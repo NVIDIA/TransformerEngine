@@ -53,6 +53,7 @@ void activation_fwd_noalloc(
       output_data, te_dtype, out_shape, output_amax, output_scale,
       output_scale_inv, nvte_scaling);
 
+
   auto stream = getCurrentCUDAStreamRaw(input_.get_device_index());
 
   // Dispatch activation type

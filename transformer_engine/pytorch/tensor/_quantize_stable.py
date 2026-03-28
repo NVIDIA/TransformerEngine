@@ -55,11 +55,11 @@ def quantize_into(src, quantizer, dst, noop_flag=None):
     q_type = type(quantizer).__name__
     if 'Block' in q_type:
         block_dim = getattr(quantizer, 'block_scaling_dim', 2)
-        out_sm = 2 if block_dim == 2 else 1  # BLOCK_SCALING_2D or 1D
+        out_sm = 3 if block_dim == 2 else 2  # BLOCK_SCALING_2D=3 or 1D=2
     elif 'MXFP8' in q_type:
-        out_sm = 3  # MXFP8_1D_SCALING
+        out_sm = 1  # MXFP8_1D_SCALING=1
     elif 'NVFP4' in q_type:
-        out_sm = 4  # NVFP4_1D_SCALING
+        out_sm = 4  # NVFP4_1D_SCALING=4
     elif 'CurrentScaling' in q_type:
         out_sm = 0  # DELAYED_TENSOR_SCALING (current scaling uses delayed mode internally)
 

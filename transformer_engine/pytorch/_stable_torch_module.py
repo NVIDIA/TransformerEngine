@@ -691,9 +691,9 @@ def _make_activation_fwd(act_type, shape_divisor=1):
             out_data, out_dtype, out_scale_inv, out_sm = extract_tensor_data(out_py)
 
             if is_mxfp8:
-                out_sm = 3
+                out_sm = 1  # MXFP8_1D_SCALING
             elif is_delayed:
-                out_sm = 0
+                out_sm = 0  # DELAYED_TENSOR_SCALING
 
             out_amax = getattr(quantizer, 'amax', None)
             out_scale = getattr(quantizer, 'scale', None)
@@ -752,11 +752,11 @@ def _make_activation_bwd(act_type):
 
         q_type = type(quantizer).__name__
         if 'Block' in q_type:
-            out_sm = 2 if getattr(quantizer, 'block_scaling_dim', 2) == 2 else 1
+            out_sm = 3 if getattr(quantizer, 'block_scaling_dim', 2) == 2 else 2  # BLOCK_2D=3, 1D=2
         elif 'MXFP8' in q_type:
-            out_sm = 3
+            out_sm = 1  # MXFP8_1D_SCALING
         elif 'NVFP4' in q_type:
-            out_sm = 4
+            out_sm = 4  # NVFP4_1D_SCALING
 
         out_amax = getattr(quantizer, 'amax', None)
         out_scale = getattr(quantizer, 'scale', None)

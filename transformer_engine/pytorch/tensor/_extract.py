@@ -27,11 +27,11 @@ _FP8_DTYPE_TO_TE = {
     "fp8e5m2": 8,   # kFloat8E5M2
 }
 
-# Scaling mode values
+# Scaling mode values (must match transformer_engine.h NVTEScalingMode enum)
 NVTE_DELAYED_TENSOR_SCALING = 0
-NVTE_BLOCK_SCALING_1D = 1
-NVTE_BLOCK_SCALING_2D = 2
-NVTE_MXFP8_1D_SCALING = 3
+NVTE_MXFP8_1D_SCALING = 1
+NVTE_BLOCK_SCALING_1D = 2
+NVTE_BLOCK_SCALING_2D = 3
 NVTE_NVFP4_1D_SCALING = 4
 
 

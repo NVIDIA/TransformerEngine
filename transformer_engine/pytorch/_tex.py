@@ -64,7 +64,14 @@ from transformer_engine.pytorch._stable_torch_module import (
     bulk_overlap_ag_with_external_gemm,
     ubuf_built_with_mpi, device_supports_multicast, get_stream_priority_range,
     # quantize, layernorm_fwd, rmsnorm_fwd: kept from pybind (gradient accum issues)
-    # Activations/bias: kept from pybind (4-path quantizer dispatch not yet replicated)
+    # Batch 13: Activation + bias ops (4-path quantizer dispatch)
+    gelu, dgelu, glu, dglu, geglu, dgeglu,
+    qgelu, dqgelu, qgeglu, dqgeglu,
+    relu, drelu, reglu, dreglu,
+    srelu, dsrelu, sreglu, dsreglu,
+    silu, dsilu, swiglu, dswiglu,
+    # clamped_swiglu, clamped_dswiglu: kept from pybind (UNFUSED path tensor metadata)
+    # bgrad_quantize, dbias_*: kept from pybind for now
     # GEMM, attention, grouped GEMM: kept from pybind (complex tensor metadata dispatch)
 )
 
