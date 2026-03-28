@@ -11,8 +11,8 @@ from typing import Any, Optional, Tuple, Union
 
 import torch
 
-import transformer_engine.pytorch._tex as tex
-from transformer_engine.pytorch._tex import DType as TE_DType
+import transformer_engine_torch as tex
+from transformer_engine_torch import DType as TE_DType
 from transformer_engine.common.recipe import Float8BlockScaling, Recipe
 from .storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
 from ..quantized_tensor import QuantizedTensor, Quantizer

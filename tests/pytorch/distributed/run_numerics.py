@@ -15,7 +15,7 @@ import transformer_engine.pytorch as te
 import torch
 from torch import nn
 import torch.distributed as dist
-import transformer_engine.pytorch._tex as tex
+import transformer_engine_torch as tex
 from transformer_engine.common.recipe import (
     MXFP8BlockScaling,
     DelayedScaling,

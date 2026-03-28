@@ -35,7 +35,7 @@ from transformer_engine.pytorch import (
     NVFP4Quantizer,
     is_bf16_available,
 )
-import transformer_engine.pytorch._tex as tex
+import transformer_engine_torch as tex
 
 # Import utility functions
 from utils import (

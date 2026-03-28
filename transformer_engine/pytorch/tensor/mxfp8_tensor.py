@@ -11,8 +11,8 @@ import warnings
 
 import torch
 from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
-import transformer_engine.pytorch._tex as tex
-from transformer_engine.pytorch._tex import DType as TE_DType
+import transformer_engine_torch as tex
+from transformer_engine_torch import DType as TE_DType
 
 from transformer_engine.common.recipe import MXFP8BlockScaling, Recipe
 from ..constants import MXFP8_BLOCK_SCALING_SIZE

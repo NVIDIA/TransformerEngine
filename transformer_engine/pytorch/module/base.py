@@ -18,7 +18,7 @@ import torch
 import torch.nn.functional as F
 from torch.distributed.tensor import DTensor
 
-import transformer_engine.pytorch._tex as tex
+import transformer_engine_torch as tex
 
 from ._common import _ParameterInitMeta, noop_cat
 from ..quantization import (

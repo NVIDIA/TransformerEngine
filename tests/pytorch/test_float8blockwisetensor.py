@@ -16,7 +16,7 @@ from transformer_engine.pytorch import (
     Float8BlockwiseQTensor,
     get_device_compute_capability,
 )
-import transformer_engine.pytorch._tex as tex
+import transformer_engine_torch as tex
 
 # PyTorch tensor dtypes
 _dtypes: List[torch.dtype] = [torch.float32, torch.float16, torch.bfloat16]

@@ -29,7 +29,7 @@ from transformer_engine.pytorch import (
     is_bf16_available,
 )
 import transformer_engine.pytorch.ops as te_ops
-import transformer_engine.pytorch._tex as tex
+import transformer_engine_torch as tex
 
 # Import utility functions
 _current_file = pathlib.Path(__file__).resolve()

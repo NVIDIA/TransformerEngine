@@ -8,7 +8,7 @@ import torch
 import pytest
 
 import transformer_engine.pytorch as te
-import transformer_engine.pytorch._tex as tex
+import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Float8CurrentScaling
 from transformer_engine.pytorch.quantization import autocast, get_fp8_torch_dtype

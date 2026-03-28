@@ -12,7 +12,7 @@ import torch
 import nvdlfw_inspect.api as debug_api
 from nvdlfw_inspect.debug_features.log_tensor_stats import LogTensorStats as BaseLogTensorStats
 from nvdlfw_inspect.registry import Registry, api_method
-import transformer_engine.pytorch._tex as tex
+import transformer_engine_torch as tex
 
 from transformer_engine.debug.features.utils.stats_buffer import STATS_BUFFERS
 from transformer_engine.debug.features.utils import get_reduction_params, next_enabled_iter

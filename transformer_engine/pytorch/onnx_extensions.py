@@ -26,7 +26,7 @@ import torch
 import onnxscript
 from onnxscript import opset18 as op
 from onnx import defs
-import transformer_engine.pytorch._tex as tex
+import transformer_engine_torch as tex
 
 from .tensor.float8_tensor import Float8Quantizer
 from .tensor.mxfp8_tensor import MXFP8Quantizer

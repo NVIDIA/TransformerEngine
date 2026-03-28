@@ -366,8 +366,8 @@ def dropout_bwd(grad_output, mask, dropout_probability, grad_input=None):
 # ============================================================================
 
 
-def fp8_transpose(input, otype, output=None):
-    return _ops.fp8_transpose(input, int(otype), output)
+def fp8_transpose(input, otype, *, out=None):
+    return _ops.fp8_transpose(input, int(otype), out)
 
 
 nvfp4_data_transpose = _ops.nvfp4_data_transpose
@@ -521,7 +521,9 @@ def nvfp4_2d_partial_cast(inp, out, scale, global_scale, h, w, start_offset, blo
 # Permutation
 # ============================================================================
 
-moe_permute_fwd = _ops.moe_permute_fwd
+def moe_permute_fwd(input, dtype, indices, num_out_tokens, workspace, max_expanded_token_num):
+    return _ops.moe_permute_fwd(input, int(dtype), indices, workspace,
+                                num_out_tokens, max_expanded_token_num)
 
 
 def moe_permute_bwd(input, dtype, row_id_map, prob, num_tokens, topK):
@@ -529,8 +531,13 @@ def moe_permute_bwd(input, dtype, row_id_map, prob, num_tokens, topK):
                                   num_tokens, topK)
 
 
-moe_unpermute_fwd = _ops.moe_unpermute_fwd
-moe_unpermute_bwd = _ops.moe_unpermute_bwd
+def moe_unpermute_fwd(input, dtype, row_id_map, prob, num_tokens, topK):
+    return _ops.moe_unpermute_fwd(input, int(dtype), row_id_map, prob,
+                                  num_tokens, topK)
+
+
+def moe_unpermute_bwd(input_bwd, input_fwd, dtype, row_id_map, prob):
+    return _ops.moe_unpermute_bwd(input_bwd, input_fwd, int(dtype), row_id_map, prob)
 
 # ============================================================================
 # Normalization

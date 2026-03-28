@@ -10,7 +10,7 @@ import math
 
 import torch
 
-import transformer_engine.pytorch._tex as tex
+import transformer_engine_torch as tex
 from transformer_engine.pytorch.ops.basic import MakeExtraOutput, RMSNorm
 
 from transformer_engine.pytorch.ops.op import (

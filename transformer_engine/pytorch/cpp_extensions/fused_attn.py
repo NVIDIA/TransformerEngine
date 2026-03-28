@@ -6,8 +6,8 @@
 import math
 from typing import Tuple, List, Union, Optional
 import torch
-import transformer_engine.pytorch._tex as tex
-from transformer_engine.pytorch._tex import (
+import transformer_engine_torch as tex
+from transformer_engine_torch import (
     NVTE_QKV_Layout,
     NVTE_QKV_Format,
     NVTE_Bias_Type,

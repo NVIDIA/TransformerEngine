@@ -19,7 +19,7 @@ from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
 from utils import ModelConfig
-import transformer_engine.pytorch._tex as tex
+import transformer_engine_torch as tex
 
 # Check supported quantization schemes
 fp8_available, _ = FP8GlobalStateManager.is_fp8_available()

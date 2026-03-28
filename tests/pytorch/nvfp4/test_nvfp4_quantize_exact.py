@@ -5,7 +5,7 @@
 import pytest
 import torch
 import transformer_engine.pytorch as te
-import transformer_engine.pytorch._tex as tex
+import transformer_engine_torch as tex
 from transformer_engine.pytorch import NVFP4Quantizer
 from transformer_engine.pytorch.custom_recipes.quantization_nvfp4 import NVFP4QuantizerRef
 from transformer_engine.pytorch.custom_recipes import utils

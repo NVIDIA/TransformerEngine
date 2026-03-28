@@ -16,7 +16,7 @@ Precision Notes:
 from typing import Optional
 
 import torch
-import transformer_engine.pytorch._tex as tex
+import transformer_engine_torch as tex
 
 
 class FusedTopkScoreFunction(torch.autograd.Function):

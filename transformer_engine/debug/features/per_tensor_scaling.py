@@ -11,7 +11,7 @@ import torch
 import nvdlfw_inspect.api as debug_api
 from nvdlfw_inspect.registry import Registry, api_method
 
-import transformer_engine.pytorch._tex as tex
+import transformer_engine_torch as tex
 from transformer_engine.pytorch.tensor import Quantizer
 from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8Tensor,

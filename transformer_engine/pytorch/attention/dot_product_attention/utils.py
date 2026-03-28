@@ -19,7 +19,7 @@ from packaging.version import Version as PkgVersion
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
-import transformer_engine.pytorch._tex as tex
+import transformer_engine_torch as tex
 import transformer_engine as te
 from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     QKVLayout,

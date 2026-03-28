@@ -4,7 +4,7 @@
 
 
 import transformer_engine.pytorch as te
-import transformer_engine.pytorch._tex as tex
+import transformer_engine_torch as tex
 from transformer_engine.pytorch import MXFP8Quantizer
 from transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 

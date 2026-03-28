@@ -6,8 +6,8 @@ import pytest
 import torch
 
 import transformer_engine.pytorch as te
-import transformer_engine.pytorch._tex as tex
-from transformer_engine.pytorch._tex import multi_tensor_compute_scale_inv_e8m0
+import transformer_engine_torch as tex
+from transformer_engine_torch import multi_tensor_compute_scale_inv_e8m0
 from transformer_engine.pytorch import is_mxfp8_available
 from transformer_engine.pytorch.optimizers.multi_tensor_apply import multi_tensor_applier
 

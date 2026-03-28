@@ -18,7 +18,7 @@ from transformer_engine.pytorch import (
     NVFP4Quantizer,
 )
 from transformer_engine.pytorch.constants import TE_DType_To_Torch
-import transformer_engine.pytorch._tex as tex
+import transformer_engine_torch as tex
 
 # Check available recipes
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)

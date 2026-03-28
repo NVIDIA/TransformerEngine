@@ -6,7 +6,7 @@ import pytest
 import torch
 
 import transformer_engine.pytorch as te
-import transformer_engine.pytorch._tex as tex
+import transformer_engine_torch as tex
 from transformer_engine.common import recipe
 from transformer_engine.pytorch.constants import FP8BwdTensorIdx, FP8FwdTensorIdx
 from transformer_engine.pytorch import (

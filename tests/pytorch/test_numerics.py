@@ -53,7 +53,7 @@ from transformer_engine.pytorch.cpp_extensions import (
 )
 from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
 from transformer_engine.common import recipe
-import transformer_engine.pytorch._tex as tex
+import transformer_engine_torch as tex
 from utils import ModelConfig, reset_rng_states
 
 

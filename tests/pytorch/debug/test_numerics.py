@@ -15,7 +15,7 @@ import torch
 import nvdlfw_inspect.api as debug_api
 import transformer_engine.debug
 import transformer_engine.pytorch as tepytorch
-import transformer_engine.pytorch._tex as tex
+import transformer_engine_torch as tex
 from transformer_engine.common.recipe import DelayedScaling, Format
 from transformer_engine.pytorch.quantization import _default_sf_compute
 from transformer_engine.pytorch import (

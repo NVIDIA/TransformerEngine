@@ -34,7 +34,7 @@ from transformer_engine.pytorch import (
     is_bf16_available,
 )
 from transformer_engine.common import recipe
-import transformer_engine.pytorch._tex as tex
+import transformer_engine_torch as tex
 from transformer_engine.pytorch.cpp_extensions import general_gemm
 from transformer_engine.pytorch.tensor.utils import replace_raw_data
 from utils import ModelConfig
