@@ -1167,11 +1167,14 @@ def cp_p2p_bwd_fused_attn(
 ):
     """Per-tile backward call of CP P2P with FusedAttention backend"""
     if fp8:
-        aux_tensors = [
-            softmax_lse,
-            softmax_lse,
-            rng_states[cp_size - step - 1],
-        ]
+        if qkv_layout == "t3hd":
+            aux_tensors = [
+                softmax_lse,
+                softmax_lse,
+                rng_states[cp_size - step - 1],
+            ]
+        else:
+            aux_tensors = [softmax_lse, rng_states[cp_size - step - 1]]
     else:
         aux_tensors = [softmax_lse, rng_states[cp_size - step - 1]]
 
@@ -1190,11 +1193,14 @@ def cp_p2p_bwd_fused_attn(
     elif section == "upper-triangle":
         q_part, out_part, dout_part = [x.contiguous() for x in [q_part, out_part, dout_part]]
         if fp8:
-            aux_tensors = [
-                softmax_lse_,
-                softmax_lse_,
-                rng_states[cp_size - step - 1],
-            ]
+            if qkv_layout == "t3hd":
+                aux_tensors = [
+                    softmax_lse_,
+                    softmax_lse_,
+                    rng_states[cp_size - step - 1],
+                ]
+            else:
+                aux_tensors = [softmax_lse_, rng_states[cp_size - step - 1]]
         else:
             aux_tensors = [softmax_lse_, rng_states[cp_size - step - 1]]
 
