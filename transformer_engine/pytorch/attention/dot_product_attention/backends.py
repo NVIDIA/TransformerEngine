@@ -1618,18 +1618,19 @@ class FusedAttnFunc(torch.autograd.Function):
         # pylint: disable=missing-function-docstring
         d_out_shadow_f16 = d_out
 
-        d_out_qdq_f16 = d_out
-        d_out_qdq_f16, _ = dpa_utils.permute_to_grouped_tensor(ctx.o_format, d_out_qdq_f16)
-        tmp_quantizer = MXFP8Quantizer(
-            fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True
-        )
-        tmp_quantizer.optimize_for_gemm = False
-        d_out_qdq_fp8 = tmp_quantizer(d_out_qdq_f16)
-        d_out_qdq_f16 = d_out_qdq_fp8.dequantize(dtype=ctx.nominal_dtype)
-        if ctx.o_format == "bshd":
-            d_out_qdq_f16 = d_out_qdq_f16.permute(0, 2, 1, 3).contiguous()
-        elif ctx.o_format == "sbhd":
-            d_out_qdq_f16 = d_out_qdq_f16.permute(2, 0, 1, 3).contiguous()
+        if _qdq_dO_in_f16_bprop or _qdq_dO_in_mxfp8_bprop:
+            d_out_qdq_f16 = d_out
+            d_out_qdq_f16, _ = dpa_utils.permute_to_grouped_tensor(ctx.o_format, d_out_qdq_f16)
+            tmp_quantizer = MXFP8Quantizer(
+                fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True
+            )
+            tmp_quantizer.optimize_for_gemm = False
+            d_out_qdq_fp8 = tmp_quantizer(d_out_qdq_f16)
+            d_out_qdq_f16 = d_out_qdq_fp8.dequantize(dtype=ctx.nominal_dtype)
+            if ctx.o_format == "bshd":
+                d_out_qdq_f16 = d_out_qdq_f16.permute(0, 2, 1, 3).contiguous()
+            elif ctx.o_format == "sbhd":
+                d_out_qdq_f16 = d_out_qdq_f16.permute(2, 0, 1, 3).contiguous()
         swapped_do_with_qdq_do = False
         if ctx.fp8 and _qdq_dO_in_mxfp8_bprop:
             d_out = d_out_qdq_f16
