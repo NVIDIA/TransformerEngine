@@ -77,7 +77,8 @@ from transformer_engine.pytorch._stable_torch_module import (
     dequantize,
     compute_amax, fused_amax_and_scale_update_after_reduction,
     # layernorm_fwd, rmsnorm_fwd, quantize: TODO (gradient accum)
-    # GEMM, attention, grouped GEMM: kept from pybind (complex tensor metadata dispatch)
+    # GEMM, attention, bias, grouped GEMM, quantize, norm fwd:
+    # Kept from pybind base import (complex type dispatch / gradient accum)
 )
 
 # ---------------------------------------------------------------------------
