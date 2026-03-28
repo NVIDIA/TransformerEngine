@@ -3429,7 +3429,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             softmax_lse_per_step[1],
             rng_states[0],
             rng_states[1],
-        ) = restore_from_saved(ctx.tensor_objects, ctx.saved_tensors)
+        ) = restore_from_func_ctx(ctx)
         kv_seq_range_per_step = ctx.kv_seq_range_per_step
         window_size_per_step = ctx.window_size_per_step
 
