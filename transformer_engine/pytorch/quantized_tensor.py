@@ -741,3 +741,22 @@ class QuantizedTensor(torch.Tensor):
 
         """
         return self.__class__.make_like(self, dtype=dtype)
+
+
+# Register stable GEMM op as a passthrough so FP8 tensors are not dequantized
+# before entering the stable ABI GEMM kernel.  We do this here rather than in
+# _stable_torch_module.py to avoid a circular import (quantized_tensor is loaded
+# before the stable module has had a chance to run its module-level registration).
+def _register_stable_abi_passthrough_ops():
+    import sys
+    if "transformer_engine.pytorch._stable_torch_module" not in sys.modules:
+        return
+    try:
+        import torch
+        _quantized_tensor_passthrough_ops.add(
+            torch.ops.transformer_engine_stable.gemm.default
+        )
+    except AttributeError:
+        pass
+
+_register_stable_abi_passthrough_ops()

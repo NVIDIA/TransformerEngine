@@ -334,10 +334,14 @@ fused_attn_fwd_noalloc(
       window_size[0], window_size[1], bottom_right_diagonal,
       workspace.data(), stream);
 
-  // Allocate workspace
+  // Allocate workspace — declare ws_data OUTSIDE the if-block so the Tensor stays alive
+  // through Phase 2 execution. If ws_data were declared inside the if-block, it would be
+  // destroyed before Phase 2, and subsequent aux-tensor allocations could reuse the same
+  // memory, causing Phase 2 to corrupt the aux tensors (seen as err 700 on 3+ layers).
   auto ws_shape = workspace.shape();
+  Tensor ws_data;
   if (ws_shape.ndim > 0 && workspace.numel() > 0) {
-    auto ws_data = allocateStableTensor(
+    ws_data = allocateStableTensor(
         std::vector<int64_t>(ws_shape.data, ws_shape.data + ws_shape.ndim),
         workspace.dtype(), device_idx);
     workspace = makeTransformerEngineTensor(
@@ -346,7 +350,13 @@ fused_attn_fwd_noalloc(
         workspace.dtype());
   }
 
-  // Allocate aux tensors and populate the pack
+  // Allocate aux tensors and populate the pack.
+  // IMPORTANT: the rng_state slot (shape=[2], dtype=int64) must use the caller-supplied
+  // rng_state tensor directly — NOT a new allocation. cuDNN (line 1182 in
+  // fused_attn_f16_arbitrary_seqlen.cu) overwrites the aux slot's dptr to point to the
+  // input rng_state buffer during Phase 2, so whatever the aux pack slot points to
+  // before Phase 2 must be the same tensor that will be returned to Python.
+  // Pybind11 does this at extensions/attention.cpp:280: set_tensor_param(i++, rng_state).
   std::vector<Tensor> aux_tensors;
   for (size_t i = 0; i < nvte_aux.size; ++i) {
     auto aux_shape = nvte_tensor_shape(nvte_aux.tensors[i]);
@@ -355,7 +365,17 @@ fused_attn_fwd_noalloc(
     for (size_t d = 0; d < aux_shape.ndim; ++d) {
       shape_vec.push_back(static_cast<int64_t>(aux_shape.data[d]));
     }
-    auto aux_tensor = allocateStableTensor(shape_vec, aux_dtype, device_idx);
+
+    // Detect the rng_state slot: shape [2], dtype int64 (kInt64=3).
+    // Use the caller-provided rng_state tensor directly for this slot.
+    Tensor aux_tensor;
+    bool is_rng_slot = (aux_dtype == DType::kInt64 &&
+                        aux_shape.ndim == 1 && aux_shape.data[0] == 2);
+    if (is_rng_slot) {
+      aux_tensor = rng_state;
+    } else {
+      aux_tensor = allocateStableTensor(shape_vec, aux_dtype, device_idx);
+    }
     aux_tensors.push_back(aux_tensor);
 
     NVTEBasicTensor temp = {
@@ -364,9 +384,6 @@ fused_attn_fwd_noalloc(
         aux_shape};
     nvte_set_tensor_param(&nvte_aux.tensors[i], kNVTERowwiseData, &temp);
   }
-
-  // Special handling: rng_state goes into aux pack if present and not yet filled
-  // The rng_state was already passed to the kernel — it handles placement
 
   // Phase 2: execute
   nvte_fused_attn_fwd(
@@ -542,10 +559,13 @@ std::tuple<Tensor, Tensor> fused_attn_bwd_noalloc(
       window_size[0], window_size[1], bottom_right_diagonal,
       deterministic, cuda_graph, workspace.data(), stream);
 
-  // Allocate workspace
+  // Allocate workspace — declare ws_data OUTSIDE the if-block so it stays alive
+  // through Phase 2 (same issue as fwd: ws_data inside if-block would be freed
+  // before Phase 2, and subsequent allocations could reuse the workspace memory).
   auto ws_shape = workspace.shape();
+  Tensor ws_data;
   if (ws_shape.ndim > 0 && workspace.numel() > 0) {
-    auto ws_data = allocateStableTensor(
+    ws_data = allocateStableTensor(
         std::vector<int64_t>(ws_shape.data, ws_shape.data + ws_shape.ndim),
         workspace.dtype(), device_idx);
     workspace = makeTransformerEngineTensor(
@@ -575,14 +595,115 @@ std::tuple<Tensor, Tensor> fused_attn_bwd_noalloc(
   return std::make_tuple(ret_dBias, ret_dSO);
 }
 
+// ============================================================================
+// Fused Attention Backward — packed variant (57 args, under 64-arg limit)
+//
+// dtype_info is a 1-D int64 CPU tensor with 20 values:
+//   [Q_dtype, Q_sm, K_dtype, K_sm, V_dtype, V_sm, O_dtype, O_sm,
+//    dO_dtype, dO_sm, S_dtype, S_sm, dP_dtype, dP_sm,
+//    dQ_dtype, dQ_sm, dK_dtype, dK_sm, dV_dtype, dV_sm]
+// dQ/dK/dV/dBias/dSoftmaxOffset are pre-allocated by the Python caller.
+// ============================================================================
+std::tuple<Tensor, Tensor> fused_attn_bwd_packed(
+    // Config (13)
+    int64_t max_seqlen_q, int64_t max_seqlen_kv,
+    double attn_scale, double p_dropout, bool set_zero,
+    int64_t qkv_layout, int64_t bias_type, int64_t attn_mask_type,
+    int64_t softmax_type, std::vector<int64_t> window_size,
+    bool bottom_right_diagonal, bool deterministic, bool cuda_graph,
+    // Sequence lengths (4)
+    Tensor cu_seqlens_q, Tensor cu_seqlens_kv,
+    std::optional<Tensor> cu_seqlens_q_padded,
+    std::optional<Tensor> cu_seqlens_kv_padded,
+    // Input tensors: data + scale_inv (10)
+    Tensor Q_data, std::optional<Tensor> Q_scale_inv,
+    Tensor K_data, std::optional<Tensor> K_scale_inv,
+    Tensor V_data, std::optional<Tensor> V_scale_inv,
+    Tensor O_data, std::optional<Tensor> O_scale_inv,
+    Tensor dO_data, std::optional<Tensor> dO_scale_inv,
+    // Softmax buffers (4)
+    Tensor S_data, std::optional<Tensor> S_scale_inv,
+    Tensor dP_data, std::optional<Tensor> dP_scale_inv,
+    // Output grad tensors (12)
+    Tensor dQ_data, std::optional<Tensor> dQ_amax,
+    std::optional<Tensor> dQ_scale, std::optional<Tensor> dQ_scale_inv,
+    Tensor dK_data, std::optional<Tensor> dK_amax,
+    std::optional<Tensor> dK_scale, std::optional<Tensor> dK_scale_inv,
+    Tensor dV_data, std::optional<Tensor> dV_amax,
+    std::optional<Tensor> dV_scale, std::optional<Tensor> dV_scale_inv,
+    // Optional bias outputs (2)
+    std::optional<Tensor> dBias, std::optional<Tensor> dSoftmaxOffset,
+    // Packed dtype info (1): [Q_dtype, Q_sm, K_dtype, K_sm, V_dtype, V_sm,
+    //   O_dtype, O_sm, dO_dtype, dO_sm, S_dtype, S_sm, dP_dtype, dP_sm,
+    //   dQ_dtype, dQ_sm, dK_dtype, dK_sm, dV_dtype, dV_sm]
+    Tensor dtype_info,
+    // Aux context from forward (11)
+    int64_t num_aux_tensors,
+    std::optional<Tensor> aux0, std::optional<Tensor> aux1,
+    std::optional<Tensor> aux2, std::optional<Tensor> aux3,
+    std::optional<Tensor> aux4, std::optional<Tensor> aux5,
+    std::optional<Tensor> aux6, std::optional<Tensor> aux7,
+    std::optional<Tensor> aux8, std::optional<Tensor> aux9) {
+
+  // Unpack dtype info from CPU int64 tensor (passed from Python as CPU tensor)
+  const auto* dt_ptr = static_cast<const int64_t*>(dtype_info.data_ptr());
+  int64_t Q_dtype = dt_ptr[0],  Q_sm = dt_ptr[1];
+  int64_t K_dtype = dt_ptr[2],  K_sm = dt_ptr[3];
+  int64_t V_dtype = dt_ptr[4],  V_sm = dt_ptr[5];
+  int64_t O_dtype = dt_ptr[6],  O_sm = dt_ptr[7];
+  int64_t dO_dtype = dt_ptr[8], dO_sm = dt_ptr[9];
+  int64_t S_dtype = dt_ptr[10], S_sm = dt_ptr[11];
+  int64_t dP_dtype = dt_ptr[12], dP_sm = dt_ptr[13];
+  int64_t dQ_dtype = dt_ptr[14], dQ_sm = dt_ptr[15];
+  int64_t dK_dtype = dt_ptr[16], dK_sm = dt_ptr[17];
+  int64_t dV_dtype = dt_ptr[18], dV_sm = dt_ptr[19];
+
+  return fused_attn_bwd_noalloc(
+      max_seqlen_q, max_seqlen_kv, attn_scale, p_dropout, set_zero,
+      qkv_layout, bias_type, attn_mask_type, softmax_type, window_size,
+      bottom_right_diagonal, deterministic,
+      cu_seqlens_q, cu_seqlens_kv,
+      Q_data, Q_dtype, Q_scale_inv, Q_sm,
+      K_data, K_dtype, K_scale_inv, K_sm,
+      V_data, V_dtype, V_scale_inv, V_sm,
+      O_data, O_dtype, O_scale_inv, O_sm,
+      dO_data, dO_dtype, dO_scale_inv, dO_sm,
+      S_data, S_dtype, S_scale_inv, S_sm,
+      dP_data, dP_dtype, dP_scale_inv, dP_sm,
+      dQ_data, dQ_dtype, dQ_amax, dQ_scale, dQ_scale_inv, dQ_sm,
+      dK_data, dK_dtype, dK_amax, dK_scale, dK_scale_inv, dK_sm,
+      dV_data, dV_dtype, dV_amax, dV_scale, dV_scale_inv, dV_sm,
+      dBias, dSoftmaxOffset,
+      num_aux_tensors,
+      aux0, aux1, aux2, aux3, aux4, aux5, aux6, aux7, aux8, aux9,
+      cu_seqlens_q_padded, cu_seqlens_kv_padded,
+      cuda_graph);
+}
+
 }  // namespace transformer_engine::pytorch::stable
 
 STABLE_TORCH_LIBRARY_FRAGMENT(transformer_engine_stable, m) {
   // Fused attention forward/backward (noalloc, flattened aux tensors)
   m.def("fused_attn_fwd_noalloc(int max_seqlen_q, int max_seqlen_kv, bool is_training, float attn_scale, float p_dropout, bool set_zero, int qkv_layout, int bias_type, int attn_mask_type, int softmax_type, int[] window_size, bool bottom_right_diagonal, Tensor cu_seqlens_q, Tensor cu_seqlens_kv, Tensor Q_data, int Q_dtype, Tensor? Q_scale_inv, int Q_scaling_mode, Tensor K_data, int K_dtype, Tensor? K_scale_inv, int K_scaling_mode, Tensor V_data, int V_dtype, Tensor? V_scale_inv, int V_scaling_mode, Tensor S_data, int S_dtype, Tensor? S_amax, Tensor? S_scale, Tensor? S_scale_inv, int S_scaling_mode, Tensor O_data, int O_dtype, Tensor? O_amax, Tensor? O_scale, Tensor? O_scale_inv, int O_scaling_mode, Tensor? cu_seqlens_q_padded, Tensor? cu_seqlens_kv_padded, Tensor? page_table_k, Tensor? page_table_v, Tensor? Bias, Tensor? SoftmaxOffset, Tensor rng_state, bool return_max_logit, bool cuda_graph) -> (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, int)");
+  m.def("fused_attn_bwd_packed("
+        "int max_seqlen_q, int max_seqlen_kv, float attn_scale, float p_dropout, bool set_zero, "
+        "int qkv_layout, int bias_type, int attn_mask_type, int softmax_type, int[] window_size, "
+        "bool bottom_right_diagonal, bool deterministic, bool cuda_graph, "
+        "Tensor cu_seqlens_q, Tensor cu_seqlens_kv, Tensor? cu_seqlens_q_padded, Tensor? cu_seqlens_kv_padded, "
+        "Tensor Q_data, Tensor? Q_scale_inv, Tensor K_data, Tensor? K_scale_inv, "
+        "Tensor V_data, Tensor? V_scale_inv, Tensor O_data, Tensor? O_scale_inv, "
+        "Tensor dO_data, Tensor? dO_scale_inv, "
+        "Tensor S_data, Tensor? S_scale_inv, Tensor dP_data, Tensor? dP_scale_inv, "
+        "Tensor dQ_data, Tensor? dQ_amax, Tensor? dQ_scale, Tensor? dQ_scale_inv, "
+        "Tensor dK_data, Tensor? dK_amax, Tensor? dK_scale, Tensor? dK_scale_inv, "
+        "Tensor dV_data, Tensor? dV_amax, Tensor? dV_scale, Tensor? dV_scale_inv, "
+        "Tensor? dBias, Tensor? dSoftmaxOffset, Tensor dtype_info, "
+        "int num_aux_tensors, "
+        "Tensor? aux0, Tensor? aux1, Tensor? aux2, Tensor? aux3, Tensor? aux4, "
+        "Tensor? aux5, Tensor? aux6, Tensor? aux7, Tensor? aux8, Tensor? aux9"
+        ") -> (Tensor, Tensor)");
   // fused_attn_bwd_noalloc has 77 args which exceeds the 64-arg PyTorch
-  // dispatcher limit. It is handled in Python by splitting into two calls
-  // or by using the pybind11 fallback path.
+  // dispatcher limit. Use fused_attn_bwd_packed instead.
   // Helpers
   m.def("fa_prepare_fwd(Tensor qkvi) -> Tensor");
   m.def("fa_prepare_bwd(Tensor q, Tensor k, Tensor v) -> Tensor");
@@ -600,7 +721,8 @@ STABLE_TORCH_LIBRARY_FRAGMENT(transformer_engine_stable, m) {
 STABLE_TORCH_LIBRARY_IMPL(transformer_engine_stable, CUDA, m) {
   using namespace transformer_engine::pytorch::stable;
   m.impl("fused_attn_fwd_noalloc", TORCH_BOX(fused_attn_fwd_noalloc));
-  // fused_attn_bwd_noalloc not registered (77 args > 64 limit)
+  m.impl("fused_attn_bwd_packed", TORCH_BOX(fused_attn_bwd_packed));
+  // fused_attn_bwd_noalloc not registered (77 args > 64 limit); use fused_attn_bwd_packed
   m.impl("fa_prepare_fwd", TORCH_BOX(fa_prepare_fwd));
   m.impl("fa_prepare_bwd", TORCH_BOX(fa_prepare_bwd));
   m.impl("thd_read_half_tensor", TORCH_BOX(thd_read_half_tensor));

@@ -107,6 +107,10 @@ class Float8Quantizer(Quantizer):
         # Update FP8 dtype
         dst._fp8_dtype = self.dtype
 
+        # quantize_into only fills rowwise data (_data). Mark transpose invalid so
+        # update_usage(columnwise_usage=True) will recreate it via _create_transpose().
+        dst._transpose_invalid = True
+
         return dst
 
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
@@ -119,6 +123,11 @@ class Float8Quantizer(Quantizer):
         if tensor.numel() > 0:
             t = tensor.contiguous() if not tensor.is_contiguous() else tensor
             quantize_into(t, self, dst)
+            # quantize_into only fills rowwise data (_data). Mark the transpose
+            # as invalid so update_usage(columnwise_usage=True) will recreate it
+            # from _data via _create_transpose(), rather than using the
+            # uninitialized empty buffer allocated by make_empty.
+            dst._transpose_invalid = True
         return dst
 
     def make_empty(
@@ -345,6 +354,10 @@ class Float8CurrentScalingQuantizer(Quantizer):
         # Update FP8 dtype
         dst._fp8_dtype = self.dtype
 
+        # quantize_into only fills rowwise data (_data). Mark transpose invalid so
+        # update_usage(columnwise_usage=True) will recreate it via _create_transpose().
+        dst._transpose_invalid = True
+
         return dst
 
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
@@ -354,6 +367,9 @@ class Float8CurrentScalingQuantizer(Quantizer):
         if tensor.numel() > 0:
             t = tensor.contiguous() if not tensor.is_contiguous() else tensor
             quantize_into(t, self, dst)
+            # quantize_into only fills rowwise data (_data). Mark the transpose
+            # as invalid so update_usage(columnwise_usage=True) will recreate it.
+            dst._transpose_invalid = True
         return dst
 
     def make_empty(

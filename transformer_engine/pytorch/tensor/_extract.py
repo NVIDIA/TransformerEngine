@@ -53,8 +53,8 @@ def extract_tensor_data(tensor):
         te_dtype = 0  # kByte
         if fp8_dtype is not None:
             te_dtype = _FP8_DTYPE_TO_TE.get(str(fp8_dtype), 7)
-        if hasattr(tensor, '_is_2D_scaled') and tensor._is_2D_scaled:
-            sm = NVTE_BLOCK_SCALING_2D
+        if hasattr(tensor, '_is_2D_scaled'):
+            sm = NVTE_BLOCK_SCALING_2D if tensor._is_2D_scaled else NVTE_BLOCK_SCALING_1D
         elif hasattr(tensor, '_block_scaling_dim'):
             sm = NVTE_BLOCK_SCALING_2D if tensor._block_scaling_dim == 2 else NVTE_BLOCK_SCALING_1D
         else:
@@ -114,7 +114,7 @@ def extract_tensor_data(tensor):
             fp8_dtype = str(tensor._fp8_dtype)
             te_dtype = _FP8_DTYPE_TO_TE.get(fp8_dtype, 7)
             # Check 1D vs 2D block scaling
-            sm = NVTE_BLOCK_SCALING_2D if tensor._block_scaling_dim == 2 else NVTE_BLOCK_SCALING_1D
+            sm = NVTE_BLOCK_SCALING_2D if tensor._is_2D_scaled else NVTE_BLOCK_SCALING_1D
             return data, te_dtype, scale_inv, sm
     except ImportError:
         pass

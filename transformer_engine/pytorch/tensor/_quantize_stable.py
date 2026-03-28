@@ -48,6 +48,65 @@ def quantize_into(src, quantizer, dst, noop_flag=None):
     if not src.is_contiguous():
         src = src.contiguous()
 
+    # Helper: transpose src to match columnwise layout [K, *M_dims].
+    # get_columnwise_shape puts the last dim first, rest in original order.
+    def _transpose_for_colwise(t):
+        if t.ndim == 2:
+            return t.T.contiguous()
+        # For ndim >= 3: put last dim first, keep remaining dims in order
+        perm = [t.ndim - 1] + list(range(t.ndim - 1))
+        return t.permute(*perm).contiguous()
+
+    # Handle columnwise-only Float8BlockwiseQTensor destination.
+    # When _rowwise_data=None but _columnwise_data exists, we quantize the
+    # transposed input (to match the [K,M] columnwise layout) into _columnwise_data.
+    _col_only = (
+        hasattr(dst, '_rowwise_data') and getattr(dst, '_rowwise_data', None) is None
+        and hasattr(dst, '_columnwise_data') and getattr(dst, '_columnwise_data', None) is not None
+        and not hasattr(dst, '_data')  # exclude Float8Tensor (which uses _data/_transpose)
+    )
+    if _col_only:
+        col_data = dst._columnwise_data
+        col_si = getattr(dst, '_columnwise_scale_inv', None)
+        fp8_dtype_attr = getattr(dst, '_fp8_dtype', None)
+        from transformer_engine.pytorch.tensor._extract import _FP8_DTYPE_TO_TE
+        out_dtype = _FP8_DTYPE_TO_TE.get(str(fp8_dtype_attr), 7) if fp8_dtype_attr else 7
+        block_dim = getattr(quantizer, 'block_scaling_dim', 2)
+        out_sm = 3 if block_dim == 2 else 2  # BLOCK_SCALING_2D=3, BLOCK_1D=2
+        force_pow_2 = getattr(quantizer, 'force_pow_2_scales', False)
+        amax_eps = getattr(quantizer, 'amax_epsilon', 0.0)
+        if block_dim == 2:
+            # 2D block scaling: quantize src (original shape) → tmp rowwise buffer,
+            # then FP8-transpose into col_data and transpose the scale.
+            # Do NOT pass src_transposed to ops.quantize: the kernel computes scale
+            # block count from the input tensor shape, and src_transposed has a
+            # different shape (e.g. 512×128×1) than what col_si expects (e.g. 1×4).
+            rowwise_scale_shape = quantizer.get_scale_shape(list(src.shape), columnwise=False)
+            tmp_si = torch.empty(rowwise_scale_shape, dtype=torch.float32, device=src.device)
+            tmp_rowwise = col_data.new_empty(list(src.shape))  # uint8, same shape as src
+            ops.quantize(src, tmp_rowwise, out_dtype, None, None, tmp_si, out_sm,
+                         force_pow_2, amax_eps, noop_flag)
+            ops.fp8_transpose(tmp_rowwise, out_dtype, col_data)
+            if col_si is not None:
+                col_si.zero_()
+                transposed_si = tmp_si.T.contiguous()
+                h = min(col_si.shape[0], transposed_si.shape[0])
+                w = min(col_si.shape[1], transposed_si.shape[1])
+                col_si[0:h, 0:w].copy_(transposed_si[0:h, 0:w])
+        else:
+            # 1D block scaling: the kernel must see src_transposed as (K, M) 2D.
+            # _transpose_for_colwise gives (K, *M_dims) which the kernel would
+            # flatten to (K*M_rest, M_last) — wrong shape for col_si.
+            # Reshape to (K=last dim of src, M=all other dims) so the kernel sees
+            # (dim0=K, dim1=M) and produces the correct per-row scale shape.
+            K = src.shape[-1]
+            M = src.numel() // K
+            src_transposed_2d = _transpose_for_colwise(src).view(K, M)
+            ops.quantize(src_transposed_2d, col_data, out_dtype, None, None, col_si, out_sm,
+                         force_pow_2, amax_eps, noop_flag)
+        dst._fp8_dtype = quantizer.dtype if hasattr(quantizer, 'dtype') else dst._fp8_dtype
+        return
+
     # Extract raw output buffers from dst
     out_data, out_dtype, out_scale_inv, out_sm = extract_tensor_data(dst)
 
@@ -101,6 +160,57 @@ def quantize_into(src, quantizer, dst, noop_flag=None):
         ops.quantize(
             src, out_data, out_dtype, amax, scale,
             out_scale_inv, out_sm, force_pow_2, amax_eps, noop_flag)
+
+    # For block-scaling tensors with both rowwise AND columnwise pre-allocated,
+    # also fill the columnwise buffer. The pybind path filled both in one fused
+    # nvte_quantize_v2 kernel. The stable path fills rowwise above, then derives
+    # columnwise by FP8-transposing the quantized bytes and transposing the scales.
+    # This matches _create_columnwise() in float8_blockwise_tensor_storage.py.
+    _has_colwise = (
+        hasattr(dst, '_rowwise_data') and getattr(dst, '_rowwise_data', None) is not None
+        and hasattr(dst, '_columnwise_data') and getattr(dst, '_columnwise_data', None) is not None
+        and not hasattr(dst, '_data')  # exclude Float8Tensor (uses _transpose/_create_transpose)
+    )
+    if _has_colwise and ('Block' in q_type or 'NVFP4' in q_type):
+        col_data = dst._columnwise_data
+        col_si = getattr(dst, '_columnwise_scale_inv', None)
+        fp8_dtype_attr = getattr(dst, '_fp8_dtype', None)
+        from transformer_engine.pytorch.tensor._extract import _FP8_DTYPE_TO_TE
+        col_dtype = _FP8_DTYPE_TO_TE.get(str(fp8_dtype_attr), out_dtype) if fp8_dtype_attr else out_dtype
+        if 'NVFP4' in q_type:
+            # NVFP4 1D scaling: quantize transposed src into columnwise buffer.
+            # col_data shape is (K, M//2) (2 FP4 values per byte, transposed layout).
+            # Quantize src_transposed_2d=(K, M) → col_data=(K, M//2) with NVFP4_1D_SCALING.
+            # This mirrors the Float8Block 1D path: blocks run along M dimension of (K,M).
+            K = src.shape[-1]
+            M = src.numel() // K
+            src_transposed_2d = _transpose_for_colwise(src).view(K, M)
+            ops.quantize(src_transposed_2d, col_data, col_dtype, None, None, col_si,
+                         out_sm, force_pow_2, amax_eps, noop_flag)
+        else:
+            block_dim = getattr(quantizer, 'block_scaling_dim', 2)
+            if block_dim == 2:
+                # 2D block scaling: columnwise scale = transposed rowwise scale.
+                # FP8-transpose the quantized bytes (identical to _create_columnwise)
+                ops.fp8_transpose(out_data, col_dtype, col_data)
+                # Transpose the rowwise scale_inv into the columnwise scale_inv buffer
+                if col_si is not None and out_scale_inv is not None:
+                    col_si.zero_()
+                    transposed_si = out_scale_inv.T.contiguous()
+                    h = min(col_si.shape[0], transposed_si.shape[0])
+                    w = min(col_si.shape[1], transposed_si.shape[1])
+                    col_si[0:h, 0:w].copy_(transposed_si[0:h, 0:w])
+            else:
+                # 1D block scaling: columnwise scale ≠ transposed rowwise scale (they cover
+                # different block directions). Quantize src in "columnwise mode" by reshaping
+                # the transposed src to (K, M) and calling ops.quantize in ROWWISE mode.
+                # This gives per-K-block scales == the per-M-block columnwise scales we need.
+                if col_si is not None:
+                    K = src.shape[-1]
+                    M = src.numel() // K
+                    src_transposed_2d = _transpose_for_colwise(src).view(K, M)
+                    ops.quantize(src_transposed_2d, col_data, col_dtype, None, None, col_si,
+                                 out_sm, force_pow_2, amax_eps, noop_flag)
 
 
 def quantize_new(tensor, quantizer):

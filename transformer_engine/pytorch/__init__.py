@@ -10,15 +10,9 @@ import functools
 
 import torch
 
-from transformer_engine.common import load_framework_extension
 from transformer_engine.pytorch.torch_version import torch_version
 
 assert torch_version() >= (2, 1), f"Minimum torch version 2.1 required. Found {torch_version()}."
-
-try:
-    load_framework_extension("torch")
-except (FileNotFoundError, RuntimeError, AssertionError, ImportError):
-    pass  # Stable ABI path: no pybind11 .so needed
 from transformer_engine.pytorch.module import LayerNormLinear
 from transformer_engine.pytorch.module import Linear
 from transformer_engine.pytorch.module import LayerNormMLP
