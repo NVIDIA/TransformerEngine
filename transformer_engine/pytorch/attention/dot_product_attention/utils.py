@@ -2362,7 +2362,9 @@ class PermuteToGroupedTensor(torch.autograd.Function):
         return q, k, v, None
 
 
-def combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer, used_in_forward=True, used_in_backward=False):
+def combine_and_quantize(
+    qkv_layout, q, k, v, qkv_quantizer, used_in_forward=True, used_in_backward=False
+):
     """Combine q,k,v based on qkv_layout and quantize them together"""
     if isinstance(qkv_quantizer, MXFP8Quantizer):
         qkv_format, q_format, kv_format = get_qkv_format(qkv_layout)

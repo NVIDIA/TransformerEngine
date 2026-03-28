@@ -2879,8 +2879,7 @@ void fused_attn_fp8_bwd(
   }
 
   void* devPtrM = input_M->data.dptr;
-  void* devPtrZInv =
-      (input_ZInv != nullptr) ? input_ZInv->data.dptr : nullptr;
+  void* devPtrZInv = (input_ZInv != nullptr) ? input_ZInv->data.dptr : nullptr;
 
   void* devPtrScaleS = input_S->scale.dptr;
   void* devPtrDescaleS = input_S->scale_inv.dptr;

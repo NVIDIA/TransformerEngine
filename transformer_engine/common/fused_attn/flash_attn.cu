@@ -141,10 +141,13 @@ void prepare_flash_attn_bwd(Tensor q, Tensor k, Tensor v, Tensor qkv, cudaStream
 }
 
 template <typename T, bool kIsBshdBshdBshd>
-__launch_bounds__(1024) __global__ void permute_to_grouped_tensor_fwd_kernel(
-    const T *__restrict__ q, const T *__restrict__ k, const T *__restrict__ v, T *__restrict__ q_out,
-    T *__restrict__ k_out, T *__restrict__ v_out, size_t b, size_t s_q, size_t h_q, size_t d_qk,
-    size_t s_kv, size_t h_kv, size_t d_v, unsigned int permute_s_splits) {
+__launch_bounds__(1024) __global__
+    void permute_to_grouped_tensor_fwd_kernel(const T *__restrict__ q, const T *__restrict__ k,
+                                              const T *__restrict__ v, T *__restrict__ q_out,
+                                              T *__restrict__ k_out, T *__restrict__ v_out,
+                                              size_t b, size_t s_q, size_t h_q, size_t d_qk,
+                                              size_t s_kv, size_t h_kv, size_t d_v,
+                                              unsigned int permute_s_splits) {
   const int which_tensor = blockIdx.z;
   const T *__restrict__ tensor_in = which_tensor == 0 ? q : (which_tensor == 1 ? k : v);
   T *__restrict__ tensor_out = which_tensor == 0 ? q_out : (which_tensor == 1 ? k_out : v_out);
@@ -165,20 +168,24 @@ __launch_bounds__(1024) __global__ void permute_to_grouped_tensor_fwd_kernel(
   if (Ddim % static_cast<size_t>(nvec) != 0) return;
 
   const unsigned int s_part = blockIdx.y;
-  const size_t s_begin = (Sdim * static_cast<size_t>(s_part)) / static_cast<size_t>(permute_s_splits);
-  const size_t s_end = (Sdim * static_cast<size_t>(s_part + 1)) / static_cast<size_t>(permute_s_splits);
+  const size_t s_begin =
+      (Sdim * static_cast<size_t>(s_part)) / static_cast<size_t>(permute_s_splits);
+  const size_t s_end =
+      (Sdim * static_cast<size_t>(s_part + 1)) / static_cast<size_t>(permute_s_splits);
   const size_t S_chunk = s_end - s_begin;
 
   const size_t in_base = kIsBshdBshdBshd ? b_i * Sdim * Hdim * Ddim : b_i * Hdim * Ddim;
   const size_t out_base = b_i * Hdim * Sdim * Ddim + h_i * Sdim * Ddim;
-  const bool use_vec128 = (Ddim % static_cast<size_t>(nvec128) == 0) &&
-                          ((reinterpret_cast<uintptr_t>(tensor_in) % alignof(Vec<T, nvec128>)) == 0) &&
-                          ((reinterpret_cast<uintptr_t>(tensor_out) % alignof(Vec<T, nvec128>)) == 0);
+  const bool use_vec128 =
+      (Ddim % static_cast<size_t>(nvec128) == 0) &&
+      ((reinterpret_cast<uintptr_t>(tensor_in) % alignof(Vec<T, nvec128>)) == 0) &&
+      ((reinterpret_cast<uintptr_t>(tensor_out) % alignof(Vec<T, nvec128>)) == 0);
 
   if (use_vec128) {
     const size_t d_vec = Ddim / static_cast<size_t>(nvec128);
     const size_t total_work = S_chunk * d_vec;
-    for (size_t w = static_cast<size_t>(threadIdx.x); w < total_work; w += static_cast<size_t>(blockDim.x)) {
+    for (size_t w = static_cast<size_t>(threadIdx.x); w < total_work;
+         w += static_cast<size_t>(blockDim.x)) {
       const size_t s_local = w / d_vec;
       const size_t s_i = s_begin + s_local;
       const size_t v = w % d_vec;
@@ -191,12 +198,14 @@ __launch_bounds__(1024) __global__ void permute_to_grouped_tensor_fwd_kernel(
         in_ptr = tensor_in + s_i * b * Hdim * Ddim + in_base + h_i * Ddim + d_off;
       }
       T *__restrict__ out_ptr = tensor_out + out_base + s_i * Ddim + d_off;
-      *reinterpret_cast<Vec<T, nvec128> *>(out_ptr) = *reinterpret_cast<const Vec<T, nvec128> *>(in_ptr);
+      *reinterpret_cast<Vec<T, nvec128> *>(out_ptr) =
+          *reinterpret_cast<const Vec<T, nvec128> *>(in_ptr);
     }
   } else {
     const size_t d_vec = Ddim / static_cast<size_t>(nvec);
     const size_t total_work = S_chunk * d_vec;
-    for (size_t w = static_cast<size_t>(threadIdx.x); w < total_work; w += static_cast<size_t>(blockDim.x)) {
+    for (size_t w = static_cast<size_t>(threadIdx.x); w < total_work;
+         w += static_cast<size_t>(blockDim.x)) {
       const size_t s_local = w / d_vec;
       const size_t s_i = s_begin + s_local;
       const size_t v = w % d_vec;
@@ -220,7 +229,8 @@ __launch_bounds__(1024) __global__ void permute_to_grouped_tensor_bwd_kernel(
     T *__restrict__ q, T *__restrict__ k, T *__restrict__ v, size_t b, size_t s_q, size_t h_q,
     size_t d_qk, size_t s_kv, size_t h_kv, size_t d_v, unsigned int permute_s_splits) {
   const int which_tensor = blockIdx.z;
-  const T *__restrict__ tensor_in = which_tensor == 0 ? grad_q : (which_tensor == 1 ? grad_k : grad_v);
+  const T *__restrict__ tensor_in =
+      which_tensor == 0 ? grad_q : (which_tensor == 1 ? grad_k : grad_v);
   T *__restrict__ tensor_out = which_tensor == 0 ? q : (which_tensor == 1 ? k : v);
   const size_t Sdim = which_tensor == 0 ? s_q : s_kv;
   const size_t Hdim = which_tensor == 0 ? h_q : h_kv;
@@ -239,20 +249,25 @@ __launch_bounds__(1024) __global__ void permute_to_grouped_tensor_bwd_kernel(
   if (Ddim % static_cast<size_t>(nvec) != 0) return;
 
   const unsigned int s_part = blockIdx.y;
-  const size_t s_begin = (Sdim * static_cast<size_t>(s_part)) / static_cast<size_t>(permute_s_splits);
-  const size_t s_end = (Sdim * static_cast<size_t>(s_part + 1)) / static_cast<size_t>(permute_s_splits);
+  const size_t s_begin =
+      (Sdim * static_cast<size_t>(s_part)) / static_cast<size_t>(permute_s_splits);
+  const size_t s_end =
+      (Sdim * static_cast<size_t>(s_part + 1)) / static_cast<size_t>(permute_s_splits);
   const size_t S_chunk = s_end - s_begin;
 
   const size_t in_base = b_i * Hdim * Sdim * Ddim + h_i * Sdim * Ddim;
-  const size_t out_base = kIsBshdBshdBshd ? b_i * Sdim * Hdim * Ddim + h_i * Ddim : b_i * Hdim * Ddim + h_i * Ddim;
-  const bool use_vec128 = (Ddim % static_cast<size_t>(nvec128) == 0) &&
-                          ((reinterpret_cast<uintptr_t>(tensor_in) % alignof(Vec<T, nvec128>)) == 0) &&
-                          ((reinterpret_cast<uintptr_t>(tensor_out) % alignof(Vec<T, nvec128>)) == 0);
+  const size_t out_base =
+      kIsBshdBshdBshd ? b_i * Sdim * Hdim * Ddim + h_i * Ddim : b_i * Hdim * Ddim + h_i * Ddim;
+  const bool use_vec128 =
+      (Ddim % static_cast<size_t>(nvec128) == 0) &&
+      ((reinterpret_cast<uintptr_t>(tensor_in) % alignof(Vec<T, nvec128>)) == 0) &&
+      ((reinterpret_cast<uintptr_t>(tensor_out) % alignof(Vec<T, nvec128>)) == 0);
 
   if (use_vec128) {
     const size_t d_vec = Ddim / static_cast<size_t>(nvec128);
     const size_t total_work = S_chunk * d_vec;
-    for (size_t w = static_cast<size_t>(threadIdx.x); w < total_work; w += static_cast<size_t>(blockDim.x)) {
+    for (size_t w = static_cast<size_t>(threadIdx.x); w < total_work;
+         w += static_cast<size_t>(blockDim.x)) {
       const size_t s_local = w / d_vec;
       const size_t s_i = s_begin + s_local;
       const size_t v = w % d_vec;
@@ -265,12 +280,14 @@ __launch_bounds__(1024) __global__ void permute_to_grouped_tensor_bwd_kernel(
       } else {
         out_ptr = tensor_out + s_i * b * Hdim * Ddim + out_base + d_off;
       }
-      *reinterpret_cast<Vec<T, nvec128> *>(out_ptr) = *reinterpret_cast<const Vec<T, nvec128> *>(in_ptr);
+      *reinterpret_cast<Vec<T, nvec128> *>(out_ptr) =
+          *reinterpret_cast<const Vec<T, nvec128> *>(in_ptr);
     }
   } else {
     const size_t d_vec = Ddim / static_cast<size_t>(nvec);
     const size_t total_work = S_chunk * d_vec;
-    for (size_t w = static_cast<size_t>(threadIdx.x); w < total_work; w += static_cast<size_t>(blockDim.x)) {
+    for (size_t w = static_cast<size_t>(threadIdx.x); w < total_work;
+         w += static_cast<size_t>(blockDim.x)) {
       const size_t s_local = w / d_vec;
       const size_t s_i = s_begin + s_local;
       const size_t v = w % d_vec;
@@ -289,9 +306,10 @@ __launch_bounds__(1024) __global__ void permute_to_grouped_tensor_bwd_kernel(
 }
 
 void permute_to_grouped_tensor_fwd(Tensor q, Tensor k, Tensor v, Tensor q_out, Tensor k_out,
-                                   Tensor v_out, NVTE_QKV_Layout original_layout, cudaStream_t stream) {
+                                   Tensor v_out, NVTE_QKV_Layout original_layout,
+                                   cudaStream_t stream) {
   using namespace transformer_engine;
-  size_t b=0, s_q=0, s_kv=0, h_q = 0, h_kv = 0, d_qk = 0, d_v = 0;
+  size_t b = 0, s_q = 0, s_kv = 0, h_q = 0, h_kv = 0, d_qk = 0, d_v = 0;
   b = q_out.shape()[0];
   h_q = q_out.shape()[1];
   s_q = q_out.shape()[2];
@@ -314,27 +332,30 @@ void permute_to_grouped_tensor_fwd(Tensor q, Tensor k, Tensor v, Tensor q_out, T
     TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(
         q.dtype(), dtype,
         permute_to_grouped_tensor_fwd_kernel<dtype, true><<<grid, threads, 0, stream>>>(
-            reinterpret_cast<const dtype *>(q.data.dptr), reinterpret_cast<const dtype *>(k.data.dptr),
-            reinterpret_cast<const dtype *>(v.data.dptr), reinterpret_cast<dtype *>(q_out.data.dptr),
-            reinterpret_cast<dtype *>(k_out.data.dptr), reinterpret_cast<dtype *>(v_out.data.dptr), b,
-            s_q, h_q, d_qk, s_kv, h_kv, d_v, permute_s_splits););
+            reinterpret_cast<const dtype *>(q.data.dptr),
+            reinterpret_cast<const dtype *>(k.data.dptr),
+            reinterpret_cast<const dtype *>(v.data.dptr),
+            reinterpret_cast<dtype *>(q_out.data.dptr), reinterpret_cast<dtype *>(k_out.data.dptr),
+            reinterpret_cast<dtype *>(v_out.data.dptr), b, s_q, h_q, d_qk, s_kv, h_kv, d_v,
+            permute_s_splits););
   } else {
     TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(
         q.dtype(), dtype,
         permute_to_grouped_tensor_fwd_kernel<dtype, false><<<grid, threads, 0, stream>>>(
-            reinterpret_cast<const dtype *>(q.data.dptr), reinterpret_cast<const dtype *>(k.data.dptr),
-            reinterpret_cast<const dtype *>(v.data.dptr), reinterpret_cast<dtype *>(q_out.data.dptr),
-            reinterpret_cast<dtype *>(k_out.data.dptr), reinterpret_cast<dtype *>(v_out.data.dptr), b,
-            s_q, h_q, d_qk, s_kv, h_kv, d_v, permute_s_splits););
+            reinterpret_cast<const dtype *>(q.data.dptr),
+            reinterpret_cast<const dtype *>(k.data.dptr),
+            reinterpret_cast<const dtype *>(v.data.dptr),
+            reinterpret_cast<dtype *>(q_out.data.dptr), reinterpret_cast<dtype *>(k_out.data.dptr),
+            reinterpret_cast<dtype *>(v_out.data.dptr), b, s_q, h_q, d_qk, s_kv, h_kv, d_v,
+            permute_s_splits););
   }
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
-void permute_to_grouped_tensor_bwd(Tensor grad_q, Tensor grad_k, Tensor grad_v,
-                                   Tensor q, Tensor k, Tensor v,
-                                   NVTE_QKV_Layout original_layout, cudaStream_t stream) {
+void permute_to_grouped_tensor_bwd(Tensor grad_q, Tensor grad_k, Tensor grad_v, Tensor q, Tensor k,
+                                   Tensor v, NVTE_QKV_Layout original_layout, cudaStream_t stream) {
   using namespace transformer_engine;
-  size_t b=0, s_q=0, s_kv=0, h_q = 0, h_kv = 0, d_qk = 0, d_v = 0;
+  size_t b = 0, s_q = 0, s_kv = 0, h_q = 0, h_kv = 0, d_qk = 0, d_v = 0;
   b = grad_q.shape()[0];
   h_q = grad_q.shape()[1];
   s_q = grad_q.shape()[2];
@@ -358,18 +379,20 @@ void permute_to_grouped_tensor_bwd(Tensor grad_q, Tensor grad_k, Tensor grad_v,
         permute_to_grouped_tensor_bwd_kernel<dtype, true><<<grid, threads, 0, stream>>>(
             reinterpret_cast<const dtype *>(grad_q.data.dptr),
             reinterpret_cast<const dtype *>(grad_k.data.dptr),
-            reinterpret_cast<const dtype *>(grad_v.data.dptr), reinterpret_cast<dtype *>(q.data.dptr),
-            reinterpret_cast<dtype *>(k.data.dptr), reinterpret_cast<dtype *>(v.data.dptr), b, s_q, h_q,
-            d_qk, s_kv, h_kv, d_v, permute_s_splits););
+            reinterpret_cast<const dtype *>(grad_v.data.dptr),
+            reinterpret_cast<dtype *>(q.data.dptr), reinterpret_cast<dtype *>(k.data.dptr),
+            reinterpret_cast<dtype *>(v.data.dptr), b, s_q, h_q, d_qk, s_kv, h_kv, d_v,
+            permute_s_splits););
   } else {
     TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(
         grad_q.dtype(), dtype,
         permute_to_grouped_tensor_bwd_kernel<dtype, false><<<grid, threads, 0, stream>>>(
             reinterpret_cast<const dtype *>(grad_q.data.dptr),
             reinterpret_cast<const dtype *>(grad_k.data.dptr),
-            reinterpret_cast<const dtype *>(grad_v.data.dptr), reinterpret_cast<dtype *>(q.data.dptr),
-            reinterpret_cast<dtype *>(k.data.dptr), reinterpret_cast<dtype *>(v.data.dptr), b, s_q, h_q,
-            d_qk, s_kv, h_kv, d_v, permute_s_splits););
+            reinterpret_cast<const dtype *>(grad_v.data.dptr),
+            reinterpret_cast<dtype *>(q.data.dptr), reinterpret_cast<dtype *>(k.data.dptr),
+            reinterpret_cast<dtype *>(v.data.dptr), b, s_q, h_q, d_qk, s_kv, h_kv, d_v,
+            permute_s_splits););
   }
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
@@ -395,8 +418,8 @@ void nvte_prepare_flash_attn_bwd(NVTETensor q, NVTETensor k, NVTETensor v, NVTET
 }
 
 void nvte_permute_to_grouped_tensor_fwd(NVTETensor q, NVTETensor k, NVTETensor v, NVTETensor q_out,
-                                        NVTETensor k_out, NVTETensor v_out, NVTE_QKV_Layout original_layout,
-                                        cudaStream_t stream) {
+                                        NVTETensor k_out, NVTETensor v_out,
+                                        NVTE_QKV_Layout original_layout, cudaStream_t stream) {
   NVTE_API_CALL(nvte_permute_to_grouped_tensor_fwd);
   using namespace transformer_engine;
 
@@ -407,12 +430,13 @@ void nvte_permute_to_grouped_tensor_fwd(NVTETensor q, NVTETensor k, NVTETensor v
 }
 
 void nvte_permute_to_grouped_tensor_bwd(NVTETensor grad_q, NVTETensor grad_k, NVTETensor grad_v,
-                                        NVTETensor q, NVTETensor k, NVTETensor v, NVTE_QKV_Layout original_layout,
-                                        cudaStream_t stream) {
+                                        NVTETensor q, NVTETensor k, NVTETensor v,
+                                        NVTE_QKV_Layout original_layout, cudaStream_t stream) {
   NVTE_API_CALL(nvte_permute_to_grouped_tensor_bwd);
   using namespace transformer_engine;
 
   flash_attention::permute_to_grouped_tensor_bwd(
-      *convertNVTETensorCheck(grad_q), *convertNVTETensorCheck(grad_k), *convertNVTETensorCheck(grad_v),
-      *convertNVTETensorCheck(q), *convertNVTETensorCheck(k), *convertNVTETensorCheck(v), original_layout, stream);
+      *convertNVTETensorCheck(grad_q), *convertNVTETensorCheck(grad_k),
+      *convertNVTETensorCheck(grad_v), *convertNVTETensorCheck(q), *convertNVTETensorCheck(k),
+      *convertNVTETensorCheck(v), original_layout, stream);
 }

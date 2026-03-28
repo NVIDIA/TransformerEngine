@@ -700,8 +700,8 @@ void nvte_fused_attn_fwd(
     nvte_convert_qkv_format(kv_format, input_V->data.shape, kv_format, tmp_shape, &b, &h_kv, &s_kv,
                             &d_v, &t_kv);
   } else {
-    nvte_convert_qkv_format(kv_format, input_V->columnwise_data.shape, kv_format, tmp_shape, &b, &h_kv, &s_kv,
-      &d_v, &t_kv);
+    nvte_convert_qkv_format(kv_format, input_V->columnwise_data.shape, kv_format, tmp_shape, &b,
+                            &h_kv, &s_kv, &d_v, &t_kv);
   }
   if (q_format == NVTE_QKV_Format::NVTE_THD) {
     b = input_cu_seqlens_q->data.shape[0] - 1;

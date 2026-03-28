@@ -287,7 +287,9 @@ std::vector<py::object> fused_attn_fwd(
                     static_cast<DType>(nvte_tensor_type(nvte_aux_tensor_pack.tensors[i])), false);
   set_tensor_param(i++, output_tensor);
   // fp8 T3HD has an additional softmax stats tensor, ZInv; return_max_logit=true has an additional Max tensor
-  if (((qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) && qkv_layout == NVTE_QKV_Layout::NVTE_T3HD) || return_max_logit) {
+  if (((qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) &&
+       qkv_layout == NVTE_QKV_Layout::NVTE_T3HD) ||
+      return_max_logit) {
     output_tensor =
         allocateSpace(nvte_shape_to_vector(nvte_tensor_shape(nvte_aux_tensor_pack.tensors[i])),
                       static_cast<DType>(nvte_tensor_type(nvte_aux_tensor_pack.tensors[i])), false);
@@ -647,18 +649,18 @@ at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v) {
   return qkv;
 }
 
-std::tuple<at::Tensor, at::Tensor, at::Tensor> permute_to_grouped_tensor_fwd(at::Tensor query,
-                                                                             at::Tensor key,
-                                                                             at::Tensor value,
-                                                                             NVTE_QKV_Layout original_layout) {
+std::tuple<at::Tensor, at::Tensor, at::Tensor> permute_to_grouped_tensor_fwd(
+    at::Tensor query, at::Tensor key, at::Tensor value, NVTE_QKV_Layout original_layout) {
   NVTE_CHECK(original_layout == NVTE_SBHD_SBHD_SBHD || original_layout == NVTE_BSHD_BSHD_BSHD,
-             "permute_to_grouped_tensor_fwd: original_layout must be NVTE_SBHD_SBHD_SBHD or NVTE_BSHD_BSHD_BSHD.");
+             "permute_to_grouped_tensor_fwd: original_layout must be NVTE_SBHD_SBHD_SBHD or "
+             "NVTE_BSHD_BSHD_BSHD.");
   NVTE_CHECK(query.is_cuda() && key.is_cuda() && value.is_cuda());
   NVTE_CHECK(query.is_contiguous() && key.is_contiguous() && value.is_contiguous());
   NVTE_CHECK(query.dim() == 4 && key.dim() == 4 && value.dim() == 4);
   NVTE_CHECK(query.scalar_type() == at::ScalarType::Half ||
              query.scalar_type() == at::ScalarType::BFloat16);
-  NVTE_CHECK(key.scalar_type() == query.scalar_type() && value.scalar_type() == query.scalar_type());
+  NVTE_CHECK(key.scalar_type() == query.scalar_type() &&
+             value.scalar_type() == query.scalar_type());
 
   int64_t B = 0;
   int64_t S_q = 0, H_q = 0, D_qk = 0;
@@ -699,17 +701,19 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> permute_to_grouped_tensor_fwd(at:
   auto te_ko = makeTransformerEngineTensor(k_out);
   auto te_vo = makeTransformerEngineTensor(v_out);
 
-  nvte_permute_to_grouped_tensor_fwd(
-      te_q.data(), te_k.data(), te_v.data(), te_qo.data(), te_ko.data(), te_vo.data(),
-      original_layout, at::cuda::getCurrentCUDAStream());
+  nvte_permute_to_grouped_tensor_fwd(te_q.data(), te_k.data(), te_v.data(), te_qo.data(),
+                                     te_ko.data(), te_vo.data(), original_layout,
+                                     at::cuda::getCurrentCUDAStream());
 
   return std::make_tuple(q_out, k_out, v_out);
 }
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> permute_to_grouped_tensor_bwd(
-    at::Tensor query_grad, at::Tensor key_grad, at::Tensor value_grad, NVTE_QKV_Layout original_layout) {
+    at::Tensor query_grad, at::Tensor key_grad, at::Tensor value_grad,
+    NVTE_QKV_Layout original_layout) {
   NVTE_CHECK(original_layout == NVTE_SBHD_SBHD_SBHD || original_layout == NVTE_BSHD_BSHD_BSHD,
-             "permute_to_grouped_tensor_bwd: original_layout must be NVTE_SBHD_SBHD_SBHD or NVTE_BSHD_BSHD_BSHD.");
+             "permute_to_grouped_tensor_bwd: original_layout must be NVTE_SBHD_SBHD_SBHD or "
+             "NVTE_BSHD_BSHD_BSHD.");
   NVTE_CHECK(query_grad.is_cuda() && key_grad.is_cuda() && value_grad.is_cuda());
   NVTE_CHECK(query_grad.is_contiguous() && key_grad.is_contiguous() && value_grad.is_contiguous());
   NVTE_CHECK(query_grad.dim() == 4 && key_grad.dim() == 4 && value_grad.dim() == 4);
@@ -751,9 +755,9 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> permute_to_grouped_tensor_bwd(
   auto te_k = makeTransformerEngineTensor(key);
   auto te_v = makeTransformerEngineTensor(value);
 
-  nvte_permute_to_grouped_tensor_bwd(
-      te_gq.data(), te_gk.data(), te_gv.data(), te_q.data(), te_k.data(), te_v.data(),
-      original_layout, at::cuda::getCurrentCUDAStream());
+  nvte_permute_to_grouped_tensor_bwd(te_gq.data(), te_gk.data(), te_gv.data(), te_q.data(),
+                                     te_k.data(), te_v.data(), original_layout,
+                                     at::cuda::getCurrentCUDAStream());
 
   return std::make_tuple(query, key, value);
 }

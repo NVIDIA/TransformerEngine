@@ -1620,7 +1620,9 @@ class FusedAttnFunc(torch.autograd.Function):
 
         d_out_qdq_f16 = d_out
         d_out_qdq_f16, _ = dpa_utils.permute_to_grouped_tensor(ctx.o_format, d_out_qdq_f16)
-        tmp_quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True)
+        tmp_quantizer = MXFP8Quantizer(
+            fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True
+        )
         tmp_quantizer.optimize_for_gemm = False
         d_out_qdq_fp8 = tmp_quantizer(d_out_qdq_f16)
         d_out_qdq_f16 = d_out_qdq_fp8.dequantize(dtype=ctx.nominal_dtype)

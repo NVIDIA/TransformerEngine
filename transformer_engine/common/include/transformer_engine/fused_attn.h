@@ -619,7 +619,9 @@ void nvte_prepare_flash_attn_bwd(NVTETensor q, NVTETensor k, NVTETensor v, NVTET
  *  \param[in]     original_layout  Original QKV layout.
  *  \param[in]     stream           CUDA stream.
  */
-void nvte_permute_to_grouped_tensor_fwd(NVTETensor q, NVTETensor k, NVTETensor v, NVTETensor q_out, NVTETensor k_out, NVTETensor v_out, NVTE_QKV_Layout original_layout, cudaStream_t stream);
+void nvte_permute_to_grouped_tensor_fwd(NVTETensor q, NVTETensor k, NVTETensor v, NVTETensor q_out,
+                                        NVTETensor k_out, NVTETensor v_out,
+                                        NVTE_QKV_Layout original_layout, cudaStream_t stream);
 
 /*!  \brief Permute Q, K, V back to original layout.
  *
