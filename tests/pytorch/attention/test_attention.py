@@ -2683,8 +2683,8 @@ class _custom_mha_fp8(torch.autograd.Function):
             quantization_params=qkv_quantizer,
             use_split_accumulator=_2X_ACC_FPROP,
         )
-        qkv_layout="bs3hd" if cudnn_frontend_version == 1 else "t3hd"
-        o_format="bshd" if cudnn_frontend_version == 1 else "thd"
+        qkv_layout = "bs3hd" if cudnn_frontend_version == 1 else "t3hd"
+        o_format = "bshd" if cudnn_frontend_version == 1 else "thd"
         qkv = qkv.view(-1, 3, h, d)
         qkv_fp16 = qkv.dequantize().view(b, max_s, 3, h, d).contiguous()
         torch.save(qkv_fp16, "qkv.pt")
