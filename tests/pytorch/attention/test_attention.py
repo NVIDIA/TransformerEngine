@@ -2683,6 +2683,8 @@ class _custom_mha_fp8(torch.autograd.Function):
             quantization_params=qkv_quantizer,
             use_split_accumulator=_2X_ACC_FPROP,
         )
+        qkv_layout="bs3hd" if cudnn_frontend_version == 1 else "t3hd"
+        o_format="bshd" if cudnn_frontend_version == 1 else "thd"
         qkv = qkv.view(-1, 3, h, d)
         qkv_fp16 = qkv.dequantize().view(b, max_s, 3, h, d).contiguous()
         torch.save(qkv_fp16, "qkv.pt")
@@ -2711,7 +2713,8 @@ class _custom_mha_fp8(torch.autograd.Function):
             attn_scale=None,
             dropout=p_dropout,
             fast_zero_fill=fast_zero_fill,
-            qkv_layout="bs3hd" if cudnn_frontend_version == 1 else "t3hd",
+            qkv_layout=qkv_layout,
+            o_format=o_format,
             attn_bias_type="no_bias",
             attn_mask_type=mask_type if cudnn_frontend_version == 1 else "padding",
             rng_gen=None,
@@ -2734,6 +2737,8 @@ class _custom_mha_fp8(torch.autograd.Function):
         ctx.num_heads = num_heads
         ctx.mask_type = mask_type
         ctx.dtype = inp.dtype
+        ctx.qkv_layout = qkv_layout
+        ctx.o_format = o_format
 
         ctx.dQKV_quantizer = dQKV_quantizer
         ctx.dO_quantizer = dO_quantizer
@@ -2751,7 +2756,6 @@ class _custom_mha_fp8(torch.autograd.Function):
             (q, k, v, inp_fp8, qkv_weight_fp8, out) = restore_from_func_ctx(ctx)
 
             proj_dgrad = ctx.dO_quantizer(grad_output)
-            fp8_dtype_backward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=False)
 
             dq, dk, dv, *rest = fused_attn_bwd(
                 ctx.max_s,
@@ -2764,7 +2768,6 @@ class _custom_mha_fp8(torch.autograd.Function):
                 out,
                 proj_dgrad.view_as(out),
                 ctx.qkv_dtype,
-                fp8_dtype_backward,
                 ctx.aux_ctx_tensors,
                 FusedAttnBackend["FP8"],
                 None,
@@ -2775,7 +2778,10 @@ class _custom_mha_fp8(torch.autograd.Function):
                 attn_scale=None,
                 dropout=ctx.p_dropout,
                 fast_zero_fill=ctx.fast_zero_fill,
-                qkv_layout="bs3hd" if cudnn_frontend_version == 1 else "t3hd",
+                qkv_layout=ctx.qkv_layout,
+                o_format=ctx.o_format,
+                do_format=ctx.o_format,
+                dqkv_layout=ctx.qkv_layout,
                 attn_bias_type="no_bias",
                 attn_mask_type=ctx.mask_type if cudnn_frontend_version == 1 else "padding",
             )
