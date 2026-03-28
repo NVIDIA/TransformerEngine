@@ -6,12 +6,28 @@
 
 """FSDP2 + FusedAdam compatibility tests.
 
-Launched via torchrun from test_fused_optimizer.py.
+Run all tests (via torchrun + pytest):
+  torchrun -m pytest <this_file> -v --tb=short
+
+Run a single test standalone (for debugging):
+  torchrun <this_file> --test <name> --recipe <recipe>
+
+Available --test values:
+  fused_adam_fp8_master_weights, fused_adam_fp8_master_weights_no_meta,
+  fused_adam_bf16, fused_adam_fp8_no_master, fused_adam_bf16_store_param_remainders,
+  fuse_wgrad_accumulation, dcp_output_parity, dcp_output_parity_async,
+  safetensors_fp32_export
+
+Available --recipe values:
+  DelayedScaling, Float8CurrentScaling, Float8BlockScaling,
+  MXFP8BlockScaling, NVFP4BlockScaling
 """
 
 import argparse
 import functools
 import os
+import shutil
+import pytest
 
 import torch
 import torch.distributed as dist
@@ -24,9 +40,7 @@ import transformer_engine.pytorch as te
 from transformer_engine.pytorch import QuantizedTensor
 import transformer_engine.common.recipe
 
-
-def get_recipe_from_string(recipe):
-    return getattr(transformer_engine.common.recipe, recipe)()
+from fsdp2_utils import get_recipe_from_string, save_custom_attrs, restore_custom_attrs
 
 
 HIDDEN_SIZE = 256
@@ -36,38 +50,6 @@ NUM_LAYERS = 2
 SEQ_LEN = 32
 BATCH_PER_RANK = 2
 NUM_STEPS = 3
-
-
-def save_custom_attrs(module):
-    custom_attrs = {}
-    for name, param in module.named_parameters():
-        if isinstance(param, QuantizedTensor):
-            ignore_keys = [key for key in param.__dict__.keys() if key.startswith("_")]
-        else:
-            ignore_keys = []
-        attrs = vars(param)
-        custom_attrs[name] = {k: v for k, v in attrs.items() if k not in ignore_keys}
-    return custom_attrs
-
-
-def restore_custom_attrs(module, custom_attrs):
-    for name, param in module.named_parameters():
-        if name in custom_attrs:
-            for attr_name, attr_value in custom_attrs[name].items():
-                setattr(param, attr_name, attr_value)
-
-
-def _setup():
-    """Common distributed setup. Returns (world_size, local_rank, device)."""
-    world_size = int(os.environ["WORLD_SIZE"])
-    local_rank = int(os.environ["LOCAL_RANK"])
-    torch.cuda.set_device(local_rank)
-    # CPU backend required for async save
-    dist.init_process_group(backend="cpu:gloo,cuda:nccl")
-    device = torch.device(f"cuda:{local_rank}")
-    torch.manual_seed(42)
-    torch.cuda.manual_seed(42)
-    return world_size, local_rank, device
 
 
 def _build_model(fp8_init, fuse_wgrad_accumulation=False, recipe=None, use_meta_device=True):
@@ -143,7 +125,14 @@ def _shard_model(model, world_size):
     return model
 
 
-def test_fused_adam_fp8_master_weights(recipe=None):
+def _get_dist_info():
+    """Get world_size and device from environment (PG already initialized by session fixture)."""
+    world_size = int(os.environ["WORLD_SIZE"])
+    device = torch.device(f"cuda:{int(os.environ['LOCAL_RANK'])}")
+    return world_size, device
+
+
+def test_fused_adam_fp8_master_weights(recipe_name):
     """FusedAdam with master_weights + FSDP2 + quantized_model_init (FP8 params).
 
     Verifies:
@@ -151,7 +140,15 @@ def test_fused_adam_fp8_master_weights(recipe=None):
     - Training loop completes without error
     - DTensor wrapping and QuantizedTensor local tensors are preserved
     """
-    world_size, _, device = _setup()
+    recipe = get_recipe_from_string(recipe_name)
+
+    if recipe_name == "NVFP4BlockScaling":
+        pytest.xfail(
+            f"{recipe_name}: quantized_model_init and FSDP2 is not currently supported, since the "
+            "block tensor is dequantized before we flatten it for FSDP2."
+        )
+
+    world_size, device = _get_dist_info()
 
     model = _build_model(fp8_init=True, recipe=recipe)
     model = _shard_model(model, world_size)
@@ -206,10 +203,8 @@ def test_fused_adam_fp8_master_weights(recipe=None):
     )
     assert qt_count > 0, "No QuantizedTensor local tensors after training"
 
-    dist.destroy_process_group()
 
-
-def test_fused_adam_fp8_master_weights_no_meta(recipe=None):
+def test_fused_adam_fp8_master_weights_no_meta(recipe_name):
     """FusedAdam with master_weights + FSDP2 + quantized_model_init WITHOUT meta device.
 
     This is the legacy path that creates quantized params directly on CUDA.
@@ -219,7 +214,16 @@ def test_fused_adam_fp8_master_weights_no_meta(recipe=None):
     For per-tensor FP8 (DelayedScaling, Float8CurrentScaling) this works
     because Float8Tensor's storage is accessible via data_ptr().
     """
-    world_size, _, device = _setup()
+    recipe = get_recipe_from_string(recipe_name)
+
+    if recipe_name in ("MXFP8BlockScaling", "Float8BlockScaling", "NVFP4BlockScaling"):
+        pytest.xfail(
+            f"{recipe_name}: FSDP2 without meta-device init crashes on block-scaling "
+            "QuantizedTensor wrapper subclasses (data_ptr() == 0). "
+            "Use device='meta' + reset_parameters() after sharding."
+        )
+
+    world_size, device = _get_dist_info()
 
     model = _build_model(fp8_init=True, recipe=recipe, use_meta_device=False)
     model = _shard_model(model, world_size)
@@ -242,15 +246,15 @@ def test_fused_adam_fp8_master_weights_no_meta(recipe=None):
         loss.backward()
         optimizer.step()
 
-    dist.destroy_process_group()
 
-
-def test_fused_adam_bf16(recipe=None):
+def test_fused_adam_bf16(recipe_name):
     """FusedAdam with master_weights + FSDP2 + bf16 params (no FP8).
 
     Verifies the non-FP8 DTensor param path in step() works correctly.
     """
-    world_size, _, device = _setup()
+    recipe = get_recipe_from_string(recipe_name)
+
+    world_size, device = _get_dist_info()
 
     model = _build_model(fp8_init=False)
     model = _shard_model(model, world_size)
@@ -284,15 +288,21 @@ def test_fused_adam_bf16(recipe=None):
     # Verify loss decreased (basic sanity)
     assert losses[-1] < losses[0], f"Loss did not decrease: {losses}"
 
-    dist.destroy_process_group()
 
-
-def test_fused_adam_fp8_no_master(recipe=None):
+def test_fused_adam_fp8_no_master(recipe_name):
     """FusedAdam without master_weights + FSDP2 + FP8 params.
 
     Verifies FusedAdam works with FSDP2 even without master weights enabled.
     """
-    world_size, _, device = _setup()
+    recipe = get_recipe_from_string(recipe_name)
+
+    if recipe_name in ("MXFP8BlockScaling", "Float8BlockScaling", "NVFP4BlockScaling"):
+        pytest.xfail(
+            f"{recipe_name}: FusedAdam without master_weights does not support "
+            "block-scaling quantized tensors. Use master_weights=True."
+        )
+
+    world_size, device = _get_dist_info()
 
     model = _build_model(fp8_init=True, recipe=recipe)
     model = _shard_model(model, world_size)
@@ -318,10 +328,8 @@ def test_fused_adam_fp8_no_master(recipe=None):
     for name, param in model.named_parameters():
         assert isinstance(param, DTensor), f"{name} lost DTensor wrapping"
 
-    dist.destroy_process_group()
 
-
-def test_fused_adam_bf16_store_param_remainders(recipe=None):
+def test_fused_adam_bf16_store_param_remainders(recipe_name):
     """FusedAdam with master_weights + store_param_remainders + FSDP2 + bf16 params.
 
     store_param_remainders stores only the trailing 16 remainder bits (int16)
@@ -335,7 +343,8 @@ def test_fused_adam_bf16_store_param_remainders(recipe=None):
     - exp_avg and exp_avg_sq are float32
     - Loss decreases (basic sanity)
     """
-    world_size, _, device = _setup()
+    recipe = get_recipe_from_string(recipe_name)
+    world_size, device = _get_dist_info()
 
     model = _build_model(fp8_init=False)
     model = _shard_model(model, world_size)
@@ -385,10 +394,18 @@ def test_fused_adam_bf16_store_param_remainders(recipe=None):
     # Verify loss decreased (basic sanity)
     assert losses[-1] < losses[0], f"Loss did not decrease: {losses}"
 
-    dist.destroy_process_group()
 
-
-def test_fuse_wgrad_accumulation(recipe=None):
+@pytest.mark.xfail(
+    reason=(
+        "fuse_wgrad_accumulation is incompatible with vanilla FSDP2: "
+        "autograd Function.apply unwraps DTensors to local tensors, so "
+        "main_grad (set on the DTensor) is inaccessible during backward. "
+        "Additionally, the fused wgrad GEMM bypasses FSDP2's reduce-scatter."
+    ),
+    raises=AttributeError,
+    strict=True,
+)
+def test_fuse_wgrad_accumulation(recipe_name):
     """fuse_wgrad_accumulation=True + FSDP2 -- expected to fail.
 
     With vanilla FSDP2, PyTorch's autograd Function.apply unwraps DTensor
@@ -400,8 +417,8 @@ def test_fuse_wgrad_accumulation(recipe=None):
     writes the gradient directly into main_grad and returns None to autograd,
     bypassing FSDP2's reduce-scatter.
     """
-    world_size, _, device = _setup()
-
+    recipe = get_recipe_from_string(recipe_name)
+    world_size, device = _get_dist_info()
     model = _build_model(fp8_init=True, fuse_wgrad_accumulation=True, recipe=recipe)
 
     # Allocate main_grad buffers on the DTensor params
@@ -433,10 +450,8 @@ def test_fuse_wgrad_accumulation(recipe=None):
     loss = F.mse_loss(output, target)
     loss.backward()  # Expected to raise AttributeError
 
-    dist.destroy_process_group()
 
-
-def test_safetensors_fp32_export(recipe=None):
+def test_safetensors_fp32_export(recipe_name):
     """Export full-precision (FP32) model to safetensors from optimizer master weights.
 
     Verifies:
@@ -446,6 +461,13 @@ def test_safetensors_fp32_export(recipe=None):
     - All saved tensors are float32
     - Saved tensor shapes match expected (unsharded) shapes
     """
+    recipe = get_recipe_from_string(recipe_name)
+    if recipe_name == "MXFP8BlockScaling":
+        pytest.xfail(
+            "MXFP8BlockScaling: FusedAdam CUDA kernel does not support "
+            "MXFP8 quantized tensors, causing illegal memory access"
+        )
+
     from safetensors.torch import load_file, save_file
     from torch.distributed.checkpoint.state_dict import (
         StateDictOptions,
@@ -453,8 +475,7 @@ def test_safetensors_fp32_export(recipe=None):
         get_optimizer_state_dict,
     )
 
-    world_size, _, device = _setup()
-
+    world_size, device = _get_dist_info()
     model = _build_model(fp8_init=True, recipe=recipe)
     model = _shard_model(model, world_size)
 
@@ -483,38 +504,39 @@ def test_safetensors_fp32_export(recipe=None):
     full_opt_state = get_optimizer_state_dict(model, optimizer, options=full_opts)
 
     rank = int(os.environ.get("RANK", "0"))
-    save_path = "/tmp/te_test_fsdp2_model_fp32.safetensors"
+    save_path = f"/tmp/te_test_fsdp2_model_fp32_{recipe_name}.safetensors"
 
     if rank == 0:
-        # Build FP32 state dict from optimizer master weights.
-        fp32_state = {}
-        opt_param_states = full_opt_state.get("state", {})
+        if os.path.exists(save_path):
+            os.remove(save_path)
 
-        for key, value in full_model_state.items():
-            if key in opt_param_states and "master_param" in opt_param_states[key]:
-                fp32_state[key] = opt_param_states[key]["master_param"].float()
-            else:
-                fp32_state[key] = value.float()
+        try:
+            fp32_state = {}
+            opt_param_states = full_opt_state.get("state", {})
 
-        assert len(fp32_state) > 0, "FP32 state dict is empty"
+            for key, value in full_model_state.items():
+                if key in opt_param_states and "master_param" in opt_param_states[key]:
+                    fp32_state[key] = opt_param_states[key]["master_param"].float()
+                else:
+                    fp32_state[key] = value.float()
 
-        # Save and verify.
-        save_file(fp32_state, save_path)
-        loaded = load_file(save_path)
+            assert len(fp32_state) > 0, "FP32 state dict is empty"
 
-        assert len(loaded) == len(
-            fp32_state
-        ), f"Loaded {len(loaded)} tensors, expected {len(fp32_state)}"
-        for k, v in loaded.items():
-            assert v.dtype == torch.float32, f"{k}: expected float32, got {v.dtype}"
+            save_file(fp32_state, save_path)
+            loaded = load_file(save_path)
 
-        # Clean up.
-        os.remove(save_path)
+            assert len(loaded) == len(
+                fp32_state
+            ), f"Loaded {len(loaded)} tensors, expected {len(fp32_state)}"
+            for k, v in loaded.items():
+                assert v.dtype == torch.float32, f"{k}: expected float32, got {v.dtype}"
+        finally:
+            if os.path.exists(save_path):
+                os.remove(save_path)
 
-    dist.destroy_process_group()
 
-
-def test_dcp_output_parity(recipe=None, async_save=False):
+@pytest.mark.parametrize("async_save", [False, True], ids=["sync", "async"])
+def test_dcp_output_parity(recipe_name, async_save):
     """DCP save/load round-trip produces bitwise-identical model outputs.
 
     1. Builds and trains a model for NUM_STEPS
@@ -525,156 +547,197 @@ def test_dcp_output_parity(recipe=None, async_save=False):
     6. Runs the same forward pass and asserts outputs are identical
     7. Runs one more training step on both models and asserts outputs still match
     """
+    recipe = get_recipe_from_string(recipe_name)
+
+    if recipe_name == "MXFP8BlockScaling":
+        pytest.xfail(
+            "MXFP8BlockScaling: FusedAdam CUDA kernel does not support "
+            "MXFP8 quantized tensors, causing illegal memory access: "
+            "/transformer_engine/common/multi_tensor/multi_tensor_apply.cuh:92 in function "
+            "multi_tensor_apply: CUDA Error: an illegal memory access was encountered"
+        )
+
+    if recipe_name == "NVFP4BlockScaling":
+        pytest.xfail(
+            "NVFP4BlockScaling: DCP load_state_dict triggers reset_sharded_param() "
+            "which calls data_ptr() on NVFP4Tensor wrapper subclass with invalid storage"
+        )
+
+    if (
+        recipe_name == "Float8BlockScaling"
+        and not async_save
+        and torch.cuda.get_device_capability()[0] == 12
+    ):
+        pytest.xfail(
+            "Float8BlockScaling is failing on SM120 with RuntimeError: "
+            "transformer_engine/common/transpose/quantize_transpose_vector_blockwise.cu:534 "
+            "in function quantize_transpose_vector_blockwise: Assertion failed: pow2_scale. On "
+            "Blackwell and newer, the FP8 block scaling recipe is emulated with MXFP8, which "
+            "requires using power of two scaling factors."
+        )
+    if recipe_name == "Float8BlockScaling" and async_save:
+        pytest.xfail(
+            "Float8BlockScaling: async DCP save/load round-trip produces different model "
+            "outputs — quantization metadata (scales) is not correctly persisted through "
+            "async distributed checkpointing. On SM120, additionally fails with pow2_scale "
+            "assertion in quantize_transpose_vector_blockwise."
+        )
+
     import torch.distributed.checkpoint as dcp
 
-    world_size, local_rank, device = _setup()
+    world_size, device = _get_dist_info()
+    rank = int(os.environ.get("RANK", "0"))
+    save_mode = "async" if async_save else "sync"
+    checkpoint_dir = f"/tmp/te_test_fsdp2_dcp_parity_{recipe_name}_{save_mode}"
 
-    # ── Build and train the original model ───────────────────────────
-    model = _build_model(fp8_init=True, recipe=recipe)
-    model = _shard_model(model, world_size)
+    if rank == 0:
+        shutil.rmtree(checkpoint_dir, ignore_errors=True)
+    dist.barrier()
 
-    optimizer = te.optimizers.FusedAdam(
-        model.parameters(),
-        lr=1e-3,
-        master_weights=True,
-        master_weight_dtype=torch.float32,
-    )
+    try:
+        # ── Build and train the original model ───────────────────────────
+        model = _build_model(fp8_init=True, recipe=recipe)
+        model = _shard_model(model, world_size)
 
-    x = torch.randn(SEQ_LEN, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
-    target = torch.randn_like(x)
+        optimizer = te.optimizers.FusedAdam(
+            model.parameters(),
+            lr=1e-3,
+            master_weights=True,
+            master_weight_dtype=torch.float32,
+        )
 
-    for _ in range(NUM_STEPS):
+        x = torch.randn(SEQ_LEN, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
+        target = torch.randn_like(x)
+
+        for _ in range(NUM_STEPS):
+            optimizer.zero_grad(set_to_none=True)
+            with te.autocast(enabled=True, recipe=recipe):
+                output = model(x)
+            loss = F.mse_loss(output, target)
+            loss.backward()
+            optimizer.step()
+
+        # Record reference output from the trained model.
+        with torch.no_grad():
+            with te.autocast(enabled=True, recipe=recipe):
+                ref_output = model(x).clone()
+
+        # ── Save checkpoint ──────────────────────────────────────────────
+        if isinstance(recipe, transformer_engine.common.recipe.DelayedScaling):
+            # We need to remove the _extra_state keys from the model state dict for
+            # DelayedScaling, since otherwise we'll run into an error that the tensor
+            # sizes are different. The alternative is a LoadPlanner that dynamically
+            # re-sizes the input tensors, see NVIDIA/TransformerEngine#1860 for more
+            # details.
+            model_state = {
+                k: v for k, v in model.state_dict().items() if not k.endswith("_extra_state")
+            }
+        else:
+            model_state = model.state_dict()
+
+        save_state = {"model": model_state, "optimizer": optimizer.state_dict()}
+
+        if not async_save:
+            dcp.save(save_state, checkpoint_id=checkpoint_dir)
+        else:
+            future = dcp.async_save(save_state, checkpoint_id=checkpoint_dir)
+            future.result()
+
+        # ── Build a fresh model and load the checkpoint ──────────────────
+        model2 = _build_model(fp8_init=True, recipe=recipe)
+        model2 = _shard_model(model2, world_size)
+
+        optimizer2 = te.optimizers.FusedAdam(
+            model2.parameters(),
+            lr=1e-3,
+            master_weights=True,
+            master_weight_dtype=torch.float32,
+        )
+
+        # Populate optimizer state so load_state_dict has matching structure.
+        optimizer2.zero_grad(set_to_none=True)
+        with te.autocast(enabled=True, recipe=recipe):
+            out_tmp = model2(x)
+        F.mse_loss(out_tmp, target).backward()
+        optimizer2.step()
+
+        if isinstance(recipe, transformer_engine.common.recipe.DelayedScaling):
+            model2_state = {
+                k: v for k, v in model2.state_dict().items() if not k.endswith("_extra_state")
+            }
+        else:
+            model2_state = model2.state_dict()
+
+        state_to_load = {"model": model2_state, "optimizer": optimizer2.state_dict()}
+
+        dcp.load(state_to_load, checkpoint_id=checkpoint_dir)
+        model2.load_state_dict(
+            state_to_load["model"],
+            strict=(
+                False
+                if isinstance(recipe, transformer_engine.common.recipe.DelayedScaling)
+                else True
+            ),
+        )
+        optimizer2.load_state_dict(state_to_load["optimizer"])
+
+        # ── Verify identical forward-pass output ─────────────────────────
+        with torch.no_grad():
+            with te.autocast(enabled=True, recipe=recipe):
+                loaded_output = model2(x)
+
+        if isinstance(recipe, transformer_engine.common.recipe.DelayedScaling):
+            # DelayedScaling stores amax history and scaling factors in _extra_state,
+            # which cannot be saved via DCP due to non-deterministic pickle sizes
+            # across ranks. The fresh model therefore uses default scaling factors,
+            # producing small numerical differences from FP8 re-quantization.
+            torch.testing.assert_close(
+                loaded_output,
+                ref_output,
+                rtol=0.05,
+                atol=0.1,
+                msg=lambda x: f"Fresh model loaded from DCP checkpoint produces different output: {x}",
+            )
+        else:
+            torch.testing.assert_close(
+                loaded_output,
+                ref_output,
+                rtol=0,
+                atol=0,
+                msg=lambda x: f"Fresh model loaded from DCP checkpoint produces different output: {x}",
+            )
+
+        # ── Verify one more training step produces identical results ─────
         optimizer.zero_grad(set_to_none=True)
         with te.autocast(enabled=True, recipe=recipe):
-            output = model(x)
-        loss = F.mse_loss(output, target)
-        loss.backward()
+            out1 = model(x)
+        loss1 = F.mse_loss(out1, target)
+        loss1.backward()
         optimizer.step()
 
-    # Record reference output from the trained model.
-    with torch.no_grad():
+        optimizer2.zero_grad(set_to_none=True)
         with te.autocast(enabled=True, recipe=recipe):
-            ref_output = model(x).clone()
+            out2 = model2(x)
+        loss2 = F.mse_loss(out2, target)
+        loss2.backward()
+        optimizer2.step()
 
-    # ── Save checkpoint ──────────────────────────────────────────────
-    checkpoint_dir = "/tmp/te_test_fsdp2_dcp_parity"
-
-    if isinstance(recipe, transformer_engine.common.recipe.DelayedScaling):
-        # We need to remove the _extra_state keys from the model state dict for DelayedScaling,
-        # since otherwise we'll run into an error that the tensor sizes are different. The
-        # alternative is a LoadPlanner that dynamically re-sizes the input tensors, see
-        # NVIDIA/TransformerEngine#1860 for more details.
-        model_state = {
-            k: v for k, v in model.state_dict().items() if not k.endswith("_extra_state")
-        }
-    else:
-        model_state = model.state_dict()
-
-    save_state = {"model": model_state, "optimizer": optimizer.state_dict()}
-
-    if not async_save:
-        dcp.save(save_state, checkpoint_id=checkpoint_dir)
-    else:
-        future = dcp.async_save(save_state, checkpoint_id=checkpoint_dir)
-        future.result()  # Block on async save completion
-
-    # ── Build a fresh model and load the checkpoint ──────────────────
-    model2 = _build_model(fp8_init=True, recipe=recipe)
-    model2 = _shard_model(model2, world_size)
-
-    optimizer2 = te.optimizers.FusedAdam(
-        model2.parameters(),
-        lr=1e-3,
-        master_weights=True,
-        master_weight_dtype=torch.float32,
-    )
-
-    # Populate optimizer state so load_state_dict has matching structure.
-    optimizer2.zero_grad(set_to_none=True)
-    with te.autocast(enabled=True, recipe=recipe):
-        out_tmp = model2(x)
-    F.mse_loss(out_tmp, target).backward()
-    optimizer2.step()
-
-    if isinstance(recipe, transformer_engine.common.recipe.DelayedScaling):
-        model2_state = {
-            k: v for k, v in model2.state_dict().items() if not k.endswith("_extra_state")
-        }
-    else:
-        model2_state = model2.state_dict()
-
-    state_to_load = {"model": model2_state, "optimizer": optimizer2.state_dict()}
-
-    dcp.load(state_to_load, checkpoint_id=checkpoint_dir)
-    model2.load_state_dict(
-        state_to_load["model"],
-        strict=(
-            False if isinstance(recipe, transformer_engine.common.recipe.DelayedScaling) else True
-        ),
-    )
-    optimizer2.load_state_dict(state_to_load["optimizer"])
-
-    # ── Verify identical forward-pass output ─────────────────────────
-    with torch.no_grad():
-        with te.autocast(enabled=True, recipe=recipe):
-            loaded_output = model2(x)
-
-    if isinstance(recipe, transformer_engine.common.recipe.DelayedScaling):
-        # DelayedScaling stores amax history and scaling factors in _extra_state,
-        # which cannot be saved via DCP due to non-deterministic pickle sizes
-        # across ranks. The fresh model therefore uses default scaling factors,
-        # producing small numerical differences from FP8 re-quantization.
-        torch.testing.assert_close(
-            loaded_output,
-            ref_output,
-            rtol=0.05,
-            atol=0.1,
-            msg=lambda x: f"Fresh model loaded from DCP checkpoint produces different output: {x}",
-        )
-    else:
-        torch.testing.assert_close(
-            loaded_output,
-            ref_output,
-            rtol=0,
-            atol=0,
-            msg=lambda x: f"Fresh model loaded from DCP checkpoint produces different output: {x}",
-        )
-
-    # ── Verify one more training step produces identical results ─────
-    optimizer.zero_grad(set_to_none=True)
-    with te.autocast(enabled=True, recipe=recipe):
-        out1 = model(x)
-    loss1 = F.mse_loss(out1, target)
-    loss1.backward()
-    optimizer.step()
-
-    optimizer2.zero_grad(set_to_none=True)
-    with te.autocast(enabled=True, recipe=recipe):
-        out2 = model2(x)
-    loss2 = F.mse_loss(out2, target)
-    loss2.backward()
-    optimizer2.step()
-
-    if isinstance(recipe, transformer_engine.common.recipe.DelayedScaling):
-        torch.testing.assert_close(
-            out2,
-            out1,
-            rtol=0.05,
-            atol=0.1,
-            msg="Training step after DCP load produces different output",
-        )
-    else:
-        torch.testing.assert_close(
-            out2, out1, msg="Training step after DCP load produces different output"
-        )
-
-    # ── Cleanup ──────────────────────────────────────────────────────
-    import shutil
-
-    if int(os.environ.get("RANK", "0")) == 0:
-        shutil.rmtree(checkpoint_dir, ignore_errors=True)
-
-    dist.destroy_process_group()
+        if isinstance(recipe, transformer_engine.common.recipe.DelayedScaling):
+            torch.testing.assert_close(
+                out2,
+                out1,
+                rtol=0.05,
+                atol=0.1,
+                msg="Training step after DCP load produces different output",
+            )
+        else:
+            torch.testing.assert_close(
+                out2, out1, msg="Training step after DCP load produces different output"
+            )
+    finally:
+        dist.barrier()
+        if rank == 0:
+            shutil.rmtree(checkpoint_dir, ignore_errors=True)
 
 
 TESTS = {
@@ -707,5 +770,13 @@ if __name__ == "__main__":
         ],
     )
     args = parser.parse_args()
-    recipe = get_recipe_from_string(args.recipe)
-    TESTS[args.test](recipe)
+    local_rank = int(os.environ["LOCAL_RANK"])
+    torch.cuda.set_device(local_rank)
+    dist.init_process_group(backend="cpu:gloo,cuda:nccl")
+    torch.manual_seed(42)
+    torch.cuda.manual_seed(42)
+    try:
+        TESTS[args.test](args.recipe)
+    finally:
+        if dist.is_initialized():
+            dist.destroy_process_group()

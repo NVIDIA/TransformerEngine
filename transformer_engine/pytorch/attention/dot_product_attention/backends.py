@@ -33,7 +33,7 @@ from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 from transformer_engine.pytorch.quantized_tensor import (
     QuantizedTensorStorage,
     prepare_for_saving,
-    restore_from_saved,
+    restore_from_func_ctx,
 )
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.constants import (
@@ -1671,7 +1671,7 @@ class FusedAttnFunc(torch.autograd.Function):
             cu_seqlens_q_padded,
             cu_seqlens_kv_padded,
             *other_tensors,
-        ) = restore_from_saved(ctx.tensor_objects, ctx.saved_tensors)
+        ) = restore_from_func_ctx(ctx)
 
         aux_ctx_tensors = other_tensors
         aux_ctx_tensors_shadow_f16 = aux_ctx_tensors

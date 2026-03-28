@@ -60,7 +60,7 @@ from ..quantized_tensor import (
     QuantizedTensorStorage,
     Quantizer,
     prepare_for_saving,
-    restore_from_saved,
+    restore_from_func_ctx,
 )
 from ...debug.pytorch.debug_state import TEDebugState
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
@@ -546,7 +546,6 @@ class _LayerNormLinear(torch.autograd.Function):
             nvtx_label = f"{nvtx_label}.{ctx.ub_name}"
 
         with get_nvtx_range_context("_LayerNormLinear_backward"):
-            saved_tensors = ctx.saved_tensors
             (  # pylint: disable=unbalanced-tuple-unpacking
                 inputmat,
                 weight,
@@ -556,11 +555,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 ln_out,
                 mu,
                 rsigma,
-            ) = restore_from_saved(ctx.tensor_objects, saved_tensors)
-
-            # Delete the references to tensor objects once they've been consumed
-            # by the `restore_from_saved` method to construct back the actual tensors.
-            ctx.tensor_objects = None
+            ) = restore_from_func_ctx(ctx)
 
             # Since main_grad can be modified inplace, it should not be a part of saved_tensors
             main_grad = (

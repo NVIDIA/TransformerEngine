@@ -68,6 +68,7 @@ from transformer_engine.pytorch.quantized_tensor import QuantizedTensor
 from transformer_engine.pytorch.quantized_tensor import Quantizer
 from transformer_engine.pytorch.quantized_tensor import prepare_for_saving
 from transformer_engine.pytorch.quantized_tensor import restore_from_saved
+from transformer_engine.pytorch.quantized_tensor import restore_from_func_ctx
 from transformer_engine.pytorch.tensor import Float8Quantizer
 from transformer_engine.pytorch.tensor import Float8CurrentScalingQuantizer
 from transformer_engine.pytorch.tensor import MXFP8Quantizer
