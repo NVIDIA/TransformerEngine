@@ -88,7 +88,26 @@ void gemm(
   float alpha_f = static_cast<float>(alpha);
   float beta_f = accumulate ? 1.0f : 0.0f;
 
+  // Configure GEMM
   MatmulConfigWrapper config;
+  bool gelu_flag = pre_gelu_out.has_value() && pre_gelu_out->numel() > 0;
+  if (bias.has_value()) {
+    if (grad) {
+      config.set_dbias_tensor(bias_tensor.data());
+    } else {
+      config.set_bias_tensor(bias_tensor.data());
+    }
+  }
+  if (grad) {
+    config.set_with_dgelu_epilogue(gelu_flag);
+  } else {
+    config.set_with_gelu_epilogue(gelu_flag);
+  }
+  if (pre_gelu_out.has_value()) {
+    config.set_epilogue_aux_tensor(pre_gelu_tensor.data());
+  }
+  config.set_use_split_accumulator(use_split_accumulator);
+
   nvte_cublas_gemm_v2(transa, transb, &alpha_f,
                       A_tensor.data(), B_tensor.data(), &beta_f,
                       D_tensor.data(), D_tensor.data(),
