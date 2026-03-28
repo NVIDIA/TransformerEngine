@@ -12,7 +12,7 @@ from operator import mul as multiply_op
 import torch
 from torch.nn import init
 
-import transformer_engine_torch as tex
+import transformer_engine.pytorch._tex as tex
 
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch.torch_version import torch_version

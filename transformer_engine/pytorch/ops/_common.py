@@ -9,7 +9,7 @@ from typing import Optional
 
 import torch
 
-from transformer_engine_torch import FP8TensorMeta
+from transformer_engine.pytorch._tex import FP8TensorMeta
 from ..torch_version import torch_version
 from ..quantization import FP8GlobalStateManager
 from ..tensor.float8_tensor import Float8Tensor

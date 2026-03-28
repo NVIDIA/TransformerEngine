@@ -11,8 +11,8 @@ from typing import Dict, Optional, Tuple, Union
 import functools
 
 import torch
-import transformer_engine_torch as tex
-from transformer_engine_torch import DType as TE_DType
+import transformer_engine.pytorch._tex as tex
+from transformer_engine.pytorch._tex import DType as TE_DType
 
 from transformer_engine.common.recipe import NVFP4BlockScaling, Recipe
 from ..constants import NVFP4_BLOCK_SCALING_SIZE, dist_group_type
@@ -208,9 +208,13 @@ class NVFP4Quantizer(Quantizer):
         return quantizer
 
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
-        """Quantize tensor implementation"""
-        from transformer_engine.pytorch.tensor._quantize_stable import quantize_new
-        return quantize_new(tensor, self)
+        """Quantize tensor implementation via stable ABI"""
+        from transformer_engine.pytorch.tensor._quantize_stable import quantize_into
+        dst = self.make_empty(list(tensor.shape), dtype=tensor.dtype, device=tensor.device)
+        if tensor.numel() > 0:
+            t = tensor.contiguous() if not tensor.is_contiguous() else tensor
+            quantize_into(t, self, dst)
+        return dst
 
     def is_quantizable(self, inp: torch.Tensor) -> bool:
         """Returns whether or not given inp can be quantized"""

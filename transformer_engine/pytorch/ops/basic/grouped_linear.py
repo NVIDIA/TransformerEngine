@@ -12,7 +12,7 @@ from typing import Any, Optional
 
 import torch
 
-import transformer_engine_torch as tex
+import transformer_engine.pytorch._tex as tex
 from ...cpp_extensions import general_grouped_gemm
 from ...distributed import CudaRNGStatesTracker
 from ...module.base import (

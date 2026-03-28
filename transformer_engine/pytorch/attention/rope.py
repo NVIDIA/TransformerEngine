@@ -8,7 +8,7 @@ Rotary Position Embedding implementation of different types along with helper fu
 from typing import Optional, Tuple, Union, List
 import torch
 
-import transformer_engine_torch as tex
+import transformer_engine.pytorch._tex as tex
 from transformer_engine.pytorch.cpp_extensions.fused_attn import QKVFormat
 
 

@@ -9,7 +9,7 @@ import ctypes
 import os
 import functools
 import torch
-import transformer_engine_torch as tex
+import transformer_engine.pytorch._tex as tex
 from ..constants import TE_DType
 from ..utils import get_sm_count, _empty_tensor
 

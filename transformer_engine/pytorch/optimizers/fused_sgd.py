@@ -11,7 +11,7 @@ import warnings
 import torch
 from torch.optim.optimizer import Optimizer, required
 
-import transformer_engine_torch as tex
+import transformer_engine.pytorch._tex as tex
 from .multi_tensor_apply import multi_tensor_applier
 
 

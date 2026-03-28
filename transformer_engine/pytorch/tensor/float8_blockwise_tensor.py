@@ -11,8 +11,8 @@ from typing import Any, Optional, Tuple, Union
 
 import torch
 
-import transformer_engine_torch as tex
-from transformer_engine_torch import DType as TE_DType
+import transformer_engine.pytorch._tex as tex
+from transformer_engine.pytorch._tex import DType as TE_DType
 from transformer_engine.common.recipe import Float8BlockScaling, Recipe
 from .storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
 from ..quantized_tensor import QuantizedTensor, Quantizer
@@ -117,9 +117,13 @@ class Float8BlockQuantizer(Quantizer):
         return dst
 
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
-        """Quantize tensor implementation"""
-        from transformer_engine.pytorch.tensor._quantize_stable import quantize_new
-        return quantize_new(tensor, self)
+        """Quantize tensor implementation via stable ABI"""
+        from transformer_engine.pytorch.tensor._quantize_stable import quantize_into
+        dst = self.make_empty(list(tensor.shape), dtype=tensor.dtype, device=tensor.device)
+        if tensor.numel() > 0:
+            t = tensor.contiguous() if not tensor.is_contiguous() else tensor
+            quantize_into(t, self, dst)
+        return dst
 
     def get_scale_shape(self, shape: Iterable[int], columnwise: bool) -> Tuple[int, int]:
         """Scaling tensor shape.

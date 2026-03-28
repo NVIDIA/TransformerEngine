@@ -10,7 +10,7 @@ from einops import rearrange
 
 import torch
 
-import transformer_engine_torch as tex
+import transformer_engine.pytorch._tex as tex
 from transformer_engine.pytorch.cpp_extensions.fused_attn import QKVFormat
 
 __all__ = ["InferenceParams", "KVCacheManager", "NonPagedKVCacheManager", "PagedKVCacheManager"]

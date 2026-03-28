@@ -7,7 +7,7 @@ import os
 import itertools
 from typing import List, Union, Tuple
 import torch
-import transformer_engine_torch as tex
+import transformer_engine.pytorch._tex as tex
 
 from transformer_engine.pytorch.utils import (
     get_cudnn_version,

@@ -7,8 +7,8 @@
 from typing import Optional, Union, List
 import torch
 
-import transformer_engine_torch as tex
-from transformer_engine_torch import (
+import transformer_engine.pytorch._tex as tex
+from transformer_engine.pytorch._tex import (
     multi_tensor_scale,
     multi_tensor_compute_scale_and_scale_inv,
     multi_tensor_compute_scale_inv_e8m0,

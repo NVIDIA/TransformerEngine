@@ -10,7 +10,7 @@ import warnings
 
 import torch
 
-from transformer_engine_torch import CommOverlapType, bulk_overlap_ag_with_external_gemm
+from transformer_engine.pytorch._tex import CommOverlapType, bulk_overlap_ag_with_external_gemm
 from ...cpp_extensions import general_gemm
 from ...distributed import get_distributed_world_size
 from ...module.base import (

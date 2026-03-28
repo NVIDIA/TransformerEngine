@@ -10,7 +10,7 @@ import warnings
 import functools
 import torch
 
-import transformer_engine_torch as tex
+import transformer_engine.pytorch._tex as tex
 
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor

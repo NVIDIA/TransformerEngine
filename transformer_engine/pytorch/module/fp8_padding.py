@@ -8,7 +8,7 @@ from typing import List, Optional, Tuple
 
 import torch
 
-import transformer_engine_torch as tex
+import transformer_engine.pytorch._tex as tex
 
 from ..quantization import FP8GlobalStateManager, get_align_size_for_quantization
 from ..jit import no_torch_dynamo

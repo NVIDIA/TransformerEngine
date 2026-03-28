@@ -14,7 +14,7 @@ from packaging.version import Version as PkgVersion
 
 import torch
 import torch.nn.functional as F
-import transformer_engine_torch as tex
+import transformer_engine.pytorch._tex as tex
 from transformer_engine.pytorch.utils import (
     get_device_compute_capability,
     split_tensor_along_dim,

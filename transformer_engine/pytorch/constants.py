@@ -6,7 +6,7 @@
 from types import SimpleNamespace
 import torch
 import torch.distributed
-import transformer_engine_torch as tex
+import transformer_engine.pytorch._tex as tex
 
 
 """

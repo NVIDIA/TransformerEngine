@@ -25,8 +25,12 @@ Tensor fused_rope_forward(Tensor input, Tensor freqs,
   STD_TORCH_CHECK(freqs.scalar_type() == ScalarType::Float,
                   "Dtype of the freqs tensor must be float");
 
-  // Allocate output with same shape/dtype/device as input
-  auto output = torch::stable::empty_like(input);
+  // Allocate contiguous output (must NOT use empty_like which preserves
+  // non-contiguous strides from transposed inputs)
+  auto sizes = input.sizes();
+  std::vector<int64_t> shape_vec(sizes.begin(), sizes.end());
+  auto output = allocateStableTensor(shape_vec, input.scalar_type(),
+                                     input.get_device_index());
 
   auto input_cu = makeTransformerEngineTensor(input);
   auto freqs_cu = makeTransformerEngineTensor(freqs);
@@ -98,7 +102,10 @@ Tensor fused_rope_backward(Tensor output_grads, Tensor freqs,
   STD_TORCH_CHECK(freqs.scalar_type() == ScalarType::Float,
                   "Dtype of the freqs tensor must be float");
 
-  auto input_grads = torch::stable::empty_like(output_grads);
+  auto og_sizes = output_grads.sizes();
+  std::vector<int64_t> og_shape(og_sizes.begin(), og_sizes.end());
+  auto input_grads = allocateStableTensor(og_shape, output_grads.scalar_type(),
+                                          output_grads.get_device_index());
 
   auto output_grads_cu = makeTransformerEngineTensor(output_grads);
   auto freqs_cu = makeTransformerEngineTensor(freqs);

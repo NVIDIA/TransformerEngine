@@ -426,6 +426,15 @@ mxfp8_scaling_partial_cast = _ops.mxfp8_scaling_partial_cast
 nvfp4_2d_compute_partial_amax = _ops.nvfp4_2d_compute_partial_amax
 
 
+def nvfp4_2d_partial_cast(inp, out, scale, global_scale, h, w, start_offset, block_len=16):
+    """Match pybind signature — out may be quantized tensor."""
+    from transformer_engine.pytorch.tensor._extract import extract_tensor_data
+    out_data, out_dtype, out_si, out_sm = extract_tensor_data(out)
+    _ops.nvfp4_2d_partial_cast_noalloc(
+        inp, out_data, out_dtype, out_si, out_sm,
+        scale, global_scale, h, w, start_offset, block_len)
+
+
 # ============================================================================
 # Permutation
 # ============================================================================
@@ -650,28 +659,116 @@ swizzle_scales_for_gemm_ = _pybind_fallback("swizzle_scales_for_gemm_")
 # ============================================================================
 
 def _make_activation_fwd(act_type, shape_divisor=1):
+    _TE_DTYPE = {torch.float32: 4, torch.float16: 5, torch.bfloat16: 6}
+    DELAYED = 0
+
     def fn(input, quantizer):
-        # For now, unquantized passthrough
-        inp = input if isinstance(input, torch.Tensor) else input
-        out = torch.empty_like(inp) if shape_divisor == 1 else \
-              torch.empty(*inp.shape[:-1], inp.shape[-1] // shape_divisor,
-                         dtype=inp.dtype, device=inp.device)
-        _ops.activation_fwd_noalloc(inp, out, int(DType.kFloat32 if inp.dtype == torch.float32 else
-                                    DType.kBFloat16 if inp.dtype == torch.bfloat16 else DType.kFloat16),
-                                    None, None, None, 0, act_type)
-        return out
+        from transformer_engine.pytorch.tensor._extract import extract_tensor_data
+        inp = input if isinstance(input, torch.Tensor) else extract_tensor_data(input)[0]
+        out_shape = list(inp.shape)
+        if shape_divisor > 1:
+            out_shape[-1] //= shape_divisor
+        te_dt = _TE_DTYPE.get(inp.dtype, 6)
+        device = inp.device
+
+        if quantizer is None:
+            # Path: no quantization
+            out = torch.empty(out_shape, dtype=inp.dtype, device=device)
+            _ops.activation_fwd_noalloc(inp, out, te_dt, None, None, None, DELAYED, act_type)
+            return out
+
+        # Determine implementation path (matches C++ activation_helper dispatch)
+        q_type = type(quantizer).__name__
+        is_delayed = 'Float8Quantizer' in q_type and 'Current' not in q_type and 'Block' not in q_type
+        is_mxfp8 = 'MXFP8' in q_type
+        is_current_scaling = 'CurrentScaling' in q_type
+        is_nvfp4 = 'NVFP4' in q_type
+        is_block = 'Block' in q_type and 'MXFP8' not in q_type
+
+        if quantizer is None or is_delayed or is_mxfp8:
+            # FULLY_FUSED: kernel writes directly to quantized output
+            out_py = quantizer.make_empty(out_shape, dtype=inp.dtype, device=device)
+            out_data, out_dtype, out_scale_inv, out_sm = extract_tensor_data(out_py)
+
+            if is_mxfp8:
+                out_sm = 3
+            elif is_delayed:
+                out_sm = 0
+
+            out_amax = getattr(quantizer, 'amax', None)
+            out_scale = getattr(quantizer, 'scale', None)
+            if isinstance(out_amax, torch.Tensor) and out_amax.numel() == 0: out_amax = None
+            if isinstance(out_scale, torch.Tensor) and out_scale.numel() == 0: out_scale = None
+
+            _ops.activation_fwd_noalloc(
+                inp, out_data, out_dtype, out_amax, out_scale, out_scale_inv, out_sm, act_type)
+
+            if hasattr(out_py, '_fp8_dtype') and hasattr(quantizer, 'dtype'):
+                out_py._fp8_dtype = quantizer.dtype
+            return out_py
+
+        elif is_current_scaling:
+            # FUSED_ACTIVATION_AMAX_FP8: activation→hp+amax, then quantize_from_amax
+            amax = getattr(quantizer, 'amax', torch.zeros(1, dtype=torch.float32, device=device))
+            # Compute activation to hp output WITH amax
+            hp_out = torch.empty(out_shape, dtype=inp.dtype, device=device)
+            _ops.activation_fwd_noalloc(inp, hp_out, te_dt, amax, None, None, DELAYED, act_type)
+            # Quantize using pre-computed amax
+            out_py = quantizer.make_empty(out_shape, dtype=inp.dtype, device=device)
+            from transformer_engine.pytorch.tensor._quantize_stable import quantize_into
+            # Set use_existing_amax so quantize_into uses quantize_from_amax
+            orig = getattr(quantizer, 'use_existing_amax', False)
+            quantizer.use_existing_amax = True
+            quantize_into(hp_out, quantizer, out_py)
+            quantizer.use_existing_amax = orig
+            return out_py
+
+        else:
+            # UNFUSED (block scaling, NVFP4 with post-RHT amax):
+            # activation→hp, then full quantize
+            hp_out = torch.empty(out_shape, dtype=inp.dtype, device=device)
+            _ops.activation_fwd_noalloc(inp, hp_out, te_dt, None, None, None, DELAYED, act_type)
+            from transformer_engine.pytorch.tensor._quantize_stable import quantize_new
+            return quantize_new(hp_out, quantizer)
+
     return fn
 
 def _make_activation_bwd(act_type):
+    _TE_DTYPE = {torch.float32: 4, torch.float16: 5, torch.bfloat16: 6}
     def fn(grad, input, quantizer):
-        inp = input if isinstance(input, torch.Tensor) else input
-        grad_t = grad if isinstance(grad, torch.Tensor) else grad
-        out = torch.empty_like(inp)
-        _ops.dactivation_noalloc(grad_t, inp, out,
-                                 int(DType.kFloat32 if inp.dtype == torch.float32 else
-                                 DType.kBFloat16 if inp.dtype == torch.bfloat16 else DType.kFloat16),
-                                 None, None, None, 0, act_type)
-        return out
+        from transformer_engine.pytorch.tensor._extract import extract_tensor_data
+        inp = input if isinstance(input, torch.Tensor) else extract_tensor_data(input)[0]
+        grad_t = grad if isinstance(grad, torch.Tensor) else extract_tensor_data(grad)[0]
+
+        if quantizer is None:
+            te_dt = _TE_DTYPE.get(inp.dtype, 6)
+            out = torch.empty_like(inp)
+            _ops.dactivation_noalloc(grad_t, inp, out, te_dt, None, None, None, 0, act_type)
+            return out
+
+        # Quantized output
+        out_py = quantizer.make_empty(list(inp.shape), dtype=inp.dtype, device=inp.device)
+        out_data, out_dtype, out_scale_inv, out_sm = extract_tensor_data(out_py)
+
+        q_type = type(quantizer).__name__
+        if 'Block' in q_type:
+            out_sm = 2 if getattr(quantizer, 'block_scaling_dim', 2) == 2 else 1
+        elif 'MXFP8' in q_type:
+            out_sm = 3
+        elif 'NVFP4' in q_type:
+            out_sm = 4
+
+        out_amax = getattr(quantizer, 'amax', None)
+        out_scale = getattr(quantizer, 'scale', None)
+        if isinstance(out_amax, torch.Tensor) and out_amax.numel() == 0: out_amax = None
+        if isinstance(out_scale, torch.Tensor) and out_scale.numel() == 0: out_scale = None
+
+        _ops.dactivation_noalloc(
+            grad_t, inp, out_data, out_dtype, out_amax, out_scale, out_scale_inv, out_sm, act_type)
+
+        if hasattr(out_py, '_fp8_dtype') and hasattr(quantizer, 'dtype'):
+            out_py._fp8_dtype = quantizer.dtype
+        return out_py
     return fn
 
 # 0=gelu, 1=glu, 2=geglu, 3=qgelu, 4=qgeglu, 5=relu, 6=reglu, 7=srelu, 8=sreglu, 9=silu, 10=swiglu
@@ -824,9 +921,10 @@ def _pack_tensor_lists(tensor_lists):
     shapes = torch.tensor(
         [[t.numel(), t.element_size()] for lst in tensor_lists for t in lst],
         dtype=torch.int64).flatten()
-    from ..constants import TE_DType
+    _TORCH_DT = {torch.float32: 4, torch.float16: 5, torch.bfloat16: 6, torch.uint8: 0,
+                  torch.int32: 2, torch.int64: 3, torch.bool: 0}
     dtypes = torch.tensor(
-        [int(TE_DType.get(t.dtype, DType.kFloat32)) for lst in tensor_lists for t in lst],
+        [_TORCH_DT.get(t.dtype, 4) for lst in tensor_lists for t in lst],
         dtype=torch.int64)
     return ptrs, shapes, dtypes, num_lists, num_tensors
 
@@ -920,9 +1018,46 @@ def multi_tensor_compute_scale_inv_e8m0(chunk_size, dummy, tensor_lists):
 # CommOverlap types and classes
 # ============================================================================
 
-class CommOverlapType:
+class CommOverlapType(IntEnum):
     RS = 0
     AG = 1
+
+
+class CommOverlapAlgo(IntEnum):
+    BULK_OVERLAP_AG = 0
+    BULK_OVERLAP_RS = 1
+    SPLIT_PIPELINED_AG_P2P = 2
+    SPLIT_PIPELINED_RS = 3
+    SPLIT_PIPELINED_RS_P2P = 4
+    ATOMIC_GEMM_RS = 5
+    ATOMIC_GEMM_AG_P2P = 6
+    ATOMIC_GEMM_RS_P2P = 7
+    EXTERNAL_BULK_OVERLAP_AG = 8
+
+
+class Float8BlockScaleTensorFormat(IntEnum):
+    GEMM_READY = 0
+    COMPACT = 1
+    INVALID = 2
+
+
+class CommOverlapCore:
+    def __init__(self):
+        pass
+    def is_atomic_gemm(self):
+        return False
+    def is_p2p_overlap(self):
+        return False
+    def is_fp8_ubuf(self):
+        return False
+
+
+class CommOverlapBase(CommOverlapCore):
+    pass
+
+
+class CommOverlapP2PBase(CommOverlapCore):
+    pass
 
 
 class CommOverlapHelper:

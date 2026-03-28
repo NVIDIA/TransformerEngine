@@ -7,7 +7,7 @@ import os
 from typing import Callable, Tuple, Union, Optional
 import torch
 from torch import nn
-import transformer_engine_torch as tex
+import transformer_engine.pytorch._tex as tex
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
 
 

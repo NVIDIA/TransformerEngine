@@ -8,8 +8,8 @@ from typing import Any, Optional, Tuple, Iterable, Union
 import warnings
 import torch
 from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
-import transformer_engine_torch as tex
-from transformer_engine_torch import DType as TE_DType
+import transformer_engine.pytorch._tex as tex
+from transformer_engine.pytorch._tex import DType as TE_DType
 
 from transformer_engine.common.recipe import (
     DelayedScaling,
@@ -110,9 +110,16 @@ class Float8Quantizer(Quantizer):
         return dst
 
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
-        """Quantize tensor implementation"""
-        from transformer_engine.pytorch.tensor._quantize_stable import quantize_new
-        return quantize_new(tensor, self)
+        """Quantize tensor implementation via stable ABI"""
+        from transformer_engine.pytorch.tensor._quantize_stable import quantize_into
+        dst = self.make_empty(list(tensor.shape), dtype=tensor.dtype, device=tensor.device)
+        # Initialize scale_inv from quantizer scale (C++ create_tensor does reciprocal(scale))
+        if hasattr(self, "scale") and self.scale is not None and self.scale.numel() > 0:
+            dst._scale_inv.copy_(1.0 / self.scale)
+        if tensor.numel() > 0:
+            t = tensor.contiguous() if not tensor.is_contiguous() else tensor
+            quantize_into(t, self, dst)
+        return dst
 
     def make_empty(
         self,
@@ -341,9 +348,13 @@ class Float8CurrentScalingQuantizer(Quantizer):
         return dst
 
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
-        """Quantize tensor implementation"""
-        from transformer_engine.pytorch.tensor._quantize_stable import quantize_new
-        return quantize_new(tensor, self)
+        """Quantize tensor implementation via stable ABI"""
+        from transformer_engine.pytorch.tensor._quantize_stable import quantize_into
+        dst = self.make_empty(list(tensor.shape), dtype=tensor.dtype, device=tensor.device)
+        if tensor.numel() > 0:
+            t = tensor.contiguous() if not tensor.is_contiguous() else tensor
+            quantize_into(t, self, dst)
+        return dst
 
     def make_empty(
         self,

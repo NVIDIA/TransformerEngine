@@ -12,7 +12,7 @@ from typing import Optional
 
 import torch
 
-from transformer_engine_torch import rmsnorm_bwd, rmsnorm_fwd
+from transformer_engine.pytorch._tex import rmsnorm_bwd, rmsnorm_fwd
 from ...constants import TE_DType
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...export import is_in_onnx_export_mode
