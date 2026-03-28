@@ -6,7 +6,7 @@ import pytest
 import torch
 
 import transformer_engine.pytorch
-import transformer_engine_torch as tex
+import transformer_engine.pytorch._tex as tex
 from transformer_engine.pytorch import is_mxfp8_available
 from transformer_engine.pytorch.optimizers import MultiTensorApply
 

@@ -25,7 +25,7 @@ from transformer_engine.pytorch import (
     Float8BlockQuantizer,
     MXFP8Quantizer,
 )
-import transformer_engine_torch as tex
+import transformer_engine.pytorch._tex as tex
 from transformer_engine.pytorch import Fp8Padding, Fp8Unpadding
 import copy
 

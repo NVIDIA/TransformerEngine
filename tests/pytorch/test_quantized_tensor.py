@@ -24,7 +24,7 @@ from transformer_engine.pytorch import (
 )
 
 from transformer_engine.pytorch.utils import is_non_tn_fp8_gemm_supported
-import transformer_engine_torch as tex
+import transformer_engine.pytorch._tex as tex
 
 from references.ref_per_tensor_cs import ref_per_tensor_cs_cast
 

@@ -32,7 +32,7 @@ from typing import Optional, Union, Tuple, List
 from onnxruntime_extensions import PyCustomOpDef, get_library_path, onnx_op
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
-import transformer_engine_torch as tex
+import transformer_engine.pytorch._tex as tex
 from transformer_engine.pytorch.export import is_in_onnx_export_mode, te_translation_table
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 from transformer_engine.pytorch.utils import get_default_init_method

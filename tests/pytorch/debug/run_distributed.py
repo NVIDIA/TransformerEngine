@@ -13,7 +13,7 @@ import re
 import torch
 import torch.distributed as dist
 import transformer_engine
-import transformer_engine_torch as tex
+import transformer_engine.pytorch._tex as tex
 import nvdlfw_inspect.api as debug_api
 from transformer_engine.debug import set_weight_tensor_tp_group_reduce
 from transformer_engine.pytorch import is_fp8_available

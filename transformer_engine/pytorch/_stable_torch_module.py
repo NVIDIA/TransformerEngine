@@ -46,65 +46,12 @@ _load_stable_lib()
 _ops = torch.ops.transformer_engine_stable
 
 
-_pybind_so_mod = None
-
-def _get_pybind_so():
-    """Get the pybind11 .so module. Lazily loaded on first call."""
-    global _pybind_so_mod
-    if _pybind_so_mod is None:
-        _preload_pybind_so()
-    return _pybind_so_mod
-
-
-def _preload_pybind_so():
-    """Pre-load the pybind11 .so. Needs libtransformer_engine.so on the path."""
-    global _pybind_so_mod
-    if _pybind_so_mod is not None:
-        return
-    try:
-        # First ensure libtransformer_engine.so is loaded (sets up CUDA libs)
-        from transformer_engine.common import load_framework_extension
-        try:
-            load_framework_extension("torch")
-        except Exception:
-            pass  # May fail if .so missing, that's OK
-
-        import importlib.util as _iu
-        import glob as _g
-        import ctypes
-        from pathlib import Path as _P
-        _td = _P(_iu.find_spec("transformer_engine").origin).parent.parent
-        _so = _g.glob(str(_td / "transformer_engine_torch.cpython-*.so"))
-        if _so:
-            # Must use the original module name (matches PyInit_ export)
-            # Temporarily remove from sys.modules, load, then restore
-            import sys as _sys
-            _saved = _sys.modules.pop("transformer_engine_torch", None)
-            try:
-                _sp = _iu.spec_from_file_location(
-                    "transformer_engine_torch", _so[0])
-                _m = _iu.module_from_spec(_sp)
-                _sp.loader.exec_module(_m)
-                _pybind_so_mod = _m
-            finally:
-                # Restore our stable module in sys.modules
-                if _saved is not None:
-                    _sys.modules["transformer_engine_torch"] = _saved
-    except Exception:
-        pass
-
-
-# Lazy preload — will be triggered on first _get_pybind_so() call
-
-
-def _pybind_fallback(name):
-    """Create a function that falls through to the pybind11 .so for ops
-    that require C++ custom type converters (quantize, GEMM, fused_attn)."""
+def _not_implemented(name):
+    """Create a stub function that raises NotImplementedError."""
     def fn(*args, **kwargs):
-        mod = _get_pybind_so()
-        if mod is not None:
-            return getattr(mod, name)(*args, **kwargs)
-        raise NotImplementedError(f"{name} requires the pybind11 .so")
+        raise NotImplementedError(
+            f"{name} is not yet implemented in the stable ABI module. "
+            f"This function needs a native stable implementation.")
     fn.__name__ = name
     return fn
 
@@ -560,26 +507,7 @@ def generic_gemm(A, transa, B, transb, D, quantizer, out_dtype, bias,
                  accumulate, use_split_accumulator,
                  comm_overlap=None, comm_type=None, extra_output=None,
                  bulk_overlap=False, alpha=1.0, beta=None):
-    """GEMM via stable ABI ops with Python-side tensor metadata extraction.
-
-    Falls back to pybind11 .so if available (for full type dispatch compatibility).
-    """
-    # Try pybind11 .so first if available (handles all edge cases)
-    mod = _get_pybind_so()
-    if mod is not None:
-        # Convert our IntEnum DType to pybind DType
-        pb_out_dtype = mod.DType(int(out_dtype)) if out_dtype is not None else None
-        pb_bias_type = mod.DType(int(bias_type)) if bias_type is not None else None
-        return mod.generic_gemm(A, transa, B, transb, D, quantizer, pb_out_dtype,
-                                bias, pb_bias_type, gelu, gelu_in, grad,
-                                workspace, workspaceSize, accumulate,
-                                use_split_accumulator,
-                                comm_overlap=comm_overlap, comm_type=comm_type,
-                                extra_output=extra_output,
-                                bulk_overlap=bulk_overlap, alpha=alpha,
-                                beta=beta)
-
-    # Pure Python path (no .so)
+    """GEMM via stable ABI ops with Python-side tensor metadata extraction."""
     from transformer_engine.pytorch.tensor._extract import extract_tensor_data
 
     A_data, A_dtype, A_scale_inv, A_sm = extract_tensor_data(A)
@@ -642,16 +570,16 @@ def dequantize(input, otype):
     return _ops.dequantize(in_data, in_dtype, in_scale_inv, in_sm, out_te_dtype)
 
 
-multi_tensor_quantize = _pybind_fallback("multi_tensor_quantize")
-split_quantize = _pybind_fallback("split_quantize")
-group_quantize = _pybind_fallback("group_quantize")
+multi_tensor_quantize = _not_implemented("multi_tensor_quantize")
+split_quantize = _not_implemented("split_quantize")
+group_quantize = _not_implemented("group_quantize")
 
 
 # ============================================================================
 # Swizzle (match pybind11 signature)
 # ============================================================================
 
-swizzle_scales_for_gemm_ = _pybind_fallback("swizzle_scales_for_gemm_")
+swizzle_scales_for_gemm_ = _not_implemented("swizzle_scales_for_gemm_")
 
 
 # ============================================================================
@@ -845,10 +773,10 @@ dbias_dsrelu = _make_dbias_dact(4)
 # Grouped GEMM (stubs)
 # ============================================================================
 
-te_general_grouped_gemm = _pybind_fallback("te_general_grouped_gemm")
-te_general_grouped_gemm_for_grouped_tensor = _pybind_fallback("te_general_grouped_gemm_for_grouped_tensor")
-te_general_grouped_gemm_for_discrete_in = _pybind_fallback("te_general_grouped_gemm_for_discrete_in")
-te_general_grouped_gemm_for_discrete_out = _pybind_fallback("te_general_grouped_gemm_for_discrete_out")
+te_general_grouped_gemm = _not_implemented("te_general_grouped_gemm")
+te_general_grouped_gemm_for_grouped_tensor = _not_implemented("te_general_grouped_gemm_for_grouped_tensor")
+te_general_grouped_gemm_for_discrete_in = _not_implemented("te_general_grouped_gemm_for_discrete_in")
+te_general_grouped_gemm_for_discrete_out = _not_implemented("te_general_grouped_gemm_for_discrete_out")
 
 # ============================================================================
 # NVFP4 multi-tensor ops (iterate using single-tensor stable ops)
@@ -1085,8 +1013,8 @@ class CommOverlapP2P:
 # Fused attention (match pybind11 signatures)
 # ============================================================================
 
-fused_attn_fwd = _pybind_fallback("fused_attn_fwd")
-fused_attn_bwd = _pybind_fallback("fused_attn_bwd")
+fused_attn_fwd = _not_implemented("fused_attn_fwd")
+fused_attn_bwd = _not_implemented("fused_attn_bwd")
 
 def bulk_overlap_ag_with_external_gemm(allgather_communicator, send_stream, recv_stream):
     _ops.bulk_overlap_ag_with_external_gemm(

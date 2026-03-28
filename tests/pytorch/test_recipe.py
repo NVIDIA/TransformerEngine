@@ -22,7 +22,7 @@ from transformer_engine.pytorch import (
     GroupedLinear,
 )
 
-import transformer_engine_torch as tex
+import transformer_engine.pytorch._tex as tex
 from transformer_engine.pytorch.quantization import (
     FP8GlobalStateManager,
     _amax_and_scale_update,

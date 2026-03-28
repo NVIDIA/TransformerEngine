@@ -13,7 +13,7 @@ from nvdlfw_inspect.registry import Registry, api_method
 from nvdlfw_inspect.utils import append_parent_docstring
 
 
-import transformer_engine_torch as tex
+import transformer_engine.pytorch._tex as tex
 from transformer_engine.debug.features.api import TEConfigAPIMapper
 from transformer_engine.common.recipe import Format
 from transformer_engine.pytorch.tensor import Quantizer

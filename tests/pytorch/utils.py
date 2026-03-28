@@ -13,7 +13,7 @@ from packaging.version import Version as PkgVersion
 import torch
 
 import transformer_engine
-import transformer_engine_torch as tex
+import transformer_engine.pytorch._tex as tex
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch import InferenceParams, QuantizedTensor
 from transformer_engine.pytorch.attention.dot_product_attention import _attention_backends

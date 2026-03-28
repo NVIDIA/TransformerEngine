@@ -45,7 +45,7 @@ from transformer_engine.pytorch.utils import (
 )
 from transformer_engine.pytorch.utils import get_cudnn_version
 from transformer_engine.pytorch.constants import FP8BwdTensorIdx, FP8FwdTensorIdx
-import transformer_engine_torch as tex
+import transformer_engine.pytorch._tex as tex
 from transformer_engine.pytorch.quantized_tensor import (
     Quantizer,
     prepare_for_saving,

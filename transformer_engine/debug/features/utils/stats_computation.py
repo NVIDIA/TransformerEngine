@@ -11,7 +11,7 @@ from collections import namedtuple
 
 import torch
 import torch.nn.functional as F
-import transformer_engine_torch as tex
+import transformer_engine.pytorch._tex as tex
 from transformer_engine.common.recipe import Format
 
 
