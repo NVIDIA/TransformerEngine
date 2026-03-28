@@ -72,6 +72,11 @@ from transformer_engine.pytorch._stable_torch_module import (
     silu, dsilu, swiglu, dswiglu,
     # clamped_swiglu, clamped_dswiglu: kept from pybind (UNFUSED path tensor metadata)
     # bgrad_quantize, dbias_*: kept from pybind for now
+    # Step 2: quantize, normalization fwd
+    # quantize: kept from pybind (gradient accum issues with MXFP8)
+    dequantize,
+    compute_amax, fused_amax_and_scale_update_after_reduction,
+    # layernorm_fwd, rmsnorm_fwd, quantize: TODO (gradient accum)
     # GEMM, attention, grouped GEMM: kept from pybind (complex tensor metadata dispatch)
 )
 
