@@ -894,7 +894,14 @@ def generic_gemm(
         _extract_gemm_operand(B, not transb)
     )
     _TORCH_DT = {torch.float32: 4, torch.float16: 5, torch.bfloat16: 6, torch.uint8: 0}
-    _TE_TO_TORCH_DT = {4: torch.float32, 5: torch.float16, 6: torch.bfloat16, 0: torch.uint8}
+    _TE_TO_TORCH_DT = {
+        4: torch.float32,
+        5: torch.float16,
+        6: torch.bfloat16,
+        0: torch.uint8,
+        7: torch.uint8,  # kFloat8E4M3 stored as uint8
+        8: torch.uint8,  # kFloat8E5M2 stored as uint8
+    }
 
     # A tensor may be columnwise-only (rowwise data is an empty placeholder, numel=0,
     # but colwise data exists). Only skip_gemm when NO data is available at all.
@@ -1123,7 +1130,106 @@ def dequantize(input, otype):
 
 
 multi_tensor_quantize = _not_implemented("multi_tensor_quantize")
-group_quantize = _not_implemented("group_quantize")
+
+
+def group_quantize(tensor, quantizer, num_tensors, first_dims):
+    """Quantize a grouped tensor (multiple tensors concatenated along dim 0).
+
+    Pure Python implementation: splits by first_dims, quantizes each chunk,
+    then constructs a GroupedTensor with concatenated data/scale buffers.
+    """
+    from transformer_engine.pytorch.tensor._quantize_stable import quantize_new
+    from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
+
+    tensor = tensor.contiguous()
+    N = tensor.shape[-1]
+    device = tensor.device
+
+    # Get split sizes
+    if first_dims is not None:
+        splits = first_dims.tolist() if isinstance(first_dims, torch.Tensor) else list(first_dims)
+    else:
+        M_each = tensor.shape[0] // num_tensors
+        splits = [M_each] * num_tensors
+
+    # Quantize each chunk
+    chunks = []
+    offset = 0
+    for i in range(num_tensors):
+        n = int(splits[i])
+        chunk = tensor[offset : offset + n]
+        chunks.append(quantize_new(chunk, quantizer))
+        offset += n
+
+    # Concatenate rowwise data and scale_inv into flat 1D buffers
+    all_data = []
+    all_si = []
+    all_cw_data = []
+    all_cw_si = []
+    offsets_list = [0]
+    si_offsets_list = [0]
+    cw_si_offsets_list = [0]
+    shapes_list = []
+
+    for qt in chunks:
+        rd = getattr(qt, "_rowwise_data", getattr(qt, "_data", qt))
+        rsi = getattr(qt, "_rowwise_scale_inv", getattr(qt, "_scale_inv", None))
+        all_data.append(rd.reshape(-1))
+        if rsi is not None:
+            all_si.append(rsi.reshape(-1))
+        cwd = getattr(qt, "_columnwise_data", None)
+        cwsi = getattr(qt, "_columnwise_scale_inv", None)
+        if cwd is not None:
+            all_cw_data.append(cwd.reshape(-1))
+        if cwsi is not None:
+            all_cw_si.append(cwsi.reshape(-1))
+        # Track shapes (flattened to 2D)
+        M_i = rd.shape[0] if rd.ndim >= 1 else 1
+        N_i = rd.shape[-1] if rd.ndim >= 2 else rd.numel()
+        shapes_list.append((M_i, N_i))
+        offsets_list.append(offsets_list[-1] + rd.numel())
+        if rsi is not None:
+            si_offsets_list.append(si_offsets_list[-1] + rsi.numel())
+        if cwsi is not None:
+            cw_si_offsets_list.append(cw_si_offsets_list[-1] + cwsi.numel())
+
+    flat_data = (
+        torch.cat(all_data) if all_data else torch.empty(0, dtype=torch.uint8, device=device)
+    )
+    flat_si = torch.cat(all_si) if all_si else None
+    flat_cw_data = torch.cat(all_cw_data) if all_cw_data else None
+    flat_cw_si = torch.cat(all_cw_si) if all_cw_si else None
+
+    total_M = sum(int(s) for s in splits)
+    logical_shape = (total_M, N)
+
+    # Build first_dims tensor on device
+    first_dims_tensor = (
+        first_dims
+        if isinstance(first_dims, torch.Tensor)
+        else torch.tensor(splits, dtype=torch.int64, device=device)
+    )
+
+    # Compute tensor_offsets
+    tensor_offsets = torch.tensor(offsets_list[:-1], dtype=torch.int64, device=device)
+
+    gt = GroupedTensor(
+        shape=logical_shape,
+        dtype=tensor.dtype,
+        num_tensors=num_tensors,
+        shapes=shapes_list,
+        quantizer=quantizer,
+        data=flat_data,
+        columnwise_data=flat_cw_data,
+        scale_inv=flat_si,
+        columnwise_scale_inv=flat_cw_si,
+        first_dims=first_dims_tensor,
+        tensor_offsets=tensor_offsets,
+        offsets=offsets_list,
+        scale_inv_offsets=si_offsets_list if flat_si is not None else None,
+        columnwise_scale_inv_offsets=cw_si_offsets_list if flat_cw_si is not None else None,
+    )
+    return gt
 
 
 def split_quantize(tensor, split_sections, quantizer_list, disable_bulk_allocation=False):
@@ -1496,7 +1602,14 @@ dbias_dsrelu = _make_dbias_dact(act_type=7, fused_act_type=4)
 # ============================================================================
 
 _TORCH_DT = {torch.float32: 4, torch.float16: 5, torch.bfloat16: 6, torch.uint8: 0}
-_TE_TO_TORCH_DT = {4: torch.float32, 5: torch.float16, 6: torch.bfloat16, 0: torch.uint8}
+_TE_TO_TORCH_DT = {
+    4: torch.float32,
+    5: torch.float16,
+    6: torch.bfloat16,
+    0: torch.uint8,
+    7: torch.uint8,  # kFloat8E4M3 stored as uint8
+    8: torch.uint8,  # kFloat8E5M2 stored as uint8
+}
 
 
 def _quantizer_to_te_dtype(quantizer):
@@ -2745,7 +2858,14 @@ def fused_attn_bwd(
     from transformer_engine.pytorch.tensor._extract import extract_tensor_data
 
     _TORCH_DT = {torch.float32: 4, torch.float16: 5, torch.bfloat16: 6, torch.uint8: 0}
-    _TE_TO_TORCH_DT = {4: torch.float32, 5: torch.float16, 6: torch.bfloat16, 0: torch.uint8}
+    _TE_TO_TORCH_DT = {
+        4: torch.float32,
+        5: torch.float16,
+        6: torch.bfloat16,
+        0: torch.uint8,
+        7: torch.uint8,  # kFloat8E4M3 stored as uint8
+        8: torch.uint8,  # kFloat8E5M2 stored as uint8
+    }
 
     # Extract input tensor data
     Q_data, Q_dtype, Q_si, Q_sm = extract_tensor_data(Q)
@@ -2822,6 +2942,12 @@ def fused_attn_bwd(
     dQ_data, dQ_te_dtype, dQ_si, dQ_sm = extract_tensor_data(dQ)
     dK_data, dK_te_dtype, dK_si, dK_sm = extract_tensor_data(dK)
     dV_data, dV_te_dtype, dV_si, dV_sm = extract_tensor_data(dV)
+    # When dqkv_dtype specifies an FP8 type, the tensors are allocated as uint8
+    # but extract_tensor_data returns kByte (0). Override with the actual FP8 dtype.
+    if dqkv_te_dtype in (7, 8):  # kFloat8E4M3, kFloat8E5M2
+        dQ_te_dtype = dqkv_te_dtype
+        dK_te_dtype = dqkv_te_dtype
+        dV_te_dtype = dqkv_te_dtype
 
     # dBias: allocate when bias_type not in {NO_BIAS=0, ALIBI=2}
     num_heads_q = Q_shape[-2] if len(Q_shape) >= 2 else 1

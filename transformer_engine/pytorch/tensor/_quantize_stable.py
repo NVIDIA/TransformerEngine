@@ -255,7 +255,9 @@ def quantize_into(src, quantizer, dst, noop_flag=None):
             # already-quantized FP4 bytes and scales. This matches the pybind
             # path (_create_columnwise in nvfp4_tensor_storage.py) which uses
             # nvfp4_data_transpose + nvfp4_2d_scale_transpose.
-            ops.nvfp4_data_transpose(out_data, col_data)
+            # nvfp4_data_transpose expects 2D [M, K_bytes]; flatten leading dims
+            rd = out_data.reshape(-1, out_data.shape[-1]) if out_data.ndim > 2 else out_data
+            ops.nvfp4_data_transpose(rd, col_data)
             if col_si is not None and out_scale_inv is not None:
                 logical_shape = list(src.shape)
                 M_val = 1
