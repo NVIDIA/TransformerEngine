@@ -689,9 +689,34 @@ def nvfp4_2d_partial_cast(inp, out, scale, global_scale, h, w, start_offset, blo
 
 
 def moe_permute_fwd(input, dtype, indices, num_out_tokens, workspace, max_expanded_token_num):
-    return _ops.moe_permute_fwd(
-        input, int(dtype), indices, workspace, num_out_tokens, max_expanded_token_num
+    num_tokens = input.size(0)
+    topK = indices.size(1)
+
+    # Workspace management: workspace is a list of [sorted_indices, row_id, sorted_row_id, temp_storage]
+    # On first call (empty workspace), allocate. Reuse on subsequent calls.
+    if not workspace:
+        options = dict(dtype=torch.int32, device=input.device, requires_grad=False)
+        sorted_indices = torch.empty(max_expanded_token_num, **options)
+        row_id = torch.arange(0, max_expanded_token_num, dtype=torch.int32, device=input.device)
+        sorted_row_id = torch.empty(max_expanded_token_num, **options)
+        # temp_storage placeholder (not used in Python sort path)
+        temp_storage = torch.empty(0, dtype=torch.int8, device=input.device)
+        workspace.extend([sorted_indices, row_id, sorted_row_id, temp_storage])
+
+    # Radix sort: sort indices to get sorted_indices and sorted_row_id
+    flat_indices = indices.reshape(-1)[: num_tokens * topK]
+    sorted_indices_out, sort_perm = torch.sort(flat_indices, stable=True)
+    workspace[0][: num_tokens * topK] = sorted_indices_out
+    workspace[2][: num_tokens * topK] = workspace[1][: num_tokens * topK][sort_perm]
+    sorted_row_id = workspace[2][: num_tokens * topK]
+
+    # Pre-allocate row_id_map
+    row_id_map = torch.empty(num_tokens * topK, dtype=torch.int32, device=input.device)
+
+    permuted_output, row_id_map = _ops.moe_permute_fwd(
+        input, int(dtype), sorted_row_id, row_id_map, num_tokens, topK, num_out_tokens
     )
+    return permuted_output, row_id_map, workspace
 
 
 def moe_permute_bwd(input, dtype, row_id_map, prob, num_tokens, topK):
@@ -703,7 +728,13 @@ def moe_unpermute_fwd(input, dtype, row_id_map, prob, num_tokens, topK):
 
 
 def moe_unpermute_bwd(input_bwd, input_fwd, dtype, row_id_map, prob):
-    return _ops.moe_unpermute_bwd(input_bwd, input_fwd, int(dtype), row_id_map, prob)
+    act_grad, prob_grad = _ops.moe_unpermute_bwd(input_bwd, input_fwd, int(dtype), row_id_map, prob)
+    # Reshape prob_grad from [num_tokens * topK] to match probs shape
+    if prob.numel() > 0 and prob_grad.numel() > 0:
+        prob_grad = prob_grad.view(prob.shape)
+    elif prob.numel() > 0:
+        prob_grad = torch.zeros_like(prob)
+    return act_grad, prob_grad
 
 
 # ============================================================================
@@ -1369,7 +1400,14 @@ def bgrad_quantize(grad_output, quantizer):
     return [grad_bias, grad_input]
 
 
-def _make_dbias_dact(act_type):
+def _make_dbias_dact(act_type, fused_act_type):
+    """Create a dbias+dactivation backward function.
+
+    act_type: index into the full dact kernel table (0-10), used by dactivation_noalloc.
+    fused_act_type: index into the compact fused dact+dbias table in bias.cpp (0-4),
+        used by dact_dbias_noalloc. Mapping: 0=dgelu, 1=dsilu, 2=drelu, 3=dqgelu, 4=dsrelu.
+    """
+
     def fn(grad_output, act_input, quantizer):
         from transformer_engine.pytorch.tensor._extract import extract_tensor_data
 
@@ -1421,7 +1459,7 @@ def _make_dbias_dact(act_type):
                 out_scale,
                 out_scale_inv,
                 out_sm,
-                act_type,
+                fused_act_type,
             )
             grad_input = out
         return [grad_bias, grad_input]
@@ -1429,13 +1467,16 @@ def _make_dbias_dact(act_type):
     return fn
 
 
-# C++ dact_table order: 0=dgelu, 1=dglu, 2=dgeglu, 3=dqgelu, 4=dqgeglu,
-#                       5=drelu, 6=dreglu, 7=dsrelu, 8=dsreglu, 9=dsilu, 10=dswiglu
-dbias_dgelu = _make_dbias_dact(0)
-dbias_dsilu = _make_dbias_dact(9)
-dbias_drelu = _make_dbias_dact(5)
-dbias_dqgelu = _make_dbias_dact(3)
-dbias_dsrelu = _make_dbias_dact(7)
+# C++ dact_table order (full, for dactivation_noalloc):
+#   0=dgelu, 1=dglu, 2=dgeglu, 3=dqgelu, 4=dqgeglu,
+#   5=drelu, 6=dreglu, 7=dsrelu, 8=dsreglu, 9=dsilu, 10=dswiglu
+# C++ fused_table order (compact, for dact_dbias_noalloc in bias.cpp):
+#   0=dgelu, 1=dsilu, 2=drelu, 3=dqgelu, 4=dsrelu
+dbias_dgelu = _make_dbias_dact(act_type=0, fused_act_type=0)
+dbias_dsilu = _make_dbias_dact(act_type=9, fused_act_type=1)
+dbias_drelu = _make_dbias_dact(act_type=5, fused_act_type=2)
+dbias_dqgelu = _make_dbias_dact(act_type=3, fused_act_type=3)
+dbias_dsrelu = _make_dbias_dact(act_type=7, fused_act_type=4)
 
 # ============================================================================
 # Grouped GEMM

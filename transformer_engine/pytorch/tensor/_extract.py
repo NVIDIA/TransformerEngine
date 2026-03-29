@@ -21,10 +21,17 @@ _DTYPE_MAP = {
     torch.bool: 0,  # kByte
 }
 
-# FP8 dtype enum values
+# FP8 dtype enum values — maps various string representations to TE dtype ints
 _FP8_DTYPE_TO_TE = {
     "fp8e4m3": 7,  # kFloat8E4M3
     "fp8e5m2": 8,  # kFloat8E5M2
+    "torch.float8_e4m3fn": 7,
+    "torch.float8_e5m2": 8,
+    "float8_e4m3fn": 7,
+    "float8_e5m2": 8,
+    # Integer DType enum values (set by _stable_torch_module.py)
+    "7": 7,
+    "8": 8,
 }
 
 # Scaling mode values (must match transformer_engine.h NVTEScalingMode enum)
