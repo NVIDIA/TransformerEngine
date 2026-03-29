@@ -57,6 +57,30 @@ def _not_implemented(name):
     return fn
 
 
+def _fill_fp8_transpose_if_needed(tensor):
+    """Fill the FP8 transpose buffer for Float8Tensor (delayed/current scaling) if pre-allocated.
+
+    The pybind11 fused LayerNorm+FP8 kernel fills both rowwise (_data) and columnwise
+    (_transpose) buffers in one shot. This helper mirrors that behavior for the stable ABI
+    path, where layernorm_fwd/rmsnorm_fwd calls quantize_new (which fills only _data).
+    Without this, update_usage(rowwise=False) sees _transpose_invalid=True and deletes both
+    _data and _transpose, leaving nothing for the backward wgrad GEMM.
+    """
+    if not hasattr(tensor, '_data') or tensor._data is None:
+        return
+    if not hasattr(tensor, '_transpose') or tensor._transpose is None:
+        return
+    if not getattr(tensor, '_transpose_invalid', True):
+        return  # already valid
+    fp8_dtype_attr = getattr(tensor, '_fp8_dtype', None)
+    if fp8_dtype_attr is None:
+        return
+    from transformer_engine.pytorch.tensor._extract import _FP8_DTYPE_TO_TE
+    fp8_te_dtype = _FP8_DTYPE_TO_TE.get(str(fp8_dtype_attr), 7)
+    tensor._transpose = _ops.fp8_transpose(tensor._data, fp8_te_dtype, tensor._transpose)
+    tensor._transpose_invalid = False
+
+
 def _extract_gemm_operand(tensor, use_rowwise):
     """Extract rowwise + optional columnwise buffers and metadata for GEMM.
 
@@ -586,6 +610,10 @@ def layernorm_fwd(input, weight, bias, eps, out, quantizer, out_dtype,
                                                  sm_margin, zero_centered_gamma)
     from transformer_engine.pytorch.tensor._quantize_stable import quantize_new
     q_out = quantize_new(result_out, quantizer)
+    # Mirror the pybind11 fused layernorm+FP8 kernel behavior: if columnwise usage
+    # is needed, fill the transpose buffer immediately so update_usage(rowwise=False)
+    # can keep the transpose and drop _data for the backward wgrad GEMM.
+    _fill_fp8_transpose_if_needed(q_out)
     return [q_out, mu, rsigma]
 
 
@@ -609,6 +637,7 @@ def rmsnorm_fwd(input, weight, eps, out, quantizer, out_dtype,
                                            sm_margin, zero_centered_gamma)
     from transformer_engine.pytorch.tensor._quantize_stable import quantize_new
     q_out = quantize_new(result_out, quantizer)
+    _fill_fp8_transpose_if_needed(q_out)
     return [q_out, None, rsigma]
 
 # ============================================================================
@@ -1219,6 +1248,16 @@ def te_general_grouped_gemm(
 
         A_data, A_te_dtype, A_si, A_sm, A_swizzled, A_cw, A_cw_si = _extract_gemm_operand(Ai, transa)
         B_data, B_te_dtype, B_si, B_sm, B_swizzled, B_cw, B_cw_si = _extract_gemm_operand(Bi, not transb)
+
+        # Mirror generic_gemm: compute on-the-fly transpose when delayed-scaling FP8
+        # tensor is missing its columnwise buffer (e.g. _transpose_invalid=True).
+        _NVTE_DELAYED = 0
+        if not transa and A_cw is None and A_sm == _NVTE_DELAYED and A_te_dtype in (7, 8):
+            A_cw = _ops.fp8_transpose(A_data, A_te_dtype, None)
+            A_cw_si = A_si
+        if transb and B_cw is None and B_sm == _NVTE_DELAYED and B_te_dtype in (7, 8):
+            B_cw = _ops.fp8_transpose(B_data, B_te_dtype, None)
+            B_cw_si = B_si
 
         if Di is None:
             # Allocate output: column-major convention → shape (N, M)

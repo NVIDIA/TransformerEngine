@@ -161,6 +161,13 @@ def quantize_into(src, quantizer, dst, noop_flag=None):
             src, out_data, out_dtype, amax, scale,
             out_scale_inv, out_sm, force_pow_2, amax_eps, noop_flag)
 
+    # For Float8Tensor (delayed scaling), _transpose may be pre-allocated by make_empty
+    # when columnwise_usage=True, but it is not filled by ops.quantize above (only _data
+    # gets filled). Mark _transpose_invalid=True so update_usage(columnwise_usage=True)
+    # will call _create_transpose() to fill it from _data on demand.
+    if hasattr(dst, '_data') and dst._data is not None and hasattr(dst, '_transpose_invalid'):
+        dst._transpose_invalid = True
+
     # For block-scaling tensors with both rowwise AND columnwise pre-allocated,
     # also fill the columnwise buffer. The pybind path filled both in one fused
     # nvte_quantize_v2 kernel. The stable path fills rowwise above, then derives

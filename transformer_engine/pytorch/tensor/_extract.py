@@ -61,6 +61,26 @@ def extract_tensor_data(tensor):
             sm = NVTE_DELAYED_TENSOR_SCALING
         return data, te_dtype, scale_inv, sm
 
+    # Columnwise-only block-scaling tensor (after update_usage(rowwise_usage=False)).
+    # _rowwise_data is None but _columnwise_data exists — return columnwise data with
+    # correct scaling_mode so callers don't fall through to the generic tensor path (sm=0).
+    if (hasattr(tensor, '_rowwise_data') and tensor._rowwise_data is None
+            and hasattr(tensor, '_columnwise_data') and tensor._columnwise_data is not None
+            and not hasattr(tensor, '_data')):
+        col_data = tensor._columnwise_data
+        col_si = getattr(tensor, '_columnwise_scale_inv', None)
+        fp8_dtype = getattr(tensor, '_fp8_dtype', None)
+        te_dtype = 0  # kByte
+        if fp8_dtype is not None:
+            te_dtype = _FP8_DTYPE_TO_TE.get(str(fp8_dtype), 7)
+        if hasattr(tensor, '_is_2D_scaled'):
+            sm = NVTE_BLOCK_SCALING_2D if tensor._is_2D_scaled else NVTE_BLOCK_SCALING_1D
+        elif hasattr(tensor, '_block_scaling_dim'):
+            sm = NVTE_BLOCK_SCALING_2D if tensor._block_scaling_dim == 2 else NVTE_BLOCK_SCALING_1D
+        else:
+            sm = NVTE_DELAYED_TENSOR_SCALING
+        return col_data, te_dtype, col_si, sm
+
     if hasattr(tensor, '_data') and tensor._data is not None:
         data = tensor._data
         scale_inv = getattr(tensor, '_scale_inv', None)
