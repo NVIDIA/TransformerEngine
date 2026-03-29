@@ -234,7 +234,24 @@ Previous results were on H100 (sm=90). These results are on B200 (sm=100a) with 
 | test_fused_router | 0 | 0 | 0 | 0 |
 | test_partial_cast | 0 | 1 | 1 | 0 |
 
-### Summary of improvements (session 2, cumulative)
+### test_sanity results (session 3, 2026-03-29)
+
+| Recipe | Before | After | Status |
+|--------|--------|-------|--------|
+| recipe0 (MXFP8BlockScaling) | 0 F | 0 F | **PASS** |
+| recipe1 (NVFP4BlockScaling) | ~1612 F | 1322 F | -290 |
+| recipe2 (Float8BlockScaling) | 2127 F | 0 F | **PASS** (was all failing) |
+| recipe3 (Float8CurrentScaling) | 0 F | 0 F | **PASS** |
+| recipe4 (DelayedScaling) | 0 F | 0 F | **PASS** |
+
+**Key fix**: On Blackwell (sm >= 100), cuBLAS doesn't natively support BLOCK_SCALING_1D/2D. The pybind path converted block scaling to MXFP8 via `convert_block_scaling_to_mxfp8_tensor()`. Implemented the same in the stable GEMM: detect block scaling, call `nvte_swizzle_block_scaling_to_mxfp8_scaling_factors()`, build MXFP8 TensorWrapper with 2D shape, force TN layout. Also flatten >2D data to 2D for MXFP8/DELAYED scaling.
+
+**Remaining recipe1 (NVFP4) issues**: 1322 failures from NVFP4 backward:
+- 704: gated activation backward gets wrong grad shape (FP4 packed vs logical)
+- 542: quantize backward shape mismatch (FP4 packed)
+- 76: view/reshape errors from FP4 packing
+
+### Summary of improvements (session 2+3, cumulative)
 
 | Test | Before F | After F | Delta |
 |------|----------|---------|-------|
