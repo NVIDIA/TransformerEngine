@@ -8,6 +8,7 @@
 #include <transformer_engine/swizzle.h>
 
 #include "../stable_common.h"
+#include "common/util/cuda_runtime.h"
 
 namespace transformer_engine::pytorch::stable {
 
@@ -225,6 +226,78 @@ void gemm(
       }
     }
     B_with_gemm_swizzled_scales = true;
+  }
+
+  // On Blackwell (sm >= 100), cuBLAS does not natively support BLOCK_SCALING.
+  // Convert to MXFP8, matching the pybind path's convert_block_scaling_to_mxfp8_tensor.
+  const bool fp8_block_scaling = (A_sm == NVTE_BLOCK_SCALING_1D || A_sm == NVTE_BLOCK_SCALING_2D ||
+                                  B_sm == NVTE_BLOCK_SCALING_1D || B_sm == NVTE_BLOCK_SCALING_2D);
+  std::vector<Tensor> block_to_mxfp8_buffers;  // keep alive during GEMM
+
+  auto convertOneDirection = [&](const Tensor& sel_data, DType dtype, const Tensor& sel_si,
+                                 NVTEScalingMode orig_sm, int device_idx) -> Tensor {
+    auto d_shape = getStableTensorShape(sel_data);
+    const bool is_fp4 = is_fp4_dtype(dtype);
+    if (is_fp4 && !d_shape.empty()) d_shape.back() *= 2;
+    size_t flat_first = 1, flat_last = 1;
+    if (!d_shape.empty()) {
+      for (size_t i = 0; i + 1 < d_shape.size(); ++i) flat_first *= d_shape[i];
+      flat_last = d_shape.back();
+    }
+    std::vector<size_t> data_2d = {flat_first, flat_last};
+    TensorWrapper input_cu(orig_sm);
+    input_cu.set_rowwise_data(sel_data.data_ptr(), dtype, data_2d);
+    auto si_shape = getStableTensorShape(sel_si);
+    input_cu.set_rowwise_scale_inv(sel_si.data_ptr(), DType::kFloat32, si_shape);
+
+    TensorWrapper output_cu(NVTE_MXFP8_1D_SCALING);
+    output_cu.set_rowwise_data(sel_data.data_ptr(), dtype, data_2d);
+    size_t sw_first = ((flat_first + 127) / 128) * 128;
+    size_t sw_last = ((flat_last + 127) / 128) * 4;
+    std::vector<size_t> sw_shape = {sw_first, sw_last};
+    auto sw_si = allocateStableTensor(
+        {static_cast<int64_t>(sw_first), static_cast<int64_t>(sw_last)}, DType::kByte, device_idx);
+    output_cu.set_rowwise_scale_inv(sw_si.data_ptr(), DType::kFloat8E8M0, sw_shape);
+    output_cu.set_with_gemm_swizzled_scales(true);
+
+    nvte_swizzle_block_scaling_to_mxfp8_scaling_factors(input_cu.data(), output_cu.data(),
+                                                        getCurrentCUDAStreamRaw(device_idx));
+    return sw_si;
+  };
+
+  auto convertBlockToMxfp8 = [&](Tensor& data, DType dtype, std::optional<Tensor>& scale_inv,
+                                 std::optional<Tensor>& cw_data, std::optional<Tensor>& cw_si,
+                                 NVTEScalingMode& sm, bool& swizzled, bool use_rowwise) {
+    if (sm != NVTE_BLOCK_SCALING_1D && sm != NVTE_BLOCK_SCALING_2D) return;
+    int device_idx = data.get_device_index();
+
+    // Convert the direction that will be used by CanonicalizeGemmInput
+    if (use_rowwise) {
+      if (scale_inv.has_value() && scale_inv->numel() > 0) {
+        auto sw = convertOneDirection(data, dtype, *scale_inv, sm, device_idx);
+        scale_inv = sw;
+        block_to_mxfp8_buffers.push_back(std::move(sw));
+      }
+    } else {
+      if (cw_data.has_value() && cw_si.has_value() && cw_si->numel() > 0) {
+        auto sw = convertOneDirection(*cw_data, dtype, *cw_si, sm, device_idx);
+        cw_si = sw;
+        block_to_mxfp8_buffers.push_back(std::move(sw));
+      }
+    }
+    sm = NVTE_MXFP8_1D_SCALING;
+    swizzled = true;
+  };
+
+  if (fp8_block_scaling && transformer_engine::cuda::sm_arch() >= 100) {
+    // Convert the direction that CanonicalizeGemmInput will use:
+    //   transa=True  → uses rowwise  → convert rowwise
+    //   transa=False → uses colwise  → convert colwise
+    convertBlockToMxfp8(A_data, A_te, A_scale_inv, A_colwise_data, A_colwise_scale_inv, A_sm,
+                        A_with_gemm_swizzled_scales, transa);
+    // For B: transb=False → rowwise, transb=True → colwise
+    convertBlockToMxfp8(B_data, B_te, B_scale_inv, B_colwise_data, B_colwise_scale_inv, B_sm,
+                        B_with_gemm_swizzled_scales, !transb);
   }
 
   auto A_tensor =
