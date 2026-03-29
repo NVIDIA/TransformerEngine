@@ -4,10 +4,10 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "../stable_common.h"
-
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/swizzle.h>
+
+#include "../stable_common.h"
 
 namespace transformer_engine::pytorch::stable {
 
@@ -39,40 +39,35 @@ DType getScaleInvDtype(NVTEScalingMode scaling_mode) {
   }
 }
 
-Tensor swizzleScaleForGemm(const Tensor& data,
-                           int64_t te_dtype,
-                           const Tensor& scale_inv,
-                           int64_t scaling_mode) {
+Tensor swizzleScaleForGemm(const Tensor& data, int64_t te_dtype, const Tensor& scale_inv,
+                           int64_t scaling_mode, bool columnwise = false) {
   auto tensor_dtype = static_cast<DType>(te_dtype);
   auto tensor_scaling_mode = static_cast<NVTEScalingMode>(scaling_mode);
   auto data_shape = getStableTensorShape(data);
+  DType si_dtype = getScaleInvDtype(tensor_scaling_mode);
+  auto si_shape = getStableTensorShape(scale_inv);
 
-  auto input_tensor = makeQuantizedTensorWrapper(
-      data, tensor_dtype, data_shape, std::nullopt, std::nullopt, scale_inv,
-      tensor_scaling_mode);
-
-  auto input_scales_nvte = input_tensor.get_rowwise_scale_inv();
-  auto scales_dtype = static_cast<DType>(input_scales_nvte.dtype);
-  std::vector<int64_t> scale_shape(
-      input_scales_nvte.shape.data,
-      input_scales_nvte.shape.data + input_scales_nvte.shape.ndim);
-  auto output_scale_inv = allocateStableTensor(
-      scale_shape, scales_dtype, data.get_device_index());
+  // Allocate output scale tensor with the same shape as input
+  std::vector<int64_t> si_shape_i64(si_shape.begin(), si_shape.end());
+  auto output_scale_inv = allocateStableTensor(si_shape_i64, si_dtype, data.get_device_index());
 
   TensorWrapper input_nvte(tensor_scaling_mode);
-  input_nvte.set_rowwise_data(nullptr, tensor_dtype, data_shape);
-  input_nvte.set_rowwise_scale_inv(input_scales_nvte.data_ptr, scales_dtype,
-                                   input_scales_nvte.shape);
-
   TensorWrapper output_nvte(tensor_scaling_mode);
-  output_nvte.set_rowwise_data(nullptr, tensor_dtype, data_shape);
-  output_nvte.set_rowwise_scale_inv(output_scale_inv.data_ptr(), scales_dtype,
-                                    input_scales_nvte.shape);
+  if (columnwise) {
+    input_nvte.set_columnwise_data(nullptr, tensor_dtype, data_shape);
+    input_nvte.set_columnwise_scale_inv(scale_inv.data_ptr(), si_dtype, si_shape);
+    output_nvte.set_columnwise_data(nullptr, tensor_dtype, data_shape);
+    output_nvte.set_columnwise_scale_inv(output_scale_inv.data_ptr(), si_dtype, si_shape);
+  } else {
+    input_nvte.set_rowwise_data(nullptr, tensor_dtype, data_shape);
+    input_nvte.set_rowwise_scale_inv(scale_inv.data_ptr(), si_dtype, si_shape);
+    output_nvte.set_rowwise_data(nullptr, tensor_dtype, data_shape);
+    output_nvte.set_rowwise_scale_inv(output_scale_inv.data_ptr(), si_dtype, si_shape);
+  }
   output_nvte.set_with_gemm_swizzled_scales(true);
 
-  nvte_swizzle_scaling_factors(
-      input_nvte.data(), output_nvte.data(),
-      getCurrentCUDAStreamRaw(data.get_device_index()));
+  nvte_swizzle_scaling_factors(input_nvte.data(), output_nvte.data(),
+                               getCurrentCUDAStreamRaw(data.get_device_index()));
 
   return output_scale_inv;
 }
@@ -81,13 +76,11 @@ Tensor swizzleScaleForGemm(const Tensor& data,
 // A_data always holds the rowwise buffer with the LOGICAL shape.
 // When A_colwise_data is provided it is set as columnwise_data on the wrapper,
 // allowing CanonicalizeGemmInput to select the right buffer based on transa/transb.
-TensorWrapper buildInputTensorWrapper(
-    const Tensor& rowwise_data,
-    DType te_dtype,
-    const std::optional<Tensor>& rowwise_scale_inv,
-    const std::optional<Tensor>& colwise_data,
-    const std::optional<Tensor>& colwise_scale_inv,
-    NVTEScalingMode scaling_mode) {
+TensorWrapper buildInputTensorWrapper(const Tensor& rowwise_data, DType te_dtype,
+                                      const std::optional<Tensor>& rowwise_scale_inv,
+                                      const std::optional<Tensor>& colwise_data,
+                                      const std::optional<Tensor>& colwise_scale_inv,
+                                      NVTEScalingMode scaling_mode) {
   DType si_dtype = getScaleInvDtype(scaling_mode);
 
   TensorWrapper out(scaling_mode);
@@ -141,24 +134,16 @@ TensorWrapper buildInputTensorWrapper(
 
 void gemm(
     // Input A (rowwise data = logical shape; colwise optional for FP8)
-    Tensor A_data, int64_t A_te_dtype,
-    std::optional<Tensor> A_scale_inv,
-    std::optional<Tensor> A_colwise_data,
-    std::optional<Tensor> A_colwise_scale_inv,
-    int64_t A_scaling_mode, bool A_with_gemm_swizzled_scales,
-    bool transa,
+    Tensor A_data, int64_t A_te_dtype, std::optional<Tensor> A_scale_inv,
+    std::optional<Tensor> A_colwise_data, std::optional<Tensor> A_colwise_scale_inv,
+    int64_t A_scaling_mode, bool A_with_gemm_swizzled_scales, bool transa,
     // Input B (rowwise data = logical shape; colwise optional for FP8)
-    Tensor B_data, int64_t B_te_dtype,
-    std::optional<Tensor> B_scale_inv,
-    std::optional<Tensor> B_colwise_data,
-    std::optional<Tensor> B_colwise_scale_inv,
-    int64_t B_scaling_mode, bool B_with_gemm_swizzled_scales,
-    bool transb,
+    Tensor B_data, int64_t B_te_dtype, std::optional<Tensor> B_scale_inv,
+    std::optional<Tensor> B_colwise_data, std::optional<Tensor> B_colwise_scale_inv,
+    int64_t B_scaling_mode, bool B_with_gemm_swizzled_scales, bool transb,
     // Output D (pre-allocated)
-    Tensor D_data, int64_t D_te_dtype,
-    std::optional<Tensor> D_amax, std::optional<Tensor> D_scale,
-    std::optional<Tensor> D_scale_inv,
-    int64_t D_scaling_mode,
+    Tensor D_data, int64_t D_te_dtype, std::optional<Tensor> D_amax, std::optional<Tensor> D_scale,
+    std::optional<Tensor> D_scale_inv, int64_t D_scaling_mode,
     // Optional bias
     std::optional<Tensor> bias, int64_t bias_type,
     // Optional pre-gelu output
@@ -166,8 +151,7 @@ void gemm(
     // Workspace
     Tensor workspace,
     // Config
-    bool grad, bool accumulate, bool use_split_accumulator,
-    double alpha) {
+    bool grad, bool accumulate, bool use_split_accumulator, double alpha) {
   auto A_te = static_cast<DType>(A_te_dtype);
   auto B_te = static_cast<DType>(B_te_dtype);
   auto D_te = static_cast<DType>(D_te_dtype);
@@ -198,7 +182,8 @@ void gemm(
       if (A_colwise_data.has_value() && A_colwise_scale_inv.has_value() &&
           A_colwise_data->numel() > 0 && A_colwise_scale_inv->numel() > 0) {
         swizzled_scale_inverses.emplace_back(
-            swizzleScaleForGemm(*A_colwise_data, A_te_dtype, *A_colwise_scale_inv, A_scaling_mode));
+            swizzleScaleForGemm(*A_colwise_data, A_te_dtype, *A_colwise_scale_inv, A_scaling_mode,
+                                /*columnwise=*/true));
         A_colwise_scale_inv = swizzled_scale_inverses.back();
       }
     }
@@ -217,19 +202,20 @@ void gemm(
       if (B_colwise_data.has_value() && B_colwise_scale_inv.has_value() &&
           B_colwise_data->numel() > 0 && B_colwise_scale_inv->numel() > 0) {
         swizzled_scale_inverses.emplace_back(
-            swizzleScaleForGemm(*B_colwise_data, B_te_dtype, *B_colwise_scale_inv, B_scaling_mode));
+            swizzleScaleForGemm(*B_colwise_data, B_te_dtype, *B_colwise_scale_inv, B_scaling_mode,
+                                /*columnwise=*/true));
         B_colwise_scale_inv = swizzled_scale_inverses.back();
       }
     }
     B_with_gemm_swizzled_scales = true;
   }
 
-  auto A_tensor = buildInputTensorWrapper(
-      A_data, A_te, A_scale_inv, A_colwise_data, A_colwise_scale_inv, A_sm);
-  auto B_tensor = buildInputTensorWrapper(
-      B_data, B_te, B_scale_inv, B_colwise_data, B_colwise_scale_inv, B_sm);
-  auto D_tensor = makeQuantizedTensorWrapper(
-      D_data, D_te, D_shape, D_amax, D_scale, D_scale_inv, D_sm);
+  auto A_tensor =
+      buildInputTensorWrapper(A_data, A_te, A_scale_inv, A_colwise_data, A_colwise_scale_inv, A_sm);
+  auto B_tensor =
+      buildInputTensorWrapper(B_data, B_te, B_scale_inv, B_colwise_data, B_colwise_scale_inv, B_sm);
+  auto D_tensor =
+      makeQuantizedTensorWrapper(D_data, D_te, D_shape, D_amax, D_scale, D_scale_inv, D_sm);
   A_tensor.set_with_gemm_swizzled_scales(A_with_gemm_swizzled_scales);
   B_tensor.set_with_gemm_swizzled_scales(B_with_gemm_swizzled_scales);
 
@@ -237,8 +223,7 @@ void gemm(
   if (bias.has_value()) {
     auto bias_te = static_cast<DType>(bias_type);
     auto bias_shape = getStableTensorShape(bias.value());
-    bias_tensor = makeTransformerEngineTensor(
-        bias->data_ptr(), bias_shape, bias_te);
+    bias_tensor = makeTransformerEngineTensor(bias->data_ptr(), bias_shape, bias_te);
   }
 
   TensorWrapper pre_gelu_tensor;
@@ -274,27 +259,28 @@ void gemm(
   }
   config.set_use_split_accumulator(use_split_accumulator);
 
-  nvte_cublas_gemm_v2(transa, transb, &alpha_f,
-                      A_tensor.data(), B_tensor.data(), &beta_f,
-                      D_tensor.data(), D_tensor.data(),
-                      ws_tensor.data(), config, stream);
+  nvte_cublas_gemm_v2(transa, transb, &alpha_f, A_tensor.data(), B_tensor.data(), &beta_f,
+                      D_tensor.data(), D_tensor.data(), ws_tensor.data(), config, stream);
 }
 
 }  // namespace transformer_engine::pytorch::stable
 
 STABLE_TORCH_LIBRARY_FRAGMENT(transformer_engine_stable, m) {
-  m.def("gemm("
-        "Tensor A_data, int A_te_dtype, Tensor? A_scale_inv, "
-        "Tensor? A_colwise_data, Tensor? A_colwise_scale_inv, "
-        "int A_scaling_mode, bool A_with_gemm_swizzled_scales, bool transa, "
-        "Tensor B_data, int B_te_dtype, Tensor? B_scale_inv, "
-        "Tensor? B_colwise_data, Tensor? B_colwise_scale_inv, "
-        "int B_scaling_mode, bool B_with_gemm_swizzled_scales, bool transb, "
-        "Tensor D_data, int D_te_dtype, Tensor? D_amax, Tensor? D_scale, Tensor? D_scale_inv, "
-        "int D_scaling_mode, Tensor? bias, int bias_type, Tensor? pre_gelu_out, "
-        "Tensor workspace, bool grad, bool accumulate, bool use_split_accumulator, "
-        "float alpha) -> ()");
-  m.def("swizzle_scale_for_gemm(Tensor data, Tensor scale_inv, int te_dtype, int scaling_mode) -> Tensor");
+  m.def(
+      "gemm("
+      "Tensor A_data, int A_te_dtype, Tensor? A_scale_inv, "
+      "Tensor? A_colwise_data, Tensor? A_colwise_scale_inv, "
+      "int A_scaling_mode, bool A_with_gemm_swizzled_scales, bool transa, "
+      "Tensor B_data, int B_te_dtype, Tensor? B_scale_inv, "
+      "Tensor? B_colwise_data, Tensor? B_colwise_scale_inv, "
+      "int B_scaling_mode, bool B_with_gemm_swizzled_scales, bool transb, "
+      "Tensor D_data, int D_te_dtype, Tensor? D_amax, Tensor? D_scale, Tensor? D_scale_inv, "
+      "int D_scaling_mode, Tensor? bias, int bias_type, Tensor? pre_gelu_out, "
+      "Tensor workspace, bool grad, bool accumulate, bool use_split_accumulator, "
+      "float alpha) -> ()");
+  m.def(
+      "swizzle_scale_for_gemm(Tensor data, Tensor scale_inv, int te_dtype, int scaling_mode) -> "
+      "Tensor");
 }
 
 STABLE_TORCH_LIBRARY_IMPL(transformer_engine_stable, CUDA, m) {

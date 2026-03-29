@@ -12,19 +12,19 @@ import torch
 
 # TE DType values (must match transformer_engine/transformer_engine.h)
 _DTYPE_MAP = {
-    torch.float32: 4,    # kFloat32
-    torch.float16: 5,    # kFloat16
-    torch.bfloat16: 6,   # kBFloat16
-    torch.uint8: 0,      # kByte (used for FP8 storage)
-    torch.int32: 2,      # kInt32
-    torch.int64: 3,      # kInt64
-    torch.bool: 0,       # kByte
+    torch.float32: 4,  # kFloat32
+    torch.float16: 5,  # kFloat16
+    torch.bfloat16: 6,  # kBFloat16
+    torch.uint8: 0,  # kByte (used for FP8 storage)
+    torch.int32: 2,  # kInt32
+    torch.int64: 3,  # kInt64
+    torch.bool: 0,  # kByte
 }
 
 # FP8 dtype enum values
 _FP8_DTYPE_TO_TE = {
-    "fp8e4m3": 7,   # kFloat8E4M3
-    "fp8e5m2": 8,   # kFloat8E5M2
+    "fp8e4m3": 7,  # kFloat8E4M3
+    "fp8e5m2": 8,  # kFloat8E5M2
 }
 
 # Scaling mode values (must match transformer_engine.h NVTEScalingMode enum)
@@ -33,6 +33,35 @@ NVTE_MXFP8_1D_SCALING = 1
 NVTE_BLOCK_SCALING_1D = 2
 NVTE_BLOCK_SCALING_2D = 3
 NVTE_NVFP4_1D_SCALING = 4
+
+
+def _detect_scaling_mode(tensor):
+    """Detect the NVTEScalingMode for a quantized tensor.
+
+    Checks tensor attributes (_is_2D_scaled, _block_scaling_dim) first,
+    then falls back to type-name detection for MXFP8/NVFP4 tensors which
+    lack those attributes.
+    """
+    if hasattr(tensor, "_is_2D_scaled"):
+        return NVTE_BLOCK_SCALING_2D if tensor._is_2D_scaled else NVTE_BLOCK_SCALING_1D
+    if hasattr(tensor, "_block_scaling_dim"):
+        return NVTE_BLOCK_SCALING_2D if tensor._block_scaling_dim == 2 else NVTE_BLOCK_SCALING_1D
+    cls_name = type(tensor).__name__
+    if "MXFP8" in cls_name:
+        return NVTE_MXFP8_1D_SCALING
+    if "NVFP4" in cls_name:
+        return NVTE_NVFP4_1D_SCALING
+    quantizer = getattr(tensor, "_quantizer", None)
+    if quantizer is not None:
+        q_name = type(quantizer).__name__
+        if "MXFP8" in q_name:
+            return NVTE_MXFP8_1D_SCALING
+        if "NVFP4" in q_name:
+            return NVTE_NVFP4_1D_SCALING
+        if "Block" in q_name:
+            block_dim = getattr(quantizer, "block_scaling_dim", None)
+            return NVTE_BLOCK_SCALING_2D if block_dim == 2 else NVTE_BLOCK_SCALING_1D
+    return NVTE_DELAYED_TENSOR_SCALING
 
 
 def extract_tensor_data(tensor):
@@ -46,16 +75,16 @@ def extract_tensor_data(tensor):
     """
     # Check for quantized TE tensor types FIRST (they subclass torch.Tensor)
     # TE quantized tensors have _rowwise_data or _data attributes
-    if hasattr(tensor, '_rowwise_data') and tensor._rowwise_data is not None:
+    if hasattr(tensor, "_rowwise_data") and tensor._rowwise_data is not None:
         data = tensor._rowwise_data
-        scale_inv = getattr(tensor, '_rowwise_scale_inv', None)
-        fp8_dtype = getattr(tensor, '_fp8_dtype', None)
+        scale_inv = getattr(tensor, "_rowwise_scale_inv", None)
+        fp8_dtype = getattr(tensor, "_fp8_dtype", None)
         te_dtype = 0  # kByte
         if fp8_dtype is not None:
             te_dtype = _FP8_DTYPE_TO_TE.get(str(fp8_dtype), 7)
-        if hasattr(tensor, '_is_2D_scaled'):
+        if hasattr(tensor, "_is_2D_scaled"):
             sm = NVTE_BLOCK_SCALING_2D if tensor._is_2D_scaled else NVTE_BLOCK_SCALING_1D
-        elif hasattr(tensor, '_block_scaling_dim'):
+        elif hasattr(tensor, "_block_scaling_dim"):
             sm = NVTE_BLOCK_SCALING_2D if tensor._block_scaling_dim == 2 else NVTE_BLOCK_SCALING_1D
         else:
             sm = NVTE_DELAYED_TENSOR_SCALING
@@ -64,27 +93,31 @@ def extract_tensor_data(tensor):
     # Columnwise-only block-scaling tensor (after update_usage(rowwise_usage=False)).
     # _rowwise_data is None but _columnwise_data exists — return columnwise data with
     # correct scaling_mode so callers don't fall through to the generic tensor path (sm=0).
-    if (hasattr(tensor, '_rowwise_data') and tensor._rowwise_data is None
-            and hasattr(tensor, '_columnwise_data') and tensor._columnwise_data is not None
-            and not hasattr(tensor, '_data')):
+    if (
+        hasattr(tensor, "_rowwise_data")
+        and tensor._rowwise_data is None
+        and hasattr(tensor, "_columnwise_data")
+        and tensor._columnwise_data is not None
+        and not hasattr(tensor, "_data")
+    ):
         col_data = tensor._columnwise_data
-        col_si = getattr(tensor, '_columnwise_scale_inv', None)
-        fp8_dtype = getattr(tensor, '_fp8_dtype', None)
+        col_si = getattr(tensor, "_columnwise_scale_inv", None)
+        fp8_dtype = getattr(tensor, "_fp8_dtype", None)
         te_dtype = 0  # kByte
         if fp8_dtype is not None:
             te_dtype = _FP8_DTYPE_TO_TE.get(str(fp8_dtype), 7)
-        if hasattr(tensor, '_is_2D_scaled'):
+        if hasattr(tensor, "_is_2D_scaled"):
             sm = NVTE_BLOCK_SCALING_2D if tensor._is_2D_scaled else NVTE_BLOCK_SCALING_1D
-        elif hasattr(tensor, '_block_scaling_dim'):
+        elif hasattr(tensor, "_block_scaling_dim"):
             sm = NVTE_BLOCK_SCALING_2D if tensor._block_scaling_dim == 2 else NVTE_BLOCK_SCALING_1D
         else:
             sm = NVTE_DELAYED_TENSOR_SCALING
         return col_data, te_dtype, col_si, sm
 
-    if hasattr(tensor, '_data') and tensor._data is not None:
+    if hasattr(tensor, "_data") and tensor._data is not None:
         data = tensor._data
-        scale_inv = getattr(tensor, '_scale_inv', None)
-        fp8_dtype = getattr(tensor, '_fp8_dtype', None)
+        scale_inv = getattr(tensor, "_scale_inv", None)
+        fp8_dtype = getattr(tensor, "_fp8_dtype", None)
         te_dtype = 0
         if fp8_dtype is not None:
             te_dtype = _FP8_DTYPE_TO_TE.get(str(fp8_dtype), 7)
@@ -100,6 +133,7 @@ def extract_tensor_data(tensor):
         from transformer_engine.pytorch.tensor.storage.float8_tensor_storage import (
             Float8TensorStorage,
         )
+
         if isinstance(tensor, Float8TensorStorage):
             data = tensor._data  # uint8 tensor
             scale_inv = tensor._scale_inv  # float32 tensor
@@ -114,6 +148,7 @@ def extract_tensor_data(tensor):
         from transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage import (
             MXFP8TensorStorage,
         )
+
         if isinstance(tensor, MXFP8TensorStorage):
             data = tensor._rowwise_data
             scale_inv = tensor._rowwise_scale_inv
@@ -128,6 +163,7 @@ def extract_tensor_data(tensor):
         from transformer_engine.pytorch.tensor.storage.float8_blockwise_tensor_storage import (
             Float8BlockwiseQTensorStorage,
         )
+
         if isinstance(tensor, Float8BlockwiseQTensorStorage):
             data = tensor._rowwise_data
             scale_inv = tensor._rowwise_scale_inv
@@ -144,6 +180,7 @@ def extract_tensor_data(tensor):
         from transformer_engine.pytorch.tensor.storage.nvfp4_tensor_storage import (
             NVFP4TensorStorage,
         )
+
         if isinstance(tensor, NVFP4TensorStorage):
             data = tensor._rowwise_data
             scale_inv = tensor._rowwise_scale_inv
@@ -153,7 +190,7 @@ def extract_tensor_data(tensor):
         pass
 
     # Fallback: treat as regular tensor
-    if hasattr(tensor, 'data') and isinstance(tensor.data, torch.Tensor):
+    if hasattr(tensor, "data") and isinstance(tensor.data, torch.Tensor):
         return tensor.data, _DTYPE_MAP.get(tensor.data.dtype, 4), None, NVTE_DELAYED_TENSOR_SCALING
 
     raise TypeError(f"Cannot extract tensor data from type {type(tensor)}")

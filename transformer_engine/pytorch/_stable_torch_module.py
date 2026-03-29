@@ -49,10 +49,13 @@ _ops = torch.ops.transformer_engine_stable
 
 def _not_implemented(name):
     """Create a stub function that raises NotImplementedError."""
+
     def fn(*args, **kwargs):
         raise NotImplementedError(
             f"{name} is not yet implemented in the stable ABI module. "
-            f"This function needs a native stable implementation.")
+            "This function needs a native stable implementation."
+        )
+
     fn.__name__ = name
     return fn
 
@@ -66,16 +69,17 @@ def _fill_fp8_transpose_if_needed(tensor):
     Without this, update_usage(rowwise=False) sees _transpose_invalid=True and deletes both
     _data and _transpose, leaving nothing for the backward wgrad GEMM.
     """
-    if not hasattr(tensor, '_data') or tensor._data is None:
+    if not hasattr(tensor, "_data") or tensor._data is None:
         return
-    if not hasattr(tensor, '_transpose') or tensor._transpose is None:
+    if not hasattr(tensor, "_transpose") or tensor._transpose is None:
         return
-    if not getattr(tensor, '_transpose_invalid', True):
+    if not getattr(tensor, "_transpose_invalid", True):
         return  # already valid
-    fp8_dtype_attr = getattr(tensor, '_fp8_dtype', None)
+    fp8_dtype_attr = getattr(tensor, "_fp8_dtype", None)
     if fp8_dtype_attr is None:
         return
     from transformer_engine.pytorch.tensor._extract import _FP8_DTYPE_TO_TE
+
     fp8_te_dtype = _FP8_DTYPE_TO_TE.get(str(fp8_dtype_attr), 7)
     tensor._transpose = _ops.fp8_transpose(tensor._data, fp8_te_dtype, tensor._transpose)
     tensor._transpose_invalid = False
@@ -95,11 +99,14 @@ def _extract_gemm_operand(tensor, use_rowwise):
          with_gemm_swizzled_scales, colwise_data, colwise_scale_inv)
     """
     from transformer_engine.pytorch.tensor._extract import extract_tensor_data
+    from transformer_engine.pytorch.tensor._extract import _detect_scaling_mode
 
     data, te_dtype, scale_inv, scaling_mode = extract_tensor_data(tensor)
-    with_gemm_swizzled_scales = bool(
-        getattr(tensor, "_with_gemm_swizzled_scales", False)
-    )
+    # For GEMM, use the real scaling mode (MXFP8/NVFP4/block-scaling).
+    # extract_tensor_data returns DELAYED for MXFP8/NVFP4 because they lack
+    # _is_2D_scaled, but the GEMM C++ code needs the correct mode.
+    scaling_mode = _detect_scaling_mode(tensor)
+    with_gemm_swizzled_scales = bool(getattr(tensor, "_with_gemm_swizzled_scales", False))
     colwise_data = None
     colwise_scale_inv = None
 
@@ -113,22 +120,21 @@ def _extract_gemm_operand(tensor, use_rowwise):
         if cw is not None:
             colwise_data = cw
             colwise_scale_inv = getattr(tensor, "_columnwise_scale_inv", None)
-    elif hasattr(tensor, "_rowwise_data") and getattr(tensor, "_rowwise_data", None) is None \
-            and getattr(tensor, "_columnwise_data", None) is not None \
-            and not hasattr(tensor, "_data"):
-        # Columnwise-only tensor (e.g. Float8BlockwiseQTensor with rowwise=False).
+    elif (
+        hasattr(tensor, "_rowwise_data")
+        and getattr(tensor, "_rowwise_data", None) is None
+        and getattr(tensor, "_columnwise_data", None) is not None
+        and not hasattr(tensor, "_data")
+    ):
+        # Columnwise-only tensor (e.g. Float8BlockwiseQTensor or MXFP8Tensor with rowwise=False).
         # Pass an empty placeholder for rowwise_data so C++ skips set_rowwise_data.
         # Set the correct scaling_mode and FP8 dtype from tensor attributes.
         fp8_dtype_attr = getattr(tensor, "_fp8_dtype", None)
         if fp8_dtype_attr is not None:
             from transformer_engine.pytorch.tensor._extract import _FP8_DTYPE_TO_TE
+
             te_dtype = _FP8_DTYPE_TO_TE.get(str(fp8_dtype_attr), 7)
-        is_2d = getattr(tensor, "_is_2D_scaled", None)
-        block_dim = getattr(getattr(tensor, "_quantizer", None), "block_scaling_dim", None)
-        if is_2d is not None:
-            scaling_mode = 3 if is_2d else 2  # BLOCK_SCALING_2D=3, BLOCK_1D=2
-        elif block_dim is not None:
-            scaling_mode = 3 if block_dim == 2 else 2
+        # scaling_mode already set by _detect_scaling_mode above
         cw = tensor._columnwise_data
         csi = getattr(tensor, "_columnwise_scale_inv", None)
         # Pass empty rowwise placeholder so C++ skips set_rowwise_data
@@ -139,12 +145,16 @@ def _extract_gemm_operand(tensor, use_rowwise):
     elif hasattr(tensor, "_data"):
         # Float8Tensor (delayed scaling).
         fp8_data = getattr(tensor, "_data", None)
-        fp8_transpose = (None if getattr(tensor, "_transpose_invalid", True)
-                         else getattr(tensor, "_transpose", None))
+        fp8_transpose = (
+            None
+            if getattr(tensor, "_transpose_invalid", True)
+            else getattr(tensor, "_transpose", None)
+        )
         fp8_dtype_attr = getattr(tensor, "_fp8_dtype", None)
         if fp8_dtype_attr is not None:
             # Resolve FP8 te_dtype from the tensor's actual FP8 dtype
             from transformer_engine.pytorch.tensor._extract import _FP8_DTYPE_TO_TE
+
             te_dtype = _FP8_DTYPE_TO_TE.get(str(fp8_dtype_attr), 7)
         si = getattr(tensor, "_scale_inv", None)
         if fp8_data is not None:
@@ -165,7 +175,16 @@ def _extract_gemm_operand(tensor, use_rowwise):
             colwise_data = fp8_transpose
             colwise_scale_inv = si
 
-    return data, te_dtype, scale_inv, scaling_mode, with_gemm_swizzled_scales, colwise_data, colwise_scale_inv
+    return (
+        data,
+        te_dtype,
+        scale_inv,
+        scaling_mode,
+        with_gemm_swizzled_scales,
+        colwise_data,
+        colwise_scale_inv,
+    )
+
 
 # ============================================================================
 # Enums (replace pybind11 enum bindings)
@@ -223,8 +242,10 @@ class FP8TensorMeta:
 # Version / info queries
 # ============================================================================
 
+
 def get_cublasLt_version():
     import ctypes
+
     try:
         lib = ctypes.CDLL("libcublasLt.so")
         lib.cublasLtGetVersion.restype = ctypes.c_size_t
@@ -235,6 +256,7 @@ def get_cublasLt_version():
 
 def get_cudnn_version():
     import ctypes
+
     try:
         lib = ctypes.CDLL("libcudnn.so")
         lib.cudnnGetVersion.restype = ctypes.c_size_t
@@ -246,6 +268,7 @@ def get_cudnn_version():
 def get_num_cublas_streams():
     import ctypes
     from transformer_engine.common import _get_shared_object_file
+
     so_path = _get_shared_object_file("core")
     lib = ctypes.CDLL(str(so_path))
     lib.nvte_get_num_compute_streams.restype = ctypes.c_int
@@ -283,37 +306,77 @@ splits_to_offsets = _ops.splits_to_offsets
 # ============================================================================
 
 
-def fused_rope_forward(input, freqs, start_positions, qkv_format, interleaved,
-                       cu_seqlens, cp_size, cp_rank):
-    return _ops.fused_rope_forward(input, freqs, start_positions,
-                                   int(qkv_format), interleaved,
-                                   cu_seqlens, cp_size, cp_rank)
+def fused_rope_forward(
+    input, freqs, start_positions, qkv_format, interleaved, cu_seqlens, cp_size, cp_rank
+):
+    return _ops.fused_rope_forward(
+        input, freqs, start_positions, int(qkv_format), interleaved, cu_seqlens, cp_size, cp_rank
+    )
 
 
-def fused_rope_backward(output_grads, freqs, start_positions, qkv_format,
-                        interleaved, cu_seqlens, cp_size, cp_rank):
-    return _ops.fused_rope_backward(output_grads, freqs, start_positions,
-                                    int(qkv_format), interleaved,
-                                    cu_seqlens, cp_size, cp_rank)
+def fused_rope_backward(
+    output_grads, freqs, start_positions, qkv_format, interleaved, cu_seqlens, cp_size, cp_rank
+):
+    return _ops.fused_rope_backward(
+        output_grads,
+        freqs,
+        start_positions,
+        int(qkv_format),
+        interleaved,
+        cu_seqlens,
+        cp_size,
+        cp_rank,
+    )
 
 
-def fused_qkv_rope_forward(qkv_input, q_freqs, k_freqs, start_positions,
-                            qkv_split_arg_list, qkv_format, interleaved,
-                            cp_size, cp_rank):
-    return _ops.fused_qkv_rope_forward(qkv_input, q_freqs, k_freqs,
-                                        start_positions, list(qkv_split_arg_list),
-                                        int(qkv_format), interleaved,
-                                        cp_size, cp_rank)
+def fused_qkv_rope_forward(
+    qkv_input,
+    q_freqs,
+    k_freqs,
+    start_positions,
+    qkv_split_arg_list,
+    qkv_format,
+    interleaved,
+    cp_size,
+    cp_rank,
+):
+    return _ops.fused_qkv_rope_forward(
+        qkv_input,
+        q_freqs,
+        k_freqs,
+        start_positions,
+        list(qkv_split_arg_list),
+        int(qkv_format),
+        interleaved,
+        cp_size,
+        cp_rank,
+    )
 
 
-def fused_qkv_rope_backward(q_grad_out, k_grad_out, v_grad_out, q_freqs,
-                             k_freqs, qkv_split_arg_list, qkv_format,
-                             interleaved, cp_size, cp_rank):
-    return _ops.fused_qkv_rope_backward(q_grad_out, k_grad_out, v_grad_out,
-                                         q_freqs, k_freqs,
-                                         list(qkv_split_arg_list),
-                                         int(qkv_format), interleaved,
-                                         cp_size, cp_rank)
+def fused_qkv_rope_backward(
+    q_grad_out,
+    k_grad_out,
+    v_grad_out,
+    q_freqs,
+    k_freqs,
+    qkv_split_arg_list,
+    qkv_format,
+    interleaved,
+    cp_size,
+    cp_rank,
+):
+    return _ops.fused_qkv_rope_backward(
+        q_grad_out,
+        k_grad_out,
+        v_grad_out,
+        q_freqs,
+        k_freqs,
+        list(qkv_split_arg_list),
+        int(qkv_format),
+        interleaved,
+        cp_size,
+        cp_rank,
+    )
 
 
 # ============================================================================
@@ -321,29 +384,52 @@ def fused_qkv_rope_backward(q_grad_out, k_grad_out, v_grad_out, q_freqs,
 # ============================================================================
 
 
-def fused_topk_with_score_function_fwd(logits, topk, use_pre_softmax,
-                                       num_groups=None, group_topk=None,
-                                       scaling_factor=None,
-                                       score_function="softmax",
-                                       expert_bias=None):
+def fused_topk_with_score_function_fwd(
+    logits,
+    topk,
+    use_pre_softmax,
+    num_groups=None,
+    group_topk=None,
+    scaling_factor=None,
+    score_function="softmax",
+    expert_bias=None,
+):
     return _ops.fused_topk_with_score_function_fwd(
-        logits, topk, use_pre_softmax,
+        logits,
+        topk,
+        use_pre_softmax,
         num_groups if num_groups is not None else -1,
         group_topk if group_topk is not None else -1,
         scaling_factor if scaling_factor is not None else 1.0,
-        score_function, expert_bias)
+        score_function,
+        expert_bias,
+    )
 
 
-def fused_topk_with_score_function_bwd(num_tokens, num_experts, routing_map,
-                                       intermediate_output, grad_probs,
-                                       grad_logits, topk, use_pre_softmax,
-                                       scaling_factor=None,
-                                       score_function="softmax"):
+def fused_topk_with_score_function_bwd(
+    num_tokens,
+    num_experts,
+    routing_map,
+    intermediate_output,
+    grad_probs,
+    grad_logits,
+    topk,
+    use_pre_softmax,
+    scaling_factor=None,
+    score_function="softmax",
+):
     _ops.fused_topk_with_score_function_bwd(
-        num_tokens, num_experts, routing_map, intermediate_output,
-        grad_probs, grad_logits, topk, use_pre_softmax,
+        num_tokens,
+        num_experts,
+        routing_map,
+        intermediate_output,
+        grad_probs,
+        grad_logits,
+        topk,
+        use_pre_softmax,
         scaling_factor if scaling_factor is not None else 1.0,
-        score_function)
+        score_function,
+    )
 
 
 fused_score_for_moe_aux_loss_fwd = _ops.fused_score_for_moe_aux_loss_fwd
@@ -358,9 +444,9 @@ fused_moe_aux_loss_bwd = _ops.fused_moe_aux_loss_bwd
 
 def dropout_fwd(input, dropout_probability, out=None):
     """Dropout forward. RNG state extracted from default CUDA generator."""
-    device = input.device if hasattr(input, 'device') else torch.device('cuda')
+    device = input.device if hasattr(input, "device") else torch.device("cuda")
     # Extract from torch tensor if input is a py handle-like
-    if hasattr(input, '_data'):
+    if hasattr(input, "_data"):
         inp_tensor = input._data
     elif isinstance(input, torch.Tensor):
         inp_tensor = input
@@ -374,7 +460,7 @@ def dropout_fwd(input, dropout_probability, out=None):
     seed = gen.initial_seed()
     # Increment offset
     state = gen.get_state()
-    offset = int.from_bytes(state[8:16].numpy().tobytes(), 'little') if len(state) > 8 else 0
+    offset = int.from_bytes(state[8:16].numpy().tobytes(), "little") if len(state) > 8 else 0
     rng_state[0] = seed
     rng_state[1] = offset
 
@@ -419,14 +505,36 @@ convert_thd_to_bshd = _ops.convert_thd_to_bshd
 convert_bshd_to_thd = _ops.convert_bshd_to_thd
 
 
-def copy_to_kv_cache(new_k, new_v, k_cache, v_cache, page_table,
-                     cu_new_lens, cu_cached_lens, qkv_format, b,
-                     max_ctx_len, max_seq_len, max_pages_per_seq,
-                     is_non_paged):
-    _ops.copy_to_kv_cache(new_k, new_v, k_cache, v_cache, page_table,
-                          cu_new_lens, cu_cached_lens, int(qkv_format), b,
-                          max_ctx_len, max_seq_len, max_pages_per_seq,
-                          is_non_paged)
+def copy_to_kv_cache(
+    new_k,
+    new_v,
+    k_cache,
+    v_cache,
+    page_table,
+    cu_new_lens,
+    cu_cached_lens,
+    qkv_format,
+    b,
+    max_ctx_len,
+    max_seq_len,
+    max_pages_per_seq,
+    is_non_paged,
+):
+    _ops.copy_to_kv_cache(
+        new_k,
+        new_v,
+        k_cache,
+        v_cache,
+        page_table,
+        cu_new_lens,
+        cu_cached_lens,
+        int(qkv_format),
+        b,
+        max_ctx_len,
+        max_seq_len,
+        max_pages_per_seq,
+        is_non_paged,
+    )
 
 
 # ============================================================================
@@ -436,15 +544,31 @@ def copy_to_kv_cache(new_k, new_v, k_cache, v_cache, page_table,
 compute_amax = _ops.compute_amax
 
 
-def get_fused_attn_backend(is_training, q_dtype, kv_dtype, qkv_layout,
-                           bias_type, attn_mask_type, softmax_type, p_dropout,
-                           num_attn_heads, num_gqa_groups, max_seqlen_q,
-                           max_seqlen_kv, head_dim_qk, head_dim_v,
-                           window_size_left, window_size_right,
-                           return_max_logit, cuda_graph, deterministic):
+def get_fused_attn_backend(
+    is_training,
+    q_dtype,
+    kv_dtype,
+    qkv_layout,
+    bias_type,
+    attn_mask_type,
+    softmax_type,
+    p_dropout,
+    num_attn_heads,
+    num_gqa_groups,
+    max_seqlen_q,
+    max_seqlen_kv,
+    head_dim_qk,
+    head_dim_v,
+    window_size_left,
+    window_size_right,
+    return_max_logit,
+    cuda_graph,
+    deterministic,
+):
     """Call nvte_get_fused_attn_backend via ctypes (no tensor args → can't use torch.ops CUDA dispatch)."""
     import ctypes
     import glob as _glob
+
     te_spec = importlib.util.find_spec("transformer_engine")
     if te_spec is not None and te_spec.origin is not None:
         te_dir = Path(te_spec.origin).parent.parent
@@ -459,59 +583,75 @@ def get_fused_attn_backend(is_training, q_dtype, kv_dtype, qkv_layout,
     fn = _lib.nvte_get_fused_attn_backend
     fn.restype = ctypes.c_int
     fn.argtypes = [
-        ctypes.c_bool,        # is_training
-        ctypes.c_int,         # q_dtype (NVTEDType enum)
-        ctypes.c_int,         # kv_dtype
-        ctypes.c_int,         # qkv_layout (NVTE_QKV_Layout enum)
-        ctypes.c_int,         # bias_type
-        ctypes.c_int,         # attn_mask_type
-        ctypes.c_int,         # softmax_type
-        ctypes.c_float,       # dropout
-        ctypes.c_size_t,      # num_attn_heads
-        ctypes.c_size_t,      # num_gqa_groups
-        ctypes.c_size_t,      # max_seqlen_q
-        ctypes.c_size_t,      # max_seqlen_kv
-        ctypes.c_size_t,      # head_dim_qk
-        ctypes.c_size_t,      # head_dim_v
-        ctypes.c_int64,       # window_size_left
-        ctypes.c_int64,       # window_size_right
-        ctypes.c_bool,        # return_max_logit
-        ctypes.c_bool,        # cuda_graph
-        ctypes.c_bool,        # deterministic
+        ctypes.c_bool,  # is_training
+        ctypes.c_int,  # q_dtype (NVTEDType enum)
+        ctypes.c_int,  # kv_dtype
+        ctypes.c_int,  # qkv_layout (NVTE_QKV_Layout enum)
+        ctypes.c_int,  # bias_type
+        ctypes.c_int,  # attn_mask_type
+        ctypes.c_int,  # softmax_type
+        ctypes.c_float,  # dropout
+        ctypes.c_size_t,  # num_attn_heads
+        ctypes.c_size_t,  # num_gqa_groups
+        ctypes.c_size_t,  # max_seqlen_q
+        ctypes.c_size_t,  # max_seqlen_kv
+        ctypes.c_size_t,  # head_dim_qk
+        ctypes.c_size_t,  # head_dim_v
+        ctypes.c_int64,  # window_size_left
+        ctypes.c_int64,  # window_size_right
+        ctypes.c_bool,  # return_max_logit
+        ctypes.c_bool,  # cuda_graph
+        ctypes.c_bool,  # deterministic
     ]
     return fn(
         bool(is_training),
-        int(q_dtype), int(kv_dtype), int(qkv_layout),
-        int(bias_type), int(attn_mask_type), int(softmax_type),
+        int(q_dtype),
+        int(kv_dtype),
+        int(qkv_layout),
+        int(bias_type),
+        int(attn_mask_type),
+        int(softmax_type),
         float(p_dropout),
-        int(num_attn_heads), int(num_gqa_groups),
-        int(max_seqlen_q), int(max_seqlen_kv),
-        int(head_dim_qk), int(head_dim_v),
-        int(window_size_left), int(window_size_right),
-        bool(return_max_logit), bool(cuda_graph), bool(deterministic),
+        int(num_attn_heads),
+        int(num_gqa_groups),
+        int(max_seqlen_q),
+        int(max_seqlen_kv),
+        int(head_dim_qk),
+        int(head_dim_v),
+        int(window_size_left),
+        int(window_size_right),
+        bool(return_max_logit),
+        bool(cuda_graph),
+        bool(deterministic),
     )
 
 
-def fused_amax_and_scale_update_after_reduction(amax_reduction_buffer,
-                                                 amax_histories, scales,
-                                                 amax_compute_algo,
-                                                 fp8_dtype, margin):
+def fused_amax_and_scale_update_after_reduction(
+    amax_reduction_buffer, amax_histories, scales, amax_compute_algo, fp8_dtype, margin
+):
     num = len(amax_histories)
-    ah_ptrs = torch.tensor([t.data_ptr() for t in amax_histories],
-                           dtype=torch.int64)
+    ah_ptrs = torch.tensor([t.data_ptr() for t in amax_histories], dtype=torch.int64)
     # Shape format: [ndim, dim0, dim1] per tensor (dim1=0 for 1D)
     ah_shapes = torch.tensor(
-        [[t.dim(), t.shape[0], t.shape[1] if t.dim() >= 2 else 0]
-         for t in amax_histories],
-        dtype=torch.int64).flatten()
+        [[t.dim(), t.shape[0], t.shape[1] if t.dim() >= 2 else 0] for t in amax_histories],
+        dtype=torch.int64,
+    ).flatten()
     sc_ptrs = torch.tensor([t.data_ptr() for t in scales], dtype=torch.int64)
     sc_shapes = torch.tensor(
-        [[t.dim(), t.shape[0], t.shape[1] if t.dim() >= 2 else 0]
-         for t in scales],
-        dtype=torch.int64).flatten()
+        [[t.dim(), t.shape[0], t.shape[1] if t.dim() >= 2 else 0] for t in scales],
+        dtype=torch.int64,
+    ).flatten()
     _ops.fused_amax_and_scale_update(
-        amax_reduction_buffer, ah_ptrs, ah_shapes, sc_ptrs, sc_shapes,
-        num, amax_compute_algo, int(fp8_dtype), margin)
+        amax_reduction_buffer,
+        ah_ptrs,
+        ah_shapes,
+        sc_ptrs,
+        sc_shapes,
+        num,
+        amax_compute_algo,
+        int(fp8_dtype),
+        margin,
+    )
 
 
 # ============================================================================
@@ -521,10 +661,10 @@ def fused_amax_and_scale_update_after_reduction(amax_reduction_buffer,
 fp8_block_scaling_compute_partial_amax = _ops.fp8_block_scaling_compute_partial_amax
 
 
-def fp8_block_scaling_partial_cast(inp, out, scale, h, w, start_offset,
-                                   block_len, out_dtype):
-    _ops.fp8_block_scaling_partial_cast(inp, out, scale, h, w, start_offset,
-                                        block_len, int(out_dtype))
+def fp8_block_scaling_partial_cast(inp, out, scale, h, w, start_offset, block_len, out_dtype):
+    _ops.fp8_block_scaling_partial_cast(
+        inp, out, scale, h, w, start_offset, block_len, int(out_dtype)
+    )
 
 
 mxfp8_scaling_compute_partial_amax = _ops.mxfp8_scaling_compute_partial_amax
@@ -536,79 +676,85 @@ nvfp4_2d_compute_partial_amax = _ops.nvfp4_2d_compute_partial_amax
 def nvfp4_2d_partial_cast(inp, out, scale, global_scale, h, w, start_offset, block_len=16):
     """Match pybind signature — out may be quantized tensor."""
     from transformer_engine.pytorch.tensor._extract import extract_tensor_data
+
     out_data, out_dtype, out_si, out_sm = extract_tensor_data(out)
     _ops.nvfp4_2d_partial_cast_noalloc(
-        inp, out_data, out_dtype, out_si, out_sm,
-        scale, global_scale, h, w, start_offset, block_len)
+        inp, out_data, out_dtype, out_si, out_sm, scale, global_scale, h, w, start_offset, block_len
+    )
 
 
 # ============================================================================
 # Permutation
 # ============================================================================
 
+
 def moe_permute_fwd(input, dtype, indices, num_out_tokens, workspace, max_expanded_token_num):
-    return _ops.moe_permute_fwd(input, int(dtype), indices, workspace,
-                                num_out_tokens, max_expanded_token_num)
+    return _ops.moe_permute_fwd(
+        input, int(dtype), indices, workspace, num_out_tokens, max_expanded_token_num
+    )
 
 
 def moe_permute_bwd(input, dtype, row_id_map, prob, num_tokens, topK):
-    return _ops.moe_unpermute_fwd(input, int(dtype), row_id_map, prob,
-                                  num_tokens, topK)
+    return _ops.moe_unpermute_fwd(input, int(dtype), row_id_map, prob, num_tokens, topK)
 
 
 def moe_unpermute_fwd(input, dtype, row_id_map, prob, num_tokens, topK):
-    return _ops.moe_unpermute_fwd(input, int(dtype), row_id_map, prob,
-                                  num_tokens, topK)
+    return _ops.moe_unpermute_fwd(input, int(dtype), row_id_map, prob, num_tokens, topK)
 
 
 def moe_unpermute_bwd(input_bwd, input_fwd, dtype, row_id_map, prob):
     return _ops.moe_unpermute_bwd(input_bwd, input_fwd, int(dtype), row_id_map, prob)
 
+
 # ============================================================================
 # Normalization
 # ============================================================================
 
+
 def layernorm_bwd(dz, x, mu, rsigma, gamma, sm_margin, zero_centered_gamma):
-    dx, dgamma, dbeta = _ops.layernorm_bwd(dz, x, mu, rsigma, gamma,
-                                           sm_margin, zero_centered_gamma)
+    dx, dgamma, dbeta = _ops.layernorm_bwd(dz, x, mu, rsigma, gamma, sm_margin, zero_centered_gamma)
     return [dx, dgamma, dbeta]
 
 
 def rmsnorm_bwd(dz, x, rsigma, gamma, sm_margin, zero_centered_gamma):
-    dx, dgamma = _ops.rmsnorm_bwd(dz, x, rsigma, gamma, sm_margin,
-                                  zero_centered_gamma)
+    dx, dgamma = _ops.rmsnorm_bwd(dz, x, rsigma, gamma, sm_margin, zero_centered_gamma)
     return [dx, dgamma]
 
 
 def rmsnorm_bwd_add(dz, x, add, rsigma, gamma, sm_margin, zero_centered_gamma):
-    dx, dgamma = _ops.rmsnorm_bwd_add(dz, x, add, rsigma, gamma,
-                                      sm_margin, zero_centered_gamma)
+    dx, dgamma = _ops.rmsnorm_bwd_add(dz, x, add, rsigma, gamma, sm_margin, zero_centered_gamma)
     return [dx, dgamma]
 
 
-def layernorm_fwd(input, weight, bias, eps, out, quantizer, out_dtype,
-                  sm_margin, zero_centered_gamma):
+def layernorm_fwd(
+    input, weight, bias, eps, out, quantizer, out_dtype, sm_margin, zero_centered_gamma
+):
     """LayerNorm forward with optional quantization via stable ABI."""
     # Get raw input tensor (may be a quantized type)
     from transformer_engine.pytorch.tensor._extract import extract_tensor_data
+
     inp_data = input if isinstance(input, torch.Tensor) else extract_tensor_data(input)[0]
     w_data = weight if isinstance(weight, torch.Tensor) else extract_tensor_data(weight)[0]
 
     if quantizer is None or out is not None:
         # Unquantized path or pre-allocated output
-        result_out, mu, rsigma = _ops.layernorm_fwd(inp_data, w_data, bias, eps,
-                                                     sm_margin, zero_centered_gamma)
+        result_out, mu, rsigma = _ops.layernorm_fwd(
+            inp_data, w_data, bias, eps, sm_margin, zero_centered_gamma
+        )
         if quantizer is not None and out is not None:
             # Quantize the output in-place
             from transformer_engine.pytorch.tensor._quantize_stable import quantize_into
+
             quantize_into(result_out, quantizer, out)
             return [out, mu, rsigma]
         return [result_out, mu, rsigma]
 
     # Quantized path: norm then quantize
-    result_out, mu, rsigma = _ops.layernorm_fwd(inp_data, w_data, bias, eps,
-                                                 sm_margin, zero_centered_gamma)
+    result_out, mu, rsigma = _ops.layernorm_fwd(
+        inp_data, w_data, bias, eps, sm_margin, zero_centered_gamma
+    )
     from transformer_engine.pytorch.tensor._quantize_stable import quantize_new
+
     q_out = quantize_new(result_out, quantizer)
     # Mirror the pybind11 fused layernorm+FP8 kernel behavior: if columnwise usage
     # is needed, fill the transpose buffer immediately so update_usage(rowwise=False)
@@ -617,28 +763,29 @@ def layernorm_fwd(input, weight, bias, eps, out, quantizer, out_dtype,
     return [q_out, mu, rsigma]
 
 
-def rmsnorm_fwd(input, weight, eps, out, quantizer, out_dtype,
-                sm_margin, zero_centered_gamma):
+def rmsnorm_fwd(input, weight, eps, out, quantizer, out_dtype, sm_margin, zero_centered_gamma):
     """RMSNorm forward with optional quantization via stable ABI."""
     from transformer_engine.pytorch.tensor._extract import extract_tensor_data
+
     inp_data = input if isinstance(input, torch.Tensor) else extract_tensor_data(input)[0]
     w_data = weight if isinstance(weight, torch.Tensor) else extract_tensor_data(weight)[0]
 
     if quantizer is None or out is not None:
-        result_out, rsigma = _ops.rmsnorm_fwd(inp_data, w_data, eps,
-                                               sm_margin, zero_centered_gamma)
+        result_out, rsigma = _ops.rmsnorm_fwd(inp_data, w_data, eps, sm_margin, zero_centered_gamma)
         if quantizer is not None and out is not None:
             from transformer_engine.pytorch.tensor._quantize_stable import quantize_into
+
             quantize_into(result_out, quantizer, out)
             return [out, None, rsigma]
         return [result_out, None, rsigma]
 
-    result_out, rsigma = _ops.rmsnorm_fwd(inp_data, w_data, eps,
-                                           sm_margin, zero_centered_gamma)
+    result_out, rsigma = _ops.rmsnorm_fwd(inp_data, w_data, eps, sm_margin, zero_centered_gamma)
     from transformer_engine.pytorch.tensor._quantize_stable import quantize_new
+
     q_out = quantize_new(result_out, quantizer)
     _fill_fp8_transpose_if_needed(q_out)
     return [q_out, None, rsigma]
+
 
 # ============================================================================
 # NVSHMEM (stub — requires NVTE_ENABLE_NVSHMEM build flag)
@@ -646,8 +793,9 @@ def rmsnorm_fwd(input, weight, eps, out, quantizer, out_dtype,
 
 
 def init_nvshmem_backend(*args, **kwargs):
-    raise RuntimeError("NVSHMEM not available in stable ABI build. "
-                       "Build with NVTE_ENABLE_NVSHMEM=1.")
+    raise RuntimeError(
+        "NVSHMEM not available in stable ABI build. Build with NVTE_ENABLE_NVSHMEM=1."
+    )
 
 
 def create_nvshmem_tensor(*args, **kwargs):
@@ -674,35 +822,62 @@ def nvshmem_finalize(*args, **kwargs):
 # GEMM
 # ============================================================================
 
-def generic_gemm(A, transa, B, transb, D, quantizer, out_dtype, bias,
-                 bias_type, gelu, gelu_in, grad, workspace, workspaceSize,
-                 accumulate, use_split_accumulator,
-                 comm_overlap=None, comm_type=None, extra_output=None,
-                 bulk_overlap=False, alpha=1.0, beta=None):
+
+def generic_gemm(
+    A,
+    transa,
+    B,
+    transb,
+    D,
+    quantizer,
+    out_dtype,
+    bias,
+    bias_type,
+    gelu,
+    gelu_in,
+    grad,
+    workspace,
+    workspaceSize,
+    accumulate,
+    use_split_accumulator,
+    comm_overlap=None,
+    comm_type=None,
+    extra_output=None,
+    bulk_overlap=False,
+    alpha=1.0,
+    beta=None,
+):
     """GEMM via stable ABI ops with Python-side tensor metadata extraction."""
     from transformer_engine.pytorch.tensor._extract import extract_tensor_data
 
-    A_data, A_dtype, A_scale_inv, A_sm, A_swizzled, A_cw_data, A_cw_scale_inv = \
+    A_data, A_dtype, A_scale_inv, A_sm, A_swizzled, A_cw_data, A_cw_scale_inv = (
         _extract_gemm_operand(A, transa)
-    B_data, B_dtype, B_scale_inv, B_sm, B_swizzled, B_cw_data, B_cw_scale_inv = \
+    )
+    B_data, B_dtype, B_scale_inv, B_sm, B_swizzled, B_cw_data, B_cw_scale_inv = (
         _extract_gemm_operand(B, not transb)
+    )
     _TORCH_DT = {torch.float32: 4, torch.float16: 5, torch.bfloat16: 6, torch.uint8: 0}
     _TE_TO_TORCH_DT = {4: torch.float32, 5: torch.float16, 6: torch.bfloat16, 0: torch.uint8}
 
     # A tensor may be columnwise-only (rowwise data is an empty placeholder, numel=0,
     # but colwise data exists). Only skip_gemm when NO data is available at all.
     def _operand_has_data(data, cw_data):
-        return (data.numel() > 0 or
-                (cw_data is not None and isinstance(cw_data, torch.Tensor) and cw_data.numel() > 0))
-    skip_gemm = not _operand_has_data(A_data, A_cw_data) or \
-                not _operand_has_data(B_data, B_cw_data)
+        return data.numel() > 0 or (
+            cw_data is not None and isinstance(cw_data, torch.Tensor) and cw_data.numel() > 0
+        )
+
+    skip_gemm = not _operand_has_data(A_data, A_cw_data) or not _operand_has_data(B_data, B_cw_data)
 
     if D is not None:
         D_data, D_dtype, D_scale_inv, D_sm = extract_tensor_data(D)
-        D_amax = getattr(D, '_amax', None) or (getattr(quantizer, 'amax', None) if quantizer else None)
-        D_scale = getattr(quantizer, 'scale', None) if quantizer else None
-        if isinstance(D_amax, torch.Tensor) and D_amax.numel() == 0: D_amax = None
-        if isinstance(D_scale, torch.Tensor) and D_scale.numel() == 0: D_scale = None
+        D_amax = getattr(D, "_amax", None) or (
+            getattr(quantizer, "amax", None) if quantizer else None
+        )
+        D_scale = getattr(quantizer, "scale", None) if quantizer else None
+        if isinstance(D_amax, torch.Tensor) and D_amax.numel() == 0:
+            D_amax = None
+        if isinstance(D_scale, torch.Tensor) and D_scale.numel() == 0:
+            D_scale = None
     else:
         # NVTE GEMM column-major convention:
         #   A1 = last dim of A, A0 = product of all other dims
@@ -713,16 +888,29 @@ def generic_gemm(A, transa, B, transb, D, quantizer, out_dtype, bias,
         #   transb=False → (*B_shape[:-1], M)   — preserves multi-dim batch dims
         #
         # When A (or B) is columnwise-only, A_data is an empty placeholder (shape (0,)).
-        # Derive logical dims from the columnwise buffer: cw_data has shape [last_dim, ...rest]
-        # for a logical tensor [...rest, last_dim], i.e., the physical transpose.
+        # Derive logical dims from the columnwise buffer.
+        # MXFP8Tensor: columnwise has same logical shape as rowwise → use shape[-1].
+        # Float8Tensor, Float8BlockwiseQTensor: columnwise = physical transpose → use shape[0].
+        def _cw_is_same_shape(t):
+            return "MXFP8" in type(t).__name__
+
+        _A_cw_is_transpose = not _cw_is_same_shape(A)
+        _B_cw_is_transpose = not _cw_is_same_shape(B)
         if A_data.numel() == 0 and A_cw_data is not None:
-            A1 = A_cw_data.shape[0]  # last dim of logical A = first dim of transposed buffer
-            A0 = A_cw_data.numel() // max(A1, 1)
+            if _A_cw_is_transpose:
+                A1 = A_cw_data.shape[0]  # physical transpose: shape[0] = last dim of logical
+                A0 = A_cw_data.numel() // max(A1, 1)
+            else:
+                A1 = A_cw_data.shape[-1]  # same logical shape: shape[-1] = last dim
+                A0 = A_cw_data.numel() // max(A1, 1)
         else:
             A1 = A_data.shape[-1]
             A0 = A_data.numel() // max(A1, 1)
         if B_data.numel() == 0 and B_cw_data is not None:
-            B1 = B_cw_data.shape[0]  # last dim of logical B = first dim of transposed buffer
+            if _B_cw_is_transpose:
+                B1 = B_cw_data.shape[0]
+            else:
+                B1 = B_cw_data.shape[-1]
         else:
             B1 = B_data.shape[-1]
         M = A0 if transa else A1
@@ -731,12 +919,14 @@ def generic_gemm(A, transa, B, transb, D, quantizer, out_dtype, bias,
         else:
             out_shape = list(B_data.shape[:-1]) + [M]
         if quantizer is not None:
-            D = quantizer.make_empty(out_shape,
-                                     dtype=A.dtype if isinstance(A, torch.Tensor) else torch.bfloat16,
-                                     device=A_data.device)
+            D = quantizer.make_empty(
+                out_shape,
+                dtype=A.dtype if isinstance(A, torch.Tensor) else torch.bfloat16,
+                device=A_data.device,
+            )
             D_data, D_dtype, D_scale_inv, D_sm = extract_tensor_data(D)
-            D_amax = getattr(quantizer, 'amax', None)
-            D_scale = getattr(quantizer, 'scale', None)
+            D_amax = getattr(quantizer, "amax", None)
+            D_scale = getattr(quantizer, "scale", None)
         else:
             if isinstance(out_dtype, torch.dtype):
                 out_dt = out_dtype
@@ -789,23 +979,72 @@ def generic_gemm(A, transa, B, transb, D, quantizer, out_dtype, bias,
 
     if comm_overlap is not None:
         _ops.gemm_with_comm_overlap(
-            A_data, A_dtype, A_scale_inv, A_cw_data, A_cw_scale_inv, A_sm, A_swizzled, transa,
-            B_data, B_dtype, B_scale_inv, B_cw_data, B_cw_scale_inv, B_sm, B_swizzled, transb,
-            D_data, D_dtype, D_amax, D_scale, D_scale_inv, D_sm,
-            bias_arg, int(bias_type) if bias_type is not None else 0,
-            gelu_in, workspace,
-            grad, accumulate, use_split_accumulator,
-            comm_overlap._handle, int(comm_type), bulk_overlap,
+            A_data,
+            A_dtype,
+            A_scale_inv,
+            A_cw_data,
+            A_cw_scale_inv,
+            A_sm,
+            A_swizzled,
+            transa,
+            B_data,
+            B_dtype,
+            B_scale_inv,
+            B_cw_data,
+            B_cw_scale_inv,
+            B_sm,
+            B_swizzled,
+            transb,
+            D_data,
+            D_dtype,
+            D_amax,
+            D_scale,
+            D_scale_inv,
+            D_sm,
+            bias_arg,
+            int(bias_type) if bias_type is not None else 0,
+            gelu_in,
+            workspace,
+            grad,
+            accumulate,
+            use_split_accumulator,
+            comm_overlap._handle,
+            int(comm_type),
+            bulk_overlap,
             extra_output,
         )
     else:
         _ops.gemm(
-            A_data, A_dtype, A_scale_inv, A_cw_data, A_cw_scale_inv, A_sm, A_swizzled, transa,
-            B_data, B_dtype, B_scale_inv, B_cw_data, B_cw_scale_inv, B_sm, B_swizzled, transb,
-            D_data, D_dtype, D_amax, D_scale, D_scale_inv, D_sm,
-            bias_arg, int(bias_type) if bias_type is not None else 0,
-            gelu_in, workspace,
-            grad, accumulate, use_split_accumulator, alpha,
+            A_data,
+            A_dtype,
+            A_scale_inv,
+            A_cw_data,
+            A_cw_scale_inv,
+            A_sm,
+            A_swizzled,
+            transa,
+            B_data,
+            B_dtype,
+            B_scale_inv,
+            B_cw_data,
+            B_cw_scale_inv,
+            B_sm,
+            B_swizzled,
+            transb,
+            D_data,
+            D_dtype,
+            D_amax,
+            D_scale,
+            D_scale_inv,
+            D_sm,
+            bias_arg,
+            int(bias_type) if bias_type is not None else 0,
+            gelu_in,
+            workspace,
+            grad,
+            accumulate,
+            use_split_accumulator,
+            alpha,
         )
 
     return [D, dbias, gelu_in, extra_output]
@@ -815,9 +1054,11 @@ def generic_gemm(A, transa, B, transb, D, quantizer, out_dtype, bias,
 # Quantize (match pybind11 signatures)
 # ============================================================================
 
+
 def quantize(tensor, quantizer, output=None, noop=None):
     """Quantize using stable ABI ops, bypassing pybind11."""
     from transformer_engine.pytorch.tensor._quantize_stable import quantize_into, quantize_new
+
     if quantizer is None:
         return tensor
     if output is not None:
@@ -830,6 +1071,7 @@ def quantize(tensor, quantizer, output=None, noop=None):
 def dequantize(input, otype):
     """Dequantize using stable ABI ops."""
     from transformer_engine.pytorch.tensor._extract import extract_tensor_data
+
     in_data, in_dtype, in_scale_inv, in_sm = extract_tensor_data(input)
     _TORCH_TO_TE = {torch.float32: 4, torch.float16: 5, torch.bfloat16: 6}
     out_te_dtype = _TORCH_TO_TE.get(otype, 4) if isinstance(otype, torch.dtype) else int(otype)
@@ -849,6 +1091,7 @@ def split_quantize(tensor, split_sections, quantizer_list, disable_bulk_allocati
     implemented; correctness is preserved for all quantizer types via the unfused path.
     """
     from transformer_engine.pytorch.tensor._quantize_stable import quantize_new
+
     num_splits = len(split_sections)
     if num_splits == 0:
         return []
@@ -857,7 +1100,7 @@ def split_quantize(tensor, split_sections, quantizer_list, disable_bulk_allocati
     offset = 0
     for i in range(num_splits):
         n = split_sections[i]
-        split = tensor[offset:offset + n]
+        split = tensor[offset : offset + n]
         quantizer = quantizer_list[i]
         if quantizer is None:
             results.append(split)
@@ -870,6 +1113,7 @@ def split_quantize(tensor, split_sections, quantizer_list, disable_bulk_allocati
 # ============================================================================
 # Swizzle (match pybind11 signature)
 # ============================================================================
+
 
 def swizzle_scales_for_gemm_(tensor):
     """Swizzle MXFP8/NVFP4 scales in-place for later GEMM use."""
@@ -886,7 +1130,10 @@ def swizzle_scales_for_gemm_(tensor):
             tensor._rowwise_data, tensor._rowwise_scale_inv, te_dtype, scaling_mode
         )
 
-    if hasattr(tensor, "_columnwise_data") and getattr(tensor, "_columnwise_scale_inv", None) is not None:
+    if (
+        hasattr(tensor, "_columnwise_data")
+        and getattr(tensor, "_columnwise_scale_inv", None) is not None
+    ):
         tensor._columnwise_scale_inv = _ops.swizzle_scale_for_gemm(
             tensor._columnwise_data, tensor._columnwise_scale_inv, te_dtype, scaling_mode
         )
@@ -903,12 +1150,14 @@ def swizzle_scales_for_gemm_(tensor):
 # Activation ops (match pybind11 individual function names)
 # ============================================================================
 
+
 def _make_activation_fwd(act_type, shape_divisor=1):
     _TE_DTYPE = {torch.float32: 4, torch.float16: 5, torch.bfloat16: 6}
     DELAYED = 0
 
     def fn(input, quantizer):
         from transformer_engine.pytorch.tensor._extract import extract_tensor_data
+
         inp = input if isinstance(input, torch.Tensor) else extract_tensor_data(input)[0]
         out_shape = list(inp.shape)
         if shape_divisor > 1:
@@ -924,11 +1173,13 @@ def _make_activation_fwd(act_type, shape_divisor=1):
 
         # Determine implementation path (matches C++ activation_helper dispatch)
         q_type = type(quantizer).__name__
-        is_delayed = 'Float8Quantizer' in q_type and 'Current' not in q_type and 'Block' not in q_type
-        is_mxfp8 = 'MXFP8' in q_type
-        is_current_scaling = 'CurrentScaling' in q_type
-        is_nvfp4 = 'NVFP4' in q_type
-        is_block = 'Block' in q_type and 'MXFP8' not in q_type
+        is_delayed = (
+            "Float8Quantizer" in q_type and "Current" not in q_type and "Block" not in q_type
+        )
+        is_mxfp8 = "MXFP8" in q_type
+        is_current_scaling = "CurrentScaling" in q_type
+        is_nvfp4 = "NVFP4" in q_type
+        is_block = "Block" in q_type and "MXFP8" not in q_type
 
         if quantizer is None or is_delayed or is_mxfp8:
             # FULLY_FUSED: kernel writes directly to quantized output
@@ -940,29 +1191,33 @@ def _make_activation_fwd(act_type, shape_divisor=1):
             elif is_delayed:
                 out_sm = 0  # DELAYED_TENSOR_SCALING
 
-            out_amax = getattr(quantizer, 'amax', None)
-            out_scale = getattr(quantizer, 'scale', None)
-            if isinstance(out_amax, torch.Tensor) and out_amax.numel() == 0: out_amax = None
-            if isinstance(out_scale, torch.Tensor) and out_scale.numel() == 0: out_scale = None
+            out_amax = getattr(quantizer, "amax", None)
+            out_scale = getattr(quantizer, "scale", None)
+            if isinstance(out_amax, torch.Tensor) and out_amax.numel() == 0:
+                out_amax = None
+            if isinstance(out_scale, torch.Tensor) and out_scale.numel() == 0:
+                out_scale = None
 
             _ops.activation_fwd_noalloc(
-                inp, out_data, out_dtype, out_amax, out_scale, out_scale_inv, out_sm, act_type)
+                inp, out_data, out_dtype, out_amax, out_scale, out_scale_inv, out_sm, act_type
+            )
 
-            if hasattr(out_py, '_fp8_dtype') and hasattr(quantizer, 'dtype'):
+            if hasattr(out_py, "_fp8_dtype") and hasattr(quantizer, "dtype"):
                 out_py._fp8_dtype = quantizer.dtype
             return out_py
 
         elif is_current_scaling:
             # FUSED_ACTIVATION_AMAX_FP8: activation→hp+amax, then quantize_from_amax
-            amax = getattr(quantizer, 'amax', torch.zeros(1, dtype=torch.float32, device=device))
+            amax = getattr(quantizer, "amax", torch.zeros(1, dtype=torch.float32, device=device))
             # Compute activation to hp output WITH amax
             hp_out = torch.empty(out_shape, dtype=inp.dtype, device=device)
             _ops.activation_fwd_noalloc(inp, hp_out, te_dt, amax, None, None, DELAYED, act_type)
             # Quantize using pre-computed amax
             out_py = quantizer.make_empty(out_shape, dtype=inp.dtype, device=device)
             from transformer_engine.pytorch.tensor._quantize_stable import quantize_into
+
             # Set use_existing_amax so quantize_into uses quantize_from_amax
-            orig = getattr(quantizer, 'use_existing_amax', False)
+            orig = getattr(quantizer, "use_existing_amax", False)
             quantizer.use_existing_amax = True
             quantize_into(hp_out, quantizer, out_py)
             quantizer.use_existing_amax = orig
@@ -974,14 +1229,18 @@ def _make_activation_fwd(act_type, shape_divisor=1):
             hp_out = torch.empty(out_shape, dtype=inp.dtype, device=device)
             _ops.activation_fwd_noalloc(inp, hp_out, te_dt, None, None, None, DELAYED, act_type)
             from transformer_engine.pytorch.tensor._quantize_stable import quantize_new
+
             return quantize_new(hp_out, quantizer)
 
     return fn
 
+
 def _make_activation_bwd(act_type):
     _TE_DTYPE = {torch.float32: 4, torch.float16: 5, torch.bfloat16: 6}
+
     def fn(grad, input, quantizer):
         from transformer_engine.pytorch.tensor._extract import extract_tensor_data
+
         inp = input if isinstance(input, torch.Tensor) else extract_tensor_data(input)[0]
         grad_t = grad if isinstance(grad, torch.Tensor) else extract_tensor_data(grad)[0]
 
@@ -996,25 +1255,30 @@ def _make_activation_bwd(act_type):
         out_data, out_dtype, out_scale_inv, out_sm = extract_tensor_data(out_py)
 
         q_type = type(quantizer).__name__
-        if 'Block' in q_type:
-            out_sm = 3 if getattr(quantizer, 'block_scaling_dim', 2) == 2 else 2  # BLOCK_2D=3, 1D=2
-        elif 'MXFP8' in q_type:
+        if "Block" in q_type:
+            out_sm = 3 if getattr(quantizer, "block_scaling_dim", 2) == 2 else 2  # BLOCK_2D=3, 1D=2
+        elif "MXFP8" in q_type:
             out_sm = 1  # MXFP8_1D_SCALING
-        elif 'NVFP4' in q_type:
+        elif "NVFP4" in q_type:
             out_sm = 4  # NVFP4_1D_SCALING
 
-        out_amax = getattr(quantizer, 'amax', None)
-        out_scale = getattr(quantizer, 'scale', None)
-        if isinstance(out_amax, torch.Tensor) and out_amax.numel() == 0: out_amax = None
-        if isinstance(out_scale, torch.Tensor) and out_scale.numel() == 0: out_scale = None
+        out_amax = getattr(quantizer, "amax", None)
+        out_scale = getattr(quantizer, "scale", None)
+        if isinstance(out_amax, torch.Tensor) and out_amax.numel() == 0:
+            out_amax = None
+        if isinstance(out_scale, torch.Tensor) and out_scale.numel() == 0:
+            out_scale = None
 
         _ops.dactivation_noalloc(
-            grad_t, inp, out_data, out_dtype, out_amax, out_scale, out_scale_inv, out_sm, act_type)
+            grad_t, inp, out_data, out_dtype, out_amax, out_scale, out_scale_inv, out_sm, act_type
+        )
 
-        if hasattr(out_py, '_fp8_dtype') and hasattr(quantizer, 'dtype'):
+        if hasattr(out_py, "_fp8_dtype") and hasattr(quantizer, "dtype"):
             out_py._fp8_dtype = quantizer.dtype
         return out_py
+
     return fn
+
 
 # 0=gelu, 1=glu, 2=geglu, 3=qgelu, 4=qgeglu, 5=relu, 6=reglu, 7=srelu, 8=sreglu, 9=silu, 10=swiglu
 gelu = _make_activation_fwd(0)
@@ -1041,30 +1305,52 @@ dsreglu = _make_activation_bwd(8)
 dsilu = _make_activation_bwd(9)
 dswiglu = _make_activation_bwd(10)
 
+
 def clamped_swiglu(input, quantizer, limit, alpha):
     inp = input if isinstance(input, torch.Tensor) else input
-    out = torch.empty(*inp.shape[:-1], inp.shape[-1] // 2,
-                     dtype=inp.dtype, device=inp.device)
+    out = torch.empty(*inp.shape[:-1], inp.shape[-1] // 2, dtype=inp.dtype, device=inp.device)
     _ops.clamped_activation_fwd_noalloc(
-        inp, out, int(DType.kFloat32 if inp.dtype == torch.float32 else DType.kBFloat16),
-        None, None, None, 0, limit, alpha, 0)
+        inp,
+        out,
+        int(DType.kFloat32 if inp.dtype == torch.float32 else DType.kBFloat16),
+        None,
+        None,
+        None,
+        0,
+        limit,
+        alpha,
+        0,
+    )
     if quantizer is not None:
         from transformer_engine.pytorch.tensor._quantize_stable import quantize_new
+
         out = quantize_new(out, quantizer)
     return out
+
 
 def clamped_dswiglu(grad, input, quantizer, limit, alpha):
     inp = input if isinstance(input, torch.Tensor) else input
     out = torch.empty_like(inp)
     _ops.clamped_dactivation_noalloc(
-        grad, inp, out, int(DType.kFloat32 if inp.dtype == torch.float32 else DType.kBFloat16),
-        None, None, None, 0, limit, alpha, 0)
+        grad,
+        inp,
+        out,
+        int(DType.kFloat32 if inp.dtype == torch.float32 else DType.kBFloat16),
+        None,
+        None,
+        None,
+        0,
+        limit,
+        alpha,
+        0,
+    )
     return out
 
 
 # ============================================================================
 # Bias ops (match pybind11 individual function names)
 # ============================================================================
+
 
 def bgrad_quantize(grad_output, quantizer):
     """Compute bias gradient and optionally quantize grad_output.
@@ -1078,18 +1364,21 @@ def bgrad_quantize(grad_output, quantizer):
         return [grad_bias, grad_output]
     # Quantize grad_output into the appropriate FP8/quantized format
     from transformer_engine.pytorch.tensor._quantize_stable import quantize_new
+
     grad_input = quantize_new(grad_output.contiguous(), quantizer)
     return [grad_bias, grad_input]
+
 
 def _make_dbias_dact(act_type):
     def fn(grad_output, act_input, quantizer):
         from transformer_engine.pytorch.tensor._extract import extract_tensor_data
+
         bias_size = act_input.shape[-1]
         in_te_dt = int(DType.kFloat32 if act_input.dtype == torch.float32 else DType.kBFloat16)
         device = act_input.device
 
-        q_name = type(quantizer).__name__ if quantizer is not None else ''
-        is_mxfp8 = 'MXFP8' in q_name
+        q_name = type(quantizer).__name__ if quantizer is not None else ""
+        is_mxfp8 = "MXFP8" in q_name
 
         # Float8Quantizer (delayed scaling) fused dact+dbias+quantize kernel requires
         # output TensorWrapper with BOTH rowwise and columnwise buffers to work on Hopper
@@ -1098,11 +1387,13 @@ def _make_dbias_dact(act_type):
         if quantizer is None or not is_mxfp8:
             # Unfused: compute dact in bf16, then sum for bias, then quantize separately
             temp = torch.empty_like(act_input)
-            _ops.dactivation_noalloc(grad_output, act_input, temp, in_te_dt,
-                                     None, None, None, 0, act_type)
+            _ops.dactivation_noalloc(
+                grad_output, act_input, temp, in_te_dt, None, None, None, 0, act_type
+            )
             grad_bias = temp.view(-1, bias_size).sum(dim=0)
             if quantizer is not None:
                 from transformer_engine.pytorch.tensor._quantize_stable import quantize_new
+
                 grad_input = quantize_new(temp, quantizer)
             else:
                 grad_input = temp
@@ -1110,21 +1401,33 @@ def _make_dbias_dact(act_type):
             # Fused path (MXFP8 only): use dact_dbias_noalloc with MXFP8 output.
             # Float8Quantizer (delayed) is handled in the unfused branch above.
             out_sm = 1  # MXFP8_1D=1
-            out_te_dt = int(getattr(quantizer, 'dtype', DType.kFloat8E4M3))
-            out = quantizer.make_empty(list(act_input.shape),
-                                       dtype=act_input.dtype, device=device)
+            out_te_dt = int(getattr(quantizer, "dtype", DType.kFloat8E4M3))
+            out = quantizer.make_empty(list(act_input.shape), dtype=act_input.dtype, device=device)
             out_data, out_dtype, out_scale_inv, _ = extract_tensor_data(out)
-            out_amax = getattr(quantizer, 'amax', None)
-            out_scale = getattr(quantizer, 'scale', None)
-            if isinstance(out_amax, torch.Tensor) and out_amax.numel() == 0: out_amax = None
-            if isinstance(out_scale, torch.Tensor) and out_scale.numel() == 0: out_scale = None
+            out_amax = getattr(quantizer, "amax", None)
+            out_scale = getattr(quantizer, "scale", None)
+            if isinstance(out_amax, torch.Tensor) and out_amax.numel() == 0:
+                out_amax = None
+            if isinstance(out_scale, torch.Tensor) and out_scale.numel() == 0:
+                out_scale = None
             grad_bias = torch.empty(bias_size, dtype=act_input.dtype, device=device)
             _ops.dact_dbias_noalloc(
-                grad_output, act_input, grad_bias, out_data,
-                out_te_dt, out_amax, out_scale, out_scale_inv, out_sm, act_type)
+                grad_output,
+                act_input,
+                grad_bias,
+                out_data,
+                out_te_dt,
+                out_amax,
+                out_scale,
+                out_scale_inv,
+                out_sm,
+                act_type,
+            )
             grad_input = out
         return [grad_bias, grad_input]
+
     return fn
+
 
 # C++ dact_table order: 0=dgelu, 1=dglu, 2=dgeglu, 3=dqgelu, 4=dqgeglu,
 #                       5=drelu, 6=dreglu, 7=dsrelu, 8=dsreglu, 9=dsilu, 10=dswiglu
@@ -1146,7 +1449,7 @@ def _quantizer_to_te_dtype(quantizer):
     """Return TE DType int for a quantizer's output dtype (or kBFloat16 if unknown)."""
     if quantizer is None:
         return int(DType.kBFloat16)
-    dt = getattr(quantizer, 'dtype', None)
+    dt = getattr(quantizer, "dtype", None)
     if dt is not None:
         return int(dt)
     return int(DType.kBFloat16)
@@ -1157,12 +1460,12 @@ def _quantizer_to_scaling_mode(quantizer):
     if quantizer is None:
         return 0  # DELAYED_TENSOR_SCALING
     qname = type(quantizer).__name__
-    if 'MXFP8' in qname:
+    if "MXFP8" in qname:
         return 1
-    if 'NVFP4' in qname:
+    if "NVFP4" in qname:
         return 4
-    if 'Block' in qname:
-        block_dim = getattr(quantizer, 'block_scaling_dim', 2)
+    if "Block" in qname:
+        block_dim = getattr(quantizer, "block_scaling_dim", 2)
         return 3 if block_dim == 2 else 2
     return 0  # DELAYED_TENSOR_SCALING
 
@@ -1175,7 +1478,7 @@ def _grouped_tensor_to_stable_args(gt):
        first_dims, last_dims, tensor_offsets,
        te_dtype, scaling_mode, logical_0, logical_1, num_tensors, swizzled)
     """
-    quantizer = getattr(gt, 'quantizer', None)
+    quantizer = getattr(gt, "quantizer", None)
     logical_shape = gt.logical_shape
     return (
         gt.rowwise_data,
@@ -1190,14 +1493,29 @@ def _grouped_tensor_to_stable_args(gt):
         logical_shape[0],
         logical_shape[1],
         gt.num_tensors,
-        bool(getattr(gt, '_with_gemm_swizzled_scales', False)),
+        bool(getattr(gt, "_with_gemm_swizzled_scales", False)),
     )
 
 
 def te_general_grouped_gemm(
-        A, transa, B, transb, D, out_dtype, m_splits, bias, bias_type,
-        single_output, pre_gelu_out, grad, workspace, workspace_size,
-        accumulate, use_split_accumulator, math_sm_count):
+    A,
+    transa,
+    B,
+    transb,
+    D,
+    out_dtype,
+    m_splits,
+    bias,
+    bias_type,
+    single_output,
+    pre_gelu_out,
+    grad,
+    workspace,
+    workspace_size,
+    accumulate,
+    use_split_accumulator,
+    math_sm_count,
+):
     """Grouped GEMM via stable ABI: iterate and call _ops.gemm() for each pair.
 
     Replaces pybind11 te_general_grouped_gemm which calls nvte_multi_tensor_gemm.
@@ -1217,7 +1535,7 @@ def te_general_grouped_gemm(
         D_list = []
         offset = 0
         for m in m_splits:
-            D_list.append(flat_D[offset:offset + m])
+            D_list.append(flat_D[offset : offset + m])
             offset += m
     else:
         D_list = list(D) if D is not None else [None] * num_gemms
@@ -1232,11 +1550,12 @@ def te_general_grouped_gemm(
         def _numel(t):
             if isinstance(t, torch.Tensor):
                 return t.numel()
-            for attr in ('_data', '_rowwise_data', '_columnwise_data'):
+            for attr in ("_data", "_rowwise_data", "_columnwise_data"):
                 d = getattr(t, attr, None)
                 if isinstance(d, torch.Tensor):
                     return d.numel()
             return 1  # unknown type, assume non-empty
+
         if _numel(Ai) == 0 or _numel(Bi) == 0:
             if Di is not None and Di.numel() > 0 and not accumulate:
                 Di.zero_()
@@ -1246,8 +1565,12 @@ def te_general_grouped_gemm(
                 pre_gelu_out[i].zero_()
             continue
 
-        A_data, A_te_dtype, A_si, A_sm, A_swizzled, A_cw, A_cw_si = _extract_gemm_operand(Ai, transa)
-        B_data, B_te_dtype, B_si, B_sm, B_swizzled, B_cw, B_cw_si = _extract_gemm_operand(Bi, not transb)
+        A_data, A_te_dtype, A_si, A_sm, A_swizzled, A_cw, A_cw_si = _extract_gemm_operand(
+            Ai, transa
+        )
+        B_data, B_te_dtype, B_si, B_sm, B_swizzled, B_cw, B_cw_si = _extract_gemm_operand(
+            Bi, not transb
+        )
 
         # Mirror generic_gemm: compute on-the-fly transpose when delayed-scaling FP8
         # tensor is missing its columnwise buffer (e.g. _transpose_invalid=True).
@@ -1278,11 +1601,36 @@ def te_general_grouped_gemm(
         # For grad=True with bias: the kernel writes dbias into bias_i in-place,
         # which is already the pre-allocated grad_bias tensor passed by the caller.
         _ops.gemm(
-            A_data, A_te_dtype, A_si, A_cw, A_cw_si, A_sm, A_swizzled, transa,
-            B_data, B_te_dtype, B_si, B_cw, B_cw_si, B_sm, B_swizzled, transb,
-            D_data, D_te_dtype, None, None, D_si, D_sm,
-            bias_i, bias_type_int, gelu_i,
-            ws, grad, accumulate, use_split_accumulator, 1.0,
+            A_data,
+            A_te_dtype,
+            A_si,
+            A_cw,
+            A_cw_si,
+            A_sm,
+            A_swizzled,
+            transa,
+            B_data,
+            B_te_dtype,
+            B_si,
+            B_cw,
+            B_cw_si,
+            B_sm,
+            B_swizzled,
+            transb,
+            D_data,
+            D_te_dtype,
+            None,
+            None,
+            D_si,
+            D_sm,
+            bias_i,
+            bias_type_int,
+            gelu_i,
+            ws,
+            grad,
+            accumulate,
+            use_split_accumulator,
+            1.0,
         )
 
         if single_output and D is not None:
@@ -1293,9 +1641,19 @@ def te_general_grouped_gemm(
 
 
 def te_general_grouped_gemm_for_grouped_tensor(
-        A, transa, B, transb, D, bias,
-        alpha, beta, workspace_setup, workspace_cublas,
-        use_split_accumulator, math_sm_count):
+    A,
+    transa,
+    B,
+    transb,
+    D,
+    bias,
+    alpha,
+    beta,
+    workspace_setup,
+    workspace_cublas,
+    use_split_accumulator,
+    math_sm_count,
+):
     """Grouped GEMM for GroupedTensor inputs (Blackwell+ nvte_grouped_gemm)."""
     A_args = _grouped_tensor_to_stable_args(A)
     B_args = _grouped_tensor_to_stable_args(B)
@@ -1305,25 +1663,55 @@ def te_general_grouped_gemm_for_grouped_tensor(
         bias_args = _grouped_tensor_to_stable_args(bias)
         has_bias = True
     else:
-        bias_args = (None, None, None, None, None, None, None,
-                     int(DType.kBFloat16), 0, 1, 1, 1, False)
+        bias_args = (
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            int(DType.kBFloat16),
+            0,
+            1,
+            1,
+            1,
+            False,
+        )
         has_bias = False
 
     _ops.grouped_gemm_for_grouped_tensor(
-        *A_args, transa,
-        *B_args, transb,
+        *A_args,
+        transa,
+        *B_args,
+        transb,
         *D_args,
-        alpha, beta, workspace_setup, workspace_cublas,
-        use_split_accumulator, math_sm_count, has_bias,
+        alpha,
+        beta,
+        workspace_setup,
+        workspace_cublas,
+        use_split_accumulator,
+        math_sm_count,
+        has_bias,
         *bias_args,
     )
     return D
 
 
 def te_general_grouped_gemm_for_discrete_in(
-        A, transa, B, transb, D, bias,
-        alpha, beta, workspace_setup, workspace_cublas,
-        use_split_accumulator, math_sm_count):
+    A,
+    transa,
+    B,
+    transb,
+    D,
+    bias,
+    alpha,
+    beta,
+    workspace_setup,
+    workspace_cublas,
+    use_split_accumulator,
+    math_sm_count,
+):
     """Grouped GEMM with discrete A list, GroupedTensor B/D (Blackwell+)."""
     B_args = _grouped_tensor_to_stable_args(B)
     D_args = _grouped_tensor_to_stable_args(D)
@@ -1332,8 +1720,21 @@ def te_general_grouped_gemm_for_discrete_in(
         bias_args = _grouped_tensor_to_stable_args(bias)
         has_bias = True
     else:
-        bias_args = (None, None, None, None, None, None, None,
-                     int(DType.kBFloat16), 0, 1, 1, 1, False)
+        bias_args = (
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            int(DType.kBFloat16),
+            0,
+            1,
+            1,
+            1,
+            False,
+        )
         has_bias = False
 
     # Pack A tensors: each element of A is an individual tensor (weight per expert).
@@ -1344,11 +1745,13 @@ def te_general_grouped_gemm_for_discrete_in(
     A_colwise_ptrs = torch.zeros(num_a, dtype=torch.int64, device=device)
     A_si_ptrs = torch.zeros(num_a, dtype=torch.int64, device=device)
     A_csi_ptrs = torch.zeros(num_a, dtype=torch.int64, device=device)
-    A_shapes = torch.zeros(num_a, 2, dtype=torch.int64, device='cpu')
-    A_te_dtypes = torch.zeros(num_a, dtype=torch.int32, device='cpu')
-    A_scaling_modes = torch.zeros(num_a, dtype=torch.int32, device='cpu')
+    A_shapes = torch.zeros(num_a, 2, dtype=torch.int64, device="cpu")
+    A_te_dtypes = torch.zeros(num_a, dtype=torch.int32, device="cpu")
+    A_scaling_modes = torch.zeros(num_a, dtype=torch.int32, device="cpu")
     for i, Ai in enumerate(A):
-        ai_data, ai_dtype, ai_si, ai_sm, ai_swizzled, ai_cw, ai_cw_si = _extract_gemm_operand(Ai, transa)
+        ai_data, ai_dtype, ai_si, ai_sm, ai_swizzled, ai_cw, ai_cw_si = _extract_gemm_operand(
+            Ai, transa
+        )
         if ai_data is not None and ai_data.numel() > 0:
             A_rowwise_ptrs[i] = ai_data.data_ptr()
             A_shapes[i, 0] = ai_data.shape[0]
@@ -1363,21 +1766,43 @@ def te_general_grouped_gemm_for_discrete_in(
         A_scaling_modes[i] = ai_sm
 
     _ops.grouped_gemm_for_discrete_in(
-        A_rowwise_ptrs, A_colwise_ptrs, A_si_ptrs, A_csi_ptrs,
-        A_shapes.to(device), A_te_dtypes.to(device), A_scaling_modes.to(device), num_a,
-        *B_args, transb,
+        A_rowwise_ptrs,
+        A_colwise_ptrs,
+        A_si_ptrs,
+        A_csi_ptrs,
+        A_shapes.to(device),
+        A_te_dtypes.to(device),
+        A_scaling_modes.to(device),
+        num_a,
+        *B_args,
+        transb,
         *D_args,
-        alpha, beta, workspace_setup, workspace_cublas,
-        use_split_accumulator, math_sm_count, has_bias,
+        alpha,
+        beta,
+        workspace_setup,
+        workspace_cublas,
+        use_split_accumulator,
+        math_sm_count,
+        has_bias,
         *bias_args,
     )
     return D
 
 
 def te_general_grouped_gemm_for_discrete_out(
-        A, transa, B, transb, D, bias,
-        alpha, beta, workspace_setup, workspace_cublas,
-        use_split_accumulator, math_sm_count):
+    A,
+    transa,
+    B,
+    transb,
+    D,
+    bias,
+    alpha,
+    beta,
+    workspace_setup,
+    workspace_cublas,
+    use_split_accumulator,
+    math_sm_count,
+):
     """Grouped GEMM with GroupedTensor A/B, discrete D list (Blackwell+)."""
     A_args = _grouped_tensor_to_stable_args(A)
     B_args = _grouped_tensor_to_stable_args(B)
@@ -1386,10 +1811,11 @@ def te_general_grouped_gemm_for_discrete_out(
     device = A_args[0].device if A_args[0] is not None else alpha.device
     D_rowwise_ptrs = torch.zeros(num_d, dtype=torch.int64, device=device)
     D_si_ptrs = torch.zeros(num_d, dtype=torch.int64, device=device)
-    D_shapes = torch.zeros(num_d, 2, dtype=torch.int64, device='cpu')
-    D_te_dtypes = torch.zeros(num_d, dtype=torch.int32, device='cpu')
-    D_scaling_modes = torch.zeros(num_d, dtype=torch.int32, device='cpu')
+    D_shapes = torch.zeros(num_d, 2, dtype=torch.int64, device="cpu")
+    D_te_dtypes = torch.zeros(num_d, dtype=torch.int32, device="cpu")
+    D_scaling_modes = torch.zeros(num_d, dtype=torch.int32, device="cpu")
     from transformer_engine.pytorch.tensor._extract import extract_tensor_data
+
     for i, Di in enumerate(D):
         d_data, d_dtype, d_si, d_sm = extract_tensor_data(Di)
         if d_data is not None and d_data.numel() > 0:
@@ -1402,35 +1828,64 @@ def te_general_grouped_gemm_for_discrete_out(
         D_scaling_modes[i] = d_sm
 
     _ops.grouped_gemm_for_discrete_out(
-        *A_args, transa,
-        *B_args, transb,
-        D_rowwise_ptrs, D_si_ptrs,
-        D_shapes.to(device), D_te_dtypes.to(device), D_scaling_modes.to(device), num_d,
-        alpha, beta, workspace_setup, workspace_cublas,
-        use_split_accumulator, math_sm_count,
+        *A_args,
+        transa,
+        *B_args,
+        transb,
+        D_rowwise_ptrs,
+        D_si_ptrs,
+        D_shapes.to(device),
+        D_te_dtypes.to(device),
+        D_scaling_modes.to(device),
+        num_d,
+        alpha,
+        beta,
+        workspace_setup,
+        workspace_cublas,
+        use_split_accumulator,
+        math_sm_count,
     )
     return D
+
 
 # ============================================================================
 # NVFP4 multi-tensor ops (iterate using single-tensor stable ops)
 # ============================================================================
 
-def nvfp4_multi_tensor_fused_scale(block_amax_list, global_amax_list,
-                                   per_block_scale_list, target_scale_list,
-                                   target_amax_list, tile_rows_list,
-                                   tile_cols_list, rows_padded_list, block_len):
+
+def nvfp4_multi_tensor_fused_scale(
+    block_amax_list,
+    global_amax_list,
+    per_block_scale_list,
+    target_scale_list,
+    target_amax_list,
+    tile_rows_list,
+    tile_cols_list,
+    rows_padded_list,
+    block_len,
+):
     for i in range(len(block_amax_list)):
         _ops.nvfp4_fused_scale(
-            block_amax_list[i], global_amax_list[i],
-            per_block_scale_list[i], target_scale_list[i],
-            target_amax_list[i], tile_rows_list[i],
-            tile_cols_list[i], rows_padded_list[i], block_len)
+            block_amax_list[i],
+            global_amax_list[i],
+            per_block_scale_list[i],
+            target_scale_list[i],
+            target_amax_list[i],
+            tile_rows_list[i],
+            tile_cols_list[i],
+            rows_padded_list[i],
+            block_len,
+        )
 
 
-def nvfp4_2d_multi_tensor_transpose(rowwise_data_list, columnwise_data_list,
-                                    rowwise_scale_inv_list,
-                                    columnwise_scale_inv_list,
-                                    M_list, K_list):
+def nvfp4_2d_multi_tensor_transpose(
+    rowwise_data_list,
+    columnwise_data_list,
+    rowwise_scale_inv_list,
+    columnwise_scale_inv_list,
+    M_list,
+    K_list,
+):
     for i in range(len(rowwise_data_list)):
         _ops.nvfp4_data_transpose(rowwise_data_list[i], columnwise_data_list[i])
         M = M_list[i]
@@ -1438,33 +1893,57 @@ def nvfp4_2d_multi_tensor_transpose(rowwise_data_list, columnwise_data_list,
         M_tiles = (M + 15) // 16
         K_tiles = (K + 15) // 16
         _ops.nvfp4_2d_scale_transpose(
-            rowwise_scale_inv_list[i], columnwise_scale_inv_list[i],
-            M_tiles, K_tiles)
+            rowwise_scale_inv_list[i], columnwise_scale_inv_list[i], M_tiles, K_tiles
+        )
 
 
-def nvfp4_multi_tensor_2d_partial_cast(inp_list, out_list, scale_list,
-                                       global_scale_list, h_list, w_list,
-                                       start_offset_list, block_len=16):
+def nvfp4_multi_tensor_2d_partial_cast(
+    inp_list,
+    out_list,
+    scale_list,
+    global_scale_list,
+    h_list,
+    w_list,
+    start_offset_list,
+    block_len=16,
+):
     for i in range(len(inp_list)):
         # out_list[i] may be a quantized tensor — extract raw data
         out = out_list[i]
         if isinstance(out, torch.Tensor):
             _ops.nvfp4_2d_partial_cast_noalloc(
-                inp_list[i], out, int(DType.kFloat4E2M1), None, 4,
-                scale_list[i], global_scale_list[i],
-                h_list[i], w_list[i], start_offset_list[i], block_len)
+                inp_list[i],
+                out,
+                int(DType.kFloat4E2M1),
+                None,
+                4,
+                scale_list[i],
+                global_scale_list[i],
+                h_list[i],
+                w_list[i],
+                start_offset_list[i],
+                block_len,
+            )
 
 
-def nvfp4_multi_tensor_compute_partial_amax(master_weight_list,
-                                            partial_amax_list,
-                                            global_amax_list,
-                                            h_list, w_list,
-                                            start_offset_list,
-                                            block_len=16):
+def nvfp4_multi_tensor_compute_partial_amax(
+    master_weight_list,
+    partial_amax_list,
+    global_amax_list,
+    h_list,
+    w_list,
+    start_offset_list,
+    block_len=16,
+):
     for i in range(len(master_weight_list)):
         _ops.nvfp4_2d_compute_partial_amax(
-            master_weight_list[i], partial_amax_list[i],
-            h_list[i], w_list[i], start_offset_list[i], block_len)
+            master_weight_list[i],
+            partial_amax_list[i],
+            h_list[i],
+            w_list[i],
+            start_offset_list[i],
+            block_len,
+        )
         _ops.compute_amax(partial_amax_list[i], global_amax_list[i])
 
 
@@ -1472,21 +1951,27 @@ def nvfp4_multi_tensor_compute_partial_amax(master_weight_list,
 # Multi-tensor ops (match pybind11 signatures with pointer packing)
 # ============================================================================
 
+
 def _pack_tensor_lists(tensor_lists):
     """Pack tensor lists into flat int64 tensors for the pointer-pack pattern."""
     num_lists = len(tensor_lists)
     num_tensors = len(tensor_lists[0])
-    ptrs = torch.tensor(
-        [t.data_ptr() for lst in tensor_lists for t in lst],
-        dtype=torch.int64)
+    ptrs = torch.tensor([t.data_ptr() for lst in tensor_lists for t in lst], dtype=torch.int64)
     shapes = torch.tensor(
-        [[t.numel(), t.element_size()] for lst in tensor_lists for t in lst],
-        dtype=torch.int64).flatten()
-    _TORCH_DT = {torch.float32: 4, torch.float16: 5, torch.bfloat16: 6, torch.uint8: 0,
-                  torch.int32: 2, torch.int64: 3, torch.bool: 0}
+        [[t.numel(), t.element_size()] for lst in tensor_lists for t in lst], dtype=torch.int64
+    ).flatten()
+    _TORCH_DT = {
+        torch.float32: 4,
+        torch.float16: 5,
+        torch.bfloat16: 6,
+        torch.uint8: 0,
+        torch.int32: 2,
+        torch.int64: 3,
+        torch.bool: 0,
+    }
     dtypes = torch.tensor(
-        [_TORCH_DT.get(t.dtype, 4) for lst in tensor_lists for t in lst],
-        dtype=torch.int64)
+        [_TORCH_DT.get(t.dtype, 4) for lst in tensor_lists for t in lst], dtype=torch.int64
+    )
     return ptrs, shapes, dtypes, num_lists, num_tensors
 
 
@@ -1507,67 +1992,222 @@ def multi_tensor_l2norm(chunk_size, noop_flag, tensor_lists, per_tensor=False):
 
 def multi_tensor_unscale_l2norm(chunk_size, noop_flag, tensor_lists, inv_scale, per_tensor=False):
     ptrs, shapes, dtypes, nl, nt = _pack_tensor_lists(tensor_lists)
-    return _ops.multi_tensor_unscale_l2norm(chunk_size, noop_flag, ptrs, shapes, dtypes, nl, nt, inv_scale, per_tensor)
+    return _ops.multi_tensor_unscale_l2norm(
+        chunk_size, noop_flag, ptrs, shapes, dtypes, nl, nt, inv_scale, per_tensor
+    )
 
 
-def multi_tensor_adam(chunk_size, noop_flag, tensor_lists, lr, beta1, beta2,
-                      epsilon, step, mode, bias_correction, weight_decay):
+def multi_tensor_adam(
+    chunk_size,
+    noop_flag,
+    tensor_lists,
+    lr,
+    beta1,
+    beta2,
+    epsilon,
+    step,
+    mode,
+    bias_correction,
+    weight_decay,
+):
     ptrs, shapes, dtypes, nl, nt = _pack_tensor_lists(tensor_lists)
-    _ops.multi_tensor_adam(chunk_size, noop_flag, ptrs, shapes, dtypes, nl, nt,
-                           lr, beta1, beta2, epsilon, step, mode,
-                           bias_correction, weight_decay)
+    _ops.multi_tensor_adam(
+        chunk_size,
+        noop_flag,
+        ptrs,
+        shapes,
+        dtypes,
+        nl,
+        nt,
+        lr,
+        beta1,
+        beta2,
+        epsilon,
+        step,
+        mode,
+        bias_correction,
+        weight_decay,
+    )
 
 
-def multi_tensor_adam_capturable(chunk_size, noop_flag, tensor_lists, lr, beta1,
-                                 beta2, epsilon, step, mode, bias_correction,
-                                 weight_decay, inv_scale):
+def multi_tensor_adam_capturable(
+    chunk_size,
+    noop_flag,
+    tensor_lists,
+    lr,
+    beta1,
+    beta2,
+    epsilon,
+    step,
+    mode,
+    bias_correction,
+    weight_decay,
+    inv_scale,
+):
     ptrs, shapes, dtypes, nl, nt = _pack_tensor_lists(tensor_lists)
-    _ops.multi_tensor_adam_capturable(chunk_size, noop_flag, ptrs, shapes, dtypes, nl, nt,
-                                     lr, beta1, beta2, epsilon, step, mode,
-                                     bias_correction, weight_decay, inv_scale)
+    _ops.multi_tensor_adam_capturable(
+        chunk_size,
+        noop_flag,
+        ptrs,
+        shapes,
+        dtypes,
+        nl,
+        nt,
+        lr,
+        beta1,
+        beta2,
+        epsilon,
+        step,
+        mode,
+        bias_correction,
+        weight_decay,
+        inv_scale,
+    )
 
 
-def multi_tensor_adam_capturable_master(chunk_size, noop_flag, tensor_lists, lr,
-                                        beta1, beta2, epsilon, step, mode,
-                                        bias_correction, weight_decay, inv_scale):
+def multi_tensor_adam_capturable_master(
+    chunk_size,
+    noop_flag,
+    tensor_lists,
+    lr,
+    beta1,
+    beta2,
+    epsilon,
+    step,
+    mode,
+    bias_correction,
+    weight_decay,
+    inv_scale,
+):
     ptrs, shapes, dtypes, nl, nt = _pack_tensor_lists(tensor_lists)
-    _ops.multi_tensor_adam_capturable_master(chunk_size, noop_flag, ptrs, shapes, dtypes, nl, nt,
-                                            lr, beta1, beta2, epsilon, step, mode,
-                                            bias_correction, weight_decay, inv_scale)
+    _ops.multi_tensor_adam_capturable_master(
+        chunk_size,
+        noop_flag,
+        ptrs,
+        shapes,
+        dtypes,
+        nl,
+        nt,
+        lr,
+        beta1,
+        beta2,
+        epsilon,
+        step,
+        mode,
+        bias_correction,
+        weight_decay,
+        inv_scale,
+    )
 
 
-def multi_tensor_adam_param_remainder(chunk_size, noop_flag, tensor_lists, lr,
-                                     beta1, beta2, epsilon, step, mode,
-                                     bias_correction, weight_decay):
+def multi_tensor_adam_param_remainder(
+    chunk_size,
+    noop_flag,
+    tensor_lists,
+    lr,
+    beta1,
+    beta2,
+    epsilon,
+    step,
+    mode,
+    bias_correction,
+    weight_decay,
+):
     ptrs, shapes, dtypes, nl, nt = _pack_tensor_lists(tensor_lists)
-    _ops.multi_tensor_adam_param_remainder(chunk_size, noop_flag, ptrs, shapes, dtypes, nl, nt,
-                                          lr, beta1, beta2, epsilon, step, mode,
-                                          bias_correction, weight_decay)
+    _ops.multi_tensor_adam_param_remainder(
+        chunk_size,
+        noop_flag,
+        ptrs,
+        shapes,
+        dtypes,
+        nl,
+        nt,
+        lr,
+        beta1,
+        beta2,
+        epsilon,
+        step,
+        mode,
+        bias_correction,
+        weight_decay,
+    )
 
 
-def multi_tensor_adam_fp8(chunk_size, noop_flag, tensor_lists, lr, beta1,
-                          beta2, epsilon, step, mode, bias_correction,
-                          weight_decay, fp8_dtype):
+def multi_tensor_adam_fp8(
+    chunk_size,
+    noop_flag,
+    tensor_lists,
+    lr,
+    beta1,
+    beta2,
+    epsilon,
+    step,
+    mode,
+    bias_correction,
+    weight_decay,
+    fp8_dtype,
+):
     ptrs, shapes, dtypes, nl, nt = _pack_tensor_lists(tensor_lists)
-    _ops.multi_tensor_adam_fp8(chunk_size, noop_flag, ptrs, shapes, dtypes, nl, nt,
-                               lr, beta1, beta2, epsilon, step, mode,
-                               bias_correction, weight_decay, int(fp8_dtype))
+    _ops.multi_tensor_adam_fp8(
+        chunk_size,
+        noop_flag,
+        ptrs,
+        shapes,
+        dtypes,
+        nl,
+        nt,
+        lr,
+        beta1,
+        beta2,
+        epsilon,
+        step,
+        mode,
+        bias_correction,
+        weight_decay,
+        int(fp8_dtype),
+    )
 
 
-def multi_tensor_sgd(chunk_size, noop_flag, tensor_lists, wd, momentum,
-                     dampening, lr, nesterov, first_run, wd_after_momentum, scale):
+def multi_tensor_sgd(
+    chunk_size,
+    noop_flag,
+    tensor_lists,
+    wd,
+    momentum,
+    dampening,
+    lr,
+    nesterov,
+    first_run,
+    wd_after_momentum,
+    scale,
+):
     ptrs, shapes, dtypes, nl, nt = _pack_tensor_lists(tensor_lists)
-    _ops.multi_tensor_sgd(chunk_size, noop_flag, ptrs, shapes, dtypes, nl, nt,
-                          wd, momentum, dampening, lr, nesterov, first_run,
-                          wd_after_momentum, scale)
+    _ops.multi_tensor_sgd(
+        chunk_size,
+        noop_flag,
+        ptrs,
+        shapes,
+        dtypes,
+        nl,
+        nt,
+        wd,
+        momentum,
+        dampening,
+        lr,
+        nesterov,
+        first_run,
+        wd_after_momentum,
+        scale,
+    )
 
 
-def multi_tensor_compute_scale_and_scale_inv(chunk_size, noop_flag, tensor_lists,
-                                             max_fp8, force_pow_2_scales=False,
-                                             epsilon=0.0):
+def multi_tensor_compute_scale_and_scale_inv(
+    chunk_size, noop_flag, tensor_lists, max_fp8, force_pow_2_scales=False, epsilon=0.0
+):
     ptrs, shapes, dtypes, nl, nt = _pack_tensor_lists(tensor_lists)
-    _ops.multi_tensor_compute_scale_and_scale_inv(chunk_size, noop_flag, ptrs, shapes, dtypes,
-                                                  nl, nt, max_fp8, force_pow_2_scales, epsilon)
+    _ops.multi_tensor_compute_scale_and_scale_inv(
+        chunk_size, noop_flag, ptrs, shapes, dtypes, nl, nt, max_fp8, force_pow_2_scales, epsilon
+    )
 
 
 def multi_tensor_compute_scale_inv_e8m0(chunk_size, dummy, tensor_lists):
@@ -1578,6 +2218,7 @@ def multi_tensor_compute_scale_inv_e8m0(chunk_size, dummy, tensor_lists):
 # ============================================================================
 # CommOverlap types and classes
 # ============================================================================
+
 
 class CommOverlapType(IntEnum):
     RS = 0
@@ -1605,10 +2246,13 @@ class Float8BlockScaleTensorFormat(IntEnum):
 class CommOverlapCore:
     def __init__(self):
         pass
+
     def is_atomic_gemm(self):
         return False
+
     def is_p2p_overlap(self):
         return False
+
     def is_fp8_ubuf(self):
         return False
 
@@ -1623,15 +2267,20 @@ class CommOverlapP2PBase(CommOverlapCore):
 
 _AllgatherCB = _ctypes.CFUNCTYPE(
     None,
-    _ctypes.c_void_p, _ctypes.c_size_t,
-    _ctypes.c_void_p, _ctypes.c_size_t,
+    _ctypes.c_void_p,
+    _ctypes.c_size_t,
+    _ctypes.c_void_p,
+    _ctypes.c_size_t,
     _ctypes.c_char_p,
 )
 _BarrierCB = _ctypes.CFUNCTYPE(None, _ctypes.c_char_p)
 
 _TORCH_TO_TE_DTYPE = {
-    torch.float32: 4, torch.float16: 5, torch.bfloat16: 6,
-    torch.uint8: 0, torch.int8: 0,
+    torch.float32: 4,
+    torch.float16: 5,
+    torch.bfloat16: 6,
+    torch.uint8: 0,
+    torch.int8: 0,
 }
 
 
@@ -1703,10 +2352,22 @@ def _make_comm_callbacks(helper):
 class CommOverlap:
     """Python replacement for pybind11 CommOverlap (handle-based stable ABI)."""
 
-    def __init__(self, shape, dtype, helper, tp_size,
-                 num_splits=3, num_max_streams=3, comm_cga_size=2,
-                 gemm_priority=0, comm_priority=0, num_comm_sm=16,
-                 set_sm_margin=True, atomic_gemm=False, rs_overlap_first_gemm=False):
+    def __init__(
+        self,
+        shape,
+        dtype,
+        helper,
+        tp_size,
+        num_splits=3,
+        num_max_streams=3,
+        comm_cga_size=2,
+        gemm_priority=0,
+        comm_priority=0,
+        num_comm_sm=16,
+        set_sm_margin=True,
+        atomic_gemm=False,
+        rs_overlap_first_gemm=False,
+    ):
         self._ag_cb, self._bar_cb = _make_comm_callbacks(helper)
         ag_ptr = _ctypes.cast(self._ag_cb, _ctypes.c_void_p).value
         bar_ptr = _ctypes.cast(self._bar_cb, _ctypes.c_void_p).value
@@ -1714,13 +2375,24 @@ class CommOverlap:
 
         buf_dtype = _TORCH_TO_TE_DTYPE.get(dtype, 6)
         self._handle = _ops.create_comm_overlap(
-            list(shape), buf_dtype,
-            helper.myrank, helper.numranks,
-            helper.mylocal, helper.numlocal,
-            helper.mynode, helper.numnodes,
-            tp_size, num_splits, num_max_streams, comm_cga_size,
-            gemm_priority, comm_priority, num_comm_sm,
-            set_sm_margin, atomic_gemm, rs_overlap_first_gemm,
+            list(shape),
+            buf_dtype,
+            helper.myrank,
+            helper.numranks,
+            helper.mylocal,
+            helper.numlocal,
+            helper.mynode,
+            helper.numnodes,
+            tp_size,
+            num_splits,
+            num_max_streams,
+            comm_cga_size,
+            gemm_priority,
+            comm_priority,
+            num_comm_sm,
+            set_sm_margin,
+            atomic_gemm,
+            rs_overlap_first_gemm,
         )
 
     def copy_into_buffer(self, input, local_chunk=False):
@@ -1755,10 +2427,23 @@ class CommOverlap:
 class CommOverlapP2P:
     """Python replacement for pybind11 CommOverlapP2P (handle-based stable ABI)."""
 
-    def __init__(self, shape, dtype, helper, tp_size, comm_type,
-                 num_max_streams=3, comm_cga_size=1, gemm_priority=0,
-                 comm_priority=0, num_comm_sm=1, set_sm_margin=False,
-                 use_ce=True, atomic_gemm=False, aggregate=False):
+    def __init__(
+        self,
+        shape,
+        dtype,
+        helper,
+        tp_size,
+        comm_type,
+        num_max_streams=3,
+        comm_cga_size=1,
+        gemm_priority=0,
+        comm_priority=0,
+        num_comm_sm=1,
+        set_sm_margin=False,
+        use_ce=True,
+        atomic_gemm=False,
+        aggregate=False,
+    ):
         self._ag_cb, self._bar_cb = _make_comm_callbacks(helper)
         ag_ptr = _ctypes.cast(self._ag_cb, _ctypes.c_void_p).value
         bar_ptr = _ctypes.cast(self._bar_cb, _ctypes.c_void_p).value
@@ -1766,14 +2451,25 @@ class CommOverlapP2P:
 
         buf_dtype = _TORCH_TO_TE_DTYPE.get(dtype, 6)
         self._handle = _ops.create_comm_overlap_p2p(
-            list(shape), buf_dtype,
-            helper.myrank, helper.numranks,
-            helper.mylocal, helper.numlocal,
-            helper.mynode, helper.numnodes,
-            tp_size, int(comm_type),
-            num_max_streams, comm_cga_size,
-            gemm_priority, comm_priority, num_comm_sm,
-            set_sm_margin, use_ce, atomic_gemm, aggregate,
+            list(shape),
+            buf_dtype,
+            helper.myrank,
+            helper.numranks,
+            helper.mylocal,
+            helper.numlocal,
+            helper.mynode,
+            helper.numnodes,
+            tp_size,
+            int(comm_type),
+            num_max_streams,
+            comm_cga_size,
+            gemm_priority,
+            comm_priority,
+            num_comm_sm,
+            set_sm_margin,
+            use_ce,
+            atomic_gemm,
+            aggregate,
         )
 
     def copy_into_buffer(self, input, local_chunk=False):
@@ -1808,18 +2504,39 @@ class CommOverlapP2P:
 # Fused attention (match pybind11 signatures)
 # ============================================================================
 
+
 def fused_attn_fwd(
-        max_seqlen_q, max_seqlen_kv, is_training, attn_scale, p_dropout,
-        set_zero, qkv_layout, bias_type, attn_mask_type, softmax_type,
-        window_size, bottom_right_diagonal,
-        cu_seqlens_q, cu_seqlens_kv,
-        Q, K, V, fake_dtype,
-        cu_seqlens_q_padded=None, cu_seqlens_kv_padded=None,
-        page_table_k=None, page_table_v=None,
-        s_quantizer=None, o_quantizer=None,
-        Bias=None, SoftmaxOffset=None,
-        rng_gen=None, rng_elts_per_thread=0,
-        return_max_logit=False, cuda_graph=False):
+    max_seqlen_q,
+    max_seqlen_kv,
+    is_training,
+    attn_scale,
+    p_dropout,
+    set_zero,
+    qkv_layout,
+    bias_type,
+    attn_mask_type,
+    softmax_type,
+    window_size,
+    bottom_right_diagonal,
+    cu_seqlens_q,
+    cu_seqlens_kv,
+    Q,
+    K,
+    V,
+    fake_dtype,
+    cu_seqlens_q_padded=None,
+    cu_seqlens_kv_padded=None,
+    page_table_k=None,
+    page_table_v=None,
+    s_quantizer=None,
+    o_quantizer=None,
+    Bias=None,
+    SoftmaxOffset=None,
+    rng_gen=None,
+    rng_elts_per_thread=0,
+    return_max_logit=False,
+    cuda_graph=False,
+):
     """Fused attention forward via stable ABI fused_attn_fwd_noalloc."""
     from transformer_engine.pytorch.tensor._extract import extract_tensor_data
 
@@ -1845,8 +2562,8 @@ def fused_attn_fwd(
     if o_quantizer is not None:
         O_tensor = o_quantizer.make_empty(O_shape, dtype=O_torch_dtype, device=device)
         O_data, O_dtype_int, O_si, O_sm = extract_tensor_data(O_tensor)
-        O_amax = getattr(o_quantizer, 'amax', None)
-        O_scale = getattr(o_quantizer, 'scale', None)
+        O_amax = getattr(o_quantizer, "amax", None)
+        O_scale = getattr(o_quantizer, "scale", None)
     else:
         O_tensor = torch.empty(O_shape, dtype=O_torch_dtype, device=device)
         O_data, O_dtype_int, O_si, O_sm = O_tensor, O_dtype_int, None, 0
@@ -1856,8 +2573,8 @@ def fused_attn_fwd(
     if s_quantizer is not None:
         S_tensor = s_quantizer.make_empty([0], dtype=torch.float32, device=device)
         S_data, S_dtype_int, S_si, S_sm = extract_tensor_data(S_tensor)
-        S_amax = getattr(s_quantizer, 'amax', None)
-        S_scale = getattr(s_quantizer, 'scale', None)
+        S_amax = getattr(s_quantizer, "amax", None)
+        S_scale = getattr(s_quantizer, "scale", None)
     else:
         S_tensor = torch.empty([0], dtype=torch.float32, device=device)
         S_data, S_dtype_int, S_si, S_sm = S_tensor, 4, None, 0
@@ -1868,21 +2585,53 @@ def fused_attn_fwd(
     rng_state = torch.zeros([2], dtype=torch.int64, device=device)
 
     result = _ops.fused_attn_fwd_noalloc(
-        int(max_seqlen_q), int(max_seqlen_kv), bool(is_training),
-        float(attn_scale), float(p_dropout), bool(set_zero),
-        int(qkv_layout), int(bias_type), int(attn_mask_type), int(softmax_type),
-        list(window_size), bool(bottom_right_diagonal),
-        cu_seqlens_q, cu_seqlens_kv,
-        Q_data, Q_dtype_int, Q_si, Q_sm,
-        K_data, K_dtype_int, K_si, K_sm,
-        V_data, V_dtype_int, V_si, V_sm,
-        S_data, S_dtype_int, S_amax, S_scale, S_si, S_sm,
-        O_data, O_dtype_int, O_amax, O_scale, O_si, O_sm,
-        cu_seqlens_q_padded, cu_seqlens_kv_padded,
-        page_table_k, page_table_v,
-        Bias, SoftmaxOffset,
+        int(max_seqlen_q),
+        int(max_seqlen_kv),
+        bool(is_training),
+        float(attn_scale),
+        float(p_dropout),
+        bool(set_zero),
+        int(qkv_layout),
+        int(bias_type),
+        int(attn_mask_type),
+        int(softmax_type),
+        list(window_size),
+        bool(bottom_right_diagonal),
+        cu_seqlens_q,
+        cu_seqlens_kv,
+        Q_data,
+        Q_dtype_int,
+        Q_si,
+        Q_sm,
+        K_data,
+        K_dtype_int,
+        K_si,
+        K_sm,
+        V_data,
+        V_dtype_int,
+        V_si,
+        V_sm,
+        S_data,
+        S_dtype_int,
+        S_amax,
+        S_scale,
+        S_si,
+        S_sm,
+        O_data,
+        O_dtype_int,
+        O_amax,
+        O_scale,
+        O_si,
+        O_sm,
+        cu_seqlens_q_padded,
+        cu_seqlens_kv_padded,
+        page_table_k,
+        page_table_v,
+        Bias,
+        SoftmaxOffset,
         rng_state,
-        bool(return_max_logit), bool(cuda_graph),
+        bool(return_max_logit),
+        bool(cuda_graph),
     )
     # result = (aux0, ..., aux9, num_aux)
     *aux_tensors, num_aux = result
@@ -1894,6 +2643,7 @@ def _get_qkv_layout_group(qkv_layout_int):
     """Call nvte_get_qkv_layout_group via ctypes. Returns int layout group."""
     import ctypes
     import glob as _glob
+
     te_spec = importlib.util.find_spec("transformer_engine")
     if te_spec is not None and te_spec.origin is not None:
         te_dir = Path(te_spec.origin).parent.parent
@@ -1908,15 +2658,35 @@ def _get_qkv_layout_group(qkv_layout_int):
 
 
 def fused_attn_bwd(
-        max_seqlen_q, max_seqlen_kv, attn_scale, p_dropout, set_zero,
-        qkv_layout, bias_type, attn_mask_type, softmax_type,
-        window_size, bottom_right_diagonal, deterministic,
-        cu_seqlens_q, cu_seqlens_kv,
-        Q, K, V, O, dO, fake_dtype, dqkv_dtype,
-        aux_ctx_tensors,
-        cu_seqlens_q_padded=None, cu_seqlens_kv_padded=None,
-        s_quantizer=None, dp_quantizer=None, dqkv_quantizer=None,
-        cuda_graph=False):
+    max_seqlen_q,
+    max_seqlen_kv,
+    attn_scale,
+    p_dropout,
+    set_zero,
+    qkv_layout,
+    bias_type,
+    attn_mask_type,
+    softmax_type,
+    window_size,
+    bottom_right_diagonal,
+    deterministic,
+    cu_seqlens_q,
+    cu_seqlens_kv,
+    Q,
+    K,
+    V,
+    O,
+    dO,
+    fake_dtype,
+    dqkv_dtype,
+    aux_ctx_tensors,
+    cu_seqlens_q_padded=None,
+    cu_seqlens_kv_padded=None,
+    s_quantizer=None,
+    dp_quantizer=None,
+    dqkv_quantizer=None,
+    cuda_graph=False,
+):
     """Fused attention backward via stable ABI fused_attn_bwd_packed."""
     from transformer_engine.pytorch.tensor._extract import extract_tensor_data
 
@@ -2004,90 +2774,176 @@ def fused_attn_bwd(
     dBias = None
     if int(bias_type) not in (0, 2):
         dBias = torch.zeros(
-            [1, num_heads_q, max_seqlen_q, max_seqlen_kv],
-            dtype=dqkv_torch_dtype, device=device)
+            [1, num_heads_q, max_seqlen_q, max_seqlen_kv], dtype=dqkv_torch_dtype, device=device
+        )
 
     # dSoftmaxOffset: allocate when softmax_type != VANILLA (0)
     dSoftmaxOffset = None
     if int(softmax_type) != 0:
-        dSoftmaxOffset = torch.zeros([1, num_heads_q, 1, 1],
-                                     dtype=torch.float32, device=device)
+        dSoftmaxOffset = torch.zeros([1, num_heads_q, 1, 1], dtype=torch.float32, device=device)
 
     # Pack dtype/scaling_mode info into a CPU int64 tensor
-    dtype_info = torch.tensor([
-        Q_dtype, Q_sm,
-        K_dtype, K_sm,
-        V_dtype, V_sm,
-        O_dtype, O_sm,
-        dO_dtype, dO_sm,
-        S_dtype, S_sm,
-        dP_dtype, dP_sm,
-        dQ_te_dtype, dQ_sm,
-        dK_te_dtype, dK_sm,
-        dV_te_dtype, dV_sm,
-    ], dtype=torch.int64, device='cpu')
+    dtype_info = torch.tensor(
+        [
+            Q_dtype,
+            Q_sm,
+            K_dtype,
+            K_sm,
+            V_dtype,
+            V_sm,
+            O_dtype,
+            O_sm,
+            dO_dtype,
+            dO_sm,
+            S_dtype,
+            S_sm,
+            dP_dtype,
+            dP_sm,
+            dQ_te_dtype,
+            dQ_sm,
+            dK_te_dtype,
+            dK_sm,
+            dV_te_dtype,
+            dV_sm,
+        ],
+        dtype=torch.int64,
+        device="cpu",
+    )
 
     # Flatten aux_ctx_tensors, padding to 10 slots
     num_aux = len(aux_ctx_tensors) if aux_ctx_tensors else 0
     aux_list = (list(aux_ctx_tensors) if aux_ctx_tensors else []) + [None] * (10 - num_aux)
 
     _ops.fused_attn_bwd_packed(
-        int(max_seqlen_q), int(max_seqlen_kv),
-        float(attn_scale), float(p_dropout), bool(set_zero),
-        int(qkv_layout), int(bias_type), int(attn_mask_type), int(softmax_type),
-        list(window_size), bool(bottom_right_diagonal), bool(deterministic), bool(cuda_graph),
-        cu_seqlens_q, cu_seqlens_kv, cu_seqlens_q_padded, cu_seqlens_kv_padded,
-        Q_data, Q_si, K_data, K_si, V_data, V_si, O_data, O_si, dO_data, dO_si,
-        S_data, S_si, dP_data, dP_si,
-        dQ_data, None, None, dQ_si,
-        dK_data, None, None, dK_si,
-        dV_data, None, None, dV_si,
-        dBias, dSoftmaxOffset,
-        dtype_info, num_aux,
+        int(max_seqlen_q),
+        int(max_seqlen_kv),
+        float(attn_scale),
+        float(p_dropout),
+        bool(set_zero),
+        int(qkv_layout),
+        int(bias_type),
+        int(attn_mask_type),
+        int(softmax_type),
+        list(window_size),
+        bool(bottom_right_diagonal),
+        bool(deterministic),
+        bool(cuda_graph),
+        cu_seqlens_q,
+        cu_seqlens_kv,
+        cu_seqlens_q_padded,
+        cu_seqlens_kv_padded,
+        Q_data,
+        Q_si,
+        K_data,
+        K_si,
+        V_data,
+        V_si,
+        O_data,
+        O_si,
+        dO_data,
+        dO_si,
+        S_data,
+        S_si,
+        dP_data,
+        dP_si,
+        dQ_data,
+        None,
+        None,
+        dQ_si,
+        dK_data,
+        None,
+        None,
+        dK_si,
+        dV_data,
+        None,
+        None,
+        dV_si,
+        dBias,
+        dSoftmaxOffset,
+        dtype_info,
+        num_aux,
         *aux_list,
     )
 
     return [dQ, dK, dV, dBias, dSoftmaxOffset]
 
+
 def bulk_overlap_ag_with_external_gemm(allgather_communicator, send_stream, recv_stream):
     _ops.bulk_overlap_ag_with_external_gemm(
-        allgather_communicator._handle,
-        send_stream.cuda_stream,
-        recv_stream.cuda_stream)
+        allgather_communicator._handle, send_stream.cuda_stream, recv_stream.cuda_stream
+    )
 
 
 # ============================================================================
 # NVTE enums exposed via pybind
 # ============================================================================
 
+
 class NVTE_QKV_Layout(IntEnum):
-    NVTE_SB3HD = 0; NVTE_SBH3D = 1; NVTE_SBHD_SB2HD = 2; NVTE_SBHD_SBH2D = 3
-    NVTE_SBHD_SBHD_SBHD = 4; NVTE_BS3HD = 5; NVTE_BSH3D = 6; NVTE_BSHD_BS2HD = 7
-    NVTE_BSHD_BSH2D = 8; NVTE_BSHD_BSHD_BSHD = 9; NVTE_T3HD = 10; NVTE_TH3D = 11
-    NVTE_THD_T2HD = 12; NVTE_THD_TH2D = 13; NVTE_THD_THD_THD = 14
-    NVTE_SBHD_BSHD_BSHD = 15; NVTE_BSHD_SBHD_SBHD = 16; NVTE_THD_BSHD_BSHD = 17
-    NVTE_THD_SBHD_SBHD = 18; NVTE_Paged_KV_BSHD_BSHD_BSHD = 19
-    NVTE_Paged_KV_BSHD_SBHD_SBHD = 20; NVTE_Paged_KV_SBHD_BSHD_BSHD = 21
-    NVTE_Paged_KV_SBHD_SBHD_SBHD = 22; NVTE_Paged_KV_THD_BSHD_BSHD = 23
+    NVTE_SB3HD = 0
+    NVTE_SBH3D = 1
+    NVTE_SBHD_SB2HD = 2
+    NVTE_SBHD_SBH2D = 3
+    NVTE_SBHD_SBHD_SBHD = 4
+    NVTE_BS3HD = 5
+    NVTE_BSH3D = 6
+    NVTE_BSHD_BS2HD = 7
+    NVTE_BSHD_BSH2D = 8
+    NVTE_BSHD_BSHD_BSHD = 9
+    NVTE_T3HD = 10
+    NVTE_TH3D = 11
+    NVTE_THD_T2HD = 12
+    NVTE_THD_TH2D = 13
+    NVTE_THD_THD_THD = 14
+    NVTE_SBHD_BSHD_BSHD = 15
+    NVTE_BSHD_SBHD_SBHD = 16
+    NVTE_THD_BSHD_BSHD = 17
+    NVTE_THD_SBHD_SBHD = 18
+    NVTE_Paged_KV_BSHD_BSHD_BSHD = 19
+    NVTE_Paged_KV_BSHD_SBHD_SBHD = 20
+    NVTE_Paged_KV_SBHD_BSHD_BSHD = 21
+    NVTE_Paged_KV_SBHD_SBHD_SBHD = 22
+    NVTE_Paged_KV_THD_BSHD_BSHD = 23
     NVTE_Paged_KV_THD_SBHD_SBHD = 24
 
+
 class NVTE_QKV_Format(IntEnum):
-    NVTE_SBHD = 0; NVTE_BSHD = 1; NVTE_THD = 2; NVTE_BSHD_2SBHD = 3
-    NVTE_SBHD_2BSHD = 4; NVTE_THD_2BSHD = 5; NVTE_THD_2SBHD = 6
+    NVTE_SBHD = 0
+    NVTE_BSHD = 1
+    NVTE_THD = 2
+    NVTE_BSHD_2SBHD = 3
+    NVTE_SBHD_2BSHD = 4
+    NVTE_THD_2BSHD = 5
+    NVTE_THD_2SBHD = 6
+
 
 class NVTE_Bias_Type(IntEnum):
-    NVTE_NO_BIAS = 0; NVTE_PRE_SCALE_BIAS = 1; NVTE_POST_SCALE_BIAS = 2; NVTE_ALIBI = 3
+    NVTE_NO_BIAS = 0
+    NVTE_PRE_SCALE_BIAS = 1
+    NVTE_POST_SCALE_BIAS = 2
+    NVTE_ALIBI = 3
+
 
 class NVTE_Mask_Type(IntEnum):
-    NVTE_NO_MASK = 0; NVTE_PADDING_MASK = 1; NVTE_CAUSAL_MASK = 2
-    NVTE_PADDING_CAUSAL_MASK = 3; NVTE_CAUSAL_BOTTOM_RIGHT_MASK = 4
-    NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK = 5; NVTE_ARBITRARY_MASK = 6
+    NVTE_NO_MASK = 0
+    NVTE_PADDING_MASK = 1
+    NVTE_CAUSAL_MASK = 2
+    NVTE_PADDING_CAUSAL_MASK = 3
+    NVTE_CAUSAL_BOTTOM_RIGHT_MASK = 4
+    NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK = 5
+    NVTE_ARBITRARY_MASK = 6
+
 
 class NVTE_Softmax_Type(IntEnum):
-    NVTE_VANILLA_SOFTMAX = 0; NVTE_OFF_BY_ONE_SOFTMAX = 1; NVTE_LEARNABLE_SOFTMAX = 2
+    NVTE_VANILLA_SOFTMAX = 0
+    NVTE_OFF_BY_ONE_SOFTMAX = 1
+    NVTE_LEARNABLE_SOFTMAX = 2
+
 
 class NVTE_Fused_Attn_Backend(IntEnum):
-    NVTE_No_Backend = -1; NVTE_F16_max512_seqlen = 0; NVTE_F16_arbitrary_seqlen = 1
+    NVTE_No_Backend = -1
+    NVTE_F16_max512_seqlen = 0
+    NVTE_F16_arbitrary_seqlen = 1
     NVTE_FP8 = 2
 
 
@@ -2113,6 +2969,7 @@ def ubuf_built_with_mpi():
 # This mirrors how te_moe ops are registered in permutation.py.
 def _register_passthrough_ops():
     import sys
+
     # Only run if quantized_tensor is already in sys.modules (avoid circular import).
     # If it's not imported yet, quantized_tensor.py will call this on its own after
     # importing _stable_torch_module.
@@ -2122,10 +2979,10 @@ def _register_passthrough_ops():
         from transformer_engine.pytorch.quantized_tensor import (
             _quantized_tensor_passthrough_ops,
         )
-        _quantized_tensor_passthrough_ops.add(
-            torch.ops.transformer_engine_stable.gemm.default
-        )
+
+        _quantized_tensor_passthrough_ops.add(torch.ops.transformer_engine_stable.gemm.default)
     except (ImportError, AttributeError):
         pass
+
 
 _register_passthrough_ops()

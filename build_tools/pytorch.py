@@ -161,9 +161,14 @@ def setup_pytorch_stable_extension(
     # Library directories and libraries
     # Find the TE common library (libtransformer_engine.so)
     te_lib_dir = Path(csrc_source_files).parent.parent.parent
+    cuda_home = os.environ.get("CUDA_HOME", os.environ.get("CUDA_PATH", "/usr/local/cuda"))
+    cuda_lib_dir = os.path.join(cuda_home, "lib64")
+    if not os.path.isdir(cuda_lib_dir):
+        cuda_lib_dir = os.path.join(cuda_home, "lib")
     library_dirs = [
         str(Path(torch.utils.cmake_prefix_path).parent.parent / "lib"),
         str(te_lib_dir),
+        cuda_lib_dir,
     ]
     libraries = ["torch", "torch_cpu", "c10", "cudart", "transformer_engine"]
 
