@@ -86,15 +86,27 @@ def extract_tensor_data(tensor):
         data = tensor._rowwise_data
         scale_inv = getattr(tensor, "_rowwise_scale_inv", None)
         fp8_dtype = getattr(tensor, "_fp8_dtype", None)
-        te_dtype = 0  # kByte
-        if fp8_dtype is not None:
-            te_dtype = _FP8_DTYPE_TO_TE.get(str(fp8_dtype), 7)
-        if hasattr(tensor, "_is_2D_scaled"):
-            sm = NVTE_BLOCK_SCALING_2D if tensor._is_2D_scaled else NVTE_BLOCK_SCALING_1D
-        elif hasattr(tensor, "_block_scaling_dim"):
-            sm = NVTE_BLOCK_SCALING_2D if tensor._block_scaling_dim == 2 else NVTE_BLOCK_SCALING_1D
+        cls_name = type(tensor).__name__
+        # Detect NVFP4 tensors first (they don't have _fp8_dtype or _is_2D_scaled)
+        if "NVFP4" in cls_name:
+            te_dtype = 10  # kFloat4E2M1
+            sm = NVTE_NVFP4_1D_SCALING
         else:
-            sm = NVTE_DELAYED_TENSOR_SCALING
+            te_dtype = 0  # kByte
+            if fp8_dtype is not None:
+                te_dtype = _FP8_DTYPE_TO_TE.get(str(fp8_dtype), 7)
+            if hasattr(tensor, "_is_2D_scaled"):
+                sm = NVTE_BLOCK_SCALING_2D if tensor._is_2D_scaled else NVTE_BLOCK_SCALING_1D
+            elif hasattr(tensor, "_block_scaling_dim"):
+                sm = (
+                    NVTE_BLOCK_SCALING_2D
+                    if tensor._block_scaling_dim == 2
+                    else NVTE_BLOCK_SCALING_1D
+                )
+            elif "MXFP8" in cls_name:
+                sm = NVTE_MXFP8_1D_SCALING
+            else:
+                sm = NVTE_DELAYED_TENSOR_SCALING
         return data, te_dtype, scale_inv, sm
 
     # Columnwise-only block-scaling tensor (after update_usage(rowwise_usage=False)).
@@ -110,15 +122,26 @@ def extract_tensor_data(tensor):
         col_data = tensor._columnwise_data
         col_si = getattr(tensor, "_columnwise_scale_inv", None)
         fp8_dtype = getattr(tensor, "_fp8_dtype", None)
-        te_dtype = 0  # kByte
-        if fp8_dtype is not None:
-            te_dtype = _FP8_DTYPE_TO_TE.get(str(fp8_dtype), 7)
-        if hasattr(tensor, "_is_2D_scaled"):
-            sm = NVTE_BLOCK_SCALING_2D if tensor._is_2D_scaled else NVTE_BLOCK_SCALING_1D
-        elif hasattr(tensor, "_block_scaling_dim"):
-            sm = NVTE_BLOCK_SCALING_2D if tensor._block_scaling_dim == 2 else NVTE_BLOCK_SCALING_1D
+        cls_name = type(tensor).__name__
+        if "NVFP4" in cls_name:
+            te_dtype = 10  # kFloat4E2M1
+            sm = NVTE_NVFP4_1D_SCALING
         else:
-            sm = NVTE_DELAYED_TENSOR_SCALING
+            te_dtype = 0  # kByte
+            if fp8_dtype is not None:
+                te_dtype = _FP8_DTYPE_TO_TE.get(str(fp8_dtype), 7)
+            if hasattr(tensor, "_is_2D_scaled"):
+                sm = NVTE_BLOCK_SCALING_2D if tensor._is_2D_scaled else NVTE_BLOCK_SCALING_1D
+            elif hasattr(tensor, "_block_scaling_dim"):
+                sm = (
+                    NVTE_BLOCK_SCALING_2D
+                    if tensor._block_scaling_dim == 2
+                    else NVTE_BLOCK_SCALING_1D
+                )
+            elif "MXFP8" in cls_name:
+                sm = NVTE_MXFP8_1D_SCALING
+            else:
+                sm = NVTE_DELAYED_TENSOR_SCALING
         return col_data, te_dtype, col_si, sm
 
     if hasattr(tensor, "_data") and tensor._data is not None:

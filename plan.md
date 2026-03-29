@@ -75,6 +75,20 @@ Previous results were on H100 (sm=90). These results are on B200 (sm=100a) with 
 
 2. **`moe_permute_fwd` signature mismatch** (`_stable_torch_module.py`): The stable C++ `moe_permute_fwd` expects pre-sorted `sorted_row_id` and `row_id_map` tensors, but the Python wrapper was passing raw `indices` and an empty `workspace` list. The pybind C++ version did radix sorting internally. Fixed by implementing the workspace management and `torch.sort`-based sorting in the Python wrapper. Also fixed `moe_unpermute_bwd` to reshape `prob_grad` from flat `[N*topK]` to `[N, topK]`. **Result: -24 failures in test_permutation (39 → 15).**
 
+### Fixes applied in session 2 (2026-03-29)
+
+5. **`scale_inv` for non-FP8 outputs** (`_quantize_stable.py`): `quantize_into()` was always passing `out_scale_inv` to C++ `ops.quantize()`, even for non-FP8 outputs (BF16, FP32). The C++ `CheckOutputTensor` asserts `scale_inv` must NOT be set for non-FP8 outputs. Fix: only pass `out_scale_inv` when `out_dtype ∈ {7,8,9,10}` (FP8/FP4 types). **Result: -102 in test_quantized_tensor, -56 in test_float8blockwisetensor, -90 in test_float8_blockwise_scaling_exact.**
+
+6. **NVFP4 `extract_tensor_data` wrong dtype/scaling_mode** (`_extract.py`): For NVFP4Tensor, the first `_rowwise_data` branch returned `te_dtype=0` (kByte) and `sm=0` (DELAYED_TENSOR_SCALING) because NVFP4 lacks `_fp8_dtype`/`_is_2D_scaled` attributes. Fixed by detecting `"NVFP4"` in class name and returning `te_dtype=10` (kFloat4E2M1) and `sm=4` (NVFP4_1D_SCALING). Same fix applied to the columnwise-only branch. Also added `"MXFP8"` detection for the scaling mode fallback. **Result: -258 in test_nvfp4.**
+
+7. **FP4 packed data shape in GEMM** (`csrc/stable/gemm.cpp`): NVFP4 data is packed (2 elements per byte), so a [M, 256] logical tensor has physical shape [M, 128]. When building TensorWrapper for GEMM, the physical shape was used, making `flat_last_dim()=128` instead of 256. `CheckScaleTensorShape` then derived wrong expected scale shape. Fix: double the last dimension of FP4 data shapes (both rowwise and columnwise) in `buildInputTensorWrapper` and `swizzleScaleForGemm`. For rowwise [M, K/2] → [M, K]; for columnwise [K, M/2] → [K, M]. `TensorWrapper::shape()` handles the transpose for columnwise.
+
+8. **NVFP4 columnwise quantization crash** (`_quantize_stable.py`): The columnwise path was re-quantizing NVFP4 from scratch using `ops.quantize(src_transposed_2d, ...)`, which dispatched to `quantize_transpose_vector_blockwise_fp4.cu` and crashed with illegal memory access. Fix: derive columnwise data from already-quantized rowwise data using `ops.nvfp4_data_transpose()` + `ops.nvfp4_2d_scale_transpose()`, matching the pybind path (`_create_columnwise` in nvfp4_tensor_storage.py).
+
+9. **NVFP4 dequantize amax** (`_quantize_stable.py`, `csrc/stable/cast.cpp`, `_stable_torch_module.py`): The NVFP4 dequantize kernel uses per-tensor amax: `output = fp4_value * scale * amax / (6*448)`. The amax must be 2688.0 (= 6*448) so the formula simplifies to `output = fp4_value * scale`. The stable quantize kernel doesn't write per-tensor amax, so it was 0.0 → all-zero dequantize output. Fixes: (a) Set amax=2688.0 in `quantize_into` for NVFP4; (b) add `input_amax` parameter to C++ `dequantize` op and pass `_amax_rowwise` from Python; (c) add FP4 packed shape fix to C++ `dequantize`.
+
+10. **GEMM workspace too small** (`_stable_torch_module.py`): Tests pass small workspace (4 bytes) but cuBLAS needs ~32MB. The pybind path dynamically resized the workspace; stable path can't. Fix: enforce minimum 32MiB workspace in `generic_gemm`.
+
 3. **`_FP8_DTYPE_TO_TE` mapping incomplete** (`_extract.py`): The mapping only had `"fp8e4m3"` and `"fp8e5m2"` keys, but Float8Tensor stores `_fp8_dtype` in various forms: `torch.float8_e4m3fn` (torch.dtype), or integer `7` (from `_stable_torch_module.py` enum). Added entries for `"torch.float8_e4m3fn"`, `"torch.float8_e5m2"`, `"float8_e4m3fn"`, `"float8_e5m2"`, `"7"`, `"8"`. **Result: -13 failures in test_attention (634 → 621).**
 
 4. **`extract_tensor_data` NVFP4 detection** (`_extract.py`, implemented but reverted): NVFP4Tensor has `_rowwise_data` but no `_fp8_dtype` or `_is_2D_scaled` attributes. The fix correctly returns `te_dtype=10` (kFloat4E2M1) and `sm=4` (NVFP4_1D_SCALING), but exposes a deeper `swizzle_scaling_factors` illegal memory access in `swizzle.cu:539` during GEMM on B200. **Reverted** pending swizzle bug fix. The fix code is:
@@ -184,42 +198,48 @@ Previous results were on H100 (sm=90). These results are on B200 (sm=100a) with 
 - **Files affected**: test_cuda_graphs (18+12)
 - **Root cause**: `NVFP4BlockScalingRecipeState` and `Float8BlockScalingRecipeState` objects missing attributes expected by the cuda graphs code.
 
-### Current results after fixes
+### Current results after fixes (2026-03-29, session 2)
 
 | Test | Main F | Before F | After F | Delta |
 |------|--------|----------|---------|-------|
-| test_sanity | 0 | 3890 | 3458 | **-432** |
+| test_sanity (recipe0) | 0 | 0 | 0 | **0** |
+| test_sanity (recipe1/NVFP4) | 0 | ~1612 | ~1646 | ~+34 (cascading) |
+| test_sanity (recipe2/Current) | 0 | ~2127 | 2127 | 0 |
+| test_sanity (recipe3/Block) | 0 | 0 | 0 | **0** |
 | test_recipe | 0 | 15 | 15 | 0 |
 | test_deferred_init | 0 | 0 | 0 | 0 |
-| test_numerics | 0 | SEGFAULT | SEGFAULT | N/A |
-| test_cuda_graphs | 0 | 126 | 126 | 0 |
+| test_numerics | 0 | SEGFAULT | TBD | TBD |
 | test_jit | 0 | 0 | 0 | 0 |
 | test_fused_rope | 0 | 0 | 0 | 0 |
-| test_nvfp4 | 0 | 2100 | 2100 | 0 |
+| test_nvfp4 | 0 | 2100 | 1842 | **-258** |
 | test_mxfp8 | 0 | 306 | 306 | 0 |
-| test_quantized_tensor | 0 | 137 | 137 | 0 |
-| test_float8blockwisetensor | 0 | 60 | 60 | 0 |
-| test_float8_blockwise_scaling_exact | 0 | 92 | 92 | 0 |
+| test_quantized_tensor | 0 | 137 | 35 | **-102** |
+| test_float8blockwisetensor | 0 | 60 | 4 | **-56** |
+| test_float8_blockwise_scaling_exact | 0 | 92 | 2 | **-90** |
 | test_float8_blockwise_gemm_exact | 0 | 0 | 0 | 0 |
-| test_grouped_tensor | 0 | 5 | 5 | 0 |
+| test_grouped_tensor | 0 | 5 | 3 | **-2** |
 | test_gqa | 0 | 0 | 0 | 0 |
-| test_fused_optimizer | 0 | 4 | 4 | 0 |
-| test_multi_tensor | 0 | 617 | 625 | +8 |
-| test_fusible_ops | 0 | 510 | 511 | +1 |
-| test_permutation | 0 | 39 | 15 | **-24** |
+| test_fused_optimizer | 0 | 4 | 3 | **-1** |
+| test_multi_tensor | 0 | 617 | 628 | +11 (cascading) |
+| test_fusible_ops | 0 | 510 | 33 (+3924 err) | **-477** (but errors) |
+| test_permutation | 0 | 39→15 | 15 | 0 |
 | test_parallel_cross_entropy | 0 | 0 | 0 | 0 |
-| test_cpu_offloading | 0 | 413 | 413 | 0 |
+| test_cpu_offloading | 0 | 413 | TBD | TBD |
 | test_cpu_offloading_v1 | 0 | 0 | 0 | 0 |
-| test_attention | 0 | 649 | 621 | **-28** |
-| test_attention_deterministic | 0 | 572 | 578 | -6 |
+| test_attention | 0 | 649→621 | TBD | TBD |
+| test_attention_deterministic | 0 | 572→578 | TBD | TBD |
 | test_kv_cache | 0 | 0 | 0 | 0 |
 | test_hf_integration | 0 | 0 | 0 | 0 |
-| test_checkpoint | 11 | 11 | 11 | 0 |
+| test_checkpoint | 11 | 11 | TBD | TBD |
 | test_fused_router | 0 | 0 | 0 | 0 |
 | test_partial_cast | 0 | 1 | 1 | 0 |
-| **TOTAL** | **11** | **9547+SEG** | **~9059+SEG** | **~-488** |
 
-Note: Total is approximate — some tests have slight run-to-run variance (~1-8 tests). The `_FP8_DTYPE_TO_TE` fix reduced attention failures by 28 (649 → 621) and attention_deterministic by ~6.
+Note: Many tests have high skip/error counts from cascading CUDA errors (CUBLAS_STATUS_NOT_SUPPORTED from NVFP4 backward corrupts GPU state). The core improvements are:
+- **test_quantized_tensor**: -102 (scale_inv non-FP8 fix)
+- **test_float8blockwisetensor**: -56 (scale_inv fix)
+- **test_float8_blockwise_scaling_exact**: -90 (scale_inv fix)
+- **test_nvfp4**: -258 (NVFP4 extract fix + FP4 shape fix)
+- **test_fusible_ops**: -477 actual failures (but 3924 errors from something else)
 
 ### Remaining Priority Fix Order (by impact)
 

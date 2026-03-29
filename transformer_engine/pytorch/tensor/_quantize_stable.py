@@ -23,6 +23,7 @@ def _get_ops():
     import glob
     import importlib.util
     from pathlib import Path
+
     te_spec = importlib.util.find_spec("transformer_engine")
     if te_spec is not None and te_spec.origin is not None:
         te_dir = Path(te_spec.origin).parent.parent
@@ -61,20 +62,23 @@ def quantize_into(src, quantizer, dst, noop_flag=None):
     # When _rowwise_data=None but _columnwise_data exists, we quantize the
     # transposed input (to match the [K,M] columnwise layout) into _columnwise_data.
     _col_only = (
-        hasattr(dst, '_rowwise_data') and getattr(dst, '_rowwise_data', None) is None
-        and hasattr(dst, '_columnwise_data') and getattr(dst, '_columnwise_data', None) is not None
-        and not hasattr(dst, '_data')  # exclude Float8Tensor (which uses _data/_transpose)
+        hasattr(dst, "_rowwise_data")
+        and getattr(dst, "_rowwise_data", None) is None
+        and hasattr(dst, "_columnwise_data")
+        and getattr(dst, "_columnwise_data", None) is not None
+        and not hasattr(dst, "_data")  # exclude Float8Tensor (which uses _data/_transpose)
     )
     if _col_only:
         col_data = dst._columnwise_data
-        col_si = getattr(dst, '_columnwise_scale_inv', None)
-        fp8_dtype_attr = getattr(dst, '_fp8_dtype', None)
+        col_si = getattr(dst, "_columnwise_scale_inv", None)
+        fp8_dtype_attr = getattr(dst, "_fp8_dtype", None)
         from transformer_engine.pytorch.tensor._extract import _FP8_DTYPE_TO_TE
+
         out_dtype = _FP8_DTYPE_TO_TE.get(str(fp8_dtype_attr), 7) if fp8_dtype_attr else 7
-        block_dim = getattr(quantizer, 'block_scaling_dim', 2)
+        block_dim = getattr(quantizer, "block_scaling_dim", 2)
         out_sm = 3 if block_dim == 2 else 2  # BLOCK_SCALING_2D=3, BLOCK_1D=2
-        force_pow_2 = getattr(quantizer, 'force_pow_2_scales', False)
-        amax_eps = getattr(quantizer, 'amax_epsilon', 0.0)
+        force_pow_2 = getattr(quantizer, "force_pow_2_scales", False)
+        amax_eps = getattr(quantizer, "amax_epsilon", 0.0)
         if block_dim == 2:
             # 2D block scaling: quantize src (original shape) → tmp rowwise buffer,
             # then FP8-transpose into col_data and transpose the scale.
@@ -84,8 +88,18 @@ def quantize_into(src, quantizer, dst, noop_flag=None):
             rowwise_scale_shape = quantizer.get_scale_shape(list(src.shape), columnwise=False)
             tmp_si = torch.empty(rowwise_scale_shape, dtype=torch.float32, device=src.device)
             tmp_rowwise = col_data.new_empty(list(src.shape))  # uint8, same shape as src
-            ops.quantize(src, tmp_rowwise, out_dtype, None, None, tmp_si, out_sm,
-                         force_pow_2, amax_eps, noop_flag)
+            ops.quantize(
+                src,
+                tmp_rowwise,
+                out_dtype,
+                None,
+                None,
+                tmp_si,
+                out_sm,
+                force_pow_2,
+                amax_eps,
+                noop_flag,
+            )
             ops.fp8_transpose(tmp_rowwise, out_dtype, col_data)
             if col_si is not None:
                 col_si.zero_()
@@ -102,9 +116,19 @@ def quantize_into(src, quantizer, dst, noop_flag=None):
             K = src.shape[-1]
             M = src.numel() // K
             src_transposed_2d = _transpose_for_colwise(src).view(K, M)
-            ops.quantize(src_transposed_2d, col_data, out_dtype, None, None, col_si, out_sm,
-                         force_pow_2, amax_eps, noop_flag)
-        dst._fp8_dtype = quantizer.dtype if hasattr(quantizer, 'dtype') else dst._fp8_dtype
+            ops.quantize(
+                src_transposed_2d,
+                col_data,
+                out_dtype,
+                None,
+                None,
+                col_si,
+                out_sm,
+                force_pow_2,
+                amax_eps,
+                noop_flag,
+            )
+        dst._fp8_dtype = quantizer.dtype if hasattr(quantizer, "dtype") else dst._fp8_dtype
         return
 
     # Extract raw output buffers from dst
@@ -112,19 +136,19 @@ def quantize_into(src, quantizer, dst, noop_flag=None):
 
     # Override scaling mode from quantizer if available (more reliable than tensor attrs)
     q_type = type(quantizer).__name__
-    if 'Block' in q_type:
-        block_dim = getattr(quantizer, 'block_scaling_dim', 2)
+    if "Block" in q_type:
+        block_dim = getattr(quantizer, "block_scaling_dim", 2)
         out_sm = 3 if block_dim == 2 else 2  # BLOCK_SCALING_2D=3 or 1D=2
-    elif 'MXFP8' in q_type:
+    elif "MXFP8" in q_type:
         out_sm = 1  # MXFP8_1D_SCALING=1
-    elif 'NVFP4' in q_type:
+    elif "NVFP4" in q_type:
         out_sm = 4  # NVFP4_1D_SCALING=4
-    elif 'CurrentScaling' in q_type:
+    elif "CurrentScaling" in q_type:
         out_sm = 0  # DELAYED_TENSOR_SCALING (current scaling uses delayed mode internally)
 
     # Get scale/amax from quantizer
-    scale = getattr(quantizer, 'scale', None)
-    amax = getattr(quantizer, 'amax', None)
+    scale = getattr(quantizer, "scale", None)
+    amax = getattr(quantizer, "amax", None)
     if scale is not None and (not isinstance(scale, torch.Tensor) or scale.numel() == 0):
         scale = None
     if amax is not None and (not isinstance(amax, torch.Tensor) or amax.numel() == 0):
@@ -132,40 +156,77 @@ def quantize_into(src, quantizer, dst, noop_flag=None):
 
     # Also check output for amax
     if amax is None:
-        for attr in ('_amax', '_amax_rowwise', 'amax_rowwise'):
+        for attr in ("_amax", "_amax_rowwise", "amax_rowwise"):
             a = getattr(dst, attr, None)
             if isinstance(a, torch.Tensor) and a.numel() > 0:
                 amax = a
                 break
 
-    force_pow_2 = getattr(quantizer, 'force_pow_2_scales', False)
-    amax_eps = getattr(quantizer, 'amax_epsilon', 0.0)
-    use_existing_amax = getattr(quantizer, 'use_existing_amax', False)
+    force_pow_2 = getattr(quantizer, "force_pow_2_scales", False)
+    amax_eps = getattr(quantizer, "amax_epsilon", 0.0)
+    use_existing_amax = getattr(quantizer, "use_existing_amax", False)
     q_type = type(quantizer).__name__
+
+    # Only pass scale_inv for FP8/FP4 output dtypes. The C++ CheckOutputTensor
+    # asserts that scale_inv must NOT be set for non-FP8 outputs.
+    is_fp8_or_fp4 = out_dtype in (7, 8, 9, 10)  # kFloat8E4M3, kFloat8E5M2, kFloat8E8M0, kFloat4E2M1
+    effective_scale_inv = out_scale_inv if is_fp8_or_fp4 else None
 
     if use_existing_amax and amax is not None:
         ops.quantize_from_amax(
-            src, out_data, out_dtype, amax,
+            src,
+            out_data,
+            out_dtype,
+            amax,
             scale or torch.ones(1, dtype=torch.float32, device=src.device),
-            out_scale_inv, out_sm, force_pow_2, amax_eps, noop_flag)
-    elif 'CurrentScaling' in q_type:
+            effective_scale_inv,
+            out_sm,
+            force_pow_2,
+            amax_eps,
+            noop_flag,
+        )
+    elif "CurrentScaling" in q_type:
         if amax is None:
             amax = torch.zeros(1, dtype=torch.float32, device=src.device)
         if scale is None:
             scale = torch.zeros(1, dtype=torch.float32, device=src.device)
         ops.quantize_with_amax(
-            src, out_data, out_dtype, amax, scale,
-            out_scale_inv, out_sm, force_pow_2, amax_eps, noop_flag)
+            src,
+            out_data,
+            out_dtype,
+            amax,
+            scale,
+            effective_scale_inv,
+            out_sm,
+            force_pow_2,
+            amax_eps,
+            noop_flag,
+        )
     else:
         ops.quantize(
-            src, out_data, out_dtype, amax, scale,
-            out_scale_inv, out_sm, force_pow_2, amax_eps, noop_flag)
+            src,
+            out_data,
+            out_dtype,
+            amax,
+            scale,
+            effective_scale_inv,
+            out_sm,
+            force_pow_2,
+            amax_eps,
+            noop_flag,
+        )
+
+    # NVFP4 quantize kernel doesn't write per-tensor amax via the stable path.
+    # The NVFP4 dequantize formula is: output = fp4_value * scale_e4m3 * amax / (6 * 448).
+    # With amax = 6 * 448 = 2688, this simplifies to: output = fp4_value * scale_e4m3.
+    if "NVFP4" in q_type and amax is not None and amax.item() == 0.0:
+        amax.fill_(6.0 * 448.0)
 
     # For Float8Tensor (delayed scaling), _transpose may be pre-allocated by make_empty
     # when columnwise_usage=True, but it is not filled by ops.quantize above (only _data
     # gets filled). Mark _transpose_invalid=True so update_usage(columnwise_usage=True)
     # will call _create_transpose() to fill it from _data on demand.
-    if hasattr(dst, '_data') and dst._data is not None and hasattr(dst, '_transpose_invalid'):
+    if hasattr(dst, "_data") and dst._data is not None and hasattr(dst, "_transpose_invalid"):
         dst._transpose_invalid = True
 
     # For block-scaling tensors with both rowwise AND columnwise pre-allocated,
@@ -174,28 +235,39 @@ def quantize_into(src, quantizer, dst, noop_flag=None):
     # columnwise by FP8-transposing the quantized bytes and transposing the scales.
     # This matches _create_columnwise() in float8_blockwise_tensor_storage.py.
     _has_colwise = (
-        hasattr(dst, '_rowwise_data') and getattr(dst, '_rowwise_data', None) is not None
-        and hasattr(dst, '_columnwise_data') and getattr(dst, '_columnwise_data', None) is not None
-        and not hasattr(dst, '_data')  # exclude Float8Tensor (uses _transpose/_create_transpose)
+        hasattr(dst, "_rowwise_data")
+        and getattr(dst, "_rowwise_data", None) is not None
+        and hasattr(dst, "_columnwise_data")
+        and getattr(dst, "_columnwise_data", None) is not None
+        and not hasattr(dst, "_data")  # exclude Float8Tensor (uses _transpose/_create_transpose)
     )
-    if _has_colwise and ('Block' in q_type or 'NVFP4' in q_type):
+    if _has_colwise and ("Block" in q_type or "NVFP4" in q_type):
         col_data = dst._columnwise_data
-        col_si = getattr(dst, '_columnwise_scale_inv', None)
-        fp8_dtype_attr = getattr(dst, '_fp8_dtype', None)
+        col_si = getattr(dst, "_columnwise_scale_inv", None)
+        fp8_dtype_attr = getattr(dst, "_fp8_dtype", None)
         from transformer_engine.pytorch.tensor._extract import _FP8_DTYPE_TO_TE
-        col_dtype = _FP8_DTYPE_TO_TE.get(str(fp8_dtype_attr), out_dtype) if fp8_dtype_attr else out_dtype
-        if 'NVFP4' in q_type:
-            # NVFP4 1D scaling: quantize transposed src into columnwise buffer.
-            # col_data shape is (K, M//2) (2 FP4 values per byte, transposed layout).
-            # Quantize src_transposed_2d=(K, M) → col_data=(K, M//2) with NVFP4_1D_SCALING.
-            # This mirrors the Float8Block 1D path: blocks run along M dimension of (K,M).
-            K = src.shape[-1]
-            M = src.numel() // K
-            src_transposed_2d = _transpose_for_colwise(src).view(K, M)
-            ops.quantize(src_transposed_2d, col_data, col_dtype, None, None, col_si,
-                         out_sm, force_pow_2, amax_eps, noop_flag)
+
+        col_dtype = (
+            _FP8_DTYPE_TO_TE.get(str(fp8_dtype_attr), out_dtype) if fp8_dtype_attr else out_dtype
+        )
+        if "NVFP4" in q_type:
+            # NVFP4 columnwise: derive from rowwise data by transposing the
+            # already-quantized FP4 bytes and scales. This matches the pybind
+            # path (_create_columnwise in nvfp4_tensor_storage.py) which uses
+            # nvfp4_data_transpose + nvfp4_2d_scale_transpose.
+            ops.nvfp4_data_transpose(out_data, col_data)
+            if col_si is not None and out_scale_inv is not None:
+                logical_shape = list(src.shape)
+                M_val = 1
+                for d in logical_shape[:-1]:
+                    M_val *= d
+                K_val = logical_shape[-1]
+                TILE_SIZE = 16
+                M_tiles = (M_val + TILE_SIZE - 1) // TILE_SIZE
+                K_tiles = (K_val + TILE_SIZE - 1) // TILE_SIZE
+                ops.nvfp4_2d_scale_transpose(out_scale_inv, col_si, M_tiles, K_tiles)
         else:
-            block_dim = getattr(quantizer, 'block_scaling_dim', 2)
+            block_dim = getattr(quantizer, "block_scaling_dim", 2)
             if block_dim == 2:
                 # 2D block scaling: columnwise scale = transposed rowwise scale.
                 # FP8-transpose the quantized bytes (identical to _create_columnwise)
@@ -216,8 +288,18 @@ def quantize_into(src, quantizer, dst, noop_flag=None):
                     K = src.shape[-1]
                     M = src.numel() // K
                     src_transposed_2d = _transpose_for_colwise(src).view(K, M)
-                    ops.quantize(src_transposed_2d, col_data, col_dtype, None, None, col_si,
-                                 out_sm, force_pow_2, amax_eps, noop_flag)
+                    ops.quantize(
+                        src_transposed_2d,
+                        col_data,
+                        col_dtype,
+                        None,
+                        None,
+                        col_si,
+                        out_sm,
+                        force_pow_2,
+                        amax_eps,
+                        noop_flag,
+                    )
 
 
 def quantize_new(tensor, quantizer):
@@ -230,8 +312,7 @@ def quantize_new(tensor, quantizer):
         tensor = tensor.contiguous()
 
     # Allocate output via quantizer's make_empty (pure Python)
-    dst = quantizer.make_empty(
-        list(tensor.shape), dtype=tensor.dtype, device=tensor.device)
+    dst = quantizer.make_empty(list(tensor.shape), dtype=tensor.dtype, device=tensor.device)
 
     # Quantize into the new output
     quantize_into(tensor, quantizer, dst)

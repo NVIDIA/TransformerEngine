@@ -44,6 +44,12 @@ Tensor swizzleScaleForGemm(const Tensor& data, int64_t te_dtype, const Tensor& s
   auto tensor_dtype = static_cast<DType>(te_dtype);
   auto tensor_scaling_mode = static_cast<NVTEScalingMode>(scaling_mode);
   auto data_shape = getStableTensorShape(data);
+  // FP4 data is packed (2 elements per byte). Double last dim to report
+  // logical element count. For rowwise [M, K/2] → [M, K]; for columnwise
+  // [K, M/2] → [K, M]. TensorWrapper::shape() handles the transpose.
+  if (is_fp4_dtype(tensor_dtype) && !data_shape.empty()) {
+    data_shape.back() *= 2;
+  }
   DType si_dtype = getScaleInvDtype(tensor_scaling_mode);
   auto si_shape = getStableTensorShape(scale_inv);
 
@@ -89,8 +95,15 @@ TensorWrapper buildInputTensorWrapper(const Tensor& rowwise_data, DType te_dtype
   // passes an empty tensor here; we skip set_rowwise_data so TensorWrapper
   // has_data() returns false, and NVTE's CanonicalizeGemmInput uses the
   // columnwise buffer instead.
+  // FP4 data is packed (2 elements per byte). The physical tensor has K/2
+  // bytes but the logical element count is K. Report logical shape so that
+  // CheckScaleTensorShape (which derives expected scale shape from
+  // flat_last_dim()) and the swizzle kernel get the correct K.
+  const bool fp4_packed = is_fp4_dtype(te_dtype);
+
   if (rowwise_data.numel() > 0) {
     auto shape = getStableTensorShape(rowwise_data);
+    if (fp4_packed && !shape.empty()) shape.back() *= 2;
     out.set_rowwise_data(rowwise_data.data_ptr(), te_dtype, shape);
   }
 
@@ -101,6 +114,10 @@ TensorWrapper buildInputTensorWrapper(const Tensor& rowwise_data, DType te_dtype
 
   if (colwise_data.has_value() && colwise_data->numel() > 0) {
     auto cw_shape = getStableTensorShape(*colwise_data);
+    // FP4 columnwise data [K, M/2]: double last dim to get [K, M].
+    // TensorWrapper::shape() transposes to [M, K], producing correct
+    // flat_first_dim()=M and flat_last_dim()=K for CheckScaleTensorShape.
+    if (fp4_packed && !cw_shape.empty()) cw_shape.back() *= 2;
     out.set_columnwise_data(colwise_data->data_ptr(), te_dtype, cw_shape);
     if (colwise_scale_inv.has_value() && colwise_scale_inv->numel() > 0) {
       auto csi_shape = getStableTensorShape(*colwise_scale_inv);

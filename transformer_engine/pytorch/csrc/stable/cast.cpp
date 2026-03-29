@@ -4,10 +4,10 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "../stable_common.h"
-
 #include <transformer_engine/cast.h>
 #include <transformer_engine/recipe.h>
+
+#include "../stable_common.h"
 
 namespace transformer_engine::pytorch::stable {
 
@@ -21,17 +21,15 @@ using Tensor = torch::stable::Tensor;
 
 void quantize(Tensor input, Tensor output_data, int64_t output_te_dtype,
               std::optional<Tensor> output_amax, std::optional<Tensor> output_scale,
-              std::optional<Tensor> output_scale_inv, int64_t scaling_mode,
-              bool force_pow_2_scales, double amax_epsilon,
-              std::optional<Tensor> noop_flag) {
+              std::optional<Tensor> output_scale_inv, int64_t scaling_mode, bool force_pow_2_scales,
+              double amax_epsilon, std::optional<Tensor> noop_flag) {
   auto shape = getStableTensorShape(input);
   auto te_dtype = static_cast<DType>(output_te_dtype);
   auto nvte_scaling = static_cast<NVTEScalingMode>(scaling_mode);
 
   auto input_cu = makeTransformerEngineTensor(input);
-  auto output_cu = makeQuantizedTensorWrapper(
-      output_data, te_dtype, shape, output_amax, output_scale,
-      output_scale_inv, nvte_scaling);
+  auto output_cu = makeQuantizedTensorWrapper(output_data, te_dtype, shape, output_amax,
+                                              output_scale, output_scale_inv, nvte_scaling);
 
   QuantizationConfigWrapper quant_config;
   if (noop_flag.has_value()) {
@@ -52,8 +50,7 @@ void quantize(Tensor input, Tensor output_data, int64_t output_te_dtype,
 
 void quantize_with_amax(Tensor input, Tensor output_data, int64_t output_te_dtype,
                         Tensor output_amax, Tensor output_scale,
-                        std::optional<Tensor> output_scale_inv,
-                        int64_t scaling_mode,
+                        std::optional<Tensor> output_scale_inv, int64_t scaling_mode,
                         bool force_pow_2_scales, double amax_epsilon,
                         std::optional<Tensor> noop_flag) {
   auto shape = getStableTensorShape(input);
@@ -61,9 +58,8 @@ void quantize_with_amax(Tensor input, Tensor output_data, int64_t output_te_dtyp
   auto nvte_scaling = static_cast<NVTEScalingMode>(scaling_mode);
 
   auto input_cu = makeTransformerEngineTensor(input);
-  auto output_cu = makeQuantizedTensorWrapper(
-      output_data, te_dtype, shape, output_amax, output_scale,
-      output_scale_inv, nvte_scaling);
+  auto output_cu = makeQuantizedTensorWrapper(output_data, te_dtype, shape, output_amax,
+                                              output_scale, output_scale_inv, nvte_scaling);
 
   QuantizationConfigWrapper quant_config;
   if (noop_flag.has_value()) {
@@ -76,8 +72,7 @@ void quantize_with_amax(Tensor input, Tensor output_data, int64_t output_te_dtyp
   auto stream = getCurrentCUDAStreamRaw(input.get_device_index());
 
   // Step 1: Compute amax from input, store in output's amax buffer
-  nvte_compute_amax_with_config(input_cu.data(), output_cu.data(),
-                                quant_config, stream);
+  nvte_compute_amax_with_config(input_cu.data(), output_cu.data(), quant_config, stream);
 
   // Step 2: Compute scale from amax
   nvte_compute_scale_from_amax(output_cu.data(), quant_config, stream);
@@ -95,8 +90,7 @@ void quantize_with_amax(Tensor input, Tensor output_data, int64_t output_te_dtyp
 
 void quantize_from_amax(Tensor input, Tensor output_data, int64_t output_te_dtype,
                         Tensor output_amax, Tensor output_scale,
-                        std::optional<Tensor> output_scale_inv,
-                        int64_t scaling_mode,
+                        std::optional<Tensor> output_scale_inv, int64_t scaling_mode,
                         bool force_pow_2_scales, double amax_epsilon,
                         std::optional<Tensor> noop_flag) {
   auto shape = getStableTensorShape(input);
@@ -104,9 +98,8 @@ void quantize_from_amax(Tensor input, Tensor output_data, int64_t output_te_dtyp
   auto nvte_scaling = static_cast<NVTEScalingMode>(scaling_mode);
 
   auto input_cu = makeTransformerEngineTensor(input);
-  auto output_cu = makeQuantizedTensorWrapper(
-      output_data, te_dtype, shape, output_amax, output_scale,
-      output_scale_inv, nvte_scaling);
+  auto output_cu = makeQuantizedTensorWrapper(output_data, te_dtype, shape, output_amax,
+                                              output_scale, output_scale_inv, nvte_scaling);
 
   QuantizationConfigWrapper quant_config;
   if (noop_flag.has_value()) {
@@ -128,21 +121,23 @@ void quantize_from_amax(Tensor input, Tensor output_data, int64_t output_te_dtyp
 // Dequantize: input (fp8) → output (hp)
 // ============================================================================
 
-Tensor dequantize(Tensor input_data, int64_t input_te_dtype,
-                  std::optional<Tensor> input_scale_inv,
-                  int64_t scaling_mode, int64_t output_te_dtype) {
+Tensor dequantize(Tensor input_data, int64_t input_te_dtype, std::optional<Tensor> input_scale_inv,
+                  std::optional<Tensor> input_amax, int64_t scaling_mode, int64_t output_te_dtype) {
   auto shape = getStableTensorShape(input_data);
   auto in_te_dtype = static_cast<DType>(input_te_dtype);
   auto out_te_dtype = static_cast<DType>(output_te_dtype);
   auto nvte_scaling = static_cast<NVTEScalingMode>(scaling_mode);
 
-  auto input_cu = makeQuantizedTensorWrapper(
-      input_data, in_te_dtype, shape, std::nullopt, std::nullopt,
-      input_scale_inv, nvte_scaling);
+  // FP4 data is packed (2 elements per byte). Report logical element count.
+  if (is_fp4_dtype(in_te_dtype) && !shape.empty()) {
+    shape.back() *= 2;
+  }
 
-  auto output = allocateStableTensor(
-      std::vector<int64_t>(shape.begin(), shape.end()),
-      out_te_dtype, input_data.get_device_index());
+  auto input_cu = makeQuantizedTensorWrapper(input_data, in_te_dtype, shape, input_amax,
+                                             std::nullopt, input_scale_inv, nvte_scaling);
+
+  auto output = allocateStableTensor(std::vector<int64_t>(shape.begin(), shape.end()), out_te_dtype,
+                                     input_data.get_device_index());
   auto output_cu = makeTransformerEngineTensor(output);
 
   nvte_dequantize(input_cu.data(), output_cu.data(),
@@ -154,10 +149,21 @@ Tensor dequantize(Tensor input_data, int64_t input_te_dtype,
 }  // namespace transformer_engine::pytorch::stable
 
 STABLE_TORCH_LIBRARY_FRAGMENT(transformer_engine_stable, m) {
-  m.def("quantize(Tensor input, Tensor output_data, int output_te_dtype, Tensor? output_amax, Tensor? output_scale, Tensor? output_scale_inv, int scaling_mode, bool force_pow_2_scales, float amax_epsilon, Tensor? noop_flag) -> ()");
-  m.def("quantize_with_amax(Tensor input, Tensor output_data, int output_te_dtype, Tensor output_amax, Tensor output_scale, Tensor? output_scale_inv, int scaling_mode, bool force_pow_2_scales, float amax_epsilon, Tensor? noop_flag) -> ()");
-  m.def("quantize_from_amax(Tensor input, Tensor output_data, int output_te_dtype, Tensor output_amax, Tensor output_scale, Tensor? output_scale_inv, int scaling_mode, bool force_pow_2_scales, float amax_epsilon, Tensor? noop_flag) -> ()");
-  m.def("dequantize(Tensor input_data, int input_te_dtype, Tensor? input_scale_inv, int scaling_mode, int output_te_dtype) -> Tensor");
+  m.def(
+      "quantize(Tensor input, Tensor output_data, int output_te_dtype, Tensor? output_amax, "
+      "Tensor? output_scale, Tensor? output_scale_inv, int scaling_mode, bool force_pow_2_scales, "
+      "float amax_epsilon, Tensor? noop_flag) -> ()");
+  m.def(
+      "quantize_with_amax(Tensor input, Tensor output_data, int output_te_dtype, Tensor "
+      "output_amax, Tensor output_scale, Tensor? output_scale_inv, int scaling_mode, bool "
+      "force_pow_2_scales, float amax_epsilon, Tensor? noop_flag) -> ()");
+  m.def(
+      "quantize_from_amax(Tensor input, Tensor output_data, int output_te_dtype, Tensor "
+      "output_amax, Tensor output_scale, Tensor? output_scale_inv, int scaling_mode, bool "
+      "force_pow_2_scales, float amax_epsilon, Tensor? noop_flag) -> ()");
+  m.def(
+      "dequantize(Tensor input_data, int input_te_dtype, Tensor? input_scale_inv, Tensor? "
+      "input_amax, int scaling_mode, int output_te_dtype) -> Tensor");
 }
 
 STABLE_TORCH_LIBRARY_IMPL(transformer_engine_stable, CUDA, m) {

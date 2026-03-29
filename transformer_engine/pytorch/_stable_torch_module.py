@@ -881,6 +881,12 @@ def generic_gemm(
     """GEMM via stable ABI ops with Python-side tensor metadata extraction."""
     from transformer_engine.pytorch.tensor._extract import extract_tensor_data
 
+    # Ensure workspace is large enough for cuBLAS. The pybind path dynamically
+    # resized the workspace; the stable path receives a fixed tensor.
+    _MIN_WORKSPACE = 33554432  # 32 MiB, matches pybind default
+    if isinstance(workspace, torch.Tensor) and workspace.numel() < _MIN_WORKSPACE:
+        workspace = torch.empty(_MIN_WORKSPACE, dtype=torch.uint8, device=workspace.device)
+
     A_data, A_dtype, A_scale_inv, A_sm, A_swizzled, A_cw_data, A_cw_scale_inv = (
         _extract_gemm_operand(A, transa)
     )
@@ -1106,7 +1112,14 @@ def dequantize(input, otype):
     in_data, in_dtype, in_scale_inv, in_sm = extract_tensor_data(input)
     _TORCH_TO_TE = {torch.float32: 4, torch.float16: 5, torch.bfloat16: 6}
     out_te_dtype = _TORCH_TO_TE.get(otype, 4) if isinstance(otype, torch.dtype) else int(otype)
-    return _ops.dequantize(in_data, in_dtype, in_scale_inv, in_sm, out_te_dtype)
+    # NVFP4 dequantize kernel needs per-tensor amax for reconstruction
+    in_amax = None
+    for attr in ("_amax_rowwise", "_amax", "amax"):
+        a = getattr(input, attr, None)
+        if isinstance(a, torch.Tensor) and a.numel() > 0:
+            in_amax = a
+            break
+    return _ops.dequantize(in_data, in_dtype, in_scale_inv, in_amax, in_sm, out_te_dtype)
 
 
 multi_tensor_quantize = _not_implemented("multi_tensor_quantize")
