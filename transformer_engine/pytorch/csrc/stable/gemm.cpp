@@ -102,9 +102,22 @@ TensorWrapper buildInputTensorWrapper(const Tensor& rowwise_data, DType te_dtype
   // flat_last_dim()) and the swizzle kernel get the correct K.
   const bool fp4_packed = is_fp4_dtype(te_dtype);
 
+  // Flatten >2D shapes to 2D for GEMM [M_dims..., K] → [M, K].
+  // Only for MXFP8/DELAYED scaling where TensorWrapper::shape() returns
+  // data shape as-is (no transpose).
+  auto flatten2D = [](std::vector<size_t>& shape, NVTEScalingMode sm) {
+    if (shape.size() <= 2) return;
+    if (sm != NVTE_MXFP8_1D_SCALING && sm != NVTE_DELAYED_TENSOR_SCALING) return;
+    size_t K = shape.back();
+    size_t M = 1;
+    for (size_t i = 0; i + 1 < shape.size(); ++i) M *= shape[i];
+    shape = {M, K};
+  };
+
   if (rowwise_data.numel() > 0) {
     auto shape = getStableTensorShape(rowwise_data);
     if (fp4_packed && !shape.empty()) shape.back() *= 2;
+    flatten2D(shape, scaling_mode);
     out.set_rowwise_data(rowwise_data.data_ptr(), te_dtype, shape);
   }
 
@@ -119,6 +132,7 @@ TensorWrapper buildInputTensorWrapper(const Tensor& rowwise_data, DType te_dtype
     // TensorWrapper::shape() transposes to [M, K], producing correct
     // flat_first_dim()=M and flat_last_dim()=K for CheckScaleTensorShape.
     if (fp4_packed && !cw_shape.empty()) cw_shape.back() *= 2;
+    flatten2D(cw_shape, scaling_mode);
     out.set_columnwise_data(colwise_data->data_ptr(), te_dtype, cw_shape);
     if (colwise_scale_inv.has_value() && colwise_scale_inv->numel() > 0) {
       auto csi_shape = getStableTensorShape(*colwise_scale_inv);
@@ -235,14 +249,22 @@ void gemm(
   std::vector<Tensor> block_to_mxfp8_buffers;  // keep alive during GEMM
 
   auto convertOneDirection = [&](const Tensor& sel_data, DType dtype, const Tensor& sel_si,
-                                 NVTEScalingMode orig_sm, int device_idx) -> Tensor {
+                                 NVTEScalingMode orig_sm, int device_idx,
+                                 bool is_columnwise) -> Tensor {
     auto d_shape = getStableTensorShape(sel_data);
     const bool is_fp4 = is_fp4_dtype(dtype);
     if (is_fp4 && !d_shape.empty()) d_shape.back() *= 2;
     size_t flat_first = 1, flat_last = 1;
     if (!d_shape.empty()) {
-      for (size_t i = 0; i + 1 < d_shape.size(); ++i) flat_first *= d_shape[i];
-      flat_last = d_shape.back();
+      if (is_columnwise) {
+        // Columnwise data: first dim is K, rest are M → [K, M_dims...]
+        flat_first = d_shape[0];
+        for (size_t i = 1; i < d_shape.size(); ++i) flat_last *= d_shape[i];
+      } else {
+        // Rowwise data: last dim is K, rest are M → [M_dims..., K]
+        for (size_t i = 0; i + 1 < d_shape.size(); ++i) flat_first *= d_shape[i];
+        flat_last = d_shape.back();
+      }
     }
     std::vector<size_t> data_2d = {flat_first, flat_last};
     TensorWrapper input_cu(orig_sm);
@@ -269,19 +291,30 @@ void gemm(
                                  std::optional<Tensor>& cw_data, std::optional<Tensor>& cw_si,
                                  NVTEScalingMode& sm, bool& swizzled, bool use_rowwise) {
     if (sm != NVTE_BLOCK_SCALING_1D && sm != NVTE_BLOCK_SCALING_2D) return;
-    int device_idx = data.get_device_index();
+    int device_idx = data.numel() > 0 ? data.get_device_index()
+                                      : (cw_data.has_value() ? cw_data->get_device_index() : 0);
 
     // Convert the direction that will be used by CanonicalizeGemmInput
     if (use_rowwise) {
       if (scale_inv.has_value() && scale_inv->numel() > 0) {
-        auto sw = convertOneDirection(data, dtype, *scale_inv, sm, device_idx);
+        auto sw = convertOneDirection(data, dtype, *scale_inv, sm, device_idx,
+                                      /*is_columnwise=*/false);
         scale_inv = sw;
         block_to_mxfp8_buffers.push_back(std::move(sw));
       }
     } else {
       if (cw_data.has_value() && cw_si.has_value() && cw_si->numel() > 0) {
-        auto sw = convertOneDirection(*cw_data, dtype, *cw_si, sm, device_idx);
+        auto sw = convertOneDirection(*cw_data, dtype, *cw_si, sm, device_idx,
+                                      /*is_columnwise=*/true);
         cw_si = sw;
+        // Also convert rowwise scale if present (for CanonicalizeGemmInput
+        // which may fall back to rowwise on Blackwell).
+        if (scale_inv.has_value() && scale_inv->numel() > 0 && data.numel() > 0) {
+          auto sw2 = convertOneDirection(data, dtype, *scale_inv, sm, device_idx,
+                                         /*is_columnwise=*/false);
+          scale_inv = sw2;
+          block_to_mxfp8_buffers.push_back(std::move(sw2));
+        }
         block_to_mxfp8_buffers.push_back(std::move(sw));
       }
     }
@@ -289,25 +322,90 @@ void gemm(
     swizzled = true;
   };
 
+  // Build a MXFP8 TensorWrapper from block-scaling data, matching the pybind
+  // convert_block_scaling_to_mxfp8_tensor pattern: select rowwise or colwise data,
+  // flatten to 2D, set as rowwise data on MXFP8 wrapper.
+  auto buildMxfp8FromBlock = [&](const Tensor& sel_data, DType dtype, const Tensor& mxfp8_si,
+                                 bool is_colwise) -> TensorWrapper {
+    auto d_shape = getStableTensorShape(sel_data);
+    const bool is_fp4 = is_fp4_dtype(dtype);
+    if (is_fp4 && !d_shape.empty()) d_shape.back() *= 2;
+    size_t flat_first, flat_last;
+    if (is_colwise) {
+      // Colwise: [K, M_dims...] → [K, M]
+      flat_first = d_shape.empty() ? 1 : d_shape[0];
+      flat_last = 1;
+      for (size_t i = 1; i < d_shape.size(); ++i) flat_last *= d_shape[i];
+    } else {
+      // Rowwise: [M_dims..., K] → [M, K]
+      flat_first = 1;
+      for (size_t i = 0; i + 1 < d_shape.size(); ++i) flat_first *= d_shape[i];
+      flat_last = d_shape.empty() ? 1 : d_shape.back();
+    }
+    std::vector<size_t> data_2d = {flat_first, flat_last};
+    auto si_shape = getStableTensorShape(mxfp8_si);
+    TensorWrapper out(NVTE_MXFP8_1D_SCALING);
+    out.set_rowwise_data(sel_data.data_ptr(), dtype, data_2d);
+    out.set_rowwise_scale_inv(mxfp8_si.data_ptr(), DType::kFloat8E8M0, si_shape);
+    out.set_with_gemm_swizzled_scales(true);
+    return out;
+  };
+
+  TensorWrapper A_tensor, B_tensor;
+
   if (fp8_block_scaling && transformer_engine::cuda::sm_arch() >= 100) {
-    // Convert the direction that CanonicalizeGemmInput will use:
-    //   transa=True  → uses rowwise  → convert rowwise
-    //   transa=False → uses colwise  → convert colwise
-    convertBlockToMxfp8(A_data, A_te, A_scale_inv, A_colwise_data, A_colwise_scale_inv, A_sm,
-                        A_with_gemm_swizzled_scales, transa);
-    // For B: transb=False → rowwise, transb=True → colwise
-    convertBlockToMxfp8(B_data, B_te, B_scale_inv, B_colwise_data, B_colwise_scale_inv, B_sm,
-                        B_with_gemm_swizzled_scales, !transb);
+    // Convert block scaling to MXFP8 and build TensorWrappers directly.
+    // Select the direction CanonicalizeGemmInput will use, convert its
+    // scale format, then force TN layout (matching pybind path).
+    auto convertAndBuild = [&](Tensor& data, DType dtype, std::optional<Tensor>& si,
+                               std::optional<Tensor>& cw_data, std::optional<Tensor>& cw_si,
+                               NVTEScalingMode sm, bool use_rowwise) -> TensorWrapper {
+      if (sm != NVTE_BLOCK_SCALING_1D && sm != NVTE_BLOCK_SCALING_2D) {
+        // Not block scaling — build normally
+        auto t = buildInputTensorWrapper(data, dtype, si, cw_data, cw_si, sm);
+        return t;
+      }
+      int dev = data.numel() > 0 ? data.get_device_index()
+                                 : (cw_data.has_value() ? cw_data->get_device_index() : 0);
+      auto& sel_data = use_rowwise ? data : *cw_data;
+      auto& sel_si = use_rowwise ? si : cw_si;
+      auto sw = convertOneDirection(sel_data, dtype, *sel_si, sm, dev, use_rowwise ? false : true);
+      block_to_mxfp8_buffers.push_back(sw);
+      return buildMxfp8FromBlock(sel_data, dtype, sw, !use_rowwise);
+    };
+
+    // Only convert and force TN when BOTH tensors are block-scaling
+    const bool A_is_block = (A_sm == NVTE_BLOCK_SCALING_1D || A_sm == NVTE_BLOCK_SCALING_2D);
+    const bool B_is_block = (B_sm == NVTE_BLOCK_SCALING_1D || B_sm == NVTE_BLOCK_SCALING_2D);
+    if (A_is_block && B_is_block) {
+      A_tensor = convertAndBuild(A_data, A_te, A_scale_inv, A_colwise_data, A_colwise_scale_inv,
+                                 A_sm, transa);
+      B_tensor = convertAndBuild(B_data, B_te, B_scale_inv, B_colwise_data, B_colwise_scale_inv,
+                                 B_sm, !transb);
+      transa = true;
+      transb = false;
+    } else {
+      // Mixed: one is block scaling, one isn't — shouldn't happen but handle gracefully
+      A_tensor = buildInputTensorWrapper(A_data, A_te, A_scale_inv, A_colwise_data,
+                                         A_colwise_scale_inv, A_sm);
+      B_tensor = buildInputTensorWrapper(B_data, B_te, B_scale_inv, B_colwise_data,
+                                         B_colwise_scale_inv, B_sm);
+    }
+  } else {
+    A_tensor = buildInputTensorWrapper(A_data, A_te, A_scale_inv, A_colwise_data,
+                                       A_colwise_scale_inv, A_sm);
+    B_tensor = buildInputTensorWrapper(B_data, B_te, B_scale_inv, B_colwise_data,
+                                       B_colwise_scale_inv, B_sm);
   }
 
-  auto A_tensor =
-      buildInputTensorWrapper(A_data, A_te, A_scale_inv, A_colwise_data, A_colwise_scale_inv, A_sm);
-  auto B_tensor =
-      buildInputTensorWrapper(B_data, B_te, B_scale_inv, B_colwise_data, B_colwise_scale_inv, B_sm);
   auto D_tensor =
       makeQuantizedTensorWrapper(D_data, D_te, D_shape, D_amax, D_scale, D_scale_inv, D_sm);
-  A_tensor.set_with_gemm_swizzled_scales(A_with_gemm_swizzled_scales);
-  B_tensor.set_with_gemm_swizzled_scales(B_with_gemm_swizzled_scales);
+  // For block-to-MXFP8 path, swizzled flag is already set by buildMxfp8FromBlock.
+  // For non-block path, set from the Python-side flag.
+  if (!fp8_block_scaling || transformer_engine::cuda::sm_arch() < 100) {
+    A_tensor.set_with_gemm_swizzled_scales(A_with_gemm_swizzled_scales);
+    B_tensor.set_with_gemm_swizzled_scales(B_with_gemm_swizzled_scales);
+  }
 
   TensorWrapper bias_tensor;
   if (bias.has_value()) {
