@@ -234,12 +234,25 @@ Previous results were on H100 (sm=90). These results are on B200 (sm=100a) with 
 | test_fused_router | 0 | 0 | 0 | 0 |
 | test_partial_cast | 0 | 1 | 1 | 0 |
 
-Note: Many tests have high skip/error counts from cascading CUDA errors (CUBLAS_STATUS_NOT_SUPPORTED from NVFP4 backward corrupts GPU state). The core improvements are:
-- **test_quantized_tensor**: -102 (scale_inv non-FP8 fix)
-- **test_float8blockwisetensor**: -56 (scale_inv fix)
-- **test_float8_blockwise_scaling_exact**: -90 (scale_inv fix)
-- **test_nvfp4**: -258 (NVFP4 extract fix + FP4 shape fix)
-- **test_fusible_ops**: -477 actual failures (but 3924 errors from something else)
+### Summary of improvements (session 2, cumulative)
+
+| Test | Before F | After F | Delta |
+|------|----------|---------|-------|
+| test_quantized_tensor | 137 | 29 | **-108** |
+| test_float8blockwisetensor | 60 | 4 | **-56** |
+| test_float8_blockwise_scaling_exact | 92 | 2 | **-90** |
+| test_nvfp4 | 2100 | 1761 | **-339** |
+| test_mxfp8 | 306 | 230 | **-76** |
+| test_attention | 649 | 547 | **-102** |
+| test_fusible_ops | 510 | 274 | **-236** |
+| test_grouped_tensor | 5 | 1 | **-4** |
+| test_cuda_graphs | 126 | 117 | **-9** |
+| test_fused_optimizer | 4 | 3 | **-1** |
+| test_cpu_offloading | 413 | 407 | **-6** |
+| **Estimated total** | | | **~-1,027** |
+
+Unchanged: test_sanity recipe2 (2127, pre-existing CUBLAS), test_multi_tensor (628), test_permutation (15).
+Tests still passing: recipe0, recipe3, deferred_init, jit, fused_rope, gqa, parallel_cross_entropy, kv_cache, hf_integration, fused_router, cpu_offloading_v1.
 
 ### Remaining Priority Fix Order (by impact)
 
