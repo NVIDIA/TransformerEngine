@@ -286,7 +286,7 @@ def quantize_into(src, quantizer, dst, noop_flag=None):
                 # different block directions). Quantize src in "columnwise mode" by reshaping
                 # the transposed src to (K, M) and calling ops.quantize in ROWWISE mode.
                 # This gives per-K-block scales == the per-M-block columnwise scales we need.
-                if col_si is not None:
+                if col_si is not None and src.ndim >= 1:
                     K = src.shape[-1]
                     M = src.numel() // K
                     src_transposed_2d = _transpose_for_colwise(src).view(K, M)

@@ -87,8 +87,11 @@ TensorWrapper buildInputTensorWrapper(const Tensor& rowwise_data, DType te_dtype
                                       const std::optional<Tensor>& rowwise_scale_inv,
                                       const std::optional<Tensor>& colwise_data,
                                       const std::optional<Tensor>& colwise_scale_inv,
-                                      NVTEScalingMode scaling_mode) {
+                                      NVTEScalingMode scaling_mode,
+                                      const std::optional<Tensor>& amax = std::nullopt,
+                                      const std::optional<Tensor>& colwise_amax = std::nullopt) {
   DType si_dtype = getScaleInvDtype(scaling_mode);
+  std::vector<size_t> scalar_shape = {1};
 
   TensorWrapper out(scaling_mode);
   // Only set rowwise data when there is actual data (numel > 0).
@@ -126,6 +129,13 @@ TensorWrapper buildInputTensorWrapper(const Tensor& rowwise_data, DType te_dtype
     out.set_rowwise_scale_inv(rowwise_scale_inv->data_ptr(), si_dtype, si_shape);
   }
 
+  // Set amax for NVFP4 tensors. The pybind path (NVTETensorFromNVFP4Tensor)
+  // sets amax on the TensorWrapper; cuBLAS uses it in the GEMM formula:
+  //   output = fp4_value * scale_e4m3 * amax / (6 * 448)
+  if (amax.has_value() && amax->numel() > 0) {
+    out.set_amax(amax->data_ptr(), DType::kFloat32, scalar_shape);
+  }
+
   if (colwise_data.has_value() && colwise_data->numel() > 0) {
     auto cw_shape = getStableTensorShape(*colwise_data);
     // FP4 columnwise data [K, M/2]: double last dim to get [K, M].
@@ -137,6 +147,9 @@ TensorWrapper buildInputTensorWrapper(const Tensor& rowwise_data, DType te_dtype
     if (colwise_scale_inv.has_value() && colwise_scale_inv->numel() > 0) {
       auto csi_shape = getStableTensorShape(*colwise_scale_inv);
       out.set_columnwise_scale_inv(colwise_scale_inv->data_ptr(), si_dtype, csi_shape);
+    }
+    if (colwise_amax.has_value() && colwise_amax->numel() > 0) {
+      out.set_columnwise_amax(colwise_amax->data_ptr(), DType::kFloat32, scalar_shape);
     }
   }
   return out;
@@ -183,7 +196,12 @@ void gemm(
     // Workspace
     Tensor workspace,
     // Config
-    bool grad, bool accumulate, bool use_split_accumulator, double alpha) {
+    bool grad, bool accumulate, bool use_split_accumulator, double alpha,
+    // NVFP4 amax (per-tensor amax for GEMM formula: out = fp4 * scale * amax / 2688)
+    std::optional<Tensor> A_amax = std::nullopt,
+    std::optional<Tensor> A_colwise_amax = std::nullopt,
+    std::optional<Tensor> B_amax = std::nullopt,
+    std::optional<Tensor> B_colwise_amax = std::nullopt) {
   auto A_te = static_cast<DType>(A_te_dtype);
   auto B_te = static_cast<DType>(B_te_dtype);
   auto D_te = static_cast<DType>(D_te_dtype);
@@ -387,15 +405,15 @@ void gemm(
     } else {
       // Mixed: one is block scaling, one isn't — shouldn't happen but handle gracefully
       A_tensor = buildInputTensorWrapper(A_data, A_te, A_scale_inv, A_colwise_data,
-                                         A_colwise_scale_inv, A_sm);
+                                         A_colwise_scale_inv, A_sm, A_amax, A_colwise_amax);
       B_tensor = buildInputTensorWrapper(B_data, B_te, B_scale_inv, B_colwise_data,
-                                         B_colwise_scale_inv, B_sm);
+                                         B_colwise_scale_inv, B_sm, B_amax, B_colwise_amax);
     }
   } else {
     A_tensor = buildInputTensorWrapper(A_data, A_te, A_scale_inv, A_colwise_data,
-                                       A_colwise_scale_inv, A_sm);
+                                       A_colwise_scale_inv, A_sm, A_amax, A_colwise_amax);
     B_tensor = buildInputTensorWrapper(B_data, B_te, B_scale_inv, B_colwise_data,
-                                       B_colwise_scale_inv, B_sm);
+                                       B_colwise_scale_inv, B_sm, B_amax, B_colwise_amax);
   }
 
   auto D_tensor =
@@ -465,7 +483,9 @@ STABLE_TORCH_LIBRARY_FRAGMENT(transformer_engine_stable, m) {
       "Tensor D_data, int D_te_dtype, Tensor? D_amax, Tensor? D_scale, Tensor? D_scale_inv, "
       "int D_scaling_mode, Tensor? bias, int bias_type, Tensor? pre_gelu_out, "
       "Tensor workspace, bool grad, bool accumulate, bool use_split_accumulator, "
-      "float alpha) -> ()");
+      "float alpha, "
+      "Tensor? A_amax=None, Tensor? A_colwise_amax=None, "
+      "Tensor? B_amax=None, Tensor? B_colwise_amax=None) -> ()");
   m.def(
       "swizzle_scale_for_gemm(Tensor data, Tensor scale_inv, int te_dtype, int scaling_mode) -> "
       "Tensor");

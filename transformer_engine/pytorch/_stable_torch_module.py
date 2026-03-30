@@ -96,7 +96,8 @@ def _extract_gemm_operand(tensor, use_rowwise):
 
     Returns:
         (data, te_dtype, scale_inv, scaling_mode,
-         with_gemm_swizzled_scales, colwise_data, colwise_scale_inv)
+         with_gemm_swizzled_scales, colwise_data, colwise_scale_inv,
+         amax, colwise_amax)
     """
     from transformer_engine.pytorch.tensor._extract import extract_tensor_data
     from transformer_engine.pytorch.tensor._extract import _detect_scaling_mode
@@ -175,6 +176,11 @@ def _extract_gemm_operand(tensor, use_rowwise):
             colwise_data = fp8_transpose
             colwise_scale_inv = si
 
+    # NVFP4 tensors carry per-tensor amax needed by the GEMM formula:
+    #   output = fp4_value * scale_e4m3 * amax / (6 * 448)
+    amax = getattr(tensor, "_amax_rowwise", None)
+    colwise_amax = getattr(tensor, "_amax_columnwise", None)
+
     return (
         data,
         te_dtype,
@@ -183,6 +189,8 @@ def _extract_gemm_operand(tensor, use_rowwise):
         with_gemm_swizzled_scales,
         colwise_data,
         colwise_scale_inv,
+        amax,
+        colwise_amax,
     )
 
 
@@ -887,10 +895,10 @@ def generic_gemm(
     if isinstance(workspace, torch.Tensor) and workspace.numel() < _MIN_WORKSPACE:
         workspace = torch.empty(_MIN_WORKSPACE, dtype=torch.uint8, device=workspace.device)
 
-    A_data, A_dtype, A_scale_inv, A_sm, A_swizzled, A_cw_data, A_cw_scale_inv = (
+    A_data, A_dtype, A_scale_inv, A_sm, A_swizzled, A_cw_data, A_cw_scale_inv, A_amax, A_cw_amax = (
         _extract_gemm_operand(A, transa)
     )
-    B_data, B_dtype, B_scale_inv, B_sm, B_swizzled, B_cw_data, B_cw_scale_inv = (
+    B_data, B_dtype, B_scale_inv, B_sm, B_swizzled, B_cw_data, B_cw_scale_inv, B_amax, B_cw_amax = (
         _extract_gemm_operand(B, not transb)
     )
     _TORCH_DT = {torch.float32: 4, torch.float16: 5, torch.bfloat16: 6, torch.uint8: 0}
@@ -940,6 +948,12 @@ def generic_gemm(
 
         _A_cw_is_transpose = not _cw_is_same_shape(A)
         _B_cw_is_transpose = not _cw_is_same_shape(B)
+        # FP4 data is packed (2 elements per byte), so physical shape has K/2
+        # in the last dim. Double it to get the logical dimension, matching
+        # the C++ gemm.cpp buildInputTensorWrapper logic.
+        _kFloat4E2M1 = 10
+        _A_fp4 = A_dtype == _kFloat4E2M1
+        _B_fp4 = B_dtype == _kFloat4E2M1
         if A_data.numel() == 0 and A_cw_data is not None:
             if _A_cw_is_transpose:
                 A1 = A_cw_data.shape[0]  # physical transpose: shape[0] = last dim of logical
@@ -947,16 +961,32 @@ def generic_gemm(
             else:
                 A1 = A_cw_data.shape[-1]  # same logical shape: shape[-1] = last dim
                 A0 = A_cw_data.numel() // max(A1, 1)
+            if _A_fp4:
+                # Columnwise FP4: physical transpose [K, M/2] → logical [K, M]
+                if _A_cw_is_transpose:
+                    A0 *= 2
+                else:
+                    A1 *= 2
         else:
             A1 = A_data.shape[-1]
             A0 = A_data.numel() // max(A1, 1)
+            if _A_fp4:
+                # Rowwise FP4: [M, K/2] → logical [M, K]
+                A1 *= 2
         if B_data.numel() == 0 and B_cw_data is not None:
             if _B_cw_is_transpose:
                 B1 = B_cw_data.shape[0]
             else:
                 B1 = B_cw_data.shape[-1]
+            if _B_fp4:
+                if _B_cw_is_transpose:
+                    pass  # B1 is from shape[0], which is the last logical dim (correct for non-packed dim)
+                else:
+                    B1 *= 2
         else:
             B1 = B_data.shape[-1]
+            if _B_fp4:
+                B1 *= 2
         M = A0 if transa else A1
         if transb:
             out_shape = [B1, M]
@@ -1089,6 +1119,10 @@ def generic_gemm(
             accumulate,
             use_split_accumulator,
             alpha,
+            A_amax,
+            A_cw_amax,
+            B_amax,
+            B_cw_amax,
         )
 
     return [D, dbias, gelu_in, extra_output]
@@ -1172,22 +1206,30 @@ def group_quantize(tensor, quantizer, num_tensors, first_dims):
     shapes_list = []
 
     for qt in chunks:
-        rd = getattr(qt, "_rowwise_data", getattr(qt, "_data", qt))
+        rd = getattr(qt, "_rowwise_data", getattr(qt, "_data", None))
+        if rd is None:
+            rd = qt if isinstance(qt, torch.Tensor) else None
         rsi = getattr(qt, "_rowwise_scale_inv", getattr(qt, "_scale_inv", None))
-        all_data.append(rd.reshape(-1))
-        if rsi is not None:
-            all_si.append(rsi.reshape(-1))
         cwd = getattr(qt, "_columnwise_data", None)
         cwsi = getattr(qt, "_columnwise_scale_inv", None)
+        if rd is not None:
+            all_data.append(rd.reshape(-1))
+        if rsi is not None:
+            all_si.append(rsi.reshape(-1))
         if cwd is not None:
             all_cw_data.append(cwd.reshape(-1))
         if cwsi is not None:
             all_cw_si.append(cwsi.reshape(-1))
-        # Track shapes (flattened to 2D)
-        M_i = rd.shape[0] if rd.ndim >= 1 else 1
-        N_i = rd.shape[-1] if rd.ndim >= 2 else rd.numel()
+        # Track shapes (flattened to 2D) - use whichever data is available
+        ref_data = rd if rd is not None else cwd
+        M_i = ref_data.shape[0] if ref_data is not None and ref_data.ndim >= 1 else 1
+        N_i = (
+            ref_data.shape[-1]
+            if ref_data is not None and ref_data.ndim >= 2
+            else (ref_data.numel() if ref_data is not None else 0)
+        )
         shapes_list.append((M_i, N_i))
-        offsets_list.append(offsets_list[-1] + rd.numel())
+        offsets_list.append(offsets_list[-1] + (rd.numel() if rd is not None else 0))
         if rsi is not None:
             si_offsets_list.append(si_offsets_list[-1] + rsi.numel())
         if cwsi is not None:
@@ -1732,11 +1774,11 @@ def te_general_grouped_gemm(
                 pre_gelu_out[i].zero_()
             continue
 
-        A_data, A_te_dtype, A_si, A_sm, A_swizzled, A_cw, A_cw_si = _extract_gemm_operand(
-            Ai, transa
+        A_data, A_te_dtype, A_si, A_sm, A_swizzled, A_cw, A_cw_si, A_amax_i, A_cw_amax_i = (
+            _extract_gemm_operand(Ai, transa)
         )
-        B_data, B_te_dtype, B_si, B_sm, B_swizzled, B_cw, B_cw_si = _extract_gemm_operand(
-            Bi, not transb
+        B_data, B_te_dtype, B_si, B_sm, B_swizzled, B_cw, B_cw_si, B_amax_i, B_cw_amax_i = (
+            _extract_gemm_operand(Bi, not transb)
         )
 
         # Mirror generic_gemm: compute on-the-fly transpose when delayed-scaling FP8
@@ -1751,9 +1793,15 @@ def te_general_grouped_gemm(
 
         if Di is None:
             # Allocate output: column-major convention → shape (N, M)
+            _kFloat4E2M1 = 10
             A1 = A_data.shape[-1]
             A0 = A_data.numel() // max(A1, 1)
             B1 = B_data.shape[-1]
+            # FP4 packed: double last dim for logical shape
+            if A_te_dtype == _kFloat4E2M1:
+                A1 *= 2
+            if B_te_dtype == _kFloat4E2M1:
+                B1 *= 2
             M = A0 if transa else A1
             N = B1 if transb else B_data.shape[-2] if B_data.ndim > 1 else B1
             out_te_int = int(out_dtype) if out_dtype is not None else int(DType.kBFloat16)
@@ -1798,6 +1846,10 @@ def te_general_grouped_gemm(
             accumulate,
             use_split_accumulator,
             1.0,
+            A_amax_i,
+            A_cw_amax_i,
+            B_amax_i,
+            B_cw_amax_i,
         )
 
         if single_output and D is not None:
@@ -2132,6 +2184,7 @@ def _pack_tensor_lists(tensor_lists):
         torch.float16: 5,
         torch.bfloat16: 6,
         torch.uint8: 0,
+        torch.int16: 1,
         torch.int32: 2,
         torch.int64: 3,
         torch.bool: 0,

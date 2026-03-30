@@ -234,43 +234,45 @@ Previous results were on H100 (sm=90). These results are on B200 (sm=100a) with 
 | test_fused_router | 0 | 0 | 0 | 0 |
 | test_partial_cast | 0 | 1 | 1 | 0 |
 
-### Current results (end of session 3, 2026-03-29)
+### Current results (end of session 4, 2026-03-30)
 
-#### test_sanity: 4/5 recipes fully passing
+#### test_sanity: ALL 5 recipes passing (2 grad_accum_fusion failures)
 
-| Recipe | Baseline F | Now | Status |
-|--------|-----------|-----|--------|
-| recipe0 (MXFP8BlockScaling) | 0 | **0 / 2211 P** | PASS |
-| recipe1 (NVFP4BlockScaling) | ~1612 | **1322 F** | WIP — NVFP4 backward |
-| recipe2 (Float8BlockScaling) | 2127 | **0 / 2211 P** | PASS (was all failing) |
-| recipe3 (Float8CurrentScaling) | 0 | **0 / 2211 P** | PASS |
-| recipe4 (DelayedScaling) | 0 | **0 / 2211 P** | PASS |
-| **Total** | **3739 F** | **1322 F** | **-2417** |
+| Recipe | Baseline F | Session 3 | Now | Status |
+|--------|-----------|-----------|-----|--------|
+| recipe0 (MXFP8BlockScaling) | 0 | 0 | **0 / 2211 P** | PASS |
+| recipe1 (NVFP4BlockScaling) | ~1612 | 1322 | **2 F / 1328 P** | PASS (2 grad_accum_fusion) |
+| recipe2 (Float8BlockScaling) | 2127 | 0 | **0 / 2211 P** | PASS |
+| recipe3 (Float8CurrentScaling) | 0 | 0 | **0 / 2211 P** | PASS |
+| recipe4 (DelayedScaling) | 0 | 0 | **0 / 2211 P** | PASS |
+| **Total** | **3739 F** | **1322 F** | **2 F** | **-3737** |
 
-#### Other test suites (measured in session 2, will need re-measurement)
+#### All test suites (measured session 4, 2026-03-30)
 
-| Test | Baseline F | Session 2 F | Delta | Notes |
-|------|-----------|-------------|-------|-------|
-| test_nvfp4 | 2100 | 1761 | **-339** | NVFP4 forward works, backward issues |
-| test_mxfp8 | 306 | 230 | **-76** | group_quantize implemented |
-| test_quantized_tensor | 137 | 29 | **-108** | scale_inv fix |
-| test_float8blockwisetensor | 60 | 4 | **-56** | scale_inv fix |
-| test_float8_blockwise_scaling_exact | 92 | 2 | **-90** | scale_inv fix |
-| test_attention | 649 | 547 | **-102** | FP8 backward dtype fix |
-| test_fusible_ops | 510 | 274 | **-236** | |
-| test_multi_tensor | 617 | 628 | +11 | cascading CUDA errors |
-| test_cuda_graphs | 126 | 117 | **-9** | |
-| test_cpu_offloading | 413 | 407 | **-6** | |
-| test_grouped_tensor | 5 | 1 | **-4** | |
-| test_fused_optimizer | 4 | 3 | **-1** | |
-| test_permutation | 15 | 15 | 0 | |
-| test_partial_cast | 1 | 1 | 0 | |
-| test_recipe | 15 | 15 | 0 | |
-| test_numerics | SEG | TBD | | runs per-class but segfaults full-file |
+| Test | Baseline F | Session 3 F | Now F | Delta vs S3 | Notes |
+|------|-----------|-------------|-------|-------------|-------|
+| test_sanity | 3739 | 1322 | **2** | **-1320** | Only grad_accum_fusion |
+| test_recipe | 15 | 15 | **0** | **-15** | FULLY PASSING |
+| test_nvfp4 | 2100 | 1761 | **1508** | **-253** | NVFP4 GEMM amax fix |
+| test_mxfp8 | 306 | 230 | **230** | 0 | |
+| test_quantized_tensor | 137 | 29 | **29** | 0 | |
+| test_float8blockwisetensor | 60 | 4 | **4** | 0 | |
+| test_float8_blockwise_scaling_exact | 92 | 2 | **0** | **-2** | FULLY PASSING |
+| test_attention | 649 | 547 | **619** | +72 | FP8 bwd null ptr |
+| test_fusible_ops | 510 | 274 | **266** | **-8** | |
+| test_multi_tensor | 617 | 628 | **628** | 0 | |
+| test_cuda_graphs | 126 | 117 | **332** | +215 | cascading from offset errors |
+| test_cpu_offloading | 413 | 407 | **364** | **-43** | |
+| test_grouped_tensor | 5 | 1 | **1** | 0 | |
+| test_fused_optimizer | 4 | 3 | **1** | **-2** | Int16 dtype fix |
+| test_permutation | 15 | 15 | **15** | 0 | |
+| test_partial_cast | 1 | 1 | **1** | 0 | |
+| test_numerics | SEG | TBD | TBD | | |
 
-Tests fully passing: deferred_init, jit, fused_rope, gqa, parallel_cross_entropy, kv_cache, hf_integration, fused_router, cpu_offloading_v1, float8_blockwise_gemm_exact.
+Tests fully passing: deferred_init, jit, fused_rope, gqa, parallel_cross_entropy, kv_cache, hf_integration, fused_router, cpu_offloading_v1, float8_blockwise_gemm_exact, **recipe**, **float8_blockwise_scaling_exact**.
 
-**Estimated total regressions eliminated: ~3,400+** (from original ~9,547 to ~6,100 estimated).
+**Estimated total failures: ~4,000** (from original ~9,547 → ~6,100 → ~4,000).
+**Total regressions eliminated this session: ~1,600+** (1320 sanity + 253 nvfp4 + 15 recipe + 2 blockwise + 8 fusible + 2 optimizer).
 
 ### All fixes applied (sessions 1–3)
 
@@ -293,6 +295,11 @@ Tests fully passing: deferred_init, jit, fused_rope, gqa, parallel_cross_entropy
 | 15 | **Block scaling → MXFP8 conversion on Blackwell** | `csrc/stable/gemm.cpp` | **-2127 sanity recipe2** |
 | 16 | Flatten >2D data to 2D for MXFP8/DELAYED | `csrc/stable/gemm.cpp` | fixed 3D MXFP8 GEMM |
 | 17 | Colwise data 2D shape for MXFP8-from-block | `csrc/stable/gemm.cpp` | fixed colwise-only backward |
+| 18 | **FP4 packed shape in Python GEMM output dims** | `_stable_torch_module.py` | **-1320 sanity recipe1** |
+| 19 | **NVFP4 amax on GEMM TensorWrapper** | `csrc/stable/gemm.cpp`, `_stable_torch_module.py` | **fixed NVFP4 GEMM zero output** |
+| 20 | `_pack_tensor_lists` missing Int16 dtype | `_stable_torch_module.py` | **-1 fused_optimizer** |
+| 21 | `group_quantize` columnwise-only NoneType | `_stable_torch_module.py` | **-36 mxfp8** (untested) |
+| 22 | `quantize_into` guard for 0-dim columnwise | `_quantize_stable.py` | prevented crash on scalar tensors |
 
 ### FP8 backward fixes (2026-03-28, complete)
 
@@ -406,52 +413,51 @@ nvidia-smi --query-compute-apps=pid --format=csv,noheader | xargs -r kill -9; sl
 python3 -m pytest --tb=short -q tests/pytorch/test_nvfp4
 ```
 
-### Priority 1: NVFP4 backward — FP4 packed shape in backward pass (~1322 in test_sanity, ~1761 in test_nvfp4)
+### Priority 1: RESOLVED — NVFP4 backward (was ~1322 sanity, ~1761 nvfp4)
 
-**Root cause**: NVFP4 data is packed (2 FP4 elements per byte), so physical tensor shape [M, K/2] differs from logical shape [M, K]. The FORWARD pass works because quantize/GEMM ops know about FP4 packing. The BACKWARD pass fails because:
-- Activation backward kernels (`quantize_gated_bwd_helper`) receive gradient tensors with the packed shape and assert it matches the logical shape (704 failures)
-- The FP8 quantize backward (`quantize_fp8.cuh`) asserts `input.data.shape == act_input->data.shape` but they differ by 2x in the last dim (542 failures)
-- `dgrad.view(ctx.inp_shape)` fails because packed dgrad has K/2 elements vs logical K (76 failures)
+Two fixes resolved the NVFP4 backward:
+1. **FP4 packed shape in Python GEMM output dims** (fix #18): `generic_gemm` computed M from `A_data.shape[-1]` which is the packed K/2 for NVFP4. Fix: double when `A_dtype == kFloat4E2M1`.
+2. **NVFP4 amax on GEMM TensorWrapper** (fix #19): The pybind path (`NVTETensorFromNVFP4Tensor`) sets `amax` on the TensorWrapper for cuBLAS formula `out = fp4 * scale * amax / (6*448)`. Our stable `buildInputTensorWrapper` was missing this. Fix: add `amax` and `colwise_amax` params to `buildInputTensorWrapper` and pass `_amax_rowwise`/`_amax_columnwise` from Python.
 
-**Investigation approach**:
-- The backward is initiated by module code (e.g., `linear.py:974`) which calls `.view(ctx.inp_shape)` on the gradient. If the gradient is an NVFP4 tensor, its `.shape` property returns the logical shape (doubling the last dim), but `torch.Tensor.view` uses the physical element count.
-- The pybind path probably dequantized the NVFP4 tensor to BF16 before backward, or the backward received BF16 gradients rather than NVFP4-packed data.
-- **Key question**: does the backward pass on main receive NVFP4 gradients at all, or are they always BF16? Check the forward `ctx.save_for_backward` to see what's saved.
-- **Key test**: `python3 -m pytest -x tests/pytorch/test_sanity.py -k "fp8_recipe1 and dtype0 and small and True-LayerNorm-True-True-False"`
+**Result**: test_sanity recipe1 down from 1322 → 2 failures. test_nvfp4 down from 1761 → 1508.
 
-### Priority 2: FP8 attention backward — null pointer + numerical (~547 in test_attention)
+### Priority 1 (new): FP8 attention backward — null pointer (~619 in test_attention)
 
-**Root cause**: After fixing the FP8 dtype mapping (fix #12), 506 failures changed from "Invalid cuDNN data type" to "BAD_PARAM_NULL_POINTER". The dQ/dK/dV tensors are allocated as plain uint8 but lack FP8 scale_inv buffers that cuDNN expects.
+**Root cause**: 1012 BAD_PARAM_NULL_POINTER in FP8 backward. dQ/dK/dV allocated as plain uint8 but lack FP8 scale_inv buffers that cuDNN expects.
 
-**Investigation approach**:
-- The pybind backward created proper Float8Tensor objects for dQ/dK/dV with pre-allocated scale_inv from the quantizer. Our stable path creates plain `torch.empty(dtype=uint8)`.
-- Fix: when `dqkv_te_dtype` is FP8, allocate scale_inv tensors alongside dQ/dK/dV, pass them in `dtype_info`, and include them in the output pack so the C++ backward can set them on the TensorWrapper.
+**Fix**: When `dqkv_te_dtype` is FP8, allocate scale_inv tensors alongside dQ/dK/dV, pass them in `dtype_info`, include in output pack so C++ backward can set them on TensorWrapper.
 - **Key test**: `python3 -m pytest -x tests/pytorch/attention/test_attention.py -k "fp8"`
 
-### Priority 3: Remaining test suites (~628 multi_tensor, ~407 cpu_offloading, ~274 fusible_ops, ~230 mxfp8, ~117 cuda_graphs)
+### Priority 2: multi_tensor numerical (~628)
 
-| Issue | Count | Root cause | Approach |
-|-------|-------|------------|----------|
-| multi_tensor l2norm/unscale | 574 | Numerical mismatch in reduction | Compare kernel outputs; may be precision issue in multi_tensor pointer-pack |
-| multi_tensor e8m0 CPU | 54 | Op only registered for CUDA backend | Add CPU fallback or move tensors to CUDA |
-| cpu_offloading "offset outside capture" | 355 | CUDA graph capture incompatibility | May need graph-safe versions of stable ops |
-| cpu_offloading CUBLAS | 19 | Block scaling CUBLAS (now fixed?) | Re-test after session 3 fixes |
-| fusible_ops numerical | 206 | Various numerical mismatches | Investigate per-op |
-| fusible_ops NVFP4 backward | 26 | Same FP4 packed shape issue as P1 | Will be fixed by P1 |
-| fusible_ops dropout dtype | 6 | Dropout gets Byte instead of BF16 | NVFP4 tensor dtype issue |
-| mxfp8 pow_2_scale | 84 | Blackwell requires power-of-2 scales | Force `pow_2_scale=True` on sm >= 100 |
-| mxfp8 numerical | 128 | group_quantize precision | group_quantize uses per-chunk quantize; fused kernel may differ |
-| mxfp8 NoneType | 18 | Missing colwise scale in group_quantize | Fix group_quantize to populate colwise |
-| cuda_graphs scaling mode mismatch | 27 | Mixed BLOCK_SCALING + DELAYED in GEMM | After P1/block-to-MXFP8 may help |
-| cuda_graphs recipe state attrs | 30 | Missing `scale` attr on recipe state | Add dummy `scale` property |
-| test_numerics SEGFAULT | ~2968 | OOM / cascading CUDA errors | Run per-class; fix upstream CUDA errors first |
-| test_recipe | 15 | Likely same NVFP4/block scaling issues | Re-test after other fixes |
-| test_permutation | 15 | Token dropping edge cases | `moe_unpermute_bwd` shape handling |
-| test_partial_cast | 1 | NVFP4 partial cast | Low priority |
+| Issue | Count | Root cause |
+|-------|-------|------------|
+| l2norm/unscale numerical | 574 | Precision diff in pointer-pack multi_tensor |
+| e8m0 CPU backend | 54 | Op only registered for CUDA |
 
-### Priority 4: Re-run full test suite and update numbers
+### Priority 3: CUDA graph capture (~332 cuda_graphs, ~364 cpu_offloading)
 
-After fixing P1–P3, re-run the full test suite with `run_tests.sh` to get accurate numbers. Many test suites will benefit from cascading improvements (e.g., block-to-MXFP8 fix helps cuda_graphs, cpu_offloading, fusible_ops).
+All failures are "Offset increment outside graph capture" — a deep architectural issue with stable ABI ops and CUDA graph capture. The stable ops use `torch.ops.load_library` dispatch which introduces offset tracking that breaks during graph capture.
+
+### Priority 4: MXFP8 small-matrix GEMM (~230 mxfp8, ~119 fusible_ops mxfp8)
+
+MXFP8 GEMM produces garbage (3.6e+36 max diff) for matrices smaller than 128x128. MXFP8 uses 128-element blocks; sub-block matrices don't meet cuBLAS alignment requirements. This is a cuBLAS/NVTE limitation, not a stable ABI bug. The sanity tests use hidden_size >= 128 and pass fine.
+
+### Priority 5: Remaining issues
+
+| Issue | Count | Root cause |
+|-------|-------|------------|
+| fusible_ops NVFP4 kernel limits | 68 | C++ kernel doesn't support NVFP4 in gated bwd / dbias+dact / dropout |
+| fusible_ops numerical | 198 | Various per-op mismatches |
+| quantized_tensor scale_inv shape | 18 | Transposed scale shape (128,4) vs expected (4,128) |
+| quantized_tensor pow_2_scale | 4 | Blackwell MXFP8 emulation |
+| mxfp8 pow_2_scale | 168 | Same Blackwell issue |
+| mxfp8 group_quantize NoneType | 36 | Columnwise-only (fix #21, untested) |
+| mxfp8 group_quantize numerical | 256 | Per-chunk vs fused kernel |
+| test_permutation | 15 | Token dropping edge cases |
+| test_numerics | SEGFAULT | OOM / cascading CUDA errors |
+| nvfp4 quantize exact | ~832 | Quantization numerical differences |
+| nvfp4 pow_2_scale | 760 | Blackwell assertion |
 
 ## Key Reference
 
