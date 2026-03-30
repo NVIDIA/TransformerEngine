@@ -2974,10 +2974,19 @@ def fused_attn_bwd(
             dP_dtype, dP_amax, dP_scale, dP_si = meta
             dP_sm = 0  # NVTE_DELAYED_TENSOR_SCALING
 
-    # Determine output grad dtype
+    # Determine output grad dtype.
+    # For Float8CurrentScalingQuantizer, the pybind version allocates dQ/dK/dV as
+    # fake_dtype (BF16), NOT uint8. Replicate that here.
+    _is_current_scaling = (
+        dqkv_quantizer is not None and "CurrentScaling" in type(dqkv_quantizer).__name__
+    )
     if dqkv_dtype is not None:
         dqkv_te_dtype = int(dqkv_dtype)
-        dqkv_torch_dtype = _TE_TO_TORCH_DT.get(dqkv_te_dtype, Q_data.dtype)
+        if _is_current_scaling:
+            # Current scaling: output is high-precision with amax tracking
+            dqkv_torch_dtype = fake_dtype if isinstance(fake_dtype, torch.dtype) else Q_data.dtype
+        else:
+            dqkv_torch_dtype = _TE_TO_TORCH_DT.get(dqkv_te_dtype, Q_data.dtype)
     elif isinstance(fake_dtype, torch.dtype):
         dqkv_torch_dtype = fake_dtype
         dqkv_te_dtype = _TORCH_DT.get(fake_dtype, Q_dtype)
@@ -3029,24 +3038,38 @@ def fused_attn_bwd(
     dQ_data, dQ_te_dtype, dQ_si, dQ_sm = extract_tensor_data(dQ)
     dK_data, dK_te_dtype, dK_si, dK_sm = extract_tensor_data(dK)
     dV_data, dV_te_dtype, dV_si, dV_sm = extract_tensor_data(dV)
-    # When dqkv_dtype specifies an FP8 type, the tensors are allocated as uint8
-    # but extract_tensor_data returns kByte (0). Override with the actual FP8 dtype.
-    # Also allocate amax and scale_inv tensors that cuDNN FP8 backward requires.
     dQ_amax = dQ_scale = dK_amax = dK_scale = dV_amax = dV_scale = None
-    if dqkv_te_dtype in (7, 8):  # kFloat8E4M3, kFloat8E5M2
+    if dqkv_te_dtype in (7, 8) and not _is_current_scaling:
+        # Delayed scaling: dQ/dK/dV are FP8 (uint8), need scale/scale_inv/amax.
+        # The pybind version uses Float8Quantizer::create_tensor which computes
+        # scale_inv = 1/scale from the quantizer's scale. Replicate that here.
         dQ_te_dtype = dqkv_te_dtype
         dK_te_dtype = dqkv_te_dtype
         dV_te_dtype = dqkv_te_dtype
-        # cuDNN FP8 backward needs non-null amax/scale_inv on output dQ/dK/dV
+        dqkv_q_scale = getattr(dqkv_quantizer, "scale", None) if dqkv_quantizer else None
+        if dqkv_q_scale is not None:
+            dqkv_scale_f32 = dqkv_q_scale.detach().to(dtype=torch.float32, device=device).reshape(1)
+            dqkv_si_f32 = (1.0 / dqkv_q_scale).to(dtype=torch.float32, device=device).reshape(1)
+        else:
+            dqkv_scale_f32 = torch.ones([1], dtype=torch.float32, device=device)
+            dqkv_si_f32 = torch.ones([1], dtype=torch.float32, device=device)
         dQ_amax = torch.zeros([1], dtype=torch.float32, device=device)
-        dQ_scale = torch.ones([1], dtype=torch.float32, device=device)
-        dQ_si = torch.ones([1], dtype=torch.float32, device=device)
+        dQ_scale = dqkv_scale_f32
+        dQ_si = dqkv_si_f32.clone()
         dK_amax = torch.zeros([1], dtype=torch.float32, device=device)
-        dK_scale = torch.ones([1], dtype=torch.float32, device=device)
-        dK_si = torch.ones([1], dtype=torch.float32, device=device)
+        dK_scale = dqkv_scale_f32.clone()
+        dK_si = dqkv_si_f32.clone()
         dV_amax = torch.zeros([1], dtype=torch.float32, device=device)
-        dV_scale = torch.ones([1], dtype=torch.float32, device=device)
-        dV_si = torch.ones([1], dtype=torch.float32, device=device)
+        dV_scale = dqkv_scale_f32.clone()
+        dV_si = dqkv_si_f32.clone()
+    elif _is_current_scaling:
+        # Current scaling: dQ/dK/dV are high-precision (BF16/FP16) with amax tracking.
+        # The pybind version uses create_unquantized_tensor_with_amax → NoneQuantizer tensor.
+        # dQ/dK/dV are already allocated as fake_dtype, extract_tensor_data returns BF16 dtype.
+        # Just need amax for cuDNN.
+        dQ_amax = torch.zeros([1], dtype=torch.float32, device=device)
+        dK_amax = torch.zeros([1], dtype=torch.float32, device=device)
+        dV_amax = torch.zeros([1], dtype=torch.float32, device=device)
 
     # dBias: allocate when bias_type not in {NO_BIAS=0, ALIBI=2}
     num_heads_q = Q_shape[-2] if len(Q_shape) >= 2 else 1
@@ -3147,6 +3170,29 @@ def fused_attn_bwd(
         num_aux,
         *aux_list,
     )
+
+    # For delayed-scaling FP8 output, wrap raw uint8 tensors in Float8Tensor with
+    # scale_inv so downstream operations correctly dequantize. For current scaling,
+    # the output is already high-precision (BF16) and doesn't need wrapping.
+    if dqkv_te_dtype in (7, 8) and dqkv_quantizer is not None and not _is_current_scaling:
+        from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
+
+        fp8_dtype_val = getattr(dqkv_quantizer, "dtype", dqkv_te_dtype)
+        fake_dt = fake_dtype if isinstance(fake_dtype, torch.dtype) else torch.bfloat16
+
+        def _wrap_fp8(raw_tensor, si_tensor):
+            return Float8Tensor(
+                raw_tensor.shape,
+                fake_dt,
+                data=raw_tensor,
+                fp8_scale_inv=si_tensor,
+                fp8_dtype=fp8_dtype_val,
+                quantizer=dqkv_quantizer,
+            )
+
+        dQ = _wrap_fp8(dQ, dQ_si)
+        dK = _wrap_fp8(dK, dK_si)
+        dV = _wrap_fp8(dV, dV_si)
 
     return [dQ, dK, dV, dBias, dSoftmaxOffset]
 
