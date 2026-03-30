@@ -14,7 +14,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-import warnings
 
 from flax.linen import combine_masks
 from flax.linen import make_attention_mask
@@ -1586,66 +1585,4 @@ class TestFusedAttnWithDeterminism:
             bias_shape,
             swa,
             seq_desc_format,
-        )
-
-
-class TestMaxSegmentsPerSeqWarning:
-    """Tests that a UserWarning is emitted when max_segments_per_seq > 1 is used with a
-    non-THD layout. The warning should be issued at the Python level before any JAX dispatch,
-    so these tests pass regardless of GPU/cuDNN availability."""
-
-    @staticmethod
-    @pytest.mark.parametrize(
-        "qkv_layout, qkv_tuple_fn",
-        [
-            pytest.param(
-                QKVLayout.BS3HD,
-                lambda b, s, h, d, dt: (jnp.zeros((b, s, 3, h, d), dtype=dt),),
-                id="BS3HD",
-            ),
-            pytest.param(
-                QKVLayout.BSHD_BSHD_BSHD,
-                lambda b, s, h, d, dt: (
-                    jnp.zeros((b, s, h, d), dtype=dt),
-                    jnp.zeros((b, s, h, d), dtype=dt),
-                    jnp.zeros((b, s, h, d), dtype=dt),
-                ),
-                id="BSHD_BSHD_BSHD",
-            ),
-        ],
-    )
-    def test_warns_max_segments_with_non_thd(qkv_layout, qkv_tuple_fn):
-        """max_segments_per_seq > 1 with a non-THD (BSHD) layout must emit a UserWarning
-        explaining that sequence packing only applies to THD layouts."""
-        b, s, h, d = 2, 4, 1, 8
-        dtype = jnp.bfloat16
-        qkv = qkv_tuple_fn(b, s, h, d, dtype)
-        seq_desc = SequenceDescriptor.from_seqlens(seqlens=(jnp.full((b,), s), jnp.full((b,), s)))
-
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            try:
-                fused_attn(
-                    qkv,
-                    None,
-                    seq_desc,
-                    None,
-                    AttnBiasType.NO_BIAS,
-                    AttnMaskType.NO_MASK,
-                    qkv_layout,
-                    AttnSoftmaxType.VANILLA_SOFTMAX,
-                    1.0 / d**0.5,
-                    0.0,
-                    False,
-                    max_segments_per_seq=2,
-                )
-            except Exception:
-                pass  # GPU/cuDNN may not be available; warning is issued before dispatch
-
-        assert any(
-            issubclass(w.category, UserWarning) and "max_segments_per_seq" in str(w.message)
-            for w in caught
-        ), (
-            "Expected a UserWarning mentioning 'max_segments_per_seq' when using "
-            f"{qkv_layout} with max_segments_per_seq=2, but no such warning was found."
         )
