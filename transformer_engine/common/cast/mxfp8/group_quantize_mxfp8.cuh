@@ -128,7 +128,7 @@ __device__ __forceinline__ void process_colwise_stage(
   if constexpr (BF16_CAST_ONLY) {
     IType4 rIn4x[BUFF_DIM_Y / 4];
     IType2 thread_amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
-    #pragma unroll
+#pragma unroll
     for (int i = 0; i < BUFF_DIM_Y; i += 4) {
       const uint32_t src_smem_ptr = __cvta_generic_to_shared(&sIn[buff][i][j]);
 
@@ -159,14 +159,16 @@ __device__ __forceinline__ void process_colwise_stage(
             "+r"(reinterpret_cast<uint32_t &>(thread_amax_2x))
           : "r"(src_smem_ptr), "r"(IN_SHMEM_STRIDE));
     }
-    const float thread_amax = static_cast<float>(__hmax(__habs(thread_amax_2x.x), __habs(thread_amax_2x.y)));
+    const float thread_amax =
+        static_cast<float>(__hmax(__habs(thread_amax_2x.x), __habs(thread_amax_2x.y)));
 
-    const e8m0_t biased_exponent = ptx::float_to_e8m0(thread_amax * Quantized_Limits<OType>::max_norm_rcp);
+    const e8m0_t biased_exponent =
+        ptx::float_to_e8m0(thread_amax * Quantized_Limits<OType>::max_norm_rcp);
     scales_colwise[scale_idx] = biased_exponent;
 
     const bf16 block_scale_inverse = ptx::exp2f_rcp<bf16>(biased_exponent);
     const ptx::bf16x2 block_scale_inverse_bf16_x2 = {block_scale_inverse, block_scale_inverse};
-    #pragma unroll
+#pragma unroll
     for (int i = 0; i < SCALE_DIM_Y; i += 4) {
       OType4 out;
       ptx::mul_cvt_4x(out, rIn4x[i / 4], block_scale_inverse_bf16_x2);
@@ -199,14 +201,14 @@ __device__ __forceinline__ void process_colwise_stage(
 
     if constexpr (FP16_CAST_ONLY) {
       IType thread_amax_f16 = static_cast<IType>(0.0f);
-      #pragma unroll
+#pragma unroll
       for (int i = 0; i < BUFF_DIM_Y; ++i) {
         rIn[i] = sIn[buff][i][j];
         thread_amax_f16 = __hmax(thread_amax_f16, __habs(rIn[i]));
       }
       thread_amax = static_cast<float>(thread_amax_f16);
     } else {
-      #pragma unroll
+#pragma unroll
       for (int i = 0; i < BUFF_DIM_Y; ++i) {
         float elt = static_cast<float>(sIn[buff][i][j]);
         if constexpr (IS_ACT) {
@@ -230,11 +232,12 @@ __device__ __forceinline__ void process_colwise_stage(
       }
     }
 
-    const e8m0_t biased_exponent = ptx::float_to_e8m0(thread_amax * Quantized_Limits<OType>::max_norm_rcp);
+    const e8m0_t biased_exponent =
+        ptx::float_to_e8m0(thread_amax * Quantized_Limits<OType>::max_norm_rcp);
     scales_colwise[scale_idx] = biased_exponent;
 
     const float block_scale_inverse = ptx::exp2f_rcp<float>(biased_exponent);
-    #pragma unroll
+#pragma unroll
     for (int i = 0; i < SCALE_DIM_Y; ++i) {
       float in;
       if constexpr (FP16_CAST_ONLY) {
@@ -543,8 +546,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
     }
     if (!job_has_work(current_job)) {
       // Zero-sized tensors are valid grouped-tensor entries; skip them and keep scheduling work.
-      advance_to_next_job(job_finished, ctaid_X, ctaid_Y, static_next_block_id,
-                          static_block_stride, total_work_blocks, work_blocks_X);
+      advance_to_next_job(job_finished, ctaid_X, ctaid_Y, static_next_block_id, static_block_stride,
+                          total_work_blocks, work_blocks_X);
       continue;
     }
 
@@ -666,16 +669,16 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
 
       const size_t buff = buff_in;
       if constexpr (COLWISE_SCALING) {
-        process_colwise_stage<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
-                              ROWWISE_SCALING, WITH_GEMM_SWIZZLED_SCALES>(
+        process_colwise_stage<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, ROWWISE_SCALING,
+                              WITH_GEMM_SWIZZLED_SCALES>(
             buff, stage, tid_X_colwise, scales_offset_Y_colwise, scales_offset_X_colwise,
             scale_stride_colwise, tensor_base_for_scales, rows, cols, sIn_ptr, sActIn_ptr,
             sCachedAct_ptr, sOutColwise_ptr, scales_colwise, partial_dbias_colwise);
       }
 
       if constexpr (ROWWISE_SCALING) {
-        process_rowwise_stage<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
-                              COLWISE_SCALING, WITH_GEMM_SWIZZLED_SCALES>(
+        process_rowwise_stage<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, COLWISE_SCALING,
+                              WITH_GEMM_SWIZZLED_SCALES>(
             buff, stage_offset_Y, thread_offset_Y_rowwise, thread_offset_X_rowwise, bank_group,
             scales_offset_Y_rowwise, scales_offset_X_rowwise, scale_stride_rowwise,
             rowwise_scale_is_within_bounds, cols, sIn_ptr, sActIn_ptr, sCachedAct_ptr,
@@ -736,8 +739,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
       }
     }
 
-    advance_to_next_job(job_finished, ctaid_X, ctaid_Y, static_next_block_id,
-                        static_block_stride, total_work_blocks, work_blocks_X);
+    advance_to_next_job(job_finished, ctaid_X, ctaid_Y, static_next_block_id, static_block_stride,
+                        total_work_blocks, work_blocks_X);
   }
 
   destroy_barriers<BUFFS_NUM>(IN_buff_readable_mbar, leading_thread);
