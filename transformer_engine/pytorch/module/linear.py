@@ -153,9 +153,6 @@ def _linear_forward_impl(
     if debug:  # turn off userbuffers in debug mode
         ub_overlap_rs_fprop = False
         ub_overlap_ag_fprop = False
-        ub_overlap_rs_dgrad = False
-        ub_bulk_wgrad = False
-        ub_bulk_dgrad = False
     ub_obj = None
     ub_type = None
     if ub_overlap_rs_fprop:
@@ -178,7 +175,6 @@ def _linear_forward_impl(
     own_quantized_input = False
     if fp8:
         assert_dim_for_fp8_exec(inputmat, weight)
-        assert_dim_for_all_gather(inputmat, with_input_all_gather_nccl, input_quantizer)
         if save_original_input:
             assert not isinstance(
                 input_quantizer, Float8Quantizer
@@ -1029,6 +1025,12 @@ def _linear_backward(
         wgrad,
         dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
         grad_bias,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
         None,
     )
 
