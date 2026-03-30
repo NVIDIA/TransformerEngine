@@ -4,19 +4,17 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "../stable_common.h"
-
 #include <transformer_engine/fused_rope.h>
+
+#include "../stable_common.h"
 
 namespace transformer_engine::pytorch::stable {
 
 using Tensor = torch::stable::Tensor;
 
-Tensor fused_rope_forward(Tensor input, Tensor freqs,
-                          std::optional<Tensor> start_positions,
-                          int64_t qkv_format, bool interleaved,
-                          std::optional<Tensor> cu_seqlens, int64_t cp_size,
-                          int64_t cp_rank) {
+Tensor fused_rope_forward(Tensor input, Tensor freqs, std::optional<Tensor> start_positions,
+                          int64_t qkv_format, bool interleaved, std::optional<Tensor> cu_seqlens,
+                          int64_t cp_size, int64_t cp_rank) {
   auto nvte_qkv_format = static_cast<NVTE_QKV_Format>(qkv_format);
 
   STD_TORCH_CHECK(freqs.dim() == 4, "expected 4D tensor");
@@ -29,8 +27,7 @@ Tensor fused_rope_forward(Tensor input, Tensor freqs,
   // non-contiguous strides from transposed inputs)
   auto sizes = input.sizes();
   std::vector<int64_t> shape_vec(sizes.begin(), sizes.end());
-  auto output = allocateStableTensor(shape_vec, input.scalar_type(),
-                                     input.get_device_index());
+  auto output = allocateStableTensor(shape_vec, input.scalar_type(), input.get_device_index());
 
   auto input_cu = makeTransformerEngineTensor(input);
   auto freqs_cu = makeTransformerEngineTensor(freqs);
@@ -60,11 +57,10 @@ Tensor fused_rope_forward(Tensor input, Tensor freqs,
 
     auto cu_seqlens_cu = makeTransformerEngineTensor(cu_seqlens.value());
 
-    nvte_fused_rope_forward(
-        input_cu.data(), cu_seqlens_cu.data(), freqs_cu.data(),
-        start_positions_cu.data(), output_cu.data(), nvte_qkv_format,
-        interleaved, static_cast<int>(cp_size), static_cast<int>(cp_rank),
-        max_s, b, h, d, d2, stride_t, 0, stride_h, stride_d, stream);
+    nvte_fused_rope_forward(input_cu.data(), cu_seqlens_cu.data(), freqs_cu.data(),
+                            start_positions_cu.data(), output_cu.data(), nvte_qkv_format,
+                            interleaved, static_cast<int>(cp_size), static_cast<int>(cp_rank),
+                            max_s, b, h, d, d2, stride_t, 0, stride_h, stride_d, stream);
 
     return output;
   }
@@ -82,20 +78,17 @@ Tensor fused_rope_forward(Tensor input, Tensor freqs,
   const int d2 = static_cast<int>(freqs.size(3));
 
   auto cu_seqlens_cu = TensorWrapper();
-  nvte_fused_rope_forward(
-      input_cu.data(), cu_seqlens_cu.data(), freqs_cu.data(),
-      start_positions_cu.data(), output_cu.data(), nvte_qkv_format, interleaved,
-      static_cast<int>(cp_size), static_cast<int>(cp_rank), s, b, h, d, d2,
-      stride_s, stride_b, stride_h, stride_d, stream);
+  nvte_fused_rope_forward(input_cu.data(), cu_seqlens_cu.data(), freqs_cu.data(),
+                          start_positions_cu.data(), output_cu.data(), nvte_qkv_format, interleaved,
+                          static_cast<int>(cp_size), static_cast<int>(cp_rank), s, b, h, d, d2,
+                          stride_s, stride_b, stride_h, stride_d, stream);
 
   return output;
 }
 
-Tensor fused_rope_backward(Tensor output_grads, Tensor freqs,
-                           std::optional<Tensor> start_positions,
-                           int64_t qkv_format, bool interleaved,
-                           std::optional<Tensor> cu_seqlens, int64_t cp_size,
-                           int64_t cp_rank) {
+Tensor fused_rope_backward(Tensor output_grads, Tensor freqs, std::optional<Tensor> start_positions,
+                           int64_t qkv_format, bool interleaved, std::optional<Tensor> cu_seqlens,
+                           int64_t cp_size, int64_t cp_rank) {
   auto nvte_qkv_format = static_cast<NVTE_QKV_Format>(qkv_format);
 
   STD_TORCH_CHECK(freqs.dim() == 4, "expected 4D tensor");
@@ -104,8 +97,8 @@ Tensor fused_rope_backward(Tensor output_grads, Tensor freqs,
 
   auto og_sizes = output_grads.sizes();
   std::vector<int64_t> og_shape(og_sizes.begin(), og_sizes.end());
-  auto input_grads = allocateStableTensor(og_shape, output_grads.scalar_type(),
-                                          output_grads.get_device_index());
+  auto input_grads =
+      allocateStableTensor(og_shape, output_grads.scalar_type(), output_grads.get_device_index());
 
   auto output_grads_cu = makeTransformerEngineTensor(output_grads);
   auto freqs_cu = makeTransformerEngineTensor(freqs);
@@ -133,11 +126,10 @@ Tensor fused_rope_backward(Tensor output_grads, Tensor freqs,
 
     auto cu_seqlens_cu = makeTransformerEngineTensor(cu_seqlens.value());
 
-    nvte_fused_rope_backward(
-        output_grads_cu.data(), cu_seqlens_cu.data(), freqs_cu.data(),
-        start_positions_cu.data(), input_grads_cu.data(), nvte_qkv_format,
-        interleaved, static_cast<int>(cp_size), static_cast<int>(cp_rank),
-        max_s, b, h, d, d2, stride_t, 0, stride_h, stride_d, stream);
+    nvte_fused_rope_backward(output_grads_cu.data(), cu_seqlens_cu.data(), freqs_cu.data(),
+                             start_positions_cu.data(), input_grads_cu.data(), nvte_qkv_format,
+                             interleaved, static_cast<int>(cp_size), static_cast<int>(cp_rank),
+                             max_s, b, h, d, d2, stride_t, 0, stride_h, stride_d, stream);
 
     return input_grads;
   }
@@ -155,20 +147,20 @@ Tensor fused_rope_backward(Tensor output_grads, Tensor freqs,
   const int d2 = static_cast<int>(freqs.size(3));
 
   auto cu_seqlens_cu = TensorWrapper();
-  nvte_fused_rope_backward(
-      output_grads_cu.data(), cu_seqlens_cu.data(), freqs_cu.data(),
-      start_positions_cu.data(), input_grads_cu.data(), nvte_qkv_format,
-      interleaved, static_cast<int>(cp_size), static_cast<int>(cp_rank), s, b,
-      h, d, d2, stride_s, stride_b, stride_h, stride_d, stream);
+  nvte_fused_rope_backward(output_grads_cu.data(), cu_seqlens_cu.data(), freqs_cu.data(),
+                           start_positions_cu.data(), input_grads_cu.data(), nvte_qkv_format,
+                           interleaved, static_cast<int>(cp_size), static_cast<int>(cp_rank), s, b,
+                           h, d, d2, stride_s, stride_b, stride_h, stride_d, stream);
 
   return input_grads;
 }
 
-std::tuple<Tensor, Tensor, Tensor> fused_qkv_rope_forward(
-    Tensor qkv_input, Tensor q_freqs, Tensor k_freqs,
-    std::optional<Tensor> start_positions,
-    std::vector<int64_t> qkv_split_arg_list, int64_t qkv_format,
-    bool interleaved, int64_t cp_size, int64_t cp_rank) {
+std::tuple<Tensor, Tensor, Tensor> fused_qkv_rope_forward(Tensor qkv_input, Tensor q_freqs,
+                                                          Tensor k_freqs,
+                                                          std::optional<Tensor> start_positions,
+                                                          std::vector<int64_t> qkv_split_arg_list,
+                                                          int64_t qkv_format, bool interleaved,
+                                                          int64_t cp_size, int64_t cp_rank) {
   auto nvte_qkv_format = static_cast<NVTE_QKV_Format>(qkv_format);
 
   STD_TORCH_CHECK(q_freqs.dim() == 4, "expected 4D tensor");
@@ -182,16 +174,14 @@ std::tuple<Tensor, Tensor, Tensor> fused_qkv_rope_forward(
 
   // q_out shape
   std::vector<int64_t> q_out_size = {sizes[0], sizes[1],
-      sizes[2] * qkv_split_arg_list[0] / qkv_split_arg_list[1],
-      qkv_split_arg_list[1]};
+                                     sizes[2] * qkv_split_arg_list[0] / qkv_split_arg_list[1],
+                                     qkv_split_arg_list[1]};
   auto q_out = allocateStableTensor(q_out_size, dtype, device_idx);
 
-  std::vector<int64_t> k_out_size = {sizes[0], sizes[1], sizes[2],
-                                     qkv_split_arg_list[1]};
+  std::vector<int64_t> k_out_size = {sizes[0], sizes[1], sizes[2], qkv_split_arg_list[1]};
   auto k_out = allocateStableTensor(k_out_size, dtype, device_idx);
 
-  std::vector<int64_t> v_out_size = {sizes[0], sizes[1], sizes[2],
-                                     qkv_split_arg_list[2]};
+  std::vector<int64_t> v_out_size = {sizes[0], sizes[1], sizes[2], qkv_split_arg_list[2]};
   auto v_out = allocateStableTensor(v_out_size, dtype, device_idx);
 
   auto qkv_cu = makeTransformerEngineTensor(qkv_input);
@@ -214,32 +204,28 @@ std::tuple<Tensor, Tensor, Tensor> fused_qkv_rope_forward(
   const int d2 = static_cast<int>(q_freqs.size(3));
 
   nvte_fused_qkv_rope_forward(
-      qkv_cu.data(), q_freqs_cu.data(), k_freqs_cu.data(),
-      start_positions_cu.data(), q_out_cu.data(), k_out_cu.data(),
-      v_out_cu.data(), nvte_qkv_format, interleaved,
+      qkv_cu.data(), q_freqs_cu.data(), k_freqs_cu.data(), start_positions_cu.data(),
+      q_out_cu.data(), k_out_cu.data(), v_out_cu.data(), nvte_qkv_format, interleaved,
       static_cast<int>(cp_size), static_cast<int>(cp_rank), s, b, h, d, d2,
-      static_cast<int>(qkv_split_arg_list[0]),
-      static_cast<int>(qkv_split_arg_list[1]),
-      static_cast<int>(qkv_split_arg_list[2]),
-      getCurrentCUDAStreamRaw(device_idx));
+      static_cast<int>(qkv_split_arg_list[0]), static_cast<int>(qkv_split_arg_list[1]),
+      static_cast<int>(qkv_split_arg_list[2]), getCurrentCUDAStreamRaw(device_idx));
 
   return std::make_tuple(q_out, k_out, v_out);
 }
 
-Tensor fused_qkv_rope_backward(
-    Tensor q_grad_out, Tensor k_grad_out, Tensor v_grad_out, Tensor q_freqs,
-    Tensor k_freqs, std::vector<int64_t> qkv_split_arg_list,
-    int64_t qkv_format, bool interleaved, int64_t cp_size, int64_t cp_rank) {
+Tensor fused_qkv_rope_backward(Tensor q_grad_out, Tensor k_grad_out, Tensor v_grad_out,
+                               Tensor q_freqs, Tensor k_freqs,
+                               std::vector<int64_t> qkv_split_arg_list, int64_t qkv_format,
+                               bool interleaved, int64_t cp_size, int64_t cp_rank) {
   auto nvte_qkv_format = static_cast<NVTE_QKV_Format>(qkv_format);
   auto dtype = q_grad_out.scalar_type();
   auto device_idx = q_grad_out.get_device_index();
 
-  auto total_hd = (q_grad_out.size(2) + k_grad_out.size(2) +
-                   v_grad_out.size(2)) * q_grad_out.size(3);
-  auto total_d =
-      qkv_split_arg_list[0] + qkv_split_arg_list[1] + qkv_split_arg_list[2];
-  std::vector<int64_t> qkv_grad_size = {
-      q_grad_out.size(0), q_grad_out.size(1), total_hd / total_d, total_d};
+  auto total_hd =
+      (q_grad_out.size(2) + k_grad_out.size(2) + v_grad_out.size(2)) * q_grad_out.size(3);
+  auto total_d = qkv_split_arg_list[0] + qkv_split_arg_list[1] + qkv_split_arg_list[2];
+  std::vector<int64_t> qkv_grad_size = {q_grad_out.size(0), q_grad_out.size(1), total_hd / total_d,
+                                        total_d};
   auto qkv_grad_input = allocateStableTensor(qkv_grad_size, dtype, device_idx);
 
   const bool is_sbhd = nvte_qkv_format == NVTE_QKV_Format::NVTE_SBHD;
@@ -257,14 +243,11 @@ Tensor fused_qkv_rope_backward(
   auto qkv_grad_cu = makeTransformerEngineTensor(qkv_grad_input);
 
   nvte_fused_qkv_rope_backward(
-      q_grad_out_cu.data(), k_grad_out_cu.data(), v_grad_out_cu.data(),
-      q_freqs_cu.data(), k_freqs_cu.data(), qkv_grad_cu.data(),
-      nvte_qkv_format, interleaved, static_cast<int>(cp_size),
-      static_cast<int>(cp_rank), s, b, h, d, d2,
-      static_cast<int>(qkv_split_arg_list[0]),
-      static_cast<int>(qkv_split_arg_list[1]),
-      static_cast<int>(qkv_split_arg_list[2]),
-      getCurrentCUDAStreamRaw(device_idx));
+      q_grad_out_cu.data(), k_grad_out_cu.data(), v_grad_out_cu.data(), q_freqs_cu.data(),
+      k_freqs_cu.data(), qkv_grad_cu.data(), nvte_qkv_format, interleaved,
+      static_cast<int>(cp_size), static_cast<int>(cp_rank), s, b, h, d, d2,
+      static_cast<int>(qkv_split_arg_list[0]), static_cast<int>(qkv_split_arg_list[1]),
+      static_cast<int>(qkv_split_arg_list[2]), getCurrentCUDAStreamRaw(device_idx));
 
   return qkv_grad_input;
 }

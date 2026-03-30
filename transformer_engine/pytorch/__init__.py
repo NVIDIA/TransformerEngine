@@ -18,6 +18,7 @@ assert torch_version() >= (2, 1), f"Minimum torch version 2.1 required. Found {t
 # so that _tex.py can use `from transformer_engine_torch import *` (matching upstream).
 import sys as _sys
 import transformer_engine.pytorch._stable_torch_module as _te_torch_mod
+
 _sys.modules.setdefault("transformer_engine_torch", _te_torch_mod)
 del _sys, _te_torch_mod
 

@@ -36,6 +36,7 @@ def _ensure_loaded():
     if te_spec is not None and te_spec.origin is not None:
         te_dir = Path(te_spec.origin).parent.parent
         import glob
+
         candidates = glob.glob(str(te_dir / "te_stable_abi*"))
         if candidates:
             torch.ops.load_library(candidates[0])
@@ -53,9 +54,7 @@ def _ensure_loaded():
 def scaled_softmax_forward(input, scale_factor):
     """Stable ABI version of scaled_softmax_forward."""
     _ensure_loaded()
-    return torch.ops.transformer_engine_stable.scaled_softmax_forward(
-        input, scale_factor
-    )
+    return torch.ops.transformer_engine_stable.scaled_softmax_forward(input, scale_factor)
 
 
 def scaled_softmax_backward(output_grad, softmax_results, scale_factor):
@@ -90,9 +89,7 @@ def scaled_upper_triang_masked_softmax_forward(input, scale_factor):
     )
 
 
-def scaled_upper_triang_masked_softmax_backward(
-    output_grads, softmax_results, scale_factor
-):
+def scaled_upper_triang_masked_softmax_backward(output_grads, softmax_results, scale_factor):
     """Stable ABI version of scaled_upper_triang_masked_softmax_backward."""
     _ensure_loaded()
     return torch.ops.transformer_engine_stable.scaled_upper_triang_masked_softmax_backward(
@@ -108,9 +105,7 @@ def scaled_aligned_causal_masked_softmax_forward(input, scale_factor):
     )
 
 
-def scaled_aligned_causal_masked_softmax_backward(
-    output_grad, softmax_results, scale_factor
-):
+def scaled_aligned_causal_masked_softmax_backward(output_grad, softmax_results, scale_factor):
     """Stable ABI version of scaled_aligned_causal_masked_softmax_backward."""
     _ensure_loaded()
     return torch.ops.transformer_engine_stable.scaled_aligned_causal_masked_softmax_backward(
@@ -144,9 +139,7 @@ def fused_multi_row_unpadding(input, output, input_row_list, unpadded_input_row_
 
 def splits_to_offsets(first_dims, logical_last_dim):
     _ensure_loaded()
-    return torch.ops.transformer_engine_stable.splits_to_offsets(
-        first_dims, logical_last_dim
-    )
+    return torch.ops.transformer_engine_stable.splits_to_offsets(first_dims, logical_last_dim)
 
 
 # ============================================================================
@@ -155,46 +148,79 @@ def splits_to_offsets(first_dims, logical_last_dim):
 
 
 def fused_rope_forward(
-    input, freqs, start_positions, qkv_format, interleaved, cu_seqlens,
-    cp_size, cp_rank
+    input, freqs, start_positions, qkv_format, interleaved, cu_seqlens, cp_size, cp_rank
 ):
     _ensure_loaded()
     return torch.ops.transformer_engine_stable.fused_rope_forward(
-        input, freqs, start_positions, int(qkv_format), interleaved,
-        cu_seqlens, cp_size, cp_rank
+        input, freqs, start_positions, int(qkv_format), interleaved, cu_seqlens, cp_size, cp_rank
     )
 
 
 def fused_rope_backward(
-    output_grads, freqs, start_positions, qkv_format, interleaved,
-    cu_seqlens, cp_size, cp_rank
+    output_grads, freqs, start_positions, qkv_format, interleaved, cu_seqlens, cp_size, cp_rank
 ):
     _ensure_loaded()
     return torch.ops.transformer_engine_stable.fused_rope_backward(
-        output_grads, freqs, start_positions, int(qkv_format), interleaved,
-        cu_seqlens, cp_size, cp_rank
+        output_grads,
+        freqs,
+        start_positions,
+        int(qkv_format),
+        interleaved,
+        cu_seqlens,
+        cp_size,
+        cp_rank,
     )
 
 
 def fused_qkv_rope_forward(
-    qkv_input, q_freqs, k_freqs, start_positions, qkv_split_arg_list,
-    qkv_format, interleaved, cp_size, cp_rank
+    qkv_input,
+    q_freqs,
+    k_freqs,
+    start_positions,
+    qkv_split_arg_list,
+    qkv_format,
+    interleaved,
+    cp_size,
+    cp_rank,
 ):
     _ensure_loaded()
     return torch.ops.transformer_engine_stable.fused_qkv_rope_forward(
-        qkv_input, q_freqs, k_freqs, start_positions, qkv_split_arg_list,
-        int(qkv_format), interleaved, cp_size, cp_rank
+        qkv_input,
+        q_freqs,
+        k_freqs,
+        start_positions,
+        qkv_split_arg_list,
+        int(qkv_format),
+        interleaved,
+        cp_size,
+        cp_rank,
     )
 
 
 def fused_qkv_rope_backward(
-    q_grad_out, k_grad_out, v_grad_out, q_freqs, k_freqs,
-    qkv_split_arg_list, qkv_format, interleaved, cp_size, cp_rank
+    q_grad_out,
+    k_grad_out,
+    v_grad_out,
+    q_freqs,
+    k_freqs,
+    qkv_split_arg_list,
+    qkv_format,
+    interleaved,
+    cp_size,
+    cp_rank,
 ):
     _ensure_loaded()
     return torch.ops.transformer_engine_stable.fused_qkv_rope_backward(
-        q_grad_out, k_grad_out, v_grad_out, q_freqs, k_freqs,
-        qkv_split_arg_list, int(qkv_format), interleaved, cp_size, cp_rank
+        q_grad_out,
+        k_grad_out,
+        v_grad_out,
+        q_freqs,
+        k_freqs,
+        qkv_split_arg_list,
+        int(qkv_format),
+        interleaved,
+        cp_size,
+        cp_rank,
     )
 
 
@@ -204,8 +230,14 @@ def fused_qkv_rope_backward(
 
 
 def fused_topk_with_score_function_fwd(
-    logits, topk, use_pre_softmax, num_groups, group_topk, scaling_factor,
-    score_function, expert_bias
+    logits,
+    topk,
+    use_pre_softmax,
+    num_groups,
+    group_topk,
+    scaling_factor,
+    score_function,
+    expert_bias,
 ):
     _ensure_loaded()
     ng = num_groups if num_groups is not None else -1
@@ -217,14 +249,30 @@ def fused_topk_with_score_function_fwd(
 
 
 def fused_topk_with_score_function_bwd(
-    num_tokens, num_experts, routing_map, intermediate_output, grad_probs,
-    grad_logits, topk, use_pre_softmax, scaling_factor, score_function
+    num_tokens,
+    num_experts,
+    routing_map,
+    intermediate_output,
+    grad_probs,
+    grad_logits,
+    topk,
+    use_pre_softmax,
+    scaling_factor,
+    score_function,
 ):
     _ensure_loaded()
     sf = scaling_factor if scaling_factor is not None else 1.0
     torch.ops.transformer_engine_stable.fused_topk_with_score_function_bwd(
-        num_tokens, num_experts, routing_map, intermediate_output, grad_probs,
-        grad_logits, topk, use_pre_softmax, sf, score_function
+        num_tokens,
+        num_experts,
+        routing_map,
+        intermediate_output,
+        grad_probs,
+        grad_logits,
+        topk,
+        use_pre_softmax,
+        sf,
+        score_function,
     )
 
 
@@ -236,30 +284,24 @@ def fused_score_for_moe_aux_loss_fwd(logits, topk, score_function):
 
 
 def fused_score_for_moe_aux_loss_bwd(
-    num_tokens, num_experts, intermediate_output, grad_scores, grad_logits,
-    topk, score_function
+    num_tokens, num_experts, intermediate_output, grad_scores, grad_logits, topk, score_function
 ):
     _ensure_loaded()
     torch.ops.transformer_engine_stable.fused_score_for_moe_aux_loss_bwd(
-        num_tokens, num_experts, intermediate_output, grad_scores, grad_logits,
-        topk, score_function
+        num_tokens, num_experts, intermediate_output, grad_scores, grad_logits, topk, score_function
     )
 
 
 def fused_moe_aux_loss_fwd(
-    probs, tokens_per_expert, total_num_tokens, num_experts, num_rows,
-    num_cols, topk, coeff
+    probs, tokens_per_expert, total_num_tokens, num_experts, num_rows, num_cols, topk, coeff
 ):
     _ensure_loaded()
     return torch.ops.transformer_engine_stable.fused_moe_aux_loss_fwd(
-        probs, tokens_per_expert, total_num_tokens, num_experts, num_rows,
-        num_cols, topk, coeff
+        probs, tokens_per_expert, total_num_tokens, num_experts, num_rows, num_cols, topk, coeff
     )
 
 
-def fused_moe_aux_loss_bwd(
-    Const_buf, tokens_per_expert, num_rows, num_cols, grad_aux_loss
-):
+def fused_moe_aux_loss_bwd(Const_buf, tokens_per_expert, num_rows, num_cols, grad_aux_loss):
     _ensure_loaded()
     return torch.ops.transformer_engine_stable.fused_moe_aux_loss_bwd(
         Const_buf, tokens_per_expert, num_rows, num_cols, grad_aux_loss

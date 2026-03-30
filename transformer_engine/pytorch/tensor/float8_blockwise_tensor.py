@@ -111,6 +111,7 @@ class Float8BlockQuantizer(Quantizer):
 
         # Launch cast kernel via stable ABI
         from transformer_engine.pytorch.tensor._quantize_stable import quantize_into
+
         quantize_into(src, self, dst, noop_flag)
 
         dst._fp8_dtype = self.dtype
@@ -119,6 +120,7 @@ class Float8BlockQuantizer(Quantizer):
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
         """Quantize tensor implementation via stable ABI"""
         from transformer_engine.pytorch.tensor._quantize_stable import quantize_into
+
         dst = self.make_empty(list(tensor.shape), dtype=tensor.dtype, device=tensor.device)
         if tensor.numel() > 0:
             t = tensor.contiguous() if not tensor.is_contiguous() else tensor

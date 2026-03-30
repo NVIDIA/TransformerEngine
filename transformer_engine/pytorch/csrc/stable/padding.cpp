@@ -4,16 +4,15 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "../stable_common.h"
-
 #include <transformer_engine/padding.h>
+
+#include "../stable_common.h"
 
 namespace transformer_engine::pytorch::stable {
 
 using Tensor = torch::stable::Tensor;
 
-void fused_multi_row_padding(Tensor input, Tensor output,
-                             std::vector<int64_t> input_row_list,
+void fused_multi_row_padding(Tensor input, Tensor output, std::vector<int64_t> input_row_list,
                              std::vector<int64_t> padded_input_row_list) {
   NVTE_CHECK(input_row_list.size() == padded_input_row_list.size(),
              "Number of input row list and padded row list must match.");
@@ -32,33 +31,28 @@ void fused_multi_row_padding(Tensor input, Tensor output,
     output_dptr_list.push_back(d_output_ptr);
 
     char* input_char_ptr = reinterpret_cast<char*>(d_input_ptr);
-    const size_t input_dptr_offset =
-        static_cast<size_t>(input_row_list[tensor_id]) *
-        static_cast<size_t>(input.size(1)) * input.element_size();
+    const size_t input_dptr_offset = static_cast<size_t>(input_row_list[tensor_id]) *
+                                     static_cast<size_t>(input.size(1)) * input.element_size();
     input_char_ptr += input_dptr_offset;
     d_input_ptr = reinterpret_cast<void*>(input_char_ptr);
 
     input_shape_list.push_back(
-        {static_cast<size_t>(input_row_list[tensor_id]),
-         static_cast<size_t>(input.size(1))});
+        {static_cast<size_t>(input_row_list[tensor_id]), static_cast<size_t>(input.size(1))});
     input_type_list.push_back(GetTransformerEngineDType(input.scalar_type()));
 
     char* output_char_ptr = reinterpret_cast<char*>(d_output_ptr);
-    const size_t output_dptr_offset =
-        static_cast<size_t>(padded_input_row_list[tensor_id]) *
-        static_cast<size_t>(output.size(1)) * output.element_size();
+    const size_t output_dptr_offset = static_cast<size_t>(padded_input_row_list[tensor_id]) *
+                                      static_cast<size_t>(output.size(1)) * output.element_size();
     output_char_ptr += output_dptr_offset;
     d_output_ptr = reinterpret_cast<void*>(output_char_ptr);
 
-    output_shape_list.push_back(
-        {static_cast<size_t>(padded_input_row_list[tensor_id]),
-         static_cast<size_t>(output.size(1))});
+    output_shape_list.push_back({static_cast<size_t>(padded_input_row_list[tensor_id]),
+                                 static_cast<size_t>(output.size(1))});
   }
 
   std::vector<NVTETensor> nvte_input_list, nvte_output_list;
   std::vector<TensorWrapper> tensor_wrappers;
-  auto make_tensor = [&tensor_wrappers](void* dptr,
-                                        const std::vector<size_t>& shape,
+  auto make_tensor = [&tensor_wrappers](void* dptr, const std::vector<size_t>& shape,
                                         DType dtype) -> NVTETensor {
     tensor_wrappers.emplace_back(makeTransformerEngineTensor(dptr, shape, dtype));
     return tensor_wrappers.back().data();
@@ -77,13 +71,12 @@ void fused_multi_row_padding(Tensor input, Tensor output,
   NVTE_CHECK(nvte_output_list.size() == nvte_input_list.size(),
              "Number of input and output tensors must match");
 
-  nvte_multi_padding(nvte_input_list.size(), nvte_input_list.data(),
-                     nvte_output_list.data(), padded_num_rows_list.data(),
+  nvte_multi_padding(nvte_input_list.size(), nvte_input_list.data(), nvte_output_list.data(),
+                     padded_num_rows_list.data(),
                      getCurrentCUDAStreamRaw(input.get_device_index()));
 }
 
-void fused_multi_row_unpadding(Tensor input, Tensor output,
-                               std::vector<int64_t> input_row_list,
+void fused_multi_row_unpadding(Tensor input, Tensor output, std::vector<int64_t> input_row_list,
                                std::vector<int64_t> unpadded_input_row_list) {
   NVTE_CHECK(input_row_list.size() == unpadded_input_row_list.size(),
              "Number of input row list and padded row list must match.");
@@ -102,33 +95,28 @@ void fused_multi_row_unpadding(Tensor input, Tensor output,
     output_dptr_list.push_back(d_output_ptr);
 
     char* input_char_ptr = reinterpret_cast<char*>(d_input_ptr);
-    const size_t input_dptr_offset =
-        static_cast<size_t>(input_row_list[tensor_id]) *
-        static_cast<size_t>(input.size(1)) * input.element_size();
+    const size_t input_dptr_offset = static_cast<size_t>(input_row_list[tensor_id]) *
+                                     static_cast<size_t>(input.size(1)) * input.element_size();
     input_char_ptr += input_dptr_offset;
     d_input_ptr = reinterpret_cast<void*>(input_char_ptr);
 
     input_shape_list.push_back(
-        {static_cast<size_t>(input_row_list[tensor_id]),
-         static_cast<size_t>(input.size(1))});
+        {static_cast<size_t>(input_row_list[tensor_id]), static_cast<size_t>(input.size(1))});
     input_type_list.push_back(GetTransformerEngineDType(input.scalar_type()));
 
     char* output_char_ptr = reinterpret_cast<char*>(d_output_ptr);
-    const size_t output_dptr_offset =
-        static_cast<size_t>(unpadded_input_row_list[tensor_id]) *
-        static_cast<size_t>(output.size(1)) * output.element_size();
+    const size_t output_dptr_offset = static_cast<size_t>(unpadded_input_row_list[tensor_id]) *
+                                      static_cast<size_t>(output.size(1)) * output.element_size();
     output_char_ptr += output_dptr_offset;
     d_output_ptr = reinterpret_cast<void*>(output_char_ptr);
 
-    output_shape_list.push_back(
-        {static_cast<size_t>(unpadded_input_row_list[tensor_id]),
-         static_cast<size_t>(output.size(1))});
+    output_shape_list.push_back({static_cast<size_t>(unpadded_input_row_list[tensor_id]),
+                                 static_cast<size_t>(output.size(1))});
   }
 
   std::vector<NVTETensor> nvte_input_list, nvte_output_list;
   std::vector<TensorWrapper> tensor_wrappers;
-  auto make_tensor = [&tensor_wrappers](void* dptr,
-                                        const std::vector<size_t>& shape,
+  auto make_tensor = [&tensor_wrappers](void* dptr, const std::vector<size_t>& shape,
                                         DType dtype) -> NVTETensor {
     tensor_wrappers.emplace_back(makeTransformerEngineTensor(dptr, shape, dtype));
     return tensor_wrappers.back().data();
@@ -147,8 +135,8 @@ void fused_multi_row_unpadding(Tensor input, Tensor output,
   NVTE_CHECK(nvte_output_list.size() == nvte_input_list.size(),
              "Number of input and output tensors must match");
 
-  nvte_multi_unpadding(nvte_input_list.size(), nvte_input_list.data(),
-                       nvte_output_list.data(), unpadded_num_rows_list.data(),
+  nvte_multi_unpadding(nvte_input_list.size(), nvte_input_list.data(), nvte_output_list.data(),
+                       unpadded_num_rows_list.data(),
                        getCurrentCUDAStreamRaw(input.get_device_index()));
 }
 

@@ -4,9 +4,9 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "../stable_common.h"
-
 #include <transformer_engine/dropout.h>
+
+#include "../stable_common.h"
 
 namespace transformer_engine::pytorch::stable {
 
@@ -22,8 +22,7 @@ using Tensor = torch::stable::Tensor;
 //   rng_state = torch.tensor([seed, offset], dtype=torch.int64, device='cuda')
 // ============================================================================
 
-std::tuple<Tensor, Tensor> dropout_fwd(
-    Tensor input, Tensor rng_state, double dropout_probability) {
+std::tuple<Tensor, Tensor> dropout_fwd(Tensor input, Tensor rng_state, double dropout_probability) {
   auto input_cu = makeTransformerEngineTensor(input);
 
   auto device_idx = input.get_device_index();
@@ -32,8 +31,8 @@ std::tuple<Tensor, Tensor> dropout_fwd(
   for (auto s : shape) total *= s;
 
   // Mask: 1 bit per element, packed into uint8
-  auto mask = allocateStableTensor(
-      {static_cast<int64_t>((total + 7) / 8)}, ScalarType::Byte, device_idx);
+  auto mask =
+      allocateStableTensor({static_cast<int64_t>((total + 7) / 8)}, ScalarType::Byte, device_idx);
 
   auto output = torch::stable::empty_like(input);
 
@@ -41,9 +40,8 @@ std::tuple<Tensor, Tensor> dropout_fwd(
   auto mask_cu = makeTransformerEngineTensor(mask);
   auto rng_state_cu = makeTransformerEngineTensor(rng_state);
 
-  nvte_dropout_fwd(input_cu.data(), output_cu.data(), mask_cu.data(),
-                   rng_state_cu.data(), static_cast<float>(dropout_probability),
-                   getCurrentCUDAStreamRaw(device_idx));
+  nvte_dropout_fwd(input_cu.data(), output_cu.data(), mask_cu.data(), rng_state_cu.data(),
+                   static_cast<float>(dropout_probability), getCurrentCUDAStreamRaw(device_idx));
 
   return std::make_tuple(output, mask);
 }
@@ -77,8 +75,11 @@ Tensor dropout_bwd(Tensor grad_output, Tensor mask, double dropout_probability,
 }  // namespace transformer_engine::pytorch::stable
 
 STABLE_TORCH_LIBRARY_FRAGMENT(transformer_engine_stable, m) {
-  m.def("dropout_fwd(Tensor input, Tensor rng_state, float dropout_probability) -> (Tensor, Tensor)");
-  m.def("dropout_bwd(Tensor grad_output, Tensor mask, float dropout_probability, Tensor? grad_input) -> Tensor");
+  m.def(
+      "dropout_fwd(Tensor input, Tensor rng_state, float dropout_probability) -> (Tensor, Tensor)");
+  m.def(
+      "dropout_bwd(Tensor grad_output, Tensor mask, float dropout_probability, Tensor? grad_input) "
+      "-> Tensor");
 }
 
 STABLE_TORCH_LIBRARY_IMPL(transformer_engine_stable, CUDA, m) {

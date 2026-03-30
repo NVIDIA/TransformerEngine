@@ -4,10 +4,10 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "../stable_common.h"
-
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/swizzle.h>
+
+#include "../stable_common.h"
 
 namespace transformer_engine::pytorch::stable {
 
@@ -35,20 +35,11 @@ DType getGroupedScaleInvDtype(NVTEScalingMode scaling_mode) {
 // Python GroupedTensor.  All optional Tensor? args may have numel()==0 to
 // indicate "not present".
 GroupedTensorWrapper buildGroupedTensorWrapper(
-    const std::optional<Tensor>& rowwise_data,
-    const std::optional<Tensor>& colwise_data,
-    const std::optional<Tensor>& scale_inv,
-    const std::optional<Tensor>& colwise_scale_inv,
-    const std::optional<Tensor>& first_dims,
-    const std::optional<Tensor>& last_dims,
-    const std::optional<Tensor>& tensor_offsets,
-    int64_t te_dtype,
-    int64_t scaling_mode,
-    int64_t logical_0,
-    int64_t logical_1,
-    int64_t num_tensors,
-    bool with_gemm_swizzled_scales) {
-
+    const std::optional<Tensor>& rowwise_data, const std::optional<Tensor>& colwise_data,
+    const std::optional<Tensor>& scale_inv, const std::optional<Tensor>& colwise_scale_inv,
+    const std::optional<Tensor>& first_dims, const std::optional<Tensor>& last_dims,
+    const std::optional<Tensor>& tensor_offsets, int64_t te_dtype, int64_t scaling_mode,
+    int64_t logical_0, int64_t logical_1, int64_t num_tensors, bool with_gemm_swizzled_scales) {
   auto dtype = static_cast<DType>(te_dtype);
   auto sm = static_cast<NVTEScalingMode>(scaling_mode);
   DType si_dtype = getGroupedScaleInvDtype(sm);
@@ -111,51 +102,40 @@ GroupedMatmulConfigWrapper buildGroupedGemmConfig(bool use_split_accumulator, in
 
 void grouped_gemm_for_grouped_tensor(
     // A (GroupedTensor) — 13 fields + transa
-    std::optional<Tensor> A_rowwise, std::optional<Tensor> A_colwise,
-    std::optional<Tensor> A_si, std::optional<Tensor> A_colwise_si,
-    std::optional<Tensor> A_first_dims, std::optional<Tensor> A_last_dims,
-    std::optional<Tensor> A_tensor_offsets,
-    int64_t A_te_dtype, int64_t A_scaling_mode,
-    int64_t A_logical_0, int64_t A_logical_1, int64_t A_num_tensors,
+    std::optional<Tensor> A_rowwise, std::optional<Tensor> A_colwise, std::optional<Tensor> A_si,
+    std::optional<Tensor> A_colwise_si, std::optional<Tensor> A_first_dims,
+    std::optional<Tensor> A_last_dims, std::optional<Tensor> A_tensor_offsets, int64_t A_te_dtype,
+    int64_t A_scaling_mode, int64_t A_logical_0, int64_t A_logical_1, int64_t A_num_tensors,
     bool A_swizzled, bool transa,
     // B (GroupedTensor) — 13 fields + transb
-    std::optional<Tensor> B_rowwise, std::optional<Tensor> B_colwise,
-    std::optional<Tensor> B_si, std::optional<Tensor> B_colwise_si,
-    std::optional<Tensor> B_first_dims, std::optional<Tensor> B_last_dims,
-    std::optional<Tensor> B_tensor_offsets,
-    int64_t B_te_dtype, int64_t B_scaling_mode,
-    int64_t B_logical_0, int64_t B_logical_1, int64_t B_num_tensors,
+    std::optional<Tensor> B_rowwise, std::optional<Tensor> B_colwise, std::optional<Tensor> B_si,
+    std::optional<Tensor> B_colwise_si, std::optional<Tensor> B_first_dims,
+    std::optional<Tensor> B_last_dims, std::optional<Tensor> B_tensor_offsets, int64_t B_te_dtype,
+    int64_t B_scaling_mode, int64_t B_logical_0, int64_t B_logical_1, int64_t B_num_tensors,
     bool B_swizzled, bool transb,
     // D (GroupedTensor) — 13 fields (no trans)
-    std::optional<Tensor> D_rowwise, std::optional<Tensor> D_colwise,
-    std::optional<Tensor> D_si, std::optional<Tensor> D_colwise_si,
-    std::optional<Tensor> D_first_dims, std::optional<Tensor> D_last_dims,
-    std::optional<Tensor> D_tensor_offsets,
-    int64_t D_te_dtype, int64_t D_scaling_mode,
-    int64_t D_logical_0, int64_t D_logical_1, int64_t D_num_tensors,
+    std::optional<Tensor> D_rowwise, std::optional<Tensor> D_colwise, std::optional<Tensor> D_si,
+    std::optional<Tensor> D_colwise_si, std::optional<Tensor> D_first_dims,
+    std::optional<Tensor> D_last_dims, std::optional<Tensor> D_tensor_offsets, int64_t D_te_dtype,
+    int64_t D_scaling_mode, int64_t D_logical_0, int64_t D_logical_1, int64_t D_num_tensors,
     // Config
-    Tensor alpha, Tensor beta,
-    Tensor workspace_setup, Tensor workspace_cublas,
+    Tensor alpha, Tensor beta, Tensor workspace_setup, Tensor workspace_cublas,
     bool use_split_accumulator, int64_t sm_count,
     // Optional bias (GroupedTensor) — 13 fields, guarded by has_bias
-    bool has_bias,
-    std::optional<Tensor> bias_rowwise, std::optional<Tensor> bias_colwise,
+    bool has_bias, std::optional<Tensor> bias_rowwise, std::optional<Tensor> bias_colwise,
     std::optional<Tensor> bias_si, std::optional<Tensor> bias_colwise_si,
     std::optional<Tensor> bias_first_dims, std::optional<Tensor> bias_last_dims,
-    std::optional<Tensor> bias_tensor_offsets,
-    int64_t bias_te_dtype, int64_t bias_scaling_mode,
-    int64_t bias_logical_0, int64_t bias_logical_1, int64_t bias_num_tensors,
-    bool bias_swizzled) {
-
-  auto A_gt = buildGroupedTensorWrapper(
-      A_rowwise, A_colwise, A_si, A_colwise_si, A_first_dims, A_last_dims, A_tensor_offsets,
-      A_te_dtype, A_scaling_mode, A_logical_0, A_logical_1, A_num_tensors, A_swizzled);
-  auto B_gt = buildGroupedTensorWrapper(
-      B_rowwise, B_colwise, B_si, B_colwise_si, B_first_dims, B_last_dims, B_tensor_offsets,
-      B_te_dtype, B_scaling_mode, B_logical_0, B_logical_1, B_num_tensors, B_swizzled);
-  auto D_gt = buildGroupedTensorWrapper(
-      D_rowwise, D_colwise, D_si, D_colwise_si, D_first_dims, D_last_dims, D_tensor_offsets,
-      D_te_dtype, D_scaling_mode, D_logical_0, D_logical_1, D_num_tensors, false);
+    std::optional<Tensor> bias_tensor_offsets, int64_t bias_te_dtype, int64_t bias_scaling_mode,
+    int64_t bias_logical_0, int64_t bias_logical_1, int64_t bias_num_tensors, bool bias_swizzled) {
+  auto A_gt = buildGroupedTensorWrapper(A_rowwise, A_colwise, A_si, A_colwise_si, A_first_dims,
+                                        A_last_dims, A_tensor_offsets, A_te_dtype, A_scaling_mode,
+                                        A_logical_0, A_logical_1, A_num_tensors, A_swizzled);
+  auto B_gt = buildGroupedTensorWrapper(B_rowwise, B_colwise, B_si, B_colwise_si, B_first_dims,
+                                        B_last_dims, B_tensor_offsets, B_te_dtype, B_scaling_mode,
+                                        B_logical_0, B_logical_1, B_num_tensors, B_swizzled);
+  auto D_gt = buildGroupedTensorWrapper(D_rowwise, D_colwise, D_si, D_colwise_si, D_first_dims,
+                                        D_last_dims, D_tensor_offsets, D_te_dtype, D_scaling_mode,
+                                        D_logical_0, D_logical_1, D_num_tensors, false);
 
   auto alpha_tw = makeTransformerEngineTensor(alpha);
   auto beta_tw = makeTransformerEngineTensor(beta);
@@ -171,22 +151,17 @@ void grouped_gemm_for_grouped_tensor(
   else if (B_rowwise.has_value() && B_rowwise->numel() > 0)
     device_idx = B_rowwise->get_device_index();
 
-  nvte_grouped_gemm(A_gt.data(), static_cast<int>(transa),
-                    B_gt.data(), static_cast<int>(transb),
-                    D_gt.data(), D_gt.data(),
-                    alpha_tw.data(), beta_tw.data(),
-                    ws_setup_tw.data(), ws_cublas_tw.data(),
-                    static_cast<NVTEGroupedMatmulConfig>(config),
+  nvte_grouped_gemm(A_gt.data(), static_cast<int>(transa), B_gt.data(), static_cast<int>(transb),
+                    D_gt.data(), D_gt.data(), alpha_tw.data(), beta_tw.data(), ws_setup_tw.data(),
+                    ws_cublas_tw.data(), static_cast<NVTEGroupedMatmulConfig>(config),
                     getCurrentCUDAStreamRaw(device_idx));
 
   if (has_bias) {
-    auto bias_gt = buildGroupedTensorWrapper(
-        bias_rowwise, bias_colwise, bias_si, bias_colwise_si,
-        bias_first_dims, bias_last_dims, bias_tensor_offsets,
-        bias_te_dtype, bias_scaling_mode, bias_logical_0, bias_logical_1,
-        bias_num_tensors, bias_swizzled);
-    nvte_grouped_bias_add(D_gt.data(), bias_gt.data(),
-                          getCurrentCUDAStreamRaw(device_idx));
+    auto bias_gt = buildGroupedTensorWrapper(bias_rowwise, bias_colwise, bias_si, bias_colwise_si,
+                                             bias_first_dims, bias_last_dims, bias_tensor_offsets,
+                                             bias_te_dtype, bias_scaling_mode, bias_logical_0,
+                                             bias_logical_1, bias_num_tensors, bias_swizzled);
+    nvte_grouped_bias_add(D_gt.data(), bias_gt.data(), getCurrentCUDAStreamRaw(device_idx));
   }
 }
 
@@ -200,41 +175,31 @@ void grouped_gemm_for_grouped_tensor(
 
 void grouped_gemm_for_discrete_in(
     // A — packed pointer arrays, one entry per expert tensor
-    Tensor A_rowwise_ptrs, Tensor A_colwise_ptrs,
-    Tensor A_si_ptrs, Tensor A_csi_ptrs,
-    Tensor A_shapes,        // (num_a, 2) int64: [rows, cols] per tensor
-    Tensor A_te_dtypes,     // (num_a,) int32
-    Tensor A_scaling_modes, // (num_a,) int32
+    Tensor A_rowwise_ptrs, Tensor A_colwise_ptrs, Tensor A_si_ptrs, Tensor A_csi_ptrs,
+    Tensor A_shapes,         // (num_a, 2) int64: [rows, cols] per tensor
+    Tensor A_te_dtypes,      // (num_a,) int32
+    Tensor A_scaling_modes,  // (num_a,) int32
     int64_t num_a_tensors,
     // B (GroupedTensor) — 13 fields + transb
-    std::optional<Tensor> B_rowwise, std::optional<Tensor> B_colwise,
-    std::optional<Tensor> B_si, std::optional<Tensor> B_colwise_si,
-    std::optional<Tensor> B_first_dims, std::optional<Tensor> B_last_dims,
-    std::optional<Tensor> B_tensor_offsets,
-    int64_t B_te_dtype, int64_t B_scaling_mode,
-    int64_t B_logical_0, int64_t B_logical_1, int64_t B_num_tensors,
+    std::optional<Tensor> B_rowwise, std::optional<Tensor> B_colwise, std::optional<Tensor> B_si,
+    std::optional<Tensor> B_colwise_si, std::optional<Tensor> B_first_dims,
+    std::optional<Tensor> B_last_dims, std::optional<Tensor> B_tensor_offsets, int64_t B_te_dtype,
+    int64_t B_scaling_mode, int64_t B_logical_0, int64_t B_logical_1, int64_t B_num_tensors,
     bool B_swizzled, bool transb,
     // D (GroupedTensor) — 13 fields
-    std::optional<Tensor> D_rowwise, std::optional<Tensor> D_colwise,
-    std::optional<Tensor> D_si, std::optional<Tensor> D_colwise_si,
-    std::optional<Tensor> D_first_dims, std::optional<Tensor> D_last_dims,
-    std::optional<Tensor> D_tensor_offsets,
-    int64_t D_te_dtype, int64_t D_scaling_mode,
-    int64_t D_logical_0, int64_t D_logical_1, int64_t D_num_tensors,
+    std::optional<Tensor> D_rowwise, std::optional<Tensor> D_colwise, std::optional<Tensor> D_si,
+    std::optional<Tensor> D_colwise_si, std::optional<Tensor> D_first_dims,
+    std::optional<Tensor> D_last_dims, std::optional<Tensor> D_tensor_offsets, int64_t D_te_dtype,
+    int64_t D_scaling_mode, int64_t D_logical_0, int64_t D_logical_1, int64_t D_num_tensors,
     // Config
-    Tensor alpha, Tensor beta,
-    Tensor workspace_setup, Tensor workspace_cublas,
+    Tensor alpha, Tensor beta, Tensor workspace_setup, Tensor workspace_cublas,
     bool use_split_accumulator, int64_t sm_count,
     // Optional bias
-    bool has_bias,
-    std::optional<Tensor> bias_rowwise, std::optional<Tensor> bias_colwise,
+    bool has_bias, std::optional<Tensor> bias_rowwise, std::optional<Tensor> bias_colwise,
     std::optional<Tensor> bias_si, std::optional<Tensor> bias_colwise_si,
     std::optional<Tensor> bias_first_dims, std::optional<Tensor> bias_last_dims,
-    std::optional<Tensor> bias_tensor_offsets,
-    int64_t bias_te_dtype, int64_t bias_scaling_mode,
-    int64_t bias_logical_0, int64_t bias_logical_1, int64_t bias_num_tensors,
-    bool bias_swizzled) {
-
+    std::optional<Tensor> bias_tensor_offsets, int64_t bias_te_dtype, int64_t bias_scaling_mode,
+    int64_t bias_logical_0, int64_t bias_logical_1, int64_t bias_num_tensors, bool bias_swizzled) {
   // Build the individual A TensorWrappers from the packed pointer arrays
   const auto* rw_ptrs = reinterpret_cast<const uintptr_t*>(A_rowwise_ptrs.data_ptr());
   const auto* cw_ptrs = reinterpret_cast<const uintptr_t*>(A_colwise_ptrs.data_ptr());
@@ -285,12 +250,12 @@ void grouped_gemm_for_discrete_in(
   // since CanonicalizeGemmInput in the C++ kernel handles orientation.
   int transa_int = 0;
 
-  auto B_gt = buildGroupedTensorWrapper(
-      B_rowwise, B_colwise, B_si, B_colwise_si, B_first_dims, B_last_dims, B_tensor_offsets,
-      B_te_dtype, B_scaling_mode, B_logical_0, B_logical_1, B_num_tensors, B_swizzled);
-  auto D_gt = buildGroupedTensorWrapper(
-      D_rowwise, D_colwise, D_si, D_colwise_si, D_first_dims, D_last_dims, D_tensor_offsets,
-      D_te_dtype, D_scaling_mode, D_logical_0, D_logical_1, D_num_tensors, false);
+  auto B_gt = buildGroupedTensorWrapper(B_rowwise, B_colwise, B_si, B_colwise_si, B_first_dims,
+                                        B_last_dims, B_tensor_offsets, B_te_dtype, B_scaling_mode,
+                                        B_logical_0, B_logical_1, B_num_tensors, B_swizzled);
+  auto D_gt = buildGroupedTensorWrapper(D_rowwise, D_colwise, D_si, D_colwise_si, D_first_dims,
+                                        D_last_dims, D_tensor_offsets, D_te_dtype, D_scaling_mode,
+                                        D_logical_0, D_logical_1, D_num_tensors, false);
 
   auto alpha_tw = makeTransformerEngineTensor(alpha);
   auto beta_tw = makeTransformerEngineTensor(beta);
@@ -301,21 +266,16 @@ void grouped_gemm_for_discrete_in(
   int device_idx = A_rowwise_ptrs.get_device_index();
 
   nvte_grouped_gemm_with_discrete_inputA(
-      A_nvte.data(), static_cast<size_t>(num_a_tensors),
-      transa_int,
-      B_gt.data(), static_cast<int>(transb),
-      D_gt.data(), D_gt.data(),
-      alpha_tw.data(), beta_tw.data(),
-      ws_setup_tw.data(), ws_cublas_tw.data(),
-      static_cast<NVTEGroupedMatmulConfig>(config),
+      A_nvte.data(), static_cast<size_t>(num_a_tensors), transa_int, B_gt.data(),
+      static_cast<int>(transb), D_gt.data(), D_gt.data(), alpha_tw.data(), beta_tw.data(),
+      ws_setup_tw.data(), ws_cublas_tw.data(), static_cast<NVTEGroupedMatmulConfig>(config),
       getCurrentCUDAStreamRaw(device_idx));
 
   if (has_bias) {
-    auto bias_gt = buildGroupedTensorWrapper(
-        bias_rowwise, bias_colwise, bias_si, bias_colwise_si,
-        bias_first_dims, bias_last_dims, bias_tensor_offsets,
-        bias_te_dtype, bias_scaling_mode, bias_logical_0, bias_logical_1,
-        bias_num_tensors, bias_swizzled);
+    auto bias_gt = buildGroupedTensorWrapper(bias_rowwise, bias_colwise, bias_si, bias_colwise_si,
+                                             bias_first_dims, bias_last_dims, bias_tensor_offsets,
+                                             bias_te_dtype, bias_scaling_mode, bias_logical_0,
+                                             bias_logical_1, bias_num_tensors, bias_swizzled);
     nvte_grouped_bias_add(D_gt.data(), bias_gt.data(), getCurrentCUDAStreamRaw(device_idx));
   }
 }
@@ -329,38 +289,32 @@ void grouped_gemm_for_discrete_in(
 
 void grouped_gemm_for_discrete_out(
     // A (GroupedTensor) — 13 fields + transa
-    std::optional<Tensor> A_rowwise, std::optional<Tensor> A_colwise,
-    std::optional<Tensor> A_si, std::optional<Tensor> A_colwise_si,
-    std::optional<Tensor> A_first_dims, std::optional<Tensor> A_last_dims,
-    std::optional<Tensor> A_tensor_offsets,
-    int64_t A_te_dtype, int64_t A_scaling_mode,
-    int64_t A_logical_0, int64_t A_logical_1, int64_t A_num_tensors,
+    std::optional<Tensor> A_rowwise, std::optional<Tensor> A_colwise, std::optional<Tensor> A_si,
+    std::optional<Tensor> A_colwise_si, std::optional<Tensor> A_first_dims,
+    std::optional<Tensor> A_last_dims, std::optional<Tensor> A_tensor_offsets, int64_t A_te_dtype,
+    int64_t A_scaling_mode, int64_t A_logical_0, int64_t A_logical_1, int64_t A_num_tensors,
     bool A_swizzled, bool transa,
     // B (GroupedTensor) — 13 fields + transb
-    std::optional<Tensor> B_rowwise, std::optional<Tensor> B_colwise,
-    std::optional<Tensor> B_si, std::optional<Tensor> B_colwise_si,
-    std::optional<Tensor> B_first_dims, std::optional<Tensor> B_last_dims,
-    std::optional<Tensor> B_tensor_offsets,
-    int64_t B_te_dtype, int64_t B_scaling_mode,
-    int64_t B_logical_0, int64_t B_logical_1, int64_t B_num_tensors,
+    std::optional<Tensor> B_rowwise, std::optional<Tensor> B_colwise, std::optional<Tensor> B_si,
+    std::optional<Tensor> B_colwise_si, std::optional<Tensor> B_first_dims,
+    std::optional<Tensor> B_last_dims, std::optional<Tensor> B_tensor_offsets, int64_t B_te_dtype,
+    int64_t B_scaling_mode, int64_t B_logical_0, int64_t B_logical_1, int64_t B_num_tensors,
     bool B_swizzled, bool transb,
     // D — packed pointer arrays
     Tensor D_rowwise_ptrs, Tensor D_si_ptrs,
-    Tensor D_shapes,        // (num_d, 2) int64: [rows, cols] per tensor
-    Tensor D_te_dtypes,     // (num_d,) int32
-    Tensor D_scaling_modes, // (num_d,) int32
+    Tensor D_shapes,         // (num_d, 2) int64: [rows, cols] per tensor
+    Tensor D_te_dtypes,      // (num_d,) int32
+    Tensor D_scaling_modes,  // (num_d,) int32
     int64_t num_d_tensors,
     // Config
-    Tensor alpha, Tensor beta,
-    Tensor workspace_setup, Tensor workspace_cublas,
+    Tensor alpha, Tensor beta, Tensor workspace_setup, Tensor workspace_cublas,
     bool use_split_accumulator, int64_t sm_count) {
-
-  auto A_gt = buildGroupedTensorWrapper(
-      A_rowwise, A_colwise, A_si, A_colwise_si, A_first_dims, A_last_dims, A_tensor_offsets,
-      A_te_dtype, A_scaling_mode, A_logical_0, A_logical_1, A_num_tensors, A_swizzled);
-  auto B_gt = buildGroupedTensorWrapper(
-      B_rowwise, B_colwise, B_si, B_colwise_si, B_first_dims, B_last_dims, B_tensor_offsets,
-      B_te_dtype, B_scaling_mode, B_logical_0, B_logical_1, B_num_tensors, B_swizzled);
+  auto A_gt = buildGroupedTensorWrapper(A_rowwise, A_colwise, A_si, A_colwise_si, A_first_dims,
+                                        A_last_dims, A_tensor_offsets, A_te_dtype, A_scaling_mode,
+                                        A_logical_0, A_logical_1, A_num_tensors, A_swizzled);
+  auto B_gt = buildGroupedTensorWrapper(B_rowwise, B_colwise, B_si, B_colwise_si, B_first_dims,
+                                        B_last_dims, B_tensor_offsets, B_te_dtype, B_scaling_mode,
+                                        B_logical_0, B_logical_1, B_num_tensors, B_swizzled);
 
   // Build D TensorWrapper array from packed pointers
   const auto* rw_ptrs = reinterpret_cast<const uintptr_t*>(D_rowwise_ptrs.data_ptr());
@@ -398,18 +352,13 @@ void grouped_gemm_for_discrete_out(
   auto config = buildGroupedGemmConfig(use_split_accumulator, sm_count);
 
   int device_idx = 0;
-  if (A_rowwise.has_value() && A_rowwise->numel() > 0)
-    device_idx = A_rowwise->get_device_index();
+  if (A_rowwise.has_value() && A_rowwise->numel() > 0) device_idx = A_rowwise->get_device_index();
 
   nvte_grouped_gemm_with_discrete_out(
-      A_gt.data(), static_cast<int>(transa),
-      B_gt.data(), static_cast<int>(transb),
-      D_nvte.data(), static_cast<size_t>(num_d_tensors),
-      D_nvte.data(), static_cast<size_t>(num_d_tensors),
-      alpha_tw.data(), beta_tw.data(),
-      ws_setup_tw.data(), ws_cublas_tw.data(),
-      static_cast<NVTEGroupedMatmulConfig>(config),
-      getCurrentCUDAStreamRaw(device_idx));
+      A_gt.data(), static_cast<int>(transa), B_gt.data(), static_cast<int>(transb), D_nvte.data(),
+      static_cast<size_t>(num_d_tensors), D_nvte.data(), static_cast<size_t>(num_d_tensors),
+      alpha_tw.data(), beta_tw.data(), ws_setup_tw.data(), ws_cublas_tw.data(),
+      static_cast<NVTEGroupedMatmulConfig>(config), getCurrentCUDAStreamRaw(device_idx));
 }
 
 }  // namespace transformer_engine::pytorch::stable
@@ -422,80 +371,83 @@ STABLE_TORCH_LIBRARY_FRAGMENT(transformer_engine_stable, m) {
   // grouped_gemm_for_grouped_tensor: A(13) + transa + B(13) + transb + D(13) +
   //   alpha + beta + ws_setup + ws_cublas + use_split_accum + sm_count +
   //   has_bias + bias(13) = 58 args total
-  m.def("grouped_gemm_for_grouped_tensor("
-        // A
-        "Tensor? A_rowwise, Tensor? A_colwise, Tensor? A_si, Tensor? A_colwise_si, "
-        "Tensor? A_first_dims, Tensor? A_last_dims, Tensor? A_tensor_offsets, "
-        "int A_te_dtype, int A_scaling_mode, int A_logical_0, int A_logical_1, "
-        "int A_num_tensors, bool A_swizzled, bool transa, "
-        // B
-        "Tensor? B_rowwise, Tensor? B_colwise, Tensor? B_si, Tensor? B_colwise_si, "
-        "Tensor? B_first_dims, Tensor? B_last_dims, Tensor? B_tensor_offsets, "
-        "int B_te_dtype, int B_scaling_mode, int B_logical_0, int B_logical_1, "
-        "int B_num_tensors, bool B_swizzled, bool transb, "
-        // D
-        "Tensor? D_rowwise, Tensor? D_colwise, Tensor? D_si, Tensor? D_colwise_si, "
-        "Tensor? D_first_dims, Tensor? D_last_dims, Tensor? D_tensor_offsets, "
-        "int D_te_dtype, int D_scaling_mode, int D_logical_0, int D_logical_1, "
-        "int D_num_tensors, "
-        // config
-        "Tensor alpha, Tensor beta, Tensor workspace_setup, Tensor workspace_cublas, "
-        "bool use_split_accumulator, int sm_count, "
-        // bias
-        "bool has_bias, "
-        "Tensor? bias_rowwise, Tensor? bias_colwise, Tensor? bias_si, Tensor? bias_colwise_si, "
-        "Tensor? bias_first_dims, Tensor? bias_last_dims, Tensor? bias_tensor_offsets, "
-        "int bias_te_dtype, int bias_scaling_mode, int bias_logical_0, int bias_logical_1, "
-        "int bias_num_tensors, bool bias_swizzled"
-        ") -> ()");
+  m.def(
+      "grouped_gemm_for_grouped_tensor("
+      // A
+      "Tensor? A_rowwise, Tensor? A_colwise, Tensor? A_si, Tensor? A_colwise_si, "
+      "Tensor? A_first_dims, Tensor? A_last_dims, Tensor? A_tensor_offsets, "
+      "int A_te_dtype, int A_scaling_mode, int A_logical_0, int A_logical_1, "
+      "int A_num_tensors, bool A_swizzled, bool transa, "
+      // B
+      "Tensor? B_rowwise, Tensor? B_colwise, Tensor? B_si, Tensor? B_colwise_si, "
+      "Tensor? B_first_dims, Tensor? B_last_dims, Tensor? B_tensor_offsets, "
+      "int B_te_dtype, int B_scaling_mode, int B_logical_0, int B_logical_1, "
+      "int B_num_tensors, bool B_swizzled, bool transb, "
+      // D
+      "Tensor? D_rowwise, Tensor? D_colwise, Tensor? D_si, Tensor? D_colwise_si, "
+      "Tensor? D_first_dims, Tensor? D_last_dims, Tensor? D_tensor_offsets, "
+      "int D_te_dtype, int D_scaling_mode, int D_logical_0, int D_logical_1, "
+      "int D_num_tensors, "
+      // config
+      "Tensor alpha, Tensor beta, Tensor workspace_setup, Tensor workspace_cublas, "
+      "bool use_split_accumulator, int sm_count, "
+      // bias
+      "bool has_bias, "
+      "Tensor? bias_rowwise, Tensor? bias_colwise, Tensor? bias_si, Tensor? bias_colwise_si, "
+      "Tensor? bias_first_dims, Tensor? bias_last_dims, Tensor? bias_tensor_offsets, "
+      "int bias_te_dtype, int bias_scaling_mode, int bias_logical_0, int bias_logical_1, "
+      "int bias_num_tensors, bool bias_swizzled"
+      ") -> ()");
 
   // grouped_gemm_for_discrete_in: A_ptrs(7) + A_meta(3) + num_a +
   //   B(13) + transb + D(13) + config(6) + has_bias + bias(13) = 57 args
-  m.def("grouped_gemm_for_discrete_in("
-        // A packed pointers
-        "Tensor A_rowwise_ptrs, Tensor A_colwise_ptrs, Tensor A_si_ptrs, Tensor A_csi_ptrs, "
-        "Tensor A_shapes, Tensor A_te_dtypes, Tensor A_scaling_modes, int num_a_tensors, "
-        // B
-        "Tensor? B_rowwise, Tensor? B_colwise, Tensor? B_si, Tensor? B_colwise_si, "
-        "Tensor? B_first_dims, Tensor? B_last_dims, Tensor? B_tensor_offsets, "
-        "int B_te_dtype, int B_scaling_mode, int B_logical_0, int B_logical_1, "
-        "int B_num_tensors, bool B_swizzled, bool transb, "
-        // D
-        "Tensor? D_rowwise, Tensor? D_colwise, Tensor? D_si, Tensor? D_colwise_si, "
-        "Tensor? D_first_dims, Tensor? D_last_dims, Tensor? D_tensor_offsets, "
-        "int D_te_dtype, int D_scaling_mode, int D_logical_0, int D_logical_1, "
-        "int D_num_tensors, "
-        // config
-        "Tensor alpha, Tensor beta, Tensor workspace_setup, Tensor workspace_cublas, "
-        "bool use_split_accumulator, int sm_count, "
-        // bias
-        "bool has_bias, "
-        "Tensor? bias_rowwise, Tensor? bias_colwise, Tensor? bias_si, Tensor? bias_colwise_si, "
-        "Tensor? bias_first_dims, Tensor? bias_last_dims, Tensor? bias_tensor_offsets, "
-        "int bias_te_dtype, int bias_scaling_mode, int bias_logical_0, int bias_logical_1, "
-        "int bias_num_tensors, bool bias_swizzled"
-        ") -> ()");
+  m.def(
+      "grouped_gemm_for_discrete_in("
+      // A packed pointers
+      "Tensor A_rowwise_ptrs, Tensor A_colwise_ptrs, Tensor A_si_ptrs, Tensor A_csi_ptrs, "
+      "Tensor A_shapes, Tensor A_te_dtypes, Tensor A_scaling_modes, int num_a_tensors, "
+      // B
+      "Tensor? B_rowwise, Tensor? B_colwise, Tensor? B_si, Tensor? B_colwise_si, "
+      "Tensor? B_first_dims, Tensor? B_last_dims, Tensor? B_tensor_offsets, "
+      "int B_te_dtype, int B_scaling_mode, int B_logical_0, int B_logical_1, "
+      "int B_num_tensors, bool B_swizzled, bool transb, "
+      // D
+      "Tensor? D_rowwise, Tensor? D_colwise, Tensor? D_si, Tensor? D_colwise_si, "
+      "Tensor? D_first_dims, Tensor? D_last_dims, Tensor? D_tensor_offsets, "
+      "int D_te_dtype, int D_scaling_mode, int D_logical_0, int D_logical_1, "
+      "int D_num_tensors, "
+      // config
+      "Tensor alpha, Tensor beta, Tensor workspace_setup, Tensor workspace_cublas, "
+      "bool use_split_accumulator, int sm_count, "
+      // bias
+      "bool has_bias, "
+      "Tensor? bias_rowwise, Tensor? bias_colwise, Tensor? bias_si, Tensor? bias_colwise_si, "
+      "Tensor? bias_first_dims, Tensor? bias_last_dims, Tensor? bias_tensor_offsets, "
+      "int bias_te_dtype, int bias_scaling_mode, int bias_logical_0, int bias_logical_1, "
+      "int bias_num_tensors, bool bias_swizzled"
+      ") -> ()");
 
   // grouped_gemm_for_discrete_out: A(13) + transa + B(13) + transb +
   //   D_ptrs(5) + num_d + config(6) = 51 args
-  m.def("grouped_gemm_for_discrete_out("
-        // A
-        "Tensor? A_rowwise, Tensor? A_colwise, Tensor? A_si, Tensor? A_colwise_si, "
-        "Tensor? A_first_dims, Tensor? A_last_dims, Tensor? A_tensor_offsets, "
-        "int A_te_dtype, int A_scaling_mode, int A_logical_0, int A_logical_1, "
-        "int A_num_tensors, bool A_swizzled, bool transa, "
-        // B
-        "Tensor? B_rowwise, Tensor? B_colwise, Tensor? B_si, Tensor? B_colwise_si, "
-        "Tensor? B_first_dims, Tensor? B_last_dims, Tensor? B_tensor_offsets, "
-        "int B_te_dtype, int B_scaling_mode, int B_logical_0, int B_logical_1, "
-        "int B_num_tensors, bool B_swizzled, bool transb, "
-        // D packed pointers
-        "Tensor D_rowwise_ptrs, Tensor D_si_ptrs, "
-        "Tensor D_shapes, Tensor D_te_dtypes, Tensor D_scaling_modes, int num_d_tensors, "
-        // config
-        "Tensor alpha, Tensor beta, Tensor workspace_setup, Tensor workspace_cublas, "
-        "bool use_split_accumulator, int sm_count"
-        ") -> ()");
+  m.def(
+      "grouped_gemm_for_discrete_out("
+      // A
+      "Tensor? A_rowwise, Tensor? A_colwise, Tensor? A_si, Tensor? A_colwise_si, "
+      "Tensor? A_first_dims, Tensor? A_last_dims, Tensor? A_tensor_offsets, "
+      "int A_te_dtype, int A_scaling_mode, int A_logical_0, int A_logical_1, "
+      "int A_num_tensors, bool A_swizzled, bool transa, "
+      // B
+      "Tensor? B_rowwise, Tensor? B_colwise, Tensor? B_si, Tensor? B_colwise_si, "
+      "Tensor? B_first_dims, Tensor? B_last_dims, Tensor? B_tensor_offsets, "
+      "int B_te_dtype, int B_scaling_mode, int B_logical_0, int B_logical_1, "
+      "int B_num_tensors, bool B_swizzled, bool transb, "
+      // D packed pointers
+      "Tensor D_rowwise_ptrs, Tensor D_si_ptrs, "
+      "Tensor D_shapes, Tensor D_te_dtypes, Tensor D_scaling_modes, int num_d_tensors, "
+      // config
+      "Tensor alpha, Tensor beta, Tensor workspace_setup, Tensor workspace_cublas, "
+      "bool use_split_accumulator, int sm_count"
+      ") -> ()");
 }
 
 STABLE_TORCH_LIBRARY_IMPL(transformer_engine_stable, CUDA, m) {

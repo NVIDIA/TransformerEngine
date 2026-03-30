@@ -8,10 +8,10 @@
 #define TRANSFORMER_ENGINE_PYTORCH_CSRC_STABLE_COMMON_H_
 
 // PyTorch Stable ABI headers
+#include <torch/csrc/stable/accelerator.h>
 #include <torch/csrc/stable/library.h>
 #include <torch/csrc/stable/ops.h>
 #include <torch/csrc/stable/tensor.h>
-#include <torch/csrc/stable/accelerator.h>
 #include <torch/headeronly/core/ScalarType.h>
 
 // CUDA headers
@@ -99,8 +99,7 @@ inline cudaStream_t getCurrentCUDAStreamRaw(int32_t device_index = -1) {
     device_index = torch::stable::accelerator::getCurrentDeviceIndex();
   }
   void* stream_ptr = nullptr;
-  TORCH_ERROR_CODE_CHECK(
-      aoti_torch_get_current_cuda_stream(device_index, &stream_ptr));
+  TORCH_ERROR_CODE_CHECK(aoti_torch_get_current_cuda_stream(device_index, &stream_ptr));
   return reinterpret_cast<cudaStream_t>(stream_ptr);
 }
 
@@ -112,13 +111,11 @@ inline cudaStream_t getCurrentCUDAStreamRaw(int32_t device_index = -1) {
 /// Replaces at::cuda::getCurrentDeviceProperties()->multiProcessorCount.
 inline int getSMCount(int device_index = -1) {
   if (device_index < 0) {
-    device_index = static_cast<int>(
-        torch::stable::accelerator::getCurrentDeviceIndex());
+    device_index = static_cast<int>(torch::stable::accelerator::getCurrentDeviceIndex());
   }
   cudaDeviceProp prop;
   cudaError_t err = cudaGetDeviceProperties(&prop, device_index);
-  NVTE_CHECK(err == cudaSuccess, "cudaGetDeviceProperties failed: ",
-             cudaGetErrorString(err));
+  NVTE_CHECK(err == cudaSuccess, "cudaGetDeviceProperties failed: ", cudaGetErrorString(err));
   return prop.multiProcessorCount;
 }
 
@@ -127,8 +124,7 @@ inline int getSMCount(int device_index = -1) {
 // ============================================================================
 
 /// Convert stable tensor sizes (int64_t array) to vector<size_t>.
-inline std::vector<size_t> getStableTensorShape(
-    const torch::stable::Tensor& t) {
+inline std::vector<size_t> getStableTensorShape(const torch::stable::Tensor& t) {
   auto sizes = t.sizes();
   std::vector<size_t> shape;
   shape.reserve(sizes.size());
@@ -146,16 +142,14 @@ inline std::vector<size_t> getStableTensorShape(
 /// Extracts data_ptr, shape, and dtype.
 inline transformer_engine::TensorWrapper makeTransformerEngineTensor(
     const torch::stable::Tensor& tensor) {
-  transformer_engine::DType dtype =
-      GetTransformerEngineDType(tensor.scalar_type());
+  transformer_engine::DType dtype = GetTransformerEngineDType(tensor.scalar_type());
   std::vector<size_t> shape = getStableTensorShape(tensor);
   return transformer_engine::TensorWrapper(tensor.data_ptr(), shape, dtype);
 }
 
 /// Create a TensorWrapper from raw components (same as unstable version).
 inline transformer_engine::TensorWrapper makeTransformerEngineTensor(
-    void* data_ptr, const std::vector<size_t>& shape,
-    const transformer_engine::DType type) {
+    void* data_ptr, const std::vector<size_t>& shape, const transformer_engine::DType type) {
   return transformer_engine::TensorWrapper(data_ptr, shape, type);
 }
 
@@ -164,52 +158,42 @@ inline transformer_engine::TensorWrapper makeTransformerEngineTensor(
 // ============================================================================
 
 /// Allocate an empty tensor on CUDA via the stable ABI.
-inline torch::stable::Tensor allocateStableTensor(
-    const std::vector<int64_t>& shape,
-    ScalarType dtype,
-    int32_t device_index = -1) {
+inline torch::stable::Tensor allocateStableTensor(const std::vector<int64_t>& shape,
+                                                  ScalarType dtype, int32_t device_index = -1) {
   if (device_index < 0) {
     device_index = torch::stable::accelerator::getCurrentDeviceIndex();
   }
   torch::headeronly::IntHeaderOnlyArrayRef size_ref(shape.data(), shape.size());
-  torch::stable::Device device(torch::headeronly::DeviceType::CUDA,
-                               device_index);
-  return torch::stable::empty(
-      size_ref,
-      dtype,
-      std::nullopt,  // layout
-      device,
-      std::nullopt,  // pin_memory
-      std::nullopt   // memory_format
+  torch::stable::Device device(torch::headeronly::DeviceType::CUDA, device_index);
+  return torch::stable::empty(size_ref, dtype,
+                              std::nullopt,  // layout
+                              device,
+                              std::nullopt,  // pin_memory
+                              std::nullopt   // memory_format
   );
 }
 
 /// Allocate an empty tensor on CUDA, using TE DType.
-inline torch::stable::Tensor allocateStableTensor(
-    const std::vector<int64_t>& shape,
-    transformer_engine::DType te_dtype,
-    int32_t device_index = -1) {
-  return allocateStableTensor(shape, GetStableScalarType(te_dtype),
-                              device_index);
+inline torch::stable::Tensor allocateStableTensor(const std::vector<int64_t>& shape,
+                                                  transformer_engine::DType te_dtype,
+                                                  int32_t device_index = -1) {
+  return allocateStableTensor(shape, GetStableScalarType(te_dtype), device_index);
 }
 
 /// Allocate a zero-filled tensor on CUDA via the stable ABI.
-inline torch::stable::Tensor allocateStableTensorZeros(
-    const std::vector<int64_t>& shape,
-    ScalarType dtype,
-    int32_t device_index = -1) {
+inline torch::stable::Tensor allocateStableTensorZeros(const std::vector<int64_t>& shape,
+                                                       ScalarType dtype,
+                                                       int32_t device_index = -1) {
   auto t = allocateStableTensor(shape, dtype, device_index);
   torch::stable::zero_(t);
   return t;
 }
 
 /// Allocate a zero-filled tensor on CUDA, using TE DType.
-inline torch::stable::Tensor allocateStableTensorZeros(
-    const std::vector<int64_t>& shape,
-    transformer_engine::DType te_dtype,
-    int32_t device_index = -1) {
-  return allocateStableTensorZeros(shape, GetStableScalarType(te_dtype),
-                                   device_index);
+inline torch::stable::Tensor allocateStableTensorZeros(const std::vector<int64_t>& shape,
+                                                       transformer_engine::DType te_dtype,
+                                                       int32_t device_index = -1) {
+  return allocateStableTensorZeros(shape, GetStableScalarType(te_dtype), device_index);
 }
 
 // ============================================================================
@@ -222,13 +206,10 @@ inline torch::stable::Tensor allocateStableTensorZeros(
 /// If scale_inv_dtype is -1, defaults to kFloat32 (use kFloat8E8M0=10 for
 /// MXFP8, kFloat8E4M3=8 for NVFP4).
 inline transformer_engine::TensorWrapper makeQuantizedTensorWrapper(
-    const torch::stable::Tensor& output_data,
-    transformer_engine::DType te_dtype,
-    const std::vector<size_t>& shape,
-    const std::optional<torch::stable::Tensor>& amax,
+    const torch::stable::Tensor& output_data, transformer_engine::DType te_dtype,
+    const std::vector<size_t>& shape, const std::optional<torch::stable::Tensor>& amax,
     const std::optional<torch::stable::Tensor>& scale,
-    const std::optional<torch::stable::Tensor>& scale_inv,
-    NVTEScalingMode scaling_mode) {
+    const std::optional<torch::stable::Tensor>& scale_inv, NVTEScalingMode scaling_mode) {
   TensorWrapper out(scaling_mode);
   out.set_rowwise_data(output_data.data_ptr(), te_dtype, shape);
 
@@ -265,12 +246,10 @@ inline void runWithWorkspace(Fn&& fn, int32_t device_idx) {
   auto ws_dtype = workspace.dtype();
   if (ws_shape.ndim > 0 && workspace.numel() > 0) {
     auto workspace_data = allocateStableTensor(
-        std::vector<int64_t>(ws_shape.data, ws_shape.data + ws_shape.ndim),
-        ws_dtype, device_idx);
+        std::vector<int64_t>(ws_shape.data, ws_shape.data + ws_shape.ndim), ws_dtype, device_idx);
     workspace = makeTransformerEngineTensor(
         workspace_data.data_ptr(),
-        std::vector<size_t>(ws_shape.data, ws_shape.data + ws_shape.ndim),
-        ws_dtype);
+        std::vector<size_t>(ws_shape.data, ws_shape.data + ws_shape.ndim), ws_dtype);
   }
 
   fn(workspace.data());

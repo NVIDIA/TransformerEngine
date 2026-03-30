@@ -749,14 +749,15 @@ class QuantizedTensor(torch.Tensor):
 # before the stable module has had a chance to run its module-level registration).
 def _register_stable_abi_passthrough_ops():
     import sys
+
     if "transformer_engine.pytorch._stable_torch_module" not in sys.modules:
         return
     try:
         import torch
-        _quantized_tensor_passthrough_ops.add(
-            torch.ops.transformer_engine_stable.gemm.default
-        )
+
+        _quantized_tensor_passthrough_ops.add(torch.ops.transformer_engine_stable.gemm.default)
     except AttributeError:
         pass
+
 
 _register_stable_abi_passthrough_ops()

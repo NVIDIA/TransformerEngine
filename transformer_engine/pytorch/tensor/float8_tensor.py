@@ -102,6 +102,7 @@ class Float8Quantizer(Quantizer):
 
         # Launch cast kernel via stable ABI
         from transformer_engine.pytorch.tensor._quantize_stable import quantize_into
+
         quantize_into(src, self, dst, noop_flag)
 
         # Update FP8 dtype
@@ -116,6 +117,7 @@ class Float8Quantizer(Quantizer):
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
         """Quantize tensor implementation via stable ABI"""
         from transformer_engine.pytorch.tensor._quantize_stable import quantize_into
+
         dst = self.make_empty(list(tensor.shape), dtype=tensor.dtype, device=tensor.device)
         # Initialize scale_inv from quantizer scale (C++ create_tensor does reciprocal(scale))
         if hasattr(self, "scale") and self.scale is not None and self.scale.numel() > 0:
@@ -349,6 +351,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
 
         # Launch cast kernel via stable ABI
         from transformer_engine.pytorch.tensor._quantize_stable import quantize_into
+
         quantize_into(src, self, dst, noop_flag)
 
         # Update FP8 dtype
@@ -363,6 +366,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
         """Quantize tensor implementation via stable ABI"""
         from transformer_engine.pytorch.tensor._quantize_stable import quantize_into
+
         dst = self.make_empty(list(tensor.shape), dtype=tensor.dtype, device=tensor.device)
         if tensor.numel() > 0:
             t = tensor.contiguous() if not tensor.is_contiguous() else tensor
