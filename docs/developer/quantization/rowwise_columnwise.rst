@@ -40,15 +40,22 @@ cuBLASLt's FP8 GEMM computes ``C = A × B`` where:
 
 In the **forward pass**:
 
-- ``output = activation × weight^T``
-- Activation is the ``A`` operand → needs **rowwise** quantization.
-- Weight is the ``B`` operand → needs **columnwise** quantization.
+- ``output = weight × activation^T`` (via ``general_gemm(weightmat, inputmat)``)
+- Weight is the ``A`` operand → needs **rowwise** quantization.
+- Activation is the ``B`` operand → needs **rowwise** quantization.
+
+In the **backward dgrad pass**:
+
+- ``grad_input = weight^T × grad_output`` (via ``general_gemm(weight, grad_output)``)
+- Weight transposed uses **columnwise** data saved from forward.
+- Grad output needs **rowwise** quantization.
 
 In the **backward wgrad pass**:
 
-- ``weight_grad = activation^T × grad_output``
-- Activation transposed is the ``A`` operand → needs **columnwise** data from forward.
-- Grad output is the ``B`` operand → needs **columnwise** quantization.
+- ``weight_grad = input^T × grad_output``
+  (via ``general_gemm(inputmat_columnwise, grad_output_columnwise)``)
+- Input transposed uses **columnwise** data saved from forward.
+- Grad output uses **columnwise** data.
 
 This is why the forward pass must produce *both* rowwise and columnwise quantized data
 for activations: the rowwise data is consumed immediately by the forward GEMM, while the
@@ -61,13 +68,13 @@ The ``Quantizer.set_usage()`` method controls which layouts are produced:
 
 .. code-block:: python
 
-   # Forward activation quantizer: needs both layouts
+   # Forward activation quantizer: rowwise for forward GEMM, columnwise for backward wgrad
    fwd_quantizer.set_usage(rowwise=True, columnwise=True)
 
-   # Weight quantizer: only columnwise for forward GEMM
-   weight_quantizer.set_usage(rowwise=False, columnwise=True)
+   # Weight quantizer: rowwise for forward GEMM, columnwise for backward dgrad
+   weight_quantizer.set_usage(rowwise=True, columnwise=True)
 
-   # Backward grad_output quantizer: needs both for dgrad and wgrad
+   # Backward grad_output quantizer: rowwise for dgrad, columnwise for wgrad
    bwd_quantizer.set_usage(rowwise=True, columnwise=True)
 
 When ``columnwise=True``, the quantization kernel produces an additional transposed

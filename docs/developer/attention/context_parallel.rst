@@ -13,8 +13,8 @@ enabling training with very long sequences that don't fit in a single GPU's memo
 the most complex part of the attention subsystem.
 
 **Implementation**: ``transformer_engine/pytorch/attention/dot_product_attention/context_parallel.py``
-(~4300 lines). Entry point: ``flash_attn_with_cp()``, which dispatches to the appropriate
-strategy class based on ``cp_comm_type``.
+(~4300 lines). Entry point: ``attn_forward_func_with_cp()``, which dispatches to the
+appropriate strategy class based on ``cp_comm_type``.
 
 Overview
 --------
@@ -200,8 +200,8 @@ The CP strategy is configured via ``DotProductAttention``:
 Key Entry Points for Developers
 ---------------------------------
 
-- **Strategy dispatch**: ``flash_attn_with_cp()`` in ``context_parallel.py`` — selects
-  P2P, all-gather, A2A, or A2A+P2P based on ``cp_comm_type``.
+- **Strategy dispatch**: ``attn_forward_func_with_cp()`` in ``context_parallel.py`` —
+  selects P2P, all-gather, A2A, or A2A+P2P based on ``cp_comm_type``.
 - **P2P forward**: ``AttnFuncWithCPAndKVP2P.forward()`` — the step loop, section logic,
   and output correction.
 - **Communication**: ``flash_attn_p2p_communicate()`` (P2P isend/irecv),

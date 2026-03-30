@@ -58,9 +58,13 @@ FlashAttention
 ``transformer_engine/pytorch/attention/dot_product_attention/backends.py``
 
 Integrates Tri Dao's `flash-attn <https://github.com/Dao-AILab/flash-attention>`_
-package as an external dependency (not bundled). The integration imports from
-``flash_attn.flash_attn_interface`` (FA2) and ``flash_attn_3.flash_attn_interface``
-(FA3). Version constraints are managed in ``FlashAttentionUtils`` in ``utils.py``.
+package as an external dependency (not bundled). Two versions are supported:
+
+- **FA2** (``flash_attn.flash_attn_interface``): Ampere and later (sm80+).
+- **FA3** (``flash_attn_3.flash_attn_interface``): Hopper only (sm90). Selected
+  automatically when installed and running on sm90; disabled on other architectures.
+
+Version constraints are managed in ``FlashAttentionUtils`` in ``utils.py``.
 
 Code flow:
 

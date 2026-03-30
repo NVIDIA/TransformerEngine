@@ -31,7 +31,7 @@ The JAX quantizer hierarchy mirrors PyTorch's:
      - Current tensor
    * - ``BlockScaleQuantizer``
      - ``MXFP8Quantizer``
-     - MXFP8 block
+     - MXFP8 block (JAX does not yet support generic block scaling 1D/2D)
    * - ``NVFP4Quantizer``
      - ``NVFP4Quantizer``
      - NVFP4

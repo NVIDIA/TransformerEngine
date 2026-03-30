@@ -77,12 +77,6 @@ responsibilities:
        # Usage control
        def set_usage(self, *, rowwise=False, columnwise=False): ...
 
-       # Properties
-       @property
-       def dtype(self) -> torch.dtype: ...
-       @property
-       def scaling_mode(self) -> str: ...
-
 The ``internal`` Flag
 ^^^^^^^^^^^^^^^^^^^^^
 
@@ -171,8 +165,7 @@ QuantizedTensor (Base: ``transformer_engine/pytorch/quantized_tensor.py``)
        # torch.Tensor subclass machinery
        def __torch_dispatch__(cls, func, types, args, kwargs): ...
 
-       # Data access
-       def get_data_tensors(self) -> dict: ...  # Extract raw data for kernel calls
+       # Data access (get_data_tensors() is on concrete Storage subclasses, not here)
        def get_metadata(self) -> dict: ...      # Scaling metadata
 
        # Dequantize

@@ -53,7 +53,9 @@ must be separate buffers with physically transposed data.
 Tensor Scaling (``NVTE_DELAYED_TENSOR_SCALING``)
 --------------------------------------------------
 
-A single scale factor applies to the entire tensor. Minimum architecture: Ada (sm89).
+A single scale factor applies to the entire tensor. Minimum architecture: Ada (sm89) for
+FP8 data types, though practical FP8 training with cuBLASLt GEMMs is typically done on
+Hopper (sm90) and later.
 
 .. note::
 

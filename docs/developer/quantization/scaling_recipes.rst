@@ -85,7 +85,7 @@ Each ``TransformerEngineBaseModule`` maintains its own quantization state:
 - **Scale tensors**: Computed from amax history before each forward pass.
 
 The module's ``init_fp8_metadata()`` method creates this state, and
-``pre_forward()`` / ``post_forward()`` manage the per-iteration lifecycle.
+``prepare_forward()`` / ``end_forward()`` manage the per-iteration lifecycle.
 
 Amax Update Flow (Delayed Scaling)
 -----------------------------------

@@ -38,10 +38,10 @@ How to Use This Guide
 
    architecture_overview
    linear_walkthrough
-   testing
    cpp_core/index
    quantization/index
    pytorch_frontend/index
    jax_frontend/index
    attention/index
    distributed/index
+   testing
