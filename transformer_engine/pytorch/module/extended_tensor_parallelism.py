@@ -6,6 +6,7 @@ from collections import defaultdict
 from typing import Dict, List, Optional
 from enum import Enum
 from dataclasses import dataclass, field
+import re
 import torch
 from contextlib import nullcontext
 
@@ -74,6 +75,17 @@ def update_config(**kwargs):
         if not hasattr(ETP_CONFIG, key):
             raise ValueError(f"Unknown ETP config option: {key}")
         setattr(ETP_CONFIG, key, value)
+
+
+def tag_etp_params_with_names(model):
+    """Populate _debug_name on every ETPShardedParam with its full dotted parameter name.
+
+    Call once after model construction so the linking log prints human-readable names
+    instead of raw tensor ids.
+    """
+    for name, param in model.named_parameters():
+        if isinstance(param, ETPShardedParam):
+            param._debug_name = name
 
 
 def wrap_module_params_etp(module, weight_names, etp_group, is_grouped=None):
@@ -154,6 +166,33 @@ class ETPShardedParam(torch.nn.Parameter):
     _pending_rs_weight = None
     _first_weight_flag = True
     _last_weight = None
+    _link_node_count = 0
+    _link_table_buffer: List[str] = []
+    _link_table_flushed: bool = False
+
+    @classmethod
+    def _buffer_link_table_row(cls, prev: "ETPShardedParam", curr: "ETPShardedParam") -> None:
+        """Buffer one row of the prefetch-link table (flushed atomically on the second forward pass)."""
+        _W = 70
+
+        def _layer_id(name: str) -> str:
+            m = re.search(r"\d+", name)
+            return m.group() if m else "-"
+
+        cls._link_node_count += 1
+        if cls._link_node_count == 1:
+            cls._link_table_buffer.append(
+                f"\n{'node_id':>7} | {'layer_id':>8} | {'curr_weight_name':<{_W}} | prev_weight_name"
+                f"\n{'-'*7}-+-{'-'*8}-+-{'-'*_W}-+-{'-'*_W}"
+            )
+            # Seed weight (first ETP param) as row 0
+            cls._link_table_buffer.append(
+                f"{'0':>7} | {_layer_id(prev._debug_name):>8} | {prev._debug_name:<{_W}} | -"
+            )
+        cls._link_table_buffer.append(
+            f"{cls._link_node_count:>7} | {_layer_id(curr._debug_name):>8} | "
+            f"{curr._debug_name:<{_W}} | {prev._debug_name}"
+        )
 
     @staticmethod
     def __new__(cls, tensor, *args, **kwargs):
@@ -195,6 +234,8 @@ class ETPShardedParam(torch.nn.Parameter):
         # Padding
         self.is_padded_last_rank = False
         self.pad_length = 0
+        # Debug
+        self._debug_name = ""
 
     def setup(self, weight_quantizer=None):
         """Set quantizer and create quantized shard."""
@@ -527,10 +568,14 @@ class ETPShardedParam(torch.nn.Parameter):
         cls = type(self)
         if not self.prefetch_initialized:
             if cls._last_weight is not None and cls._last_weight.next_w is None:
-                print_rank_0(f"linking curr w: {id(self)} {self.is_routed_expert} prev_w: {id(cls._last_weight)}")
+                cls._buffer_link_table_row(cls._last_weight, self)
                 cls._last_weight.next_w = self
                 self.prev_w = cls._last_weight
             self.prefetch_initialized = True
+        elif not cls._link_table_flushed and cls._link_table_buffer:
+            # Second forward pass: flush the complete table atomically to avoid interleaving
+            cls._link_table_flushed = True
+            print_rank_0("\n".join(cls._link_table_buffer) + "\n")
         cls._last_weight = self
 
         return result
