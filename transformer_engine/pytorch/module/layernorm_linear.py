@@ -1602,6 +1602,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
             )
 
             if new_weight_workspace is not None and cache_name is not None:
+                if isinstance(new_weight_workspace, torch.Tensor):
+                    new_weight_workspace = new_weight_workspace.detach()
                 self._fp8_workspaces[cache_name] = new_weight_workspace
 
         finally:

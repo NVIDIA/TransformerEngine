@@ -2208,8 +2208,12 @@ class LayerNormMLP(TransformerEngineBaseModule):
             )
 
             if new_fc1_ws is not None and cache_name_fc1 is not None:
+                if isinstance(new_fc1_ws, torch.Tensor):
+                    new_fc1_ws = new_fc1_ws.detach()
                 self._fp8_workspaces[cache_name_fc1] = new_fc1_ws
             if new_fc2_ws is not None and cache_name_fc2 is not None:
+                if isinstance(new_fc2_ws, torch.Tensor):
+                    new_fc2_ws = new_fc2_ws.detach()
                 self._fp8_workspaces[cache_name_fc2] = new_fc2_ws
 
         finally:
