@@ -2014,9 +2014,11 @@ class TestGroupedDense:
         and V1 GEMM on all GPUs. Verifies correctness and that pre_swizzled=False.
         """
         n_groups, m, n, k = input_shape
-        # Skip shapes where both K and N are 128-aligned; those may use V2 on SM100+.
-        if k % 128 == 0 and n % 128 == 0:
-            pytest.skip("Shape is V2-eligible; this test targets V1-only shapes")
+        # Skip shapes where K is 128-aligned; on SM100+, V2 quantize is used for any
+        # shape where both the total row count and K are 128-aligned (N alignment is
+        # not required for quantize, only for GEMM).
+        if k % 128 == 0:
+            pytest.skip("Shape is V2-eligible (K is 128-aligned); this test targets V1-only shapes")
         lhs, rhs, group_sizes, contracting_dims, _ = self._generate_grouped_dense_input(
             jnp.bfloat16, input_shape, group_size_multiplier=32
         )

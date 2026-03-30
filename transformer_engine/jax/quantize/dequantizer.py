@@ -290,17 +290,31 @@ def _grouped_dequantize(grouped_scaled_tensor):
     flatten_axis = len(original_shape) + flatten_axis if flatten_axis < 0 else flatten_axis
 
     output = []
-    non_group_shape = tuple(original_shape[i] for i in range(len(original_shape)) if i != 0)
+    # When data_layout=="T" (colwise, transposed) and first_dims is set (ragged groups), the
+    # original_shape is stored transposed: the group (variable-size) axis is the LAST dimension
+    # rather than the first. Non-group dims are original_shape[:-1], not original_shape[1:].
+    is_transposed_ragged = (
+        grouped_scaled_tensor.data_layout == "T"
+        and grouped_scaled_tensor.first_dims is not None
+        and grouped_scaled_tensor.first_dims.size > 0
+    )
+    if is_transposed_ragged:
+        non_group_shape = original_shape[:-1]
+    else:
+        non_group_shape = tuple(original_shape[i] for i in range(len(original_shape)) if i != 0)
     matrix_sizes = group_sizes * math.prod(non_group_shape)
 
     data = jnp.split(data, jnp.cumulative_sum(matrix_sizes)[:-1])
 
     scale_inv_ptr = 0
     for i, data_i in enumerate(data):
-        data_shape_i = (
-            group_sizes[i],
-            *original_shape[1:],
-        )
+        if is_transposed_ragged:
+            data_shape_i = (*non_group_shape, int(group_sizes[i]))
+        else:
+            data_shape_i = (
+                group_sizes[i],
+                *original_shape[1:],
+            )
         assert math.prod(data_shape_i) == data_i.size, (
             f"math.prod({data_shape_i}) = {math.prod(data_shape_i)} which is not equal to"
             f" {data_i.size}"
