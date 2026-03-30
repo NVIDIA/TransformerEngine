@@ -268,6 +268,15 @@ def quantize_into(src, quantizer, dst, noop_flag=None):
                 M_tiles = (M_val + TILE_SIZE - 1) // TILE_SIZE
                 K_tiles = (K_val + TILE_SIZE - 1) // TILE_SIZE
                 ops.nvfp4_2d_scale_transpose(out_scale_inv, col_si, M_tiles, K_tiles)
+            # Copy rowwise amax to columnwise amax (matches _create_columnwise
+            # in nvfp4_tensor_storage.py:445-447). cuBLAS NVFP4 GEMM uses amax
+            # in the formula: out = fp4 * scale * amax / (6*448).
+            amax_rw = getattr(dst, "_amax_rowwise", None)
+            amax_cw = getattr(dst, "_amax_columnwise", None)
+            if amax_rw is not None and amax_cw is not None:
+                amax_cw.copy_(amax_rw)
+            elif amax_rw is not None and amax_cw is None:
+                dst._amax_columnwise = amax_rw.clone()
         else:
             block_dim = getattr(quantizer, "block_scaling_dim", 2)
             if block_dim == 2:
@@ -313,10 +322,50 @@ def quantize_new(tensor, quantizer):
     if not tensor.is_contiguous():
         tensor = tensor.contiguous()
 
+    # MXFP8 requires dimensions divisible by block size (32). The pybind fused
+    # C++ kernel handles non-aligned sizes internally by padding. In the stable
+    # path we pad the input, quantize, then slice back to the original shape.
+    _MXFP8_BLOCK = 32
+    padded = False
+    orig_shape = list(tensor.shape)
+    q_type = type(quantizer).__name__
+    if "MXFP8" in q_type and len(orig_shape) >= 2:
+        last_dim = orig_shape[-1]
+        first_dims_prod = 1
+        for d in orig_shape[:-1]:
+            first_dims_prod *= d
+        need_pad_last = last_dim % _MXFP8_BLOCK != 0
+        need_pad_first = first_dims_prod % _MXFP8_BLOCK != 0
+        if need_pad_last or need_pad_first:
+            pad_last = (_MXFP8_BLOCK - last_dim % _MXFP8_BLOCK) % _MXFP8_BLOCK
+            # Flatten to 2D for padding, then reshape back
+            flat = tensor.reshape(first_dims_prod, last_dim)
+            pad_first = (_MXFP8_BLOCK - first_dims_prod % _MXFP8_BLOCK) % _MXFP8_BLOCK
+            if pad_last > 0 or pad_first > 0:
+                flat = torch.nn.functional.pad(flat, (0, pad_last, 0, pad_first))
+                tensor = flat  # keep as 2D for quantize
+                padded = True
+
     # Allocate output via quantizer's make_empty (pure Python)
     dst = quantizer.make_empty(list(tensor.shape), dtype=tensor.dtype, device=tensor.device)
 
     # Quantize into the new output
     quantize_into(tensor, quantizer, dst)
+
+    # If we padded, slice the quantized output back to the original shape
+    if padded:
+        first_dims_prod = 1
+        for d in orig_shape[:-1]:
+            first_dims_prod *= d
+        # Slice back to original 2D shape, then restore original dims
+        if hasattr(dst, "_rowwise_data") and dst._rowwise_data is not None:
+            dst._rowwise_data = dst._rowwise_data[:first_dims_prod, : orig_shape[-1]]
+        if hasattr(dst, "_rowwise_scale_inv") and dst._rowwise_scale_inv is not None:
+            si = dst._rowwise_scale_inv
+            # Scale has ceil(M/32) rows and ceil(K/32) cols
+            orig_si_rows = (first_dims_prod + _MXFP8_BLOCK - 1) // _MXFP8_BLOCK
+            orig_si_cols = (orig_shape[-1] + _MXFP8_BLOCK - 1) // _MXFP8_BLOCK
+            if si.ndim == 2:
+                dst._rowwise_scale_inv = si[:orig_si_rows, :orig_si_cols]
 
     return dst

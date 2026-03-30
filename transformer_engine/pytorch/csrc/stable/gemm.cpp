@@ -132,8 +132,15 @@ TensorWrapper buildInputTensorWrapper(const Tensor& rowwise_data, DType te_dtype
   // Set amax for NVFP4 tensors. The pybind path (NVTETensorFromNVFP4Tensor)
   // sets amax on the TensorWrapper; cuBLAS uses it in the GEMM formula:
   //   output = fp4_value * scale_e4m3 * amax / (6 * 448)
+  // CanonicalizeGemmInput forces NVFP4 to TN layout and always uses amax.dptr
+  // (not columnwise_amax), even when the original tensor is columnwise-only.
+  // So set amax from whichever source is available.
   if (amax.has_value() && amax->numel() > 0) {
     out.set_amax(amax->data_ptr(), DType::kFloat32, scalar_shape);
+  } else if (colwise_amax.has_value() && colwise_amax->numel() > 0 && is_fp4_dtype(te_dtype)) {
+    // Columnwise-only NVFP4 tensor: use columnwise amax as the rowwise amax
+    // since CanonicalizeGemmInput will use amax.dptr regardless.
+    out.set_amax(colwise_amax->data_ptr(), DType::kFloat32, scalar_shape);
   }
 
   if (colwise_data.has_value() && colwise_data->numel() > 0) {
