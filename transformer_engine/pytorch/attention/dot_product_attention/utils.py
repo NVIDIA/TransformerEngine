@@ -489,7 +489,6 @@ def get_attention_backend(
             use_fused_attention = False
 
     # Filter: Execution type
-    fp8_recipe = None
     if fp8 and fp8_meta["recipe"].fp8_dpa:
         fp8_recipe = fp8_meta["recipe"]
         if fp8_meta.get("local_recipes", None) is not None:
@@ -591,7 +590,7 @@ def get_attention_backend(
         if use_flash_attention:
             use_flash_attention = False
             logger.debug("Disabling FlashAttention for max_logit")
-        if fp8 and fp8_recipe.fp8_dpa:
+        if fp8 and fp8_meta["recipe"].fp8_dpa:
             use_flash_attention = False
             use_fused_attention = False
             use_unfused_attention = False
@@ -620,8 +619,8 @@ def get_attention_backend(
             use_flash_attention = False
             use_fused_attention = False
             use_unfused_attention = False
-        if fp8 and fp8_recipe.fp8_dpa:
-            if fp8_recipe.fp8_mha:
+        if fp8 and fp8_meta["recipe"].fp8_dpa:
+            if fp8_meta["recipe"].fp8_mha:
                 logger.debug("Disabling all backends for KV caching with FP8 MHA")
                 use_flash_attention = False
                 use_fused_attention = False
@@ -780,7 +779,7 @@ def get_attention_backend(
     if softmax_type != "vanilla":
         logger.debug("Disabling FlashAttention for softmax_type = %s", softmax_type)
         use_flash_attention = False
-        if fp8 and fp8_recipe.fp8_dpa:
+        if fp8 and fp8_meta["recipe"].fp8_dpa:
             if use_fused_attention and (
                 device_compute_capability < (10, 0) or cudnn_version < (9, 21, 0)
             ):
@@ -831,7 +830,7 @@ def get_attention_backend(
         use_unfused_attention = False
     if context_parallel and (use_flash_attention_2 or use_flash_attention_3):
         if FlashAttentionUtils.is_installed or FlashAttentionUtils.v3_is_installed:
-            if fp8 and fp8_recipe.fp8_dpa:
+            if fp8 and fp8_meta["recipe"].fp8_dpa:
                 logger.debug(
                     "Disabling FlashAttention as it does not support context parallelism with FP8"
                 )
@@ -888,13 +887,13 @@ def get_attention_backend(
                 " bias for THD format"
             )
             use_fused_attention = False
-        elif fp8 and fp8_recipe.fp8_dpa and qkv_format == "thd":
+        elif fp8 and fp8_meta["recipe"].fp8_dpa and qkv_format == "thd":
             logger.debug(
                 "Disabling FusedAttention as it does not support context parallelism with FP8"
                 " attention and THD format"
             )
             use_fused_attention = False
-        elif fp8 and fp8_recipe.fp8_dpa and core_attention_bias_type != "no_bias":
+        elif fp8 and fp8_meta["recipe"].fp8_dpa and core_attention_bias_type != "no_bias":
             logger.debug(
                 "Disabling FusedAttention as it does not support context parallelism with FP8"
                 " attention and bias"
@@ -986,7 +985,7 @@ def get_attention_backend(
     if use_fused_attention and (window_size[0] != -1 or window_size[1] not in [-1, 0]):
         if (
             fp8
-            and (fp8_recipe.fp8_dpa or fp8_recipe.fp8_mha)
+            and (fp8_meta["recipe"].fp8_dpa or fp8_meta["recipe"].fp8_mha)
             and (device_compute_capability < (10, 0) or cudnn_version < (9, 21, 0))
         ):
             logger.debug(
@@ -1098,8 +1097,8 @@ def get_attention_backend(
     if use_fused_attention:
         q_type = TE_DType[qkv_dtype]
         kv_type = q_type
-        if fp8 and fp8_recipe.fp8_dpa:
-            q_type = get_fp8_te_dtype(fp8_recipe, fprop_tensor=True)
+        if fp8 and fp8_meta["recipe"].fp8_dpa:
+            q_type = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
             kv_type = q_type
         fused_attention_backend = tex.get_fused_attn_backend(
             is_training,
