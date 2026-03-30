@@ -1071,49 +1071,45 @@ class GroupedQuantizePrimitive(BasePrimitive):
         """Return True when the V2 (CUDA-graph-safe) MXFP8 kernel can be used.
 
         V2 requires:
-          1. The total first logical dimension (product of x_shape up to flatten_axis)
+          1. SM100+ (Blackwell) — V2 grouped quantize fuses the scale_inv swizzle via
+             nvte_group_quantize.  The swizzled scale_inv must then be consumed by the
+             V2 grouped GEMM, which also requires SM100+.  Keeping both decisions tied
+             to SM100+ prevents a mismatch where V2-quantized (pre-swizzled) tensors
+             are passed to the V1 grouped GEMM (which would re-swizzle and corrupt).
+          2. The total first logical dimension (product of x_shape up to flatten_axis)
              is divisible by 128.
-          2. For multi-dim group tensors (eff > 1, e.g., kernel shape G×K×N), the
+          3. For multi-dim group tensors (eff > 1, e.g., kernel shape G×K×N), the
              per-group row count non_group_m = prod(x_shape[1:eff]) must also be
-             divisible by 128 (because group_sizes[i] counts slices, not rows, and
-             actual rows per group = group_sizes[i] * non_group_m).
-          3. For lhs-style tensors (eff == 1, shape M×K), individual group sizes must
-             be 128-aligned -- this is a dynamic constraint assumed by the caller.
+             divisible by 128.
+          4. For lhs-style tensors (eff == 1, shape M×K), individual group sizes must
+             be 128-aligned — this is a dynamic constraint assumed by the caller.
+          5. The last logical dimension (contracting dim K or output dim N) must be
+             divisible by 128, matching the V2 grouped GEMM constraint so that the
+             two always agree on V1 vs V2.
 
         Falls back to V1 when constraints are not met. V1 supports arbitrary shapes
         but performs a D2H copy of group_sizes (not CUDA-graph safe).
         """
         if ScalingMode(scaling_mode) != ScalingMode.MXFP8_1D_SCALING:
-            # assert False, (
-            #     "V2 grouped quantize kernel currently only supports MXFP8 1D scaling mode, but got"
-            #     " scaling_mode {}".format(scaling_mode)
-            # )
+            return False
+        # Require SM100+ so V2 quantize (fused swizzle) is only used alongside V2 GEMM.
+        if get_min_device_compute_capability() < 100:
             return False
         ndim = len(x_shape)
         eff = flatten_axis if flatten_axis >= 0 else flatten_axis + ndim
         total_first_dim = math.prod(x_shape[:eff])
         if total_first_dim % 128 != 0:
-            # assert False, (
-            #     "V2 grouped quantize kernel requires total first logical dimension (product of"
-            #     " x_shape up to flatten_axis) to be divisible by 128, but got shape {} and"
-            #     " flatten_axis {} with total_first_dim {}".format(
-            #         x_shape, flatten_axis, total_first_dim
-            #     )
-            # )
             return False
         # For multi-dim group tensors (e.g., kernel shape G×K×N with eff=2),
         # non_group_m = K must also be 128-aligned.
         if eff > 1:
             non_group_m = math.prod(x_shape[1:eff])
             if non_group_m % 128 != 0:
-                # assert False, (
-                #     "V2 grouped quantize kernel requires non-group dimension (product of"
-                #     " x_shape[1:flatten_axis]) to be divisible by 128 for multi-dim group tensors,"
-                #     " but got shape {} and flatten_axis {} with non_group_m {}".format(
-                #         x_shape, flatten_axis, non_group_m
-                #     )
-                # )
                 return False
+        # Last dim must be 128-aligned to match the V2 grouped GEMM requirement.
+        last_dim = math.prod(x_shape[eff:])
+        if last_dim % 128 != 0:
+            return False
         return True
 
     @staticmethod
@@ -1407,6 +1403,11 @@ def grouped_quantize(
         for i, quantizer_i in enumerate(quantizer.quantizers):
             quantizer_i.update(updated_amax[i].reshape((1,)))
 
+    # V2 grouped quantize (nvte_group_quantize) fuses the scale_inv swizzle into
+    # the kernel, so the resulting tensors are already swizzled for GEMM.
+    use_v2 = GroupedQuantizePrimitive._use_v2_kernel(
+        quantizer.scaling_mode.value, x.shape, flatten_axis
+    )
     out = ScaledTensorFactory.create(
         data=rowwise_casted_output,
         scale_inv=rowwise_scale_inv,
@@ -1419,6 +1420,7 @@ def grouped_quantize(
         flatten_axis=flatten_axis,
         first_dims=ragged_first_dims,
         original_shape=original_shape,
+        pre_swizzled=use_v2,
     )
     return out
 

@@ -1114,6 +1114,61 @@ class TestGroupedQuantize:
 
         assert_dequantized_grouped_scaled_tensor(scaled_tensor, x)
 
+    @pytest.mark.skipif(not is_mxfp8_supported, reason=mxfp8_unsupported_reason)
+    def test_grouped_quantize_v1_pre_swizzled(
+        self, input_shape, in_dtype, q_dtype, scaling_mode, q_layout, flatten_axis, with_group_sizes
+    ):
+        """V1 grouped quantize (K not 128-aligned) must produce pre_swizzled=False."""
+        if scaling_mode != ScalingMode.MXFP8_1D_SCALING:
+            pytest.skip("pre_swizzled is only relevant for MXFP8")
+        if q_layout != QuantizeLayout.ROWWISE:
+            pytest.skip("Using ROWWISE layout to get a single GroupedScaledTensor1x")
+        # Shape with K=32 (not 128-aligned) forces V1 quantize on any GPU.
+        n_groups = 4
+        group_sizes = jnp.array([32, 32, 32, 32], dtype=jnp.int32)
+        x = jax.random.uniform(jax.random.PRNGKey(0), (128, 32), jnp.bfloat16)
+        quantizer = QuantizerFactory.create(
+            scaling_mode=ScalingMode.MXFP8_1D_SCALING,
+            q_dtype=jnp.float8_e4m3fn,
+            q_layout=QuantizeLayout.ROWWISE,
+            n_groups=n_groups,
+        )
+        scaled_tensor = tex.grouped_quantize(
+            x, quantizer=quantizer, group_sizes=group_sizes, flatten_axis=-1
+        )
+        assert isinstance(scaled_tensor, GroupedScaledTensor1x)
+        assert not scaled_tensor.pre_swizzled, (
+            "V1 grouped quantize (non-128-aligned K) must produce pre_swizzled=False"
+        )
+
+    @pytest.mark.skipif(not is_v2_grouped_gemm_supported, reason=v2_grouped_gemm_unsupported_reason)
+    @pytest.mark.skipif(not is_mxfp8_supported, reason=mxfp8_unsupported_reason)
+    def test_grouped_quantize_v2_pre_swizzled(
+        self, input_shape, in_dtype, q_dtype, scaling_mode, q_layout, flatten_axis, with_group_sizes
+    ):
+        """V2 grouped quantize (SM100+, 128-aligned M and K) must produce pre_swizzled=True."""
+        if scaling_mode != ScalingMode.MXFP8_1D_SCALING:
+            pytest.skip("pre_swizzled is only relevant for MXFP8")
+        if q_layout != QuantizeLayout.ROWWISE:
+            pytest.skip("Using ROWWISE layout to get a single GroupedScaledTensor1x")
+        # Shape with M=512 and K=128 (both 128-aligned) allows V2 on SM100+.
+        n_groups = 4
+        group_sizes = jnp.array([128, 128, 128, 128], dtype=jnp.int32)
+        x = jax.random.uniform(jax.random.PRNGKey(0), (512, 128), jnp.bfloat16)
+        quantizer = QuantizerFactory.create(
+            scaling_mode=ScalingMode.MXFP8_1D_SCALING,
+            q_dtype=jnp.float8_e4m3fn,
+            q_layout=QuantizeLayout.ROWWISE,
+            n_groups=n_groups,
+        )
+        scaled_tensor = tex.grouped_quantize(
+            x, quantizer=quantizer, group_sizes=group_sizes, flatten_axis=-1
+        )
+        assert isinstance(scaled_tensor, GroupedScaledTensor1x)
+        assert scaled_tensor.pre_swizzled, (
+            "V2 grouped quantize (SM100+, 128-aligned M and K) must produce pre_swizzled=True"
+        )
+
 
 @pytest_parametrize_wrapper("in_dtype", QUANTIZATION_INPUT_DTYPE)
 class TestFusedQuantize:
@@ -1951,6 +2006,107 @@ class TestGroupedDense:
         assert_allclose(prim_wgrad, ref_wgrad, dtype=bwd_dtype)
         assert_allclose(prim_dbias, ref_dbias, dtype=dtype)
 
+    @pytest.mark.skipif(not is_mxfp8_supported, reason=mxfp8_unsupported_reason)
+    def test_grouped_dense_mxfp8_v1_pipeline(self, input_shape):
+        """V1 pipeline: V1 grouped quantize + V1 grouped GEMM.
+
+        Uses shapes where K or N is not 128-aligned, forcing V1 quantize (pre_swizzled=False)
+        and V1 GEMM on all GPUs. Verifies correctness and that pre_swizzled=False.
+        """
+        n_groups, m, n, k = input_shape
+        # Skip shapes where both K and N are 128-aligned; those may use V2 on SM100+.
+        if k % 128 == 0 and n % 128 == 0:
+            pytest.skip("Shape is V2-eligible; this test targets V1-only shapes")
+        lhs, rhs, group_sizes, contracting_dims, _ = self._generate_grouped_dense_input(
+            jnp.bfloat16, input_shape, group_size_multiplier=32
+        )
+        ref_out = self._ref_grouped_dense(lhs, rhs, None, group_sizes, contracting_dims)
+
+        quantizer = QuantizerFactory.create(
+            scaling_mode=ScalingMode.MXFP8_1D_SCALING,
+            q_dtype=jnp.float8_e4m3fn,
+            q_layout=QuantizeLayout.ROWWISE,
+            n_groups=n_groups,
+        )
+        # V1 quantize: K or N not 128-aligned → pre_swizzled=False
+        casted_lhs = jax.jit(tex.grouped_quantize, static_argnames=("flatten_axis",))(
+            lhs, quantizer=quantizer, group_sizes=group_sizes, flatten_axis=-1
+        )
+        assert isinstance(casted_lhs, GroupedScaledTensor1x)
+        assert not casted_lhs.pre_swizzled, "V1 quantize must produce pre_swizzled=False"
+
+        lhs_tensor = GroupedNoScaleTensor(
+            data=lhs, amax=None, first_dims=group_sizes, last_dims=None, original_shape=lhs.shape
+        )
+        rhs_tensor = GroupedNoScaleTensor(
+            data=rhs, amax=None, first_dims=None, last_dims=None, original_shape=rhs.shape
+        )
+        quantizer_set = QuantizerFactory.create_set(
+            scaling_mode=ScalingMode.MXFP8_1D_SCALING,
+            fwd_dtype=jnp.float8_e4m3fn,
+            bwd_dtype=jnp.float8_e4m3fn,
+            is_2x2x=False,
+            n_groups=n_groups,
+        )
+        prim_out = jax.jit(tex.grouped_gemm, static_argnames=("contracting_dims",))(
+            lhs_tensor,
+            rhs_tensor,
+            contracting_dims=contracting_dims,
+            quantizer_set=quantizer_set,
+        )
+        self._assert_grouped_gemm_output(prim_out, group_sizes, ref_out, jnp.float8_e4m3fn)
+
+    @pytest.mark.skipif(not is_v2_grouped_gemm_supported, reason=v2_grouped_gemm_unsupported_reason)
+    @pytest.mark.skipif(not is_mxfp8_supported, reason=mxfp8_unsupported_reason)
+    def test_grouped_dense_mxfp8_v2_pipeline(self, input_shape):
+        """V2 pipeline: V2 grouped quantize + V2 grouped GEMM (SM100+ required).
+
+        Uses shapes where both K and N are 128-aligned, enabling V2 quantize (pre_swizzled=True)
+        and V2 GEMM on SM100+. Verifies correctness and that pre_swizzled=True.
+        """
+        n_groups, m, n, k = input_shape
+        # Skip shapes that are not V2-eligible (K or N not 128-aligned).
+        if k % 128 != 0 or n % 128 != 0:
+            pytest.skip("Shape is not V2-eligible (K or N not 128-aligned)")
+        lhs, rhs, group_sizes, contracting_dims, _ = self._generate_grouped_dense_input(
+            jnp.bfloat16, input_shape, group_size_multiplier=128
+        )
+        ref_out = self._ref_grouped_dense(lhs, rhs, None, group_sizes, contracting_dims)
+
+        quantizer = QuantizerFactory.create(
+            scaling_mode=ScalingMode.MXFP8_1D_SCALING,
+            q_dtype=jnp.float8_e4m3fn,
+            q_layout=QuantizeLayout.ROWWISE,
+            n_groups=n_groups,
+        )
+        # V2 quantize (SM100+, 128-aligned M, K): pre_swizzled=True
+        casted_lhs = jax.jit(tex.grouped_quantize, static_argnames=("flatten_axis",))(
+            lhs, quantizer=quantizer, group_sizes=group_sizes, flatten_axis=-1
+        )
+        assert isinstance(casted_lhs, GroupedScaledTensor1x)
+        assert casted_lhs.pre_swizzled, "V2 quantize (SM100+) must produce pre_swizzled=True"
+
+        lhs_tensor = GroupedNoScaleTensor(
+            data=lhs, amax=None, first_dims=group_sizes, last_dims=None, original_shape=lhs.shape
+        )
+        rhs_tensor = GroupedNoScaleTensor(
+            data=rhs, amax=None, first_dims=None, last_dims=None, original_shape=rhs.shape
+        )
+        quantizer_set = QuantizerFactory.create_set(
+            scaling_mode=ScalingMode.MXFP8_1D_SCALING,
+            fwd_dtype=jnp.float8_e4m3fn,
+            bwd_dtype=jnp.float8_e4m3fn,
+            is_2x2x=False,
+            n_groups=n_groups,
+        )
+        prim_out = jax.jit(tex.grouped_gemm, static_argnames=("contracting_dims",))(
+            lhs_tensor,
+            rhs_tensor,
+            contracting_dims=contracting_dims,
+            quantizer_set=quantizer_set,
+        )
+        self._assert_grouped_gemm_output(prim_out, group_sizes, ref_out, jnp.float8_e4m3fn)
+
 
 # MXFP8 V1 shapes: lhs total_rows = m * 32 and rhs total_rows = n_groups * k are
 # NOT divisible by 128, forcing the V1 (non-CUDA-graph-safe) kernel.
@@ -1964,11 +2120,14 @@ GROUPED_DENSE_MXFP8_V1_INPUT_SHAPES = [
 # divisible by 128, allowing the V2 (CUDA-graph-safe) kernel to be used.
 # These shapes must be paired with group_size_multiplier=128 so that each group's
 # row count is also divisible by 128 (the V2 per-group alignment requirement).
+# Additionally, both the last dimension of lhs (K) and of rhs (N) must be 128-aligned
+# to match the V2 grouped GEMM constraint (and the updated V2 quantize constraint).
 GROUPED_DENSE_MXFP8_V2_INPUT_SHAPES = [
     # (n_groups, m, n, k)
-    # lhs total_rows = m * 128; rhs total_rows = n_groups * k
-    (8, 8, 128, 128),  # lhs: 8*128=1024 (128-aligned); rhs: 8*128=1024 (128-aligned)
-    (4, 4, 64, 256),  # lhs: 4*128=512 (128-aligned); rhs: 4*256=1024 (128-aligned)
+    # lhs: (m*128, k); rhs: (n_groups, k, n)
+    # V2 requires: m*128 % 128==0, k % 128==0 (lhs), n_groups*k % 128==0, n % 128==0 (rhs)
+    (8, 8, 128, 128),  # lhs: M=1024 ✓, K=128 ✓; rhs: G*K=1024 ✓, N=128 ✓
+    (4, 4, 128, 256),  # lhs: M=512 ✓, K=256 ✓; rhs: G*K=1024 ✓, N=128 ✓
 ]
 
 

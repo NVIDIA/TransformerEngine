@@ -493,6 +493,8 @@ class JAXX_GroupedTensorWrapper {
   void set_rowwise(Buffer_Type const &data, std::optional<Buffer_Type> const &scale_inv);
   void set_columnwise(Buffer_Type const &data, std::optional<Buffer_Type> const &scale_inv);
   void set_with_gemm_swizzled_scales(bool val);
+  void replace_scale_inv(bool use_colwise, uint8_t *sinv_ptr, NVTEDType sinv_dtype,
+                         NVTEShape sinv_shape);
   void set_group_info(Buffer_Type const &group_sizes, Buffer_Type const &group_offsets,
                       NVTEGroupedTensorParam group_sizes_param_name);
   // Set only group sizes (no offsets); the setup kernel will compute offsets from sizes.
@@ -599,6 +601,19 @@ void JAXX_GroupedTensorWrapper::set_with_gemm_swizzled_scales(bool val) {
   auto v = static_cast<uint8_t>(val);
   nvte_set_grouped_tensor_param(m_grouped_tensor, kNVTEGroupedWithGEMMSwizzledScales, &v,
                                 sizeof(v));
+}
+
+void JAXX_GroupedTensorWrapper::replace_scale_inv(bool use_colwise, uint8_t *sinv_ptr,
+                                                   NVTEDType sinv_dtype, NVTEShape sinv_shape) {
+  if (use_colwise) {
+    m_colwise_scale_inv_tensor = NVTEBasicTensor{sinv_ptr, sinv_dtype, sinv_shape};
+    nvte_set_grouped_tensor_param(m_grouped_tensor, kNVTEGroupedColumnwiseScaleInv,
+                                  &m_colwise_scale_inv_tensor, sizeof(m_colwise_scale_inv_tensor));
+  } else {
+    m_scale_inv_tensor = NVTEBasicTensor{sinv_ptr, sinv_dtype, sinv_shape};
+    nvte_set_grouped_tensor_param(m_grouped_tensor, kNVTEGroupedRowwiseScaleInv,
+                                  &m_scale_inv_tensor, sizeof(m_scale_inv_tensor));
+  }
 }
 
 void JAXX_GroupedTensorWrapper::set_group_info(Buffer_Type const &group_sizes,
@@ -806,6 +821,9 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
                                             rhs_last_dims, out_first_dims, out_last_dims, alpha);
 
   // Workspaces.
+  // V2 GEMM receives scale_inv already swizzled by nvte_group_quantize (V2 grouped quantize
+  // fuses the swizzle).  No extra sinv reservation is needed; the full cublas_workspace is
+  // available for cuBLAS.
   auto setup_workspace_ptr = reinterpret_cast<uint8_t *>(setup_workspace->untyped_data());
   auto cublas_workspace_ptr = reinterpret_cast<uint8_t *>(cublas_workspace->untyped_data());
   cublas_workspace_ptr = move_ptr_to_next_256B_aligned(cublas_workspace_ptr);
@@ -836,6 +854,9 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
   const bool rhs_use_colwise = is_mxfp8 && !rhs_is_trans;
   const bool lhs_use_colwise = is_mxfp8 && lhs_is_trans;
 
+  // For MXFP8: scale_inv is already swizzled (pre-swizzled by V2 grouped quantize via
+  // nvte_group_quantize).  Pass the buffers directly to make_grouped_tensor which sets
+  // with_gemm_swizzled_scales(true) for MXFP8 automatically.  No re-swizzling needed.
   auto rhs_tensor =
       is_mxfp8
           ? make_grouped_tensor(rhs_data, rhs_sinv, scaling_mode, rhs_use_colwise, rhs_first_dims,
@@ -850,6 +871,7 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
                                 stream, lhs_axis_boundary)
           : make_grouped_tensor(lhs_data, lhs_first_dims, lhs_last_dims, int64_base, int64_capacity,
                                 int64_offset, num_gemms, stream, lhs_axis_boundary);
+
   // Output stays NO_SCALING
   auto out_tensor = make_grouped_tensor(*output, out_first_dims, out_last_dims, int64_base,
                                         int64_capacity, int64_offset, num_gemms, stream);

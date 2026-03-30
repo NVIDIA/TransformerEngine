@@ -381,24 +381,6 @@ def swizzled_scale(scale_inv, flatten_axis, is_colwise):
     return swizzled.reshape(original_shape)
 
 
-def _swizzle_grouped_scale(scale_inv, scale_2d_shape, is_colwise):
-    """Swizzle a 1D grouped scale_inv buffer using full-tensor swizzle.
-
-    The grouped scale_inv is 1D (worst-case padded). The meaningful prefix has size
-    equal to prod(scale_2d_shape). We reshape that prefix to 2D, swizzle it, and
-    write it back, leaving any trailing padding untouched.
-    """
-    useful_size = math.prod(scale_2d_shape)
-    if useful_size == scale_inv.shape[0]:
-        # No trailing padding — reshape, swizzle, flatten.
-        return swizzled_scale(scale_inv.reshape(scale_2d_shape), 1, is_colwise).reshape(
-            scale_inv.shape
-        )
-    # Split meaningful prefix from trailing padding, swizzle prefix only.
-    prefix = scale_inv[:useful_size].reshape(scale_2d_shape)
-    swizzled = swizzled_scale(prefix, 1, is_colwise).reshape((useful_size,))
-    return jnp.concatenate([swizzled, scale_inv[useful_size:]])
-
 
 def get_lhs_axis_boundary(lhs_cdims, is_transposed):
     """Get the axis boundary for the LHS operand."""
@@ -1629,9 +1611,11 @@ class GroupedGemmPrimitive(BasePrimitive):
             workspace_size += lhs_scale_inv_aval.size * tensor_scaling_sinv_aligment
             workspace_size += rhs_scale_inv_aval.size * tensor_scaling_sinv_aligment
         elif scaling_mode == ScalingMode.MXFP8_1D_SCALING.value:
+            # V1 needs workspace for swizzled scale_inv output buffers
+            # (nvte_swizzle_scaling_factors is called per-group inside GroupedGemmFFI).
+            # V2 receives scale_inv already swizzled by nvte_group_quantize (fused swizzle in
+            # V2 grouped quantize); no extra workspace is needed for re-swizzling.
             if not use_v2_ffi:
-                # V1 needs workspace for per-group swizzle output buffers.
-                # V2: scales are pre-swizzled in JAX, no extra workspace needed.
                 workspace_size += lhs_scale_inv_aval.size + mxfp8_scaling_sinv_alignment_padding
                 workspace_size += rhs_scale_inv_aval.size + mxfp8_scaling_sinv_alignment_padding
         return workspace_size
@@ -2388,37 +2372,24 @@ def grouped_gemm(
         lhs_axis_boundary=lhs_axis_boundary,
         rhs_axis_boundary=rhs_axis_boundary,
     )
+
+    # V2 grouped GEMM requires MXFP8 inputs to be pre-swizzled by V2 grouped quantize
+    # (nvte_group_quantize fuses the swizzle). The C++ V2 GEMM FFI does not re-swizzle.
     if use_v2_ffi and scaling_mode == ScalingMode.MXFP8_1D_SCALING:
-        # Pre-swizzle full scale tensors in JAX (CUDA-graph safe).
-        # Grouped scale_inv is 1D (flat, worst-case padded). When all group sizes are
-        # multiples of 128 (V2 requirement), the per-group scales are contiguous with no
-        # inter-group padding gaps. We reshape the meaningful prefix to 2D, swizzle, and
-        # write it back into the original 1D buffer (extra trailing zeros stay untouched).
-        lhs_is_colwise = lhs_is_trans
-        rhs_is_colwise = not rhs_is_trans
-        lhs_scale_shape = scaling_mode.get_scale_shape(
-            lhs_data.shape,
-            is_colwise=lhs_is_colwise,
-            is_padded=True,
-            flatten_axis=lhs_axis_boundary,
-        )
-        rhs_scale_shape = scaling_mode.get_scale_shape(
-            rhs_data.shape,
-            is_colwise=rhs_is_colwise,
-            is_padded=True,
-            flatten_axis=rhs_axis_boundary,
-        )
-        # get_scale_shape may return a multi-dim shape (e.g. (8, 4, 128) for a 3D
-        # input), but _swizzle_grouped_scale needs a flat 2D shape (rows, cols) where
-        # cols = n_block_y (last dim) and rows = prod(all other dims). This correctly
-        # flattens the group/K-block axes into a single row dimension so the swizzle
-        # pattern operates on the full (K-blocks-across-groups × N-blocks) matrix.
-        lhs_n_block_y = lhs_scale_shape[-1]
-        rhs_n_block_y = rhs_scale_shape[-1]
-        lhs_scale_2d = (math.prod(lhs_scale_shape) // lhs_n_block_y, lhs_n_block_y)
-        rhs_scale_2d = (math.prod(rhs_scale_shape) // rhs_n_block_y, rhs_n_block_y)
-        lhs_scale_inv = _swizzle_grouped_scale(lhs_scale_inv, lhs_scale_2d, lhs_is_colwise)
-        rhs_scale_inv = _swizzle_grouped_scale(rhs_scale_inv, rhs_scale_2d, rhs_is_colwise)
+        if isinstance(lhs, GroupedScaledTensor1x) and not lhs.pre_swizzled:
+            raise ValueError(
+                "V2 grouped GEMM requires MXFP8 lhs scale_inv to be pre-swizzled. "
+                "GroupedScaledTensor1x.pre_swizzled is False. "
+                "Use V2 grouped quantize (nvte_group_quantize, requires SM100+ and "
+                "128-aligned shapes) to produce pre-swizzled tensors."
+            )
+        if isinstance(rhs, GroupedScaledTensor1x) and not rhs.pre_swizzled:
+            raise ValueError(
+                "V2 grouped GEMM requires MXFP8 rhs scale_inv to be pre-swizzled. "
+                "GroupedScaledTensor1x.pre_swizzled is False. "
+                "Use V2 grouped quantize (nvte_group_quantize, requires SM100+ and "
+                "128-aligned shapes) to produce pre-swizzled tensors."
+            )
 
     if use_v2_ffi:
         additional_arg_0 = jnp.ones((num_gemms,), jnp.float32)  # alpha
