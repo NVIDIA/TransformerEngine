@@ -1441,7 +1441,7 @@ def fused_attn(
             f"max_segments_per_seq={max_segments_per_seq} is set but qkv_layout={qkv_layout} is "
             "not a THD layout. max_segments_per_seq > 1 only applies when using THD layouts "
             "(e.g. QKVLayout.T3HD, QKVLayout.THD_T2HD, QKVLayout.THD_THD_THD) for sequence "
-            "packing. With non-THD layouts this parameter has no effect.",
+            "packing.",
             UserWarning,
             stacklevel=2,
         )
