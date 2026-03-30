@@ -675,9 +675,6 @@ def quantize_weight(
 ) -> Tuple[QuantizedTensorStorage, Optional[QuantizedTensorStorage]]:
     """Quantize a weight tensor, optionally reusing a cached workspace.
 
-    This is a standalone function (no module reference) that can be called
-    from inside ``torch.autograd.Function.forward``.
-
     Parameters
     ----------
     tensor: torch.Tensor, optional
@@ -751,6 +748,9 @@ def quantize_weight(
     if tensor is None or quantizer is None:
         raise ValueError("tensor and quantizer kwargs must be provided to construct FP8 workspace")
     if cache:
+        # Ensure the tensor in the cache is an instance of torch.Tensor,
+        # as it persists beyond a single forward pass.
+        # Setting internal=True would cause the data to be removed in prepare_for_saving(...).
         saved_internal = quantizer.internal
         quantizer.internal = False
     out = quantizer.quantize(tensor, dtype=workspace_dtype)
