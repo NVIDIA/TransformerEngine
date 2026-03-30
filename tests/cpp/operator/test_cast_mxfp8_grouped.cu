@@ -129,7 +129,7 @@ void compute_ref(const ProcessingMethod processing_method,
                     const fp8e8m0 biased_exponent = float_to_e8m0(block_amax * Quantized_Limits<OutputType>::max_reciprocal());
                     const size_t scale_idx = i * scales_stride_rowwise + tile_X;
                     output_scales_rowwise[scale_idx] = biased_exponent;
-                    float scale_reciprocal = exp2f_rcp(biased_exponent);
+                    const float scale_reciprocal = exp2f_rcp(biased_exponent);
 
                     for (size_t j = j_min; j < j_max; ++j) {
                         const size_t idx = i * cols + j;
@@ -150,7 +150,7 @@ void compute_ref(const ProcessingMethod processing_method,
                     const fp8e8m0 biased_exponent = float_to_e8m0(block_amax * Quantized_Limits<OutputType>::max_reciprocal());
                     const size_t scale_idx = tile_Y * scales_stride_colwise + j;
                     output_scales_colwise[scale_idx] = biased_exponent;
-                    float scale_reciprocal = exp2f_rcp(biased_exponent);
+                    const float scale_reciprocal = exp2f_rcp(biased_exponent);
 
                     for (size_t i = i_min; i < i_max; ++i) {
                         const size_t idx = i * cols + j;
@@ -272,13 +272,9 @@ void performTest(const ProcessingMethod processing_method,
         const size_t elts = M * K;
         elts_num += elts;
 
-        auto divide_round_up_blocks = [](const size_t N, const size_t M) -> size_t {
-            return (N == 0) ? 0 : 1 + (N - 1) / M;
-        };
-
         const size_t unpadded_rowwise_blocks_Y = M;
-        const size_t unpadded_rowwise_blocks_X = divide_round_up_blocks(K, 32);
-        const size_t unpadded_colwise_blocks_Y = divide_round_up_blocks(M, 32);
+        const size_t unpadded_rowwise_blocks_X = divide_round_up(K, 32);
+        const size_t unpadded_colwise_blocks_Y = divide_round_up(M, 32);
         const size_t unpadded_colwise_blocks_X = K;
 
         rowwise_scales_first_dim[t] = round_up_to_nearest_multiple(unpadded_rowwise_blocks_Y, 128);
@@ -509,7 +505,7 @@ void performTest(const ProcessingMethod processing_method,
     Tensor workspace;
     switch (processing_method) {
         case ProcessingMethod::CAST_ONLY: {
-            nvte_group_quantize_v2(in_group_tensor, out_group_tensor, quant_config, 0);
+            nvte_group_quantize(in_group_tensor, out_group_tensor, quant_config, 0);
             break;
         }
         case ProcessingMethod::CAST_DBIAS: {

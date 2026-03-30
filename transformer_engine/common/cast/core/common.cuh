@@ -262,7 +262,7 @@ get_tensor_cols_num(const size_t tensor_id, const size_t last_logical_dim,
     cols_num = static_cast<size_t>(last_dims_ptr[tensor_id]);
     if (cols_num % 128 != 0) {
       NVTE_DEVICE_ERROR(
-          "For non-single tensors, the last dimension of each tensor in a group "
+          "For varying last dimensions support, the last dimension of each tensor in a group "
           "must be divisible by 128.");
     }
   }
@@ -389,20 +389,15 @@ __device__ __forceinline__ bool job_has_work(const JobDescriptor &job) {
   return job.rows != 0 && job.cols != 0;
 }
 
-template <bool IS_PERSISTENT>
 __device__ __forceinline__ void advance_to_next_job(bool &job_finished, int32_t &ctaid_X,
                                                     int32_t &ctaid_Y, size_t &static_next_block_id,
                                                     const size_t static_block_stride,
                                                     const size_t total_work_blocks,
                                                     const size_t work_blocks_X) {
-  if constexpr (IS_PERSISTENT) {
-    if (static_next_block_id < total_work_blocks) {
-      ctaid_X = static_cast<int32_t>(static_next_block_id % work_blocks_X);
-      ctaid_Y = static_cast<int32_t>(static_next_block_id / work_blocks_X);
-      static_next_block_id += static_block_stride;
-    } else {
-      job_finished = true;
-    }
+  if (static_next_block_id < total_work_blocks) {
+    ctaid_X = static_cast<int32_t>(static_next_block_id % work_blocks_X);
+    ctaid_Y = static_cast<int32_t>(static_next_block_id / work_blocks_X);
+    static_next_block_id += static_block_stride;
   } else {
     job_finished = true;
   }
@@ -459,9 +454,7 @@ __device__ __forceinline__ void modify_base_tensor_map(const CUtensorMap base_te
         : "memory");
     *global_tensor_map = shared_tensor_map;
   } else {
-    NVTE_DEVICE_ERROR(
-        "tensormap.replace is architecture-specific. "
-        "Try recompiling with sm_XXXa instead of sm_XXX.");
+    NVTE_DEVICE_ERROR("tensormap.replace is architecture-specific. ");
   }
 }
 
