@@ -2898,11 +2898,11 @@ void fused_attn_fp8_bwd(
   void* devPtrdK = output_dK->data.dptr;
   void* devPtrdV = output_dV->data.dptr;
   void* devPtrAmaxdQ = output_dQ->amax.dptr;
-  void* devPtrAmaxdK = output_dQ->amax.dptr;
-  void* devPtrAmaxdV = output_dQ->amax.dptr;
+  void* devPtrAmaxdK = output_dK->amax.dptr;
+  void* devPtrAmaxdV = output_dV->amax.dptr;
   void* devPtrScaledQ = output_dQ->scale.dptr;
-  void* devPtrScaledK = output_dQ->scale.dptr;
-  void* devPtrScaledV = output_dQ->scale.dptr;
+  void* devPtrScaledK = output_dK->scale.dptr;
+  void* devPtrScaledV = output_dV->scale.dptr;
 
   void* devPtrcuSeqlensQ =
       reinterpret_cast<void*>(reinterpret_cast<int32_t*>(cu_seqlens_q->data.dptr));
