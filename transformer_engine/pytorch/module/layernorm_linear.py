@@ -576,8 +576,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ) = restore_from_saved(ctx.tensor_objects, saved_tensors)
 
             if ctx.etp_size > 1:
-                weight = origin_weight.all_gather_and_prefetch_bwd(
-                    nvtx_label=nvtx_label)
+                weight = origin_weight.all_gather_and_prefetch_bwd()
 
             # Delete the references to tensor objects once they've been consumed
             # by the `restore_from_saved` method to construct back the actual tensors.

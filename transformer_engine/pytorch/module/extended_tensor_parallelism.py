@@ -363,6 +363,13 @@ class ETPShardedParam(torch.nn.Parameter):
 
     def _all_gather_weight(self, async_op, skip_weight_cast, cast_noop_flag, fwd, nvtx_label=None):
         """Quantize (if needed) and all-gather weight. Returns (weight_total, handle)."""
+        if nvtx_label is None:
+            nvtx_label = (
+                self._debug_name
+                + (".fwd" if fwd else ".bwd")
+                + (".async" if async_op else ".sync")
+            )
+
         weights = self._weights
 
         # 1. Transition state for async gathers.
@@ -633,12 +640,18 @@ class ETPShardedParam(torch.nn.Parameter):
                 self._wgrad_rs_handle = None
                 self.rs_event.record()
 
-    def _reduce_scatter(self, wgrads, async_op):
+    def _reduce_scatter(self, wgrads, async_op, nvtx_label=None):
         """Reduce-scatter one or more wgrads. Returns (outputs, handle).
 
         Single tensor: plain reduce-scatter (no coalescing).
         Multiple tensors: coalesced reduce-scatter.
         """
+        if nvtx_label is None:
+            nvtx_label = (
+                self._debug_name
+                + ".bwd"
+                + (".async" if async_op else ".sync")
+            )
 
         for w in self._weights:
             if async_op:
@@ -661,12 +674,15 @@ class ETPShardedParam(torch.nn.Parameter):
             out_buffers = [None] * len(wgrads)
 
         if len(wgrads) == 1:
+            nvtx_range_push(f"{nvtx_label}.etp_rs")
             out, handle = reduce_scatter_along_first_dim(
                 wgrads[0], self.group, async_op=async_op, output=out_buffers[0]
             )
+            nvtx_range_pop(f"{nvtx_label}.etp_rs")
             return [out], handle
         else:
             outputs = []
+            nvtx_range_push(f"{nvtx_label}.batched_etp_rs")
             with torch.distributed._coalescing_manager(
                 group=self.group,
                 device=wgrads[0].device,
@@ -675,10 +691,11 @@ class ETPShardedParam(torch.nn.Parameter):
                 for out_buffer, tensor in zip(out_buffers, wgrads):
                     out, _ = reduce_scatter_along_first_dim(tensor, self.group, output=out_buffer)
                     outputs.append(out)
+            nvtx_range_pop(f"{nvtx_label}.batched_etp_rs")
 
             return outputs, cm if async_op else None
 
-    def wgrad_reduce_scatter(self, wgrad, fuse_wgrad_accumulation):
+    def wgrad_reduce_scatter(self, wgrad, fuse_wgrad_accumulation, nvtx_label=None):
         """Reduce-scatter wgrad(s). Sync for last weight, async+deferred for others.
 
         Accepts a single tensor (non-routed) or list of tensors (routed experts).
@@ -694,12 +711,12 @@ class ETPShardedParam(torch.nn.Parameter):
         if ETP_CONFIG.weight_prefetch and self.prev_w is not None:
             # Async reduce-scatter (not last weight — deferred finish)
             self.fuse_wgrad_accumulation = fuse_wgrad_accumulation
-            _, rs_handle = self._reduce_scatter(wgrads, async_op=True)
+            _, rs_handle = self._reduce_scatter(wgrads, async_op=True, nvtx_label=nvtx_label)
             self._wgrad_rs_handle = ETPShardHandle(rs_handle, weights, reduce_scatter=True)
             ret = tuple([None] * len(wgrads)) if batched else None
         else:
             # Sync reduce-scatter (last weight in chain)
-            sharded, _ = self._reduce_scatter(wgrads, async_op=False)
+            sharded, _ = self._reduce_scatter(wgrads, async_op=False, nvtx_label=nvtx_label)
             result = [self._finalize_wgrad(p, g, fuse_wgrad_accumulation)
                       for p, g in zip(weights, sharded)]
             ret = result if batched else result[0]
@@ -718,10 +735,10 @@ class ETPShardedParam(torch.nn.Parameter):
 
         return ret
 
-    def batched_wgrad_reduce_scatter(self, wgrad_list, fuse_wgrad_accumulation):
+    def batched_wgrad_reduce_scatter(self, wgrad_list, fuse_wgrad_accumulation, nvtx_label=None):
         """Batched version of wgrad_reduce_scatter."""
         assert self.is_routed_expert and self.weight_list is not None
-        return self.wgrad_reduce_scatter(wgrad_list, fuse_wgrad_accumulation)
+        return self.wgrad_reduce_scatter(wgrad_list, fuse_wgrad_accumulation, nvtx_label=nvtx_label)
 
     def __torch_function__(self, func, types, args=(), kwargs=None):
         if kwargs is None:

@@ -699,8 +699,7 @@ class _Linear(torch.autograd.Function):
             # --------------------------------------------------
 
             if ctx.etp_size > 1:
-                weight_fp8 = weight.all_gather_and_prefetch_bwd(
-                    nvtx_label=nvtx_label)
+                weight_fp8 = weight.all_gather_and_prefetch_bwd()
 
             dgrad = None
             dgrad_work = None

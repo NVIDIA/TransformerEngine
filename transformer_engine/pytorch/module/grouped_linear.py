@@ -420,9 +420,7 @@ class _GroupedLinear(torch.autograd.Function):
                 accumulate_wgrad_into_param_main_grad = ctx.fuse_wgrad_accumulation
 
             if ctx.etp_size > 1:
-                weights = origin_weights[0].batched_all_gather_and_prefetch_bwd(
-                    nvtx_label="te._GroupedLinear.bwd",
-                )
+                weights = origin_weights[0].batched_all_gather_and_prefetch_bwd()
 
             if ctx.requires_dgrad:
                 dgrad_gemm_use_split_accumulator = _2X_ACC_DGRAD
