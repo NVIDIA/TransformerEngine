@@ -2432,7 +2432,9 @@ def multi_tensor_compute_scale_and_scale_inv(
 
 def multi_tensor_compute_scale_inv_e8m0(chunk_size, dummy, tensor_lists):
     ptrs, shapes, dtypes, nl, nt = _pack_tensor_lists(tensor_lists)
-    _ops.multi_tensor_compute_scale_inv_e8m0(chunk_size, ptrs, shapes, dtypes, nl, nt)
+    # Pass a dummy CUDA tensor to drive dispatch to CUDA backend
+    dummy_cuda = torch.empty(1, device="cuda", dtype=torch.int64)
+    _ops.multi_tensor_compute_scale_inv_e8m0(chunk_size, dummy_cuda, ptrs, shapes, dtypes, nl, nt)
 
 
 # ============================================================================
@@ -2929,16 +2931,48 @@ def fused_attn_bwd(
 
     device = Q_data.device
 
-    # S = empty placeholder for backward (softmax stats from forward are in aux pack).
-    # The pybind backward creates te_S as empty via quantizer_helper(s_quantizer=None, {0}, ...);
-    # the actual forward softmax stats are passed via nvte_aux (aux_list below).
+    # S and dP: empty placeholder tensors for backward.
+    # For FP8, the pybind version creates these via quantizer_helper(s_quantizer, {0}, ...)
+    # which sets up FP8 dtype and scale_inv. Replicate by detecting quantizer type.
     S_data = torch.empty([0], dtype=torch.float32, device=device)
     S_dtype = 4  # kFloat32
-    S_si, S_sm = None, 0
-
-    # dP = empty placeholder
+    S_amax, S_scale, S_si, S_sm = None, None, None, 0
     dP_data = torch.empty([0], dtype=torch.float32, device=device)
-    dP_dtype, dP_si, dP_sm = 4, None, 0
+    dP_dtype = 4
+    dP_amax, dP_scale, dP_si, dP_sm = None, None, None, 0
+
+    def _fp8_quantizer_metadata(quantizer):
+        """Extract FP8 metadata from a quantizer for S/dP tensors."""
+        q_dtype = getattr(quantizer, "dtype", None)
+        if q_dtype is None:
+            return None
+        # dtype may be torch.dtype or integer TE enum
+        _FP8_DTYPES = {torch.float8_e4m3fn, torch.float8_e5m2, 7, 8}
+        if q_dtype not in _FP8_DTYPES:
+            return None
+        te_dt = 7 if q_dtype in (torch.float8_e4m3fn, 7) else 8
+        q_scale = getattr(quantizer, "scale", None)
+        amax = torch.zeros([1], dtype=torch.float32, device=device)
+        if q_scale is not None:
+            scale = q_scale.clone().detach().to(dtype=torch.float32, device=device).reshape(1)
+            si = (1.0 / q_scale).to(dtype=torch.float32, device=device).reshape(1)
+        else:
+            scale = torch.ones([1], dtype=torch.float32, device=device)
+            si = torch.ones([1], dtype=torch.float32, device=device)
+        return te_dt, amax, scale, si
+
+    if s_quantizer is not None:
+        meta = _fp8_quantizer_metadata(s_quantizer)
+        if meta is not None:
+            S_data = torch.empty([0], dtype=torch.uint8, device=device)
+            S_dtype, S_amax, S_scale, S_si = meta
+            S_sm = 0  # NVTE_DELAYED_TENSOR_SCALING
+    if dp_quantizer is not None:
+        meta = _fp8_quantizer_metadata(dp_quantizer)
+        if meta is not None:
+            dP_data = torch.empty([0], dtype=torch.uint8, device=device)
+            dP_dtype, dP_amax, dP_scale, dP_si = meta
+            dP_sm = 0  # NVTE_DELAYED_TENSOR_SCALING
 
     # Determine output grad dtype
     if dqkv_dtype is not None:
@@ -2997,10 +3031,22 @@ def fused_attn_bwd(
     dV_data, dV_te_dtype, dV_si, dV_sm = extract_tensor_data(dV)
     # When dqkv_dtype specifies an FP8 type, the tensors are allocated as uint8
     # but extract_tensor_data returns kByte (0). Override with the actual FP8 dtype.
+    # Also allocate amax and scale_inv tensors that cuDNN FP8 backward requires.
+    dQ_amax = dQ_scale = dK_amax = dK_scale = dV_amax = dV_scale = None
     if dqkv_te_dtype in (7, 8):  # kFloat8E4M3, kFloat8E5M2
         dQ_te_dtype = dqkv_te_dtype
         dK_te_dtype = dqkv_te_dtype
         dV_te_dtype = dqkv_te_dtype
+        # cuDNN FP8 backward needs non-null amax/scale_inv on output dQ/dK/dV
+        dQ_amax = torch.zeros([1], dtype=torch.float32, device=device)
+        dQ_scale = torch.ones([1], dtype=torch.float32, device=device)
+        dQ_si = torch.ones([1], dtype=torch.float32, device=device)
+        dK_amax = torch.zeros([1], dtype=torch.float32, device=device)
+        dK_scale = torch.ones([1], dtype=torch.float32, device=device)
+        dK_si = torch.ones([1], dtype=torch.float32, device=device)
+        dV_amax = torch.zeros([1], dtype=torch.float32, device=device)
+        dV_scale = torch.ones([1], dtype=torch.float32, device=device)
+        dV_si = torch.ones([1], dtype=torch.float32, device=device)
 
     # dBias: allocate when bias_type not in {NO_BIAS=0, ALIBI=2}
     num_heads_q = Q_shape[-2] if len(Q_shape) >= 2 else 1
@@ -3076,20 +3122,24 @@ def fused_attn_bwd(
         dO_data,
         dO_si,
         S_data,
+        S_amax,
+        S_scale,
         S_si,
         dP_data,
+        dP_amax,
+        dP_scale,
         dP_si,
         dQ_data,
-        None,
-        None,
+        dQ_amax,
+        dQ_scale,
         dQ_si,
         dK_data,
-        None,
-        None,
+        dK_amax,
+        dK_scale,
         dK_si,
         dV_data,
-        None,
-        None,
+        dV_amax,
+        dV_scale,
         dV_si,
         dBias,
         dSoftmaxOffset,
