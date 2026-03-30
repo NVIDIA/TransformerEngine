@@ -244,7 +244,7 @@ class TEDefaultFeatures:
         config: Dict,
         layer_name: str,
         tensor_name: str,
-        tensor: torch.Tensor,
+        tensor: Optional[torch.Tensor],
         rowwise_quantized_tensor: Optional[torch.Tensor],
         columnwise_quantized_tensor: Optional[torch.Tensor],
         quantizer: Optional[Quantizer],
@@ -262,8 +262,8 @@ class TEDefaultFeatures:
         layer_name: str
         tensor_name: str
             one of [`activation`, `weight`, `gradient`, `output`, `wgrad`, `dgrad`],
-        tensor: torch.Tensor
-            tensor in high precision,
+        tensor: Optional[torch.Tensor]
+            tensor in high precision. It can be None only if fp8 model parameters are used and tensor name is `weight`.
         rowwise_quantized_tensor: Optional[torch.Tensor]
             rowwise quantized tensor,
         columnwise_quantized_tensor: Optional[torch.Tensor]
@@ -479,9 +479,14 @@ class TransformerEngineAPI(BaseNamespaceAPI):
         """
         if call.__name__ == "inspect_tensor":
             kwargs_copy = kwargs.copy()
-            for k in ["quantizer", "columnwise_quantized_tensor", "rowwise_quantized_tensor"]:
+            for k in [
+                "quantizer",
+                "columnwise_quantized_tensor",
+                "rowwise_quantized_tensor",
+                "tp_size",
+            ]:
                 if k not in call.__code__.co_varnames:
-                    kwargs_copy.pop(k)
+                    kwargs_copy.pop(k, None)
         else:
             kwargs_copy = kwargs
 
@@ -490,6 +495,12 @@ class TransformerEngineAPI(BaseNamespaceAPI):
                 "inspect_tensor_postquantize is deprecated, use inspect_tensor instead.",
                 DeprecationWarning,
             )
+            kwargs_copy = kwargs.copy()
+            for k in ["tp_size"]:
+                if k not in call.__code__.co_varnames:
+                    kwargs_copy.pop(
+                        k, None
+                    )  # use None default to avoid KeyError if kwarg wasn't passed
 
         return call(feat_config, layer_name, **kwargs_copy)
 

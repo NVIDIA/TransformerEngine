@@ -3,57 +3,63 @@
 # See LICENSE for license information.
 
 import os
-import pytest
 import subprocess
 from pathlib import Path
-import transformer_engine.pytorch as te
 
+import pytest
 import torch
 
+import transformer_engine.pytorch as te
 
-fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
-mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
 NUM_PROCS: int = torch.cuda.device_count()
+_FSDP2_DIR = Path(__file__).parent.resolve() / "fsdp2_tests"
 
 
-def _run_test(fp_init, sharding_dims, recipe, layer_type):
-    test_path = Path(__file__).parent.resolve() / "run_fsdp2_model.py"
-    test_cmd = ["torchrun", f"--nproc_per_node={NUM_PROCS}", str(test_path)]
-
-    if fp_init:
-        test_cmd += ["--fp8-init"]
-
-    if len(sharding_dims) == 1:
-        test_cmd += ["--sharding-dims", str(sharding_dims[0])]
-    elif len(sharding_dims) == 2:
-        test_cmd += ["--sharding-dims", str(sharding_dims[0]), str(sharding_dims[1])]
-    else:
-        assert False
-    test_cmd += ["--recipe", recipe]
-    test_cmd += ["--layer-type", layer_type]
-
-    result = subprocess.run(test_cmd, env=os.environ, check=True)
-
-
-@pytest.mark.skipif(NUM_PROCS < 4, reason="Requires 4+ GPUs")
 @pytest.mark.skipif(NUM_PROCS % 2 != 0, reason="Requires even number of GPUs")
 @pytest.mark.skipif(not te.torch_version() >= (2, 4, 0), reason="Requires PyTorch 2.4.0+")
-@pytest.mark.parametrize("sharding_dims", ([NUM_PROCS], [2, NUM_PROCS // 2]))
-@pytest.mark.parametrize("fp8_init", (False, True))
-@pytest.mark.parametrize("recipe", ("delayed_scaling", "current_scaling", "mx_fp8_block_scaling"))
-@pytest.mark.parametrize("layer_type", ("LayerNormLinear", "TransformerLayer"))
-def test_distributed(fp8_init, sharding_dims, recipe, layer_type):
+def test_fsdp2_model_tests():
+    """All FSDP2 model tests (parametrized internally by recipe, fp8_init, sharding, layer)."""
+    test_path = _FSDP2_DIR / "run_fsdp2_model.py"
+    result = subprocess.run(
+        [
+            "torchrun",
+            f"--nproc_per_node={NUM_PROCS}",
+            "--local-ranks-filter=0",
+            "-m",
+            "pytest",
+            str(test_path),
+            "-v",
+            "-s",
+            "--tb=short",
+        ],
+        env=os.environ,
+        timeout=600,
+    )
+    assert result.returncode in (0, 5), f"Inner pytest failed with exit code {result.returncode}"
 
-    # Skip invalid configurations
-    if torch.cuda.device_count() < 4:
-        pytest.skip("FSDP2 test requires at least 4 GPUs")
 
-    if recipe == "mx_fp8_block_scaling" and not mxfp8_available:
-        pytest.skip(reason_for_no_mxfp8)
-    elif not fp8_available:
-        pytest.skip(reason_for_no_fp8)
-
-    _run_test(fp8_init, sharding_dims, recipe, layer_type)
+@pytest.mark.skipif(NUM_PROCS < 2, reason="Requires 2+ GPUs")
+@pytest.mark.skipif(not te.torch_version() >= (2, 4, 0), reason="Requires PyTorch 2.4.0+")
+def test_fsdp2_fused_adam_tests():
+    """All FSDP2 FusedAdam tests (parametrized internally by recipe, test variant)."""
+    test_path = _FSDP2_DIR / "run_fsdp2_fused_adam.py"
+    nproc = min(NUM_PROCS, 2)
+    result = subprocess.run(
+        [
+            "torchrun",
+            f"--nproc_per_node={nproc}",
+            "--local-ranks-filter=0",
+            "-m",
+            "pytest",
+            str(test_path),
+            "-v",
+            "-s",
+            "--tb=short",
+        ],
+        env=os.environ,
+        timeout=600,
+    )
+    assert result.returncode in (0, 5), f"Inner pytest failed with exit code {result.returncode}"
 
 
 def test_dummy() -> None:
