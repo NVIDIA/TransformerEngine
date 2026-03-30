@@ -687,14 +687,11 @@ JAXX_GroupedTensorWrapper make_grouped_tensor(Buffer_Type const &data,
 JAXX_GroupedTensorWrapper make_grouped_tensor(
     Buffer_Type const &data, Buffer_Type const &first_dims, Buffer_Type const &last_dims,
     int64_t *int64_workspace_base, size_t int64_workspace_capacity, size_t &int64_offset,
-    size_t num_gemms, cudaStream_t stream, int64_t axis_boundary = -1) {
+    size_t num_gemms, cudaStream_t stream, size_t left_size, size_t right_size) {
   auto dims = data.dimensions();
-  NVTE_CHECK(dims.size() >= 2, "grouped GEMM data buffer must be at least 2D.");
-  // Flatten dims at axis_boundary to produce a 2D NVTE shape.
-  // axis_boundary=-1 (default) collapses dims[0..N-2] → rows and keeps dims[N-1] → cols,
-  // preserving the prior behaviour for output buffers (e.g. [G, K, N] for wgrad).
-  size_t ab = (axis_boundary < 0) ? dims.size() - 1 : static_cast<size_t>(axis_boundary);
-  NVTEShape dataShape{.data = {product(dims, 0, ab), product(dims, ab, dims.size())}, .ndim = 2};
+  NVTE_CHECK(product(dims) == left_size * right_size,
+             "grouped GEMM data buffer element count does not match the provided 2D shape.");
+  NVTEShape dataShape{.data = {left_size, right_size}, .ndim = 2};
   JAXX_GroupedTensorWrapper wrapper(JAXX_Scaling_Mode::NO_SCALING, num_gemms, dataShape);
   wrapper.set_rowwise(data, std::nullopt);
   if (first_dims.element_count() > 0) {
@@ -727,11 +724,11 @@ JAXX_GroupedTensorWrapper make_grouped_tensor(
     Buffer_Type const &data, Buffer_Type const &scale_inv, JAXX_Scaling_Mode scaling_mode,
     bool use_colwise, Buffer_Type const &first_dims, Buffer_Type const &last_dims,
     int64_t *int64_workspace_base, size_t int64_workspace_capacity, size_t &int64_offset,
-    size_t num_gemms, cudaStream_t stream, int64_t axis_boundary = -1) {
+    size_t num_gemms, cudaStream_t stream, size_t left_size, size_t right_size) {
   auto dims = data.dimensions();
-  NVTE_CHECK(dims.size() >= 2, "grouped GEMM data buffer must be at least 2D.");
-  size_t ab = (axis_boundary < 0) ? dims.size() - 1 : static_cast<size_t>(axis_boundary);
-  NVTEShape dataShape{.data = {product(dims, 0, ab), product(dims, ab, dims.size())}, .ndim = 2};
+  NVTE_CHECK(product(dims) == left_size * right_size,
+             "grouped GEMM data buffer element count does not match the provided 2D shape.");
+  NVTEShape dataShape{.data = {left_size, right_size}, .ndim = 2};
   JAXX_GroupedTensorWrapper wrapper(scaling_mode, num_gemms, dataShape);
 
   const bool is_mxfp8 = scaling_mode == JAXX_Scaling_Mode::MXFP8_1D_SCALING;
@@ -861,20 +858,26 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
       is_mxfp8
           ? make_grouped_tensor(rhs_data, rhs_sinv, scaling_mode, rhs_use_colwise, rhs_first_dims,
                                 rhs_last_dims, int64_base, int64_capacity, int64_offset, num_gemms,
-                                stream, rhs_axis_boundary)
+                                stream, rhs_left_size, rhs_right_size)
           : make_grouped_tensor(rhs_data, rhs_first_dims, rhs_last_dims, int64_base, int64_capacity,
-                                int64_offset, num_gemms, stream, rhs_axis_boundary);
+                                int64_offset, num_gemms, stream, rhs_left_size, rhs_right_size);
   auto lhs_tensor =
       is_mxfp8
           ? make_grouped_tensor(lhs_data, lhs_sinv, scaling_mode, lhs_use_colwise, lhs_first_dims,
                                 lhs_last_dims, int64_base, int64_capacity, int64_offset, num_gemms,
-                                stream, lhs_axis_boundary)
+                                stream, lhs_left_size, lhs_right_size)
           : make_grouped_tensor(lhs_data, lhs_first_dims, lhs_last_dims, int64_base, int64_capacity,
-                                int64_offset, num_gemms, stream, lhs_axis_boundary);
+                                int64_offset, num_gemms, stream, lhs_left_size, lhs_right_size);
 
-  // Output stays NO_SCALING
+  // Output stays NO_SCALING. Derive 2D shape from the output buffer's own dims using
+  // last-dim-as-columns convention (equivalent to axis_boundary=-1 in the old API).
+  auto out_dims = output->dimensions();
+  NVTE_CHECK(out_dims.size() > 0, "output buffer must have at least 1 dimension");
+  size_t out_left_size = product(out_dims, 0, out_dims.size() - 1);
+  size_t out_right_size = static_cast<size_t>(out_dims[out_dims.size() - 1]);
   auto out_tensor = make_grouped_tensor(*output, out_first_dims, out_last_dims, int64_base,
-                                        int64_capacity, int64_offset, num_gemms, stream);
+                                        int64_capacity, int64_offset, num_gemms, stream,
+                                        out_left_size, out_right_size);
 
   nvte_grouped_gemm(rhs_tensor, rhs_is_trans, lhs_tensor, lhs_is_trans, nullptr, out_tensor,
                     alpha_tensor.data(), beta_tensor.data(), workspace_setup.data(),
