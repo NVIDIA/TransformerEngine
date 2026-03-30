@@ -234,55 +234,65 @@ Previous results were on H100 (sm=90). These results are on B200 (sm=100a) with 
 | test_fused_router | 0 | 0 | 0 | 0 |
 | test_partial_cast | 0 | 1 | 1 | 0 |
 
-### test_sanity results (session 3, 2026-03-29)
+### Current results (end of session 3, 2026-03-29)
 
-| Recipe | Before | After | Status |
-|--------|--------|-------|--------|
-| recipe0 (MXFP8BlockScaling) | 0 F | 0 F | **PASS** |
-| recipe1 (NVFP4BlockScaling) | ~1612 F | 1322 F | -290 |
-| recipe2 (Float8BlockScaling) | 2127 F | 0 F | **PASS** (was all failing) |
-| recipe3 (Float8CurrentScaling) | 0 F | 0 F | **PASS** |
-| recipe4 (DelayedScaling) | 0 F | 0 F | **PASS** |
+#### test_sanity: 4/5 recipes fully passing
 
-**Key fix**: On Blackwell (sm >= 100), cuBLAS doesn't natively support BLOCK_SCALING_1D/2D. The pybind path converted block scaling to MXFP8 via `convert_block_scaling_to_mxfp8_tensor()`. Implemented the same in the stable GEMM: detect block scaling, call `nvte_swizzle_block_scaling_to_mxfp8_scaling_factors()`, build MXFP8 TensorWrapper with 2D shape, force TN layout. Also flatten >2D data to 2D for MXFP8/DELAYED scaling.
+| Recipe | Baseline F | Now | Status |
+|--------|-----------|-----|--------|
+| recipe0 (MXFP8BlockScaling) | 0 | **0 / 2211 P** | PASS |
+| recipe1 (NVFP4BlockScaling) | ~1612 | **1322 F** | WIP — NVFP4 backward |
+| recipe2 (Float8BlockScaling) | 2127 | **0 / 2211 P** | PASS (was all failing) |
+| recipe3 (Float8CurrentScaling) | 0 | **0 / 2211 P** | PASS |
+| recipe4 (DelayedScaling) | 0 | **0 / 2211 P** | PASS |
+| **Total** | **3739 F** | **1322 F** | **-2417** |
 
-**Remaining recipe1 (NVFP4) issues**: 1322 failures from NVFP4 backward:
-- 704: gated activation backward gets wrong grad shape (FP4 packed vs logical)
-- 542: quantize backward shape mismatch (FP4 packed)
-- 76: view/reshape errors from FP4 packing
+#### Other test suites (measured in session 2, will need re-measurement)
 
-### Summary of improvements (session 2+3, cumulative)
+| Test | Baseline F | Session 2 F | Delta | Notes |
+|------|-----------|-------------|-------|-------|
+| test_nvfp4 | 2100 | 1761 | **-339** | NVFP4 forward works, backward issues |
+| test_mxfp8 | 306 | 230 | **-76** | group_quantize implemented |
+| test_quantized_tensor | 137 | 29 | **-108** | scale_inv fix |
+| test_float8blockwisetensor | 60 | 4 | **-56** | scale_inv fix |
+| test_float8_blockwise_scaling_exact | 92 | 2 | **-90** | scale_inv fix |
+| test_attention | 649 | 547 | **-102** | FP8 backward dtype fix |
+| test_fusible_ops | 510 | 274 | **-236** | |
+| test_multi_tensor | 617 | 628 | +11 | cascading CUDA errors |
+| test_cuda_graphs | 126 | 117 | **-9** | |
+| test_cpu_offloading | 413 | 407 | **-6** | |
+| test_grouped_tensor | 5 | 1 | **-4** | |
+| test_fused_optimizer | 4 | 3 | **-1** | |
+| test_permutation | 15 | 15 | 0 | |
+| test_partial_cast | 1 | 1 | 0 | |
+| test_recipe | 15 | 15 | 0 | |
+| test_numerics | SEG | TBD | | runs per-class but segfaults full-file |
 
-| Test | Before F | After F | Delta |
-|------|----------|---------|-------|
-| test_quantized_tensor | 137 | 29 | **-108** |
-| test_float8blockwisetensor | 60 | 4 | **-56** |
-| test_float8_blockwise_scaling_exact | 92 | 2 | **-90** |
-| test_nvfp4 | 2100 | 1761 | **-339** |
-| test_mxfp8 | 306 | 230 | **-76** |
-| test_attention | 649 | 547 | **-102** |
-| test_fusible_ops | 510 | 274 | **-236** |
-| test_grouped_tensor | 5 | 1 | **-4** |
-| test_cuda_graphs | 126 | 117 | **-9** |
-| test_fused_optimizer | 4 | 3 | **-1** |
-| test_cpu_offloading | 413 | 407 | **-6** |
-| **Estimated total** | | | **~-1,027** |
+Tests fully passing: deferred_init, jit, fused_rope, gqa, parallel_cross_entropy, kv_cache, hf_integration, fused_router, cpu_offloading_v1, float8_blockwise_gemm_exact.
 
-Unchanged: test_sanity recipe2 (2127, pre-existing CUBLAS), test_multi_tensor (628), test_permutation (15).
-Tests still passing: recipe0, recipe3, deferred_init, jit, fused_rope, gqa, parallel_cross_entropy, kv_cache, hf_integration, fused_router, cpu_offloading_v1.
+**Estimated total regressions eliminated: ~3,400+** (from original ~9,547 to ~6,100 estimated).
 
-### Remaining Priority Fix Order (by impact)
+### All fixes applied (sessions 1–3)
 
-1. **NVFP4 `extract_tensor_data` + swizzle crash** (~2,100 in test_nvfp4 + ~1,330 in test_sanity): `extract_tensor_data` returns wrong dtype/sm for NVFP4Tensor (dtype=0/kByte instead of 10/kFloat4E2M1, sm=0 instead of 4). Fix is known and tested but exposes a `swizzle_scaling_factors` illegal memory access in the GEMM path. Need to investigate swizzle bug first.
-2. **test_numerics SEGFAULT** (~2,968): Doesn't crash when run by test class individually — only segfaults when running the full file. Likely OOM or accumulated GPU memory corruption from earlier test's CUDA error.
-3. **CUBLAS_STATUS errors** (~2,127 in test_sanity): cuBLAS GEMM fails for certain FP8 scaling mode combinations on B200. Needs investigation of which GEMM parameter combos are unsupported.
-4. **FP8 Attention cuDNN dtype errors** (~506 in test_attention): `_FP8_DTYPE_TO_TE` mapping fix should resolve most of these (applied, pending verification).
-5. **Transpose errors** (~464 in test_nvfp4/mxfp8): NVFP4/MXFP8 transpose ops failing.
-6. **NotImplementedError stubs** (~379): Some ops still have stubs in `_stable_torch_module.py`.
-7. **CPU offloading offset errors** (~355): "Offset increment outside graph capture" in test_cpu_offloading.
-8. **Numerical mismatches** (~625 in test_multi_tensor, ~275 elsewhere): Output values differ from main. May be precision issues in stable quantize path.
-9. **Remaining permutation edge cases** (~15): Token dropping (`num_out_tokens < num_tokens * topK`) shapes in `moe_unpermute_bwd`.
-10. **Recipe state attributes** (~30 in test_cuda_graphs): `NVFP4BlockScalingRecipeState`/`Float8BlockScalingRecipeState` missing attributes.
+| # | Fix | Files | Impact |
+|---|-----|-------|--------|
+| 1 | `_make_dbias_dact` activation_type mapping | `_stable_torch_module.py` | -432 sanity |
+| 2 | `moe_permute_fwd` signature + sorting | `_stable_torch_module.py` | -24 permutation |
+| 3 | `_FP8_DTYPE_TO_TE` mapping for more string forms | `_extract.py` | -13 attention |
+| 4 | `scale_inv` only for FP8/FP4 outputs | `_quantize_stable.py` | -248 across quantized/block tests |
+| 5 | NVFP4 `extract_tensor_data` dtype/sm detection | `_extract.py` | -258 nvfp4 |
+| 6 | FP4 packed data shape in GEMM (`shape.back() *= 2`) | `csrc/stable/gemm.cpp` | enabled NVFP4 GEMM |
+| 7 | NVFP4 columnwise via `nvfp4_data_transpose` | `_quantize_stable.py` | fixed quantize crash |
+| 8 | NVFP4 dequantize amax = 2688.0 | `_quantize_stable.py`, `cast.cpp`, `_stable_torch_module.py` | fixed dequantize output |
+| 9 | FP4 shape fix in C++ dequantize | `csrc/stable/cast.cpp` | fixed dequantize crash |
+| 10 | Min 32 MiB GEMM workspace | `_stable_torch_module.py` | fixed small-workspace tests |
+| 11 | `group_quantize` pure Python impl | `_stable_torch_module.py` | -76 mxfp8 |
+| 12 | FP8 attention backward dQ/dK/dV dtype override | `_stable_torch_module.py` | -73 attention |
+| 13 | FP8 types in `_TE_TO_TORCH_DT` mapping | `_stable_torch_module.py` | FP8 output allocation |
+| 14 | `nvfp4_data_transpose` for >2D tensors | `_quantize_stable.py` | fixed 3D NVFP4 |
+| 15 | **Block scaling → MXFP8 conversion on Blackwell** | `csrc/stable/gemm.cpp` | **-2127 sanity recipe2** |
+| 16 | Flatten >2D data to 2D for MXFP8/DELAYED | `csrc/stable/gemm.cpp` | fixed 3D MXFP8 GEMM |
+| 17 | Colwise data 2D shape for MXFP8-from-block | `csrc/stable/gemm.cpp` | fixed colwise-only backward |
 
 ### FP8 backward fixes (2026-03-28, complete)
 
@@ -376,53 +386,72 @@ All 10,984 sanity tests pass without the pybind `.so`. The full migration is fun
 
 **Fix**: Future work — the CommOverlap hot path runs in `libtransformer_engine.so` (no PyTorch dependency). The `CommOverlapHelper` initialization needs `c10d::ProcessGroup` for allgather/barrier. Fix: move allgather/barrier callbacks to Python using `torch.distributed`.
 
-## Recommended Next Steps (updated 2026-03-29)
+## Next Steps (updated end of session 3)
 
-### How to resume testing
+### How to resume
 ```bash
 # Rebuild TE on this branch:
-NVTE_CUDA_ARCHS="100a" NVTE_USE_CCACHE=1 NVTE_BUILD_THREADS_PER_JOB=4 NVTE_CCACHE_BIN=sccache SCCACHE_DIR=/.cache/sccache NVTE_FRAMEWORK=pytorch pip install -v --no-build-isolation -e .
+NVTE_CUDA_ARCHS="100a" NVTE_USE_CCACHE=1 NVTE_BUILD_THREADS_PER_JOB=4 \
+  NVTE_CCACHE_BIN=sccache SCCACHE_DIR=/.cache/sccache NVTE_FRAMEWORK=pytorch \
+  pip install -v --no-build-isolation -e .
 
-# Run a specific test:
+# Run sanity by recipe (kill GPU between runs to avoid cascading errors):
+for r in 0 1 2 3 4; do
+  nvidia-smi --query-compute-apps=pid --format=csv,noheader | xargs -r kill -9; sleep 1
+  python3 -m pytest --tb=no -q tests/pytorch/test_sanity.py -k "fp8_recipe$r" 2>&1 | tail -1
+done
+
+# Run a specific test suite:
 nvidia-smi --query-compute-apps=pid --format=csv,noheader | xargs -r kill -9; sleep 2
-python3 -m pytest --tb=short -q /workspace/tests/pytorch/test_sanity.py
-
-# Main branch worktree for comparison (if still exists):
-# /tmp/te-main (git worktree of main branch)
-
-# Results files:
-# /workspace/test_results_main.jsonl — main branch results
-# /workspace/test_results_stable-abi.jsonl — original stable-abi results
-# /workspace/logs_fixed/*.xml — latest junit XML results after fixes
-# /workspace/run_tests.sh — test runner script
+python3 -m pytest --tb=short -q tests/pytorch/test_nvfp4
 ```
 
-### Priority 1: Fix NVFP4 `extract_tensor_data` + swizzle crash (~3,400 failures)
-The NVFP4 detection fix for `_extract.py` is known and tested (return dtype=10, sm=4 for NVFP4Tensor), but it exposes a `swizzle_scaling_factors` illegal memory access in `swizzle.cu:539` during GEMM. This crash cascades to corrupt GPU state for all subsequent tests.
-- **Investigation needed**: Debug the swizzle crash. Likely the NVFP4 scale tensor format from `make_empty` doesn't match what `nvte_swizzle_scaling_factors` expects (e.g., wrong shape, dtype, or memory layout).
+### Priority 1: NVFP4 backward — FP4 packed shape in backward pass (~1322 in test_sanity, ~1761 in test_nvfp4)
+
+**Root cause**: NVFP4 data is packed (2 FP4 elements per byte), so physical tensor shape [M, K/2] differs from logical shape [M, K]. The FORWARD pass works because quantize/GEMM ops know about FP4 packing. The BACKWARD pass fails because:
+- Activation backward kernels (`quantize_gated_bwd_helper`) receive gradient tensors with the packed shape and assert it matches the logical shape (704 failures)
+- The FP8 quantize backward (`quantize_fp8.cuh`) asserts `input.data.shape == act_input->data.shape` but they differ by 2x in the last dim (542 failures)
+- `dgrad.view(ctx.inp_shape)` fails because packed dgrad has K/2 elements vs logical K (76 failures)
+
+**Investigation approach**:
+- The backward is initiated by module code (e.g., `linear.py:974`) which calls `.view(ctx.inp_shape)` on the gradient. If the gradient is an NVFP4 tensor, its `.shape` property returns the logical shape (doubling the last dim), but `torch.Tensor.view` uses the physical element count.
+- The pybind path probably dequantized the NVFP4 tensor to BF16 before backward, or the backward received BF16 gradients rather than NVFP4-packed data.
+- **Key question**: does the backward pass on main receive NVFP4 gradients at all, or are they always BF16? Check the forward `ctx.save_for_backward` to see what's saved.
 - **Key test**: `python3 -m pytest -x tests/pytorch/test_sanity.py -k "fp8_recipe1 and dtype0 and small and True-LayerNorm-True-True-False"`
 
-### Priority 2: Fix CUBLAS_STATUS errors (~2,127 in test_sanity)
-cuBLAS GEMM fails with `CUBLAS_STATUS_NOT_SUPPORTED` for certain FP8 tensor combinations. Likely B200 (sm=100a) specific — these tests passed on H100 (sm=90).
-- **Investigation needed**: Run a failing test with CUBLAS debug logging to see which GEMM config is unsupported. May need to adjust the stable GEMM shim's tensor extraction or use a different cuBLAS algorithm selection.
-- **Key test**: `python3 -m pytest -x tests/pytorch/test_sanity.py -k "fp8_recipe2 and dtype0 and small and True-LayerNorm-True-True-False"`
+### Priority 2: FP8 attention backward — null pointer + numerical (~547 in test_attention)
 
-### Priority 3: test_numerics SEGFAULT (~2,968)
-Doesn't crash when running individual test classes. Only segfaults when running the full file. Likely OOM or GPU memory corruption from an earlier test that triggers a CUDA error.
-- **Investigation needed**: Run test classes individually to find which one triggers the crash. Try `python3 -m pytest tests/pytorch/test_numerics.py -k "test_gpt_fp8_parameters"` etc.
+**Root cause**: After fixing the FP8 dtype mapping (fix #12), 506 failures changed from "Invalid cuDNN data type" to "BAD_PARAM_NULL_POINTER". The dQ/dK/dV tensors are allocated as plain uint8 but lack FP8 scale_inv buffers that cuDNN expects.
 
-### Priority 4: FP8 Attention errors (~621, down from 649)
-The `_FP8_DTYPE_TO_TE` mapping fix helped 28 tests, but ~621 failures remain. Investigation found:
-1. **Forward S placeholder**: The pybind path creates S via `Float8Quantizer::create_tensor({0}, kFloat32)` which produces a TensorWrapper with FP8 dtype, empty uint8 data, and real amax/scale/scale_inv tensors from the quantizer. Our stable path replicates this correctly via `s_quantizer.make_empty([0])`.
-2. **Backward `fused_attn_bwd_packed`**: ~506 failures come from the backward pass. The error "Invalid cuDNN data type" happens inside `fused_attn_bwd_packed` at line 2885. All Python-side dtypes are valid (Q/K/V/O at 7=FP8, dO/dQ/dK/dV at 6=BF16, S at 7=FP8, dP at 4=F32). The invalid dtype must be generated INSIDE the C++ `fused_attn_bwd_packed` code when it unpacks the `dtype_info` tensor or constructs internal TensorWrappers.
-3. **Remaining ~127 forward failures**: cuDNN `BAD_PARAM_NULL_POINTER` and numerical mismatches.
-- **Fix approach**: Debug the C++ `fused_attn_bwd_packed` in `csrc/stable/attention.cpp` — check how it unpacks the `dtype_info` tensor and constructs TensorWrappers for the backward. The issue is likely in how dP (softmax gradient) or S TensorWrapper is built from the packed info.
+**Investigation approach**:
+- The pybind backward created proper Float8Tensor objects for dQ/dK/dV with pre-allocated scale_inv from the quantizer. Our stable path creates plain `torch.empty(dtype=uint8)`.
+- Fix: when `dqkv_te_dtype` is FP8, allocate scale_inv tensors alongside dQ/dK/dV, pass them in `dtype_info`, and include them in the output pack so the C++ backward can set them on the TensorWrapper.
+- **Key test**: `python3 -m pytest -x tests/pytorch/attention/test_attention.py -k "fp8"`
 
-### Previous priorities (still relevant)
-- **Transpose errors** (~464): NVFP4/MXFP8 transpose ops failing
-- **NotImplementedError stubs** (~379): Some ops still have stubs
-- **CPU offloading offset** (~355): "Offset increment outside graph capture"
-- **Numerical mismatches** (~625+): Output values differ from main
+### Priority 3: Remaining test suites (~628 multi_tensor, ~407 cpu_offloading, ~274 fusible_ops, ~230 mxfp8, ~117 cuda_graphs)
+
+| Issue | Count | Root cause | Approach |
+|-------|-------|------------|----------|
+| multi_tensor l2norm/unscale | 574 | Numerical mismatch in reduction | Compare kernel outputs; may be precision issue in multi_tensor pointer-pack |
+| multi_tensor e8m0 CPU | 54 | Op only registered for CUDA backend | Add CPU fallback or move tensors to CUDA |
+| cpu_offloading "offset outside capture" | 355 | CUDA graph capture incompatibility | May need graph-safe versions of stable ops |
+| cpu_offloading CUBLAS | 19 | Block scaling CUBLAS (now fixed?) | Re-test after session 3 fixes |
+| fusible_ops numerical | 206 | Various numerical mismatches | Investigate per-op |
+| fusible_ops NVFP4 backward | 26 | Same FP4 packed shape issue as P1 | Will be fixed by P1 |
+| fusible_ops dropout dtype | 6 | Dropout gets Byte instead of BF16 | NVFP4 tensor dtype issue |
+| mxfp8 pow_2_scale | 84 | Blackwell requires power-of-2 scales | Force `pow_2_scale=True` on sm >= 100 |
+| mxfp8 numerical | 128 | group_quantize precision | group_quantize uses per-chunk quantize; fused kernel may differ |
+| mxfp8 NoneType | 18 | Missing colwise scale in group_quantize | Fix group_quantize to populate colwise |
+| cuda_graphs scaling mode mismatch | 27 | Mixed BLOCK_SCALING + DELAYED in GEMM | After P1/block-to-MXFP8 may help |
+| cuda_graphs recipe state attrs | 30 | Missing `scale` attr on recipe state | Add dummy `scale` property |
+| test_numerics SEGFAULT | ~2968 | OOM / cascading CUDA errors | Run per-class; fix upstream CUDA errors first |
+| test_recipe | 15 | Likely same NVFP4/block scaling issues | Re-test after other fixes |
+| test_permutation | 15 | Token dropping edge cases | `moe_unpermute_bwd` shape handling |
+| test_partial_cast | 1 | NVFP4 partial cast | Low priority |
+
+### Priority 4: Re-run full test suite and update numbers
+
+After fixing P1–P3, re-run the full test suite with `run_tests.sh` to get accurate numbers. Many test suites will benefit from cascading improvements (e.g., block-to-MXFP8 fix helps cuda_graphs, cpu_offloading, fusible_ops).
 
 ## Key Reference
 
