@@ -1099,6 +1099,8 @@ class GroupedLinear(TransformerEngineBaseModule):
         """
         if not self.need_backward_dw():
             return
+        if self.wgrad_store.context is None or self.wgrad_store.context.empty():
+            return
         with get_nvtx_range_context("_GroupedLinear_wgrad"):
             (_, grad_biases_, _), tensor_list = self.wgrad_store.pop()
             wgrad_list = tensor_list[2]
