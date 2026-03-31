@@ -55,11 +55,10 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
     int64_t max_pages_per_seq_v, int64_t bias_b, int64_t bias_h, int64_t bias_sq, int64_t bias_skv,
     bool is_training, bool return_max_logit, float scaling_factor, float dropout_probability,
     NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format, NVTE_Bias_Type bias_type,
-    NVTE_Mask_Type mask_type,
-    NVTE_Softmax_Type softmax_type, int64_t window_size_left, int64_t window_size_right,
-    bool bottom_right_diagonal, void *devPtrQ, void *devPtrK, void *devPtrV, void *devPtrBias,
-    void *devPtrSoftmaxOffset, void *devPtrS1, void *devPtrS2, void *devPtrO,
-    void *devPtrDropoutSeed, void *devPtrDropoutOffset, void *devPtrCuSeqlensQ,
+    NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type, int64_t window_size_left,
+    int64_t window_size_right, bool bottom_right_diagonal, void *devPtrQ, void *devPtrK,
+    void *devPtrV, void *devPtrBias, void *devPtrSoftmaxOffset, void *devPtrS1, void *devPtrS2,
+    void *devPtrO, void *devPtrDropoutSeed, void *devPtrDropoutOffset, void *devPtrCuSeqlensQ,
     void *devPtrCuSeqlensKV, void *devPtrPageTableK, void *devPtrPageTableV,
     void *devPtrSeqOffsetsQ, void *devPtrSeqOffsetsKV, cudnn_frontend::DataType_t tensorType,
     void *workspace, size_t *workspace_size, cudaStream_t stream, cudnnHandle_t handle) {
@@ -1076,13 +1075,13 @@ void fused_attn_arbitrary_seqlen_fwd(
     size_t page_size_v, size_t max_pages_per_seq_k, size_t max_pages_per_seq_v, bool is_training,
     bool return_max_logit, float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout,
     NVTE_QKV_Format o_format, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
-    NVTE_Softmax_Type softmax_type,
-    int64_t window_size_left, int64_t window_size_right, bool bottom_right_diagonal,
-    const Tensor *input_Q, const Tensor *input_K, const Tensor *input_V, const Tensor *input_Bias,
-    const Tensor *input_SoftmaxOffset, Tensor *output_O, NVTETensorPack *Aux_CTX_Tensors,
-    const Tensor *cu_seqlens_q, const Tensor *cu_seqlens_kv, const Tensor *cu_seqlens_q_padded,
-    const Tensor *cu_seqlens_kv_padded, const Tensor *page_table_k, const Tensor *page_table_v,
-    const Tensor *rng_state, Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle) {
+    NVTE_Softmax_Type softmax_type, int64_t window_size_left, int64_t window_size_right,
+    bool bottom_right_diagonal, const Tensor *input_Q, const Tensor *input_K, const Tensor *input_V,
+    const Tensor *input_Bias, const Tensor *input_SoftmaxOffset, Tensor *output_O,
+    NVTETensorPack *Aux_CTX_Tensors, const Tensor *cu_seqlens_q, const Tensor *cu_seqlens_kv,
+    const Tensor *cu_seqlens_q_padded, const Tensor *cu_seqlens_kv_padded,
+    const Tensor *page_table_k, const Tensor *page_table_v, const Tensor *rng_state,
+    Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle) {
   using namespace transformer_engine;
 
   const auto QKV_type = input_Q->data.dtype;
@@ -1213,11 +1212,10 @@ void fused_attn_arbitrary_seqlen_fwd(
       page_size_v, max_pages_per_seq_k, max_pages_per_seq_v, bias_b, bias_h, bias_sq, bias_skv,
       is_training, return_max_logit, attn_scale, p_dropout, qkv_layout, o_format, bias_type,
       mask_type, softmax_type, window_size_left, window_size_right, bottom_right_diagonal, devPtrQ,
-      devPtrK,
-      devPtrV, devPtrBias, devPtrSoftmaxOffset, devPtrS1, devPtrS2, devPtrO, devPtrDropoutSeed,
-      devPtrDropoutOffset, devPtrCuSeqlensQ, devPtrCuSeqlensKV, devPtrPageTableK, devPtrPageTableV,
-      devPtrSeqOffsetsQ, devPtrSeqOffsetsKV, get_cudnn_fe_dtype(QKV_type), workspace->data.dptr,
-      &workspace_size, stream, handle);
+      devPtrK, devPtrV, devPtrBias, devPtrSoftmaxOffset, devPtrS1, devPtrS2, devPtrO,
+      devPtrDropoutSeed, devPtrDropoutOffset, devPtrCuSeqlensQ, devPtrCuSeqlensKV, devPtrPageTableK,
+      devPtrPageTableV, devPtrSeqOffsetsQ, devPtrSeqOffsetsKV, get_cudnn_fe_dtype(QKV_type),
+      workspace->data.dptr, &workspace_size, stream, handle);
 
   if (workspace_size > 0) {
     if (workspace->data.dptr == nullptr) {
@@ -1313,11 +1311,10 @@ void fused_attn_arbitrary_seqlen_bwd(
       max_batch_size, max_tokens_q, max_tokens_kv, bias_b, bias_h, bias_sq, bias_skv, attn_scale,
       p_dropout, qkv_layout, o_format, do_format, dqkv_layout, bias_type, mask_type, softmax_type,
       window_size_left, window_size_right, bottom_right_diagonal, deterministic, devPtrQ, devPtrK,
-      devPtrV, devPtrO,
-      devPtrSoftmaxStats, devPtrBias, devPtrSoftmaxOffset, devPtrdQ, devPtrdK, devPtrdV, devPtrdO,
-      devPtrdBias, devPtrdSoftmaxOffset, devPtrDropoutSeed, devPtrDropoutOffset, devPtrCuSeqlensQ,
-      devPtrCuSeqlensKV, devPtrSeqOffsetsQ, devPtrSeqOffsetsKV, get_cudnn_fe_dtype(QKV_type),
-      workspace->data.dptr, &workspace_size, stream, handle);
+      devPtrV, devPtrO, devPtrSoftmaxStats, devPtrBias, devPtrSoftmaxOffset, devPtrdQ, devPtrdK,
+      devPtrdV, devPtrdO, devPtrdBias, devPtrdSoftmaxOffset, devPtrDropoutSeed, devPtrDropoutOffset,
+      devPtrCuSeqlensQ, devPtrCuSeqlensKV, devPtrSeqOffsetsQ, devPtrSeqOffsetsKV,
+      get_cudnn_fe_dtype(QKV_type), workspace->data.dptr, &workspace_size, stream, handle);
 
   if (workspace_size > 0) {
     if (workspace->data.dptr == nullptr) {
