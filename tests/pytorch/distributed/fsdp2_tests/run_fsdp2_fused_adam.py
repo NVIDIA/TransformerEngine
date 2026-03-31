@@ -760,27 +760,9 @@ def test_dcp_resharding_save(recipe_name):
     correctly reshards the checkpoint into the new topology.
 
     The two phases are orchestrated by test_fsdp2_fused_adam_dcp_resharding in
-    test_torch_fsdp2.py using two sequential torchrun invocations.
+    test_torch_fsdp2.py using two sequential plain torchrun invocations.
     """
     recipe = get_recipe_from_string(recipe_name)
-
-    if recipe_name == "MXFP8BlockScaling":
-        pytest.xfail(
-            "MXFP8BlockScaling: FusedAdam CUDA kernel does not support "
-            "MXFP8 quantized tensors, causing illegal memory access. "
-            "Fixed by https://github.com/NVIDIA/TransformerEngine/pull/2789."
-        )
-    if recipe_name == "NVFP4BlockScaling":
-        pytest.xfail(
-            "NVFP4BlockScaling: DCP load_state_dict triggers reset_sharded_param() "
-            "which calls data_ptr() on NVFP4Tensor wrapper subclass with invalid storage"
-        )
-    if recipe_name == "Float8BlockScaling" and torch.cuda.get_device_capability()[0] >= 10:
-        pytest.xfail(
-            "Float8BlockScaling + FSDP2 with 4-rank sharding fails on Blackwell (SM10+): "
-            "swizzle_block_scaling_to_mxfp8_scaling_factors row-count assertion. "
-            "On SM12+, additionally fails with pow2_scale assertion."
-        )
 
     import torch.distributed.checkpoint as dcp
 
@@ -851,24 +833,6 @@ def test_dcp_resharding_load(recipe_name):
     confirming that DCP resharding correctly reconstructs all parameter shards.
     """
     recipe = get_recipe_from_string(recipe_name)
-
-    if recipe_name == "MXFP8BlockScaling":
-        pytest.xfail(
-            "MXFP8BlockScaling: FusedAdam CUDA kernel does not support "
-            "MXFP8 quantized tensors, causing illegal memory access. "
-            "Fixed by https://github.com/NVIDIA/TransformerEngine/pull/2789."
-        )
-    if recipe_name == "NVFP4BlockScaling":
-        pytest.xfail(
-            "NVFP4BlockScaling: DCP load_state_dict triggers reset_sharded_param() "
-            "which calls data_ptr() on NVFP4Tensor wrapper subclass with invalid storage"
-        )
-    if recipe_name == "Float8BlockScaling" and torch.cuda.get_device_capability()[0] >= 10:
-        pytest.xfail(
-            "Float8BlockScaling + FSDP2 with 4-rank sharding fails on Blackwell (SM10+): "
-            "swizzle_block_scaling_to_mxfp8_scaling_factors row-count assertion. "
-            "On SM12+, additionally fails with pow2_scale assertion."
-        )
 
     import torch.distributed.checkpoint as dcp
 

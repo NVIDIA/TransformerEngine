@@ -4,6 +4,7 @@
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,11 @@ import transformer_engine.pytorch as te
 
 NUM_PROCS: int = torch.cuda.device_count()
 _FSDP2_DIR = Path(__file__).parent.resolve() / "fsdp2_tests"
+
+# Import some utilities from PyTest-owned conftest.py.
+sys.path.insert(0, str(_FSDP2_DIR))
+from conftest import _parametrize_recipes
+sys.path.pop(0)
 
 
 @pytest.mark.skipif(NUM_PROCS % 2 != 0, reason="Requires even number of GPUs")
@@ -55,6 +61,10 @@ def test_fsdp2_fused_adam_tests():
             "-v",
             "-s",
             "--tb=short",
+            # The following 2 tests need to be run in sequence,
+            # as they depend on each other.
+            "-k",
+            "not dcp_resharding_save and not dcp_resharding_load",
         ],
         env=os.environ,
         timeout=600,
@@ -64,13 +74,32 @@ def test_fsdp2_fused_adam_tests():
 
 @pytest.mark.skipif(NUM_PROCS < 4, reason="Requires 4+ GPUs for DP4→DP2 resharding test")
 @pytest.mark.skipif(not te.torch_version() >= (2, 4, 0), reason="Requires PyTorch 2.4.0+")
-def test_fsdp2_fused_adam_dcp_resharding():
+@pytest.mark.parametrize("recipe", _parametrize_recipes())
+def test_fsdp2_fused_adam_dcp_resharding(recipe):
     """DCP checkpoint saved with DP4 loads correctly into DP2 (cross-topology resharding).
 
     Runs two sequential torchrun invocations against run_fsdp2_fused_adam.py:
-      1. nproc=4  →  test_dcp_resharding_save  (train + write checkpoint + ref output)
-      2. nproc=2  →  test_dcp_resharding_load  (load checkpoint, assert output parity)
+      1. nproc=4  →  dcp_resharding_save  (train + write checkpoint + ref output)
+      2. nproc=2  →  dcp_resharding_load  (load checkpoint, assert output parity)
     """
+    if recipe == "MXFP8BlockScaling":
+        pytest.xfail(
+            "MXFP8BlockScaling: FusedAdam CUDA kernel does not support "
+            "MXFP8 quantized tensors, causing illegal memory access. "
+            "Fixed by https://github.com/NVIDIA/TransformerEngine/pull/2789."
+        )
+    if recipe == "NVFP4BlockScaling":
+        pytest.xfail(
+            "NVFP4BlockScaling: DCP load_state_dict triggers reset_sharded_param() "
+            "which calls data_ptr() on NVFP4Tensor wrapper subclass with invalid storage"
+        )
+    if recipe == "Float8BlockScaling" and torch.cuda.get_device_capability()[0] >= 10:
+        pytest.xfail(
+            "Float8BlockScaling + FSDP2 with 4-rank sharding fails on Blackwell (SM10+): "
+            "swizzle_block_scaling_to_mxfp8_scaling_factors row-count assertion. "
+            "On SM12+, additionally fails with pow2_scale assertion."
+        )
+
     test_path = _FSDP2_DIR / "run_fsdp2_fused_adam.py"
 
     # Phase 1: save checkpoint with 4 ranks.
@@ -79,19 +108,16 @@ def test_fsdp2_fused_adam_dcp_resharding():
             "torchrun",
             "--nproc_per_node=4",
             "--local-ranks-filter=0",
-            "-m",
-            "pytest",
             str(test_path),
-            "-v",
-            "-s",
-            "--tb=short",
-            "-k",
+            "--test",
             "dcp_resharding_save",
+            "--recipe",
+            recipe,
         ],
         env=os.environ,
         timeout=300,
     )
-    assert result.returncode in (0, 5), f"DCP resharding save phase failed: {result.returncode}"
+    assert result.returncode == 0, f"DCP resharding save phase failed: {result.returncode}"
 
     # Phase 2: load checkpoint with 2 ranks (different topology).
     result = subprocess.run(
@@ -99,19 +125,16 @@ def test_fsdp2_fused_adam_dcp_resharding():
             "torchrun",
             "--nproc_per_node=2",
             "--local-ranks-filter=0",
-            "-m",
-            "pytest",
             str(test_path),
-            "-v",
-            "-s",
-            "--tb=short",
-            "-k",
+            "--test",
             "dcp_resharding_load",
+            "--recipe",
+            recipe,
         ],
         env=os.environ,
         timeout=300,
     )
-    assert result.returncode in (0, 5), f"DCP resharding load phase failed: {result.returncode}"
+    assert result.returncode == 0, f"DCP resharding load phase failed: {result.returncode}"
 
 
 def test_dummy() -> None:
