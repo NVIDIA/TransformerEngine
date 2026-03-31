@@ -1947,7 +1947,7 @@ void fused_attn_fp8_fwd_impl_v1(
           .set_dim({b, h, s_q, d_v})
           .set_stride(o_strides)
           .set_data_type(o_tensor_type);
-      amax_o->set_output(true)
+      amax_o->set_output(!is_mxfp8)
           .set_dim({1, 1, 1, 1})
           .set_stride({1, 1, 1, 1})
           .set_data_type(fe::DataType_t::FLOAT);
@@ -2024,7 +2024,6 @@ void fused_attn_fp8_fwd_impl_v1(
         {descale_v, devPtrDescaleV},
         {attn_scale, &scaling_factor},
         {O, devPtrO},
-        {amax_o, devPtrAmaxO},
         {Stats, devPtrM}};
 
     if (is_delayed_scaling) {
@@ -2034,6 +2033,7 @@ void fused_attn_fp8_fwd_impl_v1(
       variant_pack[descale_s] = devPtrDescaleS;
       variant_pack[scale_s] = devPtrScaleS;
       variant_pack[amax_s] = devPtrAmaxS;
+      variant_pack[amax_o] = devPtrAmaxO;
     }
 
     /* if (is_bias) {
@@ -2519,15 +2519,15 @@ void fused_attn_fp8_bwd_impl_v1(
           .set_dim({b, hg, s_kv, d_v})
           .set_stride(dv_strides)
           .set_data_type(dqkv_tensor_type);
-      amax_dQ->set_output(true)
+      amax_dQ->set_output(!is_mxfp8)
           .set_dim({1, 1, 1, 1})
           .set_stride({1, 1, 1, 1})
           .set_data_type(fe::DataType_t::FLOAT);
-      amax_dK->set_output(true)
+      amax_dK->set_output(!is_mxfp8)
           .set_dim({1, 1, 1, 1})
           .set_stride({1, 1, 1, 1})
           .set_data_type(fe::DataType_t::FLOAT);
-      amax_dV->set_output(true)
+      amax_dV->set_output(!is_mxfp8)
           .set_dim({1, 1, 1, 1})
           .set_stride({1, 1, 1, 1})
           .set_data_type(fe::DataType_t::FLOAT);
@@ -2628,9 +2628,6 @@ void fused_attn_fp8_bwd_impl_v1(
         {dQ, devPtrdQ},
         {dK, devPtrdK},
         {dV, devPtrdV},
-        {amax_dQ, devPtrAmaxdQ},
-        {amax_dK, devPtrAmaxdK},
-        {amax_dV, devPtrAmaxdV},
     };
     if (is_delayed_scaling || is_current_scaling) {
       variant_pack[descale_s] = devPtrDescaleS;
@@ -2638,6 +2635,9 @@ void fused_attn_fp8_bwd_impl_v1(
       variant_pack[scale_s] = devPtrScaleS;
       variant_pack[scale_dP] = devPtrScaledP;
       variant_pack[amax_dP] = devPtrAmaxdP;
+      variant_pack[amax_dQ] = devPtrAmaxdQ;
+      variant_pack[amax_dK] = devPtrAmaxdK;
+      variant_pack[amax_dV] = devPtrAmaxdV;
     }
     if (is_delayed_scaling || (is_current_scaling && !is_O_in_F16)) {
       variant_pack[descale_o] = devPtrDescaleO;
@@ -2724,7 +2724,6 @@ void fused_attn_fp8_fwd(size_t batch, size_t num_attn_heads, size_t num_gqa_grou
   devPtrK = input_K->data.dptr;
   devPtrDescaleK = input_K->scale_inv.dptr;
   devPtrO = output_O->data.dptr;
-  devPtrAmaxO = output_O->amax.dptr;
   if (input_Q->scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
     devPtrV = input_V->data.dptr;
     devPtrDescaleV = input_V->scale_inv.dptr;
@@ -2732,6 +2731,7 @@ void fused_attn_fp8_fwd(size_t batch, size_t num_attn_heads, size_t num_gqa_grou
     devPtrAmaxS = input_output_S->amax.dptr;
     devPtrScaleS = input_output_S->scale.dptr;
     devPtrDescaleS = input_output_S->scale_inv.dptr;
+    devPtrAmaxO = output_O->amax.dptr;
   } else if (input_Q->scaling_mode == NVTE_MXFP8_1D_SCALING) {
     devPtrV = input_V->columnwise_data.dptr;
     devPtrDescaleV = input_V->columnwise_scale_inv.dptr;
@@ -2881,11 +2881,14 @@ void fused_attn_fp8_bwd(
   void* devPtrM = input_M->data.dptr;
   void* devPtrZInv = (input_ZInv != nullptr) ? input_ZInv->data.dptr : nullptr;
 
-  void* devPtrScaleS = input_S->scale.dptr;
-  void* devPtrDescaleS = input_S->scale_inv.dptr;
-  void* devPtrAmaxdP = input_output_dP->amax.dptr;
-  void* devPtrScaledP = input_output_dP->scale.dptr;
-  void* devPtrDescaledP = input_output_dP->scale_inv.dptr;
+  void *devPtrScaleS = nullptr, *devPtrDescaleS = nullptr, *devPtrAmaxdP = nullptr, *devPtrScaledP = nullptr, *devPtrDescaledP = nullptr;
+  if (input_Q->scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
+    devPtrScaleS = input_S->scale.dptr;
+    devPtrDescaleS = input_S->scale_inv.dptr;
+    devPtrAmaxdP = input_output_dP->amax.dptr;
+    devPtrScaledP = input_output_dP->scale.dptr;
+    devPtrDescaledP = input_output_dP->scale_inv.dptr;
+  }
 
   void* devPtrSoftmaxOffset = nullptr;
   void* devPtrdSoftmaxOffset = nullptr;
@@ -2897,12 +2900,15 @@ void fused_attn_fp8_bwd(
   void* devPtrdQ = output_dQ->data.dptr;
   void* devPtrdK = output_dK->data.dptr;
   void* devPtrdV = output_dV->data.dptr;
-  void* devPtrAmaxdQ = output_dQ->amax.dptr;
-  void* devPtrAmaxdK = output_dK->amax.dptr;
-  void* devPtrAmaxdV = output_dV->amax.dptr;
-  void* devPtrScaledQ = output_dQ->scale.dptr;
-  void* devPtrScaledK = output_dK->scale.dptr;
-  void* devPtrScaledV = output_dV->scale.dptr;
+  void *devPtrAmaxdQ = nullptr, *devPtrAmaxdK = nullptr, *devPtrAmaxdV = nullptr, *devPtrScaledQ = nullptr, *devPtrScaledK = nullptr, *devPtrScaledV = nullptr;
+  if (input_Q->scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
+    devPtrAmaxdQ = output_dQ->amax.dptr;
+    devPtrAmaxdK = output_dK->amax.dptr;
+    devPtrAmaxdV = output_dV->amax.dptr;
+    devPtrScaledQ = output_dQ->scale.dptr;
+    devPtrScaledK = output_dK->scale.dptr;
+    devPtrScaledV = output_dV->scale.dptr;
+  }
 
   void* devPtrcuSeqlensQ =
       reinterpret_cast<void*>(reinterpret_cast<int32_t*>(cu_seqlens_q->data.dptr));
