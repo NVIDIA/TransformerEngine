@@ -200,6 +200,11 @@ void GemmRsInitMatrices(NVTECommGemmCtx* ctx, int64_t* ldd, int64_t m, int64_t n
   NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(m, n, m, block_size(ctx, n), 0, 0, *ldd,
                                                    get_cuda_dtype(d->dtype()),
                                                    ctx->grid_row_major.get(), ctx->d_desc.get()));
+
+  const cudaDataType_t comm_type = get_cuda_dtype(d->dtype());
+  NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorSetAttribute(
+      ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_COMMUNICATION_TYPE, &comm_type,
+      sizeof comm_type));
 }
 
 void GemmArInitMatrices(NVTECommGemmCtx* ctx, int64_t* ldd, int64_t m, int64_t n, int64_t k,
