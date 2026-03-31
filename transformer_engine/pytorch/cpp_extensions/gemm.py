@@ -16,6 +16,7 @@ from ..utils import get_sm_count, _empty_tensor
 from ..quantized_tensor import Quantizer
 from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
 from ..tensor.utils import is_custom
+from ..tensor.storage.hybrid_tensor_storage import HybridQuantizedTensorStorage
 from ..custom_recipes.gemm import custom_gemm
 from ...debug.pytorch.debug_quantization import DebugQuantizer
 
@@ -69,6 +70,36 @@ def validate_gemm_scale(scale: Optional[float], required: bool) -> float:
     return 0.0
 
 
+def _unwrap_hybrid_A(tensor, layout):
+    """Extract the direction-appropriate native sub-storage for GEMM operand A.
+
+    Operand A's data direction is determined by its transpose flag (layout[0]):
+      T (transposed)     → rowwise sub-storage  (.data consumed by C++)
+      N (not-transposed) → columnwise sub-storage (.columnwise_data consumed by C++)
+    For non-hybrid tensors this is a no-op passthrough.
+    """
+    if not isinstance(tensor, HybridQuantizedTensorStorage):
+        return tensor
+    if layout[0] == "T":
+        return tensor.rowwise_sub_storage
+    return tensor.columnwise_sub_storage
+
+
+def _unwrap_hybrid_B(tensor, layout):
+    """Extract the direction-appropriate native sub-storage for GEMM operand B.
+
+    Operand B's data direction is determined by its transpose flag (layout[1]):
+      N (not-transposed) → rowwise sub-storage  (.data consumed by C++)
+      T (transposed)     → columnwise sub-storage (.columnwise_data consumed by C++)
+    For non-hybrid tensors this is a no-op passthrough.
+    """
+    if not isinstance(tensor, HybridQuantizedTensorStorage):
+        return tensor
+    if layout[1] == "N":
+        return tensor.rowwise_sub_storage
+    return tensor.columnwise_sub_storage
+
+
 def general_gemm(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -94,6 +125,9 @@ def general_gemm(
     assert layout in ("TN", "NN", "NT"), f"GEMM layout {layout} not supported."
     transa = layout[0] == "T"
     transb = layout[1] == "T"
+
+    A = _unwrap_hybrid_A(A, layout)
+    B = _unwrap_hybrid_B(B, layout)
 
     alpha = validate_gemm_scale(alpha, True)
     beta = validate_gemm_scale(beta, accumulate)
@@ -203,6 +237,9 @@ def general_grouped_gemm(
     TN layout Grouped GEMM with fp8 inputs.
     """
     num_gemms = len(A)
+
+    A = [_unwrap_hybrid_A(a, layout) for a in A]
+    B = [_unwrap_hybrid_B(b, layout) for b in B]
 
     transa = layout[0] == "T"
     transb = layout[1] == "T"

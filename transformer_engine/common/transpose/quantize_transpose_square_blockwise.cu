@@ -161,13 +161,15 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK)
     static_assert(std::is_same<CType, float>::value);
     const CType scale_inv = 1.0f / block_tile_scale;
 
-    size_t row_idx = tile_id_y;
-    size_t col_idx = tile_id_x;
-    tile_scales_inv_c[row_idx * scale_stride_y + col_idx * scale_stride_x] = scale_inv;
+    if (tile_scales_inv_c != nullptr) {
+      size_t row_idx = tile_id_y;
+      size_t col_idx = tile_id_x;
+      tile_scales_inv_c[row_idx * scale_stride_y + col_idx * scale_stride_x] = scale_inv;
+    }
 
     if constexpr (kReturnTranspose) {
-      row_idx = tile_id_x;
-      col_idx = tile_id_y;
+      size_t row_idx = tile_id_x;
+      size_t col_idx = tile_id_y;
       tile_scales_inv_t[row_idx * scale_t_stride_y + col_idx * scale_t_stride_x] = scale_inv;
     }
   }
@@ -189,7 +191,9 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK)
         thrd_tile_out_trans[j].data.elt[i] = scaled_elt;
       }
     }
-    tmp_output_c.store_to(output_c + thread_tile_start_idx + i * row_length);
+    if (output_c != nullptr) {
+      tmp_output_c.store_to(output_c + thread_tile_start_idx + i * row_length);
+    }
   }
 
   // Step 4: store transpose into shared memory
@@ -388,13 +392,15 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK) block_scaled_cast_transpose
     static_assert(std::is_same<CType, float>::value);
     const CType scale_inv = 1.0f / block_tile_scale;
 
-    size_t row_idx = tile_id_y;
-    size_t col_idx = tile_id_x;
-    tile_scales_inv_c[row_idx * scale_stride_y + col_idx * scale_stride_x] = scale_inv;
+    if (tile_scales_inv_c != nullptr) {
+      size_t row_idx = tile_id_y;
+      size_t col_idx = tile_id_x;
+      tile_scales_inv_c[row_idx * scale_stride_y + col_idx * scale_stride_x] = scale_inv;
+    }
 
     if constexpr (kReturnTranspose) {
-      row_idx = tile_id_x;
-      col_idx = tile_id_y;
+      size_t row_idx = tile_id_x;
+      size_t col_idx = tile_id_y;
       tile_scales_inv_t[row_idx * scale_t_stride_y + col_idx * scale_t_stride_x] = scale_inv;
     }
   }
@@ -433,8 +439,10 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK) block_scaled_cast_transpose
           thrd_tile_out_trans[j].data.elt[i] = scaled_elt;
         }
       }
-      tmp_output_c.store_to_elts(output_c + thread_tile_start_idx + i * row_length, 0,
-                                 thread_tile_ncols);
+      if (output_c != nullptr) {
+        tmp_output_c.store_to_elts(output_c + thread_tile_start_idx + i * row_length, 0,
+                                   thread_tile_ncols);
+      }
     }
 
     if constexpr (kReturnTranspose) {
@@ -492,19 +500,26 @@ void quantize_transpose_square_blockwise(const SimpleTensor& input, SimpleTensor
                "with MXFP8, which requires using power of two scaling factors.");
   }
 
-  NVTE_CHECK(input.shape == output.shape, "Input and output must have the same shape.");
+  const bool return_identity = output.dptr != nullptr;
+  if (return_identity) {
+    NVTE_CHECK(input.shape == output.shape, "Input and output must have the same shape.");
+  }
+  NVTE_CHECK(return_identity || return_transpose,
+             "At least one of rowwise or columnwise output must be requested.");
   const size_t row_length = input.shape.size() > 0 ? input.shape.back() : 1;
   size_t num_rows = 1;
   for (size_t i = 0; (i < input.shape.size() - 1) && (input.shape.size() > 0); ++i) {
     num_rows *= input.shape.at(i);
   }
 
-  NVTE_CHECK(scale_inv.shape.size() == 2, "scale_inv must have 2 dimensions.");
-
-  size_t scale_k = scale_inv.shape[1];
-
-  const size_t scale_stride_x = 1;
-  const size_t scale_stride_y = scale_k;
+  size_t scale_k = 0;
+  const size_t scale_stride_x = return_identity ? 1 : 0;
+  size_t scale_stride_y = 0;
+  if (return_identity) {
+    NVTE_CHECK(scale_inv.shape.size() == 2, "scale_inv must have 2 dimensions.");
+    scale_k = scale_inv.shape[1];
+    scale_stride_y = scale_k;
+  }
 
   size_t scale_t_stride_x = 0;
   size_t scale_t_stride_y = 0;
@@ -522,13 +537,18 @@ void quantize_transpose_square_blockwise(const SimpleTensor& input, SimpleTensor
                    ") and output_t (shape=", output_t.shape, ") have incompatible dims.");
       }
     }
-    NVTE_CHECK(output.dtype == output_t.dtype, "output and output_t need to have the same type.");
+    if (return_identity) {
+      NVTE_CHECK(output.dtype == output_t.dtype,
+                 "output and output_t need to have the same type.");
+    }
 
     NVTE_CHECK(scale_inv_t.shape.size() == 2, "scale_inv_t must have 2 dimensions.");
 
     scale_t_stride_x = 1;
     scale_t_stride_y = scale_inv_t.shape[1];
   }
+
+  const auto out_dtype = return_identity ? output.dtype : output_t.dtype;
 
   const size_t num_blocks_x = DIVUP(row_length, BLOCK_TILE_DIM);
   const size_t num_blocks_y = DIVUP(num_rows, BLOCK_TILE_DIM);
@@ -537,7 +557,7 @@ void quantize_transpose_square_blockwise(const SimpleTensor& input, SimpleTensor
       input.dtype, InputType,
 
       TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
-          output.dtype, OutputType,
+          out_dtype, OutputType,
 
           TRANSFORMER_ENGINE_SWITCH_CONDITION(
               return_transpose, kReturnTranspose,
