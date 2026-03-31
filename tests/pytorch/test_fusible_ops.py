@@ -3288,6 +3288,9 @@ class TestSequentialModules:
             pytest.skip("single_grouped_bias requires bias=True")
         if with_quantization and dtype not in (torch.bfloat16, torch.float16):
             pytest.skip("Quantized group GEMM is only supported with BF16/FP16")
+        if quantization == "mxfp8" and bias:
+            # Will be supported in future CUDNN release.
+            pytest.skip("Bias/dbias not yet supported in MXFP8 fused grouped MLP")
 
         # Random data
         x_ref, x_test = make_reference_and_test_tensors(

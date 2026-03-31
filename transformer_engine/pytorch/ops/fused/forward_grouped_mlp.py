@@ -487,14 +487,13 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             )
             fc2_w_scales = fc2_w_scales.permute(3, 4, 1, 5, 2, 0)
 
-            fc2_kernel_out = self.grouped_gemm_quant_kernel()(
+            fc2_quant_kwargs = dict(
                 a_tensor=fc2_a_data,
                 sfa_tensor=fc2_a_scales,
                 padded_offsets=split_points,
                 alpha_tensor=alpha_tensor.float(),
                 b_tensor=fc2_w_data,
                 sfb_tensor=fc2_w_scales,
-                bias_tensor=fc2_bias_packed,
                 norm_const_tensor=None,
                 prob_tensor=torch.ones((in_shape[0], 1, 1), dtype=torch.float32, device=device),
                 acc_dtype=torch.float32,
@@ -505,6 +504,9 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
                 current_stream=current_stream,
                 use_dynamic_sched=True,
             )
+            if _quant_wrapper_has_bias_tensor_arg():
+                fc2_quant_kwargs["bias_tensor"] = fc2_bias_packed
+            fc2_kernel_out = self.grouped_gemm_quant_kernel()(**fc2_quant_kwargs)
             fc2_out = fc2_kernel_out["d_tensor"].permute(2, 0, 1).view(fc2_out_shape).contiguous()
         else:
             fc2_a_data = fc1_kernel_out["d_tensor"]
@@ -518,7 +520,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
                 data_dtype=grouped_fc2_weight[0]._fp8_dtype,
             )
 
-            fc2_kernel_out = self.grouped_gemm_quant_kernel()(
+            fc2_quant_kwargs = dict(
                 a_tensor=fc2_a_data,
                 sfa_tensor=fc2_a_scales,
                 padded_offsets=split_points,
@@ -528,7 +530,6 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
                 n=fc2_weight_shape[0],
                 b_dtype=torch.float8_e4m3fn,
                 b_major="k",
-                bias_tensor=fc2_bias_packed,
                 norm_const_tensor=None,
                 prob_tensor=torch.ones((in_shape[0], 1, 1), dtype=torch.float32, device=device),
                 acc_dtype=torch.float32,
@@ -539,6 +540,9 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
                 current_stream=current_stream,
                 use_dynamic_sched=True,
             )
+            if _quant_wrapper_has_bias_tensor_arg():
+                fc2_quant_kwargs["bias_tensor"] = fc2_bias_packed
+            fc2_kernel_out = self.grouped_gemm_quant_kernel()(**fc2_quant_kwargs)
             fc2_out = fc2_kernel_out["d_tensor"].permute(2, 0, 1).view(fc2_out_shape).contiguous()
 
         # Prepare input tensors for backward pass
