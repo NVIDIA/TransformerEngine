@@ -423,8 +423,7 @@ std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor_for_gemm(
   return SwizzledGroupedScales{std::move(rowwise_scales_pyt), std::move(columnwise_scales_pyt)};
 }
 
-std::pair<std::optional<at::Tensor>, std::optional<at::Tensor>> swizzle_grouped_scales_for_gemm(
-    py::handle &tensor, bool rowwise, bool columnwise) {
+void swizzle_grouped_scales_for_gemm(py::handle &tensor, bool rowwise, bool columnwise) {
   using namespace transformer_engine::pytorch::detail;
 
   auto tensor_nvte = GroupedTensorFromPyTorchGroupedTensor(tensor);
@@ -432,19 +431,14 @@ std::pair<std::optional<at::Tensor>, std::optional<at::Tensor>> swizzle_grouped_
   auto result = maybe_swizzle_grouped_tensor_for_gemm(tensor_nvte, rowwise, columnwise);
 
   if (result.has_value()) {
-    return std::move(*result);
+    if (result->first.has_value()) {
+      tensor.attr("scale_inv") = py::cast(*result->first);
+    }
+    if (result->second.has_value()) {
+      tensor.attr("columnwise_scale_inv") = py::cast(*result->second);
+    }
+    tensor.attr("_with_gemm_swizzled_scales") = py::cast(true);
   }
-
-  // Already swizzled or no swizzle needed — return existing scales.
-  std::optional<at::Tensor> row_scales;
-  std::optional<at::Tensor> col_scales;
-  if (rowwise && !tensor.attr("scale_inv").is_none()) {
-    row_scales = tensor.attr("scale_inv").cast<at::Tensor>();
-  }
-  if (columnwise && !tensor.attr("columnwise_scale_inv").is_none()) {
-    col_scales = tensor.attr("columnwise_scale_inv").cast<at::Tensor>();
-  }
-  return {std::move(row_scales), std::move(col_scales)};
 }
 
 void inplace_swizzle_scale_for_gemm(py::handle &tensor) {

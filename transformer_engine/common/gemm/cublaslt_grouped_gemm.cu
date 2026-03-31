@@ -266,18 +266,16 @@ inline size_t validate_grouped_gemm_inputs(
            dtype == transformer_engine::DType::kBFloat16 ||
            dtype == transformer_engine::DType::kFloat16;
   };
-  bool dtype_ok = true;
   for (const auto *tensor : inputs) {
-    const bool has_empty_logical_shape =
-        tensor->logical_shape.ndim == 2 &&
-        (tensor->logical_shape.data[0] == 0 || tensor->logical_shape.data[1] == 0);
-    if (!has_empty_logical_shape) {
-      dtype_ok = dtype_ok && is_supported_input_dtype(tensor->dtype());
+    const bool zero_work = grouped_tensor_has_zero_work(tensor);
+    if (!zero_work) {
+      NVTE_CHECK(is_supported_input_dtype(tensor->dtype()),
+                 "Grouped GEMM inputs must be FP8, BF16, or FP16, got ",
+                 transformer_engine::to_string(tensor->dtype()), ".");
     }
-    NVTE_CHECK(tensor->has_data() || tensor->has_columnwise_data() || has_empty_logical_shape,
+    NVTE_CHECK(tensor->has_data() || tensor->has_columnwise_data() || zero_work,
                "Grouped GEMM: input tensor is missing both row-wise and column-wise data");
   }
-  NVTE_CHECK(dtype_ok, "Grouped GEMM inputs must be FP8, BF16, or FP16.");
   // Cross-operand consistency across all inputs.
   const auto *ref = *inputs.begin();
   const bool ref_is_fp8 = is_fp8_dtype(ref->dtype());
@@ -595,10 +593,8 @@ inline GroupedOperandSelection select_grouped_operand(const transformer_engine::
   using namespace transformer_engine;
   const bool has_row = t->has_data();
   const bool has_col = t->has_columnwise_data();
-  const bool has_empty_logical_shape =
-      t->logical_shape.ndim == 2 &&
-      (t->logical_shape.data[0] == 0 || t->logical_shape.data[1] == 0);
-  NVTE_CHECK(has_row || has_col || has_empty_logical_shape,
+  const bool zero_work = grouped_tensor_has_zero_work(t);
+  NVTE_CHECK(has_row || has_col || zero_work,
              "Grouped GEMM operand is missing both row-wise and column-wise data");
 
   const auto sm = t->scaling_mode;
@@ -616,7 +612,7 @@ inline GroupedOperandSelection select_grouped_operand(const transformer_engine::
   sel.with_gemm_swizzled_scales = t->with_gemm_swizzled_scales;
 
   // Empty logical tensors may not allocate rowwise/columnwise buffers.
-  if (!has_row && !has_col && has_empty_logical_shape) {
+  if (!has_row && !has_col && zero_work) {
     sel.is_empty_logical_shape = true;
     sel.dtype = t->dtype();
     sel.shape = create_shape_info(t, /*swap_dims=*/false);

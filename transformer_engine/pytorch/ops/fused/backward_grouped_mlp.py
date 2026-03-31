@@ -29,6 +29,7 @@ from ..basic import GroupedLinear, ScaledSwiGLU
 from ..fuser import register_backward_fusion
 from ..op import FusedOperation, FusibleOperation, OperationContext
 from .._common import (
+    clone_grouped_tensor_storage,
     is_quantized_tensor,
     make_grouped_tensor_from_buffers,
     maybe_dequantize,
@@ -210,16 +211,17 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         split_sizes = split_sizes.to(dtype=torch.int64, device=device)
         split_points = split_points.to(dtype=torch.int, device=device)
 
-        fc2_swizzled_col_scales = None
+        fc2_weight_for_gemm = grouped_fc2_weight
         if fc2_op.single_grouped_parameter:
-            fc2_swizzled_col_scales = grouped_fc2_weight.columnwise_scale_inv
-            _, fc2_swizzled_col_scales = tex.swizzle_grouped_scales_for_gemm(
-                grouped_fc2_weight, rowwise=False, columnwise=True
+            fc2_weight_for_gemm = clone_grouped_tensor_storage(grouped_fc2_weight)
+            tex.swizzle_grouped_scales_for_gemm(
+                fc2_weight_for_gemm, rowwise=False, columnwise=True
             )
-        fc1_swizzled_col_scales = None
+        fc1_weight_for_gemm = grouped_fc1_weight
         if fc1_op.single_grouped_parameter:
-            _, fc1_swizzled_col_scales = tex.swizzle_grouped_scales_for_gemm(
-                grouped_fc1_weight, rowwise=False, columnwise=True
+            fc1_weight_for_gemm = clone_grouped_tensor_storage(grouped_fc1_weight)
+            tex.swizzle_grouped_scales_for_gemm(
+                fc1_weight_for_gemm, rowwise=False, columnwise=True
             )
 
         grouped_fc1_x = None
@@ -316,11 +318,11 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
             # Pack weight tensors for stacked kernel
             # Data actual shape: (num_groups, k, n)
             # Data logical shape: (n, k, num_groups)
-            fc2_w_data = grouped_fc2_weight.columnwise_data
+            fc2_w_data = fc2_weight_for_gemm.columnwise_data
             fc2_w_data = fc2_w_data.view(dtype=torch.float8_e4m3fn)
             fc2_w_data = fc2_w_data.view(num_groups, fc2_weight_shape[0], fc2_weight_shape[1])
             fc2_w_data = fc2_w_data.permute(2, 1, 0)
-            fc2_w_scales = fc2_swizzled_col_scales.view(dtype=torch.float8_e8m0fnu)
+            fc2_w_scales = fc2_weight_for_gemm.columnwise_scale_inv.view(dtype=torch.float8_e8m0fnu)
             fc2_w_scales = fc2_w_scales.view(
                 num_groups,
                 fc2_weight_shape[1] // 128,
@@ -636,11 +638,11 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
                 fc1_dgrad_a_data = fc2_dgrad_kernel_out["d_row_tensor"]
                 fc1_dgrad_a_scales = fc2_dgrad_kernel_out["sfd_row_tensor"]
 
-                fc1_w_data = grouped_fc1_weight.columnwise_data
+                fc1_w_data = fc1_weight_for_gemm.columnwise_data
                 fc1_w_data = fc1_w_data.view(dtype=torch.float8_e4m3fn)
                 fc1_w_data = fc1_w_data.view(num_groups, fc1_weight_shape[0], fc1_weight_shape[1])
                 fc1_w_data = fc1_w_data.permute(2, 1, 0)
-                fc1_w_scales = fc1_swizzled_col_scales.view(dtype=torch.float8_e8m0fnu)
+                fc1_w_scales = fc1_weight_for_gemm.columnwise_scale_inv.view(dtype=torch.float8_e8m0fnu)
                 fc1_w_scales = fc1_w_scales.view(
                     num_groups,
                     fc1_weight_shape[1] // 128,

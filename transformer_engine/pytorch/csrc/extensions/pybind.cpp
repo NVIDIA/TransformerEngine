@@ -390,7 +390,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Convert tensor block scales into GEMM swizzled format");
   m.def("swizzle_grouped_scales_for_gemm",
         &transformer_engine::pytorch::swizzle_grouped_scales_for_gemm,
-        "Swizzle grouped tensor scales for GEMM, returns (rowwise, columnwise) new tensors",
+        "In-place swizzle of grouped tensor scales for GEMM",
         py::arg("tensor"), py::arg("rowwise"), py::arg("columnwise"));
 
   // attention kernels

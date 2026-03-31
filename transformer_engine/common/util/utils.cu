@@ -5,7 +5,7 @@
  ************************************************************************/
 
 #include <cuda_runtime.h>
-#include <transformer_engine/device_tensor_from_host_pointers.h>
+#include <transformer_engine/utils.h>
 
 #include "../common.h"
 #include "../util/logging.h"
@@ -15,10 +15,10 @@ namespace {
 constexpr int64_t kMaxKernelAddresses = 64;
 
 struct HostPointersArgs {
-  int64_t ptrs[kMaxKernelAddresses];
+  uint64_t ptrs[kMaxKernelAddresses];
 };
 
-__global__ void write_pointers_kernel(HostPointersArgs args, int64_t *out, int64_t count,
+__global__ void write_pointers_kernel(HostPointersArgs args, uint64_t *out, int64_t count,
                                       int64_t offset) {
   const int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (idx < count) {
@@ -28,9 +28,14 @@ __global__ void write_pointers_kernel(HostPointersArgs args, int64_t *out, int64
 
 }  // namespace
 
-void nvte_convert_pointers_to_tensor(const int64_t *host_ptrs, int64_t *output, int64_t count,
+void nvte_convert_pointers_to_tensor(const uint64_t *host_ptrs, NVTETensor output, int64_t count,
                                      cudaStream_t stream) {
   NVTE_API_CALL(nvte_convert_pointers_to_tensor);
+  using namespace transformer_engine;
+  Tensor *out_tensor = convertNVTETensorCheck(output);
+  uint64_t *out_ptr = static_cast<uint64_t *>(out_tensor->data.dptr);
+  NVTE_CHECK(out_ptr != nullptr, "Output tensor data pointer is null.");
+
   int64_t offset = 0;
   while (offset < count) {
     const int64_t chunk = std::min(kMaxKernelAddresses, count - offset);
@@ -39,7 +44,7 @@ void nvte_convert_pointers_to_tensor(const int64_t *host_ptrs, int64_t *output, 
       args.ptrs[i] = host_ptrs[offset + i];
     }
     constexpr int threads = kMaxKernelAddresses;
-    write_pointers_kernel<<<1, threads, 0, stream>>>(args, output, chunk, offset);
+    write_pointers_kernel<<<1, threads, 0, stream>>>(args, out_ptr, chunk, offset);
     NVTE_CHECK_CUDA(cudaGetLastError());
     offset += chunk;
   }

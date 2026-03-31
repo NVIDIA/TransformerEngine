@@ -15,11 +15,12 @@ namespace transformer_engine::pytorch {
 
 namespace {
 
-at::Tensor collect_pointers_in_device_tensor(const std::vector<int64_t>& host_ptrs,
+at::Tensor collect_pointers_in_device_tensor(const std::vector<uint64_t>& host_ptrs,
                                              const at::Device& device, cudaStream_t stream) {
   const int64_t count = static_cast<int64_t>(host_ptrs.size());
   auto out = at::empty({count}, at::TensorOptions().dtype(at::kLong).device(device));
-  nvte_convert_pointers_to_tensor(host_ptrs.data(), out.data_ptr<int64_t>(), count, stream);
+  auto out_nvte = makeTransformerEngineTensor(out);
+  nvte_convert_pointers_to_tensor(host_ptrs.data(), out_nvte.data(), count, stream);
   return out;
 }
 
@@ -37,10 +38,10 @@ std::vector<at::Tensor> convert_host_pointers_to_tensor(
     NVTE_CHECK(first_tensor.is_cuda(), "Tensor list must be on CUDA.");
     const auto device = first_tensor.device();
     const int64_t count = static_cast<int64_t>(tensor_list.size());
-    std::vector<int64_t> host_ptrs(count);
+    std::vector<uint64_t> host_ptrs(count);
     for (int64_t i = 0; i < count; ++i) {
-      host_ptrs[i] = static_cast<int64_t>(
-          reinterpret_cast<uintptr_t>(tensor_list[static_cast<size_t>(i)].data_ptr()));
+      host_ptrs[i] =
+          reinterpret_cast<uintptr_t>(tensor_list[static_cast<size_t>(i)].data_ptr());
     }
     outputs.push_back(collect_pointers_in_device_tensor(host_ptrs, device, stream));
   }
@@ -68,15 +69,14 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> get_device_pointer_for_data_and_s
   data_shape.data[1] = static_cast<size_t>(data_tensors[0].size(1));
 
   // Collect data device pointers
-  std::vector<int64_t> data_host_ptrs(num_tensors);
+  std::vector<uint64_t> data_host_ptrs(num_tensors);
   for (size_t i = 0; i < num_tensors; ++i) {
-    data_host_ptrs[i] =
-        static_cast<int64_t>(reinterpret_cast<uintptr_t>(data_tensors[i].data_ptr()));
+    data_host_ptrs[i] = reinterpret_cast<uintptr_t>(data_tensors[i].data_ptr());
   }
 
   // Swizzle scales and collect scale pointers
   at::Tensor swizzled_scales_keepalive;
-  std::vector<int64_t> scale_host_ptrs(num_tensors);
+  std::vector<uint64_t> scale_host_ptrs(num_tensors);
 
   if (swizzle) {
     NVTEScalingMode scaling_mode;
@@ -147,14 +147,12 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> get_device_pointer_for_data_and_s
 
     // Collect swizzled scale pointers
     for (size_t i = 0; i < num_tensors; ++i) {
-      scale_host_ptrs[i] =
-          static_cast<int64_t>(reinterpret_cast<uintptr_t>(output_dptr + output_offsets[i]));
+      scale_host_ptrs[i] = reinterpret_cast<uintptr_t>(output_dptr + output_offsets[i]);
     }
   } else {
     swizzled_scales_keepalive = at::empty({0}, at::TensorOptions().dtype(at::kByte).device(device));
     for (size_t i = 0; i < num_tensors; ++i) {
-      scale_host_ptrs[i] =
-          static_cast<int64_t>(reinterpret_cast<uintptr_t>(scale_tensors[i].data_ptr()));
+      scale_host_ptrs[i] = reinterpret_cast<uintptr_t>(scale_tensors[i].data_ptr());
     }
   }
 
