@@ -186,9 +186,9 @@ void GemmRsInitMatrices(NVTECommGemmCtx* ctx, int64_t* ldd, int64_t m, int64_t n
   }
   if (transb) {
     NVTE_CHECK(b1 == n, "Unsupported tensor dimension in B: expected ", n, ", got ", b1);
-    NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(
-        n, k, block_size(ctx, n), block_size(ctx, k), 0, 0, block_size(ctx, n),
-        get_cuda_dtype(b->dtype()), ctx->grid_row_major.get(), ctx->b_desc.get()));
+    NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(n, k, block_size(ctx, n), block_size(ctx, k),
+                                                     0, 0, n, get_cuda_dtype(b->dtype()),
+                                                     ctx->grid_row_major.get(), ctx->b_desc.get()));
   } else {
     NVTE_CHECK(b0 == n, "Unsupported tensor dimension in B: expected ", n, ", got ", b0);
     NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(
