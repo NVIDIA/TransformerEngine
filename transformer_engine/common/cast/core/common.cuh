@@ -377,7 +377,6 @@ __device__ __forceinline__ bool is_job_valid(const JobDescriptor &job,
 
   const size_t tensor_offset_from_start = job.block_global_offset - tensor_start_offset;
   const size_t block_offset_Y_in_tensor = tensor_offset_from_start / job.cols;
-  const size_t block_offset_X_in_tensor = tensor_offset_from_start % job.cols;
   if (block_offset_Y_in_tensor >= job.rows) {
     return false;
   }
