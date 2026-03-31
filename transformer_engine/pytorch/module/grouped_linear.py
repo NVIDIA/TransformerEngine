@@ -180,7 +180,9 @@ class _GroupedLinear(torch.autograd.Function):
                     update_workspace=update_workspace,
                     skip_update_flag=skip_fp8_weight_update,
                     workspace_dtype=activation_dtype,
-                    quantizer_workspace=quantizer_workspaces[i] if quantizer_workspaces is not None else None,
+                    quantizer_workspace=(
+                        quantizer_workspaces[i] if quantizer_workspaces is not None else None
+                    ),
                 )
                 weights_fp8.append(weight_fp8)
 
@@ -352,7 +354,11 @@ class _GroupedLinear(torch.autograd.Function):
                             grad_biases[i], grad_output[i] = tex.bgrad_quantize(
                                 grad_output_mats[i],
                                 ctx.grad_output_quantizers[i],
-                                quantizer_workspace=ctx.quantizer_workspaces[i] if ctx.quantizer_workspaces is not None else None,
+                                quantizer_workspace=(
+                                    ctx.quantizer_workspaces[i]
+                                    if ctx.quantizer_workspaces is not None
+                                    else None
+                                ),
                             )
                     else:
                         # Unfused bias grad and multi-tensor quantize
@@ -459,8 +465,12 @@ class _GroupedLinear(torch.autograd.Function):
                                 input_quantizer.set_usage(rowwise=False, columnwise=True)
                     inputmats: list
                     if ctx.fp8 and not ctx.debug:
-                        inputmats = tex.split_quantize(inp_view, ctx.m_splits, ctx.input_quantizers,
-                                                       quantizer_workspaces=ctx.quantizer_workspaces)
+                        inputmats = tex.split_quantize(
+                            inp_view,
+                            ctx.m_splits,
+                            ctx.input_quantizers,
+                            quantizer_workspaces=ctx.quantizer_workspaces,
+                        )
                     elif ctx.debug:
                         inputmats = DebugQuantizer.multi_tensor_quantize(
                             inp_view,

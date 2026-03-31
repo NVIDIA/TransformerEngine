@@ -251,11 +251,11 @@ py::object dequantize(const py::handle &input, transformer_engine::DType otype) 
 
 namespace {
 
-void multi_tensor_quantize_impl(const std::vector<TensorWrapper> &input_list,
-                                std::vector<py::handle> &quantizer_py_list,
-                                std::vector<std::unique_ptr<Quantizer>> &quantizer_cpp_list,
-                                std::vector<TensorWrapper> &output_list,
-                                const std::optional<std::vector<at::Tensor>> &workspaces = std::nullopt) {
+void multi_tensor_quantize_impl(
+    const std::vector<TensorWrapper> &input_list, std::vector<py::handle> &quantizer_py_list,
+    std::vector<std::unique_ptr<Quantizer>> &quantizer_cpp_list,
+    std::vector<TensorWrapper> &output_list,
+    const std::optional<std::vector<at::Tensor>> &workspaces = std::nullopt) {
   // Check number of tensors
   const size_t num_tensors = input_list.size();
   NVTE_CHECK(quantizer_py_list.size() == num_tensors, "Expected ", num_tensors,
@@ -298,7 +298,8 @@ void multi_tensor_quantize_impl(const std::vector<TensorWrapper> &input_list,
     for (size_t i = 0; i < num_tensors; ++i) {
       if (workspaces.has_value() &&
           detail::IsFloat8CurrentScalingQuantizers(quantizer_py_list[i].ptr())) {
-        auto *quantizer_cs = dynamic_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp_list[i].get());
+        auto *quantizer_cs =
+            dynamic_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp_list[i].get());
         auto [amax, scale] = split_quantizer_workspace((*workspaces)[i]);
         quantizer_cs->quantize(input_list[i], output_list[i], amax, scale);
       } else {
@@ -1260,11 +1261,10 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
 
 }  // namespace
 
-std::vector<py::object> split_quantize(const at::Tensor &tensor,
-                                       const std::vector<size_t> &split_sections,
-                                       std::vector<py::handle> quantizer_list,
-                                       bool disable_bulk_allocation,
-                                       std::optional<std::vector<at::Tensor>> quantizer_workspaces) {
+std::vector<py::object> split_quantize(
+    const at::Tensor &tensor, const std::vector<size_t> &split_sections,
+    std::vector<py::handle> quantizer_list, bool disable_bulk_allocation,
+    std::optional<std::vector<at::Tensor>> quantizer_workspaces) {
   init_extension();
 
   // Check number of tensors
@@ -1412,7 +1412,7 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
     default:
       // General multi-tensor quantization
       multi_tensor_quantize_impl(input_list, quantizer_list, quantizer_cpp_list, output_cpp_list,
-                                  quantizer_workspaces);
+                                 quantizer_workspaces);
   }
 
   return output_py_list;

@@ -231,8 +231,7 @@ class Float8CurrentScalingQuantizer : public Quantizer {
                 const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
 
   /*! @brief Quantize to FP8 using provided amax/scale workspace buffers */
-  void quantize(const TensorWrapper& input, TensorWrapper& out,
-                at::Tensor amax, at::Tensor scale,
+  void quantize(const TensorWrapper& input, TensorWrapper& out, at::Tensor amax, at::Tensor scale,
                 const std::optional<TensorWrapper>& noop_flag = std::nullopt);
 
   /*! @brief Quantize to FP8, skipping local amax computation.
@@ -241,8 +240,8 @@ class Float8CurrentScalingQuantizer : public Quantizer {
    * amax (e.g. computed by a fused LN kernel). The amax may still
    * be reduced across the amax reduction group.
    */
-  void quantize_with_amax(TensorWrapper& input, TensorWrapper& out,
-                          at::Tensor amax, at::Tensor scale,
+  void quantize_with_amax(TensorWrapper& input, TensorWrapper& out, at::Tensor amax,
+                          at::Tensor scale,
                           const std::optional<TensorWrapper>& noop_flag = std::nullopt);
 
  private:
@@ -257,8 +256,7 @@ class Float8CurrentScalingQuantizer : public Quantizer {
  */
 inline std::pair<at::Tensor, at::Tensor> split_quantizer_workspace(const at::Tensor& workspace) {
   NVTE_CHECK(workspace.numel() >= 2, "Quantizer workspace must have at least 2 float32 elements");
-  return {workspace.slice(0, 0, 1).contiguous(),
-          workspace.slice(0, 1, 2).contiguous()};
+  return {workspace.slice(0, 0, 1).contiguous(), workspace.slice(0, 1, 2).contiguous()};
 }
 
 class Float8BlockQuantizer : public Quantizer {

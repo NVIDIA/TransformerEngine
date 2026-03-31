@@ -742,8 +742,7 @@ std::pair<GroupedTensorWrapper, py::object> Float8CurrentScalingQuantizer::creat
 
 std::pair<TensorWrapper, py::object>
 Float8CurrentScalingQuantizer::create_unquantized_tensor_with_amax(const std::vector<size_t>& shape,
-                                                                   DType dtype,
-                                                                   at::Tensor amax,
+                                                                   DType dtype, at::Tensor amax,
                                                                    std::optional<at::Tensor> data) {
   amax.zero_();
   auto out = data.has_value() ? NoneQuantizer(py::none()).create_tensor(shape, dtype, data.value())
@@ -849,8 +848,8 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::convert_and_
 
 void Float8CurrentScalingQuantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& out,
                                                   const std::optional<TensorWrapper>& noop_flag,
-                                                  bool compute_amax,
-                                                  at::Tensor amax, at::Tensor scale) {
+                                                  bool compute_amax, at::Tensor amax,
+                                                  at::Tensor scale) {
   auto stream = at::cuda::getCurrentCUDAStream();
 
   // Nothing to be done if input is empty
@@ -910,8 +909,7 @@ void Float8CurrentScalingQuantizer::quantize(const TensorWrapper& input, TensorW
 }
 
 void Float8CurrentScalingQuantizer::quantize_with_amax(
-    TensorWrapper& input, TensorWrapper& out,
-    at::Tensor amax, at::Tensor scale,
+    TensorWrapper& input, TensorWrapper& out, at::Tensor amax, at::Tensor scale,
     const std::optional<TensorWrapper>& noop_flag) {
   NVTE_CHECK(input.get_amax().data_ptr == amax.data_ptr(),
              "Input does not use the appropriate amax tensor");

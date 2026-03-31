@@ -55,11 +55,10 @@ NVTE_Fused_Attn_Backend get_fused_attn_backend(
 }
 
 // helper function for S and dP quantizers
-std::pair<TensorWrapper, py::object> quantizer_helper(py::handle quantizer,
-                                                      const std::vector<size_t> &shape, DType dtype,
-                                                      bool create_hp_tensor_for_cs,
-                                                      std::optional<at::Tensor> data,
-                                                      std::optional<at::Tensor> quantizer_workspace) {
+std::pair<TensorWrapper, py::object> quantizer_helper(
+    py::handle quantizer, const std::vector<size_t> &shape, DType dtype,
+    bool create_hp_tensor_for_cs, std::optional<at::Tensor> data,
+    std::optional<at::Tensor> quantizer_workspace) {
   std::unique_ptr<Quantizer> T_quantizer = convert_quantizer(quantizer);
   TensorWrapper te_T;
   py::object py_T;
@@ -80,13 +79,14 @@ std::pair<TensorWrapper, py::object> quantizer_helper(py::handle quantizer,
     // current scaling
     auto *T_quantizer_fp8 = dynamic_cast<Float8CurrentScalingQuantizer *>(T_quantizer.get());
     if (create_hp_tensor_for_cs) {
-      at::Tensor ws = quantizer_workspace.has_value()
-          ? *quantizer_workspace
-          : at::empty({2}, at::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+      at::Tensor ws =
+          quantizer_workspace.has_value()
+              ? *quantizer_workspace
+              : at::empty({2}, at::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
       auto [cs_amax, cs_scale] = split_quantizer_workspace(ws);
       if (data.has_value()) {
-        std::tie(te_T, py_T) =
-            T_quantizer_fp8->create_unquantized_tensor_with_amax(shape, dtype, cs_amax, data.value());
+        std::tie(te_T, py_T) = T_quantizer_fp8->create_unquantized_tensor_with_amax(
+            shape, dtype, cs_amax, data.value());
       } else {
         std::tie(te_T, py_T) =
             T_quantizer_fp8->create_unquantized_tensor_with_amax(shape, dtype, cs_amax);
@@ -112,8 +112,7 @@ std::vector<py::object> fused_attn_fwd(
     const std::optional<at::Tensor> cu_seqlens_q_padded,
     const std::optional<at::Tensor> cu_seqlens_kv_padded,
     const std::optional<at::Tensor> page_table_k, const std::optional<at::Tensor> page_table_v,
-    py::handle s_quantizer, py::handle o_quantizer,
-    const std::optional<at::Tensor> Bias,
+    py::handle s_quantizer, py::handle o_quantizer, const std::optional<at::Tensor> Bias,
     const std::optional<at::Tensor> SoftmaxOffset, const std::optional<at::Generator> rng_gen,
     size_t rng_elts_per_thread, bool return_max_logit, bool cuda_graph) {
   // Ensure that cuDNN handle is created on the correct device,
@@ -326,7 +325,7 @@ std::vector<py::object> fused_attn_bwd(
     const py::handle O, const py::handle dO, const at::ScalarType fake_dtype, const DType dqkv_type,
     const std::vector<at::Tensor> Aux_CTX_Tensors,
     const std::optional<at::Tensor> cu_seqlens_q_padded,
-    const std::optional<at::Tensor> cu_seqlens_kv_padded,     py::handle s_quantizer,
+    const std::optional<at::Tensor> cu_seqlens_kv_padded, py::handle s_quantizer,
     py::handle dp_quantizer, py::handle dqkv_quantizer, bool cuda_graph) {
   auto none = py::none();
 

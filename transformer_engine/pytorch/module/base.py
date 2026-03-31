@@ -824,7 +824,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         if self._quantizer_workspace is None or self._quantizer_workspace.numel() < 2:
             self._quantizer_workspace = torch.zeros(
-                2, dtype=torch.float32, device="cuda",
+                2,
+                dtype=torch.float32,
+                device="cuda",
             )
 
     def get_fp8_meta_tensors(self) -> None:
@@ -1282,7 +1284,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     grad_bias = grad_output.view(-1, grad_output.shape[-1]).sum(dim=0)
                 else:
                     grad_bias, grad_output = tex.bgrad_quantize(
-                        grad_output, quantizer,
+                        grad_output,
+                        quantizer,
                         quantizer_workspace=quantizer_workspace,
                     )
         if not isinstance(grad_output, QuantizedTensorStorage):

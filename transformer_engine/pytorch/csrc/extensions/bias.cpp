@@ -211,8 +211,8 @@ std::vector<py::object> dact_dbias(
         NVTE_CHECK(fp8_quantizer_cpp != nullptr,
                    "Invalid quantizer for fused dact-amax kernel impl");
         auto [cs_amax, cs_scale] = split_quantizer_workspace(*quantizer_workspace);
-        auto [temp_nvte, temp_py] =
-            fp8_quantizer_cpp->create_unquantized_tensor_with_amax(input_shape, grad_output_dtype, cs_amax);
+        auto [temp_nvte, temp_py] = fp8_quantizer_cpp->create_unquantized_tensor_with_amax(
+            input_shape, grad_output_dtype, cs_amax);
         NVTE_SCOPED_GIL_RELEASE({
           dact_func(grad_output_nvte.data(), act_input_nvte.data(), temp_nvte.data(), stream);
         });

@@ -777,7 +777,9 @@ class _Linear(torch.autograd.Function):
                         inputmat_total.update_usage(columnwise_usage=True)
                     else:
                         ctx.input_quantizer.set_usage(rowwise=False, columnwise=True)
-                        inputmat_total = ctx.input_quantizer(inputmat_total, workspace=ctx.quantizer_workspace)
+                        inputmat_total = ctx.input_quantizer(
+                            inputmat_total, workspace=ctx.quantizer_workspace
+                        )
 
                 # Prepare grad output tensor
                 # Note: Synchronize tensor-parallel communication and
@@ -819,7 +821,9 @@ class _Linear(torch.autograd.Function):
                         grad_output.update_usage(columnwise_usage=True)
                     else:
                         ctx.grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
-                        grad_output = ctx.grad_output_quantizer(grad_output, workspace=ctx.quantizer_workspace)
+                        grad_output = ctx.grad_output_quantizer(
+                            grad_output, workspace=ctx.quantizer_workspace
+                        )
 
                 # Figure out whether to use split accumulator
                 use_split_accumulator = _2X_ACC_WGRAD

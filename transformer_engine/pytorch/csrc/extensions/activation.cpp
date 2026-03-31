@@ -16,8 +16,8 @@ using DFuncType = void(const NVTETensor, const NVTETensor, NVTETensor, cudaStrea
 
 template <FuncType* act_func, auto act_func_with_args, typename... Args>
 py::object activation_helper(const at::Tensor& input, py::handle quantizer,
-                             std::optional<at::Tensor> quantizer_workspace,
-                             int shape_divisor = 1, Args&&... args) {
+                             std::optional<at::Tensor> quantizer_workspace, int shape_divisor = 1,
+                             Args&&... args) {
   init_extension();
 
   // Input tensor
@@ -88,8 +88,8 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer,
         auto fp8_quantizer_cpp = dynamic_cast<Float8CurrentScalingQuantizer*>(quantizer_cpp.get());
         NVTE_CHECK(fp8_quantizer_cpp != nullptr, "Could not cast to FP8 current scaling quantizer");
         auto [cs_amax, cs_scale] = split_quantizer_workspace(*quantizer_workspace);
-        auto [temp_nvte, _] =
-            fp8_quantizer_cpp->create_unquantized_tensor_with_amax(output_shape, fake_dtype, cs_amax);
+        auto [temp_nvte, _] = fp8_quantizer_cpp->create_unquantized_tensor_with_amax(
+            output_shape, fake_dtype, cs_amax);
         NVTE_SCOPED_GIL_RELEASE({
           if constexpr (act_func == nullptr) {
             act_func_with_args(input_nvte.data(), temp_nvte.data(), std::forward<Args>(args)...,
@@ -128,8 +128,7 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer,
 
 template <DFuncType* dact_func, auto dact_func_with_args, typename... Args>
 py::object dactivation_helper(const at::Tensor& grad_output, const at::Tensor& input,
-                              py::handle quantizer,
-                              std::optional<at::Tensor> quantizer_workspace,
+                              py::handle quantizer, std::optional<at::Tensor> quantizer_workspace,
                               Args&&... args) {
   init_extension();
 
@@ -203,8 +202,8 @@ py::object dactivation_helper(const at::Tensor& grad_output, const at::Tensor& i
         auto fp8_quantizer_cpp = dynamic_cast<Float8CurrentScalingQuantizer*>(quantizer_cpp.get());
         NVTE_CHECK(fp8_quantizer_cpp != nullptr, "Could not cast to FP8 current scaling quantizer");
         auto [cs_amax, cs_scale] = split_quantizer_workspace(*quantizer_workspace);
-        auto [temp_nvte, _] =
-            fp8_quantizer_cpp->create_unquantized_tensor_with_amax(input_shape, fake_dtype, cs_amax);
+        auto [temp_nvte, _] = fp8_quantizer_cpp->create_unquantized_tensor_with_amax(
+            input_shape, fake_dtype, cs_amax);
         NVTE_SCOPED_GIL_RELEASE({
           if constexpr (dact_func == nullptr) {
             dact_func_with_args(grad_output_nvte.data(), input_nvte.data(), temp_nvte.data(),
@@ -351,7 +350,8 @@ py::object clamped_swiglu(const at::Tensor& input, py::handle quantizer,
 
 py::object clamped_dswiglu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer,
                            std::optional<at::Tensor> qw, float limit, float alpha) {
-  return dactivation_helper<nullptr, nvte_clamped_dswiglu>(grad, input, quantizer, qw, limit, alpha);
+  return dactivation_helper<nullptr, nvte_clamped_dswiglu>(grad, input, quantizer, qw, limit,
+                                                           alpha);
 }
 
 }  // namespace pytorch
