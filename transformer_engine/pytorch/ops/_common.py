@@ -123,6 +123,32 @@ def make_grouped_tensor_from_buffers(
     )
 
 
+def validate_grouped_mlp_dims(fc1, swiglu, fc2) -> None:
+    """Validate FC1/SwiGLU/FC2 dimensions and interleave size for fused grouped MLP."""
+    if fc1.in_features % 256 != 0 or fc1.out_features % 256 != 0:
+        raise ValueError(
+            f"Unsupported dims for FC1 (num_groups={fc1.num_groups}, "
+            f"in_features={fc1.in_features}, out_features={fc1.out_features})."
+        )
+    if fc2.in_features % 256 != 0 or fc2.out_features % 256 != 0:
+        raise ValueError(
+            f"Unsupported dims for FC2 (num_groups={fc2.num_groups}, "
+            f"in_features={fc2.in_features}, out_features={fc2.out_features})."
+        )
+    if fc1.out_features != 2 * fc2.in_features or fc1.num_groups != fc2.num_groups:
+        raise ValueError(
+            f"FC1 (num_groups={fc1.num_groups}, in_features={fc1.in_features}, "
+            f"out_features={fc1.out_features}) "
+            f"and FC2 (num_groups={fc2.num_groups}, in_features={fc2.in_features}, "
+            f"out_features={fc2.out_features}) do not match."
+        )
+    if swiglu.glu_interleave_size != 32:
+        raise ValueError(
+            "Fused kernel requires 32-wide GLU interleaving, "
+            f"but got glu_interleave_size={swiglu.glu_interleave_size}."
+        )
+
+
 def fuse_grouped_mlp_ops(
     ops,
     *,

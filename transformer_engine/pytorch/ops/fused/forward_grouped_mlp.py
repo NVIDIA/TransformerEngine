@@ -28,6 +28,7 @@ from .._common import (
     is_quantized_tensor,
     make_grouped_tensor_from_buffers,
     maybe_dequantize,
+    validate_grouped_mlp_dims,
 )
 
 
@@ -133,32 +134,10 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         fc2: GroupedLinear,
     ) -> None:
         super().__init__((fc1, swiglu, fc2))
-        # Check for unsupported configurations
         if not self.is_supported():
             self.grouped_gemm_glu_kernel()  # Try triggering import error
             raise RuntimeError(f"{self.__class__.__name__} is not supported on this system.")
-        if fc1.in_features % 256 != 0 or fc1.out_features % 256 != 0:
-            raise ValueError(
-                f"Unsupported dims for FC1 (num_groups={fc1.num_groups}, "
-                f"in_features={fc1.in_features}, out_features={fc1.out_features})."
-            )
-        if fc2.in_features % 256 != 0 or fc2.out_features % 256 != 0:
-            raise ValueError(
-                f"Unsupported dims for FC2 (num_groups={fc2.num_groups}, "
-                f"in_features={fc2.in_features}, out_features={fc2.out_features})."
-            )
-        if fc1.out_features != 2 * fc2.in_features or fc1.num_groups != fc2.num_groups:
-            raise ValueError(
-                f"FC1 (num_groups={fc1.num_groups}, in_features={fc1.in_features}, "
-                f"out_features={fc1.out_features}) "
-                f"and FC2 (num_groups={fc2.num_groups}, in_features={fc2.in_features}, "
-                f"out_features={fc2.out_features}) do not match."
-            )
-        if swiglu.glu_interleave_size != 32:
-            raise ValueError(
-                "Fused kernel requires 32-wide GLU interleaving, "
-                f"but got glu_interleave_size={swiglu.glu_interleave_size}."
-            )
+        validate_grouped_mlp_dims(fc1, swiglu, fc2)
 
     def fuser_forward(
         self,
