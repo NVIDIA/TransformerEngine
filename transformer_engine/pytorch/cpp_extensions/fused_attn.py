@@ -365,8 +365,8 @@ def fused_attn_fwd(
 
         if qkv_format == "thd":
             if max_tensor.ndim == 4:
-                # For THD on older cuDNN runtimes or THD on sm120, stats can be [b, h, sq, 1] with padded
-                # sequence positions. Exclude those padded positions when computing max_logit.
+                # For THD on cuDNN <= 9.6 or THD on sm120, Max tensor can be [b, h, sq, 1]
+                # with padded sequence positions. Exclude those padded positions when computing max_logit.
                 seqlens_q = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).to(device=max_tensor.device)
                 sq_idx = torch.arange(max_tensor.shape[2], device=max_tensor.device).view(
                     1, 1, -1, 1
@@ -375,8 +375,9 @@ def fused_attn_fwd(
                 max_tensor = max_tensor.masked_fill(~valid, float("-inf"))
             elif max_tensor.ndim == 3:
                 if cu_seqlens_q_padded is not None:
-                    # For THD on newer cuDNN runtimes (non-sm120), Max is [tq, h, 1] with
-                    # padded positions containing junk. Mask them out with -inf.
+                    # For THD + pad_between_seqs=True + non-sm120 + cuDNN>9.6, Max tensor is [tq, h, 1]
+                    # and padding positions could be uninitialized. Exclude those padded positions when
+                    # computing max_logit.
                     actual_seqlens = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).to(
                         device=max_tensor.device
                     )
