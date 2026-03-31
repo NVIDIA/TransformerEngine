@@ -71,7 +71,7 @@ def _compute_grad_params(
     # Allocate grad buffers, determine accumulate flag
     accumulate_into_main_grad = False
     grouped_wgrad = None
-    if fc_op.single_grouped_parameter:
+    if fc_op.single_grouped_weight:
         w_list = [None]
         if ctx.weight_requires_grad:
             weight_param = fc_op.weight
@@ -143,7 +143,7 @@ def _compute_grad_params(
             gemm_fn(grouped_x, grouped_dy, wgrad_output)
 
         # Extract results, mark accumulated if needed
-        if fc_op.single_grouped_parameter:
+        if fc_op.single_grouped_weight:
             packed_wgrad = None
             if not delay_wgrad:
                 packed_wgrad = grouped_wgrad.rowwise_data.view(num_groups, *weight_shape)
@@ -177,7 +177,7 @@ def _compute_grad_params(
         return w_list + [bias_grad_packed]
 
     bias_list = bias_grads if bias_grads is not None else [None] * num_groups
-    if fc_op.single_grouped_parameter:
+    if fc_op.single_grouped_weight:
         return bias_list + w_list
     return w_list + bias_list
 
@@ -259,7 +259,7 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         fc1_weight_shape = (fc1_op.out_features, fc1_op.in_features)
         fc2_weight_shape = (fc2_op.out_features, fc2_op.in_features)
         num_groups = fc1_op.num_groups
-        fc1_weight_param = fc1_op.weight if fc1_op.single_grouped_parameter else fc1_op.weight0
+        fc1_weight_param = fc1_op.weight if fc1_op.single_grouped_weight else fc1_op.weight0
         device = fc1_weight_param.device
         dtype = fc1_ctx.dtype
 
@@ -271,7 +271,7 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
             saved_tensors[2:],
         )
 
-        if fc1_op.single_grouped_parameter:
+        if fc1_op.single_grouped_weight:
             grouped_fc1_weight, saved_tensors = saved_tensors[0], saved_tensors[1:]
         else:
             grouped_fc1_weight, saved_tensors = (
@@ -296,7 +296,7 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         # Saved tensors from FC2 forward
         saved_tensors = fc2_ctx.saved_tensors
         _, saved_tensors = saved_tensors[0], saved_tensors[1:]  # Assume same split sizes as FC1
-        if fc2_op.single_grouped_parameter:
+        if fc2_op.single_grouped_weight:
             grouped_fc2_weight, saved_tensors = saved_tensors[0], saved_tensors[1:]
         else:
             grouped_fc2_weight, saved_tensors = (
@@ -322,11 +322,11 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         split_points = split_points.to(dtype=torch.int, device=device)
 
         fc2_weight_for_gemm = grouped_fc2_weight
-        if fc2_op.single_grouped_parameter:
+        if fc2_op.single_grouped_weight:
             fc2_weight_for_gemm = grouped_fc2_weight.copy()
             tex.swizzle_grouped_scales(fc2_weight_for_gemm, rowwise=False, columnwise=True)
         fc1_weight_for_gemm = grouped_fc1_weight
-        if fc1_op.single_grouped_parameter:
+        if fc1_op.single_grouped_weight:
             fc1_weight_for_gemm = grouped_fc1_weight.copy()
             tex.swizzle_grouped_scales(fc1_weight_for_gemm, rowwise=False, columnwise=True)
 
@@ -420,7 +420,7 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         norm_const_tensor = get_cached_ones_tensor(1, dtype, device)
         current_stream = cuda.CUstream(torch.cuda.current_stream().cuda_stream)
 
-        if fc2_op.single_grouped_parameter:
+        if fc2_op.single_grouped_weight:
             # Pack weight tensors for stacked kernel
             # Data actual shape: (num_groups, k, n)
             # Data logical shape: (n, k, num_groups)
@@ -568,7 +568,7 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         if fc1_ctx.input_requires_grad:
             in_shape = out_shape[:-1] + [fc1_weight_shape[1]]
 
-            if fc1_op.single_grouped_parameter:
+            if fc1_op.single_grouped_weight:
                 fc1_dgrad_a_data = fc2_dgrad_kernel_out["d_row_tensor"]
                 fc1_dgrad_a_scales = fc2_dgrad_kernel_out["sfd_row_tensor"]
 

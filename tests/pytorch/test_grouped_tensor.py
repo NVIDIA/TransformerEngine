@@ -519,7 +519,7 @@ class TestGroupedTensor:
             in_features=in_features,
             out_features=out_features,
             params_dtype=dtype,
-            single_grouped_parameter=False,
+            single_grouped_weight=False,
         ).cuda()
         with torch.no_grad():
             for i in range(num_gemms):
@@ -543,7 +543,7 @@ class TestGroupedTensor:
             in_features=in_features,
             out_features=out_features,
             params_dtype=dtype,
-            single_grouped_parameter=True,
+            single_grouped_weight=True,
             single_grouped_bias=True,
         ).cuda()
         load_result = dst.load_state_dict(src_state_dict, strict=True)
@@ -574,7 +574,7 @@ class TestGroupedTensor:
             in_features=in_features,
             out_features=out_features,
             params_dtype=dtype,
-            single_grouped_parameter=True,
+            single_grouped_weight=True,
             single_grouped_bias=True,
         ).cuda()
         with torch.no_grad():
@@ -599,7 +599,7 @@ class TestGroupedTensor:
             in_features=in_features,
             out_features=out_features,
             params_dtype=dtype,
-            single_grouped_parameter=False,
+            single_grouped_weight=False,
         ).cuda()
         load_result = dst.load_state_dict(src_state_dict, strict=True)
         assert len(load_result.missing_keys) == 0

@@ -3246,7 +3246,7 @@ class TestSequentialModules:
     @pytest.mark.parametrize("bias", (False, True))
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("quantization", _quantization_list)
-    @pytest.mark.parametrize("single_grouped_parameter", (False, True))
+    @pytest.mark.parametrize("single_grouped_weight", (False, True))
     @pytest.mark.parametrize("single_grouped_bias", (False, True))
     @pytest.mark.parametrize("accumulate_into_main_grad", (False, True))
     @pytest.mark.parametrize("glu_interleave_size", (None, 32))
@@ -3259,7 +3259,7 @@ class TestSequentialModules:
         hidden_size: int = 256,
         dtype: torch.dtype,
         quantization: Optional[str],
-        single_grouped_parameter: bool,
+        single_grouped_weight: bool,
         single_grouped_bias: bool,
         accumulate_into_main_grad: bool,
         device: torch.device = "cuda",
@@ -3281,8 +3281,8 @@ class TestSequentialModules:
         # Skip invalid configurations
         with_quantization = quantization is not None
         maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
-        if single_grouped_parameter and quantization != "mxfp8":
-            pytest.skip("single_grouped_parameter is only supported for MXFP8 quantization")
+        if single_grouped_weight and quantization != "mxfp8":
+            pytest.skip("single_grouped_weight is only supported for MXFP8 quantization")
         if single_grouped_bias and not bias:
             pytest.skip("single_grouped_bias requires bias=True")
         if with_quantization and dtype not in (torch.bfloat16, torch.float16):
@@ -3395,7 +3395,7 @@ class TestSequentialModules:
                 bias=bias,
                 device=device,
                 dtype=dtype,
-                single_grouped_parameter=single_grouped_parameter,
+                single_grouped_weight=single_grouped_weight,
                 single_grouped_bias=single_grouped_bias,
                 accumulate_into_main_grad=accumulate_into_main_grad,
                 delay_wgrad_compute=delay_wgrad_compute,
@@ -3407,7 +3407,7 @@ class TestSequentialModules:
                 bias=bias,
                 device=device,
                 dtype=dtype,
-                single_grouped_parameter=single_grouped_parameter,
+                single_grouped_weight=single_grouped_weight,
                 single_grouped_bias=single_grouped_bias,
                 accumulate_into_main_grad=accumulate_into_main_grad,
                 delay_wgrad_compute=delay_wgrad_compute,
@@ -3420,7 +3420,7 @@ class TestSequentialModules:
 
         # Copy weights
         with torch.no_grad():
-            if single_grouped_parameter:
+            if single_grouped_weight:
                 fc1_weights = fc1.weight.quantized_tensors
                 if fc1_weights is None:
                     fc1_weights = fc1.weight.split_into_quantized_tensors()
@@ -3428,7 +3428,7 @@ class TestSequentialModules:
                 if fc2_weights is None:
                     fc2_weights = fc2.weight.split_into_quantized_tensors()
             for group_idx in range(group_size):
-                if single_grouped_parameter:
+                if single_grouped_weight:
                     fc1_weights[group_idx].copy_(fc1_ws_test[group_idx])
                     fc2_weights[group_idx].copy_(fc2_ws_test[group_idx])
                 else:
@@ -3444,7 +3444,7 @@ class TestSequentialModules:
                         getattr(fc1, f"bias{group_idx}").copy_(fc1_bs_test[group_idx])
                         getattr(fc2, f"bias{group_idx}").copy_(fc2_bs_test[group_idx])
             if accumulate_into_main_grad:
-                if single_grouped_parameter:
+                if single_grouped_weight:
                     fc1.weight.main_grad = torch.full(
                         fc1.weight.size(),
                         0.5,
@@ -3531,7 +3531,7 @@ class TestSequentialModules:
                     assert_close_grads(
                         getattr(fc1, f"bias{group_idx}"), fc1_bs_ref[group_idx], **tols
                     )
-            if not single_grouped_parameter and not accumulate_into_main_grad:
+            if not single_grouped_weight and not accumulate_into_main_grad:
                 assert_close_grads(
                     getattr(fc2, f"weight{group_idx}"), fc2_ws_ref[group_idx], **tols
                 )
@@ -3541,7 +3541,7 @@ class TestSequentialModules:
         fc1_w_ref_grad = torch.stack([w.grad for w in fc1_ws_ref], dim=0)
         fc2_w_ref_grad = torch.stack([w.grad for w in fc2_ws_ref], dim=0)
         if accumulate_into_main_grad:
-            if single_grouped_parameter:
+            if single_grouped_weight:
                 fc1_w_test_grad = fc1.weight.main_grad.to(dtype=torch.float64, device="cpu") - 0.5
                 fc2_w_test_grad = fc2.weight.main_grad.to(dtype=torch.float64, device="cpu") - 0.5
             else:
@@ -3567,19 +3567,19 @@ class TestSequentialModules:
                 )
             assert_close(fc1_w_test_grad, fc1_w_ref_grad, **tols)
             assert_close(fc2_w_test_grad, fc2_w_ref_grad, **tols)
-        elif single_grouped_parameter:
+        elif single_grouped_weight:
             assert_close(fc1.weight.grad, fc1_w_ref_grad, **tols)
             assert_close(fc2.weight.grad, fc2_w_ref_grad, **tols)
 
     @pytest.mark.parametrize("dtype", _dtypes)
-    @pytest.mark.parametrize("single_grouped_parameter", (False, True))
+    @pytest.mark.parametrize("single_grouped_weight", (False, True))
     @pytest.mark.parametrize("accumulate_into_main_grad", (False, True))
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
     def test_grouped_mlp_cuda_graph_safe_mxfp8(
         self,
         *,
         dtype: torch.dtype,
-        single_grouped_parameter: bool,
+        single_grouped_weight: bool,
         accumulate_into_main_grad: bool,
         device: torch.device = "cuda",
         group_size: int = 4,
@@ -3608,7 +3608,7 @@ class TestSequentialModules:
                 bias=False,
                 device=device,
                 dtype=dtype,
-                single_grouped_parameter=single_grouped_parameter,
+                single_grouped_weight=single_grouped_weight,
                 accumulate_into_main_grad=accumulate_into_main_grad,
             )
             fc2 = te_ops.GroupedLinear(
@@ -3618,7 +3618,7 @@ class TestSequentialModules:
                 bias=False,
                 device=device,
                 dtype=dtype,
-                single_grouped_parameter=single_grouped_parameter,
+                single_grouped_weight=single_grouped_weight,
                 accumulate_into_main_grad=accumulate_into_main_grad,
             )
             module = te_ops.Sequential(
@@ -3631,7 +3631,7 @@ class TestSequentialModules:
             if not accumulate_into_main_grad:
                 return
             with torch.no_grad():
-                if single_grouped_parameter:
+                if single_grouped_weight:
                     if getattr(fc1.weight, "main_grad", None) is None:
                         fc1.weight.main_grad = torch.empty(
                             fc1.weight.size(),
@@ -3666,7 +3666,7 @@ class TestSequentialModules:
                         fc2_weight.main_grad.fill_(value)
 
         def _collect_main_grads() -> tuple[torch.Tensor, torch.Tensor]:
-            if single_grouped_parameter:
+            if single_grouped_weight:
                 fc1_main_grad = fc1.weight.main_grad.detach().clone()
                 fc2_main_grad = fc2.weight.main_grad.detach().clone()
             else:

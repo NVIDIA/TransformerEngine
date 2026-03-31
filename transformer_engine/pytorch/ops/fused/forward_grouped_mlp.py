@@ -160,8 +160,8 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         fc2_weight_shape = (fc2_op.out_features, fc2_op.in_features)
 
         num_groups = fc1_op.num_groups
-        fc1_weight_param = fc1_op.weight if fc1_op.single_grouped_parameter else fc1_op.weight0
-        fc2_weight_param = fc2_op.weight if fc2_op.single_grouped_parameter else fc2_op.weight0
+        fc1_weight_param = fc1_op.weight if fc1_op.single_grouped_weight else fc1_op.weight0
+        fc2_weight_param = fc2_op.weight if fc2_op.single_grouped_weight else fc2_op.weight0
         device = fc1_weight_param.device
         if torch.is_autocast_enabled():
             dtype = torch.get_autocast_dtype("cuda")
@@ -210,13 +210,13 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         scales = basic_op_extra_inputs[1][0]
 
         # Prepare FC1 grouped weight tensor for fused kernels.
-        #  - single_grouped_parameter=True: op.weight is already a GroupedTensor
-        #  - single_grouped_parameter=False: cute DSL kernel works with discrete weight tensors
+        #  - single_grouped_weight=True: op.weight is already a GroupedTensor
+        #  - single_grouped_weight=False: cute DSL kernel works with discrete weight tensors
         #   as long as host pointers for addresses are packed as contiguous device tensor.
-        if fc1_op.single_grouped_parameter:
+        if fc1_op.single_grouped_weight:
             if not isinstance(fc1_op.weight, GroupedTensor):
                 raise RuntimeError(
-                    "FC1 expected GroupedTensor weight with single_grouped_parameter=True."
+                    "FC1 expected GroupedTensor weight with single_grouped_weight=True."
                 )
             if fc1_op.weight.quantizer is not None:
                 fc1_weight_quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
@@ -245,10 +245,10 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             grouped_fc1_weight = quantized_fc1_weights
 
         # Prepare FC2 grouped weight tensor for fused kernels.
-        if fc2_op.single_grouped_parameter:
+        if fc2_op.single_grouped_weight:
             if not isinstance(fc2_op.weight, GroupedTensor):
                 raise RuntimeError(
-                    "FC2 expected GroupedTensor weight with single_grouped_parameter=True."
+                    "FC2 expected GroupedTensor weight with single_grouped_weight=True."
                 )
             if fc2_op.weight.quantizer is not None:
                 fc2_weight_quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
@@ -290,11 +290,11 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         # Clone into lightweight storage and swizzle scales in-place for GEMM.
         # Original grouped_fc*_weight must stay unmodified for save_for_backward.
         fc1_weight_for_gemm = grouped_fc1_weight
-        if fc1_op.single_grouped_parameter:
+        if fc1_op.single_grouped_weight:
             fc1_weight_for_gemm = grouped_fc1_weight.copy()
             tex.swizzle_grouped_scales(fc1_weight_for_gemm, rowwise=True, columnwise=False)
         fc2_weight_for_gemm = grouped_fc2_weight
-        if fc2_op.single_grouped_parameter:
+        if fc2_op.single_grouped_weight:
             fc2_weight_for_gemm = grouped_fc2_weight.copy()
             tex.swizzle_grouped_scales(fc2_weight_for_gemm, rowwise=True, columnwise=False)
 
@@ -336,7 +336,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         fc1_bias_packed = _pack_grouped_linear_bias_for_cudnn(fc1_op)
         fc2_bias_packed = _pack_grouped_linear_bias_for_cudnn(fc2_op)
 
-        if fc1_op.single_grouped_parameter:
+        if fc1_op.single_grouped_weight:
             # Pack weight tensors for stacked kernel
             # Data actual shape: (num_groups, n, k)
             # Data logical shape: (n, k, num_groups)
@@ -448,7 +448,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
 
         # FC2 GEMM
         fc2_out_shape = in_shape[:-1] + [fc2_weight_shape[0]]
-        if fc2_op.single_grouped_parameter:
+        if fc2_op.single_grouped_weight:
             fc2_a_data = fc1_kernel_out["d_tensor"]
             fc2_a_scales = fc1_kernel_out["sfd_row_tensor"]
 
@@ -538,7 +538,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             )
             # FC1
             fc1_weight_tensors = (
-                [grouped_fc1_weight] if fc1_op.single_grouped_parameter else grouped_fc1_weight
+                [grouped_fc1_weight] if fc1_op.single_grouped_weight else grouped_fc1_weight
             )
             fc1_ctx.save_for_backward(
                 split_sizes, split_points, *fc1_weight_tensors, *fc1_input_tensors
@@ -570,7 +570,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             else:
                 fc2_input_tensors = (None, None, None, None, None)
 
-            if fc2_op.single_grouped_parameter:
+            if fc2_op.single_grouped_weight:
                 fc2_ctx.save_for_backward(split_sizes, grouped_fc2_weight, *fc2_input_tensors)
             else:
                 fc2_ctx.save_for_backward(split_sizes, *grouped_fc2_weight, *fc2_input_tensors)

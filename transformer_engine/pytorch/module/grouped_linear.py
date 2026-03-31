@@ -594,7 +594,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                        cast tensor. In some scenarios, the input tensor is used by multiple modules,
                        and saving the original input tensor may reduce the memory usage.
                        Cannot work with FP8 DelayedScaling recipe.
-    single_grouped_parameter : bool, default = False
+    single_grouped_weight : bool, default = False
                        If set to ``True``, grouped weights are stored as a single grouped parameter
                        instead of one parameter per GEMM.
                        EXPERIMENTAL and subject to change.
@@ -632,7 +632,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         ub_name: Optional[str] = None,
         delay_wgrad_compute: bool = False,
         save_original_input: bool = False,
-        single_grouped_parameter: bool = False,
+        single_grouped_weight: bool = False,
         single_grouped_bias: bool = False,
         name: Optional[str] = None,
     ) -> None:
@@ -650,7 +650,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         self.ub_overlap_ag = ub_overlap_ag
         self.ub_name = ub_name
         self.save_original_input = save_original_input
-        self.single_grouped_parameter = single_grouped_parameter
+        self.single_grouped_weight = single_grouped_weight
         self.single_grouped_bias = single_grouped_bias
         if ub_overlap_rs or ub_overlap_ag:
             raise ValueError("GroupedLinear doesn't support Userbuffer overlap.")
@@ -801,7 +801,7 @@ class GroupedLinear(TransformerEngineBaseModule):
             isinstance(grouped_weights, torch.Tensor)
             and (weight_quantizers[0] is None or not weight_quantizers[0].internal)
         ):
-            raise RuntimeError("Found internal quantizer with `single_grouped_parameter=True`.")
+            raise RuntimeError("Found internal quantizer with `single_grouped_weight=True`.")
         self.register_parameter(
             "weight",
             torch.nn.Parameter(grouped_weights),
@@ -835,7 +835,7 @@ class GroupedLinear(TransformerEngineBaseModule):
     def reset_parameters(self, defer_init=False):
         super().reset_parameters(defer_init=defer_init)
         # Grouped tensor weights / biases are opt-in features.
-        if self.single_grouped_parameter:
+        if self.single_grouped_weight:
             self.make_grouped_weights(defer_init=defer_init)
         elif self.single_grouped_bias:
             self._make_grouped_biases()
@@ -890,8 +890,8 @@ class GroupedLinear(TransformerEngineBaseModule):
         has_grouped_weight = grouped_weight_key in state_dict
         has_per_gemm_weights = all(key in state_dict for key in per_gemm_weight_keys)
 
-        if self.single_grouped_parameter:
-            # Backward compatibility: checkpoints saved without single_grouped_parameter
+        if self.single_grouped_weight:
+            # Backward compatibility: checkpoints saved without single_grouped_weight
             # store one weight tensor per GEMM (weight0..weightN). Convert them into a
             # single stacked grouped weight expected by this module configuration.
             if not has_grouped_weight and has_per_gemm_weights:
@@ -906,7 +906,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                 for key in per_gemm_weight_keys:
                     state_dict.pop(key, None)
         else:
-            # Forward compatibility: checkpoints saved with single_grouped_parameter
+            # Forward compatibility: checkpoints saved with single_grouped_weight
             # store one grouped `weight`. Convert it back to weight0..weightN.
             if not has_per_gemm_weights and has_grouped_weight:
                 grouped_weight = state_dict.pop(grouped_weight_key)

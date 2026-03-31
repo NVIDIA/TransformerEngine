@@ -535,7 +535,7 @@ def test_sanity_grouped_linear(
             ffn_hidden_size,
             bias=use_bias,
             params_dtype=dtype,
-            single_grouped_parameter=single_param,
+            single_grouped_weight=single_param,
             single_grouped_bias=single_param,
         ).cuda()
 
