@@ -70,7 +70,7 @@ __device__ __forceinline__ void ComputeKernel(uint32_t b_frag_i[4], uint32_t b_f
 
   if (kReturnIdentityAmax) {
     ldmatrix_x4_m8n8_shared_b16<false>(a_frag[0], a_frag[1], a_frag[2], a_frag[3],
-                                         reinterpret_cast<uint4*>(in_sh_ptr) + swizzle_idx);
+                                       reinterpret_cast<uint4*>(in_sh_ptr) + swizzle_idx);
 
     mma_m16_n16_k16_b16_b16_b16_noacc<kReturnIdentityAmax>(
         a_frag[0], a_frag[1], a_frag[2], a_frag[3], b_frag_i[0], b_frag_i[1], b_frag_i[2],
