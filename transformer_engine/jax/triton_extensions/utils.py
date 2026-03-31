@@ -43,8 +43,10 @@ import jax
 import jax.numpy as jnp
 
 from ..version_utils import (
+    TRITON_AUTOTUNED_INPUT_OUTPUT_ALIAS_MIN_JAX_VERSION,
     TRITON_EXTENSION_MIN_JAX_VERSION,
     is_triton_extension_supported,
+    jax_version_meet_requirement,
 )
 
 
@@ -476,15 +478,24 @@ def triton_call_lowering(
 
         input_output_aliases_with_sizes = ()
         if input_output_aliases:
-            num_inputs = len(ctx.avals_in)
-            aliases = []
-            for input_idx, output_idx in input_output_aliases.items():
-                aval = ctx.avals_in[input_idx]
-                size_bytes = aval.size * jnp.dtype(aval.dtype).itemsize
-                # AutotunedKernelCall expects buffer indices (inputs + outputs).
-                buffer_output_idx = num_inputs + output_idx
-                aliases.append((input_idx, buffer_output_idx, size_bytes))
-            input_output_aliases_with_sizes = tuple(aliases)
+            if jax_version_meet_requirement(TRITON_AUTOTUNED_INPUT_OUTPUT_ALIAS_MIN_JAX_VERSION):
+                num_inputs = len(ctx.avals_in)
+                aliases = []
+                for input_idx, output_idx in input_output_aliases.items():
+                    aval = ctx.avals_in[input_idx]
+                    size_bytes = aval.size * jnp.dtype(aval.dtype).itemsize
+                    # AutotunedKernelCall expects buffer indices (inputs + outputs).
+                    buffer_output_idx = num_inputs + output_idx
+                    aliases.append((input_idx, buffer_output_idx, size_bytes))
+                input_output_aliases_with_sizes = tuple(aliases)
+            else:
+                warnings.warn(
+                    f"JAX >= {TRITON_AUTOTUNED_INPUT_OUTPUT_ALIAS_MIN_JAX_VERSION} is required "
+                    "to safely pass input_output_aliases to TritonAutotunedKernelCall. "
+                    "Passing empty aliases as a workaround (jax-ml/jax#35218).",
+                    UserWarning,
+                    stacklevel=2,
+                )
 
         kernel_call = gpu_triton.TritonAutotunedKernelCall(
             f"{actual_kernel_fn.__name__}_autotuned",
