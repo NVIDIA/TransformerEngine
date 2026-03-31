@@ -364,7 +364,7 @@ __global__ void GraphSafeGroupHadamardAmaxTmaKernel(
               had_frag_i, had_frag_t,
               in_sh_ptr + in_row_offset +
                   (compute_stage_x * kHadamardDimension * (THREADS_PER_CHUNK / kThreadsPerWarp)),
-                swizzle_idx, local_pre_rht_amax_reg, local_amax_reg, local_amax_t_reg);
+              swizzle_idx, local_pre_rht_amax_reg, local_amax_reg, local_amax_t_reg);
         }
 
         // Ensure all threads have finished their computation before new data over-writes the shared
