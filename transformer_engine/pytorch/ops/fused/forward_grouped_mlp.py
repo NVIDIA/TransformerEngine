@@ -24,7 +24,6 @@ from ..basic import GroupedLinear, ScaledSwiGLU
 from ..fuser import register_forward_fusion
 from ..op import FusedOperation, FusibleOperation, OperationContext
 from .._common import (
-    clone_grouped_tensor_storage,
     fuse_grouped_mlp_ops,
     is_quantized_tensor,
     make_grouped_tensor_from_buffers,
@@ -313,11 +312,11 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         # Original grouped_fc*_weight must stay unmodified for save_for_backward.
         fc1_weight_for_gemm = grouped_fc1_weight
         if fc1_op.single_grouped_parameter:
-            fc1_weight_for_gemm = clone_grouped_tensor_storage(grouped_fc1_weight)
+            fc1_weight_for_gemm = grouped_fc1_weight.copy()
             tex.swizzle_grouped_scales(fc1_weight_for_gemm, rowwise=True, columnwise=False)
         fc2_weight_for_gemm = grouped_fc2_weight
         if fc2_op.single_grouped_parameter:
-            fc2_weight_for_gemm = clone_grouped_tensor_storage(grouped_fc2_weight)
+            fc2_weight_for_gemm = grouped_fc2_weight.copy()
             tex.swizzle_grouped_scales(fc2_weight_for_gemm, rowwise=True, columnwise=False)
 
         # Group-quantize input tensor and convert dtypes if needed

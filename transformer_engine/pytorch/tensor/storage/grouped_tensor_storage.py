@@ -466,6 +466,35 @@ class GroupedTensorStorage:
             requires_grad=False,
         )
 
+    def copy(self) -> "GroupedTensorStorage":
+        """Create a shallow copy that shares all data buffers with *self*.
+        No tensor data is copied; the returned object references the same
+        underlying storage for every buffer (data, scales, offsets, etc.).
+        This is useful when you need to mutate metadata (e.g. swizzle
+        scales in-place) without affecting the original object.
+        """
+        return GroupedTensorStorage(
+            shape=self.logical_shape,
+            dtype=self.fake_dtype,
+            num_tensors=self.num_tensors,
+            shapes=self.tensor_shapes,
+            quantizer=self.quantizer,
+            data=self.rowwise_data,
+            columnwise_data=self.columnwise_data,
+            scale_inv=self.scale_inv,
+            columnwise_scale_inv=self.columnwise_scale_inv,
+            amax=self.amax,
+            columnwise_amax=self.columnwise_amax,
+            scale=self.scale,
+            first_dims=self.first_dims,
+            last_dims=self.last_dims,
+            tensor_offsets=self.tensor_offsets,
+            offsets=self.offsets,
+            scale_inv_offsets=self.scale_inv_offsets,
+            columnwise_scale_inv_offsets=self.columnwise_scale_inv_offsets,
+            with_gemm_swizzled_scales=self._with_gemm_swizzled_scales,
+        )
+
     @staticmethod
     def make_tensor_offsets(first_dims: torch.Tensor, logical_last_dim: int) -> torch.Tensor:
         """Calculate GPU offsets from first dim splits."""

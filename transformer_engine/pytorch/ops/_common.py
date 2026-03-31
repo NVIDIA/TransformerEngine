@@ -21,36 +21,6 @@ from ..tensor.grouped_tensor import GroupedTensor
 from ..tensor.storage.grouped_tensor_storage import GroupedTensorStorage
 
 
-def clone_grouped_tensor_storage(src: GroupedTensorStorage) -> GroupedTensorStorage:
-    """Create a lightweight :class:`GroupedTensorStorage` that shares every
-    data buffer with *src*. src can be a GroupedTensor or GroupedTensorStorage object.
-
-    The returned object is a plain Python object (no
-    ``torch.Tensor._make_wrapper_subclass`` overhead)
-    """
-    return GroupedTensorStorage(
-        shape=src.logical_shape,
-        dtype=src.fake_dtype,
-        num_tensors=src.num_tensors,
-        shapes=src.tensor_shapes,
-        quantizer=src.quantizer,
-        data=src.rowwise_data,
-        columnwise_data=src.columnwise_data,
-        scale_inv=src.scale_inv,
-        columnwise_scale_inv=src.columnwise_scale_inv,
-        amax=src.amax,
-        columnwise_amax=src.columnwise_amax,
-        scale=src.scale,
-        first_dims=src.first_dims,
-        last_dims=src.last_dims,
-        tensor_offsets=src.tensor_offsets,
-        offsets=src.offsets,
-        scale_inv_offsets=src.scale_inv_offsets,
-        columnwise_scale_inv_offsets=src.columnwise_scale_inv_offsets,
-        with_gemm_swizzled_scales=src._with_gemm_swizzled_scales,
-    )
-
-
 def is_quantized_tensor(tensor: torch.Tensor | QuantizedTensorStorage) -> bool:
     """Check if tensor is a quantized tensor"""
     return isinstance(tensor, QuantizedTensorStorage)
