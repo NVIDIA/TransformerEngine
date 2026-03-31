@@ -96,9 +96,7 @@ def _compute_grad_params(
                             f" {tuple(main_grad.shape)} and stride"
                             f" {tuple(main_grad.stride())}"
                         ) from e
-                accumulate_into_main_grad = not getattr(
-                    weight_param, "overwrite_main_grad", False
-                )
+                accumulate_into_main_grad = not getattr(weight_param, "overwrite_main_grad", False)
                 if accumulate_into_main_grad:
                     grouped_wgrad = GroupedTensor.make_grouped_tensor_from_rowwise_data(
                         num_tensors=num_groups,
@@ -125,21 +123,15 @@ def _compute_grad_params(
                     if hasattr(wp, "__fsdp_param__"):
                         wp.main_grad = wp.get_main_grad()
                     w_list[idx] = wp.main_grad
-                accumulate_into_main_grad = not getattr(
-                    fc_op.weight0, "overwrite_main_grad", False
-                )
+                accumulate_into_main_grad = not getattr(fc_op.weight0, "overwrite_main_grad", False)
             else:
                 for idx in range(num_groups):
-                    w_list[idx] = torch.empty(
-                        weight_shape, dtype=dtype, device=device
-                    )
+                    w_list[idx] = torch.empty(weight_shape, dtype=dtype, device=device)
             wgrad_output = w_list
 
     if ctx.weight_requires_grad:
         # Launch or defer the GEMM
-        delay_wgrad = (
-            fc_op.wgrad_store is not None and fc_op.wgrad_store.delay_wgrad_compute()
-        )
+        delay_wgrad = fc_op.wgrad_store is not None and fc_op.wgrad_store.delay_wgrad_compute()
         gemm_fn = functools.partial(
             general_grouped_gemm_for_grouped_tensor,
             layout="NT",
@@ -155,9 +147,7 @@ def _compute_grad_params(
             packed_wgrad = None
             if not delay_wgrad:
                 packed_wgrad = grouped_wgrad.rowwise_data.view(num_groups, *weight_shape)
-            if accumulate_into_main_grad and hasattr(
-                weight_param, "grad_added_to_main_grad"
-            ):
+            if accumulate_into_main_grad and hasattr(weight_param, "grad_added_to_main_grad"):
                 weight_param.grad_added_to_main_grad = True
                 packed_wgrad = get_dummy_wgrad(
                     list(weight_param.size()),
@@ -167,10 +157,7 @@ def _compute_grad_params(
             w_list = [packed_wgrad]
         else:
             if delay_wgrad:
-                w_list = (
-                    list(w_list) if accumulate_into_main_grad
-                    else [None] * num_groups
-                )
+                w_list = list(w_list) if accumulate_into_main_grad else [None] * num_groups
             if accumulate_into_main_grad:
                 for idx in range(num_groups):
                     wp = getattr(fc_op, f"weight{idx}")
@@ -550,10 +537,16 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
 
         # FC2 wgrad GEMM
         fc2_grad_params = _compute_grad_params(
-            fc_op=fc2_op, ctx=fc2_ctx, num_groups=num_groups,
-            weight_shape=fc2_weight_shape, grouped_x=grouped_fc2_x,
-            grouped_dy=grouped_fc2_dy, dtype=dtype, device=device,
-            bias_grads=fc2_bias_grads, bias_grad_packed=fc2_bias_grad_packed,
+            fc_op=fc2_op,
+            ctx=fc2_ctx,
+            num_groups=num_groups,
+            weight_shape=fc2_weight_shape,
+            grouped_x=grouped_fc2_x,
+            grouped_dy=grouped_fc2_dy,
+            dtype=dtype,
+            device=device,
+            bias_grads=fc2_bias_grads,
+            bias_grad_packed=fc2_bias_grad_packed,
             label="FC2",
         )
 
@@ -656,10 +649,16 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
 
         # FC1 wgrad GEMM
         fc1_grad_params = _compute_grad_params(
-            fc_op=fc1_op, ctx=fc1_ctx, num_groups=num_groups,
-            weight_shape=fc1_weight_shape, grouped_x=grouped_fc1_x,
-            grouped_dy=grouped_fc1_dy, dtype=dtype, device=device,
-            bias_grads=fc1_bias_grads, bias_grad_packed=fc1_bias_grad_packed,
+            fc_op=fc1_op,
+            ctx=fc1_ctx,
+            num_groups=num_groups,
+            weight_shape=fc1_weight_shape,
+            grouped_x=grouped_fc1_x,
+            grouped_dy=grouped_fc1_dy,
+            dtype=dtype,
+            device=device,
+            bias_grads=fc1_bias_grads,
+            bias_grad_packed=fc1_bias_grad_packed,
             label="FC1",
         )
 
