@@ -604,7 +604,7 @@ void JAXX_GroupedTensorWrapper::set_with_gemm_swizzled_scales(bool val) {
 }
 
 void JAXX_GroupedTensorWrapper::replace_scale_inv(bool use_colwise, uint8_t *sinv_ptr,
-                                                   NVTEDType sinv_dtype, NVTEShape sinv_shape) {
+                                                  NVTEDType sinv_dtype, NVTEShape sinv_shape) {
   if (use_colwise) {
     m_colwise_scale_inv_tensor = NVTEBasicTensor{sinv_ptr, sinv_dtype, sinv_shape};
     nvte_set_grouped_tensor_param(m_grouped_tensor, kNVTEGroupedColumnwiseScaleInv,
@@ -875,9 +875,9 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
   NVTE_CHECK(out_dims.size() > 0, "output buffer must have at least 1 dimension");
   size_t out_left_size = product(out_dims, 0, out_dims.size() - 1);
   size_t out_right_size = static_cast<size_t>(out_dims[out_dims.size() - 1]);
-  auto out_tensor = make_grouped_tensor(*output, out_first_dims, out_last_dims, int64_base,
-                                        int64_capacity, int64_offset, num_gemms, stream,
-                                        out_left_size, out_right_size);
+  auto out_tensor =
+      make_grouped_tensor(*output, out_first_dims, out_last_dims, int64_base, int64_capacity,
+                          int64_offset, num_gemms, stream, out_left_size, out_right_size);
 
   nvte_grouped_gemm(rhs_tensor, rhs_is_trans, lhs_tensor, lhs_is_trans, nullptr, out_tensor,
                     alpha_tensor.data(), beta_tensor.data(), workspace_setup.data(),

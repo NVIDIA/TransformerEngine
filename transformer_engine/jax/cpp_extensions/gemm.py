@@ -381,7 +381,6 @@ def swizzled_scale(scale_inv, flatten_axis, is_colwise):
     return swizzled.reshape(original_shape)
 
 
-
 def get_lhs_axis_boundary(lhs_cdims, is_transposed):
     """Get the axis boundary for the LHS operand."""
     return max(lhs_cdims) + 1 if is_transposed else min(lhs_cdims)
@@ -2092,10 +2091,10 @@ def _can_use_v2_grouped_gemm(
                 if enforce_v2_gmm:
                     raise RuntimeError(
                         "The TE V2 grouped GEMM for MXFP8 requires the product of the first"
-                        f" dimensions (up to axis_boundary) of LHS to be divisible by 128, but got"
+                        " dimensions (up to axis_boundary) of LHS to be divisible by 128, but got"
                         f" {lhs_first_dim} with lhs_shape={lhs_shape} and"
-                        f" lhs_axis_boundary={lhs_axis_boundary}, and NVTE_JAX_ENFORCE_V2_GROUPED_GEMM"
-                        " is enabled."
+                        f" lhs_axis_boundary={lhs_axis_boundary}, and"
+                        " NVTE_JAX_ENFORCE_V2_GROUPED_GEMM is enabled."
                     )
                 return False
         if rhs_shape is not None and rhs_axis_boundary is not None:
@@ -2104,10 +2103,10 @@ def _can_use_v2_grouped_gemm(
                 if enforce_v2_gmm:
                     raise RuntimeError(
                         "The TE V2 grouped GEMM for MXFP8 requires the product of the first"
-                        f" dimensions (up to axis_boundary) of RHS to be divisible by 128, but got"
+                        " dimensions (up to axis_boundary) of RHS to be divisible by 128, but got"
                         f" {rhs_first_dim} with rhs_shape={rhs_shape} and"
-                        f" rhs_axis_boundary={rhs_axis_boundary}, and NVTE_JAX_ENFORCE_V2_GROUPED_GEMM"
-                        " is enabled."
+                        f" rhs_axis_boundary={rhs_axis_boundary}, and"
+                        " NVTE_JAX_ENFORCE_V2_GROUPED_GEMM is enabled."
                     )
                 return False
         # V2 MXFP8 also requires that the "last" dimension (after axis_boundary) of both
@@ -2124,10 +2123,10 @@ def _can_use_v2_grouped_gemm(
                 if enforce_v2_gmm:
                     raise RuntimeError(
                         "The TE V2 grouped GEMM for MXFP8 requires the product of the last"
-                        f" dimensions (after axis_boundary) of LHS to be divisible by 128, but got"
+                        " dimensions (after axis_boundary) of LHS to be divisible by 128, but got"
                         f" {lhs_last_dim} with lhs_shape={lhs_shape} and"
-                        f" lhs_axis_boundary={lhs_axis_boundary}, and NVTE_JAX_ENFORCE_V2_GROUPED_GEMM"
-                        " is enabled."
+                        f" lhs_axis_boundary={lhs_axis_boundary}, and"
+                        " NVTE_JAX_ENFORCE_V2_GROUPED_GEMM is enabled."
                     )
                 return False
         if rhs_shape is not None and rhs_axis_boundary is not None:
@@ -2136,22 +2135,21 @@ def _can_use_v2_grouped_gemm(
                 if enforce_v2_gmm:
                     raise RuntimeError(
                         "The TE V2 grouped GEMM for MXFP8 requires the product of the last"
-                        f" dimensions (after axis_boundary) of RHS to be divisible by 128, but got"
+                        " dimensions (after axis_boundary) of RHS to be divisible by 128, but got"
                         f" {rhs_last_dim} with rhs_shape={rhs_shape} and"
-                        f" rhs_axis_boundary={rhs_axis_boundary}, and NVTE_JAX_ENFORCE_V2_GROUPED_GEMM"
-                        " is enabled."
+                        f" rhs_axis_boundary={rhs_axis_boundary}, and"
+                        " NVTE_JAX_ENFORCE_V2_GROUPED_GEMM is enabled."
                     )
                 return False
         return True
 
     if enforce_v2_gmm:
         raise RuntimeError(
-            "The TE V2 grouped GEMM currently only supports non-quantized BF16 and MXFP8 with 1D block"
-            " scaling, but NVTE_JAX_ENFORCE_V2_GROUPED_GEMM is enabled and the input parameters do not meet"
-            " these requirements (scaling_mode="
-            f" {scaling_mode}, dtype={dtype}, has_bias={has_bias}, lhs_shape={lhs_shape},"
-            f" rhs_shape={rhs_shape}, lhs_axis_boundary={lhs_axis_boundary},"
-            f" rhs_axis_boundary={rhs_axis_boundary})."
+            "The TE V2 grouped GEMM currently only supports non-quantized BF16 and MXFP8 with 1D"
+            " block scaling, but NVTE_JAX_ENFORCE_V2_GROUPED_GEMM is enabled and the input"
+            f" parameters do not meet these requirements (scaling_mode= {scaling_mode},"
+            f" dtype={dtype}, has_bias={has_bias}, lhs_shape={lhs_shape}, rhs_shape={rhs_shape},"
+            f" lhs_axis_boundary={lhs_axis_boundary}, rhs_axis_boundary={rhs_axis_boundary})."
         )
     return False
 

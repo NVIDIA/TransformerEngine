@@ -1137,9 +1137,9 @@ class TestGroupedQuantize:
             x, quantizer=quantizer, group_sizes=group_sizes, flatten_axis=-1
         )
         assert isinstance(scaled_tensor, GroupedScaledTensor1x)
-        assert not scaled_tensor.pre_swizzled, (
-            "V1 grouped quantize (non-128-aligned K) must produce pre_swizzled=False"
-        )
+        assert (
+            not scaled_tensor.pre_swizzled
+        ), "V1 grouped quantize (non-128-aligned K) must produce pre_swizzled=False"
 
     @pytest.mark.skipif(not is_v2_grouped_gemm_supported, reason=v2_grouped_gemm_unsupported_reason)
     @pytest.mark.skipif(not is_mxfp8_supported, reason=mxfp8_unsupported_reason)
@@ -1165,9 +1165,9 @@ class TestGroupedQuantize:
             x, quantizer=quantizer, group_sizes=group_sizes, flatten_axis=-1
         )
         assert isinstance(scaled_tensor, GroupedScaledTensor1x)
-        assert scaled_tensor.pre_swizzled, (
-            "V2 grouped quantize (SM100+, 128-aligned M and K) must produce pre_swizzled=True"
-        )
+        assert (
+            scaled_tensor.pre_swizzled
+        ), "V2 grouped quantize (SM100+, 128-aligned M and K) must produce pre_swizzled=True"
 
 
 @pytest_parametrize_wrapper("in_dtype", QUANTIZATION_INPUT_DTYPE)
@@ -2302,9 +2302,7 @@ GROUPED_DENSE_BF16_INPUT_SHAPES = [
 ]
 
 
-@pytest.mark.skipif(
-    not is_v2_grouped_gemm_supported, reason=v2_grouped_gemm_unsupported_reason
-)
+@pytest.mark.skipif(not is_v2_grouped_gemm_supported, reason=v2_grouped_gemm_unsupported_reason)
 class TestGroupedDenseBF16V2GEMM:
     """Tests that explicitly verify V2 BF16 grouped GEMM on SM100+ hardware.
 
@@ -2358,9 +2356,7 @@ class TestGroupedDenseBF16V2GEMM:
             axis=0,
         )
 
-        prim_out = jax.jit(
-            tex.grouped_gemm, static_argnames=("contracting_dims",)
-        )(
+        prim_out = jax.jit(tex.grouped_gemm, static_argnames=("contracting_dims",))(
             lhs_tensor,
             rhs_tensor,
             contracting_dims=((1,), (1,)),
