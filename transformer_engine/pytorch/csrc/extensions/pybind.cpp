@@ -388,10 +388,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Fused Multi-tensor unpadding", py::call_guard<py::gil_scoped_release>());
   m.def("swizzle_scales_for_gemm_", &transformer_engine::pytorch::inplace_swizzle_scale_for_gemm,
         "Convert tensor block scales into GEMM swizzled format");
-  m.def("swizzle_grouped_scales",
-        &transformer_engine::pytorch::swizzle_grouped_scales,
-        "In-place swizzle of grouped tensor scales for GEMM",
-        py::arg("tensor"), py::arg("rowwise"), py::arg("columnwise"));
+  m.def("swizzle_grouped_scales", &transformer_engine::pytorch::swizzle_grouped_scales,
+        "In-place swizzle of grouped tensor scales for GEMM", py::arg("tensor"), py::arg("rowwise"),
+        py::arg("columnwise"));
 
   // attention kernels
   m.def("fa_prepare_fwd", &transformer_engine::pytorch::fa_prepare_fwd,

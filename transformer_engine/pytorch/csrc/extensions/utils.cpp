@@ -40,8 +40,7 @@ std::vector<at::Tensor> convert_host_pointers_to_tensor(
     const int64_t count = static_cast<int64_t>(tensor_list.size());
     std::vector<uint64_t> host_ptrs(count);
     for (int64_t i = 0; i < count; ++i) {
-      host_ptrs[i] =
-          reinterpret_cast<uintptr_t>(tensor_list[static_cast<size_t>(i)].data_ptr());
+      host_ptrs[i] = reinterpret_cast<uintptr_t>(tensor_list[static_cast<size_t>(i)].data_ptr());
     }
     outputs.push_back(collect_pointers_in_device_tensor(host_ptrs, device, stream));
   }
