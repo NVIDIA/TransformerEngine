@@ -377,17 +377,19 @@ def fused_attn_fwd(
                 if cu_seqlens_q_padded is not None:
                     # For THD on newer cuDNN runtimes (non-sm120), Max is [tq, h, 1] with
                     # padded positions containing junk. Mask them out with -inf.
-                    actual_seqlens = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).to(device=max_tensor.device)
-                    padded_seqlens = (cu_seqlens_q_padded[1:] - cu_seqlens_q_padded[:-1]).to(device=max_tensor.device)
+                    actual_seqlens = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).to(
+                        device=max_tensor.device
+                    )
+                    padded_seqlens = (cu_seqlens_q_padded[1:] - cu_seqlens_q_padded[:-1]).to(
+                        device=max_tensor.device
+                    )
                     pad_lens = (padded_seqlens - actual_seqlens).to(device=max_tensor.device)
                     b = pad_lens.shape[0]
 
                     # Stack [actual, pad] per batch into counts: e.g. [3,1, 3,1, 2,2, 7,1]
                     counts = torch.stack([actual_seqlens, pad_lens], dim=1).flatten()
                     # Tile [T, F] per batch: [T,F, T,F, T,F, T,F]
-                    values = torch.tensor(
-                        [True, False], device=max_tensor.device
-                    ).repeat(b)
+                    values = torch.tensor([True, False], device=max_tensor.device).repeat(b)
                     # Expand: T×3, F×1, T×3, F×1, T×2, F×2, T×7, F×1 → TTTF|TTTF|TTFF|TTTTTTTF
                     valid = torch.repeat_interleave(values, counts)
                     # Finally, replace invalid (F) positions with -inf
