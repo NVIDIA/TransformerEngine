@@ -2881,7 +2881,8 @@ void fused_attn_fp8_bwd(
   void* devPtrM = input_M->data.dptr;
   void* devPtrZInv = (input_ZInv != nullptr) ? input_ZInv->data.dptr : nullptr;
 
-  void *devPtrScaleS = nullptr, *devPtrDescaleS = nullptr, *devPtrAmaxdP = nullptr, *devPtrScaledP = nullptr, *devPtrDescaledP = nullptr;
+  void *devPtrScaleS = nullptr, *devPtrDescaleS = nullptr, *devPtrAmaxdP = nullptr,
+       *devPtrScaledP = nullptr, *devPtrDescaledP = nullptr;
   if (input_Q->scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
     devPtrScaleS = input_S->scale.dptr;
     devPtrDescaleS = input_S->scale_inv.dptr;
@@ -2900,7 +2901,8 @@ void fused_attn_fp8_bwd(
   void* devPtrdQ = output_dQ->data.dptr;
   void* devPtrdK = output_dK->data.dptr;
   void* devPtrdV = output_dV->data.dptr;
-  void *devPtrAmaxdQ = nullptr, *devPtrAmaxdK = nullptr, *devPtrAmaxdV = nullptr, *devPtrScaledQ = nullptr, *devPtrScaledK = nullptr, *devPtrScaledV = nullptr;
+  void *devPtrAmaxdQ = nullptr, *devPtrAmaxdK = nullptr, *devPtrAmaxdV = nullptr,
+       *devPtrScaledQ = nullptr, *devPtrScaledK = nullptr, *devPtrScaledV = nullptr;
   if (input_Q->scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
     devPtrAmaxdQ = output_dQ->amax.dptr;
     devPtrAmaxdK = output_dK->amax.dptr;
