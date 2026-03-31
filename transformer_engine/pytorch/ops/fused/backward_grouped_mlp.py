@@ -30,6 +30,7 @@ from ..fuser import register_backward_fusion
 from ..op import FusedOperation, FusibleOperation, OperationContext
 from .._common import (
     clone_grouped_tensor_storage,
+    fuse_grouped_mlp_ops,
     is_quantized_tensor,
     make_grouped_tensor_from_buffers,
     maybe_dequantize,
@@ -393,30 +394,12 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
                 use_dynamic_sched=True,
             )
 
-        # Unpack kernel outputs
-        # Note: Fused kernel outputs tensors with non-contiguous
-        # logical dims.
-        # Row-wise data logical shape: (sum(m), k, 1)
-        # Row-wise scale logical shape: (32 (block row), 4 (block row),
-        #   sum(m)/128, 4 (block col), k/128, 1)
-        # Column-wise data logical shape: (k, sum(m), 1)
-        # Column-wise scale logical shape: (32 (block col), 4 (block col),
-        #   k/128, 4 (block row), sum(m)/128, 1)
         fc1_dy_row_data = fc2_dgrad_kernel_out["d_row_tensor"]
-        fc1_dy_row_data = fc1_dy_row_data.permute(2, 0, 1)
         fc1_dy_row_data = fc1_dy_row_data.view(out_shape[0], fc1_weight_shape[0]).contiguous()
         fc1_dy_row_scale = fc2_dgrad_kernel_out["sfd_row_tensor"]
-        fc1_dy_row_scale = fc1_dy_row_scale.permute(5, 2, 4, 0, 1, 3)
-        fc1_dy_row_scale = fc1_dy_row_scale.view(
-            out_shape[0], fc1_weight_shape[0] // MXFP8_BLOCK_SCALING_SIZE
-        ).contiguous()
         fc1_dy_col_data = fc2_dgrad_kernel_out["d_col_tensor"]
-        fc1_dy_col_data = fc1_dy_col_data.permute(2, 0, 1)
         fc1_dy_col_data = fc1_dy_col_data.view(out_shape[0], fc1_weight_shape[0]).contiguous()
         fc1_dy_col_scale = fc2_dgrad_kernel_out["sfd_col_tensor"]
-        fc1_dy_col_scale = fc1_dy_col_scale.permute(5, 2, 4, 0, 1, 3)
-        fc1_dy_col_scale = fc1_dy_col_scale.reshape(-1)
-
         grad_scales = fc2_dgrad_kernel_out["dprob_tensor"]
         grad_scales = grad_scales.view(-1).to(dtype=dtype)
 
@@ -964,69 +947,11 @@ def fuse_backward_ops(
 
     """
 
-    # Return immediately if fused kernel is not supported
-    if not BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8.is_supported():
-        return ops
-
-    # Check if recipe is supported
-    if recipe is None:
-        return ops
-    if not recipe.mxfp8():
-        return ops
-
-    # Scan through ops, fusing if possible
-    out = []
-    window, ops = ops[:3], ops[3:]
-    while len(window) == 3:
-
-        # Check if window matches pattern
-        matches_pattern = True
-        if not (
-            isinstance(window[0], GroupedLinear)
-            and isinstance(window[1], ScaledSwiGLU)
-            and isinstance(window[2], GroupedLinear)
-        ):
-            matches_pattern = False
-        elif window[0].num_groups != window[2].num_groups:
-            matches_pattern = False
-        elif (
-            window[0].in_features % 256 != 0
-            or window[0].out_features % 256 != 0
-            or window[2].in_features % 256 != 0
-            or window[2].out_features % 256 != 0
-        ):
-            matches_pattern = False
-        elif window[1].glu_interleave_size != 32:
-            matches_pattern = False
-        elif (
-            window[0].has_bias
-            and not BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8.is_fc1_bias_supported()
-        ):
-            matches_pattern = False
-
-        if matches_pattern:
-            # Construct fused op if window matches pattern
-            op = BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(
-                fc1=window[0],
-                swiglu=window[1],
-                fc2=window[2],
-            )
-            window = [op]
-        else:
-            # Shift window if window doesn't match pattern
-            out.extend(window[:-2])
-            window = window[-2:]
-
-        # Adjust window to expected size
-        out.extend(window[:-3])
-        window = window[-3:]
-        while ops and len(window) < 3:
-            window.append(ops[0])
-            ops = ops[1:]
-
-    # Return list of ops
-    out.extend(window)
-    return out
+    return fuse_grouped_mlp_ops(
+        ops,
+        recipe=recipe,
+        fused_op_cls=BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8,
+    )
 
 
 # Register fusion if available

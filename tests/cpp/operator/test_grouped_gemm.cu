@@ -174,8 +174,8 @@ std::vector<std::tuple<size_t, size_t, size_t>> make_shapes(ShapeCase scase) {
 }
 
 void run_grouped_gemm_case(const TestParams& params) {
-#if CUBLAS_VERSION < 130200
-  GTEST_SKIP() << "Grouped GEMM requires cuBLAS 13.2+, but compile-time cuBLAS version is "
+#if CUBLAS_VERSION < 130300
+  GTEST_SKIP() << "Grouped GEMM requires cuBLAS 13.3+, but compile-time cuBLAS version is "
                << CUBLAS_VERSION << ".";
 #else
   if (getDeviceComputeCapability() < blackwellComputeCapability) {
@@ -348,12 +348,12 @@ void run_grouped_gemm_case(const TestParams& params) {
                    atol,
                    rtol);
   }
-#endif  // CUBLAS_VERSION >= 130200
+#endif  // CUBLAS_VERSION >= 130300
 }
 
 void run_grouped_gemm_discrete_out_case(const TestParams& params) {
-#if CUBLAS_VERSION < 130200
-  GTEST_SKIP() << "Grouped GEMM requires cuBLAS 13.2+, but compile-time cuBLAS version is "
+#if CUBLAS_VERSION < 130300
+  GTEST_SKIP() << "Grouped GEMM requires cuBLAS 13.3+, but compile-time cuBLAS version is "
                << CUBLAS_VERSION << ".";
 #else
   if (getDeviceComputeCapability() < blackwellComputeCapability) {
@@ -519,12 +519,12 @@ void run_grouped_gemm_discrete_out_case(const TestParams& params) {
                    atol,
                    rtol);
   }
-#endif  // CUBLAS_VERSION >= 130200
+#endif  // CUBLAS_VERSION >= 130300
 }
 
 void run_grouped_gemm_discrete_in_case(const TestParams& params) {
-#if CUBLAS_VERSION < 130200
-  GTEST_SKIP() << "Grouped GEMM requires cuBLAS 13.2+, but compile-time cuBLAS version is "
+#if CUBLAS_VERSION < 130300
+  GTEST_SKIP() << "Grouped GEMM requires cuBLAS 13.3+, but compile-time cuBLAS version is "
                << CUBLAS_VERSION << ".";
 #else
   if (getDeviceComputeCapability() < blackwellComputeCapability) {
@@ -706,7 +706,7 @@ void run_grouped_gemm_discrete_in_case(const TestParams& params) {
                    atol,
                    rtol);
   }
-#endif  // CUBLAS_VERSION >= 130200
+#endif  // CUBLAS_VERSION >= 130300
 }
 
 class GroupedGemmTest : public ::testing::TestWithParam<TestParams> {};

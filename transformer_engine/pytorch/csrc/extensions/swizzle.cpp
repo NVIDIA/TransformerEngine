@@ -338,7 +338,7 @@ at::Tensor convert_block_scaling_to_mxfp8_tensor(transformer_engine::TensorWrapp
   return swizzled_scale_inv;
 }
 
-std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor_for_gemm(
+std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor(
     GroupedTensorWrapper &input, bool rowwise_usage, bool columnwise_usage) {
   if (input.scaling_mode() != NVTE_MXFP8_1D_SCALING) {
     return std::nullopt;
@@ -416,10 +416,7 @@ std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor_for_gemm(
     input.set_columnwise_scale_inv(getDataPtr(*columnwise_scales_pyt), scales_dtype,
                                    col_scales.shape);
   }
-  if (swizzle_rowwise && swizzle_columnwise) {
-    input.set_with_gemm_swizzled_scales(true);
-  }
-
+  input.set_with_gemm_swizzled_scales(true);
   return SwizzledGroupedScales{std::move(rowwise_scales_pyt), std::move(columnwise_scales_pyt)};
 }
 
@@ -428,14 +425,20 @@ void swizzle_grouped_scales(py::handle &tensor, bool rowwise, bool columnwise) {
 
   auto tensor_nvte = GroupedTensorFromPyTorchGroupedTensor(tensor);
 
-  auto result = maybe_swizzle_grouped_tensor_for_gemm(tensor_nvte, rowwise, columnwise);
+  auto result = maybe_swizzle_grouped_tensor(tensor_nvte, rowwise, columnwise);
 
   if (result.has_value()) {
     if (result->first.has_value()) {
       tensor.attr("scale_inv") = py::cast(*result->first);
     }
+    else {
+      tensor.attr("scale_inv") = py::none();
+    }
     if (result->second.has_value()) {
       tensor.attr("columnwise_scale_inv") = py::cast(*result->second);
+    }
+    else {
+      tensor.attr("columnwise_scale_inv") = py::none();
     }
     tensor.attr("_with_gemm_swizzled_scales") = py::cast(true);
   }

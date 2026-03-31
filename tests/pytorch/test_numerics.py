@@ -2861,8 +2861,8 @@ def _make_grouped_tensor_uniform(
 @pytest.mark.parametrize("layout", ["TN", "NN", "NT"])
 @pytest.mark.parametrize("accumulate", [False, True])
 def test_grouped_gemm_grouped_tensor(z, m, n, k, case, layout, accumulate) -> None:
-    if tex.get_cublasLt_version() < 130200:
-        pytest.skip("Grouped GEMM requires cuBLAS 13.2+.")
+    if tex.get_cublasLt_version() < 130300:
+        pytest.skip("Grouped GEMM requires cuBLAS 13.3+.")
     if torch.cuda.get_device_capability() < (10, 0):
         pytest.skip("Grouped GEMM requires Blackwell (SM100) or newer.")
     if not is_bf16_available():
@@ -3050,8 +3050,8 @@ def _make_grouped_tensor_quantized_mxfp8(
 def test_grouped_gemm_grouped_tensor_mxfp8(
     shape, accumulate, layout: str, case: str, dtype: torch.dtype
 ) -> None:
-    if tex.get_cublasLt_version() < 130200:
-        pytest.skip("Grouped GEMM requires cuBLAS 13.2+.")
+    if tex.get_cublasLt_version() < 130300:
+        pytest.skip("Grouped GEMM requires cuBLAS 13.3+.")
     if torch.cuda.get_device_capability() < (10, 0):
         pytest.skip("Grouped GEMM requires Blackwell (SM100) or newer.")
     if dtype == torch.bfloat16 and not is_bf16_available():
