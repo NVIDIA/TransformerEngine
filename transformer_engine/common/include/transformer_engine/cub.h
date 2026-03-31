@@ -13,7 +13,7 @@
 extern "C" {
 #endif
 
-/*! \brief Compute the top-K largest (key, value) pairs using CUB.
+/*! \brief Compute the top-K largest (key, value) pairs.
  *
  *  \param[in]     stream           CUDA stream used for the operation.
  *  \param[in]     keys_in          Input 1D keys tensor, shape (num_items,)
@@ -28,9 +28,9 @@ extern "C" {
  *  Requirements:
  *  - Only supports float32, float16, bfloat16 keys and int32 values.
  */
-void nvte_cub_topk(cudaStream_t stream, const NVTETensor keys_in, const NVTETensor values_in,
-                   NVTETensor keys_out, NVTETensor values_out, NVTETensor workspace,
-                   const int num_items, const int k, const size_t workspace_bytes);
+void nvte_topk(cudaStream_t stream, const NVTETensor keys_in, const NVTETensor values_in,
+               NVTETensor keys_out, NVTETensor values_out, NVTETensor workspace,
+               const int num_items, const int k, const size_t workspace_bytes);
 
 #ifdef __cplusplus
 }  // extern "C"

@@ -9,10 +9,10 @@
 #include <cuda/std/execution>
 #include <cub/device/device_topk.cuh>
 
-void nvte_cub_topk(cudaStream_t stream, const NVTETensor keys_in, const NVTETensor values_in,
-                   NVTETensor keys_out, NVTETensor values_out, NVTETensor workspace,
-                   int num_items, int k, size_t workspace_bytes) {
-  NVTE_API_CALL(nvte_cub_topk);
+void nvte_topk(cudaStream_t stream, const NVTETensor keys_in, const NVTETensor values_in,
+               NVTETensor keys_out, NVTETensor values_out, NVTETensor workspace,
+               int num_items, int k, size_t workspace_bytes) {
+  NVTE_API_CALL(nvte_topk);
   using namespace transformer_engine;
 
   const Tensor *keys_in_tensor = convertNVTETensorCheck(keys_in);

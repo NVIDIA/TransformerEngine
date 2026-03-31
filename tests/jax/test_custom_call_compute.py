@@ -47,7 +47,7 @@ from transformer_engine.jax.quantize import helper
 from transformer_engine.jax.activation import activation
 from transformer_engine.jax.dense import dense, grouped_dense
 from transformer_engine.jax.layernorm_dense import layernorm_dense
-from transformer_engine.jax.cpp_extensions.cub import cub_topk
+from transformer_engine.jax.cpp_extensions.cub import topk
 
 GEMM_CASES = [
     (256, 256, 512),
@@ -1960,8 +1960,8 @@ class TestDebugInspectFFI:
 
 @pytest.mark.parametrize("dtype", [jnp.bfloat16, jnp.float16, jnp.float32])
 @pytest.mark.parametrize("problem_size", [(10000, 100), (50000, 200), (100000, 500), (1000000, 1000), (5000000, 2000)])
-class TestCubOps:
-    def test_cub_topk(self, dtype, problem_size):
+class TestTopk:
+    def test_topk(self, dtype, problem_size):
         n, k = problem_size
 
         prng_key = jax.random.PRNGKey(0)
@@ -1972,7 +1972,7 @@ class TestCubOps:
         x = jax.random.permutation(keys[2], x)
 
         ref_topk_jit = jax.jit(jax.lax.top_k, static_argnums=(1,))
-        prim_topk_jit = jax.jit(cub_topk, static_argnums=(1,))
+        prim_topk_jit = jax.jit(topk, static_argnums=(1,))
 
         ref_topk, ref_indices = ref_topk_jit(x, k)
         prim_topk, prim_indices = prim_topk_jit(x, k)

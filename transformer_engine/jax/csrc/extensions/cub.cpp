@@ -11,9 +11,9 @@
 namespace transformer_engine {
 namespace jax {
 
-Error_Type CubTopkFFI(cudaStream_t stream, Buffer_Type keys_in_buf, Buffer_Type values_in_buf,
-                      Result_Type keys_out_buf, Result_Type values_out_buf, Result_Type workspace_buf,
-                      int64_t k_value, int64_t workbuf_bytes) {
+Error_Type TopkFFI(cudaStream_t stream, Buffer_Type keys_in_buf, Buffer_Type values_in_buf,
+                   Result_Type keys_out_buf, Result_Type values_out_buf, Result_Type workspace_buf,
+                   int64_t k_value, int64_t workbuf_bytes) {
   auto keys_in_dtype = convert_ffi_datatype_to_te_dtype(keys_in_buf.element_type());
   auto values_in_dtype = convert_ffi_datatype_to_te_dtype(values_in_buf.element_type());
   auto keys_out_dtype = convert_ffi_datatype_to_te_dtype(keys_out_buf->element_type());
@@ -45,14 +45,14 @@ Error_Type CubTopkFFI(cudaStream_t stream, Buffer_Type keys_in_buf, Buffer_Type 
   auto values_out_tensor = TensorWrapper(values_out_buf->untyped_data(), output_shape, values_out_dtype);
   auto workspace_tensor = TensorWrapper(workspace_buf->untyped_data(), workspace_shape, DType::kByte);
 
-  nvte_cub_topk(stream, keys_in_tensor.data(), values_in_tensor.data(),
-                keys_out_tensor.data(), values_out_tensor.data(), workspace_tensor.data(),
-                num_items, k, workbuf_bytes);
+  nvte_topk(stream, keys_in_tensor.data(), values_in_tensor.data(),
+            keys_out_tensor.data(), values_out_tensor.data(), workspace_tensor.data(),
+            num_items, k, workbuf_bytes);
 
   return ffi_with_cuda_error_check();
 }
 
-XLA_FFI_DEFINE_HANDLER_SYMBOL(CubTopkHandler, CubTopkFFI,
+XLA_FFI_DEFINE_HANDLER_SYMBOL(TopkHandler, TopkFFI,
   FFI::Bind()
       .Ctx<FFI_Stream_Type>()  // stream
       .Arg<Buffer_Type>()      // keys_buf

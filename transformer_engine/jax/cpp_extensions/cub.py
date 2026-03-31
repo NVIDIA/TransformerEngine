@@ -11,24 +11,24 @@ from jax import dtypes, ffi
 
 from .base import BasePrimitive, register_primitive
 
-__all__ = ["CubTopkPrimitive"]
+__all__ = ["topk"]
 
 def get_cub_topk_workspace_bytes() -> int:
     """
     Get the workspace size for CUB Topk
     The safe way is calling the CUB kernel to query the workspace size.
-    For convenience, we use a heuristic value based on experiments.
-    4 MiB is enough for N up to 5,000,000 and K up to 100,000.
+    However, JAX JIT compiling needs a fixed tensor size. Using 4MB as
+    a WAR since it is large enough for N up to 5,000,000 and K up to 100,000.
     """
     return 4 * 1024 * 1024
 
 
-class CubTopkPrimitive(BasePrimitive):
+class TopKPrimitive(BasePrimitive):
     """
-    CUB Topk Primitive
+    Topk Primitive
     """
 
-    name = "te_cub_topk_ffi"
+    name = "te_topk_ffi"
     multiple_results = True
     impl_static_args = (2,)  # k_value
     inner_primitive = None
@@ -54,7 +54,7 @@ class CubTopkPrimitive(BasePrimitive):
 
     @staticmethod
     def outer_abstract(*args, **kwargs):
-        out_keys_aval, out_values_aval, _workspace_aval = CubTopkPrimitive.abstract(*args, **kwargs)
+        out_keys_aval, out_values_aval, _workspace_aval = TopKPrimitive.abstract(*args, **kwargs)
         return (out_keys_aval, out_values_aval)
 
     @staticmethod
@@ -66,7 +66,7 @@ class CubTopkPrimitive(BasePrimitive):
     ):
         workspace_bytes = get_cub_topk_workspace_bytes()
         return ffi.ffi_lowering(
-            CubTopkPrimitive.name,
+            TopKPrimitive.name,
         )(
             ctx,
             in_keys,
@@ -81,8 +81,8 @@ class CubTopkPrimitive(BasePrimitive):
         in_values,
         k_value,
     ):
-        assert CubTopkPrimitive.inner_primitive is not None
-        out_keys, out_values, _workspace = CubTopkPrimitive.inner_primitive.bind(
+        assert TopKPrimitive.inner_primitive is not None
+        out_keys, out_values, _workspace = TopKPrimitive.inner_primitive.bind(
             in_keys,
             in_values,
             k_value=k_value,
@@ -90,18 +90,18 @@ class CubTopkPrimitive(BasePrimitive):
         return (out_keys, out_values)
 
 
-register_primitive(CubTopkPrimitive)
+register_primitive(TopKPrimitive)
 
-def cub_topk(
+def topk(
     x: jnp.ndarray,
     k_value: int,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """
-    CUB Topk max pairs
+    Topk max pairs
     """
     keys = x
     values = jnp.arange(x.shape[0], dtype=jnp.int32)
-    out_keys, out_values = CubTopkPrimitive.outer_primitive.bind(
+    out_keys, out_values = TopKPrimitive.outer_primitive.bind(
         keys,
         values,
         k_value=k_value,
