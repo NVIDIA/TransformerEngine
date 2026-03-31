@@ -18,6 +18,7 @@ _FSDP2_DIR = Path(__file__).parent.resolve() / "fsdp2_tests"
 # Import some utilities from PyTest-owned conftest.py.
 sys.path.insert(0, str(_FSDP2_DIR))
 from conftest import _parametrize_recipes
+
 sys.path.pop(0)
 
 
