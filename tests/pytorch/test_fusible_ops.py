@@ -4215,6 +4215,7 @@ class TestCustomOps:
         torch.testing.assert_close(dx_test, x_ref.grad, **tols)
         torch.testing.assert_close(dw_test, w_ref.grad, **tols)
 
+
 def test_grouped_gemm_quant_cute_matches_mxfp8_quantized() -> None:
     if not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
@@ -4259,18 +4260,36 @@ def test_grouped_gemm_quant_cute_matches_mxfp8_quantized() -> None:
 
     # Allocate empty input tensors needed for cuTE DSL kernel
     padded_offsets = torch.tensor(
-        [m * (i + 1) for i in range(num_groups)], dtype=torch.int32, device=device,
+        [m * (i + 1) for i in range(num_groups)],
+        dtype=torch.int32,
+        device=device,
     )
     inputs = {
-        "a_tensor": torch.empty(1, total_m, k, dtype=torch.float8_e4m3fn, device=device).permute(1, 2, 0),
-        "b_tensor": torch.empty(num_groups, n, k, dtype=torch.float8_e4m3fn, device=device).permute(1, 2, 0),
+        "a_tensor": torch.empty(1, total_m, k, dtype=torch.float8_e4m3fn, device=device).permute(
+            1, 2, 0
+        ),
+        "b_tensor": torch.empty(num_groups, n, k, dtype=torch.float8_e4m3fn, device=device).permute(
+            1, 2, 0
+        ),
         "sfa_tensor": torch.empty(
-            1, total_m // 128, k // 128, 32, 4, 4,
-            dtype=torch.float8_e8m0fnu, device=device,
+            1,
+            total_m // 128,
+            k // 128,
+            32,
+            4,
+            4,
+            dtype=torch.float8_e8m0fnu,
+            device=device,
         ).permute(3, 4, 1, 5, 2, 0),
         "sfb_tensor": torch.empty(
-            num_groups, n // 128, k // 128, 32, 4, 4,
-            dtype=torch.float8_e8m0fnu, device=device,
+            num_groups,
+            n // 128,
+            k // 128,
+            32,
+            4,
+            4,
+            dtype=torch.float8_e8m0fnu,
+            device=device,
         ).permute(3, 4, 1, 5, 2, 0),
         "alpha_tensor": torch.empty(num_groups, dtype=torch.float32, device=device),
         "prob_tensor": torch.empty(total_m, 1, 1, dtype=torch.float32, device=device),

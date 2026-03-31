@@ -44,8 +44,9 @@ using SwizzledGroupedScales = std::pair<std::optional<at::Tensor>, std::optional
  *
  * The returned swizzled scales should be kept alive during the GEMM.
  */
-std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor(
-    GroupedTensorWrapper& input, bool rowwise_usage, bool columnwise_usage);
+std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor(GroupedTensorWrapper& input,
+                                                                  bool rowwise_usage,
+                                                                  bool columnwise_usage);
 
 /*! \brief Convert a block scaling tensor to an mxfp8 tensor in-place.
  *
