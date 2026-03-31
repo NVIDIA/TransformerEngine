@@ -473,7 +473,7 @@ def triton_call_lowering(
             )
 
             kernel_calls.append((config_call, str(config)))
-        
+
         input_output_aliases_with_sizes = ()
         if input_output_aliases:
             num_inputs = len(ctx.avals_in)
