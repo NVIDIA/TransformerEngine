@@ -4647,11 +4647,6 @@ def attn_forward_func_with_cp(
         "all_gather",
     ], f"Context parallelism does not support sliding window attention with {cp_comm_type=}!"
 
-    if fp8 and fp8_meta is not None:
-        if fp8_meta["recipe"].fp8_dpa:
-            assert (
-                softmax_type == "vanilla"
-            ), f"Context parallelism does not support {softmax_type=} with FP8 attention!"
     assert (
         softmax_type == "vanilla" or use_fused_attention
     ), f"Context parallelism only supports {softmax_type=} with FusedAttention backend!"
