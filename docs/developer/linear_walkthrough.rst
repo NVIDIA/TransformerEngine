@@ -105,21 +105,22 @@ that actually perform casts.
      ``amax_epsilon`` and ``power_2_scale`` on quantizers, while MXFP8 needs no such
      configuration.
 
-2. Six quantizers are prepared — three for the forward pass and three for the backward
-   pass:
+2. Six quantizer slots are prepared — three for the forward pass and three for the
+   backward pass:
 
    - ``input_quantizer`` — for the activation tensor (forward GEMM input)
    - ``weight_quantizer`` — for the weight parameter (forward GEMM input)
    - ``output_quantizer`` — for the forward output (optional, when ``fp8_output=True``)
    - ``grad_output_quantizer`` — for the backward gradient
    - ``grad_input_quantizer`` — for the backward gradient input (optional, when ``fp8_grad=True``)
-   - ``grad_weight_quantizer`` — for the backward weight gradient (placeholder for future
-     use; allocated for API completeness but not consumed by any current code path)
+   - ``grad_weight_quantizer`` — reserved for the backward weight gradient (currently
+     left as ``None``; no code path uses it yet, but the slot is carried through
+     the API for future use)
 
-   All six are created here because the backward pass executes outside the
-   ``autocast`` context and therefore no longer has access to the recipe
-   configuration. By creating the backward quantizers during forward setup, we
-   capture the recipe information while it is still available.
+   The backward quantizers that are populated are created here because the backward
+   pass executes outside the ``autocast`` context and therefore no longer has access
+   to the recipe configuration. By creating the backward quantizers during forward
+   setup, we capture the recipe information while it is still available.
 
    Each tensor gets its own quantizer because activations, weights, and gradients have
    different value distributions — sharing a single scale would waste dynamic range.

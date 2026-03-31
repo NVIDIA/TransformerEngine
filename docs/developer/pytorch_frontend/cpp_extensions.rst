@@ -144,7 +144,7 @@ accepts ``py::handle`` inputs:
 This function performs runtime type detection to handle all Python tensor types:
 
 1. It iterates over a registry of known quantized types (defined in
-   ``transformer_engine/pytorch/csrc/extensions/pybind.h`` as
+   ``transformer_engine/pytorch/csrc/pybind.h`` as
    ``custom_types_converters``). Each entry maps a ``PyTypeObject*`` to an extraction
    function. This registry is populated during extension initialization
    (``init_extension()``), which is why the extensions must be initialized before any

@@ -77,8 +77,11 @@ The ``Quantizer.set_usage()`` method controls which layouts are produced:
    # Backward grad_output quantizer: rowwise for dgrad, columnwise for wgrad
    bwd_quantizer.set_usage(rowwise=True, columnwise=True)
 
-When ``columnwise=True``, the quantization kernel produces an additional transposed
-copy of the data (or, for block-scaling modes, computes column-oriented block scales).
+When ``columnwise=True``, the quantizer prepares a columnwise layout of the data.
+On architectures without non-TN FP8 GEMM support, this means producing an additional
+physically transposed copy (or, for block-scaling modes, computing column-oriented
+block scales). On architectures that support non-TN FP8 GEMM (Blackwell and later),
+the rowwise data can be reused directly, so no extra buffer is allocated.
 
 Impact on the Tensor Struct
 ----------------------------
@@ -105,8 +108,8 @@ transposed into a separate buffer for the columnwise layout.
 Performance Implications
 ------------------------
 
-Producing both layouts doubles the quantization work and memory for activations. This is
-a deliberate trade-off:
+On architectures without non-TN FP8 GEMM support, producing both layouts doubles the
+quantization work and memory for activations. This is a deliberate trade-off:
 
 - **Without dual layout**: The wgrad GEMM would need to transpose and requantize at
   backward time. Beyond the performance cost (extra kernel launch and temporary memory),

@@ -88,7 +88,7 @@ Directory Map
        ├── quantize/                  #   JAX quantizer and ScaledTensor
        ├── attention.py               #   JAX attention entry points
        ├── sharding.py                #   Mesh and sharding utilities
-       └── distributed.py             #   JAX distributed collectives
+       └── dense.py                   #   JAX dense (linear) layer
 
 Data Flow: Forward Pass
 -----------------------

@@ -68,7 +68,9 @@ Hopper (sm90) and later.
 Data layout:
 
 - ``data``: row-major, one scale for the entire tensor
-- ``columnwise_data``: column-major (physically transposed), same single scale
+- ``columnwise_data``: column-major layout, same single scale. On architectures without
+  non-TN FP8 GEMM support this is a physically transposed copy; on architectures with
+  non-TN support (Blackwell+) it may alias ``data``
 - ``scale_inv``: shape ``[1]`` (one element) for FP8 tensors, empty for high-precision
 - ``amax``: populated by delayed scaling (framework responsibility), unused by current
   scaling
@@ -92,8 +94,10 @@ Blackwell.
 Data layout:
 
 - ``data``: row-major FP8, shape ``[M, N]``
-- ``columnwise_data``: the physically transposed data, shape ``[N, M]`` — this is a
-  separate buffer with independently quantized blocks along the transposed dimension
+- ``columnwise_data``: the columnwise layout, shape ``[N, M]`` — on architectures
+  without non-TN FP8 GEMM support this is a physically transposed separate buffer
+  with independently quantized blocks along the transposed dimension; on architectures
+  with non-TN support (Blackwell+) it may share the rowwise buffer
 - ``scale_inv`` (rowwise): shape ``[ceil(M), ceil(N/32)]``, padded to ``[128, 4]``
   multiples for GEMM alignment
 - ``columnwise_scale_inv``: shape ``[ceil(N), ceil(M/32)]``, padded to ``[128, 4]``
