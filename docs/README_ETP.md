@@ -484,6 +484,12 @@ Step by step for layer `i` backward:
    - **Last layer** (`prev_w is None`): Synchronous reduce-scatter. Call `_finalize_wgrad()` immediately — strips padding, accumulates into `main_grad`, fires grad-accum hook.
 5. **Deferred finish**: At the start of each subsequent layer's `wgrad_reduce_scatter`, `self.next_w._wait_reduce_scatter()` is called, which waits on `next_w._wgrad_rs_handle` and records a CUDA event. Then `_finalize_wgrad()` is called for `next_w` to strip padding, accumulate, and fire the hook. The RS buffer is returned to the pool via `cache.release()`.
 
+
+Here is an example of ETP schedule diagram for Hybried Nemotron6 in bf16 as an example (ETP+EP with partial CGs):
+
+![alt text](etp/etp_ep_nt6_schedule_bf16.png)
+
+
 ### Coalesced Expert Communication
 
 For MoE layers with multiple routed experts, all experts' all-gathers are coalesced into a single NCCL operation via `torch.distributed._coalescing_manager`. This reduces NCCL kernel launch overhead and improves bus utilization compared to E sequential all-gathers. The wgrad reduce-scatter for all experts is similarly coalesced.
