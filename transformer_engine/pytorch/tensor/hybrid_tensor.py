@@ -83,13 +83,19 @@ class HybridQuantizer(Quantizer):
     ) -> HybridQuantizedTensor:
         self.rowwise_quantizer.internal = True
         rowwise_empty = self.rowwise_quantizer.make_empty(
-            shape, dtype=dtype, device=device, pin_memory=pin_memory,
+            shape,
+            dtype=dtype,
+            device=device,
+            pin_memory=pin_memory,
         )
         self.rowwise_quantizer.internal = False
 
         self.columnwise_quantizer.internal = True
         columnwise_empty = self.columnwise_quantizer.make_empty(
-            shape, dtype=dtype, device=device, pin_memory=pin_memory,
+            shape,
+            dtype=dtype,
+            device=device,
+            pin_memory=pin_memory,
         )
         self.columnwise_quantizer.internal = False
 
@@ -165,13 +171,16 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
         return instance
 
     def __repr__(self, *, tensor_contents=None):
-        row_type = type(self._rowwise_storage).__name__ if self._rowwise_storage is not None else "None"
-        col_type = type(self._columnwise_storage).__name__ if self._columnwise_storage is not None else "None"
+        row_type = (
+            type(self._rowwise_storage).__name__ if self._rowwise_storage is not None else "None"
+        )
+        col_type = (
+            type(self._columnwise_storage).__name__
+            if self._columnwise_storage is not None
+            else "None"
+        )
         return (
-            f"HybridQuantizedTensor("
-            f"rowwise={row_type}, "
-            f"columnwise={col_type}, "
-            f"dtype={self.dtype})"
+            f"HybridQuantizedTensor(rowwise={row_type}, columnwise={col_type}, dtype={self.dtype})"
         )
 
     def dequantize(self, *, dtype: Optional[torch.dtype] = None) -> torch.Tensor:

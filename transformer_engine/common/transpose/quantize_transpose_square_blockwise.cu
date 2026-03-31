@@ -538,8 +538,7 @@ void quantize_transpose_square_blockwise(const SimpleTensor& input, SimpleTensor
       }
     }
     if (return_identity) {
-      NVTE_CHECK(output.dtype == output_t.dtype,
-                 "output and output_t need to have the same type.");
+      NVTE_CHECK(output.dtype == output_t.dtype, "output and output_t need to have the same type.");
     }
 
     NVTE_CHECK(scale_inv_t.shape.size() == 2, "scale_inv_t must have 2 dimensions.");

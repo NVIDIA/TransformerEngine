@@ -192,9 +192,7 @@ class TestHybridDequantize:
         hq = _make_hybrid_quantizer_fp4_row_fp8_col()
         result = hq.quantize(input_tensor)
         dequantized = result.dequantize()
-        torch.testing.assert_close(
-            dequantized.float(), input_tensor.float(), rtol=0.5, atol=1.0
-        )
+        torch.testing.assert_close(dequantized.float(), input_tensor.float(), rtol=0.5, atol=1.0)
 
     def test_storage_dequantize(self, input_tensor):
         hq = _make_hybrid_quantizer_fp8_row_fp4_col()
@@ -412,18 +410,22 @@ class TestHybridGemmBitwiseIdentical:
             if role in ("linear_input", "linear_weight", "linear_output"):
                 return HybridQuantizer(
                     rowwise_quantizer=Float8CurrentScalingQuantizer(
-                        tex.DType.kFloat8E4M3, device="cuda",
+                        tex.DType.kFloat8E4M3,
+                        device="cuda",
                     ),
                     columnwise_quantizer=Float8CurrentScalingQuantizer(
-                        tex.DType.kFloat8E4M3, device="cuda",
+                        tex.DType.kFloat8E4M3,
+                        device="cuda",
                     ),
                 )
             if role in ("linear_grad_output", "linear_grad_input"):
                 return Float8CurrentScalingQuantizer(
-                    tex.DType.kFloat8E5M2, device="cuda",
+                    tex.DType.kFloat8E5M2,
+                    device="cuda",
                 )
             return Float8CurrentScalingQuantizer(
-                tex.DType.kFloat8E4M3, device="cuda",
+                tex.DType.kFloat8E4M3,
+                device="cuda",
             )
 
         hybrid_recipe = recipe.CustomRecipe(qfactory=hybrid_fp8_factory)
@@ -433,25 +435,24 @@ class TestHybridGemmBitwiseIdentical:
         loss_hybrid.backward()
 
         # Forward outputs must be bitwise identical
-        assert torch.equal(out_ref, out_hybrid), (
-            f"Forward mismatch: max diff = {(out_ref - out_hybrid).abs().max().item()}"
-        )
+        assert torch.equal(
+            out_ref, out_hybrid
+        ), f"Forward mismatch: max diff = {(out_ref - out_hybrid).abs().max().item()}"
 
         # Input gradients must be bitwise identical
         assert inp_ref.grad is not None and inp_hybrid.grad is not None
-        assert torch.equal(inp_ref.grad, inp_hybrid.grad), (
-            f"Input grad mismatch: max diff = "
-            f"{(inp_ref.grad - inp_hybrid.grad).abs().max().item()}"
-        )
+        assert torch.equal(
+            inp_ref.grad, inp_hybrid.grad
+        ), f"Input grad mismatch: max diff = {(inp_ref.grad - inp_hybrid.grad).abs().max().item()}"
 
         # Parameter gradients must be bitwise identical
         ref_params = dict(model_ref.named_parameters())
         hybrid_params = dict(model_hybrid.named_parameters())
         for name, p_ref in ref_params.items():
             p_hyb = hybrid_params[name]
-            assert p_ref.grad is not None and p_hyb.grad is not None, (
-                f"Missing gradient for param '{name}'"
-            )
+            assert (
+                p_ref.grad is not None and p_hyb.grad is not None
+            ), f"Missing gradient for param '{name}'"
             assert torch.equal(p_ref.grad, p_hyb.grad), (
                 f"Param '{name}' grad mismatch: max diff = "
                 f"{(p_ref.grad - p_hyb.grad).abs().max().item()}"
@@ -494,18 +495,17 @@ class TestHybridGemmBitwiseIdenticalMXFP8:
             out_hybrid = model_hybrid(inp_hybrid)
         out_hybrid.float().sum().backward()
 
-        assert torch.equal(out_ref, out_hybrid), (
-            f"Forward mismatch: max diff = {(out_ref - out_hybrid).abs().max().item()}"
-        )
-        assert torch.equal(inp_ref.grad, inp_hybrid.grad), (
-            f"Input grad mismatch: max diff = "
-            f"{(inp_ref.grad - inp_hybrid.grad).abs().max().item()}"
-        )
+        assert torch.equal(
+            out_ref, out_hybrid
+        ), f"Forward mismatch: max diff = {(out_ref - out_hybrid).abs().max().item()}"
+        assert torch.equal(
+            inp_ref.grad, inp_hybrid.grad
+        ), f"Input grad mismatch: max diff = {(inp_ref.grad - inp_hybrid.grad).abs().max().item()}"
         for name, p_ref in dict(model_ref.named_parameters()).items():
             p_hyb = dict(model_hybrid.named_parameters())[name]
-            assert p_ref.grad is not None and p_hyb.grad is not None, (
-                f"Missing gradient for param '{name}'"
-            )
+            assert (
+                p_ref.grad is not None and p_hyb.grad is not None
+            ), f"Missing gradient for param '{name}'"
             assert torch.equal(p_ref.grad, p_hyb.grad), (
                 f"Param '{name}' grad mismatch: max diff = "
                 f"{(p_ref.grad - p_hyb.grad).abs().max().item()}"
@@ -540,18 +540,21 @@ class TestHybridGemmBitwiseIdenticalBlockFP8:
             if role in ("linear_grad_output", "linear_grad_input"):
                 return Float8BlockQuantizer(
                     fp8_dtype=tex.DType.kFloat8E4M3,
-                    rowwise=True, columnwise=True,
+                    rowwise=True,
+                    columnwise=True,
                     block_scaling_dim=dim,
                 )
             return HybridQuantizer(
                 rowwise_quantizer=Float8BlockQuantizer(
                     fp8_dtype=tex.DType.kFloat8E4M3,
-                    rowwise=True, columnwise=True,
+                    rowwise=True,
+                    columnwise=True,
                     block_scaling_dim=dim,
                 ),
                 columnwise_quantizer=Float8BlockQuantizer(
                     fp8_dtype=tex.DType.kFloat8E4M3,
-                    rowwise=True, columnwise=True,
+                    rowwise=True,
+                    columnwise=True,
                     block_scaling_dim=dim,
                 ),
             )
@@ -561,18 +564,17 @@ class TestHybridGemmBitwiseIdenticalBlockFP8:
             out_hybrid = model_hybrid(inp_hybrid)
         out_hybrid.float().sum().backward()
 
-        assert torch.equal(out_ref, out_hybrid), (
-            f"Forward mismatch: max diff = {(out_ref - out_hybrid).abs().max().item()}"
-        )
-        assert torch.equal(inp_ref.grad, inp_hybrid.grad), (
-            f"Input grad mismatch: max diff = "
-            f"{(inp_ref.grad - inp_hybrid.grad).abs().max().item()}"
-        )
+        assert torch.equal(
+            out_ref, out_hybrid
+        ), f"Forward mismatch: max diff = {(out_ref - out_hybrid).abs().max().item()}"
+        assert torch.equal(
+            inp_ref.grad, inp_hybrid.grad
+        ), f"Input grad mismatch: max diff = {(inp_ref.grad - inp_hybrid.grad).abs().max().item()}"
         for name, p_ref in dict(model_ref.named_parameters()).items():
             p_hyb = dict(model_hybrid.named_parameters())[name]
-            assert p_ref.grad is not None and p_hyb.grad is not None, (
-                f"Missing gradient for param '{name}'"
-            )
+            assert (
+                p_ref.grad is not None and p_hyb.grad is not None
+            ), f"Missing gradient for param '{name}'"
             assert torch.equal(p_ref.grad, p_hyb.grad), (
                 f"Param '{name}' grad mismatch: max diff = "
                 f"{(p_ref.grad - p_hyb.grad).abs().max().item()}"
@@ -627,18 +629,17 @@ class TestHybridGemmBitwiseIdenticalNVFP4:
             out_hybrid = model_hybrid(inp_hybrid)
         out_hybrid.float().sum().backward()
 
-        assert torch.equal(out_ref, out_hybrid), (
-            f"Forward mismatch: max diff = {(out_ref - out_hybrid).abs().max().item()}"
-        )
-        assert torch.equal(inp_ref.grad, inp_hybrid.grad), (
-            f"Input grad mismatch: max diff = "
-            f"{(inp_ref.grad - inp_hybrid.grad).abs().max().item()}"
-        )
+        assert torch.equal(
+            out_ref, out_hybrid
+        ), f"Forward mismatch: max diff = {(out_ref - out_hybrid).abs().max().item()}"
+        assert torch.equal(
+            inp_ref.grad, inp_hybrid.grad
+        ), f"Input grad mismatch: max diff = {(inp_ref.grad - inp_hybrid.grad).abs().max().item()}"
         for name, p_ref in dict(model_ref.named_parameters()).items():
             p_hyb = dict(model_hybrid.named_parameters())[name]
-            assert p_ref.grad is not None and p_hyb.grad is not None, (
-                f"Missing gradient for param '{name}'"
-            )
+            assert (
+                p_ref.grad is not None and p_hyb.grad is not None
+            ), f"Missing gradient for param '{name}'"
             assert torch.equal(p_ref.grad, p_hyb.grad), (
                 f"Param '{name}' grad mismatch: max diff = "
                 f"{(p_ref.grad - p_hyb.grad).abs().max().item()}"
@@ -680,18 +681,17 @@ class TestHybridGemmBitwiseIdenticalNVFP4:
             out_hybrid = model_hybrid(inp_hybrid)
         out_hybrid.float().sum().backward()
 
-        assert torch.equal(out_ref, out_hybrid), (
-            f"Forward mismatch: max diff = {(out_ref - out_hybrid).abs().max().item()}"
-        )
-        assert torch.equal(inp_ref.grad, inp_hybrid.grad), (
-            f"Input grad mismatch: max diff = "
-            f"{(inp_ref.grad - inp_hybrid.grad).abs().max().item()}"
-        )
+        assert torch.equal(
+            out_ref, out_hybrid
+        ), f"Forward mismatch: max diff = {(out_ref - out_hybrid).abs().max().item()}"
+        assert torch.equal(
+            inp_ref.grad, inp_hybrid.grad
+        ), f"Input grad mismatch: max diff = {(inp_ref.grad - inp_hybrid.grad).abs().max().item()}"
         for name, p_ref in dict(model_ref.named_parameters()).items():
             p_hyb = dict(model_hybrid.named_parameters())[name]
-            assert p_ref.grad is not None and p_hyb.grad is not None, (
-                f"Missing gradient for param '{name}'"
-            )
+            assert (
+                p_ref.grad is not None and p_hyb.grad is not None
+            ), f"Missing gradient for param '{name}'"
             assert torch.equal(p_ref.grad, p_hyb.grad), (
                 f"Param '{name}' grad mismatch: max diff = "
                 f"{(p_ref.grad - p_hyb.grad).abs().max().item()}"
@@ -711,7 +711,11 @@ class TestHybridGemmMixedFormat:
 
         model = Linear(in_features, out_features, params_dtype=torch.bfloat16).cuda()
         inp = torch.randn(
-            batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True,
+            batch,
+            in_features,
+            device="cuda",
+            dtype=torch.bfloat16,
+            requires_grad=True,
         )
 
         def mixed_factory(role):
@@ -778,7 +782,10 @@ class TestHybridGemmMixedFormat:
         # FP8/FP4 quantization introduces error, but the result should be
         # in the same ballpark as BF16
         torch.testing.assert_close(
-            out_mixed.float(), out_bf16.float(), rtol=0.25, atol=0.5,
+            out_mixed.float(),
+            out_bf16.float(),
+            rtol=0.25,
+            atol=0.5,
         )
 
 
@@ -817,12 +824,14 @@ class TestUnwrapHybridDirection:
 
     def test_tn_sub_storage_type(self, hybrid_tensor):
         assert isinstance(
-            _unwrap_hybrid_A(hybrid_tensor, "TN"), (Float8TensorStorage, Float8Tensor),
+            _unwrap_hybrid_A(hybrid_tensor, "TN"),
+            (Float8TensorStorage, Float8Tensor),
         )
 
     def test_nt_sub_storage_type(self, hybrid_tensor):
         assert isinstance(
-            _unwrap_hybrid_B(hybrid_tensor, "NT"), (NVFP4TensorStorage, NVFP4Tensor),
+            _unwrap_hybrid_B(hybrid_tensor, "NT"),
+            (NVFP4TensorStorage, NVFP4Tensor),
         )
 
     def test_non_hybrid_passthrough(self):
@@ -852,26 +861,30 @@ class TestHybridBiasGradient:
         def factory(role):
             if role in ("linear_grad_output", "linear_grad_input"):
                 return Float8CurrentScalingQuantizer(
-                    tex.DType.kFloat8E5M2, device="cuda",
+                    tex.DType.kFloat8E5M2,
+                    device="cuda",
                 )
             return HybridQuantizer(
                 rowwise_quantizer=Float8CurrentScalingQuantizer(
-                    tex.DType.kFloat8E4M3, device="cuda",
+                    tex.DType.kFloat8E4M3,
+                    device="cuda",
                 ),
                 columnwise_quantizer=Float8CurrentScalingQuantizer(
-                    tex.DType.kFloat8E4M3, device="cuda",
+                    tex.DType.kFloat8E4M3,
+                    device="cuda",
                 ),
             )
+
         return factory
 
     def test_bias_grad_matches_vanilla_fp8(self):
         torch.manual_seed(456)
         in_features, out_features, batch = 64, 64, 16
 
-        model_ref = Linear(in_features, out_features, bias=True,
-                           params_dtype=torch.bfloat16).cuda()
-        model_hybrid = Linear(in_features, out_features, bias=True,
-                              params_dtype=torch.bfloat16).cuda()
+        model_ref = Linear(in_features, out_features, bias=True, params_dtype=torch.bfloat16).cuda()
+        model_hybrid = Linear(
+            in_features, out_features, bias=True, params_dtype=torch.bfloat16
+        ).cuda()
         model_hybrid.load_state_dict(model_ref.state_dict())
 
         base_inp = torch.randn(batch, in_features, device="cuda", dtype=torch.bfloat16)
@@ -884,31 +897,32 @@ class TestHybridBiasGradient:
 
         # Hybrid
         inp_hyb = base_inp.clone().detach().requires_grad_(True)
-        with autocast(enabled=True,
-                      recipe=recipe.CustomRecipe(qfactory=self._make_uniform_hybrid_factory())):
+        with autocast(
+            enabled=True, recipe=recipe.CustomRecipe(qfactory=self._make_uniform_hybrid_factory())
+        ):
             out_hyb = model_hybrid(inp_hyb)
         out_hyb.float().sum().backward()
 
         ref_bias_grad = dict(model_ref.named_parameters())["bias"].grad
         hyb_bias_grad = dict(model_hybrid.named_parameters())["bias"].grad
         assert ref_bias_grad is not None and hyb_bias_grad is not None
-        assert torch.equal(ref_bias_grad, hyb_bias_grad), (
-            f"Bias grad mismatch: max diff = "
-            f"{(ref_bias_grad - hyb_bias_grad).abs().max().item()}"
-        )
+        assert torch.equal(
+            ref_bias_grad, hyb_bias_grad
+        ), f"Bias grad mismatch: max diff = {(ref_bias_grad - hyb_bias_grad).abs().max().item()}"
 
     def test_no_bias_fwd_bwd(self):
         """Linear with bias=False skips bgrad_quantize entirely."""
         torch.manual_seed(42)
         in_features, out_features, batch = 64, 64, 16
 
-        model = Linear(in_features, out_features, bias=False,
-                       params_dtype=torch.bfloat16).cuda()
-        inp = torch.randn(batch, in_features, device="cuda",
-                          dtype=torch.bfloat16, requires_grad=True)
+        model = Linear(in_features, out_features, bias=False, params_dtype=torch.bfloat16).cuda()
+        inp = torch.randn(
+            batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True
+        )
 
-        with autocast(enabled=True,
-                      recipe=recipe.CustomRecipe(qfactory=self._make_uniform_hybrid_factory())):
+        with autocast(
+            enabled=True, recipe=recipe.CustomRecipe(qfactory=self._make_uniform_hybrid_factory())
+        ):
             out = model(inp)
         out.float().sum().backward()
 
@@ -932,8 +946,7 @@ class TestHybridScalingModeCompatibility:
         torch.manual_seed(42)
         # NVFP4 GEMM requires dimensions ≥ 128 for cuBLAS support.
         model = Linear(128, 128, params_dtype=torch.bfloat16).cuda()
-        inp = torch.randn(32, 128, device="cuda", dtype=torch.bfloat16,
-                          requires_grad=True)
+        inp = torch.randn(32, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
 
         def factory(role):
             if role in ("linear_input", "linear_weight"):
@@ -954,8 +967,7 @@ class TestHybridScalingModeCompatibility:
         """NVFP4 input × FP8 grad_output columnwise → cuBLAS rejects."""
         torch.manual_seed(42)
         model = Linear(128, 128, params_dtype=torch.bfloat16).cuda()
-        inp = torch.randn(32, 128, device="cuda", dtype=torch.bfloat16,
-                          requires_grad=True)
+        inp = torch.randn(32, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
 
         def factory(role):
             if role in ("linear_input", "linear_weight"):
@@ -965,7 +977,8 @@ class TestHybridScalingModeCompatibility:
                 )
             if role in ("linear_grad_output", "linear_grad_input"):
                 return Float8CurrentScalingQuantizer(
-                    tex.DType.kFloat8E5M2, device="cuda",
+                    tex.DType.kFloat8E5M2,
+                    device="cuda",
                 )
             return None
 
@@ -1015,8 +1028,9 @@ class TestHybridReversedDirection:
         in_features, out_features, batch = 128, 128, 32
 
         model = Linear(in_features, out_features, params_dtype=torch.bfloat16).cuda()
-        inp = torch.randn(batch, in_features, device="cuda",
-                          dtype=torch.bfloat16, requires_grad=True)
+        inp = torch.randn(
+            batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True
+        )
 
         def factory(role):
             if role in ("linear_input", "linear_weight"):
@@ -1065,8 +1079,9 @@ class TestHybridMixedWithNonHybrid:
         in_features, out_features, batch = 128, 128, 32
 
         model = Linear(in_features, out_features, params_dtype=torch.bfloat16).cuda()
-        inp = torch.randn(batch, in_features, device="cuda",
-                          dtype=torch.bfloat16, requires_grad=True)
+        inp = torch.randn(
+            batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True
+        )
 
         def factory(role):
             if role == "linear_input":
@@ -1076,11 +1091,13 @@ class TestHybridMixedWithNonHybrid:
                 )
             if role == "linear_weight":
                 return Float8CurrentScalingQuantizer(
-                    tex.DType.kFloat8E4M3, device="cuda",
+                    tex.DType.kFloat8E4M3,
+                    device="cuda",
                 )
             if role in ("linear_grad_output", "linear_grad_input"):
                 return Float8CurrentScalingQuantizer(
-                    tex.DType.kFloat8E5M2, device="cuda",
+                    tex.DType.kFloat8E5M2,
+                    device="cuda",
                 )
             return None
 
@@ -1104,13 +1121,15 @@ class TestHybridMixedWithNonHybrid:
         in_features, out_features, batch = 128, 128, 32
 
         model = Linear(in_features, out_features, params_dtype=torch.bfloat16).cuda()
-        inp = torch.randn(batch, in_features, device="cuda",
-                          dtype=torch.bfloat16, requires_grad=True)
+        inp = torch.randn(
+            batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True
+        )
 
         def factory(role):
             if role == "linear_input":
                 return Float8CurrentScalingQuantizer(
-                    tex.DType.kFloat8E4M3, device="cuda",
+                    tex.DType.kFloat8E4M3,
+                    device="cuda",
                 )
             if role == "linear_weight":
                 return HybridQuantizer(
@@ -1119,7 +1138,8 @@ class TestHybridMixedWithNonHybrid:
                 )
             if role in ("linear_grad_output", "linear_grad_input"):
                 return Float8CurrentScalingQuantizer(
-                    tex.DType.kFloat8E5M2, device="cuda",
+                    tex.DType.kFloat8E5M2,
+                    device="cuda",
                 )
             return None
 
@@ -1141,6 +1161,7 @@ class TestHybridMixedWithNonHybrid:
 # ---------------------------------------------------------------------------
 # Parametrized cross-format tests (stateless quantizers)
 # ---------------------------------------------------------------------------
+
 
 def _make_mxfp8_quantizer(*, rowwise=True, columnwise=True):
     return MXFP8Quantizer(
@@ -1209,25 +1230,26 @@ def _build_cross_format_params():
         ("fp8_current", "mxfp8"),
         ("fp8_current", "nvfp4"),
         ("fp8_current", "block_fp8"),
-        ("mxfp8",       "fp8_current"),
-        ("mxfp8",       "mxfp8"),
-        ("mxfp8",       "nvfp4"),
-        ("mxfp8",       "block_fp8"),
-        ("block_fp8",   "fp8_current"),
-        ("block_fp8",   "mxfp8"),
-        ("block_fp8",   "nvfp4"),
-        ("block_fp8",   "block_fp8"),
-        ("nvfp4",       "fp8_current"),
-        ("nvfp4",       "mxfp8"),
-        ("nvfp4",       "block_fp8"),
+        ("mxfp8", "fp8_current"),
+        ("mxfp8", "mxfp8"),
+        ("mxfp8", "nvfp4"),
+        ("mxfp8", "block_fp8"),
+        ("block_fp8", "fp8_current"),
+        ("block_fp8", "mxfp8"),
+        ("block_fp8", "nvfp4"),
+        ("block_fp8", "block_fp8"),
+        ("nvfp4", "fp8_current"),
+        ("nvfp4", "mxfp8"),
+        ("nvfp4", "block_fp8"),
     ]
     params = []
     for row, col in combos:
         row_cfg = _QUANTIZER_CONFIGS[row]
         col_cfg = _QUANTIZER_CONFIGS[col]
         hw_skip = row_cfg[2] or col_cfg[2]
-        hw_reason = "; ".join(filter(None, [row_cfg[3] if row_cfg[2] else "",
-                                            col_cfg[3] if col_cfg[2] else ""]))
+        hw_reason = "; ".join(
+            filter(None, [row_cfg[3] if row_cfg[2] else "", col_cfg[3] if col_cfg[2] else ""])
+        )
         marks = []
         if hw_skip:
             marks.append(pytest.mark.skipif(True, reason=hw_reason or "N/A"))
@@ -1244,8 +1266,9 @@ class TestHybridCrossFormatParametrized:
         in_features, out_features, batch = 128, 128, 32
 
         model = Linear(in_features, out_features, params_dtype=torch.bfloat16).cuda()
-        inp = torch.randn(batch, in_features, device="cuda",
-                          dtype=torch.bfloat16, requires_grad=True)
+        inp = torch.randn(
+            batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True
+        )
 
         row_cfg = _QUANTIZER_CONFIGS[row_name]
         col_cfg = _QUANTIZER_CONFIGS[col_name]
@@ -1275,14 +1298,12 @@ class TestHybridCrossFormatParametrized:
         loss.backward()
 
         assert inp.grad is not None, "Input gradient is None"
-        assert not torch.isnan(inp.grad).any(), (
-            f"Input grad NaN ({row_name} row × {col_name} col)"
-        )
+        assert not torch.isnan(inp.grad).any(), f"Input grad NaN ({row_name} row × {col_name} col)"
         for name, p in model.named_parameters():
             assert p.grad is not None, f"Gradient for '{name}' is None"
-            assert not torch.isnan(p.grad).any(), (
-                f"Gradient for '{name}' NaN ({row_name} row × {col_name} col)"
-            )
+            assert not torch.isnan(
+                p.grad
+            ).any(), f"Gradient for '{name}' NaN ({row_name} row × {col_name} col)"
 
 
 # ---------------------------------------------------------------------------
@@ -1311,8 +1332,9 @@ class TestHybridThreeFormats:
         in_features, out_features, batch = 128, 128, 32
 
         model = Linear(in_features, out_features, params_dtype=torch.bfloat16).cuda()
-        inp = torch.randn(batch, in_features, device="cuda",
-                          dtype=torch.bfloat16, requires_grad=True)
+        inp = torch.randn(
+            batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True
+        )
 
         def factory(role):
             if role == "linear_weight":
@@ -1353,8 +1375,9 @@ class TestHybridThreeFormats:
         in_features, out_features, batch = 128, 128, 32
 
         model = Linear(in_features, out_features, params_dtype=torch.bfloat16).cuda()
-        inp = torch.randn(batch, in_features, device="cuda",
-                          dtype=torch.bfloat16, requires_grad=True)
+        inp = torch.randn(
+            batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True
+        )
 
         def factory(role):
             if role == "linear_weight":
@@ -1395,8 +1418,9 @@ class TestHybridThreeFormats:
         in_features, out_features, batch = 128, 128, 32
 
         model = Linear(in_features, out_features, params_dtype=torch.bfloat16).cuda()
-        inp = torch.randn(batch, in_features, device="cuda",
-                          dtype=torch.bfloat16, requires_grad=True)
+        inp = torch.randn(
+            batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True
+        )
 
         def factory(role):
             if role == "linear_weight":
@@ -1433,23 +1457,29 @@ class TestHybridThreeFormats:
 def _make_hybrid_fp8_factory():
     """Factory returning HybridQuantizer(FP8 row + FP8 col) for fwd roles,
     plain FP8 E5M2 for bwd roles."""
+
     def factory(role):
         if role in ("linear_input", "linear_weight", "linear_output"):
             return HybridQuantizer(
                 rowwise_quantizer=Float8CurrentScalingQuantizer(
-                    tex.DType.kFloat8E4M3, device="cuda",
+                    tex.DType.kFloat8E4M3,
+                    device="cuda",
                 ),
                 columnwise_quantizer=Float8CurrentScalingQuantizer(
-                    tex.DType.kFloat8E4M3, device="cuda",
+                    tex.DType.kFloat8E4M3,
+                    device="cuda",
                 ),
             )
         if role in ("linear_grad_output", "linear_grad_input"):
             return Float8CurrentScalingQuantizer(
-                tex.DType.kFloat8E5M2, device="cuda",
+                tex.DType.kFloat8E5M2,
+                device="cuda",
             )
         return Float8CurrentScalingQuantizer(
-            tex.DType.kFloat8E4M3, device="cuda",
+            tex.DType.kFloat8E4M3,
+            device="cuda",
         )
+
     return factory
 
 
@@ -1486,34 +1516,48 @@ class TestHybridAllModules:
     def test_linear(self):
         torch.manual_seed(500)
         model = Linear(
-            self.hidden_size, self.ffn_hidden_size, params_dtype=torch.bfloat16,
+            self.hidden_size,
+            self.ffn_hidden_size,
+            params_dtype=torch.bfloat16,
         ).cuda()
         inp = torch.randn(
-            self.batch, self.hidden_size, device="cuda",
-            dtype=torch.bfloat16, requires_grad=True,
+            self.batch,
+            self.hidden_size,
+            device="cuda",
+            dtype=torch.bfloat16,
+            requires_grad=True,
         )
         self._run_fwd_bwd(model, inp)
 
     def test_layernorm_linear(self):
         torch.manual_seed(501)
         model = LayerNormLinear(
-            self.hidden_size, self.ffn_hidden_size, params_dtype=torch.bfloat16,
+            self.hidden_size,
+            self.ffn_hidden_size,
+            params_dtype=torch.bfloat16,
         ).cuda()
         inp = torch.randn(
-            self.batch, self.hidden_size, device="cuda",
-            dtype=torch.bfloat16, requires_grad=True,
+            self.batch,
+            self.hidden_size,
+            device="cuda",
+            dtype=torch.bfloat16,
+            requires_grad=True,
         )
         self._run_fwd_bwd(model, inp)
 
     def test_layernorm_mlp(self):
         torch.manual_seed(502)
         model = LayerNormMLP(
-            hidden_size=self.hidden_size, ffn_hidden_size=self.ffn_hidden_size,
+            hidden_size=self.hidden_size,
+            ffn_hidden_size=self.ffn_hidden_size,
             params_dtype=torch.bfloat16,
         ).cuda()
         inp = torch.randn(
-            self.batch, self.hidden_size, device="cuda",
-            dtype=torch.bfloat16, requires_grad=True,
+            self.batch,
+            self.hidden_size,
+            device="cuda",
+            dtype=torch.bfloat16,
+            requires_grad=True,
         )
         self._run_fwd_bwd(model, inp)
 
@@ -1521,12 +1565,17 @@ class TestHybridAllModules:
         torch.manual_seed(504)
         num_gemms = 3
         model = GroupedLinear(
-            num_gemms, self.hidden_size, self.ffn_hidden_size,
+            num_gemms,
+            self.hidden_size,
+            self.ffn_hidden_size,
             params_dtype=torch.bfloat16,
         ).cuda()
         inp = torch.randn(
-            self.batch, self.hidden_size, device="cuda",
-            dtype=torch.bfloat16, requires_grad=True,
+            self.batch,
+            self.hidden_size,
+            device="cuda",
+            dtype=torch.bfloat16,
+            requires_grad=True,
         )
         base = self.batch // num_gemms
         rem = self.batch % num_gemms
@@ -1550,12 +1599,20 @@ class TestHybridAllModules:
     def test_transformer_layer(self):
         torch.manual_seed(503)
         model = TransformerLayer(
-            self.hidden_size, self.ffn_hidden_size, self.num_heads,
-            hidden_dropout=0.0, attention_dropout=0.0,
-            fuse_qkv_params=True, params_dtype=torch.bfloat16,
+            self.hidden_size,
+            self.ffn_hidden_size,
+            self.num_heads,
+            hidden_dropout=0.0,
+            attention_dropout=0.0,
+            fuse_qkv_params=True,
+            params_dtype=torch.bfloat16,
         ).cuda()
         inp = torch.randn(
-            self.seq_len, self.batch, self.hidden_size, device="cuda",
-            dtype=torch.bfloat16, requires_grad=True,
+            self.seq_len,
+            self.batch,
+            self.hidden_size,
+            device="cuda",
+            dtype=torch.bfloat16,
+            requires_grad=True,
         )
         self._run_fwd_bwd(model, inp)

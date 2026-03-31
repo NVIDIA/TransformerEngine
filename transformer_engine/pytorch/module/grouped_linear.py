@@ -86,9 +86,14 @@ def _hybrid_split_quantize(tensor, m_splits, quantizers):
             fake_dtype=tensor.dtype,
         )
         for row, col, rq, cq, q in zip(
-            row_results, col_results, row_quantizers, col_quantizers, quantizers,
+            row_results,
+            col_results,
+            row_quantizers,
+            col_quantizers,
+            quantizers,
         )
     ]
+
 
 __all__ = ["GroupedLinear"]
 
@@ -411,7 +416,9 @@ class _GroupedLinear(torch.autograd.Function):
                     for i in range(ctx.num_gemms):
                         grad_biases[i] = grad_output_mats[i].sum(dim=0)
                 grad_output = _hybrid_split_quantize(
-                    grad_output_view, ctx.m_splits, ctx.grad_output_quantizers,
+                    grad_output_view,
+                    ctx.m_splits,
+                    ctx.grad_output_quantizers,
                 )
             elif ctx.debug:
                 grad_output_mats = torch.split(grad_output_view, ctx.m_splits)
@@ -503,7 +510,9 @@ class _GroupedLinear(torch.autograd.Function):
                     if ctx.fp8 and not ctx.debug and not input_hybrid:
                         inputmats = tex.split_quantize(inp_view, ctx.m_splits, ctx.input_quantizers)
                     elif ctx.fp8 and input_hybrid:
-                        inputmats = _hybrid_split_quantize(inp_view, ctx.m_splits, ctx.input_quantizers)
+                        inputmats = _hybrid_split_quantize(
+                            inp_view, ctx.m_splits, ctx.input_quantizers
+                        )
                     elif ctx.debug:
                         inputmats = DebugQuantizer.multi_tensor_quantize(
                             inp_view,

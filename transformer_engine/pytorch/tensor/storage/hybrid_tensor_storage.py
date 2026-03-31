@@ -134,9 +134,7 @@ class HybridQuantizedTensorStorage(QuantizedTensorStorage):
         raise RuntimeError("HybridQuantizedTensorStorage has no data")
 
     def view(self, shape: torch.Size):
-        raise NotImplementedError(
-            "HybridQuantizedTensorStorage does not support view operations"
-        )
+        raise NotImplementedError("HybridQuantizedTensorStorage does not support view operations")
 
     def get_metadata(self) -> Dict[str, Any]:
         return {
@@ -150,7 +148,7 @@ class HybridQuantizedTensorStorage(QuantizedTensorStorage):
 
     def __repr__(self):
         return (
-            f"HybridQuantizedTensorStorage("
+            "HybridQuantizedTensorStorage("
             f"rowwise={type(self._rowwise_storage).__name__}, "
             f"columnwise={type(self._columnwise_storage).__name__}, "
             f"dtype={self._dtype})"
