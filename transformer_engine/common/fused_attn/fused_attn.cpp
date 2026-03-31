@@ -760,8 +760,9 @@ void nvte_fused_attn_fwd(
     fused_attn_arbitrary_seqlen_fwd(
         b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, t_q, t_kv, num_pages_k, num_pages_v,
         page_size_k, page_size_v, max_pages_per_seq_k, max_pages_per_seq_v, is_training,
-        return_max_logit, attn_scale, dropout, qkv_layout, bias_type, attn_mask_type, softmax_type,
-        window_size_left, window_size_right, bottom_right_diagonal, input_Q, input_K, input_V,
+        return_max_logit, attn_scale, dropout, qkv_layout, o_format, bias_type, attn_mask_type,
+        softmax_type, window_size_left, window_size_right, bottom_right_diagonal, input_Q, input_K,
+        input_V,
         input_Bias, input_SoftmaxOffset, output_O, Aux_CTX_Tensors, input_cu_seqlens_q,
         input_cu_seqlens_kv, input_cu_seqlens_q_padded, input_cu_seqlens_kv_padded,
         input_page_table_k, input_page_table_v, input_rng_state, wkspace, stream, handle);
@@ -869,8 +870,9 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
     }
     fused_attn_arbitrary_seqlen_bwd(
         b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, t_q, t_kv, attn_scale, dropout,
-        qkv_layout, bias_type, attn_mask_type, softmax_type, window_size_left, window_size_right,
-        bottom_right_diagonal, deterministic, input_Q, input_K, input_V, input_O, input_dO,
+        qkv_layout, o_format, do_format, dqkv_layout, bias_type, attn_mask_type, softmax_type,
+        window_size_left, window_size_right, bottom_right_diagonal, deterministic, input_Q, input_K,
+        input_V, input_O, input_dO,
         input_Bias, input_SoftmaxOffset, output_S, output_dQ, output_dK, output_dV, output_dBias,
         output_dSoftmaxOffset, input_cu_seqlens_q, input_cu_seqlens_kv, input_cu_seqlens_q_padded,
         input_cu_seqlens_kv_padded, input_rng_state, wkspace, stream, handle);
