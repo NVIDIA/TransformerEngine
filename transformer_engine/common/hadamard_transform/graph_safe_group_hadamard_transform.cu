@@ -366,12 +366,10 @@ __global__ void GraphSafeGroupHadamardAmaxTmaKernel(
                   (compute_stage_x * kHadamardDimension * (THREADS_PER_CHUNK / kThreadsPerWarp)),
               local_pre_rht_amax_reg, local_amax_reg, local_amax_t_reg);
         }
-
-        // Ensure all threads have finished their computation before new data over-writes the shared
-        // memory.
-        __syncthreads();
       }
-
+      // Ensure all threads have finished their computation before new data over-writes the shared
+      // memory.
+      __syncthreads();
       // Ensure generic shared-memory accesses are visible before the next TMA write.
       ptx::fence_proxy_async_shared_cta();
     }
