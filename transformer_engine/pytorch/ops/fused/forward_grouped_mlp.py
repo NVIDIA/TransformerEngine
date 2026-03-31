@@ -559,7 +559,9 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
                 fc1_x_tensor_offsets,  # tensor_offsets
             )
             # FC1
-            fc1_weight_tensors = [grouped_fc1_weight] if fc1_op.single_grouped_parameter else grouped_fc1_weight
+            fc1_weight_tensors = (
+                [grouped_fc1_weight] if fc1_op.single_grouped_parameter else grouped_fc1_weight
+            )
             fc1_ctx.save_for_backward(
                 split_sizes, split_points, *fc1_weight_tensors, *fc1_input_tensors
             )

@@ -186,12 +186,10 @@ def fuse_grouped_mlp_ops(
         return ops
 
     fc1_bias_ok = (
-        not hasattr(fused_op_cls, "is_fc1_bias_supported")
-        or fused_op_cls.is_fc1_bias_supported()
+        not hasattr(fused_op_cls, "is_fc1_bias_supported") or fused_op_cls.is_fc1_bias_supported()
     )
     fc2_bias_ok = (
-        not hasattr(fused_op_cls, "is_fc2_bias_supported")
-        or fused_op_cls.is_fc2_bias_supported()
+        not hasattr(fused_op_cls, "is_fc2_bias_supported") or fused_op_cls.is_fc2_bias_supported()
     )
 
     out = []
