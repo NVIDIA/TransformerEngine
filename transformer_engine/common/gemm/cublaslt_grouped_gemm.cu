@@ -29,11 +29,10 @@ inline void CreateCublasHandle(cublasLtHandle_t *handle) {
 
 }  // namespace
 
-// MXFP8 support for grouped GEMM requires cuBLAS 13.2+
-#define CUBLAS_MXFP8_GROUPED_GEMM_VERSION 130200
-// BF16 support for grouped GEMM requires cuBLAS 13.2+
-// cuBLAS 13.2 is mostly functional but contains a bug for wgrad when a group has k=0, the weight gradient will be uninitialized random data instead of zeros.
-#define CUBLAS_GROUPED_GEMM_VERSION 130200
+// MXFP8 support for grouped GEMM requires cuBLAS 13.3+
+#define CUBLAS_MXFP8_GROUPED_GEMM_VERSION 130300
+// BF16 support for grouped GEMM requires cuBLAS 13.3+
+#define CUBLAS_GROUPED_GEMM_VERSION 130300
 
 #if CUBLAS_VERSION >= CUBLAS_GROUPED_GEMM_VERSION
 
@@ -1089,7 +1088,7 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
   NVTE_API_CALL(nvte_grouped_gemm);
   using namespace transformer_engine;
 
-  // Grouped GEMM requires Blackwell (SM100) or newer and cuBLAS 13.2+
+  // Grouped GEMM requires Blackwell (SM100) or newer and cuBLAS 13.3+
   check_grouped_gemm_requirements("nvte_grouped_gemm");
 
   // Convert to internal types
@@ -1154,7 +1153,7 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
   NVTE_API_CALL(nvte_grouped_gemm_with_discrete_inputA);
   using namespace transformer_engine;
 
-  // Grouped GEMM requires Blackwell (SM100) or newer and cuBLAS 13.2+
+  // Grouped GEMM requires Blackwell (SM100) or newer and cuBLAS 13.3+
   check_grouped_gemm_requirements("nvte_grouped_gemm_with_discrete_inputA");
 
   NVTE_CHECK(A_list != nullptr, "Grouped GEMM: A_list is null.");
@@ -1278,7 +1277,7 @@ void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
   NVTE_API_CALL(nvte_grouped_gemm_with_discrete_out);
   using namespace transformer_engine;
 
-  // Grouped GEMM requires Blackwell (SM100) or newer and cuBLAS 13.2+
+  // Grouped GEMM requires Blackwell (SM100) or newer and cuBLAS 13.3+
   check_grouped_gemm_requirements("nvte_grouped_gemm_with_discrete_out");
 
   NVTE_CHECK(D_list != nullptr, "Grouped GEMM: D_list is null.");

@@ -423,7 +423,7 @@ std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor_for_gemm(
   return SwizzledGroupedScales{std::move(rowwise_scales_pyt), std::move(columnwise_scales_pyt)};
 }
 
-void swizzle_grouped_scales_for_gemm(py::handle &tensor, bool rowwise, bool columnwise) {
+void swizzle_grouped_scales(py::handle &tensor, bool rowwise, bool columnwise) {
   using namespace transformer_engine::pytorch::detail;
 
   auto tensor_nvte = GroupedTensorFromPyTorchGroupedTensor(tensor);

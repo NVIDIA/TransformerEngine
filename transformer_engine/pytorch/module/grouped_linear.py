@@ -6,7 +6,6 @@
 from typing import Union, Optional, Callable, Tuple, List
 from itertools import chain
 import warnings
-import os
 
 import functools
 import torch
@@ -638,12 +637,6 @@ class GroupedLinear(TransformerEngineBaseModule):
         name: Optional[str] = None,
     ) -> None:
         super().__init__(name)
-
-        # Temporary for quick testing.
-        if os.getenv("_NVTE_SINGLE_GROUPED_PARAMETER_TMP_VAR", None) == "1":
-            single_grouped_parameter = True
-        if os.getenv("_NVTE_SINGLE_GROUPED_BIAS_TMP_VAR", None) == "1":
-            single_grouped_bias = True
 
         self.params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
         self.num_gemms = num_gemms

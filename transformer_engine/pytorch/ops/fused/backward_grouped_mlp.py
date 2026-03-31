@@ -214,13 +214,13 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         fc2_weight_for_gemm = grouped_fc2_weight
         if fc2_op.single_grouped_parameter:
             fc2_weight_for_gemm = clone_grouped_tensor_storage(grouped_fc2_weight)
-            tex.swizzle_grouped_scales_for_gemm(
+            tex.swizzle_grouped_scales(
                 fc2_weight_for_gemm, rowwise=False, columnwise=True
             )
         fc1_weight_for_gemm = grouped_fc1_weight
         if fc1_op.single_grouped_parameter:
             fc1_weight_for_gemm = clone_grouped_tensor_storage(grouped_fc1_weight)
-            tex.swizzle_grouped_scales_for_gemm(
+            tex.swizzle_grouped_scales(
                 fc1_weight_for_gemm, rowwise=False, columnwise=True
             )
 
@@ -303,7 +303,7 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
             1,
             out_shape[0] // 128,
             out_shape[1] // 128,
-            32,
+            MXFP8_BLOCK_SCALING_SIZE,
             4,
             4,
         )
@@ -327,7 +327,7 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
                 num_groups,
                 fc2_weight_shape[1] // 128,
                 fc2_weight_shape[0] // 128,
-                32,
+                MXFP8_BLOCK_SCALING_SIZE,
                 4,
                 4,
             )
@@ -408,7 +408,7 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         fc1_dy_row_scale = fc2_dgrad_kernel_out["sfd_row_tensor"]
         fc1_dy_row_scale = fc1_dy_row_scale.permute(5, 2, 4, 0, 1, 3)
         fc1_dy_row_scale = fc1_dy_row_scale.view(
-            out_shape[0], fc1_weight_shape[0] // 32
+            out_shape[0], fc1_weight_shape[0] // MXFP8_BLOCK_SCALING_SIZE
         ).contiguous()
         fc1_dy_col_data = fc2_dgrad_kernel_out["d_col_tensor"]
         fc1_dy_col_data = fc1_dy_col_data.permute(2, 0, 1)
@@ -647,7 +647,7 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
                     num_groups,
                     fc1_weight_shape[1] // 128,
                     fc1_weight_shape[0] // 128,
-                    32,
+                    MXFP8_BLOCK_SCALING_SIZE,
                     4,
                     4,
                 )

@@ -667,8 +667,10 @@ class GroupedLinear(BasicOperation):
         device = weight_param.device
 
         if self._accumulate_into_main_grad:
-            assert hasattr(weight_param, "main_grad"), "MAIN GRAD NOT FOUND"
-            assert weight_param.main_grad is not None, "MAIN GRAD IS NONE"
+            if not hasattr(weight_param, "main_grad"):
+                raise RuntimeError("MAIN GRAD NOT FOUND")
+            if weight_param.main_grad is None:
+                raise RuntimeError("MAIN GRAD IS NONE")
 
         # Check which grads are required
         ctx = basic_op_ctxs[0]

@@ -12,7 +12,7 @@
 
 namespace {
 
-constexpr int64_t kMaxKernelAddresses = 64;
+constexpr int64_t kMaxKernelAddresses = 256;
 
 struct HostPointersArgs {
   uint64_t ptrs[kMaxKernelAddresses];
