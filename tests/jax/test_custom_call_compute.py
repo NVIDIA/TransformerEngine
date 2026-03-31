@@ -1959,7 +1959,9 @@ class TestDebugInspectFFI:
 
 
 @pytest.mark.parametrize("dtype", [jnp.bfloat16, jnp.float16, jnp.float32])
-@pytest.mark.parametrize("problem_size", [(10000, 100), (50000, 200), (100000, 500), (1000000, 1000), (5000000, 2000)])
+@pytest.mark.parametrize(
+    "problem_size", [(10000, 100), (50000, 200), (100000, 500), (1000000, 1000), (5000000, 2000)]
+)
 class TestTopk:
     def test_topk(self, dtype, problem_size):
         n, k = problem_size
@@ -1967,7 +1969,9 @@ class TestTopk:
         prng_key = jax.random.PRNGKey(0)
         keys = jax.random.split(prng_key, 3)
         topk_values = jax.random.uniform(keys[0], shape=(k,), dtype=dtype, minval=1.5, maxval=2.5)
-        bottom_values = jax.random.uniform(keys[1], shape=(n-k,), dtype=dtype, minval=0.0, maxval=1.0)
+        bottom_values = jax.random.uniform(
+            keys[1], shape=(n - k,), dtype=dtype, minval=0.0, maxval=1.0
+        )
         x = jnp.concatenate([topk_values, bottom_values])
         x = jax.random.permutation(keys[2], x)
 
@@ -1986,7 +1990,7 @@ class TestTopk:
         # sort and sort_key_val are ascending, make sure the smallest topk value
         # prim_topk[0] is not smaller than the k+1 largest value in the original array
         sorted_x = jax.lax.sort(x)
-        assert(prim_topk[0] >= sorted_x[-(k+1)])
+        assert prim_topk[0] >= sorted_x[-(k + 1)]
 
         # TopK values can be duplicated, instead of directly comparing the indices, we check
         # if the values at the returned indices are the same
