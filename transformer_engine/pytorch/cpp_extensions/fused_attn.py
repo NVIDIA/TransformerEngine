@@ -368,11 +368,15 @@ def fused_attn_fwd(
                 # For THD on older cuDNN runtimes or THD on sm120, stats can be [b, h, sq, 1] with padded
                 # sequence positions. Exclude those padded positions when computing max_logit.
                 seqlens_q = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).to(device=max_tensor.device)
-                sq_idx = torch.arange(max_tensor.shape[2], device=max_tensor.device).view(1, 1, -1, 1)
+                sq_idx = torch.arange(max_tensor.shape[2], device=max_tensor.device).view(
+                    1, 1, -1, 1
+                )
                 valid = sq_idx < seqlens_q.view(-1, 1, 1, 1)
                 max_tensor = max_tensor.masked_fill(~valid, float("-inf"))
             elif max_tensor.ndim == 3:
-                assert cu_seqlens_q_padded is not None, "cu_seqlens_q_padded must be not None when qkv_format = thd!"
+                assert (
+                    cu_seqlens_q_padded is not None
+                ), "cu_seqlens_q_padded must be not None when qkv_format = thd!"
                 # For THD on newer cuDNN runtimes (non-sm120), Max is [tq, h, 1] with
                 # padded positions containing junk. Mask them out with -inf.
                 actual_seqlens = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
@@ -383,9 +387,7 @@ def fused_attn_fwd(
                 # Stack [actual, pad] per batch into counts: e.g. [3,1, 3,1, 2,2, 7,1]
                 counts = torch.stack([actual_seqlens, pad_lens], dim=1).flatten()
                 # Tile [T, F] per batch: [T,F, T,F, T,F, T,F]
-                values = torch.tensor(
-                    [True, False], device=max_tensor.device
-                ).repeat(b)
+                values = torch.tensor([True, False], device=max_tensor.device).repeat(b)
                 # Expand: T×3, F×1, T×3, F×1, T×2, F×2, T×7, F×1 → TTTF|TTTF|TTFF|TTTTTTTF
                 valid = torch.repeat_interleave(values, counts)
                 # Finally, replace invalid (F) positions with -inf
