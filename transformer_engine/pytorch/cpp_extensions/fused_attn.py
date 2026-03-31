@@ -388,7 +388,7 @@ def fused_attn_fwd(
 
                     # Stack [actual, pad] per batch into counts: e.g. [3,1, 3,1, 2,2, 7,1]
                     counts = torch.stack([actual_seqlens, pad_lens], dim=1).flatten()
-                    # Tile [T, F] per batch: [T,F, T,F, T,F, T,F]
+                    # Tile [T, F] per sequence: [T,F, T,F, T,F, T,F]
                     values = torch.tensor([True, False], device=max_tensor.device).repeat(b)
                     # Expand: T×3, F×1, T×3, F×1, T×2, F×2, T×7, F×1 → TTTF|TTTF|TTFF|TTTTTTTF
                     valid = torch.repeat_interleave(values, counts)
