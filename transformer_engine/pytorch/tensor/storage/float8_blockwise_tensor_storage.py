@@ -73,6 +73,24 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
             if t is not None:
                 t.data = _empty_tensor()
 
+    def copy_from_storage(self, src: QuantizedTensorStorage) -> None:
+        """Copy data buffers from another Float8BlockwiseQTensorStorage."""
+        if not isinstance(src, Float8BlockwiseQTensorStorage):
+            raise TypeError("copy_from_storage expects Float8BlockwiseQTensorStorage")
+        if self._fp8_dtype != src._fp8_dtype:
+            raise RuntimeError("FP8 dtype mismatch in copy_from_storage")
+        if self._is_2D_scaled != src._is_2D_scaled:
+            raise RuntimeError("Scale layout mismatch in copy_from_storage")
+
+        def _copy_optional(dst: Optional[torch.Tensor], src_tensor: Optional[torch.Tensor]):
+            if dst is not None and src_tensor is not None:
+                dst.copy_(src_tensor)
+
+        _copy_optional(self._rowwise_data, src._rowwise_data)
+        _copy_optional(self._columnwise_data, src._columnwise_data)
+        _copy_optional(self._rowwise_scale_inv, src._rowwise_scale_inv)
+        _copy_optional(self._columnwise_scale_inv, src._columnwise_scale_inv)
+
     def get_metadata(self) -> Dict[str, Any]:
         """Get this tensor's metadata."""
         return {

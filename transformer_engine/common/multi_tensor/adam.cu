@@ -49,7 +49,7 @@ struct FP8Data {
 template <>
 struct FP8Data<false> {};
 
-template <typename PARAM_T, typename GRAD_T, typename FULL_T, typename index_t>
+template <typename PARAM_T, typename GRAD_T, typename FULL_T, typename MOMENT_T, typename index_t>
 struct AdamFunctorMaster {
   static constexpr bool is_fp8_type = is_fp8<PARAM_T>::value;
 
@@ -79,10 +79,10 @@ struct AdamFunctorMaster {
     PARAM_T *p = reinterpret_cast<PARAM_T *>(tl.addresses[1][tensor_loc]);
     p += chunk_idx * chunk_size;
 
-    FULL_T *m = reinterpret_cast<FULL_T *>(tl.addresses[2][tensor_loc]);
+    MOMENT_T *m = reinterpret_cast<MOMENT_T *>(tl.addresses[2][tensor_loc]);
     m += chunk_idx * chunk_size;
 
-    FULL_T *v = reinterpret_cast<FULL_T *>(tl.addresses[3][tensor_loc]);
+    MOMENT_T *v = reinterpret_cast<MOMENT_T *>(tl.addresses[3][tensor_loc]);
     v += chunk_idx * chunk_size;
 
     FULL_T *p_master = reinterpret_cast<FULL_T *>(tl.addresses[4][tensor_loc]);
@@ -147,8 +147,8 @@ struct AdamFunctorMaster {
         int i = i_start + threadIdx.x + ii * blockDim.x;
         if (i < n && i < chunk_size) {
           p_master[i] = static_cast<FULL_T>(r_p[ii]);
-          m[i] = static_cast<FULL_T>(r_m[ii]);
-          v[i] = static_cast<FULL_T>(r_v[ii]);
+          m[i] = static_cast<MOMENT_T>(r_m[ii]);
+          v[i] = static_cast<MOMENT_T>(r_v[ii]);
           if constexpr (is_fp8_type) {
             __builtin_assume(fp8_data.max >= 0);
             fp8_data.max = fmaxf(fabsf(r_p[ii]), fp8_data.max);
@@ -175,7 +175,7 @@ struct AdamFunctorMaster {
   }
 };
 
-template <typename GRAD_T, typename FULL_T, typename index_t>
+template <typename GRAD_T, typename FULL_T, typename MOMENT_T, typename index_t>
 struct AdamFunctorMasterParamRemainder {
   __device__ __forceinline__ void operator()(index_t chunk_size, volatile int *noop_gmem,
                                              TensorListMetadata<5> &tl,  // NOLINT(*)
@@ -194,10 +194,10 @@ struct AdamFunctorMasterParamRemainder {
     int16_t *p = reinterpret_cast<int16_t *>(tl.addresses[1][tensor_loc]);
     p += chunk_idx * chunk_size;
 
-    FULL_T *m = reinterpret_cast<FULL_T *>(tl.addresses[2][tensor_loc]);
+    MOMENT_T *m = reinterpret_cast<MOMENT_T *>(tl.addresses[2][tensor_loc]);
     m += chunk_idx * chunk_size;
 
-    FULL_T *v = reinterpret_cast<FULL_T *>(tl.addresses[3][tensor_loc]);
+    MOMENT_T *v = reinterpret_cast<MOMENT_T *>(tl.addresses[3][tensor_loc]);
     v += chunk_idx * chunk_size;
 
     int16_t *p_remainder = reinterpret_cast<int16_t *>(tl.addresses[4][tensor_loc]);
@@ -283,15 +283,15 @@ struct AdamFunctorMasterParamRemainder {
           p_remainder[i] = local_p_rem[ii];
           p[i] = local_p[ii];
 
-          m[i] = static_cast<FULL_T>(r_m[ii]);
-          v[i] = static_cast<FULL_T>(r_v[ii]);
+          m[i] = static_cast<MOMENT_T>(r_m[ii]);
+          v[i] = static_cast<MOMENT_T>(r_v[ii]);
         }
       }
     }
   }
 };
 
-template <typename PARAM_T, typename GRAD_T, typename FULL_T, typename index_t>
+template <typename PARAM_T, typename GRAD_T, typename FULL_T, typename MOMENT_T, typename index_t>
 struct AdamFunctor {
   __device__ __forceinline__ void operator()(index_t chunk_size, volatile int *noop_gmem,
                                              TensorListMetadata<4> &tl,  // NOLINT(*)
@@ -317,10 +317,10 @@ struct AdamFunctor {
     PARAM_T *p = reinterpret_cast<PARAM_T *>(tl.addresses[1][tensor_loc]);
     p += chunk_idx * chunk_size;
 
-    FULL_T *m = reinterpret_cast<FULL_T *>(tl.addresses[2][tensor_loc]);
+    MOMENT_T *m = reinterpret_cast<MOMENT_T *>(tl.addresses[2][tensor_loc]);
     m += chunk_idx * chunk_size;
 
-    FULL_T *v = reinterpret_cast<FULL_T *>(tl.addresses[3][tensor_loc]);
+    MOMENT_T *v = reinterpret_cast<MOMENT_T *>(tl.addresses[3][tensor_loc]);
     v += chunk_idx * chunk_size;
 
     n -= chunk_idx * chunk_size;
@@ -372,15 +372,15 @@ struct AdamFunctor {
         int i = i_start + threadIdx.x + ii * blockDim.x;
         if (i < n && i < chunk_size) {
           p[i] = static_cast<PARAM_T>(r_p[ii]);
-          m[i] = static_cast<FULL_T>(r_m[ii]);
-          v[i] = static_cast<FULL_T>(r_v[ii]);
+          m[i] = static_cast<MOMENT_T>(r_m[ii]);
+          v[i] = static_cast<MOMENT_T>(r_v[ii]);
         }
       }
     }
   }
 };
 
-template <typename T, typename FULL_T>
+template <typename T, typename FULL_T, typename MOMENT_T>
 struct AdamCapturableFunctor {
   __device__ __forceinline__ void operator()(int chunk_size, volatile int *noop_gmem,
                                              TensorListMetadata<4> &tl,  // NOLINT(*)
@@ -410,10 +410,10 @@ struct AdamCapturableFunctor {
     T *p = reinterpret_cast<T *>(tl.addresses[1][tensor_loc]);
     p += chunk_idx * chunk_size;
 
-    FULL_T *m = reinterpret_cast<FULL_T *>(tl.addresses[2][tensor_loc]);
+    MOMENT_T *m = reinterpret_cast<MOMENT_T *>(tl.addresses[2][tensor_loc]);
     m += chunk_idx * chunk_size;
 
-    FULL_T *v = reinterpret_cast<FULL_T *>(tl.addresses[3][tensor_loc]);
+    MOMENT_T *v = reinterpret_cast<MOMENT_T *>(tl.addresses[3][tensor_loc]);
     v += chunk_idx * chunk_size;
 
     n -= chunk_idx * chunk_size;
@@ -466,15 +466,15 @@ struct AdamCapturableFunctor {
         int i = i_start + threadIdx.x + ii * blockDim.x;
         if (i < n && i < chunk_size) {
           p[i] = static_cast<T>(r_p[ii]);
-          m[i] = static_cast<FULL_T>(r_m[ii]);
-          v[i] = static_cast<FULL_T>(r_v[ii]);
+          m[i] = static_cast<MOMENT_T>(r_m[ii]);
+          v[i] = static_cast<MOMENT_T>(r_v[ii]);
         }
       }
     }
   }
 };
 
-template <typename T, typename FULL_T>
+template <typename T, typename FULL_T, typename MOMENT_T>
 struct AdamCapturableMasterFunctor {
   __device__ __forceinline__ void operator()(int chunk_size, volatile int *noop_gmem,
                                              TensorListMetadata<5> &tl,  // NOLINT(*)
@@ -504,10 +504,10 @@ struct AdamCapturableMasterFunctor {
     T *p = reinterpret_cast<T *>(tl.addresses[1][tensor_loc]);
     p += chunk_idx * chunk_size;
 
-    FULL_T *m = reinterpret_cast<FULL_T *>(tl.addresses[2][tensor_loc]);
+    MOMENT_T *m = reinterpret_cast<MOMENT_T *>(tl.addresses[2][tensor_loc]);
     m += chunk_idx * chunk_size;
 
-    FULL_T *v = reinterpret_cast<FULL_T *>(tl.addresses[3][tensor_loc]);
+    MOMENT_T *v = reinterpret_cast<MOMENT_T *>(tl.addresses[3][tensor_loc]);
     v += chunk_idx * chunk_size;
 
     FULL_T *p_master = reinterpret_cast<FULL_T *>(tl.addresses[4][tensor_loc]);
@@ -564,8 +564,8 @@ struct AdamCapturableMasterFunctor {
         if (i < n && i < chunk_size) {
           p[i] = static_cast<T>(r_p[ii]);
           p_master[i] = static_cast<FULL_T>(r_p[ii]);
-          m[i] = static_cast<FULL_T>(r_m[ii]);
-          v[i] = static_cast<FULL_T>(r_v[ii]);
+          m[i] = static_cast<MOMENT_T>(r_m[ii]);
+          v[i] = static_cast<MOMENT_T>(r_v[ii]);
         }
       }
     }
@@ -606,12 +606,17 @@ void multi_tensor_adam_cuda(int chunk_size, Tensor noop_flag,
     NVTE_CHECK(tensor_lists[1][j]->dtype() == p_in_type_te, "Param tensor ", j,
                " has dtype=", to_string(tensor_lists[1][j]->dtype()),
                ", but expected dtype=", to_string(p_in_type_te));
-    NVTE_CHECK(tensor_lists[2][j]->dtype() == DType::kFloat32, "First moment tensor ", j,
-               " has dtype=", to_string(tensor_lists[2][j]->dtype()),
-               ", but expected dtype=", to_string(DType::kFloat32));
-    NVTE_CHECK(tensor_lists[3][j]->dtype() == DType::kFloat32, "Second moment tensor ", j,
-               " has dtype=", to_string(tensor_lists[3][j]->dtype()),
-               ", but expected dtype=", to_string(DType::kFloat32));
+    {
+      const bool m_is_fp32 = tensor_lists[2][j]->dtype() == DType::kFloat32;
+      const bool m_is_bf16 = tensor_lists[2][j]->dtype() == DType::kBFloat16;
+      const bool v_is_fp32 = tensor_lists[3][j]->dtype() == DType::kFloat32;
+      const bool v_is_bf16 = tensor_lists[3][j]->dtype() == DType::kBFloat16;
+      NVTE_CHECK((m_is_fp32 && v_is_fp32) || (m_is_bf16 && v_is_bf16),
+                 "First and second moment tensors must both be Float32 or both be BFloat16, but "
+                 "tensor ",
+                 j, " has first moment dtype=", to_string(tensor_lists[2][j]->dtype()),
+                 " and second moment dtype=", to_string(tensor_lists[3][j]->dtype()));
+    }
     if (num_tensor_lists == 5) {
       NVTE_CHECK(tensor_lists[4][j]->dtype() == DType::kFloat32, "Master param tensor ", j,
                  " has dtype=", to_string(tensor_lists[4][j]->dtype()),
@@ -633,6 +638,9 @@ void multi_tensor_adam_cuda(int chunk_size, Tensor noop_flag,
     }
   }
 
+  // Get moment dtype (m and v have the same dtype, already validated above)
+  const auto moment_type_te = tensor_lists[2][0]->dtype();
+
   // Launch kernel
   if (requires_64bit_indexing) {
     if (num_tensor_lists == 4) {
@@ -641,22 +649,26 @@ void multi_tensor_adam_cuda(int chunk_size, Tensor noop_flag,
           p_in_type_te, p_in_type,
           TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
               g_in_type_te, g_in_type,
-              multi_tensor_apply<4>((int64_t)BLOCK_SIZE, (int64_t)chunk_size, noop_flag,
-                                    tensor_lists,
-                                    AdamFunctor<p_in_type, g_in_type, float, int64_t>(), stream,
-                                    beta1, beta2, bias_correction1, bias_correction2, epsilon, lr,
-                                    (adamMode_t)mode, weight_decay);));
+              TRANSFORMER_ENGINE_TYPE_SWITCH_FP32_BF16(
+                  moment_type_te, moment_type,
+                  multi_tensor_apply<4>(
+                      (int64_t)BLOCK_SIZE, (int64_t)chunk_size, noop_flag, tensor_lists,
+                      AdamFunctor<p_in_type, g_in_type, float, moment_type, int64_t>(), stream,
+                      beta1, beta2, bias_correction1, bias_correction2, epsilon, lr,
+                      (adamMode_t)mode, weight_decay);)));
     } else {
       // g, p, m, v, p_master
       TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
           p_in_type_te, p_in_type,
           TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
               g_in_type_te, g_in_type,
-              multi_tensor_apply<5>((int64_t)BLOCK_SIZE, (int64_t)chunk_size, noop_flag,
-                                    tensor_lists,
-                                    AdamFunctorMaster<p_in_type, g_in_type, float, int64_t>(),
-                                    stream, beta1, beta2, bias_correction1, bias_correction2,
-                                    epsilon, lr, (adamMode_t)mode, weight_decay);));
+              TRANSFORMER_ENGINE_TYPE_SWITCH_FP32_BF16(
+                  moment_type_te, moment_type,
+                  multi_tensor_apply<5>(
+                      (int64_t)BLOCK_SIZE, (int64_t)chunk_size, noop_flag, tensor_lists,
+                      AdamFunctorMaster<p_in_type, g_in_type, float, moment_type, int64_t>(),
+                      stream, beta1, beta2, bias_correction1, bias_correction2, epsilon, lr,
+                      (adamMode_t)mode, weight_decay);)));
     }
   } else {
     if (num_tensor_lists == 4) {
@@ -665,20 +677,26 @@ void multi_tensor_adam_cuda(int chunk_size, Tensor noop_flag,
           p_in_type_te, p_in_type,
           TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
               g_in_type_te, g_in_type,
-              multi_tensor_apply<4>(BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,
-                                    AdamFunctor<p_in_type, g_in_type, float, int32_t>(), stream,
-                                    beta1, beta2, bias_correction1, bias_correction2, epsilon, lr,
-                                    (adamMode_t)mode, weight_decay);));
+              TRANSFORMER_ENGINE_TYPE_SWITCH_FP32_BF16(
+                  moment_type_te, moment_type,
+                  multi_tensor_apply<4>(
+                      BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,
+                      AdamFunctor<p_in_type, g_in_type, float, moment_type, int32_t>(), stream,
+                      beta1, beta2, bias_correction1, bias_correction2, epsilon, lr,
+                      (adamMode_t)mode, weight_decay);)));
     } else {
       // g, p, m, v, p_master
       TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
           p_in_type_te, p_in_type,
           TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
               g_in_type_te, g_in_type,
-              multi_tensor_apply<5>(BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,
-                                    AdamFunctorMaster<p_in_type, g_in_type, float, int32_t>(),
-                                    stream, beta1, beta2, bias_correction1, bias_correction2,
-                                    epsilon, lr, (adamMode_t)mode, weight_decay);));
+              TRANSFORMER_ENGINE_TYPE_SWITCH_FP32_BF16(
+                  moment_type_te, moment_type,
+                  multi_tensor_apply<5>(
+                      BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,
+                      AdamFunctorMaster<p_in_type, g_in_type, float, moment_type, int32_t>(),
+                      stream, beta1, beta2, bias_correction1, bias_correction2, epsilon, lr,
+                      (adamMode_t)mode, weight_decay);)));
     }
   }
   NVTE_CHECK_CUDA(cudaGetLastError());
@@ -716,24 +734,35 @@ void multi_tensor_adam_param_remainder_cuda(int chunk_size, Tensor noop_flag,
     NVTE_CHECK(tensor_lists[1][j]->dtype() == DType::kBFloat16, "Param tensor ", j,
                " has dtype=", to_string(tensor_lists[1][j]->dtype()),
                ", but expected dtype=", to_string(DType::kBFloat16));
-    NVTE_CHECK(tensor_lists[2][j]->dtype() == DType::kFloat32, "First moment tensor ", j,
-               " has dtype=", to_string(tensor_lists[2][j]->dtype()),
-               ", but expected dtype=", to_string(DType::kFloat32));
-    NVTE_CHECK(tensor_lists[3][j]->dtype() == DType::kFloat32, "Second moment tensor ", j,
-               " has dtype=", to_string(tensor_lists[3][j]->dtype()),
-               ", but expected dtype=", to_string(DType::kFloat32));
+    {
+      const bool m_is_fp32 = tensor_lists[2][j]->dtype() == DType::kFloat32;
+      const bool m_is_bf16 = tensor_lists[2][j]->dtype() == DType::kBFloat16;
+      const bool v_is_fp32 = tensor_lists[3][j]->dtype() == DType::kFloat32;
+      const bool v_is_bf16 = tensor_lists[3][j]->dtype() == DType::kBFloat16;
+      NVTE_CHECK((m_is_fp32 && v_is_fp32) || (m_is_bf16 && v_is_bf16),
+                 "First and second moment tensors must both be Float32 or both be BFloat16, but "
+                 "tensor ",
+                 j, " has first moment dtype=", to_string(tensor_lists[2][j]->dtype()),
+                 " and second moment dtype=", to_string(tensor_lists[3][j]->dtype()));
+    }
     NVTE_CHECK(tensor_lists[4][j]->dtype() == DType::kInt16, "Param remainder tensor ", j,
                " has dtype=", to_string(tensor_lists[4][j]->dtype()),
                ", but expected dtype=", to_string(DType::kInt16));
   }
 
+  // Get moment dtype (m and v have the same dtype, already validated above)
+  const auto moment_type_te = tensor_lists[2][0]->dtype();
+
   // Launch kernel
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
       g_in_type_te, g_in_type,
-      multi_tensor_apply<5>((int64_t)BLOCK_SIZE, (int64_t)chunk_size, noop_flag, tensor_lists,
-                            AdamFunctorMasterParamRemainder<g_in_type, float, int64_t>(), stream,
-                            beta1, beta2, bias_correction1, bias_correction2, epsilon, lr,
-                            (adamMode_t)mode, weight_decay););
+      TRANSFORMER_ENGINE_TYPE_SWITCH_FP32_BF16(
+          moment_type_te, moment_type,
+          multi_tensor_apply<5>(
+              (int64_t)BLOCK_SIZE, (int64_t)chunk_size, noop_flag, tensor_lists,
+              AdamFunctorMasterParamRemainder<g_in_type, float, moment_type, int64_t>(), stream,
+              beta1, beta2, bias_correction1, bias_correction2, epsilon, lr, (adamMode_t)mode,
+              weight_decay);));
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
@@ -812,17 +841,17 @@ void multi_tensor_adam_fp8_cuda(int chunk_size, Tensor noop_flag,
             g_in_type_te, g_in_type,
             multi_tensor_apply<5, true>(
                 (int64_t)BLOCK_SIZE, (int64_t)chunk_size, noop_flag, tensor_lists,
-                AdamFunctorMaster<FP8_T, g_in_type, float, int64_t>(), stream, beta1, beta2,
+                AdamFunctorMaster<FP8_T, g_in_type, float, float, int64_t>(), stream, beta1, beta2,
                 bias_correction1, bias_correction2, epsilon, lr, (adamMode_t)mode, weight_decay);));
   } else {
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
         fp8_dtype, FP8_T,
         TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
             g_in_type_te, g_in_type,
-            multi_tensor_apply<5, true>(BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,
-                                        AdamFunctorMaster<FP8_T, g_in_type, float, int32_t>(),
-                                        stream, beta1, beta2, bias_correction1, bias_correction2,
-                                        epsilon, lr, (adamMode_t)mode, weight_decay);));
+            multi_tensor_apply<5, true>(
+                BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,
+                AdamFunctorMaster<FP8_T, g_in_type, float, float, int32_t>(), stream, beta1, beta2,
+                bias_correction1, bias_correction2, epsilon, lr, (adamMode_t)mode, weight_decay);));
   }
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
@@ -852,22 +881,32 @@ void multi_tensor_adam_capturable_cuda(int chunk_size, Tensor noop_flag,
     NVTE_CHECK(tensor_lists[1][j]->dtype() == g_in_type_te, "Param tensor ", j,
                " has dtype=", to_string(tensor_lists[1][j]->dtype()),
                ", but expected dtype=", to_string(g_in_type_te));
-    NVTE_CHECK(tensor_lists[2][j]->dtype() == DType::kFloat32, "First moment tensor ", j,
-               " has dtype=", to_string(tensor_lists[2][j]->dtype()),
-               ", but expected dtype=", to_string(DType::kFloat32));
-    NVTE_CHECK(tensor_lists[3][j]->dtype() == DType::kFloat32, "Second moment tensor ", j,
-               " has dtype=", to_string(tensor_lists[3][j]->dtype()),
-               ", but expected dtype=", to_string(DType::kFloat32));
+    {
+      const bool m_is_fp32 = tensor_lists[2][j]->dtype() == DType::kFloat32;
+      const bool m_is_bf16 = tensor_lists[2][j]->dtype() == DType::kBFloat16;
+      const bool v_is_fp32 = tensor_lists[3][j]->dtype() == DType::kFloat32;
+      const bool v_is_bf16 = tensor_lists[3][j]->dtype() == DType::kBFloat16;
+      NVTE_CHECK((m_is_fp32 && v_is_fp32) || (m_is_bf16 && v_is_bf16),
+                 "First and second moment tensors must both be Float32 or both be BFloat16, but "
+                 "tensor ",
+                 j, " has first moment dtype=", to_string(tensor_lists[2][j]->dtype()),
+                 " and second moment dtype=", to_string(tensor_lists[3][j]->dtype()));
+    }
   }
+
+  // Get moment dtype (m and v have the same dtype, already validated above)
+  const auto moment_type_te = tensor_lists[2][0]->dtype();
 
   // Launch kernel
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
       tensor_lists[0][0]->dtype(), dtype,
-      multi_tensor_apply<4>(BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,
-                            AdamCapturableFunctor<dtype, float>(), stream, beta1, beta2,
-                            reinterpret_cast<int *>(step.data.dptr), bias_correction, epsilon,
-                            reinterpret_cast<float *>(lr.data.dptr), (adamMode_t)mode, weight_decay,
-                            reinterpret_cast<float *>(inv_scale.data.dptr));)
+      TRANSFORMER_ENGINE_TYPE_SWITCH_FP32_BF16(
+          moment_type_te, moment_type,
+          multi_tensor_apply<4>(BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,
+                                AdamCapturableFunctor<dtype, float, moment_type>(), stream, beta1,
+                                beta2, reinterpret_cast<int *>(step.data.dptr), bias_correction,
+                                epsilon, reinterpret_cast<float *>(lr.data.dptr), (adamMode_t)mode,
+                                weight_decay, reinterpret_cast<float *>(inv_scale.data.dptr));))
 
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
@@ -897,25 +936,36 @@ void multi_tensor_adam_capturable_master_cuda(int chunk_size, Tensor noop_flag,
     NVTE_CHECK(tensor_lists[1][j]->dtype() == g_in_type_te, "Param tensor ", j,
                " has dtype=", to_string(tensor_lists[1][j]->dtype()),
                ", but expected dtype=", to_string(g_in_type_te));
-    NVTE_CHECK(tensor_lists[2][j]->dtype() == DType::kFloat32, "First moment tensor ", j,
-               " has dtype=", to_string(tensor_lists[2][j]->dtype()),
-               ", but expected dtype=", to_string(DType::kFloat32));
-    NVTE_CHECK(tensor_lists[3][j]->dtype() == DType::kFloat32, "Second moment tensor ", j,
-               " has dtype=", to_string(tensor_lists[3][j]->dtype()),
-               ", but expected dtype=", to_string(DType::kFloat32));
+    {
+      const bool m_is_fp32 = tensor_lists[2][j]->dtype() == DType::kFloat32;
+      const bool m_is_bf16 = tensor_lists[2][j]->dtype() == DType::kBFloat16;
+      const bool v_is_fp32 = tensor_lists[3][j]->dtype() == DType::kFloat32;
+      const bool v_is_bf16 = tensor_lists[3][j]->dtype() == DType::kBFloat16;
+      NVTE_CHECK((m_is_fp32 && v_is_fp32) || (m_is_bf16 && v_is_bf16),
+                 "First and second moment tensors must both be Float32 or both be BFloat16, but "
+                 "tensor ",
+                 j, " has first moment dtype=", to_string(tensor_lists[2][j]->dtype()),
+                 " and second moment dtype=", to_string(tensor_lists[3][j]->dtype()));
+    }
     NVTE_CHECK(tensor_lists[4][j]->dtype() == DType::kFloat32, "Master param tensor ", j,
                " has dtype=", to_string(tensor_lists[4][j]->dtype()),
                ", but expected dtype=", to_string(DType::kFloat32));
   }
 
+  // Get moment dtype (m and v have the same dtype, already validated above)
+  const auto moment_type_te = tensor_lists[2][0]->dtype();
+
   // Launch kernel
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
       tensor_lists[0][0]->dtype(), dtype,
-      multi_tensor_apply<5>(BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,
-                            AdamCapturableMasterFunctor<dtype, float>(), stream, beta1, beta2,
-                            reinterpret_cast<int *>(step.data.dptr), bias_correction, epsilon,
-                            reinterpret_cast<float *>(lr.data.dptr), (adamMode_t)mode, weight_decay,
-                            reinterpret_cast<float *>(inv_scale.data.dptr));)
+      TRANSFORMER_ENGINE_TYPE_SWITCH_FP32_BF16(
+          moment_type_te, moment_type,
+          multi_tensor_apply<5>(BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,
+                                AdamCapturableMasterFunctor<dtype, float, moment_type>(), stream,
+                                beta1, beta2, reinterpret_cast<int *>(step.data.dptr),
+                                bias_correction, epsilon, reinterpret_cast<float *>(lr.data.dptr),
+                                (adamMode_t)mode, weight_decay,
+                                reinterpret_cast<float *>(inv_scale.data.dptr));))
 
   NVTE_CHECK_CUDA(cudaGetLastError());
 }

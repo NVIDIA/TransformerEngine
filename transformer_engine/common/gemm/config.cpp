@@ -126,3 +126,106 @@ void nvte_destroy_matmul_config(NVTEMatmulConfig config) {
     delete reinterpret_cast<transformer_engine::MatmulConfig *>(config);
   }
 }
+
+NVTEGroupedMatmulConfig nvte_create_grouped_matmul_config() {
+  return new transformer_engine::GroupedMatmulConfig;
+}
+
+void nvte_get_grouped_matmul_config_attribute(NVTEGroupedMatmulConfig config,
+                                              NVTEGroupedMatmulConfigAttribute attr, void *buf,
+                                              size_t size_in_bytes, size_t *size_written) {
+  // Write attribute size
+  NVTE_CHECK(attr < kNVTEGroupedMatmulConfigNumAttributes,
+             "Invalid NVTEGroupedMatmulConfigAttribute (got ", static_cast<int>(attr), ")");
+  NVTE_CHECK(size_written != nullptr, "Invalid size_written (got NULL)");
+  const auto &attr_size = transformer_engine::GroupedMatmulConfig::attr_sizes[attr];
+  *size_written = attr_size;
+
+  // Return immediately if buffer is not provided
+  if (buf == nullptr) {
+    return;
+  }
+
+  // Check buffer size
+  NVTE_CHECK(size_in_bytes >= attr_size,
+             "Buffer is too small for grouped matmul config attribute "
+             "(attribute ",
+             static_cast<int>(attr), " needs ", attr_size, " bytes, but buffer has ", size_in_bytes,
+             " bytes)");
+
+  // Write to buffer
+  NVTE_CHECK(config != nullptr, "Invalid NVTEGroupedMatmulConfig (got NULL)");
+  const auto &config_ = *reinterpret_cast<const transformer_engine::GroupedMatmulConfig *>(config);
+  switch (attr) {
+    case kNVTEGroupedMatmulConfigAvgM: {
+      int64_t val = config_.avg_m.value_or(0);
+      std::memcpy(buf, &val, attr_size);
+      break;
+    }
+    case kNVTEGroupedMatmulConfigAvgN: {
+      int64_t val = config_.avg_n.value_or(0);
+      std::memcpy(buf, &val, attr_size);
+      break;
+    }
+    case kNVTEGroupedMatmulConfigAvgK: {
+      int64_t val = config_.avg_k.value_or(0);
+      std::memcpy(buf, &val, attr_size);
+      break;
+    }
+    case kNVTEGroupedMatmulConfigSMCount:
+      std::memcpy(buf, &config_.sm_count, attr_size);
+      break;
+    default:
+      NVTE_ERROR("Unsupported NVTEGroupedMatmulConfigAttribute (got ", static_cast<int>(attr), ")");
+  }
+}
+
+void nvte_set_grouped_matmul_config_attribute(NVTEGroupedMatmulConfig config,
+                                              NVTEGroupedMatmulConfigAttribute attr,
+                                              const void *buf, size_t size_in_bytes) {
+  // Check attribute and buffer
+  NVTE_CHECK(attr < kNVTEGroupedMatmulConfigNumAttributes,
+             "Invalid NVTEGroupedMatmulConfigAttribute (got ", static_cast<int>(attr), ")");
+  const auto &attr_size = transformer_engine::GroupedMatmulConfig::attr_sizes[attr];
+  NVTE_CHECK(size_in_bytes >= attr_size,
+             "Buffer is too small for grouped matmul config attribute "
+             "(attribute ",
+             static_cast<int>(attr), " needs ", attr_size, " bytes, but buffer has ", size_in_bytes,
+             " bytes)");
+  NVTE_CHECK(buf != nullptr, "Invalid buffer (got NULL)");
+
+  // Read from buffer
+  NVTE_CHECK(config != nullptr, "Invalid NVTEGroupedMatmulConfig (got NULL)");
+  auto &config_ = *reinterpret_cast<transformer_engine::GroupedMatmulConfig *>(config);
+  switch (attr) {
+    case kNVTEGroupedMatmulConfigAvgM: {
+      int64_t val;
+      std::memcpy(&val, buf, attr_size);
+      config_.avg_m = val;
+      break;
+    }
+    case kNVTEGroupedMatmulConfigAvgN: {
+      int64_t val;
+      std::memcpy(&val, buf, attr_size);
+      config_.avg_n = val;
+      break;
+    }
+    case kNVTEGroupedMatmulConfigAvgK: {
+      int64_t val;
+      std::memcpy(&val, buf, attr_size);
+      config_.avg_k = val;
+      break;
+    }
+    case kNVTEGroupedMatmulConfigSMCount:
+      std::memcpy(&config_.sm_count, buf, attr_size);
+      break;
+    default:
+      NVTE_ERROR("Unsupported NVTEGroupedMatmulConfigAttribute (got ", static_cast<int>(attr), ")");
+  }
+}
+
+void nvte_destroy_grouped_matmul_config(NVTEGroupedMatmulConfig config) {
+  if (config != nullptr) {
+    delete reinterpret_cast<transformer_engine::GroupedMatmulConfig *>(config);
+  }
+}

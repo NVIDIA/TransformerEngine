@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 140" width="1100" height="140">
+  <defs>
+    <style>
+      @import url("../_static/css/diagram-colors.css");
+      
+      .title { font: bold 16px sans-serif; fill: #333; text-anchor: middle; }
+      .text { font: 13px sans-serif; fill: #333; text-anchor: middle; }
+      
+      /* Arrows */
+      .arrow { stroke: #616161; stroke-width: 2; fill: none; marker-end: url(#arrowhead); }
+      
+      /* High precision tensor */
+      .hp {
+        fill: #e8f5e9;
+        stroke: #43a047;
+        stroke-width: 2;
+      }
+      
+      /* Amax operations */
+      .amax {
+        fill: #fff3e0;
+        stroke: #ff9800;
+        stroke-width: 2;
+      }
+      
+      /* Quantize operations */
+      .quantize {
+        fill: #fce4ec;
+        stroke: #e91e63;
+        stroke-width: 2;
+      }
+      
+      /* NVFP4 tensor */
+      .nvfp4 {
+        fill: #87CEEB;
+        stroke: #444;
+        stroke-width: 2;
+      }
+      
+      /* All-gather operations */
+      .allgather {
+        fill: #e1f5fe;
+        stroke: #039be5;
+        stroke-width: 2;
+      }
+    </style>
+    <marker id="arrowhead" markerWidth="6" markerHeight="6" refX="5" refY="2" orient="auto">
+      <polygon points="0 0, 6 2, 0 4" fill="#616161" />
+    </marker>
+  </defs>
+  
+  <!-- Title -->
+  <text x="550" y="30" class="title">Quantization + All-Gather for NVFP4</text>
+  
+  <!-- High Precision Tensor -->
+  <rect x="20" y="70" width="100" height="55" class="hp" rx="6"/>
+  <text x="70" y="93" class="text">High Precision</text>
+  <text x="70" y="110" class="text">Tensor</text>
+  
+  <!-- Arrow -->
+  <path d="M 120 97 L 145 97" class="arrow"/>
+  
+  <!-- Compute Amax -->
+  <rect x="145" y="70" width="100" height="55" class="amax" rx="6"/>
+  <text x="195" y="93" class="text">Compute</text>
+  <text x="195" y="110" class="text">Amax</text>
+  
+  <!-- Arrow -->
+  <path d="M 245 97 L 270 97" class="arrow"/>
+  
+  <!-- Synchronize Amax -->
+  <rect x="270" y="70" width="100" height="55" class="amax" rx="6"/>
+  <text x="320" y="93" class="text">Synchronize</text>
+  <text x="320" y="110" class="text">Amax</text>
+  
+  <!-- Arrow -->
+  <path d="M 370 97 L 395 97" class="arrow"/>
+  
+  <!-- Compute s_global -->
+  <rect x="395" y="70" width="100" height="55" class="amax" rx="6"/>
+  <text x="445" y="93" class="text">Compute</text>
+  <text x="445" y="110" class="text">s_global</text>
+  
+  <!-- Arrow -->
+  <path d="M 495 97 L 520 97" class="arrow"/>
+  
+  <!-- Scale + Cast -->
+  <rect x="520" y="70" width="100" height="55" class="quantize" rx="6"/>
+  <text x="570" y="86" class="text">Scale + Cast</text>
+  <text x="570" y="103" class="text">(s_block,</text>
+  <text x="570" y="118" class="text">s_global)</text>
+  
+  <!-- Arrow -->
+  <path d="M 620 97 L 645 97" class="arrow"/>
+  
+  <!-- NVFP4 Tensor (intermediate) -->
+  <rect x="645" y="70" width="100" height="55" class="nvfp4" rx="6"/>
+  <text x="695" y="93" class="text">NVFP4</text>
+  <text x="695" y="110" class="text">Tensor</text>
+  
+  <!-- Arrow -->
+  <path d="M 745 97 L 770 97" class="arrow"/>
+  
+  <!-- All-Gather -->
+  <rect x="770" y="70" width="100" height="55" class="allgather" rx="6"/>
+  <text x="820" y="102" class="text">All-Gather</text>
+  
+  <!-- Arrow -->
+  <path d="M 870 97 L 895 97" class="arrow"/>
+  
+  <!-- NVFP4 Gathered Tensor -->
+  <rect x="895" y="70" width="130" height="55" class="nvfp4" rx="6"/>
+  <text x="960" y="93" class="text">NVFP4 Gathered</text>
+  <text x="960" y="110" class="text">Tensor</text>
+  
+</svg>
+

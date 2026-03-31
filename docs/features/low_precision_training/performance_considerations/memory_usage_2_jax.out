@@ -1,0 +1,10 @@
+# START_MEMORY_USAGE_2
+Tensors in memory:
+  Shape: (1024, 1024), Dtype: float8_e4m3fn, Size: 1024.0 KB
+  Shape: (1024, 1024), Dtype: float8_e4m3fn, Size: 1024.0 KB
+  Shape: (1024, 1024), Dtype: bfloat16, Size: 2048.0 KB
+  Total from all live arrays: 4.02 MB
+# END_MEMORY_USAGE_2
+Processing events...
+Generated:
+	No reports were generated
