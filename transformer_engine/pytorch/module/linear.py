@@ -104,6 +104,7 @@ class _Linear(torch.autograd.Function):
             grad_input_quantizer,
             grad_weight_quantizer,
             grad_output_quantizer,
+            quantizer_workspace,
             fuse_wgrad_accumulation,
             cpu_offloading,
             tp_group,
@@ -198,7 +199,7 @@ class _Linear(torch.autograd.Function):
                         # tensor will not be cached for backward pass
                         input_quantizer.set_usage(columnwise=False)
                         own_quantized_input = False
-                    inputmat = input_quantizer(inputmat)
+                    inputmat = input_quantizer(inputmat, workspace=quantizer_workspace)
             else:
                 inputmat = cast_if_needed(inp, activation_dtype)  # Cast for AMP
 
@@ -231,7 +232,7 @@ class _Linear(torch.autograd.Function):
                     input_quantizer.set_usage(
                         rowwise=True, columnwise=backward_needs_input and not save_original_input
                     )
-                    inputmat = input_quantizer(inputmat)
+                    inputmat = input_quantizer(inputmat, workspace=quantizer_workspace)
                     own_quantized_input = True
             else:
                 inputmat = cast_if_needed(inp, activation_dtype)  # Cast for AMP
@@ -273,6 +274,7 @@ class _Linear(torch.autograd.Function):
                 skip_update_flag=skip_fp8_weight_update,
                 fsdp_group=fsdp_group,
                 workspace_dtype=activation_dtype,
+                quantizer_workspace=quantizer_workspace,
             )
             weightmat.update_usage(rowwise_usage=True)
 
@@ -446,6 +448,7 @@ class _Linear(torch.autograd.Function):
             ctx.grad_input_quantizer = grad_input_quantizer
             ctx.grad_weight_quantizer = grad_weight_quantizer
             ctx.grad_output_quantizer = grad_output_quantizer
+            ctx.quantizer_workspace = quantizer_workspace
             ctx.fuse_wgrad_accumulation = fuse_wgrad_accumulation
             if fuse_wgrad_accumulation and weight.requires_grad:
                 # This check is needed to ensure that main_grad is not created
@@ -601,6 +604,7 @@ class _Linear(torch.autograd.Function):
                 grad_output,
                 ctx.parallel_mode == "row",
                 ctx.grad_output_quantizer,
+                ctx.quantizer_workspace,
             )
             nvtx_range_pop(f"{nvtx_label}.grad_output_preprocess")
 
@@ -773,7 +777,7 @@ class _Linear(torch.autograd.Function):
                         inputmat_total.update_usage(columnwise_usage=True)
                     else:
                         ctx.input_quantizer.set_usage(rowwise=False, columnwise=True)
-                        inputmat_total = ctx.input_quantizer(inputmat_total)
+                        inputmat_total = ctx.input_quantizer(inputmat_total, workspace=ctx.quantizer_workspace)
 
                 # Prepare grad output tensor
                 # Note: Synchronize tensor-parallel communication and
@@ -815,7 +819,7 @@ class _Linear(torch.autograd.Function):
                         grad_output.update_usage(columnwise_usage=True)
                     else:
                         ctx.grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
-                        grad_output = ctx.grad_output_quantizer(grad_output)
+                        grad_output = ctx.grad_output_quantizer(grad_output, workspace=ctx.quantizer_workspace)
 
                 # Figure out whether to use split accumulator
                 use_split_accumulator = _2X_ACC_WGRAD
@@ -1429,6 +1433,7 @@ class Linear(TransformerEngineBaseModule):
                 grad_input_quantizer,
                 grad_weight_quantizer,
                 grad_output_quantizer,
+                self._quantizer_workspace,
                 self.fuse_wgrad_accumulation,
                 is_cpu_offload_enabled(),
                 self.tp_group,

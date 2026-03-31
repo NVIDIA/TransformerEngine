@@ -113,6 +113,7 @@ class _LayerNormLinear(torch.autograd.Function):
             grad_input_quantizer,
             grad_weight_quantizer,
             grad_output_quantizer,
+            quantizer_workspace,
             cpu_offloading,
             tp_group,
             tp_size,
@@ -227,6 +228,7 @@ class _LayerNormLinear(torch.autograd.Function):
             normalization,
             fwd_ln_sm_margin,
             zero_centered_gamma,
+            quantizer_workspace=quantizer_workspace,
         )
         nvtx_range_pop(f"{nvtx_label}.norm")
 
@@ -248,16 +250,16 @@ class _LayerNormLinear(torch.autograd.Function):
                 ln_out_total, _ = gather_along_first_dim(ln_out, tp_group)
                 ln_out_return = ln_out_total
                 if fp8 or debug:
-                    ln_out = input_quantizer(ln_out)
+                    ln_out = input_quantizer(ln_out, workspace=quantizer_workspace)
                     input_quantizer.set_usage(rowwise=True, columnwise=False)
-                    ln_out_total = input_quantizer(ln_out_total)
+                    ln_out_total = input_quantizer(ln_out_total, workspace=quantizer_workspace)
             else:
                 quantizer = None
                 if fp8 or debug:
                     quantizer = input_quantizer
                     # custom recipe doesn't need to support quantized AG
                     if not with_quantized_norm and not custom:
-                        ln_out = quantizer(ln_out)
+                        ln_out = quantizer(ln_out, workspace=quantizer_workspace)
                     quantizer.set_usage(rowwise=True, columnwise=False)
                 if ub_overlap_ag_fprop:  # Initialize Userbuffers all-gather
                     ln_out_total, _ = fill_userbuffers_buffer_for_all_gather(
@@ -274,7 +276,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     )
         else:
             if (fp8 or debug) and not with_quantized_norm:
-                ln_out = input_quantizer(ln_out)
+                ln_out = input_quantizer(ln_out, workspace=quantizer_workspace)
             ln_out_total = ln_out
         nvtx_range_pop(f"{nvtx_label}.gemm_input_cast_comm")
         # ------------------------------------------------------
@@ -307,6 +309,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 skip_update_flag=skip_fp8_weight_update,
                 fsdp_group=fsdp_group,
                 workspace_dtype=activation_dtype,
+                quantizer_workspace=quantizer_workspace,
             )
             weightmat.update_usage(rowwise_usage=True)
 
@@ -487,6 +490,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.grad_weight_quantizer = grad_weight_quantizer
             ctx.grad_output_quantizer = grad_output_quantizer
             ctx.input_quantizer = input_quantizer
+            ctx.quantizer_workspace = quantizer_workspace
             ctx.owns_input = inputmat is not inp
             ctx.weight = weight
             ctx.activation_dtype = activation_dtype
@@ -642,6 +646,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 grad_outputs[0],
                 ctx.parallel_mode == "row",
                 ctx.grad_output_quantizer,
+                ctx.quantizer_workspace,
             )
             nvtx_range_pop(f"{nvtx_label}.grad_output_preprocess")
 
@@ -819,14 +824,14 @@ class _LayerNormLinear(torch.autograd.Function):
                         ln_out_total.update_usage(columnwise_usage=True)
                     else:
                         ctx.input_quantizer.set_usage(rowwise=False, columnwise=True)
-                        ln_out_total = ctx.input_quantizer(ln_out_total)
+                        ln_out_total = ctx.input_quantizer(ln_out_total, workspace=ctx.quantizer_workspace)
 
                 if ctx.fp8 or ctx.debug:
                     if isinstance(grad_output, QuantizedTensorStorage):
                         grad_output.update_usage(columnwise_usage=True)
                     else:
                         ctx.grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
-                        grad_output = ctx.grad_output_quantizer(grad_output)
+                        grad_output = ctx.grad_output_quantizer(grad_output, workspace=ctx.quantizer_workspace)
 
                 # Figure out whether to use split accumulator
                 use_split_accumulator = _2X_ACC_WGRAD
@@ -1551,6 +1556,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 grad_input_quantizer,
                 grad_weight_quantizer,
                 grad_output_quantizer,
+                self._quantizer_workspace,
                 is_cpu_offload_enabled(),
                 self.tp_group,
                 self.tp_size,

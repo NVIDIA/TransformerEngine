@@ -61,7 +61,8 @@ std::vector<py::object> layernorm_bwd(const at::Tensor &dz, const at::Tensor &x,
 std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, MaybeTensor bias,
                                       float eps, py::object out, py::handle quantizer,
                                       DType out_dtype, const int sm_margin,
-                                      const bool zero_centered_gamma) {
+                                      const bool zero_centered_gamma,
+                                      std::optional<at::Tensor> quantizer_workspace) {
   using namespace transformer_engine::pytorch::detail;
 
   // Ensure that cuDNN handle is created on the correct device,
@@ -154,8 +155,9 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
     } break;
     case Impl::FUSED_NORM_AMAX_FP8: {
       auto fp8_quantizer_cpp = static_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
+      auto [cs_amax, cs_scale] = split_quantizer_workspace(*quantizer_workspace);
       std::tie(unquantized_out_nvte, unquantized_out) =
-          fp8_quantizer_cpp->create_unquantized_tensor_with_amax(shape, out_dtype);
+          fp8_quantizer_cpp->create_unquantized_tensor_with_amax(shape, out_dtype, cs_amax);
       kernel_out_nvte = &unquantized_out_nvte;
     } break;
     case Impl::FUSED_NORM_AMAX_NVFP4: {
@@ -199,7 +201,8 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
     } break;
     case Impl::FUSED_NORM_AMAX_FP8: {
       auto fp8_quantizer_cpp = static_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
-      fp8_quantizer_cpp->quantize_with_amax(unquantized_out_nvte, out_nvte);
+      auto [cs_amax, cs_scale] = split_quantizer_workspace(*quantizer_workspace);
+      fp8_quantizer_cpp->quantize_with_amax(unquantized_out_nvte, out_nvte, cs_amax, cs_scale);
     } break;
     case Impl::FUSED_NORM_AMAX_NVFP4: {
       auto nvfp4_quantizer_cpp = static_cast<NVFP4Quantizer *>(quantizer_cpp.get());
@@ -303,7 +306,8 @@ std::vector<py::object> rmsnorm_bwd_add(const at::Tensor &dz, const at::Tensor &
 
 std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &weight, float eps,
                                     py::object out, py::handle quantizer, DType out_dtype,
-                                    const int sm_margin, const bool zero_centered_gamma) {
+                                    const int sm_margin, const bool zero_centered_gamma,
+                                    std::optional<at::Tensor> quantizer_workspace) {
   using namespace transformer_engine::pytorch::detail;
 
   // Ensure that cuDNN handle is created on the correct device,
@@ -390,8 +394,9 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
     } break;
     case Impl::FUSED_NORM_AMAX_FP8: {
       auto fp8_quantizer_cpp = static_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
+      auto [cs_amax, cs_scale] = split_quantizer_workspace(*quantizer_workspace);
       std::tie(unquantized_out_nvte, unquantized_out) =
-          fp8_quantizer_cpp->create_unquantized_tensor_with_amax(shape, out_dtype);
+          fp8_quantizer_cpp->create_unquantized_tensor_with_amax(shape, out_dtype, cs_amax);
       kernel_out_nvte = &unquantized_out_nvte;
     } break;
     case Impl::FUSED_NORM_AMAX_NVFP4: {
@@ -433,7 +438,8 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
     } break;
     case Impl::FUSED_NORM_AMAX_FP8: {
       auto fp8_quantizer_cpp = static_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
-      fp8_quantizer_cpp->quantize_with_amax(unquantized_out_nvte, out_nvte);
+      auto [cs_amax, cs_scale] = split_quantizer_workspace(*quantizer_workspace);
+      fp8_quantizer_cpp->quantize_with_amax(unquantized_out_nvte, out_nvte, cs_amax, cs_scale);
     } break;
     case Impl::FUSED_NORM_AMAX_NVFP4: {
       auto nvfp4_quantizer_cpp = static_cast<NVFP4Quantizer *>(quantizer_cpp.get());

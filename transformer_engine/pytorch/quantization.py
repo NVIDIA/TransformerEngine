@@ -1107,7 +1107,6 @@ class Float8CurrentScalingRecipeState(RecipeState):
     recipe: Float8CurrentScaling
     mode: str
     dtype: tex.DType
-    device: torch.device
 
     def __init__(
         self,
@@ -1122,19 +1121,14 @@ class Float8CurrentScalingRecipeState(RecipeState):
         self.num_quantizers = num_quantizers
         self.dtype = get_fp8_te_dtype(recipe, mode == "forward")
 
-        # Allocate buffers
-        if device is None:
-            device = torch.device("cuda")
-        self.device = device
-
     def make_quantizers(self) -> list:
         from .tensor.float8_tensor import Float8CurrentScalingQuantizer
 
         return [
             Float8CurrentScalingQuantizer(
-                self.dtype, device=self.device, force_pow_2_scales=self.recipe.use_power_2_scales
+                self.dtype, force_pow_2_scales=self.recipe.use_power_2_scales
             )
-            for i in range(self.num_quantizers)
+            for _ in range(self.num_quantizers)
         ]
 
 

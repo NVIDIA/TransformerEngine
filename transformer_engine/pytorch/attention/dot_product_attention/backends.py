@@ -456,10 +456,10 @@ class UnfusedDotProductAttention(torch.nn.Module):
                 fp8_recipe = fp8_meta["local_recipes"][0]
             if fp8_recipe.float8_current_scaling():
                 S_quantizer = Float8CurrentScalingQuantizer(
-                    fp8_dtype=S_quantizer.dtype, device="cuda"
+                    fp8_dtype=S_quantizer.dtype,
                 )
                 dP_quantizer = Float8CurrentScalingQuantizer(
-                    fp8_dtype=dP_quantizer.dtype, device="cuda"
+                    fp8_dtype=dP_quantizer.dtype,
                 )
 
             if "2" in qkv_layout or "3" in qkv_layout:

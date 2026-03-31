@@ -136,13 +136,15 @@ void init_extension() {
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   NVTE_DECLARE_COMMON_PYBIND11_HANDLES(m)
   m.def("quantize", transformer_engine::pytorch::quantize, py::arg("tensor"), py::arg("quantizer"),
-        py::arg("output") = py::none(), py::arg("noop") = py::none());
+        py::arg("output") = py::none(), py::arg("noop") = py::none(),
+        py::arg("workspace") = py::none());
   m.def("dequantize", &transformer_engine::pytorch::dequantize, "Dequantize", py::arg("input"),
         py::arg("otype"));
   m.def("group_quantize", transformer_engine::pytorch::group_quantize, py::arg("tensor"),
         py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"));
   m.def("bgrad_quantize", transformer_engine::pytorch::bgrad_quantize,
-        "Compute bias gradient and quantize", py::arg("input"), py::arg("quantizer"));
+        "Compute bias gradient and quantize", py::arg("input"), py::arg("quantizer"),
+        py::arg("quantizer_workspace") = py::none());
   m.def("generic_gemm", transformer_engine::pytorch::gemm, "Compute GEMM (matrix-matrix multiply)",
         py::arg("A"), py::arg("transA"), py::arg("B"), py::arg("transB"), py::arg("D"),
         py::arg("quantizer"), py::arg("output_dtype"), py::arg("bias"), py::arg("bias_type"),
@@ -153,74 +155,81 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("alpha") = 1.0f, py::arg("beta") = std::nullopt);
   /* GLU (sigmoid gate) */
   m.def("glu", transformer_engine::pytorch::glu, "GLU activation", py::arg("input"),
-        py::arg("quantizer"));
+        py::arg("quantizer"), py::arg("quantizer_workspace") = py::none());
   /* GELU and variants*/
   m.def("gelu", transformer_engine::pytorch::gelu, "GeLU activation", py::arg("input"),
-        py::arg("quantizer"));
+        py::arg("quantizer"), py::arg("quantizer_workspace") = py::none());
   m.def("geglu", transformer_engine::pytorch::geglu, "GeGLU activation", py::arg("input"),
-        py::arg("quantizer"));
+        py::arg("quantizer"), py::arg("quantizer_workspace") = py::none());
   m.def("qgelu", transformer_engine::pytorch::qgelu, "QuickGELU activation", py::arg("input"),
-        py::arg("quantizer"));
+        py::arg("quantizer"), py::arg("quantizer_workspace") = py::none());
   m.def("qgeglu", transformer_engine::pytorch::qgeglu, "QuickGeGLU activation", py::arg("input"),
-        py::arg("quantizer"));
+        py::arg("quantizer"), py::arg("quantizer_workspace") = py::none());
   /* ReLU and variants */
   m.def("relu", transformer_engine::pytorch::relu, "ReLU activation", py::arg("input"),
-        py::arg("quantizer"));
+        py::arg("quantizer"), py::arg("quantizer_workspace") = py::none());
   m.def("reglu", transformer_engine::pytorch::reglu, "ReGLU activation", py::arg("input"),
-        py::arg("quantizer"));
+        py::arg("quantizer"), py::arg("quantizer_workspace") = py::none());
   m.def("srelu", transformer_engine::pytorch::srelu, "Squared ReLU activation", py::arg("input"),
-        py::arg("quantizer"));
+        py::arg("quantizer"), py::arg("quantizer_workspace") = py::none());
   m.def("sreglu", transformer_engine::pytorch::sreglu, "Squared ReGLU activation", py::arg("input"),
-        py::arg("quantizer"));
+        py::arg("quantizer"), py::arg("quantizer_workspace") = py::none());
   /* SwiGLU and variants */
   m.def("silu", transformer_engine::pytorch::silu, "SiLU activation", py::arg("input"),
-        py::arg("quantizer"));
+        py::arg("quantizer"), py::arg("quantizer_workspace") = py::none());
   m.def("swiglu", transformer_engine::pytorch::swiglu, "SwiGLU activation", py::arg("input"),
-        py::arg("quantizer"));
+        py::arg("quantizer"), py::arg("quantizer_workspace") = py::none());
   m.def("clamped_swiglu", transformer_engine::pytorch::clamped_swiglu,
         "SwiGLU activation used in GPT OSS", py::arg("input"), py::arg("quantizer"),
+        py::arg("quantizer_workspace") = py::none(),
         py::arg("limit") = 7.0f, py::arg("alpha") = 1.702f);
   /* Backward of GLU */
   m.def("dglu", transformer_engine::pytorch::dglu, "Backward of GLU", py::arg("grad"),
-        py::arg("fwd_input"), py::arg("quantizer"));
+        py::arg("fwd_input"), py::arg("quantizer"), py::arg("quantizer_workspace") = py::none());
   /* Backward of GELU and variants */
   m.def("dgelu", transformer_engine::pytorch::dgelu, "Backward of GeLU", py::arg("grad"),
-        py::arg("fwd_input"), py::arg("quantizer"));
+        py::arg("fwd_input"), py::arg("quantizer"), py::arg("quantizer_workspace") = py::none());
   m.def("dgeglu", transformer_engine::pytorch::dgeglu, "Backward of GeGLU", py::arg("grad"),
-        py::arg("fwd_input"), py::arg("quantizer"));
+        py::arg("fwd_input"), py::arg("quantizer"), py::arg("quantizer_workspace") = py::none());
   m.def("dqgelu", transformer_engine::pytorch::dqgelu, "Backward of QuickGELU", py::arg("grad"),
-        py::arg("fwd_input"), py::arg("quantizer"));
+        py::arg("fwd_input"), py::arg("quantizer"), py::arg("quantizer_workspace") = py::none());
   m.def("dqgeglu", transformer_engine::pytorch::dqgeglu, "Backward of QuickGeGLU", py::arg("grad"),
-        py::arg("fwd_input"), py::arg("quantizer"));
+        py::arg("fwd_input"), py::arg("quantizer"), py::arg("quantizer_workspace") = py::none());
   /* Backward of ReLU and variants */
   m.def("drelu", transformer_engine::pytorch::drelu, "Backward of ReLU", py::arg("grad"),
-        py::arg("fwd_input"), py::arg("quantizer"));
+        py::arg("fwd_input"), py::arg("quantizer"), py::arg("quantizer_workspace") = py::none());
   m.def("dreglu", transformer_engine::pytorch::dreglu, "Backward of ReGLU", py::arg("grad"),
-        py::arg("fwd_input"), py::arg("quantizer"));
+        py::arg("fwd_input"), py::arg("quantizer"), py::arg("quantizer_workspace") = py::none());
   m.def("dsrelu", transformer_engine::pytorch::dsrelu, "Backward of Squared ReLU", py::arg("grad"),
-        py::arg("fwd_input"), py::arg("quantizer"));
+        py::arg("fwd_input"), py::arg("quantizer"), py::arg("quantizer_workspace") = py::none());
   m.def("dsreglu", transformer_engine::pytorch::dsreglu, "Backward of Squared ReGLU",
-        py::arg("grad"), py::arg("fwd_input"), py::arg("quantizer"));
+        py::arg("grad"), py::arg("fwd_input"), py::arg("quantizer"),
+        py::arg("quantizer_workspace") = py::none());
   /* Backward of SiLU and variants */
   m.def("dsilu", transformer_engine::pytorch::dsilu, "Backward of SiLU", py::arg("grad"),
-        py::arg("fwd_input"), py::arg("quantizer"));
+        py::arg("fwd_input"), py::arg("quantizer"), py::arg("quantizer_workspace") = py::none());
   m.def("dswiglu", transformer_engine::pytorch::dswiglu, "Backward of SwiGLU", py::arg("grad"),
-        py::arg("fwd_input"), py::arg("quantizer"));
+        py::arg("fwd_input"), py::arg("quantizer"), py::arg("quantizer_workspace") = py::none());
   m.def("clamped_dswiglu", transformer_engine::pytorch::clamped_dswiglu,
         "Backward of SwiGLU used in GPT OSS", py::arg("grad"), py::arg("fwd_input"),
-        py::arg("quantizer"), py::arg("limit") = 7.0f, py::arg("alpha") = 1.702f);
+        py::arg("quantizer"), py::arg("quantizer_workspace") = py::none(),
+        py::arg("limit") = 7.0f, py::arg("alpha") = 1.702f);
   /* DBias + DAct fusions*/
   m.def("dbias_dgelu", transformer_engine::pytorch::dbias_dgelu, "DGeLU + DBias + Quantize",
-        py::arg("grad"), py::arg("fwd_input"), py::arg("quantizer"));
+        py::arg("grad"), py::arg("fwd_input"), py::arg("quantizer"),
+        py::arg("quantizer_workspace") = py::none());
   m.def("dbias_dsilu", transformer_engine::pytorch::dbias_dsilu, "DSiLU + DBias + Quantize",
-        py::arg("grad"), py::arg("fwd_input"), py::arg("quantizer"));
+        py::arg("grad"), py::arg("fwd_input"), py::arg("quantizer"),
+        py::arg("quantizer_workspace") = py::none());
   m.def("dbias_drelu", transformer_engine::pytorch::dbias_drelu, "DReLU + DBias + Quantize",
-        py::arg("grad"), py::arg("fwd_input"), py::arg("quantizer"));
+        py::arg("grad"), py::arg("fwd_input"), py::arg("quantizer"),
+        py::arg("quantizer_workspace") = py::none());
   m.def("dbias_dqgelu", transformer_engine::pytorch::dbias_dqgelu, "DQGeLU + DBias + Quantize",
-        py::arg("grad"), py::arg("fwd_input"), py::arg("quantizer"));
+        py::arg("grad"), py::arg("fwd_input"), py::arg("quantizer"),
+        py::arg("quantizer_workspace") = py::none());
   m.def("dbias_dsrelu", transformer_engine::pytorch::dbias_dsrelu,
         "DSquaredReLU + DBias + Quantize", py::arg("grad"), py::arg("fwd_input"),
-        py::arg("quantizer"));
+        py::arg("quantizer"), py::arg("quantizer_workspace") = py::none());
 
   // Permutation functions
   m.def("moe_permute_fwd", transformer_engine::pytorch::moe_permute_fwd, "MOE permute FWD",
@@ -261,11 +270,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // Other granular functions
   m.def("layernorm_fwd", &transformer_engine::pytorch::layernorm_fwd, "LayerNorm", py::arg("input"),
         py::arg("weight"), py::arg("bias"), py::arg("eps"), py::arg("ln_out"), py::arg("quantizer"),
-        py::arg("otype"), py::arg("sm_margin"), py::arg("zero_centered_gamma"));
+        py::arg("otype"), py::arg("sm_margin"), py::arg("zero_centered_gamma"),
+        py::arg("quantizer_workspace") = py::none());
   m.def("layernorm_bwd", &transformer_engine::pytorch::layernorm_bwd, "Backward of LayerNorm");
   m.def("rmsnorm_fwd", &transformer_engine::pytorch::rmsnorm_fwd, "RMSNorm", py::arg("input"),
         py::arg("weight"), py::arg("eps"), py::arg("ln_out"), py::arg("quantizer"),
-        py::arg("otype"), py::arg("sm_margin"), py::arg("zero_centered_gamma"));
+        py::arg("otype"), py::arg("sm_margin"), py::arg("zero_centered_gamma"),
+        py::arg("quantizer_workspace") = py::none());
   m.def("rmsnorm_bwd", &transformer_engine::pytorch::rmsnorm_bwd, "Backward of RMSNorm");
   m.def("rmsnorm_bwd_add", &transformer_engine::pytorch::rmsnorm_bwd_add,
         "Fused backward of RMSNorm + add");
@@ -273,7 +284,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Multi-tensor quantize", py::arg("tensor_list"), py::arg("quantizer_list"));
   m.def("split_quantize", &transformer_engine::pytorch::split_quantize,
         "Split and multi-tensor quantize", py::arg("tensor"), py::arg("split_sections"),
-        py::arg("quantizer_list"), py::arg("disable_bulk_allocation") = false);
+        py::arg("quantizer_list"), py::arg("disable_bulk_allocation") = false,
+        py::arg("quantizer_workspaces") = py::none());
   m.def("te_general_grouped_gemm", &transformer_engine::pytorch::te_general_grouped_gemm,
         "Grouped GEMM");
   m.def("te_general_grouped_gemm_for_grouped_tensor",

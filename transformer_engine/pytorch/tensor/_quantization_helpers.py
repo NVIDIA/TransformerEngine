@@ -24,8 +24,11 @@ class _QuantizeFunc(torch.autograd.Function):
         _ctx: Optional[torch.autograd.function.FunctionCtx],  # unused
         tensor: torch.Tensor,
         quantize_impl: Callable,
+        workspace: Optional[torch.Tensor] = None,
     ) -> QuantizedTensor:
         # pylint: disable=missing-function-docstring
+        if workspace is not None:
+            return quantize_impl(tensor, workspace=workspace)
         return quantize_impl(tensor)
 
     @staticmethod
@@ -35,7 +38,7 @@ class _QuantizeFunc(torch.autograd.Function):
     ) -> Tuple[Optional[torch.Tensor], ...]:
         # pylint: disable=missing-function-docstring
         # Assume that we want gradients in full precision
-        return grad, None
+        return grad, None, None
 
 
 class _IdentityFunc(torch.autograd.Function):
