@@ -13,7 +13,6 @@
 
 #include <cuda_runtime.h>
 #include <stdint.h>
-
 #include <transformer_engine/transformer_engine.h>
 
 #ifdef __cplusplus

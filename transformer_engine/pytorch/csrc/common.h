@@ -27,7 +27,6 @@
 #include <transformer_engine/cast.h>
 #include <transformer_engine/cast_transpose_noop.h>
 #include <transformer_engine/comm_gemm_overlap.h>
-#include <transformer_engine/utils.h>
 #include <transformer_engine/fused_attn.h>
 #include <transformer_engine/fused_rope.h>
 #include <transformer_engine/fused_router.h>
@@ -43,6 +42,7 @@
 #include <transformer_engine/swizzle.h>
 #include <transformer_engine/transformer_engine.h>
 #include <transformer_engine/transpose.h>
+#include <transformer_engine/utils.h>
 
 #include <ATen/cuda/CUDAGraphsUtils.cuh>
 #include <cassert>

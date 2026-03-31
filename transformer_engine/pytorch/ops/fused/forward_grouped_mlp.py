@@ -313,15 +313,11 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         fc1_weight_for_gemm = grouped_fc1_weight
         if fc1_op.single_grouped_parameter:
             fc1_weight_for_gemm = clone_grouped_tensor_storage(grouped_fc1_weight)
-            tex.swizzle_grouped_scales(
-                fc1_weight_for_gemm, rowwise=True, columnwise=False
-            )
+            tex.swizzle_grouped_scales(fc1_weight_for_gemm, rowwise=True, columnwise=False)
         fc2_weight_for_gemm = grouped_fc2_weight
         if fc2_op.single_grouped_parameter:
             fc2_weight_for_gemm = clone_grouped_tensor_storage(grouped_fc2_weight)
-            tex.swizzle_grouped_scales(
-                fc2_weight_for_gemm, rowwise=True, columnwise=False
-            )
+            tex.swizzle_grouped_scales(fc2_weight_for_gemm, rowwise=True, columnwise=False)
 
         # Group-quantize input tensor and convert dtypes if needed
         fc1_x = maybe_dequantize(input_, dtype)
@@ -371,7 +367,12 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             fc1_w_data = fc1_w_data.permute(1, 2, 0)
             fc1_w_scales = fc1_weight_for_gemm.scale_inv.view(dtype=torch.float8_e8m0fnu)
             fc1_w_scales = fc1_w_scales.view(
-                num_groups, fc1_weight_shape[0] // 128, fc1_weight_shape[1] // 128, MXFP8_BLOCK_SCALING_SIZE, 4, 4
+                num_groups,
+                fc1_weight_shape[0] // 128,
+                fc1_weight_shape[1] // 128,
+                MXFP8_BLOCK_SCALING_SIZE,
+                4,
+                4,
             )
             fc1_w_scales = fc1_w_scales.permute(3, 4, 1, 5, 2, 0)
 
