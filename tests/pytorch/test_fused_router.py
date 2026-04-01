@@ -179,6 +179,15 @@ def run_comparison(
     score_function,
     enable_bias,
 ):
+    if topk >= num_experts:
+        pytest.skip(f"topk ({topk}) >= num_experts ({num_experts})")
+    if group_topk is not None and num_groups is not None:
+        group_size = num_experts // num_groups
+        per_group_topk = topk // group_topk
+        if per_group_topk >= group_size:
+            pytest.skip(
+                f"per-group topk ({per_group_topk}) >= group_size ({group_size})"
+            )
     # Set some parameters
     if score_function in ("sigmoid", "sqrtsoftplus"):
         # Construct logits with a narrow range to avoid very small activation values,
@@ -356,6 +365,8 @@ def test_topk_softmax(
 @pytest.mark.parametrize("topk", [1, 4, 8, 16, 32])
 @pytest.mark.parametrize("score_function", ["softmax", "sigmoid", "sqrtsoftplus"])
 def test_fused_scores_for_aux_loss(dtype, num_tokens, num_experts, topk, score_function):
+    if topk >= num_experts:
+        pytest.skip(f"topk ({topk}) >= num_experts ({num_experts})")
     if score_function in ("sigmoid", "sqrtsoftplus"):
         # Construct logits with a narrow range to avoid very small activation values
         offset = torch.arange(-num_tokens // 2, num_tokens // 2, dtype=dtype, device="cuda") * 1e-4
@@ -408,6 +419,8 @@ def test_fused_scores_for_aux_loss(dtype, num_tokens, num_experts, topk, score_f
 @pytest.mark.parametrize("num_experts", [1024, 256, 128, 32])
 @pytest.mark.parametrize("topk", [4, 32])
 def test_fused_moe_aux_loss(dtype, num_tokens, num_experts, topk):
+    if topk >= num_experts:
+        pytest.skip(f"topk ({topk}) >= num_experts ({num_experts})")
     # Construct the special probs to avoid inf in the sigmoid function
     offset = torch.arange(-num_tokens // 2, num_tokens // 2, dtype=dtype, device="cuda") * 1e-4
     probs = torch.arange(-num_experts // 2, num_experts // 2, device="cuda", dtype=dtype) * 1e-2
