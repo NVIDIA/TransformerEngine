@@ -9,6 +9,7 @@ from collections.abc import Callable
 import functools
 import inspect
 import math
+import os
 from typing import Optional
 
 import torch
@@ -470,10 +471,10 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         fc2_dgrad_kernel_out = self.grouped_gemm_dglu_kernel()(**fc2_dglu_kwargs)
 
         fc1_dy_row_data = fc2_dgrad_kernel_out["d_row_tensor"]
-        fc1_dy_row_data = fc1_dy_row_data.view(out_shape[0], fc1_weight_shape[0]).contiguous()
+        fc1_dy_row_data = fc1_dy_row_data.view(out_shape[0], fc1_weight_shape[0])
         fc1_dy_row_scale = fc2_dgrad_kernel_out["sfd_row_tensor"]
         fc1_dy_col_data = fc2_dgrad_kernel_out["d_col_tensor"]
-        fc1_dy_col_data = fc1_dy_col_data.view(out_shape[0], fc1_weight_shape[0]).contiguous()
+        fc1_dy_col_data = fc1_dy_col_data.view(out_shape[0], fc1_weight_shape[0])
         fc1_dy_col_scale = fc2_dgrad_kernel_out["sfd_col_tensor"]
         grad_scales = fc2_dgrad_kernel_out["dprob_tensor"]
         grad_scales = grad_scales.view(-1).to(dtype=dtype)
