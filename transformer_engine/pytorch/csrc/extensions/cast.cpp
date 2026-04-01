@@ -217,9 +217,10 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
       break;
     }
     case GroupedQuantizationMode::MXFP8_GROUPED_QUANTIZE: {
+      QuantizationConfigWrapper quant_config_cpp;
       NVTE_SCOPED_GIL_RELEASE({
         nvte_group_quantize(grouped_input_tensor.data(), grouped_output_tensor_cpp.data(),
-                            at::cuda::getCurrentCUDAStream());
+                            quant_config_cpp, at::cuda::getCurrentCUDAStream());
       });
       break;
     }
