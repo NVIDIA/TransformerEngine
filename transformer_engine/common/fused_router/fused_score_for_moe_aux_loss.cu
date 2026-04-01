@@ -156,9 +156,7 @@ void fused_score_for_moe_aux_loss_forward_kernel_launcher(
         <<<grid_size, kThreadsPerBlock, shared_memory_size, stream>>>(
             logits, num_tokens, num_experts, topk, score_function, scores, routing_map,
             intermediate_output);
-  }
-  else
-  {
+  } else {
     cudaFuncSetAttribute(fused_score_for_moe_aux_loss_forward_kernel<DataType, TopkFuncType::Radix>,
                          cudaFuncAttributeMaxDynamicSharedMemorySize, shared_memory_size);
     fused_score_for_moe_aux_loss_forward_kernel<DataType, TopkFuncType::Radix>
