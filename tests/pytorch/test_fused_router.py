@@ -17,6 +17,28 @@ if torch.cuda.is_available():
     torch.cuda.manual_seed(seed)
 
 
+def _get_tolerances(dtype: torch.dtype, num_experts: int):
+    """Return (atol, rtol) scaled by the number of experts.
+
+    With many experts the fused and reference kernels accumulate
+    floating-point reductions (e.g. normalization sums) in different
+    orders, causing O(num_experts * machine_eps) rounding divergence.
+    Scale the default tolerances accordingly so that small expert
+    counts keep tight checks while large counts (1024+) get the
+    headroom they need.
+    """
+    # Default tolerances for torch.testing.assert_close
+    base_atol, base_rtol = 1e-5, 1.3e-6
+
+    eps = 2e-7
+    # The worst-case rounding error from summing N values is O(N * eps).
+    # Use 2 * num_experts * eps as the tolerance floor so tests pass for
+    # large expert counts while remaining tight for small ones.
+    atol = max(base_atol, 2 * num_experts * eps)
+    rtol = max(base_rtol, 2 * num_experts * eps)
+    return atol, rtol
+
+
 # Pytorch-based group topk
 def group_limited_topk(
     scores: torch.Tensor,
@@ -215,7 +237,8 @@ def run_comparison(
         expert_bias=expert_bias_clone,
     )
 
-    torch.testing.assert_close(probs, probs_fused)
+    atol, rtol = _get_tolerances(dtype, num_experts)
+    torch.testing.assert_close(probs, probs_fused, atol=atol, rtol=rtol)
     torch.testing.assert_close(routing_map, routing_map_fused)
 
     # Fake the loss
@@ -227,12 +250,12 @@ def run_comparison(
     loss_fused.backward()
 
     # Check the gradient
-    torch.testing.assert_close(logits.grad, logits_clone.grad)
+    torch.testing.assert_close(logits.grad, logits_clone.grad, atol=atol, rtol=rtol)
 
 
 @pytest.mark.parametrize("dtype", [torch.float32])
 @pytest.mark.parametrize("num_tokens", [2048, 7168, 8992])
-@pytest.mark.parametrize("num_experts", [128, 32])
+@pytest.mark.parametrize("num_experts", [1024, 128, 32])
 @pytest.mark.parametrize("topk", [4, 8])
 @pytest.mark.parametrize("group_topk", [None, 4])
 @pytest.mark.parametrize("scaling_factor", [None, 1.2])
@@ -263,7 +286,7 @@ def test_topk_sigmoid(
 
 @pytest.mark.parametrize("dtype", [torch.float32])
 @pytest.mark.parametrize("num_tokens", [2048, 7168, 8992])
-@pytest.mark.parametrize("num_experts", [128, 32])
+@pytest.mark.parametrize("num_experts", [1024, 128, 32])
 @pytest.mark.parametrize("topk", [4, 8])
 @pytest.mark.parametrize("group_topk", [None, 4])
 @pytest.mark.parametrize("scaling_factor", [None, 1.2])
@@ -294,7 +317,7 @@ def test_topk_sqrtsoftplus(
 
 @pytest.mark.parametrize("dtype", [torch.float32])
 @pytest.mark.parametrize("num_tokens", [2048, 7168, 14234])
-@pytest.mark.parametrize("num_experts", [128, 32])
+@pytest.mark.parametrize("num_experts", [1024, 128, 32])
 @pytest.mark.parametrize("topk", [4, 8])
 @pytest.mark.parametrize("use_pre_softmax", [True, False])
 @pytest.mark.parametrize("group_topk", [None, 4])
@@ -325,7 +348,7 @@ def test_topk_softmax(
 
 @pytest.mark.parametrize("dtype", [torch.float32])
 @pytest.mark.parametrize("num_tokens", [2048, 7168])
-@pytest.mark.parametrize("num_experts", [256, 128, 32])
+@pytest.mark.parametrize("num_experts", [1024, 256, 128, 32])
 @pytest.mark.parametrize("topk", [1, 4, 8])
 @pytest.mark.parametrize("score_function", ["softmax", "sigmoid", "sqrtsoftplus"])
 def test_fused_scores_for_aux_loss(dtype, num_tokens, num_experts, topk, score_function):
@@ -364,7 +387,8 @@ def test_fused_scores_for_aux_loss(dtype, num_tokens, num_experts, topk, score_f
         score_function=score_function,
     )
 
-    torch.testing.assert_close(scores, scores_fused)
+    atol, rtol = _get_tolerances(dtype, num_experts)
+    torch.testing.assert_close(scores, scores_fused, atol=atol, rtol=rtol)
     torch.testing.assert_close(routing_map, routing_map_fused)
 
     loss = torch.sum(scores)
@@ -372,12 +396,12 @@ def test_fused_scores_for_aux_loss(dtype, num_tokens, num_experts, topk, score_f
     loss_fused = torch.sum(scores_fused)
     loss_fused.backward()
 
-    torch.testing.assert_close(logits.grad, logits_clone.grad)
+    torch.testing.assert_close(logits.grad, logits_clone.grad, atol=atol, rtol=rtol)
 
 
 @pytest.mark.parametrize("dtype", [torch.float32])
 @pytest.mark.parametrize("num_tokens", [2048, 7168, 14234])
-@pytest.mark.parametrize("num_experts", [256, 128, 32])
+@pytest.mark.parametrize("num_experts", [1024, 256, 128, 32])
 @pytest.mark.parametrize("topk", [4])
 def test_fused_moe_aux_loss(dtype, num_tokens, num_experts, topk):
     # Construct the special probs to avoid inf in the sigmoid function
@@ -411,13 +435,14 @@ def test_fused_moe_aux_loss(dtype, num_tokens, num_experts, topk):
         coeff=coeff,
     )
 
-    torch.testing.assert_close(aux_loss, aux_loss_fused)
+    atol, rtol = _get_tolerances(dtype, num_experts)
+    torch.testing.assert_close(aux_loss, aux_loss_fused, atol=atol, rtol=rtol)
 
     # Backward
     aux_loss.backward()
     aux_loss_fused.backward()
 
-    torch.testing.assert_close(probs.grad, probs_clone.grad)
+    torch.testing.assert_close(probs.grad, probs_clone.grad, atol=atol, rtol=rtol)
 
 
 def profile_topk_softmax(
