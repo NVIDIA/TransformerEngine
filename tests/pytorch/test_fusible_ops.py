@@ -4355,5 +4355,5 @@ def test_grouped_gemm_quant_cute_matches_mxfp8_quantized() -> None:
     d_cute = outputs["d_tensor"]
     if d_cute.dim() == 3:
         d_cute = d_cute.squeeze(-1)
-    tols = {"rtol": 0.125, "atol": 0.25}
+    tols = dtype_tols(torch.bfloat16)
     assert_close(d_cute[:total_m].float(), ref, **tols)
