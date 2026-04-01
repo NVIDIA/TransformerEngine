@@ -343,7 +343,9 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
             )
 
         # Split grad output tensor and convert dtypes if needed
-        fc2_ctx.grad_output_quantizer.set_usage(rowwise=True, columnwise=fc2_ctx.weight_requires_grad)
+        fc2_ctx.grad_output_quantizer.set_usage(
+            rowwise=True, columnwise=fc2_ctx.weight_requires_grad
+        )
         fc2_ctx.grad_output_quantizer.optimize_for_gemm = True
         output_fc2_dbias = fc2_op.has_bias
         fc2_dbias_packed = None
