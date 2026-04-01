@@ -16,7 +16,7 @@
 namespace transformer_engine {
 namespace fused_router {
 
-template <typename DataType>
+template <typename DataType, TopkFuncType TopkFunc = TopkFuncType::Naive>
 __global__ void fused_score_for_moe_aux_loss_forward_kernel(const DataType *logits, int num_tokens,
                                                             int num_experts, int topk,
                                                             int score_function, float *scores,
@@ -123,7 +123,7 @@ __global__ void fused_score_for_moe_aux_loss_forward_kernel(const DataType *logi
          * Section: Topk
          * Get the topk indices
          */
-    naive_topk_and_mask(local_logits, num_experts, topk, topk_indices, topk_logits, lane_id);
+    topk_and_mask<TopkFunc>(local_logits, num_experts, topk, topk_indices, topk_logits, lane_id);
     __syncwarp();
 
     // Write the routing_map to the output tensor
@@ -149,10 +149,23 @@ void fused_score_for_moe_aux_loss_forward_kernel_launcher(
   size_t shared_memory_size = num_experts * num_token_per_block * sizeof(CompType)  // logits
                               + topk * num_token_per_block * sizeof(CompType)       // topk_logits
                               + topk * num_token_per_block * sizeof(int);           // topk_indices
-  fused_score_for_moe_aux_loss_forward_kernel<DataType>
-      <<<grid_size, kThreadsPerBlock, shared_memory_size, stream>>>(
-          logits, num_tokens, num_experts, topk, score_function, scores, routing_map,
-          intermediate_output);
+  if (topk < 16) {
+    cudaFuncSetAttribute(fused_score_for_moe_aux_loss_forward_kernel<DataType, TopkFuncType::Naive>,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, shared_memory_size);
+    fused_score_for_moe_aux_loss_forward_kernel<DataType, TopkFuncType::Naive>
+        <<<grid_size, kThreadsPerBlock, shared_memory_size, stream>>>(
+            logits, num_tokens, num_experts, topk, score_function, scores, routing_map,
+            intermediate_output);
+  }
+  else
+  {
+    cudaFuncSetAttribute(fused_score_for_moe_aux_loss_forward_kernel<DataType, TopkFuncType::Radix>,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, shared_memory_size);
+    fused_score_for_moe_aux_loss_forward_kernel<DataType, TopkFuncType::Radix>
+        <<<grid_size, kThreadsPerBlock, shared_memory_size, stream>>>(
+            logits, num_tokens, num_experts, topk, score_function, scores, routing_map,
+            intermediate_output);
+  }
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
@@ -305,6 +318,8 @@ void fused_score_for_moe_aux_loss_backward_kernel_launcher(
                               +
                               num_experts * num_token_per_block * sizeof(CompType)  // act_from_fwd
                               + num_experts * num_token_per_block * sizeof(CompType);  // comp_buf
+  cudaFuncSetAttribute(fused_score_for_moe_aux_loss_backward_kernel<DataType>,
+                       cudaFuncAttributeMaxDynamicSharedMemorySize, shared_memory_size);
   fused_score_for_moe_aux_loss_backward_kernel<DataType>
       <<<grid_size, kThreadsPerBlock, shared_memory_size, stream>>>(
           intermediate_output, grad_scores, num_tokens, num_experts, topk, score_function,
