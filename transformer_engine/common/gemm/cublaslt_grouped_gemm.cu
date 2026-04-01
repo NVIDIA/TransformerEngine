@@ -126,26 +126,6 @@ inline int64_t compute_avg_last_dim(const transformer_engine::GroupedTensor *t) 
   return static_cast<int64_t>(t->logical_shape.data[1]) / static_cast<int64_t>(t->num_tensors);
 }
 
-inline bool grouped_tensor_has_zero_work(const transformer_engine::GroupedTensor *t) {
-  return t != nullptr && t->logical_shape.ndim == 2 &&
-         (t->logical_shape.data[0] == 0 || t->logical_shape.data[1] == 0);
-}
-
-inline bool tensor_has_zero_work(const transformer_engine::Tensor *t) {
-  const auto shape = t->shape();
-  return shape.size() == 2 && (shape[0] == 0 || shape[1] == 0);
-}
-
-inline bool tensor_list_has_zero_work(const NVTETensor *tensor_list, size_t list_size) {
-  if (list_size == 0) return false;
-  for (size_t i = 0; i < list_size; ++i) {
-    const auto *t = transformer_engine::convertNVTETensorCheck(tensor_list[i]);
-    if (!tensor_has_zero_work(t)) {
-      return false;
-    }
-  }
-  return true;
-}
 
 // Constants for grouped GEMM workspace (declared early for use in helpers)
 static constexpr size_t kGroupedGemmAlignment = 256;
@@ -266,27 +246,33 @@ inline size_t validate_grouped_gemm_inputs(
            dtype == transformer_engine::DType::kFloat16;
   };
   for (const auto *tensor : inputs) {
-    const bool zero_work = grouped_tensor_has_zero_work(tensor);
-    if (!zero_work) {
+    if (tensor->has_data() || tensor->has_columnwise_data()) {
       NVTE_CHECK(is_supported_input_dtype(tensor->dtype()),
                  "Grouped GEMM inputs must be FP8, BF16, or FP16, got ",
                  transformer_engine::to_string(tensor->dtype()), ".");
     }
-    NVTE_CHECK(tensor->has_data() || tensor->has_columnwise_data() || zero_work,
-               "Grouped GEMM: input tensor is missing both row-wise and column-wise data");
   }
-  // Cross-operand consistency across all inputs.
-  const auto *ref = *inputs.begin();
-  const bool ref_is_fp8 = is_fp8_dtype(ref->dtype());
-  const bool ref_is_mxfp8 = transformer_engine::is_mxfp_scaling(ref->scaling_mode);
+  // Cross-operand consistency across all inputs (skip tensors without data).
+  const transformer_engine::GroupedTensor *ref = nullptr;
   for (const auto *tensor : inputs) {
-    NVTE_CHECK(is_fp8_dtype(tensor->dtype()) == ref_is_fp8,
-               "Grouped GEMM: A and B must both be FP8 or both be non-FP8.");
-    NVTE_CHECK(transformer_engine::is_mxfp_scaling(tensor->scaling_mode) == ref_is_mxfp8,
-               "Grouped GEMM: A and B must both use MXFP8 scaling or both use tensor scaling.");
-    if (ref_is_mxfp8) {
-      NVTE_CHECK(tensor->with_gemm_swizzled_scales,
-                 "MXFP8 grouped GEMM: scales must be swizzled for GEMM.");
+    if (tensor->has_data() || tensor->has_columnwise_data()) {
+      ref = tensor;
+      break;
+    }
+  }
+  if (ref != nullptr) {
+    const bool ref_is_fp8 = is_fp8_dtype(ref->dtype());
+    const bool ref_is_mxfp8 = transformer_engine::is_mxfp_scaling(ref->scaling_mode);
+    for (const auto *tensor : inputs) {
+      if (!(tensor->has_data() || tensor->has_columnwise_data())) continue;
+      NVTE_CHECK(is_fp8_dtype(tensor->dtype()) == ref_is_fp8,
+                 "Grouped GEMM: A and B must both be FP8 or both be non-FP8.");
+      NVTE_CHECK(transformer_engine::is_mxfp_scaling(tensor->scaling_mode) == ref_is_mxfp8,
+                 "Grouped GEMM: A and B must both use MXFP8 scaling or both use tensor scaling.");
+      if (ref_is_mxfp8) {
+        NVTE_CHECK(tensor->with_gemm_swizzled_scales,
+                   "MXFP8 grouped GEMM: scales must be swizzled for GEMM.");
+      }
     }
   }
   return num_tensors;
@@ -343,7 +329,6 @@ struct GroupedOperandSelection {
   transformer_engine::DType dtype = transformer_engine::DType::kNumTypes;
   NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
   bool with_gemm_swizzled_scales = false;
-  bool is_empty_logical_shape = false;
   bool trans = false;
 };
 
@@ -592,9 +577,15 @@ inline GroupedOperandSelection select_grouped_operand(const transformer_engine::
   using namespace transformer_engine;
   const bool has_row = t->has_data();
   const bool has_col = t->has_columnwise_data();
-  const bool zero_work = grouped_tensor_has_zero_work(t);
-  NVTE_CHECK(has_row || has_col || zero_work,
-             "Grouped GEMM operand is missing both row-wise and column-wise data");
+
+  if (!has_row && !has_col) {
+    GroupedOperandSelection sel{};
+    sel.trans = trans;
+    sel.scaling_mode = t->scaling_mode;
+    sel.dtype = t->dtype();
+    sel.shape = create_shape_info(t, /*swap_dims=*/false);
+    return sel;
+  }
 
   const auto sm = t->scaling_mode;
   const bool mxfp8 = is_mxfp_scaling(sm);
@@ -610,13 +601,6 @@ inline GroupedOperandSelection select_grouped_operand(const transformer_engine::
   sel.scaling_mode = sm;
   sel.with_gemm_swizzled_scales = t->with_gemm_swizzled_scales;
 
-  // Empty logical tensors may not allocate rowwise/columnwise buffers.
-  if (!has_row && !has_col && zero_work) {
-    sel.is_empty_logical_shape = true;
-    sel.dtype = t->dtype();
-    sel.shape = create_shape_info(t, /*swap_dims=*/false);
-    return sel;
-  }
   const DType rep_dtype = has_row ? row_dtype : col_dtype;
   const bool is_fp8 = is_fp8_dtype(rep_dtype);
   const bool non_tn_fp8_ok = nvte_is_non_tn_fp8_gemm_supported();
@@ -809,11 +793,6 @@ inline void execute_grouped_gemm(const GroupedGemmSetupWorkspace &setup_workspac
       transformer_engine::detail::HandleManager<cublasLtHandle_t, CreateCublasHandle>;
   cublasLtHandle_t handle = cublasHandleManager::Instance().GetHandle();
 
-  // Zero-work grouped GEMM is a no-op.
-  if (avg_m_val == 0 || avg_n_val == 0 || avg_k_val == 0) {
-    return;
-  }
-
   cublasOperation_t op_A = A_sel.trans ? CUBLAS_OP_T : CUBLAS_OP_N;
   cublasOperation_t op_B = B_sel.trans ? CUBLAS_OP_T : CUBLAS_OP_N;
 
@@ -878,7 +857,6 @@ __global__ void grouped_bias_add_kernel(char *d_base, const char *bias_base, Ten
 
   const int64_t m = d_meta.first_dims ? d_meta.first_dims[tensor_idx] : d_meta.uniform_first;
   const int64_t n = d_meta.last_dims ? d_meta.last_dims[tensor_idx] : d_meta.uniform_last;
-  if (m == 0 || n == 0) return;
 
   const int64_t d_offset = compute_grouped_tensor_offset(d_meta, tensor_idx);
   const int64_t bias_offset = compute_grouped_tensor_offset(bias_meta, tensor_idx);
@@ -1104,11 +1082,6 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
   // Parse config (if provided)
   GroupedMatmulConfig config_ = parse_grouped_gemm_config(config);
 
-  // Zero-token edge case: bypass grouped GEMM setup/launch entirely.
-  if (grouped_tensor_has_zero_work(inputA) || grouped_tensor_has_zero_work(inputB)) {
-    return;
-  }
-
   // Validate inputs and outputs.
   const size_t num_tensors = validate_grouped_gemm_inputs(inputA->num_tensors, {inputA, inputB},
                                                           alpha_tensor, beta_tensor);
@@ -1174,10 +1147,6 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
   const size_t num_tensors =
       validate_grouped_gemm_inputs(num_a_tensors, {inputB}, alpha_tensor, beta_tensor);
 
-  // Zero-token edge case: bypass grouped GEMM setup/launch entirely.
-  if (tensor_list_has_zero_work(A_list, num_a_tensors) || grouped_tensor_has_zero_work(inputB)) {
-    return;
-  }
   validate_grouped_gemm_outputs(num_tensors, {inputC_raw, outputD});
 
   // If C is NULL, use D as C (valid when beta=0, cuBLAS won't read C data)
@@ -1314,10 +1283,6 @@ void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
   // Parse config (if provided)
   GroupedMatmulConfig config_ = parse_grouped_gemm_config(config);
 
-  // Zero-token edge case: bypass grouped GEMM setup/launch entirely.
-  if (grouped_tensor_has_zero_work(inputA) || grouped_tensor_has_zero_work(inputB)) {
-    return;
-  }
   // Select operand storage (row-wise vs column-wise) and adjust transpose flags to
   // mirror the non-grouped GEMM logic for FP8 layout constraints.
   auto A_sel = select_grouped_operand(inputA, static_cast<bool>(transa), /*is_A=*/true);
