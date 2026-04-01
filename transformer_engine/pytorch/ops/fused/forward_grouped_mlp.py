@@ -88,7 +88,9 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         if not cls.is_supported():
             return False
         try:
-            from cudnn import grouped_gemm_glu_wrapper_sm100  # pylint: disable=import-outside-toplevel
+            from cudnn import (
+                grouped_gemm_glu_wrapper_sm100,
+            )  # pylint: disable=import-outside-toplevel
         except ImportError:
             return False
         try:
@@ -104,7 +106,9 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         if not cls.is_supported():
             return False
         try:
-            from cudnn import grouped_gemm_quant_wrapper_sm100  # pylint: disable=import-outside-toplevel
+            from cudnn import (
+                grouped_gemm_quant_wrapper_sm100,
+            )  # pylint: disable=import-outside-toplevel
         except ImportError:
             return False
         try:
