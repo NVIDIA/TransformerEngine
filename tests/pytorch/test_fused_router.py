@@ -185,9 +185,7 @@ def run_comparison(
         group_size = num_experts // num_groups
         per_group_topk = topk // group_topk
         if per_group_topk >= group_size:
-            pytest.skip(
-                f"per-group topk ({per_group_topk}) >= group_size ({group_size})"
-            )
+            pytest.skip(f"per-group topk ({per_group_topk}) >= group_size ({group_size})")
     # Set some parameters
     if score_function in ("sigmoid", "sqrtsoftplus"):
         # Construct logits with a narrow range to avoid very small activation values,
