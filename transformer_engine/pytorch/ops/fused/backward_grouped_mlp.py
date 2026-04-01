@@ -549,9 +549,7 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
                 "padded_offsets": split_points,
                 "alpha_tensor": alpha_tensor.float(),
                 "norm_const_tensor": None,
-                "prob_tensor": torch.ones(
-                    (out_shape[0], 1, 1), dtype=torch.float32, device=device
-                ),
+                "prob_tensor": torch.ones((out_shape[0], 1, 1), dtype=torch.float32, device=device),
                 "acc_dtype": torch.float32,
                 "c_dtype": dtype,
                 "d_dtype": dtype,
