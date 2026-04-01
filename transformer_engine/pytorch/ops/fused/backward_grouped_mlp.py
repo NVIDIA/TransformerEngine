@@ -14,7 +14,6 @@ from typing import Optional
 import torch
 
 import transformer_engine_torch as tex
-from cuda.bindings import driver as cuda
 from ...cpp_extensions import (
     general_grouped_gemm_for_grouped_tensor,
 )
@@ -31,7 +30,6 @@ from ..op import FusedOperation, FusibleOperation, OperationContext
 from .._common import (
     fuse_grouped_mlp_ops,
     is_quantized_tensor,
-    make_grouped_tensor_from_buffers,
     maybe_dequantize,
     validate_grouped_mlp_dims,
 )
@@ -332,34 +330,34 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
 
         grouped_fc1_x = None
         if fc1_ctx.weight_requires_grad:
-            grouped_fc1_x = make_grouped_tensor_from_buffers(
-                num_groups=num_groups,
+            grouped_fc1_x = GroupedTensor(
+                shape=(out_shape[0], fc1_weight_shape[1]),
+                dtype=dtype,
+                num_tensors=num_groups,
+                quantizer=fc1_ctx.input_quantizers[0],
                 data=fc1_x_data,
                 columnwise_data=fc1_x_col_data,
                 scale_inv=fc1_x_scale,
                 columnwise_scale_inv=fc1_x_col_scale,
-                split_sizes=split_sizes,
-                logical_last_dim=fc1_weight_shape[1],
-                dtype=dtype,
-                quantizer=fc1_ctx.input_quantizers[0],
-                with_gemm_swizzled_scales=True,
+                first_dims=split_sizes,
                 tensor_offsets=fc1_x_tensor_offsets,
+                with_gemm_swizzled_scales=True,
             )
 
         grouped_fc2_x = None
         if fc2_ctx.weight_requires_grad:
-            grouped_fc2_x = make_grouped_tensor_from_buffers(
-                num_groups=num_groups,
+            grouped_fc2_x = GroupedTensor(
+                shape=(out_shape[0], fc2_weight_shape[1]),
+                dtype=dtype,
+                num_tensors=num_groups,
+                quantizer=fc2_ctx.input_quantizers[0],
                 data=fc2_x_data,
                 columnwise_data=fc2_x_col_data,
                 scale_inv=fc2_x_scale,
                 columnwise_scale_inv=fc2_x_col_scale,
-                split_sizes=split_sizes,
-                logical_last_dim=fc2_weight_shape[1],
-                dtype=dtype,
-                quantizer=fc2_ctx.input_quantizers[0],
-                with_gemm_swizzled_scales=True,
+                first_dims=split_sizes,
                 tensor_offsets=fc2_x_tensor_offsets,
+                with_gemm_swizzled_scales=True,
             )
 
         # Split grad output tensor and convert dtypes if needed
@@ -418,7 +416,7 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         # Kernel scaling factors
         alpha_tensor = get_cached_ones_tensor(num_groups, dtype, device)
         norm_const_tensor = get_cached_ones_tensor(1, dtype, device)
-        current_stream = cuda.CUstream(torch.cuda.current_stream().cuda_stream)
+        current_stream = torch.cuda.current_stream().cuda_stream
 
         if fc2_op.single_grouped_weight:
             # Pack weight tensors for stacked kernel
@@ -522,16 +520,18 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
                     ]
 
         # FC1 grad output for dgrad and wgrad GEMMs
-        grouped_fc1_dy = make_grouped_tensor_from_buffers(
-            num_groups=num_groups,
+        fc1_dy_tensor_offsets = fc1_ctx.base_split_offsets * fc1_weight_shape[0]
+        grouped_fc1_dy = GroupedTensor(
+            shape=(out_shape[0], fc1_weight_shape[0]),
+            dtype=dtype,
+            num_tensors=num_groups,
+            quantizer=fc1_ctx.grad_output_quantizers[0],
             data=fc1_dy_row_data,
             columnwise_data=fc1_dy_col_data,
             scale_inv=fc1_dy_row_scale,
             columnwise_scale_inv=fc1_dy_col_scale,
-            split_sizes=split_sizes,
-            logical_last_dim=fc1_weight_shape[0],
-            dtype=dtype,
-            quantizer=fc1_ctx.grad_output_quantizers[0],
+            first_dims=split_sizes,
+            tensor_offsets=fc1_dy_tensor_offsets,
             with_gemm_swizzled_scales=True,
         )
 

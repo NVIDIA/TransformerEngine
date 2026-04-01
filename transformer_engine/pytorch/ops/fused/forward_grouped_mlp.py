@@ -13,12 +13,12 @@ from typing import Any, Optional
 import torch
 
 import transformer_engine_torch as tex
-from cuda.bindings import driver as cuda
 from ...module._common import noop_cat
 from ...quantization import Recipe
 from ...tensor import Quantizer
 from ...utils import get_cached_ones_tensor, get_device_compute_capability, mark_grouped_tensor
 from ...tensor.grouped_tensor import GroupedTensor
+from ...tensor.mxfp8_tensor import MXFP8Quantizer
 from ...constants import MXFP8_BLOCK_SCALING_SIZE
 from ..basic import GroupedLinear, ScaledSwiGLU
 from ..fuser import register_forward_fusion
@@ -26,40 +26,9 @@ from ..op import FusedOperation, FusibleOperation, OperationContext
 from .._common import (
     fuse_grouped_mlp_ops,
     is_quantized_tensor,
-    make_grouped_tensor_from_buffers,
     maybe_dequantize,
     validate_grouped_mlp_dims,
 )
-
-
-@functools.lru_cache(maxsize=1)
-def _glu_wrapper_has_bias_tensor_arg() -> bool:
-    """True if cudnn-frontend SM100 GLU wrapper accepts ``bias_tensor``."""
-    try:
-        from cudnn import grouped_gemm_glu_wrapper_sm100  # pylint: disable=import-outside-toplevel
-    except ImportError:
-        return False
-    try:
-        params = inspect.signature(grouped_gemm_glu_wrapper_sm100).parameters
-    except (TypeError, ValueError):
-        return False
-    return "bias_tensor" in params
-
-
-@functools.lru_cache(maxsize=1)
-def _quant_wrapper_has_bias_tensor_arg() -> bool:
-    """True if cudnn-frontend SM100 Quant wrapper accepts ``bias_tensor``."""
-    try:
-        from cudnn import (
-            grouped_gemm_quant_wrapper_sm100,
-        )  # pylint: disable=import-outside-toplevel
-    except ImportError:
-        return False
-    try:
-        params = inspect.signature(grouped_gemm_quant_wrapper_sm100).parameters
-    except (TypeError, ValueError):
-        return False
-    return "bias_tensor" in params
 
 
 def _pack_grouped_linear_bias_for_cudnn(linear_op: GroupedLinear) -> Optional[torch.Tensor]:
@@ -113,18 +82,36 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         return True
 
     @classmethod
+    @functools.lru_cache(maxsize=1)
     def is_fc1_bias_supported(cls) -> bool:
         """Whether cudnn-frontend exposes ``bias_tensor`` on the grouped GEMM GLU SM100 wrapper (FC1)."""
         if not cls.is_supported():
             return False
-        return _glu_wrapper_has_bias_tensor_arg()
+        try:
+            from cudnn import grouped_gemm_glu_wrapper_sm100  # pylint: disable=import-outside-toplevel
+        except ImportError:
+            return False
+        try:
+            params = inspect.signature(grouped_gemm_glu_wrapper_sm100).parameters
+        except (TypeError, ValueError):
+            return False
+        return "bias_tensor" in params
 
     @classmethod
+    @functools.lru_cache(maxsize=1)
     def is_fc2_bias_supported(cls) -> bool:
         """Whether cudnn-frontend exposes ``bias_tensor`` on the grouped GEMM Quant SM100 wrapper (FC2)."""
         if not cls.is_supported():
             return False
-        return _quant_wrapper_has_bias_tensor_arg()
+        try:
+            from cudnn import grouped_gemm_quant_wrapper_sm100  # pylint: disable=import-outside-toplevel
+        except ImportError:
+            return False
+        try:
+            params = inspect.signature(grouped_gemm_quant_wrapper_sm100).parameters
+        except (TypeError, ValueError):
+            return False
+        return "bias_tensor" in params
 
     def __init__(
         self,
@@ -154,10 +141,10 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         fc1_ctx, swiglu_ctx, fc2_ctx = basic_op_ctxs
 
         # Tensor properties
-        in_shape = list(input_.size())
-        assert len(in_shape) == 2, f"Expected 2D input tensor, got shape={in_shape}."
         fc1_weight_shape = (fc1_op.out_features, fc1_op.in_features)
         fc2_weight_shape = (fc2_op.out_features, fc2_op.in_features)
+        input_ = input_.reshape(-1, fc1_weight_shape[1])
+        in_shape = list(input_.size())
 
         num_groups = fc1_op.num_groups
         fc1_weight_param = fc1_op.weight if fc1_op.single_grouped_weight else fc1_op.weight0
@@ -203,8 +190,15 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             raise ValueError(f"Expected {num_groups} splits, but got {int(split_sizes.numel())}.")
         split_sizes = split_sizes.to(dtype=torch.int64, device=device)
         split_points = torch.cumsum(split_sizes, 0, dtype=torch.int)
-        fc1_x_tensor_offsets = GroupedTensor.make_tensor_offsets(split_sizes, fc1_weight_shape[1])
-        fc2_x_tensor_offsets = GroupedTensor.make_tensor_offsets(split_sizes, fc2_weight_shape[1])
+        split_points_offsets = torch.cumsum(split_sizes, 0)
+        base_offsets = torch.cat(
+            [
+                torch.zeros(1, device=split_sizes.device, dtype=split_sizes.dtype),
+                split_points_offsets,
+            ]
+        )
+        fc1_x_tensor_offsets = base_offsets * fc1_weight_shape[1]
+        fc2_x_tensor_offsets = base_offsets * fc2_weight_shape[1]
 
         # Extract post-scales from extra input
         scales = basic_op_extra_inputs[1][0]
@@ -299,11 +293,18 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             tex.swizzle_grouped_scales(fc2_weight_for_gemm, rowwise=True, columnwise=False)
 
         # Group-quantize input tensor and convert dtypes if needed
-        fc1_x = maybe_dequantize(input_, dtype)
         for quantizer in fc1_input_quantizers:
             quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
             quantizer.optimize_for_gemm = True
-        grouped_fc1_x = tex.group_quantize(fc1_x, fc1_input_quantizers[0], num_groups, split_sizes)
+        if isinstance(input_, GroupedTensor) and isinstance(
+            getattr(input_, "quantizer", None), MXFP8Quantizer
+        ):
+            grouped_fc1_x = input_
+        else:
+            fc1_x = maybe_dequantize(input_, dtype)
+            grouped_fc1_x = tex.group_quantize(
+                fc1_x, fc1_input_quantizers[0], num_groups, split_sizes
+            )
 
         # Pack data tensors
         # Note: Fused kernel expects tensor with non-contiguous
@@ -331,7 +332,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
 
         alpha_tensor = get_cached_ones_tensor(num_groups, dtype, device)
         norm_const_tensor = get_cached_ones_tensor(1, dtype, device)
-        current_stream = cuda.CUstream(torch.cuda.current_stream().cuda_stream)
+        current_stream = torch.cuda.current_stream().cuda_stream
 
         fc1_bias_packed = _pack_grouped_linear_bias_for_cudnn(fc1_op)
         fc2_bias_packed = _pack_grouped_linear_bias_for_cudnn(fc2_op)
@@ -432,26 +433,41 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         # Repack columnwise scales on GPU to preserve group ordering.
 
         # FC2 inputs scales are already swizzled/optimized for GEMM
-        grouped_fc2_x = make_grouped_tensor_from_buffers(
-            num_groups=num_groups,
+        grouped_fc2_x = GroupedTensor(
+            shape=(in_shape[0], fc2_weight_shape[1]),
+            dtype=dtype,
+            num_tensors=num_groups,
+            quantizer=fc2_input_quantizers[0],
             data=fc2_in_row_data.reshape(-1),
             columnwise_data=fc2_in_col_data.reshape(-1),
             scale_inv=fc2_in_row_scale.reshape(-1),
             columnwise_scale_inv=fc2_in_col_scale.reshape(-1),
-            split_sizes=split_sizes,
-            logical_last_dim=fc2_weight_shape[1],
-            dtype=dtype,
-            quantizer=fc2_input_quantizers[0],
-            with_gemm_swizzled_scales=True,
+            first_dims=split_sizes,
             tensor_offsets=fc2_x_tensor_offsets,
+            with_gemm_swizzled_scales=True,
         )
 
         # FC2 GEMM
         fc2_out_shape = in_shape[:-1] + [fc2_weight_shape[0]]
-        if fc2_op.single_grouped_weight:
-            fc2_a_data = fc1_kernel_out["d_tensor"]
-            fc2_a_scales = fc1_kernel_out["sfd_row_tensor"]
+        fc2_quant_kwargs = dict(
+            a_tensor=fc1_kernel_out["d_tensor"],
+            sfa_tensor=fc1_kernel_out["sfd_row_tensor"],
+            padded_offsets=split_points,
+            alpha_tensor=alpha_tensor.float(),
+            norm_const_tensor=None,
+            prob_tensor=torch.ones((in_shape[0], 1, 1), dtype=torch.float32, device=device),
+            acc_dtype=torch.float32,
+            c_dtype=dtype,
+            d_dtype=dtype,
+            cd_major="n",
+            sf_vec_size=MXFP8_BLOCK_SCALING_SIZE,
+            current_stream=current_stream,
+            use_dynamic_sched=True,
+        )
+        if self.is_fc2_bias_supported():
+            fc2_quant_kwargs["bias_tensor"] = fc2_bias_packed
 
+        if fc2_op.single_grouped_weight:
             fc2_w_data = fc2_weight_for_gemm.rowwise_data
             fc2_w_data = fc2_w_data.view(dtype=torch.float8_e4m3fn)
             fc2_w_data = fc2_w_data.view(num_groups, fc2_weight_shape[0], fc2_weight_shape[1])
@@ -467,32 +483,9 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
                 4,
             )
             fc2_w_scales = fc2_w_scales.permute(3, 4, 1, 5, 2, 0)
-
-            fc2_quant_kwargs = dict(
-                a_tensor=fc2_a_data,
-                sfa_tensor=fc2_a_scales,
-                padded_offsets=split_points,
-                alpha_tensor=alpha_tensor.float(),
-                b_tensor=fc2_w_data,
-                sfb_tensor=fc2_w_scales,
-                norm_const_tensor=None,
-                prob_tensor=torch.ones((in_shape[0], 1, 1), dtype=torch.float32, device=device),
-                acc_dtype=torch.float32,
-                c_dtype=dtype,
-                d_dtype=dtype,
-                cd_major="n",
-                sf_vec_size=MXFP8_BLOCK_SCALING_SIZE,
-                current_stream=current_stream,
-                use_dynamic_sched=True,
-            )
-            if _quant_wrapper_has_bias_tensor_arg():
-                fc2_quant_kwargs["bias_tensor"] = fc2_bias_packed
-            fc2_kernel_out = self.grouped_gemm_quant_kernel()(**fc2_quant_kwargs)
-            fc2_out = fc2_kernel_out["d_tensor"].permute(2, 0, 1).view(fc2_out_shape).contiguous()
+            fc2_quant_kwargs["b_tensor"] = fc2_w_data
+            fc2_quant_kwargs["sfb_tensor"] = fc2_w_scales
         else:
-            fc2_a_data = fc1_kernel_out["d_tensor"]
-            fc2_a_scales = fc1_kernel_out["sfd_row_tensor"]
-
             fc2_b_ptrs, fc2_sfb_ptrs, _ = tex.get_device_pointer_for_data_and_scales(
                 [w._rowwise_data for w in grouped_fc2_weight],
                 [w._rowwise_scale_inv for w in grouped_fc2_weight],
@@ -500,31 +493,14 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
                 rowwise=True,
                 data_dtype=grouped_fc2_weight[0]._fp8_dtype,
             )
+            fc2_quant_kwargs["b_ptrs"] = fc2_b_ptrs
+            fc2_quant_kwargs["sfb_ptrs"] = fc2_sfb_ptrs
+            fc2_quant_kwargs["n"] = fc2_weight_shape[0]
+            fc2_quant_kwargs["b_dtype"] = torch.float8_e4m3fn
+            fc2_quant_kwargs["b_major"] = "k"
 
-            fc2_quant_kwargs = dict(
-                a_tensor=fc2_a_data,
-                sfa_tensor=fc2_a_scales,
-                padded_offsets=split_points,
-                alpha_tensor=alpha_tensor.float(),
-                b_ptrs=fc2_b_ptrs,
-                sfb_ptrs=fc2_sfb_ptrs,
-                n=fc2_weight_shape[0],
-                b_dtype=torch.float8_e4m3fn,
-                b_major="k",
-                norm_const_tensor=None,
-                prob_tensor=torch.ones((in_shape[0], 1, 1), dtype=torch.float32, device=device),
-                acc_dtype=torch.float32,
-                c_dtype=dtype,
-                d_dtype=dtype,
-                cd_major="n",
-                sf_vec_size=MXFP8_BLOCK_SCALING_SIZE,
-                current_stream=current_stream,
-                use_dynamic_sched=True,
-            )
-            if _quant_wrapper_has_bias_tensor_arg():
-                fc2_quant_kwargs["bias_tensor"] = fc2_bias_packed
-            fc2_kernel_out = self.grouped_gemm_quant_kernel()(**fc2_quant_kwargs)
-            fc2_out = fc2_kernel_out["d_tensor"].permute(2, 0, 1).view(fc2_out_shape).contiguous()
+        fc2_kernel_out = self.grouped_gemm_quant_kernel()(**fc2_quant_kwargs)
+        fc2_out = fc2_kernel_out["d_tensor"].permute(2, 0, 1).view(fc2_out_shape).contiguous()
 
         # Save state for backward pass
         if requires_grad:
@@ -551,6 +527,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             fc1_ctx.dtype = dtype
             fc1_ctx.input_requires_grad = input_requires_grad
             fc1_ctx.weight_requires_grad = weight_requires_grad
+            fc1_ctx.base_split_offsets = base_offsets
 
             # Scaled SwiGLU
             swiglu_ctx.save_for_backward(swiglu_in, scales)

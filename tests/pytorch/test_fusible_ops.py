@@ -38,9 +38,6 @@ from transformer_engine.pytorch import (
 )
 from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
 from transformer_engine.pytorch.cpp_extensions.gemm import general_grouped_gemm_for_grouped_tensor
-from transformer_engine.pytorch.ops._common import (
-    make_grouped_tensor_from_buffers,
-)
 import transformer_engine_torch as tex
 
 # Import utility functions

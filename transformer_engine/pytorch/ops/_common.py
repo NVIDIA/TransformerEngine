@@ -17,8 +17,6 @@ from ..quantized_tensor import QuantizedTensorStorage
 from ..utils import canonicalize_dtype
 from ..module._common import noop_cat
 from ..tensor import Quantizer
-from ..tensor.grouped_tensor import GroupedTensor
-from ..tensor.storage.grouped_tensor_storage import GroupedTensorStorage
 
 
 def is_quantized_tensor(tensor: torch.Tensor | QuantizedTensorStorage) -> bool:
@@ -75,52 +73,6 @@ def get_fp8_meta_from_fp8_tensor(tensor: Float8Tensor) -> tuple[FP8TensorMeta, i
     fp8_meta.amax_history = torch.empty(1, 1, dtype=torch.float32, device=tensor.device)
     fp8_meta.scale_inv = tensor._scale_inv
     return fp8_meta, 0
-
-
-def make_grouped_tensor_from_buffers(
-    *,
-    num_groups: int,
-    data: torch.Tensor,
-    split_sizes: torch.Tensor,
-    columnwise_data: torch.Tensor = None,
-    scale_inv: torch.Tensor = None,
-    columnwise_scale_inv: torch.Tensor = None,
-    tensor_offsets: torch.Tensor = None,
-    logical_last_dim: int,
-    dtype: torch.dtype,
-    quantizer: Quantizer = None,
-    with_gemm_swizzled_scales: bool = False,
-) -> GroupedTensor:
-    """Build GroupedTensor from FC1+SwiGLU / dSwiGLU kernel outputs.
-
-    Scales are already in GEMM swizzled layout.
-    """
-    if tensor_offsets is None:
-        tensor_offsets = GroupedTensor.make_tensor_offsets(split_sizes, logical_last_dim)
-    logical_first_dim = data.shape[0] if data is not None else columnwise_data.shape[0]
-    ndim = data.ndim if data is not None else columnwise_data.ndim
-    if ndim == 1:
-        logical_first_dim = logical_first_dim // logical_last_dim
-    return GroupedTensor(
-        shape=(logical_first_dim, logical_last_dim),
-        dtype=dtype,
-        quantizer=quantizer,
-        num_tensors=num_groups,
-        data=data,
-        columnwise_data=columnwise_data,
-        scale_inv=scale_inv,
-        columnwise_scale_inv=columnwise_scale_inv,
-        amax=None,
-        columnwise_amax=None,
-        scale=None,
-        first_dims=split_sizes,
-        last_dims=None,
-        tensor_offsets=tensor_offsets,
-        offsets=None,
-        scale_inv_offsets=None,
-        columnwise_scale_inv_offsets=None,
-        with_gemm_swizzled_scales=with_gemm_swizzled_scales,
-    )
 
 
 def validate_grouped_mlp_dims(fc1, swiglu, fc2) -> None:
