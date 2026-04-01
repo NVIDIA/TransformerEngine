@@ -88,7 +88,27 @@ struct NVTECusolverMpCtx {
   CusolverMpGrid grid;
   void* workspace;
   size_t workspace_size;
+  bool workspace_registered;
 };
+
+namespace {
+
+void FreeWorkspace(NVTECusolverMpCtx* ctx) {
+  if (ctx->workspace == nullptr) {
+    return;
+  }
+  if (ctx->workspace_registered) {
+    NVTE_CHECK_CUSOLVERMP(cusolverMpBufferDeregister(ctx->grid.get(), ctx->workspace));
+    NVTE_CHECK_NCCL(ncclMemFree(ctx->workspace));
+  } else {
+    NVTE_CHECK_CUDA(cudaFree(ctx->workspace));
+  }
+  ctx->workspace = nullptr;
+  ctx->workspace_size = 0;
+  ctx->workspace_registered = false;
+}
+
+}  // namespace
 
 NVTECusolverMpCtx* nvte_cusolvermp_ctx_create(ncclComm_t comm, int nranks, int rank) {
   NVTE_API_CALL(nvte_cusolvermp_ctx_create);
@@ -116,14 +136,13 @@ NVTECusolverMpCtx* nvte_cusolvermp_ctx_create(ncclComm_t comm, int nranks, int r
       .grid = std::move(grid),
       .workspace = nullptr,
       .workspace_size = 0,
+      .workspace_registered = false,
   };
 }
 
 void nvte_cusolvermp_ctx_destroy(NVTECusolverMpCtx* ctx) {
   NVTE_API_CALL(nvte_cusolvermp_ctx_destroy);
-  if (ctx->workspace) {
-    cudaFree(ctx->workspace);
-  }
+  FreeWorkspace(ctx);
   // Destroy handle and grid before the stream they depend on
   ctx->handle.reset();
   ctx->grid.reset();
@@ -171,11 +190,28 @@ void nvte_newton_schulz(NVTECusolverMpCtx* ctx, int64_t m, int64_t n, NVTETensor
 
   // Allocate/grow device workspace
   if (ctx->workspace_size < wrksp_size_device) {
-    if (ctx->workspace) {
-      NVTE_CHECK_CUDA(cudaFree(ctx->workspace));
+    FreeWorkspace(ctx);
+
+    void* workspace = nullptr;
+    bool workspace_registered = false;
+
+    if (ncclMemAlloc(&workspace, wrksp_size_device) == ncclSuccess) {
+      if (cusolverMpBufferRegister(ctx->grid.get(), workspace, wrksp_size_device) ==
+          CUSOLVER_STATUS_SUCCESS) {
+        workspace_registered = true;
+      } else {
+        NVTE_CHECK_NCCL(ncclMemFree(workspace));
+        workspace = nullptr;
+      }
     }
-    NVTE_CHECK_CUDA(cudaMalloc(&ctx->workspace, wrksp_size_device));
+
+    if (workspace == nullptr) {
+      NVTE_CHECK_CUDA(cudaMalloc(&workspace, wrksp_size_device));
+    }
+
+    ctx->workspace = workspace;
     ctx->workspace_size = wrksp_size_device;
+    ctx->workspace_registered = workspace_registered;
   }
 
   // Allocate host workspace
