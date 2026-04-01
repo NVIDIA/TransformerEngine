@@ -254,17 +254,17 @@ void fused_topk_with_score_function_forward_kernel_launcher(
     shared_memory_size += num_experts * num_token_per_block * sizeof(CompType);  // maksed_scores
   }
   if (topk < 16) {
-    cudaFuncSetAttribute(
+    NVTE_CHECK_CUDA(cudaFuncSetAttribute(
         fused_topk_with_score_function_forward_kernel<DataType, BiasType, TopkFuncType::Naive>,
-        cudaFuncAttributeMaxDynamicSharedMemorySize, shared_memory_size);
+        cudaFuncAttributeMaxDynamicSharedMemorySize, shared_memory_size));
     fused_topk_with_score_function_forward_kernel<DataType, BiasType, TopkFuncType::Naive>
         <<<grid_size, kThreadsPerBlock, shared_memory_size, stream>>>(
             logits, num_tokens, num_experts, topk, use_pre_softmax, num_groups, group_topk,
             scaling_factor, score_function, expert_bias, probs, routing_map, intermediate_output);
   } else {
-    cudaFuncSetAttribute(
+    NVTE_CHECK_CUDA(cudaFuncSetAttribute(
         fused_topk_with_score_function_forward_kernel<DataType, BiasType, TopkFuncType::Radix>,
-        cudaFuncAttributeMaxDynamicSharedMemorySize, shared_memory_size);
+        cudaFuncAttributeMaxDynamicSharedMemorySize, shared_memory_size));
     fused_topk_with_score_function_forward_kernel<DataType, BiasType, TopkFuncType::Radix>
         <<<grid_size, kThreadsPerBlock, shared_memory_size, stream>>>(
             logits, num_tokens, num_experts, topk, use_pre_softmax, num_groups, group_topk,
@@ -479,8 +479,9 @@ void fused_topk_with_score_function_backward_kernel_launcher(
                               num_experts * num_token_per_block * sizeof(CompType)  // act_from_fwd
                               + num_experts * num_token_per_block * sizeof(CompType)  // comp_buf
                               + num_experts * num_token_per_block * sizeof(bool);     // routing_map
-  cudaFuncSetAttribute(fused_topk_with_score_function_backward_kernel<DataType>,
-                       cudaFuncAttributeMaxDynamicSharedMemorySize, shared_memory_size);
+  NVTE_CHECK_CUDA(cudaFuncSetAttribute(fused_topk_with_score_function_backward_kernel<DataType>,
+                                      cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                      shared_memory_size));
   fused_topk_with_score_function_backward_kernel<DataType>
       <<<grid_size, kThreadsPerBlock, shared_memory_size, stream>>>(
           routing_map, intermediate_output, grad_probs, num_tokens, num_experts, topk,

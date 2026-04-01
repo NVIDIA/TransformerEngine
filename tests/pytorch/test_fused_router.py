@@ -30,7 +30,11 @@ def _get_tolerances(dtype: torch.dtype, num_experts: int):
     # Default tolerances for torch.testing.assert_close
     base_atol, base_rtol = 1e-5, 1.3e-6
 
-    eps = 2e-7
+    eps = {
+        torch.float32: 2e-7,
+        torch.float16: 1e-3,
+        torch.bfloat16: 4e-3,
+    }.get(dtype, 2e-7)
     # The worst-case rounding error from summing N values is O(N * eps).
     # Use 2 * num_experts * eps as the tolerance floor so tests pass for
     # large expert counts while remaining tight for small ones.
@@ -256,7 +260,7 @@ def run_comparison(
 @pytest.mark.parametrize("dtype", [torch.float32])
 @pytest.mark.parametrize("num_tokens", [2048, 7168, 8992])
 @pytest.mark.parametrize("num_experts", [1024, 128, 32])
-@pytest.mark.parametrize("topk", [4, 8])
+@pytest.mark.parametrize("topk", [4, 8, 16, 32])
 @pytest.mark.parametrize("group_topk", [None, 4])
 @pytest.mark.parametrize("scaling_factor", [None, 1.2])
 @pytest.mark.parametrize("enable_bias", [True, False])
@@ -287,7 +291,7 @@ def test_topk_sigmoid(
 @pytest.mark.parametrize("dtype", [torch.float32])
 @pytest.mark.parametrize("num_tokens", [2048, 7168, 8992])
 @pytest.mark.parametrize("num_experts", [1024, 128, 32])
-@pytest.mark.parametrize("topk", [4, 8])
+@pytest.mark.parametrize("topk", [4, 8, 16, 32])
 @pytest.mark.parametrize("group_topk", [None, 4])
 @pytest.mark.parametrize("scaling_factor", [None, 1.2])
 @pytest.mark.parametrize("enable_bias", [True, False])
@@ -318,7 +322,7 @@ def test_topk_sqrtsoftplus(
 @pytest.mark.parametrize("dtype", [torch.float32])
 @pytest.mark.parametrize("num_tokens", [2048, 7168, 14234])
 @pytest.mark.parametrize("num_experts", [1024, 128, 32])
-@pytest.mark.parametrize("topk", [4, 8])
+@pytest.mark.parametrize("topk", [4, 8, 16, 32])
 @pytest.mark.parametrize("use_pre_softmax", [True, False])
 @pytest.mark.parametrize("group_topk", [None, 4])
 @pytest.mark.parametrize("scaling_factor", [None, 1.2])
@@ -349,7 +353,7 @@ def test_topk_softmax(
 @pytest.mark.parametrize("dtype", [torch.float32])
 @pytest.mark.parametrize("num_tokens", [2048, 7168])
 @pytest.mark.parametrize("num_experts", [1024, 256, 128, 32])
-@pytest.mark.parametrize("topk", [1, 4, 8])
+@pytest.mark.parametrize("topk", [1, 4, 8, 16, 32])
 @pytest.mark.parametrize("score_function", ["softmax", "sigmoid", "sqrtsoftplus"])
 def test_fused_scores_for_aux_loss(dtype, num_tokens, num_experts, topk, score_function):
     if score_function in ("sigmoid", "sqrtsoftplus"):
@@ -402,7 +406,7 @@ def test_fused_scores_for_aux_loss(dtype, num_tokens, num_experts, topk, score_f
 @pytest.mark.parametrize("dtype", [torch.float32])
 @pytest.mark.parametrize("num_tokens", [2048, 7168, 14234])
 @pytest.mark.parametrize("num_experts", [1024, 256, 128, 32])
-@pytest.mark.parametrize("topk", [4])
+@pytest.mark.parametrize("topk", [4, 32])
 def test_fused_moe_aux_loss(dtype, num_tokens, num_experts, topk):
     # Construct the special probs to avoid inf in the sigmoid function
     offset = torch.arange(-num_tokens // 2, num_tokens // 2, dtype=dtype, device="cuda") * 1e-4
