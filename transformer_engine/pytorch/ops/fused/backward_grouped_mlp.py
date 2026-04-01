@@ -320,7 +320,7 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
                 shape=(out_shape[0], fc1_weight_shape[1]),
                 dtype=dtype,
                 num_tensors=num_groups,
-                quantizer=fc1_ctx.input_quantizers[0],
+                quantizer=fc1_ctx.input_quantizer,
                 columnwise_data=fc1_x_col_data,
                 columnwise_scale_inv=fc1_x_col_scale,
                 first_dims=split_sizes,
@@ -334,7 +334,7 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
                 shape=(out_shape[0], fc2_weight_shape[1]),
                 dtype=dtype,
                 num_tensors=num_groups,
-                quantizer=fc2_ctx.input_quantizers[0],
+                quantizer=fc2_ctx.input_quantizer,
                 columnwise_data=fc2_x_col_data,
                 columnwise_scale_inv=fc2_x_col_scale,
                 first_dims=split_sizes,
@@ -343,9 +343,8 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
             )
 
         # Split grad output tensor and convert dtypes if needed
-        for quantizer in fc2_ctx.grad_output_quantizers:
-            quantizer.set_usage(rowwise=True, columnwise=fc2_ctx.weight_requires_grad)
-            quantizer.optimize_for_gemm = True
+        fc2_ctx.grad_output_quantizer.set_usage(rowwise=True, columnwise=fc2_ctx.weight_requires_grad)
+        fc2_ctx.grad_output_quantizer.optimize_for_gemm = True
         output_fc2_dbias = fc2_op.has_bias
         fc2_dbias_packed = None
         if (
@@ -358,7 +357,7 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
             fc2_dy = maybe_dequantize(grad_output, dtype)
             gq_ret = tex.group_quantize(
                 fc2_dy,
-                fc2_ctx.grad_output_quantizers[0],
+                fc2_ctx.grad_output_quantizer,
                 num_groups,
                 split_sizes,
                 output_fc2_dbias,
@@ -498,7 +497,7 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
             shape=(out_shape[0], fc1_weight_shape[0]),
             dtype=dtype,
             num_tensors=num_groups,
-            quantizer=fc1_ctx.grad_output_quantizers[0],
+            quantizer=fc1_ctx.grad_output_quantizer,
             data=fc1_dy_row_data,
             columnwise_data=fc1_dy_col_data,
             scale_inv=fc1_dy_row_scale,

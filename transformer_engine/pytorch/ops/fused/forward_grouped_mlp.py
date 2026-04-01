@@ -166,17 +166,12 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         )
 
         # Quantizers
-        fc1_input_quantizers = [None] * num_groups
+        fc1_input_quantizer = fc1_op.get_quantizer("forward", 0)
         fc1_weight_quantizer = fc1_op.get_quantizer("forward", 1)
-        fc1_grad_output_quantizers = [None] * num_groups
-        fc2_input_quantizers = [None] * num_groups
+        fc1_grad_output_quantizer = fc1_op.get_quantizer("backward", 0)
+        fc2_input_quantizer = fc2_op.get_quantizer("forward", 0)
         fc2_weight_quantizer = fc2_op.get_quantizer("forward", 1)
-        fc2_grad_output_quantizers = [None] * num_groups
-        for idx in range(num_groups):
-            fc1_input_quantizers[idx] = fc1_op.get_quantizer("forward", 2 * idx)
-            fc1_grad_output_quantizers[idx] = fc1_op.get_quantizer("backward", idx)
-            fc2_input_quantizers[idx] = fc2_op.get_quantizer("forward", 2 * idx)
-            fc2_grad_output_quantizers[idx] = fc2_op.get_quantizer("backward", idx)
+        fc2_grad_output_quantizer = fc2_op.get_quantizer("backward", 0)
 
         # Extract split sizes from extra input
         fc1_split_sizes = basic_op_extra_inputs[0][0]
@@ -285,9 +280,8 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             grouped_fc2_weight._with_gemm_swizzled_scales = False
 
         # Group-quantize input tensor and convert dtypes if needed
-        for quantizer in fc1_input_quantizers:
-            quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
-            quantizer.optimize_for_gemm = True
+        fc1_input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
+        fc1_input_quantizer.optimize_for_gemm = True
         if isinstance(input_, GroupedTensor) and isinstance(
             getattr(input_, "quantizer", None), MXFP8Quantizer
         ):
@@ -295,7 +289,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         else:
             fc1_x = maybe_dequantize(input_, dtype)
             grouped_fc1_x = tex.group_quantize(
-                fc1_x, fc1_input_quantizers[0], num_groups, split_sizes
+                fc1_x, fc1_input_quantizer, num_groups, split_sizes
             )
 
         # Pack data tensors
@@ -417,7 +411,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             shape=(in_shape[0], fc2_weight_shape[1]),
             dtype=dtype,
             num_tensors=num_groups,
-            quantizer=fc2_input_quantizers[0],
+            quantizer=fc2_input_quantizer,
             data=fc2_in_row_data.reshape(-1),
             columnwise_data=fc2_in_col_data.reshape(-1),
             scale_inv=fc2_in_row_scale.reshape(-1),
@@ -502,9 +496,9 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
                 split_sizes, split_points, *fc1_weight_tensors, *fc1_input_tensors
             )
             fc1_ctx.with_quantized_compute = True
-            fc1_ctx.input_quantizers = fc1_input_quantizers
+            fc1_ctx.input_quantizer = fc1_input_quantizer
             fc1_ctx.weight_quantizer = fc1_weight_quantizer
-            fc1_ctx.grad_output_quantizers = fc1_grad_output_quantizers
+            fc1_ctx.grad_output_quantizer = fc1_grad_output_quantizer
             fc1_ctx.grad_input_quantizers = None
             fc1_ctx.dtype = dtype
             fc1_ctx.input_requires_grad = input_requires_grad
@@ -533,9 +527,9 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
                 fc2_ctx.save_for_backward(split_sizes, *grouped_fc2_weight, *fc2_input_tensors)
 
             fc2_ctx.with_quantized_compute = True
-            fc2_ctx.input_quantizers = fc2_input_quantizers
+            fc2_ctx.input_quantizer = fc2_input_quantizer
             fc2_ctx.weight_quantizer = fc2_weight_quantizer
-            fc2_ctx.grad_output_quantizers = fc2_grad_output_quantizers
+            fc2_ctx.grad_output_quantizer = fc2_grad_output_quantizer
             fc2_ctx.grad_input_quantizers = None
             fc2_ctx.dtype = dtype
             fc2_ctx.input_requires_grad = input_requires_grad
