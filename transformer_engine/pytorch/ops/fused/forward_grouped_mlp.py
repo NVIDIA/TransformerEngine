@@ -103,7 +103,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
     @functools.lru_cache(maxsize=None)
     def is_supported(cls) -> bool:
         """Whether this fused operation is supported on the current system."""
-        if get_device_compute_capability() < (10, 0):
+        if get_device_compute_capability()[0] != 10:
             return False
         try:
             cls.grouped_gemm_glu_kernel()
