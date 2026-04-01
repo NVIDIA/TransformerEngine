@@ -652,6 +652,36 @@ def _segment_ids_to_seqlens(segment_ids_q, segment_ids_kv, attn_mask_type):
     return q_seq_lens, kv_seq_lens
 
 
+@jax.jit
+def _generate_default_segment_pos_thd(seg_ids: jnp.ndarray) -> jnp.ndarray:
+    """Jitted THD default segment_pos generation used by current_jit impl."""
+    batch_size, seq_size = seg_ids.shape
+    seq_idx = jnp.arange(seq_size, dtype=jnp.int32)
+    first_is_segment = jnp.full((batch_size, 1), True, dtype=bool)
+    segment_start = jnp.concatenate(
+        [
+            first_is_segment,
+            (seg_ids[..., 1:] != seg_ids[..., :-1]) & (seg_ids[..., 1:] != 0),
+        ],
+        axis=-1,
+    )
+    segment_start_idx = jnp.where(segment_start, seq_idx[None, :], 0)
+    segment_start_offsets = jax.lax.associative_scan(jnp.maximum, segment_start_idx, axis=-1)
+    last_nonzero_idx = jax.vmap(
+        lambda segids_row: jnp.max(jnp.where(segids_row != 0, seq_idx, -1))
+    )(seg_ids)
+    seg_pos = seq_idx[None, :] - segment_start_offsets
+    trailing_mask = seq_idx[None, :] <= last_nonzero_idx[:, None]
+    return jnp.where(trailing_mask, seg_pos, 0)
+
+
+@jax.jit
+def _generate_default_segment_pos_bshd(seg_ids: jnp.ndarray) -> jnp.ndarray:
+    """Jitted non-THD default segment_pos generation used by current_jit impl."""
+    seqlen = seg_ids.shape[-1]
+    return jnp.broadcast_to(jnp.arange(seqlen), seg_ids.shape)
+
+
 @jax.tree_util.register_pytree_node_class
 class SequenceDescriptor:
     """A class to describe the sequences with flexible initialization.
@@ -902,54 +932,13 @@ class SequenceDescriptor:
                     " primitive"
                 )
 
-            # Generate the default pos for THD and BSHD non-reordered segment_ids
-            def generate_default_pos(seg_ids):
-                if is_thd:
-                    batch_size, seq_size = seg_ids.shape
-                    # Assume that the first token belongs to a segment and is not a padded token
-                    first_is_segment = jnp.full((batch_size, 1), True, dtype=bool)
-                    # Get segment start positions
-                    segment_start = jnp.concatenate(
-                        [
-                            first_is_segment,
-                            (seg_ids[..., 1:] != seg_ids[..., :-1]) & (seg_ids[..., 1:] != 0),
-                        ],
-                        axis=-1,
-                    )
-                    # Get offset for location where new segment starts
-                    segment_start_idx = jax.vmap(lambda row: jnp.arange(row.size) * row)(
-                        segment_start
-                    )
-                    segment_start_offsets = jax.vmap(jnp.maximum.accumulate)(segment_start_idx)
-
-                    # Get the last non-zero index - after this everything is padding
-                    # (B,)
-                    last_nonzero_idx = jax.vmap(
-                        lambda segids_row: jnp.max(
-                            jnp.where(segids_row != 0, jnp.arange(seq_size), -1)
-                        )
-                    )(seg_ids)
-                    seg_pos_no_thd = jnp.arange(seq_size)
-                    # Get a mask which can be used to zero out all the padding at the end (after the non-zero index)
-                    mask = seg_pos_no_thd <= last_nonzero_idx[:, None]
-
-                    # Get the unmasked seg_pos for the THD sequence
-                    seg_pos = (
-                        jnp.broadcast_to(jnp.arange(seq_size), seg_ids.shape)
-                        - segment_start_offsets
-                    )
-
-                    # Use the mask to zero out the padding at the end (after the non-zero index)
-                    segment_pos = jax.vmap(
-                        lambda pos_row, mask_row: jnp.where(mask_row, pos_row, 0)
-                    )(seg_pos, mask)
-                    return segment_pos
-
-                seqlen = seg_ids.shape[-1]
-                return jnp.broadcast_to(jnp.arange(seqlen), seg_ids.shape)
-
-            q_seg_pos = generate_default_pos(q_seg_ids)
-            kv_seg_pos = generate_default_pos(kv_seg_ids)
+            # Generate default pos via jitted helper kernels.
+            if is_thd:
+                q_seg_pos = _generate_default_segment_pos_thd(q_seg_ids)
+                kv_seg_pos = _generate_default_segment_pos_thd(kv_seg_ids)
+            else:
+                q_seg_pos = _generate_default_segment_pos_bshd(q_seg_ids)
+                kv_seg_pos = _generate_default_segment_pos_bshd(kv_seg_ids)
             segment_pos = (q_seg_pos, kv_seg_pos)
         # Explicitly passed segment_pos
         else:
