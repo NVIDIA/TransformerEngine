@@ -40,7 +40,6 @@ from ..utils import (
     init_method_constant,
     cast_if_needed,
     assert_dim_for_fp8_exec,
-    assert_dim_for_all_gather,
     clear_tensor_data,
     requires_grad,
     needs_quantized_gemm,
@@ -81,7 +80,7 @@ from ..quantized_tensor import (
     QuantizedTensorStorage,
     Quantizer,
     prepare_for_saving,
-    restore_from_saved,
+    restore_from_func_ctx,
 )
 from ..cpp_extensions import (
     general_gemm,
@@ -334,7 +333,6 @@ class _LayerNormMLP(torch.autograd.Function):
         inputmat = inp.view((-1, in_features))
         if fp8:
             assert_dim_for_fp8_exec(inputmat, fc1_weight, fc2_weight)
-            assert_dim_for_all_gather(inputmat, sequence_parallel, fc1_input_quantizer)
 
         activation_func = _act_func(
             activation, FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
@@ -900,11 +898,7 @@ class _LayerNormMLP(torch.autograd.Function):
     def _recompute(ctx):
         # pylint: disable=missing-function-docstring
 
-        saved_tensors = ctx.saved_tensors
-        tensors = restore_from_saved(ctx.tensor_objects, saved_tensors)
-        # Delete the references to tensor objects once they've been consumed
-        # by the `restore_from_saved` method to construct back the actual tensors.
-        ctx.tensor_objects = None
+        tensors = restore_from_func_ctx(ctx)
 
         if ctx.checkpoint:  # do recomputation from the original args
 
@@ -2373,6 +2367,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                     label,
                     None if label in ("dgrad", "wgrad") else base_quantizers[i + offset],
                     self.tp_group,
+                    self.tp_size,
                 )
                 for i, label in enumerate(labels)
             ]

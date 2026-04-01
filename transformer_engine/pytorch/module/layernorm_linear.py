@@ -29,7 +29,6 @@ from .base import (
 from ..quantization import FP8GlobalStateManager
 from ..utils import (
     assert_dim_for_fp8_exec,
-    assert_dim_for_all_gather,
     cast_if_needed,
     clear_tensor_data,
     divide,
@@ -61,7 +60,7 @@ from ..quantized_tensor import (
     QuantizedTensorStorage,
     Quantizer,
     prepare_for_saving,
-    restore_from_saved,
+    restore_from_func_ctx,
 )
 from ...debug.pytorch.debug_state import TEDebugState
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
@@ -158,7 +157,6 @@ class _LayerNormLinear(torch.autograd.Function):
         inputmat = inp
         if fp8:
             assert_dim_for_fp8_exec(inputmat, weight)
-            assert_dim_for_all_gather(inputmat, with_input_all_gather, input_quantizer)
 
         # Cast for native AMP
         nvtx_range_push(f"{nvtx_label}.norm_input_cast")
@@ -548,7 +546,6 @@ class _LayerNormLinear(torch.autograd.Function):
             nvtx_label = f"{nvtx_label}.{ctx.ub_name}"
 
         with get_nvtx_range_context("_LayerNormLinear_backward"):
-            saved_tensors = ctx.saved_tensors
             (  # pylint: disable=unbalanced-tuple-unpacking
                 inputmat,
                 weight,
@@ -558,11 +555,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 ln_out,
                 mu,
                 rsigma,
-            ) = restore_from_saved(ctx.tensor_objects, saved_tensors)
-
-            # Delete the references to tensor objects once they've been consumed
-            # by the `restore_from_saved` method to construct back the actual tensors.
-            ctx.tensor_objects = None
+            ) = restore_from_func_ctx(ctx)
 
             # Since main_grad can be modified inplace, it should not be a part of saved_tensors
             main_grad = (
@@ -1194,6 +1187,10 @@ class LayerNormLinear(TransformerEngineBaseModule):
         assert (
             self.parallel_mode in GemmParallelModes
         ), f"parallel_mode {parallel_mode} not supported"
+        if self.parallel_mode == "row":
+            raise NotImplementedError(
+                "Normalization does not support tensor-parallel distribution."
+            )
 
         if self.parallel_mode == "column":
             self.out_features = divide(self.out_features, self.tp_size)
@@ -1646,7 +1643,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
 
         names = ["activation", "weight", "output", "dgrad", "wgrad", "gradient"]
         return tuple(
-            DebugQuantizer(self.name, name, q, self.tp_group)
+            DebugQuantizer(self.name, name, q, self.tp_group, self.tp_size)
             for name, q in zip(names, original_quantizers)
         )
 

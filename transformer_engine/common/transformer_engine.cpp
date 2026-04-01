@@ -33,35 +33,6 @@ size_t typeToSize(const DType type) {
   return typeToNumBits(type) / 8;
 }
 
-std::string to_string(const DType type) {
-  switch (type) {
-    case DType::kByte:
-      return "Byte";
-    case DType::kBFloat16:
-      return "BFloat16";
-    case DType::kFloat16:
-      return "Float16";
-    case DType::kFloat32:
-      return "Float32";
-    case DType::kFloat8E4M3:
-      return "Float8E4M3";
-    case DType::kFloat8E5M2:
-      return "Float8E5M2";
-    case DType::kFloat8E8M0:
-      return "Float8E8M0";
-    case DType::kFloat4E2M1:
-      return "Float4E2M1";
-    case DType::kInt16:
-      return "Int16";
-    case DType::kInt32:
-      return "Int32";
-    case DType::kInt64:
-      return "Int64";
-    default:
-      return concat_strings("Invalid type ", static_cast<int>(type));
-  }
-}
-
 std::string to_string(const NVTEScalingMode &mode) {
   switch (mode) {
     case NVTE_DELAYED_TENSOR_SCALING:
@@ -650,7 +621,7 @@ NVTEShape nvte_make_shape(const size_t *data, size_t ndim) {
 NVTEShape nvte_tensor_shape(const NVTETensor tensor) {
   auto *t = transformer_engine::convertNVTETensor(tensor);
   if (t == nullptr) {
-    NVTE_ERROR("Invalid tensor");
+    NVTE_ERROR("Invalid tensor: received null pointer in nvte_tensor_shape");
   }
 
   // Determine tensor shape depending on tensor format
@@ -662,7 +633,7 @@ NVTEShape nvte_tensor_shape(const NVTETensor tensor) {
 NVTEShape nvte_tensor_columnwise_shape(const NVTETensor tensor) {
   auto *t = transformer_engine::convertNVTETensor(tensor);
   if (t == nullptr) {
-    NVTE_ERROR("Invalid tensor");
+    NVTE_ERROR("Invalid tensor: received null pointer in nvte_tensor_columnwise_shape");
   }
   const std::vector<size_t> &shape = t->columnwise_data.shape;
   return nvte_make_shape(shape.data(), shape.size());
