@@ -3080,8 +3080,7 @@ def test_grouped_gemm_grouped_tensor_zero_work(layout, accumulate, quant_type) -
     )
 
     out_result = (
-        grouped_out if isinstance(grouped_out, list)
-        else grouped_out.split_into_quantized_tensors()
+        grouped_out if isinstance(grouped_out, list) else grouped_out.split_into_quantized_tensors()
     )
     for i in range(z):
         if out_result[i].numel() == 0:
@@ -3089,9 +3088,7 @@ def test_grouped_gemm_grouped_tensor_zero_work(layout, accumulate, quant_type) -
         if accumulate:
             torch.testing.assert_close(out_result[i], out_before[i])
         else:
-            torch.testing.assert_close(
-                out_result[i], torch.zeros_like(out_result[i])
-            )
+            torch.testing.assert_close(out_result[i], torch.zeros_like(out_result[i]))
 
 
 def _make_grouped_tensor_quantized_mxfp8(

@@ -126,7 +126,6 @@ inline int64_t compute_avg_last_dim(const transformer_engine::GroupedTensor *t) 
   return static_cast<int64_t>(t->logical_shape.data[1]) / static_cast<int64_t>(t->num_tensors);
 }
 
-
 // Constants for grouped GEMM workspace (declared early for use in helpers)
 static constexpr size_t kGroupedGemmAlignment = 256;
 static constexpr size_t kGroupedGemmCublasWorkspaceSize = 32ull * 1024 * 1024;  // 32 MiB
