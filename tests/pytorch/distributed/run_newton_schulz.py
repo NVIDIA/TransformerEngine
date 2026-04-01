@@ -14,10 +14,27 @@ import torch
 import torch.distributed as dist
 from torch.distributed.elastic.multiprocessing.errors import record
 
+from transformer_engine.pytorch.newton_schulz import (
+    cusolvermp_ctx_create,
+    get_coefficients,
+    newton_schulz,
+)
+
+
+def newton_schulz_reference(x: torch.Tensor, coefficients: list[float]) -> torch.Tensor:
+    """Local Newton-Schulz reference using dense PyTorch matrix operations."""
+    out = x.clone()
+    for i in range(len(coefficients) // 3):
+        alpha, beta, gamma = coefficients[3 * i : 3 * (i + 1)]
+        xxt = out @ out.T
+        out = alpha * out + beta * (xxt @ out) + gamma * ((xxt @ xxt) @ out)
+    return out
+
 
 @record
 def main():
     parser = argparse.ArgumentParser(description="Newton-Schulz distributed test")
+    parser.add_argument("--check", type=str, default="orthogonality", choices=["orthogonality", "reference"])
     parser.add_argument("--dtype", type=str, default="float32", choices=["float32", "bfloat16"])
     parser.add_argument("--matrix-size", type=int, default=256)
     parser.add_argument("--num-iterations", type=int, default=5)
@@ -32,6 +49,7 @@ def main():
 
     dtype = torch.float32 if args.dtype == "float32" else torch.bfloat16
     N = args.matrix_size
+    coefficients = get_coefficients(args.num_iterations)
 
     # Ensure N is divisible by world_size
     assert N % world_size == 0, f"Matrix size {N} must be divisible by world_size {world_size}"
@@ -55,13 +73,10 @@ def main():
     local_rows = N // world_size
     x_local = A[rank * local_rows : (rank + 1) * local_rows, :].contiguous()
 
-    # Run the distributed Newton-Schulz
-    from transformer_engine.pytorch.newton_schulz import cusolvermp_ctx_create, newton_schulz
-
     group = dist.group.WORLD
     ctx = cusolvermp_ctx_create(group)
     try:
-        newton_schulz(x_local, ctx, args.num_iterations)
+        newton_schulz(x_local, ctx, args.num_iterations, coefficients=coefficients)
     finally:
         ctx.destroy()
 
@@ -70,14 +85,21 @@ def main():
     dist.all_gather(gathered, x_local)
     X = torch.cat(gathered, dim=0)
 
-    # Check: the resulting matrix should be orthogonal
+    # Check: the resulting matrix should be orthogonal, or match a local reference.
     if rank == 0:
-        XXT = X @ X.t()
-        I = torch.eye(N, device=XXT.device, dtype=XXT.dtype)
-        max_diff = (XXT - I).abs().max().item()
-        print(f"Max |X @ X.t() - I|: {max_diff:.6e}", flush=True)
+        if args.check == "orthogonality":
+            xxt = X @ X.t()
+            expected = torch.eye(N, device=xxt.device, dtype=xxt.dtype)
+            max_diff = (xxt - expected).abs().max().item()
+            print(f"Max |X @ X.t() - I|: {max_diff:.6e}", flush=True)
+            passed = torch.allclose(xxt, expected, atol=args.atol, rtol=args.rtol)
+        else:
+            reference = newton_schulz_reference(A.float(), coefficients).to(dtype)
+            max_diff = (X - reference).abs().max().item()
+            print(f"Max |distributed - reference|: {max_diff:.6e}", flush=True)
+            passed = torch.allclose(X, reference, atol=args.atol, rtol=args.rtol)
 
-        if torch.allclose(XXT, I, atol=args.atol, rtol=args.rtol):
+        if passed:
             print("NUMERICAL CHECK PASSED", flush=True)
         else:
             print("NUMERICAL CHECK FAILED", flush=True, file=sys.stderr)

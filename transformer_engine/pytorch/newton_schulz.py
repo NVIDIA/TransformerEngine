@@ -78,6 +78,30 @@ def cusolvermp_ctx_create(group: dist.ProcessGroup) -> CusolverMpCtx:
     return CusolverMpCtx(ptr, nranks)
 
 
+def get_coefficients(num_iterations: int) -> List[float]:
+    """Return the default coefficient schedule for Newton-Schulz."""
+    quintic_coefficients = [
+        4.0848,
+        -6.8946,
+        2.9270,
+        3.9505,
+        -6.3029,
+        2.6377,
+        3.7418,
+        -5.5913,
+        2.3037,
+        2.8769,
+        -3.1427,
+        1.2046,
+        2.8366,
+        -3.0525,
+        1.2012,
+    ]
+    if num_iterations == 5:
+        return quintic_coefficients
+    return [1.5, -0.5, 0.0] * num_iterations
+
+
 def newton_schulz(
     x: torch.Tensor,
     ctx: CusolverMpCtx,
@@ -98,27 +122,8 @@ def newton_schulz(
     coefficients : list of float, optional
         Polynomial coefficients for the Newton-Schulz iteration.
     """
-    QUINTIC_COEFFICIENTS = [
-        4.0848,
-        -6.8946,
-        2.9270,
-        3.9505,
-        -6.3029,
-        2.6377,
-        3.7418,
-        -5.5913,
-        2.3037,
-        2.8769,
-        -3.1427,
-        1.2046,
-        2.8366,
-        -3.0525,
-        1.2012,
-    ]
     if coefficients is None:
-        coefficients = (
-            QUINTIC_COEFFICIENTS if num_iterations == 5 else [1.5, -0.5, 0.0] * num_iterations
-        )
+        coefficients = get_coefficients(num_iterations)
     if len(coefficients) != num_iterations * 3:
         raise ValueError(
             f"Unexpected number of coefficients: {len(coefficients)} for"
