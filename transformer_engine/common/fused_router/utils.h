@@ -287,7 +287,6 @@ __device__ inline unsigned int float_to_ordered_uint(float f) {
   return u ^ mask;
 }
 
-
 __device__ inline void radix_topk_and_mask(CompType *scores, int data_size, int topk,
                                            int *topk_indices, CompType *topk_scores, int lane_id) {
   // assert(topk > 0 && "naive_topk_and_mask_v2: topk must be positive");
