@@ -288,9 +288,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             grouped_fc1_x = input_
         else:
             fc1_x = maybe_dequantize(input_, dtype)
-            grouped_fc1_x = tex.group_quantize(
-                fc1_x, fc1_input_quantizer, num_groups, split_sizes
-            )
+            grouped_fc1_x = tex.group_quantize(fc1_x, fc1_input_quantizer, num_groups, split_sizes)
 
         # Pack data tensors
         # Note: Fused kernel expects tensor with non-contiguous
