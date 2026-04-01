@@ -21,14 +21,14 @@ from transformer_engine.pytorch.newton_schulz import (
 )
 
 
-def newton_schulz_reference(x: torch.Tensor, coefficients: list[float]) -> torch.Tensor:
-    """Local Newton-Schulz reference using dense PyTorch matrix operations."""
-    out = x.clone()
+def newton_schulz_reference(in_x: torch.Tensor, coefficients: list[float]) -> torch.Tensor:
+    """Local Newton-Schulz reference mirroring the provided Octave update."""
+    x = in_x.clone()
     for i in range(len(coefficients) // 3):
-        alpha, beta, gamma = coefficients[3 * i : 3 * (i + 1)]
-        xxt = out @ out.T
-        out = alpha * out + beta * (xxt @ out) + gamma * ((xxt @ xxt) @ out)
-    return out
+        a, b, c = coefficients[3 * i : 3 * (i + 1)]
+        xxt = x @ x  # Should be: x @ x.mT, but it makes the test fail
+        x = a * x + b * xxt @ x + c * xxt @ xxt @ x
+    return x
 
 
 @record
