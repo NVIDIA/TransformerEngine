@@ -480,8 +480,8 @@ void fused_topk_with_score_function_backward_kernel_launcher(
                               + num_experts * num_token_per_block * sizeof(CompType)  // comp_buf
                               + num_experts * num_token_per_block * sizeof(bool);     // routing_map
   NVTE_CHECK_CUDA(cudaFuncSetAttribute(fused_topk_with_score_function_backward_kernel<DataType>,
-                                      cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                      shared_memory_size));
+                                       cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                       shared_memory_size));
   fused_topk_with_score_function_backward_kernel<DataType>
       <<<grid_size, kThreadsPerBlock, shared_memory_size, stream>>>(
           routing_map, intermediate_output, grad_probs, num_tokens, num_experts, topk,
