@@ -567,7 +567,7 @@ void fused_multi_row_unpadding(at::Tensor input, at::Tensor output,
 
 void inplace_swizzle_scale_for_gemm(py::handle &tensor);
 
-void swizzle_grouped_scales(py::handle &tensor, bool rowwise, bool columnwise);
+void grouped_swizzle_for_gemm(py::handle &tensor, bool rowwise, bool columnwise);
 
 /***************************************************************************************************
  * NVSHMEM APIs

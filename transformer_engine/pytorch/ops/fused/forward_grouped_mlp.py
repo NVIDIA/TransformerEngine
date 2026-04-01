@@ -281,17 +281,6 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         ):
             grouped_fc2_weight._with_gemm_swizzled_scales = False
 
-        # Clone into lightweight storage and swizzle scales in-place for GEMM.
-        # Original grouped_fc*_weight must stay unmodified for save_for_backward.
-        fc1_weight_for_gemm = grouped_fc1_weight
-        if fc1_op.single_grouped_weight:
-            fc1_weight_for_gemm = grouped_fc1_weight.copy()
-            tex.swizzle_grouped_scales(fc1_weight_for_gemm, rowwise=True, columnwise=False)
-        fc2_weight_for_gemm = grouped_fc2_weight
-        if fc2_op.single_grouped_weight:
-            fc2_weight_for_gemm = grouped_fc2_weight.copy()
-            tex.swizzle_grouped_scales(fc2_weight_for_gemm, rowwise=True, columnwise=False)
-
         # Group-quantize input tensor and convert dtypes if needed
         for quantizer in fc1_input_quantizers:
             quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
@@ -338,6 +327,10 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         fc2_bias_packed = _pack_grouped_linear_bias_for_cudnn(fc2_op)
 
         if fc1_op.single_grouped_weight:
+            # Clone and swizzle scales for GEMM.
+            fc1_weight_for_gemm = grouped_fc1_weight.copy()
+            tex.grouped_swizzle_for_gemm(fc1_weight_for_gemm, rowwise=True, columnwise=False)
+
             # Pack weight tensors for stacked kernel
             # Data actual shape: (num_groups, n, k)
             # Data logical shape: (n, k, num_groups)
@@ -468,6 +461,10 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             fc2_quant_kwargs["bias_tensor"] = fc2_bias_packed
 
         if fc2_op.single_grouped_weight:
+            # Clone and swizzle scales for GEMM (original stays unmodified for save_for_backward)
+            fc2_weight_for_gemm = grouped_fc2_weight.copy()
+            tex.grouped_swizzle_for_gemm(fc2_weight_for_gemm, rowwise=True, columnwise=False)
+
             fc2_w_data = fc2_weight_for_gemm.rowwise_data
             fc2_w_data = fc2_w_data.view(dtype=torch.float8_e4m3fn)
             fc2_w_data = fc2_w_data.view(num_groups, fc2_weight_shape[0], fc2_weight_shape[1])
@@ -506,11 +503,9 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         if requires_grad:
             mark_grouped_tensor(grouped_fc1_x, swiglu_in, scales, grouped_fc2_x)
             fc1_input_tensors = (
-                None,  # data
-                grouped_fc1_x.columnwise_data,  # columnwise_data
-                None,  # scale_inv
-                grouped_fc1_x.columnwise_scale_inv,  # columnwise_scale_inv
-                fc1_x_tensor_offsets,  # tensor_offsets
+                grouped_fc1_x.columnwise_data,
+                grouped_fc1_x.columnwise_scale_inv,
+                fc1_x_tensor_offsets,
             )
             # FC1
             fc1_weight_tensors = (
@@ -538,14 +533,12 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             # FC2 state
             if grouped_fc2_x is not None:
                 fc2_input_tensors = (
-                    None,  # data
-                    grouped_fc2_x.columnwise_data,  # columnwise_data
-                    None,  # scale_inv
-                    grouped_fc2_x.columnwise_scale_inv,  # columnwise_scale_inv
-                    fc2_x_tensor_offsets,  # tensor_offsets
+                    grouped_fc2_x.columnwise_data,
+                    grouped_fc2_x.columnwise_scale_inv,
+                    fc2_x_tensor_offsets,
                 )
             else:
-                fc2_input_tensors = (None, None, None, None, None)
+                fc2_input_tensors = (None, None, None)
 
             if fc2_op.single_grouped_weight:
                 fc2_ctx.save_for_backward(split_sizes, grouped_fc2_weight, *fc2_input_tensors)
