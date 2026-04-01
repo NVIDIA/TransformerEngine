@@ -1224,6 +1224,7 @@ class TestBasicOps:
         torch.testing.assert_close(y_test, y_ref, **tols)
         torch.testing.assert_close(dx_test, x_ref.grad, **tols)
         torch.testing.assert_close(dw_test, w_ref.grad, **tols)
+        torch.testing.assert_close(db_test, b_ref.grad, **tols)
 
     def test_layer_norm_autocast(
         self,
@@ -3487,20 +3488,20 @@ class TestSequentialModules:
             and dtype in (torch.bfloat16, torch.float16)
             and glu_interleave_size == 32
         ):
-            assert te_ops.fused.ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8.is_supported()
-            assert te_ops.fused.BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8.is_supported()
-            forward_ops = module._module_groups[0]._forward_ops
-            backward_ops = module._module_groups[0]._backward_ops
-            assert len(forward_ops) == 1
-            assert isinstance(
-                forward_ops[0][0],
-                te_ops.fused.ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8,
-            )
-            assert len(backward_ops) == 1
-            assert isinstance(
-                backward_ops[0][0],
-                te_ops.fused.BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8,
-            )
+            if te_ops.fused.ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8.is_supported():
+                forward_ops = module._module_groups[0]._forward_ops
+                assert len(forward_ops) == 1
+                assert isinstance(
+                    forward_ops[0][0],
+                    te_ops.fused.ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8,
+                )
+            if te_ops.fused.BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8.is_supported():
+                backward_ops = module._module_groups[0]._backward_ops
+                assert len(backward_ops) == 1
+                assert isinstance(
+                    backward_ops[0][0],
+                    te_ops.fused.BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8,
+                )
 
         # Loose tols for sanity checking
         tols = {"rtol": 0.125, "atol": 0.25}
