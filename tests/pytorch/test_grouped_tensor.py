@@ -379,12 +379,11 @@ class TestGroupedTensor:
 
         # Quantize using grouped API
         if output_dbias:
-            grouped_output, dbias = tex.group_quantize(
+            grouped_output, dbias = tex.bgrad_group_quantize(
                 grouped_input,
                 quantizer,
                 num_tensors,
                 first_dims,
-                output_dbias=True,
             )
         else:
             grouped_output = tex.group_quantize(
@@ -434,8 +433,8 @@ class TestGroupedTensor:
 
         # Warmup to initialize kernels and allocator state
         if output_dbias:
-            _ = tex.group_quantize(
-                static_input, quantizer, num_tensors, static_first_dims, output_dbias=True
+            _ = tex.bgrad_group_quantize(
+                static_input, quantizer, num_tensors, static_first_dims
             )
         else:
             _ = tex.group_quantize(static_input, quantizer, num_tensors, static_first_dims)
@@ -444,12 +443,11 @@ class TestGroupedTensor:
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             if output_dbias:
-                static_output, static_dbias = tex.group_quantize(
+                static_output, static_dbias = tex.bgrad_group_quantize(
                     static_input,
                     quantizer,
                     num_tensors,
                     static_first_dims,
-                    output_dbias=True,
                 )
             else:
                 static_output = tex.group_quantize(
@@ -468,12 +466,11 @@ class TestGroupedTensor:
         torch.cuda.synchronize()
 
         if output_dbias:
-            expected_out, expected_dbias = tex.group_quantize(
+            expected_out, expected_dbias = tex.bgrad_group_quantize(
                 static_input,
                 quantizer,
                 num_tensors,
                 static_first_dims,
-                output_dbias=True,
             )
         else:
             expected_out = tex.group_quantize(
