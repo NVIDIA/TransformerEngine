@@ -287,13 +287,6 @@ __device__ inline unsigned int float_to_ordered_uint(float f) {
   return u ^ mask;
 }
 
-// Convert back from ordered uint to float.
-__device__ inline float ordered_uint_to_float(unsigned int u) {
-  // Reverse the transformation: if MSB is set (was positive), flip sign bit.
-  // If MSB is clear (was negative), flip all bits.
-  unsigned int mask = (u & 0x80000000u) ? 0x80000000u : 0xFFFFFFFFu;
-  return __uint_as_float(u ^ mask);
-}
 
 __device__ inline void radix_topk_and_mask(CompType *scores, int data_size, int topk,
                                            int *topk_indices, CompType *topk_scores, int lane_id) {
