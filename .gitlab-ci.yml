@@ -1,3 +1,8 @@
+workflow:
+  name: '$PIPELINE_NAME'
+  rules:
+    - when: always
+
 ######################################################
 ## Variables used by the test runs
 ######################################################
@@ -75,6 +80,9 @@ variables:
     SLACK_PING_TEST_OWNERS:
       description: Must be paired with SEND_SLACK_MESSAGE=1. If enabled, will ping test owners on Slack if any failures occur instead of the user who launched the pipeline. Use case, scheduled CI runs on 'main'.
       value: 0
+    PIPELINE_NAME:
+      description: Custom pipeline name shown in the GitLab UI and Slackbot messages. Leave empty for default behavior.
+      value: ""
 
     VIRTUAL: 0
     JOB_START_STRING: "=== JOB START ==="
@@ -265,6 +273,7 @@ before_script:
             --form "variables[CODE_VERSION]=${CODE_VERSION}" \
             --form "variables[SEND_SLACK_MESSAGE]=${SEND_SLACK_MESSAGE}" \
             --form "variables[SLACK_PING_TEST_OWNERS]=${SLACK_PING_TEST_OWNERS}" \
+            --form "variables[PIPELINE_NAME]=${PIPELINE_NAME}" \
             --form "variables[githubData]=${githubData}" \
             https://gitlab-master.nvidia.com/api/v4/projects/61603/trigger/pipeline | grep 201) || true
           echo "\n" | cat ${tmp_file} -
@@ -1039,6 +1048,10 @@ send_result_to_slack:
         echo "$slack_ping_string"
 
         echo "$(get_github_pr_info_as_markdown)"
+
+        if [ -n "$PIPELINE_NAME" ]; then
+          echo "Pipeline name: $PIPELINE_NAME"
+        fi
     }
 
     function get_pipeline_job_summary_message() {
