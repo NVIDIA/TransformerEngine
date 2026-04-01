@@ -13,7 +13,6 @@ from typing import Any, Optional
 import torch
 
 import transformer_engine_torch as tex
-from ...module._common import noop_cat
 from ...quantization import Recipe
 from ...tensor import Quantizer
 from ...utils import get_cached_ones_tensor, get_device_compute_capability, mark_grouped_tensor
@@ -330,6 +329,25 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         fc1_bias_packed = _pack_grouped_linear_bias_for_cudnn(fc1_op)
         fc2_bias_packed = _pack_grouped_linear_bias_for_cudnn(fc2_op)
 
+        fc1_glu_kwargs = {
+            "a_tensor": fc1_x_data,
+            "sfa_tensor": fc1_x_scales,
+            "padded_offsets": split_points,
+            "alpha_tensor": alpha_tensor,
+            "bias_tensor": fc1_bias_packed,
+            "norm_const_tensor": norm_const_tensor,
+            "prob_tensor": scales.detach().to(dtype=dtype).reshape(-1, 1, 1),
+            "acc_dtype": torch.float32,
+            "c_dtype": torch.bfloat16,
+            "d_dtype": torch.float8_e4m3fn,
+            "cd_major": "n",
+            "sf_vec_size": MXFP8_BLOCK_SCALING_SIZE,
+            "current_stream": current_stream,
+            "discrete_col_sfd": True,
+            "act_func": "swiglu",
+            "use_dynamic_sched": True,
+        }
+
         if fc1_op.single_grouped_weight:
             # Clone and swizzle scales for GEMM.
             fc1_weight_for_gemm = grouped_fc1_weight.copy()
@@ -353,26 +371,8 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             )
             fc1_w_scales = fc1_w_scales.permute(3, 4, 1, 5, 2, 0)
 
-            fc1_kernel_out = self.grouped_gemm_glu_kernel()(
-                a_tensor=fc1_x_data,
-                sfa_tensor=fc1_x_scales,
-                padded_offsets=split_points,
-                alpha_tensor=alpha_tensor,
-                b_tensor=fc1_w_data,
-                sfb_tensor=fc1_w_scales,
-                bias_tensor=fc1_bias_packed,
-                norm_const_tensor=norm_const_tensor,
-                prob_tensor=scales.detach().to(dtype=dtype).reshape(-1, 1, 1),
-                acc_dtype=torch.float32,
-                c_dtype=torch.bfloat16,
-                d_dtype=torch.float8_e4m3fn,
-                cd_major="n",
-                sf_vec_size=MXFP8_BLOCK_SCALING_SIZE,
-                current_stream=current_stream,
-                discrete_col_sfd=True,
-                act_func="swiglu",
-                use_dynamic_sched=True,
-            )
+            fc1_glu_kwargs["b_tensor"] = fc1_w_data
+            fc1_glu_kwargs["sfb_tensor"] = fc1_w_scales
         else:
             # Discrete-weight kernel: per-expert data/scale pointers
             fc1_b_ptrs, fc1_sfb_ptrs, _fc1_sw = tex.get_device_pointer_for_data_and_scales(
@@ -382,30 +382,13 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
                 rowwise=True,
                 data_dtype=grouped_fc1_weight[0]._fp8_dtype,
             )
+            fc1_glu_kwargs["b_ptrs"] = fc1_b_ptrs
+            fc1_glu_kwargs["sfb_ptrs"] = fc1_sfb_ptrs
+            fc1_glu_kwargs["n"] = fc1_weight_shape[0]
+            fc1_glu_kwargs["b_dtype"] = torch.float8_e4m3fn
+            fc1_glu_kwargs["b_major"] = "k"
 
-            fc1_kernel_out = self.grouped_gemm_glu_kernel()(
-                a_tensor=fc1_x_data,
-                sfa_tensor=fc1_x_scales,
-                padded_offsets=split_points,
-                alpha_tensor=alpha_tensor,
-                b_ptrs=fc1_b_ptrs,
-                sfb_ptrs=fc1_sfb_ptrs,
-                n=fc1_weight_shape[0],
-                b_dtype=torch.float8_e4m3fn,
-                b_major="k",
-                bias_tensor=fc1_bias_packed,
-                norm_const_tensor=norm_const_tensor,
-                prob_tensor=scales.detach().to(dtype=dtype).reshape(-1, 1, 1),
-                acc_dtype=torch.float32,
-                c_dtype=torch.bfloat16,
-                d_dtype=torch.float8_e4m3fn,
-                cd_major="n",
-                sf_vec_size=MXFP8_BLOCK_SCALING_SIZE,
-                current_stream=current_stream,
-                discrete_col_sfd=True,
-                act_func="swiglu",
-                use_dynamic_sched=True,
-            )
+        fc1_kernel_out = self.grouped_gemm_glu_kernel()(**fc1_glu_kwargs)
 
         # Unpack kernel outputs
         # Note: Fused kernel outputs tensors with non-contiguous
@@ -446,21 +429,21 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
 
         # FC2 GEMM
         fc2_out_shape = in_shape[:-1] + [fc2_weight_shape[0]]
-        fc2_quant_kwargs = dict(
-            a_tensor=fc1_kernel_out["d_tensor"],
-            sfa_tensor=fc1_kernel_out["sfd_row_tensor"],
-            padded_offsets=split_points,
-            alpha_tensor=alpha_tensor.float(),
-            norm_const_tensor=None,
-            prob_tensor=torch.ones((in_shape[0], 1, 1), dtype=torch.float32, device=device),
-            acc_dtype=torch.float32,
-            c_dtype=dtype,
-            d_dtype=dtype,
-            cd_major="n",
-            sf_vec_size=MXFP8_BLOCK_SCALING_SIZE,
-            current_stream=current_stream,
-            use_dynamic_sched=True,
-        )
+        fc2_quant_kwargs = {
+            "a_tensor": fc1_kernel_out["d_tensor"],
+            "sfa_tensor": fc1_kernel_out["sfd_row_tensor"],
+            "padded_offsets": split_points,
+            "alpha_tensor": alpha_tensor.float(),
+            "norm_const_tensor": None,
+            "prob_tensor": torch.ones((in_shape[0], 1, 1), dtype=torch.float32, device=device),
+            "acc_dtype": torch.float32,
+            "c_dtype": dtype,
+            "d_dtype": dtype,
+            "cd_major": "n",
+            "sf_vec_size": MXFP8_BLOCK_SCALING_SIZE,
+            "current_stream": current_stream,
+            "use_dynamic_sched": True,
+        }
         if self.is_fc2_bias_supported():
             fc2_quant_kwargs["bias_tensor"] = fc2_bias_packed
 

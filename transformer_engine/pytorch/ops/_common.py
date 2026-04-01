@@ -15,8 +15,6 @@ from ..quantization import FP8GlobalStateManager
 from ..tensor.float8_tensor import Float8Tensor
 from ..quantized_tensor import QuantizedTensorStorage
 from ..utils import canonicalize_dtype
-from ..module._common import noop_cat
-from ..tensor import Quantizer
 
 
 def is_quantized_tensor(tensor: torch.Tensor | QuantizedTensorStorage) -> bool:

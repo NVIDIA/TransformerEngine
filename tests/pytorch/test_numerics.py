@@ -3008,6 +3008,92 @@ def test_grouped_gemm_grouped_tensor(z, m, n, k, case, layout, accumulate) -> No
             torch.testing.assert_close(o, o_ref, **tols)
 
 
+@pytest.mark.parametrize("layout", ["TN", "NN", "NT"])
+@pytest.mark.parametrize("accumulate", [False, True])
+@pytest.mark.parametrize("quant_type", ["bf16", "mxfp8"])
+def test_grouped_gemm_grouped_tensor_zero_work(layout, accumulate, quant_type) -> None:
+    """Grouped GEMM with all-zero split sizes (zero total work).
+
+    For wgrad (NT layout) the output should be zero when not accumulating,
+    or unchanged when accumulating with beta=1.
+    """
+    if torch.cuda.get_device_capability() < (10, 0):
+        pytest.skip("Grouped GEMM requires Blackwell (SM100) or newer.")
+    if not is_bf16_available():
+        pytest.skip("bfloat16 is required for grouped GEMM test.")
+    if quant_type == "mxfp8" and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+
+    z = 4
+    k, n = 256, 256
+    dtype = torch.bfloat16
+    device = torch.device("cuda")
+    m_sizes = [0] * z
+    use_mxfp8 = quant_type == "mxfp8"
+
+    if layout == "NT":
+        A = [torch.randn(0, k, dtype=dtype, device=device) for _ in range(z)]
+        B = [torch.randn(0, n, dtype=dtype, device=device) for _ in range(z)]
+        out = [torch.randn(n, k, dtype=dtype, device=device) for _ in range(z)]
+    elif layout == "TN":
+        A = [torch.randn(n, k, dtype=dtype, device=device) for _ in range(z)]
+        B = [torch.randn(0, k, dtype=dtype, device=device) for _ in range(z)]
+        out = [torch.randn(0, n, dtype=dtype, device=device) for _ in range(z)]
+    else:  # NN
+        A = [torch.randn(n, k, dtype=dtype, device=device) for _ in range(z)]
+        B = [torch.randn(0, n, dtype=dtype, device=device) for _ in range(z)]
+        out = [torch.randn(0, k, dtype=dtype, device=device) for _ in range(z)]
+
+    out_before = [o.clone() for o in out]
+
+    if use_mxfp8:
+        transa = layout[0] == "T"
+        transb = layout[1] == "T"
+        grouped_A = _make_grouped_tensor_quantized_mxfp8(
+            A, is_a=True, transposed=transa, device=device
+        )
+        grouped_B = _make_grouped_tensor_quantized_mxfp8(
+            B, is_a=False, transposed=transb, device=device
+        )
+    else:
+        grouped_B = _make_grouped_tensor_from_splits(m_sizes, B[0].shape[1], device, dtype)
+        if layout in ("TN", "NN"):
+            grouped_A = _make_grouped_tensor_uniform(z, n, k, device, dtype)
+            _pack_grouped_tensor(grouped_A, A)
+        else:  # NT
+            grouped_A = _make_grouped_tensor_from_splits(m_sizes, k, device, dtype)
+
+    if layout == "TN":
+        grouped_out = _make_grouped_tensor_from_splits(m_sizes, n, device, dtype)
+    elif layout == "NN":
+        grouped_out = _make_grouped_tensor_from_splits(m_sizes, k, device, dtype)
+    else:  # NT
+        grouped_out = _make_grouped_tensor_uniform(z, n, k, device, dtype)
+        _pack_grouped_tensor(grouped_out, out)
+
+    general_grouped_gemm_for_grouped_tensor(
+        grouped_A,
+        grouped_B,
+        grouped_out,
+        layout=layout,
+        accumulate=accumulate,
+    )
+
+    out_result = (
+        grouped_out if isinstance(grouped_out, list)
+        else grouped_out.split_into_quantized_tensors()
+    )
+    for i in range(z):
+        if out_result[i].numel() == 0:
+            continue
+        if accumulate:
+            torch.testing.assert_close(out_result[i], out_before[i])
+        else:
+            torch.testing.assert_close(
+                out_result[i], torch.zeros_like(out_result[i])
+            )
+
+
 def _make_grouped_tensor_quantized_mxfp8(
     tensors: List[torch.Tensor],
     *,

@@ -17,10 +17,8 @@ import transformer_engine_torch as tex
 from ...cpp_extensions import (
     general_grouped_gemm_for_grouped_tensor,
 )
-from ...module._common import noop_cat
 from ...module.base import get_dummy_wgrad
 from ...quantization import Recipe
-from ...tensor import Quantizer
 from ...tensor.grouped_tensor import GroupedTensor
 from ...tensor.mxfp8_tensor import MXFP8Quantizer
 from ...utils import clear_tensor_data, get_cached_ones_tensor, get_device_compute_capability
@@ -30,7 +28,6 @@ from ..fuser import register_backward_fusion
 from ..op import FusedOperation, FusibleOperation, OperationContext
 from .._common import (
     fuse_grouped_mlp_ops,
-    is_quantized_tensor,
     maybe_dequantize,
     validate_grouped_mlp_dims,
 )
@@ -70,6 +67,7 @@ def _compute_grad_params(
     # Allocate grad buffers, determine accumulate flag
     accumulate_into_main_grad = False
     grouped_wgrad = None
+    wgrad_output = None
     if fc_op.single_grouped_weight:
         w_list = [None]
         if ctx.weight_requires_grad:
@@ -409,11 +407,33 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         norm_const_tensor = get_cached_ones_tensor(1, dtype, device)
         current_stream = torch.cuda.current_stream().cuda_stream
 
+        prob_tensor = scales.detach().to(dtype=torch.float32).reshape(-1, 1, 1)
+        dprob_tensor = torch.zeros_like(prob_tensor)
+
+        fc2_dglu_kwargs = {
+            "a_tensor": fc2_dy_data,
+            "c_tensor": swiglu_in.unsqueeze(0).permute(1, 2, 0),
+            "sfa_tensor": fc2_dy_scales,
+            "padded_offsets": split_points,
+            "alpha_tensor": alpha_tensor,
+            "beta_tensor": alpha_tensor,
+            "prob_tensor": prob_tensor,
+            "dprob_tensor": dprob_tensor,
+            "generate_dbias": fc1_op.has_bias,
+            "norm_const_tensor": norm_const_tensor,
+            "d_dtype": torch.float8_e4m3fn,
+            "cd_major": "n",
+            "sf_vec_size": MXFP8_BLOCK_SCALING_SIZE,
+            "current_stream": current_stream,
+            "discrete_col_sfd": True,
+            "act_func": "dswiglu",
+            "use_dynamic_sched": True,
+        }
+
         if fc2_op.single_grouped_weight:
             # Clone and swizzle scales for GEMM
             fc2_weight_for_gemm = grouped_fc2_weight.copy()
             tex.grouped_swizzle_for_gemm(fc2_weight_for_gemm, rowwise=False, columnwise=True)
-
             # Pack weight tensors for stacked kernel
             # Data actual shape: (num_groups, k, n)
             # Data logical shape: (n, k, num_groups)
@@ -432,30 +452,8 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
             )
             fc2_w_scales = fc2_w_scales.permute(3, 4, 1, 5, 2, 0)
 
-            prob_tensor = scales.detach().to(dtype=torch.float32).reshape(-1, 1, 1)
-            dprob_tensor = torch.zeros_like(prob_tensor)
-
-            fc2_dgrad_kernel_out = self.grouped_gemm_dglu_kernel()(
-                a_tensor=fc2_dy_data,
-                c_tensor=swiglu_in.unsqueeze(0).permute(1, 2, 0),
-                sfa_tensor=fc2_dy_scales,
-                padded_offsets=split_points,
-                alpha_tensor=alpha_tensor,
-                beta_tensor=alpha_tensor,
-                prob_tensor=prob_tensor,
-                dprob_tensor=dprob_tensor,
-                b_tensor=fc2_w_data,
-                sfb_tensor=fc2_w_scales,
-                generate_dbias=fc1_op.has_bias,
-                norm_const_tensor=norm_const_tensor,
-                d_dtype=torch.float8_e4m3fn,
-                cd_major="n",
-                sf_vec_size=MXFP8_BLOCK_SCALING_SIZE,
-                current_stream=current_stream,
-                discrete_col_sfd=True,
-                act_func="dswiglu",
-                use_dynamic_sched=True,
-            )
+            fc2_dglu_kwargs["b_tensor"] = fc2_w_data
+            fc2_dglu_kwargs["sfb_tensor"] = fc2_w_scales
         else:
             fc2_b_ptrs, fc2_sfb_ptrs, _fc2_sw = tex.get_device_pointer_for_data_and_scales(
                 [w._columnwise_data for w in grouped_fc2_weight],
@@ -464,33 +462,13 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
                 rowwise=False,
                 data_dtype=grouped_fc2_weight[0]._fp8_dtype,
             )
-            prob_tensor = scales.detach().to(dtype=torch.float32).reshape(-1, 1, 1)
-            dprob_tensor = torch.zeros_like(prob_tensor)
+            fc2_dglu_kwargs["b_ptrs"] = fc2_b_ptrs
+            fc2_dglu_kwargs["sfb_ptrs"] = fc2_sfb_ptrs
+            fc2_dglu_kwargs["n"] = fc2_weight_shape[1]
+            fc2_dglu_kwargs["b_dtype"] = torch.float8_e4m3fn
+            fc2_dglu_kwargs["b_major"] = "n"
 
-            fc2_dgrad_kernel_out = self.grouped_gemm_dglu_kernel()(
-                a_tensor=fc2_dy_data,
-                c_tensor=swiglu_in.unsqueeze(0).permute(1, 2, 0),
-                sfa_tensor=fc2_dy_scales,
-                padded_offsets=split_points,
-                alpha_tensor=alpha_tensor,
-                beta_tensor=alpha_tensor,
-                prob_tensor=prob_tensor,
-                dprob_tensor=dprob_tensor,
-                b_ptrs=fc2_b_ptrs,
-                sfb_ptrs=fc2_sfb_ptrs,
-                n=fc2_weight_shape[1],
-                b_dtype=torch.float8_e4m3fn,
-                b_major="n",
-                generate_dbias=fc1_op.has_bias,
-                norm_const_tensor=norm_const_tensor,
-                d_dtype=torch.float8_e4m3fn,
-                cd_major="n",
-                sf_vec_size=MXFP8_BLOCK_SCALING_SIZE,
-                current_stream=current_stream,
-                discrete_col_sfd=True,
-                act_func="dswiglu",
-                use_dynamic_sched=True,
-            )
+        fc2_dgrad_kernel_out = self.grouped_gemm_dglu_kernel()(**fc2_dglu_kwargs)
 
         fc1_dy_row_data = fc2_dgrad_kernel_out["d_row_tensor"]
         fc1_dy_row_data = fc1_dy_row_data.view(out_shape[0], fc1_weight_shape[0]).contiguous()
@@ -563,13 +541,32 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         if fc1_ctx.input_requires_grad:
             in_shape = out_shape[:-1] + [fc1_weight_shape[1]]
 
+            fc1_dgrad_a_data = fc2_dgrad_kernel_out["d_row_tensor"]
+            fc1_dgrad_a_scales = fc2_dgrad_kernel_out["sfd_row_tensor"]
+
+            fc1_dgrad_kwargs = {
+                "a_tensor": fc1_dgrad_a_data,
+                "sfa_tensor": fc1_dgrad_a_scales,
+                "padded_offsets": split_points,
+                "alpha_tensor": alpha_tensor.float(),
+                "norm_const_tensor": None,
+                "prob_tensor": torch.ones(
+                    (out_shape[0], 1, 1), dtype=torch.float32, device=device
+                ),
+                "acc_dtype": torch.float32,
+                "c_dtype": dtype,
+                "d_dtype": dtype,
+                "cd_major": "n",
+                "sf_vec_size": MXFP8_BLOCK_SCALING_SIZE,
+                "current_stream": current_stream,
+                "discrete_col_sfd": True,
+                "use_dynamic_sched": True,
+            }
+
             if fc1_op.single_grouped_weight:
                 # Clone and swizzle scales for GEMM
                 fc1_weight_for_gemm = grouped_fc1_weight.copy()
                 tex.grouped_swizzle_for_gemm(fc1_weight_for_gemm, rowwise=False, columnwise=True)
-
-                fc1_dgrad_a_data = fc2_dgrad_kernel_out["d_row_tensor"]
-                fc1_dgrad_a_scales = fc2_dgrad_kernel_out["sfd_row_tensor"]
 
                 fc1_w_data = fc1_weight_for_gemm.columnwise_data
                 fc1_w_data = fc1_w_data.view(dtype=torch.float8_e4m3fn)
@@ -588,31 +585,9 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
                 )
                 fc1_w_scales = fc1_w_scales.permute(3, 4, 1, 5, 2, 0)
 
-                fc1_dgrad_kernel_out = self.grouped_gemm_quant_kernel()(
-                    a_tensor=fc1_dgrad_a_data,
-                    sfa_tensor=fc1_dgrad_a_scales,
-                    padded_offsets=split_points,
-                    alpha_tensor=alpha_tensor.float(),
-                    b_tensor=fc1_w_data,
-                    sfb_tensor=fc1_w_scales,
-                    norm_const_tensor=None,
-                    prob_tensor=torch.ones(
-                        (out_shape[0], 1, 1), dtype=torch.float32, device=device
-                    ),
-                    acc_dtype=torch.float32,
-                    c_dtype=dtype,
-                    d_dtype=dtype,
-                    cd_major="n",
-                    sf_vec_size=MXFP8_BLOCK_SCALING_SIZE,
-                    current_stream=current_stream,
-                    discrete_col_sfd=True,
-                    use_dynamic_sched=True,
-                )
-                grad_input = fc1_dgrad_kernel_out["d_tensor"].view(in_shape)
+                fc1_dgrad_kwargs["b_tensor"] = fc1_w_data
+                fc1_dgrad_kwargs["sfb_tensor"] = fc1_w_scales
             else:
-                fc1_dgrad_a_data = fc2_dgrad_kernel_out["d_row_tensor"]
-                fc1_dgrad_a_scales = fc2_dgrad_kernel_out["sfd_row_tensor"]
-
                 fc1_b_ptrs, fc1_sfb_ptrs, _ = tex.get_device_pointer_for_data_and_scales(
                     [w._columnwise_data for w in grouped_fc1_weight],
                     [w._columnwise_scale_inv for w in grouped_fc1_weight],
@@ -621,30 +596,14 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
                     data_dtype=grouped_fc1_weight[0]._fp8_dtype,
                 )
 
-                fc1_dgrad_kernel_out = self.grouped_gemm_quant_kernel()(
-                    a_tensor=fc1_dgrad_a_data,
-                    sfa_tensor=fc1_dgrad_a_scales,
-                    padded_offsets=split_points,
-                    alpha_tensor=alpha_tensor.float(),
-                    b_ptrs=fc1_b_ptrs,
-                    sfb_ptrs=fc1_sfb_ptrs,
-                    n=fc1_weight_shape[1],
-                    b_dtype=torch.float8_e4m3fn,
-                    b_major="n",
-                    norm_const_tensor=None,
-                    prob_tensor=torch.ones(
-                        (out_shape[0], 1, 1), dtype=torch.float32, device=device
-                    ),
-                    acc_dtype=torch.float32,
-                    c_dtype=dtype,
-                    d_dtype=dtype,
-                    cd_major="n",
-                    sf_vec_size=MXFP8_BLOCK_SCALING_SIZE,
-                    current_stream=current_stream,
-                    discrete_col_sfd=True,
-                    use_dynamic_sched=True,
-                )
-                grad_input = fc1_dgrad_kernel_out["d_tensor"].view(in_shape)
+                fc1_dgrad_kwargs["b_ptrs"] = fc1_b_ptrs
+                fc1_dgrad_kwargs["sfb_ptrs"] = fc1_sfb_ptrs
+                fc1_dgrad_kwargs["n"] = fc1_weight_shape[1]
+                fc1_dgrad_kwargs["b_dtype"] = torch.float8_e4m3fn
+                fc1_dgrad_kwargs["b_major"] = "n"
+
+            fc1_dgrad_kernel_out = self.grouped_gemm_quant_kernel()(**fc1_dgrad_kwargs)
+            grad_input = fc1_dgrad_kernel_out["d_tensor"].view(in_shape)
 
         # FC1 wgrad GEMM
         fc1_grad_params = _compute_grad_params(

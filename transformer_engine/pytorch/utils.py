@@ -172,6 +172,8 @@ def divide(numerator: int, denominator: int) -> int:
 
 
 def mark_grouped_tensor(*tensors: List[Any]):
+    """Mark tensors as grouped by setting their ``_grouped`` attribute.
+    Needed for paged stashing in MLM."""
     for tensor in tensors:
         if tensor is None:
             continue
