@@ -65,8 +65,6 @@ RUN --mount=from=build-scripts,source=build-scripts,target=/nvidia/build-scripts
   && apt-get update \
   && apt-get install -y python3 python3-pip \
   && pip3 install cmake==3.21.0 \
-  && export NCCL_VERSION=2.29.3 \
-  && /nvidia/build-scripts/installNCCL.sh \
   || [[ ! "${FRAMEWORK}" == "jax" ]]
 EOF
 
@@ -86,8 +84,11 @@ RUN <<"EOF" bash -e
   && export NVTE_FRAMEWORK=none \
   || export NVTE_FRAMEWORK=${FRAMEWORK}
 
+  [[ "${FRAMEWORK}" == "jax" ]] \
+  && export NVTE_WITH_CUBLASMP=0 \
+  || export NVTE_WITH_CUBLASMP=1
+
   NVTE_BUILD_THREADS_PER_JOB=4 \
-  NVTE_WITH_CUBLASMP=1 \
   CUBLASMP_HOME=/usr \
   pip3 install --verbose --verbose --no-build-isolation .[test]
 
