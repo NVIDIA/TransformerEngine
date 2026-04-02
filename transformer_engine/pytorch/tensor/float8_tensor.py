@@ -8,7 +8,6 @@ from typing import Any, Optional, Tuple, Iterable, Union
 import warnings
 import torch
 from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
-import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
 
 from transformer_engine.common.recipe import (
@@ -94,23 +93,62 @@ class Float8Quantizer(Quantizer):
         if not isinstance(dst, Float8Tensor):
             raise ValueError("Float8Quantizer can only update Float8Tensor")
 
+        # Handle non-torch.Tensor inputs (e.g. DebugQuantizedTensor from debug mode backward pass)
+        if not isinstance(src, torch.Tensor) and hasattr(src, "dequantize"):
+            src = src.dequantize()
         # Make sure input is in expected format
         if not devices_match(src.device, dst.device):
             src = src.to(device=dst.device)
         if not src.is_contiguous():
             src = src.contiguous()
 
-        # Launch cast kernel
-        tex.quantize(src, self, dst, noop_flag)
+        # Launch cast kernel via stable ABI
+        from transformer_engine.pytorch.tensor._quantize_stable import quantize_into
+
+        quantize_into(src, self, dst, noop_flag)
 
         # Update FP8 dtype
         dst._fp8_dtype = self.dtype
 
+        # quantize_into only fills rowwise data (_data). Recompute the
+        # transpose from _data so that _transpose is valid.
+        if dst._transpose is not None:
+            if dst._data.ndim <= 1:
+                dst._transpose.copy_(dst._data)
+                dst._transpose_invalid = False
+            else:
+                dst._create_transpose()
+        else:
+            dst._transpose_invalid = True
+
         return dst
 
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
-        """Quantize tensor implementation"""
-        return tex.quantize(tensor, self)
+        """Quantize tensor implementation via stable ABI"""
+        from transformer_engine.pytorch.tensor._quantize_stable import quantize_into
+
+        # Handle non-torch.Tensor inputs (e.g. DebugQuantizedTensor from debug mode backward pass)
+        if not isinstance(tensor, torch.Tensor) and hasattr(tensor, "dequantize"):
+            tensor = tensor.dequantize()
+        dst = self.make_empty(list(tensor.shape), dtype=tensor.dtype, device=tensor.device)
+        # Initialize scale_inv from quantizer scale (C++ create_tensor does reciprocal(scale))
+        if hasattr(self, "scale") and self.scale is not None and self.scale.numel() > 0:
+            dst._scale_inv.copy_(1.0 / self.scale)
+        if tensor.numel() > 0:
+            t = tensor.contiguous() if not tensor.is_contiguous() else tensor
+            quantize_into(t, self, dst)
+            # quantize_into only fills rowwise data (_data). Recompute the
+            # transpose from _data so that _transpose is valid.
+            if dst._transpose is not None:
+                if dst._data.ndim <= 1:
+                    # For 0-dim/1-dim tensors, transpose is identity
+                    dst._transpose.copy_(dst._data)
+                    dst._transpose_invalid = False
+                else:
+                    dst._create_transpose()
+            else:
+                dst._transpose_invalid = True
+        return dst
 
     def make_empty(
         self,
@@ -134,7 +172,7 @@ class Float8Quantizer(Quantizer):
         # Allocate FP8 data transpose if needed
         data_transpose = None
         if self.columnwise_usage:
-            transpose_shape = [shape[-1]] + list(shape[:-1])
+            transpose_shape = [shape[-1]] + list(shape[:-1]) if len(shape) > 0 else []
             data_transpose = torch.empty(
                 transpose_shape,
                 dtype=torch.uint8,
@@ -323,23 +361,59 @@ class Float8CurrentScalingQuantizer(Quantizer):
         if not isinstance(dst, Float8Tensor):
             raise ValueError("Float8CurrentScalingQuantizer can only update Float8Tensor")
 
+        # Handle non-torch.Tensor inputs (e.g. DebugQuantizedTensor from debug mode backward pass)
+        if not isinstance(src, torch.Tensor) and hasattr(src, "dequantize"):
+            src = src.dequantize()
         # Make sure input is in expected format
         if not devices_match(src.device, dst.device):
             src = src.to(device=dst.device)
         if not src.is_contiguous():
             src = src.contiguous()
 
-        # Launch cast kernel
-        tex.quantize(src, self, dst, noop_flag)
+        # Launch cast kernel via stable ABI
+        from transformer_engine.pytorch.tensor._quantize_stable import quantize_into
+
+        quantize_into(src, self, dst, noop_flag)
 
         # Update FP8 dtype
         dst._fp8_dtype = self.dtype
 
+        # quantize_into only fills rowwise data (_data). Recompute the
+        # transpose from _data so that _transpose is valid.
+        if dst._transpose is not None:
+            if dst._data.ndim <= 1:
+                dst._transpose.copy_(dst._data)
+                dst._transpose_invalid = False
+            else:
+                dst._create_transpose()
+        else:
+            dst._transpose_invalid = True
+
         return dst
 
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
-        """Quantize tensor implementation"""
-        return tex.quantize(tensor, self)
+        """Quantize tensor implementation via stable ABI"""
+        from transformer_engine.pytorch.tensor._quantize_stable import quantize_into
+
+        # Handle non-torch.Tensor inputs (e.g. DebugQuantizedTensor from debug mode backward pass)
+        if not isinstance(tensor, torch.Tensor) and hasattr(tensor, "dequantize"):
+            tensor = tensor.dequantize()
+        dst = self.make_empty(list(tensor.shape), dtype=tensor.dtype, device=tensor.device)
+        if tensor.numel() > 0:
+            t = tensor.contiguous() if not tensor.is_contiguous() else tensor
+            quantize_into(t, self, dst)
+            # quantize_into only fills rowwise data (_data). Recompute the
+            # transpose from _data so that _transpose is valid.
+            if dst._transpose is not None:
+                if dst._data.ndim <= 1:
+                    # For 0-dim/1-dim tensors, transpose is identity
+                    dst._transpose.copy_(dst._data)
+                    dst._transpose_invalid = False
+                else:
+                    dst._create_transpose()
+            else:
+                dst._transpose_invalid = True
+        return dst
 
     def make_empty(
         self,
@@ -363,7 +437,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
         # Allocate FP8 data transpose if needed
         data_transpose = None
         if self.columnwise_usage:
-            transpose_shape = [shape[-1]] + list(shape[:-1])
+            transpose_shape = [shape[-1]] + list(shape[:-1]) if len(shape) > 0 else []
             data_transpose = torch.empty(
                 transpose_shape,
                 dtype=torch.uint8,

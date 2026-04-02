@@ -48,7 +48,7 @@ from build_tools.build_ext import get_build_ext
 from build_tools.utils import copy_common_headers, min_python_version_str
 from build_tools.te_version import te_version
 from build_tools.pytorch import (
-    setup_pytorch_extension,
+    setup_pytorch_stable_extension,
     install_requirements,
     test_requirements,
 )
@@ -151,11 +151,12 @@ if __name__ == "__main__":
     # Extensions
     common_headers_dir = "common_headers"
     copy_common_headers(current_file_path.parent, str(current_file_path / common_headers_dir))
-    ext_modules = [
-        setup_pytorch_extension(
-            "csrc", current_file_path / "csrc", current_file_path / common_headers_dir
-        )
-    ]
+    ext_modules = []
+    stable_ext = setup_pytorch_stable_extension(
+        "csrc", current_file_path / "csrc", current_file_path / common_headers_dir
+    )
+    if stable_ext is not None:
+        ext_modules.append(stable_ext)
 
     # Setup version and requirements.
     # Having the framework extension depend on the core lib allows

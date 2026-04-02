@@ -129,11 +129,27 @@ def get_build_ext(
                         install_dir=install_dir,
                     )
 
-            # Build non-CMake extensions as usual
+            # Build non-CMake extensions as usual.
+            # Add cmake install/build dirs to library_dirs so the linker
+            # can find libtransformer_engine.so at link time.
+            cmake_lib_dirs = []
+            for ext in self.extensions:
+                if isinstance(ext, CMakeExtension):
+                    package_path = Path(self.get_ext_fullpath(ext.name))
+                    cmake_lib_dirs.append(str(package_path.resolve().parent))
+            build_dir = os.getenv("NVTE_CMAKE_BUILD_DIR")
+            if build_dir:
+                cmake_lib_dirs.append(str(Path(build_dir).resolve()))
+            else:
+                root_dir = Path(__file__).resolve().parent.parent
+                cmake_lib_dirs.append(str(root_dir / "build" / "cmake"))
+
             all_extensions = self.extensions
             self.extensions = [
                 ext for ext in self.extensions if not isinstance(ext, CMakeExtension)
             ]
+            for ext in self.extensions:
+                ext.library_dirs = cmake_lib_dirs + (ext.library_dirs or [])
             super().run()
             self.extensions = all_extensions
 

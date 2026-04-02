@@ -68,23 +68,39 @@ class MXFP8Quantizer(Quantizer):
 
         assert isinstance(dst, MXFP8Tensor), f"Cannot store quantized MXFP8 in {type(dst)} type."
 
+        # Handle non-torch.Tensor inputs (e.g. DebugQuantizedTensor from debug mode backward pass)
+        if not isinstance(src, torch.Tensor) and hasattr(src, "dequantize"):
+            src = src.dequantize()
         # Make sure input is in expected format
         if not devices_match(src.device, dst.device):
             src = src.to(device=dst.device)
         if not src.is_contiguous():
             src = src.contiguous()
 
-        # Launch cast kernel
-        tex.quantize(src, self, dst, noop_flag)
+        # Launch cast kernel via stable ABI
+        from transformer_engine.pytorch.tensor._quantize_stable import quantize_into
+
+        quantize_into(src, self, dst, noop_flag)
 
         # Update FP8 dtype
         dst._fp8_dtype = self.dtype
+        # The stable ABI quantize path does not swizzle scales, so reset the flag
+        dst._with_gemm_swizzled_scales = False
 
         return dst
 
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
-        """Quantize tensor implementation"""
-        return tex.quantize(tensor, self)
+        """Quantize tensor implementation via stable ABI"""
+        from transformer_engine.pytorch.tensor._quantize_stable import quantize_into
+
+        # Handle non-torch.Tensor inputs (e.g. DebugQuantizedTensor from debug mode backward pass)
+        if not isinstance(tensor, torch.Tensor) and hasattr(tensor, "dequantize"):
+            tensor = tensor.dequantize()
+        dst = self.make_empty(list(tensor.shape), dtype=tensor.dtype, device=tensor.device)
+        if tensor.numel() > 0:
+            t = tensor.contiguous() if not tensor.is_contiguous() else tensor
+            quantize_into(t, self, dst)
+        return dst
 
     def is_quantizable(self, inp: torch.Tensor) -> bool:
         """Returns whether or not given inp can be quantized"""
@@ -157,7 +173,10 @@ class MXFP8Quantizer(Quantizer):
             columnwise_scale_inv=columnwise_scale_inv,
             quantizer=self,
             requires_grad=requires_grad,
-            with_gemm_swizzled_scales=self.optimize_for_gemm,
+            # The stable ABI quantize path does not swizzle scales during
+            # quantization, so always report unswizzled. The GEMM C++ code
+            # will swizzle on-the-fly when it sees this flag is False.
+            with_gemm_swizzled_scales=False,
         )
 
     def calibrate(self, tensor: torch.Tensor) -> None:

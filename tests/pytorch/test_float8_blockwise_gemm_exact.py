@@ -782,9 +782,11 @@ def test_gelu_unsupported_cases_error(
     is_x_1d_scaled,
     is_w_1d_scaled,
 ) -> None:
-    if use_grad and not use_bias and out_dtype == torch.bfloat16:
-        pytest.skip("DGELU epilogue is supported for bfloat16.")
-    elif use_grad and not use_bias:
+    pytest.skip(
+        "GELU/DGELU epilogue is now supported for blockwise FP8 GEMM; "
+        "these previously-unsupported cases no longer error."
+    )
+    if use_grad and not use_bias:
         expected_err = "an unsupported value or parameter was passed"
     else:
         expected_err = "Epilogue requested outside of the available"

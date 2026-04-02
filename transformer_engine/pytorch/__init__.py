@@ -7,15 +7,21 @@
 # pylint: disable=wrong-import-position
 
 import functools
+import sys as _sys
 
 import torch
 
-from transformer_engine.common import load_framework_extension
 from transformer_engine.pytorch.torch_version import torch_version
 
-assert torch_version() >= (2, 1), f"Minimum torch version 2.1 required. Found {torch_version()}."
+assert torch_version() >= (2, 6), f"Minimum torch version 2.6 required. Found {torch_version()}."
 
-load_framework_extension("torch")
+# Expose the stable ABI module as the top-level transformer_engine_torch package
+# so that _tex.py can use `from transformer_engine_torch import *` (matching upstream).
+import transformer_engine.pytorch._stable_torch_module as _te_torch_mod
+
+_sys.modules.setdefault("transformer_engine_torch", _te_torch_mod)
+del _sys, _te_torch_mod
+
 from transformer_engine.pytorch.module import LayerNormLinear
 from transformer_engine.pytorch.module import Linear
 from transformer_engine.pytorch.module import LayerNormMLP

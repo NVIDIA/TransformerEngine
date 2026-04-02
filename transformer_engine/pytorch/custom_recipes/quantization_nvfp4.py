@@ -231,8 +231,15 @@ class NVFP4TensorRef(QuantizedTensorStorage):
 
     @property
     def custom(self) -> bool:
-        """Flag to indicate this quantized tensor is custom."""
-        return True
+        """Flag to indicate this quantized tensor is custom.
+
+        Returns False so that GEMM operations route through cuBLAS
+        (the same kernel used by the production recipe) rather than
+        the Python qgemm reference implementation.  This keeps the
+        reference quantization path independent while still exercising
+        the production GEMM.
+        """
+        return False
 
     def prepare_for_saving(
         self,
@@ -255,22 +262,59 @@ class NVFP4TensorRef(QuantizedTensorStorage):
         self.scale_t = tensors[3]
         return tensors[4:]
 
-    # Compatibility
+    # NVFP4TensorStorage-compatible properties so that extract_tensor_data()
+    # and _extract_gemm_operand() can handle this type on the cuBLAS path.
     @property
-    def _data(self):
+    def _rowwise_data(self):
         return self.data
 
-    @_data.setter
-    def _data(self, value):
+    @_rowwise_data.setter
+    def _rowwise_data(self, value):
         self.data = value
 
     @property
-    def _scale_inv(self):
+    def _rowwise_scale_inv(self):
         return self.scale
 
-    @_scale_inv.setter
-    def _scale_inv(self, value):
+    @_rowwise_scale_inv.setter
+    def _rowwise_scale_inv(self, value):
         self.scale = value
+
+    @property
+    def _columnwise_data(self):
+        return self.data_t
+
+    @_columnwise_data.setter
+    def _columnwise_data(self, value):
+        self.data_t = value
+
+    @property
+    def _columnwise_scale_inv(self):
+        return self.scale_t
+
+    @_columnwise_scale_inv.setter
+    def _columnwise_scale_inv(self, value):
+        self.scale_t = value
+
+    @property
+    def _amax_rowwise(self):
+        return self.global_amax_row
+
+    @_amax_rowwise.setter
+    def _amax_rowwise(self, value):
+        self.global_amax_row = value
+
+    @property
+    def _amax_columnwise(self):
+        return self.global_amax_col
+
+    @_amax_columnwise.setter
+    def _amax_columnwise(self, value):
+        self.global_amax_col = value
+
+    @property
+    def _with_gemm_swizzled_scales(self):
+        return False
 
     def __repr__(self):
         return (
@@ -577,6 +621,23 @@ class NVFP4QuantizerRef(Quantizer):
         out = tensor[:M, :N].contiguous()
         return out
 
+    @staticmethod
+    def _pad_scale_for_gemm(scale: torch.Tensor, M: int, K: int) -> torch.Tensor:
+        """Pad scale tensor to match cuBLAS alignment requirements.
+
+        cuBLAS expects NVFP4 scale tensors with M padded to a multiple
+        of 128 and K//16 padded to a multiple of 4.
+        """
+        BLOCK = 16
+        target_m = ((M + 127) // 128) * 128
+        target_k = (((K // BLOCK) + 3) // 4) * 4
+        cur_m, cur_k = scale.shape
+        if cur_m >= target_m and cur_k >= target_k:
+            return scale
+        padded = torch.zeros(target_m, target_k, dtype=scale.dtype, device=scale.device)
+        padded[:cur_m, :cur_k] = scale
+        return padded
+
     def _quantize(self, tensor: torch.Tensor) -> Tuple[
         Optional[torch.Tensor],
         Optional[torch.Tensor],
@@ -619,12 +680,13 @@ class NVFP4QuantizerRef(Quantizer):
                 )
             # Prepare inputs once so we can reuse for both amax and quantization
             # Row-input will always be the original input.
+            # Note: RHT is NOT applied here because the stable ABI quantize
+            # kernel does not fuse RHT into standalone quantization; RHT is
+            # only applied by fused LN/activation+quantize kernels.  Matching
+            # the production behaviour ensures the reference's columnwise data
+            # is identical to production, allowing exact wgrad comparison.
             row_input = tensor
-            col_input = (
-                self._apply_rht(tensor.t().contiguous())
-                if self.with_rht
-                else tensor.t().contiguous()
-            )
+            col_input = tensor.t().contiguous()
             # Compute amax for rowwise and columnwise paths separately
             global_amax_row = torch.max(torch.abs(row_input)).to(torch.float32).view(1)
             global_amax_col = (
@@ -654,6 +716,7 @@ class NVFP4QuantizerRef(Quantizer):
                 sx = sx.T
 
             qx = self._rm_pad_tensor(qx, (M, N // 2))
+            sx = self._pad_scale_for_gemm(sx, M, N)
 
         else:
             qx = None
@@ -675,6 +738,7 @@ class NVFP4QuantizerRef(Quantizer):
             )
 
             qx_t = self._rm_pad_tensor(qx_t, (N, M // 2))
+            sx_t = self._pad_scale_for_gemm(sx_t, N, M)
 
             if transpose_scales:
                 sx_t = sx_t.T
