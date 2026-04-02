@@ -88,7 +88,11 @@ fi
 # Each run_test call: env_prefix, xml_name, test_path, fail_label
 # Tests are dispatched in waves of NUM_GPUS, one per GPU.
 
-run_test "" "pytest_test_sanity.xml" "$TE_PATH/tests/pytorch/test_sanity.py" "test_sanity.py"
+# DEBUG: inject a deliberate failure to test error capture (remove before merging)
+run_test "" "pytest_debug_forced_fail.xml" "-c 'import pytest; pytest.fail(\"DELIBERATE FAILURE: testing parallel error capture\")'" "debug_forced_fail"
+
+# DEBUG: inject a RuntimeError into test_sanity's GPU slot (remove before merging)
+run_test "" "pytest_test_sanity.xml" "-c 'import torch; raise RuntimeError(f\"DELIBERATE ERROR: simulating OOM on GPU {torch.cuda.current_device()}\")'" "test_sanity.py_INJECTED"
 run_test "" "pytest_test_recipe.xml" "$TE_PATH/tests/pytorch/test_recipe.py" "test_recipe.py"
 run_test "" "pytest_test_deferred_init.xml" "$TE_PATH/tests/pytorch/test_deferred_init.py" "test_deferred_init.py"
 run_test "PYTORCH_JIT=0 NVTE_TORCH_COMPILE=0 NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 NVTE_FUSED_ATTN=0" "pytest_test_numerics.xml" "$TE_PATH/tests/pytorch/test_numerics.py" "test_numerics.py"
