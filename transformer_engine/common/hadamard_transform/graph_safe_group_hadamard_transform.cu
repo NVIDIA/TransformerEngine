@@ -25,13 +25,6 @@ namespace {
 constexpr int kMaxTensorsPerKernel = 64;
 constexpr int kThreadsPerWarp = 32;
 
-enum ShapeRepresentation {
-  SAME_BOTH_DIMS = 0,
-  VARYING_FIRST_DIM = 1,
-  VARYING_LAST_DIM = 2,
-  VARYING_BOTH_DIMS = 3
-};
-
 __device__ __forceinline__ size_t get_current_tensor_id(
     const ShapeRepresentation shape_rep, const size_t num_tensors, const size_t current_offset,
     const size_t first_logical_dim, const size_t last_logical_dim,
