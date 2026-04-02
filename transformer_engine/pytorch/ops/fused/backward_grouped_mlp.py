@@ -9,6 +9,7 @@ from collections.abc import Callable
 import functools
 import inspect
 import math
+import os
 from typing import Optional
 
 import torch
@@ -357,17 +358,20 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
             grouped_fc2_dy = grad_output
         else:
             fc2_dy = maybe_dequantize(grad_output, dtype)
-            gq_ret = tex.group_quantize(
-                fc2_dy,
-                fc2_ctx.grad_output_quantizer,
-                num_groups,
-                split_sizes,
-                output_fc2_dbias,
-            )
             if output_fc2_dbias:
-                grouped_fc2_dy, fc2_dbias_packed = gq_ret
+                grouped_fc2_dy, fc2_dbias_packed = tex.bgrad_group_quantize(
+                    fc2_dy,
+                    fc2_ctx.grad_output_quantizer,
+                    num_groups,
+                    split_sizes,
+                )
             else:
-                grouped_fc2_dy = gq_ret
+                grouped_fc2_dy = tex.group_quantize(
+                    fc2_dy,
+                    fc2_ctx.grad_output_quantizer,
+                    num_groups,
+                    split_sizes,
+                )
 
         fc2_bias_grads: Optional[list[Optional[torch.Tensor]]] = None
         fc2_bias_grad_packed: Optional[torch.Tensor] = None
@@ -472,10 +476,10 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         fc2_dgrad_kernel_out = self.grouped_gemm_dglu_kernel()(**fc2_dglu_kwargs)
 
         fc1_dy_row_data = fc2_dgrad_kernel_out["d_row_tensor"]
-        fc1_dy_row_data = fc1_dy_row_data.view(out_shape[0], fc1_weight_shape[0]).contiguous()
+        fc1_dy_row_data = fc1_dy_row_data.view(out_shape[0], fc1_weight_shape[0])
         fc1_dy_row_scale = fc2_dgrad_kernel_out["sfd_row_tensor"]
         fc1_dy_col_data = fc2_dgrad_kernel_out["d_col_tensor"]
-        fc1_dy_col_data = fc1_dy_col_data.view(out_shape[0], fc1_weight_shape[0]).contiguous()
+        fc1_dy_col_data = fc1_dy_col_data.view(out_shape[0], fc1_weight_shape[0])
         fc1_dy_col_scale = fc2_dgrad_kernel_out["sfd_col_tensor"]
         grad_scales = fc2_dgrad_kernel_out["dprob_tensor"]
         grad_scales = grad_scales.view(-1).to(dtype=dtype)

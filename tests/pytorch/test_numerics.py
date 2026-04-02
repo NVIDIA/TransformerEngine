@@ -3028,48 +3028,72 @@ def test_grouped_gemm_grouped_tensor_zero_work(layout, accumulate, quant_type) -
     k, n = 256, 256
     dtype = torch.bfloat16
     device = torch.device("cuda")
-    m_sizes = [0] * z
     use_mxfp8 = quant_type == "mxfp8"
 
-    if layout == "NT":
-        A = [torch.randn(0, k, dtype=dtype, device=device) for _ in range(z)]
-        B = [torch.randn(0, n, dtype=dtype, device=device) for _ in range(z)]
-        out = [torch.randn(n, k, dtype=dtype, device=device) for _ in range(z)]
-    elif layout == "TN":
-        A = [torch.randn(n, k, dtype=dtype, device=device) for _ in range(z)]
-        B = [torch.randn(0, k, dtype=dtype, device=device) for _ in range(z)]
-        out = [torch.randn(0, n, dtype=dtype, device=device) for _ in range(z)]
-    else:  # NN
-        A = [torch.randn(n, k, dtype=dtype, device=device) for _ in range(z)]
-        B = [torch.randn(0, n, dtype=dtype, device=device) for _ in range(z)]
-        out = [torch.randn(0, k, dtype=dtype, device=device) for _ in range(z)]
+    transa = layout[0] == "T"
+    transb = layout[1] == "T"
+    zero_first_dims = torch.zeros(z, dtype=torch.int64, device=device)
 
-    out_before = [o.clone() for o in out]
+    def _make_zero_tokens_grouped_tensor(logical_last_dim, is_a):
+        """Create a GroupedTensor with non-zero logical_shape but zero first_dims."""
+        buf = torch.randn(k, logical_last_dim, dtype=dtype, device=device)
+        if use_mxfp8:
+            if is_a:
+                rowwise, columnwise = transa, not transa
+            else:
+                rowwise, columnwise = not transb, transb
+            quantizer = MXFP8Quantizer(
+                fp8_dtype=tex.DType.kFloat8E4M3,
+                rowwise=rowwise,
+                columnwise=columnwise,
+            )
+            quantizer.optimize_for_gemm = True
+            return tex.group_quantize(buf, quantizer, z, zero_first_dims)
+        return GroupedTensor.make_grouped_tensor(
+            num_tensors=z,
+            first_dims=zero_first_dims,
+            last_dims=None,
+            logical_first_dim=k,
+            logical_last_dim=logical_last_dim,
+            quantizer=None,
+            device=device,
+            dtype=dtype,
+        )
 
-    if use_mxfp8:
-        transa = layout[0] == "T"
-        transb = layout[1] == "T"
-        grouped_A = _make_grouped_tensor_quantized_mxfp8(
-            A, is_a=True, transposed=transa, device=device
-        )
-        grouped_B = _make_grouped_tensor_quantized_mxfp8(
-            B, is_a=False, transposed=transb, device=device
-        )
-    else:
-        grouped_B = _make_grouped_tensor_from_splits(m_sizes, B[0].shape[1], device, dtype)
-        if layout in ("TN", "NN"):
+    if layout in ("TN", "NN"):
+        weight_tensors = [torch.randn(n, k, dtype=dtype, device=device) for _ in range(z)]
+        if use_mxfp8:
+            grouped_A = _make_grouped_tensor_quantized_mxfp8(
+                weight_tensors, is_a=True, transposed=transa, device=device
+            )
+        else:
             grouped_A = _make_grouped_tensor_uniform(z, n, k, device, dtype)
-            _pack_grouped_tensor(grouped_A, A)
-        else:  # NT
-            grouped_A = _make_grouped_tensor_from_splits(m_sizes, k, device, dtype)
-
-    if layout == "TN":
-        grouped_out = _make_grouped_tensor_from_splits(m_sizes, n, device, dtype)
-    elif layout == "NN":
-        grouped_out = _make_grouped_tensor_from_splits(m_sizes, k, device, dtype)
+            _pack_grouped_tensor(grouped_A, weight_tensors)
     else:  # NT
+        grouped_A = _make_zero_tokens_grouped_tensor(k, is_a=True)
+
+    b_last_dim = k if layout == "TN" else n
+    grouped_B = _make_zero_tokens_grouped_tensor(b_last_dim, is_a=False)
+
+    if layout == "NT":
+        out = [torch.randn(n, k, dtype=dtype, device=device) for _ in range(z)]
         grouped_out = _make_grouped_tensor_uniform(z, n, k, device, dtype)
         _pack_grouped_tensor(grouped_out, out)
+    else:
+        out = [torch.zeros(0, dtype=dtype, device=device) for _ in range(z)]
+        out_last_dim = n if layout == "TN" else k
+        grouped_out = GroupedTensor.make_grouped_tensor(
+            num_tensors=z,
+            first_dims=zero_first_dims,
+            last_dims=None,
+            logical_first_dim=k,
+            logical_last_dim=out_last_dim,
+            quantizer=None,
+            device=device,
+            dtype=dtype,
+        )
+
+    out_before = [o.clone() for o in out]
 
     general_grouped_gemm_for_grouped_tensor(
         grouped_A,
