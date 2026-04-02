@@ -75,6 +75,7 @@ def get_fp8_meta_from_fp8_tensor(tensor: Float8Tensor) -> tuple[FP8TensorMeta, i
 
 def validate_grouped_mlp_dims(fc1, swiglu, fc2) -> None:
     """Validate FC1/SwiGLU/FC2 dimensions and interleave size for fused grouped MLP."""
+
     if fc1.in_features % 256 != 0 or fc1.out_features % 256 != 0:
         raise ValueError(
             f"Unsupported dims for FC1 (num_groups={fc1.num_groups}, "
