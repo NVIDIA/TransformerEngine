@@ -17,8 +17,8 @@ from torch.distributed.elastic.multiprocessing.errors import record
 from transformer_engine.pytorch.newton_schulz import (
     cusolvermp_ctx_create,
     get_coefficients,
-    newton_schulz,
 )
+import transformer_engine_torch as tex
 
 
 def newton_schulz_reference(in_x: torch.Tensor, coefficients: list[float]) -> torch.Tensor:
@@ -26,9 +26,21 @@ def newton_schulz_reference(in_x: torch.Tensor, coefficients: list[float]) -> to
     x = in_x.clone()
     for i in range(len(coefficients) // 3):
         a, b, c = coefficients[3 * i : 3 * (i + 1)]
-        xxt = x @ x  # Should be: x @ x.mT, but it makes the test fail
+        xxt = x @ x.mT
         x = a * x + b * xxt @ x + c * xxt @ xxt @ x
     return x
+
+
+def to_column_major_local(x: torch.Tensor) -> torch.Tensor:
+    """Copy a logical 2D tensor into a column-major local buffer."""
+    x_col_major = torch.empty_strided(
+        size=x.shape,
+        stride=(1, x.shape[0]),
+        dtype=x.dtype,
+        device=x.device,
+    )
+    x_col_major.copy_(x)
+    return x_col_major
 
 
 @record
@@ -36,7 +48,8 @@ def main():
     parser = argparse.ArgumentParser(description="Newton-Schulz distributed test")
     parser.add_argument("--check", type=str, default="orthogonality", choices=["orthogonality", "reference"])
     parser.add_argument("--dtype", type=str, default="float32", choices=["float32", "bfloat16"])
-    parser.add_argument("--matrix-size", type=int, default=256)
+    parser.add_argument("--matrix-rows", type=int, default=256)
+    parser.add_argument("--matrix-cols", type=int, default=None)
     parser.add_argument("--num-iterations", type=int, default=5)
     parser.add_argument("--atol", type=float, default=1e-2)
     parser.add_argument("--rtol", type=float, default=1e-2)
@@ -48,35 +61,40 @@ def main():
     torch.cuda.set_device(rank)
 
     dtype = torch.float32 if args.dtype == "float32" else torch.bfloat16
-    N = args.matrix_size
+    m = args.matrix_rows
+    n = args.matrix_cols if args.matrix_cols is not None else args.matrix_rows
     coefficients = get_coefficients(args.num_iterations)
 
-    # Ensure N is divisible by world_size
-    assert N % world_size == 0, f"Matrix size {N} must be divisible by world_size {world_size}"
+    # Ensure the distributed row dimension is divisible by world_size.
+    assert m % world_size == 0, f"Matrix rows {m} must be divisible by world_size {world_size}"
 
-    # Create a random symmetric positive definite matrix on rank 0
-    # A = Q @ diag(eigenvalues) @ Q^T with eigenvalues in (0, 1)
-    # This ensures Newton-Schulz converges
+    # Create a random matrix on rank 0 with singular values in (0, 1),
+    # which keeps the Newton-Schulz iterations in the convergence regime.
     if rank == 0:
         torch.manual_seed(42)
-        Q, _ = torch.linalg.qr(torch.randn(N, N, device="cuda", dtype=torch.float32))
-        eigenvalues = torch.rand(N, device="cuda", dtype=torch.float32) * 0.8 + 0.1
-        A = Q @ torch.diag(eigenvalues) @ Q.T
+        k = min(m, n)
+        U, _ = torch.linalg.qr(torch.randn(m, k, device="cuda", dtype=torch.float32), mode="reduced")
+        V, _ = torch.linalg.qr(torch.randn(n, k, device="cuda", dtype=torch.float32), mode="reduced")
+        singular_values = torch.rand(k, device="cuda", dtype=torch.float32) * 0.8 + 0.1
+        A = U @ torch.diag(singular_values) @ V.T
         A = A.to(dtype)
     else:
-        A = torch.empty(N, N, device="cuda", dtype=dtype)
+        A = torch.empty(m, n, device="cuda", dtype=dtype)
 
     # Broadcast the full matrix to all ranks
     dist.broadcast(A, src=0)
 
     # Scatter rows to each rank
-    local_rows = N // world_size
+    local_rows = m // world_size
     x_local = A[rank * local_rows : (rank + 1) * local_rows, :].contiguous()
 
     group = dist.group.WORLD
     ctx = cusolvermp_ctx_create(group)
     try:
-        newton_schulz(x_local, ctx, args.num_iterations, coefficients=coefficients)
+        # cuSOLVERMp expects the local shard to use column-major storage.
+        x_local_col_major = to_column_major_local(x_local)
+        tex.newton_schulz(ctx._ptr, m, n, x_local_col_major, args.num_iterations, coefficients)
+        x_local = x_local_col_major.contiguous()
     finally:
         ctx.destroy()
 
@@ -88,11 +106,17 @@ def main():
     # Check: the resulting matrix should be orthogonal, or match a local reference.
     if rank == 0:
         if args.check == "orthogonality":
-            xxt = X @ X.t()
-            expected = torch.eye(N, device=xxt.device, dtype=xxt.dtype)
-            max_diff = (xxt - expected).abs().max().item()
-            print(f"Max |X @ X.t() - I|: {max_diff:.6e}", flush=True)
-            passed = torch.allclose(xxt, expected, atol=args.atol, rtol=args.rtol)
+            if m <= n:
+                gram = X @ X.t()
+                expected = torch.eye(m, device=gram.device, dtype=gram.dtype)
+                max_diff = (gram - expected).abs().max().item()
+                print(f"Max |X @ X.t() - I|: {max_diff:.6e}", flush=True)
+            else:
+                gram = X.t() @ X
+                expected = torch.eye(n, device=gram.device, dtype=gram.dtype)
+                max_diff = (gram - expected).abs().max().item()
+                print(f"Max |X.t() @ X - I|: {max_diff:.6e}", flush=True)
+            passed = torch.allclose(gram, expected, atol=args.atol, rtol=args.rtol)
         else:
             reference = newton_schulz_reference(A.float(), coefficients).to(dtype)
             max_diff = (X - reference).abs().max().item()
