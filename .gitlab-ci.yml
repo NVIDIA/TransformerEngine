@@ -1345,7 +1345,7 @@ send_result_to_slack:
 .B200_runner:
     variables:
       SLURM_PARTITION: "batch"
-      SLURM_ACCOUNT: "core_dlfw_ci"
+      SLURM_ACCOUNT: "coreai_dlfw_dev"
     tags:
     - ${B200_RUNNER}
 
@@ -1354,8 +1354,8 @@ send_result_to_slack:
     - .B200_runner
     variables:
       GPUS: 1
-      CI_BUILDS_DIR: "/lustre/fsw/core_dlfw_ci"
-      DATADIR: "/lustre/fsw/core_dlfw_ci/datasets"
+      CI_BUILDS_DIR: "/lustre/fsw/coreai_dlfw_dev"
+      DATADIR: "/lustre/fsw/coreai_dlfw_dev/datasets"
       SLURM_NODES: 1
       CUDA_VISIBLE_DEVICES: "0"
 
@@ -1364,8 +1364,8 @@ send_result_to_slack:
     - .B200_runner
     variables:
       GPUS: 8
-      CI_BUILDS_DIR: "/lustre/fsw/core_dlfw_ci"
-      DATADIR: "/lustre/fsw/core_dlfw_ci/datasets"
+      CI_BUILDS_DIR: "/lustre/fsw/coreai_dlfw_dev"
+      DATADIR: "/lustre/fsw/coreai_dlfw_dev/datasets"
       SLURM_NODES: 1
 
 .GB200_1GPU:
