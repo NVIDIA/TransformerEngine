@@ -3249,12 +3249,13 @@ class TestSequentialModules:
     @pytest.mark.parametrize("accumulate_into_main_grad", (False, True))
     @pytest.mark.parametrize("glu_interleave_size", (None, 32))
     @pytest.mark.parametrize("delay_wgrad_compute", (False, True))
+    @pytest.mark.parametrize("hidden_size", (64, 256))
     def test_grouped_mlp(
         self,
         *,
         group_size: int = 4,
         bias: bool,
-        hidden_size: int = 256,
+        hidden_size: int,
         dtype: torch.dtype,
         quantization: Optional[str],
         single_grouped_weight: bool,

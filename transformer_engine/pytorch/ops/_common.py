@@ -76,12 +76,12 @@ def get_fp8_meta_from_fp8_tensor(tensor: Float8Tensor) -> tuple[FP8TensorMeta, i
 def validate_grouped_mlp_dims(fc1, swiglu, fc2) -> None:
     """Validate FC1/SwiGLU/FC2 dimensions and interleave size for fused grouped MLP."""
 
-    if fc1.in_features % 256 != 0 or fc1.out_features % 256 != 0:
+    if fc1.in_features % 64 != 0 or fc1.out_features % 64 != 0:
         raise ValueError(
             f"Unsupported dims for FC1 (num_groups={fc1.num_groups}, "
             f"in_features={fc1.in_features}, out_features={fc1.out_features})."
         )
-    if fc2.in_features % 256 != 0 or fc2.out_features % 256 != 0:
+    if fc2.in_features % 64 != 0 or fc2.out_features % 64 != 0:
         raise ValueError(
             f"Unsupported dims for FC2 (num_groups={fc2.num_groups}, "
             f"in_features={fc2.in_features}, out_features={fc2.out_features})."
@@ -153,10 +153,10 @@ def fuse_grouped_mlp_ops(
         elif window[0].num_groups != window[2].num_groups:
             matches_pattern = False
         elif (
-            window[0].in_features % 256 != 0
-            or window[0].out_features % 256 != 0
-            or window[2].in_features % 256 != 0
-            or window[2].out_features % 256 != 0
+            window[0].in_features % 64 != 0
+            or window[0].out_features % 64 != 0
+            or window[2].in_features % 64 != 0
+            or window[2].out_features % 64 != 0
         ):
             matches_pattern = False
         elif window[1].glu_interleave_size != 32:

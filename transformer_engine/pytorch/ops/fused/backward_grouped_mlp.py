@@ -401,8 +401,8 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         fc2_dy_scales = fc2_dy_scales.view(dtype=torch.float8_e8m0fnu)
         fc2_dy_scales = fc2_dy_scales.view(
             1,
-            out_shape[0] // 128,
-            out_shape[1] // 128,
+            (out_shape[0] + 127) // 128,
+            (out_shape[1] + 127) // 128,
             MXFP8_BLOCK_SCALING_SIZE,
             4,
             4,
@@ -451,8 +451,8 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
             fc2_w_scales = fc2_weight_for_gemm.columnwise_scale_inv.view(dtype=torch.float8_e8m0fnu)
             fc2_w_scales = fc2_w_scales.view(
                 num_groups,
-                fc2_weight_shape[1] // 128,
-                fc2_weight_shape[0] // 128,
+                (fc2_weight_shape[1] + 127) // 128,
+                (fc2_weight_shape[0] + 127) // 128,
                 MXFP8_BLOCK_SCALING_SIZE,
                 4,
                 4,
@@ -582,8 +582,8 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
                 )
                 fc1_w_scales = fc1_w_scales.view(
                     num_groups,
-                    fc1_weight_shape[1] // 128,
-                    fc1_weight_shape[0] // 128,
+                    (fc1_weight_shape[1] + 127) // 128,
+                    (fc1_weight_shape[0] + 127) // 128,
                     MXFP8_BLOCK_SCALING_SIZE,
                     4,
                     4,
