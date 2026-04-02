@@ -103,16 +103,18 @@ class TEMixtralSparseMoeBlock(nn.Module):
         routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
         routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
         routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
-        routing_weights = routing_weights.to(hidden_states.dtype)
+        # Keep routing_weights in float32; TE recommends float32 for merging_probs.
 
         # ── Permute tokens by expert assignment ─────────────────────────────
+        # selected_experts is an index map [num_tokens, top_k] — must pass map_type='index'.
         # moe_permute reorders tokens so all tokens for expert-0 are contiguous,
         # followed by all tokens for expert-1, etc.
         permuted_tokens, row_id_map = te.moe_permute(
             hidden_states_flat,
             selected_experts.to(torch.int32),
-            num_out_tokens=None,
-            max_token_num=num_tokens,
+            num_out_tokens=-1,
+            max_token_num=num_tokens * self.top_k,
+            map_type="index",
         )
 
         # ── m_splits: tokens routed to each expert ──────────────────────────
@@ -130,10 +132,12 @@ class TEMixtralSparseMoeBlock(nn.Module):
         expert_outputs = self.experts_down(intermediate_act, m_splits=m_splits)
 
         # ── Unpermute and apply routing weights ─────────────────────────────
+        # map_type must match the permute call; merging_probs replaces the deprecated probs kwarg.
         final_hidden_states = te.moe_unpermute(
             expert_outputs,
             row_id_map,
-            probs=routing_weights,
+            merging_probs=routing_weights,
+            map_type="index",
         )
 
         final_hidden_states = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
