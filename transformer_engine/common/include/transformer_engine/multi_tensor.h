@@ -233,16 +233,33 @@ void nvte_multi_tensor_sgd_cuda(int chunk_size, NVTETensor noop_flag, NVTETensor
  * \warning   This API is **experimental** and subject to change.
  *
  *  \param[in]      chunk_size              Number of tensor elements processed by a CUDA block.
- *  \param[in]      noop_flag               If this single element tensor has non-zero value, kernel will exit immediately.
+ *  \param[out]     is_infinite             Whether the kernel detected a non-finite input value.
  *  \param[in,out]  tensor_lists            2D array of input tensors.
  *  \param[in]      num_tensor_lists        Size (dim0) of tensor_lists.
  *  \param[in]      num_tensors_per_list    Size (dim1) of tensor_lists.
  *  \param[in]      scale                   Scalar for the scaling operation.
  *  \param[in]      stream                  CUDA stream used for this operation.
  */
-void nvte_multi_tensor_scale_cuda(int chunk_size, NVTETensor noop_flag, NVTETensor **tensor_lists,
+void nvte_multi_tensor_scale_cuda(int chunk_size, NVTETensor is_infinite, NVTETensor **tensor_lists,
                                   const size_t num_tensor_lists, const size_t num_tensors_per_list,
                                   float scale, cudaStream_t stream);
+
+/*!  \brief Check overflow and scale a list of tensors. scale is tensor input.
+ *
+ * \warning   This API is **experimental** and subject to change.
+ *
+ *  \param[in]      chunk_size              Number of tensor elements processed by a CUDA block.
+ *  \param[out]     is_infinite             Whether the kernel detected a non-finite input value.
+ *  \param[in,out]  tensor_lists            2D array of input tensors.
+ *  \param[in]      num_tensor_lists        Size (dim0) of tensor_lists.
+ *  \param[in]      num_tensors_per_list    Size (dim1) of tensor_lists.
+ *  \param[in]      scale                   Tensor for the scaling operation.
+ *  \param[in]      stream                  CUDA stream used for this operation.
+ */
+void nvte_multi_tensor_scale_tensor_cuda(int chunk_size, NVTETensor is_infinite,
+                                         NVTETensor **tensor_lists, const size_t num_tensor_lists,
+                                         const size_t num_tensors_per_list, NVTETensor scale,
+                                         cudaStream_t stream);
 
 /*!  \brief Check overflow and scale a list of tensors.
  *
@@ -295,6 +312,17 @@ void nvte_multi_tensor_compute_scale_inv_e8m0_cuda(int chunk_size, NVTETensor **
  */
 void nvte_group_amax(const NVTETensor input, NVTETensor *outputs, const size_t *split_sections,
                      size_t num_tensors, cudaStream_t stream);
+
+/*! \brief Grouped-tensor amax without doing hadamard transform.
+ *
+ *  This function is experimental and the API is not stable.
+ *
+ *  \param[in]      input            NVTEGroupedTensor Input tensor.
+ *  \param[in,out]  output           NVTEGroupedTensor Output tensor.
+ *  \param[in]      stream           CUDA stream used for the operation.
+ */
+void nvte_group_amax_graph_safe(const NVTEGroupedTensor input, NVTEGroupedTensor output,
+                                cudaStream_t stream);
 
 #ifdef __cplusplus
 }  // extern "C"

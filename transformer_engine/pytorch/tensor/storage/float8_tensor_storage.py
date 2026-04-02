@@ -14,7 +14,7 @@ from transformer_engine_torch import DType as TE_DType
 
 from ...quantized_tensor import QuantizedTensorStorage, Quantizer
 
-from ...constants import TE_DType as torch_to_transformer_engine_dtype
+from ...constants import TE_DType as torch_to_transformer_engine_dtype, TE_DType_To_Torch
 
 from ...utils import is_non_tn_fp8_gemm_supported, _empty_tensor
 
@@ -35,6 +35,13 @@ class _FromFloat8Func(torch.autograd.Function):
         if tensor._data is not None:
             if tensor._data.numel() == 0:
                 return torch.empty_like(tensor._data, dtype=dtype)
+            if tensor._data.is_cpu:
+                # CPU fallback: reinterpret uint8 as FP8, cast to target dtype, scale
+                fp8_torch_dtype = TE_DType_To_Torch[tensor._fp8_dtype]
+                return (
+                    tensor._data.view(fp8_torch_dtype).float()
+                    * tensor._scale_inv.to(tensor._data.device)
+                ).to(dtype)
             # Cast from FP8
             return tex.dequantize(tensor, te_dtype)
 
@@ -75,14 +82,16 @@ class Float8TensorStorage(QuantizedTensorStorage):
         data: Optional[torch.Tensor],
         fp8_scale_inv: torch.Tensor,
         fp8_dtype: TE_DType,
+        fake_dtype: Optional[torch.dtype] = None,
         data_transpose: Optional[torch.Tensor] = None,
         quantizer: Optional[Quantizer] = None,
         **kwargs,
     ):
         if cls is Float8TensorStorage:
             instance = object.__new__(cls)
+            instance._dtype = fake_dtype if fake_dtype is not None else torch.float32
         else:
-            instance = super().__new__(cls, *args, **kwargs)
+            instance = super().__new__(cls, *args, fake_dtype=fake_dtype, **kwargs)
         instance._data = data
         instance._quantizer = quantizer.copy() if quantizer is not None else None
         instance._fp8_dtype = fp8_dtype
@@ -104,6 +113,24 @@ class Float8TensorStorage(QuantizedTensorStorage):
                 t.data = _empty_tensor()
         self._transpose_invalid = True
 
+    def copy_from_storage(self, src: QuantizedTensorStorage) -> None:
+        """Copy data buffers from another Float8TensorStorage."""
+        if not isinstance(src, Float8TensorStorage):
+            raise TypeError("copy_from_storage expects Float8TensorStorage")
+        if self._fp8_dtype != src._fp8_dtype:
+            raise RuntimeError("FP8 dtype mismatch in copy_from_storage")
+
+        def _copy_optional(
+            dst: Optional[torch.Tensor],
+            src_tensor: Optional[torch.Tensor],
+        ):
+            if dst is not None and src_tensor is not None:
+                dst.copy_(src_tensor)
+
+        _copy_optional(self._data, src._data)
+        _copy_optional(self._transpose, src._transpose)
+        _copy_optional(self._scale_inv, src._scale_inv)
+
     def get_metadata(self) -> Dict[str, Any]:
         """Get this tensor's metadata."""
         return {
@@ -112,6 +139,12 @@ class Float8TensorStorage(QuantizedTensorStorage):
             "fp8_dtype": self._fp8_dtype,
             "data_transpose": self._transpose,
             "quantizer": self._quantizer,
+            "device": (
+                self._data.device
+                if self._data is not None
+                else (self._transpose.device if self._transpose is not None else None)
+            ),
+            "fake_dtype": self._dtype,
         }
 
     def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], QuantizedTensorStorage]:
@@ -141,8 +174,10 @@ class Float8TensorStorage(QuantizedTensorStorage):
             return self._transpose
         raise ValueError("No data to get, both rowwise_data and columnwise_data are False")
 
-    def dequantize(self, *, dtype: torch.dtype = torch.float32) -> torch.Tensor:
+    def dequantize(self, *, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
         """Dequantize to a higher precision."""
+        if dtype is None:
+            dtype = self._dtype
         return _FromFloat8Func.forward(None, self, dtype)
 
     def size(self, *args, **kwargs):
@@ -151,6 +186,15 @@ class Float8TensorStorage(QuantizedTensorStorage):
             return self._data.size(*args, **kwargs)
         size = self._transpose.size(*args, **kwargs)
         return torch.Size([size[-1], math.prod(size[:-1])])
+
+    @property
+    def device(self):
+        """Return the device of the tensor. Define this to avoid expensive PyObject lookups."""
+        if self._data is not None:
+            return self._data.device
+        if self._transpose is not None:
+            return self._transpose.device
+        raise RuntimeError("Float8TensorStorage has no data!")
 
     def view(self, shape: torch.Size):
         # pylint: disable=missing-function-docstring
@@ -165,6 +209,7 @@ class Float8TensorStorage(QuantizedTensorStorage):
             data=out_data,
             fp8_scale_inv=self._scale_inv,
             fp8_dtype=self._fp8_dtype,
+            fake_dtype=self._dtype,
             data_transpose=out_transpose,
             quantizer=self._quantizer,
         )

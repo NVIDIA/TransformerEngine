@@ -6,15 +6,16 @@
 
 from typing import Dict, Optional, List, Tuple
 from contextlib import contextmanager
+import warnings
 
 import torch
 import nvdlfw_inspect.api as debug_api
-
-
 from nvdlfw_inspect.debug_features.log_tensor_stats import LogTensorStats as BaseLogTensorStats
 from nvdlfw_inspect.registry import Registry, api_method
+import transformer_engine_torch as tex
 
 from transformer_engine.debug.features.utils.stats_buffer import STATS_BUFFERS
+from transformer_engine.debug.features.utils import get_reduction_params, next_enabled_iter
 from transformer_engine.pytorch.tensor import Quantizer, QuantizedTensor
 from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8Quantizer,
@@ -22,7 +23,14 @@ from transformer_engine.pytorch.tensor.float8_tensor import (
 )
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockQuantizer
-from transformer_engine.debug.features.utils import get_reduction_params, next_enabled_iter
+
+try:
+    from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
+
+    _nvfp4_available = True
+except ImportError:
+    _nvfp4_available = False
+    NVFP4Quantizer = None
 
 
 ALL_RECIPE_NAMES = ["fp8_delayed_scaling", "fp8_current_scaling", "mxfp8", "fp8_block_scaling"]
@@ -39,6 +47,8 @@ def _get_recipe_name(quantizer: Optional[Quantizer]):
         return "mxfp8"
     if isinstance(quantizer, Float8BlockQuantizer):
         return "fp8_block_scaling"
+    if _nvfp4_available and isinstance(quantizer, NVFP4Quantizer):
+        return "nvfp4"
     raise ValueError(f"Unsupported quantizer type: {type(quantizer)}")
 
 
@@ -111,6 +121,10 @@ class LogFp8TensorStats(BaseLogTensorStats):
                 - scale_inv_max - maximum of the inverse of the scaling factors,
                 - mse - mean squared error of the quantized tensor and the original tensor = sum((quantized_tensor - original_tensor)**2) / num_elements,
 
+            When collecting stats for the weight tensor with FP8 model parameters enabled,
+            only "scale_inv_min" and "scale_inv_max" are available.
+            All other statistics require access to the high precision tensor.
+
         tensors/tensors_struct: List[str]
             list of tensors to log
                 - activation,
@@ -148,13 +162,26 @@ class LogFp8TensorStats(BaseLogTensorStats):
                     end_step: 80
     """
 
-    def check_if_stat_is_supported(self, stat: str, current_recipe: str):
+    def check_if_stat_is_supported(
+        self, stat: str, current_recipe: str, high_precision_tensor_provided: bool
+    ):
         """Returns True if stat is supported, raises ValueError otherwise."""
         columnwise = stat.endswith("_columnwise")
         if columnwise:
             stat = stat[: -len("_columnwise")]
         recipe_from_stat, _ = self.get_recipe_from_stat(stat, default_recipe=current_recipe)
         stat_without_recipe = stat.replace(recipe_from_stat + "_", "")
+
+        need_high_precision_tensor_stats = ["underflows%", "overflows%", "mse"]
+        if (
+            stat_without_recipe in need_high_precision_tensor_stats
+            and not high_precision_tensor_provided
+        ):
+            raise ValueError(
+                f"Stat {stat} requires a high precision tensor to be provided. "
+                "This feature is not supported for weight tensors when using fp8 model "
+                "parameters."
+            )
 
         if current_recipe == "" and recipe_from_stat == "":
             raise ValueError(
@@ -163,6 +190,16 @@ class LogFp8TensorStats(BaseLogTensorStats):
 
         if recipe_from_stat != "" and recipe_from_stat not in ALL_RECIPE_NAMES:
             raise ValueError(f"Stat {stat} contains an unsupported recipe name: {recipe_from_stat}")
+
+        # Block any NVFP4 stats in LogFp8TensorStats (FP8-specific logic won't work)
+        # But allow recipe-prefixed FP8 stats like "mxfp8_underflows%" even with NVFP4 quantizer
+        if recipe_from_stat == "nvfp4":
+            raise ValueError(
+                f"[NVTORCH INSPECT ERROR] Cannot compute NVFP4 stats '{stat}' in LogFp8TensorStats."
+                " FP8-specific statistics do not work with NVFP4. Use LogNvfp4TensorStats for"
+                " NVFP4-specific stats, or use FP8 recipe-prefixed stats (e.g.,"
+                " 'mxfp8_underflows%', 'fp8_block_scaling_mse') for what-if FP8 comparisons."
+            )
 
         if recipe_from_stat in ["fp8_delayed_scaling", "fp8_current_scaling"] and columnwise:
             raise ValueError(
@@ -189,6 +226,7 @@ class LogFp8TensorStats(BaseLogTensorStats):
 
     def get_recipe_from_stat(self, stat: str, default_recipe: str = ""):
         """Returns the recipe name from the stat string."""
+
         columnwise_stat = stat.endswith("_columnwise")
         for recipe_name in ALL_RECIPE_NAMES:
             if recipe_name in stat:
@@ -213,7 +251,7 @@ class LogFp8TensorStats(BaseLogTensorStats):
         Yields the aux_dict.
         Needs to clean after usage, because it possibly change the usage of the quantized tensor.
         """
-        fp8_dtype = None
+        fp8_dtype = tex.DType.kFloat8E4M3
         if recipe_name in ["fp8_delayed_scaling", "fp8_current_scaling", "fp8_block_scaling"]:
             assert isinstance(
                 quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer, Float8BlockQuantizer)
@@ -268,27 +306,42 @@ class LogFp8TensorStats(BaseLogTensorStats):
         tensor_name: str,
         iteration: int,
         tp_group: torch.distributed.ProcessGroup,
-        tensor: torch.Tensor,
+        tensor: Optional[torch.Tensor],
         rowwise_quantized_tensor: Optional[torch.Tensor | QuantizedTensor] = None,
         columnwise_quantized_tensor: Optional[torch.Tensor | QuantizedTensor] = None,
         quantizer: Optional[Quantizer] = None,
+        tp_size: int = 1,
     ):
         """
         API call used to collect the data about the tensor after process_tensor()/quantization.
         """
         assert rowwise_quantized_tensor is columnwise_quantized_tensor
-        assert (
-            quantizer is not None
-        ), "[NVTORCH INSPECT ERROR] LogFp8TensorStats cannot be run without low-precision recipe."
+
+        # Skip logging if quantizer is None (layer runs in high precision)
+        if quantizer is None:
+            warnings.warn(
+                f"[LogFp8TensorStats] Skipping stats collection for layer '{layer_name}', "
+                f"tensor '{tensor_name}': layer runs in high precision (no quantizer)."
+            )
+            return
 
         quantized_tensor = rowwise_quantized_tensor
-        assert isinstance(
-            quantized_tensor, QuantizedTensor
-        ), "[NVTORCH INSPECT ERROR] LogFp8TensorStats quantized_tensor must be a QuantizedTensor."
+
+        # Skip logging if quantized_tensor is not a QuantizedTensor (incompatible precision)
+        if not isinstance(quantized_tensor, QuantizedTensor):
+            warnings.warn(
+                f"[LogFp8TensorStats] Skipping stats collection for layer '{layer_name}', "
+                f"tensor '{tensor_name}': incompatible precision "
+                f"(expected QuantizedTensor, got {type(quantized_tensor).__name__})."
+            )
+            return
+
         recipe_name = _get_recipe_name(quantizer)
 
         for stat in config["stats"]:
-            self.check_if_stat_is_supported(stat, recipe_name)
+            self.check_if_stat_is_supported(
+                stat, recipe_name, high_precision_tensor_provided=tensor is not None
+            )
 
         start_step = config.get("start_step", None)
         end_step = config.get("end_step", None)
@@ -304,7 +357,7 @@ class LogFp8TensorStats(BaseLogTensorStats):
         )
 
         skip_reduction, reduction_group, reduce_within_microbatch = get_reduction_params(
-            tensor_name, tp_group
+            tensor_name, tp_group, tp_size
         )
 
         STATS_BUFFERS.try_add_buffer(

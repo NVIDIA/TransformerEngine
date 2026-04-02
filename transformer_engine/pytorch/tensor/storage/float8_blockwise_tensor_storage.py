@@ -46,12 +46,14 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         quantizer: Quantizer,
         is_2D_scaled: bool,
         *args,
+        fake_dtype: Optional[torch.dtype] = None,
         **kwargs,
     ):
         if cls is Float8BlockwiseQTensorStorage:
             instance = object.__new__(cls)
+            instance._dtype = fake_dtype if fake_dtype is not None else torch.float32
         else:
-            instance = super().__new__(cls, *args, **kwargs)
+            instance = super().__new__(cls, *args, fake_dtype=fake_dtype, **kwargs)
         instance._rowwise_data = rowwise_data
         instance._columnwise_data = columnwise_data
         instance._quantizer = quantizer.copy() if quantizer is not None else None
@@ -73,6 +75,24 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
             if t is not None:
                 t.data = _empty_tensor()
 
+    def copy_from_storage(self, src: QuantizedTensorStorage) -> None:
+        """Copy data buffers from another Float8BlockwiseQTensorStorage."""
+        if not isinstance(src, Float8BlockwiseQTensorStorage):
+            raise TypeError("copy_from_storage expects Float8BlockwiseQTensorStorage")
+        if self._fp8_dtype != src._fp8_dtype:
+            raise RuntimeError("FP8 dtype mismatch in copy_from_storage")
+        if self._is_2D_scaled != src._is_2D_scaled:
+            raise RuntimeError("Scale layout mismatch in copy_from_storage")
+
+        def _copy_optional(dst: Optional[torch.Tensor], src_tensor: Optional[torch.Tensor]):
+            if dst is not None and src_tensor is not None:
+                dst.copy_(src_tensor)
+
+        _copy_optional(self._rowwise_data, src._rowwise_data)
+        _copy_optional(self._columnwise_data, src._columnwise_data)
+        _copy_optional(self._rowwise_scale_inv, src._rowwise_scale_inv)
+        _copy_optional(self._columnwise_scale_inv, src._columnwise_scale_inv)
+
     def get_metadata(self) -> Dict[str, Any]:
         """Get this tensor's metadata."""
         return {
@@ -83,6 +103,7 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
             "fp8_dtype": self._fp8_dtype,
             "quantizer": self._quantizer,
             "is_2D_scaled": self._is_2D_scaled,
+            "fake_dtype": self._dtype,
         }
 
     def prepare_for_saving(
@@ -131,7 +152,9 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         permute_dims.append(0)
         return torch.permute(columnwise_dq, tuple(permute_dims)).contiguous()
 
-    def _dequantize_vectorwise(self, *, dtype: torch.dtype = torch.float32) -> torch.Tensor:
+    def _dequantize_vectorwise(self, *, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
+        if dtype is None:
+            dtype = self._dtype
         block_len = 128
 
         q_M, q_K = 1, 1
@@ -193,10 +216,12 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
             return self._transpose_dq_columnwise_output(result)
         return result
 
-    def dequantize(self, *, dtype: torch.dtype = torch.float32) -> torch.Tensor:
+    def dequantize(self, *, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
         """
         Construct plain PyTorch tensor from Float8BlockwiseQTensor
         """
+        if dtype is None:
+            dtype = self._dtype
         block_len = 128
         if not self._is_2D_scaled:
             return self._dequantize_vectorwise(dtype=dtype)
@@ -271,6 +296,15 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
             reordered.append(dims[i])
         reordered.append(dims[0])
         return torch.Size(reordered)
+
+    @property
+    def device(self):
+        """Return the device of the tensor. Define this to avoid expensive PyObject lookups."""
+        if self._rowwise_data is not None:
+            return self._rowwise_data.device
+        if self._columnwise_data is not None:
+            return self._columnwise_data.device
+        raise RuntimeError("Float8BlockwiseQTensorStorage has no data!")
 
     def _create_columnwise(self):
         """

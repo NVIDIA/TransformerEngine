@@ -135,7 +135,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
       threadIdx.x + blockIdx.x * THREADS_NUM + blockIdx.y * gridDim.x * THREADS_NUM;
   const size_t rng_seed = rng_state != nullptr ? rng_state[0] : 0;
   const size_t rng_offset = rng_state != nullptr ? rng_state[1] : 0;
-  transformer_engine::curanddx::detail::philox4x32_native_state<10> rng;
+  transformer_engine::curanddx::detail::philox4x32_native_state<NVTE_BUILD_NUM_PHILOX_ROUNDS> rng;
   rng.init(rng_seed, rng_sequence, rng_offset);
   uint4 random_uint4 = USE_STOCHASTIC_ROUNDING ? rng.generate4() : uint4{0, 0, 0, 0};
   // Index of the random number. It increments each time when used and resets to 0 if reaches 4x
@@ -647,7 +647,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
       threadIdx.x + blockIdx.x * THREADS_NUM + blockIdx.y * gridDim.x * THREADS_NUM;
   const size_t rng_seed = rng_state != nullptr ? rng_state[0] : 0;
   const size_t rng_offset = rng_state != nullptr ? rng_state[1] : 0;
-  transformer_engine::curanddx::detail::philox4x32_native_state<10> rng;
+  transformer_engine::curanddx::detail::philox4x32_native_state<NVTE_BUILD_NUM_PHILOX_ROUNDS> rng;
   rng.init(rng_seed, rng_sequence, rng_offset);
   uint4 random_uint4 = USE_STOCHASTIC_ROUNDING ? rng.generate4() : uint4{0, 0, 0, 0};
   int rnd_idx =
@@ -1168,10 +1168,10 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
   // TODO(Frank): Is there a better way to do this?
   bool return_transpose = output->has_columnwise_data();
 
-  // if (!use_2d_quantization && (input.dtype() == DType::kBFloat16)) {
-  //   quantize_transpose_tuned_1D(input, noop, output, quant_config, stream);
-  //   return;
-  // }
+  if (!use_2d_quantization && (input.dtype() == DType::kBFloat16)) {
+    quantize_transpose_tuned_1D(input, noop, output, quant_config, stream);
+    return;
+  }
 
   constexpr bool COMPUTE_ACTIVATIONS = false;
   using ParamOP = Empty;

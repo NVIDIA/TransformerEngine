@@ -11,6 +11,10 @@ import time
 
 import transformer_engine.jax
 from transformer_engine_jax import get_device_compute_capability
+from transformer_engine.jax.version_utils import (
+    TRITON_EXTENSION_MIN_JAX_VERSION,
+    is_triton_extension_supported,
+)
 
 
 @pytest.fixture(autouse=True, scope="function")
@@ -83,5 +87,28 @@ class TestTimingPlugin:
 
 
 def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "triton: mark test (or test class) as requiring JAX Triton kernel support"
+        f" (JAX >= {TRITON_EXTENSION_MIN_JAX_VERSION})."
+        " Apply per test/class with @pytest.mark.triton so non-Triton tests in the same file run on"
+        " old JAX.",
+    )
     if os.getenv("NVTE_JAX_TEST_TIMING", "0") == "1":
         config.pluginmanager.register(TestTimingPlugin(), "test_timing")
+
+
+def pytest_collection_modifyitems(config, items):
+    """Skip tests marked 'triton' when JAX is too old for Triton kernel dispatch."""
+    if is_triton_extension_supported():
+        return
+    skip_triton = pytest.mark.skip(
+        reason=(
+            f"JAX >= {TRITON_EXTENSION_MIN_JAX_VERSION} required for Triton kernel support. "
+            "Triton kernel dispatch segfaults with older jaxlib. "
+            "Upgrade with: pip install --upgrade jax jaxlib"
+        )
+    )
+    for item in items:
+        if item.get_closest_marker("triton"):
+            item.add_marker(skip_triton)

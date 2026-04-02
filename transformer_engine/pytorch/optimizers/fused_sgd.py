@@ -123,7 +123,7 @@ class FusedSGD(Optimizer):
         self.set_grad_none = set_grad_none
         if self.set_grad_none is not None:
             warnings.warn(
-                "set_grad_none kwarg in FusedAdam constructor is deprecated. "
+                "set_grad_none kwarg in FusedSGD constructor is deprecated. "
                 "Use set_to_none kwarg in zero_grad instead.",
                 DeprecationWarning,
             )
@@ -147,7 +147,7 @@ class FusedSGD(Optimizer):
             if set_to_none is not None and set_to_none != self.set_grad_none:
                 raise ValueError(
                     f"Called zero_grad with set_to_none={set_to_none}, "
-                    f"but FusedAdam was initialized with set_grad_none={self.set_grad_none}"
+                    f"but FusedSGD was initialized with set_grad_none={self.set_grad_none}"
                 )
             set_to_none = self.set_grad_none
         if set_to_none is None:

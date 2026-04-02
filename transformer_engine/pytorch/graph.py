@@ -108,6 +108,8 @@ def _make_graphed_callables(
     pool: Optional[Tuple[int, ...]] = None,
     retain_graph_in_backward: bool = False,
     _reuse_graph_input_output_buffers: bool = False,
+    pre_warmup_hook: Optional[Callable] = None,
+    post_warmup_hook: Optional[Callable] = None,
 ) -> SingleOrTuple[Callable]:
     """
     Helper method for `make_graphed_callables`
@@ -137,7 +139,7 @@ def _make_graphed_callables(
     # Check training/inference
     is_training = all(c.training for c in callables)
     if not is_training and any(c.training for c in callables):
-        assert False, (
+        raise RuntimeError(
             "make_graphed_callables only supports when modules are all in training or all in"
             " inference mode."
         )
@@ -146,8 +148,16 @@ def _make_graphed_callables(
     _order_without_wgrad = None
     delay_wgrad_compute = False
     if _order is None:
-        assert len(sample_args) == len(callables)
-        assert len(sample_kwargs) == len(callables)
+        if len(sample_args) != len(callables):
+            raise ValueError(
+                "Expected sample_args to have the same length as callables, "
+                f"but got {len(sample_args)} sample_args for {len(callables)} callables"
+            )
+        if len(sample_kwargs) != len(callables):
+            raise ValueError(
+                "Expected sample_kwargs to have the same length as callables, "
+                f"but got {len(sample_kwargs)} sample_kwargs for {len(callables)} callables"
+            )
     else:
         # Custom logic for interleaved pipeline parallelism
         # Note: This is tightly coupled with the Megatron-core
@@ -171,48 +181,62 @@ def _make_graphed_callables(
             _order_without_wgrad.append(c_id)
         num_model_chunks = max(_order_without_wgrad)
         num_microbatches = len(_order_without_wgrad) // num_model_chunks // 2
-        assert num_model_chunks * num_microbatches * 2 == len(_order_without_wgrad)
+        if num_model_chunks * num_microbatches * 2 != len(_order_without_wgrad):
+            raise ValueError(
+                f"Pipeline-parallel order dimension mismatch: num_model_chunks ({num_model_chunks})"
+                f" * num_microbatches ({num_microbatches}) * 2 ="
+                f" {num_model_chunks * num_microbatches * 2}, but len(_order_without_wgrad) ="
+                f" {len(_order_without_wgrad)}"
+            )
 
         # When delay_wgrad_compute is enabled, each layer is treated as a model chunk, which
         # allows for fine-grained graph capture order.
         if delay_wgrad_compute:
-            assert (
-                _num_layers_per_chunk is not None
-            ), "'_num_layers_per_chunk' must be provided when delay_wgrad_compute is True."
+            if _num_layers_per_chunk is None:
+                raise ValueError(
+                    "'_num_layers_per_chunk' must be provided when delay_wgrad_compute is True."
+                )
             for num_layers in _num_layers_per_chunk:
-                assert (
-                    num_layers == 1
-                ), "Each model chunk must have only one layer when delay_wgrad_compute is True."
+                if num_layers != 1:
+                    raise ValueError(
+                        "Each model chunk must have only one layer when delay_wgrad_compute is"
+                        f" True, but got {num_layers} layers."
+                    )
 
         # Determine number of layers in each model chunk.
         if _num_layers_per_chunk is None:
-            assert len(sample_args) * 2 >= len(_order_without_wgrad) and (
-                len(sample_args) * 2 % len(_order_without_wgrad) == 0
-            ), (
-                f"{len(sample_args)} * 2 >= {len(_order_without_wgrad)} and {len(sample_args)} * 2"
-                f" % {len(_order_without_wgrad)} == 0"
-            )
+            if not (
+                len(sample_args) * 2 >= len(_order_without_wgrad)
+                and (len(sample_args) * 2 % len(_order_without_wgrad) == 0)
+            ):
+                raise ValueError(
+                    f"{len(sample_args)} * 2 >= {len(_order_without_wgrad)} and"
+                    f" {len(sample_args)} * 2 % {len(_order_without_wgrad)} == 0"
+                )
             num_layers = len(sample_args) // num_model_chunks // num_microbatches
             _num_layers_per_chunk = [num_layers] * num_model_chunks
         else:
-            assert (
+            if not (
                 isinstance(_num_layers_per_chunk, int)
                 or len(_num_layers_per_chunk) == num_model_chunks
-            ), (
-                "If _num_layers_per_chunk is provided, it must be an integer or a list of"
-                f" {num_model_chunks} integers, but got {_num_layers_per_chunk}."
-            )
+            ):
+                raise ValueError(
+                    "If _num_layers_per_chunk is provided, it must be an integer or a list of"
+                    f" {num_model_chunks} integers, but got {_num_layers_per_chunk}."
+                )
             if isinstance(_num_layers_per_chunk, int):
                 _num_layers_per_chunk = [_num_layers_per_chunk] * num_model_chunks
         total_num_layers = sum(_num_layers_per_chunk)
-        assert len(callables) == total_num_layers, (
-            f"Callables should have ({total_num_layers}) "
-            + f"entries when order input is provided but got {len(callables)}."
-        )
-        assert len(sample_args) == total_num_layers * num_microbatches, (
-            f"Expected {total_num_layers * num_microbatches} "
-            + f"args tuple, but got {len(sample_args)}."
-        )
+        if len(callables) != total_num_layers:
+            raise ValueError(
+                f"Callables should have ({total_num_layers}) "
+                + f"entries when order input is provided but got {len(callables)}."
+            )
+        if len(sample_args) != total_num_layers * num_microbatches:
+            raise ValueError(
+                f"Expected {total_num_layers * num_microbatches} "
+                + f"args tuple, but got {len(sample_args)}."
+            )
 
         # Calculate the starting index of each chunk in callables for future use.
         _prefix_num_layers = [0]
@@ -220,19 +244,26 @@ def _make_graphed_callables(
             num_layers = _num_layers_per_chunk[m_chunk]
             _prefix_num_layers.append(_prefix_num_layers[-1] + num_layers)
 
-        assert len(sample_kwargs) == len(sample_args)
+        if len(sample_kwargs) != len(sample_args):
+            raise ValueError(
+                "Pipeline-parallel schedule requires sample_kwargs and sample_args to have "
+                f"the same length, but got {len(sample_kwargs)} sample_kwargs "
+                f"for {len(sample_args)} sample_args"
+            )
 
     # Check reuse graph conditions and reorganize sample_args and sample_kwargs.
     # Note: When capturing a graph, we hold onto the args and kwargs so we have static buffers
     # when the graph is replayed. If two model chunk microbatches have no overlap between their
     # forward and backward, then we can reduce memory usage by reusing the same static buffers.
     if _reuse_graph_input_output_buffers:
-        assert (
-            _order is not None
-        ), "`_order` must be provided when `_reuse_graph_input_output_buffers` is True."
-        assert (
-            is_training
-        ), "`_reuse_graph_input_output_buffers` is only available in training mode."
+        if _order is None:
+            raise ValueError(
+                "`_order` must be provided when `_reuse_graph_input_output_buffers` is True."
+            )
+        if not is_training:
+            raise RuntimeError(
+                "`_reuse_graph_input_output_buffers` is only available in training mode."
+            )
         if isinstance(sample_args, tuple):
             sample_args = list(sample_args)
         if isinstance(sample_kwargs, tuple):
@@ -298,20 +329,22 @@ def _make_graphed_callables(
     # Check callables
     for c in callables:
         if isinstance(c, torch.nn.Module):
-            assert (
+            if not (
                 len(c._backward_hooks) == 0
                 and len(c._forward_hooks) == 0
                 and len(c._forward_pre_hooks) == 0
-            ), (
-                "Modules must not have hooks registered at the time they are passed. "
-                + "However, registering hooks on modules after passing them "
-                + "through make_graphed_callables is allowed."
-            )
-            assert all(b.requires_grad is False for b in c.buffers()), (
-                "In any :class:`~torch.nn.Module` passed to "
-                + ":func:`~make_graphed_callables`, only parameters may be trainable. "
-                + "All buffers must have ``requires_grad=False``."
-            )
+            ):
+                raise RuntimeError(
+                    "Modules must not have hooks registered at the time they are passed. "
+                    + "However, registering hooks on modules after passing them "
+                    + "through make_graphed_callables is allowed."
+                )
+            if not all(b.requires_grad is False for b in c.buffers()):
+                raise RuntimeError(
+                    "In any :class:`~torch.nn.Module` passed to "
+                    + ":func:`~make_graphed_callables`, only parameters may be trainable. "
+                    + "All buffers must have ``requires_grad=False``."
+                )
 
     # Flatten callable arguments
     per_callable_kwargs_keys = [list(kwargs.keys()) for kwargs in sample_kwargs]
@@ -320,10 +353,11 @@ def _make_graphed_callables(
         flatten_arg, _ = _tree_flatten(args)
         flatten_kwarg, _ = _tree_flatten([kwargs[key] for key in kwargs_keys])
         flatten_sample_args.append(tuple(flatten_arg + flatten_kwarg))
-        assert all(isinstance(arg, torch.Tensor) for arg in flatten_arg), (
-            "In the beta API, sample_args "
-            + "for each callable must contain only Tensors. Other types are not allowed."
-        )
+        if not all(isinstance(arg, torch.Tensor) for arg in flatten_arg):
+            raise TypeError(
+                "In the beta API, sample_args "
+                + "for each callable must contain only Tensors. Other types are not allowed."
+            )
 
     # If a callable is an nn.Module, its graph's full input surface is the args the user explicitly
     # passes to forward (ie, its sample_args) AND the module's parameter attributes.
@@ -352,7 +386,12 @@ def _make_graphed_callables(
                         )
                         else ()
                     )
-        assert len(per_callable_module_params) == len(flatten_sample_args)
+        if len(per_callable_module_params) != len(flatten_sample_args):
+            raise ValueError(
+                "Pipeline-parallel dimension mismatch: "
+                f"per_callable_module_params has {len(per_callable_module_params)} entries, "
+                f"but flatten_sample_args has {len(flatten_sample_args)} entries"
+            )
         per_callable_static_input_surfaces = [
             flatten_sample_args[i] + per_callable_module_params[i]
             for i in range(len(flatten_sample_args))
@@ -398,12 +437,12 @@ def _make_graphed_callables(
                     warmup_func_idx.append(func_idx)
                     warmup_func.append(func)
                 fwd_idx[m_chunk] += 1
-    assert len(warmup_func) == len(
-        sample_args
-    ), f"Warmup runs {len(warmup_func)} don't match args {len(sample_args)}."
-    assert len(warmup_func_idx) == len(
-        set(warmup_func_idx)
-    ), f"Warmup runs {len(warmup_func)} but only {len(set(warmup_func_idx))} are unique."
+    if len(warmup_func) != len(sample_args):
+        raise ValueError(f"Warmup runs {len(warmup_func)} don't match args {len(sample_args)}.")
+    if len(warmup_func_idx) != len(set(warmup_func_idx)):
+        raise RuntimeError(
+            f"Warmup runs {len(warmup_func)} but only {len(set(warmup_func_idx))} are unique."
+        )
 
     # Filter the TE modules that cudagraph can access.
     visited_te_modules = {}
@@ -427,9 +466,10 @@ def _make_graphed_callables(
                     modules.add(module)
                 # If forward is called on a te.ops.Sequential it is not called on its constituent ops
                 elif isinstance(module, Sequential):
-                    assert (
-                        module._module_groups is not None
-                    ), "Should have been initialized by warmup"
+                    if module._module_groups is None:
+                        raise RuntimeError(
+                            "module._module_groups should have been initialized by warmup"
+                        )
                     for module_group in module._module_groups:
                         if isinstance(module_group, OperationFuser):
                             for basic_op in module_group._basic_ops:
@@ -440,6 +480,8 @@ def _make_graphed_callables(
                     else:
                         visited_te_modules[func_idx].update(modules)
 
+            if pre_warmup_hook is not None:
+                pre_warmup_hook()
             for warmup_iter in range(num_warmup_iters):
                 hooks = []
                 for module in func.modules():
@@ -451,11 +493,12 @@ def _make_graphed_callables(
                 if is_training:
                     inputs = tuple(i for i in static_input_surface if i.requires_grad)
                     with _none_grad_context_wrapper(inputs):
+                        outputs_requiring_grad = tuple(
+                            o for o in outputs if o is not None and o.requires_grad
+                        )
                         torch.autograd.backward(
-                            tuple(o for o in outputs if o.requires_grad),
-                            grad_tensors=tuple(
-                                torch.empty_like(o) for o in outputs if o.requires_grad
-                            ),
+                            outputs_requiring_grad,
+                            grad_tensors=tuple(torch.empty_like(o) for o in outputs_requiring_grad),
                         )
                         grad_inputs = tuple(input.grad for input in inputs)
 
@@ -475,20 +518,22 @@ def _make_graphed_callables(
                             grad_inputs[grad_inputs_idx] is None
                             and grad_inputs_idx < num_required_grad_sample_args
                         ):
-                            assert allow_unused_input, (
-                                "The input tensor requires grad, but the grad is None after"
-                                " backward pass."
-                            )
+                            if not allow_unused_input:
+                                raise RuntimeError(
+                                    "The input tensor requires grad, but the grad is None after"
+                                    " backward pass."
+                                )
                         elif (
                             grad_inputs[grad_inputs_idx] is not None
                             and grad_inputs_idx >= num_required_grad_sample_args
                         ):
                             module_params_with_grad.append(static_input_surface[inputs_idx])
                     if len(module_params_with_grad) != len(per_callable_module_params[func_idx]):
-                        assert warmup_iter == 0, (
-                            "no-grad params should only be used as inputs in the first warmup"
-                            " iteration"
-                        )
+                        if warmup_iter != 0:
+                            raise RuntimeError(
+                                "no-grad params should only be used as inputs in the first warmup"
+                                f" iteration, but found in iteration {warmup_iter}"
+                            )
                         per_callable_module_params[func_idx] = tuple(module_params_with_grad)
                         static_input_surface = flatten_sample_args[func_idx] + tuple(
                             module_params_with_grad
@@ -506,11 +551,8 @@ def _make_graphed_callables(
                 else:
                     grad_inputs = None
                 del outputs, grad_inputs
-            # The following code is added specifically for MCore's special requirements,
-            # aimed at preventing warmup from altering the control flow.
-            for module in func.modules():
-                if hasattr(module, "is_first_microbatch"):
-                    module.is_first_microbatch = True
+            if post_warmup_hook is not None:
+                post_warmup_hook()
     torch.cuda.synchronize()
 
     # All captures here share a mempool. To avoid replays corrupting each other's memory,
@@ -529,7 +571,10 @@ def _make_graphed_callables(
         previous_chunk_last_callable_bwd_idx = None
         for i, c_id in enumerate(_order):
             if c_id > 0:
-                assert isinstance(c_id, int), "Forward order value must be an integer."
+                if not isinstance(c_id, int):
+                    raise TypeError(
+                        f"Forward order value must be an integer, but got {type(c_id).__name__}."
+                    )
                 # Capture forward graph for model chunk c_id, microbatch fwd_idx[c_id-1]
                 m_chunk = c_id - 1
                 for l_no in range(_num_layers_per_chunk[m_chunk]):
@@ -581,23 +626,27 @@ def _make_graphed_callables(
                                     break
                             if wgrad_validation_list[i] is None:
                                 wgrad_validation_list[i] = False
-                            assert wgrad_validation_list[i], (
-                                f"Number of wgrad graph({num_wgrad_c_id}) doesn't match number "
-                                f"of dgrad graphs ({len(same_bwd_c_id_list)}) for chunk {c_id}."
-                            )
+                            if not wgrad_validation_list[i]:
+                                raise RuntimeError(
+                                    f"Number of wgrad graph({num_wgrad_c_id}) doesn't match number "
+                                    f"of dgrad graphs ({len(same_bwd_c_id_list)}) for chunk {c_id}."
+                                )
                     elif ceil(c_id) != c_id:
                         per_callable_bwd_idx -= _num_layers_per_chunk[m_chunk]
-                        assert is_training, "Only training mode supports backward_dw."
+                        if not is_training:
+                            raise RuntimeError("Only training mode supports backward_dw.")
                         # If no one module needs the backward_dw, the bwd_dw_graph will be empty.
                         # So skip capturing it. For backward_dw, the order value is c_id - 0.5 to indicate
                         # the specific order of backward_dw.
-                        assert ceil(c_id) - c_id == 0.5, (
-                            "The order diff of wgrad and dgrad must be 0.5, "
-                            f"get {ceil(c_id) - c_id}."
-                        )
-                        assert need_bwd_dw_graph[
-                            per_callable_bwd_idx
-                        ], "No module needs wgrad computation but get float in order"
+                        if ceil(c_id) - c_id != 0.5:
+                            raise ValueError(
+                                "The order diff of wgrad and dgrad must be 0.5, "
+                                f"get {ceil(c_id) - c_id}."
+                            )
+                        if not need_bwd_dw_graph[per_callable_bwd_idx]:
+                            raise RuntimeError(
+                                "No module needs wgrad computation but get float in order"
+                            )
                         bwd_dw_graph = bwd_dw_graphs[per_callable_bwd_idx]
                         with _graph_context_wrapper(bwd_dw_graph, pool=mempool):
                             for module in visited_te_modules[per_callable_bwd_idx]:
@@ -616,19 +665,22 @@ def _make_graphed_callables(
                         # Note for _reuse_graph_input_output_buffers: grad output is only used
                         # within backward, so we can reuse the same static buffers every time.
                         static_grad_outputs_keys = tuple(
-                            (o.shape, o.dtype, o.layout) for o in static_outputs if o.requires_grad
+                            (o.shape, o.dtype, o.layout)
+                            for o in static_outputs
+                            if o is not None and o.requires_grad
                         )
                         if static_grad_outputs_keys in static_grad_outputs_dict:
                             static_grad_outputs = static_grad_outputs_dict[static_grad_outputs_keys]
                         else:
                             static_grad_outputs = tuple(
-                                torch.empty_like(o) if o.requires_grad else None
+                                torch.empty_like(o) if o is not None and o.requires_grad else None
                                 for o in static_outputs
                             )
                             static_grad_outputs_dict[static_grad_outputs_keys] = static_grad_outputs
                     else:
                         static_grad_outputs = tuple(
-                            torch.empty_like(o) if o.requires_grad else None for o in static_outputs
+                            torch.empty_like(o) if o is not None and o.requires_grad else None
+                            for o in static_outputs
                         )
                     if is_training:
                         inputs = tuple(i for i in static_input_surface if i.requires_grad)
@@ -636,7 +688,9 @@ def _make_graphed_callables(
                             bwd_graph, pool=mempool
                         ):
                             torch.autograd.backward(
-                                tuple(o for o in static_outputs if o.requires_grad),
+                                tuple(
+                                    o for o in static_outputs if o is not None and o.requires_grad
+                                ),
                                 grad_tensors=tuple(o for o in static_grad_outputs if o is not None),
                                 retain_graph=retain_graph_in_backward,
                             )
@@ -719,7 +773,8 @@ def _make_graphed_callables(
         ):
             # For now, assumes all static_outputs require grad
             static_grad_outputs = tuple(
-                torch.empty_like(o) if o.requires_grad else None for o in static_outputs
+                torch.empty_like(o) if o is not None and o.requires_grad else None
+                for o in static_outputs
             )
             if is_training:
                 inputs = tuple(i for i in static_input_surface if i.requires_grad)
@@ -727,7 +782,7 @@ def _make_graphed_callables(
                     bwd_graph, pool=mempool
                 ):
                     torch.autograd.backward(
-                        tuple(o for o in static_outputs if o.requires_grad),
+                        tuple(o for o in static_outputs if o is not None and o.requires_grad),
                         grad_tensors=tuple(o for o in static_grad_outputs if o is not None),
                         retain_graph=retain_graph_in_backward,
                     )
@@ -775,14 +830,15 @@ def _make_graphed_callables(
             """Autograd function for graph replay."""
 
             @staticmethod
-            def forward(ctx, skip_fp8_weight_update, *inputs):
+            def forward(ctx, skip_fp8_weight_update, cuda_graph_stream, cuda_graph_event, *inputs):
                 # pylint: disable=missing-function-docstring
 
                 # Set flag for whether to update FP8 weight updates
                 ctx.is_first_module = FP8GlobalStateManager.is_first_fp8_module()
                 if ctx.is_first_module and skip_fp8_weight_update is not None:
                     FP8GlobalStateManager.set_skip_fp8_weight_update_tensor(skip_fp8_weight_update)
-
+                ctx.cuda_graph_stream = cuda_graph_stream
+                ctx.cuda_graph_event = cuda_graph_event
                 # Copy values from new tensors into static tensors
                 for i in range(len_user_args):
                     if (
@@ -792,9 +848,22 @@ def _make_graphed_callables(
                         static_input_surface[i].copy_(inputs[i])
 
                 # Replay forward graph
-                fwd_graph.replay()
-                assert isinstance(static_outputs, tuple)
-                return tuple(o.detach() for o in static_outputs)
+                if cuda_graph_stream != torch.cuda.current_stream():
+                    cuda_graph_stream.wait_stream(torch.cuda.current_stream())
+                    with cuda_graph_stream:
+                        fwd_graph.replay()
+                    if cuda_graph_event is not None:
+                        torch.cuda.current_stream().wait_event(cuda_graph_event)
+                    else:
+                        torch.cuda.current_stream().wait_stream(cuda_graph_stream)
+                else:
+                    fwd_graph.replay()
+                if not isinstance(static_outputs, tuple):
+                    raise TypeError(
+                        "Expected static_outputs to be a tuple, but got"
+                        f" {type(static_outputs).__name__}"
+                    )
+                return tuple(o.detach() if o is not None else o for o in static_outputs)
 
             @staticmethod
             @torch.autograd.function.once_differentiable
@@ -802,22 +871,40 @@ def _make_graphed_callables(
                 # pylint: disable=missing-function-docstring
 
                 # Replay backward graph
-                assert len(grads) == len(static_grad_outputs)
+                if len(grads) != len(static_grad_outputs):
+                    raise ValueError(
+                        "Backward graph grad dimension mismatch: "
+                        f"received {len(grads)} grads, "
+                        f"but expected {len(static_grad_outputs)} static_grad_outputs"
+                    )
                 for g, grad in zip(static_grad_outputs, grads):
                     if g is not None:
                         # don't copy if autograd gods have been kind and the
                         # incoming grad is already in the right place
                         if g.data_ptr() != grad.data_ptr():
                             g.copy_(grad)
-                bwd_graph.replay()
+                if ctx.cuda_graph_stream != torch.cuda.current_stream():
+                    ctx.cuda_graph_stream.wait_stream(torch.cuda.current_stream())
+                    with ctx.cuda_graph_stream:
+                        bwd_graph.replay()
+                    if ctx.cuda_graph_event is not None:
+                        torch.cuda.current_stream().wait_event(ctx.cuda_graph_event)
+                    else:
+                        torch.cuda.current_stream().wait_stream(ctx.cuda_graph_stream)
+                else:
+                    bwd_graph.replay()
 
                 # Update FP8 scale factors if needed
                 if ctx.is_first_module:
                     FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
 
                 # Input args that didn't require grad expect a None gradient.
-                assert isinstance(static_grad_inputs, tuple)
-                return (None,) + tuple(
+                if not isinstance(static_grad_inputs, tuple):
+                    raise TypeError(
+                        "Expected static_grad_inputs to be a tuple, but got"
+                        f" {type(static_grad_inputs).__name__}"
+                    )
+                return (None, None, None) + tuple(
                     b.detach() if b is not None else b for b in static_grad_inputs
                 )
 
@@ -826,12 +913,33 @@ def _make_graphed_callables(
             # Decide whether to update FP8 weights
             skip_fp8_weight_update = None
             if cache_quantized_params:
-                assert "is_first_microbatch" in user_kwargs and isinstance(
+                if "is_first_microbatch" not in user_kwargs or not isinstance(
                     user_kwargs["is_first_microbatch"], bool
-                ), "`is_first_microbatch` boolean kwarg must be provided for FP8 weight caching."
+                ):
+                    raise ValueError(
+                        "`is_first_microbatch` boolean kwarg must be provided for FP8 weight"
+                        " caching."
+                    )
 
                 skip_fp8_weight_update = not user_kwargs["is_first_microbatch"]
 
+            # The cuda_graph_stream and cuda_graph_event are used in the TE CUDA graph replay.
+            # When replaying the graph in the cuda graph stream, the graph replay could overlap
+            # with the work on main stream.
+            # When cuda_graph_event is given, it should be an external event recorded
+            # in the cuda graph and is used to sync-back to the main stream.
+            # If cuda_graph_event is not given, it will be None and the graph replay will block
+            # the main stream until it is finished.
+            if "cuda_graph_stream" in user_kwargs:
+                cuda_graph_stream = user_kwargs["cuda_graph_stream"]
+                user_kwargs.pop("cuda_graph_stream")
+            else:
+                cuda_graph_stream = torch.cuda.current_stream()
+            if "cuda_graph_event" in user_kwargs:
+                cuda_graph_event = user_kwargs["cuda_graph_event"]
+                user_kwargs.pop("cuda_graph_event")
+            else:
+                cuda_graph_event = None
             # Check that required kwargs are provided
             for key in kwargs_keys:
                 if key not in user_kwargs:
@@ -847,17 +955,29 @@ def _make_graphed_callables(
             flatten_user_args, _ = _tree_flatten(user_args)
             flatten_user_kwargs, _ = _tree_flatten([user_kwargs[key] for key in kwargs_keys])
             func_args = tuple(flatten_user_args) + tuple(flatten_user_kwargs) + module_params
-            out = Graphed.apply(skip_fp8_weight_update, *func_args)
+            out = Graphed.apply(
+                skip_fp8_weight_update, cuda_graph_stream, cuda_graph_event, *func_args
+            )
             return _tree_unflatten(out, output_unflatten_spec)
 
         return functionalized
 
     def make_graphed_attribute_functions(graph_idx):
+        # Get te modules for current graph
+        te_modules = visited_te_modules.get(graph_idx, set())
 
         # Attach backward_dw as an attribute to the graphed callable.
         def backward_dw():
             if need_bwd_dw_graph.get(graph_idx, False):
                 bwd_dw_graphs[graph_idx].replay()
+
+                # Trigger the grad accumulation hook for wgrad graphs.
+                for module in te_modules:
+                    if (
+                        isinstance(module, TransformerEngineBaseModule)
+                        and module.need_backward_dw()
+                    ):
+                        module._trigger_wgrad_accumulation_and_reduce_hooks()
 
         # Attach reset as an attribute to the graphed callable.
         def reset():
@@ -1023,6 +1143,8 @@ def make_graphed_callables(
     pool: Optional[Tuple[int, ...]] = None,
     retain_graph_in_backward: bool = False,
     _reuse_graph_input_output_buffers: bool = False,
+    pre_warmup_hook: Optional[Callable] = None,
+    post_warmup_hook: Optional[Callable] = None,
 ) -> Union[Callable, Tuple[Callable, ...]]:
     """
     Make CUDA graph version of Transformer Engine modules
@@ -1061,6 +1183,10 @@ def make_graphed_callables(
         graphs. Only supported with Mcore interleaved pipeline parallelism, i.e.
         when `_order` is provided. All callables in `modules` are assumed to have
         inputs and outputs with the same dtype and shape.
+    pre_warmup_hook: callable, default = None
+                      A hook function that will be called before the warmup iterations.
+    post_warmup_hook: callable, default = None
+                      A hook function that will be called after the warmup iterations.
 
     Quantization parameters
     -----------------------
@@ -1175,12 +1301,16 @@ def make_graphed_callables(
         modules = (modules,)
 
     if not isinstance(enabled, tuple):
-        assert isinstance(enabled, bool), "enabled must be a bool or a tuple of bools"
+        if not isinstance(enabled, bool):
+            raise TypeError(
+                f"enabled must be a bool or a tuple of bools, but got {type(enabled).__name__}"
+            )
         enabled = (enabled,) * len(modules)
     else:
-        assert len(enabled) == len(
-            modules
-        ), f"enabled length ({len(enabled)}) must match modules length ({len(modules)})"
+        if len(enabled) != len(modules):
+            raise ValueError(
+                f"enabled length ({len(enabled)}) must match modules length ({len(modules)})"
+            )
     if any(enabled) and recipe is None:
         recipe = get_default_fp8_recipe()
     elif not any(enabled):
@@ -1216,7 +1346,8 @@ def make_graphed_callables(
 
     forward_funcs = []
     for module in modules:
-        assert isinstance(module, torch.nn.Module), f"Graphing for {type(module)} is not supported."
+        if not isinstance(module, torch.nn.Module):
+            raise TypeError(f"Graphing for {type(module)} is not supported.")
         wrap_autocast(module)
         forward_funcs.append(module)
 
@@ -1247,6 +1378,8 @@ def make_graphed_callables(
         pool=pool,
         retain_graph_in_backward=retain_graph_in_backward,
         _reuse_graph_input_output_buffers=_reuse_graph_input_output_buffers,
+        pre_warmup_hook=pre_warmup_hook,
+        post_warmup_hook=post_warmup_hook,
     )
 
     # Ensures warmup does not affect numerics for ops such as dropout.

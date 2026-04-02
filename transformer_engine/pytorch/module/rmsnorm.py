@@ -4,7 +4,7 @@
 
 """RMSNorm API"""
 import warnings
-from typing import Iterable, Optional, Union
+from typing import Any, Iterable, Optional, Union
 
 import torch
 
@@ -105,6 +105,10 @@ class RMSNorm(_RMSNormOp):
             zero_centered_gamma=zero_centered_gamma,
             **kwargs,
         )
+
+    def fast_setattr(self, name: str, value: Any) -> None:
+        """Fast attribute set for non-parameter fields."""
+        self.__dict__[name] = value
 
     def reset_rms_norm_parameters(self) -> None:
         """Deprecated"""

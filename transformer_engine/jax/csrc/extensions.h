@@ -45,6 +45,42 @@ struct ActivationConfig {
   ClampedSwigluConfig clamped_swiglu;
 };
 
+struct GemmConfig {
+  JAXX_Scaling_Mode scaling_mode;
+  JAXX_Collective_Op collective_op;
+  int64_t lhs_axis_boundary;
+  int64_t rhs_axis_boundary;
+  bool lhs_transposed;
+  bool rhs_transposed;
+  bool use_split_accumulator;
+};
+
+struct GroupedGemmV2Config {
+  bool lhs_is_trans;
+  bool rhs_is_trans;
+  JAXX_Scaling_Mode scaling_mode;
+  int64_t lhs_axis_boundary;
+  int64_t rhs_axis_boundary;
+  int64_t lhs_left_size;
+  int64_t lhs_right_size;
+  int64_t rhs_left_size;
+  int64_t rhs_right_size;
+};
+
+struct GroupedGemmConfig {
+  bool lhs_is_trans;
+  bool rhs_is_trans;
+  JAXX_Scaling_Mode scaling_mode;
+  bool has_bias;
+  bool use_async_d2h_group_sizes;
+  int64_t lhs_axis_boundary;
+  int64_t rhs_axis_boundary;
+  int64_t lhs_left_size;
+  int64_t lhs_right_size;
+  int64_t rhs_left_size;
+  int64_t rhs_right_size;
+};
+
 inline bool use_fp8(DType type) { return type == DType::kFloat8E4M3 || type == DType::kFloat8E5M2; }
 
 // Activation
@@ -133,21 +169,33 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
 
 // GEMM
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GemmHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(GemmV2Handler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(CollectiveGemmInitHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(GemmInitV2Handler);
 
 // Grouped GEMM
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedGemmD2HGroupSizesHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedGemmHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedGemmV2Handler);
 
 // Amax
 XLA_FFI_DECLARE_HANDLER_SYMBOL(RHTAmaxCalculationInitializeHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(RHTAmaxCalculationHandler);
+
+// Inspect
+XLA_FFI_DECLARE_HANDLER_SYMBOL(InspectHandler);
 
 // Cudnn helpers
 XLA_FFI_DECLARE_HANDLER_SYMBOL(CudnnHandleInitHandler);
 
 // CuBLAS helpers
 XLA_FFI_DECLARE_HANDLER_SYMBOL(CublasHandleInitHandler);
+
+// Router
+XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedTopkWithScoreFunctionForwardHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedTopkWithScoreFunctionBackwardHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedMoEAuxLossForwardHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedMoEAuxLossBackwardHandler);
 
 }  // namespace jax
 }  // namespace transformer_engine
@@ -160,8 +208,43 @@ XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(
     transformer_engine::jax::ActivationConfig,
     ::xla::ffi::StructMember<transformer_engine::jax::ClampedSwigluConfig>("clamped_swiglu"));
 
+XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(
+    transformer_engine::jax::GemmConfig,
+    ::xla::ffi::StructMember<transformer_engine::jax::JAXX_Scaling_Mode>("scaling_mode"),
+    ::xla::ffi::StructMember<transformer_engine::jax::JAXX_Collective_Op>("collective_op"),
+    ::xla::ffi::StructMember<int64_t>("lhs_axis_boundary"),
+    ::xla::ffi::StructMember<int64_t>("rhs_axis_boundary"),
+    ::xla::ffi::StructMember<bool>("lhs_transposed"),
+    ::xla::ffi::StructMember<bool>("rhs_transposed"),
+    ::xla::ffi::StructMember<bool>("use_split_accumulator"));
+
+XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(
+    transformer_engine::jax::GroupedGemmV2Config, ::xla::ffi::StructMember<bool>("lhs_is_trans"),
+    ::xla::ffi::StructMember<bool>("rhs_is_trans"),
+    ::xla::ffi::StructMember<transformer_engine::jax::JAXX_Scaling_Mode>("scaling_mode"),
+    ::xla::ffi::StructMember<int64_t>("lhs_axis_boundary"),
+    ::xla::ffi::StructMember<int64_t>("rhs_axis_boundary"),
+    ::xla::ffi::StructMember<int64_t>("lhs_left_size"),
+    ::xla::ffi::StructMember<int64_t>("lhs_right_size"),
+    ::xla::ffi::StructMember<int64_t>("rhs_left_size"),
+    ::xla::ffi::StructMember<int64_t>("rhs_right_size"));
+
+XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(
+    transformer_engine::jax::GroupedGemmConfig, ::xla::ffi::StructMember<bool>("lhs_is_trans"),
+    ::xla::ffi::StructMember<bool>("rhs_is_trans"),
+    ::xla::ffi::StructMember<transformer_engine::jax::JAXX_Scaling_Mode>("scaling_mode"),
+    ::xla::ffi::StructMember<bool>("has_bias"),
+    ::xla::ffi::StructMember<bool>("use_async_d2h_group_sizes"),
+    ::xla::ffi::StructMember<int64_t>("lhs_axis_boundary"),
+    ::xla::ffi::StructMember<int64_t>("rhs_axis_boundary"),
+    ::xla::ffi::StructMember<int64_t>("lhs_left_size"),
+    ::xla::ffi::StructMember<int64_t>("lhs_right_size"),
+    ::xla::ffi::StructMember<int64_t>("rhs_left_size"),
+    ::xla::ffi::StructMember<int64_t>("rhs_right_size"));
+
 // ENUM_ATTR and DICT_ATTR recoding need to be registered in the global namespace
 XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Scaling_Mode);
+XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Score_Function);
 XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Collective_Op);
 XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Quantize_Layout);
 

@@ -36,6 +36,7 @@ from transformer_engine.jax.quantize import (
     ScaledTensor1x,
     ScaledTensor2x,
     GroupedScaledTensor1x,
+    GroupedNoScaleTensor,
     ScalingMode,
     QuantizerFactory,
     QuantizeLayout,
@@ -150,8 +151,13 @@ def assert_dequantized_grouped_scaled_tensor(
     a: Union[GroupedScaledTensor1x, ScaledTensor2x], b: jnp.ndarray
 ):
     if isinstance(a, GroupedScaledTensor1x):
-        assert a.group_sizes.sum() == b.shape[0]
-        b = jnp.split(b, jnp.cumulative_sum(a.group_sizes)[:-1], axis=0)
+        group_sizes = (
+            a.first_dims
+            if a.first_dims is not None
+            else jnp.ones(a.original_shape[0], dtype=jnp.int32)
+        )
+        assert group_sizes.sum() == b.shape[0]
+        b = jnp.split(b, jnp.cumulative_sum(group_sizes)[:-1], axis=0)
         dq_a = a.dequantize()
         for dq_a_i, b_i in zip(dq_a, b):
             if len(dq_a_i) == 0:
@@ -1787,13 +1793,18 @@ class TestGroupedDense:
         ref_out = self._ref_grouped_dense(lhs, rhs, None, group_sizes, contracting_dims)
 
         # jitting grouped_gemm
+        lhs_tensor = GroupedNoScaleTensor(
+            data=lhs, amax=None, first_dims=group_sizes, last_dims=None, original_shape=lhs.shape
+        )
+        rhs_tensor = GroupedNoScaleTensor(
+            data=rhs, amax=None, first_dims=None, last_dims=None, original_shape=rhs.shape
+        )
         prim_out = jax.jit(
             tex.grouped_gemm, static_argnames=("contracting_dims", "use_async_d2h_group_sizes")
         )(
-            lhs,
-            rhs,
-            group_sizes,
-            contracting_dims,
+            lhs_tensor,
+            rhs_tensor,
+            contracting_dims=contracting_dims,
             use_async_d2h_group_sizes=True,
         )
 
@@ -1825,8 +1836,17 @@ class TestGroupedDense:
         )
         ref_out = self._ref_grouped_dense(lhs, rhs, None, group_sizes, contracting_dims)
 
+        lhs_tensor = GroupedNoScaleTensor(
+            data=lhs, amax=None, first_dims=group_sizes, last_dims=None, original_shape=lhs.shape
+        )
+        rhs_tensor = GroupedNoScaleTensor(
+            data=rhs, amax=None, first_dims=None, last_dims=None, original_shape=rhs.shape
+        )
         prim_out = jax.jit(tex.grouped_gemm, static_argnames=("contracting_dims",))(
-            lhs, rhs, group_sizes, contracting_dims, quantizer_set=quantizer_set
+            lhs_tensor,
+            rhs_tensor,
+            contracting_dims=contracting_dims,
+            quantizer_set=quantizer_set,
         )
 
         allclose_dtype = jnp.float8_e4m3fn
@@ -1921,3 +1941,37 @@ class TestGroupedDense:
         assert_allclose(prim_dgrad, ref_dgrad, dtype=bwd_dtype)
         assert_allclose(prim_wgrad, ref_wgrad, dtype=bwd_dtype)
         assert_allclose(prim_dbias, ref_dbias, dtype=dtype)
+
+
+class TestDebugInspectFFI:
+
+    @pytest_parametrize_wrapper("shape", [(256, 128)])
+    @pytest_parametrize_wrapper(
+        "dtype",
+        [
+            jnp.float32,
+            jnp.bfloat16,
+            jnp.float16,
+            # Note: fp4 currently doesn't work
+            # jnp.float4_e2m1fn
+        ]
+        + ([jnp.float8_e4m3fn, jnp.float8_e5m2] if is_fp8_supported else []),
+    )
+    def test_debug_inspect_ffi(self, shape, dtype):
+        from transformer_engine.jax.debug.experimental import inspect_array, load_array_dump
+
+        def f(x):
+            x = x + 1
+            x = inspect_array(x, "my_array")
+            x = x + 1
+            return x
+
+        key = jax.random.PRNGKey(0)
+        x = jax.random.uniform(key, shape, jnp.float32)
+        x = x.astype(dtype)
+        _ = jax.jit(f)(x)
+
+        expected = x + 1
+        actual = load_array_dump("my_tensor_gpu0.bin", shape, dtype)
+
+        assert_allclose(actual, expected, dtype=dtype)

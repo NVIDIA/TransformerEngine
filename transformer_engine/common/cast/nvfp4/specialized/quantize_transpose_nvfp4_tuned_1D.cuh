@@ -142,7 +142,8 @@ using OType2x3D = fp4e2m1x2[BUFFS_NUM_OUT][BUFF_OUT_DIM_Y][BUFF_OUT_DIM_X];
 using OType2xt3D = fp4e2m1x2[BUFFS_NUM_OUT_TR][BUFF_OUT_TR_DIM_Y][BUFF_OUT_TR_DIM_X];
 using ScalesType2D = nvfp4_scale_t[TunableConfig::CHUNK_DIM_Y][SCALES_PER_CHUNK_X];
 using ScalesTypeTr2D = nvfp4_scale_t[TunableConfig::CHUNK_DIM_X][SCALES_PER_CHUNK_Y];
-using RNG_t = typename transformer_engine::curanddx::detail::philox4x32_native_state<10>;
+using RNG_t = typename transformer_engine::curanddx::detail::philox4x32_native_state<
+    NVTE_BUILD_NUM_PHILOX_ROUNDS>;
 
 template <bool USE_FAST_MATH>
 struct SCALING_COEFFICIENT_TYPE {};
@@ -163,9 +164,24 @@ __device__ __forceinline__ float get_amax_of_pair(const IType2 pair) {
 template <typename SF_TYPE>
 __device__ __forceinline__ SF_TYPE
 compute_nvfp4_scaling_coefficient(const nvfp4_scale_t S_dec_block, const float S_enc) {
-  constexpr float float_max = detail::TypeExtrema<SF_TYPE>::max;
-  const float scale_rcp = fminf(S_enc / static_cast<float>(S_dec_block), float_max);
-  return static_cast<SF_TYPE>(scale_rcp);
+  NVTE_DEVICE_ERROR("Unsupported scaling-factor type. Only FP32 and BF16 are supported.");
+}
+
+template <>
+__device__ __forceinline__ float compute_nvfp4_scaling_coefficient<float>(
+    const nvfp4_scale_t S_dec_block, const float S_enc) {
+  const float S_dec = 1.0f / S_enc;
+  const float scale_rcp =
+      fminf(1.0f / (static_cast<float>(S_dec_block) * S_dec), detail::TypeExtrema<float>::max);
+  return scale_rcp;
+}
+
+template <>
+__device__ __forceinline__ bf16
+compute_nvfp4_scaling_coefficient<bf16>(const nvfp4_scale_t S_dec_block, const float S_enc) {
+  const float scale_rcp =
+      fminf(S_enc / (static_cast<float>(S_dec_block)), detail::TypeExtrema<bf16>::max);
+  return static_cast<bf16>(scale_rcp);
 }
 
 template <bool USE_STOCHASTIC_ROUNDING, bool USE_FAST_MATH>
