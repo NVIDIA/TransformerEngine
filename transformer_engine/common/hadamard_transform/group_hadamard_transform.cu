@@ -66,9 +66,8 @@ __device__ __forceinline__ void ComputeKernel(uint32_t b_frag_i[4], uint32_t b_f
   if (kReturnTransposedAmax) {
     if (!kReturnIdentityAmax) {
       ldmatrix_x4_m8n8_shared_b16<true>(a_frag[0], a_frag[1], a_frag[2], a_frag[3],
-                                         reinterpret_cast<uint4*>(in_sh_ptr) + swizzle_idx);
-    }
-    else {
+                                        reinterpret_cast<uint4*>(in_sh_ptr) + swizzle_idx);
+    } else {
       matrix_transpose_m8_n8_b16_inplace(a_frag[0]);
       matrix_transpose_m8_n8_b16_inplace(a_frag[1]);
       matrix_transpose_m8_n8_b16_inplace(a_frag[2]);
@@ -76,11 +75,11 @@ __device__ __forceinline__ void ComputeKernel(uint32_t b_frag_i[4], uint32_t b_f
     }
 
     mma_m16_n16_k16_b16_b16_b16_noacc<kReturnTransposedAmax>(
-      a_frag[0], a_frag[2], a_frag[1], a_frag[3], b_frag_t[0], b_frag_t[1], b_frag_t[2],
-      b_frag_t[3], c_frag[0], c_frag[1], c_frag[2], c_frag[3], temp_amax_t_reg);
-    asm volatile("max.xorsign.abs.bf16x2 %0, %1, %2;\n\t" 
-                : "=r"(local_amax_t_reg)
-                : "r"(local_amax_t_reg), "r"(temp_amax_t_reg));
+        a_frag[0], a_frag[2], a_frag[1], a_frag[3], b_frag_t[0], b_frag_t[1], b_frag_t[2],
+        b_frag_t[3], c_frag[0], c_frag[1], c_frag[2], c_frag[3], temp_amax_t_reg);
+    asm volatile("max.xorsign.abs.bf16x2 %0, %1, %2;\n\t"
+                 : "=r"(local_amax_t_reg)
+                 : "r"(local_amax_t_reg), "r"(temp_amax_t_reg));
   }
 
   if (kReturnPreRhtAmax) {
