@@ -172,8 +172,12 @@ def divide(numerator: int, denominator: int) -> int:
 
 
 def mark_grouped_tensor(*tensors: List[Any]):
-    """Mark tensors as grouped by setting their ``_grouped`` attribute.
-    Needed for paged stashing in MLM."""
+    """
+    Needed for paged stashing in Megatron-LM. This attribute allows
+    Megatron-LM to detect which tensors are dynamic (varying shapes)
+    and remove the padding before doing the `save_for_backward` to
+    save memory.
+    Note: Only columnwise data is saved for backward."""
     for tensor in tensors:
         if tensor is None:
             continue

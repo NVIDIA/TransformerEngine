@@ -543,7 +543,7 @@ class GroupedTensorStorage:
         all_same_last = last_dims is None
 
         assert all_same_last, "Last dim must be uniform for GroupedTensor"
-        assert logical_first_dim >= 0, "Logical first dim must be non-negative for GroupedTensor"
+        assert logical_first_dim > 0, "Logical first dim must be positive for GroupedTensor"
         assert logical_last_dim > 0, "Logical last dim must be positive for GroupedTensor"
 
         # assert (
