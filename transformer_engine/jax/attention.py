@@ -874,6 +874,18 @@ class SequenceDescriptor:
         Return:
             A SequenceDescriptor with segment_ids/segment_pos initialized.
         """
+        # Examples (0 in segment_ids means padding):
+        # THD (three segments packed together in a sequence of length 16 with no intra-segment padding):
+        # segment_ids = [1, 1, 1, 2, 2, 3, 3, 3, 3, 3, 0, 0, 0, 0, 0, 0]
+        # segment_pos = [0, 1, 2, 0, 1, 0, 1, 2, 3, 4, 0, 0, 0, 0, 0, 0]
+        # THD (three segments packed together in a sequence of length 16 with intra-segment padding):
+        # segment_ids = [1, 1, 1, 2, 2, 3, 3, 3, 0, 0, 4, 4, 0, 0, 0, 0]
+        # segment_pos = [0, 1, 2, 0, 1, 0, 1, 2, 3, 4, 0, 1, 0, 0, 0, 0]
+        # BSHD (only one segment per sequence):
+        # segment_ids = [1, 1, 1, 1, 1, 1, 1, 0, 0]
+        # segment_pos = [0, 1, 2, 3, 4, 5, 6, 7, 8]
+        # For an example of how to generate the segment_ids and segment_pos,
+        # see tests/jax/test_fused_attn.py `generate_random_segment_ids_and_pos() and `generate_valid_segment_ids_and_pos()`
         q_seg_ids, kv_seg_ids = cls._expand_to_pair(segment_ids)
         q_seg_pos, kv_seg_pos = cls._expand_to_pair(segment_pos)
 
