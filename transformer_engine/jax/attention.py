@@ -651,6 +651,7 @@ def _segment_ids_to_seqlens(segment_ids_q, segment_ids_kv, attn_mask_type):
         kv_seq_lens = jnp.sum(segment_ids_kv, axis=-1).astype(jnp.int32)
     return q_seq_lens, kv_seq_lens
 
+
 @jax.tree_util.register_pytree_node_class
 class SequenceDescriptor:
     """A class to describe the sequences with flexible initialization.
