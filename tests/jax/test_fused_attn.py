@@ -557,9 +557,7 @@ class FusedAttnRunner:
                 ],
                 axis=-1,
             )
-            segment_pos = jnp.broadcast_to(
-                jnp.arange(max_seqlen, dtype=jnp.int32), tokens.shape
-            )
+            segment_pos = jnp.broadcast_to(jnp.arange(max_seqlen, dtype=jnp.int32), tokens.shape)
             return tokens, segment_pos, jnp.logical_not(tokens)
 
         def generate_random_segment_ids_and_pos(
