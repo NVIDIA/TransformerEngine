@@ -651,37 +651,6 @@ def _segment_ids_to_seqlens(segment_ids_q, segment_ids_kv, attn_mask_type):
         kv_seq_lens = jnp.sum(segment_ids_kv, axis=-1).astype(jnp.int32)
     return q_seq_lens, kv_seq_lens
 
-
-@jax.jit
-def _generate_default_segment_pos_thd(seg_ids: jnp.ndarray) -> jnp.ndarray:
-    """Jitted THD default segment_pos generation used by current_jit impl."""
-    batch_size, seq_size = seg_ids.shape
-    seq_idx = jnp.arange(seq_size, dtype=jnp.int32)
-    first_is_segment = jnp.full((batch_size, 1), True, dtype=bool)
-    segment_start = jnp.concatenate(
-        [
-            first_is_segment,
-            (seg_ids[..., 1:] != seg_ids[..., :-1]) & (seg_ids[..., 1:] != 0),
-        ],
-        axis=-1,
-    )
-    segment_start_idx = jnp.where(segment_start, seq_idx[None, :], 0)
-    segment_start_offsets = jax.lax.associative_scan(jnp.maximum, segment_start_idx, axis=-1)
-    last_nonzero_idx = jax.vmap(
-        lambda segids_row: jnp.max(jnp.where(segids_row != 0, seq_idx, -1))
-    )(seg_ids)
-    seg_pos = seq_idx[None, :] - segment_start_offsets
-    trailing_mask = seq_idx[None, :] <= last_nonzero_idx[:, None]
-    return jnp.where(trailing_mask, seg_pos, 0)
-
-
-@jax.jit
-def _generate_default_segment_pos_bshd(seg_ids: jnp.ndarray) -> jnp.ndarray:
-    """Jitted non-THD default segment_pos generation used by current_jit impl."""
-    seqlen = seg_ids.shape[-1]
-    return jnp.broadcast_to(jnp.arange(seqlen), seg_ids.shape)
-
-
 @jax.tree_util.register_pytree_node_class
 class SequenceDescriptor:
     """A class to describe the sequences with flexible initialization.
@@ -884,15 +853,10 @@ class SequenceDescriptor:
     def from_segment_ids_and_pos(
         cls,
         segment_ids: Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]],
-        segment_pos: Optional[Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]] = None,
-        *,
-        is_thd: bool,
-        is_segment_ids_reordered: bool,
+        segment_pos: Optional[Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]],
     ) -> SequenceDescriptor:
         """
-        Experimental factory method for inputs with segment IDs and optional positions.
-        segment_pos = None to be used only for: BSHD with or without load balancing and,
-                                                THD without load balancing
+        Experimental factory method for inputs with segment IDs and positions.
         Args:
             segment_ids(Tuple(jnp.ndarray, jnp.ndarray)) = (q_segment_ids, kv_segment_ids):
                 - q_segment_ids (jnp.ndarray):
@@ -906,47 +870,15 @@ class SequenceDescriptor:
                   The position inside each segment for query, with shape [batch, max_seqlen].
                 - kv_segment_pos (jnp.ndarray):
                   The position inside each segment for key, value, with shape [batch, max_seqlen].
-            is_thd(bool): If True, QKVLayout is of type THD, else it is BSHD
-            is_segment_ids_reordered(bool): If True, the segment ids have been reordered for load balancing.
-            Only THD with load balancing is expected to have this flag set to True
         Return:
             A SequenceDescriptor with segment_ids/segment_pos initialized.
         """
         q_seg_ids, kv_seg_ids = cls._expand_to_pair(segment_ids)
-
-        # Using defaults : segment pos has to be generated.
-        if segment_pos is None:
-            # THD + load balanced segment_ids are not supported in this function
-            # BSHD + load balanced segment_ids are incorrect as BSHD handles reordering within the primitive itself
-            if is_segment_ids_reordered:
-                assert not is_thd, (
-                    f"{segment_pos=} default arg is not supported for load balanced reordered"
-                    " (Striped) THD inputs. Please pass the load balanced reordered segment_pos"
-                    " and segment_ids explicitly to {from_segment_ids_and_pos.__qualname__}"
-                    " using convenience function reorder_causal_load_balancing()"
-                )
-                assert is_thd, (
-                    f"{segment_pos=} default arg is not supported for load balanced reordered (Dual"
-                    " Chunk) BSHD inputs. BSHD segment_pos and segment_ids do not need to be load"
-                    " balanced reordered. The reordering for these is performed within the"
-                    " primitive"
-                )
-
-            # Generate default pos via jitted helper kernels.
-            if is_thd:
-                q_seg_pos = _generate_default_segment_pos_thd(q_seg_ids)
-                kv_seg_pos = _generate_default_segment_pos_thd(kv_seg_ids)
-            else:
-                q_seg_pos = _generate_default_segment_pos_bshd(q_seg_ids)
-                kv_seg_pos = _generate_default_segment_pos_bshd(kv_seg_ids)
-            segment_pos = (q_seg_pos, kv_seg_pos)
-        # Explicitly passed segment_pos
-        else:
-            segment_pos = cls._expand_to_pair(segment_pos)
+        q_seg_pos, kv_seg_pos = cls._expand_to_pair(segment_pos)
 
         return cls(
             segment_ids=(q_seg_ids, kv_seg_ids),
-            segment_pos=segment_pos,
+            segment_pos=(q_seg_pos, kv_seg_pos),
         )
 
 
