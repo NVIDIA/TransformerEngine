@@ -290,6 +290,8 @@ class Float8BlockQuantizer : public Quantizer {
 class MXFP8Quantizer : public Quantizer {
  public:
   DType dtype;
+  // 2D block scaling
+  bool with_2d_quantization;
 
   explicit MXFP8Quantizer(const py::handle& quantizer);
 
