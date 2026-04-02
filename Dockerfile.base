@@ -35,7 +35,7 @@ RUN <<"EOF" bash -e
   && apt-get install -y git python3 python3-pip \
   && pip3 install cmake==3.21.0 nvidia-cudnn-cu12==9.9.0.52 \
   && pip3 install --force-reinstall --no-cache-dir nvidia-cutlass-dsl-libs-cu13==4.4.1 \
-  && pip3 install nvidia-cudnn-frontend[cutedsl]==1.21.0 \
+  && pip3 install --force-reinstall --no-cache-dir nvidia-cudnn-frontend[cutedsl]==1.21.0 \
   || [[ ! "${FRAMEWORK}" == "core" ]]
 EOF
 RUN pip3 install ninja pybind11 nvidia-mathdx==25.1.1
