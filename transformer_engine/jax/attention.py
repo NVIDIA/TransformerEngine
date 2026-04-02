@@ -884,13 +884,14 @@ class SequenceDescriptor:
         # BSHD (only one segment per sequence):
         # segment_ids = [1, 1, 1, 1, 1, 1, 1, 0, 0]
         # segment_pos = [0, 1, 2, 3, 4, 5, 6, 7, 8]
-        #TODO(@KshitijLakhani): Make segment_pos Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]] and remove below check (starting June 2026)
+        # TODO(@KshitijLakhani): Make segment_pos Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]] and remove below check (starting June 2026)
         if segment_pos is None:
             raise ValueError(
-                "segment_pos is now required. Automatic segment_pos generation was removed "
-                "because it did not have sufficient context to generate a correct segment_pos "
-                "across all load-balancing and context-parallel strategies. Please generate the segment_pos explicitly."
-                "See tests/jax/test_fused_attn.py generate_random_segment_ids_and_pos() and generate_valid_segment_ids_and_pos()"
+                "segment_pos is now required. Automatic segment_pos generation was removed because"
+                " it did not have sufficient context to generate a correct segment_pos across all"
+                " load-balancing and context-parallel strategies. Please generate the segment_pos"
+                " explicitly.See tests/jax/test_fused_attn.py generate_random_segment_ids_and_pos()"
+                " and generate_valid_segment_ids_and_pos()"
             )
 
         q_seg_ids, kv_seg_ids = cls._expand_to_pair(segment_ids)
