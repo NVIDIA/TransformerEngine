@@ -433,9 +433,7 @@ class TestGroupedTensor:
 
         # Warmup to initialize kernels and allocator state
         if output_dbias:
-            _ = tex.bgrad_group_quantize(
-                static_input, quantizer, num_tensors, static_first_dims
-            )
+            _ = tex.bgrad_group_quantize(static_input, quantizer, num_tensors, static_first_dims)
         else:
             _ = tex.group_quantize(static_input, quantizer, num_tensors, static_first_dims)
         torch.cuda.synchronize()
