@@ -550,8 +550,16 @@ class FusedAttnRunner:
         def generate_valid_segment_ids_and_pos(bs, max_seqlen, pad_ratio):
             pad_len = int(max_seqlen * pad_ratio)
             valid_len = max_seqlen - pad_len
-            tokens = jnp.concatenate([jnp.ones((bs, valid_len)), jnp.zeros((bs, pad_len))], axis=-1)
-            segment_pos = jnp.broadcast_to(jnp.arange(max_seqlen, dtype=tokens.dtype), tokens.shape)
+            tokens = jnp.concatenate(
+                [
+                    jnp.ones((bs, valid_len), dtype=jnp.int32),
+                    jnp.zeros((bs, pad_len), dtype=jnp.int32),
+                ],
+                axis=-1,
+            )
+            segment_pos = jnp.broadcast_to(
+                jnp.arange(max_seqlen, dtype=jnp.int32), tokens.shape
+            )
             return tokens, segment_pos, jnp.logical_not(tokens)
 
         def generate_random_segment_ids_and_pos(
