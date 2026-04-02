@@ -26,7 +26,6 @@ def get_cached_ones_tensor(
     device: torch.device,
 ) -> torch.Tensor:
     """Return a cached ``torch.ones`` tensor.
-
     Tensors are cached by ``(num_elements, dtype, device)`` and kept alive
     by the cache, ensuring stable data pointers across CUDA graph replays.
     """
