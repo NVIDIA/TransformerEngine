@@ -174,14 +174,19 @@ class NVFP4Quantizer(Quantizer):
 
         assert isinstance(dst, NVFP4Tensor), f"Cannot store quantized NVFP4 in {type(dst)} type."
 
+        # Handle non-torch.Tensor inputs (e.g. DebugQuantizedTensor from debug mode backward pass)
+        if not isinstance(src, torch.Tensor) and hasattr(src, "dequantize"):
+            src = src.dequantize()
         # Make sure input is in expected format
         if not devices_match(src.device, dst.device):
             src = src.to(device=dst.device)
         if not src.is_contiguous():
             src = src.contiguous()
 
-        # Launch cast kernel
-        tex.quantize(src, self, dst, noop_flag)
+        # Launch cast kernel via stable ABI
+        from transformer_engine.pytorch.tensor._quantize_stable import quantize_into
+
+        quantize_into(src, self, dst, noop_flag)
 
         return dst
 
@@ -207,8 +212,17 @@ class NVFP4Quantizer(Quantizer):
         return quantizer
 
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
-        """Quantize tensor implementation"""
-        return tex.quantize(tensor, self)
+        """Quantize tensor implementation via stable ABI"""
+        from transformer_engine.pytorch.tensor._quantize_stable import quantize_into
+
+        # Handle non-torch.Tensor inputs (e.g. DebugQuantizedTensor from debug mode backward pass)
+        if not isinstance(tensor, torch.Tensor) and hasattr(tensor, "dequantize"):
+            tensor = tensor.dequantize()
+        dst = self.make_empty(list(tensor.shape), dtype=tensor.dtype, device=tensor.device)
+        if tensor.numel() > 0:
+            t = tensor.contiguous() if not tensor.is_contiguous() else tensor
+            quantize_into(t, self, dst)
+        return dst
 
     def is_quantizable(self, inp: torch.Tensor) -> bool:
         """Returns whether or not given inp can be quantized"""

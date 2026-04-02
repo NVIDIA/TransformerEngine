@@ -265,6 +265,10 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
         """
         For MXFP8, columnwise scaled output is only produced by x2
         scaling kernels, so this function only disables usages.
+
+        Note: rowwise data is preserved even when rowwise_usage=False
+        because the stable ABI GEMM wrapper may need it to create
+        columnwise data on-the-fly via _ensure_mxfp8_columnwise.
         """
 
         # Default usage is based on available data
@@ -283,21 +287,17 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
                 raise RuntimeError(
                     "Requested row-wise usage, but MXFP8Tensor is missing row-scaled scale-inverses"
                 )
-        else:
-            self._rowwise_data = None
-            self._rowwise_scale_inv = None
+        # Note: do NOT clear rowwise data when rowwise_usage=False.
+        # The GEMM wrapper needs rowwise data to create columnwise on-the-fly.
 
         # Update column-scaled data
         if columnwise_usage:
             if self._columnwise_data is None:
-                raise RuntimeError(
-                    "Requested column-wise usage, but MXFP8Tensor is missing column-scaled FP8 data"
-                )
+                # Columnwise data not available — the GEMM wrapper will create
+                # it on-the-fly from rowwise data via _ensure_mxfp8_columnwise.
+                pass
             if self._columnwise_scale_inv is None:
-                raise RuntimeError(
-                    "Requested column-wise usage, "
-                    "but MXFP8Tensor is missing column-scaled scale-inverses"
-                )
+                pass  # Will be created on-the-fly
         else:
             self._columnwise_data = None
             self._columnwise_scale_inv = None

@@ -103,6 +103,13 @@ class CommOverlapCore {
 
   int get_tp_size() { return _tp_size; }
 
+  int get_tp_id() { return _tp_id; }
+
+  int get_rank() { return _rank; }
+
+  const TensorWrapper &get_ubuf() const { return _ubuf; }
+  TensorWrapper &get_ubuf() { return _ubuf; }
+
   bool is_atomic_gemm() { return _atomic_gemm; }
 
   bool is_p2p_overlap() { return _is_p2p; }
@@ -168,6 +175,8 @@ class CommOverlapBase : public CommOverlapCore {
 
  public:
   CommOverlapBase() {}  // dummy constructor for exposing type to Python
+
+  cudaStream_t get_comm_stream() const { return _stream_comm; }
 
   CommOverlapBase(const std::vector<size_t> &buffer_shape, DType buffer_dtype, int myrank,
                   int numranks, int mylocal, int numlocal, int mynode, int numnodes, int tp_size,
@@ -248,6 +257,11 @@ class CommOverlapP2PBase : public CommOverlapCore {
 
  public:
   CommOverlapP2PBase() {}  // dummy constructor for exposing type to Python
+
+  const std::vector<TensorWrapper> &get_ubufs() const { return _ubufs; }
+  std::vector<TensorWrapper> &get_ubufs() { return _ubufs; }
+  const std::vector<cudaStream_t> &get_send_streams() const { return _stream_send; }
+  cudaStream_t get_recv_stream() const { return _stream_recv; }
 
   CommOverlapP2PBase(const std::vector<size_t> &buffer_shape, DType buffer_dtype, int myrank,
                      int numranks, int mylocal, int numlocal, int mynode, int numnodes, int tp_size,

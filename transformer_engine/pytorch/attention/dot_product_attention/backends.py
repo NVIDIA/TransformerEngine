@@ -1132,7 +1132,7 @@ class FlashAttention(torch.nn.Module):
                     shape=output_data.shape,
                 )
             else:
-                output = output.view(batch_size, max_seqlen_q // cp_size, -1).transpose(0, 1)
+                output = output.reshape(batch_size, max_seqlen_q // cp_size, -1).transpose(0, 1)
         elif q_format == "bshd":
             # (bs)hd -> bs(hd)
             output = output.reshape(batch_size, max_seqlen_q // cp_size, -1)

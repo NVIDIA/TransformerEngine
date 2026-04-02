@@ -4,86 +4,86 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "transformer_engine/dropout.h"
+#include <transformer_engine/dropout.h>
 
-#include <ATen/cuda/CUDAGeneratorImpl.h>
-#include <pybind.h>
+#include "../stable_common.h"
 
-#include <ATen/cuda/CUDAGraphsUtils.cuh>
+namespace transformer_engine::pytorch::stable {
 
-#include "../common.h"
-#include "../extensions.h"
-#include "../pybind.h"
-#include "transformer_engine/transformer_engine.h"
+using Tensor = torch::stable::Tensor;
 
-namespace transformer_engine {
-namespace pytorch {
+// ============================================================================
+// Dropout forward — RNG state extracted in Python, passed as tensor
+//
+// Python shim does:
+//   gen = torch.cuda.default_generators[device]
+//   philox_state = gen.get_state()  # or philox_cuda_state for graph capture
+//   seed, offset = extract_seed_offset(philox_state)
+//   rng_state = torch.tensor([seed, offset], dtype=torch.int64, device='cuda')
+// ============================================================================
 
-std::vector<py::object> dropout_fwd(const py::handle &input, float dropout_probability,
-                                    std::optional<at::Tensor> out) {
-  using namespace transformer_engine::pytorch::detail;
+std::tuple<Tensor, Tensor> dropout_fwd(Tensor input, Tensor rng_state, double dropout_probability) {
+  auto input_cu = makeTransformerEngineTensor(input);
 
-  // Input tensor
-  const TensorWrapper input_nvte = makeTransformerEngineTensor(input, py::none());
+  auto device_idx = input.get_device_index();
+  auto shape = getStableTensorShape(input);
+  size_t total = 1;
+  for (auto s : shape) total *= s;
 
-  // Allocate output tensor if needed
-  if (!out) {
-    at::ScalarType dtype = GetATenDType(input_nvte.dtype());
-    if (dtype == at::kFloat8_e4m3fn || dtype == at::kFloat8_e5m2) {
-      dtype = input.attr("dtype").cast<at::ScalarType>();
-    }
-    const auto shape_uint64 = convertShape(input_nvte.shape());
-    const std::vector<int64_t> shape_int64(shape_uint64.begin(), shape_uint64.end());
-    const auto opts = at::TensorOptions().dtype(dtype).device(torch::kCUDA);
-    out = at::empty(shape_int64, opts);
-  }
-  TensorWrapper out_nvte = makeTransformerEngineTensor(*out);
+  // Mask: 1 bit per element, packed into uint8
+  auto mask =
+      allocateStableTensor({static_cast<int64_t>((total + 7) / 8)}, ScalarType::Byte, device_idx);
 
-  // Mask tensor
-  auto mask_pyt = allocateTorchTensor(input_nvte.numel() / 8, DType::kByte);
-  auto mask_nvte = makeTransformerEngineTensor(mask_pyt);
+  auto output = torch::stable::empty_like(input);
 
-  // RNG state tensor
-  auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
-      std::nullopt, at::cuda::detail::getDefaultCUDAGenerator());
-  at::PhiloxCudaState philox_args;
-  {
-    std::lock_guard<std::mutex> lock(gen->mutex_);
-    constexpr int64_t rng_elts_per_thread = 4;
-    philox_args = gen->philox_cuda_state(rng_elts_per_thread);
-  }
-  auto rng_state_pyt = allocateTorchTensor(2, DType::kInt64);
-  NVTE_SCOPED_GIL_RELEASE({
-    nvte_extract_seed_and_offset(
-        reinterpret_cast<int64_t *>(rng_state_pyt.data_ptr()), philox_args.captured_,
-        philox_args.seed_.ptr, philox_args.seed_.val, philox_args.offset_.ptr,
-        philox_args.offset_.val, philox_args.offset_intragraph_, at::cuda::getCurrentCUDAStream());
-  });
-  auto rng_state_nvte = makeTransformerEngineTensor(rng_state_pyt);
+  auto output_cu = makeTransformerEngineTensor(output);
+  auto mask_cu = makeTransformerEngineTensor(mask);
+  auto rng_state_cu = makeTransformerEngineTensor(rng_state);
 
-  // Launch kernel
-  NVTE_SCOPED_GIL_RELEASE({
-    nvte_dropout_fwd(input_nvte.data(), out_nvte.data(), mask_nvte.data(), rng_state_nvte.data(),
-                     dropout_probability, at::cuda::getCurrentCUDAStream());
-  });
+  nvte_dropout_fwd(input_cu.data(), output_cu.data(), mask_cu.data(), rng_state_cu.data(),
+                   static_cast<float>(dropout_probability), getCurrentCUDAStreamRaw(device_idx));
 
-  return {py::cast(std::move(*out)), py::cast(mask_pyt)};
+  return std::make_tuple(output, mask);
 }
 
-py::object dropout_bwd(const at::Tensor &grad_output, const at::Tensor &mask,
-                       const float dropout_probability, std::optional<at::Tensor> grad_input) {
-  const auto grad_output_nvte = makeTransformerEngineTensor(grad_output);
-  const auto mask_nvte = makeTransformerEngineTensor(mask);
-  if (!grad_input) {
-    grad_input = at::empty_like(grad_output);
+// ============================================================================
+// Dropout backward
+// ============================================================================
+
+Tensor dropout_bwd(Tensor grad_output, Tensor mask, double dropout_probability,
+                   std::optional<Tensor> grad_input) {
+  auto grad_output_ = torch::stable::contiguous(grad_output);
+
+  Tensor grad_in;
+  if (grad_input.has_value()) {
+    grad_in = grad_input.value();
+  } else {
+    grad_in = torch::stable::empty_like(grad_output_);
   }
-  auto grad_input_nvte = makeTransformerEngineTensor(*grad_input);
-  NVTE_SCOPED_GIL_RELEASE({
-    nvte_dropout_bwd(grad_output_nvte.data(), mask_nvte.data(), grad_input_nvte.data(),
-                     dropout_probability, at::cuda::getCurrentCUDAStream());
-  });
-  return py::cast(std::move(*grad_input));
+
+  auto grad_output_cu = makeTransformerEngineTensor(grad_output_);
+  auto mask_cu = makeTransformerEngineTensor(mask);
+  auto grad_input_cu = makeTransformerEngineTensor(grad_in);
+
+  nvte_dropout_bwd(grad_output_cu.data(), mask_cu.data(), grad_input_cu.data(),
+                   static_cast<float>(dropout_probability),
+                   getCurrentCUDAStreamRaw(grad_output_.get_device_index()));
+
+  return grad_in;
 }
 
-}  // namespace pytorch
-}  // namespace transformer_engine
+}  // namespace transformer_engine::pytorch::stable
+
+STABLE_TORCH_LIBRARY_FRAGMENT(transformer_engine_stable, m) {
+  m.def(
+      "dropout_fwd(Tensor input, Tensor rng_state, float dropout_probability) -> (Tensor, Tensor)");
+  m.def(
+      "dropout_bwd(Tensor grad_output, Tensor mask, float dropout_probability, Tensor? grad_input) "
+      "-> Tensor");
+}
+
+STABLE_TORCH_LIBRARY_IMPL(transformer_engine_stable, CUDA, m) {
+  using namespace transformer_engine::pytorch::stable;
+  m.impl("dropout_fwd", TORCH_BOX(dropout_fwd));
+  m.impl("dropout_bwd", TORCH_BOX(dropout_bwd));
+}

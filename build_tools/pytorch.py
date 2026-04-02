@@ -6,15 +6,16 @@
 import os
 from pathlib import Path
 
+from typing import List
+
 import setuptools
 
-from .utils import all_files_in_dir, cuda_version, get_cuda_include_dirs, debug_build_enabled
-from typing import List
+from .utils import all_files_in_dir, get_cuda_include_dirs, debug_build_enabled
 
 
 def install_requirements() -> List[str]:
     """Install dependencies for TE/PyTorch extensions."""
-    return ["torch>=2.1", "einops", "onnxscript", "onnx", "packaging", "pydantic", "nvdlfw-inspect"]
+    return ["torch>=2.6", "einops", "onnxscript", "onnx", "packaging", "pydantic", "nvdlfw-inspect"]
 
 
 def test_requirements() -> List[str]:
@@ -29,17 +30,26 @@ def test_requirements() -> List[str]:
     ]
 
 
-def setup_pytorch_extension(
+def setup_pytorch_stable_extension(
     csrc_source_files,
     csrc_header_files,
     common_header_files,
 ) -> setuptools.Extension:
-    """Setup CUDA extension for PyTorch support"""
+    """Setup stable ABI extension for PyTorch support.
 
-    # Source files
-    sources = all_files_in_dir(Path(csrc_source_files), name_extension="cpp")
+    This extension uses only the PyTorch stable ABI (torch/csrc/stable/),
+    producing a binary that is compatible across PyTorch versions.
+    It does NOT use CppExtension to avoid pulling in unstable ATen headers.
+    """
+    import torch
 
-    # Header files
+    # Source files from csrc/extensions/ directory
+    stable_dir = Path(csrc_source_files) / "extensions"
+    sources = all_files_in_dir(stable_dir, name_extension="cpp")
+    if not sources:
+        return None
+
+    # Include directories
     include_dirs = get_cuda_include_dirs()
     include_dirs.extend(
         [
@@ -47,56 +57,56 @@ def setup_pytorch_extension(
             common_header_files / "common",
             common_header_files / "common" / "include",
             csrc_header_files,
+            # PyTorch headers (for stable ABI only)
+            Path(torch.utils.cmake_prefix_path).parent.parent / "include",
         ]
     )
 
     # Compiler flags
-    cxx_flags = ["-O3", "-fvisibility=hidden"]
+    cxx_flags = ["-O3", "-fvisibility=hidden", "-std=c++17", "-DUSE_CUDA"]
+    if bool(int(os.environ.get("NVTE_ENABLE_NVSHMEM", "0"))):
+        cxx_flags.append("-DNVTE_ENABLE_NVSHMEM")
+        nvshmem_home = os.environ.get("NVSHMEM_HOME", "")
+        if nvshmem_home:
+            include_dirs.append(Path(nvshmem_home) / "include")
+        # Try system NVSHMEM paths (Debian/Ubuntu packages)
+        for nvshmem_inc in ["/usr/include/nvshmem_13", "/usr/local/include/nvshmem"]:
+            if os.path.isdir(nvshmem_inc):
+                include_dirs.append(Path(nvshmem_inc))
+                break
     if debug_build_enabled():
         cxx_flags.append("-g")
         cxx_flags.append("-UNDEBUG")
     else:
         cxx_flags.append("-g0")
 
-    # Version-dependent CUDA options
-    try:
-        version = cuda_version()
-    except FileNotFoundError:
-        print("Could not determine CUDA version")
-    else:
-        if version < (12, 0):
-            raise RuntimeError("Transformer Engine requires CUDA 12.0 or newer")
+    # Library directories and libraries
+    # Find the TE common library (libtransformer_engine.so)
+    te_lib_dir = Path(csrc_source_files).parent.parent.parent
+    cuda_home = os.environ.get("CUDA_HOME", os.environ.get("CUDA_PATH", "/usr/local/cuda"))
+    cuda_lib_dir = os.path.join(cuda_home, "lib64")
+    if not os.path.isdir(cuda_lib_dir):
+        cuda_lib_dir = os.path.join(cuda_home, "lib")
+    library_dirs = [
+        str(Path(torch.utils.cmake_prefix_path).parent.parent / "lib"),
+        str(te_lib_dir),
+        cuda_lib_dir,
+    ]
+    libraries = ["torch", "torch_cpu", "c10", "cudart", "transformer_engine"]
 
-    if bool(int(os.getenv("NVTE_UB_WITH_MPI", "0"))):
-        assert (
-            os.getenv("MPI_HOME") is not None
-        ), "MPI_HOME=/path/to/mpi must be set when compiling with NVTE_UB_WITH_MPI=1!"
-        mpi_path = Path(os.getenv("MPI_HOME"))
-        include_dirs.append(mpi_path / "include")
-        cxx_flags.append("-DNVTE_UB_WITH_MPI")
+    # Set rpath so the stable extension can find libtransformer_engine.so at runtime.
+    # Use $ORIGIN for co-located libraries plus the absolute path for editable installs.
+    extra_link_args = [
+        "-Wl,-rpath,$ORIGIN",
+        f"-Wl,-rpath,{te_lib_dir.resolve()}",
+    ]
 
-    library_dirs = []
-    libraries = []
-    if bool(int(os.getenv("NVTE_ENABLE_NVSHMEM", 0))):
-        assert (
-            os.getenv("NVSHMEM_HOME") is not None
-        ), "NVSHMEM_HOME must be set when compiling with NVTE_ENABLE_NVSHMEM=1"
-        nvshmem_home = Path(os.getenv("NVSHMEM_HOME"))
-        include_dirs.append(nvshmem_home / "include")
-        library_dirs.append(nvshmem_home / "lib")
-        libraries.append("nvshmem_host")
-        cxx_flags.append("-DNVTE_ENABLE_NVSHMEM")
-
-    # Construct PyTorch CUDA extension
-    sources = [str(path) for path in sources]
-    include_dirs = [str(path) for path in include_dirs]
-    from torch.utils.cpp_extension import CppExtension
-
-    return CppExtension(
-        name="transformer_engine_torch",
+    return setuptools.Extension(
+        name="transformer_engine.te_stable_abi",
         sources=[str(src) for src in sources],
         include_dirs=[str(inc) for inc in include_dirs],
-        extra_compile_args={"cxx": cxx_flags},
-        libraries=[str(lib) for lib in libraries],
-        library_dirs=[str(lib_dir) for lib_dir in library_dirs],
+        extra_compile_args=cxx_flags,
+        libraries=libraries,
+        library_dirs=library_dirs,
+        extra_link_args=extra_link_args,
     )

@@ -10,7 +10,7 @@ import warnings
 from typing import Any, Optional, Tuple, Union
 
 import torch
-import transformer_engine_torch as tex
+
 from transformer_engine_torch import DType as TE_DType
 from transformer_engine.common.recipe import Float8BlockScaling, Recipe
 from .storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
@@ -99,6 +99,9 @@ class Float8BlockQuantizer(Quantizer):
         AssertionError
             If the destination tensor is not a Float8BlockwiseQTensor
         """
+        # Handle non-torch.Tensor inputs (e.g. DebugQuantizedTensor from debug mode backward pass)
+        if not isinstance(src, torch.Tensor) and hasattr(src, "dequantize"):
+            src = src.dequantize()
         assert isinstance(
             dst, Float8BlockwiseQTensor
         ), f"Cannot store quantized blockwise tensor in {type(dst)} type."
@@ -108,15 +111,26 @@ class Float8BlockQuantizer(Quantizer):
         if not src.is_contiguous():
             src = src.contiguous()
 
-        # Launch cast kernel
-        tex.quantize(src, self, dst, noop_flag)
+        # Launch cast kernel via stable ABI
+        from transformer_engine.pytorch.tensor._quantize_stable import quantize_into
+
+        quantize_into(src, self, dst, noop_flag)
 
         dst._fp8_dtype = self.dtype
         return dst
 
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
-        """Quantize tensor implementation"""
-        return tex.quantize(tensor, self)
+        """Quantize tensor implementation via stable ABI"""
+        from transformer_engine.pytorch.tensor._quantize_stable import quantize_into
+
+        # Handle non-torch.Tensor inputs (e.g. DebugQuantizedTensor from debug mode backward pass)
+        if not isinstance(tensor, torch.Tensor) and hasattr(tensor, "dequantize"):
+            tensor = tensor.dequantize()
+        dst = self.make_empty(list(tensor.shape), dtype=tensor.dtype, device=tensor.device)
+        if tensor.numel() > 0:
+            t = tensor.contiguous() if not tensor.is_contiguous() else tensor
+            quantize_into(t, self, dst)
+        return dst
 
     def get_scale_shape(self, shape: Iterable[int], columnwise: bool) -> Tuple[int, int]:
         """Scaling tensor shape.

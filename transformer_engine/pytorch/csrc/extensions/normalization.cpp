@@ -4,25 +4,30 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "../extensions.h"
-#include "common/util/system.h"
-#include "pybind.h"
+#include <transformer_engine/normalization.h>
 
-namespace transformer_engine::pytorch {
+#include "../stable_common.h"
 
-std::vector<py::object> layernorm_bwd(const at::Tensor &dz, const at::Tensor &x,
-                                      const at::Tensor &mu, const at::Tensor &rsigma,
-                                      const at::Tensor &gamma, const int sm_margin,
-                                      const bool zero_centered_gamma) {
-  const auto &dz_ = dz.contiguous();
-  const auto &x_ = x.contiguous();
-  const auto &mu_ = mu.contiguous();
-  const auto &rsigma_ = rsigma.contiguous();
-  const auto &gamma_ = gamma.contiguous();
+namespace transformer_engine::pytorch::stable {
 
-  auto dx = at::empty_like(x_);
-  auto dgamma = at::empty_like(gamma_);
-  auto dbeta = at::empty_like(gamma_);
+using Tensor = torch::stable::Tensor;
+
+// ============================================================================
+// Layernorm backward
+// ============================================================================
+
+std::tuple<Tensor, Tensor, Tensor> layernorm_bwd(Tensor dz, Tensor x, Tensor mu, Tensor rsigma,
+                                                 Tensor gamma, int64_t sm_margin,
+                                                 bool zero_centered_gamma) {
+  auto dz_ = torch::stable::contiguous(dz);
+  auto x_ = torch::stable::contiguous(x);
+  auto mu_ = torch::stable::contiguous(mu);
+  auto rsigma_ = torch::stable::contiguous(rsigma);
+  auto gamma_ = torch::stable::contiguous(gamma);
+
+  auto dx = torch::stable::empty_like(x_);
+  auto dgamma = torch::stable::empty_like(gamma_);
+  auto dbeta = torch::stable::empty_like(gamma_);
   TensorWrapper workspace;
 
   auto dz_cu = makeTransformerEngineTensor(dz_);
@@ -34,194 +39,109 @@ std::vector<py::object> layernorm_bwd(const at::Tensor &dz, const at::Tensor &x,
   auto dgamma_cu = makeTransformerEngineTensor(dgamma);
   auto dbeta_cu = makeTransformerEngineTensor(dbeta);
 
-  // This call populates tensors with the required config.
-  NVTE_SCOPED_GIL_RELEASE({
-    nvte_layernorm_bwd(dz_cu.data(), x_cu.data(), mu_cu.data(), rsigma_cu.data(), gamma_cu.data(),
-                       dx_cu.data(), dgamma_cu.data(), dbeta_cu.data(), workspace.data(),
-                       at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
-                       zero_centered_gamma, at::cuda::getCurrentCUDAStream());
-  });
+  auto device_idx = dz_.get_device_index();
+  int sm_count = getSMCount(device_idx) - static_cast<int>(sm_margin);
+  auto stream = getCurrentCUDAStreamRaw(device_idx);
 
-  // Alloc space for Tensors.
-  auto workspace_data = allocateSpace(workspace.shape(), workspace.dtype());
-  workspace =
-      makeTransformerEngineTensor(workspace_data.data_ptr(), workspace.shape(), workspace.dtype());
-
-  // Actual call to bwd kernel.
-  NVTE_SCOPED_GIL_RELEASE({
-    nvte_layernorm_bwd(dz_cu.data(), x_cu.data(), mu_cu.data(), rsigma_cu.data(), gamma_cu.data(),
-                       dx_cu.data(), dgamma_cu.data(), dbeta_cu.data(), workspace.data(),
-                       at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
-                       zero_centered_gamma, at::cuda::getCurrentCUDAStream());
-  });
-
-  return {py::cast(dx), py::cast(dgamma), py::cast(dbeta)};
-}
-
-std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, MaybeTensor bias,
-                                      float eps, py::object out, py::handle quantizer,
-                                      DType out_dtype, const int sm_margin,
-                                      const bool zero_centered_gamma) {
-  using namespace transformer_engine::pytorch::detail;
-
-  // Ensure that cuDNN handle is created on the correct device,
-  // overriding torch.cuda.set_device calls from user side.
-  // Assumes all tensors passed are on the same device.
-  at::cuda::CUDAGuard device_guard(input.cast<at::Tensor>().device());
-
-  // Input and param tensors
-  auto none = py::none();
-  const TensorWrapper &input_nvte = makeTransformerEngineTensor(input, none);
-  const TensorWrapper &weight_nvte = makeTransformerEngineTensor(weight, none);
-  TensorWrapper bias_nvte;
-  if (bias.has_value()) {
-    bias_nvte = makeTransformerEngineTensor(*bias);
-  }
-
-  // Tensor dimensions
-  const auto shape = nvte_shape_to_vector(input_nvte.shape());
-  const auto outer_size = product(shape) / shape.back();
-  const auto inner_size = shape.back();
-
-  // Tensors to save for backward pass
-  at::Tensor mu_py = at::empty({static_cast<int64_t>(outer_size)}, at::CUDA(at::kFloat));
-  at::Tensor rsigma_py = at::empty({static_cast<int64_t>(outer_size)}, at::CUDA(at::kFloat));
-  TensorWrapper mu_nvte = makeTransformerEngineTensor(mu_py);
-  TensorWrapper rsigma_nvte = makeTransformerEngineTensor(rsigma_py);
-
-  // Quantizer
-  auto quantizer_cpp = convert_quantizer(quantizer);
-
-  // Choose implementation
-  enum class Impl {
-    // Compute norm in high precision, then quantize
-    UNFUSED,
-    // Compute norm directly
-    FULLY_FUSED,
-    // Compute norm and amax in high precision, then quantize to FP8
-    FUSED_NORM_AMAX_FP8,
-    // Compute norm and amax in high precision, then quantize to NVFP4
-    FUSED_NORM_AMAX_NVFP4
-  };
-  Impl impl = Impl::UNFUSED;
-  if (quantizer.is_none() || IsFloat8Quantizers(quantizer.ptr())) {
-    impl = Impl::FULLY_FUSED;
-  } else if (IsMXFP8Quantizers(quantizer.ptr())) {
-    if (transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN") && outer_size % 128 == 0 &&
-        inner_size % 128 == 0) {
-      // cuDNN MXFP8 kernel requires full 128x128 tiles
-      impl = Impl::FULLY_FUSED;
-    }
-  } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr()) &&
-             !transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN")) {
-    auto fp8_quantizer_cpp = dynamic_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
-    NVTE_CHECK(fp8_quantizer_cpp != nullptr, "Could not cast to FP8 current scaling quantizer");
-    impl = Impl::FUSED_NORM_AMAX_FP8;
-  } else if (detail::IsNVFP4Quantizers(quantizer.ptr())) {
-    auto nvfp4_quantizer_cpp = dynamic_cast<NVFP4Quantizer *>(quantizer_cpp.get());
-    NVTE_CHECK(nvfp4_quantizer_cpp != nullptr, "Could not cast to NVFP4 quantizer");
-    if (nvfp4_quantizer_cpp->with_rht && nvfp4_quantizer_cpp->with_post_rht_amax) {
-      // Post-RHT amax is handled within NVFP4 quantizer
-      impl = Impl::UNFUSED;
-    } else if (!transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN")) {
-      // TE kernel supports amax output
-      impl = Impl::FUSED_NORM_AMAX_NVFP4;
-    }
-  }
-
-  // Output tensor
-  TensorWrapper out_nvte;
-  if (out.is_none()) {
-    if (impl == Impl::FULLY_FUSED) {
-      // FP8 has no special logic to optimize for GEMM, MXFP8 cuDNN
-      // kernel does not support GEMM swizzled scales
-      quantizer_cpp->optimize_for_gemm = false;
-    }
-    std::tie(out_nvte, out) = quantizer_cpp->create_tensor(shape, out_dtype);
-  } else {
-    out_nvte = makeTransformerEngineTensor(out, quantizer);
-  }
-
-  // Construct unquantized output tensor if needed
-  TensorWrapper unquantized_out_nvte;
-  py::object unquantized_out;
-  TensorWrapper *kernel_out_nvte = &out_nvte;
-  switch (impl) {
-    case Impl::UNFUSED: {
-      NoneQuantizer q{none};
-      std::tie(unquantized_out_nvte, unquantized_out) = q.create_tensor(shape, out_dtype);
-      kernel_out_nvte = &unquantized_out_nvte;
-    } break;
-    case Impl::FUSED_NORM_AMAX_FP8: {
-      auto fp8_quantizer_cpp = static_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
-      std::tie(unquantized_out_nvte, unquantized_out) =
-          fp8_quantizer_cpp->create_unquantized_tensor_with_amax(shape, out_dtype);
-      kernel_out_nvte = &unquantized_out_nvte;
-    } break;
-    case Impl::FUSED_NORM_AMAX_NVFP4: {
-      auto nvfp4_quantizer_cpp = static_cast<NVFP4Quantizer *>(quantizer_cpp.get());
-      std::tie(unquantized_out_nvte, unquantized_out) =
-          nvfp4_quantizer_cpp->create_unquantized_tensor_with_amax(out_nvte, out_dtype);
-      kernel_out_nvte = &unquantized_out_nvte;
-    } break;
-    default: {
-    }
-  }
-
-  // Query workspace size
-  TensorWrapper workspace;
-  NVTE_SCOPED_GIL_RELEASE({
-    nvte_layernorm_fwd(input_nvte.data(), weight_nvte.data(), bias_nvte.data(), eps,
-                       kernel_out_nvte->data(), mu_nvte.data(), rsigma_nvte.data(),
-                       workspace.data(),
-                       at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
-                       zero_centered_gamma, at::cuda::getCurrentCUDAStream());
-  });
+  // First call: query workspace size
+  nvte_layernorm_bwd(dz_cu.data(), x_cu.data(), mu_cu.data(), rsigma_cu.data(), gamma_cu.data(),
+                     dx_cu.data(), dgamma_cu.data(), dbeta_cu.data(), workspace.data(), sm_count,
+                     zero_centered_gamma, stream);
 
   // Allocate workspace
-  auto workspace_data = allocateSpace(workspace.shape(), workspace.dtype());
-  workspace =
-      makeTransformerEngineTensor(workspace_data.data_ptr(), workspace.shape(), workspace.dtype());
+  auto ws_shape = workspace.shape();
+  auto ws_dtype = workspace.dtype();
+  auto workspace_data = allocateStableTensor(
+      std::vector<int64_t>(ws_shape.data, ws_shape.data + ws_shape.ndim), ws_dtype, device_idx);
+  workspace = makeTransformerEngineTensor(
+      workspace_data.data_ptr(), std::vector<size_t>(ws_shape.data, ws_shape.data + ws_shape.ndim),
+      ws_dtype);
 
-  // Launch kernel
-  NVTE_SCOPED_GIL_RELEASE({
-    nvte_layernorm_fwd(input_nvte.data(), weight_nvte.data(), bias_nvte.data(), eps,
-                       kernel_out_nvte->data(), mu_nvte.data(), rsigma_nvte.data(),
-                       workspace.data(),
-                       at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
-                       zero_centered_gamma, at::cuda::getCurrentCUDAStream());
-  });
+  // Second call: actual computation
+  nvte_layernorm_bwd(dz_cu.data(), x_cu.data(), mu_cu.data(), rsigma_cu.data(), gamma_cu.data(),
+                     dx_cu.data(), dgamma_cu.data(), dbeta_cu.data(), workspace.data(), sm_count,
+                     zero_centered_gamma, stream);
 
-  // Quantize output if needed
-  switch (impl) {
-    case Impl::UNFUSED: {
-      quantizer_cpp->quantize(unquantized_out_nvte, out_nvte);
-    } break;
-    case Impl::FUSED_NORM_AMAX_FP8: {
-      auto fp8_quantizer_cpp = static_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
-      fp8_quantizer_cpp->quantize_with_amax(unquantized_out_nvte, out_nvte);
-    } break;
-    case Impl::FUSED_NORM_AMAX_NVFP4: {
-      auto nvfp4_quantizer_cpp = static_cast<NVFP4Quantizer *>(quantizer_cpp.get());
-      nvfp4_quantizer_cpp->quantize_with_amax(unquantized_out_nvte, out_nvte);
-    } break;
-    default: {
-    }
-  }
-
-  return {out, py::cast(mu_py), py::cast(rsigma_py)};
+  return std::make_tuple(dx, dgamma, dbeta);
 }
 
-std::vector<py::object> rmsnorm_bwd(const at::Tensor &dz, const at::Tensor &x,
-                                    const at::Tensor &rsigma, const at::Tensor &gamma,
-                                    const int sm_margin, const bool zero_centered_gamma) {
-  const auto &dz_ = dz.contiguous();
-  const auto &x_ = x.contiguous();
-  const auto &rsigma_ = rsigma.contiguous();
-  const auto &gamma_ = gamma.contiguous();
+// ============================================================================
+// Layernorm forward (unquantized output)
+// ============================================================================
 
-  auto dx = at::empty_like(x_);
-  auto dgamma = at::empty_like(gamma_);
+std::tuple<Tensor, Tensor, Tensor> layernorm_fwd(Tensor input, Tensor weight,
+                                                 std::optional<Tensor> bias, double eps,
+                                                 int64_t sm_margin, bool zero_centered_gamma) {
+  auto input_ = torch::stable::contiguous(input);
+  auto weight_ = torch::stable::contiguous(weight);
+
+  auto input_cu = makeTransformerEngineTensor(input_);
+  auto weight_cu = makeTransformerEngineTensor(weight_);
+  // bias_ must outlive the kernel launch — declaring at function scope ensures
+  // the contiguous tensor (if created) stays alive until after the kernel.
+  Tensor bias_contiguous;
+  TensorWrapper bias_cu;
+  if (bias.has_value()) {
+    bias_contiguous = torch::stable::contiguous(bias.value());
+    bias_cu = makeTransformerEngineTensor(bias_contiguous);
+  }
+
+  auto shape = getStableTensorShape(input_);
+  size_t outer_size = 1;
+  for (size_t i = 0; i + 1 < shape.size(); ++i) outer_size *= shape[i];
+
+  auto device_idx = input_.get_device_index();
+  auto output = torch::stable::empty_like(input_);
+  auto mu = allocateStableTensor({static_cast<int64_t>(outer_size)}, ScalarType::Float, device_idx);
+  auto rsigma =
+      allocateStableTensor({static_cast<int64_t>(outer_size)}, ScalarType::Float, device_idx);
+
+  auto output_cu = makeTransformerEngineTensor(output);
+  auto mu_cu = makeTransformerEngineTensor(mu);
+  auto rsigma_cu = makeTransformerEngineTensor(rsigma);
+  TensorWrapper workspace;
+
+  int sm_count = getSMCount(device_idx) - static_cast<int>(sm_margin);
+  auto stream = getCurrentCUDAStreamRaw(device_idx);
+
+  // First call: query workspace
+  nvte_layernorm_fwd(input_cu.data(), weight_cu.data(), bias_cu.data(), static_cast<float>(eps),
+                     output_cu.data(), mu_cu.data(), rsigma_cu.data(), workspace.data(), sm_count,
+                     zero_centered_gamma, stream);
+
+  // workspace_data must outlive the second kernel call — hoist out of if block.
+  Tensor workspace_data;
+  auto ws_shape = workspace.shape();
+  auto ws_dtype = workspace.dtype();
+  if (ws_shape.ndim > 0) {
+    workspace_data = allocateStableTensor(
+        std::vector<int64_t>(ws_shape.data, ws_shape.data + ws_shape.ndim), ws_dtype, device_idx);
+    workspace = makeTransformerEngineTensor(
+        workspace_data.data_ptr(),
+        std::vector<size_t>(ws_shape.data, ws_shape.data + ws_shape.ndim), ws_dtype);
+  }
+
+  // Second call: actual computation
+  nvte_layernorm_fwd(input_cu.data(), weight_cu.data(), bias_cu.data(), static_cast<float>(eps),
+                     output_cu.data(), mu_cu.data(), rsigma_cu.data(), workspace.data(), sm_count,
+                     zero_centered_gamma, stream);
+
+  return std::make_tuple(output, mu, rsigma);
+}
+
+// ============================================================================
+// RMSnorm backward
+// ============================================================================
+
+std::tuple<Tensor, Tensor> rmsnorm_bwd(Tensor dz, Tensor x, Tensor rsigma, Tensor gamma,
+                                       int64_t sm_margin, bool zero_centered_gamma) {
+  auto dz_ = torch::stable::contiguous(dz);
+  auto x_ = torch::stable::contiguous(x);
+  auto rsigma_ = torch::stable::contiguous(rsigma);
+  auto gamma_ = torch::stable::contiguous(gamma);
+
+  auto dx = torch::stable::empty_like(x_);
+  auto dgamma = torch::stable::empty_like(gamma_);
   TensorWrapper workspace;
 
   auto dz_cu = makeTransformerEngineTensor(dz_);
@@ -231,42 +151,91 @@ std::vector<py::object> rmsnorm_bwd(const at::Tensor &dz, const at::Tensor &x,
   auto dx_cu = makeTransformerEngineTensor(dx);
   auto dgamma_cu = makeTransformerEngineTensor(dgamma);
 
-  // This call populates tensors with the required config.
-  NVTE_SCOPED_GIL_RELEASE({
-    nvte_rmsnorm_bwd(dz_cu.data(), x_cu.data(), rsigma_cu.data(), gamma_cu.data(), dx_cu.data(),
-                     dgamma_cu.data(), workspace.data(),
-                     at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
-                     zero_centered_gamma, at::cuda::getCurrentCUDAStream());
-  });
+  auto device_idx = dz_.get_device_index();
+  int sm_count = getSMCount(device_idx) - static_cast<int>(sm_margin);
+  auto stream = getCurrentCUDAStreamRaw(device_idx);
 
-  // Alloc space for Tensors.
-  auto workspace_data = allocateSpace(workspace.shape(), workspace.dtype());
-  workspace =
-      makeTransformerEngineTensor(workspace_data.data_ptr(), workspace.shape(), workspace.dtype());
+  nvte_rmsnorm_bwd(dz_cu.data(), x_cu.data(), rsigma_cu.data(), gamma_cu.data(), dx_cu.data(),
+                   dgamma_cu.data(), workspace.data(), sm_count, zero_centered_gamma, stream);
 
-  // Actual call to bwd kernel.
-  NVTE_SCOPED_GIL_RELEASE({
-    nvte_rmsnorm_bwd(dz_cu.data(), x_cu.data(), rsigma_cu.data(), gamma_cu.data(), dx_cu.data(),
-                     dgamma_cu.data(), workspace.data(),
-                     at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
-                     zero_centered_gamma, at::cuda::getCurrentCUDAStream());
-  });
+  auto ws_shape = workspace.shape();
+  auto ws_dtype = workspace.dtype();
+  auto workspace_data = allocateStableTensor(
+      std::vector<int64_t>(ws_shape.data, ws_shape.data + ws_shape.ndim), ws_dtype, device_idx);
+  workspace = makeTransformerEngineTensor(
+      workspace_data.data_ptr(), std::vector<size_t>(ws_shape.data, ws_shape.data + ws_shape.ndim),
+      ws_dtype);
 
-  return {py::cast(dx), py::cast(dgamma)};
+  nvte_rmsnorm_bwd(dz_cu.data(), x_cu.data(), rsigma_cu.data(), gamma_cu.data(), dx_cu.data(),
+                   dgamma_cu.data(), workspace.data(), sm_count, zero_centered_gamma, stream);
+
+  return std::make_tuple(dx, dgamma);
 }
 
-std::vector<py::object> rmsnorm_bwd_add(const at::Tensor &dz, const at::Tensor &x,
-                                        const at::Tensor &add, const at::Tensor &rsigma,
-                                        const at::Tensor &gamma, const int sm_margin,
-                                        const bool zero_centered_gamma) {
-  const auto &dz_ = dz.contiguous();
-  const auto &x_ = x.contiguous();
-  const auto &add_ = add.contiguous();
-  const auto &rsigma_ = rsigma.contiguous();
-  const auto &gamma_ = gamma.contiguous();
+// ============================================================================
+// RMSnorm forward (unquantized output)
+// ============================================================================
 
-  auto dx = at::empty_like(x_);
-  auto dgamma = at::empty_like(gamma_);
+std::tuple<Tensor, Tensor> rmsnorm_fwd(Tensor input, Tensor weight, double eps, int64_t sm_margin,
+                                       bool zero_centered_gamma) {
+  auto input_ = torch::stable::contiguous(input);
+  auto weight_ = torch::stable::contiguous(weight);
+
+  auto input_cu = makeTransformerEngineTensor(input_);
+  auto weight_cu = makeTransformerEngineTensor(weight_);
+
+  auto shape = getStableTensorShape(input_);
+  size_t outer_size = 1;
+  for (size_t i = 0; i + 1 < shape.size(); ++i) outer_size *= shape[i];
+
+  auto device_idx = input_.get_device_index();
+  auto output = torch::stable::empty_like(input_);
+  auto rsigma =
+      allocateStableTensor({static_cast<int64_t>(outer_size)}, ScalarType::Float, device_idx);
+
+  auto output_cu = makeTransformerEngineTensor(output);
+  auto rsigma_cu = makeTransformerEngineTensor(rsigma);
+  TensorWrapper workspace;
+
+  int sm_count = getSMCount(device_idx) - static_cast<int>(sm_margin);
+  auto stream = getCurrentCUDAStreamRaw(device_idx);
+
+  nvte_rmsnorm_fwd(input_cu.data(), weight_cu.data(), static_cast<float>(eps), output_cu.data(),
+                   rsigma_cu.data(), workspace.data(), sm_count, zero_centered_gamma, stream);
+
+  // workspace_data must outlive the second kernel call — hoist out of if block.
+  Tensor workspace_data;
+  auto ws_shape = workspace.shape();
+  auto ws_dtype = workspace.dtype();
+  if (ws_shape.ndim > 0) {
+    workspace_data = allocateStableTensor(
+        std::vector<int64_t>(ws_shape.data, ws_shape.data + ws_shape.ndim), ws_dtype, device_idx);
+    workspace = makeTransformerEngineTensor(
+        workspace_data.data_ptr(),
+        std::vector<size_t>(ws_shape.data, ws_shape.data + ws_shape.ndim), ws_dtype);
+  }
+
+  nvte_rmsnorm_fwd(input_cu.data(), weight_cu.data(), static_cast<float>(eps), output_cu.data(),
+                   rsigma_cu.data(), workspace.data(), sm_count, zero_centered_gamma, stream);
+
+  return std::make_tuple(output, rsigma);
+}
+
+// ============================================================================
+// RMSnorm backward with add
+// ============================================================================
+
+std::tuple<Tensor, Tensor> rmsnorm_bwd_add(Tensor dz, Tensor x, Tensor add, Tensor rsigma,
+                                           Tensor gamma, int64_t sm_margin,
+                                           bool zero_centered_gamma) {
+  auto dz_ = torch::stable::contiguous(dz);
+  auto x_ = torch::stable::contiguous(x);
+  auto add_ = torch::stable::contiguous(add);
+  auto rsigma_ = torch::stable::contiguous(rsigma);
+  auto gamma_ = torch::stable::contiguous(gamma);
+
+  auto dx = torch::stable::empty_like(x_);
+  auto dgamma = torch::stable::empty_like(gamma_);
   TensorWrapper workspace;
 
   auto dz_cu = makeTransformerEngineTensor(dz_);
@@ -277,173 +246,166 @@ std::vector<py::object> rmsnorm_bwd_add(const at::Tensor &dz, const at::Tensor &
   auto dx_cu = makeTransformerEngineTensor(dx);
   auto dgamma_cu = makeTransformerEngineTensor(dgamma);
 
-  // This call populates tensors with the required config.
-  NVTE_SCOPED_GIL_RELEASE({
-    nvte_rmsnorm_bwd_add(dz_cu.data(), x_cu.data(), add_cu.data(), rsigma_cu.data(),
-                         gamma_cu.data(), dx_cu.data(), dgamma_cu.data(), workspace.data(),
-                         at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
-                         zero_centered_gamma, at::cuda::getCurrentCUDAStream());
-  });
+  auto device_idx = dz_.get_device_index();
+  int sm_count = getSMCount(device_idx) - static_cast<int>(sm_margin);
+  auto stream = getCurrentCUDAStreamRaw(device_idx);
 
-  // Alloc space for Tensors.
-  auto workspace_data = allocateSpace(workspace.shape(), workspace.dtype());
-  workspace =
-      makeTransformerEngineTensor(workspace_data.data_ptr(), workspace.shape(), workspace.dtype());
+  nvte_rmsnorm_bwd_add(dz_cu.data(), x_cu.data(), add_cu.data(), rsigma_cu.data(), gamma_cu.data(),
+                       dx_cu.data(), dgamma_cu.data(), workspace.data(), sm_count,
+                       zero_centered_gamma, stream);
 
-  // Actual call to bwd kernel.
-  NVTE_SCOPED_GIL_RELEASE({
-    nvte_rmsnorm_bwd_add(dz_cu.data(), x_cu.data(), add_cu.data(), rsigma_cu.data(),
-                         gamma_cu.data(), dx_cu.data(), dgamma_cu.data(), workspace.data(),
-                         at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
-                         zero_centered_gamma, at::cuda::getCurrentCUDAStream());
-  });
+  auto ws_shape = workspace.shape();
+  auto ws_dtype = workspace.dtype();
+  auto workspace_data = allocateStableTensor(
+      std::vector<int64_t>(ws_shape.data, ws_shape.data + ws_shape.ndim), ws_dtype, device_idx);
+  workspace = makeTransformerEngineTensor(
+      workspace_data.data_ptr(), std::vector<size_t>(ws_shape.data, ws_shape.data + ws_shape.ndim),
+      ws_dtype);
 
-  return {py::cast(dx), py::cast(dgamma)};
+  nvte_rmsnorm_bwd_add(dz_cu.data(), x_cu.data(), add_cu.data(), rsigma_cu.data(), gamma_cu.data(),
+                       dx_cu.data(), dgamma_cu.data(), workspace.data(), sm_count,
+                       zero_centered_gamma, stream);
+
+  return std::make_tuple(dx, dgamma);
 }
 
-std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &weight, float eps,
-                                    py::object out, py::handle quantizer, DType out_dtype,
-                                    const int sm_margin, const bool zero_centered_gamma) {
-  using namespace transformer_engine::pytorch::detail;
+// ============================================================================
+// Layernorm forward — no-alloc variant for quantized output
+// ============================================================================
+//
+// The caller pre-allocates output_data and all quantization buffers.
+// The NVTE kernel writes to the output TensorWrapper, which is configured
+// from the raw buffer arguments. This preserves all kernel fusion:
+//
+//   FULLY_FUSED:     pass quantized output_data + amax + scale + scale_inv
+//   NORM+AMAX fused: pass hp output_data + amax (no scale/scale_inv)
+//   UNFUSED:         pass hp output_data only (no quantization buffers)
+//
+// The Python shim decides which buffers to provide based on quantizer type.
 
-  // Ensure that cuDNN handle is created on the correct device,
-  // overriding torch.cuda.set_device calls from user side.
-  // Assumes all tensors passed are on the same device.
-  at::cuda::CUDAGuard device_guard(input.cast<at::Tensor>().device());
+std::tuple<Tensor, Tensor> layernorm_fwd_noalloc(
+    Tensor input, Tensor weight, std::optional<Tensor> bias, double eps,
+    // Pre-allocated output buffer
+    Tensor output_data,
+    int64_t output_te_dtype,  // transformer_engine::DType as int
+    // Optional quantization metadata (pass empty tensors if unused)
+    std::optional<Tensor> output_amax, std::optional<Tensor> output_scale,
+    std::optional<Tensor> output_scale_inv,
+    int64_t scaling_mode,  // NVTEScalingMode as int
+    // mu/rsigma pre-allocated by caller
+    Tensor mu, Tensor rsigma, int64_t sm_margin, bool zero_centered_gamma) {
+  auto input_ = torch::stable::contiguous(input);
+  auto weight_ = torch::stable::contiguous(weight);
 
-  // Input and param tensors
-  auto none = py::none();
-  const TensorWrapper &input_nvte = makeTransformerEngineTensor(input, none);
-  const TensorWrapper &weight_nvte = makeTransformerEngineTensor(weight, none);
-
-  // Tensor dimensions
-  const auto shape = nvte_shape_to_vector(input_nvte.shape());
-  const auto outer_size = product(shape) / shape.back();
-  const auto inner_size = shape.back();
-
-  // Tensors to save for backward pass
-  at::Tensor rsigma_py = at::empty({static_cast<int64_t>(outer_size)}, at::CUDA(at::kFloat));
-  TensorWrapper rsigma_nvte = makeTransformerEngineTensor(rsigma_py);
-
-  // Quantizer
-  auto quantizer_cpp = convert_quantizer(quantizer);
-
-  // Choose implementation
-  enum class Impl {
-    // Compute norm in high precision, then quantize
-    UNFUSED,
-    // Compute norm directly
-    FULLY_FUSED,
-    // Compute norm and amax in high precision, then quantize to FP8
-    FUSED_NORM_AMAX_FP8,
-    // Compute norm and amax in high precision, then quantize to NVFP4
-    FUSED_NORM_AMAX_NVFP4
-  };
-  Impl impl = Impl::UNFUSED;
-  if (quantizer.is_none() || IsFloat8Quantizers(quantizer.ptr())) {
-    impl = Impl::FULLY_FUSED;
-  } else if (IsMXFP8Quantizers(quantizer.ptr())) {
-    if (transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN") && outer_size % 128 == 0 &&
-        inner_size % 128 == 0) {
-      // cuDNN MXFP8 kernel requires full 128x128 tiles
-      impl = Impl::FULLY_FUSED;
-    }
-  } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr()) &&
-             !transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN")) {
-    auto fp8_quantizer_cpp = dynamic_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
-    NVTE_CHECK(fp8_quantizer_cpp != nullptr, "Could not cast to FP8 current scaling quantizer");
-    impl = Impl::FUSED_NORM_AMAX_FP8;
-  } else if (detail::IsNVFP4Quantizers(quantizer.ptr())) {
-    auto nvfp4_quantizer_cpp = dynamic_cast<NVFP4Quantizer *>(quantizer_cpp.get());
-    NVTE_CHECK(nvfp4_quantizer_cpp != nullptr, "Could not cast to NVFP4 quantizer");
-    if (nvfp4_quantizer_cpp->with_rht && nvfp4_quantizer_cpp->with_post_rht_amax) {
-      // Post-RHT amax is handled within NVFP4 quantizer
-      impl = Impl::UNFUSED;
-    } else if (!transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN")) {
-      // TE kernel supports amax output
-      impl = Impl::FUSED_NORM_AMAX_NVFP4;
-    }
+  auto input_cu = makeTransformerEngineTensor(input_);
+  auto weight_cu = makeTransformerEngineTensor(weight_);
+  // bias_contiguous must outlive the kernel — hoist out of if block.
+  Tensor bias_contiguous;
+  TensorWrapper bias_cu;
+  if (bias.has_value()) {
+    bias_contiguous = torch::stable::contiguous(bias.value());
+    bias_cu = makeTransformerEngineTensor(bias_contiguous);
   }
 
-  // Output tensor
-  TensorWrapper out_nvte;
-  if (out.is_none()) {
-    if (impl == Impl::FULLY_FUSED) {
-      // FP8 has no special logic to optimize for GEMM, MXFP8 cuDNN
-      // kernel does not support GEMM swizzled scales
-      quantizer_cpp->optimize_for_gemm = false;
-    }
-    std::tie(out_nvte, out) = quantizer_cpp->create_tensor(shape, out_dtype);
-  } else {
-    out_nvte = makeTransformerEngineTensor(out, quantizer);
-  }
+  auto shape = getStableTensorShape(input_);
+  auto te_dtype = static_cast<DType>(output_te_dtype);
+  auto nvte_scaling = static_cast<NVTEScalingMode>(scaling_mode);
 
-  // Construct unquantized output tensor if needed
-  TensorWrapper unquantized_out_nvte;
-  py::object unquantized_out;
-  TensorWrapper *kernel_out_nvte = &out_nvte;
-  switch (impl) {
-    case Impl::UNFUSED: {
-      NoneQuantizer q{none};
-      std::tie(unquantized_out_nvte, unquantized_out) = q.create_tensor(shape, out_dtype);
-      kernel_out_nvte = &unquantized_out_nvte;
-    } break;
-    case Impl::FUSED_NORM_AMAX_FP8: {
-      auto fp8_quantizer_cpp = static_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
-      std::tie(unquantized_out_nvte, unquantized_out) =
-          fp8_quantizer_cpp->create_unquantized_tensor_with_amax(shape, out_dtype);
-      kernel_out_nvte = &unquantized_out_nvte;
-    } break;
-    case Impl::FUSED_NORM_AMAX_NVFP4: {
-      auto nvfp4_quantizer_cpp = static_cast<NVFP4Quantizer *>(quantizer_cpp.get());
-      std::tie(unquantized_out_nvte, unquantized_out) =
-          nvfp4_quantizer_cpp->create_unquantized_tensor_with_amax(out_nvte, out_dtype);
-      kernel_out_nvte = &unquantized_out_nvte;
-    } break;
-    default: {
-    }
-  }
+  auto output_cu = makeQuantizedTensorWrapper(output_data, te_dtype, shape, output_amax,
+                                              output_scale, output_scale_inv, nvte_scaling);
+  auto mu_cu = makeTransformerEngineTensor(mu);
+  auto rsigma_cu = makeTransformerEngineTensor(rsigma);
 
-  // Query workspace size
-  TensorWrapper workspace;
-  NVTE_SCOPED_GIL_RELEASE({
-    nvte_rmsnorm_fwd(input_nvte.data(), weight_nvte.data(), eps, kernel_out_nvte->data(),
-                     rsigma_nvte.data(), workspace.data(),
-                     at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
-                     zero_centered_gamma, at::cuda::getCurrentCUDAStream());
-  });
+  auto device_idx = input_.get_device_index();
+  int sm_count = getSMCount(device_idx) - static_cast<int>(sm_margin);
+  auto stream = getCurrentCUDAStreamRaw(device_idx);
 
-  // Allocate workspace
-  auto workspace_data = allocateSpace(workspace.shape(), workspace.dtype());
-  workspace =
-      makeTransformerEngineTensor(workspace_data.data_ptr(), workspace.shape(), workspace.dtype());
+  runWithWorkspace(
+      [&](NVTETensor ws) {
+        nvte_layernorm_fwd(input_cu.data(), weight_cu.data(), bias_cu.data(),
+                           static_cast<float>(eps), output_cu.data(), mu_cu.data(),
+                           rsigma_cu.data(), ws, sm_count, zero_centered_gamma, stream);
+      },
+      device_idx);
 
-  // Launch kernel
-  NVTE_SCOPED_GIL_RELEASE({
-    nvte_rmsnorm_fwd(input_nvte.data(), weight_nvte.data(), eps, kernel_out_nvte->data(),
-                     rsigma_nvte.data(), workspace.data(),
-                     at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
-                     zero_centered_gamma, at::cuda::getCurrentCUDAStream());
-  });
-
-  // Quantize output if needed
-  switch (impl) {
-    case Impl::UNFUSED: {
-      quantizer_cpp->quantize(unquantized_out_nvte, out_nvte);
-    } break;
-    case Impl::FUSED_NORM_AMAX_FP8: {
-      auto fp8_quantizer_cpp = static_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
-      fp8_quantizer_cpp->quantize_with_amax(unquantized_out_nvte, out_nvte);
-    } break;
-    case Impl::FUSED_NORM_AMAX_NVFP4: {
-      auto nvfp4_quantizer_cpp = static_cast<NVFP4Quantizer *>(quantizer_cpp.get());
-      nvfp4_quantizer_cpp->quantize_with_amax(unquantized_out_nvte, out_nvte);
-    } break;
-    default: {
-    }
-  }
-
-  return {out, py::none(), py::cast(rsigma_py)};
+  return std::make_tuple(mu, rsigma);
 }
 
-}  // namespace transformer_engine::pytorch
+// ============================================================================
+// RMSnorm forward — no-alloc variant for quantized output
+// ============================================================================
+
+Tensor rmsnorm_fwd_noalloc(Tensor input, Tensor weight, double eps, Tensor output_data,
+                           int64_t output_te_dtype, std::optional<Tensor> output_amax,
+                           std::optional<Tensor> output_scale,
+                           std::optional<Tensor> output_scale_inv, int64_t scaling_mode,
+                           Tensor rsigma, int64_t sm_margin, bool zero_centered_gamma) {
+  auto input_ = torch::stable::contiguous(input);
+  auto weight_ = torch::stable::contiguous(weight);
+
+  auto input_cu = makeTransformerEngineTensor(input_);
+  auto weight_cu = makeTransformerEngineTensor(weight_);
+
+  auto shape = getStableTensorShape(input_);
+  auto te_dtype = static_cast<DType>(output_te_dtype);
+  auto nvte_scaling = static_cast<NVTEScalingMode>(scaling_mode);
+
+  auto output_cu = makeQuantizedTensorWrapper(output_data, te_dtype, shape, output_amax,
+                                              output_scale, output_scale_inv, nvte_scaling);
+  auto rsigma_cu = makeTransformerEngineTensor(rsigma);
+
+  auto device_idx = input_.get_device_index();
+  int sm_count = getSMCount(device_idx) - static_cast<int>(sm_margin);
+  auto stream = getCurrentCUDAStreamRaw(device_idx);
+
+  runWithWorkspace(
+      [&](NVTETensor ws) {
+        nvte_rmsnorm_fwd(input_cu.data(), weight_cu.data(), static_cast<float>(eps),
+                         output_cu.data(), rsigma_cu.data(), ws, sm_count, zero_centered_gamma,
+                         stream);
+      },
+      device_idx);
+
+  return rsigma;
+}
+
+}  // namespace transformer_engine::pytorch::stable
+
+// Schema definitions (added to the transformer_engine_stable library)
+STABLE_TORCH_LIBRARY_FRAGMENT(transformer_engine_stable, m) {
+  m.def(
+      "layernorm_bwd(Tensor dz, Tensor x, Tensor mu, Tensor rsigma, Tensor gamma, int sm_margin, "
+      "bool zero_centered_gamma) -> (Tensor, Tensor, Tensor)");
+  m.def(
+      "layernorm_fwd(Tensor input, Tensor weight, Tensor? bias, float eps, int sm_margin, bool "
+      "zero_centered_gamma) -> (Tensor, Tensor, Tensor)");
+  m.def(
+      "layernorm_fwd_noalloc(Tensor input, Tensor weight, Tensor? bias, float eps, Tensor "
+      "output_data, int output_te_dtype, Tensor? output_amax, Tensor? output_scale, Tensor? "
+      "output_scale_inv, int scaling_mode, Tensor mu, Tensor rsigma, int sm_margin, bool "
+      "zero_centered_gamma) -> (Tensor, Tensor)");
+  m.def(
+      "rmsnorm_bwd(Tensor dz, Tensor x, Tensor rsigma, Tensor gamma, int sm_margin, bool "
+      "zero_centered_gamma) -> (Tensor, Tensor)");
+  m.def(
+      "rmsnorm_fwd(Tensor input, Tensor weight, float eps, int sm_margin, bool "
+      "zero_centered_gamma) -> (Tensor, Tensor)");
+  m.def(
+      "rmsnorm_fwd_noalloc(Tensor input, Tensor weight, float eps, Tensor output_data, int "
+      "output_te_dtype, Tensor? output_amax, Tensor? output_scale, Tensor? output_scale_inv, int "
+      "scaling_mode, Tensor rsigma, int sm_margin, bool zero_centered_gamma) -> Tensor");
+  m.def(
+      "rmsnorm_bwd_add(Tensor dz, Tensor x, Tensor add, Tensor rsigma, Tensor gamma, int "
+      "sm_margin, bool zero_centered_gamma) -> (Tensor, Tensor)");
+}
+
+STABLE_TORCH_LIBRARY_IMPL(transformer_engine_stable, CUDA, m) {
+  using namespace transformer_engine::pytorch::stable;
+  m.impl("layernorm_bwd", TORCH_BOX(layernorm_bwd));
+  m.impl("layernorm_fwd", TORCH_BOX(layernorm_fwd));
+  m.impl("layernorm_fwd_noalloc", TORCH_BOX(layernorm_fwd_noalloc));
+  m.impl("rmsnorm_bwd", TORCH_BOX(rmsnorm_bwd));
+  m.impl("rmsnorm_fwd", TORCH_BOX(rmsnorm_fwd));
+  m.impl("rmsnorm_fwd_noalloc", TORCH_BOX(rmsnorm_fwd_noalloc));
+  m.impl("rmsnorm_bwd_add", TORCH_BOX(rmsnorm_bwd_add));
+}
