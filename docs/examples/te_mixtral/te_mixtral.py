@@ -84,9 +84,7 @@ class TEMixtralSparseMoeBlock(nn.Module):
             bias=False,
         )
 
-    def forward(
-        self, hidden_states: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, hidden_states: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
             hidden_states: [batch_size, sequence_length, hidden_dim]
@@ -122,9 +120,7 @@ class TEMixtralSparseMoeBlock(nn.Module):
         # Count the number of (token, top_k_slot) pairs assigned to each expert.
         # Each such pair becomes one row in the permuted tensor, so the sum over
         # all experts equals num_tokens * top_k — the total permuted-tensor rows.
-        m_splits = [
-            int((selected_experts == i).sum().item()) for i in range(self.num_experts)
-        ]
+        m_splits = [int((selected_experts == i).sum().item()) for i in range(self.num_experts)]
 
         # ── Expert computation ──────────────────────────────────────────────
         # Gate + Up projection (combined), then SwiGLU, then Down projection.
@@ -254,20 +250,20 @@ def replace_params(hf_state_dict, te_state_dict, config):
 
             # gate_proj (w1) occupies the first ffn_dim rows of the combined weight.
             if hf_expert_prefix + "w1.weight" in hf_state_dict:
-                te_state_dict[te_gate_up_key].data[: config.intermediate_size] = (
-                    hf_state_dict[hf_expert_prefix + "w1.weight"].data
-                )
+                te_state_dict[te_gate_up_key].data[: config.intermediate_size] = hf_state_dict[
+                    hf_expert_prefix + "w1.weight"
+                ].data
 
             # up_proj (w3) occupies the second ffn_dim rows.
             if hf_expert_prefix + "w3.weight" in hf_state_dict:
-                te_state_dict[te_gate_up_key].data[config.intermediate_size :] = (
-                    hf_state_dict[hf_expert_prefix + "w3.weight"].data
-                )
+                te_state_dict[te_gate_up_key].data[config.intermediate_size :] = hf_state_dict[
+                    hf_expert_prefix + "w3.weight"
+                ].data
 
             # down_proj (w2) maps directly.
             if hf_expert_prefix + "w2.weight" in hf_state_dict:
-                te_state_dict[te_down_key].data[:] = (
-                    hf_state_dict[hf_expert_prefix + "w2.weight"].data
-                )
+                te_state_dict[te_down_key].data[:] = hf_state_dict[
+                    hf_expert_prefix + "w2.weight"
+                ].data
 
     return all_layer_prefixes
