@@ -854,7 +854,7 @@ class SequenceDescriptor:
     def from_segment_ids_and_pos(
         cls,
         segment_ids: Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]],
-        segment_pos: Optional[Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]],
+        segment_pos: Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]],
     ) -> SequenceDescriptor:
         """
         Experimental factory method for inputs with segment IDs and positions.
