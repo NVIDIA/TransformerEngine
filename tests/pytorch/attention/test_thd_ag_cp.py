@@ -57,9 +57,7 @@ def run_test():
     q_global = 0.02 * torch.randn(total_tokens, num_heads, head_dim, dtype=dtype, device="cuda")
     k_global = 0.02 * torch.randn(total_tokens, num_heads, head_dim, dtype=dtype, device="cuda")
     v_global = 0.02 * torch.randn(total_tokens, num_heads, head_dim, dtype=dtype, device="cuda")
-    dout_global = 0.02 * torch.randn(
-        total_tokens, num_heads * head_dim, dtype=dtype, device="cuda"
-    )
+    dout_global = 0.02 * torch.randn(total_tokens, num_heads * head_dim, dtype=dtype, device="cuda")
 
     # ============ Run without CP (single-GPU reference) ============
     log.info(f"[Rank {rank}] Running without CP (reference)")
@@ -77,7 +75,9 @@ def run_test():
     v_ref = v_global.clone().requires_grad_()
 
     out_ref = core_attn(
-        q_ref, k_ref, v_ref,
+        q_ref,
+        k_ref,
+        v_ref,
         cu_seqlens_q=cu_seqlens,
         cu_seqlens_kv=cu_seqlens,
         cu_seqlens_q_padded=cu_seqlens_padded,
@@ -91,9 +91,7 @@ def run_test():
     log.info(f"[Rank {rank}] Running with CP (all_gather)")
 
     # Partition Q/K/V for this CP rank
-    seq_idx = tex.thd_get_partitioned_indices(
-        cu_seqlens_padded, total_tokens, world_size, rank
-    )
+    seq_idx = tex.thd_get_partitioned_indices(cu_seqlens_padded, total_tokens, world_size, rank)
     seq_idx_kv = seq_idx  # same since self-attention
 
     q_cp = q_global.index_select(0, seq_idx).contiguous().requires_grad_()
@@ -110,7 +108,9 @@ def run_test():
     )
 
     out_cp = core_attn(
-        q_cp, k_cp, v_cp,
+        q_cp,
+        k_cp,
+        v_cp,
         cu_seqlens_q=cu_seqlens,
         cu_seqlens_kv=cu_seqlens,
         cu_seqlens_q_padded=cu_seqlens_padded,

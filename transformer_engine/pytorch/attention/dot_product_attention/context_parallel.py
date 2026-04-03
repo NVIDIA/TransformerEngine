@@ -2836,9 +2836,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         padding = "padding" in attn_mask_type
         if qkv_format == "thd":
             # THD always uses padding mask types; per-step masks set internally
-            assert padding, (
-                f"THD format requires padding mask type, got {attn_mask_type}!"
-            )
+            assert padding, f"THD format requires padding mask type, got {attn_mask_type}!"
         else:
             assert not padding, f"{attn_mask_type} mask type is not supported!"
         if use_fused_attention and causal and "bottom_right" not in attn_mask_type:
@@ -2904,9 +2902,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
 
         if qkv_format != "thd":
             # [b, s, h, d] -> [b, 2, s//2, h, d] or [s, b, h, d] -> [2, s//2, b, h, d]
-            q = q.view(
-                *q.shape[:seq_dim], 2, q.shape[seq_dim] // 2, *q.shape[(seq_dim + 1) :]
-            )
+            q = q.view(*q.shape[:seq_dim], 2, q.shape[seq_dim] // 2, *q.shape[(seq_dim + 1) :])
             # [b, s, h, d] or [s, b, h, d] -> [s, b, h, d]
             k, v = [x.movedim(seq_dim, 0).contiguous() for x in [k, v]]
 
@@ -2916,9 +2912,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
 
         if qkv_format == "thd":
             # [cp*t, h, d] -> reorder to contiguous per-sequence order -> [t_full, h, d]
-            chunk_ids_for_kv_ag = get_seq_chunk_ids_for_reordering_before_attn(
-                cp_size, k.device
-            )
+            chunk_ids_for_kv_ag = get_seq_chunk_ids_for_reordering_before_attn(cp_size, k.device)
             k_ag = reorder_seq_chunks_after_a2a_before_attn_thd(
                 k_ag, cu_seqlens_q_original, chunk_ids_for_kv_ag, cp_size
             )
@@ -2929,9 +2923,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             # [cp, s, b, h, d] -> [cp*2, s//2, b, h, d]
             k_ag = k_ag.view(2 * cp_size, k.shape[0] // 2, *k.shape[1:])
             v_ag = v_ag.view(2 * cp_size, v.shape[0] // 2, *v.shape[1:])
-            chunk_ids_for_kv_ag = get_seq_chunk_ids_for_reordering_before_attn(
-                cp_size, k.device
-            )
+            chunk_ids_for_kv_ag = get_seq_chunk_ids_for_reordering_before_attn(cp_size, k.device)
             k_ag = torch.index_select(k_ag, dim=0, index=chunk_ids_for_kv_ag)
             v_ag = torch.index_select(v_ag, dim=0, index=chunk_ids_for_kv_ag)
             # [cp*2, s//2, b, h, d] -> [cp*s, b, h, d]
@@ -3017,9 +3009,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                         cu_seqlens_kv_per_step[i] = cu_seqlens_q * (chunk_id + 1)
                         # Window size
                         if window_size is None:
-                            window_size_per_step[i] = (
-                                (-1, 0) if causal else (-1, -1)
-                            )
+                            window_size_per_step[i] = (-1, 0) if causal else (-1, -1)
                         else:
                             window_size_per_step[i] = window_size
                     if use_fused_attention:
@@ -3207,9 +3197,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         if ctx.qkv_format == "thd":
             # [cp*t, h, d] -> reorder to contiguous per-sequence order
             cu_seqlens_kv_full = cu_seqlens_q * (2 * cp_size)
-            chunk_ids_for_kv_ag = get_seq_chunk_ids_for_reordering_before_attn(
-                cp_size, k.device
-            )
+            chunk_ids_for_kv_ag = get_seq_chunk_ids_for_reordering_before_attn(cp_size, k.device)
             k_ag = reorder_seq_chunks_after_a2a_before_attn_thd(
                 k_ag, cu_seqlens_kv_full, chunk_ids_for_kv_ag, cp_size
             )
@@ -3226,9 +3214,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             # [cp, s, b, h, d] -> [cp*2, s//2, b, h, d]
             k_ag = k_ag.view(2 * cp_size, k.shape[0] // 2, *k.shape[1:])
             v_ag = v_ag.view(2 * cp_size, v.shape[0] // 2, *v.shape[1:])
-            chunk_ids_for_kv_ag = get_seq_chunk_ids_for_reordering_before_attn(
-                cp_size, k.device
-            )
+            chunk_ids_for_kv_ag = get_seq_chunk_ids_for_reordering_before_attn(cp_size, k.device)
             k_ag = torch.index_select(k_ag, dim=0, index=chunk_ids_for_kv_ag)
             v_ag = torch.index_select(v_ag, dim=0, index=chunk_ids_for_kv_ag)
             # [cp*2, s//2, b, h, d] -> [cp*s, b, h, d]
@@ -3413,12 +3399,8 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         if ctx.qkv_format == "thd":
             # Reverse-reorder dK/dV from contiguous order back to dual-chunk order,
             # then reduce-scatter across CP ranks
-            dk = reorder_seq_chunks_before_a2a_after_attn_thd(
-                dk, cu_seqlens_kv_full, cp_size
-            )
-            dv = reorder_seq_chunks_before_a2a_after_attn_thd(
-                dv, cu_seqlens_kv_full, cp_size
-            )
+            dk = reorder_seq_chunks_before_a2a_after_attn_thd(dk, cu_seqlens_kv_full, cp_size)
+            dv = reorder_seq_chunks_before_a2a_after_attn_thd(dv, cu_seqlens_kv_full, cp_size)
             dk, _ = reduce_scatter_along_first_dim(dk, ctx.cp_group)
             dv, _ = reduce_scatter_along_first_dim(dv, ctx.cp_group)
             # dQ is already [t_rank, h, d], no reshape needed
@@ -3426,9 +3408,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             # [cp*s, b, h, d] -> [cp*2, s//2, b, h, d]
             dk = dk.view(2 * cp_size, -1, *dk.shape[-3:])
             dv = dv.view(2 * cp_size, -1, *dv.shape[-3:])
-            chunk_ids_for_kv_ag = get_seq_chunk_ids_for_reordering_after_attn(
-                cp_size, dk.device
-            )
+            chunk_ids_for_kv_ag = get_seq_chunk_ids_for_reordering_after_attn(cp_size, dk.device)
             dk = torch.index_select(dk, dim=0, index=chunk_ids_for_kv_ag)
             dv = torch.index_select(dv, dim=0, index=chunk_ids_for_kv_ag)
             # [cp*2, s//2, b, h, d] -> [cp*s, b, h, d]

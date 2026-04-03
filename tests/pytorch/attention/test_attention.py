@@ -1054,14 +1054,14 @@ def test_fused_attn_split_q():
         h = half_seqlens[i].item()
         e = cu_seqlens[i + 1].item()
 
-        diff1 = (out_full[s:s+h] - out_step1[s:s+h]).abs().max().item()
-        diff2 = (out_full[s+h:e] - out_step2[s+h:e]).abs().max().item()
+        diff1 = (out_full[s : s + h] - out_step1[s : s + h]).abs().max().item()
+        diff2 = (out_full[s + h : e] - out_step2[s + h : e]).abs().max().item()
         logging.info(
             f"[test_fused_attn_split_q]: fwd seq {i}: "
             f"first_half max_diff={diff1}, second_half max_diff={diff2}"
         )
-        torch.testing.assert_close(out_full[s:s+h], out_step1[s:s+h], **fwd_tols)
-        torch.testing.assert_close(out_full[s+h:e], out_step2[s+h:e], **fwd_tols)
+        torch.testing.assert_close(out_full[s : s + h], out_step1[s : s + h], **fwd_tols)
+        torch.testing.assert_close(out_full[s + h : e], out_step2[s + h : e], **fwd_tols)
 
     # --- Compare backward: dQ at valid positions ---
     for i in range(batch_size):
@@ -1069,14 +1069,14 @@ def test_fused_attn_split_q():
         h = half_seqlens[i].item()
         e = cu_seqlens[i + 1].item()
 
-        dq_diff1 = (dq_full[s:s+h] - dq_step1[s:s+h]).abs().max().item()
-        dq_diff2 = (dq_full[s+h:e] - dq_step2[s+h:e]).abs().max().item()
+        dq_diff1 = (dq_full[s : s + h] - dq_step1[s : s + h]).abs().max().item()
+        dq_diff2 = (dq_full[s + h : e] - dq_step2[s + h : e]).abs().max().item()
         logging.info(
             f"[test_fused_attn_split_q]: bwd dQ seq {i}: "
             f"first_half max_diff={dq_diff1}, second_half max_diff={dq_diff2}"
         )
-        torch.testing.assert_close(dq_full[s:s+h], dq_step1[s:s+h], **bwd_tols)
-        torch.testing.assert_close(dq_full[s+h:e], dq_step2[s+h:e], **bwd_tols)
+        torch.testing.assert_close(dq_full[s : s + h], dq_step1[s : s + h], **bwd_tols)
+        torch.testing.assert_close(dq_full[s + h : e], dq_step2[s + h : e], **bwd_tols)
 
 
 def _run_dot_product_attention(
