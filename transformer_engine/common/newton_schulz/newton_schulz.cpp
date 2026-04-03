@@ -17,8 +17,7 @@
 
 using namespace transformer_engine;
 
-// RAII wrapper types for cuSolverMp handles (outside anonymous namespace because
-// CusolverMpHandle and CusolverMpGrid are used in the NVTECusolverMpCtx struct)
+namespace {
 
 struct CusolverMpHandleDeleter {
   void operator()(cusolverMpHandle_t handle) const { cusolverMpDestroy(handle); }
@@ -31,8 +30,6 @@ struct CusolverMpGridDeleter {
 };
 using CusolverMpGrid =
     std::unique_ptr<std::remove_pointer_t<cusolverMpGrid_t>, CusolverMpGridDeleter>;
-
-namespace {
 
 struct CusolverMpMatrixDescDeleter {
   void operator()(cusolverMpMatrixDescriptor_t desc) const { cusolverMpDestroyMatrixDesc(desc); }

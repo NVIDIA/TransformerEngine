@@ -227,6 +227,7 @@ list(APPEND transformer_engine_SOURCES
      comm_gemm/comm_gemm.cpp)
 endif()
 
+option(NVTE_WITH_CUSOLVERMP "Use cuSolverMp for distributed Newton-Schulz" OFF)
 if (NVTE_WITH_CUSOLVERMP)
 list(APPEND transformer_engine_SOURCES
      newton_schulz/newton_schulz.cpp)
@@ -305,7 +306,6 @@ if (NVTE_WITH_CUBLASMP)
   message(STATUS "Using nvshmem at: ${NVSHMEM_DIR}")
 endif()
 
-option(NVTE_WITH_CUSOLVERMP "Use cuSolverMp for distributed Newton-Schulz" OFF)
 if (NVTE_WITH_CUSOLVERMP)
     target_compile_definitions(transformer_engine PRIVATE NVTE_WITH_CUSOLVERMP)
     target_include_directories(transformer_engine PRIVATE ${CUSOLVERMP_DIR}/include)
