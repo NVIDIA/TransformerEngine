@@ -87,7 +87,7 @@ __global__ void __launch_bounds__(threads_per_block) multi_padding_kernel(MultiP
   // Note: Each thread loads n_iterations subtiles, casts to output
   // type, and transposes in registers.
   Type local_zero = static_cast<Type>(0.f);
-#pragma unroll
+#pragma unroll 4
   for (int iter = 0; iter < n_iterations; ++iter) {
     const int i1 = tidy + iter * bdimy;
     const int j1 = tidx;
@@ -171,7 +171,7 @@ __global__ void __launch_bounds__(threads_per_block) multi_unpadding_kernel(Mult
   // Note: Each thread loads n_iterations subtiles, casts to output
   // type, and transposes in registers.
   Type local_zero = static_cast<Type>(0.f);
-#pragma unroll
+#pragma unroll 4
   for (int iter = 0; iter < n_iterations; ++iter) {
     const int i1 = tidy + iter * bdimy;
     const int j1 = tidx;
