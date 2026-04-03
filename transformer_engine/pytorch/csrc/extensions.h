@@ -353,32 +353,6 @@ py::object dropout_bwd(const at::Tensor &grad_output, const at::Tensor &mask,
                        std::optional<at::Tensor> grad_input = std::nullopt);
 
 /***************************************************************************************************
- * Softmax
- **************************************************************************************************/
-
-at::Tensor scaled_softmax_forward(at::Tensor input, float scale_factor);
-
-at::Tensor scaled_softmax_backward(at::Tensor output_grad_, at::Tensor softmax_results_,
-                                   float scale_factor);
-
-at::Tensor scaled_masked_softmax_forward(at::Tensor input, at::Tensor mask, float scale_factor);
-
-at::Tensor scaled_masked_softmax_backward(at::Tensor output_grad_, at::Tensor softmax_results_,
-                                          float scale_factor);
-
-at::Tensor scaled_upper_triang_masked_softmax_forward(at::Tensor input, float scale_factor);
-
-at::Tensor scaled_upper_triang_masked_softmax_backward(at::Tensor output_grads_,
-                                                       at::Tensor softmax_results_,
-                                                       float scale_factor);
-
-at::Tensor scaled_aligned_causal_masked_softmax_forward(at::Tensor input, float scale_factor);
-
-at::Tensor scaled_aligned_causal_masked_softmax_backward(at::Tensor output_grads_,
-                                                         at::Tensor softmax_results_,
-                                                         float scale_factor);
-
-/***************************************************************************************************
  * FP8 recipe
  **************************************************************************************************/
 
