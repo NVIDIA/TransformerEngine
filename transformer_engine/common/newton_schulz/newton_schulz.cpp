@@ -144,8 +144,8 @@ void nvte_cusolvermp_ctx_destroy(NVTECusolverMpCtx* ctx) {
   NVTE_API_CALL(nvte_cusolvermp_ctx_destroy);
   FreeWorkspace(ctx);
   // Destroy handle and grid before the stream they depend on
-  ctx->handle.reset();
   ctx->grid.reset();
+  ctx->handle.reset();
   cudaEventDestroy(ctx->in_ready);
   cudaEventDestroy(ctx->out_ready);
   cudaStreamDestroy(ctx->stream);
@@ -170,8 +170,10 @@ void nvte_newton_schulz(NVTECusolverMpCtx* ctx, int64_t m, int64_t n, NVTETensor
   const int64_t nb = (n + ctx->nranks - 1) / ctx->nranks;
 
   // Compute local leading dimension
-  const int64_t local_rows = cusolverMpNUMROC(n, nb, ctx->rank, 0, ctx->nranks);
-  const int64_t lld = std::max(local_rows, static_cast<int64_t>(1));
+  const int64_t local_cols = cusolverMpNUMROC(n, nb, ctx->rank, 0, ctx->nranks);
+  NVTE_CHECK(t->shape().size() == 2, "Shape size:", t->shape().size());
+  NVTE_CHECK(t->shape()[1] == local_cols, "Tensor cols:", t->shape()[0], "Local cols:", local_cols);
+  const int64_t lld = std::max(local_cols, static_cast<int64_t>(1));
 
   const cudaDataType_t cuda_dtype = get_cuda_dtype(t->dtype());
 
