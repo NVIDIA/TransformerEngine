@@ -8,9 +8,25 @@
 #define TRANSFORMER_ENGINE_FUSED_ROUTER_UTILS_H_
 
 #include "transformer_engine/transformer_engine.h"
+#include "../util/logging.h"
+#include "../utils.cuh"
 
 namespace transformer_engine {
 namespace fused_router {
+
+// Check if requested shared memory size exceeds device capacity.
+// Throws an error with num_experts info to help users diagnose the issue.
+inline void check_shared_memory_capacity_num_experts(size_t shared_memory_size, int num_experts) {
+  int device_id;
+  NVTE_CHECK_CUDA(cudaGetDevice(&device_id));
+  int max_smem_per_block;
+  NVTE_CHECK_CUDA(cudaDeviceGetAttribute(&max_smem_per_block,
+                                         cudaDevAttrMaxSharedMemoryPerBlockOptin, device_id));
+  NVTE_CHECK(shared_memory_size <= static_cast<size_t>(max_smem_per_block),
+             "Shared memory size (", shared_memory_size, " bytes) exceeds device capacity (",
+             max_smem_per_block, " bytes). Try reducing num_experts (currently ", num_experts,
+             ").");
+}
 
 // Using FP32 to handle all the calculations.
 // Currently, only FP32 is supported because
@@ -212,8 +228,8 @@ __device__ inline void apply_softmax_on_float(float *scores, int data_size, int 
   // Fix: treat -inf max as "no data" and skip the expf computation.
 #pragma unroll
   for (int offset = 16; offset > 0; offset >>= 1) {
-    float other_max = __shfl_xor_sync(0xffffffff, local_max, offset);
-    float other_sum = __shfl_xor_sync(0xffffffff, local_sum, offset);
+    float other_max = warp_shuffle_xor(local_max, offset);
+    float other_sum = warp_shuffle_xor(local_sum, offset);
     float new_max = fmaxf(local_max, other_max);
     if (new_max > -std::numeric_limits<float>::infinity()) {
       // At least one side has real data; safe to compute expf differences
@@ -276,16 +292,6 @@ enum class TopkFuncType {
  * Complexity: 9 × O(E/32) = O(E) per warp, independent of K.
  ******************************************************************************/
 
-// Convert float to an unsigned integer that preserves descending sort order.
-// After conversion, a numerically larger float maps to a larger uint32.
-// This allows bitwise radix selection to find top-K by searching from MSB.
-__device__ inline unsigned int float_to_ordered_uint(float f) {
-  unsigned int u = __float_as_uint(f);
-  // If sign bit is set (negative), flip all bits.
-  // If sign bit is clear (positive or +0), flip only the sign bit.
-  unsigned int mask = (u & 0x80000000u) ? 0xFFFFFFFFu : 0x80000000u;
-  return u ^ mask;
-}
 
 __device__ inline void radix_topk_and_mask(CompType *scores, int data_size, int topk,
                                            int *topk_indices, CompType *topk_scores, int lane_id) {
@@ -327,13 +333,7 @@ __device__ inline void radix_topk_and_mask(CompType *scores, int data_size, int 
     unsigned int total_counts[RADIX_SIZE];
 #pragma unroll
     for (int b = 0; b < RADIX_SIZE; b++) {
-      unsigned int c = counts[b];
-      // Butterfly reduction
-      c += __shfl_xor_sync(0xffffffff, c, 16);
-      c += __shfl_xor_sync(0xffffffff, c, 8);
-      c += __shfl_xor_sync(0xffffffff, c, 4);
-      c += __shfl_xor_sync(0xffffffff, c, 2);
-      c += __shfl_xor_sync(0xffffffff, c, 1);
+      unsigned int c = warp_allreduce_sum(counts[b]);
       total_counts[b] = c;  // same value on all lanes after full reduction
     }
 

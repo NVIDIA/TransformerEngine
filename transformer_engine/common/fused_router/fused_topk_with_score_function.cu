@@ -253,6 +253,9 @@ void fused_topk_with_score_function_forward_kernel_launcher(
     shared_memory_size += num_groups * num_token_per_block * sizeof(CompType);   // group_scores
     shared_memory_size += num_experts * num_token_per_block * sizeof(CompType);  // maksed_scores
   }
+  check_shared_memory_capacity_num_experts(shared_memory_size, num_experts);
+  // Radix selection is O(E), independent of K, but it needs 4 passes for 32-bit float; 
+  // switch at K=16 where naive O(K^2*E) starts to dominate
   if (topk < 16) {
     NVTE_CHECK_CUDA(cudaFuncSetAttribute(
         fused_topk_with_score_function_forward_kernel<DataType, BiasType, TopkFuncType::Naive>,
@@ -479,6 +482,7 @@ void fused_topk_with_score_function_backward_kernel_launcher(
                               num_experts * num_token_per_block * sizeof(CompType)  // act_from_fwd
                               + num_experts * num_token_per_block * sizeof(CompType)  // comp_buf
                               + num_experts * num_token_per_block * sizeof(bool);     // routing_map
+  check_shared_memory_capacity_num_experts(shared_memory_size, num_experts);
   NVTE_CHECK_CUDA(cudaFuncSetAttribute(fused_topk_with_score_function_backward_kernel<DataType>,
                                        cudaFuncAttributeMaxDynamicSharedMemorySize,
                                        shared_memory_size));
