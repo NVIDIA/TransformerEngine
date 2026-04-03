@@ -233,6 +233,64 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
   return py::reinterpret_borrow<py::object>(grouped_output_py);
 }
 
+py::object bgrad_group_quantize(const at::Tensor &tensor, py::handle quantizer,
+                                const size_t num_tensors, std::optional<at::Tensor> first_dims) {
+  using namespace transformer_engine::pytorch::detail;
+  init_extension();
+
+  NVTE_CHECK(tensor.dim() == 2, "Tensor must be 2D");
+
+  std::vector<size_t> logical_shape;
+  for (const auto &d : tensor.sizes()) {
+    logical_shape.push_back(d);
+  }
+  const auto logical_first_dim = logical_shape[0];
+  const auto logical_last_dim = logical_shape[1];
+
+  NVTE_CHECK(logical_first_dim > 0 && logical_last_dim > 0,
+             "bgrad_group_quantize: empty input tensor is not supported.");
+
+  NVTE_CHECK(detail::IsMXFP8Quantizers(quantizer.ptr()),
+             "bgrad_group_quantize: only MXFP8 quantizer is supported.");
+
+  auto quantizer_cpp = convert_quantizer(quantizer);
+
+  auto grouped_input_tensor = GroupedTensorWrapper(num_tensors, logical_shape);
+  grouped_input_tensor.set_rowwise_data(
+      tensor.data_ptr(), GetTransformerEngineDType(tensor.scalar_type()), getTensorShape(tensor));
+
+  auto [grouped_output_tensor_cpp, grouped_output_py] = quantizer_cpp->create_grouped_tensor(
+      num_tensors, logical_shape, GetTransformerEngineDType(tensor.scalar_type()),
+      py::reinterpret_borrow<py::object>(quantizer), first_dims, logical_first_dim,
+      logical_last_dim);
+
+  const std::vector<size_t> dbias_logical_shape = {num_tensors, logical_last_dim};
+  GroupedTensorWrapper grouped_dbias(num_tensors, dbias_logical_shape, NVTE_DELAYED_TENSOR_SCALING);
+  at::Tensor dbias_torch =
+      at::empty({static_cast<int64_t>(num_tensors), static_cast<int64_t>(logical_last_dim)},
+                tensor.options());
+  grouped_dbias.set_rowwise_data(dbias_torch.data_ptr(),
+                                 GetTransformerEngineDType(tensor.scalar_type()),
+                                 getTensorShape(dbias_torch));
+  TensorWrapper workspace_nvte;
+  auto stream = at::cuda::getCurrentCUDAStream();
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_group_quantize_dbias(grouped_input_tensor.data(), grouped_output_tensor_cpp.data(),
+                              grouped_dbias.data(), workspace_nvte.data(), stream);
+  });
+  if (workspace_nvte.ndim() > 0 && workspace_nvte.numel() > 0) {
+    at::Tensor workspace_torch = allocateSpace(workspace_nvte.shape(), workspace_nvte.dtype());
+    workspace_nvte = makeTransformerEngineTensor(workspace_torch.data_ptr(), workspace_nvte.shape(),
+                                                 workspace_nvte.dtype());
+  }
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_group_quantize_dbias(grouped_input_tensor.data(), grouped_output_tensor_cpp.data(),
+                              grouped_dbias.data(), workspace_nvte.data(), stream);
+  });
+  return py::make_tuple(py::reinterpret_borrow<py::object>(grouped_output_py),
+                        py::cast(std::move(dbias_torch)));
+}
+
 py::object dequantize(const py::handle &input, transformer_engine::DType otype) {
   init_extension();
 
