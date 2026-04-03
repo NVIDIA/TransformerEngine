@@ -36,7 +36,8 @@ Python Side
 
 Only a subset of C++ extensions have dedicated Python wrapper modules:
 
-- ``gemm.py`` — ``general_gemm()``, ``grouped_gemm()``
+- ``gemm.py`` — ``general_gemm()``, ``grouped_gemm()``,
+  ``general_grouped_gemm_for_grouped_tensor()``
 - ``fused_attn.py`` — ``fused_attn_fwd()``, ``fused_attn_bwd()``
 
 Most other C++ extensions (normalization, activation, cast, transpose, etc.) are exposed

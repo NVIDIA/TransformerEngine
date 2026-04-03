@@ -140,6 +140,9 @@ support and minimal overhead.
        def quantize_(self, tensor, quantizer): ...  # In-place quantization
        def copy_from_storage(self, other): ...
 
+   # Module-level helper (preferred over calling restore_from_saved directly)
+   def restore_from_func_ctx(func_ctx) -> list: ...  # Reassemble + cleanup ctx
+
 Storage objects are used internally by:
 
 - C++ extension calls (converted to ``NVTETensor`` for kernel dispatch)

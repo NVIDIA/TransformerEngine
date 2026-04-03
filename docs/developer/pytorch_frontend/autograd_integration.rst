@@ -89,9 +89,9 @@ Since ``QuantizedTensorStorage`` is not a ``torch.Tensor`` (see
 - Its **metadata** (with all tensor fields set to ``None``) — stored on ``ctx.tensor_objects``.
 - A list of raw **``torch.Tensor`` objects** — passed through ``ctx.save_for_backward()``.
 
-In the backward pass, ``restore_from_saved()`` reassembles the original
-``QuantizedTensorStorage`` objects from the saved tensors and metadata. After
-reassembling, ``ctx.tensor_objects`` must be deleted to avoid keeping references to the
+In the backward pass, ``restore_from_func_ctx()`` reassembles the original
+``QuantizedTensorStorage`` objects from the saved tensors and metadata. It also
+automatically deletes ``ctx.tensor_objects`` to avoid keeping references to the
 reassembled tensors on ``ctx`` (which would defeat the purpose of using
 ``save_for_backward`` in the first place).
 
@@ -102,11 +102,8 @@ reassembled tensors on ``ctx`` (which would defeat the purpose of using
    ctx.save_for_backward(*tensors_to_save)
    ctx.tensor_objects = tensor_objects
 
-   # Backward: reassemble and release ctx references
-   inputmat, weightmat, weight, bias = restore_from_saved(
-       ctx.saved_tensors, ctx.tensor_objects,
-   )
-   del ctx.tensor_objects  # Avoid holding tensor references on ctx
+   # Backward: reassemble and release ctx references in one call
+   inputmat, weightmat, weight, bias = restore_from_func_ctx(ctx)
 
 Activation Recomputation
 ------------------------

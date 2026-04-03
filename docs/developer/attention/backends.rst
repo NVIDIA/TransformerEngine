@@ -115,6 +115,12 @@ specifically the ``fused_attn_*_fwd_impl()`` / ``fused_attn_*_bwd_impl()`` funct
 where the cuDNN graph is built. For backend selection logic, see
 ``nvte_get_fused_attn_backend()`` in ``fused_attn.cpp``.
 
+.. note::
+
+   SM120 (Blackwell) has additional validation in the C++ dispatcher: cuDNN >= 9.18.1 is
+   required, deterministic mode is not supported, and T3HD/TH3D interleaved layouts are
+   not available. See :doc:`backend_selection` for the full set of SM120 restrictions.
+
 Helper CUDA Kernels
 ^^^^^^^^^^^^^^^^^^^
 

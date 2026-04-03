@@ -186,6 +186,12 @@ CP support varies by attention backend:
 - **FlashAttention**: CP support via P2P and A2A.
 - **Unfused**: No CP support.
 
+.. note::
+
+   On SM120 (Blackwell), the ragged softmax stats optimization used for THD layout in
+   context parallelism is not available (cuDNN limitation). The implementation falls back
+   to the dense stats format on SM120.
+
 The CP strategy is configured via ``DotProductAttention``:
 
 .. code-block:: python

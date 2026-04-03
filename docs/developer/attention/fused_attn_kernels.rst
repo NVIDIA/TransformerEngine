@@ -105,9 +105,9 @@ produce different auxiliary tensors, they are passed through an ``NVTETensorPack
 Each sub-backend populates the pack differently:
 
 - **Sub-backend 0** (F16 max512): 1 tensor — ``S`` (full softmax intermediate).
-- **Sub-backend 1** (F16 arbitrary): 2+ tensors — softmax stats (``S`` or
-  ``Max``/``Sum_Exp`` depending on ``return_max_logit``), ``rng_state``, and optionally
-  ``Bias`` and ``SoftmaxOffset``.
+- **Sub-backend 1** (F16 arbitrary): 2+ tensors — ``Stats`` (log-sum-exp, always
+  present), optionally ``Max`` (when ``return_max_logit=True``), ``rng_state``, and
+  optionally ``Bias`` and ``SoftmaxOffset``.
 - **Sub-backend 2** (FP8): 3 tensors — ``M`` (row max), ``ZInv`` (inverse softmax
   denominator), ``rng_state``.
 

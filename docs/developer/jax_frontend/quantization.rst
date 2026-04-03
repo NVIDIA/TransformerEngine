@@ -51,7 +51,11 @@ Instead of PyTorch's ``QuantizedTensor`` (which is a ``torch.Tensor`` subclass),
 - ``ScaledTensor2x`` — Dual-layout tensor wrapping both a rowwise and columnwise
   ``ScaledTensor1x``.
 
-A ``NoScaleTensor`` type wraps unquantized data with optional amax tracking.
+A ``NoScaleTensor`` type wraps unquantized data with optional amax tracking. For grouped
+operations, ``GroupedScaledTensor1x`` extends the single-layout type with support for
+ragged grouping (specified via ``first_dims`` and ``last_dims`` arrays that describe
+per-group sizes along each dimension), and ``GroupedNoScaleTensor`` provides an
+unquantized grouped tensor for use with grouped GEMM.
 
 Since JAX arrays are immutable, these are simple data classes (not JAX array subclasses),
 registered as pytree nodes so JAX can trace through them:

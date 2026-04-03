@@ -33,6 +33,22 @@ groups, etc.) and then applies a priority order:
 FusedAttention is preferred on Hopper+ for performance reasons. On pre-Hopper hardware,
 FlashAttention takes priority when both are available.
 
+SM120 (Blackwell) Architecture Notes
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+SM120 GPUs have additional restrictions that affect backend selection:
+
+- **KV caching**: Both FusedAttention and FlashAttention are disabled when KV caching
+  (inference mode) is active. Only the Unfused backend is available for KV-cached
+  inference on SM120.
+- **cuDNN version**: FusedAttention requires cuDNN >= 9.18.1 for THD layout on SM120.
+  With older cuDNN versions, FusedAttention is disabled for THD.
+- **Layout restrictions**: Even with cuDNN >= 9.18.1, the T3HD and TH3D layouts
+  (interleaved Q/K/V) are not supported on SM120.
+- **Deterministic mode**: Deterministic attention is not supported on SM120.
+- **Softmax LSE packed format**: The packed softmax LSE format for THD is excluded on
+  SM120 (requires cuDNN >= 9.6.0 and a non-SM120 architecture).
+
 Environment Variables
 ---------------------
 

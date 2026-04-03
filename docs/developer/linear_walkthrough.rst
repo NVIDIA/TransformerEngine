@@ -328,10 +328,12 @@ layouts to keep.
    ctx.save_for_backward(*tensors_to_save)
    ctx.tensor_objects = tensor_objects
 
-The ``prepare_for_saving`` / ``restore_from_saved`` pair handles the fact that
+The ``prepare_for_saving`` / ``restore_from_func_ctx`` pair handles the fact that
 ``QuantizedTensorStorage`` is not a ``torch.Tensor`` and therefore cannot be passed
-directly to ``ctx.save_for_backward()``. It splits each storage into metadata and raw
-tensors so that PyTorch can manage their lifetime correctly. See
+directly to ``ctx.save_for_backward()``. ``prepare_for_saving`` splits each storage into
+metadata and raw tensors so that PyTorch can manage their lifetime correctly.
+``restore_from_func_ctx`` reassembles the storages and automatically cleans up
+``ctx.tensor_objects`` references to avoid holding stale tensor references. See
 :doc:`pytorch_frontend/autograd_integration` for the full explanation of why this is
 necessary and how it works.
 
