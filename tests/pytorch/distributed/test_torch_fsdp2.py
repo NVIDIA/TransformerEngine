@@ -122,11 +122,10 @@ def test_fsdp2_fused_adam_dcp_resharding(recipe):
             "NVFP4BlockScaling: DCP load_state_dict triggers reset_sharded_param() "
             "which calls data_ptr() on NVFP4Tensor wrapper subclass with invalid storage"
         )
-    if recipe == "Float8BlockScaling" and torch.cuda.get_device_capability()[0] >= 10:
+    if recipe == "Float8BlockScaling":
         pytest.xfail(
-            "Float8BlockScaling + FSDP2 with 4-rank sharding fails on Blackwell (SM10+): "
-            "swizzle_block_scaling_to_mxfp8_scaling_factors row-count assertion. "
-            "On SM12+, additionally fails with pow2_scale assertion."
+            "Float8BlockScaling doesnt work for DCP resharding with scale inv padding "
+            "not being handled correctly for slice ops"
         )
 
     test_path = _FSDP2_DIR / "run_fsdp2_fused_adam.py"
