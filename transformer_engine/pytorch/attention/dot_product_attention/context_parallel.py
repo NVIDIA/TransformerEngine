@@ -2836,7 +2836,8 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         padding = "padding" in attn_mask_type
         assert not padding, f"{attn_mask_type} mask type is not supported!"
         if use_fused_attention and causal and "bottom_right" not in attn_mask_type:
-            attn_mask_type = attn_mask_type + "_bottom_right"
+            if qkv_format != "thd":
+                attn_mask_type = attn_mask_type + "_bottom_right"
         assert attn_bias_type == "no_bias", f"{attn_bias_type} bias type is not supported!"
         assert q.shape[-1] % 8 == 0, "Hidden size per attention head should be multiple of 8!"
         assert (
@@ -2874,14 +2875,18 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                 if fa_utils.v2_6_0_plus:
                     fa_forward_kwargs["softcap"] = 0.0
 
-        assert qkv_format != "thd", f"{qkv_format} format is not supported!"
         qkv_layout = qkv_format + "_" + qkv_format + "_" + qkv_format
 
-        seq_dim = qkv_format.index("s")
-        assert (
-            q.shape[seq_dim] % 2 == 0 and k.shape[seq_dim] % 2 == 0
-        ), "Sequence length per GPU needs to be divisible by 2!"
+        if qkv_format == "thd":
+            # Save original cu_seqlens before division (needed for KV reordering)
+            cu_seqlens_q_original = cu_seqlens_q.clone()
+        else:
+            seq_dim = qkv_format.index("s")
+            assert (
+                q.shape[seq_dim] % 2 == 0 and k.shape[seq_dim] % 2 == 0
+            ), "Sequence length per GPU needs to be divisible by 2!"
 
+        # Divide by 2*cp_size to get per-chunk values
         max_seqlen_q = max_seqlen_q // (2 * cp_size)
         max_seqlen_kv = max_seqlen_kv // (2 * cp_size)
         if use_fused_attention or qkv_format == "thd":
@@ -2891,24 +2896,42 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         else:
             cu_seqlens_q_padded = None
 
-        # [b, s, h, d] -> [b, 2, s//2, h, d] or [s, b, h, d] -> [2, s//2, b, h, d]
-        q = q.view(*q.shape[:seq_dim], 2, q.shape[seq_dim] // 2, *q.shape[(seq_dim + 1) :])
-        # [b, s, h, d] or [s, b, h, d] -> [s, b, h, d]
-        k, v = [x.movedim(seq_dim, 0).contiguous() for x in [k, v]]
+        if qkv_format != "thd":
+            # [b, s, h, d] -> [b, 2, s//2, h, d] or [s, b, h, d] -> [2, s//2, b, h, d]
+            q = q.view(
+                *q.shape[:seq_dim], 2, q.shape[seq_dim] // 2, *q.shape[(seq_dim + 1) :]
+            )
+            # [b, s, h, d] or [s, b, h, d] -> [s, b, h, d]
+            k, v = [x.movedim(seq_dim, 0).contiguous() for x in [k, v]]
 
-        # [s, b, h, d] -> [cp, s, b, h, d]
+        # AllGather K/V across CP ranks
         k_ag, _ = gather_along_first_dim(k, cp_group)
         v_ag, _ = gather_along_first_dim(v, cp_group)
 
-        # [cp, s, b, h, d] -> [cp*2, s//2, b, h, d]
-        k_ag = k_ag.view(2 * cp_size, k.shape[0] // 2, *k.shape[1:])
-        v_ag = v_ag.view(2 * cp_size, v.shape[0] // 2, *v.shape[1:])
-        chunk_ids_for_kv_ag = get_seq_chunk_ids_for_reordering_before_attn(cp_size, k.device)
-        k_ag = torch.index_select(k_ag, dim=0, index=chunk_ids_for_kv_ag)
-        v_ag = torch.index_select(v_ag, dim=0, index=chunk_ids_for_kv_ag)
-        # [cp*2, s//2, b, h, d] -> [cp*s, b, h, d]
-        k_ag = k_ag.view(-1, *k.shape[1:])
-        v_ag = v_ag.view(-1, *v.shape[1:])
+        if qkv_format == "thd":
+            # [cp*t, h, d] -> reorder to contiguous per-sequence order -> [t_full, h, d]
+            chunk_ids_for_kv_ag = get_seq_chunk_ids_for_reordering_before_attn(
+                cp_size, k.device
+            )
+            k_ag = reorder_seq_chunks_after_a2a_before_attn_thd(
+                k_ag, cu_seqlens_q_original, chunk_ids_for_kv_ag, cp_size
+            )
+            v_ag = reorder_seq_chunks_after_a2a_before_attn_thd(
+                v_ag, cu_seqlens_q_original, chunk_ids_for_kv_ag, cp_size
+            )
+        else:
+            # [cp, s, b, h, d] -> [cp*2, s//2, b, h, d]
+            k_ag = k_ag.view(2 * cp_size, k.shape[0] // 2, *k.shape[1:])
+            v_ag = v_ag.view(2 * cp_size, v.shape[0] // 2, *v.shape[1:])
+            chunk_ids_for_kv_ag = get_seq_chunk_ids_for_reordering_before_attn(
+                cp_size, k.device
+            )
+            k_ag = torch.index_select(k_ag, dim=0, index=chunk_ids_for_kv_ag)
+            v_ag = torch.index_select(v_ag, dim=0, index=chunk_ids_for_kv_ag)
+            # [cp*2, s//2, b, h, d] -> [cp*s, b, h, d]
+            k_ag = k_ag.view(-1, *k.shape[1:])
+            v_ag = v_ag.view(-1, *v.shape[1:])
+
         cp_stream.wait_stream(torch.cuda.current_stream())
 
         # create two streams to resolve wave quantization issue of Flash Attn in each step
@@ -2925,35 +2948,75 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         max_logit_per_step = [None, None]
         max_logit = None
 
+        # Pre-compute THD-specific per-step cu_seqlens
+        if qkv_format == "thd":
+            cu_seqlens_kv_full = cu_seqlens_q * (2 * cp_size)
+            # Rank-level padded offsets (2 chunks per sequence on this rank)
+            cu_seqlens_q_padded_rank = cu_seqlens_q_padded * 2
+            chunk_sizes_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+            # Step 0: first chunk valid, starts at allocation start
+            thd_cu_seqlens_q_padded_per_step = [cu_seqlens_q_padded_rank, None]
+            # Step 1: second chunk valid, starts at midpoint (front-padded)
+            thd_cu_seqlens_q_padded_per_step[1] = cu_seqlens_q_padded_rank.clone()
+            thd_cu_seqlens_q_padded_per_step[1][:-1] += chunk_sizes_q
+            thd_attn_mask_type_per_step = ["padding_causal", "padding_causal_bottom_right"]
+
         for i in range(len(local_seq_chunk_ids) + 1):
             if i < len(local_seq_chunk_ids):
                 with torch.cuda.stream(flash_attn_streams[i]):
-                    # [b, 2, sq//2, h, d] -> [b, sq//2, h, d]
-                    # or [2, sq//2, b, h, d] -> [sq//2, b, h, d]
-                    q_ = q.select(seq_dim, i).contiguous()
-                    kv_seq_range_per_step[i], window_size_per_step[i] = (
-                        get_kv_seq_info_after_all_gather(
-                            local_seq_chunk_ids[i],
-                            cp_size,
-                            max_seqlen_q,
-                            max_seqlen_kv,
-                            window_size,
-                            causal,
+                    if qkv_format in ["bshd", "sbhd"]:
+                        # [b, 2, sq//2, h, d] -> [b, sq//2, h, d]
+                        # or [2, sq//2, b, h, d] -> [sq//2, b, h, d]
+                        q_ = q.select(seq_dim, i).contiguous()
+                        kv_seq_range_per_step[i], window_size_per_step[i] = (
+                            get_kv_seq_info_after_all_gather(
+                                local_seq_chunk_ids[i],
+                                cp_size,
+                                max_seqlen_q,
+                                max_seqlen_kv,
+                                window_size,
+                                causal,
+                            )
                         )
-                    )
-                    seq_start_idx, seq_end_idx = (
-                        kv_seq_range_per_step[i][0],
-                        kv_seq_range_per_step[i][1],
-                    )
-                    max_seqlen_kv_ = seq_end_idx - seq_start_idx
-                    if use_fused_attention or qkv_format == "thd":
-                        cu_seqlens_kv_per_step[i] = dpa_utils.get_full_cu_seqlens(
-                            k.shape[1], max_seqlen_kv_, k.device
+                        seq_start_idx, seq_end_idx = (
+                            kv_seq_range_per_step[i][0],
+                            kv_seq_range_per_step[i][1],
                         )
-                    k_, v_ = [x[seq_start_idx:seq_end_idx] for x in [k_ag, v_ag]]
-                    # [s_range, b, h, d] -> [b, s_range, h, d] or [s_range, b, h, d]
-                    k_, v_ = [x.movedim(0, seq_dim).contiguous() for x in [k_, v_]]
+                        max_seqlen_kv_ = seq_end_idx - seq_start_idx
+                        if use_fused_attention:
+                            cu_seqlens_kv_per_step[i] = dpa_utils.get_full_cu_seqlens(
+                                k.shape[1], max_seqlen_kv_, k.device
+                            )
+                        k_, v_ = [x[seq_start_idx:seq_end_idx] for x in [k_ag, v_ag]]
+                        # [s_range, b, h, d] -> [b, s_range, h, d] or [s_range, b, h, d]
+                        k_, v_ = [x.movedim(0, seq_dim).contiguous() for x in [k_, v_]]
+                    elif qkv_format == "thd":
+                        # THD: no tensor slicing — use cu_seqlens to select valid
+                        # tokens per step. Q stays [t_rank, h, d], K/V stay [t_full, h, d].
+                        q_ = q
+                        k_ = k_ag
+                        v_ = v_ag
+                        chunk_id = local_seq_chunk_ids[i]
+                        max_seqlen_kv_ = max_seqlen_kv * (chunk_id + 1)
+                        # KV visible range: first (chunk_id+1) chunks per sequence
+                        cu_seqlens_kv_per_step[i] = cu_seqlens_q * (chunk_id + 1)
+                        # Window size
+                        if window_size is None:
+                            window_size_per_step[i] = (
+                                (-1, 0) if causal else (-1, -1)
+                            )
+                        else:
+                            window_size_per_step[i] = window_size
                     if use_fused_attention:
+                        # Set per-step parameters for THD vs bshd/sbhd
+                        if qkv_format == "thd":
+                            attn_mask_type_ = thd_attn_mask_type_per_step[i]
+                            cu_seqlens_q_padded_ = thd_cu_seqlens_q_padded_per_step[i]
+                            cu_seqlens_kv_padded_ = cu_seqlens_kv_full
+                        else:
+                            attn_mask_type_ = attn_mask_type
+                            cu_seqlens_q_padded_ = cu_seqlens_q_padded
+                            cu_seqlens_kv_padded_ = cu_seqlens_kv_per_step[i]
                         (
                             out_per_step[i],
                             [softmax_lse_per_step[i], rng_states[i]],
@@ -2972,11 +3035,11 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             attn_scale=softmax_scale,
                             dropout=dropout_p,
                             qkv_layout=qkv_layout,
-                            attn_mask_type=attn_mask_type,
+                            attn_mask_type=attn_mask_type_,
                             attn_bias_type=attn_bias_type,
                             attn_bias=attn_bias,
-                            cu_seqlens_q_padded=cu_seqlens_q_padded,
-                            cu_seqlens_kv_padded=cu_seqlens_kv_per_step[i],
+                            cu_seqlens_q_padded=cu_seqlens_q_padded_,
+                            cu_seqlens_kv_padded=cu_seqlens_kv_padded_,
                             window_size=window_size_per_step[i],
                             return_max_logit=return_max_logit,
                             cuda_graph=is_graph_capturing(),
@@ -3025,6 +3088,17 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                         out[:, i - 1].copy_(out_per_step[i - 1])
                     elif qkv_format == "sbhd":
                         out[i - 1].copy_(out_per_step[i - 1])
+                    elif qkv_format == "thd":
+                        # Copy valid token ranges from this step's output
+                        # Step 0 wrote at first-chunk positions,
+                        # Step 1 wrote at second-chunk positions
+                        step_padded = thd_cu_seqlens_q_padded_per_step[i - 1]
+                        batch_size = cu_seqlens_q.shape[0] - 1
+                        for b in range(batch_size):
+                            s = step_padded[b].item()
+                            sz = chunk_sizes_q[b].item()
+                            out[s : s + sz].copy_(out_per_step[i - 1][s : s + sz])
+
                 if return_max_logit:
                     max_logit = torch.maximum(max_logit, max_logit_per_step[i - 1])
 
@@ -3034,7 +3108,9 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                 max_logit, op=torch.distributed.ReduceOp.MAX, group=cp_group
             )
 
-        if use_fused_attention:
+        if qkv_format == "thd":
+            pass  # out is already [t_rank, h, d], no reshape needed
+        elif use_fused_attention:
             if qkv_format == "bshd":
                 out = out.view(out.shape[0], -1, *out.shape[-2:])
             elif qkv_format == "sbhd":
@@ -3068,6 +3144,9 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         ctx.deterministic = deterministic
         ctx.use_fused_attention = use_fused_attention
         ctx.use_flash_attn_3 = use_flash_attn_3
+        if qkv_format == "thd":
+            ctx.thd_attn_mask_type_per_step = thd_attn_mask_type_per_step
+            ctx.max_seqlen_kv = max_seqlen_kv
         nvtx_range_pop("transformer_engine.AttnFuncWithCPAndKVAllGather.forward")
         if return_max_logit:
             return out, max_logit
