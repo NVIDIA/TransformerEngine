@@ -66,6 +66,30 @@ def test_fsdp2_fused_adam_tests():
     )
 
 
+@pytest.mark.skipif(NUM_PROCS < 2, reason="Requires 2+ GPUs")
+@pytest.mark.skipif(not te.torch_version() >= (2, 4, 0), reason="Requires PyTorch 2.4.0+")
+def test_fsdp2_mem_leak_tests():
+    """FSDP2 memory leak detection tests (parametrized internally by recipe, quantized_model_init)."""
+    test_path = _FSDP2_DIR / "run_fsdp2_mem_leak.py"
+    nproc = min(NUM_PROCS, 2)
+    result = subprocess.run(
+        [
+            "torchrun",
+            f"--nproc_per_node={nproc}",
+            "--local-ranks-filter=0",
+            "-m",
+            "pytest",
+            str(test_path),
+            "-v",
+            "-s",
+            "--tb=short",
+        ],
+        env=os.environ,
+        timeout=600,
+    )
+    assert result.returncode in (0, 5), f"Inner pytest failed with exit code {result.returncode}"
+
+
 def test_dummy() -> None:
     """Dummy test
 
