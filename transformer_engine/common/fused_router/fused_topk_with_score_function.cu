@@ -254,7 +254,7 @@ void fused_topk_with_score_function_forward_kernel_launcher(
     shared_memory_size += num_experts * num_token_per_block * sizeof(CompType);  // maksed_scores
   }
   check_shared_memory_capacity_num_experts(shared_memory_size, num_experts);
-  // Radix selection is O(E), independent of K, but it needs 4 passes for 32-bit float; 
+  // Radix selection is O(E), independent of K, but it needs 4 passes for 32-bit float;
   // switch at K=16 where naive O(K^2*E) starts to dominate
   if (topk < 16) {
     NVTE_CHECK_CUDA(cudaFuncSetAttribute(

@@ -7,9 +7,9 @@
 #ifndef TRANSFORMER_ENGINE_FUSED_ROUTER_UTILS_H_
 #define TRANSFORMER_ENGINE_FUSED_ROUTER_UTILS_H_
 
-#include "transformer_engine/transformer_engine.h"
 #include "../util/logging.h"
 #include "../utils.cuh"
+#include "transformer_engine/transformer_engine.h"
 
 namespace transformer_engine {
 namespace fused_router {
@@ -22,10 +22,9 @@ inline void check_shared_memory_capacity_num_experts(size_t shared_memory_size, 
   int max_smem_per_block;
   NVTE_CHECK_CUDA(cudaDeviceGetAttribute(&max_smem_per_block,
                                          cudaDevAttrMaxSharedMemoryPerBlockOptin, device_id));
-  NVTE_CHECK(shared_memory_size <= static_cast<size_t>(max_smem_per_block),
-             "Shared memory size (", shared_memory_size, " bytes) exceeds device capacity (",
-             max_smem_per_block, " bytes). Try reducing num_experts (currently ", num_experts,
-             ").");
+  NVTE_CHECK(shared_memory_size <= static_cast<size_t>(max_smem_per_block), "Shared memory size (",
+             shared_memory_size, " bytes) exceeds device capacity (", max_smem_per_block,
+             " bytes). Try reducing num_experts (currently ", num_experts, ").");
 }
 
 // Using FP32 to handle all the calculations.
@@ -291,7 +290,6 @@ enum class TopkFuncType {
  *
  * Complexity: 9 × O(E/32) = O(E) per warp, independent of K.
  ******************************************************************************/
-
 
 __device__ inline void radix_topk_and_mask(CompType *scores, int data_size, int topk,
                                            int *topk_indices, CompType *topk_scores, int lane_id) {
