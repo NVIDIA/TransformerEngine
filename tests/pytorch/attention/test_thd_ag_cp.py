@@ -1,5 +1,5 @@
 """
-Standalone test for THD AllGather-based Context Parallelism (forward only).
+Standalone test for THD AllGather-based Context Parallelism (forward + backward).
 
 Run with:
     torchrun --nproc_per_node=2 tests/pytorch/attention/test_thd_ag_cp.py
@@ -39,13 +39,11 @@ def run_test():
     num_heads = 16
     head_dim = 64
     dtype = torch.bfloat16
+    atol, rtol = 2.5e-2, 2.5e-2
 
     # Sequence lengths must be divisible by 2*world_size=4
-    # Test with asymmetric sequence lengths
     seqlens = torch.tensor([256, 512, 1024], dtype=torch.int32)
-    assert all(s % (2 * world_size) == 0 for s in seqlens), (
-        "Sequence lengths must be divisible by 2*world_size"
-    )
+    assert all(s % (2 * world_size) == 0 for s in seqlens)
 
     # Build cu_seqlens (no padding between seqs)
     cu_seqlens = torch.zeros(batch_size + 1, dtype=torch.int32)
@@ -59,6 +57,9 @@ def run_test():
     q_global = 0.02 * torch.randn(total_tokens, num_heads, head_dim, dtype=dtype, device="cuda")
     k_global = 0.02 * torch.randn(total_tokens, num_heads, head_dim, dtype=dtype, device="cuda")
     v_global = 0.02 * torch.randn(total_tokens, num_heads, head_dim, dtype=dtype, device="cuda")
+    dout_global = 0.02 * torch.randn(
+        total_tokens, num_heads * head_dim, dtype=dtype, device="cuda"
+    )
 
     # ============ Run without CP (single-GPU reference) ============
     log.info(f"[Rank {rank}] Running without CP (reference)")
@@ -70,33 +71,35 @@ def run_test():
         qkv_format="thd",
         attn_mask_type="padding_causal",
     ).cuda()
-    core_attn.eval()
 
-    q_ref = q_global.clone()
-    k_ref = k_global.clone()
-    v_ref = v_global.clone()
+    q_ref = q_global.clone().requires_grad_()
+    k_ref = k_global.clone().requires_grad_()
+    v_ref = v_global.clone().requires_grad_()
 
-    with torch.no_grad():
-        out_ref = core_attn(
-            q_ref, k_ref, v_ref,
-            cu_seqlens_q=cu_seqlens,
-            cu_seqlens_kv=cu_seqlens,
-            cu_seqlens_q_padded=cu_seqlens_padded,
-            cu_seqlens_kv_padded=cu_seqlens_padded,
-        )
-    log.info(f"[Rank {rank}] Reference output shape: {out_ref.shape}")
+    out_ref = core_attn(
+        q_ref, k_ref, v_ref,
+        cu_seqlens_q=cu_seqlens,
+        cu_seqlens_kv=cu_seqlens,
+        cu_seqlens_q_padded=cu_seqlens_padded,
+        cu_seqlens_kv_padded=cu_seqlens_padded,
+    )
+    out_ref.backward(dout_global.clone())
+    dq_ref, dk_ref, dv_ref = q_ref.grad, k_ref.grad, v_ref.grad
+    log.info(f"[Rank {rank}] Reference out shape: {out_ref.shape}")
 
     # ============ Run with CP (AllGather) ============
     log.info(f"[Rank {rank}] Running with CP (all_gather)")
 
-    # Partition Q/K/V for this CP rank using tex.thd_get_partitioned_indices
+    # Partition Q/K/V for this CP rank
     seq_idx = tex.thd_get_partitioned_indices(
         cu_seqlens_padded, total_tokens, world_size, rank
     )
-    q_cp = q_global.index_select(0, seq_idx).contiguous()
-    k_cp = k_global.index_select(0, seq_idx).contiguous()
-    v_cp = v_global.index_select(0, seq_idx).contiguous()
-    log.info(f"[Rank {rank}] CP Q shape: {q_cp.shape}, seq_idx[:10]: {seq_idx[:10]}")
+    seq_idx_kv = seq_idx  # same since self-attention
+
+    q_cp = q_global.index_select(0, seq_idx).contiguous().requires_grad_()
+    k_cp = k_global.index_select(0, seq_idx_kv).contiguous().requires_grad_()
+    v_cp = v_global.index_select(0, seq_idx_kv).contiguous().requires_grad_()
+    dout_cp = dout_global.index_select(0, seq_idx).contiguous()
 
     # Set up CP group
     core_attn.set_context_parallel_group(
@@ -106,36 +109,45 @@ def run_test():
         "all_gather",
     )
 
-    with torch.no_grad():
-        out_cp = core_attn(
-            q_cp, k_cp, v_cp,
-            cu_seqlens_q=cu_seqlens,
-            cu_seqlens_kv=cu_seqlens,
-            cu_seqlens_q_padded=cu_seqlens_padded,
-            cu_seqlens_kv_padded=cu_seqlens_padded,
-        )
-    log.info(f"[Rank {rank}] CP output shape: {out_cp.shape}")
+    out_cp = core_attn(
+        q_cp, k_cp, v_cp,
+        cu_seqlens_q=cu_seqlens,
+        cu_seqlens_kv=cu_seqlens,
+        cu_seqlens_q_padded=cu_seqlens_padded,
+        cu_seqlens_kv_padded=cu_seqlens_padded,
+    )
+    out_cp.backward(dout_cp)
+    dq_cp, dk_cp, dv_cp = q_cp.grad, k_cp.grad, v_cp.grad
+    log.info(f"[Rank {rank}] CP out shape: {out_cp.shape}")
 
     # ============ Compare ============
-    # Extract same partition from reference output
-    out_ref_part = out_ref.index_select(0, seq_idx).contiguous()
+    # Extract reference outputs for this rank's partition
+    out_ref_part = out_ref.detach().index_select(0, seq_idx).contiguous()
+    dq_ref_part = dq_ref.index_select(0, seq_idx).contiguous()
+    dk_ref_part = dk_ref.index_select(0, seq_idx_kv).contiguous()
+    dv_ref_part = dv_ref.index_select(0, seq_idx_kv).contiguous()
 
-    # Compare
-    max_diff = (out_ref_part - out_cp).abs().max().item()
-    log.info(f"[Rank {rank}] Max absolute diff: {max_diff}")
-
-    try:
-        torch.testing.assert_close(
-            out_ref_part, out_cp,
-            atol=2.5e-2, rtol=2.5e-2,
-        )
-        log.info(f"[Rank {rank}] PASSED: CP output matches reference!")
-    except AssertionError as e:
-        log.error(f"[Rank {rank}] FAILED: {e}")
-        sys.exit(1)
+    passed = True
+    for name, ref, cp in [
+        ("out", out_ref_part, out_cp.detach()),
+        ("dq", dq_ref_part, dq_cp),
+        ("dk", dk_ref_part, dk_cp),
+        ("dv", dv_ref_part, dv_cp),
+    ]:
+        max_diff = (ref - cp).abs().max().item()
+        log.info(f"[Rank {rank}] {name}: max_diff = {max_diff}")
+        try:
+            torch.testing.assert_close(ref, cp, atol=atol, rtol=rtol)
+            log.info(f"[Rank {rank}] {name}: PASSED")
+        except AssertionError as e:
+            log.error(f"[Rank {rank}] {name}: FAILED - {e}")
+            passed = False
 
     dist.destroy_process_group()
-    log.info(f"[Rank {rank}] Test completed successfully.")
+    if not passed:
+        log.error(f"[Rank {rank}] TEST FAILED")
+        sys.exit(1)
+    log.info(f"[Rank {rank}] ALL TESTS PASSED")
 
 
 if __name__ == "__main__":
