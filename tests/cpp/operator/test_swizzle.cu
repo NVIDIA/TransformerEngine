@@ -199,6 +199,115 @@ void performTestUnswizzle1D(const size_t M, const size_t K, bool rowwise, bool c
   }
 }
 
+// Zero out padding in a scale_inv CPU buffer so that the CPU reference
+// matches the kernel, which zeroes elements outside the original dims.
+// The buffer is stored in leading-dim-major order (row-major for rowwise,
+// column-major for colwise).  `padded_rows x padded_cols` is the full
+// (padded) shape; `orig_rows` / `orig_cols` are the unpadded extents.
+static void zero_scale_inv_padding(uint8_t *buf,
+                                   size_t padded_rows, size_t padded_cols,
+                                   size_t orig_rows, size_t orig_cols) {
+  for (size_t r = 0; r < padded_rows; ++r) {
+    for (size_t c = 0; c < padded_cols; ++c) {
+      if (r >= orig_rows || c >= orig_cols) {
+        buf[r * padded_cols + c] = 0;
+      }
+    }
+  }
+}
+
+void performTestGroupedSwizzleMXFP8(const int num_tensors, const size_t M, const size_t K) {
+  using namespace transformer_engine;
+  using namespace test;
+
+  std::vector<std::unique_ptr<Tensor>> input_tensors;
+  std::vector<std::unique_ptr<Tensor>> output_tensors;
+  std::vector<Tensor*> input_ptrs;
+  std::vector<Tensor*> output_ptrs;
+  input_tensors.reserve(num_tensors);
+  output_tensors.reserve(num_tensors);
+  input_ptrs.reserve(num_tensors);
+  output_ptrs.reserve(num_tensors);
+
+  constexpr size_t BLOCK_SIZE = 32;
+  const std::vector<size_t> shape{M, K};
+  for (int i = 0; i < num_tensors; ++i) {
+    auto input = std::make_unique<Tensor>("input_" + std::to_string(i), shape,
+                                          DType::kFloat8E4M3, true, true,
+                                          NVTE_MXFP8_1D_SCALING);
+    auto output = std::make_unique<Tensor>("output_" + std::to_string(i), shape,
+                                           DType::kFloat8E4M3, true, true,
+                                           NVTE_MXFP8_1D_SCALING);
+    fillUniform(input.get());
+    fillUniform(output.get());
+
+    // The grouped swizzle kernel zeroes scale_inv elements that fall
+    // outside the original (unpadded) dimensions.  Mirror that in the
+    // per-tensor CPU buffers so the CPU reference produces identical output.
+    input->to_cpu();
+    const NVTEShape rs = input->rowwise_scale_inv_shape();
+    zero_scale_inv_padding(input->rowwise_cpu_scale_inv_ptr<uint8_t>(),
+                           rs.data[0], rs.data[1],
+                           M, (K + BLOCK_SIZE - 1) / BLOCK_SIZE);
+    const NVTEShape cs = input->columnwise_scale_inv_shape();
+    zero_scale_inv_padding(input->columnwise_cpu_scale_inv_ptr<uint8_t>(),
+                           cs.data[0], cs.data[1],
+                           (M + BLOCK_SIZE - 1) / BLOCK_SIZE, K);
+    input->from_cpu();
+
+    input_ptrs.push_back(input.get());
+    output_ptrs.push_back(output.get());
+    input_tensors.emplace_back(std::move(input));
+    output_tensors.emplace_back(std::move(output));
+  }
+
+  GroupedBuffers grouped_input = build_grouped_tensor(input_ptrs, NVTE_MXFP8_1D_SCALING);
+  GroupedBuffers grouped_output = build_grouped_tensor(output_ptrs, NVTE_MXFP8_1D_SCALING);
+  const uint8_t input_swizzled = 0;
+  nvte_set_grouped_tensor_param(grouped_input.get_handle(),
+                                kNVTEGroupedWithGEMMSwizzledScales,
+                                &input_swizzled, sizeof(input_swizzled));
+  const uint8_t output_swizzled = 1;
+  nvte_set_grouped_tensor_param(grouped_output.get_handle(),
+                                kNVTEGroupedWithGEMMSwizzledScales,
+                                &output_swizzled, sizeof(output_swizzled));
+
+  const NVTEShape row_shape = input_tensors[0]->rowwise_scale_inv_shape();
+  const NVTEShape col_shape = input_tensors[0]->columnwise_scale_inv_shape();
+  const size_t row_numel = row_shape.data[0] * row_shape.data[1];
+  const size_t col_numel = col_shape.data[0] * col_shape.data[1];
+
+  NVTE_CHECK_CUDA(cudaMemset(grouped_output.scale_inv.get(), 0, num_tensors * row_numel));
+  NVTE_CHECK_CUDA(cudaMemset(grouped_output.columnwise_scale_inv.get(), 0, num_tensors * col_numel));
+
+  nvte_swizzle_grouped_scaling_factors(grouped_input.get_handle(),
+                                       grouped_output.get_handle(), 0);
+
+  std::vector<uint8_t> output_row(num_tensors * row_numel);
+  std::vector<uint8_t> output_col(num_tensors * col_numel);
+  NVTE_CHECK_CUDA(cudaMemcpy(output_row.data(), grouped_output.scale_inv.get(),
+                             output_row.size(), cudaMemcpyDeviceToHost));
+  NVTE_CHECK_CUDA(cudaMemcpy(output_col.data(), grouped_output.columnwise_scale_inv.get(),
+                             output_col.size(), cudaMemcpyDeviceToHost));
+
+  std::vector<uint8_t> ref_row(num_tensors * row_numel);
+  std::vector<uint8_t> ref_col(num_tensors * col_numel);
+  for (int i = 0; i < num_tensors; ++i) {
+    compute_ref_swizzle<128, 4, true>(input_tensors[i]->rowwise_cpu_scale_inv_ptr<uint8_t>(),
+                                      ref_row.data() + i * row_numel,
+                                      row_shape.data[0], row_shape.data[1]);
+    compute_ref_swizzle<128, 4, false>(
+        input_tensors[i]->columnwise_cpu_scale_inv_ptr<uint8_t>(),
+        ref_col.data() + i * col_numel,
+        col_shape.data[1], col_shape.data[0]);
+  }
+
+  compareResults("grouped_swizzle_rowwise", output_row.data(), ref_row.data(),
+                 num_tensors * row_numel);
+  compareResults("grouped_swizzle_colwise", output_col.data(), ref_col.data(),
+                 num_tensors * col_numel);
+}
+
 class SwizzleTestSuite : public ::testing::TestWithParam<std::tuple<std::pair<int, int>, std::pair<bool, bool>, bool>> {};
 
 
@@ -229,6 +338,41 @@ TEST_P(UnswizzleTestSuite, TestUnswizzle) {
                          scaling_mode.first, scaling_mode.second,
                          transa);
 }
+
+class SwizzleGroupedTestSuite
+    : public ::testing::TestWithParam<std::tuple<int, size_t, size_t>> {};
+
+TEST_P(SwizzleGroupedTestSuite, TestGroupedSwizzleMXFP8) {
+  const auto num_tensors = std::get<0>(GetParam());
+  const auto M = std::get<1>(GetParam());
+  const auto K = std::get<2>(GetParam());
+  performTestGroupedSwizzleMXFP8(num_tensors, M, K);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+  OperatorTest,
+  SwizzleGroupedTestSuite,
+  ::testing::Values(
+    // M and K both divisible by 128
+    std::make_tuple(3, 256, 256),
+    std::make_tuple(4, 128, 128),
+    // M not divisible by 128
+    std::make_tuple(3, 200, 256),
+    std::make_tuple(2, 65, 256),
+    // K not divisible by 128
+    std::make_tuple(3, 256, 160),
+    std::make_tuple(2, 256, 96),
+    // Neither M nor K divisible by 128
+    std::make_tuple(3, 200, 160),
+    std::make_tuple(4, 33, 64),
+    std::make_tuple(2, 1, 32)
+  ),
+  [](const testing::TestParamInfo<SwizzleGroupedTestSuite::ParamType>& info) {
+    return "n" + std::to_string(std::get<0>(info.param)) +
+           "_M" + std::to_string(std::get<1>(info.param)) +
+           "_K" + std::to_string(std::get<2>(info.param));
+  }
+);
 
 namespace {
 
