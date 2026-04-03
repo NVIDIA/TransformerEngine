@@ -153,15 +153,17 @@ void fused_score_for_moe_aux_loss_forward_kernel_launcher(
   // Radix selection is O(E), independent of K, but it needs 4 passes for 32-bit float;
   // switch at K=16 where naive O(K^2*E) starts to dominate
   if (topk < 16) {
-    NVTE_CHECK_CUDA(cudaFuncSetAttribute(fused_score_for_moe_aux_loss_forward_kernel<DataType, TopkFuncType::Naive>,
-                         cudaFuncAttributeMaxDynamicSharedMemorySize, shared_memory_size));
+    NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+        fused_score_for_moe_aux_loss_forward_kernel<DataType, TopkFuncType::Naive>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize, shared_memory_size));
     fused_score_for_moe_aux_loss_forward_kernel<DataType, TopkFuncType::Naive>
         <<<grid_size, kThreadsPerBlock, shared_memory_size, stream>>>(
             logits, num_tokens, num_experts, topk, score_function, scores, routing_map,
             intermediate_output);
   } else {
-    NVTE_CHECK_CUDA(cudaFuncSetAttribute(fused_score_for_moe_aux_loss_forward_kernel<DataType, TopkFuncType::Radix>,
-                         cudaFuncAttributeMaxDynamicSharedMemorySize, shared_memory_size));
+    NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+        fused_score_for_moe_aux_loss_forward_kernel<DataType, TopkFuncType::Radix>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize, shared_memory_size));
     fused_score_for_moe_aux_loss_forward_kernel<DataType, TopkFuncType::Radix>
         <<<grid_size, kThreadsPerBlock, shared_memory_size, stream>>>(
             logits, num_tokens, num_experts, topk, score_function, scores, routing_map,
@@ -321,7 +323,8 @@ void fused_score_for_moe_aux_loss_backward_kernel_launcher(
                               + num_experts * num_token_per_block * sizeof(CompType);  // comp_buf
   check_shared_memory_capacity_num_experts(shared_memory_size, num_experts);
   NVTE_CHECK_CUDA(cudaFuncSetAttribute(fused_score_for_moe_aux_loss_backward_kernel<DataType>,
-                       cudaFuncAttributeMaxDynamicSharedMemorySize, shared_memory_size));
+                                       cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                       shared_memory_size));
   fused_score_for_moe_aux_loss_backward_kernel<DataType>
       <<<grid_size, kThreadsPerBlock, shared_memory_size, stream>>>(
           intermediate_output, grad_scores, num_tokens, num_experts, topk, score_function,
