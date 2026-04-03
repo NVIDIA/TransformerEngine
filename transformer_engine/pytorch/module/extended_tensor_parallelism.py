@@ -17,7 +17,8 @@ from ..distributed import (
 )
 from ..quantized_tensor import QuantizedTensor
 from ..tensor import NVFP4TensorStorage, MXFP8TensorStorage
-from ..utils import nvtx_range_pop, nvtx_range_push
+from ..utils import nvtx_range_pop, nvtx_range_push, round_up_to_nearest_multiple
+from ..constants import NVFP4_BLOCK_SCALING_SIZE, MXFP8_BLOCK_SCALING_SIZE
 from .base import get_dummy_wgrad
 
 import transformer_engine_torch as tex
@@ -354,6 +355,38 @@ class ETPShardedParam(torch.nn.Parameter):
                     metadata["columnwise_data"] = metadata["columnwise_data"][
                         :-self.pad_length
                     ]
+            M = self._unsharded_shape[0]
+            if isinstance(tensor, NVFP4TensorStorage):
+                # NVFP4 scale_inv shapes (see NVFP4Quantizer.get_scale_shape):
+                #   rowwise_scale_inv:    [round_up(M, 128),  round_up(ceil(K/16), 4)]
+                #   columnwise_scale_inv: [round_up(K, 128),  round_up(ceil(M/16), 4)]
+                # ETP shards M (dim 0 of the weight), so strip to the unpadded sizes.
+                if metadata.get("rowwise_scale_inv") is not None:
+                    m_rows = round_up_to_nearest_multiple(M, 128)
+                    metadata["rowwise_scale_inv"] = metadata["rowwise_scale_inv"][:m_rows]
+                if metadata.get("columnwise_scale_inv") is not None:
+                    m_tiles = round_up_to_nearest_multiple(
+                        math.ceil(M / NVFP4_BLOCK_SCALING_SIZE), 4
+                    )
+                    metadata["columnwise_scale_inv"] = (
+                        metadata["columnwise_scale_inv"][:, :m_tiles].contiguous()
+                    )
+            else:
+                # MXFP8 scale_inv shapes (see MXFP8Quantizer.get_scale_shape):
+                #   rowwise_scale_inv:    [round_up(M, 128),     round_up(K//32, 4)]
+                #   columnwise_scale_inv: [round_up(M//32, 4),   round_up(K, 128)]
+                # ETP shards M (dim 0 of the weight), so strip to the unpadded sizes.
+                if metadata.get("rowwise_scale_inv") is not None:
+                    m_rows = round_up_to_nearest_multiple(M, 128)
+                    metadata["rowwise_scale_inv"] = metadata["rowwise_scale_inv"][:m_rows]
+                if metadata.get("columnwise_scale_inv") is not None:
+                    m_tiles = round_up_to_nearest_multiple(
+                        M // MXFP8_BLOCK_SCALING_SIZE, 4
+                    )
+                    metadata["columnwise_scale_inv"] = (
+                        metadata["columnwise_scale_inv"][:m_tiles]
+                    )
+
             return type(tensor)(**metadata, shape=self._unsharded_shape, dtype=torch.bfloat16)
         else:
             return tensor[:-self.pad_length]
