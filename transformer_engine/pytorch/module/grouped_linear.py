@@ -51,8 +51,49 @@ from ..quantized_tensor import (
     prepare_for_saving,
     restore_from_func_ctx,
 )
+from ..tensor.hybrid_tensor import HybridQuantizer
 from ...debug.pytorch.debug_quantization import DebugQuantizer
 from ...debug.pytorch.debug_state import TEDebugState
+
+
+def _has_hybrid_quantizer(quantizers):
+    """Check if any quantizer in the list is a HybridQuantizer."""
+    return any(isinstance(q, HybridQuantizer) for q in quantizers if q is not None)
+
+
+def _hybrid_split_quantize(tensor, m_splits, quantizers):
+    """Grouped split+quantize for HybridQuantizer lists.
+
+    Runs tex.split_quantize twice (once per direction with the native
+    sub-quantizers), then zips the results into HybridQuantizedTensorStorage.
+    Non-hybrid quantizers in the list fall back to per-split Python quantize.
+    """
+    from ..tensor.storage.hybrid_tensor_storage import HybridQuantizedTensorStorage as HybridStorage
+
+    row_quantizers = [q.rowwise_quantizer for q in quantizers]
+    col_quantizers = [q.columnwise_quantizer for q in quantizers]
+
+    row_results = tex.split_quantize(tensor, m_splits, row_quantizers)
+    col_results = tex.split_quantize(tensor, m_splits, col_quantizers)
+
+    return [
+        HybridStorage(
+            rowwise_storage=row,
+            columnwise_storage=col,
+            rowwise_quantizer=rq,
+            columnwise_quantizer=cq,
+            quantizer=q,
+            fake_dtype=tensor.dtype,
+        )
+        for row, col, rq, cq, q in zip(
+            row_results,
+            col_results,
+            row_quantizers,
+            col_quantizers,
+            quantizers,
+        )
+    ]
+
 
 __all__ = ["GroupedLinear"]
 
@@ -144,7 +185,8 @@ class _GroupedLinear(torch.autograd.Function):
             )
         inp_view = inp.reshape(-1, in_features)
         inputmats: list
-        if fp8 and not debug:
+        hybrid = _has_hybrid_quantizer(input_quantizers)
+        if fp8 and not debug and not hybrid:
             # Disable bulk allocation when CPU offloading is active: offloading skips small
             # tensors (like scales), but bulk allocation shares storage across all tensors,
             # so if scales can't be offloaded, nothing in the group can be offloaded.
@@ -154,6 +196,8 @@ class _GroupedLinear(torch.autograd.Function):
                 input_quantizers,
                 disable_bulk_allocation=cpu_offloading,
             )
+        elif fp8 and hybrid:
+            inputmats = _hybrid_split_quantize(inp_view, m_splits, input_quantizers)
         elif debug:
             inputmats = DebugQuantizer.multi_tensor_quantize(
                 inp_view, input_quantizers, m_splits, activation_dtype
@@ -338,7 +382,8 @@ class _GroupedLinear(torch.autograd.Function):
             grad_output_view = grad_output.contiguous().view(-1, grad_output.shape[-1])
             grad_output = [None] * ctx.num_gemms
             grad_biases = [None] * ctx.num_gemms
-            if ctx.fp8 and not ctx.debug:
+            grad_output_hybrid = _has_hybrid_quantizer(ctx.grad_output_quantizers)
+            if ctx.fp8 and not ctx.debug and not grad_output_hybrid:
                 if ctx.use_bias:
                     grad_output_mats = torch.split(grad_output_view, ctx.m_splits)
                     recipe = ctx.fp8_recipe
@@ -365,6 +410,16 @@ class _GroupedLinear(torch.autograd.Function):
                         ctx.m_splits,
                         ctx.grad_output_quantizers,
                     )
+            elif ctx.fp8 and grad_output_hybrid:
+                if ctx.use_bias:
+                    grad_output_mats = torch.split(grad_output_view, ctx.m_splits)
+                    for i in range(ctx.num_gemms):
+                        grad_biases[i] = grad_output_mats[i].sum(dim=0)
+                grad_output = _hybrid_split_quantize(
+                    grad_output_view,
+                    ctx.m_splits,
+                    ctx.grad_output_quantizers,
+                )
             elif ctx.debug:
                 grad_output_mats = torch.split(grad_output_view, ctx.m_splits)
                 for i in range(ctx.num_gemms):
@@ -451,8 +506,13 @@ class _GroupedLinear(torch.autograd.Function):
                             else:
                                 input_quantizer.set_usage(rowwise=False, columnwise=True)
                     inputmats: list
-                    if ctx.fp8 and not ctx.debug:
+                    input_hybrid = _has_hybrid_quantizer(ctx.input_quantizers)
+                    if ctx.fp8 and not ctx.debug and not input_hybrid:
                         inputmats = tex.split_quantize(inp_view, ctx.m_splits, ctx.input_quantizers)
+                    elif ctx.fp8 and input_hybrid:
+                        inputmats = _hybrid_split_quantize(
+                            inp_view, ctx.m_splits, ctx.input_quantizers
+                        )
                     elif ctx.debug:
                         inputmats = DebugQuantizer.multi_tensor_quantize(
                             inp_view,
