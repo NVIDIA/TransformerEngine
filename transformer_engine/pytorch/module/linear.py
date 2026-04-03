@@ -963,7 +963,7 @@ class _Linear(torch.autograd.Function):
                 dgrad_work = None
 
         if ctx.etp_size > 1:
-            wgrad = weight.wgrad_reduce_scatter(wgrad, ctx.fuse_wgrad_accumulation)
+            wgrad = weight.wgrad_reduce_scatter(wgrad)
         if ctx.requires_wgrad:
             # Handle custom DDP from mcore.
             if (

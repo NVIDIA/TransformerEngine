@@ -551,7 +551,7 @@ class _GroupedLinear(torch.autograd.Function):
                     return wgrad
 
                 if ctx.etp_size > 1:
-                    wgrad_list = origin_weights[0].batched_wgrad_reduce_scatter(wgrad_list, ctx.fuse_wgrad_accumulation)
+                    wgrad_list = origin_weights[0].batched_wgrad_reduce_scatter(wgrad_list)
                 elif ctx.fuse_wgrad_accumulation:
                     wgrad_list = [
                             handle_custom_ddp_from_mcore(weight, wgrad)

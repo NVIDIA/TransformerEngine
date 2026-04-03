@@ -938,7 +938,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     wgrad, grad_bias_ = wgrad_gemm(ln_out_total, grad_output)
 
                     if ctx.etp_size > 1:
-                        wgrad = origin_weight.wgrad_reduce_scatter(wgrad, ctx.fuse_wgrad_accumulation)
+                        wgrad = origin_weight.wgrad_reduce_scatter(wgrad)
 
                     # Update grad bias if needed
                     if grad_bias is None:
