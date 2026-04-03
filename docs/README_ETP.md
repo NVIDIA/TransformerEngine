@@ -28,7 +28,8 @@ TODO(shiqingf): add performance for Ultra model in nvfp4.
 | **FP8 / MXFP8 support** | Quantized shards with ETP-group amax reduction |
 | **Routed expert support** | Batched coalesced all-gather for all experts in a MoE layer (GroupedLinear) |
 | **Composable with TP/SP** | Orthogonal to tensor parallelism and sequence parallelism |
-| **CUDA Graphs compatible** | ETP is compatible with CUDA Graphs. |
+| **CUDA Graphs compatible** | ETP is compatible with CUDA Graphs. And kernels on sidestreams are no longer required to synchronize at graph breaks
+ |
 | **Debug naming** | `tag_etp_params_with_names(model)` populates human-readable names on every `ETPShardedParam`; the prefetch-link table is printed atomically at the start of the second forward pass |
 
 ### Implementation Mechanisms
@@ -40,7 +41,7 @@ TODO(shiqingf): add performance for Ultra model in nvfp4.
 | **Separate AG and RS state** | All-gather state (`state`) and reduce-scatter state (`rs_state`) are tracked independently per param, allowing forward and backward async ops to proceed without interference |
 | **Dedicated CUDA streams** | AG and RS run on separate global CUDA streams (`AG_STREAM`, `RS_STREAM`), decoupled from the default compute stream; completion is signaled back via per-param CUDA events (`ag_event`, `rs_event`) that the compute stream waits on before consuming the result |
 | **Ticket-based buffer cache** | `ETPWeightCache` assigns persistent tickets via `reserve()`; buffers are lazily allocated on `get()` and returned to the pool on `release()`; `clear()` drops all buffers while keeping tickets valid for lazy re-allocation (used for CUDA Graph re-capture) |
-| **Wgrad reduce-scatter** | Async reduce-scatter of weight gradients, deferred to overlap with next layer's wgrad RS; padding stripped and grad accumulated in `_finalize_wgrad()` |
+| **Wgrad reduce-scatter** | Async reduce-scatter of weight gradients, deferred to overlap with next layer's wgrad RS; `_finalize_wgrad()` resets `rs_state`, strips padding, and accumulates the result into `param.main_grad`, returning a dummy-zero grad to autograd |
 
 ---
 
@@ -129,7 +130,8 @@ BACKWARD  (wgrad path)
     └─ _reduce_scatter pads:  [F, K]  →  [padded_F, K]  (re-pads before RS so chunks are equal)
          └─ reduce-scatter   →  [shard_size, K]  per rank
               └─ _finalize_wgrad → _strip_padding  →  [real_rows, K]
-                   └─ stored as param.grad  (matches local shard shape)
+                   └─ accumulated into param.main_grad  (matches local shard shape)
+                        └─ dummy zero grad returned to autograd
 ```
 
 #### Wrapping call
@@ -159,7 +161,7 @@ NONE ─────────────────────────
 
 The `DATA_READY_SYNC` state is used for on-demand synchronous gathers (cold start or when prefetch is disabled). `DATA_READY` is used after an async gather completes via `handle.wait()`.
 
-Invalid transitions are guarded by `_set_state()` / `_set_rs_state()`.
+Transition validation is implemented but currently commented out in `_set_state()` / `_set_rs_state()` (guarded by `ETP_CONFIG.check_param_states`); both methods unconditionally set the new state in the current implementation.
 
 ### Class Diagram
 
@@ -204,8 +206,6 @@ classDiagram
         +Event rs_event
         +ETPShardHandle _prefetch_handle
         +ETPShardHandle _wgrad_rs_handle
-        +callable _grad_accum_node
-        +callable _grad_accum_hook
         +Quantizer _quantizer
         +bool did_cast_to_low_precision
         +QuantizedTensor quantized
@@ -219,7 +219,6 @@ classDiagram
         +ProcessGroup group
         +List weight_list
         +Tensor wgrad_rs
-        +bool fuse_wgrad_accumulation
         +str _debug_name
         +setup(weight_quantizer)
         +_weights() List
@@ -240,10 +239,9 @@ classDiagram
         +all_gather_and_prefetch(fwd, ...) Tensor
         +all_gather_and_prefetch_bwd() Tensor
         +get_wgrad_tensor() Tensor
-        +register_grad_accum_hook(node, hook)
-        +_finalize_wgrad(param, wgrad_rs, fuse) [staticmethod]
+        +_finalize_wgrad(param, wgrad_rs) [staticmethod]
         +_reduce_scatter(wgrads, async_op) tuple
-        +wgrad_reduce_scatter(wgrad, fuse)
+        +wgrad_reduce_scatter(wgrad)
     }
 
     %% ── Async all-gather handles ─────────────────────────────────────────────
@@ -479,10 +477,10 @@ Step by step for layer `i` backward:
 1. **`all_gather_and_prefetch_bwd()`**: Gather `W_i` for the dgrad GEMM; simultaneously async-prefetch `W_i-1` (the `prev_w`) for the next backward step. Uses `skip_weight_cast=True` — no re-quantization needed since scales are already valid from the forward pass.
 2. **dgrad GEMM**: Compute `dX = dY × W_i` using the gathered weight.
 3. **wgrad GEMM**: Compute `dW = X^T × dY` using the saved input activation.
-4. **`wgrad_reduce_scatter(wgrad, fuse_wgrad_accumulation)`**:
+4. **`wgrad_reduce_scatter(wgrad)`**:
    - **Non-last layer** (`prev_w is not None`): Launch async reduce-scatter; store `ETPShardHandle` in `self._wgrad_rs_handle`. Return `None` to backward (gradient deferred).
-   - **Last layer** (`prev_w is None`): Synchronous reduce-scatter. Call `_finalize_wgrad()` immediately — strips padding, accumulates into `main_grad`, fires grad-accum hook.
-5. **Deferred finish**: At the start of each subsequent layer's `wgrad_reduce_scatter`, `self.next_w._wait_reduce_scatter()` is called, which waits on `next_w._wgrad_rs_handle` and records a CUDA event. Then `_finalize_wgrad()` is called for `next_w` to strip padding, accumulate, and fire the hook. The RS buffer is returned to the pool via `cache.release()`.
+   - **Last layer** (`prev_w is None`): Synchronous reduce-scatter. Call `_finalize_wgrad()` immediately — resets `rs_state` to `NONE`, strips padding (if last rank is padded), accumulates into `param.main_grad`, returns a dummy-zero grad tensor to autograd.
+5. **Deferred finish**: At the start of each subsequent layer's `wgrad_reduce_scatter`, `self.next_w._wait_reduce_scatter()` is called, which waits on `next_w._wgrad_rs_handle` and records a CUDA event. Then `_finalize_wgrad()` is called for `next_w` to reset `rs_state`, strip padding, and accumulate into `main_grad`. The RS buffer is returned to the pool via `cache.release()`.
 
 
 Here is an example of ETP schedule diagram for Hybried Nemotron6 in bf16 as an example (ETP+EP with partial CGs):
@@ -576,8 +574,10 @@ A buffer lives in **exactly one** place at a time:
 
 ```
 reserve()    → slot created, buf=None (no allocation yet)
-get(ticket)  → buf allocated lazily from pool or fresh; stored in slot
-release(ticket) → buf returned to pool; slot.buf set to None
+get(ticket)  → buf allocated lazily from pool or fresh; stored in slot.buf (idempotent)
+release(ticket) → buf appended to pool (slot.buf stays set; production code calls release
+               only after get() has emptied the pool for that key, so the duplicate-check
+               in release() is never triggered)
 clear()      → all slot.buf = None, pool cleared (tickets stay valid; next get() re-allocates)
 ```
 
