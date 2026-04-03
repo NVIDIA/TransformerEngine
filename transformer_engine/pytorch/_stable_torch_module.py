@@ -1469,6 +1469,25 @@ def dequantize(input, otype):  # pylint: disable=redefined-builtin
         if isinstance(a, torch.Tensor) and a.numel() > 0:
             in_amax = a
             break
+
+    # MXFP8 columnwise-only: the columnwise data is stored in transposed layout.
+    # Dequantize by transposing data + scale so the kernel sees consistent rowwise shapes,
+    # then transpose the result back.
+    _is_mxfp8_colonly = (
+        hasattr(input, "_rowwise_data")
+        and input._rowwise_data is None
+        and hasattr(input, "_columnwise_data")
+        and input._columnwise_data is not None
+        and "MXFP8" in type(input).__name__
+    )
+    if _is_mxfp8_colonly:
+        # col_data shape is (M, K), col_scale_inv shape is (ceil(M/32)/4*4, ceil(K/128)*128).
+        # Transpose both so the kernel sees data as (K, M) with scale (ceil(K/128)*128, ceil(M/32)/4*4).
+        t_data = in_data.T.contiguous()
+        t_si = in_scale_inv.T.contiguous() if in_scale_inv is not None else None
+        result = _ops.dequantize(t_data, in_dtype, t_si, in_amax, in_sm, out_te_dtype)
+        return result.T.contiguous()
+
     return _ops.dequantize(in_data, in_dtype, in_scale_inv, in_amax, in_sm, out_te_dtype)
 
 
@@ -1478,24 +1497,146 @@ multi_tensor_quantize = _not_implemented("multi_tensor_quantize")
 def group_quantize(tensor, quantizer, num_tensors, first_dims):
     """Quantize a grouped tensor (multiple tensors concatenated along dim 0).
 
-    Pure Python implementation: splits by first_dims, quantizes each chunk,
-    then constructs a GroupedTensor with concatenated data/scale buffers.
+    For scaling modes supported by nvte_group_quantize (MXFP8), this calls
+    the fused C kernel which handles all chunks in a single kernel launch.
+    For other modes, falls back to per-chunk Python quantization.
     """
-    from transformer_engine.pytorch.tensor._quantize_stable import quantize_new
-    from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
+    from transformer_engine.pytorch.tensor.storage.grouped_tensor_storage import (
+        GroupedTensorStorage,
+    )
 
     tensor = tensor.contiguous()
     N = tensor.shape[-1]
     device = tensor.device
 
     # Get split sizes
+    # Note: .tolist() on a CUDA tensor triggers a D2H copy which is forbidden during
+    # CUDA graph capture. We cache the Python list on the tensor to avoid repeated copies.
     if first_dims is not None:
-        splits = first_dims.tolist() if isinstance(first_dims, torch.Tensor) else list(first_dims)
+        if isinstance(first_dims, torch.Tensor):
+            # Cache the Python list to avoid D2H copy during CUDA graph capture.
+            # The warmup call populates the cache; graph capture reuses it.
+            if not hasattr(first_dims, "_cached_list"):
+                first_dims._cached_list = first_dims.tolist()
+            splits = first_dims._cached_list
+        else:
+            splits = list(first_dims)
     else:
         M_each = tensor.shape[0] // num_tensors
         splits = [M_each] * num_tensors
 
-    # Quantize each chunk
+    total_M = sum(int(s) for s in splits)
+
+    # Determine if we can use the fused C++ group_quantize kernel
+    q_name = type(quantizer).__name__ if quantizer is not None else ""
+    use_fused = "MXFP8" in q_name
+
+    if use_fused and N > 0:
+        return _group_quantize_fused(
+            tensor, quantizer, num_tensors, first_dims, splits, total_M, N, device
+        )
+
+    return _group_quantize_fallback(
+        tensor, quantizer, num_tensors, first_dims, splits, total_M, N, device
+    )
+
+
+def _group_quantize_fused(tensor, quantizer, num_tensors, first_dims, splits, total_M, N, device):
+    """Fused group quantize via nvte_group_quantize C kernel."""
+    from transformer_engine.pytorch.tensor.storage.grouped_tensor_storage import (
+        GroupedTensorStorage,
+    )
+
+    # Build first_dims tensor on device
+    first_dims_tensor = (
+        first_dims
+        if isinstance(first_dims, torch.Tensor)
+        else torch.tensor(splits, dtype=torch.int64, device=device)
+    )
+
+    # Allocate output GroupedTensor with correct buffer sizes via make_grouped_tensor
+    # For total_M == 0 (all groups empty), use max(total_M, 1) so that
+    # make_grouped_tensor allocates valid (but tiny) buffers.
+    alloc_M = max(total_M, 1)
+    output_gt = GroupedTensorStorage.make_grouped_tensor(
+        num_tensors=num_tensors,
+        first_dims=first_dims_tensor,
+        last_dims=None,
+        logical_first_dim=alloc_M,
+        logical_last_dim=N,
+        quantizer=quantizer,
+        device=device,
+        dtype=tensor.dtype,
+    )
+    # Fix up the logical shape to reflect the actual total_M (may be 0)
+    output_gt.logical_shape = (total_M, N)
+
+    # When total_M == 0 (no valid data), skip the C++ kernel and return
+    # the empty GroupedTensor directly - the kernel asserts non-empty buffers.
+    if total_M == 0:
+        output_gt._with_gemm_swizzled_scales = bool(getattr(quantizer, "optimize_for_gemm", False))
+        return output_gt
+
+    # Build input tensor_offsets: cumulative element offsets based on first_dims * N
+    input_tensor_offsets = torch.cat(
+        [
+            torch.zeros(1, device=device, dtype=torch.int64),
+            torch.cumsum(first_dims_tensor * N, dim=0),
+        ]
+    )
+
+    # Input TE dtype from torch dtype
+    _TORCH_TO_TE_DT = {
+        torch.float32: int(DType.kFloat32),
+        torch.float16: int(DType.kFloat16),
+        torch.bfloat16: int(DType.kBFloat16),
+    }
+    input_te_dtype = _TORCH_TO_TE_DT.get(tensor.dtype, int(DType.kBFloat16))
+
+    # Output metadata
+    output_te_dtype = _quantizer_to_te_dtype(quantizer)
+    output_scaling_mode = _quantizer_to_scaling_mode(quantizer)
+    output_swizzled = bool(getattr(quantizer, "optimize_for_gemm", False))
+
+    # Call the fused C++ kernel
+    _ops.group_quantize(
+        # Input grouped tensor
+        tensor.reshape(-1),  # flat 1D input data
+        first_dims_tensor,
+        input_tensor_offsets,
+        input_te_dtype,
+        total_M,  # input logical dim 0 (sum of first_dims, not buffer size)
+        N,
+        num_tensors,
+        # Output grouped tensor
+        output_gt.rowwise_data,
+        output_gt.columnwise_data,
+        output_gt.scale_inv,
+        output_gt.columnwise_scale_inv,
+        output_gt.first_dims if output_gt.first_dims is not None else first_dims_tensor,
+        output_gt.tensor_offsets if output_gt.tensor_offsets is not None else input_tensor_offsets,
+        output_te_dtype,
+        output_scaling_mode,
+        total_M,
+        N,
+        output_swizzled,
+    )
+
+    # Set the swizzled flag on the output GroupedTensor
+    output_gt._with_gemm_swizzled_scales = output_swizzled
+
+    return output_gt
+
+
+def _group_quantize_fallback(
+    tensor, quantizer, num_tensors, first_dims, splits, total_M, N, device
+):
+    """Fallback per-chunk Python group quantize for non-MXFP8 scaling modes."""
+    from transformer_engine.pytorch.tensor._quantize_stable import quantize_new
+    from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
+
+    # Quantize each chunk using slicing (not torch.split, which fails when
+    # sum(splits) != tensor.shape[0], e.g. in paged stashing with all-zero splits)
     chunks = []
     offset = 0
     for i in range(num_tensors):
@@ -1509,6 +1650,7 @@ def group_quantize(tensor, quantizer, num_tensors, first_dims):
     all_si = []
     all_cw_data = []
     all_cw_si = []
+    all_amax = []
     offsets_list = [0]
     si_offsets_list = [0]
     cw_si_offsets_list = [0]
@@ -1521,6 +1663,10 @@ def group_quantize(tensor, quantizer, num_tensors, first_dims):
         rsi = getattr(qt, "_rowwise_scale_inv", getattr(qt, "_scale_inv", None))
         cwd = getattr(qt, "_columnwise_data", None)
         cwsi = getattr(qt, "_columnwise_scale_inv", None)
+        # Collect amax (needed by NVFP4 for dequantization)
+        amax_val = getattr(qt, "_amax_rowwise", None) or getattr(qt, "_amax", None)
+        if isinstance(amax_val, torch.Tensor) and amax_val.numel() > 0:
+            all_amax.append(amax_val.reshape(-1))
         if rd is not None:
             all_data.append(rd.reshape(-1))
         if rsi is not None:
@@ -1550,8 +1696,8 @@ def group_quantize(tensor, quantizer, num_tensors, first_dims):
     flat_si = torch.cat(all_si) if all_si else None
     flat_cw_data = torch.cat(all_cw_data) if all_cw_data else None
     flat_cw_si = torch.cat(all_cw_si) if all_cw_si else None
+    flat_amax = torch.cat(all_amax) if all_amax else None
 
-    total_M = sum(int(s) for s in splits)
     logical_shape = (total_M, N)
 
     # Build first_dims tensor on device
@@ -1574,6 +1720,7 @@ def group_quantize(tensor, quantizer, num_tensors, first_dims):
         columnwise_data=flat_cw_data,
         scale_inv=flat_si,
         columnwise_scale_inv=flat_cw_si,
+        amax=flat_amax,
         first_dims=first_dims_tensor,
         tensor_offsets=tensor_offsets,
         offsets=offsets_list,
@@ -1630,7 +1777,7 @@ def swizzle_scales_for_gemm_(tensor):
 
     if hasattr(tensor, "_rowwise_data") and getattr(tensor, "_rowwise_scale_inv", None) is not None:
         tensor._rowwise_scale_inv = _ops.swizzle_scale_for_gemm(
-            tensor._rowwise_data, tensor._rowwise_scale_inv, te_dtype, scaling_mode
+            tensor._rowwise_data, te_dtype, tensor._rowwise_scale_inv, scaling_mode, False
         )
 
     if (
@@ -1638,7 +1785,7 @@ def swizzle_scales_for_gemm_(tensor):
         and getattr(tensor, "_columnwise_scale_inv", None) is not None
     ):
         tensor._columnwise_scale_inv = _ops.swizzle_scale_for_gemm(
-            tensor._columnwise_data, tensor._columnwise_scale_inv, te_dtype, scaling_mode
+            tensor._columnwise_data, te_dtype, tensor._columnwise_scale_inv, scaling_mode, True
         )
 
     if hasattr(tensor, "_scale_inv") and getattr(tensor, "_scale_inv", None) is not None:
@@ -1764,8 +1911,9 @@ def _make_activation_bwd(act_type):
 
         q_type = type(quantizer).__name__
         is_current_scaling = "CurrentScaling" in q_type
+        is_nvfp4 = "NVFP4" in q_type
 
-        if is_current_scaling:
+        if is_current_scaling or is_nvfp4:
             # Current scaling: compute backward activation to hp output first,
             # then quantize. This mirrors the forward path for current scaling.
             # The fused dactivation kernel for delayed scaling uses a pre-existing
@@ -2404,9 +2552,10 @@ def te_general_grouped_gemm_for_discrete_out(  # pylint: disable=unused-argument
     B_args = _grouped_tensor_to_stable_args(B)
 
     num_d = len(D)
-    device = A_args[0].device if A_args[0] is not None else alpha.device
-    D_rowwise_ptrs = torch.zeros(num_d, dtype=torch.int64, device=device)
-    D_si_ptrs = torch.zeros(num_d, dtype=torch.int64, device=device)
+    # These tensors store raw data pointers (CUDA addresses as integers) and metadata.
+    # They MUST be on CPU because the C++ kernel dereferences them on the host.
+    D_rowwise_ptrs = torch.zeros(num_d, dtype=torch.int64, device="cpu")
+    D_si_ptrs = torch.zeros(num_d, dtype=torch.int64, device="cpu")
     D_shapes = torch.zeros(num_d, 2, dtype=torch.int64, device="cpu")
     D_te_dtypes = torch.zeros(num_d, dtype=torch.int32, device="cpu")
     D_scaling_modes = torch.zeros(num_d, dtype=torch.int32, device="cpu")
@@ -2430,9 +2579,9 @@ def te_general_grouped_gemm_for_discrete_out(  # pylint: disable=unused-argument
         transb,
         D_rowwise_ptrs,
         D_si_ptrs,
-        D_shapes.to(device),
-        D_te_dtypes.to(device),
-        D_scaling_modes.to(device),
+        D_shapes,
+        D_te_dtypes,
+        D_scaling_modes,
         num_d,
         alpha,
         beta,
@@ -3165,9 +3314,11 @@ def fused_attn_fwd(  # pylint: disable=unused-argument
         O_data, O_dtype_int, O_si, O_sm = extract_tensor_data(O_tensor)
         O_amax = getattr(o_quantizer, "amax", None)
         O_scale = getattr(o_quantizer, "scale", None)
-        # Initialize scale_inv = 1/scale (pybind does this in Float8Quantizer::create_tensor).
-        # make_empty leaves _scale_inv uninitialized; the NVTE kernel does NOT write it.
-        if O_scale is not None and O_si is not None:
+        # Initialize scale_inv = 1/scale for delayed scaling (where scale is pre-computed).
+        # For current scaling, scale is uninitialized (torch.empty) and the kernel computes
+        # it on-the-fly, so we must NOT do reciprocal on garbage values.
+        o_is_current = "CurrentScaling" in type(o_quantizer).__name__
+        if O_scale is not None and O_si is not None and not o_is_current:
             O_si.copy_(O_scale.float().reciprocal())
     else:
         O_tensor = torch.empty(O_shape, dtype=O_torch_dtype, device=device)
@@ -3180,8 +3331,9 @@ def fused_attn_fwd(  # pylint: disable=unused-argument
         S_data, S_dtype_int, S_si, S_sm = extract_tensor_data(S_tensor)
         S_amax = getattr(s_quantizer, "amax", None)
         S_scale = getattr(s_quantizer, "scale", None)
-        # Initialize scale_inv = 1/scale (same as O above)
-        if S_scale is not None and S_si is not None:
+        # Initialize scale_inv = 1/scale for delayed scaling only (same logic as O above)
+        s_is_current = "CurrentScaling" in type(s_quantizer).__name__
+        if S_scale is not None and S_si is not None and not s_is_current:
             S_si.copy_(S_scale.float().reciprocal())
     else:
         S_tensor = torch.empty([0], dtype=torch.float32, device=device)
@@ -3357,10 +3509,13 @@ def fused_attn_bwd(
         amax = (
             q_amax if q_amax is not None else torch.zeros([1], dtype=torch.float32, device=device)
         )
-        if q_scale is not None:
+        is_current = "CurrentScaling" in type(quantizer).__name__
+        if q_scale is not None and not is_current:
             scale = q_scale.clone().detach().to(dtype=torch.float32, device=device).reshape(1)
             si = (1.0 / q_scale).to(dtype=torch.float32, device=device).reshape(1)
         else:
+            # Current scaling: scale is uninitialized, kernel computes it on-the-fly.
+            # Use identity scale (1.0) as placeholder.
             scale = torch.ones([1], dtype=torch.float32, device=device)
             si = torch.ones([1], dtype=torch.float32, device=device)
         return te_dt, amax, scale, si

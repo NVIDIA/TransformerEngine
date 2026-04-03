@@ -227,9 +227,13 @@ def quantize_into(src, quantizer, dst, noop_flag=None):
             # flatten to (K*M_rest, M_last) — wrong shape for col_si.
             # Reshape to (K=last dim of src, M=all other dims) so the kernel sees
             # (dim0=K, dim1=M) and produces the correct per-row scale shape.
-            K = src.shape[-1]
-            M = src.numel() // K
-            src_transposed_2d = _transpose_for_colwise(src).view(K, M)
+            if src.ndim == 0:
+                # Scalar tensor: treat as (1, 1) for columnwise quantization
+                src_transposed_2d = src.reshape(1, 1)
+            else:
+                K = src.shape[-1]
+                M = src.numel() // K
+                src_transposed_2d = _transpose_for_colwise(src).view(K, M)
             ops.quantize(
                 src_transposed_2d,
                 col_data,
@@ -509,10 +513,14 @@ def quantize_into(src, quantizer, dst, noop_flag=None):
                 # different block directions). Quantize src in "columnwise mode" by reshaping
                 # the transposed src to (K, M) and calling ops.quantize in ROWWISE mode.
                 # This gives per-K-block scales == the per-M-block columnwise scales we need.
-                if col_si is not None and src.ndim >= 1:
-                    K = src.shape[-1]
-                    M = src.numel() // K
-                    src_transposed_2d = _transpose_for_colwise(src).view(K, M)
+                if col_si is not None:
+                    if src.ndim == 0:
+                        # Scalar tensor: treat as (1, 1) for columnwise quantization
+                        src_transposed_2d = src.reshape(1, 1)
+                    else:
+                        K = src.shape[-1]
+                        M = src.numel() // K
+                        src_transposed_2d = _transpose_for_colwise(src).view(K, M)
                     ops.quantize(
                         src_transposed_2d,
                         col_data,

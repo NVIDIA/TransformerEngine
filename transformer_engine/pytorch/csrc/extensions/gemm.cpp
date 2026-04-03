@@ -507,8 +507,8 @@ STABLE_TORCH_LIBRARY_FRAGMENT(transformer_engine_stable, m) {
       "Tensor? A_amax=None, Tensor? A_colwise_amax=None, "
       "Tensor? B_amax=None, Tensor? B_colwise_amax=None) -> ()");
   m.def(
-      "swizzle_scale_for_gemm(Tensor data, Tensor scale_inv, int te_dtype, int scaling_mode) -> "
-      "Tensor");
+      "swizzle_scale_for_gemm(Tensor data, int te_dtype, Tensor scale_inv, int scaling_mode, "
+      "bool columnwise=False) -> Tensor");
 }
 
 STABLE_TORCH_LIBRARY_IMPL(transformer_engine_stable, CUDA, m) {

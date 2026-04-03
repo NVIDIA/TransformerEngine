@@ -6,11 +6,10 @@
 import os
 from pathlib import Path
 
-from typing import List
-
 import setuptools
 
 from .utils import all_files_in_dir, get_cuda_include_dirs, debug_build_enabled
+from typing import List
 
 
 def install_requirements() -> List[str]:
@@ -49,7 +48,7 @@ def setup_pytorch_stable_extension(
     if not sources:
         return None
 
-    # Include directories
+    # Header files
     include_dirs = get_cuda_include_dirs()
     include_dirs.extend(
         [
@@ -64,49 +63,45 @@ def setup_pytorch_stable_extension(
 
     # Compiler flags
     cxx_flags = ["-O3", "-fvisibility=hidden", "-std=c++17", "-DUSE_CUDA"]
-    if bool(int(os.environ.get("NVTE_ENABLE_NVSHMEM", "0"))):
-        cxx_flags.append("-DNVTE_ENABLE_NVSHMEM")
-        nvshmem_home = os.environ.get("NVSHMEM_HOME", "")
-        if nvshmem_home:
-            include_dirs.append(Path(nvshmem_home) / "include")
-        # Try system NVSHMEM paths (Debian/Ubuntu packages)
-        for nvshmem_inc in ["/usr/include/nvshmem_13", "/usr/local/include/nvshmem"]:
-            if os.path.isdir(nvshmem_inc):
-                include_dirs.append(Path(nvshmem_inc))
-                break
     if debug_build_enabled():
         cxx_flags.append("-g")
         cxx_flags.append("-UNDEBUG")
     else:
         cxx_flags.append("-g0")
 
-    # Library directories and libraries
-    # Find the TE common library (libtransformer_engine.so)
-    te_lib_dir = Path(csrc_source_files).parent.parent.parent
+    library_dirs = []
+    libraries = []
+
+    # PyTorch and CUDA libraries (needed since we don't use CppExtension)
+    torch_lib_dir = str(Path(torch.utils.cmake_prefix_path).parent.parent / "lib")
     cuda_home = os.environ.get("CUDA_HOME", os.environ.get("CUDA_PATH", "/usr/local/cuda"))
     cuda_lib_dir = os.path.join(cuda_home, "lib64")
     if not os.path.isdir(cuda_lib_dir):
         cuda_lib_dir = os.path.join(cuda_home, "lib")
-    library_dirs = [
-        str(Path(torch.utils.cmake_prefix_path).parent.parent / "lib"),
-        str(te_lib_dir),
-        cuda_lib_dir,
-    ]
-    libraries = ["torch", "torch_cpu", "c10", "cudart", "transformer_engine"]
+    library_dirs.extend([torch_lib_dir, cuda_lib_dir])
+    libraries.extend(["torch", "torch_cpu", "c10", "cudart", "transformer_engine"])
+
+    if bool(int(os.getenv("NVTE_ENABLE_NVSHMEM", 0))):
+        assert (
+            os.getenv("NVSHMEM_HOME") is not None
+        ), "NVSHMEM_HOME must be set when compiling with NVTE_ENABLE_NVSHMEM=1"
+        nvshmem_home = Path(os.getenv("NVSHMEM_HOME"))
+        include_dirs.append(nvshmem_home / "include")
+        library_dirs.append(nvshmem_home / "lib")
+        libraries.append("nvshmem_host")
+        cxx_flags.append("-DNVTE_ENABLE_NVSHMEM")
 
     # Set rpath so the stable extension can find libtransformer_engine.so at runtime.
-    # Use $ORIGIN for co-located libraries plus the absolute path for editable installs.
-    extra_link_args = [
-        "-Wl,-rpath,$ORIGIN",
-        f"-Wl,-rpath,{te_lib_dir.resolve()}",
-    ]
+    # Use $ORIGIN for co-located libraries.
+    extra_link_args = ["-Wl,-rpath,$ORIGIN"]
 
+    # Construct stable ABI extension
     return setuptools.Extension(
         name="transformer_engine.te_stable_abi",
         sources=[str(src) for src in sources],
         include_dirs=[str(inc) for inc in include_dirs],
         extra_compile_args=cxx_flags,
-        libraries=libraries,
-        library_dirs=library_dirs,
+        libraries=[str(lib) for lib in libraries],
+        library_dirs=[str(lib_dir) for lib_dir in library_dirs],
         extra_link_args=extra_link_args,
     )

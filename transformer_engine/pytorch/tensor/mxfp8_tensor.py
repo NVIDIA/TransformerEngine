@@ -100,6 +100,13 @@ class MXFP8Quantizer(Quantizer):
         if tensor.numel() > 0:
             t = tensor.contiguous() if not tensor.is_contiguous() else tensor
             quantize_into(t, self, dst)
+        # When optimize_for_gemm is True, swizzle scales for cuBLAS GEMM.
+        # The stable ABI quantize kernel does not fuse the swizzle, so we
+        # apply it as a post-processing step here.
+        if getattr(self, "optimize_for_gemm", False) and tensor.numel() > 0:
+            import transformer_engine_torch as tex
+
+            tex.swizzle_scales_for_gemm_(dst)
         return dst
 
     def is_quantizable(self, inp: torch.Tensor) -> bool:

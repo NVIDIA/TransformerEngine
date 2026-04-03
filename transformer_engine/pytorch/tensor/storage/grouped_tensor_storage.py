@@ -421,7 +421,7 @@ class GroupedTensorStorage:
         all_same_last = last_dims is None
 
         assert all_same_last, "Last dim must be uniform for GroupedTensor"
-        assert logical_first_dim > 0, "Logical first dim must be positive for GroupedTensor"
+        assert logical_first_dim >= 0, "Logical first dim must be non-negative for GroupedTensor"
         assert logical_last_dim > 0, "Logical last dim must be positive for GroupedTensor"
 
         # assert (
@@ -445,8 +445,17 @@ class GroupedTensorStorage:
                     torch.cumsum(first_dims * logical_last_dim, dim=0),
                 ]
             )
-            offsets = tensor_offsets.tolist()
-            first_dims_list = first_dims.tolist()
+            # Cache .tolist() on first_dims to avoid D2H copies during CUDA
+            # graph capture. The warmup call populates the cache; captures reuse it.
+            # tensor_offsets is derived from first_dims, so we compute offsets
+            # from the cached Python list instead of calling tensor_offsets.tolist().
+            if not hasattr(first_dims, "_cached_list"):
+                first_dims._cached_list = first_dims.tolist()
+            first_dims_list = first_dims._cached_list
+            # Compute offsets from the cached list (no D2H copy)
+            offsets = [0]
+            for fd in first_dims_list:
+                offsets.append(offsets[-1] + int(fd) * logical_last_dim)
             for i in range(num_tensors):
                 shape.append((first_dims_list[i], logical_last_dim))
         else:

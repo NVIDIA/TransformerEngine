@@ -218,6 +218,84 @@ Tensor dequantize(Tensor input_data, int64_t input_te_dtype, std::optional<Tenso
   return output;
 }
 
+// ============================================================================
+// Group Quantize: input grouped tensor (hp) → output grouped tensor (fp8)
+// Wraps nvte_group_quantize for fused per-group quantization.
+// ============================================================================
+
+void group_quantize(
+    // Input grouped tensor (high-precision)
+    Tensor input_rowwise_data, Tensor input_first_dims, Tensor input_tensor_offsets,
+    int64_t input_te_dtype, int64_t input_logical_0, int64_t input_logical_1, int64_t num_tensors,
+    // Output grouped tensor (quantized)
+    std::optional<Tensor> output_rowwise_data, std::optional<Tensor> output_colwise_data,
+    std::optional<Tensor> output_scale_inv, std::optional<Tensor> output_colwise_scale_inv,
+    Tensor output_first_dims, Tensor output_tensor_offsets, int64_t output_te_dtype,
+    int64_t output_scaling_mode, int64_t output_logical_0, int64_t output_logical_1,
+    bool output_swizzled) {
+  auto in_dtype = static_cast<DType>(input_te_dtype);
+  auto out_dtype = static_cast<DType>(output_te_dtype);
+  auto out_sm = static_cast<NVTEScalingMode>(output_scaling_mode);
+  DType si_dtype = DType::kFloat32;
+  if (out_sm == NVTE_MXFP8_1D_SCALING) {
+    si_dtype = DType::kFloat8E8M0;
+  } else if (out_sm == NVTE_NVFP4_1D_SCALING) {
+    si_dtype = DType::kFloat8E4M3;
+  }
+
+  auto n = static_cast<size_t>(num_tensors);
+
+  // Build input GroupedTensorWrapper (unquantized, no scaling)
+  std::vector<size_t> in_logical = {static_cast<size_t>(input_logical_0),
+                                    static_cast<size_t>(input_logical_1)};
+  GroupedTensorWrapper input_gt(n, in_logical, NVTE_DELAYED_TENSOR_SCALING);
+  {
+    auto shape = getStableTensorShape(input_rowwise_data);
+    input_gt.set_rowwise_data(input_rowwise_data.data_ptr(), in_dtype, shape);
+  }
+  {
+    auto shape = getStableTensorShape(input_first_dims);
+    input_gt.set_first_dims(input_first_dims.data_ptr(), DType::kInt64, shape);
+  }
+  {
+    auto shape = getStableTensorShape(input_tensor_offsets);
+    input_gt.set_tensor_offsets(input_tensor_offsets.data_ptr(), DType::kInt64, shape);
+  }
+
+  // Build output GroupedTensorWrapper (quantized)
+  std::vector<size_t> out_logical = {static_cast<size_t>(output_logical_0),
+                                     static_cast<size_t>(output_logical_1)};
+  GroupedTensorWrapper output_gt(n, out_logical, out_sm);
+  if (output_rowwise_data.has_value() && output_rowwise_data->numel() > 0) {
+    auto shape = getStableTensorShape(*output_rowwise_data);
+    output_gt.set_rowwise_data(output_rowwise_data->data_ptr(), out_dtype, shape);
+  }
+  if (output_colwise_data.has_value() && output_colwise_data->numel() > 0) {
+    auto shape = getStableTensorShape(*output_colwise_data);
+    output_gt.set_columnwise_data(output_colwise_data->data_ptr(), out_dtype, shape);
+  }
+  if (output_scale_inv.has_value() && output_scale_inv->numel() > 0) {
+    auto shape = getStableTensorShape(*output_scale_inv);
+    output_gt.set_rowwise_scale_inv(output_scale_inv->data_ptr(), si_dtype, shape);
+  }
+  if (output_colwise_scale_inv.has_value() && output_colwise_scale_inv->numel() > 0) {
+    auto shape = getStableTensorShape(*output_colwise_scale_inv);
+    output_gt.set_columnwise_scale_inv(output_colwise_scale_inv->data_ptr(), si_dtype, shape);
+  }
+  {
+    auto shape = getStableTensorShape(output_first_dims);
+    output_gt.set_first_dims(output_first_dims.data_ptr(), DType::kInt64, shape);
+  }
+  {
+    auto shape = getStableTensorShape(output_tensor_offsets);
+    output_gt.set_tensor_offsets(output_tensor_offsets.data_ptr(), DType::kInt64, shape);
+  }
+  output_gt.set_with_gemm_swizzled_scales(output_swizzled);
+
+  auto stream = getCurrentCUDAStreamRaw(input_rowwise_data.get_device_index());
+  nvte_group_quantize(input_gt.data(), output_gt.data(), stream);
+}
+
 }  // namespace transformer_engine::pytorch::stable
 
 STABLE_TORCH_LIBRARY_FRAGMENT(transformer_engine_stable, m) {
@@ -242,6 +320,28 @@ STABLE_TORCH_LIBRARY_FRAGMENT(transformer_engine_stable, m) {
   m.def(
       "dequantize(Tensor input_data, int input_te_dtype, Tensor? input_scale_inv, Tensor? "
       "input_amax, int scaling_mode, int output_te_dtype) -> Tensor");
+  // group_quantize: input(7) + output(11) = 18 args
+  m.def(
+      "group_quantize("
+      "Tensor input_rowwise_data, "
+      "Tensor input_first_dims, "
+      "Tensor input_tensor_offsets, "
+      "int input_te_dtype, "
+      "int input_logical_0, "
+      "int input_logical_1, "
+      "int num_tensors, "
+      "Tensor? output_rowwise_data, "
+      "Tensor? output_colwise_data, "
+      "Tensor? output_scale_inv, "
+      "Tensor? output_colwise_scale_inv, "
+      "Tensor output_first_dims, "
+      "Tensor output_tensor_offsets, "
+      "int output_te_dtype, "
+      "int output_scaling_mode, "
+      "int output_logical_0, "
+      "int output_logical_1, "
+      "bool output_swizzled"
+      ") -> ()");
 }
 
 STABLE_TORCH_LIBRARY_IMPL(transformer_engine_stable, CUDA, m) {
@@ -251,4 +351,5 @@ STABLE_TORCH_LIBRARY_IMPL(transformer_engine_stable, CUDA, m) {
   m.impl("quantize_from_amax", TORCH_BOX(quantize_from_amax));
   m.impl("quantize_bidirectional", TORCH_BOX(quantize_bidirectional));
   m.impl("dequantize", TORCH_BOX(dequantize));
+  m.impl("group_quantize", TORCH_BOX(group_quantize));
 }

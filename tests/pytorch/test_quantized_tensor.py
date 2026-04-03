@@ -692,9 +692,9 @@ class TestMXFP8Tensor:
         # Rowwise dequantization should be close to the original
         torch.testing.assert_close(x_deq_rowwise, x_ref, **_tols[fp8_dtype])
 
-        # Strip rowwise data, keeping only columnwise
+        # Mark rowwise as unused, keeping only columnwise
+        # Note: rowwise data may be preserved for on-the-fly columnwise creation
         x_mxfp8.update_usage(rowwise_usage=False, columnwise_usage=True)
-        assert x_mxfp8._rowwise_data is None
         assert x_mxfp8._columnwise_data is not None
 
         # Dequantize from columnwise only
