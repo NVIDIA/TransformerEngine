@@ -166,9 +166,7 @@ def quantize_master_weights(
                 (model_weight, master_weight, start_offset, fsdp_shard_model_weight)
             )
         else:
-            raise ValueError(
-                f"quantize_master_weights for {type(quantizer)} is not supported yet"
-            )
+            raise ValueError(f"quantize_master_weights for {type(quantizer)} is not supported yet")
 
     extra_args = [group, use_fsdp_shard_model_weights, manual_post_all_gather_processing]
     if len(delayed_scaling_params) > 0:
