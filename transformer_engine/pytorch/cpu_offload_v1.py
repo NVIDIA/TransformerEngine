@@ -19,7 +19,7 @@ CPUOffloadEnabled = False
 CPUOffloadedLayer = False
 
 
-def mark_activation_offload(*tensors):
+def mark_activation_offload(*tensors, offload: bool = True):
     """Set the type of the offloading needed for a tensor."""
     if TEDebugState.debug_enabled:
         raise RuntimeError("CPU offload is not supported in debug mode.")
@@ -28,16 +28,16 @@ def mark_activation_offload(*tensors):
         if tensor is None:
             continue
         if type(tensor) in [torch.Tensor, torch.nn.Parameter]:
-            tensor.activation_offloading = True
+            tensor.activation_offloading = offload
         else:
             data_tensors = tensor.get_data_tensors()
             for tensor in data_tensors:
                 if tensor is not None:
-                    tensor.activation_offloading = True
+                    tensor.activation_offloading = offload
                     # This is a hack to force clear the tensor after it is offloaded.
                     # It is needed, because .*TensorStorage classes are saved in the ctx,
                     # and they contain the reference to their data tensors.
-                    tensor.needs_force_clear = True
+                    tensor.needs_force_clear = offload
 
 
 def is_cpu_offload_enabled() -> bool:
