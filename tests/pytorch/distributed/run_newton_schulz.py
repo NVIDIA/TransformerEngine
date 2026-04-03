@@ -51,8 +51,8 @@ def main():
     n = args.matrix_cols if args.matrix_cols is not None else args.matrix_rows
     coefficients = get_coefficients(args.num_iterations)
 
-    # Ensure the distributed row dimension is divisible by world_size.
-    assert m % world_size == 0, f"Matrix rows {m} must be divisible by world_size {world_size}"
+    # Ensure the distributed column dimension is divisible by world_size.
+    assert n % world_size == 0, f"Matrix columns {n} must be divisible by world_size {world_size}"
 
     # Create a random matrix on rank 0 with singular values in (0, 1),
     # which keeps the Newton-Schulz iterations in the convergence regime.
