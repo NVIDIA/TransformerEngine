@@ -3036,7 +3036,7 @@ def test_grouped_gemm_grouped_tensor_zero_work(layout, accumulate, quant_type) -
 
     def _make_zero_tokens_grouped_tensor(logical_last_dim, is_a):
         """Create a GroupedTensor with non-zero logical_shape but zero first_dims."""
-        buf = torch.randn(k, logical_last_dim, dtype=dtype, device=device)
+        buf = torch.randn(0, logical_last_dim, dtype=dtype, device=device)
         if use_mxfp8:
             if is_a:
                 rowwise, columnwise = transa, not transa
