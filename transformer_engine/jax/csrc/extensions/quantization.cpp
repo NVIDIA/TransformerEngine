@@ -632,7 +632,8 @@ Error_Type GroupedQuantizeV2FFI(cudaStream_t stream, Buffer_Type inputs, Buffer_
   if (total_colwise_sinv_size > 0)
     nvte_memset(colwise_sinv->untyped_data(), 0, total_colwise_sinv_size, stream);
 
-  nvte_group_quantize(in_grouped, out_grouped, stream);
+  QuantizationConfigWrapper quant_config{};
+  nvte_group_quantize(in_grouped, out_grouped, quant_config, stream);
 
   nvte_destroy_grouped_tensor(in_grouped);
   nvte_destroy_grouped_tensor(out_grouped);
