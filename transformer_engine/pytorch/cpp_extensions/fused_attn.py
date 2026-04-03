@@ -317,7 +317,6 @@ def fused_attn_fwd(
         raise ValueError(f"Unsupported backend {fused_attention_backend}")
 
     # execute kernel
-
     output_tensors = tex.fused_attn_fwd(
         max_seqlen_q,
         max_seqlen_kv,

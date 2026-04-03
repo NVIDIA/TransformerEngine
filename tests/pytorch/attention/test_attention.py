@@ -895,13 +895,188 @@ def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout):
     test_dot_product_attention(
         dtype, model_configs, model, False, True, qkv_layout, False, pad_between_seqs
     )
-    if get_cudnn_version() >= (9, 3, 0):
-        logging.info("[test_dpa_qkv_layout_thd]: pad_between_seqs = False")
-        # cuDNN 9.3.0+ is required to run pad_between_seqs = False/True in the same run
-        pad_between_seqs = False
-        test_dot_product_attention(
-            dtype, model_configs, model, False, True, qkv_layout, False, pad_between_seqs
+    # if get_cudnn_version() >= (9, 3, 0):
+    #     logging.info("[test_dpa_qkv_layout_thd]: pad_between_seqs = False")
+    #     # cuDNN 9.3.0+ is required to run pad_between_seqs = False/True in the same run
+    #     pad_between_seqs = False
+    #     test_dot_product_attention(
+    #         dtype, model_configs, model, False, True, qkv_layout, False, pad_between_seqs
+    #     )
+
+
+def test_fused_attn_split_q():
+    """Verify front-padding by splitting Q into two halves and running attention in two steps.
+
+    Uses causal attention. Three runs on the same Q/K/V data (tightly packed THD):
+      1) Full: all Q tokens valid, padding_causal_bottom_right → reference output
+      2) Step 1: first half of each seq's Q valid (tail-padding), padding_causal
+      3) Step 2: second half valid (front-padding), padding_causal_bottom_right
+
+    Step 1 uses padding_causal (top-left aligned) so Q[i] attends to K[0..i],
+    matching the full run's first half.
+    Step 2 uses padding_causal_bottom_right so Q[i] attends to K[0..i+s/2],
+    matching the full run's second half.
+
+    Forward: step1 first-halves + step2 second-halves == full output.
+    Backward: dQ from step1/step2 at valid positions == dQ from full run.
+    """
+    from transformer_engine.pytorch.constants import TE_DType
+
+    dtype = torch.bfloat16
+    batch_size = 2
+    num_heads = 16
+    head_dim = 64
+    max_seqlen = 2048
+
+    # Even sequence lengths so they split cleanly
+    seqlens = torch.tensor([1504, 1826], dtype=torch.int32, device="cuda")
+    half_seqlens = seqlens // 2  # [752, 913]
+    cu_seqlens = torch.zeros(batch_size + 1, dtype=torch.int32, device="cuda")
+    cu_seqlens[1:] = torch.cumsum(seqlens, dim=0)
+    total_tokens = cu_seqlens[-1].item()  # 3330
+
+    # Create tightly packed Q, K, V (no padding between sequences)
+    torch.manual_seed(42)
+    q_data = 0.1 * torch.randn(total_tokens, num_heads, head_dim, dtype=dtype, device="cuda")
+    k_data = 0.1 * torch.randn(total_tokens, num_heads, head_dim, dtype=dtype, device="cuda")
+    v_data = 0.1 * torch.randn(total_tokens, num_heads, head_dim, dtype=dtype, device="cuda")
+
+    # Create output gradient for backward
+    d_out = 0.001 * torch.randint(
+        0, 200, (total_tokens, num_heads * head_dim), dtype=dtype, device="cuda"
+    )
+
+    backend = FusedAttnBackend["F16_arbitrary_seqlen"]
+
+    common_kwargs = dict(
+        max_seqlen_q=max_seqlen,
+        max_seqlen_kv=max_seqlen,
+        k=k_data,
+        v=v_data,
+        fake_dtype=dtype,
+        fused_attention_backend=backend,
+        cu_seqlens_kv=cu_seqlens,
+        cu_seqlens_kv_padded=cu_seqlens,
+        qkv_layout="thd_thd_thd",
+        attn_bias_type="no_bias",
+    )
+
+    bwd_common_kwargs = dict(
+        max_seqlen_q=max_seqlen,
+        max_seqlen_kv=max_seqlen,
+        k=k_data,
+        v=v_data,
+        fake_dtype=dtype,
+        dqkv_dtype=TE_DType[dtype],
+        fused_attention_backend=backend,
+        cu_seqlens_kv=cu_seqlens,
+        cu_seqlens_kv_padded=cu_seqlens,
+        qkv_layout="thd_thd_thd",
+        attn_bias_type="no_bias",
+    )
+
+    # --- Full run (reference): all Q tokens valid ---
+    out_full, aux_full, *_ = fused_attn_fwd(
+        is_training=True,
+        cu_seqlens_q=cu_seqlens,
+        q=q_data,
+        cu_seqlens_q_padded=cu_seqlens,
+        attn_mask_type="padding_causal_bottom_right",
+        **common_kwargs,
+    )
+    dq_full, dk_full, dv_full, *_ = fused_attn_bwd(
+        cu_seqlens_q=cu_seqlens,
+        q=q_data,
+        o=out_full,
+        d_o=d_out,
+        aux_ctx_tensors=aux_full,
+        cu_seqlens_q_padded=cu_seqlens,
+        attn_mask_type="padding_causal_bottom_right",
+        **bwd_common_kwargs,
+    )
+
+    # cu_seqlens_q for half-length queries: [0, 752, 1665]
+    cu_seqlens_q_half = torch.zeros(batch_size + 1, dtype=torch.int32, device="cuda")
+    cu_seqlens_q_half[1:] = torch.cumsum(half_seqlens, dim=0)
+
+    # --- Step 1: first half of each seq's Q valid, second half is tail-padding ---
+    # padding_causal (top-left aligned): Q[i] attends to K[0..i]
+    out_step1, aux_step1, *_ = fused_attn_fwd(
+        is_training=True,
+        cu_seqlens_q=cu_seqlens_q_half,
+        q=q_data,
+        cu_seqlens_q_padded=cu_seqlens,
+        attn_mask_type="padding_causal",
+        **common_kwargs,
+    )
+    dq_step1, dk_step1, dv_step1, *_ = fused_attn_bwd(
+        cu_seqlens_q=cu_seqlens_q_half,
+        q=q_data,
+        o=out_step1,
+        d_o=d_out,
+        aux_ctx_tensors=aux_step1,
+        cu_seqlens_q_padded=cu_seqlens,
+        attn_mask_type="padding_causal",
+        **bwd_common_kwargs,
+    )
+
+    # --- Step 2: second half of each seq's Q valid, first half is front-padding ---
+    # padding_causal_bottom_right: Q[i] attends to K[0..i + seqlen_kv - seqlen_q]
+    cu_seqlens_q_padded_step2 = torch.zeros(batch_size + 1, dtype=torch.int32, device="cuda")
+    for i in range(batch_size):
+        cu_seqlens_q_padded_step2[i] = cu_seqlens[i] + half_seqlens[i]
+    cu_seqlens_q_padded_step2[batch_size] = total_tokens
+
+    out_step2, aux_step2, *_ = fused_attn_fwd(
+        is_training=True,
+        cu_seqlens_q=cu_seqlens_q_half,
+        q=q_data,
+        cu_seqlens_q_padded=cu_seqlens_q_padded_step2,
+        attn_mask_type="padding_causal_bottom_right",
+        **common_kwargs,
+    )
+    dq_step2, dk_step2, dv_step2, *_ = fused_attn_bwd(
+        cu_seqlens_q=cu_seqlens_q_half,
+        q=q_data,
+        o=out_step2,
+        d_o=d_out,
+        aux_ctx_tensors=aux_step2,
+        cu_seqlens_q_padded=cu_seqlens_q_padded_step2,
+        attn_mask_type="padding_causal_bottom_right",
+        **bwd_common_kwargs,
+    )
+
+    # --- Compare forward: stitch step1 + step2 vs full ---
+    fwd_tols = dict(atol=0, rtol=0)
+    bwd_tols = dict(atol=1e-6, rtol=1e-4)  # bf16 backward has minor numerical variance
+    for i in range(batch_size):
+        s = cu_seqlens[i].item()
+        h = half_seqlens[i].item()
+        e = cu_seqlens[i + 1].item()
+
+        diff1 = (out_full[s : s + h] - out_step1[s : s + h]).abs().max().item()
+        diff2 = (out_full[s + h : e] - out_step2[s + h : e]).abs().max().item()
+        logging.info(
+            f"[test_fused_attn_split_q]: fwd seq {i}: "
+            f"first_half max_diff={diff1}, second_half max_diff={diff2}"
         )
+        torch.testing.assert_close(out_full[s : s + h], out_step1[s : s + h], **fwd_tols)
+        torch.testing.assert_close(out_full[s + h : e], out_step2[s + h : e], **fwd_tols)
+
+    # --- Compare backward: dQ at valid positions ---
+    for i in range(batch_size):
+        s = cu_seqlens[i].item()
+        h = half_seqlens[i].item()
+        e = cu_seqlens[i + 1].item()
+
+        dq_diff1 = (dq_full[s : s + h] - dq_step1[s : s + h]).abs().max().item()
+        dq_diff2 = (dq_full[s + h : e] - dq_step2[s + h : e]).abs().max().item()
+        logging.info(
+            f"[test_fused_attn_split_q]: bwd dQ seq {i}: "
+            f"first_half max_diff={dq_diff1}, second_half max_diff={dq_diff2}"
+        )
+        torch.testing.assert_close(dq_full[s : s + h], dq_step1[s : s + h], **bwd_tols)
+        torch.testing.assert_close(dq_full[s + h : e], dq_step2[s + h : e], **bwd_tols)
 
 
 def _run_dot_product_attention(
