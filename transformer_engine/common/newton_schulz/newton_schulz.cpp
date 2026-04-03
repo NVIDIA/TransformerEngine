@@ -123,18 +123,18 @@ NVTECusolverMpCtx* nvte_cusolvermp_ctx_create(ncclComm_t comm, int nranks, int r
   auto handle = MakeCusolverMpHandle(device_id, stream);
   auto grid = MakeCusolverMpGrid(handle.get(), comm, nranks, 1, CUSOLVERMP_GRID_MAPPING_COL_MAJOR);
 
-  return new NVTECusolverMpCtx{
-      .nranks = nranks,
-      .rank = rank,
-      .stream = stream,
-      .in_ready = in_ready,
-      .out_ready = out_ready,
-      .handle = std::move(handle),
-      .grid = std::move(grid),
-      .workspace = nullptr,
-      .workspace_size = 0,
-      .workspace_registered = false,
-  };
+  return new NVTECusolverMpCtx(
+      nranks,
+      rank,
+      stream,
+      in_ready,
+      out_ready,
+      std::move(handle),
+      std::move(grid),
+      nullptr,
+      0,
+      false,
+  );
 }
 
 void nvte_cusolvermp_ctx_destroy(NVTECusolverMpCtx* ctx) {
