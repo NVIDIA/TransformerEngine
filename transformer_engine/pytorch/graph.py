@@ -454,9 +454,7 @@ def _make_graphed_callables(
         args = sample_args[func_idx]
         kwargs = sample_kwargs[func_idx]
 
-        def hook_fn(
-            module, inputs, outputs, func_idx=func_idx
-        ):  # pylint: disable=unused-argument
+        def hook_fn(module, inputs, outputs, func_idx=func_idx):  # pylint: disable=unused-argument
             modules = set()
             if isinstance(module, TransformerEngineBaseModule):
                 modules.add(module)
@@ -521,9 +519,7 @@ def _make_graphed_callables(
 
         inputs = tuple(i for i in static_input_surface if i.requires_grad)
         with _none_grad_context_wrapper(inputs):
-            outputs_requiring_grad = tuple(
-                o for o in outputs if o is not None and o.requires_grad
-            )
+            outputs_requiring_grad = tuple(o for o in outputs if o is not None and o.requires_grad)
             torch.autograd.backward(
                 outputs_requiring_grad,
                 grad_tensors=tuple(torch.empty_like(o) for o in outputs_requiring_grad),
@@ -557,8 +553,7 @@ def _make_graphed_callables(
             ):
                 if not allow_unused_input:
                     raise RuntimeError(
-                        "The input tensor requires grad, but the grad is None after"
-                        " backward pass."
+                        "The input tensor requires grad, but the grad is None after backward pass."
                     )
             elif (
                 grad_inputs[grad_inputs_idx] is not None
@@ -572,9 +567,7 @@ def _make_graphed_callables(
                     f" iteration, but found in iteration {warmup_iter}"
                 )
             per_callable_module_params[func_idx] = tuple(module_params_with_grad)
-            static_input_surface = flatten_sample_args[func_idx] + tuple(
-                module_params_with_grad
-            )
+            static_input_surface = flatten_sample_args[func_idx] + tuple(module_params_with_grad)
             per_callable_static_input_surfaces[func_idx] = static_input_surface
 
         # Run wgrad. This is essential for some TE modules when they have
@@ -625,16 +618,11 @@ def _make_graphed_callables(
                             for l_no in reversed(range(_num_layers_per_chunk[m_chunk])):
                                 per_callable_bwd_idx = (
                                     _prefix_num_layers[m_chunk] * num_microbatches
-                                ) + (
-                                    bwd_idx[m_chunk] * _num_layers_per_chunk[m_chunk] + l_no
-                                )
+                                ) + (bwd_idx[m_chunk] * _num_layers_per_chunk[m_chunk] + l_no)
                                 func = callables[_prefix_num_layers[m_chunk] + l_no]
                                 outputs = per_fwd_outputs[per_callable_bwd_idx]
                                 _run_warmup_backward(
-                                    per_callable_bwd_idx,
-                                    func,
-                                    outputs,
-                                    warmup_iter
+                                    per_callable_bwd_idx, func, outputs, warmup_iter
                                 )
                             bwd_idx[m_chunk] += 1
 
@@ -680,8 +668,12 @@ def _make_graphed_callables(
                         and capture_time_hooks[per_callable_fwd_idx] is not None
                         and "forward_pre" in capture_time_hooks[per_callable_fwd_idx]
                     ):
-                        for hook in capture_time_hooks[per_callable_fwd_idx]["forward_pre"].values():
-                            hook(func, args, kwargs)  # forward_pre hook signature: (module, args, kwargs)
+                        for hook in capture_time_hooks[per_callable_fwd_idx][
+                            "forward_pre"
+                        ].values():
+                            hook(
+                                func, args, kwargs
+                            )  # forward_pre hook signature: (module, args, kwargs)
 
                     with _graph_context_wrapper(fwd_graph, pool=mempool):
                         outputs = func(*args, **kwargs)
@@ -694,7 +686,9 @@ def _make_graphed_callables(
                         and "forward" in capture_time_hooks[per_callable_fwd_idx]
                     ):
                         for hook in capture_time_hooks[per_callable_fwd_idx]["forward"].values():
-                            hook(func, args, outputs)  # forward hook signature: (module, inputs, output)
+                            hook(
+                                func, args, outputs
+                            )  # forward hook signature: (module, inputs, output)
 
                     flatten_outputs, spec = _tree_flatten(outputs)
                     per_callable_static_outputs[per_callable_fwd_idx] = tuple(flatten_outputs)
@@ -830,7 +824,9 @@ def _make_graphed_callables(
                         ):
                             # Get the callable module for this backward index
                             callable_module = graph_callables[per_callable_bwd_idx]
-                            for hook in capture_time_hooks[per_callable_bwd_idx]["backward"].values():
+                            for hook in capture_time_hooks[per_callable_bwd_idx][
+                                "backward"
+                            ].values():
                                 # During capture, call with the actual module (not None)
                                 # FSDP hooks need to access module attributes
                                 hook(callable_module)
