@@ -10,11 +10,7 @@ from typing import Any, Dict, Optional
 import torch
 
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
-from .quantized_tensor import (
-    QuantizedTensorStorage,
-    prepare_for_saving,
-    restore_from_saved,
-)
+from .quantized_tensor import QuantizedTensorStorage
 from .tensor.float8_tensor import Float8Tensor
 
 __all__ = ["get_cpu_offload_context"]
@@ -23,7 +19,7 @@ CPUOffloadEnabled = False
 CPUOffloadedLayer = False
 
 
-def mark_activation_offload(*tensors):
+def mark_activation_offload(*tensors, offload: bool = True):
     """Set the type of the offloading needed for a tensor."""
     if TEDebugState.debug_enabled:
         raise RuntimeError("CPU offload is not supported in debug mode.")
@@ -32,31 +28,22 @@ def mark_activation_offload(*tensors):
         if tensor is None:
             continue
         if type(tensor) in [torch.Tensor, torch.nn.Parameter]:
-            tensor.activation_offloading = True
+            tensor.activation_offloading = offload
         else:
             data_tensors = tensor.get_data_tensors()
             for tensor in data_tensors:
                 if tensor is not None:
-                    tensor.activation_offloading = True
+                    tensor.activation_offloading = offload
                     # This is a hack to force clear the tensor after it is offloaded.
                     # It is needed, because .*TensorStorage classes are saved in the ctx,
                     # and they contain the reference to their data tensors.
-                    tensor.needs_force_clear = True
+                    tensor.needs_force_clear = offload
 
 
 def is_cpu_offload_enabled() -> bool:
     """Check if CPU offloading is currently enabled."""
     return CPUOffloadEnabled
 
-def mark_not_offload(*tensors: torch.Tensor):
-    """Marks tensors to prevent them from being offloaded."""
-    tensors, tensor_obj = prepare_for_saving(*tensors)
-
-    for tensor in tensors:
-        if tensor is not None:
-            setattr(tensor, "_TE_do_not_offload", True)
-
-    restore_from_saved(tensor_obj, tensors)
 
 def is_current_layer_offloaded() -> bool:
     """Check if current layers is being offloaded."""
