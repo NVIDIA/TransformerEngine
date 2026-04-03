@@ -276,6 +276,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("quantizer_list"), py::arg("disable_bulk_allocation") = false);
   m.def("te_general_grouped_gemm", &transformer_engine::pytorch::te_general_grouped_gemm,
         "Grouped GEMM");
+  m.def("te_general_grouped_gemm_for_grouped_tensor",
+        &transformer_engine::pytorch::te_general_grouped_gemm_for_grouped_tensor,
+        "Grouped GEMM for GroupedTensor");
+  m.def("te_general_grouped_gemm_for_discrete_in",
+        &transformer_engine::pytorch::te_general_grouped_gemm_for_discrete_in,
+        "Grouped GEMM for discrete A input list");
+  m.def("te_general_grouped_gemm_for_discrete_out",
+        &transformer_engine::pytorch::te_general_grouped_gemm_for_discrete_out,
+        "Grouped GEMM for discrete output list");
   m.def("fp8_transpose", &transformer_engine::pytorch::fp8_transpose, "Transpose with FP8 I/O",
         py::arg("input"), py::arg("dtype"), py::kw_only(), py::arg("out"),
         py::call_guard<py::gil_scoped_release>());

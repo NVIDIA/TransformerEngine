@@ -22,17 +22,23 @@ from jax.sharding import PartitionSpec, NamedSharding
 
 from common import (
     assert_allclose,
+    get_tolerance_dtype,
     _initialize_distributed,
     _get_dp_and_tp_sizes,
     _create_mesh,
     DP_AXIS,
     TPSP_AXIS,
-    PARAMS_KEY,
     cgemm_parser,
 )
 
 import transformer_engine.jax.cpp_extensions as tex
-from transformer_engine.jax.quantize import autocast
+from transformer_engine.jax.quantize import (
+    autocast,
+    is_quantize_recipe_supported,
+    get_quantization_recipe,
+    QuantizerFactory,
+    noop_quantizer_set,
+)
 from transformer_engine.jax.cpp_extensions.gemm import CollectiveOp
 from transformer_engine.jax.sharding import MeshResource
 
@@ -54,31 +60,15 @@ def _get_operand_sharding(mesh, collective_op, is_with_dp):
     return x_sharding, weight_sharding, bias_sharding, output_sharding
 
 
-def _get_dp_and_tp_sizes(args):
-    num_gpu = args.num_processes * args.num_devices_per_process
-    if args.tensor_parallel_size is None:
-        num_gpu_dp = 2 if args.enable_data_parallel else 1
-        assert (
-            num_gpu > 1 and num_gpu % num_gpu_dp == 0
-        ), "Number of GPUs must be greater than 1 and divisible by number of data parallel GPUs"
-        num_gpu_tp = num_gpu // num_gpu_dp
-    else:
-        num_gpu_tp = args.tensor_parallel_size
-        assert (
-            num_gpu > 1 and num_gpu % num_gpu_tp == 0
-        ), "Number of GPUs must be greater than 1 and divisible by number of data parallel GPUs"
-        num_gpu_dp = num_gpu // num_gpu_tp
-    return num_gpu_dp, num_gpu_tp
-
-
 @partial(jax.jit, static_argnames=("contracting_dims", "collective_op", "output_sharding"))
-def _jitted_cgemm(x, weight, bias, contracting_dims, collective_op, output_sharding):
+def _jitted_cgemm(x, weight, bias, quantizer_set, contracting_dims, collective_op, output_sharding):
     output = tex.gemm(
         x,
         weight,
         bias=bias,
         contracting_dims=contracting_dims,
         collective_op=collective_op,
+        quantizer_set=quantizer_set,
     )
     if output_sharding is not None:
         output = jax.lax.with_sharding_constraint(output, output_sharding)
@@ -107,11 +97,20 @@ def run_gemm_tests(args, mesh=None):
         else CollectiveOp.REDUCE_SCATTER
     )
 
+    use_quantization = args.quantize_recipe is not None
+    recipe = get_quantization_recipe(args.quantize_recipe) if use_quantization else None
+
+    # autocast sets the global recipe (fwd/bwd dtypes) AND the global MeshResource
+    # (via global_shard_guard) required for collective GEMM sharding axis resolution.
     with mesh, autocast(
-        enabled=False,
-        recipe=None,
+        enabled=use_quantization,
+        recipe=recipe,
         mesh_resource=MeshResource(dp_resource=DP_AXIS, tpsp_resource=TPSP_AXIS),
     ):
+        # Build quantizer_set inside autocast so create_set() can read the global recipe
+        # for correct fwd/bwd dtypes. autocast does not inject quantizers into raw
+        # tex.gemm() calls, so we must pass quantizer_set explicitly.
+        quantizer_set = QuantizerFactory.create_set() if use_quantization else noop_quantizer_set
         print(f"Device mesh: {mesh}")
 
         x_sharding, weight_sharding, bias_sharding, output_sharding = _get_operand_sharding(
@@ -125,6 +124,7 @@ def run_gemm_tests(args, mesh=None):
             x_sharded,
             weight_sharded,
             bias_sharded,
+            quantizer_set,
             contracting_dims=((2,), (0,)),
             collective_op=CollectiveOp.NONE,
             output_sharding=output_sharding,
@@ -133,6 +133,7 @@ def run_gemm_tests(args, mesh=None):
             x_sharded,
             weight_sharded,
             bias_sharded,
+            quantizer_set,
             contracting_dims=((2,), (0,)),
             collective_op=collective_op,
             output_sharding=output_sharding,
@@ -150,7 +151,9 @@ def run_gemm_tests(args, mesh=None):
         jax.block_until_ready(gathered_output)
 
     if args.enable_result_check and args.process_id == 0:
-        assert_allclose(gathered_ref_output, gathered_output)
+        assert_allclose(
+            gathered_ref_output, gathered_output, dtype=get_tolerance_dtype(quantizer_set)
+        )
 
 
 class TestCollectiveGemmWithDP(unittest.TestCase):
@@ -185,6 +188,84 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
         """Test Collective GEMM with ReduceScatter"""
         self.args.collective_type = "reduce_scatter"
         run_gemm_tests(self.args, self.mesh)
+
+    def test_te_delayed_scaling_fp8_all_gather_with_dp(self):
+        """Test Collective GEMM with FP8 DelayedScaling + AllGather"""
+        self.args.quantize_recipe = "DelayedScaling"
+        is_supported, reason = is_quantize_recipe_supported(self.args.quantize_recipe)
+        if not is_supported:
+            self.skipTest(reason)
+
+        self.args.collective_type = "all_gather"
+        run_gemm_tests(self.args, self.mesh)
+
+    def test_te_delayed_scaling_fp8_reduce_scatter_with_dp(self):
+        """Test Collective GEMM with FP8 DelayedScaling + ReduceScatter"""
+        self.args.quantize_recipe = "DelayedScaling"
+        is_supported, reason = is_quantize_recipe_supported(self.args.quantize_recipe)
+        if not is_supported:
+            self.skipTest(reason)
+
+        self.args.collective_type = "reduce_scatter"
+        run_gemm_tests(self.args, self.mesh)
+
+    def test_te_current_scaling_fp8_all_gather_with_dp(self):
+        """Test Collective GEMM with FP8 Float8CurrentScaling + AllGather"""
+        self.args.quantize_recipe = "Float8CurrentScaling"
+        is_supported, reason = is_quantize_recipe_supported(self.args.quantize_recipe)
+        if not is_supported:
+            self.skipTest(reason)
+
+        self.args.collective_type = "all_gather"
+        run_gemm_tests(self.args, self.mesh)
+
+    def test_te_current_scaling_fp8_reduce_scatter_with_dp(self):
+        """Test Collective GEMM with FP8 Float8CurrentScaling + ReduceScatter"""
+        self.args.quantize_recipe = "Float8CurrentScaling"
+        is_supported, reason = is_quantize_recipe_supported(self.args.quantize_recipe)
+        if not is_supported:
+            self.skipTest(reason)
+
+        self.args.collective_type = "reduce_scatter"
+        run_gemm_tests(self.args, self.mesh)
+
+    def test_te_mxfp8_all_gather_with_dp(self):
+        """Test Collective GEMM with MXFP8BlockScaling + AllGather"""
+        self.args.quantize_recipe = "MXFP8BlockScaling"
+        is_supported, reason = is_quantize_recipe_supported(self.args.quantize_recipe)
+        if not is_supported:
+            self.skipTest(reason)
+
+        self.args.collective_type = "all_gather"
+        run_gemm_tests(self.args, self.mesh)
+
+    def test_te_mxfp8_reduce_scatter_with_dp(self):
+        """Test Collective GEMM with MXFP8BlockScaling + ReduceScatter"""
+        self.args.quantize_recipe = "MXFP8BlockScaling"
+        is_supported, reason = is_quantize_recipe_supported(self.args.quantize_recipe)
+        if not is_supported:
+            self.skipTest(reason)
+
+        self.args.collective_type = "reduce_scatter"
+        run_gemm_tests(self.args, self.mesh)
+
+    # def test_te_nvfp4_all_gather_with_dp(self):
+    #     """Test Collective GEMM with NVFP4BlockScaling + AllGather"""
+    #     self.args.quantize_recipe = "NVFP4BlockScaling"
+    #     is_supported, reason = is_quantize_recipe_supported(self.args.quantize_recipe)
+    #     if not is_supported:
+    #         self.skipTest(reason)
+    #     self.args.collective_type = "all_gather"
+    #     run_gemm_tests(self.args, self.mesh)
+
+    # def test_te_nvfp4_reduce_scatter_with_dp(self):
+    #     """Test Collective GEMM with NVFP4BlockScaling + ReduceScatter"""
+    #     self.args.quantize_recipe = "NVFP4BlockScaling"
+    #     is_supported, reason = is_quantize_recipe_supported(self.args.quantize_recipe)
+    #     if not is_supported:
+    #         self.skipTest(reason)
+    #     self.args.collective_type = "reduce_scatter"
+    #     run_gemm_tests(self.args, self.mesh)
 
 
 if __name__ == "__main__":

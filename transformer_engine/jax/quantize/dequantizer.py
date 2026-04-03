@@ -275,29 +275,45 @@ def _grouped_dequantize(grouped_scaled_tensor):
     """
     data = grouped_scaled_tensor.data
     scale_inv = grouped_scaled_tensor.scale_inv
-    group_sizes = grouped_scaled_tensor.group_sizes
+    group_sizes = (
+        grouped_scaled_tensor.first_dims
+        if grouped_scaled_tensor.first_dims is not None
+        and grouped_scaled_tensor.first_dims.size > 0
+        else grouped_scaled_tensor.last_dims
+    )
+    # For non-ragged groups (kernel case), group_sizes is not stored; derive from original_shape
+    if group_sizes is None:
+        group_sizes = jnp.ones(grouped_scaled_tensor.original_shape[0], dtype=jnp.int32)
     flatten_axis = grouped_scaled_tensor.flatten_axis
     scaling_mode = grouped_scaled_tensor.scaling_mode
     original_shape = grouped_scaled_tensor.original_shape
-    group_axis = grouped_scaled_tensor.group_axis
-
     flatten_axis = len(original_shape) + flatten_axis if flatten_axis < 0 else flatten_axis
 
     output = []
-    non_group_shape = tuple(
-        original_shape[i] for i in range(len(original_shape)) if i != group_axis
+    # For transposed (colwise) tensors with ragged groups, the group dimension is the last
+    # axis of original_shape (e.g. original_shape = (N, M) with groups along M), while the
+    # non-group dimensions are all axes before it.  For the uniform-groups case the group
+    # dimension stays at axis 0, so the existing axis-0 logic applies.
+    is_transposed_ragged = (
+        grouped_scaled_tensor.data_layout == "T" and group_sizes.size != original_shape[0]
     )
+    if is_transposed_ragged:
+        non_group_shape = original_shape[:-1]
+    else:
+        non_group_shape = tuple(original_shape[i] for i in range(len(original_shape)) if i != 0)
     matrix_sizes = group_sizes * math.prod(non_group_shape)
 
     data = jnp.split(data, jnp.cumulative_sum(matrix_sizes)[:-1])
 
     scale_inv_ptr = 0
     for i, data_i in enumerate(data):
-        data_shape_i = (
-            *original_shape[:group_axis],
-            group_sizes[i],
-            *original_shape[group_axis + 1 :],
-        )
+        if is_transposed_ragged:
+            data_shape_i = (*non_group_shape, group_sizes[i])
+        else:
+            data_shape_i = (
+                group_sizes[i],
+                *original_shape[1:],
+            )
         assert math.prod(data_shape_i) == data_i.size, (
             f"math.prod({data_shape_i}) = {math.prod(data_shape_i)} which is not equal to"
             f" {data_i.size}"

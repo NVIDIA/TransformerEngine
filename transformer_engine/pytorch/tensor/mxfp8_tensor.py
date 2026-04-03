@@ -634,7 +634,13 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
 
         # Get FSDP state
         fsdp_state = _get_module_fsdp_state(module)
-        reshard_after_forward = fsdp_state._fsdp_param_group._reshard_after_forward
+        param_group = fsdp_state._fsdp_param_group
+        if param_group is None:
+            raise RuntimeError(
+                "FSDP state for this module has no parameter group; "
+                "cannot determine reshard_after_forward."
+            )
+        reshard_after_forward = param_group._reshard_after_forward
 
         # Remove padding from scale inverses before allgather
         # Rowwise scale_inv should be divisible by [128,4], columnwise by [4, 128]
@@ -662,7 +668,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         # are used again in backward. And hence if we need the columnwise data/scale_inv,
         # we need to send them as well for allgather in forward pass itself.
         if reshard_after_forward:
-            training_state = fsdp_state._fsdp_param_group._training_state
+            training_state = param_group._training_state
             is_backward_pass = training_state == TrainingState.PRE_BACKWARD
             # Allgather only the necessary tensors based on forward/backward pass
             rowwise_usage = not is_backward_pass

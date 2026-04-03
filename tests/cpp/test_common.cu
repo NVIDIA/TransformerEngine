@@ -1157,6 +1157,8 @@ GroupedBuffers build_grouped_tensor(const std::vector<Tensor*>& tensors,
 
   NVTEGroupedTensor h = grouped.handle.get();
 
+  size_t total_elems_size = static_cast<size_t>(total_elems);
+  NVTEShape flat_shape = nvte_make_shape(&total_elems_size, 1);
   // Copy rowwise data if available
   if (has_rowwise) {
     grouped.data = cuda_alloc(total_bytes);
@@ -1167,7 +1169,7 @@ GroupedBuffers build_grouped_tensor(const std::vector<Tensor*>& tensors,
                                  grouped.tensor_bytes[i],
                                  cudaMemcpyDeviceToDevice));
     }
-    NVTEBasicTensor data_tensor{grouped.data.get(), static_cast<NVTEDType>(dtype), grouped.logical_shape};
+    NVTEBasicTensor data_tensor{grouped.data.get(), static_cast<NVTEDType>(dtype), flat_shape};
     nvte_set_grouped_tensor_param(h, kNVTEGroupedRowwiseData, &data_tensor, sizeof(data_tensor));
   }
 
@@ -1183,7 +1185,7 @@ GroupedBuffers build_grouped_tensor(const std::vector<Tensor*>& tensors,
     }
     NVTEBasicTensor col_tensor{grouped.columnwise_data.get(),
                                static_cast<NVTEDType>(dtype),
-                               grouped.logical_shape};
+                               flat_shape};
     nvte_set_grouped_tensor_param(h, kNVTEGroupedColumnwiseData, &col_tensor, sizeof(col_tensor));
   }
 

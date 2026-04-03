@@ -571,6 +571,7 @@ class FusedAdam(torch.optim.Optimizer):
 
             has_fp16 = False
             has_bf16 = False
+            quantized_params_to_update = []
 
             for p in group["params"]:
                 state = self.state[p]
@@ -622,6 +623,29 @@ class FusedAdam(torch.optim.Optimizer):
                     g_of_fp8_model.append(p_grad.data)
                     m_of_fp8_model.append(unscaled_state["exp_avg"])
                     v_of_fp8_model.append(unscaled_state["exp_avg_sq"])
+                elif isinstance(p, QuantizedTensor) or (
+                    isinstance(p, DTensor) and isinstance(p._local_tensor, QuantizedTensor)
+                ):
+                    # Block-scaling quantized params (MXFP8Tensor, Float8BlockwiseQTensor,
+                    # NVFP4Tensor). Operate on FP32 master weights, requantize back after
+                    # Adam update.
+                    # Note: a fused Adam+requantize kernel (like multi_tensor_adam_fp8
+                    # for Float8Tensor) would avoid the FP32 round-trip here.
+                    if not self.master_weights:
+                        local_p = p._local_tensor if isinstance(p, DTensor) else p
+                        raise RuntimeError(
+                            "FusedAdam without master_weights does not support "
+                            f"{type(local_p).__name__} parameters. Use master_weights=True."
+                        )
+                    # Route to the FP32 master-weight path: Adam updates the FP32 master,
+                    # then we write back to the quantized param after kernels run.
+                    # Gradients may be BF16/FP16 from the backward pass — cast to FP32
+                    # to match the FP32 Adam kernel expectations.
+                    p_f32_model.append(unscaled_state["master_param"].data)
+                    g_of_f32_model.append(p_grad.data.float())
+                    m_of_f32_model.append(unscaled_state["exp_avg"])
+                    v_of_f32_model.append(unscaled_state["exp_avg_sq"])
+                    quantized_params_to_update.append((p, unscaled_state["master_param"]))
                 elif p.dtype in [torch.float16, torch.bfloat16]:
                     has_fp16 = has_fp16 or p.dtype == torch.float16
                     has_bf16 = has_bf16 or p.dtype == torch.bfloat16
@@ -644,6 +668,13 @@ class FusedAdam(torch.optim.Optimizer):
                 if self.capturable and len(p_fp8_model) > 0:
                     raise RuntimeError(
                         "FusedAdam does not support FP8 model weights with capturable=True."
+                    )
+
+                if self.capturable and len(quantized_params_to_update) > 0:
+                    raise RuntimeError(
+                        "FusedAdam does not support block-scaling quantized weights "
+                        "with capturable=True. The post-step quantize_() writeback "
+                        "cannot be captured in a CUDA graph."
                     )
 
                 if has_fp16 and has_bf16:
@@ -781,6 +812,11 @@ class FusedAdam(torch.optim.Optimizer):
                 if len(p_f32_model) > 0:
                     tensor_lists = [g_of_f32_model, p_f32_model, m_of_f32_model, v_of_f32_model]
                     apply_multi_tensor_adam(self.multi_tensor_adam, tensor_lists)
+
+            # Write updated FP32 master weights back to quantized parameters
+            for qt_param, master_w in quantized_params_to_update:
+                local_p = qt_param._local_tensor if isinstance(qt_param, DTensor) else qt_param
+                local_p.quantize_(master_w.data)
 
             # Scaling
             for name in ["exp_avg", "exp_avg_sq", "master_param"]:

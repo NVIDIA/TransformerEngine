@@ -206,7 +206,7 @@ NVTE_QKV_Format nvte_get_kv_format(NVTE_QKV_Layout qkv_layout);
  *  \param[in]     head_dim_v          The head dimension of V.
  *  \param[in]     window_size_left    Sliding window size (the left half).
  *  \param[in]     window_size_right   Sliding window size (the right half).
- *  \param[in]     return_max_logit    Whether to produce Max and Sum_Exp, or Stats.
+ *  \param[in]     return_max_logit    Whether to produce Max along with Stats.
  *  \param[in]     cuda_graph          Whether cuda graph capture is enabled or not.
  *  \param[in]     deterministic       Whether determinism is required or not.
  */
@@ -269,7 +269,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
  *  \param[in]     max_seqlen_kv             Max sequence length used for computing for K and V.
  *                                           it may be >= max(seqlen_kv_i) for i=0,...batch_size-1.
  *  \param[in]     is_training               Whether this is in training mode or inference.
- *  \param[in]     return_max_logit          Whether to produce Max and Sum_Exp, or Stats.
+ *  \param[in]     return_max_logit          Whether to produce Max along with Stats.
  *  \param[in]     cuda_graph                Whether cuda graph capture is enabled or not.
  *  \param[in]     attn_scale                Scaling factor for Q * K.T.
  *  \param[in]     dropout                   Dropout probability.
