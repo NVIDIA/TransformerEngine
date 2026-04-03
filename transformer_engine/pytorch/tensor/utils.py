@@ -121,13 +121,25 @@ def quantize_master_weights(
     for model_weight, master_weight, start_offset, fsdp_shard_model_weight in zip(
         model_weights, master_weights, start_offsets, fsdp_shard_model_weights
     ):
+        # Clear `_high_precision_init_val` of model_weight automatically.
+        # - Master weights are initialized from model weights, if we use fp8 primary weights to
+        #   initialize master weights, the numerical values of master weights are not consistent
+        #   with the numerical values when we initialize them from bf16/fp16 weights.
+        # - So we add a `_high_precision_init_val` attribute to each model weight to store the
+        #   original bf16/fp16 weight on cpu before casting it to fp8. And users can use
+        #   `get_high_precision_init_val` to get this cpu tensor.
+        # - This cpu tensor is not needed once the master weight is initialized, so users should
+        #   call `clear_high_precision_init_val` to remove it after master weight is initialized.
+        # - In case users don't call `clear_high_precision_init_val`, we will clear it automatically
+        #   here. It's safe to clear the `_high_precision_init_val` at this time because this
+        #   function is supposed to be called after the master weights are initialized and updated.
         if hasattr(model_weight, "clear_high_precision_init_val"):
             model_weight.clear_high_precision_init_val()
 
         if master_weight is not None:
-            # When not using fp8_primary_weights, the master_weight (fp32) is first cast to
+            # When not using fp8/fp4_primary_weights, the master_weight (fp32) is first cast to
             # bf16/fp16, and then cast to fp8 during forward. Although it's not necessary when
-            # fp8_primary_weights is enabled, we still keep this logic to keep numerical
+            # fp8/fp4_primary_weights is enabled, we still keep this logic to keep numerical
             # consistency. So here we cast the master_weight to model_weight.dtype.
             master_weight = master_weight.to(model_weight.dtype)
 
