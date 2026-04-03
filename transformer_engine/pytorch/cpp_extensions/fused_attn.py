@@ -317,53 +317,6 @@ def fused_attn_fwd(
         raise ValueError(f"Unsupported backend {fused_attention_backend}")
 
     # execute kernel
-
-    # === DEBUG: Log inputs and shapes to fused attention backend ===
-    import logging as _logging
-    _log = _logging.getLogger("fused_attn_debug")
-    _log.setLevel(_logging.DEBUG)
-    if not _log.handlers:
-        _handler = _logging.StreamHandler()
-        _handler.setLevel(_logging.DEBUG)
-        _log.addHandler(_handler)
-
-    _log.debug("===== fused_attn_fwd inputs =====")
-    _log.debug(f"  is_training       = {is_training}")
-    _log.debug(f"  max_seqlen_q      = {max_seqlen_q}")
-    _log.debug(f"  max_seqlen_kv     = {max_seqlen_kv}")
-    _log.debug(f"  attn_scale        = {attn_scale}")
-    _log.debug(f"  dropout           = {dropout}")
-    _log.debug(f"  fast_zero_fill    = {fast_zero_fill}")
-    _log.debug(f"  qkv_layout        = {qkv_layout}")
-    _log.debug(f"  attn_bias_type    = {attn_bias_type}")
-    _log.debug(f"  attn_mask_type    = {attn_mask_type}")
-    _log.debug(f"  softmax_type      = {softmax_type}")
-    _log.debug(f"  window_size       = {window_size}")
-    _log.debug(f"  bottom_right_diagonal = {bottom_right_diagonal}")
-    _log.debug(f"  return_max_logit  = {return_max_logit}")
-    _log.debug(f"  cuda_graph        = {cuda_graph}")
-    _log.debug(f"  backend           = {fused_attention_backend}")
-    _log.debug(f"  fake_dtype        = {fake_dtype}")
-    _log.debug(f"  q.shape           = {list(q.shape)}, q.dtype = {q.dtype}, q.device = {q.device}")
-    _log.debug(f"  k.shape           = {list(k.shape)}, k.dtype = {k.dtype}, k.device = {k.device}")
-    _log.debug(f"  v.shape           = {list(v.shape)}, v.dtype = {v.dtype}, v.device = {v.device}")
-    _log.debug(f"  cu_seqlens_q.shape  = {list(cu_seqlens_q.shape)}, dtype = {cu_seqlens_q.dtype}, values = {cu_seqlens_q.tolist()}")
-    _log.debug(f"  cu_seqlens_kv.shape = {list(cu_seqlens_kv.shape)}, dtype = {cu_seqlens_kv.dtype}, values = {cu_seqlens_kv.tolist()}")
-    _log.debug(f"  cu_seqlens_q_padded  = {list(cu_seqlens_q_padded.shape) if cu_seqlens_q_padded is not None else None}"
-               f"{', values = ' + str(cu_seqlens_q_padded.tolist()) if cu_seqlens_q_padded is not None else ''}")
-    _log.debug(f"  cu_seqlens_kv_padded = {list(cu_seqlens_kv_padded.shape) if cu_seqlens_kv_padded is not None else None}"
-               f"{', values = ' + str(cu_seqlens_kv_padded.tolist()) if cu_seqlens_kv_padded is not None else ''}")
-    _log.debug(f"  attn_bias         = {list(attn_bias.shape) if attn_bias is not None else None}"
-               f"{', dtype = ' + str(attn_bias.dtype) if attn_bias is not None else ''}")
-    _log.debug(f"  page_table_k      = {list(page_table_k.shape) if page_table_k is not None else None}")
-    _log.debug(f"  page_table_v      = {list(page_table_v.shape) if page_table_v is not None else None}")
-    _log.debug(f"  s_quantizer       = {s_quantizer}")
-    _log.debug(f"  o_quantizer       = {o_quantizer}")
-    _log.debug(f"  softmax_offset    = {list(softmax_offset.shape) if softmax_offset is not None else None}")
-    _log.debug(f"  rng_gen           = {rng_gen}")
-    _log.debug(f"  rng_elts_per_thread = {rng_elts_per_thread}")
-    _log.debug("===== end fused_attn_fwd inputs =====")
-
     output_tensors = tex.fused_attn_fwd(
         max_seqlen_q,
         max_seqlen_kv,
