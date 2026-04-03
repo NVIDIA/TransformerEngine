@@ -166,17 +166,17 @@ void nvte_newton_schulz(NVTECusolverMpCtx* ctx, int64_t m, int64_t n, NVTETensor
   NVTE_CHECK_CUDA(cudaStreamWaitEvent(ctx->stream, ctx->in_ready));
 
   // Block size for ScaLAPACK-style distribution
-  const int64_t mb = (m + ctx->nranks - 1) / ctx->nranks;
-  const int64_t nb = n;
+  const int64_t mb = m;
+  const int64_t nb = (n + ctx->nranks - 1) / ctx->nranks;
 
   // Compute local leading dimension
-  const int64_t local_rows = cusolverMpNUMROC(m, mb, ctx->rank, 0, ctx->nranks);
+  const int64_t local_rows = cusolverMpNUMROC(n, nb, ctx->rank, 0, ctx->nranks);
   const int64_t lld = std::max(local_rows, static_cast<int64_t>(1));
 
   const cudaDataType_t cuda_dtype = get_cuda_dtype(t->dtype());
 
   // Create matrix descriptor
-  auto mat_desc = MakeCusolverMpMatrixDesc(ctx->grid.get(), cuda_dtype, m, n, mb, nb, 0, 0, lld);
+  auto mat_desc = MakeCusolverMpMatrixDesc(ctx->grid.get(), cuda_dtype, n, m, nb, mb, 0, 0, lld);
 
   // Create Newton-Schulz descriptor
   auto ns_desc = MakeCusolverMpNSDesc();
@@ -185,7 +185,7 @@ void nvte_newton_schulz(NVTECusolverMpCtx* ctx, int64_t m, int64_t n, NVTETensor
   size_t wrksp_size_device = 0;
   size_t wrksp_size_host = 0;
   NVTE_CHECK_CUSOLVERMP(cusolverMpNewtonSchulz_bufferSize(
-      ctx->handle.get(), ns_desc.get(), m, n, t->data.dptr, 1, 1, mat_desc.get(), num_iterations,
+      ctx->handle.get(), ns_desc.get(), n, m, t->data.dptr, 1, 1, mat_desc.get(), num_iterations,
       coefficients, CUDA_R_32F, &wrksp_size_device, &wrksp_size_host));
 
   // Allocate/grow device workspace
@@ -219,7 +219,7 @@ void nvte_newton_schulz(NVTECusolverMpCtx* ctx, int64_t m, int64_t n, NVTETensor
 
   // Execute Newton-Schulz
   NVTE_CHECK_CUSOLVERMP(cusolverMpNewtonSchulz(
-      ctx->handle.get(), ns_desc.get(), m, n, t->data.dptr, 1, 1, mat_desc.get(), num_iterations,
+      ctx->handle.get(), ns_desc.get(), n, m, t->data.dptr, 1, 1, mat_desc.get(), num_iterations,
       coefficients, CUDA_R_32F, ctx->workspace, ctx->workspace_size, workspace_host.data(),
       workspace_host.size(), nullptr));
 

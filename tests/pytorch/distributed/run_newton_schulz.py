@@ -17,8 +17,8 @@ from torch.distributed.elastic.multiprocessing.errors import record
 from transformer_engine.pytorch.newton_schulz import (
     cusolvermp_ctx_create,
     get_coefficients,
+    newton_schulz,
 )
-import transformer_engine_torch as tex
 
 
 def newton_schulz_reference(in_x: torch.Tensor, coefficients: list[float]) -> torch.Tensor:
@@ -29,20 +29,6 @@ def newton_schulz_reference(in_x: torch.Tensor, coefficients: list[float]) -> to
         xxt = x @ x.mT
         x = a * x + b * xxt @ x + c * xxt @ xxt @ x
     return x
-
-
-def to_column_major_local(x: torch.Tensor) -> torch.Tensor:
-    """Copy a logical 2D tensor into a column-major local buffer."""
-    x_col_major = torch.empty_strided(
-        size=x.shape,
-        stride=(1, x.shape[0]),
-        dtype=x.dtype,
-        device=x.device,
-    )
-    x_col_major.copy_(x)
-    return x_col_major
-
-
 @record
 def main():
     parser = argparse.ArgumentParser(description="Newton-Schulz distributed test")
@@ -84,24 +70,21 @@ def main():
     # Broadcast the full matrix to all ranks
     dist.broadcast(A, src=0)
 
-    # Scatter rows to each rank
-    local_rows = m // world_size
-    x_local = A[rank * local_rows : (rank + 1) * local_rows, :].contiguous()
+    # Scatter columns to each rank
+    local_cols = n // world_size
+    x_local = A[:, rank * local_cols : (rank + 1) * local_cols].contiguous()
 
     group = dist.group.WORLD
     ctx = cusolvermp_ctx_create(group)
     try:
-        # cuSOLVERMp expects the local shard to use column-major storage.
-        x_local_col_major = to_column_major_local(x_local)
-        tex.newton_schulz(ctx._ptr, m, n, x_local_col_major, args.num_iterations, coefficients)
-        x_local = x_local_col_major.contiguous()
+        newton_schulz(x_local, ctx, args.num_iterations, coefficients=coefficients)
     finally:
         ctx.destroy()
 
     # Gather results
     gathered = [torch.empty_like(x_local) for _ in range(world_size)]
     dist.all_gather(gathered, x_local)
-    X = torch.cat(gathered, dim=0)
+    X = torch.cat(gathered, dim=1)
 
     # Check: the resulting matrix should be orthogonal, or match a local reference.
     if rank == 0:
