@@ -2834,7 +2834,13 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
 
         causal = "causal" in attn_mask_type
         padding = "padding" in attn_mask_type
-        assert not padding, f"{attn_mask_type} mask type is not supported!"
+        if qkv_format == "thd":
+            # THD always uses padding mask types; per-step masks set internally
+            assert padding, (
+                f"THD format requires padding mask type, got {attn_mask_type}!"
+            )
+        else:
+            assert not padding, f"{attn_mask_type} mask type is not supported!"
         if use_fused_attention and causal and "bottom_right" not in attn_mask_type:
             if qkv_format != "thd":
                 attn_mask_type = attn_mask_type + "_bottom_right"
@@ -2959,7 +2965,16 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             # Step 1: second chunk valid, starts at midpoint (front-padded)
             thd_cu_seqlens_q_padded_per_step[1] = cu_seqlens_q_padded_rank.clone()
             thd_cu_seqlens_q_padded_per_step[1][:-1] += chunk_sizes_q
-            thd_attn_mask_type_per_step = ["padding_causal", "padding_causal_bottom_right"]
+            if causal:
+                # Q is always the last chunk in the visible KV range,
+                # so bottom_right alignment is always correct.
+                # (When seqlen_q == seqlen_kv, bottom_right == top-left.)
+                thd_attn_mask_type_per_step = [
+                    "padding_causal_bottom_right",
+                    "padding_causal_bottom_right",
+                ]
+            else:
+                thd_attn_mask_type_per_step = ["padding", "padding"]
 
         for i in range(len(local_seq_chunk_ids) + 1):
             if i < len(local_seq_chunk_ids):
