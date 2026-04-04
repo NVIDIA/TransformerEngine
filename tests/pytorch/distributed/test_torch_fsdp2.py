@@ -66,6 +66,10 @@ def test_fsdp2_fused_adam_tests():
             "-v",
             "-s",
             "--tb=short",
+            # The following 2 tests need to be run in sequence,
+            # as they depend on each other.
+            "-k",
+            "not dcp_resharding_save and not dcp_resharding_load",
         ],
         valid_returncodes=(0, 5),
         env=os.environ,
@@ -90,10 +94,6 @@ def test_fsdp2_mem_leak_tests():
             "-v",
             "-s",
             "--tb=short",
-            # The following 2 tests need to be run in sequence,
-            # as they depend on each other.
-            "-k",
-            "not dcp_resharding_save and not dcp_resharding_load",
         ],
         env=os.environ,
         timeout=600,
