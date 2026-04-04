@@ -21,6 +21,7 @@
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include <cudnn.h>
+#include <nccl.h>
 #include <torch/extension.h>
 #include <torch/torch.h>
 #include <transformer_engine/activation.h>
@@ -50,6 +51,7 @@
 #include <iostream>
 #include <memory>
 #include <torch/csrc/distributed/c10d/ProcessGroup.hpp>
+#include <torch/csrc/distributed/c10d/ProcessGroupNCCL.hpp>
 #include <vector>
 
 #include "c10/util/ArrayRef.h"

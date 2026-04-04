@@ -152,6 +152,9 @@ def _parse_args(argv=None, namespace=None):
         "--use-cuda-graphs", action="store_true", default=False, help="Use CUDA graphs."
     )
     parser.add_argument(
+        "--use-cublasmp", action="store_true", default=False, help="Use cuBLASMp backend."
+    )
+    parser.add_argument(
         "-v", "--verbose", action="store_true", default=False, help="Verbose info messages."
     )
     opts = parser.parse_args(argv, namespace)
@@ -203,6 +206,7 @@ def _main(opts):
         capture_output=True,
         text=True,
         shell=True,
+        check=False,
     )
 
     if result.stdout == "0":  # Extra checks for non-MNNVL platforms
@@ -306,7 +310,7 @@ def _main(opts):
     helper = (
         tex.CommOverlapHelper()
         if tex.ubuf_built_with_mpi()
-        else tex.CommOverlapHelper(bootstrap_pg)
+        else tex.CommOverlapHelper(bootstrap_pg, tp_group)
     )
 
     # Initialize userbuffers with (M, N) buffer
@@ -323,24 +327,44 @@ def _main(opts):
     ):
         buffer_dtype = torch.uint8
     ub_obj = (
-        tex.CommOverlapP2P(
-            (outer_size, hidden_size),
-            buffer_dtype,
-            helper,
-            tp_size,  # Tensor-parallel group size (may be different than LOCAL_SIZE)
-            opts.comm_type,
-            set_sm_margin=opts.comm_type == tex.CommOverlapType.RS or opts.atomic,
-            atomic_gemm=opts.atomic,
-            aggregate=opts.aggregate,
-            use_ce=not (opts.atomic and bool(int(os.getenv("NVTE_AG_P2P_MULTI_ATOMIC", "0")))),
+        (
+            tex.CommOverlapP2P(
+                (outer_size, hidden_size),
+                buffer_dtype,
+                helper,
+                tp_size,  # Tensor-parallel group size (may be different than LOCAL_SIZE)
+                opts.comm_type,
+                set_sm_margin=opts.comm_type == tex.CommOverlapType.RS or opts.atomic,
+                atomic_gemm=opts.atomic,
+                aggregate=opts.aggregate,
+                use_ce=not (opts.atomic and bool(int(os.getenv("NVTE_AG_P2P_MULTI_ATOMIC", "0")))),
+            )
+            if not opts.use_cublasmp
+            else tex.CommOverlapP2P(
+                helper,
+                tp_rank,
+                tp_size,
+                num_comm_sm=3,
+                atomic_gemm=opts.atomic,
+            )
         )
         if opts.p2p
-        else tex.CommOverlap(
-            (outer_size, hidden_size),
-            buffer_dtype,
-            helper,
-            tp_size,  # Tensor-parallel group size (may be different than LOCAL_SIZE)
-            atomic_gemm=opts.atomic,
+        else (
+            tex.CommOverlap(
+                (outer_size, hidden_size),
+                buffer_dtype,
+                helper,
+                tp_size,  # Tensor-parallel group size (may be different than LOCAL_SIZE)
+                atomic_gemm=opts.atomic,
+            )
+            if not opts.use_cublasmp
+            else tex.CommOverlap(
+                helper,
+                tp_rank,
+                tp_size,
+                num_comm_sm=16,
+                atomic_gemm=opts.atomic,
+            )
         )
     )
 
@@ -348,22 +372,30 @@ def _main(opts):
     ub_obj2 = None
     if opts.atomic and opts.comm_type == tex.CommOverlapType.AG and opts.check_numerics:
         ub_obj2 = (
-            tex.CommOverlapP2P(
-                (outer_size, hidden_size),
-                torch.uint8 if opts.fp8_output else torch.bfloat16,
-                helper,
-                tp_size,  # Tensor-parallel group size (may be different than LOCAL_SIZE)
-                tex.CommOverlapType.RS,
-                set_sm_margin=True,
-                atomic_gemm=True,
+            (
+                tex.CommOverlapP2P(
+                    (outer_size, hidden_size),
+                    torch.uint8 if opts.fp8_output else torch.bfloat16,
+                    helper,
+                    tp_size,  # Tensor-parallel group size (may be different than LOCAL_SIZE)
+                    tex.CommOverlapType.RS,
+                    set_sm_margin=True,
+                    atomic_gemm=True,
+                )
+                if not opts.use_cublasmp
+                else tex.CommOverlapP2P(helper, tp_rank, tp_size, num_comm_sm=16, atomic_gemm=True)
             )
             if opts.atomic_rs_p2p
-            else tex.CommOverlap(
-                (outer_size, hidden_size),
-                torch.uint8 if opts.fp8_output else torch.bfloat16,
-                helper,
-                tp_size,  # Tensor-parallel group size (may be different than LOCAL_SIZE)
-                atomic_gemm=True,
+            else (
+                tex.CommOverlap(
+                    (outer_size, hidden_size),
+                    torch.uint8 if opts.fp8_output else torch.bfloat16,
+                    helper,
+                    tp_size,  # Tensor-parallel group size (may be different than LOCAL_SIZE)
+                    atomic_gemm=True,
+                )
+                if not opts.use_cublasmp
+                else tex.CommOverlap(helper, tp_rank, tp_size, num_comm_sm=3, atomic_gemm=True)
             )
         )
 
@@ -408,7 +440,7 @@ def _main(opts):
         mean=0.0,
         std=opts.std,
     )
-    if ub_obj2 is not None:
+    if opts.comm_type == tex.CommOverlapType.AG and ub_obj2 is not None:
         kernel2_t = torch.nn.init.normal_(
             torch.empty(local_kernel2_t_shape, dtype=torch.bfloat16, device="cuda"),
             mean=0.0,
@@ -429,22 +461,22 @@ def _main(opts):
             # AG Kernel: (K/P, N) -> gather -> (K, N) -> T -> (N, K)
             ker_g = torch.transpose(
                 te.distributed.gather_along_first_dim(kernel_t, tp_group)[0], 0, 1
-            ).to(dtype=torch.float32)
+            )
             # AG Input: (M/P, N) -> gather -> (M, N)
-            inp_g = te.distributed.gather_along_first_dim(inp, tp_group)[0].to(dtype=torch.float32)
+            inp_g = te.distributed.gather_along_first_dim(inp, tp_group)[0]
             if ub_obj2 is not None:
                 ker2_g = te.distributed.gather_along_first_dim(
                     torch.transpose(kernel2_t, 0, 1), tp_group
-                )[0].to(dtype=torch.float32)
+                )[0]
         else:
             # RS Kernel: (N, K/P) -> T -> (K/P, N) -> gather -> (K, N)
             ker_g = te.distributed.gather_along_first_dim(
                 torch.transpose(kernel_t, 0, 1), tp_group
-            )[0].to(dtype=torch.float32)
+            )[0]
             # RS Input: (M, K/P) -> T -> (K/P, M) -> gather -> (K, M) -> T -> (M, K)
             inp_g = torch.transpose(
                 te.distributed.gather_along_first_dim(torch.transpose(inp, 0, 1), tp_group)[0], 0, 1
-            ).to(dtype=torch.float32)
+            )
 
     if opts.bulk_overlap:
         if opts.comm_type == tex.CommOverlapType.AG:
@@ -456,10 +488,20 @@ def _main(opts):
             # Sum the list together for final global result
             ref_g = torch.stack(bulk_inp_list).sum(dim=0)
     else:
-        ref_g = torch.matmul(inp_g, ker_g)
+        ref_g, *_ = tex.general_gemm(
+            torch.transpose(ker_g, 0, 1),
+            inp_g,
+            out_dtype=torch.bfloat16,
+            use_split_accumulator=te.module.base._2X_ACC_FPROP,
+        )
         if ub_obj2 is not None:
             inp2_g = torch.nn.functional.gelu(ref_g)  # pylint: disable=not-callable
-            ref2_g = torch.matmul(inp2_g, ker2_g)
+            ref2_g = tex.general_gemm(
+                torch.transpose(ker2_g),
+                inp2_g,
+                out_dtype=torch.bfloat16,
+                use_split_accumulator=te.module.base._2X_ACC_FPROP,
+            )
 
     # Initialize quantizers
     with_quantized_compute = opts.quantization != "none"
@@ -580,7 +622,7 @@ def _main(opts):
                 tp_group,
             )
             gemm_inp = inp
-        else:
+        elif not opts.use_cublasmp:
             ag_out, _ = fill_userbuffers_buffer_for_all_gather(
                 ub_obj,
                 inp_fp8 if with_quantized_compute else inp,
@@ -588,6 +630,8 @@ def _main(opts):
                 tp_group,
             )
             gemm_inp = ag_out
+        else:
+            gemm_inp = inp_fp8 if with_quantized_compute else inp
         if ub_obj2 is not None:
             rs_out2 = torch.empty(
                 (outer_size // tp_size, hidden_size), dtype=torch.bfloat16, device="cuda"

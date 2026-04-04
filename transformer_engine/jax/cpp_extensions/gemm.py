@@ -24,6 +24,7 @@ from transformer_engine_jax import (
     JAXX_Collective_Op,
     get_device_compute_capability,
     initialize_cgemm_communicator,
+    is_collective_gemm_with_cublasmp,
     get_cgemm_num_max_streams,
     get_grouped_gemm_setup_workspace_size,
 )
@@ -221,6 +222,7 @@ def collective_gemm_bootstrap(
     num_sm_for_communication=2,
     use_ce=True,
     aggregate_all_gather=False,
+    use_cublasmp=False,
 ):
     """Initialize NCCL communicators for Collective GEMM operations.
 
@@ -316,6 +318,7 @@ def collective_gemm_bootstrap(
         num_sm_for_communication,
         use_ce,
         aggregate_all_gather,
+        use_cublasmp,
     )
 
 
@@ -605,7 +608,11 @@ class GemmPrimitive(BasePrimitive):
         if scaling_mode.is_nvfp4_scaling:
             workspace_size += lhs_scale_inv.size + rhs_scale_inv.size
         if not collective_op.is_none:
-            workspace_size *= get_cgemm_num_max_streams()
+            if is_collective_gemm_with_cublasmp():
+                # cuBlasMp manages its own cuBlasLt workspaces per stream
+                workspace_size = 0
+            else:
+                workspace_size *= get_cgemm_num_max_streams()
         # cuBLAS workspace ptr must be 256 bytes aligned but JAX buffers are not
         # necessarily 256 bytes aligned, we add some padding to ensure alignment.
         workspace_size += 256
@@ -811,10 +818,10 @@ class GemmPrimitive(BasePrimitive):
         contracting_dims,
         scaling_mode,
         use_split_accumulator,
-        collective_op,
         transpose_batch_sequence,
         sequence_dim,
         is_outer,
+        collective_op,
     ):
         del transpose_batch_sequence, sequence_dim, is_outer
         if GemmPrimitive.outer_primitive is None:
@@ -997,9 +1004,9 @@ class GemmPrimitive(BasePrimitive):
         lhs_scale_specs = rhs_scale_specs = (None,)
         if scaling_mode.is_1d_block_scaling():
             rhs_scale_specs = rhs_specs
-            # Set the seq spec to None to trigger AG the scales as TE/Common CGEMM does not handle
-            # scale collecting yet
-            if collective_op.is_all_gather:
+            # Set the seq spec to None to trigger AG the scales as TE/Common CGEMM w/ Userbuffers
+            # backend does not handle scale collecting yet (cuBLASMp backend does)
+            if collective_op.is_all_gather and not is_collective_gemm_with_cublasmp():
                 lhs_scale_specs = tuple(
                     None if i == sequence_dim else s for i, s in enumerate(lhs_specs)
                 )
