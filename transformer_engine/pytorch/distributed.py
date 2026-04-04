@@ -263,10 +263,10 @@ class activation_recompute_forward(AbstractContextManager, ContextDecorator):
 
         if self.activation_recompute and not self.recompute_phase:
             activation_recompute_forward._is_first_fp8_module.append(
-                FP8GlobalStateManager.IS_FIRST_FP8_MODULE
+                FP8GlobalStateManager.quantization_state.is_first_fp8_module
             )
         if self.activation_recompute and self.recompute_phase:
-            FP8GlobalStateManager.IS_FIRST_FP8_MODULE = (
+            FP8GlobalStateManager.quantization_state.is_first_fp8_module = (
                 activation_recompute_forward._is_first_fp8_module.pop(0)
             )
 

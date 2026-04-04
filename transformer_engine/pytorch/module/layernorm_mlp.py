@@ -241,7 +241,12 @@ class _LayerNormMLP(torch.autograd.Function):
             if checkpoint:
                 # save the state of autocast and quantizers for recomputation
                 ctx.autocast_state = (
-                    FP8GlobalStateManager.get_autocast_state()
+                    FP8GlobalStateManager.quantization_state.fp8_enabled,
+                    FP8GlobalStateManager.quantization_state.fp8_calibration,
+                    FP8GlobalStateManager.quantization_state.fp8_recipe,
+                    FP8GlobalStateManager.quantization_state.fp8_distributed_group,
+                    FP8GlobalStateManager.quantization_state.is_first_fp8_module,
+                    FP8GlobalStateManager.quantization_state.fp8_graph_capturing,
                 )  # to restore autocast state during recomputation
                 if (
                     fp8
@@ -831,10 +836,10 @@ class _LayerNormMLP(torch.autograd.Function):
             if ctx.fp8 and requires_grad(
                 inp, ln_weight, ln_bias, fc1_weight, fc2_weight, fc1_bias, fc2_bias
             ):
-                _first_fp8_module = FP8GlobalStateManager.IS_FIRST_FP8_MODULE
+                _first_fp8_module = FP8GlobalStateManager.quantization_state.is_first_fp8_module
                 ctx.reduce_and_update_bwd_fp8_tensors = FP8GlobalStateManager.is_first_fp8_module()
                 if in_fp8_activation_recompute_phase() or is_recomputation:
-                    FP8GlobalStateManager.IS_FIRST_FP8_MODULE = _first_fp8_module
+                    FP8GlobalStateManager.quantization_state.is_first_fp8_module = _first_fp8_module
 
             ctx.wgrad_store = wgrad_store
             if is_recomputation:  # return the recomputed tensors
@@ -905,9 +910,21 @@ class _LayerNormMLP(torch.autograd.Function):
             # backward is not in autocast context, so we set the state here
             # we also have to set the quantizer states to what they were before the forward pass (only relevant for DelayedScaling recipe)
             final_autocast_state = (
-                FP8GlobalStateManager.get_autocast_state()
+                FP8GlobalStateManager.quantization_state.fp8_enabled,
+                FP8GlobalStateManager.quantization_state.fp8_calibration,
+                FP8GlobalStateManager.quantization_state.fp8_recipe,
+                FP8GlobalStateManager.quantization_state.fp8_distributed_group,
+                FP8GlobalStateManager.quantization_state.is_first_fp8_module,
+                FP8GlobalStateManager.quantization_state.fp8_graph_capturing,
             )  # get current autocast state
-            FP8GlobalStateManager.set_autocast_state(ctx.autocast_state)  # set old autocast state
+            (
+                FP8GlobalStateManager.quantization_state.fp8_enabled,
+                FP8GlobalStateManager.quantization_state.fp8_calibration,
+                FP8GlobalStateManager.quantization_state.fp8_recipe,
+                FP8GlobalStateManager.quantization_state.fp8_distributed_group,
+                FP8GlobalStateManager.quantization_state.is_first_fp8_module,
+                FP8GlobalStateManager.quantization_state.fp8_graph_capturing,
+            ) = ctx.autocast_state  # set old autocast state
             if (
                 ctx.other_args["fp8"]
                 and FP8GlobalStateManager.get_fp8_recipe().__class__.__name__ == "DelayedScaling"
@@ -930,7 +947,14 @@ class _LayerNormMLP(torch.autograd.Function):
                 tuple(ctx.other_args.values()),
             )
 
-            FP8GlobalStateManager.set_autocast_state(final_autocast_state)  # restore autocast state
+            (
+                FP8GlobalStateManager.quantization_state.fp8_enabled,
+                FP8GlobalStateManager.quantization_state.fp8_calibration,
+                FP8GlobalStateManager.quantization_state.fp8_recipe,
+                FP8GlobalStateManager.quantization_state.fp8_distributed_group,
+                FP8GlobalStateManager.quantization_state.is_first_fp8_module,
+                FP8GlobalStateManager.quantization_state.fp8_graph_capturing,
+            ) = final_autocast_state  # restore autocast state
             if (
                 ctx.other_args["fp8"]
                 and FP8GlobalStateManager.get_fp8_recipe().__class__.__name__ == "DelayedScaling"
@@ -2041,7 +2065,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
         debug = self.is_debug_iter()
 
         if FP8GlobalStateManager.fp8_graph_capturing():
-            skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()
+            skip_fp8_weight_update = (
+                FP8GlobalStateManager.quantization_state.skip_fp8_weight_update_tensor
+            )
         else:
             skip_fp8_weight_update = None
         if skip_fp8_weight_update is not None:
