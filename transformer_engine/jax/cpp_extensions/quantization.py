@@ -52,6 +52,53 @@ from ..quantize import (
 __all__ = ["quantize", "quantize_dbias", "grouped_quantize", "grouped_dbias"]
 
 
+def _build_scale_spec(x_spec, scale_shape, mesh):
+    """Build a PartitionSpec for the MXFP8 scale tensor compatible with its shape.
+
+    The scale tensor has smaller dimensions than the data tensor (each dimension
+    divided by the MXFP8 block size). This function ensures that we only shard a
+    scale dimension by a mesh axis (or tuple of axes) if scale_shape[i] is
+    divisible by the total axis size. If not, a ValueError is raised with a
+    helpful diagnostic message.
+    """
+    result = []
+    for axis, scale_dim in zip(x_spec, scale_shape):
+        if axis is None:
+            result.append(None)
+        elif isinstance(axis, str):
+            axis_size = mesh.shape.get(axis, 1)
+            if scale_dim % axis_size == 0:
+                result.append(axis)
+            else:
+                raise ValueError(
+                    f"Cannot partition MXFP8 scale tensor (shape={tuple(scale_shape)}) "
+                    f"by mesh axis '{axis}' of size {axis_size}: "
+                    f"scale dim {scale_dim} is not divisible by {axis_size}. "
+                    "The data tensor's sharding is incompatible with the MXFP8 block "
+                    "size along this axis. Try reducing expert parallelism (EP) so that "
+                    "EP divides the scale dimension, or increase the tensor size."
+                )
+        elif isinstance(axis, (tuple, list)):
+            # Multi-axis sharding (e.g. ('fsdp', 'expert')): check total combined size.
+            total_size = 1
+            for a in axis:
+                total_size *= mesh.shape.get(a, 1)
+            if scale_dim % total_size == 0:
+                result.append(axis)
+            else:
+                raise ValueError(
+                    f"Cannot partition MXFP8 scale tensor (shape={tuple(scale_shape)}) "
+                    f"by mesh axes {tuple(axis)} of combined size {total_size}: "
+                    f"scale dim {scale_dim} is not divisible by {total_size}. "
+                    "The data tensor's sharding is incompatible with the MXFP8 block "
+                    "size along this axis. Try reducing parallelism or increasing the "
+                    "tensor size."
+                )
+        else:
+            result.append(None)
+    return tuple(result)
+
+
 class BaseDBiasQuantizePrimitive(BasePrimitive):
     """
     Cast Primitive wrapping nvte_quantize and nvte_quantize_dbias
@@ -447,7 +494,13 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
 
         scale_inv_spec = colwise_scale_inv_spec = (None,)
         if ScalingMode(scaling_mode).is_block_scaling:
-            scale_inv_spec = x_spec
+            rowwise_scale_shape, _ = ScalingMode(scaling_mode).get_scale_shape_2x(
+                arg_infos[0].shape,
+                is_padded=False,
+                flatten_axis=flatten_axis,
+                broadcast_2d_scale_shape_to_1d=True,
+            )
+            scale_inv_spec = _build_scale_spec(x_spec, rowwise_scale_shape, mesh)
 
         if q_layout.has_colwise:
             if (
@@ -529,7 +582,13 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
 
         scale_inv_spec = colwise_scale_inv_spec = (None,)
         if ScalingMode(scaling_mode).is_block_scaling:
-            scale_inv_spec = x_spec
+            rowwise_scale_shape, _ = ScalingMode(scaling_mode).get_scale_shape_2x(
+                arg_infos[0].shape,
+                is_padded=False,
+                flatten_axis=flatten_axis,
+                broadcast_2d_scale_shape_to_1d=True,
+            )
+            scale_inv_spec = _build_scale_spec(x_spec, rowwise_scale_shape, mesh)
 
         if q_layout.has_colwise:
             if (
@@ -994,7 +1053,8 @@ class GroupedQuantizePrimitive(BasePrimitive):
     Cast Primitive wrapping nvte_quantize and nvte_quantize_dbias
     """
 
-    name = "te_grouped_quantize_ffi"
+    name = "te_grouped_quantize_ffi"  # V1: fallback path (supports all shapes, not CUDA-graph safe)
+    name_v2 = "te_grouped_quantize_v2_ffi"  # V2: MXFP8, CUDA-graph safe
     multiple_results = True
     impl_static_args = (
         3,
@@ -1005,6 +1065,52 @@ class GroupedQuantizePrimitive(BasePrimitive):
     )  # out_dtype, scaling_mode, q_layout, flatten_axis, scale_dtype
     inner_primitive = None
     outer_primitive = None
+
+    @staticmethod
+    def _use_v2_kernel(scaling_mode, x_shape, flatten_axis):
+        """Return True when the V2 (CUDA-graph-safe) MXFP8 kernel can be used.
+
+        V2 requires:
+          1. SM100+ (Blackwell) — V2 grouped quantize fuses the scale_inv swizzle via
+             nvte_group_quantize.  The swizzled scale_inv must then be consumed by the
+             V2 grouped GEMM, which also requires SM100+.  Keeping both decisions tied
+             to SM100+ prevents a mismatch where V2-quantized (pre-swizzled) tensors
+             are passed to the V1 grouped GEMM (which would re-swizzle and corrupt).
+          2. The total first logical dimension (product of x_shape up to flatten_axis)
+             is divisible by 128.
+          3. For multi-dim group tensors (eff > 1, e.g., kernel shape G×K×N), the
+             per-group row count non_group_m = prod(x_shape[1:eff]) must also be
+             divisible by 128.
+          4. For lhs-style tensors (eff == 1, shape M×K), individual group sizes must
+             be 128-aligned — this is a dynamic constraint assumed by the caller.
+          5. The last logical dimension (contracting dim K or output dim N) must be
+             divisible by 128, matching the V2 grouped GEMM constraint so that the
+             two always agree on V1 vs V2.
+
+        Falls back to V1 when constraints are not met. V1 supports arbitrary shapes
+        but performs a D2H copy of group_sizes (not CUDA-graph safe).
+        """
+        if ScalingMode(scaling_mode) != ScalingMode.MXFP8_1D_SCALING:
+            return False
+        # Require SM100+ so V2 quantize (fused swizzle) is only used alongside V2 GEMM.
+        if get_min_device_compute_capability() < 100:
+            return False
+        ndim = len(x_shape)
+        eff = flatten_axis if flatten_axis >= 0 else flatten_axis + ndim
+        total_first_dim = math.prod(x_shape[:eff])
+        if total_first_dim % 128 != 0:
+            return False
+        # For multi-dim group tensors (e.g., kernel shape G×K×N with eff=2),
+        # non_group_m = K must also be 128-aligned.
+        if eff > 1:
+            non_group_m = math.prod(x_shape[1:eff])
+            if non_group_m % 128 != 0:
+                return False
+        # Last dim must be 128-aligned to match the V2 grouped GEMM requirement.
+        last_dim = math.prod(x_shape[eff:])
+        if last_dim % 128 != 0:
+            return False
+        return True
 
     @staticmethod
     def abstract(
@@ -1048,7 +1154,16 @@ class GroupedQuantizePrimitive(BasePrimitive):
             rowwise_scale_inv_shape = (1,)
         rowwise_out_aval = jax.core.ShapedArray(shape=rowwise_out_shape, dtype=out_dtype)
 
-        amax_aval = jax.core.ShapedArray(shape=(group_sizes_aval.size,), dtype=jnp.float32)
+        use_v2 = GroupedQuantizePrimitive._use_v2_kernel(scaling_mode, x_aval.shape, flatten_axis)
+        if use_v2:
+            # V2 path: 5th output is int64_workspace laid out as:
+            #   [n_groups int64 group_sizes | n_groups+1 int64 offsets]
+            # = (2*n_groups + 1) * sizeof(int64_t) bytes stored as uint8.
+            n_groups = group_sizes_aval.size
+            fifth_out_aval = jax.core.ShapedArray(shape=((2 * n_groups + 1) * 8,), dtype=jnp.uint8)
+        else:
+            # V1 path: 5th output is amax
+            fifth_out_aval = jax.core.ShapedArray(shape=(group_sizes_aval.size,), dtype=jnp.float32)
 
         if q_layout.has_colwise:
             colwise_out_shape = out_shape
@@ -1068,7 +1183,7 @@ class GroupedQuantizePrimitive(BasePrimitive):
             colwise_out_aval,
             rowwise_scale_inv_aval,
             colwise_scale_inv_aval,
-            amax_aval,
+            fifth_out_aval,
         )
 
     @staticmethod
@@ -1082,9 +1197,17 @@ class GroupedQuantizePrimitive(BasePrimitive):
             colwise_out,
             scale_inv,
             colwise_scale_inv,
-            updated_amax,
+            fifth_out,
         ) = GroupedQuantizePrimitive.abstract(*args, **kwargs)
-        return rowwise_out, colwise_out, scale_inv, colwise_scale_inv, updated_amax
+        # When V2 is used, the inner abstract returns int64_workspace as the 5th output.
+        # The outer interface always presents amax (float32, n_groups) for a consistent API.
+        scaling_mode = kwargs.get("scaling_mode")
+        x_aval = args[0]
+        group_sizes_aval = args[2]
+        flatten_axis = kwargs.get("flatten_axis")
+        if GroupedQuantizePrimitive._use_v2_kernel(scaling_mode, x_aval.shape, flatten_axis):
+            fifth_out = jax.core.ShapedArray(shape=(group_sizes_aval.size,), dtype=jnp.float32)
+        return rowwise_out, colwise_out, scale_inv, colwise_scale_inv, fifth_out
 
     @staticmethod
     def lowering(
@@ -1107,6 +1230,21 @@ class GroupedQuantizePrimitive(BasePrimitive):
         assert x_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
         assert scale_aval.dtype == jnp.float32
         assert group_sizes_aval.dtype == jnp.int32
+        use_v2 = GroupedQuantizePrimitive._use_v2_kernel(scaling_mode, x_aval.shape, flatten_axis)
+        if use_v2:
+            # V2: CUDA-graph safe; scale is passed but ignored by the C++ handler.
+            # Requires total_first_dim % 128 == 0 (checked above) and all individual
+            # group sizes % 128 == 0 (dynamic constraint, enforced by the kernel).
+            return ffi.ffi_lowering(GroupedQuantizePrimitive.name_v2)(
+                ctx,
+                x,
+                scale,
+                group_sizes,
+                q_layout=q_layout.value.value,
+                flatten_axis=flatten_axis,
+            )
+        # V1: supports arbitrary shapes but not CUDA-graph safe (performs D2H copy of group_sizes).
+        # Used for non-MXFP8 scaling modes and for MXFP8 when total_first_dim % 128 != 0.
         return ffi.ffi_lowering(GroupedQuantizePrimitive.name)(
             ctx,
             x,
@@ -1137,7 +1275,7 @@ class GroupedQuantizePrimitive(BasePrimitive):
             colwise_out,
             rowwise_scale_inv,
             colwise_scale_inv,
-            updated_amax,
+            fifth,
         ) = GroupedQuantizePrimitive.inner_primitive.bind(
             x,
             scale,
@@ -1148,6 +1286,12 @@ class GroupedQuantizePrimitive(BasePrimitive):
             flatten_axis=flatten_axis,
             scale_dtype=scale_dtype,
         )
+        use_v2 = GroupedQuantizePrimitive._use_v2_kernel(scaling_mode, x.shape, flatten_axis)
+        if use_v2:
+            # fifth is int64_workspace; return a dummy zero amax for interface compatibility
+            updated_amax = jnp.zeros((group_sizes.size,), jnp.float32)
+        else:
+            updated_amax = fifth
         return (rowwise_out, colwise_out, rowwise_scale_inv, colwise_scale_inv, updated_amax)
 
 
@@ -1259,6 +1403,11 @@ def grouped_quantize(
         for i, quantizer_i in enumerate(quantizer.quantizers):
             quantizer_i.update(updated_amax[i].reshape((1,)))
 
+    # V2 grouped quantize (nvte_group_quantize) fuses the scale_inv swizzle into
+    # the kernel, so the resulting tensors are already swizzled for GEMM.
+    use_v2 = GroupedQuantizePrimitive._use_v2_kernel(
+        quantizer.scaling_mode.value, x.shape, flatten_axis
+    )
     out = ScaledTensorFactory.create(
         data=rowwise_casted_output,
         scale_inv=rowwise_scale_inv,
@@ -1271,6 +1420,7 @@ def grouped_quantize(
         flatten_axis=flatten_axis,
         first_dims=ragged_first_dims,
         original_shape=original_shape,
+        pre_swizzled=use_v2,
     )
     return out
 

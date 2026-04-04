@@ -290,12 +290,13 @@ def _grouped_dequantize(grouped_scaled_tensor):
     flatten_axis = len(original_shape) + flatten_axis if flatten_axis < 0 else flatten_axis
 
     output = []
-    # For transposed (colwise) tensors with ragged groups, the group dimension is the last
-    # axis of original_shape (e.g. original_shape = (N, M) with groups along M), while the
-    # non-group dimensions are all axes before it.  For the uniform-groups case the group
-    # dimension stays at axis 0, so the existing axis-0 logic applies.
+    # When data_layout=="T" (colwise, transposed) and first_dims is set (ragged groups), the
+    # original_shape is stored transposed: the group (variable-size) axis is the LAST dimension
+    # rather than the first. Non-group dims are original_shape[:-1], not original_shape[1:].
     is_transposed_ragged = (
-        grouped_scaled_tensor.data_layout == "T" and group_sizes.size != original_shape[0]
+        grouped_scaled_tensor.data_layout == "T"
+        and grouped_scaled_tensor.first_dims is not None
+        and grouped_scaled_tensor.first_dims.size > 0
     )
     if is_transposed_ragged:
         non_group_shape = original_shape[:-1]
@@ -308,7 +309,7 @@ def _grouped_dequantize(grouped_scaled_tensor):
     scale_inv_ptr = 0
     for i, data_i in enumerate(data):
         if is_transposed_ragged:
-            data_shape_i = (*non_group_shape, group_sizes[i])
+            data_shape_i = (*non_group_shape, int(group_sizes[i]))
         else:
             data_shape_i = (
                 group_sizes[i],

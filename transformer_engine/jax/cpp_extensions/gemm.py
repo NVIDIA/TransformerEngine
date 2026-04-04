@@ -1610,9 +1610,9 @@ class GroupedGemmPrimitive(BasePrimitive):
             workspace_size += lhs_scale_inv_aval.size * tensor_scaling_sinv_aligment
             workspace_size += rhs_scale_inv_aval.size * tensor_scaling_sinv_aligment
         elif scaling_mode == ScalingMode.MXFP8_1D_SCALING.value:
-            # We also pad scale_inv swizzle buffers size for 256 bytes alignment.
-            workspace_size += lhs_scale_inv_aval.size + mxfp8_scaling_sinv_alignment_padding
-            workspace_size += rhs_scale_inv_aval.size + mxfp8_scaling_sinv_alignment_padding
+            # Both V1 and V2 quantize now produce pre-swizzled scales, so the GEMM
+            # does not need extra workspace for nvte_swizzle_scaling_factors.
+            pass
         return workspace_size
 
     @staticmethod
@@ -2034,11 +2034,14 @@ def _can_use_v2_grouped_gemm(
     scaling_mode: ScalingMode,
     dtype: jnp.dtype,
     has_bias: bool,
+    lhs_shape=None,
+    rhs_shape=None,
+    lhs_axis_boundary=None,
+    rhs_axis_boundary=None,
 ) -> bool:
     """Determine whether the cuda-graphable grouped GEMM implementation can be used based on the input parameters."""
-    # Use the cuda-graphable path for plain BF16 non-quantized inputs; fall back to the legacy
-    # nvte_multi_tensor_gemm path for all other cases (FP8, MXFP8, etc.) to stay
-    # feature-compatible with the main branch.
+    # Use the cuda-graphable path for plain BF16 non-quantized inputs and MXFP8; fall back to
+    # the legacy nvte_multi_tensor_gemm path for all other cases (tensor-scaled FP8, etc.).
     # Bias can be supported in a kernel or in pure-JAX in the future.
 
     enforce_v2_gmm = _should_enforce_v2_grouped_gemm()
@@ -2063,13 +2066,86 @@ def _can_use_v2_grouped_gemm(
             )
         return False
 
-    if scaling_mode == ScalingMode.NO_SCALING and dtype == jnp.bfloat16 and not has_bias:
+    if has_bias:
+        if enforce_v2_gmm:
+            raise RuntimeError(
+                "Grouped GEMM with bias is not supported in the TE V2 grouped GEMM kernel, but"
+                " NVTE_JAX_ENFORCE_V2_GROUPED_GEMM is enabled and has_bias is True."
+            )
+        return False
+
+    if scaling_mode == ScalingMode.NO_SCALING and dtype == jnp.bfloat16:
+        return True
+
+    if scaling_mode == ScalingMode.MXFP8_1D_SCALING:
+        # V2 MXFP8 requires that the total first dimension of both operands (up to
+        # axis_boundary) is divisible by 128, matching the quantize V2 kernel requirement.
+        # Individual group sizes must also be 128-aligned (dynamic constraint).
+        if lhs_shape is not None and lhs_axis_boundary is not None:
+            lhs_first_dim = math.prod(lhs_shape[:lhs_axis_boundary])
+            if lhs_first_dim % 128 != 0:
+                if enforce_v2_gmm:
+                    raise RuntimeError(
+                        "The TE V2 grouped GEMM for MXFP8 requires the product of the first"
+                        " dimensions (up to axis_boundary) of LHS to be divisible by 128, but got"
+                        f" {lhs_first_dim} with lhs_shape={lhs_shape} and"
+                        f" lhs_axis_boundary={lhs_axis_boundary}, and"
+                        " NVTE_JAX_ENFORCE_V2_GROUPED_GEMM is enabled."
+                    )
+                return False
+        if rhs_shape is not None and rhs_axis_boundary is not None:
+            rhs_first_dim = math.prod(rhs_shape[:rhs_axis_boundary])
+            if rhs_first_dim % 128 != 0:
+                if enforce_v2_gmm:
+                    raise RuntimeError(
+                        "The TE V2 grouped GEMM for MXFP8 requires the product of the first"
+                        " dimensions (up to axis_boundary) of RHS to be divisible by 128, but got"
+                        f" {rhs_first_dim} with rhs_shape={rhs_shape} and"
+                        f" rhs_axis_boundary={rhs_axis_boundary}, and"
+                        " NVTE_JAX_ENFORCE_V2_GROUPED_GEMM is enabled."
+                    )
+                return False
+        # V2 MXFP8 also requires that the "last" dimension (after axis_boundary) of both
+        # operands is a multiple of 128.  The V2 GEMM setup kernel computes per-group
+        # scale pointers as ``data_offset / 32``, which equals ``K_blocks * last_dim``.
+        # The quantize kernel, however, pads the colwise scale stride to
+        # ``ceil(last_dim / 128) * 128``, making per-group padded scale larger than
+        # ``K_blocks * last_dim`` when ``last_dim`` is not 128-aligned.  This causes
+        # adjacent groups' scales to overlap in the flat buffer.  Fall back to V1 (which
+        # swizzles per-group scales individually) when the condition is not met.
+        if lhs_shape is not None and lhs_axis_boundary is not None:
+            lhs_last_dim = math.prod(lhs_shape[lhs_axis_boundary:])
+            if lhs_last_dim % 128 != 0:
+                if enforce_v2_gmm:
+                    raise RuntimeError(
+                        "The TE V2 grouped GEMM for MXFP8 requires the product of the last"
+                        " dimensions (after axis_boundary) of LHS to be divisible by 128, but got"
+                        f" {lhs_last_dim} with lhs_shape={lhs_shape} and"
+                        f" lhs_axis_boundary={lhs_axis_boundary}, and"
+                        " NVTE_JAX_ENFORCE_V2_GROUPED_GEMM is enabled."
+                    )
+                return False
+        if rhs_shape is not None and rhs_axis_boundary is not None:
+            rhs_last_dim = math.prod(rhs_shape[rhs_axis_boundary:])
+            if rhs_last_dim % 128 != 0:
+                if enforce_v2_gmm:
+                    raise RuntimeError(
+                        "The TE V2 grouped GEMM for MXFP8 requires the product of the last"
+                        " dimensions (after axis_boundary) of RHS to be divisible by 128, but got"
+                        f" {rhs_last_dim} with rhs_shape={rhs_shape} and"
+                        f" rhs_axis_boundary={rhs_axis_boundary}, and"
+                        " NVTE_JAX_ENFORCE_V2_GROUPED_GEMM is enabled."
+                    )
+                return False
         return True
 
     if enforce_v2_gmm:
         raise RuntimeError(
-            "The TE V2 grouped GEMM currently only supports BF16 with no quantization recipe and"
-            f" without bias, but received {scaling_mode=}, {dtype=}, {has_bias=}"
+            "The TE V2 grouped GEMM currently only supports non-quantized BF16 and MXFP8 with 1D"
+            " block scaling, but NVTE_JAX_ENFORCE_V2_GROUPED_GEMM is enabled and the input"
+            f" parameters do not meet these requirements (scaling_mode= {scaling_mode},"
+            f" dtype={dtype}, has_bias={has_bias}, lhs_shape={lhs_shape}, rhs_shape={rhs_shape},"
+            f" lhs_axis_boundary={lhs_axis_boundary}, rhs_axis_boundary={rhs_axis_boundary})."
         )
     return False
 
@@ -2328,7 +2404,34 @@ def grouped_gemm(
             " and padded with zeros to not affect the result of the MoE block."
         )
 
-    use_v2_ffi = _can_use_v2_grouped_gemm(scaling_mode, lhs_data.dtype, has_bias)
+    use_v2_ffi = _can_use_v2_grouped_gemm(
+        scaling_mode,
+        lhs_data.dtype,
+        has_bias,
+        lhs_shape=lhs_shape,
+        rhs_shape=rhs_shape,
+        lhs_axis_boundary=lhs_axis_boundary,
+        rhs_axis_boundary=rhs_axis_boundary,
+    )
+
+    # V2 grouped GEMM requires MXFP8 inputs to be pre-swizzled by V2 grouped quantize
+    # (nvte_group_quantize fuses the swizzle). The C++ V2 GEMM FFI does not re-swizzle.
+    if use_v2_ffi and scaling_mode == ScalingMode.MXFP8_1D_SCALING:
+        if isinstance(lhs, GroupedScaledTensor1x) and not lhs.pre_swizzled:
+            raise ValueError(
+                "V2 grouped GEMM requires MXFP8 lhs scale_inv to be pre-swizzled. "
+                "GroupedScaledTensor1x.pre_swizzled is False. "
+                "Use V2 grouped quantize (nvte_group_quantize, requires SM100+ and "
+                "128-aligned shapes) to produce pre-swizzled tensors."
+            )
+        if isinstance(rhs, GroupedScaledTensor1x) and not rhs.pre_swizzled:
+            raise ValueError(
+                "V2 grouped GEMM requires MXFP8 rhs scale_inv to be pre-swizzled. "
+                "GroupedScaledTensor1x.pre_swizzled is False. "
+                "Use V2 grouped quantize (nvte_group_quantize, requires SM100+ and "
+                "128-aligned shapes) to produce pre-swizzled tensors."
+            )
+
     if use_v2_ffi:
         additional_arg_0 = jnp.ones((num_gemms,), jnp.float32)  # alpha
         additional_arg_1 = jnp.zeros((num_gemms,), jnp.float32)  # beta
