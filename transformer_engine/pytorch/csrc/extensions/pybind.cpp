@@ -399,6 +399,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fa_prepare_bwd", &transformer_engine::pytorch::fa_prepare_bwd,
         "Backward of QKV preparation for Flash Attention",
         py::call_guard<py::gil_scoped_release>());
+  m.def("permute_to_grouped_tensor_fwd",
+        &transformer_engine::pytorch::permute_to_grouped_tensor_fwd,
+        "Permute Q, K, V to grouped tensors.", py::arg("query"), py::arg("key"), py::arg("value"),
+        py::arg("original_layout"), py::call_guard<py::gil_scoped_release>());
+  m.def(
+      "permute_to_grouped_tensor_bwd", &transformer_engine::pytorch::permute_to_grouped_tensor_bwd,
+      "Permute Q, K, V back to original layout.", py::arg("query_grad"), py::arg("key_grad"),
+      py::arg("value_grad"), py::arg("original_layout"), py::call_guard<py::gil_scoped_release>());
   m.def("fused_attn_fwd", &transformer_engine::pytorch::fused_attn_fwd,
         "Fused Attention FP8/BF16/FP16 FWD with separate Q, K and V");
   m.def("fused_attn_bwd", &transformer_engine::pytorch::fused_attn_bwd,

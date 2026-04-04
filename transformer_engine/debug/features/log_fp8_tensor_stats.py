@@ -14,6 +14,8 @@ from nvdlfw_inspect.debug_features.log_tensor_stats import LogTensorStats as Bas
 from nvdlfw_inspect.registry import Registry, api_method
 import transformer_engine_torch as tex
 
+import transformer_engine_torch as tex
+
 from transformer_engine.debug.features.utils.stats_buffer import STATS_BUFFERS
 from transformer_engine.debug.features.utils import get_reduction_params, next_enabled_iter
 from transformer_engine.pytorch.tensor import Quantizer, QuantizedTensor

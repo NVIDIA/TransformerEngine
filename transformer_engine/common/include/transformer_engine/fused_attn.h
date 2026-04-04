@@ -52,6 +52,8 @@ enum NVTE_QKV_Layout {
   NVTE_Paged_KV_SBHD_SBHD_SBHD = 22, /*!< Paged_KV_SBHD_SBHD_SBHD layout */
   NVTE_Paged_KV_THD_BSHD_BSHD = 23,  /*!< Paged_KV_THD_BSHD_BSHD layout */
   NVTE_Paged_KV_THD_SBHD_SBHD = 24,  /*!< Paged_KV_THD_SBHD_SBHD layout */
+  NVTE_BHSD_BHSD_BHSD = 25,          /*!< BHSD_BHSD_BHSD layout */
+  NVTE_QKV_Layout_NOT_SET,           /*!< Not set */
 };
 
 /*! \enum NVTE_QKV_Layout_Group
@@ -70,6 +72,8 @@ enum NVTE_QKV_Layout_Group {
   NVTE_HD_HD_HD = 4,
   /*! Paged_KV_HD_HD_HD QKV layouts, e.g. Paged_KV_BSHD_BSHD_BSHD, Paged_KV_THD_SBHD_SBHD */
   NVTE_Paged_KV_HD_HD_HD = 5,
+  /*! SD_SD_SD QKV layouts, e.g. BHSD_BHSD_BHSD */
+  NVTE_SD_SD_SD = 6,
 };
 
 /*! \enum NVTE_QKV_Format
@@ -90,6 +94,10 @@ enum NVTE_QKV_Format {
   NVTE_THD_2BSHD = 5,
   /*! THD format for Q and SBHD format for KV, i.e. THD_SBHD_SBHD, Paged_KV_THD_SBHD_SBHD */
   NVTE_THD_2SBHD = 6,
+  /*! BHSD QKV format, e.g. BHSD_BHSD_BHSD */
+  NVTE_BHSD = 7,
+  /*! Not set */
+  NVTE_QKV_Format_NOT_SET,
 };
 
 /*! \enum NVTE_Bias_Type
@@ -188,6 +196,22 @@ NVTE_QKV_Format nvte_get_q_format(NVTE_QKV_Layout qkv_layout);
  */
 NVTE_QKV_Format nvte_get_kv_format(NVTE_QKV_Layout qkv_layout);
 
+/*! \brief Convert one NVTE_QKV_Format to another.
+ *
+ *  \param[in]     src_format          The source format.
+ *  \param[in]     src_shape           The source shape.
+ *  \param[in]     dst_format          The destination format.
+ *  \param[out]    dst_shape           The destination shape.
+ *  \param[out]    b                   The batch size.
+ *  \param[out]    h                   The number of heads.
+ *  \param[out]    s                   The sequence length.
+ *  \param[out]    d                   The head dimension.
+ *  \param[out]    t                   The number of tokens.
+ */
+void nvte_convert_qkv_format(NVTE_QKV_Format src_format, std::vector<size_t> src_shape,
+                             NVTE_QKV_Format dst_format, std::vector<size_t> &dst_shape, size_t *b,
+                             size_t *h, size_t *s, size_t *d, size_t *t);
+
 /*! \brief Get fused attention backend based on input parameters.
  *
  *  \param[in]     is_training         Whether the model is in training mode.
@@ -274,6 +298,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
  *  \param[in]     attn_scale                Scaling factor for Q * K.T.
  *  \param[in]     dropout                   Dropout probability.
  *  \param[in]     qkv_layout                QKV tensors' layout.
+ *  \param[in]     o_format                  Output format.
  *  \param[in]     bias_type                 Bias type.
  *  \param[in]     attn_mask_type            Attention mask type.
  *  \param[in]     softmax_type              Attention softmax type.
@@ -283,19 +308,17 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
  *  \param[in]     workspace                 Workspace tensor.
  *  \param[in]     stream                    CUDA stream used for this operation.
  */
-void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETensor V,
-                         const NVTETensor Bias, const NVTETensor SoftmaxOffset, NVTETensor S,
-                         NVTETensor O, NVTETensorPack *Aux_CTX_Tensors,
-                         const NVTETensor cu_seqlens_q, const NVTETensor cu_seqlens_kv,
-                         const NVTETensor cu_seqlens_q_padded,
-                         const NVTETensor cu_seqlens_kv_padded, const NVTETensor page_table_k,
-                         const NVTETensor page_table_v, const NVTETensor rng_state,
-                         size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training,
-                         bool return_max_logit, bool cuda_graph, float attn_scale, float dropout,
-                         NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
-                         NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
-                         int64_t window_size_left, int64_t window_size_right,
-                         bool bottom_right_diagonal, NVTETensor workspace, cudaStream_t stream);
+void nvte_fused_attn_fwd(
+    const NVTETensor Q, const NVTETensor K, const NVTETensor V, const NVTETensor Bias,
+    const NVTETensor SoftmaxOffset, NVTETensor S, NVTETensor O, NVTETensorPack *Aux_CTX_Tensors,
+    const NVTETensor cu_seqlens_q, const NVTETensor cu_seqlens_kv,
+    const NVTETensor cu_seqlens_q_padded, const NVTETensor cu_seqlens_kv_padded,
+    const NVTETensor page_table_k, const NVTETensor page_table_v, const NVTETensor rng_state,
+    size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training, bool return_max_logit,
+    bool cuda_graph, float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout,
+    NVTE_QKV_Format o_format, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
+    NVTE_Softmax_Type softmax_type, int64_t window_size_left, int64_t window_size_right,
+    bool bottom_right_diagonal, NVTETensor workspace, cudaStream_t stream);
 
 /*! \brief Compute the backward of the dot product attention with separate Q, K and V.
  *
@@ -347,6 +370,9 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
  *  \param[in]     attn_scale                Scaling factor for Q * K.T.
  *  \param[in]     dropout                   Dropout probability.
  *  \param[in]     qkv_layout                QKV tensors' layout.
+ *  \param[in]     o_format                  Output format.
+ *  \param[in]     do_format                 Output gradient's format.
+ *  \param[in]     dqkv_layout               QKV gradient tensors' layout.
  *  \param[in]     bias_type                 Bias type.
  *  \param[in]     attn_mask_type            Attention mask type.
  *  \param[in]     softmax_type              Attention softmax type.
@@ -366,11 +392,12 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                          const NVTETensor cu_seqlens_q_padded,
                          const NVTETensor cu_seqlens_kv_padded, size_t max_seqlen_q,
                          size_t max_seqlen_kv, float attn_scale, float dropout,
-                         NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
-                         NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
-                         int64_t window_size_left, int64_t window_size_right,
-                         bool bottom_right_diagonal, bool deterministic, bool cuda_graph,
-                         NVTETensor workspace, cudaStream_t stream);
+                         NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format,
+                         NVTE_QKV_Format do_format, NVTE_QKV_Layout dqkv_layout,
+                         NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
+                         NVTE_Softmax_Type softmax_type, int64_t window_size_left,
+                         int64_t window_size_right, bool bottom_right_diagonal, bool deterministic,
+                         bool cuda_graph, NVTETensor workspace, cudaStream_t stream);
 
 /*!  \brief Update the RNG state with the seed and calculated offset.
  *
@@ -583,6 +610,36 @@ void nvte_prepare_flash_attn_fwd(NVTETensor qkvi, NVTETensor qkv, cudaStream_t s
  */
 void nvte_prepare_flash_attn_bwd(NVTETensor q, NVTETensor k, NVTETensor v, NVTETensor qkv,
                                  cudaStream_t stream);
+
+/*!  \brief Permute Q, K, V to grouped tensors.
+ *
+ *  \param[in]     q                Query tensor
+ *  \param[in]     k                Key tensor
+ *  \param[in]     v                Value tensor
+ *  \param[out]    q_out            Output query tensor
+ *  \param[out]    k_out            Output key tensor
+ *  \param[out]    v_out            Output value tensor
+ *  \param[in]     original_layout  Original QKV layout.
+ *  \param[in]     stream           CUDA stream.
+ */
+void nvte_permute_to_grouped_tensor_fwd(NVTETensor q, NVTETensor k, NVTETensor v, NVTETensor q_out,
+                                        NVTETensor k_out, NVTETensor v_out,
+                                        NVTE_QKV_Layout original_layout, cudaStream_t stream);
+
+/*!  \brief Permute Q, K, V back to original layout.
+ *
+ *  \param[in]     grad_q           Gradient of query tensor
+ *  \param[in]     grad_k           Gradient of key tensor
+ *  \param[in]     grad_v           Gradient of value tensor
+ *  \param[out]    q                Original query tensor
+ *  \param[out]    k                Original key tensor
+ *  \param[out]    v                Original value tensor
+ *  \param[in]     original_layout  Original QKV layout.
+ *  \param[in]     stream           CUDA stream.
+ */
+void nvte_permute_to_grouped_tensor_bwd(NVTETensor grad_q, NVTETensor grad_k, NVTETensor grad_v,
+                                        NVTETensor q, NVTETensor k, NVTETensor v,
+                                        NVTE_QKV_Layout original_layout, cudaStream_t stream);
 
 #ifdef __cplusplus
 }  // extern "C"

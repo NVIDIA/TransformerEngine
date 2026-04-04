@@ -1445,6 +1445,22 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(const std::ve
   return {std::move(out_cpp), std::move(out_py)};
 }
 
+std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_unquantized_tensor_with_amax(
+    const std::vector<size_t>& shape, DType dtype, std::optional<at::Tensor> data) {
+  // static std::once_flag once;
+  // static at::Tensor amax_tensor;
+  // std::call_once(once, []() {
+  //   amax_tensor = at::zeros({1}, at::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+  // });
+  auto out = data.has_value() ? NoneQuantizer(py::none()).create_tensor(shape, dtype, data.value())
+                              : NoneQuantizer(py::none()).create_tensor(shape, dtype);
+  TensorWrapper out_cpp = std::move(out.first);
+  py::object out_py = std::move(out.second);
+  // out_cpp.set_amax(amax_tensor.data_ptr(), GetTransformerEngineDType(amax_tensor.scalar_type()),
+  //                  getTensorShape(amax_tensor));
+  return {std::move(out_cpp), std::move(out_py)};
+}
+
 std::pair<GroupedTensorWrapper, py::object> MXFP8Quantizer::create_grouped_tensor(
     const size_t num_tensors, const std::vector<size_t>& logical_shape, const DType dtype,
     py::object quantizer, const std::optional<at::Tensor>& first_dims,
