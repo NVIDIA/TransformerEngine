@@ -2338,10 +2338,10 @@ class PermuteToGroupedTensor(torch.autograd.Function):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        input_layout: str = "bshd_bshd_bshd",
+        original_layout: str = "bshd_bshd_bshd",
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         # pylint: disable=missing-function-docstring
-        ctx.original_layout = QKVLayout[input_layout]
+        ctx.original_layout = QKVLayout[original_layout]
         return tex.permute_to_grouped_tensor_fwd(query, key, value, ctx.original_layout)
 
     @staticmethod
