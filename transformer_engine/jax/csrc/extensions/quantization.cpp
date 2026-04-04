@@ -640,8 +640,8 @@ Error_Type GroupedQuantizeV2FFI(cudaStream_t stream, Buffer_Type inputs, Buffer_
   // scale_inv in GEMM-swizzled layout.  Enable the fused swizzle so the kernel
   // writes scales in the layout the GEMM will consume directly.
   uint8_t swizzle_flag = 1;
-  nvte_set_grouped_tensor_param(out_grouped, kNVTEGroupedWithGEMMSwizzledScales,
-                                &swizzle_flag, sizeof(swizzle_flag));
+  nvte_set_grouped_tensor_param(out_grouped, kNVTEGroupedWithGEMMSwizzledScales, &swizzle_flag,
+                                sizeof(swizzle_flag));
 
   QuantizationConfigWrapper quant_config{};
   nvte_group_quantize(in_grouped, out_grouped, quant_config, stream);
