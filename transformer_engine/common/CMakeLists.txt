@@ -95,6 +95,16 @@ set(CUTLASS_INCLUDE_DIR
 set(CUTLASS_TOOLS_INCLUDE_DIR
   "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cutlass/tools/util/include")
 
+# CCCL (CUDA Core Compute Libraries)
+set(CCCL_INCLUDE_DIR
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cccl")
+if(NOT EXISTS "${CCCL_INCLUDE_DIR}")
+    message(FATAL_ERROR
+            "Could not find CCCL at ${CCCL_INCLUDE_DIR}. "
+            "Try running 'git submodule update --init --recursive' "
+            "within the Transformer Engine source.")
+endif()
+
 # Python
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 
@@ -152,6 +162,7 @@ list(APPEND transformer_engine_cuda_sources
      permutation/permutation.cu
      util/utils.cu
      util/padding.cu
+     util/cub.cu
      swizzle/swizzle.cu
      swizzle/swizzle_block_scaling.cu
      fused_softmax/scaled_masked_softmax.cu
@@ -263,8 +274,11 @@ target_link_libraries(transformer_engine PUBLIC
 
 target_include_directories(transformer_engine PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+# Use CCCL from 3rdparty instead of the one from CUDA Toolkit
 target_include_directories(transformer_engine SYSTEM PRIVATE
-                           ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}/cccl)
+                           ${CCCL_INCLUDE_DIR}/thrust
+                           ${CCCL_INCLUDE_DIR}/cub
+                           ${CCCL_INCLUDE_DIR}/libcudacxx/include)
 target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_DIR}")
 target_include_directories(transformer_engine PRIVATE
                           ${CUTLASS_INCLUDE_DIR}
