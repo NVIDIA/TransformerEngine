@@ -738,10 +738,13 @@ class FlashAttention(torch.nn.Module):
         fp8: bool = False,
         fp8_meta: Optional[Dict[str, Any]] = None,
         quantizers=None,
+        pad_between_seqs: Optional[bool] = False,
         inference_params: Optional[InferenceParams] = None,
         flash_attention_backend: Optional[PkgVersion] = PkgVersion("0"),
         fp8_output: bool = False,
         num_splits: Optional[int] = 1,
+        cu_seqlens_q_padded: Optional[torch.Tensor] = None,
+        cu_seqlens_kv_padded: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """flash-attn fprop"""
 
@@ -919,6 +922,7 @@ class FlashAttention(torch.nn.Module):
         use_flash_attn_3 = False
         if flash_attention_backend is not None and flash_attention_backend > PkgVersion("3.0.0b"):
             use_flash_attn_3 = True
+
         if context_parallel and all(
             not isinstance(x, Float8Tensor) for x in [query_layer, key_layer, value_layer]
         ):
@@ -935,8 +939,16 @@ class FlashAttention(torch.nn.Module):
                     cu_seqlens_kv,
                     max_seqlen_q,
                     max_seqlen_kv,
-                    cu_seqlens_q if qkv_format == "thd" else None,
-                    cu_seqlens_kv if qkv_format == "thd" else None,
+                    (
+                        cu_seqlens_q_padded
+                        if pad_between_seqs
+                        else (cu_seqlens_q if qkv_format == "thd" else None)
+                    ),
+                    (
+                        cu_seqlens_kv_padded
+                        if pad_between_seqs
+                        else (cu_seqlens_kv if qkv_format == "thd" else None)
+                    ),
                     self.attention_dropout if self.training else 0.0,
                     cp_group,
                     cp_global_ranks,
@@ -948,7 +960,7 @@ class FlashAttention(torch.nn.Module):
                     deterministic=self.deterministic,
                     window_size=window_size,
                     quantizers=quantizers,
-                    pad_between_seqs=False,
+                    pad_between_seqs=pad_between_seqs,
                     use_flash_attn_3=use_flash_attn_3,
                     fp8_output=fp8_output,
                 )
@@ -984,8 +996,12 @@ class FlashAttention(torch.nn.Module):
                     else:
                         func = flash_attn_with_kvcache_v3  # pylint: disable=possibly-used-before-assignment
                     if not use_flash_attn_3 or inference_params is None:
-                        fa_optional_forward_args_thd.append(cu_seqlens_q)
-                        fa_optional_forward_args_thd.append(cu_seqlens_kv)
+                        if pad_between_seqs and use_flash_attn_3:
+                            fa_optional_forward_args_thd.append(cu_seqlens_q_padded)
+                            fa_optional_forward_args_thd.append(cu_seqlens_kv_padded)
+                        else:
+                            fa_optional_forward_args_thd.append(cu_seqlens_q)
+                            fa_optional_forward_args_thd.append(cu_seqlens_kv)
                         fa_optional_forward_args_thd.append(max_seqlen_q)
                         fa_optional_forward_args_thd.append(max_seqlen_kv)
                 if not use_flash_attn_3:
@@ -1019,6 +1035,13 @@ class FlashAttention(torch.nn.Module):
                     fa_3_optional_forward_kwargs = {}
                     fa_3_optional_forward_kwargs["window_size"] = window_size
                     fa_3_optional_forward_kwargs["num_splits"] = num_splits
+                    if pad_between_seqs:
+                        fa_3_optional_forward_kwargs["seqused_q"] = (
+                            cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+                        )
+                        fa_3_optional_forward_kwargs["seqused_k"] = (
+                            cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
+                        )
                     if inference_params is None:
                         fa_3_optional_forward_kwargs["deterministic"] = self.deterministic
                     else:

@@ -85,10 +85,19 @@ if test_essential:
 @pytest.mark.parametrize("model", model_configs_flash_attn.keys())
 @pytest.mark.parametrize("qkv_format", qkv_formats)
 @pytest.mark.parametrize("cp_comm_type", cp_comm_types)
-def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
+@pytest.mark.parametrize("pad_between_seqs", [False, True])
+def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type, pad_between_seqs):
     num_gpus = 4 if cp_comm_type == "a2a+p2p" else 2
     if num_gpus > torch.cuda.device_count():
         pytest.skip(f"Test requires {num_gpus} GPUs, but found {torch.cuda.device_count()}")
+
+    if pad_between_seqs:
+        if qkv_format != "thd":
+            pytest.skip("pad_between_seqs only applies to THD format!")
+        if not FlashAttentionUtils.v3_is_installed:
+            pytest.skip("pad_between_seqs with CP requires Flash Attention v3!")
+        if cp_comm_type == "a2a+p2p":
+            pytest.skip("pad_between_seqs is not yet supported with A2A+P2P CP comm type!")
 
     config = model_configs_flash_attn[model]
     config.context_parallel = True
@@ -133,6 +142,7 @@ def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
             qkv_format=qkv_format,
             kernel_backend="FlashAttention",
             cp_comm_type=cp_comm_type,
+            pad_between_seqs=pad_between_seqs,
             log_level=pytest_logging_level,
         ),
     )
