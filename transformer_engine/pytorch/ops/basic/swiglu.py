@@ -119,7 +119,6 @@ class SwiGLU(BasicOperation):
         if self.cache_quantized_input:
             input_quantizer = Float8CurrentScalingQuantizer(
                 tex.DType.kFloat8E4M3,
-                input_.device,
             )
             input_quantizer.set_usage(rowwise=True, columnwise=False)
             input_ = input_quantizer(input_)
@@ -274,7 +273,7 @@ class ClampedSwiGLU(BasicOperation):
 
         # Quantize input to FP8 before caching if needed
         if self.cache_quantized_input:
-            input_quantizer = Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, x.device)
+            input_quantizer = Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3)
             input_quantizer.set_usage(rowwise=True, columnwise=False)
             x = input_quantizer(x)
 

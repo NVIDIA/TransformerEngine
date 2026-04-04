@@ -532,11 +532,7 @@ void Float8Quantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
 
 Float8CurrentScalingQuantizer::Float8CurrentScalingQuantizer(const py::handle& quantizer)
     : Quantizer(quantizer) {
-  const at::Tensor& scale = quantizer.attr("scale").cast<at::Tensor>();
-  const at::Tensor& amax = quantizer.attr("amax").cast<at::Tensor>();
   const DType type = quantizer.attr("dtype").cast<DType>();
-  this->amax = amax;
-  this->scale = scale;
   this->dtype = type;
 
   // Get amax reduction group if needed
@@ -557,12 +553,8 @@ Float8CurrentScalingQuantizer::Float8CurrentScalingQuantizer(const py::handle& q
 }
 
 void Float8CurrentScalingQuantizer::set_quantization_params(TensorWrapper* tensor) const {
-  // transfer amax and scale pointer from quantizer to output tensor (only as gpu buffer, no meaningful data in them)
-  tensor->set_scale(scale.data_ptr(), GetTransformerEngineDType(scale.scalar_type()),
-                    getTensorShape(scale));
-  at::TensorOptions opts = opts.dtype(torch::kFloat32).device(torch::kCUDA);
-  tensor->set_amax(amax.data_ptr(), GetTransformerEngineDType(amax.scalar_type()),
-                   getTensorShape(amax));
+  // No-op: amax and scale buffers are set directly by quantize/quantize_with_amax
+  // from externally provided workspace tensors.
 }
 
 std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tensor(
@@ -750,7 +742,7 @@ std::pair<GroupedTensorWrapper, py::object> Float8CurrentScalingQuantizer::creat
 
 std::pair<TensorWrapper, py::object>
 Float8CurrentScalingQuantizer::create_unquantized_tensor_with_amax(const std::vector<size_t>& shape,
-                                                                   DType dtype,
+                                                                   DType dtype, at::Tensor amax,
                                                                    std::optional<at::Tensor> data) {
   amax.zero_();
   auto out = data.has_value() ? NoneQuantizer(py::none()).create_tensor(shape, dtype, data.value())
@@ -856,13 +848,20 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::convert_and_
 
 void Float8CurrentScalingQuantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& out,
                                                   const std::optional<TensorWrapper>& noop_flag,
-                                                  bool compute_amax) {
+                                                  bool compute_amax, at::Tensor amax,
+                                                  at::Tensor scale) {
   auto stream = at::cuda::getCurrentCUDAStream();
 
   // Nothing to be done if input is empty
   if (input.numel() == 0) {
     return;
   }
+
+  // Set amax and scale buffers on the output tensor
+  out.set_amax(amax.data_ptr(), GetTransformerEngineDType(amax.scalar_type()),
+               getTensorShape(amax));
+  out.set_scale(scale.data_ptr(), GetTransformerEngineDType(scale.scalar_type()),
+                getTensorShape(scale));
 
   // Quantization configs
   QuantizationConfigWrapper quant_config;
@@ -897,15 +896,25 @@ void Float8CurrentScalingQuantizer::quantize_impl(const TensorWrapper& input, Te
 
 void Float8CurrentScalingQuantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
                                              const std::optional<TensorWrapper>& noop_flag) {
-  this->quantize_impl(input, out, noop_flag, true);
+  const auto opts = at::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+  auto amax = at::empty({1}, opts);
+  auto scale = at::empty({1}, opts);
+  this->quantize_impl(input, out, noop_flag, true, amax, scale);
+}
+
+void Float8CurrentScalingQuantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
+                                             at::Tensor amax, at::Tensor scale,
+                                             const std::optional<TensorWrapper>& noop_flag) {
+  this->quantize_impl(input, out, noop_flag, true, amax, scale);
 }
 
 void Float8CurrentScalingQuantizer::quantize_with_amax(
-    TensorWrapper& input, TensorWrapper& out, const std::optional<TensorWrapper>& noop_flag) {
+    TensorWrapper& input, TensorWrapper& out, at::Tensor amax, at::Tensor scale,
+    const std::optional<TensorWrapper>& noop_flag) {
   NVTE_CHECK(input.get_amax().data_ptr == amax.data_ptr(),
              "Input does not use the appropriate amax tensor");
   input.set_amax(nullptr, DType::kFloat32, input.defaultShape);
-  this->quantize_impl(input, out, noop_flag, false);
+  this->quantize_impl(input, out, noop_flag, false, amax, scale);
 }
 
 Float8BlockQuantizer::Float8BlockQuantizer(const py::handle& quantizer) : Quantizer(quantizer) {

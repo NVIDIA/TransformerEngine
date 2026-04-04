@@ -15,7 +15,8 @@ using FuncType = void(const NVTETensor, NVTETensor, cudaStream_t);
 using DFuncType = void(const NVTETensor, const NVTETensor, NVTETensor, cudaStream_t);
 
 template <FuncType* act_func, auto act_func_with_args, typename... Args>
-py::object activation_helper(const at::Tensor& input, py::handle quantizer, int shape_divisor = 1,
+py::object activation_helper(const at::Tensor& input, py::handle quantizer,
+                             std::optional<at::Tensor> quantizer_workspace, int shape_divisor = 1,
                              Args&&... args) {
   init_extension();
 
@@ -86,8 +87,9 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
       {
         auto fp8_quantizer_cpp = dynamic_cast<Float8CurrentScalingQuantizer*>(quantizer_cpp.get());
         NVTE_CHECK(fp8_quantizer_cpp != nullptr, "Could not cast to FP8 current scaling quantizer");
-        auto [temp_nvte, _] =
-            fp8_quantizer_cpp->create_unquantized_tensor_with_amax(output_shape, fake_dtype);
+        auto [cs_amax, cs_scale] = split_quantizer_workspace(*quantizer_workspace);
+        auto [temp_nvte, _] = fp8_quantizer_cpp->create_unquantized_tensor_with_amax(
+            output_shape, fake_dtype, cs_amax);
         NVTE_SCOPED_GIL_RELEASE({
           if constexpr (act_func == nullptr) {
             act_func_with_args(input_nvte.data(), temp_nvte.data(), std::forward<Args>(args)...,
@@ -96,7 +98,7 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
             act_func(input_nvte.data(), temp_nvte.data(), stream);
           }
         });
-        fp8_quantizer_cpp->quantize_with_amax(temp_nvte, out_nvte);
+        fp8_quantizer_cpp->quantize_with_amax(temp_nvte, out_nvte, cs_amax, cs_scale);
       }
       break;
     case Impl::FUSED_ACTIVATION_AMAX_NVFP4:
@@ -126,7 +128,8 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
 
 template <DFuncType* dact_func, auto dact_func_with_args, typename... Args>
 py::object dactivation_helper(const at::Tensor& grad_output, const at::Tensor& input,
-                              py::handle quantizer, Args&&... args) {
+                              py::handle quantizer, std::optional<at::Tensor> quantizer_workspace,
+                              Args&&... args) {
   init_extension();
 
   // Grad output and input tensors
@@ -198,8 +201,9 @@ py::object dactivation_helper(const at::Tensor& grad_output, const at::Tensor& i
       {
         auto fp8_quantizer_cpp = dynamic_cast<Float8CurrentScalingQuantizer*>(quantizer_cpp.get());
         NVTE_CHECK(fp8_quantizer_cpp != nullptr, "Could not cast to FP8 current scaling quantizer");
-        auto [temp_nvte, _] =
-            fp8_quantizer_cpp->create_unquantized_tensor_with_amax(input_shape, fake_dtype);
+        auto [cs_amax, cs_scale] = split_quantizer_workspace(*quantizer_workspace);
+        auto [temp_nvte, _] = fp8_quantizer_cpp->create_unquantized_tensor_with_amax(
+            input_shape, fake_dtype, cs_amax);
         NVTE_SCOPED_GIL_RELEASE({
           if constexpr (dact_func == nullptr) {
             dact_func_with_args(grad_output_nvte.data(), input_nvte.data(), temp_nvte.data(),
@@ -208,7 +212,7 @@ py::object dactivation_helper(const at::Tensor& grad_output, const at::Tensor& i
             dact_func(grad_output_nvte.data(), input_nvte.data(), temp_nvte.data(), stream);
           }
         });
-        fp8_quantizer_cpp->quantize_with_amax(temp_nvte, grad_input_nvte);
+        fp8_quantizer_cpp->quantize_with_amax(temp_nvte, grad_input_nvte, cs_amax, cs_scale);
       }
       break;
     case Impl::FUSED_ACTIVATION_AMAX_NVFP4:
@@ -238,103 +242,116 @@ py::object dactivation_helper(const at::Tensor& grad_output, const at::Tensor& i
 }  // namespace
 
 /* GELU and variants */
-py::object gelu(const at::Tensor& input, py::handle quantizer) {
-  return activation_helper<nvte_gelu, nullptr>(input, quantizer);
+py::object gelu(const at::Tensor& input, py::handle quantizer, std::optional<at::Tensor> qw) {
+  return activation_helper<nvte_gelu, nullptr>(input, quantizer, qw);
 }
 
-py::object dgelu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer) {
-  return dactivation_helper<nvte_dgelu, nullptr>(grad, input, quantizer);
+py::object dgelu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer,
+                 std::optional<at::Tensor> qw) {
+  return dactivation_helper<nvte_dgelu, nullptr>(grad, input, quantizer, qw);
 }
 
-py::object glu(const at::Tensor& input, py::handle quantizer) {
-  return activation_helper<nvte_glu, nullptr>(input, quantizer, 2);
+py::object glu(const at::Tensor& input, py::handle quantizer, std::optional<at::Tensor> qw) {
+  return activation_helper<nvte_glu, nullptr>(input, quantizer, qw, 2);
 }
 
-py::object dglu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer) {
-  return dactivation_helper<nvte_dglu, nullptr>(grad, input, quantizer);
+py::object dglu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer,
+                std::optional<at::Tensor> qw) {
+  return dactivation_helper<nvte_dglu, nullptr>(grad, input, quantizer, qw);
 }
 
-py::object geglu(const at::Tensor& input, py::handle quantizer) {
-  return activation_helper<nvte_geglu, nullptr>(input, quantizer, 2);
+py::object geglu(const at::Tensor& input, py::handle quantizer, std::optional<at::Tensor> qw) {
+  return activation_helper<nvte_geglu, nullptr>(input, quantizer, qw, 2);
 }
 
-py::object dgeglu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer) {
-  return dactivation_helper<nvte_dgeglu, nullptr>(grad, input, quantizer);
+py::object dgeglu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer,
+                  std::optional<at::Tensor> qw) {
+  return dactivation_helper<nvte_dgeglu, nullptr>(grad, input, quantizer, qw);
 }
 
-py::object qgelu(const at::Tensor& input, py::handle quantizer) {
-  return activation_helper<nvte_qgelu, nullptr>(input, quantizer);
+py::object qgelu(const at::Tensor& input, py::handle quantizer, std::optional<at::Tensor> qw) {
+  return activation_helper<nvte_qgelu, nullptr>(input, quantizer, qw);
 }
 
-py::object dqgelu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer) {
-  return dactivation_helper<nvte_dqgelu, nullptr>(grad, input, quantizer);
+py::object dqgelu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer,
+                  std::optional<at::Tensor> qw) {
+  return dactivation_helper<nvte_dqgelu, nullptr>(grad, input, quantizer, qw);
 }
 
-py::object qgeglu(const at::Tensor& input, py::handle quantizer) {
-  return activation_helper<nvte_qgeglu, nullptr>(input, quantizer, 2);
+py::object qgeglu(const at::Tensor& input, py::handle quantizer, std::optional<at::Tensor> qw) {
+  return activation_helper<nvte_qgeglu, nullptr>(input, quantizer, qw, 2);
 }
 
-py::object dqgeglu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer) {
-  return dactivation_helper<nvte_dqgeglu, nullptr>(grad, input, quantizer);
+py::object dqgeglu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer,
+                   std::optional<at::Tensor> qw) {
+  return dactivation_helper<nvte_dqgeglu, nullptr>(grad, input, quantizer, qw);
 }
 
 /* ReLU and variants */
-py::object relu(const at::Tensor& input, py::handle quantizer) {
-  return activation_helper<nvte_relu, nullptr>(input, quantizer);
+py::object relu(const at::Tensor& input, py::handle quantizer, std::optional<at::Tensor> qw) {
+  return activation_helper<nvte_relu, nullptr>(input, quantizer, qw);
 }
 
-py::object drelu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer) {
-  return dactivation_helper<nvte_drelu, nullptr>(grad, input, quantizer);
+py::object drelu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer,
+                 std::optional<at::Tensor> qw) {
+  return dactivation_helper<nvte_drelu, nullptr>(grad, input, quantizer, qw);
 }
 
-py::object reglu(const at::Tensor& input, py::handle quantizer) {
-  return activation_helper<nvte_reglu, nullptr>(input, quantizer, 2);
+py::object reglu(const at::Tensor& input, py::handle quantizer, std::optional<at::Tensor> qw) {
+  return activation_helper<nvte_reglu, nullptr>(input, quantizer, qw, 2);
 }
 
-py::object dreglu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer) {
-  return dactivation_helper<nvte_dreglu, nullptr>(grad, input, quantizer);
+py::object dreglu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer,
+                  std::optional<at::Tensor> qw) {
+  return dactivation_helper<nvte_dreglu, nullptr>(grad, input, quantizer, qw);
 }
 
-py::object srelu(const at::Tensor& input, py::handle quantizer) {
-  return activation_helper<nvte_srelu, nullptr>(input, quantizer);
+py::object srelu(const at::Tensor& input, py::handle quantizer, std::optional<at::Tensor> qw) {
+  return activation_helper<nvte_srelu, nullptr>(input, quantizer, qw);
 }
 
-py::object dsrelu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer) {
-  return dactivation_helper<nvte_dsrelu, nullptr>(grad, input, quantizer);
+py::object dsrelu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer,
+                  std::optional<at::Tensor> qw) {
+  return dactivation_helper<nvte_dsrelu, nullptr>(grad, input, quantizer, qw);
 }
 
-py::object sreglu(const at::Tensor& input, py::handle quantizer) {
-  return activation_helper<nvte_sreglu, nullptr>(input, quantizer, 2);
+py::object sreglu(const at::Tensor& input, py::handle quantizer, std::optional<at::Tensor> qw) {
+  return activation_helper<nvte_sreglu, nullptr>(input, quantizer, qw, 2);
 }
 
-py::object dsreglu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer) {
-  return dactivation_helper<nvte_dsreglu, nullptr>(grad, input, quantizer);
+py::object dsreglu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer,
+                   std::optional<at::Tensor> qw) {
+  return dactivation_helper<nvte_dsreglu, nullptr>(grad, input, quantizer, qw);
 }
 /* Silu and variants */
-py::object silu(const at::Tensor& input, py::handle quantizer) {
-  return activation_helper<nvte_silu, nullptr>(input, quantizer);
+py::object silu(const at::Tensor& input, py::handle quantizer, std::optional<at::Tensor> qw) {
+  return activation_helper<nvte_silu, nullptr>(input, quantizer, qw);
 }
 
-py::object dsilu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer) {
-  return dactivation_helper<nvte_dsilu, nullptr>(grad, input, quantizer);
+py::object dsilu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer,
+                 std::optional<at::Tensor> qw) {
+  return dactivation_helper<nvte_dsilu, nullptr>(grad, input, quantizer, qw);
 }
 
-py::object swiglu(const at::Tensor& input, py::handle quantizer) {
-  return activation_helper<nvte_swiglu, nullptr>(input, quantizer, 2);
+py::object swiglu(const at::Tensor& input, py::handle quantizer, std::optional<at::Tensor> qw) {
+  return activation_helper<nvte_swiglu, nullptr>(input, quantizer, qw, 2);
 }
 
-py::object dswiglu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer) {
-  return dactivation_helper<nvte_dswiglu, nullptr>(grad, input, quantizer);
+py::object dswiglu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer,
+                   std::optional<at::Tensor> qw) {
+  return dactivation_helper<nvte_dswiglu, nullptr>(grad, input, quantizer, qw);
 }
 
 /* clamped functions */
-py::object clamped_swiglu(const at::Tensor& input, py::handle quantizer, float limit, float alpha) {
-  return activation_helper<nullptr, nvte_clamped_swiglu>(input, quantizer, 2, limit, alpha);
+py::object clamped_swiglu(const at::Tensor& input, py::handle quantizer,
+                          std::optional<at::Tensor> qw, float limit, float alpha) {
+  return activation_helper<nullptr, nvte_clamped_swiglu>(input, quantizer, qw, 2, limit, alpha);
 }
 
 py::object clamped_dswiglu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer,
-                           float limit, float alpha) {
-  return dactivation_helper<nullptr, nvte_clamped_dswiglu>(grad, input, quantizer, limit, alpha);
+                           std::optional<at::Tensor> qw, float limit, float alpha) {
+  return dactivation_helper<nullptr, nvte_clamped_dswiglu>(grad, input, quantizer, qw, limit,
+                                                           alpha);
 }
 
 }  // namespace pytorch
