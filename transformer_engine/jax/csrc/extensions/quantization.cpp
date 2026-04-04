@@ -245,11 +245,6 @@ Error_Type DBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_T
     }
   }
 
-  // For MXFP8, produce pre-swizzled scales so the GEMM can consume them directly.
-  if (scaling_mode == JAXX_Scaling_Mode::MXFP8_1D_SCALING) {
-    output_tensor.set_with_gemm_swizzled_scales(true);
-  }
-
   auto dbias_tensor = TensorWrapper(dbias, dbias_shape, in_dtype);
   auto workspace_tensor = TensorWrapper(workspace, workspace_shape, workspace_dtype);
 
