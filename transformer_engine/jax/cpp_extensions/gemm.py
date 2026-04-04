@@ -1610,13 +1610,9 @@ class GroupedGemmPrimitive(BasePrimitive):
             workspace_size += lhs_scale_inv_aval.size * tensor_scaling_sinv_aligment
             workspace_size += rhs_scale_inv_aval.size * tensor_scaling_sinv_aligment
         elif scaling_mode == ScalingMode.MXFP8_1D_SCALING.value:
-            # V1 needs workspace for swizzled scale_inv output buffers
-            # (nvte_swizzle_scaling_factors is called per-group inside GroupedGemmFFI).
-            # V2 receives scale_inv already swizzled by nvte_group_quantize (fused swizzle in
-            # V2 grouped quantize); no extra workspace is needed for re-swizzling.
-            if not use_v2_ffi:
-                workspace_size += lhs_scale_inv_aval.size + mxfp8_scaling_sinv_alignment_padding
-                workspace_size += rhs_scale_inv_aval.size + mxfp8_scaling_sinv_alignment_padding
+            # Both V1 and V2 quantize now produce pre-swizzled scales, so the GEMM
+            # does not need extra workspace for nvte_swizzle_scaling_factors.
+            pass
         return workspace_size
 
     @staticmethod
