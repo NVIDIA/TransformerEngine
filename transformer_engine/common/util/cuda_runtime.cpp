@@ -7,6 +7,7 @@
 #include "../util/cuda_runtime.h"
 
 #include <cublasLt.h>
+#include <nvrtc.h>
 
 #include <filesystem>
 #include <mutex>
@@ -200,6 +201,73 @@ const std::string &include_directory(bool required) {
 
   // Return cached path
   return path;
+}
+
+int include_directory_version(bool required) {
+  // Header path
+  const auto &include_dir = cuda::include_directory(false);
+  if (include_dir.empty()) {
+    if (required) {
+      NVTE_ERROR("Could not detect version of CUDA Toolkit headers "
+                 "(CUDA Toolkit headers not found).");
+    }
+    return -1;
+  }
+
+  // Program to probe CUDA version
+  static const char probe_source[] = R"!(
+#include <cuda_runtime_api.h>
+#define STRINGIFY(s) #s
+#define XSTRINGIFY(s) STRINGIFY(s)
+static_assert(false,
+              " transformer_engine::cuda::include_directory_version "
+              "CUDART_VERSION=" XSTRINGIFY(CUDART_VERSION) " ");
+)!";
+  nvrtcProgram probe = nullptr;
+  const auto create_program_status = nvrtcCreateProgram(&probe, probe_source, "version_probe.cu", 0, nullptr, nullptr);
+  if (create_program_status != NVRTC_SUCCESS) {
+    if (required) {
+      NVTE_CHECK_NVRTC(create_program_status);
+    }
+    return -1;
+  }
+
+  // Compile program and extract logs
+  const std::string include_opt = concat_strings("-I", include_dir);
+  const char *opts[] = {include_opt.c_str()};
+  nvrtcCompileProgram(probe, 1, opts);  // Expected to fail
+  std::string log;
+  size_t log_size = 0;
+  if (nvrtcGetProgramLogSize(probe, &log_size) == NVRTC_SUCCESS && log_size > 0) {
+    log.resize(log_size);
+    if (nvrtcGetProgramLog(probe, log.data()) != NVRTC_SUCCESS) {
+      log.clear();
+    }
+  }
+  nvrtcDestroyProgram(&probe);
+
+  // Determine version by parsing build logs
+  int version = -1;
+  do {
+    const std::string marker = " transformer_engine::cuda::include_directory_version CUDART_VERSION=";
+    const auto marker_pos = log.find(marker);
+    if (marker_pos == std::string::npos) {
+      break;
+    }
+    try {
+      version = std::stoi(log.substr(marker_pos + marker.size()));
+    } catch (const std::invalid_argument &) {
+      break;
+    } catch (const std::out_of_range &) {
+      break;
+    }
+  } while (false);
+  if (version < 0 && required) {
+    NVTE_ERROR("Could not detect version of CUDA Toolkit headers "
+               "(Error parsing build logs of probe program).");
+  }
+
+  return version;
 }
 
 int cudart_version() {

@@ -12,6 +12,7 @@
 
 #include "../common.h"
 #include "../util/cuda_driver.h"
+#include "../util/cuda_runtime.h"
 #include "../util/string.h"
 #include "../util/system.h"
 
@@ -24,61 +25,6 @@ namespace {
 // Strings with headers for RTC kernels
 #include "string_code_util_math_h.h"
 #include "string_code_utils_cuh.h"
-
-/*! \brief CUDA version reported by the headers at the configured include path
- *
- * Compiles a tiny probe through NVRTC using the same include path as real
- * RTC kernels.  Including cuda.h ensures CUDA_VERSION is defined, and
- * embedding it in a static_assert failure message lets us extract the
- * resolved value from the diagnostic log without parsing header text.
- *
- * \return CUDA version encoded as major * 1000 + minor * 10
- *         (e.g. 12040 for CUDA 12.4), or -1 if it could not be determined.
- */
-int cuda_header_version() {
-  const std::string &include_dir = cuda::include_directory(false);
-  if (include_dir.empty()) {
-    return -1;
-  }
-
-  static const char probe_source[] =
-      "#include <cuda.h>\n"
-      "#define NVTE_STRINGIFY2(x) #x\n"
-      "#define NVTE_STRINGIFY(x) NVTE_STRINGIFY2(x)\n"
-      "static_assert(false, \"NVTE_CUDA_VERSION=\" NVTE_STRINGIFY(CUDA_VERSION));\n";
-
-  nvrtcProgram probe = nullptr;
-  if (nvrtcCreateProgram(&probe, probe_source, "nvte_version_probe.cu", 0, nullptr, nullptr) !=
-      NVRTC_SUCCESS) {
-    return -1;
-  }
-
-  const std::string include_opt = concat_strings("-I", include_dir);
-  const char *opts[] = {include_opt.c_str()};
-  nvrtcCompileProgram(probe, 1, opts);  // expected to fail
-
-  std::string log;
-  size_t log_size = 0;
-  if (nvrtcGetProgramLogSize(probe, &log_size) == NVRTC_SUCCESS && log_size > 0) {
-    log.resize(log_size);
-    if (nvrtcGetProgramLog(probe, log.data()) != NVRTC_SUCCESS) {
-      log.clear();
-    }
-  }
-  nvrtcDestroyProgram(&probe);
-
-  // Parse the integer that follows our embedded marker
-  const std::string marker = "NVTE_CUDA_VERSION=";
-  const auto marker_pos = log.find(marker);
-  if (marker_pos == std::string::npos) {
-    return -1;
-  }
-  try {
-    return std::stoi(log.substr(marker_pos + marker.size()));
-  } catch (...) {
-    return -1;
-  }
-}
 
 /*! \brief Latest compute capability that NVRTC supports
  *
@@ -230,33 +176,38 @@ void KernelManager::compile(const std::string& kernel_label, const std::string& 
   const nvrtcResult compile_result =
       nvrtcCompileProgram(program, opts_ptrs.size(), opts_ptrs.data());
   if (compile_result != NVRTC_SUCCESS) {
-    // Display log if compilation failed
-    std::string log = concat_strings("NVRTC compilation log for ", filename, ":\n");
+    std::string log;
+
+    // Check CUDA versions
+    const int build_version = CUDA_VERSION;
+    int nvrtc_version = -1;
+    int nvrtc_version_major = 0, nvrtc_version_minor = 0;
+    if (nvrtcVersion(&nvrtc_version_major, &nvrtc_version_minor) == NVRTC_SUCCESS) {
+      nvrtc_version = nvrtc_version_major * 1000 + nvrtc_version_minor * 10;
+    }
+    const int header_version = cuda::include_directory_version();
+    log += concat_strings("Compile-time CUDA version: ", build_version, "\n",
+                          "Run-time NVRTC version: ", nvrtc_version, "\n",
+                          "Run-time CUDA headers version: ", header_version, "\n");
+    if (nvrtc_version != header_version) {
+      log += concat_strings(
+          "\nWarning: CUDA versions do not match between NVRTC and CUDA headers (",
+          cuda::include_directory(), "). "
+          "Consider changing the CUDA header search path (by setting NVTE_CUDA_INCLUDE_DIR) "
+          "or the linked CUDA Runtime (by setting CUDA_HOME or LD_LIBRARY_PATH).\n\n");
+    }
+
+    // Get build log
+    log += concat_strings("NVRTC compilation log for ", filename, ":\n");
     const size_t log_offset = log.size();
     size_t log_size;
     NVTE_CHECK_NVRTC(nvrtcGetProgramLogSize(program, &log_size));
     log.resize(log_offset + log_size);
     NVTE_CHECK_NVRTC(nvrtcGetProgramLog(program, &log[log_offset]));
     log.back() = '\n';
+
+    // Display log and throw error
     std::cerr << log;
-    // Warn if a NVRTC/header version mismatch may explain the failure
-    int nvrtc_major = 0, nvrtc_minor = 0;
-    const int header_ver = cuda_header_version();
-    if (nvrtcGetVersion(&nvrtc_major, &nvrtc_minor) == NVRTC_SUCCESS && header_ver >= 0) {
-      const int header_major = header_ver / 1000;
-      const int header_minor = (header_ver % 1000) / 10;
-      if (nvrtc_major != header_major || nvrtc_minor != header_minor) {
-        std::cerr << concat_strings(
-            "Note: NVRTC library version (", nvrtc_major, ".", nvrtc_minor,
-            ") does not match CUDA headers version (", header_major, ".", header_minor,
-            ") found in \"", cuda::include_directory(false), "\". "
-            "This version mismatch may have caused the above compilation failure. "
-            "Consider setting NVTE_CUDA_INCLUDE_DIR to a path with CUDA ", nvrtc_major, ".",
-            nvrtc_minor,
-            " headers, "
-            "or adjusting CUDA_HOME or LD_LIBRARY_PATH to link the correct NVRTC library.\n");
-      }
-    }
     NVTE_CHECK_NVRTC(compile_result);
   }
 
