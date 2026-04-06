@@ -15,6 +15,7 @@
 #include <sstream>
 #include <string>
 
+#include "../util/cuda_driver.h"
 #include "../util/logging.h"
 #include "nvshmem_waitkernel.h"
 

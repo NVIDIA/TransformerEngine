@@ -338,8 +338,9 @@ at::Tensor convert_block_scaling_to_mxfp8_tensor(transformer_engine::TensorWrapp
   return swizzled_scale_inv;
 }
 
-std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor_for_gemm(
-    GroupedTensorWrapper &input) {
+std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor(GroupedTensorWrapper &input,
+                                                                  bool rowwise_usage,
+                                                                  bool columnwise_usage) {
   if (input.scaling_mode() != NVTE_MXFP8_1D_SCALING) {
     return std::nullopt;
   }
@@ -349,9 +350,9 @@ std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor_for_gemm(
 
   const auto row_scales = input.get_rowwise_scale_inv();
   const auto col_scales = input.get_columnwise_scale_inv();
-  const bool has_rowwise_scales = !is_empty_grouped_tensor_param(row_scales);
-  const bool has_columnwise_scales = !is_empty_grouped_tensor_param(col_scales);
-  if (!has_rowwise_scales && !has_columnwise_scales) {
+  const bool swizzle_rowwise = rowwise_usage && !is_empty_grouped_tensor_param(row_scales);
+  const bool swizzle_columnwise = columnwise_usage && !is_empty_grouped_tensor_param(col_scales);
+  if (!swizzle_rowwise && !swizzle_columnwise) {
     return std::nullopt;
   }
   const auto first_dims = input.get_first_dims();
@@ -364,55 +365,82 @@ std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor_for_gemm(
 
   std::optional<at::Tensor> rowwise_scales_pyt;
   std::optional<at::Tensor> columnwise_scales_pyt;
-  GroupedTensorWrapper output(input.num_tensors(), input.logical_shape(), input.scaling_mode());
 
-  const auto rowwise_data = input.get_rowwise_data();
-  if (rowwise_data.data_ptr != nullptr) {
-    output.set_rowwise_data(rowwise_data.data_ptr, static_cast<DType>(rowwise_data.dtype),
-                            rowwise_data.shape);
-  }
-  const auto columnwise_data = input.get_columnwise_data();
-  if (columnwise_data.data_ptr != nullptr) {
-    output.set_columnwise_data(columnwise_data.data_ptr, static_cast<DType>(columnwise_data.dtype),
-                               columnwise_data.shape);
-  }
+  GroupedTensorWrapper swizzle_input(input.num_tensors(), input.logical_shape(),
+                                     input.scaling_mode());
+  GroupedTensorWrapper swizzle_output(input.num_tensors(), input.logical_shape(),
+                                      input.scaling_mode());
+
   const auto tensor_offsets = input.get_tensor_offsets();
   if (tensor_offsets.data_ptr != nullptr) {
-    output.set_tensor_offsets(tensor_offsets.data_ptr, static_cast<DType>(tensor_offsets.dtype),
-                              tensor_offsets.shape);
+    swizzle_input.set_tensor_offsets(
+        tensor_offsets.data_ptr, static_cast<DType>(tensor_offsets.dtype), tensor_offsets.shape);
+    swizzle_output.set_tensor_offsets(
+        tensor_offsets.data_ptr, static_cast<DType>(tensor_offsets.dtype), tensor_offsets.shape);
   }
 
-  if (has_rowwise_scales) {
+  if (swizzle_rowwise) {
+    const auto data = input.get_rowwise_data();
+    const auto data_dtype = static_cast<DType>(data.dtype);
     const auto scales_dtype = static_cast<DType>(row_scales.dtype);
+    swizzle_input.set_rowwise_data(nullptr, data_dtype, data.shape);
+    swizzle_input.set_rowwise_scale_inv(row_scales.data_ptr, scales_dtype, row_scales.shape);
     rowwise_scales_pyt = allocateSpace(row_scales.shape, scales_dtype, false);
-    void *output_scales_dptr = getDataPtr(*rowwise_scales_pyt);
-    output.set_rowwise_scale_inv(output_scales_dptr, scales_dtype, row_scales.shape);
+    swizzle_output.set_rowwise_data(nullptr, data_dtype, data.shape);
+    swizzle_output.set_rowwise_scale_inv(getDataPtr(*rowwise_scales_pyt), scales_dtype,
+                                         row_scales.shape);
   }
-  if (has_columnwise_scales) {
+  if (swizzle_columnwise) {
+    const auto data = input.get_columnwise_data();
+    const auto data_dtype = static_cast<DType>(data.dtype);
     const auto scales_dtype = static_cast<DType>(col_scales.dtype);
+    swizzle_input.set_columnwise_data(nullptr, data_dtype, data.shape);
+    swizzle_input.set_columnwise_scale_inv(col_scales.data_ptr, scales_dtype, col_scales.shape);
     columnwise_scales_pyt = allocateSpace(col_scales.shape, scales_dtype, false);
-    void *output_scales_dptr = getDataPtr(*columnwise_scales_pyt);
-    output.set_columnwise_scale_inv(output_scales_dptr, scales_dtype, col_scales.shape);
+    swizzle_output.set_columnwise_data(nullptr, data_dtype, data.shape);
+    swizzle_output.set_columnwise_scale_inv(getDataPtr(*columnwise_scales_pyt), scales_dtype,
+                                            col_scales.shape);
   }
 
-  output.set_with_gemm_swizzled_scales(true);
+  swizzle_output.set_with_gemm_swizzled_scales(true);
   NVTE_SCOPED_GIL_RELEASE({
-    nvte_swizzle_grouped_scaling_factors(input.data(), output.data(),
+    nvte_swizzle_grouped_scaling_factors(swizzle_input.data(), swizzle_output.data(),
                                          at::cuda::getCurrentCUDAStream());
   });
 
-  if (has_rowwise_scales) {
+  if (swizzle_rowwise) {
     const auto scales_dtype = static_cast<DType>(row_scales.dtype);
     input.set_rowwise_scale_inv(getDataPtr(*rowwise_scales_pyt), scales_dtype, row_scales.shape);
   }
-  if (has_columnwise_scales) {
+  if (swizzle_columnwise) {
     const auto scales_dtype = static_cast<DType>(col_scales.dtype);
     input.set_columnwise_scale_inv(getDataPtr(*columnwise_scales_pyt), scales_dtype,
                                    col_scales.shape);
   }
   input.set_with_gemm_swizzled_scales(true);
-
   return SwizzledGroupedScales{std::move(rowwise_scales_pyt), std::move(columnwise_scales_pyt)};
+}
+
+void grouped_swizzle_for_gemm(py::handle &tensor, bool rowwise, bool columnwise) {
+  using namespace transformer_engine::pytorch::detail;
+
+  auto tensor_nvte = GroupedTensorFromPyTorchGroupedTensor(tensor);
+
+  auto result = maybe_swizzle_grouped_tensor(tensor_nvte, rowwise, columnwise);
+
+  if (result.has_value()) {
+    if (result->first.has_value()) {
+      tensor.attr("scale_inv") = py::cast(*result->first);
+    } else {
+      tensor.attr("scale_inv") = py::none();
+    }
+    if (result->second.has_value()) {
+      tensor.attr("columnwise_scale_inv") = py::cast(*result->second);
+    } else {
+      tensor.attr("columnwise_scale_inv") = py::none();
+    }
+    tensor.attr("_with_gemm_swizzled_scales") = py::cast(true);
+  }
 }
 
 void inplace_swizzle_scale_for_gemm(py::handle &tensor) {

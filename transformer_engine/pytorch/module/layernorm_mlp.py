@@ -81,7 +81,7 @@ from ..quantized_tensor import (
     QuantizedTensorStorage,
     Quantizer,
     prepare_for_saving,
-    restore_from_saved,
+    restore_from_func_ctx,
 )
 from ..cpp_extensions import (
     general_gemm,
@@ -901,11 +901,7 @@ class _LayerNormMLP(torch.autograd.Function):
     def _recompute(ctx):
         # pylint: disable=missing-function-docstring
 
-        saved_tensors = ctx.saved_tensors
-        tensors = restore_from_saved(ctx.tensor_objects, saved_tensors)
-        # Delete the references to tensor objects once they've been consumed
-        # by the `restore_from_saved` method to construct back the actual tensors.
-        ctx.tensor_objects = None
+        tensors = restore_from_func_ctx(ctx)
 
         if ctx.checkpoint:  # do recomputation from the original args
 
