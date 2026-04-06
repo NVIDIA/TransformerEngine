@@ -678,18 +678,18 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
       NVTE_CHECK_CUDA(cudaGetDevice(&current_device));
       cudaDeviceProp deviceProp;
       NVTE_CHECK_CUDA(cudaGetDeviceProperties(&deviceProp, current_device));
-      bool peer_access_available = false;
+      bool all_peers_accessible = true;
       for (int i = 0; i < comm->nvsize; i++) {
         if (i != comm->nvrank) {
           int can_access_peer;
           cudaError_t peer_result = cudaDeviceCanAccessPeer(&can_access_peer, current_device, i);
-          if (peer_result == cudaSuccess && can_access_peer) {
-            peer_access_available = true;
+          if (peer_result != cudaSuccess || !can_access_peer) {
+            all_peers_accessible = false;
             break;
           }
         }
       }
-      if (!peer_access_available) {
+      if (!all_peers_accessible) {
         free(tmp);
         NVTE_ERROR(
             "No peer-to-peer access available between GPUs. This platform does not support the "
