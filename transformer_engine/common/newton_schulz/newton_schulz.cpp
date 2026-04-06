@@ -19,6 +19,16 @@ using namespace transformer_engine;
 
 namespace {
 
+struct CudaStreamDeleter {
+  void operator()(std::remove_pointer_t<cudaStream_t>* stream) const { cudaStreamDestroy(stream); }
+};
+using CudaStream = std::unique_ptr<std::remove_pointer_t<cudaStream_t>, CudaStreamDeleter>;
+
+struct CudaEventDeleter {
+  void operator()(std::remove_pointer_t<cudaEvent_t>* event) const { cudaEventDestroy(event); }
+};
+using CudaEvent = std::unique_ptr<std::remove_pointer_t<cudaEvent_t>, CudaEventDeleter>;
+
 struct CusolverMpHandleDeleter {
   void operator()(cusolverMpHandle_t handle) const { cusolverMpDestroy(handle); }
 };
@@ -73,14 +83,26 @@ CusolverMpNSDesc MakeCusolverMpNSDesc() {
   return CusolverMpNSDesc(raw);
 }
 
+CudaStream MakeCudaStream() {
+  cudaStream_t raw{};
+  NVTE_CHECK_CUDA(cudaStreamCreate(&raw));
+  return CudaStream(raw);
+}
+
+CudaEvent MakeCudaEvent() {
+  cudaEvent_t raw{};
+  NVTE_CHECK_CUDA(cudaEventCreate(&raw));
+  return CudaEvent(raw);
+}
+
 }  // namespace
 
 struct NVTECusolverMpCtx {
   int64_t nranks;
   int64_t rank;
-  cudaStream_t stream;
-  cudaEvent_t in_ready;
-  cudaEvent_t out_ready;
+  CudaStream stream;
+  CudaEvent in_ready;
+  CudaEvent out_ready;
   CusolverMpHandle handle;
   CusolverMpGrid grid;
   void* workspace;
@@ -112,23 +134,19 @@ NVTECusolverMpCtx* nvte_cusolvermp_ctx_create(ncclComm_t comm, int nranks, int r
   int device_id{};
   NVTE_CHECK_CUDA(cudaGetDevice(&device_id));
 
-  cudaStream_t stream{};
-  NVTE_CHECK_CUDA(cudaStreamCreate(&stream));
+  auto stream = MakeCudaStream();
+  auto in_ready = MakeCudaEvent();
+  auto out_ready = MakeCudaEvent();
 
-  cudaEvent_t in_ready{};
-  NVTE_CHECK_CUDA(cudaEventCreate(&in_ready));
-  cudaEvent_t out_ready{};
-  NVTE_CHECK_CUDA(cudaEventCreate(&out_ready));
-
-  auto handle = MakeCusolverMpHandle(device_id, stream);
+  auto handle = MakeCusolverMpHandle(device_id, stream.get());
   auto grid = MakeCusolverMpGrid(handle.get(), comm, nranks, 1, CUSOLVERMP_GRID_MAPPING_COL_MAJOR);
 
   return new NVTECusolverMpCtx{
       nranks,
       rank,
-      stream,
-      in_ready,
-      out_ready,
+      std::move(stream),
+      std::move(in_ready),
+      std::move(out_ready),
       std::move(handle),
       std::move(grid),
       nullptr,
@@ -143,9 +161,6 @@ void nvte_cusolvermp_ctx_destroy(NVTECusolverMpCtx* ctx) {
   // Destroy handle and grid before the stream they depend on
   ctx->grid.reset();
   ctx->handle.reset();
-  cudaEventDestroy(ctx->in_ready);
-  cudaEventDestroy(ctx->out_ready);
-  cudaStreamDestroy(ctx->stream);
   delete ctx;
 }
 
@@ -159,8 +174,8 @@ void nvte_newton_schulz(NVTECusolverMpCtx* ctx, int64_t m, int64_t n, NVTETensor
 
   // Make the internal stream wait for the caller's stream so that
   // the input tensor is ready before cuSolverMp reads it.
-  NVTE_CHECK_CUDA(cudaEventRecord(ctx->in_ready, caller_stream));
-  NVTE_CHECK_CUDA(cudaStreamWaitEvent(ctx->stream, ctx->in_ready));
+  NVTE_CHECK_CUDA(cudaEventRecord(ctx->in_ready.get(), caller_stream));
+  NVTE_CHECK_CUDA(cudaStreamWaitEvent(ctx->stream.get(), ctx->in_ready.get()));
 
   // Block size for ScaLAPACK-style distribution
   const int64_t mb = m;
@@ -217,13 +232,15 @@ void nvte_newton_schulz(NVTECusolverMpCtx* ctx, int64_t m, int64_t n, NVTETensor
   std::vector<uint8_t> workspace_host(wrksp_size_host);
 
   // Execute Newton-Schulz
-  NVTE_CHECK_CUSOLVERMP(cusolverMpNewtonSchulz(
-      ctx->handle.get(), ns_desc.get(), n, m, t->data.dptr, 1, 1, mat_desc.get(), num_iterations,
-      coefficients, CUDA_R_32F, ctx->workspace, ctx->workspace_size, workspace_host.data(),
-      workspace_host.size(), nullptr));
+  NVTE_CHECK_CUSOLVERMP(cusolverMpNewtonSchulz(ctx->handle.get(), ns_desc.get(), n, m,
+                                               t->data.dptr, 1, 1, mat_desc.get(),
+                                               num_iterations, coefficients, CUDA_R_32F,
+                                               ctx->workspace, ctx->workspace_size,
+                                               workspace_host.data(), workspace_host.size(),
+                                               nullptr));
 
   // Make the caller's stream wait for the internal stream so that
   // the output tensor is ready before the caller uses it.
-  NVTE_CHECK_CUDA(cudaEventRecord(ctx->out_ready, ctx->stream));
-  NVTE_CHECK_CUDA(cudaStreamWaitEvent(caller_stream, ctx->out_ready));
+  NVTE_CHECK_CUDA(cudaEventRecord(ctx->out_ready.get(), ctx->stream.get()));
+  NVTE_CHECK_CUDA(cudaStreamWaitEvent(caller_stream, ctx->out_ready.get()));
 }
