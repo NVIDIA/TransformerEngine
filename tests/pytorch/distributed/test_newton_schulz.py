@@ -39,7 +39,7 @@ def _run_test(dtype, matrix_shape, num_iterations, check):
     if dtype == "bfloat16":
         test_cmd += ["--atol=5e-2", "--rtol=5e-2"]
 
-    result = subprocess.run(test_cmd, env=os.environ, capture_output=True, check=False)
+    result = subprocess.run(test_cmd, env=os.environ, capture_output=True, check=False, timeout=300)
     if (
         result.returncode != 0
         or "NUMERICAL CHECK FAILED" in result.stderr.decode()
