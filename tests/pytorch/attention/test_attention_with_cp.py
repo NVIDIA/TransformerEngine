@@ -22,7 +22,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import Fla
 
 _current_file = pathlib.Path(__file__).resolve()
 sys.path.append(str(_current_file.parent.parent))
-from utils import ModelConfig, get_available_attention_backends
+from utils import ModelConfig, get_available_attention_backends, run_distributed
 
 pytest_logging_level = logging.getLevelName(logging.root.level)
 
@@ -134,7 +134,7 @@ def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type, pad_bet
     if not flash_attn_supported:
         pytest.skip("No attention backend available.")
 
-    subprocess.run(
+    run_distributed(
         get_bash_arguments(
             num_gpus_per_node=num_gpus,
             dtype=dtype,
@@ -145,7 +145,6 @@ def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type, pad_bet
             pad_between_seqs=pad_between_seqs,
             log_level=pytest_logging_level,
         ),
-        check=True,
     )
 
 
@@ -378,7 +377,7 @@ def test_cp_with_fused_attention(
     if not fused_attn_supported:
         pytest.skip("No attention backend available.")
 
-    subprocess.run(
+    run_distributed(
         get_bash_arguments(
             num_gpus_per_node=num_gpus,
             dtype=dtype,
@@ -394,5 +393,4 @@ def test_cp_with_fused_attention(
             is_training=is_training,
             log_level=pytest_logging_level,
         ),
-        check=True,
     )
