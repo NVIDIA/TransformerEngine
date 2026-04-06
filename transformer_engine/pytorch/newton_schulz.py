@@ -11,10 +11,6 @@ import torch.distributed as dist
 
 import transformer_engine_torch as tex
 
-_CUSOLVERMP_REQUIRED = (
-    "Newton-Schulz requires Transformer Engine to be built with NVTE_WITH_CUSOLVERMP=1"
-)
-
 
 class CusolverMpCtx:
     """cuSolverMp context for Newton-Schulz matrix orthogonalization.
@@ -69,8 +65,6 @@ def cusolvermp_ctx_create(group: dist.ProcessGroup) -> CusolverMpCtx:
     CusolverMpCtx
         Context to be passed to :func:`newton_schulz`.
     """
-    if not hasattr(tex, "cusolvermp_ctx_create"):
-        raise RuntimeError(_CUSOLVERMP_REQUIRED)
     nccl_comm_ptr = _get_nccl_comm_ptr(group)
     nranks = dist.get_world_size(group)
     rank = dist.get_rank(group)
@@ -139,9 +133,6 @@ def newton_schulz(
         raise ValueError("Input tensor must be contiguous")
     if not x.is_cuda:
         raise ValueError("Input tensor must be on CUDA device")
-
-    if not hasattr(tex, "newton_schulz"):
-        raise RuntimeError(_CUSOLVERMP_REQUIRED)
 
     # Global matrix dimensions; columns are distributed across ranks.
     m = x.size(0)

@@ -120,7 +120,9 @@ list(APPEND transformer_engine_cpp_sources
      util/rtc.cpp
      comm_gemm_overlap/userbuffers/ipcsocket.cc
      comm_gemm_overlap/userbuffers/userbuffers-host.cpp
-     comm_gemm_overlap/comm_gemm_overlap.cpp)
+     comm_gemm_overlap/comm_gemm_overlap.cpp
+     newton_schulz/newton_schulz.cpp
+     )
 
 list(APPEND transformer_engine_cuda_sources
      common.cu
@@ -227,12 +229,6 @@ list(APPEND transformer_engine_SOURCES
      comm_gemm/comm_gemm.cpp)
 endif()
 
-option(NVTE_WITH_CUSOLVERMP "Use cuSolverMp for distributed Newton-Schulz" OFF)
-if (NVTE_WITH_CUSOLVERMP)
-list(APPEND transformer_engine_SOURCES
-     newton_schulz/newton_schulz.cpp)
-endif()
-
 add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
 target_include_directories(transformer_engine PUBLIC
                            "${CMAKE_CURRENT_SOURCE_DIR}/include")
@@ -306,6 +302,7 @@ if (NVTE_WITH_CUBLASMP)
   message(STATUS "Using nvshmem at: ${NVSHMEM_DIR}")
 endif()
 
+option(NVTE_WITH_CUSOLVERMP "Use cuSolverMp for distributed Newton-Schulz" OFF)
 if (NVTE_WITH_CUSOLVERMP)
     target_compile_definitions(transformer_engine PRIVATE NVTE_WITH_CUSOLVERMP)
     target_include_directories(transformer_engine PRIVATE ${CUSOLVERMP_DIR}/include)
