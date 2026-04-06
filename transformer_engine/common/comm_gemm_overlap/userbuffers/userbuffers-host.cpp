@@ -240,7 +240,7 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
     size_t gran;
     CUmulticastObjectProp mcProp = {};
     mcProp.numDevices = (*comm)->ar2_nvsize;
-    mcProp.size = (*comm)->mc_maxsize;
+    mcProp.size = mc_maxsize;
     mcProp.handleTypes =
         mnnvl_fabric ? CU_MEM_HANDLE_TYPE_FABRIC : CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
 
