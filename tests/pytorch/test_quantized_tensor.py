@@ -658,7 +658,6 @@ class TestQuantizedTensor:
             y_test = y_test.to(dtype=torch.float64, device="cpu")
             torch.testing.assert_close(y_test, y_ref, **tols)
 
-
     @pytest.mark.parametrize("quantization", _quantization_list)
     def test_shape_with_none_data(
         self,
