@@ -323,8 +323,9 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
       IPCCHECK(ipcSocketClose(&ipcSock));
       close(fd);
     }
-    NVTE_CALL_CHECK_CUDA_DRIVER(cuMulticastAddDevice, (*comm)->mc_handle,
-                                (CUdeviceptr)(*comm)->mydev);
+    CUdevice cudev;
+    NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGet, &cudev, (*comm)->mydev);
+    NVTE_CALL_CHECK_CUDA_DRIVER(cuMulticastAddDevice, (*comm)->mc_handle, cudev);
 
     CUdeviceptr mc_va;
     NVTE_CALL_CHECK_CUDA_DRIVER(cuMemAddressReserve, &mc_va, mc_maxsize, (size_t)0, (CUdeviceptr)0U,
