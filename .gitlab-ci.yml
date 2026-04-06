@@ -818,6 +818,7 @@ jax-py3-qa-manifest:
           fi;
       done;
       gzip ${CI_PROJECT_DIR}/${CI_JOB_ID}/logs/*.txt 2>/dev/null || true;
+      rm -rf logs/;
       mkdir -p logs;
       cp ${CI_PROJECT_DIR}/${CI_JOB_ID}/logs/* logs/ 2>/dev/null || true;
       exit ${RV:-0}
