@@ -14,7 +14,10 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_NEWTON_SCHULZ_H_
 #define TRANSFORMER_ENGINE_COMMON_NEWTON_SCHULZ_H_
 
+#ifdef NVTE_WITH_CUSOLVERMP
 #include <nccl.h>
+// ... struct and function declarations ...
+#endif  // NVTE_WITH_CUSOLVERMP
 #include <stdint.h>
 
 #include "transformer_engine.h"
