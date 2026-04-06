@@ -29,10 +29,14 @@ def newton_schulz_reference(in_x: torch.Tensor, coefficients: list[float]) -> to
         xxt = x @ x.mT
         x = a * x + b * xxt @ x + c * xxt @ xxt @ x
     return x
+
+
 @record
 def main():
     parser = argparse.ArgumentParser(description="Newton-Schulz distributed test")
-    parser.add_argument("--check", type=str, default="orthogonality", choices=["orthogonality", "reference"])
+    parser.add_argument(
+        "--check", type=str, default="orthogonality", choices=["orthogonality", "reference"]
+    )
     parser.add_argument("--dtype", type=str, default="float32", choices=["float32", "bfloat16"])
     parser.add_argument("--matrix-rows", type=int, default=256)
     parser.add_argument("--matrix-cols", type=int, default=None)
@@ -59,8 +63,12 @@ def main():
     if rank == 0:
         torch.manual_seed(42)
         k = min(m, n)
-        U, _ = torch.linalg.qr(torch.randn(m, k, device="cuda", dtype=torch.float32), mode="reduced")
-        V, _ = torch.linalg.qr(torch.randn(n, k, device="cuda", dtype=torch.float32), mode="reduced")
+        U, _ = torch.linalg.qr(
+            torch.randn(m, k, device="cuda", dtype=torch.float32), mode="reduced"
+        )
+        V, _ = torch.linalg.qr(
+            torch.randn(n, k, device="cuda", dtype=torch.float32), mode="reduced"
+        )
         singular_values = torch.rand(k, device="cuda", dtype=torch.float32) * 0.8 + 0.1
         A = U @ torch.diag(singular_values) @ V.T
         A = A.to(dtype)
