@@ -141,6 +141,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("otype"));
   m.def("group_quantize", transformer_engine::pytorch::group_quantize, py::arg("tensor"),
         py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"));
+  m.def("bgrad_group_quantize", transformer_engine::pytorch::bgrad_group_quantize,
+        py::arg("tensor"), py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"));
   m.def("bgrad_quantize", transformer_engine::pytorch::bgrad_quantize,
         "Compute bias gradient and quantize", py::arg("input"), py::arg("quantizer"));
   m.def("generic_gemm", transformer_engine::pytorch::gemm, "Compute GEMM (matrix-matrix multiply)",
@@ -387,6 +389,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Fused Multi-tensor unpadding", py::call_guard<py::gil_scoped_release>());
   m.def("swizzle_scales_for_gemm_", &transformer_engine::pytorch::inplace_swizzle_scale_for_gemm,
         "Convert tensor block scales into GEMM swizzled format");
+  m.def("grouped_swizzle_for_gemm", &transformer_engine::pytorch::grouped_swizzle_for_gemm,
+        "In-place swizzle of grouped tensor scales for GEMM", py::arg("tensor"), py::arg("rowwise"),
+        py::arg("columnwise"));
 
   // attention kernels
   m.def("fa_prepare_fwd", &transformer_engine::pytorch::fa_prepare_fwd,
@@ -462,6 +467,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Get cublasLt version", py::call_guard<py::gil_scoped_release>());
   m.def("get_cudnn_version", &transformer_engine::pytorch::get_cudnn_version, "Get cuDNN version",
         py::call_guard<py::gil_scoped_release>());
+  m.def("convert_host_pointers_to_tensor",
+        &transformer_engine::pytorch::convert_host_pointers_to_tensor,
+        "Copy host-side device pointers into device tensors", py::arg("tensor_lists"),
+        py::call_guard<py::gil_scoped_release>());
+  m.def("get_device_pointer_for_data_and_scales",
+        &transformer_engine::pytorch::get_device_pointer_for_data_and_scales,
+        "Swizzle scales and collect data/scale device pointers into device tensors",
+        py::arg("data_tensors"), py::arg("scale_tensors"), py::arg("swizzle") = false,
+        py::arg("rowwise"), py::arg("data_dtype"), py::call_guard<py::gil_scoped_release>());
   m.def("splits_to_offsets", &transformer_engine::pytorch::splits_to_offsets,
         "Compute grouped tensor offsets from split sizes", py::arg("first_dims"),
         py::arg("logical_last_dim"), py::call_guard<py::gil_scoped_release>());

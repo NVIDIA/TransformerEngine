@@ -6,8 +6,9 @@ from __future__ import annotations
 
 import logging
 import os
+import subprocess
 from contextlib import contextmanager
-from typing import Optional, Tuple, Dict, Any, List
+from typing import Optional, Sequence, Tuple, Dict, Any, List
 from packaging.version import Version as PkgVersion
 
 import torch
@@ -411,3 +412,34 @@ def assert_close_grads(
     assert actual is not None
     assert expected is not None
     assert_close(actual.grad, expected.grad, **kwargs)
+
+
+def run_distributed(
+    args: Sequence[str],
+    *,
+    valid_returncodes: Sequence[int] = (0,),
+    **kwargs,
+) -> subprocess.CompletedProcess:
+    """Run a distributed subprocess with stderr capture for better error reporting.
+
+    stdout streams to the terminal in real time for interactive debugging.
+    On failure, stderr (containing Python tracebacks) is included in the
+    AssertionError so pytest writes it into the JUnit XML report.
+
+    Args:
+        args: Command and arguments to run.
+        valid_returncodes: Return codes considered success (default: (0,)).
+            Use (0, 5) for inner pytest runs where 5 means all tests skipped.
+        **kwargs: Passed through to subprocess.run (e.g. env, timeout).
+    """
+    result = subprocess.run(args, stderr=subprocess.PIPE, text=True, **kwargs)
+    if result.returncode not in valid_returncodes:
+        cmd_str = " ".join(str(a) for a in args)
+        msg = f"Command exited with code {result.returncode}:\n  {cmd_str}\n"
+        if result.stderr:
+            stderr_tail = result.stderr[-4000:]
+            if len(result.stderr) > 4000:
+                stderr_tail = "... [truncated] ...\n" + stderr_tail
+            msg += f"\n--- stderr ---\n{stderr_tail}"
+        raise AssertionError(msg)
+    return result
