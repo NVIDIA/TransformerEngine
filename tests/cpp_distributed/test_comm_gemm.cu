@@ -204,7 +204,7 @@ class CommGemmFixure : public ::testing::TestWithParam<Params> {
     std::vector<BType> bdata(k * n);
     std::generate(bdata.begin(), bdata.end(),
                   [&rng, &dist, b_scale] { return static_cast<BType>(dist(rng) * b_scale); });
-    std::vector<BiasType> biasdata(m * n);
+    std::vector<BiasType> biasdata(m);
     std::generate(biasdata.begin(), biasdata.end(), [&rng, &dist, bias_scale] {
       return static_cast<BiasType>(dist(rng) * bias_scale);
     });
@@ -213,7 +213,7 @@ class CommGemmFixure : public ::testing::TestWithParam<Params> {
                      : MakeFromData<AType>(adata, 0, 0, m, k, m, a_scale);
     auto gb = transb ? MakeFromData<BType>(bdata, 0, 0, n, k, n, b_scale)
                      : MakeFromData<BType>(bdata, 0, 0, k, n, k, b_scale);
-    auto gbias = MakeFromData<BiasType>(biasdata, 0, 0, m, n, m, bias_scale);
+    auto gbias = MakeFromData<BiasType>(biasdata, 0, 0, m, 1, m, bias_scale);
     auto gd = Make<DType>(m, n, d_scale);
     auto gaux = Make<DType>(m, n, d_scale);
 
@@ -226,8 +226,8 @@ class CommGemmFixure : public ::testing::TestWithParam<Params> {
                                           dims.b_cols_num, dims.b_rows_num, n, b_scale)
                     : MakeFromData<BType>(bdata, dims.b_rows_start, dims.b_cols_start,
                                           dims.b_rows_num, dims.b_cols_num, k, b_scale);
-    auto bias = MakeFromData<BiasType>(biasdata, dims.d_rows_start, dims.d_cols_start,
-                                       dims.d_rows_num, dims.d_cols_num, m, bias_scale);
+    auto bias = MakeFromData<BiasType>(biasdata, dims.d_rows_start, 0, dims.d_rows_num, 1, m,
+                                       bias_scale);
     auto d = Make<DType>(dims.d_rows_num, dims.d_cols_num, d_scale);
     auto aux = Make<DType>(dims.d_rows_num, dims.d_cols_num, d_scale);
 
@@ -253,7 +253,7 @@ class CommGemmFixure : public ::testing::TestWithParam<Params> {
                                  dims.d_rows_num, dims.d_cols_num, m);
     NVTE_CHECK(out.size() == out_golden.size());
     for (size_t i = 0; i < out.size(); ++i) {
-      EXPECT_NEAR(static_cast<float>(out[i]), static_cast<float>(out_golden[i]), tol * k);
+      EXPECT_NEAR(static_cast<float>(out[i]), static_cast<float>(out_golden[i]), tol);
     }
   }
 
