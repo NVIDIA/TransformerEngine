@@ -698,16 +698,16 @@ size_t grouped_gemm_num_gemms(Buffer_Type const &lhs_first_dims, Buffer_Type con
 //   rhs represents [k, n] (not transposed) or [n, k] (transposed).
 // Returns {non_contracting_avg, contracting_avg}, i.e. {avg_m, avg_k} for lhs or {avg_n, avg_k}
 // for rhs.
-std::pair<int64_t, int64_t> grouped_gemm_avg_dims(
-    Buffer_Type const &first_dims, Buffer_Type const &last_dims, size_t left_size,
-    size_t right_size, size_t num_gemms, bool is_trans) {
+std::pair<int64_t, int64_t> grouped_gemm_avg_dims(Buffer_Type const &first_dims,
+                                                  Buffer_Type const &last_dims, size_t left_size,
+                                                  size_t right_size, size_t num_gemms,
+                                                  bool is_trans) {
   bool first_ragged = first_dims.element_count() > 0;
   bool last_ragged = last_dims.element_count() > 0;
   bool any_ragged = first_ragged || last_ragged;
   // Per-group left: divide by num_gemms if first dim is ragged OR if tensor has no ragged dims
   // (G is folded into left_size).  Keep as-is only when last dim is ragged but first is not.
-  size_t pg_left =
-      (first_ragged || !any_ragged) ? left_size / num_gemms : left_size;
+  size_t pg_left = (first_ragged || !any_ragged) ? left_size / num_gemms : left_size;
   size_t pg_right = last_ragged ? right_size / num_gemms : right_size;
   int64_t non_contract = static_cast<int64_t>(is_trans ? pg_right : pg_left);
   int64_t contract = static_cast<int64_t>(is_trans ? pg_left : pg_right);
@@ -773,9 +773,9 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
                                         int64_capacity, int64_offset, num_gemms, stream);
 
   auto [avg_m, avg_k_lhs] = grouped_gemm_avg_dims(lhs_first_dims, lhs_last_dims, lhs_left_size,
-                                                    lhs_right_size, num_gemms, lhs_is_trans);
+                                                  lhs_right_size, num_gemms, lhs_is_trans);
   auto [avg_n, avg_k_rhs] = grouped_gemm_avg_dims(rhs_first_dims, rhs_last_dims, rhs_left_size,
-                                                    rhs_right_size, num_gemms, rhs_is_trans);
+                                                  rhs_right_size, num_gemms, rhs_is_trans);
   // Use k from lhs (both sides should agree for well-formed inputs).
   (void)avg_k_rhs;
 
@@ -786,9 +786,7 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
 
   nvte_grouped_gemm(rhs_tensor, rhs_is_trans, lhs_tensor, lhs_is_trans, nullptr, out_tensor,
                     alpha_tensor.data(), beta_tensor.data(), workspace_setup.data(),
-                    workspace_cublas.data(),
-                    gemmConfig,
-                    stream);
+                    workspace_cublas.data(), gemmConfig, stream);
 
   return ffi_with_cuda_error_check();
 }
