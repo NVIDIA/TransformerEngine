@@ -3838,7 +3838,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         orig_q_shape, orig_k_shape, orig_v_shape = q.shape, k.shape, v.shape
         orig_o_shape = orig_q_shape[:-1] + orig_v_shape[-1:]
         o_format = qkv_format
-        batch_dim_qkv, seq_dim_qkv, _ = get_bsh_dims(qkv_format)
+        _, seq_dim_qkv, _ = get_bsh_dims(qkv_format)
         _, seq_dim_o, _ = get_bsh_dims(o_format)
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
