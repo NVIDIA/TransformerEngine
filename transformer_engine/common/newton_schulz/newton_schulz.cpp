@@ -187,7 +187,7 @@ void nvte_newton_schulz(NVTECusolverMpCtx* ctx, int64_t m, int64_t n, NVTETensor
   // Compute local leading dimension
   const int64_t local_cols = cusolverMpNUMROC(n, nb, ctx->rank, 0, ctx->nranks);
   NVTE_CHECK(t->shape().size() == 2, "Shape size:", t->shape().size());
-  NVTE_CHECK(t->shape()[1] == local_cols, "Tensor cols:", t->shape()[0], "Local cols:", local_cols);
+  NVTE_CHECK(t->shape()[1] == local_cols, "Tensor cols:", t->shape()[1], "Local cols:", local_cols);
   const int64_t lld = std::max(local_cols, static_cast<int64_t>(1));
 
   const cudaDataType_t cuda_dtype = get_cuda_dtype(t->dtype());
