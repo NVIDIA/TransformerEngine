@@ -314,7 +314,11 @@ if (NVTE_WITH_CUSOLVERMP)
                  PATHS ${CUSOLVERMP_DIR}
                  PATH_SUFFIXES lib
                  REQUIRED)
-    target_link_libraries(transformer_engine PUBLIC ${CUSOLVERMP_LIB})
+    find_library(NCCL_LIB
+                 NAMES nccl libnccl
+                 PATH_SUFFIXES lib
+                 REQUIRED)
+    target_link_libraries(transformer_engine PRIVATE ${NCCL_LIB} ${CUSOLVERMP_LIB})
     message(STATUS "Using cuSolverMp at: ${CUSOLVERMP_DIR}")
 endif()
 
