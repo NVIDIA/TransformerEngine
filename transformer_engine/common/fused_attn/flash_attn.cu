@@ -36,18 +36,15 @@ constexpr int tma_permute_s_tile = 32;
 // ---- 4D TMA PTX wrappers ----
 
 __device__ __forceinline__ void cp_async_bulk_tensor_4d_global_to_shared(
-    void *dst_shmem, const CUtensorMap *tensor_map,
-    uint32_t c0, uint32_t c1, uint32_t c2, uint32_t c3,
-    uint64_t *mbar) {
+    void *dst_shmem, const CUtensorMap *tensor_map, uint32_t c0, uint32_t c1, uint32_t c2,
+    uint32_t c3, uint64_t *mbar) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   uint32_t dst = __cvta_generic_to_shared(dst_shmem);
   uint32_t bar = __cvta_generic_to_shared(mbar);
   asm volatile(
       "cp.async.bulk.tensor.4d.shared::cluster.global.tile"
-      ".mbarrier::complete_tx::bytes [%0], [%1, {%2, %3, %4, %5}], [%6];"
-      ::"r"(dst), "l"(tensor_map),
-        "r"(c0), "r"(c1), "r"(c2), "r"(c3),
-        "r"(bar)
+      ".mbarrier::complete_tx::bytes [%0], [%1, {%2, %3, %4, %5}], [%6];" ::"r"(dst),
+      "l"(tensor_map), "r"(c0), "r"(c1), "r"(c2), "r"(c3), "r"(bar)
       : "memory");
 #else
   NVTE_DEVICE_ERROR("cp_async_bulk_tensor_4d_global_to_shared requires SM 10.0+.");
@@ -55,17 +52,14 @@ __device__ __forceinline__ void cp_async_bulk_tensor_4d_global_to_shared(
 }
 
 __device__ __forceinline__ void cp_async_bulk_tensor_4d_shared_to_global(
-    const CUtensorMap *tensor_map,
-    uint32_t c0, uint32_t c1, uint32_t c2, uint32_t c3,
+    const CUtensorMap *tensor_map, uint32_t c0, uint32_t c1, uint32_t c2, uint32_t c3,
     void *src_shmem) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   uint32_t src = __cvta_generic_to_shared(src_shmem);
   asm volatile(
       "cp.async.bulk.tensor.4d.global.shared::cta.bulk_group"
-      " [%0, {%1, %2, %3, %4}], [%5];"
-      ::"l"(tensor_map),
-        "r"(c0), "r"(c1), "r"(c2), "r"(c3),
-        "r"(src)
+      " [%0, {%1, %2, %3, %4}], [%5];" ::"l"(tensor_map),
+      "r"(c0), "r"(c1), "r"(c2), "r"(c3), "r"(src)
       : "memory");
 #else
   NVTE_DEVICE_ERROR("cp_async_bulk_tensor_4d_shared_to_global requires SM 9.0+.");
@@ -79,9 +73,9 @@ __device__ __forceinline__ void cp_async_bulk_tensor_4d_shared_to_global(
 //
 // The box (tile) copied per TMA instruction is [box0, box1, box2, box3].
 
-static void create_4D_tensor_map(CUtensorMap &tensorMap, void *dataPtr, DType dtype,
-                                 uint64_t dim0, uint64_t dim1, uint64_t dim2, uint64_t dim3,
-                                 uint32_t box0, uint32_t box1, uint32_t box2, uint32_t box3) {
+static void create_4D_tensor_map(CUtensorMap &tensorMap, void *dataPtr, DType dtype, uint64_t dim0,
+                                 uint64_t dim1, uint64_t dim2, uint64_t dim3, uint32_t box0,
+                                 uint32_t box1, uint32_t box2, uint32_t box3) {
   cuda_driver::ensure_context_exists();
   static PFN_cuTensorMapEncodeTiled_v12000 cuDriverTensorMapEncodeTiled = []() {
     void *ptr = cuda_driver::get_symbol("cuTensorMapEncodeTiled");
@@ -115,8 +109,7 @@ static void create_4D_tensor_map(CUtensorMap &tensorMap, void *dataPtr, DType dt
 
   NVTE_CHECK_CUDA_DRIVER(cuDriverTensorMapEncodeTiled(
       &tensorMap, tma_dtype, rank, dataPtr, size, stride, boxSize, elemStride,
-      CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_NONE,
-      CU_TENSOR_MAP_L2_PROMOTION_NONE,
+      CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_NONE, CU_TENSOR_MAP_L2_PROMOTION_NONE,
       CU_TENSOR_MAP_FLOAT_OOB_FILL_NAN_REQUEST_ZERO_FMA));
 }
 
@@ -243,50 +236,40 @@ void prepare_flash_attn_bwd(Tensor q, Tensor k, Tensor v, Tensor qkv, cudaStream
 // Strided SBHD: TMA dims [D, H, B, S], coords [0, h, b, s]
 
 template <typename T, bool kIsBshdBshdBshd>
-__device__ __forceinline__ void issue_tma_load_strided(
-    T *smem_buf, const CUtensorMap *tma,
-    size_t h_i, size_t s_tile, size_t b_i,
-    uint64_t *mbar, size_t tile_bytes) {
+__device__ __forceinline__ void issue_tma_load_strided(T *smem_buf, const CUtensorMap *tma,
+                                                       size_t h_i, size_t s_tile, size_t b_i,
+                                                       uint64_t *mbar, size_t tile_bytes) {
   ptx::mbarrier_arrive_expect_tx(mbar, static_cast<uint32_t>(tile_bytes));
   if constexpr (kIsBshdBshdBshd) {
-    cp_async_bulk_tensor_4d_global_to_shared(
-        smem_buf, tma,
-        0, static_cast<uint32_t>(h_i),
-        static_cast<uint32_t>(s_tile), static_cast<uint32_t>(b_i),
-        mbar);
+    cp_async_bulk_tensor_4d_global_to_shared(smem_buf, tma, 0, static_cast<uint32_t>(h_i),
+                                             static_cast<uint32_t>(s_tile),
+                                             static_cast<uint32_t>(b_i), mbar);
   } else {
-    cp_async_bulk_tensor_4d_global_to_shared(
-        smem_buf, tma,
-        0, static_cast<uint32_t>(h_i),
-        static_cast<uint32_t>(b_i), static_cast<uint32_t>(s_tile),
-        mbar);
+    cp_async_bulk_tensor_4d_global_to_shared(smem_buf, tma, 0, static_cast<uint32_t>(h_i),
+                                             static_cast<uint32_t>(b_i),
+                                             static_cast<uint32_t>(s_tile), mbar);
   }
 }
 
 template <typename T, bool kIsBshdBshdBshd>
-__device__ __forceinline__ void issue_tma_store_strided(
-    const CUtensorMap *tma, T *smem_buf,
-    size_t h_i, size_t s_tile, size_t b_i) {
+__device__ __forceinline__ void issue_tma_store_strided(const CUtensorMap *tma, T *smem_buf,
+                                                        size_t h_i, size_t s_tile, size_t b_i) {
   if constexpr (kIsBshdBshdBshd) {
-    cp_async_bulk_tensor_4d_shared_to_global(
-        tma,
-        0, static_cast<uint32_t>(h_i),
-        static_cast<uint32_t>(s_tile), static_cast<uint32_t>(b_i),
-        smem_buf);
+    cp_async_bulk_tensor_4d_shared_to_global(tma, 0, static_cast<uint32_t>(h_i),
+                                             static_cast<uint32_t>(s_tile),
+                                             static_cast<uint32_t>(b_i), smem_buf);
   } else {
-    cp_async_bulk_tensor_4d_shared_to_global(
-        tma,
-        0, static_cast<uint32_t>(h_i),
-        static_cast<uint32_t>(b_i), static_cast<uint32_t>(s_tile),
-        smem_buf);
+    cp_async_bulk_tensor_4d_shared_to_global(tma, 0, static_cast<uint32_t>(h_i),
+                                             static_cast<uint32_t>(b_i),
+                                             static_cast<uint32_t>(s_tile), smem_buf);
   }
   ptx::cp_async_bulk_commit_group();
 }
 
 __device__ __forceinline__ void st_global_cs_uint4(uint4 *ptr, uint4 val) {
-  asm volatile("st.global.cs.v4.b32 [%0], {%1, %2, %3, %4};"
-      :: "l"(ptr), "r"(val.x), "r"(val.y), "r"(val.z), "r"(val.w)
-      : "memory");
+  asm volatile("st.global.cs.v4.b32 [%0], {%1, %2, %3, %4};" ::"l"(ptr), "r"(val.x), "r"(val.y),
+               "r"(val.z), "r"(val.w)
+               : "memory");
 }
 
 // ---- Forward: BSHD/SBHD → BHSD ----
@@ -295,14 +278,13 @@ __device__ __forceinline__ void st_global_cs_uint4(uint4 *ptr, uint4 val) {
 
 template <typename T, bool kIsBshdBshdBshd>
 __launch_bounds__(tma_permute_threads) __global__
-    void permute_to_grouped_tensor_fwd_kernel(
-        const __grid_constant__ CUtensorMap tma_q_in,
-        const __grid_constant__ CUtensorMap tma_k_in,
-        const __grid_constant__ CUtensorMap tma_v_in,
-        T *__restrict__ q_out, T *__restrict__ k_out, T *__restrict__ v_out,
-        size_t b, size_t s_q, size_t h_q, size_t d_qk,
-        size_t s_kv, size_t h_kv, size_t d_v,
-        unsigned int permute_s_splits) {
+    void permute_to_grouped_tensor_fwd_kernel(const __grid_constant__ CUtensorMap tma_q_in,
+                                              const __grid_constant__ CUtensorMap tma_k_in,
+                                              const __grid_constant__ CUtensorMap tma_v_in,
+                                              T *__restrict__ q_out, T *__restrict__ k_out,
+                                              T *__restrict__ v_out, size_t b, size_t s_q,
+                                              size_t h_q, size_t d_qk, size_t s_kv, size_t h_kv,
+                                              size_t d_v, unsigned int permute_s_splits) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   const int which = blockIdx.z;
   const CUtensorMap *tma_in = which == 0 ? &tma_q_in : (which == 1 ? &tma_k_in : &tma_v_in);
@@ -316,8 +298,11 @@ __launch_bounds__(tma_permute_threads) __global__
   const size_t h_i = static_cast<size_t>(blockIdx.x) % h_grid;
 
   if (b_i >= b) return;
-  if (which == 0) { if (h_i >= h_q) return; }
-  else            { if (h_i >= h_kv) return; }
+  if (which == 0) {
+    if (h_i >= h_q) return;
+  } else {
+    if (h_i >= h_kv) return;
+  }
 
   const unsigned int s_part = blockIdx.y;
   const size_t s_begin =
@@ -348,8 +333,7 @@ __launch_bounds__(tma_permute_threads) __global__
     const size_t tile_rows = min(S_TILE, s_end - s_tile);
 
     if (is_leader) {
-      issue_tma_load_strided<T, kIsBshdBshdBshd>(
-          smem, tma_in, h_i, s_tile, b_i, &mbar, tile_bytes);
+      issue_tma_load_strided<T, kIsBshdBshdBshd>(smem, tma_in, h_i, s_tile, b_i, &mbar, tile_bytes);
     } else {
       ptx::mbarrier_arrive(&mbar);
     }
@@ -381,19 +365,14 @@ __launch_bounds__(tma_permute_threads) __global__
 // Vectorized loads from contiguous input → smem → TMA store to strided output.
 
 template <typename T, bool kIsBshdBshdBshd>
-__launch_bounds__(tma_permute_threads) __global__
-    void permute_to_grouped_tensor_bwd_kernel(
-        const T *__restrict__ grad_q, const T *__restrict__ grad_k, const T *__restrict__ grad_v,
-        const __grid_constant__ CUtensorMap tma_q_out,
-        const __grid_constant__ CUtensorMap tma_k_out,
-        const __grid_constant__ CUtensorMap tma_v_out,
-        size_t b, size_t s_q, size_t h_q, size_t d_qk,
-        size_t s_kv, size_t h_kv, size_t d_v,
-        unsigned int permute_s_splits) {
+__launch_bounds__(tma_permute_threads) __global__ void permute_to_grouped_tensor_bwd_kernel(
+    const T *__restrict__ grad_q, const T *__restrict__ grad_k, const T *__restrict__ grad_v,
+    const __grid_constant__ CUtensorMap tma_q_out, const __grid_constant__ CUtensorMap tma_k_out,
+    const __grid_constant__ CUtensorMap tma_v_out, size_t b, size_t s_q, size_t h_q, size_t d_qk,
+    size_t s_kv, size_t h_kv, size_t d_v, unsigned int permute_s_splits) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   const int which = blockIdx.z;
-  const T *__restrict__ tensor_in =
-      which == 0 ? grad_q : (which == 1 ? grad_k : grad_v);
+  const T *__restrict__ tensor_in = which == 0 ? grad_q : (which == 1 ? grad_k : grad_v);
   const CUtensorMap *tma_out = which == 0 ? &tma_q_out : (which == 1 ? &tma_k_out : &tma_v_out);
   const size_t Sdim = which == 0 ? s_q : s_kv;
   const size_t Hdim = which == 0 ? h_q : h_kv;
@@ -404,8 +383,11 @@ __launch_bounds__(tma_permute_threads) __global__
   const size_t h_i = static_cast<size_t>(blockIdx.x) % h_grid;
 
   if (b_i >= b) return;
-  if (which == 0) { if (h_i >= h_q) return; }
-  else            { if (h_i >= h_kv) return; }
+  if (which == 0) {
+    if (h_i >= h_q) return;
+  } else {
+    if (h_i >= h_kv) return;
+  }
 
   const unsigned int s_part = blockIdx.y;
   const size_t s_begin =
@@ -430,8 +412,7 @@ __launch_bounds__(tma_permute_threads) __global__
 
     for (size_t i = threadIdx.x * vec_elems; i < total_elems;
          i += static_cast<size_t>(blockDim.x) * vec_elems) {
-      *reinterpret_cast<uint4 *>(smem + i) =
-          *reinterpret_cast<const uint4 *>(in_ptr + i);
+      *reinterpret_cast<uint4 *>(smem + i) = *reinterpret_cast<const uint4 *>(in_ptr + i);
     }
 
     ptx::fence_proxy_async_shared_cta();
@@ -451,21 +432,16 @@ __launch_bounds__(tma_permute_threads) __global__
 //
 // For BSHD [B, S, H, D]: TMA dims [D, H, S, B], box [D, 1, S_TILE, 1]
 // For SBHD [S, B, H, D]: TMA dims [D, H, B, S], box [D, 1, 1, S_TILE]
-static void create_strided_tensor_map(CUtensorMap &map, void *ptr, DType dtype,
-                                      size_t b, size_t s, size_t h, size_t d,
-                                      bool is_bshd) {
+static void create_strided_tensor_map(CUtensorMap &map, void *ptr, DType dtype, size_t b, size_t s,
+                                      size_t h, size_t d, bool is_bshd) {
   if (is_bshd) {
-    create_4D_tensor_map(map, ptr, dtype,
-                         static_cast<uint64_t>(d), static_cast<uint64_t>(h),
+    create_4D_tensor_map(map, ptr, dtype, static_cast<uint64_t>(d), static_cast<uint64_t>(h),
                          static_cast<uint64_t>(s), static_cast<uint64_t>(b),
-                         static_cast<uint32_t>(d), 1,
-                         static_cast<uint32_t>(tma_permute_s_tile), 1);
+                         static_cast<uint32_t>(d), 1, static_cast<uint32_t>(tma_permute_s_tile), 1);
   } else {
-    create_4D_tensor_map(map, ptr, dtype,
-                         static_cast<uint64_t>(d), static_cast<uint64_t>(h),
+    create_4D_tensor_map(map, ptr, dtype, static_cast<uint64_t>(d), static_cast<uint64_t>(h),
                          static_cast<uint64_t>(b), static_cast<uint64_t>(s),
-                         static_cast<uint32_t>(d), 1, 1,
-                         static_cast<uint32_t>(tma_permute_s_tile));
+                         static_cast<uint32_t>(d), 1, 1, static_cast<uint32_t>(tma_permute_s_tile));
   }
 }
 
@@ -473,13 +449,13 @@ void permute_to_grouped_tensor_fwd(Tensor q, Tensor k, Tensor v, Tensor q_out, T
                                    Tensor v_out, NVTE_QKV_Layout original_layout,
                                    cudaStream_t stream) {
   using namespace transformer_engine;
-  const size_t b    = q_out.shape()[0];
-  const size_t h_q  = q_out.shape()[1];
-  const size_t s_q  = q_out.shape()[2];
+  const size_t b = q_out.shape()[0];
+  const size_t h_q = q_out.shape()[1];
+  const size_t s_q = q_out.shape()[2];
   const size_t d_qk = q_out.shape()[3];
   const size_t h_kv = k_out.shape()[1];
   const size_t s_kv = k_out.shape()[2];
-  const size_t d_v  = v_out.shape()[3];
+  const size_t d_v = v_out.shape()[3];
 
   NVTE_CHECK(d_qk % nvec128 == 0 && d_v % nvec128 == 0,
              "permute_to_grouped_tensor_fwd: head dim must be divisible by ", nvec128, ".");
@@ -502,27 +478,21 @@ void permute_to_grouped_tensor_fwd(Tensor q, Tensor k, Tensor v, Tensor q_out, T
 
   if (is_bshd) {
     TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(
-        q.dtype(), dtype,
-        auto kernel = permute_to_grouped_tensor_fwd_kernel<dtype, true>;
-        NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-            kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes));
+        q.dtype(), dtype, auto kernel = permute_to_grouped_tensor_fwd_kernel<dtype, true>;
+        NVTE_CHECK_CUDA(
+            cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes));
         kernel<<<grid, tma_permute_threads, smem_bytes, stream>>>(
-            tma_q_in, tma_k_in, tma_v_in,
-            reinterpret_cast<dtype *>(q_out.data.dptr),
-            reinterpret_cast<dtype *>(k_out.data.dptr),
-            reinterpret_cast<dtype *>(v_out.data.dptr),
+            tma_q_in, tma_k_in, tma_v_in, reinterpret_cast<dtype *>(q_out.data.dptr),
+            reinterpret_cast<dtype *>(k_out.data.dptr), reinterpret_cast<dtype *>(v_out.data.dptr),
             b, s_q, h_q, d_qk, s_kv, h_kv, d_v, permute_s_splits););
   } else {
     TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(
-        q.dtype(), dtype,
-        auto kernel = permute_to_grouped_tensor_fwd_kernel<dtype, false>;
-        NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-            kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes));
+        q.dtype(), dtype, auto kernel = permute_to_grouped_tensor_fwd_kernel<dtype, false>;
+        NVTE_CHECK_CUDA(
+            cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes));
         kernel<<<grid, tma_permute_threads, smem_bytes, stream>>>(
-            tma_q_in, tma_k_in, tma_v_in,
-            reinterpret_cast<dtype *>(q_out.data.dptr),
-            reinterpret_cast<dtype *>(k_out.data.dptr),
-            reinterpret_cast<dtype *>(v_out.data.dptr),
+            tma_q_in, tma_k_in, tma_v_in, reinterpret_cast<dtype *>(q_out.data.dptr),
+            reinterpret_cast<dtype *>(k_out.data.dptr), reinterpret_cast<dtype *>(v_out.data.dptr),
             b, s_q, h_q, d_qk, s_kv, h_kv, d_v, permute_s_splits););
   }
   NVTE_CHECK_CUDA(cudaGetLastError());
@@ -531,13 +501,13 @@ void permute_to_grouped_tensor_fwd(Tensor q, Tensor k, Tensor v, Tensor q_out, T
 void permute_to_grouped_tensor_bwd(Tensor grad_q, Tensor grad_k, Tensor grad_v, Tensor q, Tensor k,
                                    Tensor v, NVTE_QKV_Layout original_layout, cudaStream_t stream) {
   using namespace transformer_engine;
-  const size_t b    = grad_q.shape()[0];
-  const size_t h_q  = grad_q.shape()[1];
-  const size_t s_q  = grad_q.shape()[2];
+  const size_t b = grad_q.shape()[0];
+  const size_t h_q = grad_q.shape()[1];
+  const size_t s_q = grad_q.shape()[2];
   const size_t d_qk = grad_q.shape()[3];
   const size_t h_kv = grad_k.shape()[1];
   const size_t s_kv = grad_k.shape()[2];
-  const size_t d_v  = grad_v.shape()[3];
+  const size_t d_v = grad_v.shape()[3];
 
   NVTE_CHECK(d_qk % nvec128 == 0 && d_v % nvec128 == 0,
              "permute_to_grouped_tensor_bwd: head dim must be divisible by ", nvec128, ".");
@@ -560,28 +530,24 @@ void permute_to_grouped_tensor_bwd(Tensor grad_q, Tensor grad_k, Tensor grad_v, 
 
   if (is_bshd) {
     TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(
-        grad_q.dtype(), dtype,
-        auto kernel = permute_to_grouped_tensor_bwd_kernel<dtype, true>;
-        NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-            kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes));
+        grad_q.dtype(), dtype, auto kernel = permute_to_grouped_tensor_bwd_kernel<dtype, true>;
+        NVTE_CHECK_CUDA(
+            cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes));
         kernel<<<grid, tma_permute_threads, smem_bytes, stream>>>(
             reinterpret_cast<const dtype *>(grad_q.data.dptr),
             reinterpret_cast<const dtype *>(grad_k.data.dptr),
-            reinterpret_cast<const dtype *>(grad_v.data.dptr),
-            tma_q_out, tma_k_out, tma_v_out,
-            b, s_q, h_q, d_qk, s_kv, h_kv, d_v, permute_s_splits););
+            reinterpret_cast<const dtype *>(grad_v.data.dptr), tma_q_out, tma_k_out, tma_v_out, b,
+            s_q, h_q, d_qk, s_kv, h_kv, d_v, permute_s_splits););
   } else {
     TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(
-        grad_q.dtype(), dtype,
-        auto kernel = permute_to_grouped_tensor_bwd_kernel<dtype, false>;
-        NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-            kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes));
+        grad_q.dtype(), dtype, auto kernel = permute_to_grouped_tensor_bwd_kernel<dtype, false>;
+        NVTE_CHECK_CUDA(
+            cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes));
         kernel<<<grid, tma_permute_threads, smem_bytes, stream>>>(
             reinterpret_cast<const dtype *>(grad_q.data.dptr),
             reinterpret_cast<const dtype *>(grad_k.data.dptr),
-            reinterpret_cast<const dtype *>(grad_v.data.dptr),
-            tma_q_out, tma_k_out, tma_v_out,
-            b, s_q, h_q, d_qk, s_kv, h_kv, d_v, permute_s_splits););
+            reinterpret_cast<const dtype *>(grad_v.data.dptr), tma_q_out, tma_k_out, tma_v_out, b,
+            s_q, h_q, d_qk, s_kv, h_kv, d_v, permute_s_splits););
   }
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
