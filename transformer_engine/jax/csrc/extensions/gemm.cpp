@@ -775,7 +775,7 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
   auto [avg_m, avg_k_lhs] = grouped_gemm_avg_dims(lhs_first_dims, lhs_last_dims, lhs_left_size,
                                                   lhs_right_size, num_gemms, lhs_is_trans);
   auto [avg_n, avg_k_rhs] = grouped_gemm_avg_dims(rhs_first_dims, rhs_last_dims, rhs_left_size,
-                                                  rhs_right_size, num_gemms, rhs_is_trans);
+                                                  rhs_right_size, num_gemms, !rhs_is_trans);
   // Use k from lhs (both sides should agree for well-formed inputs).
   (void)avg_k_rhs;
 
