@@ -206,16 +206,21 @@ void rmsnorm_bwd_add(const Tensor &dz, const Tensor &x, const Tensor &add, const
     CheckOutputTensor(*dgamma, "dgamma");
   }
 
-  // cuDNN does not currently support fused backward+add
-  NVTE_Norm_Backend norm_backend = NVTE_Norm_Backend::Te;
-
-  // TE backend does not currently support zero_centered_gamma_in_weight_dtype
-  NVTE_CHECK(!use_zero_centered_gamma_in_weight_dtype(),
-             "zero_centered_gamma_in_weight_dtype is currently not supported for rmsnorm_bwd_add");
-
-  bool is_aligned = is_ptr_aligned(x.data.dptr, gamma.data.dptr, rsigma.data.dptr, dx->data.dptr,
-                                   dz.data.dptr, dgamma->data.dptr, add.data.dptr);
+  NVTE_Norm_Backend norm_backend;
+  bool is_aligned = true;
   bool gamma_in_weight_dtype = false;
+  if (use_cudnn_norm_bwd()) {
+    norm_backend = NVTE_Norm_Backend::Cudnn;
+    gamma_in_weight_dtype = use_zero_centered_gamma_in_weight_dtype();
+  } else {
+    norm_backend = NVTE_Norm_Backend::Te;
+    // TE backend does not currently support zero_centered_gamma_in_weight_dtype
+    NVTE_CHECK(!use_zero_centered_gamma_in_weight_dtype(),
+               "zero_centered_gamma_in_weight_dtype is currently not supported "
+               "for rmsnorm_bwd_add with TE backend");
+    is_aligned = is_ptr_aligned(x.data.dptr, gamma.data.dptr, rsigma.data.dptr, dx->data.dptr,
+                                dz.data.dptr, dgamma->data.dptr, add.data.dptr);
+  }
 
   auto plan = NormalizationPlanRegistry::getInstance().getNormalizationPlan(
       norm_backend, NVTE_Norm_Type::RMSNorm, NVTE_Norm_Stage::BackwardAdd,

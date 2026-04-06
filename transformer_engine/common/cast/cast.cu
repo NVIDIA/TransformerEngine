@@ -27,12 +27,12 @@ void nvte_quantize(const NVTETensor input, NVTETensor output, cudaStream_t strea
 }
 
 void nvte_group_quantize(const NVTEGroupedTensor input, NVTEGroupedTensor output,
-                         cudaStream_t stream) {
+                         const NVTEQuantizationConfig quant_config, cudaStream_t stream) {
   NVTE_API_CALL(nvte_group_quantize);
   using namespace transformer_engine;
 
   constexpr bool IS_ACT = false;
-  dispatch::group_quantize_fwd_helper<IS_ACT, Empty, nullptr>(input, output, nullptr, stream);
+  dispatch::group_quantize_fwd_helper<IS_ACT, Empty, nullptr>(input, output, quant_config, stream);
 }
 
 void nvte_quantize_noop(const NVTETensor input, NVTETensor output, NVTETensor noop,
@@ -70,7 +70,7 @@ void nvte_quantize_dbias(const NVTETensor input, NVTETensor output, NVTETensor d
 }
 
 void nvte_group_quantize_dbias(const NVTEGroupedTensor input, NVTEGroupedTensor output,
-                               NVTETensor dbias, NVTETensor workspace, cudaStream_t stream) {
+                               NVTEGroupedTensor dbias, NVTETensor workspace, cudaStream_t stream) {
   NVTE_API_CALL(nvte_group_quantize_dbias);
   using namespace transformer_engine;
 
@@ -124,7 +124,8 @@ void nvte_multi_tensor_quantize(const NVTETensor *inputs, NVTETensor *outputs,
 }
 
 // Group quantize assumes contiguous inputs and outputs in memory allocation
-// TODO (zhongbo): find a better way to make it a more generalized API
+// Note: this API assumes knowing split sections from the host, if split information
+// comes from D2H copy, it will break cuda graph capture
 void nvte_group_nvfp4_quantize_with_amax(const NVTETensor input, NVTETensor *outputs,
                                          const size_t *split_sections, const size_t num_tensors,
                                          const NVTEQuantizationConfig quant_config,
@@ -134,6 +135,6 @@ void nvte_group_nvfp4_quantize_with_amax(const NVTETensor input, NVTETensor *out
 
   constexpr bool IS_ACT = false;
 
-  dispatch::group_quantize_fwd_helper<IS_ACT, Empty, nullptr>(input, outputs, split_sections,
-                                                              num_tensors, quant_config, stream);
+  dispatch::group_quantize_fwd_host_aware_helper<IS_ACT, Empty, nullptr>(
+      input, outputs, split_sections, num_tensors, quant_config, stream);
 }

@@ -554,11 +554,15 @@ def get_attention_backend(
     #          | FP8            | non-paged/paged | sm90         | thd           | >= 1
     # Unfused  | FP32/FP16/BF16 | non-paged/paged | all          | bshd,sbhd,thd | >= 1
     if inference_params is not None:
-        # Temporarily disabling fused attention for kv caching for sm89 irrespective of cuDNN version
-        # until the cuDNN bug is resolved
-        if device_compute_capability == (8, 9):
-            logger.debug("Disabling FusedAttention for KV caching for sm89")
+        # Temporarily disabling fused attention for kv caching for sm89/sm120 irrespective of
+        # cuDNN version until the cuDNN bug is resolved.
+        if device_compute_capability in ((8, 9), (12, 0)):
+            logger.debug("Disabling FusedAttention for KV caching for sm89/sm120")
             use_fused_attention = False
+        # Temporarily disable FlashAttention for KV caching on sm120
+        if device_compute_capability == (12, 0):
+            logger.debug("Disabling FlashAttention for KV caching for sm120")
+            use_flash_attention = False
         if context_parallel:
             logger.debug("Disabling all backends for KV caching with context parallelism")
             use_flash_attention = False
@@ -691,12 +695,21 @@ def get_attention_backend(
                 )
             use_flash_attention = False
         if device_compute_capability == (12, 0):
-            if use_fused_attention:
-                logger.debug(
-                    "Disabling FusedAttention as qkv_format = thd is"
-                    " not supported for compute capability = sm120"
-                )
-            use_fused_attention = False
+            if cudnn_version < (9, 18, 1):
+                if use_fused_attention:
+                    logger.debug(
+                        "Disabling FusedAttention as qkv_format = thd is"
+                        " not supported for compute capability = sm120 and cuDNN version < 9.18.1"
+                    )
+                use_fused_attention = False
+            elif qkv_layout in {"t3hd", "th3d"}:
+                if use_fused_attention:
+                    logger.debug(
+                        "Disabling FusedAttention as qkv_layout = %s is not supported for"
+                        " compute capability = sm120",
+                        qkv_layout,
+                    )
+                use_fused_attention = False
 
     # Filter: Dropout
     if attention_dropout != 0.0 and use_flash_attention_3:
@@ -966,12 +979,13 @@ def get_attention_backend(
         and fu_core_attention_bias_type == "post_scale_bias"
         and fu_core_attention_bias_shape != "1hss"
     ):
-        if fu_core_attention_bias_requires_grad:
-            # remove this line when cuDNN adds bwd support for
-            # [1, 1, s, s], [b, 1, s, s] and [b, h, s, s]
-            logger.debug("Disabling FusedAttention for dBias in [1, H, S, S] shape")
+        # dbias calculation is not supported for 111s as of cuDNN 9.18. So, use fused attention backend only if bias does not require grad.
+        if fu_core_attention_bias_requires_grad and fu_core_attention_bias_shape == "111s":
+            logger.warning(
+                "Disabling FusedAttention as dbias calculation is not supported for 111s"
+            )
             use_fused_attention = False
-        else:
+        elif not fu_core_attention_bias_requires_grad:
             # max512 backend will only support [1, h, s, s]
             os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
 
@@ -1066,8 +1080,15 @@ def get_attention_backend(
             )
             use_fused_attention = False
             fused_attention_backend = None
-        if fused_attention_backend == FusedAttnBackend["FP8"] and is_training:
-            logger.debug("Disabling FusedAttention for determinism reasons with FP8")
+        if (
+            fused_attention_backend == FusedAttnBackend["FP8"]
+            and is_training
+            and (device_compute_capability < (9, 0) or cudnn_version < (9, 19, 0))
+        ):
+            logger.debug(
+                "Disabling FusedAttention for determinism reasons with FP8 on arch < sm90 or cuDNN"
+                " < 9.19.0"
+            )
             use_fused_attention = False
             fused_attention_backend = None
         if (
