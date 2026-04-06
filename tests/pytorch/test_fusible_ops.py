@@ -4263,32 +4263,36 @@ def test_grouped_gemm_quant_cute_matches_mxfp8_quantized() -> None:
         device=device,
     )
     inputs = {
-        "a_tensor": torch.empty(1, total_m, k, dtype=torch.float8_e4m3fn, device=device).permute(
-            1, 2, 0
+        "a_tensor": (
+            torch.empty(1, total_m, k, dtype=torch.float8_e4m3fn, device=device).permute(1, 2, 0)
         ),
-        "b_tensor": torch.empty(num_groups, n, k, dtype=torch.float8_e4m3fn, device=device).permute(
-            1, 2, 0
+        "b_tensor": (
+            torch.empty(num_groups, n, k, dtype=torch.float8_e4m3fn, device=device).permute(1, 2, 0)
         ),
-        "sfa_tensor": torch.empty(
-            1,
-            total_m // 128,
-            k // 128,
-            32,
-            4,
-            4,
-            dtype=torch.float8_e8m0fnu,
-            device=device,
-        ).permute(3, 4, 1, 5, 2, 0),
-        "sfb_tensor": torch.empty(
-            num_groups,
-            n // 128,
-            k // 128,
-            32,
-            4,
-            4,
-            dtype=torch.float8_e8m0fnu,
-            device=device,
-        ).permute(3, 4, 1, 5, 2, 0),
+        "sfa_tensor": (
+            torch.empty(
+                1,
+                total_m // 128,
+                k // 128,
+                32,
+                4,
+                4,
+                dtype=torch.float8_e8m0fnu,
+                device=device,
+            ).permute(3, 4, 1, 5, 2, 0)
+        ),
+        "sfb_tensor": (
+            torch.empty(
+                num_groups,
+                n // 128,
+                k // 128,
+                32,
+                4,
+                4,
+                dtype=torch.float8_e8m0fnu,
+                device=device,
+            ).permute(3, 4, 1, 5, 2, 0)
+        ),
         "alpha_tensor": torch.empty(num_groups, dtype=torch.float32, device=device),
         "prob_tensor": torch.empty(total_m, 1, 1, dtype=torch.float32, device=device),
         "padded_offsets_tensor": padded_offsets,

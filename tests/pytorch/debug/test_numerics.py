@@ -275,8 +275,7 @@ LOGGING_CONFIG = """logging_config:
 """
 
 
-DISABLE_FP8_CONFIG = Template(
-    """disable_fp8_config:
+DISABLE_FP8_CONFIG = Template("""disable_fp8_config:
   enabled: True
   layers:
     layer_types: [linear]
@@ -284,8 +283,7 @@ DISABLE_FP8_CONFIG = Template(
     DisableFP8GEMM:
       enabled: True
       gemms: [$gemms]
-"""
-)
+""")
 
 
 @create_config_file
@@ -407,8 +405,7 @@ def test_per_tensor_scaling(
     )
 
 
-PER_TENSOR_SCALING_CONFIG = Template(
-    """per_tensor_scaling_config:
+PER_TENSOR_SCALING_CONFIG = Template("""per_tensor_scaling_config:
   enabled: True
   layers:
     layer_types: [linear]
@@ -417,8 +414,7 @@ PER_TENSOR_SCALING_CONFIG = Template(
       enabled: True
       gemms_struct:
 $gemms
-"""
-)
+""")
 
 
 def _prepare_per_tensor_scaling_config(
@@ -670,8 +666,7 @@ def test_fake_quant_fp8(
     )
 
 
-FAKE_QUANT_CONFIG = Template(
-    """fake_quant_config:
+FAKE_QUANT_CONFIG = Template("""fake_quant_config:
   enabled: True
   layers:
     layer_types: [linear]
@@ -680,8 +675,7 @@ FAKE_QUANT_CONFIG = Template(
       enabled: True
       gemms_struct:
 $gemms
-"""
-)
+""")
 
 
 def fake_quant_fp8_create_config(

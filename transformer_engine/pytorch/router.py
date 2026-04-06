@@ -13,6 +13,7 @@ Precision Notes:
 - Only cast to low-precision when necessary and the casting only happens in writing to
   global memory. For example, the gradient is required to have the same dtype as the input.
 """
+
 from typing import Optional
 
 import torch

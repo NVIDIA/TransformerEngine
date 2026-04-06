@@ -8,7 +8,6 @@ from contextlib import contextmanager
 from typing import Generator
 import torch
 
-
 _IN_ONNX_EXPORT_MODE = False
 TORCH_MAJOR = int(torch.__version__.split(".")[0])
 TORCH_MINOR = int(torch.__version__.split(".")[1])

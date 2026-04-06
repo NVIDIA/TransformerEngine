@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Python interface for fused attention extensions"""
+
 import math
 from typing import Tuple, List, Union, Optional
 import torch
@@ -17,7 +18,6 @@ from transformer_engine_torch import (
 )
 from ..quantized_tensor import Quantizer
 from ..constants import FP8BwdTensorIdx, FP8FwdTensorIdx
-
 
 __all__ = [
     "fused_attn_fwd",

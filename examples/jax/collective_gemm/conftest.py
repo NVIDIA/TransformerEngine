@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """config for collective_gemm tests"""
+
 import pytest
 
 

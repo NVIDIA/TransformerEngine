@@ -20,7 +20,6 @@ from transformer_engine.pytorch.tensor._quantization_helpers import (
     _stride_from_shape,
 )
 
-
 # Custom ops that should pass through __torch_dispatch__ without unwrapping
 # QuantizedTensor subclasses (e.g. Float8Tensor). Register ops here that
 # handle quantized tensors internally.

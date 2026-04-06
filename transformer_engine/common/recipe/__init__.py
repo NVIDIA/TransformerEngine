@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """This module provides predefined FP8 recipes."""
+
 from __future__ import annotations
 import os
 from enum import Enum

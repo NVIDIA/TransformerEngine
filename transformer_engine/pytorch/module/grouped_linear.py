@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """GroupedLinear API"""
+
 from typing import Union, Optional, Callable, Tuple, List
 from itertools import chain
 import warnings
