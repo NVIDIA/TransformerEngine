@@ -365,6 +365,12 @@ def _make_graphed_callables(
                 + "for each callable must contain only Tensors. Other types are not allowed."
             )
 
+    if capture_time_hooks is not None and len(capture_time_hooks) != len(callables):
+        raise ValueError(
+            f"capture_time_hooks has {len(capture_time_hooks)} entries but there are "
+            f"{len(callables)} callables"
+        )
+
     # If a callable is an nn.Module, its graph's full input surface is the args the user explicitly
     # passes to forward (ie, its sample_args) AND the module's parameter attributes.
     # Note: These per_callable_* variables are not actually
@@ -454,7 +460,7 @@ def _make_graphed_callables(
     visited_te_modules = {}
     need_bwd_dw_graph = {}
 
-    def _run_warmup_forward(func_idx, func):
+    def _run_warmup_forward(func_idx, func, callable_idx):
         """Run forward for one callable during warmup; returns flattened outputs."""
         args = sample_args[func_idx]
         kwargs = sample_kwargs[func_idx]
@@ -484,42 +490,44 @@ def _make_graphed_callables(
 
         if (
             capture_time_hooks is not None
-            and func_idx < len(capture_time_hooks)
-            and capture_time_hooks[func_idx] is not None
-            and "forward_pre" in capture_time_hooks[func_idx]
+            and capture_time_hooks[callable_idx] is not None
+            and "pre_forward" in capture_time_hooks[callable_idx]
         ):
-            for hook in capture_time_hooks[func_idx]["forward_pre"].values():
-                hook(func, args, kwargs)
+            for hook in capture_time_hooks[callable_idx]["pre_forward"].values():
+                result = hook(func, args, kwargs)
+                if result is not None:
+                    args, kwargs = result
 
         hooks = []
         for module in func.modules():
             hooks.append(module.register_forward_hook(hook_fn))
-        outputs, _ = _tree_flatten(func(*args, **kwargs))
+        outputs = func(*args, **kwargs)
         for hook in hooks:
             hook.remove()
 
         if (
             capture_time_hooks is not None
-            and func_idx < len(capture_time_hooks)
-            and capture_time_hooks[func_idx] is not None
-            and "forward" in capture_time_hooks[func_idx]
+            and capture_time_hooks[callable_idx] is not None
+            and "forward" in capture_time_hooks[callable_idx]
         ):
-            for hook in capture_time_hooks[func_idx]["forward"].values():
-                hook(func, args, outputs)
+            for hook in capture_time_hooks[callable_idx]["forward"].values():
+                result = hook(func, args, outputs)
+                if result is not None:
+                    outputs = result
 
+        outputs, _ = _tree_flatten(outputs)
         return outputs
 
-    def _run_warmup_backward(func_idx, func, outputs, warmup_iter):
+    def _run_warmup_backward(func_idx, func, outputs, warmup_iter, callable_idx):
         """Run dgrad backward for one callable during warmup."""
         static_input_surface = per_callable_static_input_surfaces[func_idx]
 
         if (
             capture_time_hooks is not None
-            and func_idx < len(capture_time_hooks)
-            and capture_time_hooks[func_idx] is not None
-            and "pre_backward" in capture_time_hooks[func_idx]
+            and capture_time_hooks[callable_idx] is not None
+            and "pre_backward" in capture_time_hooks[callable_idx]
         ):
-            for hook in capture_time_hooks[func_idx]["pre_backward"].values():
+            for hook in capture_time_hooks[callable_idx]["pre_backward"].values():
                 hook(func)
 
         inputs = tuple(i for i in static_input_surface if i.requires_grad)
@@ -533,11 +541,10 @@ def _make_graphed_callables(
 
         if (
             capture_time_hooks is not None
-            and func_idx < len(capture_time_hooks)
-            and capture_time_hooks[func_idx] is not None
-            and "backward" in capture_time_hooks[func_idx]
+            and capture_time_hooks[callable_idx] is not None
+            and "backward" in capture_time_hooks[callable_idx]
         ):
-            for hook in capture_time_hooks[func_idx]["backward"].values():
+            for hook in capture_time_hooks[callable_idx]["backward"].values():
                 hook(func)
 
         # Filter module params that get None grad from grad_inputs and remove them
@@ -594,11 +601,11 @@ def _make_graphed_callables(
                 # All forwards in order, then all backwards in reverse order.
                 warmup_outputs = []
                 for func_idx, func in zip(warmup_func_idx, warmup_func):
-                    outputs = _run_warmup_forward(func_idx, func)
+                    outputs = _run_warmup_forward(func_idx, func, func_idx)
                     warmup_outputs.append((func_idx, func, outputs))
                 if is_training:
                     for func_idx, func, outputs in reversed(warmup_outputs):
-                        _run_warmup_backward(func_idx, func, outputs, warmup_iter)
+                        _run_warmup_backward(func_idx, func, outputs, warmup_iter, func_idx)
             else:
                 # Follow _order exactly, mirroring the capture phase.
                 per_fwd_outputs = {}  # per_callable_fwd_idx -> flattened outputs
@@ -609,11 +616,12 @@ def _make_graphed_callables(
                         # Forward pass for chunk c_id.
                         m_chunk = c_id - 1
                         for l_no in range(_num_layers_per_chunk[m_chunk]):
+                            callable_idx = _prefix_num_layers[m_chunk] + l_no
                             per_callable_fwd_idx = (
                                 _prefix_num_layers[m_chunk] * num_microbatches
                             ) + (fwd_idx[m_chunk] * _num_layers_per_chunk[m_chunk] + l_no)
-                            func = callables[_prefix_num_layers[m_chunk] + l_no]
-                            outputs = _run_warmup_forward(per_callable_fwd_idx, func)
+                            func = callables[callable_idx]
+                            outputs = _run_warmup_forward(per_callable_fwd_idx, func, callable_idx)
                             per_fwd_outputs[per_callable_fwd_idx] = outputs
                         fwd_idx[m_chunk] += 1
                     elif ceil(c_id) == c_id:
@@ -621,13 +629,14 @@ def _make_graphed_callables(
                         if is_training:
                             m_chunk = -c_id - 1
                             for l_no in reversed(range(_num_layers_per_chunk[m_chunk])):
+                                callable_idx = _prefix_num_layers[m_chunk] + l_no
                                 per_callable_bwd_idx = (
                                     _prefix_num_layers[m_chunk] * num_microbatches
                                 ) + (bwd_idx[m_chunk] * _num_layers_per_chunk[m_chunk] + l_no)
-                                func = callables[_prefix_num_layers[m_chunk] + l_no]
+                                func = callables[callable_idx]
                                 outputs = per_fwd_outputs[per_callable_bwd_idx]
                                 _run_warmup_backward(
-                                    per_callable_bwd_idx, func, outputs, warmup_iter
+                                    per_callable_bwd_idx, func, outputs, warmup_iter, callable_idx
                                 )
                             bwd_idx[m_chunk] += 1
 
@@ -658,7 +667,8 @@ def _make_graphed_callables(
                 # Capture forward graph for model chunk c_id, microbatch fwd_idx[c_id-1]
                 m_chunk = c_id - 1
                 for l_no in range(_num_layers_per_chunk[m_chunk]):
-                    func = callables[_prefix_num_layers[m_chunk] + l_no]
+                    callable_idx = _prefix_num_layers[m_chunk] + l_no
+                    func = callables[callable_idx]
                     per_callable_fwd_idx = (_prefix_num_layers[m_chunk] * num_microbatches) + (
                         fwd_idx[m_chunk] * _num_layers_per_chunk[m_chunk] + l_no
                     )
@@ -666,19 +676,16 @@ def _make_graphed_callables(
                     kwargs = sample_kwargs[per_callable_fwd_idx]
                     fwd_graph = fwd_graphs[per_callable_fwd_idx]
 
-                    # Call forward_pre hooks before forward graph capture (outside capture context)
+                    # Call pre_forward hooks before forward graph capture (outside capture context)
                     if (
                         capture_time_hooks is not None
-                        and per_callable_fwd_idx < len(capture_time_hooks)
-                        and capture_time_hooks[per_callable_fwd_idx] is not None
-                        and "forward_pre" in capture_time_hooks[per_callable_fwd_idx]
+                        and capture_time_hooks[callable_idx] is not None
+                        and "pre_forward" in capture_time_hooks[callable_idx]
                     ):
-                        for hook in capture_time_hooks[per_callable_fwd_idx][
-                            "forward_pre"
-                        ].values():
-                            hook(
-                                func, args, kwargs
-                            )  # forward_pre hook signature: (module, args, kwargs)
+                        for hook in capture_time_hooks[callable_idx]["pre_forward"].values():
+                            result = hook(func, args, kwargs)
+                            if result is not None:
+                                args, kwargs = result
 
                     with _graph_context_wrapper(fwd_graph, pool=mempool):
                         outputs = func(*args, **kwargs)
@@ -686,14 +693,13 @@ def _make_graphed_callables(
                     # Call forward hooks after forward graph capture (outside capture context)
                     if (
                         capture_time_hooks is not None
-                        and per_callable_fwd_idx < len(capture_time_hooks)
-                        and capture_time_hooks[per_callable_fwd_idx] is not None
-                        and "forward" in capture_time_hooks[per_callable_fwd_idx]
+                        and capture_time_hooks[callable_idx] is not None
+                        and "forward" in capture_time_hooks[callable_idx]
                     ):
-                        for hook in capture_time_hooks[per_callable_fwd_idx]["forward"].values():
-                            hook(
-                                func, args, outputs
-                            )  # forward hook signature: (module, inputs, output)
+                        for hook in capture_time_hooks[callable_idx]["forward"].values():
+                            result = hook(func, args, outputs)
+                            if result is not None:
+                                outputs = result
 
                     flatten_outputs, spec = _tree_flatten(outputs)
                     per_callable_static_outputs[per_callable_fwd_idx] = tuple(flatten_outputs)
@@ -705,6 +711,7 @@ def _make_graphed_callables(
                 m_chunk = -ceil(c_id) - 1
                 previous_per_callable_bwd_idx = None
                 for l_no in list(reversed(range(_num_layers_per_chunk[m_chunk]))):
+                    callable_idx = _prefix_num_layers[m_chunk] + l_no
                     per_callable_bwd_idx = (_prefix_num_layers[m_chunk] * num_microbatches) + (
                         bwd_idx[m_chunk] * _num_layers_per_chunk[m_chunk] + l_no
                     )
@@ -794,17 +801,14 @@ def _make_graphed_callables(
                         # Call pre_backward hooks before backward graph capture (outside capture context)
                         if (
                             capture_time_hooks is not None
-                            and per_callable_bwd_idx < len(capture_time_hooks)
-                            and capture_time_hooks[per_callable_bwd_idx] is not None
-                            and "pre_backward" in capture_time_hooks[per_callable_bwd_idx]
+                            and capture_time_hooks[callable_idx] is not None
+                            and "pre_backward" in capture_time_hooks[callable_idx]
                         ):
                             # Get the callable module for this backward index
                             callable_module = graph_callables[per_callable_bwd_idx]
-                            for hook in capture_time_hooks[per_callable_bwd_idx][
+                            for hook in capture_time_hooks[callable_idx][
                                 "pre_backward"
                             ].values():
-                                # During capture, call with the actual module (not None)
-                                # FSDP hooks need to access module attributes
                                 hook(callable_module)
 
                         inputs = tuple(i for i in static_input_surface if i.requires_grad)
@@ -823,17 +827,12 @@ def _make_graphed_callables(
                         # Call backward hooks after backward graph capture (outside capture context)
                         if (
                             capture_time_hooks is not None
-                            and per_callable_bwd_idx < len(capture_time_hooks)
-                            and capture_time_hooks[per_callable_bwd_idx] is not None
-                            and "backward" in capture_time_hooks[per_callable_bwd_idx]
+                            and capture_time_hooks[callable_idx] is not None
+                            and "backward" in capture_time_hooks[callable_idx]
                         ):
                             # Get the callable module for this backward index
                             callable_module = graph_callables[per_callable_bwd_idx]
-                            for hook in capture_time_hooks[per_callable_bwd_idx][
-                                "backward"
-                            ].values():
-                                # During capture, call with the actual module (not None)
-                                # FSDP hooks need to access module attributes
+                            for hook in capture_time_hooks[callable_idx]["backward"].values():
                                 hook(callable_module)
 
                     # Constructs a tuple suitable for returning from Graphed.backward:
@@ -893,15 +892,16 @@ def _make_graphed_callables(
         for func_idx, (func, args, kwargs, fwd_graph) in enumerate(
             zip(callables, sample_args, sample_kwargs, fwd_graphs)
         ):
-            # Call forward_pre hooks before forward graph capture (outside capture context)
+            # Call pre_forward hooks before forward graph capture (outside capture context)
             if (
                 capture_time_hooks is not None
-                and func_idx < len(capture_time_hooks)
                 and capture_time_hooks[func_idx] is not None
-                and "forward_pre" in capture_time_hooks[func_idx]
+                and "pre_forward" in capture_time_hooks[func_idx]
             ):
-                for hook in capture_time_hooks[func_idx]["forward_pre"].values():
-                    hook(func, args, kwargs)
+                for hook in capture_time_hooks[func_idx]["pre_forward"].values():
+                    result = hook(func, args, kwargs)
+                    if result is not None:
+                        args, kwargs = result
 
             with _graph_context_wrapper(fwd_graph, pool=mempool):
                 outputs = func(*args, **kwargs)
@@ -910,12 +910,13 @@ def _make_graphed_callables(
             # Call forward hooks after forward graph capture (outside capture context)
             if (
                 capture_time_hooks is not None
-                and func_idx < len(capture_time_hooks)
                 and capture_time_hooks[func_idx] is not None
                 and "forward" in capture_time_hooks[func_idx]
             ):
                 for hook in capture_time_hooks[func_idx]["forward"].values():
-                    hook(func, args, outputs)
+                    result = hook(func, args, outputs)
+                    if result is not None:
+                        outputs = result
 
             flatten_outputs, spec = _tree_flatten(outputs)
             per_callable_static_outputs.append(tuple(flatten_outputs))
@@ -940,7 +941,6 @@ def _make_graphed_callables(
                 # Call pre_backward hooks before backward graph capture (outside capture context)
                 if (
                     capture_time_hooks is not None
-                    and bwd_idx < len(capture_time_hooks)
                     and capture_time_hooks[bwd_idx] is not None
                     and "pre_backward" in capture_time_hooks[bwd_idx]
                 ):
@@ -962,7 +962,6 @@ def _make_graphed_callables(
                 # Call backward hooks after backward graph capture (outside capture context)
                 if (
                     capture_time_hooks is not None
-                    and bwd_idx < len(capture_time_hooks)
                     and capture_time_hooks[bwd_idx] is not None
                     and "backward" in capture_time_hooks[bwd_idx]
                 ):
@@ -1369,9 +1368,11 @@ def make_graphed_callables(
         when `_order` is provided. All callables in `modules` are assumed to have
         inputs and outputs with the same dtype and shape.
     pre_warmup_hook: callable, default = None
-                      A hook function that will be called before the warmup iterations.
+                      A hook function that will be called once before all warmup iterations
+                      (not once per callable).
     post_warmup_hook: callable, default = None
-                      A hook function that will be called after the warmup iterations.
+                      A hook function that will be called once after all warmup iterations
+                      (not once per callable).
     capture_time_hooks: list of dict, optional
                    Per-callable hooks invoked at capture time (during warmup iterations and
                    graph capture), but intentionally executed **outside** the CUDA graph
@@ -1381,7 +1382,7 @@ def make_graphed_callables(
                    CPU-side state updates.
                    Each element corresponds to one callable and is a dict with any subset
                    of the following keys:
-                   - ``"forward_pre"``: dict of hooks called *before* the forward pass.
+                   - ``"pre_forward"``: dict of hooks called *before* the forward pass.
                      Hook signature: ``hook(module, args, kwargs)``.
                    - ``"forward"``: dict of hooks called *after* the forward pass.
                      Hook signature: ``hook(module, args, output)``.
