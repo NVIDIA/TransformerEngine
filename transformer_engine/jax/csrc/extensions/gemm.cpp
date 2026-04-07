@@ -930,18 +930,6 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
       make_grouped_tensor(*output, out_first_dims, out_last_dims, int64_base, int64_capacity,
                           int64_offset, num_gemms, stream, out_left_size, out_right_size);
 
-  auto [avg_m, avg_k_lhs] = grouped_gemm_avg_dims(lhs_first_dims, lhs_last_dims, lhs_left_size,
-                                                    lhs_right_size, num_gemms, lhs_is_trans);
-  auto [avg_n, avg_k_rhs] = grouped_gemm_avg_dims(rhs_first_dims, rhs_last_dims, rhs_left_size,
-                                                  rhs_right_size, num_gemms, !rhs_is_trans);
-  // Use k from lhs (both sides should agree for well-formed inputs).
-  (void)avg_k_rhs;
-
-  GroupedMatmulConfigWrapper gemmConfig{};
-  gemmConfig.set_avg_m(avg_m);
-  gemmConfig.set_avg_n(avg_n);
-  gemmConfig.set_avg_k(avg_k_lhs);
-
   auto [avg_m, avg_k_lhs] = grouped_gemm_avg_dims(
       lhs_first_dims, lhs_last_dims, {lhs_left_size, lhs_right_size}, num_gemms, lhs_is_trans);
   auto [avg_n, avg_k_rhs] = grouped_gemm_avg_dims(
