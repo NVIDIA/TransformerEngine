@@ -181,7 +181,7 @@ void KernelManager::compile(const std::string& kernel_label, const std::string& 
     // Decode CUDA version number to "major.minor" string
     auto version_string = [](int v) -> std::string {
       if (v < 0) {
-        return "<unknown>";
+        return "<not found>";
       }
       return concat_strings(v / 1000, ".", (v % 1000) / 10);
     };
