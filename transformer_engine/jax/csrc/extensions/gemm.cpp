@@ -837,13 +837,15 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmV2Handler, GroupedGemmV2FFI,
                                   .Attrs<GroupedGemmV2Config>(),
                               FFI_CudaGraph_Traits);
 
-Error_Type GroupedGemmV2InitializeFFI(
-    cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type lhs_sinv, Buffer_Type rhs_data,
-    Buffer_Type rhs_sinv, Buffer_Type bias, Buffer_Type lhs_first_dims, Buffer_Type lhs_last_dims,
-    Buffer_Type rhs_first_dims, Buffer_Type rhs_last_dims, Buffer_Type out_first_dims,
-    Buffer_Type out_last_dims, Buffer_Type alpha, Buffer_Type beta, Result_Type output,
-    Result_Type cublas_workspace, Result_Type setup_workspace, Result_Type int64_workspace,
-    GroupedGemmV2Config config) {
+Error_Type GroupedGemmV2InitializeFFI(cudaStream_t stream, Buffer_Type lhs_data,
+                                      Buffer_Type lhs_sinv, Buffer_Type rhs_data,
+                                      Buffer_Type rhs_sinv, Buffer_Type bias,
+                                      Buffer_Type lhs_first_dims, Buffer_Type lhs_last_dims,
+                                      Buffer_Type rhs_first_dims, Buffer_Type rhs_last_dims,
+                                      Buffer_Type out_first_dims, Buffer_Type out_last_dims,
+                                      Buffer_Type alpha, Buffer_Type beta, Result_Type output,
+                                      Result_Type cublas_workspace, Result_Type setup_workspace,
+                                      Result_Type int64_workspace, GroupedGemmV2Config config) {
   return wrapInStreamCapture(std::function(GroupedGemmV2FFI), stream, lhs_data, lhs_sinv, rhs_data,
                              rhs_sinv, bias, lhs_first_dims, lhs_last_dims, rhs_first_dims,
                              rhs_last_dims, out_first_dims, out_last_dims, alpha, beta, output,
