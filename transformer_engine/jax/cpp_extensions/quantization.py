@@ -52,53 +52,6 @@ from ..quantize import (
 __all__ = ["quantize", "quantize_dbias", "grouped_quantize", "grouped_dbias"]
 
 
-def _build_scale_spec(x_spec, scale_shape, mesh):
-    """Build a PartitionSpec for the MXFP8 scale tensor compatible with its shape.
-
-    The scale tensor has smaller dimensions than the data tensor (each dimension
-    divided by the MXFP8 block size). This function ensures that we only shard a
-    scale dimension by a mesh axis (or tuple of axes) if scale_shape[i] is
-    divisible by the total axis size. If not, a ValueError is raised with a
-    helpful diagnostic message.
-    """
-    result = []
-    for axis, scale_dim in zip(x_spec, scale_shape):
-        if axis is None:
-            result.append(None)
-        elif isinstance(axis, str):
-            axis_size = mesh.shape.get(axis, 1)
-            if scale_dim % axis_size == 0:
-                result.append(axis)
-            else:
-                raise ValueError(
-                    f"Cannot partition MXFP8 scale tensor (shape={tuple(scale_shape)}) "
-                    f"by mesh axis '{axis}' of size {axis_size}: "
-                    f"scale dim {scale_dim} is not divisible by {axis_size}. "
-                    "The data tensor's sharding is incompatible with the MXFP8 block "
-                    "size along this axis. Try reducing expert parallelism (EP) so that "
-                    "EP divides the scale dimension, or increase the tensor size."
-                )
-        elif isinstance(axis, (tuple, list)):
-            # Multi-axis sharding (e.g. ('fsdp', 'expert')): check total combined size.
-            total_size = 1
-            for a in axis:
-                total_size *= mesh.shape.get(a, 1)
-            if scale_dim % total_size == 0:
-                result.append(axis)
-            else:
-                raise ValueError(
-                    f"Cannot partition MXFP8 scale tensor (shape={tuple(scale_shape)}) "
-                    f"by mesh axes {tuple(axis)} of combined size {total_size}: "
-                    f"scale dim {scale_dim} is not divisible by {total_size}. "
-                    "The data tensor's sharding is incompatible with the MXFP8 block "
-                    "size along this axis. Try reducing parallelism or increasing the "
-                    "tensor size."
-                )
-        else:
-            result.append(None)
-    return tuple(result)
-
-
 class BaseDBiasQuantizePrimitive(BasePrimitive):
     """
     Cast Primitive wrapping nvte_quantize and nvte_quantize_dbias
@@ -494,13 +447,7 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
 
         scale_inv_spec = colwise_scale_inv_spec = (None,)
         if ScalingMode(scaling_mode).is_block_scaling:
-            rowwise_scale_shape, _ = ScalingMode(scaling_mode).get_scale_shape_2x(
-                arg_infos[0].shape,
-                is_padded=False,
-                flatten_axis=flatten_axis,
-                broadcast_2d_scale_shape_to_1d=True,
-            )
-            scale_inv_spec = _build_scale_spec(x_spec, rowwise_scale_shape, mesh)
+            scale_inv_spec = x_spec
 
         if q_layout.has_colwise:
             if (
@@ -582,13 +529,7 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
 
         scale_inv_spec = colwise_scale_inv_spec = (None,)
         if ScalingMode(scaling_mode).is_block_scaling:
-            rowwise_scale_shape, _ = ScalingMode(scaling_mode).get_scale_shape_2x(
-                arg_infos[0].shape,
-                is_padded=False,
-                flatten_axis=flatten_axis,
-                broadcast_2d_scale_shape_to_1d=True,
-            )
-            scale_inv_spec = _build_scale_spec(x_spec, rowwise_scale_shape, mesh)
+            scale_inv_spec = x_spec
 
         if q_layout.has_colwise:
             if (
