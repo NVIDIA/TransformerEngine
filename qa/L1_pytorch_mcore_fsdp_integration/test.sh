@@ -11,7 +11,10 @@ set -e
 # Download Megatron-LM if needed
 if [ ! -d "${MCORE_PATH}" ]; then
     pushd $(dirname ${MCORE_PATH})
-    git clone -b core_v0.16.1 https://github.com/NVIDIA/Megatron-LM.git Megatron-LM
+    git clone https://github.com/NVIDIA/Megatron-LM.git Megatron-LM
+    # Megatron-LM / Megatron-FSDP commit for main branch on Apr. 7, 2026.
+    # Necessary to support wgrad accumulate fusion and Megatron-FSDP NCCL UBR.
+    pushd Megatron-LM && git checkout 8cbc45b6e039f300c53eb09579fc973d703455cd && popd
     popd
 fi
 
@@ -34,17 +37,17 @@ export NVTE_BWD_LAYERNORM_SM_MARGIN=0
 export NVTE_BIAS_GELU_NVFUSION=0
 export NVTE_BIAS_DROPOUT_FUSION=0
 
+# V1 offloading has bugs that are exposed by Megatron-FSDP.
+# This test will focus on validating the new offloading code.
+# Un-set the Megatron-LM default of V1.
+export NVTE_CPU_OFFLOAD_V1=0
+
 # Megatron-LM command to run Megatron-FSDP.
-# TODO(@cspades): Megatron-Core 0.16.1 doesn't have the NCCL UBR / double-buffer
-# fix for wgrad accumulate fusion yet. Next version bump of Megatron-Core, add:
-# --use-nccl-ub
-# --fsdp-double-buffer
-# --fsdp-manual-registration
 python3 \
 -m torch.distributed.launch \
 --use_env \
 --nnodes=1 \
---nproc_per_node=4 \
+--nproc_per_node=$(nvidia-smi -L | wc -l) \
 ${MCORE_PATH}/pretrain_gpt.py \
 --tensor-model-parallel-size 1 \
 --pipeline-model-parallel-size 1 \
@@ -70,9 +73,12 @@ ${MCORE_PATH}/pretrain_gpt.py \
 --use-precision-aware-optimizer \
 --num-distributed-optimizer-instances 2 \
 --outer-dp-sharding-strategy optim \
+--use-nccl-ub \
+--fsdp-double-buffer \
+--fsdp-manual-registration \
 --fp8-format hybrid \
 --fp8-param-gather \
---fp8-recipe tensorwise \
+--fp8-recipe mxfp8 \
 --cpu-offloading-num-layers 1 \
 --overlap-grad-reduce \
 --overlap-param-gather \
