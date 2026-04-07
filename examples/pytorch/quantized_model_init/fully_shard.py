@@ -42,6 +42,7 @@ from torch.distributed.tensor import DTensor
 
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
+from transformer_engine.pytorch.quantized_tensor import QuantizedTensor
 
 # ── Configuration ────────────────────────────────────────────────────
 HIDDEN_SIZE = 256
@@ -51,7 +52,7 @@ NUM_LAYERS = 3
 SEQ_LEN = 32
 BATCH_PER_RANK = 2
 NUM_STEPS = 5
-DTYPE = torch.bfloat16
+DTYPE = torch.float32
 
 
 def dist_print(msg):
@@ -77,6 +78,8 @@ def main():
     # preserve_high_precision_init_val=True saves the original BF16
     # values on CPU so they can seed optimizer master weights later,
     # avoiding the precision loss of dequantizing from FP8.
+    # We set DTYPE to float32 since these weights will actually be initialized as FP8,
+    # but we want to seed the optimizer states (which will be in FP32) with the FP32 values.
     with te.quantized_model_init(enabled=True, preserve_high_precision_init_val=True):
         model = torch.nn.Sequential(
             *[
@@ -126,15 +129,17 @@ def main():
     # By default, FusedAdam initializes master weights by dequantizing
     # the FP8 parameters, which introduces quantization noise.  Instead,
     # we seed them from the original BF16 init values preserved in step 2.
-    for param in model.parameters():
+    for name, param in model.named_parameters():
         optimizer.initialize_state(param, store_param_remainders=False)
         local = param._local_tensor if isinstance(param, DTensor) else param
-        hp_val = getattr(local, "get_high_precision_init_val", lambda: None)()
-        if hp_val is not None:
+        if isinstance(local, QuantizedTensor):
+            hp_val = local.get_high_precision_init_val()
+            assert hp_val.dtype == DTYPE, f"HP val dtype {hp_val.dtype}, expected {DTYPE}"
             optimizer.set_scaled_state(
                 param, "master_param", hp_val.to(device=device, dtype=torch.float32)
             )
             local.clear_high_precision_init_val()
+
     dist_print("Optimizer master weights seeded from high-precision init values.")
 
     # ── 7. Training loop ─────────────────────────────────────────────
