@@ -806,9 +806,7 @@ def _make_graphed_callables(
                         ):
                             # Get the callable module for this backward index
                             callable_module = graph_callables[per_callable_bwd_idx]
-                            for hook in capture_time_hooks[callable_idx][
-                                "pre_backward"
-                            ].values():
+                            for hook in capture_time_hooks[callable_idx]["pre_backward"].values():
                                 hook(callable_module)
 
                         inputs = tuple(i for i in static_input_surface if i.requires_grad)
