@@ -29,12 +29,10 @@ def _get_tolerances(dtype: torch.dtype, num_experts: int):
     """
     # Default tolerances for torch.testing.assert_close
     base_atol, base_rtol = 1e-5, 1.3e-6
-
-    eps = {
-        torch.float32: 2e-7,
-        torch.float16: 1e-3,
-        torch.bfloat16: 4e-3,
-    }.get(dtype, 2e-7)
+    # TODO: account for fp16, bf16 as dtype
+    if dtype != torch.float32:
+        raise NotImplementedError("tolerances implemented for fp32 only")
+    eps = 2e-7
     # The worst-case rounding error from summing N values is O(N * eps).
     # Use 2 * num_experts * eps as the tolerance floor so tests pass for
     # large expert counts while remaining tight for small ones.
