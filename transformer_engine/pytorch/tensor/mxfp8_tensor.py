@@ -884,7 +884,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
             return self._rowwise_data.shape
         if self._columnwise_data is not None:
             return self._columnwise_data.shape
-        raise RuntimeError("MXFP8Tensor has no data!")
+        return torch.Tensor.size(self)
 
     @property
     def is_cuda(self):
