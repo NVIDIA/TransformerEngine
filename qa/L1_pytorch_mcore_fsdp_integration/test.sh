@@ -51,7 +51,6 @@ python3 \
 ${MCORE_PATH}/pretrain_gpt.py \
 --tensor-model-parallel-size 1 \
 --pipeline-model-parallel-size 1 \
---use-cpu-initialization \
 --num-layers 2 \
 --hidden-size 128 \
 --num-attention-heads 8 \
@@ -62,6 +61,7 @@ ${MCORE_PATH}/pretrain_gpt.py \
 --global-batch-size 8 \
 --train-iters 10 \
 --eval-iters 10 \
+--eval-interval 100 \
 --lr 1e-4 \
 --mock-data \
 --vocab-file ${VOCAB_FILE} \
