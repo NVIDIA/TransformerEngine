@@ -839,14 +839,15 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmV2Handler, GroupedGemmV2FFI,
 
 Error_Type GroupedGemmV2InitializeFFI(
     cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type lhs_sinv, Buffer_Type rhs_data,
-    Buffer_Type rhs_sinv, Buffer_Type bias, Buffer_Type group_sizes, Buffer_Type alpha,
-    Buffer_Type beta, Result_Type output, Result_Type cublas_workspace, Result_Type setup_workspace,
-    Result_Type int64_workspace, size_t m, size_t n, size_t k, bool lhs_is_trans, bool rhs_is_trans,
-    JAXX_Scaling_Mode scaling_mode, bool is_grouped_dense_wgrad) {
+    Buffer_Type rhs_sinv, Buffer_Type bias, Buffer_Type lhs_first_dims, Buffer_Type lhs_last_dims,
+    Buffer_Type rhs_first_dims, Buffer_Type rhs_last_dims, Buffer_Type out_first_dims,
+    Buffer_Type out_last_dims, Buffer_Type alpha, Buffer_Type beta, Result_Type output,
+    Result_Type cublas_workspace, Result_Type setup_workspace, Result_Type int64_workspace,
+    GroupedGemmV2Config config) {
   return wrapInStreamCapture(std::function(GroupedGemmV2FFI), stream, lhs_data, lhs_sinv, rhs_data,
-                             rhs_sinv, bias, group_sizes, alpha, beta, output, cublas_workspace,
-                             setup_workspace, int64_workspace, m, n, k, lhs_is_trans, rhs_is_trans,
-                             scaling_mode, is_grouped_dense_wgrad);
+                             rhs_sinv, bias, lhs_first_dims, lhs_last_dims, rhs_first_dims,
+                             rhs_last_dims, out_first_dims, out_last_dims, alpha, beta, output,
+                             cublas_workspace, setup_workspace, int64_workspace, config);
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmV2InitializeHandler, GroupedGemmV2InitializeFFI,
@@ -857,20 +858,19 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmV2InitializeHandler, GroupedGemmV2Initi
                                   .Arg<Buffer_Type>()      // rhs_data
                                   .Arg<Buffer_Type>()      // rhs_sinv
                                   .Arg<Buffer_Type>()      // bias
-                                  .Arg<Buffer_Type>()      // group_sizes (int32)
+                                  .Arg<Buffer_Type>()      // lhs_first_dims (G,) or empty (0,)
+                                  .Arg<Buffer_Type>()      // lhs_last_dims (G,) or empty (0,)
+                                  .Arg<Buffer_Type>()      // rhs_first_dims (G,) or empty (0,)
+                                  .Arg<Buffer_Type>()      // rhs_last_dims (G,) or empty (0,)
+                                  .Arg<Buffer_Type>()      // out_first_dims (G,) or empty (0,)
+                                  .Arg<Buffer_Type>()      // out_last_dims (G,) or empty (0,)
                                   .Arg<Buffer_Type>()      // alpha
                                   .Arg<Buffer_Type>()      // beta
                                   .Ret<Buffer_Type>()      // output
                                   .Ret<Buffer_Type>()      // cublas_workspace
                                   .Ret<Buffer_Type>()      // setup_workspace
                                   .Ret<Buffer_Type>()      // int64_workspace
-                                  .Attr<int64_t>("M")
-                                  .Attr<int64_t>("N")
-                                  .Attr<int64_t>("K")
-                                  .Attr<bool>("lhs_is_trans")
-                                  .Attr<bool>("rhs_is_trans")
-                                  .Attr<JAXX_Scaling_Mode>("scaling_mode")
-                                  .Attr<bool>("is_grouped_dense_wgrad"));
+                                  .Attrs<GroupedGemmV2Config>());
 
 Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type lhs_sinv,
                           Buffer_Type rhs_data, Buffer_Type rhs_sinv, Buffer_Type bias,
