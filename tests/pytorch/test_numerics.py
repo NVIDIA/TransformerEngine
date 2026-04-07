@@ -2861,8 +2861,8 @@ def _make_grouped_tensor_uniform(
 @pytest.mark.parametrize("layout", ["TN", "NN", "NT"])
 @pytest.mark.parametrize("accumulate", [False, True])
 def test_grouped_gemm_grouped_tensor(z, m, n, k, case, layout, accumulate) -> None:
-    if tex.get_cublasLt_version() < 130200:
-        pytest.skip("Grouped GEMM requires cuBLAS 13.2+.")
+    if tex.get_cublasLt_version() < 130300:
+        pytest.skip("Grouped GEMM requires cuBLAS 13.3+.")
     if torch.cuda.get_device_capability() < (10, 0):
         pytest.skip("Grouped GEMM requires Blackwell (SM100) or newer.")
     if not is_bf16_available():
@@ -3008,6 +3008,113 @@ def test_grouped_gemm_grouped_tensor(z, m, n, k, case, layout, accumulate) -> No
             torch.testing.assert_close(o, o_ref, **tols)
 
 
+@pytest.mark.parametrize("layout", ["TN", "NN", "NT"])
+@pytest.mark.parametrize("accumulate", [False, True])
+@pytest.mark.parametrize("quant_type", ["bf16", "mxfp8"])
+def test_grouped_gemm_grouped_tensor_zero_work(layout, accumulate, quant_type) -> None:
+    """Grouped GEMM with all-zero split sizes (zero total work).
+
+    For wgrad (NT layout) the output should be zero when not accumulating,
+    or unchanged when accumulating with beta=1.
+    """
+    if torch.cuda.get_device_capability() < (10, 0):
+        pytest.skip("Grouped GEMM requires Blackwell (SM100) or newer.")
+    if not is_bf16_available():
+        pytest.skip("bfloat16 is required for grouped GEMM test.")
+    if quant_type == "mxfp8" and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+
+    z = 4
+    k, n = 256, 256
+    dtype = torch.bfloat16
+    device = torch.device("cuda")
+    use_mxfp8 = quant_type == "mxfp8"
+
+    transa = layout[0] == "T"
+    transb = layout[1] == "T"
+    zero_first_dims = torch.zeros(z, dtype=torch.int64, device=device)
+
+    def _make_zero_tokens_grouped_tensor(logical_last_dim, is_a):
+        """Create a GroupedTensor with non-zero logical_shape but zero first_dims."""
+        buf = torch.randn(0, logical_last_dim, dtype=dtype, device=device)
+        if use_mxfp8:
+            if is_a:
+                rowwise, columnwise = transa, not transa
+            else:
+                rowwise, columnwise = not transb, transb
+            quantizer = MXFP8Quantizer(
+                fp8_dtype=tex.DType.kFloat8E4M3,
+                rowwise=rowwise,
+                columnwise=columnwise,
+            )
+            quantizer.optimize_for_gemm = True
+            return tex.group_quantize(buf, quantizer, z, zero_first_dims)
+        return GroupedTensor.make_grouped_tensor(
+            num_tensors=z,
+            first_dims=zero_first_dims,
+            last_dims=None,
+            logical_first_dim=k,
+            logical_last_dim=logical_last_dim,
+            quantizer=None,
+            device=device,
+            dtype=dtype,
+        )
+
+    if layout in ("TN", "NN"):
+        weight_tensors = [torch.randn(n, k, dtype=dtype, device=device) for _ in range(z)]
+        if use_mxfp8:
+            grouped_A = _make_grouped_tensor_quantized_mxfp8(
+                weight_tensors, is_a=True, transposed=transa, device=device
+            )
+        else:
+            grouped_A = _make_grouped_tensor_uniform(z, n, k, device, dtype)
+            _pack_grouped_tensor(grouped_A, weight_tensors)
+    else:  # NT
+        grouped_A = _make_zero_tokens_grouped_tensor(k, is_a=True)
+
+    b_last_dim = k if layout == "TN" else n
+    grouped_B = _make_zero_tokens_grouped_tensor(b_last_dim, is_a=False)
+
+    if layout == "NT":
+        out = [torch.randn(n, k, dtype=dtype, device=device) for _ in range(z)]
+        grouped_out = _make_grouped_tensor_uniform(z, n, k, device, dtype)
+        _pack_grouped_tensor(grouped_out, out)
+    else:
+        out = [torch.zeros(0, dtype=dtype, device=device) for _ in range(z)]
+        out_last_dim = n if layout == "TN" else k
+        grouped_out = GroupedTensor.make_grouped_tensor(
+            num_tensors=z,
+            first_dims=zero_first_dims,
+            last_dims=None,
+            logical_first_dim=k,
+            logical_last_dim=out_last_dim,
+            quantizer=None,
+            device=device,
+            dtype=dtype,
+        )
+
+    out_before = [o.clone() for o in out]
+
+    general_grouped_gemm_for_grouped_tensor(
+        grouped_A,
+        grouped_B,
+        grouped_out,
+        layout=layout,
+        accumulate=accumulate,
+    )
+
+    out_result = (
+        grouped_out if isinstance(grouped_out, list) else grouped_out.split_into_quantized_tensors()
+    )
+    for i in range(z):
+        if out_result[i].numel() == 0:
+            continue
+        if accumulate:
+            torch.testing.assert_close(out_result[i], out_before[i])
+        else:
+            torch.testing.assert_close(out_result[i], torch.zeros_like(out_result[i]))
+
+
 def _make_grouped_tensor_quantized_mxfp8(
     tensors: List[torch.Tensor],
     *,
@@ -3050,8 +3157,8 @@ def _make_grouped_tensor_quantized_mxfp8(
 def test_grouped_gemm_grouped_tensor_mxfp8(
     shape, accumulate, layout: str, case: str, dtype: torch.dtype
 ) -> None:
-    if tex.get_cublasLt_version() < 130200:
-        pytest.skip("Grouped GEMM requires cuBLAS 13.2+.")
+    if tex.get_cublasLt_version() < 130300:
+        pytest.skip("Grouped GEMM requires cuBLAS 13.3+.")
     if torch.cuda.get_device_capability() < (10, 0):
         pytest.skip("Grouped GEMM requires Blackwell (SM100) or newer.")
     if dtype == torch.bfloat16 and not is_bf16_available():
