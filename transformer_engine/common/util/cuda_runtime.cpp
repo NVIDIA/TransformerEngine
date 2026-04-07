@@ -7,9 +7,9 @@
 #include "../util/cuda_runtime.h"
 
 #include <cublasLt.h>
-#include <nvrtc.h>
 
 #include <filesystem>
+#include <fstream>
 #include <mutex>
 
 #include "../common.h"
@@ -214,60 +214,33 @@ int include_directory_version(bool required) {
     return -1;
   }
 
-  // Program to probe CUDA version
-  static const char probe_source[] = R"!(
-#include <cuda_runtime_api.h>
-#define STRINGIFY(s) #s
-#define XSTRINGIFY(s) STRINGIFY(s)
-static_assert(false,
-              " transformer_engine::cuda::include_directory_version "
-              "CUDART_VERSION=" XSTRINGIFY(CUDART_VERSION) " ");
-)!";
-  nvrtcProgram probe = nullptr;
-  const auto create_program_status = nvrtcCreateProgram(&probe, probe_source, "version_probe.cu", 0, nullptr, nullptr);
-  if (create_program_status != NVRTC_SUCCESS) {
-    if (required) {
-      NVTE_CHECK_NVRTC(create_program_status);
-    }
-    return -1;
-  }
-
-  // Compile program and extract logs
-  const std::string include_opt = concat_strings("-I", include_dir);
-  const char *opts[] = {include_opt.c_str()};
-  nvrtcCompileProgram(probe, 1, opts);  // Expected to fail
-  std::string log;
-  size_t log_size = 0;
-  if (nvrtcGetProgramLogSize(probe, &log_size) == NVRTC_SUCCESS && log_size > 0) {
-    log.resize(log_size);
-    if (nvrtcGetProgramLog(probe, log.data()) != NVRTC_SUCCESS) {
-      log.clear();
+  // Parse CUDART_VERSION from cuda_runtime_api.h.
+  const auto header_path = std::filesystem::path(include_dir) / "cuda_runtime_api.h";
+  std::ifstream header_file(header_path);
+  if (header_file.is_open()) {
+    const std::string define_prefix = "#define CUDART_VERSION ";
+    std::string line;
+    while (std::getline(header_file, line)) {
+      const auto pos = line.find(define_prefix);
+      if (pos == std::string::npos) {
+        continue;
+      }
+      try {
+        const int version = std::stoi(line.substr(pos + define_prefix.size()));
+        if (version > 0) {
+          return version;
+        }
+      } catch (...) {
+        continue;
+      }
     }
   }
-  nvrtcDestroyProgram(&probe);
 
-  // Determine version by parsing build logs
-  int version = -1;
-  do {
-    const std::string marker = " transformer_engine::cuda::include_directory_version CUDART_VERSION=";
-    const auto marker_pos = log.find(marker);
-    if (marker_pos == std::string::npos) {
-      break;
-    }
-    try {
-      version = std::stoi(log.substr(marker_pos + marker.size()));
-    } catch (const std::invalid_argument &) {
-      break;
-    } catch (const std::out_of_range &) {
-      break;
-    }
-  } while (false);
-  if (version < 0 && required) {
+  if (required) {
     NVTE_ERROR("Could not detect version of CUDA Toolkit headers "
-               "(Error parsing build logs of probe program).");
+               "(Could not parse CUDART_VERSION from ", header_path.string(), ").");
   }
-
-  return version;
+  return -1;
 }
 
 int cudart_version() {

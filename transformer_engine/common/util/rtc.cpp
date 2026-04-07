@@ -178,6 +178,14 @@ void KernelManager::compile(const std::string& kernel_label, const std::string& 
   if (compile_result != NVRTC_SUCCESS) {
     std::string log;
 
+    // Decode CUDA version number to "major.minor" string
+    auto version_string = [](int v) -> std::string {
+      if (v < 0) {
+        return "<unknown>";
+      }
+      return concat_strings(v / 1000, ".", (v % 1000) / 10);
+    };
+
     // Check CUDA versions
     const int build_version = CUDA_VERSION;
     int nvrtc_version = -1;
@@ -186,9 +194,9 @@ void KernelManager::compile(const std::string& kernel_label, const std::string& 
       nvrtc_version = nvrtc_version_major * 1000 + nvrtc_version_minor * 10;
     }
     const int header_version = cuda::include_directory_version();
-    log += concat_strings("Compile-time CUDA version: ", build_version, "\n",
-                          "Run-time NVRTC version: ", nvrtc_version, "\n",
-                          "Run-time CUDA headers version: ", header_version, "\n");
+    log += concat_strings("Compile-time CUDA version: ", version_string(build_version), "\n",
+                          "Run-time NVRTC version: ", version_string(nvrtc_version), "\n",
+                          "Run-time CUDA headers version: ", version_string(header_version), "\n");
     if (nvrtc_version != header_version) {
       log += concat_strings(
           "\nWarning: CUDA versions do not match between NVRTC and CUDA headers (",
