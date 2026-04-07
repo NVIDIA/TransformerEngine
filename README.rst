@@ -8,7 +8,7 @@
 Transformer Engine
 ==================
 
-`Quickstart <#examples>`_ | `Installation <#installation>`_ | `User Guide <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/index.html>`_ | `Examples <https://github.com/NVIDIA/TransformerEngine/tree/main/examples>`_ | `FP8 Convergence <#fp8-convergence>`_ | `Integrations <#integrations>`_ | `Release notes <https://docs.nvidia.com/deeplearning/transformer-engine/documentation-archive.html>`_
+`Quickstart <#examples>`_ | `Installation <#installation>`_ | `User Guide <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/index.html>`_ | `Examples <https://github.com/NVIDIA/TransformerEngine/tree/main/examples>`_ | `Convergence <#convergence>`_ | `Integrations <#integrations>`_ | `Release notes <https://docs.nvidia.com/deeplearning/transformer-engine/documentation-archive.html>`_
 
 Latest News
 ===========
@@ -198,7 +198,6 @@ If you run any examples, please ensure you are using a matching version of Trans
 **Benefits of using NGC containers:**
 
 * All dependencies pre-installed with compatible versions and optimized configurations
-* NGC PyTorch 23.08+ containers include FlashAttention-2
 
 pip Installation
 ^^^^^^^^^^^^^^^^
@@ -376,10 +375,10 @@ An example of this change is,
      False, False,  True,  True,  True,
      False, False, False, False,  True]
 
-FP8 Convergence
-===============
+Convergence
+===========
 
-FP8 has been tested extensively across different model architectures and configurations and we found **no significant difference** between FP8 and BF16 training loss curves. FP8 has also been validated for accuracy on downstream LLM tasks (e.g. LAMBADA and WikiText). Below are examples of models tested for convergence across different frameworks.
+FP8 and MXFP8 have been tested extensively across different model architectures and configurations and we found **no significant difference** between FP8/MXFP8 and BF16 training loss curves. FP8 and MXFP8 have also been validated for accuracy on downstream LLM tasks (e.g. LAMBADA and WikiText). Below are examples of models tested for convergence across different frameworks.
 
 +------------+------------------+---------------------------------------------------------------------------------------------------------+
 | Model      | Framework        | Source                                                                                                  |
@@ -388,11 +387,11 @@ FP8 has been tested extensively across different model architectures and configu
 +------------+------------------+---------------------------------------------------------------------------------------------------------+
 | LLama2-7B  |  Alibaba Pai     | https://mp.weixin.qq.com/s/NQT0uKXLbXyh5031zBdeBQ                                                       |
 +------------+------------------+---------------------------------------------------------------------------------------------------------+
-| LLM-8B     |  Megatron Core  | https://arxiv.org/abs/2506.08027                                                                        |
+| LLM-8B     |  Megatron Core   | https://arxiv.org/abs/2506.08027                                                                        |
 +------------+------------------+---------------------------------------------------------------------------------------------------------+
 | MPT-13B    |  Mosaic Composer | https://www.databricks.com/blog/turbocharged-training-optimizing-databricks-mosaic-ai-stack-fp8         |
 +------------+------------------+---------------------------------------------------------------------------------------------------------+
-| MoE-16B    |  Megatron Core  | https://arxiv.org/abs/2506.08027                                                                        |
+| MoE-16B    |  Megatron Core   | https://arxiv.org/abs/2506.08027                                                                        |
 +------------+------------------+---------------------------------------------------------------------------------------------------------+
 | LLama2-70B |  Alibaba Pai     | https://mp.weixin.qq.com/s/NQT0uKXLbXyh5031zBdeBQ                                                       |
 +------------+------------------+---------------------------------------------------------------------------------------------------------+
@@ -408,7 +407,7 @@ Transformer Engine has been integrated with popular LLM frameworks such as:
 * `MosaicML Composer <https://github.com/mosaicml/composer/releases/tag/v0.13.1>`_
 * `NVIDIA JAX Toolbox <https://github.com/NVIDIA/JAX-Toolbox>`_
 * `NVIDIA Megatron-LM <https://github.com/NVIDIA/Megatron-LM>`_
-* `NVIDIA NeMo Framework <https://github.com/NVIDIA/NeMo-Megatron-Launcher>`_
+* `NVIDIA NeMo Megatron Bridge <https://github.com/NVIDIA-NeMo/Megatron-Bridge>`_
 * `Amazon SageMaker Model Parallel Library <https://docs.aws.amazon.com/sagemaker/latest/dg/model-parallel-core-features-v2-tensor-parallelism.html>`_
 * `Levanter <https://github.com/stanford-crfm/levanter>`_
 * `GPT-NeoX <https://github.com/EleutherAI/gpt-neox>`_
@@ -431,7 +430,7 @@ Papers
 Videos
 ======
 
-* `Stable and Scalable FP8 Deep Learning Training on Blackwell | GTC 2025 <https://www.nvidia.com/en-us/on-demand/session/gtc24-s62457/>`__
+* `Stable and Scalable FP8 Deep Learning Training on Blackwell | GTC 2025 <https://www.nvidia.com/en-us/on-demand/session/gtc25-s72778/>`_
 * `Blackwell Numerics for AI | GTC 2025 <https://www.nvidia.com/en-us/on-demand/session/gtc25-s72458/>`_
 * `Building LLMs: Accelerating Pretraining of Foundational Models With FP8 Precision | GTC 2025 <https://www.nvidia.com/gtc/session-catalog/?regcode=no-ncid&ncid=no-ncid&tab.catalogallsessionstab=16566177511100015Kus&search=zoho#/session/1726152813607001vnYK>`_
 * `From FP8 LLM Training to Inference: Language AI at Scale | GTC 2025 <https://www.nvidia.com/en-us/on-demand/session/gtc25-s72799/>`_
