@@ -967,7 +967,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         if self._transpose is not None:
             transpose_shape = self._transpose.shape
             return torch.Size(tuple(transpose_shape[1:]) + (transpose_shape[0],))
-        raise RuntimeError("Both data and transpose are None")
+        return torch.Tensor.size(self)
 
     @property
     def is_cuda(self):
