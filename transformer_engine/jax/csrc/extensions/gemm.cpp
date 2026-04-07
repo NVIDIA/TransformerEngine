@@ -790,34 +790,54 @@ size_t grouped_gemm_num_gemms(Buffer_Type const &lhs_first_dims, Buffer_Type con
   }
 }
 
-// Compute per-group average m, n, k from the 2D operand shapes and ragged indicators.
-// For each operand, left_size and right_size are the total 2D dimensions of the entire buffer.
-// - If a dim is ragged (first_dims/last_dims non-empty), its total is the sum of per-group sizes,
-//   so the average is total / num_gemms.
-// - If a dim is static but the tensor has no ragged dims at all, the group batch dimension G is
-//   folded into left_size (since G is always dim 0 and axis_boundary >= 1), so we divide it out.
-// - If a dim is static and the *other* dim of the same tensor is ragged, there is no G in the
-//   shape, so the static dim's size is already the per-group value.
-//
-// The transpose flag determines the mapping from per-group (left, right) to (m_or_non_contract,
-// k_or_contract):
-//   lhs represents [m, k] (not transposed) or [k, m] (transposed).
-//   rhs represents [k, n] (not transposed) or [n, k] (transposed).
-// Returns {non_contracting_avg, contracting_avg}, i.e. {avg_m, avg_k} for lhs or {avg_n, avg_k}
-// for rhs.
-std::pair<int64_t, int64_t> grouped_gemm_avg_dims(
-    Buffer_Type const &first_dims, Buffer_Type const &last_dims, size_t left_size,
-    size_t right_size, size_t num_gemms, bool is_trans) {
+/* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
+/*! \brief Compute estimates for average dimensions of a grouped tensor.
+ *
+ * Returns a pair of {non_contracting_avg, contracting_avg} dimensions for the given grouped tensor, to estimate per-group GEMM sizes. When a dimension is ragged, we estimate the average size by dividing the dim size by G ("num_gemms"). When a dimension has no ragged dims, we assume it is of shape (G*K, N) or (G*N, K) so we divide the first dim by G to get the average per-group size.
+ *
+ * Examples:
+ *  - fwd lhs: shape_2d=[ragged M, K], first_dims=[M,...] (ragged M) → avg_m = (G*M)/G = M, avg_k = K
+ *  - fwd rhs: shape_2d=[G*K, N], last_dims=None (static K) → avg_k = (G*K)/G = K, avg_n = N
+ *  - wgrad lhs: shape_2d=[M, ragged K], last_dims=[K,...] (ragged K) → avg_k = (G*K)/G = K, avg_m = M
+ *  - wgrad rhs: shape_2d=[N, ragged K], last_dims=[K,...] (ragged K) → avg_k = (G*K)/G = K, avg_n = N
+ *
+ *  \param[in]  first_dims           XLA buffer of on-device first dimensions. Shape (G,) if ragged, empty otherwise.
+ *  \param[in]  last_dims            XLA buffer of on-device last dimensions. Shape (G,) if ragged, empty otherwise.
+ *  \param[in]  shape_2d             Pair of total 2D dimensions (rows, cols) for the operand.
+ *  \param[in]  num_gemms            Number of GEMMs (G) in the grouped operation.
+ *  \param[in]  is_trans             Whether the operand is transposed.
+ *  \return Pair of {non_contracting_avg, contracting_avg}, i.e. {avg_m, avg_k} for lhs or
+ *         {avg_n, avg_k} for rhs.
+ */
+std::pair<int64_t, int64_t> grouped_gemm_avg_dims(Buffer_Type const &first_dims,
+                                                  Buffer_Type const &last_dims,
+                                                  std::pair<size_t, size_t> const &shape_2d,
+                                                  size_t num_gemms, bool is_trans) {
   bool first_ragged = first_dims.element_count() > 0;
   bool last_ragged = last_dims.element_count() > 0;
   bool any_ragged = first_ragged || last_ragged;
-  // Per-group left: divide by num_gemms if first dim is ragged OR if tensor has no ragged dims
-  // (G is folded into left_size).  Keep as-is only when last dim is ragged but first is not.
-  size_t pg_left =
-      (first_ragged || !any_ragged) ? left_size / num_gemms : left_size;
-  size_t pg_right = last_ragged ? right_size / num_gemms : right_size;
-  int64_t non_contract = static_cast<int64_t>(is_trans ? pg_right : pg_left);
-  int64_t contract = static_cast<int64_t>(is_trans ? pg_left : pg_right);
+
+  std::pair<size_t, size_t> per_group_shape_2d{};
+  if (first_ragged) {
+    per_group_shape_2d = {
+        static_cast<size_t>(std::round(static_cast<double>(shape_2d.first) / num_gemms)),
+        shape_2d.second};
+  } else if (!any_ragged) {
+    per_group_shape_2d = {
+        static_cast<size_t>(std::round(static_cast<double>(shape_2d.first) / num_gemms)),
+        shape_2d.second};
+  } else if (last_ragged && !first_ragged) {
+    per_group_shape_2d = {
+        shape_2d.first,
+        static_cast<size_t>(std::round(static_cast<double>(shape_2d.second) / num_gemms))};
+  } else {
+    NVTE_CHECK(false, "Grouped GEMM with both first_dims and last_dims ragged is not supported.");
+  }
+
+  int64_t non_contract =
+      static_cast<int64_t>(is_trans ? per_group_shape_2d.second : per_group_shape_2d.first);
+  int64_t contract =
+      static_cast<int64_t>(is_trans ? per_group_shape_2d.first : per_group_shape_2d.second);
   return {non_contract, contract};
 }
 
@@ -922,11 +942,22 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
   gemmConfig.set_avg_n(avg_n);
   gemmConfig.set_avg_k(avg_k_lhs);
 
+  auto [avg_m, avg_k_lhs] = grouped_gemm_avg_dims(
+      lhs_first_dims, lhs_last_dims, {lhs_left_size, lhs_right_size}, num_gemms, lhs_is_trans);
+  auto [avg_n, avg_k_rhs] = grouped_gemm_avg_dims(
+      rhs_first_dims, rhs_last_dims, {rhs_left_size, rhs_right_size}, num_gemms, !rhs_is_trans);
+  // Use k from lhs (both sides should agree for well-formed inputs).
+  NVTE_CHECK(avg_k_lhs == avg_k_rhs, "Contracting dimension mismatch: lhs avg_k=", avg_k_lhs,
+             " vs rhs avg_k=", avg_k_rhs);
+
+  GroupedMatmulConfigWrapper gemmConfig{};
+  gemmConfig.set_avg_m(avg_m);
+  gemmConfig.set_avg_n(avg_n);
+  gemmConfig.set_avg_k(avg_k_lhs);
+
   nvte_grouped_gemm(rhs_tensor, rhs_is_trans, lhs_tensor, lhs_is_trans, nullptr, out_tensor,
                     alpha_tensor.data(), beta_tensor.data(), workspace_setup.data(),
-                    workspace_cublas.data(),
-                    gemmConfig,
-                    stream);
+                    workspace_cublas.data(), gemmConfig, stream);
 
   return ffi_with_cuda_error_check();
 }

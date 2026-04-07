@@ -1363,7 +1363,7 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
                        NVTETensor workspace_cublas, NVTEGroupedMatmulConfig config,
                        cudaStream_t stream) {
   NVTE_ERROR("nvte_grouped_gemm requires cuBLAS 13.3+, but compile-time cuBLAS version is ",
-             CUBLAS_VERSION, ". Please upgrade to CUDA 13.3 or newer.");
+             CUBLAS_VERSION, ". Please upgrade to cuBLAS 13.3 (shipped with CUDA 13.2) or newer.");
 }
 
 void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num_a_tensors,
@@ -1375,7 +1375,7 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
   NVTE_ERROR(
       "nvte_grouped_gemm_with_discrete_inputA requires cuBLAS 13.3+, but compile-time "
       "cuBLAS version is ",
-      CUBLAS_VERSION, ". Please upgrade to CUDA 13.3 or newer.");
+      CUBLAS_VERSION, ". Please upgrade to cuBLAS 13.3 (shipped with CUDA 13.2) or newer.");
 }
 
 void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
@@ -1388,20 +1388,20 @@ void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
   NVTE_ERROR(
       "nvte_grouped_gemm_with_discrete_out requires cuBLAS 13.3+, but compile-time "
       "cuBLAS version is ",
-      CUBLAS_VERSION, ". Please upgrade to CUDA 13.3 or newer.");
+      CUBLAS_VERSION, ". Please upgrade to cuBLAS 13.3 (shipped with CUDA 13.2) or newer.");
 }
 
 void nvte_grouped_bias_add(const NVTEGroupedTensor output, const NVTEGroupedTensor bias,
                            cudaStream_t stream) {
   NVTE_ERROR("nvte_grouped_bias_add requires cuBLAS 13.3+, but compile-time cuBLAS version is ",
-             CUBLAS_VERSION, ". Please upgrade to CUDA 13.3 or newer.");
+             CUBLAS_VERSION, ". Please upgrade to cuBLAS 13.3 (shipped with CUDA 13.2) or newer.");
 }
 
 size_t nvte_get_grouped_gemm_setup_workspace_size(size_t num_tensors) {
   NVTE_ERROR(
       "nvte_get_grouped_gemm_setup_workspace_size requires cuBLAS 13.3+, but compile-time cuBLAS "
       "version is ",
-      CUBLAS_VERSION, ". Please upgrade to CUDA 13.3 or newer.");
+      CUBLAS_VERSION, ". Please upgrade to cuBLAS 13.3 (shipped with CUDA 13.2) or newer.");
   return 0;
 }
 
