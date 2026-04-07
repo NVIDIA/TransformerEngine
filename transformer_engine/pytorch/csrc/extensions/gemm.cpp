@@ -9,9 +9,7 @@
 #include <optional>
 #include <string>
 
-#include "../common.h"
 #include "../extensions.h"
-#include "common.h"
 #include "common/util/cuda_runtime.h"
 #include "common/util/system.h"
 #include "pybind.h"
@@ -637,8 +635,10 @@ py::object te_general_grouped_gemm_for_grouped_tensor(
   auto gemm_config = prepare_grouped_gemm_config(alpha, beta, workspace_setup, workspace_cublas,
                                                  num_tensors, math_sm_count, use_split_accumulator);
 
-  [[maybe_unused]] auto swizzled_scales_A = maybe_swizzle_grouped_tensor_for_gemm(grouped_A);
-  [[maybe_unused]] auto swizzled_scales_B = maybe_swizzle_grouped_tensor_for_gemm(grouped_B);
+  [[maybe_unused]] auto swizzled_scales_A =
+      maybe_swizzle_grouped_tensor(grouped_A, transa, !transa);
+  [[maybe_unused]] auto swizzled_scales_B =
+      maybe_swizzle_grouped_tensor(grouped_B, transb, !transb);
 
   NVTE_SCOPED_GIL_RELEASE({
     nvte_grouped_gemm(grouped_A.data(), transa, grouped_B.data(), transb, grouped_D.data(),
@@ -704,7 +704,8 @@ py::object te_general_grouped_gemm_for_discrete_in(py::handle A, bool transa, py
   swizzled_scale_inverses_list.emplace_back(
       multi_tensor_swizzle_scales_for_gemm(te_A_wrappers, transa, !transa));
 
-  [[maybe_unused]] auto swizzled_scales_B = maybe_swizzle_grouped_tensor_for_gemm(grouped_B);
+  [[maybe_unused]] auto swizzled_scales_B =
+      maybe_swizzle_grouped_tensor(grouped_B, transb, !transb);
 
   NVTE_SCOPED_GIL_RELEASE({
     nvte_grouped_gemm_with_discrete_inputA(
@@ -769,8 +770,10 @@ py::object te_general_grouped_gemm_for_discrete_out(py::handle A, bool transa, p
     te_D_vector.emplace_back(te_D_wrappers.back().data());
   }
 
-  [[maybe_unused]] auto swizzled_scales_A = maybe_swizzle_grouped_tensor_for_gemm(grouped_A);
-  [[maybe_unused]] auto swizzled_scales_B = maybe_swizzle_grouped_tensor_for_gemm(grouped_B);
+  [[maybe_unused]] auto swizzled_scales_A =
+      maybe_swizzle_grouped_tensor(grouped_A, transa, !transa);
+  [[maybe_unused]] auto swizzled_scales_B =
+      maybe_swizzle_grouped_tensor(grouped_B, transb, !transb);
 
   NVTE_SCOPED_GIL_RELEASE({
     nvte_grouped_gemm_with_discrete_out(

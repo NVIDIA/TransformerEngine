@@ -26,7 +26,7 @@ extern "C" {
  *  Requirements:
  *  - scale_inv is stored in row-major.
  *  - scale_inv size is padded to 128x4 for row-scale and 4x128 for col-scale.
- *  - data is quantitized along K-dimension, i.e. 1D-scaling block lies along the K-dimension.
+ *  - data is quantized along K-dimension, i.e. 1D-scaling block lies along the K-dimension.
  */
 void nvte_swizzle_scaling_factors(const NVTETensor input, NVTETensor output, cudaStream_t stream);
 
@@ -40,10 +40,38 @@ void nvte_swizzle_scaling_factors(const NVTETensor input, NVTETensor output, cud
  *  Requirements:
  *  - scale_inv is stored in row-major.
  *  - scale_inv size is padded to 128x4 for row-scale and 4x128 for col-scale.
- *  - data is quantitized along K-dimension, i.e. 1D-scaling block lies along the K-dimension.
+ *  - data is quantized along K-dimension, i.e. 1D-scaling block lies along the K-dimension.
  */
 void nvte_multi_tensor_swizzle_scaling_factors(const NVTETensor* inputs, NVTETensor* outputs,
                                                const size_t num_tensors, cudaStream_t stream);
+
+/*! \brief Unswizzling scaling factors from the interleaved layout used by GEMM back to row-major
+ *
+ *  \param[in]     input        Input tensor with swizzled scale_inv.
+ *  \param[in,out] output       Output tensor which hosts non-swizzled scale_inv.
+ *  \param[in]     stream       CUDA stream used for the operation.
+ *
+ *  Requirements:
+ *  - scale_inv is stored in row-major in output.
+ *  - scale_inv size is padded to 128x4 for row-scale and 4x128 for col-scale.
+ *  - data is quantized along K-dimension, i.e. 1D-scaling block lies along the K-dimension.
+ */
+void nvte_unswizzle_scaling_factors(const NVTETensor input, NVTETensor output, cudaStream_t stream);
+
+/*! \brief Unswizzling scaling factors from the interleaved layout used by GEMM back to row-major
+ *
+ *  \param[in]     inputs       Input tensors with swizzled scale_inv.
+ *  \param[in,out] outputs      Output tensors which hosts non-swizzled scale_inv.
+ *  \param[in]     num_tensors  Number of input and output tensors.
+ *  \param[in]     stream       CUDA stream used for the operation.
+ *
+ *  Requirements:
+ *  - scale_inv is stored in row-major in output.
+ *  - scale_inv size is padded to 128x4 for row-scale and 4x128 for col-scale.
+ *  - data is quantized along K-dimension, i.e. 1D-scaling block lies along the K-dimension.
+ */
+void nvte_multi_tensor_unswizzle_scaling_factors(const NVTETensor* inputs, NVTETensor* outputs,
+                                                 const size_t num_tensors, cudaStream_t stream);
 
 /*! \brief Swizzling FP8 block scaling scaling factors into mxfp8 interleaved layout for GEMM
  *

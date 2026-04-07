@@ -91,7 +91,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
     int r = blockIdx.y * kRowsPerTile + r_;
     int c = blockIdx.x * kColsPerTile / 32 + c_;
     size_t idx = r * scale_inv_rowwise_stride + c;
-    smem_scales_rowwise[r_][c_] = ptx::exp2f_rcp(scale_inv_rowwise[idx]);
+    smem_scales_rowwise[r_][c_] = ptx::exp2f_rcp<float>(scale_inv_rowwise[idx]);
   }
 
   // Load scales_colwise
@@ -100,7 +100,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
     int r = blockIdx.y * kRowsPerTile / 32;
     int c = blockIdx.x * kColsPerTile + c_;
     size_t idx = r * scale_inv_colwise_stride + c;
-    smem_scales_colwise[c_] = ptx::exp2f_rcp(scale_inv_colwise[idx]);
+    smem_scales_colwise[c_] = ptx::exp2f_rcp<float>(scale_inv_colwise[idx]);
   }
 
   __syncthreads();

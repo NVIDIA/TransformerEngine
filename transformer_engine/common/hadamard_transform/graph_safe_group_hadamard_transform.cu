@@ -25,13 +25,6 @@ namespace {
 constexpr int kMaxTensorsPerKernel = 64;
 constexpr int kThreadsPerWarp = 32;
 
-enum ShapeRepresentation {
-  SAME_BOTH_DIMS = 0,
-  VARYING_FIRST_DIM = 1,
-  VARYING_LAST_DIM = 2,
-  VARYING_BOTH_DIMS = 3
-};
-
 __device__ __forceinline__ size_t get_current_tensor_id(
     const ShapeRepresentation shape_rep, const size_t num_tensors, const size_t current_offset,
     const size_t first_logical_dim, const size_t last_logical_dim,
@@ -65,18 +58,12 @@ __device__ __forceinline__ size_t get_current_tensor_id(
 template <typename IType, int kHadamardDimension, int BUFF_DIM_Y, int BUFF_DIM_X,
           bool kReturnPreRhtAmax, bool kReturnIdentityAmax, bool kReturnTransposedAmax>
 __device__ __forceinline__ void ComputeKernel(uint32_t b_frag_i[4], uint32_t b_frag_t[4],
-                                              IType* in_sh_ptr, uint32_t& local_pre_rht_amax_reg,
+                                              IType* in_sh_ptr, int swizzle_idx,
+                                              uint32_t& local_pre_rht_amax_reg,
                                               uint32_t& local_amax_reg,
                                               uint32_t& local_amax_t_reg) {
   uint32_t a_frag[4];  // A matrix fragment
   uint32_t c_frag[4];  // Result fragment
-
-  int warp_id = threadIdx.x / kThreadsPerWarp;
-  int local_rank = (threadIdx.x % kThreadsPerWarp);
-
-  int ld_row_idx = local_rank % kHadamardDimension;
-  int ld_col_idx = local_rank / kHadamardDimension + warp_id * 2;
-  int swizzle_idx = swizzle_128B_atom_32B(ld_row_idx, ld_col_idx);
 
   uint32_t temp_amax_reg;
   uint32_t temp_amax_t_reg;
@@ -94,17 +81,15 @@ __device__ __forceinline__ void ComputeKernel(uint32_t b_frag_i[4], uint32_t b_f
   }
 
   if (kReturnTransposedAmax) {
-    // TODO(Frank): This is not efficient, since we could directly load the
-    // matrix in transposed layout.
     if (!kReturnIdentityAmax) {
-      ldmatrix_x4_m8n8_shared_b16<false>(a_frag[0], a_frag[1], a_frag[2], a_frag[3],
-                                         reinterpret_cast<uint4*>(in_sh_ptr) + swizzle_idx);
+      ldmatrix_x4_m8n8_shared_b16<true>(a_frag[0], a_frag[1], a_frag[2], a_frag[3],
+                                        reinterpret_cast<uint4*>(in_sh_ptr) + swizzle_idx);
+    } else {
+      matrix_transpose_m8_n8_b16_inplace(a_frag[0]);
+      matrix_transpose_m8_n8_b16_inplace(a_frag[1]);
+      matrix_transpose_m8_n8_b16_inplace(a_frag[2]);
+      matrix_transpose_m8_n8_b16_inplace(a_frag[3]);
     }
-
-    matrix_transpose_m8_n8_b16_inplace(a_frag[0]);
-    matrix_transpose_m8_n8_b16_inplace(a_frag[1]);
-    matrix_transpose_m8_n8_b16_inplace(a_frag[2]);
-    matrix_transpose_m8_n8_b16_inplace(a_frag[3]);
 
     mma_m16_n16_k16_b16_b16_b16_noacc<kReturnTransposedAmax>(
         a_frag[0], a_frag[2], a_frag[1], a_frag[3], b_frag_t[0], b_frag_t[1], b_frag_t[2],
@@ -322,6 +307,12 @@ __global__ void GraphSafeGroupHadamardAmaxTmaKernel(
   uint32_t local_amax_reg = *reinterpret_cast<uint32_t*>(&local_amax);
   uint32_t local_amax_t_reg = *reinterpret_cast<uint32_t*>(&local_amax_t);
 
+  const int warp_id = threadIdx.x / kThreadsPerWarp;
+  const int local_rank = threadIdx.x % kThreadsPerWarp;
+  const int ld_row_idx = local_rank % kHadamardDimension;
+  const int ld_col_idx = local_rank / kHadamardDimension + warp_id * 2;
+  const int swizzle_idx = swizzle_128B_atom_32B(ld_row_idx, ld_col_idx);
+
   for (int stage_y = 0; stage_y < STAGES_Y; ++stage_y) {
     for (int stage_x = 0; stage_x < STAGES_X; ++stage_x) {
       int stage = STAGES_X * stage_y + stage_x;
@@ -364,14 +355,12 @@ __global__ void GraphSafeGroupHadamardAmaxTmaKernel(
               had_frag_i, had_frag_t,
               in_sh_ptr + in_row_offset +
                   (compute_stage_x * kHadamardDimension * (THREADS_PER_CHUNK / kThreadsPerWarp)),
-              local_pre_rht_amax_reg, local_amax_reg, local_amax_t_reg);
+              swizzle_idx, local_pre_rht_amax_reg, local_amax_reg, local_amax_t_reg);
         }
-
-        // Ensure all threads have finished their computation before new data over-writes the shared
-        // memory.
-        __syncthreads();
       }
-
+      // Ensure all threads have finished their computation before new data over-writes the shared
+      // memory.
+      __syncthreads();
       // Ensure generic shared-memory accesses are visible before the next TMA write.
       ptx::fence_proxy_async_shared_cta();
     }

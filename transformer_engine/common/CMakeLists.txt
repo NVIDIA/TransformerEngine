@@ -150,6 +150,7 @@ list(APPEND transformer_engine_cuda_sources
      normalization/rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu
      normalization/rmsnorm/rmsnorm_fwd_cuda_kernel.cu
      permutation/permutation.cu
+     util/utils.cu
      util/padding.cu
      swizzle/swizzle.cu
      swizzle/swizzle_block_scaling.cu

@@ -270,7 +270,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       if (colwise_scale_is_within_bounds) {
         scales_colwise_e8m0[scale_idx] = biased_exponent;
       }
-      const float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
+      const float block_scale_inverse = ptx::exp2f_rcp<float>(biased_exponent);
 
 // 3. Scale elements
 #pragma unroll

@@ -25,6 +25,15 @@ def jax_version_meet_requirement(version: str):
 # Minimum JAX version required for Triton kernel dispatch (jaxlib < 0.8.0 segfaults).
 TRITON_EXTENSION_MIN_JAX_VERSION = "0.8.0"
 
+# Minimum JAX version for safe input_output_aliases in TritonAutotunedKernelCall.
+# jaxlib/gpu/triton_kernels.cc had a bug in the autotuning save/restore loop:
+# it iterated over all declared aliases unconditionally, but input_copies only
+# contains entries for aliases where XLA actually shared buffers at runtime.
+# Accessing a missing entry produced a null vector → CUDA_ERROR_INVALID_VALUE.
+# Fixed by: https://github.com/jax-ml/jax/pull/35218 (merged 2026-03-17, main).
+# Ships in JAX 0.9.3 (not yet released as of 2026-03-31).
+TRITON_AUTOTUNED_INPUT_OUTPUT_ALIAS_MIN_JAX_VERSION = "0.9.3"
+
 
 def is_triton_extension_supported() -> bool:
     """Return True if the current JAX version supports Triton kernel dispatch.
@@ -40,4 +49,5 @@ __all__ = [
     "jax_version_meet_requirement",
     "is_triton_extension_supported",
     "TRITON_EXTENSION_MIN_JAX_VERSION",
+    "TRITON_AUTOTUNED_INPUT_OUTPUT_ALIAS_MIN_JAX_VERSION",
 ]
