@@ -200,7 +200,8 @@ void KernelManager::compile(const std::string& kernel_label, const std::string& 
     if (nvrtc_version != header_version) {
       log += concat_strings(
           "\nWarning: CUDA versions do not match between NVRTC and CUDA headers (",
-          cuda::include_directory(), "). "
+          cuda::include_directory(),
+          "). "
           "Consider changing the CUDA header search path (by setting NVTE_CUDA_INCLUDE_DIR) "
           "or the linked CUDA Runtime (by setting CUDA_HOME or LD_LIBRARY_PATH).\n\n");
     }

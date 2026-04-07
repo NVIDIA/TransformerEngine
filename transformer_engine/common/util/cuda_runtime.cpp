@@ -208,8 +208,9 @@ int include_directory_version(bool required) {
   const auto &include_dir = cuda::include_directory(false);
   if (include_dir.empty()) {
     if (required) {
-      NVTE_ERROR("Could not detect version of CUDA Toolkit headers "
-                 "(CUDA Toolkit headers not found).");
+      NVTE_ERROR(
+          "Could not detect version of CUDA Toolkit headers "
+          "(CUDA Toolkit headers not found).");
     }
     return -1;
   }
@@ -237,8 +238,10 @@ int include_directory_version(bool required) {
   }
 
   if (required) {
-    NVTE_ERROR("Could not detect version of CUDA Toolkit headers "
-               "(Could not parse CUDART_VERSION from ", header_path.string(), ").");
+    NVTE_ERROR(
+        "Could not detect version of CUDA Toolkit headers "
+        "(Could not parse CUDART_VERSION from ",
+        header_path.string(), ").");
   }
   return -1;
 }
