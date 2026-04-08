@@ -63,7 +63,7 @@ from ..quantized_tensor import (
     prepare_for_saving,
     restore_from_func_ctx,
 )
-from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
+from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer, Float8Tensor
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.utils import is_custom
 from ..export import is_in_onnx_export_mode, assert_warmed_up
@@ -262,6 +262,30 @@ class _Linear(torch.autograd.Function):
         # Prepare weight tensor
         # ------------------------------------------------------
         weightmat = weight
+        try:
+            from ..distributed import _get_module_fsdp_state
+
+            _get_module_fsdp_state(module)
+            is_fsdp2 = True
+        except (RuntimeError, ImportError):
+            is_fsdp2 = False
+        # FSDP2 workspace optimization only applies to quantizer types
+        # whose backward re-creation is validated.
+        from ..tensor.mxfp8_tensor import MXFP8Quantizer
+        from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
+        from ..tensor.nvfp4_tensor import NVFP4Quantizer
+
+        _fsdp2_safe = isinstance(
+            weight_quantizer,
+            (
+                Float8Quantizer,
+                Float8CurrentScalingQuantizer,
+                MXFP8Quantizer,
+                Float8BlockQuantizer,
+                NVFP4Quantizer,
+            ),
+        ) or isinstance(weight, Float8Tensor)
+        is_fsdp2 = is_fsdp2 and _fsdp2_safe
         if fp8 or debug:
             # Configure quantizer
             # No need to set the quantizer states if weight is already quantized
@@ -275,22 +299,49 @@ class _Linear(torch.autograd.Function):
                         is_fp8_activation_recompute_enabled()
                         and not in_fp8_activation_recompute_phase()
                     )
+                # FSDP2: Skip columnwise/transpose creation during forward
+                # to avoid accumulating caches across layers. Backward's
+                # FSDP2 all-gather will recreate them. (Issue #2681)
+                if is_fsdp2:
+                    columnwise_usage = False
                 weight_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
             elif isinstance(weight, QuantizedTensor):
                 # If weight is already quantized, no need to set quantizer states
                 weight_quantizer = weight._quantizer
+                # FSDP2: Disable columnwise on pre-quantized block-scaled weights
+                # whose _create_columnwise() can regenerate in backward. (#2681)
+                from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
+                from ..tensor.nvfp4_tensor import NVFP4Quantizer as _NVFP4Quantizer
+
+                if is_fsdp2 and isinstance(
+                    weight_quantizer, (Float8BlockQuantizer, _NVFP4Quantizer)
+                ):
+                    weight_quantizer.set_usage(rowwise=True, columnwise=False)
             # Get quantized weight
+            # FSDP2: Don't cache workspaces — they would persist across
+            # layers, defeating FSDP2 memory savings. (Issue #2681)
             update_workspace = is_first_microbatch is None or is_first_microbatch
+            wt_cache = None if (is_first_microbatch is None or is_fsdp2) else "weight"
             weightmat = module.get_weight_workspace(
                 tensor=weight,
                 quantizer=weight_quantizer,
-                cache_name=(None if is_first_microbatch is None else "weight"),
+                cache_name=wt_cache,
                 update_workspace=update_workspace,
                 skip_update_flag=skip_fp8_weight_update,
                 fsdp_group=fsdp_group,
                 workspace_dtype=activation_dtype,
             )
-            weightmat.update_usage(rowwise_usage=True)
+            # FSDP2: Discard columnwise data on block-scaled pre-quantized
+            # weights whose _create_columnwise() can regenerate in backward.
+            # (Issue #2681)
+            if (
+                is_fsdp2
+                and isinstance(weight, QuantizedTensor)
+                and isinstance(weight_quantizer, (Float8BlockQuantizer, _NVFP4Quantizer))
+            ):
+                weightmat.update_usage(rowwise_usage=True, columnwise_usage=False)
+            else:
+                weightmat.update_usage(rowwise_usage=True)
 
         else:
             weightmat = cast_if_needed(weightmat, activation_dtype)  # Cast for AMP
@@ -450,14 +501,21 @@ class _Linear(torch.autograd.Function):
                 mark_not_offload(weight, weightmat, bias)
 
             # TODO(ksivamani): Check memory usage
+            # FSDP2: Don't save FP8 workspace for non-quantized weights.
+            # Backward will re-quantize from FSDP2 all-gathered weight.
+            # (Issue #2681)
+            wt_save = weightmat
+            if is_fsdp2 and weightmat is not weight:
+                wt_save = None
             tensors_to_save, tensor_objects = prepare_for_saving(
                 saved_inputmat,
-                weightmat,
+                wt_save,
                 weight,
                 bias,
             )
             ctx.save_for_backward(*tensors_to_save)
             ctx.tensor_objects = tensor_objects
+            ctx.is_fsdp2 = is_fsdp2
 
             ctx.activation_dtype = activation_dtype
             ctx.fp8 = fp8
@@ -715,6 +773,16 @@ class _Linear(torch.autograd.Function):
             dgrad_work = None
             if ctx.requires_dgrad:
 
+                # FSDP2: Re-create workspace from all-gathered weight
+                # when workspace was not saved. (Issue #2681)
+                if weight_fp8 is None:
+                    if isinstance(weight, QuantizedTensorStorage):
+                        weight.update_usage(columnwise_usage=True)
+                        weight_fp8 = weight
+                    elif ctx.weight_quantizer is not None:
+                        ctx.weight_quantizer.set_usage(rowwise=True, columnwise=True)
+                        weight_fp8 = ctx.weight_quantizer(weight)
+
                 # Make sure required data is available
                 if isinstance(grad_output, QuantizedTensorStorage):
                     grad_output.update_usage(rowwise_usage=True)
@@ -775,6 +843,21 @@ class _Linear(torch.autograd.Function):
                     bulk_overlap=ctx.ub_bulk_dgrad,
                 )
                 nvtx_range_pop(f"{nvtx_label}.dgrad_gemm")
+
+                # FSDP2: Clear FP8 transpose cache after dgrad GEMM.
+                # (Issue #2717)
+                if getattr(ctx, "is_fsdp2", False) and hasattr(weight_fp8, "_transpose"):
+                    if getattr(weight_fp8, "_transpose", None) is not None:
+                        weight_fp8._transpose = None
+                        weight_fp8._transpose_invalid = True
+                # FSDP2: Clear blockwise columnwise caches after dgrad GEMM.
+                # (Issues #2681, #2717)
+                if getattr(ctx, "is_fsdp2", False) and hasattr(weight_fp8, "_columnwise_data"):
+                    if getattr(weight_fp8, "_columnwise_data", None) is not None:
+                        weight_fp8._columnwise_data = None
+                        weight_fp8._columnwise_scale_inv = None
+                        if hasattr(weight_fp8, "_amax_columnwise"):
+                            weight_fp8._amax_columnwise = None
 
                 # Prepare grad input tensor
                 # Note: Perform tensor-parallel communication
