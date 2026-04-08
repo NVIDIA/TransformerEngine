@@ -135,14 +135,13 @@ class ScalingModeMetadataImpl(ABC):
 
     @abstractmethod
     def get_grouped_scale_shape(
-        self, data_shape, n_groups, group_axis, is_colwise, is_padded=True, flatten_axis=-1
+        self, data_shape, n_groups, is_colwise, is_padded=True, flatten_axis=-1
     ) -> Tuple[int]:
         """Get the shape for scale tensors in this mode.
 
         Args:
             data_shape: Original shape of the data tensor
             n_groups: Number of groups in grouped quantization
-            group_axis: The axis along which grouping is performed
             is_colwise: Whether to use column-wise scaling
             is_padded: Whether to use padded shapes
             flatten_axis: The axis along which the tensor could be flattened to 2D (default: -1)
@@ -253,7 +252,7 @@ class NoScalingModeMetadataImpl(ScalingModeMetadataImpl):
         return QuantizeLayout.ROWWISE
 
     def get_grouped_scale_shape(
-        self, data_shape, n_groups, group_axis, is_colwise, is_padded=True, flatten_axis=-1
+        self, data_shape, n_groups, is_colwise, is_padded=True, flatten_axis=-1
     ) -> Tuple[int]:
         """Get the shape for scale tensors in this mode.
 
@@ -266,7 +265,7 @@ class NoScalingModeMetadataImpl(ScalingModeMetadataImpl):
         Returns:
             The shape for scale tensors
         """
-        del data_shape, group_axis, is_colwise
+        del data_shape, is_colwise
         assert isinstance(n_groups, int)
         return (n_groups,)
 
@@ -370,7 +369,7 @@ class CurrentScalingModeMetadataImpl(ScalingModeMetadataImpl):
         return QuantizeLayout.COLWISE
 
     def get_grouped_scale_shape(
-        self, data_shape, n_groups, group_axis, is_colwise, is_padded=True, flatten_axis=-1
+        self, data_shape, n_groups, is_colwise, is_padded=True, flatten_axis=-1
     ) -> Tuple[int]:
         """Get the shape for scale tensors in this mode.
 
@@ -383,7 +382,7 @@ class CurrentScalingModeMetadataImpl(ScalingModeMetadataImpl):
         Returns:
             The shape for scale tensors
         """
-        del data_shape, group_axis, is_colwise
+        del data_shape, is_colwise
         assert isinstance(n_groups, int)
         return (n_groups,)
 
@@ -613,7 +612,7 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
         return QuantizeLayout.COLWISE
 
     def get_grouped_scale_shape(
-        self, data_shape, n_groups, group_axis, is_colwise, is_padded=True, flatten_axis=-1
+        self, data_shape, n_groups, is_colwise, is_padded=True, flatten_axis=-1
     ) -> Tuple[int]:
         """Get the shape for grouped scale tensors in this mode.
         If padded: The estimiated maximal possible shape for grouped scale tensor is return instead.
@@ -937,14 +936,13 @@ class ScalingMode(Enum):
         )
 
     def get_grouped_scale_shape_2x(
-        self, data_shape, n_groups, group_axis, is_padded=True, flatten_axis=-1
+        self, data_shape, n_groups, is_padded=True, flatten_axis=-1
     ) -> Tuple[Tuple[int]]:
         """Get shapes for both row-wise and column-wise scaling.
 
         Args:
             data_shape: Shape of the data tensor
             n_groups: Number of groups for grouped quantization
-            group_axis: The axis along which grouping is performed
             is_padded: Whether to use padded shapes
             flatten_axis: The axis along which the tensor could be flattened to 2D (default: -1)
 
@@ -954,7 +952,6 @@ class ScalingMode(Enum):
         rowwise_scale_shape = self.get_grouped_scale_shape(
             data_shape,
             n_groups,
-            group_axis,
             is_colwise=False,
             is_padded=is_padded,
             flatten_axis=flatten_axis,
@@ -962,7 +959,6 @@ class ScalingMode(Enum):
         colwise_scale_shape = self.get_grouped_scale_shape(
             data_shape,
             n_groups,
-            group_axis,
             is_colwise=True,
             is_padded=is_padded,
             flatten_axis=flatten_axis,
@@ -970,7 +966,7 @@ class ScalingMode(Enum):
         return (rowwise_scale_shape, colwise_scale_shape)
 
     def get_grouped_scale_shape(
-        self, data_shape, n_groups, group_axis, is_colwise, is_padded=True, flatten_axis=-1
+        self, data_shape, n_groups, is_colwise, is_padded=True, flatten_axis=-1
     ) -> Tuple[Tuple[int]]:
         """Get shapes for both row-wise and column-wise scaling.
 
@@ -985,7 +981,6 @@ class ScalingMode(Enum):
         return self._get_impl().get_grouped_scale_shape(
             data_shape,
             n_groups,
-            group_axis,
             is_colwise=is_colwise,
             is_padded=is_padded,
             flatten_axis=flatten_axis,

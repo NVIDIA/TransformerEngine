@@ -10,6 +10,9 @@ import subprocess
 import sys
 import pathlib
 
+sys.path.append(str(pathlib.Path(__file__).resolve().parent.parent))
+from utils import run_distributed
+
 import pytest
 import torch
 from torch import nn
@@ -1207,7 +1210,7 @@ def test_nvfp4_partial_cast_matches_full(world_size: int) -> None:
         current_file,
         "--parallel-nvfp4-partial",
     ]
-    subprocess.run(command, check=True)
+    run_distributed(command)
 
 
 def test_single_gpu_partial_cast_vs_full():

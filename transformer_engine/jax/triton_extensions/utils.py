@@ -43,8 +43,10 @@ import jax
 import jax.numpy as jnp
 
 from ..version_utils import (
+    TRITON_AUTOTUNED_INPUT_OUTPUT_ALIAS_MIN_JAX_VERSION,
     TRITON_EXTENSION_MIN_JAX_VERSION,
     is_triton_extension_supported,
+    jax_version_meet_requirement,
 )
 
 
@@ -474,23 +476,31 @@ def triton_call_lowering(
 
             kernel_calls.append((config_call, str(config)))
 
-        # IMPORTANT: We pass an empty tuple for input_output_aliases_with_sizes.
-        #
-        # Background:
-        # 1. jax.ffi.ffi_lowering(operand_output_aliases=...) is a HINT to XLA that an
-        #    output can reuse an input's buffer. XLA may or may not honor this.
-        # 2. TritonAutotunedKernelCall's input_output_aliases_with_sizes triggers
-        #    save/restore logic during autotuning (see jaxlib/gpu/triton_kernels.cc:630-701).
-        #
-        # The problem: The save phase (triton_kernels.cc:632) only saves if buffers[input_idx] == buffers[output_idx],
-        # but the restore phase (triton_kernels.cc:697-700) unconditionally iterates over all aliases and tries
-        # to access input_copies[input_idx]. If XLA didn't actually alias the buffers, input_copies[input_idx] doesn't exist, creating an empty vector whose .data() returns nullptr, causing CUDA_ERROR_INVALID_VALUE during the restore memcpy.
-        #
-        # WAR: Don't pass aliases to TritonAutotunedKernelCall.
+        input_output_aliases_with_sizes = ()
+        if input_output_aliases:
+            if jax_version_meet_requirement(TRITON_AUTOTUNED_INPUT_OUTPUT_ALIAS_MIN_JAX_VERSION):
+                num_inputs = len(ctx.avals_in)
+                aliases = []
+                for input_idx, output_idx in input_output_aliases.items():
+                    aval = ctx.avals_in[input_idx]
+                    size_bytes = aval.size * jnp.dtype(aval.dtype).itemsize
+                    # AutotunedKernelCall expects buffer indices (inputs + outputs).
+                    buffer_output_idx = num_inputs + output_idx
+                    aliases.append((input_idx, buffer_output_idx, size_bytes))
+                input_output_aliases_with_sizes = tuple(aliases)
+            else:
+                warnings.warn(
+                    f"JAX >= {TRITON_AUTOTUNED_INPUT_OUTPUT_ALIAS_MIN_JAX_VERSION} is required "
+                    "to safely pass input_output_aliases to TritonAutotunedKernelCall. "
+                    "Passing empty aliases as a workaround (jax-ml/jax#35218).",
+                    UserWarning,
+                    stacklevel=2,
+                )
+
         kernel_call = gpu_triton.TritonAutotunedKernelCall(
             f"{actual_kernel_fn.__name__}_autotuned",
             kernel_calls,
-            (),  # Empty to avoid buggy save/restore in jaxlib/gpu/triton_kernels.cc
+            input_output_aliases_with_sizes,
         )
 
     else:

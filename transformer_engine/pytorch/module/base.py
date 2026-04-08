@@ -80,19 +80,19 @@ class UserBufferQuantizationMode(Enum):
 
 def get_dummy_wgrad(shape: list, dtype: torch.dtype, zero=False) -> torch.Tensor:
     """Returns a dummy tensor of given shape."""
-    if len(shape) != 2:
-        raise ValueError(f"Expected 2D shape, got {len(shape)}D: {shape}")
+
+    key = (*shape, dtype)
     global _dummy_wgrads
-    if (shape[0], shape[1], dtype) not in _dummy_wgrads:
-        _dummy_wgrads[(shape[0], shape[1], dtype)] = torch.empty(
+    if key not in _dummy_wgrads:
+        _dummy_wgrads[key] = torch.empty(
             shape,
             dtype=dtype,
             device="cuda",
             requires_grad=False,
         )
     if zero:
-        _dummy_wgrads[(shape[0], shape[1], dtype)].fill_(0)
-    return _dummy_wgrads[(shape[0], shape[1], dtype)].detach()
+        _dummy_wgrads[key].fill_(0)
+    return _dummy_wgrads[key].detach()
 
 
 def initialize_ub(
@@ -1184,9 +1184,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         grad_output = grad_output.reshape((-1, grad_output.shape[-1]))
         grad_output = grad_output.contiguous()
         gather_grad_output = row_parallel_mode and ctx.sequence_parallel
+        use_fp8_bwd = ctx.fp8 and ctx.backward_override is None
 
         # Non-FP8 case: bgrad is fused with wgrad for this case.
-        if not ctx.fp8 and not ctx.debug:
+        if not use_fp8_bwd and not ctx.debug:
             if gather_grad_output:
                 if not ctx.ub_overlap_ag:  # Perform NCCL all-gather
                     grad_output, _ = gather_along_first_dim(grad_output, ctx.tp_group)

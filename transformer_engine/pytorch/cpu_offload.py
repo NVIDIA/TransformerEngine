@@ -46,6 +46,7 @@ def mark_activation_offload(*tensors):
 def mark_not_offload(*tensors: torch.Tensor):
     """Marks tensors to prevent them from being offloaded."""
     if NVTE_CPU_OFFLOAD_V1:
+        v1_code_path.mark_activation_offload(*tensors, offload=False)
         return
 
     tensors, tensor_obj = prepare_for_saving(*tensors)

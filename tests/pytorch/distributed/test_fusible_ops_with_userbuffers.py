@@ -38,7 +38,7 @@ from transformer_engine.pytorch import (
 # Import utility functions
 _current_file = pathlib.Path(__file__).resolve()
 sys.path.append(str(_current_file.parent.parent))
-from utils import dtype_tols, make_recipe, str_to_dtype
+from utils import dtype_tols, make_recipe, run_distributed, str_to_dtype
 
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
@@ -463,7 +463,7 @@ def test_fuser_ops_with_userbuffers(
     env["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "0"
 
     # Launch parallel job
-    result = subprocess.run(command, check=True, env=env)
+    run_distributed(command, env=env)
 
 
 def main() -> None:

@@ -15,6 +15,7 @@
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
+#include <cudnn.h>
 
 #include <transformer_engine/normalization.h>
 #include <transformer_engine/transformer_engine.h>

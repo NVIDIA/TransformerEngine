@@ -19,6 +19,19 @@ from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
 __all__ = ["get_device_compute_capability", "get_cudnn_version", "is_bf16_available"]
 
 
+@functools.lru_cache(maxsize=None)
+def get_cached_ones_tensor(
+    num_elements: int,
+    dtype: torch.dtype,
+    device: torch.device,
+) -> torch.Tensor:
+    """Return a cached ``torch.ones`` tensor.
+    Tensors are cached by ``(num_elements, dtype, device)`` and kept alive
+    by the cache, ensuring stable data pointers across CUDA graph replays.
+    """
+    return torch.ones(num_elements, dtype=dtype, device=device)
+
+
 def requires_grad(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
     """Check if any of the given tensors require gradient."""
     for tensor in tensors:
@@ -155,6 +168,29 @@ def divide(numerator: int, denominator: int) -> int:
     the division value."""
     ensure_divisibility(numerator, denominator)
     return numerator // denominator
+
+
+def mark_grouped_tensor(*tensors: List[Any]):
+    """
+    Needed for paged stashing in Megatron-LM. This attribute allows
+    Megatron-LM to detect which tensors are dynamic (varying shapes)
+    and remove the padding before doing the `save_for_backward` to
+    save memory.
+    Note: Only columnwise data is saved for backward."""
+    for tensor in tensors:
+        if tensor is None:
+            continue
+        if hasattr(tensor, "columnwise_data"):
+            assert (
+                tensor.columnwise_data is not None
+            ), "Columnwise data is not set for grouped tensor"
+            assert (
+                tensor.columnwise_scale_inv is not None
+            ), "Columnwise scale inverse is not set for grouped tensor"
+            setattr(tensor.columnwise_data, "grouped_tensor_scale_inv", False)
+            setattr(tensor.columnwise_scale_inv, "grouped_tensor_scale_inv", True)
+        else:
+            setattr(tensor, "grouped_tensor_scale_inv", False)
 
 
 def split_tensor_along_dim(
