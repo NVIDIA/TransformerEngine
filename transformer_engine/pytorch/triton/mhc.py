@@ -237,6 +237,7 @@ class mHCProjectionOp(torch.autograd.Function):
         tuple: A tuple of (H, ms) where H is the projected matrix of shape (M, 32) padded for memory alignment (only the first N elements are valid), and ms is the mean square of shape (M,) in FP32.
         """
         x = x.contiguous()
+        phi = phi.contiguous()
 
         ctx.use_tf32 = use_tf32
         ctx.dtype = x.dtype

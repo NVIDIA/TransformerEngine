@@ -281,7 +281,7 @@ def _mhc_scale_fwd_fused(
     offs_a = tl.where((cols >= 2 * n) & (cols < 2 * n + n * n), 2, offs_a)
     # Pick a[0] from a for the first 4 columns, a[1] for the next 4 columns, and a[2] for the rest of the columns
     a = tl.load(
-        a_ptr + offs_a * stride_a, mask=offs_a < N, other=0.0
+        a_ptr + offs_a * stride_a, mask=offs_a < 3, other=0.0
     )  # a[2*n + n*n:] is filled with garbage
     a = tl.where(cols < N, a, 0.0)  # Mask out the garbage values in a
 
@@ -1668,7 +1668,7 @@ def _mhc_expand_combine_with_bias_bwd(
     grad_f_ptrs = grad_f_ptr + offs_m[:, None] * stride_grad_fm + offs_c[None, :] * stride_grad_fc
     tl.store(grad_f_ptrs, grad_f, mask=mask_m[:, None] & mask_c[None, :])
 
-    grad_bias = grad_f.sum(axis=0)  # (BLOCK_SIZE_C,)
+    grad_bias = grad_f_acc.sum(axis=0)  # (BLOCK_SIZE_C,)
     grad_bias_ptrs = grad_bias_ptr + offs_c * stride_grad_bias
     tl.atomic_add(grad_bias_ptrs, grad_bias, mask=mask_c, sem="relaxed")
 
