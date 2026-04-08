@@ -672,8 +672,8 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
     NVTE_CHECK_CUDA(cudaIpcGetMemHandle(memhndl, *gpubuff));
 
     cudaIpcMemHandle_t *tmp;
-    NVTE_CHECK_CUDA(cudaMallocHost(reinterpret_cast<void **>(&tmp),
-          comm->nvsize * sizeof(cudaIpcMemHandle_t)));
+    NVTE_CHECK_CUDA(
+        cudaMallocHost(reinterpret_cast<void **>(&tmp), comm->nvsize * sizeof(cudaIpcMemHandle_t)));
 
     comm->_allgather(reinterpret_cast<void *>(tmp), comm->nvsize * sizeof(cudaIpcMemHandle_t),
                      reinterpret_cast<void *>(memhndl), sizeof(cudaIpcMemHandle_t),
