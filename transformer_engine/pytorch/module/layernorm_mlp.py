@@ -487,8 +487,12 @@ class _LayerNormMLP(torch.autograd.Function):
             Float8BlockQuantizer,
             NVFP4Quantizer,
         )
-        _is_safe_for_fsdp2 = isinstance(fc1_weight_quantizer, _fsdp2_safe_quantizers) or isinstance(
-            fc1_weight, Float8Tensor
+        _is_safe_for_fsdp2 = (
+            isinstance(fc1_weight_quantizer, _fsdp2_safe_quantizers)
+            or isinstance(fc1_weight, Float8Tensor)
+        ) and (
+            isinstance(fc2_weight_quantizer, _fsdp2_safe_quantizers)
+            or isinstance(fc2_weight, Float8Tensor)
         )
         fsdp2_skip_columnwise = is_fsdp2 and not is_recomputation and _is_safe_for_fsdp2
         if fp8 or debug:
@@ -882,6 +886,8 @@ class _LayerNormMLP(torch.autograd.Function):
 
             ctx.fc1_weight_requires_grad = fc1_weight.requires_grad
             ctx.fc2_weight_requires_grad = fc2_weight.requires_grad
+            ctx.fc1_weight = fc1_weight
+            ctx.fc2_weight = fc2_weight
             ctx.fsdp2_skip_columnwise = fsdp2_skip_columnwise
 
             ctx.device = device
@@ -1249,9 +1255,7 @@ class _LayerNormMLP(torch.autograd.Function):
 
             # FSDP2: Clear FP8 transpose cache after FC2 dgrad GEMM.
             # (Issue #2717)
-            if getattr(ctx, "fsdp2_skip_columnwise", False) and hasattr(
-                fc2_weight, "_transpose"
-            ):
+            if getattr(ctx, "fsdp2_skip_columnwise", False) and hasattr(fc2_weight, "_transpose"):
                 if getattr(fc2_weight, "_transpose", None) is not None:
                     fc2_weight._transpose = None
                     fc2_weight._transpose_invalid = True
@@ -1537,9 +1541,7 @@ class _LayerNormMLP(torch.autograd.Function):
 
             # FSDP2: Clear FP8 transpose cache after FC1 dgrad GEMM.
             # (Issue #2717)
-            if getattr(ctx, "fsdp2_skip_columnwise", False) and hasattr(
-                fc1_weight, "_transpose"
-            ):
+            if getattr(ctx, "fsdp2_skip_columnwise", False) and hasattr(fc1_weight, "_transpose"):
                 if getattr(fc1_weight, "_transpose", None) is not None:
                     fc1_weight._transpose = None
                     fc1_weight._transpose_invalid = True
