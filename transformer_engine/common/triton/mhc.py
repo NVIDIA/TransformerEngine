@@ -302,11 +302,11 @@ def _mhc_scale_fwd_fused(
         h, 1.0 / rms[:, None], b[None, :]
     )  # (BLOCK_SIZE_M, BLOCK_SIZE_N), where the first 2n columns are H_pre and H_post, and the rest are H_res
     h_sigmoid_pre = tl.sigmoid(h)
-    h_sigmold_post = 2 * h_sigmoid_pre
+    h_sigmoid_post = 2 * h_sigmoid_pre
 
     # Use this mask to select h[:, :2n]
     h = tl.where(cols[None, :] < n, h_sigmoid_pre, h)
-    h = tl.where((cols[None, :] >= n) & (cols[None, :] < 2 * n), h_sigmold_post, h)
+    h = tl.where((cols[None, :] >= n) & (cols[None, :] < 2 * n), h_sigmoid_post, h)
 
     tl.store(
         out_ptr + offs_m[:, None] * stride_out_m + cols[None, :] * stride_out_n,

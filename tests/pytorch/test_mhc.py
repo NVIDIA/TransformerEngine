@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-from attr import dataclass
+from dataclasses import dataclass
 import pytest
 import torch
 import torch.nn.functional as F
@@ -16,7 +16,6 @@ from transformer_engine.pytorch.triton.mhc import (
     mhc_fused_projection,
 )
 
-seed = 1234
 reset_rng_states()
 
 # Enable TF32 for matmul to ensure consistency between the fused and reference implementations
@@ -341,8 +340,6 @@ def test_mhc_combined(cfg: MHCConfig, dtype):
     nC = n * C
 
     tols = get_tols(dtype)
-
-    tols = get_tols(dtype)
     use_tf32 = False
 
     x = torch.randn(s * b, nC, device="cuda", requires_grad=True, dtype=dtype)
@@ -486,3 +483,5 @@ def test_mhc_expand_combine(cfg: MHCConfig, dtype, with_bias):
     torch.testing.assert_close(H_post.grad, H_post_ref.grad, **tols)
     torch.testing.assert_close(x.grad, x_ref.grad, **tols)
     torch.testing.assert_close(H_res.grad, H_res_ref.grad, **tols)
+    if bias is not None:
+        torch.testing.assert_close(bias.grad, bias_ref.grad, **tols)

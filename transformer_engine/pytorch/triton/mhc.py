@@ -158,7 +158,7 @@ def mhc_fused_expand_combine(
     x : torch.Tensor
         input activation tensor of shape (s, b, C, n), which is the hyper connection input before the aggregation operation
     H_res : torch.Tensor
-        input H_res matrix of shape (s, b, n)
+        input H_res matrix of shape (s, b, n, n)
     n : int
         number of hyper connections
     use_tf32 : bool
@@ -217,6 +217,9 @@ def mhc_fused_projection(x: torch.Tensor, phi: torch.Tensor, use_tf32: bool = Tr
 
 
 class mHCProjectionOp(torch.autograd.Function):
+    """
+    PyTorch operator for the fused projection operation in mHC, whose wrapper API is mhc_fused_projection.
+    """
 
     @staticmethod
     def forward(ctx, x, phi, use_tf32=True):
@@ -394,6 +397,9 @@ class mHCProjectionOp(torch.autograd.Function):
 
 
 class mHCScaleFusedOp(torch.autograd.Function):
+    """
+    PyTorch operator for the fused scale operation in mHC, whose wrapper API is mhc_fused_scale.
+    """
 
     @staticmethod
     def forward(ctx, H, alpha, beta, ms, n):
@@ -534,6 +540,9 @@ class mHCScaleFusedOp(torch.autograd.Function):
 
 
 class mHCSinkhornOp(torch.autograd.Function):
+    """
+    PyTorch operator for the Sinkhorn operation in mHC, whose wrapper API is mhc_fused_sinkhorn.
+    """
 
     @staticmethod
     def forward(ctx, H_res, n=4, recompute_hist=True, iters=20):
@@ -697,6 +706,9 @@ class mHCSinkhornOp(torch.autograd.Function):
 
 
 class mHCAggregateOp(torch.autograd.Function):
+    """
+    PyTorch operator for the aggregate operation in mHC, whose wrapper API is mhc_fused_aggregate.
+    """
 
     @staticmethod
     def forward(ctx, x, H_pre, n, use_tf32=True):
@@ -830,6 +842,9 @@ class mHCAggregateOp(torch.autograd.Function):
 
 
 class mHCExpandCombineOp(torch.autograd.Function):
+    """
+    PyTorch operator for the expand and combine operation in mHC, whose wrapper API is mhc_fused_expand_combine.
+    """
 
     @staticmethod
     def forward(ctx, f, bias, H_post, x, H_res, n, use_tf32=True):
