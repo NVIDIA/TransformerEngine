@@ -1785,12 +1785,12 @@ void unswizzle_grouped_scaling_factors(const GroupedTensor* input, GroupedTensor
     kernel_t kernel_fn = nullptr;
     switch (vec_load_size) {
       case 4:
-        kernel_fn = grouped_unswizzle_scaling_uniform_shape_kernel<int4, SF_TILE_DIM_M,
-                                                                    SF_TILE_DIM_K>;
+        kernel_fn =
+            grouped_unswizzle_scaling_uniform_shape_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>;
         break;
       case 2:
-        kernel_fn = grouped_unswizzle_scaling_uniform_shape_kernel<int2, SF_TILE_DIM_M,
-                                                                    SF_TILE_DIM_K>;
+        kernel_fn =
+            grouped_unswizzle_scaling_uniform_shape_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>;
         break;
       case 1:
         kernel_fn =
