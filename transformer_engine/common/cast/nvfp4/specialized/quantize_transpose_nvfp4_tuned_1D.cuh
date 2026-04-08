@@ -418,12 +418,12 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D
   const float S_enc_rowwise =
       (amax_rowwise_ptr == nullptr)
           ? 1.0f
-          : core::compute_global_encode_scaling_factor_FP4(*amax_rowwise_ptr);
+          : core::compute_global_encode_scaling_factor(*amax_rowwise_ptr);
 
   const float S_enc_colwise =
       (amax_colwise_ptr == nullptr)
           ? S_enc_rowwise
-          : core::compute_global_encode_scaling_factor_FP4(*amax_colwise_ptr);
+          : core::compute_global_encode_scaling_factor(*amax_colwise_ptr);
 
   __shared__ uint64_t workID_mbar;
   __shared__ __uint128_t workID_response;

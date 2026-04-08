@@ -41,25 +41,18 @@ struct TunableConfig {
   static constexpr size_t CHUNK_DIM_Y = 128;
   static constexpr size_t CHUNK_DIM_X = 128;
   static constexpr int PREFETCH_STAGES = 1;
-  static constexpr bool PERSISTENT = true;
   static constexpr size_t STATIC_PERSISTENT_BLOCKS_PER_SM = 4;
 };
 
 constexpr size_t CHUNK_DIM_Y = TunableConfig::CHUNK_DIM_Y;
 constexpr size_t CHUNK_DIM_X = TunableConfig::CHUNK_DIM_X;
 constexpr int PREFETCH_STAGES = TunableConfig::PREFETCH_STAGES;
-constexpr bool PERSISTENT = TunableConfig::PERSISTENT;
 constexpr size_t STATIC_PERSISTENT_BLOCKS_PER_SM = TunableConfig::STATIC_PERSISTENT_BLOCKS_PER_SM;
 
 constexpr size_t ELTS_PER_CHUNK = CHUNK_DIM_Y * CHUNK_DIM_X;
 
-static_assert(!PERSISTENT || (STATIC_PERSISTENT_BLOCKS_PER_SM > 0),
-              "STATIC_PERSISTENT_BLOCKS_PER_SM must be greater than zero in persistent mode.");
-
-constexpr int MAX_SUPPORTED_TENSOR_DESCRIPTORS = 64;
-__device__ alignas(128) CUtensorMap g_tensor_maps_input[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
-__device__ alignas(128) CUtensorMap g_tensor_maps_output[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
-__device__ alignas(128) CUtensorMap g_tensor_maps_output_t[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
+static_assert(STATIC_PERSISTENT_BLOCKS_PER_SM > 0,
+              "STATIC_PERSISTENT_BLOCKS_PER_SM must be greater than zero.");
 
 constexpr int SCALE_DIM = 16;  // NVFP4 block (x16 elts)
 constexpr int THREADS_NUM = 128;
@@ -343,275 +336,8 @@ __device__ __forceinline__ void rowwise_scaling(const IType *__restrict__ sIn_pt
   }
 }
 
-__device__ __forceinline__ size_t get_current_tensor_id(
-    const ShapeRepresentation shape_rep, const size_t num_tensors, const size_t current_offset,
-    const size_t block_Y, const size_t first_logical_dim, const size_t last_logical_dim,
-    const int64_t *const __restrict__ offsets_ptr) {
-  if (shape_rep == ShapeRepresentation::SAME_BOTH_DIMS) {
-    const size_t current_row = block_Y * CHUNK_DIM_Y;
-    const size_t rows_per_tensor = first_logical_dim / num_tensors;
-    return current_row / rows_per_tensor;
-  }
-
-  size_t low = 1;
-  size_t hi = num_tensors;  // [low, hi]
-  while (low < hi) {
-    const size_t mid = low + (hi - low) / 2;
-    const size_t mid_offset = static_cast<size_t>(offsets_ptr[mid]);
-    if (mid_offset <= current_offset) {
-      low = mid + 1;
-    } else {
-      hi = mid;
-    }
-  }
-  return low - 1;
-}
-
-__device__ __forceinline__ size_t get_tensor_rows_num(
-    const size_t tensor_id, const ShapeRepresentation shape_rep, const size_t first_logical_dim,
-    const int64_t *const __restrict__ first_dims_ptr, const size_t num_tensors) {
-  size_t rows_num = 0;
-  switch (shape_rep) {
-    case ShapeRepresentation::SAME_BOTH_DIMS:
-      rows_num = first_logical_dim / num_tensors;
-      break;
-    case ShapeRepresentation::VARYING_LAST_DIM:
-      rows_num = first_logical_dim;
-      break;
-    case ShapeRepresentation::VARYING_FIRST_DIM:
-    case ShapeRepresentation::VARYING_BOTH_DIMS:
-      rows_num = static_cast<size_t>(first_dims_ptr[tensor_id]);
-      break;
-  }
-  if (rows_num % 128 != 0) {
-    NVTE_DEVICE_ERROR("First dimension of each tensor in a group must be divisible by 128.");
-  }
-  return rows_num;
-}
-
-__device__ __forceinline__ size_t get_tensor_cols_num(
-    const size_t tensor_id, const ShapeRepresentation shape_rep, const size_t last_logical_dim,
-    const int64_t *const __restrict__ last_dims_ptr) {
-  size_t cols_num = 0;
-  switch (shape_rep) {
-    case ShapeRepresentation::SAME_BOTH_DIMS:
-    case ShapeRepresentation::VARYING_FIRST_DIM:
-      cols_num = last_logical_dim;
-      break;
-    case ShapeRepresentation::VARYING_LAST_DIM:
-    case ShapeRepresentation::VARYING_BOTH_DIMS:
-      cols_num = static_cast<size_t>(last_dims_ptr[tensor_id]);
-      if (cols_num % 128 != 0) {
-        NVTE_DEVICE_ERROR(
-            "For non-single tensors, the last dimension of each tensor in a group "
-            "must be divisible by 128.");
-      }
-      break;
-  }
-  return cols_num;
-}
-
-__device__ __forceinline__ size_t
-get_tensor_base_offset(const size_t tensor_id, const ShapeRepresentation shape_rep,
-                       const size_t first_logical_dim, const size_t last_logical_dim,
-                       const size_t num_tensors, const int64_t *const __restrict__ offsets_ptr) {
-  if (shape_rep == ShapeRepresentation::SAME_BOTH_DIMS) {
-    const size_t rows_per_tensor = first_logical_dim / num_tensors;
-    return tensor_id * rows_per_tensor * last_logical_dim;
-  }
-  return static_cast<size_t>(offsets_ptr[tensor_id]);
-}
-
 __device__ __forceinline__ size_t get_nvfp4_scale_stride(const size_t block_scaled_dim) {
   return DIVUP_TO_MULTIPLE(DIVUP(block_scaled_dim, static_cast<size_t>(SCALE_DIM)), 4);
-}
-
-struct JobDescriptor {
-  size_t block_id = 0;
-  size_t block_global_offset = 0;
-  size_t tensor_id = 0;
-  size_t rows = 0;
-  size_t cols = 0;
-};
-
-struct BlockDescriptor {
-  size_t tensor_base = 0;
-  size_t block_id_Y = 0;
-  size_t block_id_X = 0;
-  size_t block_offset_Y = 0;
-  size_t block_offset_X = 0;
-};
-
-__device__ __forceinline__ JobDescriptor decode_job(
-    const ShapeRepresentation shape_rep, const bool use_single_work_grid, const size_t num_tensors,
-    const size_t first_logical_dim, const size_t last_logical_dim, const size_t work_blocks_X,
-    const int32_t ctaid_X, const int32_t ctaid_Y, const int64_t *const __restrict__ offsets_ptr,
-    const int64_t *const __restrict__ first_dims_ptr,
-    const int64_t *const __restrict__ last_dims_ptr) {
-  JobDescriptor job{};
-  job.block_id = static_cast<size_t>(ctaid_Y) * work_blocks_X + static_cast<size_t>(ctaid_X);
-  job.block_global_offset = use_single_work_grid
-                                ? (ctaid_Y * CHUNK_DIM_Y * last_logical_dim + ctaid_X * CHUNK_DIM_X)
-                                : (job.block_id * ELTS_PER_CHUNK);
-  job.tensor_id = get_current_tensor_id(shape_rep, num_tensors, job.block_global_offset,
-                                        static_cast<size_t>(ctaid_Y), first_logical_dim,
-                                        last_logical_dim, offsets_ptr);
-  job.rows =
-      get_tensor_rows_num(job.tensor_id, shape_rep, first_logical_dim, first_dims_ptr, num_tensors);
-  job.cols = get_tensor_cols_num(job.tensor_id, shape_rep, last_logical_dim, last_dims_ptr);
-  return job;
-}
-
-__device__ __forceinline__ bool is_job_valid(const JobDescriptor &job,
-                                             const ShapeRepresentation shape_rep,
-                                             const size_t total_work_blocks,
-                                             const int64_t *const __restrict__ offsets_ptr) {
-  bool is_valid = (job.block_id < total_work_blocks) && (job.rows != 0) && (job.cols != 0);
-  if (!is_valid || shape_rep == ShapeRepresentation::SAME_BOTH_DIMS) {
-    return is_valid;
-  }
-
-  const size_t tensor_end_offset = static_cast<size_t>(offsets_ptr[job.tensor_id + 1]);
-  if (job.block_global_offset >= tensor_end_offset) {
-    return false;
-  }
-
-  return true;
-}
-
-__device__ __forceinline__ BlockDescriptor decode_block(
-    const JobDescriptor &job, const ShapeRepresentation shape_rep, const bool use_single_work_grid,
-    const size_t first_logical_dim, const size_t last_logical_dim, const size_t num_tensors,
-    const int32_t ctaid_X, const int32_t ctaid_Y, const int64_t *const __restrict__ offsets_ptr) {
-  BlockDescriptor block{};
-  block.tensor_base = get_tensor_base_offset(job.tensor_id, shape_rep, first_logical_dim,
-                                             last_logical_dim, num_tensors, offsets_ptr);
-
-  const size_t blocks_X_num_in_current_tensor = DIVUP(job.cols, static_cast<size_t>(CHUNK_DIM_X));
-  if (use_single_work_grid) {
-    block.block_id_X = static_cast<size_t>(ctaid_X);
-    if (shape_rep == ShapeRepresentation::SAME_BOTH_DIMS) {
-      const size_t rows_per_tensor = first_logical_dim / num_tensors;
-      const size_t blocks_Y_per_tensor = DIVUP(rows_per_tensor, static_cast<size_t>(CHUNK_DIM_Y));
-      block.block_id_Y = static_cast<size_t>(ctaid_Y) - job.tensor_id * blocks_Y_per_tensor;
-    } else {
-      const size_t tensor_base_row = block.tensor_base / job.cols;
-      block.block_id_Y = static_cast<size_t>(ctaid_Y) - tensor_base_row / CHUNK_DIM_Y;
-    }
-  } else {
-    const size_t block_id_in_current_tensor = job.block_id - block.tensor_base / ELTS_PER_CHUNK;
-    block.block_id_Y = block_id_in_current_tensor / blocks_X_num_in_current_tensor;
-    block.block_id_X = block_id_in_current_tensor % blocks_X_num_in_current_tensor;
-  }
-
-  block.block_offset_Y = block.block_id_Y * CHUNK_DIM_Y;
-  block.block_offset_X = block.block_id_X * CHUNK_DIM_X;
-  return block;
-}
-
-__device__ __forceinline__ uintptr_t get_pointer_with_offset_bits(const uintptr_t base_ptr,
-                                                                  const size_t offset_elts,
-                                                                  const size_t data_type_bits) {
-  const size_t offset_bits = offset_elts * data_type_bits;
-  if (offset_bits % 8 != 0) {
-    NVTE_DEVICE_ERROR("Data offset is not byte-aligned.");
-  }
-  return base_ptr + offset_bits / 8;
-}
-
-__device__ __forceinline__ void modify_base_tensor_map(const CUtensorMap base_tensor_map,
-                                                       CUtensorMap *global_tensor_map,
-                                                       const uintptr_t global_data_ptr,
-                                                       const size_t global_dim_Y,
-                                                       const size_t global_dim_X,
-                                                       const size_t data_type_bits) {
-  __shared__ CUtensorMap shared_tensor_map;
-  shared_tensor_map = base_tensor_map;
-  constexpr bool is_blackwell = ARCH_BLACKWELL_FAMILY;
-  if constexpr (is_blackwell) {
-    const size_t global_stride_bits = global_dim_X * data_type_bits;
-    if (global_stride_bits % 8 != 0) {
-      NVTE_DEVICE_ERROR("Shape not supported. Data stride must be byte-aligned.");
-    }
-    const size_t global_stride_bytes = global_stride_bits / 8;
-    if (global_stride_bytes % TMA_GMEM_ALIGNMENT != 0) {
-      NVTE_DEVICE_ERROR("Shape not supported. Data stride must be 16B aligned.");
-    }
-    if (global_data_ptr % TMA_GMEM_ALIGNMENT != 0) {
-      NVTE_DEVICE_ERROR("Tensor data pointer must be 16B aligned.");
-    }
-    asm volatile(
-        "{\n\t"
-        ".reg.b64 tensor_map_ptr; \n\t"
-        "mov.b64 tensor_map_ptr, %0; \n\t"
-        "tensormap.replace.tile.global_address.b1024.b64 [tensor_map_ptr], %1; \n\t"
-        "tensormap.replace.tile.global_dim.b1024.b32 [tensor_map_ptr], 1, %2; \n\t"
-        "tensormap.replace.tile.global_dim.b1024.b32 [tensor_map_ptr], 0, %3; \n\t"
-        "tensormap.replace.tile.global_stride.b1024.b64 [tensor_map_ptr], 0, %4; \n\t"
-        "}\n"
-        :
-        : "l"(reinterpret_cast<uintptr_t>(&shared_tensor_map)), "l"(global_data_ptr),
-          "r"(static_cast<uint32_t>(global_dim_Y)), "r"(static_cast<uint32_t>(global_dim_X)),
-          "l"(static_cast<uint64_t>(global_stride_bytes))
-        : "memory");
-    *global_tensor_map = shared_tensor_map;
-  } else {
-    NVTE_DEVICE_ERROR(
-        "tensormap.replace is architecture-specific. "
-        "Try recompiling with sm_XXXa instead of sm_XXX.");
-  }
-}
-
-template <typename InType>
-__global__ void update_tma_descriptors(
-    const __grid_constant__ CUtensorMap base_tensor_map_input,
-    const __grid_constant__ CUtensorMap base_tensor_map_output,
-    const __grid_constant__ CUtensorMap base_tensor_map_output_t,
-    const InType *const __restrict__ input_data_ptr, const void *const output_data_ptr,
-    const void *const output_t_data_ptr, const ShapeRepresentation shape_rep,
-    const size_t num_tensors, const size_t first_logical_dim, const size_t last_logical_dim,
-    const int64_t *const __restrict__ offsets_ptr, const int64_t *const __restrict__ first_dims_ptr,
-    const int64_t *const __restrict__ last_dims_ptr, const bool rowwise, const bool colwise) {
-  const bool leading_thread = (threadIdx.x == 0);
-  const size_t tensor_id = blockIdx.x;
-  if (!leading_thread || tensor_id >= num_tensors) {
-    return;
-  }
-
-  const size_t rows =
-      get_tensor_rows_num(tensor_id, shape_rep, first_logical_dim, first_dims_ptr, num_tensors);
-  const size_t cols = get_tensor_cols_num(tensor_id, shape_rep, last_logical_dim, last_dims_ptr);
-  const size_t offset_elts = get_tensor_base_offset(tensor_id, shape_rep, first_logical_dim,
-                                                    last_logical_dim, num_tensors, offsets_ptr);
-
-  {
-    const uintptr_t global_data_ptr = get_pointer_with_offset_bits(
-        reinterpret_cast<uintptr_t>(input_data_ptr), offset_elts, TypeInfo<InType>::size);
-    modify_base_tensor_map(base_tensor_map_input, &g_tensor_maps_input[tensor_id], global_data_ptr,
-                           rows, cols, TypeInfo<InType>::size);
-  }
-
-  if (rowwise) {
-    const uintptr_t global_data_ptr =
-        get_pointer_with_offset_bits(reinterpret_cast<uintptr_t>(output_data_ptr), offset_elts, 4);
-    modify_base_tensor_map(base_tensor_map_output, &g_tensor_maps_output[tensor_id],
-                           global_data_ptr, rows, cols, 4);
-  }
-
-  if (colwise) {
-    const uintptr_t global_data_ptr = get_pointer_with_offset_bits(
-        reinterpret_cast<uintptr_t>(output_t_data_ptr), offset_elts, 4);
-    modify_base_tensor_map(base_tensor_map_output_t, &g_tensor_maps_output_t[tensor_id],
-                           global_data_ptr, cols, rows, 4);
-  }
-}
-
-__device__ __forceinline__ void fence_acquire_tensormap(const CUtensorMap *tensor_map) {
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  asm volatile("fence.proxy.tensormap::generic.acquire.cta [%0], 128;" ::"l"(tensor_map));
-#else
-  NVTE_DEVICE_ERROR("fence_acquire_tensormap is only supported on SM 9.0+.");
-#endif
 }
 
 template <bool USE_STOCHASTIC_ROUNDING, bool USE_FAST_MATH, bool RETURN_TRANSPOSE>
@@ -719,15 +445,13 @@ __global__ void __launch_bounds__(THREADS_NUM) group_quantize_transpose_nvfp4_tu
   int32_t ctaid_Y = static_cast<int32_t>(blockIdx.y);
   size_t static_next_block_id = 0;
   size_t static_block_stride = 0;
-  if constexpr (PERSISTENT) {
-    if (launch_block_id >= total_work_blocks) {
-      return;
-    }
-    ctaid_X = static_cast<int32_t>(launch_block_id % work_blocks_X);
-    ctaid_Y = static_cast<int32_t>(launch_block_id / work_blocks_X);
-    static_block_stride = static_cast<size_t>(gridDim.x) * static_cast<size_t>(gridDim.y);
-    static_next_block_id = launch_block_id + static_block_stride;
+  if (launch_block_id >= total_work_blocks) {
+    return;
   }
+  ctaid_X = static_cast<int32_t>(launch_block_id % work_blocks_X);
+  ctaid_Y = static_cast<int32_t>(launch_block_id / work_blocks_X);
+  static_block_stride = static_cast<size_t>(gridDim.x) * static_cast<size_t>(gridDim.y);
+  static_next_block_id = launch_block_id + static_block_stride;
 
   bool job_finished = false;
   int buff_in = 0;
@@ -737,16 +461,17 @@ __global__ void __launch_bounds__(THREADS_NUM) group_quantize_transpose_nvfp4_tu
   bool has_prefetched_current_job = true;
 
   {
-    const JobDescriptor first_job = decode_job(
+    const JobDescriptor first_job = decode_job<CHUNK_DIM_Y, CHUNK_DIM_X>(
         shape_rep, use_single_work_grid, num_tensors, first_logical_dim, last_logical_dim,
         work_blocks_X, ctaid_X, ctaid_Y, offsets_ptr, first_dims_ptr, last_dims_ptr);
     if (!is_job_valid(first_job, shape_rep, total_work_blocks, offsets_ptr)) {
       return;
     }
     const BlockDescriptor first_block =
-        decode_block(first_job, shape_rep, use_single_work_grid, first_logical_dim,
-                     last_logical_dim, num_tensors, ctaid_X, ctaid_Y, offsets_ptr);
-    const CUtensorMap &tensor_map_input = g_tensor_maps_input[first_job.tensor_id];
+        decode_block<CHUNK_DIM_Y, CHUNK_DIM_X>(first_job, shape_rep, use_single_work_grid,
+                                               first_logical_dim, last_logical_dim, num_tensors,
+                                               ctaid_X, ctaid_Y, offsets_ptr);
+    const CUtensorMap &tensor_map_input = g_tensor_maps.input[first_job.tensor_id];
     if (leading_thread) {
       fence_acquire_tensormap(&tensor_map_input);
     }
@@ -770,7 +495,7 @@ __global__ void __launch_bounds__(THREADS_NUM) group_quantize_transpose_nvfp4_tu
   }
 
   while (!job_finished) {
-    const JobDescriptor current_job = decode_job(
+    const JobDescriptor current_job = decode_job<CHUNK_DIM_Y, CHUNK_DIM_X>(
         shape_rep, use_single_work_grid, num_tensors, first_logical_dim, last_logical_dim,
         work_blocks_X, ctaid_X, ctaid_Y, offsets_ptr, first_dims_ptr, last_dims_ptr);
     const bool current_job_is_valid =
@@ -786,8 +511,9 @@ __global__ void __launch_bounds__(THREADS_NUM) group_quantize_transpose_nvfp4_tu
     }
 
     const BlockDescriptor current_block =
-        decode_block(current_job, shape_rep, use_single_work_grid, first_logical_dim,
-                     last_logical_dim, num_tensors, ctaid_X, ctaid_Y, offsets_ptr);
+        decode_block<CHUNK_DIM_Y, CHUNK_DIM_X>(current_job, shape_rep, use_single_work_grid,
+                                               first_logical_dim, last_logical_dim, num_tensors,
+                                               ctaid_X, ctaid_Y, offsets_ptr);
 
     const size_t rows = current_job.rows;
     const size_t cols = current_job.cols;
@@ -822,9 +548,9 @@ __global__ void __launch_bounds__(THREADS_NUM) group_quantize_transpose_nvfp4_tu
     nvfp4_scale_t *const scales_colwise =
         RETURN_TRANSPOSE ? (scales_t_ptr + colwise_scale_base[current_job.tensor_id]) : nullptr;
 
-    const CUtensorMap &tensor_map_input = g_tensor_maps_input[current_job.tensor_id];
-    const CUtensorMap &tensor_map_output = g_tensor_maps_output[current_job.tensor_id];
-    const CUtensorMap &tensor_map_output_t = g_tensor_maps_output_t[current_job.tensor_id];
+    const CUtensorMap &tensor_map_input = g_tensor_maps.input[current_job.tensor_id];
+    const CUtensorMap &tensor_map_output = g_tensor_maps.output_rowwise[current_job.tensor_id];
+    const CUtensorMap &tensor_map_output_t = g_tensor_maps.output_colwise[current_job.tensor_id];
 
     if (leading_thread) {
       fence_acquire_tensormap(&tensor_map_input);
@@ -847,37 +573,27 @@ __global__ void __launch_bounds__(THREADS_NUM) group_quantize_transpose_nvfp4_tu
       BlockDescriptor prefetch_block = current_block;
 
       if (stage == STAGES - PREFETCH_STAGES) {
-        if constexpr (PERSISTENT) {
-          if (static_next_block_id < total_work_blocks) {
-            ctaid_X = static_cast<int32_t>(static_next_block_id % work_blocks_X);
-            ctaid_Y = static_cast<int32_t>(static_next_block_id / work_blocks_X);
-            static_next_block_id += static_block_stride;
-          } else {
-            ctaid_X = 0;
-            ctaid_Y = static_cast<int32_t>(work_blocks_Y);
-            allow_next_job_prefetch = false;
-          }
+        if (static_next_block_id < total_work_blocks) {
+          ctaid_X = static_cast<int32_t>(static_next_block_id % work_blocks_X);
+          ctaid_Y = static_cast<int32_t>(static_next_block_id / work_blocks_X);
+          static_next_block_id += static_block_stride;
         } else {
-          ctaid_X = -1;
-          ctaid_Y = -1;
-        }
-        if constexpr (!PERSISTENT) {
-          if (ctaid_X == -1 && ctaid_Y == -1) {
-            job_finished = true;
-          }
+          ctaid_X = 0;
+          ctaid_Y = static_cast<int32_t>(work_blocks_Y);
+          allow_next_job_prefetch = false;
         }
       }
 
       if ((stage >= STAGES - PREFETCH_STAGES) && allow_next_job_prefetch && !job_finished) {
-        prefetch_job = decode_job(shape_rep, use_single_work_grid, num_tensors, first_logical_dim,
-                                  last_logical_dim, work_blocks_X, ctaid_X, ctaid_Y, offsets_ptr,
-                                  first_dims_ptr, last_dims_ptr);
+        prefetch_job = decode_job<CHUNK_DIM_Y, CHUNK_DIM_X>(
+            shape_rep, use_single_work_grid, num_tensors, first_logical_dim, last_logical_dim,
+            work_blocks_X, ctaid_X, ctaid_Y, offsets_ptr, first_dims_ptr, last_dims_ptr);
         allow_next_job_prefetch =
             is_job_valid(prefetch_job, shape_rep, total_work_blocks, offsets_ptr);
         if (allow_next_job_prefetch) {
-          prefetch_block =
-              decode_block(prefetch_job, shape_rep, use_single_work_grid, first_logical_dim,
-                           last_logical_dim, num_tensors, ctaid_X, ctaid_Y, offsets_ptr);
+          prefetch_block = decode_block<CHUNK_DIM_Y, CHUNK_DIM_X>(
+              prefetch_job, shape_rep, use_single_work_grid, first_logical_dim, last_logical_dim,
+              num_tensors, ctaid_X, ctaid_Y, offsets_ptr);
         }
       }
 
@@ -898,7 +614,7 @@ __global__ void __launch_bounds__(THREADS_NUM) group_quantize_transpose_nvfp4_tu
         const int global_offset_X =
             static_cast<int>(prefetch_block.block_offset_X) + next_prefetch_stage_offset_X;
 
-        const CUtensorMap &prefetch_tensor_map_input = g_tensor_maps_input[prefetch_job.tensor_id];
+        const CUtensorMap &prefetch_tensor_map_input = g_tensor_maps.input[prefetch_job.tensor_id];
         if (leading_thread && stage == STAGES - PREFETCH_STAGES) {
           fence_acquire_tensormap(&prefetch_tensor_map_input);
         }
@@ -1091,17 +807,11 @@ inline void group_quantize_transpose(const GroupedTensor *input, const Tensor *n
     work_blocks_X = DIVUP(elts_total, ELTS_PER_CHUNK);
   }
 
-  size_t launch_blocks_X = work_blocks_X;
-  size_t launch_blocks_Y = work_blocks_Y;
-  if constexpr (PERSISTENT) {
-    const size_t sm_num = static_cast<size_t>(transformer_engine::cuda::sm_count());
-    const size_t static_grid_size = sm_num * STATIC_PERSISTENT_BLOCKS_PER_SM;
-    NVTE_CHECK(static_grid_size > 0, "Static persistent grid size must be greater than zero.");
-    launch_blocks_X = static_grid_size;
-    launch_blocks_Y = 1;
-  }
+  const size_t sm_num = static_cast<size_t>(transformer_engine::cuda::sm_count());
+  const size_t static_grid_size = sm_num * STATIC_PERSISTENT_BLOCKS_PER_SM;
+  NVTE_CHECK(static_grid_size > 0, "Static persistent grid size must be greater than zero.");
 
-  const dim3 grid(launch_blocks_X, launch_blocks_Y);
+  const dim3 grid(static_grid_size, 1);
   const int block_size = THREADS_NUM;
 
   const int64_t *const offsets_ptr = reinterpret_cast<const int64_t *>(output->tensor_offsets.dptr);
@@ -1186,7 +896,7 @@ inline void group_quantize_transpose(const GroupedTensor *input, const Tensor *n
   const void *const output_dptr = output->data.dptr;
   const void *const output_t_dptr = return_transpose ? output->columnwise_data.dptr : nullptr;
 
-  update_tma_descriptors<IType><<<num_tensors, 1, 0, stream>>>(
+  update_tma_descriptors_packed_output<IType, 4><<<num_tensors, 1, 0, stream>>>(
       tensor_map_input, tensor_map_output, tensor_map_output_transpose, input_dptr, output_dptr,
       output_t_dptr, shape_rep, num_tensors, first_logical_dim, last_logical_dim, offsets_ptr,
       first_dims_ptr, last_dims_ptr, true, return_transpose);

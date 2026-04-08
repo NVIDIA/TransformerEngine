@@ -496,7 +496,7 @@ void performTest(const ShapeRepresentation shape_rep,
     quant_config.set_use_fast_math(use_fast_math);
     quant_config.set_stochastic_rounding(false);
 
-    nvte_group_quantize_v2(in_group_tensor, out_group_tensor, quant_config, 0);
+    nvte_group_quantize(in_group_tensor, out_group_tensor, quant_config, 0);
     cudaDeviceSynchronize();
     auto err = cudaGetLastError();
     ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
