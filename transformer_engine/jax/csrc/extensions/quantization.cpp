@@ -562,68 +562,37 @@ Error_Type GroupedQuantizeV2FFI(cudaStream_t stream, Buffer_Type inputs, Buffer_
   offsets_shape.data[0] = n_groups + 1;
 
   // Build input grouped tensor (plain float data, no quantization on the input side).
-  NVTEGroupedTensor in_grouped = nvte_create_grouped_tensor(
-      get_nvte_scaling_mode(JAXX_Scaling_Mode::NO_SCALING), n_groups, data_shape);
-  {
-    NVTEBasicTensor in_data{reinterpret_cast<uint8_t *>(inputs.untyped_data()),
-                            static_cast<NVTEDType>(in_dtype), data_shape};
-    nvte_set_grouped_tensor_param(in_grouped, kNVTEGroupedRowwiseData, &in_data, sizeof(in_data));
-    NVTEBasicTensor sz_tensor{reinterpret_cast<uint8_t *>(int64_ptr), NVTEDType::kNVTEInt64,
-                              sz_shape};
-    nvte_set_grouped_tensor_param(in_grouped, kNVTEGroupedFirstDims, &sz_tensor, sizeof(sz_tensor));
-    NVTEBasicTensor offsets_tensor{reinterpret_cast<uint8_t *>(offsets_ptr_out),
-                                   NVTEDType::kNVTEInt64, offsets_shape};
-    nvte_set_grouped_tensor_param(in_grouped, kNVTEGroupedTensorOffsets, &offsets_tensor,
-                                  sizeof(offsets_tensor));
-  }
+  GroupedTensorWrapper in_grouped(n_groups, data_shape,
+                                  get_nvte_scaling_mode(JAXX_Scaling_Mode::NO_SCALING));
+  in_grouped.set_rowwise_data(reinterpret_cast<uint8_t *>(inputs.untyped_data()), in_dtype,
+                              data_shape)
+      .set_first_dims(reinterpret_cast<void *>(int64_ptr), DType::kInt64, sz_shape)
+      .set_tensor_offsets(reinterpret_cast<void *>(offsets_ptr_out), DType::kInt64, offsets_shape);
 
   // Build output grouped tensor.
-  NVTEGroupedTensor out_grouped = nvte_create_grouped_tensor(
-      get_nvte_scaling_mode(JAXX_Scaling_Mode::MXFP8_1D_SCALING), n_groups, data_shape);
-
-  // Set group sizes and offsets on output tensor (same device pointers).
-  {
-    NVTEBasicTensor sz_tensor{reinterpret_cast<uint8_t *>(int64_ptr), NVTEDType::kNVTEInt64,
-                              sz_shape};
-    nvte_set_grouped_tensor_param(out_grouped, kNVTEGroupedFirstDims, &sz_tensor,
-                                  sizeof(sz_tensor));
-    NVTEBasicTensor offsets_tensor{reinterpret_cast<uint8_t *>(offsets_ptr_out),
-                                   NVTEDType::kNVTEInt64, offsets_shape};
-    nvte_set_grouped_tensor_param(out_grouped, kNVTEGroupedTensorOffsets, &offsets_tensor,
-                                  sizeof(offsets_tensor));
-  }
+  GroupedTensorWrapper out_grouped(n_groups, data_shape,
+                                   get_nvte_scaling_mode(JAXX_Scaling_Mode::MXFP8_1D_SCALING));
+  out_grouped.set_first_dims(reinterpret_cast<void *>(int64_ptr), DType::kInt64, sz_shape)
+      .set_tensor_offsets(reinterpret_cast<void *>(offsets_ptr_out), DType::kInt64, offsets_shape);
 
   // Rowwise output data + scale_inv.
   if (is_quantize_rowwise(quantize_layout)) {
-    NVTEBasicTensor rw_data{reinterpret_cast<uint8_t *>(rowwise_out->untyped_data()),
-                            static_cast<NVTEDType>(out_dtype), data_shape};
-    nvte_set_grouped_tensor_param(out_grouped, kNVTEGroupedRowwiseData, &rw_data, sizeof(rw_data));
-
     NVTEShape rw_sinv_shape{};
     rw_sinv_shape.ndim = 2;
     rw_sinv_shape.data[0] = m;
     rw_sinv_shape.data[1] = n / 32;  // MXFP8 block size = 32
-    NVTEBasicTensor rw_sinv{reinterpret_cast<uint8_t *>(rowwise_sinv->untyped_data()),
-                            static_cast<NVTEDType>(sinv_dtype), rw_sinv_shape};
-    nvte_set_grouped_tensor_param(out_grouped, kNVTEGroupedRowwiseScaleInv, &rw_sinv,
-                                  sizeof(rw_sinv));
+    out_grouped.set_rowwise_data(rowwise_out->untyped_data(), out_dtype, data_shape)
+        .set_rowwise_scale_inv(rowwise_sinv->untyped_data(), sinv_dtype, rw_sinv_shape);
   }
 
   // Colwise output data + scale_inv.
   if (is_quantize_colwise(quantize_layout)) {
-    NVTEBasicTensor cw_data{reinterpret_cast<uint8_t *>(colwise_out->untyped_data()),
-                            static_cast<NVTEDType>(out_dtype), data_shape};
-    nvte_set_grouped_tensor_param(out_grouped, kNVTEGroupedColumnwiseData, &cw_data,
-                                  sizeof(cw_data));
-
     NVTEShape cw_sinv_shape{};
     cw_sinv_shape.ndim = 2;
     cw_sinv_shape.data[0] = m / 32;  // MXFP8 block size = 32
     cw_sinv_shape.data[1] = n;
-    NVTEBasicTensor cw_sinv{reinterpret_cast<uint8_t *>(colwise_sinv->untyped_data()),
-                            static_cast<NVTEDType>(sinv_dtype), cw_sinv_shape};
-    nvte_set_grouped_tensor_param(out_grouped, kNVTEGroupedColumnwiseScaleInv, &cw_sinv,
-                                  sizeof(cw_sinv));
+    out_grouped.set_columnwise_data(colwise_out->untyped_data(), out_dtype, data_shape)
+        .set_columnwise_scale_inv(colwise_sinv->untyped_data(), sinv_dtype, cw_sinv_shape);
   }
 
   // Zero-initialize scale_inv buffers (mirrors V1 behaviour for MXFP8).
@@ -639,15 +608,10 @@ Error_Type GroupedQuantizeV2FFI(cudaStream_t stream, Buffer_Type inputs, Buffer_
   // V2 grouped quantize is always paired with V2 grouped GEMM, which expects
   // scale_inv in GEMM-swizzled layout.  Enable the fused swizzle so the kernel
   // writes scales in the layout the GEMM will consume directly.
-  uint8_t swizzle_flag = 1;
-  nvte_set_grouped_tensor_param(out_grouped, kNVTEGroupedWithGEMMSwizzledScales, &swizzle_flag,
-                                sizeof(swizzle_flag));
+  out_grouped.set_with_gemm_swizzled_scales(true);
 
   QuantizationConfigWrapper quant_config{};
-  nvte_group_quantize(in_grouped, out_grouped, quant_config, stream);
-
-  nvte_destroy_grouped_tensor(in_grouped);
-  nvte_destroy_grouped_tensor(out_grouped);
+  nvte_group_quantize(in_grouped.data(), out_grouped.data(), quant_config, stream);
 
   return ffi_with_cuda_error_check();
 }
