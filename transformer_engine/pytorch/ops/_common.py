@@ -73,8 +73,8 @@ def get_fp8_meta_from_fp8_tensor(tensor: Float8Tensor) -> tuple[FP8TensorMeta, i
     return fp8_meta, 0
 
 
-def validate_grouped_mlp_dims(fc1, swiglu, fc2) -> None:
-    """Validate FC1/SwiGLU/FC2 dimensions and interleave size for fused grouped MLP."""
+def validate_grouped_mlp_dims(fc1, glu_op, fc2) -> None:
+    """Validate FC1 / scaled GLU / FC2 dimensions for fused grouped MLP."""
 
     if fc1.in_features % 256 != 0 or fc1.out_features % 256 != 0:
         raise ValueError(
@@ -93,10 +93,10 @@ def validate_grouped_mlp_dims(fc1, swiglu, fc2) -> None:
             f"and FC2 (num_groups={fc2.num_groups}, in_features={fc2.in_features}, "
             f"out_features={fc2.out_features}) do not match."
         )
-    if swiglu.glu_interleave_size != 32:
+    if glu_op.glu_interleave_size != 32:
         raise ValueError(
             "Fused kernel requires 32-wide GLU interleaving, "
-            f"but got glu_interleave_size={swiglu.glu_interleave_size}."
+            f"but got glu_interleave_size={glu_op.glu_interleave_size}."
         )
 
 
@@ -106,7 +106,7 @@ def fuse_grouped_mlp_ops(
     recipe,
     fused_op_cls,
 ):
-    """Sliding-window fusion for GroupedLinear + ScaledSwiGLU + GroupedLinear.
+    """Sliding-window fusion for GroupedLinear + scaled GLU + GroupedLinear.
 
     Parameters
     ----------
@@ -116,7 +116,9 @@ def fuse_grouped_mlp_ops(
         Quantization recipe.
     fused_op_cls : type
         Fused operation class with ``is_supported()`` classmethod and
-        constructor accepting ``fc1``, ``swiglu``, ``fc2`` keyword args.
+        constructor accepting ``fc1``, ``swiglu_op``, ``fc2`` keyword args. The
+        ``swiglu_op`` must be :class:`~transformer_engine.pytorch.ops.basic.swiglu.ScaledSwiGLU`
+        or :class:`~transformer_engine.pytorch.ops.basic.swiglu.ScaledClampedSwiGLU`.
         May also expose ``is_fc1_bias_supported()`` and/or
         ``is_fc2_bias_supported()`` classmethods for bias eligibility.
 
@@ -125,7 +127,11 @@ def fuse_grouped_mlp_ops(
     list of FusibleOperation
         Updated operations with matched triples replaced by fused ops.
     """
-    from .basic import GroupedLinear, ScaledSwiGLU  # pylint: disable=import-outside-toplevel
+    from .basic import (  # pylint: disable=import-outside-toplevel
+        GroupedLinear,
+        ScaledClampedSwiGLU,
+        ScaledSwiGLU,
+    )
 
     if not fused_op_cls.is_supported():
         return ops
@@ -146,7 +152,7 @@ def fuse_grouped_mlp_ops(
         matches_pattern = True
         if not (
             isinstance(window[0], GroupedLinear)
-            and isinstance(window[1], ScaledSwiGLU)
+            and isinstance(window[1], (ScaledSwiGLU, ScaledClampedSwiGLU))
             and isinstance(window[2], GroupedLinear)
         ):
             matches_pattern = False

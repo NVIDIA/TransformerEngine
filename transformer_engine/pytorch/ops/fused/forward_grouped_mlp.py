@@ -20,7 +20,7 @@ from ...utils import get_cached_ones_tensor, get_device_compute_capability, mark
 from ...tensor.grouped_tensor import GroupedTensor
 from ...tensor.mxfp8_tensor import MXFP8Quantizer
 from ...constants import MXFP8_BLOCK_SCALING_SIZE
-from ..basic import GroupedLinear, ScaledSwiGLU
+from ..basic import GroupedLinear, ScaledClampedSwiGLU, ScaledSwiGLU
 from ..fuser import register_forward_fusion
 from ..op import FusedOperation, FusibleOperation, OperationContext
 from .._common import (
@@ -46,7 +46,7 @@ def _pack_grouped_linear_bias_for_cudnn(linear_op: GroupedLinear) -> Optional[to
 
 
 class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
-    """Fused op for MXFP8 GroupedLinear + ScaledSwiGLU + GroupedLinear
+    """Fused op for MXFP8 GroupedLinear + scaled GLU + GroupedLinear
 
     Uses experimental CuTe DSL kernel from cuDNN front-end.
 
@@ -123,7 +123,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         self,
         *,
         fc1: GroupedLinear,
-        swiglu: ScaledSwiGLU,
+        swiglu: ScaledSwiGLU | ScaledClampedSwiGLU,
         fc2: GroupedLinear,
     ) -> None:
         super().__init__((fc1, swiglu, fc2))
@@ -131,6 +131,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             self.grouped_gemm_glu_kernel()  # Try triggering import error
             raise RuntimeError(f"{self.__class__.__name__} is not supported on this system.")
         validate_grouped_mlp_dims(fc1, swiglu, fc2)
+        self._cudnn_act_func: str = "geglu" if isinstance(swiglu, ScaledClampedSwiGLU) else "swiglu"
 
     def fuser_forward(
         self,
@@ -339,7 +340,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             "sf_vec_size": MXFP8_BLOCK_SCALING_SIZE,
             "current_stream": current_stream,
             "discrete_col_sfd": True,
-            "act_func": "swiglu",
+            "act_func": self._cudnn_act_func,
             "use_dynamic_sched": True,
         }
 

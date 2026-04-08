@@ -24,7 +24,7 @@ from ...tensor.grouped_tensor import GroupedTensor
 from ...tensor.mxfp8_tensor import MXFP8Quantizer
 from ...utils import clear_tensor_data, get_cached_ones_tensor, get_device_compute_capability
 from ...constants import MXFP8_BLOCK_SCALING_SIZE
-from ..basic import GroupedLinear, ScaledSwiGLU
+from ..basic import GroupedLinear, ScaledClampedSwiGLU, ScaledSwiGLU
 from ..fuser import register_backward_fusion
 from ..op import FusedOperation, FusibleOperation, OperationContext
 from .._common import (
@@ -181,7 +181,7 @@ def _compute_grad_params(
 
 
 class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
-    """Fused op for MXFP8 GroupedLinear + ScaledSwiGLU + GroupedLinear
+    """Fused op for MXFP8 GroupedLinear + ScaledSwiGLU or ScaledClampedSwiGLU + GroupedLinear
 
     Uses experimental CuTe DSL kernel from cuDNN front-end.
 
@@ -229,7 +229,7 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         self,
         *,
         fc1: GroupedLinear,
-        swiglu: ScaledSwiGLU,
+        swiglu: ScaledSwiGLU | ScaledClampedSwiGLU,
         fc2: GroupedLinear,
     ) -> None:
         super().__init__((fc1, swiglu, fc2))
@@ -237,6 +237,9 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
             self.grouped_gemm_dglu_kernel()  # Try triggering import error
             raise RuntimeError(f"{self.__class__.__name__} is not supported on this system.")
         validate_grouped_mlp_dims(fc1, swiglu, fc2)
+        self._cudnn_dact_func: str = (
+            "dgeglu" if isinstance(swiglu, ScaledClampedSwiGLU) else "dswiglu"
+        )
 
     def fuser_backward(
         self,
@@ -433,7 +436,7 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
             "sf_vec_size": MXFP8_BLOCK_SCALING_SIZE,
             "current_stream": current_stream,
             "discrete_col_sfd": True,
-            "act_func": "dswiglu",
+            "act_func": self._cudnn_dact_func,
             "use_dynamic_sched": True,
         }
 

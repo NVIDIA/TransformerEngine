@@ -223,6 +223,8 @@ Operation fuser
 
 .. autoapiclass:: transformer_engine.pytorch.ops.ScaledSwiGLU
 
+.. autoapiclass:: transformer_engine.pytorch.ops.ScaledClampedSwiGLU
+
 .. autoapiclass:: transformer_engine.pytorch.ops.SiLU
 
 .. autoapiclass:: transformer_engine.pytorch.ops.SwiGLU
