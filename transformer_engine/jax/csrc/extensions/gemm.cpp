@@ -943,6 +943,19 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
   gemmConfig.set_avg_n(avg_n);
   gemmConfig.set_avg_k(avg_k_lhs);
 
+  auto [avg_m, avg_k_lhs] = grouped_gemm_avg_dims(
+      lhs_first_dims, lhs_last_dims, {lhs_left_size, lhs_right_size}, num_gemms, lhs_is_trans);
+  auto [avg_n, avg_k_rhs] = grouped_gemm_avg_dims(
+      rhs_first_dims, rhs_last_dims, {rhs_left_size, rhs_right_size}, num_gemms, !rhs_is_trans);
+  // Use k from lhs (both sides should agree for well-formed inputs).
+  NVTE_CHECK(avg_k_lhs == avg_k_rhs, "Contracting dimension mismatch: lhs avg_k=", avg_k_lhs,
+             " vs rhs avg_k=", avg_k_rhs);
+
+  GroupedMatmulConfigWrapper gemmConfig{};
+  gemmConfig.set_avg_m(avg_m);
+  gemmConfig.set_avg_n(avg_n);
+  gemmConfig.set_avg_k(avg_k_lhs);
+
   nvte_grouped_gemm(rhs_tensor, rhs_is_trans, lhs_tensor, lhs_is_trans, nullptr, out_tensor,
                     alpha_tensor.data(), beta_tensor.data(), workspace_setup.data(),
                     workspace_cublas.data(), gemmConfig, stream);
