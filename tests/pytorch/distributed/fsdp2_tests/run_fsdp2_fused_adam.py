@@ -333,7 +333,9 @@ def test_fused_adam_fp8_high_precision_init(recipe_name):
         local = param._local_tensor if isinstance(param, DTensor) else param
         hp_val = getattr(local, "get_high_precision_init_val", lambda: None)()
         if hp_val is not None:
-            optimizer.set_scaled_state(param, "master_param", hp_val.to(device=device))
+            optimizer.set_scaled_state(
+                param, "master_param", hp_val.to(device=device, dtype=torch.float32)
+            )
             local.clear_high_precision_init_val()
 
     # Verify high-precision init values are cleared after seeding

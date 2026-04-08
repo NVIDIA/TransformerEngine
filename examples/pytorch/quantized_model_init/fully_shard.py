@@ -52,6 +52,11 @@ NUM_LAYERS = 3
 SEQ_LEN = 32
 BATCH_PER_RANK = 2
 NUM_STEPS = 5
+# DTYPE is used for both params_dtype and activation tensors in this example.
+# float32 is chosen for params_dtype so that the high-precision init values
+# (which seed the optimizer's FP32 master weights) avoid a lossy BF16→FP8→FP32
+# round-trip.  Using float32 for activations as well keeps the example simple;
+# in production you would typically use BF16 activations inside te.autocast().
 DTYPE = torch.float32
 
 
@@ -226,6 +231,7 @@ def main():
         save_file(fp32_state, save_path)
         dist_print(f"\nSaved FP32 model ({len(fp32_state)} params) to {save_path}")
 
+    dist.barrier()  # wait for rank 0 to finish file I/O
     dist.destroy_process_group()
 
 
