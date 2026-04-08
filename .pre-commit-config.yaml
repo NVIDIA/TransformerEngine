@@ -45,6 +45,7 @@ repos:
       - id: cpplint
         types_or: [c, c++, cuda]
         files: ^transformer_engine/(common|jax|pytorch)/
+        exclude: ^transformer_engine/build_tools/build/
 
   - repo: https://github.com/pre-commit/mirrors-clang-format
     rev: v18.1.6
