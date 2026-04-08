@@ -467,7 +467,7 @@ class TransformerEngineAPI(BaseNamespaceAPI):
         if api_name == "modify_tensor":
             assert type(ret) in get_all_tensor_types()
             if (
-                type(ret) == torch.Tensor  # pylint: disable=unidiomatic-typecheck
+                type(ret) is torch.Tensor  # pylint: disable=unidiomatic-typecheck
                 and "dtype" in kwargs
             ):
                 if kwargs["dtype"] is not None:

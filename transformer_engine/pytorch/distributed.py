@@ -17,7 +17,6 @@ import torch
 from torch.cuda import _lazy_call, _lazy_init
 from torch.utils.checkpoint import detach_variable, noop_context_fn
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.distributed.fsdp._common_utils import _get_module_fsdp_state
 from torch.distributed.fsdp._traversal_utils import _get_fsdp_states_with_modules
 
 try:

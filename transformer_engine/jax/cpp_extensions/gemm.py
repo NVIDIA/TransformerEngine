@@ -816,7 +816,6 @@ class GemmPrimitive(BasePrimitive):
         sequence_dim,
         is_outer,
     ):
-        del transpose_batch_sequence, sequence_dim, is_outer
         if GemmPrimitive.outer_primitive is None:
             raise RuntimeError("GemmPrimitive.outer_primitive has not been registered")
         lhs_bdims, _, rhs_bdims, *_ = batch_dims

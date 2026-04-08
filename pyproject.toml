@@ -7,3 +7,40 @@ requires = ["setuptools>=61.0", "cmake>=3.21", "wheel", "pybind11[global]", "nin
 
 # Use legacy backend to import local packages in setup.py
 build-backend = "setuptools.build_meta:__legacy__"
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.format]
+preview = true
+docstring-code-format = true
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "PL"]
+ignore = [
+    "E402",     # module-level-import-not-at-top (pylint import-outside-toplevel was disabled)
+    "E501",     # line-too-long
+    "E731",     # lambda-assignment
+    "E741",     # ambiguous-variable-name (pylint invalid-name was disabled)
+    "PLR0904",  # too-many-public-methods
+    "PLR0911",  # too-many-return-statements
+    "PLR0912",  # too-many-branches
+    "PLR0913",  # too-many-arguments
+    "PLR0914",  # too-many-locals
+    "PLR0915",  # too-many-statements
+    "PLR0917",  # too-many-positional-arguments
+    "PLR1702",  # too-many-nested-blocks
+    "PLR1704",  # redefined-argument-from-local
+    "PLR2004",  # magic-value-comparison
+    "PLR5501",  # collapsible-else-if
+    "PLW0602",  # global-variable-not-assigned
+    "PLW0603",  # global-statement
+    "PLW2901",  # redefined-loop-name
+    "PLC0415",  # import-outside-toplevel
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401", "F403"]
+"transformer_engine/pytorch/fp8.py" = ["F401"]
+"transformer_engine/pytorch/export.py" = ["F401"]
+"transformer_engine/pytorch/attention/dot_product_attention/backends.py" = ["F401"]

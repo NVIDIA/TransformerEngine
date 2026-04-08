@@ -3355,10 +3355,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         assert attn_bias_type == "no_bias", f"{attn_bias_type} bias type is not supported!"
         assert q.shape[-1] % 8 == 0, "Hidden size per attention head should be multiple of 8!"
         assert (
-            window_size == (-1, 0)
-            or window_size == (-1, -1)
-            or use_fused_attention
-            or fa_utils.v2_3_plus
+            window_size in ((-1, 0), (-1, -1)) or use_fused_attention or fa_utils.v2_3_plus
         ), "Sliding window attention only can work with FusedAttention or FlashAttention >= 2.3!"
 
         flash_attn_fwd = None
@@ -4061,9 +4058,7 @@ def attn_forward_func_with_cp(
         cu_seqlens_q_padded is not None and cu_seqlens_kv_padded is not None
     ), "cu_seqlens_padded can not be None for context parallelism and qkv_format = 'thd'!"
 
-    sliding_window_attn = (
-        window_size is not None and window_size != (-1, 0) and window_size != (-1, -1)
-    )
+    sliding_window_attn = window_size is not None and window_size not in ((-1, 0), (-1, -1))
     assert not sliding_window_attn or cp_comm_type in [
         "a2a",
         "all_gather",

@@ -77,7 +77,7 @@ class ForwardLinearBiasActivation(FusedOperation):
             if basic_op_kwargs[idx]:
                 raise ValueError("Bias operation forward does not expect keyword arguments")
         if self._op_idxs["activation"] is None:
-            activation_op = None  # pylint: disable=unused-variable
+            pass  # No activation op needed
         else:
             raise NotImplementedError("Activations are not yet supported")
 
