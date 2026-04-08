@@ -662,13 +662,21 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
     }
 
     NVTE_CHECK(comm->nvsize <= 8, "CUDA IPC supports only up to 8 GPUs in an NVLink domain.");
-    cudaIpcMemHandle_t memhndl;
-    NVTE_CHECK_CUDA(cudaIpcGetMemHandle(&memhndl, *gpubuff));
 
-    cudaIpcMemHandle_t *tmp =
-        reinterpret_cast<cudaIpcMemHandle_t *>(malloc(comm->nvsize * sizeof(cudaIpcMemHandle_t)));
+    // Use cudaMallocHost (pinned host memory) so these buffers are CPU-accessible (plain memcpy)
+    // and GPU DMA-accessible, allowing the allgather callback to pass them directly to NCCL
+    // without additional staging copies.
+    cudaIpcMemHandle_t *memhndl;
+    NVTE_CHECK_CUDA(
+        cudaMallocHost(reinterpret_cast<void **>(&memhndl), sizeof(cudaIpcMemHandle_t)));
+    NVTE_CHECK_CUDA(cudaIpcGetMemHandle(memhndl, *gpubuff));
+
+    cudaIpcMemHandle_t *tmp;
+    NVTE_CHECK_CUDA(cudaMallocHost(reinterpret_cast<void **>(&tmp),
+          comm->nvsize * sizeof(cudaIpcMemHandle_t)));
+
     comm->_allgather(reinterpret_cast<void *>(tmp), comm->nvsize * sizeof(cudaIpcMemHandle_t),
-                     reinterpret_cast<void *>(&memhndl), sizeof(cudaIpcMemHandle_t),
+                     reinterpret_cast<void *>(memhndl), sizeof(cudaIpcMemHandle_t),
                      comm->comm_intra);
 
     // Check for NVLINK support before attempting IPC operations
@@ -689,7 +697,8 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
         }
       }
       if (!peer_access_available) {
-        free(tmp);
+        cudaFreeHost(tmp);
+        cudaFreeHost(memhndl);
         NVTE_ERROR(
             "No peer-to-peer access available between GPUs. This platform does not support the "
             "GPU-to-GPU "
@@ -712,7 +721,8 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
         comm->peer_ptr[hndl], comm->nvsize * sizeof(void *), cudaMemcpyHostToDevice));
 
     NVTE_CHECK_CUDA(cudaDeviceSynchronize());
-    free(tmp);
+    cudaFreeHost(tmp);
+    cudaFreeHost(memhndl);
 #if CUDART_VERSION >= 12010
   }
 #endif
