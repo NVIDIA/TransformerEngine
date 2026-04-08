@@ -665,16 +665,21 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
 
     // Use cudaMallocHost (pinned host memory) so these buffers are CPU-accessible (plain memcpy)
     // and GPU DMA-accessible, allowing the allgather callback to pass them directly to NCCL
-    // without additional staging copies.
+    // without additional staging copies. RAII guards ensure the pinned pages are released on
+    // every exit path, including exceptions thrown by NVTE_CHECK_CUDA / NVTE_ERROR.
+    struct PinnedDeleter {
+      void operator()(void *p) const { if (p) cudaFreeHost(p); }
+    };
     cudaIpcMemHandle_t *memhndl;
     NVTE_CHECK_CUDA(
         cudaMallocHost(reinterpret_cast<void **>(&memhndl), sizeof(cudaIpcMemHandle_t)));
+    std::unique_ptr<void, PinnedDeleter> memhndl_guard(memhndl);
     NVTE_CHECK_CUDA(cudaIpcGetMemHandle(memhndl, *gpubuff));
 
     cudaIpcMemHandle_t *tmp;
-    NVTE_CHECK_CUDA(
-        cudaMallocHost(reinterpret_cast<void **>(&tmp), comm->nvsize * sizeof(cudaIpcMemHandle_t)));
-
+    NVTE_CHECK_CUDA(cudaMallocHost(reinterpret_cast<void **>(&tmp),
+          comm->nvsize * sizeof(cudaIpcMemHandle_t)));
+    std::unique_ptr<void, PinnedDeleter> tmp_guard(tmp);
     comm->_allgather(reinterpret_cast<void *>(tmp), comm->nvsize * sizeof(cudaIpcMemHandle_t),
                      reinterpret_cast<void *>(memhndl), sizeof(cudaIpcMemHandle_t),
                      comm->comm_intra);
@@ -697,8 +702,6 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
         }
       }
       if (!peer_access_available) {
-        cudaFreeHost(tmp);
-        cudaFreeHost(memhndl);
         NVTE_ERROR(
             "No peer-to-peer access available between GPUs. This platform does not support the "
             "GPU-to-GPU "
@@ -721,8 +724,6 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
         comm->peer_ptr[hndl], comm->nvsize * sizeof(void *), cudaMemcpyHostToDevice));
 
     NVTE_CHECK_CUDA(cudaDeviceSynchronize());
-    cudaFreeHost(tmp);
-    cudaFreeHost(memhndl);
 #if CUDART_VERSION >= 12010
   }
 #endif
