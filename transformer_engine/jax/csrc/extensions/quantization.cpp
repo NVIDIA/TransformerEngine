@@ -564,8 +564,8 @@ Error_Type GroupedQuantizeV2FFI(cudaStream_t stream, Buffer_Type inputs, Buffer_
   // Build input grouped tensor (plain float data, no quantization on the input side).
   GroupedTensorWrapper in_grouped(n_groups, data_shape,
                                   get_nvte_scaling_mode(JAXX_Scaling_Mode::NO_SCALING));
-  in_grouped.set_rowwise_data(reinterpret_cast<uint8_t *>(inputs.untyped_data()), in_dtype,
-                              data_shape)
+  in_grouped
+      .set_rowwise_data(reinterpret_cast<uint8_t *>(inputs.untyped_data()), in_dtype, data_shape)
       .set_first_dims(reinterpret_cast<void *>(int64_ptr), DType::kInt64, sz_shape)
       .set_tensor_offsets(reinterpret_cast<void *>(offsets_ptr_out), DType::kInt64, offsets_shape);
 

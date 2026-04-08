@@ -1072,10 +1072,13 @@ class TestRandomizedHadamardTransform:
 
 @pytest.mark.skipif(not is_fp8_supported, reason=fp8_unsupported_reason)
 @pytest_parametrize_wrapper("in_dtype", QUANTIZATION_INPUT_DTYPE)
-@pytest_parametrize_wrapper("input_shape", [
-    (8, 16, 32),   # V1 MXFP8: K=32 not 128-aligned
-    (4, 8, 128),   # V2 MXFP8 eligible: K=128, M*32=256 both 128-aligned
-])
+@pytest_parametrize_wrapper(
+    "input_shape",
+    [
+        (8, 16, 32),  # V1 MXFP8: K=32 not 128-aligned
+        (4, 8, 128),  # V2 MXFP8 eligible: K=128, M*32=256 both 128-aligned
+    ],
+)
 @pytest_parametrize_wrapper("q_dtype", [jnp.float8_e4m3fn])
 @pytest_parametrize_wrapper("scaling_mode", non_fp4_supported_scaling_modes)
 @pytest_parametrize_wrapper("flatten_axis", [-1])
@@ -1149,10 +1152,9 @@ class TestGroupedQuantize:
                 )
             elif k_dim % 128 != 0:
                 # V1 path: non-128-aligned K forces V1 quantize
-                assert not scaled_tensor.pre_swizzled, (
-                    "V1 grouped quantize (non-128-aligned K) must produce"
-                    " pre_swizzled=False"
-                )
+                assert (
+                    not scaled_tensor.pre_swizzled
+                ), "V1 grouped quantize (non-128-aligned K) must produce pre_swizzled=False"
 
 
 @pytest_parametrize_wrapper("in_dtype", QUANTIZATION_INPUT_DTYPE)
@@ -1753,10 +1755,10 @@ fwd_bwd_dtypes = [
 
 GROUPED_DENSE_INPUT_SHAPES = [
     # (n_groups, m, n, k), the actual m will be multiplied by group_size_multiplier
-    (5, 32, 128, 64),   # V1 MXFP8: K=64 not 128-aligned; also tests n_groups not a multiple of 4
-    (8, 64, 32, 128),   # V1 MXFP8 GEMM: N=32 not 128-aligned
+    (5, 32, 128, 64),  # V1 MXFP8: K=64 not 128-aligned; also tests n_groups not a multiple of 4
+    (8, 64, 32, 128),  # V1 MXFP8 GEMM: N=32 not 128-aligned
     (8, 64, 128, 256),  # V2 MXFP8 eligible: K=256, N=128 both 128-aligned
-    (4, 4, 128, 128),   # V2 MXFP8 eligible: K=128, N=128 both 128-aligned (smaller shape)
+    (4, 4, 128, 128),  # V2 MXFP8 eligible: K=128, N=128 both 128-aligned (smaller shape)
 ]
 
 

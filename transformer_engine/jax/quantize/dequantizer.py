@@ -361,9 +361,7 @@ def _grouped_dequantize(grouped_scaled_tensor):
             is_padded=False,
             flatten_axis=flatten_axis,
         )
-        scale_inv_i = scale_inv[
-            scale_inv_ptr : scale_inv_ptr + math.prod(padded_scale_shape_i)
-        ]
+        scale_inv_i = scale_inv[scale_inv_ptr : scale_inv_ptr + math.prod(padded_scale_shape_i)]
         # MXFP8 grouped quantize (both V1 and V2) always produces GEMM-swizzled
         # scales.  Detect by scaling_mode (not pre_swizzled, which is only set for V2
         # to maintain pytree compatibility with the GEMM path).
@@ -380,12 +378,8 @@ def _grouped_dequantize(grouped_scaled_tensor):
             unpadded_2d = scaling_mode.get_scale_shape(
                 flat_data_2d, is_colwise=is_colwise, is_padded=False, flatten_axis=1
             )
-            scale_inv_i = _unswizzle_mxfp8_grouped_scale(
-                scale_inv_i, padded_2d, is_colwise
-            )
-            scale_inv_i = jax.lax.slice(
-                scale_inv_i, [0, 0], list(unpadded_2d)
-            )
+            scale_inv_i = _unswizzle_mxfp8_grouped_scale(scale_inv_i, padded_2d, is_colwise)
+            scale_inv_i = jax.lax.slice(scale_inv_i, [0, 0], list(unpadded_2d))
         else:
             scale_inv_i = scale_inv_i.reshape(padded_scale_shape_i)
             scale_inv_i = jax.lax.slice(
