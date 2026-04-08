@@ -303,22 +303,6 @@ class _LayerNormLinear(torch.autograd.Function):
             is_fsdp2 = True
         except (RuntimeError, ImportError):
             is_fsdp2 = False
-        # FSDP2 workspace optimization only applies to quantizer types
-        # whose backward re-creation is validated.
-        from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
-        from ..tensor.nvfp4_tensor import NVFP4Quantizer
-
-        _fsdp2_safe = isinstance(
-            weight_quantizer,
-            (
-                Float8Quantizer,
-                Float8CurrentScalingQuantizer,
-                MXFP8Quantizer,
-                Float8BlockQuantizer,
-                NVFP4Quantizer,
-            ),
-        ) or isinstance(weight, Float8Tensor)
-        is_fsdp2 = is_fsdp2 and _fsdp2_safe
         if fp8 or debug:
             is_weight_param_quantized = isinstance(weight, QuantizedTensorStorage)
 
@@ -331,6 +315,9 @@ class _LayerNormLinear(torch.autograd.Function):
                 # whose _create_columnwise() can regenerate in backward. This
                 # prevents auxiliary columnwise attrs from persisting across
                 # layers since FSDP2 only manages the main tensor data. (#2681)
+                from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
+                from ..tensor.nvfp4_tensor import NVFP4Quantizer
+
                 if is_fsdp2 and isinstance(
                     weight_quantizer, (Float8BlockQuantizer, NVFP4Quantizer)
                 ):

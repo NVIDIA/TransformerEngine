@@ -269,23 +269,6 @@ class _Linear(torch.autograd.Function):
             is_fsdp2 = True
         except (RuntimeError, ImportError):
             is_fsdp2 = False
-        # FSDP2 workspace optimization only applies to quantizer types
-        # whose backward re-creation is validated.
-        from ..tensor.mxfp8_tensor import MXFP8Quantizer
-        from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
-        from ..tensor.nvfp4_tensor import NVFP4Quantizer
-
-        _fsdp2_safe = isinstance(
-            weight_quantizer,
-            (
-                Float8Quantizer,
-                Float8CurrentScalingQuantizer,
-                MXFP8Quantizer,
-                Float8BlockQuantizer,
-                NVFP4Quantizer,
-            ),
-        ) or isinstance(weight, Float8Tensor)
-        is_fsdp2 = is_fsdp2 and _fsdp2_safe
         if fp8 or debug:
             # Configure quantizer
             # No need to set the quantizer states if weight is already quantized
