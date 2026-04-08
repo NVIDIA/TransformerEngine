@@ -487,28 +487,20 @@ __global__ void __launch_bounds__(TB_DIM* TB_DIM)
 
 template <typename LType, int SF_TILE_DIM_M, int SF_TILE_DIM_K>
 __global__ void __launch_bounds__(TB_DIM* TB_DIM)
-    grouped_unswizzle_row_scaling_uniform_shape_kernel(const void* input, void* output, const int M,
-                                                       const int K,
-                                                       const size_t scale_stride_bytes) {
+    grouped_unswizzle_scaling_uniform_shape_kernel(const void* input, void* output, const int M,
+                                                   const int K, const size_t scale_stride_bytes,
+                                                   const bool row_scaling) {
   const int tensor_id = blockIdx.z;
   const uint8_t* input_base =
       reinterpret_cast<const uint8_t*>(input) + tensor_id * scale_stride_bytes;
   uint8_t* output_base = reinterpret_cast<uint8_t*>(output) + tensor_id * scale_stride_bytes;
-  unswizzle_row_scaling_kernel_impl<LType, SF_TILE_DIM_M, SF_TILE_DIM_K>(
-      input_base, output_base, M, K, blockIdx.x, blockIdx.y, gridDim.x, gridDim.y);
-}
-
-template <typename LType, int SF_TILE_DIM_M, int SF_TILE_DIM_K>
-__global__ void __launch_bounds__(TB_DIM* TB_DIM)
-    grouped_unswizzle_col_scaling_uniform_shape_kernel(const void* input, void* output, const int M,
-                                                       const int K,
-                                                       const size_t scale_stride_bytes) {
-  const int tensor_id = blockIdx.z;
-  const uint8_t* input_base =
-      reinterpret_cast<const uint8_t*>(input) + tensor_id * scale_stride_bytes;
-  uint8_t* output_base = reinterpret_cast<uint8_t*>(output) + tensor_id * scale_stride_bytes;
-  unswizzle_col_scaling_kernel_impl<LType, SF_TILE_DIM_M, SF_TILE_DIM_K>(
-      input_base, output_base, M, K, blockIdx.x, blockIdx.y, gridDim.x, gridDim.y);
+  if (row_scaling) {
+    unswizzle_row_scaling_kernel_impl<LType, SF_TILE_DIM_M, SF_TILE_DIM_K>(
+        input_base, output_base, M, K, blockIdx.x, blockIdx.y, gridDim.x, gridDim.y);
+  } else {
+    unswizzle_col_scaling_kernel_impl<LType, SF_TILE_DIM_M, SF_TILE_DIM_K>(
+        input_base, output_base, M, K, blockIdx.x, blockIdx.y, gridDim.x, gridDim.y);
+  }
 }
 
 template <typename LType, int SF_TILE_DIM_M, int SF_TILE_DIM_K>
@@ -1739,8 +1731,6 @@ void unswizzle_grouped_scaling_factors(const GroupedTensor* input, GroupedTensor
   }
 
   NVTE_CHECK(output->all_same_shape(), "Grouped unswizzle requires uniform tensor shapes.");
-  NVTE_CHECK(output->all_same_last_dim() && output->all_same_first_dim(),
-             "Grouped unswizzle requires uniform tensor shapes.");
 
   const size_t first_dim = output->get_common_first_dim();
   const size_t last_dim = output->get_common_last_dim();
@@ -1791,69 +1781,28 @@ void unswizzle_grouped_scaling_factors(const GroupedTensor* input, GroupedTensor
     const void* input_ptr = rowwise ? input->scale_inv.dptr : input->columnwise_scale_inv.dptr;
     void* output_ptr = rowwise ? output->scale_inv.dptr : output->columnwise_scale_inv.dptr;
 
-    if (rowwise) {
-      switch (vec_load_size) {
-        case 4:
-          NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-              grouped_unswizzle_row_scaling_uniform_shape_kernel<int4, SF_TILE_DIM_M,
-                                                                 SF_TILE_DIM_K>,
-              cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
-          grouped_unswizzle_row_scaling_uniform_shape_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>
-              <<<num_blocks, block_size, slm_size, stream>>>(input_ptr, output_ptr, padded_m,
-                                                             padded_k, scale_stride_bytes);
-          break;
-        case 2:
-          NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-              grouped_unswizzle_row_scaling_uniform_shape_kernel<int2, SF_TILE_DIM_M,
-                                                                 SF_TILE_DIM_K>,
-              cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
-          grouped_unswizzle_row_scaling_uniform_shape_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>
-              <<<num_blocks, block_size, slm_size, stream>>>(input_ptr, output_ptr, padded_m,
-                                                             padded_k, scale_stride_bytes);
-          break;
-        case 1:
-          NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-              grouped_unswizzle_row_scaling_uniform_shape_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>,
-              cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
-          grouped_unswizzle_row_scaling_uniform_shape_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>
-              <<<num_blocks, block_size, slm_size, stream>>>(input_ptr, output_ptr, padded_m,
-                                                             padded_k, scale_stride_bytes);
-          break;
-        default:
-          NVTE_ERROR("Not valid vec_load_size.");
-      }
-    } else {
-      switch (vec_load_size) {
-        case 4:
-          NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-              grouped_unswizzle_col_scaling_uniform_shape_kernel<int4, SF_TILE_DIM_M,
-                                                                 SF_TILE_DIM_K>,
-              cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
-          grouped_unswizzle_col_scaling_uniform_shape_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>
-              <<<num_blocks, block_size, slm_size, stream>>>(input_ptr, output_ptr, padded_m,
-                                                             padded_k, scale_stride_bytes);
-          break;
-        case 2:
-          NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-              grouped_unswizzle_col_scaling_uniform_shape_kernel<int2, SF_TILE_DIM_M,
-                                                                 SF_TILE_DIM_K>,
-              cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
-          grouped_unswizzle_col_scaling_uniform_shape_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>
-              <<<num_blocks, block_size, slm_size, stream>>>(input_ptr, output_ptr, padded_m,
-                                                             padded_k, scale_stride_bytes);
-          break;
-        case 1:
-          NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-              grouped_unswizzle_col_scaling_uniform_shape_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>,
-              cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
-          grouped_unswizzle_col_scaling_uniform_shape_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>
-              <<<num_blocks, block_size, slm_size, stream>>>(input_ptr, output_ptr, padded_m,
-                                                             padded_k, scale_stride_bytes);
-          break;
-        default:
-          NVTE_ERROR("Not valid vec_load_size.");
-      }
+    using kernel_t = void (*)(const void*, void*, const int, const int, const size_t, const bool);
+    kernel_t kernel_fn = nullptr;
+    switch (vec_load_size) {
+      case 4:
+        kernel_fn = grouped_unswizzle_scaling_uniform_shape_kernel<int4, SF_TILE_DIM_M,
+                                                                    SF_TILE_DIM_K>;
+        break;
+      case 2:
+        kernel_fn = grouped_unswizzle_scaling_uniform_shape_kernel<int2, SF_TILE_DIM_M,
+                                                                    SF_TILE_DIM_K>;
+        break;
+      case 1:
+        kernel_fn =
+            grouped_unswizzle_scaling_uniform_shape_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>;
+        break;
+      default:
+        NVTE_ERROR("Not valid vec_load_size.");
     }
+    NVTE_CHECK_CUDA(
+        cudaFuncSetAttribute(kernel_fn, cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
+    kernel_fn<<<num_blocks, block_size, slm_size, stream>>>(input_ptr, output_ptr, padded_m,
+                                                            padded_k, scale_stride_bytes, rowwise);
     NVTE_CHECK_CUDA(cudaGetLastError());
   };
 
