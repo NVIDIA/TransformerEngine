@@ -6,6 +6,7 @@
 from contextlib import nullcontext
 from importlib.metadata import version as get_pkg_version
 from importlib.metadata import PackageNotFoundError
+import importlib.util
 import os
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import warnings
@@ -138,15 +139,35 @@ except PackageNotFoundError:
     flash_attn_with_kvcache_v3 = None
     # pass  # only print warning if use_flash_attention_3 = True in get_attention_backend
 else:
-    from flash_attn_3.flash_attn_interface import flash_attn_func as flash_attn_func_v3
-    from flash_attn_3.flash_attn_interface import (
-        flash_attn_varlen_func as flash_attn_varlen_func_v3,
-    )
-    from flash_attn_3.flash_attn_interface import (
-        flash_attn_with_kvcache as flash_attn_with_kvcache_v3,
-    )
-    from flash_attn_3.flash_attn_interface import _flash_attn_forward as _flash_attn_fwd_v3
-    from flash_attn_3.flash_attn_interface import _flash_attn_backward as _flash_attn_bwd_v3
+    if importlib.util.find_spec("flash_attn_3.flash_attn_interface") is not None:
+        from flash_attn_3.flash_attn_interface import flash_attn_func as flash_attn_func_v3
+        from flash_attn_3.flash_attn_interface import (
+            flash_attn_varlen_func as flash_attn_varlen_func_v3,
+        )
+        from flash_attn_3.flash_attn_interface import (
+            flash_attn_with_kvcache as flash_attn_with_kvcache_v3,
+        )
+        from flash_attn_3.flash_attn_interface import _flash_attn_forward as _flash_attn_fwd_v3
+        from flash_attn_3.flash_attn_interface import _flash_attn_backward as _flash_attn_bwd_v3
+    elif importlib.util.find_spec("flash_attn_interface") is not None:
+        warnings.warn(
+            "flash_attn_interface found outside flash_attn_3 package. "
+            "Importing directly from flash_attn_interface."
+        )
+        from flash_attn_interface import flash_attn_func as flash_attn_func_v3
+        from flash_attn_interface import (
+            flash_attn_varlen_func as flash_attn_varlen_func_v3,
+        )
+        from flash_attn_interface import (
+            flash_attn_with_kvcache as flash_attn_with_kvcache_v3,
+        )
+        from flash_attn_interface import _flash_attn_forward as _flash_attn_fwd_v3
+        from flash_attn_interface import _flash_attn_backward as _flash_attn_bwd_v3
+    else:
+        raise ModuleNotFoundError(
+            "flash-attn-3 package is installed but flash_attn_interface module "
+            "could not be found in flash_attn_3/ or site-packages/."
+        )
 
     fa_utils.set_flash_attention_3_params()
 
