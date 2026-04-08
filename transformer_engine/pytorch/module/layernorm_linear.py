@@ -63,7 +63,6 @@ from ..quantized_tensor import (
     restore_from_func_ctx,
 )
 from ...debug.pytorch.debug_state import TEDebugState
-from ..tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer, Float8Tensor
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..cpu_offload import (
     is_cpu_offload_enabled,
@@ -328,7 +327,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 # FSDP2 all-gather will recreate them. (Issue #2681)
                 weight_quantizer.set_usage(
                     rowwise=True,
-                    columnwise=is_grad_enabled and not is_fsdp2,
+                    columnwise=is_grad_enabled and not is_fsdp2 and backward_override is None,
                 )
 
             # Get quantized weight
