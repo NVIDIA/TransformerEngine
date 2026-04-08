@@ -703,28 +703,34 @@ def _make_graphed_callables(
                     fwd_graph = fwd_graphs[per_callable_fwd_idx]
 
                     # Call pre_forward hooks before forward graph capture (outside capture context)
-                    if capture_time_hooks is not None and capture_time_hooks[callable_idx] is not None:
+                    if (
+                        capture_time_hooks is not None
+                        and capture_time_hooks[callable_idx] is not None
+                    ):
                         _hooks = capture_time_hooks[callable_idx]
                         _pre_fwd_with_kwargs = _hooks.get("forward_pre_hooks_with_kwargs", {})
                         for hook_id, hook in _hooks.get("forward_pre_hooks", {}).items():
                             if hook_id in _pre_fwd_with_kwargs:
                                 if hook(func, args, kwargs) is not None:
                                     raise RuntimeError(
-                                        "capture_time_hooks forward_pre_hooks must not return a value "
-                                        "(args/kwargs must not be modified via hook return)"
+                                        "capture_time_hooks forward_pre_hooks must not return a"
+                                        " value (args/kwargs must not be modified via hook return)"
                                     )
                             else:
                                 if hook(func, args) is not None:
                                     raise RuntimeError(
-                                        "capture_time_hooks forward_pre_hooks must not return a value "
-                                        "(args must not be modified via hook return)"
+                                        "capture_time_hooks forward_pre_hooks must not return a"
+                                        " value (args must not be modified via hook return)"
                                     )
 
                     with _graph_context_wrapper(fwd_graph, pool=mempool):
                         outputs = func(*args, **kwargs)
 
                     # Call forward hooks after forward graph capture (outside capture context)
-                    if capture_time_hooks is not None and capture_time_hooks[callable_idx] is not None:
+                    if (
+                        capture_time_hooks is not None
+                        and capture_time_hooks[callable_idx] is not None
+                    ):
                         _hooks = capture_time_hooks[callable_idx]
                         _fwd_with_kwargs = _hooks.get("forward_hooks_with_kwargs", {})
                         for hook_id, hook in _hooks.get("forward_hooks", {}).items():
@@ -851,8 +857,8 @@ def _make_graphed_callables(
                             ].values():
                                 if hook(callable_module, static_grad_outputs) is not None:
                                     raise RuntimeError(
-                                        "capture_time_hooks backward_pre_hooks must not return a value "
-                                        "(grad_output must not be modified via hook return)"
+                                        "capture_time_hooks backward_pre_hooks must not return a"
+                                        " value (grad_output must not be modified via hook return)"
                                     )
 
                         inputs = tuple(i for i in static_input_surface if i.requires_grad)
@@ -877,7 +883,10 @@ def _make_graphed_callables(
                             # Get the callable module for this backward index
                             callable_module = graph_callables[per_callable_bwd_idx]
                             for hook in capture_time_hooks[callable_idx]["backward_hooks"].values():
-                                if hook(callable_module, grad_inputs, static_grad_outputs) is not None:
+                                if (
+                                    hook(callable_module, grad_inputs, static_grad_outputs)
+                                    is not None
+                                ):
                                     raise RuntimeError(
                                         "capture_time_hooks backward_hooks must not return a value "
                                         "(grad_input must not be modified via hook return)"
