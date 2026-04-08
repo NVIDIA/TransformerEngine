@@ -527,11 +527,6 @@ class ScaledSwiGLU(_ScaledGLU):
         interleaved format. See the corresponding option in the SwiGLU
         operation for more details.
 
-    See Also
-    --------
-    ScaledClampedSwiGLU
-        Use for cuDNN ``act_func="geglu"``.
-
     """
 
     def _glu_forward(self, swiglu_in: torch.Tensor) -> torch.Tensor:
@@ -561,11 +556,6 @@ class ScaledClampedSwiGLU(_ScaledGLU):
         Clamp limit (see :class:`ClampedSwiGLU`).
     alpha : float, default ``1.702``
         Sigmoid scale (see :class:`ClampedSwiGLU`).
-
-    See Also
-    --------
-    ScaledSwiGLU
-        Use for cuDNN ``act_func="swiglu"``.
 
     """
 
