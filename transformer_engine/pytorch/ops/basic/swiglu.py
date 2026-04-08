@@ -570,7 +570,6 @@ class ScaledClampedSwiGLU(_ScaledGLU):
         self._clamped: ClampedSwiGLU = ClampedSwiGLU(
             limit=limit,
             alpha=alpha,
-            glu_interleave_size=glu_interleave_size,
         )
 
     def _glu_forward(self, swiglu_in: torch.Tensor) -> torch.Tensor:

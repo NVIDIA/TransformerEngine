@@ -131,6 +131,8 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             self.grouped_gemm_glu_kernel()  # Try triggering import error
             raise RuntimeError(f"{self.__class__.__name__} is not supported on this system.")
         validate_grouped_mlp_dims(fc1, swiglu, fc2)
+        # The cuDNN geglu implementation corresponds to ScaledClampedSwiGLU.
+        # The act_func string should be fixed on the cuDNN FE side.
         self._cudnn_act_func: str = "geglu" if isinstance(swiglu, ScaledClampedSwiGLU) else "swiglu"
 
     def fuser_forward(

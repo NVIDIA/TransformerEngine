@@ -3334,7 +3334,7 @@ class TestSequentialModules:
     @pytest.mark.parametrize("accumulate_into_main_grad", (False, True))
     @pytest.mark.parametrize("glu_interleave_size", (None, 32))
     @pytest.mark.parametrize("delay_wgrad_compute", (False, True))
-    @pytest.mark.parametrize("activation", ("swiglu", "geglu"))
+    @pytest.mark.parametrize("activation", ("scaled_swiglu", "scaled_clamped_swiglu"))
     def test_grouped_mlp(
         self,
         *,
@@ -3375,7 +3375,7 @@ class TestSequentialModules:
         if quantization == "mxfp8" and bias:
             # Will be supported in future CUDNN release.
             pytest.skip("Bias/dbias not yet supported in MXFP8 fused grouped MLP")
-        if quantization == "nvfp4" and activation == "geglu" and bias:
+        if quantization == "nvfp4" and activation == "scaled_clamped_swiglu" and bias:
             # TODO: ksivaman: Need to debug numerics for this case.
             pytest.skip("Bias/dbias not yet supported in NVFP4 fused grouped MLP with GeGLU")
 
@@ -3466,7 +3466,7 @@ class TestSequentialModules:
                 x = x.transpose(1, 2)
                 x = x.reshape(-1, 2 * hidden_size)
             x1, x2 = x.chunk(2, dim=-1)
-            if activation == "swiglu":
+            if activation == "scaled_swiglu":
                 x = torch.nn.functional.silu(x1) * x2
             else:
                 lim = torch.tensor(7.0, device=x1.device, dtype=x1.dtype)
@@ -3484,7 +3484,7 @@ class TestSequentialModules:
         recipe = make_recipe(quantization)
         scaled_act = (
             te_ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size)
-            if activation == "swiglu"
+            if activation == "scaled_swiglu"
             else te_ops.ScaledClampedSwiGLU(glu_interleave_size=glu_interleave_size)
         )
         with te.quantized_model_init(enabled=with_quantization, recipe=recipe):
@@ -3674,7 +3674,7 @@ class TestSequentialModules:
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("single_grouped_weight", (False, True))
     @pytest.mark.parametrize("accumulate_into_main_grad", (False, True))
-    @pytest.mark.parametrize("activation", ("swiglu", "geglu"))
+    @pytest.mark.parametrize("activation", ("scaled_swiglu", "scaled_clamped_swiglu"))
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
     def test_grouped_mlp_cuda_graph_safe_mxfp8(
         self,
@@ -3725,7 +3725,7 @@ class TestSequentialModules:
             )
             scaled_act = (
                 te_ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size)
-                if activation == "swiglu"
+                if activation == "scaled_swiglu"
                 else te_ops.ScaledClampedSwiGLU(glu_interleave_size=glu_interleave_size)
             )
             module = te_ops.Sequential(
