@@ -264,23 +264,6 @@ class _Linear(torch.autograd.Function):
         # ------------------------------------------------------
         weightmat = weight
         is_fsdp2 = module.is_fsdp2
-        # FSDP2 workspace optimization only applies to quantizer types
-        # whose backward re-creation is validated.
-        from ..tensor.mxfp8_tensor import MXFP8Quantizer
-        from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
-        from ..tensor.nvfp4_tensor import NVFP4Quantizer
-
-        _fsdp2_safe = isinstance(
-            weight_quantizer,
-            (
-                Float8Quantizer,
-                Float8CurrentScalingQuantizer,
-                MXFP8Quantizer,
-                Float8BlockQuantizer,
-                NVFP4Quantizer,
-            ),
-        ) or isinstance(weight, Float8Tensor)
-        fsdp2_skip_columnwise = is_fsdp2 and _fsdp2_safe
         if fp8 or debug:
             # Configure quantizer
             # No need to set the quantizer states if weight is already quantized
@@ -297,7 +280,7 @@ class _Linear(torch.autograd.Function):
                 # FSDP2: Skip columnwise/transpose creation during forward
                 # to avoid accumulating caches across layers. Backward's
                 # FSDP2 all-gather will recreate them. (Issue #2681)
-                if fsdp2_skip_columnwise:
+                if is_fsdp2:
                     columnwise_usage = False
                 weight_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
             elif isinstance(weight, QuantizedTensor):
@@ -308,7 +291,7 @@ class _Linear(torch.autograd.Function):
                 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
                 from ..tensor.nvfp4_tensor import NVFP4Quantizer as _NVFP4Quantizer
 
-                if fsdp2_skip_columnwise and isinstance(
+                if is_fsdp2 and isinstance(
                     weight_quantizer, (Float8BlockQuantizer, _NVFP4Quantizer)
                 ):
                     weight_quantizer.set_usage(rowwise=True, columnwise=False)
@@ -316,7 +299,7 @@ class _Linear(torch.autograd.Function):
             # FSDP2: Don't cache workspaces — they would persist across
             # layers, defeating FSDP2 memory savings. (Issue #2681)
             update_workspace = is_first_microbatch is None or is_first_microbatch
-            wt_cache = None if (is_first_microbatch is None or fsdp2_skip_columnwise) else "weight"
+            wt_cache = None if (is_first_microbatch is None or is_fsdp2) else "weight"
             weightmat = module.get_weight_workspace(
                 tensor=weight,
                 quantizer=weight_quantizer,
@@ -330,7 +313,7 @@ class _Linear(torch.autograd.Function):
             # weights whose _create_columnwise() can regenerate in backward.
             # (Issue #2681)
             if (
-                fsdp2_skip_columnwise
+                is_fsdp2
                 and isinstance(weight, QuantizedTensor)
                 and isinstance(weight_quantizer, (Float8BlockQuantizer, _NVFP4Quantizer))
             ):
@@ -490,7 +473,7 @@ class _Linear(torch.autograd.Function):
             # Backward will re-quantize from FSDP2 all-gathered weight.
             # (Issue #2681)
             wt_save = weightmat
-            if fsdp2_skip_columnwise and weightmat is not weight:
+            if is_fsdp2 and weightmat is not weight:
                 wt_save = None
             tensors_to_save, tensor_objects = prepare_for_saving(
                 saved_inputmat,
@@ -500,7 +483,7 @@ class _Linear(torch.autograd.Function):
             )
             ctx.save_for_backward(*tensors_to_save)
             ctx.tensor_objects = tensor_objects
-            ctx.fsdp2_skip_columnwise = fsdp2_skip_columnwise
+            ctx.is_fsdp2 = is_fsdp2
 
             ctx.activation_dtype = activation_dtype
             ctx.fp8 = fp8
@@ -850,7 +833,7 @@ class _Linear(torch.autograd.Function):
 
                 # FSDP2: Clear FP8 transpose cache after dgrad GEMM.
                 # (Issue #2717)
-                if getattr(ctx, "fsdp2_skip_columnwise", False) and hasattr(
+                if getattr(ctx, "is_fsdp2", False) and hasattr(
                     weight_fp8, "_transpose"
                 ):
                     if getattr(weight_fp8, "_transpose", None) is not None:
@@ -858,7 +841,7 @@ class _Linear(torch.autograd.Function):
                         weight_fp8._transpose_invalid = True
                 # FSDP2: Clear blockwise columnwise caches after dgrad GEMM.
                 # (Issues #2681, #2717)
-                if getattr(ctx, "fsdp2_skip_columnwise", False) and hasattr(
+                if getattr(ctx, "is_fsdp2", False) and hasattr(
                     weight_fp8, "_columnwise_data"
                 ):
                     if getattr(weight_fp8, "_columnwise_data", None) is not None:

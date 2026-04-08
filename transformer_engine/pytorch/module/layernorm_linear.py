@@ -298,22 +298,6 @@ class _LayerNormLinear(torch.autograd.Function):
         weightmat = weight
         is_weight_param_quantized = False
         is_fsdp2 = module.is_fsdp2
-        # FSDP2 workspace optimization only applies to quantizer types
-        # whose backward re-creation is validated.
-        from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
-        from ..tensor.nvfp4_tensor import NVFP4Quantizer
-
-        _fsdp2_safe = isinstance(
-            weight_quantizer,
-            (
-                Float8Quantizer,
-                Float8CurrentScalingQuantizer,
-                MXFP8Quantizer,
-                Float8BlockQuantizer,
-                NVFP4Quantizer,
-            ),
-        ) or isinstance(weight, Float8Tensor)
-        fsdp2_skip_columnwise = is_fsdp2 and _fsdp2_safe
         if fp8 or debug:
             is_weight_param_quantized = isinstance(weight, QuantizedTensorStorage)
 
@@ -326,7 +310,10 @@ class _LayerNormLinear(torch.autograd.Function):
                 # whose _create_columnwise() can regenerate in backward. This
                 # prevents auxiliary columnwise attrs from persisting across
                 # layers since FSDP2 only manages the main tensor data. (#2681)
-                if fsdp2_skip_columnwise and isinstance(
+                from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
+                from ..tensor.nvfp4_tensor import NVFP4Quantizer
+
+                if is_fsdp2 and isinstance(
                     weight_quantizer, (Float8BlockQuantizer, NVFP4Quantizer)
                 ):
                     weight_quantizer.set_usage(rowwise=True, columnwise=False)
@@ -336,14 +323,14 @@ class _LayerNormLinear(torch.autograd.Function):
                 # FSDP2 all-gather will recreate them. (Issue #2681)
                 weight_quantizer.set_usage(
                     rowwise=True,
-                    columnwise=is_grad_enabled and not fsdp2_skip_columnwise,
+                    columnwise=is_grad_enabled and not is_fsdp2,
                 )
 
             # Get quantized weight
             # FSDP2: Don't cache workspaces — they would persist across
             # layers, defeating FSDP2 memory savings. (Issue #2681)
             update_workspace = is_first_microbatch is None or is_first_microbatch
-            wt_cache = None if (is_first_microbatch is None or fsdp2_skip_columnwise) else "weight"
+            wt_cache = None if (is_first_microbatch is None or is_fsdp2) else "weight"
             weightmat = module.get_weight_workspace(
                 tensor=weight,
                 quantizer=weight_quantizer,
@@ -358,7 +345,7 @@ class _LayerNormLinear(torch.autograd.Function):
             # FSDP2 doesn't manage, causing accumulation. They can regenerate
             # via _create_columnwise() in backward. (Issue #2681)
             if (
-                fsdp2_skip_columnwise
+                is_fsdp2
                 and is_weight_param_quantized
                 and isinstance(weight_quantizer, (Float8BlockQuantizer, NVFP4Quantizer))
             ):
@@ -514,7 +501,7 @@ class _LayerNormLinear(torch.autograd.Function):
             # Backward will re-quantize from FSDP2 all-gathered weight.
             # (Issue #2681)
             wt_save = weightmat
-            if fsdp2_skip_columnwise and weightmat is not weight:
+            if is_fsdp2 and weightmat is not weight:
                 wt_save = None
             tensors_to_save, tensor_objects = prepare_for_saving(
                 inputmat,
@@ -531,7 +518,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.requires_dgrad = inp_requires_grad
             ctx.requires_wgrad = weight.requires_grad
             ctx.is_weight_param_quantized = is_weight_param_quantized
-            ctx.fsdp2_skip_columnwise = fsdp2_skip_columnwise
+            ctx.is_fsdp2 = is_fsdp2
             if fuse_wgrad_accumulation and weight.requires_grad:
                 # Keep weakref to weight to preserve attributes like main_grad
                 # when we need to modify the weight python object
@@ -854,7 +841,7 @@ class _LayerNormLinear(torch.autograd.Function):
             nvtx_range_pop(f"{nvtx_label}.dgrad_gemm")
 
             # FSDP2: Clear FP8 transpose cache after dgrad GEMM. (Issue #2717)
-            if getattr(ctx, "fsdp2_skip_columnwise", False) and hasattr(
+            if getattr(ctx, "is_fsdp2", False) and hasattr(
                 weight, "_transpose"
             ):
                 if getattr(weight, "_transpose", None) is not None:
@@ -862,7 +849,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     weight._transpose_invalid = True
             # FSDP2: Clear blockwise columnwise caches after dgrad GEMM.
             # (Issues #2681, #2717)
-            if getattr(ctx, "fsdp2_skip_columnwise", False) and hasattr(
+            if getattr(ctx, "is_fsdp2", False) and hasattr(
                 weight, "_columnwise_data"
             ):
                 if getattr(weight, "_columnwise_data", None) is not None:

@@ -479,22 +479,7 @@ class _LayerNormMLP(torch.autograd.Function):
         # FSDP2: Skip columnwise/transpose creation during forward (not
         # recompute) to avoid accumulating FP8 caches across layers.
         # Backward's FSDP2 all-gather will recreate them. (Issue #2681)
-        # Only for quantizer types whose backward re-creation is validated.
-        _fsdp2_safe_quantizers = (
-            Float8Quantizer,
-            Float8CurrentScalingQuantizer,
-            MXFP8Quantizer,
-            Float8BlockQuantizer,
-            NVFP4Quantizer,
-        )
-        _is_safe_for_fsdp2 = (
-            isinstance(fc1_weight_quantizer, _fsdp2_safe_quantizers)
-            or isinstance(fc1_weight, Float8Tensor)
-        ) and (
-            isinstance(fc2_weight_quantizer, _fsdp2_safe_quantizers)
-            or isinstance(fc2_weight, Float8Tensor)
-        )
-        fsdp2_skip_columnwise = is_fsdp2 and not is_recomputation and _is_safe_for_fsdp2
+        fsdp2_skip_columnwise = is_fsdp2 and not is_recomputation
         if fp8 or debug:
             # If weights are not quantized, we call get_weight_workspace,
             # which handles weight caching etc.
