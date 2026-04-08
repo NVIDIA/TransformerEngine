@@ -1346,6 +1346,9 @@ def grouped_quantize(
 
     # V2 grouped quantize (nvte_group_quantize) fuses the scale_inv swizzle into
     # the kernel, so the resulting tensors are already swizzled for GEMM.
+    # Note: V1 also produces swizzled scales (via set_with_gemm_swizzled_scales),
+    # but pre_swizzled is only set for V2 to maintain pytree compatibility.
+    # The dequantizer detects MXFP8 swizzling via the scaling_mode instead.
     use_v2 = GroupedQuantizePrimitive._use_v2_kernel(
         quantizer.scaling_mode.value, x.shape, flatten_axis
     )

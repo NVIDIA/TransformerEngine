@@ -1091,8 +1091,17 @@ class TestGroupedQuantize:
         key = jax.random.PRNGKey(0)
         subkeys = jax.random.split(key, 2)
 
-        # *32 so that the input shapes works for MXFP8
-        input_shape = (m * 32, n)
+        # Use 128 multiplier for V2-eligible MXFP8 shapes (both M and K 128-aligned)
+        # so that per-group row counts are also 128-aligned as required by the V2 kernel.
+        # Use 32 for other shapes (V1 handles arbitrary group sizes).
+        v2_eligible = (
+            scaling_mode == ScalingMode.MXFP8_1D_SCALING
+            and is_v2_grouped_gemm_supported
+            and (m * 32) % 128 == 0
+            and n % 128 == 0
+        )
+        group_size_multiplier = 128 if v2_eligible else 32
+        input_shape = (m * group_size_multiplier, n)
 
         if with_group_sizes:
             group_sizes = jnp.sort(jax.random.randint(subkeys[0], (n_groups - 1,), 0, m))
@@ -1100,7 +1109,7 @@ class TestGroupedQuantize:
             group_sizes = jnp.diff(group_sizes)
             assert group_sizes.sum() == m
             assert jnp.any(group_sizes == 0)  # make sure that at least one group has 0 row
-            group_sizes = group_sizes * 32
+            group_sizes = group_sizes * group_size_multiplier
         else:
             group_sizes = None
             input_shape = (n_groups, input_shape[0] // n_groups, input_shape[1])
@@ -1122,16 +1131,15 @@ class TestGroupedQuantize:
 
         assert_dequantized_grouped_scaled_tensor(scaled_tensor, x)
 
-        # Verify MXFP8 pre_swizzled flag for ROWWISE grouped quantize with explicit group_sizes.
-        # V2 grouped quantize (SM100+) fuses the scale swizzle and sets pre_swizzled=True
-        # when both total M and K are 128-aligned. V1 always produces pre_swizzled=False.
+        # Verify MXFP8 pre_swizzled flag for ROWWISE with explicit group_sizes.
+        # pre_swizzled=True indicates the V2 kernel was used (SM100+, 128-aligned dims).
         if (
             scaling_mode == ScalingMode.MXFP8_1D_SCALING
             and q_layout == QuantizeLayout.ROWWISE
             and with_group_sizes
             and isinstance(scaled_tensor, GroupedScaledTensor1x)
         ):
-            total_m = m * 32
+            total_m = m * group_size_multiplier
             k_dim = n
             if is_v2_grouped_gemm_supported and total_m % 128 == 0 and k_dim % 128 == 0:
                 # V2 path on SM100+: scales are pre-swizzled for GEMM
@@ -1142,7 +1150,8 @@ class TestGroupedQuantize:
             elif k_dim % 128 != 0:
                 # V1 path: non-128-aligned K forces V1 quantize
                 assert not scaled_tensor.pre_swizzled, (
-                    "V1 grouped quantize (non-128-aligned K) must produce pre_swizzled=False"
+                    "V1 grouped quantize (non-128-aligned K) must produce"
+                    " pre_swizzled=False"
                 )
 
 
