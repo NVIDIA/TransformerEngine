@@ -870,6 +870,15 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
     }
   }
 
+  // Skip kernel if tensor size is zero
+  if (elts_total == 0) {
+    if constexpr (IS_DBIAS) {
+      NVTE_ERROR("Invalid grouped tensor shape for DBias computation (first_logical_dim=",
+                 first_logical_dim, ", last_logical_dim=", last_logical_dim, ")");
+    }
+    return;
+  }
+
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
       input->dtype(), IType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(

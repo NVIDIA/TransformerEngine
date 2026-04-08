@@ -415,6 +415,8 @@ std::vector<std::pair<size_t, size_t>> matrix_sizes = {
     {768, 1024},
     {8192, 128},
     {577, 1632},
+    {0, 128},
+    {128, 0},
 };
 
 std::vector<std::pair<size_t, size_t>> block_sizes = {

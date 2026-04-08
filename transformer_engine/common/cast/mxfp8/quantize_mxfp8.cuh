@@ -579,6 +579,14 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
   const size_t rows = input.flat_first_dim();
   const size_t cols = input.flat_last_dim();
 
+  // Skip kernel if tensor size is zero
+  if (rows == 0 || cols == 0) {
+    if constexpr (IS_DBIAS) {
+      NVTE_ERROR("Invalid tensor shape for DBias computation (shape=", input.shape(), ").");
+    }
+    return;
+  }
+
   // Tensor chunk handled by each CUDA block
   constexpr size_t CHUNK_DIM_Y = CAST_DBIAS_ONLY ? 128 : 64;
   constexpr size_t CHUNK_DIM_X = CAST_DBIAS_ONLY ? 128 : 64;

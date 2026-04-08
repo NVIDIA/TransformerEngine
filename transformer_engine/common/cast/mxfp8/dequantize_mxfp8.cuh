@@ -249,6 +249,8 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
 
   const size_t rows = input.flat_first_dim();
   const size_t cols = input.flat_last_dim();
+  if (rows == 0 || cols == 0) { return; }
+
   const size_t chunks_Y = DIVUP(rows, CHUNK_DIM_Y);
   const size_t chunks_X = DIVUP(cols, CHUNK_DIM_X);
 

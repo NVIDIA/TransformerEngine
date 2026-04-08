@@ -355,7 +355,10 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK)
 template <bool IS_ACT, typename ParamOP, float (*OP)(float, const ParamOP &)>
 void quantize_1D(const Tensor &input, Tensor *output, cudaStream_t stream) {
   using namespace quantize_1D_kernel;
+
+  // Tensor size
   const size_t N = product(input.data.shape);
+  if (N == 0) { return; }
 
   const bool isFullTile = (N % ELEMS_PER_BLOCK == 0);
   NVTE_CHECK(isFullTile, "Only full tiles are supported.");
@@ -391,8 +394,18 @@ void quantize_2D(const Tensor &input, const Tensor *act_input, Tensor *output, T
   using namespace quantize_2D_kernel;
   checkCuDriverContext(stream);
 
+  // Tensor dimensions
   const size_t rows = input.flat_first_dim();
   const size_t cols = input.flat_last_dim();
+
+  // Skip kernel if tensor size is zero
+  if (rows == 0 || cols == 0) {
+    if constexpr (IS_DBIAS) {
+      NVTE_ERROR("Invalid tensor shape for DBias computation (shape=", input.shape(), ").");
+    }
+    return;
+  }
+
   const size_t chunks_Y = DIVUP(rows, FP8_CHUNK_DIM_Y);
   const size_t chunks_X = DIVUP(cols, FP8_CHUNK_DIM_X);
   const size_t blocks_Y = chunks_Y;

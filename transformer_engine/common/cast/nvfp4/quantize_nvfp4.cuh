@@ -560,6 +560,7 @@ inline void quantize(const Tensor &input, const Tensor *noop, Tensor *output, cu
 
   const size_t rows = input.flat_first_dim();
   const size_t cols = input.flat_last_dim();
+  if (rows == 0 || cols == 0) { return; }
 
   constexpr size_t CHUNK_DIM_Y = 128;
   constexpr size_t CHUNK_DIM_X = 128;
