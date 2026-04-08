@@ -668,7 +668,9 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
     // without additional staging copies. RAII guards ensure the pinned pages are released on
     // every exit path, including exceptions thrown by NVTE_CHECK_CUDA / NVTE_ERROR.
     struct PinnedDeleter {
-      void operator()(void *p) const { if (p) cudaFreeHost(p); }
+      void operator()(void *p) const {
+        if (p) cudaFreeHost(p);
+      }
     };
     cudaIpcMemHandle_t *memhndl;
     NVTE_CHECK_CUDA(
@@ -677,8 +679,8 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
     NVTE_CHECK_CUDA(cudaIpcGetMemHandle(memhndl, *gpubuff));
 
     cudaIpcMemHandle_t *tmp;
-    NVTE_CHECK_CUDA(cudaMallocHost(reinterpret_cast<void **>(&tmp),
-          comm->nvsize * sizeof(cudaIpcMemHandle_t)));
+    NVTE_CHECK_CUDA(
+        cudaMallocHost(reinterpret_cast<void **>(&tmp), comm->nvsize * sizeof(cudaIpcMemHandle_t)));
     std::unique_ptr<void, PinnedDeleter> tmp_guard(tmp);
     comm->_allgather(reinterpret_cast<void *>(tmp), comm->nvsize * sizeof(cudaIpcMemHandle_t),
                      reinterpret_cast<void *>(memhndl), sizeof(cudaIpcMemHandle_t),
