@@ -145,9 +145,8 @@ bool supports_multicast(int device_id) {
     testProp.size = 4096;  // 4KB test size
     testProp.handleTypes = CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
     size_t gran;
-    CUresult gran_result = cuda_driver::call(
-        "cuMulticastGetGranularity", &gran, &testProp,
-        CU_MULTICAST_GRANULARITY_RECOMMENDED);
+    CUresult gran_result = cuda_driver::call("cuMulticastGetGranularity", &gran, &testProp,
+                                             CU_MULTICAST_GRANULARITY_RECOMMENDED);
     if (gran_result != CUDA_SUCCESS) {
       cache[device_id] = false;
       return;
