@@ -1668,7 +1668,7 @@ def _mhc_expand_combine_with_bias_bwd(
     grad_f_ptrs = grad_f_ptr + offs_m[:, None] * stride_grad_fm + offs_c[None, :] * stride_grad_fc
     tl.store(grad_f_ptrs, grad_f, mask=mask_m[:, None] & mask_c[None, :])
 
-    grad_bias = grad_f_acc.sum(axis=0)  # (BLOCK_SIZE_C,)
+    grad_bias = tl.sum(grad_f_acc, axis=0)  # (BLOCK_SIZE_C,)
     grad_bias_ptrs = grad_bias_ptr + offs_c * stride_grad_bias
     tl.atomic_add(grad_bias_ptrs, grad_bias, mask=mask_c, sem="relaxed")
 
