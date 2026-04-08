@@ -17,7 +17,7 @@ from ...utils import clear_tensor_data
 from ..op import BasicOperation, OperationContext
 from .._common import maybe_dequantize
 
-__all__ = ["SwiGLU", "ClampedSwiGLU", "ScaledSwiGLU", "ScaledClampedSwiGLU"]
+__all__ = ["SwiGLU", "ClampedSwiGLU", "ScaledSwiGLU", "ScaledClampedQGeGLU"]
 
 
 class SwiGLU(BasicOperation):
@@ -540,8 +540,9 @@ class ScaledSwiGLU(_ScaledGLU):
         return tex.dswiglu(grad_swiglu_out, swiglu_in, None)
 
 
-class ScaledClampedSwiGLU(_ScaledGLU):
-    r"""Clamped SwiGLU with post-scaling (matches cuDNN grouped GEMM ``act_func="geglu"``).
+class ScaledClampedQGeGLU(_ScaledGLU):
+    r"""Clamped QGeGLU with post-scaling
+    (matches cuDNN grouped GEMM ``act_func="geglu"``).
 
     Same layout and scaling contract as :class:`ScaledSwiGLU`, but the GLU
     uses :class:`ClampedSwiGLU` numerics (default ``limit`` / ``alpha`` match

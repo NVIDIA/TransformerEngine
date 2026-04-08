@@ -116,9 +116,9 @@ def fuse_grouped_mlp_ops(
         Quantization recipe.
     fused_op_cls : type
         Fused operation class with ``is_supported()`` classmethod and
-        constructor accepting ``fc1``, ``swiglu_op``, ``fc2`` keyword args. The
-        ``swiglu_op`` must be :class:`~transformer_engine.pytorch.ops.basic.swiglu.ScaledSwiGLU`
-        or :class:`~transformer_engine.pytorch.ops.basic.swiglu.ScaledClampedSwiGLU`.
+        constructor accepting ``fc1``, ``glu_op``, ``fc2`` keyword args. The
+        ``glu_op`` must be :class:`~transformer_engine.pytorch.ops.basic.swiglu.ScaledSwiGLU`
+        or :class:`~transformer_engine.pytorch.ops.basic.swiglu.ScaledClampedQGeGLU`.
         May also expose ``is_fc1_bias_supported()`` and/or
         ``is_fc2_bias_supported()`` classmethods for bias eligibility.
 
@@ -129,7 +129,7 @@ def fuse_grouped_mlp_ops(
     """
     from .basic import (  # pylint: disable=import-outside-toplevel
         GroupedLinear,
-        ScaledClampedSwiGLU,
+        ScaledClampedQGeGLU,
         ScaledSwiGLU,
     )
 
@@ -152,8 +152,13 @@ def fuse_grouped_mlp_ops(
         matches_pattern = True
         if not (
             isinstance(window[0], GroupedLinear)
-            and isinstance(window[1], (ScaledSwiGLU, ScaledClampedSwiGLU))
+            and isinstance(window[1], (ScaledSwiGLU, ScaledClampedQGeGLU))
             and isinstance(window[2], GroupedLinear)
+        ):
+            matches_pattern = False
+        elif (
+            isinstance(window[1], ScaledClampedQGeGLU)
+            and abs(window[1]._clamped.alpha - 1.702) > 0.001
         ):
             matches_pattern = False
         elif window[0].num_groups != window[2].num_groups:

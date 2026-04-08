@@ -20,7 +20,7 @@ from ...utils import get_cached_ones_tensor, get_device_compute_capability, mark
 from ...tensor.grouped_tensor import GroupedTensor
 from ...tensor.mxfp8_tensor import MXFP8Quantizer
 from ...constants import MXFP8_BLOCK_SCALING_SIZE
-from ..basic import GroupedLinear, ScaledClampedSwiGLU, ScaledSwiGLU
+from ..basic import GroupedLinear, ScaledClampedQGeGLU, ScaledSwiGLU
 from ..fuser import register_forward_fusion
 from ..op import FusedOperation, FusibleOperation, OperationContext
 from .._common import (
@@ -123,7 +123,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         self,
         *,
         fc1: GroupedLinear,
-        swiglu: ScaledSwiGLU | ScaledClampedSwiGLU,
+        swiglu: ScaledSwiGLU | ScaledClampedQGeGLU,
         fc2: GroupedLinear,
     ) -> None:
         super().__init__((fc1, swiglu, fc2))
@@ -131,9 +131,9 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             self.grouped_gemm_glu_kernel()  # Try triggering import error
             raise RuntimeError(f"{self.__class__.__name__} is not supported on this system.")
         validate_grouped_mlp_dims(fc1, swiglu, fc2)
-        # The cuDNN geglu implementation corresponds to ScaledClampedSwiGLU.
+        # The cuDNN geglu implementation corresponds to ScaledClampedQGeGLU.
         # The act_func string should be fixed on the cuDNN FE side.
-        self._cudnn_act_func: str = "geglu" if isinstance(swiglu, ScaledClampedSwiGLU) else "swiglu"
+        self._cudnn_act_func: str = "geglu" if isinstance(swiglu, ScaledClampedQGeGLU) else "swiglu"
 
     def fuser_forward(
         self,

@@ -2237,7 +2237,7 @@ class TestBasicOps:
     @pytest.mark.parametrize("in_shape", ((71, 192), (5, 7, 128)))
     @pytest.mark.parametrize("input_requires_grad", (False, True))
     @pytest.mark.parametrize("scales_requires_grad", (False, True))
-    def test_scaled_clamped_swiglu(
+    def test_scaled_clamped_qgeglu(
         self,
         *,
         in_shape: Iterable[int],
@@ -2249,7 +2249,7 @@ class TestBasicOps:
         limit: float = 7.0,
         alpha: float = 1.702,
     ) -> None:
-        """Clamped SwiGLU with post-scale"""
+        """ScaledClampedQGeGLU (clamped QGeGLU with post-scale)"""
 
         # Tensor dims
         out_shape = list(in_shape)
@@ -2295,7 +2295,7 @@ class TestBasicOps:
         if input_requires_grad or scales_requires_grad:
             y_ref.backward(dy_ref)
 
-        op = te_ops.ScaledClampedSwiGLU(
+        op = te_ops.ScaledClampedQGeGLU(
             glu_interleave_size=glu_interleave_size,
             limit=limit,
             alpha=alpha,
@@ -2310,9 +2310,9 @@ class TestBasicOps:
         assert_close_grads(x_test, x_ref, **tols)
         assert_close_grads(scales_test, scales_ref, **tols)
 
-    def test_interleaved_scaled_clamped_swiglu(self):
-        """Clamped SwiGLU with post-scale and block interleaved input format"""
-        self.test_scaled_clamped_swiglu(
+    def test_interleaved_scaled_clamped_qgeglu(self):
+        """ScaledClampedQGeGLU with block interleaved input format"""
+        self.test_scaled_clamped_qgeglu(
             in_shape=(32, 192),
             glu_interleave_size=32,
             input_requires_grad=True,
@@ -3334,7 +3334,7 @@ class TestSequentialModules:
     @pytest.mark.parametrize("accumulate_into_main_grad", (False, True))
     @pytest.mark.parametrize("glu_interleave_size", (None, 32))
     @pytest.mark.parametrize("delay_wgrad_compute", (False, True))
-    @pytest.mark.parametrize("activation", ("scaled_swiglu", "scaled_clamped_swiglu"))
+    @pytest.mark.parametrize("activation", ("scaled_swiglu", "scaled_clamped_qgeglu"))
     def test_grouped_mlp(
         self,
         *,
@@ -3352,7 +3352,7 @@ class TestSequentialModules:
         delay_wgrad_compute: bool,
         activation: str,
     ) -> None:
-        """GroupedLinear + ScaledSwiGLU / ScaledClampedSwiGLU + GroupedLinear"""
+        """GroupedLinear + ScaledSwiGLU / ScaledClampedQGeGLU + GroupedLinear"""
 
         # Split sizes
         split_sizes = [split_alignment * (i) for i in range(group_size)]
@@ -3375,7 +3375,7 @@ class TestSequentialModules:
         if quantization == "mxfp8" and bias:
             # Will be supported in future CUDNN release.
             pytest.skip("Bias/dbias not yet supported in MXFP8 fused grouped MLP")
-        if quantization == "nvfp4" and activation == "scaled_clamped_swiglu" and bias:
+        if quantization == "nvfp4" and activation == "scaled_clamped_qgeglu" and bias:
             # TODO: ksivaman: Need to debug numerics for this case.
             pytest.skip("Bias/dbias not yet supported in NVFP4 fused grouped MLP with GeGLU")
 
@@ -3485,7 +3485,7 @@ class TestSequentialModules:
         scaled_act = (
             te_ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size)
             if activation == "scaled_swiglu"
-            else te_ops.ScaledClampedSwiGLU(glu_interleave_size=glu_interleave_size)
+            else te_ops.ScaledClampedQGeGLU(glu_interleave_size=glu_interleave_size)
         )
         with te.quantized_model_init(enabled=with_quantization, recipe=recipe):
             fc1 = te_ops.GroupedLinear(
@@ -3674,7 +3674,7 @@ class TestSequentialModules:
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("single_grouped_weight", (False, True))
     @pytest.mark.parametrize("accumulate_into_main_grad", (False, True))
-    @pytest.mark.parametrize("activation", ("scaled_swiglu", "scaled_clamped_swiglu"))
+    @pytest.mark.parametrize("activation", ("scaled_swiglu", "scaled_clamped_qgeglu"))
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
     def test_grouped_mlp_cuda_graph_safe_mxfp8(
         self,
@@ -3726,7 +3726,7 @@ class TestSequentialModules:
             scaled_act = (
                 te_ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size)
                 if activation == "scaled_swiglu"
-                else te_ops.ScaledClampedSwiGLU(glu_interleave_size=glu_interleave_size)
+                else te_ops.ScaledClampedQGeGLU(glu_interleave_size=glu_interleave_size)
             )
             module = te_ops.Sequential(
                 fc1,
