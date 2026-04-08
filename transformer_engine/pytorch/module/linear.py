@@ -64,7 +64,7 @@ from ..quantized_tensor import (
     prepare_for_saving,
     restore_from_func_ctx,
 )
-from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer, Float8Tensor
+from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.utils import is_custom
 from ..export import is_in_onnx_export_mode, assert_warmed_up

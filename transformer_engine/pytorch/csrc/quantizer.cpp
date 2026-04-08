@@ -978,10 +978,10 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
   if (internal) {
     // Use direct C API call bypassing pybind11 overhead
     py::dict kwargs;
-    kwargs["rowwise_data"] = py::cast(data_rowwise);
-    kwargs["columnwise_data"] = py::cast(data_colwise);
-    kwargs["rowwise_scale_inv"] = py::cast(scale_inv_rowwise);
-    kwargs["columnwise_scale_inv"] = py::cast(scale_inv_colwise);
+    kwargs["rowwise_data"] = rowwise_usage ? py::cast(data_rowwise) : py::none();
+    kwargs["columnwise_data"] = columnwise_usage ? py::cast(data_colwise) : py::none();
+    kwargs["rowwise_scale_inv"] = rowwise_usage ? py::cast(scale_inv_rowwise) : py::none();
+    kwargs["columnwise_scale_inv"] = columnwise_usage ? py::cast(scale_inv_colwise) : py::none();
     kwargs["fp8_dtype"] = py::cast(this->dtype);
     kwargs["quantizer"] = this->quantizer;
     kwargs["is_2D_scaled"] = py::cast(block_scaling_dim == 2);
@@ -1004,10 +1004,10 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
     kwargs["shape"] = py::cast(torch_shape);
     kwargs["stride"] = py::cast(stride_int64);
     kwargs["dtype"] = py::cast(GetATenDType(dtype));
-    kwargs["rowwise_data"] = py::cast(data_rowwise);
-    kwargs["columnwise_data"] = py::cast(data_colwise);
-    kwargs["rowwise_scale_inv"] = py::cast(scale_inv_rowwise);
-    kwargs["columnwise_scale_inv"] = py::cast(scale_inv_colwise);
+    kwargs["rowwise_data"] = rowwise_usage ? py::cast(data_rowwise) : py::none();
+    kwargs["columnwise_data"] = columnwise_usage ? py::cast(data_colwise) : py::none();
+    kwargs["rowwise_scale_inv"] = rowwise_usage ? py::cast(scale_inv_rowwise) : py::none();
+    kwargs["columnwise_scale_inv"] = columnwise_usage ? py::cast(scale_inv_colwise) : py::none();
     kwargs["fp8_dtype"] = py::cast(this->dtype);
     kwargs["quantizer"] = this->quantizer;
     kwargs["is_2D_scaled"] = py::cast(block_scaling_dim == 2);
