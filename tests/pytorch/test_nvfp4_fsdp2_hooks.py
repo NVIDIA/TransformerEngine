@@ -21,7 +21,6 @@ from transformer_engine.pytorch import (
 )
 from transformer_engine.pytorch.utils import round_up_to_nearest_multiple
 from transformer_engine.pytorch.constants import NVFP4_BLOCK_SCALING_SIZE
-import transformer_engine_torch as tex
 
 nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available(return_reason=True)
 

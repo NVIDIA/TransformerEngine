@@ -363,9 +363,6 @@ NUM_PROCS = int(os.environ.get("WORLD_SIZE", "1"))
 @pytest.mark.parametrize("fp8_init", [False, True])
 @pytest.mark.parametrize("layer_type", ["LayerNormLinear", "TransformerLayer"])
 def test_distributed(recipe_name, fp8_init, sharding_dims, layer_type):
-    if recipe_name == "Float8BlockScaling" and fp8_init:
-        pytest.xfail(f"{recipe_name} + fp8_init: test_fp8_fsdp2_allgather is currently failing.")
-
     torch.manual_seed(42)
     torch.cuda.manual_seed(42)
 

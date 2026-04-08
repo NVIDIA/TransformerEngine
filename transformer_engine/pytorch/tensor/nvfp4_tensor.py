@@ -604,6 +604,11 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
         sharded_tensors = (rowwise_data, rowwise_scale_inv)
         columnwise_usage = self._quantizer.columnwise_usage
         if columnwise_usage:
+            assert self._quantizer.with_2d_quantization, (
+                "FSDP2 columnwise all-gather requires 2D quantization to be enabled, "
+                "since columnwise data cannot be derived from rowwise alone. "
+                "Ensure the NVFP4Quantizer was created with with_2d_quantization=True."
+            )
             sharded_tensors += (columnwise_data, columnwise_scale_inv)
 
         # Pass amax via metadata (scalar, same on all ranks — not all-gathered)
@@ -723,17 +728,26 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
             return tensor.view(shape)
 
         # as_strided — FSDP2 applies this on the unsharded param.
-        # When shape and strides match (no-op), return self to preserve the quantized type.
+        # Only the identity case (same shape, contiguous strides, zero offset) is supported.
+        # Non-identity as_strided cannot fall through because NVFP4 does not support
+        # dequantization, so we raise explicitly rather than producing undefined behavior.
         if func == aten.as_strided.default:
             tensor = args[0]
             shape = args[1]
             strides = args[2]
+            storage_offset = args[3] if len(args) > 3 else 0
             if (
                 len(shape) == len(strides) == 2
                 and tuple(strides) == (shape[-1], 1)
                 and tuple(shape) == tuple(tensor.size())
+                and storage_offset == 0
             ):
                 return NVFP4Tensor.make_like(tensor)
+            raise NotImplementedError(
+                "NVFP4Tensor does not support non-identity as_strided "
+                f"(shape={shape}, strides={strides}, storage_offset={storage_offset}, "
+                f"tensor.size()={tuple(tensor.size())})"
+            )
 
         # slice — FSDP2 applies this for shard unpadding.
         # When the slice covers the full dimension, return self.
