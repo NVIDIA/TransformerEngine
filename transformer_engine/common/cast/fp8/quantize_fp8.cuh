@@ -358,7 +358,9 @@ void quantize_1D(const Tensor &input, Tensor *output, cudaStream_t stream) {
 
   // Tensor size
   const size_t N = product(input.data.shape);
-  if (N == 0) { return; }
+  if (N == 0) {
+    return;
+  }
 
   const bool isFullTile = (N % ELEMS_PER_BLOCK == 0);
   NVTE_CHECK(isFullTile, "Only full tiles are supported.");

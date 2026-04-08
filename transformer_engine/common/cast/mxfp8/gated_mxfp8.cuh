@@ -710,7 +710,9 @@ void quantize_gated(const Tensor &gated_input, const Tensor &grad, Tensor *outpu
   const size_t rows = gated_input.flat_first_dim();
   const size_t cols = gated_input.flat_last_dim() / 2;
   const size_t output_cols = (IS_BWD ? 2 : 1) * cols;
-  if (rows == 0 || cols == 0) { return; }
+  if (rows == 0 || cols == 0) {
+    return;
+  }
 
   const bool USE_ROWWISE_SCALING = output->has_data();
   const bool USE_COLWISE_SCALING = output->has_columnwise_data();

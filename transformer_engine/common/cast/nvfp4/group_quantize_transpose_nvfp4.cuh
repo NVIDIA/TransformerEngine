@@ -785,7 +785,9 @@ void group_quantize_transpose(const Tensor &input, const Tensor *noop,
 
   const size_t rows = input.flat_first_dim();
   const size_t cols = input.flat_last_dim();
-  if (rows == 0 || cols == 0) { return; }
+  if (rows == 0 || cols == 0) {
+    return;
+  }
 
   NVTE_CHECK(rows % 32 == 0,
              "Number of tensor rows must be a multiple of 32");  // 16B alignment for TMA
