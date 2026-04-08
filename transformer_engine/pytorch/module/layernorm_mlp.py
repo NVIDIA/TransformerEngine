@@ -492,8 +492,12 @@ class _LayerNormMLP(torch.autograd.Function):
             Float8BlockQuantizer,
             NVFP4Quantizer,
         )
-        _is_safe_for_fsdp2 = isinstance(fc1_weight_quantizer, _fsdp2_safe_quantizers) or isinstance(
-            fc1_weight, Float8Tensor
+        _is_safe_for_fsdp2 = (
+            isinstance(fc1_weight_quantizer, _fsdp2_safe_quantizers)
+            or isinstance(fc1_weight, Float8Tensor)
+        ) and (
+            isinstance(fc2_weight_quantizer, _fsdp2_safe_quantizers)
+            or isinstance(fc2_weight, Float8Tensor)
         )
         fsdp2_skip_columnwise = is_fsdp2 and not is_recomputation and _is_safe_for_fsdp2
         if fp8 or debug:
@@ -875,7 +879,7 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.fc2_weight_requires_grad = fc2_weight.requires_grad
             ctx.fc1_weight = fc1_weight
             ctx.fc2_weight = fc2_weight
-            ctx.is_fsdp2 = fsdp2_skip_columnwise
+            ctx.fsdp2_skip_columnwise = fsdp2_skip_columnwise
 
             ctx.device = device
             ctx.activation_dtype = activation_dtype
@@ -1232,13 +1236,15 @@ class _LayerNormMLP(torch.autograd.Function):
             # it from persisting on the all-gathered buffer across step
             # boundaries. Only for Float8TensorStorage which uses _transpose.
             # (Issue #2717)
-            if getattr(ctx, "is_fsdp2", False) and hasattr(fc2_weight, "_transpose"):
+            if getattr(ctx, "fsdp2_skip_columnwise", False) and hasattr(fc2_weight, "_transpose"):
                 if getattr(fc2_weight, "_transpose", None) is not None:
                     fc2_weight._transpose = None
                     fc2_weight._transpose_invalid = True
             # FSDP2: Clear blockwise columnwise caches after FC2 dgrad GEMM.
             # (Issues #2681, #2717)
-            if getattr(ctx, "is_fsdp2", False) and hasattr(fc2_weight, "_columnwise_data"):
+            if getattr(ctx, "fsdp2_skip_columnwise", False) and hasattr(
+                fc2_weight, "_columnwise_data"
+            ):
                 if getattr(fc2_weight, "_columnwise_data", None) is not None:
                     fc2_weight._columnwise_data = None
                     fc2_weight._columnwise_scale_inv = None
@@ -1516,13 +1522,15 @@ class _LayerNormMLP(torch.autograd.Function):
 
             # FSDP2: Clear FP8 transpose cache after FC1 dgrad GEMM.
             # (Issue #2717)
-            if getattr(ctx, "is_fsdp2", False) and hasattr(fc1_weight, "_transpose"):
+            if getattr(ctx, "fsdp2_skip_columnwise", False) and hasattr(fc1_weight, "_transpose"):
                 if getattr(fc1_weight, "_transpose", None) is not None:
                     fc1_weight._transpose = None
                     fc1_weight._transpose_invalid = True
             # FSDP2: Clear blockwise columnwise caches after FC1 dgrad GEMM.
             # (Issues #2681, #2717)
-            if getattr(ctx, "is_fsdp2", False) and hasattr(fc1_weight, "_columnwise_data"):
+            if getattr(ctx, "fsdp2_skip_columnwise", False) and hasattr(
+                fc1_weight, "_columnwise_data"
+            ):
                 if getattr(fc1_weight, "_columnwise_data", None) is not None:
                     fc1_weight._columnwise_data = None
                     fc1_weight._columnwise_scale_inv = None
