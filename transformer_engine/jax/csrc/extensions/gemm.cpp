@@ -683,6 +683,57 @@ size_t grouped_gemm_num_gemms(Buffer_Type const &lhs_first_dims, Buffer_Type con
   }
 }
 
+/* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
+/*! \brief Compute estimates for average dimensions of a grouped tensor.
+ *
+ * Returns a pair of {non_contracting_avg, contracting_avg} dimensions for the given grouped tensor, to estimate per-group GEMM sizes. When a dimension is ragged, we estimate the average size by dividing the dim size by G ("num_gemms"). When a dimension has no ragged dims, we assume it is of shape (G*K, N) or (G*N, K) so we divide the first dim by G to get the average per-group size.
+ *
+ * Examples:
+ *  - fwd lhs: shape_2d=[ragged M, K], first_dims=[M,...] (ragged M) → avg_m = (G*M)/G = M, avg_k = K
+ *  - fwd rhs: shape_2d=[G*K, N], last_dims=None (static K) → avg_k = (G*K)/G = K, avg_n = N
+ *  - wgrad lhs: shape_2d=[M, ragged K], last_dims=[K,...] (ragged K) → avg_k = (G*K)/G = K, avg_m = M
+ *  - wgrad rhs: shape_2d=[N, ragged K], last_dims=[K,...] (ragged K) → avg_k = (G*K)/G = K, avg_n = N
+ *
+ *  \param[in]  first_dims           XLA buffer of on-device first dimensions. Shape (G,) if ragged, empty otherwise.
+ *  \param[in]  last_dims            XLA buffer of on-device last dimensions. Shape (G,) if ragged, empty otherwise.
+ *  \param[in]  shape_2d             Pair of total 2D dimensions (rows, cols) for the operand.
+ *  \param[in]  num_gemms            Number of GEMMs (G) in the grouped operation.
+ *  \param[in]  is_trans             Whether the operand is transposed.
+ *  \return Pair of {non_contracting_avg, contracting_avg}, i.e. {avg_m, avg_k} for lhs or
+ *         {avg_n, avg_k} for rhs.
+ */
+std::pair<int64_t, int64_t> grouped_gemm_avg_dims(Buffer_Type const &first_dims,
+                                                  Buffer_Type const &last_dims,
+                                                  std::pair<size_t, size_t> const &shape_2d,
+                                                  size_t num_gemms, bool is_trans) {
+  bool first_ragged = first_dims.element_count() > 0;
+  bool last_ragged = last_dims.element_count() > 0;
+  bool any_ragged = first_ragged || last_ragged;
+
+  std::pair<size_t, size_t> per_group_shape_2d{};
+  if (first_ragged) {
+    per_group_shape_2d = {
+        static_cast<size_t>(std::round(static_cast<double>(shape_2d.first) / num_gemms)),
+        shape_2d.second};
+  } else if (!any_ragged) {
+    per_group_shape_2d = {
+        static_cast<size_t>(std::round(static_cast<double>(shape_2d.first) / num_gemms)),
+        shape_2d.second};
+  } else if (last_ragged && !first_ragged) {
+    per_group_shape_2d = {
+        shape_2d.first,
+        static_cast<size_t>(std::round(static_cast<double>(shape_2d.second) / num_gemms))};
+  } else {
+    NVTE_CHECK(false, "Grouped GEMM with both first_dims and last_dims ragged is not supported.");
+  }
+
+  int64_t non_contract =
+      static_cast<int64_t>(is_trans ? per_group_shape_2d.second : per_group_shape_2d.first);
+  int64_t contract =
+      static_cast<int64_t>(is_trans ? per_group_shape_2d.first : per_group_shape_2d.second);
+  return {non_contract, contract};
+}
+
 }  // namespace jax
 }  // namespace transformer_engine
 
@@ -741,11 +792,22 @@ Error_Type GroupedGemmV2FFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Ty
   auto out_tensor = make_grouped_tensor(*output, out_first_dims, out_last_dims, int64_base,
                                         int64_capacity, int64_offset, num_gemms, stream);
 
+  auto [avg_m, avg_k_lhs] = grouped_gemm_avg_dims(
+      lhs_first_dims, lhs_last_dims, {lhs_left_size, lhs_right_size}, num_gemms, lhs_is_trans);
+  auto [avg_n, avg_k_rhs] = grouped_gemm_avg_dims(
+      rhs_first_dims, rhs_last_dims, {rhs_left_size, rhs_right_size}, num_gemms, !rhs_is_trans);
+  // Use k from lhs (both sides should agree for well-formed inputs).
+  NVTE_CHECK(avg_k_lhs == avg_k_rhs, "Contracting dimension mismatch: lhs avg_k=", avg_k_lhs,
+             " vs rhs avg_k=", avg_k_rhs);
+
+  GroupedMatmulConfigWrapper gemmConfig{};
+  gemmConfig.set_avg_m(avg_m);
+  gemmConfig.set_avg_n(avg_n);
+  gemmConfig.set_avg_k(avg_k_lhs);
+
   nvte_grouped_gemm(rhs_tensor, rhs_is_trans, lhs_tensor, lhs_is_trans, nullptr, out_tensor,
                     alpha_tensor.data(), beta_tensor.data(), workspace_setup.data(),
-                    workspace_cublas.data(),
-                    nullptr,  // config (use defaults)
-                    stream);
+                    workspace_cublas.data(), gemmConfig, stream);
 
   return ffi_with_cuda_error_check();
 }
