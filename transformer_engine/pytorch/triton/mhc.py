@@ -78,10 +78,10 @@ def mhc_fused_scale(
         alpha[1] is applied to H[:, n:2n] for H_post
         alpha[2] is applied to H[:, 2n:2n+n*n] for H_res
     beta : torch.Tensor
-        bias term for H, of shape (2*n+n*n,), where
-        beta[0:n] is applied to H[:, 0:n] for H_pre
-        beta[n:2n] is applied to H[:, n:2n] for H_post
-        beta[2n:2n+n*n] is applied to H[:, 2n:2n+n*n] for H_res
+        bias term for H, of shape (1, 2*n+n*n), where
+        beta[0, 0:n] is applied to H[:, 0:n] for H_pre
+        beta[0, n:2n] is applied to H[:, n:2n] for H_post
+        beta[0, 2n:2n+n*n] is applied to H[:, 2n:2n+n*n] for H_res
     ms : torch.Tensor
         mean square for each row of H from the projection kernel, of shape (M,), used for RMSNorm scaling
     n : int
@@ -416,7 +416,7 @@ class mHCScaleFusedOp(torch.autograd.Function):
         ctx : The context object.
         H (tensor): The input H matrix of shape (M, 32), where only the first N=2n+n*n elements are valid.
         alpha (tensor): The scaling factors of shape (3,), one for each of H_pre, H_post, H_res.
-        beta (tensor): The bias terms of shape (2n+n*n,).
+        beta (tensor): The bias terms of shape (1, 2n+n*n).
         ms (tensor): The mean square from the projection kernel, of shape (M,), used for RMSNorm scaling.
         n (int): The number of hyper connections (only n=4 is supported).
 
