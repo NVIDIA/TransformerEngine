@@ -416,7 +416,7 @@ class mHCScaleFusedOp(torch.autograd.Function):
         ctx : The context object.
         H (tensor): The input H matrix of shape (M, 32), where only the first N=2n+n*n elements are valid.
         alpha (tensor): The scaling factors of shape (3,), one for each of H_pre, H_post, H_res.
-        beta (tensor): The bias terms of shape (1, 2n+n*n).
+        beta (tensor): The bias terms of shape (2n+n*n,).
         ms (tensor): The mean square from the projection kernel, of shape (M,), used for RMSNorm scaling.
         n (int): The number of hyper connections (only n=4 is supported).
 
