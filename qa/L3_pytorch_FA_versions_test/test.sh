@@ -44,11 +44,8 @@ do
   then
     pip3 install flash-attn==${fa_version} --no-build-isolation || error_exit "Failed to install flash-attn==${fa_version}"
   else
-    git clone https://github.com/Dao-AILab/flash-attention.git || error_exit "Failed to clone flash-attention"
-    cd flash-attention/hopper && python setup.py install || error_exit "Failed to install flash-attention from source"
-    python_path=`python -c "import site; print(site.getsitepackages()[0])"`
-    mkdir -p $python_path/flash_attn_3
-    cp flash_attn_interface.py $python_path/flash_attn_3/
+    git clone https://github.com/Dao-AILab/flash-attention.git
+    cd flash-attention/hopper && python setup.py install
     cd ../../
   fi
 
