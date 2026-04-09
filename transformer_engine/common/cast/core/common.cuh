@@ -695,18 +695,15 @@ __global__ void __launch_bounds__(1)
 }
 
 template <typename IType, size_t OUTPUT_DATA_TYPE_BITS>
-__global__ void __launch_bounds__(1)
-    update_tma_descriptors_packed_output(
-        const __grid_constant__ CUtensorMap base_tensor_map_input,
-        const __grid_constant__ CUtensorMap base_tensor_map_output_rowwise,
-        const __grid_constant__ CUtensorMap base_tensor_map_output_colwise,
-        const IType *const __restrict__ input_data_ptr, const void *const output_rowwise_data_ptr,
-        const void *const output_colwise_data_ptr, const ShapeRepresentation shape_rep,
-        const size_t num_tensors, const size_t first_logical_dim, const size_t last_logical_dim,
-        const int64_t *const __restrict__ offsets_ptr,
-        const int64_t *const __restrict__ first_dims_ptr,
-        const int64_t *const __restrict__ last_dims_ptr, const bool rowwise,
-        const bool colwise) {
+__global__ void __launch_bounds__(1) update_tma_descriptors_packed_output(
+    const __grid_constant__ CUtensorMap base_tensor_map_input,
+    const __grid_constant__ CUtensorMap base_tensor_map_output_rowwise,
+    const __grid_constant__ CUtensorMap base_tensor_map_output_colwise,
+    const IType *const __restrict__ input_data_ptr, const void *const output_rowwise_data_ptr,
+    const void *const output_colwise_data_ptr, const ShapeRepresentation shape_rep,
+    const size_t num_tensors, const size_t first_logical_dim, const size_t last_logical_dim,
+    const int64_t *const __restrict__ offsets_ptr, const int64_t *const __restrict__ first_dims_ptr,
+    const int64_t *const __restrict__ last_dims_ptr, const bool rowwise, const bool colwise) {
   const bool leading_thread = (threadIdx.x == 0);
   const size_t tensor_id = blockIdx.x;
   if (!leading_thread || tensor_id >= num_tensors) {

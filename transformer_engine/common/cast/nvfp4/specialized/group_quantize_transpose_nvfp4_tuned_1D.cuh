@@ -467,10 +467,9 @@ __global__ void __launch_bounds__(THREADS_NUM) group_quantize_transpose_nvfp4_tu
     if (!is_job_valid(first_job, shape_rep, total_work_blocks, offsets_ptr)) {
       return;
     }
-    const BlockDescriptor first_block =
-        decode_block<CHUNK_DIM_Y, CHUNK_DIM_X>(first_job, shape_rep, use_single_work_grid,
-                                               first_logical_dim, last_logical_dim, num_tensors,
-                                               ctaid_X, ctaid_Y, offsets_ptr);
+    const BlockDescriptor first_block = decode_block<CHUNK_DIM_Y, CHUNK_DIM_X>(
+        first_job, shape_rep, use_single_work_grid, first_logical_dim, last_logical_dim,
+        num_tensors, ctaid_X, ctaid_Y, offsets_ptr);
     const CUtensorMap &tensor_map_input = g_tensor_maps.input[first_job.tensor_id];
     if (leading_thread) {
       fence_acquire_tensormap(&tensor_map_input);
@@ -510,10 +509,9 @@ __global__ void __launch_bounds__(THREADS_NUM) group_quantize_transpose_nvfp4_tu
       break;
     }
 
-    const BlockDescriptor current_block =
-        decode_block<CHUNK_DIM_Y, CHUNK_DIM_X>(current_job, shape_rep, use_single_work_grid,
-                                               first_logical_dim, last_logical_dim, num_tensors,
-                                               ctaid_X, ctaid_Y, offsets_ptr);
+    const BlockDescriptor current_block = decode_block<CHUNK_DIM_Y, CHUNK_DIM_X>(
+        current_job, shape_rep, use_single_work_grid, first_logical_dim, last_logical_dim,
+        num_tensors, ctaid_X, ctaid_Y, offsets_ptr);
 
     const size_t rows = current_job.rows;
     const size_t cols = current_job.cols;
