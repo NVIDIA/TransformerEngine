@@ -745,7 +745,7 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
         if self._columnwise_data is not None:
             byte_shape = self._columnwise_data.shape
             return torch.Size(byte_shape[1:-1] + (byte_shape[-1] * 2, byte_shape[0]))
-        raise RuntimeError("NVFP4Tensor has no data!")
+        return torch.Tensor.size(self)
 
     @property
     def is_cuda(self):
