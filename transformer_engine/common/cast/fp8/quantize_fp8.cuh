@@ -400,6 +400,31 @@ void quantize_2D(const Tensor &input, const Tensor *act_input, Tensor *output, T
   const size_t rows = input.flat_first_dim();
   const size_t cols = input.flat_last_dim();
 
+  const size_t chunks_Y = DIVUP(rows, FP8_CHUNK_DIM_Y);
+  const size_t chunks_X = DIVUP(cols, FP8_CHUNK_DIM_X);
+  const size_t blocks_Y = chunks_Y;
+  const size_t blocks_X = chunks_X;
+
+  NVTE_CHECK(is_fp8_dtype(output->dtype()), "Output must have FP8 type.");
+
+  // Workspace for dbias
+  const size_t dbias_rows = blocks_Y;
+  const size_t dbias_cols = cols;
+  if constexpr (IS_DBIAS) {
+    NVTE_CHECK(dbias->data.dtype == input.data.dtype, "DBias must have the same type as input.");
+    NVTE_CHECK(dbias->data.shape == std::vector<size_t>{cols}, "Wrong shape of DBias.");
+    NVTE_CHECK(workspace != nullptr, "Workspace must be a tensor.");
+    NVTE_CHECK(dbias_rows > 0 && dbias_cols > 0,
+               "Invalid workspace shape for DBias computation (input shape=",
+               input.shape(), ", workspace shape=(", dbias_rows, ",", dbias_cols, ")).");
+
+    if (workspace->data.dptr == nullptr) {
+      workspace->data.shape = {dbias_rows, dbias_cols};
+      workspace->data.dtype = DType::kFloat32;
+      return;
+    }
+  }
+
   // Skip kernel if tensor size is zero
   if (rows == 0 || cols == 0) {
     if constexpr (IS_DBIAS) {
@@ -408,32 +433,11 @@ void quantize_2D(const Tensor &input, const Tensor *act_input, Tensor *output, T
     return;
   }
 
-  const size_t chunks_Y = DIVUP(rows, FP8_CHUNK_DIM_Y);
-  const size_t chunks_X = DIVUP(cols, FP8_CHUNK_DIM_X);
-  const size_t blocks_Y = chunks_Y;
-  const size_t blocks_X = chunks_X;
-
-  const size_t dbias_rows = blocks_Y;
-  const size_t dbias_cols = cols;
-
-  NVTE_CHECK(is_fp8_dtype(output->dtype()), "Output must have FP8 type.");
-  NVTE_CHECK(output->scale_inv.dptr != nullptr, "Scaling tensor must be allocated");
-
-  if constexpr (IS_DBIAS) {
-    NVTE_CHECK(dbias->data.dtype == input.data.dtype, "DBias must have the same type as input.");
-    NVTE_CHECK(dbias->data.shape == std::vector<size_t>{cols}, "Wrong shape of DBias.");
-    NVTE_CHECK(workspace != nullptr, "Workspace must be a tensor.");
-
-    if (workspace->data.dptr == nullptr) {
-      workspace->data.shape = {dbias_rows, dbias_cols};
-      workspace->data.dtype = DType::kFloat32;
-      return;
-    }
-  }
   float *const workspace_ptr = IS_DBIAS ? reinterpret_cast<float *>(workspace->data.dptr) : nullptr;
   float *const amax_ptr = reinterpret_cast<float *>(output->amax.dptr);
   float *const scale_inv_ptr = reinterpret_cast<float *>(output->scale_inv.dptr);
   float *const scale_ptr = reinterpret_cast<float *>(output->scale.dptr);
+  NVTE_CHECK(scale_inv_ptr != nullptr, "Scaling tensor must be allocated");
 
   const dim3 block(FP8_THREADS_PER_CHUNK);
   const dim3 grid(blocks_X, blocks_Y);
