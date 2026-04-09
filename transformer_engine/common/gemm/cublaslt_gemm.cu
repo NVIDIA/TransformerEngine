@@ -956,8 +956,8 @@ void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor 
   const void *alpha_ptr = GetScalarOne();
   const void *beta_ptr = accumulate ? GetScalarOne() : GetScalarZero();
 
-  NVTE_CHECK(is_delayed_tensor_scaling(inputA->scaling_mode) &&
-                 is_delayed_tensor_scaling(inputB->scaling_mode),
+  NVTE_CHECK(is_tensor_scaling(inputA->scaling_mode) &&
+                 is_tensor_scaling(inputB->scaling_mode),
              "Atomic GEMM only supports delayed scaling.");
   cublas_gemm(inputA, inputB, outputD, biasTensor, outputGelu, (transa) ? CUBLAS_OP_T : CUBLAS_OP_N,
               (transb) ? CUBLAS_OP_T : CUBLAS_OP_N, grad, wspace->data.dptr, wspace->data.shape[0],
