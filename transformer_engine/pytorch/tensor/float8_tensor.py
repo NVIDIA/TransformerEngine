@@ -678,7 +678,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                 quantizer=tensor._quantizer,
             )
 
-        if func in [aten.slice.Tensor, aten.select.int]:
+        if func in (aten.slice.Tensor, aten.select.int):
             tensor = args[0]
             data = tensor._data
             data_slice = data.__torch_dispatch__(
@@ -687,7 +687,24 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                 [data] + list(args[1:]),
                 kwargs,
             )
-            return Float8Tensor.make_like(tensor, data=data_slice, shape=data_slice.shape)
+            transpose_slice = None
+            if tensor._transpose is not None and not tensor._transpose_invalid:
+                transpose = tensor._transpose
+                ndim = data.dim()
+                dim = args[1] if len(args) > 1 else 0
+                t_dim = 0 if dim == ndim - 1 else dim + 1
+                transpose_slice = transpose.__torch_dispatch__(
+                    func,
+                    types,
+                    [transpose, t_dim] + list(args[2:]),
+                    kwargs,
+                )
+            return Float8Tensor.make_like(
+                tensor,
+                data=data_slice,
+                data_transpose=transpose_slice,
+                shape=data_slice.shape,
+            )
 
         # Related to FSDP2
         if func == aten.split.Tensor:
@@ -950,7 +967,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         if self._transpose is not None:
             transpose_shape = self._transpose.shape
             return torch.Size(tuple(transpose_shape[1:]) + (transpose_shape[0],))
-        raise RuntimeError("Both data and transpose are None")
+        return torch.Tensor.size(self)
 
     @property
     def is_cuda(self):

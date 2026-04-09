@@ -1184,9 +1184,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         grad_output = grad_output.reshape((-1, grad_output.shape[-1]))
         grad_output = grad_output.contiguous()
         gather_grad_output = row_parallel_mode and ctx.sequence_parallel
+        use_fp8_bwd = ctx.fp8 and ctx.backward_override is None
 
         # Non-FP8 case: bgrad is fused with wgrad for this case.
-        if not ctx.fp8 and not ctx.debug:
+        if not use_fp8_bwd and not ctx.debug:
             if gather_grad_output:
                 if not ctx.ub_overlap_ag:  # Perform NCCL all-gather
                     grad_output, _ = gather_along_first_dim(grad_output, ctx.tp_group)
@@ -1378,10 +1379,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     if hasattr(self, "_high_precision_init_val"):
                         del self._high_precision_init_val
 
-                param._high_precision_init_val = high_precision_init_val
-                param.get_high_precision_init_val = MethodType(get, param)
-                param.clear_high_precision_init_val = MethodType(clear, param)
-                # Update the parameter based on its type
+                # DTensor.from_local() does not preserve object identity,
+                # so attach to the DTensor's local tensor when applicable.
+                target = dtensor_param._local_tensor if is_dtensor else param
+                target._high_precision_init_val = high_precision_init_val
+                target.get_high_precision_init_val = MethodType(get, target)
+                target.clear_high_precision_init_val = MethodType(clear, target)
 
             if not is_dtensor:
                 self.module_setattr(name, param)
