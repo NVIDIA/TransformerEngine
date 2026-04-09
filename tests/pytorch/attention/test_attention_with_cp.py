@@ -374,8 +374,21 @@ def test_cp_with_fused_attention(
         is_training=is_training,
     )
     _, fused_attn_supported, _ = available_backends
+
+    # Skip any tests if not supported by the configs
     if not fused_attn_supported:
         pytest.skip("No attention backend available.")
+
+    deterministic = not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
+    if deterministic:
+        if config.softmax_type != "vanilla":
+            pytest.skip(
+                "Deterministic mode does not support non-vanilla softmax with FusedAttention"
+            )
+        if config.attn_bias_type == "post_scale_bias" and is_training:
+            pytest.skip(
+                "Deterministic mode does not support post_scale_bias with requires_grad"
+            )
 
     run_distributed(
         get_bash_arguments(
