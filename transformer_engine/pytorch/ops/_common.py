@@ -5,9 +5,12 @@
 """Helper functions used in fusible operations."""
 
 from __future__ import annotations
+import functools
+from importlib.metadata import PackageNotFoundError, version as get_pkg_version
 from typing import Optional
 
 import torch
+from packaging.version import Version as PkgVersion
 
 from transformer_engine_torch import FP8TensorMeta
 from ..torch_version import torch_version
@@ -15,6 +18,15 @@ from ..quantization import FP8GlobalStateManager
 from ..tensor.float8_tensor import Float8Tensor
 from ..quantized_tensor import QuantizedTensorStorage
 from ..utils import canonicalize_dtype
+
+
+@functools.lru_cache(maxsize=1)
+def _nvidia_cudnn_frontend_supports_scaled_clamped_qgeglu() -> bool:
+    """Check cuDNN FE min version with fixed numerics for qgeglu."""
+    try:
+        return PkgVersion(get_pkg_version("nvidia-cudnn-frontend")) >= PkgVersion("1.23.0")
+    except PackageNotFoundError:
+        return False
 
 
 def is_quantized_tensor(tensor: torch.Tensor | QuantizedTensorStorage) -> bool:
@@ -73,8 +85,8 @@ def get_fp8_meta_from_fp8_tensor(tensor: Float8Tensor) -> tuple[FP8TensorMeta, i
     return fp8_meta, 0
 
 
-def validate_grouped_mlp_dims(fc1, swiglu, fc2) -> None:
-    """Validate FC1/SwiGLU/FC2 dimensions and interleave size for fused grouped MLP."""
+def validate_grouped_mlp_dims(fc1, glu_op, fc2) -> None:
+    """Validate FC1 / scaled GLU / FC2 dimensions for fused grouped MLP."""
 
     if fc1.in_features % 64 != 0 or fc1.out_features % 64 != 0:
         raise ValueError(
@@ -93,10 +105,10 @@ def validate_grouped_mlp_dims(fc1, swiglu, fc2) -> None:
             f"and FC2 (num_groups={fc2.num_groups}, in_features={fc2.in_features}, "
             f"out_features={fc2.out_features}) do not match."
         )
-    if swiglu.glu_interleave_size != 32:
+    if glu_op.glu_interleave_size != 32:
         raise ValueError(
             "Fused kernel requires 32-wide GLU interleaving, "
-            f"but got glu_interleave_size={swiglu.glu_interleave_size}."
+            f"but got glu_interleave_size={glu_op.glu_interleave_size}."
         )
 
 
@@ -106,7 +118,7 @@ def fuse_grouped_mlp_ops(
     recipe,
     fused_op_cls,
 ):
-    """Sliding-window fusion for GroupedLinear + ScaledSwiGLU + GroupedLinear.
+    """Sliding-window fusion for GroupedLinear + scaled GLU + GroupedLinear.
 
     Parameters
     ----------
@@ -116,7 +128,9 @@ def fuse_grouped_mlp_ops(
         Quantization recipe.
     fused_op_cls : type
         Fused operation class with ``is_supported()`` classmethod and
-        constructor accepting ``fc1``, ``swiglu``, ``fc2`` keyword args.
+        constructor accepting ``fc1``, ``glu_op``, ``fc2`` keyword args. The
+        ``glu_op`` must be :class:`~transformer_engine.pytorch.ops.basic.swiglu.ScaledSwiGLU`
+        or :class:`~transformer_engine.pytorch.ops.basic.swiglu.ScaledClampedQGeGLU`.
         May also expose ``is_fc1_bias_supported()`` and/or
         ``is_fc2_bias_supported()`` classmethods for bias eligibility.
 
@@ -125,7 +139,11 @@ def fuse_grouped_mlp_ops(
     list of FusibleOperation
         Updated operations with matched triples replaced by fused ops.
     """
-    from .basic import GroupedLinear, ScaledSwiGLU  # pylint: disable=import-outside-toplevel
+    from .basic import (  # pylint: disable=import-outside-toplevel
+        GroupedLinear,
+        ScaledClampedQGeGLU,
+        ScaledSwiGLU,
+    )
 
     if not fused_op_cls.is_supported():
         return ops
@@ -146,8 +164,13 @@ def fuse_grouped_mlp_ops(
         matches_pattern = True
         if not (
             isinstance(window[0], GroupedLinear)
-            and isinstance(window[1], ScaledSwiGLU)
+            and isinstance(window[1], (ScaledSwiGLU, ScaledClampedQGeGLU))
             and isinstance(window[2], GroupedLinear)
+        ):
+            matches_pattern = False
+        elif isinstance(window[1], ScaledClampedQGeGLU) and (
+            abs(window[1]._clamped.alpha - 1.702) > 0.001
+            or not _nvidia_cudnn_frontend_supports_scaled_clamped_qgeglu()
         ):
             matches_pattern = False
         elif window[0].num_groups != window[2].num_groups:
