@@ -37,9 +37,9 @@ TODO(shiqingf): add performance for Ultra model in nvfp4.
 | Mechanism | Description |
 |---|---|
 | **Alignment padding** | Shards padded to `ETPConfig.pad_for_alignment × etp_size` rows at construction via `get_padded_shard()`; only last rank carries padding (`is_padded_last_rank`); padding stripped in `_strip_padding()` both post-gather (before GEMM) and post-reduce-scatter (before wgrad accumulation) |
-| **Fine-grained weight scheduling** | Each weight has its own `ETPWeightState` lifecycle and is scheduled independently via a doubly-linked list (`next_w`/`prev_w`), enabling per-weight AG/RS overlap at single-weight granularity |
+| **Fine-grained weight scheduling** | Each weight has its own `ETPWeightState` lifecycle and is scheduled independently via a doubly-linked list (`next_w`/`prev_w`), enabling per-weight AG/RS overlap at single-weight granularity. Two independent chains are maintained: one for dense params (mamba/attn/shared_expert) and one for expert params (grouped_fc1/grouped_fc2) |
 | **Separate AG and RS state** | All-gather state (`state`) and reduce-scatter state (`rs_state`) are tracked independently per param, allowing forward and backward async ops to proceed without interference |
-| **Dedicated CUDA streams** | AG and RS run on separate global CUDA streams (`AG_STREAM`, `RS_STREAM`), decoupled from the default compute stream; completion is signaled back via per-param CUDA events (`ag_event`, `rs_event`) that the compute stream waits on before consuming the result |
+| **Shared CUDA streams** | AG and RS run on shared CUDA streams (`get_ag_stream()`, `get_rs_stream()`) across all chains; completion is signaled back via per-param CUDA events (`ag_event`, `rs_event`) that the compute stream waits on before consuming the result. Streams must be shared because `ag_event` is recorded on the AG stream during CUDA graph capture; using a different stream at replay would cause `ag_event.wait()` to see a stale recording |
 | **Ticket-based buffer cache** | `ETPWeightCache` assigns persistent tickets via `reserve()`; buffers are lazily allocated on `get()` and returned to the pool on `release()`; `clear()` drops all buffers while keeping tickets valid for lazy re-allocation (used for CUDA Graph re-capture) |
 | **Wgrad reduce-scatter** | Async reduce-scatter of weight gradients, deferred to overlap with next layer's wgrad RS; `_finalize_wgrad()` resets `rs_state`, strips padding, and accumulates the result into `param.main_grad`, returning a dummy-zero grad to autograd |
 
@@ -143,7 +143,7 @@ if etp_group is not None:
     del weight_tensor   # free the temporary full-weight buffer
 ```
 
-For `GroupedLinear` (MoE), `wrap_module_params_etp` is called with `is_grouped=True`, which additionally sets `weight_list` on the first expert's `ETPShardedParam` so all experts' weights can be batched together in a single coalesced all-gather.
+For `GroupedLinear` (MoE), `wrap_module_params_etp` is called with `is_grouped=True`, which additionally sets `weight_list` on the first expert's `ETPShardedParam` so all experts' weights can be batched together in a single coalesced all-gather. It also sets `chain_id='expert'` so expert params join the expert prefetch chain (separate from the dense chain).
 
 ### State Machine
 
@@ -193,10 +193,7 @@ classDiagram
         <<nn.Parameter subclass>>
         $ _pending_rs_weight : ETPShardedParam
         $ _first_weight_flag : bool
-        $ _last_weight : ETPShardedParam
-        $ _link_node_count : int
-        $ _link_table_buffer : List[str]
-        $ _link_table_flushed : bool
+        $ _chain_state : Dict[str, dict]
         +ETPWeightState state
         +ETPWeightState rs_state
         +int _ag_ticket_fwd
@@ -214,6 +211,7 @@ classDiagram
         +bool prefetch_initialized
         +ETPShardedParam next_w
         +ETPShardedParam prev_w
+        +str chain_id
         +bool is_routed_expert
         +int expert_idx
         +ProcessGroup group
@@ -277,6 +275,7 @@ classDiagram
         +tuple key
         +ETPShardedParam param
         +dtype
+        +str chain_id
         +bool reduce_scatter
         +bool fwd
         +Tensor buf
@@ -375,6 +374,65 @@ FSDP (Fully Sharded Data Parallelism) and ETP both shard weight parameters, but 
 **Key distinction**: FSDP shards across the *data-parallel dimension* (replicas processing different samples), while ETP shards across the *model-parallel dimension* (GPUs processing the same sample). They can coexist: a model can use FSDP for data parallelism and ETP for weight memory reduction simultaneously.
 
 A further practical difference is that ETP is **quantization-aware**: shards are quantized *before* the all-gather, so the wire bandwidth is proportional to the quantized size (e.g., FP4 = 1/4 of BF16), not the original weight size. FSDP gathers in full precision by default.
+
+---
+
+## Two-Chain Architecture (Dense + Expert)
+
+ETP maintains **two independent prefetch chains** to cleanly separate dense and expert weight management:
+
+| Chain | Params | NCCL Group | CUDA Graph |
+|-------|--------|-----------|------------|
+| **Dense** (`chain_id='dense'`) | mamba, attention, shared expert | `PARAMETER_SHARDING_GROUP` | Captured in graphs |
+| **Expert** (`chain_id='expert'`) | grouped_fc1, grouped_fc2 | `EXPERT_PARAMETER_SHARDING_GROUP` | Runs eagerly |
+
+Both chains share the same `ag_stream` / `rs_stream` (see "Shared Streams" below).
+
+### Why Two Chains Instead of One?
+
+The original design used a **single global chain** linking all ETP params:
+
+```
+Single chain (old):
+CG(mamba.fc1 -> mamba.fc2) -> CG(shared_expert.fc1 -> shared_expert.fc2) -> EAGER(grouped_fc1 -> grouped_fc2) -> CG(next_mamba.fc1 -> ...) -> ...
+                                                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                                                                            crosses CG/eager boundary
+```
+
+This caused two problems:
+
+1. **Cross-chain prefetch crossing CG/eager boundary**: The single linked list linked dense params (captured in CUDA graphs) to expert params (running eagerly). The prefetch chain crossed the CG/eager boundary, causing the captured AG event sequence to include expert weight prefetches. At 64+ GPU IB scale, this interaction corrupted NCCL communicator progress tracking across graph replays and caused deadlocks.
+
+2. **Complex fencing**: Numerous `_drain_etp_side_streams()` fences were needed at every CG/eager boundary (forward expert compute entry, backward dispatch/combine, finalize_model_grads). These fences were fragile, hard to reason about, and didn't fully solve the 64-GPU hang.
+
+The two-chain design eliminates both problems:
+
+```
+Dense chain:  CG(mamba.fc1 -> mamba.fc2) -> CG(shared_expert.fc1 -> shared_expert.fc2) -> CG(next_mamba.fc1 -> ...) -> ...
+Expert chain: EAGER(grouped_fc1_L1 -> grouped_fc2_L1) -> EAGER(grouped_fc1_L2 -> grouped_fc2_L2) -> ...
+              (never crosses into CG, never uses PARAMETER_SHARDING_GROUP)
+```
+
+Each chain uses its own NCCL communicator and stays entirely within one execution mode (CG or eager).
+
+### Chain Construction
+
+Each chain builds its own doubly-linked list independently via per-chain state in `_chain_state`:
+
+```
+Dense chain:  mamba.fc1 -> mamba.fc2 -> shared_expert.fc1 -> shared_expert.fc2 -> next_mamba.fc1 -> ...
+Expert chain: grouped_fc1_layer1 -> grouped_fc2_layer1 -> grouped_fc1_layer2 -> ...
+```
+
+The `chain_id` is set automatically: `wrap_module_params_etp(..., is_grouped=True)` sets `chain_id='expert'`; all other params default to `chain_id='dense'`.
+
+### Shared Streams
+
+Both chains share the same `ag_stream` and `rs_stream`. Per-chain streams were considered but cause correctness issues: the `ag_event` CUDA event object is recorded on `ag_stream` during CUDA graph capture. If expert params used a different stream at replay time, `ag_event.wait()` would see a stale recording, producing Inf gradients. Shared streams avoid this while the chain-level isolation (no cross-chain `next_w`/`prev_w` links) provides the key benefit of preventing prefetch chains from crossing the CG/eager boundary.
+
+### Buffer Cache
+
+The single global `ETPWeightCache` serves both chains. Cache keys already include `expert_idx`, so dense and expert buffers never collide. `reallocate_to_mempool()` only migrates **dense-chain** buffers into the CUDA graph memory pool; expert-chain buffers remain in regular allocator memory.
 
 ---
 

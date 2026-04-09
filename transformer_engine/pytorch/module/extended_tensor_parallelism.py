@@ -47,20 +47,32 @@ _ETP_CACHE = None
 
 # Global set of ETPShardedParam with in-flight async comms (AG or RS).
 _inflight_comm_params: set = set()
-AG_STREAM = None
-RS_STREAM = None
+_AG_STREAMS: Dict[str, torch.cuda.Stream] = {}
+_RS_STREAMS: Dict[str, torch.cuda.Stream] = {}
 
-def get_ag_stream():
-    global AG_STREAM
-    if AG_STREAM is None:
-        AG_STREAM = torch.cuda.Stream()
-    return AG_STREAM
+def get_ag_stream(chain_id: str = 'dense') -> torch.cuda.Stream:
+    # All chains share one AG stream. The ag_event CUDA event object is recorded on
+    # this stream during graph capture; using a different stream at replay would cause
+    # ag_event.wait() to see a stale recording, producing Inf gradients.
+    key = 'shared'
+    if key not in _AG_STREAMS:
+        _AG_STREAMS[key] = torch.cuda.Stream()
+    return _AG_STREAMS[key]
 
-def get_rs_stream():
-    global RS_STREAM
-    if RS_STREAM is None:
-        RS_STREAM = torch.cuda.Stream()
-    return RS_STREAM
+def get_rs_stream(chain_id: str = 'dense') -> torch.cuda.Stream:
+    # All chains share one RS stream (same reason as AG stream).
+    key = 'shared'
+    if key not in _RS_STREAMS:
+        _RS_STREAMS[key] = torch.cuda.Stream()
+    return _RS_STREAMS[key]
+
+def get_all_ag_streams() -> list:
+    """Return all AG streams that have been created."""
+    return list(_AG_STREAMS.values())
+
+def get_all_rs_streams() -> list:
+    """Return all RS streams that have been created."""
+    return list(_RS_STREAMS.values())
 
 @dataclass
 class ETPConfig:
@@ -133,6 +145,7 @@ def wrap_module_params_etp(module, weight_names, etp_group, is_grouped=None):
         if is_grouped:
             etp_shard.expert_idx = idx
             etp_shard.is_routed_expert = True
+            etp_shard.chain_id = 'expert'
         etp_shard.group = etp_group
         etp_shard.ps_size = etp_size
         # register the newly sharded param back to the module
@@ -167,13 +180,22 @@ class ETPShardedParam(torch.nn.Parameter):
 
     _pending_rs_weight = None
     _first_weight_flag = True
-    _last_weight = None
-    _link_node_count = 0
-    _link_table_buffer: List[str] = []
-    _link_table_flushed: bool = False
+    # Per-chain state: each chain_id ('dense', 'expert') has its own linked list.
+    _chain_state: Dict[str, dict] = {}
 
     @classmethod
-    def _buffer_link_table_row(cls, prev: "ETPShardedParam", curr: "ETPShardedParam") -> None:
+    def _get_chain_state(cls, chain_id: str) -> dict:
+        if chain_id not in cls._chain_state:
+            cls._chain_state[chain_id] = {
+                'last_weight': None,
+                'link_node_count': 0,
+                'link_table_buffer': [],
+                'link_table_flushed': False,
+            }
+        return cls._chain_state[chain_id]
+
+    @classmethod
+    def _buffer_link_table_row(cls, prev: "ETPShardedParam", curr: "ETPShardedParam", chain: dict) -> None:
         """Buffer one row of the prefetch-link table (flushed atomically on the second forward pass)."""
         _W = 70
 
@@ -181,18 +203,20 @@ class ETPShardedParam(torch.nn.Parameter):
             m = re.search(r"\d+", name)
             return m.group() if m else "-"
 
-        cls._link_node_count += 1
-        if cls._link_node_count == 1:
-            cls._link_table_buffer.append(
+        chain['link_node_count'] += 1
+        if chain['link_node_count'] == 1:
+            chain_id = getattr(curr, 'chain_id', 'dense')
+            chain['link_table_buffer'].append(
+                f"\n[{chain_id} chain]"
                 f"\n{'node_id':>7} | {'layer_id':>8} | {'curr_weight_name':<{_W}} | prev_weight_name"
                 f"\n{'-'*7}-+-{'-'*8}-+-{'-'*_W}-+-{'-'*_W}"
             )
             # Seed weight (first ETP param) as row 0
-            cls._link_table_buffer.append(
+            chain['link_table_buffer'].append(
                 f"{'0':>7} | {_layer_id(prev._debug_name):>8} | {prev._debug_name:<{_W}} | -"
             )
-        cls._link_table_buffer.append(
-            f"{cls._link_node_count:>7} | {_layer_id(curr._debug_name):>8} | "
+        chain['link_table_buffer'].append(
+            f"{chain['link_node_count']:>7} | {_layer_id(curr._debug_name):>8} | "
             f"{curr._debug_name:<{_W}} | {prev._debug_name}"
         )
 
@@ -219,6 +243,8 @@ class ETPShardedParam(torch.nn.Parameter):
         self.prefetch_initialized = False
         self.next_w = None
         self.prev_w = None
+        # Chain identity: 'dense' for mamba/attn/shared_expert, 'expert' for grouped experts
+        self.chain_id = 'dense'
         # Grouped gemm
         self.is_routed_expert = False
         self.expert_idx = None
@@ -480,7 +506,7 @@ class ETPShardedParam(torch.nn.Parameter):
             # Since wait() may sychronize against a different stream than the current stream,
             # an event is recorded and waited on when the data is retrieved, which ensures the
             # AG always finishes before returning the unsharded param
-            with torch.cuda.stream(get_ag_stream()):
+            with torch.cuda.stream(get_ag_stream(self.chain_id)):
                 if self._prefetch_handle is not None:
                     self._prefetch_handle.wait()
                     self._prefetch_handle = None
@@ -597,12 +623,15 @@ class ETPShardedParam(torch.nn.Parameter):
             w._set_state(ETPWeightState.NONE)
 
         # Lazy population of linked list: link previous weight to current weight
+        # Uses per-chain state so dense and expert chains never cross-link.
         cls = type(self)
+        chain = cls._get_chain_state(self.chain_id)
         if not self.prefetch_initialized:
-            if cls._last_weight is not None and cls._last_weight.next_w is None:
-                cls._buffer_link_table_row(cls._last_weight, self)
-                cls._last_weight.next_w = self
-                self.prev_w = cls._last_weight
+            last_w = chain['last_weight']
+            if last_w is not None and last_w.next_w is None:
+                cls._buffer_link_table_row(last_w, self, chain)
+                last_w.next_w = self
+                self.prev_w = last_w
 
             cache = get_global_ETP_cache()
 
@@ -615,11 +644,11 @@ class ETPShardedParam(torch.nn.Parameter):
                 cache.release(w._ag_ticket_fwd)
 
             self.prefetch_initialized = True
-        elif not cls._link_table_flushed and cls._link_table_buffer:
+        elif not chain['link_table_flushed'] and chain['link_table_buffer']:
             # Second forward pass: flush the complete table atomically to avoid interleaving
-            cls._link_table_flushed = True
-            print_rank_0("\n".join(cls._link_table_buffer) + "\n")
-        cls._last_weight = self
+            chain['link_table_flushed'] = True
+            print_rank_0("\n".join(chain['link_table_buffer']) + "\n")
+        chain['last_weight'] = self
 
         return result
 
@@ -660,7 +689,7 @@ class ETPShardedParam(torch.nn.Parameter):
 
     def _wait_reduce_scatter(self):
         # assert self._wgrad_rs_handle is not None or is_graph_capturing()
-        with torch.cuda.stream(get_rs_stream()):
+        with torch.cuda.stream(get_rs_stream(self.chain_id)):
             if self._wgrad_rs_handle is not None:
                 self._wgrad_rs_handle.wait()
                 self._wgrad_rs_handle = None
@@ -798,6 +827,7 @@ class _TicketSlot:
     dtype: object                                # torch.dtype or tex.DType
     reduce_scatter: bool
     fwd: bool
+    chain_id: str = 'dense'                      # chain this slot belongs to
     buf: Optional[torch.Tensor] = field(default=None)  # None when released or after clear()
 
 
@@ -878,7 +908,8 @@ class ETPWeightCache:
         self._next_ticket += 1
 
         self._slots[ticket] = _TicketSlot(
-            key=key, param=param, dtype=dtype, reduce_scatter=reduce_scatter, fwd=fwd
+            key=key, param=param, dtype=dtype, reduce_scatter=reduce_scatter, fwd=fwd,
+            chain_id=getattr(param, 'chain_id', 'dense'),
         )
         return ticket
 
@@ -909,17 +940,26 @@ class ETPWeightCache:
         self._total_bytes = 0
 
     def reallocate_to_mempool(self, device, mempool):
-        """Re-allocate all ticket buffers into a CUDA graph memory pool.
+        """Re-allocate dense-chain ticket buffers into a CUDA graph memory pool.
 
-        Call BEFORE graph capture so every buffer lives in the capture pool
-        and no allocations are recorded inside the graph.
+        Call BEFORE graph capture so every dense-chain buffer lives in the capture
+        pool and no allocations are recorded inside the graph.  Expert-chain buffers
+        are left in regular memory (expert compute runs eagerly, not in graphs).
         """
 
-        # Clone the current memory pool buffers but into the passed in mempool
+        # Identify keys that belong to the dense chain
+        dense_keys = set()
+        for slot in self._slots.values():
+            if slot.chain_id == 'dense':
+                dense_keys.add(slot.key)
+
+        # Clone only dense-chain pool buffers into the passed in mempool
         self._total_bytes = 0
         new_pool = defaultdict(list)
         torch._C._cuda_beginAllocateCurrentThreadToPool(device, mempool)
         for key, buffers in self._pool.items():
+            if key not in dense_keys:
+                continue
             new_buffers = []
             for _ in range(len(buffers)):
                 buf = self._allocate_buffer(*self.key_to_allocate_func[key])
@@ -927,17 +967,24 @@ class ETPWeightCache:
             new_pool[key] = new_buffers
         torch._C._cuda_endAllocateToPool(device, mempool)
 
-        # Map each buffer in the old pool to its corresponding new one
+        # Map each buffer in the old pool to its corresponding new one (dense only)
         old_to_new_buff = {}
         for key, old_pool in self._pool.items():
+            if key not in dense_keys:
+                continue
             new = new_pool[key]
             for old_buf, new_buf in zip(old_pool, new):
                 old_to_new_buff[old_buf] = new_buf
-        # Replace each slot's reference to its corresponding new one
+
+        # Replace each dense slot's reference; keep expert slots unchanged
         for slot in self._slots.values():
-            if slot.buf is not None:
+            if slot.chain_id == 'dense' and slot.buf is not None and slot.buf in old_to_new_buff:
                 slot.buf = old_to_new_buff[slot.buf]
 
+        # Merge: dense keys get new buffers, expert keys keep old ones
+        for key, buffers in self._pool.items():
+            if key not in dense_keys:
+                new_pool[key] = buffers
         self._pool = new_pool
         return
 
@@ -955,10 +1002,16 @@ def reallocate_etp_cache_to_mempool(device, mempool):
         _ETP_CACHE.reallocate_to_mempool(device, mempool)
 
 
-def wait_async_comms():
-    """Wait on all in-flight ETP async communications (all-gathers + reduce-scatters).
+def wait_async_comms(chain_id: str = None):
+    """Wait on in-flight ETP async communications (all-gathers + reduce-scatters).
+
+    Args:
+        chain_id: If specified, only drain params belonging to this chain ('dense' or 'expert').
+                  If None, drain all chains (backward compat).
     """
     for param in list(_inflight_comm_params):
+        if chain_id is not None and getattr(param, 'chain_id', 'dense') != chain_id:
+            continue
         param._wait_param_gather()
         param._wait_reduce_scatter()
 
