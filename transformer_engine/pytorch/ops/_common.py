@@ -5,9 +5,12 @@
 """Helper functions used in fusible operations."""
 
 from __future__ import annotations
+import functools
+from importlib.metadata import PackageNotFoundError, version as get_pkg_version
 from typing import Optional
 
 import torch
+from packaging.version import Version as PkgVersion
 
 from transformer_engine_torch import FP8TensorMeta
 from ..torch_version import torch_version
@@ -15,6 +18,15 @@ from ..quantization import FP8GlobalStateManager
 from ..tensor.float8_tensor import Float8Tensor
 from ..quantized_tensor import QuantizedTensorStorage
 from ..utils import canonicalize_dtype
+
+
+@functools.lru_cache(maxsize=1)
+def _nvidia_cudnn_frontend_supports_scaled_clamped_qgeglu() -> bool:
+    """Check cuDNN FE min version with fixed numerics for qgeglu."""
+    try:
+        return PkgVersion(get_pkg_version("nvidia-cudnn-frontend")) >= PkgVersion("1.23.0")
+    except PackageNotFoundError:
+        return False
 
 
 def is_quantized_tensor(tensor: torch.Tensor | QuantizedTensorStorage) -> bool:
@@ -156,9 +168,9 @@ def fuse_grouped_mlp_ops(
             and isinstance(window[2], GroupedLinear)
         ):
             matches_pattern = False
-        elif (
-            isinstance(window[1], ScaledClampedQGeGLU)
-            and abs(window[1]._clamped.alpha - 1.702) > 0.001
+        elif isinstance(window[1], ScaledClampedQGeGLU) and (
+            abs(window[1]._clamped.alpha - 1.702) > 0.001
+            or not _nvidia_cudnn_frontend_supports_scaled_clamped_qgeglu()
         ):
             matches_pattern = False
         elif window[0].num_groups != window[2].num_groups:
