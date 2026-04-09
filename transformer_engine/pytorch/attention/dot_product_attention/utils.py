@@ -135,10 +135,7 @@ class FlashAttentionUtils:
     # Please follow these instructions to install FA3
     v3_installation_steps = """\
 (1) git clone https://github.com/Dao-AILab/flash-attention.git
-(2) cd flash-attention/hopper && python setup.py install
-(3) python_path=`python -c "import site; print(site.getsitepackages()[0])"`
-(4) mkdir -p $python_path/flash_attn_3
-(5) cp flash_attn_interface.py $python_path/flash_attn_3/flash_attn_interface.py"""
+(2) cd flash-attention/hopper && python setup.py install"""
     v3_warning_printed = False
 
     @staticmethod
@@ -554,11 +551,15 @@ def get_attention_backend(
     #          | FP8            | non-paged/paged | sm90         | thd           | >= 1
     # Unfused  | FP32/FP16/BF16 | non-paged/paged | all          | bshd,sbhd,thd | >= 1
     if inference_params is not None:
-        # Temporarily disabling fused attention for kv caching for sm89 irrespective of cuDNN version
-        # until the cuDNN bug is resolved
-        if device_compute_capability == (8, 9):
-            logger.debug("Disabling FusedAttention for KV caching for sm89")
+        # Temporarily disabling fused attention for kv caching for sm89/sm120 irrespective of
+        # cuDNN version until the cuDNN bug is resolved.
+        if device_compute_capability in ((8, 9), (12, 0)):
+            logger.debug("Disabling FusedAttention for KV caching for sm89/sm120")
             use_fused_attention = False
+        # Temporarily disable FlashAttention for KV caching on sm120
+        if device_compute_capability == (12, 0):
+            logger.debug("Disabling FlashAttention for KV caching for sm120")
+            use_flash_attention = False
         if context_parallel:
             logger.debug("Disabling all backends for KV caching with context parallelism")
             use_flash_attention = False
@@ -691,12 +692,21 @@ def get_attention_backend(
                 )
             use_flash_attention = False
         if device_compute_capability == (12, 0):
-            if use_fused_attention:
-                logger.debug(
-                    "Disabling FusedAttention as qkv_format = thd is"
-                    " not supported for compute capability = sm120"
-                )
-            use_fused_attention = False
+            if cudnn_version < (9, 18, 1):
+                if use_fused_attention:
+                    logger.debug(
+                        "Disabling FusedAttention as qkv_format = thd is"
+                        " not supported for compute capability = sm120 and cuDNN version < 9.18.1"
+                    )
+                use_fused_attention = False
+            elif qkv_layout in {"t3hd", "th3d"}:
+                if use_fused_attention:
+                    logger.debug(
+                        "Disabling FusedAttention as qkv_layout = %s is not supported for"
+                        " compute capability = sm120",
+                        qkv_layout,
+                    )
+                use_fused_attention = False
 
     # Filter: Dropout
     if attention_dropout != 0.0 and use_flash_attention_3:
