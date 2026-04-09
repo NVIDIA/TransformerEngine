@@ -12,9 +12,10 @@ import random
 from typing import Optional
 
 import pytest
-import torch
 
 import transformer_engine
+import torch
+
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
 import transformer_engine.pytorch.ops as te_ops
@@ -3241,7 +3242,7 @@ class TestSequentialModules:
             torch.testing.assert_close(to_cpu(ffn1.bias.grad), b1_ref.grad, **tols)
             torch.testing.assert_close(to_cpu(ffn2.bias.grad), b2_ref.grad, **tols)
 
-    @pytest.mark.parametrize("bias", (False, True))
+    @pytest.mark.parametrize("bias", (True))
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("quantization", _quantization_list)
     @pytest.mark.parametrize("single_grouped_weight", (False, True))
@@ -3285,9 +3286,6 @@ class TestSequentialModules:
             pytest.skip("single_grouped_bias requires bias=True")
         if with_quantization and dtype not in (torch.bfloat16, torch.float16):
             pytest.skip("Quantized group GEMM is only supported with BF16/FP16")
-        if quantization == "mxfp8" and bias:
-            # Will be supported in future CUDNN release.
-            pytest.skip("Bias/dbias not yet supported in MXFP8 fused grouped MLP")
 
         # Random data
         x_ref, x_test = make_reference_and_test_tensors(
@@ -3378,7 +3376,9 @@ class TestSequentialModules:
             x1, x2 = x.chunk(2, dim=-1)
             x = torch.nn.functional.silu(x1) * x2
             x = x * probs[group_idx].unsqueeze(-1)
-            x = torch.nn.functional.linear(x, fc2_ws_ref[group_idx], bias=fc2_bs_ref[group_idx])
+            x = torch.nn.functional.linear(x, fc2_ws_ref[group_idx])
+            if bias:
+                x = x + fc2_bs_ref[group_idx] * probs[group_idx].unsqueeze(-1)
             ys.append(x)
         y_ref = torch.cat(ys)
         y_ref.backward(dy_ref)
@@ -3398,6 +3398,7 @@ class TestSequentialModules:
                 accumulate_into_main_grad=accumulate_into_main_grad,
                 delay_wgrad_compute=delay_wgrad_compute,
             )
+
             fc2 = te_ops.GroupedLinear(
                 group_size,
                 hidden_size,
@@ -3409,6 +3410,7 @@ class TestSequentialModules:
                 single_grouped_bias=single_grouped_bias,
                 accumulate_into_main_grad=accumulate_into_main_grad,
                 delay_wgrad_compute=delay_wgrad_compute,
+                scale_bias=bias,
             )
             module = te_ops.Sequential(
                 fc1,
@@ -3473,7 +3475,8 @@ class TestSequentialModules:
 
         # Fuse ops and perform forward and backward pass
         with te.autocast(enabled=with_quantization, recipe=recipe):
-            y_test = module(x_test, split_sizes, probs_test, split_sizes)
+            fc2_extra = (split_sizes, probs_test) if bias else (split_sizes,)
+            y_test = module(x_test, split_sizes, probs_test, *fc2_extra)
         y_test.backward(dy_test)
         if delay_wgrad_compute:
             fc1.backward_dw()

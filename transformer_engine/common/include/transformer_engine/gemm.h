@@ -407,6 +407,7 @@ void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
 void nvte_grouped_bias_add(const NVTEGroupedTensor output, const NVTEGroupedTensor bias,
                            cudaStream_t stream);
 
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif  // __cplusplus

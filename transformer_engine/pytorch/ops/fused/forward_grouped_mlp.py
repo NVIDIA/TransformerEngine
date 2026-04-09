@@ -424,13 +424,19 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
 
         # FC2 GEMM
         fc2_out_shape = in_shape[:-1] + [fc2_weight_shape[0]]
+        fc2_scales = basic_op_extra_inputs[2][1] if fc2_op._scale_bias else None
+        fc2_scales_tensor = (
+            fc2_scales.detach().to(dtype=torch.float32).reshape(-1, 1, 1)
+            if fc2_scales is not None
+            else torch.ones((in_shape[0], 1, 1), dtype=torch.float32, device=device)
+        )
         fc2_quant_kwargs = {
             "a_tensor": fc1_kernel_out["d_tensor"],
             "sfa_tensor": fc1_kernel_out["sfd_row_tensor"],
             "padded_offsets": split_points,
             "alpha_tensor": alpha_tensor.float(),
             "norm_const_tensor": None,
-            "prob_tensor": torch.ones((in_shape[0], 1, 1), dtype=torch.float32, device=device),
+            "prob_tensor": fc2_scales_tensor,
             "acc_dtype": torch.float32,
             "c_dtype": dtype,
             "d_dtype": dtype,
