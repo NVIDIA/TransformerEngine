@@ -766,6 +766,10 @@ inline void group_quantize_transpose(const GroupedTensor *input, const Tensor *n
   const size_t elts_total = first_logical_dim * last_logical_dim;
   const size_t num_tensors = input->num_tensors;
 
+  if (first_logical_dim == 0 || last_logical_dim == 0) {
+    return;
+  }
+
   NVTE_CHECK(num_tensors <= MAX_SUPPORTED_TENSOR_DESCRIPTORS,
              "Number of tensors in a group is larger than the MAX number of supported "
              "descriptors (64).");
