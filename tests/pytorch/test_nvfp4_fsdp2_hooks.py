@@ -86,22 +86,15 @@ class TestNVFP4FSDP2Hooks:
             mp_policy=None,
         )
 
-        # Verify sharded tensor shapes
-        # sharded_tensors = (rowwise_data, rowwise_scale_inv, columnwise_data, columnwise_scale_inv)
-        assert len(sharded_tensors) == 4, "Expected 4 tensors (rowwise + columnwise)"
+        # Only rowwise tensors are all-gathered; columnwise is derived locally
+        assert len(sharded_tensors) == 2, "Expected 2 tensors (rowwise data + scale only)"
 
-        rowwise_data, rowwise_scale_inv, columnwise_data, columnwise_scale_inv = sharded_tensors
+        rowwise_data, rowwise_scale_inv = sharded_tensors
 
         # Rowwise data: (shard_M, K//2) — unmodified
         assert rowwise_data.shape == (shard_M, K // 2)
         # Rowwise scale: unpadded dim0 to shard_M
         assert rowwise_scale_inv.shape[0] == shard_M
-
-        # Columnwise data: transposed to (shard_M//2, K)
-        assert columnwise_data.shape == (shard_M // 2, K)
-        # Columnwise scale: transposed to (m_blocks, round_up(K, 128))
-        m_blocks = math.ceil(shard_M / NVFP4_BLOCK_SCALING_SIZE)
-        assert columnwise_scale_inv.shape == (m_blocks, round_up_to_nearest_multiple(K, 128))
 
         # Simulate all-gather
         all_gather_outputs = _simulate_all_gather(sharded_tensors, world_size)
@@ -126,6 +119,7 @@ class TestNVFP4FSDP2Hooks:
         )
         assert result._rowwise_scale_inv.shape == expected_rowwise_scale_shape
 
+        # Columnwise data derived locally via _create_columnwise()
         assert result._columnwise_data.shape == (K, M // 2)
 
         expected_col_scale_shape = (
@@ -147,8 +141,6 @@ class TestNVFP4FSDP2Hooks:
         # Save original internal tensors for comparison
         orig_rowwise_data = qt._rowwise_data.clone()
         orig_rowwise_scale = qt._rowwise_scale_inv.clone()
-        orig_columnwise_data = qt._columnwise_data.clone()
-        orig_columnwise_scale = qt._columnwise_scale_inv.clone()
         orig_amax_row = qt._amax_rowwise.clone()
         orig_amax_col = qt._amax_columnwise.clone()
         orig_deq = qt.dequantize()
@@ -184,9 +176,11 @@ class TestNVFP4FSDP2Hooks:
             orig_rowwise_scale[:shard_M, :],
         )
 
-        # Columnwise data: each shard contributes (K, shard_M//2) -> repeated gives (K, M//2)
-        expected_col_data = torch.cat([orig_columnwise_data] * world_size, dim=1)
-        assert torch.equal(result._columnwise_data, expected_col_data)
+        # Columnwise data is derived locally via _create_columnwise(), not all-gathered.
+        # Verify it was created and has the correct shape.
+        assert result._columnwise_data is not None
+        assert result._columnwise_data.shape == (K, M // 2)
+        assert result._columnwise_scale_inv is not None
 
         # Amax values passed through metadata — should be preserved
         assert torch.equal(result._amax_rowwise, orig_amax_row)
