@@ -624,8 +624,8 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
     NVTE_CHECK(dbias->data.shape == std::vector<size_t>{cols}, "Wrong shape of DBias.");
     NVTE_CHECK(workspace != nullptr, "Workspace must be a tensor.");
     NVTE_CHECK(dbias_rows > 0 && dbias_cols > 0,
-               "Invalid workspace shape for DBias computation (input shape=",
-               input.shape(), ", workspace shape=(", dbias_rows, ",", dbias_cols, ")).");
+               "Invalid workspace shape for DBias computation (input shape=", input.shape(),
+               ", workspace shape=(", dbias_rows, ",", dbias_cols, ")).");
 
     if (workspace->data.dptr == nullptr) {
       workspace->data.shape = {dbias_rows, dbias_cols};
