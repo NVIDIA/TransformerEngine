@@ -386,9 +386,7 @@ def test_cp_with_fused_attention(
                 "Deterministic mode does not support non-vanilla softmax with FusedAttention"
             )
         if config.attn_bias_type == "post_scale_bias" and is_training:
-            pytest.skip(
-                "Deterministic mode does not support post_scale_bias with requires_grad"
-            )
+            pytest.skip("Deterministic mode does not support post_scale_bias with requires_grad")
 
     run_distributed(
         get_bash_arguments(
