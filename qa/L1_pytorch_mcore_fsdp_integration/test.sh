@@ -4,6 +4,11 @@
 
 set -e
 
+# Megatron-LM / Megatron-FSDP commit for main branch on Apr. 7, 2026.
+# Necessary to support wgrad accumulate fusion and Megatron-FSDP NCCL UBR,
+# and TODO(@cspades) fixes decoupled_grad <> DistOpt usage in Megatron-LM.
+MCORE_REF=${1:-8cbc45b6e039f300c53eb09579fc973d703455cd}
+
 # Paths
 : ${TE_PATH:=/opt/transformerengine}
 : ${MCORE_PATH:=${TE_PATH}/qa/L1_pytorch_mcore_fsdp_integration/Megatron-LM}
@@ -12,9 +17,7 @@ set -e
 if [ ! -d "${MCORE_PATH}" ]; then
     pushd $(dirname ${MCORE_PATH})
     git clone https://github.com/NVIDIA/Megatron-LM.git Megatron-LM
-    # Megatron-LM / Megatron-FSDP commit for main branch on Apr. 7, 2026.
-    # Necessary to support wgrad accumulate fusion and Megatron-FSDP NCCL UBR.
-    pushd Megatron-LM && git checkout 8cbc45b6e039f300c53eb09579fc973d703455cd && popd
+    pushd Megatron-LM && git checkout "${MCORE_REF}" && popd
     popd
 fi
 
