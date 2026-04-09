@@ -197,24 +197,18 @@ def test_dot_product_attention(
         )
         flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
 
-    # Flash Attention requires bottom-right-diagonal causal mask for cross-attention
-    cross_attn_causal = config.max_seqlen_q != config.max_seqlen_kv and config.attn_mask_type in [
-        "causal",
-        "padding_causal",
-    ]
-    sm = get_device_compute_capability()
     # FA3 natively supports pad_between_seqs via seqused_q/seqused_k (SM90 only).
-    # FA2 does not support pad_between_seqs and is not available on SM >= 100.
-    if not cross_attn_causal and (
-        pad_between_seqs
-        and FlashAttentionUtils.v3_is_installed
-        and sm == (9, 0)
-        or not pad_between_seqs
-        and FlashAttentionUtils.is_installed
-        and (config.window_size[0] == -1 or FlashAttentionUtils.v2_3_plus)
-        and sm < (10, 0)
-    ):
-        flash_attn_supported = True
+    # Override flash_attn_supported only for pad_between_seqs=True because
+    # get_available_attention_backends doesn't know about FA3's seqused support yet.
+    # For pad_between_seqs=False, trust the backend checker's result as-is.
+    if pad_between_seqs:
+        cross_attn_causal = (
+            config.max_seqlen_q != config.max_seqlen_kv
+            and config.attn_mask_type in ["causal", "padding_causal"]
+        )
+        sm = get_device_compute_capability()
+        if not cross_attn_causal and FlashAttentionUtils.v3_is_installed and sm == (9, 0):
+            flash_attn_supported = True
 
     # Skip if only unfused backend is supported
     if (len(fused_attn_backends) + flash_attn_supported + unfused_attn_supported) < 2:
