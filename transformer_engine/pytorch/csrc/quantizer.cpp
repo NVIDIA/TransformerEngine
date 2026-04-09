@@ -2228,7 +2228,14 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
     quant_config_columnwise.set_noop_tensor(noop_flag->data());
   }
   quant_config.set_nvfp4_2d_quantization(this->with_2d_quantization);
-  quant_config.set_stochastic_rounding(this->stochastic_rounding);
+
+  // Disable stochastic-rounding FP4 cast path for SM120, which relies on arch-specific PTX
+  // instructions
+  cudaDeviceProp device_prop{};
+  NVTE_CHECK_CUDA(cudaGetDeviceProperties(&device_prop, c10::cuda::current_device()));
+  const bool sm120_device = (device_prop.major == 12 && device_prop.minor == 0);
+  const bool use_stochastic_rounding = this->stochastic_rounding && !sm120_device;
+  quant_config.set_stochastic_rounding(use_stochastic_rounding);
 
   // We only need RHT for columnwise usage.
   // flat first dim and last dim for multi dimensional input
@@ -2238,9 +2245,9 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
   }
   size_t cols = input.size(input.ndim() - 1);
 
-  // Restriction for the RHT cast fusion kernel because we are using MMA hardware for computing RHT
+  // Disable fused RHT+cast path for SM120 because it requires dynamic smem over-request
   bool eligible_for_rht_cast_fusion =
-      input.dtype() == DType::kBFloat16 && rows % 64 == 0 && cols % 128 == 0;
+      input.dtype() == DType::kBFloat16 && rows % 64 == 0 && cols % 128 == 0 && !sm120_device;
 
   // Stochastic rounding
   // When both rowwise and columnwise quantization are used with RHT,
@@ -2254,11 +2261,11 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
   // 3. Columnwise usage is enabled
   // 4. Rowwise and columnwise quantization are not fused,
   //    because within a single kernel we can generate two different random numbers for rowwise and columnwise
-  const bool need_separate_columnwise_rng = this->stochastic_rounding && this->with_rht &&
+  const bool need_separate_columnwise_rng = use_stochastic_rounding && this->with_rht &&
                                             this->columnwise_usage &&
                                             (!eligible_for_rht_cast_fusion);
 
-  if (this->stochastic_rounding) {
+  if (use_stochastic_rounding) {
     const size_t rng_elts_per_thread = 1024;  // Wild guess, probably can be tightened
     auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
         std::nullopt, at::cuda::detail::getDefaultCUDAGenerator());
