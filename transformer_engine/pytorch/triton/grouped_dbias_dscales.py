@@ -73,8 +73,11 @@ def _compute_grouped_dbias_dscales(
     )
 
     _grouped_dbias_dscales_kernel[grid](
-        dy, scales, bias,
-        dbias, dscales,
+        dy,
+        scales,
+        bias,
+        dbias,
+        dscales,
         offsets,
         hidden,
         N_ROW_SPLITS=N_ROW_SPLITS,

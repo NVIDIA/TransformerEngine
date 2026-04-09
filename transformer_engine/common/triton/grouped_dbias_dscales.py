@@ -10,8 +10,11 @@ import triton.language as tl
 
 @triton.jit
 def _grouped_dbias_dscales_kernel(
-    dy_ptr, scales_ptr, bias_ptr,
-    dbias_ptr, dscales_ptr,
+    dy_ptr,
+    scales_ptr,
+    bias_ptr,
+    dbias_ptr,
+    dscales_ptr,
     offsets_ptr,
     hidden,
     N_ROW_SPLITS: tl.constexpr,
@@ -49,7 +52,8 @@ def _grouped_dbias_dscales_kernel(
 
     bias_vals = tl.load(
         bias_ptr + group_idx * hidden + col_offs,
-        mask=col_mask, other=0.0,
+        mask=col_mask,
+        other=0.0,
     ).to(tl.float32)
 
     dbias_acc = tl.zeros([BLOCK_H], dtype=tl.float32)
@@ -63,7 +67,8 @@ def _grouped_dbias_dscales_kernel(
 
         dy_tile = tl.load(
             dy_ptr + global_rows[:, None] * hidden + col_offs[None, :],
-            mask=tile_mask, other=0.0,
+            mask=tile_mask,
+            other=0.0,
         ).to(tl.float32)
 
         scales_vals = tl.load(scales_ptr + global_rows, mask=row_mask, other=0.0)

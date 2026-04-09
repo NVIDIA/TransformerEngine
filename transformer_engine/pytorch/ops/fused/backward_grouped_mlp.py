@@ -490,7 +490,10 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
             bias_packed = torch.stack(fc2_biases)
             scales_f32 = scales.detach().to(dtype=torch.float32)
             fc2_dbias_packed_result, grad_scales = _compute_grouped_dbias_dscales(
-                fc2_dy, scales_f32, bias_packed, split_sizes,
+                fc2_dy,
+                scales_f32,
+                bias_packed,
+                split_sizes,
                 offsets=fc1_ctx.base_split_offsets,
                 dscales=grad_scales,
             )
@@ -498,9 +501,7 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
             if fc2_op.single_grouped_bias:
                 fc2_bias_grad_packed = fc2_dbias_packed_result
             else:
-                fc2_bias_grads = [
-                    fc2_dbias_packed_result[idx] for idx in range(num_groups)
-                ]
+                fc2_bias_grads = [fc2_dbias_packed_result[idx] for idx in range(num_groups)]
         elif fc2_dbias_packed is not None:
             if fc2_op.single_grouped_bias:
                 fc2_bias_grad_packed = fc2_dbias_packed.to(dtype=dtype)

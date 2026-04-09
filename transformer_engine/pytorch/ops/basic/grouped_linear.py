@@ -240,8 +240,7 @@ class GroupedLinear(BasicOperation):
                 bias_parts = self.bias.split_into_quantized_tensors()
             return [maybe_dequantize(p.reshape(-1), dtype) for p in bias_parts]
         return [
-            maybe_dequantize(getattr(self, f"bias{idx}"), dtype)
-            for idx in range(self.num_groups)
+            maybe_dequantize(getattr(self, f"bias{idx}"), dtype) for idx in range(self.num_groups)
         ]
 
     def num_quantizers(self, mode: str) -> int:
@@ -873,10 +872,7 @@ class GroupedLinear(BasicOperation):
             dys = tex.split_quantize(dy, split_sizes_int, ctx.grad_output_quantizers)
             if has_bias and not self._scale_bias:
                 dy_splits = list(torch.split(grad_output, split_sizes_int))
-                grad_biases = [
-                    dy_s.reshape(-1, dy_s.size(-1)).sum(dim=0)
-                    for dy_s in dy_splits
-                ]
+                grad_biases = [dy_s.reshape(-1, dy_s.size(-1)).sum(dim=0) for dy_s in dy_splits]
         else:
             dys = torch.split(dy, split_sizes_int)
             if has_bias and not self._scale_bias:
@@ -889,7 +885,10 @@ class GroupedLinear(BasicOperation):
             offsets[1:] = split_sizes.cumsum(0)
             dy_2d = dy.reshape(-1, dy.size(-1))
             dbias_packed, grad_scales = _compute_grouped_dbias_dscales(
-                dy_2d, scales_f32, bias_packed, split_sizes,
+                dy_2d,
+                scales_f32,
+                bias_packed,
+                split_sizes,
                 offsets=offsets,
             )
             grad_biases = [dbias_packed[idx] for idx in range(num_groups)]
