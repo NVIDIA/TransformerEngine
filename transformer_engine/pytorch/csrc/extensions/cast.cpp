@@ -247,8 +247,7 @@ py::object bgrad_group_quantize(const at::Tensor &tensor, py::handle quantizer,
   const auto logical_first_dim = logical_shape[0];
   const auto logical_last_dim = logical_shape[1];
 
-  NVTE_CHECK(logical_first_dim > 0 && logical_last_dim > 0,
-             "bgrad_group_quantize: empty input tensor is not supported.");
+  bool empty_input_buffer = logical_first_dim == 0 || logical_last_dim == 0;
 
   NVTE_CHECK(detail::IsMXFP8Quantizers(quantizer.ptr()),
              "bgrad_group_quantize: only MXFP8 quantizer is supported.");
@@ -263,6 +262,14 @@ py::object bgrad_group_quantize(const at::Tensor &tensor, py::handle quantizer,
       num_tensors, logical_shape, GetTransformerEngineDType(tensor.scalar_type()),
       py::reinterpret_borrow<py::object>(quantizer), first_dims, logical_first_dim,
       logical_last_dim);
+
+  if (empty_input_buffer) {
+    at::Tensor dbias_torch =
+        at::zeros({static_cast<int64_t>(num_tensors), static_cast<int64_t>(logical_last_dim)},
+                  tensor.options());
+    return py::make_tuple(py::reinterpret_borrow<py::object>(grouped_output_py),
+                          py::cast(std::move(dbias_torch)));
+  }
 
   const std::vector<size_t> dbias_logical_shape = {num_tensors, logical_last_dim};
   GroupedTensorWrapper grouped_dbias(num_tensors, dbias_logical_shape, NVTE_DELAYED_TENSOR_SCALING);

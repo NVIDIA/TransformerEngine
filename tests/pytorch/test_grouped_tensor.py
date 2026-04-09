@@ -410,6 +410,27 @@ class TestGroupedTensor:
             expected_dbias = torch.stack([t.sum(dim=0) for t in input_tensors])
             assert torch.allclose(dbias, expected_dbias)
 
+    @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+    def test_bgrad_group_quantize_zero_size_tensor(self) -> None:
+        """Test bgrad_group_quantize handles zero-row input without error."""
+        num_tensors = 3
+        last_dim = 1024
+        grouped_input = torch.empty(0, last_dim, dtype=torch.bfloat16, device="cuda")
+
+        quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+        quantizer.set_usage(rowwise=True, columnwise=False)
+        first_dims = torch.zeros(num_tensors, dtype=torch.int64, device="cuda")
+
+        grouped_output, dbias = tex.bgrad_group_quantize(
+            grouped_input,
+            quantizer,
+            num_tensors,
+            first_dims,
+        )
+
+        assert dbias.shape == (num_tensors, last_dim)
+        assert torch.all(dbias == 0)
+
     @pytest.mark.parametrize("output_dbias", [False, True])
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
     def test_group_quantize_cudagraph_capturable(self, output_dbias: bool) -> None:
