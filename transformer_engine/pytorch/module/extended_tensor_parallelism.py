@@ -431,8 +431,7 @@ class ETPShardedParam(torch.nn.Parameter):
             cache = get_global_ETP_cache()
             for p, dt in zip(weights, dtypes):
                 if fwd:
-                    if p._ag_ticket_fwd is None:
-                        p._ag_ticket_fwd = cache.reserve(p, dt, fwd=True)
+                    # The fwd ag buffer is always initialized in 'all_gather_and_prefetch'
                     out_buffers.append(cache.get(p._ag_ticket_fwd))
                 else:
                     if p._ag_ticket_bwd is None:
@@ -597,11 +596,6 @@ class ETPShardedParam(torch.nn.Parameter):
         for w in self._weights:
             w._set_state(ETPWeightState.NONE)
 
-        if self.prev_w is not None:
-            cache = get_global_ETP_cache()
-            for w in self._weights:
-                cache.release(w._ag_ticket_fwd)
-
         # Lazy population of linked list: link previous weight to current weight
         cls = type(self)
         if not self.prefetch_initialized:
@@ -609,6 +603,17 @@ class ETPShardedParam(torch.nn.Parameter):
                 cls._buffer_link_table_row(cls._last_weight, self)
                 cls._last_weight.next_w = self
                 self.prev_w = cls._last_weight
+
+            cache = get_global_ETP_cache()
+
+            # Set the fwd ag buffer
+            quantizers = [w._quantizer for w in self._weights]
+            dtypes = [q.dtype if q is not None else w.dtype for q, w in zip(quantizers, self._weights)]
+            for w, dt in zip(self._weights, dtypes):
+                w._ag_ticket_fwd = cache.reserve(w, dt, fwd=True)
+                cache.get(w._ag_ticket_fwd)
+                cache.release(w._ag_ticket_fwd)
+
             self.prefetch_initialized = True
         elif not cls._link_table_flushed and cls._link_table_buffer:
             # Second forward pass: flush the complete table atomically to avoid interleaving
