@@ -83,7 +83,7 @@ class GroupedLinear(BasicOperation):
     scale_bias : bool, default = ``False``
         If ``True`` (and ``bias=True``), expects a probability tensor as an
         additional extra input and adds ``bias * scales`` instead of ``bias``
-        in the forward pass. The probability tensor has shape
+        in the forward pass. The scale tensor has shape
         ``(total_tokens,)`` and is split according to the split sizes.
 
     """
