@@ -1105,7 +1105,9 @@ class GroupedQuantizePrimitive(BasePrimitive):
             #   [n_groups int64 group_sizes | n_groups+1 int64 offsets]
             # = (2*n_groups + 1) * sizeof(int64_t) bytes stored as uint8.
             n_groups = group_sizes_aval.size
-            int64_workspace_aval = jax.core.ShapedArray(shape=((2 * n_groups + 1) * 8,), dtype=jnp.uint8)
+            int64_workspace_aval = jax.core.ShapedArray(
+                shape=((2 * n_groups + 1) * 8,), dtype=jnp.uint8
+            )
         else:
             # V1 path: Unused for V1 codepath
             int64_workspace_aval = jax.core.ShapedArray(shape=(0,), dtype=jnp.uint8)
@@ -1146,7 +1148,13 @@ class GroupedQuantizePrimitive(BasePrimitive):
             updated_amax_aval,
             _,
         ) = GroupedQuantizePrimitive.abstract(*args, **kwargs)
-        return (rowwise_out_aval, colwise_out_aval, rowwise_scale_inv_aval, colwise_scale_inv_aval, updated_amax_aval)
+        return (
+            rowwise_out_aval,
+            colwise_out_aval,
+            rowwise_scale_inv_aval,
+            colwise_scale_inv_aval,
+            updated_amax_aval,
+        )
 
     @staticmethod
     def lowering(

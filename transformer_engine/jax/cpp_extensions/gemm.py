@@ -2035,6 +2035,7 @@ def _should_enforce_v2_grouped_gemm() -> bool:
             f"NVTE_JAX_ENFORCE_V2_GROUPED_GEMM must be an integer (0 or 1), got: {val!r}"
         ) from e
 
+
 def _is_v2_grouped_gemm_supported(
     scaling_mode: ScalingMode,
     dtype: jnp.dtype,
@@ -2047,17 +2048,23 @@ def _is_v2_grouped_gemm_supported(
     """Determine whether the V2 grouped GEMM implementation can be used based on the input parameters."""
 
     if not _v2_grouped_gemm_available:
-        return False, (
-            "TE was not compiled with support for the V2 grouped GEMM kernel, reason: "
-            f"{_v2_grouped_gemm_available_reason}"
+        return (
+            False,
+            (
+                "TE was not compiled with support for the V2 grouped GEMM kernel, reason: "
+                f"{_v2_grouped_gemm_available_reason}"
+            ),
         )
 
     # nvte_grouped_gemm (the v2 kernel) requires SM100+ (Blackwell or newer).
     # Fall back to the v1 path on SM90 (Hopper) and older architectures.
     if get_min_device_compute_capability() < 100:
-        return False, (
-            "The TE V2 grouped GEMM requires SM100+ (Blackwell or newer) but current min device"
-            f" compute capability is {get_min_device_compute_capability()}."
+        return (
+            False,
+            (
+                "The TE V2 grouped GEMM requires SM100+ (Blackwell or newer) but current min device"
+                f" compute capability is {get_min_device_compute_capability()}."
+            ),
         )
 
     if has_bias:
@@ -2073,20 +2080,26 @@ def _is_v2_grouped_gemm_supported(
         if lhs_shape is not None and lhs_axis_boundary is not None:
             lhs_first_dim = math.prod(lhs_shape[:lhs_axis_boundary])
             if lhs_first_dim % 128 != 0:
-                return False, (
-                    "The TE V2 grouped GEMM for MXFP8 requires the product of the first"
-                    " dimensions (up to axis_boundary) of LHS to be divisible by 128, but got"
-                    f" {lhs_first_dim} with lhs_shape={lhs_shape} and"
-                    f" lhs_axis_boundary={lhs_axis_boundary}."
+                return (
+                    False,
+                    (
+                        "The TE V2 grouped GEMM for MXFP8 requires the product of the first"
+                        " dimensions (up to axis_boundary) of LHS to be divisible by 128, but got"
+                        f" {lhs_first_dim} with lhs_shape={lhs_shape} and"
+                        f" lhs_axis_boundary={lhs_axis_boundary}."
+                    ),
                 )
         if rhs_shape is not None and rhs_axis_boundary is not None:
             rhs_first_dim = math.prod(rhs_shape[:rhs_axis_boundary])
             if rhs_first_dim % 128 != 0:
-                return False, (
-                    "The TE V2 grouped GEMM for MXFP8 requires the product of the first"
-                    " dimensions (up to axis_boundary) of RHS to be divisible by 128, but got"
-                    f" {rhs_first_dim} with rhs_shape={rhs_shape} and"
-                    f" rhs_axis_boundary={rhs_axis_boundary}."
+                return (
+                    False,
+                    (
+                        "The TE V2 grouped GEMM for MXFP8 requires the product of the first"
+                        " dimensions (up to axis_boundary) of RHS to be divisible by 128, but got"
+                        f" {rhs_first_dim} with rhs_shape={rhs_shape} and"
+                        f" rhs_axis_boundary={rhs_axis_boundary}."
+                    ),
                 )
 
         # V2 MXFP8 also requires that the "last" dimension (after axis_boundary) of both
@@ -2094,30 +2107,40 @@ def _is_v2_grouped_gemm_supported(
         if lhs_shape is not None and lhs_axis_boundary is not None:
             lhs_last_dim = math.prod(lhs_shape[lhs_axis_boundary:])
             if lhs_last_dim % 128 != 0:
-                return False, (
-                    "The TE V2 grouped GEMM for MXFP8 requires the product of the last"
-                    " dimensions (after axis_boundary) of LHS to be divisible by 128, but got"
-                    f" {lhs_last_dim} with lhs_shape={lhs_shape} and"
-                    f" lhs_axis_boundary={lhs_axis_boundary}."
+                return (
+                    False,
+                    (
+                        "The TE V2 grouped GEMM for MXFP8 requires the product of the last"
+                        " dimensions (after axis_boundary) of LHS to be divisible by 128, but got"
+                        f" {lhs_last_dim} with lhs_shape={lhs_shape} and"
+                        f" lhs_axis_boundary={lhs_axis_boundary}."
+                    ),
                 )
         if rhs_shape is not None and rhs_axis_boundary is not None:
             rhs_last_dim = math.prod(rhs_shape[rhs_axis_boundary:])
             if rhs_last_dim % 128 != 0:
-                return False, (
-                    "The TE V2 grouped GEMM for MXFP8 requires the product of the last"
-                    " dimensions (after axis_boundary) of RHS to be divisible by 128, but got"
-                    f" {rhs_last_dim} with rhs_shape={rhs_shape} and"
-                    f" rhs_axis_boundary={rhs_axis_boundary}."
+                return (
+                    False,
+                    (
+                        "The TE V2 grouped GEMM for MXFP8 requires the product of the last"
+                        " dimensions (after axis_boundary) of RHS to be divisible by 128, but got"
+                        f" {rhs_last_dim} with rhs_shape={rhs_shape} and"
+                        f" rhs_axis_boundary={rhs_axis_boundary}."
+                    ),
                 )
         return True, ""
 
-    return False, (
-        "The TE V2 grouped GEMM currently only supports non-quantized BF16 and MXFP8 with 1D"
-        " block scaling, but NVTE_JAX_ENFORCE_V2_GROUPED_GEMM is enabled and the input"
-        f" parameters do not meet these requirements (scaling_mode= {scaling_mode},"
-        f" dtype={dtype}, has_bias={has_bias}, lhs_shape={lhs_shape}, rhs_shape={rhs_shape},"
-        f" lhs_axis_boundary={lhs_axis_boundary}, rhs_axis_boundary={rhs_axis_boundary})."
+    return (
+        False,
+        (
+            "The TE V2 grouped GEMM currently only supports non-quantized BF16 and MXFP8 with 1D"
+            " block scaling, but NVTE_JAX_ENFORCE_V2_GROUPED_GEMM is enabled and the input"
+            f" parameters do not meet these requirements (scaling_mode= {scaling_mode},"
+            f" dtype={dtype}, has_bias={has_bias}, lhs_shape={lhs_shape}, rhs_shape={rhs_shape},"
+            f" lhs_axis_boundary={lhs_axis_boundary}, rhs_axis_boundary={rhs_axis_boundary})."
+        ),
     )
+
 
 def is_v2_grouped_gemm_supported(
     scaling_mode: ScalingMode,
@@ -2128,8 +2151,8 @@ def is_v2_grouped_gemm_supported(
     lhs_axis_boundary=None,
     rhs_axis_boundary=None,
 ) -> tuple[bool, str]:
-    """ Determine whether the V2 grouped GEMM implementation can be used based on the input parameters.
-    
+    """Determine whether the V2 grouped GEMM implementation can be used based on the input parameters.
+
     Returns:
         A tuple of (is_supported: bool, reason: str) where is_supported indicates whether the V2 grouped GEMM can be used, and reason provides an explanation if it is not supported.
     """
@@ -2152,7 +2175,10 @@ def is_v2_grouped_gemm_supported(
 
     return is_v2_supported, reason
 
-def _get_out_dtype_and_scaling_mode(x: Union[GroupedNoScaleTensor, GroupedScaledTensor1x]) -> Tuple[jnp.dtype, ScalingMode]:
+
+def _get_out_dtype_and_scaling_mode(
+    x: Union[GroupedNoScaleTensor, GroupedScaledTensor1x],
+) -> Tuple[jnp.dtype, ScalingMode]:
     if isinstance(x, GroupedScaledTensor1x):
         out_dtype = x.dq_dtype
         scaling_mode = x.scaling_mode
@@ -2165,9 +2191,17 @@ def _get_out_dtype_and_scaling_mode(x: Union[GroupedNoScaleTensor, GroupedScaled
         )
     return out_dtype, scaling_mode
 
-def _infer_output_ragged_dims(lhs: Union[GroupedNoScaleTensor, GroupedScaledTensor1x], rhs: Union[GroupedNoScaleTensor, GroupedScaledTensor1x]) -> Tuple[Optional[jnp.ndarray], Optional[jnp.ndarray]]:
-    assert isinstance(lhs, (GroupedNoScaleTensor, GroupedScaledTensor1x)), f"Expected lhs to be GroupedNoScaleTensor or GroupedScaledTensor1x, got type={type(lhs)}"
-    assert isinstance(rhs, (GroupedNoScaleTensor, GroupedScaledTensor1x)), f"Expected rhs to be GroupedNoScaleTensor or GroupedScaledTensor1x, got type={type(rhs)}"
+
+def _infer_output_ragged_dims(
+    lhs: Union[GroupedNoScaleTensor, GroupedScaledTensor1x],
+    rhs: Union[GroupedNoScaleTensor, GroupedScaledTensor1x],
+) -> Tuple[Optional[jnp.ndarray], Optional[jnp.ndarray]]:
+    assert isinstance(
+        lhs, (GroupedNoScaleTensor, GroupedScaledTensor1x)
+    ), f"Expected lhs to be GroupedNoScaleTensor or GroupedScaledTensor1x, got type={type(lhs)}"
+    assert isinstance(
+        rhs, (GroupedNoScaleTensor, GroupedScaledTensor1x)
+    ), f"Expected rhs to be GroupedNoScaleTensor or GroupedScaledTensor1x, got type={type(rhs)}"
 
     # Infer output dims from which operand has the ragged non-contracting dim.
     if rhs.first_dims is not None or rhs.last_dims is not None:
@@ -2184,6 +2218,7 @@ def _infer_output_ragged_dims(lhs: Union[GroupedNoScaleTensor, GroupedScaledTens
         out_first_dims = out_last_dims = None
 
     return out_first_dims, out_last_dims
+
 
 def _adjust_contracting_dims_for_hopper_fp8_transpose(
     lhs: Union[GroupedNoScaleTensor, GroupedScaledTensor1x],
@@ -2222,6 +2257,7 @@ def _adjust_contracting_dims_for_hopper_fp8_transpose(
 
     return lhs_contract_dim, rhs_contract_dim
 
+
 def _quantize_inputs_if_needed(
     lhs: Union[GroupedNoScaleTensor, GroupedScaledTensor1x],
     rhs: Union[GroupedNoScaleTensor, GroupedScaledTensor1x],
@@ -2230,17 +2266,23 @@ def _quantize_inputs_if_needed(
     rhs_is_trans: bool,
     lhs_flatten_axis: int,
     rhs_flatten_axis: int,
-) -> Tuple[Union[GroupedNoScaleTensor, GroupedScaledTensor1x], Union[GroupedNoScaleTensor, GroupedScaledTensor1x]]:
+) -> Tuple[
+    Union[GroupedNoScaleTensor, GroupedScaledTensor1x],
+    Union[GroupedNoScaleTensor, GroupedScaledTensor1x],
+]:
     if quantizer_set is noop_quantizer_set:
         return lhs, rhs
 
-    assert isinstance(lhs, GroupedNoScaleTensor), f"Expected lhs to be GroupedNoScaleTensor before quantization, got type={type(lhs)}"
-    assert isinstance(rhs, GroupedNoScaleTensor), f"Expected rhs to be GroupedNoScaleTensor before quantization, got type={type(rhs)}"
+    assert isinstance(
+        lhs, GroupedNoScaleTensor
+    ), f"Expected lhs to be GroupedNoScaleTensor before quantization, got type={type(lhs)}"
+    assert isinstance(
+        rhs, GroupedNoScaleTensor
+    ), f"Expected rhs to be GroupedNoScaleTensor before quantization, got type={type(rhs)}"
 
     if not isinstance(quantizer_set.x, GroupedQuantizer):
         raise TypeError(
-            "Expected quantizer_set.x to be GroupedQuantizer, but got"
-            f" type={type(quantizer_set.x)}"
+            f"Expected quantizer_set.x to be GroupedQuantizer, but got type={type(quantizer_set.x)}"
         )
     if type(quantizer_set.x) is not type(quantizer_set.kernel):
         raise TypeError(
@@ -2255,9 +2297,7 @@ def _quantize_inputs_if_needed(
     else:
         lhs_is_rowwise = not lhs_is_trans
         rhs_is_rowwise = rhs_is_trans
-    quantizer_set.x.q_layout = (
-        QuantizeLayout.ROWWISE if lhs_is_rowwise else QuantizeLayout.COLWISE
-    )
+    quantizer_set.x.q_layout = QuantizeLayout.ROWWISE if lhs_is_rowwise else QuantizeLayout.COLWISE
     quantizer_set.kernel.q_layout = (
         QuantizeLayout.ROWWISE if rhs_is_rowwise else QuantizeLayout.COLWISE
     )
@@ -2272,13 +2312,12 @@ def _quantize_inputs_if_needed(
     )
     lhs_input_data = lhs.data
     rhs_input_data = rhs.data
-    lhs_q = grouped_quantize(
-        lhs_input_data, quantizer_set.x, active_group_sizes, lhs_flatten_axis
-    )
+    lhs_q = grouped_quantize(lhs_input_data, quantizer_set.x, active_group_sizes, lhs_flatten_axis)
     rhs_q = grouped_quantize(
         rhs_input_data, quantizer_set.kernel, group_sizes=None, flatten_axis=rhs_flatten_axis
     )
     return lhs_q, rhs_q
+
 
 def _get_num_gemms(
     lhs: Union[GroupedNoScaleTensor, GroupedScaledTensor1x],
@@ -2294,6 +2333,7 @@ def _get_num_gemms(
         "Ensure that at least one of the input tensors has valid first_dims or last_dims."
         "For grouped_gemm, at least one tensor must be ragged."
     )
+
 
 def grouped_gemm(
     lhs: Union[GroupedNoScaleTensor, GroupedScaledTensor1x],
@@ -2331,7 +2371,9 @@ def grouped_gemm(
     out_dtype, scaling_mode = _get_out_dtype_and_scaling_mode(lhs)
     rhs_out_dtype, rhs_scaling_mode = _get_out_dtype_and_scaling_mode(rhs)
     assert out_dtype == rhs_out_dtype, f"Mismatched output dtypes: {out_dtype} vs {rhs_out_dtype}"
-    assert scaling_mode == rhs_scaling_mode, f"Mismatched scaling modes: {scaling_mode} vs {rhs_scaling_mode}"
+    assert (
+        scaling_mode == rhs_scaling_mode
+    ), f"Mismatched scaling modes: {scaling_mode} vs {rhs_scaling_mode}"
     del rhs_out_dtype, rhs_scaling_mode
 
     out_first_dims, out_last_dims = _infer_output_ragged_dims(lhs, rhs)
@@ -2348,10 +2390,7 @@ def grouped_gemm(
     rhs_flatten_axis = -len(rhs_contract_dim) if rhs_is_trans else 1 + len(rhs_contract_dim)
 
     lhs, rhs = _quantize_inputs_if_needed(
-        lhs, rhs,
-        quantizer_set,
-        lhs_is_trans, rhs_is_trans,
-        lhs_flatten_axis, rhs_flatten_axis
+        lhs, rhs, quantizer_set, lhs_is_trans, rhs_is_trans, lhs_flatten_axis, rhs_flatten_axis
     )
 
     # Re-read scaling_mode after quantization: if _quantize_inputs_if_needed converted
@@ -2364,9 +2403,7 @@ def grouped_gemm(
 
     if scaling_mode.is_tensor_scaling() and not is_fp8_gemm_with_all_layouts_supported():
         lhs_contract_dim, rhs_contract_dim = _adjust_contracting_dims_for_hopper_fp8_transpose(
-            lhs, rhs,
-            lhs_contract_dim, rhs_contract_dim,
-            lhs_is_trans, rhs_is_trans
+            lhs, rhs, lhs_contract_dim, rhs_contract_dim, lhs_is_trans, rhs_is_trans
         )
 
     # Compute N-D axis boundaries from final (post-adjustment) contracting dims.
@@ -2398,7 +2435,9 @@ def grouped_gemm(
             rhs_non_contracting = tuple(rhs.original_shape[d] for d in range(rhs_axis_boundary))
         else:
             # fwd/dgrad: rhs (e.g. kernel_T of shape (G, N, K)) has G batch dim at dim 0; skip it
-            rhs_non_contracting = tuple(rhs.original_shape[d] for d in range(rhs_axis_boundary) if d != 0)
+            rhs_non_contracting = tuple(
+                rhs.original_shape[d] for d in range(rhs_axis_boundary) if d != 0
+            )
     else:
         rhs_non_contracting = rhs.original_shape[rhs_axis_boundary:]
     if rhs.first_dims is not None or rhs.last_dims is not None:
@@ -2438,7 +2477,6 @@ def grouped_gemm(
         # grouped_quantize has set pre_swizzled=True on the input tensors.
         assert lhs.pre_swizzled, "lhs must be pre-swizzled for MXFP8 1D scaling"
         assert rhs.pre_swizzled, "rhs must be pre-swizzled for MXFP8 1D scaling"
-
 
     if use_v2_ffi:
         additional_arg_0 = jnp.ones((num_gemms,), jnp.float32)  # alpha

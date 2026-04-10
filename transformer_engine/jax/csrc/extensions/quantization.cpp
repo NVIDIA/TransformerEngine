@@ -318,9 +318,9 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(DequantizeHandler, DequantizeFFI,
 Error_Type GroupedQuantizeFFI(cudaStream_t stream, Buffer_Type inputs, Buffer_Type scales,
                               Buffer_Type group_sizes, Result_Type outputs,
                               Result_Type colwise_outputs, Result_Type scale_invs,
-                              Result_Type colwise_scale_invs, Result_Type amaxs, Result_Type _unused,
-                              JAXX_Scaling_Mode scaling_mode, JAXX_Quantize_Layout quantize_layout,
-                              int64_t flatten_axis) {
+                              Result_Type colwise_scale_invs, Result_Type amaxs,
+                              Result_Type _unused, JAXX_Scaling_Mode scaling_mode,
+                              JAXX_Quantize_Layout quantize_layout, int64_t flatten_axis) {
   NVTE_CHECK(scaling_mode != JAXX_Scaling_Mode::NO_SCALING,
              "Unsupported scaling mode: ", static_cast<int>(scaling_mode));
 
@@ -486,27 +486,29 @@ Error_Type GroupedQuantizeFFI(cudaStream_t stream, Buffer_Type inputs, Buffer_Ty
   return ffi_with_cuda_error_check();
 }
 
-XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedQuantizeHandler, GroupedQuantizeFFI,
-                              FFI::Bind()
-                                  .Ctx<FFI_Stream_Type>()  // stream
-                                  .Arg<Buffer_Type>()      // input
-                                  .Arg<Buffer_Type>()      // scale
-                                  .Arg<Buffer_Type>()      // group_sizes
-                                  .Ret<Buffer_Type>()      // output
-                                  .Ret<Buffer_Type>()      // colwise output
-                                  .Ret<Buffer_Type>()      // scale_inv
-                                  .Ret<Buffer_Type>()      // scale_inv colwise
-                                  .Ret<Buffer_Type>()      // amax
-                                  .Ret<Buffer_Type>()      // unused (for compatibility with V2 interface)
-                                  .Attr<JAXX_Scaling_Mode>("scaling_mode")
-                                  .Attr<JAXX_Quantize_Layout>("q_layout")
-                                  .Attr<int64_t>("flatten_axis"));
+XLA_FFI_DEFINE_HANDLER_SYMBOL(
+    GroupedQuantizeHandler, GroupedQuantizeFFI,
+    FFI::Bind()
+        .Ctx<FFI_Stream_Type>()  // stream
+        .Arg<Buffer_Type>()      // input
+        .Arg<Buffer_Type>()      // scale
+        .Arg<Buffer_Type>()      // group_sizes
+        .Ret<Buffer_Type>()      // output
+        .Ret<Buffer_Type>()      // colwise output
+        .Ret<Buffer_Type>()      // scale_inv
+        .Ret<Buffer_Type>()      // scale_inv colwise
+        .Ret<Buffer_Type>()      // amax
+        .Ret<Buffer_Type>()      // unused (for compatibility with V2 interface)
+        .Attr<JAXX_Scaling_Mode>("scaling_mode")
+        .Attr<JAXX_Quantize_Layout>("q_layout")
+        .Attr<int64_t>("flatten_axis"));
 
 Error_Type GroupedQuantizeV2FFI(cudaStream_t stream, Buffer_Type inputs, Buffer_Type scale_unused,
                                 Buffer_Type group_sizes, Result_Type rowwise_out,
                                 Result_Type colwise_out, Result_Type rowwise_sinv,
-                                Result_Type colwise_sinv, Result_Type updated_amaxs, Result_Type int64_workspace,
-                                JAXX_Quantize_Layout quantize_layout, int64_t flatten_axis) {
+                                Result_Type colwise_sinv, Result_Type updated_amaxs,
+                                Result_Type int64_workspace, JAXX_Quantize_Layout quantize_layout,
+                                int64_t flatten_axis) {
   (void)scale_unused;  // scale is unused for MXFP8; accepted to match V1 input arity
   auto in_dtype = convert_ffi_datatype_to_te_dtype(inputs.element_type());
   auto out_dtype = convert_ffi_datatype_to_te_dtype(rowwise_out->element_type());

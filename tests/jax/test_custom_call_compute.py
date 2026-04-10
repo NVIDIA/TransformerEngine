@@ -1079,7 +1079,7 @@ class TestRandomizedHadamardTransform:
 @pytest_parametrize_wrapper(
     "group_size_multiplier",
     [
-        32,   # V1 MXFP8: group size must be multiple of 32
+        32,  # V1 MXFP8: group size must be multiple of 32
         128,  # V2 MXFP8 eligible: group size must be multiple of 128
     ],
 )
@@ -1092,7 +1092,15 @@ class TestRandomizedHadamardTransform:
 )
 class TestGroupedQuantize:
     def test_grouped_qdq(
-        self, in_dtype, input_shape, group_size_multiplier, q_dtype, scaling_mode, q_layout, flatten_axis, with_group_sizes
+        self,
+        in_dtype,
+        input_shape,
+        group_size_multiplier,
+        q_dtype,
+        scaling_mode,
+        q_layout,
+        flatten_axis,
+        with_group_sizes,
     ):
         n_groups, m, n = input_shape
         key = jax.random.PRNGKey(0)
@@ -1121,10 +1129,12 @@ class TestGroupedQuantize:
         if (
             scaling_mode == ScalingMode.MXFP8_1D_SCALING
             and group_size_multiplier % 128 != 0
-            and GroupedQuantizePrimitive._use_v2_kernel(scaling_mode.value, input_shape, flatten_axis)
+            and GroupedQuantizePrimitive._use_v2_kernel(
+                scaling_mode.value, input_shape, flatten_axis
+            )
         ):
             pytest.skip(
-                f"MXFP8 V2 quantize requires each group to be 128-aligned; "
+                "MXFP8 V2 quantize requires each group to be 128-aligned; "
                 f"group_size_multiplier={group_size_multiplier} may produce smaller groups"
             )
 
