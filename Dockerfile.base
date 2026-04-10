@@ -39,7 +39,7 @@ RUN <<"EOF" bash -e
   pip3 install ninja pybind11
 
   [[ "${FRAMEWORK}" =~ pytorch|all ]] \
-  && pip3 install nvidia-cutlass-dsl[cu13]==4.4.1 nvidia-cudnn-frontend[cutedsl]==1.21.0 \
+  && pip3 install nvidia-cutlass-dsl[cu13]==4.4.1 nvidia-cudnn-frontend[cutedsl]==1.22.0 \
   || [[ ! "${FRAMEWORK}" =~ pytorch|all ]]
 EOF
 
