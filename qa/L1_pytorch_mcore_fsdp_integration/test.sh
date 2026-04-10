@@ -4,10 +4,10 @@
 
 set -e
 
-# Megatron-LM / Megatron-FSDP commit for main branch on Apr. 7, 2026.
+# Megatron-LM / Megatron-FSDP commit for main branch on Apr. 10, 2026.
 # Necessary to support wgrad accumulate fusion and Megatron-FSDP NCCL UBR,
-# and TODO(@cspades) fixes decoupled_grad <> DistOpt usage in Megatron-LM.
-MCORE_REF=${1:-8cbc45b6e039f300c53eb09579fc973d703455cd}
+# and fixes decoupled_grad <> DistOpt usage in Megatron-LM.
+MCORE_REF=${1:-ab43d43f0bc04f4656d4af15afb6e7e4c9ad71c8}
 
 # Paths
 : ${TE_PATH:=/opt/transformerengine}
