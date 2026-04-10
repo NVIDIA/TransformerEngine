@@ -2213,7 +2213,7 @@ def _adjust_contracting_dims_for_hopper_fp8_transpose(
     if rhs_layout_is_T:
         # For rhs [G, K, N], need to exclude the G dim from contract_dim
         if (
-            lhs_first_dims.size > 0 or lhs_last_dims.size > 0
+            lhs.first_dims is not None or lhs.last_dims is not None
         ):  # fwd/dgrad: rhs has G as first dim
             rhs_contract_dim = tuple(
                 (rhs_ndim - 1 - i) % (rhs_ndim - 1) + 1 for i in rhs_contract_dim
@@ -2268,7 +2268,7 @@ def _quantize_inputs_if_needed(
         (
             gs
             for gs in [lhs.first_dims, lhs.last_dims, rhs.first_dims, rhs.last_dims]
-            if gs.size > 0
+            if gs is not None and gs.size > 0
         ),
         empty_gs,
     )
