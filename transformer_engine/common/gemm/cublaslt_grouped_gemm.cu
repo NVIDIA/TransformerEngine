@@ -345,6 +345,7 @@ inline void check_grouped_gemm_requirements(const char *api_name) {
   }
 #else
   NVTE_CHECK(sm >= 100, api_name, " requires Blackwell (SM100) or newer architecture.");
+  NVTE_CHECK(sm != 120 && sm != 121, api_name, " is currently unsupported on SM12x architectures.");
   NVTE_CHECK(cublas_ver >= CUBLAS_GROUPED_GEMM_VERSION, api_name,
              " requires cuBLAS 13.3+, but run-time cuBLAS version is ", cublas_ver);
 #endif
