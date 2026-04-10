@@ -399,9 +399,7 @@ class CurrentScalingQuantizerRef(Quantizer):
             return y
 
         # cublas fp8 gemm does not support fp32 bias
-        use_bias_in_gemm = (
-            bias is not None and out_dtype != torch.float32 and bias.dtype != torch.float32
-        )
+        use_bias_in_gemm = bias is not None and torch.float32 not in (out_dtype, bias.dtype)
 
         # Run quantized gemm: y = qw * qx
         scaled_mm_res = torch._scaled_mm(

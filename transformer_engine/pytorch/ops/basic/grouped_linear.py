@@ -499,7 +499,9 @@ class GroupedLinear(BasicOperation):
                         f"Weight {group_idx} has requires_grad={weight.requires_grad}, "
                         f"but expected requires_grad={weight_requires_grad}."
                     )
-                if type(weight.data) != weight_tensor_type:  # pylint: disable=unidiomatic-typecheck
+                if (
+                    type(weight.data) is not weight_tensor_type
+                ):  # pylint: disable=unidiomatic-typecheck
                     raise RuntimeError(
                         f"Weight {group_idx} has invalid tensor type "
                         f"(expected {weight_tensor_type.__name__}, "

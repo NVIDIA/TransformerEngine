@@ -7,5 +7,5 @@
 try:
     from . import pytorch
     from .pytorch.debug_state import set_weight_tensor_tp_group_reduce
-except ImportError as e:
+except ImportError:
     pass
