@@ -257,10 +257,12 @@ class Float8CurrentScalingQuantizer(Quantizer):
     force_pow_2_scales: bool
     amax_epsilon: float
 
+    _LAZY_WORKSPACE_ATTRS = frozenset({"scale", "amax"})
+
     def __init__(
         self,
         fp8_dtype: TE_DType,
-        device: torch.device,
+        device: Optional[torch.device] = None,
         *,
         rowwise: bool = True,
         columnwise: bool = True,
@@ -273,18 +275,72 @@ class Float8CurrentScalingQuantizer(Quantizer):
         amax: Optional[torch.Tensor] = None,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
-        if scale is None:
+        if scale is None and device is not None:
             scale = torch.empty(1, dtype=torch.float32, device=device)
-        if amax is None:
+        if amax is None and device is not None:
             amax = torch.empty(1, dtype=torch.float32, device=device)
-        self.scale = scale
-        self.amax = amax
+        if scale is not None:
+            self.scale = scale
+        if amax is not None:
+            self.amax = amax
         self.dtype = fp8_dtype
         self.use_existing_amax = use_existing_amax
         self.with_amax_reduction = with_amax_reduction
         self.amax_reduction_group = amax_reduction_group
         self.force_pow_2_scales = force_pow_2_scales
         self.amax_epsilon = amax_epsilon
+
+    def __getattr__(self, name: str):
+        if name in Float8CurrentScalingQuantizer._LAZY_WORKSPACE_ATTRS:
+            buf = torch.empty(1, dtype=torch.float32, device=torch.cuda.current_device())
+            object.__setattr__(self, name, buf)
+            return buf
+        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+
+    def __eq__(self, other):
+        if not isinstance(other, Float8CurrentScalingQuantizer):
+            return NotImplemented
+        return (
+            self.dtype == other.dtype
+            and self.use_existing_amax == other.use_existing_amax
+            and self.with_amax_reduction == other.with_amax_reduction
+            and self.force_pow_2_scales == other.force_pow_2_scales
+            and self.amax_epsilon == other.amax_epsilon
+            and self.rowwise_usage == other.rowwise_usage
+            and self.columnwise_usage == other.columnwise_usage
+        )
+
+    def __hash__(self):
+        return hash(
+            (
+                type(self),
+                self.dtype,
+                self.use_existing_amax,
+                self.with_amax_reduction,
+                self.force_pow_2_scales,
+                self.amax_epsilon,
+                self.rowwise_usage,
+                self.columnwise_usage,
+            )
+        )
+
+    def __fx_repr__(self):
+        return (
+            (
+                "Float8CurrentScalingQuantizer("
+                f"fp8_dtype=TE_DType.{self.dtype.name}, "
+                f"rowwise={self.rowwise_usage}, "
+                f"columnwise={self.columnwise_usage}, "
+                f"use_existing_amax={self.use_existing_amax}, "
+                f"with_amax_reduction={self.with_amax_reduction}, "
+                f"force_pow_2_scales={self.force_pow_2_scales}, "
+                f"amax_epsilon={self.amax_epsilon})"
+            ),
+            {
+                "Float8CurrentScalingQuantizer": Float8CurrentScalingQuantizer,
+                "TE_DType": TE_DType,
+            },
+        )
 
     def __getstate__(self):
         """Exclude unpicklable process group from serialized state."""
@@ -297,7 +353,6 @@ class Float8CurrentScalingQuantizer(Quantizer):
 
         quantizer = Float8CurrentScalingQuantizer(
             fp8_dtype=self.dtype,
-            device=0,
             rowwise=self.rowwise_usage,
             columnwise=self.columnwise_usage,
             with_amax_reduction=self.with_amax_reduction,
