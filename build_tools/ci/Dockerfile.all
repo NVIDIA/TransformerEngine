@@ -1,0 +1,31 @@
+FROM ubuntu:24.04
+
+# Container dependencies
+RUN apt-get update && apt-get install -y git python3 python3-pip ccache
+
+ENV PIP_BREAK_SYSTEM_PACKAGES=1
+
+# Python build dependencies
+RUN pip install cmake ninja pybind11 numpy packaging
+
+# PyTorch (CUDA 13.0)
+RUN pip install torch --index-url https://download.pytorch.org/whl/cu130
+
+# JAX with CUDA 13 support
+RUN pip install "jax[cuda13]"
+
+# NVIDIA CUDA toolkit wheels
+RUN pip install \
+    "nvidia-cuda-nvcc<13.1" \
+    "nvidia-cuda-cccl<13.1" \
+    "nvidia-cuda-crt<13.1" \
+    "nvidia-nvvm<13.1" \
+    "nvidia-cuda-profiler-api<13.1" \
+    "nvidia-nvml-dev<13.1"
+
+# Create symlinks for CUDA libraries
+RUN CUDA_PATH=$(python3 -c "import nvidia; print(list(nvidia.__path__)[0] + '/cu13')") && \
+    ln -s $CUDA_PATH/lib/libcudart.so.13 $CUDA_PATH/lib/libcudart.so && \
+    ln -s $CUDA_PATH/lib/libcublas.so.13 $CUDA_PATH/lib/libcublas.so && \
+    ln -s $CUDA_PATH/../nccl/lib/libnccl.so.2 $CUDA_PATH/../nccl/lib/libnccl.so && \
+    ln -s $CUDA_PATH/lib $CUDA_PATH/lib64

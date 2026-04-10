@@ -12,10 +12,10 @@
 #include <cudnn.h>
 #include <nvrtc.h>
 
-#include "nccl.h"
-
 #ifdef NVTE_WITH_CUBLASMP
 #include <cublasmp.h>
+
+#include "nccl.h"
 #endif  // NVTE_WITH_CUBLASMP
 
 #include <iostream>
