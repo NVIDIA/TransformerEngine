@@ -1432,12 +1432,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     (2, cp_size), dtype=torch.float32, device=q.device
                 )
                 for i in range(cp_size):
-                    S_quantizer_per_step[i].amax = delayed_scaling_amax_per_step[0][i].reshape(
-                        (1,)
-                    )
-                    O_quantizer_per_step[i].amax = delayed_scaling_amax_per_step[1][i].reshape(
-                        (1,)
-                    )
+                    S_quantizer_per_step[i].amax = delayed_scaling_amax_per_step[0][i].reshape((1,))
+                    O_quantizer_per_step[i].amax = delayed_scaling_amax_per_step[1][i].reshape((1,))
         else:
             # q_f16:   torch.Tensor, dtype=fwd_nominal_dtype
             # q, k, v: torch.Tensor, dtype=fwd_nominal_dtype
@@ -2245,9 +2241,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     dP_quantizer_per_step[i].amax = delayed_scaling_amax_per_step[0][i].reshape(
                         (1,)
                     )
-                    dQKV_quantizer_per_step[i].amax = delayed_scaling_amax_per_step[1][
-                        i
-                    ].reshape((1,))
+                    dQKV_quantizer_per_step[i].amax = delayed_scaling_amax_per_step[1][i].reshape(
+                        (1,)
+                    )
         else:
             if isinstance(dout, QuantizedTensorStorage):
                 dout = dout.dequantize(dtype=bwd_nominal_dtype)
