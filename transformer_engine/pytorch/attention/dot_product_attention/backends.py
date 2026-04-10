@@ -162,16 +162,10 @@ try:
 except PackageNotFoundError:
     flash_attn_func_v4 = None
     flash_attn_varlen_func_v4 = None
-    # TODO: for context parallel
-    # _flash_attn_fwd_v4 = None
-    # _flash_attn_bwd_v4 = None
 else:
     from flash_attn.cute.interface import (  # pylint: disable=ungrouped-imports,no-name-in-module
         flash_attn_func as flash_attn_func_v4,
         flash_attn_varlen_func as flash_attn_varlen_func_v4,
-        # TODO: for context parallel
-        # _flash_attn_fwd as _flash_attn_fwd_v4,
-        # _flash_attn_bwd as _flash_attn_bwd_v4,
     )
 
     fa_utils.set_flash_attention_4_params()

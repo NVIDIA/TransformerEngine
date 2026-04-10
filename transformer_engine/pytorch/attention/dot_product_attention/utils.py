@@ -142,7 +142,7 @@ class FlashAttentionUtils:
     fa4_version = PkgVersion("0")
     use_v4 = False
     v4_installation_steps = """\
-(1) pip install flash-attn-4"""
+pip install flash-attn-4==4.0.0b8 nvidia-cutlass-dsl[cu13]"""
     v4_warning_printed = False
 
     @staticmethod
