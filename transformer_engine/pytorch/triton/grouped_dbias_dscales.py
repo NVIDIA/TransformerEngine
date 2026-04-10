@@ -46,8 +46,7 @@ def _compute_grouped_dbias_dscales(
             zero tensor is allocated.
 
     Returns:
-        dbias: (num_groups, hidden) -- same dtype as dy if freshly
-            allocated, or the input tensor (fp32) if provided.
+        dbias: (num_groups, hidden) float32
         dscales: (total_tokens,) float32
     """
     num_groups = bias.shape[0]
