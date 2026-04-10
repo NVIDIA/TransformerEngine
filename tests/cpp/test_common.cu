@@ -536,7 +536,8 @@ void Tensor::from_cpu() const {
 void Tensor::set_scale(float scale) {
   if (isFp8Type(dtype()) || isFp4Type(dtype())) {
     NVTE_CHECK(scale_cpu_data_);
-    if (tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING) {
+    if (tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING
+        || tensor_.scaling_mode() == NVTE_NVFP4_1D_SCALING) {
       *scale_cpu_data_ = scale;
       from_cpu();
     }
