@@ -370,6 +370,8 @@ void performTest_x2(const size_t rows,
 }
 
 std::vector<std::pair<size_t, size_t>> tensor_dims = {
+    {0, 128},
+    {0, 256},
     {1, 16},
     {16, 48},
     {65, 96},
