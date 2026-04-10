@@ -128,7 +128,7 @@ def test_custom_recipe_grouped_linear_sanity():
     in_features = 64
     out_features = 64
     # Each per-GEMM M dim must be a multiple of 16 to satisfy cuBLAS FP8 GEMM's
-    # leading-dimension alignment requirement on Hopper (sm_90).
+    # leading-dimension alignment requirement on Hopper and SM120 paths.
     m_splits = [16] * num_gemms
     batch = sum(m_splits)
 
@@ -281,7 +281,7 @@ def test_custom_recipe_factory_invocation_counts_and_cycling():
     in_features = 64
     out_features = 64
     # batch must be a multiple of 16 to satisfy cuBLAS FP8 GEMM's leading-dim
-    # alignment requirement on Hopper (sm_90).
+    # alignment requirement on Hopper and SM120 paths.
     batch = 16
 
     op = Linear(in_features, out_features, params_dtype=torch.bfloat16)
