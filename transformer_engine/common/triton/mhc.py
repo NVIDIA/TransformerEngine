@@ -855,9 +855,9 @@ def _mhc_sinkhorn_bwd_fused(
 
 
 def aggregate_config():
-    block_m = [32, 64]
-    block_c = [32]
-    warps = [2]
+    block_m = [1, 2, 4]
+    block_c = [64, 128, 256]
+    warps = [1, 2, 4]
     stages = [1, 2, 3, 4]
 
     configs = []
@@ -903,7 +903,6 @@ def _mhc_aggregate_fwd(
     tl.assume(stride_xm > 0 and stride_xCn == 1)
     tl.assume(stride_output_m > 0 and stride_output_c == 1)
 
-    tl.assume(BLOCK_SIZE_M % 32 == 0)
     tl.assume(BLOCK_SIZE_C % 32 == 0)
 
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
@@ -992,7 +991,6 @@ def _mhc_aggregate_bwd(
     tl.assume(stride_grad_xm > 0 and stride_grad_xCn == 1)
     tl.assume(stride_grad_output_m > 0 and stride_grad_output_c == 1)
 
-    tl.assume(BLOCK_SIZE_M % 32 == 0)
     tl.assume(BLOCK_SIZE_C % 32 == 0)
 
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
@@ -1046,9 +1044,9 @@ def _mhc_aggregate_bwd(
 
 
 def expand_combine_config():
-    block_m = [32]
-    block_c = [32]
-    warps = [4]
+    block_m = [1, 2, 4]
+    block_c = [128, 256]
+    warps = [1, 2]
     stages = [1, 2, 3, 4]
 
     configs = []
@@ -1100,7 +1098,6 @@ def _mhc_expand_combine_fwd(
     tl.assume(stride_xm > 0 and stride_xCn == 1)
     tl.assume(stride_output_m > 0 and stride_output_Cn == 1)
 
-    tl.assume(BLOCK_SIZE_M % 32 == 0)
     tl.assume(BLOCK_SIZE_C % 32 == 0)
 
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
@@ -1241,7 +1238,6 @@ def _mhc_expand_combine_bwd(
     tl.assume(stride_grad_fm > 0 and stride_grad_fc == 1)
     tl.assume(stride_grad_xm > 0 and stride_grad_xCn == 1)
 
-    tl.assume(BLOCK_SIZE_M % 32 == 0)
     tl.assume(BLOCK_SIZE_C % 32 == 0)
 
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
@@ -1410,7 +1406,6 @@ def _mhc_expand_combine_with_bias_fwd(
     tl.assume(stride_xm > 0 and stride_xCn == 1)
     tl.assume(stride_output_m > 0 and stride_output_Cn == 1)
 
-    tl.assume(BLOCK_SIZE_M % 32 == 0)
     tl.assume(BLOCK_SIZE_C % 32 == 0)
 
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
@@ -1559,7 +1554,6 @@ def _mhc_expand_combine_with_bias_bwd(
     tl.assume(stride_grad_bias == 1)
     tl.assume(stride_grad_xm > 0 and stride_grad_xCn == 1)
 
-    tl.assume(BLOCK_SIZE_M % 32 == 0)
     tl.assume(BLOCK_SIZE_C % 32 == 0)
 
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
