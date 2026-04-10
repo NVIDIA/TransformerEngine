@@ -12,7 +12,13 @@ import transformer_engine_torch as tex
 from transformer_engine.pytorch.cpp_extensions.fused_attn import QKVFormat
 
 
-__all__ = ["RotaryPositionEmbedding", "apply_rotary_pos_emb", "apply_fused_qkv_rotary_pos_emb"]
+__all__ = [
+    "RotaryPositionEmbedding",
+    "apply_rotary_pos_emb",
+    "apply_fused_qkv_rotary_pos_emb",
+    "fused_apply_mla_rope_for_q",
+    "fused_apply_mla_rope_for_kv",
+]
 
 
 class RotaryPositionEmbedding(torch.nn.Module):
@@ -253,6 +259,230 @@ class FusedQKVRoPEFunc(torch.autograd.Function):
         )
 
         return grad_input, None, None, None, None, None, None, None, None
+
+
+class FusedMLARoPEQFunc(torch.autograd.Function):
+    """
+    Autograd function for applying YARN RoPE to MLA's query using CUDA kernels.
+
+    Reads interleaved elements from the last emb_dim of each head, applies YARN
+    rotation with split cos/sin (left and right halves), and writes de-interleaved.
+    The first qk_head_dim elements per head are copied unchanged.
+
+    Supports both SBHD [s, b, h, d] and THD [t, h, d] input formats.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        q: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        qk_head_dim: int,
+        emb_dim: int,
+        cu_seqlens_q: Union[torch.Tensor, None] = None,
+        cp_rank: int = 0,
+        cp_size: int = 1,
+    ) -> torch.Tensor:
+        if cos.dtype != torch.float32:
+            cos = cos.float()
+        if sin.dtype != torch.float32:
+            sin = sin.float()
+        cos = cos.contiguous().view(-1, emb_dim)
+        sin = sin.contiguous().view(-1, emb_dim)
+
+        output = tex.fused_mla_rope_q_forward(
+            q, cos, sin, cu_seqlens_q, qk_head_dim, emb_dim, cp_size, cp_rank
+        )
+        ctx.save_for_backward(cos, sin)
+        ctx.qk_head_dim = qk_head_dim
+        ctx.emb_dim = emb_dim
+        ctx.cu_seqlens_q = cu_seqlens_q
+        ctx.cp_rank = cp_rank
+        ctx.cp_size = cp_size
+        return output
+
+    @staticmethod
+    def backward(
+        ctx, grad_output: torch.Tensor
+    ) -> Tuple[Union[torch.Tensor, None], ...]:
+        cos, sin = ctx.saved_tensors
+        grad_input = tex.fused_mla_rope_q_backward(
+            grad_output,
+            cos,
+            sin,
+            ctx.cu_seqlens_q,
+            ctx.qk_head_dim,
+            ctx.emb_dim,
+            ctx.cp_size,
+            ctx.cp_rank,
+        )
+        return grad_input, None, None, None, None, None, None, None
+
+
+class FusedMLARoPEKVFunc(torch.autograd.Function):
+    """
+    Autograd function for applying YARN RoPE to MLA's key and value using CUDA kernels.
+
+    Splits the input KV tensor into key and value, applies YARN rotation to a
+    separate k_pos_emb (shared across heads), and concatenates the rotated
+    embedding to each head of the output key.
+
+    Supports both SBHD [s, b, h, k_dim+v_dim] and THD [t, h, k_dim+v_dim] formats.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        kv: torch.Tensor,
+        k_pos_emb: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        emb_dim: int,
+        k_dim: int,
+        v_dim: int,
+        cu_seqlens_kv: Union[torch.Tensor, None] = None,
+        cp_rank: int = 0,
+        cp_size: int = 1,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if cos.dtype != torch.float32:
+            cos = cos.float()
+        if sin.dtype != torch.float32:
+            sin = sin.float()
+        cos = cos.contiguous().view(-1, emb_dim)
+        sin = sin.contiguous().view(-1, emb_dim)
+
+        o_key, o_value = tex.fused_mla_rope_kv_forward(
+            kv, k_pos_emb, cos, sin, cu_seqlens_kv, emb_dim, k_dim, v_dim, cp_size, cp_rank
+        )
+        ctx.save_for_backward(cos, sin)
+        ctx.emb_dim = emb_dim
+        ctx.k_dim = k_dim
+        ctx.v_dim = v_dim
+        ctx.cu_seqlens_kv = cu_seqlens_kv
+        ctx.cp_rank = cp_rank
+        ctx.cp_size = cp_size
+        return o_key, o_value
+
+    @staticmethod
+    def backward(
+        ctx, dk: torch.Tensor, dv: torch.Tensor
+    ) -> Tuple[Union[torch.Tensor, None], ...]:
+        cos, sin = ctx.saved_tensors
+        d_kv, d_emb = tex.fused_mla_rope_kv_backward(
+            dk,
+            dv,
+            cos,
+            sin,
+            ctx.cu_seqlens_kv,
+            ctx.emb_dim,
+            ctx.k_dim,
+            ctx.v_dim,
+            ctx.cp_size,
+            ctx.cp_rank,
+        )
+        return d_kv, d_emb, None, None, None, None, None, None, None, None
+
+
+def fused_apply_mla_rope_for_q(
+    t: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    qk_head_dim: int,
+    emb_dim: int,
+    cu_seqlens_q: Optional[torch.Tensor] = None,
+    cp_rank: int = 0,
+    cp_size: int = 1,
+) -> torch.Tensor:
+    """
+    Apply YARN RoPE to MLA's query using fused CUDA kernels.
+
+    Along the last dimension of each head, the first qk_head_dim elements are
+    unchanged and the last emb_dim elements receive YARN rotation. The input is
+    read interleaved and written de-interleaved.
+
+    Parameters
+    ----------
+    t : torch.Tensor
+        Query tensor of shape [s, b, h, qk_head_dim + emb_dim] (SBHD)
+        or [total_t, h, qk_head_dim + emb_dim] (THD).
+    cos : torch.Tensor
+        Pre-computed cosine tensor [max_s, 1, 1, emb_dim] or [max_s, emb_dim].
+    sin : torch.Tensor
+        Pre-computed sine tensor [max_s, 1, 1, emb_dim] or [max_s, emb_dim].
+    qk_head_dim : int
+        Dimension of the non-RoPE prefix per head.
+    emb_dim : int
+        RoPE embedding dimension.
+    cu_seqlens_q : torch.Tensor, optional
+        Cumulative sequence lengths [num_seqs + 1] for THD format.
+    cp_rank : int
+        Context parallel rank.
+    cp_size : int
+        Context parallel world size.
+
+    Returns
+    -------
+    torch.Tensor
+        Output tensor with same shape as input, YARN RoPE applied.
+    """
+    return FusedMLARoPEQFunc.apply(
+        t, cos, sin, qk_head_dim, emb_dim, cu_seqlens_q, cp_rank, cp_size
+    )
+
+
+def fused_apply_mla_rope_for_kv(
+    kv: torch.Tensor,
+    k_pos_emb: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    emb_dim: int,
+    k_dim: int,
+    v_dim: int,
+    cu_seqlens_kv: Optional[torch.Tensor] = None,
+    cp_rank: int = 0,
+    cp_size: int = 1,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Apply YARN RoPE to MLA's key and value using fused CUDA kernels.
+
+    Splits KV into key and value, applies YARN rotation to k_pos_emb (shared
+    across heads), and concatenates the rotated embedding to each head of the
+    output key.
+
+    Parameters
+    ----------
+    kv : torch.Tensor
+        Combined KV tensor [s, b, h, k_dim + v_dim] (SBHD)
+        or [total_t, h, k_dim + v_dim] (THD).
+    k_pos_emb : torch.Tensor
+        Positional embedding [s, b, 1, emb_dim] or [total_t, 1, emb_dim].
+    cos : torch.Tensor
+        Pre-computed cosine tensor [max_s, 1, 1, emb_dim] or [max_s, emb_dim].
+    sin : torch.Tensor
+        Pre-computed sine tensor [max_s, 1, 1, emb_dim] or [max_s, emb_dim].
+    emb_dim : int
+        RoPE embedding dimension.
+    k_dim : int
+        Key dimension per head.
+    v_dim : int
+        Value dimension per head.
+    cu_seqlens_kv : torch.Tensor, optional
+        Cumulative sequence lengths [num_seqs + 1] for THD format.
+    cp_rank : int
+        Context parallel rank.
+    cp_size : int
+        Context parallel world size.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        (o_key, o_value) where o_key has shape [..., h, k_dim + emb_dim]
+        and o_value has shape [..., h, v_dim].
+    """
+    return FusedMLARoPEKVFunc.apply(
+        kv, k_pos_emb, cos, sin, emb_dim, k_dim, v_dim, cu_seqlens_kv, cp_rank, cp_size
+    )
 
 
 def _rotate_half(x: torch.Tensor, interleaved: bool) -> torch.Tensor:

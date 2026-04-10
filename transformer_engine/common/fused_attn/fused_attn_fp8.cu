@@ -1662,7 +1662,8 @@ void fused_attn_fp8_fwd_impl_v1(
     void* devPtrScaleO, void* devPtrAmaxO, void* devPtrAmaxS, void* devPtrcuSeqlensQ,
     void* devPtrcuSeqlensKV, void* devPtrDropoutSeed, void* devPtrDropoutOffset,
     cudnn_frontend::DataType_t qkv_tensor_type, cudnn_frontend::DataType_t o_tensor_type,
-    NVTEScalingMode scaling_mode, void* workspace, size_t* workspace_size, cudaStream_t stream,
+    NVTEScalingMode scaling_mode, NVTE_QKV_Format qkv_scale_inv_format,
+    void* workspace, size_t* workspace_size, cudaStream_t stream,
     cudnnHandle_t handle) {
   using namespace transformer_engine;
   const auto cudnn_runtime_version = cudnnGetVersion();
@@ -1718,6 +1719,8 @@ void fused_attn_fp8_fwd_impl_v1(
                                o_format,
                                NVTE_QKV_Format_NOT_SET,
                                NVTE_QKV_Layout_NOT_SET,
+                               qkv_scale_inv_format,
+                               NVTE_QKV_Format_NOT_SET,
                                bias_type,
                                mask_type,
                                softmax_type,
@@ -1823,18 +1826,35 @@ void fused_attn_fp8_fwd_impl_v1(
           scale_o = mha_graph->tensor(1.0f);
         }
       } else if (is_mxfp8) {
-        NVTE_QKV_Format q_format = nvte_get_q_format(qkv_layout);
-        NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
+        NVTE_QKV_Format q_scale_format =
+            (qkv_scale_inv_format != NVTE_QKV_Format_NOT_SET)
+                ? qkv_scale_inv_format : nvte_get_q_format(qkv_layout);
+        NVTE_QKV_Format kv_scale_format =
+            (qkv_scale_inv_format != NVTE_QKV_Format_NOT_SET)
+                ? qkv_scale_inv_format : nvte_get_kv_format(qkv_layout);
         std::vector<int64_t> q_scale_strides(4);
         std::vector<int64_t> k_scale_strides(4);
         std::vector<int64_t> v_scale_strides(4);
         auto padded = pad_s_d_for_mxfp8(s_q, s_kv, d_qk, d_v);
         generateMatrixStridesWithFormat(b, h, padded.s_q_padded, padded.d_qk_scale_padded,
-                                        q_scale_strides.data(), q_format);
+                                        q_scale_strides.data(), q_scale_format);
         generateMatrixStridesWithFormat(b, hg, padded.s_kv_padded, padded.d_qk_scale_padded,
-                                        k_scale_strides.data(), kv_format);
+                                        k_scale_strides.data(), kv_scale_format);
         generateMatrixStridesWithFormat(b, hg, padded.s_kv_scale_padded, padded.d_v_padded,
-                                        v_scale_strides.data(), kv_format);
+                                        v_scale_strides.data(), kv_scale_format);
+        printf("q_scale_strides: %d, %d, %d, %d\n", q_scale_strides[0], q_scale_strides[1], q_scale_strides[2], q_scale_strides[3]);
+        printf("k_scale_strides: %d, %d, %d, %d\n", k_scale_strides[0], k_scale_strides[1], k_scale_strides[2], k_scale_strides[3]);
+        printf("v_scale_strides: %d, %d, %d, %d\n", v_scale_strides[0], v_scale_strides[1], v_scale_strides[2], v_scale_strides[3]);
+        printf("qkv_layout: %d\n", qkv_layout);
+        printf("qkv_scale_inv_format: %d\n", qkv_scale_inv_format);
+        printf("q_scale_format: %d\n", q_scale_format);
+        printf("kv_scale_format: %d\n", kv_scale_format);
+        printf("padded.s_q_padded: %d\n", padded.s_q_padded);
+        printf("padded.d_qk_scale_padded: %d\n", padded.d_qk_scale_padded);
+        printf("padded.s_kv_padded: %d\n", padded.s_kv_padded);
+        printf("padded.d_qk_scale_padded: %d\n", padded.d_qk_scale_padded);
+        printf("padded.s_kv_scale_padded: %d\n", padded.s_kv_scale_padded);
+        printf("padded.d_v_padded: %d\n", padded.d_v_padded);
         descale_q =
             mha_graph->tensor(fe::graph::Tensor_attributes()
                                   .set_name("Descale_q")
@@ -2090,8 +2110,9 @@ void fused_attn_fp8_bwd_impl_v1(
     void* devPtrDescaledO_t, void* devPtrcuSeqlensQ, void* devPtrcuSeqlensKV,
     void* devPtrDropoutSeed, void* devPtrDropoutOffset, cudnn_frontend::DataType_t qkv_tensor_type,
     cudnn_frontend::DataType_t o_tensor_type, cudnn_frontend::DataType_t do_tensor_type,
-    cudnn_frontend::DataType_t dqkv_tensor_type, NVTEScalingMode scaling_mode, void* workspace,
-    size_t* workspace_size, cudaStream_t stream, cudnnHandle_t handle) {
+    cudnn_frontend::DataType_t dqkv_tensor_type, NVTEScalingMode scaling_mode,
+    NVTE_QKV_Format qkv_scale_inv_format, NVTE_QKV_Format do_scale_inv_format,
+    void* workspace, size_t* workspace_size, cudaStream_t stream, cudnnHandle_t handle) {
   using namespace transformer_engine;
   const auto cudnn_runtime_version = cudnnGetVersion();
   bool is_bias = (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
@@ -2149,6 +2170,8 @@ void fused_attn_fp8_bwd_impl_v1(
                                o_format,
                                do_format,
                                dqkv_layout,
+                               qkv_scale_inv_format,
+                               do_scale_inv_format,
                                bias_type,
                                mask_type,
                                softmax_type,
@@ -2313,6 +2336,15 @@ void fused_attn_fp8_bwd_impl_v1(
       } else if (is_mxfp8) {
         NVTE_QKV_Format q_format = nvte_get_q_format(qkv_layout);
         NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
+        NVTE_QKV_Format q_scale_format =
+            (qkv_scale_inv_format != NVTE_QKV_Format_NOT_SET)
+                ? qkv_scale_inv_format : q_format;
+        NVTE_QKV_Format kv_scale_format =
+            (qkv_scale_inv_format != NVTE_QKV_Format_NOT_SET)
+                ? qkv_scale_inv_format : kv_format;
+        NVTE_QKV_Format do_scale_format =
+            (do_scale_inv_format != NVTE_QKV_Format_NOT_SET)
+                ? do_scale_inv_format : do_format;
         // Q_t, K_t, dO_t, dO_f16
         std::vector<int64_t> q_t_strides(4), k_t_strides(4), dO_t_strides(4);
         generateMatrixStridesWithFormat(b, h, s_q, d_qk, q_t_strides.data(), q_format);
@@ -2343,19 +2375,19 @@ void fused_attn_fp8_bwd_impl_v1(
         std::vector<int64_t> q_scale_strides(4), q_t_scale_strides(4), k_scale_strides(4),
             k_t_scale_strides(4), v_scale_strides(4), dO_scale_strides(4), dO_t_scale_strides(4);
         generateMatrixStridesWithFormat(b, h, padded.s_q_padded, padded.d_qk_scale_padded,
-                                        q_scale_strides.data(), q_format);
+                                        q_scale_strides.data(), q_scale_format);
         generateMatrixStridesWithFormat(b, h, padded.s_q_scale_padded, padded.d_qk_padded,
-                                        q_t_scale_strides.data(), q_format);
+                                        q_t_scale_strides.data(), q_scale_format);
         generateMatrixStridesWithFormat(b, hg, padded.s_kv_padded, padded.d_qk_scale_padded,
-                                        k_scale_strides.data(), kv_format);
+                                        k_scale_strides.data(), kv_scale_format);
         generateMatrixStridesWithFormat(b, hg, padded.s_kv_scale_padded, padded.d_qk_padded,
-                                        k_t_scale_strides.data(), kv_format);
+                                        k_t_scale_strides.data(), kv_scale_format);
         generateMatrixStridesWithFormat(b, hg, padded.s_kv_padded, padded.d_v_scale_padded,
-                                        v_scale_strides.data(), kv_format);
+                                        v_scale_strides.data(), kv_scale_format);
         generateMatrixStridesWithFormat(b, h, padded.s_q_padded, padded.d_v_scale_padded,
-                                        dO_scale_strides.data(), do_format);
+                                        dO_scale_strides.data(), do_scale_format);
         generateMatrixStridesWithFormat(b, h, padded.s_q_scale_padded, padded.d_v_padded,
-                                        dO_t_scale_strides.data(), do_format);
+                                        dO_t_scale_strides.data(), do_scale_format);
         descale_q =
             mha_graph->tensor(fe::graph::Tensor_attributes()
                                   .set_name("Descale_q")
@@ -2719,7 +2751,8 @@ void fused_attn_fp8_fwd(size_t batch, size_t num_attn_heads, size_t num_gqa_grou
                         const Tensor* input_SoftmaxOffset, Tensor* input_output_S, Tensor* output_O,
                         NVTETensorPack* Aux_CTX_Tensors, const Tensor* cu_seqlens_q,
                         const Tensor* cu_seqlens_kv, const Tensor* rng_state, Tensor* workspace,
-                        cudaStream_t stream, cudnnHandle_t handle) {
+                        cudaStream_t stream, cudnnHandle_t handle,
+                        NVTE_QKV_Format qkv_scale_inv_format) {
   using namespace transformer_engine;
   void *devPtrQ = nullptr, *devPtrK = nullptr, *devPtrV = nullptr;
   void *devPtrDescaleQ = nullptr, *devPtrDescaleK = nullptr, *devPtrDescaleV = nullptr;
@@ -2814,6 +2847,7 @@ void fused_attn_fp8_fwd(size_t batch, size_t num_attn_heads, size_t num_gqa_grou
         devPtrDescaleV, devPtrDescaleS, devPtrScaleS, devPtrScaleO, devPtrAmaxO, devPtrAmaxS,
         devPtrcuSeqlensQ, devPtrcuSeqlensKV, devPtrDropoutSeed, devPtrDropoutOffset,
         get_cudnn_fe_dtype(QKV_type), get_cudnn_fe_dtype(O_type), input_Q->scaling_mode,
+        qkv_scale_inv_format,
         workspace->data.dptr, &workspace_size, stream, handle);
   } else if (qkv_layout == NVTE_QKV_Layout::NVTE_T3HD) {
     fused_attn::fused_attn_fp8_fwd_impl(
@@ -2852,7 +2886,8 @@ void fused_attn_fp8_bwd(
     const Tensor* input_S, const Tensor* input_SoftmaxOffset, Tensor* input_output_dP,
     const Tensor* output_dQ, const Tensor* output_dK, const Tensor* output_dV,
     Tensor* output_dSoftmaxOffset, const Tensor* cu_seqlens_q, const Tensor* cu_seqlens_kv,
-    const Tensor* rng_state, Tensor* workspace, cudaStream_t stream, cudnnHandle_t handle) {
+    const Tensor* rng_state, Tensor* workspace, cudaStream_t stream, cudnnHandle_t handle,
+    NVTE_QKV_Format qkv_scale_inv_format, NVTE_QKV_Format do_scale_inv_format) {
   using namespace transformer_engine;
   void* devPtrQ = input_Q->data.dptr;
   void* devPtrK = input_K->data.dptr;
@@ -2947,7 +2982,9 @@ void fused_attn_fp8_bwd(
         devPtrDescaleQ_t, devPtrDescaleK_t, devPtrDescaledO_t, devPtrcuSeqlensQ, devPtrcuSeqlensKV,
         devPtrDropoutSeed, devPtrDropoutOffset, get_cudnn_fe_dtype(QKV_type),
         get_cudnn_fe_dtype(O_type), get_cudnn_fe_dtype(dO_type), get_cudnn_fe_dtype(dQKV_type),
-        input_dO->scaling_mode, workspace->data.dptr, &workspace_size, stream, handle);
+        input_dO->scaling_mode,
+        qkv_scale_inv_format, do_scale_inv_format,
+        workspace->data.dptr, &workspace_size, stream, handle);
   } else if (dqkv_layout == NVTE_QKV_Layout::NVTE_T3HD) {
     // remove this when cuDNN FE supports FP8 + THD
     NVTE_CHECK(input_ZInv != nullptr && input_ZInv->data.dptr != nullptr,

@@ -401,12 +401,19 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::call_guard<py::gil_scoped_release>());
   m.def("permute_to_grouped_tensor_fwd",
         &transformer_engine::pytorch::permute_to_grouped_tensor_fwd,
-        "Permute Q, K, V to grouped tensors.", py::arg("query"), py::arg("key"), py::arg("value"),
-        py::arg("original_layout"), py::call_guard<py::gil_scoped_release>());
-  m.def(
-      "permute_to_grouped_tensor_bwd", &transformer_engine::pytorch::permute_to_grouped_tensor_bwd,
-      "Permute Q, K, V back to original layout.", py::arg("query_grad"), py::arg("key_grad"),
-      py::arg("value_grad"), py::arg("original_layout"), py::call_guard<py::gil_scoped_release>());
+        "Permute tensors from BSHD/SBHD to BHSD.", py::arg("query"),
+        py::arg("key") = py::none(), py::arg("value") = py::none(),
+        py::arg("original_format") = static_cast<int>(NVTE_BSHD),
+        py::call_guard<py::gil_scoped_release>());
+  m.def("permute_to_grouped_tensor_bwd",
+        &transformer_engine::pytorch::permute_to_grouped_tensor_bwd,
+        "Permute tensors back to original format.", py::arg("query_grad"),
+        py::arg("key_grad") = py::none(), py::arg("value_grad") = py::none(),
+        py::arg("original_format") = static_cast<int>(NVTE_BSHD),
+        py::call_guard<py::gil_scoped_release>());
+  m.def("pad_last_dim", &transformer_engine::pytorch::pad_last_dim,
+        "Pad last dimension of 2D tensors to a common alignment.", py::arg("inputs"),
+        py::arg("alignment"), py::call_guard<py::gil_scoped_release>());
   m.def("fused_attn_fwd", &transformer_engine::pytorch::fused_attn_fwd,
         "Fused Attention FP8/BF16/FP16 FWD with separate Q, K and V");
   m.def("fused_attn_bwd", &transformer_engine::pytorch::fused_attn_bwd,
@@ -427,6 +434,16 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Fused Apply QKV RoPE FWD", py::call_guard<py::gil_scoped_release>());
   m.def("fused_qkv_rope_backward", &transformer_engine::pytorch::fused_qkv_rope_backward,
         "Fused Apply QKV RoPE BWD", py::call_guard<py::gil_scoped_release>());
+
+  // fused MLA rope
+  m.def("fused_mla_rope_q_forward", &transformer_engine::pytorch::fused_mla_rope_q_forward,
+        "Fused MLA RoPE Q FWD", py::call_guard<py::gil_scoped_release>());
+  m.def("fused_mla_rope_q_backward", &transformer_engine::pytorch::fused_mla_rope_q_backward,
+        "Fused MLA RoPE Q BWD", py::call_guard<py::gil_scoped_release>());
+  m.def("fused_mla_rope_kv_forward", &transformer_engine::pytorch::fused_mla_rope_kv_forward,
+        "Fused MLA RoPE KV FWD", py::call_guard<py::gil_scoped_release>());
+  m.def("fused_mla_rope_kv_backward", &transformer_engine::pytorch::fused_mla_rope_kv_backward,
+        "Fused MLA RoPE KV BWD", py::call_guard<py::gil_scoped_release>());
 
   // fused router
   m.def("fused_topk_with_score_function_fwd",

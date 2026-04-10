@@ -298,4 +298,216 @@ at::Tensor fused_qkv_rope_backward(const at::Tensor &q_grad_out, const at::Tenso
   return qkv_grad_input;
 }
 
+at::Tensor fused_mla_rope_q_forward(const at::Tensor &q_input, const at::Tensor &cos,
+                                    const at::Tensor &sin,
+                                    const std::optional<at::Tensor> cu_seqlens,
+                                    const int qk_head_dim, const int emb_dim, const int cp_size,
+                                    const int cp_rank) {
+  TORCH_CHECK(cos.scalar_type() == at::ScalarType::Float, "cos must be float32");
+  TORCH_CHECK(sin.scalar_type() == at::ScalarType::Float, "sin must be float32");
+  TORCH_CHECK(cos.is_contiguous(), "cos must be contiguous");
+  TORCH_CHECK(sin.is_contiguous(), "sin must be contiguous");
+
+  int max_seqlen = 0, batch_size = 0, nheads = 0, headdim = 0, total_seqlen = 0, s = 0, b = 0;
+  at::Tensor q_flat;
+  if (cu_seqlens.has_value()) {
+    TORCH_CHECK(q_input.dim() == 3, "expected 3D tensor for THD format");
+    total_seqlen = q_input.size(0);
+    nheads = q_input.size(1);
+    headdim = q_input.size(2);
+    b = cu_seqlens.value().size(0) - 1;
+    s = 0;
+    q_flat = q_input.contiguous();
+  } else {
+    TORCH_CHECK(q_input.dim() == 4, "expected 4D tensor for SBHD format");
+    max_seqlen = q_input.size(0);
+    batch_size = q_input.size(1);
+    nheads = q_input.size(2);
+    headdim = q_input.size(3);
+    q_flat = q_input.contiguous().view({max_seqlen * batch_size, nheads, headdim});
+    total_seqlen = q_flat.size(0);
+    s = max_seqlen;
+    b = batch_size;
+  }
+  TORCH_CHECK(headdim == qk_head_dim + emb_dim, "headdim must equal qk_head_dim + emb_dim");
+
+  auto q_out = at::empty_like(q_flat);
+  auto q_in_cu = makeTransformerEngineTensor(q_flat);
+  auto cos_cu = makeTransformerEngineTensor(cos);
+  auto sin_cu = makeTransformerEngineTensor(sin);
+  auto q_out_cu = makeTransformerEngineTensor(q_out);
+  auto cu_seqlens_cu = TensorWrapper();
+  if (cu_seqlens.has_value()) {
+    cu_seqlens_cu = makeTransformerEngineTensor(cu_seqlens.value());
+  }
+
+  nvte_fused_mla_rope_q_forward(q_in_cu.data(), cos_cu.data(), sin_cu.data(), q_out_cu.data(),
+                                cu_seqlens_cu.data(), qk_head_dim, emb_dim, nheads, headdim,
+                                total_seqlen, s, b, cp_size, cp_rank,
+                                at::cuda::getCurrentCUDAStream());
+
+  if (!cu_seqlens.has_value()) {
+    q_out = q_out.view({max_seqlen, batch_size, nheads, headdim});
+  }
+  return q_out;
+}
+
+at::Tensor fused_mla_rope_q_backward(const at::Tensor &grad_output, const at::Tensor &cos,
+                                     const at::Tensor &sin,
+                                     const std::optional<at::Tensor> cu_seqlens,
+                                     const int qk_head_dim, const int emb_dim, const int cp_size,
+                                     const int cp_rank) {
+  int max_seqlen = 0, batch_size = 0, nheads = 0, headdim = 0, total_seqlen = 0, s = 0, b = 0;
+  at::Tensor grad_flat;
+  if (cu_seqlens.has_value()) {
+    total_seqlen = grad_output.size(0);
+    nheads = grad_output.size(1);
+    headdim = grad_output.size(2);
+    b = cu_seqlens.value().size(0) - 1;
+    s = 0;
+    grad_flat = grad_output.contiguous();
+  } else {
+    max_seqlen = grad_output.size(0);
+    batch_size = grad_output.size(1);
+    nheads = grad_output.size(2);
+    headdim = grad_output.size(3);
+    grad_flat = grad_output.contiguous().view({max_seqlen * batch_size, nheads, headdim});
+    total_seqlen = grad_flat.size(0);
+    s = max_seqlen;
+    b = batch_size;
+  }
+
+  auto grad_in = at::empty_like(grad_flat);
+  auto grad_out_cu = makeTransformerEngineTensor(grad_flat);
+  auto cos_cu = makeTransformerEngineTensor(cos);
+  auto sin_cu = makeTransformerEngineTensor(sin);
+  auto grad_in_cu = makeTransformerEngineTensor(grad_in);
+  auto cu_seqlens_cu = TensorWrapper();
+  if (cu_seqlens.has_value()) {
+    cu_seqlens_cu = makeTransformerEngineTensor(cu_seqlens.value());
+  }
+
+  nvte_fused_mla_rope_q_backward(grad_out_cu.data(), cos_cu.data(), sin_cu.data(),
+                                 grad_in_cu.data(), cu_seqlens_cu.data(), qk_head_dim, emb_dim,
+                                 nheads, headdim, total_seqlen, s, b, cp_size, cp_rank,
+                                 at::cuda::getCurrentCUDAStream());
+
+  if (!cu_seqlens.has_value()) {
+    grad_in = grad_in.view({max_seqlen, batch_size, nheads, headdim});
+  }
+  return grad_in;
+}
+
+std::tuple<at::Tensor, at::Tensor> fused_mla_rope_kv_forward(
+    const at::Tensor &kv_input, const at::Tensor &k_pos_emb, const at::Tensor &cos,
+    const at::Tensor &sin, const std::optional<at::Tensor> cu_seqlens, const int emb_dim,
+    const int k_dim, const int v_dim, const int cp_size, const int cp_rank) {
+  TORCH_CHECK(cos.scalar_type() == at::ScalarType::Float, "cos must be float32");
+  TORCH_CHECK(sin.scalar_type() == at::ScalarType::Float, "sin must be float32");
+  TORCH_CHECK(cos.is_contiguous(), "cos must be contiguous");
+  TORCH_CHECK(sin.is_contiguous(), "sin must be contiguous");
+  TORCH_CHECK(kv_input.size(-1) == k_dim + v_dim, "last dim of kv must be k_dim + v_dim");
+
+  int max_seqlen = 0, batch_size = 0, nheads = 0, total_seqlen = 0, s = 0, b_val = 0;
+  at::Tensor kv_flat, emb_flat;
+  if (cu_seqlens.has_value()) {
+    TORCH_CHECK(kv_input.dim() == 3, "expected 3D tensor for THD format");
+    total_seqlen = kv_input.size(0);
+    nheads = kv_input.size(1);
+    b_val = cu_seqlens.value().size(0) - 1;
+    s = 0;
+    kv_flat = kv_input.contiguous();
+    emb_flat = k_pos_emb.contiguous().view({total_seqlen, emb_dim});
+  } else {
+    TORCH_CHECK(kv_input.dim() == 4, "expected 4D tensor for SBHD format");
+    max_seqlen = kv_input.size(0);
+    batch_size = kv_input.size(1);
+    nheads = kv_input.size(2);
+    kv_flat = kv_input.contiguous().view({max_seqlen * batch_size, nheads, k_dim + v_dim});
+    emb_flat = k_pos_emb.contiguous().view({max_seqlen * batch_size, emb_dim});
+    total_seqlen = kv_flat.size(0);
+    s = max_seqlen;
+    b_val = batch_size;
+  }
+
+  auto opts = at::TensorOptions().dtype(kv_input.scalar_type()).device(kv_input.device());
+  auto o_key = at::empty({total_seqlen, nheads, k_dim + emb_dim}, opts);
+  auto o_value = at::empty({total_seqlen, nheads, v_dim}, opts);
+
+  auto kv_cu = makeTransformerEngineTensor(kv_flat);
+  auto emb_cu = makeTransformerEngineTensor(emb_flat);
+  auto cos_cu = makeTransformerEngineTensor(cos);
+  auto sin_cu = makeTransformerEngineTensor(sin);
+  auto okey_cu = makeTransformerEngineTensor(o_key);
+  auto oval_cu = makeTransformerEngineTensor(o_value);
+  auto cu_seqlens_cu = TensorWrapper();
+  if (cu_seqlens.has_value()) {
+    cu_seqlens_cu = makeTransformerEngineTensor(cu_seqlens.value());
+  }
+
+  nvte_fused_mla_rope_kv_forward(kv_cu.data(), emb_cu.data(), cos_cu.data(), sin_cu.data(),
+                                 okey_cu.data(), oval_cu.data(), cu_seqlens_cu.data(), emb_dim,
+                                 k_dim, v_dim, nheads, total_seqlen, s, b_val, cp_size, cp_rank,
+                                 at::cuda::getCurrentCUDAStream());
+
+  if (!cu_seqlens.has_value()) {
+    o_key = o_key.view({max_seqlen, batch_size, nheads, k_dim + emb_dim});
+    o_value = o_value.view({max_seqlen, batch_size, nheads, v_dim});
+  }
+  return std::make_tuple(o_key, o_value);
+}
+
+std::tuple<at::Tensor, at::Tensor> fused_mla_rope_kv_backward(
+    const at::Tensor &dk, const at::Tensor &dv, const at::Tensor &cos, const at::Tensor &sin,
+    const std::optional<at::Tensor> cu_seqlens, const int emb_dim, const int k_dim,
+    const int v_dim, const int cp_size, const int cp_rank) {
+  int max_seqlen = 0, batch_size = 0, nheads = 0, total_seqlen = 0, s = 0, b_val = 0;
+  at::Tensor dk_flat, dv_flat;
+  if (cu_seqlens.has_value()) {
+    total_seqlen = dk.size(0);
+    nheads = dk.size(1);
+    b_val = cu_seqlens.value().size(0) - 1;
+    s = 0;
+    dk_flat = dk.contiguous();
+    dv_flat = dv.contiguous();
+  } else {
+    max_seqlen = dk.size(0);
+    batch_size = dk.size(1);
+    nheads = dk.size(2);
+    dk_flat = dk.contiguous().view({max_seqlen * batch_size, nheads, k_dim + emb_dim});
+    dv_flat = dv.contiguous().view({max_seqlen * batch_size, nheads, v_dim});
+    total_seqlen = dk_flat.size(0);
+    s = max_seqlen;
+    b_val = batch_size;
+  }
+
+  auto opts = at::TensorOptions().dtype(dk.scalar_type()).device(dk.device());
+  auto d_kv = at::empty({total_seqlen, nheads, k_dim + v_dim}, opts);
+  auto d_emb = at::empty({total_seqlen, emb_dim}, opts);
+
+  auto dk_cu = makeTransformerEngineTensor(dk_flat);
+  auto dv_cu = makeTransformerEngineTensor(dv_flat);
+  auto cos_cu = makeTransformerEngineTensor(cos);
+  auto sin_cu = makeTransformerEngineTensor(sin);
+  auto dkv_cu = makeTransformerEngineTensor(d_kv);
+  auto demb_cu = makeTransformerEngineTensor(d_emb);
+  auto cu_seqlens_cu = TensorWrapper();
+  if (cu_seqlens.has_value()) {
+    cu_seqlens_cu = makeTransformerEngineTensor(cu_seqlens.value());
+  }
+
+  nvte_fused_mla_rope_kv_backward(dk_cu.data(), dv_cu.data(), cos_cu.data(), sin_cu.data(),
+                                  dkv_cu.data(), demb_cu.data(), cu_seqlens_cu.data(), emb_dim,
+                                  k_dim, v_dim, nheads, total_seqlen, s, b_val, cp_size, cp_rank,
+                                  at::cuda::getCurrentCUDAStream());
+
+  if (!cu_seqlens.has_value()) {
+    d_kv = d_kv.view({max_seqlen, batch_size, nheads, k_dim + v_dim});
+    d_emb = d_emb.view({max_seqlen, batch_size, 1, emb_dim});
+  } else {
+    d_emb = d_emb.view({total_seqlen, 1, emb_dim});
+  }
+  return std::make_tuple(d_kv, d_emb);
+}
+
 }  // namespace transformer_engine::pytorch

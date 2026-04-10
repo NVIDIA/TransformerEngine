@@ -146,6 +146,7 @@ def fused_attn_fwd(
     softmax_offset: torch.Tensor = None,
     return_max_logit: bool = False,
     cuda_graph: bool = False,
+    qkv_scale_inv_format: str = None,
 ) -> Tuple[Union[torch.Tensor, None], ...]:
     """Fused Attention FWD for separate QKV input.
 
@@ -312,6 +313,11 @@ def fused_attn_fwd(
 
     # execute kernel
 
+    _qkv_scale_inv_fmt = (
+        QKVFormat[qkv_scale_inv_format]
+        if qkv_scale_inv_format is not None
+        else NVTE_QKV_Format.NVTE_QKV_Format_NOT_SET
+    )
     output_tensors = tex.fused_attn_fwd(
         max_seqlen_q,
         max_seqlen_kv,
@@ -344,6 +350,7 @@ def fused_attn_fwd(
         rng_elts_per_thread,
         return_max_logit,
         cuda_graph,
+        _qkv_scale_inv_fmt,
     )
 
     if return_max_logit:
@@ -431,6 +438,8 @@ def fused_attn_bwd(
     bottom_right_diagonal: bool = None,
     deterministic: bool = False,
     cuda_graph: bool = False,
+    qkv_scale_inv_format: str = None,
+    do_scale_inv_format: str = None,
 ) -> Tuple[Union[torch.Tensor, None], ...]:
     """Fused Attention BWD for packed KV input.
 
@@ -557,6 +566,16 @@ def fused_attn_bwd(
                 f" for backend={fused_attention_backend}."
             )
 
+    _qkv_scale_inv_fmt = (
+        QKVFormat[qkv_scale_inv_format]
+        if qkv_scale_inv_format is not None
+        else NVTE_QKV_Format.NVTE_QKV_Format_NOT_SET
+    )
+    _do_scale_inv_fmt = (
+        QKVFormat[do_scale_inv_format]
+        if do_scale_inv_format is not None
+        else NVTE_QKV_Format.NVTE_QKV_Format_NOT_SET
+    )
     output_tensors = tex.fused_attn_bwd(
         max_seqlen_q,
         max_seqlen_kv,
@@ -588,6 +607,8 @@ def fused_attn_bwd(
         dp_quantizer,
         dqkv_quantizer,
         cuda_graph,
+        _qkv_scale_inv_fmt,
+        _do_scale_inv_fmt,
     )
 
     return output_tensors

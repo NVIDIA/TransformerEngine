@@ -94,7 +94,8 @@ std::vector<py::object> fused_attn_fwd(
     const std::optional<at::Tensor> page_table_k, const std::optional<at::Tensor> page_table_v,
     py::handle s_quantizer, py::handle o_quantizer, const std::optional<at::Tensor> Bias,
     const std::optional<at::Tensor> SoftmaxOffset, const std::optional<at::Generator> rng_gen,
-    size_t rng_elts_per_thread, bool return_max_logit, bool cuda_graph);
+    size_t rng_elts_per_thread, bool return_max_logit, bool cuda_graph,
+    NVTE_QKV_Format qkv_scale_inv_format = NVTE_QKV_Format_NOT_SET);
 
 std::vector<py::object> fused_attn_bwd(
     size_t max_seqlen_q, size_t max_seqlen_kv, float attn_scale, float p_dropout, bool set_zero,
@@ -107,16 +108,21 @@ std::vector<py::object> fused_attn_bwd(
     const std::vector<at::Tensor> Aux_CTX_Tensors,
     const std::optional<at::Tensor> cu_seqlens_q_padded,
     const std::optional<at::Tensor> cu_seqlens_kv_padded, py::handle s_quantizer,
-    py::handle dp_quantizer, py::handle dqkv_quantizer, bool cuda_graph);
+    py::handle dp_quantizer, py::handle dqkv_quantizer, bool cuda_graph,
+    NVTE_QKV_Format qkv_scale_inv_format = NVTE_QKV_Format_NOT_SET,
+    NVTE_QKV_Format do_scale_inv_format = NVTE_QKV_Format_NOT_SET);
 
 at::Tensor fa_prepare_fwd(at::Tensor qkvi);
 at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v);
 
-std::tuple<at::Tensor, at::Tensor, at::Tensor> permute_to_grouped_tensor_fwd(
-    at::Tensor query, at::Tensor key, at::Tensor value, NVTE_QKV_Layout input_layout);
-std::tuple<at::Tensor, at::Tensor, at::Tensor> permute_to_grouped_tensor_bwd(
-    at::Tensor query_grad, at::Tensor key_grad, at::Tensor value_grad,
-    NVTE_QKV_Layout input_layout);
+std::vector<at::Tensor> permute_to_grouped_tensor_fwd(
+    at::Tensor query, std::optional<at::Tensor> key, std::optional<at::Tensor> value,
+    NVTE_QKV_Format original_format);
+std::vector<at::Tensor> permute_to_grouped_tensor_bwd(
+    at::Tensor query_grad, std::optional<at::Tensor> key_grad,
+    std::optional<at::Tensor> value_grad, NVTE_QKV_Format original_format);
+
+std::vector<at::Tensor> pad_last_dim(std::vector<at::Tensor> inputs, int64_t alignment);
 
 at::Tensor convert_thd_to_bshd(at::Tensor tensor, at::Tensor cu_seqlens, int b, int max_seq_len);
 at::Tensor convert_bshd_to_thd(at::Tensor tensor, at::Tensor cu_seqlens, int t);
@@ -455,6 +461,28 @@ at::Tensor fused_qkv_rope_backward(const at::Tensor &q_grad_out, const at::Tenso
                                    const std::vector<int> &qkv_split_arg_list,
                                    const NVTE_QKV_Format qkv_format, const bool interleaved,
                                    const int cp_size, const int cp_rank);
+
+at::Tensor fused_mla_rope_q_forward(const at::Tensor &q_input, const at::Tensor &cos,
+                                    const at::Tensor &sin,
+                                    const std::optional<at::Tensor> cu_seqlens,
+                                    const int qk_head_dim, const int emb_dim, const int cp_size,
+                                    const int cp_rank);
+
+at::Tensor fused_mla_rope_q_backward(const at::Tensor &grad_output, const at::Tensor &cos,
+                                     const at::Tensor &sin,
+                                     const std::optional<at::Tensor> cu_seqlens,
+                                     const int qk_head_dim, const int emb_dim, const int cp_size,
+                                     const int cp_rank);
+
+std::tuple<at::Tensor, at::Tensor> fused_mla_rope_kv_forward(
+    const at::Tensor &kv_input, const at::Tensor &k_pos_emb, const at::Tensor &cos,
+    const at::Tensor &sin, const std::optional<at::Tensor> cu_seqlens, const int emb_dim,
+    const int k_dim, const int v_dim, const int cp_size, const int cp_rank);
+
+std::tuple<at::Tensor, at::Tensor> fused_mla_rope_kv_backward(
+    const at::Tensor &dk, const at::Tensor &dv, const at::Tensor &cos, const at::Tensor &sin,
+    const std::optional<at::Tensor> cu_seqlens, const int emb_dim, const int k_dim,
+    const int v_dim, const int cp_size, const int cp_rank);
 
 /***************************************************************************************************
  * Miscellaneous

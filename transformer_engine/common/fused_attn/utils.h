@@ -297,6 +297,8 @@ struct FADescriptor_v1 {
   NVTE_QKV_Format o_format;
   NVTE_QKV_Format do_format;
   NVTE_QKV_Layout dqkv_layout;
+  NVTE_QKV_Format qkv_scale_inv_format;
+  NVTE_QKV_Format do_scale_inv_format;
   NVTE_Bias_Type bias_type;
   NVTE_Mask_Type mask_type;
   NVTE_Softmax_Type softmax_type;
@@ -314,7 +316,8 @@ struct FADescriptor_v1 {
     return std::tie(b, h, hg, s_q, s_kv, d_qk, d_v, num_pages_k, num_pages_v, page_size_k,
                     page_size_v, max_pages_per_seq_k, max_pages_per_seq_v, bias_b, bias_h, bias_sq,
                     bias_skv, attnScale, isTraining, dropoutProbability, qkv_layout, o_format,
-                    do_format, dqkv_layout, mask_type, softmax_type, window_size_left,
+                    do_format, dqkv_layout, qkv_scale_inv_format, do_scale_inv_format,
+                    mask_type, softmax_type, window_size_left,
                     window_size_right, bottom_right_diagonal, deterministic, bias_type,
                     qkv_tensor_type, o_tensor_type, do_tensor_type, dqkv_tensor_type,
                     return_max_logit) <
@@ -322,7 +325,9 @@ struct FADescriptor_v1 {
                     rhs.num_pages_v, rhs.page_size_k, rhs.page_size_v, rhs.max_pages_per_seq_k,
                     rhs.max_pages_per_seq_v, rhs.bias_b, rhs.bias_h, rhs.bias_sq, rhs.bias_skv,
                     rhs.attnScale, rhs.isTraining, rhs.dropoutProbability, rhs.qkv_layout,
-                    rhs.o_format, rhs.do_format, rhs.dqkv_layout, rhs.mask_type, rhs.softmax_type,
+                    rhs.o_format, rhs.do_format, rhs.dqkv_layout,
+                    rhs.qkv_scale_inv_format, rhs.do_scale_inv_format,
+                    rhs.mask_type, rhs.softmax_type,
                     rhs.window_size_left, rhs.window_size_right, rhs.bottom_right_diagonal,
                     rhs.deterministic, rhs.bias_type, rhs.qkv_tensor_type, rhs.o_tensor_type,
                     rhs.do_tensor_type, rhs.dqkv_tensor_type, rhs.return_max_logit);

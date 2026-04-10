@@ -318,7 +318,8 @@ void nvte_fused_attn_fwd(
     bool cuda_graph, float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout,
     NVTE_QKV_Format o_format, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
     NVTE_Softmax_Type softmax_type, int64_t window_size_left, int64_t window_size_right,
-    bool bottom_right_diagonal, NVTETensor workspace, cudaStream_t stream);
+    bool bottom_right_diagonal, NVTETensor workspace, cudaStream_t stream,
+    NVTE_QKV_Format qkv_scale_inv_format = NVTE_QKV_Format_NOT_SET);
 
 /*! \brief Compute the backward of the dot product attention with separate Q, K and V.
  *
@@ -397,7 +398,9 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                          NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
                          NVTE_Softmax_Type softmax_type, int64_t window_size_left,
                          int64_t window_size_right, bool bottom_right_diagonal, bool deterministic,
-                         bool cuda_graph, NVTETensor workspace, cudaStream_t stream);
+                         bool cuda_graph, NVTETensor workspace, cudaStream_t stream,
+                         NVTE_QKV_Format qkv_scale_inv_format = NVTE_QKV_Format_NOT_SET,
+                         NVTE_QKV_Format do_scale_inv_format = NVTE_QKV_Format_NOT_SET);
 
 /*!  \brief Update the RNG state with the seed and calculated offset.
  *
@@ -611,35 +614,58 @@ void nvte_prepare_flash_attn_fwd(NVTETensor qkvi, NVTETensor qkv, cudaStream_t s
 void nvte_prepare_flash_attn_bwd(NVTETensor q, NVTETensor k, NVTETensor v, NVTETensor qkv,
                                  cudaStream_t stream);
 
-/*!  \brief Permute Q, K, V to grouped tensors.
+/*!  \brief Permute Q, K, V to grouped tensors (BSHD/SBHD → BHSD).
  *
- *  \param[in]     q                Query tensor
- *  \param[in]     k                Key tensor
- *  \param[in]     v                Value tensor
- *  \param[out]    q_out            Output query tensor
- *  \param[out]    k_out            Output key tensor
- *  \param[out]    v_out            Output value tensor
- *  \param[in]     original_layout  Original QKV layout.
+ *  When num_tensors == 1, only q/q_out are used (k/v/k_out/v_out are ignored).
+ *
+ *  \param[in]     q                Query tensor (or the single tensor).
+ *  \param[in]     k                Key tensor (ignored when num_tensors == 1).
+ *  \param[in]     v                Value tensor (ignored when num_tensors == 1).
+ *  \param[out]    q_out            Output query tensor.
+ *  \param[out]    k_out            Output key tensor (ignored when num_tensors == 1).
+ *  \param[out]    v_out            Output value tensor (ignored when num_tensors == 1).
+ *  \param[in]     original_format  Original QKV format (NVTE_BSHD or NVTE_SBHD).
+ *  \param[in]     num_tensors      Number of tensors to permute (1 or 3).
  *  \param[in]     stream           CUDA stream.
  */
 void nvte_permute_to_grouped_tensor_fwd(NVTETensor q, NVTETensor k, NVTETensor v, NVTETensor q_out,
                                         NVTETensor k_out, NVTETensor v_out,
-                                        NVTE_QKV_Layout original_layout, cudaStream_t stream);
+                                        NVTE_QKV_Format original_format, size_t num_tensors,
+                                        cudaStream_t stream);
 
-/*!  \brief Permute Q, K, V back to original layout.
+/*!  \brief Permute Q, K, V back to original format (BHSD → BSHD/SBHD).
  *
- *  \param[in]     grad_q           Gradient of query tensor
- *  \param[in]     grad_k           Gradient of key tensor
- *  \param[in]     grad_v           Gradient of value tensor
- *  \param[out]    q                Original query tensor
- *  \param[out]    k                Original key tensor
- *  \param[out]    v                Original value tensor
- *  \param[in]     original_layout  Original QKV layout.
+ *  When num_tensors == 1, only grad_q/q are used (others are ignored).
+ *
+ *  \param[in]     grad_q           Gradient of query tensor.
+ *  \param[in]     grad_k           Gradient of key tensor (ignored when num_tensors == 1).
+ *  \param[in]     grad_v           Gradient of value tensor (ignored when num_tensors == 1).
+ *  \param[out]    q                Original query tensor.
+ *  \param[out]    k                Original key tensor (ignored when num_tensors == 1).
+ *  \param[out]    v                Original value tensor (ignored when num_tensors == 1).
+ *  \param[in]     original_format  Original QKV format (NVTE_BSHD or NVTE_SBHD).
+ *  \param[in]     num_tensors      Number of tensors to permute (1 or 3).
  *  \param[in]     stream           CUDA stream.
  */
 void nvte_permute_to_grouped_tensor_bwd(NVTETensor grad_q, NVTETensor grad_k, NVTETensor grad_v,
                                         NVTETensor q, NVTETensor k, NVTETensor v,
-                                        NVTE_QKV_Layout original_layout, cudaStream_t stream);
+                                        NVTE_QKV_Format original_format, size_t num_tensors,
+                                        cudaStream_t stream);
+
+/*!  \brief Pad the last dimension of multiple 2D tensors with zeros in one kernel launch.
+ *
+ *  Each tensor copies a row-major (rows, in_cols) input to a (rows, out_cols) output,
+ *  zero-filling the region [in_cols, out_cols) in every row.
+ *  Outputs must be pre-allocated with out_cols >= in_cols and matching dtype.
+ *  Up to 16 tensors may be processed in a single call.
+ *
+ *  \param[in]     inputs       Array of num_tensors 2D input tensors.
+ *  \param[out]    outputs      Array of num_tensors 2D output tensors, pre-allocated.
+ *  \param[in]     num_tensors  Number of tensor pairs to process (1..16).
+ *  \param[in]     stream       CUDA stream.
+ */
+void nvte_multi_pad_last_dim(NVTETensor *inputs, NVTETensor *outputs, size_t num_tensors,
+                             cudaStream_t stream);
 
 #ifdef __cplusplus
 }  // extern "C"

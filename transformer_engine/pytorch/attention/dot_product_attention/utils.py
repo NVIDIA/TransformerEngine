@@ -22,6 +22,7 @@ import torch.nn.functional as F
 import transformer_engine_torch as tex
 import transformer_engine as te
 from transformer_engine.pytorch.cpp_extensions.fused_attn import (
+    QKVFormat,
     QKVLayout,
     AttnBiasType,
     AttnMaskType,
@@ -2314,14 +2315,24 @@ def print_quantizers(
                 print(f"{label} >> {names[i]:14s}: {type_str}")
 
 
+_FORMAT_STR_TO_ENUM = {
+    "bshd": QKVFormat["bshd"],
+    "sbhd": QKVFormat["sbhd"],
+}
+
+
 def permute_to_grouped_tensor(src_format, tensor):
     """Permute tensor from src_format = {bshd, sbhd, thd} to des_format = {bhsd, htd} for MXFP8 quantization."""
     if src_format in ["bhsd", "htd"]:
         return tensor, src_format
     des_format = "bhsd" if src_format != "thd" else "htd"
-    # make tensor contiguous bshd/sbhd/thd
     tensor = tensor.contiguous() if not tensor.is_contiguous() else tensor
-    # permute bshd/sbhd to bhsd, and thd to htd
+
+    fmt = _FORMAT_STR_TO_ENUM.get(src_format)
+    if fmt is not None and tensor.dim() == 4:
+        result = tex.permute_to_grouped_tensor_fwd(tensor, original_format=fmt)
+        return result[0], des_format
+
     dim_s_or_t = src_format.find("s") if "s" in src_format else src_format.find("t")
     dim_others = [i for i in range(len(tensor.shape)) if i != dim_s_or_t]
     new_dims = [*dim_others[:-1], dim_s_or_t, dim_others[-1]]
@@ -2330,35 +2341,69 @@ def permute_to_grouped_tensor(src_format, tensor):
 
 
 class PermuteToGroupedTensor(torch.autograd.Function):
-    """Permute Q, K, V from {bshd_bshd_bshd, sbhd_sbhd_sbhd} to bhsd_bhsd_bhsd."""
+    """Permute tensors from {bshd, sbhd} to bhsd format.
+
+    Accepts 1 tensor (key=None, value=None) or 3 tensors (Q, K, V).
+    """
 
     @staticmethod
     def forward(
         ctx: torch.autograd.function.FunctionCtx,
         query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        original_layout: str = "bshd_bshd_bshd",
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        key: torch.Tensor = None,
+        value: torch.Tensor = None,
+        original_format: str = "bshd",
+    ):
         # pylint: disable=missing-function-docstring
-        ctx.original_layout = QKVLayout[original_layout]
-        return tex.permute_to_grouped_tensor_fwd(query, key, value, ctx.original_layout)
+        fmt = _FORMAT_STR_TO_ENUM[original_format]
+        ctx.original_format = fmt
+        ctx.num_tensors = 1 if key is None else 3
+        results = tex.permute_to_grouped_tensor_fwd(query, key, value, fmt)
+        if ctx.num_tensors == 1:
+            return results[0]
+        return tuple(results)
 
     @staticmethod
-    def backward(
-        ctx: torch.autograd.function.FunctionCtx,
-        query_grad: torch.Tensor,
-        key_grad: torch.Tensor,
-        value_grad: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def backward(ctx, *grad_outputs):
         # pylint: disable=missing-function-docstring
+        if ctx.num_tensors == 1:
+            result = tex.permute_to_grouped_tensor_bwd(
+                grad_outputs[0], original_format=ctx.original_format,
+            )
+            return result[0], None, None, None
         q, k, v = tex.permute_to_grouped_tensor_bwd(
-            query_grad,
-            key_grad,
-            value_grad,
-            ctx.original_layout,
+            grad_outputs[0], grad_outputs[1], grad_outputs[2], ctx.original_format,
         )
         return q, k, v, None
+
+
+def _mxfp8_pad_and_swizzle_scales(*fp8_tensors):
+    """Pad and swizzle scales for MXFP8 tensors quantized with optimize_for_gemm=False.
+
+    When quantizing with optimize_for_gemm=False, the scales are in their natural
+    (non-swizzled) layout. This function pads the scale dimensions to the alignment
+    required by cuDNN and then applies the GEMM swizzle pattern.
+    Rowwise scales are padded to a multiple of 4 in the last dim.
+    Columnwise scales are padded to a multiple of 128 in the last dim.
+    """
+    rs_list = [t._rowwise_scale_inv for t in fp8_tensors if t._rowwise_scale_inv is not None]
+    cs_list = [t._columnwise_scale_inv for t in fp8_tensors if t._columnwise_scale_inv is not None]
+    if rs_list:
+        rs_padded = tex.pad_last_dim(rs_list, 4)
+        idx = 0
+        for t in fp8_tensors:
+            if t._rowwise_scale_inv is not None:
+                t._rowwise_scale_inv = rs_padded[idx]
+                idx += 1
+    if cs_list:
+        cs_padded = tex.pad_last_dim(cs_list, 128)
+        idx = 0
+        for t in fp8_tensors:
+            if t._columnwise_scale_inv is not None:
+                t._columnwise_scale_inv = cs_padded[idx]
+                idx += 1
+    for t in fp8_tensors:
+        tex.swizzle_scales_for_gemm_(t)
 
 
 def combine_and_quantize(
@@ -2367,59 +2412,25 @@ def combine_and_quantize(
     """Combine q,k,v based on qkv_layout and quantize them together"""
     if isinstance(qkv_quantizer, MXFP8Quantizer):
         qkv_format, q_format, kv_format = get_qkv_format(qkv_layout)
-        # permute q, k, v to bhsd/htd format
-        qkv_contiguous_block = False
-        if qkv_layout in ["bshd_bshd_bshd", "sbhd_sbhd_sbhd"]:
-            q, k, v = PermuteToGroupedTensor.apply(q, k, v, qkv_layout)
-            qkv_contiguous_block = True
-        else:
-            if q_format not in ["bhsd", "htd"]:
-                q, _ = permute_to_grouped_tensor(q_format, q)
-            if kv_format not in ["bhsd", "htd"]:
-                k, _ = permute_to_grouped_tensor(kv_format, k)
-                v, _ = permute_to_grouped_tensor(kv_format, v)
 
-        qkv_layout = "bhsd_bhsd_bhsd" if qkv_format != "thd" else "htd_htd_htd"
-        # check shapes
         original_shapes = [x.shape for x in [q, k, v]]
-        s_q, d_qk = q.shape[-2:]
-        s_kv, d_v = v.shape[-2:]
+        _seq_dim = {"sbhd": 0, "bshd": 1, "bhsd": 2, "htd": 1}
+        d_qk = q.shape[-1]
+        d_v = v.shape[-1]
+        s_q = q.shape[_seq_dim.get(q_format, 2)]
+        s_kv = v.shape[_seq_dim.get(kv_format, 2)]
         assert s_q % 128 == 0 and s_kv % 128 == 0 and d_qk % 32 == 0 and d_v % 32 == 0, (
             "MXFP8 quantization requires s_q % 128 == 0, s_kv % 128 == 0, d_qk % 32 == 0, d_v % 32"
             f" == 0. Found {s_q=}, {s_kv=}, {d_qk=}, {d_v=}."
         )
         q, k, v = [x.view(-1, x.shape[-1]) for x in [q, k, v]]
-        # quantize q, k, v
-        # if qkv_contiguous_block:
-        #     if d_qk == d_v:
-        #         first_dims = torch.tensor(
-        #             [q.shape[0], k.shape[0], v.shape[0]], dtype=torch.int64, device=q.device
-        #         )
-        #         qkv_2d = torch.cat([q, k, v], dim=0)
-        #         grouped_tensor = tex.group_quantize(qkv_2d, qkv_quantizer, 3, first_dims)
-        #         quantized_tensors = grouped_tensor.split_into_quantized_tensors()
-        #         q_fp8, k_fp8, v_fp8 = quantized_tensors[0], quantized_tensors[1], quantized_tensors[2]
-        #     else:
-        #         first_dims = torch.tensor([q.shape[0], k.shape[0]], dtype=torch.int64, device=q.device)
-        #         qk_2d = torch.cat([q, k], dim=0)
-        #         grouped_tensor = tex.group_quantize(qk_2d, qkv_quantizer, 2, first_dims)
-        #         q_fp8, k_fp8 = grouped_tensor.split_into_quantized_tensors()
-        #         v_fp8 = qkv_quantizer(v)
-        # else:
-        #     input_tensors = [q, k, v]
-        #     num_tensors = len(input_tensors)
-        #     shapes = [x.shape for x in input_tensors]
-        #     grouped_tensor = GroupedTensor.make_grouped_tensor_with_shapes(
-        #         num_tensors=num_tensors,
-        #         shapes=shapes,
-        #         quantizer=qkv_quantizer,
-        #         device="cuda",
-        #         dtype=q.dtype,
-        #     )
-        #     quantized_tensors = grouped_tensor.quantize(input_tensors)
-        #     q_fp8, k_fp8, v_fp8 = quantized_tensors[0], quantized_tensors[1], quantized_tensors[2]
-        # else:
-        #     q_fp8, k_fp8, v_fp8 = [qkv_quantizer(x) for x in [q, k, v]]
+
+        # Quantize without internal swizzle. The caller is responsible for
+        # permuting scale_inv to the required format (e.g. BHSD for cuDNN)
+        # and applying pad + swizzle before passing to fused attention.
+        orig_optimize = qkv_quantizer.optimize_for_gemm
+        qkv_quantizer.optimize_for_gemm = False
+
         if used_in_forward and used_in_backward:
             q_fp8, k_fp8, v_fp8 = [qkv_quantizer(x) for x in [q, k, v]]
         if used_in_forward and not used_in_backward:
@@ -2436,6 +2447,8 @@ def combine_and_quantize(
             qkv_quantizer.rowwise_usage = True
             qkv_quantizer.columnwise_usage = False
             v_fp8 = qkv_quantizer(v)
+
+        qkv_quantizer.optimize_for_gemm = orig_optimize
 
         # view rowwise/columnwise data back to original shapes, not rowwise_scale_inv/columnwise_scale_inv
         q_fp8, k_fp8, v_fp8 = [x.view(s) for x, s in zip([q_fp8, k_fp8, v_fp8], original_shapes)]

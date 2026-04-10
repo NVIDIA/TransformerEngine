@@ -430,6 +430,79 @@ __global__ void __launch_bounds__(TB_DIM* TB_DIM)
       input, output, M, K, original_M, original_K, blockIdx.x, blockIdx.y, gridDim.x, gridDim.y);
 }
 
+// Narrow-K specialization for row scaling swizzle.
+// When K is small (num_tiles_k < TB_DIM), the standard kernel wastes threadIdx.x
+// because there aren't enough K-tiles to distribute across threads.
+// This kernel repurposes the thread dimensions: threadIdx.x iterates rows within
+// an M-tile, threadIdx.y indexes M-tiles within the block, processing TB_DIM
+// M-tiles per block with full thread utilization.
+template <int SF_TILE_DIM_M, int SF_TILE_DIM_K>
+__device__ void swizzle_row_scaling_narrow_k_impl(
+    const void* input, void* output, const int M, const int K,
+    const int original_M, const int original_K,
+    const int bid, const int grid_dim) {
+  constexpr int SF_TILE_SIZE_I32 = SF_TILE_DIM_M * SF_TILE_DIM_K / 4;
+  const int K_i32 = K / 4;
+  const int num_tiles_m = M / SF_TILE_DIM_M;
+
+  const int m_tile = bid * blockDim.y + threadIdx.y;
+  const bool active = (m_tile < num_tiles_m);
+
+  extern __shared__ int4 slm_v4i[];
+  const int slm_tile_v4i = K_i32 * (SF_TILE_SIZE_I32 / 4);
+
+  if (active) {
+    const bool padding_m = (m_tile == num_tiles_m - 1) && (original_M < M);
+    const bool padding_k = (original_K < K);
+
+    int4* my_slm = slm_v4i + threadIdx.y * slm_tile_v4i;
+
+    for (int k = 0; k < K_i32; k++) {
+      const int input_base = m_tile * SF_TILE_DIM_M * K_i32 + k;
+      const int* input_i32 = reinterpret_cast<const int*>(input) + input_base;
+
+      int regs[N_SF_PER_TD_PER_TILE];
+#pragma unroll
+      for (int i = 0; i < N_SF_PER_TD_PER_TILE; i++) {
+        const int row = i * TB_DIM + threadIdx.x;
+        regs[i] = __ldg(input_i32 + row * K_i32);
+        if (padding_m || padding_k) {
+          for (int j = 0; j < 4; j++) {
+            const int byte_row = m_tile * SF_TILE_DIM_M + row;
+            const int byte_col = k * 4 + j;
+            if (byte_row >= original_M || byte_col >= original_K) {
+              reinterpret_cast<uint8_t*>(&regs[i])[j] = 0;
+            }
+          }
+        }
+      }
+
+      my_slm[k * (SF_TILE_SIZE_I32 / 4) + threadIdx.x] =
+          *reinterpret_cast<int4*>(regs);
+    }
+  }
+
+  __syncthreads();
+
+  if (active) {
+    int4* my_slm = slm_v4i + threadIdx.y * slm_tile_v4i;
+    int4* out_v4i = reinterpret_cast<int4*>(
+        reinterpret_cast<int*>(output) + m_tile * SF_TILE_DIM_M * K_i32);
+
+    for (int i = threadIdx.x; i < slm_tile_v4i; i += blockDim.x) {
+      out_v4i[i] = my_slm[i];
+    }
+  }
+}
+
+template <int SF_TILE_DIM_M, int SF_TILE_DIM_K>
+__global__ void __launch_bounds__(TB_DIM* TB_DIM)
+    swizzle_row_scaling_narrow_k_kernel(const void* input, void* output, const int M, const int K,
+                                        const int original_M, const int original_K) {
+  swizzle_row_scaling_narrow_k_impl<SF_TILE_DIM_M, SF_TILE_DIM_K>(
+      input, output, M, K, original_M, original_K, blockIdx.x, gridDim.x);
+}
+
 constexpr int kMaxTensorsPerKernel = 64;  // Args must be <4 KB
 struct MultiSwizzleArgs {
   // (input) Data buffers for input scaling factors
@@ -719,13 +792,6 @@ void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t s
 
   // Perform row-wise swizzle
   if (rowwise_swizzle) {
-    int vec_load_size = (num_tiles_k - 1) % 4 + 1;
-    /* there is no int3 and misaligned if using int4/int2 */
-    if (vec_load_size == 3) vec_load_size = 1;
-    int n_tiles_in_tb = TB_DIM * vec_load_size;
-    dim3 num_blocks(DIVUP(num_tiles_k, n_tiles_in_tb), num_tiles_m);
-    int slm_size = n_tiles_in_tb * SF_TILE_DIM_M * SF_TILE_DIM_K * sizeof(int8_t);
-
     int original_M{0}, original_K{0};
     void *input_scale_inv_ptr{nullptr}, *output_scale_inv_ptr{nullptr};
     switch (scaling_mode) {
@@ -754,34 +820,54 @@ void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t s
         NVTE_ERROR("Invalid scaling mode");
     }
 
-    switch (vec_load_size) {
-      case 4:
-        NVTE_CHECK_CUDA(
-            cudaFuncSetAttribute(swizzle_row_scaling_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>,
-                                 cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
-        swizzle_row_scaling_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>
-            <<<num_blocks, block_size, slm_size, stream>>>(
-                input_scale_inv_ptr, output_scale_inv_ptr, m, k, original_M, original_K);
-        break;
-      case 2:
-        NVTE_CHECK_CUDA(
-            cudaFuncSetAttribute(swizzle_row_scaling_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>,
-                                 cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
-        swizzle_row_scaling_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>
-            <<<num_blocks, block_size, slm_size, stream>>>(
-                input_scale_inv_ptr, output_scale_inv_ptr, m, k, original_M, original_K);
-        break;
-      case 1:
-        NVTE_CHECK_CUDA(
-            cudaFuncSetAttribute(swizzle_row_scaling_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>,
-                                 cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
-        swizzle_row_scaling_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>
-            <<<num_blocks, block_size, slm_size, stream>>>(
-                input_scale_inv_ptr, output_scale_inv_ptr, m, k, original_M, original_K);
-        break;
-      default:
-        NVTE_ERROR("Not valid vec_load_size.");
-        break;
+    if (num_tiles_k < TB_DIM) {
+      // Narrow-K: batch TB_DIM M-tiles per block, fully utilizing all threads.
+      dim3 num_blocks_narrow(DIVUP(num_tiles_m, TB_DIM));
+      int slm_size = TB_DIM * num_tiles_k * SF_TILE_DIM_M * SF_TILE_DIM_K * sizeof(int8_t);
+      NVTE_CHECK_CUDA(
+          cudaFuncSetAttribute(
+              swizzle_row_scaling_narrow_k_kernel<SF_TILE_DIM_M, SF_TILE_DIM_K>,
+              cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
+      swizzle_row_scaling_narrow_k_kernel<SF_TILE_DIM_M, SF_TILE_DIM_K>
+          <<<num_blocks_narrow, block_size, slm_size, stream>>>(
+              input_scale_inv_ptr, output_scale_inv_ptr, m, k, original_M, original_K);
+    } else {
+      int vec_load_size = (num_tiles_k - 1) % 4 + 1;
+      /* there is no int3 and misaligned if using int4/int2 */
+      if (vec_load_size == 3) vec_load_size = 1;
+      int n_tiles_in_tb = TB_DIM * vec_load_size;
+      dim3 num_blocks(DIVUP(num_tiles_k, n_tiles_in_tb), num_tiles_m);
+      int slm_size = n_tiles_in_tb * SF_TILE_DIM_M * SF_TILE_DIM_K * sizeof(int8_t);
+
+      switch (vec_load_size) {
+        case 4:
+          NVTE_CHECK_CUDA(
+              cudaFuncSetAttribute(swizzle_row_scaling_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>,
+                                   cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
+          swizzle_row_scaling_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>
+              <<<num_blocks, block_size, slm_size, stream>>>(
+                  input_scale_inv_ptr, output_scale_inv_ptr, m, k, original_M, original_K);
+          break;
+        case 2:
+          NVTE_CHECK_CUDA(
+              cudaFuncSetAttribute(swizzle_row_scaling_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>,
+                                   cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
+          swizzle_row_scaling_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>
+              <<<num_blocks, block_size, slm_size, stream>>>(
+                  input_scale_inv_ptr, output_scale_inv_ptr, m, k, original_M, original_K);
+          break;
+        case 1:
+          NVTE_CHECK_CUDA(
+              cudaFuncSetAttribute(swizzle_row_scaling_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>,
+                                   cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
+          swizzle_row_scaling_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>
+              <<<num_blocks, block_size, slm_size, stream>>>(
+                  input_scale_inv_ptr, output_scale_inv_ptr, m, k, original_M, original_K);
+          break;
+        default:
+          NVTE_ERROR("Not valid vec_load_size.");
+          break;
+      }
     }
     NVTE_CHECK_CUDA(cudaGetLastError());
   }

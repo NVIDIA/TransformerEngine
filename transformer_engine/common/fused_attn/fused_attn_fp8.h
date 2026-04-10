@@ -25,7 +25,8 @@ void fused_attn_fp8_fwd(size_t batch, size_t num_attn_heads, size_t num_gqa_grou
                         const Tensor *input_SoftmaxOffset, Tensor *input_output_S, Tensor *output_O,
                         NVTETensorPack *Aux_CTX_Tensors, const Tensor *cu_seqlens_q,
                         const Tensor *cu_seqlens_kv, const Tensor *rng_state, Tensor *workspace,
-                        cudaStream_t stream, cudnnHandle_t handle);
+                        cudaStream_t stream, cudnnHandle_t handle,
+                        NVTE_QKV_Format qkv_scale_inv_format = NVTE_QKV_Format_NOT_SET);
 
 // fused attention BWD FP8 with separate Q, K, V
 void fused_attn_fp8_bwd(
@@ -40,6 +41,8 @@ void fused_attn_fp8_bwd(
     const Tensor *input_S, const Tensor *input_SoftmaxOffset, Tensor *input_output_dP,
     const Tensor *output_dQ, const Tensor *output_dK, const Tensor *output_dV,
     Tensor *output_dSoftmaxOffset, const Tensor *cu_seqlens_q, const Tensor *cu_seqlens_kv,
-    const Tensor *rng_state, Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle);
+    const Tensor *rng_state, Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle,
+    NVTE_QKV_Format qkv_scale_inv_format = NVTE_QKV_Format_NOT_SET,
+    NVTE_QKV_Format do_scale_inv_format = NVTE_QKV_Format_NOT_SET);
 #endif  // end of CUDNN>=8900
 }  // namespace transformer_engine

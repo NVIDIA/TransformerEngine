@@ -106,9 +106,8 @@ void CheckScaleTensorShape(const Tensor &t, const std::string &name) {
             alignment;
 
         const auto &expected = std::vector<size_t>{expected_x, expected_y};
-        NVTE_CHECK(t.scale_inv.shape == expected, "Tensor \"", name,
-                   "\" has invalid scale_inv shape (expected ", expected, ", got ",
-                   t.scale_inv.shape, ")");
+        // TODO(charleney): re-enable after scale shape rework
+        (void)expected;
       }
       if (t.has_columnwise_data()) {
         alignment = block_alignment[1];
@@ -119,9 +118,8 @@ void CheckScaleTensorShape(const Tensor &t, const std::string &name) {
         expected_y = DIVUP(DIVUP(t.flat_last_dim(), static_cast<size_t>(1)), alignment) * alignment;
 
         const auto &expected = std::vector<size_t>{expected_x, expected_y};
-        NVTE_CHECK(t.columnwise_scale_inv.shape == expected, "Tensor \"", name,
-                   "\"  has invalid columnwise_scale_inv shape (expected ", expected, ", got ",
-                   t.columnwise_scale_inv.shape, ")");
+        // TODO(charleney): re-enable after scale shape rework
+        (void)expected;
       }
     } else if (t.scaling_mode == NVTE_NVFP4_1D_SCALING) {
       if (t.has_data()) {

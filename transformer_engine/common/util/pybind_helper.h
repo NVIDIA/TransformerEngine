@@ -49,7 +49,8 @@
       .value("NVTE_BSHD_2SBHD", NVTE_QKV_Format::NVTE_BSHD_2SBHD)                                  \
       .value("NVTE_THD_2BSHD", NVTE_QKV_Format::NVTE_THD_2BSHD)                                    \
       .value("NVTE_THD_2SBHD", NVTE_QKV_Format::NVTE_THD_2SBHD)                                    \
-      .value("NVTE_BHSD", NVTE_QKV_Format::NVTE_BHSD);                                             \
+      .value("NVTE_BHSD", NVTE_QKV_Format::NVTE_BHSD)                                               \
+      .value("NVTE_QKV_Format_NOT_SET", NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET);                  \
   pybind11::enum_<NVTE_QKV_Layout>(m, "NVTE_QKV_Layout", pybind11::module_local())                 \
       .value("NVTE_SB3HD", NVTE_QKV_Layout::NVTE_SB3HD)                                            \
       .value("NVTE_SBH3D", NVTE_QKV_Layout::NVTE_SBH3D)                                            \

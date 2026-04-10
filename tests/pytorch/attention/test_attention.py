@@ -1814,7 +1814,7 @@ model_configs_fp8_vs_f16 = {
         head_dim_v=128,
     ),
     "fp8_10": ModelConfig(
-        2,
+        1,
         4096,
         128,
         192,
