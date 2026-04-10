@@ -38,10 +38,15 @@ using SwizzledGroupedScales = std::pair<std::optional<at::Tensor>, std::optional
 /*! \brief Swizzle grouped tensor scales for GEMM if needed.
  * Currently only works for MXFP8 1D scaling with uniform shapes.
  *
+ * \param[in,out] input           Grouped tensor whose scales to swizzle.
+ * \param[in]     rowwise_usage   Whether rowwise scales are needed.
+ * \param[in]     columnwise_usage Whether columnwise scales are needed.
+ *
  * The returned swizzled scales should be kept alive during the GEMM.
  */
-std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor_for_gemm(
-    GroupedTensorWrapper& input);
+std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor(GroupedTensorWrapper& input,
+                                                                  bool rowwise_usage,
+                                                                  bool columnwise_usage);
 
 /*! \brief Convert a block scaling tensor to an mxfp8 tensor in-place.
  *

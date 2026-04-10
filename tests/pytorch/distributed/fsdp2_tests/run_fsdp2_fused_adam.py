@@ -14,13 +14,20 @@ Run a single test standalone (for debugging):
 
 Available --test values:
   fused_adam_fp8_master_weights, fused_adam_fp8_master_weights_no_meta,
+  fused_adam_fp8_high_precision_init,
   fused_adam_bf16, fused_adam_fp8_no_master, fused_adam_bf16_store_param_remainders,
   fuse_wgrad_accumulation, dcp_output_parity, dcp_output_parity_async,
-  safetensors_fp32_export
+  dcp_resharding_save, dcp_resharding_load, safetensors_fp32_export
 
 Available --recipe values:
   DelayedScaling, Float8CurrentScaling, Float8BlockScaling,
   MXFP8BlockScaling, NVFP4BlockScaling
+
+Note: dcp_resharding_save and dcp_resharding_load are two phases of a single
+cross-topology test.  Run dcp_resharding_save under a larger world_size first
+(e.g. --nproc_per_node=4), then run dcp_resharding_load under a smaller one
+(e.g. --nproc_per_node=2).  The orchestration is handled automatically by
+test_fsdp2_fused_adam_dcp_resharding in test_torch_fsdp2.py.
 """
 
 import argparse
@@ -52,7 +59,14 @@ BATCH_PER_RANK = 2
 NUM_STEPS = 3
 
 
-def _build_model(fp8_init, fuse_wgrad_accumulation=False, recipe=None, use_meta_device=True):
+def _build_model(
+    fp8_init,
+    fuse_wgrad_accumulation=False,
+    recipe=None,
+    use_meta_device=True,
+    preserve_high_precision_init_val=False,
+    params_dtype=torch.bfloat16,
+):
     """Build a Sequential of TransformerLayers, optionally with FP8 init.
 
     When fp8_init=True and use_meta_device=True (the default), the model is
@@ -68,7 +82,11 @@ def _build_model(fp8_init, fuse_wgrad_accumulation=False, recipe=None, use_meta_
     data_ptr() == 0.
     """
     if fp8_init:
-        ctx = te.quantized_model_init(enabled=True, recipe=recipe)
+        ctx = te.quantized_model_init(
+            enabled=True,
+            recipe=recipe,
+            preserve_high_precision_init_val=preserve_high_precision_init_val,
+        )
     else:
         from contextlib import nullcontext
 
@@ -76,7 +94,7 @@ def _build_model(fp8_init, fuse_wgrad_accumulation=False, recipe=None, use_meta_
     kwargs = dict(
         fuse_wgrad_accumulation=fuse_wgrad_accumulation,
         fuse_qkv_params=True,
-        params_dtype=torch.bfloat16,
+        params_dtype=params_dtype,
         hidden_dropout=0.0,
         attention_dropout=0.0,
     )
@@ -245,6 +263,131 @@ def test_fused_adam_fp8_master_weights_no_meta(recipe_name):
         loss = F.mse_loss(output, target)
         loss.backward()
         optimizer.step()
+
+
+def test_fused_adam_fp8_high_precision_init(recipe_name):
+    """FusedAdam with master_weights seeded from high-precision init values.
+
+    Tests the preserve_high_precision_init_val=True path demonstrated in the
+    fully_shard.py example:
+    1. Model is created with preserve_high_precision_init_val=True on meta device
+    2. After FSDP2 sharding + materialization, each QuantizedTensor param has
+       a high-precision init value accessible via get_high_precision_init_val()
+    3. These values seed the optimizer's FP32 master weights (avoiding FP8
+       round-trip precision loss)
+    4. Training completes successfully with correct optimizer state dtypes
+    """
+    recipe = get_recipe_from_string(recipe_name)
+
+    if recipe_name == "NVFP4BlockScaling":
+        pytest.xfail(
+            f"{recipe_name}: quantized_model_init and FSDP2 is not currently supported, since the "
+            "block tensor is dequantized before we flatten it for FSDP2."
+        )
+
+    world_size, device = _get_dist_info()
+
+    model = _build_model(
+        fp8_init=True,
+        recipe=recipe,
+        preserve_high_precision_init_val=True,
+        params_dtype=torch.float32,
+    )
+    model = _shard_model(model, world_size)
+
+    # Verify params are DTensors with QuantizedTensor local shards
+    for name, param in model.named_parameters():
+        assert isinstance(param, DTensor), f"{name} is not DTensor"
+    qt_count = sum(
+        1
+        for _, p in model.named_parameters()
+        if isinstance(p, DTensor) and isinstance(p._local_tensor, QuantizedTensor)
+    )
+    assert qt_count > 0, "No QuantizedTensor local tensors after sharding"
+
+    # Verify high-precision init values exist for all QuantizedTensor params
+    hp_val_count = 0
+    for name, param in model.named_parameters():
+        local = param._local_tensor if isinstance(param, DTensor) else param
+        if isinstance(local, QuantizedTensor):
+            hp_val = getattr(local, "get_high_precision_init_val", lambda: None)()
+            assert (
+                hp_val is not None
+            ), f"{name}: QuantizedTensor param missing high-precision init value"
+            assert (
+                hp_val.dtype == torch.float32
+            ), f"{name}: HP init val dtype {hp_val.dtype}, expected float32"
+            hp_val_count += 1
+    assert hp_val_count > 0, "No high-precision init values found"
+
+    # Create optimizer and seed master weights from high-precision init values
+    optimizer = te.optimizers.FusedAdam(
+        model.parameters(),
+        lr=1e-3,
+        master_weights=True,
+        master_weight_dtype=torch.float32,
+    )
+
+    for name, param in model.named_parameters():
+        optimizer.initialize_state(param, store_param_remainders=False)
+        local = param._local_tensor if isinstance(param, DTensor) else param
+        hp_val = getattr(local, "get_high_precision_init_val", lambda: None)()
+        if hp_val is not None:
+            optimizer.set_scaled_state(
+                param, "master_param", hp_val.to(device=device, dtype=torch.float32)
+            )
+            local.clear_high_precision_init_val()
+
+    # Verify high-precision init values are cleared after seeding
+    for name, param in model.named_parameters():
+        local = param._local_tensor if isinstance(param, DTensor) else param
+        if isinstance(local, QuantizedTensor):
+            hp_val = getattr(local, "get_high_precision_init_val", lambda: None)()
+            assert (
+                hp_val is None
+            ), f"{name}: high-precision init value not cleared after seeding optimizer"
+
+    # Verify optimizer master weights are float32
+    for param in model.parameters():
+        state = optimizer.state[param]
+        if "master_param" in state:
+            assert (
+                state["master_param"].dtype == torch.float32
+            ), f"master_param dtype {state['master_param'].dtype}, expected float32"
+
+    # Training loop
+    x = torch.randn(SEQ_LEN, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.float32, device=device)
+    target = torch.randn_like(x)
+
+    for step in range(NUM_STEPS):
+        optimizer.zero_grad(set_to_none=True)
+        with te.autocast(enabled=True, recipe=recipe):
+            output = model(x)
+        loss = F.mse_loss(output, target)
+        loss.backward()
+        optimizer.step()
+
+    # Verify optimizer states after training
+    for param in model.parameters():
+        state = optimizer.state[param]
+        assert (
+            state["exp_avg"].dtype == torch.float32
+        ), f"exp_avg dtype {state['exp_avg'].dtype}, expected float32"
+        assert (
+            state["exp_avg_sq"].dtype == torch.float32
+        ), f"exp_avg_sq dtype {state['exp_avg_sq'].dtype}, expected float32"
+        if "master_param" in state:
+            assert (
+                state["master_param"].dtype == torch.float32
+            ), f"master_param dtype {state['master_param'].dtype}, expected float32"
+
+    # Verify FP8 params preserved after training
+    qt_count = sum(
+        1
+        for _, p in model.named_parameters()
+        if isinstance(p, DTensor) and isinstance(p._local_tensor, QuantizedTensor)
+    )
+    assert qt_count > 0, "No QuantizedTensor local tensors after training"
 
 
 def test_fused_adam_bf16(recipe_name):
@@ -465,7 +608,8 @@ def test_safetensors_fp32_export(recipe_name):
     if recipe_name == "MXFP8BlockScaling":
         pytest.xfail(
             "MXFP8BlockScaling: FusedAdam CUDA kernel does not support "
-            "MXFP8 quantized tensors, causing illegal memory access"
+            "MXFP8 quantized tensors, causing illegal memory access. "
+            "Fixed by https://github.com/NVIDIA/TransformerEngine/pull/2789."
         )
 
     from safetensors.torch import load_file, save_file
@@ -554,7 +698,8 @@ def test_dcp_output_parity(recipe_name, async_save):
             "MXFP8BlockScaling: FusedAdam CUDA kernel does not support "
             "MXFP8 quantized tensors, causing illegal memory access: "
             "/transformer_engine/common/multi_tensor/multi_tensor_apply.cuh:92 in function "
-            "multi_tensor_apply: CUDA Error: an illegal memory access was encountered"
+            "multi_tensor_apply: CUDA Error: an illegal memory access was encountered. "
+            "Fixed by https://github.com/NVIDIA/TransformerEngine/pull/2789."
         )
 
     if recipe_name == "NVFP4BlockScaling":
@@ -740,22 +885,193 @@ def test_dcp_output_parity(recipe_name, async_save):
             shutil.rmtree(checkpoint_dir, ignore_errors=True)
 
 
+def test_dcp_resharding_save(recipe_name):
+    """Phase 1 of the DCP resharding test: train with current world_size and save checkpoint.
+
+    Trains a model for NUM_STEPS, records the forward-pass output, and writes:
+    - A DCP checkpoint to /tmp/te_test_fsdp2_dcp_resharding_<recipe>/
+    - A reference output tensor to /tmp/te_test_fsdp2_dcp_resharding_<recipe>_ref.pt
+
+    These artifacts are consumed by test_dcp_resharding_load, which runs under
+    a *different* world_size (typically half as many ranks) to verify that DCP
+    correctly reshards the checkpoint into the new topology.
+
+    The two phases are orchestrated by test_fsdp2_fused_adam_dcp_resharding in
+    test_torch_fsdp2.py using two sequential plain torchrun invocations.
+    """
+    recipe = get_recipe_from_string(recipe_name)
+
+    import torch.distributed.checkpoint as dcp
+
+    world_size, device = _get_dist_info()
+    rank = int(os.environ.get("RANK", "0"))
+    checkpoint_dir = f"/tmp/te_test_fsdp2_dcp_resharding_{recipe_name}"
+    ref_output_path = f"/tmp/te_test_fsdp2_dcp_resharding_{recipe_name}_ref.pt"
+
+    if rank == 0:
+        shutil.rmtree(checkpoint_dir, ignore_errors=True)
+        if os.path.exists(ref_output_path):
+            os.remove(ref_output_path)
+    dist.barrier()
+
+    model = _build_model(fp8_init=True, recipe=recipe)
+    model = _shard_model(model, world_size)
+
+    optimizer = te.optimizers.FusedAdam(
+        model.parameters(),
+        lr=1e-3,
+        master_weights=True,
+        master_weight_dtype=torch.float32,
+    )
+
+    # Fixed seed so the load phase reproduces the exact same input tensor.
+    torch.manual_seed(12345)
+    torch.cuda.manual_seed(12345)
+    x = torch.randn(SEQ_LEN, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
+    target = torch.randn_like(x)
+
+    for _ in range(NUM_STEPS):
+        optimizer.zero_grad(set_to_none=True)
+        with te.autocast(enabled=True, recipe=recipe):
+            output = model(x)
+        loss = F.mse_loss(output, target)
+        loss.backward()
+        optimizer.step()
+
+    # Record the reference output before saving.
+    with torch.no_grad():
+        with te.autocast(enabled=True, recipe=recipe):
+            ref_output = model(x).clone().cpu()
+
+    dist.barrier()
+    if rank == 0:
+        torch.save(ref_output, ref_output_path)
+
+    if isinstance(recipe, transformer_engine.common.recipe.DelayedScaling):
+        model_state = {
+            k: v for k, v in model.state_dict().items() if not k.endswith("_extra_state")
+        }
+    else:
+        model_state = model.state_dict()
+
+    dcp.save(
+        {"model": model_state, "optimizer": optimizer.state_dict()},
+        checkpoint_id=checkpoint_dir,
+    )
+    dist.barrier()
+
+
+def test_dcp_resharding_load(recipe_name):
+    """Phase 2 of the DCP resharding test: load into a different world_size and verify parity.
+
+    Loads the DCP checkpoint written by test_dcp_resharding_save (which ran
+    under a larger world_size, e.g. 4 ranks) into a fresh model sharded over
+    the current, smaller world_size (e.g. 2 ranks).  Asserts that the model
+    output after loading is bitwise-identical to the reference saved in phase 1,
+    confirming that DCP resharding correctly reconstructs all parameter shards.
+    """
+    recipe = get_recipe_from_string(recipe_name)
+
+    import torch.distributed.checkpoint as dcp
+
+    world_size, device = _get_dist_info()
+    rank = int(os.environ.get("RANK", "0"))
+    checkpoint_dir = f"/tmp/te_test_fsdp2_dcp_resharding_{recipe_name}"
+    ref_output_path = f"/tmp/te_test_fsdp2_dcp_resharding_{recipe_name}_ref.pt"
+
+    try:
+        model2 = _build_model(fp8_init=True, recipe=recipe)
+        model2 = _shard_model(model2, world_size)
+
+        optimizer2 = te.optimizers.FusedAdam(
+            model2.parameters(),
+            lr=1e-3,
+            master_weights=True,
+            master_weight_dtype=torch.float32,
+        )
+
+        # Same fixed seed as the save phase to reproduce identical x/target.
+        torch.manual_seed(12345)
+        torch.cuda.manual_seed(12345)
+        x = torch.randn(SEQ_LEN, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
+        target = torch.randn_like(x)
+
+        # Populate optimizer state so load_state_dict has a matching structure.
+        optimizer2.zero_grad(set_to_none=True)
+        with te.autocast(enabled=True, recipe=recipe):
+            out_tmp = model2(x)
+        F.mse_loss(out_tmp, target).backward()
+        optimizer2.step()
+
+        if isinstance(recipe, transformer_engine.common.recipe.DelayedScaling):
+            model2_state = {
+                k: v for k, v in model2.state_dict().items() if not k.endswith("_extra_state")
+            }
+        else:
+            model2_state = model2.state_dict()
+
+        state_to_load = {"model": model2_state, "optimizer": optimizer2.state_dict()}
+        dcp.load(state_to_load, checkpoint_id=checkpoint_dir)
+        model2.load_state_dict(
+            state_to_load["model"],
+            strict=(
+                False
+                if isinstance(recipe, transformer_engine.common.recipe.DelayedScaling)
+                else True
+            ),
+        )
+        optimizer2.load_state_dict(state_to_load["optimizer"])
+
+        with torch.no_grad():
+            with te.autocast(enabled=True, recipe=recipe):
+                loaded_output = model2(x).cpu()
+
+        if rank == 0:
+            ref_output = torch.load(ref_output_path, weights_only=True)
+
+            if isinstance(recipe, transformer_engine.common.recipe.DelayedScaling):
+                torch.testing.assert_close(
+                    loaded_output,
+                    ref_output,
+                    rtol=0.05,
+                    atol=0.1,
+                    msg=lambda m: f"Resharded model output differs from reference: {m}",
+                )
+            else:
+                torch.testing.assert_close(
+                    loaded_output,
+                    ref_output,
+                    rtol=0,
+                    atol=0,
+                    msg=lambda m: f"Resharded model output differs from reference: {m}",
+                )
+    finally:
+        dist.barrier()
+        if rank == 0:
+            shutil.rmtree(checkpoint_dir, ignore_errors=True)
+            if os.path.exists(ref_output_path):
+                os.remove(ref_output_path)
+
+
 TESTS = {
     "fused_adam_fp8_master_weights": test_fused_adam_fp8_master_weights,
     "fused_adam_fp8_master_weights_no_meta": test_fused_adam_fp8_master_weights_no_meta,
+    "fused_adam_fp8_high_precision_init": test_fused_adam_fp8_high_precision_init,
     "fused_adam_bf16": test_fused_adam_bf16,
     "fused_adam_fp8_no_master": test_fused_adam_fp8_no_master,
     "fused_adam_bf16_store_param_remainders": test_fused_adam_bf16_store_param_remainders,
     "fuse_wgrad_accumulation": test_fuse_wgrad_accumulation,
     "dcp_output_parity": functools.partial(test_dcp_output_parity, async_save=False),
     "dcp_output_parity_async": functools.partial(test_dcp_output_parity, async_save=True),
+    "dcp_resharding_save": test_dcp_resharding_save,
+    "dcp_resharding_load": test_dcp_resharding_load,
     "safetensors_fp32_export": test_safetensors_fp32_export,
 }
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--test", required=True, choices=list(TESTS.keys()))
+    parser.add_argument("--test", required=True, choices=sorted(TESTS.keys()))
     parser.add_argument(
         "--recipe",
         type=str,
