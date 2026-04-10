@@ -2027,7 +2027,13 @@ def grouped_gemm_copy_group_sizes(
 @cache
 def _should_enforce_v2_grouped_gemm() -> bool:
     """Read NVTE_JAX_ENFORCE_V2_GROUPED_GEMM once per process (cached)."""
-    return os.getenv("NVTE_JAX_ENFORCE_V2_GROUPED_GEMM", "0") == "1"
+    val = os.getenv("NVTE_JAX_ENFORCE_V2_GROUPED_GEMM", "0")
+    try:
+        return bool(int(val))
+    except ValueError as e:
+        raise ValueError(
+            f"NVTE_JAX_ENFORCE_V2_GROUPED_GEMM must be an integer (0 or 1), got: {val!r}"
+        ) from e
 
 
 def _can_use_v2_grouped_gemm(
