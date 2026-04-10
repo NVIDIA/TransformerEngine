@@ -554,14 +554,14 @@ class ETPShardedParam(torch.nn.Parameter):
             weight_total
         """
 
-        if self.next_w is not None:
+        if ETP_CONFIG.weight_prefetch and self.next_w is not None:
             result = self._get_prefetched_weight(False, skip_weight_cast=True)
         else:
             result = self._all_gather_weight_on_demand(False, skip_weight_cast=True)
 
         if (
-            ETP_CONFIG.weight_prefetch 
-            and self.prev_w is not None 
+            ETP_CONFIG.weight_prefetch
+            and self.prev_w is not None
             and self.prev_w._need_weight_prefetch
         ):
             _, handle = self.prev_w._all_gather_weight(
@@ -574,7 +574,7 @@ class ETPShardedParam(torch.nn.Parameter):
         for w in self._weights:
             w._set_state(ETPWeightState.NONE)
 
-        if self.next_w is not None:
+        if ETP_CONFIG.weight_prefetch and self.next_w is not None:
             cache = get_global_ETP_cache()
             for w in self._weights:
                 cache.release(w._ag_ticket_bwd)
@@ -599,15 +599,15 @@ class ETPShardedParam(torch.nn.Parameter):
         Returns:
             weight_total
         """
-        if self.prev_w is not None:
+        if ETP_CONFIG.weight_prefetch and self.prev_w is not None:
             result = self._get_prefetched_weight(True, skip_weight_cast, cast_noop_flag)
         else:
             result = self._all_gather_weight_on_demand(True, skip_weight_cast, cast_noop_flag)
 
         # Prefetch next weight
         if (
-            ETP_CONFIG.weight_prefetch 
-            and self.next_w is not None 
+            ETP_CONFIG.weight_prefetch
+            and self.next_w is not None
             and self.next_w._need_weight_prefetch
         ):
             _, handle = self.next_w._all_gather_weight(
@@ -776,7 +776,7 @@ class ETPShardedParam(torch.nn.Parameter):
 
         # Wait for last reduce scatter if it was async
         # Currently only support reduce scattering in reverse order
-        if self.next_w is not None:
+        if ETP_CONFIG.weight_prefetch and self.next_w is not None:
             self.next_w._wait_reduce_scatter()
             self.next_w.rs_event.wait()
 
