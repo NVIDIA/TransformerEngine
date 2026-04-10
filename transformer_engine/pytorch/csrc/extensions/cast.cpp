@@ -83,6 +83,12 @@ py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::ob
 
 namespace {
 
+inline bool is_sm120_device() {
+  cudaDeviceProp device_prop{};
+  NVTE_CHECK_CUDA(cudaGetDeviceProperties(&device_prop, c10::cuda::current_device()));
+  return device_prop.major == 12 && device_prop.minor == 0;
+}
+
 // helper functions for NVFP4 grouped quantization (cuda graph safe with shapes stored in device without D2H copy)
 void group_quantize_nvfp4_impl(const GroupedTensorWrapper &grouped_input_tensor,
                                GroupedTensorWrapper &grouped_output_tensor,
@@ -1026,6 +1032,7 @@ void split_quantize_nvfp4_impl_with_rht_helper(const TensorWrapper &input,
                                                cudaStream_t stream) {
   const size_t num_tensors = split_sections.size();
   const auto &quantizer = *quantizers.front();
+  const bool sm120_device = is_sm120_device();
 
   std::vector<NVTETensor> nvte_tensor_input_list;
   std::vector<NVTETensor> nvte_tensor_output_list;
@@ -1038,6 +1045,8 @@ void split_quantize_nvfp4_impl_with_rht_helper(const TensorWrapper &input,
   bool all_aligned_token_dim =
       std::all_of(split_sections.begin(), split_sections.end(),
                   [](size_t split_section) { return split_section % 128 == 0; });
+  // SM120 fallback: avoid the fully fused grouped row+col RHT kernel path.
+  all_aligned_token_dim = all_aligned_token_dim && !sm120_device;
 
   // in the case when rowwise and colwise cannot be fused, we have to generate the RNG states twice
   // so that rowwise and colwise will have different random numbers
@@ -1056,7 +1065,7 @@ void split_quantize_nvfp4_impl_with_rht_helper(const TensorWrapper &input,
   bool with_bulk_generate_rng_states = true;
 
   // Stochastic rounding
-  bool need_stochastic_rounding = quantizer.stochastic_rounding;
+  bool need_stochastic_rounding = quantizer.stochastic_rounding && !sm120_device;
   auto stochastic_rng_state_resources = setup_stochastic_rounding_rng_states_helper(
       num_tensors, need_stochastic_rounding, with_bulk_generate_rng_states,
       need_separate_rng_states, quant_config_list, quant_config_list_colwise);
@@ -1145,6 +1154,8 @@ void split_quantize_nvfp4_impl_with_rht_helper(const TensorWrapper &input,
     if (quantizer.columnwise_usage) {
       std::vector<TensorWrapper> out_transpose_list;
       std::vector<NVTETensor> nvte_tensor_out_transpose_list;
+      std::vector<at::Tensor> rht_output_t_tensors;
+      rht_output_t_tensors.reserve(num_tensors);
       for (size_t i = 0; i < num_tensors; i++) {
         bool is_empty_split = input_list[i].numel() == 0;
         auto out_columnwise_data = output_list[i].get_columnwise_data();
@@ -1176,10 +1187,31 @@ void split_quantize_nvfp4_impl_with_rht_helper(const TensorWrapper &input,
         out_transpose_list.emplace_back(std::move(out_transpose));
         nvte_tensor_out_transpose_list.push_back(out_transpose_list.back().data());
       }
-      nvte_group_hadamard_transform_cast_fusion_columnwise(
-          input.data(), reinterpret_cast<NVTETensor *>(nvte_tensor_out_transpose_list.data()),
-          rht_matrix_nvte.data(), split_sections.data(), num_tensors,
-          quant_config_list_colwise_to_use[0], stream);
+      if (sm120_device) {
+        // SM120 fallback: avoid grouped columnwise RHT fusion path and run unfused per split.
+        for (size_t i = 0; i < num_tensors; i++) {
+          if (input_list[i].numel() == 0) {
+            continue;
+          }
+          const int rows = static_cast<int>(split_sections[i]);
+          const int cols = static_cast<int>(input_list[i].size(input_list[i].ndim() - 1));
+          auto rht_output_t = allocateTorchTensor(cols, rows, input_list[i].dtype());
+          rht_output_t_tensors.push_back(rht_output_t);
+          TensorWrapper rht_output_t_cpp;
+          rht_output_t_cpp.set_rowwise_data(
+              rht_output_t.data_ptr(), input_list[i].dtype(),
+              std::vector<size_t>{static_cast<size_t>(cols), static_cast<size_t>(rows)});
+          nvte_hadamard_transform(input_list[i].data(), rht_output_t_cpp.data(), 0,
+                                  quantizer.rht_matrix_random_sign_mask_t, stream);
+          nvte_quantize_v2(rht_output_t_cpp.data(), out_transpose_list[i].data(),
+                           quant_config_list_colwise_to_use[i], stream);
+        }
+      } else {
+        nvte_group_hadamard_transform_cast_fusion_columnwise(
+            input.data(), reinterpret_cast<NVTETensor *>(nvte_tensor_out_transpose_list.data()),
+            rht_matrix_nvte.data(), split_sections.data(), num_tensors,
+            quant_config_list_colwise_to_use[0], stream);
+      }
     }
   }
 }
@@ -1192,6 +1224,7 @@ void split_quantize_nvfp4_impl_helper(const TensorWrapper &input,
                                       cudaStream_t stream) {
   const size_t num_tensors = input_list.size();
   const auto &quantizer = *quantizers.front();
+  const bool sm120_device = is_sm120_device();
 
   std::vector<NVTETensor> nvte_tensor_input_list;
   std::vector<NVTETensor> nvte_tensor_output_list;
@@ -1214,7 +1247,7 @@ void split_quantize_nvfp4_impl_helper(const TensorWrapper &input,
   // so that we can generate all rng states at once
   bool with_bulk_generate_rng_states = false;
 
-  bool need_stochastic_rounding = quantizer.stochastic_rounding;
+  bool need_stochastic_rounding = quantizer.stochastic_rounding && !sm120_device;
 
   // place holder for colwise rng states, which are not needed in this case
   std::vector<QuantizationConfigWrapper> dummy_quant_config_list_colwise;

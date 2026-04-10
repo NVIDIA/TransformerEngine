@@ -64,6 +64,7 @@ fp8_block_scaling_available = is_fp8_block_scaling_available()
 nvfp4_available = is_nvfp4_available()
 
 sm_80plus = get_device_compute_capability() >= (8, 0)
+sm_120 = get_device_compute_capability() == (12, 0)
 
 seed = 1234
 # Reset RNG states.
@@ -2703,9 +2704,15 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
             max_seqlen_kv=config.max_seqlen_kv,
         )
 
+        tols = dtype_tols(dtype)
+        if sm_120:
+            # sm120 FusedAttention does not support T3HD/TH3D layouts, so for T3HD/TH3D, the test falls back to using Flash Attn backend
+            # whereas for BSHD/SBHD, the test uses FusedAttention backend by default. Hence, relaxing the atol tolerance for T3HD/TH3D.
+            tols["atol"] = max(tols["atol"], 4e-3)
         torch.testing.assert_close(
             y_bshd,
             y_thd.reshape(bs, config.max_seqlen_q, config.hidden_size).contiguous(),
+            **tols,
         )
 
 
@@ -2865,6 +2872,8 @@ def test_grouped_gemm_grouped_tensor(z, m, n, k, case, layout, accumulate) -> No
         pytest.skip("Grouped GEMM requires cuBLAS 13.3+.")
     if torch.cuda.get_device_capability() < (10, 0):
         pytest.skip("Grouped GEMM requires Blackwell (SM100) or newer.")
+    if torch.cuda.get_device_capability() == (12, 0):
+        pytest.skip("Grouped GEMM is currently unsupported on SM120.")
     if not is_bf16_available():
         pytest.skip("bfloat16 is required for grouped GEMM test.")
 
@@ -3019,6 +3028,8 @@ def test_grouped_gemm_grouped_tensor_zero_work(layout, accumulate, quant_type) -
     """
     if torch.cuda.get_device_capability() < (10, 0):
         pytest.skip("Grouped GEMM requires Blackwell (SM100) or newer.")
+    if torch.cuda.get_device_capability() == (12, 0):
+        pytest.skip("Grouped GEMM is currently unsupported on SM120.")
     if not is_bf16_available():
         pytest.skip("bfloat16 is required for grouped GEMM test.")
     if quant_type == "mxfp8" and not mxfp8_available:
@@ -3161,6 +3172,8 @@ def test_grouped_gemm_grouped_tensor_mxfp8(
         pytest.skip("Grouped GEMM requires cuBLAS 13.3+.")
     if torch.cuda.get_device_capability() < (10, 0):
         pytest.skip("Grouped GEMM requires Blackwell (SM100) or newer.")
+    if torch.cuda.get_device_capability() == (12, 0):
+        pytest.skip("Grouped GEMM is currently unsupported on SM120.")
     if dtype == torch.bfloat16 and not is_bf16_available():
         pytest.skip("bfloat16 is required for grouped GEMM test.")
 

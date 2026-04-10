@@ -491,6 +491,11 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     }
   }
 
+  // Ensure async shared->global copy is done reading shared source before reuse.
+  ptx::cp_async_bulk_wait_group_read<0>();
+  // Ensure all warps reach the reuse boundary before DBIAS scratch writes.
+  __syncthreads();
+
   parity ^= 1;
 
   if constexpr (IS_DBIAS) {
