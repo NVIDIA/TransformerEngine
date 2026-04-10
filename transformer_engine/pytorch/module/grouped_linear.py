@@ -515,25 +515,11 @@ class _GroupedLinear(torch.autograd.Function):
                         )
                 elif ctx.backward_override == "dequantized":
                     inputmats_dequant = []
-                    for m_split, inputmat in zip(ctx.m_splits, inputmats):
+                    for inputmat in inputmats:
                         if isinstance(inputmat, QuantizedTensorStorage):
-                            if m_split == 0:
-                                # Dequant kernels for some quantized storage formats
-                                # (e.g. MXFP8/Float8BlockScaling) do not accept empty
-                                # M-dimension inputs. For empty grouped splits, materialize
-                                # an explicit empty high-precision matrix instead of invoking
-                                # dequantize().
-                                inputmats_dequant.append(
-                                    torch.empty(
-                                        (0, ctx.weights_shape_1),
-                                        dtype=ctx.activation_dtype,
-                                        device=ctx.device,
-                                    )
-                                )
-                            else:
-                                inputmats_dequant.append(
-                                    inputmat.dequantize(dtype=ctx.activation_dtype)
-                                )
+                            inputmats_dequant.append(
+                                inputmat.dequantize(dtype=ctx.activation_dtype)
+                            )
                         else:
                             inputmats_dequant.append(cast_if_needed(inputmat, ctx.activation_dtype))
                     inputmats = inputmats_dequant
