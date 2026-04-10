@@ -87,7 +87,11 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer,
       {
         auto fp8_quantizer_cpp = dynamic_cast<Float8CurrentScalingQuantizer*>(quantizer_cpp.get());
         NVTE_CHECK(fp8_quantizer_cpp != nullptr, "Could not cast to FP8 current scaling quantizer");
-        auto [cs_amax, cs_scale] = split_quantizer_workspace(*quantizer_workspace);
+        at::Tensor ws =
+            quantizer_workspace.has_value()
+                ? *quantizer_workspace
+                : at::empty({2}, at::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+        auto [cs_amax, cs_scale] = split_quantizer_workspace(ws);
         auto [temp_nvte, _] = fp8_quantizer_cpp->create_unquantized_tensor_with_amax(
             output_shape, fake_dtype, cs_amax);
         NVTE_SCOPED_GIL_RELEASE({
@@ -201,7 +205,11 @@ py::object dactivation_helper(const at::Tensor& grad_output, const at::Tensor& i
       {
         auto fp8_quantizer_cpp = dynamic_cast<Float8CurrentScalingQuantizer*>(quantizer_cpp.get());
         NVTE_CHECK(fp8_quantizer_cpp != nullptr, "Could not cast to FP8 current scaling quantizer");
-        auto [cs_amax, cs_scale] = split_quantizer_workspace(*quantizer_workspace);
+        at::Tensor ws =
+            quantizer_workspace.has_value()
+                ? *quantizer_workspace
+                : at::empty({2}, at::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+        auto [cs_amax, cs_scale] = split_quantizer_workspace(ws);
         auto [temp_nvte, _] = fp8_quantizer_cpp->create_unquantized_tensor_with_amax(
             input_shape, fake_dtype, cs_amax);
         NVTE_SCOPED_GIL_RELEASE({

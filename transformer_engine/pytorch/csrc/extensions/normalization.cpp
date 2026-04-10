@@ -143,6 +143,14 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
     out_nvte = makeTransformerEngineTensor(out, quantizer);
   }
 
+  // Resolve quantizer workspace for current scaling path.
+  at::Tensor cs_workspace;
+  if (impl == Impl::FUSED_NORM_AMAX_FP8) {
+    cs_workspace = quantizer_workspace.has_value()
+                       ? *quantizer_workspace
+                       : at::empty({2}, at::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+  }
+
   // Construct unquantized output tensor if needed
   TensorWrapper unquantized_out_nvte;
   py::object unquantized_out;
@@ -155,7 +163,7 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
     } break;
     case Impl::FUSED_NORM_AMAX_FP8: {
       auto fp8_quantizer_cpp = static_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
-      auto [cs_amax, cs_scale] = split_quantizer_workspace(*quantizer_workspace);
+      auto [cs_amax, cs_scale] = split_quantizer_workspace(cs_workspace);
       std::tie(unquantized_out_nvte, unquantized_out) =
           fp8_quantizer_cpp->create_unquantized_tensor_with_amax(shape, out_dtype, cs_amax);
       kernel_out_nvte = &unquantized_out_nvte;
@@ -201,7 +209,7 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
     } break;
     case Impl::FUSED_NORM_AMAX_FP8: {
       auto fp8_quantizer_cpp = static_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
-      auto [cs_amax, cs_scale] = split_quantizer_workspace(*quantizer_workspace);
+      auto [cs_amax, cs_scale] = split_quantizer_workspace(cs_workspace);
       fp8_quantizer_cpp->quantize_with_amax(unquantized_out_nvte, out_nvte, cs_amax, cs_scale);
     } break;
     case Impl::FUSED_NORM_AMAX_NVFP4: {
@@ -382,6 +390,14 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
     out_nvte = makeTransformerEngineTensor(out, quantizer);
   }
 
+  // Resolve quantizer workspace for current scaling path.
+  at::Tensor cs_workspace;
+  if (impl == Impl::FUSED_NORM_AMAX_FP8) {
+    cs_workspace = quantizer_workspace.has_value()
+                       ? *quantizer_workspace
+                       : at::empty({2}, at::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+  }
+
   // Construct unquantized output tensor if needed
   TensorWrapper unquantized_out_nvte;
   py::object unquantized_out;
@@ -394,7 +410,7 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
     } break;
     case Impl::FUSED_NORM_AMAX_FP8: {
       auto fp8_quantizer_cpp = static_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
-      auto [cs_amax, cs_scale] = split_quantizer_workspace(*quantizer_workspace);
+      auto [cs_amax, cs_scale] = split_quantizer_workspace(cs_workspace);
       std::tie(unquantized_out_nvte, unquantized_out) =
           fp8_quantizer_cpp->create_unquantized_tensor_with_amax(shape, out_dtype, cs_amax);
       kernel_out_nvte = &unquantized_out_nvte;
@@ -438,7 +454,7 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
     } break;
     case Impl::FUSED_NORM_AMAX_FP8: {
       auto fp8_quantizer_cpp = static_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
-      auto [cs_amax, cs_scale] = split_quantizer_workspace(*quantizer_workspace);
+      auto [cs_amax, cs_scale] = split_quantizer_workspace(cs_workspace);
       fp8_quantizer_cpp->quantize_with_amax(unquantized_out_nvte, out_nvte, cs_amax, cs_scale);
     } break;
     case Impl::FUSED_NORM_AMAX_NVFP4: {

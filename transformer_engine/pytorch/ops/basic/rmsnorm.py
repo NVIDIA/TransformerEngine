@@ -17,6 +17,7 @@ from ...constants import TE_DType
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...export import is_in_onnx_export_mode
 from ...tensor import Quantizer
+from ...tensor.float8_tensor import Float8CurrentScalingQuantizer
 from ...utils import (
     canonicalize_device,
     canonicalize_dtype,
@@ -126,6 +127,7 @@ class RMSNorm(BasicOperation):
                 "backward": getenv("NVTE_BWD_LAYERNORM_SM_MARGIN"),
                 "inference": getenv("NVTE_INF_LAYERNORM_SM_MARGIN"),
             }
+        self._quantizer_workspace: Optional[torch.Tensor] = None
 
     def reset_parameters(self) -> None:
         """Initialize parameter buffers and values"""
@@ -183,6 +185,21 @@ class RMSNorm(BasicOperation):
         w = maybe_dequantize(self.weight, dtype).view((inner_dim,))
 
         # Compute RMSNorm
+        quantizer_workspace = None
+        if isinstance(next_op_input_quantizer, Float8CurrentScalingQuantizer):
+            if (
+                self._quantizer_workspace is None
+                or self._quantizer_workspace.device != x.device
+                or self._quantizer_workspace.numel()
+                < Float8CurrentScalingQuantizer.WORKSPACE_FLOATS_PER_QUANTIZER
+            ):
+                self._quantizer_workspace = torch.empty(
+                    (Float8CurrentScalingQuantizer.WORKSPACE_FLOATS_PER_QUANTIZER,),
+                    dtype=torch.float32,
+                    device=x.device,
+                )
+            quantizer_workspace = self._quantizer_workspace
+
         sm_margin = self._sm_margins["forward" if ctx.requires_grad else "inference"]
         y, _, rstdevs = rmsnorm_fwd(
             x,
@@ -193,6 +210,7 @@ class RMSNorm(BasicOperation):
             TE_DType[dtype],
             sm_margin,
             self.zero_centered_gamma,
+            quantizer_workspace,
         )
 
         # Save state for backward pass

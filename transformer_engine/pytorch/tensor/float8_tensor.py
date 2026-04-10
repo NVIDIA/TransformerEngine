@@ -256,6 +256,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
     def __init__(
         self,
         fp8_dtype: TE_DType,
+        device: Optional[torch.device] = None,
         *,
         rowwise: bool = True,
         columnwise: bool = True,
@@ -266,6 +267,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
         scale: Optional[torch.Tensor] = None,
         amax: Optional[torch.Tensor] = None,
     ) -> None:
+        del device  # accepted for backward compatibility, no longer used
         super().__init__(rowwise=rowwise, columnwise=columnwise)
         self.dtype = fp8_dtype
         self.with_amax_reduction = with_amax_reduction

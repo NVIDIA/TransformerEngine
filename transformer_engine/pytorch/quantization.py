@@ -1114,7 +1114,7 @@ class Float8CurrentScalingRecipeState(RecipeState):
         *,
         mode: str,
         num_quantizers: int = 1,
-        device: Optional[torch.device] = None,
+        **kwargs,
     ) -> None:
         self.recipe = recipe
         self.mode = mode

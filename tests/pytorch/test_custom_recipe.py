@@ -290,10 +290,10 @@ def test_custom_recipe_factory_invocation_counts_and_cycling():
         if role in counts:
             counts[role] += 1
         if role in ("linear_input", "linear_weight", "linear_output"):
-            return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device=torch.device("cuda"))
+            return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
         if role in ("linear_grad_output", "linear_grad_input"):
-            return Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device=torch.device("cuda"))
-        return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device=torch.device("cuda"))
+            return Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda")
+        return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
 
     custom = recipe.CustomRecipe(qfactory=quantizer_factory)
 
@@ -319,7 +319,7 @@ def test_factories_return_distinct_instances_and_buffers():
 
     # Two calls should produce distinct quantizer objects and distinct tensor buffers
     def factory():
-        return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device=torch.device("cuda"))
+        return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
 
     q1 = factory()
     q2 = factory()

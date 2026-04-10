@@ -306,6 +306,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 "fc2_grad_input_quantizer": fc2_grad_input_quantizer,
                 "fc2_grad_weight_quantizer": fc2_grad_weight_quantizer,
                 "fc2_grad_output_quantizer": fc2_grad_output_quantizer,
+                "quantizer_workspace": quantizer_workspace,
                 "cpu_offloading": cpu_offloading,
                 "tp_group": tp_group,
                 "tp_size": tp_size,

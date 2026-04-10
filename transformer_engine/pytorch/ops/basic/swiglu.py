@@ -229,18 +229,39 @@ class ClampedSwiGLU(BasicOperation):
         self.alpha: float = alpha
         self.cache_quantized_input: bool = cache_quantized_input
         self.glu_interleave_size: Optional[int] = glu_interleave_size
+        self._quantizer_workspace: Optional[torch.Tensor] = None
+
+    def _get_quantizer_workspace(
+        self, quantizer: Optional[Quantizer], device: torch.device
+    ) -> Optional[torch.Tensor]:
+        if not isinstance(quantizer, Float8CurrentScalingQuantizer):
+            return None
+        if (
+            self._quantizer_workspace is None
+            or self._quantizer_workspace.device != device
+            or self._quantizer_workspace.numel()
+            < Float8CurrentScalingQuantizer.WORKSPACE_FLOATS_PER_QUANTIZER
+        ):
+            self._quantizer_workspace = torch.empty(
+                (Float8CurrentScalingQuantizer.WORKSPACE_FLOATS_PER_QUANTIZER,),
+                dtype=torch.float32,
+                device=device,
+            )
+        return self._quantizer_workspace
 
     def _tex_clamped_swiglu_forward(
         self,
         swiglu_in: torch.Tensor,
         next_op_input_quantizer: Optional[Quantizer],
+        quantizer_workspace: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Call :func:`tex.clamped_swiglu` with this op's ``limit`` / ``alpha``."""
         return tex.clamped_swiglu(
             swiglu_in,
             next_op_input_quantizer,
-            self.limit,
-            self.alpha,
+            quantizer_workspace=quantizer_workspace,
+            limit=self.limit,
+            alpha=self.alpha,
         )
 
     def _tex_clamped_dswiglu(
@@ -248,14 +269,16 @@ class ClampedSwiGLU(BasicOperation):
         dy: torch.Tensor,
         swiglu_in: torch.Tensor,
         quantizer: Optional[Quantizer],
+        quantizer_workspace: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Call :func:`tex.clamped_dswiglu` with this op's ``limit`` / ``alpha``."""
         return tex.clamped_dswiglu(
             dy,
             swiglu_in,
             quantizer,
-            self.limit,
-            self.alpha,
+            quantizer_workspace=quantizer_workspace,
+            limit=self.limit,
+            alpha=self.alpha,
         )
 
     def op_forward(
@@ -292,7 +315,12 @@ class ClampedSwiGLU(BasicOperation):
             swiglu_in = swiglu_in.view(shape)
 
         # Launch kernel
-        out = self._tex_clamped_swiglu_forward(swiglu_in, next_op_input_quantizer)
+        next_quantizer_workspace = self._get_quantizer_workspace(next_op_input_quantizer, x.device)
+        out = self._tex_clamped_swiglu_forward(
+            swiglu_in,
+            next_op_input_quantizer,
+            quantizer_workspace=next_quantizer_workspace,
+        )
 
         # Quantize input to FP8 before caching if needed
         if self.cache_quantized_input:
@@ -342,7 +370,13 @@ class ClampedSwiGLU(BasicOperation):
             quantizer = None
 
         # Launch kernel
-        grad_swiglu_in = self._tex_clamped_dswiglu(dy, swiglu_in, quantizer)
+        prev_quantizer_workspace = self._get_quantizer_workspace(quantizer, x.device)
+        grad_swiglu_in = self._tex_clamped_dswiglu(
+            dy,
+            swiglu_in,
+            quantizer,
+            quantizer_workspace=prev_quantizer_workspace,
+        )
 
         # Apply interleaving if needed
         dx = grad_swiglu_in
