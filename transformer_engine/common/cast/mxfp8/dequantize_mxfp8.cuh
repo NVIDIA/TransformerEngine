@@ -20,6 +20,7 @@
 #include "../../util/math.h"
 #include "../../util/ptx.cuh"
 #include "../../utils.cuh"
+#include "swizzle.cuh"
 
 namespace transformer_engine {
 namespace dispatch {
@@ -42,12 +43,13 @@ constexpr size_t THREADS_PER_CHUNK_X_COLWISE = CHUNK_DIM_X;                     
 constexpr size_t ITERATIONS = CHUNK_DIM_Y / BUFFER_DIM_Y;                       //    8 = 128 / 16
 static_assert(ITERATIONS >= 1);
 
-template <typename IType, typename OType, size_t SCALE_DIM_Y, size_t SCALE_DIM_X>
+template <typename IType, typename OType, size_t SCALE_DIM_Y, size_t SCALE_DIM_X,
+          bool WITH_GEMM_SWIZZLED_SCALES>
 __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     dequantize_mxfp8_kernel(const __grid_constant__ CUtensorMap tensor_map_input,
                             const __grid_constant__ CUtensorMap tensor_map_output,
                             const e8m0_t *const scales_ptr, const size_t rows, const size_t cols,
-                            const size_t scales_stride) {
+                            const size_t scales_stride, const size_t num_scale_tiles_X) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   constexpr bool USE_ROWWISE_SCALING = SCALE_DIM_X > 1;
 
@@ -158,7 +160,18 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             ? (scales_rowwise_chunk_offset_X + tid_rowwise_X / THREADS_PER_SCALE_X_ROWWISE)
             : (scales_colwise_chunk_offset_X + tid_colwise_X);
 
-    const int scale_idx = scale_offset_Y * scales_stride + scale_offset_X;
+    size_t scale_idx;
+    if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
+      if constexpr (USE_ROWWISE_SCALING) {
+        scale_idx =
+            swizzle::gemm_swizzled_scale_idx(scale_offset_Y, scale_offset_X, num_scale_tiles_X);
+      } else {
+        scale_idx =
+            swizzle::gemm_swizzled_scale_idx(scale_offset_X, scale_offset_Y, num_scale_tiles_X);
+      }
+    } else {
+      scale_idx = scale_offset_Y * scales_stride + scale_offset_X;
+    }
     const e8m0_t biased_exponent = scales_ptr[scale_idx];
     const float block_scale = ptx::exp2f(biased_exponent);
 
@@ -239,9 +252,10 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
     NVTE_CHECK(is_fp8_dtype(input.columnwise_data.dtype), "Input must have FP8 type.");
   }
 
-  NVTE_CHECK(!input.with_gemm_swizzled_scales, "Input must have scales in compact format.");
   NVTE_CHECK(!is_fp8_dtype(output->data.dtype), "Output must be in higher precision.");
   NVTE_CHECK(output->shape() == input.shape(), "Input and output shapes need to match.");
+
+  const bool with_gemm_swizzled_scales = input.with_gemm_swizzled_scales;
 
   // TODO: Make more general
   const size_t scale_dim_X_rowwise = use_rowwise_scaling ? 32 : 1;
@@ -276,6 +290,9 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
 
   const size_t scales_stride = use_rowwise_scaling ? scales_X_rowwise : scales_X_colwise;
 
+  const size_t num_scale_tiles_X = use_rowwise_scaling ? DIVUP(cols, static_cast<size_t>(128))
+                                                       : DIVUP(rows, static_cast<size_t>(128));
+
   const SimpleTensor &input_data = use_rowwise_scaling ? input.data : input.columnwise_data;
 
   const dim3 block(THREADS_PER_CHUNK);
@@ -289,21 +306,26 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
               input.dtype(), IType,
               TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
                   output->dtype(), OType,
+                  TRANSFORMER_ENGINE_SWITCH_CONDITION(
+                      with_gemm_swizzled_scales, WITH_GEMM_SWIZZLED_SCALES,
 
-                  alignas(64) CUtensorMap tensor_map_input{};
-                  alignas(64) CUtensorMap tensor_map_output{};
+                      alignas(64) CUtensorMap tensor_map_input{};
+                      alignas(64) CUtensorMap tensor_map_output{};
 
-                  create_2D_tensor_map(tensor_map_input, input_data, rows, cols, SHMEM_DIM_Y,
-                                       SHMEM_DIM_X, cols, 0, typeToNumBits(input.dtype()));
-                  create_2D_tensor_map(tensor_map_output, output->data, rows, cols, SHMEM_DIM_Y,
-                                       SHMEM_DIM_X, cols, 0, typeToNumBits(output->dtype()));
+                      create_2D_tensor_map(tensor_map_input, input_data, rows, cols, SHMEM_DIM_Y,
+                                           SHMEM_DIM_X, cols, 0, typeToNumBits(input.dtype()));
+                      create_2D_tensor_map(tensor_map_output, output->data, rows, cols, SHMEM_DIM_Y,
+                                           SHMEM_DIM_X, cols, 0, typeToNumBits(output->dtype()));
 
-                  dequantize_mxfp8_kernel<IType, OType, SCALE_DIM_Y, SCALE_DIM_X>
-                  <<<grid, block, 0, stream>>>(tensor_map_input, tensor_map_output, scales_ptr,
-                                               rows, cols, scales_stride););  // NOLINT(*)
-          );                                                                  // NOLINT(*)
-      );                                                                      // NOLINT(*)
-  );                                                                          // NOLINT(*)
+                      dequantize_mxfp8_kernel<IType, OType, SCALE_DIM_Y, SCALE_DIM_X,
+                                              WITH_GEMM_SWIZZLED_SCALES>
+                      <<<grid, block, 0, stream>>>(tensor_map_input, tensor_map_output, scales_ptr,
+                                                   rows, cols, scales_stride,
+                                                   num_scale_tiles_X););  // NOLINT(*)
+              );                                                          // NOLINT(*)
+          );                                                              // NOLINT(*)
+      );                                                                  // NOLINT(*)
+  );                                                                      // NOLINT(*)
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 }  // namespace mxfp8
