@@ -603,7 +603,8 @@ class CommOverlapHelper : torch::CustomClassHolder {
  private:
   bool initialized{false};
   bool backend_is_nccl{false};
-  std::map<std::string, c10d::ProcessGroup *> pgs;
+  std::map<std::string, c10d::ProcessGroup *> torch_pgs;
+  std::map<std::string, ncclComm_t> nccl_comms;
 
  public:
   int myrank = -1;
@@ -624,6 +625,8 @@ class CommOverlapHelper : torch::CustomClassHolder {
                     ExtComm comm);
 
   void ub_barrier(ExtComm comm);
+
+  ncclComm_t get_nccl_comm(std::string comm_name);
 };
 
 class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOverlapBase {
@@ -634,6 +637,11 @@ class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOve
               int gemm_priority = 0, int comm_priority = 0, int num_comm_sm = 16,
               bool set_sm_margin = true, bool atomic_gemm = false,
               bool rs_overlap_first_gemm = false);
+
+  CommOverlap(CommOverlapHelper *helper, int tp_rank, int tp_size, int num_comm_sm = 16,
+              bool atomic_gemm = false)
+      : CommOverlapBase(helper->get_nccl_comm("intra"), tp_rank, tp_size, num_comm_sm,
+                        atomic_gemm) {}
 
   ~CommOverlap() {}
 
@@ -653,9 +661,14 @@ class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::Comm
                  CommOverlapHelper *helper, int tp_size,
                  transformer_engine::CommOverlapType comm_type,
                  int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS, int comm_cga_size = 2,
-                 int gemm_priority = 0, int comm_priority = 0, int num_comm_sm = 3,
-                 bool set_sm_margin = true, bool atomic_gemm = false, bool use_ce = true,
+                 int gemm_priority = 0, int comm_priority = 0, int num_comm_sm = 1,
+                 bool set_sm_margin = false, bool atomic_gemm = false, bool use_ce = true,
                  bool aggregate = false);
+
+  CommOverlapP2P(CommOverlapHelper *helper, int tp_rank, int tp_size, int num_comm_sm = 1,
+                 bool atomic_gemm = false)
+      : CommOverlapP2PBase(helper->get_nccl_comm("intra"), tp_rank, tp_size, num_comm_sm,
+                           atomic_gemm) {}
 
   ~CommOverlapP2P() {}
 

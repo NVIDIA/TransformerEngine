@@ -39,12 +39,13 @@ bool is_low_precision(const DType type) {
 }
 
 std::vector<size_t> getGemmOutputShape(const NVTEShape& A_shape, const bool transa,
-                                       const NVTEShape& B_shape, const bool transb) {
+                                       const NVTEShape& B_shape, const bool transb,
+                                       size_t tp_size = 1, size_t tp_dim = 0) {
   // Flatten outer dims to get 2D matrices
-  const size_t A0 = A_shape.ndim > 0 ? product(A_shape, 0, A_shape.ndim - 1) : 1;
-  const size_t A1 = A_shape.ndim > 0 ? A_shape.data[A_shape.ndim - 1] : 1;
-  const size_t B0 = B_shape.ndim > 0 ? product(B_shape, 0, B_shape.ndim - 1) : 1;
-  const size_t B1 = B_shape.ndim > 0 ? B_shape.data[B_shape.ndim - 1] : 1;
+  size_t A0 = A_shape.ndim > 0 ? product(A_shape, 0, A_shape.ndim - 1) : 1;
+  size_t A1 = A_shape.ndim > 0 ? A_shape.data[A_shape.ndim - 1] : 1;
+  size_t B0 = B_shape.ndim > 0 ? product(B_shape, 0, B_shape.ndim - 1) : 1;
+  size_t B1 = B_shape.ndim > 0 ? B_shape.data[B_shape.ndim - 1] : 1;
 
   // Check matrix dims
   NVTE_CHECK((transa ? A1 : A0) == (transb ? B0 : B1), "Invalid matrix dimensions for GEMM (A=(",
@@ -54,21 +55,36 @@ std::vector<size_t> getGemmOutputShape(const NVTEShape& A_shape, const bool tran
   std::vector<size_t> ret;
   if (transb) {
     ret.emplace_back(B1);
-  } else {
+  } else if (tp_size == 1) {
     // Unflatten B0
     for (size_t i = 0; i < B_shape.ndim - 1; ++i) {
       ret.emplace_back(B_shape.data[i]);
     }
+  } else {
+    // Keep output tensor in 2D for comm+GEMM overlap
+    ret.emplace_back(B0);
   }
   if (transa) {
     ret.emplace_back(A0);
   } else {
     ret.emplace_back(A1);
   }
+
+  // Correct output dims for comm+GEMM overlap if needed
+  if (tp_size > 1) {
+    if (tp_dim == 0) {
+      // Outer dim is sharded, comm+GEMM overlap would need to do all-gather
+      ret[0] *= tp_size;
+    } else {
+      // Inner dim is sharded, comm+GEMM overlap would need to do reduce-scatter
+      ret[0] /= tp_size;
+    }
+  }
   return ret;
 }
 
-bool checkGemmShape(const std::vector<size_t>& expected, const NVTEShape& actual) {
+bool checkGemmShape(const std::vector<size_t>& expected, const NVTEShape& actual,
+                    size_t tp_size = 1, size_t tp_dim = 0) {
   if (expected.size() != actual.ndim) return false;
   for (size_t i = 0; i < expected.size(); ++i) {
     if (expected[i] != actual.data[i]) return false;
@@ -151,11 +167,18 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
                                  A_tensor.scaling_mode() == NVTE_BLOCK_SCALING_2D ||
                                  B_tensor.scaling_mode() == NVTE_BLOCK_SCALING_1D ||
                                  B_tensor.scaling_mode() == NVTE_BLOCK_SCALING_2D;
-
+  // Get TP info for comm+GEMM overlap
+  size_t tp_size = 1;
+  size_t tp_dim = 0;
+  if (comm_overlap && !bulk_overlap && comm_overlap->with_cublasmp()) {
+    tp_size = comm_overlap->get_tp_size();
+    tp_dim = (comm_type.value() == CommOverlapType::AG) ? 0 : 1;
+  }
   // Check tensor dimensions
   const auto& A_shape = A_tensor.shape();
   const auto& B_shape = B_tensor.shape();
-  const auto& D_shape = detail::getGemmOutputShape(A_shape, transa, B_shape, transb);
+  const auto& D_shape =
+      detail::getGemmOutputShape(A_shape, transa, B_shape, transb, tp_size, tp_dim);
   NVTE_CHECK(A_shape.ndim >= 1, "Tensor A needs to have at least 1 dimension");
   NVTE_CHECK(B_shape.ndim >= 1, "Tensor B needs to have at least 1 dimension");
 

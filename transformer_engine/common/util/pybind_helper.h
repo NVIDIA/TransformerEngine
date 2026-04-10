@@ -108,11 +108,15 @@
                                                                    pybind11::module_local())       \
       .def(py::init([]() { return new transformer_engine::CommOverlapCore(); }),                   \
            py::call_guard<py::gil_scoped_release>())                                               \
+      .def("get_tp_size", &transformer_engine::CommOverlapCore::get_tp_size,                       \
+           py::call_guard<py::gil_scoped_release>())                                               \
       .def("is_atomic_gemm", &transformer_engine::CommOverlapCore::is_atomic_gemm,                 \
            py::call_guard<py::gil_scoped_release>())                                               \
       .def("is_p2p_overlap", &transformer_engine::CommOverlapCore::is_p2p_overlap,                 \
            py::call_guard<py::gil_scoped_release>())                                               \
       .def("is_fp8_ubuf", &transformer_engine::CommOverlapCore::is_fp8_ubuf,                       \
+           py::call_guard<py::gil_scoped_release>())                                               \
+      .def("with_cublasmp", &transformer_engine::CommOverlapCore::with_cublasmp,                   \
            py::call_guard<py::gil_scoped_release>());                                              \
   py::class_<transformer_engine::CommOverlapBase,                                                  \
              std::shared_ptr<transformer_engine::CommOverlapBase>,                                 \
@@ -136,6 +140,8 @@
       },                                                                                           \
       py::call_guard<py::gil_scoped_release>(), py::arg("device_id") = -1);                        \
   m.def("ubuf_built_with_mpi", &transformer_engine::ubuf_built_with_mpi,                           \
+        py::call_guard<py::gil_scoped_release>());                                                 \
+  m.def("nvte_built_with_cublasmp", &nvte_built_with_cublasmp,                                     \
         py::call_guard<py::gil_scoped_release>());
 
 #endif

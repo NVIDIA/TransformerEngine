@@ -12,6 +12,7 @@ def pytest_addoption(parser):
     parser.addoption("--num-processes", action="store", default=1)
     parser.addoption("--process-id", action="store", default=0)
     parser.addoption("--local-device-ids", action="store", default=None)
+    parser.addoption("--use-cublasmp", action="store_true", default=False)
 
 
 @pytest.fixture(autouse=True)
@@ -27,3 +28,4 @@ def distributed_args(request):
             if request.cls.local_device_ids is None
             else len(request.cls.local_device_ids.split(","))
         )
+        request.cls.use_cublasmp = request.config.getoption("--use-cublasmp")
