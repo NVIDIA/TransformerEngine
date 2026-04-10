@@ -1344,7 +1344,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         cu_seqlens_kv_per_step = [None for _ in range(cp_size)]
 
         fused_attn_backend = None
-        amax_per_step = None
+        delayed_scaling_amax_per_step = None
         S_quantizer_per_step = [None for _ in range(cp_size)]
         O_quantizer_per_step = [None for _ in range(cp_size)]
         max_logit_per_step = [None for _ in range(cp_size)]
@@ -1421,16 +1421,23 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 dP_quantizer,
             )
 
-            # amax_per_step[0]: amax_s x cp_size
-            # amax_per_step[1]: amax_o x cp_size
-            amax_per_step = torch.zeros((2, cp_size), dtype=torch.float32, device=q.device)
-            # per_step tensors are not reduced even if Float8CurrentScaling.with_amax_reduction=True;
-            # only used to hold temporary scale/amax values (output only, no quantization op)
             for i in range(cp_size):
                 S_quantizer_per_step[i] = S_quantizer.copy()
-                S_quantizer_per_step[i].amax = amax_per_step[0][i].reshape((1,))
                 O_quantizer_per_step[i] = O_quantizer.copy()
-                O_quantizer_per_step[i].amax = amax_per_step[1][i].reshape((1,))
+
+            if fp8_recipe.delayed():
+                # delayed_scaling_amax_per_step[0]: amax_s x cp_size
+                # delayed_scaling_amax_per_step[1]: amax_o x cp_size
+                delayed_scaling_amax_per_step = torch.zeros(
+                    (2, cp_size), dtype=torch.float32, device=q.device
+                )
+                for i in range(cp_size):
+                    S_quantizer_per_step[i].amax = delayed_scaling_amax_per_step[0][i].reshape(
+                        (1,)
+                    )
+                    O_quantizer_per_step[i].amax = delayed_scaling_amax_per_step[1][i].reshape(
+                        (1,)
+                    )
         else:
             # q_f16:   torch.Tensor, dtype=fwd_nominal_dtype
             # q, k, v: torch.Tensor, dtype=fwd_nominal_dtype
@@ -1918,9 +1925,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         elif not use_fused_attention:
             out = out.view(-1, *out.shape[-2:])
 
-        # update FP8 quantizers: amax across cp_size steps
-        if fp8 and use_fused_attention:
-            amax_cp_fwd = amax_per_step.amax(dim=1)
+        # update FP8 quantizers: amax across cp_size steps (delayed scaling only)
+        if fp8 and use_fused_attention and fp8_recipe.delayed():
+            amax_cp_fwd = delayed_scaling_amax_per_step.amax(dim=1)
             S_quantizer.amax.copy_(amax_cp_fwd[0])
             O_quantizer.amax.copy_(amax_cp_fwd[1])
 
@@ -2034,7 +2041,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         ctx.QKV_quantizer = QKV_quantizer
         ctx.O_quantizer = O_quantizer
         ctx.S_quantizer = S_quantizer
-        if ctx.fp8:
+        if ctx.fp8 and fp8_recipe.delayed():
             ctx.QKV_quantizer = QKV_quantizer.copy()
             ctx.QKV_quantizer.scale = QKV_quantizer.scale.clone()
             ctx.O_quantizer = O_quantizer.copy()
@@ -2152,7 +2159,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
         # convert out, dout to the right type
         fused_attn_backend = None
-        amax_per_step = None
+        delayed_scaling_amax_per_step = None
         dP_quantizer_per_step = [None for _ in range(cp_size)]
         dQKV_quantizer_per_step = [None for _ in range(cp_size)]
         buffer_dtype = torch.uint8
@@ -2224,16 +2231,23 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     device=kv.device,
                 )
 
-            # amax_per_step[0]: amax_dp x cp_size
-            # amax_per_step[1]: amax_dqkv x cp_size
-            amax_per_step = torch.zeros((2, cp_size), dtype=torch.float32, device=q.device)
-            # per_step tensors are not reduced even if Float8CurrentScaling.with_amax_reduction=True;
-            # only used to hold temporary scale/amax values (output only, no quantization op)
             for i in range(cp_size):
                 dP_quantizer_per_step[i] = ctx.dP_quantizer.copy()
-                dP_quantizer_per_step[i].amax = amax_per_step[0][i].reshape((1,))
                 dQKV_quantizer_per_step[i] = ctx.dQKV_quantizer.copy()
-                dQKV_quantizer_per_step[i].amax = amax_per_step[1][i].reshape((1,))
+
+            if ctx.fp8_recipe.delayed():
+                # delayed_scaling_amax_per_step[0]: amax_dp x cp_size
+                # delayed_scaling_amax_per_step[1]: amax_dqkv x cp_size
+                delayed_scaling_amax_per_step = torch.zeros(
+                    (2, cp_size), dtype=torch.float32, device=q.device
+                )
+                for i in range(cp_size):
+                    dP_quantizer_per_step[i].amax = delayed_scaling_amax_per_step[0][i].reshape(
+                        (1,)
+                    )
+                    dQKV_quantizer_per_step[i].amax = delayed_scaling_amax_per_step[1][
+                        i
+                    ].reshape((1,))
         else:
             if isinstance(dout, QuantizedTensorStorage):
                 dout = dout.dequantize(dtype=bwd_nominal_dtype)
@@ -2645,9 +2659,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
         # sum up all cp_size for dq, dk, dv
         if ctx.fp8 and ctx.use_fused_attention:
-            amax_cp_bwd = amax_per_step.amax(dim=1)
-            ctx.dP_quantizer.amax.copy_(amax_cp_bwd[0])
-            ctx.dQKV_quantizer.amax.copy_(amax_cp_bwd[1])
+            if ctx.fp8_recipe.delayed():
+                amax_cp_bwd = delayed_scaling_amax_per_step.amax(dim=1)
+                ctx.dP_quantizer.amax.copy_(amax_cp_bwd[0])
+                ctx.dQKV_quantizer.amax.copy_(amax_cp_bwd[1])
 
             dq = dq_buffer
             if ctx.fp8_recipe.delayed():
@@ -3647,7 +3662,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         ctx.QKV_quantizer = QKV_quantizer
         ctx.O_quantizer = O_quantizer
         ctx.S_quantizer = S_quantizer
-        if ctx.fp8:
+        if ctx.fp8 and fp8_recipe.delayed():
             ctx.QKV_quantizer = QKV_quantizer.copy()
             ctx.QKV_quantizer.scale = QKV_quantizer.scale.clone()
             ctx.O_quantizer = O_quantizer.copy()
