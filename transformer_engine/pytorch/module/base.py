@@ -726,19 +726,22 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     FP8GlobalStateManager.get_buffer_info()
                 ]
                 for pos, buffer_key in zip((fwd_pos, bwd_pos), (fwd_key, bwd_key)):
-                    if buffer_key in FP8GlobalStateManager.global_amax_buffer:
-                        if buffer_key not in FP8GlobalStateManager.global_amax_history_buffer:
+                    if buffer_key in FP8GlobalStateManager.quantization_state.global_amax_buffer:
+                        if (
+                            buffer_key
+                            not in FP8GlobalStateManager.quantization_state.global_amax_history_buffer
+                        ):
                             raise RuntimeError(
                                 "TE internal error during amax history change: "
                                 f"buffer_key '{buffer_key}' found in global_amax_buffer "
                                 "but missing from global_amax_history_buffer"
                             )
-                        FP8GlobalStateManager.global_amax_buffer[buffer_key][pos] = self.fp8_meta[
-                            meta_key
-                        ].amax_history[0]
-                        FP8GlobalStateManager.global_amax_history_buffer[buffer_key][pos] = (
-                            self.fp8_meta[meta_key].amax_history
-                        )
+                        FP8GlobalStateManager.quantization_state.global_amax_history_buffer[
+                            buffer_key
+                        ][pos] = self.fp8_meta[meta_key].amax_history
+                        FP8GlobalStateManager.quantization_state.global_amax_buffer[buffer_key][
+                            pos
+                        ] = self.fp8_meta[meta_key].amax_history[0]
 
     def set_meta_tensor(self, fwd: bool, recipe: Recipe) -> None:
         """Init scales and amaxes for fwd | bwd."""
