@@ -99,6 +99,11 @@ def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
     if cp_comm_type == "all_gather" and config.attn_bias_type != "no_bias":
         pytest.skip("CP implementation with KV all-gather does not support bias yet!")
     if qkv_format == "thd":
+        if cp_comm_type == "all_gather":
+            pytest.skip(
+                "FlashAttention does not support THD padding; use FusedAttention for"
+                " THD+all_gather CP."
+            )
         if cp_comm_type == "a2a+p2p":
             pytest.skip(
                 "CP implementation with QKVO A2A+P2P (Hierarchical A2A) does not support THD format"

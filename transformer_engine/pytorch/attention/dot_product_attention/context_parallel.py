@@ -2844,8 +2844,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         else:
             assert not padding, f"{attn_mask_type} mask type is not supported!"
         if use_fused_attention and causal and "bottom_right" not in attn_mask_type:
-            if qkv_format != "thd":
-                attn_mask_type = attn_mask_type + "_bottom_right"
+            attn_mask_type = attn_mask_type + "_bottom_right"
         assert attn_bias_type == "no_bias", f"{attn_bias_type} bias type is not supported!"
         assert q.shape[-1] % 8 == 0, "Hidden size per attention head should be multiple of 8!"
         assert (
@@ -2888,6 +2887,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         if qkv_format == "thd":
             # Save original global cu_seqlens before division
             cu_seqlens_q_original = cu_seqlens_q.clone()
+            cu_seqlens_kv_original = cu_seqlens_kv.clone()
         else:
             seq_dim = qkv_format.index("s")
             assert (
@@ -2899,8 +2899,9 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         max_seqlen_kv = max_seqlen_kv // (2 * cp_size)
         if use_fused_attention and qkv_format != "thd":
             cu_seqlens_q = cu_seqlens_q // (2 * cp_size)
-        if cu_seqlens_q_padded is not None and qkv_format == "thd":
+        if qkv_format == "thd":
             cu_seqlens_q_padded = cu_seqlens_q_padded // (2 * cp_size)
+            cu_seqlens_kv_padded = cu_seqlens_kv_padded // (2 * cp_size)
         else:
             cu_seqlens_q_padded = None
 
@@ -2924,10 +2925,10 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                 cp_size, k.device
             )
             k_ag = reorder_seq_chunks_after_a2a_before_attn_thd(
-                k_ag, cu_seqlens_kv_padded, chunk_ids_for_kv_ag, cp_size
+                k_ag, cu_seqlens_kv_padded * 2 * cp_size, chunk_ids_for_kv_ag, cp_size
             )
             v_ag = reorder_seq_chunks_after_a2a_before_attn_thd(
-                v_ag, cu_seqlens_kv_padded, chunk_ids_for_kv_ag, cp_size
+                v_ag, cu_seqlens_kv_padded * 2 * cp_size, chunk_ids_for_kv_ag, cp_size
             )
         else:
             # [cp, s, b, h, d] -> [cp*2, s//2, b, h, d]
@@ -2979,39 +2980,27 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             # Per-step Q cu_seqlens_padded: offset-based approach — pass full Q tensor
             # and vary cu_seqlens_q_padded to point kernel at the correct chunk.
             # cuDNN uses back-padding (valid tokens at beginning of padded allocation).
-            padded_chunk_sizes = cu_seqlens_q_padded[1:] - cu_seqlens_q_padded[:-1]
-            actual_seqlens = cu_seqlens_q_original[1:] - cu_seqlens_q_original[:-1]
+            padded_chunk_sizes_q = cu_seqlens_q_padded[1:] - cu_seqlens_q_padded[:-1]
+            actual_seqlens_kv = cu_seqlens_kv_original[1:] - cu_seqlens_kv_original[:-1]
             # Step 0: kernel reads from start of each seq's 2-chunk allocation (first chunk)
             # Step 1: kernel reads from midpoint of each seq's allocation (second chunk)
             thd_cu_seqlens_q_padded_per_step = [cu_seqlens_q_padded_rank, None]
             thd_cu_seqlens_q_padded_per_step[1] = cu_seqlens_q_padded_rank.clone()
-            thd_cu_seqlens_q_padded_per_step[1][:-1] += padded_chunk_sizes
+            thd_cu_seqlens_q_padded_per_step[1][:-1] += padded_chunk_sizes_q
 
             # Per-step KV cu_seqlens (non-padded): how many actual KV tokens are
             # visible for each sequence.
-            thd_cu_seqlens_kv_per_step = [None, None]
+            padded_chunk_sizes_kv = cu_seqlens_kv_padded[1:] - cu_seqlens_kv_padded[:-1]
+            thd_cu_seqlens_kv_per_step = [cu_seqlens_q_original.clone(), cu_seqlens_q_original.clone()]
             for step_idx in range(2):
                 if causal:
                     # Causal: visible KV covers chunks 0..chunk_id
                     chunk_id = local_seq_chunk_ids[step_idx]
-                    visible_padded = padded_chunk_sizes * (chunk_id + 1)
-                    visible_actual = torch.minimum(actual_seqlens, visible_padded)
-                    cs = torch.zeros_like(cu_seqlens_q_original)
+                    visible_padded = padded_chunk_sizes_kv * (chunk_id + 1)
+                    visible_actual = torch.minimum(actual_seqlens_kv, visible_padded)
+                    cs = torch.zeros_like(cu_seqlens_kv_original)
                     cs[1:] = visible_actual.cumsum(0)
                     thd_cu_seqlens_kv_per_step[step_idx] = cs
-                else:
-                    # Non-causal: all KV tokens visible
-                    thd_cu_seqlens_kv_per_step[step_idx] = cu_seqlens_q_original.clone()
-
-            if causal:
-                # Q is always the last chunk in the visible KV range,
-                # so bottom_right alignment is always correct.
-                thd_attn_mask_type_per_step = [
-                    "padding_causal_bottom_right",
-                    "padding_causal_bottom_right",
-                ]
-            else:
-                thd_attn_mask_type_per_step = ["padding", "padding"]
 
         for i in range(len(local_seq_chunk_ids) + 1):
             if i < len(local_seq_chunk_ids):
@@ -3063,13 +3052,11 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                     if use_fused_attention:
                         # Set per-step parameters for THD vs bshd/sbhd
                         if qkv_format == "thd":
-                            attn_mask_type_ = thd_attn_mask_type_per_step[i]
                             cu_seqlens_q_ = thd_cu_seqlens_q_per_step[i]
                             cu_seqlens_q_padded_ = thd_cu_seqlens_q_padded_per_step[i]
                             cu_seqlens_kv_padded_ = cu_seqlens_kv_padded
                         else:
                             cu_seqlens_q_ = cu_seqlens_q
-                            attn_mask_type_ = attn_mask_type
                             cu_seqlens_q_padded_ = cu_seqlens_q_padded
                             cu_seqlens_kv_padded_ = cu_seqlens_kv_per_step[i]
                         (
@@ -3090,7 +3077,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             attn_scale=softmax_scale,
                             dropout=dropout_p,
                             qkv_layout=qkv_layout,
-                            attn_mask_type=attn_mask_type_,
+                            attn_mask_type=attn_mask_type,
                             attn_bias_type=attn_bias_type,
                             attn_bias=attn_bias,
                             cu_seqlens_q_padded=cu_seqlens_q_padded_,
@@ -3201,7 +3188,6 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         ctx.use_fused_attention = use_fused_attention
         ctx.use_flash_attn_3 = use_flash_attn_3
         if qkv_format == "thd":
-            ctx.thd_attn_mask_type_per_step = thd_attn_mask_type_per_step
             ctx.max_seqlen_kv = max_seqlen_kv
             ctx.cu_seqlens_kv_padded = cu_seqlens_kv_padded
             ctx.thd_cu_seqlens_q_per_step = thd_cu_seqlens_q_per_step
@@ -3346,7 +3332,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                     if ctx.use_fused_attention:
                         # Set per-step parameters for THD
                         if ctx.qkv_format == "thd":
-                            attn_mask_type_ = ctx.thd_attn_mask_type_per_step[i]
+                            attn_mask_type_ = ctx.attn_mask_type
                             cu_seqlens_q_ = thd_cu_seqlens_q_per_step[i]
                             cu_seqlens_q_padded_ = thd_cu_seqlens_q_padded_per_step[i]
                             cu_seqlens_kv_padded_ = cu_seqlens_kv_padded
