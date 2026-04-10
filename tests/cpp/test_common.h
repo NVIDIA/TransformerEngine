@@ -319,6 +319,16 @@ class Tensor {
     tensor_.set_amax(nullptr, DType::kFloat32, tensor_.defaultShape);
   }
 
+  void set_amax(float amax_val) {
+    if (!amax_cpu_data_) {
+      amax_cpu_data_ = std::make_shared<float>(0);
+      float* amax_gpu = nullptr;
+      cudaMalloc((void**)&amax_gpu, sizeof(float));  // NOLINT(*)
+      tensor_.set_amax(amax_gpu, DType::kFloat32, std::vector<size_t>{1});
+    }
+    *amax_cpu_data_ = amax_val;
+  }
+
   void set_with_gemm_swizzled_scales(bool with_gemm_swizzled_scales){
     tensor_.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
   }
