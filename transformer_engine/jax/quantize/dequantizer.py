@@ -287,11 +287,11 @@ def _unswizzle_mxfp8_grouped_scale(scale_inv_flat, padded_scale_2d, is_colwise):
         unswizzled = jnp.transpose(reshaped, (0, 3, 2, 1, 4))
         # Back to transposed 2D, then un-transpose
         return jnp.transpose(unswizzled.reshape(rows, cols))
-    else:
-        rows, cols = padded_scale_2d
-        reshaped = scale_inv_flat.reshape(rows // 128, cols // 4, 32, 4, 4)
-        unswizzled = jnp.transpose(reshaped, (0, 3, 2, 1, 4))
-        return unswizzled.reshape(rows, cols)
+
+    rows, cols = padded_scale_2d
+    reshaped = scale_inv_flat.reshape(rows // 128, cols // 4, 32, 4, 4)
+    unswizzled = jnp.transpose(reshaped, (0, 3, 2, 1, 4))
+    return unswizzled.reshape(rows, cols)
 
 
 def _grouped_dequantize(grouped_scaled_tensor):

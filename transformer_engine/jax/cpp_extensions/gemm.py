@@ -1598,7 +1598,6 @@ class GroupedGemmPrimitive(BasePrimitive):
         workspace_size = get_cublas_workspace_size_bytes() * stream_count
         workspace_alignment_padding = 256
         tensor_scaling_sinv_aligment = 16
-        mxfp8_scaling_sinv_alignment_padding = 256
         # cuBLAS workspace ptr must be 256 bytes aligned but JAX buffers are not
         # necessarily 256 bytes aligned, we add some padding to ensure alignment.
         workspace_size += workspace_alignment_padding
@@ -2248,7 +2247,6 @@ def _quantize_inputs_if_needed(
             "Expected quantizer_set.x and quantizer_set.kernel to have the same type, but got"
             f" {type(quantizer_set.x)} and {type(quantizer_set.kernel)}"
         )
-    scaling_mode = quantizer_set.x.scaling_mode
     if (
         quantizer_set.x.scaling_mode.is_tensor_scaling()
         and is_fp8_gemm_with_all_layouts_supported()
@@ -2286,7 +2284,6 @@ def _get_num_gemms(
     lhs: Union[GroupedNoScaleTensor, GroupedScaledTensor1x],
     rhs: Union[GroupedNoScaleTensor, GroupedScaledTensor1x],
 ) -> int:
-    num_gemms = 0
     for x in [lhs, rhs]:
         if x.first_dims is not None:
             return x.first_dims.size
