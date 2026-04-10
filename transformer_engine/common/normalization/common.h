@@ -294,7 +294,7 @@ class CudnnNormalizationPlan : public NormalizationPlanBase {
   std::shared_ptr<fe::graph::Tensor_attributes> _z_mx_row, _z_mx_col, _sf_row, _sf_col;
   const bool _training;
   // BWD
-  std::shared_ptr<fe::graph::Tensor_attributes> _dz, _dx, _dgamma, _dbeta;
+  std::shared_ptr<fe::graph::Tensor_attributes> _dz, _dx, _dgamma, _dbeta, _add;
 
   fe::graph::Graph _graph;
   std::unordered_map<std::shared_ptr<fe::graph::Tensor_attributes>, void*> _variant_pack;

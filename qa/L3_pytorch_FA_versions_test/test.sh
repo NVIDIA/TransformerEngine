@@ -34,9 +34,6 @@ do
   else
     git clone https://github.com/Dao-AILab/flash-attention.git
     cd flash-attention/hopper && python setup.py install
-    python_path=`python -c "import site; print(site.getsitepackages()[0])"`
-    mkdir -p $python_path/flash_attn_3
-    cp flash_attn_interface.py $python_path/flash_attn_3/
     cd ../../
   fi
 

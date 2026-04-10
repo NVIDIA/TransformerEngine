@@ -30,6 +30,11 @@ class _FromMXFP8Func(torch.autograd.Function):
         dtype: torch.dtype,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
+        if tensor._rowwise_data is not None and tensor._rowwise_data.numel() == 0:
+            return torch.empty(tensor.size(), dtype=dtype, device=tensor.device)
+        if tensor._columnwise_data is not None and tensor._columnwise_data.numel() == 0:
+            return torch.empty(tensor.size(), dtype=dtype, device=tensor.device)
+
         dtype = torch_to_transformer_engine_dtype[dtype]
 
         # Make sure FP8 data is in expected format
@@ -84,12 +89,14 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
         quantizer: Optional[Quantizer],
         with_gemm_swizzled_scales: bool,
         *args,
+        fake_dtype: Optional[torch.dtype] = None,
         **kwargs,
     ):
         if cls is MXFP8TensorStorage:
             instance = object.__new__(cls)
+            instance._dtype = fake_dtype if fake_dtype is not None else torch.float32
         else:
-            instance = super().__new__(cls, *args, **kwargs)
+            instance = super().__new__(cls, *args, fake_dtype=fake_dtype, **kwargs)
         instance._rowwise_data = rowwise_data
         instance._columnwise_data = columnwise_data
         instance._rowwise_scale_inv = rowwise_scale_inv
@@ -139,6 +146,7 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
             "fp8_dtype": self._fp8_dtype,
             "quantizer": self._quantizer,
             "with_gemm_swizzled_scales": self._with_gemm_swizzled_scales,
+            "fake_dtype": self._dtype,
         }
 
     def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], MXFP8TensorStorage]:
@@ -175,8 +183,12 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
             return self._columnwise_data
         raise ValueError("No data to get, both rowwise_data and columnwise_data are False")
 
-    def dequantize(self, *, dtype: torch.dtype = torch.float32) -> torch.Tensor:
+    def dequantize(self, *, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
         """Dequantize to a higher precision."""
+        if dtype is None:
+            dtype = self._dtype
+        if self._rowwise_data is not None and self._rowwise_data.numel() == 0:
+            return torch.empty(self.size(), dtype=dtype, device=self.device)
         return _FromMXFP8Func.forward(None, self, dtype)
 
     def size(self, *args, **kwargs):
@@ -238,6 +250,7 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
             fp8_dtype=self._fp8_dtype,
             quantizer=self._quantizer,
             with_gemm_swizzled_scales=self._with_gemm_swizzled_scales,
+            fake_dtype=self._dtype,
         )
 
     def __repr__(self):

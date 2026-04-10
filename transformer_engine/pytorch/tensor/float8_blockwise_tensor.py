@@ -10,7 +10,6 @@ import warnings
 from typing import Any, Optional, Tuple, Union
 
 import torch
-
 import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
 from transformer_engine.common.recipe import Float8BlockScaling, Recipe
@@ -326,7 +325,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
         return (
             f"Float8BlockwiseQTensor(fp8_dtype={self._fp8_dtype},"
             f" is_2D_scaled={self._is_2D_scaled},"
-            f" data={self.dequantize(dtype=self.dtype)})"
+            f" data={self.dequantize()})"
         )
 
     def quantize_(
@@ -428,6 +427,30 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
                     " (scales and columnwise data untouched)."
                 )
             return Float8BlockwiseQTensor.make_like(tensor)
+
+        # as_strided op — applied by FSDP2 on the unsharded param.
+        # When shape and strides match (no-op), return self to preserve the quantized type.
+        # If shape differs (e.g. padding needed), fall through to dequantize.
+        if func == aten.as_strided.default:
+            tensor = args[0]
+            shape = args[1]
+            strides = args[2]
+            if (
+                len(shape) == len(strides) == 2
+                and tuple(strides) == (shape[-1], 1)
+                and tuple(shape) == tuple(tensor.size())
+            ):
+                return Float8BlockwiseQTensor.make_like(tensor)
+
+        # slice op — applied by FSDP2 when shards need unpadding.
+        # When the slice is a no-op (covers entire dimension), return self.
+        if func == aten.slice.Tensor:
+            tensor = args[0]
+            dim = args[1]
+            start = args[2]
+            length = args[3]
+            if start == 0 and length == tensor.size(dim):
+                return Float8BlockwiseQTensor.make_like(tensor)
 
         # record stream op
         if func == torch.ops.aten.record_stream.default:
@@ -575,7 +598,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
             return self._rowwise_data.shape
         if self._columnwise_data is not None:
             return self._columnwise_data.shape
-        raise RuntimeError("Float8BlockwiseQTensor has no data!")
+        return torch.Tensor.size(self)
 
     @property
     def is_cuda(self):
@@ -585,6 +608,120 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
         if self._columnwise_data is not None:
             return self._columnwise_data.is_cuda
         raise RuntimeError("Float8BlockwiseQTensor has no data!")
+
+    def fsdp_pre_all_gather(self, mesh, orig_size, contiguous_orig_stride, module, mp_policy):
+        """Called by FSDP2 before all-gather of weights for forward and backward passes.
+
+        Args:
+            mesh: DeviceMesh used by FSDP2 to shard the weights.
+            orig_size: Original size of the weight tensor.
+            contiguous_orig_stride: Original stride of the weight tensor.
+            module: FSDP-wrapped module containing this tensor.
+            mp_policy: Mixed precision policy used by FSDP2.
+
+        Returns:
+            sharded_tensors: Tuple of tensors to be all-gathered.
+            metadata: Metadata needed for reconstructing the tensor after all-gather.
+        """
+        # pylint: disable=unused-argument
+        # PyTorch FSDP2 private API – tested with PyTorch 2.5+;
+        from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
+        from transformer_engine.pytorch.distributed import _get_module_fsdp_state
+
+        if not self._is_2D_scaled:
+            raise NotImplementedError(
+                "FSDP2 is only supported for Float8BlockwiseQTensors with 2D block scaling "
+                "(block_scaling_dim=2). 1D block scaling is not supported because the scale "
+                "layout has M in dim1, which is incompatible with FSDP2 dim0 all-gather."
+            )
+
+        if self._rowwise_data is None or self._rowwise_scale_inv is None:
+            raise RuntimeError(
+                "Rowwise data must be available for FSDP2 all-gather with 2D block scaling."
+            )
+
+        fsdp_state = _get_module_fsdp_state(module)
+        param_group = fsdp_state._fsdp_param_group
+        if param_group is None:
+            raise RuntimeError(
+                "FSDP state for this module has no parameter group; "
+                "cannot determine reshard_after_forward."
+            )
+        reshard_after_forward = param_group._reshard_after_forward
+
+        # If weights are resharded after forward pass, only the relevant usage
+        # is needed based on whether it's a forward or backward pass.
+        # If not resharded, the same all-gathered weights are reused in backward,
+        # so both usages may be needed.
+        if reshard_after_forward:
+            training_state = param_group._training_state
+            is_backward_pass = training_state == TrainingState.PRE_BACKWARD
+            rowwise_usage = not is_backward_pass
+            columnwise_usage = is_backward_pass
+        else:
+            rowwise_usage = True
+            columnwise_usage = self._quantizer.columnwise_usage
+
+        # For 2D block scaling (128x128 blocks), columnwise data and scales are
+        # the transpose of rowwise data and scales. Only all-gather the rowwise
+        # tensors; columnwise will be derived locally via _create_columnwise()
+        # in post_all_gather, halving all-gather communication volume.
+        sharded_tensors = (self._rowwise_data, self._rowwise_scale_inv)
+        metadata = (self._fp8_dtype, self._is_2D_scaled, rowwise_usage, columnwise_usage)
+        return sharded_tensors, metadata
+
+    def fsdp_post_all_gather(
+        self,
+        all_gather_outputs: Tuple[torch.Tensor, ...],
+        metadata: Any,
+        param_dtype: torch.dtype,
+        *,
+        out: Optional[Float8BlockwiseQTensor] = None,
+    ):
+        """Called by FSDP2 after all-gather of weights for forward and backward passes.
+
+        Args:
+            all_gather_outputs: All-gathered tensors from fsdp_pre_all_gather.
+            metadata: Metadata from fsdp_pre_all_gather.
+            param_dtype: High-precision dtype of the tensor.
+            out: Existing tensor to update in-place (None on first iteration).
+
+        Returns:
+            Tuple of (Float8BlockwiseQTensor, all_gather_outputs).
+        """
+        fp8_dtype, is_2D_scaled, rowwise_usage, columnwise_usage = metadata
+
+        # Only rowwise data+scales were all-gathered (columnwise is derived locally).
+        rowwise_data, rowwise_scale_inv = all_gather_outputs[:2]
+        data_shape = rowwise_data.shape
+
+        if out is not None:
+            out._rowwise_data = rowwise_data
+            out._rowwise_scale_inv = rowwise_scale_inv
+        else:
+            out = Float8BlockwiseQTensor(
+                shape=data_shape,
+                dtype=param_dtype,
+                fp8_dtype=fp8_dtype,
+                rowwise_data=rowwise_data,
+                rowwise_scale_inv=rowwise_scale_inv,
+                columnwise_data=None,
+                columnwise_scale_inv=None,
+                quantizer=self._quantizer,
+                is_2D_scaled=is_2D_scaled,
+            )
+
+        # For 2D block scaling, derive columnwise data and scales from rowwise
+        # via local fp8 transpose.
+        if columnwise_usage:
+            out._create_columnwise()
+        # remove usages if not needed.
+        out.update_usage(
+            rowwise_usage=rowwise_usage,
+            columnwise_usage=columnwise_usage,
+        )
+        out._quantizer.set_usage(rowwise=rowwise_usage, columnwise=columnwise_usage)
+        return out, all_gather_outputs
 
 
 class _ViewFunc(torch.autograd.Function):

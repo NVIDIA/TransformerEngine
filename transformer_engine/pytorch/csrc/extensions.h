@@ -149,6 +149,25 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
     std::vector<at::Tensor> pre_gelu_out, bool grad, std::vector<at::Tensor> workspace,
     size_t workspaceSize, bool accumulate, bool use_split_accumulator, int math_sm_count);
 
+py::object te_general_grouped_gemm_for_grouped_tensor(
+    py::handle A, bool transa, py::handle B, bool transb, py::handle D, py::object bias,
+    at::Tensor alpha, at::Tensor beta, at::Tensor workspace_setup, at::Tensor workspace_cublas,
+    bool use_split_accumulator, int math_sm_count);
+
+py::object te_general_grouped_gemm_for_discrete_in(py::handle A, bool transa, py::handle B,
+                                                   bool transb, py::handle D, py::object bias,
+                                                   at::Tensor alpha, at::Tensor beta,
+                                                   at::Tensor workspace_setup,
+                                                   at::Tensor workspace_cublas,
+                                                   bool use_split_accumulator, int math_sm_count);
+
+py::object te_general_grouped_gemm_for_discrete_out(py::handle A, bool transa, py::handle B,
+                                                    bool transb, py::handle D, py::object bias,
+                                                    at::Tensor alpha, at::Tensor beta,
+                                                    at::Tensor workspace_setup,
+                                                    at::Tensor workspace_cublas,
+                                                    bool use_split_accumulator, int math_sm_count);
+
 /***************************************************************************************************
  * Transpose
  **************************************************************************************************/
@@ -289,6 +308,9 @@ py::object dequantize(const py::handle &input, DType otype);
 
 py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const size_t num_tensors,
                           std::optional<at::Tensor> first_dims);
+
+py::object bgrad_group_quantize(const at::Tensor &tensor, py::handle quantizer,
+                                const size_t num_tensors, std::optional<at::Tensor> first_dims);
 
 std::vector<py::object> multi_tensor_quantize(const std::vector<at::Tensor> &tensor_list,
                                               std::vector<py::handle> quantizer_list);
@@ -435,6 +457,14 @@ size_t get_cublasLt_version();
 
 size_t get_cudnn_version();
 
+std::vector<at::Tensor> convert_host_pointers_to_tensor(
+    std::vector<std::vector<at::Tensor>> tensor_lists);
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> get_device_pointer_for_data_and_scales(
+    std::vector<at::Tensor> data_tensors, std::vector<at::Tensor> scale_tensors, bool swizzle,
+    bool rowwise, transformer_engine::DType data_dtype);
+at::Tensor splits_to_offsets(const at::Tensor &first_dims, int64_t logical_last_dim);
+
 /***************************************************************************************************
  * Support THD format for Context Parallel
  **************************************************************************************************/
@@ -465,6 +495,10 @@ at::Tensor thd_get_partitioned_indices(const at::Tensor &cu_seqlens, int total_t
 
 void multi_tensor_scale_cuda(int chunk_size, at::Tensor noop_flag,
                              std::vector<std::vector<at::Tensor>> tensor_lists, float scale);
+
+void multi_tensor_scale_tensor_cuda(int chunk_size, at::Tensor is_infinite,
+                                    std::vector<std::vector<at::Tensor>> tensor_lists,
+                                    at::Tensor scale);
 
 std::tuple<at::Tensor, at::Tensor> multi_tensor_l2norm_cuda(
     int chunk_size, at::Tensor noop_flag, std::vector<std::vector<at::Tensor>> tensor_lists,
@@ -535,6 +569,8 @@ void fused_multi_row_unpadding(at::Tensor input, at::Tensor output,
  **************************************************************************************************/
 
 void inplace_swizzle_scale_for_gemm(py::handle &tensor);
+
+void grouped_swizzle_for_gemm(py::handle &tensor, bool rowwise, bool columnwise);
 
 /***************************************************************************************************
  * NVSHMEM APIs
