@@ -2991,7 +2991,10 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             # Per-step KV cu_seqlens (non-padded): how many actual KV tokens are
             # visible for each sequence.
             padded_chunk_sizes_kv = cu_seqlens_kv_padded[1:] - cu_seqlens_kv_padded[:-1]
-            thd_cu_seqlens_kv_per_step = [cu_seqlens_q_original.clone(), cu_seqlens_q_original.clone()]
+            thd_cu_seqlens_kv_per_step = [
+                cu_seqlens_q_original.clone(),
+                cu_seqlens_q_original.clone(),
+            ]
             for step_idx in range(2):
                 if causal:
                     # Causal: visible KV covers chunks 0..chunk_id
