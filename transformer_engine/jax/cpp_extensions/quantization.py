@@ -1095,16 +1095,18 @@ class GroupedQuantizePrimitive(BasePrimitive):
             rowwise_scale_inv_shape = (1,)
         rowwise_out_aval = jax.core.ShapedArray(shape=rowwise_out_shape, dtype=out_dtype)
 
+        updated_amax_aval = jax.core.ShapedArray(shape=(group_sizes_aval.size,), dtype=jnp.float32)
+
         use_v2 = GroupedQuantizePrimitive._use_v2_kernel(scaling_mode, x_aval.shape, flatten_axis)
         if use_v2:
-            # V2 path: 5th output is int64_workspace laid out as:
+            # V2 path: int64_workspace laid out as:
             #   [n_groups int64 group_sizes | n_groups+1 int64 offsets]
             # = (2*n_groups + 1) * sizeof(int64_t) bytes stored as uint8.
             n_groups = group_sizes_aval.size
-            fifth_out_aval = jax.core.ShapedArray(shape=((2 * n_groups + 1) * 8,), dtype=jnp.uint8)
+            int64_workspace_aval = jax.core.ShapedArray(shape=((2 * n_groups + 1) * 8,), dtype=jnp.uint8)
         else:
-            # V1 path: 5th output is amax
-            fifth_out_aval = jax.core.ShapedArray(shape=(group_sizes_aval.size,), dtype=jnp.float32)
+            # V1 path: Unused for V1 codepath
+            int64_workspace_aval = jax.core.ShapedArray(shape=(0,), dtype=jnp.uint8)
 
         if q_layout.has_colwise:
             colwise_out_shape = out_shape
@@ -1124,7 +1126,8 @@ class GroupedQuantizePrimitive(BasePrimitive):
             colwise_out_aval,
             rowwise_scale_inv_aval,
             colwise_scale_inv_aval,
-            fifth_out_aval,
+            updated_amax_aval,
+            int64_workspace_aval,
         )
 
     @staticmethod
@@ -1134,21 +1137,14 @@ class GroupedQuantizePrimitive(BasePrimitive):
         """
         # Phuong: keeping outer abstract so that we can add fuse dbias later
         (
-            rowwise_out,
-            colwise_out,
-            scale_inv,
-            colwise_scale_inv,
-            fifth_out,
+            rowwise_out_aval,
+            colwise_out_aval,
+            rowwise_scale_inv_aval,
+            colwise_scale_inv_aval,
+            updated_amax_aval,
+            _,
         ) = GroupedQuantizePrimitive.abstract(*args, **kwargs)
-        # When V2 is used, the inner abstract returns int64_workspace as the 5th output.
-        # The outer interface always presents amax (float32, n_groups) for a consistent API.
-        scaling_mode = kwargs.get("scaling_mode")
-        x_aval = args[0]
-        group_sizes_aval = args[2]
-        flatten_axis = kwargs.get("flatten_axis")
-        if GroupedQuantizePrimitive._use_v2_kernel(scaling_mode, x_aval.shape, flatten_axis):
-            fifth_out = jax.core.ShapedArray(shape=(group_sizes_aval.size,), dtype=jnp.float32)
-        return rowwise_out, colwise_out, scale_inv, colwise_scale_inv, fifth_out
+        return (rowwise_out_aval, colwise_out_aval, rowwise_scale_inv_aval, colwise_scale_inv_aval, updated_amax_aval)
 
     @staticmethod
     def lowering(
@@ -1216,7 +1212,8 @@ class GroupedQuantizePrimitive(BasePrimitive):
             colwise_out,
             rowwise_scale_inv,
             colwise_scale_inv,
-            fifth,
+            updated_amax,
+            _,
         ) = GroupedQuantizePrimitive.inner_primitive.bind(
             x,
             scale,
@@ -1227,13 +1224,7 @@ class GroupedQuantizePrimitive(BasePrimitive):
             flatten_axis=flatten_axis,
             scale_dtype=scale_dtype,
         )
-        use_v2 = GroupedQuantizePrimitive._use_v2_kernel(scaling_mode, x.shape, flatten_axis)
-        if use_v2:
-            # fifth is int64_workspace; return a dummy zero amax for interface compatibility
-            updated_amax = jnp.zeros((group_sizes.size,), jnp.float32)
-        else:
-            updated_amax = fifth
-        return (rowwise_out, colwise_out, rowwise_scale_inv, colwise_scale_inv, updated_amax)
+        return rowwise_out, colwise_out, rowwise_scale_inv, colwise_scale_inv, updated_amax
 
 
 register_primitive(GroupedQuantizePrimitive)

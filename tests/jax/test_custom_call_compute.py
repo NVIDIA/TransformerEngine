@@ -43,7 +43,6 @@ from transformer_engine.jax.quantize import (
     noop_quantizer_set,
     QuantizeMetaSet,
     QuantizeMeta,
-    get_device_compute_capability,
 )
 from transformer_engine.jax.quantize import helper
 from transformer_engine.jax.activation import activation
@@ -77,9 +76,6 @@ supported_scaling_modes = helper.get_supported_scaling_modes()
 non_fp4_supported_scaling_modes = [s for s in supported_scaling_modes if not s.is_nvfp4_scaling]
 supported_recipes = helper.get_supported_quantization_recipes()
 supported_recipes = [pytest.param(r, id=r.__class__.__name__) for r in supported_recipes]
-
-is_v2_grouped_gemm_supported = get_device_compute_capability(0) >= 100
-v2_grouped_gemm_unsupported_reason = "V2 grouped GEMM requires SM100+ (Blackwell or newer)"
 
 
 def is_shape_supported_by_mxfp8(input_shape):
@@ -1079,6 +1075,13 @@ class TestRandomizedHadamardTransform:
         (4, 8, 128),  # V2 MXFP8 eligible: K=128, M*32=256 both 128-aligned
     ],
 )
+@pytest_parametrize_wrapper(
+    "group_size_multiplier",
+    [
+        32,   # V1 MXFP8: group size must be multiple of 32
+        128,  # V2 MXFP8 eligible: group size must be multiple of 128
+    ],
+)
 @pytest_parametrize_wrapper("q_dtype", [jnp.float8_e4m3fn])
 @pytest_parametrize_wrapper("scaling_mode", non_fp4_supported_scaling_modes)
 @pytest_parametrize_wrapper("flatten_axis", [-1])
@@ -1088,22 +1091,12 @@ class TestRandomizedHadamardTransform:
 )
 class TestGroupedQuantize:
     def test_grouped_qdq(
-        self, in_dtype, input_shape, q_dtype, scaling_mode, q_layout, flatten_axis, with_group_sizes
+        self, in_dtype, input_shape, group_size_multiplier, q_dtype, scaling_mode, q_layout, flatten_axis, with_group_sizes
     ):
         n_groups, m, n = input_shape
         key = jax.random.PRNGKey(0)
         subkeys = jax.random.split(key, 2)
 
-        # Use 128 multiplier for V2-eligible MXFP8 shapes (both M and K 128-aligned)
-        # so that per-group row counts are also 128-aligned as required by the V2 kernel.
-        # Use 32 for other shapes (V1 handles arbitrary group sizes).
-        v2_eligible = (
-            scaling_mode == ScalingMode.MXFP8_1D_SCALING
-            and is_v2_grouped_gemm_supported
-            and (m * 32) % 128 == 0
-            and n % 128 == 0
-        )
-        group_size_multiplier = 128 if v2_eligible else 32
         input_shape = (m * group_size_multiplier, n)
 
         if with_group_sizes:
@@ -1133,28 +1126,6 @@ class TestGroupedQuantize:
         )
 
         assert_dequantized_grouped_scaled_tensor(scaled_tensor, x)
-
-        # Verify MXFP8 pre_swizzled flag for ROWWISE with explicit group_sizes.
-        # pre_swizzled=True indicates the V2 kernel was used (SM100+, 128-aligned dims).
-        if (
-            scaling_mode == ScalingMode.MXFP8_1D_SCALING
-            and q_layout == QuantizeLayout.ROWWISE
-            and with_group_sizes
-            and isinstance(scaled_tensor, GroupedScaledTensor1x)
-        ):
-            total_m = m * group_size_multiplier
-            k_dim = n
-            if is_v2_grouped_gemm_supported and total_m % 128 == 0 and k_dim % 128 == 0:
-                # V2 path on SM100+: scales are pre-swizzled for GEMM
-                assert scaled_tensor.pre_swizzled, (
-                    "V2 grouped quantize (SM100+, 128-aligned M and K) must produce"
-                    " pre_swizzled=True"
-                )
-            elif k_dim % 128 != 0:
-                # V1 path: non-128-aligned K forces V1 quantize
-                assert (
-                    not scaled_tensor.pre_swizzled
-                ), "V1 grouped quantize (non-128-aligned K) must produce pre_swizzled=False"
 
 
 @pytest_parametrize_wrapper("in_dtype", QUANTIZATION_INPUT_DTYPE)
@@ -1799,10 +1770,7 @@ class TestGroupedDense:
         group_sizes = group_sizes.at[1].set(0)
         assert group_sizes.sum() == m
 
-        # Scale group sizes by the multiplier.
-        # Use group_size_multiplier=128 for MXFP8 V2 tests so that each group's row count
-        # is divisible by 128, satisfying the V2 kernel's per-group alignment requirement.
-        # Use group_size_multiplier=32 for V1 tests or non-MXFP8 tests.
+        # Scale group sizes by the multiplier for alignment requirements.
         group_sizes = group_sizes * group_size_multiplier
         m = m * group_size_multiplier
 

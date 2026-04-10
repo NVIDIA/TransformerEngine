@@ -47,7 +47,7 @@ from ..quantize import (
     apply_padding_to_scale_inv,
     QuantizeLayout,
 )
-from .misc import get_padded_spec, is_all_reduce_in_float32
+from .misc import get_padded_spec, is_all_reduce_in_float32, get_min_device_compute_capability
 from ..sharding import (
     global_mesh_resource,
     tpsp_axis_size,
@@ -66,6 +66,7 @@ __all__ = [
     "sanitize_dims",
     "get_non_contracting_dims",
     "transpose_dims",
+    "is_v2_grouped_gemm_supported",
 ]
 
 
@@ -2035,8 +2036,7 @@ def _should_enforce_v2_grouped_gemm() -> bool:
             f"NVTE_JAX_ENFORCE_V2_GROUPED_GEMM must be an integer (0 or 1), got: {val!r}"
         ) from e
 
-
-def _can_use_v2_grouped_gemm(
+def _is_v2_grouped_gemm_supported(
     scaling_mode: ScalingMode,
     dtype: jnp.dtype,
     has_bias: bool,
@@ -2044,44 +2044,28 @@ def _can_use_v2_grouped_gemm(
     rhs_shape=None,
     lhs_axis_boundary=None,
     rhs_axis_boundary=None,
-) -> bool:
-    """Determine whether the cuda-graphable grouped GEMM implementation can be used based on the input parameters."""
-    # Use the cuda-graphable path for plain BF16 non-quantized inputs and MXFP8; fall back to
-    # the legacy nvte_multi_tensor_gemm path for all other cases (tensor-scaled FP8, etc.).
-    # Bias can be supported in a kernel or in pure-JAX in the future.
-
-    enforce_v2_gmm = _should_enforce_v2_grouped_gemm()
+) -> tuple[bool, str]:
+    """Determine whether the V2 grouped GEMM implementation can be used based on the input parameters."""
 
     if not _v2_grouped_gemm_available:
-        if enforce_v2_gmm:
-            raise RuntimeError(
-                "The TE V2 grouped GEMM is not available but NVTE_JAX_ENFORCE_V2_GROUPED_GEMM is"
-                " enabled. The reason for V2 grouped GEMM not being available:"
-                f" {_v2_grouped_gemm_available_reason}"
-            )
-        return False
+        return False, (
+            "TE was not compiled with support for the V2 grouped GEMM kernel, reason: "
+            f"{_v2_grouped_gemm_available_reason}"
+        )
 
     # nvte_grouped_gemm (the v2 kernel) requires SM100+ (Blackwell or newer).
     # Fall back to the v1 path on SM90 (Hopper) and older architectures.
-    if get_device_compute_capability(0) < 100:
-        if enforce_v2_gmm:
-            raise RuntimeError(
-                "The TE V2 grouped GEMM requires SM100+ (Blackwell or newer) but current device"
-                f" compute capability of GPU 0 is {get_device_compute_capability(0)} and"
-                " NVTE_JAX_ENFORCE_V2_GROUPED_GEMM is enabled."
-            )
-        return False
+    if get_min_device_compute_capability() < 100:
+        return False, (
+            "The TE V2 grouped GEMM requires SM100+ (Blackwell or newer) but current min device"
+            f" compute capability is {get_min_device_compute_capability()}."
+        )
 
     if has_bias:
-        if enforce_v2_gmm:
-            raise RuntimeError(
-                "Grouped GEMM with bias is not supported in the TE V2 grouped GEMM kernel, but"
-                " NVTE_JAX_ENFORCE_V2_GROUPED_GEMM is enabled and has_bias is True."
-            )
-        return False
+        return False, "Grouped GEMM with bias is not supported in the TE V2 grouped GEMM kernel."
 
     if scaling_mode == ScalingMode.NO_SCALING and dtype == jnp.bfloat16:
-        return True
+        return True, ""
 
     if scaling_mode == ScalingMode.MXFP8_1D_SCALING:
         # V2 MXFP8 requires that the total first dimension of both operands (up to
@@ -2090,27 +2074,22 @@ def _can_use_v2_grouped_gemm(
         if lhs_shape is not None and lhs_axis_boundary is not None:
             lhs_first_dim = math.prod(lhs_shape[:lhs_axis_boundary])
             if lhs_first_dim % 128 != 0:
-                if enforce_v2_gmm:
-                    raise RuntimeError(
-                        "The TE V2 grouped GEMM for MXFP8 requires the product of the first"
-                        " dimensions (up to axis_boundary) of LHS to be divisible by 128, but got"
-                        f" {lhs_first_dim} with lhs_shape={lhs_shape} and"
-                        f" lhs_axis_boundary={lhs_axis_boundary}, and"
-                        " NVTE_JAX_ENFORCE_V2_GROUPED_GEMM is enabled."
-                    )
-                return False
+                return False, (
+                    "The TE V2 grouped GEMM for MXFP8 requires the product of the first"
+                    " dimensions (up to axis_boundary) of LHS to be divisible by 128, but got"
+                    f" {lhs_first_dim} with lhs_shape={lhs_shape} and"
+                    f" lhs_axis_boundary={lhs_axis_boundary}."
+                )
         if rhs_shape is not None and rhs_axis_boundary is not None:
             rhs_first_dim = math.prod(rhs_shape[:rhs_axis_boundary])
             if rhs_first_dim % 128 != 0:
-                if enforce_v2_gmm:
-                    raise RuntimeError(
-                        "The TE V2 grouped GEMM for MXFP8 requires the product of the first"
-                        " dimensions (up to axis_boundary) of RHS to be divisible by 128, but got"
-                        f" {rhs_first_dim} with rhs_shape={rhs_shape} and"
-                        f" rhs_axis_boundary={rhs_axis_boundary}, and"
-                        " NVTE_JAX_ENFORCE_V2_GROUPED_GEMM is enabled."
-                    )
-                return False
+                return False, (
+                    "The TE V2 grouped GEMM for MXFP8 requires the product of the first"
+                    " dimensions (up to axis_boundary) of RHS to be divisible by 128, but got"
+                    f" {rhs_first_dim} with rhs_shape={rhs_shape} and"
+                    f" rhs_axis_boundary={rhs_axis_boundary}."
+                )
+
         # V2 MXFP8 also requires that the "last" dimension (after axis_boundary) of both
         # operands is a multiple of 128.  The V2 GEMM setup kernel computes per-group
         # scale pointers as ``data_offset / 32``, which equals ``K_blocks * last_dim``.
@@ -2122,38 +2101,63 @@ def _can_use_v2_grouped_gemm(
         if lhs_shape is not None and lhs_axis_boundary is not None:
             lhs_last_dim = math.prod(lhs_shape[lhs_axis_boundary:])
             if lhs_last_dim % 128 != 0:
-                if enforce_v2_gmm:
-                    raise RuntimeError(
-                        "The TE V2 grouped GEMM for MXFP8 requires the product of the last"
-                        " dimensions (after axis_boundary) of LHS to be divisible by 128, but got"
-                        f" {lhs_last_dim} with lhs_shape={lhs_shape} and"
-                        f" lhs_axis_boundary={lhs_axis_boundary}, and"
-                        " NVTE_JAX_ENFORCE_V2_GROUPED_GEMM is enabled."
-                    )
-                return False
+                return False, (
+                    "The TE V2 grouped GEMM for MXFP8 requires the product of the last"
+                    " dimensions (after axis_boundary) of LHS to be divisible by 128, but got"
+                    f" {lhs_last_dim} with lhs_shape={lhs_shape} and"
+                    f" lhs_axis_boundary={lhs_axis_boundary}."
+                )
         if rhs_shape is not None and rhs_axis_boundary is not None:
             rhs_last_dim = math.prod(rhs_shape[rhs_axis_boundary:])
             if rhs_last_dim % 128 != 0:
-                if enforce_v2_gmm:
-                    raise RuntimeError(
-                        "The TE V2 grouped GEMM for MXFP8 requires the product of the last"
-                        " dimensions (after axis_boundary) of RHS to be divisible by 128, but got"
-                        f" {rhs_last_dim} with rhs_shape={rhs_shape} and"
-                        f" rhs_axis_boundary={rhs_axis_boundary}, and"
-                        " NVTE_JAX_ENFORCE_V2_GROUPED_GEMM is enabled."
-                    )
-                return False
-        return True
+                return False, (
+                    "The TE V2 grouped GEMM for MXFP8 requires the product of the last"
+                    " dimensions (after axis_boundary) of RHS to be divisible by 128, but got"
+                    f" {rhs_last_dim} with rhs_shape={rhs_shape} and"
+                    f" rhs_axis_boundary={rhs_axis_boundary}."
+                )
+        return True, ""
 
-    if enforce_v2_gmm:
+    return False, (
+        "The TE V2 grouped GEMM currently only supports non-quantized BF16 and MXFP8 with 1D"
+        " block scaling, but NVTE_JAX_ENFORCE_V2_GROUPED_GEMM is enabled and the input"
+        f" parameters do not meet these requirements (scaling_mode= {scaling_mode},"
+        f" dtype={dtype}, has_bias={has_bias}, lhs_shape={lhs_shape}, rhs_shape={rhs_shape},"
+        f" lhs_axis_boundary={lhs_axis_boundary}, rhs_axis_boundary={rhs_axis_boundary})."
+    )
+
+def is_v2_grouped_gemm_supported(
+    scaling_mode: ScalingMode,
+    dtype: jnp.dtype,
+    has_bias: bool,
+    lhs_shape=None,
+    rhs_shape=None,
+    lhs_axis_boundary=None,
+    rhs_axis_boundary=None,
+) -> tuple[bool, str]:
+    """ Determine whether the V2 grouped GEMM implementation can be used based on the input parameters.
+    
+    Returns:
+        A tuple of (is_supported: bool, reason: str) where is_supported indicates whether the V2 grouped GEMM can be used, and reason provides an explanation if it is not supported.
+    """
+    # Use the V2 path for plain BF16 non-quantized inputs and MXFP8; fall back to
+    # the legacy nvte_multi_tensor_gemm path for all other cases (tensor-scaled FP8, etc.).
+    # Bias can be supported in a kernel or in pure-JAX in the future.
+
+    enforce_v2_gmm = _should_enforce_v2_grouped_gemm()
+
+    is_v2_supported, reason = _is_v2_grouped_gemm_supported(
+        scaling_mode, dtype, has_bias, lhs_shape, rhs_shape, lhs_axis_boundary, rhs_axis_boundary
+    )
+
+    if enforce_v2_gmm and not is_v2_supported:
         raise RuntimeError(
-            "The TE V2 grouped GEMM currently only supports non-quantized BF16 and MXFP8 with 1D"
-            " block scaling, but NVTE_JAX_ENFORCE_V2_GROUPED_GEMM is enabled and the input"
-            f" parameters do not meet these requirements (scaling_mode= {scaling_mode},"
-            f" dtype={dtype}, has_bias={has_bias}, lhs_shape={lhs_shape}, rhs_shape={rhs_shape},"
-            f" lhs_axis_boundary={lhs_axis_boundary}, rhs_axis_boundary={rhs_axis_boundary})."
+            "The TE V2 grouped GEMM is not supported for the given input parameters, but"
+            " NVTE_JAX_ENFORCE_V2_GROUPED_GEMM is enabled. The reason for V2 grouped GEMM not being"
+            f" supported: {reason}"
         )
-    return False
+
+    return is_v2_supported, reason
 
 
 def grouped_gemm(
@@ -2410,7 +2414,7 @@ def grouped_gemm(
             " and padded with zeros to not affect the result of the MoE block."
         )
 
-    use_v2_ffi = _can_use_v2_grouped_gemm(
+    use_v2_ffi, _ = is_v2_grouped_gemm_supported(
         scaling_mode,
         lhs_data.dtype,
         has_bias,
