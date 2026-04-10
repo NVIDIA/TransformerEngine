@@ -1176,6 +1176,8 @@ class GroupedLinear(TransformerEngineBaseModule):
             if cache_weight:
                 for i, ws in enumerate(new_workspaces):
                     if ws is not None:
+                        if isinstance(ws, torch.Tensor):
+                            ws = ws.detach()
                         self._fp8_workspaces[f"weight{i}"] = ws
 
         finally:
