@@ -33,6 +33,7 @@ class CrossEntropyFunction(torch.autograd.Function):
         dist_process_group=None,
         ignore_idx=-100,
         is_cg_capturable=False,
+        z_loss_weight=0.0,
     ):
         """
         The forward pass of the Cross Entropy loss. If dist_process_group is passed for distributed loss calculation, the input to each
@@ -45,7 +46,8 @@ class CrossEntropyFunction(torch.autograd.Function):
         label_smoothing (float): The amount of smoothing when computing the loss, where 0.0 means no smoothing.
         reduce_loss (bool): If true, returns the averaged loss across the B*SQ dimension.
         dist_process_group (torch.dist.ProcessGroup): The distributed process group the loss computation is split across, None if on 1 device.
-        ignore_idx (int): The index for which loss and gradients are made to zero
+        ignore_idx (int): The index for which loss and gradients are made to zero.
+        z_loss_weight (float): Weight for z-loss regularization. Adds z_loss_weight * log(Z)^2 per token.
 
         Returns:
         tensor: The computed loss.
@@ -57,6 +59,7 @@ class CrossEntropyFunction(torch.autograd.Function):
             reduce_loss,
             dist_process_group,
             ignore_idx,
+            z_loss_weight,
         )
 
         ctx.save_for_backward(inp.detach())
@@ -85,6 +88,7 @@ class CrossEntropyFunction(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
@@ -96,11 +100,12 @@ def parallel_cross_entropy(
     dist_process_group: Optional[torch.distributed.ProcessGroup] = None,
     ignore_idx: int = -100,
     is_cg_capturable: bool = False,
+    z_loss_weight: float = 0.0,
     *,
     _input: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """
-    Cross Entropy loss with optional distributed reduction.
+    Cross Entropy loss with optional distributed reduction and z-loss regularization.
 
     The input tensor can be in BF16/FP32, the loss and gradient calculation happens in
     FP32 only. The returned loss is always in FP32, the input gradients are upcasted
@@ -127,6 +132,9 @@ def parallel_cross_entropy(
         The index for which loss and gradients are made to zero.
     is_cg_capturable : bool, default = False
         Whether the operation is CUDA graph capturable.
+    z_loss_weight : float, default = 0.0
+        Weight for z-loss regularization. Adds ``z_loss_weight * log(Z)^2`` per token.
+        This value is a Triton compile-time constant; use a fixed value during training.
 
     Returns
     -------
@@ -141,6 +149,9 @@ def parallel_cross_entropy(
         )
         inp = _input
 
+    if not (z_loss_weight >= 0.0 and z_loss_weight != float("inf")):
+        raise ValueError(f"z_loss_weight must be a finite non-negative number, got {z_loss_weight}")
+
     return CrossEntropyFunction.apply(
         inp,
         target,
@@ -149,4 +160,5 @@ def parallel_cross_entropy(
         dist_process_group,
         ignore_idx,
         is_cg_capturable,
+        z_loss_weight,
     )
