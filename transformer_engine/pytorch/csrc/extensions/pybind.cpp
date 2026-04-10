@@ -234,32 +234,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("moe_unpermute_bwd", transformer_engine::pytorch::moe_unpermute_bwd, "MOE unpermute BWD",
         py::call_guard<py::gil_scoped_release>());
 
-  // Softmax functions
-  m.def("scaled_softmax_forward", &transformer_engine::pytorch::scaled_softmax_forward,
-        "Scaled Softmax FWD", py::call_guard<py::gil_scoped_release>());
-  m.def("scaled_softmax_backward", &transformer_engine::pytorch::scaled_softmax_backward,
-        "Scaled Softmax BWD", py::call_guard<py::gil_scoped_release>());
-  m.def("scaled_masked_softmax_forward",
-        &transformer_engine::pytorch::scaled_masked_softmax_forward, "Scaled Masked Softmax FWD",
-        py::call_guard<py::gil_scoped_release>());
-  m.def("scaled_masked_softmax_backward",
-        &transformer_engine::pytorch::scaled_masked_softmax_backward, "Scaled Masked Softmax BWD",
-        py::call_guard<py::gil_scoped_release>());
-  m.def("scaled_upper_triang_masked_softmax_forward",
-        &transformer_engine::pytorch::scaled_upper_triang_masked_softmax_forward,
-        "Scaled Upper-Triangular Masked Softmax FWD", py::call_guard<py::gil_scoped_release>());
-  m.def("scaled_upper_triang_masked_softmax_backward",
-        &transformer_engine::pytorch::scaled_upper_triang_masked_softmax_backward,
-        "Scaled Upper-Triangular Masked Softmax BWD", py::call_guard<py::gil_scoped_release>());
-  m.def("scaled_aligned_causal_masked_softmax_forward",
-        &transformer_engine::pytorch::scaled_aligned_causal_masked_softmax_forward,
-        "Scaled Bottom-Right Corner Aligned Masked Softmax FWD",
-        py::call_guard<py::gil_scoped_release>());
-  m.def("scaled_aligned_causal_masked_softmax_backward",
-        &transformer_engine::pytorch::scaled_aligned_causal_masked_softmax_backward,
-        "Scaled Bottom-Right Corner Aligned Masked Softmax BWD",
-        py::call_guard<py::gil_scoped_release>());
-
   // Other granular functions
   m.def("layernorm_fwd", &transformer_engine::pytorch::layernorm_fwd, "LayerNorm", py::arg("input"),
         py::arg("weight"), py::arg("bias"), py::arg("eps"), py::arg("ln_out"), py::arg("quantizer"),
