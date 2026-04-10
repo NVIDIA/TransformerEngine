@@ -112,9 +112,9 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
           dequantize_fp4_kernel<OType, WITH_GEMM_SWIZZLED_SCALES><<<blocks, threads, 0, stream>>>(
               input.data.dptr, reinterpret_cast<OType *>(output->data.dptr),
               reinterpret_cast<fp8e4m3 *>(input.scale_inv.dptr),
-              reinterpret_cast<float *>(input.amax.dptr), N, Mread,
-              input.scale_inv.shape.back(), num_scale_tiles_X););  // NOLINT(*)
-  );                                                               // NOLINT(*)
+              reinterpret_cast<float *>(input.amax.dptr), N, Mread, input.scale_inv.shape.back(),
+              num_scale_tiles_X););  // NOLINT(*)
+  );                                 // NOLINT(*)
   NVTE_CHECK_CUDA(cudaGetLastError());
 #else
   NVTE_ERROR("CUDA 12.8 or higher is needed for FP4 calculation!");
