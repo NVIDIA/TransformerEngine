@@ -549,7 +549,7 @@ class _GroupedLinear(torch.autograd.Function):
                     use_split_accumulator=wgrad_gemm_use_split_accumulator,
                     accumulate=(
                         accumulate_wgrad_into_param_main_grad
-                        if not getattr(weights[0], "overwrite_main_grad", False)
+                        if not getattr(origin_weights[0], "overwrite_main_grad", False)
                         else False
                     ),
                 )
