@@ -119,10 +119,17 @@ def test_custom_recipe_grouped_linear_sanity():
     num_gemms = 3
     in_features = 64
     out_features = 64
-    batch = 32
-    base = batch // num_gemms
-    rem = batch % num_gemms
-    m_splits = [base + (1 if i < rem else 0) for i in range(num_gemms)]
+    # Use 16-aligned splits on SM120 to satisfy FP8 GEMM leading-dimension requirements in backward.
+    is_sm120 = torch.cuda.get_device_capability() == (12, 0)
+    if is_sm120:    
+        split_m = 16
+        batch = num_gemms * split_m
+        m_splits = [split_m] * num_gemms
+    else:
+        batch = 32
+        base = batch // num_gemms
+        rem = batch % num_gemms
+        m_splits = [base + (1 if i < rem else 0) for i in range(num_gemms)]
 
     model = GroupedLinear(num_gemms, in_features, out_features, params_dtype=torch.bfloat16).cuda()
     inp = torch.randn(batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True)
@@ -272,7 +279,12 @@ def test_custom_recipe_factory_invocation_counts_and_cycling():
 
     in_features = 64
     out_features = 64
-    batch = 8
+    # Use single-aligned batch on SM120 only.
+    is_sm120 = torch.cuda.get_device_capability() == (12, 0)
+    if is_sm120:
+        batch = 16
+    else:
+        batch = 8
 
     op = Linear(in_features, out_features, params_dtype=torch.bfloat16)
     inp = torch.randn(batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True)
