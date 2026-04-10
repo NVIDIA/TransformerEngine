@@ -154,6 +154,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         fc2_weight_shape = (fc2_op.out_features, fc2_op.in_features)
         input_ = input_.reshape(-1, fc1_weight_shape[1])
         in_shape = list(input_.size())
+        assert in_shape[0] % 128 == 0, "Unsupported input shape for fused grouped MLP."
 
         num_groups = fc1_op.num_groups
         fc1_weight_param = fc1_op.weight if fc1_op.single_grouped_weight else fc1_op.weight0
