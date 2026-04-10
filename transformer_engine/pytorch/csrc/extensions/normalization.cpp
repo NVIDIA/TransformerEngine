@@ -146,9 +146,10 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
   // Resolve quantizer workspace for current scaling path.
   at::Tensor cs_workspace;
   if (impl == Impl::FUSED_NORM_AMAX_FP8) {
-    cs_workspace = quantizer_workspace.has_value()
-                       ? *quantizer_workspace
-                       : at::empty({2}, at::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    cs_workspace =
+        quantizer_workspace.has_value()
+            ? *quantizer_workspace
+            : at::empty({2}, at::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
   }
 
   // Construct unquantized output tensor if needed
@@ -393,9 +394,10 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
   // Resolve quantizer workspace for current scaling path.
   at::Tensor cs_workspace;
   if (impl == Impl::FUSED_NORM_AMAX_FP8) {
-    cs_workspace = quantizer_workspace.has_value()
-                       ? *quantizer_workspace
-                       : at::empty({2}, at::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    cs_workspace =
+        quantizer_workspace.has_value()
+            ? *quantizer_workspace
+            : at::empty({2}, at::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
   }
 
   // Construct unquantized output tensor if needed
