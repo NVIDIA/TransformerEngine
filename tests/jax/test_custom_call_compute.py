@@ -27,6 +27,7 @@ from transformer_engine.jax.cpp_extensions.normalization import (
 from transformer_engine.jax.cpp_extensions.quantization import (
     _jax_quantize,
     _jax_quantize_dbias,
+    GroupedQuantizePrimitive,
 )
 from transformer_engine.jax.cpp_extensions.misc import get_cudnn_version
 from transformer_engine.jax import cpp_extensions as tex
@@ -1112,6 +1113,20 @@ class TestGroupedQuantize:
 
         if flatten_axis == -2:
             input_shape = input_shape[:-1] + (2,) + input_shape[-1:]
+
+        # V2 MXFP8 quantize requires every individual group size to be a multiple of 128.
+        # group_size_multiplier=32 can produce groups of 32 or 64 rows which violate this.
+        # This cannot be checked at runtime (group sizes live on device), so we skip the
+        # test configuration rather than weaken the kernel-selection logic.
+        if (
+            scaling_mode == ScalingMode.MXFP8_1D_SCALING
+            and group_size_multiplier % 128 != 0
+            and GroupedQuantizePrimitive._use_v2_kernel(scaling_mode.value, input_shape, flatten_axis)
+        ):
+            pytest.skip(
+                f"MXFP8 V2 quantize requires each group to be 128-aligned; "
+                f"group_size_multiplier={group_size_multiplier} may produce smaller groups"
+            )
 
         x = jax.random.uniform(subkeys[1], input_shape, in_dtype)
 

@@ -1023,7 +1023,9 @@ class GroupedQuantizePrimitive(BasePrimitive):
              per-group row count non_group_m = prod(x_shape[1:eff]) must also be
              divisible by 128.
           4. For lhs-style tensors (eff == 1, shape M×K), individual group sizes must
-             be 128-aligned — this is a dynamic constraint assumed by the caller.
+             be 128-aligned — this is a dynamic constraint that cannot be checked here
+             because group sizes live on device. The caller is responsible for ensuring
+             this.
           5. The last logical dimension (contracting dim K or output dim N) must be
              divisible by 128, matching the V2 grouped GEMM constraint so that the
              two always agree on V1 vs V2.
@@ -1335,14 +1337,11 @@ def grouped_quantize(
         for i, quantizer_i in enumerate(quantizer.quantizers):
             quantizer_i.update(updated_amax[i].reshape((1,)))
 
-    # V2 grouped quantize (nvte_group_quantize) fuses the scale_inv swizzle into
-    # the kernel, so the resulting tensors are already swizzled for GEMM.
-    # Note: V1 also produces swizzled scales (via set_with_gemm_swizzled_scales),
-    # but pre_swizzled is only set for V2 to maintain pytree compatibility.
-    # The dequantizer detects MXFP8 swizzling via the scaling_mode instead.
-    use_v2 = GroupedQuantizePrimitive._use_v2_kernel(
-        quantizer.scaling_mode.value, x.shape, flatten_axis
-    )
+    # Both V1 (set_with_gemm_swizzled_scales) and V2 (nvte_group_quantize) produce
+    # pre-swizzled scale_inv tensors for use by the grouped GEMM kernel. Set
+    # pre_swizzled=True for all MXFP8 grouped quantization so that grouped_gemm can
+    # assert this invariant unconditionally.
+    is_mxfp8 = quantizer.scaling_mode == ScalingMode.MXFP8_1D_SCALING
     out = ScaledTensorFactory.create(
         data=rowwise_casted_output,
         scale_inv=rowwise_scale_inv,
@@ -1355,7 +1354,7 @@ def grouped_quantize(
         flatten_axis=flatten_axis,
         first_dims=ragged_first_dims,
         original_shape=original_shape,
-        pre_swizzled=use_v2,
+        pre_swizzled=is_mxfp8,
     )
     return out
 

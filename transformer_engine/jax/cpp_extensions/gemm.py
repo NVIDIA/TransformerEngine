@@ -2357,6 +2357,11 @@ def grouped_gemm(
         lhs_flatten_axis, rhs_flatten_axis
     )
 
+    # Re-read scaling_mode after quantization: if _quantize_inputs_if_needed converted
+    # GroupedNoScaleTensor → GroupedScaledTensor1x, the original scaling_mode (NO_SCALING)
+    # would cause the C++ kernel to skip scale_inv setup, triggering a cuBLAS assertion.
+    _, scaling_mode = _get_out_dtype_and_scaling_mode(lhs)
+
     if lhs.data.dtype == jnp.float8_e5m2 and rhs.data.dtype == jnp.float8_e5m2:
         raise ValueError("FP8 GEMM does not support E5M2 * E5M2")
 
@@ -2431,7 +2436,9 @@ def grouped_gemm(
     )
 
     if scaling_mode == ScalingMode.MXFP8_1D_SCALING:
-        # Pre-swizzling is required for both V1 and V2. GroupedQuantize handles this.
+        # Both V1 and V2 quantize produce pre-swizzled scales (V1 via
+        # set_with_gemm_swizzled_scales, V2 via nvte_group_quantize). Require that
+        # grouped_quantize has set pre_swizzled=True on the input tensors.
         assert lhs.pre_swizzled, "lhs must be pre-swizzled for MXFP8 1D scaling"
         assert rhs.pre_swizzled, "rhs must be pre-swizzled for MXFP8 1D scaling"
 
