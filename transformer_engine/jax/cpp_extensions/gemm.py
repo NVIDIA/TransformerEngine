@@ -9,7 +9,7 @@ import os
 from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import partial, reduce, cache
-from typing import Tuple, Sequence, Union
+from typing import Tuple, Sequence, Union, Optional
 from enum import Enum
 import warnings
 
@@ -2091,13 +2091,7 @@ def _is_v2_grouped_gemm_supported(
                 )
 
         # V2 MXFP8 also requires that the "last" dimension (after axis_boundary) of both
-        # operands is a multiple of 128.  The V2 GEMM setup kernel computes per-group
-        # scale pointers as ``data_offset / 32``, which equals ``K_blocks * last_dim``.
-        # The quantize kernel, however, pads the colwise scale stride to
-        # ``ceil(last_dim / 128) * 128``, making per-group padded scale larger than
-        # ``K_blocks * last_dim`` when ``last_dim`` is not 128-aligned.  This causes
-        # adjacent groups' scales to overlap in the flat buffer.  Fall back to V1 (which
-        # swizzles per-group scales individually) when the condition is not met.
+        # operands is a multiple of 128. This is because the MXFP8 scales must be padded to a multiple of (128, 4). The nvte_grouped_gemm setup kernels only handle the case when this dim is a multiple of 128 as well. If it is not, the GEMM setup kernel will not compute the scale offsets correctly and will read overlapping scales from the previous group, causing incorrect results.
         if lhs_shape is not None and lhs_axis_boundary is not None:
             lhs_last_dim = math.prod(lhs_shape[lhs_axis_boundary:])
             if lhs_last_dim % 128 != 0:
@@ -2159,6 +2153,150 @@ def is_v2_grouped_gemm_supported(
 
     return is_v2_supported, reason
 
+def _get_out_dtype_and_scaling_mode(x: Union[GroupedNoScaleTensor, GroupedScaledTensor1x]) -> Tuple[jnp.dtype, ScalingMode]:
+    if isinstance(x, GroupedScaledTensor1x):
+        out_dtype = x.dq_dtype
+        scaling_mode = x.scaling_mode
+    elif isinstance(x, GroupedNoScaleTensor):
+        out_dtype = x.data.dtype
+        scaling_mode = ScalingMode.NO_SCALING
+    else:
+        raise TypeError(
+            f"Input must be GroupedNoScaleTensor or GroupedScaledTensor1x, got type={type(x)}"
+        )
+    return out_dtype, scaling_mode
+
+def _infer_output_ragged_dims(lhs: Union[GroupedNoScaleTensor, GroupedScaledTensor1x], rhs: Union[GroupedNoScaleTensor, GroupedScaledTensor1x]) -> Tuple[Optional[jnp.ndarray], Optional[jnp.ndarray]]:
+    assert isinstance(lhs, (GroupedNoScaleTensor, GroupedScaledTensor1x)), f"Expected lhs to be GroupedNoScaleTensor or GroupedScaledTensor1x, got type={type(lhs)}"
+    assert isinstance(rhs, (GroupedNoScaleTensor, GroupedScaledTensor1x)), f"Expected rhs to be GroupedNoScaleTensor or GroupedScaledTensor1x, got type={type(rhs)}"
+
+    # Infer output dims from which operand has the ragged non-contracting dim.
+    if rhs.first_dims is not None or rhs.last_dims is not None:
+        # Wgrad: rhs contracting dim is ragged → output is uniform (G prefix from num_groups)
+        out_first_dims = None
+        out_last_dims = None
+    elif lhs.first_dims is not None:
+        out_first_dims = lhs.first_dims
+        out_last_dims = None
+    elif lhs.last_dims is not None:
+        out_first_dims = None
+        out_last_dims = lhs.last_dims
+    else:
+        out_first_dims = out_last_dims = None
+
+    return out_first_dims, out_last_dims
+
+def _adjust_contracting_dims_for_hopper_fp8_transpose(
+    lhs: Union[GroupedNoScaleTensor, GroupedScaledTensor1x],
+    rhs: Union[GroupedNoScaleTensor, GroupedScaledTensor1x],
+    lhs_contract_dim: Sequence[int],
+    rhs_contract_dim: Sequence[int],
+    lhs_is_trans: bool,
+    rhs_is_trans: bool,
+) -> Tuple[Sequence[int], Sequence[int]]:
+    # Only support FP8 GEMM with NT layout on Hopper and other earlier GPUs
+    # thus additional transpose is required
+    lhs_layout_is_T = lhs.data_layout == "T"
+    rhs_layout_is_T = rhs.data_layout == "T"
+    # we can't apply _shape_normalization on the grouped input
+    # thus we need to ensure that lhs is in N and rhs is in T
+    if lhs_is_trans != lhs_layout_is_T:
+        raise RuntimeError("lhs input must be transposed before calling grouped_gemm")
+    if (not rhs_is_trans) != rhs_layout_is_T:
+        raise RuntimeError("rhs input must be transposed before calling grouped_gemm")
+    lhs_is_trans = False
+    rhs_is_trans = True
+    lhs_ndim = len(lhs.original_shape)
+    rhs_ndim = len(rhs.original_shape)
+    if lhs_layout_is_T:
+        lhs_contract_dim = tuple((lhs_ndim - 1 - i) % lhs_ndim for i in lhs_contract_dim)
+    if rhs_layout_is_T:
+        # For rhs [G, K, N], need to exclude the G dim from contract_dim
+        if (
+            lhs_first_dims.size > 0 or lhs_last_dims.size > 0
+        ):  # fwd/dgrad: rhs has G as first dim
+            rhs_contract_dim = tuple(
+                (rhs_ndim - 1 - i) % (rhs_ndim - 1) + 1 for i in rhs_contract_dim
+            )
+        else:
+            rhs_contract_dim = tuple((rhs_ndim - 1 - i) % rhs_ndim for i in rhs_contract_dim)
+
+    return lhs_contract_dim, rhs_contract_dim
+
+def _quantize_inputs_if_needed(
+    lhs: Union[GroupedNoScaleTensor, GroupedScaledTensor1x],
+    rhs: Union[GroupedNoScaleTensor, GroupedScaledTensor1x],
+    quantizer_set: QuantizerSet,
+    lhs_is_trans: bool,
+    rhs_is_trans: bool,
+    lhs_flatten_axis: int,
+    rhs_flatten_axis: int,
+) -> Tuple[Union[GroupedNoScaleTensor, GroupedScaledTensor1x], Union[GroupedNoScaleTensor, GroupedScaledTensor1x]]:
+    if quantizer_set is noop_quantizer_set:
+        return lhs, rhs
+
+    assert isinstance(lhs, GroupedNoScaleTensor), f"Expected lhs to be GroupedNoScaleTensor before quantization, got type={type(lhs)}"
+    assert isinstance(rhs, GroupedNoScaleTensor), f"Expected rhs to be GroupedNoScaleTensor before quantization, got type={type(rhs)}"
+
+    if not isinstance(quantizer_set.x, GroupedQuantizer):
+        raise TypeError(
+            "Expected quantizer_set.x to be GroupedQuantizer, but got"
+            f" type={type(quantizer_set.x)}"
+        )
+    if type(quantizer_set.x) is not type(quantizer_set.kernel):
+        raise TypeError(
+            "Expected quantizer_set.x and quantizer_set.kernel to have the same type, but got"
+            f" {type(quantizer_set.x)} and {type(quantizer_set.kernel)}"
+        )
+    scaling_mode = quantizer_set.x.scaling_mode
+    if (
+        quantizer_set.x.scaling_mode.is_tensor_scaling()
+        and is_fp8_gemm_with_all_layouts_supported()
+    ):
+        lhs_is_rowwise = rhs_is_rowwise = True
+    else:
+        lhs_is_rowwise = not lhs_is_trans
+        rhs_is_rowwise = rhs_is_trans
+    quantizer_set.x.q_layout = (
+        QuantizeLayout.ROWWISE if lhs_is_rowwise else QuantizeLayout.COLWISE
+    )
+    quantizer_set.kernel.q_layout = (
+        QuantizeLayout.ROWWISE if rhs_is_rowwise else QuantizeLayout.COLWISE
+    )
+    empty_gs = jnp.empty((0,), jnp.int32)
+    active_group_sizes = next(
+        (
+            gs
+            for gs in [lhs.first_dims, lhs.last_dims, rhs.first_dims, rhs.last_dims]
+            if gs.size > 0
+        ),
+        empty_gs,
+    )
+    lhs_input_data = lhs.data
+    rhs_input_data = rhs.data
+    lhs_q = grouped_quantize(
+        lhs_input_data, quantizer_set.x, active_group_sizes, lhs_flatten_axis
+    )
+    rhs_q = grouped_quantize(
+        rhs_input_data, quantizer_set.kernel, group_sizes=None, flatten_axis=rhs_flatten_axis
+    )
+    return lhs_q, rhs_q
+
+def _get_num_gemms(
+    lhs: Union[GroupedNoScaleTensor, GroupedScaledTensor1x],
+    rhs: Union[GroupedNoScaleTensor, GroupedScaledTensor1x],
+) -> int:
+    num_gemms = 0
+    for x in [lhs, rhs]:
+        if x.first_dims is not None:
+            return x.first_dims.size
+        if x.last_dims is not None:
+            return x.last_dims.size
+    raise ValueError(
+        "Cannot infer number of gemms since neither lhs nor rhs has first_dims or last_dims. "
+        "Ensure that at least one of the input tensors has valid first_dims or last_dims."
+        "For grouped_gemm, at least one tensor must be ragged."
+    )
 
 def grouped_gemm(
     lhs: Union[GroupedNoScaleTensor, GroupedScaledTensor1x],
@@ -2193,179 +2331,47 @@ def grouped_gemm(
 
     empty_gs = jnp.empty((0,), jnp.int32)
 
-    # Extract data, dims, and metadata from tensor objects.
-    # Keep data in its original layout (may be 1D for quantized tensors) to preserve
-    # JAX sharding; the C++ side uses original_shape to derive m/n/k.
-    if isinstance(lhs, GroupedNoScaleTensor):
-        lhs_data = lhs.data
-        lhs_shape = lhs.original_shape
-        lhs_scale_inv = jnp.empty((0,), jnp.float32)
-        scaling_mode = ScalingMode.NO_SCALING
-        out_dtype = lhs.data.dtype
-        lhs_first_dims = lhs.first_dims if lhs.first_dims is not None else empty_gs
-        lhs_last_dims = lhs.last_dims if lhs.last_dims is not None else empty_gs
-    elif isinstance(lhs, GroupedScaledTensor1x):
-        lhs_shape = lhs.original_shape
-        lhs_data = lhs.data
-        lhs_scale_inv = lhs.scale_inv
-        scaling_mode = lhs.scaling_mode
-        out_dtype = lhs.dq_dtype
-        lhs_first_dims = lhs.first_dims if lhs.first_dims is not None else empty_gs
-        lhs_last_dims = lhs.last_dims if lhs.last_dims is not None else empty_gs
-    else:
-        raise TypeError(
-            f"lhs must be GroupedNoScaleTensor or GroupedScaledTensor1x, got type={type(lhs)}"
-        )
+    out_dtype, scaling_mode = _get_out_dtype_and_scaling_mode(lhs)
+    rhs_out_dtype, rhs_scaling_mode = _get_out_dtype_and_scaling_mode(rhs)
+    assert out_dtype == rhs_out_dtype, f"Mismatched output dtypes: {out_dtype} vs {rhs_out_dtype}"
+    assert scaling_mode == rhs_scaling_mode, f"Mismatched scaling modes: {scaling_mode} vs {rhs_scaling_mode}"
+    del rhs_out_dtype, rhs_scaling_mode
 
-    if isinstance(rhs, GroupedNoScaleTensor):
-        rhs_data = rhs.data
-        rhs_shape = rhs.original_shape
-        rhs_scale_inv = jnp.empty((0,), jnp.float32)
-        rhs_first_dims = rhs.first_dims if rhs.first_dims is not None else empty_gs
-        rhs_last_dims = rhs.last_dims if rhs.last_dims is not None else empty_gs
-    elif isinstance(rhs, GroupedScaledTensor1x):
-        rhs_shape = rhs.original_shape
-        rhs_data = rhs.data
-        rhs_scale_inv = rhs.scale_inv
-        rhs_first_dims = rhs.first_dims if rhs.first_dims is not None else empty_gs
-        rhs_last_dims = rhs.last_dims if rhs.last_dims is not None else empty_gs
-        if isinstance(lhs, GroupedScaledTensor1x) and lhs.scaling_mode != rhs.scaling_mode:
-            raise ValueError(
-                f"Mismatched scaling modes: lhs.scaling_mode={lhs.scaling_mode},"
-                f" rhs.scaling_mode={rhs.scaling_mode}"
-            )
-        if isinstance(lhs, GroupedScaledTensor1x):
-            scaling_mode = lhs.scaling_mode
-    else:
-        raise TypeError(
-            f"rhs must be GroupedNoScaleTensor or GroupedScaledTensor1x, got type={type(rhs)}"
-        )
-
-    # Infer output dims from which operand has the ragged non-contracting dim.
-    if rhs_first_dims.size > 0 or rhs_last_dims.size > 0:
-        # Wgrad: rhs contracting dim is ragged → output is uniform (G prefix from num_groups)
-        out_first_dims = empty_gs
-        out_last_dims = empty_gs
-    elif lhs_first_dims.size > 0:
-        out_first_dims = lhs_first_dims
-        out_last_dims = empty_gs
-    elif lhs_last_dims.size > 0:
-        out_first_dims = empty_gs
-        out_last_dims = lhs_last_dims
-    else:
-        out_first_dims = out_last_dims = empty_gs
+    out_first_dims, out_last_dims = _infer_output_ragged_dims(lhs, rhs)
 
     out_dtype = preferred_element_type or out_dtype
 
     lhs_contract_dim, rhs_contract_dim = contracting_dims
 
-    lhs_is_trans = lhs_contract_dim[-1] != len(lhs_shape) - 1
+    lhs_is_trans = lhs_contract_dim[-1] != len(lhs.original_shape) - 1
     lhs_flatten_axis = len(lhs_contract_dim) * (1 if lhs_is_trans else -1)
 
     # rhs_is_trans: K is the last dim of rhs (i.e., rhs is in "T" layout).
-    rhs_is_trans = rhs_contract_dim[-1] == len(rhs_shape) - 1
+    rhs_is_trans = rhs_contract_dim[-1] == len(rhs.original_shape) - 1
     rhs_flatten_axis = -len(rhs_contract_dim) if rhs_is_trans else 1 + len(rhs_contract_dim)
 
-    if (
-        not isinstance(lhs, ScaledTensor)
-        and not isinstance(rhs, ScaledTensor)
-        and quantizer_set != noop_quantizer_set
-    ):
-        if not isinstance(quantizer_set.x, GroupedQuantizer):
-            raise TypeError(
-                "Expected quantizer_set.x to be GroupedQuantizer, but got"
-                f" type={type(quantizer_set.x)}"
-            )
-        if type(quantizer_set.x) is not type(quantizer_set.kernel):
-            raise TypeError(
-                "Expected quantizer_set.x and quantizer_set.kernel to have the same type, but got"
-                f" {type(quantizer_set.x)} and {type(quantizer_set.kernel)}"
-            )
-        scaling_mode = quantizer_set.x.scaling_mode
-        if (
-            quantizer_set.x.scaling_mode.is_tensor_scaling()
-            and is_fp8_gemm_with_all_layouts_supported()
-        ):
-            lhs_is_rowwise = rhs_is_rowwise = True
-        else:
-            lhs_is_rowwise = not lhs_is_trans
-            rhs_is_rowwise = rhs_is_trans
-        quantizer_set.x.q_layout = (
-            QuantizeLayout.ROWWISE if lhs_is_rowwise else QuantizeLayout.COLWISE
-        )
-        quantizer_set.kernel.q_layout = (
-            QuantizeLayout.ROWWISE if rhs_is_rowwise else QuantizeLayout.COLWISE
-        )
-        active_group_sizes = next(
-            (
-                gs
-                for gs in [lhs_first_dims, lhs_last_dims, rhs_first_dims, rhs_last_dims]
-                if gs.size > 0
-            ),
-            empty_gs,
-        )
-        lhs_input_data = lhs.data if isinstance(lhs, GroupedNoScaleTensor) else lhs_data
-        rhs_input_data = rhs.data if isinstance(rhs, GroupedNoScaleTensor) else rhs_data
-        lhs_q = grouped_quantize(
-            lhs_input_data, quantizer_set.x, active_group_sizes, lhs_flatten_axis
-        )
-        rhs_q = grouped_quantize(
-            rhs_input_data, quantizer_set.kernel, group_sizes=None, flatten_axis=rhs_flatten_axis
-        )
-        lhs_data = lhs_q.data
-        rhs_data = rhs_q.data
-        lhs_scale_inv = lhs_q.scale_inv
-        rhs_scale_inv = rhs_q.scale_inv
-        lhs_shape = lhs_q.original_shape
-        rhs_shape = rhs_q.original_shape
+    lhs, rhs = _quantize_inputs_if_needed(
+        lhs, rhs,
+        quantizer_set,
+        lhs_is_trans, rhs_is_trans,
+        lhs_flatten_axis, rhs_flatten_axis
+    )
 
-    if lhs_data.dtype == jnp.float8_e5m2 and rhs_data.dtype == jnp.float8_e5m2:
+    if lhs.data.dtype == jnp.float8_e5m2 and rhs.data.dtype == jnp.float8_e5m2:
         raise ValueError("FP8 GEMM does not support E5M2 * E5M2")
 
-    # Only support FP8 GEMM with NT layout on Hopper and other earlier GPUs
-    # thus additional transpose is required
     if scaling_mode.is_tensor_scaling() and not is_fp8_gemm_with_all_layouts_supported():
-        if isinstance(lhs, ScaledTensor) and isinstance(rhs, ScaledTensor):
-            lhs_layout_is_T = lhs.data_layout == "T"
-            rhs_layout_is_T = rhs.data_layout == "T"
-        else:
-            lhs_layout_is_T = lhs_q.data_layout == "T"
-            rhs_layout_is_T = rhs_q.data_layout == "T"
-        # we can't apply _shape_normalization on the grouped input
-        # thus we need to ensure that lhs is in N and rhs is in T
-        if lhs_is_trans != lhs_layout_is_T:
-            raise RuntimeError("lhs input must be transposed before calling grouped_gemm")
-        if (not rhs_is_trans) != rhs_layout_is_T:
-            raise RuntimeError("rhs input must be transposed before calling grouped_gemm")
-        lhs_is_trans = False
-        rhs_is_trans = True
-        lhs_ndim = len(lhs_shape)
-        rhs_ndim = len(rhs_shape)
-        if lhs_layout_is_T:
-            lhs_contract_dim = tuple((lhs_ndim - 1 - i) % lhs_ndim for i in lhs_contract_dim)
-        if rhs_layout_is_T:
-            # For rhs [G, K, N], need to exclude the G dim from contract_dim
-            if (
-                lhs_first_dims.size > 0 or lhs_last_dims.size > 0
-            ):  # fwd/dgrad: rhs has G as first dim
-                rhs_contract_dim = tuple(
-                    (rhs_ndim - 1 - i) % (rhs_ndim - 1) + 1 for i in rhs_contract_dim
-                )
-            else:
-                rhs_contract_dim = tuple((rhs_ndim - 1 - i) % rhs_ndim for i in rhs_contract_dim)
+        lhs_contract_dim, rhs_contract_dim = _adjust_contracting_dims_for_hopper_fp8_transpose(
+            lhs, rhs,
+            lhs_contract_dim, rhs_contract_dim,
+            lhs_is_trans, rhs_is_trans
+        )
 
     # Compute N-D axis boundaries from final (post-adjustment) contracting dims.
     lhs_axis_boundary = get_lhs_axis_boundary(lhs_contract_dim, lhs_is_trans)
     rhs_axis_boundary = get_rhs_axis_boundary(rhs_contract_dim, rhs_is_trans)
 
-    num_gemms = (
-        lhs_first_dims.size
-        or lhs_last_dims.size
-        or rhs_first_dims.size
-        or rhs_last_dims.size
-        or out_first_dims.size
-        or out_last_dims.size
-    )
+    num_gemms = _get_num_gemms(lhs, rhs)
     if num_gemms == 0:
         raise ValueError(
             "grouped_gemm requires at least one non-empty dimension array. "
@@ -2374,26 +2380,26 @@ def grouped_gemm(
 
     # Pre-compute collapsed 2D sizes from original N-D shapes.
     # These are static Python ints passed as primitive parameters (must be hashable).
-    lhs_left_size = math.prod(lhs_shape[:lhs_axis_boundary])
-    lhs_right_size = math.prod(lhs_shape[lhs_axis_boundary:])
-    rhs_left_size = math.prod(rhs_shape[:rhs_axis_boundary])
-    rhs_right_size = math.prod(rhs_shape[rhs_axis_boundary:])
+    lhs_left_size = math.prod(lhs.original_shape[:lhs_axis_boundary])
+    lhs_right_size = math.prod(lhs.original_shape[lhs_axis_boundary:])
+    rhs_left_size = math.prod(rhs.original_shape[:rhs_axis_boundary])
+    rhs_right_size = math.prod(rhs.original_shape[rhs_axis_boundary:])
 
     # Pre-compute output shape from N-D input shapes (static Python ints).
     if lhs_is_trans:
-        lhs_non_contracting = lhs_shape[lhs_axis_boundary:]
+        lhs_non_contracting = lhs.original_shape[lhs_axis_boundary:]
     else:
-        lhs_non_contracting = lhs_shape[:lhs_axis_boundary]
+        lhs_non_contracting = lhs.original_shape[:lhs_axis_boundary]
     if rhs_is_trans:
-        if rhs_first_dims.size > 0 or rhs_last_dims.size > 0:
+        if rhs.first_dims is not None or rhs.last_dims is not None:
             # wgrad: rhs (e.g. grad_T of shape (N, M)) has no G batch dim; include all dims
-            rhs_non_contracting = tuple(rhs_shape[d] for d in range(rhs_axis_boundary))
+            rhs_non_contracting = tuple(rhs.original_shape[d] for d in range(rhs_axis_boundary))
         else:
             # fwd/dgrad: rhs (e.g. kernel_T of shape (G, N, K)) has G batch dim at dim 0; skip it
-            rhs_non_contracting = tuple(rhs_shape[d] for d in range(rhs_axis_boundary) if d != 0)
+            rhs_non_contracting = tuple(rhs.original_shape[d] for d in range(rhs_axis_boundary) if d != 0)
     else:
-        rhs_non_contracting = rhs_shape[rhs_axis_boundary:]
-    if rhs_first_dims.size > 0 or rhs_last_dims.size > 0:
+        rhs_non_contracting = rhs.original_shape[rhs_axis_boundary:]
+    if rhs.first_dims is not None or rhs.last_dims is not None:
         out_shape = (num_gemms, *lhs_non_contracting, *rhs_non_contracting)
     else:
         out_shape = (*lhs_non_contracting, *rhs_non_contracting)
@@ -2416,31 +2422,19 @@ def grouped_gemm(
 
     use_v2_ffi, _ = is_v2_grouped_gemm_supported(
         scaling_mode,
-        lhs_data.dtype,
+        lhs.data.dtype,
         has_bias,
-        lhs_shape=lhs_shape,
-        rhs_shape=rhs_shape,
+        lhs_shape=lhs.original_shape,
+        rhs_shape=rhs.original_shape,
         lhs_axis_boundary=lhs_axis_boundary,
         rhs_axis_boundary=rhs_axis_boundary,
     )
 
-    # V2 grouped GEMM requires MXFP8 inputs to be pre-swizzled by V2 grouped quantize
-    # (nvte_group_quantize fuses the swizzle). The C++ V2 GEMM FFI does not re-swizzle.
-    if use_v2_ffi and scaling_mode == ScalingMode.MXFP8_1D_SCALING:
-        if isinstance(lhs, GroupedScaledTensor1x) and not lhs.pre_swizzled:
-            raise ValueError(
-                "V2 grouped GEMM requires MXFP8 lhs scale_inv to be pre-swizzled. "
-                "GroupedScaledTensor1x.pre_swizzled is False. "
-                "Use V2 grouped quantize (nvte_group_quantize, requires SM100+ and "
-                "128-aligned shapes) to produce pre-swizzled tensors."
-            )
-        if isinstance(rhs, GroupedScaledTensor1x) and not rhs.pre_swizzled:
-            raise ValueError(
-                "V2 grouped GEMM requires MXFP8 rhs scale_inv to be pre-swizzled. "
-                "GroupedScaledTensor1x.pre_swizzled is False. "
-                "Use V2 grouped quantize (nvte_group_quantize, requires SM100+ and "
-                "128-aligned shapes) to produce pre-swizzled tensors."
-            )
+    if scaling_mode == ScalingMode.MXFP8_1D_SCALING:
+        # Pre-swizzling is required for both V1 and V2. GroupedQuantize handles this.
+        assert lhs.pre_swizzled, "lhs must be pre-swizzled for MXFP8 1D scaling"
+        assert rhs.pre_swizzled, "rhs must be pre-swizzled for MXFP8 1D scaling"
+
 
     if use_v2_ffi:
         additional_arg_0 = jnp.ones((num_gemms,), jnp.float32)  # alpha
@@ -2450,17 +2444,17 @@ def grouped_gemm(
         additional_arg_1 = jnp.zeros((0,), jnp.int32)  # unused placeholder
 
     (out,) = GroupedGemmPrimitive.outer_primitive.bind(
-        lhs_data,
-        lhs_scale_inv,
-        rhs_data,
-        rhs_scale_inv,
+        lhs.data,
+        lhs.scale_inv if isinstance(lhs, GroupedScaledTensor1x) else jnp.empty((0,), jnp.float32),
+        rhs.data,
+        rhs.scale_inv if isinstance(rhs, GroupedScaledTensor1x) else jnp.empty((0,), jnp.float32),
         bias,
-        lhs_first_dims,
-        lhs_last_dims,
-        rhs_first_dims,
-        rhs_last_dims,
-        out_first_dims,
-        out_last_dims,
+        lhs.first_dims if lhs.first_dims is not None else empty_gs,
+        lhs.last_dims if lhs.last_dims is not None else empty_gs,
+        rhs.first_dims if rhs.first_dims is not None else empty_gs,
+        rhs.last_dims if rhs.last_dims is not None else empty_gs,
+        out_first_dims if out_first_dims is not None else empty_gs,
+        out_last_dims if out_last_dims is not None else empty_gs,
         additional_arg_0,
         additional_arg_1,
         lhs_is_trans=lhs_is_trans,
