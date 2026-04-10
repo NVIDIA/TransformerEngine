@@ -178,8 +178,12 @@ void run_grouped_gemm_case(const TestParams& params) {
   GTEST_SKIP() << "Grouped GEMM requires cuBLAS 13.3+, but compile-time cuBLAS version is "
                << CUBLAS_VERSION << ".";
 #else
-  if (getDeviceComputeCapability() < blackwellComputeCapability) {
+  const int compute_capability = getDeviceComputeCapability();
+  if (compute_capability < blackwellComputeCapability) {
     GTEST_SKIP() << "Grouped GEMM requires Blackwell (SM100) or newer.";
+  }
+  if (compute_capability == 120) {
+    GTEST_SKIP() << "Grouped GEMM is currently unsupported on SM120.";
   }
 
   const std::vector<std::tuple<size_t, size_t, size_t>> shapes = make_shapes(params.shape_case);
@@ -356,8 +360,12 @@ void run_grouped_gemm_discrete_out_case(const TestParams& params) {
   GTEST_SKIP() << "Grouped GEMM requires cuBLAS 13.3+, but compile-time cuBLAS version is "
                << CUBLAS_VERSION << ".";
 #else
-  if (getDeviceComputeCapability() < blackwellComputeCapability) {
+  const int compute_capability = getDeviceComputeCapability();
+  if (compute_capability < blackwellComputeCapability) {
     GTEST_SKIP() << "Grouped GEMM requires Blackwell (SM100) or newer.";
+  }
+  if (compute_capability == 120) {
+    GTEST_SKIP() << "Grouped GEMM is currently unsupported on SM120.";
   }
 
   const std::vector<std::tuple<size_t, size_t, size_t>> shapes = make_shapes(params.shape_case);
@@ -527,8 +535,12 @@ void run_grouped_gemm_discrete_in_case(const TestParams& params) {
   GTEST_SKIP() << "Grouped GEMM requires cuBLAS 13.3+, but compile-time cuBLAS version is "
                << CUBLAS_VERSION << ".";
 #else
-  if (getDeviceComputeCapability() < blackwellComputeCapability) {
+  const int compute_capability = getDeviceComputeCapability();
+  if (compute_capability < blackwellComputeCapability) {
     GTEST_SKIP() << "Grouped GEMM requires Blackwell (SM100) or newer.";
+  }
+  if (compute_capability == 120) {
+    GTEST_SKIP() << "Grouped GEMM is currently unsupported on SM120.";
   }
 
   const std::vector<std::tuple<size_t, size_t, size_t>> shapes = make_shapes(params.shape_case);
