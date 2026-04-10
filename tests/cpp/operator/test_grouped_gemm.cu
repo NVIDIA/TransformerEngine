@@ -252,6 +252,9 @@ inline std::string grouped_gemm_skip_reason(const TestParams& params) {
     return "Grouped GEMM on Hopper (SM90) requires cuBLAS 13.4+, but run-time cuBLAS "
            "version is " + std::to_string(cublas_ver) + ".";
   }
+  if (cc == 120 || cc == 121) {
+    return "Grouped GEMM is currently unsupported on SM12x architectures.";
+  }
   if (params.recipe != InputRecipe::kBF16) {
     const bool is_blackwell_plus = cc >= blackwellComputeCapability;
     const bool fp8_block = is_fp8_block_recipe(params.recipe);
