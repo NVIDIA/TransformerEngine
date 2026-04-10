@@ -2872,6 +2872,8 @@ def test_grouped_gemm_grouped_tensor(z, m, n, k, case, layout, accumulate) -> No
         pytest.skip("Grouped GEMM requires cuBLAS 13.3+.")
     if torch.cuda.get_device_capability() < (10, 0):
         pytest.skip("Grouped GEMM requires Blackwell (SM100) or newer.")
+    if torch.cuda.get_device_capability() == (12, 0):
+        pytest.skip("Grouped GEMM is currently unsupported on SM120.")
     if not is_bf16_available():
         pytest.skip("bfloat16 is required for grouped GEMM test.")
 
@@ -3026,6 +3028,8 @@ def test_grouped_gemm_grouped_tensor_zero_work(layout, accumulate, quant_type) -
     """
     if torch.cuda.get_device_capability() < (10, 0):
         pytest.skip("Grouped GEMM requires Blackwell (SM100) or newer.")
+    if torch.cuda.get_device_capability() == (12, 0):
+        pytest.skip("Grouped GEMM is currently unsupported on SM120.")
     if not is_bf16_available():
         pytest.skip("bfloat16 is required for grouped GEMM test.")
     if quant_type == "mxfp8" and not mxfp8_available:
@@ -3168,6 +3172,8 @@ def test_grouped_gemm_grouped_tensor_mxfp8(
         pytest.skip("Grouped GEMM requires cuBLAS 13.3+.")
     if torch.cuda.get_device_capability() < (10, 0):
         pytest.skip("Grouped GEMM requires Blackwell (SM100) or newer.")
+    if torch.cuda.get_device_capability() == (12, 0):
+        pytest.skip("Grouped GEMM is currently unsupported on SM120.")
     if dtype == torch.bfloat16 and not is_bf16_available():
         pytest.skip("bfloat16 is required for grouped GEMM test.")
 
