@@ -533,8 +533,13 @@ class _Linear(torch.autograd.Function):
             nvtx_label = f"{nvtx_label}.{ctx.ub_name}"
 
         with get_nvtx_range_context("_Linear_backward"):
-            inputmat, weight_fp8, saved_weight, bias = (  # pylint: disable=unbalanced-tuple-unpacking
-                restore_from_func_ctx(ctx)
+            (
+                inputmat,
+                weight_fp8,
+                saved_weight,
+                bias,
+            ) = restore_from_func_ctx(  # pylint: disable=unbalanced-tuple-unpacking
+                ctx
             )
 
             # Restore from weakref to get original weight python object
