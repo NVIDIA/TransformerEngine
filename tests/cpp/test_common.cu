@@ -441,17 +441,20 @@ void Tensor::to_cpu() const {
                 cudaMemcpyDeviceToHost);
   }
   if (isFp8Type(dtype()) || isFp4Type(dtype())) {
-    if ((tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING)) {
+    if ((tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING)
+        || (tensor_.scaling_mode() == NVTE_NVFP4_1D_SCALING)) {
       if (tensor_.amax() != nullptr){
         cudaMemcpy(amax_cpu_data_.get(),
                   tensor_.amax(),
                   sizeof(float),
                   cudaMemcpyDeviceToHost);
       }
-      cudaMemcpy(scale_cpu_data_.get(),
-                 tensor_.scale(),
-                 sizeof(float),
-                 cudaMemcpyDeviceToHost);
+      if (tensor_.scale() != nullptr) {
+        cudaMemcpy(scale_cpu_data_.get(),
+                   tensor_.scale(),
+                   sizeof(float),
+                   cudaMemcpyDeviceToHost);
+      }
     }
     auto [rowwise_scale_meta, colwise_scale_meta] = get_scales(s, tensor_.scaling_mode());
     if (rowwise_) {
@@ -509,7 +512,8 @@ void Tensor::from_cpu() const {
 void Tensor::set_scale(float scale) {
   if (isFp8Type(dtype()) || isFp4Type(dtype())) {
     NVTE_CHECK(scale_cpu_data_);
-    if (tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING) {
+    if (tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING
+        || tensor_.scaling_mode() == NVTE_NVFP4_1D_SCALING) {
       *scale_cpu_data_ = scale;
       from_cpu();
     }

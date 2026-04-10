@@ -151,19 +151,19 @@ void performTest_dequantize_nvfp4_swizzled(const size_t rows, const size_t cols)
     setRandomScale(&quantized_swizzled);
     quantized_swizzled.set_with_gemm_swizzled_scales(true);
 
-    // Copy FP4 data
+    // Copy amax and scale from compact to swizzled before FP4 data,
+    // since from_cpu() uploads all CPU buffers (including zero-init data).
+    quantized_compact.to_cpu();
+    quantized_swizzled.set_amax(quantized_compact.amax());
+    quantized_swizzled.set_scale(quantized_compact.scale());
+    quantized_swizzled.from_cpu();
+
+    // Copy FP4 data after from_cpu() to avoid being overwritten
     const size_t data_bytes = rows * cols / 2;
     if (data_bytes > 0) {
         cudaMemcpy(quantized_swizzled.rowwise_dptr(), quantized_compact.rowwise_dptr(),
                    data_bytes, cudaMemcpyDeviceToDevice);
     }
-
-    // Copy amax from compact to swizzled (GPU-to-GPU)
-    // Read amax from compact tensor, set on swizzled tensor, upload
-    quantized_compact.to_cpu();
-    quantized_swizzled.set_amax(quantized_compact.amax());
-    quantized_swizzled.set_scale(quantized_compact.scale());
-    quantized_swizzled.from_cpu();
 
     // Swizzle scales
     if (data_bytes > 0) {
