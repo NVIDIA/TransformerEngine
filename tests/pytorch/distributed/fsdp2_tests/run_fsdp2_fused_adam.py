@@ -49,7 +49,6 @@ import transformer_engine.common.recipe
 
 from fsdp2_utils import get_recipe_from_string, save_custom_attrs, restore_custom_attrs
 
-
 HIDDEN_SIZE = 256
 FFN_HIDDEN_SIZE = 1024
 NUM_ATTENTION_HEADS = 8

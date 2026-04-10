@@ -87,7 +87,7 @@ class InspectPrimitive(BasePrimitive):
         inspect implementation
         """
         assert InspectPrimitive.inner_primitive is not None
-        (x) = InspectPrimitive.inner_primitive.bind(
+        x = InspectPrimitive.inner_primitive.bind(
             x,
             x_min,
             x_max,

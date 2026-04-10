@@ -33,7 +33,6 @@ from transformer_engine.common.recipe import (
     CustomRecipe,
 )
 
-
 # Importing each function instead of 'import *' allows us specify '__all__' in
 # quantize.py and also makes any newer additions to quantize.py invisible via
 # fp8.py so that we don't reinforce importing internal TE functions.

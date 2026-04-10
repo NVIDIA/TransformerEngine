@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Quantization utilities for TransformerEngine"""
+
 from __future__ import annotations
 
 import abc
@@ -30,7 +31,6 @@ from .constants import dist_group_type
 
 from .utils import get_device_compute_capability
 from .jit import jit_fuser
-
 
 __all__ = [
     "autocast",

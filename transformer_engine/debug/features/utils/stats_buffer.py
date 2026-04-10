@@ -8,7 +8,6 @@ Buffers are fed with tensors, they compute necessary stats and save them.
 When log() is called, they gather stats from all nodes, compute combined final stats and log them.
 """
 
-
 from collections import defaultdict
 from typing import Dict
 import torch

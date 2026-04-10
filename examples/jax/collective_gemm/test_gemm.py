@@ -12,6 +12,7 @@ This script uses custom distributed initialization with the following arguments:
 Example:
     python test_gemm.py --coordinator-address localhost:1234 --num-processes 2 --process-id 0 --local-device-ids 0,1,2,3
 """
+
 import unittest
 import os
 from functools import partial

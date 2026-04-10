@@ -3,11 +3,11 @@
 # See LICENSE for license information.
 
 """Enums for e2e transformer"""
+
 from types import SimpleNamespace
 import torch
 import torch.distributed
 import transformer_engine_torch as tex
-
 
 """
 This is a map: torch.dtype -> int

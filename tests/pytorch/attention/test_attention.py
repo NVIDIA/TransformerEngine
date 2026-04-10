@@ -2701,7 +2701,7 @@ class _custom_mha_fp8(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
         with torch.cuda.nvtx.range("_DPA"):
-            (q, k, v, inp_fp8, qkv_weight_fp8, out) = restore_from_func_ctx(ctx)
+            q, k, v, inp_fp8, qkv_weight_fp8, out = restore_from_func_ctx(ctx)
 
             proj_dgrad = ctx.dO_quantizer(grad_output)
             fp8_dtype_backward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=False)

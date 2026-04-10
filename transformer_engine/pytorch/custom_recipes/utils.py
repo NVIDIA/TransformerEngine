@@ -8,7 +8,6 @@ import enum
 
 import torch
 
-
 HIGH_PRECISION_FLOAT_DTYPES = (
     torch.float,
     torch.float16,
