@@ -83,6 +83,13 @@ py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::ob
 
 namespace {
 
+inline bool is_sm120_device() {
+  cudaDeviceProp device_prop{};
+  NVTE_CHECK_CUDA(cudaGetDeviceProperties(&device_prop, c10::cuda::current_device()));
+  return device_prop.major == 12 && device_prop.minor == 0;
+}
+
+
 // helper functions for NVFP4 grouped quantization (cuda graph safe with shapes stored in device without D2H copy)
 void group_quantize_nvfp4_impl(const GroupedTensorWrapper &grouped_input_tensor,
                                GroupedTensorWrapper &grouped_output_tensor,
@@ -1026,6 +1033,7 @@ void split_quantize_nvfp4_impl_with_rht_helper(const TensorWrapper &input,
                                                cudaStream_t stream) {
   const size_t num_tensors = split_sections.size();
   const auto &quantizer = *quantizers.front();
+  const bool sm120_device = is_sm120_device();
 
   std::vector<NVTETensor> nvte_tensor_input_list;
   std::vector<NVTETensor> nvte_tensor_output_list;
@@ -1056,7 +1064,7 @@ void split_quantize_nvfp4_impl_with_rht_helper(const TensorWrapper &input,
   bool with_bulk_generate_rng_states = true;
 
   // Stochastic rounding
-  bool need_stochastic_rounding = quantizer.stochastic_rounding;
+  bool need_stochastic_rounding = quantizer.stochastic_rounding && !sm120_device;
   auto stochastic_rng_state_resources = setup_stochastic_rounding_rng_states_helper(
       num_tensors, need_stochastic_rounding, with_bulk_generate_rng_states,
       need_separate_rng_states, quant_config_list, quant_config_list_colwise);
@@ -1214,7 +1222,7 @@ void split_quantize_nvfp4_impl_helper(const TensorWrapper &input,
   // so that we can generate all rng states at once
   bool with_bulk_generate_rng_states = false;
 
-  bool need_stochastic_rounding = quantizer.stochastic_rounding;
+  bool need_stochastic_rounding = quantizer.stochastic_rounding && !sm120_device;
 
   // place holder for colwise rng states, which are not needed in this case
   std::vector<QuantizationConfigWrapper> dummy_quant_config_list_colwise;
