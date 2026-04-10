@@ -493,7 +493,6 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
                 fc2_dy,
                 scales_f32,
                 bias_packed,
-                split_sizes,
                 offsets=fc1_ctx.base_split_offsets,
                 dscales=grad_scales,
             )

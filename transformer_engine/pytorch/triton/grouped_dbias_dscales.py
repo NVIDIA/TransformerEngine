@@ -18,7 +18,6 @@ def _compute_grouped_dbias_dscales(
     dy: torch.Tensor,
     scales: torch.Tensor,
     bias: torch.Tensor,
-    split_sizes: torch.Tensor,
     offsets: torch.Tensor,
     dbias: Optional[torch.Tensor] = None,
     dscales: Optional[torch.Tensor] = None,
@@ -37,7 +36,6 @@ def _compute_grouped_dbias_dscales(
         dy: (total_tokens, hidden) -- FC2 output grad.
         scales: (total_tokens,) float32 -- per-token routing scales.
         bias: (num_groups, hidden) -- per-group FC2 biases.
-        split_sizes: (num_groups,) int64 -- tokens per group.
         offsets: (num_groups+1,) int64 -- cumulative row offsets
             ``[0, s0, s0+s1, ..., total_tokens]``.
         dbias: optional (num_groups, hidden) float32 -- if provided,
@@ -56,11 +54,18 @@ def _compute_grouped_dbias_dscales(
     hidden = dy.shape[1]
     total_tokens = dy.shape[0]
 
-    alloc_dbias = dbias is None
     if dbias is None:
         dbias = torch.zeros(num_groups, hidden, dtype=torch.float32, device=dy.device)
+    else:
+        assert dbias.dtype == torch.float32, (
+            f"_compute_grouped_dbias_dscales: dbias must be float32, got {dbias.dtype}"
+        )
     if dscales is None:
         dscales = torch.zeros(total_tokens, dtype=torch.float32, device=dy.device)
+    else:
+        assert dscales.dtype == torch.float32, (
+            f"_compute_grouped_dbias_dscales: dscales must be float32, got {dscales.dtype}"
+        )
 
     BLOCK_M = 128
     BLOCK_H = 128
@@ -87,6 +92,4 @@ def _compute_grouped_dbias_dscales(
         num_stages=2,
     )
 
-    if alloc_dbias:
-        return dbias.to(dy.dtype), dscales
     return dbias, dscales

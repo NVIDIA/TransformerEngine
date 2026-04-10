@@ -888,7 +888,6 @@ class GroupedLinear(BasicOperation):
                 dy_2d,
                 scales_f32,
                 bias_packed,
-                split_sizes,
                 offsets=offsets,
             )
             grad_biases = [dbias_packed[idx] for idx in range(num_groups)]
