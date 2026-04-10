@@ -57,15 +57,15 @@ def _compute_grouped_dbias_dscales(
     if dbias is None:
         dbias = torch.zeros(num_groups, hidden, dtype=torch.float32, device=dy.device)
     else:
-        assert dbias.dtype == torch.float32, (
-            f"_compute_grouped_dbias_dscales: dbias must be float32, got {dbias.dtype}"
-        )
+        assert (
+            dbias.dtype == torch.float32
+        ), f"_compute_grouped_dbias_dscales: dbias must be float32, got {dbias.dtype}"
     if dscales is None:
         dscales = torch.zeros(total_tokens, dtype=torch.float32, device=dy.device)
     else:
-        assert dscales.dtype == torch.float32, (
-            f"_compute_grouped_dbias_dscales: dscales must be float32, got {dscales.dtype}"
-        )
+        assert (
+            dscales.dtype == torch.float32
+        ), f"_compute_grouped_dbias_dscales: dscales must be float32, got {dscales.dtype}"
 
     BLOCK_M = 128
     BLOCK_H = 128
