@@ -89,7 +89,6 @@ inline bool is_sm120_device() {
   return device_prop.major == 12 && device_prop.minor == 0;
 }
 
-
 // helper functions for NVFP4 grouped quantization (cuda graph safe with shapes stored in device without D2H copy)
 void group_quantize_nvfp4_impl(const GroupedTensorWrapper &grouped_input_tensor,
                                GroupedTensorWrapper &grouped_output_tensor,
@@ -1192,9 +1191,9 @@ void split_quantize_nvfp4_impl_with_rht_helper(const TensorWrapper &input,
           auto rht_output_t = allocateTorchTensor(cols, rows, input_list[i].dtype());
           rht_output_t_tensors.push_back(rht_output_t);
           TensorWrapper rht_output_t_cpp;
-          rht_output_t_cpp.set_rowwise_data(rht_output_t.data_ptr(), input_list[i].dtype(),
-                                            std::vector<size_t>{static_cast<size_t>(cols),
-                                                                static_cast<size_t>(rows)});
+          rht_output_t_cpp.set_rowwise_data(
+              rht_output_t.data_ptr(), input_list[i].dtype(),
+              std::vector<size_t>{static_cast<size_t>(cols), static_cast<size_t>(rows)});
           nvte_hadamard_transform(input_list[i].data(), rht_output_t_cpp.data(), 0,
                                   quantizer.rht_matrix_random_sign_mask_t, stream);
           nvte_quantize_v2(rht_output_t_cpp.data(), out_transpose_list[i].data(),

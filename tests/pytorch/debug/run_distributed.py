@@ -47,6 +47,7 @@ TEST_NR = 0
 
 fp8_available = is_fp8_available()
 
+
 def _cmp_dist(ground_truth, output, parallel_mode):
     if parallel_mode == "column" and torch.cuda.get_device_capability() == (12, 0):
         # SM120: distributed column-parallel path may show a single-element

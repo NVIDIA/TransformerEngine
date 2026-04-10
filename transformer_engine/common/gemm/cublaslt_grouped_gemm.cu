@@ -302,8 +302,7 @@ inline size_t grouped_gemm_setup_workspace_size(size_t num_tensors) {
 inline void check_grouped_gemm_requirements(const char *api_name) {
   const int current_device = transformer_engine::cuda::current_device();
   const int sm_arch = transformer_engine::cuda::sm_arch(current_device);
-  NVTE_CHECK(sm_arch >= 100, api_name,
-             " requires Blackwell (SM100) or newer architecture.");
+  NVTE_CHECK(sm_arch >= 100, api_name, " requires Blackwell (SM100) or newer architecture.");
   NVTE_CHECK(sm_arch != 120, api_name,
              " is currently unsupported on SM120. Grouped cuBLASLt GEMM heuristic selection "
              "returns CUBLAS_STATUS_NOT_SUPPORTED on this architecture (even with relaxed hints)");
