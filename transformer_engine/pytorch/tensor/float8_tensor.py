@@ -232,24 +232,18 @@ class Float8CurrentScalingQuantizer(Quantizer):
     value ("amax") in the tensor is computed directly by scanning the input
     high-precision tensor, without the need of any history window.
 
-    Unlike delayed scaling, scale and amax tensors are not needed to initialize the
-    quantizer, becuse they are simply GPU buffers that will be filled by current
-    scaling quantization kernels, instead of using values taken from delayed scaling
-    history window. Therefore, device parameter is needed for tensor allocation.
+    This quantizer is stateless: it holds only configuration, not GPU
+    workspace buffers. Temporary amax/scale workspace is provided
+    externally via the ``workspace`` argument to :meth:`quantize`, or
+    allocated on the fly when no workspace is supplied.
 
     Both Float8CurrentScalingQuantizer and Float8Quantizer produces Float8Tensor,
     because they are both per-tensor scaling, ie. one scaling factor per tensor.
 
     """
 
-    """Workspace buffer for FP8 scaling factor"""
-    scale: torch.Tensor
-    """Workspace buffer for max-abs value"""
-    amax: torch.Tensor
     """FP8 datatype"""
     dtype: TE_DType
-    """amax update options"""
-    use_existing_amax: bool
     """amax reduction options"""
     with_amax_reduction: bool
     amax_reduction_group: Optional[dist_group_type]
@@ -257,14 +251,15 @@ class Float8CurrentScalingQuantizer(Quantizer):
     force_pow_2_scales: bool
     amax_epsilon: float
 
+    WORKSPACE_FLOATS_PER_QUANTIZER: int = 2  # [amax, scale]
+
     def __init__(
         self,
         fp8_dtype: TE_DType,
-        device: torch.device,
+        device: Optional[torch.device] = None,
         *,
         rowwise: bool = True,
         columnwise: bool = True,
-        use_existing_amax: bool = False,
         with_amax_reduction: bool = False,
         amax_reduction_group: Optional[dist_group_type] = None,
         force_pow_2_scales: bool = False,
@@ -272,19 +267,20 @@ class Float8CurrentScalingQuantizer(Quantizer):
         scale: Optional[torch.Tensor] = None,
         amax: Optional[torch.Tensor] = None,
     ) -> None:
+        del device  # accepted for backward compatibility, no longer used
         super().__init__(rowwise=rowwise, columnwise=columnwise)
-        if scale is None:
-            scale = torch.empty(1, dtype=torch.float32, device=device)
-        if amax is None:
-            amax = torch.empty(1, dtype=torch.float32, device=device)
-        self.scale = scale
-        self.amax = amax
         self.dtype = fp8_dtype
-        self.use_existing_amax = use_existing_amax
         self.with_amax_reduction = with_amax_reduction
         self.amax_reduction_group = amax_reduction_group
         self.force_pow_2_scales = force_pow_2_scales
         self.amax_epsilon = amax_epsilon
+        # scale/amax are NOT stored by default. They are accepted as
+        # optional kwargs for call sites that need shared buffers
+        # (e.g. context-parallel attention).
+        if scale is not None:
+            self.scale = scale
+        if amax is not None:
+            self.amax = amax
 
     def __getstate__(self):
         """Exclude unpicklable process group from serialized state."""
@@ -292,21 +288,38 @@ class Float8CurrentScalingQuantizer(Quantizer):
         state["amax_reduction_group"] = None
         return state
 
+    @staticmethod
+    def _get_or_alloc_workspace(
+        workspace: Optional[torch.Tensor],
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Return a float32 workspace of size >= 2: [amax, scale].
+
+        If workspace is provided, returns it as-is. Otherwise allocates
+        a fresh temporary buffer.
+        """
+        if workspace is not None:
+            return workspace
+        return torch.empty(2, dtype=torch.float32, device=device)
+
     def copy(self) -> Float8CurrentScalingQuantizer:
         """Create shallow copy"""
 
+        kwargs = {}
+        if hasattr(self, "scale"):
+            kwargs["scale"] = self.scale
+        if hasattr(self, "amax"):
+            kwargs["amax"] = self.amax
+
         quantizer = Float8CurrentScalingQuantizer(
             fp8_dtype=self.dtype,
-            device=0,
             rowwise=self.rowwise_usage,
             columnwise=self.columnwise_usage,
             with_amax_reduction=self.with_amax_reduction,
             amax_reduction_group=self.amax_reduction_group,
-            use_existing_amax=self.use_existing_amax,
             force_pow_2_scales=self.force_pow_2_scales,
             amax_epsilon=self.amax_epsilon,
-            scale=self.scale,
-            amax=self.amax,
+            **kwargs,
         )
         quantizer.internal = self.internal
         quantizer.optimize_for_gemm = self.optimize_for_gemm
@@ -319,6 +332,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
         dst: QuantizedTensor,
         *,
         noop_flag: Optional[torch.Tensor] = None,
+        workspace: Optional[torch.Tensor] = None,
     ) -> QuantizedTensor:
         if not isinstance(dst, Float8Tensor):
             raise ValueError("Float8CurrentScalingQuantizer can only update Float8Tensor")
@@ -329,17 +343,25 @@ class Float8CurrentScalingQuantizer(Quantizer):
         if not src.is_contiguous():
             src = src.contiguous()
 
+        workspace = self._get_or_alloc_workspace(workspace, src.device)
+
         # Launch cast kernel
-        tex.quantize(src, self, dst, noop_flag)
+        tex.quantize(src, self, dst, noop_flag, workspace)
 
         # Update FP8 dtype
         dst._fp8_dtype = self.dtype
 
         return dst
 
-    def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
+    def quantize_impl(
+        self,
+        tensor: torch.Tensor,
+        *,
+        workspace: Optional[torch.Tensor] = None,
+    ) -> QuantizedTensor:
         """Quantize tensor implementation"""
-        return tex.quantize(tensor, self)
+        workspace = self._get_or_alloc_workspace(workspace, tensor.device)
+        return tex.quantize(tensor, self, None, None, workspace)
 
     def make_empty(
         self,

@@ -19,7 +19,8 @@
 namespace transformer_engine {
 namespace pytorch {
 
-std::vector<py::object> bgrad_quantize(const at::Tensor &grad_output, py::handle quantizer) {
+std::vector<py::object> bgrad_quantize(const at::Tensor &grad_output, py::handle quantizer,
+                                       std::optional<at::Tensor> quantizer_workspace) {
   using namespace transformer_engine::pytorch::detail;
   init_extension();
 
@@ -109,7 +110,8 @@ std::vector<py::object> dact_dbias(
     void (*dact_dbias_func)(const NVTETensor, const NVTETensor, NVTETensor, NVTETensor, NVTETensor,
                             cudaStream_t),
     void (*dact_func)(const NVTETensor, const NVTETensor, NVTETensor, cudaStream_t),
-    at::Tensor grad_output_torch, at::Tensor act_input_torch, py::handle quantizer_py) {
+    at::Tensor grad_output_torch, at::Tensor act_input_torch, py::handle quantizer_py,
+    std::optional<at::Tensor> quantizer_workspace) {
   using namespace transformer_engine::pytorch::detail;
   init_extension();
 
@@ -208,14 +210,19 @@ std::vector<py::object> dact_dbias(
             dynamic_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
         NVTE_CHECK(fp8_quantizer_cpp != nullptr,
                    "Invalid quantizer for fused dact-amax kernel impl");
-        auto [temp_nvte, temp_py] =
-            fp8_quantizer_cpp->create_unquantized_tensor_with_amax(input_shape, grad_output_dtype);
+        at::Tensor ws =
+            quantizer_workspace.has_value()
+                ? *quantizer_workspace
+                : at::empty({2}, at::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+        auto [cs_amax, cs_scale] = split_quantizer_workspace(ws);
+        auto [temp_nvte, temp_py] = fp8_quantizer_cpp->create_unquantized_tensor_with_amax(
+            input_shape, grad_output_dtype, cs_amax);
         NVTE_SCOPED_GIL_RELEASE({
           dact_func(grad_output_nvte.data(), act_input_nvte.data(), temp_nvte.data(), stream);
         });
         const auto temp_torch = temp_py.cast<at::Tensor>();
         at::sum_out(grad_bias_torch, temp_torch.reshape({-1, bias_size}), {0});
-        fp8_quantizer_cpp->quantize_with_amax(temp_nvte, grad_input_nvte);
+        fp8_quantizer_cpp->quantize_with_amax(temp_nvte, grad_input_nvte, cs_amax, cs_scale);
         break;
       }
     case Impl::FUSED_DACT_AMAX_NVFP4:
@@ -245,28 +252,28 @@ std::vector<py::object> dact_dbias(
 }  // namespace
 
 std::vector<py::object> dbias_dgelu(const at::Tensor &grad_output, const at::Tensor &act_input,
-                                    py::handle quantizer) {
-  return dact_dbias(nvte_quantize_dbias_dgelu, nvte_dgelu, grad_output, act_input, quantizer);
+                                    py::handle quantizer, std::optional<at::Tensor> qw) {
+  return dact_dbias(nvte_quantize_dbias_dgelu, nvte_dgelu, grad_output, act_input, quantizer, qw);
 }
 
 std::vector<py::object> dbias_dsilu(const at::Tensor &grad_output, const at::Tensor &act_input,
-                                    py::handle quantizer) {
-  return dact_dbias(nvte_quantize_dbias_dsilu, nvte_dsilu, grad_output, act_input, quantizer);
+                                    py::handle quantizer, std::optional<at::Tensor> qw) {
+  return dact_dbias(nvte_quantize_dbias_dsilu, nvte_dsilu, grad_output, act_input, quantizer, qw);
 }
 
 std::vector<py::object> dbias_drelu(const at::Tensor &grad_output, const at::Tensor &act_input,
-                                    py::handle quantizer) {
-  return dact_dbias(nvte_quantize_dbias_drelu, nvte_drelu, grad_output, act_input, quantizer);
+                                    py::handle quantizer, std::optional<at::Tensor> qw) {
+  return dact_dbias(nvte_quantize_dbias_drelu, nvte_drelu, grad_output, act_input, quantizer, qw);
 }
 
 std::vector<py::object> dbias_dqgelu(const at::Tensor &grad_output, const at::Tensor &act_input,
-                                     py::handle quantizer) {
-  return dact_dbias(nvte_quantize_dbias_dqgelu, nvte_dqgelu, grad_output, act_input, quantizer);
+                                     py::handle quantizer, std::optional<at::Tensor> qw) {
+  return dact_dbias(nvte_quantize_dbias_dqgelu, nvte_dqgelu, grad_output, act_input, quantizer, qw);
 }
 
 std::vector<py::object> dbias_dsrelu(const at::Tensor &grad_output, const at::Tensor &act_input,
-                                     py::handle quantizer) {
-  return dact_dbias(nvte_quantize_dbias_dsrelu, nvte_dsrelu, grad_output, act_input, quantizer);
+                                     py::handle quantizer, std::optional<at::Tensor> qw) {
+  return dact_dbias(nvte_quantize_dbias_dsrelu, nvte_dsrelu, grad_output, act_input, quantizer, qw);
 }
 
 }  // namespace pytorch

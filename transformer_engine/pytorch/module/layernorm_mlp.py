@@ -203,6 +203,7 @@ class _LayerNormMLP(torch.autograd.Function):
             fc2_grad_input_quantizer,
             fc2_grad_weight_quantizer,
             fc2_grad_output_quantizer,
+            quantizer_workspace,
             cpu_offloading,
             tp_group,
             tp_size,
@@ -305,6 +306,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 "fc2_grad_input_quantizer": fc2_grad_input_quantizer,
                 "fc2_grad_weight_quantizer": fc2_grad_weight_quantizer,
                 "fc2_grad_output_quantizer": fc2_grad_output_quantizer,
+                "quantizer_workspace": quantizer_workspace,
                 "cpu_offloading": cpu_offloading,
                 "tp_group": tp_group,
                 "tp_size": tp_size,
@@ -419,6 +421,7 @@ class _LayerNormMLP(torch.autograd.Function):
             normalization,
             fwd_ln_sm_margin,
             zero_centered_gamma,
+            quantizer_workspace=quantizer_workspace,
         )
         ln_out_return = None
 
@@ -439,16 +442,16 @@ class _LayerNormMLP(torch.autograd.Function):
                 ln_out_total, _ = gather_along_first_dim(ln_out, tp_group)
                 ln_out_return = ln_out_total
                 if fp8 or debug:
-                    ln_out = fc1_input_quantizer(ln_out)
+                    ln_out = fc1_input_quantizer(ln_out, workspace=quantizer_workspace)
                     fc1_input_quantizer.set_usage(rowwise=True, columnwise=False)
-                    ln_out_total = fc1_input_quantizer(ln_out_total)
+                    ln_out_total = fc1_input_quantizer(ln_out_total, workspace=quantizer_workspace)
             else:
                 quantizer = None
                 if fp8 or debug:
                     quantizer = fc1_input_quantizer
                     # custom recipe doesn't need to support quantized AG
                     if not with_quantized_norm and not custom:
-                        ln_out = fc1_input_quantizer(ln_out)
+                        ln_out = fc1_input_quantizer(ln_out, workspace=quantizer_workspace)
                     fc1_input_quantizer.set_usage(rowwise=True, columnwise=False)
                 if ub_overlap_ag:
                     # Copy into Userbuffers buffer
@@ -468,7 +471,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     )
         else:
             if (fp8 or debug) and not with_quantized_norm:
-                ln_out = fc1_input_quantizer(ln_out)
+                ln_out = fc1_input_quantizer(ln_out, workspace=quantizer_workspace)
             ln_out_total = ln_out
 
         # Cast weights to expected dtype
@@ -499,6 +502,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 skip_update_flag=skip_fp8_weight_update,
                 fsdp_group=fsdp_group,
                 workspace_dtype=activation_dtype,
+                quantizer_workspace=quantizer_workspace,
             )
             fc2_weight_final = module.get_weight_workspace(
                 tensor=fc2_weight,
@@ -508,6 +512,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 skip_update_flag=skip_fp8_weight_update,
                 fsdp_group=fsdp_group,
                 workspace_dtype=activation_dtype,
+                quantizer_workspace=quantizer_workspace,
             )
             fc1_weight_final.update_usage(rowwise_usage=True)
             fc2_weight_final.update_usage(rowwise_usage=True)
@@ -597,26 +602,34 @@ class _LayerNormMLP(torch.autograd.Function):
         elif debug:
             fc1_out, *_ = fc1_outputs
             act_out = activation_func(fc1_out, None, **act_params)
-            act_out = fc2_input_quantizer(act_out)
+            act_out = fc2_input_quantizer(act_out, workspace=quantizer_workspace)
         else:
             fc1_out, *_ = fc1_outputs
             if fp8:
                 recipe = FP8GlobalStateManager.get_fp8_recipe()
                 if recipe.float8_block_scaling():
-                    # tex.quantize does not support GELU fusion for blockwise
                     act_out = activation_func(fc1_out, None, **act_params)
                     act_out = tex.quantize(act_out, fc2_input_quantizer)
                 elif recipe.custom():
-                    # tex.quantize does not support custom quantizers
                     act_out = activation_func(fc1_out, None, **act_params)
-                    act_out = fc2_input_quantizer(act_out)
+                    act_out = fc2_input_quantizer(act_out, workspace=quantizer_workspace)
                 else:
-                    act_out = activation_func(fc1_out, fc2_input_quantizer, **act_params)
+                    act_out = activation_func(
+                        fc1_out,
+                        fc2_input_quantizer,
+                        quantizer_workspace=quantizer_workspace,
+                        **act_params,
+                    )
             else:
                 if fp8_calibration:
                     act_out = activation_func(fc1_out, None, **act_params)
                 else:
-                    act_out = activation_func(fc1_out, fc2_input_quantizer, **act_params)
+                    act_out = activation_func(
+                        fc1_out,
+                        fc2_input_quantizer,
+                        quantizer_workspace=quantizer_workspace,
+                        **act_params,
+                    )
 
         if not fp8 and fp8_calibration:
             if fc2_input_quantizer is not None:
@@ -798,6 +811,7 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.fc2_grad_output_quantizer = fc2_grad_output_quantizer
             ctx.fc1_input_quantizer = fc1_input_quantizer
             ctx.fc2_input_quantizer = fc2_input_quantizer
+            ctx.quantizer_workspace = quantizer_workspace
 
             ctx.fc1_weight_requires_grad = fc1_weight.requires_grad
             ctx.fc2_weight_requires_grad = fc2_weight.requires_grad
@@ -1056,7 +1070,11 @@ class _LayerNormMLP(torch.autograd.Function):
                 grad_output,
                 fc2_bias_grad,
             ) = TransformerEngineBaseModule.grad_output_preprocess(
-                ctx, grad_outputs[0], True, ctx.fc2_grad_output_quantizer
+                ctx,
+                grad_outputs[0],
+                True,
+                ctx.fc2_grad_output_quantizer,
+                ctx.quantizer_workspace,
             )
 
             # Launch tensor-parallel communication for FC1 GEMM input
@@ -1206,14 +1224,18 @@ class _LayerNormMLP(torch.autograd.Function):
                         act_out.update_usage(columnwise_usage=True)
                     else:
                         ctx.fc2_input_quantizer.set_usage(rowwise=False, columnwise=True)
-                        act_out = ctx.fc2_input_quantizer(act_out)
+                        act_out = ctx.fc2_input_quantizer(
+                            act_out, workspace=ctx.quantizer_workspace
+                        )
 
                 if ctx.fp8 or ctx.debug:
                     if isinstance(grad_output, QuantizedTensorStorage):
                         grad_output.update_usage(columnwise_usage=True)
                     else:
                         ctx.fc2_grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
-                        grad_output = ctx.fc2_grad_output_quantizer(grad_output)
+                        grad_output = ctx.fc2_grad_output_quantizer(
+                            grad_output, workspace=ctx.quantizer_workspace
+                        )
 
                 # Whether to set grad arg in general_gemm
                 grad_arg = True
@@ -1293,12 +1315,12 @@ class _LayerNormMLP(torch.autograd.Function):
                 assert not ctx.fp8
                 fc1_bias_grad, dact = bgrad_dgelu_fused(fc2_dgrad, fc1_out_without_bias, fc1_bias)
                 if ctx.fc1_grad_output_quantizer is not None:
-                    dact = ctx.fc1_grad_output_quantizer(dact)
+                    dact = ctx.fc1_grad_output_quantizer(dact, workspace=ctx.quantizer_workspace)
             elif ctx.debug:
                 dact_func = _act_func(ctx.activation)[1]
                 dact = dact_func(fc2_dgrad, fc1_out.to(ctx.activation_dtype), None, **act_params)
                 fc1_bias_grad = dact.sum(dim=0)
-                dact = ctx.fc1_grad_output_quantizer(dact)
+                dact = ctx.fc1_grad_output_quantizer(dact, workspace=ctx.quantizer_workspace)
             elif (
                 _act_func(ctx.activation, ctx.fp8_recipe if ctx.fp8 else None)[2] is not None
                 and ctx.fp8
@@ -1311,6 +1333,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     fc2_dgrad,
                     fc1_out.to(ctx.activation_dtype),
                     ctx.fc1_grad_output_quantizer,
+                    quantizer_workspace=ctx.quantizer_workspace,
                     **act_params,
                 )  # quantize bgrad gelu fused
             else:
@@ -1330,10 +1353,14 @@ class _LayerNormMLP(torch.autograd.Function):
                         or ctx.fp8_recipe.custom()
                     ):
                         fc1_bias_grad = dact.view(-1, dact.shape[-1]).sum(dim=0)
-                        dact = ctx.fc1_grad_output_quantizer(dact)
+                        dact = ctx.fc1_grad_output_quantizer(
+                            dact, workspace=ctx.quantizer_workspace
+                        )
                     else:
                         fc1_bias_grad, dact = tex.bgrad_quantize(
-                            dact, ctx.fc1_grad_output_quantizer
+                            dact,
+                            ctx.fc1_grad_output_quantizer,
+                            quantizer_workspace=ctx.quantizer_workspace,
                         )
                 else:
                     fuse_gemm_and_bias_fc1_wgrad = (
@@ -1447,7 +1474,9 @@ class _LayerNormMLP(torch.autograd.Function):
                         ln_out_total.update_usage(columnwise_usage=True)
                     else:
                         ctx.fc1_input_quantizer.set_usage(rowwise=False, columnwise=True)
-                        ln_out_total = ctx.fc1_input_quantizer(ln_out_total)
+                        ln_out_total = ctx.fc1_input_quantizer(
+                            ln_out_total, workspace=ctx.quantizer_workspace
+                        )
 
                 # Prepare grad output tensor
                 # Note: Synchronize tensor-parallel communication and
@@ -1457,7 +1486,9 @@ class _LayerNormMLP(torch.autograd.Function):
                         dact.update_usage(columnwise_usage=True)
                     else:
                         ctx.fc1_grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
-                        dact = ctx.fc1_grad_output_quantizer(dact)
+                        dact = ctx.fc1_grad_output_quantizer(
+                            dact, workspace=ctx.quantizer_workspace
+                        )
 
                 # Output buffer for overlapping grad input
                 # reduce-scatter with wgrad GEMM
@@ -2131,6 +2162,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 fc2_grad_input_quantizer,
                 fc2_grad_weight_quantizer,
                 fc2_grad_output_quantizer,
+                self._quantizer_workspace,
                 is_cpu_offload_enabled(),
                 self.tp_group,
                 self.tp_size,

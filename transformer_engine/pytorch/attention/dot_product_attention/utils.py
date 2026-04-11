@@ -2180,10 +2180,7 @@ def print_quantizers(
                 type_str = "DS"
             elif isinstance(q, Float8CurrentScalingQuantizer):
                 type_str = "CS"
-            print(
-                f"{label} >> {names[i]:14s}: {type_str}, {q.scale.item():.4e} x"
-                f" {q.amax.item():.4e} = {q.scale.item()*q.amax.item():.4e}"
-            )
+            print(f"{label} >> {names[i]:14s}: {type_str}")
 
 
 def combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer):

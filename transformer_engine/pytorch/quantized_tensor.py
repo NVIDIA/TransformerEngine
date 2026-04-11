@@ -269,6 +269,7 @@ class Quantizer(abc.ABC):
         dst: QuantizedTensor,
         *,
         noop_flag: Optional[torch.Tensor] = None,
+        workspace: Optional[torch.Tensor] = None,
     ) -> QuantizedTensor:
         """Quantize tensor in-place"""
         raise NotImplementedError(
@@ -281,30 +282,50 @@ class Quantizer(abc.ABC):
         *,
         out: Optional[QuantizedTensor] = None,
         dtype: Optional[torch.dtype] = None,  # pylint: disable=unused-argument # used by override
+        workspace: Optional[torch.Tensor] = None,
     ) -> QuantizedTensor:
-        """Quantize tensor"""
-        if out is not None:
-            return self.update_quantized(tensor, out)
-        if (not self.internal) and torch.is_grad_enabled():
-            return _QuantizeFunc.apply(tensor, self.quantize_impl)
-        return _QuantizeFunc.forward(None, tensor, self.quantize_impl)
+        """Quantize tensor
 
-    def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
+        Parameters
+        ----------
+        tensor: torch.Tensor
+            High-precision tensor to quantize.
+        out: QuantizedTensor, optional
+            Pre-allocated output tensor for in-place quantization.
+        dtype: torch.dtype, optional
+            Desired output dtype (used by some subclasses).
+        workspace: torch.Tensor, optional
+            Float32 workspace buffer for intermediate values (e.g.
+            amax and scale for current-scaling FP8). When ``None``,
+            subclasses may allocate a temporary buffer internally.
+        """
+        if out is not None:
+            return self.update_quantized(tensor, out, workspace=workspace)
+        if (not self.internal) and torch.is_grad_enabled():
+            return _QuantizeFunc.apply(tensor, self.quantize_impl, workspace)
+        return _QuantizeFunc.forward(None, tensor, self.quantize_impl, workspace)
+
+    def quantize_impl(self, tensor: torch.Tensor, **kwargs) -> QuantizedTensor:
         """Quantize tensor implementation"""
         raise NotImplementedError(
             f"{self.__class__.__name__} class does not implement quantize_impl function"
         )
 
-    def multi_quantize(self, list_of_tensors):
+    def multi_quantize(self, list_of_tensors, *, workspace: Optional[torch.Tensor] = None):
         """Quantize multiple tensors"""
         list_of_output_tensors = []
         for tensor in list_of_tensors:
-            list_of_output_tensors.append(self.quantize(tensor))
+            list_of_output_tensors.append(self.quantize(tensor, workspace=workspace))
         return list_of_output_tensors
 
-    def __call__(self, tensor: torch.Tensor) -> QuantizedTensor:
+    def __call__(
+        self,
+        tensor: torch.Tensor,
+        *,
+        workspace: Optional[torch.Tensor] = None,
+    ) -> QuantizedTensor:
         """Quantize tensor"""
-        return self.quantize(tensor)
+        return self.quantize(tensor, workspace=workspace)
 
     def make_empty(
         self,

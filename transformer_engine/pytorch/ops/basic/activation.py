@@ -63,6 +63,25 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
     def __init__(self, *, cache_quantized_input: bool = False):
         super().__init__()
         self.cache_quantized_input: bool = cache_quantized_input
+        self._quantizer_workspace: Optional[torch.Tensor] = None
+
+    def _get_quantizer_workspace(
+        self, quantizer: Optional[Quantizer], device: torch.device
+    ) -> Optional[torch.Tensor]:
+        if not isinstance(quantizer, Float8CurrentScalingQuantizer):
+            return None
+        if (
+            self._quantizer_workspace is None
+            or self._quantizer_workspace.device != device
+            or self._quantizer_workspace.numel()
+            < Float8CurrentScalingQuantizer.WORKSPACE_FLOATS_PER_QUANTIZER
+        ):
+            self._quantizer_workspace = torch.empty(
+                (Float8CurrentScalingQuantizer.WORKSPACE_FLOATS_PER_QUANTIZER,),
+                dtype=torch.float32,
+                device=device,
+            )
+        return self._quantizer_workspace
 
     @abc.abstractmethod
     def _activation_forward_impl(self, *args, **kwargs) -> torch.Tensor:
@@ -101,11 +120,14 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
         x = maybe_dequantize(input_.contiguous(), dtype)
 
         # Launch kernel
-        y = self._activation_forward_impl(x, next_op_input_quantizer)
+        next_quantizer_workspace = self._get_quantizer_workspace(next_op_input_quantizer, x.device)
+        y = self._activation_forward_impl(
+            x, next_op_input_quantizer, quantizer_workspace=next_quantizer_workspace
+        )
 
         # Quantize input to FP8 before caching if needed
         if self.cache_quantized_input:
-            input_quantizer = Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, x.device)
+            input_quantizer = Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3)
             input_quantizer.set_usage(rowwise=True, columnwise=False)
             x = input_quantizer(x)
 
@@ -135,7 +157,15 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
         dy = maybe_dequantize(grad_output.contiguous(), x.dtype)
 
         # Launch kernel
-        dx = self._activation_backward_impl(dy, x, ctx.prev_op_grad_output_quantizer)
+        prev_quantizer_workspace = self._get_quantizer_workspace(
+            ctx.prev_op_grad_output_quantizer, x.device
+        )
+        dx = self._activation_backward_impl(
+            dy,
+            x,
+            ctx.prev_op_grad_output_quantizer,
+            quantizer_workspace=prev_quantizer_workspace,
+        )
 
         # Clear input tensor if possible
         clear_tensor_data(x)

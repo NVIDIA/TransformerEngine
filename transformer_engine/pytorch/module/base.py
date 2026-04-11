@@ -661,6 +661,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fsdp_wrapped = False
         self.fsdp_group = None
         self._fp8_workspaces: Dict[str, QuantizedTensor] = {}
+        self._quantizer_workspace: Optional[torch.Tensor] = None
         self.activation_dtype: Optional[torch.dtype] = None
         self.wgrad_accumulation_and_reduce_hooks = []
         self.wgrad_store = None
@@ -807,7 +808,26 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.set_meta_tensor(True, recipe)
         self.set_meta_tensor(False, recipe)
 
+        self._init_quantizer_workspace(recipe)
+
         self.fast_setattr("fp8_meta_tensors_initialized", True)
+
+    def _init_quantizer_workspace(self, recipe: Recipe) -> None:
+        """Allocate shared workspace buffer for stateless quantizers.
+
+        A single 2-float32 buffer ``[amax, scale]`` is reused by all
+        Float8CurrentScaling quantizers because quantization ops run
+        sequentially on the same CUDA stream.
+        """
+        if not recipe.float8_current_scaling():
+            return
+
+        if self._quantizer_workspace is None or self._quantizer_workspace.numel() < 2:
+            self._quantizer_workspace = torch.zeros(
+                2,
+                dtype=torch.float32,
+                device="cuda",
+            )
 
     def get_fp8_meta_tensors(self) -> None:
         """Get scales and amaxes."""
@@ -1068,6 +1088,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             )
             # Clear cached workspaces as they were created with the old recipe/quantizer type
             self._fp8_workspaces.clear()
+            self._quantizer_workspace = None
 
     def prepare_forward(
         self,
@@ -1174,6 +1195,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         grad_output: torch.Tensor,
         row_parallel_mode: bool,
         quantizer: Optional[Quantizer],
+        quantizer_workspace: Optional[torch.Tensor] = None,
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         """Utility function for backward.
         Returns tuple in order (all optional/None based on training precion/recipe):
@@ -1217,7 +1239,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                         Float8BlockwiseQTensorStorage,
                     ),
                 ):
-                    grad_output = quantizer(grad_output)
+                    grad_output = quantizer(grad_output, workspace=quantizer_workspace)
 
                 # Copy into communication buffer, and replace original gradient with it
                 grad_output, _ = fill_userbuffers_buffer_for_all_gather(
@@ -1237,7 +1259,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         # Debug without all-gather: unfused cast and bgrad
         # bgrad only if wgrad is in FP8, otherwise it is fused with wgrad and we return None
         if ctx.debug:
-            grad_output_ = quantizer(grad_output)
+            grad_output_ = quantizer(grad_output, workspace=quantizer_workspace)
             if ctx.use_bias:
                 grad_bias = grad_output.view(-1, grad_output.shape[-1]).sum(dim=0)
             else:
@@ -1260,12 +1282,15 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 grad_bias = grad_output.dequantize().view(-1, grad_output.shape[-1]).sum(dim=0)
             else:
                 if isinstance(quantizer, Float8BlockQuantizer):
-                    # unfuse bgrad for now until cast_transpose + dgrad calculation is ready for Float8BlockQuantizer.
                     grad_bias = grad_output.view(-1, grad_output.shape[-1]).sum(dim=0)
                 else:
-                    grad_bias, grad_output = tex.bgrad_quantize(grad_output, quantizer)
+                    grad_bias, grad_output = tex.bgrad_quantize(
+                        grad_output,
+                        quantizer,
+                        quantizer_workspace=quantizer_workspace,
+                    )
         if not isinstance(grad_output, QuantizedTensorStorage):
-            grad_output = quantizer(grad_output)
+            grad_output = quantizer(grad_output, workspace=quantizer_workspace)
         return grad_output, grad_bias
 
     def register_parameter(self, name, param, **kwargs):
@@ -1405,6 +1430,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         skip_update_flag: Optional[torch.Tensor] = None,
         fsdp_group: Optional[dist_group_type] = None,
         workspace_dtype: Optional[torch.dtype] = None,
+        quantizer_workspace: Optional[torch.Tensor] = None,
     ) -> QuantizedTensor:
         """Get workspace buffer for weights and maybe update its values
 
@@ -1503,7 +1529,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 # Setting internal=True would cause the data to be removed in prepare_for_saving(...).
                 quantizer_internal = quantizer.internal
                 quantizer.internal = False
-            out = quantizer.quantize(tensor, dtype=workspace_dtype)
+            out = quantizer.quantize(tensor, dtype=workspace_dtype, workspace=quantizer_workspace)
             if cache_name is not None:
                 quantizer.internal = quantizer_internal
 
@@ -1521,7 +1547,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if hasattr(out, "quantize_"):
                 out.quantize_(tensor, noop_flag=skip_update_flag)
             else:
-                tex.quantize(tensor, quantizer, out, skip_update_flag)
+                tex.quantize(tensor, quantizer, out, skip_update_flag, quantizer_workspace)
         return out
 
     def _load_from_state_dict(

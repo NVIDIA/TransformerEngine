@@ -324,8 +324,10 @@ def _cast_master_weights_to_fp8_current_scaling(
     packed_amaxes = torch.zeros(len(params), dtype=torch.float32, device=device)
     amaxes = [packed_amaxes[i : i + 1] for i in range(len(params))]
 
-    # Collect scales and scale_invs to update them after amax reduction.
-    scales, scale_invs = [], []
+    # Allocate scale buffers and collect scale_invs for the multi-tensor update.
+    packed_scales = torch.ones(len(params), dtype=torch.float32, device=device)
+    scales = [packed_scales[i : i + 1] for i in range(len(params))]
+    scale_invs = []
 
     # ---------------------------------------------------------------------------------------------
     # Step 1: Iterate through all the none empty master weights and compute amax of them. Store the
@@ -352,7 +354,6 @@ def _cast_master_weights_to_fp8_current_scaling(
                 f"expected {amax_epsilon} but got {quantizer.amax_epsilon}"
             )
 
-        scales.append(quantizer.scale.view(1))
         scale_invs.append(model_weight._scale_inv.view(1))
 
         # Compute amax of the master weight and store it in packed_amaxes.

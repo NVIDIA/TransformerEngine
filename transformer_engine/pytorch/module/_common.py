@@ -42,6 +42,7 @@ def apply_normalization(
     normalization: str,
     fwd_ln_sm_margin: int,
     zero_centered_gamma: bool,
+    quantizer_workspace=None,
 ):
     """Apply normalization to input."""
     normalization_func = _get_normalization_func(normalization, True)
@@ -56,6 +57,7 @@ def apply_normalization(
         TE_DType[output_dtype] if output_dtype in TE_DType else output_dtype,
         fwd_ln_sm_margin,
         zero_centered_gamma,
+        quantizer_workspace,
     )
 
 

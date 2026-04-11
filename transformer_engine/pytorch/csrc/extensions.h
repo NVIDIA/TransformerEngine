@@ -215,57 +215,80 @@ at::Tensor swap_first_dims(at::Tensor tensor, std::optional<at::Tensor> out = st
  **************************************************************************************************/
 
 /* GLU (sigmoid gate) */
-py::object glu(const at::Tensor &input, py::handle quantizer);
+py::object glu(const at::Tensor &input, py::handle quantizer,
+               std::optional<at::Tensor> qw = std::nullopt);
 
-py::object dglu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer);
+py::object dglu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer,
+                std::optional<at::Tensor> qw = std::nullopt);
 
 /* GELU and variants*/
-py::object gelu(const at::Tensor &input, py::handle quantizer);
+py::object gelu(const at::Tensor &input, py::handle quantizer,
+                std::optional<at::Tensor> qw = std::nullopt);
 
-py::object dgelu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer);
+py::object dgelu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer,
+                 std::optional<at::Tensor> qw = std::nullopt);
 
-py::object geglu(const at::Tensor &input, py::handle quantizer);
+py::object geglu(const at::Tensor &input, py::handle quantizer,
+                 std::optional<at::Tensor> qw = std::nullopt);
 
-py::object dgeglu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer);
+py::object dgeglu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer,
+                  std::optional<at::Tensor> qw = std::nullopt);
 
-py::object qgelu(const at::Tensor &input, py::handle quantizer);
+py::object qgelu(const at::Tensor &input, py::handle quantizer,
+                 std::optional<at::Tensor> qw = std::nullopt);
 
-py::object dqgelu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer);
+py::object dqgelu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer,
+                  std::optional<at::Tensor> qw = std::nullopt);
 
-py::object qgeglu(const at::Tensor &input, py::handle quantizer);
+py::object qgeglu(const at::Tensor &input, py::handle quantizer,
+                  std::optional<at::Tensor> qw = std::nullopt);
 
-py::object dqgeglu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer);
+py::object dqgeglu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer,
+                   std::optional<at::Tensor> qw = std::nullopt);
 
 /* ReLU and variants*/
-py::object relu(const at::Tensor &input, py::handle quantizer);
+py::object relu(const at::Tensor &input, py::handle quantizer,
+                std::optional<at::Tensor> qw = std::nullopt);
 
-py::object drelu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer);
+py::object drelu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer,
+                 std::optional<at::Tensor> qw = std::nullopt);
 
-py::object reglu(const at::Tensor &input, py::handle quantizer);
+py::object reglu(const at::Tensor &input, py::handle quantizer,
+                 std::optional<at::Tensor> qw = std::nullopt);
 
-py::object dreglu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer);
+py::object dreglu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer,
+                  std::optional<at::Tensor> qw = std::nullopt);
 
-py::object srelu(const at::Tensor &input, py::handle quantizer);
+py::object srelu(const at::Tensor &input, py::handle quantizer,
+                 std::optional<at::Tensor> qw = std::nullopt);
 
-py::object dsrelu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer);
+py::object dsrelu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer,
+                  std::optional<at::Tensor> qw = std::nullopt);
 
-py::object sreglu(const at::Tensor &input, py::handle quantizer);
+py::object sreglu(const at::Tensor &input, py::handle quantizer,
+                  std::optional<at::Tensor> qw = std::nullopt);
 
-py::object dsreglu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer);
+py::object dsreglu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer,
+                   std::optional<at::Tensor> qw = std::nullopt);
 
 /* Silu and variants*/
-py::object silu(const at::Tensor &input, py::handle quantizer);
+py::object silu(const at::Tensor &input, py::handle quantizer,
+                std::optional<at::Tensor> qw = std::nullopt);
 
-py::object dsilu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer);
+py::object dsilu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer,
+                 std::optional<at::Tensor> qw = std::nullopt);
 
-py::object swiglu(const at::Tensor &input, py::handle quantizer);
+py::object swiglu(const at::Tensor &input, py::handle quantizer,
+                  std::optional<at::Tensor> qw = std::nullopt);
 
-py::object dswiglu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer);
+py::object dswiglu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer,
+                   std::optional<at::Tensor> qw = std::nullopt);
 
-py::object clamped_swiglu(const at::Tensor &input, py::handle quantizer, float limit, float alpha);
+py::object clamped_swiglu(const at::Tensor &input, py::handle quantizer,
+                          std::optional<at::Tensor> qw, float limit, float alpha);
 
 py::object clamped_dswiglu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer,
-                           float limit, float alpha);
+                           std::optional<at::Tensor> qw, float limit, float alpha);
 /***************************************************************************************************
  * LayerNorm
  **************************************************************************************************/
@@ -278,7 +301,8 @@ std::vector<py::object> layernorm_bwd(const at::Tensor &dz, const at::Tensor &x,
 std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, MaybeTensor bias,
                                       float eps, py::object ln_out, py::handle quantizer,
                                       DType out_dtype, const int sm_margin,
-                                      const bool zero_centered_gamma);
+                                      const bool zero_centered_gamma,
+                                      std::optional<at::Tensor> quantizer_workspace = std::nullopt);
 
 /***************************************************************************************************
  * RMSNorm
@@ -295,14 +319,16 @@ std::vector<py::object> rmsnorm_bwd_add(const at::Tensor &dz, const at::Tensor &
 
 std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &weight, float eps,
                                     py::object ln_out, py::handle quantizer, DType otype,
-                                    const int sm_margin, const bool zero_centered_gamma);
+                                    const int sm_margin, const bool zero_centered_gamma,
+                                    std::optional<at::Tensor> quantizer_workspace = std::nullopt);
 
 /***************************************************************************************************
  * Cast
  **************************************************************************************************/
 
 py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::object &output,
-                    std::optional<at::Tensor> noop_flag);
+                    std::optional<at::Tensor> noop_flag,
+                    std::optional<at::Tensor> workspace = std::nullopt);
 
 py::object dequantize(const py::handle &input, DType otype);
 
@@ -315,31 +341,38 @@ py::object bgrad_group_quantize(const at::Tensor &tensor, py::handle quantizer,
 std::vector<py::object> multi_tensor_quantize(const std::vector<at::Tensor> &tensor_list,
                                               std::vector<py::handle> quantizer_list);
 
-std::vector<py::object> split_quantize(const at::Tensor &tensor,
-                                       const std::vector<size_t> &split_sections,
-                                       std::vector<py::handle> quantizer_list,
-                                       bool disable_bulk_allocation = false);
+std::vector<py::object> split_quantize(
+    const at::Tensor &tensor, const std::vector<size_t> &split_sections,
+    std::vector<py::handle> quantizer_list, bool disable_bulk_allocation = false,
+    std::optional<std::vector<at::Tensor>> quantizer_workspaces = std::nullopt);
 
 /***************************************************************************************************
  * Bias gradient fusions
  **************************************************************************************************/
 
-std::vector<py::object> bgrad_quantize(const at::Tensor &input, py::handle py_quantizer);
+std::vector<py::object> bgrad_quantize(
+    const at::Tensor &input, py::handle py_quantizer,
+    std::optional<at::Tensor> quantizer_workspace = std::nullopt);
 
 std::vector<py::object> dbias_dgelu(const at::Tensor &grad_output, const at::Tensor &act_input,
-                                    py::handle quantizer);
+                                    py::handle quantizer,
+                                    std::optional<at::Tensor> qw = std::nullopt);
 
 std::vector<py::object> dbias_dsilu(const at::Tensor &grad_output, const at::Tensor &act_input,
-                                    py::handle quantizer);
+                                    py::handle quantizer,
+                                    std::optional<at::Tensor> qw = std::nullopt);
 
 std::vector<py::object> dbias_drelu(const at::Tensor &grad_output, const at::Tensor &act_input,
-                                    py::handle quantizer);
+                                    py::handle quantizer,
+                                    std::optional<at::Tensor> qw = std::nullopt);
 
 std::vector<py::object> dbias_dqgelu(const at::Tensor &grad_output, const at::Tensor &act_input,
-                                     py::handle quantizer);
+                                     py::handle quantizer,
+                                     std::optional<at::Tensor> qw = std::nullopt);
 
 std::vector<py::object> dbias_dsrelu(const at::Tensor &grad_output, const at::Tensor &act_input,
-                                     py::handle quantizer);
+                                     py::handle quantizer,
+                                     std::optional<at::Tensor> qw = std::nullopt);
 
 /***************************************************************************************************
  * Dropout

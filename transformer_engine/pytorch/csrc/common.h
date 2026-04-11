@@ -195,9 +195,7 @@ class Float8Quantizer : public Quantizer {
 
 class Float8CurrentScalingQuantizer : public Quantizer {
  public:
-  at::Tensor scale;
   at::Tensor scale_inv;
-  at::Tensor amax;
   DType dtype;
   bool with_amax_reduction;
   c10::intrusive_ptr<dist_group_type> amax_reduction_group;
@@ -218,32 +216,49 @@ class Float8CurrentScalingQuantizer : public Quantizer {
       py::object quantizer, const std::optional<at::Tensor>& first_dims, size_t logical_first_dim,
       size_t logical_last_dim) const override;
 
-  /*! @brief Construct an unquantized tensor that shares the quantizer's amax pointer.
+  /*! @brief Construct an unquantized tensor with an amax buffer.
    *
-   * The amax is zeroed out. Most TE kernels that output amax expect
-   * amax to be initialized to zero.
+   * The provided amax tensor is zeroed out and set on the output tensor.
+   * Most TE kernels that output amax expect amax to be initialized to zero.
   */
   std::pair<TensorWrapper, py::object> create_unquantized_tensor_with_amax(
-      const std::vector<size_t>& shape, DType dtype, std::optional<at::Tensor> data = std::nullopt);
+      const std::vector<size_t>& shape, DType dtype, at::Tensor amax,
+      std::optional<at::Tensor> data = std::nullopt);
 
   std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
 
+  /*! @brief Quantize to FP8 (virtual fallback, allocates local amax/scale) */
   void quantize(const TensorWrapper& input, TensorWrapper& out,
                 const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
 
-  /*! @brief Quantize to FP8, skipping local amax computation
+  /*! @brief Quantize to FP8 using provided amax/scale workspace buffers */
+  void quantize(const TensorWrapper& input, TensorWrapper& out, at::Tensor amax, at::Tensor scale,
+                const std::optional<TensorWrapper>& noop_flag = std::nullopt);
+
+  /*! @brief Quantize to FP8, skipping local amax computation.
    *
-   * The quantizer's amax pointer is assumed to already hold the local
-   * amax. The amax may still be reduced across the amax reduction
-   * group.
+   * The provided amax tensor is assumed to already hold the local
+   * amax (e.g. computed by a fused LN kernel). The amax may still
+   * be reduced across the amax reduction group.
    */
-  void quantize_with_amax(TensorWrapper& input, TensorWrapper& out,
+  void quantize_with_amax(TensorWrapper& input, TensorWrapper& out, at::Tensor amax,
+                          at::Tensor scale,
                           const std::optional<TensorWrapper>& noop_flag = std::nullopt);
 
  private:
   void quantize_impl(const TensorWrapper& input, TensorWrapper& out,
-                     const std::optional<TensorWrapper>& noop_flag, bool compute_amax);
+                     const std::optional<TensorWrapper>& noop_flag, bool compute_amax,
+                     at::Tensor amax, at::Tensor scale);
 };
+
+/*! @brief Extract amax and scale from a quantizer workspace tensor.
+ *
+ * Workspace layout: [amax, scale] (2 float32).
+ */
+inline std::pair<at::Tensor, at::Tensor> split_quantizer_workspace(const at::Tensor& workspace) {
+  NVTE_CHECK(workspace.numel() >= 2, "Quantizer workspace must have at least 2 float32 elements");
+  return {workspace.slice(0, 0, 1).contiguous(), workspace.slice(0, 1, 2).contiguous()};
+}
 
 class Float8BlockQuantizer : public Quantizer {
  public:

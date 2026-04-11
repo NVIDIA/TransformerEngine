@@ -96,6 +96,7 @@ class _GroupedLinear(torch.autograd.Function):
             skip_fp8_weight_update,
             save_original_input,
             debug,
+            quantizer_workspaces,
         ) = non_tensor_args
         if fp8:
             backward_override = FP8GlobalStateManager.get_fp8_recipe().backward_override
@@ -164,6 +165,7 @@ class _GroupedLinear(torch.autograd.Function):
                 m_splits,
                 input_quantizers,
                 disable_bulk_allocation=cpu_offloading,
+                quantizer_workspaces=quantizer_workspaces,
             )
         elif debug:
             inputmats = DebugQuantizer.multi_tensor_quantize(
@@ -189,6 +191,9 @@ class _GroupedLinear(torch.autograd.Function):
                     update_workspace=update_workspace,
                     skip_update_flag=skip_fp8_weight_update,
                     workspace_dtype=activation_dtype,
+                    quantizer_workspace=(
+                        quantizer_workspaces[i] if quantizer_workspaces is not None else None
+                    ),
                 )
                 weights_fp8.append(weight_fp8)
 
@@ -325,6 +330,7 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.debug = debug
             ctx.save_original_input = save_original_input
             ctx.input_quantizers = input_quantizers
+            ctx.quantizer_workspaces = quantizer_workspaces
 
             # backward overrides
             if backward_override is not None:
@@ -378,6 +384,11 @@ class _GroupedLinear(torch.autograd.Function):
                             grad_biases[i], grad_output[i] = tex.bgrad_quantize(
                                 grad_output_mats[i],
                                 ctx.grad_output_quantizers[i],
+                                quantizer_workspace=(
+                                    ctx.quantizer_workspaces[i]
+                                    if ctx.quantizer_workspaces is not None
+                                    else None
+                                ),
                             )
                     else:
                         # Unfused bias grad and multi-tensor quantize
@@ -387,6 +398,7 @@ class _GroupedLinear(torch.autograd.Function):
                             grad_output_view,
                             ctx.m_splits,
                             ctx.grad_output_quantizers,
+                            quantizer_workspaces=ctx.quantizer_workspaces,
                         )
                 else:
                     # Multi-tensor quantize
@@ -394,6 +406,7 @@ class _GroupedLinear(torch.autograd.Function):
                         grad_output_view,
                         ctx.m_splits,
                         ctx.grad_output_quantizers,
+                        quantizer_workspaces=ctx.quantizer_workspaces,
                     )
             elif ctx.debug:
                 grad_output_mats = torch.split(grad_output_view, ctx.m_splits)
@@ -501,7 +514,12 @@ class _GroupedLinear(torch.autograd.Function):
                                 input_quantizer.set_usage(rowwise=False, columnwise=True)
                     inputmats: list
                     if ctx.fp8 and not ctx.debug:
-                        inputmats = tex.split_quantize(inp_view, ctx.m_splits, ctx.input_quantizers)
+                        inputmats = tex.split_quantize(
+                            inp_view,
+                            ctx.m_splits,
+                            ctx.input_quantizers,
+                            quantizer_workspaces=ctx.quantizer_workspaces,
+                        )
                     elif ctx.debug:
                         inputmats = DebugQuantizer.multi_tensor_quantize(
                             inp_view,
@@ -712,6 +730,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         super().__init__(name)
 
         self.params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
+        self._quantizer_workspaces = None
         self.num_gemms = num_gemms
         self.in_features = in_features
         self.out_features = out_features
@@ -822,6 +841,23 @@ class GroupedLinear(TransformerEngineBaseModule):
                 for i in range(self.num_gemms):
                     if name in (f"weight{i}", f"bias{i}"):
                         param.skip_backward_post_hook = True
+
+    def _init_quantizer_workspace(self, recipe: Recipe) -> None:
+        """Allocate per-group workspace buffers for stateless quantizers.
+
+        Each GEMM group needs its own 2-float32 [amax, scale] buffer
+        because groups may be quantized in parallel.
+        """
+        if not recipe.float8_current_scaling():
+            self._quantizer_workspaces = None
+            return
+        n = self.num_gemms
+        needed = n * 2
+        if self._quantizer_workspace is None or self._quantizer_workspace.numel() < needed:
+            self._quantizer_workspace = torch.zeros(needed, dtype=torch.float32, device="cuda")
+        self._quantizer_workspaces = [
+            self._quantizer_workspace[i * 2 : i * 2 + 2] for i in range(n)
+        ]
 
     def set_meta_tensor(self, fwd: bool, recipe: Recipe) -> None:
         """Init scales and amaxes for fwd | bwd."""
@@ -1155,6 +1191,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                 None,  # skip_fp8_weight_update
                 self.save_original_input,
                 debug,
+                self._quantizer_workspaces,
             )
             out = linear_fn(*autograd_ctx, inp, non_tensor_args, *weight_tensors, *bias_tensors)
 
