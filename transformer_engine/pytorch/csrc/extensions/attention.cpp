@@ -91,6 +91,21 @@ std::pair<TensorWrapper, py::object> quantizer_helper(py::handle quantizer,
           !data.has_value(),
           "Float8CurrentScalingQuantizer::create_tensor() does not take data tensor as input!");
     }
+  } else if (detail::IsMXFP8Quantizers(quantizer.ptr())) {
+    // MXFP8
+    auto *T_quantizer_fp8 = dynamic_cast<MXFP8Quantizer *>(T_quantizer.get());
+    if (create_hp_tensor_for_cs) {
+      if (data.has_value()) {
+        std::tie(te_T, py_T) =
+            T_quantizer_fp8->create_unquantized_tensor_with_amax(shape, dtype, data.value());
+      } else {
+        std::tie(te_T, py_T) = T_quantizer_fp8->create_unquantized_tensor_with_amax(shape, dtype);
+      }
+    } else {
+      std::tie(te_T, py_T) = T_quantizer_fp8->create_tensor(shape, dtype);
+      NVTE_CHECK(!data.has_value(),
+                 "MXFP8Quantizer::create_tensor() does not take data tensor as input!");
+    }
   }
   return {std::move(te_T), std::move(py_T)};
 }
@@ -98,7 +113,7 @@ std::pair<TensorWrapper, py::object> quantizer_helper(py::handle quantizer,
 // fused attention FWD with separate Q, K and V tensors
 std::vector<py::object> fused_attn_fwd(
     size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training, float attn_scale, float p_dropout,
-    bool set_zero, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
+    bool set_zero, NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format, NVTE_Bias_Type bias_type,
     NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
     const std::vector<int64_t> window_size, bool bottom_right_diagonal,
     const at::Tensor cu_seqlens_q, const at::Tensor cu_seqlens_kv, const py::handle Q,
@@ -108,7 +123,8 @@ std::vector<py::object> fused_attn_fwd(
     const std::optional<at::Tensor> page_table_k, const std::optional<at::Tensor> page_table_v,
     py::handle s_quantizer, py::handle o_quantizer, const std::optional<at::Tensor> Bias,
     const std::optional<at::Tensor> SoftmaxOffset, const std::optional<at::Generator> rng_gen,
-    size_t rng_elts_per_thread, bool return_max_logit, bool cuda_graph) {
+    size_t rng_elts_per_thread, bool return_max_logit, bool cuda_graph,
+    NVTE_QKV_Format qkv_scale_inv_format) {
   // Ensure that cuDNN handle is created on the correct device,
   // overriding torch.cuda.set_device calls from user side.
   // Assumes all tensors passed are on the same device.
@@ -134,8 +150,13 @@ std::vector<py::object> fused_attn_fwd(
   std::unique_ptr<Quantizer> O_quantizer = convert_quantizer(o_quantizer);
   std::vector<size_t> q_shape = convertShape(te_Q.shape());
   std::vector<size_t> v_shape = convertShape(te_V.shape());
-  auto o_shape = std::vector<size_t>{q_shape.begin(), q_shape.end()};
-  o_shape[o_shape.size() - 1] = v_shape[v_shape.size() - 1];
+  auto o_shape_tmp = std::vector<size_t>{q_shape.begin(), q_shape.end()};
+  o_shape_tmp[o_shape_tmp.size() - 1] = v_shape[v_shape.size() - 1];
+  auto o_shape = std::vector<size_t>{o_shape_tmp.begin(), o_shape_tmp.end()};
+  size_t h = 0, d = 0;
+  NVTE_QKV_Format q_format = nvte_get_q_format(qkv_layout);
+  nvte_convert_qkv_format(q_format, o_shape_tmp, o_format, o_shape, nullptr, &h, nullptr, &d,
+                          nullptr);
   const DType fake_dtype_te = GetTransformerEngineDType(fake_dtype);
   std::tie(te_O, py_O) = quantizer_helper(o_quantizer, o_shape, fake_dtype_te, true, std::nullopt);
 
@@ -146,9 +167,7 @@ std::vector<py::object> fused_attn_fwd(
   TensorWrapper te_page_table_k, te_page_table_v;
   if (qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
     // FP8
-    auto h = q_shape[q_shape.size() - 2];
-    auto d = q_shape[q_shape.size() - 1];
-    if (set_zero && (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD)) {
+    if (set_zero && (o_format == NVTE_QKV_Format::NVTE_THD)) {
       if ((h * d) % block_size == 0) {
         mha_fill(te_O, cu_seqlens_q.index({torch::indexing::Slice(-1, torch::indexing::None)}));
       } else {
@@ -156,7 +175,7 @@ std::vector<py::object> fused_attn_fwd(
       }
     }
   } else if (qkv_type == DType::kBFloat16 || qkv_type == DType::kFloat16) {
-    if (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD) {
+    if (o_format == NVTE_QKV_Format::NVTE_THD) {
       te_O.zero_(at::cuda::getCurrentCUDAStream());
     }
   } else {
@@ -235,9 +254,9 @@ std::vector<py::object> fused_attn_fwd(
         te_O.data(), &nvte_aux_tensor_pack, te_cu_seqlens_q.data(), te_cu_seqlens_kv.data(),
         te_cu_seqlens_q_padded.data(), te_cu_seqlens_kv_padded.data(), te_page_table_k.data(),
         te_page_table_v.data(), te_rng_state.data(), max_seqlen_q, max_seqlen_kv, is_training,
-        return_max_logit, cuda_graph, attn_scale, p_dropout, qkv_layout, bias_type, attn_mask_type,
-        softmax_type, window_size[0], window_size[1], bottom_right_diagonal, workspace.data(),
-        at::cuda::getCurrentCUDAStream());
+        return_max_logit, cuda_graph, attn_scale, p_dropout, qkv_layout, o_format, bias_type,
+        attn_mask_type, softmax_type, window_size[0], window_size[1], bottom_right_diagonal,
+        workspace.data(), at::cuda::getCurrentCUDAStream(), qkv_scale_inv_format);
   });
 
   // allocate memory for workspace and auxiliary output tensors
@@ -260,7 +279,7 @@ std::vector<py::object> fused_attn_fwd(
   // f16_arbitrary:
   // return_max_logit=false: S [b, h, sq, 1], rng_state [2], (optional) Bias [1, h, sq, skv], (optional) SoftmaxOffset [1, h, 1, 1]
   // return_max_logit=true: S [b, h, sq, 1], Max [b, h, sq, 1], rng_state [2], (optional) Bias [1, h, sq, skv], (optional) SoftmaxOffset [1, h, 1, 1]
-  // fp8          : M [b, h, sq, 1], ZInv [b, h, sq, 1], rng_state [2]
+  // fp8          : M [b, h, sq, 1], optional ZInv [b, h, sq, 1] (T3HD path), rng_state [2]
   size_t i = 0;
   at::Tensor output_tensor;
   // intermediate softmax tensor, S or M (for fp8)
@@ -268,8 +287,10 @@ std::vector<py::object> fused_attn_fwd(
       allocateSpace(nvte_shape_to_vector(nvte_tensor_shape(nvte_aux_tensor_pack.tensors[i])),
                     static_cast<DType>(nvte_tensor_type(nvte_aux_tensor_pack.tensors[i])), false);
   set_tensor_param(i++, output_tensor);
-  // fp8 has an additional softmax stats tensor, ZInv; return_max_logit=true has an additional Max tensor
-  if (return_max_logit || qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
+  // fp8 T3HD has an additional softmax stats tensor, ZInv; return_max_logit=true has an additional Max tensor
+  if (((qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) &&
+       qkv_layout == NVTE_QKV_Layout::NVTE_T3HD) ||
+      return_max_logit) {
     output_tensor =
         allocateSpace(nvte_shape_to_vector(nvte_tensor_shape(nvte_aux_tensor_pack.tensors[i])),
                       static_cast<DType>(nvte_tensor_type(nvte_aux_tensor_pack.tensors[i])), false);
@@ -295,9 +316,9 @@ std::vector<py::object> fused_attn_fwd(
         te_O.data(), &nvte_aux_tensor_pack, te_cu_seqlens_q.data(), te_cu_seqlens_kv.data(),
         te_cu_seqlens_q_padded.data(), te_cu_seqlens_kv_padded.data(), te_page_table_k.data(),
         te_page_table_v.data(), te_rng_state.data(), max_seqlen_q, max_seqlen_kv, is_training,
-        return_max_logit, cuda_graph, attn_scale, p_dropout, qkv_layout, bias_type, attn_mask_type,
-        softmax_type, window_size[0], window_size[1], bottom_right_diagonal, workspace.data(),
-        at::cuda::getCurrentCUDAStream());
+        return_max_logit, cuda_graph, attn_scale, p_dropout, qkv_layout, o_format, bias_type,
+        attn_mask_type, softmax_type, window_size[0], window_size[1], bottom_right_diagonal,
+        workspace.data(), at::cuda::getCurrentCUDAStream(), qkv_scale_inv_format);
   });
 
   // destroy tensor wrappers, but not allocated memory
@@ -310,15 +331,17 @@ std::vector<py::object> fused_attn_fwd(
 // fused attention BWD with separate Q, K and V
 std::vector<py::object> fused_attn_bwd(
     size_t max_seqlen_q, size_t max_seqlen_kv, float attn_scale, float p_dropout, bool set_zero,
-    NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
+    NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format, NVTE_QKV_Format do_format,
+    NVTE_QKV_Layout dqkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
     NVTE_Softmax_Type softmax_type, const std::vector<int64_t> window_size,
     bool bottom_right_diagonal, bool deterministic, const at::Tensor cu_seqlens_q,
     const at::Tensor cu_seqlens_kv, const py::handle Q, const py::handle K, const py::handle V,
-    const py::handle O, const py::handle dO, const at::ScalarType fake_dtype, const DType dqkv_type,
+    const py::handle O, const py::handle dO, const at::ScalarType fake_dtype,
     const std::vector<at::Tensor> Aux_CTX_Tensors,
     const std::optional<at::Tensor> cu_seqlens_q_padded,
     const std::optional<at::Tensor> cu_seqlens_kv_padded, py::handle s_quantizer,
-    py::handle dp_quantizer, py::handle dqkv_quantizer, bool cuda_graph) {
+    py::handle dp_quantizer, py::handle dqkv_quantizer, bool cuda_graph,
+    NVTE_QKV_Format qkv_scale_inv_format, NVTE_QKV_Format do_scale_inv_format) {
   auto none = py::none();
 
   // create QKV, O, dO tensor wrappers
@@ -343,25 +366,35 @@ std::vector<py::object> fused_attn_bwd(
   std::vector<size_t> q_shape = convertShape(te_Q.shape());
   std::vector<size_t> k_shape = convertShape(te_K.shape());
   std::vector<size_t> v_shape = convertShape(te_V.shape());
-  auto h_q = q_shape[q_shape.size() - 2];
-  auto h_kv = k_shape[k_shape.size() - 2];
-  auto d_qk = q_shape[q_shape.size() - 1];
-  const DType fake_dtype_te = GetTransformerEngineDType(fake_dtype);
-
+  const DType dqkv_fake_dtype = GetTransformerEngineDType(fake_dtype);
+  size_t h_q = 0, h_kv = 0, d_qk = 0, d_v = 0;
+  size_t ndim_q = q_shape.size();
+  size_t ndim_kv = k_shape.size();
+  std::vector<size_t> dQ_shape(ndim_q), dK_shape(ndim_kv), dV_shape(ndim_kv);
+  NVTE_QKV_Format q_format = nvte_get_q_format(qkv_layout);
+  NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
+  NVTE_QKV_Format dq_format = nvte_get_q_format(dqkv_layout);
+  NVTE_QKV_Format dkv_format = nvte_get_kv_format(dqkv_layout);
+  nvte_convert_qkv_format(q_format, q_shape, dq_format, dQ_shape, nullptr, &h_q, nullptr, &d_qk,
+                          nullptr);
+  nvte_convert_qkv_format(kv_format, k_shape, dkv_format, dK_shape, nullptr, &h_kv, nullptr,
+                          nullptr, nullptr);
+  nvte_convert_qkv_format(kv_format, v_shape, dkv_format, dV_shape, nullptr, nullptr, nullptr, &d_v,
+                          nullptr);
   at::Tensor dQ, dK, dV, dQKV, dKV;
-  NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
-  std::vector<int64_t> tmp_shape;
-  auto options = torch::TensorOptions().dtype(GetATenDType(dqkv_type)).device(torch::kCUDA);
-  if (dqkv_type == DType::kFloat8E4M3 || dqkv_type == DType::kFloat8E5M2) {
+  // FP16/BF16: dqkv_fake_dtype = kFloat16/kBFloat16, dQ/dK/dV.dtype = torch.float16/torch.bfloat16
+  // FP8DS: dqkv_fake_dtype = kFloat16/kBFloat16, dQ/dK/dV.dtype = torch.uint8
+  // FP8CS/MXFP8: dqkv_fake_dtype = kFloat16/kBFloat16, dQ/dK/dV.dtype = torch.float16/torch.bfloat16
+  auto options = torch::TensorOptions().dtype(fake_dtype).device(torch::kCUDA);
+  if (detail::IsFloat8Quantizers(dqkv_quantizer.ptr())) {
     options = options.dtype(torch::kUInt8);
   }
-  if (detail::IsFloat8CurrentScalingQuantizers(dqkv_quantizer.ptr())) {
-    options = options.dtype(fake_dtype);
-  }
 
+  NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(dqkv_layout);
+  std::vector<int64_t> tmp_shape;
   switch (layout_group) {
     case NVTE_QKV_Layout_Group::NVTE_3HD:
-      tmp_shape = std::vector<int64_t>{q_shape.begin(), q_shape.end()};
+      tmp_shape = std::vector<int64_t>{dQ_shape.begin(), dQ_shape.end()};
       tmp_shape.insert(tmp_shape.begin() + tmp_shape.size() - 2, int64_t(3));
       dQKV = torch::empty(c10::IntArrayRef(tmp_shape), options);
       dQ = dQKV.index({"...", torch::indexing::Slice(0, 1, 1),
@@ -378,7 +411,7 @@ std::vector<py::object> fused_attn_bwd(
                .squeeze(tmp_shape.size() - 3);
       break;
     case NVTE_QKV_Layout_Group::NVTE_H3D:
-      tmp_shape = std::vector<int64_t>{q_shape.begin(), q_shape.end()};
+      tmp_shape = std::vector<int64_t>{dQ_shape.begin(), dQ_shape.end()};
       tmp_shape.insert(tmp_shape.begin() + tmp_shape.size() - 1, int64_t(3));
       dQKV = torch::empty(c10::IntArrayRef(tmp_shape), options);
       dQ = dQKV.index({"...", torch::indexing::Slice(0, 1, 1),
@@ -392,9 +425,9 @@ std::vector<py::object> fused_attn_bwd(
                .squeeze(tmp_shape.size() - 2);
       break;
     case NVTE_QKV_Layout_Group::NVTE_HD_2HD:
-      tmp_shape = std::vector<int64_t>(q_shape.begin(), q_shape.end());
+      tmp_shape = std::vector<int64_t>(dQ_shape.begin(), dQ_shape.end());
       dQ = torch::empty(tmp_shape, options);
-      tmp_shape = std::vector<int64_t>{k_shape.begin(), k_shape.end()};
+      tmp_shape = std::vector<int64_t>{dK_shape.begin(), dK_shape.end()};
       tmp_shape.insert(tmp_shape.begin() + tmp_shape.size() - 2, int64_t(2));
       dKV = torch::empty(c10::IntArrayRef(tmp_shape), options);
       dK = dKV.index({"...", torch::indexing::Slice(0, 1, 1),
@@ -407,9 +440,9 @@ std::vector<py::object> fused_attn_bwd(
                .squeeze(tmp_shape.size() - 3);
       break;
     case NVTE_QKV_Layout_Group::NVTE_HD_H2D:
-      tmp_shape = std::vector<int64_t>(q_shape.begin(), q_shape.end());
+      tmp_shape = std::vector<int64_t>(dQ_shape.begin(), dQ_shape.end());
       dQ = torch::empty(tmp_shape, options);
-      tmp_shape = std::vector<int64_t>{k_shape.begin(), k_shape.end()};
+      tmp_shape = std::vector<int64_t>{dK_shape.begin(), dK_shape.end()};
       tmp_shape.insert(tmp_shape.begin() + tmp_shape.size() - 1, int64_t(2));
       dKV = torch::empty(c10::IntArrayRef(tmp_shape), options);
       dK = dKV.index({"...", torch::indexing::Slice(0, 1, 1),
@@ -420,27 +453,29 @@ std::vector<py::object> fused_attn_bwd(
                .squeeze(tmp_shape.size() - 2);
       break;
     case NVTE_QKV_Layout_Group::NVTE_HD_HD_HD:
-      tmp_shape = std::vector<int64_t>(q_shape.begin(), q_shape.end());
+    case NVTE_QKV_Layout_Group::NVTE_SD_SD_SD:
+      tmp_shape = std::vector<int64_t>(dQ_shape.begin(), dQ_shape.end());
       dQ = torch::empty(tmp_shape, options);
-      tmp_shape = std::vector<int64_t>(k_shape.begin(), k_shape.end());
+      tmp_shape = std::vector<int64_t>(dK_shape.begin(), dK_shape.end());
       dK = torch::empty(tmp_shape, options);
-      tmp_shape = std::vector<int64_t>(v_shape.begin(), v_shape.end());
+      tmp_shape = std::vector<int64_t>(dV_shape.begin(), dV_shape.end());
       dV = torch::empty(tmp_shape, options);
       break;
     default:
       NVTE_ERROR("QKV layout not supported!");
   }
 
-  std::tie(te_dQ, py_dQ) = quantizer_helper(dqkv_quantizer, q_shape, fake_dtype_te, true, dQ);
-  std::tie(te_dK, py_dK) = quantizer_helper(dqkv_quantizer, k_shape, fake_dtype_te, true, dK);
-  std::tie(te_dV, py_dV) = quantizer_helper(dqkv_quantizer, v_shape, fake_dtype_te, true, dV);
+  std::tie(te_dQ, py_dQ) = quantizer_helper(dqkv_quantizer, dQ_shape, dqkv_fake_dtype, true, dQ);
+  std::tie(te_dK, py_dK) = quantizer_helper(dqkv_quantizer, dK_shape, dqkv_fake_dtype, true, dK);
+  std::tie(te_dV, py_dV) = quantizer_helper(dqkv_quantizer, dV_shape, dqkv_fake_dtype, true, dV);
 
   // construct NVTE tensors
-  if (dqkv_type == DType::kFloat8E4M3 || dqkv_type == DType::kFloat8E5M2) {
+  if (detail::IsFloat8Quantizers(dqkv_quantizer.ptr())) {
     // FP8
-    if (set_zero && (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD)) {
+    if (set_zero && (nvte_get_qkv_format(dqkv_layout) == NVTE_QKV_Format::NVTE_THD)) {
       if (((h_q * d_qk) % block_size == 0) && ((h_kv * d_qk) % block_size == 0) &&
-          dQ.is_contiguous() && dK.is_contiguous() && dV.is_contiguous()) {
+          ((h_kv * d_v) % block_size == 0) && dQ.is_contiguous() && dK.is_contiguous() &&
+          dV.is_contiguous()) {
         mha_fill(te_dQ, cu_seqlens_q.index({torch::indexing::Slice(-1, torch::indexing::None)}));
         mha_fill(te_dK, cu_seqlens_kv.index({torch::indexing::Slice(-1, torch::indexing::None)}));
         mha_fill(te_dV, cu_seqlens_kv.index({torch::indexing::Slice(-1, torch::indexing::None)}));
@@ -450,8 +485,10 @@ std::vector<py::object> fused_attn_bwd(
         dV.fill_(0);
       }
     }
-  } else if (dqkv_type == DType::kBFloat16 || dqkv_type == DType::kFloat16) {
-    if (nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD) {
+  } else if (dqkv_quantizer.is_none() ||
+             detail::IsFloat8CurrentScalingQuantizers(dqkv_quantizer.ptr()) ||
+             detail::IsMXFP8Quantizers(dqkv_quantizer.ptr())) {
+    if (nvte_get_qkv_format(dqkv_layout) == NVTE_QKV_Format::NVTE_THD) {
       dQ.fill_(0);
       dK.fill_(0);
       dV.fill_(0);
@@ -538,9 +575,10 @@ std::vector<py::object> fused_attn_bwd(
         &nvte_aux_tensor_pack, te_dQ.data(), te_dK.data(), te_dV.data(), te_dBias.data(),
         te_dSoftmaxOffset.data(), te_cu_seqlens_q.data(), te_cu_seqlens_kv.data(),
         te_cu_seqlens_q_padded.data(), te_cu_seqlens_kv_padded.data(), max_seqlen_q, max_seqlen_kv,
-        attn_scale, p_dropout, qkv_layout, bias_type, attn_mask_type, softmax_type, window_size[0],
-        window_size[1], bottom_right_diagonal, deterministic, cuda_graph, workspace.data(),
-        at::cuda::getCurrentCUDAStream());
+        attn_scale, p_dropout, qkv_layout, o_format, do_format, dqkv_layout, bias_type,
+        attn_mask_type, softmax_type, window_size[0], window_size[1], bottom_right_diagonal,
+        deterministic, cuda_graph, workspace.data(), at::cuda::getCurrentCUDAStream(),
+        qkv_scale_inv_format, do_scale_inv_format);
   });
 
   // allocate memory for workspace
@@ -555,9 +593,10 @@ std::vector<py::object> fused_attn_bwd(
         &nvte_aux_tensor_pack, te_dQ.data(), te_dK.data(), te_dV.data(), te_dBias.data(),
         te_dSoftmaxOffset.data(), te_cu_seqlens_q.data(), te_cu_seqlens_kv.data(),
         te_cu_seqlens_q_padded.data(), te_cu_seqlens_kv_padded.data(), max_seqlen_q, max_seqlen_kv,
-        attn_scale, p_dropout, qkv_layout, bias_type, attn_mask_type, softmax_type, window_size[0],
-        window_size[1], bottom_right_diagonal, deterministic, cuda_graph, workspace.data(),
-        at::cuda::getCurrentCUDAStream());
+        attn_scale, p_dropout, qkv_layout, o_format, do_format, dqkv_layout, bias_type,
+        attn_mask_type, softmax_type, window_size[0], window_size[1], bottom_right_diagonal,
+        deterministic, cuda_graph, workspace.data(), at::cuda::getCurrentCUDAStream(),
+        qkv_scale_inv_format, do_scale_inv_format);
   });
 
   // destroy tensor wrappers
@@ -612,6 +651,256 @@ at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v) {
                               at::cuda::getCurrentCUDAStream());
 
   return qkv;
+}
+
+std::vector<at::Tensor> permute_to_grouped_tensor_fwd(
+    at::Tensor query, std::optional<at::Tensor> key, std::optional<at::Tensor> value,
+    const std::string &original_format, int64_t d_qk_pad, int64_t d_v_pad,
+    std::optional<at::Tensor> q_out_opt, std::optional<at::Tensor> k_out_opt,
+    std::optional<at::Tensor> v_out_opt) {
+  NVTE_CHECK(original_format == "sbhd" || original_format == "bshd",
+             "Unsupported original_format \"", original_format,
+             "\"; expected \"sbhd\" or \"bshd\".");
+  const auto original_format_enum = (original_format == "sbhd") ? NVTE_SBHD : NVTE_BSHD;
+  NVTE_CHECK(query.is_cuda() && query.is_contiguous() && query.dim() == 4);
+  NVTE_CHECK(query.scalar_type() == at::ScalarType::Half ||
+             query.scalar_type() == at::ScalarType::BFloat16 ||
+             query.scalar_type() == at::ScalarType::Byte);
+
+  const bool has_kv = key.has_value() && value.has_value();
+  const size_t num_tensors = has_kv ? 3 : 1;
+
+  int64_t B, S_q, H_q, D_qk;
+  if (original_format_enum == NVTE_SBHD) {
+    S_q = query.size(0);
+    B = query.size(1);
+    H_q = query.size(2);
+    D_qk = query.size(3);
+  } else {
+    B = query.size(0);
+    S_q = query.size(1);
+    H_q = query.size(2);
+    D_qk = query.size(3);
+  }
+
+  const int64_t D_qk_out = (d_qk_pad > 0) ? d_qk_pad : D_qk;
+
+  if (!has_kv) {
+    at::Tensor q_out;
+    if (q_out_opt.has_value()) {
+      q_out = q_out_opt.value();
+    } else {
+      q_out = (D_qk_out == D_qk) ? at::empty({B, H_q, S_q, D_qk_out}, query.options())
+                                 : at::zeros({B, H_q, S_q, D_qk_out}, query.options());
+    }
+    auto te_q = makeTransformerEngineTensor(query);
+    auto te_qo = makeTransformerEngineTensor(q_out);
+    nvte_permute_to_grouped_tensor_fwd(te_q.data(), te_q.data(), te_q.data(), te_qo.data(),
+                                       te_qo.data(), te_qo.data(), original_format_enum, 1,
+                                       at::cuda::getCurrentCUDAStream());
+    return {q_out};
+  }
+
+  auto &k = key.value();
+  auto &v = value.value();
+  NVTE_CHECK(k.is_cuda() && k.is_contiguous() && k.dim() == 4);
+  NVTE_CHECK(v.is_cuda() && v.is_contiguous() && v.dim() == 4);
+  NVTE_CHECK(k.scalar_type() == query.scalar_type() && v.scalar_type() == query.scalar_type());
+
+  int64_t S_kv, H_kv, D_v;
+  if (original_format_enum == NVTE_SBHD) {
+    S_kv = k.size(0);
+    H_kv = k.size(2);
+    D_v = v.size(3);
+  } else {
+    S_kv = k.size(1);
+    H_kv = k.size(2);
+    D_v = v.size(3);
+  }
+
+  const int64_t D_v_out = (d_v_pad > 0) ? d_v_pad : D_v;
+
+  at::Tensor q_out, k_out, v_out;
+  if (q_out_opt.has_value() && k_out_opt.has_value() && v_out_opt.has_value()) {
+    q_out = q_out_opt.value();
+    k_out = k_out_opt.value();
+    v_out = v_out_opt.value();
+  } else {
+    const bool needs_pad = (D_qk_out != D_qk) || (D_v_out != D_v);
+    const int64_t numel_q = B * H_q * S_q * D_qk_out;
+    const int64_t numel_k = B * H_kv * S_kv * D_qk_out;
+    const int64_t numel_v = B * H_kv * S_kv * D_v_out;
+    at::Tensor qkv_out_flat = needs_pad ? at::zeros({numel_q + numel_k + numel_v}, query.options())
+                                        : at::empty({numel_q + numel_k + numel_v}, query.options());
+    q_out = qkv_out_flat.narrow(0, 0, numel_q).view({B, H_q, S_q, D_qk_out});
+    k_out = qkv_out_flat.narrow(0, numel_q, numel_k).view({B, H_kv, S_kv, D_qk_out});
+    v_out = qkv_out_flat.narrow(0, numel_q + numel_k, numel_v).view({B, H_kv, S_kv, D_v_out});
+  }
+
+  auto te_q = makeTransformerEngineTensor(query);
+  auto te_k = makeTransformerEngineTensor(k);
+  auto te_v = makeTransformerEngineTensor(v);
+  auto te_qo = makeTransformerEngineTensor(q_out);
+  auto te_ko = makeTransformerEngineTensor(k_out);
+  auto te_vo = makeTransformerEngineTensor(v_out);
+
+  nvte_permute_to_grouped_tensor_fwd(te_q.data(), te_k.data(), te_v.data(), te_qo.data(),
+                                     te_ko.data(), te_vo.data(), original_format_enum, 3,
+                                     at::cuda::getCurrentCUDAStream());
+
+  return {q_out, k_out, v_out};
+}
+
+std::vector<at::Tensor> permute_to_grouped_tensor_bwd(at::Tensor query_grad,
+                                                      std::optional<at::Tensor> key_grad,
+                                                      std::optional<at::Tensor> value_grad,
+                                                      const std::string &original_format,
+                                                      int64_t d_qk_out, int64_t d_v_out) {
+  NVTE_CHECK(original_format == "sbhd" || original_format == "bshd",
+             "Unsupported original_format \"", original_format,
+             "\"; expected \"sbhd\" or \"bshd\".");
+  const auto original_format_enum = (original_format == "sbhd") ? NVTE_SBHD : NVTE_BSHD;
+  NVTE_CHECK(query_grad.is_cuda() && query_grad.is_contiguous() && query_grad.dim() == 4);
+  NVTE_CHECK(query_grad.scalar_type() == at::ScalarType::Half ||
+             query_grad.scalar_type() == at::ScalarType::BFloat16 ||
+             query_grad.scalar_type() == at::ScalarType::Byte);
+
+  const bool has_kv = key_grad.has_value() && value_grad.has_value();
+
+  const int64_t B = query_grad.size(0);
+  const int64_t H_q = query_grad.size(1);
+  const int64_t S_q = query_grad.size(2);
+  const int64_t D_qk_in = query_grad.size(3);
+  const int64_t D_qk = (d_qk_out > 0) ? d_qk_out : D_qk_in;
+
+  if (!has_kv) {
+    at::Tensor q;
+    if (original_format_enum == NVTE_SBHD) {
+      q = at::empty({S_q, B, H_q, D_qk}, query_grad.options());
+    } else {
+      q = at::empty({B, S_q, H_q, D_qk}, query_grad.options());
+    }
+    auto te_gq = makeTransformerEngineTensor(query_grad);
+    auto te_q = makeTransformerEngineTensor(q);
+    nvte_permute_to_grouped_tensor_bwd(te_gq.data(), te_gq.data(), te_gq.data(), te_q.data(),
+                                       te_q.data(), te_q.data(), original_format_enum, 1,
+                                       at::cuda::getCurrentCUDAStream());
+    return {q};
+  }
+
+  auto &kg = key_grad.value();
+  auto &vg = value_grad.value();
+  NVTE_CHECK(kg.is_cuda() && kg.is_contiguous() && kg.dim() == 4);
+  NVTE_CHECK(vg.is_cuda() && vg.is_contiguous() && vg.dim() == 4);
+  NVTE_CHECK(kg.scalar_type() == query_grad.scalar_type() &&
+             vg.scalar_type() == query_grad.scalar_type());
+
+  const int64_t H_kv = kg.size(1);
+  const int64_t S_kv = kg.size(2);
+  const int64_t D_v_in = vg.size(3);
+  const int64_t D_v = (d_v_out > 0) ? d_v_out : D_v_in;
+
+  const int64_t numel_q = S_q * B * H_q * D_qk;
+  const int64_t numel_k = S_kv * B * H_kv * D_qk;
+  const int64_t numel_v = S_kv * B * H_kv * D_v;
+  at::Tensor qkv_grad_flat = at::empty({numel_q + numel_k + numel_v}, query_grad.options());
+
+  at::Tensor query, key, value;
+  if (original_format_enum == NVTE_SBHD) {
+    query = qkv_grad_flat.narrow(0, 0, numel_q).view({S_q, B, H_q, D_qk});
+    key = qkv_grad_flat.narrow(0, numel_q, numel_k).view({S_kv, B, H_kv, D_qk});
+    value = qkv_grad_flat.narrow(0, numel_q + numel_k, numel_v).view({S_kv, B, H_kv, D_v});
+  } else {
+    query = qkv_grad_flat.narrow(0, 0, numel_q).view({B, S_q, H_q, D_qk});
+    key = qkv_grad_flat.narrow(0, numel_q, numel_k).view({B, S_kv, H_kv, D_qk});
+    value = qkv_grad_flat.narrow(0, numel_q + numel_k, numel_v).view({B, S_kv, H_kv, D_v});
+  }
+
+  auto te_gq = makeTransformerEngineTensor(query_grad);
+  auto te_gk = makeTransformerEngineTensor(kg);
+  auto te_gv = makeTransformerEngineTensor(vg);
+  auto te_q = makeTransformerEngineTensor(query);
+  auto te_k = makeTransformerEngineTensor(key);
+  auto te_v = makeTransformerEngineTensor(value);
+
+  nvte_permute_to_grouped_tensor_bwd(te_gq.data(), te_gk.data(), te_gv.data(), te_q.data(),
+                                     te_k.data(), te_v.data(), original_format_enum, 3,
+                                     at::cuda::getCurrentCUDAStream());
+
+  return {query, key, value};
+}
+
+/***************************************************************************************************
+ * Pad the last dimension of 2D tensors to a common alignment, zero-filling the padding.
+ * All tensors share the same alignment; launches a single fused kernel.
+ **************************************************************************************************/
+
+std::vector<at::Tensor> multi_tensor_pad_last_dim(std::vector<at::Tensor> inputs,
+                                                  int64_t alignment) {
+  const auto align = static_cast<size_t>(alignment);
+  NVTE_CHECK(align > 0, "multi_tensor_pad_last_dim: alignment must be > 0.");
+  NVTE_CHECK(!inputs.empty(), "multi_tensor_pad_last_dim: inputs must not be empty.");
+
+  auto stream = at::cuda::getCurrentCUDAStream();
+  std::vector<at::Tensor> outputs;
+  outputs.reserve(inputs.size());
+
+  std::vector<size_t> kernel_indices;
+
+  for (size_t i = 0; i < inputs.size(); ++i) {
+    auto &input = inputs[i];
+
+    NVTE_CHECK(input.dim() == 2, "multi_tensor_pad_last_dim: expected 2D input at index ", i,
+               ", got ", input.dim(), "D.");
+    NVTE_CHECK(input.is_cuda(), "multi_tensor_pad_last_dim: input must be a CUDA tensor at index ",
+               i, ".");
+    NVTE_CHECK(input.is_contiguous(),
+               "multi_tensor_pad_last_dim: input must be contiguous at index ", i, ".");
+
+    const int64_t rows = input.size(0);
+    const int64_t in_cols = input.size(1);
+    const int64_t padded_cols =
+        static_cast<int64_t>(DIVUP_TO_MULTIPLE(static_cast<size_t>(in_cols), align));
+
+    if (in_cols == padded_cols) {
+      outputs.push_back(input);
+      continue;
+    }
+
+    at::Tensor output = at::empty({rows, padded_cols}, input.options());
+    outputs.push_back(output);
+    kernel_indices.push_back(outputs.size() - 1);
+  }
+
+  if (kernel_indices.empty()) return outputs;
+
+  std::vector<transformer_engine::TensorWrapper> te_in_wrappers, te_out_wrappers;
+  te_in_wrappers.reserve(kernel_indices.size());
+  te_out_wrappers.reserve(kernel_indices.size());
+
+  size_t ki = 0;
+  for (size_t i = 0; i < inputs.size(); ++i) {
+    const int64_t in_cols = inputs[i].size(1);
+    const int64_t padded_cols =
+        static_cast<int64_t>(DIVUP_TO_MULTIPLE(static_cast<size_t>(in_cols), align));
+    if (in_cols == padded_cols) continue;
+
+    te_in_wrappers.push_back(makeTransformerEngineTensor(inputs[i]));
+    te_out_wrappers.push_back(makeTransformerEngineTensor(outputs[kernel_indices[ki]]));
+    ++ki;
+  }
+
+  std::vector<NVTETensor> nvte_inputs(te_in_wrappers.size());
+  std::vector<NVTETensor> nvte_outputs(te_out_wrappers.size());
+  for (size_t i = 0; i < te_in_wrappers.size(); ++i) {
+    nvte_inputs[i] = te_in_wrappers[i].data();
+    nvte_outputs[i] = te_out_wrappers[i].data();
+  }
+
+  nvte_multi_tensor_pad_last_dim(nvte_inputs.data(), nvte_outputs.data(), te_in_wrappers.size(),
+                                 stream);
+
+  return outputs;
 }
 
 /***************************************************************************************************

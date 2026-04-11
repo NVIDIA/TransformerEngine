@@ -443,6 +443,103 @@ void grouped_swizzle_for_gemm(py::handle &tensor, bool rowwise, bool columnwise)
   }
 }
 
+void inplace_multi_swizzle_scales_for_gemm(std::vector<py::object> &tensors, bool rowwise_usage,
+                                           bool columnwise_usage, bool check_scale_inv_shapes) {
+  NVTE_CHECK(rowwise_usage != columnwise_usage,
+             "Expect exactly one of rowwise_usage and columnwise_usage.");
+  if (tensors.empty()) {
+    return;
+  }
+
+  // Convert Python tensors to C++ TensorWrappers
+  std::vector<transformer_engine::TensorWrapper> te_wrappers;
+  te_wrappers.reserve(tensors.size());
+  for (auto &t : tensors) {
+    te_wrappers.push_back(makeTransformerEngineTensor(t, py::none()));
+  }
+
+  // Check scaling mode and filter tensors needing swizzle
+  const auto scaling_mode = te_wrappers.front().scaling_mode();
+  switch (scaling_mode) {
+    case NVTE_MXFP8_1D_SCALING:
+    case NVTE_NVFP4_1D_SCALING:
+      break;
+    default:
+      return;
+  }
+
+  struct SwizzleItem {
+    size_t py_idx;
+    at::Tensor output_pyt;
+  };
+  std::vector<SwizzleItem> items;
+  std::vector<transformer_engine::TensorWrapper> inputs_nvte, outputs_nvte;
+
+  for (size_t i = 0; i < te_wrappers.size(); ++i) {
+    auto &tw = te_wrappers[i];
+    if (tw.get_with_gemm_swizzled_scales()) {
+      continue;
+    }
+    const auto scales_nvte =
+        rowwise_usage ? tw.get_rowwise_scale_inv() : tw.get_columnwise_scale_inv();
+    if (scales_nvte.data_ptr == nullptr ||
+        (scales_nvte.shape.ndim == 1 && scales_nvte.shape.data[0] == 0)) {
+      continue;
+    }
+    const auto data_nvte = rowwise_usage ? tw.get_rowwise_data() : tw.get_columnwise_data();
+    const auto data_dtype = static_cast<DType>(data_nvte.dtype);
+    const auto scales_dtype = static_cast<DType>(scales_nvte.dtype);
+
+    // Allocate a separate output tensor that properly owns its memory
+    auto output_pyt = allocateSpace(scales_nvte.shape, scales_dtype, false);
+
+    inputs_nvte.emplace_back(scaling_mode);
+    outputs_nvte.emplace_back(scaling_mode);
+    auto &in_nvte = inputs_nvte.back();
+    auto &out_nvte = outputs_nvte.back();
+    if (rowwise_usage) {
+      in_nvte.set_rowwise_data(nullptr, data_dtype, data_nvte.shape);
+      in_nvte.set_rowwise_scale_inv(scales_nvte.data_ptr, scales_dtype, scales_nvte.shape);
+      out_nvte.set_rowwise_data(nullptr, data_dtype, data_nvte.shape);
+      out_nvte.set_rowwise_scale_inv(getDataPtr(output_pyt), scales_dtype, scales_nvte.shape);
+    } else {
+      in_nvte.set_columnwise_data(nullptr, data_dtype, data_nvte.shape);
+      in_nvte.set_columnwise_scale_inv(scales_nvte.data_ptr, scales_dtype, scales_nvte.shape);
+      out_nvte.set_columnwise_data(nullptr, data_dtype, data_nvte.shape);
+      out_nvte.set_columnwise_scale_inv(getDataPtr(output_pyt), scales_dtype, scales_nvte.shape);
+    }
+    out_nvte.set_with_gemm_swizzled_scales(true);
+    items.push_back({i, std::move(output_pyt)});
+  }
+
+  if (items.empty()) {
+    return;
+  }
+
+  // Pack raw NVTETensors and launch single batched kernel
+  std::vector<NVTETensor> inputs_raw, outputs_raw;
+  inputs_raw.reserve(inputs_nvte.size());
+  outputs_raw.reserve(outputs_nvte.size());
+  for (auto &t : inputs_nvte) inputs_raw.push_back(t.data());
+  for (auto &t : outputs_nvte) outputs_raw.push_back(t.data());
+
+  auto stream = at::cuda::getCurrentCUDAStream();
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_multi_tensor_swizzle_scaling_factors(inputs_raw.data(), outputs_raw.data(),
+                                              inputs_raw.size(), stream, check_scale_inv_shapes);
+  });
+
+  // Update Python tensors with the owning output tensors
+  for (auto &item : items) {
+    auto &t = tensors[item.py_idx];
+    if (rowwise_usage) {
+      t.attr("_rowwise_scale_inv") = py::cast(item.output_pyt);
+    } else {
+      t.attr("_columnwise_scale_inv") = py::cast(item.output_pyt);
+    }
+  }
+}
+
 void inplace_swizzle_scale_for_gemm(py::handle &tensor) {
   // Convert Python tensor to C++ tensor
   auto tensor_nvte = makeTransformerEngineTensor(tensor, py::none());
