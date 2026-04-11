@@ -43,7 +43,8 @@ void nvte_swizzle_scaling_factors(const NVTETensor input, NVTETensor output, cud
  *  - data is quantized along K-dimension, i.e. 1D-scaling block lies along the K-dimension.
  */
 void nvte_multi_tensor_swizzle_scaling_factors(const NVTETensor* inputs, NVTETensor* outputs,
-                                               const size_t num_tensors, cudaStream_t stream);
+                                               const size_t num_tensors, cudaStream_t stream,
+                                               bool check_scale_inv_shapes = true);
 
 /*! \brief Unswizzling scaling factors from the interleaved layout used by GEMM back to row-major
  *

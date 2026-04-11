@@ -117,12 +117,12 @@ at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v);
 
 std::vector<at::Tensor> permute_to_grouped_tensor_fwd(
     at::Tensor query, std::optional<at::Tensor> key, std::optional<at::Tensor> value,
-    NVTE_QKV_Format original_format);
+    const std::string &original_format);
 std::vector<at::Tensor> permute_to_grouped_tensor_bwd(
     at::Tensor query_grad, std::optional<at::Tensor> key_grad,
-    std::optional<at::Tensor> value_grad, NVTE_QKV_Format original_format);
+    std::optional<at::Tensor> value_grad, const std::string &original_format);
 
-std::vector<at::Tensor> pad_last_dim(std::vector<at::Tensor> inputs, int64_t alignment);
+std::vector<at::Tensor> multi_tensor_pad_last_dim(std::vector<at::Tensor> inputs, int64_t alignment);
 
 at::Tensor convert_thd_to_bshd(at::Tensor tensor, at::Tensor cu_seqlens, int b, int max_seq_len);
 at::Tensor convert_bshd_to_thd(at::Tensor tensor, at::Tensor cu_seqlens, int t);
@@ -462,28 +462,6 @@ at::Tensor fused_qkv_rope_backward(const at::Tensor &q_grad_out, const at::Tenso
                                    const NVTE_QKV_Format qkv_format, const bool interleaved,
                                    const int cp_size, const int cp_rank);
 
-at::Tensor fused_mla_rope_q_forward(const at::Tensor &q_input, const at::Tensor &cos,
-                                    const at::Tensor &sin,
-                                    const std::optional<at::Tensor> cu_seqlens,
-                                    const int qk_head_dim, const int emb_dim, const int cp_size,
-                                    const int cp_rank);
-
-at::Tensor fused_mla_rope_q_backward(const at::Tensor &grad_output, const at::Tensor &cos,
-                                     const at::Tensor &sin,
-                                     const std::optional<at::Tensor> cu_seqlens,
-                                     const int qk_head_dim, const int emb_dim, const int cp_size,
-                                     const int cp_rank);
-
-std::tuple<at::Tensor, at::Tensor> fused_mla_rope_kv_forward(
-    const at::Tensor &kv_input, const at::Tensor &k_pos_emb, const at::Tensor &cos,
-    const at::Tensor &sin, const std::optional<at::Tensor> cu_seqlens, const int emb_dim,
-    const int k_dim, const int v_dim, const int cp_size, const int cp_rank);
-
-std::tuple<at::Tensor, at::Tensor> fused_mla_rope_kv_backward(
-    const at::Tensor &dk, const at::Tensor &dv, const at::Tensor &cos, const at::Tensor &sin,
-    const std::optional<at::Tensor> cu_seqlens, const int emb_dim, const int k_dim,
-    const int v_dim, const int cp_size, const int cp_rank);
-
 /***************************************************************************************************
  * Miscellaneous
  **************************************************************************************************/
@@ -604,6 +582,10 @@ void fused_multi_row_unpadding(at::Tensor input, at::Tensor output,
  **************************************************************************************************/
 
 void inplace_swizzle_scale_for_gemm(py::handle &tensor);
+
+void inplace_multi_swizzle_scales_for_gemm(std::vector<py::object> &tensors, bool rowwise_usage,
+                                           bool columnwise_usage,
+                                           bool check_scale_inv_shapes = true);
 
 void grouped_swizzle_for_gemm(py::handle &tensor, bool rowwise, bool columnwise);
 

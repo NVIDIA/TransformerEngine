@@ -313,7 +313,7 @@ def fused_attn_fwd(
 
     # execute kernel
 
-    _qkv_scale_inv_fmt = (
+    _qkv_scale_inv_format = (
         QKVFormat[qkv_scale_inv_format]
         if qkv_scale_inv_format is not None
         else NVTE_QKV_Format.NVTE_QKV_Format_NOT_SET
@@ -350,7 +350,7 @@ def fused_attn_fwd(
         rng_elts_per_thread,
         return_max_logit,
         cuda_graph,
-        _qkv_scale_inv_fmt,
+        _qkv_scale_inv_format,
     )
 
     if return_max_logit:
@@ -566,12 +566,12 @@ def fused_attn_bwd(
                 f" for backend={fused_attention_backend}."
             )
 
-    _qkv_scale_inv_fmt = (
+    _qkv_scale_inv_format = (
         QKVFormat[qkv_scale_inv_format]
         if qkv_scale_inv_format is not None
         else NVTE_QKV_Format.NVTE_QKV_Format_NOT_SET
     )
-    _do_scale_inv_fmt = (
+    _do_scale_inv_format = (
         QKVFormat[do_scale_inv_format]
         if do_scale_inv_format is not None
         else NVTE_QKV_Format.NVTE_QKV_Format_NOT_SET
@@ -607,8 +607,8 @@ def fused_attn_bwd(
         dp_quantizer,
         dqkv_quantizer,
         cuda_graph,
-        _qkv_scale_inv_fmt,
-        _do_scale_inv_fmt,
+        _qkv_scale_inv_format,
+        _do_scale_inv_format,
     )
 
     return output_tensors

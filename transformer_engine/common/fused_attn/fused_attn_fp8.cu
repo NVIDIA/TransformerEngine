@@ -1826,10 +1826,10 @@ void fused_attn_fp8_fwd_impl_v1(
           scale_o = mha_graph->tensor(1.0f);
         }
       } else if (is_mxfp8) {
-        NVTE_QKV_Format q_scale_format =
+        NVTE_QKV_Format q_scale_inv_format =
             (qkv_scale_inv_format != NVTE_QKV_Format_NOT_SET)
                 ? qkv_scale_inv_format : nvte_get_q_format(qkv_layout);
-        NVTE_QKV_Format kv_scale_format =
+        NVTE_QKV_Format kv_scale_inv_format =
             (qkv_scale_inv_format != NVTE_QKV_Format_NOT_SET)
                 ? qkv_scale_inv_format : nvte_get_kv_format(qkv_layout);
         std::vector<int64_t> q_scale_strides(4);
@@ -1837,24 +1837,11 @@ void fused_attn_fp8_fwd_impl_v1(
         std::vector<int64_t> v_scale_strides(4);
         auto padded = pad_s_d_for_mxfp8(s_q, s_kv, d_qk, d_v);
         generateMatrixStridesWithFormat(b, h, padded.s_q_padded, padded.d_qk_scale_padded,
-                                        q_scale_strides.data(), q_scale_format);
+                                        q_scale_strides.data(), q_scale_inv_format);
         generateMatrixStridesWithFormat(b, hg, padded.s_kv_padded, padded.d_qk_scale_padded,
-                                        k_scale_strides.data(), kv_scale_format);
+                                        k_scale_strides.data(), kv_scale_inv_format);
         generateMatrixStridesWithFormat(b, hg, padded.s_kv_scale_padded, padded.d_v_padded,
-                                        v_scale_strides.data(), kv_scale_format);
-        printf("q_scale_strides: %d, %d, %d, %d\n", q_scale_strides[0], q_scale_strides[1], q_scale_strides[2], q_scale_strides[3]);
-        printf("k_scale_strides: %d, %d, %d, %d\n", k_scale_strides[0], k_scale_strides[1], k_scale_strides[2], k_scale_strides[3]);
-        printf("v_scale_strides: %d, %d, %d, %d\n", v_scale_strides[0], v_scale_strides[1], v_scale_strides[2], v_scale_strides[3]);
-        printf("qkv_layout: %d\n", qkv_layout);
-        printf("qkv_scale_inv_format: %d\n", qkv_scale_inv_format);
-        printf("q_scale_format: %d\n", q_scale_format);
-        printf("kv_scale_format: %d\n", kv_scale_format);
-        printf("padded.s_q_padded: %d\n", padded.s_q_padded);
-        printf("padded.d_qk_scale_padded: %d\n", padded.d_qk_scale_padded);
-        printf("padded.s_kv_padded: %d\n", padded.s_kv_padded);
-        printf("padded.d_qk_scale_padded: %d\n", padded.d_qk_scale_padded);
-        printf("padded.s_kv_scale_padded: %d\n", padded.s_kv_scale_padded);
-        printf("padded.d_v_padded: %d\n", padded.d_v_padded);
+                                        v_scale_strides.data(), kv_scale_inv_format);
         descale_q =
             mha_graph->tensor(fe::graph::Tensor_attributes()
                                   .set_name("Descale_q")
@@ -2336,13 +2323,13 @@ void fused_attn_fp8_bwd_impl_v1(
       } else if (is_mxfp8) {
         NVTE_QKV_Format q_format = nvte_get_q_format(qkv_layout);
         NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
-        NVTE_QKV_Format q_scale_format =
+        NVTE_QKV_Format q_scale_inv_format =
             (qkv_scale_inv_format != NVTE_QKV_Format_NOT_SET)
                 ? qkv_scale_inv_format : q_format;
-        NVTE_QKV_Format kv_scale_format =
+        NVTE_QKV_Format kv_scale_inv_format =
             (qkv_scale_inv_format != NVTE_QKV_Format_NOT_SET)
                 ? qkv_scale_inv_format : kv_format;
-        NVTE_QKV_Format do_scale_format =
+        NVTE_QKV_Format do_scale_format_ =
             (do_scale_inv_format != NVTE_QKV_Format_NOT_SET)
                 ? do_scale_inv_format : do_format;
         // Q_t, K_t, dO_t, dO_f16
@@ -2375,19 +2362,19 @@ void fused_attn_fp8_bwd_impl_v1(
         std::vector<int64_t> q_scale_strides(4), q_t_scale_strides(4), k_scale_strides(4),
             k_t_scale_strides(4), v_scale_strides(4), dO_scale_strides(4), dO_t_scale_strides(4);
         generateMatrixStridesWithFormat(b, h, padded.s_q_padded, padded.d_qk_scale_padded,
-                                        q_scale_strides.data(), q_scale_format);
+                                        q_scale_strides.data(), q_scale_inv_format);
         generateMatrixStridesWithFormat(b, h, padded.s_q_scale_padded, padded.d_qk_padded,
-                                        q_t_scale_strides.data(), q_scale_format);
+                                        q_t_scale_strides.data(), q_scale_inv_format);
         generateMatrixStridesWithFormat(b, hg, padded.s_kv_padded, padded.d_qk_scale_padded,
-                                        k_scale_strides.data(), kv_scale_format);
+                                        k_scale_strides.data(), kv_scale_inv_format);
         generateMatrixStridesWithFormat(b, hg, padded.s_kv_scale_padded, padded.d_qk_padded,
-                                        k_t_scale_strides.data(), kv_scale_format);
+                                        k_t_scale_strides.data(), kv_scale_inv_format);
         generateMatrixStridesWithFormat(b, hg, padded.s_kv_padded, padded.d_v_scale_padded,
-                                        v_scale_strides.data(), kv_scale_format);
+                                        v_scale_strides.data(), kv_scale_inv_format);
         generateMatrixStridesWithFormat(b, h, padded.s_q_padded, padded.d_v_scale_padded,
-                                        dO_scale_strides.data(), do_scale_format);
+                                        dO_scale_strides.data(), do_scale_format_);
         generateMatrixStridesWithFormat(b, h, padded.s_q_scale_padded, padded.d_v_padded,
-                                        dO_t_scale_strides.data(), do_scale_format);
+                                        dO_t_scale_strides.data(), do_scale_format_);
         descale_q =
             mha_graph->tensor(fe::graph::Tensor_attributes()
                                   .set_name("Descale_q")

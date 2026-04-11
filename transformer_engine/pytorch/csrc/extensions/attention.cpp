@@ -655,20 +655,20 @@ at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v) {
 
 std::vector<at::Tensor> permute_to_grouped_tensor_fwd(
     at::Tensor query, std::optional<at::Tensor> key, std::optional<at::Tensor> value,
-    NVTE_QKV_Format original_format) {
-  NVTE_CHECK(original_format == NVTE_SBHD || original_format == NVTE_BSHD,
-             "permute_to_grouped_tensor_fwd: original_format must be NVTE_SBHD or NVTE_BSHD.");
+    const std::string &original_format) {
+  NVTE_CHECK(original_format == "sbhd" || original_format == "bshd",
+             "Unsupported original_format \"", original_format, "\"; expected \"sbhd\" or \"bshd\".");
+  const auto original_format_enum = (original_format == "sbhd") ? NVTE_SBHD : NVTE_BSHD;
   NVTE_CHECK(query.is_cuda() && query.is_contiguous() && query.dim() == 4);
   NVTE_CHECK(query.scalar_type() == at::ScalarType::Half ||
              query.scalar_type() == at::ScalarType::BFloat16 ||
-             query.scalar_type() == at::ScalarType::Float ||
              query.scalar_type() == at::ScalarType::Byte);
 
   const bool has_kv = key.has_value() && value.has_value();
   const size_t num_tensors = has_kv ? 3 : 1;
 
   int64_t B, S_q, H_q, D_qk;
-  if (original_format == NVTE_SBHD) {
+  if (original_format_enum == NVTE_SBHD) {
     S_q = query.size(0); B = query.size(1); H_q = query.size(2); D_qk = query.size(3);
   } else {
     B = query.size(0); S_q = query.size(1); H_q = query.size(2); D_qk = query.size(3);
@@ -681,7 +681,7 @@ std::vector<at::Tensor> permute_to_grouped_tensor_fwd(
     auto te_qo = makeTransformerEngineTensor(q_out);
     nvte_permute_to_grouped_tensor_fwd(te_q.data(), te_q.data(), te_q.data(),
                                        te_qo.data(), te_qo.data(), te_qo.data(),
-                                       original_format, 1, at::cuda::getCurrentCUDAStream());
+                                       original_format_enum, 1, at::cuda::getCurrentCUDAStream());
     return {q_out};
   }
 
@@ -692,7 +692,7 @@ std::vector<at::Tensor> permute_to_grouped_tensor_fwd(
   NVTE_CHECK(k.scalar_type() == query.scalar_type() && v.scalar_type() == query.scalar_type());
 
   int64_t S_kv, H_kv, D_v;
-  if (original_format == NVTE_SBHD) {
+  if (original_format_enum == NVTE_SBHD) {
     S_kv = k.size(0); H_kv = k.size(2); D_v = v.size(3);
   } else {
     S_kv = k.size(1); H_kv = k.size(2); D_v = v.size(3);
@@ -715,20 +715,20 @@ std::vector<at::Tensor> permute_to_grouped_tensor_fwd(
 
   nvte_permute_to_grouped_tensor_fwd(te_q.data(), te_k.data(), te_v.data(),
                                      te_qo.data(), te_ko.data(), te_vo.data(),
-                                     original_format, 3, at::cuda::getCurrentCUDAStream());
+                                     original_format_enum, 3, at::cuda::getCurrentCUDAStream());
 
   return {q_out, k_out, v_out};
 }
 
 std::vector<at::Tensor> permute_to_grouped_tensor_bwd(
     at::Tensor query_grad, std::optional<at::Tensor> key_grad,
-    std::optional<at::Tensor> value_grad, NVTE_QKV_Format original_format) {
-  NVTE_CHECK(original_format == NVTE_SBHD || original_format == NVTE_BSHD,
-             "permute_to_grouped_tensor_bwd: original_format must be NVTE_SBHD or NVTE_BSHD.");
+    std::optional<at::Tensor> value_grad,     const std::string &original_format) {
+  NVTE_CHECK(original_format == "sbhd" || original_format == "bshd",
+             "Unsupported original_format \"", original_format, "\"; expected \"sbhd\" or \"bshd\".");
+  const auto original_format_enum = (original_format == "sbhd") ? NVTE_SBHD : NVTE_BSHD;
   NVTE_CHECK(query_grad.is_cuda() && query_grad.is_contiguous() && query_grad.dim() == 4);
   NVTE_CHECK(query_grad.scalar_type() == at::ScalarType::Half ||
              query_grad.scalar_type() == at::ScalarType::BFloat16 ||
-             query_grad.scalar_type() == at::ScalarType::Float ||
              query_grad.scalar_type() == at::ScalarType::Byte);
 
   const bool has_kv = key_grad.has_value() && value_grad.has_value();
@@ -740,7 +740,7 @@ std::vector<at::Tensor> permute_to_grouped_tensor_bwd(
 
   if (!has_kv) {
     at::Tensor q;
-    if (original_format == NVTE_SBHD) {
+    if (original_format_enum == NVTE_SBHD) {
       q = at::empty({S_q, B, H_q, D_qk}, query_grad.options());
     } else {
       q = at::empty({B, S_q, H_q, D_qk}, query_grad.options());
@@ -749,7 +749,7 @@ std::vector<at::Tensor> permute_to_grouped_tensor_bwd(
     auto te_q = makeTransformerEngineTensor(q);
     nvte_permute_to_grouped_tensor_bwd(te_gq.data(), te_gq.data(), te_gq.data(),
                                        te_q.data(), te_q.data(), te_q.data(),
-                                       original_format, 1, at::cuda::getCurrentCUDAStream());
+                                       original_format_enum, 1, at::cuda::getCurrentCUDAStream());
     return {q};
   }
 
@@ -770,7 +770,7 @@ std::vector<at::Tensor> permute_to_grouped_tensor_bwd(
   at::Tensor qkv_grad_flat = at::empty({numel_q + numel_k + numel_v}, query_grad.options());
 
   at::Tensor query, key, value;
-  if (original_format == NVTE_SBHD) {
+  if (original_format_enum == NVTE_SBHD) {
     query = qkv_grad_flat.narrow(0, 0, numel_q).view({S_q, B, H_q, D_qk});
     key = qkv_grad_flat.narrow(0, numel_q, numel_k).view({S_kv, B, H_kv, D_qk});
     value = qkv_grad_flat.narrow(0, numel_q + numel_k, numel_v).view({S_kv, B, H_kv, D_v});
@@ -789,7 +789,7 @@ std::vector<at::Tensor> permute_to_grouped_tensor_bwd(
 
   nvte_permute_to_grouped_tensor_bwd(te_gq.data(), te_gk.data(), te_gv.data(),
                                      te_q.data(), te_k.data(), te_v.data(),
-                                     original_format, 3, at::cuda::getCurrentCUDAStream());
+                                     original_format_enum, 3, at::cuda::getCurrentCUDAStream());
 
   return {query, key, value};
 }
@@ -799,10 +799,10 @@ std::vector<at::Tensor> permute_to_grouped_tensor_bwd(
  * All tensors share the same alignment; launches a single fused kernel.
  **************************************************************************************************/
 
-std::vector<at::Tensor> pad_last_dim(std::vector<at::Tensor> inputs, int64_t alignment) {
+std::vector<at::Tensor> multi_tensor_pad_last_dim(std::vector<at::Tensor> inputs, int64_t alignment) {
   const auto align = static_cast<size_t>(alignment);
-  NVTE_CHECK(align > 0, "pad_last_dim: alignment must be > 0.");
-  NVTE_CHECK(!inputs.empty(), "pad_last_dim: inputs must not be empty.");
+  NVTE_CHECK(align > 0, "multi_tensor_pad_last_dim: alignment must be > 0.");
+  NVTE_CHECK(!inputs.empty(), "multi_tensor_pad_last_dim: inputs must not be empty.");
 
   auto stream = at::cuda::getCurrentCUDAStream();
   std::vector<at::Tensor> outputs;
@@ -813,10 +813,10 @@ std::vector<at::Tensor> pad_last_dim(std::vector<at::Tensor> inputs, int64_t ali
   for (size_t i = 0; i < inputs.size(); ++i) {
     auto &input = inputs[i];
 
-    NVTE_CHECK(input.dim() == 2, "pad_last_dim: expected 2D input at index ", i, ", got ",
+    NVTE_CHECK(input.dim() == 2, "multi_tensor_pad_last_dim: expected 2D input at index ", i, ", got ",
                input.dim(), "D.");
-    NVTE_CHECK(input.is_cuda(), "pad_last_dim: input must be a CUDA tensor at index ", i, ".");
-    NVTE_CHECK(input.is_contiguous(), "pad_last_dim: input must be contiguous at index ", i, ".");
+    NVTE_CHECK(input.is_cuda(), "multi_tensor_pad_last_dim: input must be a CUDA tensor at index ", i, ".");
+    NVTE_CHECK(input.is_contiguous(), "multi_tensor_pad_last_dim: input must be contiguous at index ", i, ".");
 
     const int64_t rows = input.size(0);
     const int64_t in_cols = input.size(1);
@@ -858,7 +858,7 @@ std::vector<at::Tensor> pad_last_dim(std::vector<at::Tensor> inputs, int64_t ali
     nvte_outputs[i] = te_out_wrappers[i].data();
   }
 
-  nvte_multi_pad_last_dim(nvte_inputs.data(), nvte_outputs.data(), te_in_wrappers.size(), stream);
+  nvte_multi_tensor_pad_last_dim(nvte_inputs.data(), nvte_outputs.data(), te_in_wrappers.size(), stream);
 
   return outputs;
 }

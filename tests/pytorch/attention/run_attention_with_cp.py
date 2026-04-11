@@ -333,7 +333,7 @@ def run_dpa_with_cp(
     qkv_layout = "_".join([qkv_format] * 3)
     q, k, v, dout = [x.clone().detach() for x in [q_orig, k_orig, v_orig, dout_orig]]
     if fp8_mha:
-        q, k, v, qkv_layout = combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer)
+        q, k, v, qkv_layout, _ = combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer)
     for x in [q, k, v]:
         x.requires_grad = True
 
@@ -441,7 +441,7 @@ def run_dpa_with_cp(
         dout_quantizer.scale.fill_(1.0)
         dout_quantizer.amax.fill_(0.0)
     if fp8_mha:
-        q_, k_, v_, qkv_layout = combine_and_quantize(qkv_layout, q_, k_, v_, qkv_quantizer)
+        q_, k_, v_, qkv_layout, _ = combine_and_quantize(qkv_layout, q_, k_, v_, qkv_quantizer)
     if is_training:
         q_, k_, v_ = [x.requires_grad_() for x in [q_, k_, v_]]
     if bias_ is not None:

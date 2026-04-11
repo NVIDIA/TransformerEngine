@@ -664,8 +664,8 @@ void nvte_permute_to_grouped_tensor_bwd(NVTETensor grad_q, NVTETensor grad_k, NV
  *  \param[in]     num_tensors  Number of tensor pairs to process (1..16).
  *  \param[in]     stream       CUDA stream.
  */
-void nvte_multi_pad_last_dim(NVTETensor *inputs, NVTETensor *outputs, size_t num_tensors,
-                             cudaStream_t stream);
+void nvte_multi_tensor_pad_last_dim(NVTETensor *inputs, NVTETensor *outputs, size_t num_tensors,
+                                    cudaStream_t stream);
 
 #ifdef __cplusplus
 }  // extern "C"

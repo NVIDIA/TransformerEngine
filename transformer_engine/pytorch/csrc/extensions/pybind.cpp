@@ -389,6 +389,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Fused Multi-tensor unpadding", py::call_guard<py::gil_scoped_release>());
   m.def("swizzle_scales_for_gemm_", &transformer_engine::pytorch::inplace_swizzle_scale_for_gemm,
         "Convert tensor block scales into GEMM swizzled format");
+  m.def("multi_swizzle_scales_for_gemm_",
+        &transformer_engine::pytorch::inplace_multi_swizzle_scales_for_gemm,
+        "Batch-swizzle block scales for multiple tensors in a single kernel launch",
+        py::arg("tensors"), py::arg("rowwise_usage"), py::arg("columnwise_usage"),
+        py::arg("check_scale_inv_shapes") = true);
   m.def("grouped_swizzle_for_gemm", &transformer_engine::pytorch::grouped_swizzle_for_gemm,
         "In-place swizzle of grouped tensor scales for GEMM", py::arg("tensor"), py::arg("rowwise"),
         py::arg("columnwise"));
@@ -403,15 +408,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         &transformer_engine::pytorch::permute_to_grouped_tensor_fwd,
         "Permute tensors from BSHD/SBHD to BHSD.", py::arg("query"),
         py::arg("key") = py::none(), py::arg("value") = py::none(),
-        py::arg("original_format") = static_cast<int>(NVTE_BSHD),
+        py::arg("original_format") = std::string("bshd"),
         py::call_guard<py::gil_scoped_release>());
   m.def("permute_to_grouped_tensor_bwd",
         &transformer_engine::pytorch::permute_to_grouped_tensor_bwd,
         "Permute tensors back to original format.", py::arg("query_grad"),
         py::arg("key_grad") = py::none(), py::arg("value_grad") = py::none(),
-        py::arg("original_format") = static_cast<int>(NVTE_BSHD),
+        py::arg("original_format") = std::string("bshd"),
         py::call_guard<py::gil_scoped_release>());
-  m.def("pad_last_dim", &transformer_engine::pytorch::pad_last_dim,
+  m.def("multi_tensor_pad_last_dim", &transformer_engine::pytorch::multi_tensor_pad_last_dim,
         "Pad last dimension of 2D tensors to a common alignment.", py::arg("inputs"),
         py::arg("alignment"), py::call_guard<py::gil_scoped_release>());
   m.def("fused_attn_fwd", &transformer_engine::pytorch::fused_attn_fwd,
@@ -435,15 +440,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fused_qkv_rope_backward", &transformer_engine::pytorch::fused_qkv_rope_backward,
         "Fused Apply QKV RoPE BWD", py::call_guard<py::gil_scoped_release>());
 
-  // fused MLA rope
-  m.def("fused_mla_rope_q_forward", &transformer_engine::pytorch::fused_mla_rope_q_forward,
-        "Fused MLA RoPE Q FWD", py::call_guard<py::gil_scoped_release>());
-  m.def("fused_mla_rope_q_backward", &transformer_engine::pytorch::fused_mla_rope_q_backward,
-        "Fused MLA RoPE Q BWD", py::call_guard<py::gil_scoped_release>());
-  m.def("fused_mla_rope_kv_forward", &transformer_engine::pytorch::fused_mla_rope_kv_forward,
-        "Fused MLA RoPE KV FWD", py::call_guard<py::gil_scoped_release>());
-  m.def("fused_mla_rope_kv_backward", &transformer_engine::pytorch::fused_mla_rope_kv_backward,
-        "Fused MLA RoPE KV BWD", py::call_guard<py::gil_scoped_release>());
 
   // fused router
   m.def("fused_topk_with_score_function_fwd",
