@@ -100,6 +100,9 @@ pybind11::dict Registrations() {
   dict["te_fused_moe_aux_loss_forward_ffi"] = EncapsulateFFI(FusedMoEAuxLossForwardHandler);
   dict["te_fused_moe_aux_loss_backward_ffi"] = EncapsulateFFI(FusedMoEAuxLossBackwardHandler);
 
+  // Cub Topk
+  dict["te_topk_ffi"] = EncapsulateFFI(TopkHandler);
+
   return dict;
 }
 

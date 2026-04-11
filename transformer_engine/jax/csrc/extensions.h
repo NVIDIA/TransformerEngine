@@ -197,6 +197,9 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedTopkWithScoreFunctionBackwardHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedMoEAuxLossForwardHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedMoEAuxLossBackwardHandler);
 
+// Topk
+XLA_FFI_DECLARE_HANDLER_SYMBOL(TopkHandler);
+
 }  // namespace jax
 }  // namespace transformer_engine
 
