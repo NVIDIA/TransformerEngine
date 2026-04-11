@@ -154,18 +154,6 @@ else:
 
 # Float8CurrentScaling: fused_attn_bwd takes O in FP8 by default, this flag allows it in F16
 _dpa_fp8_cs_o_in_f16 = os.getenv("NVTE_DPA_FP8CS_O_in_F16", "1") == "1"
-_run_shadow_f16_fwd = os.getenv("NVTE_RUN_SHADOW_F16_FWD", "0") == "1"
-_replace_out_return_with_shadow_f16 = (
-    os.getenv("NVTE_REPLACE_OUT_RETURN_WITH_SHADOW_F16", "0") == "1"
-)
-_replace_out_save_with_shadow_f16 = os.getenv("NVTE_REPLACE_OUT_SAVE_WITH_SHADOW_F16", "0") == "1"
-_replace_aux_with_shadow_f16 = os.getenv("NVTE_REPLACE_AUX_WITH_SHADOW_F16", "0") == "1"
-_run_shadow_f16_bwd = os.getenv("NVTE_RUN_SHADOW_F16_BWD", "0") == "1"
-_replace_dq_with_shadow_f16 = os.getenv("NVTE_REPLACE_DQ_WITH_SHADOW_F16", "0") == "1"
-_replace_dk_with_shadow_f16 = os.getenv("NVTE_REPLACE_DK_WITH_SHADOW_F16", "0") == "1"
-_replace_dv_with_shadow_f16 = os.getenv("NVTE_REPLACE_DV_WITH_SHADOW_F16", "0") == "1"
-_qdq_dO_in_mxfp8_bprop = os.getenv("NVTE_QDQ_DO_IN_MXFP8_BPROP", "0") == "1"
-_qdq_dO_in_f16_bprop = os.getenv("NVTE_QDQ_DO_IN_F16_BPROP", "0") == "1"
 
 
 class FP8EmulationFunc(torch.autograd.Function):
@@ -1276,8 +1264,6 @@ class FusedAttnFunc(torch.autograd.Function):
         out_nominal_dtype = q.dtype
 
         max_logit = None
-        orig_q, orig_k, orig_v = q, k, v
-        orig_qkv_layout = qkv_layout
         qkv_scale_inv_format = None
         if fp8:
             fused_attention_backend = FusedAttnBackend["FP8"]
@@ -1344,56 +1330,6 @@ class FusedAttnFunc(torch.autograd.Function):
                 qkv_scale_inv_format=qkv_scale_inv_format,
             )
 
-            if _run_shadow_f16_fwd:
-                # q, k, v, out_: torch.Tensor; dtype = torch.float16 or torch.bfloat16
-                assert all(
-                    x.dtype in [torch.float16, torch.bfloat16] for x in [q, k, v]
-                ), "q, k, v must be torch.float16 or torch.bfloat16"
-                out_f16_, aux_ctx_tensors_f16, *_ = fused_attn_fwd(
-                    is_training,
-                    max_seqlen_q,
-                    max_seqlen_kv,
-                    cu_seqlens_q,
-                    cu_seqlens_kv,
-                    orig_q,
-                    orig_k,
-                    orig_v,
-                    out_nominal_dtype,
-                    FusedAttnBackend["F16_arbitrary_seqlen"],
-                    attn_bias,
-                    cu_seqlens_q_padded,
-                    cu_seqlens_kv_padded,
-                    page_table_k,
-                    page_table_v,
-                    None,  # s_quantizer
-                    None,  # o_quantizer
-                    attn_scale,
-                    dropout_p,
-                    fast_zero_fill,
-                    orig_qkv_layout,
-                    o_format,
-                    attn_bias_type,
-                    attn_mask_type,
-                    softmax_type,
-                    window_size,
-                    bottom_right_diagonal,
-                    rng_gen,
-                    softmax_offset,
-                    return_max_logit,
-                    is_graph_capturing(),
-                )
-                # if torch.cuda.current_device() == 0:
-                #     print(
-                #         f"L{layer_number}: real/shadow out   min:"
-                #         f" {out_.min():.4f}/{out_f16_.min():.4f}, max:"
-                #         f" {out_.max():.4f}/{out_f16_.max():.4f}"
-                #     )
-                #     print(
-                #         f"L{layer_number}: real/shadow stats min:"
-                #         f" {aux_ctx_tensors[0].min():.4f}/{aux_ctx_tensors_f16[0].min():.4f}, max:"
-                #         f" {aux_ctx_tensors[0].max():.4f}/{aux_ctx_tensors_f16[0].max():.4f}"
-                #     )
-
             # out_fp8: Float8Tensor/MXFP8Tensor; dtype = torch.float16 or torch.bfloat16
             #                        fp8_dtype = tex.DType.kFloat8E4M3
             # out:     torch.Tensor; dtype = torch.float16 or torch.bfloat16
@@ -1438,10 +1374,6 @@ class FusedAttnFunc(torch.autograd.Function):
 
             # return appropriate tensors
             out_ret = out_fp8 if is_output_fp8 else out_f16
-            if _run_shadow_f16_fwd and _replace_out_return_with_shadow_f16:
-                out_ret = out_f16_
-            if _run_shadow_f16_fwd and _replace_aux_with_shadow_f16:
-                aux_ctx_tensors[0] = aux_ctx_tensors_f16[0]
 
             # save q, k, v, o tensors
             fp8_tensors = (None, None, None, None)
@@ -1456,32 +1388,9 @@ class FusedAttnFunc(torch.autograd.Function):
                     fp8_recipe.float8_current_scaling() and not _dpa_fp8_cs_o_in_f16
                 ):
                     fp8_tensors = (q_fp8, k_fp8, v_fp8, out_fp8)
-                if _run_shadow_f16_bwd:
-                    f16_tensors = (q, k, v, out_f16)
             else:
                 if is_input_fp8:
                     q, k, v = combine_and_dequantize(qkv_layout, q_fp8, k_fp8, v_fp8)
-                if _run_shadow_f16_fwd and not _replace_aux_with_shadow_f16:
-                    tmp_quantizer = QKV_quantizer.copy()
-                    if isinstance(tmp_quantizer, MXFP8Quantizer):
-                        tmp_quantizer.optimize_for_gemm = False
-                    q_fp8_, k_fp8_, _, _, _ = combine_and_quantize(
-                        original_qkv_layout, q, k, v, tmp_quantizer, used_in_backward=True
-                    )
-                    q_ = q_fp8_.dequantize(dtype=out_nominal_dtype)
-                    k_ = k_fp8_.dequantize(dtype=out_nominal_dtype)
-                    if isinstance(tmp_quantizer, MXFP8Quantizer):
-                        qkv_format, *_ = dpa_utils.get_qkv_format(original_qkv_layout)
-                        if qkv_format == "bshd":
-                            q = q_.permute(0, 2, 1, 3).contiguous()
-                            k = k_.permute(0, 2, 1, 3).contiguous()
-                        elif qkv_format == "sbhd":
-                            q = q_.permute(2, 0, 1, 3).contiguous()
-                            k = k_.permute(2, 0, 1, 3).contiguous()
-                    else:
-                        q, k = q_, k_
-                if _run_shadow_f16_fwd and _replace_out_save_with_shadow_f16:
-                    out_f16 = out_f16_
                 f16_tensors = (q, k, v, out_f16)
         else:
             # q, k, v, out_: torch.Tensor; dtype = torch.float16 or torch.bfloat16
@@ -1622,35 +1531,6 @@ class FusedAttnFunc(torch.autograd.Function):
     @staticmethod
     def backward(ctx, d_out, *_args):
         # pylint: disable=missing-function-docstring
-        d_out_shadow_f16 = d_out
-
-        if _qdq_dO_in_f16_bprop or _qdq_dO_in_mxfp8_bprop:
-            d_out_qdq_f16 = d_out
-            d_out_qdq_f16 = dpa_utils.permute_to_grouped_tensor_pytorch(d_out_qdq_f16, ctx.o_format)
-            tmp_quantizer = MXFP8Quantizer(
-                fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True
-            )
-            tmp_quantizer.optimize_for_gemm = False
-            d_out_qdq_fp8 = tmp_quantizer(d_out_qdq_f16)
-            d_out_qdq_f16 = d_out_qdq_fp8.dequantize(dtype=ctx.nominal_dtype)
-            if ctx.o_format == "bshd":
-                d_out_qdq_f16 = d_out_qdq_f16.permute(0, 2, 1, 3).contiguous()
-            elif ctx.o_format == "sbhd":
-                d_out_qdq_f16 = d_out_qdq_f16.permute(2, 0, 1, 3).contiguous()
-        swapped_do_with_qdq_do = False
-        if ctx.fp8 and _qdq_dO_in_mxfp8_bprop:
-            d_out = d_out_qdq_f16
-            swapped_do_with_qdq_do = True
-        if ctx.fp8 and _qdq_dO_in_mxfp8_bprop and _run_shadow_f16_bwd:
-            d_out_shadow_f16 = d_out_qdq_f16
-            swapped_do_with_qdq_do = True
-        if not ctx.fp8 and _qdq_dO_in_f16_bprop:
-            d_out = d_out_qdq_f16
-            swapped_do_with_qdq_do = True
-        # if swapped_do_with_qdq_do:
-        #     print(f"swapped, {ctx.fp8=},{_qdq_dO_in_mxfp8_bprop=}, {_qdq_dO_in_f16_bprop=}, {_run_shadow_f16_bwd=}, {_replace_dq_with_shadow_f16=}, {_replace_dk_with_shadow_f16=}, {_replace_dv_with_shadow_f16=}")
-        # else:
-        #     print(f"not swapped, {ctx.fp8=}, {_qdq_dO_in_mxfp8_bprop=}, {_qdq_dO_in_f16_bprop=}, {_run_shadow_f16_bwd=}, {_replace_dq_with_shadow_f16=}, {_replace_dk_with_shadow_f16=}, {_replace_dv_with_shadow_f16=}")
 
         # d_out:     torch.Tensor; dtype = torch.float16 or torch.bfloat16
         # d_out_fp8: Float8Tensor; dtype = torch.float16 or torch.bfloat16
@@ -1686,8 +1566,6 @@ class FusedAttnFunc(torch.autograd.Function):
         ) = restore_from_func_ctx(ctx)
 
         aux_ctx_tensors = other_tensors
-        aux_ctx_tensors_shadow_f16 = aux_ctx_tensors
-        out_shadow_f16 = out
         original_qkv_layout = ctx.dqkv_layout
         original_qkv_format, *_ = dpa_utils.get_qkv_format(original_qkv_layout)
 
@@ -1805,84 +1683,6 @@ class FusedAttnFunc(torch.autograd.Function):
                         qkv_scale_inv_format=ctx.qkv_scale_inv_format,
                         do_scale_inv_format=do_scale_inv_format,
                     )
-                    if _run_shadow_f16_bwd:
-                        original_qkv_layout = ctx.dqkv_layout
-                        tmp_quantizer = ctx.QKV_quantizer.copy()
-                        if isinstance(tmp_quantizer, MXFP8Quantizer):
-                            tmp_quantizer.optimize_for_gemm = False
-                        q_fp8_, k_fp8_, v_fp8_, _, _ = combine_and_quantize(
-                            original_qkv_layout, q, k, v, tmp_quantizer, used_in_backward=True
-                        )
-                        q_shadow_f16, k_shadow_f16, v_shadow_f16 = [
-                            x.dequantize(dtype=dqkv_nominal_dtype) for x in (q_fp8_, k_fp8_, v_fp8_)
-                        ]
-                        if isinstance(tmp_quantizer, MXFP8Quantizer):
-                            if original_qkv_format == "bshd":
-                                q_shadow_f16, k_shadow_f16, v_shadow_f16 = [
-                                    x.permute(0, 2, 1, 3).contiguous()
-                                    for x in (q_shadow_f16, k_shadow_f16, v_shadow_f16)
-                                ]
-                            elif original_qkv_format == "sbhd":
-                                q_shadow_f16, k_shadow_f16, v_shadow_f16 = [
-                                    x.permute(2, 0, 1, 3).contiguous()
-                                    for x in (q_shadow_f16, k_shadow_f16, v_shadow_f16)
-                                ]
-                        dq_shadow_f16, dk_shadow_f16, dv_shadow_f16, *rest = fused_attn_bwd(
-                            ctx.max_seqlen_q,
-                            ctx.max_seqlen_kv,
-                            cu_seqlens_q,
-                            cu_seqlens_kv,
-                            q_shadow_f16,
-                            k_shadow_f16,
-                            v_shadow_f16,
-                            out_shadow_f16,
-                            d_out_shadow_f16,
-                            dqkv_nominal_dtype,
-                            aux_ctx_tensors_shadow_f16,
-                            FusedAttnBackend["F16_arbitrary_seqlen"],
-                            cu_seqlens_q_padded,
-                            cu_seqlens_kv_padded,
-                            None,
-                            None,
-                            None,
-                            ctx.attn_scale,
-                            ctx.dropout_p,
-                            ctx.fast_zero_fill,
-                            original_qkv_layout,
-                            original_qkv_format,
-                            original_qkv_format,
-                            original_qkv_layout,
-                            ctx.attn_bias_type,
-                            ctx.attn_mask_type,
-                            ctx.softmax_type,
-                            ctx.window_size,
-                            ctx.bottom_right_diagonal,
-                            ctx.deterministic,
-                            is_graph_capturing(),
-                        )
-                        if _replace_dq_with_shadow_f16:
-                            dq_ = dq_shadow_f16
-                        if _replace_dk_with_shadow_f16:
-                            dk_ = dk_shadow_f16
-                        if _replace_dv_with_shadow_f16:
-                            dv_ = dv_shadow_f16
-                        # if torch.cuda.current_device() == 0:
-                        #     print(
-                        #         f"L{ctx.layer_number}: real/shadow dq min:"
-                        #         f" {dq_.min():.4f}/{dq_shadow_f16.min():.4f}, max:"
-                        #         f" {dq_.max():.4f}/{dq_shadow_f16.max():.4f}"
-                        #     )
-                        #     print(
-                        #         f"L{ctx.layer_number}: real/shadow dk min:"
-                        #         f" {dk_.min():.4f}/{dk_shadow_f16.min():.4f}, max:"
-                        #         f" {dk_.max():.4f}/{dk_shadow_f16.max():.4f}"
-                        #     )
-                        #     print(
-                        #         f"L{ctx.layer_number}: real/shadow dv min:"
-                        #         f" {dv_.min():.4f}/{dv_shadow_f16.min():.4f}, max:"
-                        #         f" {dv_.max():.4f}/{dv_shadow_f16.max():.4f}"
-                        #     )
-
                     # dq, dk, dv:             torch.Tensor; dtype = torch.float16 or torch.bfloat16
                     dq, dk, dv = dq_, dk_, dv_
                     is_quantized_tensor = isinstance(dq_, QuantizedTensorStorage)
