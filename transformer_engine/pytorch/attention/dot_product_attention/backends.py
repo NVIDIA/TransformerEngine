@@ -177,7 +177,11 @@ class FP8EmulationFunc(torch.autograd.Function):
             ]
             # always in sbhd_sbhd_sbhd shape at this point
             q_fp8, k_fp8, v_fp8, qkv_layout, _ = combine_and_quantize(
-                qkv_layout, query_layer, key_layer, value_layer, quantizer,
+                qkv_layout,
+                query_layer,
+                key_layer,
+                value_layer,
+                quantizer,
                 keep_same_data_and_scale_inv_format=True,
             )
             tensors = combine_and_dequantize(
@@ -212,7 +216,11 @@ class FP8EmulationFunc(torch.autograd.Function):
             query_grad, key_grad, value_grad = [x.contiguous() for x in [grad1, grad2, grad3]]
             # always in sbhd_sbhd_sbhd shape at this point
             dq_fp8, dk_fp8, dv_fp8, new_qkv_layout, _ = combine_and_quantize(
-                ctx.qkv_layout, query_grad, key_grad, value_grad, ctx.quantizer,
+                ctx.qkv_layout,
+                query_grad,
+                key_grad,
+                value_grad,
+                ctx.quantizer,
                 keep_same_data_and_scale_inv_format=True,
             )
             tensors = combine_and_dequantize(
@@ -1545,7 +1553,9 @@ class FusedAttnFunc(torch.autograd.Function):
                 d_out_fp8 = d_out
             elif isinstance(ctx.dO_quantizer, MXFP8Quantizer):
                 d_out_fp8, do_scale_inv_format = mxfp8_quantize_single_tensor(
-                    d_out, ctx.dO_quantizer, do_format,
+                    d_out,
+                    ctx.dO_quantizer,
+                    do_format,
                 )
             else:
                 d_out_fp8 = ctx.dO_quantizer(d_out)

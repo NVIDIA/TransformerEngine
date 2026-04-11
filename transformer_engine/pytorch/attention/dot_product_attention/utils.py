@@ -2314,9 +2314,6 @@ def print_quantizers(
                 print(f"{label} >> {names[i]:14s}: {type_str}")
 
 
-
-
-
 def mxfp8_pad_and_swizzle_scales(*fp8_tensors):
     """Pad and swizzle scales for MXFP8 tensors quantized with optimize_for_gemm=False.
 
@@ -2346,13 +2343,9 @@ def mxfp8_pad_and_swizzle_scales(*fp8_tensors):
     has_cs = len(cs_list) > 0
     tensor_list = list(fp8_tensors)
     if has_rs:
-        tex.multi_swizzle_scales_for_gemm_(
-            tensor_list, True, False, check_scale_inv_shapes=False
-        )
+        tex.multi_swizzle_scales_for_gemm_(tensor_list, True, False, check_scale_inv_shapes=False)
     if has_cs:
-        tex.multi_swizzle_scales_for_gemm_(
-            tensor_list, False, True, check_scale_inv_shapes=False
-        )
+        tex.multi_swizzle_scales_for_gemm_(tensor_list, False, True, check_scale_inv_shapes=False)
     for t in tensor_list:
         t._with_gemm_swizzled_scales = True
 
@@ -2370,11 +2363,16 @@ def mxfp8_permute_scale_inv_to_bhsd(*tensors, src_format):
     if src_format in ("bhsd", "htd"):
         outs = [
             MXFP8Tensor(
-                shape=t.shape, dtype=t.dtype,
-                rowwise_data=t._rowwise_data, rowwise_scale_inv=t._rowwise_scale_inv,
-                columnwise_data=t._columnwise_data, columnwise_scale_inv=t._columnwise_scale_inv,
-                quantizer=t._quantizer, requires_grad=False,
-                fp8_dtype=t._fp8_dtype, with_gemm_swizzled_scales=t._with_gemm_swizzled_scales,
+                shape=t.shape,
+                dtype=t.dtype,
+                rowwise_data=t._rowwise_data,
+                rowwise_scale_inv=t._rowwise_scale_inv,
+                columnwise_data=t._columnwise_data,
+                columnwise_scale_inv=t._columnwise_scale_inv,
+                quantizer=t._quantizer,
+                requires_grad=False,
+                fp8_dtype=t._fp8_dtype,
+                with_gemm_swizzled_scales=t._with_gemm_swizzled_scales,
             )
             for t in tensors
         ]
@@ -2413,7 +2411,9 @@ def mxfp8_permute_scale_inv_to_bhsd(*tensors, src_format):
         d_qk_rs_pad = _align_up(rs_4d_list[0].shape[-1], 4)
         d_v_rs_pad = _align_up(rs_4d_list[-1].shape[-1], 4) if len(rs_4d_list) >= 2 else d_qk_rs_pad
         for i, rs in enumerate(rs_4d_list):
-            d_pad = d_v_rs_pad if (i == len(rs_4d_list) - 1 and len(rs_4d_list) >= 3) else d_qk_rs_pad
+            d_pad = (
+                d_v_rs_pad if (i == len(rs_4d_list) - 1 and len(rs_4d_list) >= 3) else d_qk_rs_pad
+            )
             shape = _bhsd_shape(rs, src_format, d_pad)
             numel = 1
             for s in shape:
@@ -2423,9 +2423,13 @@ def mxfp8_permute_scale_inv_to_bhsd(*tensors, src_format):
 
     if cs_4d_list:
         d_qk_cs_pad = _align_up(cs_4d_list[0].shape[-1], 128)
-        d_v_cs_pad = _align_up(cs_4d_list[-1].shape[-1], 128) if len(cs_4d_list) >= 2 else d_qk_cs_pad
+        d_v_cs_pad = (
+            _align_up(cs_4d_list[-1].shape[-1], 128) if len(cs_4d_list) >= 2 else d_qk_cs_pad
+        )
         for i, cs in enumerate(cs_4d_list):
-            d_pad = d_v_cs_pad if (i == len(cs_4d_list) - 1 and len(cs_4d_list) >= 3) else d_qk_cs_pad
+            d_pad = (
+                d_v_cs_pad if (i == len(cs_4d_list) - 1 and len(cs_4d_list) >= 3) else d_qk_cs_pad
+            )
             shape = _bhsd_shape(cs, src_format, d_pad)
             numel = 1
             for s in shape:
@@ -2433,20 +2437,26 @@ def mxfp8_permute_scale_inv_to_bhsd(*tensors, src_format):
             cs_out_list.append((total_numel, numel, shape))
             total_numel += numel
 
-    combined_buf = torch.empty(total_numel, dtype=torch.uint8,
-                               device=tensors[0]._rowwise_scale_inv.device) if total_numel > 0 else None
+    combined_buf = (
+        torch.empty(total_numel, dtype=torch.uint8, device=tensors[0]._rowwise_scale_inv.device)
+        if total_numel > 0
+        else None
+    )
 
     def _slice_outputs(out_list):
         """Slice the combined buffer into 4D output tensors."""
-        return [combined_buf[offset : offset + numel].view(shape)
-                for offset, numel, shape in out_list]
+        return [
+            combined_buf[offset : offset + numel].view(shape) for offset, numel, shape in out_list
+        ]
 
     rs_permuted = None
     if rs_4d_list:
         rs_outs = _slice_outputs(rs_out_list)
         rs_permuted = tex.permute_to_grouped_tensor_fwd(
-            *rs_4d_list, original_format=src_format,
-            d_qk_pad=d_qk_rs_pad, d_v_pad=d_v_rs_pad,
+            *rs_4d_list,
+            original_format=src_format,
+            d_qk_pad=d_qk_rs_pad,
+            d_v_pad=d_v_rs_pad,
             q_out=rs_outs[0],
             k_out=rs_outs[1] if len(rs_outs) >= 3 else None,
             v_out=rs_outs[2] if len(rs_outs) >= 3 else None,
@@ -2457,8 +2467,10 @@ def mxfp8_permute_scale_inv_to_bhsd(*tensors, src_format):
     if cs_4d_list:
         cs_outs = _slice_outputs(cs_out_list)
         cs_permuted = tex.permute_to_grouped_tensor_fwd(
-            *cs_4d_list, original_format=src_format,
-            d_qk_pad=d_qk_cs_pad, d_v_pad=d_v_cs_pad,
+            *cs_4d_list,
+            original_format=src_format,
+            d_qk_pad=d_qk_cs_pad,
+            d_v_pad=d_v_cs_pad,
             q_out=cs_outs[0],
             k_out=cs_outs[1] if len(cs_outs) >= 3 else None,
             v_out=cs_outs[2] if len(cs_outs) >= 3 else None,
@@ -2466,16 +2478,23 @@ def mxfp8_permute_scale_inv_to_bhsd(*tensors, src_format):
     cs_d_scales = [cp.shape[-1] for cp in cs_permuted] if cs_permuted else []
 
     outs = []
-    for i, (t, rp, rd, cp, cd) in enumerate(zip(tensors, rs_permuted, rs_d_scales, cs_permuted, cs_d_scales)):
+    for i, (t, rp, rd, cp, cd) in enumerate(
+        zip(tensors, rs_permuted, rs_d_scales, cs_permuted, cs_d_scales)
+    ):
         rp = rp.view(-1, rd) if rd is not None else None
         cp = cp.view(-1, cd) if cd is not None else None
         outs.append(
             MXFP8Tensor(
-                shape=t.shape, dtype=t.dtype,
-                rowwise_data=t._rowwise_data, rowwise_scale_inv=rp,
-                columnwise_data=t._columnwise_data, columnwise_scale_inv=cp,
-                quantizer=t._quantizer, requires_grad=False,
-                fp8_dtype=t._fp8_dtype, with_gemm_swizzled_scales=t._with_gemm_swizzled_scales,
+                shape=t.shape,
+                dtype=t.dtype,
+                rowwise_data=t._rowwise_data,
+                rowwise_scale_inv=rp,
+                columnwise_data=t._columnwise_data,
+                columnwise_scale_inv=cp,
+                quantizer=t._quantizer,
+                requires_grad=False,
+                fp8_dtype=t._fp8_dtype,
+                with_gemm_swizzled_scales=t._with_gemm_swizzled_scales,
             )
         )
 
@@ -2510,24 +2529,43 @@ def mxfp8_quantize_single_tensor(tensor, quantizer, src_format):
     _s_dim = {"bshd": 2, "sbhd": 0, "bhsd": 2}
     _d_dim = {"bshd": 3, "sbhd": 3, "bhsd": 3}
     rowwise_scale_inv_shape = list(tensor.shape)
-    rowwise_scale_inv_shape[_d_dim[src_format]] = rowwise_scale_inv_shape[_d_dim[src_format]]//MXFP8_BLOCK_SCALING_SIZE
+    rowwise_scale_inv_shape[_d_dim[src_format]] = (
+        rowwise_scale_inv_shape[_d_dim[src_format]] // MXFP8_BLOCK_SCALING_SIZE
+    )
     columnwise_scale_inv_shape = list(tensor.shape)
-    columnwise_scale_inv_shape[_s_dim[src_format]] = columnwise_scale_inv_shape[_s_dim[src_format]]//MXFP8_BLOCK_SCALING_SIZE
+    columnwise_scale_inv_shape[_s_dim[src_format]] = (
+        columnwise_scale_inv_shape[_s_dim[src_format]] // MXFP8_BLOCK_SCALING_SIZE
+    )
     if src_format == "bhsd":
-        tensor = tensor.view(tensor.shape[:_s_dim[src_format]], -1)
+        tensor = tensor.view(tensor.shape[: _s_dim[src_format]], -1)
     elif src_format == "sbhd":
         tensor = tensor.view(tensor.shape[_s_dim[src_format]], -1)
     orig_optimize = quantizer.optimize_for_gemm
     quantizer.optimize_for_gemm = False
     fp8_tensor = quantizer(tensor)
     quantizer.optimize_for_gemm = orig_optimize
-    fp8_tensor._rowwise_data = fp8_tensor._rowwise_data.view(original_shape) if fp8_tensor._rowwise_data is not None else None
-    fp8_tensor._columnwise_data = fp8_tensor._columnwise_data.view(original_shape) if fp8_tensor._columnwise_data is not None else None
-    fp8_tensor._rowwise_scale_inv = fp8_tensor._rowwise_scale_inv.view(rowwise_scale_inv_shape) if fp8_tensor._rowwise_scale_inv is not None else None
-    fp8_tensor._columnwise_scale_inv = fp8_tensor._columnwise_scale_inv.view(columnwise_scale_inv_shape) if fp8_tensor._columnwise_scale_inv is not None else None
+    fp8_tensor._rowwise_data = (
+        fp8_tensor._rowwise_data.view(original_shape)
+        if fp8_tensor._rowwise_data is not None
+        else None
+    )
+    fp8_tensor._columnwise_data = (
+        fp8_tensor._columnwise_data.view(original_shape)
+        if fp8_tensor._columnwise_data is not None
+        else None
+    )
+    fp8_tensor._rowwise_scale_inv = (
+        fp8_tensor._rowwise_scale_inv.view(rowwise_scale_inv_shape)
+        if fp8_tensor._rowwise_scale_inv is not None
+        else None
+    )
+    fp8_tensor._columnwise_scale_inv = (
+        fp8_tensor._columnwise_scale_inv.view(columnwise_scale_inv_shape)
+        if fp8_tensor._columnwise_scale_inv is not None
+        else None
+    )
     (fp8_tensor,) = mxfp8_permute_scale_inv_to_bhsd(fp8_tensor, src_format=src_format)
     return fp8_tensor, "bhsd"
-
 
 
 def combine_and_quantize(
@@ -2616,8 +2654,8 @@ def combine_and_quantize(
         for x in [q, k, v]:
             rs_shape = list(x.shape)
             cs_shape = list(x.shape)
-            rs_shape[_d_dim[qkv_format]] = rs_shape[_d_dim[qkv_format]]//MXFP8_BLOCK_SCALING_SIZE
-            cs_shape[_s_dim[qkv_format]] = cs_shape[_s_dim[qkv_format]]//MXFP8_BLOCK_SCALING_SIZE
+            rs_shape[_d_dim[qkv_format]] = rs_shape[_d_dim[qkv_format]] // MXFP8_BLOCK_SCALING_SIZE
+            cs_shape[_s_dim[qkv_format]] = cs_shape[_s_dim[qkv_format]] // MXFP8_BLOCK_SCALING_SIZE
             rowwise_scale_inv_shapes.append(rs_shape)
             columnwise_scale_inv_shapes.append(cs_shape)
 
@@ -2668,23 +2706,74 @@ def combine_and_quantize(
         if not keep_same_data_and_scale_inv_format:
             qkv_quantizer.optimize_for_gemm = orig_optimize
 
-        q_fp8._rowwise_data = q_fp8._rowwise_data.view(original_shapes[0]) if q_fp8._rowwise_data is not None else None
-        q_fp8._columnwise_data = q_fp8._columnwise_data.view(original_shapes[0]) if q_fp8._columnwise_data is not None else None
-        k_fp8._rowwise_data = k_fp8._rowwise_data.view(original_shapes[1]) if k_fp8._rowwise_data is not None else None
-        k_fp8._columnwise_data = k_fp8._columnwise_data.view(original_shapes[1]) if k_fp8._columnwise_data is not None else None
-        v_fp8._rowwise_data = v_fp8._rowwise_data.view(original_shapes[2]) if v_fp8._rowwise_data is not None else None
-        v_fp8._columnwise_data = v_fp8._columnwise_data.view(original_shapes[2]) if v_fp8._columnwise_data is not None else None
+        q_fp8._rowwise_data = (
+            q_fp8._rowwise_data.view(original_shapes[0])
+            if q_fp8._rowwise_data is not None
+            else None
+        )
+        q_fp8._columnwise_data = (
+            q_fp8._columnwise_data.view(original_shapes[0])
+            if q_fp8._columnwise_data is not None
+            else None
+        )
+        k_fp8._rowwise_data = (
+            k_fp8._rowwise_data.view(original_shapes[1])
+            if k_fp8._rowwise_data is not None
+            else None
+        )
+        k_fp8._columnwise_data = (
+            k_fp8._columnwise_data.view(original_shapes[1])
+            if k_fp8._columnwise_data is not None
+            else None
+        )
+        v_fp8._rowwise_data = (
+            v_fp8._rowwise_data.view(original_shapes[2])
+            if v_fp8._rowwise_data is not None
+            else None
+        )
+        v_fp8._columnwise_data = (
+            v_fp8._columnwise_data.view(original_shapes[2])
+            if v_fp8._columnwise_data is not None
+            else None
+        )
 
         if not keep_same_data_and_scale_inv_format:
             # Permute only scale_inv to BHSD + pad + swizzle
-            q_fp8._rowwise_scale_inv = q_fp8._rowwise_scale_inv.view(rowwise_scale_inv_shapes[0]) if q_fp8._rowwise_scale_inv is not None else None
-            q_fp8._columnwise_scale_inv = q_fp8._columnwise_scale_inv.view(columnwise_scale_inv_shapes[0]) if q_fp8._columnwise_scale_inv is not None else None
-            k_fp8._rowwise_scale_inv = k_fp8._rowwise_scale_inv.view(rowwise_scale_inv_shapes[1]) if k_fp8._rowwise_scale_inv is not None else None
-            k_fp8._columnwise_scale_inv = k_fp8._columnwise_scale_inv.view(columnwise_scale_inv_shapes[1]) if k_fp8._columnwise_scale_inv is not None else None
-            v_fp8._rowwise_scale_inv = v_fp8._rowwise_scale_inv.view(rowwise_scale_inv_shapes[2]) if v_fp8._rowwise_scale_inv is not None else None
-            v_fp8._columnwise_scale_inv = v_fp8._columnwise_scale_inv.view(columnwise_scale_inv_shapes[2]) if v_fp8._columnwise_scale_inv is not None else None
+            q_fp8._rowwise_scale_inv = (
+                q_fp8._rowwise_scale_inv.view(rowwise_scale_inv_shapes[0])
+                if q_fp8._rowwise_scale_inv is not None
+                else None
+            )
+            q_fp8._columnwise_scale_inv = (
+                q_fp8._columnwise_scale_inv.view(columnwise_scale_inv_shapes[0])
+                if q_fp8._columnwise_scale_inv is not None
+                else None
+            )
+            k_fp8._rowwise_scale_inv = (
+                k_fp8._rowwise_scale_inv.view(rowwise_scale_inv_shapes[1])
+                if k_fp8._rowwise_scale_inv is not None
+                else None
+            )
+            k_fp8._columnwise_scale_inv = (
+                k_fp8._columnwise_scale_inv.view(columnwise_scale_inv_shapes[1])
+                if k_fp8._columnwise_scale_inv is not None
+                else None
+            )
+            v_fp8._rowwise_scale_inv = (
+                v_fp8._rowwise_scale_inv.view(rowwise_scale_inv_shapes[2])
+                if v_fp8._rowwise_scale_inv is not None
+                else None
+            )
+            v_fp8._columnwise_scale_inv = (
+                v_fp8._columnwise_scale_inv.view(columnwise_scale_inv_shapes[2])
+                if v_fp8._columnwise_scale_inv is not None
+                else None
+            )
             q_fp8, k_fp8, v_fp8 = mxfp8_permute_scale_inv_to_bhsd(
-                q_fp8, k_fp8, v_fp8, src_format=q_format,
+                q_fp8,
+                k_fp8,
+                v_fp8,
+                src_format=q_format,
             )
             qkv_scale_inv_format = "bhsd"
 

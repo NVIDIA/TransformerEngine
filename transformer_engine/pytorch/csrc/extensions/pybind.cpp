@@ -406,20 +406,17 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::call_guard<py::gil_scoped_release>());
   m.def("permute_to_grouped_tensor_fwd",
         &transformer_engine::pytorch::permute_to_grouped_tensor_fwd,
-        "Permute tensors from BSHD/SBHD to BHSD.", py::arg("query"),
-        py::arg("key") = py::none(), py::arg("value") = py::none(),
-        py::arg("original_format") = std::string("bshd"),
+        "Permute tensors from BSHD/SBHD to BHSD.", py::arg("query"), py::arg("key") = py::none(),
+        py::arg("value") = py::none(), py::arg("original_format") = std::string("bshd"),
         py::arg("d_qk_pad") = int64_t(0), py::arg("d_v_pad") = int64_t(0),
-        py::arg("q_out") = py::none(), py::arg("k_out") = py::none(),
-        py::arg("v_out") = py::none(),
+        py::arg("q_out") = py::none(), py::arg("k_out") = py::none(), py::arg("v_out") = py::none(),
         py::call_guard<py::gil_scoped_release>());
   m.def("permute_to_grouped_tensor_bwd",
         &transformer_engine::pytorch::permute_to_grouped_tensor_bwd,
         "Permute tensors back to original format.", py::arg("query_grad"),
         py::arg("key_grad") = py::none(), py::arg("value_grad") = py::none(),
-        py::arg("original_format") = std::string("bshd"),
-        py::arg("d_qk_out") = int64_t(0), py::arg("d_v_out") = int64_t(0),
-        py::call_guard<py::gil_scoped_release>());
+        py::arg("original_format") = std::string("bshd"), py::arg("d_qk_out") = int64_t(0),
+        py::arg("d_v_out") = int64_t(0), py::call_guard<py::gil_scoped_release>());
   m.def("multi_tensor_pad_last_dim", &transformer_engine::pytorch::multi_tensor_pad_last_dim,
         "Pad last dimension of 2D tensors to a common alignment.", py::arg("inputs"),
         py::arg("alignment"), py::call_guard<py::gil_scoped_release>());
@@ -443,7 +440,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Fused Apply QKV RoPE FWD", py::call_guard<py::gil_scoped_release>());
   m.def("fused_qkv_rope_backward", &transformer_engine::pytorch::fused_qkv_rope_backward,
         "Fused Apply QKV RoPE BWD", py::call_guard<py::gil_scoped_release>());
-
 
   // fused router
   m.def("fused_topk_with_score_function_fwd",

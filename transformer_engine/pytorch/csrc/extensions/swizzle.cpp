@@ -444,8 +444,7 @@ void grouped_swizzle_for_gemm(py::handle &tensor, bool rowwise, bool columnwise)
 }
 
 void inplace_multi_swizzle_scales_for_gemm(std::vector<py::object> &tensors, bool rowwise_usage,
-                                           bool columnwise_usage,
-                                           bool check_scale_inv_shapes) {
+                                           bool columnwise_usage, bool check_scale_inv_shapes) {
   NVTE_CHECK(rowwise_usage != columnwise_usage,
              "Expect exactly one of rowwise_usage and columnwise_usage.");
   if (tensors.empty()) {
@@ -527,8 +526,7 @@ void inplace_multi_swizzle_scales_for_gemm(std::vector<py::object> &tensors, boo
   auto stream = at::cuda::getCurrentCUDAStream();
   NVTE_SCOPED_GIL_RELEASE({
     nvte_multi_tensor_swizzle_scaling_factors(inputs_raw.data(), outputs_raw.data(),
-                                              inputs_raw.size(), stream,
-                                              check_scale_inv_shapes);
+                                              inputs_raw.size(), stream, check_scale_inv_shapes);
   });
 
   // Update Python tensors with the owning output tensors

@@ -787,22 +787,19 @@ void nvte_fused_attn_fwd(
   }
 }
 // NVTE fused attention BWD with separate Q, K and V
-void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETensor V,
-                         const NVTETensor O, const NVTETensor dO, const NVTETensor S, NVTETensor dP,
-                         const NVTETensorPack *Aux_CTX_Tensors, NVTETensor dQ, NVTETensor dK,
-                         NVTETensor dV, NVTETensor dBias, NVTETensor dSoftmaxOffset,
-                         const NVTETensor cu_seqlens_q, const NVTETensor cu_seqlens_kv,
-                         const NVTETensor cu_seqlens_q_padded,
-                         const NVTETensor cu_seqlens_kv_padded, size_t max_seqlen_q,
-                         size_t max_seqlen_kv, float attn_scale, float dropout,
-                         NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format,
-                         NVTE_QKV_Format do_format, NVTE_QKV_Layout dqkv_layout,
-                         NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
-                         NVTE_Softmax_Type softmax_type, int64_t window_size_left,
-                         int64_t window_size_right, bool bottom_right_diagonal, bool deterministic,
-                         bool cuda_graph, NVTETensor workspace, cudaStream_t stream,
-                         NVTE_QKV_Format qkv_scale_inv_format,
-                         NVTE_QKV_Format do_scale_inv_format) {
+void nvte_fused_attn_bwd(
+    const NVTETensor Q, const NVTETensor K, const NVTETensor V, const NVTETensor O,
+    const NVTETensor dO, const NVTETensor S, NVTETensor dP, const NVTETensorPack *Aux_CTX_Tensors,
+    NVTETensor dQ, NVTETensor dK, NVTETensor dV, NVTETensor dBias, NVTETensor dSoftmaxOffset,
+    const NVTETensor cu_seqlens_q, const NVTETensor cu_seqlens_kv,
+    const NVTETensor cu_seqlens_q_padded, const NVTETensor cu_seqlens_kv_padded,
+    size_t max_seqlen_q, size_t max_seqlen_kv, float attn_scale, float dropout,
+    NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format, NVTE_QKV_Format do_format,
+    NVTE_QKV_Layout dqkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
+    NVTE_Softmax_Type softmax_type, int64_t window_size_left, int64_t window_size_right,
+    bool bottom_right_diagonal, bool deterministic, bool cuda_graph, NVTETensor workspace,
+    cudaStream_t stream, NVTE_QKV_Format qkv_scale_inv_format,
+    NVTE_QKV_Format do_scale_inv_format) {
   NVTE_API_CALL(nvte_flash_attn_bwd);
   using namespace transformer_engine;
   const Tensor *input_cu_seqlens_q = convertNVTETensorCheck(cu_seqlens_q);

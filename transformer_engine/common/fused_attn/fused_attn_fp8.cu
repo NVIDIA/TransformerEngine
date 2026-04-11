@@ -1662,9 +1662,8 @@ void fused_attn_fp8_fwd_impl_v1(
     void* devPtrScaleO, void* devPtrAmaxO, void* devPtrAmaxS, void* devPtrcuSeqlensQ,
     void* devPtrcuSeqlensKV, void* devPtrDropoutSeed, void* devPtrDropoutOffset,
     cudnn_frontend::DataType_t qkv_tensor_type, cudnn_frontend::DataType_t o_tensor_type,
-    NVTEScalingMode scaling_mode, NVTE_QKV_Format qkv_scale_inv_format,
-    void* workspace, size_t* workspace_size, cudaStream_t stream,
-    cudnnHandle_t handle) {
+    NVTEScalingMode scaling_mode, NVTE_QKV_Format qkv_scale_inv_format, void* workspace,
+    size_t* workspace_size, cudaStream_t stream, cudnnHandle_t handle) {
   using namespace transformer_engine;
   const auto cudnn_runtime_version = cudnnGetVersion();
   bool is_bias = (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
@@ -1826,12 +1825,12 @@ void fused_attn_fp8_fwd_impl_v1(
           scale_o = mha_graph->tensor(1.0f);
         }
       } else if (is_mxfp8) {
-        NVTE_QKV_Format q_scale_inv_format =
-            (qkv_scale_inv_format != NVTE_QKV_Format_NOT_SET)
-                ? qkv_scale_inv_format : nvte_get_q_format(qkv_layout);
-        NVTE_QKV_Format kv_scale_inv_format =
-            (qkv_scale_inv_format != NVTE_QKV_Format_NOT_SET)
-                ? qkv_scale_inv_format : nvte_get_kv_format(qkv_layout);
+        NVTE_QKV_Format q_scale_inv_format = (qkv_scale_inv_format != NVTE_QKV_Format_NOT_SET)
+                                                 ? qkv_scale_inv_format
+                                                 : nvte_get_q_format(qkv_layout);
+        NVTE_QKV_Format kv_scale_inv_format = (qkv_scale_inv_format != NVTE_QKV_Format_NOT_SET)
+                                                  ? qkv_scale_inv_format
+                                                  : nvte_get_kv_format(qkv_layout);
         std::vector<int64_t> q_scale_strides(4);
         std::vector<int64_t> k_scale_strides(4);
         std::vector<int64_t> v_scale_strides(4);
@@ -2098,8 +2097,8 @@ void fused_attn_fp8_bwd_impl_v1(
     void* devPtrDropoutSeed, void* devPtrDropoutOffset, cudnn_frontend::DataType_t qkv_tensor_type,
     cudnn_frontend::DataType_t o_tensor_type, cudnn_frontend::DataType_t do_tensor_type,
     cudnn_frontend::DataType_t dqkv_tensor_type, NVTEScalingMode scaling_mode,
-    NVTE_QKV_Format qkv_scale_inv_format, NVTE_QKV_Format do_scale_inv_format,
-    void* workspace, size_t* workspace_size, cudaStream_t stream, cudnnHandle_t handle) {
+    NVTE_QKV_Format qkv_scale_inv_format, NVTE_QKV_Format do_scale_inv_format, void* workspace,
+    size_t* workspace_size, cudaStream_t stream, cudnnHandle_t handle) {
   using namespace transformer_engine;
   const auto cudnn_runtime_version = cudnnGetVersion();
   bool is_bias = (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
@@ -2324,14 +2323,11 @@ void fused_attn_fp8_bwd_impl_v1(
         NVTE_QKV_Format q_format = nvte_get_q_format(qkv_layout);
         NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
         NVTE_QKV_Format q_scale_inv_format =
-            (qkv_scale_inv_format != NVTE_QKV_Format_NOT_SET)
-                ? qkv_scale_inv_format : q_format;
+            (qkv_scale_inv_format != NVTE_QKV_Format_NOT_SET) ? qkv_scale_inv_format : q_format;
         NVTE_QKV_Format kv_scale_inv_format =
-            (qkv_scale_inv_format != NVTE_QKV_Format_NOT_SET)
-                ? qkv_scale_inv_format : kv_format;
+            (qkv_scale_inv_format != NVTE_QKV_Format_NOT_SET) ? qkv_scale_inv_format : kv_format;
         NVTE_QKV_Format do_scale_format_ =
-            (do_scale_inv_format != NVTE_QKV_Format_NOT_SET)
-                ? do_scale_inv_format : do_format;
+            (do_scale_inv_format != NVTE_QKV_Format_NOT_SET) ? do_scale_inv_format : do_format;
         // Q_t, K_t, dO_t, dO_f16
         std::vector<int64_t> q_t_strides(4), k_t_strides(4), dO_t_strides(4);
         generateMatrixStridesWithFormat(b, h, s_q, d_qk, q_t_strides.data(), q_format);
@@ -2834,8 +2830,7 @@ void fused_attn_fp8_fwd(size_t batch, size_t num_attn_heads, size_t num_gqa_grou
         devPtrDescaleV, devPtrDescaleS, devPtrScaleS, devPtrScaleO, devPtrAmaxO, devPtrAmaxS,
         devPtrcuSeqlensQ, devPtrcuSeqlensKV, devPtrDropoutSeed, devPtrDropoutOffset,
         get_cudnn_fe_dtype(QKV_type), get_cudnn_fe_dtype(O_type), input_Q->scaling_mode,
-        qkv_scale_inv_format,
-        workspace->data.dptr, &workspace_size, stream, handle);
+        qkv_scale_inv_format, workspace->data.dptr, &workspace_size, stream, handle);
   } else if (qkv_layout == NVTE_QKV_Layout::NVTE_T3HD) {
     fused_attn::fused_attn_fp8_fwd_impl(
         batch, num_attn_heads, max_seqlen_q, max_seqlen_kv, head_dim_qk, is_training, attn_scale,
@@ -2969,9 +2964,8 @@ void fused_attn_fp8_bwd(
         devPtrDescaleQ_t, devPtrDescaleK_t, devPtrDescaledO_t, devPtrcuSeqlensQ, devPtrcuSeqlensKV,
         devPtrDropoutSeed, devPtrDropoutOffset, get_cudnn_fe_dtype(QKV_type),
         get_cudnn_fe_dtype(O_type), get_cudnn_fe_dtype(dO_type), get_cudnn_fe_dtype(dQKV_type),
-        input_dO->scaling_mode,
-        qkv_scale_inv_format, do_scale_inv_format,
-        workspace->data.dptr, &workspace_size, stream, handle);
+        input_dO->scaling_mode, qkv_scale_inv_format, do_scale_inv_format, workspace->data.dptr,
+        &workspace_size, stream, handle);
   } else if (dqkv_layout == NVTE_QKV_Layout::NVTE_T3HD) {
     // remove this when cuDNN FE supports FP8 + THD
     NVTE_CHECK(input_ZInv != nullptr && input_ZInv->data.dptr != nullptr,
