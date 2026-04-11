@@ -17,7 +17,7 @@ from packaging.version import Version as PkgVersion
 @lru_cache(maxsize=None)
 def jax_version_meet_requirement(version: str):
     """Return True if the installed JAX version is >= the required version."""
-    jax_version = PkgVersion(get_pkg_version("jax"))
+    jax_version = PkgVersion(PkgVersion(get_pkg_version("jax")).public)
     jax_version_required = PkgVersion(version)
     return jax_version >= jax_version_required
 
