@@ -93,6 +93,9 @@ pybind11::dict Registrations() {
   dict["te_inspect_ffi"] =
       pybind11::dict(pybind11::arg("execute") = EncapsulateFFI(InspectHandler));
 
+  dict["te_validate_group_sizes_ffi"] =
+      pybind11::dict(pybind11::arg("execute") = EncapsulateFFI(ValidateGroupSizesHandler));
+
   // Router
   dict["te_fused_topk_with_score_function_forward_ffi"] =
       EncapsulateFFI(FusedTopkWithScoreFunctionForwardHandler);

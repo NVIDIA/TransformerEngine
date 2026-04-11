@@ -81,6 +81,10 @@ struct GroupedGemmConfig {
   int64_t rhs_right_size;
 };
 
+struct ValidateGroupSizesConfig {
+  int64_t align_size;
+};
+
 inline bool use_fp8(DType type) { return type == DType::kFloat8E4M3 || type == DType::kFloat8E5M2; }
 
 // Activation
@@ -187,6 +191,9 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(RHTAmaxCalculationHandler);
 // Inspect
 XLA_FFI_DECLARE_HANDLER_SYMBOL(InspectHandler);
 
+// Validation
+XLA_FFI_DECLARE_HANDLER_SYMBOL(ValidateGroupSizesHandler);
+
 // Cudnn helpers
 XLA_FFI_DECLARE_HANDLER_SYMBOL(CudnnHandleInitHandler);
 
@@ -243,6 +250,10 @@ XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(
     ::xla::ffi::StructMember<int64_t>("lhs_right_size"),
     ::xla::ffi::StructMember<int64_t>("rhs_left_size"),
     ::xla::ffi::StructMember<int64_t>("rhs_right_size"));
+
+XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(
+    transformer_engine::jax::ValidateGroupSizesConfig,
+    ::xla::ffi::StructMember<int64_t>("align_size"));
 
 // ENUM_ATTR and DICT_ATTR recoding need to be registered in the global namespace
 XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Scaling_Mode);
