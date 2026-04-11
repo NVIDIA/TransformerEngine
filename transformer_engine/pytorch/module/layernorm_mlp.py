@@ -474,6 +474,17 @@ class _LayerNormMLP(torch.autograd.Function):
         # Cast weights to expected dtype
         fc1_weight_final = fc1_weight
         fc2_weight_final = fc2_weight
+        try:
+            from ..distributed import _get_module_fsdp_state
+
+            _get_module_fsdp_state(module)
+            is_fsdp2 = True
+        except (RuntimeError, ImportError):
+            is_fsdp2 = False
+        # FSDP2: Skip columnwise/transpose creation during forward (not
+        # recompute) to avoid accumulating FP8 caches across layers.
+        # Backward's FSDP2 all-gather will recreate them. (Issue #2681)
+        fsdp2_skip_columnwise = is_fsdp2 and not is_recomputation
         if fp8 or debug:
             # If weights are not quantized, we call get_weight_workspace,
             # which handles weight caching etc.
@@ -483,18 +494,42 @@ class _LayerNormMLP(torch.autograd.Function):
             # for debug mode we create quantizer every iteration, thus we need to set the quantizer states
             if isinstance(fc1_weight, QuantizedTensorStorage) and not debug:
                 fc1_weight_quantizer = fc1_weight._quantizer
+                # FSDP2: Disable columnwise on pre-quantized block-scaled
+                # weights whose _create_columnwise() can regenerate. (#2681)
+                if fsdp2_skip_columnwise and isinstance(
+                    fc1_weight_quantizer, (Float8BlockQuantizer, NVFP4Quantizer)
+                ):
+                    fc1_weight_quantizer.set_usage(rowwise=True, columnwise=False)
             elif fc1_weight_quantizer is not None:
-                fc1_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
+                fc1_weight_quantizer.set_usage(
+                    rowwise=True,
+                    columnwise=is_grad_enabled and not fsdp2_skip_columnwise,
+                )
 
             if isinstance(fc2_weight, QuantizedTensorStorage) and not debug:
                 fc2_weight_quantizer = fc2_weight._quantizer
+                if fsdp2_skip_columnwise and isinstance(
+                    fc2_weight_quantizer, (Float8BlockQuantizer, NVFP4Quantizer)
+                ):
+                    fc2_weight_quantizer.set_usage(rowwise=True, columnwise=False)
             elif fc2_weight_quantizer is not None:
-                fc2_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
+                fc2_weight_quantizer.set_usage(
+                    rowwise=True,
+                    columnwise=is_grad_enabled and not fsdp2_skip_columnwise,
+                )
 
+            # FSDP2: Don't cache workspaces — they would persist across
+            # layers, defeating FSDP2 memory savings. (Issue #2681)
+            fc1_cache = (
+                None if (is_first_microbatch is None or fsdp2_skip_columnwise) else "fc1_weight"
+            )
+            fc2_cache = (
+                None if (is_first_microbatch is None or fsdp2_skip_columnwise) else "fc2_weight"
+            )
             fc1_weight_final = module.get_weight_workspace(
                 tensor=fc1_weight,
                 quantizer=fc1_weight_quantizer,
-                cache_name=(None if is_first_microbatch is None else "fc1_weight"),
+                cache_name=fc1_cache,
                 update_workspace=update_workspace,
                 skip_update_flag=skip_fp8_weight_update,
                 fsdp_group=fsdp_group,
@@ -503,14 +538,30 @@ class _LayerNormMLP(torch.autograd.Function):
             fc2_weight_final = module.get_weight_workspace(
                 tensor=fc2_weight,
                 quantizer=fc2_weight_quantizer,
-                cache_name=(None if is_first_microbatch is None else "fc2_weight"),
+                cache_name=fc2_cache,
                 update_workspace=update_workspace,
                 skip_update_flag=skip_fp8_weight_update,
                 fsdp_group=fsdp_group,
                 workspace_dtype=activation_dtype,
             )
-            fc1_weight_final.update_usage(rowwise_usage=True)
-            fc2_weight_final.update_usage(rowwise_usage=True)
+            # FSDP2: Discard columnwise data on block-scaled pre-quantized
+            # weights whose _create_columnwise() can regenerate. (#2681)
+            if (
+                fsdp2_skip_columnwise
+                and isinstance(fc1_weight, QuantizedTensorStorage)
+                and isinstance(fc1_weight_quantizer, (Float8BlockQuantizer, NVFP4Quantizer))
+            ):
+                fc1_weight_final.update_usage(rowwise_usage=True, columnwise_usage=False)
+            else:
+                fc1_weight_final.update_usage(rowwise_usage=True)
+            if (
+                fsdp2_skip_columnwise
+                and isinstance(fc2_weight, QuantizedTensorStorage)
+                and isinstance(fc2_weight_quantizer, (Float8BlockQuantizer, NVFP4Quantizer))
+            ):
+                fc2_weight_final.update_usage(rowwise_usage=True, columnwise_usage=False)
+            else:
+                fc2_weight_final.update_usage(rowwise_usage=True)
         else:
             fc1_weight_final = cast_if_needed(fc1_weight_final, activation_dtype)
             fc2_weight_final = cast_if_needed(fc2_weight_final, activation_dtype)
@@ -752,17 +803,27 @@ class _LayerNormMLP(torch.autograd.Function):
                         fc2_weight,
                         fc2_bias,
                     )
+                # FSDP2: Don't save FP8 workspace copies for non-quantized
+                # weights. Backward will re-quantize from the FSDP2
+                # all-gathered weight parameter. (Issue #2681)
+                fc1_wt_save = fc1_weight_final
+                fc2_wt_save = fc2_weight_final
+                if fsdp2_skip_columnwise:
+                    if fc1_weight_final is not fc1_weight:
+                        fc1_wt_save = None
+                    if fc2_weight_final is not fc2_weight:
+                        fc2_wt_save = None
                 tensors_to_save, tensor_objects = prepare_for_saving(
                     inputmat,
                     ln_weight,
                     ln_out,
-                    fc1_weight_final,
+                    fc1_wt_save,
                     fc1_weight,
                     fc1_bias,
                     fc1_out,
                     fc1_out_without_bias,
                     act_out,
-                    fc2_weight_final,
+                    fc2_wt_save,
                     fc2_weight,
                     fc2_bias,
                     mu,
@@ -803,6 +864,7 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.fc2_weight_requires_grad = fc2_weight.requires_grad
             ctx.fc1_weight = fc1_weight
             ctx.fc2_weight = fc2_weight
+            ctx.fsdp2_skip_columnwise = fsdp2_skip_columnwise
 
             ctx.device = device
             ctx.activation_dtype = activation_dtype
@@ -1117,6 +1179,17 @@ class _LayerNormMLP(torch.autograd.Function):
                 and (not ctx.debug)
             )
 
+            # FSDP2: Re-create workspace from all-gathered weight when
+            # workspace was not saved to avoid forward memory
+            # accumulation. (Issue #2681)
+            if fc2_weight is None:
+                if isinstance(origin_fc2_weight, QuantizedTensorStorage):
+                    origin_fc2_weight.update_usage(columnwise_usage=True)
+                    fc2_weight = origin_fc2_weight
+                elif ctx.fc2_weight_quantizer is not None:
+                    ctx.fc2_weight_quantizer.set_usage(rowwise=True, columnwise=True)
+                    fc2_weight = ctx.fc2_weight_quantizer(origin_fc2_weight)
+
             # Make sure required data is available
             if isinstance(grad_output, QuantizedTensorStorage):
                 grad_output.update_usage(rowwise_usage=True)
@@ -1143,6 +1216,25 @@ class _LayerNormMLP(torch.autograd.Function):
                 ub=ub_obj_fc2_dgrad,
                 ub_type=tex.CommOverlapType.AG if ctx.ub_overlap_ag else None,
             )
+
+            # FSDP2: Clear FP8 transpose cache after dgrad GEMM to prevent
+            # it from persisting on the all-gathered buffer across step
+            # boundaries. Only for Float8TensorStorage which uses _transpose.
+            # (Issue #2717)
+            if getattr(ctx, "fsdp2_skip_columnwise", False) and hasattr(fc2_weight, "_transpose"):
+                if getattr(fc2_weight, "_transpose", None) is not None:
+                    fc2_weight._transpose = None
+                    fc2_weight._transpose_invalid = True
+            # FSDP2: Clear blockwise columnwise caches after FC2 dgrad GEMM.
+            # (Issues #2681, #2717)
+            if getattr(ctx, "fsdp2_skip_columnwise", False) and hasattr(
+                fc2_weight, "_columnwise_data"
+            ):
+                if getattr(fc2_weight, "_columnwise_data", None) is not None:
+                    fc2_weight._columnwise_data = None
+                    fc2_weight._columnwise_scale_inv = None
+                    if hasattr(fc2_weight, "_amax_columnwise"):
+                        fc2_weight._amax_columnwise = None
 
             # Prepare input grad tensor
             dact = None
@@ -1371,9 +1463,19 @@ class _LayerNormMLP(torch.autograd.Function):
             # FC1 DGRAD
             # --------------------------------------------------
 
+            # FSDP2: Re-create workspace from all-gathered weight when
+            # workspace was not saved. (Issue #2681)
+            if fc1_weight is None:
+                if isinstance(origin_fc1_weight, QuantizedTensorStorage):
+                    origin_fc1_weight.update_usage(columnwise_usage=True)
+                    fc1_weight = origin_fc1_weight
+                elif ctx.fc1_weight_quantizer is not None:
+                    ctx.fc1_weight_quantizer.set_usage(rowwise=True, columnwise=True)
+                    fc1_weight = ctx.fc1_weight_quantizer(origin_fc1_weight)
+
             # Make sure required data is available
             if ctx.fc1_weight_quantizer is not None and isinstance(
-                ctx.fc1_weight_quantizer, QuantizedTensorStorage
+                ctx.fc1_weight, QuantizedTensorStorage
             ):
                 ctx.fc1_weight.update_usage(columnwise_usage=True)
 
@@ -1402,6 +1504,23 @@ class _LayerNormMLP(torch.autograd.Function):
                 extra_output=reduce_scatter_out,
                 bulk_overlap=ctx.ub_bulk_dgrad,
             )
+
+            # FSDP2: Clear FP8 transpose cache after FC1 dgrad GEMM.
+            # (Issue #2717)
+            if getattr(ctx, "fsdp2_skip_columnwise", False) and hasattr(fc1_weight, "_transpose"):
+                if getattr(fc1_weight, "_transpose", None) is not None:
+                    fc1_weight._transpose = None
+                    fc1_weight._transpose_invalid = True
+            # FSDP2: Clear blockwise columnwise caches after FC1 dgrad GEMM.
+            # (Issues #2681, #2717)
+            if getattr(ctx, "fsdp2_skip_columnwise", False) and hasattr(
+                fc1_weight, "_columnwise_data"
+            ):
+                if getattr(fc1_weight, "_columnwise_data", None) is not None:
+                    fc1_weight._columnwise_data = None
+                    fc1_weight._columnwise_scale_inv = None
+                    if hasattr(fc1_weight, "_amax_columnwise"):
+                        fc1_weight._amax_columnwise = None
 
             # Prepare grad input tensor
             # Note: Perform tensor-parallel communication
