@@ -2358,8 +2358,11 @@ def mxfp8_pad_and_swizzle_scales(*fp8_tensors):
 
 
 def mxfp8_permute_scale_inv_to_bhsd(*tensors, src_format):
-    """Permute scale_inv of one or more MXFP8Tensors from *src_format* to BHSD,
-    then pad+swizzle for F8_128x4.
+    """Pad, permute, then swizzle scale_inv of one or more MXFP8Tensors.
+
+    Order of operations: pad → permute (src_format → BHSD) → swizzle.
+    Padding before the permute ensures the last dimension is aligned, which
+    can improve memory coalescing inside the permute kernel.
 
     Uses a single batched ``tex.permute_to_grouped_tensor_fwd`` call regardless
     of how many tensors are passed (1 for dO, 3 for Q/K/V, etc.).
@@ -2378,28 +2381,43 @@ def mxfp8_permute_scale_inv_to_bhsd(*tensors, src_format):
         mxfp8_pad_and_swizzle_scales(*outs)
         return tuple(outs)
 
-    # Permute rowwise scale_inv from src_format to BHSD
+    # 1. PAD scale_invs while still in original 4D layout (e.g. SBHD).
+    #    multi_tensor_pad_last_dim requires 2D, so flatten → pad → restore 4D.
     rs_4d_list = []
-    rs_d_scales = []
     for t in tensors:
         rs = t._rowwise_scale_inv
         if rs is not None:
             rs_4d_list.append(rs)
-            rs_d_scales.append(rs.shape[-1])
-
-    rs_permuted = None
     if rs_4d_list:
-        rs_permuted = tex.permute_to_grouped_tensor_fwd(*rs_4d_list, original_format=src_format)
+        rs_shapes = [rs.shape for rs in rs_4d_list]
+        rs_2d = [rs.view(-1, rs.shape[-1]) for rs in rs_4d_list]
+        rs_2d_padded = tex.multi_tensor_pad_last_dim(rs_2d, 4)
+        rs_4d_list = [
+            rp.view(*shape[:-1], rp.shape[-1])
+            for rp, shape in zip(rs_2d_padded, rs_shapes)
+        ]
 
-    # Permute columnwise scale_inv from src_format to BHSD
     cs_4d_list = []
-    cs_d_scales = []
     for t in tensors:
         cs = t._columnwise_scale_inv
         if cs is not None:
             cs_4d_list.append(cs)
-            cs_d_scales.append(cs.shape[-1])
+    if cs_4d_list:
+        cs_shapes = [cs.shape for cs in cs_4d_list]
+        cs_2d = [cs.view(-1, cs.shape[-1]) for cs in cs_4d_list]
+        cs_2d_padded = tex.multi_tensor_pad_last_dim(cs_2d, 128)
+        cs_4d_list = [
+            cp.view(*shape[:-1], cp.shape[-1])
+            for cp, shape in zip(cs_2d_padded, cs_shapes)
+        ]
 
+    # 2. PERMUTE padded scale_invs from src_format to BHSD.
+    rs_d_scales = [rs.shape[-1] for rs in rs_4d_list]
+    rs_permuted = None
+    if rs_4d_list:
+        rs_permuted = tex.permute_to_grouped_tensor_fwd(*rs_4d_list, original_format=src_format)
+
+    cs_d_scales = [cs.shape[-1] for cs in cs_4d_list]
     cs_permuted = None
     if cs_4d_list:
         cs_permuted = tex.permute_to_grouped_tensor_fwd(*cs_4d_list, original_format=src_format)
@@ -2418,6 +2436,7 @@ def mxfp8_permute_scale_inv_to_bhsd(*tensors, src_format):
             )
         )
 
+    # 3. SWIZZLE (padding already done above, so the pad inside is a no-op).
     mxfp8_pad_and_swizzle_scales(*outs)
 
     return tuple(outs)
