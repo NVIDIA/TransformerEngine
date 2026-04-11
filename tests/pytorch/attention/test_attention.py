@@ -124,7 +124,7 @@ model_configs_base = {
 @pytest.mark.parametrize("workspace_opt", [True, False])
 @pytest.mark.parametrize("qkv_layout", [None])
 @pytest.mark.parametrize("swa", [False])
-@pytest.mark.parametrize("pad_between_seqs", [False])
+@pytest.mark.parametrize("pad_between_seqs", [False, True])
 def test_dot_product_attention(
     dtype,
     model_configs,
@@ -157,6 +157,8 @@ def test_dot_product_attention(
 
     config.window_size = check_set_window_size(config.attn_mask_type, config.window_size)
     qkv_format = qkv_layout.replace("3", "").replace("2", "").split("_")[0]
+    if pad_between_seqs and qkv_format != "thd":
+        pytest.skip("pad_between_seqs only applies to THD format!")
     if qkv_format == "thd" and "padding" not in config.attn_mask_type:
         config.attn_mask_type = (
             "padding_" + config.attn_mask_type if config.attn_mask_type != "no_mask" else "padding"
@@ -195,18 +197,18 @@ def test_dot_product_attention(
         )
         flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
 
-    # FlashAttention does not support pad_between_seqs, but _run_dot_product_attention
-    # mannually pads and unpads the input and output of FlashAttention for testing purposes
-    if (
-        pad_between_seqs
-        and FlashAttentionUtils.is_installed
-        and not (
+    # FA3 natively supports pad_between_seqs via seqused_q/seqused_k (SM90 only).
+    # Override flash_attn_supported only for pad_between_seqs=True because
+    # get_available_attention_backends doesn't know about FA3's seqused support yet.
+    # For pad_between_seqs=False, trust the backend checker's result as-is.
+    if pad_between_seqs:
+        cross_attn_causal = (
             config.max_seqlen_q != config.max_seqlen_kv
             and config.attn_mask_type in ["causal", "padding_causal"]
         )
-        and (config.window_size[0] == -1 or FlashAttentionUtils.v2_3_plus)
-    ):
-        flash_attn_supported = True
+        sm = get_device_compute_capability()
+        if not cross_attn_causal and FlashAttentionUtils.v3_is_installed and sm == (9, 0):
+            flash_attn_supported = True
 
     # Skip if only unfused backend is supported
     if (len(fused_attn_backends) + flash_attn_supported + unfused_attn_supported) < 2:
@@ -1197,12 +1199,12 @@ def _run_dot_product_attention(
         block.softmax_offset.requires_grad = True
 
     # Run a forward and backward pass
-    if backend in ["FlashAttention", "UnfusedDotProductAttention"]:
+    if backend in ["UnfusedDotProductAttention"]:
         q = inp_orig[0]
         k = inp_orig[1]
         v = inp_orig[2]
         d_out = out_grad_orig
-    if backend == "FusedAttention":
+    if backend in ["FusedAttention", "FlashAttention"]:
         q = inp[0]
         k = inp[1]
         v = inp[2]
@@ -1218,14 +1220,19 @@ def _run_dot_product_attention(
         max_seqlen_kv=config.max_seqlen_kv,
         cu_seqlens_q=cu_seqlens_q,
         cu_seqlens_kv=cu_seqlens_kv,
-        cu_seqlens_q_padded=cu_seqlens_q_after_pad if backend == "FusedAttention" else None,
-        cu_seqlens_kv_padded=cu_seqlens_kv_after_pad if backend == "FusedAttention" else None,
+        cu_seqlens_q_padded=(
+            cu_seqlens_q_after_pad if backend in ["FusedAttention", "FlashAttention"] else None
+        ),
+        cu_seqlens_kv_padded=(
+            cu_seqlens_kv_after_pad if backend in ["FusedAttention", "FlashAttention"] else None
+        ),
         attn_mask_type=config.attn_mask_type,
         checkpoint_core_attention=ckpt_attn,
         core_attention_bias_type=config.attn_bias_type,
         core_attention_bias=bias,
         alibi_slopes=alibi_slopes,
         fast_zero_fill=True,
+        pad_between_seqs=pad_between_seqs,
         # Only pass num_splits when exercising the FlashAttention path
         num_splits=config.num_splits if backend == "FlashAttention" else 1,
     )
@@ -1239,12 +1246,12 @@ def _run_dot_product_attention(
     if is_training and config.softmax_type != "vanilla":
         d_softmax_offset = block.softmax_offset.grad
 
-    if backend in ["FlashAttention", "UnfusedDotProductAttention"]:
+    if backend in ["UnfusedDotProductAttention"]:
         if is_training:
             return out, max_logit, (q.grad, k.grad, v.grad, d_softmax_offset)
         else:
             return out, max_logit, (None, None, None, d_softmax_offset)
-    if backend == "FusedAttention":
+    if backend in ["FusedAttention", "FlashAttention"]:
         if qkv_format == "thd" and pad_between_seqs:
             out_orig = torch.Tensor([]).to(device="cuda", dtype=dtype)
             if is_training:
