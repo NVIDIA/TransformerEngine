@@ -2381,46 +2381,89 @@ def mxfp8_permute_scale_inv_to_bhsd(*tensors, src_format):
         mxfp8_pad_and_swizzle_scales(*outs)
         return tuple(outs)
 
-    # 1. PAD scale_invs while still in original 4D layout (e.g. SBHD).
-    #    multi_tensor_pad_last_dim requires 2D, so flatten → pad → restore 4D.
+    # 1+2. FUSED PERMUTE+PAD: permute from src_format to BHSD and pad D in one kernel.
     rs_4d_list = []
     for t in tensors:
         rs = t._rowwise_scale_inv
         if rs is not None:
             rs_4d_list.append(rs)
-    if rs_4d_list:
-        rs_shapes = [rs.shape for rs in rs_4d_list]
-        rs_2d = [rs.view(-1, rs.shape[-1]) for rs in rs_4d_list]
-        rs_2d_padded = tex.multi_tensor_pad_last_dim(rs_2d, 4)
-        rs_4d_list = [
-            rp.view(*shape[:-1], rp.shape[-1])
-            for rp, shape in zip(rs_2d_padded, rs_shapes)
-        ]
 
     cs_4d_list = []
     for t in tensors:
         cs = t._columnwise_scale_inv
         if cs is not None:
             cs_4d_list.append(cs)
-    if cs_4d_list:
-        cs_shapes = [cs.shape for cs in cs_4d_list]
-        cs_2d = [cs.view(-1, cs.shape[-1]) for cs in cs_4d_list]
-        cs_2d_padded = tex.multi_tensor_pad_last_dim(cs_2d, 128)
-        cs_4d_list = [
-            cp.view(*shape[:-1], cp.shape[-1])
-            for cp, shape in zip(cs_2d_padded, cs_shapes)
-        ]
 
-    # 2. PERMUTE padded scale_invs from src_format to BHSD.
-    rs_d_scales = [rs.shape[-1] for rs in rs_4d_list]
+    def _align_up(x, a):
+        return ((x + a - 1) // a) * a
+
+    def _bhsd_shape(src_4d, src_fmt, d_pad):
+        """Output shape after permute to BHSD with padded last dim."""
+        if src_fmt == "sbhd":
+            S, B, H, _ = src_4d.shape
+        else:
+            B, S, H, _ = src_4d.shape
+        return (B, H, S, d_pad)
+
+    rs_out_list = []
+    cs_out_list = []
+    total_numel = 0
+
+    if rs_4d_list:
+        d_qk_rs_pad = _align_up(rs_4d_list[0].shape[-1], 4)
+        d_v_rs_pad = _align_up(rs_4d_list[-1].shape[-1], 4) if len(rs_4d_list) >= 2 else d_qk_rs_pad
+        for i, rs in enumerate(rs_4d_list):
+            d_pad = d_v_rs_pad if (i == len(rs_4d_list) - 1 and len(rs_4d_list) >= 3) else d_qk_rs_pad
+            shape = _bhsd_shape(rs, src_format, d_pad)
+            numel = 1
+            for s in shape:
+                numel *= s
+            rs_out_list.append((total_numel, numel, shape))
+            total_numel += numel
+
+    if cs_4d_list:
+        d_qk_cs_pad = _align_up(cs_4d_list[0].shape[-1], 128)
+        d_v_cs_pad = _align_up(cs_4d_list[-1].shape[-1], 128) if len(cs_4d_list) >= 2 else d_qk_cs_pad
+        for i, cs in enumerate(cs_4d_list):
+            d_pad = d_v_cs_pad if (i == len(cs_4d_list) - 1 and len(cs_4d_list) >= 3) else d_qk_cs_pad
+            shape = _bhsd_shape(cs, src_format, d_pad)
+            numel = 1
+            for s in shape:
+                numel *= s
+            cs_out_list.append((total_numel, numel, shape))
+            total_numel += numel
+
+    combined_buf = torch.empty(total_numel, dtype=torch.uint8,
+                               device=tensors[0]._rowwise_scale_inv.device) if total_numel > 0 else None
+
+    def _slice_outputs(out_list):
+        """Slice the combined buffer into 4D output tensors."""
+        return [combined_buf[offset : offset + numel].view(shape)
+                for offset, numel, shape in out_list]
+
     rs_permuted = None
     if rs_4d_list:
-        rs_permuted = tex.permute_to_grouped_tensor_fwd(*rs_4d_list, original_format=src_format)
+        rs_outs = _slice_outputs(rs_out_list)
+        rs_permuted = tex.permute_to_grouped_tensor_fwd(
+            *rs_4d_list, original_format=src_format,
+            d_qk_pad=d_qk_rs_pad, d_v_pad=d_v_rs_pad,
+            q_out=rs_outs[0],
+            k_out=rs_outs[1] if len(rs_outs) >= 3 else None,
+            v_out=rs_outs[2] if len(rs_outs) >= 3 else None,
+        )
+    rs_d_scales = [rp.shape[-1] for rp in rs_permuted] if rs_permuted else []
 
-    cs_d_scales = [cs.shape[-1] for cs in cs_4d_list]
     cs_permuted = None
     if cs_4d_list:
-        cs_permuted = tex.permute_to_grouped_tensor_fwd(*cs_4d_list, original_format=src_format)
+        cs_outs = _slice_outputs(cs_out_list)
+        cs_permuted = tex.permute_to_grouped_tensor_fwd(
+            *cs_4d_list, original_format=src_format,
+            d_qk_pad=d_qk_cs_pad, d_v_pad=d_v_cs_pad,
+            q_out=cs_outs[0],
+            k_out=cs_outs[1] if len(cs_outs) >= 3 else None,
+            v_out=cs_outs[2] if len(cs_outs) >= 3 else None,
+        )
+    cs_d_scales = [cp.shape[-1] for cp in cs_permuted] if cs_permuted else []
 
     outs = []
     for i, (t, rp, rd, cp, cd) in enumerate(zip(tensors, rs_permuted, rs_d_scales, cs_permuted, cs_d_scales)):
@@ -2436,8 +2479,11 @@ def mxfp8_permute_scale_inv_to_bhsd(*tensors, src_format):
             )
         )
 
-    # 3. SWIZZLE (padding already done above, so the pad inside is a no-op).
-    mxfp8_pad_and_swizzle_scales(*outs)
+    # 3. SWIZZLE (padding already done by the fused permute+pad above).
+    tex.multi_swizzle_scales_for_gemm_(outs, True, False, check_scale_inv_shapes=False)
+    tex.multi_swizzle_scales_for_gemm_(outs, False, True, check_scale_inv_shapes=False)
+    for t in outs:
+        t._with_gemm_swizzled_scales = True
 
     return tuple(outs)
 

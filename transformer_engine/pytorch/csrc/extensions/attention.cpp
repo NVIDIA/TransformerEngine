@@ -655,7 +655,9 @@ at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v) {
 
 std::vector<at::Tensor> permute_to_grouped_tensor_fwd(
     at::Tensor query, std::optional<at::Tensor> key, std::optional<at::Tensor> value,
-    const std::string &original_format) {
+    const std::string &original_format, int64_t d_qk_pad, int64_t d_v_pad,
+    std::optional<at::Tensor> q_out_opt, std::optional<at::Tensor> k_out_opt,
+    std::optional<at::Tensor> v_out_opt) {
   NVTE_CHECK(original_format == "sbhd" || original_format == "bshd",
              "Unsupported original_format \"", original_format, "\"; expected \"sbhd\" or \"bshd\".");
   const auto original_format_enum = (original_format == "sbhd") ? NVTE_SBHD : NVTE_BSHD;
@@ -674,9 +676,17 @@ std::vector<at::Tensor> permute_to_grouped_tensor_fwd(
     B = query.size(0); S_q = query.size(1); H_q = query.size(2); D_qk = query.size(3);
   }
 
-  at::Tensor q_out = at::empty({B, H_q, S_q, D_qk}, query.options());
+  const int64_t D_qk_out = (d_qk_pad > 0) ? d_qk_pad : D_qk;
 
   if (!has_kv) {
+    at::Tensor q_out;
+    if (q_out_opt.has_value()) {
+      q_out = q_out_opt.value();
+    } else {
+      q_out = (D_qk_out == D_qk)
+          ? at::empty({B, H_q, S_q, D_qk_out}, query.options())
+          : at::zeros({B, H_q, S_q, D_qk_out}, query.options());
+    }
     auto te_q = makeTransformerEngineTensor(query);
     auto te_qo = makeTransformerEngineTensor(q_out);
     nvte_permute_to_grouped_tensor_fwd(te_q.data(), te_q.data(), te_q.data(),
@@ -698,13 +708,25 @@ std::vector<at::Tensor> permute_to_grouped_tensor_fwd(
     S_kv = k.size(1); H_kv = k.size(2); D_v = v.size(3);
   }
 
-  const int64_t numel_q = B * H_q * S_q * D_qk;
-  const int64_t numel_k = B * H_kv * S_kv * D_qk;
-  const int64_t numel_v = B * H_kv * S_kv * D_v;
-  at::Tensor qkv_out_flat = at::empty({numel_q + numel_k + numel_v}, query.options());
-  q_out = qkv_out_flat.narrow(0, 0, numel_q).view({B, H_q, S_q, D_qk});
-  at::Tensor k_out = qkv_out_flat.narrow(0, numel_q, numel_k).view({B, H_kv, S_kv, D_qk});
-  at::Tensor v_out = qkv_out_flat.narrow(0, numel_q + numel_k, numel_v).view({B, H_kv, S_kv, D_v});
+  const int64_t D_v_out = (d_v_pad > 0) ? d_v_pad : D_v;
+
+  at::Tensor q_out, k_out, v_out;
+  if (q_out_opt.has_value() && k_out_opt.has_value() && v_out_opt.has_value()) {
+    q_out = q_out_opt.value();
+    k_out = k_out_opt.value();
+    v_out = v_out_opt.value();
+  } else {
+    const bool needs_pad = (D_qk_out != D_qk) || (D_v_out != D_v);
+    const int64_t numel_q = B * H_q * S_q * D_qk_out;
+    const int64_t numel_k = B * H_kv * S_kv * D_qk_out;
+    const int64_t numel_v = B * H_kv * S_kv * D_v_out;
+    at::Tensor qkv_out_flat = needs_pad
+        ? at::zeros({numel_q + numel_k + numel_v}, query.options())
+        : at::empty({numel_q + numel_k + numel_v}, query.options());
+    q_out = qkv_out_flat.narrow(0, 0, numel_q).view({B, H_q, S_q, D_qk_out});
+    k_out = qkv_out_flat.narrow(0, numel_q, numel_k).view({B, H_kv, S_kv, D_qk_out});
+    v_out = qkv_out_flat.narrow(0, numel_q + numel_k, numel_v).view({B, H_kv, S_kv, D_v_out});
+  }
 
   auto te_q = makeTransformerEngineTensor(query);
   auto te_k = makeTransformerEngineTensor(k);
@@ -722,7 +744,8 @@ std::vector<at::Tensor> permute_to_grouped_tensor_fwd(
 
 std::vector<at::Tensor> permute_to_grouped_tensor_bwd(
     at::Tensor query_grad, std::optional<at::Tensor> key_grad,
-    std::optional<at::Tensor> value_grad,     const std::string &original_format) {
+    std::optional<at::Tensor> value_grad,     const std::string &original_format,
+    int64_t d_qk_out, int64_t d_v_out) {
   NVTE_CHECK(original_format == "sbhd" || original_format == "bshd",
              "Unsupported original_format \"", original_format, "\"; expected \"sbhd\" or \"bshd\".");
   const auto original_format_enum = (original_format == "sbhd") ? NVTE_SBHD : NVTE_BSHD;
@@ -736,7 +759,8 @@ std::vector<at::Tensor> permute_to_grouped_tensor_bwd(
   const int64_t B = query_grad.size(0);
   const int64_t H_q = query_grad.size(1);
   const int64_t S_q = query_grad.size(2);
-  const int64_t D_qk = query_grad.size(3);
+  const int64_t D_qk_in = query_grad.size(3);
+  const int64_t D_qk = (d_qk_out > 0) ? d_qk_out : D_qk_in;
 
   if (!has_kv) {
     at::Tensor q;
@@ -762,7 +786,8 @@ std::vector<at::Tensor> permute_to_grouped_tensor_bwd(
 
   const int64_t H_kv = kg.size(1);
   const int64_t S_kv = kg.size(2);
-  const int64_t D_v = vg.size(3);
+  const int64_t D_v_in = vg.size(3);
+  const int64_t D_v = (d_v_out > 0) ? d_v_out : D_v_in;
 
   const int64_t numel_q = S_q * B * H_q * D_qk;
   const int64_t numel_k = S_kv * B * H_kv * D_qk;
