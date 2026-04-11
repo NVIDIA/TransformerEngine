@@ -844,13 +844,7 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
   e8m0_t *const scales_rowwise_ptr = reinterpret_cast<e8m0_t *>(output->scale_inv.dptr);
   e8m0_t *const scales_colwise_ptr = reinterpret_cast<e8m0_t *>(output->columnwise_scale_inv.dptr);
 
-  if (use_rowwise_scaling) {
-    NVTE_CHECK(scales_rowwise_ptr != nullptr, "Scaling tensor must be allocated");
-  }
-  if (use_colwise_scaling) {
-    NVTE_CHECK(scales_colwise_ptr != nullptr, "Columnwise scaling tensor must be allocated");
-  }
-
+  // Workspace for dbias
   if constexpr (IS_DBIAS) {
     NVTE_CHECK(is_single_tensor,
                "DBias is only supported for tensors with the const last dimension.");
@@ -863,11 +857,32 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
     NVTE_CHECK(workspace != nullptr, "Workspace must be a tensor.");
     const size_t dbias_workspace_rows = DIVUP(first_logical_dim, static_cast<size_t>(CHUNK_DIM_Y));
     const size_t dbias_workspace_cols = last_logical_dim;
+    NVTE_CHECK(dbias_workspace_rows > 0 && dbias_workspace_cols > 0,
+               "Invalid workspace shape for DBias computation (input first_logical_dim=",
+               first_logical_dim, ", input last_logical_dim=", last_logical_dim,
+               ", workspace shape=(", dbias_workspace_rows, ",", dbias_workspace_cols, ")).");
     if (workspace->data.dptr == nullptr) {
       workspace->data.shape = {dbias_workspace_rows, dbias_workspace_cols};
       workspace->data.dtype = DType::kFloat32;
       return;
     }
+  }
+
+  // Skip kernel if tensor size is zero
+  if (elts_total == 0) {
+    if constexpr (IS_DBIAS) {
+      NVTE_ERROR("Invalid grouped tensor shape for DBias computation (first_logical_dim=",
+                 first_logical_dim, ", last_logical_dim=", last_logical_dim, ")");
+    }
+    return;
+  }
+
+  // Check pointers
+  if (use_rowwise_scaling) {
+    NVTE_CHECK(scales_rowwise_ptr != nullptr, "Scaling tensor must be allocated");
+  }
+  if (use_colwise_scaling) {
+    NVTE_CHECK(scales_colwise_ptr != nullptr, "Columnwise scaling tensor must be allocated");
   }
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(

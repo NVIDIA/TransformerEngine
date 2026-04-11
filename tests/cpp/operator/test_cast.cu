@@ -64,7 +64,7 @@ void performTest(const std::vector<size_t>& shape) {
   cudaDeviceSynchronize();
   auto err = cudaGetLastError();
   ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
-  if (isFp8Type(otype)) {
+  if (isFp8Type(otype) && full_size > 0) {
     auto [atol_amax, rtol_amax] = getTolerances(DType::kFloat32);
     compareResults("amax", output_c.amax(), ref_amax, atol_amax, rtol_amax);
     float ref_scale_inv = 1.f / output_c.scale();
@@ -91,6 +91,8 @@ std::vector<std::vector<size_t>> test_cases = {
   {5, 160},
   {5, 4, 3, 160},
   {217, 256},
+  {0, 128},
+  {128, 0},
 };
 }  // namespace
 
