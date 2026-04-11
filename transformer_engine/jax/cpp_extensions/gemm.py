@@ -2227,7 +2227,7 @@ def _adjust_contracting_dims_for_hopper_fp8_transpose(
     rhs_contract_dim: Sequence[int],
     lhs_is_trans: bool,
     rhs_is_trans: bool,
-) -> Tuple[Sequence[int], Sequence[int]]:
+) -> Tuple[bool, bool, Sequence[int], Sequence[int]]:
     # Only support FP8 GEMM with NT layout on Hopper and other earlier GPUs
     # thus additional transpose is required
     lhs_layout_is_T = lhs.data_layout == "T"
@@ -2255,7 +2255,7 @@ def _adjust_contracting_dims_for_hopper_fp8_transpose(
         else:
             rhs_contract_dim = tuple((rhs_ndim - 1 - i) % rhs_ndim for i in rhs_contract_dim)
 
-    return lhs_contract_dim, rhs_contract_dim
+    return lhs_is_trans, rhs_is_trans, lhs_contract_dim, rhs_contract_dim
 
 
 def _quantize_inputs_if_needed(
@@ -2402,8 +2402,10 @@ def grouped_gemm(
         raise ValueError("FP8 GEMM does not support E5M2 * E5M2")
 
     if scaling_mode.is_tensor_scaling() and not is_fp8_gemm_with_all_layouts_supported():
-        lhs_contract_dim, rhs_contract_dim = _adjust_contracting_dims_for_hopper_fp8_transpose(
-            lhs, rhs, lhs_contract_dim, rhs_contract_dim, lhs_is_trans, rhs_is_trans
+        lhs_is_trans, rhs_is_trans, lhs_contract_dim, rhs_contract_dim = (
+            _adjust_contracting_dims_for_hopper_fp8_transpose(
+                lhs, rhs, lhs_contract_dim, rhs_contract_dim, lhs_is_trans, rhs_is_trans
+            )
         )
 
     # Compute N-D axis boundaries from final (post-adjustment) contracting dims.
