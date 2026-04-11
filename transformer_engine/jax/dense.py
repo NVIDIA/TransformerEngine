@@ -315,9 +315,11 @@ def _dense_bwd_rule(
 
 _dense.defvjp(_dense_fwd_rule, _dense_bwd_rule)
 
+
 @cache
 def _should_validate_group_size_alignment() -> bool:
     return os.getenv("NVTE_JAX_VALIDATE_GROUP_SIZE_ALIGNMENT", "0") == "1"
+
 
 def grouped_dense(
     x: jnp.ndarray,

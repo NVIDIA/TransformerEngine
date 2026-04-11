@@ -13,7 +13,7 @@ namespace transformer_engine {
 namespace jax {
 
 Error_Type ValidateGroupSizesFFI(cudaStream_t stream, Buffer_Type group_sizes_buf,
-                                  Result_Type output_buf, ValidateGroupSizesConfig config) {
+                                 Result_Type output_buf, ValidateGroupSizesConfig config) {
   NVTE_CHECK(group_sizes_buf.untyped_data() != nullptr,
              "group_sizes input must be provided for validate_group_sizes operation");
   NVTE_CHECK(output_buf->untyped_data() != nullptr,
@@ -31,19 +31,19 @@ Error_Type ValidateGroupSizesFFI(cudaStream_t stream, Buffer_Type group_sizes_bu
 
   for (int64_t i = 0; i < num_experts; ++i) {
     NVTE_CHECK(group_sizes_host[i] % align_size == 0,
-               "group_sizes alignment check failed: group_sizes[", i, "] = ",
-               group_sizes_host[i], " is not divisible by align_size = ", align_size);
+               "group_sizes alignment check failed: group_sizes[", i, "] = ", group_sizes_host[i],
+               " is not divisible by align_size = ", align_size);
   }
 
   return ffi_with_cuda_error_check();
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(ValidateGroupSizesHandler, ValidateGroupSizesFFI,
-                               FFI::Bind()
-                                   .Ctx<FFI_Stream_Type>()  // stream
-                                   .Arg<Buffer_Type>()      // group_sizes
-                                   .Ret<Buffer_Type>()      // output (aliased to input)
-                                   .Attr<ValidateGroupSizesConfig>("config"));
+                              FFI::Bind()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // group_sizes
+                                  .Ret<Buffer_Type>()      // output (aliased to input)
+                                  .Attr<ValidateGroupSizesConfig>("config"));
 // Note: no FFI_CudaGraph_Traits — not CUDA-graph compatible
 
 }  // namespace jax

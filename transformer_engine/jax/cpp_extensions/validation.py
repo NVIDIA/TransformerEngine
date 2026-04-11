@@ -29,9 +29,9 @@ class ValidateGroupSizesPrimitive(BasePrimitive):
     @staticmethod
     def abstract(group_sizes_aval, *, align_size):
         """validate_group_sizes abstract"""
-        assert group_sizes_aval.dtype == jnp.int32, (
-            f"group_sizes must have dtype int32, got {group_sizes_aval.dtype}"
-        )
+        assert (
+            group_sizes_aval.dtype == jnp.int32
+        ), f"group_sizes must have dtype int32, got {group_sizes_aval.dtype}"
         del align_size
         return group_sizes_aval  # pass-through: same shape and dtype
 

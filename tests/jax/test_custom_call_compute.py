@@ -2024,12 +2024,14 @@ class TestDebugInspectFFI:
 
 class TestValidation:
 
-    @pytest_parametrize_wrapper("group_sizes", [
-        (128, 0, 128, 256, 512),  # includes an empty group
-        (128, 128, 256),
-        (115, 128, 256),  # includes a group that is not 128-aligned
-
-    ])
+    @pytest_parametrize_wrapper(
+        "group_sizes",
+        [
+            (128, 0, 128, 256, 512),  # includes an empty group
+            (128, 128, 256),
+            (115, 128, 256),  # includes a group that is not 128-aligned
+        ],
+    )
     @pytest_parametrize_wrapper("align_size", [8, 128])
     def test_validate_group_sizes(self, group_sizes, align_size):
         from transformer_engine.jax.cpp_extensions import validate_group_sizes
@@ -2039,8 +2041,13 @@ class TestValidation:
         actual_raised_error = False
         try:
             group_sizes_array = jnp.array(group_sizes, dtype=jnp.int32)
-            group_sizes_array = jax.jit(lambda gs: validate_group_sizes(gs, align_size))(group_sizes_array)
+            group_sizes_array = jax.jit(lambda gs: validate_group_sizes(gs, align_size))(
+                group_sizes_array
+            )
         except RuntimeError as e:
             actual_raised_error = True
 
-        assert actual_raised_error == expected_raise_error, f"Expected raise error: {expected_raise_error}, but got {actual_raised_error} for group_sizes: {group_sizes} and align_size: {align_size}"
+        assert actual_raised_error == expected_raise_error, (
+            f"Expected raise error: {expected_raise_error}, but got {actual_raised_error} for"
+            f" group_sizes: {group_sizes} and align_size: {align_size}"
+        )
