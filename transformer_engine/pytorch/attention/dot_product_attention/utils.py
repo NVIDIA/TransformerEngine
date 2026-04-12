@@ -2507,14 +2507,14 @@ def mxfp8_quantize_single_tensor(tensor, quantizer, src_format):
     Returns (fp8_tensor, scale_inv_format) where scale_inv_format is "bhsd".
     """
     original_shape = tensor.shape
-    _s_dim = {"bshd": 2, "sbhd": 0, "bhsd": 2}
+    _s_dim = {"bshd": 1, "sbhd": 0, "bhsd": 2}
     _d_dim = {"bshd": 3, "sbhd": 3, "bhsd": 3}
     rowwise_scale_inv_shape = list(tensor.shape)
     rowwise_scale_inv_shape[_d_dim[src_format]] = rowwise_scale_inv_shape[_d_dim[src_format]]//MXFP8_BLOCK_SCALING_SIZE
     columnwise_scale_inv_shape = list(tensor.shape)
     columnwise_scale_inv_shape[_s_dim[src_format]] = columnwise_scale_inv_shape[_s_dim[src_format]]//MXFP8_BLOCK_SCALING_SIZE
-    if src_format == "bhsd":
-        tensor = tensor.view(tensor.shape[:_s_dim[src_format]], -1)
+    if src_format in ("bhsd", "bshd"):
+        tensor = tensor.view(*tensor.shape[:_s_dim[src_format]+1], -1)
     elif src_format == "sbhd":
         tensor = tensor.view(tensor.shape[_s_dim[src_format]], -1)
     orig_optimize = quantizer.optimize_for_gemm
@@ -2624,11 +2624,13 @@ def combine_and_quantize(
         needs_permute = qkv_format not in ("bhsd", "htd")
         qkv_scale_inv_format = None
         original_shapes = [None, None, None]
+        if any(not x.is_contiguous() for x in [q, k, v]):
+            keep_same_data_and_scale_inv_format = True
 
         if keep_same_data_and_scale_inv_format and needs_permute:
             # Permute f16 data to BHSD, then quantize with swizzle
             # Prefer the fused custom kernel; fall back to pytorch if unsupported
-            if qkv_format in ("bshd", "sbhd") and q.dim() == 4:
+            if qkv_layout in ("bshd_bshd_bshd", "sbhd_sbhd_sbhd") and q.dim() == 4:
                 q, k, v = tex.permute_to_grouped_tensor_fwd(q, k, v, original_format=q_format)
             else:
                 q = permute_to_grouped_tensor_pytorch(q, q_format)
@@ -2644,7 +2646,7 @@ def combine_and_quantize(
             qkv_quantizer.optimize_for_gemm = False
             original_shapes = [x.shape for x in [q, k, v]]
             if qkv_format == "bshd":
-                q, k, v = [x.view(x.shape[:2], -1) for x in [q, k, v]]
+                q, k, v = [x.view(*x.shape[:2], -1) for x in [q, k, v]]
             elif qkv_format == "sbhd":
                 q, k, v = [x.view(x.shape[0], -1) for x in [q, k, v]]
 
