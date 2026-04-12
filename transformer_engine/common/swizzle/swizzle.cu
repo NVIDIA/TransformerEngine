@@ -21,6 +21,17 @@ namespace {
 constexpr int MXFP8_BLOCK_SIZE = 32;
 constexpr int NVFP4_BLOCK_SIZE = 16;
 
+int get_max_dynamic_smem() {
+  static int max_smem = -1;
+  if (max_smem < 0) {
+    int device;
+    NVTE_CHECK_CUDA(cudaGetDevice(&device));
+    NVTE_CHECK_CUDA(cudaDeviceGetAttribute(
+        &max_smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, device));
+  }
+  return max_smem;
+}
+
 constexpr __device__ __host__ int TB_DIM = 32;
 constexpr __device__ __host__ int NEW_SF_TILE_DIM_K = 16;
 constexpr __device__ __host__ int N_SF_PER_TD_PER_TILE = 4;
@@ -951,16 +962,17 @@ void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t s
         NVTE_ERROR("Invalid scaling mode");
     }
 
-    if (num_tiles_k < TB_DIM) {
+    const int narrow_k_slm_size = TB_DIM * num_tiles_k * SF_TILE_DIM_M * SF_TILE_DIM_K
+                                    * static_cast<int>(sizeof(int8_t));
+    if (num_tiles_k < TB_DIM && narrow_k_slm_size <= get_max_dynamic_smem()) {
       // Narrow-K: batch TB_DIM M-tiles per block, fully utilizing all threads.
       dim3 num_blocks_narrow(DIVUP(num_tiles_m, TB_DIM));
-      int slm_size = TB_DIM * num_tiles_k * SF_TILE_DIM_M * SF_TILE_DIM_K * sizeof(int8_t);
       NVTE_CHECK_CUDA(
           cudaFuncSetAttribute(
               swizzle_row_scaling_narrow_k_kernel<SF_TILE_DIM_M, SF_TILE_DIM_K>,
-              cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
+              cudaFuncAttributeMaxDynamicSharedMemorySize, narrow_k_slm_size));
       swizzle_row_scaling_narrow_k_kernel<SF_TILE_DIM_M, SF_TILE_DIM_K>
-          <<<num_blocks_narrow, block_size, slm_size, stream>>>(
+          <<<num_blocks_narrow, block_size, narrow_k_slm_size, stream>>>(
               input_scale_inv_ptr, output_scale_inv_ptr, m, k, original_M, original_K);
     } else {
       int vec_load_size = (num_tiles_k - 1) % 4 + 1;
@@ -1008,16 +1020,17 @@ void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t s
     const int original_M = input->flat_last_dim();
     const int original_K = input->flat_first_dim() / MXFP8_BLOCK_SIZE;
 
-    if (num_tiles_m < TB_DIM) {
+    const int narrow_m_slm_size = TB_DIM * num_tiles_m * SF_TILE_DIM_M * SF_TILE_DIM_K
+                                    * static_cast<int>(sizeof(int8_t));
+    if (num_tiles_m < TB_DIM && narrow_m_slm_size <= get_max_dynamic_smem()) {
       // Narrow-M: batch TB_DIM K-tiles per block, fully utilizing all threads.
       dim3 num_blocks_narrow(DIVUP(num_tiles_k, TB_DIM));
-      int slm_size = TB_DIM * num_tiles_m * SF_TILE_DIM_M * SF_TILE_DIM_K * sizeof(int8_t);
       NVTE_CHECK_CUDA(
           cudaFuncSetAttribute(
               swizzle_col_scaling_narrow_m_kernel<SF_TILE_DIM_M, SF_TILE_DIM_K>,
-              cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
+              cudaFuncAttributeMaxDynamicSharedMemorySize, narrow_m_slm_size));
       swizzle_col_scaling_narrow_m_kernel<SF_TILE_DIM_M, SF_TILE_DIM_K>
-          <<<num_blocks_narrow, block_size, slm_size, stream>>>(
+          <<<num_blocks_narrow, block_size, narrow_m_slm_size, stream>>>(
               input->columnwise_scale_inv.dptr, output->columnwise_scale_inv.dptr,
               m, k, original_M, original_K);
     } else {
@@ -1380,7 +1393,10 @@ void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
       }
 
       int num_tiles_k = k / SF_TILE_DIM_K;
-      all_narrow_k = all_narrow_k && (num_tiles_k < TB_DIM);
+      const int narrow_k_slm = TB_DIM * num_tiles_k * SF_TILE_DIM_M * SF_TILE_DIM_K
+                                * static_cast<int>(sizeof(int8_t));
+      all_narrow_k = all_narrow_k && (num_tiles_k < TB_DIM)
+                     && (narrow_k_slm <= get_max_dynamic_smem());
       int vec_load_size_i = (num_tiles_k - 1) % 4 + 1;
       // We use the minimum vec_load_size across all tensors.
       // TODO(zhongbo): fix vec_load_size for NVFP4
@@ -1448,7 +1464,10 @@ void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
 
       int num_tiles_m = m / SF_TILE_DIM_M;
       int num_tiles_k = k / SF_TILE_DIM_K;
-      all_narrow_m = all_narrow_m && (num_tiles_m < TB_DIM);
+      const int narrow_m_slm = TB_DIM * num_tiles_m * SF_TILE_DIM_M * SF_TILE_DIM_K
+                                * static_cast<int>(sizeof(int8_t));
+      all_narrow_m = all_narrow_m && (num_tiles_m < TB_DIM)
+                     && (narrow_m_slm <= get_max_dynamic_smem());
       int vec_load_size_i = (num_tiles_k - 1) % 4 + 1;
       // We use the minimum vec_load_size across all tensors.
       vec_load_size = std::min(vec_load_size, vec_load_size_i);
