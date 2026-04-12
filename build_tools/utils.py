@@ -341,6 +341,17 @@ def get_frameworks() -> List[str]:
     return _frameworks
 
 
+def setup_mpi_flags(include_dirs: List, cxx_flags: List) -> None:
+    """Add MPI include path and compile definition if NVTE_UB_WITH_MPI is enabled."""
+    if bool(int(os.getenv("NVTE_UB_WITH_MPI", "0"))):
+        assert (
+            os.getenv("MPI_HOME") is not None
+        ), "MPI_HOME=/path/to/mpi must be set when compiling with NVTE_UB_WITH_MPI=1!"
+        mpi_path = Path(os.getenv("MPI_HOME"))
+        include_dirs.append(mpi_path / "include")
+        cxx_flags.append("-DNVTE_UB_WITH_MPI")
+
+
 def copy_common_headers(
     src_dir: Union[Path, str],
     dst_dir: Union[Path, str],
