@@ -29,7 +29,13 @@ class CusolverMpCtx:
 
     def destroy(self) -> None:
         """Destroy the underlying cuSolverMp context."""
-        tex.cusolvermp_ctx_destroy(self._ptr)
+        if self._ptr is not None:
+            tex.cusolvermp_ctx_destroy(self._ptr)
+            self._ptr = None
+
+    def __del__(self) -> Non:
+        # Called when the context is manually destroyed or during Python teardown
+        self.destroy()
 
     def __enter__(self) -> "CusolverMpCtx":
         return self
