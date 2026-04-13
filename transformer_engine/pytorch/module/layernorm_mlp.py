@@ -80,7 +80,7 @@ from ..quantized_tensor import (
     QuantizedTensorStorage,
     Quantizer,
     prepare_for_saving,
-    restore_from_saved,
+    restore_from_func_ctx,
 )
 from ..cpp_extensions import (
     general_gemm,
@@ -234,6 +234,15 @@ class _LayerNormMLP(torch.autograd.Function):
             debug,
             recompute_for_bwd,
         ) = non_tensor_args
+        if fp8:
+            backward_override = FP8GlobalStateManager.get_fp8_recipe().backward_override
+        else:
+            backward_override = None
+        assert backward_override is None, (
+            "NVTE_BACKWARD_OVERRIDE=high_precision/dequantized is not implemented in LayerNormMLP."
+            " Replace LayerNormMLP with LayerNormLinear + Linear to enable"
+            " high_precision/dequantized backward."
+        )
 
         # if grad is enabled and this is not the bwd stage, we must save this so bwd knows which path to take
         if is_grad_enabled and not recompute_for_bwd:
@@ -780,6 +789,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     ctx.fc2_main_grad_func = lambda: fc2_weight.main_grad
 
             ctx.fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
+            ctx.backward_override = backward_override
             ctx.fc1_grad_input_quantizer = fc1_grad_input_quantizer
             ctx.fc1_grad_weight_quantizer = fc1_grad_weight_quantizer
             ctx.fc1_grad_output_quantizer = fc1_grad_output_quantizer
@@ -898,11 +908,7 @@ class _LayerNormMLP(torch.autograd.Function):
     def _recompute(ctx):
         # pylint: disable=missing-function-docstring
 
-        saved_tensors = ctx.saved_tensors
-        tensors = restore_from_saved(ctx.tensor_objects, saved_tensors)
-        # Delete the references to tensor objects once they've been consumed
-        # by the `restore_from_saved` method to construct back the actual tensors.
-        ctx.tensor_objects = None
+        tensors = restore_from_func_ctx(ctx)
 
         if ctx.checkpoint:  # do recomputation from the original args
 
