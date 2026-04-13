@@ -298,9 +298,11 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
     @functools.lru_cache(maxsize=None)
     def grouped_gemm_wgrad_kernel(cls) -> Optional[Callable]:
         """CuTe DSL kernel for grouped GEMM wgrad on SM100+.
-        Returns ``None`` when the cuDNN front-end wgrad API is not
-        available or lacks the required wgrad_tensor/wgrad_ptrs params.
+        Returns ``None`` when the cuDNN front-end package is older than
+        1.23.0
         """
+        if not _nvidia_cudnn_frontend_supports_wgrad():
+            return None
         from cudnn import grouped_gemm_wgrad_wrapper_sm100  # pylint: disable=no-name-in-module
         return grouped_gemm_wgrad_wrapper_sm100
 
