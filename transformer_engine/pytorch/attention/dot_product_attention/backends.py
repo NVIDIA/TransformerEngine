@@ -29,7 +29,7 @@ from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8Quantizer,
     Float8CurrentScalingQuantizer,
 )
-from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
+from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 from transformer_engine.pytorch.quantized_tensor import (
     QuantizedTensorStorage,
     prepare_for_saving,
@@ -1575,7 +1575,6 @@ class FusedAttnFunc(torch.autograd.Function):
 
         aux_ctx_tensors = other_tensors
         original_qkv_layout = ctx.dqkv_layout
-        original_qkv_format, *_ = dpa_utils.get_qkv_format(original_qkv_layout)
 
         if not aux_ctx_tensors[0].is_contiguous():
             aux_ctx_tensors[0] = aux_ctx_tensors[0].contiguous()

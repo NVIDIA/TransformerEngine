@@ -44,7 +44,7 @@ from transformer_engine.pytorch.tensor.float8_tensor import (
 from transformer_engine.pytorch.tensor.float8_tensor import Float8TensorStorage
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
 from transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
-from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
+
 from transformer_engine.pytorch.quantization import get_fp8_te_dtype
 from transformer_engine.pytorch.constants import TE_DType, MXFP8_BLOCK_SCALING_SIZE
 

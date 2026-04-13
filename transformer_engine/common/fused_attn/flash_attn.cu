@@ -199,7 +199,7 @@ __device__ __forceinline__ void copy_row_bytes(const char *__restrict__ src, cha
     memcpy(dst + off, &tmp, 4);
   }
   for (; off + 2 <= D_bytes; off += 2) {
-    unsigned short tmp;
+    uint16_t tmp;
     memcpy(&tmp, src + off, 2);
     memcpy(dst + off, &tmp, 2);
   }
