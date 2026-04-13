@@ -33,7 +33,7 @@ class CusolverMpCtx:
             tex.cusolvermp_ctx_destroy(self._ptr)
             self._ptr = None
 
-    def __del__(self) -> Non:
+    def __del__(self) -> None:
         # Called when the context is manually destroyed or during Python teardown
         self.destroy()
 
