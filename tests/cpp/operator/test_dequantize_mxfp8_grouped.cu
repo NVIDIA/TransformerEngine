@@ -144,7 +144,7 @@ void performTest(const ShapeRepresentation shape_rep, const size_t num_tensors,
   offsets_shape.ndim = 1;
   first_dims_shape.data[0] = num_tensors;
   last_dims_shape.data[0] = num_tensors;
-  offsets_shape.data[0] = num_tensors;
+  offsets_shape.data[0] = num_tensors + 1;
 
   // Data tensors must be 1D (flattened)
   std::vector<size_t> data_1d_shape = {elts_num};

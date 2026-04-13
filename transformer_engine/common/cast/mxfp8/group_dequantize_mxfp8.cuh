@@ -31,13 +31,52 @@ constexpr int MAX_SUPPORTED_TENSOR_DESCRIPTORS = 64;
 __device__ alignas(128) CUtensorMap g_tensor_maps_input[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
 __device__ alignas(128) CUtensorMap g_tensor_maps_output[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
 
-// Reuse helper types and functions from group_quantize_kernel namespace
-using group_quantize_kernel::fence_acquire_tensormap;
-using group_quantize_kernel::get_current_tensor_id;
-using group_quantize_kernel::get_tensor_cols_num;
-using group_quantize_kernel::get_tensor_rows_num;
-using group_quantize_kernel::modify_base_tensor_map;
-using group_quantize_kernel::ShapeRepresentation;
+// Reuse helper types and functions from common namespace
+using common::fence_acquire_tensormap;
+using common::get_tensor_cols_num;
+using common::get_tensor_rows_num;
+using common::modify_base_tensor_map;
+
+// Runtime dispatch wrapper for get_current_tensor_id (common only has template version)
+template <size_t CHUNK_DIM_Y_>
+__device__ __forceinline__ size_t get_current_tensor_id(
+    const ShapeRepresentation shape_rep, const size_t num_tensors, const size_t current_offset,
+    const size_t block_Y, const size_t first_logical_dim, const size_t last_logical_dim,
+    const int64_t *const __restrict__ offsets_ptr) {
+  switch (shape_rep) {
+    case ShapeRepresentation::SAME_BOTH_DIMS:
+      return common::get_current_tensor_id<ShapeRepresentation::SAME_BOTH_DIMS, CHUNK_DIM_Y_>(
+          num_tensors, current_offset, block_Y, first_logical_dim, last_logical_dim, offsets_ptr);
+    case ShapeRepresentation::VARYING_FIRST_DIM:
+      return common::get_current_tensor_id<ShapeRepresentation::VARYING_FIRST_DIM, CHUNK_DIM_Y_>(
+          num_tensors, current_offset, block_Y, first_logical_dim, last_logical_dim, offsets_ptr);
+    case ShapeRepresentation::VARYING_LAST_DIM:
+      return common::get_current_tensor_id<ShapeRepresentation::VARYING_LAST_DIM, CHUNK_DIM_Y_>(
+          num_tensors, current_offset, block_Y, first_logical_dim, last_logical_dim, offsets_ptr);
+    case ShapeRepresentation::VARYING_BOTH_DIMS:
+      return common::get_current_tensor_id<ShapeRepresentation::VARYING_BOTH_DIMS, CHUNK_DIM_Y_>(
+          num_tensors, current_offset, block_Y, first_logical_dim, last_logical_dim, offsets_ptr);
+  }
+  return 0;
+}
+
+// Shared constexpr parameters used by both the kernel and the launch function.
+// Defined in a struct so they are visible in both host and device code.
+struct DequantizeConfig {
+  static constexpr size_t CHUNK_DIM_Y = 128;
+  static constexpr size_t CHUNK_DIM_X = 128;
+  static constexpr size_t THREADS_PER_CHUNK = 128;
+  static constexpr size_t BUFFERS_NUM = 2;
+  static constexpr size_t ELEMS_PER_THREAD = 16;
+  static constexpr size_t BUFFER_DIM_Y = 16;
+  static constexpr size_t BUFFER_DIM_X = CHUNK_DIM_X;
+  static constexpr size_t SHMEM_DIM_Y = BUFFER_DIM_Y;
+  static constexpr size_t SHMEM_DIM_X = BUFFER_DIM_X;
+  static constexpr size_t THREADS_PER_CHUNK_X_ROWWISE = CHUNK_DIM_X / ELEMS_PER_THREAD;
+  static constexpr size_t THREADS_PER_CHUNK_X_COLWISE = CHUNK_DIM_X;
+  static constexpr size_t ITERATIONS = CHUNK_DIM_Y / BUFFER_DIM_Y;
+  static constexpr size_t ELTS_PER_CHUNK = CHUNK_DIM_Y * CHUNK_DIM_X;
+};
 
 template <typename IType, typename OType>
 __global__ void update_tma_descriptors(const __grid_constant__ CUtensorMap base_tensor_map_input,
@@ -59,6 +98,13 @@ __global__ void update_tma_descriptors(const __grid_constant__ CUtensorMap base_
 
   const size_t offset_elts = offsets_ptr[tensor_id];
 
+  // Zero-sized groups: skip TMA descriptor update. The main kernel already returns
+  // early for rows==0 or cols==0, but creating a TMA descriptor with a zero dimension
+  // is invalid and causes CUDA_ERROR_ILLEGAL_ADDRESS.
+  if (rows == 0 || cols == 0) {
+    return;
+  }
+
   if (leading_thread && (tensor_id < num_tensors)) {
     {
       const uintptr_t global_data_ptr = reinterpret_cast<uintptr_t>(input_data_ptr + offset_elts);
@@ -73,7 +119,7 @@ __global__ void update_tma_descriptors(const __grid_constant__ CUtensorMap base_
   }
 }
 
-template <typename IType, typename OType, size_t SCALE_DIM_Y, size_t SCALE_DIM_X>
+template <typename IType, typename OType, bool ROWWISE>
 __global__ void __launch_bounds__(128)
     group_dequantize_mxfp8_kernel(const __grid_constant__ CUtensorMap tensor_map_input_static,
                                   const __grid_constant__ CUtensorMap tensor_map_output_static,
@@ -84,21 +130,22 @@ __global__ void __launch_bounds__(128)
                                   const int64_t *const __restrict__ last_dims_ptr,
                                   const e8m0_t *const __restrict__ scales_ptr) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-  constexpr size_t CHUNK_DIM_Y = 128;
-  constexpr size_t CHUNK_DIM_X = 128;
-  constexpr size_t THREADS_PER_CHUNK = 128;
-  constexpr size_t BUFFERS_NUM = 2;
-  constexpr size_t ELEMS_PER_THREAD = 16;
-  constexpr size_t BUFFER_DIM_Y = 16;
-  constexpr size_t BUFFER_DIM_X = CHUNK_DIM_X;
-  constexpr size_t SHMEM_DIM_Y = BUFFER_DIM_Y;
-  constexpr size_t SHMEM_DIM_X = BUFFER_DIM_X;
-  constexpr size_t THREADS_PER_CHUNK_X_ROWWISE = CHUNK_DIM_X / ELEMS_PER_THREAD;
-  constexpr size_t THREADS_PER_CHUNK_X_COLWISE = CHUNK_DIM_X;
-  constexpr size_t ITERATIONS = CHUNK_DIM_Y / BUFFER_DIM_Y;
-  constexpr size_t ELTS_PER_CHUNK = CHUNK_DIM_Y * CHUNK_DIM_X;
+  constexpr size_t CHUNK_DIM_Y = DequantizeConfig::CHUNK_DIM_Y;
+  constexpr size_t CHUNK_DIM_X = DequantizeConfig::CHUNK_DIM_X;
+  constexpr size_t THREADS_PER_CHUNK = DequantizeConfig::THREADS_PER_CHUNK;
+  constexpr size_t BUFFERS_NUM = DequantizeConfig::BUFFERS_NUM;
+  constexpr size_t ELEMS_PER_THREAD = DequantizeConfig::ELEMS_PER_THREAD;
+  constexpr size_t BUFFER_DIM_Y = DequantizeConfig::BUFFER_DIM_Y;
+  constexpr size_t SHMEM_DIM_Y = DequantizeConfig::SHMEM_DIM_Y;
+  constexpr size_t SHMEM_DIM_X = DequantizeConfig::SHMEM_DIM_X;
+  constexpr size_t THREADS_PER_CHUNK_X_ROWWISE = DequantizeConfig::THREADS_PER_CHUNK_X_ROWWISE;
+  constexpr size_t THREADS_PER_CHUNK_X_COLWISE = DequantizeConfig::THREADS_PER_CHUNK_X_COLWISE;
+  constexpr size_t ITERATIONS = DequantizeConfig::ITERATIONS;
+  constexpr size_t ELTS_PER_CHUNK = DequantizeConfig::ELTS_PER_CHUNK;
 
-  constexpr bool USE_ROWWISE_SCALING = SCALE_DIM_X > 1;
+  constexpr bool USE_ROWWISE_SCALING = ROWWISE;
+  constexpr size_t SCALE_DIM_Y = ROWWISE ? 1 : 32;
+  constexpr size_t SCALE_DIM_X = ROWWISE ? 32 : 1;
 
   constexpr size_t SCALES_ROWWISE_PER_CHUNK_Y = CHUNK_DIM_Y;
   constexpr size_t SCALES_ROWWISE_PER_CHUNK_X = CHUNK_DIM_X / SCALE_DIM_X;
@@ -121,8 +168,9 @@ __global__ void __launch_bounds__(128)
     block_id_Y = blockIdx.x / chunks_X;
     block_id_X = blockIdx.x % chunks_X;
     const size_t block_global_offset = blockIdx.x * ELTS_PER_CHUNK;
-    tensor_id = get_current_tensor_id(shape_rep, num_tensors, block_global_offset, block_id_Y,
-                                      first_logical_dim, last_logical_dim, offsets_ptr);
+    tensor_id =
+        get_current_tensor_id<CHUNK_DIM_Y>(shape_rep, num_tensors, block_global_offset, block_id_Y,
+                                           first_logical_dim, last_logical_dim, offsets_ptr);
   } else if (shape_rep == ShapeRepresentation::VARYING_LAST_DIM) {
     // Virtual 2D grid: DIVUP(R,128) row-tiles x (total_cols/128) col-tiles
     const size_t chunks_X_total = last_logical_dim / CHUNK_DIM_X;
@@ -130,17 +178,18 @@ __global__ void __launch_bounds__(128)
     block_id_Y = blockIdx.x / chunks_X_total;
     // Search using column-based element offset (works with existing binary search)
     const size_t search_offset = col_chunk_global * CHUNK_DIM_X * first_logical_dim;
-    tensor_id = get_current_tensor_id(shape_rep, num_tensors, search_offset, block_id_Y,
-                                      first_logical_dim, last_logical_dim, offsets_ptr);
+    tensor_id =
+        get_current_tensor_id<CHUNK_DIM_Y>(shape_rep, num_tensors, search_offset, block_id_Y,
+                                           first_logical_dim, last_logical_dim, offsets_ptr);
     const size_t tensor_col_start = static_cast<size_t>(offsets_ptr[tensor_id]) / first_logical_dim;
     block_id_X = col_chunk_global - tensor_col_start / CHUNK_DIM_X;
   } else {
     // VARYING_BOTH_DIMS: 1D grid, element-offset-based (both dims 128-aligned)
     const size_t block_global_offset = blockIdx.x * ELTS_PER_CHUNK;
     const size_t chunks_X_for_id = DIVUP(last_logical_dim, CHUNK_DIM_X);
-    tensor_id = get_current_tensor_id(shape_rep, num_tensors, block_global_offset,
-                                      blockIdx.x / chunks_X_for_id, first_logical_dim,
-                                      last_logical_dim, offsets_ptr);
+    tensor_id = get_current_tensor_id<CHUNK_DIM_Y>(shape_rep, num_tensors, block_global_offset,
+                                                   blockIdx.x / chunks_X_for_id, first_logical_dim,
+                                                   last_logical_dim, offsets_ptr);
     const size_t vb_tensor_base = static_cast<size_t>(offsets_ptr[tensor_id]);
     const size_t vb_cols =
         get_tensor_cols_num(tensor_id, shape_rep, last_logical_dim, last_dims_ptr);
@@ -223,14 +272,7 @@ __global__ void __launch_bounds__(128)
 #pragma nv_diag_suppress static_var_with_dynamic_init
   __shared__ alignas(8) uint64_t mbar[ITERATIONS];
 
-  if (is_master_thread) {
-#pragma unroll
-    for (int iter = 0; iter < ITERATIONS; ++iter) {
-      ptx::mbarrier_init(&mbar[iter], THREADS_PER_CHUNK);
-    }
-    ptx::fence_proxy_async_shared_cta();
-  }
-  __syncthreads();
+  initialize_barriers<ITERATIONS, THREADS_PER_CHUNK>(mbar, is_master_thread);
 
   int parity = 0;
   constexpr int iteration_zero = 0;
@@ -267,8 +309,6 @@ __global__ void __launch_bounds__(128)
         ptx::mbarrier_arrive(&mbar[next_iter]);
       }
     }
-
-    ptx::fence_proxy_async_shared_cta();
 
     // Wait for the data to have arrived
     ptx::mbarrier_wait_parity(&mbar[iter], parity);
@@ -326,12 +366,7 @@ __global__ void __launch_bounds__(128)
   ptx::cp_async_bulk_wait_group_read<0>();
   __syncthreads();
 
-  if (is_master_thread) {
-#pragma unroll
-    for (int iter = 0; iter < ITERATIONS; ++iter) {
-      ptx::mbarrier_invalid(&mbar[iter]);
-    }
-  }
+  destroy_barriers<ITERATIONS>(mbar, is_master_thread);
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 }  // namespace group_dequantize_kernel
@@ -339,13 +374,6 @@ __global__ void __launch_bounds__(128)
 inline void group_dequantize(const GroupedTensor *input, GroupedTensor *output,
                              cudaStream_t stream) {
   using namespace group_dequantize_kernel;
-  using group_quantize_kernel::ShapeRepresentation;
-
-  constexpr size_t CHUNK_DIM_Y = 128;
-  constexpr size_t CHUNK_DIM_X = 128;
-  constexpr size_t THREADS_PER_CHUNK = 128;
-  constexpr size_t SHMEM_DIM_Y = 16;
-  constexpr size_t SHMEM_DIM_X = 128;
 
   checkCuDriverContext(stream);
 
@@ -358,6 +386,7 @@ inline void group_dequantize(const GroupedTensor *input, GroupedTensor *output,
 
   NVTE_CHECK(!input->with_gemm_swizzled_scales, "Input must have scales in compact format.");
   NVTE_CHECK(!is_fp8_dtype(output->dtype()), "Output must be in higher precision.");
+  NVTE_CHECK(!is_fp4_dtype(output->dtype()), "Output must not be FP4.");
   NVTE_CHECK(is_fp8_dtype(input->dtype()), "Input must have FP8 type.");
 
   NVTE_CHECK(input->num_tensors == output->num_tensors,
@@ -383,9 +412,11 @@ inline void group_dequantize(const GroupedTensor *input, GroupedTensor *output,
 
   const size_t num_tensors = input->num_tensors;
 
-  // TODO: Make more general
-  const size_t scale_dim_X_rowwise = use_rowwise_scaling ? 32 : 1;
-  const size_t scale_dim_Y_colwise = use_colwise_scaling ? 32 : 1;
+  constexpr size_t CHUNK_DIM_Y = DequantizeConfig::CHUNK_DIM_Y;
+  constexpr size_t CHUNK_DIM_X = DequantizeConfig::CHUNK_DIM_X;
+  constexpr size_t THREADS_PER_CHUNK = DequantizeConfig::THREADS_PER_CHUNK;
+  constexpr size_t SHMEM_DIM_Y = DequantizeConfig::SHMEM_DIM_Y;
+  constexpr size_t SHMEM_DIM_X = DequantizeConfig::SHMEM_DIM_X;
 
   size_t blocks = 0;
   if (is_single_tensor) {
@@ -393,7 +424,7 @@ inline void group_dequantize(const GroupedTensor *input, GroupedTensor *output,
     const size_t blocks_X = DIVUP(last_logical_dim, CHUNK_DIM_X);
     blocks = blocks_Y * blocks_X;
   } else {
-    NVTE_CHECK(num_tensors < MAX_SUPPORTED_TENSOR_DESCRIPTORS,
+    NVTE_CHECK(num_tensors <= MAX_SUPPORTED_TENSOR_DESCRIPTORS,
                "Number of tensors in a group is larger than "
                "the MAX number of supported descriptors (64).");
     NVTE_CHECK(last_logical_dim % CHUNK_DIM_X == 0,
@@ -418,45 +449,42 @@ inline void group_dequantize(const GroupedTensor *input, GroupedTensor *output,
 
   const SimpleTensor &input_data = use_rowwise_scaling ? input->data : input->columnwise_data;
 
-  TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
-      scale_dim_Y_colwise, SCALE_DIM_Y,
-      TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
-          scale_dim_X_rowwise, SCALE_DIM_X,
-          TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
-              input->dtype(), IType,
-              TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
-                  output->dtype(), OType,
+  TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
+      input->dtype(), IType,
+      TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
+          output->dtype(), OType,
 
-                  alignas(64) CUtensorMap tensor_map_input{};
-                  alignas(64) CUtensorMap tensor_map_output{};
+          alignas(64) CUtensorMap tensor_map_input{};
+          alignas(64) CUtensorMap tensor_map_output{};
 
-                  create_2D_tensor_map(tensor_map_input, input_data, first_logical_dim,
-                                       last_logical_dim, SHMEM_DIM_Y, SHMEM_DIM_X, last_logical_dim,
-                                       0, typeToNumBits(input->dtype()));
-                  create_2D_tensor_map(tensor_map_output, output->data, first_logical_dim,
-                                       last_logical_dim, SHMEM_DIM_Y, SHMEM_DIM_X, last_logical_dim,
-                                       0, typeToNumBits(output->dtype()));
+          create_2D_tensor_map(tensor_map_input, input_data, first_logical_dim, last_logical_dim,
+                               SHMEM_DIM_Y, SHMEM_DIM_X, last_logical_dim, 0,
+                               typeToNumBits(input->dtype()));
+          create_2D_tensor_map(tensor_map_output, output->data, first_logical_dim, last_logical_dim,
+                               SHMEM_DIM_Y, SHMEM_DIM_X, last_logical_dim, 0,
+                               typeToNumBits(output->dtype()));
 
-                  // Update tensor descriptors before launching the kernel
-                  if (!is_single_tensor) {
-                    const IType *const input_dptr =
-                        reinterpret_cast<const IType *>(input_data.dptr);
-                    OType *const output_dptr = reinterpret_cast<OType *>(output->data.dptr);
+          // Update tensor descriptors before launching the kernel
+          if (!is_single_tensor) {
+            const IType *const input_dptr = reinterpret_cast<const IType *>(input_data.dptr);
+            OType *const output_dptr = reinterpret_cast<OType *>(output->data.dptr);
 
-                    update_tma_descriptors<IType, OType><<<num_tensors, 32, 0, stream>>>(
-                        tensor_map_input, tensor_map_output, input_dptr, output_dptr, shape_rep,
-                        num_tensors, first_logical_dim, last_logical_dim, offsets_ptr,
-                        first_dims_ptr, last_dims_ptr);
-                  }
+            update_tma_descriptors<IType, OType><<<num_tensors, 32, 0, stream>>>(
+                tensor_map_input, tensor_map_output, input_dptr, output_dptr, shape_rep,
+                num_tensors, first_logical_dim, last_logical_dim, offsets_ptr, first_dims_ptr,
+                last_dims_ptr);
+          }
 
-                  group_dequantize_mxfp8_kernel<IType, OType, SCALE_DIM_Y, SCALE_DIM_X>
-                  <<<grid, block, 0, stream>>>(tensor_map_input, tensor_map_output, shape_rep,
-                                               num_tensors, first_logical_dim, last_logical_dim,
-                                               offsets_ptr, first_dims_ptr, last_dims_ptr,
-                                               scales_ptr););  // NOLINT(*)
-          );                                                   // NOLINT(*)
-      );                                                       // NOLINT(*)
-  );                                                           // NOLINT(*)
+          if (use_rowwise_scaling) {
+            group_dequantize_mxfp8_kernel<IType, OType, true><<<grid, block, 0, stream>>>(
+                tensor_map_input, tensor_map_output, shape_rep, num_tensors, first_logical_dim,
+                last_logical_dim, offsets_ptr, first_dims_ptr, last_dims_ptr, scales_ptr);
+          } else {
+            group_dequantize_mxfp8_kernel<IType, OType, false><<<grid, block, 0, stream>>>(
+                tensor_map_input, tensor_map_output, shape_rep, num_tensors, first_logical_dim,
+                last_logical_dim, offsets_ptr, first_dims_ptr, last_dims_ptr, scales_ptr);
+          });  // NOLINT(*)
+  );           // NOLINT(*)
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
