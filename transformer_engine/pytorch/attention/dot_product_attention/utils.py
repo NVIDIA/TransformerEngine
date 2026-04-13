@@ -2358,14 +2358,11 @@ def mxfp8_pad_and_swizzle_scales(*fp8_tensors):
 
 
 def mxfp8_permute_scale_inv_to_bhsd(*tensors, src_format):
-    """Pad, permute, then swizzle scale_inv of one or more MXFP8Tensors.
+    """Pad, permute, and swizzle _rowwise_scale_inv and _columnwise_scale_inv of a list of MXFP8Tensors.
 
-    Order of operations: pad → permute (src_format → BHSD) → swizzle.
-    Padding before the permute ensures the last dimension is aligned, which
-    can improve memory coalescing inside the permute kernel.
-
-    Uses a single batched ``tex.permute_to_grouped_tensor_fwd`` call regardless
-    of how many tensors are passed (1 for dO, 3 for Q/K/V, etc.).
+    Output tensors are allocated with padding in mind (%4 for rowwise and %128 for columnwise), allowing the
+    permute kernel to select more efficient execution paths. Permute and swizzle are batched, for all tensors
+    in either direction (rowwise or columnwise).
     """
     if src_format in ("bhsd", "htd"):
         outs = [
@@ -2382,17 +2379,9 @@ def mxfp8_permute_scale_inv_to_bhsd(*tensors, src_format):
         return tuple(outs)
 
     # 1+2. FUSED PERMUTE+PAD: permute from src_format to BHSD and pad D in one kernel.
-    rs_4d_list = []
-    for t in tensors:
-        rs = t._rowwise_scale_inv
-        if rs is not None:
-            rs_4d_list.append(rs)
-
-    cs_4d_list = []
-    for t in tensors:
-        cs = t._columnwise_scale_inv
-        if cs is not None:
-            cs_4d_list.append(cs)
+    # Keep Nones so lists stay aligned 1:1 with *tensors.
+    rs_list = [t._rowwise_scale_inv for t in tensors]
+    cs_list = [t._columnwise_scale_inv for t in tensors]
 
     def _align_up(x, a):
         return ((x + a - 1) // a) * a
@@ -2405,70 +2394,42 @@ def mxfp8_permute_scale_inv_to_bhsd(*tensors, src_format):
             B, S, H, _ = src_4d.shape
         return (B, H, S, d_pad)
 
-    rs_out_list = []
-    cs_out_list = []
-    total_numel = 0
-
-    if rs_4d_list:
-        d_qk_rs_pad = _align_up(rs_4d_list[0].shape[-1], 4)
-        d_v_rs_pad = _align_up(rs_4d_list[-1].shape[-1], 4) if len(rs_4d_list) >= 2 else d_qk_rs_pad
-        for i, rs in enumerate(rs_4d_list):
-            d_pad = d_v_rs_pad if (i == len(rs_4d_list) - 1 and len(rs_4d_list) >= 3) else d_qk_rs_pad
-            shape = _bhsd_shape(rs, src_format, d_pad)
+    def _build_outputs(scale_list, alignment):
+        """Pre-allocate BHSD output tensors from a combined buffer, None where input is None."""
+        entries = []
+        total = 0
+        for s in scale_list:
+            if s is None:
+                entries.append(None)
+                continue
+            d_pad = _align_up(s.shape[-1], alignment)
+            shape = _bhsd_shape(s, src_format, d_pad)
             numel = 1
-            for s in shape:
-                numel *= s
-            rs_out_list.append((total_numel, numel, shape))
-            total_numel += numel
+            for dim in shape:
+                numel *= dim
+            entries.append((total, numel, shape))
+            total += numel
+        if total == 0:
+            return [None] * len(scale_list)
+        device = next(s for s in scale_list if s is not None).device
+        buf = torch.empty(total, dtype=torch.uint8, device=device)
+        return [buf[e[0]:e[0] + e[1]].view(e[2]) if e is not None else None
+                for e in entries]
 
-    if cs_4d_list:
-        d_qk_cs_pad = _align_up(cs_4d_list[0].shape[-1], 128)
-        d_v_cs_pad = _align_up(cs_4d_list[-1].shape[-1], 128) if len(cs_4d_list) >= 2 else d_qk_cs_pad
-        for i, cs in enumerate(cs_4d_list):
-            d_pad = d_v_cs_pad if (i == len(cs_4d_list) - 1 and len(cs_4d_list) >= 3) else d_qk_cs_pad
-            shape = _bhsd_shape(cs, src_format, d_pad)
-            numel = 1
-            for s in shape:
-                numel *= s
-            cs_out_list.append((total_numel, numel, shape))
-            total_numel += numel
+    rs_outs = _build_outputs(rs_list, 4)
+    cs_outs = _build_outputs(cs_list, 128)
 
-    combined_buf = torch.empty(total_numel, dtype=torch.uint8,
-                               device=tensors[0]._rowwise_scale_inv.device) if total_numel > 0 else None
-
-    def _slice_outputs(out_list):
-        """Slice the combined buffer into 4D output tensors."""
-        return [combined_buf[offset : offset + numel].view(shape)
-                for offset, numel, shape in out_list]
-
-    rs_permuted = None
-    if rs_4d_list:
-        rs_outs = _slice_outputs(rs_out_list)
-        rs_permuted = tex.permute_to_grouped_tensor_fwd(
-            *rs_4d_list, original_format=src_format,
-            d_qk_pad=d_qk_rs_pad, d_v_pad=d_v_rs_pad,
-            q_out=rs_outs[0],
-            k_out=rs_outs[1] if len(rs_outs) >= 3 else None,
-            v_out=rs_outs[2] if len(rs_outs) >= 3 else None,
-        )
-    rs_d_scales = [rp.shape[-1] for rp in rs_permuted] if rs_permuted else []
-
-    cs_permuted = None
-    if cs_4d_list:
-        cs_outs = _slice_outputs(cs_out_list)
-        cs_permuted = tex.permute_to_grouped_tensor_fwd(
-            *cs_4d_list, original_format=src_format,
-            d_qk_pad=d_qk_cs_pad, d_v_pad=d_v_cs_pad,
-            q_out=cs_outs[0],
-            k_out=cs_outs[1] if len(cs_outs) >= 3 else None,
-            v_out=cs_outs[2] if len(cs_outs) >= 3 else None,
-        )
-    cs_d_scales = [cp.shape[-1] for cp in cs_permuted] if cs_permuted else []
+    rs_permuted = tex.multi_tensor_permute_to_grouped_tensor_fwd(
+        rs_list, original_format=src_format, outputs=rs_outs,
+    )
+    cs_permuted = tex.multi_tensor_permute_to_grouped_tensor_fwd(
+        cs_list, original_format=src_format, outputs=cs_outs,
+    )
 
     outs = []
-    for i, (t, rp, rd, cp, cd) in enumerate(zip(tensors, rs_permuted, rs_d_scales, cs_permuted, cs_d_scales)):
-        rp = rp.view(-1, rd) if rd is not None else None
-        cp = cp.view(-1, cd) if cd is not None else None
+    for t, rp, cp in zip(tensors, rs_permuted, cs_permuted):
+        rp = rp.view(-1, rp.shape[-1]) if rp is not None else None
+        cp = cp.view(-1, cp.shape[-1]) if cp is not None else None
         outs.append(
             MXFP8Tensor(
                 shape=t.shape, dtype=t.dtype,
@@ -2631,7 +2592,9 @@ def combine_and_quantize(
             # Permute f16 data to BHSD, then quantize with swizzle
             # Prefer the fused custom kernel; fall back to pytorch if unsupported
             if qkv_layout in ("bshd_bshd_bshd", "sbhd_sbhd_sbhd") and q.dim() == 4:
-                q, k, v = tex.permute_to_grouped_tensor_fwd(q, k, v, original_format=q_format)
+                q, k, v = tex.multi_tensor_permute_to_grouped_tensor_fwd(
+                    [q, k, v], original_format=q_format,
+                )
             else:
                 q = permute_to_grouped_tensor_pytorch(q, q_format)
                 k = permute_to_grouped_tensor_pytorch(k, kv_format)

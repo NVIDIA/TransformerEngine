@@ -115,16 +115,12 @@ std::vector<py::object> fused_attn_bwd(
 at::Tensor fa_prepare_fwd(at::Tensor qkvi);
 at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v);
 
-std::vector<at::Tensor> permute_to_grouped_tensor_fwd(
-    at::Tensor query, std::optional<at::Tensor> key, std::optional<at::Tensor> value,
-    const std::string &original_format, int64_t d_qk_pad = 0, int64_t d_v_pad = 0,
-    std::optional<at::Tensor> q_out = std::nullopt,
-    std::optional<at::Tensor> k_out = std::nullopt,
-    std::optional<at::Tensor> v_out = std::nullopt);
-std::vector<at::Tensor> permute_to_grouped_tensor_bwd(
-    at::Tensor query_grad, std::optional<at::Tensor> key_grad,
-    std::optional<at::Tensor> value_grad, const std::string &original_format,
-    int64_t d_qk_out = 0, int64_t d_v_out = 0);
+std::vector<std::optional<at::Tensor>> multi_tensor_permute_to_grouped_tensor_fwd(
+    std::vector<std::optional<at::Tensor>> inputs, const std::string &original_format,
+    std::vector<std::optional<at::Tensor>> outputs = {});
+std::vector<std::optional<at::Tensor>> multi_tensor_permute_to_grouped_tensor_bwd(
+    std::vector<std::optional<at::Tensor>> inputs, const std::string &original_format,
+    std::vector<std::optional<at::Tensor>> outputs = {});
 
 std::vector<at::Tensor> multi_tensor_pad_last_dim(std::vector<at::Tensor> inputs, int64_t alignment);
 

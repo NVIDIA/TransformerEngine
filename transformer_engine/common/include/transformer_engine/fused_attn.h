@@ -614,43 +614,37 @@ void nvte_prepare_flash_attn_fwd(NVTETensor qkvi, NVTETensor qkv, cudaStream_t s
 void nvte_prepare_flash_attn_bwd(NVTETensor q, NVTETensor k, NVTETensor v, NVTETensor qkv,
                                  cudaStream_t stream);
 
-/*!  \brief Permute Q, K, V to grouped tensors (BSHD/SBHD → BHSD).
+/*!  \brief Permute multiple tensors from BSHD/SBHD to BHSD.
  *
- *  When num_tensors == 1, only q/q_out are used (k/v/k_out/v_out are ignored).
+ *  Each input tensor is 4D in BSHD or SBHD layout, and the corresponding output tensor
+ *  is 4D in BHSD layout. Output tensors may be pre-allocated and have a larger D dimension.
  *
- *  \param[in]     q                Query tensor (or the single tensor).
- *  \param[in]     k                Key tensor (ignored when num_tensors == 1).
- *  \param[in]     v                Value tensor (ignored when num_tensors == 1).
- *  \param[out]    q_out            Output query tensor.
- *  \param[out]    k_out            Output key tensor (ignored when num_tensors == 1).
- *  \param[out]    v_out            Output value tensor (ignored when num_tensors == 1).
+ *  \param[in]     inputs           List of input tensors.
+ *  \param[out]    outputs          List of output tensors.
+ *  \param[in]     num_tensors      Number of tensors in the list.
  *  \param[in]     original_format  Original QKV format (NVTE_BSHD or NVTE_SBHD).
- *  \param[in]     num_tensors      Number of tensors to permute (1 or 3).
  *  \param[in]     stream           CUDA stream.
  */
-void nvte_permute_to_grouped_tensor_fwd(NVTETensor q, NVTETensor k, NVTETensor v, NVTETensor q_out,
-                                        NVTETensor k_out, NVTETensor v_out,
-                                        NVTE_QKV_Format original_format, size_t num_tensors,
-                                        cudaStream_t stream);
+void nvte_multi_tensor_permute_to_grouped_tensor_fwd(NVTETensor *inputs, NVTETensor *outputs,
+                                                     size_t num_tensors,
+                                                     NVTE_QKV_Format original_format,
+                                                     cudaStream_t stream);
 
-/*!  \brief Permute Q, K, V back to original format (BHSD → BSHD/SBHD).
+/*!  \brief Permute multiple tensors from BHSD back to BSHD/SBHD.
  *
- *  When num_tensors == 1, only grad_q/q are used (others are ignored).
+ *  Each input tensor is 4D in BHSD layout, and the corresponding output tensor
+ *  is 4D in BSHD or SBHD layout. Output tensors may be pre-allocated and have a smaller D dimension.
  *
- *  \param[in]     grad_q           Gradient of query tensor.
- *  \param[in]     grad_k           Gradient of key tensor (ignored when num_tensors == 1).
- *  \param[in]     grad_v           Gradient of value tensor (ignored when num_tensors == 1).
- *  \param[out]    q                Original query tensor.
- *  \param[out]    k                Original key tensor (ignored when num_tensors == 1).
- *  \param[out]    v                Original value tensor (ignored when num_tensors == 1).
+ *  \param[in]     inputs           List of input tensors.
+ *  \param[out]    outputs          List of output tensors.
+ *  \param[in]     num_tensors      Number of tensors in the list.
  *  \param[in]     original_format  Original QKV format (NVTE_BSHD or NVTE_SBHD).
- *  \param[in]     num_tensors      Number of tensors to permute (1 or 3).
  *  \param[in]     stream           CUDA stream.
  */
-void nvte_permute_to_grouped_tensor_bwd(NVTETensor grad_q, NVTETensor grad_k, NVTETensor grad_v,
-                                        NVTETensor q, NVTETensor k, NVTETensor v,
-                                        NVTE_QKV_Format original_format, size_t num_tensors,
-                                        cudaStream_t stream);
+void nvte_multi_tensor_permute_to_grouped_tensor_bwd(NVTETensor *inputs, NVTETensor *outputs,
+                                                     size_t num_tensors,
+                                                     NVTE_QKV_Format original_format,
+                                                     cudaStream_t stream);
 
 /*!  \brief Pad the last dimension of multiple 2D tensors with zeros in one kernel launch.
  *

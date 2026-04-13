@@ -155,12 +155,28 @@ void prepare_flash_attn_bwd(Tensor q, Tensor k, Tensor v, Tensor qkv, cudaStream
 }  // namespace flash_attention
 
 // ============================================================================
-// permute_to_grouped_tensor: BSHD/SBHD ↔ BHSD permutation
+// multi_tensor_permute_to_grouped_tensor: BSHD/SBHD ↔ BHSD permutation
 // ============================================================================
 
-namespace permute_to_grouped_tensor {
+namespace multi_tensor_permute_to_grouped_tensor {
 
 using flash_attention::Vec;
+
+constexpr int kMaxPermuteTensors = 16;
+
+struct PermuteSlot {
+  const void *input;
+  void *output;
+  size_t S, H, D_in, D_out;
+};
+
+struct PermuteParams {
+  PermuteSlot slots[kMaxPermuteTensors];
+};
+
+struct TmaMapParams {
+  CUtensorMap maps[kMaxPermuteTensors];
+};
 
 // ---------- fallback_not_vec_aligned: row-copy helper (D is small / misaligned) ----------
 
@@ -207,18 +223,14 @@ constexpr int TRANSPOSE_WARPS = TRANSPOSE_BLOCK / 32;   // 8
 template <typename T, bool kIsSbhd>
 __launch_bounds__(TRANSPOSE_BLOCK) __global__
     void permute_to_grouped_tensor_fwd_fallback_not_vec_aligned_kernel(
-        const T *__restrict__ q_in, const T *__restrict__ k_in, const T *__restrict__ v_in,
-        T *__restrict__ q_out, T *__restrict__ k_out, T *__restrict__ v_out,
-        size_t b, size_t s_q, size_t h_q, size_t d_qk, size_t d_qk_out,
-        size_t s_kv, size_t h_kv, size_t d_v, size_t d_v_out,
-        unsigned int s_tiles) {
-  const int which = blockIdx.z;
-  const T *__restrict__ in = which == 0 ? q_in : (which == 1 ? k_in : v_in);
-  T *__restrict__ out           = which == 0 ? q_out : (which == 1 ? k_out : v_out);
-  const size_t S     = which == 0 ? s_q  : s_kv;
-  const size_t H     = which == 0 ? h_q  : h_kv;
-  const size_t D     = which == 0 ? d_qk : (which == 1 ? d_qk : d_v);
-  const size_t D_out = which == 0 ? d_qk_out : (which == 1 ? d_qk_out : d_v_out);
+        PermuteParams params, size_t b, unsigned int s_tiles) {
+  const auto &slot = params.slots[blockIdx.z];
+  const T *__restrict__ in = reinterpret_cast<const T *>(slot.input);
+  T *__restrict__ out = reinterpret_cast<T *>(slot.output);
+  const size_t S     = slot.S;
+  const size_t H     = slot.H;
+  const size_t D     = slot.D_in;
+  const size_t D_out = slot.D_out;
   const size_t D_bytes = D * sizeof(T);
   const size_t D_out_bytes = D_out * sizeof(T);
   const size_t D_smem_pad = (D_bytes + 3u) & ~size_t(3);
@@ -272,18 +284,14 @@ __launch_bounds__(TRANSPOSE_BLOCK) __global__
 template <typename T, bool kIsSbhd>
 __launch_bounds__(TRANSPOSE_BLOCK) __global__
     void permute_to_grouped_tensor_bwd_fallback_not_vec_aligned_kernel(
-        const T *__restrict__ grad_q, const T *__restrict__ grad_k, const T *__restrict__ grad_v,
-        T *__restrict__ q_out, T *__restrict__ k_out, T *__restrict__ v_out,
-        size_t b, size_t s_q, size_t h_q, size_t d_qk, size_t d_qk_in,
-        size_t s_kv, size_t h_kv, size_t d_v, size_t d_v_in,
-        unsigned int s_tiles) {
-  const int which = blockIdx.z;
-  const T *__restrict__ in = which == 0 ? grad_q : (which == 1 ? grad_k : grad_v);
-  T *__restrict__ out           = which == 0 ? q_out : (which == 1 ? k_out : v_out);
-  const size_t S     = which == 0 ? s_q  : s_kv;
-  const size_t H     = which == 0 ? h_q  : h_kv;
-  const size_t D_write = which == 0 ? d_qk : (which == 1 ? d_qk : d_v);
-  const size_t D_read  = which == 0 ? d_qk_in : (which == 1 ? d_qk_in : d_v_in);
+        PermuteParams params, size_t b, unsigned int s_tiles) {
+  const auto &slot = params.slots[blockIdx.z];
+  const T *__restrict__ in = reinterpret_cast<const T *>(slot.input);
+  T *__restrict__ out = reinterpret_cast<T *>(slot.output);
+  const size_t S     = slot.S;
+  const size_t H     = slot.H;
+  const size_t D_write = slot.D_out;
+  const size_t D_read  = slot.D_in;
   const size_t D_data_bytes = D_write * sizeof(T);
   const size_t D_smem_pad = (D_data_bytes + 3u) & ~size_t(3);
 
@@ -399,27 +407,19 @@ __device__ __forceinline__ void permute_bwd_vec_loop(
 template <typename T, bool kIsSbhd>
 __launch_bounds__(fallback_permute_threads) __global__
     void permute_to_grouped_tensor_fwd_fallback_vec_aligned_kernel(
-        const T *__restrict__ q_in, const T *__restrict__ k_in, const T *__restrict__ v_in,
-        T *__restrict__ q_out, T *__restrict__ k_out, T *__restrict__ v_out, size_t b, size_t s_q,
-        size_t h_q, size_t d_qk, size_t d_qk_out, size_t s_kv, size_t h_kv, size_t d_v,
-        size_t d_v_out, unsigned int permute_s_splits) {
-  const int which = blockIdx.z;
-  const T *__restrict__ in = which == 0 ? q_in : (which == 1 ? k_in : v_in);
-  T *__restrict__ out = which == 0 ? q_out : (which == 1 ? k_out : v_out);
-  const size_t S = which == 0 ? s_q : s_kv;
-  const size_t H = which == 0 ? h_q : h_kv;
-  const size_t D = which == 0 ? d_qk : (which == 1 ? d_qk : d_v);
-  const size_t D_out = which == 0 ? d_qk_out : (which == 1 ? d_qk_out : d_v_out);
+        PermuteParams params, size_t b, unsigned int permute_s_splits, size_t h_grid) {
+  const auto &slot = params.slots[blockIdx.z];
+  const T *__restrict__ in = reinterpret_cast<const T *>(slot.input);
+  T *__restrict__ out = reinterpret_cast<T *>(slot.output);
+  const size_t S = slot.S;
+  const size_t H = slot.H;
+  const size_t D = slot.D_in;
+  const size_t D_out = slot.D_out;
 
-  const size_t h_grid = h_q > h_kv ? h_q : h_kv;
   const size_t b_i = static_cast<size_t>(blockIdx.x) / h_grid;
   const size_t h_i = static_cast<size_t>(blockIdx.x) % h_grid;
   if (b_i >= b) return;
-  if (which == 0) {
-    if (h_i >= h_q) return;
-  } else {
-    if (h_i >= h_kv) return;
-  }
+  if (h_i >= H) return;
 
   const unsigned int s_part = blockIdx.y;
   const size_t s_begin =
@@ -453,27 +453,19 @@ __launch_bounds__(fallback_permute_threads) __global__
 template <typename T, bool kIsSbhd>
 __launch_bounds__(fallback_permute_threads) __global__
     void permute_to_grouped_tensor_bwd_fallback_vec_aligned_kernel(
-        const T *__restrict__ grad_q, const T *__restrict__ grad_k, const T *__restrict__ grad_v,
-        T *__restrict__ q_out, T *__restrict__ k_out, T *__restrict__ v_out, size_t b, size_t s_q,
-        size_t h_q, size_t d_qk, size_t d_qk_in, size_t s_kv, size_t h_kv, size_t d_v,
-        size_t d_v_in, unsigned int permute_s_splits) {
-  const int which = blockIdx.z;
-  const T *__restrict__ in = which == 0 ? grad_q : (which == 1 ? grad_k : grad_v);
-  T *__restrict__ out = which == 0 ? q_out : (which == 1 ? k_out : v_out);
-  const size_t S = which == 0 ? s_q : s_kv;
-  const size_t H = which == 0 ? h_q : h_kv;
-  const size_t D_write = which == 0 ? d_qk : (which == 1 ? d_qk : d_v);
-  const size_t D_read  = which == 0 ? d_qk_in : (which == 1 ? d_qk_in : d_v_in);
+        PermuteParams params, size_t b, unsigned int permute_s_splits, size_t h_grid) {
+  const auto &slot = params.slots[blockIdx.z];
+  const T *__restrict__ in = reinterpret_cast<const T *>(slot.input);
+  T *__restrict__ out = reinterpret_cast<T *>(slot.output);
+  const size_t S = slot.S;
+  const size_t H = slot.H;
+  const size_t D_write = slot.D_out;
+  const size_t D_read  = slot.D_in;
 
-  const size_t h_grid = h_q > h_kv ? h_q : h_kv;
   const size_t b_i = static_cast<size_t>(blockIdx.x) / h_grid;
   const size_t h_i = static_cast<size_t>(blockIdx.x) % h_grid;
   if (b_i >= b) return;
-  if (which == 0) {
-    if (h_i >= h_q) return;
-  } else {
-    if (h_i >= h_kv) return;
-  }
+  if (h_i >= H) return;
 
   const unsigned int s_part = blockIdx.y;
   const size_t s_begin =
@@ -643,35 +635,24 @@ __device__ __forceinline__ void st_global_cs_uint4(uint4 *ptr, uint4 val) {
 
 template <typename T, bool kIsBshdBshdBshd>
 __launch_bounds__(tma_permute_threads) __global__
-    void permute_to_grouped_tensor_fwd_kernel(const __grid_constant__ CUtensorMap tma_q_in,
-                                              const __grid_constant__ CUtensorMap tma_k_in,
-                                              const __grid_constant__ CUtensorMap tma_v_in,
-                                              T *__restrict__ q_out, T *__restrict__ k_out,
-                                              T *__restrict__ v_out, size_t b, size_t s_q,
-                                              size_t h_q, size_t d_qk, size_t d_qk_out,
-                                              size_t s_kv, size_t h_kv,
-                                              size_t d_v, size_t d_v_out,
-                                              unsigned int permute_s_splits,
-                                              size_t s_tile_size) {
+    void permute_to_grouped_tensor_fwd_kernel(
+        const __grid_constant__ TmaMapParams tma_maps,
+        PermuteParams params, size_t b, size_t h_grid,
+        unsigned int permute_s_splits, size_t s_tile_size) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-  const int which = blockIdx.z;
-  const CUtensorMap *tma_in = which == 0 ? &tma_q_in : (which == 1 ? &tma_k_in : &tma_v_in);
-  T *__restrict__ tensor_out = which == 0 ? q_out : (which == 1 ? k_out : v_out);
-  const size_t Sdim = which == 0 ? s_q : s_kv;
-  const size_t Hdim = which == 0 ? h_q : h_kv;
-  const size_t Ddim = which == 0 ? d_qk : (which == 1 ? d_qk : d_v);
-  const size_t Ddim_out = which == 0 ? d_qk_out : (which == 1 ? d_qk_out : d_v_out);
+  const auto &slot = params.slots[blockIdx.z];
+  const CUtensorMap *tma_in = &tma_maps.maps[blockIdx.z];
+  T *__restrict__ tensor_out = reinterpret_cast<T *>(slot.output);
+  const size_t Sdim = slot.S;
+  const size_t Hdim = slot.H;
+  const size_t Ddim = slot.D_in;
+  const size_t Ddim_out = slot.D_out;
 
-  const size_t h_grid = h_q > h_kv ? h_q : h_kv;
   const size_t b_i = static_cast<size_t>(blockIdx.x) / h_grid;
   const size_t h_i = static_cast<size_t>(blockIdx.x) % h_grid;
 
   if (b_i >= b) return;
-  if (which == 0) {
-    if (h_i >= h_q) return;
-  } else {
-    if (h_i >= h_kv) return;
-  }
+  if (h_i >= Hdim) return;
 
   const unsigned int s_part = blockIdx.y;
   const size_t s_begin =
@@ -753,31 +734,23 @@ __launch_bounds__(tma_permute_threads) __global__
 
 template <typename T, bool kIsBshdBshdBshd>
 __launch_bounds__(tma_permute_threads) __global__ void permute_to_grouped_tensor_bwd_kernel(
-    const T *__restrict__ grad_q, const T *__restrict__ grad_k, const T *__restrict__ grad_v,
-    const __grid_constant__ CUtensorMap tma_q_out, const __grid_constant__ CUtensorMap tma_k_out,
-    const __grid_constant__ CUtensorMap tma_v_out, size_t b, size_t s_q, size_t h_q,
-    size_t d_qk, size_t d_qk_in,
-    size_t s_kv, size_t h_kv, size_t d_v, size_t d_v_in,
+    const __grid_constant__ TmaMapParams tma_maps,
+    PermuteParams params, size_t b, size_t h_grid,
     unsigned int permute_s_splits, size_t s_tile_size) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-  const int which = blockIdx.z;
-  const T *__restrict__ tensor_in = which == 0 ? grad_q : (which == 1 ? grad_k : grad_v);
-  const CUtensorMap *tma_out = which == 0 ? &tma_q_out : (which == 1 ? &tma_k_out : &tma_v_out);
-  const size_t Sdim = which == 0 ? s_q : s_kv;
-  const size_t Hdim = which == 0 ? h_q : h_kv;
-  const size_t Ddim = which == 0 ? d_qk : (which == 1 ? d_qk : d_v);
-  const size_t Ddim_in = which == 0 ? d_qk_in : (which == 1 ? d_qk_in : d_v_in);
+  const auto &slot = params.slots[blockIdx.z];
+  const T *__restrict__ tensor_in = reinterpret_cast<const T *>(slot.input);
+  const CUtensorMap *tma_out = &tma_maps.maps[blockIdx.z];
+  const size_t Sdim = slot.S;
+  const size_t Hdim = slot.H;
+  const size_t Ddim = slot.D_out;
+  const size_t Ddim_in = slot.D_in;
 
-  const size_t h_grid = h_q > h_kv ? h_q : h_kv;
   const size_t b_i = static_cast<size_t>(blockIdx.x) / h_grid;
   const size_t h_i = static_cast<size_t>(blockIdx.x) % h_grid;
 
   if (b_i >= b) return;
-  if (which == 0) {
-    if (h_i >= h_q) return;
-  } else {
-    if (h_i >= h_kv) return;
-  }
+  if (h_i >= Hdim) return;
 
   const unsigned int s_part = blockIdx.y;
   const size_t s_begin =
@@ -846,340 +819,295 @@ static void create_strided_tensor_map(CUtensorMap &map, void *ptr, DType dtype, 
   }
 }
 
-// ---- check if TMA path is feasible ----
+void multi_tensor_permute_to_grouped_tensor_fwd(Tensor *inputs, Tensor *outputs,
+                                                size_t num_tensors,
+                                                NVTE_QKV_Format original_format,
+                                                cudaStream_t stream) {
+  using namespace transformer_engine;
+  if (num_tensors == 0) return;
+  NVTE_CHECK(num_tensors <= static_cast<size_t>(kMaxPermuteTensors),
+             "num_tensors must be in [1, ", kMaxPermuteTensors, "], got ", num_tensors, ".");
 
-static bool can_use_tma_permute(DType dtype, size_t d_qk, size_t d_v) {
-  const int sm = cuda::sm_arch(cuda::current_device());
-  if (sm < 90) return false;
-
-  switch (dtype) {
-    case DType::kFloat16:
-    case DType::kBFloat16:
-    case DType::kFloat8E4M3:
-    case DType::kFloat8E5M2:
-    case DType::kFloat8E8M0:
-    case DType::kByte:
-      break;
-    default:
-      return false;
-  }
+  const bool is_bshd = (original_format == NVTE_QKV_Format::NVTE_BSHD);
+  const DType dtype = inputs[0].dtype();
   const size_t elem_size = typeToSize(dtype);
-  const size_t inner_qk = d_qk * elem_size;
-  const size_t inner_v = d_v * elem_size;
-  // hardware requirements for TMA
-  if (inner_qk < 32 || inner_v < 32) return false;
-  if (inner_qk % 16 != 0 || inner_v % 16 != 0) return false;
-  return true;
-}
+  const size_t b = outputs[0].shape()[0];
 
+  PermuteParams params{};
+  size_t s_max = 0, h_max = 0, s_min = SIZE_MAX;
+  size_t d_in_max = 0, d_out_max = 0;
+  bool any_not_vec_aligned = false;
+  bool all_tma_ok = true;
 
-void permute_to_grouped_tensor_fwd(Tensor q, Tensor k, Tensor v, Tensor q_out, Tensor k_out,
-                                   Tensor v_out, NVTE_QKV_Format original_format,
-                                   size_t num_tensors, cudaStream_t stream) {
-  using namespace transformer_engine;
-  const size_t b = q_out.shape()[0];
-  const size_t h_q = q_out.shape()[1];
-  const size_t s_q = q_out.shape()[2];
-  const size_t h_kv = k_out.shape()[1];
-  const size_t s_kv = k_out.shape()[2];
+  for (size_t i = 0; i < num_tensors; ++i) {
+    const size_t H = outputs[i].shape()[1];
+    const size_t S = outputs[i].shape()[2];
+    const size_t D_in = inputs[i].shape()[inputs[i].shape().size() - 1];
+    const size_t D_out = outputs[i].shape()[3];
+    params.slots[i] = {inputs[i].data.dptr, outputs[i].data.dptr, S, H, D_in, D_out};
+    s_max = std::max(s_max, S);
+    h_max = std::max(h_max, H);
+    s_min = std::min(s_min, S);
+    d_in_max = std::max(d_in_max, D_in);
+    d_out_max = std::max(d_out_max, D_out);
+    if ((D_in * elem_size) % 4 != 0) any_not_vec_aligned = true;
+    const size_t inner = D_in * elem_size;
+    if (inner < 32 || inner % 16 != 0) all_tma_ok = false;
+  }
 
-  const size_t d_qk = q.shape()[3];
-  const size_t d_v  = v.shape()[3];
-  const size_t d_qk_out = q_out.shape()[3];
-  const size_t d_v_out  = v_out.shape()[3];
+  if (all_tma_ok) {
+    const int sm = cuda::sm_arch(cuda::current_device());
+    if (sm < 90) {
+      all_tma_ok = false;
+    } else {
+      switch (dtype) {
+        case DType::kFloat16: case DType::kBFloat16:
+        case DType::kFloat8E4M3: case DType::kFloat8E5M2:
+        case DType::kFloat8E8M0: case DType::kByte:
+          break;
+        default:
+          all_tma_ok = false;
+      }
+    }
+  }
 
-  const bool is_bshd = (original_format == NVTE_QKV_Format::NVTE_BSHD);
+  // TMA path
+  if (all_tma_ok) {
+    const size_t s_tile = std::min(static_cast<size_t>(tma_permute_s_tile_default), s_min);
+    bool tma_aligned = true;
+    for (size_t i = 0; i < num_tensors && tma_aligned; ++i) {
+      if ((s_tile * params.slots[i].D_in * elem_size) % sizeof(uint4) != 0)
+        tma_aligned = false;
+    }
 
-  if (!can_use_tma_permute(q.dtype(), d_qk, d_v)) {
-    const size_t elem_size = typeToSize(q.dtype());
-    const size_t d_qk_bytes = d_qk * elem_size;
-    const size_t d_v_bytes  = d_v  * elem_size;
-    const bool needs_transpose = (d_qk_bytes % 4 != 0) || (d_v_bytes % 4 != 0);
+    if (tma_aligned) {
+      TmaMapParams tma_maps{};
+      for (size_t i = 0; i < num_tensors; ++i) {
+        const auto &slot = params.slots[i];
+        create_strided_tensor_map(tma_maps.maps[i], const_cast<void *>(slot.input),
+                                  dtype, b, slot.S, slot.H, slot.D_in, s_tile, is_bshd);
+      }
 
-    if (needs_transpose) {
-      const size_t s_max = std::max(s_q, s_kv);
-      const size_t h_max = std::max(h_q, h_kv);
-      const unsigned int st = static_cast<unsigned int>(
-          (s_max + TRANSPOSE_TILE - 1) / TRANSPOSE_TILE);
-      const unsigned int ht = static_cast<unsigned int>(
-          (h_max + TRANSPOSE_TILE - 1) / TRANSPOSE_TILE);
-      dim3 grid(static_cast<unsigned int>(b) * st, ht,
+      const unsigned int permute_s_splits =
+          std::max(1u, static_cast<unsigned int>(s_min / s_tile));
+      dim3 grid(static_cast<unsigned int>(b * h_max), permute_s_splits,
                 static_cast<unsigned int>(num_tensors));
-      const size_t d_max = std::max(d_qk, d_v);
-      const size_t D_pad = (d_max * elem_size + 3u) & ~size_t(3);
-      const size_t smem_bytes =
-          static_cast<size_t>(TRANSPOSE_TILE) *
-          (static_cast<size_t>(TRANSPOSE_TILE) * D_pad + 4);
+      const size_t smem_bytes = s_tile * d_in_max * elem_size;
 
       if (is_bshd) {
         TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
-            q.dtype(), dtype,
-            permute_to_grouped_tensor_fwd_fallback_not_vec_aligned_kernel<dtype, false>
-                <<<grid, TRANSPOSE_BLOCK, smem_bytes, stream>>>(
-                    reinterpret_cast<const dtype *>(q.data.dptr),
-                    reinterpret_cast<const dtype *>(k.data.dptr),
-                    reinterpret_cast<const dtype *>(v.data.dptr),
-                    reinterpret_cast<dtype *>(q_out.data.dptr),
-                    reinterpret_cast<dtype *>(k_out.data.dptr),
-                    reinterpret_cast<dtype *>(v_out.data.dptr),
-                    b, s_q, h_q, d_qk, d_qk_out, s_kv, h_kv, d_v, d_v_out, st););
+            dtype, dtype_t,
+            auto kernel = permute_to_grouped_tensor_fwd_kernel<dtype_t, true>;
+            NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+                kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes));
+            kernel<<<grid, tma_permute_threads, smem_bytes, stream>>>(
+                tma_maps, params, b, h_max, permute_s_splits, s_tile););
       } else {
         TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
-            q.dtype(), dtype,
-            permute_to_grouped_tensor_fwd_fallback_not_vec_aligned_kernel<dtype, true>
-                <<<grid, TRANSPOSE_BLOCK, smem_bytes, stream>>>(
-                    reinterpret_cast<const dtype *>(q.data.dptr),
-                    reinterpret_cast<const dtype *>(k.data.dptr),
-                    reinterpret_cast<const dtype *>(v.data.dptr),
-                    reinterpret_cast<dtype *>(q_out.data.dptr),
-                    reinterpret_cast<dtype *>(k_out.data.dptr),
-                    reinterpret_cast<dtype *>(v_out.data.dptr),
-                    b, s_q, h_q, d_qk, d_qk_out, s_kv, h_kv, d_v, d_v_out, st););
+            dtype, dtype_t,
+            auto kernel = permute_to_grouped_tensor_fwd_kernel<dtype_t, false>;
+            NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+                kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes));
+            kernel<<<grid, tma_permute_threads, smem_bytes, stream>>>(
+                tma_maps, params, b, h_max, permute_s_splits, s_tile););
       }
       NVTE_CHECK_CUDA(cudaGetLastError());
       return;
     }
+  }
 
-    const size_t s_min = std::min(s_q, s_kv);
+  // Fallback path: single batched launch for all N tensors
+  if (any_not_vec_aligned) {
+    const unsigned int st = static_cast<unsigned int>(
+        (s_max + TRANSPOSE_TILE - 1) / TRANSPOSE_TILE);
+    const unsigned int ht = static_cast<unsigned int>(
+        (h_max + TRANSPOSE_TILE - 1) / TRANSPOSE_TILE);
+    dim3 grid(static_cast<unsigned int>(b) * st, ht,
+              static_cast<unsigned int>(num_tensors));
+    const size_t D_pad = (d_in_max * elem_size + 3u) & ~size_t(3);
+    const size_t smem_bytes =
+        static_cast<size_t>(TRANSPOSE_TILE) *
+        (static_cast<size_t>(TRANSPOSE_TILE) * D_pad + 4);
+
+    if (is_bshd) {
+      TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
+          dtype, dtype_t,
+          permute_to_grouped_tensor_fwd_fallback_not_vec_aligned_kernel<dtype_t, false>
+              <<<grid, TRANSPOSE_BLOCK, smem_bytes, stream>>>(params, b, st););
+    } else {
+      TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
+          dtype, dtype_t,
+          permute_to_grouped_tensor_fwd_fallback_not_vec_aligned_kernel<dtype_t, true>
+              <<<grid, TRANSPOSE_BLOCK, smem_bytes, stream>>>(params, b, st););
+    }
+  } else {
     const unsigned int permute_s_splits = std::max(
         1u, static_cast<unsigned int>(s_min / static_cast<size_t>(fallback_permute_threads)));
-    const size_t h_grid = std::max(h_q, h_kv);
-    dim3 grid(static_cast<unsigned int>(b * h_grid), permute_s_splits,
+    dim3 grid(static_cast<unsigned int>(b * h_max), permute_s_splits,
               static_cast<unsigned int>(num_tensors));
 
     if (is_bshd) {
       TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
-          q.dtype(), dtype,
-          permute_to_grouped_tensor_fwd_fallback_vec_aligned_kernel<dtype, false>
+          dtype, dtype_t,
+          permute_to_grouped_tensor_fwd_fallback_vec_aligned_kernel<dtype_t, false>
               <<<grid, fallback_permute_threads, 0, stream>>>(
-                  reinterpret_cast<const dtype *>(q.data.dptr),
-                  reinterpret_cast<const dtype *>(k.data.dptr),
-                  reinterpret_cast<const dtype *>(v.data.dptr),
-                  reinterpret_cast<dtype *>(q_out.data.dptr),
-                  reinterpret_cast<dtype *>(k_out.data.dptr),
-                  reinterpret_cast<dtype *>(v_out.data.dptr),
-                  b, s_q, h_q, d_qk, d_qk_out, s_kv, h_kv, d_v, d_v_out,
-                  permute_s_splits););
+                  params, b, permute_s_splits, h_max););
     } else {
       TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
-          q.dtype(), dtype,
-          permute_to_grouped_tensor_fwd_fallback_vec_aligned_kernel<dtype, true>
+          dtype, dtype_t,
+          permute_to_grouped_tensor_fwd_fallback_vec_aligned_kernel<dtype_t, true>
               <<<grid, fallback_permute_threads, 0, stream>>>(
-                  reinterpret_cast<const dtype *>(q.data.dptr),
-                  reinterpret_cast<const dtype *>(k.data.dptr),
-                  reinterpret_cast<const dtype *>(v.data.dptr),
-                  reinterpret_cast<dtype *>(q_out.data.dptr),
-                  reinterpret_cast<dtype *>(k_out.data.dptr),
-                  reinterpret_cast<dtype *>(v_out.data.dptr),
-                  b, s_q, h_q, d_qk, d_qk_out, s_kv, h_kv, d_v, d_v_out,
-                  permute_s_splits););
+                  params, b, permute_s_splits, h_max););
     }
-    NVTE_CHECK_CUDA(cudaGetLastError());
-    return;
-  }
-
-  const size_t elem_size = typeToSize(q.dtype());
-  const size_t s_min = std::min(s_q, s_kv);
-  const size_t s_tile = std::min(static_cast<size_t>(tma_permute_s_tile_default), s_min);
-  NVTE_CHECK((s_tile * d_qk * elem_size) % sizeof(uint4) == 0 &&
-             (s_tile * d_v  * elem_size) % sizeof(uint4) == 0,
-             "permute_to_grouped_tensor_fwd: S_TILE(", s_tile, ") * D * elem_size must "
-             "be divisible by ", sizeof(uint4), ". d_qk=", d_qk, ", d_v=", d_v,
-             ", elem_size=", elem_size, ".");
-
-  alignas(64) CUtensorMap tma_q_in{}, tma_k_in{}, tma_v_in{};
-  create_strided_tensor_map(tma_q_in, q.data.dptr, q.dtype(), b, s_q, h_q, d_qk, s_tile, is_bshd);
-  create_strided_tensor_map(tma_k_in, k.data.dptr, k.dtype(), b, s_kv, h_kv, d_qk, s_tile, is_bshd);
-  create_strided_tensor_map(tma_v_in, v.data.dptr, v.dtype(), b, s_kv, h_kv, d_v, s_tile, is_bshd);
-
-  const unsigned int permute_s_splits =
-      std::max(1u, static_cast<unsigned int>(s_min / s_tile));
-  const size_t h_grid = std::max(h_q, h_kv);
-  dim3 grid(static_cast<unsigned int>(b * h_grid), permute_s_splits,
-            static_cast<unsigned int>(num_tensors));
-
-  const size_t d_max = std::max(d_qk, d_v);
-  const size_t smem_bytes = s_tile * d_max * elem_size;
-
-  if (is_bshd) {
-    TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
-        q.dtype(), dtype, auto kernel = permute_to_grouped_tensor_fwd_kernel<dtype, true>;
-        NVTE_CHECK_CUDA(
-            cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes));
-        kernel<<<grid, tma_permute_threads, smem_bytes, stream>>>(
-            tma_q_in, tma_k_in, tma_v_in, reinterpret_cast<dtype *>(q_out.data.dptr),
-            reinterpret_cast<dtype *>(k_out.data.dptr), reinterpret_cast<dtype *>(v_out.data.dptr),
-            b, s_q, h_q, d_qk, d_qk_out, s_kv, h_kv, d_v, d_v_out,
-            permute_s_splits, s_tile););
-  } else {
-    TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
-        q.dtype(), dtype, auto kernel = permute_to_grouped_tensor_fwd_kernel<dtype, false>;
-        NVTE_CHECK_CUDA(
-            cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes));
-        kernel<<<grid, tma_permute_threads, smem_bytes, stream>>>(
-            tma_q_in, tma_k_in, tma_v_in, reinterpret_cast<dtype *>(q_out.data.dptr),
-            reinterpret_cast<dtype *>(k_out.data.dptr), reinterpret_cast<dtype *>(v_out.data.dptr),
-            b, s_q, h_q, d_qk, d_qk_out, s_kv, h_kv, d_v, d_v_out,
-            permute_s_splits, s_tile););
   }
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
-void permute_to_grouped_tensor_bwd(Tensor grad_q, Tensor grad_k, Tensor grad_v, Tensor q, Tensor k,
-                                   Tensor v, NVTE_QKV_Format original_format,
-                                   size_t num_tensors, cudaStream_t stream) {
+void multi_tensor_permute_to_grouped_tensor_bwd(Tensor *inputs, Tensor *outputs,
+                                                size_t num_tensors,
+                                                NVTE_QKV_Format original_format,
+                                                cudaStream_t stream) {
   using namespace transformer_engine;
-  const size_t b = grad_q.shape()[0];
-  const size_t h_q = grad_q.shape()[1];
-  const size_t s_q = grad_q.shape()[2];
-  const size_t h_kv = grad_k.shape()[1];
-  const size_t s_kv = grad_k.shape()[2];
-
-  const size_t d_qk = q.shape()[q.shape().size() - 1];
-  const size_t d_v  = v.shape()[v.shape().size() - 1];
-  const size_t d_qk_in = grad_q.shape()[3];
-  const size_t d_v_in  = grad_v.shape()[3];
+  if (num_tensors == 0) return;
+  NVTE_CHECK(num_tensors <= static_cast<size_t>(kMaxPermuteTensors),
+             "num_tensors must be in [1, ", kMaxPermuteTensors, "], got ", num_tensors, ".");
 
   const bool is_bshd = (original_format == NVTE_QKV_Format::NVTE_BSHD);
+  const DType dtype = inputs[0].dtype();
+  const size_t elem_size = typeToSize(dtype);
+  const size_t b = inputs[0].shape()[0];
 
-  if (!can_use_tma_permute(grad_q.dtype(), d_qk, d_v)) {
-    const size_t elem_size = typeToSize(grad_q.dtype());
-    const size_t d_qk_bytes = d_qk * elem_size;
-    const size_t d_v_bytes  = d_v  * elem_size;
-    const bool needs_transpose = (d_qk_bytes % 4 != 0) || (d_v_bytes % 4 != 0);
+  PermuteParams params{};
+  size_t s_max = 0, h_max = 0, s_min = SIZE_MAX;
+  size_t d_in_max = 0, d_out_max = 0;
+  bool any_not_vec_aligned = false;
+  bool all_tma_ok = true;
 
-    if (needs_transpose) {
-      const size_t s_max = std::max(s_q, s_kv);
-      const size_t h_max = std::max(h_q, h_kv);
-      const unsigned int st = static_cast<unsigned int>(
-          (s_max + TRANSPOSE_TILE - 1) / TRANSPOSE_TILE);
-      const unsigned int ht = static_cast<unsigned int>(
-          (h_max + TRANSPOSE_TILE - 1) / TRANSPOSE_TILE);
-      dim3 grid(static_cast<unsigned int>(b) * st, ht,
+  for (size_t i = 0; i < num_tensors; ++i) {
+    const size_t H = inputs[i].shape()[1];
+    const size_t S = inputs[i].shape()[2];
+    const size_t D_in = inputs[i].shape()[3];
+    const size_t D_out = outputs[i].shape()[outputs[i].shape().size() - 1];
+    params.slots[i] = {inputs[i].data.dptr, outputs[i].data.dptr, S, H, D_in, D_out};
+    s_max = std::max(s_max, S);
+    h_max = std::max(h_max, H);
+    s_min = std::min(s_min, S);
+    d_in_max = std::max(d_in_max, D_in);
+    d_out_max = std::max(d_out_max, D_out);
+    if ((D_out * elem_size) % 4 != 0) any_not_vec_aligned = true;
+    const size_t inner = D_out * elem_size;
+    if (inner < 32 || inner % 16 != 0) all_tma_ok = false;
+  }
+
+  if (all_tma_ok) {
+    const int sm = cuda::sm_arch(cuda::current_device());
+    if (sm < 90) {
+      all_tma_ok = false;
+    } else {
+      switch (dtype) {
+        case DType::kFloat16: case DType::kBFloat16:
+        case DType::kFloat8E4M3: case DType::kFloat8E5M2:
+        case DType::kFloat8E8M0: case DType::kByte:
+          break;
+        default:
+          all_tma_ok = false;
+      }
+    }
+  }
+
+  // TMA path
+  if (all_tma_ok) {
+    const size_t s_tile = std::min(static_cast<size_t>(tma_permute_s_tile_default), s_min);
+    bool tma_aligned = true;
+    for (size_t i = 0; i < num_tensors && tma_aligned; ++i) {
+      if ((s_tile * params.slots[i].D_out * elem_size) % sizeof(uint4) != 0)
+        tma_aligned = false;
+    }
+
+    if (tma_aligned) {
+      TmaMapParams tma_maps{};
+      for (size_t i = 0; i < num_tensors; ++i) {
+        const auto &slot = params.slots[i];
+        create_strided_tensor_map(tma_maps.maps[i], slot.output,
+                                  dtype, b, slot.S, slot.H, slot.D_out, s_tile, is_bshd);
+      }
+
+      const unsigned int permute_s_splits =
+          std::max(1u, static_cast<unsigned int>(s_min / s_tile));
+      dim3 grid(static_cast<unsigned int>(b * h_max), permute_s_splits,
                 static_cast<unsigned int>(num_tensors));
-      const size_t d_max = std::max(d_qk, d_v);
-      const size_t D_pad = (d_max * elem_size + 3u) & ~size_t(3);
-      const size_t smem_bytes =
-          static_cast<size_t>(TRANSPOSE_TILE) *
-          (static_cast<size_t>(TRANSPOSE_TILE) * D_pad + 4);
+      const size_t smem_bytes = s_tile * d_out_max * elem_size;
 
       if (is_bshd) {
         TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
-            grad_q.dtype(), dtype,
-            permute_to_grouped_tensor_bwd_fallback_not_vec_aligned_kernel<dtype, false>
-                <<<grid, TRANSPOSE_BLOCK, smem_bytes, stream>>>(
-                    reinterpret_cast<const dtype *>(grad_q.data.dptr),
-                    reinterpret_cast<const dtype *>(grad_k.data.dptr),
-                    reinterpret_cast<const dtype *>(grad_v.data.dptr),
-                    reinterpret_cast<dtype *>(q.data.dptr),
-                    reinterpret_cast<dtype *>(k.data.dptr),
-                    reinterpret_cast<dtype *>(v.data.dptr),
-                    b, s_q, h_q, d_qk, d_qk_in, s_kv, h_kv, d_v, d_v_in, st););
+            dtype, dtype_t,
+            auto kernel = permute_to_grouped_tensor_bwd_kernel<dtype_t, true>;
+            NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+                kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes));
+            kernel<<<grid, tma_permute_threads, smem_bytes, stream>>>(
+                tma_maps, params, b, h_max, permute_s_splits, s_tile););
       } else {
         TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
-            grad_q.dtype(), dtype,
-            permute_to_grouped_tensor_bwd_fallback_not_vec_aligned_kernel<dtype, true>
-                <<<grid, TRANSPOSE_BLOCK, smem_bytes, stream>>>(
-                    reinterpret_cast<const dtype *>(grad_q.data.dptr),
-                    reinterpret_cast<const dtype *>(grad_k.data.dptr),
-                    reinterpret_cast<const dtype *>(grad_v.data.dptr),
-                    reinterpret_cast<dtype *>(q.data.dptr),
-                    reinterpret_cast<dtype *>(k.data.dptr),
-                    reinterpret_cast<dtype *>(v.data.dptr),
-                    b, s_q, h_q, d_qk, d_qk_in, s_kv, h_kv, d_v, d_v_in, st););
+            dtype, dtype_t,
+            auto kernel = permute_to_grouped_tensor_bwd_kernel<dtype_t, false>;
+            NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+                kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes));
+            kernel<<<grid, tma_permute_threads, smem_bytes, stream>>>(
+                tma_maps, params, b, h_max, permute_s_splits, s_tile););
       }
       NVTE_CHECK_CUDA(cudaGetLastError());
       return;
     }
+  }
 
-    const size_t s_min = std::min(s_q, s_kv);
+  // Fallback path: single batched launch for all N tensors
+  if (any_not_vec_aligned) {
+    const unsigned int st = static_cast<unsigned int>(
+        (s_max + TRANSPOSE_TILE - 1) / TRANSPOSE_TILE);
+    const unsigned int ht = static_cast<unsigned int>(
+        (h_max + TRANSPOSE_TILE - 1) / TRANSPOSE_TILE);
+    dim3 grid(static_cast<unsigned int>(b) * st, ht,
+              static_cast<unsigned int>(num_tensors));
+    const size_t D_pad = (d_out_max * elem_size + 3u) & ~size_t(3);
+    const size_t smem_bytes =
+        static_cast<size_t>(TRANSPOSE_TILE) *
+        (static_cast<size_t>(TRANSPOSE_TILE) * D_pad + 4);
+
+    if (is_bshd) {
+      TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
+          dtype, dtype_t,
+          permute_to_grouped_tensor_bwd_fallback_not_vec_aligned_kernel<dtype_t, false>
+              <<<grid, TRANSPOSE_BLOCK, smem_bytes, stream>>>(params, b, st););
+    } else {
+      TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
+          dtype, dtype_t,
+          permute_to_grouped_tensor_bwd_fallback_not_vec_aligned_kernel<dtype_t, true>
+              <<<grid, TRANSPOSE_BLOCK, smem_bytes, stream>>>(params, b, st););
+    }
+  } else {
     const unsigned int permute_s_splits = std::max(
         1u, static_cast<unsigned int>(s_min / static_cast<size_t>(fallback_permute_threads)));
-    const size_t h_grid = std::max(h_q, h_kv);
-    dim3 grid(static_cast<unsigned int>(b * h_grid), permute_s_splits,
+    dim3 grid(static_cast<unsigned int>(b * h_max), permute_s_splits,
               static_cast<unsigned int>(num_tensors));
 
     if (is_bshd) {
       TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
-          grad_q.dtype(), dtype,
-          permute_to_grouped_tensor_bwd_fallback_vec_aligned_kernel<dtype, false>
+          dtype, dtype_t,
+          permute_to_grouped_tensor_bwd_fallback_vec_aligned_kernel<dtype_t, false>
               <<<grid, fallback_permute_threads, 0, stream>>>(
-                  reinterpret_cast<const dtype *>(grad_q.data.dptr),
-                  reinterpret_cast<const dtype *>(grad_k.data.dptr),
-                  reinterpret_cast<const dtype *>(grad_v.data.dptr),
-                  reinterpret_cast<dtype *>(q.data.dptr),
-                  reinterpret_cast<dtype *>(k.data.dptr),
-                  reinterpret_cast<dtype *>(v.data.dptr),
-                  b, s_q, h_q, d_qk, d_qk_in, s_kv, h_kv, d_v, d_v_in,
-                  permute_s_splits););
+                  params, b, permute_s_splits, h_max););
     } else {
       TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
-          grad_q.dtype(), dtype,
-          permute_to_grouped_tensor_bwd_fallback_vec_aligned_kernel<dtype, true>
+          dtype, dtype_t,
+          permute_to_grouped_tensor_bwd_fallback_vec_aligned_kernel<dtype_t, true>
               <<<grid, fallback_permute_threads, 0, stream>>>(
-                  reinterpret_cast<const dtype *>(grad_q.data.dptr),
-                  reinterpret_cast<const dtype *>(grad_k.data.dptr),
-                  reinterpret_cast<const dtype *>(grad_v.data.dptr),
-                  reinterpret_cast<dtype *>(q.data.dptr),
-                  reinterpret_cast<dtype *>(k.data.dptr),
-                  reinterpret_cast<dtype *>(v.data.dptr),
-                  b, s_q, h_q, d_qk, d_qk_in, s_kv, h_kv, d_v, d_v_in,
-                  permute_s_splits););
+                  params, b, permute_s_splits, h_max););
     }
-    NVTE_CHECK_CUDA(cudaGetLastError());
-    return;
-  }
-
-  const size_t elem_size = typeToSize(grad_q.dtype());
-  const size_t s_min = std::min(s_q, s_kv);
-  const size_t s_tile = std::min(static_cast<size_t>(tma_permute_s_tile_default), s_min);
-  NVTE_CHECK((s_tile * d_qk * elem_size) % sizeof(uint4) == 0 &&
-             (s_tile * d_v  * elem_size) % sizeof(uint4) == 0,
-             "permute_to_grouped_tensor_bwd: S_TILE(", s_tile, ") * D * elem_size must "
-             "be divisible by ", sizeof(uint4), ". d_qk=", d_qk, ", d_v=", d_v,
-             ", elem_size=", elem_size, ".");
-
-  alignas(64) CUtensorMap tma_q_out{}, tma_k_out{}, tma_v_out{};
-  create_strided_tensor_map(tma_q_out, q.data.dptr, q.dtype(), b, s_q, h_q, d_qk, s_tile, is_bshd);
-  create_strided_tensor_map(tma_k_out, k.data.dptr, k.dtype(), b, s_kv, h_kv, d_qk, s_tile, is_bshd);
-  create_strided_tensor_map(tma_v_out, v.data.dptr, v.dtype(), b, s_kv, h_kv, d_v, s_tile, is_bshd);
-
-  const unsigned int permute_s_splits =
-      std::max(1u, static_cast<unsigned int>(s_min / s_tile));
-  const size_t h_grid = std::max(h_q, h_kv);
-  dim3 grid(static_cast<unsigned int>(b * h_grid), permute_s_splits,
-            static_cast<unsigned int>(num_tensors));
-
-  const size_t d_max = std::max(d_qk, d_v);
-  const size_t smem_bytes = s_tile * d_max * elem_size;
-
-  if (is_bshd) {
-    TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
-        grad_q.dtype(), dtype, auto kernel = permute_to_grouped_tensor_bwd_kernel<dtype, true>;
-        NVTE_CHECK_CUDA(
-            cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes));
-        kernel<<<grid, tma_permute_threads, smem_bytes, stream>>>(
-            reinterpret_cast<const dtype *>(grad_q.data.dptr),
-            reinterpret_cast<const dtype *>(grad_k.data.dptr),
-            reinterpret_cast<const dtype *>(grad_v.data.dptr), tma_q_out, tma_k_out, tma_v_out, b,
-            s_q, h_q, d_qk, d_qk_in, s_kv, h_kv, d_v, d_v_in,
-            permute_s_splits, s_tile););
-  } else {
-    TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
-        grad_q.dtype(), dtype, auto kernel = permute_to_grouped_tensor_bwd_kernel<dtype, false>;
-        NVTE_CHECK_CUDA(
-            cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes));
-        kernel<<<grid, tma_permute_threads, smem_bytes, stream>>>(
-            reinterpret_cast<const dtype *>(grad_q.data.dptr),
-            reinterpret_cast<const dtype *>(grad_k.data.dptr),
-            reinterpret_cast<const dtype *>(grad_v.data.dptr), tma_q_out, tma_k_out, tma_v_out, b,
-            s_q, h_q, d_qk, d_qk_in, s_kv, h_kv, d_v, d_v_in,
-            permute_s_splits, s_tile););
   }
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
-}  // namespace permute_to_grouped_tensor
+}  // namespace multi_tensor_permute_to_grouped_tensor
 
 // ===================================================================================
 // multi_tensor_pad_last_dim: pad the last dimension of multiple tensors to a certain alignment
@@ -1309,30 +1237,36 @@ void nvte_prepare_flash_attn_bwd(NVTETensor q, NVTETensor k, NVTETensor v, NVTET
                                           stream);
 }
 
-void nvte_permute_to_grouped_tensor_fwd(NVTETensor q, NVTETensor k, NVTETensor v, NVTETensor q_out,
-                                        NVTETensor k_out, NVTETensor v_out,
-                                        NVTE_QKV_Format original_format, size_t num_tensors,
-                                        cudaStream_t stream) {
-  NVTE_API_CALL(nvte_permute_to_grouped_tensor_fwd);
+void nvte_multi_tensor_permute_to_grouped_tensor_fwd(NVTETensor *inputs, NVTETensor *outputs,
+                                                     size_t num_tensors,
+                                                     NVTE_QKV_Format original_format,
+                                                     cudaStream_t stream) {
+  NVTE_API_CALL(nvte_multi_tensor_permute_to_grouped_tensor_fwd);
   using namespace transformer_engine;
 
-  permute_to_grouped_tensor::permute_to_grouped_tensor_fwd(
-      *convertNVTETensorCheck(q), *convertNVTETensorCheck(k), *convertNVTETensorCheck(v),
-      *convertNVTETensorCheck(q_out), *convertNVTETensorCheck(k_out),
-      *convertNVTETensorCheck(v_out), original_format, num_tensors, stream);
+  std::vector<Tensor> in_vec(num_tensors), out_vec(num_tensors);
+  for (size_t i = 0; i < num_tensors; ++i) {
+    in_vec[i] = *convertNVTETensorCheck(inputs[i]);
+    out_vec[i] = *convertNVTETensorCheck(outputs[i]);
+  }
+  multi_tensor_permute_to_grouped_tensor::multi_tensor_permute_to_grouped_tensor_fwd(
+      in_vec.data(), out_vec.data(), num_tensors, original_format, stream);
 }
 
-void nvte_permute_to_grouped_tensor_bwd(NVTETensor grad_q, NVTETensor grad_k, NVTETensor grad_v,
-                                        NVTETensor q, NVTETensor k, NVTETensor v,
-                                        NVTE_QKV_Format original_format, size_t num_tensors,
-                                        cudaStream_t stream) {
-  NVTE_API_CALL(nvte_permute_to_grouped_tensor_bwd);
+void nvte_multi_tensor_permute_to_grouped_tensor_bwd(NVTETensor *inputs, NVTETensor *outputs,
+                                                     size_t num_tensors,
+                                                     NVTE_QKV_Format original_format,
+                                                     cudaStream_t stream) {
+  NVTE_API_CALL(nvte_multi_tensor_permute_to_grouped_tensor_bwd);
   using namespace transformer_engine;
 
-  permute_to_grouped_tensor::permute_to_grouped_tensor_bwd(
-      *convertNVTETensorCheck(grad_q), *convertNVTETensorCheck(grad_k),
-      *convertNVTETensorCheck(grad_v), *convertNVTETensorCheck(q), *convertNVTETensorCheck(k),
-      *convertNVTETensorCheck(v), original_format, num_tensors, stream);
+  std::vector<Tensor> in_vec(num_tensors), out_vec(num_tensors);
+  for (size_t i = 0; i < num_tensors; ++i) {
+    in_vec[i] = *convertNVTETensorCheck(inputs[i]);
+    out_vec[i] = *convertNVTETensorCheck(outputs[i]);
+  }
+  multi_tensor_permute_to_grouped_tensor::multi_tensor_permute_to_grouped_tensor_bwd(
+      in_vec.data(), out_vec.data(), num_tensors, original_format, stream);
 }
 
 void nvte_multi_tensor_pad_last_dim(NVTETensor *inputs, NVTETensor *outputs, size_t num_tensors,
