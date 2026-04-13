@@ -10,7 +10,8 @@ customizable contracting dimensions for flexible tensor operations.
 """
 
 from typing import Tuple, Sequence
-from functools import partial
+from functools import cache, partial
+import os
 import warnings
 import jax
 import jax.numpy as jnp
@@ -315,6 +316,11 @@ def _dense_bwd_rule(
 _dense.defvjp(_dense_fwd_rule, _dense_bwd_rule)
 
 
+@cache
+def _should_validate_group_size_alignment() -> bool:
+    return os.getenv("NVTE_JAX_VALIDATE_GROUP_SIZE_ALIGNMENT", "0") == "1"
+
+
 def grouped_dense(
     x: jnp.ndarray,
     kernel: jnp.ndarray,
@@ -349,6 +355,10 @@ def grouped_dense(
     Returns:
         A jnp.ndarray containing the result of the grouped linear operation
     """
+    if _should_validate_group_size_alignment():
+        # TODO(jberchtold): Use a proper alignment check dependent on the recipe, 128 is conservative for now.
+        group_sizes = tex.validate_group_sizes(group_sizes, 128)
+
     output = _grouped_dense(
         x,
         kernel,

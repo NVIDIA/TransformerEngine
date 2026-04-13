@@ -33,6 +33,7 @@ pybind11::dict Registrations() {
   // Quantization
   dict["te_dbias_quantize_ffi"] = EncapsulateFFI(DBiasQuantizeHandler);
   dict["te_grouped_quantize_ffi"] = EncapsulateFFI(GroupedQuantizeHandler);
+  dict["te_grouped_quantize_v2_ffi"] = EncapsulateFFI(GroupedQuantizeV2Handler);
   dict["te_dequantize_ffi"] = EncapsulateFFI(DequantizeHandler);
 
   // Softmax
@@ -91,6 +92,9 @@ pybind11::dict Registrations() {
 
   dict["te_inspect_ffi"] =
       pybind11::dict(pybind11::arg("execute") = EncapsulateFFI(InspectHandler));
+
+  dict["te_validate_group_sizes_ffi"] =
+      pybind11::dict(pybind11::arg("execute") = EncapsulateFFI(ValidateGroupSizesHandler));
 
   // Router
   dict["te_fused_topk_with_score_function_forward_ffi"] =
