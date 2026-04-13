@@ -289,9 +289,9 @@ void CheckGroupedTensorShapeArrays(const GroupedTensor &t, const std::string &na
                " tensor_offsets must be 1D");
     NVTE_CHECK(t.tensor_offsets.dtype == DType::kInt64, "Grouped tensor ", name,
                " tensor_offsets must have dtype Int64");
-    NVTE_CHECK(t.tensor_offsets.shape[0] == t.num_tensors + 1,
-               "Grouped tensor ", name, " tensor_offsets size (", t.tensor_offsets.shape[0],
-               ") must equal num_tensors+1 (", t.num_tensors + 1, ")");
+    NVTE_CHECK(t.tensor_offsets.shape[0] == t.num_tensors + 1, "Grouped tensor ", name,
+               " tensor_offsets size (", t.tensor_offsets.shape[0], ") must equal num_tensors+1 (",
+               t.num_tensors + 1, ")");
   }
 
   // tensor_offsets is required if any dimension varies
