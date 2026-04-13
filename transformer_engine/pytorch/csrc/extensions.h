@@ -122,7 +122,8 @@ std::vector<std::optional<at::Tensor>> multi_tensor_permute_to_grouped_tensor_bw
     std::vector<std::optional<at::Tensor>> inputs, const std::string &original_format,
     std::vector<std::optional<at::Tensor>> outputs = {});
 
-std::vector<at::Tensor> multi_tensor_pad_last_dim(std::vector<at::Tensor> inputs, int64_t alignment);
+std::vector<at::Tensor> multi_tensor_pad_last_dim(std::vector<at::Tensor> inputs,
+                                                  int64_t alignment);
 
 at::Tensor convert_thd_to_bshd(at::Tensor tensor, at::Tensor cu_seqlens, int b, int max_seq_len);
 at::Tensor convert_bshd_to_thd(at::Tensor tensor, at::Tensor cu_seqlens, int t);

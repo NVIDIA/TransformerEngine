@@ -2348,9 +2348,10 @@ def mxfp8_quantize_fast_path(tensor_quantizer_pairs, src_format):
     """
     if not tensor_quantizer_pairs:
         return [], src_format
-    assert src_format in ("bshd", "sbhd"), (
-        f"mxfp8_quantize_fast_path only supports bshd/sbhd, got {src_format!r}."
-    )
+    assert src_format in (
+        "bshd",
+        "sbhd",
+    ), f"mxfp8_quantize_fast_path only supports bshd/sbhd, got {src_format!r}."
     _s_dim = {"bshd": 1, "sbhd": 0}
     _d_dim = {"bshd": 3, "sbhd": 3}
 
@@ -2377,10 +2378,26 @@ def mxfp8_quantize_fast_path(tensor_quantizer_pairs, src_format):
         quantizer.optimize_for_gemm = orig_optimize
 
         # reshape rowwise/columnwise data to original shape
-        fp8_tensor._rowwise_data = fp8_tensor._rowwise_data.view(original_shape) if fp8_tensor._rowwise_data is not None else None
-        fp8_tensor._columnwise_data = fp8_tensor._columnwise_data.view(original_shape) if fp8_tensor._columnwise_data is not None else None
-        fp8_tensor._rowwise_scale_inv = fp8_tensor._rowwise_scale_inv.view(rs_shape) if fp8_tensor._rowwise_scale_inv is not None else None
-        fp8_tensor._columnwise_scale_inv = fp8_tensor._columnwise_scale_inv.view(cs_shape) if fp8_tensor._columnwise_scale_inv is not None else None
+        fp8_tensor._rowwise_data = (
+            fp8_tensor._rowwise_data.view(original_shape)
+            if fp8_tensor._rowwise_data is not None
+            else None
+        )
+        fp8_tensor._columnwise_data = (
+            fp8_tensor._columnwise_data.view(original_shape)
+            if fp8_tensor._columnwise_data is not None
+            else None
+        )
+        fp8_tensor._rowwise_scale_inv = (
+            fp8_tensor._rowwise_scale_inv.view(rs_shape)
+            if fp8_tensor._rowwise_scale_inv is not None
+            else None
+        )
+        fp8_tensor._columnwise_scale_inv = (
+            fp8_tensor._columnwise_scale_inv.view(cs_shape)
+            if fp8_tensor._columnwise_scale_inv is not None
+            else None
+        )
         fp8_tensors.append(fp8_tensor)
 
     # ---- Pad + permute + swizzle scale_inv to BHSD ----
@@ -2415,8 +2432,7 @@ def mxfp8_quantize_fast_path(tensor_quantizer_pairs, src_format):
             return [None] * len(scale_list)
         device = next(s for s in scale_list if s is not None).device
         buf = torch.empty(total, dtype=torch.uint8, device=device)
-        return [buf[e[0]:e[0] + e[1]].view(e[2]) if e is not None else None
-                for e in entries]
+        return [buf[e[0] : e[0] + e[1]].view(e[2]) if e is not None else None for e in entries]
 
     # allocate buffers with padding in mind
     rs_outs = _build_outputs(rs_list, 4)
@@ -2424,10 +2440,14 @@ def mxfp8_quantize_fast_path(tensor_quantizer_pairs, src_format):
 
     # permute scale_invs to BHSD; batched
     rs_permuted = tex.multi_tensor_permute_to_grouped_tensor_fwd(
-        rs_list, original_format=src_format, outputs=rs_outs,
+        rs_list,
+        original_format=src_format,
+        outputs=rs_outs,
     )
     cs_permuted = tex.multi_tensor_permute_to_grouped_tensor_fwd(
-        cs_list, original_format=src_format, outputs=cs_outs,
+        cs_list,
+        original_format=src_format,
+        outputs=cs_outs,
     )
 
     # build output tensors
@@ -2437,11 +2457,16 @@ def mxfp8_quantize_fast_path(tensor_quantizer_pairs, src_format):
         cp = cp.view(-1, cp.shape[-1]) if cp is not None else None
         result.append(
             MXFP8Tensor(
-                shape=t.shape, dtype=t.dtype,
-                rowwise_data=t._rowwise_data, rowwise_scale_inv=rp,
-                columnwise_data=t._columnwise_data, columnwise_scale_inv=cp,
-                quantizer=t._quantizer, requires_grad=False,
-                fp8_dtype=t._fp8_dtype, with_gemm_swizzled_scales=t._with_gemm_swizzled_scales,
+                shape=t.shape,
+                dtype=t.dtype,
+                rowwise_data=t._rowwise_data,
+                rowwise_scale_inv=rp,
+                columnwise_data=t._columnwise_data,
+                columnwise_scale_inv=cp,
+                quantizer=t._quantizer,
+                requires_grad=False,
+                fp8_dtype=t._fp8_dtype,
+                with_gemm_swizzled_scales=t._with_gemm_swizzled_scales,
             )
         )
 
@@ -2468,7 +2493,8 @@ def combine_and_quantize(
     if isinstance(qkv_quantizer, MXFP8Quantizer):
         qkv_format, q_format, kv_format = get_qkv_format(qkv_layout)
         assert qkv_format in ("bshd", "sbhd"), (
-            f"combine_and_quantize only supports bshd/sbhd for MXFP8 quantization, got {qkv_format!r}."
+            "combine_and_quantize only supports bshd/sbhd for MXFP8 quantization, got"
+            f" {qkv_format!r}."
         )
 
         _s_dim = {"sbhd": 0, "bshd": 1}
@@ -2489,21 +2515,29 @@ def combine_and_quantize(
         if not keep_same_data_and_scale_inv_format:
             q_quantizer, k_quantizer, v_quantizer = [qkv_quantizer.copy() for _ in range(3)]
             if used_in_forward and not used_in_backward:
-                q_quantizer.rowwise_usage = True;  q_quantizer.columnwise_usage = False
-                k_quantizer.rowwise_usage = True;  k_quantizer.columnwise_usage = False
-                v_quantizer.rowwise_usage = False; v_quantizer.columnwise_usage = True
+                q_quantizer.rowwise_usage = True
+                q_quantizer.columnwise_usage = False
+                k_quantizer.rowwise_usage = True
+                k_quantizer.columnwise_usage = False
+                v_quantizer.rowwise_usage = False
+                v_quantizer.columnwise_usage = True
             elif (not used_in_forward) and used_in_backward:
-                q_quantizer.rowwise_usage = True;  q_quantizer.columnwise_usage = True
-                k_quantizer.rowwise_usage = True;  k_quantizer.columnwise_usage = True
-                v_quantizer.rowwise_usage = True;  v_quantizer.columnwise_usage = False
+                q_quantizer.rowwise_usage = True
+                q_quantizer.columnwise_usage = True
+                k_quantizer.rowwise_usage = True
+                k_quantizer.columnwise_usage = True
+                v_quantizer.rowwise_usage = True
+                v_quantizer.columnwise_usage = False
             (q_fp8, k_fp8, v_fp8), qkv_scale_inv_format = mxfp8_quantize_fast_path(
-                [(q, q_quantizer), (k, k_quantizer), (v, v_quantizer)], qkv_format)
+                [(q, q_quantizer), (k, k_quantizer), (v, v_quantizer)], qkv_format
+            )
             return q_fp8, k_fp8, v_fp8, qkv_layout, qkv_scale_inv_format
 
         # ---- Slow path: permute data to BHSD first, then quantize with swizzle ----
         if qkv_layout in ("bshd_bshd_bshd", "sbhd_sbhd_sbhd"):
             q, k, v = tex.multi_tensor_permute_to_grouped_tensor_fwd(
-                [q, k, v], original_format=qkv_format,
+                [q, k, v],
+                original_format=qkv_format,
             )
         else:
             q = permute_to_grouped_tensor_pytorch(q, q_format)
@@ -2517,19 +2551,34 @@ def combine_and_quantize(
 
         q_quantizer, k_quantizer, v_quantizer = [qkv_quantizer.copy() for _ in range(3)]
         if used_in_forward and not used_in_backward:
-            q_quantizer.rowwise_usage = True;  q_quantizer.columnwise_usage = False
-            k_quantizer.rowwise_usage = True;  k_quantizer.columnwise_usage = False
-            v_quantizer.rowwise_usage = False; v_quantizer.columnwise_usage = True
+            q_quantizer.rowwise_usage = True
+            q_quantizer.columnwise_usage = False
+            k_quantizer.rowwise_usage = True
+            k_quantizer.columnwise_usage = False
+            v_quantizer.rowwise_usage = False
+            v_quantizer.columnwise_usage = True
         elif (not used_in_forward) and used_in_backward:
-            q_quantizer.rowwise_usage = True;  q_quantizer.columnwise_usage = True
-            k_quantizer.rowwise_usage = True;  k_quantizer.columnwise_usage = True
-            v_quantizer.rowwise_usage = True;  v_quantizer.columnwise_usage = False
-        q_fp8, k_fp8, v_fp8 = [quant(x) for quant, x in zip(
-            [q_quantizer, k_quantizer, v_quantizer], [q, k, v])]
+            q_quantizer.rowwise_usage = True
+            q_quantizer.columnwise_usage = True
+            k_quantizer.rowwise_usage = True
+            k_quantizer.columnwise_usage = True
+            v_quantizer.rowwise_usage = True
+            v_quantizer.columnwise_usage = False
+        q_fp8, k_fp8, v_fp8 = [
+            quant(x) for quant, x in zip([q_quantizer, k_quantizer, v_quantizer], [q, k, v])
+        ]
 
         for fp8_tensor, shape in zip([q_fp8, k_fp8, v_fp8], original_shapes):
-            fp8_tensor._rowwise_data = fp8_tensor._rowwise_data.view(shape) if fp8_tensor._rowwise_data is not None else None
-            fp8_tensor._columnwise_data = fp8_tensor._columnwise_data.view(shape) if fp8_tensor._columnwise_data is not None else None
+            fp8_tensor._rowwise_data = (
+                fp8_tensor._rowwise_data.view(shape)
+                if fp8_tensor._rowwise_data is not None
+                else None
+            )
+            fp8_tensor._columnwise_data = (
+                fp8_tensor._columnwise_data.view(shape)
+                if fp8_tensor._columnwise_data is not None
+                else None
+            )
 
         return q_fp8, k_fp8, v_fp8, qkv_layout, qkv_scale_inv_format
 

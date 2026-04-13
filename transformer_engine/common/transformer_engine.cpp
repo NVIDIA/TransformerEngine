@@ -144,8 +144,7 @@ void CheckScaleTensorShape(const Tensor &t, const std::string &name) {
   }
 }
 
-void CheckInputTensor(const Tensor &t, const std::string &name,
-                      bool check_scale_inv_shapes) {
+void CheckInputTensor(const Tensor &t, const std::string &name, bool check_scale_inv_shapes) {
   const DType type = t.dtype();
   if (is_fp8_dtype(type)) {
     // FP8 input needs to have scale_inv

@@ -406,14 +406,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::call_guard<py::gil_scoped_release>());
   m.def("multi_tensor_permute_to_grouped_tensor_fwd",
         &transformer_engine::pytorch::multi_tensor_permute_to_grouped_tensor_fwd,
-        "Permute multiple tensors from BSHD/SBHD to BHSD.",
-        py::arg("inputs"), py::arg("original_format") = std::string("bshd"),
+        "Permute multiple tensors from BSHD/SBHD to BHSD.", py::arg("inputs"),
+        py::arg("original_format") = std::string("bshd"),
         py::arg("outputs") = std::vector<std::optional<at::Tensor>>{},
         py::call_guard<py::gil_scoped_release>());
   m.def("multi_tensor_permute_to_grouped_tensor_bwd",
         &transformer_engine::pytorch::multi_tensor_permute_to_grouped_tensor_bwd,
-        "Permute multiple tensors from BHSD back to BSHD/SBHD.",
-        py::arg("inputs"), py::arg("original_format") = std::string("bshd"),
+        "Permute multiple tensors from BHSD back to BSHD/SBHD.", py::arg("inputs"),
+        py::arg("original_format") = std::string("bshd"),
         py::arg("outputs") = std::vector<std::optional<at::Tensor>>{},
         py::call_guard<py::gil_scoped_release>());
   m.def("multi_tensor_pad_last_dim", &transformer_engine::pytorch::multi_tensor_pad_last_dim,
@@ -439,7 +439,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Fused Apply QKV RoPE FWD", py::call_guard<py::gil_scoped_release>());
   m.def("fused_qkv_rope_backward", &transformer_engine::pytorch::fused_qkv_rope_backward,
         "Fused Apply QKV RoPE BWD", py::call_guard<py::gil_scoped_release>());
-
 
   // fused router
   m.def("fused_topk_with_score_function_fwd",
