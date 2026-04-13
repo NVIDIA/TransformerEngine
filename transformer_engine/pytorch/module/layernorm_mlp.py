@@ -514,13 +514,11 @@ class _LayerNormMLP(torch.autograd.Function):
                 )
 
             # FSDP2: Don't cache workspaces — they would persist across
-            # layers, defeating FSDP2 memory savings. (Issue #2681)
-            fc1_cache = (
-                None if (is_first_microbatch is None or fsdp2_skip_columnwise) else "fc1_weight"
-            )
-            fc2_cache = (
-                None if (is_first_microbatch is None or fsdp2_skip_columnwise) else "fc2_weight"
-            )
+            # layers, defeating FSDP2 memory savings. Use is_fsdp2 (not
+            # fsdp2_skip_columnwise) so caching stays disabled even during
+            # gradient-checkpoint recomputation. (Issue #2681)
+            fc1_cache = None if (is_first_microbatch is None or is_fsdp2) else "fc1_weight"
+            fc2_cache = None if (is_first_microbatch is None or is_fsdp2) else "fc2_weight"
             fc1_weight_final = module.get_weight_workspace(
                 tensor=fc1_weight,
                 quantizer=fc1_weight_quantizer,
@@ -874,6 +872,10 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.fc1_weight = fc1_weight
             ctx.fc2_weight = fc2_weight
             ctx.fsdp2_skip_columnwise = fsdp2_skip_columnwise
+            # Store raw is_fsdp2 flag for backward cleanup — must not be
+            # gated on is_recomputation since backward cleanup runs after
+            # the real backward, not the recomputation forward.
+            ctx.is_fsdp2 = is_fsdp2
 
             ctx.device = device
             ctx.activation_dtype = activation_dtype
@@ -1240,10 +1242,10 @@ class _LayerNormMLP(torch.autograd.Function):
 
             # FSDP2: Clear columnwise/transpose caches after FC2 dgrad GEMM
             # to prevent them from persisting on the all-gathered buffer.
+            # Uses is_fsdp2 (not fsdp2_skip_columnwise) so cleanup runs
+            # even when backward follows gradient-checkpoint recomputation.
             # (Issues #2681, #2717)
-            if getattr(ctx, "fsdp2_skip_columnwise", False) and isinstance(
-                fc2_weight, QuantizedTensorStorage
-            ):
+            if getattr(ctx, "is_fsdp2", False) and isinstance(fc2_weight, QuantizedTensorStorage):
                 fc2_weight.update_usage(columnwise_usage=False)
 
             # Prepare input grad tensor
@@ -1517,10 +1519,10 @@ class _LayerNormMLP(torch.autograd.Function):
 
             # FSDP2: Clear columnwise/transpose caches after FC1 dgrad GEMM
             # to prevent them from persisting on the all-gathered buffer.
+            # Uses is_fsdp2 (not fsdp2_skip_columnwise) so cleanup runs
+            # even when backward follows gradient-checkpoint recomputation.
             # (Issues #2681, #2717)
-            if getattr(ctx, "fsdp2_skip_columnwise", False) and isinstance(
-                fc1_weight, QuantizedTensorStorage
-            ):
+            if getattr(ctx, "is_fsdp2", False) and isinstance(fc1_weight, QuantizedTensorStorage):
                 fc1_weight.update_usage(columnwise_usage=False)
 
             # Prepare grad input tensor
