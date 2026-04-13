@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 import functools
+import inspect
 from importlib.metadata import PackageNotFoundError, version as get_pkg_version
 from typing import Optional
 
@@ -36,11 +37,6 @@ def _nvidia_cudnn_frontend_supports_wgrad() -> bool:
         return PkgVersion(get_pkg_version("nvidia-cudnn-frontend")) >= PkgVersion("1.23.0")
     except PackageNotFoundError:
         return False
-
-
-def is_quantized_tensor(tensor: torch.Tensor | QuantizedTensorStorage) -> bool:
-    """Check if tensor is a quantized tensor"""
-    return isinstance(tensor, QuantizedTensorStorage)
 
 
 def maybe_dequantize(
