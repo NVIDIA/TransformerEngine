@@ -116,9 +116,7 @@ class TEMixtralSparseMoeBlock(nn.Module):
         # experts, versus the previous loop that called .item() once per expert
         # (8 blocking GPU→CPU syncs that wiped out the GroupedLinear speedup).
         m_splits = (
-            torch.bincount(selected_experts.reshape(-1), minlength=self.num_experts)
-            .int()
-            .tolist()
+            torch.bincount(selected_experts.reshape(-1), minlength=self.num_experts).int().tolist()
         )
 
         # ── Expert FFN: gate_up → SwiGLU → down ─────────────────────────────
@@ -191,6 +189,7 @@ class TEMixtralForCausalLM:
         if device_map:
             # Replicate the same device map on the TE model.
             from accelerate import dispatch_model
+
             te_model = dispatch_model(te_model, device_map=device_map)
         else:
             te_model.to(next(hf_model.parameters()).device)
