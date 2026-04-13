@@ -60,27 +60,24 @@ def _cudnn_compute_wgrad(
     fp8_dtype = torch.float8_e4m3fn
 
     # a_tensor = DY^T = (out_features, total_tokens) row-major
-    a_tensor = (
-        grouped_dy.columnwise_data
-        .view(dtype=fp8_dtype)
-        .view(total_tokens, out_features)
-        .T  
-    )
+    a_tensor = grouped_dy.columnwise_data.view(dtype=fp8_dtype).view(total_tokens, out_features).T
     # b_tensor = X = (total_tokens, in_features) column-major
-    b_tensor = (
-        grouped_x.columnwise_data
-        .view(dtype=fp8_dtype)
-        .view(total_tokens, in_features)
-    )
+    b_tensor = grouped_x.columnwise_data.view(dtype=fp8_dtype).view(total_tokens, in_features)
 
-    sfa_tensor = grouped_dy.columnwise_scale_inv.view(out_features, -1).view(dtype=torch.float8_e8m0fnu)
-    sfb_tensor = grouped_x.columnwise_scale_inv.view(in_features, -1).view(dtype=torch.float8_e8m0fnu)
+    sfa_tensor = grouped_dy.columnwise_scale_inv.view(out_features, -1).view(
+        dtype=torch.float8_e8m0fnu
+    )
+    sfb_tensor = grouped_x.columnwise_scale_inv.view(in_features, -1).view(
+        dtype=torch.float8_e8m0fnu
+    )
     offsets_tensor = offsets.to(dtype=torch.int32)
 
     # Prepare wgrad output
     if single_grouped_weight:
         # Dense mode: single (num_groups, out_features, in_features) tensor
-        wgrad_tensor = wgrad_output.rowwise_data.view(offsets_tensor.shape[0], out_features, in_features)
+        wgrad_tensor = wgrad_output.rowwise_data.view(
+            offsets_tensor.shape[0], out_features, in_features
+        )
         wgrad_kernel_fn(
             a_tensor=a_tensor,
             b_tensor=b_tensor,
@@ -294,6 +291,7 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
     def grouped_gemm_wgrad_kernel(cls) -> Callable:
         """CuTe DSL kernel for grouped GEMM wgrad on SM100+."""
         from cudnn import grouped_gemm_wgrad_wrapper_sm100  # pylint: disable=no-name-in-module
+
         return grouped_gemm_wgrad_wrapper_sm100
 
     @classmethod
