@@ -42,6 +42,7 @@
 #include <transformer_engine/swizzle.h>
 #include <transformer_engine/transformer_engine.h>
 #include <transformer_engine/transpose.h>
+#include <transformer_engine/utils.h>
 
 #include <ATen/cuda/CUDAGraphsUtils.cuh>
 #include <cassert>
@@ -370,6 +371,11 @@ class NVFP4Quantizer : public Quantizer {
  private:
   void quantize_impl(const TensorWrapper& input, TensorWrapper& out,
                      const std::optional<TensorWrapper>& noop_flag, bool compute_amax);
+  void quantize_with_rht_unfused_helper(const TensorWrapper& input, TensorWrapper& out,
+                                        TensorWrapper& rht_output_t_cpp,
+                                        QuantizationConfigWrapper& quant_config,
+                                        QuantizationConfigWrapper& quant_config_columnwise,
+                                        cudaStream_t stream);
 };
 
 std::unique_ptr<Quantizer> convert_quantizer(py::handle quantizer);
