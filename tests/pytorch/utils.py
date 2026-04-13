@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 import subprocess
 from contextlib import contextmanager
 from typing import Optional, Sequence, Tuple, Dict, Any, List
@@ -173,8 +174,8 @@ def skip_unsupported_backward_override(
         pytest.skip(f"{layer_type} does not support NVTE_BACKWARD_OVERRIDE={backward_override}.")
 
 
-# Cached RNG state
-_rng_states: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
+# Cached RNG state (torch CPU, torch CUDA, Python ``random``)
+_rng_states: Optional[Tuple[torch.Tensor, torch.Tensor, Any]] = None
 
 
 def reset_rng_states() -> None:
@@ -183,11 +184,17 @@ def reset_rng_states() -> None:
     if _rng_states is None:
         torch.manual_seed(1234)
         torch.cuda.manual_seed(1234)
-        _rng_states = (torch.get_rng_state(), torch.cuda.get_rng_state())
+        random.seed(1234)
+        _rng_states = (
+            torch.get_rng_state(),
+            torch.cuda.get_rng_state(),
+            random.getstate(),
+        )
     else:
-        cpu_rng_state, cuda_rng_state = _rng_states
+        cpu_rng_state, cuda_rng_state, random_state = _rng_states
         torch.set_rng_state(cpu_rng_state)
         torch.cuda.set_rng_state(cuda_rng_state)
+        random.setstate(random_state)
 
 
 def compare_and_assert(a, b, name_a, name_b, atol, rtol, rmse_tol, is_fp8):

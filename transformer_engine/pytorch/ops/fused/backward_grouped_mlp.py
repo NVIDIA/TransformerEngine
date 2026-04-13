@@ -15,9 +15,6 @@ from typing import Optional
 import torch
 
 import transformer_engine_torch as tex
-from ...cpp_extensions import (
-    general_grouped_gemm_for_grouped_tensor,
-)
 from ...module.base import get_dummy_wgrad
 from ...quantization import Recipe
 from ...tensor.grouped_tensor import GroupedTensor
@@ -28,11 +25,86 @@ from ..basic import GroupedLinear, ScaledClampedQGeGLU, ScaledSwiGLU
 from ..fuser import register_backward_fusion
 from ..op import FusedOperation, FusibleOperation, OperationContext
 from .._common import (
+    _nvidia_cudnn_frontend_supports_wgrad,
     fuse_grouped_mlp_ops,
     maybe_dequantize,
     validate_grouped_mlp_dims,
 )
+from ...cpp_extensions import general_grouped_gemm_for_grouped_tensor
+from ...module.base import _2X_ACC_WGRAD
 from ...triton.grouped_dbias_dscales import _compute_grouped_dbias_dscales
+
+
+def _cudnn_compute_wgrad(
+    grouped_x: GroupedTensor,
+    grouped_dy: GroupedTensor,
+    wgrad_output,
+    weight_shape: tuple,
+    offsets: torch.Tensor,
+    accumulate: bool,
+    wgrad_kernel_fn,
+    single_grouped_weight: bool,
+):
+    """Compute wgrad using the cuDNN CuTe DSL grouped GEMM wgrad kernel.
+
+    The cuDNN wgrad kernel computes:
+        wgrad[e] = a[:, tok_start:tok_end] @ b[tok_start:tok_end, :]
+    where a = DY^T = (out_features, total_tokens) row-major and
+          b = X  = (total_tokens, in_features) column-major.
+    """
+    out_features, in_features = weight_shape
+    total_tokens = grouped_dy.logical_shape[0]
+
+    fp8_dtype = torch.float8_e4m3fn
+
+    # a_tensor = DY^T = (out_features, total_tokens) row-major
+    a_tensor = grouped_dy.columnwise_data.view(dtype=fp8_dtype).view(total_tokens, out_features).T
+    # b_tensor = X = (total_tokens, in_features) column-major
+    b_tensor = grouped_x.columnwise_data.view(dtype=fp8_dtype).view(total_tokens, in_features)
+
+    sfa_tensor = grouped_dy.columnwise_scale_inv.view(out_features, -1).view(
+        dtype=torch.float8_e8m0fnu
+    )
+    sfb_tensor = grouped_x.columnwise_scale_inv.view(in_features, -1).view(
+        dtype=torch.float8_e8m0fnu
+    )
+    offsets_tensor = offsets.to(dtype=torch.int32)
+
+    # Prepare wgrad output
+    if single_grouped_weight:
+        # Dense mode: single (num_groups, out_features, in_features) tensor
+        wgrad_tensor = wgrad_output.rowwise_data.view(
+            offsets_tensor.shape[0], out_features, in_features
+        )
+        wgrad_kernel_fn(
+            a_tensor=a_tensor,
+            b_tensor=b_tensor,
+            sfa_tensor=sfa_tensor,
+            sfb_tensor=sfb_tensor,
+            offsets_tensor=offsets_tensor,
+            output_mode="dense",
+            wgrad_tensor=wgrad_tensor,
+            acc_dtype=torch.float32,
+            wgrad_dtype=wgrad_tensor.dtype,
+            sf_vec_size=MXFP8_BLOCK_SCALING_SIZE,
+            accumulate_on_output=accumulate,
+        )
+    else:
+        # Discrete mode: per-expert wgrad device pointers
+        (wgrad_ptrs,) = tex.convert_host_pointers_to_tensor([wgrad_output])
+        wgrad_kernel_fn(
+            a_tensor=a_tensor,
+            b_tensor=b_tensor,
+            sfa_tensor=sfa_tensor,
+            sfb_tensor=sfb_tensor,
+            offsets_tensor=offsets_tensor,
+            output_mode="discrete",
+            wgrad_ptrs=wgrad_ptrs,
+            acc_dtype=torch.float32,
+            wgrad_dtype=wgrad_output[0].dtype,
+            sf_vec_size=MXFP8_BLOCK_SCALING_SIZE,
+            accumulate_on_output=accumulate,
+        )
 
 
 @functools.lru_cache(maxsize=1)
@@ -61,6 +133,9 @@ def _compute_grad_params(
     bias_grads,
     bias_grad_packed,
     label="",
+    *,
+    cudnn_wgrad_kernel_fn,
+    offsets,
 ):
     """Compute weight gradients and build grad_params for a GroupedLinear layer.
     Returns the grad_params list in parameter registration order.
@@ -131,11 +206,23 @@ def _compute_grad_params(
     if ctx.weight_requires_grad:
         # Launch or defer the GEMM
         delay_wgrad = fc_op.wgrad_store is not None and fc_op.wgrad_store.delay_wgrad_compute()
-        gemm_fn = functools.partial(
-            general_grouped_gemm_for_grouped_tensor,
-            layout="NT",
-            accumulate=accumulate_into_main_grad,
-        )
+        if cudnn_wgrad_kernel_fn is not None:
+            gemm_fn = functools.partial(
+                _cudnn_compute_wgrad,
+                weight_shape=weight_shape,
+                offsets=offsets,
+                accumulate=accumulate_into_main_grad,
+                wgrad_kernel_fn=cudnn_wgrad_kernel_fn,
+                single_grouped_weight=fc_op.single_grouped_weight,
+            )
+        else:
+            gemm_fn = functools.partial(
+                general_grouped_gemm_for_grouped_tensor,
+                layout="NT",
+                accumulate=accumulate_into_main_grad,
+                use_split_accumulator=_2X_ACC_WGRAD,
+            )
+
         if delay_wgrad:
             fc_op.wgrad_store.put([grouped_x, grouped_dy, wgrad_output], gemm_fn)
         else:
@@ -203,6 +290,19 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         from cudnn import grouped_gemm_quant_wrapper_sm100  # pylint: disable=no-name-in-module
 
         return grouped_gemm_quant_wrapper_sm100
+
+    @classmethod
+    @functools.lru_cache(maxsize=None)
+    def grouped_gemm_wgrad_kernel(cls) -> Optional[Callable]:
+        """CuTe DSL kernel for grouped GEMM wgrad on SM100+.
+        Returns ``None`` when the cuDNN front-end package is older than
+        1.23.0.
+        """
+        if not _nvidia_cudnn_frontend_supports_wgrad():
+            return None
+        from cudnn import grouped_gemm_wgrad_wrapper_sm100  # pylint: disable=no-name-in-module
+
+        return grouped_gemm_wgrad_wrapper_sm100
 
     @classmethod
     @functools.lru_cache(maxsize=None)
@@ -399,8 +499,8 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         fc2_dy_scales = fc2_dy_scales.view(dtype=torch.float8_e8m0fnu)
         fc2_dy_scales = fc2_dy_scales.view(
             1,
-            out_shape[0] // 128,
-            out_shape[1] // 128,
+            (out_shape[0] + 127) // 128,
+            (out_shape[1] + 127) // 128,
             MXFP8_BLOCK_SCALING_SIZE,
             4,
             4,
@@ -449,8 +549,8 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
             fc2_w_scales = fc2_weight_for_gemm.columnwise_scale_inv.view(dtype=torch.float8_e8m0fnu)
             fc2_w_scales = fc2_w_scales.view(
                 num_groups,
-                fc2_weight_shape[1] // 128,
-                fc2_weight_shape[0] // 128,
+                (fc2_weight_shape[1] + 127) // 128,
+                (fc2_weight_shape[0] + 127) // 128,
                 MXFP8_BLOCK_SCALING_SIZE,
                 4,
                 4,
@@ -477,10 +577,12 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
 
         fc1_dy_row_data = fc2_dgrad_kernel_out["d_row_tensor"]
         fc1_dy_row_data = fc1_dy_row_data.view(out_shape[0], fc1_weight_shape[0])
-        fc1_dy_row_scale = fc2_dgrad_kernel_out["sfd_row_tensor"]
+        # View scale in their actual swizzled shape
+        fc1_dy_row_scale = fc2_dgrad_kernel_out["sfd_row_tensor"].permute(5, 2, 4, 0, 1, 3).view(-1)
         fc1_dy_col_data = fc2_dgrad_kernel_out["d_col_tensor"]
         fc1_dy_col_data = fc1_dy_col_data.view(out_shape[0], fc1_weight_shape[0])
-        fc1_dy_col_scale = fc2_dgrad_kernel_out["sfd_col_tensor"]
+        # View scale in their actual swizzled shape
+        fc1_dy_col_scale = fc2_dgrad_kernel_out["sfd_col_tensor"].permute(5, 2, 4, 0, 1, 3).view(-1)
         grad_scales = fc2_dgrad_kernel_out["dprob_tensor"].view(-1)
 
         fc2_bias_grads: Optional[list[Optional[torch.Tensor]]] = None
@@ -553,6 +655,8 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
             bias_grads=fc2_bias_grads,
             bias_grad_packed=fc2_bias_grad_packed,
             label="FC2",
+            cudnn_wgrad_kernel_fn=self.grouped_gemm_wgrad_kernel(),
+            offsets=split_points,
         )
 
         # Clear FC2 input tensor if possible
@@ -607,8 +711,8 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
                 )
                 fc1_w_scales = fc1_w_scales.view(
                     num_groups,
-                    fc1_weight_shape[1] // 128,
-                    fc1_weight_shape[0] // 128,
+                    (fc1_weight_shape[1] + 127) // 128,
+                    (fc1_weight_shape[0] + 127) // 128,
                     MXFP8_BLOCK_SCALING_SIZE,
                     4,
                     4,
@@ -648,6 +752,8 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
             bias_grads=fc1_bias_grads,
             bias_grad_packed=fc1_bias_grad_packed,
             label="FC1",
+            cudnn_wgrad_kernel_fn=self.grouped_gemm_wgrad_kernel(),
+            offsets=split_points,
         )
 
         # Clear FC1 input tensor if possible
