@@ -21,9 +21,9 @@ class CusolverMpCtx:
 
     def __init__(self, group: dist.ProcessGroup) -> None:
         self.nranks = dist.get_world_size(group)
-        self._ptr = tex.cusolvermp_ctx_create(_get_nccl_comm_ptr(group),
-                                              dist.get_world_size(group),
-                                              dist.get_rank(group))
+        self._ptr = tex.cusolvermp_ctx_create(
+            _get_nccl_comm_ptr(group), dist.get_world_size(group), dist.get_rank(group)
+        )
 
     def destroy(self) -> None:
         """Destroy the underlying cuSolverMp context."""
