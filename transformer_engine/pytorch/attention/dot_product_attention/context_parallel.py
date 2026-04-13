@@ -2899,7 +2899,6 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             cu_seqlens_q = cu_seqlens_q // (2 * cp_size)
         if qkv_format == "thd":
             cu_seqlens_q_padded = cu_seqlens_q_padded // (2 * cp_size)
-            cu_seqlens_kv_padded = cu_seqlens_kv_padded // (2 * cp_size)
         else:
             cu_seqlens_q_padded = None
 
@@ -2919,10 +2918,10 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             # division by 2*cp_size, which requires divisible values.
             chunk_ids_for_kv_ag = get_seq_chunk_ids_for_reordering_before_attn(cp_size, k.device)
             k_ag = reorder_seq_chunks_after_a2a_before_attn_thd(
-                k_ag, cu_seqlens_kv_padded * 2 * cp_size, chunk_ids_for_kv_ag, cp_size
+                k_ag, cu_seqlens_kv_padded, chunk_ids_for_kv_ag, cp_size
             )
             v_ag = reorder_seq_chunks_after_a2a_before_attn_thd(
-                v_ag, cu_seqlens_kv_padded * 2 * cp_size, chunk_ids_for_kv_ag, cp_size
+                v_ag, cu_seqlens_kv_padded, chunk_ids_for_kv_ag, cp_size
             )
         else:
             # [cp, s, b, h, d] -> [cp*2, s//2, b, h, d]
@@ -2981,7 +2980,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             # and vary cu_seqlens_q_padded to point kernel at the correct chunk.
             # cuDNN uses back-padding (valid tokens at beginning of padded allocation).
             padded_chunk_sizes_q = cu_seqlens_q_padded[1:] - cu_seqlens_q_padded[:-1]
-            actual_seqlens_kv = cu_seqlens_kv_original[1:] - cu_seqlens_kv_original[:-1]
+
             # Step 0: kernel reads from start of each seq's 2-chunk allocation (first chunk)
             # Step 1: kernel reads from midpoint of each seq's allocation (second chunk)
             thd_cu_seqlens_q_padded_per_step = [cu_seqlens_q_padded_rank, None]
@@ -2990,20 +2989,20 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
 
             # Per-step KV cu_seqlens (non-padded): how many actual KV tokens are
             # visible for each sequence.
-            padded_chunk_sizes_kv = cu_seqlens_kv_padded[1:] - cu_seqlens_kv_padded[:-1]
-            thd_cu_seqlens_kv_per_step = [
-                cu_seqlens_q_original.clone(),
-                cu_seqlens_q_original.clone(),
-            ]
-            for step_idx in range(2):
-                if causal:
-                    # Causal: visible KV covers chunks 0..chunk_id
-                    chunk_id = local_seq_chunk_ids[step_idx]
-                    visible_padded = padded_chunk_sizes_kv * (chunk_id + 1)
-                    visible_actual = torch.minimum(actual_seqlens_kv, visible_padded)
-                    cs = torch.zeros_like(cu_seqlens_kv_original)
-                    cs[1:] = visible_actual.cumsum(0)
-                    thd_cu_seqlens_kv_per_step[step_idx] = cs
+            actual_seqlens_kv = cu_seqlens_kv_original[1:] - cu_seqlens_kv_original[:-1]
+            padded_chunk_sizes_kv = (cu_seqlens_kv_padded[1:] - cu_seqlens_kv_padded[:-1]) // (2 * cp_size)
+            thd_cu_seqlens_kv_per_step = [cu_seqlens_kv_original.clone(), cu_seqlens_kv_original.clone()]
+
+            if causal:
+                # Causal: visible KV covers chunks 0..chunk_id
+                # chunk_id = local_seq_chunk_ids[step_idx]
+                visible_padded = [padded_chunk_sizes_kv * (chunk_id + 1) for chunk_id in local_seq_chunk_ids]
+                # [AG+THD] Is this needed?
+                visible_actual = [torch.minimum(actual_seqlens_kv, visible_padded_split) for visible_padded_split in visible_padded]
+                thd_cu_seqlens_kv_per_step = [torch.zeros_like(cu_seqlens_kv_original) for _ in range(2)]
+                # Adjust chunks for each step
+                thd_cu_seqlens_kv_per_step[0][1:] = visible_actual[0].cumsum(0)
+                thd_cu_seqlens_kv_per_step[1][1:] = visible_actual[1].cumsum(0)
 
         for i in range(len(local_seq_chunk_ids) + 1):
             if i < len(local_seq_chunk_ids):
