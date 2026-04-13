@@ -65,7 +65,6 @@ from transformer_engine.pytorch.export import onnx_export
 from transformer_engine.pytorch.cross_entropy import parallel_cross_entropy
 from transformer_engine.pytorch.newton_schulz import (
     CusolverMpCtx,
-    cusolvermp_ctx_create,
     newton_schulz,
 )
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage

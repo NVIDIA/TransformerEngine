@@ -15,7 +15,7 @@ import torch.distributed as dist
 from torch.distributed.elastic.multiprocessing.errors import record
 
 from transformer_engine.pytorch.newton_schulz import (
-    cusolvermp_ctx_create,
+    CusolverMpCtx,
     get_coefficients,
     newton_schulz,
 )
@@ -82,8 +82,7 @@ def main():
     local_cols = n // world_size
     x_local = A[:, rank * local_cols : (rank + 1) * local_cols].contiguous()
 
-    group = dist.group.WORLD
-    ctx = cusolvermp_ctx_create(group)
+    ctx = CusolverMpCtx(dist.group.WORLD)
     try:
         newton_schulz(x_local, ctx, args.num_iterations, coefficients=coefficients)
     finally:

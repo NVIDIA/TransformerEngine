@@ -16,16 +16,14 @@ class CusolverMpCtx:
     """cuSolverMp context for Newton-Schulz matrix orthogonalization.
 
     Context creation is expensive; create once and reuse across multiple
-    :func:`newton_schulz` calls.  Call :meth:`destroy` when done, or use as a
-    context manager::
-
-        with te.cusolvermp_ctx_create(group) as ctx:
-            te.newton_schulz(x, ctx)
+    :func:`newton_schulz` calls.  Call :meth:`destroy` when done.
     """
 
-    def __init__(self, ptr: int, nranks: int) -> None:
-        self._ptr = ptr
-        self.nranks = nranks
+    def __init__(self, group: dist.ProcessGroup) -> None:
+        self.nranks = dist.get_world_size(group)
+        self._ptr = tex.cusolvermp_ctx_create(_get_nccl_comm_ptr(group),
+                                              dist.get_world_size(group),
+                                              dist.get_rank(group))
 
     def destroy(self) -> None:
         """Destroy the underlying cuSolverMp context."""
@@ -37,12 +35,6 @@ class CusolverMpCtx:
         # Called when the context is manually destroyed or during Python teardown
         self.destroy()
 
-    def __enter__(self) -> "CusolverMpCtx":
-        return self
-
-    def __exit__(self, *_) -> None:
-        self.destroy()
-
 
 def _get_nccl_comm_ptr(group: dist.ProcessGroup) -> int:
     """Extract the raw NCCL communicator pointer from a PyTorch process group."""
@@ -51,31 +43,6 @@ def _get_nccl_comm_ptr(group: dist.ProcessGroup) -> int:
         raise RuntimeError(f"Newton-Schulz requires NCCL backend, got '{backend}'")
     nccl_backend = group._get_backend(torch.device("cuda"))
     return nccl_backend._comm_ptr()
-
-
-def cusolvermp_ctx_create(group: dist.ProcessGroup) -> CusolverMpCtx:
-    """Create a cuSolverMp context for Newton-Schulz matrix orthogonalization.
-
-    Context creation is expensive; callers should create the context once and
-    reuse it across multiple :func:`newton_schulz` calls.  The context must be
-    destroyed with :meth:`CusolverMpCtx.destroy` (or used as a context manager)
-    when it is no longer needed.
-
-    Parameters
-    ----------
-    group : torch.distributed.ProcessGroup
-        Process group with NCCL backend for distributed communication.
-
-    Returns
-    -------
-    CusolverMpCtx
-        Context to be passed to :func:`newton_schulz`.
-    """
-    nccl_comm_ptr = _get_nccl_comm_ptr(group)
-    nranks = dist.get_world_size(group)
-    rank = dist.get_rank(group)
-    ptr = tex.cusolvermp_ctx_create(nccl_comm_ptr, nranks, rank)
-    return CusolverMpCtx(ptr, nranks)
 
 
 def get_coefficients(num_iterations: int) -> List[float]:
