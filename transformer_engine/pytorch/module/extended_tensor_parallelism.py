@@ -644,11 +644,11 @@ class ETPShardedParam(torch.nn.Parameter):
                 cache.release(w._ag_ticket_fwd)
 
             self.prefetch_initialized = True
+            chain['last_weight'] = self
         elif not chain['link_table_flushed'] and chain['link_table_buffer']:
             # Second forward pass: flush the complete table atomically to avoid interleaving
             chain['link_table_flushed'] = True
             print_rank_0("\n".join(chain['link_table_buffer']) + "\n")
-        chain['last_weight'] = self
 
         return result
 
