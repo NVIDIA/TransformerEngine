@@ -6,11 +6,13 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 import subprocess
 from contextlib import contextmanager
 from typing import Optional, Sequence, Tuple, Dict, Any, List
 from packaging.version import Version as PkgVersion
 
+import pytest
 import torch
 
 import transformer_engine
@@ -118,7 +120,7 @@ def quantization_tols(name: str) -> dict[str, float]:
     raise ValueError(f"Unsupported quantization scheme ({name})")
 
 
-def make_recipe(name: Optional[str]) -> Optional[Recipe]:
+def make_recipe(name: Optional[str], **recipe_kwargs: Any) -> Optional[Recipe]:
     """Make recipe for quantization scheme"""
     if name is None:
         return None
@@ -126,28 +128,54 @@ def make_recipe(name: Optional[str]) -> Optional[Recipe]:
         return transformer_engine.common.recipe.DelayedScaling(
             fp8_format=transformer_engine.common.recipe.Format.E4M3,
             amax_history_len=8,
+            **recipe_kwargs,
         )
     if name == "fp8_current_scaling":
         return transformer_engine.common.recipe.Float8CurrentScaling(
             fp8_format=transformer_engine.common.recipe.Format.E4M3,
+            **recipe_kwargs,
         )
     if name == "mxfp8":
         return transformer_engine.common.recipe.MXFP8BlockScaling(
             fp8_format=transformer_engine.common.recipe.Format.E4M3,
+            **recipe_kwargs,
         )
     if name == "fp8_block_scaling":
-        return transformer_engine.common.recipe.Float8BlockScaling()
+        return transformer_engine.common.recipe.Float8BlockScaling(**recipe_kwargs)
     if name == "nvfp4":
         return transformer_engine.common.recipe.NVFP4BlockScaling(
             disable_rht=True,
             disable_stochastic_rounding=True,
             disable_2d_quantization=True,
+            **recipe_kwargs,
         )
     raise ValueError(f"Unsupported quantization scheme ({name})")
 
 
-# Cached RNG state
-_rng_states: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
+def skip_unsupported_backward_override(
+    layer_type: str,
+    quant_recipe: Optional[Recipe],
+    backward_override: Optional[str],
+) -> None:
+    """Skip known unsupported layer/recipe/backward-override combinations used in tests."""
+    if backward_override is None:
+        return
+    if quant_recipe is None and backward_override is not None:
+        pytest.skip(f"Not a quantized recipe, cannot use backward override {backward_override}.")
+    if quant_recipe.delayed() and backward_override is not None:
+        pytest.skip(f"Delayed scaling does not support backward override {backward_override}.")
+    if layer_type in (
+        "layernorm_mlp",
+        "layernorm_mlp_nocheckpoint",
+        "layernorm_mlp_checkpoint",
+        "transformer",
+        "transformer_layer",
+    ):
+        pytest.skip(f"{layer_type} does not support NVTE_BACKWARD_OVERRIDE={backward_override}.")
+
+
+# Cached RNG state (torch CPU, torch CUDA, Python ``random``)
+_rng_states: Optional[Tuple[torch.Tensor, torch.Tensor, Any]] = None
 
 
 def reset_rng_states() -> None:
@@ -156,11 +184,17 @@ def reset_rng_states() -> None:
     if _rng_states is None:
         torch.manual_seed(1234)
         torch.cuda.manual_seed(1234)
-        _rng_states = (torch.get_rng_state(), torch.cuda.get_rng_state())
+        random.seed(1234)
+        _rng_states = (
+            torch.get_rng_state(),
+            torch.cuda.get_rng_state(),
+            random.getstate(),
+        )
     else:
-        cpu_rng_state, cuda_rng_state = _rng_states
+        cpu_rng_state, cuda_rng_state, random_state = _rng_states
         torch.set_rng_state(cpu_rng_state)
         torch.cuda.set_rng_state(cuda_rng_state)
+        random.setstate(random_state)
 
 
 def compare_and_assert(a, b, name_a, name_b, atol, rtol, rmse_tol, is_fp8):

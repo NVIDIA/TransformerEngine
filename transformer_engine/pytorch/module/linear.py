@@ -7,6 +7,7 @@ from typing import Callable, Dict, Optional, Tuple, Union, List
 from functools import reduce
 from operator import mul as multiply_op
 import warnings
+import weakref
 
 import torch
 
@@ -128,6 +129,12 @@ class _Linear(torch.autograd.Function):
             save_original_input,
             debug,
         ) = non_tensor_args
+        if fp8:
+            backward_override = FP8GlobalStateManager.get_fp8_recipe().backward_override
+        else:
+            backward_override = None
+        if backward_override == "high_precision":
+            save_original_input = True
 
         # NVTX label for profiling
         nvtx_label = "transformer_engine._Linear.forward"
@@ -187,7 +194,10 @@ class _Linear(torch.autograd.Function):
                     raise ValueError("Missing quantizer for input tensor")
                 if not isinstance(inputmat, QuantizedTensorStorage) and not custom:
                     own_quantized_input = True
-                    input_quantizer.set_usage(rowwise=True, columnwise=backward_needs_input)
+                    input_quantizer.set_usage(
+                        rowwise=True,
+                        columnwise=backward_needs_input and backward_override is None,
+                    )
                     if isinstance(
                         input_quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)
                     ):
@@ -229,7 +239,12 @@ class _Linear(torch.autograd.Function):
                     if input_quantizer is None:
                         raise ValueError("Missing quantizer for input tensor")
                     input_quantizer.set_usage(
-                        rowwise=True, columnwise=backward_needs_input and not save_original_input
+                        rowwise=True,
+                        columnwise=(
+                            backward_needs_input
+                            and not save_original_input
+                            and backward_override is None
+                        ),
                     )
                     inputmat = input_quantizer(inputmat)
                     own_quantized_input = True
@@ -254,6 +269,8 @@ class _Linear(torch.autograd.Function):
             # for debug mode we create quantizer every iteration, thus we need to set the quantizer states
             if weight_quantizer is not None and (not isinstance(weight, QuantizedTensor) or debug):
                 columnwise_usage = is_grad_enabled and inp.requires_grad
+                if backward_override is not None:
+                    columnwise_usage = False
                 if not columnwise_usage:
                     columnwise_usage = (
                         is_fp8_activation_recompute_enabled()
@@ -387,7 +404,11 @@ class _Linear(torch.autograd.Function):
                 and own_quantized_input
                 and isinstance(inputmat, QuantizedTensorStorage)
             ):
-                if (
+                if backward_override is not None:
+                    # In dequantized mode we should dequantize directly from the
+                    # fprop quantized tensor layout without retargeting usage.
+                    inputmat.update_usage(rowwise_usage=True, columnwise_usage=False)
+                elif (
                     ctx.backward_input_needs_gather
                     and weight_quantizer.supports_only_rowwise_all_gather()
                 ):
@@ -417,16 +438,6 @@ class _Linear(torch.autograd.Function):
             nvtx_range_pop(f"{nvtx_label}.fsdp_scatter")
 
             if cpu_offloading:
-                ctx.grad_added_to_main_grad = hasattr(weight, "grad_added_to_main_grad")
-
-                if ctx.grad_added_to_main_grad:
-                    # If you are passing torch.nn.Parameter through the Torch hooks, you will
-                    # get back torch.Tensor. Torch rips off the Parameter wrapper.
-                    # You need to preserve the weight object to have all the attributes user
-                    # sets for the weights. Because of this, it is not recommended to offload
-                    # weights if weights are externally touched outside this module
-                    ctx.weight_object = weight
-
                 mark_not_offload(weight, weightmat, bias)
 
             # TODO(ksivamani): Check memory usage
@@ -442,12 +453,20 @@ class _Linear(torch.autograd.Function):
             ctx.activation_dtype = activation_dtype
             ctx.fp8 = fp8
             ctx.fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
+            ctx.backward_override = backward_override
             ctx.input_quantizer = input_quantizer
             ctx.grad_input_quantizer = grad_input_quantizer
             ctx.grad_weight_quantizer = grad_weight_quantizer
             ctx.grad_output_quantizer = grad_output_quantizer
+            ctx.is_weight_param_quantized = isinstance(weight, QuantizedTensorStorage)
             ctx.fuse_wgrad_accumulation = fuse_wgrad_accumulation
             if fuse_wgrad_accumulation and weight.requires_grad:
+                # Keep a weakref to the original Python object because save_for_backward
+                # may return a plain Tensor without custom Parameter attributes.
+                ctx.origin_weight_ref = weakref.ref(weight)
+                ctx.origin_weight_overwrites_main_grad = getattr(
+                    weight, "overwrite_main_grad", False
+                )
                 # This check is needed to ensure that main_grad is not created
                 # during the forward pass when using MCore FSDP as it creates
                 # the main_grad buffer lazily before backprop
@@ -485,6 +504,19 @@ class _Linear(torch.autograd.Function):
                     FP8GlobalStateManager.IS_FIRST_FP8_MODULE = _first_fp8_module
             ctx.wgrad_store = wgrad_store
 
+            # backward overrides
+            if backward_override is not None:
+                ctx.fp8 = False
+                ctx.debug = False
+                ctx.ub_overlap_ag = False
+                ctx.ub_overlap_rs_dgrad = False
+                ctx.ub_bulk_dgrad = False
+                ctx.ub_bulk_wgrad = False
+                ctx.grad_input_quantizer = None
+                ctx.grad_weight_quantizer = None
+                ctx.grad_output_quantizer = None
+                ctx.reduce_and_update_bwd_fp8_tensors = False
+
         # ------------------------------------------------------
         # Cached state for backward pass is ready...
         # ------------------------------------------------------
@@ -501,22 +533,34 @@ class _Linear(torch.autograd.Function):
             nvtx_label = f"{nvtx_label}.{ctx.ub_name}"
 
         with get_nvtx_range_context("_Linear_backward"):
-            inputmat, weight_fp8, weight, bias = (  # pylint: disable=unbalanced-tuple-unpacking
-                restore_from_func_ctx(ctx)
+            (
+                inputmat,
+                weight_fp8,
+                saved_weight,
+                bias,
+            ) = restore_from_func_ctx(  # pylint: disable=unbalanced-tuple-unpacking
+                ctx
             )
 
-            # Since main_grad can be modified inplace, it should not be a part of saved_tensors
-            main_grad = (
-                ctx.main_grad_func()
-                if weight is not None and ctx.fuse_wgrad_accumulation and ctx.requires_wgrad
-                else None
+            # Restore from weakref to get original weight python object
+            # (preserves attributes like main_grad, grad_added_to_main_grad, etc.)
+            origin_weight_python_object = None
+            origin_weight_overwrites_main_grad = getattr(
+                ctx, "origin_weight_overwrites_main_grad", False
             )
-
-            if ctx.cpu_offloading:
-                if ctx.grad_added_to_main_grad:
-                    weight = ctx.weight_object
-            if ctx.requires_wgrad and ctx.fuse_wgrad_accumulation:
-                weight.main_grad = main_grad
+            main_grad = None
+            if ctx.fuse_wgrad_accumulation and ctx.requires_wgrad:
+                origin_weight_ref = ctx.origin_weight_ref
+                ctx.origin_weight_ref = None
+                origin_weight_python_object = (
+                    origin_weight_ref() if origin_weight_ref is not None else None
+                )
+                assert (
+                    origin_weight_python_object is not None
+                ), "weight was removed while fuse_wgrad_accumulation=True"
+                # Since main_grad can be modified inplace, it should not be a part of saved_tensors
+                main_grad = ctx.main_grad_func()
+                origin_weight_python_object.main_grad = main_grad
 
             # Gather intermediate/activation tensors if needed
             # NOTE: weight_fp8 = weight when ctx.fp8 == False and torch.disttributed.FSDP already
@@ -684,8 +728,10 @@ class _Linear(torch.autograd.Function):
                 # Make sure required data is available
                 if isinstance(grad_output, QuantizedTensorStorage):
                     grad_output.update_usage(rowwise_usage=True)
-                if ctx.weight_quantizer is not None and isinstance(
-                    weight_fp8, QuantizedTensorStorage
+                if (
+                    ctx.fp8
+                    and ctx.weight_quantizer is not None
+                    and isinstance(weight_fp8, QuantizedTensorStorage)
                 ):
                     weight_fp8.update_usage(columnwise_usage=True)
 
@@ -714,8 +760,18 @@ class _Linear(torch.autograd.Function):
                 # Note: dx = dy * w
 
                 nvtx_range_push(f"{nvtx_label}.dgrad_gemm")
+                weight_for_dgrad = weight_fp8
+                if ctx.backward_override == "dequantized":
+                    if isinstance(weight_for_dgrad, QuantizedTensorStorage):
+                        weight_for_dgrad = weight_for_dgrad.dequantize(dtype=ctx.activation_dtype)
+                    else:
+                        weight_for_dgrad = cast_if_needed(weight_for_dgrad, ctx.activation_dtype)
+                elif ctx.backward_override == "high_precision":
+                    weight_for_dgrad = saved_weight
+                    if isinstance(weight_for_dgrad, QuantizedTensorStorage):
+                        weight_for_dgrad = weight_for_dgrad.dequantize(dtype=ctx.activation_dtype)
                 gemm_out, *_, reduce_scatter_out = general_gemm(
-                    weight_fp8,
+                    weight_for_dgrad,
                     grad_output,
                     layout="NN",
                     grad=True,
@@ -848,7 +904,7 @@ class _Linear(torch.autograd.Function):
                     "quantization_params": ctx.grad_weight_quantizer,
                     "accumulate": (
                         accumulate_wgrad_into_param_main_grad
-                        if not getattr(weight, "overwrite_main_grad", False)
+                        if not origin_weight_overwrites_main_grad
                         else False
                     ),
                     "layout": "NT",
@@ -938,22 +994,20 @@ class _Linear(torch.autograd.Function):
 
         if ctx.requires_wgrad:
             # Handle custom DDP from mcore.
-            if (
-                ctx.fuse_wgrad_accumulation
-                and weight is not None
-                and hasattr(weight, "grad_added_to_main_grad")
+            if ctx.fuse_wgrad_accumulation and hasattr(
+                origin_weight_python_object, "grad_added_to_main_grad"
             ):
-                weight.grad_added_to_main_grad = True
-                if getattr(weight, "zero_out_wgrad", False):
+                origin_weight_python_object.grad_added_to_main_grad = True
+                if getattr(origin_weight_python_object, "zero_out_wgrad", False):
                     wgrad = get_dummy_wgrad(
-                        list(weight.main_grad.shape),
-                        weight.dtype,
+                        list(main_grad.shape),
+                        origin_weight_python_object.dtype,
                         zero=True,
                     )
                 else:
                     wgrad = get_dummy_wgrad(
-                        list(weight.main_grad.shape),
-                        weight.dtype,
+                        list(main_grad.shape),
+                        origin_weight_python_object.dtype,
                     )
             elif ctx.fuse_wgrad_accumulation:
                 wgrad = None
@@ -967,7 +1021,7 @@ class _Linear(torch.autograd.Function):
             nvtx_range_pop(f"{nvtx_label}.reduce_and_update_fp8_tensors")
 
         # Scatter fp8 weight buffers
-        if ctx.fp8 and not isinstance(weight, QuantizedTensorStorage):
+        if ctx.fp8 and not ctx.is_weight_param_quantized:
             _fsdp_scatter_tensors(ctx.fsdp_group, weight_fp8)
         return (
             wgrad,
@@ -1490,6 +1544,13 @@ class Linear(TransformerEngineBaseModule):
                 grad_output_quantizer.optimize_for_gemm = True
             if fp8_grad:
                 grad_input_quantizer = self.quantizers["scaling_bwd"][FP8BwdTensorIdx.GRAD_INPUT1]
+        fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
+        if fp8_recipe.backward_override == "dequantized" and (
+            fp8_recipe.mxfp8() or fp8_recipe.nvfp4()
+        ):
+            input_quantizer.optimize_for_gemm = False
+            if grad_output_quantizer is not None:
+                grad_output_quantizer.optimize_for_gemm = False
         return (
             input_quantizer,
             weight_quantizer,
