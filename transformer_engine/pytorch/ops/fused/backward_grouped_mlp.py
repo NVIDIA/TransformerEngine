@@ -25,10 +25,13 @@ from ..basic import GroupedLinear, ScaledClampedQGeGLU, ScaledSwiGLU
 from ..fuser import register_backward_fusion
 from ..op import FusedOperation, FusibleOperation, OperationContext
 from .._common import (
+    _nvidia_cudnn_frontend_supports_wgrad,
     fuse_grouped_mlp_ops,
     maybe_dequantize,
     validate_grouped_mlp_dims,
 )
+from ...cpp_extensions import general_grouped_gemm_for_grouped_tensor
+from ...module.base import _2X_ACC_WGRAD
 from ...triton.grouped_dbias_dscales import _compute_grouped_dbias_dscales
 
 
@@ -203,14 +206,22 @@ def _compute_grad_params(
     if ctx.weight_requires_grad:
         # Launch or defer the GEMM
         delay_wgrad = fc_op.wgrad_store is not None and fc_op.wgrad_store.delay_wgrad_compute()
-        gemm_fn = functools.partial(
-            _cudnn_compute_wgrad,
-            weight_shape=weight_shape,
-            offsets=offsets,
-            accumulate=accumulate_into_main_grad,
-            wgrad_kernel_fn=cudnn_wgrad_kernel_fn,
-            single_grouped_weight=fc_op.single_grouped_weight,
-        )
+        if cudnn_wgrad_kernel_fn is not None:
+            gemm_fn = functools.partial(
+                _cudnn_compute_wgrad,
+                weight_shape=weight_shape,
+                offsets=offsets,
+                accumulate=accumulate_into_main_grad,
+                wgrad_kernel_fn=cudnn_wgrad_kernel_fn,
+                single_grouped_weight=fc_op.single_grouped_weight,
+            )
+        else:
+            gemm_fn = functools.partial(
+                general_grouped_gemm_for_grouped_tensor,
+                layout="NT",
+                accumulate=accumulate_into_main_grad,
+                use_split_accumulator=_2X_ACC_WGRAD,
+            )
 
         if delay_wgrad:
             fc_op.wgrad_store.put([grouped_x, grouped_dy, wgrad_output], gemm_fn)
@@ -277,15 +288,18 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
     def grouped_gemm_quant_kernel(cls) -> Callable:
         """Grouped GEMM quant kernel for block-scaled inputs."""
         from cudnn import grouped_gemm_quant_wrapper_sm100  # pylint: disable=no-name-in-module
-
         return grouped_gemm_quant_wrapper_sm100
 
     @classmethod
     @functools.lru_cache(maxsize=None)
-    def grouped_gemm_wgrad_kernel(cls) -> Callable:
-        """CuTe DSL kernel for grouped GEMM wgrad on SM100+."""
+    def grouped_gemm_wgrad_kernel(cls) -> Optional[Callable]:
+        """CuTe DSL kernel for grouped GEMM wgrad on SM100+.
+        Returns ``None`` when the cuDNN front-end package is older than
+        1.23.0.
+        """
+        if not _nvidia_cudnn_frontend_supports_wgrad():
+            return None
         from cudnn import grouped_gemm_wgrad_wrapper_sm100  # pylint: disable=no-name-in-module
-
         return grouped_gemm_wgrad_wrapper_sm100
 
     @classmethod
@@ -299,7 +313,6 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         try:
             cls.grouped_gemm_dglu_kernel()
             cls.grouped_gemm_quant_kernel()
-            cls.grouped_gemm_wgrad_kernel()
         except ImportError:
             return False
         return True

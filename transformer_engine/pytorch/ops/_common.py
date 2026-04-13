@@ -29,6 +29,15 @@ def _nvidia_cudnn_frontend_supports_scaled_clamped_qgeglu() -> bool:
         return False
 
 
+@functools.lru_cache(maxsize=1)
+def _nvidia_cudnn_frontend_supports_wgrad() -> bool:
+    """Check cuDNN FE min version for grouped GEMM wgrad kernel."""
+    try:
+        return PkgVersion(get_pkg_version("nvidia-cudnn-frontend")) >= PkgVersion("1.23.0")
+    except PackageNotFoundError:
+        return False
+
+
 def is_quantized_tensor(tensor: torch.Tensor | QuantizedTensorStorage) -> bool:
     """Check if tensor is a quantized tensor"""
     return isinstance(tensor, QuantizedTensorStorage)
