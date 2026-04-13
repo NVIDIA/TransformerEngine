@@ -831,24 +831,13 @@ class _Linear(torch.autograd.Function):
                 )
                 nvtx_range_pop(f"{nvtx_label}.dgrad_gemm")
 
-                # FSDP2: Clear FP8 transpose cache after dgrad GEMM.
-                # (Issue #2717)
-                if getattr(ctx, "is_fsdp2", False) and hasattr(
-                    weight_fp8, "_transpose"
-                ):
-                    if getattr(weight_fp8, "_transpose", None) is not None:
-                        weight_fp8._transpose = None
-                        weight_fp8._transpose_invalid = True
-                # FSDP2: Clear blockwise columnwise caches after dgrad GEMM.
+                # FSDP2: Clear columnwise/transpose caches after dgrad GEMM
+                # to prevent them from persisting on the all-gathered buffer.
                 # (Issues #2681, #2717)
-                if getattr(ctx, "is_fsdp2", False) and hasattr(
-                    weight_fp8, "_columnwise_data"
+                if getattr(ctx, "is_fsdp2", False) and isinstance(
+                    weight_fp8, QuantizedTensorStorage
                 ):
-                    if getattr(weight_fp8, "_columnwise_data", None) is not None:
-                        weight_fp8._columnwise_data = None
-                        weight_fp8._columnwise_scale_inv = None
-                        if hasattr(weight_fp8, "_amax_columnwise"):
-                            weight_fp8._amax_columnwise = None
+                    weight_fp8.update_usage(columnwise_usage=False)
 
                 # Prepare grad input tensor
                 # Note: Perform tensor-parallel communication

@@ -1238,22 +1238,13 @@ class _LayerNormMLP(torch.autograd.Function):
                 ub_type=tex.CommOverlapType.AG if ctx.ub_overlap_ag else None,
             )
 
-            # FSDP2: Clear FP8 transpose cache after FC2 dgrad GEMM.
-            # (Issue #2717)
-            if getattr(ctx, "fsdp2_skip_columnwise", False) and hasattr(fc2_weight, "_transpose"):
-                if getattr(fc2_weight, "_transpose", None) is not None:
-                    fc2_weight._transpose = None
-                    fc2_weight._transpose_invalid = True
-            # FSDP2: Clear blockwise columnwise caches after FC2 dgrad GEMM.
+            # FSDP2: Clear columnwise/transpose caches after FC2 dgrad GEMM
+            # to prevent them from persisting on the all-gathered buffer.
             # (Issues #2681, #2717)
-            if getattr(ctx, "fsdp2_skip_columnwise", False) and hasattr(
-                fc2_weight, "_columnwise_data"
+            if getattr(ctx, "fsdp2_skip_columnwise", False) and isinstance(
+                fc2_weight, QuantizedTensorStorage
             ):
-                if getattr(fc2_weight, "_columnwise_data", None) is not None:
-                    fc2_weight._columnwise_data = None
-                    fc2_weight._columnwise_scale_inv = None
-                    if hasattr(fc2_weight, "_amax_columnwise"):
-                        fc2_weight._amax_columnwise = None
+                fc2_weight.update_usage(columnwise_usage=False)
 
             # Prepare input grad tensor
             dact = None
@@ -1524,22 +1515,13 @@ class _LayerNormMLP(torch.autograd.Function):
                 bulk_overlap=ctx.ub_bulk_dgrad,
             )
 
-            # FSDP2: Clear FP8 transpose cache after FC1 dgrad GEMM.
-            # (Issue #2717)
-            if getattr(ctx, "fsdp2_skip_columnwise", False) and hasattr(fc1_weight, "_transpose"):
-                if getattr(fc1_weight, "_transpose", None) is not None:
-                    fc1_weight._transpose = None
-                    fc1_weight._transpose_invalid = True
-            # FSDP2: Clear blockwise columnwise caches after FC1 dgrad GEMM.
+            # FSDP2: Clear columnwise/transpose caches after FC1 dgrad GEMM
+            # to prevent them from persisting on the all-gathered buffer.
             # (Issues #2681, #2717)
-            if getattr(ctx, "fsdp2_skip_columnwise", False) and hasattr(
-                fc1_weight, "_columnwise_data"
+            if getattr(ctx, "fsdp2_skip_columnwise", False) and isinstance(
+                fc1_weight, QuantizedTensorStorage
             ):
-                if getattr(fc1_weight, "_columnwise_data", None) is not None:
-                    fc1_weight._columnwise_data = None
-                    fc1_weight._columnwise_scale_inv = None
-                    if hasattr(fc1_weight, "_amax_columnwise"):
-                        fc1_weight._amax_columnwise = None
+                fc1_weight.update_usage(columnwise_usage=False)
 
             # Prepare grad input tensor
             # Note: Perform tensor-parallel communication

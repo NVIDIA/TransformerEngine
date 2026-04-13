@@ -274,6 +274,18 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
         scaling kernels, so this function only disables usages.
         """
 
+        # Fast path: clear one dimension without touching the other.
+        # Avoids resolving None to a boolean and hitting assertions
+        # when the other dimension's data is missing (e.g., FSDP2 cleanup).
+        if columnwise_usage is False and rowwise_usage is None:
+            self._columnwise_data = None
+            self._columnwise_scale_inv = None
+            return
+        if rowwise_usage is False and columnwise_usage is None:
+            self._rowwise_data = None
+            self._rowwise_scale_inv = None
+            return
+
         # Default usage is based on available data
         if rowwise_usage is None:
             rowwise_usage = self._rowwise_data is not None

@@ -771,13 +771,15 @@ class _LayerNormLinear(torch.autograd.Function):
 
             # FSDP2: Re-create workspace from all-gathered weight when
             # workspace was not saved. (Issue #2681)
+            # Use saved_weight (the original weight parameter) since
+            # origin_weight is only set when fuse_wgrad_accumulation=True.
             if weight is None:
-                if isinstance(origin_weight, QuantizedTensorStorage):
-                    origin_weight.update_usage(columnwise_usage=True)
-                    weight = origin_weight
+                if isinstance(saved_weight, QuantizedTensorStorage):
+                    saved_weight.update_usage(columnwise_usage=True)
+                    weight = saved_weight
                 elif ctx.weight_quantizer is not None:
                     ctx.weight_quantizer.set_usage(rowwise=True, columnwise=True)
-                    weight = ctx.weight_quantizer(origin_weight)
+                    weight = ctx.weight_quantizer(saved_weight)
 
             # Make sure required data is available
             if isinstance(grad_output, QuantizedTensorStorage):
@@ -839,23 +841,11 @@ class _LayerNormLinear(torch.autograd.Function):
             )
             nvtx_range_pop(f"{nvtx_label}.dgrad_gemm")
 
-            # FSDP2: Clear FP8 transpose cache after dgrad GEMM. (Issue #2717)
-            if getattr(ctx, "is_fsdp2", False) and hasattr(
-                weight, "_transpose"
-            ):
-                if getattr(weight, "_transpose", None) is not None:
-                    weight._transpose = None
-                    weight._transpose_invalid = True
-            # FSDP2: Clear blockwise columnwise caches after dgrad GEMM.
+            # FSDP2: Clear columnwise/transpose caches after dgrad GEMM
+            # to prevent them from persisting on the all-gathered buffer.
             # (Issues #2681, #2717)
-            if getattr(ctx, "is_fsdp2", False) and hasattr(
-                weight, "_columnwise_data"
-            ):
-                if getattr(weight, "_columnwise_data", None) is not None:
-                    weight._columnwise_data = None
-                    weight._columnwise_scale_inv = None
-                    if hasattr(weight, "_amax_columnwise"):
-                        weight._amax_columnwise = None
+            if getattr(ctx, "is_fsdp2", False) and isinstance(weight, QuantizedTensorStorage):
+                weight.update_usage(columnwise_usage=False)
 
             # Prepare grad input tensor
             # Note: Perform tensor-parallel communication
