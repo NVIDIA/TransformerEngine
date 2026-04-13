@@ -15,6 +15,17 @@ namespace transformer_engine::pytorch {
 
 namespace {
 
+/*! @brief Resolve an optional device to a concrete CUDA device
+ *
+ * If no device is provided, uses the current CUDA device.
+ */
+at::Device resolve_device(std::optional<at::Device> device) {
+  if (device.has_value()) {
+    return *device;
+  }
+  return at::Device(torch::kCUDA, c10::cuda::current_device());
+}
+
 /*! @brief Transposed tensor shape
  *
  * The tensor is interpreted as a 2D matrix by flattening all but the
@@ -128,9 +139,10 @@ Float8Quantizer::Float8Quantizer(const py::handle& quantizer) : Quantizer(quanti
   this->dtype = type;
 }
 
-std::pair<TensorWrapper, py::object> NoneQuantizer::create_tensor(const std::vector<size_t>& shape,
-                                                                  DType dtype, at::Device device,
-                                                                  bool pin_memory) const {
+std::pair<TensorWrapper, py::object> NoneQuantizer::create_tensor(
+    const std::vector<size_t>& shape, DType dtype, std::optional<at::Device> device_opt,
+    bool pin_memory) const {
+  const auto device = resolve_device(device_opt);
   const std::vector<int64_t> shape_int64(shape.begin(), shape.end());
   const auto opts =
       at::TensorOptions().dtype(GetATenDType(dtype)).device(device).pinned_memory(pin_memory);
@@ -241,7 +253,9 @@ void Float8Quantizer::set_quantization_params(TensorWrapper* tensor) const {
 }
 
 std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
-    const std::vector<size_t>& shape, DType dtype, at::Device device, bool pin_memory) const {
+    const std::vector<size_t>& shape, DType dtype, std::optional<at::Device> device_opt,
+    bool pin_memory) const {
+  const auto device = resolve_device(device_opt);
   const auto opts =
       at::TensorOptions().dtype(torch::kFloat32).device(device).pinned_memory(pin_memory);
   at::Tensor scale_inv = at::empty(std::vector<int64_t>{1}, opts);
@@ -251,8 +265,9 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
 
 std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
     const std::vector<size_t>& shape, DType dtype, std::optional<at::Tensor> data,
-    std::optional<at::Tensor> transpose, std::optional<at::Tensor> scale_inv, at::Device device,
-    bool pin_memory) const {
+    std::optional<at::Tensor> transpose, std::optional<at::Tensor> scale_inv,
+    std::optional<at::Device> device_opt, bool pin_memory) const {
+  const auto device = resolve_device(device_opt);
   using namespace pybind11::literals;
   int is_non_tn_fp8_gemm_supported = nvte_is_non_tn_fp8_gemm_supported();
   // Initialize data tensor
@@ -569,7 +584,9 @@ void Float8CurrentScalingQuantizer::set_quantization_params(TensorWrapper* tenso
 }
 
 std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tensor(
-    const std::vector<size_t>& shape, DType dtype, at::Device device, bool pin_memory) const {
+    const std::vector<size_t>& shape, DType dtype, std::optional<at::Device> device_opt,
+    bool pin_memory) const {
+  const auto device = resolve_device(device_opt);
   using namespace pybind11::literals;
 
   // Initialize data tensor
@@ -922,7 +939,9 @@ Float8BlockQuantizer::Float8BlockQuantizer(const py::handle& quantizer) : Quanti
 void Float8BlockQuantizer::set_quantization_params(TensorWrapper* tensor) const {}
 
 std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
-    const std::vector<size_t>& shape, DType dtype, at::Device device, bool pin_memory) const {
+    const std::vector<size_t>& shape, DType dtype, std::optional<at::Device> device_opt,
+    bool pin_memory) const {
+  const auto device = resolve_device(device_opt);
   using namespace pybind11::literals;
   std::vector<int64_t> torch_shape;
   for (auto s : shape) {
@@ -1333,9 +1352,10 @@ MXFP8Quantizer::MXFP8Quantizer(const py::handle& quantizer) : Quantizer(quantize
 
 void MXFP8Quantizer::set_quantization_params(TensorWrapper* tensor) const {}
 
-std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(const std::vector<size_t>& shape,
-                                                                   DType dtype, at::Device device,
-                                                                   bool pin_memory) const {
+std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(
+    const std::vector<size_t>& shape, DType dtype, std::optional<at::Device> device_opt,
+    bool pin_memory) const {
+  const auto device = resolve_device(device_opt);
   using namespace pybind11::literals;
 
   // Scaling factor format
@@ -1729,9 +1749,10 @@ void NVFP4Quantizer::set_quantization_params(TensorWrapper* tensor) const {
                               columnwise_data.shape);
 }
 
-std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::vector<size_t>& shape,
-                                                                   DType dtype, at::Device device,
-                                                                   bool pin_memory) const {
+std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
+    const std::vector<size_t>& shape, DType dtype, std::optional<at::Device> device_opt,
+    bool pin_memory) const {
+  const auto device = resolve_device(device_opt);
   using namespace pybind11::literals;
 
   // Scaling factor format
