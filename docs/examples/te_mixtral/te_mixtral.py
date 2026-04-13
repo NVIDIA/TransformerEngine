@@ -6,7 +6,7 @@ import os
 import re
 import gc
 from contextlib import contextmanager
-from typing import Optional, Tuple
+from typing import Tuple
 
 import torch
 import torch.nn as nn
@@ -17,7 +17,6 @@ from transformer_engine.pytorch import GroupedLinear
 
 import transformers
 from transformers.models.mixtral.modeling_mixtral import (
-    MixtralModel,
     MixtralForCausalLM,
     MixtralConfig,
 )
@@ -28,29 +27,29 @@ from transformers.utils.hub import get_checkpoint_shard_files
 
 @contextmanager
 def replace_moe_block(te_moe_cls):
-    """
-    Replace `MixtralSparseMoeBlock` with custom `TEMixtralSparseMoeBlock`.
-    """
-    original_moe_cls = transformers.models.mixtral.modeling_mixtral.MixtralSparseMoeBlock
+    """Context manager: swap MixtralSparseMoeBlock for TEMixtralSparseMoeBlock."""
+    original = transformers.models.mixtral.modeling_mixtral.MixtralSparseMoeBlock
     transformers.models.mixtral.modeling_mixtral.MixtralSparseMoeBlock = te_moe_cls
     try:
         yield
     finally:
-        transformers.models.mixtral.modeling_mixtral.MixtralSparseMoeBlock = original_moe_cls
+        transformers.models.mixtral.modeling_mixtral.MixtralSparseMoeBlock = original
 
 
 class TEMixtralSparseMoeBlock(nn.Module):
-    """
-    Transformer Engine optimized MoE block using GroupedLinear for parallel expert processing.
+    """TE-optimized MoE block replacing HuggingFace MixtralSparseMoeBlock.
 
-    Replaces HuggingFace's `MixtralSparseMoeBlock` with two key improvements:
-    1. `te.GroupedLinear` processes all experts in a single batched GEMM call instead of
-       looping over individual `nn.Linear` layers, reducing kernel launch overhead.
-    2. `te.moe_permute` / `te.moe_unpermute` efficiently reorder tokens by expert assignment
-       so the batched GEMM sees contiguous data per expert.
+    Key improvements over the HF implementation:
+    - ``te.GroupedLinear`` processes all experts in a single batched GEMM instead
+      of a Python loop over individual ``nn.Linear`` layers.
+    - ``te.moe_permute`` / ``te.moe_unpermute`` reorder tokens by expert assignment
+      with zero data copies beyond what cuBLAS needs.
+    - ``torch.bincount`` computes per-expert token counts in one GPU kernel with a
+      single host transfer (``tolist()``), avoiding the 8 blocking ``.item()`` calls
+      that killed performance in the naive loop approach.
 
-    The SwiGLU gate and up projections (w1/w3) are combined into one GroupedLinear layer
-    (out_features = 2 * ffn_dim) to match the pattern used by TE's TransformerLayer.
+    The SwiGLU gate (w1) and up (w3) projections are fused into one GroupedLinear
+    (out_features = 2 * ffn_dim) so the two half-results can be split after the GEMM.
 
     Args:
         config: MixtralConfig
@@ -63,11 +62,11 @@ class TEMixtralSparseMoeBlock(nn.Module):
         self.num_experts = config.num_local_experts
         self.top_k = config.num_experts_per_tok
 
-        # Keep HuggingFace router unchanged — not in the GEMM critical path.
+        # Router — not in the GEMM critical path; keep as plain nn.Linear.
         self.gate = nn.Linear(self.hidden_dim, self.num_experts, bias=False)
 
         # Combined gate_proj (w1) + up_proj (w3) for all experts.
-        # Weight{i} shape: [2 * ffn_dim, hidden_dim]
+        # Per-expert weight shape: [2 * ffn_dim, hidden_dim]
         self.experts_gate_up = GroupedLinear(
             num_gemms=self.num_experts,
             in_features=self.hidden_dim,
@@ -76,7 +75,7 @@ class TEMixtralSparseMoeBlock(nn.Module):
         )
 
         # down_proj (w2) for all experts.
-        # Weight{i} shape: [hidden_dim, ffn_dim]
+        # Per-expert weight shape: [hidden_dim, ffn_dim]
         self.experts_down = GroupedLinear(
             num_gemms=self.num_experts,
             in_features=self.ffn_dim,
@@ -91,87 +90,142 @@ class TEMixtralSparseMoeBlock(nn.Module):
 
         Returns:
             final_hidden_states: [batch_size, sequence_length, hidden_dim]
-            router_logits: [batch_size * sequence_length, num_experts]
+            router_logits:       [batch_size * sequence_length, num_experts]
         """
         batch_size, sequence_length, hidden_dim = hidden_states.shape
-        # Flatten to [num_tokens, hidden_dim]
-        hidden_states_flat = hidden_states.view(-1, hidden_dim)
-        num_tokens = hidden_states_flat.shape[0]
+        hidden_states_flat = hidden_states.view(-1, hidden_dim)  # [T, H]
 
         # ── Router ──────────────────────────────────────────────────────────
-        router_logits = self.gate(hidden_states_flat)
-        routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
+        router_logits = self.gate(hidden_states_flat)  # [T, num_experts]
+        routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float32)
         routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
         routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
-        # Keep routing_weights in float32; TE recommends float32 for merging_probs.
+        # routing_weights stays float32 — required by moe_unpermute merging_probs.
 
         # ── Permute tokens by expert assignment ─────────────────────────────
-        # selected_experts is an index map [num_tokens, top_k] — must pass map_type='index'.
-        # moe_permute reorders tokens so all tokens for expert-0 are contiguous,
-        # followed by all tokens for expert-1, etc.
+        # moe_permute reorders the flat token tensor so that all tokens assigned
+        # to expert-0 appear first, then expert-1, etc., ready for GroupedLinear.
         permuted_tokens, row_id_map = te.moe_permute(
             hidden_states_flat,
             selected_experts.to(torch.int32),
-            num_out_tokens=-1,
-            max_token_num=num_tokens * self.top_k,
             map_type="index",
         )
 
-        # ── m_splits: tokens routed to each expert ──────────────────────────
-        # selected_experts shape: [num_tokens, top_k].
-        # Count the number of (token, top_k_slot) pairs assigned to each expert.
-        # Each such pair becomes one row in the permuted tensor, so the sum over
-        # all experts equals num_tokens * top_k — the total permuted-tensor rows.
-        m_splits = [int((selected_experts == i).sum().item()) for i in range(self.num_experts)]
+        # ── Per-expert token counts (m_splits) ──────────────────────────────
+        # bincount runs entirely on GPU; tolist() does ONE host transfer for all
+        # experts, versus the previous loop that called .item() once per expert
+        # (8 blocking GPU→CPU syncs that wiped out the GroupedLinear speedup).
+        m_splits = (
+            torch.bincount(selected_experts.reshape(-1), minlength=self.num_experts)
+            .int()
+            .tolist()
+        )
 
-        # ── Expert computation ──────────────────────────────────────────────
-        # Gate + Up projection (combined), then SwiGLU, then Down projection.
-        intermediate = self.experts_gate_up(permuted_tokens, m_splits=m_splits)
-        gate_proj, up_proj = intermediate.chunk(2, dim=-1)
-        intermediate_act = F.silu(gate_proj) * up_proj
-        expert_outputs = self.experts_down(intermediate_act, m_splits=m_splits)
+        # ── Expert FFN: gate_up → SwiGLU → down ─────────────────────────────
+        gate_up = self.experts_gate_up(permuted_tokens, m_splits=m_splits)
+        gate_proj, up_proj = gate_up.chunk(2, dim=-1)
+        expert_out = self.experts_down(F.silu(gate_proj) * up_proj, m_splits=m_splits)
 
-        # ── Unpermute and apply routing weights ─────────────────────────────
-        # map_type must match the permute call; merging_probs replaces the deprecated probs kwarg.
+        # ── Unpermute and weight-sum over top-k experts ──────────────────────
         final_hidden_states = te.moe_unpermute(
-            expert_outputs,
+            expert_out,
             row_id_map,
             merging_probs=routing_weights,
             map_type="index",
         )
 
-        final_hidden_states = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
-        return final_hidden_states, router_logits
+        return final_hidden_states.reshape(batch_size, sequence_length, hidden_dim), router_logits
 
 
 class TEMixtralForCausalLM:
-    """
-    Causal LM created with `MixtralForCausalLM` where every `MixtralSparseMoeBlock`
-    is monkey-patched with `TEMixtralSparseMoeBlock` before model initialisation.
+    """Factory that builds a MixtralForCausalLM with every MoE block replaced by
+    TEMixtralSparseMoeBlock.
 
-    Args:
-        config: MixtralConfig
+    Usage — convert an already-loaded HF model (works with device_map="auto")::
+
+        from transformers import AutoModelForCausalLM
+        from te_mixtral import TEMixtralForCausalLM
+
+        hf_model = AutoModelForCausalLM.from_pretrained(
+            "mistralai/Mixtral-8x7B-v0.1",
+            torch_dtype=torch.bfloat16,
+            device_map="auto",   # distributes across 2x H100
+        )
+        te_model = TEMixtralForCausalLM.from_hf_model(hf_model)
     """
 
     def __new__(cls, config: MixtralConfig):
-        with replace_moe_block(te_moe_cls=TEMixtralSparseMoeBlock):
-            mixtral_for_causal_lm = MixtralForCausalLM(config)
-        return mixtral_for_causal_lm
+        with replace_moe_block(TEMixtralSparseMoeBlock):
+            return MixtralForCausalLM(config)
 
     @classmethod
-    def from_pretrained_local(cls, pretrained_model_name_or_path, *args, config, **kwargs):
-        """
-        Custom method adapted from `from_pretrained` in HuggingFace Transformers.
+    def from_hf_model(cls, hf_model: MixtralForCausalLM) -> MixtralForCausalLM:
+        """Convert an in-memory HuggingFace Mixtral model to use TE GroupedLinear experts.
 
-        Loads a sharded Mixtral checkpoint from a local directory and maps the
-        weights into the TE-optimised model (including expert weight packing
-        into GroupedLinear tensors).
+        Compatible with models loaded via ``device_map="auto"`` (multi-GPU).  Each MoE
+        block is rebuilt on the same device as the original block's gate weight.
+
+        Args:
+            hf_model: Loaded ``MixtralForCausalLM``.
+
+        Returns:
+            A ``MixtralForCausalLM`` whose MoE blocks are ``TEMixtralSparseMoeBlock``
+            instances with packed GroupedLinear weights.
+        """
+        config = hf_model.config
+        dtype = next(hf_model.parameters()).dtype
+        torch.set_default_dtype(dtype)
+
+        # Build the TE model on CPU; weights are placed correctly below.
+        te_model = cls(config)
+
+        # Populate the full TE state dict from HF weights, then load in one shot.
+        te_state = te_model.state_dict()
+        hf_state = hf_model.state_dict()  # pulls all params to CPU
+        _pack_expert_weights(hf_state, te_state, config)
+        te_model.load_state_dict(te_state)
+
+        # Mirror the device placement of the original model.
+        # For device_map="auto", hf_model.hf_device_map maps submodule names to devices.
+        device_map = getattr(hf_model, "hf_device_map", None)
+        if device_map:
+            # Replicate the same device map on the TE model.
+            from accelerate import dispatch_model
+            te_model = dispatch_model(te_model, device_map=device_map)
+        else:
+            te_model.to(next(hf_model.parameters()).device)
+
+        return te_model
+
+    @classmethod
+    def from_pretrained_local(
+        cls,
+        pretrained_model_name_or_path: str,
+        *args,
+        config: MixtralConfig,
+        **kwargs,
+    ) -> MixtralForCausalLM:
+        """Load a sharded local Mixtral checkpoint directly into a TE model.
+
+        Iterates over checkpoint shards one at a time (memory-efficient) and packs
+        expert weights into GroupedLinear tensors as each shard is processed.
+
+        Args:
+            pretrained_model_name_or_path: Path to the directory containing the
+                sharded checkpoint (``model.safetensors.index.json`` or
+                ``pytorch_model.bin.index.json``).
+            config: ``MixtralConfig`` for the model.
+            **kwargs: Forwarded to HF helpers; ``torch_dtype`` is respected.
+
+        Returns:
+            A TE-optimised ``MixtralForCausalLM``.
         """
         torch.set_default_dtype(kwargs.get("torch_dtype", torch.bfloat16))
 
-        vanilla_model = cls(config)
-        subfolder = ""
-        variant = None
+        te_model = cls(config)
+        te_state = te_model.state_dict()  # template — filled shard by shard
+
+        subfolder, variant = "", None
 
         if os.path.isfile(
             os.path.join(
@@ -185,7 +239,6 @@ class TEMixtralForCausalLM:
                 subfolder,
                 _add_variant("model.safetensors.index.json", variant),
             )
-            is_sharded = True
         elif os.path.isfile(
             os.path.join(
                 pretrained_model_name_or_path,
@@ -198,76 +251,77 @@ class TEMixtralForCausalLM:
                 subfolder,
                 _add_variant(WEIGHTS_INDEX_NAME, variant),
             )
-            is_sharded = True
         else:
-            raise AssertionError("Only sharded PyTorch checkpoint format is supported.")
+            raise AssertionError("Only sharded checkpoint format is supported.")
 
         resolved_archive_file, _ = get_checkpoint_shard_files(
             pretrained_model_name_or_path,
             archive_file,
         )
 
-        if not is_sharded:
-            assert not isinstance(resolved_archive_file, list)
-            resolved_archive_file = [resolved_archive_file]
-
         for shard_file in resolved_archive_file:
-            state_dict = load_state_dict(shard_file)
-            replace_params(state_dict, vanilla_model.state_dict(), config)
-            vanilla_model.load_state_dict(state_dict, strict=False)
-            del state_dict
+            hf_shard = load_state_dict(shard_file)
+            _pack_expert_weights(hf_shard, te_state, config)
+            del hf_shard
             gc.collect()
 
-        return vanilla_model
+        te_model.load_state_dict(te_state)
+        return te_model
 
 
-def replace_params(hf_state_dict, te_state_dict, config):
+def _pack_expert_weights(hf_state_dict: dict, te_state_dict: dict, config: MixtralConfig) -> None:
+    """Pack HuggingFace per-expert weights into TE GroupedLinear tensors.
+
+    Modifies ``te_state_dict`` in-place using ``.copy_()`` so the result is
+    correct regardless of whether ``state_dict()`` returns shared-storage views
+    or independent copies (the behaviour changed across PyTorch versions).
+
+    HF naming::
+
+        model.layers.{L}.block_sparse_moe.experts.{E}.w1.weight  # gate_proj
+        model.layers.{L}.block_sparse_moe.experts.{E}.w3.weight  # up_proj
+        model.layers.{L}.block_sparse_moe.experts.{E}.w2.weight  # down_proj
+
+    TE naming (GroupedLinear, one tensor per expert)::
+
+        model.layers.{L}.block_sparse_moe.experts_gate_up.weight{E}  # w1 || w3
+        model.layers.{L}.block_sparse_moe.experts_down.weight{E}     # w2
+
+    All non-expert parameters present in ``hf_state_dict`` that share a name
+    with a key in ``te_state_dict`` are also copied (attention, norms,
+    embeddings, router gate).
     """
-    Copy HuggingFace Mixtral parameters into the TE model's state dict.
+    expert_keys_consumed: set = set()
 
-    Non-MoE parameters (attention, norms, embeddings) are passed through
-    unchanged via `load_state_dict(..., strict=False)`.  Expert weights are
-    packed into the GroupedLinear tensors here.
+    layer_prefixes: set = set()
+    for key in hf_state_dict:
+        m = re.match(r"model\.layers\.\d+\.", key)
+        if m:
+            layer_prefixes.add(m.group())
 
-    HF naming:
-        model.layers.{L}.block_sparse_moe.experts.{E}.w1.weight  — gate_proj
-        model.layers.{L}.block_sparse_moe.experts.{E}.w3.weight  — up_proj
-        model.layers.{L}.block_sparse_moe.experts.{E}.w2.weight  — down_proj
-
-    TE naming (GroupedLinear stores one tensor per expert):
-        model.layers.{L}.block_sparse_moe.experts_gate_up.weight{E}
-        model.layers.{L}.block_sparse_moe.experts_down.weight{E}
-    """
-    all_layer_prefixes = set()
-    for param_key in hf_state_dict.keys():
-        m = re.match(r"model\.layers\.\d+\.", param_key)
-        if m is not None:
-            all_layer_prefixes.add(m.group())
-
-    for layer_prefix in all_layer_prefixes:
+    for layer_prefix in layer_prefixes:
         moe_prefix = layer_prefix + "block_sparse_moe."
 
-        for expert_idx in range(config.num_local_experts):
-            hf_expert_prefix = moe_prefix + f"experts.{expert_idx}."
-            te_gate_up_key = moe_prefix + f"experts_gate_up.weight{expert_idx}"
-            te_down_key = moe_prefix + f"experts_down.weight{expert_idx}"
+        for e in range(config.num_local_experts):
+            hf_pfx = moe_prefix + f"experts.{e}."
+            te_gu = moe_prefix + f"experts_gate_up.weight{e}"
+            te_dn = moe_prefix + f"experts_down.weight{e}"
 
-            # gate_proj (w1) occupies the first ffn_dim rows of the combined weight.
-            if hf_expert_prefix + "w1.weight" in hf_state_dict:
-                te_state_dict[te_gate_up_key].data[: config.intermediate_size] = hf_state_dict[
-                    hf_expert_prefix + "w1.weight"
-                ].data
+            w1 = hf_pfx + "w1.weight"
+            w3 = hf_pfx + "w3.weight"
+            w2 = hf_pfx + "w2.weight"
 
-            # up_proj (w3) occupies the second ffn_dim rows.
-            if hf_expert_prefix + "w3.weight" in hf_state_dict:
-                te_state_dict[te_gate_up_key].data[config.intermediate_size :] = hf_state_dict[
-                    hf_expert_prefix + "w3.weight"
-                ].data
+            if w1 in hf_state_dict:
+                te_state_dict[te_gu][: config.intermediate_size].copy_(hf_state_dict[w1])
+                expert_keys_consumed.add(w1)
+            if w3 in hf_state_dict:
+                te_state_dict[te_gu][config.intermediate_size :].copy_(hf_state_dict[w3])
+                expert_keys_consumed.add(w3)
+            if w2 in hf_state_dict:
+                te_state_dict[te_dn].copy_(hf_state_dict[w2])
+                expert_keys_consumed.add(w2)
 
-            # down_proj (w2) maps directly.
-            if hf_expert_prefix + "w2.weight" in hf_state_dict:
-                te_state_dict[te_down_key].data[:] = hf_state_dict[
-                    hf_expert_prefix + "w2.weight"
-                ].data
-
-    return all_layer_prefixes
+    # Pass through all remaining params that exist in both dicts (attention, norms, etc.).
+    for key, tensor in hf_state_dict.items():
+        if key not in expert_keys_consumed and key in te_state_dict:
+            te_state_dict[key].copy_(tensor)

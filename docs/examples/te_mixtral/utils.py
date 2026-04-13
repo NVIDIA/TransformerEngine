@@ -36,7 +36,7 @@ class HyperParameters:
         self.max_seq_length = 256
         self.gradient_accumulation_steps = 1
         self.num_warmup_steps = 5
-        self.num_training_steps = 10
+        self.num_training_steps = 3
 
         # Set by the user or populated automatically on download.
         self.weights_cache_dir = ""
