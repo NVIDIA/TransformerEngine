@@ -2990,16 +2990,28 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             # Per-step KV cu_seqlens (non-padded): how many actual KV tokens are
             # visible for each sequence.
             actual_seqlens_kv = cu_seqlens_kv_original[1:] - cu_seqlens_kv_original[:-1]
-            padded_chunk_sizes_kv = (cu_seqlens_kv_padded[1:] - cu_seqlens_kv_padded[:-1]) // (2 * cp_size)
-            thd_cu_seqlens_kv_per_step = [cu_seqlens_kv_original.clone(), cu_seqlens_kv_original.clone()]
+            padded_chunk_sizes_kv = (cu_seqlens_kv_padded[1:] - cu_seqlens_kv_padded[:-1]) // (
+                2 * cp_size
+            )
+            thd_cu_seqlens_kv_per_step = [
+                cu_seqlens_kv_original.clone(),
+                cu_seqlens_kv_original.clone(),
+            ]
 
             if causal:
                 # Causal: visible KV covers chunks 0..chunk_id
                 # chunk_id = local_seq_chunk_ids[step_idx]
-                visible_padded = [padded_chunk_sizes_kv * (chunk_id + 1) for chunk_id in local_seq_chunk_ids]
+                visible_padded = [
+                    padded_chunk_sizes_kv * (chunk_id + 1) for chunk_id in local_seq_chunk_ids
+                ]
                 # [AG+THD] Is this needed?
-                visible_actual = [torch.minimum(actual_seqlens_kv, visible_padded_split) for visible_padded_split in visible_padded]
-                thd_cu_seqlens_kv_per_step = [torch.zeros_like(cu_seqlens_kv_original) for _ in range(2)]
+                visible_actual = [
+                    torch.minimum(actual_seqlens_kv, visible_padded_split)
+                    for visible_padded_split in visible_padded
+                ]
+                thd_cu_seqlens_kv_per_step = [
+                    torch.zeros_like(cu_seqlens_kv_original) for _ in range(2)
+                ]
                 # Adjust chunks for each step
                 thd_cu_seqlens_kv_per_step[0][1:] = visible_actual[0].cumsum(0)
                 thd_cu_seqlens_kv_per_step[1][1:] = visible_actual[1].cumsum(0)
