@@ -58,7 +58,7 @@ RUN --mount=from=ccache-state,target=/ccache-state <<"EOF" bash -e
 EOF
 
 RUN --mount=from=build-scripts,source=build-scripts,target=/nvidia/build-scripts <<"EOF" bash -e
-  export CUBLASMP_VERSION=0.8.0.2023
+  export CUBLASMP_VERSION=0.9.0.2693
   /nvidia/build-scripts/installCUBLASMP.sh
 EOF
 
