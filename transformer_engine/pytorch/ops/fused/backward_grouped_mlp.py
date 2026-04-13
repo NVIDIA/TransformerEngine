@@ -32,6 +32,7 @@ from .._common import (
     maybe_dequantize,
     validate_grouped_mlp_dims,
 )
+from ...triton.grouped_dbias_dscales import _compute_grouped_dbias_dscales
 
 
 @functools.lru_cache(maxsize=1)
@@ -321,6 +322,7 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
             raise ValueError(f"Expected {num_groups} splits, but got {int(split_sizes.numel())}.")
         split_sizes = split_sizes.to(dtype=torch.int64, device=device)
         split_points = split_points.to(dtype=torch.int, device=device)
+        scale_bias = fc2_op._scale_bias and fc2_op.has_bias
 
         grouped_fc1_x = None
         if fc1_ctx.weight_requires_grad:
@@ -357,6 +359,7 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         fc2_ctx.grad_output_quantizer.optimize_for_gemm = True
         output_fc2_dbias = fc2_op.has_bias
         fc2_dbias_packed = None
+        fc2_dy = None
         if (
             not output_fc2_dbias
             and isinstance(grad_output, GroupedTensor)
@@ -365,7 +368,7 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
             grouped_fc2_dy = grad_output
         else:
             fc2_dy = maybe_dequantize(grad_output, dtype)
-            if output_fc2_dbias:
+            if output_fc2_dbias and not scale_bias:
                 grouped_fc2_dy, fc2_dbias_packed = tex.bgrad_group_quantize(
                     fc2_dy,
                     fc2_ctx.grad_output_quantizer,
@@ -379,16 +382,6 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
                     num_groups,
                     split_sizes,
                 )
-
-        fc2_bias_grads: Optional[list[Optional[torch.Tensor]]] = None
-        fc2_bias_grad_packed: Optional[torch.Tensor] = None
-        if fc2_dbias_packed is not None:
-            if fc2_op.single_grouped_bias:
-                fc2_bias_grad_packed = fc2_dbias_packed.to(dtype=dtype)
-            else:
-                fc2_bias_grads = [
-                    fc2_dbias_packed[idx].to(dtype=dtype) for idx in range(num_groups)
-                ]
 
         # Pack data tensors
         # Note: Fused kernel expects tensor with non-contiguous
@@ -419,8 +412,8 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         norm_const_tensor = get_cached_ones_tensor(1, dtype, device)
         current_stream = torch.cuda.current_stream().cuda_stream
 
-        prob_tensor = scales.detach().to(dtype=torch.float32).reshape(-1, 1, 1)
-        dprob_tensor = torch.zeros_like(prob_tensor)
+        scales_tensor = scales.detach().to(dtype=torch.float32).reshape(-1, 1, 1)
+        dscales_tensor = torch.zeros_like(scales_tensor)
 
         fc2_dglu_kwargs = {
             "a_tensor": fc2_dy_data,
@@ -429,8 +422,8 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
             "padded_offsets": split_points,
             "alpha_tensor": alpha_tensor,
             "beta_tensor": alpha_tensor,
-            "prob_tensor": prob_tensor,
-            "dprob_tensor": dprob_tensor,
+            "prob_tensor": scales_tensor,
+            "dprob_tensor": dscales_tensor,
             "generate_dbias": fc1_op.has_bias,
             "norm_const_tensor": norm_const_tensor,
             "d_dtype": torch.float8_e4m3fn,
@@ -488,8 +481,35 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         fc1_dy_col_data = fc2_dgrad_kernel_out["d_col_tensor"]
         fc1_dy_col_data = fc1_dy_col_data.view(out_shape[0], fc1_weight_shape[0])
         fc1_dy_col_scale = fc2_dgrad_kernel_out["sfd_col_tensor"]
-        grad_scales = fc2_dgrad_kernel_out["dprob_tensor"]
-        grad_scales = grad_scales.view(-1).to(dtype=dtype)
+        grad_scales = fc2_dgrad_kernel_out["dprob_tensor"].view(-1)
+
+        fc2_bias_grads: Optional[list[Optional[torch.Tensor]]] = None
+        fc2_bias_grad_packed: Optional[torch.Tensor] = None
+        if scale_bias:
+            fc2_biases = fc2_op._get_bias_tensors(dtype)
+            bias_packed = torch.stack(fc2_biases)
+            scales_f32 = scales.detach().to(dtype=torch.float32)
+            fc2_dbias_packed_result, grad_scales = _compute_grouped_dbias_dscales(
+                fc2_dy,
+                scales_f32,
+                bias_packed,
+                offsets=fc1_ctx.base_split_offsets,
+                dscales=grad_scales,
+            )
+            fc2_dbias_packed_result = fc2_dbias_packed_result.to(dtype=dtype)
+            if fc2_op.single_grouped_bias:
+                fc2_bias_grad_packed = fc2_dbias_packed_result
+            else:
+                fc2_bias_grads = [fc2_dbias_packed_result[idx] for idx in range(num_groups)]
+        elif fc2_dbias_packed is not None:
+            if fc2_op.single_grouped_bias:
+                fc2_bias_grad_packed = fc2_dbias_packed.to(dtype=dtype)
+            else:
+                fc2_bias_grads = [
+                    fc2_dbias_packed[idx].to(dtype=dtype) for idx in range(num_groups)
+                ]
+
+        grad_scales = grad_scales.to(dtype=dtype)
 
         fc1_bias_grads: Optional[list[Optional[torch.Tensor]]] = None
         fc1_bias_grad_packed: Optional[torch.Tensor] = None
@@ -643,10 +663,11 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
                 grouped_fc1_x.columnwise_scale_inv,
             )
 
+        fc2_grad_extra = (None, None) if fc2_op._scale_bias else (None,)
         return (
             grad_input,
             [fc1_grad_params, (), fc2_grad_params],
-            [(None,), (grad_scales,), (None,)],
+            [(None,), (grad_scales,), fc2_grad_extra],
         )
 
 
