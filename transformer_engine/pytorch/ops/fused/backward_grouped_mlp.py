@@ -292,6 +292,7 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
     def grouped_gemm_quant_kernel(cls) -> Callable:
         """Grouped GEMM quant kernel for block-scaled inputs."""
         from cudnn import grouped_gemm_quant_wrapper_sm100  # pylint: disable=no-name-in-module
+
         return grouped_gemm_quant_wrapper_sm100
 
     @classmethod
@@ -302,6 +303,7 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         available or lacks the required wgrad_tensor/wgrad_ptrs params.
         """
         from cudnn import grouped_gemm_wgrad_wrapper_sm100  # pylint: disable=no-name-in-module
+
         return grouped_gemm_wgrad_wrapper_sm100
 
     @classmethod
