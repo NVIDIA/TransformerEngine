@@ -72,8 +72,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     print_quantizers,
     ConvertTHDtoBSHD,
     ConvertBSHDtoTHD,
-    mxfp8_pad_and_swizzle_scales,
-    mxfp8_quantize_single_tensor,
+    mxfp8_quantize_fast_path,
 )
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     AttentionLogging as attn_log,
@@ -1544,8 +1543,8 @@ class FusedAttnFunc(torch.autograd.Function):
             if isinstance(d_out, QuantizedTensorStorage):
                 d_out_fp8 = d_out
             elif isinstance(ctx.dO_quantizer, MXFP8Quantizer):
-                d_out_fp8, do_scale_inv_format = mxfp8_quantize_single_tensor(
-                    d_out, ctx.dO_quantizer, do_format,
+                (d_out_fp8,), do_scale_inv_format = mxfp8_quantize_fast_path(
+                    [(d_out, ctx.dO_quantizer)], do_format,
                 )
             else:
                 d_out_fp8 = ctx.dO_quantizer(d_out)

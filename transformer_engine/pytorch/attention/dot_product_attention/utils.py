@@ -2314,88 +2314,90 @@ def print_quantizers(
                 print(f"{label} >> {names[i]:14s}: {type_str}")
 
 
-
-
-
-def mxfp8_pad_and_swizzle_scales(*fp8_tensors):
-    """Pad and swizzle scales for MXFP8 tensors quantized with optimize_for_gemm=False.
-
-    When quantizing with optimize_for_gemm=False, the scales are in their natural
-    (non-swizzled) layout. This function pads the scale dimensions to the alignment
-    required by cuDNN and then applies the GEMM swizzle pattern.
-    Rowwise scales are padded to a multiple of 4 in the last dim.
-    Columnwise scales are padded to a multiple of 128 in the last dim.
-    """
-    rs_list = [t._rowwise_scale_inv for t in fp8_tensors if t._rowwise_scale_inv is not None]
-    cs_list = [t._columnwise_scale_inv for t in fp8_tensors if t._columnwise_scale_inv is not None]
-    if rs_list:
-        rs_padded = tex.multi_tensor_pad_last_dim(rs_list, 4)
-        idx = 0
-        for t in fp8_tensors:
-            if t._rowwise_scale_inv is not None:
-                t._rowwise_scale_inv = rs_padded[idx]
-                idx += 1
-    if cs_list:
-        cs_padded = tex.multi_tensor_pad_last_dim(cs_list, 128)
-        idx = 0
-        for t in fp8_tensors:
-            if t._columnwise_scale_inv is not None:
-                t._columnwise_scale_inv = cs_padded[idx]
-                idx += 1
-    has_rs = len(rs_list) > 0
-    has_cs = len(cs_list) > 0
-    tensor_list = list(fp8_tensors)
-    if has_rs:
-        tex.multi_swizzle_scales_for_gemm_(
-            tensor_list, True, False, check_scale_inv_shapes=False
-        )
-    if has_cs:
-        tex.multi_swizzle_scales_for_gemm_(
-            tensor_list, False, True, check_scale_inv_shapes=False
-        )
-    for t in tensor_list:
-        t._with_gemm_swizzled_scales = True
-
-
-def mxfp8_permute_scale_inv_to_bhsd(*tensors, src_format):
-    """Pad, permute, and swizzle _rowwise_scale_inv and _columnwise_scale_inv of a list of MXFP8Tensors.
-
-    Output tensors are allocated with padding in mind (%4 for rowwise and %128 for columnwise), allowing the
-    permute kernel to select more efficient execution paths. Permute and swizzle are batched, for all tensors
-    in either direction (rowwise or columnwise).
-    """
+def permute_to_grouped_tensor_pytorch(tensor, src_format):
+    """Permute to BHSD or HTD format using native PyTorch operations."""
     if src_format in ("bhsd", "htd"):
-        outs = [
-            MXFP8Tensor(
-                shape=t.shape, dtype=t.dtype,
-                rowwise_data=t._rowwise_data, rowwise_scale_inv=t._rowwise_scale_inv,
-                columnwise_data=t._columnwise_data, columnwise_scale_inv=t._columnwise_scale_inv,
-                quantizer=t._quantizer, requires_grad=False,
-                fp8_dtype=t._fp8_dtype, with_gemm_swizzled_scales=t._with_gemm_swizzled_scales,
-            )
-            for t in tensors
-        ]
-        mxfp8_pad_and_swizzle_scales(*outs)
-        return tuple(outs)
+        return tensor
+    dim_s = src_format.find("s") if "s" in src_format else src_format.find("t")
+    dim_others = [i for i in range(tensor.ndim) if i != dim_s]
+    new_dims = [*dim_others[:-1], dim_s, dim_others[-1]]
+    return tensor.permute(*new_dims).contiguous()
 
-    # 1+2. FUSED PERMUTE+PAD: permute from src_format to BHSD and pad D in one kernel.
-    # Keep Nones so lists stay aligned 1:1 with *tensors.
-    rs_list = [t._rowwise_scale_inv for t in tensors]
-    cs_list = [t._columnwise_scale_inv for t in tensors]
+
+def mxfp8_quantize_fast_path(tensor_quantizer_pairs, src_format):
+    """MXFP8 attention requires quantization along S and D dimensions. This fast path
+    quantizes tensors without swizzle, and pads, permutes and swizzles the scale_invs
+    to achieve faster speed thanks to the smaller sizes of scale_invs. Output tensors
+    have _rowwise_data and _columnwise_data in src_format, and _rowwise_scale_inv and
+    _columnwise_scale_inv in BHSD format.
+
+    Parameters
+    ----------
+    tensor_quantizer_pairs : list of (torch.Tensor, MXFP8Quantizer)
+        Each pair is a tensor and its quantizer (with the desired
+        rowwise_usage / columnwise_usage already set).
+    src_format : str
+        Layout of input tensors: ``"bshd"`` or ``"sbhd"``.
+        All tensors in the list must have the same src_format.
+    Returns
+    -------
+    fp8_tensors : list of MXFP8Tensor
+        Data in ``src_format``, scale_inv in BHSD format.
+    scale_inv_format : str
+        Always ``"bhsd"``.
+    """
+    if not tensor_quantizer_pairs:
+        return [], src_format
+    assert src_format in ("bshd", "sbhd"), (
+        f"mxfp8_quantize_fast_path only supports bshd/sbhd, got {src_format!r}."
+    )
+    _s_dim = {"bshd": 1, "sbhd": 0}
+    _d_dim = {"bshd": 3, "sbhd": 3}
+
+    fp8_tensors = []
+    for tensor, quantizer in tensor_quantizer_pairs:
+        original_shape = tensor.shape
+        rs_shape = list(original_shape)
+        rs_shape[_d_dim[src_format]] //= MXFP8_BLOCK_SCALING_SIZE
+        cs_shape = list(original_shape)
+        cs_shape[_s_dim[src_format]] //= MXFP8_BLOCK_SCALING_SIZE
+
+        # view tensor as 2D for quantization
+        # BSHD -> (B*S, H*D)
+        # SBHD -> (S, B*H*D)
+        if src_format == "bshd":
+            tensor = tensor.view(*tensor.shape[:2], -1)
+        else:
+            tensor = tensor.view(tensor.shape[0], -1)
+
+        # quantize
+        orig_optimize = quantizer.optimize_for_gemm
+        quantizer.optimize_for_gemm = False
+        fp8_tensor = quantizer(tensor)
+        quantizer.optimize_for_gemm = orig_optimize
+
+        # reshape rowwise/columnwise data to original shape
+        fp8_tensor._rowwise_data = fp8_tensor._rowwise_data.view(original_shape) if fp8_tensor._rowwise_data is not None else None
+        fp8_tensor._columnwise_data = fp8_tensor._columnwise_data.view(original_shape) if fp8_tensor._columnwise_data is not None else None
+        fp8_tensor._rowwise_scale_inv = fp8_tensor._rowwise_scale_inv.view(rs_shape) if fp8_tensor._rowwise_scale_inv is not None else None
+        fp8_tensor._columnwise_scale_inv = fp8_tensor._columnwise_scale_inv.view(cs_shape) if fp8_tensor._columnwise_scale_inv is not None else None
+        fp8_tensors.append(fp8_tensor)
+
+    # ---- Pad + permute + swizzle scale_inv to BHSD ----
+    rs_list = [t._rowwise_scale_inv for t in fp8_tensors]
+    cs_list = [t._columnwise_scale_inv for t in fp8_tensors]
 
     def _align_up(x, a):
         return ((x + a - 1) // a) * a
 
-    def _bhsd_shape(src_4d, src_fmt, d_pad):
-        """Output shape after permute to BHSD with padded last dim."""
-        if src_fmt == "sbhd":
+    def _bhsd_shape(src_4d, d_pad):
+        if src_format == "sbhd":
             S, B, H, _ = src_4d.shape
         else:
             B, S, H, _ = src_4d.shape
         return (B, H, S, d_pad)
 
     def _build_outputs(scale_list, alignment):
-        """Pre-allocate BHSD output tensors from a combined buffer, None where input is None."""
         entries = []
         total = 0
         for s in scale_list:
@@ -2403,7 +2405,7 @@ def mxfp8_permute_scale_inv_to_bhsd(*tensors, src_format):
                 entries.append(None)
                 continue
             d_pad = _align_up(s.shape[-1], alignment)
-            shape = _bhsd_shape(s, src_format, d_pad)
+            shape = _bhsd_shape(s, d_pad)
             numel = 1
             for dim in shape:
                 numel *= dim
@@ -2416,9 +2418,11 @@ def mxfp8_permute_scale_inv_to_bhsd(*tensors, src_format):
         return [buf[e[0]:e[0] + e[1]].view(e[2]) if e is not None else None
                 for e in entries]
 
+    # allocate buffers with padding in mind
     rs_outs = _build_outputs(rs_list, 4)
     cs_outs = _build_outputs(cs_list, 128)
 
+    # permute scale_invs to BHSD; batched
     rs_permuted = tex.multi_tensor_permute_to_grouped_tensor_fwd(
         rs_list, original_format=src_format, outputs=rs_outs,
     )
@@ -2426,11 +2430,12 @@ def mxfp8_permute_scale_inv_to_bhsd(*tensors, src_format):
         cs_list, original_format=src_format, outputs=cs_outs,
     )
 
-    outs = []
-    for t, rp, cp in zip(tensors, rs_permuted, cs_permuted):
+    # build output tensors
+    result = []
+    for t, rp, cp in zip(fp8_tensors, rs_permuted, cs_permuted):
         rp = rp.view(-1, rp.shape[-1]) if rp is not None else None
         cp = cp.view(-1, cp.shape[-1]) if cp is not None else None
-        outs.append(
+        result.append(
             MXFP8Tensor(
                 shape=t.shape, dtype=t.dtype,
                 rowwise_data=t._rowwise_data, rowwise_scale_inv=rp,
@@ -2440,55 +2445,13 @@ def mxfp8_permute_scale_inv_to_bhsd(*tensors, src_format):
             )
         )
 
-    # 3. SWIZZLE (padding already done by the fused permute+pad above).
-    tex.multi_swizzle_scales_for_gemm_(outs, True, False, check_scale_inv_shapes=False)
-    tex.multi_swizzle_scales_for_gemm_(outs, False, True, check_scale_inv_shapes=False)
-    for t in outs:
+    # swizzle in place; batched
+    tex.multi_swizzle_scales_for_gemm_(result, True, False, check_scale_inv_shapes=False)
+    tex.multi_swizzle_scales_for_gemm_(result, False, True, check_scale_inv_shapes=False)
+    for t in result:
         t._with_gemm_swizzled_scales = True
 
-    return tuple(outs)
-
-
-def permute_to_grouped_tensor_pytorch(tensor, src_format):
-    """Permute to BHSD using pure PyTorch operations (.permute().contiguous())."""
-    if src_format in ("bhsd", "htd"):
-        return tensor
-    dim_s = src_format.find("s") if "s" in src_format else src_format.find("t")
-    dim_others = [i for i in range(tensor.ndim) if i != dim_s]
-    new_dims = [*dim_others[:-1], dim_s, dim_others[-1]]
-    return tensor.permute(*new_dims).contiguous()
-
-
-def mxfp8_quantize_single_tensor(tensor, quantizer, src_format):
-    """Quantize a single tensor with MXFP8 (no swizzle) and permute its scale_inv to BHSD.
-
-    Combines the quantize-without-swizzle and scale_inv permute+pad+swizzle
-    steps into a single call.  Used for dO in the backward pass.
-
-    Returns (fp8_tensor, scale_inv_format) where scale_inv_format is "bhsd".
-    """
-    original_shape = tensor.shape
-    _s_dim = {"bshd": 1, "sbhd": 0, "bhsd": 2}
-    _d_dim = {"bshd": 3, "sbhd": 3, "bhsd": 3}
-    rowwise_scale_inv_shape = list(tensor.shape)
-    rowwise_scale_inv_shape[_d_dim[src_format]] = rowwise_scale_inv_shape[_d_dim[src_format]]//MXFP8_BLOCK_SCALING_SIZE
-    columnwise_scale_inv_shape = list(tensor.shape)
-    columnwise_scale_inv_shape[_s_dim[src_format]] = columnwise_scale_inv_shape[_s_dim[src_format]]//MXFP8_BLOCK_SCALING_SIZE
-    if src_format in ("bhsd", "bshd"):
-        tensor = tensor.view(*tensor.shape[:_s_dim[src_format]+1], -1)
-    elif src_format == "sbhd":
-        tensor = tensor.view(tensor.shape[_s_dim[src_format]], -1)
-    orig_optimize = quantizer.optimize_for_gemm
-    quantizer.optimize_for_gemm = False
-    fp8_tensor = quantizer(tensor)
-    quantizer.optimize_for_gemm = orig_optimize
-    fp8_tensor._rowwise_data = fp8_tensor._rowwise_data.view(original_shape) if fp8_tensor._rowwise_data is not None else None
-    fp8_tensor._columnwise_data = fp8_tensor._columnwise_data.view(original_shape) if fp8_tensor._columnwise_data is not None else None
-    fp8_tensor._rowwise_scale_inv = fp8_tensor._rowwise_scale_inv.view(rowwise_scale_inv_shape) if fp8_tensor._rowwise_scale_inv is not None else None
-    fp8_tensor._columnwise_scale_inv = fp8_tensor._columnwise_scale_inv.view(columnwise_scale_inv_shape) if fp8_tensor._columnwise_scale_inv is not None else None
-    (fp8_tensor,) = mxfp8_permute_scale_inv_to_bhsd(fp8_tensor, src_format=src_format)
-    return fp8_tensor, "bhsd"
-
+    return result, "bhsd"
 
 
 def combine_and_quantize(
@@ -2501,69 +2464,15 @@ def combine_and_quantize(
     used_in_backward=False,
     keep_same_data_and_scale_inv_format=False,
 ):
-    """Combine Q, K, V tensors based on qkv_layout and quantize them together.
-
-    For non-MXFP8 quantizers the tensors are concatenated (packed or flat),
-    quantized in one shot, then split back.
-
-    For MXFP8, the behaviour depends on ``keep_same_data_and_scale_inv_format``:
-
-    * **True** – permute the high-precision data to BHSD *before* quantising
-      so that both the FP8 data and its scale_inv end up in the same (BHSD)
-      layout.  This is the simpler, pre-existing path used by
-      ``FP8EmulationFunc`` (unfused attention).
-    * **False** (default) – quantise in the original layout *without* the
-      internal GEMM-swizzle, then permute only the much smaller scale_inv
-      tensors to BHSD and apply padding + swizzle.  This avoids an expensive
-      permutation of the large FP8 data tensors and is the optimised path
-      used by fused attention.
-
-    Parameters
-    ----------
-    qkv_layout : str
-        Layout descriptor, e.g. ``"sbhd_sbhd_sbhd"`` or ``"bshd_bshd_bshd"``.
-    q : torch.Tensor
-        Query tensor in the layout indicated by *qkv_layout*.
-    k : torch.Tensor
-        Key tensor.
-    v : torch.Tensor
-        Value tensor.
-    qkv_quantizer : Quantizer
-        Quantizer instance (e.g. ``MXFP8Quantizer``, ``Float8Quantizer``).
-    used_in_forward : bool, default = True
-        Hint for MXFP8 rowwise/columnwise allocation.
-    used_in_backward : bool, default = False
-        Hint for MXFP8 rowwise/columnwise allocation.
-    keep_same_data_and_scale_inv_format : bool, default = False
-        MXFP8 only.  When True, permute high-precision data to BHSD before
-        quantising (with swizzle) so that data and scale_inv share the same
-        layout.  When False, data stays in the original layout and only the
-        scale_inv is permuted to BHSD afterwards.
-
-    Returns
-    -------
-    q_fp8 : QuantizedTensor
-        Quantized query.
-    k_fp8 : QuantizedTensor
-        Quantized key.
-    v_fp8 : QuantizedTensor
-        Quantized value.
-    qkv_layout : str
-        May change to ``"bhsd_bhsd_bhsd"`` when
-        ``keep_same_data_and_scale_inv_format=True`` and a permutation was
-        needed.
-    qkv_scale_inv_format : str or None
-        ``"bhsd"`` when the scale_inv layout differs from the data layout
-        (i.e. ``keep_same_data_and_scale_inv_format=False`` and a permutation
-        was needed); ``None`` otherwise.
-    """
+    """Combine Q, K, V tensors based on qkv_layout and quantize them together."""
     if isinstance(qkv_quantizer, MXFP8Quantizer):
         qkv_format, q_format, kv_format = get_qkv_format(qkv_layout)
+        assert qkv_format in ("bshd", "sbhd"), (
+            f"combine_and_quantize only supports bshd/sbhd for MXFP8 quantization, got {qkv_format!r}."
+        )
 
-        _s_dim = {"sbhd": 0, "bshd": 1, "bhsd": 2}
-        _b_dim = {"sbhd": 1, "bshd": 0, "bhsd": 0}
-        _h_dim = {"sbhd": 2, "bshd": 2, "bhsd": 1}
-        _d_dim = {"sbhd": 3, "bshd": 3, "bhsd": 3}
+        _s_dim = {"sbhd": 0, "bshd": 1}
+        _d_dim = {"sbhd": 3, "bshd": 3}
         d_qk = q.shape[_d_dim[qkv_format]]
         d_v = v.shape[_d_dim[qkv_format]]
         s_q = q.shape[_s_dim[q_format]]
@@ -2572,86 +2481,55 @@ def combine_and_quantize(
             "MXFP8 quantization requires s_q % 128 == 0, s_kv % 128 == 0, d_qk % 32 == 0, d_v % 32"
             f" == 0. Found {s_q=}, {s_kv=}, {d_qk=}, {d_v=}."
         )
-        rowwise_scale_inv_shapes = []
-        columnwise_scale_inv_shapes = []
-        for x in [q, k, v]:
-            rs_shape = list(x.shape)
-            cs_shape = list(x.shape)
-            rs_shape[_d_dim[qkv_format]] = rs_shape[_d_dim[qkv_format]]//MXFP8_BLOCK_SCALING_SIZE
-            cs_shape[_s_dim[qkv_format]] = cs_shape[_s_dim[qkv_format]]//MXFP8_BLOCK_SCALING_SIZE
-            rowwise_scale_inv_shapes.append(rs_shape)
-            columnwise_scale_inv_shapes.append(cs_shape)
 
-        needs_permute = qkv_format not in ("bhsd", "htd")
-        qkv_scale_inv_format = None
-        original_shapes = [None, None, None]
-        if any(not x.is_contiguous() for x in [q, k, v]):
+        if qkv_layout not in ("bshd_bshd_bshd", "sbhd_sbhd_sbhd"):
             keep_same_data_and_scale_inv_format = True
 
-        if keep_same_data_and_scale_inv_format and needs_permute:
-            # Permute f16 data to BHSD, then quantize with swizzle
-            # Prefer the fused custom kernel; fall back to pytorch if unsupported
-            if qkv_layout in ("bshd_bshd_bshd", "sbhd_sbhd_sbhd") and q.dim() == 4:
-                q, k, v = tex.multi_tensor_permute_to_grouped_tensor_fwd(
-                    [q, k, v], original_format=q_format,
-                )
-            else:
-                q = permute_to_grouped_tensor_pytorch(q, q_format)
-                k = permute_to_grouped_tensor_pytorch(k, kv_format)
-                v = permute_to_grouped_tensor_pytorch(v, kv_format)
-            qkv_layout = "bhsd_bhsd_bhsd" if qkv_format != "thd" else "htd_htd_htd"
-            qkv_scale_inv_format = "bhsd" if qkv_format != "thd" else "htd"
-            original_shapes = [x.shape for x in [q, k, v]]
-            q, k, v = [x.view(-1, x.shape[-1]) for x in [q, k, v]]
-
+        # ---- Fast path: quantize in original layout, then permute/swizzle scale_inv ----
         if not keep_same_data_and_scale_inv_format:
-            orig_optimize = qkv_quantizer.optimize_for_gemm
-            qkv_quantizer.optimize_for_gemm = False
-            original_shapes = [x.shape for x in [q, k, v]]
-            if qkv_format == "bshd":
-                q, k, v = [x.view(*x.shape[:2], -1) for x in [q, k, v]]
-            elif qkv_format == "sbhd":
-                q, k, v = [x.view(x.shape[0], -1) for x in [q, k, v]]
+            q_quantizer, k_quantizer, v_quantizer = [qkv_quantizer.copy() for _ in range(3)]
+            if used_in_forward and not used_in_backward:
+                q_quantizer.rowwise_usage = True;  q_quantizer.columnwise_usage = False
+                k_quantizer.rowwise_usage = True;  k_quantizer.columnwise_usage = False
+                v_quantizer.rowwise_usage = False; v_quantizer.columnwise_usage = True
+            elif (not used_in_forward) and used_in_backward:
+                q_quantizer.rowwise_usage = True;  q_quantizer.columnwise_usage = True
+                k_quantizer.rowwise_usage = True;  k_quantizer.columnwise_usage = True
+                v_quantizer.rowwise_usage = True;  v_quantizer.columnwise_usage = False
+            (q_fp8, k_fp8, v_fp8), qkv_scale_inv_format = mxfp8_quantize_fast_path(
+                [(q, q_quantizer), (k, k_quantizer), (v, v_quantizer)], qkv_format)
+            return q_fp8, k_fp8, v_fp8, qkv_layout, qkv_scale_inv_format
 
-        if used_in_forward and used_in_backward:
-            q_fp8, k_fp8, v_fp8 = [qkv_quantizer(x) for x in [q, k, v]]
-        elif used_in_forward and not used_in_backward:
-            qkv_quantizer.rowwise_usage = True
-            qkv_quantizer.columnwise_usage = False
-            q_fp8, k_fp8 = [qkv_quantizer(x) for x in [q, k]]
-            qkv_quantizer.rowwise_usage = False
-            qkv_quantizer.columnwise_usage = True
-            v_fp8 = qkv_quantizer(v)
-        elif (not used_in_forward) and used_in_backward:
-            qkv_quantizer.rowwise_usage = True
-            qkv_quantizer.columnwise_usage = True
-            q_fp8, k_fp8 = [qkv_quantizer(x) for x in [q, k]]
-            qkv_quantizer.rowwise_usage = True
-            qkv_quantizer.columnwise_usage = False
-            v_fp8 = qkv_quantizer(v)
-
-        if not keep_same_data_and_scale_inv_format:
-            qkv_quantizer.optimize_for_gemm = orig_optimize
-
-        q_fp8._rowwise_data = q_fp8._rowwise_data.view(original_shapes[0]) if q_fp8._rowwise_data is not None else None
-        q_fp8._columnwise_data = q_fp8._columnwise_data.view(original_shapes[0]) if q_fp8._columnwise_data is not None else None
-        k_fp8._rowwise_data = k_fp8._rowwise_data.view(original_shapes[1]) if k_fp8._rowwise_data is not None else None
-        k_fp8._columnwise_data = k_fp8._columnwise_data.view(original_shapes[1]) if k_fp8._columnwise_data is not None else None
-        v_fp8._rowwise_data = v_fp8._rowwise_data.view(original_shapes[2]) if v_fp8._rowwise_data is not None else None
-        v_fp8._columnwise_data = v_fp8._columnwise_data.view(original_shapes[2]) if v_fp8._columnwise_data is not None else None
-
-        if not keep_same_data_and_scale_inv_format:
-            # Permute only scale_inv to BHSD + pad + swizzle
-            q_fp8._rowwise_scale_inv = q_fp8._rowwise_scale_inv.view(rowwise_scale_inv_shapes[0]) if q_fp8._rowwise_scale_inv is not None else None
-            q_fp8._columnwise_scale_inv = q_fp8._columnwise_scale_inv.view(columnwise_scale_inv_shapes[0]) if q_fp8._columnwise_scale_inv is not None else None
-            k_fp8._rowwise_scale_inv = k_fp8._rowwise_scale_inv.view(rowwise_scale_inv_shapes[1]) if k_fp8._rowwise_scale_inv is not None else None
-            k_fp8._columnwise_scale_inv = k_fp8._columnwise_scale_inv.view(columnwise_scale_inv_shapes[1]) if k_fp8._columnwise_scale_inv is not None else None
-            v_fp8._rowwise_scale_inv = v_fp8._rowwise_scale_inv.view(rowwise_scale_inv_shapes[2]) if v_fp8._rowwise_scale_inv is not None else None
-            v_fp8._columnwise_scale_inv = v_fp8._columnwise_scale_inv.view(columnwise_scale_inv_shapes[2]) if v_fp8._columnwise_scale_inv is not None else None
-            q_fp8, k_fp8, v_fp8 = mxfp8_permute_scale_inv_to_bhsd(
-                q_fp8, k_fp8, v_fp8, src_format=q_format,
+        # ---- Slow path: permute data to BHSD first, then quantize with swizzle ----
+        if qkv_layout in ("bshd_bshd_bshd", "sbhd_sbhd_sbhd"):
+            q, k, v = tex.multi_tensor_permute_to_grouped_tensor_fwd(
+                [q, k, v], original_format=qkv_format,
             )
-            qkv_scale_inv_format = "bhsd"
+        else:
+            q = permute_to_grouped_tensor_pytorch(q, q_format)
+            k = permute_to_grouped_tensor_pytorch(k, kv_format)
+            v = permute_to_grouped_tensor_pytorch(v, kv_format)
+        qkv_layout = "bhsd_bhsd_bhsd"
+        qkv_scale_inv_format = "bhsd"
+
+        original_shapes = [x.shape for x in [q, k, v]]
+        q, k, v = [x.view(-1, x.shape[-1]) for x in [q, k, v]]
+
+        q_quantizer, k_quantizer, v_quantizer = [qkv_quantizer.copy() for _ in range(3)]
+        if used_in_forward and not used_in_backward:
+            q_quantizer.rowwise_usage = True;  q_quantizer.columnwise_usage = False
+            k_quantizer.rowwise_usage = True;  k_quantizer.columnwise_usage = False
+            v_quantizer.rowwise_usage = False; v_quantizer.columnwise_usage = True
+        elif (not used_in_forward) and used_in_backward:
+            q_quantizer.rowwise_usage = True;  q_quantizer.columnwise_usage = True
+            k_quantizer.rowwise_usage = True;  k_quantizer.columnwise_usage = True
+            v_quantizer.rowwise_usage = True;  v_quantizer.columnwise_usage = False
+        q_fp8, k_fp8, v_fp8 = [quant(x) for quant, x in zip(
+            [q_quantizer, k_quantizer, v_quantizer], [q, k, v])]
+
+        for fp8_tensor, shape in zip([q_fp8, k_fp8, v_fp8], original_shapes):
+            fp8_tensor._rowwise_data = fp8_tensor._rowwise_data.view(shape) if fp8_tensor._rowwise_data is not None else None
+            fp8_tensor._columnwise_data = fp8_tensor._columnwise_data.view(shape) if fp8_tensor._columnwise_data is not None else None
 
         return q_fp8, k_fp8, v_fp8, qkv_layout, qkv_scale_inv_format
 

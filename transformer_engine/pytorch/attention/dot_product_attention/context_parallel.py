@@ -46,7 +46,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     combine_and_quantize,
     combine_and_dequantize,
     print_quantizers,
-    mxfp8_quantize_single_tensor,
+    mxfp8_quantize_fast_path,
 )
 
 _cu_seqlens_info_with_cp_cache = {}
@@ -1246,8 +1246,8 @@ def cp_p2p_bwd_fused_attn(
             dout_part = Float8Tensor.make_like(dout_fp8, data=dout_part, dtype=bwd_nominal_dtype)
         else:
             aux_tensors.append(dout_part)
-            dout_part, do_scale_inv_format = mxfp8_quantize_single_tensor(
-                dout_part, dO_quantizer_per_step, do_format,
+            (dout_part,), do_scale_inv_format = mxfp8_quantize_fast_path(
+                [(dout_part, dO_quantizer_per_step)], do_format,
             )
         fp8_meta_kwargs["s_quantizer"] = S_quantizer
         fp8_meta_kwargs["dp_quantizer"] = dP_quantizer_per_step
@@ -3645,8 +3645,8 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                                     )
                                 )
                                 aux_ctx_tensors.append(dout_part)
-                                dout_part, do_scale_inv_format = mxfp8_quantize_single_tensor(
-                                    dout_part, ctx.dO_quantizer, do_format,
+                                (dout_part,), do_scale_inv_format = mxfp8_quantize_fast_path(
+                                    [(dout_part, ctx.dO_quantizer)], do_format,
                                 )
                         dq_per_step[i], dk_per_step[i], dv_per_step[i], *_ = fused_attn_bwd(
                             ctx.max_seqlen_q,
@@ -4372,8 +4372,8 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                     dout_part = Float8Tensor.make_like(dout_fp8, data=dout, dtype=bwd_nominal_dtype)
                 else:
                     aux_ctx_tensors.append(dout)
-                    dout_part, do_scale_inv_format = mxfp8_quantize_single_tensor(
-                        dout, ctx.dO_quantizer, do_format,
+                    (dout_part,), do_scale_inv_format = mxfp8_quantize_fast_path(
+                        [(dout, ctx.dO_quantizer)], do_format,
                     )
             dq, dk, dv, *rest = fused_attn_bwd(
                 ctx.max_seqlen_q,
