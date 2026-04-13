@@ -113,8 +113,12 @@ def get_coefficients(steps: int, coefficient_type: NSCoeffT = "quintic") -> List
     """
     if coefficient_type not in _COEFFICIENT_SETS:
         raise ValueError("Invalid coefficient type: " + coefficient_type)
-    iter_mode: CoeffIterMode = "repeat_last" if coefficient_type in ("polar_express", "cans") else "cycle"
-    coeff_iter = get_coefficient_iterator(steps, _COEFFICIENT_SETS[coefficient_type], mode=iter_mode)
+    iter_mode: CoeffIterMode = (
+        "repeat_last" if coefficient_type in ("polar_express", "cans") else "cycle"
+    )
+    coeff_iter = get_coefficient_iterator(
+        steps, _COEFFICIENT_SETS[coefficient_type], mode=iter_mode
+    )
     return list(chain.from_iterable(coeff_iter))
 
 
