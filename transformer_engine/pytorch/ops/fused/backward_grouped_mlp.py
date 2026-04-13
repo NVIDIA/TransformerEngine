@@ -299,11 +299,12 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
     def grouped_gemm_wgrad_kernel(cls) -> Optional[Callable]:
         """CuTe DSL kernel for grouped GEMM wgrad on SM100+.
         Returns ``None`` when the cuDNN front-end package is older than
-        1.23.0
+        1.23.0.
         """
         if not _nvidia_cudnn_frontend_supports_wgrad():
             return None
         from cudnn import grouped_gemm_wgrad_wrapper_sm100  # pylint: disable=no-name-in-module
+
         return grouped_gemm_wgrad_wrapper_sm100
 
     @classmethod
@@ -501,8 +502,8 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         fc2_dy_scales = fc2_dy_scales.view(dtype=torch.float8_e8m0fnu)
         fc2_dy_scales = fc2_dy_scales.view(
             1,
-            out_shape[0] // 128,
-            out_shape[1] // 128,
+            (out_shape[0] + 127) // 128,
+            (out_shape[1] + 127) // 128,
             MXFP8_BLOCK_SCALING_SIZE,
             4,
             4,
@@ -551,8 +552,8 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
             fc2_w_scales = fc2_weight_for_gemm.columnwise_scale_inv.view(dtype=torch.float8_e8m0fnu)
             fc2_w_scales = fc2_w_scales.view(
                 num_groups,
-                fc2_weight_shape[1] // 128,
-                fc2_weight_shape[0] // 128,
+                (fc2_weight_shape[1] + 127) // 128,
+                (fc2_weight_shape[0] + 127) // 128,
                 MXFP8_BLOCK_SCALING_SIZE,
                 4,
                 4,
@@ -713,8 +714,8 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
                 )
                 fc1_w_scales = fc1_w_scales.view(
                     num_groups,
-                    fc1_weight_shape[1] // 128,
-                    fc1_weight_shape[0] // 128,
+                    (fc1_weight_shape[1] + 127) // 128,
+                    (fc1_weight_shape[0] + 127) // 128,
                     MXFP8_BLOCK_SCALING_SIZE,
                     4,
                     4,
