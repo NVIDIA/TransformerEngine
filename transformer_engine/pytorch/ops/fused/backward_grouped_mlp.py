@@ -15,9 +15,6 @@ from typing import Optional
 import torch
 
 import transformer_engine_torch as tex
-from ...cpp_extensions import (
-    general_grouped_gemm_for_grouped_tensor,
-)
 from ...module.base import get_dummy_wgrad
 from ...quantization import Recipe
 from ...tensor.grouped_tensor import GroupedTensor
@@ -141,8 +138,9 @@ def _compute_grad_params(
     bias_grads,
     bias_grad_packed,
     label="",
-    cudnn_wgrad_kernel_fn=None,
-    offsets=None,
+    *,
+    cudnn_wgrad_kernel_fn,
+    offsets,
 ):
     """Compute weight gradients and build grad_params for a GroupedLinear layer.
     Returns the grad_params list in parameter registration order.
@@ -213,23 +211,15 @@ def _compute_grad_params(
     if ctx.weight_requires_grad:
         # Launch or defer the GEMM
         delay_wgrad = fc_op.wgrad_store is not None and fc_op.wgrad_store.delay_wgrad_compute()
-
-        if cudnn_wgrad_kernel_fn is not None and offsets is not None:
-            gemm_fn = functools.partial(
-                _cudnn_compute_wgrad,
-                weight_shape=weight_shape,
-                offsets=offsets,
-                dtype=dtype,
-                accumulate=accumulate_into_main_grad,
-                wgrad_kernel_fn=cudnn_wgrad_kernel_fn,
-                single_grouped_weight=fc_op.single_grouped_weight,
-            )
-        else:
-            gemm_fn = functools.partial(
-                general_grouped_gemm_for_grouped_tensor,
-                layout="NT",
-                accumulate=accumulate_into_main_grad,
-            )
+        gemm_fn = functools.partial(
+            _cudnn_compute_wgrad,
+            weight_shape=weight_shape,
+            offsets=offsets,
+            dtype=dtype,
+            accumulate=accumulate_into_main_grad,
+            wgrad_kernel_fn=cudnn_wgrad_kernel_fn,
+            single_grouped_weight=fc_op.single_grouped_weight,
+        )
 
         if delay_wgrad:
             fc_op.wgrad_store.put([grouped_x, grouped_dy, wgrad_output], gemm_fn)
@@ -317,18 +307,6 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         try:
             cls.grouped_gemm_dglu_kernel()
             cls.grouped_gemm_quant_kernel()
-            cls.grouped_gemm_wgrad_kernel()
-        except ImportError:
-            return False
-        return True
-
-    @classmethod
-    @functools.lru_cache(maxsize=None)
-    def is_wgrad_supported(cls) -> bool:
-        """Whether the CuTe DSL wgrad kernel is available."""
-        if not cls.is_supported():
-            return False
-        try:
             cls.grouped_gemm_wgrad_kernel()
         except ImportError:
             return False
@@ -658,7 +636,6 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         )
 
         # FC2 wgrad GEMM
-        _use_cudnn_wgrad = self.is_wgrad_supported()
         fc2_grad_params = _compute_grad_params(
             fc_op=fc2_op,
             ctx=fc2_ctx,
@@ -671,7 +648,7 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
             bias_grads=fc2_bias_grads,
             bias_grad_packed=fc2_bias_grad_packed,
             label="FC2",
-            cudnn_wgrad_kernel_fn=self.grouped_gemm_wgrad_kernel() if _use_cudnn_wgrad else None,
+            cudnn_wgrad_kernel_fn=self.grouped_gemm_wgrad_kernel(),
             offsets=split_points,
         )
 
@@ -768,7 +745,7 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
             bias_grads=fc1_bias_grads,
             bias_grad_packed=fc1_bias_grad_packed,
             label="FC1",
-            cudnn_wgrad_kernel_fn=self.grouped_gemm_wgrad_kernel() if _use_cudnn_wgrad else None,
+            cudnn_wgrad_kernel_fn=self.grouped_gemm_wgrad_kernel(),
             offsets=split_points,
         )
 
