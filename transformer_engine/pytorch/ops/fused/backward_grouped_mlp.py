@@ -48,10 +48,6 @@ def _cudnn_compute_wgrad(
         wgrad[e] = a[:, tok_start:tok_end] @ b[tok_start:tok_end, :]
     where a = DY^T = (out_features, total_tokens) row-major and
           b = X  = (total_tokens, in_features) column-major.
-
-    TE's columnwise_data is (total_tokens, features) row-major with
-    columnwise block scaling. We transpose data and reorder scale
-    super-blocks from TE's global layout to cuDNN's per-group layout.
     """
     out_features, in_features = weight_shape
     total_tokens = grouped_dy.logical_shape[0]
