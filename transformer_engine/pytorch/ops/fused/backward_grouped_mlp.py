@@ -246,8 +246,8 @@ def _compute_grad_params(
                 )
             w_list = [packed_wgrad]
         else:
-            if delay_wgrad:
-                w_list = list(w_list) if accumulate_into_main_grad else [None] * num_groups
+            if delay_wgrad or accumulate_into_main_grad:
+                w_list = [None] * num_groups
             if accumulate_into_main_grad:
                 for idx in range(num_groups):
                     wp = getattr(fc_op, f"weight{idx}")
