@@ -35,8 +35,12 @@ This autograd function wraps the forward GEMM and defines the corresponding back
            # 3. Forward GEMM: output = qinput @ qweight^T
            output = general_gemm(qinput, qweight, bias=bias)
 
-           # 4. Save for backward
-           ctx.save_for_backward(qinput, qweight, ...)
+           # 4. Save for backward — prepare_for_saving splits QuantizedTensor
+           #    and QuantizedTensorStorage objects into raw torch.Tensors
+           #    (for save_for_backward) and metadata (for ctx.tensor_objects)
+           tensors_to_save, tensor_objects = prepare_for_saving(qinput, qweight, weight, bias)
+           ctx.save_for_backward(*tensors_to_save)
+           ctx.tensor_objects = tensor_objects
 
            return output
 
@@ -46,7 +50,9 @@ This autograd function wraps the forward GEMM and defines the corresponding back
 
        @staticmethod
        def backward(ctx, grad_output):
-           qinput, qweight, ... = ctx.saved_tensors
+           # restore_from_func_ctx reassembles the QuantizedTensorStorage
+           # objects from saved tensors + metadata, and deletes ctx.tensor_objects
+           qinput, qweight, weight, bias = restore_from_func_ctx(ctx)
 
            # 1. Quantize grad_output
            qgrad = grad_quantizer(grad_output)
@@ -67,12 +73,9 @@ What gets saved for backward depends on the configuration:
 
 **FP8 disabled**: Standard PyTorch behavior — save full-precision input and weight.
 
-**FP8 enabled (no recompute)**: Save the ``QuantizedTensor`` objects from forward. These
-contain both rowwise data (used by dgrad GEMM) and columnwise data (used by wgrad GEMM).
-Memory cost: ~2× the FP8 data size (rowwise + columnwise).
-
-Saving QuantizedTensorStorage via prepare_for_saving
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+**FP8 enabled (no recompute)**: Save the ``QuantizedTensor`` or ``QuantizedTensorStorage``
+objects from forward. These contain both rowwise data (used by dgrad GEMM) and columnwise
+data (used by wgrad GEMM). Memory cost: ~2× the FP8 data size (rowwise + columnwise).
 
 PyTorch offers two ways to pass data from forward to backward: direct attributes on
 ``ctx``, and ``ctx.save_for_backward()``. Direct ``ctx`` attributes are not released after
@@ -84,26 +87,15 @@ promptly, but it only accepts ``torch.Tensor`` objects.
 Since ``QuantizedTensorStorage`` is not a ``torch.Tensor`` (see
 :doc:`/developer/quantization/class_hierarchy` for the distinction between
 ``QuantizedTensorStorage`` and ``QuantizedTensor``), the helper function
-``prepare_for_saving()`` (in ``quantized_tensor.py``) splits each storage into:
+``prepare_for_saving()`` (in ``quantized_tensor.py``) splits each object into:
 
 - Its **metadata** (with all tensor fields set to ``None``) — stored on ``ctx.tensor_objects``.
 - A list of raw **``torch.Tensor`` objects** — passed through ``ctx.save_for_backward()``.
 
-In the backward pass, ``restore_from_func_ctx()`` reassembles the original
-``QuantizedTensorStorage`` objects from the saved tensors and metadata. It also
-automatically deletes ``ctx.tensor_objects`` to avoid keeping references to the
-reassembled tensors on ``ctx`` (which would defeat the purpose of using
-``save_for_backward`` in the first place).
-
-.. code-block:: python
-
-   # Forward: split and save
-   tensors_to_save, tensor_objects = prepare_for_saving(inputmat, weightmat, weight, bias)
-   ctx.save_for_backward(*tensors_to_save)
-   ctx.tensor_objects = tensor_objects
-
-   # Backward: reassemble and release ctx references in one call
-   inputmat, weightmat, weight, bias = restore_from_func_ctx(ctx)
+In the backward pass, ``restore_from_func_ctx()`` reassembles the original objects from
+the saved tensors and metadata, as shown in the pseudocode above. It also automatically
+deletes ``ctx.tensor_objects`` to avoid keeping references to the reassembled tensors on
+``ctx`` (which would defeat the purpose of using ``save_for_backward`` in the first place).
 
 Activation Recomputation
 ------------------------
@@ -136,9 +128,9 @@ __torch_dispatch__ and Automatic Dequantization
 This is the most complex part of the ``QuantizedTensor`` class. The dispatch logic handles
 three cases:
 
-1. **TE-optimized operations** (e.g., GEMM): These recognize ``QuantizedTensor`` inputs
-   and extract the raw FP8 data + scales directly via ``get_data_tensors()``, avoiding
-   any dequantization.
+1. **TE-optimized operations** (e.g., GEMM): ``QuantizedTensor`` and
+   ``QuantizedTensorStorage`` objects are handled natively by the C++ extensions,
+   so no dequantization occurs.
 
 2. **Non-mutable operations**: For standard PyTorch ops that don't modify their inputs
    (e.g., ``torch.add``, ``torch.matmul``), the dispatch automatically dequantizes all
