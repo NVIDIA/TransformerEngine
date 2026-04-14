@@ -873,7 +873,7 @@ class GroupedTensorStorage:
         if self.scale_inv is not None and self.scale_inv_offsets is None:
             if recipe.nvfp4() or recipe.mxfp8() or recipe.float8_block_scaling():
                 cum = 0
-                scale_inv_offsets: List[int] = [0]
+                scale_inv_offsets = [0]
                 for i in range(self.num_tensors):
                     tensor_shape = self.tensor_shapes[i]
                     scale_shape = self.quantizer.get_scale_shape(tensor_shape, False)
@@ -883,7 +883,7 @@ class GroupedTensorStorage:
         if self.columnwise_scale_inv is not None and self.columnwise_scale_inv_offsets is None:
             if recipe.nvfp4() or recipe.mxfp8() or recipe.float8_block_scaling():
                 cum = 0
-                columnwise_scale_inv_offsets: List[int] = [0]
+                columnwise_scale_inv_offsets = [0]
                 for i in range(self.num_tensors):
                     tensor_shape = self.tensor_shapes[i]
                     scale_shape = self.quantizer.get_scale_shape(tensor_shape, True)
