@@ -28,6 +28,11 @@ Environment Variables:
         pytorch-triton for JAX Triton kernels (suppresses warnings). This is
         useful when both JAX and PyTorch are installed in the same environment.
         Default is "0".
+    NVTE_JAX_ENFORCE_TRITON_AUTOTUNING: If set to "1", raise a RuntimeError when
+        the installed JAX is too old to safely run TritonAutotunedKernelCall
+        (jax-ml/jax#35218) instead of silently falling back to non-autotuned
+        dispatch. Useful for CI or debugging to ensure autotuning is active.
+        Default is "0" (silent compatibility fallback).
 """
 
 import hashlib
@@ -434,11 +439,27 @@ def triton_call_lowering(
     kernel_constexprs = constexprs if constexprs is not None else {}
 
     # Handle autotuned kernels - compile all configs.
-    # Set NVTE_DISABLE_TRITON_AUTOTUNING=1 to skip TritonAutotunedKernelCall and use a
-    # single fixed config instead (useful for measuring autotuning overhead or for JAX
-    # versions that do not support input_output_aliases on autotuned calls).
-    _disable_autotuning = os.environ.get("NVTE_DISABLE_TRITON_AUTOTUNING", "0") == "1"
-    is_autotuned = isinstance(kernel_fn, autotuner.Autotuner) and not _disable_autotuning
+    # On JAX < TRITON_AUTOTUNED_INPUT_OUTPUT_ALIAS_MIN_JAX_VERSION the save/restore
+    # loop in TritonAutotunedKernelCall is buggy (jax-ml/jax#35218).  Fall back to a
+    # single non-autotuned dispatch for compatibility.  Set
+    # NVTE_JAX_ENFORCE_TRITON_AUTOTUNING=1 to raise an error instead, prompting the
+    # user to upgrade JAX for improved performance.
+    is_autotuned = isinstance(kernel_fn, autotuner.Autotuner)
+    if is_autotuned and not jax_version_meet_requirement(
+        TRITON_AUTOTUNED_INPUT_OUTPUT_ALIAS_MIN_JAX_VERSION
+    ):
+        if os.environ.get("NVTE_JAX_ENFORCE_TRITON_AUTOTUNING", "0") == "1":
+            raise RuntimeError(
+                "NVTE_JAX_ENFORCE_TRITON_AUTOTUNING=1 requires JAX >= "
+                f"{TRITON_AUTOTUNED_INPUT_OUTPUT_ALIAS_MIN_JAX_VERSION} for safe "
+                "Triton autotuning (jax-ml/jax#35218). "
+                f"Current JAX version: {jax.__version__}. "
+                "Upgrade: pip install --upgrade jax jaxlib"
+            )
+        # Compatibility fallback: disable autotuning on old JAX to avoid
+        # CUDA_ERROR_INVALID_VALUE from the unfixed save/restore loop.
+        is_autotuned = False
+
     if is_autotuned:
         # Compile all configs for runtime selection
         kernel_calls = []
@@ -484,24 +505,17 @@ def triton_call_lowering(
 
         input_output_aliases_with_sizes = ()
         if input_output_aliases:
-            if jax_version_meet_requirement(TRITON_AUTOTUNED_INPUT_OUTPUT_ALIAS_MIN_JAX_VERSION):
-                num_inputs = len(ctx.avals_in)
-                aliases = []
-                for input_idx, output_idx in input_output_aliases.items():
-                    aval = ctx.avals_in[input_idx]
-                    size_bytes = aval.size * jnp.dtype(aval.dtype).itemsize
-                    # AutotunedKernelCall expects buffer indices (inputs + outputs).
-                    buffer_output_idx = num_inputs + output_idx
-                    aliases.append((input_idx, buffer_output_idx, size_bytes))
-                input_output_aliases_with_sizes = tuple(aliases)
-            else:
-                warnings.warn(
-                    f"JAX >= {TRITON_AUTOTUNED_INPUT_OUTPUT_ALIAS_MIN_JAX_VERSION} is required "
-                    "to safely pass input_output_aliases to TritonAutotunedKernelCall. "
-                    "Passing empty aliases as a workaround (jax-ml/jax#35218).",
-                    UserWarning,
-                    stacklevel=2,
-                )
+            # JAX version is guaranteed >= TRITON_AUTOTUNED_INPUT_OUTPUT_ALIAS_MIN_JAX_VERSION
+            # here — verified by the upfront check that set is_autotuned.
+            num_inputs = len(ctx.avals_in)
+            aliases = []
+            for input_idx, output_idx in input_output_aliases.items():
+                aval = ctx.avals_in[input_idx]
+                size_bytes = aval.size * jnp.dtype(aval.dtype).itemsize
+                # AutotunedKernelCall expects buffer indices (inputs + outputs).
+                buffer_output_idx = num_inputs + output_idx
+                aliases.append((input_idx, buffer_output_idx, size_bytes))
+            input_output_aliases_with_sizes = tuple(aliases)
 
         kernel_call = gpu_triton.TritonAutotunedKernelCall(
             f"{actual_kernel_fn.__name__}_autotuned",
@@ -511,8 +525,8 @@ def triton_call_lowering(
 
     else:
         # Regular kernel: compile single config.
-        # If the kernel is an Autotuner but autotuning is disabled, unwrap it and use
-        # the first config's kwargs (user constexprs still take priority via dict merge).
+        # If the kernel is an Autotuner but JAX is too old for safe autotuning, unwrap
+        # it and use the first config's kwargs (user constexprs take priority via dict merge).
         if isinstance(kernel_fn, autotuner.Autotuner):
             actual_kernel_fn = kernel_fn.fn
             if kernel_fn.configs:
