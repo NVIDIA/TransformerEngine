@@ -9,8 +9,9 @@ reported time (we pre-allocate a float32 copy before the timed loop).
 """
 
 import sys
-sys.path.insert(0, '/workspace/TransformerEngine')
-sys.path.insert(0, '/workspace/topk')
+
+sys.path.insert(0, "/workspace/TransformerEngine")
+sys.path.insert(0, "/workspace/topk")
 
 import time
 import torch
@@ -25,20 +26,20 @@ import air_topk_wrapper
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-DTYPE_JAX   = jnp.bfloat16
+DTYPE_JAX = jnp.bfloat16
 DTYPE_TORCH = torch.bfloat16
 
 WARMUP_ITERS = 50
-BENCH_ITERS  = 200
+BENCH_ITERS = 200
 
 CONFIGS = [
     # (N, K)
-    (100_000,     100),
-    (100_000,     500),
-    (100_000,   1_000),
-    (500_000,     500),
-    (500_000,   1_000),
-    (500_000,   2_000),
+    (100_000, 100),
+    (100_000, 500),
+    (100_000, 1_000),
+    (500_000, 500),
+    (500_000, 1_000),
+    (500_000, 2_000),
     (1_000_000, 1_000),
     (1_000_000, 2_000),
     (1_000_000, 5_000),
@@ -53,6 +54,7 @@ CONFIGS = [
 # ---------------------------------------------------------------------------
 # Benchmark helpers
 # ---------------------------------------------------------------------------
+
 
 def bench_torch(x_torch: torch.Tensor, k: int) -> float:
     """Median latency in ms for torch.topk (bfloat16)."""
@@ -100,9 +102,13 @@ def bench_cub(x_jax: jnp.ndarray, k: int) -> float:
     return float(np.median(times))
 
 
-def bench_air_topk(x_f32: torch.Tensor, lengths: torch.Tensor,
-                   buffer: torch.Tensor, out_indices: torch.Tensor,
-                   k: int) -> float:
+def bench_air_topk(
+    x_f32: torch.Tensor,
+    lengths: torch.Tensor,
+    buffer: torch.Tensor,
+    out_indices: torch.Tensor,
+    k: int,
+) -> float:
     """Median latency in ms for AIR TopK (float32)."""
     for _ in range(WARMUP_ITERS):
         air_topk_wrapper.topk_kernel(x_f32, lengths, k, buffer, out_indices, False)
@@ -120,9 +126,14 @@ def bench_air_topk(x_f32: torch.Tensor, lengths: torch.Tensor,
     return float(np.median(times))
 
 
-def bench_topk_per_row(x_f32: torch.Tensor, lengths: torch.Tensor,
-                       out_aux: torch.Tensor, logits_aux: torch.Tensor,
-                       out_indices: torch.Tensor, k: int) -> float | None:
+def bench_topk_per_row(
+    x_f32: torch.Tensor,
+    lengths: torch.Tensor,
+    out_aux: torch.Tensor,
+    logits_aux: torch.Tensor,
+    out_indices: torch.Tensor,
+    k: int,
+) -> float | None:
     """Median latency in ms for topk_per_row (float32).
 
     Buffers are pre-allocated outside the timed loop.  The input is already
@@ -137,7 +148,7 @@ def bench_topk_per_row(x_f32: torch.Tensor, lengths: torch.Tensor,
         topk_per_row.topk_kernel(x_f32, lengths, k, out_aux, logits_aux, out_indices, False)
         torch.cuda.synchronize()
     except RuntimeError:
-        torch.cuda.synchronize()   # drain any pending CUDA work
+        torch.cuda.synchronize()  # drain any pending CUDA work
         return None
 
     for _ in range(WARMUP_ITERS - 1):
@@ -160,6 +171,7 @@ def bench_topk_per_row(x_f32: torch.Tensor, lengths: torch.Tensor,
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main():
     print(f"GPU: {torch.cuda.get_device_name(0)}")
     print(f"PyTorch: {torch.__version__}  |  JAX: {jax.__version__}")
@@ -167,37 +179,41 @@ def main():
     print(f"topk_per_row dtype: float32 (kernel is float32-only; input cast pre-benchmark)\n")
 
     col = [10, 10, 8, 16, 12, 12, 14, 18]
-    header = (f"{'dtype':<{col[0]}} {'N':>{col[1]}} {'K':>{col[2]}}"
-              f" {'jax.lax.top_k':>{col[3]}} {'torch.topk':>{col[4]}}"
-              f" {'CUB TopK':>{col[5]}} {'AIR TopK':>{col[6]}} {'topk_per_row':>{col[7]}}")
+    header = (
+        f"{'dtype':<{col[0]}} {'N':>{col[1]}} {'K':>{col[2]}}"
+        f" {'jax.lax.top_k':>{col[3]}} {'torch.topk':>{col[4]}}"
+        f" {'CUB TopK':>{col[5]}} {'AIR TopK':>{col[6]}} {'topk_per_row':>{col[7]}}"
+    )
     sep = "-" * len(header)
     print(header)
     print(sep)
 
     rng = jax.random.PRNGKey(42)
 
-    for (N, K) in CONFIGS:
+    for N, K in CONFIGS:
         # --- shared input data ---
-        x_jax   = jax.random.uniform(rng, shape=(N,), dtype=DTYPE_JAX)
+        x_jax = jax.random.uniform(rng, shape=(N,), dtype=DTYPE_JAX)
         x_jax.block_until_ready()
-        x_torch = torch.from_dlpack(x_jax).clone()          # bfloat16, 1-D
+        x_torch = torch.from_dlpack(x_jax).clone()  # bfloat16, 1-D
 
         # float32 view for float32-only kernels: [1, N]
-        x_f32   = x_torch.float().unsqueeze(0).contiguous()
-        lengths = torch.tensor([N], dtype=torch.int32, device='cuda')
+        x_f32 = x_torch.float().unsqueeze(0).contiguous()
+        lengths = torch.tensor([N], dtype=torch.int32, device="cuda")
         out_aux, logits_aux, out_indices_pr = topk_per_row.allocate_buffers(x_f32, K)
         air_buf, out_indices_air = air_topk_wrapper.allocate_buffers(x_f32, K, False)
 
-        t_jax  = bench_jax_lax(x_jax,   K)
-        t_tor  = bench_torch(x_torch,    K)
-        t_cub  = bench_cub(x_jax,        K)
-        t_air  = bench_air_topk(x_f32, lengths, air_buf, out_indices_air, K)
-        t_pr   = bench_topk_per_row(x_f32, lengths, out_aux, logits_aux, out_indices_pr, K)
+        t_jax = bench_jax_lax(x_jax, K)
+        t_tor = bench_torch(x_torch, K)
+        t_cub = bench_cub(x_jax, K)
+        t_air = bench_air_topk(x_f32, lengths, air_buf, out_indices_air, K)
+        t_pr = bench_topk_per_row(x_f32, lengths, out_aux, logits_aux, out_indices_pr, K)
         pr_str = f"{t_pr:>{col[7]}.4f}" if t_pr is not None else f"{'N/A':>{col[7]}}"
 
-        print(f"{'bfloat16':<{col[0]}} {N:>{col[1]},} {K:>{col[2]},}"
-              f" {t_jax:>{col[3]}.4f} {t_tor:>{col[4]}.4f}"
-              f" {t_cub:>{col[5]}.4f} {t_air:>{col[6]}.4f} {pr_str}")
+        print(
+            f"{'bfloat16':<{col[0]}} {N:>{col[1]},} {K:>{col[2]},}"
+            f" {t_jax:>{col[3]}.4f} {t_tor:>{col[4]}.4f}"
+            f" {t_cub:>{col[5]}.4f} {t_air:>{col[6]}.4f} {pr_str}"
+        )
 
     print(sep)
     print("All times in milliseconds (median).")
