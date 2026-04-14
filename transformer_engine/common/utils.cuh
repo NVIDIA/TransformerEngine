@@ -928,6 +928,13 @@ using e8m0_t = uint8_t;
 
 enum ScalingType { ROWWISE = 0, COLWISE = 1, BIDIMENSIONAL = 2 };
 
+enum ShapeRepresentation {
+  SAME_BOTH_DIMS = 0,
+  VARYING_FIRST_DIM = 1,
+  VARYING_LAST_DIM = 2,
+  VARYING_BOTH_DIMS = 3
+};
+
 template <typename T>
 struct Numeric_Traits;
 

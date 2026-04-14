@@ -7,6 +7,7 @@ from typing import Callable, Dict, Optional, Tuple, Union, List
 from functools import reduce
 from operator import mul as multiply_op
 import warnings
+import weakref
 
 import torch
 
@@ -132,6 +133,12 @@ def _linear_forward_impl(
         save_original_input,
         debug,
     ) = non_tensor_args
+    if fp8:
+        backward_override = FP8GlobalStateManager.get_fp8_recipe().backward_override
+    else:
+        backward_override = None
+    if backward_override == "high_precision":
+        save_original_input = True
 
     # NVTX label for profiling
     nvtx_label = "transformer_engine._Linear.forward"
@@ -188,7 +195,10 @@ def _linear_forward_impl(
                 raise ValueError("Missing quantizer for input tensor")
             if not isinstance(inputmat, QuantizedTensorStorage) and not custom:
                 own_quantized_input = True
-                input_quantizer.set_usage(rowwise=True, columnwise=backward_needs_input)
+                input_quantizer.set_usage(
+                    rowwise=True,
+                    columnwise=backward_needs_input and backward_override is None,
+                )
                 if isinstance(
                     input_quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)
                 ):
@@ -230,7 +240,12 @@ def _linear_forward_impl(
                 if input_quantizer is None:
                     raise ValueError("Missing quantizer for input tensor")
                 input_quantizer.set_usage(
-                    rowwise=True, columnwise=backward_needs_input and not save_original_input
+                    rowwise=True,
+                    columnwise=(
+                        backward_needs_input
+                        and not save_original_input
+                        and backward_override is None
+                    ),
                 )
                 inputmat = input_quantizer(inputmat)
                 own_quantized_input = True
@@ -254,6 +269,8 @@ def _linear_forward_impl(
         # No need to set the quantizer states if weight is already quantized
         if weight_quantizer is not None and not isinstance(weight, QuantizedTensor):
             columnwise_usage = is_grad_enabled and inp.requires_grad
+            if backward_override is not None:
+                columnwise_usage = False
             if not columnwise_usage:
                 columnwise_usage = (
                     is_fp8_activation_recompute_enabled()
@@ -386,7 +403,9 @@ def _linear_forward_impl(
             and own_quantized_input
             and isinstance(inputmat, QuantizedTensorStorage)
         ):
-            if (
+            if backward_override is not None:
+                inputmat.update_usage(rowwise_usage=True, columnwise_usage=False)
+            elif (
                 backward_input_needs_gather
                 and weight_quantizer.supports_only_rowwise_all_gather()
             ):
@@ -489,10 +508,18 @@ def _linear_setup_ctx(ctx, tensors_to_save, tensor_objects, ctx_attrs,
     ctx.grad_weight_quantizer = grad_weight_quantizer
     ctx.grad_output_quantizer = grad_output_quantizer
 
+    # backward_override
+    if fp8:
+        backward_override = FP8GlobalStateManager.get_fp8_recipe().backward_override
+    else:
+        backward_override = None
+
     # Values from non_tensor_args
     ctx.activation_dtype = activation_dtype
     ctx.fp8 = fp8
     ctx.fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
+    ctx.backward_override = backward_override
+    ctx.is_weight_param_quantized = isinstance(weight, QuantizedTensorStorage)
     ctx.fuse_wgrad_accumulation = fuse_wgrad_accumulation
     ctx.cpu_offloading = cpu_offloading
     ctx.is_first_microbatch = is_first_microbatch
@@ -524,22 +551,31 @@ def _linear_setup_ctx(ctx, tensors_to_save, tensor_objects, ctx_attrs,
 
     # main_grad_func setup
     if fuse_wgrad_accumulation and weight.requires_grad:
+        ctx.origin_weight_ref = weakref.ref(weight)
+        ctx.origin_weight_overwrites_main_grad = getattr(
+            weight, "overwrite_main_grad", False
+        )
         if hasattr(weight, "__fsdp_param__"):
             ctx.main_grad_func = weight.get_main_grad
         else:
             ctx.main_grad_func = lambda: weight.main_grad
 
-    # CPU offloading state
-    ctx.grad_added_to_main_grad = False
-    if cpu_offloading:
-        ctx.grad_added_to_main_grad = hasattr(weight, "grad_added_to_main_grad")
-        if ctx.grad_added_to_main_grad:
-            ctx.weight_object = weight
-
     # Forward-computed values that can't be derived here
     ctx.weight_quantizer = ctx_attrs["weight_quantizer"]
     ctx.fsdp_shapes = ctx_attrs["fsdp_shapes"]
     ctx.owns_input = ctx_attrs["owns_input"]
+
+    # backward overrides
+    if backward_override is not None:
+        ctx.fp8 = False
+        ctx.debug = False
+        ctx.ub_overlap_ag = False
+        ctx.ub_overlap_rs_dgrad = False
+        ctx.ub_bulk_dgrad = False
+        ctx.ub_bulk_wgrad = False
+        ctx.grad_input_quantizer = None
+        ctx.grad_weight_quantizer = None
+        ctx.grad_output_quantizer = None
 
 
 def _linear_backward(
@@ -559,22 +595,31 @@ def _linear_backward(
         nvtx_label = f"{nvtx_label}.{ctx.ub_name}"
 
     with get_nvtx_range_context("_Linear_backward"):
-        inputmat, weight_fp8, weight, bias = (  # pylint: disable=unbalanced-tuple-unpacking
-            restore_from_func_ctx(ctx)
+        (
+            inputmat,
+            weight_fp8,
+            saved_weight,
+            bias,
+        ) = restore_from_func_ctx(  # pylint: disable=unbalanced-tuple-unpacking
+            ctx
         )
 
-        # Since main_grad can be modified inplace, it should not be a part of saved_tensors
-        main_grad = (
-            ctx.main_grad_func()
-            if weight is not None and ctx.fuse_wgrad_accumulation and ctx.requires_wgrad
-            else None
+        origin_weight_python_object = None
+        origin_weight_overwrites_main_grad = getattr(
+            ctx, "origin_weight_overwrites_main_grad", False
         )
-
-        if ctx.cpu_offloading:
-            if ctx.grad_added_to_main_grad:
-                weight = ctx.weight_object
-        if ctx.requires_wgrad and ctx.fuse_wgrad_accumulation:
-            weight.main_grad = main_grad
+        main_grad = None
+        if ctx.fuse_wgrad_accumulation and ctx.requires_wgrad:
+            origin_weight_ref = ctx.origin_weight_ref
+            ctx.origin_weight_ref = None
+            origin_weight_python_object = (
+                origin_weight_ref() if origin_weight_ref is not None else None
+            )
+            assert (
+                origin_weight_python_object is not None
+            ), "weight was removed while fuse_wgrad_accumulation=True"
+            main_grad = ctx.main_grad_func()
+            origin_weight_python_object.main_grad = main_grad
 
         # Gather intermediate/activation tensors if needed
         # NOTE: weight_fp8 = weight when ctx.fp8 == False and torch.disttributed.FSDP already
@@ -742,8 +787,10 @@ def _linear_backward(
             # Make sure required data is available
             if isinstance(grad_output, QuantizedTensorStorage):
                 grad_output.update_usage(rowwise_usage=True)
-            if weight_quantizer is not None and isinstance(
-                weight_fp8, QuantizedTensorStorage
+            if (
+                ctx.fp8
+                and ctx.weight_quantizer is not None
+                and isinstance(weight_fp8, QuantizedTensorStorage)
             ):
                 weight_fp8.update_usage(columnwise_usage=True)
 
@@ -772,8 +819,18 @@ def _linear_backward(
             # Note: dx = dy * w
 
             nvtx_range_push(f"{nvtx_label}.dgrad_gemm")
+            weight_for_dgrad = weight_fp8
+            if ctx.backward_override == "dequantized":
+                if isinstance(weight_for_dgrad, QuantizedTensorStorage):
+                    weight_for_dgrad = weight_for_dgrad.dequantize(dtype=ctx.activation_dtype)
+                else:
+                    weight_for_dgrad = cast_if_needed(weight_for_dgrad, ctx.activation_dtype)
+            elif ctx.backward_override == "high_precision":
+                weight_for_dgrad = saved_weight
+                if isinstance(weight_for_dgrad, QuantizedTensorStorage):
+                    weight_for_dgrad = weight_for_dgrad.dequantize(dtype=ctx.activation_dtype)
             gemm_out, *_, reduce_scatter_out = general_gemm(
-                weight_fp8,
+                weight_for_dgrad,
                 grad_output,
                 layout="NN",
                 grad=True,
@@ -906,7 +963,7 @@ def _linear_backward(
                 "quantization_params": grad_weight_quantizer,
                 "accumulate": (
                     accumulate_wgrad_into_param_main_grad
-                    if not getattr(weight, "overwrite_main_grad", False)
+                    if not origin_weight_overwrites_main_grad
                     else False
                 ),
                 "layout": "NT",
@@ -996,22 +1053,20 @@ def _linear_backward(
 
     if ctx.requires_wgrad:
         # Handle custom DDP from mcore.
-        if (
-            ctx.fuse_wgrad_accumulation
-            and weight is not None
-            and hasattr(weight, "grad_added_to_main_grad")
+        if ctx.fuse_wgrad_accumulation and hasattr(
+            origin_weight_python_object, "grad_added_to_main_grad"
         ):
-            weight.grad_added_to_main_grad = True
-            if getattr(weight, "zero_out_wgrad", False):
+            origin_weight_python_object.grad_added_to_main_grad = True
+            if getattr(origin_weight_python_object, "zero_out_wgrad", False):
                 wgrad = get_dummy_wgrad(
-                    list(weight.main_grad.shape),
-                    weight.dtype,
+                    list(main_grad.shape),
+                    origin_weight_python_object.dtype,
                     zero=True,
                 )
             else:
                 wgrad = get_dummy_wgrad(
-                    list(weight.main_grad.shape),
-                    weight.dtype,
+                    list(main_grad.shape),
+                    origin_weight_python_object.dtype,
                 )
         elif ctx.fuse_wgrad_accumulation:
             wgrad = None
@@ -1019,7 +1074,7 @@ def _linear_backward(
         wgrad = None
 
     # Scatter fp8 weight buffers
-    if ctx.fp8 and not isinstance(weight, QuantizedTensorStorage):
+    if ctx.fp8 and not ctx.is_weight_param_quantized:
         _fsdp_scatter_tensors(ctx.fsdp_group, weight_fp8)
     return (
         wgrad,
@@ -1073,6 +1128,8 @@ class _Linear(torch.autograd.Function):
             if fp8 and requires_grad(inp, weight, bias):
                 ctx.reduce_and_update_bwd_fp8_tensors = _check_fp8_reduce_and_update()
             else:
+                ctx.reduce_and_update_bwd_fp8_tensors = False
+            if ctx.backward_override is not None:
                 ctx.reduce_and_update_bwd_fp8_tensors = False
 
         return out
@@ -1611,6 +1668,13 @@ class Linear(TransformerEngineBaseModule):
                 grad_output_quantizer.optimize_for_gemm = True
             if fp8_grad:
                 grad_input_quantizer = self.quantizers["scaling_bwd"][FP8BwdTensorIdx.GRAD_INPUT1]
+        fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
+        if fp8_recipe.backward_override == "dequantized" and (
+            fp8_recipe.mxfp8() or fp8_recipe.nvfp4()
+        ):
+            input_quantizer.optimize_for_gemm = False
+            if grad_output_quantizer is not None:
+                grad_output_quantizer.optimize_for_gemm = False
         return (
             input_quantizer,
             weight_quantizer,
