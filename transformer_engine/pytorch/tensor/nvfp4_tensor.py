@@ -211,10 +211,17 @@ class NVFP4Quantizer(Quantizer):
         return tex.quantize(tensor, self)
 
     def is_quantizable(self, inp: torch.Tensor) -> bool:
-        """Returns whether or not given inp can be quantized"""
+        """Whether tensor can be quantized and distributed via all-gather.
+
+        For distributed all-gather with columnwise scaling, the first
+        dimension must be aligned to the block size so that no scaling
+        block spans across GPU boundaries.
+        """
         if inp.ndim < 2:
             return False
         if inp.shape[-1] % 32 != 0:
+            return False
+        if self.columnwise_usage and math.prod(inp.shape[:-1]) % NVFP4_BLOCK_SCALING_SIZE != 0:
             return False
         return True
 
