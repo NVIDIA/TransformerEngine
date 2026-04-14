@@ -301,12 +301,7 @@ class MXFP8Quantizer : public Quantizer {
   std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
                                                      DType dtype) const override;
 
-  /*! @brief Construct an unquantized tensor that shares the quantizer's amax pointer.
-   *
-   * The amax is zeroed out. Most TE kernels that output amax expect
-   * amax to be initialized to zero.
-  */
-  std::pair<TensorWrapper, py::object> create_unquantized_tensor_with_amax(
+  std::pair<TensorWrapper, py::object> create_unquantized_tensor(
       const std::vector<size_t>& shape, DType dtype, std::optional<at::Tensor> data = std::nullopt);
 
   std::pair<GroupedTensorWrapper, py::object> create_grouped_tensor(
