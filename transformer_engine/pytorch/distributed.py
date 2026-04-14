@@ -1119,7 +1119,7 @@ def _start_all_gather_fp8_blockwise(
         raise ValueError(f"Got non-FP8 blockwise quantizer ({quantizer.__class__.__name__})")
 
     # Fall back to high-precision all-gather if FP8 is not supported
-    if not quantizer.is_quantizable(inp) or quantizer.block_scaling_dim != 1:
+    if not quantizer.supports_quantized_allgather(inp) or quantizer.block_scaling_dim != 1:
         warnings.warn("Cannot quantize input tensor. Performing all-gather in high precision.")
         if isinstance(inp, QuantizedTensorStorage):
             inp = inp.dequantize(dtype=dtype)  # Dequantize if needed
@@ -1371,7 +1371,7 @@ def _all_gather_nvfp4(
     if (
         not isinstance(inp, NVFP4TensorStorage)
         and quantizer is not None
-        and not quantizer.is_quantizable(inp)
+        and not quantizer.supports_quantized_allgather(inp)
     ):
         warnings.warn("Cannot quantize input tensor. Performing all-gather in high precision.")
         if isinstance(inp, QuantizedTensorStorage):
@@ -1545,7 +1545,7 @@ def _all_gather_mxfp8(
     if (
         not isinstance(inp, MXFP8TensorStorage)
         and quantizer is not None
-        and not quantizer.is_quantizable(inp)
+        and not quantizer.supports_quantized_allgather(inp)
     ):
         warnings.warn("Cannot quantize input tensor. Performing all-gather in high precision.")
         if isinstance(inp, QuantizedTensorStorage):

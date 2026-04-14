@@ -210,8 +210,8 @@ class NVFP4Quantizer(Quantizer):
         """Quantize tensor implementation"""
         return tex.quantize(tensor, self)
 
-    def is_quantizable(self, inp: torch.Tensor) -> bool:
-        """Whether tensor can be quantized and distributed via all-gather.
+    def supports_quantized_allgather(self, inp: torch.Tensor) -> bool:
+        """Whether tensor shape supports quantized all-gather.
 
         For distributed all-gather with columnwise scaling, the first
         dimension must be aligned to the block size so that no scaling
