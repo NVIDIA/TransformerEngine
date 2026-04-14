@@ -319,6 +319,14 @@ class Quantizer(abc.ABC):
     ) -> QuantizedTensor:
         """Construct quantized tensor with uninitialized data"""
 
+        # Guard for custom quantizers that don't have a registered C++ converter.
+        # Without this, they would hit an opaque C++ NVTE_ERROR.
+        if getattr(self, "custom", False):
+            raise NotImplementedError(
+                f"{self.__class__.__name__} class does not implement make_empty function, "
+                "required for construction of uninitialized quantized tensor"
+            )
+
         if device is None:
             device = torch.device("cuda")
         # Handle the device passed as string
