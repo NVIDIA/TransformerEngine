@@ -110,6 +110,9 @@ def replace_params(hf_state_dict: dict, te_state_dict: dict, config: MixtralConf
     The helper supports both packed HF MoE tensors (`mlp.experts.gate_up_proj`)
     and older per-expert tensors (`experts.{i}.w{1,2,3}.weight`).
     """
+    ep_size = int(getattr(config, "expert_parallel_size", 1))
+    ep_rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
+
     all_layer_prefixes = set()
     for param_key in hf_state_dict.keys():
         m = re.match(r"model\.layers\.\d+\.", param_key)
@@ -164,7 +167,14 @@ def replace_params(hf_state_dict: dict, te_state_dict: dict, config: MixtralConf
         te_gate_up_key = layer_prefix + "mlp.experts_gate_up_weight"
         for hf_key in packed_gate_up_candidates:
             if hf_key in hf_state_dict and te_gate_up_key in te_state_dict:
-                _copy_param(te_state_dict[te_gate_up_key], hf_state_dict[hf_key])
+                te_gate_up = te_state_dict[te_gate_up_key]
+                if isinstance(te_gate_up, DTensor):
+                    te_gate_up = te_gate_up.to_local()
+                local_experts = te_gate_up.shape[0]
+                expert_start = ep_rank * local_experts if ep_size > 1 else 0
+                expert_end = expert_start + local_experts
+                hf_gate_up = hf_state_dict[hf_key][expert_start:expert_end]
+                _copy_param(te_state_dict[te_gate_up_key], hf_gate_up)
                 break
 
         packed_down_candidates = (
@@ -174,7 +184,14 @@ def replace_params(hf_state_dict: dict, te_state_dict: dict, config: MixtralConf
         te_down_key = layer_prefix + "mlp.experts_down_weight"
         for hf_key in packed_down_candidates:
             if hf_key in hf_state_dict and te_down_key in te_state_dict:
-                _copy_param(te_state_dict[te_down_key], hf_state_dict[hf_key])
+                te_down = te_state_dict[te_down_key]
+                if isinstance(te_down, DTensor):
+                    te_down = te_down.to_local()
+                local_experts = te_down.shape[0]
+                expert_start = ep_rank * local_experts if ep_size > 1 else 0
+                expert_end = expert_start + local_experts
+                hf_down = hf_state_dict[hf_key][expert_start:expert_end]
+                _copy_param(te_state_dict[te_down_key], hf_down)
                 break
 
         # Older HF Mixtral checkpoints may store one tensor per expert.
@@ -187,10 +204,12 @@ def replace_params(hf_state_dict: dict, te_state_dict: dict, config: MixtralConf
                 te_down = te_down.to_local()
 
             num_local_experts = te_gate_up.shape[0]
+            expert_start = ep_rank * num_local_experts if ep_size > 1 else 0
             for expert_idx in range(num_local_experts):
+                global_expert_idx = expert_start + expert_idx
                 expert_prefixes = (
-                    layer_prefix + f"mlp.experts.{expert_idx}.",
-                    layer_prefix + f"block_sparse_moe.experts.{expert_idx}.",
+                    layer_prefix + f"mlp.experts.{global_expert_idx}.",
+                    layer_prefix + f"block_sparse_moe.experts.{global_expert_idx}.",
                 )
                 for expert_prefix in expert_prefixes:
                     w1_key = expert_prefix + "w1.weight"

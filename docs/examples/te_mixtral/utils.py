@@ -4,11 +4,15 @@
 
 import sys
 import time
+import os
 import IPython
 
 import torch
+import torch.distributed as dist
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
+from torch.distributed.tensor import DTensor
+from torch.distributed.tensor.device_mesh import DeviceMesh
 
 from transformers import (
     AutoModelForCausalLM,
@@ -41,6 +45,7 @@ class HyperParameters:
         # Set by the user or populated automatically on download.
         self.weights_cache_dir = ""
         self.hf_access_token = ""
+        self.expert_parallel_size = 8
 
 
 hyperparams = HyperParameters()
@@ -128,18 +133,76 @@ def init_te_mixtral_model(hyperparams: HyperParameters):
     """Load Mixtral with TE-optimised MoE blocks."""
     ensure_model_is_downloaded(hyperparams)
 
-    from te_mixtral import TEMixtralForCausalLM
+    from te_mixtral import NVMixtralForCausalLM, replace_params
 
-    config = AutoConfig.from_pretrained(hyperparams.weights_cache_dir)
-    config._attn_implementation = "flash_attention_2"
-    model = TEMixtralForCausalLM.from_pretrained_local(
+    base_config = AutoConfig.from_pretrained(hyperparams.weights_cache_dir)
+    base_config._attn_implementation = "flash_attention_2"
+    te_config = NVMixtralForCausalLM.config_class(**base_config.to_dict())
+    te_config.expert_parallel_size = hyperparams.expert_parallel_size
+
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    if world_size > 1:
+        torch.cuda.set_device(local_rank)
+        if not dist.is_initialized():
+            dist.init_process_group(backend="nccl", init_method="env://")
+        if world_size != hyperparams.expert_parallel_size:
+            raise ValueError(
+                "For this minimal EP setup, WORLD_SIZE must match expert_parallel_size. "
+                f"Got WORLD_SIZE={world_size}, expert_parallel_size={hyperparams.expert_parallel_size}."
+            )
+    elif hyperparams.expert_parallel_size != 1:
+        raise ValueError("expert_parallel_size > 1 requires torchrun distributed launch.")
+
+    # Load the HF model on CPU and map weights into TE structure.
+    hf_model = AutoModelForCausalLM.from_pretrained(
         hyperparams.weights_cache_dir,
-        config=config,
+        config=base_config,
         torch_dtype=torch.bfloat16,
+        device_map="cpu",
     )
-    model = model.cuda()
+    model = NVMixtralForCausalLM(te_config).to(
+        device=f"cuda:{local_rank}",
+        dtype=torch.bfloat16,
+    )
+    te_state_dict = model.state_dict()
+    replace_params(hf_model.state_dict(), te_state_dict, model.config)
+    model.load_state_dict(te_state_dict, strict=False)
+    del hf_model
+
+    if hyperparams.expert_parallel_size > 1:
+        ep_mesh = DeviceMesh("cuda", torch.arange(world_size))
+        model.model.set_ep_groups(ep_group=dist.group.WORLD, ep_mesh=ep_mesh)
+
     model.config.use_cache = False
     return model
+
+
+def build_adamw(model, hyperparams: HyperParameters):
+    """Build AdamW optimizer compatible with mixed Tensor/DTensor parameters."""
+    dtensor_params = []
+    tensor_params = []
+    for param in model.parameters():
+        if not param.requires_grad:
+            continue
+        if isinstance(param, DTensor) or isinstance(param.data, DTensor):
+            dtensor_params.append(param)
+        else:
+            tensor_params.append(param)
+
+    param_groups = []
+    if tensor_params:
+        param_groups.append({"params": tensor_params})
+    if dtensor_params:
+        param_groups.append({"params": dtensor_params})
+
+    use_fused = hyperparams.expert_parallel_size == 1 and not dtensor_params
+    return AdamW(
+        params=param_groups,
+        lr=hyperparams.learning_rate,
+        fused=use_fused,
+        foreach=False,
+    )
 
 
 def wrap_with_accelerator(model, hyperparams: HyperParameters):
@@ -156,7 +219,7 @@ def wrap_with_accelerator(model, hyperparams: HyperParameters):
     )
 
     train_dataloader = get_dataloaders(accelerator, hyperparams)
-    optimizer = AdamW(params=model.parameters(), lr=hyperparams.learning_rate, fused=True)
+    optimizer = build_adamw(model, hyperparams)
     lr_scheduler = get_linear_schedule_with_warmup(
         optimizer=optimizer,
         num_warmup_steps=hyperparams.num_warmup_steps,
@@ -212,6 +275,13 @@ def finetune_model(model, hyperparams, accelerator, train_dataloader, optimizer,
         f"{hyperparams.num_training_steps} fine-tuning steps complete!\n"
         f"Average time per step: {ms_per_step:.0f} ms"
     )
+
+
+def run_te_mixtral_finetune(hyperparams: HyperParameters):
+    """Convenience entrypoint: init TE Mixtral, wrap, and run fine-tuning."""
+    model = init_te_mixtral_model(hyperparams)
+    accelerator, model, optimizer, train_dataloader, lr_scheduler = wrap_with_accelerator(model, hyperparams)
+    finetune_model(model, hyperparams, accelerator, train_dataloader, optimizer, lr_scheduler)
 
 
 def restart_jupyter_notebook():

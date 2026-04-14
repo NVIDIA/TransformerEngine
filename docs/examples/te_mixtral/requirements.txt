@@ -1,4 +1,7 @@
-transformers==4.47.1
-accelerate==1.10.0
-datasets==4.0.0
-sentencepiece==0.2.1
+torch
+torchao!=0.14.0
+transformer_engine[pytorch]
+transformers
+accelerate
+datasets
+safetensors
