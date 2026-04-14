@@ -97,9 +97,9 @@ std::pair<TensorWrapper, py::object> quantizer_helper(py::handle quantizer,
     if (create_hp_tensor_for_cs) {
       if (data.has_value()) {
         std::tie(te_T, py_T) =
-            T_quantizer_fp8->create_unquantized_tensor_with_amax(shape, dtype, data.value());
+            T_quantizer_fp8->create_unquantized_tensor(shape, dtype, data.value());
       } else {
-        std::tie(te_T, py_T) = T_quantizer_fp8->create_unquantized_tensor_with_amax(shape, dtype);
+        std::tie(te_T, py_T) = T_quantizer_fp8->create_unquantized_tensor(shape, dtype);
       }
     } else {
       std::tie(te_T, py_T) = T_quantizer_fp8->create_tensor(shape, dtype);
