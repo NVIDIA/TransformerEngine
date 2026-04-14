@@ -53,9 +53,9 @@ def moe_permute_index_map_forward(
             f"Permute not possible: inp.size(0) ({inp.size(0)}) must match "
             f"index.size(0) ({index.size(0)})."
         )
-    assert num_out_tokens >= 0, (
-        f"moe_permute (index map) requires num_out_tokens >= 0, got {num_out_tokens}."
-    )
+    assert (
+        num_out_tokens >= 0
+    ), f"moe_permute (index map) requires num_out_tokens >= 0, got {num_out_tokens}."
     if index.dtype != torch.int32:
         warnings.warn(
             f"The data type of the input `index` of Permute is {index.dtype}! "
@@ -95,9 +95,9 @@ def _moe_permute_index_map_fake(  # pylint: disable=unused-argument
     num_tokens = inp.shape[0]
     topK = index.shape[1]
     if num_tokens > 0:
-        assert num_out_tokens >= 0, (
-            f"moe_permute (index map) requires num_out_tokens >= 0, got {num_out_tokens}."
-        )
+        assert (
+            num_out_tokens >= 0
+        ), f"moe_permute (index map) requires num_out_tokens >= 0, got {num_out_tokens}."
 
     # Infer output shape
     output_tokens = num_out_tokens if num_out_tokens > 0 else num_tokens * topK
