@@ -1,17 +1,38 @@
 """
 Benchmark jax.lax.top_k, torch.topk, CUB TopK (TransformerEngine PR #2784),
-and topk_per_row (/workspace/topk) for bfloat16 inputs across the (N, K)
+AIR TopK, and topk_per_row for bfloat16 inputs across the (N, K)
 configurations from the reference sheet.
 
-Note: topk_per_row is float32-only.  Inputs are cast to float32 for that
-kernel so the values are equivalent; the cast cost is NOT included in the
-reported time (we pre-allocate a float32 copy before the timed loop).
+Note: AIR TopK and topk_per_row are float32-only.  Inputs are cast to float32
+for those kernels; the cast cost is NOT included in the reported time.
+
+The two custom kernels live in topk/ inside this repo.  They are built
+automatically on first run if the .so files are not present.
 """
 
+import os
+import subprocess
 import sys
 
-sys.path.insert(0, "/workspace/TransformerEngine")
-sys.path.insert(0, "/workspace/topk")
+# Ensure the repo root is on the path for the TE import.
+_repo_root = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _repo_root)
+
+# Build topk/ extensions if not already built.
+_topk_dir = os.path.join(_repo_root, "topk")
+_so_names = ["air_topk_wrapper", "topk_per_row"]
+_missing = [
+    n
+    for n in _so_names
+    if not any(f.startswith(n) and f.endswith(".so") for f in os.listdir(_topk_dir))
+]
+if _missing:
+    print(f"Building topk extensions ({', '.join(_missing)}) ...")
+    subprocess.check_call(
+        [sys.executable, "setup.py", "build_ext", "--inplace"],
+        cwd=_topk_dir,
+    )
+sys.path.insert(0, _topk_dir)
 
 import time
 import torch
