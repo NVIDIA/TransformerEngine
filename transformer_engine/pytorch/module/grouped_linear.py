@@ -420,6 +420,16 @@ class _GroupedLinear(torch.autograd.Function):
                 accumulate_wgrad_into_param_main_grad = ctx.fuse_wgrad_accumulation
 
             if ctx.etp_size > 1:
+                # Drain main_stream before launching EETP all-gather on ag_stream.
+                # With --overlap-grad-reduce + CG, DDP backward hooks may have fired a
+                # reduce-scatter (IB, on main_stream) that races with the EETP AG (IB,
+                # on ag_stream). Making ag_stream wait for main_stream serializes IB ops.
+                from transformer_engine.pytorch.module.extended_tensor_parallelism import (
+                    get_ag_stream,
+                )
+                get_ag_stream(origin_weights[0].chain_id).wait_stream(
+                    torch.cuda.current_stream()
+                )
                 weights = origin_weights[0].batched_all_gather_and_prefetch_bwd()
 
             if ctx.requires_dgrad:
