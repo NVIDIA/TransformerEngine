@@ -52,7 +52,6 @@ from ..version_utils import (
     TRITON_EXTENSION_MIN_JAX_VERSION,
     is_triton_autotuned_alias_safe,
     is_triton_extension_supported,
-    jax_version_meet_requirement,
 )
 
 
