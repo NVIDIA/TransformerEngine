@@ -516,13 +516,11 @@ void inplace_multi_tensor_swizzle_scales_for_gemm(std::vector<py::object> &tenso
     auto scale_view = output_buffer->narrow(0, static_cast<int64_t>(offset),
                                             static_cast<int64_t>(num_bytes)).view(torch_shape);
 
-    auto &t = tensors[swizzle_indices[j]];
     if (rowwise_usage) {
-      t.attr("_rowwise_scale_inv") = py::cast(scale_view);
+      tensors[swizzle_indices[j]].attr("_rowwise_scale_inv") = py::cast(scale_view);
     } else {
-      t.attr("_columnwise_scale_inv") = py::cast(scale_view);
+      tensors[swizzle_indices[j]].attr("_columnwise_scale_inv") = py::cast(scale_view);
     }
-    t.attr("_with_gemm_swizzled_scales") = true;
   }
 }
 
