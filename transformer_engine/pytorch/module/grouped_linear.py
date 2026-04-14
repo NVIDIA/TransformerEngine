@@ -1317,15 +1317,6 @@ class GroupedLinear(TransformerEngineBaseModule):
                 for i in range(self.num_gemms):
                     grad_output_quantizers[i].internal = True
                     grad_output_quantizers[i].optimize_for_gemm = True
-            fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
-            if fp8_recipe.backward_override == "dequantized" and (
-                fp8_recipe.mxfp8() or fp8_recipe.nvfp4()
-            ):
-                for input_quantizer in input_quantizers:
-                    input_quantizer.optimize_for_gemm = False
-                if torch.is_grad_enabled():
-                    for grad_output_quantizer in grad_output_quantizers:
-                        grad_output_quantizer.optimize_for_gemm = False
         return (
             input_quantizers,
             weight_quantizers,
