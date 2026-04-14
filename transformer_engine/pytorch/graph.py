@@ -324,11 +324,12 @@ def _make_graphed_callables(
 
     if cache_quantized_params:
         # Initialize flag that controls FP8 weight updates
-        if FP8GlobalStateManager.quantization_state.skip_fp8_weight_update_tensor is None:
-            FP8GlobalStateManager.quantization_state.skip_fp8_weight_update_tensor = torch.empty(
+        qstate = FP8GlobalStateManager.quantization_state
+        if qstate.skip_fp8_weight_update_tensor is None:
+            qstate.skip_fp8_weight_update_tensor = torch.empty(
                 1, dtype=torch.float32, device="cuda"
             )
-        FP8GlobalStateManager.quantization_state.skip_fp8_weight_update_tensor.fill_(False)
+        qstate.skip_fp8_weight_update_tensor.fill_(False)
 
     # Check callables
     for c in callables:

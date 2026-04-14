@@ -322,18 +322,16 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                         pos, buffer_key = self._fp8_metas[mode][
                             FP8GlobalStateManager.get_buffer_info()
                         ]
-                        if (
-                            buffer_key
-                            in FP8GlobalStateManager.quantization_state.global_amax_buffer
-                        ):
+                        qstate = FP8GlobalStateManager.quantization_state
+                        if buffer_key in qstate.global_amax_buffer:
                             assert (
                                 buffer_key
-                                in FP8GlobalStateManager.quantization_state.global_amax_history_buffer
+                                in qstate.global_amax_history_buffer
                             ), "TE internal error during amax history change."
-                            FP8GlobalStateManager.quantization_state.global_amax_buffer[buffer_key][
+                            qstate.global_amax_buffer[buffer_key][
                                 pos
                             ] = recipe_state.amax_history[0]
-                            FP8GlobalStateManager.quantization_state.global_amax_history_buffer[
+                            qstate.global_amax_history_buffer[
                                 buffer_key
                             ][pos] = recipe_state.amax_history
 

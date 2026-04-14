@@ -531,10 +531,11 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.normalization = normalization
             ctx.reduce_and_update_bwd_fp8_tensors = False
             if ctx.fp8 and requires_grad(inp, ln_weight, ln_bias, weight, bias):
-                _first_fp8_module = FP8GlobalStateManager.quantization_state.is_first_fp8_module
+                qstate = FP8GlobalStateManager.quantization_state
+                _first_fp8_module = qstate.is_first_fp8_module
                 ctx.reduce_and_update_bwd_fp8_tensors = FP8GlobalStateManager.is_first_fp8_module()
                 if in_fp8_activation_recompute_phase():
-                    FP8GlobalStateManager.quantization_state.is_first_fp8_module = _first_fp8_module
+                    qstate.is_first_fp8_module = _first_fp8_module
             ctx.wgrad_store = wgrad_store
             ctx.debug = debug
 
