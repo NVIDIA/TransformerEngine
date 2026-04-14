@@ -131,9 +131,13 @@ def replace_params(hf_state_dict: dict, te_state_dict: dict, config: MixtralConf
 
     for layer_prefix in all_layer_prefixes:
         direct_layer_mappings = {
-            layer_prefix + "input_layernorm.weight": layer_prefix + "self_attention.layernorm_qkv.layer_norm_weight",
+            layer_prefix
+            + "input_layernorm.weight": layer_prefix
+            + "self_attention.layernorm_qkv.layer_norm_weight",
             layer_prefix + "self_attn.o_proj.weight": layer_prefix + "self_attention.proj.weight",
-            layer_prefix + "post_attention_layernorm.weight": layer_prefix + "post_attention_layernorm.weight",
+            layer_prefix
+            + "post_attention_layernorm.weight": layer_prefix
+            + "post_attention_layernorm.weight",
         }
         for hf_key, te_key in direct_layer_mappings.items():
             if hf_key in hf_state_dict and te_key in te_state_dict:
@@ -148,7 +152,9 @@ def replace_params(hf_state_dict: dict, te_state_dict: dict, config: MixtralConf
             }
             for proj_kind, hf_key in qkv_sources.items():
                 if hf_key in hf_state_dict:
-                    _copy_qkv_proj_to_fused(te_state_dict[fused_qkv_key], hf_state_dict[hf_key], proj_kind, config)
+                    _copy_qkv_proj_to_fused(
+                        te_state_dict[fused_qkv_key], hf_state_dict[hf_key], proj_kind, config
+                    )
 
         gate_candidates = (
             layer_prefix + "mlp.gate.weight",
@@ -218,11 +224,15 @@ def replace_params(hf_state_dict: dict, te_state_dict: dict, config: MixtralConf
 
                     if w1_key in hf_state_dict:
                         te_gate_up[expert_idx, : config.intermediate_size].copy_(
-                            hf_state_dict[w1_key].to(device=te_gate_up.device, dtype=te_gate_up.dtype)
+                            hf_state_dict[w1_key].to(
+                                device=te_gate_up.device, dtype=te_gate_up.dtype
+                            )
                         )
                     if w3_key in hf_state_dict:
                         te_gate_up[expert_idx, config.intermediate_size :].copy_(
-                            hf_state_dict[w3_key].to(device=te_gate_up.device, dtype=te_gate_up.dtype)
+                            hf_state_dict[w3_key].to(
+                                device=te_gate_up.device, dtype=te_gate_up.dtype
+                            )
                         )
                     if w2_key in hf_state_dict:
                         te_down[expert_idx].copy_(
@@ -251,10 +261,14 @@ class NVMixtralConfig(MixtralConfig):
 
         if self.layer_precision is not None:
             if len(self.layer_precision) != self.num_hidden_layers:
-                raise ValueError(f"layer_precision must be a list of length {self.num_hidden_layers}")
+                raise ValueError(
+                    f"layer_precision must be a list of length {self.num_hidden_layers}"
+                )
             for precision in self.layer_precision:
                 if precision not in {"fp8", "fp4", None}:
-                    raise ValueError(f'layer_precision element must be "fp8", "fp4", or None, got {precision!r}')
+                    raise ValueError(
+                        f'layer_precision element must be "fp8", "fp4", or None, got {precision!r}'
+                    )
 
         if self.num_local_experts % self.expert_parallel_size != 0:
             raise ValueError(
@@ -332,7 +346,10 @@ class NVMixtralPreTrainedModel(PreTrainedModel):
     base_model_prefix = "model"
     _no_split_modules = ("NVMixtralDecoderLayer",)
     _skip_keys_device_placement = ("past_key_values",)
-    _do_not_quantize = ("lm_head", "model.layers.*.mlp.gate")  # Flag for testing that these layers are not quantized.
+    _do_not_quantize = (
+        "lm_head",
+        "model.layers.*.mlp.gate",
+    )  # Flag for testing that these layers are not quantized.
 
     def init_empty_weights(self):
         """Handles moving the model from the meta device to the cuda device and initializing the weights."""
@@ -349,7 +366,9 @@ class NVMixtralPreTrainedModel(PreTrainedModel):
         self.model.embed_tokens.to_empty(device="cuda")
         self.model.embed_tokens.apply(self._init_weights)
 
-        self.model.rotary_emb.inv_freq = LlamaRotaryEmbedding(config=self.model.config).inv_freq.to("cuda")
+        self.model.rotary_emb.inv_freq = LlamaRotaryEmbedding(config=self.model.config).inv_freq.to(
+            "cuda"
+        )
 
         self.tie_weights()
 
@@ -437,12 +456,20 @@ class NVMixtralSparseMoeBlock(nn.Module):
         # so that reset_parameters() / _get_weight_tensors() can still find them.
         self.experts_gate_up_weight = nn.Parameter(
             torch.stack(
-                [self.experts_gate_up._parameters.pop(f"weight{i}").data for i in range(self.num_local_experts)]
+                [
+                    self.experts_gate_up._parameters.pop(f"weight{i}").data
+                    for i in range(self.num_local_experts)
+                ]
             )
         )  # [num_local_experts, 2*intermediate_size, hidden_size]
 
         self.experts_down_weight = nn.Parameter(
-            torch.stack([self.experts_down._parameters.pop(f"weight{i}").data for i in range(self.num_local_experts)])
+            torch.stack(
+                [
+                    self.experts_down._parameters.pop(f"weight{i}").data
+                    for i in range(self.num_local_experts)
+                ]
+            )
         )  # [num_local_experts, hidden_size, intermediate_size]
 
         # Set views back on GroupedLinear so getattr(self, "weight{i}") still works
@@ -504,11 +531,15 @@ class NVMixtralSparseMoeBlock(nn.Module):
         # Guard: only wrap plain tensors; skip if already DTensors (e.g. repeated calls).
         if not isinstance(self.experts_gate_up_weight.data, DTensor):
             self.experts_gate_up_weight = nn.Parameter(
-                DTensor.from_local(self.experts_gate_up_weight.data, device_mesh=ep_mesh, placements=[Shard(0)])
+                DTensor.from_local(
+                    self.experts_gate_up_weight.data, device_mesh=ep_mesh, placements=[Shard(0)]
+                )
             )
         if not isinstance(self.experts_down_weight.data, DTensor):
             self.experts_down_weight = nn.Parameter(
-                DTensor.from_local(self.experts_down_weight.data, device_mesh=ep_mesh, placements=[Shard(0)])
+                DTensor.from_local(
+                    self.experts_down_weight.data, device_mesh=ep_mesh, placements=[Shard(0)]
+                )
             )
 
     def _expert_ffn(self, tokens: torch.Tensor, m_splits: list[int]) -> torch.Tensor:
@@ -553,14 +584,18 @@ class NVMixtralSparseMoeBlock(nn.Module):
             router_logits = self.gate(hidden_states)  # [N, num_experts]
 
         routing_weights = torch.nn.functional.softmax(router_logits, dim=-1, dtype=torch.float32)
-        routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)  # [N, top_k]
+        routing_weights, selected_experts = torch.topk(
+            routing_weights, self.top_k, dim=-1
+        )  # [N, top_k]
         # Normalize routing weights
         routing_weights = routing_weights / routing_weights.sum(dim=-1, keepdim=True)
 
         # Auxiliary load-balancing loss (switch transformer style)
         if self.moe_aux_loss_coeff > 0:
             num_tokens = hidden_states.shape[0]
-            m_splits_tensor = torch.bincount(selected_experts.reshape(-1), minlength=self.num_experts).int()
+            m_splits_tensor = torch.bincount(
+                selected_experts.reshape(-1), minlength=self.num_experts
+            ).int()
             # f_i: fraction of tokens dispatched to each expert
             f = m_splits_tensor.float() / (num_tokens * self.top_k)
             # P_i: mean router probability per expert (over all tokens)
@@ -575,7 +610,9 @@ class NVMixtralSparseMoeBlock(nn.Module):
         self._sync_expert_views()
 
         dispatch_output = self.dispatcher.dispatch(hidden_states, selected_experts, routing_weights)
-        expert_output = self._expert_ffn(dispatch_output.expert_input, dispatch_output.tokens_per_expert)
+        expert_output = self._expert_ffn(
+            dispatch_output.expert_input, dispatch_output.tokens_per_expert
+        )
         output = self.dispatcher.combine(expert_output, dispatch_output.handle)
 
         return output.reshape(original_shape)
@@ -584,7 +621,9 @@ class NVMixtralSparseMoeBlock(nn.Module):
 class NVMixtralDecoderLayer(nn.Module):
     """Mixtral decoder layer using TE attention and MoE MLP."""
 
-    def __init__(self, config: MixtralConfig, layer_idx: int, dispatcher: TokenDispatcher | None = None):
+    def __init__(
+        self, config: MixtralConfig, layer_idx: int, dispatcher: TokenDispatcher | None = None
+    ):
         """Initialize the decoder layer."""
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -686,12 +725,18 @@ class NVMixtralModel(NVMixtralPreTrainedModel):
 
         if fp8_recipe is not None and self.config.layer_precision is None:
             if fp4_recipe is not None:
-                raise RuntimeError("Both FP8 and FP4 recipes provided, but no layer precision provided.")
+                raise RuntimeError(
+                    "Both FP8 and FP4 recipes provided, but no layer precision provided."
+                )
 
-            warnings.warn("No layer precision provided, using FP8 recipe for all layers.", UserWarning)
+            warnings.warn(
+                "No layer precision provided, using FP8 recipe for all layers.", UserWarning
+            )
             self.config.layer_precision = ["fp8"] * self.config.num_hidden_layers
 
-        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx, dtype=config.dtype)
+        self.embed_tokens = nn.Embedding(
+            config.vocab_size, config.hidden_size, self.padding_idx, dtype=config.dtype
+        )
 
         layers: list[NVMixtralDecoderLayer] = []
         for layer_idx in range(config.num_hidden_layers):
@@ -747,21 +792,35 @@ class NVMixtralModel(NVMixtralPreTrainedModel):
         hidden_states = inputs_embeds
 
         # TE-specific input handling
-        has_thd_input = [x in kwargs for x in ["cu_seq_lens_q", "cu_seq_lens_k", "max_length_q", "max_length_k"]]
+        has_thd_input = [
+            x in kwargs for x in ["cu_seq_lens_q", "cu_seq_lens_k", "max_length_q", "max_length_k"]
+        ]
         should_pack_inputs = not any(has_thd_input) and self.config.attn_input_format == "thd"
 
         if should_pack_inputs:
-            assert attention_mask is not None, "Attention mask is required when packing BSHD inputs."
+            assert (
+                attention_mask is not None
+            ), "Attention mask is required when packing BSHD inputs."
             batch_size = hidden_states.size(0)
             padded_seq_len = input_ids.size(1)
-            hidden_states, indices, cu_seqlens, max_seqlen, _ = _unpad_input(hidden_states, attention_mask)
+            hidden_states, indices, cu_seqlens, max_seqlen, _ = _unpad_input(
+                hidden_states, attention_mask
+            )
             kwargs["cu_seq_lens_q"] = kwargs["cu_seq_lens_k"] = cu_seqlens
             kwargs["max_length_q"] = kwargs["max_length_k"] = max_seqlen
 
-        if self.config.attn_input_format == "thd" and hidden_states.dim() == 3 and hidden_states.size(0) == 1:
+        if (
+            self.config.attn_input_format == "thd"
+            and hidden_states.dim() == 3
+            and hidden_states.size(0) == 1
+        ):
             hidden_states = hidden_states.squeeze(0)
 
-        if self.config.attn_input_format == "bshd" and attention_mask is not None and attention_mask.dim() == 2:
+        if (
+            self.config.attn_input_format == "bshd"
+            and attention_mask is not None
+            and attention_mask.dim() == 2
+        ):
             # Convert HF mask (1=attend, 0=pad) to TE boolean mask (True=masked, False=attend)
             attention_mask = ~attention_mask[:, None, None, :].bool()
 
@@ -784,7 +843,9 @@ class NVMixtralModel(NVMixtralPreTrainedModel):
                 with self.get_autocast_context(layer_idx):
                     hidden_states = decoder_layer(
                         hidden_states,
-                        attention_mask=None if self.config.attn_input_format == "thd" else attention_mask,
+                        attention_mask=(
+                            None if self.config.attn_input_format == "thd" else attention_mask
+                        ),
                         rotary_pos_emb=te_rope_emb,
                         inference_params=past_key_values,
                         cu_seqlens_q=kwargs.get("cu_seq_lens_q", None),
@@ -874,7 +935,9 @@ class NVMixtralForCausalLM(NVMixtralPreTrainedModel, transformers.GenerationMixi
                 AllToAllTokenDispatcher will be used.
         """
         super().__init__(config)
-        self.model = NVMixtralModel(config, fp8_recipe=fp8_recipe, fp4_recipe=fp4_recipe, dispatcher=dispatcher)
+        self.model = NVMixtralModel(
+            config, fp8_recipe=fp8_recipe, fp4_recipe=fp4_recipe, dispatcher=dispatcher
+        )
         self.vocab_size = config.vocab_size
 
         with transformer_engine.pytorch.quantized_model_init(enabled=False):
@@ -884,7 +947,9 @@ class NVMixtralForCausalLM(NVMixtralPreTrainedModel, transformers.GenerationMixi
                 bias=False,
                 params_dtype=config.dtype,
                 device="meta" if torch.get_default_device() == torch.device("meta") else "cuda",
-                init_method=lambda x: torch.nn.init.normal_(x, mean=0.0, std=config.initializer_range),
+                init_method=lambda x: torch.nn.init.normal_(
+                    x, mean=0.0, std=config.initializer_range
+                ),
             )
 
         self.post_init()
@@ -916,7 +981,9 @@ class NVMixtralForCausalLM(NVMixtralPreTrainedModel, transformers.GenerationMixi
         )
 
         hidden_states = outputs.last_hidden_state
-        slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
+        slice_indices = (
+            slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
+        )
 
         with transformer_engine.pytorch.autocast(enabled=False):
             if hidden_states.ndim == 3:
@@ -927,7 +994,11 @@ class NVMixtralForCausalLM(NVMixtralPreTrainedModel, transformers.GenerationMixi
         loss = None
         if labels is not None or shift_labels is not None:
             loss = self.loss_function(
-                logits=logits, labels=labels, shift_labels=shift_labels, vocab_size=self.config.vocab_size, **kwargs
+                logits=logits,
+                labels=labels,
+                shift_labels=shift_labels,
+                vocab_size=self.config.vocab_size,
+                **kwargs,
             )
 
         # Collect auxiliary load-balancing loss from all MoE layers
@@ -996,7 +1067,9 @@ def _pad_input(hidden_states, indices, batch, seqlen):
     Adapted from huggingface/transformers/modeling_flash_attention_utils.py
     """
     dim = hidden_states.shape[1:]
-    output = torch.zeros((batch * seqlen), *dim, device=hidden_states.device, dtype=hidden_states.dtype)
+    output = torch.zeros(
+        (batch * seqlen), *dim, device=hidden_states.device, dtype=hidden_states.dtype
+    )
     output[indices] = hidden_states
     return output.view(batch, seqlen, *dim)
 
@@ -1024,7 +1097,9 @@ def _unpad_input(hidden_states, attention_mask, unused_mask=None):
     used_seqlens_in_batch = attention_mask.sum(dim=-1, dtype=torch.int32)
     indices = torch.nonzero(all_masks.flatten(), as_tuple=False).flatten()
     max_seqlen_in_batch = seqlens_in_batch.max().item()
-    cu_seqlens = torch.nn.functional.pad(torch.cumsum(seqlens_in_batch, dim=0, dtype=torch.int32), (1, 0))
+    cu_seqlens = torch.nn.functional.pad(
+        torch.cumsum(seqlens_in_batch, dim=0, dtype=torch.int32), (1, 0)
+    )
 
     return (
         hidden_states.reshape(-1, *hidden_states.shape[2:])[indices],
@@ -1095,7 +1170,11 @@ def _build_expert_sort_indices(recv_counts: torch.Tensor) -> tuple[torch.Tensor,
 
     # Mapping from source block index (s * L + e) to expert block index (e * S + s)
     s_idx = torch.arange(ep_size, device=device).unsqueeze(1).expand(ep_size, num_local_experts)
-    e_idx = torch.arange(num_local_experts, device=device).unsqueeze(0).expand(ep_size, num_local_experts)
+    e_idx = (
+        torch.arange(num_local_experts, device=device)
+        .unsqueeze(0)
+        .expand(ep_size, num_local_experts)
+    )
     src_to_exp = (e_idx * ep_size + s_idx).reshape(-1)
 
     # Per-block positional shift from source layout to expert layout
@@ -1156,7 +1235,9 @@ class _DifferentiableAllToAll(torch.autograd.Function):
             device=input.device,
             dtype=input.dtype,
         )
-        dist.all_to_all_single(output, input.contiguous(), output_split_sizes, input_split_sizes, group=group)
+        dist.all_to_all_single(
+            output, input.contiguous(), output_split_sizes, input_split_sizes, group=group
+        )
         return output
 
     @staticmethod
@@ -1225,7 +1306,9 @@ class AllToAllTokenDispatcher:
         )
 
         # Compute m_splits: number of tokens per expert
-        m_splits_tensor = torch.bincount(selected_experts.reshape(-1), minlength=self.num_experts).int()
+        m_splits_tensor = torch.bincount(
+            selected_experts.reshape(-1), minlength=self.num_experts
+        ).int()
 
         if self._ep_group is not None:
             ep_group = self._ep_group
