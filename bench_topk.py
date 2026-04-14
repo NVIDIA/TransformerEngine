@@ -197,7 +197,7 @@ def main():
     print(f"GPU: {torch.cuda.get_device_name(0)}")
     print(f"PyTorch: {torch.__version__}  |  JAX: {jax.__version__}")
     print(f"Warmup: {WARMUP_ITERS}  |  Bench: {BENCH_ITERS} iters  |  Metric: median ms")
-    print(f"topk_per_row dtype: float32 (kernel is float32-only; input cast pre-benchmark)\n")
+    print(f"topk_per_row dtype: float32 (float32-only; input cast pre-benchmark)\n")
 
     col = [10, 10, 8, 16, 12, 12, 14, 18]
     header = (
@@ -217,16 +217,18 @@ def main():
         x_jax.block_until_ready()
         x_torch = torch.from_dlpack(x_jax).clone()  # bfloat16, 1-D
 
-        # float32 view for float32-only kernels: [1, N]
+        # bfloat16 2D view for AIR TopK: [1, N]
+        x_bf16_2d = x_torch.unsqueeze(0).contiguous()
+        # float32 view for topk_per_row (float32-only): [1, N]
         x_f32 = x_torch.float().unsqueeze(0).contiguous()
         lengths = torch.tensor([N], dtype=torch.int32, device="cuda")
         out_aux, logits_aux, out_indices_pr = topk_per_row.allocate_buffers(x_f32, K)
-        air_buf, out_indices_air = air_topk_wrapper.allocate_buffers(x_f32, K, False)
+        air_buf, out_indices_air = air_topk_wrapper.allocate_buffers(x_bf16_2d, K, False)
 
         t_jax = bench_jax_lax(x_jax, K)
         t_tor = bench_torch(x_torch, K)
         t_cub = bench_cub(x_jax, K)
-        t_air = bench_air_topk(x_f32, lengths, air_buf, out_indices_air, K)
+        t_air = bench_air_topk(x_bf16_2d, lengths, air_buf, out_indices_air, K)
         t_pr = bench_topk_per_row(x_f32, lengths, out_aux, logits_aux, out_indices_pr, K)
         pr_str = f"{t_pr:>{col[7]}.4f}" if t_pr is not None else f"{'N/A':>{col[7]}}"
 
@@ -238,7 +240,7 @@ def main():
 
     print(sep)
     print("All times in milliseconds (median).")
-    print("AIR TopK and topk_per_row columns use float32 input; all others use bfloat16.")
+    print("topk_per_row column uses float32 input; all others use bfloat16.")
 
 
 if __name__ == "__main__":

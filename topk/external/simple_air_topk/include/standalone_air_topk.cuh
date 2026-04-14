@@ -9,7 +9,21 @@ constexpr unsigned FULL_WARP_MASK = 0xffffffff;
 #include <cooperative_groups/reduce.h>
 #include <cub/device/device_radix_sort.cuh>
 #include <cub/util_allocator.cuh>
+#include <cuda_bf16.h>
 namespace cg = cooperative_groups;
+
+// Helper: convert a float literal to type T without relying on implicit
+// conversions (needed when __CUDA_NO_BFLOAT16_CONVERSIONS__ is defined).
+namespace nv_detail {
+template <typename T> __host__ __device__ inline T float_to_T(float v) {
+  return static_cast<T>(v);
+}
+#if defined(__CUDACC__)
+template <> __host__ __device__ inline __nv_bfloat16 float_to_T<__nv_bfloat16>(float v) {
+  return __float2bfloat16(v);
+}
+#endif
+} // namespace nv_detail
 
 namespace nv {
 
@@ -719,7 +733,7 @@ __device__ void radix_kernel_func(const T *in, const IdxT *in_idx,
       }
       for (int index = threadIdx.x + len; index < k; index += BlockSize) {
         if constexpr (store_out) {
-          out[index] = -1;
+          out[index] = nv_detail::float_to_T<T>(-1.0f);
         }
         out_idx[index] = -1;
       }
@@ -1023,7 +1037,7 @@ __device__ void radix_topk_one_block_func(const T *in, const IdxT *in_idx,
     }
     for (int index = threadIdx.x + len; index < k; index += BlockSize) {
       if constexpr (store_out) {
-        out[index] = -1;
+        out[index] = nv_detail::float_to_T<T>(-1.0f);
       }
       out_idx[index] = -1;
     }
