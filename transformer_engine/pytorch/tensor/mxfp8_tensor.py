@@ -90,9 +90,7 @@ class MXFP8Quantizer(Quantizer):
         """Returns whether or not given inp can be quantized"""
         if inp.ndim < 2:
             return False
-        if inp.shape[-1] % MXFP8_BLOCK_SCALING_SIZE != 0:
-            return False
-        if math.prod(inp.shape[:-1]) % MXFP8_BLOCK_SCALING_SIZE != 0:
+        if inp.shape[-1] % 16 != 0:
             return False
         return True
 
@@ -110,12 +108,9 @@ class MXFP8Quantizer(Quantizer):
         if device is None:
             device = torch.device("cuda")
 
-        assert (
-            shape[-1] % MXFP8_BLOCK_SCALING_SIZE == 0
-            and math.prod(shape[:-1]) % MXFP8_BLOCK_SCALING_SIZE == 0
-        ), (
-            f"Incorrect shape {shape} for MXFP8. Tensor dims must be divisible by"
-            f" {MXFP8_BLOCK_SCALING_SIZE}"
+        assert shape[-1] % 16 == 0, (
+            f"Incorrect shape {shape} for MXFP8."
+            f" Last dimension must be divisible by 16."
         )
 
         # Allocate FP8 data

@@ -214,9 +214,7 @@ class NVFP4Quantizer(Quantizer):
         """Returns whether or not given inp can be quantized"""
         if inp.ndim < 2:
             return False
-        if inp.shape[-1] % NVFP4_BLOCK_SCALING_SIZE != 0:
-            return False
-        if math.prod(inp.shape[:-1]) % NVFP4_BLOCK_SCALING_SIZE != 0:
+        if inp.shape[-1] % 32 != 0:
             return False
         return True
 
@@ -303,15 +301,9 @@ class NVFP4Quantizer(Quantizer):
         if device is None:
             device = torch.device("cuda")
 
-        assert shape[-1] % NVFP4_BLOCK_SCALING_SIZE == 0, (
-            f"Incorrect shape {shape} for NVFP4. Tensor dims must be divisible by"
-            f" {NVFP4_BLOCK_SCALING_SIZE}"
-        )
-
-        flat_first_dim = math.prod(shape[:-1])
-        assert flat_first_dim % NVFP4_BLOCK_SCALING_SIZE == 0, (
-            f"Incorrect shape {shape} for NVFP4. Tensor dims must be divisible by"
-            f" {NVFP4_BLOCK_SCALING_SIZE}"
+        assert shape[-1] % 32 == 0, (
+            f"Incorrect shape {shape} for NVFP4."
+            f" Last dimension must be divisible by 32."
         )
 
         # Allocate FP4 data
