@@ -136,7 +136,13 @@ def _check_triton_compatibility():
             "If you don't need Triton, use transformer_engine.jax.cpp_extensions instead."
         )
 
-    use_pytorch_triton_explicit = bool(int(os.environ.get("NVTE_USE_PYTORCH_TRITON", "0")))
+    val = os.environ.get("NVTE_USE_PYTORCH_TRITON", "0")
+    try:
+        use_pytorch_triton_explicit = bool(int(val))
+    except ValueError as e:
+        raise ValueError(
+            f"NVTE_USE_PYTORCH_TRITON must be an integer (0 or 1), got: {val!r}"
+        ) from e
 
     if is_pytorch_triton:
         if use_pytorch_triton_explicit:
@@ -214,7 +220,13 @@ def get_triton_info():
         if info['is_pytorch_triton']:
              print("Using pytorch-triton - compatible with both PyTorch and JAX")
     """
-    env_acknowledged = bool(int(os.environ.get("NVTE_USE_PYTORCH_TRITON", "0")))
+    val = os.environ.get("NVTE_USE_PYTORCH_TRITON", "0")
+    try:
+        env_acknowledged = bool(int(val))
+    except ValueError as e:
+        raise ValueError(
+            f"NVTE_USE_PYTORCH_TRITON must be an integer (0 or 1), got: {val!r}"
+        ) from e
 
     return {
         "version": _TRITON_VERSION,
@@ -446,7 +458,15 @@ def triton_call_lowering(
     # user to upgrade JAX for improved performance.
     is_autotuned = isinstance(kernel_fn, autotuner.Autotuner)
     if is_autotuned and not is_triton_autotuned_alias_safe():
-        if os.environ.get("NVTE_JAX_ENFORCE_TRITON_AUTOTUNING", "0") == "1":
+        val = os.environ.get("NVTE_JAX_ENFORCE_TRITON_AUTOTUNING", "0")
+        try:
+            enforce = bool(int(val))
+        except ValueError as e:
+            raise ValueError(
+                "NVTE_JAX_ENFORCE_TRITON_AUTOTUNING must be an integer (0 or 1),"
+                f" got: {val!r}"
+            ) from e
+        if enforce:
             raise RuntimeError(
                 "NVTE_JAX_ENFORCE_TRITON_AUTOTUNING=1 requires JAX >= "
                 f"{TRITON_AUTOTUNED_INPUT_OUTPUT_ALIAS_MIN_JAX_VERSION} (stable) or a "
