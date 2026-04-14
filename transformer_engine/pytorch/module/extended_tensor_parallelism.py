@@ -50,6 +50,31 @@ _inflight_comm_params: set = set()
 _AG_STREAMS: Dict[str, torch.cuda.Stream] = {}
 _RS_STREAMS: Dict[str, torch.cuda.Stream] = {}
 
+# Standalone wgrad input buffer pool, keyed by (shape, dtype).
+# Separate from ETPWeightCache because:
+# 1. Wgrad buffers are expert-chain only (never graphed)
+# 2. They need true release-then-reuse (the pool shrinks/grows), whereas
+#    ETPWeightCache keeps slot.buf set for CUDA graph address stability
+_wgrad_buf_pool: Dict[tuple, list] = {}
+
+
+def _wgrad_pool_get(shape: tuple, dtype: torch.dtype, device) -> torch.Tensor:
+    """Get a wgrad buffer from the pool, or allocate a fresh one."""
+    key = (shape, dtype)
+    pool = _wgrad_buf_pool.get(key)
+    if pool:
+        return pool.pop()
+    return torch.empty(shape, dtype=dtype, device=device, requires_grad=False)
+
+
+def _wgrad_pool_put(buf: torch.Tensor):
+    """Return a wgrad buffer to the pool for reuse."""
+    key = (tuple(buf.shape), buf.dtype)
+    if key not in _wgrad_buf_pool:
+        _wgrad_buf_pool[key] = []
+    _wgrad_buf_pool[key].append(buf)
+
+
 def get_ag_stream(chain_id: str = 'dense') -> torch.cuda.Stream:
     # All chains share one AG stream. The ag_event CUDA event object is recorded on
     # this stream during graph capture; using a different stream at replay would cause
@@ -167,6 +192,7 @@ class ETPShardHandle:
     def wait(self):
         if self.handle is not None:
             self.handle.wait()
+            self.handle = None  # Release NCCL Work and its C++ tensor references promptly
         for w in self.etp_shards:
             if self.reduce_scatter:
                 w._set_rs_state(ETPWeightState.DATA_READY)
@@ -659,12 +685,7 @@ class ETPShardedParam(torch.nn.Parameter):
         return self.all_gather_and_prefetch(**kwargs)
 
     def get_wgrad_tensor(self):
-        return torch.empty(
-            self._unsharded_shape,
-            dtype=self.main_grad.dtype,
-            device=self.device,
-            requires_grad=False,
-        )
+        return _wgrad_pool_get(self._unsharded_shape, self.main_grad.dtype, self.device)
 
     @staticmethod
     def _finalize_wgrad(param, wgrad_rs):
@@ -695,6 +716,14 @@ class ETPShardedParam(torch.nn.Parameter):
                 self._wgrad_rs_handle.wait()
                 self._wgrad_rs_handle = None
                 self.rs_event.record()
+        # RS is done — drop stashed wgrad input buffer refs.
+        # Safe because handle.wait() above guarantees the RS kernel finished reading them.
+        # Expert-chain buffers go back to pool for reuse; dense-chain buffers just drop refs.
+        if getattr(self, '_wgrad_input_bufs', None) is not None:
+            if self.chain_id == 'expert':
+                for buf in self._wgrad_input_bufs:
+                    _wgrad_pool_put(buf)
+            self._wgrad_input_bufs = None
 
     def _reduce_scatter(self, wgrads, async_op, nvtx_label=None):
         """Reduce-scatter one or more wgrads. Returns (outputs, handle).
@@ -764,15 +793,26 @@ class ETPShardedParam(torch.nn.Parameter):
         wgrads = list(wgrad) if batched else [wgrad]
         weights = self._weights
 
+        # Expert-chain wgrads are recycled via the standalone pool (_wgrad_pool_put).
+        # All ungraphed weights (expert + output layer) benefit from the stash
+        # (_wgrad_input_bufs) which drops Python refs once the RS is waited.
+        poolable = self.chain_id == 'expert'
+
         if ETP_CONFIG.weight_prefetch and self.prev_w is not None:
             # Async reduce-scatter (not last weight — deferred finish)
             _, rs_handle = self._reduce_scatter(wgrads, async_op=True, nvtx_label=nvtx_label)
             self._wgrad_rs_handle = ETPShardHandle(rs_handle, weights, reduce_scatter=True)
+            # Stash wgrad input buffers — cannot recycle yet because the async RS
+            # kernel is still reading them on rs_stream.
+            self._wgrad_input_bufs = wgrads
             ret = tuple([None] * len(wgrads)) if batched else None
         else:
-            # Sync reduce-scatter (last weight in chain)
+            # Sync reduce-scatter (last weight in chain) — RS done, recycle immediately
             sharded, _ = self._reduce_scatter(wgrads, async_op=False, nvtx_label=nvtx_label)
             result = [self._finalize_wgrad(p, g) for p, g in zip(weights, sharded)]
+            if poolable:
+                for buf in wgrads:
+                    _wgrad_pool_put(buf)
             ret = result if batched else result[0]
 
         # Wait for last reduce scatter if it was async
@@ -927,10 +967,18 @@ class ETPWeightCache:
         return slot.buf
 
     def release(self, ticket: int):
-        """Return the buffer to the pool.  Ticket remains valid."""
+        """Return the buffer to the pool.  Ticket remains valid.
+
+        slot.buf is intentionally NOT cleared: get() must stay idempotent so that
+        CUDA-graph-captured buffers keep their fixed address across replays, and
+        reallocate_to_mempool() can find every dense-chain buffer.
+        """
         slot = self._slots[ticket]
-        assert slot.buf is not None
-        if slot.buf not in self._pool[slot.key]:
+        if slot.buf is None:
+            return
+        # Use identity check — tensor == tensor returns a multi-element bool tensor
+        # which crashes in a boolean context ("Boolean value of Tensor is ambiguous").
+        if not any(b is slot.buf for b in self._pool.get(slot.key, [])):
             self._pool[slot.key].append(slot.buf)
 
     def clear(self):
