@@ -461,6 +461,13 @@ def get_attention_backend(
         if use_flash_attention_4 and FlashAttentionUtils.v4_is_installed:
             logger.debug("Disabling FlashAttention 4 for compute capability < sm80")
         use_flash_attention_4 = False
+    # On SM90, prefer FA3 over FA4 when FA3 is available.
+    # FA3 is more mature on Hopper; FA4's SM90 backward has limitations
+    # (MLA, non-standard head dims, SplitKV).
+    if use_flash_attention_4 and use_flash_attention_3 and device_compute_capability == (9, 0):
+        if FlashAttentionUtils.v4_is_installed:
+            logger.debug("Disabling FlashAttention 4 to prefer FlashAttention 3 on SM90")
+        use_flash_attention_4 = False
 
     # Filter: Data type
     if qkv_dtype not in [torch.bfloat16, torch.float16]:
@@ -562,6 +569,11 @@ def get_attention_backend(
         if use_flash_attention_2 and FlashAttentionUtils.is_installed:
             logger.debug("Disabling FlashAttention 2 for num_splits")
             use_flash_attention_2 = False
+        # FA4 SplitKV is only supported on SM100+
+        if use_flash_attention_4 and device_compute_capability < (10, 0):
+            if FlashAttentionUtils.v4_is_installed:
+                logger.debug("Disabling FlashAttention 4 for num_splits on SM < 100")
+            use_flash_attention_4 = False
         if use_fused_attention:
             logger.debug("Disabling FusedAttention for num_splits")
             use_fused_attention = False
