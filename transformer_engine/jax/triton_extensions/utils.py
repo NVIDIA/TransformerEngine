@@ -50,6 +50,7 @@ import jax.numpy as jnp
 from ..version_utils import (
     TRITON_AUTOTUNED_INPUT_OUTPUT_ALIAS_MIN_JAX_VERSION,
     TRITON_EXTENSION_MIN_JAX_VERSION,
+    is_triton_autotuned_alias_safe,
     is_triton_extension_supported,
     jax_version_meet_requirement,
 )
@@ -445,14 +446,12 @@ def triton_call_lowering(
     # NVTE_JAX_ENFORCE_TRITON_AUTOTUNING=1 to raise an error instead, prompting the
     # user to upgrade JAX for improved performance.
     is_autotuned = isinstance(kernel_fn, autotuner.Autotuner)
-    if is_autotuned and not jax_version_meet_requirement(
-        TRITON_AUTOTUNED_INPUT_OUTPUT_ALIAS_MIN_JAX_VERSION
-    ):
+    if is_autotuned and not is_triton_autotuned_alias_safe():
         if os.environ.get("NVTE_JAX_ENFORCE_TRITON_AUTOTUNING", "0") == "1":
             raise RuntimeError(
                 "NVTE_JAX_ENFORCE_TRITON_AUTOTUNING=1 requires JAX >= "
-                f"{TRITON_AUTOTUNED_INPUT_OUTPUT_ALIAS_MIN_JAX_VERSION} for safe "
-                "Triton autotuning (jax-ml/jax#35218). "
+                f"{TRITON_AUTOTUNED_INPUT_OUTPUT_ALIAS_MIN_JAX_VERSION} (stable) or a "
+                "post-2026-03-17 nightly for safe Triton autotuning (jax-ml/jax#35218). "
                 f"Current JAX version: {jax.__version__}. "
                 "Upgrade: pip install --upgrade jax jaxlib"
             )
