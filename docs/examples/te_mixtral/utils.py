@@ -225,9 +225,14 @@ def wrap_with_accelerator(model, hyperparams: HyperParameters):
         num_warmup_steps=hyperparams.num_warmup_steps,
         num_training_steps=hyperparams.num_training_steps,
     )
-    model, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-        model, optimizer, train_dataloader, lr_scheduler
-    )
+    if hyperparams.expert_parallel_size > 1:
+        # EP path: model already contains DTensor params and should not be DDP-wrapped.
+        optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+            optimizer, train_dataloader, lr_scheduler
+        )
+        return accelerator, model, optimizer, train_dataloader, lr_scheduler
+
+    model, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(model, optimizer, train_dataloader, lr_scheduler)
     return accelerator, model, optimizer, train_dataloader, lr_scheduler
 
 
