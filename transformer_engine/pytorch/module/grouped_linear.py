@@ -1140,10 +1140,11 @@ class GroupedLinear(TransformerEngineBaseModule):
 
             num_gemms = len(m_splits)
             cache_weight = is_first_microbatch is not None
-            weight_workspaces = [
-                self._fp8_workspaces.get(f"weight{i}") if cache_weight else None
-                for i in range(num_gemms)
-            ]
+            weight_workspaces = (
+                [self._fp8_workspaces.get(f"weight{i}") for i in range(num_gemms)]
+                if cache_weight
+                else [None] * num_gemms
+            )
 
             non_tensor_args = (
                 m_splits,
