@@ -463,8 +463,7 @@ def triton_call_lowering(
             enforce = bool(int(val))
         except ValueError as e:
             raise ValueError(
-                "NVTE_JAX_ENFORCE_TRITON_AUTOTUNING must be an integer (0 or 1),"
-                f" got: {val!r}"
+                f"NVTE_JAX_ENFORCE_TRITON_AUTOTUNING must be an integer (0 or 1), got: {val!r}"
             ) from e
         if enforce:
             raise RuntimeError(
