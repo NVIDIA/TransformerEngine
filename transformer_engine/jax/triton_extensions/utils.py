@@ -538,19 +538,6 @@ def triton_call_lowering(
                 )
                 num_ctas = first_cfg.num_ctas if first_cfg.num_ctas is not None else num_ctas
 
-                # NVTE_TRITON_BLOCK_SIZE lets benchmarks pin a specific BLOCK_SIZE candidate
-                # without changing any other constexpr.  Only applied when the kernel has a
-                # BLOCK_SIZE constant and the env var is explicitly set.
-                _bs_env = os.environ.get("NVTE_TRITON_BLOCK_SIZE", "")
-                if _bs_env and "BLOCK_SIZE" in kernel_constexprs:
-                    try:
-                        kernel_constexprs["BLOCK_SIZE"] = int(_bs_env)
-                    except ValueError as exc:
-                        raise ValueError(
-                            f"NVTE_TRITON_BLOCK_SIZE={_bs_env!r} is not a valid integer. "
-                            "Set it to a plain integer, e.g. NVTE_TRITON_BLOCK_SIZE=128."
-                        ) from exc
-
         kernel = compile_triton(
             actual_kernel_fn,
             signature,
