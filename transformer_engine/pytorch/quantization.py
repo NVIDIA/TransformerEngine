@@ -146,8 +146,9 @@ def check_recipe_support(recipe: Recipe) -> None:
 def get_default_fp8_recipe() -> Recipe:
     """FP8 recipe with default args."""
     assert not torch.compiler.is_compiling(), (
-        "get_default_fp8_recipe() must not be called during torch.compile tracing. "
-        "Pass an explicit recipe to te.autocast() instead of relying on the default."
+        "Creating Recipe objects inside compiled regions is not supported because "
+        "their construction is not traceable. "
+        "Pass an explicit recipe to te.autocast() instead."
     )
     if check_mxfp8_support()[0]:
         return MXFP8BlockScaling()
