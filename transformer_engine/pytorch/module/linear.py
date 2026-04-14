@@ -88,7 +88,6 @@ def _check_fp8_reduce_and_update():
     return result
 
 
-
 def _linear_forward_impl(
     weight: torch.Tensor,
     inp: torch.Tensor,
@@ -199,9 +198,7 @@ def _linear_forward_impl(
                     rowwise=True,
                     columnwise=backward_needs_input and backward_override is None,
                 )
-                if isinstance(
-                    input_quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)
-                ):
+                if isinstance(input_quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)):
                     # All-gather is not supported with FP8 column-wise data
                     input_quantizer.set_usage(columnwise=False)
                 if save_original_input:
@@ -406,8 +403,7 @@ def _linear_forward_impl(
             if backward_override is not None:
                 inputmat.update_usage(rowwise_usage=True, columnwise_usage=False)
             elif (
-                backward_input_needs_gather
-                and weight_quantizer.supports_only_rowwise_all_gather()
+                backward_input_needs_gather and weight_quantizer.supports_only_rowwise_all_gather()
             ):
                 # All-gather is not supported with FP8 column-wise data
                 inputmat.update_usage(rowwise_usage=True, columnwise_usage=False)
@@ -455,11 +451,21 @@ def _linear_forward_impl(
     return out, tensors_to_save, tensor_objects, ctx_attrs
 
 
-def _linear_setup_ctx(ctx, tensors_to_save, tensor_objects, ctx_attrs,
-                      inp, weight, bias, non_tensor_args,
-                      input_quantizer, weight_quantizer_orig,
-                      grad_input_quantizer, grad_weight_quantizer,
-                      grad_output_quantizer):
+def _linear_setup_ctx(
+    ctx,
+    tensors_to_save,
+    tensor_objects,
+    ctx_attrs,
+    inp,
+    weight,
+    bias,
+    non_tensor_args,
+    input_quantizer,
+    weight_quantizer_orig,
+    grad_input_quantizer,
+    grad_weight_quantizer,
+    grad_output_quantizer,
+):
     """Save forward state into autograd context for backward pass."""
     if ctx_attrs is None:
         return
@@ -552,9 +558,7 @@ def _linear_setup_ctx(ctx, tensors_to_save, tensor_objects, ctx_attrs,
     # main_grad_func setup
     if fuse_wgrad_accumulation and weight.requires_grad:
         ctx.origin_weight_ref = weakref.ref(weight)
-        ctx.origin_weight_overwrites_main_grad = getattr(
-            weight, "overwrite_main_grad", False
-        )
+        ctx.origin_weight_overwrites_main_grad = getattr(weight, "overwrite_main_grad", False)
         if hasattr(weight, "__fsdp_param__"):
             ctx.main_grad_func = weight.get_main_grad
         else:
@@ -687,11 +691,7 @@ def _linear_backward(
         #       results in `Assertion failed: output_tensor->has_data(). Quantizing in only the columnwise direction not supported yet!`
         # NOTE: For `ctx.bias is True`, selected quantize kernel errors with
         #       `cast_kernels.cuh:1322 in function fp8_quantize_arch_l_100: Not implemented scaling mode or fusion: NVTE_DELAYED_TENSOR_SCALING or IS_DBIAS=true on GPU with compute capability < 10.0.`
-        if (
-            not ctx.use_bias
-            and not ctx.requires_wgrad
-            and grad_output_quantizer is not None
-        ):
+        if not ctx.use_bias and not ctx.requires_wgrad and grad_output_quantizer is not None:
             grad_output_quantizer.set_usage(columnwise=False)
 
         # Prepare grad output tensor
@@ -1111,13 +1111,24 @@ class _Linear(torch.autograd.Function):
     ) -> torch.Tensor:
         """Forward pass: compute linear output and set up autograd context."""
         out, tensors_to_save, tensor_objects, ctx_attrs = _linear_forward_impl(
-            weight, inp, bias, non_tensor_args,
-            input_quantizer, weight_quantizer, output_quantizer,
+            weight,
+            inp,
+            bias,
+            non_tensor_args,
+            input_quantizer,
+            weight_quantizer,
+            output_quantizer,
         )
         if ctx is not None:
             _linear_setup_ctx(
-                ctx, tensors_to_save, tensor_objects, ctx_attrs,
-                inp, weight, bias, non_tensor_args,
+                ctx,
+                tensors_to_save,
+                tensor_objects,
+                ctx_attrs,
+                inp,
+                weight,
+                bias,
+                non_tensor_args,
                 input_quantizer=input_quantizer,
                 weight_quantizer_orig=weight_quantizer,
                 grad_input_quantizer=grad_input_quantizer,
@@ -1141,7 +1152,8 @@ class _Linear(torch.autograd.Function):
         if ctx.ub_name is not None:
             nvtx_label = f"{nvtx_label}.{ctx.ub_name}"
         result = _linear_backward(
-            ctx, grad_output,
+            ctx,
+            grad_output,
             input_quantizer=ctx.input_quantizer,
             weight_quantizer=ctx.weight_quantizer,
             grad_input_quantizer=ctx.grad_input_quantizer,
