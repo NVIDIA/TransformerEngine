@@ -30,9 +30,13 @@ TRITON_EXTENSION_MIN_JAX_VERSION = "0.8.0"
 # it iterated over all declared aliases unconditionally, but input_copies only
 # contains entries for aliases where XLA actually shared buffers at runtime.
 # Accessing a missing entry produced a null vector → CUDA_ERROR_INVALID_VALUE.
-# Fixed by: https://github.com/jax-ml/jax/pull/35218 (merged 2026-03-17, main).
-# Ships in JAX 0.9.3 (not yet released as of 2026-03-31).
-TRITON_AUTOTUNED_INPUT_OUTPUT_ALIAS_MIN_JAX_VERSION = "0.9.3"
+# Fixed by: https://github.com/jax-ml/jax/pull/35218 (committed 2026-03-10 on jax-ml/jax main;
+# first published nightly container: jax-2026-03-17). Ships in JAX 0.9.3 (stable).
+# Nightly containers report "0.9.2devYYYYMMDD", which packaging.version treats as a
+# pre-release of 0.9.2 (less than 0.9.2 stable, greater than any 0.9.2.devN).
+# Using "0.9.2.dev20260317" as the floor accepts post-fix nightlies while correctly
+# rejecting pre-fix builds (0.9.2.dev20260316 and earlier).
+TRITON_AUTOTUNED_INPUT_OUTPUT_ALIAS_MIN_JAX_VERSION = "0.9.2.dev20260317"
 
 
 def is_triton_extension_supported() -> bool:

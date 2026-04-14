@@ -433,8 +433,12 @@ def triton_call_lowering(
     num_ctas = 1
     kernel_constexprs = constexprs if constexprs is not None else {}
 
-    # Handle autotuned kernels - compile all configs
-    is_autotuned = isinstance(kernel_fn, autotuner.Autotuner)
+    # Handle autotuned kernels - compile all configs.
+    # Set NVTE_DISABLE_TRITON_AUTOTUNING=1 to skip TritonAutotunedKernelCall and use a
+    # single fixed config instead (useful for measuring autotuning overhead or for JAX
+    # versions that do not support input_output_aliases on autotuned calls).
+    _disable_autotuning = os.environ.get("NVTE_DISABLE_TRITON_AUTOTUNING", "0") == "1"
+    is_autotuned = isinstance(kernel_fn, autotuner.Autotuner) and not _disable_autotuning
     if is_autotuned:
         # Compile all configs for runtime selection
         kernel_calls = []
@@ -446,8 +450,10 @@ def triton_call_lowering(
             config_num_stages = config.num_stages if config.num_stages is not None else num_stages
             config_num_ctas = config.num_ctas if config.num_ctas is not None else num_ctas
 
-            # Merge config kwargs with user constexprs
-            config_constexprs = {**config.kwargs, **(constexprs if constexprs else {})}
+            # Config kwargs (e.g. BLOCK_SIZE) take priority over caller constexprs so that
+            # each autotuning candidate actually compiles with its own BLOCK_SIZE rather than
+            # having the caller-supplied grid BLOCK_SIZE override every config.
+            config_constexprs = {**(constexprs if constexprs else {}), **config.kwargs}
 
             # Compile this config
             config_kernel = compile_triton(
@@ -504,7 +510,28 @@ def triton_call_lowering(
         )
 
     else:
-        # Regular kernel: compile single config
+        # Regular kernel: compile single config.
+        # If the kernel is an Autotuner but autotuning is disabled, unwrap it and use
+        # the first config's kwargs (user constexprs still take priority via dict merge).
+        if isinstance(kernel_fn, autotuner.Autotuner):
+            actual_kernel_fn = kernel_fn.fn
+            if kernel_fn.configs:
+                first_cfg = kernel_fn.configs[0]
+                # user constexprs override config kwargs (so stride / size scalars win)
+                kernel_constexprs = {**first_cfg.kwargs, **(constexprs or {})}
+                num_warps = first_cfg.num_warps if first_cfg.num_warps is not None else num_warps
+                num_stages = (
+                    first_cfg.num_stages if first_cfg.num_stages is not None else num_stages
+                )
+                num_ctas = first_cfg.num_ctas if first_cfg.num_ctas is not None else num_ctas
+
+                # NVTE_TRITON_BLOCK_SIZE lets benchmarks pin a specific BLOCK_SIZE candidate
+                # without changing any other constexpr.  Only applied when the kernel has a
+                # BLOCK_SIZE constant and the env var is explicitly set.
+                _bs_env = os.environ.get("NVTE_TRITON_BLOCK_SIZE", "")
+                if _bs_env and "BLOCK_SIZE" in kernel_constexprs:
+                    kernel_constexprs["BLOCK_SIZE"] = int(_bs_env)
+
         kernel = compile_triton(
             actual_kernel_fn,
             signature,
