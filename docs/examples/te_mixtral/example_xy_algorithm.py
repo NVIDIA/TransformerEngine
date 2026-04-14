@@ -23,7 +23,9 @@ from te_mixtral import NVMixtralConfig, NVMixtralForCausalLM
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="EP smoke test for TE Mixtral.")
-    parser.add_argument("--ep-size", type=int, default=8, help="Expert parallel size (set to 8 for 8 GPUs).")
+    parser.add_argument(
+        "--ep-size", type=int, default=8, help="Expert parallel size (set to 8 for 8 GPUs)."
+    )
     parser.add_argument("--num-experts", type=int, default=8, help="Global number of experts.")
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--seq-len", type=int, default=64)
@@ -46,11 +48,13 @@ def main() -> None:
     try:
         if world_size != args.ep_size:
             raise ValueError(
-                f"--ep-size ({args.ep_size}) must match WORLD_SIZE ({world_size}) for this minimal EP example."
+                f"--ep-size ({args.ep_size}) must match WORLD_SIZE ({world_size}) for this minimal"
+                " EP example."
             )
         if args.num_experts % args.ep_size != 0:
             raise ValueError(
-                f"--num-experts ({args.num_experts}) must be divisible by --ep-size ({args.ep_size})."
+                f"--num-experts ({args.num_experts}) must be divisible by --ep-size"
+                f" ({args.ep_size})."
             )
 
         torch.manual_seed(1234 + rank)
@@ -125,7 +129,10 @@ def main() -> None:
 
         if rank == 0:
             print("EP smoke test passed.")
-            print(f"world_size={world_size}, ep_size={args.ep_size}, global_experts={args.num_experts}")
+            print(
+                f"world_size={world_size}, ep_size={args.ep_size},"
+                f" global_experts={args.num_experts}"
+            )
             print(f"local expert shard shape (layer0 gate_up): {local_shape}")
             print(f"mean loss across ranks: {loss_value.item():.6f}")
     finally:

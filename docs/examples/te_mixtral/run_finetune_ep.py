@@ -20,7 +20,9 @@ from utils import HyperParameters, run_hf_baseline_finetune, run_te_mixtral_fine
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run TE Mixtral fine-tuning with Expert Parallelism.")
+    parser = argparse.ArgumentParser(
+        description="Run TE Mixtral fine-tuning with Expert Parallelism."
+    )
     parser.add_argument("--hf-token", type=str, default=os.environ.get("HF_TOKEN", ""))
     parser.add_argument("--ep-size", type=int, default=8)
     parser.add_argument(
