@@ -325,15 +325,14 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                         qstate = FP8GlobalStateManager.quantization_state
                         if buffer_key in qstate.global_amax_buffer:
                             assert (
-                                buffer_key
-                                in qstate.global_amax_history_buffer
+                                buffer_key in qstate.global_amax_history_buffer
                             ), "TE internal error during amax history change."
-                            qstate.global_amax_buffer[buffer_key][
+                            qstate.global_amax_buffer[buffer_key][pos] = recipe_state.amax_history[
+                                0
+                            ]
+                            qstate.global_amax_history_buffer[buffer_key][
                                 pos
-                            ] = recipe_state.amax_history[0]
-                            qstate.global_amax_history_buffer[
-                                buffer_key
-                            ][pos] = recipe_state.amax_history
+                            ] = recipe_state.amax_history
 
         # Add meta tensors to global buffer to participate in reduction
         for mode in ("forward", "backward"):

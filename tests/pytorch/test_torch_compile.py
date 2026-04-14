@@ -165,7 +165,7 @@ if _opaque_available:
     )
 
     _lib.define(
-        f"toy_linear_backward(Tensor grad_output, Tensor inp, Tensor weight,"
+        "toy_linear_backward(Tensor grad_output, Tensor inp, Tensor weight,"
         f" {_Q} grad_output_q) -> (Tensor, Tensor)"
     )
 

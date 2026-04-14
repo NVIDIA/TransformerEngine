@@ -129,8 +129,7 @@ def check_recipe_support(recipe: Recipe) -> None:
     """Check if the given recipe is supported."""
     if torch.compiler.is_compiling() and isinstance(recipe, DelayedScaling):
         raise RuntimeError(
-            "DelayedScaling is not supported under torch.compile. "
-            "Please use other recipes instead."
+            "DelayedScaling is not supported under torch.compile. Please use other recipes instead."
         )
     recipe_supported = True
     unsupported_reason = ""
@@ -420,28 +419,18 @@ class FP8GlobalStateManager:
             key = cls.get_key_in_buffer(forward, fp8_meta["recipe"], fp8_meta["fp8_group"])
 
             if key not in qstate.global_amax_buffer:
-                qstate.global_amax_buffer[key] = [
-                    fp8_meta[fp8_meta_tensor_key].amax_history[0]
-                ]
+                qstate.global_amax_buffer[key] = [fp8_meta[fp8_meta_tensor_key].amax_history[0]]
                 qstate.global_amax_history_buffer[key] = [
                     fp8_meta[fp8_meta_tensor_key].amax_history
                 ]
-                qstate.global_scale_buffer[key] = [
-                    fp8_meta[fp8_meta_tensor_key].scale
-                ]
+                qstate.global_scale_buffer[key] = [fp8_meta[fp8_meta_tensor_key].scale]
             else:
-                qstate.global_amax_buffer[key].append(
-                    fp8_meta[fp8_meta_tensor_key].amax_history[0]
-                )
+                qstate.global_amax_buffer[key].append(fp8_meta[fp8_meta_tensor_key].amax_history[0])
                 qstate.global_amax_history_buffer[key].append(
                     fp8_meta[fp8_meta_tensor_key].amax_history
                 )
-                qstate.global_scale_buffer[key].append(
-                    fp8_meta[fp8_meta_tensor_key].scale
-                )
-            fp8_meta[index_in_buffer].append(
-                len(qstate.global_amax_buffer[key]) - 1
-            )
+                qstate.global_scale_buffer[key].append(fp8_meta[fp8_meta_tensor_key].scale)
+            fp8_meta[index_in_buffer].append(len(qstate.global_amax_buffer[key]) - 1)
             fp8_meta[index_in_buffer].append(key)
 
     @classmethod
@@ -653,12 +642,7 @@ class FP8GlobalStateManager:
         # Reduce only the non-FP8 weight modules here.
         # FP8 weight modules are reduced at the end of the optimizer
         # step after the weight amax is populated.
-        if (
-            enabled
-            and qstate.autocast_depth == 0
-            and not _graph
-            and torch.is_grad_enabled()
-        ):
+        if enabled and qstate.autocast_depth == 0 and not _graph and torch.is_grad_enabled():
             # delayed scaling only function, for other recipes (current scaling with any granularity),
             # this is noop for other recipes because cls.global_amax_buffer is empty list
             cls.reduce_and_update_fp8_tensors(forward=True)
@@ -682,18 +666,14 @@ class FP8GlobalStateManager:
 
         qstate = cls.quantization_state
         if buffer_position_key in fp8_meta:
-            qstate.fp8_tensors_recompute_buffer[
-                fp8_meta[buffer_position_key]
-            ].append(to_copy)
+            qstate.fp8_tensors_recompute_buffer[fp8_meta[buffer_position_key]].append(to_copy)
         else:
             if len(qstate.fp8_tensors_recompute_buffer) == 0:
                 qstate.fp8_tensors_recompute_buffer = [deque()]
             else:
                 qstate.fp8_tensors_recompute_buffer.append(deque())
             qstate.fp8_tensors_recompute_buffer[-1].append(to_copy)
-            fp8_meta[buffer_position_key] = (
-                len(qstate.fp8_tensors_recompute_buffer) - 1
-            )
+            fp8_meta[buffer_position_key] = len(qstate.fp8_tensors_recompute_buffer) - 1
 
     @classmethod
     def get_old_fp8_meta_tensors_for_recompute(cls, fp8_meta: Dict[str, Any]) -> None:
