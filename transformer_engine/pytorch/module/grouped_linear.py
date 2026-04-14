@@ -453,6 +453,13 @@ class _GroupedLinear(torch.autograd.Function):
                     use_split_accumulator=dgrad_gemm_use_split_accumulator,
                 )
 
+            # Gathered weights are no longer needed after dgrad GEMM.
+            # For nvfp4, the NVFP4TensorStorage and its sub-tensors (scale_inv etc.)
+            # would otherwise survive until function return via this local ref.
+            if ctx.etp_size > 1:
+                weight_sizes = [w.size() for w in weights]
+                del weights
+
             if ctx.weights_requires_grad:
                 wgrad_gemm_use_split_accumulator = _2X_ACC_WGRAD
                 if ctx.fp8:
@@ -464,9 +471,10 @@ class _GroupedLinear(torch.autograd.Function):
                 if ctx.fuse_wgrad_accumulation:
                     wgrad_list = main_grads
                 else:
+                    sizes = weight_sizes if ctx.etp_size > 1 else [w.size() for w in weights]
                     wgrad_list = [
-                        torch.empty(w.size(), dtype=ctx.activation_dtype, device=ctx.device)
-                        for w in weights
+                        torch.empty(sz, dtype=ctx.activation_dtype, device=ctx.device)
+                        for sz in sizes
                     ]
 
                 if ctx.save_original_input:
