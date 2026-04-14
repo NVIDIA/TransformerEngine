@@ -972,7 +972,7 @@ filter_and_histogram_for_one_block(const T *in_buf, const IdxT *in_idx_buf,
           calc_bucket<T, BitsPerPass>(value, start_bit, mask, select_min);
       atomicAdd(histogram + bucket, static_cast<IdxT>(1));
     }
-  } 
+  }
   }else {
     // not use vectorized_process here because it increases #registers a lot
     IdxT *p_out_cnt = &counter->out_cnt;
