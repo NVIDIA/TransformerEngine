@@ -450,21 +450,22 @@ class ETPShardedParam(torch.nn.Parameter):
         else:
             gather_weights = list(w.get_padded_shard() for w in weights)
 
-        # 4. Cache checkout (async only — sync gathers don't need pooled buffers).
-        if async_op:
-            dtypes = [q.dtype if q is not None else w.dtype for q, w in zip(quantizers, weights)]
-            out_buffers = []
-            cache = get_global_ETP_cache()
-            for p, dt in zip(weights, dtypes):
-                if fwd:
-                    # The fwd ag buffer is always initialized in 'all_gather_and_prefetch'
-                    out_buffers.append(cache.get(p._ag_ticket_fwd))
-                else:
-                    if p._ag_ticket_bwd is None:
-                        p._ag_ticket_bwd = cache.reserve(p, dt, fwd=False)
-                    out_buffers.append(cache.get(p._ag_ticket_bwd))
-        else:
-            out_buffers = None
+        # 4. Cache checkout — use pooled buffers for both async and sync gathers
+        #    to avoid allocating fresh memory each iteration.
+        dtypes = [q.dtype if q is not None else w.dtype for q, w in zip(quantizers, weights)]
+        out_buffers = []
+        cache = get_global_ETP_cache()
+        for p, dt in zip(weights, dtypes):
+            if fwd:
+                if p._ag_ticket_fwd is None:
+                    p._ag_ticket_fwd = cache.reserve(p, dt, fwd=True)
+                    cache.get(p._ag_ticket_fwd)
+                    cache.release(p._ag_ticket_fwd)
+                out_buffers.append(cache.get(p._ag_ticket_fwd))
+            else:
+                if p._ag_ticket_bwd is None:
+                    p._ag_ticket_bwd = cache.reserve(p, dt, fwd=False)
+                out_buffers.append(cache.get(p._ag_ticket_bwd))
 
         # 5. Communicate.
         etp_group = weights[0].group
