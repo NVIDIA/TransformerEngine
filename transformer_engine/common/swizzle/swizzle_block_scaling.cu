@@ -141,7 +141,6 @@ void launch_kernel(const void* const in, void* const out, uint32_t data_rows, ui
              alignof(uint4), " bytes");
   NVTE_CHECK(is_aligned_ptr(out, alignof(uint4)),
              "Output scaling factor pointer must be aligned to ", alignof(uint4), " bytes");
-  NVTE_CHECK(data_rows % 4 == 0, "Input tensor must not have any padding scaling factors");
 
   const uint32_t tiles_x = DIVUP(data_cols, 128u);
   const uint32_t tiles_y = DIVUP(data_rows, 128u);

@@ -1346,9 +1346,10 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(const std::ve
     }
   }
   const size_t flat_last_dim = shape.size() > 0 ? shape.back() : 1;
-  NVTE_CHECK(flat_first_dim % MXFP8_BLOCK_SIZE == 0 && flat_last_dim % MXFP8_BLOCK_SIZE == 0,
-             "MXFP8 requires tensor dims that are divisible by ", MXFP8_BLOCK_SIZE,
-             " (got shape=", shape, ")");
+  NVTE_CHECK(flat_last_dim % 16 == 0,
+             "MXFP8 requires the last tensor dimension to be divisible by 16,"
+             " got tensor with shape ", shape,
+             " (flat_first_dim=", flat_first_dim, ", flat_last_dim=", flat_last_dim, ")");
   const auto rowwise_scale_inv_shape = get_scale_shape(shape, false);
   const auto columnwise_scale_inv_shape = get_scale_shape(shape, true);
 
@@ -1665,9 +1666,9 @@ std::vector<size_t> MXFP8Quantizer::get_scale_shape(const std::vector<size_t>& s
 
   auto last_dim = shape.back();
 
-  NVTE_CHECK(last_dim % MXFP8_BLOCK_SIZE == 0 && (numel / last_dim) % MXFP8_BLOCK_SIZE == 0,
-             "MXFP8 requires tensor dims that are divisible by ", MXFP8_BLOCK_SIZE,
-             " (got shape=", shape, ")");
+  NVTE_CHECK(last_dim % 16 == 0,
+             "MXFP8 requires the last tensor dimension to be divisible by 16,"
+             " got tensor with shape ", shape);
 
   std::vector<size_t> scale_shape;
 
@@ -1676,11 +1677,11 @@ std::vector<size_t> MXFP8Quantizer::get_scale_shape(const std::vector<size_t>& s
   if (rowwise_usage) {
     // rowwise scaling factor shape
     size_t sinv0 = roundup(numel / last_dim, 128);
-    size_t sinv1 = roundup(last_dim / MXFP8_BLOCK_SIZE, 4);
+    size_t sinv1 = roundup(ceildiv(last_dim, MXFP8_BLOCK_SIZE), 4);
     scale_shape = {sinv0, sinv1};
   } else {
     // columnwise scaling factor shape
-    size_t sinv0 = roundup(numel / (last_dim * MXFP8_BLOCK_SIZE), 4);
+    size_t sinv0 = roundup(ceildiv(numel / last_dim, MXFP8_BLOCK_SIZE), 4);
     size_t sinv1 = roundup(last_dim, 128);
     scale_shape = {sinv0, sinv1};
   }
@@ -1739,11 +1740,10 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
     }
   }
   const size_t flat_last_dim = shape.size() > 0 ? shape.back() : 1;
-  NVTE_CHECK(flat_first_dim % NVFP4_BLOCK_SIZE == 0, "First dim for NVFP4 must be divisible by ",
-             NVFP4_BLOCK_SIZE, " (got shape=", shape, ")");
-  NVTE_CHECK(flat_last_dim % NVFP4_BLOCK_SIZE == 0,
-             "NVFP4 requires tensor dims that are divisible by ", NVFP4_BLOCK_SIZE,
-             " (got shape=", shape, ")");
+  NVTE_CHECK(flat_last_dim % 32 == 0,
+             "NVFP4 requires the last tensor dimension to be divisible by 32,"
+             " got tensor with shape ", shape,
+             " (flat_first_dim=", flat_first_dim, ", flat_last_dim=", flat_last_dim, ")");
   const auto rowwise_scale_inv_shape = get_scale_shape(shape, false);
   const auto columnwise_scale_inv_shape = get_scale_shape(shape, true);
 
@@ -2438,11 +2438,9 @@ std::vector<size_t> NVFP4Quantizer::get_scale_shape(const std::vector<size_t>& s
   auto last_dim = shape.back();
   auto flat_first_dim = numel / last_dim;
 
-  NVTE_CHECK(last_dim % NVFP4_BLOCK_SIZE == 0, "Last dim for NVFP4 must be divisible by ",
-             NVFP4_BLOCK_SIZE, " (got dim=", last_dim, ")");
-  NVTE_CHECK(flat_first_dim % NVFP4_BLOCK_SIZE == 0,
-             "NVFP4 requires tensor dims that are divisible by ", NVFP4_BLOCK_SIZE,
-             " (got shape=", shape, ")");
+  NVTE_CHECK(last_dim % 32 == 0,
+             "NVFP4 requires the last tensor dimension to be divisible by 32,"
+             " got tensor with shape ", shape);
 
   std::vector<size_t> scale_shape;
 
@@ -2451,12 +2449,12 @@ std::vector<size_t> NVFP4Quantizer::get_scale_shape(const std::vector<size_t>& s
   if (rowwise_usage) {
     // rowwise scaling factor shape
     size_t sinv0 = roundup(flat_first_dim, 128);
-    size_t sinv1 = roundup(last_dim / NVFP4_BLOCK_SIZE, 4);
+    size_t sinv1 = roundup(ceildiv(last_dim, NVFP4_BLOCK_SIZE), 4);
     scale_shape = {sinv0, sinv1};
   } else {
     // columnwise scaling factor shape
     size_t sinv0 = roundup(last_dim, 128);
-    size_t sinv1 = roundup(flat_first_dim / NVFP4_BLOCK_SIZE, 4);
+    size_t sinv1 = roundup(ceildiv(flat_first_dim, NVFP4_BLOCK_SIZE), 4);
     scale_shape = {sinv0, sinv1};
   }
   return scale_shape;
