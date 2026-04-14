@@ -336,7 +336,7 @@ py::object group_dequantize(const py::handle &input, transformer_engine::DType o
     if (attr.is_none()) return std::nullopt;
     return attr.cast<at::Tensor>();
   };
-  auto rowwise_data = get_optional_tensor("data");
+  auto rowwise_data = get_optional_tensor("rowwise_data");
   auto columnwise_data = get_optional_tensor("columnwise_data");
   auto rowwise_scale_inv = get_optional_tensor("scale_inv");
   auto columnwise_scale_inv = get_optional_tensor("columnwise_scale_inv");
@@ -354,11 +354,13 @@ py::object group_dequantize(const py::handle &input, transformer_engine::DType o
   }
 
   // Build input GroupedTensorWrapper.
+  // Data tensors are stored as flat 1D buffers; use the quantizer's dtype
+  // (e.g. kFloat8E4M3) rather than the raw tensor scalar_type (uint8).
   auto input_cpp = GroupedTensorWrapper(num_tensors, logical_shape, quantizer->get_scaling_mode());
   if (rowwise_data.has_value()) {
     input_cpp.set_rowwise_data(rowwise_data->data_ptr(),
-                               GetTransformerEngineDType(rowwise_data->scalar_type()),
-                               getTensorShape(*rowwise_data));
+                               quantizer->dtype,
+                               std::vector<size_t>{static_cast<size_t>(rowwise_data->numel())});
     if (rowwise_scale_inv.has_value()) {
       input_cpp.set_rowwise_scale_inv(rowwise_scale_inv->data_ptr(), DType::kFloat8E8M0,
                                       getTensorShape(*rowwise_scale_inv));
@@ -366,8 +368,8 @@ py::object group_dequantize(const py::handle &input, transformer_engine::DType o
   }
   if (columnwise_data.has_value()) {
     input_cpp.set_columnwise_data(columnwise_data->data_ptr(),
-                                  GetTransformerEngineDType(columnwise_data->scalar_type()),
-                                  getTensorShape(*columnwise_data));
+                                  quantizer->dtype,
+                                  std::vector<size_t>{static_cast<size_t>(columnwise_data->numel())});
     if (columnwise_scale_inv.has_value()) {
       input_cpp.set_columnwise_scale_inv(columnwise_scale_inv->data_ptr(), DType::kFloat8E8M0,
                                          getTensorShape(*columnwise_scale_inv));

@@ -529,9 +529,11 @@ class TestGroupedTensor:
         assert torch.equal(dequantized.first_dims, quantized.first_dims)
         assert torch.equal(dequantized.tensor_offsets, quantized.tensor_offsets)
 
-        # Verify dequantized values are close to original.
-        dequantized_bf16 = dequantized.data.reshape(grouped_input.shape)
-        torch.testing.assert_close(dequantized_bf16, grouped_input, atol=0.125, rtol=0.1)
+        # Verify dequantized values are close to original (per-tensor).
+        dequantized_tensors = dequantized.split_into_quantized_tensors()
+        assert len(dequantized_tensors) == num_tensors
+        for orig, deq in zip(input_tensors, dequantized_tensors):
+            torch.testing.assert_close(deq, orig, atol=0.125, rtol=0.1)
 
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
     def test_group_dequantize_cudagraph_capturable(self) -> None:
@@ -567,14 +569,17 @@ class TestGroupedTensor:
             dim=0,
         )
         fresh_quantized = tex.group_quantize(fresh_input, quantizer, num_tensors, first_dims)
-        quantized.data.copy_(fresh_quantized.data)
+        quantized.rowwise_data.copy_(fresh_quantized.rowwise_data)
         quantized.scale_inv.copy_(fresh_quantized.scale_inv)
 
         graph.replay()
         torch.cuda.synchronize()
 
         expected = tex.group_dequantize(quantized, tex.DType.kBFloat16)
-        assert torch.equal(static_output.data, expected.data)
+        expected_tensors = expected.split_into_quantized_tensors()
+        static_tensors = static_output.split_into_quantized_tensors()
+        for exp, got in zip(expected_tensors, static_tensors):
+            assert torch.equal(got, exp)
 
     def test_clear(self) -> None:
         """Test clear method"""
