@@ -31,7 +31,8 @@ std::tuple<std::optional<at::Tensor>, std::optional<at::Tensor>> swizzle_scales_
  */
 std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm(std::vector<TensorWrapper>& tensors,
                                                                bool rowwise_usage,
-                                                               bool columnwise_usage);
+                                                               bool columnwise_usage,
+                                                               bool check_scale_inv_shapes = true);
 
 using SwizzledGroupedScales = std::pair<std::optional<at::Tensor>, std::optional<at::Tensor>>;
 

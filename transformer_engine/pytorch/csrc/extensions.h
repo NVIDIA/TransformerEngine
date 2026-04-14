@@ -584,7 +584,7 @@ void fused_multi_row_unpadding(at::Tensor input, at::Tensor output,
 
 void inplace_swizzle_scale_for_gemm(py::handle &tensor);
 
-void inplace_multi_swizzle_scales_for_gemm(std::vector<py::object> &tensors, bool rowwise_usage,
+void inplace_multi_tensor_swizzle_scales_for_gemm(std::vector<py::object> &tensors, bool rowwise_usage,
                                            bool columnwise_usage,
                                            bool check_scale_inv_shapes = true);
 
