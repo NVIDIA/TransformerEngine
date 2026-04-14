@@ -2477,8 +2477,10 @@ def grouped_gemm(
         # Both V1 and V2 quantize produce pre-swizzled scales (V1 via
         # set_with_gemm_swizzled_scales, V2 via nvte_group_quantize). Require that
         # grouped_quantize has set pre_swizzled=True on the input tensors.
-        assert lhs.pre_swizzled, "lhs must be pre-swizzled for MXFP8 1D scaling"
-        assert rhs.pre_swizzled, "rhs must be pre-swizzled for MXFP8 1D scaling"
+        if not lhs.pre_swizzled:
+            raise ValueError("lhs must be pre-swizzled for MXFP8 1D scaling")
+        if not rhs.pre_swizzled:
+            raise ValueError("rhs must be pre-swizzled for MXFP8 1D scaling")
 
     if use_v2_ffi:
         additional_arg_0 = jnp.ones((num_gemms,), jnp.float32)  # alpha
