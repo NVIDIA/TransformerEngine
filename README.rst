@@ -38,21 +38,19 @@ precision-like API that can be used seamlessly with your framework-specific code
 framework agnostic C++ API that can be integrated with other deep learning libraries to enable FP8
 support for Transformers.
 
-As the number of parameters in Transformer models continues to grow, training and inference for
-architectures such as BERT, GPT and T5 become very memory and compute-intensive. Most deep learning
-frameworks train with FP32 by default. This is not essential, however, to achieve full accuracy for
-many deep learning models. Using mixed-precision training, which combines single-precision (FP32)
-with lower precision (e.g. FP16) format when training a model, results in significant speedups with
-minimal differences in accuracy as compared to FP32 training. With Hopper GPU
-architecture FP8 precision was introduced, which offers improved performance over FP16 with no
-degradation in accuracy. Although all major deep learning frameworks support FP16, FP8 support is
-not available natively in frameworks today.
+As Transformer models scale to hundreds of billions of parameters across large language models,
+MoE architectures, and multimodal models, training and inference become increasingly
+memory and compute-intensive. Mixed-precision training, which combines single-precision (FP32) with
+lower precision formats, delivers significant speedups with minimal impact on accuracy. FP8, introduced
+with the Hopper GPU architecture, offers further performance gains over FP16 with no degradation in
+accuracy, and newer formats like MXFP8 and NVFP4 on Blackwell push efficiency even further.
 
-TE addresses the problem of FP8 support by providing APIs that integrate with popular Large Language
-Model (LLM) libraries. It provides a Python API consisting of modules to easily build a Transformer
-layer as well as a framework-agnostic library in C++ including structs and kernels needed for FP8
-support. Modules provided by TE internally maintain scaling factors and other values needed for FP8
-training, greatly simplifying mixed precision training for users.
+TE integrates with popular LLM frameworks and provides optimizations that make low-precision training
+work seamlessly with advanced features like MoE, tensor/sequence/context parallelism, and fused
+operations. It provides a Python API consisting of modules to easily build a Transformer layer as
+well as a framework-agnostic library in C++ including structs and kernels needed for FP8 support.
+Modules provided by TE internally maintain scaling factors and other values needed for FP8 training,
+greatly simplifying mixed precision training for users.
 
 Highlights
 ==========
