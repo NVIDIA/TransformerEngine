@@ -396,7 +396,7 @@ __device__ void swizzle_col_scaling_narrow_m_kernel_impl(const void* input, void
   const int k_tile = bid * blockDim.y + threadIdx.y;
   const bool active = (k_tile < num_tiles_k);
   const int remaining = num_tiles_k - bid * static_cast<int>(blockDim.y);
-  const int k_tiles_in_block = remaining < TB_DIM ? remaining : TB_DIM;
+  const int k_tiles_in_block = remaining <= 0 ? 0 : (remaining < TB_DIM ? remaining : TB_DIM);
 
   extern __shared__ int slm_narrow_m[];
 

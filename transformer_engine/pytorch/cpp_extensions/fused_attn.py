@@ -35,6 +35,7 @@ TORCH_DType = {
 }
 
 QKVFormat = {
+    None: NVTE_QKV_Format.NVTE_QKV_Format_NOT_SET,
     "bshd": NVTE_QKV_Format.NVTE_BSHD,
     "sbhd": NVTE_QKV_Format.NVTE_SBHD,
     "thd": NVTE_QKV_Format.NVTE_THD,
@@ -233,6 +234,9 @@ def fused_attn_fwd(
                       whether to return the maximum attention score
     cuda_graph : bool, default = False
                 whether or not cuda graph capture is enabled.
+    qkv_scale_inv_format : str, default = None
+                format of the scale-inverse tensors for QKV; {"sbhd", "bshd", "thd", "bhsd"};
+                if None, defaults to the format inferred from qkv_layout.
 
     Returns
     ----------
@@ -313,11 +317,6 @@ def fused_attn_fwd(
 
     # execute kernel
 
-    _qkv_scale_inv_format = (
-        QKVFormat[qkv_scale_inv_format]
-        if qkv_scale_inv_format is not None
-        else NVTE_QKV_Format.NVTE_QKV_Format_NOT_SET
-    )
     output_tensors = tex.fused_attn_fwd(
         max_seqlen_q,
         max_seqlen_kv,
@@ -350,7 +349,7 @@ def fused_attn_fwd(
         rng_elts_per_thread,
         return_max_logit,
         cuda_graph,
-        _qkv_scale_inv_format,
+        QKVFormat[qkv_scale_inv_format],
     )
 
     if return_max_logit:
@@ -486,6 +485,9 @@ def fused_attn_bwd(
                 Quantizer object for the intermediate value dP.
     dqkv_quantizer : Quantizer, default = None
                 Quantizer object for the output values of the fused_attn_bwd.
+    attn_scale : float, default = None
+                if not None, use attn_scale as the attention scale for Q*K.T BMM;
+                if None, use 1.0/sqrt(head_dim_qk) as the default
     dropout : float, default = 0.0
                 dropout probability, 0.0 means no dropout, 1.0 means no output;
                 dropout must be 0.0 if is_training is False
@@ -524,6 +526,12 @@ def fused_attn_bwd(
                 whether to execute the backward pass with deterministic behaviours.
     cuda_graph : bool, default = False
                 whether or not cuda graph capture is enabled.
+    qkv_scale_inv_format : str, default = None
+                format of the scale-inverse tensors for QKV; {"sbhd", "bshd", "thd", "bhsd"};
+                if None, defaults to the format inferred from qkv_layout.
+    do_scale_inv_format : str, default = None
+                format of the scale-inverse tensors for dO; {"sbhd", "bshd", "thd", "bhsd"};
+                if None, defaults to the format inferred from the output layout.
 
     Returns
     ----------
@@ -566,16 +574,6 @@ def fused_attn_bwd(
                 f" for backend={fused_attention_backend}."
             )
 
-    _qkv_scale_inv_format = (
-        QKVFormat[qkv_scale_inv_format]
-        if qkv_scale_inv_format is not None
-        else NVTE_QKV_Format.NVTE_QKV_Format_NOT_SET
-    )
-    _do_scale_inv_format = (
-        QKVFormat[do_scale_inv_format]
-        if do_scale_inv_format is not None
-        else NVTE_QKV_Format.NVTE_QKV_Format_NOT_SET
-    )
     output_tensors = tex.fused_attn_bwd(
         max_seqlen_q,
         max_seqlen_kv,
@@ -607,8 +605,8 @@ def fused_attn_bwd(
         dp_quantizer,
         dqkv_quantizer,
         cuda_graph,
-        _qkv_scale_inv_format,
-        _do_scale_inv_format,
+        QKVFormat[qkv_scale_inv_format],
+        QKVFormat[do_scale_inv_format],
     )
 
     return output_tensors

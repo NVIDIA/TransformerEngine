@@ -38,7 +38,7 @@ void nvte_swizzle_scaling_factors(const NVTETensor input, NVTETensor output, cud
  *  \param[in]     stream                  CUDA stream used for the operation.
  *  \param[in]     check_scale_inv_shapes  Whether to verify scale_inv shape/padding
  *                                         requirements. Set to false when data and scale_inv
- *                                         may have different shapes.
+ *                                         have different shapes, e.g. in MXFP8.
  *
  *  Requirements:
  *  - scale_inv is stored in row-major.

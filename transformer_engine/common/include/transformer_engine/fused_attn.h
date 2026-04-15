@@ -307,6 +307,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
  *  \param[in]     bottom_right_diagonal     Whether to align sliding window and ALiBi diagonal to the bottom right corner of the softmax matrix.
  *  \param[in]     workspace                 Workspace tensor.
  *  \param[in]     stream                    CUDA stream used for this operation.
+ *  \param[in]     qkv_scale_inv_format      Format of scale-inverse tensors for QKV.
  */
 void nvte_fused_attn_fwd(
     const NVTETensor Q, const NVTETensor K, const NVTETensor V, const NVTETensor Bias,
@@ -384,6 +385,8 @@ void nvte_fused_attn_fwd(
  *  \param[in]     cuda_graph                Whether cuda graph capture is enabled or not.
  *  \param[in]     workspace                 Workspace tensor.
  *  \param[in]     stream                    CUDA stream used for this operation.
+ *  \param[in]     qkv_scale_inv_format      Format of scale-inverse tensors for QKV.
+ *  \param[in]     do_scale_inv_format       Format of scale-inverse tensors for dO.
  */
 void nvte_fused_attn_bwd(
     const NVTETensor Q, const NVTETensor K, const NVTETensor V, const NVTETensor O,
@@ -614,10 +617,11 @@ void nvte_prepare_flash_attn_bwd(NVTETensor q, NVTETensor k, NVTETensor v, NVTET
 /*!  \brief Permute multiple tensors from BSHD/SBHD to BHSD.
  *
  *  Each input tensor is 4D in BSHD or SBHD layout, and the corresponding output tensor
- *  is 4D in BHSD layout. Output tensors may be pre-allocated and have a larger D dimension.
+ *  is 4D in BHSD layout. Output tensors are pre-allocated and may have a larger last dimension.
+ *  Up to 16 tensors may be processed in a single call.
  *
  *  \param[in]     inputs           List of input tensors.
- *  \param[out]    outputs          List of output tensors.
+ *  \param[in,out] outputs          List of output tensors.
  *  \param[in]     num_tensors      Number of tensors in the list.
  *  \param[in]     original_format  Original QKV format (NVTE_BSHD or NVTE_SBHD).
  *  \param[in]     stream           CUDA stream.
@@ -634,9 +638,9 @@ void nvte_multi_tensor_permute_to_grouped_tensor(NVTETensor *inputs, NVTETensor 
  *  Outputs must be pre-allocated with out_cols >= in_cols and matching dtype.
  *  Up to 16 tensors may be processed in a single call.
  *
- *  \param[in]     inputs       Array of num_tensors 2D input tensors.
- *  \param[out]    outputs      Array of num_tensors 2D output tensors, pre-allocated.
- *  \param[in]     num_tensors  Number of tensor pairs to process (1..16).
+ *  \param[in]     inputs       List of input tensors.
+ *  \param[in,out] outputs      List of output tensors.
+ *  \param[in]     num_tensors  Number of tensors in the list.
  *  \param[in]     stream       CUDA stream.
  */
 void nvte_multi_tensor_pad_last_dim(NVTETensor *inputs, NVTETensor *outputs, size_t num_tensors,

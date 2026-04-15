@@ -57,7 +57,7 @@ NVTE_Fused_Attn_Backend get_fused_attn_backend(
 // helper function for S and dP quantizers
 std::pair<TensorWrapper, py::object> quantizer_helper(py::handle quantizer,
                                                       const std::vector<size_t> &shape, DType dtype,
-                                                      bool create_hp_tensor_for_cs,
+                                                      bool create_hp_tensor,
                                                       std::optional<at::Tensor> data) {
   std::unique_ptr<Quantizer> T_quantizer = convert_quantizer(quantizer);
   TensorWrapper te_T;
@@ -78,7 +78,7 @@ std::pair<TensorWrapper, py::object> quantizer_helper(py::handle quantizer,
   } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
     // current scaling
     auto *T_quantizer_fp8 = dynamic_cast<Float8CurrentScalingQuantizer *>(T_quantizer.get());
-    if (create_hp_tensor_for_cs) {
+    if (create_hp_tensor) {
       if (data.has_value()) {
         std::tie(te_T, py_T) =
             T_quantizer_fp8->create_unquantized_tensor_with_amax(shape, dtype, data.value());
@@ -94,7 +94,7 @@ std::pair<TensorWrapper, py::object> quantizer_helper(py::handle quantizer,
   } else if (detail::IsMXFP8Quantizers(quantizer.ptr())) {
     // MXFP8
     auto *T_quantizer_fp8 = dynamic_cast<MXFP8Quantizer *>(T_quantizer.get());
-    if (create_hp_tensor_for_cs) {
+    if (create_hp_tensor) {
       if (data.has_value()) {
         std::tie(te_T, py_T) =
             T_quantizer_fp8->create_unquantized_tensor(shape, dtype, data.value());
@@ -472,24 +472,32 @@ std::vector<py::object> fused_attn_bwd(
   // construct NVTE tensors
   if (detail::IsFloat8Quantizers(dqkv_quantizer.ptr())) {
     // FP8
-    if (set_zero && (nvte_get_qkv_format(dqkv_layout) == NVTE_QKV_Format::NVTE_THD)) {
-      if (((h_q * d_qk) % block_size == 0) && ((h_kv * d_qk) % block_size == 0) &&
-          ((h_kv * d_v) % block_size == 0) && dQ.is_contiguous() && dK.is_contiguous() &&
-          dV.is_contiguous()) {
-        mha_fill(te_dQ, cu_seqlens_q.index({torch::indexing::Slice(-1, torch::indexing::None)}));
-        mha_fill(te_dK, cu_seqlens_kv.index({torch::indexing::Slice(-1, torch::indexing::None)}));
-        mha_fill(te_dV, cu_seqlens_kv.index({torch::indexing::Slice(-1, torch::indexing::None)}));
-      } else {
-        dQ.fill_(0);
-        dK.fill_(0);
-        dV.fill_(0);
+    if (set_zero) {
+      if (dq_format == NVTE_QKV_Format::NVTE_THD) {
+        if (((h_q * d_qk) % block_size == 0) && dQ.is_contiguous()) {
+          mha_fill(te_dQ, cu_seqlens_q.index({torch::indexing::Slice(-1, torch::indexing::None)}));
+        } else {
+          dQ.fill_(0);
+        }
+      }
+      if (dkv_format == NVTE_QKV_Format::NVTE_THD) {
+        if (((h_kv * d_qk) % block_size == 0) && ((h_kv * d_v) % block_size == 0) &&
+            dK.is_contiguous() && dV.is_contiguous()) {
+          mha_fill(te_dK, cu_seqlens_kv.index({torch::indexing::Slice(-1, torch::indexing::None)}));
+          mha_fill(te_dV, cu_seqlens_kv.index({torch::indexing::Slice(-1, torch::indexing::None)}));
+        } else {
+          dK.fill_(0);
+          dV.fill_(0);
+        }
       }
     }
   } else if (dqkv_quantizer.is_none() ||
              detail::IsFloat8CurrentScalingQuantizers(dqkv_quantizer.ptr()) ||
              detail::IsMXFP8Quantizers(dqkv_quantizer.ptr())) {
-    if (nvte_get_qkv_format(dqkv_layout) == NVTE_QKV_Format::NVTE_THD) {
+    if (dq_format == NVTE_QKV_Format::NVTE_THD) {
       dQ.fill_(0);
+    }
+    if (dkv_format == NVTE_QKV_Format::NVTE_THD) {
       dK.fill_(0);
       dV.fill_(0);
     }

@@ -1171,15 +1171,15 @@ def get_attention_backend(
             )
             use_flash_attention_2 = False
     if use_fused_attention and deterministic:
-        # if softmax_type != "vanilla":
-        #     logger.debug(
-        #         "Disabling FusedAttention for determinism reasons with softmax_type = %s. "
-        #         "Sink attention (off-by-one and learnable softmax) requires "
-        #         "NVTE_ALLOW_NONDETERMINISTIC_ALGO=1",
-        #         softmax_type,
-        #     )
-        #     use_fused_attention = False
-        #     fused_attention_backend = None
+        if softmax_type != "vanilla":
+            logger.debug(
+                "Disabling FusedAttention for determinism reasons with softmax_type = %s. "
+                "Sink attention (off-by-one and learnable softmax) requires "
+                "NVTE_ALLOW_NONDETERMINISTIC_ALGO=1",
+                softmax_type,
+            )
+            use_fused_attention = False
+            fused_attention_backend = None
         if (
             fused_attention_backend == FusedAttnBackend["FP8"]
             and is_training
@@ -2230,11 +2230,11 @@ def get_attention_quantizers(fp8, fp8_recipe, quantizers):
     dO_quantizer.set_usage(rowwise=True, columnwise=False)
 
     dP_quantizer = quantizers["scaling_bwd"][META_DP]
-    dP_quantizer.interal = True
+    dP_quantizer.internal = True
     dP_quantizer.set_usage(rowwise=True, columnwise=False)
 
     dQKV_quantizer = quantizers["scaling_bwd"][META_DQKV]
-    dQKV_quantizer.interal = False
+    dQKV_quantizer.internal = False
     dQKV_quantizer.set_usage(rowwise=True, columnwise=False)
 
     if fp8_recipe.mxfp8():
@@ -2324,9 +2324,9 @@ def permute_to_grouped_tensor_pytorch(tensor, src_format):
 def mxfp8_quantize_fast_path(tensor_quantizer_pairs, src_format):
     """MXFP8 attention requires quantization along S and D dimensions. This fast path
     quantizes tensors without swizzle, and pads, permutes and swizzles the scale_invs
-    to achieve faster speed thanks to the smaller sizes of scale_invs. Output tensors
-    have _rowwise_data and _columnwise_data in src_format, and _rowwise_scale_inv and
-    _columnwise_scale_inv in BHSD format.
+    to achieve faster speed due to the smaller sizes of scale_invs compare to the data.
+    The output tensors have _rowwise_data and _columnwise_data in src_format, and
+    _rowwise_scale_inv and _columnwise_scale_inv in BHSD format.
 
     Parameters
     ----------
@@ -2338,7 +2338,7 @@ def mxfp8_quantize_fast_path(tensor_quantizer_pairs, src_format):
         All tensors in the list must have the same src_format.
     Returns
     -------
-    fp8_tensors : list of MXFP8Tensor
+    fp8_tensors : list of MXFP8Tensors
         Data in ``src_format``, scale_inv in BHSD format.
     scale_inv_format : str
         Always ``"bhsd"``.
@@ -2508,7 +2508,7 @@ def combine_and_quantize(
         if qkv_layout not in ("bshd_bshd_bshd", "sbhd_sbhd_sbhd"):
             keep_same_data_and_scale_inv_format = True
 
-        # ---- Fast path: quantize in original layout, then permute/swizzle scale_inv ----
+        # ---- Fast path: quantize in original layout, permute scale_inv to BHSD, then swizzle ----
         if not keep_same_data_and_scale_inv_format:
             q_quantizer, k_quantizer, v_quantizer = [qkv_quantizer.copy() for _ in range(3)]
             if used_in_forward and not used_in_backward:
@@ -2530,7 +2530,7 @@ def combine_and_quantize(
             )
             return q_fp8, k_fp8, v_fp8, qkv_layout, qkv_scale_inv_format
 
-        # ---- Slow path: permute data to BHSD first, then quantize with swizzle ----
+        # ---- Slow path: permute data to BHSD, then quantize with swizzle ----
         if qkv_layout in ("bshd_bshd_bshd", "sbhd_sbhd_sbhd"):
             q, k, v = tex.multi_tensor_permute_to_grouped_tensor(
                 [q, k, v],
