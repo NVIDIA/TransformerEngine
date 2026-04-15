@@ -7,6 +7,7 @@ from typing import Callable, Dict, Optional, Tuple, Union, List
 from functools import reduce
 from operator import mul as multiply_op
 import warnings
+import weakref
 
 import torch
 
@@ -19,6 +20,7 @@ from .base import (
     fill_userbuffers_buffer_for_all_gather,
     get_dummy_wgrad,
     get_ub,
+    quantize_weight,
     TransformerEngineBaseModule,
     _2X_ACC_FPROP,
     _2X_ACC_DGRAD,
@@ -87,10 +89,11 @@ class _Linear(torch.autograd.Function):
     def forward(
         ctx,
         weight: torch.Tensor,
+        weight_workspace: Optional[torch.Tensor],
         inp: torch.Tensor,
         bias: Optional[torch.Tensor],
         non_tensor_args: Tuple,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         # pylint: disable=missing-function-docstring
 
         (
@@ -122,7 +125,7 @@ class _Linear(torch.autograd.Function):
             ub_name,
             fp8_output,  # pylint: disable=unused-variable
             fsdp_group,
-            module,
+            cache_weight,
             skip_fp8_weight_update,
             symmetric_ar_type,
             save_original_input,
@@ -261,6 +264,7 @@ class _Linear(torch.autograd.Function):
         # ------------------------------------------------------
         # Prepare weight tensor
         # ------------------------------------------------------
+        new_weight_workspace = None
         weightmat = weight
         if fp8 or debug:
             # Configure quantizer
@@ -277,18 +281,18 @@ class _Linear(torch.autograd.Function):
                     )
                 weight_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
             elif isinstance(weight, QuantizedTensor):
-                # If weight is already quantized, no need to set quantizer states
                 weight_quantizer = weight._quantizer
             # Get quantized weight
-            update_workspace = is_first_microbatch is None or is_first_microbatch
-            weightmat = module.get_weight_workspace(
+            update_ws = is_first_microbatch is None or is_first_microbatch
+            weightmat, new_weight_workspace = quantize_weight(
                 tensor=weight,
                 quantizer=weight_quantizer,
-                cache_name=(None if is_first_microbatch is None else "weight"),
-                update_workspace=update_workspace,
+                workspace=weight_workspace,
+                update_workspace=update_ws,
                 skip_update_flag=skip_fp8_weight_update,
                 fsdp_group=fsdp_group,
                 workspace_dtype=activation_dtype,
+                cache=cache_weight,
             )
             weightmat.update_usage(rowwise_usage=True)
 
@@ -437,16 +441,6 @@ class _Linear(torch.autograd.Function):
             nvtx_range_pop(f"{nvtx_label}.fsdp_scatter")
 
             if cpu_offloading:
-                ctx.grad_added_to_main_grad = hasattr(weight, "grad_added_to_main_grad")
-
-                if ctx.grad_added_to_main_grad:
-                    # If you are passing torch.nn.Parameter through the Torch hooks, you will
-                    # get back torch.Tensor. Torch rips off the Parameter wrapper.
-                    # You need to preserve the weight object to have all the attributes user
-                    # sets for the weights. Because of this, it is not recommended to offload
-                    # weights if weights are externally touched outside this module
-                    ctx.weight_object = weight
-
                 mark_not_offload(weight, weightmat, bias)
 
             # TODO(ksivamani): Check memory usage
@@ -467,8 +461,15 @@ class _Linear(torch.autograd.Function):
             ctx.grad_input_quantizer = grad_input_quantizer
             ctx.grad_weight_quantizer = grad_weight_quantizer
             ctx.grad_output_quantizer = grad_output_quantizer
+            ctx.is_weight_param_quantized = isinstance(weight, QuantizedTensorStorage)
             ctx.fuse_wgrad_accumulation = fuse_wgrad_accumulation
             if fuse_wgrad_accumulation and weight.requires_grad:
+                # Keep a weakref to the original Python object because save_for_backward
+                # may return a plain Tensor without custom Parameter attributes.
+                ctx.origin_weight_ref = weakref.ref(weight)
+                ctx.origin_weight_overwrites_main_grad = getattr(
+                    weight, "overwrite_main_grad", False
+                )
                 # This check is needed to ensure that main_grad is not created
                 # during the forward pass when using MCore FSDP as it creates
                 # the main_grad buffer lazily before backprop
@@ -500,10 +501,11 @@ class _Linear(torch.autograd.Function):
 
             ctx.owns_input = saved_inputmat is not inp
             if ctx.fp8 and requires_grad(inp, weight, bias):
-                _first_fp8_module = FP8GlobalStateManager.IS_FIRST_FP8_MODULE
+                qstate = FP8GlobalStateManager.quantization_state
+                _first_fp8_module = qstate.is_first_fp8_module
                 ctx.reduce_and_update_bwd_fp8_tensors = FP8GlobalStateManager.is_first_fp8_module()
                 if in_fp8_activation_recompute_phase():
-                    FP8GlobalStateManager.IS_FIRST_FP8_MODULE = _first_fp8_module
+                    qstate.is_first_fp8_module = _first_fp8_module
             ctx.wgrad_store = wgrad_store
 
             # backward overrides
@@ -523,10 +525,12 @@ class _Linear(torch.autograd.Function):
         # Cached state for backward pass is ready...
         # ------------------------------------------------------
 
-        return out
+        return out, new_weight_workspace
 
     @staticmethod
-    def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
+    def backward(
+        ctx, grad_output: torch.Tensor, _grad_weight_workspace
+    ) -> Tuple[Union[torch.Tensor, None], ...]:
         # pylint: disable=missing-function-docstring
 
         # NVTX label for profiling
@@ -535,22 +539,34 @@ class _Linear(torch.autograd.Function):
             nvtx_label = f"{nvtx_label}.{ctx.ub_name}"
 
         with get_nvtx_range_context("_Linear_backward"):
-            inputmat, weight_fp8, weight, bias = (  # pylint: disable=unbalanced-tuple-unpacking
-                restore_from_func_ctx(ctx)
+            (
+                inputmat,
+                weight_fp8,
+                saved_weight,
+                bias,
+            ) = restore_from_func_ctx(  # pylint: disable=unbalanced-tuple-unpacking
+                ctx
             )
 
-            # Since main_grad can be modified inplace, it should not be a part of saved_tensors
-            main_grad = (
-                ctx.main_grad_func()
-                if weight is not None and ctx.fuse_wgrad_accumulation and ctx.requires_wgrad
-                else None
+            # Restore from weakref to get original weight python object
+            # (preserves attributes like main_grad, grad_added_to_main_grad, etc.)
+            origin_weight_python_object = None
+            origin_weight_overwrites_main_grad = getattr(
+                ctx, "origin_weight_overwrites_main_grad", False
             )
-
-            if ctx.cpu_offloading:
-                if ctx.grad_added_to_main_grad:
-                    weight = ctx.weight_object
-            if ctx.requires_wgrad and ctx.fuse_wgrad_accumulation:
-                weight.main_grad = main_grad
+            main_grad = None
+            if ctx.fuse_wgrad_accumulation and ctx.requires_wgrad:
+                origin_weight_ref = ctx.origin_weight_ref
+                ctx.origin_weight_ref = None
+                origin_weight_python_object = (
+                    origin_weight_ref() if origin_weight_ref is not None else None
+                )
+                assert (
+                    origin_weight_python_object is not None
+                ), "weight was removed while fuse_wgrad_accumulation=True"
+                # Since main_grad can be modified inplace, it should not be a part of saved_tensors
+                main_grad = ctx.main_grad_func()
+                origin_weight_python_object.main_grad = main_grad
 
             # Gather intermediate/activation tensors if needed
             # NOTE: weight_fp8 = weight when ctx.fp8 == False and torch.disttributed.FSDP already
@@ -757,7 +773,7 @@ class _Linear(torch.autograd.Function):
                     else:
                         weight_for_dgrad = cast_if_needed(weight_for_dgrad, ctx.activation_dtype)
                 elif ctx.backward_override == "high_precision":
-                    weight_for_dgrad = weight
+                    weight_for_dgrad = saved_weight
                     if isinstance(weight_for_dgrad, QuantizedTensorStorage):
                         weight_for_dgrad = weight_for_dgrad.dequantize(dtype=ctx.activation_dtype)
                 gemm_out, *_, reduce_scatter_out = general_gemm(
@@ -894,7 +910,7 @@ class _Linear(torch.autograd.Function):
                     "quantization_params": ctx.grad_weight_quantizer,
                     "accumulate": (
                         accumulate_wgrad_into_param_main_grad
-                        if not getattr(weight, "overwrite_main_grad", False)
+                        if not origin_weight_overwrites_main_grad
                         else False
                     ),
                     "layout": "NT",
@@ -984,22 +1000,20 @@ class _Linear(torch.autograd.Function):
 
         if ctx.requires_wgrad:
             # Handle custom DDP from mcore.
-            if (
-                ctx.fuse_wgrad_accumulation
-                and weight is not None
-                and hasattr(weight, "grad_added_to_main_grad")
+            if ctx.fuse_wgrad_accumulation and hasattr(
+                origin_weight_python_object, "grad_added_to_main_grad"
             ):
-                weight.grad_added_to_main_grad = True
-                if getattr(weight, "zero_out_wgrad", False):
+                origin_weight_python_object.grad_added_to_main_grad = True
+                if getattr(origin_weight_python_object, "zero_out_wgrad", False):
                     wgrad = get_dummy_wgrad(
-                        list(weight.main_grad.shape),
-                        weight.dtype,
+                        list(main_grad.shape),
+                        origin_weight_python_object.dtype,
                         zero=True,
                     )
                 else:
                     wgrad = get_dummy_wgrad(
-                        list(weight.main_grad.shape),
-                        weight.dtype,
+                        list(main_grad.shape),
+                        origin_weight_python_object.dtype,
                     )
             elif ctx.fuse_wgrad_accumulation:
                 wgrad = None
@@ -1013,10 +1027,11 @@ class _Linear(torch.autograd.Function):
             nvtx_range_pop(f"{nvtx_label}.reduce_and_update_fp8_tensors")
 
         # Scatter fp8 weight buffers
-        if ctx.fp8 and not isinstance(weight, QuantizedTensorStorage):
+        if ctx.fp8 and not ctx.is_weight_param_quantized:
             _fsdp_scatter_tensors(ctx.fsdp_group, weight_fp8)
         return (
             wgrad,
+            None,  # weight_workspace
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             grad_bias,
             None,
@@ -1417,7 +1432,9 @@ class Linear(TransformerEngineBaseModule):
         debug = self.is_debug_iter()
 
         if FP8GlobalStateManager.fp8_graph_capturing():
-            skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()
+            skip_fp8_weight_update = (
+                FP8GlobalStateManager.quantization_state.skip_fp8_weight_update_tensor
+            )
         else:
             skip_fp8_weight_update = None
         if skip_fp8_weight_update is not None:
@@ -1464,6 +1481,11 @@ class Linear(TransformerEngineBaseModule):
                 linear_fn = _Linear.forward
                 autograd_ctx = [None]
 
+            cache_name = None if is_first_microbatch is None else "weight"
+            weight_workspace = (
+                self._fp8_workspaces.get(cache_name) if cache_name is not None else None
+            )
+
             non_tensor_args = (
                 is_first_microbatch,
                 self.fp8,
@@ -1493,19 +1515,26 @@ class Linear(TransformerEngineBaseModule):
                 self.ub_name,
                 fp8_output,
                 self.fsdp_group,
-                self,
+                cache_name is not None,
                 skip_fp8_weight_update,
                 self.symmetric_ar_type,
                 self.save_original_input,
                 debug,
             )
-            out = linear_fn(
+            out, new_weight_workspace = linear_fn(
                 *autograd_ctx,
                 weight_tensor,
+                weight_workspace,
                 inp,
                 bias_tensor if (self.apply_bias and not self.gemm_bias_unfused_add) else None,
                 non_tensor_args,
             )
+
+            if new_weight_workspace is not None and cache_name is not None:
+                if isinstance(new_weight_workspace, torch.Tensor):
+                    new_weight_workspace = new_weight_workspace.detach()
+                self._fp8_workspaces[cache_name] = new_weight_workspace
+
         finally:
             self.end_forward()
         if self.gemm_bias_unfused_add:
