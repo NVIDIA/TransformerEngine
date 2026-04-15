@@ -371,6 +371,7 @@ constexpr int tma_permute_s_tile_default = 32;
 __device__ __forceinline__ void cp_async_bulk_tensor_4d_global_to_shared(
     void *dst_shmem, const CUtensorMap *tensor_map, uint32_t c0, uint32_t c1, uint32_t c2,
     uint32_t c3, uint64_t *mbar) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   uint32_t dst = __cvta_generic_to_shared(dst_shmem);
   uint32_t bar = __cvta_generic_to_shared(mbar);
   asm volatile(
@@ -378,6 +379,9 @@ __device__ __forceinline__ void cp_async_bulk_tensor_4d_global_to_shared(
       ".mbarrier::complete_tx::bytes [%0], [%1, {%2, %3, %4, %5}], [%6];" ::"r"(dst),
       "l"(tensor_map), "r"(c0), "r"(c1), "r"(c2), "r"(c3), "r"(bar)
       : "memory");
+#else
+  NVTE_DEVICE_ERROR("cp_async_bulk_tensor_4d_global_to_shared requires SM 10.0+.");
+#endif
 }
 
 __device__ __forceinline__ void cp_async_bulk_tensor_4d_shared_to_global(
