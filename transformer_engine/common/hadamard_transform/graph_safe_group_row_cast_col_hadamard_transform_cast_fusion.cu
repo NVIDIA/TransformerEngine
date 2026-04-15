@@ -162,6 +162,9 @@ struct SharedStorage {
   alignas(16) AccumulatorPipelineStorage accumulator;
   alignas(16) MainloopPipelineStorage mainloop;
   alignas(16) cute::uint64_t tma_barrier[1];
+  // Used only when kEnableRHTColQuant=false: signals cp.async completion of offsets/first_dims
+  // to the row quant warp without going through tma_barrier[0] (which is never signaled in that path).
+  alignas(16) cute::uint64_t cpasync_barrier[1];
   alignas(16) SchedPipelineStorage sched;
   alignas(16) SchedThrottlePipelineStorage sched_throttle;
   alignas(16) int32_t atomic_tile_id[SchedulerPipelineStageCount_];
@@ -169,6 +172,8 @@ struct SharedStorage {
   alignas(16) float global_d_amax[kMaxTensorsPerKernel];
   uint32_t atomic_tile_counter[SchedulerPipelineStageCount_];
   uint32_t tmem_base_ptr;
+  alignas(8) int64_t smem_offsets[kMaxTensorsPerKernel + 1];
+  alignas(8) int64_t smem_first_dims[kMaxTensorsPerKernel];
 };
 
 // Main RHT GEMM kernel entry -- highly templated for flexible architecture/config support
@@ -376,6 +381,13 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device_g
                       EpilogueUnrollFactor, SchedulerPipelineStageCount>;
     SharedStorage &shared_storage = *reinterpret_cast<SharedStorage *>(shared_memory);
 
+    // offsets_smem and first_dims_smem point to the smem cache populated by the DMA warp via
+    // LDGSTS (cp.async). tma_barrier[0] is initialized with 2 arrivals: the DMA warp arrives
+    // after cp.async.wait_all (ensuring offsets/first_dims are in smem), and TMA B hardware
+    // arrives when the Hadamard matrix load completes. Epilogue warps wait on tma_barrier[0].
+    const int64_t *const offsets_smem = shared_storage.smem_offsets;
+    const int64_t *const first_dims_smem = shared_storage.smem_first_dims;
+
     // Compute the number of tiles in M and N after tiling and assign scheduler
     uint32_t tiles_in_m = uint32_t(size(ceil_div(M, size<0>(cluster_tile))));
     uint32_t tiles_in_n = uint32_t(size(ceil_div(sum_token_dims, size<2>(epilogue_tiler))));
@@ -500,14 +512,66 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device_g
         cutlass::make_producer_start_state<SchedThrottlePipeline>();
 
     if (warp_idx == 2 && elect_one_sync()) {
-      cute::initialize_barrier(shared_storage.tma_barrier[0], /* num_threads */ 1);
+      if constexpr (kEnableRHTColQuant) {
+        // Two arrivals required: (1) DMA warp after cp.async completes, (2) TMA B hardware completion.
+        cute::initialize_barrier(shared_storage.tma_barrier[0], /* num_threads */ 2);
+      } else {
+        cute::initialize_barrier(shared_storage.tma_barrier[0], /* num_threads */ 1);
+        cute::initialize_barrier(shared_storage.cpasync_barrier[0], /* num_threads */ 1);
+      }
     }
     __syncthreads();
+    if (threadIdx.x == 0) printf("[DBG] block=%d after barrier init\n", blockIdx.x);
 
     // Warp group roles: DMA (global->shared copy), MMA (tensor core gemm), scheduler, column quantizer, row quantizer
     if (is_dma_warp) {
       // Warp responsible for loading input from global to shared memory using TMA (Tensor Memory Access).
       cutlass::arch::warpgroup_reg_dealloc<32>();
+      if (elect_one_sync()) printf("[DBG] block=%d DMA warp: entered\n", blockIdx.x);
+
+      // Use LDGSTS (cp.async) in the DMA warp to load offsets and first_dims into shared memory.
+      // For kEnableRHTColQuant=true: after cp.async completes, the DMA warp provides the 1st of
+      // 2 arrivals at tma_barrier[0] (with release semantics). TMA B hardware completion provides
+      // the 2nd arrival, firing the barrier. Epilogue warps wait on tma_barrier[0] before reading
+      // offsets_smem/first_dims_smem.
+      // For kEnableRHTColQuant=false: cpasync_barrier[0] is used instead.
+      constexpr int kWarpSize = 32;
+      const int local_tidx = threadIdx.x % kWarpSize;
+      if (elect_one_sync()) printf("[DBG] block=%d DMA warp: before offsets loop, num_tensors=%zu local_tidx=%d\n", blockIdx.x, num_tensors, (int)local_tidx);
+      auto async_op = cute::SM80_CP_ASYNC_CACHEALWAYS<int64_t>{};
+      for (size_t i = local_tidx; i <= num_tensors; i += kWarpSize) {
+        async_op.copy(offsets[i], shared_storage.smem_offsets[i]);
+      }
+      if (elect_one_sync()) printf("[DBG] block=%d DMA warp: offsets loop done\n", blockIdx.x);
+      for (size_t i = local_tidx; i < num_tensors; i += kWarpSize) {
+        async_op.copy(first_dims[i], shared_storage.smem_first_dims[i]);
+      }
+      if (elect_one_sync()) printf("[DBG] block=%d DMA warp: both loops done\n", blockIdx.x);
+      if constexpr (kEnableRHTColQuant) {
+        // Wait for all cp.async offsets/first_dims copies to complete, then provide the
+        // 1st of 2 required arrivals at tma_barrier[0] (with release semantics so consumers
+        // see the smem writes). The 2nd arrival comes from TMA B hardware completion below.
+        asm volatile("cp.async.commit_group;\n" ::);
+        asm volatile("cp.async.wait_all;\n" ::);
+        __threadfence_block();
+        if (elect_one_sync()) {
+          transformer_engine::ptx::mbarrier_arrive(&shared_storage.tma_barrier[0]);
+          printf("[DBG] block=%d DMA warp: tma_barrier arrived (1/2)\n", blockIdx.x);
+        }
+      } else {
+        // No TMA B in this path. Block until all cp.async ops issued above are complete, then
+        // signal cpasync_barrier[0] so the row quant warp can safely read offsets_smem.
+        if (elect_one_sync()) printf("[DBG] block=%d DMA warp: before cp.async.wait_all\n", blockIdx.x);
+        asm volatile("cp.async.commit_group;\n" ::);
+        asm volatile("cp.async.wait_all;\n" ::);
+        __threadfence_block();
+        if (elect_one_sync()) {
+          printf("[DBG] block=%d DMA warp: signaling cpasync_barrier\n", blockIdx.x);
+          transformer_engine::ptx::mbarrier_arrive(&shared_storage.cpasync_barrier[0]);
+          printf("[DBG] block=%d DMA warp: cpasync_barrier signaled\n", blockIdx.x);
+        }
+      }
+
       // Get TMA tensors for input matrix A and B (Hadamard/transform matrix) from global memory.
       Tensor mA = tma_load_a.get_tma_tensor(make_shape(M, packed_N));
       Tensor mB = tma_load_b.get_tma_tensor(make_shape(RhtTensorSize, RhtTensorSize));
@@ -551,6 +615,7 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device_g
                                               kTmaRhtTensorTransactionBytes);
           copy(tma_load_b.with(shared_storage.tma_barrier[0], tma_mcast_mask_b), tBgB(_, 0, 0),
                tBsB(_, 0));
+          printf("[DBG] block=%d DMA warp: TMA B issued (2nd arrival pending)\n", blockIdx.x);
         }
       }
 
@@ -704,14 +769,16 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device_g
           rng_seed = rng_state != nullptr ? __ldg(rng_state) : 0;
           rng_offset = rng_state != nullptr ? __ldg(rng_state + 1) : 0;
         }
+        // tma_barrier[0] completes after both B tensor TMA and offsets cp.async finish.
+        cute::wait_barrier(shared_storage.tma_barrier[0], 0 /*tma_phase_bit*/);
         // TODO(zhongbo): double check the logic here
         int group_idx = get_current_tensor_id(
             shape_rep, num_tensors, (scheduler.tile_n_base() * size<1>(epilogue_tiler)) * M,
-            packed_N, M, offsets);
+            packed_N, M, offsets_smem);
 
         // Determine quantization scale factor layouts/output splits for this group
         TSFDLayout sfd_layout;
-        int cur_N = static_cast<int>(first_dims[group_idx]);
+        int cur_N = static_cast<int>(first_dims_smem[group_idx]);
         if constexpr (kEnableSwizzleSFOutput) {
           sfd_layout = tile_to_shape(SwizzledSFDLayoutAtom{}, make_shape(M, cur_N), Step<_2, _1>{});
         } else {
@@ -772,7 +839,7 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device_g
 
             // TODO(zhongbo): double check the logic here
             int cur_group_idx = get_current_tensor_id(
-                shape_rep, num_tensors, global_tile_n_offset * M, packed_N, M, offsets);
+                shape_rep, num_tensors, global_tile_n_offset * M, packed_N, M, offsets_smem);
 
             if (cur_group_idx != group_idx) {
               group_idx = cur_group_idx;
@@ -786,7 +853,7 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device_g
               global_decode_scale = 1.0f / global_encode_scale;
               global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
               // TODO(zhongbo): double check the logic here
-              cur_N = first_dims[group_idx];
+              cur_N = first_dims_smem[group_idx];
               if constexpr (kEnableSwizzleSFOutput) {
                 sfd_layout =
                     tile_to_shape(SwizzledSFDLayoutAtom{}, make_shape(M, cur_N), Step<_2, _1>{});
@@ -938,6 +1005,7 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device_g
     } else if (is_epilogue_row_quant_warp) {
       // Warp responsible for quantizing the input (before Hadamard transform) to FP4 for row-wise usage.
       cutlass::arch::warpgroup_reg_alloc<136>();
+      if (threadIdx.x == 256) printf("[DBG] block=%d row_quant: warp entered\n", blockIdx.x);
       if constexpr (kEnableRowQuant) {
         using S2RVectorType = uint128_t;
 
@@ -997,11 +1065,22 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device_g
         // Will result in barrier_id=10 passed to bar.sync instr as cutlass adds 8
         // in order to go over the reserved named barrier count.
         constexpr int row_quant_barrier_id = 2;
+        if (threadIdx.x == 256) printf("[DBG] block=%d row_quant: before NamedBarrier::sync\n", blockIdx.x);
         cutlass::arch::NamedBarrier::sync(NumEpilogueRowQuantThreadCount, row_quant_barrier_id);
+        if (threadIdx.x == 256) printf("[DBG] block=%d row_quant: after NamedBarrier::sync, before wait_barrier\n", blockIdx.x);
 
+        // Wait until offsets/first_dims cp.async copies are visible in smem.
+        // When kEnableRHTColQuant=true, tma_barrier[0] covers both B TMA and cp.async.
+        // When kEnableRHTColQuant=false, cpasync_barrier[0] covers cp.async only.
+        if constexpr (kEnableRHTColQuant) {
+          cute::wait_barrier(shared_storage.tma_barrier[0], 0 /*phase_bit*/);
+        } else {
+          cute::wait_barrier(shared_storage.cpasync_barrier[0], 0 /*phase_bit*/);
+        }
+        if (threadIdx.x == 256) printf("[DBG] block=%d row_quant: after wait_barrier, group_idx computation\n", blockIdx.x);
         int group_idx = get_current_tensor_id(
             shape_rep, num_tensors, (scheduler.tile_n_base() * size<1>(epilogue_tiler)) * M,
-            packed_N, M, offsets);
+            packed_N, M, offsets_smem);
         float a_global_amax_val = shared_storage.global_a_amax[group_idx];
         // Aligning with TensorEngine's recipe to generate scale factors // {$nv-internal-release}
         static constexpr float fp4_max = 6.0f;
@@ -1023,7 +1102,7 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device_g
             int global_tile_n_offset = (scheduler.tile_n_base() + k_tile) * size<1>(epilogue_tiler);
 
             int cur_group_idx = get_current_tensor_id(
-                shape_rep, num_tensors, global_tile_n_offset * M, packed_N, M, offsets);
+                shape_rep, num_tensors, global_tile_n_offset * M, packed_N, M, offsets_smem);
             if (cur_group_idx != group_idx) {
               group_idx = cur_group_idx;
               a_global_amax_val = shared_storage.global_a_amax[group_idx];
@@ -1259,10 +1338,15 @@ void group_row_col_rht_gemm_ntt_w_sfc_graph_safe(
   static int constexpr kBlackwellSmemSize = 232448;  // 232KB in bytes
   static int constexpr kBytesPerStage =
       cute::size(mma_shape_A) * sizeof(TA) + MainloopPipelineBytes;
+  // smem_offsets: (kMaxTensorsPerKernel+1) x int64, smem_first_dims: kMaxTensorsPerKernel x int64
+  // Note: tma_barrier[1] and cpasync_barrier[1] (8 bytes each) are not counted here; their impact
+  // on kMaxStages is negligible (<0.01% of the 232KB budget).
+  static int constexpr kSmemOffsetCacheBytes =
+      sizeof(int64_t) * (kMaxTensorsPerKernel + 1) + sizeof(int64_t) * kMaxTensorsPerKernel;
   static int constexpr kReservedBytes = SchedulerWorkspaceBytes + SchedulerThrottlePipelineBytes +
                                         SchedulerPipelineBytes + TmemBasePtrsBytes +
                                         TmemDeallocBytes + BTensorBytes +
-                                        AccPipelineBytes;  // Reserve for barriers and other uses
+                                        AccPipelineBytes + kSmemOffsetCacheBytes;  // Reserve for barriers and other uses
   static int constexpr kMaxStages = (kBlackwellSmemSize - kReservedBytes) / kBytesPerStage;
   auto sP = Int<kMaxStages>{};  // SMEM pipelines
 
