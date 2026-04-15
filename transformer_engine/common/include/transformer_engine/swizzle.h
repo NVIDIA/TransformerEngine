@@ -52,9 +52,9 @@ void nvte_multi_tensor_swizzle_scaling_factors(const NVTETensor* inputs, NVTETen
  *  different shapes, e.g. when scale_invs have been transposed for attention.
  */
 void nvte_multi_tensor_swizzle_scaling_factors_unchecked(const NVTETensor* inputs,
-                                                        NVTETensor* outputs,
-                                                        const size_t num_tensors,
-                                                        cudaStream_t stream);
+                                                         NVTETensor* outputs,
+                                                         const size_t num_tensors,
+                                                         cudaStream_t stream);
 
 /*! \brief Unswizzling scaling factors from the interleaved layout used by GEMM back to row-major
  *

@@ -209,8 +209,8 @@ NVTE_QKV_Format nvte_get_kv_format(NVTE_QKV_Layout qkv_layout);
  *  \param[out]    t                   The number of tokens.
  */
 void nvte_convert_qkv_shape(NVTE_QKV_Format src_format, const size_t *src_shape,
-                             NVTE_QKV_Format dst_format, size_t *dst_shape, size_t *b, size_t *h,
-                             size_t *s, size_t *d, size_t *t);
+                            NVTE_QKV_Format dst_format, size_t *dst_shape, size_t *b, size_t *h,
+                            size_t *s, size_t *d, size_t *t);
 
 /*! \brief Get fused attention backend based on input parameters.
  *
@@ -633,9 +633,8 @@ void nvte_prepare_flash_attn_bwd(NVTETensor q, NVTETensor k, NVTETensor v, NVTET
  *  \param[in]     stream           CUDA stream.
  */
 void nvte_multi_tensor_transpose_to_bhsd(NVTETensor *inputs, NVTETensor *outputs,
-                                             size_t num_tensors,
-                                             NVTE_QKV_Format original_format,
-                                             cudaStream_t stream);
+                                         size_t num_tensors, NVTE_QKV_Format original_format,
+                                         cudaStream_t stream);
 
 /*!  \brief Pad the last dimension of multiple 2D tensors with zeros in one kernel launch.
  *

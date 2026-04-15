@@ -1827,9 +1827,9 @@ void nvte_multi_tensor_swizzle_scaling_factors(const NVTETensor* inputs, NVTETen
 }
 
 void nvte_multi_tensor_swizzle_scaling_factors_unchecked(const NVTETensor* inputs,
-                                                        NVTETensor* outputs,
-                                                        const size_t num_tensors,
-                                                        cudaStream_t stream) {
+                                                         NVTETensor* outputs,
+                                                         const size_t num_tensors,
+                                                         cudaStream_t stream) {
   NVTE_API_CALL(nvte_multi_tensor_swizzle_scaling_factors_unchecked);
   using namespace transformer_engine;
   NVTE_CHECK(num_tensors > 0, "Number of tensors should be greater than 0.");

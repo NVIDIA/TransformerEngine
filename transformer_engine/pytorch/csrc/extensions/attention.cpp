@@ -154,7 +154,7 @@ std::vector<py::object> fused_attn_fwd(
   size_t h = 0, d = 0;
   NVTE_QKV_Format q_format = nvte_get_q_format(qkv_layout);
   nvte_convert_qkv_shape(q_format, o_shape_tmp.data(), o_format, o_shape.data(), nullptr, &h,
-                          nullptr, &d, nullptr);
+                         nullptr, &d, nullptr);
   const DType fake_dtype_te = GetTransformerEngineDType(fake_dtype);
   std::tie(te_O, py_O) = quantizer_helper(o_quantizer, o_shape, fake_dtype_te, true, std::nullopt);
 
@@ -374,11 +374,11 @@ std::vector<py::object> fused_attn_bwd(
   NVTE_QKV_Format dq_format = nvte_get_q_format(dqkv_layout);
   NVTE_QKV_Format dkv_format = nvte_get_kv_format(dqkv_layout);
   nvte_convert_qkv_shape(q_format, q_shape.data(), dq_format, dQ_shape.data(), nullptr, &h_q,
-                          nullptr, &d_qk, nullptr);
+                         nullptr, &d_qk, nullptr);
   nvte_convert_qkv_shape(kv_format, k_shape.data(), dkv_format, dK_shape.data(), nullptr, &h_kv,
-                          nullptr, nullptr, nullptr);
+                         nullptr, nullptr, nullptr);
   nvte_convert_qkv_shape(kv_format, v_shape.data(), dkv_format, dV_shape.data(), nullptr, nullptr,
-                          nullptr, &d_v, nullptr);
+                         nullptr, &d_v, nullptr);
   at::Tensor dQ, dK, dV, dQKV, dKV;
   // FP16/BF16: dqkv_fake_dtype = kFloat16/kBFloat16, dQ/dK/dV.dtype = torch.float16/torch.bfloat16
   // FP8DS: dqkv_fake_dtype = kFloat16/kBFloat16, dQ/dK/dV.dtype = torch.uint8
@@ -664,16 +664,16 @@ std::vector<std::optional<at::Tensor>> multi_tensor_transpose_to_bhsd(
     std::vector<std::optional<at::Tensor>> outputs) {
   NVTE_CHECK(original_format == "sbhd" || original_format == "bshd",
              "multi_tensor_transpose_to_bhsd: only BSHD/SBHD -> BHSD is currently supported. "
-             "Got original_format=\"", original_format, "\".");
+             "Got original_format=\"",
+             original_format, "\".");
   const auto original_format_enum = (original_format == "sbhd") ? NVTE_SBHD : NVTE_BSHD;
 
   if (inputs.empty()) return {};
 
   const bool has_outputs = !outputs.empty();
   if (has_outputs) {
-    NVTE_CHECK(outputs.size() == inputs.size(),
-               "multi_tensor_transpose_to_bhsd: outputs.size() (", outputs.size(),
-               ") != inputs.size() (", inputs.size(), ").");
+    NVTE_CHECK(outputs.size() == inputs.size(), "multi_tensor_transpose_to_bhsd: outputs.size() (",
+               outputs.size(), ") != inputs.size() (", inputs.size(), ").");
   }
 
   std::vector<transformer_engine::TensorWrapper> te_ins, te_outs;
@@ -722,8 +722,7 @@ std::vector<std::optional<at::Tensor>> multi_tensor_transpose_to_bhsd(
       nvte_outs[j] = te_outs[j].data();
     }
     nvte_multi_tensor_transpose_to_bhsd(nvte_ins.data(), nvte_outs.data(), te_ins.size(),
-                                                original_format_enum,
-                                                at::cuda::getCurrentCUDAStream());
+                                        original_format_enum, at::cuda::getCurrentCUDAStream());
   }
 
   return result;

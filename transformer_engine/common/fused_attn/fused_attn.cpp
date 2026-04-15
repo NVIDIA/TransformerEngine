@@ -247,8 +247,8 @@ static std::pair<size_t, std::array<int, 4>> qkv_format_dim_order(NVTE_QKV_Forma
 
 // convert a tensor shape from one NVTE_QKV_Format to another
 void nvte_convert_qkv_shape(NVTE_QKV_Format src_format, const size_t *src_shape,
-                             NVTE_QKV_Format dst_format, size_t *dst_shape, size_t *b, size_t *h,
-                             size_t *s, size_t *d, size_t *t) {
+                            NVTE_QKV_Format dst_format, size_t *dst_shape, size_t *b, size_t *h,
+                            size_t *s, size_t *d, size_t *t) {
   size_t canonical[5] = {};  // b, h, s, d, t
   auto [src_ndim, src_order] = qkv_format_dim_order(src_format);
   for (size_t i = 0; i < src_ndim; ++i) canonical[src_order[i]] = src_shape[i];

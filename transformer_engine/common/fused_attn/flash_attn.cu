@@ -221,7 +221,7 @@ constexpr int TRANSPOSE_WARPS = TRANSPOSE_BLOCK / 32;  // 8
 template <typename T, bool kIsBshd>
 __launch_bounds__(TRANSPOSE_BLOCK) __global__
     void transpose_to_bhsd_fallback_not_vec_aligned_kernel(PermuteParams params, size_t b,
-                                                                   unsigned int s_tiles) {
+                                                           unsigned int s_tiles) {
   const auto &slot = params.slots[blockIdx.z];
   const T *__restrict__ in = reinterpret_cast<const T *>(slot.input);
   T *__restrict__ out = reinterpret_cast<T *>(slot.output);
@@ -321,8 +321,8 @@ __device__ __forceinline__ void permute_vec_loop(const T *__restrict__ in, T *__
 template <typename T, bool kIsBshd>
 __launch_bounds__(fallback_permute_threads) __global__
     void transpose_to_bhsd_fallback_vec_aligned_kernel(PermuteParams params, size_t b,
-                                                               unsigned int permute_s_splits,
-                                                               size_t h_grid) {
+                                                       unsigned int permute_s_splits,
+                                                       size_t h_grid) {
   const auto &slot = params.slots[blockIdx.z];
   const T *__restrict__ in = reinterpret_cast<const T *>(slot.input);
   T *__restrict__ out = reinterpret_cast<T *>(slot.output);
@@ -488,8 +488,8 @@ __device__ __forceinline__ void st_global_cs_uint4(uint4 *ptr, uint4 val) {
 template <typename T, bool kIsBshd>
 __launch_bounds__(tma_permute_threads) __global__
     void transpose_to_bhsd_kernel(const __grid_constant__ TmaMapParams tma_maps,
-                                          PermuteParams params, size_t b, size_t h_grid,
-                                          unsigned int permute_s_splits, size_t s_tile_size) {
+                                  PermuteParams params, size_t b, size_t h_grid,
+                                  unsigned int permute_s_splits, size_t s_tile_size) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   const auto &slot = params.slots[blockIdx.z];
   const CUtensorMap *tma_in = &tma_maps.maps[blockIdx.z];
@@ -598,11 +598,11 @@ static void create_strided_tensor_map(CUtensorMap &map, void *ptr, DType dtype, 
 }
 
 void multi_tensor_transpose_to_bhsd(Tensor *inputs, Tensor *outputs, size_t num_tensors,
-                                            NVTE_QKV_Format original_format, cudaStream_t stream) {
+                                    NVTE_QKV_Format original_format, cudaStream_t stream) {
   using namespace transformer_engine;
   if (num_tensors == 0) return;
-  NVTE_CHECK(num_tensors <= static_cast<size_t>(kMaxPermuteTensors),
-             "num_tensors must be in [1, ", kMaxPermuteTensors, "], got ", num_tensors, ".");
+  NVTE_CHECK(num_tensors <= static_cast<size_t>(kMaxPermuteTensors), "num_tensors must be in [1, ",
+             kMaxPermuteTensors, "], got ", num_tensors, ".");
 
   const bool is_bshd = (original_format == NVTE_QKV_Format::NVTE_BSHD);
   const DType dtype = inputs[0].dtype();
@@ -876,9 +876,8 @@ void nvte_prepare_flash_attn_bwd(NVTETensor q, NVTETensor k, NVTETensor v, NVTET
 }
 
 void nvte_multi_tensor_transpose_to_bhsd(NVTETensor *inputs, NVTETensor *outputs,
-                                                 size_t num_tensors,
-                                                 NVTE_QKV_Format original_format,
-                                                 cudaStream_t stream) {
+                                         size_t num_tensors, NVTE_QKV_Format original_format,
+                                         cudaStream_t stream) {
   NVTE_API_CALL(nvte_multi_tensor_transpose_to_bhsd);
   NVTE_CHECK(original_format == NVTE_QKV_Format::NVTE_BSHD ||
                  original_format == NVTE_QKV_Format::NVTE_SBHD,
