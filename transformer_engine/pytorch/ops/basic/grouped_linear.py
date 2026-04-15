@@ -1045,7 +1045,7 @@ class GroupedLinear(BasicOperation):
                     grad_weight = torch.stack(grad_weights, dim=0)
             final_weight_grads = [grad_weight]
         else:
-            if delay_wgrad and ctx.weight_requires_grad:
+            if delay_wgrad and ctx.weight_requires_grad and not accumulate_into_main_grad:
                 final_weight_grads = [None] * num_groups
             else:
                 final_weight_grads = grad_weights

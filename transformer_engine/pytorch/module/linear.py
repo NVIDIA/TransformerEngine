@@ -20,6 +20,7 @@ from .base import (
     fill_userbuffers_buffer_for_all_gather,
     get_dummy_wgrad,
     get_ub,
+    quantize_weight,
     TransformerEngineBaseModule,
     _2X_ACC_FPROP,
     _2X_ACC_DGRAD,
@@ -81,15 +82,17 @@ __all__ = ["Linear"]
 
 def _check_fp8_reduce_and_update():
     """Check if this is the first FP8 module (for backward reduce-and-update)."""
-    _first_fp8_module = FP8GlobalStateManager.IS_FIRST_FP8_MODULE
+    qstate = FP8GlobalStateManager.quantization_state
+    _first_fp8_module = qstate.is_first_fp8_module
     result = FP8GlobalStateManager.is_first_fp8_module()
     if in_fp8_activation_recompute_phase():
-        FP8GlobalStateManager.IS_FIRST_FP8_MODULE = _first_fp8_module
+        qstate.is_first_fp8_module = _first_fp8_module
     return result
 
 
 def _linear_forward_impl(
     weight: torch.Tensor,
+    weight_workspace: Optional[torch.Tensor],
     inp: torch.Tensor,
     bias: Optional[torch.Tensor],
     non_tensor_args: Tuple,
@@ -126,7 +129,7 @@ def _linear_forward_impl(
         ub_name,
         _fp8_output,
         fsdp_group,
-        module,
+        cache_weight,
         skip_fp8_weight_update,
         symmetric_ar_type,
         save_original_input,
@@ -260,11 +263,13 @@ def _linear_forward_impl(
     # ------------------------------------------------------
     # Prepare weight tensor
     # ------------------------------------------------------
+    new_weight_workspace = None
     weightmat = weight
     if fp8 or debug:
         # Configure quantizer
         # No need to set the quantizer states if weight is already quantized
-        if weight_quantizer is not None and not isinstance(weight, QuantizedTensor):
+        # for debug mode we create quantizer every iteration, thus we need to set the quantizer states
+        if weight_quantizer is not None and (not isinstance(weight, QuantizedTensor) or debug):
             columnwise_usage = is_grad_enabled and inp.requires_grad
             if backward_override is not None:
                 columnwise_usage = False
@@ -275,18 +280,18 @@ def _linear_forward_impl(
                 )
             weight_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
         elif isinstance(weight, QuantizedTensor):
-            # If weight is already quantized, no need to set quantizer states
             weight_quantizer = weight._quantizer
         # Get quantized weight
-        update_workspace = is_first_microbatch is None or is_first_microbatch
-        weightmat = module.get_weight_workspace(
+        update_ws = is_first_microbatch is None or is_first_microbatch
+        weightmat, new_weight_workspace = quantize_weight(
             tensor=weight,
             quantizer=weight_quantizer,
-            cache_name=(None if is_first_microbatch is None else "weight"),
-            update_workspace=update_workspace,
+            workspace=weight_workspace,
+            update_workspace=update_ws,
             skip_update_flag=skip_fp8_weight_update,
             fsdp_group=fsdp_group,
             workspace_dtype=activation_dtype,
+            cache=cache_weight,
         )
         weightmat.update_usage(rowwise_usage=True)
 
@@ -448,7 +453,7 @@ def _linear_forward_impl(
             "owns_input": owns_input,
         }
 
-    return out, tensors_to_save, tensor_objects, ctx_attrs
+    return out, new_weight_workspace, tensors_to_save, tensor_objects, ctx_attrs
 
 
 def _linear_setup_ctx(
@@ -495,7 +500,7 @@ def _linear_setup_ctx(
         ub_name,
         _fp8_output,
         fsdp_group,
-        _module,
+        _cache_weight,
         _skip_fp8_weight_update,
         _symmetric_ar_type,
         _save_original_input,
@@ -1078,6 +1083,7 @@ def _linear_backward(
         _fsdp_scatter_tensors(ctx.fsdp_group, weight_fp8)
     return (
         wgrad,
+        None,  # weight_workspace
         dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
         grad_bias,
         None,
@@ -1099,6 +1105,7 @@ class _Linear(torch.autograd.Function):
     def forward(
         ctx,
         weight: torch.Tensor,
+        weight_workspace: Optional[torch.Tensor],
         inp: torch.Tensor,
         bias: Optional[torch.Tensor],
         non_tensor_args: Tuple,
@@ -1108,16 +1115,19 @@ class _Linear(torch.autograd.Function):
         grad_input_quantizer: Optional[Quantizer],
         grad_weight_quantizer: Optional[Quantizer],
         grad_output_quantizer: Optional[Quantizer],
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Forward pass: compute linear output and set up autograd context."""
-        out, tensors_to_save, tensor_objects, ctx_attrs = _linear_forward_impl(
-            weight,
-            inp,
-            bias,
-            non_tensor_args,
-            input_quantizer,
-            weight_quantizer,
-            output_quantizer,
+        out, new_weight_workspace, tensors_to_save, tensor_objects, ctx_attrs = (
+            _linear_forward_impl(
+                weight,
+                weight_workspace,
+                inp,
+                bias,
+                non_tensor_args,
+                input_quantizer,
+                weight_quantizer,
+                output_quantizer,
+            )
         )
         if ctx is not None:
             _linear_setup_ctx(
@@ -1143,10 +1153,12 @@ class _Linear(torch.autograd.Function):
             if ctx.backward_override is not None:
                 ctx.reduce_and_update_bwd_fp8_tensors = False
 
-        return out
+        return out, new_weight_workspace
 
     @staticmethod
-    def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
+    def backward(
+        ctx, grad_output: torch.Tensor, _grad_weight_workspace
+    ) -> Tuple[Union[torch.Tensor, None], ...]:
         """Backward pass: compute gradients and reduce FP8 scaling factors."""
         nvtx_label = "transformer_engine._Linear.backward"
         if ctx.ub_name is not None:
@@ -1561,7 +1573,9 @@ class Linear(TransformerEngineBaseModule):
         debug = self.is_debug_iter()
 
         if FP8GlobalStateManager.fp8_graph_capturing():
-            skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()
+            skip_fp8_weight_update = (
+                FP8GlobalStateManager.quantization_state.skip_fp8_weight_update_tensor
+            )
         else:
             skip_fp8_weight_update = None
         if skip_fp8_weight_update is not None:
@@ -1608,6 +1622,11 @@ class Linear(TransformerEngineBaseModule):
                 linear_fn = _Linear.forward
                 autograd_ctx = [None]
 
+            cache_name = None if is_first_microbatch is None else "weight"
+            weight_workspace = (
+                self._fp8_workspaces.get(cache_name) if cache_name is not None else None
+            )
+
             non_tensor_args = (
                 is_first_microbatch,
                 self.fp8,
@@ -1631,15 +1650,16 @@ class Linear(TransformerEngineBaseModule):
                 self.ub_name,
                 fp8_output,
                 self.fsdp_group,
-                self,
+                cache_name is not None,
                 skip_fp8_weight_update,
                 self.symmetric_ar_type,
                 self.save_original_input,
                 debug,
             )
-            out = linear_fn(
+            out, new_weight_workspace = linear_fn(
                 *autograd_ctx,
                 weight_tensor,
+                weight_workspace,
                 inp,
                 bias_tensor if (self.apply_bias and not self.gemm_bias_unfused_add) else None,
                 non_tensor_args,
@@ -1650,6 +1670,12 @@ class Linear(TransformerEngineBaseModule):
                 grad_weight_quantizer,
                 grad_output_quantizer,
             )
+
+            if new_weight_workspace is not None and cache_name is not None:
+                if isinstance(new_weight_workspace, torch.Tensor):
+                    new_weight_workspace = new_weight_workspace.detach()
+                self._fp8_workspaces[cache_name] = new_weight_workspace
+
         finally:
             self.end_forward()
         if self.gemm_bias_unfused_add:

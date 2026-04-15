@@ -44,6 +44,7 @@ def _cudnn_compute_wgrad(
     accumulate: bool,
     wgrad_kernel_fn,
     single_grouped_weight: bool,
+    current_stream=None,
 ):
     """Compute wgrad using the cuDNN CuTe DSL grouped GEMM wgrad kernel.
 
@@ -88,6 +89,7 @@ def _cudnn_compute_wgrad(
             wgrad_dtype=wgrad_tensor.dtype,
             sf_vec_size=MXFP8_BLOCK_SCALING_SIZE,
             accumulate_on_output=accumulate,
+            current_stream=current_stream,
         )
     else:
         # Discrete mode: per-expert wgrad device pointers
@@ -104,6 +106,7 @@ def _cudnn_compute_wgrad(
             wgrad_dtype=wgrad_output[0].dtype,
             sf_vec_size=MXFP8_BLOCK_SCALING_SIZE,
             accumulate_on_output=accumulate,
+            current_stream=current_stream,
         )
 
 
@@ -214,6 +217,7 @@ def _compute_grad_params(
                 accumulate=accumulate_into_main_grad,
                 wgrad_kernel_fn=cudnn_wgrad_kernel_fn,
                 single_grouped_weight=fc_op.single_grouped_weight,
+                current_stream=torch.cuda.current_stream().cuda_stream,
             )
         else:
             gemm_fn = functools.partial(
@@ -242,8 +246,8 @@ def _compute_grad_params(
                 )
             w_list = [packed_wgrad]
         else:
-            if delay_wgrad:
-                w_list = list(w_list) if accumulate_into_main_grad else [None] * num_groups
+            if delay_wgrad or accumulate_into_main_grad:
+                w_list = [None] * num_groups
             if accumulate_into_main_grad:
                 for idx in range(num_groups):
                     wp = getattr(fc_op, f"weight{idx}")
