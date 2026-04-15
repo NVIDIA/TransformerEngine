@@ -1271,6 +1271,39 @@ def test_linear_accuracy(dtype, bs, model, return_bias, bias):
             assert_allclose(te_output, torch_output, tolerance, rtol[dtype])
 
 
+@pytest.mark.parametrize("recipe", fp8_recipes)
+def test_linear_small_M(recipe):
+    """Test te.Linear with small batch dimension (M=1).
+
+    Verifies that the relaxed dimension checks allow small M values
+    for recipes that support them. Previously assert_dim_for_fp8_exec
+    would reject any M not divisible by 8.
+    """
+    from transformer_engine.common.recipe import Float8BlockScaling, NVFP4BlockScaling
+    if isinstance(recipe, (Float8BlockScaling, NVFP4BlockScaling)):
+        pytest.skip(
+            f"{recipe.__class__.__name__} does not support M=1"
+            " (block scaling swizzle / Hadamard transform requirements)"
+        )
+
+    hidden_size = 128
+    te_linear = Linear(
+        hidden_size,
+        4 * hidden_size,
+        bias=False,
+        params_dtype=torch.bfloat16,
+        device="cuda",
+    )
+
+    x = torch.randn(1, 1, hidden_size, dtype=torch.bfloat16, device="cuda")
+
+    with autocast(enabled=True, recipe=recipe):
+        with torch.no_grad():
+            out = te_linear(x)
+    torch.cuda.synchronize()
+    assert out.shape == (1, 1, 4 * hidden_size)
+
+
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", ["small"])
