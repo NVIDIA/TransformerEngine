@@ -6,7 +6,7 @@
 
 #include "../util/cuda_runtime.h"
 
-#include <cublasLt.h>
+#include <mublas.h>
 
 #include <filesystem>
 #include <mutex>
@@ -202,6 +202,7 @@ const std::string &include_directory(bool required) {
   return path;
 }
 
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
 int cudart_version() {
   auto get_version = []() -> int {
     int version;
@@ -217,6 +218,7 @@ size_t cublas_version() {
   static size_t version = cublasLtGetVersion();
   return version;
 }
+#endif
 
 }  // namespace cuda
 

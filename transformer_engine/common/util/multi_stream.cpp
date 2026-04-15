@@ -14,7 +14,7 @@
 #include <mutex>
 #include <vector>
 
-#include "cuda_runtime.h"
+#include "musa_runtime.h"
 #include "logging.h"
 
 namespace transformer_engine::detail {

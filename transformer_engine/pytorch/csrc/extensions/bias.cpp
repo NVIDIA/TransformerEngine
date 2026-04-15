@@ -57,7 +57,7 @@ std::vector<py::object> bgrad_quantize(const at::Tensor &grad_output, py::handle
   // Check if fused kernel is supported
   bool with_fused_kernel = false;
   if (detail::IsFloat8Quantizers(quantizer.ptr())) {
-    auto prop = at::cuda::getCurrentDeviceProperties();
+    auto prop = at::musa::getCurrentDeviceProperties();
     const size_t sm_arch = 10 * prop->major + prop->minor;
     if (sm_arch >= 100) {
       // Fused kernel for dbias + FP8 cast on SM arch 10.0+
@@ -81,7 +81,7 @@ std::vector<py::object> bgrad_quantize(const at::Tensor &grad_output, py::handle
   // Query workspace size
   TensorWrapper workspace_nvte;
   at::Tensor workspace_torch;
-  auto stream = at::cuda::getCurrentCUDAStream();
+  auto stream = at::musa::getCurrentCUDAStream();
   NVTE_SCOPED_GIL_RELEASE({
     nvte_quantize_dbias(grad_output_nvte.data(), grad_input_nvte.data(), grad_bias_nvte.data(),
                         workspace_nvte.data(), stream);
@@ -161,7 +161,7 @@ std::vector<py::object> dact_dbias(
   }
 
   // Perform compute
-  auto stream = at::cuda::getCurrentCUDAStream();
+  auto stream = at::musa::getCurrentCUDAStream();
   switch (impl) {
     case Impl::UNFUSED:
       // Unfused dact, dbias, quantize

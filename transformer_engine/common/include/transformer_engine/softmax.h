@@ -7,8 +7,8 @@
 #ifndef TRANSFORMER_ENGINE_SOFTMAX_H_
 #define TRANSFORMER_ENGINE_SOFTMAX_H_
 
-#include <cuda_bf16.h>
-#include <cuda_fp16.h>
+#include <musa_bf16.h>
+#include <musa_fp16.h>
 
 #include "transformer_engine.h"
 

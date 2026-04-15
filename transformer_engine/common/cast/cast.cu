@@ -4,35 +4,55 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include <cuda.h>
-#include <cudaTypedefs.h>
-#include <cuda_runtime.h>
+#include <musa.h>
+#include <musaTypedefs.h>
+#include <musa_runtime.h>
 #include <transformer_engine/cast.h>
 #include <transformer_engine/multi_stream.h>
 
 #include "../common.h"
 #include "../transpose/cast_transpose.h"
+#include "../util/vectorized_pointwise.h"
 #include "../util/multi_stream.h"
 #include "../utils.cuh"
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
 #include "dispatch/dequantize.cuh"
 #include "dispatch/quantize.cuh"
+#else
+#include "dispatch/cast_kernels.muh"
+#include "dispatch/dequantize_kernels.muh"
+#endif
 #include "transformer_engine/transpose.h"
 
 void nvte_quantize(const NVTETensor input, NVTETensor output, cudaStream_t stream) {
   NVTE_API_CALL(nvte_quantize);
   using namespace transformer_engine;
 
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
   constexpr bool IS_ACT = false;
   dispatch::quantize_fwd_helper<IS_ACT, Empty, nullptr>(input, output, nullptr, stream);
+#else
+  constexpr bool IS_DBIAS = false;
+  constexpr bool IS_DACT = false;
+  constexpr bool IS_ACT = false;
+  constexpr NVTETensor dbias = nullptr;
+  constexpr NVTETensor workspace = nullptr;
+  constexpr const NVTETensor grad = nullptr;
+
+  detail::quantize_helper<IS_DBIAS, IS_DACT, IS_ACT, Empty, detail::identity>(input, grad, nullptr, output,
+                                                                     dbias, workspace, stream);
+#endif
 }
 
 void nvte_group_quantize(const NVTEGroupedTensor input, NVTEGroupedTensor output,
                          cudaStream_t stream) {
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
   NVTE_API_CALL(nvte_group_quantize);
   using namespace transformer_engine;
 
   constexpr bool IS_ACT = false;
   dispatch::group_quantize_fwd_helper<IS_ACT, Empty, nullptr>(input, output, nullptr, stream);
+#endif
 }
 
 void nvte_quantize_noop(const NVTETensor input, NVTETensor output, NVTETensor noop,
@@ -40,11 +60,23 @@ void nvte_quantize_noop(const NVTETensor input, NVTETensor output, NVTETensor no
   NVTE_API_CALL(nvte_quantize_noop);
   using namespace transformer_engine;
 
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
   // Create config with noop tensor
   QuantizationConfig quant_config;
   quant_config.noop_tensor = noop;
 
   nvte_quantize_v2(input, output, reinterpret_cast<NVTEQuantizationConfig>(&quant_config), stream);
+#else
+  constexpr bool IS_DBIAS = false;
+  constexpr bool IS_DACT = false;
+  constexpr bool IS_ACT = false;
+  constexpr NVTETensor dbias = nullptr;
+  constexpr NVTETensor workspace = nullptr;
+  constexpr const NVTETensor grad = nullptr;
+
+  detail::quantize_helper<IS_DBIAS, IS_DACT, IS_ACT, Empty, detail::identity>(input, grad, noop, output,
+                                                                     dbias, workspace, stream);
+#endif
 }
 
 void nvte_quantize_v2(const NVTETensor input, NVTETensor output,
@@ -52,8 +84,10 @@ void nvte_quantize_v2(const NVTETensor input, NVTETensor output,
   NVTE_API_CALL(nvte_quantize_v2);
   using namespace transformer_engine;
 
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
   constexpr bool IS_ACT = false;
   dispatch::quantize_fwd_helper<IS_ACT, Empty, nullptr>(input, output, quant_config, stream);
+#endif
 }
 
 void nvte_quantize_dbias(const NVTETensor input, NVTETensor output, NVTETensor dbias,
@@ -61,12 +95,22 @@ void nvte_quantize_dbias(const NVTETensor input, NVTETensor output, NVTETensor d
   NVTE_API_CALL(nvte_quantize_dbias);
   using namespace transformer_engine;
 
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
   constexpr bool IS_DBIAS = true;
   constexpr bool IS_DACT = false;
   constexpr const NVTETensor activation_input = nullptr;
 
   dispatch::quantize_bwd_helper<IS_DBIAS, IS_DACT, Empty, nullptr>(
       input, activation_input, output, dbias, workspace, nullptr, stream);
+#else
+  constexpr bool IS_DBIAS = true;
+  constexpr bool IS_DACT = false;
+  constexpr bool IS_ACT = false;
+  constexpr const NVTETensor activation_input = nullptr;
+
+  detail::quantize_helper<IS_DBIAS, IS_DACT, IS_ACT, Empty, detail::identity>(
+      activation_input, input, nullptr, output, dbias, workspace, stream);
+#endif
 }
 
 void nvte_group_quantize_dbias(const NVTEGroupedTensor input, NVTEGroupedTensor output,
@@ -74,19 +118,26 @@ void nvte_group_quantize_dbias(const NVTEGroupedTensor input, NVTEGroupedTensor 
   NVTE_API_CALL(nvte_group_quantize_dbias);
   using namespace transformer_engine;
 
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
   constexpr bool IS_DBIAS = true;
   constexpr bool IS_DACT = false;
   constexpr const NVTEGroupedTensor activation_input = nullptr;
 
   dispatch::group_quantize_bwd_helper<IS_DBIAS, IS_DACT, Empty, nullptr>(
       input, activation_input, output, dbias, workspace, nullptr, stream);
+#endif
 }
 
 void nvte_dequantize(const NVTETensor input, NVTETensor output, cudaStream_t stream) {
   NVTE_API_CALL(nvte_dequantize);
   using namespace transformer_engine;
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
   dispatch::dequantize_helper(*convertNVTETensorCheck(input), convertNVTETensorCheck(output),
                               stream);
+#else
+  detail::dequantize_helper(*reinterpret_cast<const Tensor *>(input),
+                            reinterpret_cast<Tensor *>(output), stream);
+#endif
 }
 
 void nvte_multi_tensor_quantize(const NVTETensor *inputs, NVTETensor *outputs,
@@ -95,6 +146,7 @@ void nvte_multi_tensor_quantize(const NVTETensor *inputs, NVTETensor *outputs,
   NVTE_API_CALL(nvte_multi_tensor_quantize);
   using namespace transformer_engine;
 
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
   constexpr bool IS_ACT = false;
 
   const size_t num_streams = nvte_get_num_compute_streams();
@@ -121,6 +173,7 @@ void nvte_multi_tensor_quantize(const NVTETensor *inputs, NVTETensor *outputs,
   for (int s = 0; s < num_stream_used; s++) {
     NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream, detail::get_compute_stream_event(s)));
   }
+#endif
 }
 
 // Group quantize assumes contiguous inputs and outputs in memory allocation
@@ -132,8 +185,10 @@ void nvte_group_nvfp4_quantize_with_amax(const NVTETensor input, NVTETensor *out
   NVTE_API_CALL(nvte_group_nvfp4_quantize_with_amax);
   using namespace transformer_engine;
 
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
   constexpr bool IS_ACT = false;
 
   dispatch::group_quantize_fwd_helper<IS_ACT, Empty, nullptr>(input, outputs, split_sections,
                                                               num_tensors, quant_config, stream);
+#endif
 }

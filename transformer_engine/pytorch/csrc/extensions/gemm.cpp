@@ -18,6 +18,8 @@
 #include "transformer_engine/transformer_engine.h"
 #include "util.h"
 
+#include <torch_musa/csrc/core/MUSAGuard.h>
+
 namespace {
 
 void* get_data_ptr(transformer_engine::pytorch::MaybeTensor tensor) {
@@ -98,7 +100,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   // Ensure that cublasLt handle is created on the correct device,
   // overriding torch.cuda.set_device calls from user side.
   // Assumes all tensors passed are on the same device.
-  at::cuda::CUDAGuard device_guard(workspace.device());
+  at::musa::CUDAGuard device_guard(workspace.device());
 
   // Input tensors
   NVTE_CHECK(!A.is_none(), "Tensor A has not been provided");
@@ -178,7 +180,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   if (bias.has_value()) {
     if (grad) {
       auto opts =
-          torch::TensorOptions().dtype(GetATenDType(out_tensor.dtype())).device(torch::kCUDA);
+          torch::TensorOptions().dtype(GetATenDType(out_tensor.dtype())).device(torch::kMUSA);
       bias_grad = at::empty({static_cast<int64_t>(B_shape.data[B_shape.ndim - 1])}, opts);
       bias_tensor = makeTransformerEngineTensor(*bias_grad);
     } else {
@@ -195,7 +197,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   if (gelu) {
     if (!grad) {
       auto dtype = GetATenDType(gelu_type);
-      auto opts = torch::TensorOptions().dtype(dtype).device(torch::kCUDA);
+      auto opts = torch::TensorOptions().dtype(dtype).device(torch::kMUSA);
       std::vector<int64_t> torch_shape;
       for (auto v : D_shape) {
         torch_shape.push_back(v);
@@ -218,7 +220,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
 
   // Set an external SM Margin to all the GEMMs.
   // This comes in handy when DP is overlapped with GEMMs
-  const int device_id = at::cuda::current_device();
+  const int device_id = at::musa::current_device();
   const int sm_count = transformer_engine::cuda::sm_count(device_id);
   int num_math_sms = sm_count - transformer_engine::getenv<int>("NVTE_EXT_MARGIN_SM", sm_count);
 
@@ -237,7 +239,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
 
   // Keep the swizzled scaling factor tensors alive during the GEMM.
   std::vector<std::optional<at::Tensor>> swizzled_scale_inverses_list;
-  auto main_stream = at::cuda::getCurrentCUDAStream();
+  auto main_stream = at::musa::getCurrentCUDAStream();
   if (A_tensor.numel() != 0 && B_tensor.numel() != 0) {
     // Optionally swizzle the scaling factors
     auto [A_row_scales, A_col_scales] = swizzle_scales_for_gemm(A_tensor, transa, !transa);
@@ -313,11 +315,19 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
       }
     } else {
       // Launch GEMM
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
       NVTE_SCOPED_GIL_RELEASE({
         nvte_cublas_gemm_v2(transa, transb, &alpha, A_tensor.data(), B_tensor.data(), &beta.value(),
                             out_tensor.data(), out_tensor.data(), te_workspace.data(), config,
                             main_stream);
       });
+#else
+      NVTE_SCOPED_GIL_RELEASE({
+        nvte_cublas_gemm(A_tensor.data(), B_tensor.data(), out_tensor.data(), bias_tensor.data(),
+                        te_pre_gelu_out.data(), transa, transb, grad, te_workspace.data(),
+                        accumulate, use_split_accumulator, num_math_sms, main_stream);
+      });
+#endif
     }
   } else {
     if (out_tensor.numel() != 0 && !accumulate) {
@@ -362,7 +372,7 @@ void te_atomic_gemm(at::Tensor A, at::Tensor A_scale_inverse, DType A_type,
   // Ensure that cublasLt handle is created on the correct device,
   // overriding torch.cuda.set_device calls from user side.
   // Assumes all tensors passed are on the same device.
-  at::cuda::CUDAGuard device_guard(workspace.device());
+  at::musa::CUDAGuard device_guard(workspace.device());
 
   // TODO: Handle scaling modes
   NVTEScalingMode nvte_scaling_modeA = NVTE_DELAYED_TENSOR_SCALING;
@@ -399,7 +409,7 @@ void te_atomic_gemm(at::Tensor A, at::Tensor A_scale_inverse, DType A_type,
     nvte_cublas_atomic_gemm(te_A.data(), te_B.data(), te_D.data(), te_bias.data(),
                             te_pre_gelu_out.data(), transa, transb, grad, te_workspace.data(),
                             accumulate, use_split_accumulator, math_sm_count, m_split, n_split,
-                            gemm_producer, te_counter.data(), at::cuda::getCurrentCUDAStream());
+                            gemm_producer, te_counter.data(), at::musa::getCurrentCUDAStream());
   });
 }
 
@@ -416,7 +426,7 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
   // Ensure that cublasLt handle is created on the correct device,
   // overriding torch.cuda.set_device calls from user side.
   // Assumes all tensors passed are on the same device.
-  at::cuda::CUDAGuard device_guard(workspace[0].device());
+  at::musa::CUDAGuard device_guard(workspace[0].device());
 
   void* output_data_ptr = nullptr;
   if (single_output) {
@@ -444,7 +454,7 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
       }
     }
     auto dtype = GetATenDType(D_type);
-    auto opts = torch::TensorOptions().dtype(dtype).device(torch::kCUDA);
+    auto opts = torch::TensorOptions().dtype(dtype).device(torch::kMUSA);
     if (single_output) {
       if (output_data_ptr == nullptr) {
         out_tensor = at::empty(D_shape, opts);
@@ -462,7 +472,7 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
       D_vectors.emplace_back(out_tensor);
     } else {
       if (D == std::nullopt) {
-        auto opts = torch::TensorOptions().dtype(dtype).device(torch::kCUDA);
+        auto opts = torch::TensorOptions().dtype(dtype).device(torch::kMUSA);
         out_tensor = at::empty(D_shape, opts);
         D_vectors.emplace_back(out_tensor);
       } else {
@@ -508,6 +518,7 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
   swizzled_scale_inverses_list.emplace_back(
       multi_tensor_swizzle_scales_for_gemm(te_B_wrappers, !transb, transb));
 
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
   // Emulate the FP8 block scaling recipe with MXFP8 on Blackwell and newer
   // as it is not natively supported by cublasLt
   if (transformer_engine::cuda::sm_arch() >= 100) {
@@ -540,6 +551,7 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
       transb = false;
     }
   }
+#endif
 
   std::vector<NVTETensor> te_A_vector, te_B_vector, te_D_vector, te_bias_vector,
       te_pre_gelu_out_vector;
@@ -560,13 +572,23 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
     te_workspace_wrappers.emplace_back(std::move(wsp));
   }
 
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
   // For now, we only have multi-stream cublas backend.
   NVTE_SCOPED_GIL_RELEASE({
     nvte_multi_tensor_gemm(te_A_vector.data(), te_B_vector.data(), te_D_vector.data(),
                            te_bias_vector.data(), te_pre_gelu_out_vector.data(), te_A_vector.size(),
                            transa, transb, grad, te_workspace_vector.data(), accumulate,
-                           use_split_accumulator, math_sm_count, at::cuda::getCurrentCUDAStream());
+                           use_split_accumulator, math_sm_count, at::musa::getCurrentCUDAStream());
   });
+#else
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_multi_stream_cublas_gemm(te_A_vector.data(), te_B_vector.data(), te_D_vector.data(),
+                                  te_bias_vector.data(), te_pre_gelu_out_vector.data(),
+                                  te_A_vector.size(), transa, transb, grad,
+                                  te_workspace_vector.data(), accumulate, use_split_accumulator,
+                                  math_sm_count, at::musa::getCurrentCUDAStream());
+  });
+#endif
   return bias;
 }
 

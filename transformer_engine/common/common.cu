@@ -142,6 +142,7 @@ void checkCuDriverContext(CUstream stream) {
   }
 }
 
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
 CUtensorMapDataType get_CUtensorMapDataType(DType dtype) {
   static const std::unordered_map<DType, CUtensorMapDataType> dtypeMapping = []() {
     std::unordered_map<DType, CUtensorMapDataType> typeMapping = {
@@ -225,11 +226,16 @@ void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
       // Any element that is outside of bounds will be set to zero by the TMA transfer.
       CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE));
 }
+#endif
 
 bool is_supported_by_CC_100() {
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
   int deviceComputeCapability = cuda::sm_arch(cuda::current_device());
 
   return deviceComputeCapability >= 100;
+#else
+  return false;
+#endif
 }
 
 std::vector<std::vector<Tensor *>> convert_tensor_array(NVTETensor **nvte_tensors,

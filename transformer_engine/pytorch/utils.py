@@ -16,8 +16,24 @@ from .quantized_tensor import Quantizer
 from .torch_version import torch_version
 from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
 
+def wrap_name(src):
+    return f"_orig_{src}"
 
-__all__ = ["get_device_compute_capability", "get_cudnn_version", "is_bf16_available"]
+def add_attr(module, name, target):
+    setattr(module, name, target)
+
+def wrap_attr(module, name, wrapper):
+    target = getattr(module, name)
+    setattr(module, wrap_name(name), target)
+    setattr(module, name, wrapper)
+
+def replace_attr(module, name, target):
+    wrap_attr(module, name, target)
+
+def musa_assert_dim_for_fp8_exec(*tensors: List[torch.Tensor]) -> None:
+    return
+
+__all__ = ["get_device_compute_capability", "get_mudnn_version", "is_bf16_available"]
 
 
 def requires_grad(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
@@ -31,7 +47,7 @@ def requires_grad(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
 @functools.lru_cache(maxsize=None)
 def _empty_tensor() -> torch.Tensor:
     """Get tensor with no entries and no data"""
-    return torch.Tensor().cuda()
+    return torch.Tensor().musa()
 
 
 def clear_tensor_data(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
@@ -497,11 +513,11 @@ def is_non_tn_fp8_gemm_supported() -> bool:
 
 
 @functools.lru_cache(maxsize=None)
-def get_cudnn_version() -> Tuple[int, int, int]:
+def get_mudnn_version() -> Tuple[int, int, int]:
     """Runtime cuDNN version (major, minor, patch)"""
     import transformer_engine.pytorch.cpp_extensions as ext
 
-    encoded_version = ext.get_cudnn_version()
+    encoded_version = ext.get_mudnn_version()
     major_version_magnitude = 1000 if encoded_version < 90000 else 10000
     major, encoded_version = divmod(encoded_version, major_version_magnitude)
     minor, patch = divmod(encoded_version, 100)

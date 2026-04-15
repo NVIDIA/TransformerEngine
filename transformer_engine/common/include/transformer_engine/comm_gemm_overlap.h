@@ -7,8 +7,8 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_COMM_GEMM_OVERLAP_H_
 #define TRANSFORMER_ENGINE_COMMON_COMM_GEMM_OVERLAP_H_
 
-#include <cuda.h>
-#include <cuda_fp8.h>
+#include <musa.h>
+#include <musa_fp8.h>
 #include <transformer_engine/transformer_engine.h>
 
 #include <functional>

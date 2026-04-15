@@ -4,11 +4,14 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include <cuda.h>
-#include <cuda_fp8.h>
-#include <cuda_runtime.h>
+#include <musa.h>
+#include <musa_fp8.h>
+#include <musa_runtime.h>
+#include "../../include/transformer_engine/musify.h"
 
-#if __CUDA_ARCH__ >= 800
+#if NVTE_USE_MUSA
+#define half_dtype mt_bfloat16
+#elif __CUDA_ARCH__ >= 800
 #define half_dtype nv_bfloat16
 #else
 #define half_dtype half
@@ -22,18 +25,31 @@
 #include "common/util/vectorized_pointwise.h"
 #include "userbuffers.h"
 
+const uint64_t global_idf = 0ULL;
 #define MAX_THREADS 1024
 
-#define ATOMIC_CONSUMER(chunk)                                             \
-  if (counters) {                                                          \
-    if (threadIdx.x == 0 && blockIdx.x == 0) {                             \
-      while (0 != (atomicCAS(((unsigned int *)counters) + chunk, 0, 0))) { \
-      }                                                                    \
-      ((unsigned int *)counters)[chunk] = 1;                               \
-      asm volatile("fence.sc.gpu;\n");                                     \
-    }                                                                      \
-    if (blockIdx.x == 0) __syncthreads();                                  \
-  }
+#define CHECK_MUSA_DRIVER(cmd)                                                               \
+  do {                                                                                       \
+    MUresult err = cmd;                                                                      \
+    if (err != MUSA_SUCCESS) {                                                               \
+      const char *errStr;                                                                    \
+      muGetErrorString(err, &errStr);                                                        \
+      fprintf(stderr, "MUSA Driver Error at %d:%s\n %s\n", __LINE__, __FILE__, errStr);      \
+      exit(1);                                                                               \
+    }                                                                                        \
+  } while (0)
+
+
+// #define ATOMIC_CONSUMER(chunk)                                             \
+//   if (counters) {                                                          \
+//     if (threadIdx.x == 0 && blockIdx.x == 0) {                             \
+//       while (0 != (atomicCAS(((unsigned int *)counters) + chunk, 0, 0))) { \
+//       }                                                                    \
+//       ((unsigned int *)counters)[chunk] = 1;                               \
+//       asm volatile("fence.sc.gpu;\n");                                     \
+//     }                                                                      \
+//     if (blockIdx.x == 0) __syncthreads();                                  \
+//   }
 
 #define ATOMIC_PRODUCER(chunk)             \
   if (counters) {                          \
@@ -44,6 +60,7 @@
 // If we expect that producer will be 2B+ messages behind consumer
 #define CHECK_IDS(producer, consumer) (((unsigned)(producer) - (unsigned)(consumer)) & (~INT_MAX))
 
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
 // Strip the path from a full filename
 #define FILENAME(file)                                      \
   ({                                                        \
@@ -61,6 +78,13 @@
 #define UB_PRINT(message, ...) \
   printf("[%s:%s:%d] " message "\n", FILENAME(__FILE__), __FUNCTION__, __LINE__, __VA_ARGS__)
 
+#else
+
+#define UB_PRINT(message, ...) \
+  printf("[%s:%s:%d] " message "\n", __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
+
+#endif
+
 // Report and error on timeout
 #define CHECK_TIMEOUT(t, timeout) ((clock64() - (t)) > timeout)
 
@@ -70,6 +94,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
                                         const int myrank, const int gpustep, const int lineoffset,
                                         const int numlines, void **commbuff, const int handleridx,
                                         const uint64_t ub_timeout) {
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
   __shared__ int4 *userptr[RANKS];
   int *flagptr, physgpu, targetgpu, *myptr;
   int *reduceidptr, reduce_id;
@@ -148,6 +173,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     }
   }
   if (threadIdx.x == 0 && blockIdx.x == 0) *reduceidptr = reduce_id;
+#endif
 }  // fp16 inplace reduce kernel (Volta,Hopper)
 
 template <int RANKS>
@@ -156,6 +182,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
                                         const int myrank, const int gpustep, const int lineoffset,
                                         const int numlines, void **commbuff, const int handleridx,
                                         const uint64_t ub_timeout) {
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
   __shared__ int4 *userptr[RANKS];
   int *flagptr, physgpu, targetgpu, *myptr;
   int *reduceidptr, reduce_id;
@@ -255,6 +282,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     }
   }
   if (threadIdx.x == 0 && blockIdx.x == 0) *reduceidptr = reduce_id;
+#endif
 }  // fp16 inplace reduce kernel (Ampere)
 
 template <int RANKS>
@@ -868,7 +896,21 @@ __global__ void __launch_bounds__(MAX_THREADS)
   }
 
   for (int chunk_i = 0; chunk_i < numchunks; chunk_i++) {
-    ATOMIC_CONSUMER(chunk_i);
+    // ATOMIC_CONSUMER(chunk_i);
+
+    if (counters) {                                                          
+      if (threadIdx.x == 0 && blockIdx.x == 0) {                             
+        while (0 != (atomicCAS(((unsigned int *)counters) + chunk_i, 0, 0))) { 
+        }                                                                    
+        ((unsigned int *)counters)[chunk_i] = 1;                               
+#ifdef NVTE_USE_MUSA                                                       
+        asm volatile("DMA.IDF.SLC.BYPASS  %0" :: "R"(global_idf));           
+#else                                                                      
+        asm volatile("fence.sc.gpu;\n");                                     
+#endif                                                                     
+      }                                                                      
+      if (blockIdx.x == 0) __syncthreads();                                  
+    }
 
     lastSM = 0;
     if (threadIdx.x < RANKS) {
@@ -1025,7 +1067,11 @@ __global__ void __launch_bounds__(MAX_THREADS)
 
       // reset counter for next producer.
       ((unsigned int *)counters)[0] = 1;
+#ifdef NVTE_USE_MUSA
+      asm volatile("DMA.IDF.SLC.BYPASS  %0" :: "R"(global_idf));
+#else
       asm volatile("fence.sc.gpu;\n");
+#endif
     }
   }
   __syncthreads();
@@ -1116,7 +1162,11 @@ __global__ void __launch_bounds__(MAX_THREADS)
 
         // reset counter for next producer.
         ((unsigned int *)counters)[chunk_i] = 1;
+#ifdef NVTE_USE_MUSA
+        asm volatile("DMA.IDF.SLC.BYPASS  %0" :: "R"(global_idf));
+#else
         asm volatile("fence.sc.gpu;\n");
+#endif
       }
     }
     __syncthreads();
@@ -1357,6 +1407,11 @@ __global__ void __launch_bounds__(MAX_THREADS)
   }
 }  // fp16 inplace allgather kernel (Volta,Hopper)
 
+#ifdef NVTE_USE_MUSA
+#define SETUP_LAUNCH_CONFIG(sms, threads, stream)                                    \
+  musaLaunchConfig_t cfg = {sms, threads, 0, stream, NULL, 0};                       \
+  cfg.numAttrs = 0;
+#else
 #define SETUP_LAUNCH_CONFIG(sms, threads, stream)                                    \
   cudaLaunchConfig_t cfg = {sms, threads, 0, stream, NULL, 0};                       \
   cudaLaunchAttribute attribute_ub[2];                                               \
@@ -1367,6 +1422,8 @@ __global__ void __launch_bounds__(MAX_THREADS)
   attribute_ub[0].id = cudaLaunchAttributeCooperative;                               \
   cfg.attrs = attribute_ub;                                                          \
   cfg.numAttrs = comm->sm_arch >= 9 ? 2 : 1;
+#endif
+
 
 #if (CUDART_VERSION >= 12030)
 #define ADD_LAUNCH_COMPLETION_EVENT(attribute_ub, comm_launch_event) \
@@ -1979,7 +2036,11 @@ template void reducescatter2_userbuff_strided_multiatomic_fp8<__nv_fp8_e5m2>(
     const int numchunks, void *counters, communicator *comm, cudaStream_t stream);
 
 __global__ void kuserbuffers_pullsend(int myrank, int peer, int *send_id, int *flagptr) {
+#ifdef NVTE_USE_MUSA
+  atomicAdd(flagptr, 1);
+#else
   atomicAdd_system(flagptr, 1);
+#endif
 }
 
 __global__ void kuserbuffers_inc(int *id) { atomicAdd(id, 1); }
@@ -1999,7 +2060,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     const int signal_id = (*recv_id) + 1;
     volatile int *flag = (volatile int *)flagptr;
     clock_t s = clock64();
-    while (CHECK_IDS(*flag, signal_id)) {
+    while (CHECK_IDS(volatile_load((int*)flag), signal_id)) {
       if (CHECK_TIMEOUT(s, ub_timeout)) {
         UB_PRINT(
             "pullrecv [grank dst:%d global src:%d][nvrank(GPU) dst: %d src: %d]: expecting %d,"
@@ -2050,10 +2111,18 @@ __global__ void __launch_bounds__(MAX_THREADS)
     __syncthreads();
     if (threadIdx.x) return;
     __threadfence_system();
+#ifdef NVTE_USE_MUSA
+    atomicAdd(flagptr, 1);
+#else
     atomicAdd_system(flagptr,
                      1);  // otherwise need local SM sync before sending flag
+#endif
   } else {                // 0 bytes and 1 SM only
+#ifdef NVTE_USE_MUSA
+    atomicAdd(flagptr, 1);
+#else
     atomicAdd_system(flagptr, 1);
+#endif
   }
 }
 
@@ -2112,10 +2181,18 @@ __global__ void __launch_bounds__(MAX_THREADS)
     __syncthreads();
     if (threadIdx.x) return;
     __threadfence_system();
+#ifdef NVTE_USE_MUSA
+    atomicAdd(send_flagptr, 1);
+#else
     atomicAdd_system(send_flagptr,
                      1);  // otherwise need local SM sync before sending flag
+#endif
   } else {                // 0 bytes and 1 SM only
+#ifdef NVTE_USE_MUSA
+    atomicAdd(send_flagptr, 1);
+#else
     atomicAdd_system(send_flagptr, 1);
+#endif
   }
 
   if (blockIdx.x == 0 && threadIdx.x == 0) {
@@ -2170,10 +2247,18 @@ __global__ void __launch_bounds__(MAX_THREADS)
     __syncthreads();
     if (threadIdx.x) return;
     __threadfence_system();
+#ifdef NVTE_USE_MUSA
+    atomicAdd(send_flagptr, 1);
+#else
     atomicAdd_system(send_flagptr,
                      1);  // otherwise need local SM sync before sending flag
+#endif
   } else {                // 0 bytes and 1 SM only
+#ifdef NVTE_USE_MUSA
+    atomicAdd(send_flagptr, 1);
+#else
     atomicAdd_system(send_flagptr, 1);
+#endif
   }
 
   if (blockIdx.x == 0 && threadIdx.x == 0) {
@@ -2196,7 +2281,11 @@ __global__ void __launch_bounds__(MAX_THREADS)
     // Decrement atomic val to signal current output tile finish
     if (counters) {
       ((unsigned int *)counters)[0] = 0;
+#ifdef NVTE_USE_MUSA
+      asm volatile("DMA.IDF.SLC.BYPASS  %0" :: "R"(global_idf));
+#else
       asm volatile("fence.sc.gpu;\n");
+#endif
     }
   }
 }
@@ -2237,11 +2326,19 @@ __global__ void __launch_bounds__(MAX_THREADS) kuserbuffers_pushsendrecv_multiat
       __syncthreads();
       if (!threadIdx.x) {
         __threadfence_system();
+#ifdef NVTE_USE_MUSA
+        atomicAdd(send_flagptr, 1);
+#else
         atomicAdd_system(send_flagptr,
                          1);  // otherwise need local SM sync before sending flag
+#endif
       }
     } else {  // 0 bytes and 1 SM only
+#ifdef NVTE_USE_MUSA
+      atomicAdd(send_flagptr, 1);
+#else
       atomicAdd_system(send_flagptr, 1);
+#endif
     }
 
     // wait for message to arrive.
@@ -2267,7 +2364,11 @@ __global__ void __launch_bounds__(MAX_THREADS) kuserbuffers_pushsendrecv_multiat
       // Decrement atomic val to signal current output tile finish
       if (counters) {
         ((unsigned int *)counters)[recv_chunk_id /*chunk_i+1*/] = 0;
+#ifdef NVTE_USE_MUSA
+        asm volatile("DMA.IDF.SLC.BYPASS  %0" :: "R"(global_idf));
+#else
         asm volatile("fence.sc.gpu;\n");
+#endif
       }
     }
 
@@ -2576,7 +2677,11 @@ static __global__ void producer_kernel(void *atomic_ptr, int chunk_i) {
   // COMM kernel need to explicitely flash gmem.
   // GEMM kernel already executed, and can not see gmem
   // change without COMM kernel explicitely make change
+#ifdef NVTE_USE_MUSA
+  asm volatile("DMA.IDF.SLC.BYPASS  %0" :: "R"(global_idf));
+#else
   asm volatile("fence.sc.gpu;\n");
+#endif
 }
 
 // consumer
@@ -2586,7 +2691,11 @@ static __global__ void consumer_kernel(void *atomic_ptr, int chunk_i) {
     while (0 != (atomicCAS((unsigned int *)atomic_ptr + chunk_i, 0, 0))) {
     }
     ((unsigned int *)atomic_ptr)[chunk_i] = 1;
+#ifdef NVTE_USE_MUSA
+    asm volatile("DMA.IDF.SLC.BYPASS  %0" :: "R"(global_idf));
+#else
     asm volatile("fence.sc.gpu;\n");
+#endif
   }
 }
 
@@ -2598,7 +2707,11 @@ static __global__ void consumer_batch_kernel(void *atomic_ptr, int first_chunk_i
       while (0 != (atomicCAS((unsigned int *)atomic_ptr + i, 0, 0))) {
       }
       ((unsigned int *)atomic_ptr)[i] = 1;
+#ifdef NVTE_USE_MUSA
+      asm volatile("DMA.IDF.SLC.BYPASS  %0" :: "R"(global_idf));
+#else
       asm volatile("fence.sc.gpu;\n");
+#endif
     }
   }
 }

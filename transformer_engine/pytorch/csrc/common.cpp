@@ -309,11 +309,13 @@ size_t roundup(size_t value, size_t multiple) {
 size_t ceildiv(size_t numer, size_t denom) { return (numer + denom - 1) / denom; }
 
 void philox_unpack(at::PhiloxCudaState arg, int64_t* rng_state_ptr) {
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
   NVTE_SCOPED_GIL_RELEASE({
     nvte_extract_seed_and_offset(rng_state_ptr, arg.captured_, arg.seed_.ptr, arg.seed_.val,
                                  arg.offset_.ptr, arg.offset_.val, arg.offset_intragraph_,
-                                 at::cuda::getCurrentCUDAStream());
+                                 at::musa::getCurrentCUDAStream());
   });
+#endif
 }
 
 // extract PhiloxCudaState from CUDA random number generator

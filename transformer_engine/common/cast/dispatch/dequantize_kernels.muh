@@ -1,0 +1,94 @@
+/*************************************************************************
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *
+ * See LICENSE for license information.
+ ************************************************************************/
+
+/*! \file dequantize_kernels.cuh
+ *  \brief CUDA kernels to cast from MXFP8.
+ */
+
+#ifndef TRANSFORMER_ENGINE_DEQUANTIZE_KERNELS_CUH_
+#define TRANSFORMER_ENGINE_DEQUANTIZE_KERNELS_CUH_
+
+#include <musa.h>
+#include <musaTypedefs.h>
+#include <musa_runtime.h>
+#include <transformer_engine/cast.h>
+
+#include <cfloat>
+#include <limits>
+
+#include "../common.h"
+#include "../transpose/cast_transpose.h"
+#include "../util/vectorized_pointwise.h"
+#include "../utils.cuh"
+#include "math.h"
+// #include "ptx.cuh"
+#include "transformer_engine/activation.h"
+#include "transformer_engine/transpose.h"
+// #include "mtfp8_cast.muh"
+
+namespace transformer_engine {
+
+namespace dequantization {
+
+constexpr size_t CHUNK_DIM_Y = 128;
+constexpr size_t CHUNK_DIM_X = 128;
+constexpr size_t THREADS_PER_CHUNK = 128;
+constexpr size_t BUFFERS_NUM = 2;
+
+constexpr size_t ELEMS_PER_THREAD = 16;
+constexpr size_t BUFFER_DIM_Y = 16;           // only 32 is supported
+constexpr size_t BUFFER_DIM_X = CHUNK_DIM_X;  // 128
+constexpr size_t SHMEM_DIM_Y = BUFFER_DIM_Y;  // 16
+constexpr size_t SHMEM_DIM_X = BUFFER_DIM_X;  // 128
+
+constexpr size_t THREADS_PER_CHUNK_X_ROWWISE = CHUNK_DIM_X / ELEMS_PER_THREAD;  //  8 = 128 / 16
+constexpr size_t THREADS_PER_CHUNK_X_COLWISE = CHUNK_DIM_X;                     //  128
+constexpr size_t ITERATIONS = CHUNK_DIM_Y / BUFFER_DIM_Y;                       //    8 = 128 / 16
+static_assert(ITERATIONS >= 1);
+
+static void fp8_dequantize(const Tensor &input, Tensor *output, musaStream_t stream) {
+  NVTE_CHECK(is_fp8_dtype(input.data.dtype), "Input must have FP8 type.");
+  NVTE_CHECK(!is_fp8_dtype(output->data.dtype), "Output must be in higher precision.");
+  NVTE_CHECK(output->data.shape == input.data.shape, "Input and output shapes need to match.");
+
+  const size_t N = product(input.data.shape);
+  TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
+      input.data.dtype, IType,
+      TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
+          output->data.dtype, OType,
+
+          constexpr int nvec = 32 / sizeof(OType);
+          detail::DequantizeParam p;
+          p.scale_inv = reinterpret_cast<const fp32 *>(input.scale_inv.dptr);
+          VectorizedUnaryKernelLauncher<nvec, detail::DequantizeParam, detail::dequantize_func>(
+              reinterpret_cast<const IType *>(input.data.dptr), nullptr,
+              reinterpret_cast<OType *>(output->data.dptr), nullptr, nullptr, nullptr, N, p,
+              stream););  // NOLINT(*)
+  );                      // NOLINT(*)
+}
+
+}  // namespace dequantization
+
+namespace detail {
+
+inline void dequantize_helper(const Tensor &input, Tensor *output, musaStream_t stream) {
+  CheckInputTensor(input, "cast_input");
+  CheckOutputTensor(*output, "cast_output");
+
+  if (is_tensor_scaling(input.scaling_mode)) {
+    dequantization::fp8_dequantize(input, output, stream);
+  // } else if (is_mtfp_scaling(input.scaling_mode)) {
+  //   mtfp8_dequantize(&input, output, stream);
+  } else {
+    NVTE_ERROR("Not implemented scaling mode: " + to_string(input.scaling_mode) + ".");
+  }
+}
+
+}  // namespace detail
+
+}  // namespace transformer_engine
+
+#endif  // TRANSFORMER_ENGINE_DEQUANTIZE_KERNELS_CUH_

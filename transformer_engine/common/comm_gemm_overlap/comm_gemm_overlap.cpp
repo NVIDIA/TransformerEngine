@@ -798,6 +798,7 @@ void CommOverlapP2PBase::atomic_gemm_overlap_ag(
     const TensorWrapper &A, bool transa, const TensorWrapper &B, bool transb, TensorWrapper &D,
     TensorWrapper &bias, TensorWrapper &pre_gelu_out, TensorWrapper &workspace, bool grad,
     bool accumulate, bool use_split_accumulator, TensorWrapper &B_copy, cudaStream_t stream_main) {
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
   int ori_sms = _ub_comm->sms;
   _ub_comm->use_ce = _use_ce;
   _ub_comm->sms = _num_comm_sm;
@@ -887,6 +888,7 @@ void CommOverlapP2PBase::atomic_gemm_overlap_ag(
   NVTE_CHECK_CUDA(cudaFreeAsync(D_buffer_ptr, stream_main));
 
   _ub_comm->sms = ori_sms;
+#endif
 }  // CommOverlapP2PBase::atomic_gemm_overlap_ag
 
 /*

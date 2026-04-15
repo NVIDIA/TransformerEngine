@@ -71,7 +71,11 @@ __global__ void moe_unpermute_kernel(const T *input, T *unpermuted_output, const
     if (source_row != -1) {
       const T *source_row_ptr = input + source_row * num_cols;
 
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
       frag_load_store = __ldlu(reinterpret_cast<const float4 *>(source_row_ptr + i));
+#else
+      frag_load_store = *(reinterpret_cast<const float4 *>(source_row_ptr + i));
+#endif
 
       for (int e = 0; e < kElementsPerAccess; e++) {
         frag_sum[e] = TCompute(frag_load_store_ptr[e]);
@@ -95,7 +99,11 @@ __global__ void moe_unpermute_kernel(const T *input, T *unpermuted_output, const
 
       const T *source_row_ptr = input + source_row * num_cols;
 
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
       frag_load_store = __ldlu(reinterpret_cast<const float4 *>(source_row_ptr + i));
+#else
+      frag_load_store = *(reinterpret_cast<const float4 *>(source_row_ptr + i));
+#endif
 
       for (int e = 0; e < kElementsPerAccess; e++) {
         frag_elem[e] = TCompute(frag_load_store_ptr[e]);
@@ -162,7 +170,11 @@ __global__ void moe_permute_kernel(const T *input_bwd, const T *input_fwd, T *ac
   for (int i = tid * kElementsPerAccess; i < num_cols; i += blockDim.x * kElementsPerAccess) {
     TCompute frag_src[kElementsPerAccess];
 
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
     frag_load_store = __ldlu(reinterpret_cast<const float4 *>(source_row_ptr + i));
+#else
+    frag_load_store = *(reinterpret_cast<const float4 *>(source_row_ptr + i));
+#endif
 
     for (int e = 0; e < kElementsPerAccess; e++) frag_src[e] = TCompute(frag_load_store_ptr[e]);
 
@@ -192,7 +204,11 @@ __global__ void moe_permute_kernel(const T *input_bwd, const T *input_fwd, T *ac
           // Inner product calculation for prob_grad in unpermute bwd
           const T *input_fwd_ptr = input_fwd + dest_row * num_cols;
 
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
           frag_load_store = __ldlu(reinterpret_cast<const float4 *>(input_fwd_ptr + i));
+#else
+          frag_load_store = *(reinterpret_cast<const float4 *>(input_fwd_ptr + i));
+#endif
 
           TCompute frag_input_fwd[kElementsPerAccess];
           for (int e = 0; e < kElementsPerAccess; e++)

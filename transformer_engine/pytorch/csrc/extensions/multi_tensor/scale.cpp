@@ -15,7 +15,7 @@ void multi_tensor_scale_cuda(int chunk_size, at::Tensor noop_flag,
       makeTransformerEngineTensorList(tensor_lists);
 
   nvte_multi_tensor_scale_cuda(chunk_size, noop_flag_cu.data(), tensor_lists_ptr.data(), num_lists,
-                               num_tensors, scale, at::cuda::getCurrentCUDAStream());
+                               num_tensors, scale, at::musa::getCurrentCUDAStream());
 }
 
 }  // namespace transformer_engine::pytorch

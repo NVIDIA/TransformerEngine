@@ -7,7 +7,7 @@
 #include "transformer_engine/comm_gemm.h"
 
 #include <cublasmp.h>
-#include <cuda_runtime.h>
+#include <musa_runtime.h>
 
 #include <map>
 #include <memory>

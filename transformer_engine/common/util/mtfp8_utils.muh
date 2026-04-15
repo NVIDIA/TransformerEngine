@@ -1,0 +1,65 @@
+#ifndef TRANSFORMER_ENGINE_MUSA_COMMON_UTIL_MTFP8_UTILS_MUH_
+#define TRANSFORMER_ENGINE_MUSA_COMMON_UTIL_MTFP8_UTILS_MUH_
+
+#include "cuda_driver.h"
+#include "cuda_runtime.h"
+
+namespace transformer_engine::mtfp8 {
+
+inline constexpr size_t io_bytes = 16;
+inline constexpr size_t warp_size = 32;
+inline constexpr size_t warp_bits = 5;
+inline constexpr size_t warp_mask = 0x1f;
+inline constexpr size_t max_threads_per_block = 1024;
+inline constexpr size_t max_warps_per_block = max_threads_per_block / warp_size;
+
+inline bool is_power_of_2(size_t n) {
+  return (n > 0) && (n & (n - 1)) == 0;
+}
+
+inline size_t next_power_of_2(size_t n) {
+  assert(n >= 1);
+  if (is_power_of_2(n)) {
+    return n;
+  }
+  n |= n >> 1;
+	n |= n >> 2;
+	n |= n >> 4;
+	n |= n >> 8;
+	n |= n >> 16;
+	n |= n >> 32;
+  n += 1;
+  assert(is_power_of_2(n));
+  return n;
+}
+
+inline size_t ceil_div(size_t a, size_t b) {
+  return (a + b - 1) / b;
+}
+
+inline __device__ float global_amax_min = 1e-15;
+
+template <size_t vlen>
+struct VlenTrait {
+  static constexpr bool is_power_of_2 = false;
+};
+
+#define ADD_VLEN_TRAIT(LEN, BITS, MASK)       \
+template<>                                    \
+struct VlenTrait<LEN> {                       \
+  static constexpr bool is_power_of_2 = true; \
+  static constexpr size_t bits = BITS;        \
+  static constexpr size_t mask = MASK;        \
+}
+
+ADD_VLEN_TRAIT(4, 2, 0x3);
+ADD_VLEN_TRAIT(8, 3, 0x7);
+ADD_VLEN_TRAIT(16, 4, 0xf);
+ADD_VLEN_TRAIT(32, 5, 0x1f);
+ADD_VLEN_TRAIT(64, 6, 0x3f);
+
+#undef ADD_VLEN_TRAIT
+
+} // namespace transformer_engine::mtfp8
+
+#endif // TRANSFORMER_ENGINE_MUSA_COMMON_UTIL_MTFP8_UTILS_MUH_

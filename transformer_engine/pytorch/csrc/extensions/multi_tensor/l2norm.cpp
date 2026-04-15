@@ -47,7 +47,7 @@ std::tuple<at::Tensor, at::Tensor> multi_tensor_l2norm_cuda(
   nvte_multi_tensor_l2norm_cuda(chunk_size, noop_flag_cu.data(), tensor_lists_ptr.data(), num_lists,
                                 num_tensors, output_cu.data(), output_per_tensor_cu.data(),
                                 ret_cu.data(), ret_per_tensor_cu.data(), per_tensor,
-                                max_chunks_per_tensor, at::cuda::getCurrentCUDAStream());
+                                max_chunks_per_tensor, at::musa::getCurrentCUDAStream());
 
   return std::tuple<at::Tensor, at::Tensor>(ret, ret_per_tensor);
 }
@@ -94,7 +94,7 @@ std::tuple<at::Tensor, at::Tensor> multi_tensor_unscale_l2norm_cuda(
   nvte_multi_tensor_unscale_l2norm_cuda(
       chunk_size, noop_flag_cu.data(), tensor_lists_ptr.data(), num_lists, num_tensors,
       output_cu.data(), output_per_tensor_cu.data(), ret_cu.data(), ret_per_tensor_cu.data(),
-      inv_scale_cu.data(), per_tensor, max_chunks_per_tensor, at::cuda::getCurrentCUDAStream());
+      inv_scale_cu.data(), per_tensor, max_chunks_per_tensor, at::musa::getCurrentCUDAStream());
 
   return std::tuple<at::Tensor, at::Tensor>(ret, ret_per_tensor);
 }

@@ -6,10 +6,12 @@
 
 #include "transformer_engine/dropout.h"
 
-#include <ATen/cuda/CUDAGeneratorImpl.h>
+#include <ATen/musa/MUSAGeneratorImpl.h>
 #include <pybind.h>
 
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
 #include <ATen/cuda/CUDAGraphsUtils.cuh>
+#endif
 
 #include "../common.h"
 #include "../extensions.h"
@@ -34,7 +36,7 @@ std::vector<py::object> dropout_fwd(const py::handle &input, float dropout_proba
     }
     const auto shape_uint64 = convertShape(input_nvte.shape());
     const std::vector<int64_t> shape_int64(shape_uint64.begin(), shape_uint64.end());
-    const auto opts = at::TensorOptions().dtype(dtype).device(torch::kCUDA);
+    const auto opts = at::TensorOptions().dtype(dtype).device(torch::kMUSA);
     out = at::empty(shape_int64, opts);
   }
   TensorWrapper out_nvte = makeTransformerEngineTensor(*out);
@@ -45,27 +47,29 @@ std::vector<py::object> dropout_fwd(const py::handle &input, float dropout_proba
 
   // RNG state tensor
   auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
-      std::nullopt, at::cuda::detail::getDefaultCUDAGenerator());
+      std::nullopt, at::musa::detail::getDefaultCUDAGenerator());
   at::PhiloxCudaState philox_args;
   {
     std::lock_guard<std::mutex> lock(gen->mutex_);
     constexpr int64_t rng_elts_per_thread = 4;
     philox_args = gen->philox_cuda_state(rng_elts_per_thread);
   }
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
   auto rng_state_pyt = allocateTorchTensor(2, DType::kInt64);
   NVTE_SCOPED_GIL_RELEASE({
     nvte_extract_seed_and_offset(
         reinterpret_cast<int64_t *>(rng_state_pyt.data_ptr()), philox_args.captured_,
         philox_args.seed_.ptr, philox_args.seed_.val, philox_args.offset_.ptr,
-        philox_args.offset_.val, philox_args.offset_intragraph_, at::cuda::getCurrentCUDAStream());
+        philox_args.offset_.val, philox_args.offset_intragraph_, at::musa::getCurrentCUDAStream());
   });
   auto rng_state_nvte = makeTransformerEngineTensor(rng_state_pyt);
 
   // Launch kernel
   NVTE_SCOPED_GIL_RELEASE({
     nvte_dropout_fwd(input_nvte.data(), out_nvte.data(), mask_nvte.data(), rng_state_nvte.data(),
-                     dropout_probability, at::cuda::getCurrentCUDAStream());
+                     dropout_probability, at::musa::getCurrentCUDAStream());
   });
+#endif
 
   return {py::cast(std::move(*out)), py::cast(mask_pyt)};
 }
@@ -78,10 +82,12 @@ py::object dropout_bwd(const at::Tensor &grad_output, const at::Tensor &mask,
     grad_input = at::empty_like(grad_output);
   }
   auto grad_input_nvte = makeTransformerEngineTensor(*grad_input);
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
   NVTE_SCOPED_GIL_RELEASE({
     nvte_dropout_bwd(grad_output_nvte.data(), mask_nvte.data(), grad_input_nvte.data(),
-                     dropout_probability, at::cuda::getCurrentCUDAStream());
+                     dropout_probability, at::musa::getCurrentCUDAStream());
   });
+#endif
   return py::cast(std::move(*grad_input));
 }
 

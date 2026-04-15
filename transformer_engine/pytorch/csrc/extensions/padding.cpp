@@ -77,7 +77,7 @@ void fused_multi_row_padding(at::Tensor input, at::Tensor output,
   // Launch TE kernel
   NVTE_SCOPED_GIL_RELEASE({
     nvte_multi_padding(nvte_input_list.size(), nvte_input_list.data(), nvte_output_list.data(),
-                       padded_num_rows_list.data(), at::cuda::getCurrentCUDAStream());
+                       padded_num_rows_list.data(), at::musa::getCurrentCUDAStream());
   });
 }
 
@@ -151,7 +151,7 @@ void fused_multi_row_unpadding(at::Tensor input, at::Tensor output,
 
   // Launch TE kernel
   nvte_multi_unpadding(nvte_input_list.size(), nvte_input_list.data(), nvte_output_list.data(),
-                       unpadded_num_rows_list.data(), at::cuda::getCurrentCUDAStream());
+                       unpadded_num_rows_list.data(), at::musa::getCurrentCUDAStream());
 }
 
 }  // namespace transformer_engine::pytorch

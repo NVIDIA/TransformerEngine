@@ -5,7 +5,7 @@
  ************************************************************************/
 
 #include <assert.h>
-#include <cuda_runtime.h>
+#include <musa_runtime.h>
 #include <transformer_engine/fused_router.h>
 
 #include "../common.h"

@@ -94,7 +94,7 @@ py::object dequantize(const py::handle &input, transformer_engine::DType otype) 
   auto [out_tensor, out] = q.create_tensor(shape, otype);
 
   NVTE_SCOPED_GIL_RELEASE({
-    nvte_dequantize(input_tensor.data(), out_tensor.data(), at::cuda::getCurrentCUDAStream());
+    nvte_dequantize(input_tensor.data(), out_tensor.data(), at::musa::getCurrentCUDAStream());
   });
 
   return out;
@@ -140,8 +140,10 @@ void multi_tensor_quantize_impl(const std::vector<TensorWrapper> &input_list,
       nvte_tensor_output_list.push_back(output_list[i].data());
     }
     NVTE_SCOPED_GIL_RELEASE({
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
       nvte_multi_cast_transpose(nvte_tensor_input_list.size(), nvte_tensor_input_list.data(),
-                                nvte_tensor_output_list.data(), at::cuda::getCurrentCUDAStream());
+                                nvte_tensor_output_list.data(), at::musa::getCurrentCUDAStream());
+#endif
     });
   } else {
     // Quantize kernels individually
@@ -754,7 +756,7 @@ static StochasticRngStateResources setup_stochastic_rounding_rng_states_helper(
   const size_t rng_elts_per_thread =
       res.with_bulk_generate_rng_states ? (1024 * num_tensors) : 1024;
 
-  auto opts = at::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
+  auto opts = at::TensorOptions().dtype(torch::kInt64).device(torch::kMUSA);
   res.rng_states_tensor = torch::empty({static_cast<int64_t>(2 * num_tensors)}, opts);
   if (need_separate_rng_states) {
     res.rng_states_tensor_colwise = torch::empty({static_cast<int64_t>(2 * num_tensors)}, opts);
@@ -765,7 +767,7 @@ static StochasticRngStateResources setup_stochastic_rounding_rng_states_helper(
 
   for (size_t i = 0; i < num_tensors; ++i) {
     auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
-        std::nullopt, at::cuda::detail::getDefaultCUDAGenerator());
+        std::nullopt, at::musa::detail::getDefaultCUDAGenerator());
 
     // Rowwise RNG state
     at::PhiloxCudaState philox_args = init_philox_state(gen, rng_elts_per_thread);
@@ -806,6 +808,7 @@ void split_quantize_nvfp4_impl_with_rht_helper(const TensorWrapper &input,
                                                const std::vector<size_t> &split_sections,
                                                const std::vector<NVFP4Quantizer *> &quantizers,
                                                cudaStream_t stream) {
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
   const size_t num_tensors = split_sections.size();
   const auto &quantizer = *quantizers.front();
 
@@ -864,9 +867,11 @@ void split_quantize_nvfp4_impl_with_rht_helper(const TensorWrapper &input,
     // We need:
     // 1. Rowwise amax = amax for input
     // 2. Columnwise amax = amax for RHT(input.t)
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
     nvte_group_hadamard_transform_amax(
         input.data(), reinterpret_cast<NVTETensor *>(nvte_tensor_output_list.data()),
         split_sections.data(), num_tensors, 0, quantizer.rht_matrix_random_sign_mask_t, stream);
+#endif
   } else {
     // RHT is enabled, but amax is pre-RHT amax
     NVTE_ERROR("NVFP4 split-quantize does not yet support pre-RHT amax");
@@ -884,10 +889,12 @@ void split_quantize_nvfp4_impl_with_rht_helper(const TensorWrapper &input,
     auto nvte_tile_scheduler_workspace =
         makeTransformerEngineTensor(tile_scheduler_workspace_torch);
     // call the fully-fused grouped kernel for rowwise quantization & colwise RHT quantization transpose
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
     nvte_group_hadamard_transform_cast_fusion(
         input.data(), reinterpret_cast<NVTETensor *>(nvte_tensor_output_list.data()),
         rht_matrix_nvte.data(), split_sections.data(), num_tensors, quant_config_list[0],
         nvte_tile_scheduler_workspace.data(), stream);
+#endif
   } else {
     // Separate quantization for rowwise usage and columnwise usage
     // Rowwise quantization fusion with grouped version
@@ -914,9 +921,11 @@ void split_quantize_nvfp4_impl_with_rht_helper(const TensorWrapper &input,
         out_identity_list.emplace_back(std::move(out_identity));
         nvte_tensor_out_identity_list.push_back(out_identity_list.back().data());
       }
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
       nvte_group_nvfp4_quantize_with_amax(input.data(), nvte_tensor_out_identity_list.data(),
                                           split_sections.data(), num_tensors, quant_config_list[0],
                                           stream);
+#endif
     }
 
     // Columnwise RHT quantization fusion with grouped version
@@ -954,12 +963,15 @@ void split_quantize_nvfp4_impl_with_rht_helper(const TensorWrapper &input,
         out_transpose_list.emplace_back(std::move(out_transpose));
         nvte_tensor_out_transpose_list.push_back(out_transpose_list.back().data());
       }
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
       nvte_group_hadamard_transform_cast_fusion_columnwise(
           input.data(), reinterpret_cast<NVTETensor *>(nvte_tensor_out_transpose_list.data()),
           rht_matrix_nvte.data(), split_sections.data(), num_tensors,
           quant_config_list_colwise_to_use[0], stream);
+#endif
     }
   }
+#endif
 }
 
 void split_quantize_nvfp4_impl_helper(const TensorWrapper &input,
@@ -1017,8 +1029,10 @@ void split_quantize_nvfp4_impl_helper(const TensorWrapper &input,
     NVTE_CHECK(amax_ptr != nullptr, "Could not find amax pointer");
     output_list[i].set_amax(amax_ptr, DType::kFloat32, std::vector<size_t>{1});
   }
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
   nvte_group_amax(input.data(), reinterpret_cast<NVTETensor *>(nvte_tensor_output_list.data()),
                   split_sections.data(), num_tensors, stream);
+#endif
   for (size_t i = 0; i < num_tensors; i++) {
     output_list[i].set_amax(orig_amax_ptr_list[i], DType::kFloat32, std::vector<size_t>{1});
   }
@@ -1079,7 +1093,7 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
              "NVFP4 multi-quantize requires inner dim to be multiple of 128.");
 
   // CUDA stream
-  auto stream = at::cuda::getCurrentCUDAStream();
+  auto stream = at::musa::getCurrentCUDAStream();
 
   // Perform multi-tensor quantization
   NVTE_SCOPED_GIL_RELEASE({

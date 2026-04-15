@@ -20,9 +20,11 @@ void fp8_block_scaling_compute_partial_amax(const at::Tensor &tensor, at::Tensor
   const TensorWrapper tensor_cu = makeTransformerEngineTensor(tensor);
   TensorWrapper amax_cu = makeTransformerEngineTensor(amax);
 
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
   nvte_fp8_block_scaling_compute_partial_amax(tensor_cu.data(), amax_cu.data(), h, w,
                                               amax.stride(0), amax.stride(1), start_offset,
-                                              block_len, at::cuda::getCurrentCUDAStream());
+                                              block_len, at::musa::getCurrentCUDAStream());
+#endif
 }
 
 void fp8_block_scaling_partial_cast(const at::Tensor &inp, at::Tensor out, const at::Tensor &scale,
@@ -43,9 +45,11 @@ void fp8_block_scaling_partial_cast(const at::Tensor &inp, at::Tensor out, const
   TensorWrapper out_cu = makeTransformerEngineTensor(out);
   const TensorWrapper scale_cu = makeTransformerEngineTensor(scale);
 
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
   nvte_fp8_block_scaling_partial_cast(
       inp_cu.data(), out_cu.data(), scale_cu.data(), h, w, scale.stride(0), scale.stride(1),
-      start_offset, block_len, static_cast<NVTEDType>(out_dtype), at::cuda::getCurrentCUDAStream());
+      start_offset, block_len, static_cast<NVTEDType>(out_dtype), at::musa::getCurrentCUDAStream());
+#endif
 }
 
 void mxfp8_scaling_compute_partial_amax(const at::Tensor &input, at::Tensor amax_rowwise,
@@ -59,9 +63,11 @@ void mxfp8_scaling_compute_partial_amax(const at::Tensor &input, at::Tensor amax
   TensorWrapper amax_rowwise_cu = makeTransformerEngineTensor(amax_rowwise);
   TensorWrapper amax_colwise_cu = makeTransformerEngineTensor(amax_colwise);
 
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
   nvte_mxfp8_scaling_compute_partial_amax(input_cu.data(), amax_rowwise_cu.data(),
                                           amax_colwise_cu.data(), rows, cols, start_offset,
-                                          at::cuda::getCurrentCUDAStream());
+                                          at::musa::getCurrentCUDAStream());
+#endif
 }
 
 void mxfp8_scaling_partial_cast(const at::Tensor &input, at::Tensor output_rowwise,
@@ -80,10 +86,12 @@ void mxfp8_scaling_partial_cast(const at::Tensor &input, at::Tensor output_rowwi
   const TensorWrapper scale_inv_rowwise_cu = makeTransformerEngineTensor(scale_inv_rowwise);
   const TensorWrapper scale_inv_colwise_cu = makeTransformerEngineTensor(scale_inv_colwise);
 
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
   nvte_mxfp8_scaling_partial_cast(input_cu.data(), output_rowwise_cu.data(),
                                   output_colwise_cu.data(), scale_inv_rowwise_cu.data(),
                                   scale_inv_colwise_cu.data(), rows, cols, start_offset,
-                                  at::cuda::getCurrentCUDAStream());
+                                  at::musa::getCurrentCUDAStream());
+#endif
 }
 
 }  // namespace transformer_engine::pytorch

@@ -7,12 +7,13 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_UTIL_LOGGING_H_
 #define TRANSFORMER_ENGINE_COMMON_UTIL_LOGGING_H_
 
-#include <cublas_v2.h>
-#include <cuda_runtime_api.h>
-#include <cudnn.h>
-#include <nvrtc.h>
+#include "transformer_engine/musify.h"
+#include <mublas.h>
+#include <musa_runtime_api.h>
+#include <mudnn.h>
+// #include <nvrtc.h>
 
-#include "nccl.h"
+// #include "mccl.h"
 
 #ifdef NVTE_WITH_CUBLASMP
 #include <cublasmp.h>
@@ -106,12 +107,22 @@
 
 #endif  // NVTE_WITH_CUBLASMP
 
-#define NVTE_CHECK_NCCL(expr)                                                 \
-  do {                                                                        \
-    const ncclResult_t status_NVTE_CHECK_NCCL = (expr);                       \
-    if (status_NVTE_CHECK_NCCL != ncclSuccess) {                              \
-      NVTE_ERROR("NCCL Error: ", ncclGetErrorString(status_NVTE_CHECK_NCCL)); \
-    }                                                                         \
+// #define NVTE_CHECK_NCCL(expr)                                                 \
+//   do {                                                                        \
+//     const ncclResult_t status_NVTE_CHECK_NCCL = (expr);                       \
+//     if (status_NVTE_CHECK_NCCL != ncclSuccess) {                              \
+//       NVTE_ERROR("NCCL Error: ", ncclGetErrorString(status_NVTE_CHECK_NCCL)); \
+//     }                                                                         \
+//   } while (false)
+
+#define NVTE_CHECK_MU(expr)                       \
+  do {                                            \
+    MUresult status = (expr);                     \
+    if (status != MUSA_SUCCESS) {                 \
+      const char* err_str;                        \
+      muGetErrorString(status, &err_str);         \
+      NVTE_ERROR("musa driver Error: ", err_str); \
+    }                                             \
   } while (false)
 
 #endif  // TRANSFORMER_ENGINE_COMMON_UTIL_LOGGING_H_

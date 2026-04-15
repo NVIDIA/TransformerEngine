@@ -48,7 +48,7 @@ from transformer_engine.pytorch.quantization import is_mxfp8_available
 from transformer_engine.pytorch.quantization import is_fp8_block_scaling_available
 from transformer_engine.pytorch.quantization import is_nvfp4_available
 from transformer_engine.pytorch.quantization import get_default_recipe
-from transformer_engine.pytorch.utils import get_cudnn_version
+from transformer_engine.pytorch.utils import get_mudnn_version
 from transformer_engine.pytorch.utils import get_device_compute_capability
 from transformer_engine.pytorch.utils import is_bf16_available
 from transformer_engine.pytorch.graph import make_graphed_callables

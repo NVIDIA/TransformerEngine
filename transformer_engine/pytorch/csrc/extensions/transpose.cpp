@@ -35,7 +35,7 @@ at::Tensor fp8_transpose(at::Tensor input, DType otype, std::optional<at::Tensor
   if (output.has_value()) {
     out = *output;
   } else {
-    const auto opts = at::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
+    const auto opts = at::TensorOptions().dtype(torch::kUInt8).device(torch::kMUSA);
     out = at::empty(transpose_shape_int64, opts);
   }
 
@@ -47,7 +47,7 @@ at::Tensor fp8_transpose(at::Tensor input, DType otype, std::optional<at::Tensor
   // Compute transpose
   auto input_cu = makeTransformerEngineTensor(input.data_ptr(), std::vector<size_t>{M, N}, otype);
   auto output_cu = makeTransformerEngineTensor(out.data_ptr(), std::vector<size_t>{N, M}, otype);
-  nvte_transpose(input_cu.data(), output_cu.data(), at::cuda::getCurrentCUDAStream());
+  nvte_transpose(input_cu.data(), output_cu.data(), at::musa::getCurrentCUDAStream());
 
   return out;
 }
@@ -72,7 +72,7 @@ at::Tensor swap_first_dims(at::Tensor tensor, std::optional<at::Tensor> out) {
   // Launch kernel
   const TensorWrapper te_input = makeTransformerEngineTensor(input);
   TensorWrapper te_output = makeTransformerEngineTensor(*out);
-  nvte_swap_first_dims(te_input.data(), te_output.data(), at::cuda::getCurrentCUDAStream());
+  nvte_swap_first_dims(te_input.data(), te_output.data(), at::musa::getCurrentCUDAStream());
 
   return std::move(*out);
 }

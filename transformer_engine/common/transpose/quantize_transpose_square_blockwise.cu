@@ -4,10 +4,10 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include <cuda.h>
-#include <cudaTypedefs.h>
-#include <cuda_bf16.h>
-#include <cuda_runtime.h>
+#include <musa.h>
+#include <musaTypedefs.h>
+#include <musa_bf16.h>
+#include <musa_runtime.h>
 
 #include <cfloat>
 #include <cuda/barrier>
@@ -456,6 +456,7 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK) block_scaled_cast_transpose
   }
 }
 
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
 template <typename OutputType>
 CUtensorMap get_tensor_map(const SimpleTensor& tensor, size_t global_dim_x, size_t global_dim_y) {
   CUtensorMapDataType dataType;
@@ -472,6 +473,7 @@ CUtensorMap get_tensor_map(const SimpleTensor& tensor, size_t global_dim_x, size
                        /*stride_elems=*/global_dim_x, /*offset_elems=*/0, sizeof(OutputType) * 8);
   return tensor_map_output_trans;
 }
+#endif
 
 }  // namespace
 }  // namespace transformer_engine

@@ -7,20 +7,24 @@
 #ifndef TRANSFORMER_ENGINE_PYTORCH_CSRC_COMMON_H_
 #define TRANSFORMER_ENGINE_PYTORCH_CSRC_COMMON_H_
 
+#include <transformer_engine/musify.h>
+
 #include <ATen/ATen.h>
 #include <ATen/Dispatch.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <ATen/cuda/CUDAGeneratorImpl.h>
+#include <ATen/musa/MUSAContext.h>
+#include <ATen/musa/MUSAGeneratorImpl.h>
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
 #include <ATen/cudnn/Handle.h>
+#endif
 #include <ATen/native/DispatchStub.h>
 #include <c10/macros/Macros.h>
 #include <c10/util/Float8_e4m3fn.h>
 #include <c10/util/Float8_e5m2.h>
-#include <cublasLt.h>
-#include <cuda.h>
-#include <cuda_bf16.h>
-#include <cuda_runtime.h>
-#include <cudnn.h>
+#include <mublas.h>
+#include <musa.h>
+#include <musa_bf16.h>
+#include <musa_runtime.h>
+#include <mudnn.h>
 #include <torch/extension.h>
 #include <torch/torch.h>
 #include <transformer_engine/activation.h>
@@ -31,7 +35,7 @@
 #include <transformer_engine/fused_rope.h>
 #include <transformer_engine/fused_router.h>
 #include <transformer_engine/gemm.h>
-#include <transformer_engine/hadamard_transform.h>
+// #include <transformer_engine/hadamard_transform.h>
 #include <transformer_engine/multi_stream.h>
 #include <transformer_engine/multi_tensor.h>
 #include <transformer_engine/normalization.h>
@@ -43,7 +47,9 @@
 #include <transformer_engine/transformer_engine.h>
 #include <transformer_engine/transpose.h>
 
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
 #include <ATen/cuda/CUDAGraphsUtils.cuh>
+#endif
 #include <cassert>
 #include <cstring>
 #include <iostream>

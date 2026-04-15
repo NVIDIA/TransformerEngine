@@ -11,7 +11,7 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_FUSED_ATTN_ARBITRARY_SEQLEN_H_
 #define TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_FUSED_ATTN_ARBITRARY_SEQLEN_H_
 
-#include <cudnn.h>
+#include <mudnn.h>
 
 #include "common/common.h"
 #include "transformer_engine/fused_attn.h"

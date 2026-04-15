@@ -7,15 +7,16 @@
 /*! \file ptx.cuh
  *  \brief BW PTX
  */
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
 
 #ifndef TRANSFORMER_ENGINE_PTX_CUH_
 #define TRANSFORMER_ENGINE_PTX_CUH_
 
-#include <cuda.h>
-#include <cuda_runtime.h>
+#include <musa.h>
+#include <musa_runtime.h>
 
 #if CUDA_VERSION >= 12080
-#include <cuda_fp4.h>
+#include <musa_fp4.h>
 #endif  // CUDA_VERSION >= 12080
 
 #include "common/utils.cuh"
@@ -1962,3 +1963,5 @@ __forceinline__ __device__ void copy_2d_to_sharedx3(
 }  // namespace transformer_engine
 
 #endif  // TRANSFORMER_ENGINE_PTX_CUH_
+
+#endif

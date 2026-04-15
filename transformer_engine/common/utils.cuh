@@ -7,12 +7,14 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_UTILS_CUH_
 #define TRANSFORMER_ENGINE_COMMON_UTILS_CUH_
 
-#include <cuda_bf16.h>
-#include <cuda_fp16.h>
-#include <cuda_fp8.h>
+#include "transformer_engine/musify.h"
+
+#include <musa_bf16.h>
+#include <musa_fp16.h>
+#include <musa_fp8.h>
 
 #if CUDA_VERSION >= 12080
-#include <cuda_fp4.h>
+#include <musa_fp4.h>
 #endif
 
 #if !defined(__CUDACC_RTC__)
@@ -300,6 +302,23 @@ struct Vec {
     }
   }
 
+  __device__ Vec() = default;
+
+  __device__ Vec(const Elt_type& num) {
+#pragma unroll
+    for (int i = 0; i < NUM_ELT; i++) {
+      this->data.elt[i] = num;
+    }
+  }
+
+  __device__ Vec& operator=(const Elt_type& num) {
+#pragma unroll
+    for (int i = 0; i < NUM_ELT; i++) {
+      this->data.elt[i] = num;
+    }
+    return *this;
+  }
+
   template <typename Op>
   inline __device__ void assign(const Op &op) {
 #pragma unroll
@@ -372,9 +391,18 @@ struct InterCTASync {
   }
 
   inline __device__ void spin_wait_(int *barrier, int step, int expected) {
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
     asm volatile("red.release.gpu.global.add.s32 [%0], %1;" ::"l"(barrier), "r"(step));
+#else
+    __musa_fence_rel();
+    atomicAdd(barrier, step);
+#endif
     for (int found = -1; found != expected;) {
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
       asm volatile("ld.global.acquire.gpu.b32 %0, [%1];" : "=r"(found) : "l"(barrier));
+#else
+      found = volatile_load(barrier);
+#endif
     }
   }
 

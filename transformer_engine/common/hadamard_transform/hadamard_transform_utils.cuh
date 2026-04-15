@@ -7,10 +7,10 @@
 #ifndef TRANSFORMER_ENGINE_HADAMARD_TRANSFORM_UTILS_CUH_
 #define TRANSFORMER_ENGINE_HADAMARD_TRANSFORM_UTILS_CUH_
 
-#include <cuda.h>
-#include <cudaTypedefs.h>
-#include <cuda_bf16.h>
-#include <cuda_runtime.h>
+#include <musa.h>
+#include <musaTypedefs.h>
+#include <musa_bf16.h>
+#include <musa_runtime.h>
 
 #include "common/common.h"
 #include "common/util/ptx.cuh"

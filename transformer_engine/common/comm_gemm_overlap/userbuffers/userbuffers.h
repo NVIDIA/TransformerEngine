@@ -7,8 +7,8 @@
 #ifndef TRANSFORMER_ENGINE_USERBUFFERS_H_
 #define TRANSFORMER_ENGINE_USERBUFFERS_H_
 
-#include <cuda.h>
-#include <cuda_runtime.h>
+#include <musa.h>
+#include <musa_runtime.h>
 #include <pthread.h>
 
 #include <chrono>

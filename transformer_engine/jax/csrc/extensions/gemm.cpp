@@ -17,7 +17,7 @@
 #include "common/util/cuda_runtime.h"
 #include "common/util/string.h"
 #include "common/util/system.h"
-#include "cuda_runtime.h"
+#include "musa_runtime.h"
 #include "nccl.h"
 #include "transformer_engine/swizzle.h"
 #include "xla/ffi/api/c_api.h"

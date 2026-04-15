@@ -64,7 +64,7 @@ at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
     nvte_fused_rope_forward(input_cu.data(), cu_seqlens_cu.data(), freqs_cu.data(),
                             start_positions_cu.data(), output_cu.data(), qkv_format, interleaved,
                             cp_size, cp_rank, max_s, b, h, d, d2, stride_t, /*stride_b=*/0,
-                            stride_h, stride_d, at::cuda::getCurrentCUDAStream());
+                            stride_h, stride_d, at::musa::getCurrentCUDAStream());
 
     return output;
   }
@@ -98,7 +98,7 @@ at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
   nvte_fused_rope_forward(input_cu.data(), cu_seqlens_cu.data(), freqs_cu.data(),
                           start_positions_cu.data(), output_cu.data(), qkv_format, interleaved,
                           cp_size, cp_rank, s, b, h, d, d2, stride_s, stride_b, stride_h, stride_d,
-                          at::cuda::getCurrentCUDAStream());
+                          at::musa::getCurrentCUDAStream());
 
   return output;
 }
@@ -157,7 +157,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_qkv_rope_forward(
                               start_positions_cu.data(), q_out_cu.data(), k_out_cu.data(),
                               v_out_cu.data(), qkv_format, interleaved, cp_size, cp_rank, s, b, h,
                               d, d2, qkv_split_arg_list[0], qkv_split_arg_list[1],
-                              qkv_split_arg_list[2], at::cuda::getCurrentCUDAStream());
+                              qkv_split_arg_list[2], at::musa::getCurrentCUDAStream());
 
   return std::make_tuple(q_out, k_out, v_out);
 }
@@ -217,7 +217,7 @@ at::Tensor fused_rope_backward(const at::Tensor &output_grads, const at::Tensor 
     nvte_fused_rope_backward(output_grads_cu.data(), cu_seqlens_cu.data(), freqs_cu.data(),
                              start_positions_cu.data(), input_grads_cu.data(), qkv_format,
                              interleaved, cp_size, cp_rank, max_s, b, h, d, d2, stride_t,
-                             /*stride_b=*/0, stride_h, stride_d, at::cuda::getCurrentCUDAStream());
+                             /*stride_b=*/0, stride_h, stride_d, at::musa::getCurrentCUDAStream());
 
     return input_grads;
   }
@@ -255,7 +255,7 @@ at::Tensor fused_rope_backward(const at::Tensor &output_grads, const at::Tensor 
   nvte_fused_rope_backward(output_grads_cu.data(), cu_seqlens_cu.data(), freqs_cu.data(),
                            start_positions_cu.data(), input_grads_cu.data(), qkv_format,
                            interleaved, cp_size, cp_rank, s, b, h, d, d2, stride_s, stride_b,
-                           stride_h, stride_d, at::cuda::getCurrentCUDAStream());
+                           stride_h, stride_d, at::musa::getCurrentCUDAStream());
 
   return input_grads;
 }
@@ -293,7 +293,7 @@ at::Tensor fused_qkv_rope_backward(const at::Tensor &q_grad_out, const at::Tenso
                                q_freqs_cu.data(), k_freqs_cu.data(), qkv_grad_cu.data(), qkv_format,
                                interleaved, cp_size, cp_rank, s, b, h, d, d2, qkv_split_arg_list[0],
                                qkv_split_arg_list[1], qkv_split_arg_list[2],
-                               at::cuda::getCurrentCUDAStream());
+                               at::musa::getCurrentCUDAStream());
 
   return qkv_grad_input;
 }

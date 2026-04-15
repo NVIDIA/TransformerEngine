@@ -46,7 +46,7 @@ from transformer_engine.pytorch.constants import TE_DType
 
 from transformer_engine.pytorch.utils import (
     get_device_compute_capability,
-    get_cudnn_version,
+    get_mudnn_version,
     SplitAlongDim,
     combine_tensors,
 )
@@ -354,7 +354,7 @@ def get_attention_backend(
     if not logger.hasHandlers():
         logger.addHandler(AttentionLogging._stream_handler)
     device_compute_capability = get_device_compute_capability()
-    cudnn_version = get_cudnn_version()
+    cudnn_version = get_mudnn_version()
     run_config = {
         "transformer_engine_version": te.__version__,
         "compute_capability": "sm"

@@ -14,11 +14,13 @@ void nvte_silu(const NVTETensor input, NVTETensor output, cudaStream_t stream) {
 }
 
 void nvte_group_silu(const NVTEGroupedTensor input, NVTEGroupedTensor output, cudaStream_t stream) {
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
   NVTE_API_CALL(nvte_group_silu);
   using namespace transformer_engine;
   constexpr bool IS_ACT = true;
   dispatch::group_quantize_fwd_helper<IS_ACT, Empty, silu<fp32, fp32>>(input, output, nullptr,
                                                                        stream);
+#endif
 }
 
 void nvte_dsilu(const NVTETensor grad, const NVTETensor input, NVTETensor output,
@@ -30,6 +32,7 @@ void nvte_dsilu(const NVTETensor grad, const NVTETensor input, NVTETensor output
 
 void nvte_group_dsilu(const NVTEGroupedTensor grad, const NVTEGroupedTensor input,
                       NVTEGroupedTensor output, cudaStream_t stream) {
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
   NVTE_API_CALL(nvte_group_dsilu);
   using namespace transformer_engine;
   NVTETensor dbias = nullptr;
@@ -40,11 +43,13 @@ void nvte_group_dsilu(const NVTEGroupedTensor grad, const NVTEGroupedTensor inpu
 
   dispatch::group_quantize_bwd_helper<IS_DBIAS, IS_DACT, Empty, dsilu<fp32, fp32>>(
       grad, input, output, dbias, workspace, nullptr, stream);
+#endif
 }
 
 void nvte_quantize_dbias_dsilu(const NVTETensor input, const NVTETensor activation_input,
                                NVTETensor output, NVTETensor dbias, NVTETensor workspace,
                                cudaStream_t stream) {
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
   NVTE_API_CALL(nvte_quantize_dbias_dsilu);
   using namespace transformer_engine;
 
@@ -53,12 +58,14 @@ void nvte_quantize_dbias_dsilu(const NVTETensor input, const NVTETensor activati
 
   dispatch::quantize_bwd_helper<IS_DBIAS, IS_DACT, Empty, dsilu<fp32, fp32>>(
       input, activation_input, output, dbias, workspace, nullptr, stream);
+#endif
 }
 
 void nvte_group_quantize_dbias_dsilu(const NVTEGroupedTensor input,
                                      const NVTEGroupedTensor activation_input,
                                      NVTEGroupedTensor output, NVTETensor dbias,
                                      NVTETensor workspace, cudaStream_t stream) {
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
   NVTE_API_CALL(nvte_group_quantize_dbias_dsilu);
   using namespace transformer_engine;
 
@@ -67,6 +74,7 @@ void nvte_group_quantize_dbias_dsilu(const NVTEGroupedTensor input,
 
   dispatch::group_quantize_bwd_helper<IS_DBIAS, IS_DACT, Empty, dsilu<fp32, fp32>>(
       input, activation_input, output, dbias, workspace, nullptr, stream);
+#endif
 }
 
 void nvte_swiglu(const NVTETensor input, NVTETensor output, cudaStream_t stream) {

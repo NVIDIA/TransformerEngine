@@ -56,16 +56,16 @@ def assert_warmed_up(module: torch.nn.Module) -> None:
     )
 
 
-if TORCH_MAJOR == 2 and TORCH_MINOR >= 4 or TORCH_MAJOR > 2:
-    # pylint: disable=unused-import
-    from .onnx_extensions import (
-        torch_onnx_gemm_inf_op,
-        onnx_quantize_fp8_op,
-        onnx_dequantize_fp8_op,
-        onnx_quantize_mxfp8_op,
-        onnx_dequantize_mxfp8_op,
-        onnx_layernorm,
-        onnx_attention_mask_func,
-        onnx_gemm,
-        te_translation_table,
-    )
+# if TORCH_MAJOR == 2 and TORCH_MINOR >= 4 or TORCH_MAJOR > 2:
+#     # pylint: disable=unused-import
+#     from .onnx_extensions import (
+#         torch_onnx_gemm_inf_op,
+#         onnx_quantize_fp8_op,
+#         onnx_dequantize_fp8_op,
+#         onnx_quantize_mxfp8_op,
+#         onnx_dequantize_mxfp8_op,
+#         onnx_layernorm,
+#         onnx_attention_mask_func,
+#         onnx_gemm,
+#         te_translation_table,
+#     )

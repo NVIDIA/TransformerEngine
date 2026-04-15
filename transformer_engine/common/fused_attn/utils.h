@@ -7,7 +7,7 @@
 #ifndef TRANSFORMER_ENGINE_FUSED_ATTN_UTILS_H_
 #define TRANSFORMER_ENGINE_FUSED_ATTN_UTILS_H_
 
-#include <cudnn.h>
+#include <mudnn.h>
 #include <cudnn_frontend.h>
 #include <cudnn_frontend_utils.h>
 

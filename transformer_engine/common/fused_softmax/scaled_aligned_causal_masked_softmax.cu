@@ -5,10 +5,12 @@
  ************************************************************************/
 
 #include <assert.h>
-#include <cuda.h>
-#include <cuda_fp16.h>
+#include <musa.h>
+#include <musa_fp16.h>
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
 #include <cuda_profiler_api.h>
-#include <cuda_runtime.h>
+#endif
+#include <musa_runtime.h>
 #include <stdint.h>
 #include <transformer_engine/softmax.h>
 
@@ -92,7 +94,7 @@ struct Max {
 template <typename T>
 __device__ __forceinline__ T WARP_SHFL_XOR_NATIVE(T value, int laneMask, int width = warpSize,
                                                   unsigned int mask = 0xffffffff) {
-#if CUDA_VERSION >= 9000
+#if NVTE_USE_MUSA
   return __shfl_xor_sync(mask, value, laneMask, width);
 #else
   return __shfl_xor(value, laneMask, width);

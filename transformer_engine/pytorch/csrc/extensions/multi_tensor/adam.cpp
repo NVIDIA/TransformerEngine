@@ -19,7 +19,7 @@ void multi_tensor_adam_cuda(int chunk_size, at::Tensor noop_flag,
 
   nvte_multi_tensor_adam_cuda(chunk_size, noop_flag_cu.data(), tensor_lists_ptr.data(), num_lists,
                               num_tensors, lr, beta1, beta2, epsilon, step, mode, bias_correction,
-                              weight_decay, at::cuda::getCurrentCUDAStream());
+                              weight_decay, at::musa::getCurrentCUDAStream());
 }
 
 void multi_tensor_adam_param_remainder_cuda(int chunk_size, at::Tensor noop_flag,
@@ -33,7 +33,7 @@ void multi_tensor_adam_param_remainder_cuda(int chunk_size, at::Tensor noop_flag
 
   nvte_multi_tensor_adam_param_remainder_cuda(
       chunk_size, noop_flag_cu.data(), tensor_lists_ptr.data(), num_lists, num_tensors, lr, beta1,
-      beta2, epsilon, step, mode, bias_correction, weight_decay, at::cuda::getCurrentCUDAStream());
+      beta2, epsilon, step, mode, bias_correction, weight_decay, at::musa::getCurrentCUDAStream());
 }
 
 void multi_tensor_adam_fp8_cuda(int chunk_size, at::Tensor noop_flag,
@@ -48,7 +48,7 @@ void multi_tensor_adam_fp8_cuda(int chunk_size, at::Tensor noop_flag,
   nvte_multi_tensor_adam_fp8_cuda(chunk_size, noop_flag_cu.data(), tensor_lists_ptr.data(),
                                   num_lists, num_tensors, lr, beta1, beta2, epsilon, step, mode,
                                   bias_correction, weight_decay, static_cast<NVTEDType>(fp8_dtype),
-                                  at::cuda::getCurrentCUDAStream());
+                                  at::musa::getCurrentCUDAStream());
 }
 
 void multi_tensor_adam_capturable_cuda(int chunk_size, at::Tensor noop_flag,
@@ -67,7 +67,7 @@ void multi_tensor_adam_capturable_cuda(int chunk_size, at::Tensor noop_flag,
   nvte_multi_tensor_adam_capturable_cuda(
       chunk_size, noop_flag_cu.data(), tensor_lists_ptr.data(), num_lists, num_tensors,
       lr_cu.data(), beta1, beta2, epsilon, step_cu.data(), mode, bias_correction, weight_decay,
-      inv_scale_cu.data(), at::cuda::getCurrentCUDAStream());
+      inv_scale_cu.data(), at::musa::getCurrentCUDAStream());
 }
 
 void multi_tensor_adam_capturable_master_cuda(int chunk_size, at::Tensor noop_flag,
@@ -86,7 +86,7 @@ void multi_tensor_adam_capturable_master_cuda(int chunk_size, at::Tensor noop_fl
   nvte_multi_tensor_adam_capturable_master_cuda(
       chunk_size, noop_flag_cu.data(), tensor_lists_ptr.data(), num_lists, num_tensors,
       lr_cu.data(), beta1, beta2, epsilon, step_cu.data(), mode, bias_correction, weight_decay,
-      inv_scale_cu.data(), at::cuda::getCurrentCUDAStream());
+      inv_scale_cu.data(), at::musa::getCurrentCUDAStream());
 }
 
 }  // namespace transformer_engine::pytorch

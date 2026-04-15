@@ -4,8 +4,8 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include <cuda.h>
-#include <cuda_bf16.h>
+#include <musa.h>
+#include <musa_bf16.h>
 #include <nvshmem.h>
 
 #include <cstdio>

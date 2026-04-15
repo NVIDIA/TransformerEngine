@@ -213,6 +213,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("moe_unpermute_bwd", transformer_engine::pytorch::moe_unpermute_bwd, "MOE unpermute BWD",
         py::call_guard<py::gil_scoped_release>());
 
+  // Permutation with mask functions
+  m.def("moe_permute_mask", transformer_engine::pytorch::moe_permute_mask);
+  m.def("moe_unpermute_mask", transformer_engine::pytorch::moe_unpermute_mask);
+  m.def("moe_unpermute_mask_bwd_with_merging_probs", transformer_engine::pytorch::moe_unpermute_mask_bwd_with_merging_probs);
+
   // Softmax functions
   m.def("scaled_softmax_forward", &transformer_engine::pytorch::scaled_softmax_forward,
         "Scaled Softmax FWD", py::call_guard<py::gil_scoped_release>());
@@ -300,21 +305,21 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Convert tensor block scales into GEMM swizzled format");
 
   // attention kernels
-  m.def("fa_prepare_fwd", &transformer_engine::pytorch::fa_prepare_fwd,
-        "Prepare QKV for Flash Attention", py::call_guard<py::gil_scoped_release>());
-  m.def("fa_prepare_bwd", &transformer_engine::pytorch::fa_prepare_bwd,
-        "Backward of QKV preparation for Flash Attention",
-        py::call_guard<py::gil_scoped_release>());
+//   m.def("fa_prepare_fwd", &transformer_engine::pytorch::fa_prepare_fwd,
+//         "Prepare QKV for Flash Attention", py::call_guard<py::gil_scoped_release>());
+//   m.def("fa_prepare_bwd", &transformer_engine::pytorch::fa_prepare_bwd,
+//         "Backward of QKV preparation for Flash Attention",
+//         py::call_guard<py::gil_scoped_release>());
   m.def("fused_attn_fwd", &transformer_engine::pytorch::fused_attn_fwd,
         "Fused Attention FP8/BF16/FP16 FWD with separate Q, K and V");
   m.def("fused_attn_bwd", &transformer_engine::pytorch::fused_attn_bwd,
         "Fused Attention FP8/BF16/FP16 BWD with separate Q, K and V");
-  m.def("copy_to_kv_cache", &transformer_engine::pytorch::copy_to_kv_cache,
-        "Copy new KV tokens to KV cache", py::call_guard<py::gil_scoped_release>());
-  m.def("convert_thd_to_bshd", &transformer_engine::pytorch::convert_thd_to_bshd,
-        "Convert a tensor from THD to BSHD", py::call_guard<py::gil_scoped_release>());
-  m.def("convert_bshd_to_thd", &transformer_engine::pytorch::convert_bshd_to_thd,
-        "Convert a tesnor from BSHD to THD", py::call_guard<py::gil_scoped_release>());
+//   m.def("copy_to_kv_cache", &transformer_engine::pytorch::copy_to_kv_cache,
+//         "Copy new KV tokens to KV cache", py::call_guard<py::gil_scoped_release>());
+//   m.def("convert_thd_to_bshd", &transformer_engine::pytorch::convert_thd_to_bshd,
+//         "Convert a tensor from THD to BSHD", py::call_guard<py::gil_scoped_release>());
+//   m.def("convert_bshd_to_thd", &transformer_engine::pytorch::convert_bshd_to_thd,
+//         "Convert a tesnor from BSHD to THD", py::call_guard<py::gil_scoped_release>());
 
   // fused apply rope
   m.def("fused_rope_forward", &transformer_engine::pytorch::fused_rope_forward,
@@ -361,9 +366,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("grad_input") = std::nullopt);
 
   // Misc
-  m.def("get_cublasLt_version", &transformer_engine::pytorch::get_cublasLt_version,
+  m.def("get_mublas_version", &transformer_engine::pytorch::get_mublas_version,
         "Get cublasLt version", py::call_guard<py::gil_scoped_release>());
-  m.def("get_cudnn_version", &transformer_engine::pytorch::get_cudnn_version, "Get cuDNN version",
+  m.def("get_mudnn_version", &transformer_engine::pytorch::get_mudnn_version, "Get cuDNN version",
         py::call_guard<py::gil_scoped_release>());
   m.def("get_num_cublas_streams", &nvte_get_num_compute_streams, "Get number of compute streams",
         py::call_guard<py::gil_scoped_release>());

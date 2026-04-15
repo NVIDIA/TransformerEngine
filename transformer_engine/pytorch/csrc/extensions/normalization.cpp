@@ -8,6 +8,10 @@
 #include "common/util/system.h"
 #include "pybind.h"
 
+#include <torch_musa/csrc/core/MUSAGuard.h>
+#include <ATen/ops/torch__fused_rmsnorm_backward_native.h>
+#include <torch_musa/csrc/aten/ops/RMSNorm.h>
+
 namespace transformer_engine::pytorch {
 
 std::vector<py::object> layernorm_bwd(const at::Tensor &dz, const at::Tensor &x,
@@ -38,8 +42,8 @@ std::vector<py::object> layernorm_bwd(const at::Tensor &dz, const at::Tensor &x,
   NVTE_SCOPED_GIL_RELEASE({
     nvte_layernorm_bwd(dz_cu.data(), x_cu.data(), mu_cu.data(), rsigma_cu.data(), gamma_cu.data(),
                        dx_cu.data(), dgamma_cu.data(), dbeta_cu.data(), workspace.data(),
-                       at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
-                       zero_centered_gamma, at::cuda::getCurrentCUDAStream());
+                       at::musa::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
+                       zero_centered_gamma, at::musa::getCurrentCUDAStream());
   });
 
   // Alloc space for Tensors.
@@ -51,8 +55,8 @@ std::vector<py::object> layernorm_bwd(const at::Tensor &dz, const at::Tensor &x,
   NVTE_SCOPED_GIL_RELEASE({
     nvte_layernorm_bwd(dz_cu.data(), x_cu.data(), mu_cu.data(), rsigma_cu.data(), gamma_cu.data(),
                        dx_cu.data(), dgamma_cu.data(), dbeta_cu.data(), workspace.data(),
-                       at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
-                       zero_centered_gamma, at::cuda::getCurrentCUDAStream());
+                       at::musa::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
+                       zero_centered_gamma, at::musa::getCurrentCUDAStream());
   });
 
   return {py::cast(dx), py::cast(dgamma), py::cast(dbeta)};
@@ -67,7 +71,7 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
   // Ensure that cuDNN handle is created on the correct device,
   // overriding torch.cuda.set_device calls from user side.
   // Assumes all tensors passed are on the same device.
-  at::cuda::CUDAGuard device_guard(input.cast<at::Tensor>().device());
+  at::musa::CUDAGuard device_guard(input.cast<at::Tensor>().device());
 
   // Input and param tensors
   auto none = py::none();
@@ -174,8 +178,8 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
     nvte_layernorm_fwd(input_nvte.data(), weight_nvte.data(), bias_nvte.data(), eps,
                        kernel_out_nvte->data(), mu_nvte.data(), rsigma_nvte.data(),
                        workspace.data(),
-                       at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
-                       zero_centered_gamma, at::cuda::getCurrentCUDAStream());
+                       at::musa::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
+                       zero_centered_gamma, at::musa::getCurrentCUDAStream());
   });
 
   // Allocate workspace
@@ -188,8 +192,8 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
     nvte_layernorm_fwd(input_nvte.data(), weight_nvte.data(), bias_nvte.data(), eps,
                        kernel_out_nvte->data(), mu_nvte.data(), rsigma_nvte.data(),
                        workspace.data(),
-                       at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
-                       zero_centered_gamma, at::cuda::getCurrentCUDAStream());
+                       at::musa::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
+                       zero_centered_gamma, at::musa::getCurrentCUDAStream());
   });
 
   // Quantize output if needed
@@ -231,12 +235,13 @@ std::vector<py::object> rmsnorm_bwd(const at::Tensor &dz, const at::Tensor &x,
   auto dx_cu = makeTransformerEngineTensor(dx);
   auto dgamma_cu = makeTransformerEngineTensor(dgamma);
 
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
   // This call populates tensors with the required config.
   NVTE_SCOPED_GIL_RELEASE({
     nvte_rmsnorm_bwd(dz_cu.data(), x_cu.data(), rsigma_cu.data(), gamma_cu.data(), dx_cu.data(),
                      dgamma_cu.data(), workspace.data(),
-                     at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
-                     zero_centered_gamma, at::cuda::getCurrentCUDAStream());
+                     at::musa::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
+                     zero_centered_gamma, at::musa::getCurrentCUDAStream());
   });
 
   // Alloc space for Tensors.
@@ -248,10 +253,14 @@ std::vector<py::object> rmsnorm_bwd(const at::Tensor &dz, const at::Tensor &x,
   NVTE_SCOPED_GIL_RELEASE({
     nvte_rmsnorm_bwd(dz_cu.data(), x_cu.data(), rsigma_cu.data(), gamma_cu.data(), dx_cu.data(),
                      dgamma_cu.data(), workspace.data(),
-                     at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
-                     zero_centered_gamma, at::cuda::getCurrentCUDAStream());
+                     at::musa::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
+                     zero_centered_gamma, at::musa::getCurrentCUDAStream());
   });
+#else
+  std::tie(dx, dgamma) = at::_fused_rmsnorm_backward(
+      dz_, rsigma_, x_, {x_.size(-1)}, 1e-5, gamma_);
 
+#endif
   return {py::cast(dx), py::cast(dgamma)};
 }
 
@@ -277,12 +286,13 @@ std::vector<py::object> rmsnorm_bwd_add(const at::Tensor &dz, const at::Tensor &
   auto dx_cu = makeTransformerEngineTensor(dx);
   auto dgamma_cu = makeTransformerEngineTensor(dgamma);
 
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
   // This call populates tensors with the required config.
   NVTE_SCOPED_GIL_RELEASE({
     nvte_rmsnorm_bwd_add(dz_cu.data(), x_cu.data(), add_cu.data(), rsigma_cu.data(),
                          gamma_cu.data(), dx_cu.data(), dgamma_cu.data(), workspace.data(),
-                         at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
-                         zero_centered_gamma, at::cuda::getCurrentCUDAStream());
+                         at::musa::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
+                         zero_centered_gamma, at::musa::getCurrentCUDAStream());
   });
 
   // Alloc space for Tensors.
@@ -294,10 +304,11 @@ std::vector<py::object> rmsnorm_bwd_add(const at::Tensor &dz, const at::Tensor &
   NVTE_SCOPED_GIL_RELEASE({
     nvte_rmsnorm_bwd_add(dz_cu.data(), x_cu.data(), add_cu.data(), rsigma_cu.data(),
                          gamma_cu.data(), dx_cu.data(), dgamma_cu.data(), workspace.data(),
-                         at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
-                         zero_centered_gamma, at::cuda::getCurrentCUDAStream());
+                         at::musa::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
+                         zero_centered_gamma, at::musa::getCurrentCUDAStream());
   });
 
+#endif
   return {py::cast(dx), py::cast(dgamma)};
 }
 
@@ -309,7 +320,7 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
   // Ensure that cuDNN handle is created on the correct device,
   // overriding torch.cuda.set_device calls from user side.
   // Assumes all tensors passed are on the same device.
-  at::cuda::CUDAGuard device_guard(input.cast<at::Tensor>().device());
+  at::musa::CUDAGuard device_guard(input.cast<at::Tensor>().device());
 
   // Input and param tensors
   auto none = py::none();
@@ -409,8 +420,8 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
   NVTE_SCOPED_GIL_RELEASE({
     nvte_rmsnorm_fwd(input_nvte.data(), weight_nvte.data(), eps, kernel_out_nvte->data(),
                      rsigma_nvte.data(), workspace.data(),
-                     at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
-                     zero_centered_gamma, at::cuda::getCurrentCUDAStream());
+                     at::musa::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
+                     zero_centered_gamma, at::musa::getCurrentCUDAStream());
   });
 
   // Allocate workspace
@@ -422,8 +433,8 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
   NVTE_SCOPED_GIL_RELEASE({
     nvte_rmsnorm_fwd(input_nvte.data(), weight_nvte.data(), eps, kernel_out_nvte->data(),
                      rsigma_nvte.data(), workspace.data(),
-                     at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
-                     zero_centered_gamma, at::cuda::getCurrentCUDAStream());
+                     at::musa::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
+                     zero_centered_gamma, at::musa::getCurrentCUDAStream());
   });
 
   // Quantize output if needed

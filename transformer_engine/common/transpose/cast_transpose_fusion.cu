@@ -4,7 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include <cuda_runtime.h>
+#include <musa_runtime.h>
 #include <transformer_engine/transpose.h>
 
 #include <cfloat>
@@ -12,6 +12,7 @@
 #include <numeric>
 #include <type_traits>
 
+#include "../cast/dispatch/cast_kernels.muh"
 #include "../util/math.h"
 #include "../util/rtc.h"
 #include "../util/string.h"
@@ -689,9 +690,11 @@ void cast_transpose_fused(const Tensor &input, const Tensor *act_input, Tensor *
             constexpr const char *otype_name = TypeInfo<OutputType>::name;
 
             int actType = 0;
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
             if constexpr (IS_DACT || IS_ACT) {
               actType = get_activation_type<ComputeType, ParamOP, OP>();
             }
+#endif
 
             // Compile NVRTC kernel if needed and launch
             auto &rtc_manager = rtc::KernelManager::instance();
@@ -1237,6 +1240,8 @@ void dgated_act_cast_transpose(const Tensor &input, const Tensor &gated_act_inpu
 
 // Explicit template instantiation
 template void cast_transpose_fused<true, false, false, float, transformer_engine::Empty, nullptr>(
+    const Tensor &, const Tensor *, Tensor *, Tensor *, Tensor *, cudaStream_t);
+template void cast_transpose_fused<true, false, false, float, transformer_engine::Empty, detail::identity>(
     const Tensor &, const Tensor *, Tensor *, Tensor *, Tensor *, cudaStream_t);
 #define NVTE_INSTANTIATE_ACTIVATION(op)                                                    \
   template void cast_transpose_fused<false, false, true, float, transformer_engine::Empty, \

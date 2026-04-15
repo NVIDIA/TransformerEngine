@@ -8,8 +8,13 @@
 
 namespace transformer_engine::pytorch {
 
-size_t get_cublasLt_version() { return cublasLtGetVersion(); }
+// size_t get_mublas_version() { return cublasLtGetVersion(); }
 
-size_t get_cudnn_version() { return cudnnGetVersion(); }
+// size_t get_mudnn_version() { return cudnnGetVersion(); }
+
+size_t get_mublas_version() { return MUBLAS_VERSION_MAJOR * 10000ul + MUBLAS_VERSION_MINOR * 100ul + MUBLAS_VERSION_PATCH; }
+
+size_t get_mudnn_version() { return ::musa::dnn::GetVersion(); }
+
 
 }  // namespace transformer_engine::pytorch

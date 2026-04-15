@@ -7,13 +7,17 @@
 #include "transformer_engine/fused_attn.h"
 
 #include "../common.h"
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
 #include "../cudnn_utils.h"
+#endif
 #include "../util/cuda_runtime.h"
 #include "../util/system.h"
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
 #include "fused_attn_f16_arbitrary_seqlen.h"
 #include "fused_attn_f16_max512_seqlen.h"
 #include "fused_attn_fp8.h"
 #include "utils.h"
+#endif
 
 // map NVTE_QKV_Layout to NVTE_QKV_Layout_Group
 NVTE_QKV_Layout_Group nvte_get_qkv_layout_group(NVTE_QKV_Layout qkv_layout) {
@@ -141,6 +145,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     int64_t window_size_right, bool return_max_logit, bool cuda_graph, bool deterministic) {
   using namespace transformer_engine;
   NVTE_Fused_Attn_Backend backend = NVTE_Fused_Attn_Backend::NVTE_No_Backend;
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
   const int device_id = cuda::current_device();
   const int sm_arch_ = cuda::sm_arch(device_id);
   NVTE_CHECK(q_dtype == kv_dtype, "Q and KV must have the same data type.");
@@ -445,6 +450,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
   } else {
     backend = NVTE_Fused_Attn_Backend::NVTE_No_Backend;
   }
+#endif
   return backend;
 }
 
@@ -462,6 +468,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                          NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
                          int64_t window_size_left, int64_t window_size_right,
                          bool bottom_right_diagonal, NVTETensor workspace, cudaStream_t stream) {
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
   NVTE_API_CALL(nvte_flash_attn_fwd);
   using namespace transformer_engine;
   const Tensor *input_cu_seqlens_q = convertNVTETensorCheck(cu_seqlens_q);
@@ -570,6 +577,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   } else {
     NVTE_ERROR("Invalid combination of data type and sequence length for fused attention. \n");
   }
+#endif
 }
 // NVTE fused attention BWD with separate Q, K and V
 void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETensor V,
@@ -585,6 +593,7 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                          int64_t window_size_left, int64_t window_size_right,
                          bool bottom_right_diagonal, bool deterministic, bool cuda_graph,
                          NVTETensor workspace, cudaStream_t stream) {
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
   NVTE_API_CALL(nvte_flash_attn_bwd);
   using namespace transformer_engine;
   const Tensor *input_cu_seqlens_q = convertNVTETensorCheck(cu_seqlens_q);
@@ -683,19 +692,26 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   } else {
     NVTE_ERROR("Invalid combination of data type and sequence length for fused attention. \n");
   }
+#endif
 }
 
 uint32_t nvte_get_runtime_num_segments(NVTETensor cu_seqlen, NVTETensor workspace, size_t len,
                                        cudaStream_t stream) {
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
   NVTE_API_CALL(nvte_get_runtime_num_segments);
   using namespace transformer_engine::fused_attn;
   return GetRuntimeNumSegments(cu_seqlen, workspace, len, stream);
+#else
+  return 0;
+#endif
 }
 
 void nvte_populate_rng_state_async(NVTETensor rng_state_dst, const NVTETensor seed,
                                    size_t q_max_seqlen, size_t kv_max_seqlen,
                                    NVTE_Fused_Attn_Backend backend, cudaStream_t stream) {
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
   NVTE_API_CALL(nvte_populate_rng_state_async);
   using namespace transformer_engine::fused_attn;
   PopulateRngStateAsync(rng_state_dst, seed, q_max_seqlen, kv_max_seqlen, backend, stream);
+#endif
 }

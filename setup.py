@@ -34,13 +34,14 @@ from setuptools.command.build_ext import build_ext as BuildExtension
 os.environ["NVTE_PROJECT_BUILDING"] = "1"
 
 if "pytorch" in frameworks:
-    from torch.utils.cpp_extension import BuildExtension
+    # from torch.utils.cpp_extension import BuildExtension
+    from torch_musa.utils.musa_extension import BuildExtension
 elif "jax" in frameworks:
     from pybind11.setup_helpers import build_ext as BuildExtension
 
 
 CMakeBuildExtension = get_build_ext(BuildExtension)
-archs = cuda_archs()
+# archs = cuda_archs()
 
 
 class TimedBdist(bdist_wheel):
@@ -55,7 +56,8 @@ class TimedBdist(bdist_wheel):
 
 def setup_common_extension() -> CMakeExtension:
     """Setup CMake extension for common library"""
-    cmake_flags = ["-DCMAKE_CUDA_ARCHITECTURES={}".format(archs)]
+    # cmake_flags = ["-DCMAKE_CUDA_ARCHITECTURES={}".format(archs)]
+    cmake_flags = []
     if bool(int(os.getenv("NVTE_UB_WITH_MPI", "0"))):
         assert (
             os.getenv("MPI_HOME") is not None
@@ -108,17 +110,17 @@ def setup_requirements() -> Tuple[List[str], List[str]]:
     test_reqs: List[str] = ["pytest>=8.2.1"]
 
     # Framework-specific requirements
-    if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
-        if "pytorch" in frameworks:
-            from build_tools.pytorch import install_requirements, test_requirements
+    # if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
+    #     if "pytorch" in frameworks:
+    #         from build_tools.pytorch import install_requirements, test_requirements
 
-            install_reqs.extend(install_requirements())
-            test_reqs.extend(test_requirements())
-        if "jax" in frameworks:
-            from build_tools.jax import install_requirements, test_requirements
+    #         install_reqs.extend(install_requirements())
+    #         test_reqs.extend(test_requirements())
+    #     if "jax" in frameworks:
+    #         from build_tools.jax import install_requirements, test_requirements
 
-            install_reqs.extend(install_requirements())
-            test_reqs.extend(test_requirements())
+    #         install_reqs.extend(install_requirements())
+    #         test_reqs.extend(test_requirements())
 
     return [remove_dups(reqs) for reqs in [install_reqs, test_reqs]]
 
@@ -179,7 +181,7 @@ def git_check_submodules() -> None:
 if __name__ == "__main__":
     __version__ = te_version()
 
-    git_check_submodules()
+    # git_check_submodules()
 
     with open("README.rst", encoding="utf-8") as f:
         long_description = f.read()
@@ -197,7 +199,7 @@ if __name__ == "__main__":
             "core": [f"transformer_engine_cu12=={__version__}"],
             "core_cu12": [f"transformer_engine_cu12=={__version__}"],
             "core_cu13": [f"transformer_engine_cu13=={__version__}"],
-            "pytorch": [f"transformer_engine_torch=={__version__}"],
+            # "pytorch": [f"transformer_engine_torch=={__version__}"],
             "jax": [f"transformer_engine_jax=={__version__}"],
         }
     else:

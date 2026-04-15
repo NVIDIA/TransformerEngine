@@ -4,10 +4,10 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include <cuda.h>
-#include <cudaTypedefs.h>
-#include <cuda_bf16.h>
-#include <cuda_runtime.h>
+#include <musa.h>
+#include <musaTypedefs.h>
+#include <musa_bf16.h>
+#include <musa_runtime.h>
 
 #include <algorithm>
 #include <cfloat>

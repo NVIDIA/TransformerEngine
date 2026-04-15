@@ -32,6 +32,7 @@ namespace {
  */
 inline int max_supported_sm_arch() {
   static int arch_ = -1;
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
   if (arch_ < 0) {
     int num_archs = 0;
     NVTE_CHECK_NVRTC(nvrtcGetNumSupportedArchs(&num_archs));
@@ -40,6 +41,7 @@ inline int max_supported_sm_arch() {
     NVTE_CHECK_NVRTC(nvrtcGetSupportedArchs(archs.data()));
     arch_ = archs.back();
   }
+#endif
   return arch_;
 }
 
@@ -47,11 +49,13 @@ inline int max_supported_sm_arch() {
 
 bool is_enabled() {
   static bool is_enabled_ = false;
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
   static bool need_to_check_env = true;
   if (need_to_check_env) {
     is_enabled_ = !getenv<bool>("NVTE_DISABLE_NVRTC");
     need_to_check_env = false;
   }
+#endif
   return is_enabled_;
 }
 
@@ -139,6 +143,7 @@ KernelManager& KernelManager::instance() {
 
 void KernelManager::compile(const std::string& kernel_label, const std::string& kernel_name,
                             const std::string& code, const std::string& filename) {
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
   std::lock_guard<std::mutex> lock_guard_(lock_);
 
   // Choose whether to compile to PTX or cubin
@@ -212,6 +217,7 @@ void KernelManager::compile(const std::string& kernel_label, const std::string& 
 
   // Clean up
   NVTE_CHECK_NVRTC(nvrtcDestroyProgram(&program));
+#endif
 }
 
 void KernelManager::set_cache_config(const std::string& kernel_label, CUfunc_cache cache_config) {

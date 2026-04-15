@@ -51,7 +51,7 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
   }
 
   // Perform compute
-  auto stream = at::cuda::getCurrentCUDAStream();
+  auto stream = at::musa::getCurrentCUDAStream();
   switch (impl) {
     case Impl::UNFUSED:
       // Compute activation in high precision, then quantize
@@ -163,7 +163,7 @@ py::object dactivation_helper(const at::Tensor& grad_output, const at::Tensor& i
   }
 
   // Perform compute
-  auto stream = at::cuda::getCurrentCUDAStream();
+  auto stream = at::musa::getCurrentCUDAStream();
   switch (impl) {
     case Impl::UNFUSED:
       // Compute activation backward in high precision, then quantize

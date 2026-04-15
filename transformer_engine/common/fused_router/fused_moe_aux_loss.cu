@@ -6,7 +6,7 @@
 
 #include <assert.h>
 #include <cooperative_groups.h>
-#include <cuda_runtime.h>
+#include <musa_runtime.h>
 #include <transformer_engine/fused_router.h>
 
 #include "../common.h"
@@ -166,7 +166,7 @@ void fused_moe_aux_loss_forward_kernel_launcher(const DataType* probs,
                                                 int num_cols, int topk, float coeff,
                                                 DataType* aux_loss, float* Const_buf,
                                                 cudaStream_t stream) {
-  if (cuda::sm_arch(cuda::current_device()) >= 90) {
+#if __CUDA_ARCH__ >= 900
     cudaLaunchConfig_t config = {0};
     int cluster_size = 8;
     config.gridDim = cluster_size;
@@ -190,13 +190,13 @@ void fused_moe_aux_loss_forward_kernel_launcher(const DataType* probs,
     NVTE_CHECK_CUDA(cudaLaunchKernelEx(
         &config, fused_moe_aux_loss_forward_kernel<DataType, IndexType>, probs, tokens_per_expert,
         total_num_tokens, num_experts, num_rows, num_cols, topk, coeff, aux_loss, Const_buf));
-  } else {
+#else
     size_t smem_size = sizeof(CompType) * num_cols;
     fused_moe_aux_loss_forward_kernel<DataType, IndexType>
         <<<1, 1024, smem_size, stream>>>(probs, tokens_per_expert, total_num_tokens, num_experts,
                                          num_rows, num_cols, topk, coeff, aux_loss, Const_buf);
     NVTE_CHECK_CUDA(cudaGetLastError());
-  }
+#endif
 }
 
 void fused_moe_aux_loss_forward(const Tensor& probs, const Tensor& tokens_per_expert,

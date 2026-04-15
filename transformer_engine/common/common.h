@@ -7,17 +7,19 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_COMMON_H_
 #define TRANSFORMER_ENGINE_COMMON_COMMON_H_
 
-#include <cudaTypedefs.h>
+#include "transformer_engine/musify.h"
+
+#include <musaTypedefs.h>
 #define FP4_TYPE_SUPPORTED (CUDA_VERSION >= 12080)
 
-#include <cuda_bf16.h>
-#include <cuda_fp16.h>
-#include <cuda_fp8.h>
+#include <musa_bf16.h>
+#include <musa_fp16.h>
+#include <musa_fp8.h>
 #if FP4_TYPE_SUPPORTED
-#include <cuda_fp4.h>
+#include <musa_fp4.h>
 #endif
 
-#include <cuda_runtime_api.h>
+#include <musa_runtime_api.h>
 #include <transformer_engine/transformer_engine.h>
 
 #include <cstdint>
@@ -904,6 +906,7 @@ void update_tensor_scale_inv(Tensor *t, cudaStream_t stream);
 
 void checkCuDriverContext(CUstream stream);
 
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
 CUtensorMapDataType get_CUtensorMapDataType(DType dtype);
 
 // Set up parameters to create TMA descriptor.
@@ -912,6 +915,8 @@ void create_2D_tensor_map(
     const uint64_t globalX, const uint32_t shmemY, const uint32_t shmemX,
     const uint32_t stride_elems, const uint32_t offset_elems, const size_t type_num_bits,
     const CUtensorMapSwizzle swizzle = CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_NONE);
+
+#endif
 
 bool is_supported_by_CC_100();
 

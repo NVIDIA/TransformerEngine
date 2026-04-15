@@ -7,9 +7,11 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_NORM_COMMON_H_
 #define TRANSFORMER_ENGINE_COMMON_NORM_COMMON_H_
 
-#include <cudnn.h>
+#include <mudnn.h>
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
 #include <cudnn_frontend.h>
 #include <cudnn_frontend_utils.h>
+#endif
 #include <transformer_engine/normalization.h>
 #include <transformer_engine/transformer_engine.h>
 
@@ -22,14 +24,18 @@
 #include <vector>
 
 #include "../common.h"
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
 #include "../cudnn_utils.h"
+#endif
 #include "../util/system.h"
 
 namespace transformer_engine {
 
 namespace normalization {
 
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
 namespace fe = cudnn_frontend;
+#endif
 
 template <typename KernelParamsType>
 struct LaunchParams {
@@ -260,6 +266,7 @@ class TeNormalizationPlan : public NormalizationPlanBase {
   const bool _is_layernorm;
 };
 
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
 class CudnnNormalizationPlan : public NormalizationPlanBase {
  public:
   CudnnNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage, DType wtype,
@@ -300,6 +307,7 @@ class CudnnNormalizationPlan : public NormalizationPlanBase {
   std::unordered_map<std::shared_ptr<fe::graph::Tensor_attributes>, void*> _variant_pack;
   cudnnHandle_t _handle;
 };
+#endif
 
 class NormalizationPlanRegistry {
  public:

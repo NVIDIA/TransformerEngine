@@ -11,7 +11,8 @@
 #ifndef TRANSFORMER_ENGINE_MULTI_STREAM_H
 #define TRANSFORMER_ENGINE_MULTI_STREAM_H
 
-#include "cuda_runtime.h"
+#include "musify.h"
+#include "musa_runtime.h"
 
 #ifdef __cplusplus
 extern "C" {

@@ -7,7 +7,9 @@
 #ifndef TRANSFORMER_ENGINE_CUDNN_UTILS_H_
 #define TRANSFORMER_ENGINE_CUDNN_UTILS_H_
 
-#include <cudnn.h>
+#include "transformer_engine/musify.h"
+
+#include <mudnn.h>
 #include <cudnn_frontend.h>
 #include <cudnn_frontend_utils.h>
 #include <cudnn_graph.h>

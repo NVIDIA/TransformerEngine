@@ -4,7 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include <cuda_runtime.h>
+#include <musa_runtime.h>
 #include <transformer_engine/cast_transpose_noop.h>
 #include <transformer_engine/transpose.h>
 

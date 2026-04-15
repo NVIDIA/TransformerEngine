@@ -7,7 +7,8 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_UTIL_CUDA_DRIVER_H_
 #define TRANSFORMER_ENGINE_COMMON_UTIL_CUDA_DRIVER_H_
 
-#include <cuda.h>
+#include <musa.h>
+#include "transformer_engine/musify.h"
 
 #include <string>
 

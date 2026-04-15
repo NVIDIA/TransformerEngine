@@ -7,7 +7,7 @@
 #include <limits>
 // Stringstream is a big hammer, but I want to rely on operator<< for dtype.
 #include <assert.h>
-#include <cuda_fp8.h>
+#include <musa_fp8.h>
 #include <transformer_engine/multi_tensor.h>
 #include <transformer_engine/transformer_engine.h>
 

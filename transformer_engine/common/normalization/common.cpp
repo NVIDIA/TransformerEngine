@@ -39,10 +39,12 @@ Compute always in FP32
 namespace transformer_engine {
 namespace normalization {
 
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
 cudnn_frontend::NormFwdPhase_t get_cudnn_forward_phase(const bool training) {
   return training ? cudnn_frontend::NormFwdPhase_t::TRAINING
                   : cudnn_frontend::NormFwdPhase_t::INFERENCE;
 }
+#endif
 
 TupleKeyType get_key(NVTE_Norm_Backend NormBackend, NVTE_Norm_Type NormType,
                      NVTE_Norm_Stage NormStage, DType wtype, DType itype, DType otype, DType ctype,
@@ -196,6 +198,7 @@ void TeNormalizationPlan<BackwardKernelParams>::execute(void* x_dptr, void* gamm
   _kernel(_launch_params, false);
 }
 
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
 CudnnNormalizationPlan::CudnnNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage,
                                                DType wtype, DType itype, DType otype, DType ctype,
                                                const size_t batch_size, const size_t hidden_size,
@@ -483,6 +486,7 @@ void CudnnNormalizationPlan::execute(void* x_dptr, void* gamma_dptr, void* mean_
   NVTE_CHECK_CUDNN(cudnnSetStream(_handle, stream));
   NVTE_CHECK(_graph.execute(_handle, _variant_pack, workspace_dptr).is_good());
 }
+#endif
 
 NormalizationPlanBase* NormalizationPlanRegistry::getNormalizationPlan(
     NVTE_Norm_Backend NormBackend, NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage, DType wtype,
@@ -502,9 +506,11 @@ NormalizationPlanBase* NormalizationPlanRegistry::getNormalizationPlan(
 
   std::unique_ptr<NormalizationPlanBase> plan;
   if (NormBackend == NVTE_Norm_Backend::Cudnn) {
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
     plan = std::make_unique<CudnnNormalizationPlan>(NormType, NormStage, wtype, itype, otype, ctype,
                                                     batch_size, hidden_size, sm_count,
                                                     zero_centered_gamma, mode, training);
+#endif
   } else if (NormStage == NVTE_Norm_Stage::Forward) {
     plan = std::make_unique<TeNormalizationPlan<ForwardKernelParams>>(
         NormType, NormStage, wtype, itype, otype, ctype, batch_size, hidden_size, sm_count,
@@ -519,12 +525,21 @@ NormalizationPlanBase* NormalizationPlanRegistry::getNormalizationPlan(
 }
 
 bool& _cudnn_norm_fwd_flag() {
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
   static bool flag = transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN");
+  return flag;
+#else
+  static bool flag = false;
+#endif
   return flag;
 }
 
 bool& _cudnn_norm_bwd_flag() {
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
   static bool flag = transformer_engine::getenv<bool>("NVTE_NORM_BWD_USE_CUDNN");
+#else
+  static bool flag = false;
+#endif
   return flag;
 }
 

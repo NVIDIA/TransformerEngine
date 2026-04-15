@@ -4,9 +4,8 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include <cublasLt.h>
-#include <cublas_v2.h>
-#include <cuda.h>
+#include <mublas.h>
+#include <musa.h>
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/multi_stream.h>
 #include <transformer_engine/recipe.h>

@@ -68,7 +68,11 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
 
   NVTE_Norm_Backend norm_backend;
   bool is_aligned = true;
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
   bool cudnn_backend = use_cudnn_norm_fwd() || is_mxfp8_scaling(z->scaling_mode);
+#else
+  bool cudnn_backend = false;
+#endif
 
   if (!is_fp8_dtype(z->data.dtype) && z->amax.dptr != nullptr) {
     NVTE_CHECK(!cudnn_backend,

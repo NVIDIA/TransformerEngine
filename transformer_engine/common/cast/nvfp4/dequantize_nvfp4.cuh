@@ -11,9 +11,9 @@
 #ifndef TRANSFORMER_ENGINE_DEQUANTIZE_NVFP4_CUH_
 #define TRANSFORMER_ENGINE_DEQUANTIZE_NVFP4_CUH_
 
-#include <cuda.h>
-#include <cudaTypedefs.h>
-#include <cuda_runtime.h>
+#include <musa.h>
+#include <musaTypedefs.h>
+#include <musa_runtime.h>
 #include <transformer_engine/transformer_engine.h>
 
 #include "../../common.h"
@@ -22,7 +22,7 @@
 #include "../../utils.cuh"
 
 #if FP4_TYPE_SUPPORTED
-#include <cuda_fp4.h>
+#include <musa_fp4.h>
 #endif  // FP4_TYPE_SUPPORTED
 
 namespace transformer_engine {

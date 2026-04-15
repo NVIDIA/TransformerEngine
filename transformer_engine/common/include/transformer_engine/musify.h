@@ -1,0 +1,156 @@
+#ifndef MUSIFY_H
+#define MUSIFY_H
+
+#include <string>
+
+#define CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED \
+    MU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_MUSA_VMM_SUPPORTED
+#define CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED \
+    MU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED
+#define CU_MEM_ACCESS_FLAGS_PROT_READWRITE MU_MEM_ACCESS_FLAGS_PROT_READWRITE
+#define CU_MEM_ALLOC_GRANULARITY_MINIMUM MU_MEM_ALLOC_GRANULARITY_MINIMUM
+#define CU_MEM_ALLOCATION_TYPE_PINNED MU_MEM_ALLOCATION_TYPE_PINNED
+#define CU_MEM_HANDLE_TYPE_FABRIC MU_MEM_HANDLE_TYPE_FABRIC
+#define CU_MEM_LOCATION_TYPE_DEVICE MU_MEM_LOCATION_TYPE_DEVICE
+#define CU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD MU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD
+#define CU_MEMORYTYPE_DEVICE MU_MEMORYTYPE_DEVICE
+#define CU_MEMORYTYPE_HOST MU_MEMORYTYPE_HOST
+#define CU_POINTER_ATTRIBUTE_MEMORY_TYPE MU_POINTER_ATTRIBUTE_MEMORY_TYPE
+#define CU_POINTER_ATTRIBUTE_RANGE_SIZE MU_POINTER_ATTRIBUTE_RANGE_SIZE
+#define CU_DEVICE_ATTRIBUTE_MEMORY_POOLS_SUPPORTED \
+    MU_DEVICE_ATTRIBUTE_MEMORY_POOLS_SUPPORTED
+#define CU_FUNC_CACHE_PREFER_SHARED MU_FUNC_CACHE_PREFER_SHARED
+
+#define CUdevice MUdevice
+#define CUdeviceptr MUdeviceptr
+#define CUmemAccessDesc MUmemAccessDesc
+#define CUmemAllocationProp MUmemAllocationProp
+#define CUmemFabricHandle MUmemFabricHandle
+#define CUmemAllocationHandleType MUmemAllocationHandleType
+#define CUmemGenericAllocationHandle MUmemGenericAllocationHandle
+#define CUmemorytype MUmemorytype
+#define CUresult MUresult
+#define CUstream MUstream
+#define CUcontext MUcontext
+#define CUfunction MUfunction
+#define CUfunc_cache MUfunc_cache
+#define CUmodule MUmodule
+#define cuDeviceGet muDeviceGet
+#define cuDeviceGetAttribute muDeviceGetAttribute
+#define cuGetErrorString muGetErrorString
+#define cuMemAddressFree muMemAddressFree
+#define cuMemAddressReserve muMemAddressReserve
+#define cuMemCreate muMemCreate
+#define cuMemExportToShareableHandle muMemExportToShareableHandle
+#define cuMemGetAddressRange muMemGetAddressRange
+#define cuMemGetAllocationGranularity muMemGetAllocationGranularity
+#define cuMemGetHandleForAddressRange muMemGetHandleForAddressRange
+#define cuMemImportFromShareableHandle muMemImportFromShareableHandle
+#define cuMemMap muMemMap
+#define cuMemRelease muMemRelease
+#define cuMemRetainAllocationHandle muMemRetainAllocationHandle
+#define cuMemSetAccess muMemSetAccess
+#define cuMemUnmap muMemUnmap
+#define cuPointerGetAttribute muPointerGetAttribute
+#define cuCtxGetCurrent muCtxGetCurrent
+
+#define CUDA_SUCCESS MUSA_SUCCESS
+#define CUDA_ERROR_NOT_PERMITTED MUSA_ERROR_NOT_PERMITTED
+#define CUDA_ERROR_NOT_SUPPORTED MUSA_ERROR_NOT_SUPPORTED
+#define CUDA_ERROR_INVALID_CONTEXT MUSA_ERROR_INVALID_CONTEXT
+#define cudaDeviceCanAccessPeer musaDeviceCanAccessPeer
+#define cudaDeviceEnablePeerAccess musaDeviceEnablePeerAccess
+#define cudaDeviceGetPCIBusId musaDeviceGetPCIBusId
+#define cudaErrorPeerAccessAlreadyEnabled musaErrorPeerAccessAlreadyEnabled
+#define cudaError_t musaError_t
+#define cudaFree musaFree
+#define cudaFreeHost musaFreeHost
+#define cudaGetDevice musaGetDevice
+#define cudaGetDeviceCount musaGetDeviceCount
+#define cudaGetErrorString musaGetErrorString
+#define cudaGetLastError musaGetLastError
+#define cudaHostRegister musaHostRegister
+#define cudaHostRegisterPortable musaHostRegisterPortable
+#define cudaHostUnregister musaHostUnregister
+#define cudaIpcCloseMemHandle musaIpcCloseMemHandle
+#define cudaIpcGetMemHandle musaIpcGetMemHandle
+#define cudaIpcMemHandle_t musaIpcMemHandle_t
+#define cudaIpcMemLazyEnablePeerAccess musaIpcMemLazyEnablePeerAccess
+#define cudaIpcOpenMemHandle musaIpcOpenMemHandle
+#define cudaMalloc musaMalloc
+#define cudaMallocHost musaMallocHost
+#define cudaMemcpy musaMemcpy
+#define cudaMemcpyAsync musaMemcpyAsync
+#define cudaMemcpyDefault musaMemcpyDefault
+#define cudaMemcpyDeviceToHost musaMemcpyDeviceToHost
+#define cudaMemcpyHostToDevice musaMemcpyHostToDevice
+#define cudaMemset musaMemset
+#define cudaMemsetAsync musaMemsetAsync
+#define cudaMemoryTypeDevice musaMemoryTypeDevice
+#define cudaMemoryTypeHost musaMemoryTypeHost
+#define cudaMemoryTypeUnregistered musaMemoryTypeUnregistered
+#define cudaPointerAttributes musaPointerAttributes
+#define cudaPointerGetAttributes musaPointerGetAttributes
+#define cudaSetDevice musaSetDevice
+#define cudaStreamCreate musaStreamCreate
+#define cudaStreamDestroy musaStreamDestroy
+#define cudaStreamSynchronize musaStreamSynchronize
+#define cudaStream_t musaStream_t
+#define cudaSuccess musaSuccess
+#define cudaEvent_t musaEvent_t
+#define cudaDataType_t musaDataType_t
+#define cudaStreamWaitEvent musaStreamWaitEvent
+#define cudaMemcpyDeviceToDevice musaMemcpyDeviceToDevice
+#define cudaEventRecord musaEventRecord
+#define cudaEventCreate musaEventCreate
+#define cudaEventDestroy musaEventDestroy
+#define PhiloxCudaState PhiloxMusaState
+#define philox_cuda_state philox_musa_state
+#define CUDAGeneratorImpl MUSAGeneratorImpl
+#define CUDAGuard OptionalMUSAGuard
+#define CUDAStream MUSAStream
+#define getCurrentCUDAStream getCurrentMUSAStream
+#define getDefaultCUDAGenerator getDefaultMUSAGenerator
+#define cudaLaunchConfig_t musaLaunchConfig_t
+#define cudaOccupancyMaxPotentialClusterSize musaOccupancyMaxPotentialClusterSize
+#define cudaLaunchAttribute musaLaunchAttribute
+#define cudaLaunchAttributeClusterDimension musaLaunchAttributeClusterDimension
+#define cudaDeviceProp musaDeviceProp
+#define cudaGetDeviceProperties musaGetDeviceProperties
+#define cudaDeviceGetStreamPriorityRange musaDeviceGetStreamPriorityRange
+#define cudaRuntimeGetVersion musaRuntimeGetVersion
+#define cudaEventCreateWithFlags musaEventCreateWithFlags
+#define cudaLaunchKernelExC musaLaunchKernelExC
+#define cudaStreamNonBlocking musaStreamNonBlocking
+#define cudaDriverEntryPointQueryResult musaDriverEntryPointQueryResult
+#define cudaEnableDefault musaEnableDefault
+#define cudaDriverEntryPointSuccess musaDriverEntryPointSuccess
+#define cudaFuncAttributePreferredSharedMemoryCarveout musaFuncAttributePreferredSharedMemoryCarveout
+#define cudaFuncSetAttribute musaFuncSetAttribute
+#define cudaFuncAttributeMaxDynamicSharedMemorySize musaFuncAttributeMaxDynamicSharedMemorySize
+#define cudaDeviceSynchronize musaDeviceSynchronize
+#define cudaDevAttrClockRate musaDevAttrClockRate
+#define cudaLaunchAttributeCooperative musaLaunchAttributeCooperative
+#define cudaStreamCreateWithPriority musaStreamCreateWithPriority
+#define cudaMallocAsync musaMallocAsync
+#define cudaFreeAsync musaFreeAsync
+#define cudaDeviceGetAttribute musaDeviceGetAttribute
+#define cudaEventDisableTiming musaEventDisableTiming
+#define cudaLaunchCooperativeKernel musaLaunchCooperativeKernel
+#define cudaOccupancyMaxActiveBlocksPerMultiprocessor musaOccupancyMaxActiveBlocksPerMultiprocessor
+
+#define nv_bfloat16 mt_bfloat16
+#define nv_bfloat16 mt_bfloat16
+#define nv_bfloat162 mt_bfloat162
+#define __nv_fp8_e4m3 __mt_fp8_e4m3
+#define __nv_fp8_e5m2 __mt_fp8_e5m2
+#define __nv_bfloat16 __mt_bfloat16
+#define CUDA_R_16F MUSA_R_16F
+#define CUDA_R_32F MUSA_R_32F
+#define CUDA_R_16BF MUSA_R_16BF
+#define CUDA_R_8F_E4M3 MUSA_R_8F_E4M3
+#define CUDA_R_8F_E5M2 MUSA_R_8F_E5M2
+
+
+
+#endif

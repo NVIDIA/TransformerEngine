@@ -4,7 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include <cuda_runtime.h>
+#include <musa_runtime.h>
 #include <transformer_engine/transpose.h>
 
 #include <cfloat>
@@ -197,6 +197,7 @@ __global__ void __launch_bounds__(threads_per_block)
 
 void multi_cast_transpose(const std::vector<Tensor*> input_list, std::vector<Tensor*> output_list,
                           cudaStream_t stream) {
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
   // Check that number of tensors is valid
   NVTE_CHECK(output_list.size() == input_list.size(),
              "Number of input and output tensors must match");
@@ -328,6 +329,7 @@ void multi_cast_transpose(const std::vector<Tensor*> input_list, std::vector<Ten
     );                                                                              // NOLINT(*)
     NVTE_CHECK_CUDA(cudaGetLastError());
   }
+#endif
 }
 
 }  // namespace transformer_engine

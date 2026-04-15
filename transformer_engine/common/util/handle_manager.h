@@ -9,7 +9,8 @@
 
 #include <vector>
 
-#include "cuda_runtime.h"
+#include "transformer_engine/musify.h"
+#include "musa_runtime.h"
 #include "logging.h"
 
 namespace transformer_engine::detail {

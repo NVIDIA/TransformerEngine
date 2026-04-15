@@ -20,7 +20,7 @@ from transformer_engine.common.recipe import (
     DelayedScaling,
     Float8CurrentScaling,
 )
-from transformer_engine.pytorch.utils import get_cudnn_version
+from transformer_engine.pytorch.utils import get_mudnn_version
 from transformer_engine.pytorch.quantization import (
     get_fp8_te_dtype,
     FP8GlobalStateManager,
@@ -406,7 +406,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         # To use the workspace optimization path for determinism, please
         # set NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT=1 for cuDNN >=8.9.5 and <9.0.0,
         # and set NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 for cuDNN >=9.0.0.
-        cudnn_version = get_cudnn_version()
+        cudnn_version = get_mudnn_version()
         if (8, 9, 5) <= cudnn_version < (9, 0, 0):
             if self.deterministic:
                 os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] = "1"
@@ -1425,6 +1425,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     fused_attention_backend = _attention_backends["fused_attention_backend"]
                     use_unfused_attention = _attention_backends["use_unfused_attention"]
 
+            use_flash_attention = True #TODO:huang.huang set fa manually now!
             # raise exception if no backend is available
             if sum([use_flash_attention, use_fused_attention, use_unfused_attention]) == 0:
                 raise ValueError(

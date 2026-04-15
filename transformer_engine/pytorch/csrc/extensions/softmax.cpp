@@ -32,7 +32,7 @@ at::Tensor scaled_softmax_forward(at::Tensor input, float scale_factor) {
   auto softmax_results_cu = makeTransformerEngineTensor(softmax_results);
 
   nvte_scaled_softmax_forward(input_cu.data(), softmax_results_cu.data(), scale_factor,
-                              at::cuda::getCurrentCUDAStream());
+                              at::musa::getCurrentCUDAStream());
 
   return softmax_results;
 }
@@ -58,7 +58,7 @@ at::Tensor scaled_softmax_backward(at::Tensor output_grad_, at::Tensor softmax_r
   // Produce gradients in place.
   nvte_scaled_softmax_backward(output_grads_cu.data(), softmax_results_cu.data(),
                                output_grads_cu.data(), scale_factor,
-                               at::cuda::getCurrentCUDAStream());
+                               at::musa::getCurrentCUDAStream());
 
   return output_grads;
 }
@@ -95,7 +95,7 @@ at::Tensor scaled_masked_softmax_forward(at::Tensor input, at::Tensor mask, floa
   auto softmax_results_cu = makeTransformerEngineTensor(softmax_results);
 
   nvte_scaled_masked_softmax_forward(input_cu.data(), mask_cu.data(), softmax_results_cu.data(),
-                                     scale_factor, at::cuda::getCurrentCUDAStream());
+                                     scale_factor, at::musa::getCurrentCUDAStream());
 
   return softmax_results;
 }
@@ -121,7 +121,7 @@ at::Tensor scaled_masked_softmax_backward(at::Tensor output_grad_, at::Tensor so
   // Produce gradients in place.
   nvte_scaled_softmax_backward(output_grads_cu.data(), softmax_results_cu.data(),
                                output_grads_cu.data(), scale_factor,
-                               at::cuda::getCurrentCUDAStream());
+                               at::musa::getCurrentCUDAStream());
 
   return output_grads;
 }
@@ -144,7 +144,7 @@ at::Tensor scaled_upper_triang_masked_softmax_forward(at::Tensor input, float sc
   auto softmax_results_cu = makeTransformerEngineTensor(softmax_results);
 
   nvte_scaled_upper_triang_masked_softmax_forward(input_cu.data(), softmax_results_cu.data(),
-                                                  scale_factor, at::cuda::getCurrentCUDAStream());
+                                                  scale_factor, at::musa::getCurrentCUDAStream());
 
   return softmax_results;
 }
@@ -173,7 +173,7 @@ at::Tensor scaled_upper_triang_masked_softmax_backward(at::Tensor output_grads_,
   // Produce gradients in place.
   nvte_scaled_upper_triang_masked_softmax_backward(
       output_grads_cu.data(), softmax_results_cu.data(), output_grads_cu.data(), scale_factor,
-      at::cuda::getCurrentCUDAStream());
+      at::musa::getCurrentCUDAStream());
 
   return output_grads;
 }
@@ -202,7 +202,7 @@ at::Tensor scaled_aligned_causal_masked_softmax_forward(at::Tensor input, float 
   auto softmax_results_cu = makeTransformerEngineTensor(softmax_results);
 
   nvte_scaled_aligned_causal_masked_softmax_forward(input_cu.data(), softmax_results_cu.data(),
-                                                    scale_factor, at::cuda::getCurrentCUDAStream());
+                                                    scale_factor, at::musa::getCurrentCUDAStream());
 
   return softmax_results;
 }
@@ -229,7 +229,7 @@ at::Tensor scaled_aligned_causal_masked_softmax_backward(at::Tensor output_grad_
   // Produce gradients in place.
   nvte_scaled_aligned_causal_masked_softmax_backward(
       output_grads_cu.data(), softmax_results_cu.data(), output_grads_cu.data(), scale_factor,
-      at::cuda::getCurrentCUDAStream());
+      at::musa::getCurrentCUDAStream());
 
   return output_grads;
 }

@@ -5,8 +5,8 @@
  ************************************************************************/
 
 #include <assert.h>
-#include <cuda_runtime.h>
-#include <cuda_runtime_api.h>
+#include <musa_runtime.h>
+#include <musa_runtime_api.h>
 #include <inttypes.h>
 #include <math.h>
 #include <sched.h>
@@ -20,7 +20,9 @@
 #include <utility>
 
 #include "common/util/cuda_driver.h"
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
 #include "common/util/cuda_nvml.h"
+#endif
 #include "common/util/cuda_runtime.h"
 #include "common/util/logging.h"
 #include "common/util/system.h"
@@ -66,10 +68,13 @@ void ub_mpi_barrier(ExtComm comm) { UB_MPI_CHECK(MPI_Barrier(comm)); }
 // MNNVL: FABRIC handle support lifted from CUDA 12.3
 #define CU_MEM_HANDLE_TYPE_FABRIC ((CUmemAllocationHandleType)0x8ULL)
 #define CU_IPC_HANDLE_SIZE 64
+
+#if CUDART_VERSION >= 12010
 typedef struct CUmemFabricHandle_st {
   unsigned char data[CU_IPC_HANDLE_SIZE];
 } CUmemFabricHandle_v1;
 typedef CUmemFabricHandle_v1 CUmemFabricHandle;
+#endif
 #endif
 
 int stringCmp(const void *a, const void *b) { return strcmp((const char *)a, (const char *)b); }

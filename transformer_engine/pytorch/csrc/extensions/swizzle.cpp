@@ -59,7 +59,7 @@ std::tuple<std::optional<at::Tensor>, std::optional<at::Tensor>> swizzle_scales_
   }
 
   // CUDA stream
-  auto stream = at::cuda::getCurrentCUDAStream();
+  auto stream = at::musa::getCurrentCUDAStream();
 
   // Swizzle row-wise scales if needed
   std::optional<at::Tensor> rowwise_scales_pyt;
@@ -238,7 +238,7 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm(
   NVTE_SCOPED_GIL_RELEASE({
     nvte_multi_tensor_swizzle_scaling_factors(inputs_nvte_raw.data(), outputs_nvte_raw.data(),
                                               inputs_nvte_raw.size(),
-                                              at::cuda::getCurrentCUDAStream());
+                                              at::musa::getCurrentCUDAStream());
   });
 
   // Update tensors with swizzled scales
@@ -322,7 +322,7 @@ at::Tensor convert_block_scaling_to_mxfp8_tensor(transformer_engine::TensorWrapp
   // Convert scaling factors from FP8 block scaling GEMM_READY format to mxfp8 swizzled format
   NVTE_SCOPED_GIL_RELEASE({
     nvte_swizzle_block_scaling_to_mxfp8_scaling_factors(input_cu.data(), output_cu.data(),
-                                                        at::cuda::getCurrentCUDAStream());
+                                                        at::musa::getCurrentCUDAStream());
   });
 
   // Set the input tensor to be the converted mxfp8 tensor and return the swizzled scaling factor

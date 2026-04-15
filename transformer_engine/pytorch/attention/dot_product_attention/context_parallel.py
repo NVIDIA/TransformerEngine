@@ -10,7 +10,7 @@ import torch
 import transformer_engine_torch as tex
 
 from transformer_engine.pytorch.utils import (
-    get_cudnn_version,
+    get_mudnn_version,
     nvtx_range_pop,
     nvtx_range_push,
     get_device_compute_capability,
@@ -1491,7 +1491,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         softmax_lse_in_packed_format = False
         if qkv_format == "thd":
             if use_fused_attention:
-                softmax_lse_in_packed_format = get_cudnn_version() >= (9, 6, 0)
+                softmax_lse_in_packed_format = get_mudnn_version() >= (9, 6, 0)
             else:
                 softmax_lse_in_packed_format = fa_utils.v2_6_0_plus or use_flash_attn_3
 
@@ -4072,7 +4072,7 @@ def attn_forward_func_with_cp(
     assert (
         softmax_type == "vanilla" or cp_comm_type == "a2a"
     ), f"Context parallelism only supports {softmax_type=} with cp_comm_type = 'a2a'!"
-    if get_cudnn_version() < (9, 18, 0):
+    if get_mudnn_version() < (9, 18, 0):
         assert softmax_type == "vanilla" or qkv_format != "thd", (
             f"Before cuDNN 9.18.0, context parallelism does not support {softmax_type=} with"
             " qkv_format = 'thd'!"

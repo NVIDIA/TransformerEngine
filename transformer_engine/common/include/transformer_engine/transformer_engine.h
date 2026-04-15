@@ -11,7 +11,8 @@
 #ifndef TRANSFORMER_ENGINE_TRANSFORMER_ENGINE_H_
 #define TRANSFORMER_ENGINE_TRANSFORMER_ENGINE_H_
 
-#include <cuda_runtime_api.h>
+#include "musify.h"
+#include <musa_runtime_api.h>
 #include <stddef.h>
 #include <stdint.h>
 

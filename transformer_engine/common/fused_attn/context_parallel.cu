@@ -5,8 +5,8 @@
  ************************************************************************/
 
 #include <assert.h>
-#include <cuda.h>
-#include <cuda_bf16.h>
+#include <musa.h>
+#include <musa_bf16.h>
 
 #include "../common.h"
 #include "transformer_engine/fused_attn.h"

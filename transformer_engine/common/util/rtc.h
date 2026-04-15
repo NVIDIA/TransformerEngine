@@ -7,9 +7,11 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_UTIL_RTC_H_
 #define TRANSFORMER_ENGINE_COMMON_UTIL_RTC_H_
 
-#include <cuda.h>
-#include <cuda_runtime_api.h>
-#include <nvrtc.h>
+#include "transformer_engine/musify.h"
+
+#include <musa.h>
+#include <musa_runtime_api.h>
+// #include <nvrtc.h>
 
 #include <memory>
 #include <mutex>

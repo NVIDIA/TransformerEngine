@@ -7,16 +7,26 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_NVTX_H_
 #define TRANSFORMER_ENGINE_COMMON_NVTX_H_
 
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
 #include <nvtx3/nvToolsExt.h>
+#endif
 
 #include <string>
 
 namespace transformer_engine::nvtx {
 
 struct NVTXWrapper {
-  explicit NVTXWrapper(const std::string &name) { nvtxRangePush(name.c_str()); }
+  explicit NVTXWrapper(const std::string &name) {
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
+    nvtxRangePush(name.c_str());
+#endif
+  }
 
-  ~NVTXWrapper() { nvtxRangePop(); }
+  ~NVTXWrapper() {
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
+    nvtxRangePop();
+#endif
+  }
 };
 
 }  // namespace transformer_engine::nvtx

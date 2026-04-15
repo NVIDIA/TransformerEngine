@@ -89,7 +89,8 @@ _flash_attn_bwd = None
 _flash_attn_varlen_fwd = None
 _flash_attn_varlen_bwd = None
 try:
-    fa_utils.version = PkgVersion(get_pkg_version("flash-attn"))
+    # fa_utils.version = PkgVersion(get_pkg_version("flash-attn"))
+    fa_utils.version = PkgVersion("2.5.0")
 except PackageNotFoundError:
     pass  # only print warning if use_flash_attention_2 = True in get_attention_backend
 else:
@@ -100,7 +101,7 @@ else:
         fa_utils.is_installed = True
 
     if fa_utils.is_installed:
-        from flash_attn_2_cuda import varlen_bwd as flash_attn_cuda_bwd
+        # from flash_attn_2_cuda import varlen_bwd as flash_attn_cuda_bwd
         from flash_attn.flash_attn_interface import flash_attn_func, flash_attn_varlen_func
         from flash_attn.flash_attn_interface import _flash_attn_forward as _flash_attn_fwd
         from flash_attn.flash_attn_interface import _flash_attn_backward as _flash_attn_bwd

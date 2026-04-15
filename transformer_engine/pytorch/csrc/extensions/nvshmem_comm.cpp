@@ -12,9 +12,9 @@
 #include <nvshmemx.h>
 #endif
 
-#include <cuda.h>
-#include <cuda_fp8.h>
-#include <torch/cuda.h>
+#include <musa.h>
+#include <musa_fp8.h>
+#include <torch/musa.h>
 #include <torch/extension.h>
 
 namespace transformer_engine::pytorch {
@@ -36,7 +36,7 @@ void init_nvshmem_backend(c10d::ProcessGroup *process_group) {
       torch::from_blob(reinterpret_cast<void *>(&id),
                        {static_cast<int64_t>(sizeof(nvshmemx_uniqueid_t) / sizeof(uint8_t))},
                        at::device(torch::kCPU).dtype(torch::kUInt8));
-  auto datatmp = (backend_is_nccl) ? datatensor.cuda() : datatensor;
+  auto datatmp = (backend_is_nccl) ? datatensor.musa() : datatensor;
 
   c10d::BroadcastOptions bcast_opts;
   bcast_opts.rootRank = 0;
@@ -65,7 +65,7 @@ void init_nvshmem_backend(c10d::ProcessGroup *process_group) {
 void nvshmem_wait_on_current_stream(torch::Tensor signal, const std::string &wait_kind) {
 #ifdef NVTE_ENABLE_NVSHMEM
   uint64_t *sig_addr = reinterpret_cast<uint64_t *>(signal.data_ptr());
-  cudaStream_t cur_stream = (cudaStream_t)at::cuda::getCurrentCUDAStream();
+  cudaStream_t cur_stream = (cudaStream_t)at::musa::getCurrentCUDAStream();
 
   WaitKind wait_kind_enum = WaitKind::STREAM_WAIT;
 
@@ -109,7 +109,7 @@ void nvshmem_send_on_current_stream(torch::Tensor src, torch::Tensor dst, int pe
   uint64_t *sig_addr = reinterpret_cast<uint64_t *>(signal.data_ptr());
   auto nelement = src.numel() * src.element_size();
   uint64_t sigval = 1;
-  at::cuda::CUDAStream cur_stream = at::cuda::getCurrentCUDAStream();
+  at::musa::CUDAStream cur_stream = at::musa::getCurrentCUDAStream();
 
   nvshmemx_putmem_signal_on_stream(dst_ptr, src_ptr, nelement, sig_addr, sigval, NVSHMEM_SIGNAL_SET,
                                    peer, (cudaStream_t)cur_stream);

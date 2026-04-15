@@ -15,9 +15,11 @@ void multi_tensor_compute_scale_and_scale_inv_cuda(
   auto [_, __, tensor_lists_ptr, num_lists, num_tensors] =
       makeTransformerEngineTensorList(tensor_lists);
 
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
   nvte_multi_tensor_compute_scale_and_scale_inv_cuda(
       chunk_size, noop_flag_cu.data(), tensor_lists_ptr.data(), num_lists, num_tensors, max_fp8,
-      force_pow_2_scales, epsilon, at::cuda::getCurrentCUDAStream());
+      force_pow_2_scales, epsilon, at::musa::getCurrentCUDAStream());
+#endif
 }
 
 void multi_tensor_compute_scale_inv_e8m0_cuda(int chunk_size, const py::object &dummy,
@@ -26,8 +28,10 @@ void multi_tensor_compute_scale_inv_e8m0_cuda(int chunk_size, const py::object &
   auto [_, __, tensor_lists_ptr, num_lists, num_tensors] =
       makeTransformerEngineTensorList(tensor_lists);
 
+#ifndef NVTE_SKIP_MUSA_UNCOMPATIBLE
   nvte_multi_tensor_compute_scale_inv_e8m0_cuda(chunk_size, tensor_lists_ptr.data(), num_lists,
-                                                num_tensors, at::cuda::getCurrentCUDAStream());
+                                                num_tensors, at::musa::getCurrentCUDAStream());
+#endif
 }
 
 }  // namespace transformer_engine::pytorch
