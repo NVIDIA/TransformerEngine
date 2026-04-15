@@ -220,6 +220,28 @@ We can use both structs for tensors and GEMMs. The tensors_struct should be nest
             tensor_feature_param2: value
           gemm_feature_param1: value
 
+AutoswitchGemm notes
+--------------------
+
+``AutoswitchGemm`` supports both global and per-GEMM configuration.
+
+- Use ``gemms: [...]`` for one shared policy.
+- Use ``gemms_struct`` to set per-GEMM thresholds.
+
+If ``tensors``/``tensors_struct`` are omitted, monitored tensors are inferred from GEMMs:
+
+- ``fprop`` -> ``activation``, ``weight``
+- ``dgrad`` -> ``gradient``, ``weight``
+- ``wgrad`` -> ``activation``, ``gradient``
+
+Other important keys:
+
+- ``underflow_threshold_pct``: switch trigger based on underflow percentage.
+- ``mse_threshold``: switch trigger based on quantization MSE.
+- metrics are consumed in the same iteration where they are computed.
+- ``allow_fp8_model_params_dequantized_weight``: allows ``fprop``/``dgrad`` switching
+  for layers with FP8 model parameters by using dequantized temporary weights.
+
 Enabling or Disabling Sections and Features
 -------------------------------------------
 

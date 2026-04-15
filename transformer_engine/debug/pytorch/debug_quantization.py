@@ -320,14 +320,21 @@ class DebugQuantizer(Quantizer):
                 self.parent_quantizer.set_usage(rowwise=True)
 
         rowwise_gemm_tensor, columnwise_gemm_tensor = None, None
-        if STANDARD_QUANTIZE in [self.rowwise_tensor_plan, self.columnwise_tensor_plan]:
+        parent_has_quantized_usage = (
+            self.parent_quantizer is not None
+            and (self.parent_quantizer.rowwise_usage or self.parent_quantizer.columnwise_usage)
+        )
+        if (
+            STANDARD_QUANTIZE in [self.rowwise_tensor_plan, self.columnwise_tensor_plan]
+            and parent_has_quantized_usage
+        ):
             quantized_tensor = self.parent_quantizer(tensor)
             # if both rowwise_tensor_plan and columnwise_tensor_plan need to be quantized,
             # one tensor with columnwise=True and rowwise=True is computed
             # and both rowwise_tensor_plan and columnwise_tensor_plan point to it.
-            if self.rowwise_tensor_plan == STANDARD_QUANTIZE:
+            if self.rowwise_tensor_plan == STANDARD_QUANTIZE and self.parent_quantizer.rowwise_usage:
                 rowwise_gemm_tensor = quantized_tensor
-            if self.columnwise_tensor_plan == STANDARD_QUANTIZE:
+            if self.columnwise_tensor_plan == STANDARD_QUANTIZE and self.parent_quantizer.columnwise_usage:
                 columnwise_gemm_tensor = quantized_tensor
 
         # 2. modify_tensor() is called, if it is used.
@@ -562,25 +569,56 @@ class DebugQuantizer(Quantizer):
         if not self.output_tensor:
             self._update_parent_quantizer_usage()
 
-    def wrap_quantized_tensor(self, tensor: QuantizedTensor):
+    def wrap_quantized_tensor(
+        self, tensor: QuantizedTensor, dtype: Optional[torch.dtype] = None
+    ):
         """
         Wraps the quantized tensor with the debug quantizer.
         It is used for weight tensors when fp8 model parameters are enabled.
         """
+        if API_CALL_MODIFY in (self.rowwise_tensor_plan, self.columnwise_tensor_plan):
+            raise AssertionError(
+                "[NVTORCH INSPECT ERROR] Weight tensor with fp8 model parameters enabled cannot"
+                " be modified by modify_tensor()."
+            )
 
-        assert (
+        dequantized_weight = None
+
+        def _get_dequantized_weight():
+            nonlocal dequantized_weight
+            if dequantized_weight is None:
+                output_dtype = dtype if dtype is not None else tensor.dtype
+                try:
+                    dequantized_weight = tensor.dequantize(dtype=output_dtype)
+                except TypeError:
+                    dequantized_weight = tensor.dequantize()
+                    if dequantized_weight.dtype != output_dtype:
+                        dequantized_weight = dequantized_weight.to(output_dtype)
+            return dequantized_weight
+
+        if (
             self.rowwise_tensor_plan == STANDARD_QUANTIZE
             and self.columnwise_tensor_plan == STANDARD_QUANTIZE
-        ), (
-            "[NVTORCH INSPECT ERROR] Weight tensor with fp8 model parameters enabled cannot be"
-            " modified by any feature."
-        )
+        ):
+            rowwise_tensor = tensor
+            columnwise_tensor = tensor
+            inspect_source = None
+        else:
+            rowwise_tensor = (
+                tensor if self.rowwise_tensor_plan == STANDARD_QUANTIZE else _get_dequantized_weight()
+            )
+            columnwise_tensor = (
+                tensor
+                if self.columnwise_tensor_plan == STANDARD_QUANTIZE
+                else _get_dequantized_weight()
+            )
+            inspect_source = _get_dequantized_weight()
 
-        self._call_inspect_tensor_api(None, tensor, tensor)
+        self._call_inspect_tensor_api(inspect_source, rowwise_tensor, columnwise_tensor)
 
         return DebugQuantizedTensor(
-            rowwise_gemm_tensor=tensor,
-            columnwise_gemm_tensor=tensor,
+            rowwise_gemm_tensor=rowwise_tensor,
+            columnwise_gemm_tensor=columnwise_tensor,
             quantizer=self,
             layer_name=self.layer_name,
             tensor_name=self.tensor_name,
@@ -676,7 +714,8 @@ class DebugQuantizedTensor(QuantizedTensorStorage):
 
     def update_usage(self, rowwise_usage: bool = None, columnwise_usage: bool = None):
         """Update usage of the tensor."""
-        if self.rowwise_gemm_tensor is not self.columnwise_gemm_tensor:
+        same_storage = self.rowwise_gemm_tensor is self.columnwise_gemm_tensor
+        if not same_storage:
             # If the same object is used both for rowwise and columnwise gemms,
             # there is no benefit in erasing the usage of one of them.
             # And there are scenarios when not deleting the usage of one of them is needed.
@@ -687,9 +726,27 @@ class DebugQuantizedTensor(QuantizedTensorStorage):
                 self.columnwise_gemm_tensor = None
 
         if isinstance(self.rowwise_gemm_tensor, QuantizedTensor):
-            self.rowwise_gemm_tensor.update_usage(rowwise_usage, columnwise_usage)
+            if same_storage:
+                rowwise_rowwise_usage = rowwise_usage
+                rowwise_columnwise_usage = columnwise_usage
+            else:
+                # Keep rowwise storage focused on rowwise path.
+                rowwise_rowwise_usage = rowwise_usage
+                rowwise_columnwise_usage = False if columnwise_usage is not None else None
+            self.rowwise_gemm_tensor.update_usage(
+                rowwise_rowwise_usage, rowwise_columnwise_usage
+            )
         if isinstance(self.columnwise_gemm_tensor, QuantizedTensor):
-            self.columnwise_gemm_tensor.update_usage(rowwise_usage, columnwise_usage)
+            if same_storage:
+                columnwise_rowwise_usage = rowwise_usage
+                columnwise_columnwise_usage = columnwise_usage
+            else:
+                # Keep columnwise storage focused on columnwise path.
+                columnwise_rowwise_usage = False if rowwise_usage is not None else None
+                columnwise_columnwise_usage = columnwise_usage
+            self.columnwise_gemm_tensor.update_usage(
+                columnwise_rowwise_usage, columnwise_columnwise_usage
+            )
 
         if rowwise_usage and self.rowwise_gemm_tensor is None:
             raise RuntimeError(

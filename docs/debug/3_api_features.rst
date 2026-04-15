@@ -10,6 +10,7 @@ Debug features
 .. autoapiclass:: transformer_engine.debug.features.log_fp8_tensor_stats.LogFp8TensorStats
 .. autoapiclass:: transformer_engine.debug.features.log_nvfp4_tensor_stats.LogNvfp4TensorStats
 .. autoapiclass:: transformer_engine.debug.features.disable_quantization_gemm.DisableQuantizationGEMM
+.. autoapiclass:: transformer_engine.debug.features.autoswitch_gemm.AutoswitchGemm
 .. autoapiclass:: transformer_engine.debug.features.disable_quantization_layer.DisableQuantizationLayer
 .. autoapiclass:: transformer_engine.debug.features.per_tensor_scaling.PerTensorScaling
 .. autoapiclass:: transformer_engine.debug.features.fake_quant.FakeQuant
