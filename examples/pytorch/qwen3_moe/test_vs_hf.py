@@ -5,10 +5,9 @@
 """Compare Qwen3 MoE TE implementation against HuggingFace reference.
 
 Runs forward and backward passes on both models with identical weights and
-verifies that logits and gradients match.
-
 Usage:
-    python -m examples.pytorch.qwen3_moe.test_vs_hf [--seed 42]
+    cd examples/pytorch/qwen3_moe
+    python test_vs_hf.py [--seed 42]
 
 Requirements:
     pip install transformers
