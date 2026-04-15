@@ -794,7 +794,7 @@ def _linear_backward(
                 grad_output.update_usage(rowwise_usage=True)
             if (
                 ctx.fp8
-                and ctx.weight_quantizer is not None
+                and weight_quantizer is not None
                 and isinstance(weight_fp8, QuantizedTensorStorage)
             ):
                 weight_fp8.update_usage(columnwise_usage=True)
