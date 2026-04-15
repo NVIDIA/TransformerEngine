@@ -2311,7 +2311,7 @@ def print_quantizers(
                 print(f"{label} >> {names[i]:14s}: {type_str}")
 
 
-def permute_to_grouped_tensor_pytorch(tensor, src_format):
+def transpose_to_bhsd_htd_pytorch(tensor, src_format):
     """Permute to BHSD or HTD format using native PyTorch operations."""
     if src_format in ("bhsd", "htd"):
         return tensor
@@ -2436,12 +2436,12 @@ def mxfp8_quantize_fast_path(tensor_quantizer_pairs, src_format):
     cs_outs = _build_outputs(cs_list, 128)
 
     # permute scale_invs to BHSD; batched
-    rs_permuted = tex.multi_tensor_permute_to_grouped_tensor(
+    rs_permuted = tex.multi_tensor_transpose_to_bhsd(
         rs_list,
         original_format=src_format,
         outputs=rs_outs,
     )
-    cs_permuted = tex.multi_tensor_permute_to_grouped_tensor(
+    cs_permuted = tex.multi_tensor_transpose_to_bhsd(
         cs_list,
         original_format=src_format,
         outputs=cs_outs,
@@ -2532,14 +2532,14 @@ def combine_and_quantize(
 
         # ---- Slow path: permute data to BHSD, then quantize with swizzle ----
         if qkv_layout in ("bshd_bshd_bshd", "sbhd_sbhd_sbhd"):
-            q, k, v = tex.multi_tensor_permute_to_grouped_tensor(
+            q, k, v = tex.multi_tensor_transpose_to_bhsd(
                 [q, k, v],
                 original_format=qkv_format,
             )
         else:
-            q = permute_to_grouped_tensor_pytorch(q, q_format)
-            k = permute_to_grouped_tensor_pytorch(k, kv_format)
-            v = permute_to_grouped_tensor_pytorch(v, kv_format)
+            q = transpose_to_bhsd_htd_pytorch(q, q_format)
+            k = transpose_to_bhsd_htd_pytorch(k, kv_format)
+            v = transpose_to_bhsd_htd_pytorch(v, kv_format)
         qkv_layout = "bhsd_bhsd_bhsd"
         qkv_scale_inv_format = "bhsd"
 

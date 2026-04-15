@@ -156,10 +156,10 @@ void prepare_flash_attn_bwd(Tensor q, Tensor k, Tensor v, Tensor qkv, cudaStream
 }  // namespace flash_attention
 
 // ============================================================================
-// multi_tensor_permute_to_grouped_tensor: BSHD/SBHD -> BHSD
+// multi_tensor_transpose_to_bhsd: BSHD/SBHD -> BHSD
 // ============================================================================
 
-namespace multi_tensor_permute_to_grouped_tensor {
+namespace multi_tensor_transpose_to_bhsd {
 
 using flash_attention::Vec;
 
@@ -220,7 +220,7 @@ constexpr int TRANSPOSE_WARPS = TRANSPOSE_BLOCK / 32;  // 8
 
 template <typename T, bool kIsBshd>
 __launch_bounds__(TRANSPOSE_BLOCK) __global__
-    void permute_to_grouped_tensor_fallback_not_vec_aligned_kernel(PermuteParams params, size_t b,
+    void transpose_to_bhsd_fallback_not_vec_aligned_kernel(PermuteParams params, size_t b,
                                                                    unsigned int s_tiles) {
   const auto &slot = params.slots[blockIdx.z];
   const T *__restrict__ in = reinterpret_cast<const T *>(slot.input);
@@ -320,7 +320,7 @@ __device__ __forceinline__ void permute_vec_loop(const T *__restrict__ in, T *__
 
 template <typename T, bool kIsBshd>
 __launch_bounds__(fallback_permute_threads) __global__
-    void permute_to_grouped_tensor_fallback_vec_aligned_kernel(PermuteParams params, size_t b,
+    void transpose_to_bhsd_fallback_vec_aligned_kernel(PermuteParams params, size_t b,
                                                                unsigned int permute_s_splits,
                                                                size_t h_grid) {
   const auto &slot = params.slots[blockIdx.z];
@@ -487,7 +487,7 @@ __device__ __forceinline__ void st_global_cs_uint4(uint4 *ptr, uint4 val) {
 
 template <typename T, bool kIsBshd>
 __launch_bounds__(tma_permute_threads) __global__
-    void permute_to_grouped_tensor_kernel(const __grid_constant__ TmaMapParams tma_maps,
+    void transpose_to_bhsd_kernel(const __grid_constant__ TmaMapParams tma_maps,
                                           PermuteParams params, size_t b, size_t h_grid,
                                           unsigned int permute_s_splits, size_t s_tile_size) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
@@ -597,7 +597,7 @@ static void create_strided_tensor_map(CUtensorMap &map, void *ptr, DType dtype, 
   }
 }
 
-void multi_tensor_permute_to_grouped_tensor(Tensor *inputs, Tensor *outputs, size_t num_tensors,
+void multi_tensor_transpose_to_bhsd(Tensor *inputs, Tensor *outputs, size_t num_tensors,
                                             NVTE_QKV_Format original_format, cudaStream_t stream) {
   using namespace transformer_engine;
   if (num_tensors == 0) return;
@@ -677,14 +677,14 @@ void multi_tensor_permute_to_grouped_tensor(Tensor *inputs, Tensor *outputs, siz
 
       if (is_bshd) {
         TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
-            dtype, dtype_t, auto kernel = permute_to_grouped_tensor_kernel<dtype_t, true>;
+            dtype, dtype_t, auto kernel = transpose_to_bhsd_kernel<dtype_t, true>;
             NVTE_CHECK_CUDA(cudaFuncSetAttribute(
                 kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes));
             kernel<<<grid, tma_permute_threads, smem_bytes, stream>>>(tma_maps, params, b, h_max,
                                                                       permute_s_splits, s_tile););
       } else {
         TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
-            dtype, dtype_t, auto kernel = permute_to_grouped_tensor_kernel<dtype_t, false>;
+            dtype, dtype_t, auto kernel = transpose_to_bhsd_kernel<dtype_t, false>;
             NVTE_CHECK_CUDA(cudaFuncSetAttribute(
                 kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes));
             kernel<<<grid, tma_permute_threads, smem_bytes, stream>>>(tma_maps, params, b, h_max,
@@ -704,12 +704,12 @@ void multi_tensor_permute_to_grouped_tensor(Tensor *inputs, Tensor *outputs, siz
     if (is_bshd) {
       TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
           dtype, dtype_t,
-          permute_to_grouped_tensor_fallback_vec_aligned_kernel<dtype_t, true>
+          transpose_to_bhsd_fallback_vec_aligned_kernel<dtype_t, true>
           <<<grid, fallback_permute_threads, 0, stream>>>(params, b, permute_s_splits, h_max););
     } else {
       TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
           dtype, dtype_t,
-          permute_to_grouped_tensor_fallback_vec_aligned_kernel<dtype_t, false>
+          transpose_to_bhsd_fallback_vec_aligned_kernel<dtype_t, false>
           <<<grid, fallback_permute_threads, 0, stream>>>(params, b, permute_s_splits, h_max););
     }
   } else {
@@ -725,19 +725,19 @@ void multi_tensor_permute_to_grouped_tensor(Tensor *inputs, Tensor *outputs, siz
     if (is_bshd) {
       TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
           dtype, dtype_t,
-          permute_to_grouped_tensor_fallback_not_vec_aligned_kernel<dtype_t, true>
+          transpose_to_bhsd_fallback_not_vec_aligned_kernel<dtype_t, true>
           <<<grid, TRANSPOSE_BLOCK, smem_bytes, stream>>>(params, b, st););
     } else {
       TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
           dtype, dtype_t,
-          permute_to_grouped_tensor_fallback_not_vec_aligned_kernel<dtype_t, false>
+          transpose_to_bhsd_fallback_not_vec_aligned_kernel<dtype_t, false>
           <<<grid, TRANSPOSE_BLOCK, smem_bytes, stream>>>(params, b, st););
     }
   }
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
-}  // namespace multi_tensor_permute_to_grouped_tensor
+}  // namespace multi_tensor_transpose_to_bhsd
 
 // ===================================================================================
 // multi_tensor_pad_last_dim: pad the last dim of multiple tensors to certain alignment
@@ -866,11 +866,15 @@ void nvte_prepare_flash_attn_bwd(NVTETensor q, NVTETensor k, NVTETensor v, NVTET
                                           stream);
 }
 
-void nvte_multi_tensor_permute_to_grouped_tensor(NVTETensor *inputs, NVTETensor *outputs,
+void nvte_multi_tensor_transpose_to_bhsd(NVTETensor *inputs, NVTETensor *outputs,
                                                  size_t num_tensors,
                                                  NVTE_QKV_Format original_format,
                                                  cudaStream_t stream) {
-  NVTE_API_CALL(nvte_multi_tensor_permute_to_grouped_tensor);
+  NVTE_API_CALL(nvte_multi_tensor_transpose_to_bhsd);
+  NVTE_CHECK(original_format == NVTE_QKV_Format::NVTE_BSHD ||
+                 original_format == NVTE_QKV_Format::NVTE_SBHD,
+             "nvte_multi_tensor_transpose_to_bhsd: only BSHD/SBHD -> BHSD is currently "
+             "supported.");
   using namespace transformer_engine;
 
   std::vector<Tensor> in_vec(num_tensors), out_vec(num_tensors);
@@ -878,7 +882,7 @@ void nvte_multi_tensor_permute_to_grouped_tensor(NVTETensor *inputs, NVTETensor 
     in_vec[i] = *convertNVTETensorCheck(inputs[i]);
     out_vec[i] = *convertNVTETensorCheck(outputs[i]);
   }
-  multi_tensor_permute_to_grouped_tensor::multi_tensor_permute_to_grouped_tensor(
+  multi_tensor_transpose_to_bhsd::multi_tensor_transpose_to_bhsd(
       in_vec.data(), out_vec.data(), num_tensors, original_format, stream);
 }
 

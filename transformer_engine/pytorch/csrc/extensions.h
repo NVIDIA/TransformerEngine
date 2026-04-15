@@ -113,7 +113,7 @@ std::vector<py::object> fused_attn_bwd(
 at::Tensor fa_prepare_fwd(at::Tensor qkvi);
 at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v);
 
-std::vector<std::optional<at::Tensor>> multi_tensor_permute_to_grouped_tensor(
+std::vector<std::optional<at::Tensor>> multi_tensor_transpose_to_bhsd(
     std::vector<std::optional<at::Tensor>> inputs, const std::string &original_format,
     std::vector<std::optional<at::Tensor>> outputs = {});
 

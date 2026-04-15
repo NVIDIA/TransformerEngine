@@ -659,12 +659,12 @@ at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v) {
   return qkv;
 }
 
-std::vector<std::optional<at::Tensor>> multi_tensor_permute_to_grouped_tensor(
+std::vector<std::optional<at::Tensor>> multi_tensor_transpose_to_bhsd(
     std::vector<std::optional<at::Tensor>> inputs, const std::string &original_format,
     std::vector<std::optional<at::Tensor>> outputs) {
   NVTE_CHECK(original_format == "sbhd" || original_format == "bshd",
-             "Unsupported original_format \"", original_format,
-             "\"; expected \"sbhd\" or \"bshd\".");
+             "multi_tensor_transpose_to_bhsd: only BSHD/SBHD -> BHSD is currently supported. "
+             "Got original_format=\"", original_format, "\".");
   const auto original_format_enum = (original_format == "sbhd") ? NVTE_SBHD : NVTE_BSHD;
 
   if (inputs.empty()) return {};
@@ -672,7 +672,7 @@ std::vector<std::optional<at::Tensor>> multi_tensor_permute_to_grouped_tensor(
   const bool has_outputs = !outputs.empty();
   if (has_outputs) {
     NVTE_CHECK(outputs.size() == inputs.size(),
-               "multi_tensor_permute_to_grouped_tensor: outputs.size() (", outputs.size(),
+               "multi_tensor_transpose_to_bhsd: outputs.size() (", outputs.size(),
                ") != inputs.size() (", inputs.size(), ").");
   }
 
@@ -684,12 +684,12 @@ std::vector<std::optional<at::Tensor>> multi_tensor_permute_to_grouped_tensor(
 
     auto &input = inputs[i].value();
     NVTE_CHECK(input.is_cuda() && input.is_contiguous() && input.dim() == 4,
-               "multi_tensor_permute_to_grouped_tensor: input ", i,
+               "multi_tensor_transpose_to_bhsd: input ", i,
                " must be a contiguous 4D CUDA tensor.");
     NVTE_CHECK(input.scalar_type() == at::ScalarType::Half ||
                    input.scalar_type() == at::ScalarType::BFloat16 ||
                    input.scalar_type() == at::ScalarType::Byte,
-               "multi_tensor_permute_to_grouped_tensor: unsupported dtype at index ", i, ".");
+               "multi_tensor_transpose_to_bhsd: unsupported dtype at index ", i, ".");
 
     at::Tensor output;
     if (has_outputs && outputs[i].has_value()) {
@@ -721,7 +721,7 @@ std::vector<std::optional<at::Tensor>> multi_tensor_permute_to_grouped_tensor(
       nvte_ins[j] = te_ins[j].data();
       nvte_outs[j] = te_outs[j].data();
     }
-    nvte_multi_tensor_permute_to_grouped_tensor(nvte_ins.data(), nvte_outs.data(), te_ins.size(),
+    nvte_multi_tensor_transpose_to_bhsd(nvte_ins.data(), nvte_outs.data(), te_ins.size(),
                                                 original_format_enum,
                                                 at::cuda::getCurrentCUDAStream());
   }
