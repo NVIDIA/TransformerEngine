@@ -70,6 +70,14 @@ RUN --mount=from=build-scripts,source=build-scripts,target=/nvidia/build-scripts
   || [[ ! "${FRAMEWORK}" == "jax" ]]
 EOF
 
+RUN CUDA_PARTS=(${CUDA_VERSION//./ }) \
+  && CUDA_SUFFIX=$([ ${CUDA_PARTS[0]} -eq 12 ] && echo "12.9.1" || echo "13.1.0") \
+  && ARCH=$([ ${HOSTTYPE} = "aarch64" ] && echo "sbsa" || echo "x86_64") \
+  && CUSOLVERMP_TAR_NAME="cusolvermp_build_${ARCH}_rockylinux8_cuda${CUDA_SUFFIX}_release.tar.gz" \
+  && wget "https://urm.nvidia.com/artifactory/sw-cuda-math-cusolvermp-generic/cicd/release/v0.8.0/3063//${CUSOLVERMP_TAR_NAME}" \
+  && tar -C /usr --strip-components=1 -xf "$CUSOLVERMP_TAR_NAME" \
+  && rm "$CUSOLVERMP_TAR_NAME"
+
 # Install Transformer Engine
 RUN <<"EOF" bash -e
   export CCACHE_DIR=/ccache
@@ -92,6 +100,7 @@ RUN <<"EOF" bash -e
 
   NVTE_BUILD_THREADS_PER_JOB=4 \
   CUBLASMP_HOME=/usr \
+  NVTE_WITH_CUSOLVERMP=1 \
   pip3 install --verbose --verbose --no-build-isolation .[test]
 
   ccache --show-stats
