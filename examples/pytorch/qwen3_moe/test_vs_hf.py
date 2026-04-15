@@ -192,10 +192,8 @@ def main() -> None:
 
     te_logits, _ = te_model(input_ids)
     # Use identical logits so the backward graph sees the same values.
-    te_logits.data.copy_(hf_logits.detach())
+    te_logits, _ = te_model(input_ids)
     te_logits.backward(grad_output)
-
-    max_grad_err = 0.0
     for name, te_param in te_model.named_parameters():
         if te_param.grad is None:
             continue
