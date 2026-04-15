@@ -92,6 +92,15 @@ struct GemmParam {
   int ldb = 0;  // B column strides
 };
 
+// Minimum number of elements for 16-byte alignment, given a data type.
+// cuBLAS requires (dim * typeSize) % 16 == 0 for FP8 tensor core usage,
+// i.e. dim % (128 / typeBits) == 0.
+constexpr size_t kAlignmentBytes = 16;
+
+size_t min_alignment_elements(transformer_engine::DType dtype) {
+  return kAlignmentBytes * 8 / transformer_engine::typeToNumBits(dtype);
+}
+
 /* Populate parameters for cuBLAS GEMM
  *
  * cuBLAS follows the BLAS convention of column-major ordering. This
@@ -157,8 +166,9 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     }
 
     if (is_fp8_dtype(ret.Atype)) {
-      NVTE_CHECK(ret.lda % 16 == 0,
-                 "FP8 GEMM requires leading dimension of A to be divisible by 16,"
+      const auto align = min_alignment_elements(ret.Atype);
+      NVTE_CHECK(ret.lda % align == 0,
+                 "FP8 GEMM requires leading dimension of A to be divisible by ", align, ","
                  " got lda=", ret.lda, " (m=", m, ", n=", n, ", k=", k, ")."
                  " See https://docs.nvidia.com/cuda/cublas/#tensor-core-usage.");
     }
@@ -178,9 +188,9 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     ret.A_scale_inv = is_A_transposed ? A.scale_inv.dptr : A.columnwise_scale_inv.dptr;
     ret.lda = k;
 
-    // NVFP4 is 4-bit, so 32 elements = 16 bytes for alignment.
-    NVTE_CHECK((ret.lda % 32) == 0,
-               "NVFP4 GEMM requires leading dimension of A to be divisible by 32,"
+    const auto align = min_alignment_elements(ret.Atype);
+    NVTE_CHECK((ret.lda % align) == 0,
+               "NVFP4 GEMM requires leading dimension of A to be divisible by ", align, ","
                " got lda=", ret.lda, " (m=", m, ", n=", n, ", k=", k, ")."
                " See https://docs.nvidia.com/cuda/cublas/#tensor-core-usage.");
   } else if (mxfp8) {
@@ -199,8 +209,9 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     ret.A_scale_inv = is_A_transposed ? A.scale_inv.dptr : A.columnwise_scale_inv.dptr;
     ret.lda = is_A_transposed ? k : m;
 
-    NVTE_CHECK((ret.lda % 16) == 0,
-               "MXFP8 GEMM requires leading dimension of A to be divisible by 16,"
+    const auto align = min_alignment_elements(ret.Atype);
+    NVTE_CHECK((ret.lda % align) == 0,
+               "MXFP8 GEMM requires leading dimension of A to be divisible by ", align, ","
                " got lda=", ret.lda, " (m=", m, ", n=", n, ", k=", k, ")."
                " See https://docs.nvidia.com/cuda/cublas/#tensor-core-usage.");
   } else if (A.scaling_mode == NVTE_BLOCK_SCALING_1D || A.scaling_mode == NVTE_BLOCK_SCALING_2D) {
@@ -217,8 +228,9 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     ret.A_scale_inv = is_A_transposed ? A.scale_inv.dptr : A.columnwise_scale_inv.dptr;
     ret.lda = k;
 
-    NVTE_CHECK((ret.lda % 16) == 0,
-               "Block-scaled FP8 GEMM requires leading dimension of A to be divisible by 16,"
+    const auto align = min_alignment_elements(ret.Atype);
+    NVTE_CHECK((ret.lda % align) == 0,
+               "Block-scaled FP8 GEMM requires leading dimension of A to be divisible by ", align, ","
                " got lda=", ret.lda, " (m=", m, ", n=", n, ", k=", k, ")."
                " See https://docs.nvidia.com/cuda/cublas/#tensor-core-usage.");
     // Divisibility of 8 derived from FP8 (m * CTypeSize) % 16 == 0 requirement.
@@ -262,9 +274,10 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
       ret.ldb = is_B_transposed ? k : n;
     }
 
-    if (is_fp8_dtype(ret.Atype)) {
-      NVTE_CHECK(ret.ldb % 16 == 0,
-                 "FP8 GEMM requires leading dimension of B to be divisible by 16,"
+    if (is_fp8_dtype(ret.Btype)) {
+      const auto align = min_alignment_elements(ret.Btype);
+      NVTE_CHECK(ret.ldb % align == 0,
+                 "FP8 GEMM requires leading dimension of B to be divisible by ", align, ","
                  " got ldb=", ret.ldb, " (m=", m, ", n=", n, ", k=", k, ")."
                  " See https://docs.nvidia.com/cuda/cublas/#tensor-core-usage.");
     }
@@ -282,9 +295,9 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     ret.B_scale_inv = is_B_transposed ? B.columnwise_scale_inv.dptr : B.scale_inv.dptr;
     ret.ldb = k;
 
-    // NVFP4 is 4-bit, so 32 elements = 16 bytes for alignment.
-    NVTE_CHECK((ret.ldb % 32) == 0,
-               "NVFP4 GEMM requires leading dimension of B to be divisible by 32,"
+    const auto align = min_alignment_elements(ret.Btype);
+    NVTE_CHECK((ret.ldb % align) == 0,
+               "NVFP4 GEMM requires leading dimension of B to be divisible by ", align, ","
                " got ldb=", ret.ldb, " (m=", m, ", n=", n, ", k=", k, ")."
                " See https://docs.nvidia.com/cuda/cublas/#tensor-core-usage.");
   } else if (mxfp8) {
@@ -299,8 +312,9 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     ret.B_scale_inv = is_B_transposed ? B.columnwise_scale_inv.dptr : B.scale_inv.dptr;
     ret.ldb = is_B_transposed ? n : k;
 
-    NVTE_CHECK((ret.ldb % 16) == 0,
-               "MXFP8 GEMM requires leading dimension of B to be divisible by 16,"
+    const auto align = min_alignment_elements(ret.Btype);
+    NVTE_CHECK((ret.ldb % align) == 0,
+               "MXFP8 GEMM requires leading dimension of B to be divisible by ", align, ","
                " got ldb=", ret.ldb, " (m=", m, ", n=", n, ", k=", k, ")."
                " See https://docs.nvidia.com/cuda/cublas/#tensor-core-usage.");
   } else if (B.scaling_mode == NVTE_BLOCK_SCALING_1D || B.scaling_mode == NVTE_BLOCK_SCALING_2D) {
@@ -317,8 +331,9 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     ret.B_scale_inv = is_B_transposed ? B.columnwise_scale_inv.dptr : B.scale_inv.dptr;
     ret.ldb = k;
 
-    NVTE_CHECK((ret.ldb % 16) == 0,
-               "Block-scaled FP8 GEMM requires leading dimension of B to be divisible by 16,"
+    const auto align = min_alignment_elements(ret.Btype);
+    NVTE_CHECK((ret.ldb % align) == 0,
+               "Block-scaled FP8 GEMM requires leading dimension of B to be divisible by ", align, ","
                " got ldb=", ret.ldb, " (m=", m, ", n=", n, ", k=", k, ")."
                " See https://docs.nvidia.com/cuda/cublas/#tensor-core-usage.");
     if (B.scaling_mode == NVTE_BLOCK_SCALING_1D) {
