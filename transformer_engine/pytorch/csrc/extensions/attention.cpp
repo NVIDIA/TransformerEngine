@@ -653,7 +653,7 @@ at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v) {
   return qkv;
 }
 
-std::vector<std::optional<at::Tensor>> multi_tensor_permute_to_grouped_tensor_fwd(
+std::vector<std::optional<at::Tensor>> multi_tensor_permute_to_grouped_tensor(
     std::vector<std::optional<at::Tensor>> inputs, const std::string &original_format,
     std::vector<std::optional<at::Tensor>> outputs) {
   NVTE_CHECK(original_format == "sbhd" || original_format == "bshd",
@@ -666,7 +666,7 @@ std::vector<std::optional<at::Tensor>> multi_tensor_permute_to_grouped_tensor_fw
   const bool has_outputs = !outputs.empty();
   if (has_outputs) {
     NVTE_CHECK(outputs.size() == inputs.size(),
-               "multi_tensor_permute_to_grouped_tensor_fwd: outputs.size() (", outputs.size(),
+               "multi_tensor_permute_to_grouped_tensor: outputs.size() (", outputs.size(),
                ") != inputs.size() (", inputs.size(), ").");
   }
 
@@ -678,12 +678,12 @@ std::vector<std::optional<at::Tensor>> multi_tensor_permute_to_grouped_tensor_fw
 
     auto &input = inputs[i].value();
     NVTE_CHECK(input.is_cuda() && input.is_contiguous() && input.dim() == 4,
-               "multi_tensor_permute_to_grouped_tensor_fwd: input ", i,
+               "multi_tensor_permute_to_grouped_tensor: input ", i,
                " must be a contiguous 4D CUDA tensor.");
     NVTE_CHECK(input.scalar_type() == at::ScalarType::Half ||
                    input.scalar_type() == at::ScalarType::BFloat16 ||
                    input.scalar_type() == at::ScalarType::Byte,
-               "multi_tensor_permute_to_grouped_tensor_fwd: unsupported dtype at index ", i, ".");
+               "multi_tensor_permute_to_grouped_tensor: unsupported dtype at index ", i, ".");
 
     at::Tensor output;
     if (has_outputs && outputs[i].has_value()) {
@@ -715,81 +715,13 @@ std::vector<std::optional<at::Tensor>> multi_tensor_permute_to_grouped_tensor_fw
       nvte_ins[j] = te_ins[j].data();
       nvte_outs[j] = te_outs[j].data();
     }
-    nvte_multi_tensor_permute_to_grouped_tensor_fwd(nvte_ins.data(), nvte_outs.data(),
+    nvte_multi_tensor_permute_to_grouped_tensor(nvte_ins.data(), nvte_outs.data(),
                                                     te_ins.size(), original_format_enum,
                                                     at::cuda::getCurrentCUDAStream());
   }
 
   return result;
 }
-
-std::vector<std::optional<at::Tensor>> multi_tensor_permute_to_grouped_tensor_bwd(
-    std::vector<std::optional<at::Tensor>> inputs, const std::string &original_format,
-    std::vector<std::optional<at::Tensor>> outputs) {
-  NVTE_CHECK(original_format == "sbhd" || original_format == "bshd",
-             "Unsupported original_format \"", original_format,
-             "\"; expected \"sbhd\" or \"bshd\".");
-  const auto original_format_enum = (original_format == "sbhd") ? NVTE_SBHD : NVTE_BSHD;
-
-  if (inputs.empty()) return {};
-
-  const bool has_outputs = !outputs.empty();
-  if (has_outputs) {
-    NVTE_CHECK(outputs.size() == inputs.size(),
-               "multi_tensor_permute_to_grouped_tensor_bwd: outputs.size() (", outputs.size(),
-               ") != inputs.size() (", inputs.size(), ").");
-  }
-
-  std::vector<transformer_engine::TensorWrapper> te_ins, te_outs;
-  std::vector<std::optional<at::Tensor>> result(inputs.size(), std::nullopt);
-
-  for (size_t i = 0; i < inputs.size(); ++i) {
-    if (!inputs[i].has_value()) continue;
-
-    auto &input = inputs[i].value();
-    NVTE_CHECK(input.is_cuda() && input.is_contiguous() && input.dim() == 4,
-               "multi_tensor_permute_to_grouped_tensor_bwd: input ", i,
-               " must be a contiguous 4D CUDA tensor.");
-    NVTE_CHECK(input.scalar_type() == at::ScalarType::Half ||
-                   input.scalar_type() == at::ScalarType::BFloat16 ||
-                   input.scalar_type() == at::ScalarType::Byte,
-               "multi_tensor_permute_to_grouped_tensor_bwd: unsupported dtype at index ", i, ".");
-
-    at::Tensor output;
-    if (has_outputs && outputs[i].has_value()) {
-      output = outputs[i].value();
-    } else {
-      const int64_t B = input.size(0), H = input.size(1), S = input.size(2), D = input.size(3);
-      if (original_format_enum == NVTE_SBHD) {
-        output = at::empty({S, B, H, D}, input.options());
-      } else {
-        output = at::empty({B, S, H, D}, input.options());
-      }
-    }
-
-    te_ins.push_back(makeTransformerEngineTensor(input));
-    te_outs.push_back(makeTransformerEngineTensor(output));
-    result[i] = output;
-  }
-
-  if (!te_ins.empty()) {
-    std::vector<NVTETensor> nvte_ins(te_ins.size()), nvte_outs(te_outs.size());
-    for (size_t j = 0; j < te_ins.size(); ++j) {
-      nvte_ins[j] = te_ins[j].data();
-      nvte_outs[j] = te_outs[j].data();
-    }
-    nvte_multi_tensor_permute_to_grouped_tensor_bwd(nvte_ins.data(), nvte_outs.data(),
-                                                    te_ins.size(), original_format_enum,
-                                                    at::cuda::getCurrentCUDAStream());
-  }
-
-  return result;
-}
-
-/***************************************************************************************************
- * Pad the last dimension of 2D tensors to a common alignment, zero-filling the padding.
- * All tensors share the same alignment; launches a single fused kernel.
- **************************************************************************************************/
 
 std::vector<at::Tensor> multi_tensor_pad_last_dim(std::vector<at::Tensor> inputs,
                                                   int64_t alignment) {

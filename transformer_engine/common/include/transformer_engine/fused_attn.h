@@ -622,23 +622,7 @@ void nvte_prepare_flash_attn_bwd(NVTETensor q, NVTETensor k, NVTETensor v, NVTET
  *  \param[in]     original_format  Original QKV format (NVTE_BSHD or NVTE_SBHD).
  *  \param[in]     stream           CUDA stream.
  */
-void nvte_multi_tensor_permute_to_grouped_tensor_fwd(NVTETensor *inputs, NVTETensor *outputs,
-                                                     size_t num_tensors,
-                                                     NVTE_QKV_Format original_format,
-                                                     cudaStream_t stream);
-
-/*!  \brief Permute multiple tensors from BHSD back to BSHD/SBHD.
- *
- *  Each input tensor is 4D in BHSD layout, and the corresponding output tensor
- *  is 4D in BSHD or SBHD layout. Output tensors may be pre-allocated and have a smaller D dimension.
- *
- *  \param[in]     inputs           List of input tensors.
- *  \param[out]    outputs          List of output tensors.
- *  \param[in]     num_tensors      Number of tensors in the list.
- *  \param[in]     original_format  Original QKV format (NVTE_BSHD or NVTE_SBHD).
- *  \param[in]     stream           CUDA stream.
- */
-void nvte_multi_tensor_permute_to_grouped_tensor_bwd(NVTETensor *inputs, NVTETensor *outputs,
+void nvte_multi_tensor_permute_to_grouped_tensor(NVTETensor *inputs, NVTETensor *outputs,
                                                      size_t num_tensors,
                                                      NVTE_QKV_Format original_format,
                                                      cudaStream_t stream);

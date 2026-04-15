@@ -404,15 +404,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fa_prepare_bwd", &transformer_engine::pytorch::fa_prepare_bwd,
         "Backward of QKV preparation for Flash Attention",
         py::call_guard<py::gil_scoped_release>());
-  m.def("multi_tensor_permute_to_grouped_tensor_fwd",
-        &transformer_engine::pytorch::multi_tensor_permute_to_grouped_tensor_fwd,
+  m.def("multi_tensor_permute_to_grouped_tensor",
+        &transformer_engine::pytorch::multi_tensor_permute_to_grouped_tensor,
         "Permute multiple tensors from BSHD/SBHD to BHSD.", py::arg("inputs"),
-        py::arg("original_format") = std::string("bshd"),
-        py::arg("outputs") = std::vector<std::optional<at::Tensor>>{},
-        py::call_guard<py::gil_scoped_release>());
-  m.def("multi_tensor_permute_to_grouped_tensor_bwd",
-        &transformer_engine::pytorch::multi_tensor_permute_to_grouped_tensor_bwd,
-        "Permute multiple tensors from BHSD back to BSHD/SBHD.", py::arg("inputs"),
         py::arg("original_format") = std::string("bshd"),
         py::arg("outputs") = std::vector<std::optional<at::Tensor>>{},
         py::call_guard<py::gil_scoped_release>());

@@ -2436,12 +2436,12 @@ def mxfp8_quantize_fast_path(tensor_quantizer_pairs, src_format):
     cs_outs = _build_outputs(cs_list, 128)
 
     # permute scale_invs to BHSD; batched
-    rs_permuted = tex.multi_tensor_permute_to_grouped_tensor_fwd(
+    rs_permuted = tex.multi_tensor_permute_to_grouped_tensor(
         rs_list,
         original_format=src_format,
         outputs=rs_outs,
     )
-    cs_permuted = tex.multi_tensor_permute_to_grouped_tensor_fwd(
+    cs_permuted = tex.multi_tensor_permute_to_grouped_tensor(
         cs_list,
         original_format=src_format,
         outputs=cs_outs,
@@ -2532,7 +2532,7 @@ def combine_and_quantize(
 
         # ---- Slow path: permute data to BHSD first, then quantize with swizzle ----
         if qkv_layout in ("bshd_bshd_bshd", "sbhd_sbhd_sbhd"):
-            q, k, v = tex.multi_tensor_permute_to_grouped_tensor_fwd(
+            q, k, v = tex.multi_tensor_permute_to_grouped_tensor(
                 [q, k, v],
                 original_format=qkv_format,
             )
