@@ -17,6 +17,7 @@ from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
 from .base import (
     get_dummy_wgrad,
+    quantize_weight,
     TransformerEngineBaseModule,
     _2X_ACC_FPROP,
     _2X_ACC_DGRAD,
@@ -70,7 +71,7 @@ class _GroupedLinear(torch.autograd.Function):
         inp: torch.Tensor,
         non_tensor_args: Tuple,
         *weights_and_biases,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, list]:
         # pylint: disable=missing-function-docstring
 
         # Reduce number of arguments to autograd function in order
@@ -93,7 +94,8 @@ class _GroupedLinear(torch.autograd.Function):
             sequence_parallel,
             activation_dtype,
             is_grad_enabled,
-            module,
+            weight_workspaces,
+            cache_weight,
             skip_fp8_weight_update,
             save_original_input,
             debug,
@@ -178,18 +180,19 @@ class _GroupedLinear(torch.autograd.Function):
 
         # Initialize weights
         weights_fp8: list
+        new_workspaces = [None] * num_gemms
         if fp8 or debug:
-            # FP8 cast to workspace buffer
             weights_fp8 = []
-            update_workspace = is_first_microbatch is None or is_first_microbatch
+            update_ws = is_first_microbatch is None or is_first_microbatch
             for i in range(num_gemms):
-                weight_fp8 = module.get_weight_workspace(
+                weight_fp8, new_workspaces[i] = quantize_weight(
                     tensor=weights[i],
                     quantizer=weight_quantizers[i],
-                    cache_name=(None if is_first_microbatch is None else f"weight{i}"),
-                    update_workspace=update_workspace,
+                    workspace=weight_workspaces[i] if weight_workspaces else None,
+                    update_workspace=update_ws,
                     skip_update_flag=skip_fp8_weight_update,
                     workspace_dtype=activation_dtype,
+                    cache=cache_weight,
                 )
                 weights_fp8.append(weight_fp8)
 
@@ -332,10 +335,12 @@ class _GroupedLinear(torch.autograd.Function):
                 ctx.reduce_and_update_bwd_fp8_tensors = False
 
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
-        return out.view(-1, *inp.shape[1:-1], out.shape[-1])
+        return out.view(-1, *inp.shape[1:-1], out.shape[-1]), new_workspaces
 
     @staticmethod
-    def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
+    def backward(
+        ctx, grad_output: torch.Tensor, _grad_workspaces
+    ) -> Tuple[Union[torch.Tensor, None], ...]:
         # pylint: disable=missing-function-docstring
         with get_nvtx_range_context("_GroupedLinear_backward"):
             saved_tensors = restore_from_func_ctx(ctx)
@@ -1131,6 +1136,14 @@ class GroupedLinear(TransformerEngineBaseModule):
                 linear_fn = _GroupedLinear.forward
                 autograd_ctx = [None]
 
+            num_gemms = len(m_splits)
+            cache_weight = is_first_microbatch is not None
+            weight_workspaces = (
+                [self._fp8_workspaces.get(f"weight{i}") for i in range(num_gemms)]
+                if cache_weight
+                else [None] * num_gemms
+            )
+
             non_tensor_args = (
                 m_splits,
                 self.apply_bias,
@@ -1149,12 +1162,22 @@ class GroupedLinear(TransformerEngineBaseModule):
                 self.sequence_parallel,
                 self.activation_dtype,
                 is_grad_enabled,
-                self,
+                weight_workspaces,
+                cache_weight,
                 None,  # skip_fp8_weight_update
                 self.save_original_input,
                 debug,
             )
-            out = linear_fn(*autograd_ctx, inp, non_tensor_args, *weight_tensors, *bias_tensors)
+            out, new_workspaces = linear_fn(
+                *autograd_ctx, inp, non_tensor_args, *weight_tensors, *bias_tensors
+            )
+
+            if cache_weight:
+                for i, ws in enumerate(new_workspaces):
+                    if ws is not None:
+                        if isinstance(ws, torch.Tensor):
+                            ws = ws.detach()
+                        self._fp8_workspaces[f"weight{i}"] = ws
 
         finally:
             self.end_forward()
