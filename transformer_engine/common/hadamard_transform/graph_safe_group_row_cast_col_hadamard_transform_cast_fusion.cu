@@ -521,13 +521,11 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device_g
       }
     }
     __syncthreads();
-    if (threadIdx.x == 0) printf("[DBG] block=%d after barrier init\n", blockIdx.x);
 
     // Warp group roles: DMA (global->shared copy), MMA (tensor core gemm), scheduler, column quantizer, row quantizer
     if (is_dma_warp) {
       // Warp responsible for loading input from global to shared memory using TMA (Tensor Memory Access).
       cutlass::arch::warpgroup_reg_dealloc<32>();
-      if (elect_one_sync()) printf("[DBG] block=%d DMA warp: entered\n", blockIdx.x);
 
       // Use LDGSTS (cp.async) in the DMA warp to load offsets and first_dims into shared memory.
       // For kEnableRHTColQuant=true: after cp.async completes, the DMA warp provides the 1st of
@@ -537,16 +535,13 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device_g
       // For kEnableRHTColQuant=false: cpasync_barrier[0] is used instead.
       constexpr int kWarpSize = 32;
       const int local_tidx = threadIdx.x % kWarpSize;
-      if (elect_one_sync()) printf("[DBG] block=%d DMA warp: before offsets loop, num_tensors=%zu local_tidx=%d\n", blockIdx.x, num_tensors, (int)local_tidx);
       auto async_op = cute::SM80_CP_ASYNC_CACHEALWAYS<int64_t>{};
       for (size_t i = local_tidx; i <= num_tensors; i += kWarpSize) {
         async_op.copy(offsets[i], shared_storage.smem_offsets[i]);
       }
-      if (elect_one_sync()) printf("[DBG] block=%d DMA warp: offsets loop done\n", blockIdx.x);
       for (size_t i = local_tidx; i < num_tensors; i += kWarpSize) {
         async_op.copy(first_dims[i], shared_storage.smem_first_dims[i]);
       }
-      if (elect_one_sync()) printf("[DBG] block=%d DMA warp: both loops done\n", blockIdx.x);
       if constexpr (kEnableRHTColQuant) {
         // Wait for all cp.async offsets/first_dims copies to complete, then provide the
         // 1st of 2 required arrivals at tma_barrier[0] (with release semantics so consumers
@@ -556,19 +551,15 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device_g
         __threadfence_block();
         if (elect_one_sync()) {
           transformer_engine::ptx::mbarrier_arrive(&shared_storage.tma_barrier[0]);
-          printf("[DBG] block=%d DMA warp: tma_barrier arrived (1/2)\n", blockIdx.x);
         }
       } else {
         // No TMA B in this path. Block until all cp.async ops issued above are complete, then
         // signal cpasync_barrier[0] so the row quant warp can safely read offsets_smem.
-        if (elect_one_sync()) printf("[DBG] block=%d DMA warp: before cp.async.wait_all\n", blockIdx.x);
         asm volatile("cp.async.commit_group;\n" ::);
         asm volatile("cp.async.wait_all;\n" ::);
         __threadfence_block();
         if (elect_one_sync()) {
-          printf("[DBG] block=%d DMA warp: signaling cpasync_barrier\n", blockIdx.x);
           transformer_engine::ptx::mbarrier_arrive(&shared_storage.cpasync_barrier[0]);
-          printf("[DBG] block=%d DMA warp: cpasync_barrier signaled\n", blockIdx.x);
         }
       }
 
@@ -615,7 +606,6 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device_g
                                               kTmaRhtTensorTransactionBytes);
           copy(tma_load_b.with(shared_storage.tma_barrier[0], tma_mcast_mask_b), tBgB(_, 0, 0),
                tBsB(_, 0));
-          printf("[DBG] block=%d DMA warp: TMA B issued (2nd arrival pending)\n", blockIdx.x);
         }
       }
 
@@ -1005,7 +995,6 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device_g
     } else if (is_epilogue_row_quant_warp) {
       // Warp responsible for quantizing the input (before Hadamard transform) to FP4 for row-wise usage.
       cutlass::arch::warpgroup_reg_alloc<136>();
-      if (threadIdx.x == 256) printf("[DBG] block=%d row_quant: warp entered\n", blockIdx.x);
       if constexpr (kEnableRowQuant) {
         using S2RVectorType = uint128_t;
 
@@ -1065,9 +1054,7 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device_g
         // Will result in barrier_id=10 passed to bar.sync instr as cutlass adds 8
         // in order to go over the reserved named barrier count.
         constexpr int row_quant_barrier_id = 2;
-        if (threadIdx.x == 256) printf("[DBG] block=%d row_quant: before NamedBarrier::sync\n", blockIdx.x);
         cutlass::arch::NamedBarrier::sync(NumEpilogueRowQuantThreadCount, row_quant_barrier_id);
-        if (threadIdx.x == 256) printf("[DBG] block=%d row_quant: after NamedBarrier::sync, before wait_barrier\n", blockIdx.x);
 
         // Wait until offsets/first_dims cp.async copies are visible in smem.
         // When kEnableRHTColQuant=true, tma_barrier[0] covers both B TMA and cp.async.
@@ -1077,7 +1064,6 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device_g
         } else {
           cute::wait_barrier(shared_storage.cpasync_barrier[0], 0 /*phase_bit*/);
         }
-        if (threadIdx.x == 256) printf("[DBG] block=%d row_quant: after wait_barrier, group_idx computation\n", blockIdx.x);
         int group_idx = get_current_tensor_id(
             shape_rep, num_tensors, (scheduler.tile_n_base() * size<1>(epilogue_tiler)) * M,
             packed_N, M, offsets_smem);
