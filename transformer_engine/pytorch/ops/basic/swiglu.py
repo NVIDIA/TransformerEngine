@@ -417,14 +417,6 @@ class _ScaledGLU(BasicOperation):
     ) -> torch.Tensor:
         raise NotImplementedError
 
-    def op_forward(self, *args, **kwargs) -> None:
-        raise RuntimeError(
-            f"{self.__class__.__name__} operation has "
-            f"{self.num_extra_inputs} extra tensor inputs "
-            f"and {self.num_extra_outputs} extra tensor outputs. "
-            "It overrides `fuser_forward` instead of `op_forward`."
-        )
-
     def op_backward(self, *args, **kwargs) -> None:
         raise RuntimeError(
             f"{self.__class__.__name__} operation has "
@@ -433,16 +425,20 @@ class _ScaledGLU(BasicOperation):
             "It overrides `fuser_backward` instead of `op_backward`."
         )
 
-    def fuser_forward(
+    def fuser_forward_compute(
         self,
-        basic_op_ctxs: list[OperationContext],
         input_: torch.Tensor,
         *,
+        requires_grad: list[bool],
         basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
         prev_op_grad_output_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
         basic_op_kwargs: list[dict[str, Any]],
-    ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
+    ) -> tuple[
+        torch.Tensor,
+        Iterable[Iterable[torch.Tensor]],
+        list[tuple[Optional[torch.Tensor], ...]],
+    ]:
         extra_input = basic_op_extra_inputs[0][0]
 
         # Determine compute dtype
@@ -473,20 +469,40 @@ class _ScaledGLU(BasicOperation):
         swiglu_out = self._glu_forward(swiglu_in)
         out = swiglu_out * scales.unsqueeze(-1)
 
-        # Save state for backward pass
-        ctx = basic_op_ctxs[0]
-        if ctx.requires_grad:
-            if is_cpu_offload_enabled():
-                mark_activation_offload(input_)
-            ctx.input_requires_grad = True
-            ctx.extra_input_requires_grad = extra_input.requires_grad
-            ctx.dtype = dtype
-            ctx.save_for_backward(
-                input_,
-                scales if ctx.input_requires_grad else None,
-            )
+        if requires_grad[0]:
+            tensors_to_save = [(input_, scales)]
+        else:
+            tensors_to_save = [()]
 
-        return out, [()]
+        return out, [()], tensors_to_save
+
+    def fuser_forward_save_ctx(
+        self,
+        basic_op_ctxs: list[OperationContext],
+        input_: torch.Tensor,
+        tensors_to_save: list[tuple[Optional[torch.Tensor], ...]],
+        *,
+        requires_grad: list[bool],
+        basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
+        prev_op_grad_output_quantizer: Optional[Quantizer],
+        next_op_input_quantizer: Optional[Quantizer],
+        basic_op_kwargs: list[dict[str, Any]],
+    ) -> None:
+        if not requires_grad[0]:
+            return
+        ctx = basic_op_ctxs[0]
+        saved_input = tensors_to_save[0][0]
+        if is_cpu_offload_enabled():
+            mark_activation_offload(saved_input)
+        ctx.save_for_backward(*tensors_to_save[0])
+        ctx.input_requires_grad = True
+        ctx.extra_input_requires_grad = basic_op_extra_inputs[0][0].requires_grad
+        if torch.is_autocast_enabled():
+            ctx.dtype = torch.get_autocast_dtype("cuda")
+        elif isinstance(input_, torch.Tensor):
+            ctx.dtype = input_.dtype
+        else:
+            ctx.dtype = basic_op_extra_inputs[0][0].dtype
 
     def fuser_backward(
         self,

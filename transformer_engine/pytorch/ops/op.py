@@ -313,6 +313,8 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             )
         if has_compute:
             cls._use_split_forward = True
+        elif has_op_forward:
+            cls._use_split_forward = False
 
     def __init__(self) -> None:
         super().__init__()

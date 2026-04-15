@@ -657,14 +657,6 @@ class GroupedLinear(BasicOperation):
                         recipe.fp8_quant_bwd_grad.amax_epsilon
                     )
 
-    def op_forward(self, *args, **kwargs):
-        raise RuntimeError(
-            f"{self.__class__.__name__} operation has "
-            f"{self.num_extra_inputs} extra tensor inputs "
-            f"and {self.num_extra_outputs} extra tensor outputs. "
-            "It overrides `fuser_forward` instead of `op_forward`."
-        )
-
     def op_backward(self, *args, **kwargs):
         raise RuntimeError(
             f"{self.__class__.__name__} operation has "
