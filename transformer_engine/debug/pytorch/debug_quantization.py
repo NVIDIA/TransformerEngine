@@ -320,9 +320,8 @@ class DebugQuantizer(Quantizer):
                 self.parent_quantizer.set_usage(rowwise=True)
 
         rowwise_gemm_tensor, columnwise_gemm_tensor = None, None
-        parent_has_quantized_usage = (
-            self.parent_quantizer is not None
-            and (self.parent_quantizer.rowwise_usage or self.parent_quantizer.columnwise_usage)
+        parent_has_quantized_usage = self.parent_quantizer is not None and (
+            self.parent_quantizer.rowwise_usage or self.parent_quantizer.columnwise_usage
         )
         if (
             STANDARD_QUANTIZE in [self.rowwise_tensor_plan, self.columnwise_tensor_plan]
@@ -332,9 +331,15 @@ class DebugQuantizer(Quantizer):
             # if both rowwise_tensor_plan and columnwise_tensor_plan need to be quantized,
             # one tensor with columnwise=True and rowwise=True is computed
             # and both rowwise_tensor_plan and columnwise_tensor_plan point to it.
-            if self.rowwise_tensor_plan == STANDARD_QUANTIZE and self.parent_quantizer.rowwise_usage:
+            if (
+                self.rowwise_tensor_plan == STANDARD_QUANTIZE
+                and self.parent_quantizer.rowwise_usage
+            ):
                 rowwise_gemm_tensor = quantized_tensor
-            if self.columnwise_tensor_plan == STANDARD_QUANTIZE and self.parent_quantizer.columnwise_usage:
+            if (
+                self.columnwise_tensor_plan == STANDARD_QUANTIZE
+                and self.parent_quantizer.columnwise_usage
+            ):
                 columnwise_gemm_tensor = quantized_tensor
 
         # 2. modify_tensor() is called, if it is used.
@@ -569,9 +574,7 @@ class DebugQuantizer(Quantizer):
         if not self.output_tensor:
             self._update_parent_quantizer_usage()
 
-    def wrap_quantized_tensor(
-        self, tensor: QuantizedTensor, dtype: Optional[torch.dtype] = None
-    ):
+    def wrap_quantized_tensor(self, tensor: QuantizedTensor, dtype: Optional[torch.dtype] = None):
         """
         Wraps the quantized tensor with the debug quantizer.
         It is used for weight tensors when fp8 model parameters are enabled.
@@ -605,7 +608,9 @@ class DebugQuantizer(Quantizer):
             inspect_source = None
         else:
             rowwise_tensor = (
-                tensor if self.rowwise_tensor_plan == STANDARD_QUANTIZE else _get_dequantized_weight()
+                tensor
+                if self.rowwise_tensor_plan == STANDARD_QUANTIZE
+                else _get_dequantized_weight()
             )
             columnwise_tensor = (
                 tensor
@@ -733,9 +738,7 @@ class DebugQuantizedTensor(QuantizedTensorStorage):
                 # Keep rowwise storage focused on rowwise path.
                 rowwise_rowwise_usage = rowwise_usage
                 rowwise_columnwise_usage = False if columnwise_usage is not None else None
-            self.rowwise_gemm_tensor.update_usage(
-                rowwise_rowwise_usage, rowwise_columnwise_usage
-            )
+            self.rowwise_gemm_tensor.update_usage(rowwise_rowwise_usage, rowwise_columnwise_usage)
         if isinstance(self.columnwise_gemm_tensor, QuantizedTensor):
             if same_storage:
                 columnwise_rowwise_usage = rowwise_usage
