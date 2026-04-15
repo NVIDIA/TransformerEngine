@@ -725,10 +725,10 @@ class ETPShardedParam(torch.nn.Parameter):
         # 3. Trigger DDP backward hook (register_grad_ready).
         # ETP bypasses autograd's normal gradient flow (returns None for async RS,
         # accumulates directly into main_grad), so we must trigger the DDP hook
-        # manually. param.grad = dummy_grad is a Python attribute set that does NOT
-        # fire autograd's grad accumulator hook — only the explicit call below does.
+        # manually. Do NOT set param.grad before calling — the hook checks
+        # param.grad and would accumulate it into main_grad if zero_out_wgrad
+        # is True, corrupting the gradient with a non-zero dummy.
         if getattr(param, '_grad_accum_hook', None) is not None:
-            param.grad = dummy_grad
             param._grad_accum_hook()
 
         return dummy_grad

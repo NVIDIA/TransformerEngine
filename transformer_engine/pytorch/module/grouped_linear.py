@@ -560,6 +560,12 @@ class _GroupedLinear(torch.autograd.Function):
 
                 if ctx.etp_size > 1:
                     wgrad_list = origin_weights[0].batched_wgrad_reduce_scatter(wgrad_list)
+                    # Drop Python refs to wgrad input buffers. The async RS on rs_stream
+                    # still holds C++ refs (via NCCL Work); those are released when
+                    # _wait_reduce_scatter calls handle.wait() + self.handle = None.
+                    # Without this del, main_grads keeps the tensors alive until function
+                    # return, wasting memory during graph capture warmup.
+                    del main_grads
                 elif ctx.fuse_wgrad_accumulation:
                     wgrad_list = [
                             handle_custom_ddp_from_mcore(weight, wgrad)
