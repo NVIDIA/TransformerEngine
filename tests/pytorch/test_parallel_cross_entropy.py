@@ -15,18 +15,31 @@ class TestParallelCrossEntropy:
     def generate_iters(self, iters: int):
         self.iters = iters
 
-    def generate_infra(self, reduce_loss: bool, label_smoothing: float, z_loss_weight: float = 0.0, ignore_idx: int = -100):
+    def generate_infra(
+        self,
+        reduce_loss: bool,
+        label_smoothing: float,
+        z_loss_weight: float = 0.0,
+        ignore_idx: int = -100,
+    ):
         self.test_loss_func = parallel_cross_entropy
         if z_loss_weight == 0.0:
             self.ref_loss_func = torch.nn.CrossEntropyLoss(
-                label_smoothing=label_smoothing, reduction="mean" if reduce_loss else "none",
+                label_smoothing=label_smoothing,
+                reduction="mean" if reduce_loss else "none",
                 ignore_index=ignore_idx,
             )
         else:
 
             def ref_with_zloss(inp, tar):
                 inp = inp.float()
-                ce = F.cross_entropy(inp, tar, reduction="none", label_smoothing=label_smoothing, ignore_index=ignore_idx)
+                ce = F.cross_entropy(
+                    inp,
+                    tar,
+                    reduction="none",
+                    label_smoothing=label_smoothing,
+                    ignore_index=ignore_idx,
+                )
                 z_pen = z_loss_weight * torch.square(torch.logsumexp(inp, dim=-1))
                 z_pen[tar == ignore_idx] = 0.0
                 loss = ce + z_pen
@@ -90,16 +103,18 @@ class TestParallelCrossEntropy:
         if check_lse:
             ref_lse = torch.logsumexp(self.input_test.float(), dim=-1)
 
-            loss_only = self.test_loss_func(self.input_test.clone().detach(), self.tar_test,
-                                            z_loss_weight=z_loss_weight)
+            loss_only = self.test_loss_func(
+                self.input_test.clone().detach(), self.tar_test, z_loss_weight=z_loss_weight
+            )
 
             inp_lse = self.input_test.clone().detach().requires_grad_(True)
-            loss_lse, lse = self.test_loss_func(inp_lse, self.tar_test,
-                                                z_loss_weight=z_loss_weight, return_log_sum_exp=True)
+            loss_lse, lse = self.test_loss_func(
+                inp_lse, self.tar_test, z_loss_weight=z_loss_weight, return_log_sum_exp=True
+            )
 
             torch.testing.assert_close(loss_lse, loss_only)
 
-            non_ignored = (self.tar_test != -100)
+            non_ignored = self.tar_test != -100
             torch.testing.assert_close(lse[non_ignored], ref_lse[non_ignored], atol=1e-5, rtol=1e-5)
 
             if ignore_idx:

@@ -57,8 +57,13 @@ class CrossEntropyFunction(torch.autograd.Function):
             log_sum_exp is non-differentiable.
         """
         loss, inp, log_sum_exp = triton_cross_entropy.cross_entropy_forward(
-            inp, target, label_smoothing, reduce_loss, dist_process_group,
-            ignore_idx, z_loss_weight,
+            inp,
+            target,
+            label_smoothing,
+            reduce_loss,
+            dist_process_group,
+            ignore_idx,
+            z_loss_weight,
         )
 
         ctx.save_for_backward(inp.detach())
