@@ -46,10 +46,16 @@ class TopKPrimitive(BasePrimitive):
         values_dtype = dtypes.canonicalize_dtype(in_values_aval.dtype)
         assert keys_dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
         assert values_dtype == jnp.int32
+        assert in_keys_aval.ndim in (1, 2), "topk input must be 1D or 2D"
 
         workspace_bytes = get_cub_topk_workspace_bytes()
-        out_keys_aval = jax.core.ShapedArray(shape=(k_value,), dtype=keys_dtype)
-        out_values_aval = jax.core.ShapedArray(shape=(k_value,), dtype=jnp.int32)
+        if in_keys_aval.ndim == 2:
+            batch_size = in_keys_aval.shape[0]
+            out_shape = (batch_size, k_value)
+        else:
+            out_shape = (k_value,)
+        out_keys_aval = jax.core.ShapedArray(shape=out_shape, dtype=keys_dtype)
+        out_values_aval = jax.core.ShapedArray(shape=out_shape, dtype=jnp.int32)
         workspace_aval = jax.core.ShapedArray(shape=(workspace_bytes,), dtype=jnp.uint8)
         return (out_keys_aval, out_values_aval, workspace_aval)
 
@@ -99,10 +105,15 @@ def topk(
     k_value: int,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """
-    Topk max pairs
+    Topk max pairs.  x may be 1D (N,) or 2D (batch, N).
+    For 2D input the operation is applied independently to each row and the
+    outputs have shape (batch, k).
     """
     keys = x
-    values = jnp.arange(x.shape[0], dtype=jnp.int32)
+    # Build an index array with the same shape as x: 0..N-1 along the last axis.
+    values = jnp.broadcast_to(
+        jnp.arange(x.shape[-1], dtype=jnp.int32), x.shape
+    ).copy()
     out_keys, out_values = TopKPrimitive.outer_primitive.bind(
         keys,
         values,
