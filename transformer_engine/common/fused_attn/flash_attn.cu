@@ -30,9 +30,8 @@ struct alignas(sizeof(T) * N) Vec {
 
 constexpr int warp_size = 32;
 constexpr int type_size = 2;  // FP16 or BF16
-constexpr int nvec64 = sizeof(uint64_t) / type_size;
-constexpr int nvec128 = sizeof(uint4) / type_size;
-constexpr int load_size = warp_size * nvec64;
+constexpr int nvec = sizeof(uint64_t) / type_size;
+constexpr int load_size = warp_size * nvec;
 constexpr int block_size = 512;
 
 template <typename T>
@@ -41,7 +40,7 @@ __launch_bounds__(block_size) __global__
                             const size_t W) {
   const int warpid = (blockDim.x * blockIdx.x + threadIdx.x) / warp_size;
   const int id_in_warp = threadIdx.x % warp_size;
-  const size_t offset_input = blockIdx.y * W + warpid * 3 * W * Z + id_in_warp * nvec64;
+  const size_t offset_input = blockIdx.y * W + warpid * 3 * W * Z + id_in_warp * nvec;
   const T *my_input = qkvi + offset_input;
 
   const size_t s = warpid / B;
@@ -50,13 +49,13 @@ __launch_bounds__(block_size) __global__
   const size_t b = warpid % B;
 
   const size_t offset_output =
-      blockIdx.y * B * S * Z * W + (s + b * S) * W * Z + id_in_warp * nvec64;
+      blockIdx.y * B * S * Z * W + (s + b * S) * W * Z + id_in_warp * nvec;
 
   T *my_output = qkv + offset_output;
 
   for (int i = 0; i < Z; ++i) {
-    Vec<T, nvec64> *const out = reinterpret_cast<Vec<T, nvec64> *>(my_output + i * load_size);
-    *out = *reinterpret_cast<const Vec<T, nvec64> *>(my_input + i * load_size * 3);
+    Vec<T, nvec> *const out = reinterpret_cast<Vec<T, nvec> *>(my_output + i * load_size);
+    *out = *reinterpret_cast<const Vec<T, nvec> *>(my_input + i * load_size * 3);
   }
 }
 
@@ -68,7 +67,7 @@ __launch_bounds__(block_size) __global__
 
   const int warpid = (blockDim.x * blockIdx.x + threadIdx.x) / warp_size;
   const int id_in_warp = threadIdx.x % warp_size;
-  const size_t offset_input = warpid * W * Z + id_in_warp * nvec64;
+  const size_t offset_input = warpid * W * Z + id_in_warp * nvec;
   const T *my_input = input + offset_input;
 
   const size_t b = warpid / S;
@@ -76,13 +75,13 @@ __launch_bounds__(block_size) __global__
 
   const size_t s = warpid % S;
 
-  const size_t offset_output = (b + s * B) * 3 * W * Z + id_in_warp * nvec64 + blockIdx.y * W;
+  const size_t offset_output = (b + s * B) * 3 * W * Z + id_in_warp * nvec + blockIdx.y * W;
 
   T *my_output = qkv + offset_output;
 
   for (int i = 0; i < Z; ++i) {
-    Vec<T, nvec64> *const out = reinterpret_cast<Vec<T, nvec64> *>(my_output + i * load_size * 3);
-    *out = *reinterpret_cast<const Vec<T, nvec64> *>(my_input + i * load_size);
+    Vec<T, nvec> *const out = reinterpret_cast<Vec<T, nvec> *>(my_output + i * load_size * 3);
+    *out = *reinterpret_cast<const Vec<T, nvec> *>(my_input + i * load_size);
   }
 }
 
