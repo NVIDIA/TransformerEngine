@@ -64,18 +64,21 @@ void compute_ref(const ProcessingMethod processing_method,
             for (size_t j = 0; j < cols; ++j) {
                 const size_t idx = i * cols + j;
                 const float in = static_cast<float>(input[idx]);
+                const float g = static_cast<float>(grad[idx]);
                 float out;
                 switch (processing_method) {
                 case ProcessingMethod::CAST_ONLY:
-                case ProcessingMethod::CAST_DBIAS:
                     out = in;
+                    break;
+                case ProcessingMethod::CAST_DBIAS:
+                    out = g;
                     break;
                 case ProcessingMethod::CAST_ACT:
                     out = OP(in);
                     break;
                 case ProcessingMethod::CAST_DBIAS_DACT:
                 case ProcessingMethod::CAST_DACT:
-                    out = OP(in) * static_cast<float>(grad[idx]);
+                    out = OP(in) * g;
                     break;
                 default:
                     NVTE_ERROR("Invalid processing mode (",
