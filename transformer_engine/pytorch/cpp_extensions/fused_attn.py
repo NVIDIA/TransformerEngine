@@ -138,6 +138,7 @@ def fused_attn_fwd(
     fast_zero_fill: bool = True,
     qkv_layout: str = "sbh3d",
     o_format: str = "sbhd",
+    qkv_scale_inv_format: str = None,
     attn_bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
     softmax_type: str = "vanilla",
@@ -147,7 +148,6 @@ def fused_attn_fwd(
     softmax_offset: torch.Tensor = None,
     return_max_logit: bool = False,
     cuda_graph: bool = False,
-    qkv_scale_inv_format: str = None,
 ) -> Tuple[Union[torch.Tensor, None], ...]:
     """Fused Attention FWD for separate QKV input.
 
@@ -210,6 +210,9 @@ def fused_attn_fwd(
                 "t3hd", "th3d", "thd_t2hd", "thd_th2d", "thd_thd_thd"}
     o_format : str, default = "sbhd"
                 format of O; {"sbhd", "bshd", "thd"}
+    qkv_scale_inv_format : str, default = None
+                format of the scale-inverse tensors for QKV; {"sbhd", "bshd", "thd", "bhsd"};
+                if None, defaults to the format inferred from qkv_layout.
     attn_bias_type : str, default = "no_bias"
                 type of the bias; {"no_bias", "pre_scale_bias", "post_scale_bias", "alibi"}
     attn_mask_type : str, default = "padding"
@@ -234,9 +237,6 @@ def fused_attn_fwd(
                       whether to return the maximum attention score
     cuda_graph : bool, default = False
                 whether or not cuda graph capture is enabled.
-    qkv_scale_inv_format : str, default = None
-                format of the scale-inverse tensors for QKV; {"sbhd", "bshd", "thd", "bhsd"};
-                if None, defaults to the format inferred from qkv_layout.
 
     Returns
     ----------
@@ -326,6 +326,7 @@ def fused_attn_fwd(
         fast_zero_fill,
         QKVLayout[qkv_layout],
         QKVFormat[o_format],
+        QKVFormat[qkv_scale_inv_format],
         AttnBiasType[attn_bias_type],
         AttnMaskType[attn_mask_type],
         SoftmaxType[softmax_type],
@@ -349,7 +350,6 @@ def fused_attn_fwd(
         rng_elts_per_thread,
         return_max_logit,
         cuda_graph,
-        QKVFormat[qkv_scale_inv_format],
     )
 
     if return_max_logit:
@@ -430,6 +430,8 @@ def fused_attn_bwd(
     o_format: str = "sbhd",
     do_format: str = "sbhd",
     dqkv_layout: str = "sbh3d",
+    qkv_scale_inv_format: str = None,
+    do_scale_inv_format: str = None,
     attn_bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
     softmax_type: str = "vanilla",
@@ -437,8 +439,6 @@ def fused_attn_bwd(
     bottom_right_diagonal: bool = None,
     deterministic: bool = False,
     cuda_graph: bool = False,
-    qkv_scale_inv_format: str = None,
-    do_scale_inv_format: str = None,
 ) -> Tuple[Union[torch.Tensor, None], ...]:
     """Fused Attention BWD for packed KV input.
 
@@ -508,6 +508,12 @@ def fused_attn_bwd(
                 {"sb3hd", "sbh3d", "sbhd_sb2hd", "sbhd_sbh2d", "sbhd_sbhd_sbhd",
                 "bs3hd", "bsh3d", "bshd_bs2hd", "bshd_bsh2d", "bshd_bshd_bshd",
                 "t3hd", "th3d", "thd_t2hd", "thd_th2d", "thd_thd_thd"}
+    qkv_scale_inv_format : str, default = None
+                format of the scale-inverse tensors for QKV; {"sbhd", "bshd", "thd", "bhsd"};
+                if None, defaults to the format inferred from qkv_layout.
+    do_scale_inv_format : str, default = None
+                format of the scale-inverse tensors for dO; {"sbhd", "bshd", "thd", "bhsd"};
+                if None, defaults to the format inferred from the output layout.
     attn_bias_type : str, default = "no_bias"
                 type of the bias; {"no_bias", "pre_scale_bias", "post_scale_bias", "alibi"}
     attn_mask_type : str, default = "padding"
@@ -526,12 +532,6 @@ def fused_attn_bwd(
                 whether to execute the backward pass with deterministic behaviours.
     cuda_graph : bool, default = False
                 whether or not cuda graph capture is enabled.
-    qkv_scale_inv_format : str, default = None
-                format of the scale-inverse tensors for QKV; {"sbhd", "bshd", "thd", "bhsd"};
-                if None, defaults to the format inferred from qkv_layout.
-    do_scale_inv_format : str, default = None
-                format of the scale-inverse tensors for dO; {"sbhd", "bshd", "thd", "bhsd"};
-                if None, defaults to the format inferred from the output layout.
 
     Returns
     ----------
@@ -584,6 +584,8 @@ def fused_attn_bwd(
         QKVFormat[o_format],
         QKVFormat[do_format],
         QKVLayout[dqkv_layout],
+        QKVFormat[qkv_scale_inv_format],
+        QKVFormat[do_scale_inv_format],
         AttnBiasType[attn_bias_type],
         AttnMaskType[attn_mask_type],
         SoftmaxType[softmax_type],
@@ -605,8 +607,6 @@ def fused_attn_bwd(
         dp_quantizer,
         dqkv_quantizer,
         cuda_graph,
-        QKVFormat[qkv_scale_inv_format],
-        QKVFormat[do_scale_inv_format],
     )
 
     return output_tensors

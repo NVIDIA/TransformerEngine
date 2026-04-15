@@ -299,6 +299,8 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
  *  \param[in]     dropout                   Dropout probability.
  *  \param[in]     qkv_layout                QKV tensors' layout.
  *  \param[in]     o_format                  Output format.
+ *  \param[in]     qkv_scale_inv_format      Format of scale-inverse tensors for QKV;
+ *                                           if NVTE_QKV_Format_NOT_SET, inferred from qkv_layout.
  *  \param[in]     bias_type                 Bias type.
  *  \param[in]     attn_mask_type            Attention mask type.
  *  \param[in]     softmax_type              Attention softmax type.
@@ -307,7 +309,6 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
  *  \param[in]     bottom_right_diagonal     Whether to align sliding window and ALiBi diagonal to the bottom right corner of the softmax matrix.
  *  \param[in]     workspace                 Workspace tensor.
  *  \param[in]     stream                    CUDA stream used for this operation.
- *  \param[in]     qkv_scale_inv_format      Format of scale-inverse tensors for QKV.
  */
 void nvte_fused_attn_fwd(
     const NVTETensor Q, const NVTETensor K, const NVTETensor V, const NVTETensor Bias,
@@ -317,10 +318,10 @@ void nvte_fused_attn_fwd(
     const NVTETensor page_table_k, const NVTETensor page_table_v, const NVTETensor rng_state,
     size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training, bool return_max_logit,
     bool cuda_graph, float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout,
-    NVTE_QKV_Format o_format, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
+    NVTE_QKV_Format o_format, NVTE_QKV_Format qkv_scale_inv_format,
+    NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
     NVTE_Softmax_Type softmax_type, int64_t window_size_left, int64_t window_size_right,
-    bool bottom_right_diagonal, NVTETensor workspace, cudaStream_t stream,
-    NVTE_QKV_Format qkv_scale_inv_format = NVTE_QKV_Format_NOT_SET);
+    bool bottom_right_diagonal, NVTETensor workspace, cudaStream_t stream);
 
 /*! \brief Compute the backward of the dot product attention with separate Q, K and V.
  *
@@ -375,6 +376,10 @@ void nvte_fused_attn_fwd(
  *  \param[in]     o_format                  Output format.
  *  \param[in]     do_format                 Output gradient's format.
  *  \param[in]     dqkv_layout               QKV gradient tensors' layout.
+ *  \param[in]     qkv_scale_inv_format      Format of scale-inverse tensors for QKV;
+ *                                           if NVTE_QKV_Format_NOT_SET, inferred from qkv_layout.
+ *  \param[in]     do_scale_inv_format       Format of scale-inverse tensors for dO;
+ *                                           if NVTE_QKV_Format_NOT_SET, inferred from the output layout.
  *  \param[in]     bias_type                 Bias type.
  *  \param[in]     attn_mask_type            Attention mask type.
  *  \param[in]     softmax_type              Attention softmax type.
@@ -385,8 +390,6 @@ void nvte_fused_attn_fwd(
  *  \param[in]     cuda_graph                Whether cuda graph capture is enabled or not.
  *  \param[in]     workspace                 Workspace tensor.
  *  \param[in]     stream                    CUDA stream used for this operation.
- *  \param[in]     qkv_scale_inv_format      Format of scale-inverse tensors for QKV.
- *  \param[in]     do_scale_inv_format       Format of scale-inverse tensors for dO.
  */
 void nvte_fused_attn_bwd(
     const NVTETensor Q, const NVTETensor K, const NVTETensor V, const NVTETensor O,
@@ -396,11 +399,12 @@ void nvte_fused_attn_bwd(
     const NVTETensor cu_seqlens_q_padded, const NVTETensor cu_seqlens_kv_padded,
     size_t max_seqlen_q, size_t max_seqlen_kv, float attn_scale, float dropout,
     NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format, NVTE_QKV_Format do_format,
-    NVTE_QKV_Layout dqkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
-    NVTE_Softmax_Type softmax_type, int64_t window_size_left, int64_t window_size_right,
+    NVTE_QKV_Layout dqkv_layout, NVTE_QKV_Format qkv_scale_inv_format,
+    NVTE_QKV_Format do_scale_inv_format, NVTE_Bias_Type bias_type,
+    NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
+    int64_t window_size_left, int64_t window_size_right,
     bool bottom_right_diagonal, bool deterministic, bool cuda_graph, NVTETensor workspace,
-    cudaStream_t stream, NVTE_QKV_Format qkv_scale_inv_format = NVTE_QKV_Format_NOT_SET,
-    NVTE_QKV_Format do_scale_inv_format = NVTE_QKV_Format_NOT_SET);
+    cudaStream_t stream);
 
 /*!  \brief Update the RNG state with the seed and calculated offset.
  *

@@ -1326,6 +1326,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 fast_zero_fill,
                 qkv_layout,
                 o_format,
+                qkv_scale_inv_format,
                 attn_bias_type,
                 attn_mask_type,
                 softmax_type,
@@ -1334,7 +1335,6 @@ class FusedAttnFunc(torch.autograd.Function):
                 rng_gen,
                 softmax_offset,
                 cuda_graph=is_graph_capturing(),
-                qkv_scale_inv_format=qkv_scale_inv_format,
             )
 
             # out_fp8: Float8Tensor/MXFP8Tensor; dtype = torch.float16 or torch.bfloat16
@@ -1424,6 +1424,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 fast_zero_fill,
                 qkv_layout,
                 o_format,
+                None,
                 attn_bias_type,
                 attn_mask_type,
                 softmax_type,
@@ -1680,6 +1681,8 @@ class FusedAttnFunc(torch.autograd.Function):
                         ctx.o_format,
                         do_format,
                         ctx.dqkv_layout,
+                        ctx.qkv_scale_inv_format,
+                        do_scale_inv_format,
                         ctx.attn_bias_type,
                         ctx.attn_mask_type,
                         ctx.softmax_type,
@@ -1687,8 +1690,6 @@ class FusedAttnFunc(torch.autograd.Function):
                         ctx.bottom_right_diagonal,
                         ctx.deterministic,
                         is_graph_capturing(),
-                        qkv_scale_inv_format=ctx.qkv_scale_inv_format,
-                        do_scale_inv_format=do_scale_inv_format,
                     )
                     # dq, dk, dv:             torch.Tensor; dtype = torch.float16 or torch.bfloat16
                     dq, dk, dv = dq_, dk_, dv_
@@ -1748,6 +1749,8 @@ class FusedAttnFunc(torch.autograd.Function):
                         ctx.o_format,
                         do_format,
                         ctx.dqkv_layout,
+                        None,
+                        None,
                         ctx.attn_bias_type,
                         ctx.attn_mask_type,
                         ctx.softmax_type,
