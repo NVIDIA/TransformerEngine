@@ -3688,10 +3688,7 @@ class TestSequentialModules:
         glu_interleave_size: int = 32,
         token_padding: int = 2048,
     ) -> None:
-        """Grouped MLP forward+backward should be CUDA graph capturable (MXFP8).
-        Uses a padded token buffer (token_padding extra rows) to also cover
-        the sync-free MoE scenario where offsets[-1] < buffer_rows.
-        """
+        """Grouped MLP forward+backward should be CUDA graph capturable (MXFP8)."""
 
         if not te_ops.fused.ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8.is_supported():
             pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
