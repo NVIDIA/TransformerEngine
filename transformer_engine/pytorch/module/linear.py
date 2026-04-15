@@ -134,11 +134,10 @@ def _linear_forward_impl(
         symmetric_ar_type,
         save_original_input,
         debug,
+        backward_override,
+        custom,
+        backward_input_needs_gather,
     ) = non_tensor_args
-    if fp8:
-        backward_override = FP8GlobalStateManager.get_fp8_recipe().backward_override
-    else:
-        backward_override = None
     if backward_override == "high_precision":
         save_original_input = True
 
@@ -159,9 +158,6 @@ def _linear_forward_impl(
     )
 
     # Configure Userbuffers communication (comm+GEMM overlap)
-    if debug:  # turn off userbuffers in debug mode
-        ub_overlap_rs_fprop = False
-        ub_overlap_ag_fprop = False
     ub_obj = None
     ub_type = None
     if ub_overlap_rs_fprop:
@@ -170,9 +166,6 @@ def _linear_forward_impl(
     elif ub_overlap_ag_fprop:
         ub_obj = get_ub(ub_name + "_fprop", fp8)
         ub_type = tex.CommOverlapType.AG
-
-    # custom recipe check
-    custom = is_custom(input_quantizer) or is_custom(weight_quantizer)
 
     # ------------------------------------------------------
     # Prepare input tensor
@@ -395,10 +388,6 @@ def _linear_forward_impl(
         if save_original_input:
             inputmat = inp
 
-        backward_input_needs_gather = (
-            weight.requires_grad and parallel_mode == "column" and sequence_parallel
-        )
-
         # Discard unneeded data in input tensor
         if (
             backward_needs_input
@@ -466,14 +455,11 @@ def _linear_setup_ctx(
     bias,
     non_tensor_args,
     input_quantizer,
-    weight_quantizer_orig,
     grad_input_quantizer,
     grad_weight_quantizer,
     grad_output_quantizer,
 ):
     """Save forward state into autograd context for backward pass."""
-    if ctx_attrs is None:
-        return
     ctx.save_for_backward(*tensors_to_save)
     ctx.tensor_objects = tensor_objects
 
@@ -505,6 +491,9 @@ def _linear_setup_ctx(
         _symmetric_ar_type,
         _save_original_input,
         debug,
+        backward_override,
+        custom,
+        backward_input_needs_gather,
     ) = non_tensor_args
 
     # Values derived from input tensors
@@ -518,12 +507,6 @@ def _linear_setup_ctx(
     ctx.grad_input_quantizer = grad_input_quantizer
     ctx.grad_weight_quantizer = grad_weight_quantizer
     ctx.grad_output_quantizer = grad_output_quantizer
-
-    # backward_override
-    if fp8:
-        backward_override = FP8GlobalStateManager.get_fp8_recipe().backward_override
-    else:
-        backward_override = None
 
     # Values from non_tensor_args
     ctx.activation_dtype = activation_dtype
@@ -545,20 +528,13 @@ def _linear_setup_ctx(
     ctx.wgrad_store = wgrad_store
     ctx.ub_overlap_ag = ub_overlap_ag_dgrad
 
-    # UB flags adjusted for debug mode
-    if debug:
-        ub_overlap_rs_dgrad = False
-        ub_bulk_dgrad = False
-        ub_bulk_wgrad = False
     ctx.ub_overlap_rs_dgrad = ub_overlap_rs_dgrad
     ctx.ub_bulk_dgrad = ub_bulk_dgrad
     ctx.ub_bulk_wgrad = ub_bulk_wgrad
 
     # Derived values
-    ctx.backward_input_needs_gather = (
-        weight.requires_grad and parallel_mode == "column" and sequence_parallel
-    )
-    ctx.custom = is_custom(input_quantizer) or is_custom(weight_quantizer_orig)
+    ctx.backward_input_needs_gather = backward_input_needs_gather
+    ctx.custom = custom
 
     # main_grad_func setup
     if fuse_wgrad_accumulation and weight.requires_grad:
@@ -1140,7 +1116,6 @@ class _Linear(torch.autograd.Function):
                 bias,
                 non_tensor_args,
                 input_quantizer=input_quantizer,
-                weight_quantizer_orig=weight_quantizer,
                 grad_input_quantizer=grad_input_quantizer,
                 grad_weight_quantizer=grad_weight_quantizer,
                 grad_output_quantizer=grad_output_quantizer,
@@ -1627,6 +1602,32 @@ class Linear(TransformerEngineBaseModule):
                 self._fp8_workspaces.get(cache_name) if cache_name is not None else None
             )
 
+            if self.fp8:
+                backward_override = FP8GlobalStateManager.get_fp8_recipe().backward_override
+            else:
+                backward_override = None
+            custom = is_custom(input_quantizer) or is_custom(weight_quantizer)
+            backward_input_needs_gather = (
+                weight_tensor.requires_grad
+                and self.parallel_mode == "column"
+                and self.sequence_parallel
+            )
+
+            if debug:
+                ub_overlap_rs_fprop = False
+                ub_overlap_ag_dgrad = False
+                ub_overlap_ag_fprop = False
+                ub_overlap_rs_dgrad = False
+                ub_bulk_dgrad = False
+                ub_bulk_wgrad = False
+            else:
+                ub_overlap_rs_fprop = self.ub_overlap_rs_fprop
+                ub_overlap_ag_dgrad = self.ub_overlap_ag_dgrad
+                ub_overlap_ag_fprop = self.ub_overlap_ag_fprop
+                ub_overlap_rs_dgrad = self.ub_overlap_rs_dgrad
+                ub_bulk_dgrad = self.ub_bulk_dgrad
+                ub_bulk_wgrad = self.ub_bulk_wgrad
+
             non_tensor_args = (
                 is_first_microbatch,
                 self.fp8,
@@ -1641,12 +1642,12 @@ class Linear(TransformerEngineBaseModule):
                 self.activation_dtype,
                 self.parallel_mode,
                 is_grad_enabled,
-                self.ub_overlap_rs_fprop,
-                self.ub_overlap_ag_dgrad,
-                self.ub_overlap_ag_fprop,
-                self.ub_overlap_rs_dgrad,
-                self.ub_bulk_dgrad,
-                self.ub_bulk_wgrad,
+                ub_overlap_rs_fprop,
+                ub_overlap_ag_dgrad,
+                ub_overlap_ag_fprop,
+                ub_overlap_rs_dgrad,
+                ub_bulk_dgrad,
+                ub_bulk_wgrad,
                 self.ub_name,
                 fp8_output,
                 self.fsdp_group,
@@ -1655,6 +1656,9 @@ class Linear(TransformerEngineBaseModule):
                 self.symmetric_ar_type,
                 self.save_original_input,
                 debug,
+                backward_override,
+                custom,
+                backward_input_needs_gather,
             )
             out, new_weight_workspace = linear_fn(
                 *autograd_ctx,
