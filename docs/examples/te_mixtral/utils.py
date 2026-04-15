@@ -52,6 +52,8 @@ hyperparams = HyperParameters()
 
 
 def get_dataloaders(accelerator: Accelerator, hyperparams: HyperParameters):
+    from bionemo_mixtral.collator import DataCollatorWithFlattening
+
     dataset = load_dataset(hyperparams.dataset_name, split="train")
     tokenizer = AutoTokenizer.from_pretrained(hyperparams.model_name)
     if getattr(tokenizer, "pad_token", None) is None:
@@ -71,11 +73,16 @@ def get_dataloaders(accelerator: Accelerator, hyperparams: HyperParameters):
     with accelerator.main_process_first():
         dataset = dataset.map(tokenize, batched=True, remove_columns=dataset.column_names)
 
-    # Pad to multiple of 16 for both FP8 and BF16.
-    data_collator = DataCollatorForLanguageModeling(
+    pad_multiple = 32 if hyperparams.mixed_precision == "fp8" else 16
+    bshd_collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer,
         mlm=False,
-        pad_to_multiple_of=16,
+        pad_to_multiple_of=pad_multiple,
+    )
+    data_collator = DataCollatorWithFlattening(
+        collator=bshd_collator,
+        pad_to_multiple_of=pad_multiple,
+        separator_id=-100,
     )
 
     train_dataloader = DataLoader(
@@ -119,12 +126,21 @@ def init_baseline_model(hyperparams: HyperParameters):
 
     config = AutoConfig.from_pretrained(hyperparams.weights_cache_dir)
     config._attn_implementation = "flash_attention_2"
+    load_kwargs = {
+        "config": config,
+        "torch_dtype": torch.bfloat16,
+    }
+    # For baseline on large Mixtral, allow single-process multi-GPU model placement.
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    if world_size == 1 and torch.cuda.device_count() > 1:
+        load_kwargs["device_map"] = "auto"
+
     model = AutoModelForCausalLM.from_pretrained(
         hyperparams.weights_cache_dir,
-        config=config,
-        torch_dtype=torch.bfloat16,
+        **load_kwargs,
     )
-    model = model.cuda()
+    if not hasattr(model, "hf_device_map"):
+        model = model.cuda()
     model.config.use_cache = False
     return model
 
@@ -134,11 +150,17 @@ def init_te_mixtral_model(hyperparams: HyperParameters):
     ensure_model_is_downloaded(hyperparams)
 
     from te_mixtral import NVMixtralForCausalLM, replace_params
+    import transformer_engine.common.recipe as te_recipe
 
     base_config = AutoConfig.from_pretrained(hyperparams.weights_cache_dir)
     base_config._attn_implementation = "flash_attention_2"
     te_config = NVMixtralForCausalLM.config_class(**base_config.to_dict())
     te_config.expert_parallel_size = hyperparams.expert_parallel_size
+
+    fp8_recipe = None
+    if hyperparams.mixed_precision == "fp8":
+        fp8_recipe = te_recipe.DelayedScaling()
+        te_config.layer_precision = ["fp8"] * te_config.num_hidden_layers
 
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
@@ -161,7 +183,7 @@ def init_te_mixtral_model(hyperparams: HyperParameters):
         torch_dtype=torch.bfloat16,
         device_map="cpu",
     )
-    model = NVMixtralForCausalLM(te_config).to(
+    model = NVMixtralForCausalLM(te_config, fp8_recipe=fp8_recipe).to(
         device=f"cuda:{local_rank}",
         dtype=torch.bfloat16,
     )
@@ -207,14 +229,18 @@ def build_adamw(model, hyperparams: HyperParameters):
 
 def wrap_with_accelerator(model, hyperparams: HyperParameters):
     """Wrap the model in HuggingFace Accelerate (with optional FP8 support)."""
+    use_ep_fp8 = hyperparams.expert_parallel_size > 1 and hyperparams.mixed_precision == "fp8"
     fp8_kwarg_handler = (
-        [FP8RecipeKwargs(backend="te")] if hyperparams.mixed_precision == "fp8" else None
+        [FP8RecipeKwargs(backend="te")]
+        if hyperparams.mixed_precision == "fp8" and not use_ep_fp8
+        else None
     )
+    accelerator_mixed_precision = "bf16" if use_ep_fp8 else hyperparams.mixed_precision
 
     accelerator = Accelerator(
         log_with="wandb",
         gradient_accumulation_steps=hyperparams.gradient_accumulation_steps,
-        mixed_precision=hyperparams.mixed_precision,
+        mixed_precision=accelerator_mixed_precision,
         kwargs_handlers=fp8_kwarg_handler,
     )
 
@@ -227,6 +253,13 @@ def wrap_with_accelerator(model, hyperparams: HyperParameters):
     )
     if hyperparams.expert_parallel_size > 1:
         # EP path: model already contains DTensor params and should not be DDP-wrapped.
+        optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+            optimizer, train_dataloader, lr_scheduler
+        )
+        return accelerator, model, optimizer, train_dataloader, lr_scheduler
+
+    if hasattr(model, "hf_device_map"):
+        # HF baseline with device_map model-parallel placement should not be DDP-wrapped.
         optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
             optimizer, train_dataloader, lr_scheduler
         )
@@ -285,6 +318,13 @@ def finetune_model(model, hyperparams, accelerator, train_dataloader, optimizer,
 def run_te_mixtral_finetune(hyperparams: HyperParameters):
     """Convenience entrypoint: init TE Mixtral, wrap, and run fine-tuning."""
     model = init_te_mixtral_model(hyperparams)
+    accelerator, model, optimizer, train_dataloader, lr_scheduler = wrap_with_accelerator(model, hyperparams)
+    finetune_model(model, hyperparams, accelerator, train_dataloader, optimizer, lr_scheduler)
+
+
+def run_hf_baseline_finetune(hyperparams: HyperParameters):
+    """Convenience entrypoint: run HuggingFace Mixtral baseline fine-tuning."""
+    model = init_baseline_model(hyperparams)
     accelerator, model, optimizer, train_dataloader, lr_scheduler = wrap_with_accelerator(model, hyperparams)
     finetune_model(model, hyperparams, accelerator, train_dataloader, optimizer, lr_scheduler)
 
