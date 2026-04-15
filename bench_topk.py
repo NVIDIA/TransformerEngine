@@ -130,7 +130,8 @@ def main():
     print(f"GPU: {torch.cuda.get_device_name(0)}")
     print(f"PyTorch: {torch.__version__}  |  JAX: {jax.__version__}")
     print(f"Warmup: {args.warmup}  |  Bench: {args.iterations} iters  |  Metric: mean ms (batched)")
-    print(f"topk_per_row dtype: float32 (float32-only; input cast pre-benchmark)\n")
+    pr_note = "" if args.dtype == "float32" else " (float32-only; input cast pre-benchmark)"
+    print(f"topk_per_row dtype: float32{pr_note}\n")
 
     col = [10, 10, 8, 16, 12, 12, 14, 18]
     header = (
@@ -171,14 +172,15 @@ def main():
             pr_str = f"{t_pr:>{col[7]}.4f}" if t_pr is not None else f"{'N/A':>{col[7]}}"
 
             print(
-                f"{'bfloat16':<{col[0]}} {N:>{col[1]},} {K:>{col[2]},}"
+                f"{args.dtype:<{col[0]}} {N:>{col[1]},} {K:>{col[2]},}"
                 f" {t_jax:>{col[3]}.4f} {t_tor:>{col[4]}.4f}"
                 f" {t_cub:>{col[5]}.4f} {t_air:>{col[6]}.4f} {pr_str}"
             )
 
     print(sep)
     print("All times in milliseconds (mean).")
-    print("topk_per_row column uses float32 input; all others use bfloat16.")
+    if args.dtype != "float32":
+        print(f"topk_per_row column uses float32 input; all others use {args.dtype}.")
 
 
 if __name__ == "__main__":
