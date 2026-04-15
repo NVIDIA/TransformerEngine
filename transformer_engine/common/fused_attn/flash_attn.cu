@@ -48,8 +48,7 @@ __launch_bounds__(block_size) __global__
 
   const size_t b = warpid % B;
 
-  const size_t offset_output =
-      blockIdx.y * B * S * Z * W + (s + b * S) * W * Z + id_in_warp * nvec;
+  const size_t offset_output = blockIdx.y * B * S * Z * W + (s + b * S) * W * Z + id_in_warp * nvec;
 
   T *my_output = qkv + offset_output;
 
