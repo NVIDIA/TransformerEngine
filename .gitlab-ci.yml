@@ -1710,23 +1710,23 @@ L1_pytorch_onnx_unittest--B200_1GPU:
     - .L1_test_on_cluster
     - .B200_1GPU
 
-L3_pytorch_FA_versions_test--H100_1GPU:
+L3_pytorch_FA_versions_test--H100_4GPU:
     variables:
       FRAMEWORK: pytorch
       ARCH: amd64
     needs: [ pytorch-py3-devel-amd64 ]
     extends:
     - .L3_test
-    - .H100_1GPU
+    - .H100_4GPU
 
-L3_pytorch_FA_versions_test--B200_1GPU:
+L3_pytorch_FA_versions_test--B200_8GPU:
     variables:
       FRAMEWORK: pytorch
       ARCH: amd64
     needs: [ pytorch-py3-devel-amd64 ]
     extends:
     - .L3_test_on_cluster
-    - .B200_1GPU
+    - .B200_8GPU
 
 L0_jax_unittest--A100_1GPU:
     variables:
