@@ -111,9 +111,7 @@ def topk(
     """
     keys = x
     # Build an index array with the same shape as x: 0..N-1 along the last axis.
-    values = jnp.broadcast_to(
-        jnp.arange(x.shape[-1], dtype=jnp.int32), x.shape
-    ).copy()
+    values = jnp.broadcast_to(jnp.arange(x.shape[-1], dtype=jnp.int32), x.shape).copy()
     out_keys, out_values = TopKPrimitive.outer_primitive.bind(
         keys,
         values,

@@ -44,9 +44,16 @@ def parse_args():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--dtype", choices=["float16", "bfloat16", "float32"], default="bfloat16")
-    parser.add_argument("--n_list", type=str, required=True, help="Comma-separated N values (seqlen for 2D)")
+    parser.add_argument(
+        "--n_list", type=str, required=True, help="Comma-separated N values (seqlen for 2D)"
+    )
     parser.add_argument("--k_list", type=str, required=True, help="Comma-separated K values")
-    parser.add_argument("--bs_list", type=str, default=None, help="Comma-separated batch sizes; enables 2D benchmark")
+    parser.add_argument(
+        "--bs_list",
+        type=str,
+        default=None,
+        help="Comma-separated batch sizes; enables 2D benchmark",
+    )
     parser.add_argument("--warmup", type=int, default=50)
     parser.add_argument("--iterations", type=int, default=200)
     return parser.parse_args()
@@ -59,6 +66,7 @@ TORCH_DTYPE_MAP = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float3
 # ---------------------------------------------------------------------------
 # Benchmark helpers – batched methodology: submit all iters, sync once
 # ---------------------------------------------------------------------------
+
 
 def bench_jax_lax(x_jax, k, warmup, iters):
     """Works for both 1D (N,) and 2D (bs, seqlen) – lax.top_k operates on last axis."""
@@ -145,12 +153,16 @@ def bench_per_row(x_f32, lengths, out_aux, logits_aux, out_idx, k, warmup, iters
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def fmt(val, width):
     return f"{val:{width}.4f}" if val is not None else f"{'N/A':>{width}}"
 
 
 def run_1d(n_list, k_list, jax_dtype, args, col, sep):
-    print("── 1D ──────────────────────────────────────────────────────────────────────────────────────────────────────")
+    print(
+        "── 1D"
+        " ──────────────────────────────────────────────────────────────────────────────────────────────────────"
+    )
     print(
         f"{'dtype':<{col[0]}} {'N':>{col[1]}} {'K':>{col[2]}}"
         f" {'jax.lax.top_k':>{col[3]}} {'torch.topk':>{col[4]}}"
@@ -176,7 +188,9 @@ def run_1d(n_list, k_list, jax_dtype, args, col, sep):
             t_tor = bench_torch(x_torch, K, args.warmup, args.iterations)
             t_cub = bench_cub(x_jax, K, args.warmup, args.iterations)
             t_air = bench_air(x_2d, lengths, air_buf, out_idx_air, K, args.warmup, args.iterations)
-            t_pr  = bench_per_row(x_f32, lengths, out_aux, logits_aux, out_idx_pr, K, args.warmup, args.iterations)
+            t_pr = bench_per_row(
+                x_f32, lengths, out_aux, logits_aux, out_idx_pr, K, args.warmup, args.iterations
+            )
 
             print(
                 f"{args.dtype:<{col[0]}} {N:>{col[1]},} {K:>{col[2]},}"
@@ -188,7 +202,10 @@ def run_1d(n_list, k_list, jax_dtype, args, col, sep):
 
 def run_2d(n_list, k_list, bs_list, jax_dtype, args, sep):
     col = [10, 6, 10, 8, 16, 12, 12, 14, 18]
-    print("\n── 2D (top-k per row) ──────────────────────────────────────────────────────────────────────────────────────")
+    print(
+        "\n── 2D (top-k per row)"
+        " ──────────────────────────────────────────────────────────────────────────────────────"
+    )
     print(
         f"{'dtype':<{col[0]}} {'bs':>{col[1]}} {'seqlen':>{col[2]}} {'K':>{col[3]}}"
         f" {'jax.lax.top_k':>{col[4]}} {'torch.topk':>{col[5]}}"
@@ -205,7 +222,7 @@ def run_2d(n_list, k_list, bs_list, jax_dtype, args, sep):
                     continue
                 x_jax = jax.random.uniform(rng, shape=(BS, seqlen), dtype=jax_dtype)
                 x_jax.block_until_ready()
-                x_torch = torch.from_dlpack(x_jax).clone()          # (bs, seqlen)
+                x_torch = torch.from_dlpack(x_jax).clone()  # (bs, seqlen)
                 x_f32 = x_torch.float().contiguous()
                 lengths = torch.full((BS,), seqlen, dtype=torch.int32, device="cuda")
                 out_aux, logits_aux, out_idx_pr = topk_per_row.allocate_buffers(x_f32, K)
@@ -214,8 +231,12 @@ def run_2d(n_list, k_list, bs_list, jax_dtype, args, sep):
                 t_jax = bench_jax_lax(x_jax, K, args.warmup, args.iterations)
                 t_tor = bench_torch(x_torch, K, args.warmup, args.iterations)
                 t_cub = bench_cub_2d(x_jax, K, args.warmup, args.iterations)
-                t_air = bench_air(x_torch, lengths, air_buf, out_idx_air, K, args.warmup, args.iterations)
-                t_pr  = bench_per_row(x_f32, lengths, out_aux, logits_aux, out_idx_pr, K, args.warmup, args.iterations)
+                t_air = bench_air(
+                    x_torch, lengths, air_buf, out_idx_air, K, args.warmup, args.iterations
+                )
+                t_pr = bench_per_row(
+                    x_f32, lengths, out_aux, logits_aux, out_idx_pr, K, args.warmup, args.iterations
+                )
 
                 print(
                     f"{args.dtype:<{col[0]}} {BS:>{col[1]}} {seqlen:>{col[2]},} {K:>{col[3]},}"
@@ -229,10 +250,11 @@ def run_2d(n_list, k_list, bs_list, jax_dtype, args, sep):
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main():
     args = parse_args()
-    n_list  = [int(x.strip()) for x in args.n_list.split(",")]
-    k_list  = [int(x.strip()) for x in args.k_list.split(",")]
+    n_list = [int(x.strip()) for x in args.n_list.split(",")]
+    k_list = [int(x.strip()) for x in args.k_list.split(",")]
     bs_list = [int(x.strip()) for x in args.bs_list.split(",")] if args.bs_list else None
     jax_dtype = JAX_DTYPE_MAP[args.dtype]
 
