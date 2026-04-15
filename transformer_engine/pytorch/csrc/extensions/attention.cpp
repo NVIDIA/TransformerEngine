@@ -772,16 +772,9 @@ std::vector<at::Tensor> multi_tensor_pad_last_dim(std::vector<at::Tensor> inputs
   te_in_wrappers.reserve(kernel_indices.size());
   te_out_wrappers.reserve(kernel_indices.size());
 
-  size_t ki = 0;
-  for (size_t i = 0; i < inputs.size(); ++i) {
-    const int64_t in_cols = inputs[i].size(1);
-    const int64_t padded_cols =
-        static_cast<int64_t>(DIVUP_TO_MULTIPLE(static_cast<size_t>(in_cols), align));
-    if (in_cols == padded_cols) continue;
-
-    te_in_wrappers.push_back(makeTransformerEngineTensor(inputs[i]));
-    te_out_wrappers.push_back(makeTransformerEngineTensor(outputs[kernel_indices[ki]]));
-    ++ki;
+  for (size_t idx : kernel_indices) {
+    te_in_wrappers.push_back(makeTransformerEngineTensor(inputs[idx]));
+    te_out_wrappers.push_back(makeTransformerEngineTensor(outputs[idx]));
   }
 
   std::vector<NVTETensor> nvte_inputs(te_in_wrappers.size());
