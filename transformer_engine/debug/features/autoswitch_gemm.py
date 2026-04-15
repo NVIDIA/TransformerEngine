@@ -169,9 +169,10 @@ class AutoswitchGemm(TEConfigAPIMapper):
     mse_threshold: float, default = 1e-4
         Trigger switch to high precision if quantization MSE exceeds this value.
 
-    The switch decision is same-iteration only:
-    metrics computed at iteration `n` are consumed in iteration `n`.
-    There is no cross-iteration hold window.
+    The switch decision is same-iteration:
+    metrics computed at iteration `n` are consumed in iteration `n`
+    after all GEMM input tensors are prepared.
+    The switch is applied for one iteration.
 
     allow_fp8_model_params_dequantized_weight: bool, default = False
         If True, allows `fprop`/`dgrad` to switch to high precision even when
@@ -417,14 +418,14 @@ class AutoswitchGemm(TEConfigAPIMapper):
         config: Dict,
         state: _GemmSwitchState,
     ) -> None:
-        """Consume current-iteration metrics and arm switch for this iteration only."""
+        """Consume current-iteration metrics and arm switch for one iteration."""
         metric = self._latest_metrics.get((layer_name, gemm))
         if metric is None:
             return
 
         metric_iter = int(metric["iteration"])
         if metric_iter != iteration:
-            # Autoswitch consumes metrics only in the same iteration they were produced.
+            # Autoswitch consumes metrics only in the iteration they were produced.
             return
 
         metric_snapshot = (
@@ -461,14 +462,21 @@ class AutoswitchGemm(TEConfigAPIMapper):
 
         debug_api.log_message(
             f"Feature={self.__class__.__name__}: switch {gemm} to high precision in"
-            f" iter={iteration}. Triggered by {metric['tensor_name']} at iter={metric_iter}:"
+            f" iter={iteration}. Triggered by {metric['tensor_name']} sampled at iter={metric_iter}:"
             f" {state.last_reason}",
             layer_name,
             extra_cachable_args=(gemm, "switch"),
         )
 
     @api_method
-    def fp8_gemm_enabled(self, config, layer_name: str, gemm: str, iteration: int):
+    def fp8_gemm_enabled(
+        self,
+        config,
+        layer_name: str,
+        gemm: str,
+        iteration: int,
+        final_decision: bool = False,
+    ):
         """Decide whether selected GEMM should run quantized (True) or high precision (False)."""
         state = self._get_or_create_state(layer_name, gemm)
         metric_logger = self._get_metrics_logger()
@@ -488,7 +496,7 @@ class AutoswitchGemm(TEConfigAPIMapper):
             and not allow_fp8_model_params_fallback
         ):
             state.disable_until_iter = -1
-            if metric_logger is not None:
+            if final_decision and metric_logger is not None:
                 metric_logger.log_scalar(layer_name, gemm, "quantized_enabled", iteration, 1.0)
                 metric_logger.log_scalar(
                     layer_name, gemm, "switch_blocked_fp8_model_params", iteration, 1.0
@@ -501,12 +509,8 @@ class AutoswitchGemm(TEConfigAPIMapper):
             )
             return True, iteration + 1
 
-        if (
-            gemm in {"fprop", "dgrad"}
-            and fp8_model_params_layer
-            and allow_fp8_model_params_fallback
-        ):
-            if metric_logger is not None:
+        if gemm in {"fprop", "dgrad"} and fp8_model_params_layer and allow_fp8_model_params_fallback:
+            if final_decision and metric_logger is not None:
                 metric_logger.log_scalar(
                     layer_name, gemm, "fp8_model_params_dequantized_fallback", iteration, 1.0
                 )
@@ -520,7 +524,7 @@ class AutoswitchGemm(TEConfigAPIMapper):
         self._consume_new_metric_and_maybe_arm_switch(layer_name, gemm, iteration, config, state)
 
         if iteration <= state.disable_until_iter:
-            if metric_logger is not None:
+            if final_decision and metric_logger is not None:
                 metric_logger.log_scalar(layer_name, gemm, "quantized_enabled", iteration, 0.0)
                 metric_logger.log_scalar(
                     layer_name,
@@ -537,7 +541,7 @@ class AutoswitchGemm(TEConfigAPIMapper):
             )
             return False, iteration + 1
 
-        if metric_logger is not None:
+        if final_decision and metric_logger is not None:
             metric_logger.log_scalar(layer_name, gemm, "quantized_enabled", iteration, 1.0)
         return True, iteration + 1
 

@@ -73,6 +73,10 @@ from ..cpu_offload import (
     mark_not_offload,
     mark_activation_offload,
 )
+from ...debug.pytorch.gemm_runtime_hooks import (
+    resolve_gemm_inputs_after_sampling,
+    should_resolve_inputs_after_sampling,
+)
 from ...debug.pytorch.debug_state import TEDebugState
 
 __all__ = ["Linear"]
@@ -335,6 +339,15 @@ class _Linear(torch.autograd.Function):
         # Forward GEMM
         # Note: y = x * w^T
         # ------------------------------------------------------
+        if debug and should_resolve_inputs_after_sampling(weight_quantizer, input_quantizer):
+            weightmat, inputmat_total = resolve_gemm_inputs_after_sampling(
+                "fprop",
+                weightmat,
+                inputmat_total,
+                weight_quantizer,
+                input_quantizer,
+                activation_dtype,
+            )
         nvtx_range_push(f"{nvtx_label}.gemm")
         gemm_out, *_, reduce_scatter_out = general_gemm(
             weightmat,
@@ -760,6 +773,17 @@ class _Linear(torch.autograd.Function):
                     weight_for_dgrad = weight
                     if isinstance(weight_for_dgrad, QuantizedTensorStorage):
                         weight_for_dgrad = weight_for_dgrad.dequantize(dtype=ctx.activation_dtype)
+                if ctx.debug and should_resolve_inputs_after_sampling(
+                    ctx.weight_quantizer, ctx.grad_output_quantizer
+                ):
+                    weight_for_dgrad, grad_output = resolve_gemm_inputs_after_sampling(
+                        "dgrad",
+                        weight_for_dgrad,
+                        grad_output,
+                        ctx.weight_quantizer,
+                        ctx.grad_output_quantizer,
+                        ctx.activation_dtype,
+                    )
                 gemm_out, *_, reduce_scatter_out = general_gemm(
                     weight_for_dgrad,
                     grad_output,
@@ -920,6 +944,17 @@ class _Linear(torch.autograd.Function):
                     some advanced communication/compute overlapping.
 
                     """
+                    if ctx.debug and should_resolve_inputs_after_sampling(
+                        ctx.input_quantizer, ctx.grad_output_quantizer
+                    ):
+                        x, dy = resolve_gemm_inputs_after_sampling(
+                            "wgrad",
+                            x,
+                            dy,
+                            ctx.input_quantizer,
+                            ctx.grad_output_quantizer,
+                            ctx.activation_dtype,
+                        )
                     nvtx_range_push(f"{nvtx_label}.wgrad_gemm")
                     dw, db, *_ = general_gemm(x, dy, **wgrad_gemm_kwargs)
                     nvtx_range_pop(f"{nvtx_label}.wgrad_gemm")
