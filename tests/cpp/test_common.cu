@@ -883,8 +883,6 @@ std::pair<double, double> getTolerances(const DType type) {
       return {0.0675, 0.125};
     case DType::kFloat8E5M2:
       return {0.125, 0.25};
-    case DType::kFloat8E8M0:
-      return {1e-2, 1e-2};
     default:
       NVTE_CHECK("Invalid type!");
   }
