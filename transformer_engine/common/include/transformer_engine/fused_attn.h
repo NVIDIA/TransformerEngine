@@ -209,8 +209,8 @@ NVTE_QKV_Format nvte_get_kv_format(NVTE_QKV_Layout qkv_layout);
  *  \param[out]    t                   The number of tokens.
  */
 void nvte_convert_qkv_format(NVTE_QKV_Format src_format, const size_t *src_shape,
-                             NVTE_QKV_Format dst_format, size_t *dst_shape,
-                             size_t *b, size_t *h, size_t *s, size_t *d, size_t *t);
+                             NVTE_QKV_Format dst_format, size_t *dst_shape, size_t *b, size_t *h,
+                             size_t *s, size_t *d, size_t *t);
 
 /*! \brief Get fused attention backend based on input parameters.
  *
@@ -310,18 +310,20 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
  *  \param[in]     workspace                 Workspace tensor.
  *  \param[in]     stream                    CUDA stream used for this operation.
  */
-void nvte_fused_attn_fwd(
-    const NVTETensor Q, const NVTETensor K, const NVTETensor V, const NVTETensor Bias,
-    const NVTETensor SoftmaxOffset, NVTETensor S, NVTETensor O, NVTETensorPack *Aux_CTX_Tensors,
-    const NVTETensor cu_seqlens_q, const NVTETensor cu_seqlens_kv,
-    const NVTETensor cu_seqlens_q_padded, const NVTETensor cu_seqlens_kv_padded,
-    const NVTETensor page_table_k, const NVTETensor page_table_v, const NVTETensor rng_state,
-    size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training, bool return_max_logit,
-    bool cuda_graph, float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout,
-    NVTE_QKV_Format o_format, NVTE_QKV_Format qkv_scale_inv_format,
-    NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
-    NVTE_Softmax_Type softmax_type, int64_t window_size_left, int64_t window_size_right,
-    bool bottom_right_diagonal, NVTETensor workspace, cudaStream_t stream);
+void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETensor V,
+                         const NVTETensor Bias, const NVTETensor SoftmaxOffset, NVTETensor S,
+                         NVTETensor O, NVTETensorPack *Aux_CTX_Tensors,
+                         const NVTETensor cu_seqlens_q, const NVTETensor cu_seqlens_kv,
+                         const NVTETensor cu_seqlens_q_padded,
+                         const NVTETensor cu_seqlens_kv_padded, const NVTETensor page_table_k,
+                         const NVTETensor page_table_v, const NVTETensor rng_state,
+                         size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training,
+                         bool return_max_logit, bool cuda_graph, float attn_scale, float dropout,
+                         NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format,
+                         NVTE_QKV_Format qkv_scale_inv_format, NVTE_Bias_Type bias_type,
+                         NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
+                         int64_t window_size_left, int64_t window_size_right,
+                         bool bottom_right_diagonal, NVTETensor workspace, cudaStream_t stream);
 
 /*! \brief Compute the backward of the dot product attention with separate Q, K and V.
  *
@@ -391,20 +393,21 @@ void nvte_fused_attn_fwd(
  *  \param[in]     workspace                 Workspace tensor.
  *  \param[in]     stream                    CUDA stream used for this operation.
  */
-void nvte_fused_attn_bwd(
-    const NVTETensor Q, const NVTETensor K, const NVTETensor V, const NVTETensor O,
-    const NVTETensor dO, const NVTETensor S, NVTETensor dP, const NVTETensorPack *Aux_CTX_Tensors,
-    NVTETensor dQ, NVTETensor dK, NVTETensor dV, NVTETensor dBias, NVTETensor dSoftmaxOffset,
-    const NVTETensor cu_seqlens_q, const NVTETensor cu_seqlens_kv,
-    const NVTETensor cu_seqlens_q_padded, const NVTETensor cu_seqlens_kv_padded,
-    size_t max_seqlen_q, size_t max_seqlen_kv, float attn_scale, float dropout,
-    NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format, NVTE_QKV_Format do_format,
-    NVTE_QKV_Layout dqkv_layout, NVTE_QKV_Format qkv_scale_inv_format,
-    NVTE_QKV_Format do_scale_inv_format, NVTE_Bias_Type bias_type,
-    NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
-    int64_t window_size_left, int64_t window_size_right,
-    bool bottom_right_diagonal, bool deterministic, bool cuda_graph, NVTETensor workspace,
-    cudaStream_t stream);
+void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETensor V,
+                         const NVTETensor O, const NVTETensor dO, const NVTETensor S, NVTETensor dP,
+                         const NVTETensorPack *Aux_CTX_Tensors, NVTETensor dQ, NVTETensor dK,
+                         NVTETensor dV, NVTETensor dBias, NVTETensor dSoftmaxOffset,
+                         const NVTETensor cu_seqlens_q, const NVTETensor cu_seqlens_kv,
+                         const NVTETensor cu_seqlens_q_padded,
+                         const NVTETensor cu_seqlens_kv_padded, size_t max_seqlen_q,
+                         size_t max_seqlen_kv, float attn_scale, float dropout,
+                         NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format,
+                         NVTE_QKV_Format do_format, NVTE_QKV_Layout dqkv_layout,
+                         NVTE_QKV_Format qkv_scale_inv_format, NVTE_QKV_Format do_scale_inv_format,
+                         NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
+                         NVTE_Softmax_Type softmax_type, int64_t window_size_left,
+                         int64_t window_size_right, bool bottom_right_diagonal, bool deterministic,
+                         bool cuda_graph, NVTETensor workspace, cudaStream_t stream);
 
 /*!  \brief Update the RNG state with the seed and calculated offset.
  *
@@ -631,9 +634,9 @@ void nvte_prepare_flash_attn_bwd(NVTETensor q, NVTETensor k, NVTETensor v, NVTET
  *  \param[in]     stream           CUDA stream.
  */
 void nvte_multi_tensor_permute_to_grouped_tensor(NVTETensor *inputs, NVTETensor *outputs,
-                                                     size_t num_tensors,
-                                                     NVTE_QKV_Format original_format,
-                                                     cudaStream_t stream);
+                                                 size_t num_tensors,
+                                                 NVTE_QKV_Format original_format,
+                                                 cudaStream_t stream);
 
 /*!  \brief Pad the last dimension of multiple 2D tensors with zeros in one kernel launch.
  *

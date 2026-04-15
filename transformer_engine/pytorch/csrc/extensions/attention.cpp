@@ -114,11 +114,10 @@ std::pair<TensorWrapper, py::object> quantizer_helper(py::handle quantizer,
 std::vector<py::object> fused_attn_fwd(
     size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training, float attn_scale, float p_dropout,
     bool set_zero, NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format,
-    NVTE_QKV_Format qkv_scale_inv_format, NVTE_Bias_Type bias_type,
-    NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
-    const std::vector<int64_t> window_size, bool bottom_right_diagonal,
-    const at::Tensor cu_seqlens_q, const at::Tensor cu_seqlens_kv, const py::handle Q,
-    const py::handle K, const py::handle V, const at::ScalarType fake_dtype,
+    NVTE_QKV_Format qkv_scale_inv_format, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
+    NVTE_Softmax_Type softmax_type, const std::vector<int64_t> window_size,
+    bool bottom_right_diagonal, const at::Tensor cu_seqlens_q, const at::Tensor cu_seqlens_kv,
+    const py::handle Q, const py::handle K, const py::handle V, const at::ScalarType fake_dtype,
     const std::optional<at::Tensor> cu_seqlens_q_padded,
     const std::optional<at::Tensor> cu_seqlens_kv_padded,
     const std::optional<at::Tensor> page_table_k, const std::optional<at::Tensor> page_table_v,
@@ -155,8 +154,8 @@ std::vector<py::object> fused_attn_fwd(
   auto o_shape = std::vector<size_t>{o_shape_tmp.begin(), o_shape_tmp.end()};
   size_t h = 0, d = 0;
   NVTE_QKV_Format q_format = nvte_get_q_format(qkv_layout);
-  nvte_convert_qkv_format(q_format, o_shape_tmp.data(), o_format, o_shape.data(),
-                          nullptr, &h, nullptr, &d, nullptr);
+  nvte_convert_qkv_format(q_format, o_shape_tmp.data(), o_format, o_shape.data(), nullptr, &h,
+                          nullptr, &d, nullptr);
   const DType fake_dtype_te = GetTransformerEngineDType(fake_dtype);
   std::tie(te_O, py_O) = quantizer_helper(o_quantizer, o_shape, fake_dtype_te, true, std::nullopt);
 
@@ -375,12 +374,12 @@ std::vector<py::object> fused_attn_bwd(
   NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
   NVTE_QKV_Format dq_format = nvte_get_q_format(dqkv_layout);
   NVTE_QKV_Format dkv_format = nvte_get_kv_format(dqkv_layout);
-  nvte_convert_qkv_format(q_format, q_shape.data(), dq_format, dQ_shape.data(),
-                          nullptr, &h_q, nullptr, &d_qk, nullptr);
-  nvte_convert_qkv_format(kv_format, k_shape.data(), dkv_format, dK_shape.data(),
-                          nullptr, &h_kv, nullptr, nullptr, nullptr);
-  nvte_convert_qkv_format(kv_format, v_shape.data(), dkv_format, dV_shape.data(),
-                          nullptr, nullptr, nullptr, &d_v, nullptr);
+  nvte_convert_qkv_format(q_format, q_shape.data(), dq_format, dQ_shape.data(), nullptr, &h_q,
+                          nullptr, &d_qk, nullptr);
+  nvte_convert_qkv_format(kv_format, k_shape.data(), dkv_format, dK_shape.data(), nullptr, &h_kv,
+                          nullptr, nullptr, nullptr);
+  nvte_convert_qkv_format(kv_format, v_shape.data(), dkv_format, dV_shape.data(), nullptr, nullptr,
+                          nullptr, &d_v, nullptr);
   at::Tensor dQ, dK, dV, dQKV, dKV;
   // FP16/BF16: dqkv_fake_dtype = kFloat16/kBFloat16, dQ/dK/dV.dtype = torch.float16/torch.bfloat16
   // FP8DS: dqkv_fake_dtype = kFloat16/kBFloat16, dQ/dK/dV.dtype = torch.uint8
@@ -723,9 +722,9 @@ std::vector<std::optional<at::Tensor>> multi_tensor_permute_to_grouped_tensor(
       nvte_ins[j] = te_ins[j].data();
       nvte_outs[j] = te_outs[j].data();
     }
-    nvte_multi_tensor_permute_to_grouped_tensor(nvte_ins.data(), nvte_outs.data(),
-                                                    te_ins.size(), original_format_enum,
-                                                    at::cuda::getCurrentCUDAStream());
+    nvte_multi_tensor_permute_to_grouped_tensor(nvte_ins.data(), nvte_outs.data(), te_ins.size(),
+                                                original_format_enum,
+                                                at::cuda::getCurrentCUDAStream());
   }
 
   return result;

@@ -243,10 +243,9 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm(
 
   // Launch kernel
   NVTE_SCOPED_GIL_RELEASE({
-    nvte_multi_tensor_swizzle_scaling_factors(inputs_nvte_raw.data(), outputs_nvte_raw.data(),
-                                              inputs_nvte_raw.size(),
-                                              at::cuda::getCurrentCUDAStream(),
-                                              check_scale_inv_shapes);
+    nvte_multi_tensor_swizzle_scaling_factors(
+        inputs_nvte_raw.data(), outputs_nvte_raw.data(), inputs_nvte_raw.size(),
+        at::cuda::getCurrentCUDAStream(), check_scale_inv_shapes);
   });
 
   // Update tensors with swizzled scales
@@ -444,8 +443,9 @@ void grouped_swizzle_for_gemm(py::handle &tensor, bool rowwise, bool columnwise)
   }
 }
 
-void inplace_multi_tensor_swizzle_scales_for_gemm(std::vector<py::object> &tensors, bool rowwise_usage,
-                                           bool columnwise_usage, bool check_scale_inv_shapes) {
+void inplace_multi_tensor_swizzle_scales_for_gemm(std::vector<py::object> &tensors,
+                                                  bool rowwise_usage, bool columnwise_usage,
+                                                  bool check_scale_inv_shapes) {
   NVTE_CHECK(rowwise_usage != columnwise_usage,
              "Expect exactly one of rowwise_usage and columnwise_usage.");
   if (tensors.empty()) {
@@ -499,9 +499,8 @@ void inplace_multi_tensor_swizzle_scales_for_gemm(std::vector<py::object> &tenso
   // Update Python objects with properly-shaped views into the contiguous output buffer
   const uint8_t *base = reinterpret_cast<const uint8_t *>(output_buffer->data_ptr());
   for (size_t j = 0; j < wrappers_to_swizzle.size(); ++j) {
-    const auto scales_nvte = rowwise_usage
-        ? wrappers_to_swizzle[j].get_rowwise_scale_inv()
-        : wrappers_to_swizzle[j].get_columnwise_scale_inv();
+    const auto scales_nvte = rowwise_usage ? wrappers_to_swizzle[j].get_rowwise_scale_inv()
+                                           : wrappers_to_swizzle[j].get_columnwise_scale_inv();
 
     const size_t offset = reinterpret_cast<const uint8_t *>(scales_nvte.data_ptr) - base;
     const auto dtype = static_cast<DType>(scales_nvte.dtype);
@@ -513,8 +512,9 @@ void inplace_multi_tensor_swizzle_scales_for_gemm(std::vector<py::object> &tenso
     for (size_t d = 0; d < scales_nvte.shape.ndim; ++d) {
       torch_shape.push_back(static_cast<int64_t>(scales_nvte.shape.data[d]));
     }
-    auto scale_view = output_buffer->narrow(0, static_cast<int64_t>(offset),
-                                            static_cast<int64_t>(num_bytes)).view(torch_shape);
+    auto scale_view =
+        output_buffer->narrow(0, static_cast<int64_t>(offset), static_cast<int64_t>(num_bytes))
+            .view(torch_shape);
 
     if (rowwise_usage) {
       tensors[swizzle_indices[j]].attr("_rowwise_scale_inv") = py::cast(scale_view);

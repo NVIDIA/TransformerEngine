@@ -85,11 +85,10 @@ NVTE_Fused_Attn_Backend get_fused_attn_backend(
 std::vector<py::object> fused_attn_fwd(
     size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training, float attn_scale, float p_dropout,
     bool set_zero, NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format,
-    NVTE_QKV_Format qkv_scale_inv_format, NVTE_Bias_Type bias_type,
-    NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
-    const std::vector<int64_t> window_size, bool bottom_right_diagonal,
-    const at::Tensor cu_seqlens_q, const at::Tensor cu_seqlens_kv, const py::handle Q,
-    const py::handle K, const py::handle V, const at::ScalarType fake_dtype,
+    NVTE_QKV_Format qkv_scale_inv_format, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
+    NVTE_Softmax_Type softmax_type, const std::vector<int64_t> window_size,
+    bool bottom_right_diagonal, const at::Tensor cu_seqlens_q, const at::Tensor cu_seqlens_kv,
+    const py::handle Q, const py::handle K, const py::handle V, const at::ScalarType fake_dtype,
     const std::optional<at::Tensor> cu_seqlens_q_padded,
     const std::optional<at::Tensor> cu_seqlens_kv_padded,
     const std::optional<at::Tensor> page_table_k, const std::optional<at::Tensor> page_table_v,
@@ -580,9 +579,9 @@ void fused_multi_row_unpadding(at::Tensor input, at::Tensor output,
 
 void inplace_swizzle_scale_for_gemm(py::handle &tensor);
 
-void inplace_multi_tensor_swizzle_scales_for_gemm(std::vector<py::object> &tensors, bool rowwise_usage,
-                                           bool columnwise_usage,
-                                           bool check_scale_inv_shapes = true);
+void inplace_multi_tensor_swizzle_scales_for_gemm(std::vector<py::object> &tensors,
+                                                  bool rowwise_usage, bool columnwise_usage,
+                                                  bool check_scale_inv_shapes = true);
 
 void grouped_swizzle_for_gemm(py::handle &tensor, bool rowwise, bool columnwise);
 

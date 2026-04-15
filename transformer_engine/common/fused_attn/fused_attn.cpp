@@ -231,18 +231,24 @@ NVTE_QKV_Format nvte_get_kv_format(NVTE_QKV_Layout qkv_layout) {
 // Canonical order: b=0, h=1, s=2, d=3, t=4.
 static std::pair<size_t, std::array<int, 4>> qkv_format_dim_order(NVTE_QKV_Format fmt) {
   switch (fmt) {
-    case NVTE_QKV_Format::NVTE_BSHD: return {4, {0, 2, 1, 3}};  // b s h d
-    case NVTE_QKV_Format::NVTE_SBHD: return {4, {2, 0, 1, 3}};  // s b h d
-    case NVTE_QKV_Format::NVTE_BHSD: return {4, {0, 1, 2, 3}};  // b h s d
-    case NVTE_QKV_Format::NVTE_THD:  return {3, {4, 1, 3, -1}}; // t h d
-    default: NVTE_ERROR("QKV format not supported!"); return {0, {}};
+    case NVTE_QKV_Format::NVTE_BSHD:
+      return {4, {0, 2, 1, 3}};  // b s h d
+    case NVTE_QKV_Format::NVTE_SBHD:
+      return {4, {2, 0, 1, 3}};  // s b h d
+    case NVTE_QKV_Format::NVTE_BHSD:
+      return {4, {0, 1, 2, 3}};  // b h s d
+    case NVTE_QKV_Format::NVTE_THD:
+      return {3, {4, 1, 3, -1}};  // t h d
+    default:
+      NVTE_ERROR("QKV format not supported!");
+      return {0, {}};
   }
 }
 
 // map one NVTE_QKV_Format to another
 void nvte_convert_qkv_format(NVTE_QKV_Format src_format, const size_t *src_shape,
-                             NVTE_QKV_Format dst_format, size_t *dst_shape,
-                             size_t *b, size_t *h, size_t *s, size_t *d, size_t *t) {
+                             NVTE_QKV_Format dst_format, size_t *dst_shape, size_t *b, size_t *h,
+                             size_t *s, size_t *d, size_t *t) {
   size_t canonical[5] = {};  // b, h, s, d, t
   auto [src_ndim, src_order] = qkv_format_dim_order(src_format);
   for (size_t i = 0; i < src_ndim; ++i) canonical[src_order[i]] = src_shape[i];
@@ -250,7 +256,9 @@ void nvte_convert_qkv_format(NVTE_QKV_Format src_format, const size_t *src_shape
   auto [dst_ndim, dst_order] = qkv_format_dim_order(dst_format);
   for (size_t i = 0; i < dst_ndim; ++i) dst_shape[i] = canonical[dst_order[i]];
 
-  auto set = [](size_t *ptr, size_t val) { if (ptr) *ptr = val; };
+  auto set = [](size_t *ptr, size_t val) {
+    if (ptr) *ptr = val;
+  };
   set(b, canonical[0]);
   set(h, canonical[1]);
   set(s, canonical[2]);
@@ -612,18 +620,20 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
 }
 
 // NVTE fused attention FWD with separate Q, K and V
-void nvte_fused_attn_fwd(
-    const NVTETensor Q, const NVTETensor K, const NVTETensor V, const NVTETensor Bias,
-    const NVTETensor SoftmaxOffset, NVTETensor S, NVTETensor O, NVTETensorPack *Aux_CTX_Tensors,
-    const NVTETensor cu_seqlens_q, const NVTETensor cu_seqlens_kv,
-    const NVTETensor cu_seqlens_q_padded, const NVTETensor cu_seqlens_kv_padded,
-    const NVTETensor page_table_k, const NVTETensor page_table_v, const NVTETensor rng_state,
-    size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training, bool return_max_logit,
-    bool cuda_graph, float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout,
-    NVTE_QKV_Format o_format, NVTE_QKV_Format qkv_scale_inv_format,
-    NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
-    NVTE_Softmax_Type softmax_type, int64_t window_size_left, int64_t window_size_right,
-    bool bottom_right_diagonal, NVTETensor workspace, cudaStream_t stream) {
+void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETensor V,
+                         const NVTETensor Bias, const NVTETensor SoftmaxOffset, NVTETensor S,
+                         NVTETensor O, NVTETensorPack *Aux_CTX_Tensors,
+                         const NVTETensor cu_seqlens_q, const NVTETensor cu_seqlens_kv,
+                         const NVTETensor cu_seqlens_q_padded,
+                         const NVTETensor cu_seqlens_kv_padded, const NVTETensor page_table_k,
+                         const NVTETensor page_table_v, const NVTETensor rng_state,
+                         size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training,
+                         bool return_max_logit, bool cuda_graph, float attn_scale, float dropout,
+                         NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format,
+                         NVTE_QKV_Format qkv_scale_inv_format, NVTE_Bias_Type bias_type,
+                         NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
+                         int64_t window_size_left, int64_t window_size_right,
+                         bool bottom_right_diagonal, NVTETensor workspace, cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_fwd);
   using namespace transformer_engine;
   const Tensor *input_cu_seqlens_q = convertNVTETensorCheck(cu_seqlens_q);
@@ -651,12 +661,9 @@ void nvte_fused_attn_fwd(
   auto *v_dims = input_V->scaling_mode != NVTE_MXFP8_1D_SCALING
                      ? input_V->data.shape.data()
                      : input_V->columnwise_data.shape.data();
-  nvte_convert_qkv_format(q_format, q_dims, q_format, tmp_shape,
-                          &b, &h_q, &s_q, &d_qk, &t_q);
-  nvte_convert_qkv_format(kv_format, k_dims, kv_format, tmp_shape,
-                          &b, &h_kv, &s_kv, &d_qk, &t_kv);
-  nvte_convert_qkv_format(kv_format, v_dims, kv_format, tmp_shape,
-                          &b, &h_kv, &s_kv, &d_v, &t_kv);
+  nvte_convert_qkv_format(q_format, q_dims, q_format, tmp_shape, &b, &h_q, &s_q, &d_qk, &t_q);
+  nvte_convert_qkv_format(kv_format, k_dims, kv_format, tmp_shape, &b, &h_kv, &s_kv, &d_qk, &t_kv);
+  nvte_convert_qkv_format(kv_format, v_dims, kv_format, tmp_shape, &b, &h_kv, &s_kv, &d_v, &t_kv);
   if (q_format == NVTE_QKV_Format::NVTE_THD) {
     b = input_cu_seqlens_q->data.shape[0] - 1;
   } else if (kv_format == NVTE_QKV_Format::NVTE_THD) {
@@ -740,20 +747,21 @@ void nvte_fused_attn_fwd(
   }
 }
 // NVTE fused attention BWD with separate Q, K and V
-void nvte_fused_attn_bwd(
-    const NVTETensor Q, const NVTETensor K, const NVTETensor V, const NVTETensor O,
-    const NVTETensor dO, const NVTETensor S, NVTETensor dP, const NVTETensorPack *Aux_CTX_Tensors,
-    NVTETensor dQ, NVTETensor dK, NVTETensor dV, NVTETensor dBias, NVTETensor dSoftmaxOffset,
-    const NVTETensor cu_seqlens_q, const NVTETensor cu_seqlens_kv,
-    const NVTETensor cu_seqlens_q_padded, const NVTETensor cu_seqlens_kv_padded,
-    size_t max_seqlen_q, size_t max_seqlen_kv, float attn_scale, float dropout,
-    NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format, NVTE_QKV_Format do_format,
-    NVTE_QKV_Layout dqkv_layout, NVTE_QKV_Format qkv_scale_inv_format,
-    NVTE_QKV_Format do_scale_inv_format, NVTE_Bias_Type bias_type,
-    NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
-    int64_t window_size_left, int64_t window_size_right,
-    bool bottom_right_diagonal, bool deterministic, bool cuda_graph, NVTETensor workspace,
-    cudaStream_t stream) {
+void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETensor V,
+                         const NVTETensor O, const NVTETensor dO, const NVTETensor S, NVTETensor dP,
+                         const NVTETensorPack *Aux_CTX_Tensors, NVTETensor dQ, NVTETensor dK,
+                         NVTETensor dV, NVTETensor dBias, NVTETensor dSoftmaxOffset,
+                         const NVTETensor cu_seqlens_q, const NVTETensor cu_seqlens_kv,
+                         const NVTETensor cu_seqlens_q_padded,
+                         const NVTETensor cu_seqlens_kv_padded, size_t max_seqlen_q,
+                         size_t max_seqlen_kv, float attn_scale, float dropout,
+                         NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format,
+                         NVTE_QKV_Format do_format, NVTE_QKV_Layout dqkv_layout,
+                         NVTE_QKV_Format qkv_scale_inv_format, NVTE_QKV_Format do_scale_inv_format,
+                         NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
+                         NVTE_Softmax_Type softmax_type, int64_t window_size_left,
+                         int64_t window_size_right, bool bottom_right_diagonal, bool deterministic,
+                         bool cuda_graph, NVTETensor workspace, cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_bwd);
   using namespace transformer_engine;
   const Tensor *input_cu_seqlens_q = convertNVTETensorCheck(cu_seqlens_q);
@@ -781,12 +789,9 @@ void nvte_fused_attn_bwd(
   auto *q_dims = input_Q->data.shape.data();
   auto *k_dims = input_K->data.shape.data();
   auto *v_dims = input_V->data.shape.data();
-  nvte_convert_qkv_format(q_format, q_dims, q_format, tmp_shape,
-                          &b, &h_q, &s_q, &d_qk, &t_q);
-  nvte_convert_qkv_format(kv_format, k_dims, kv_format, tmp_shape,
-                          &b, &h_kv, &s_kv, &d_qk, &t_kv);
-  nvte_convert_qkv_format(kv_format, v_dims, kv_format, tmp_shape,
-                          &b, &h_kv, &s_kv, &d_v, &t_kv);
+  nvte_convert_qkv_format(q_format, q_dims, q_format, tmp_shape, &b, &h_q, &s_q, &d_qk, &t_q);
+  nvte_convert_qkv_format(kv_format, k_dims, kv_format, tmp_shape, &b, &h_kv, &s_kv, &d_qk, &t_kv);
+  nvte_convert_qkv_format(kv_format, v_dims, kv_format, tmp_shape, &b, &h_kv, &s_kv, &d_v, &t_kv);
   if (q_format == NVTE_QKV_Format::NVTE_THD) {
     b = input_cu_seqlens_q->data.shape[0] - 1;
   } else if (kv_format == NVTE_QKV_Format::NVTE_THD) {

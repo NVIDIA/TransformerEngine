@@ -391,8 +391,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Convert tensor block scales into GEMM swizzled format");
   m.def("multi_tensor_swizzle_scales_for_gemm_",
         &transformer_engine::pytorch::inplace_multi_tensor_swizzle_scales_for_gemm,
-        "Convert multiple tensors' block scales into GEMM swizzled format",
-        py::arg("tensors"), py::arg("rowwise_usage"), py::arg("columnwise_usage"),
+        "Convert multiple tensors' block scales into GEMM swizzled format", py::arg("tensors"),
+        py::arg("rowwise_usage"), py::arg("columnwise_usage"),
         py::arg("check_scale_inv_shapes") = true);
   m.def("grouped_swizzle_for_gemm", &transformer_engine::pytorch::grouped_swizzle_for_gemm,
         "In-place swizzle of grouped tensor scales for GEMM", py::arg("tensor"), py::arg("rowwise"),
@@ -407,8 +407,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("multi_tensor_permute_to_grouped_tensor",
         &transformer_engine::pytorch::multi_tensor_permute_to_grouped_tensor,
         "Permute multiple tensors from BSHD/SBHD to BHSD.", py::arg("inputs"),
-        py::arg("original_format"),
-        py::arg("outputs") = std::vector<std::optional<at::Tensor>>{},
+        py::arg("original_format"), py::arg("outputs") = std::vector<std::optional<at::Tensor>>{},
         py::call_guard<py::gil_scoped_release>());
   m.def("multi_tensor_pad_last_dim", &transformer_engine::pytorch::multi_tensor_pad_last_dim,
         "Pad multiple tensors' last dimension to a common alignment.", py::arg("inputs"),
