@@ -648,7 +648,7 @@ void compareResults_sequential(const std::string &name, const Tensor &test,
         const double first_mismatch_t = static_cast<double>(test_data[first_mismatch_idx]);
         const double first_mismatch_r = static_cast<double>(ref_data[first_mismatch_idx]);
 
-        GTEST_FAIL() << mismatches_num << " mismatche(s) which is more than tolerable mismatch limit of "
+        GTEST_FAIL() << mismatches_num << " mismatch(es) which is more than tolerable mismatch limit of "
                     << tolerable_mismatches_limit << "." << std::endl
                     << "Error in tensor " << name << " in "
                     << direction << " direction." << std::endl
@@ -716,7 +716,7 @@ void compareResults_parallel(const std::string &name, const Tensor &test, const 
       const double r = static_cast<double>(ref_data[i]);
       std::string direction = rowwise ? "rowwise" : "columnwise";
 
-      GTEST_FAIL() << mismatches << " mismatche(s) which is more than tolerable mismatch limit of "
+      GTEST_FAIL() << mismatches << " mismatch(es) which is more than tolerable mismatch limit of "
                    << tolerable_mismatches_limit << "." << std::endl
                    << "Error in tensor " << name << " in "
                    << direction << " direction." << std::endl
@@ -748,6 +748,17 @@ void compareResults(const std::string &name, const float test, const float ref,
 }
 
 
+void compareResults(const std::string &name, const float *test, const float *ref,
+                    const size_t N, const double atol, const double rtol) {
+  size_t mismatches = 0;
+  const size_t first_idx = getFirstMismatchIdx<float>(DType::kFloat32, test, ref, N, atol, rtol, mismatches);
+  if (first_idx != N) {
+    GTEST_FAIL() << mismatches << " mismatch(es) in \"" << name << "\"."
+                 << " First at index " << first_idx << ": "
+                 << test[first_idx] << " vs " << ref[first_idx];
+  }
+}
+
 void compareResults(const std::string &name, const uint8_t *test, const uint8_t *ref,
                     size_t N, float mismatch_rate_tol) {
   size_t max_mismatches = std::ceil(N * mismatch_rate_tol);
@@ -764,7 +775,7 @@ void compareResults(const std::string &name, const uint8_t *test, const uint8_t 
       for (auto &index : mismatch_indices)
         std::cout << "Mismatch at (" << index << "):" << static_cast<int>(test[i]) << " vs "
         << static_cast<int>(ref[i]) << std::endl;
-      GTEST_FAIL() << n_mismatches << " mismatche(s) which is more than mismatch tol.";
+      GTEST_FAIL() << n_mismatches << " mismatch(es) which is more than mismatch tol.";
     }
   }
 }
@@ -837,7 +848,7 @@ void compare_scaling_factors(const std::string &name, const T *test, const T *re
                     << static_cast<UpcastType>(test[index]) << " vs "
                     << static_cast<UpcastType>(ref[index]) << std::endl;
         }
-        GTEST_FAIL() << mismatches_num << " mismatche(s) which is more than tolerable mismatch limit of "
+        GTEST_FAIL() << mismatches_num << " mismatch(es) which is more than tolerable mismatch limit of "
                      << tolerable_mismatches_limit << ".";
       }
     }
@@ -869,7 +880,9 @@ std::pair<double, double> getTolerances(const DType type) {
     case DType::kBFloat16:
       return {1e-5, 1e-2};
     case DType::kFloat8E4M3:
+      return {0.0675, 0.125};
     case DType::kFloat8E5M2:
+      return {0.125, 0.25};
     case DType::kFloat8E8M0:
       return {1e-2, 1e-2};
     default:

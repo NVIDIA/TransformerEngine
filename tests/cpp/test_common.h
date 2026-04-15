@@ -437,6 +437,40 @@ inline float exp2f_rcp(fp8e8m0 biased_exp) {
   return fp32_val;
 }
 
+// Dequantize MXFP8 (rowwise): one E8M0 scale per 32-element row segment.
+// scale_stride: number of scale entries per row (padded column-block count).
+// Scale for element (i, j) is at scales[i * scale_stride + j / 32].
+template <typename FP8Type>
+inline void dequantize_mxfp8_rowwise(const FP8Type* fp8_data, const fp8e8m0* scales,
+                                      float* out, size_t rows, size_t cols,
+                                      size_t scale_stride) {
+  #pragma omp parallel for proc_bind(spread) schedule(static)
+  for (size_t i = 0; i < rows; ++i) {
+    for (size_t j = 0; j < cols; ++j) {
+      const size_t scale_idx = i * scale_stride + j / 32;
+      const float scale = std::exp2f(static_cast<float>(scales[scale_idx]) - FP32_EXPONENT_BIAS);
+      out[i * cols + j] = static_cast<float>(fp8_data[i * cols + j]) * scale;
+    }
+  }
+}
+
+// Dequantize MXFP8 (colwise): one E8M0 scale per 32-element column segment.
+// scale_stride: number of scale entries per row-of-blocks (padded column count).
+// Scale for element (i, j) is at scales[(i / 32) * scale_stride + j].
+template <typename FP8Type>
+inline void dequantize_mxfp8_colwise(const FP8Type* fp8_data, const fp8e8m0* scales,
+                                      float* out, size_t rows, size_t cols,
+                                      size_t scale_stride) {
+  #pragma omp parallel for proc_bind(spread) schedule(static)
+  for (size_t i = 0; i < rows; ++i) {
+    for (size_t j = 0; j < cols; ++j) {
+      const size_t scale_idx = (i / 32) * scale_stride + j;
+      const float scale = std::exp2f(static_cast<float>(scales[scale_idx]) - FP32_EXPONENT_BIAS);
+      out[i * cols + j] = static_cast<float>(fp8_data[i * cols + j]) * scale;
+    }
+  }
+}
+
 inline float identity(const float x) { return x; }
 inline float gelu(const float x)     { return x * (0.5f + 0.5f * tanhf(x * (0.79788456f + 0.03567741f * x * x))); }
 inline float dgelu(const float x) {
@@ -472,6 +506,8 @@ void compareResults(const std::string &name, const float test, const float ref,
                     double atol = 1e-5, double rtol = 1e-8);
 void compareResults(const std::string &name, const uint8_t *test, const uint8_t *ref,
                     size_t N, float mismatch_rate_tol = 0.);
+void compareResults(const std::string &name, const float *test, const float *ref,
+                    size_t N, double atol, double rtol);
 template <typename T>
 void compare_scaling_factors(const std::string &name, const T *test, const T *ref,
                              const size_t row_blocks, const size_t col_blocks, const size_t stride,

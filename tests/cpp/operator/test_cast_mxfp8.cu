@@ -36,121 +36,50 @@ enum ActivationType {
     SReLU
 };
 
-template <typename InputType, typename OutputType>
+// Compute the pre-quantization float values that the GPU kernel processes before
+// casting to FP8. These are used as the reference for dequantized output comparison.
+template <typename InputType>
 void compute_ref(const ProcessingMethod processing_method,
                  float (*OP)(const float),
-                 const bool rowwise,
-                 const bool colwise,
                  const InputType* input,
                  const InputType* grad,
-                 OutputType* output_rowwise,
-                 OutputType* output_colwise,
-                 fp8e8m0* output_scales_rowwise,
-                 fp8e8m0* output_scales_colwise,
+                 float* ref_output,
                  InputType* output_dbias,
                  const size_t rows,
-                 const size_t cols,
-                 const size_t scales_stride_rowwise,
-                 const size_t scales_stride_colwise)
+                 const size_t cols)
 {
-    const size_t tile_size_Y = 32;
-    const size_t tile_size_X = 32;
-    const size_t tiles_num_Y = (rows + tile_size_Y - 1) / tile_size_Y;
-    const size_t tiles_num_X = (cols + tile_size_X - 1) / tile_size_X;
-
     std::vector<float> output_dbias_fp32(cols, 0);
     #pragma omp parallel proc_bind(spread)
     {
-        // Buffers to cache intermediate computations
-        std::vector<float> cache_buffer(tile_size_Y * tile_size_X);
-
         std::vector<float> thread_dbias(cols, 0);
-        #pragma omp for schedule(static)
-        for (size_t t = 0; t < tiles_num_Y * tiles_num_X; ++t) {
-            const size_t tile_Y = t / tiles_num_X;
-            const size_t tile_X = t % tiles_num_X;
-            const size_t tile_offset_Y = tile_Y * tile_size_Y;
-            const size_t tile_offset_X = tile_X * tile_size_X;
-
-            const size_t i_min = tile_offset_Y;
-            const size_t i_max = std::min(i_min + tile_size_Y, rows);
-
-            const size_t j_min = tile_offset_X;
-            const size_t j_max = std::min(j_min + tile_size_X, cols);
-
-            // Cache computations
-            for (size_t i = i_min; i < i_max; ++i) {
-                for (size_t j = j_min; j < j_max; ++j) {
-
-                    const size_t idx = i * cols + j;
-                    const size_t cache_idx = (i - i_min) * tile_size_X + (j - j_min);
-
-                    float elt = static_cast<float>(input[idx]);
-                    if (processing_method == ProcessingMethod::CAST_DBIAS) {
-                        // grad is the input
-                        elt = static_cast<float>(grad[idx]);
+        #pragma omp for schedule(static) collapse(2)
+        for (size_t i = 0; i < rows; ++i) {
+            for (size_t j = 0; j < cols; ++j) {
+                const size_t idx = i * cols + j;
+                const float in = static_cast<float>(input[idx]);
+                float out;
+                switch (processing_method) {
+                case ProcessingMethod::CAST_ONLY:
+                case ProcessingMethod::CAST_DBIAS:
+                    out = in;
+                    break;
+                case ProcessingMethod::CAST_ACT:
+                    out = OP(in);
+                    break;
+                case ProcessingMethod::CAST_DBIAS_DACT:
+                case ProcessingMethod::CAST_DACT:
+                    {
+                        const float g = static_cast<float>(grad[idx]);
+                        out = OP(in) * g;
                     }
-                    if (processing_method != ProcessingMethod::CAST_ONLY
-                        && processing_method != ProcessingMethod::CAST_DBIAS) {
-                        elt = OP(elt);
-                    }
-                    if (processing_method == ProcessingMethod::CAST_DACT ||
-                        processing_method == ProcessingMethod::CAST_DBIAS_DACT) {
-                        elt *= static_cast<float>(grad[idx]);
-                    }
-                    thread_dbias[j] += elt;
-
-                    // Numerical truncation: after downcast to InputType (BF16/FP16), upcast it back to FP32
-                    elt = static_cast<float>(static_cast<InputType>(elt));
-
-                    cache_buffer[cache_idx] = elt;
-                    if (isinf(elt) || isnan(elt)) {
-                        continue;
-                    }
+                    break;
+                default:
+                    NVTE_ERROR("Invalid processing mode (",
+                               static_cast<int>(processing_method), ").");
                 }
-            }
-
-            if (rowwise) {
-                for (size_t i = i_min; i < i_max; ++i) {
-                    float block_amax = 0.0f;
-
-                    for (size_t j = j_min; j < j_max; ++j) {
-                        const size_t cache_idx = (i - i_min) * tile_size_X + (j - j_min);
-                        block_amax = std::max(block_amax, std::abs(cache_buffer[cache_idx]));
-                    }
-
-                    const fp8e8m0 biased_exponent = float_to_e8m0(block_amax * Quantized_Limits<OutputType>::max_reciprocal());
-                    const size_t scale_idx = i * scales_stride_rowwise + tile_X;
-                    output_scales_rowwise[scale_idx] = biased_exponent;
-                    const float scale_reciprocal = exp2f_rcp(biased_exponent);
-
-                    for (size_t j = j_min; j < j_max; ++j) {
-                        const size_t idx = i * cols + j;
-                        const size_t cache_idx = (i - i_min) * tile_size_X + (j - j_min);
-                        output_rowwise[idx] = static_cast<OutputType>(cache_buffer[cache_idx] * scale_reciprocal);
-                    }
-                }
-            }
-            if (colwise) {
-                for (size_t j = j_min; j < j_max; ++j) {
-                    float block_amax = 0.0f;
-
-                    for (size_t i = i_min; i < i_max; ++i) {
-                        const size_t cache_idx = (i - i_min) * tile_size_X + (j - j_min);
-                        block_amax = std::max(block_amax, std::abs(cache_buffer[cache_idx]));
-                    }
-
-                    const fp8e8m0 biased_exponent = float_to_e8m0(block_amax * Quantized_Limits<OutputType>::max_reciprocal());
-                    const size_t scale_idx = tile_Y * scales_stride_colwise + j;
-                    output_scales_colwise[scale_idx] = biased_exponent;
-                    const float scale_reciprocal = exp2f_rcp(biased_exponent);
-
-                    for (size_t i = i_min; i < i_max; ++i) {
-                        const size_t idx = i * cols + j;
-                        const size_t cache_idx = (i - i_min) * tile_size_X + (j - j_min);
-                        output_colwise[idx] = static_cast<OutputType>(cache_buffer[cache_idx] * scale_reciprocal);
-                    }
-                }
+                thread_dbias[j] += out;
+                // Match GPU: downcast to InputType then back to float before quantization.
+                ref_output[idx] = static_cast<float>(static_cast<InputType>(out));
             }
         }
         #pragma omp critical
@@ -181,39 +110,32 @@ void performTest_x1(const ProcessingMethod processing_method,
                     const bool colwise,
                     InputsFillCase fill_case) {
     using namespace test;
-    using EncodingType = fp32;
     DType itype = TypeInfo<InputType>::dtype;
     DType otype = TypeInfo<OutputType>::dtype;
 
     const size_t rows = first_dimension(shape);
     const size_t cols = last_dimension(shape);
 
+    NVTE_CHECK(rowwise != colwise,
+               "Expected either rowwise or columnwise scaling (rowwise=", rowwise,
+               ", colwise=", colwise, ").");
     if (shape.size() < 2 && colwise) {
-      GTEST_SKIP();
+        GTEST_SKIP();
     }
 
     const size_t block_size_rows = rowwise ? 1 : 32;
     const size_t block_size_cols = colwise ? 1 : 32;
-
-    const std::array<size_t,4> scale_dims = get_scale_tensor_dims(rows, cols, block_size_rows,
-                                                                  block_size_cols);
-
-    const size_t unpadded_blocks_Y = scale_dims[0];
-    const size_t unpadded_blocks_X = scale_dims[1];
-    const size_t blocks_Y = scale_dims[2];
-    const size_t blocks_X = scale_dims[3];
-    const size_t scales_stride = blocks_X;
+    const size_t scales_stride = get_scale_tensor_dims(rows, cols, block_size_rows, block_size_cols)[3];
 
     Tensor input("input", shape, itype);
     Tensor grad("grad", shape, itype);
     Tensor output_c("output_c", shape, otype, rowwise, colwise, NVTE_MXFP8_1D_SCALING);
     Tensor output_dbias("output_dbias", std::vector<size_t>{ cols }, itype);
 
-    std::unique_ptr<OutputType[]> ref_output_c = std::make_unique<OutputType[]>(rows * cols);
+    std::vector<float> ref_output(rows * cols);
     std::unique_ptr<InputType[]> ref_output_dbias = std::make_unique<InputType[]>(cols);
-    std::unique_ptr<fp8e8m0[]> ref_output_scales = std::make_unique<fp8e8m0[]>(blocks_Y * blocks_X);
 
-    fillCase<EncodingType>(&input, fill_case);
+    fillCase<fp32>(&input, fill_case);
     fillUniform(&grad);
 
     Tensor workspace;
@@ -223,18 +145,11 @@ void performTest_x1(const ProcessingMethod processing_method,
             break;
         }
         case ProcessingMethod::CAST_DBIAS: {
-            nvte_quantize_dbias(grad.data(),
-                                output_c.data(),
-                                output_dbias.data(),
-                                workspace.data(),
-                                0);
+            nvte_quantize_dbias(grad.data(), output_c.data(), output_dbias.data(),
+                                workspace.data(), 0);
             workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
-
-            nvte_quantize_dbias(grad.data(),
-                                output_c.data(),
-                                output_dbias.data(),
-                                workspace.data(),
-                                0);
+            nvte_quantize_dbias(grad.data(), output_c.data(), output_dbias.data(),
+                                workspace.data(), 0);
             break;
         }
         case ProcessingMethod::CAST_DBIAS_DACT: {
@@ -243,21 +158,11 @@ void performTest_x1(const ProcessingMethod processing_method,
             else if (OP == &drelu)  { nvte_quantize_dbias_dact = &nvte_quantize_dbias_drelu; }
             else if (OP == &dqgelu) { nvte_quantize_dbias_dact = &nvte_quantize_dbias_dqgelu; }
             else if (OP == &dsrelu) { nvte_quantize_dbias_dact = &nvte_quantize_dbias_dsrelu; }
-
-            nvte_quantize_dbias_dact(grad.data(),
-                                     input.data(),
-                                     output_c.data(),
-                                     output_dbias.data(),
-                                     workspace.data(),
-                                     0);
+            nvte_quantize_dbias_dact(grad.data(), input.data(), output_c.data(),
+                                     output_dbias.data(), workspace.data(), 0);
             workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
-
-            nvte_quantize_dbias_dact(grad.data(),
-                                     input.data(),
-                                     output_c.data(),
-                                     output_dbias.data(),
-                                     workspace.data(),
-                                     0);
+            nvte_quantize_dbias_dact(grad.data(), input.data(), output_c.data(),
+                                     output_dbias.data(), workspace.data(), 0);
             break;
         }
         case ProcessingMethod::CAST_DACT: {
@@ -266,7 +171,6 @@ void performTest_x1(const ProcessingMethod processing_method,
             else if (OP == &drelu)  { nvte_dact = &nvte_drelu; }
             else if (OP == &dqgelu) { nvte_dact = &nvte_dqgelu; }
             else if (OP == &dsrelu) { nvte_dact = &nvte_dsrelu; }
-
             nvte_dact(grad.data(), input.data(), output_c.data(), 0);
             break;
         }
@@ -276,7 +180,6 @@ void performTest_x1(const ProcessingMethod processing_method,
             else if (OP == &relu)  { nvte_act = &nvte_relu; }
             else if (OP == &qgelu) { nvte_act = &nvte_qgelu; }
             else if (OP == &srelu) { nvte_act = &nvte_srelu; }
-
             nvte_act(input.data(), output_c.data(), 0);
             break;
         }
@@ -286,54 +189,43 @@ void performTest_x1(const ProcessingMethod processing_method,
     auto err = cudaGetLastError();
     ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
 
-    compute_ref<InputType, OutputType>(processing_method,
-                                       OP,
-                                       rowwise,
-                                       colwise,
-                                       input.rowwise_cpu_dptr<InputType>(),
-                                       grad.rowwise_cpu_dptr<InputType>(),
-                                       ref_output_c.get(),
-                                       ref_output_c.get(),
-                                       ref_output_scales.get(),
-                                       ref_output_scales.get(),
-                                       ref_output_dbias.get(),
-                                       rows,
-                                       cols,
-                                       scales_stride,
-                                       scales_stride);
+    // CPU reference: pre-quantization float values that the GPU kernel operates on.
+    compute_ref<InputType>(processing_method, OP,
+                           input.rowwise_cpu_dptr<InputType>(),
+                           grad.rowwise_cpu_dptr<InputType>(),
+                           ref_output.data(), ref_output_dbias.get(),
+                           rows, cols);
 
-    const uint8_t * const gpu_scales_ptr = rowwise
-                                           ? output_c.rowwise_cpu_scale_inv_ptr<fp8e8m0>()
-                                           : output_c.columnwise_cpu_scale_inv_ptr<fp8e8m0>();
+    // Dequantize GPU output using the GPU's own scales, then compare to the
+    // pre-quantization reference.  This is valid regardless of whether the GPU
+    // and reference rounded a near-power-of-2 amax to the same E8M0 exponent.
+    std::vector<float> dequant_output(rows * cols);
+    if (rowwise) {
+        dequantize_mxfp8_rowwise(
+            output_c.rowwise_cpu_dptr<OutputType>(),
+            output_c.rowwise_cpu_scale_inv_ptr<fp8e8m0>(),
+            dequant_output.data(), rows, cols, scales_stride);
+    } else {
+        dequantize_mxfp8_colwise(
+            output_c.columnwise_cpu_dptr<OutputType>(),
+            output_c.columnwise_cpu_scale_inv_ptr<fp8e8m0>(),
+            dequant_output.data(), rows, cols, scales_stride);
+    }
 
-    const size_t scale_diff_abs_tolerance = 0;
-    const double abs_tolerable_mismatches_limit = 0.0;
-    const double rel_tolerable_mismatches_limit = 0.0;
-
-    size_t mismatches_scales = 0;
-
-    compare_scaling_factors("scales", gpu_scales_ptr, ref_output_scales.get(),
-                            unpadded_blocks_Y, unpadded_blocks_X, scales_stride,
-                            mismatches_scales,
-                            scale_diff_abs_tolerance,
-                            abs_tolerable_mismatches_limit,
-                            rel_tolerable_mismatches_limit);
-
-    const size_t mismatches_elts = 32 * mismatches_scales;
     auto [atol, rtol] = getTolerances(otype);
-    compareResults("output_c", output_c, ref_output_c.get(), rowwise, atol, rtol, true, mismatches_elts);
+    compareResults("output_c", dequant_output.data(), ref_output.data(), rows * cols, atol, rtol);
 
     if (processing_method == ProcessingMethod::CAST_DBIAS
-        || processing_method == ProcessingMethod::CAST_DBIAS_DACT)
-    {
+        || processing_method == ProcessingMethod::CAST_DBIAS_DACT) {
         auto [atol_dbias, rtol_dbias] = getTolerances(itype);
         if (itype == DType::kFloat32) {
             atol_dbias = 1e-4;
-            rtol_dbias *= sqrt(static_cast<double>(rows)) ;
+            rtol_dbias *= sqrt(static_cast<double>(rows));
         } else {
             rtol_dbias *= 4;
         }
-        compareResults("output_dbias", output_dbias, ref_output_dbias.get(), true, atol_dbias, rtol_dbias);
+        compareResults("output_dbias", output_dbias, ref_output_dbias.get(), true,
+                       atol_dbias, rtol_dbias);
     }
 }
 
@@ -352,44 +244,30 @@ void performTest_x2(const ProcessingMethod processing_method,
                     const size_t block_size_cols,
                     InputsFillCase fill_case) {
     using namespace test;
-    using EncodingType = fp32;
     DType itype = TypeInfo<InputType>::dtype;
     DType otype = TypeInfo<OutputType>::dtype;
 
     if (shape.size() < 2) {
-      GTEST_SKIP();
+        GTEST_SKIP();
     }
 
     const size_t rows = first_dimension(shape);
     const size_t cols = last_dimension(shape);
 
-    const std::array<size_t,4> scale_dims_rowwise = get_scale_tensor_dims(rows, cols, 1, 32);
-    const std::array<size_t,4> scale_dims_colwise = get_scale_tensor_dims(rows, cols, 32, 1);
-
-    const size_t unpadded_blocks_Y_rowwise = scale_dims_rowwise[0];
-    const size_t unpadded_blocks_X_rowwise = scale_dims_rowwise[1];
-    const size_t blocks_Y_rowwise = scale_dims_rowwise[2];
-    const size_t blocks_X_rowwise = scale_dims_rowwise[3];
-    const size_t scales_stride_rowwise = blocks_X_rowwise;
-
-    const size_t unpadded_blocks_Y_colwise = scale_dims_colwise[0];
-    const size_t unpadded_blocks_X_colwise = scale_dims_colwise[1];
-    const size_t blocks_Y_colwise = scale_dims_colwise[2];
-    const size_t blocks_X_colwise = scale_dims_colwise[3];
-    const size_t scales_stride_colwise = blocks_X_colwise;
+    const size_t scales_stride_rowwise = get_scale_tensor_dims(rows, cols, 1, 32)[3];
+    const size_t scales_stride_colwise = get_scale_tensor_dims(rows, cols, 32, 1)[3];
 
     Tensor input("input", shape, itype);
     Tensor grad("grad", shape, itype);
     Tensor output("output", shape, otype, true, true, NVTE_MXFP8_1D_SCALING);
     Tensor output_dbias("output_dbias", std::vector<size_t>{ cols }, itype);
 
-    std::unique_ptr<OutputType[]> ref_output_c_rowwise = std::make_unique<OutputType[]>(rows * cols);
-    std::unique_ptr<OutputType[]> ref_output_c_colwise = std::make_unique<OutputType[]>(rows * cols);
-    std::unique_ptr<fp8e8m0[]> ref_scales_rowwise = std::make_unique<fp8e8m0[]>(blocks_Y_rowwise * blocks_X_rowwise);
-    std::unique_ptr<fp8e8m0[]> ref_scales_colwise = std::make_unique<fp8e8m0[]>(blocks_Y_colwise * blocks_X_colwise);
+    // Single reference array serves both rowwise and colwise comparisons: the
+    // pre-quantization float values are independent of the scaling direction.
+    std::vector<float> ref_output(rows * cols);
     std::unique_ptr<InputType[]> ref_output_dbias = std::make_unique<InputType[]>(cols);
 
-    fillCase<EncodingType>(&input, fill_case);
+    fillCase<fp32>(&input, fill_case);
     fillUniform(&grad);
 
     Tensor workspace;
@@ -399,18 +277,11 @@ void performTest_x2(const ProcessingMethod processing_method,
             break;
         }
         case ProcessingMethod::CAST_DBIAS: {
-            nvte_quantize_dbias(grad.data(),
-                                output.data(),
-                                output_dbias.data(),
-                                workspace.data(),
-                                0);
+            nvte_quantize_dbias(grad.data(), output.data(), output_dbias.data(),
+                                workspace.data(), 0);
             workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
-
-            nvte_quantize_dbias(grad.data(),
-                                output.data(),
-                                output_dbias.data(),
-                                workspace.data(),
-                                0);
+            nvte_quantize_dbias(grad.data(), output.data(), output_dbias.data(),
+                                workspace.data(), 0);
             break;
         }
         case ProcessingMethod::CAST_DBIAS_DACT: {
@@ -419,21 +290,11 @@ void performTest_x2(const ProcessingMethod processing_method,
             else if (OP == &drelu)  { nvte_quantize_dbias_dact = &nvte_quantize_dbias_drelu; }
             else if (OP == &dqgelu) { nvte_quantize_dbias_dact = &nvte_quantize_dbias_dqgelu; }
             else if (OP == &dsrelu) { nvte_quantize_dbias_dact = &nvte_quantize_dbias_dsrelu; }
-
-            nvte_quantize_dbias_dact(grad.data(),
-                                     input.data(),
-                                     output.data(),
-                                     output_dbias.data(),
-                                     workspace.data(),
-                                     0);
+            nvte_quantize_dbias_dact(grad.data(), input.data(), output.data(),
+                                     output_dbias.data(), workspace.data(), 0);
             workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
-
-            nvte_quantize_dbias_dact(grad.data(),
-                                     input.data(),
-                                     output.data(),
-                                     output_dbias.data(),
-                                     workspace.data(),
-                                     0);
+            nvte_quantize_dbias_dact(grad.data(), input.data(), output.data(),
+                                     output_dbias.data(), workspace.data(), 0);
             break;
         }
         case ProcessingMethod::CAST_DACT: {
@@ -442,7 +303,6 @@ void performTest_x2(const ProcessingMethod processing_method,
             else if (OP == &drelu)  { nvte_dact = &nvte_drelu; }
             else if (OP == &dqgelu) { nvte_dact = &nvte_dqgelu; }
             else if (OP == &dsrelu) { nvte_dact = &nvte_dsrelu; }
-
             nvte_dact(grad.data(), input.data(), output.data(), 0);
             break;
         }
@@ -452,7 +312,6 @@ void performTest_x2(const ProcessingMethod processing_method,
             else if (OP == &relu)  { nvte_act = &nvte_relu; }
             else if (OP == &qgelu) { nvte_act = &nvte_qgelu; }
             else if (OP == &srelu) { nvte_act = &nvte_srelu; }
-
             nvte_act(input.data(), output.data(), 0);
             break;
         }
@@ -462,62 +321,47 @@ void performTest_x2(const ProcessingMethod processing_method,
     auto err = cudaGetLastError();
     ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
 
-    compute_ref<InputType, OutputType>(processing_method,
-                                       OP,
-                                       true,
-                                       true,
-                                       input.rowwise_cpu_dptr<InputType>(),
-                                       grad.rowwise_cpu_dptr<InputType>(),
-                                       ref_output_c_rowwise.get(),
-                                       ref_output_c_colwise.get(),
-                                       ref_scales_rowwise.get(),
-                                       ref_scales_colwise.get(),
-                                       ref_output_dbias.get(),
-                                       rows,
-                                       cols,
-                                       scales_stride_rowwise,
-                                       scales_stride_colwise);
-
-    const size_t scale_diff_abs_tolerance = 0;
-    const double abs_tolerable_mismatches_limit = 0.0;
-    const double rel_tolerable_mismatches_limit = 0.0;
-
-    size_t mismatches_scales_rowwise = 0;
-    compare_scaling_factors("scales_rowwise", output.rowwise_cpu_scale_inv_ptr<fp8e8m0>(),
-                            ref_scales_rowwise.get(), unpadded_blocks_Y_rowwise,
-                            unpadded_blocks_X_rowwise, scales_stride_rowwise,
-                            mismatches_scales_rowwise,
-                            scale_diff_abs_tolerance,
-                            abs_tolerable_mismatches_limit,
-                            rel_tolerable_mismatches_limit);
-
-    size_t mismatches_scales_colwise = 0;
-    compare_scaling_factors("scales_colwise", output.columnwise_cpu_scale_inv_ptr<fp8e8m0>(),
-                            ref_scales_colwise.get(), unpadded_blocks_Y_colwise,
-                            unpadded_blocks_X_colwise, scales_stride_colwise,
-                            mismatches_scales_colwise,
-                            scale_diff_abs_tolerance,
-                            abs_tolerable_mismatches_limit,
-                            rel_tolerable_mismatches_limit);
-
-    const size_t mismatches_elts_rowwise = 32 * mismatches_scales_rowwise;
-    const size_t mismatches_elts_colwise = 32 * mismatches_scales_colwise;
+    compute_ref<InputType>(processing_method, OP,
+                           input.rowwise_cpu_dptr<InputType>(),
+                           grad.rowwise_cpu_dptr<InputType>(),
+                           ref_output.data(), ref_output_dbias.get(),
+                           rows, cols);
 
     auto [atol, rtol] = getTolerances(otype);
-    compareResults("output_c_rowwise", output, ref_output_c_rowwise.get(), true, atol, rtol, true, mismatches_elts_rowwise);
-    compareResults("output_c_colwise", output, ref_output_c_colwise.get(), false, atol, rtol, true, mismatches_elts_colwise);
+
+    // Dequantize rowwise GPU output and compare to reference.
+    {
+        std::vector<float> dequant_rowwise(rows * cols);
+        dequantize_mxfp8_rowwise(
+            output.rowwise_cpu_dptr<OutputType>(),
+            output.rowwise_cpu_scale_inv_ptr<fp8e8m0>(),
+            dequant_rowwise.data(), rows, cols, scales_stride_rowwise);
+        compareResults("output_rowwise", dequant_rowwise.data(), ref_output.data(),
+                       rows * cols, atol, rtol);
+    }
+
+    // Dequantize colwise GPU output and compare to reference.
+    {
+        std::vector<float> dequant_colwise(rows * cols);
+        dequantize_mxfp8_colwise(
+            output.columnwise_cpu_dptr<OutputType>(),
+            output.columnwise_cpu_scale_inv_ptr<fp8e8m0>(),
+            dequant_colwise.data(), rows, cols, scales_stride_colwise);
+        compareResults("output_colwise", dequant_colwise.data(), ref_output.data(),
+                       rows * cols, atol, rtol);
+    }
 
     if (processing_method == ProcessingMethod::CAST_DBIAS
-        || processing_method == ProcessingMethod::CAST_DBIAS_DACT)
-    {
+        || processing_method == ProcessingMethod::CAST_DBIAS_DACT) {
         auto [atol_dbias, rtol_dbias] = getTolerances(itype);
         if (itype == DType::kFloat32) {
             atol_dbias = 1e-4;
-            rtol_dbias *= sqrt(static_cast<double>(rows)) ;
+            rtol_dbias *= sqrt(static_cast<double>(rows));
         } else {
             rtol_dbias *= 4;
         }
-        compareResults("output_dbias", output_dbias, ref_output_dbias.get(), true, atol_dbias, rtol_dbias);
+        compareResults("output_dbias", output_dbias, ref_output_dbias.get(), true,
+                       atol_dbias, rtol_dbias);
     }
 }
 
@@ -569,8 +413,6 @@ std::vector<ActivationType> Activation_types = {
     // ActivationType::QGeLU,
     // ActivationType::SReLU,
 };
-
-}  // namespace
 
 class FusedCastMXFP8TestSuite : public ::testing::TestWithParam
     <std::tuple<ProcessingMethod,
@@ -683,6 +525,8 @@ std::string to_string(const ActivationType Act_type) {
         default: return "";
     }
 }
+
+}  // namespace
 
 INSTANTIATE_TEST_SUITE_P(
     OperatorTest,
