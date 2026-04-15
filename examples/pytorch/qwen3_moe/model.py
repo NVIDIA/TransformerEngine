@@ -13,7 +13,6 @@ TE module mapping (HF -> TE):
 """
 
 from collections.abc import Callable
-from typing import override
 
 import torch
 import torch.nn as nn
@@ -63,7 +62,6 @@ class Qwen3MoeRouter(nn.Module):
         self.weight = nn.Parameter(torch.empty(num_experts, hidden_size))
         nn.init.normal_(self.weight, mean=0.0, std=initializer_range)
 
-    @override
     def forward(
         self, hidden_states: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -133,7 +131,6 @@ class Qwen3MoeBlock(nn.Module):
         for param in self.expert_mlp.parameters():
             init_fn(param)
 
-    @override
     def forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Route tokens to experts and apply SwiGLU.
 
@@ -209,8 +206,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
         self.post_attention_layernorm = te.RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.mlp = Qwen3MoeBlock(config)
 
-    @override
-    def forward(  # type: ignore[override]
+    def forward(
         self,
         hidden_states: torch.Tensor,
         freqs: torch.Tensor,
@@ -265,7 +261,6 @@ class Qwen3MoeModel(nn.Module):
             dim=config.head_dim, rotary_base=config.rope_theta
         )
 
-    @override
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -316,7 +311,6 @@ class Qwen3MoeForCausalLM(nn.Module):
             init_method=init_fn,
         )
 
-    @override
     def forward(
         self,
         input_ids: torch.Tensor,
