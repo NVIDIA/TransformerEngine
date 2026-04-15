@@ -1575,7 +1575,6 @@ class FusedAttnFunc(torch.autograd.Function):
         ) = restore_from_func_ctx(ctx)
 
         aux_ctx_tensors = other_tensors
-        original_qkv_layout = ctx.dqkv_layout
 
         if not aux_ctx_tensors[0].is_contiguous():
             aux_ctx_tensors[0] = aux_ctx_tensors[0].contiguous()
