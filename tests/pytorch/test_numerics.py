@@ -2926,9 +2926,7 @@ def test_grouped_gemm_grouped_tensor(z, m, n, k, case, layout, accumulate, use_b
             for i in range(z):
                 ms = m_sizes[i]
                 s = bias_scale[offset : offset + ms].unsqueeze(-1)
-                out_ref.append(
-                    (out_ref_no_bias[i].float() + bias[i].float() * s).to(dtype)
-                )
+                out_ref.append((out_ref_no_bias[i].float() + bias[i].float() * s).to(dtype))
                 offset += ms
         else:
             out_ref = [(o.float() + b.float()).to(dtype) for o, b in zip(out_ref_no_bias, bias)]

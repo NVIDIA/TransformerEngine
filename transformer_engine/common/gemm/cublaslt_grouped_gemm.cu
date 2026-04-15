@@ -899,9 +899,9 @@ __global__ void grouped_bias_add_kernel(char *d_base, const char *bias_base,
 #pragma unroll
     for (int i = 0; i < kVec; ++i) {
       if constexpr (UseScale) {
-        d_in.scratch_.separate[i] = static_cast<T>(
-            static_cast<float>(d_in.scratch_.separate[i]) +
-            static_cast<float>(b_in.scratch_.separate[i]) * s);
+        d_in.scratch_.separate[i] =
+            static_cast<T>(static_cast<float>(d_in.scratch_.separate[i]) +
+                           static_cast<float>(b_in.scratch_.separate[i]) * s);
       } else {
         d_in.scratch_.separate[i] = d_in.scratch_.separate[i] + b_in.scratch_.separate[i];
       }
@@ -1364,14 +1364,12 @@ void nvte_grouped_bias_add(const NVTEGroupedTensor output, const NVTEGroupedTens
 
   const float *scale_ptr = nullptr;
   if (scale_tensor->data.dptr != nullptr) {
-    NVTE_CHECK(scale_tensor->dtype() == DType::kFloat32,
-               "Grouped bias add: scale must be float32");
-    NVTE_CHECK(scale_tensor->data.shape.size() == 1,
-               "Grouped bias add: scale must be 1D, got ", scale_tensor->data.shape.size(), "D");
+    NVTE_CHECK(scale_tensor->dtype() == DType::kFloat32, "Grouped bias add: scale must be float32");
+    NVTE_CHECK(scale_tensor->data.shape.size() == 1, "Grouped bias add: scale must be 1D, got ",
+               scale_tensor->data.shape.size(), "D");
     const size_t total_rows = static_cast<size_t>(outputD->logical_shape.data[0]);
-    NVTE_CHECK(scale_tensor->data.shape[0] == total_rows,
-               "Grouped bias add: scale size (", scale_tensor->data.shape[0],
-               ") must equal total rows (", total_rows, ")");
+    NVTE_CHECK(scale_tensor->data.shape[0] == total_rows, "Grouped bias add: scale size (",
+               scale_tensor->data.shape[0], ") must equal total rows (", total_rows, ")");
     scale_ptr = static_cast<const float *>(scale_tensor->data.dptr);
   }
 
@@ -1384,8 +1382,7 @@ void nvte_grouped_bias_add(const NVTEGroupedTensor output, const NVTEGroupedTens
   int device_id;
   NVTE_CHECK_CUDA(cudaGetDevice(&device_id));
   int num_sms;
-  NVTE_CHECK_CUDA(
-      cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, device_id));
+  NVTE_CHECK_CUDA(cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, device_id));
   constexpr int kBlocksPerSM = 8;
   const int num_tensors = static_cast<int>(outputD->num_tensors);
   int blocks_per_tensor = std::max(1, (num_sms * kBlocksPerSM) / num_tensors);
@@ -1394,17 +1391,17 @@ void nvte_grouped_bias_add(const NVTEGroupedTensor output, const NVTEGroupedTens
 
   if (scale_ptr != nullptr) {
     TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(dtype, T, {
-      grouped_bias_add_kernel<T, kVec, true><<<grid, block, 0, stream>>>(
-          static_cast<char *>(outputD->data.dptr),
-          static_cast<const char *>(bias_tensor->data.dptr), scale_ptr, d_meta, bias_meta,
-          outputD->num_tensors);
+      grouped_bias_add_kernel<T, kVec, true>
+          <<<grid, block, 0, stream>>>(static_cast<char *>(outputD->data.dptr),
+                                       static_cast<const char *>(bias_tensor->data.dptr), scale_ptr,
+                                       d_meta, bias_meta, outputD->num_tensors);
     });
   } else {
     TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(dtype, T, {
-      grouped_bias_add_kernel<T, kVec, false><<<grid, block, 0, stream>>>(
-          static_cast<char *>(outputD->data.dptr),
-          static_cast<const char *>(bias_tensor->data.dptr), scale_ptr, d_meta, bias_meta,
-          outputD->num_tensors);
+      grouped_bias_add_kernel<T, kVec, false>
+          <<<grid, block, 0, stream>>>(static_cast<char *>(outputD->data.dptr),
+                                       static_cast<const char *>(bias_tensor->data.dptr), scale_ptr,
+                                       d_meta, bias_meta, outputD->num_tensors);
     });
   }
 
