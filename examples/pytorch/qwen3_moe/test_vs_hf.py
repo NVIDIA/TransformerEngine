@@ -4,7 +4,7 @@ Runs forward and backward passes on both models with identical weights and
 verifies that logits and gradients match.
 
 Usage:
-    python -m examples.pytorch.qwen3_moe.test_vs_hf [--seed 42] [--device cuda]
+    python -m examples.pytorch.qwen3_moe.test_vs_hf [--seed 42]
 
 Requirements:
     pip install transformers
@@ -146,11 +146,10 @@ def _copy_hf_to_te(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Compare TE vs HF Qwen3 MoE")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--device", type=str, default="cuda")
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
-    device = args.device
+    device = "cuda"
 
     hf_config = _to_hf_config(_TEST_CONFIG)
     hf_model = modeling_qwen3_moe.Qwen3MoeForCausalLM(hf_config).to(
