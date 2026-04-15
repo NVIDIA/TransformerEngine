@@ -53,6 +53,7 @@ TORCH_DTYPE_MAP = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float3
 # Benchmark helpers – batched methodology: submit all iters, sync once
 # ---------------------------------------------------------------------------
 
+
 def bench_jax_lax(x_jax, k, warmup, iters):
     f = jax.jit(lambda x: jax.lax.top_k(x, k))
     for _ in range(warmup):
@@ -118,6 +119,7 @@ def bench_per_row(x_f32, lengths, out_aux, logits_aux, out_idx, k, warmup, iters
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main():
     args = parse_args()
     n_list = [int(x.strip()) for x in args.n_list.split(",")]
@@ -160,8 +162,12 @@ def main():
             t_jax = bench_jax_lax(x_jax, K, args.warmup, args.iterations)
             t_tor = bench_torch(x_torch, K, args.warmup, args.iterations)
             t_cub = bench_cub(x_jax, K, args.warmup, args.iterations)
-            t_air = bench_air(x_bf16_2d, lengths, air_buf, out_idx_air, K, args.warmup, args.iterations)
-            t_pr  = bench_per_row(x_f32, lengths, out_aux, logits_aux, out_idx_pr, K, args.warmup, args.iterations)
+            t_air = bench_air(
+                x_bf16_2d, lengths, air_buf, out_idx_air, K, args.warmup, args.iterations
+            )
+            t_pr = bench_per_row(
+                x_f32, lengths, out_aux, logits_aux, out_idx_pr, K, args.warmup, args.iterations
+            )
             pr_str = f"{t_pr:>{col[7]}.4f}" if t_pr is not None else f"{'N/A':>{col[7]}}"
 
             print(
