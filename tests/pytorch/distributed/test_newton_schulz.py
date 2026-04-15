@@ -25,7 +25,7 @@ ORTHOGONALITY_SHAPES = [
 REFERENCE_SHAPES = [(NUM_PROCS * 64, NUM_PROCS * 64)]
 
 
-def _run_test(dtype, matrix_shape, num_iterations, check):
+def _run_test(dtype, matrix_shape, num_iterations, coeff_type, check):
     rows, cols = matrix_shape
     test_path = TEST_ROOT / "run_newton_schulz.py"
     test_cmd = LAUNCH_CMD + [
@@ -35,6 +35,7 @@ def _run_test(dtype, matrix_shape, num_iterations, check):
         f"--matrix-rows={rows}",
         f"--matrix-cols={cols}",
         f"--num-iterations={num_iterations}",
+        f"--coeff-type={coeff_type}",
     ]
     if dtype == "bfloat16":
         test_cmd += ["--atol=5e-2", "--rtol=5e-2"]
@@ -54,15 +55,15 @@ def _run_test(dtype, matrix_shape, num_iterations, check):
 
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
 @pytest.mark.parametrize("matrix_shape", ORTHOGONALITY_SHAPES)
-@pytest.mark.parametrize("num_iterations", [5, 15])
-def test_orthogonality(dtype, matrix_shape, num_iterations):
+@pytest.mark.parametrize("num_iterations,coeff_type", [(5, "quintic"), (8, "polar_express")])
+def test_orthogonality(dtype, matrix_shape, num_iterations, coeff_type):
     """Test distributed Newton-Schulz orthogonality."""
-    _run_test(dtype, matrix_shape, num_iterations, "orthogonality")
+    _run_test(dtype, matrix_shape, num_iterations, coeff_type, "orthogonality")
 
 
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
 @pytest.mark.parametrize("matrix_shape", REFERENCE_SHAPES)
-@pytest.mark.parametrize("num_iterations", [5, 15])
-def test_against_reference(dtype, matrix_shape, num_iterations):
+@pytest.mark.parametrize("num_iterations,coeff_type", [(5, "quintic"), (8, "polar_express")])
+def test_against_reference(dtype, matrix_shape, num_iterations, coeff_type):
     """Test distributed Newton-Schulz against a local reference implementation."""
-    _run_test(dtype, matrix_shape, num_iterations, "reference")
+    _run_test(dtype, matrix_shape, num_iterations, coeff_type, "reference")

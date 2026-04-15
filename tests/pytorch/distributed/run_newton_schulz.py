@@ -41,6 +41,7 @@ def main():
     parser.add_argument("--matrix-rows", type=int, default=256)
     parser.add_argument("--matrix-cols", type=int, default=None)
     parser.add_argument("--num-iterations", type=int, default=5)
+    parser.add_argument("--coeff-type", type=str, default="quintic")
     parser.add_argument("--atol", type=float, default=1e-2)
     parser.add_argument("--rtol", type=float, default=1e-2)
     args = parser.parse_args()
@@ -53,7 +54,7 @@ def main():
     dtype = torch.float32 if args.dtype == "float32" else torch.bfloat16
     m = args.matrix_rows
     n = args.matrix_cols if args.matrix_cols is not None else args.matrix_rows
-    coefficients = get_coefficients(args.num_iterations)
+    coefficients = get_coefficients(args.num_iterations, args.coeff_type)
 
     # Ensure the distributed column dimension is divisible by world_size.
     assert n % world_size == 0, f"Matrix columns {n} must be divisible by world_size {world_size}"
