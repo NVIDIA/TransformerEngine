@@ -86,12 +86,6 @@ class ForwardLinearBiasAdd(FusedOperation):
         else:
             backward_override = None
 
-        # Get autocast dtype if needed
-        if torch.is_autocast_enabled():
-            dtype = torch.get_autocast_dtype("cuda")
-        else:
-            dtype = linear_op.weight.dtype
-
         # Linear forward
         output = basic_op_extra_inputs[self._op_idxs["add"]][0]
         output, x_local, w = BasicLinear._functional_forward(

@@ -90,9 +90,8 @@ class L2Normalization(BasicOperation):
         if requires_grad:
             y, rsqrt_norm = l2normalization_fwd_fused(x, self.eps)
             return y, (x, rsqrt_norm)
-        else:
-            y = l2normalization_fused(x, self.eps)
-            return y, (None, None)
+        y = l2normalization_fused(x, self.eps)
+        return y, (None, None)
 
     def op_forward_save_ctx(
         self,

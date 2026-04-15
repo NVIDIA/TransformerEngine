@@ -130,13 +130,13 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
 
             if op._use_split_forward:
                 op_ctxs = [basic_op_ctxs[idx] for idx in basic_op_idxs]
-                fwd_kwargs = dict(
-                    requires_grad=[basic_op_ctxs[idx].requires_grad for idx in basic_op_idxs],
-                    basic_op_extra_inputs=extra_inputs,
-                    prev_op_grad_output_quantizer=prev_op_grad_output_quantizer,
-                    next_op_input_quantizer=next_op_input_quantizer,
-                    basic_op_kwargs=[basic_op_kwargs[idx] for idx in basic_op_idxs],
-                )
+                fwd_kwargs = {
+                    "requires_grad": [basic_op_ctxs[idx].requires_grad for idx in basic_op_idxs],
+                    "basic_op_extra_inputs": extra_inputs,
+                    "prev_op_grad_output_quantizer": prev_op_grad_output_quantizer,
+                    "next_op_input_quantizer": next_op_input_quantizer,
+                    "basic_op_kwargs": [basic_op_kwargs[idx] for idx in basic_op_idxs],
+                }
                 x_input = x
                 x, fused_op_extra_outputs, tensors_to_save = op.fuser_forward_compute(
                     x_input, **fwd_kwargs
