@@ -625,7 +625,6 @@ void nvte_prepare_flash_attn_bwd(NVTETensor q, NVTETensor k, NVTETensor v, NVTET
  *
  *  Each input tensor is 4D in BSHD or SBHD layout, and the corresponding output tensor
  *  is 4D in BHSD layout. Output tensors are pre-allocated and may have a larger last dimension.
- *  Up to 16 tensors may be processed in a single call.
  *
  *  \param[in]     inputs           List of input tensors.
  *  \param[in,out] outputs          List of output tensors.
@@ -643,7 +642,6 @@ void nvte_multi_tensor_transpose_to_bhsd(NVTETensor *inputs, NVTETensor *outputs
  *  Each tensor copies a row-major (rows, in_cols) input to a (rows, out_cols) output,
  *  zero-filling the region [in_cols, out_cols) in every row.
  *  Outputs must be pre-allocated with out_cols >= in_cols and matching dtype.
- *  Up to 16 tensors may be processed in a single call.
  *
  *  \param[in]     inputs       List of input tensors.
  *  \param[in,out] outputs      List of output tensors.

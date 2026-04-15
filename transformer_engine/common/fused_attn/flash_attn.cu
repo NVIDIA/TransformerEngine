@@ -601,8 +601,8 @@ void multi_tensor_transpose_to_bhsd(Tensor *inputs, Tensor *outputs, size_t num_
                                             NVTE_QKV_Format original_format, cudaStream_t stream) {
   using namespace transformer_engine;
   if (num_tensors == 0) return;
-  NVTE_CHECK(num_tensors <= static_cast<size_t>(kMaxPermuteTensors), "num_tensors must be in [1, ",
-             kMaxPermuteTensors, "], got ", num_tensors, ".");
+  NVTE_CHECK(num_tensors <= static_cast<size_t>(kMaxPermuteTensors),
+             "num_tensors must be in [1, ", kMaxPermuteTensors, "], got ", num_tensors, ".");
 
   const bool is_bshd = (original_format == NVTE_QKV_Format::NVTE_BSHD);
   const DType dtype = inputs[0].dtype();
@@ -783,12 +783,22 @@ __launch_bounds__(pad_threads_per_block) __global__
   }
 }
 
+void launch_pad_batch(MultiPadParams &params, int kernel_count, size_t max_n_uint32,
+                      cudaStream_t stream) {
+  if (kernel_count == 0) return;
+  constexpr int threads = pad_threads_per_block;
+  const int blocks_x = static_cast<int>(
+      std::min(DIVUP(max_n_uint32, static_cast<size_t>(threads)), static_cast<size_t>(65535)));
+  dim3 grid(blocks_x, kernel_count);
+  multi_tensor_pad_last_dim_kernel<<<grid, threads, 0, stream>>>(params);
+  NVTE_CHECK_CUDA(cudaGetLastError());
+}
+
 void multi_tensor_pad_last_dim(Tensor *inputs, Tensor *outputs, size_t num_tensors,
                                cudaStream_t stream) {
   using namespace transformer_engine;
 
-  NVTE_CHECK(num_tensors > 0 && num_tensors <= kMaxPadTensors, "num_tensors must be in [1, ",
-             kMaxPadTensors, "], got ", num_tensors, ".");
+  if (num_tensors == 0) return;
 
   MultiPadParams params{};
   size_t max_n_uint32 = 0;
@@ -818,6 +828,13 @@ void multi_tensor_pad_last_dim(Tensor *inputs, Tensor *outputs, size_t num_tenso
       continue;
     }
 
+    if (kernel_count == kMaxPadTensors) {
+      launch_pad_batch(params, kernel_count, max_n_uint32, stream);
+      params = MultiPadParams{};
+      kernel_count = 0;
+      max_n_uint32 = 0;
+    }
+
     const size_t elem_size = typeToSize(inp.data.dtype);
     const auto in_row_bytes = static_cast<uint32_t>(in_cols * elem_size);
     const auto out_row_bytes = static_cast<uint32_t>(out_cols * elem_size);
@@ -834,15 +851,7 @@ void multi_tensor_pad_last_dim(Tensor *inputs, Tensor *outputs, size_t num_tenso
     ++kernel_count;
   }
 
-  if (kernel_count == 0) return;
-
-  constexpr int threads = pad_threads_per_block;
-  const int blocks_x = static_cast<int>(
-      std::min(DIVUP(max_n_uint32, static_cast<size_t>(threads)), static_cast<size_t>(65535)));
-  dim3 grid(blocks_x, kernel_count);
-
-  multi_tensor_pad_last_dim_kernel<<<grid, threads, 0, stream>>>(params);
-  NVTE_CHECK_CUDA(cudaGetLastError());
+  launch_pad_batch(params, kernel_count, max_n_uint32, stream);
 }
 
 }  // namespace multi_tensor_pad_last_dim
@@ -882,8 +891,12 @@ void nvte_multi_tensor_transpose_to_bhsd(NVTETensor *inputs, NVTETensor *outputs
     in_vec[i] = *convertNVTETensorCheck(inputs[i]);
     out_vec[i] = *convertNVTETensorCheck(outputs[i]);
   }
-  multi_tensor_transpose_to_bhsd::multi_tensor_transpose_to_bhsd(
-      in_vec.data(), out_vec.data(), num_tensors, original_format, stream);
+  constexpr size_t kBatch = multi_tensor_transpose_to_bhsd::kMaxPermuteTensors;
+  for (size_t offset = 0; offset < num_tensors; offset += kBatch) {
+    const size_t batch = std::min(num_tensors - offset, kBatch);
+    multi_tensor_transpose_to_bhsd::multi_tensor_transpose_to_bhsd(
+        in_vec.data() + offset, out_vec.data() + offset, batch, original_format, stream);
+  }
 }
 
 void nvte_multi_tensor_pad_last_dim(NVTETensor *inputs, NVTETensor *outputs, size_t num_tensors,
