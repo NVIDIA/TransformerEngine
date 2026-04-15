@@ -261,6 +261,9 @@ class ETPShardedParam(torch.nn.Parameter):
         self._prefetch_handle = None
         self._need_weight_prefetch = True
         self.ag_event = torch.cuda.Event(external=True)
+        # DDP backward hook (set by register_grad_accum_hook)
+        self._grad_accum_node = None
+        self._grad_accum_hook = None
         # Quantization
         self._quantizer = None
         self.did_cast_to_low_precision = False
@@ -687,12 +690,24 @@ class ETPShardedParam(torch.nn.Parameter):
     def get_wgrad_tensor(self):
         return _wgrad_pool_get(self._unsharded_shape, self.main_grad.dtype, self.device)
 
+    def register_grad_accum_hook(self, grad_accum_node, hook):
+        """Register a DDP backward hook to be called from _finalize_wgrad.
+
+        For ETP params, autograd may receive None (async RS) so the normal grad
+        accumulator hook never fires. Instead, _finalize_wgrad calls the hook
+        explicitly after RS wait + gradient accumulation, ensuring DDP's
+        register_grad_ready fires at exactly the right time.
+        """
+        self._grad_accum_node = grad_accum_node
+        self._grad_accum_hook = hook
+
     @staticmethod
     def _finalize_wgrad(param, wgrad_rs):
-        """Post-RS per-param processing: strip padding, accumulate into main_grad.
+        """Post-RS per-param processing: strip padding, accumulate, call DDP hook.
 
-        Accumulates the reduce-scattered wgrad into main_grad and returns
-        a dummy zero grad to autograd (DDP backward post hook is not used for ETP params).
+        Accumulates the reduce-scattered wgrad into main_grad and triggers
+        the DDP backward hook (register_grad_ready) so the DP reduce-scatter
+        fires at the correct time during backward.
         """
 
         param._set_rs_state(ETPWeightState.NONE)
@@ -706,6 +721,16 @@ class ETPShardedParam(torch.nn.Parameter):
         if hasattr(param, "grad_added_to_main_grad"):
             param.grad_added_to_main_grad = True
         dummy_grad = get_dummy_wgrad(list(param.main_grad.shape), param.dtype)
+
+        # 3. Trigger DDP backward hook (register_grad_ready).
+        # ETP bypasses autograd's normal gradient flow (returns None for async RS,
+        # accumulates directly into main_grad), so we must trigger the DDP hook
+        # manually. param.grad = dummy_grad is a Python attribute set that does NOT
+        # fire autograd's grad accumulator hook — only the explicit call below does.
+        if getattr(param, '_grad_accum_hook', None) is not None:
+            param.grad = dummy_grad
+            param._grad_accum_hook()
+
         return dummy_grad
 
 
