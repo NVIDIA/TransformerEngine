@@ -4,7 +4,7 @@
 
 """Cross Entropy Loss API"""
 
-from typing import Optional
+from typing import Optional, Tuple, Union
 import warnings
 
 import torch
@@ -34,6 +34,7 @@ class CrossEntropyFunction(torch.autograd.Function):
         ignore_idx=-100,
         is_cg_capturable=False,
         z_loss_weight=0.0,
+        return_log_sum_exp=False,
     ):
         """
         The forward pass of the Cross Entropy loss. If dist_process_group is passed for distributed loss calculation, the input to each
@@ -48,32 +49,35 @@ class CrossEntropyFunction(torch.autograd.Function):
         dist_process_group (torch.dist.ProcessGroup): The distributed process group the loss computation is split across, None if on 1 device.
         ignore_idx (int): The index for which loss and gradients are made to zero.
         z_loss_weight (float): Weight for z-loss regularization. Adds z_loss_weight * log(Z)^2 per token.
+        return_log_sum_exp (bool): If True, also returns log(sum(exp(logits))) per token.
 
         Returns:
-        tensor: The computed loss.
+        tensor: The computed loss (when return_log_sum_exp=False).
+        tuple[tensor, tensor]: (loss, log_sum_exp) when return_log_sum_exp=True.
+            log_sum_exp is non-differentiable.
         """
-        loss, inp = triton_cross_entropy.cross_entropy_forward(
-            inp,
-            target,
-            label_smoothing,
-            reduce_loss,
-            dist_process_group,
-            ignore_idx,
-            z_loss_weight,
+        loss, inp, log_sum_exp = triton_cross_entropy.cross_entropy_forward(
+            inp, target, label_smoothing, reduce_loss, dist_process_group,
+            ignore_idx, z_loss_weight,
         )
 
         ctx.save_for_backward(inp.detach())
         ctx.is_cg_capturable = is_cg_capturable
+
+        if return_log_sum_exp:
+            ctx.mark_non_differentiable(log_sum_exp)
+            return loss, log_sum_exp
         return loss
 
     @staticmethod
-    def backward(ctx, grad_output):
+    def backward(ctx, grad_output, grad_log_sum_exp=None):
         """
         The backward pass of the Cross Entropy loss.
 
         Parameters:
         ctx : The context object with saved tensors.
         grad_output (tensor): The tensor containing the gradient of the loss with respect to the output.
+        grad_log_sum_exp: None when return_log_sum_exp=True (log_sum_exp is non-differentiable).
 
         Returns:
         tuple: A tuple with the gradients with respect to the inputs. The elements are tensors or None.
@@ -82,6 +86,7 @@ class CrossEntropyFunction(torch.autograd.Function):
         inp = triton_cross_entropy.cross_entropy_backward(inp, grad_output, ctx.is_cg_capturable)
         return (
             inp,
+            None,
             None,
             None,
             None,
@@ -103,7 +108,8 @@ def parallel_cross_entropy(
     z_loss_weight: float = 0.0,
     *,
     _input: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
+    return_log_sum_exp: bool = False,
+) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     """
     Cross Entropy loss with optional distributed reduction and z-loss regularization.
 
@@ -135,11 +141,19 @@ def parallel_cross_entropy(
     z_loss_weight : float, default = 0.0
         Weight for z-loss regularization. Adds ``z_loss_weight * log(Z)^2`` per token.
         This value is a Triton compile-time constant; use a fixed value during training.
+    return_log_sum_exp : bool, default = False
+        If True, returns a ``(loss, log_sum_exp)`` tuple. If False (default), returns only
+        ``loss`` as a single tensor, preserving backward compatibility.
 
     Returns
     -------
     torch.Tensor
-        The computed loss.
+        The computed loss. Shape is ``(B, SQ)`` (or scalar if ``reduce_loss=True``).
+        Returned when ``return_log_sum_exp=False`` (default).
+    tuple[torch.Tensor, torch.Tensor]
+        ``(loss, log_sum_exp)`` when ``return_log_sum_exp=True``.
+        ``log_sum_exp`` has shape ``(B, SQ)``: ``log(sum(exp(logits)))`` per token,
+        useful as a training metric. Non-differentiable; zero for ignored tokens.
     """
     # Handle backward compatibility with _input parameter
     if _input is not None:
@@ -161,4 +175,5 @@ def parallel_cross_entropy(
         ignore_idx,
         is_cg_capturable,
         z_loss_weight,
+        return_log_sum_exp,
     )

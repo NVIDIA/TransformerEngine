@@ -80,10 +80,34 @@ class TestParallelCrossEntropy:
         reduce_loss: bool,
         ignore_idx: bool = False,
         z_loss_weight: float = 0.0,
+        check_lse: bool = False,
     ):
 
         # Random data
         self.generate_input(dtype, swap_dim, ignore_idx)
+
+        # Check return_log_sum_exp before the main forward (which modifies input in-place)
+        if check_lse:
+            ref_lse = torch.logsumexp(self.input_test.float(), dim=-1)
+
+            loss_only = self.test_loss_func(self.input_test.clone().detach(), self.tar_test,
+                                            z_loss_weight=z_loss_weight)
+
+            inp_lse = self.input_test.clone().detach().requires_grad_(True)
+            loss_lse, lse = self.test_loss_func(inp_lse, self.tar_test,
+                                                z_loss_weight=z_loss_weight, return_log_sum_exp=True)
+
+            torch.testing.assert_close(loss_lse, loss_only)
+
+            non_ignored = (self.tar_test != -100)
+            torch.testing.assert_close(lse[non_ignored], ref_lse[non_ignored], atol=1e-5, rtol=1e-5)
+
+            if ignore_idx:
+                assert torch.all(lse[~non_ignored] == 0.0), "LSE should be zero for ignored tokens"
+
+            loss_lse.sum().backward()
+            assert inp_lse.grad is not None
+            assert inp_lse.grad.shape == self.input_test.shape
 
         # Forward pass — default return is a single tensor (backward compatible)
         test_loss = self.test_loss_func(
@@ -288,6 +312,44 @@ class TestParallelCrossEntropy:
                 label_smoothing=0,
                 reduce_loss=False,
                 z_loss_weight=0.001,
+            )
+
+    def test_return_log_sum_exp(self):
+        self.generate_iters(5)
+        self.generate_infra(False, 0)
+        for i in range(self.iters):
+            self.one_iteration_test(
+                dtype=torch.float32,
+                swap_dim=random.choice([True, False]),
+                label_smoothing=0,
+                reduce_loss=False,
+                check_lse=True,
+            )
+
+    def test_return_log_sum_exp_with_z_loss(self):
+        self.generate_iters(5)
+        self.generate_infra(False, 0, z_loss_weight=0.01)
+        for i in range(self.iters):
+            self.one_iteration_test(
+                dtype=torch.float32,
+                swap_dim=random.choice([True, False]),
+                label_smoothing=0,
+                reduce_loss=False,
+                z_loss_weight=0.01,
+                check_lse=True,
+            )
+
+    def test_return_log_sum_exp_with_ignore_idx(self):
+        self.generate_iters(5)
+        self.generate_infra(False, 0)
+        for i in range(self.iters):
+            self.one_iteration_test(
+                dtype=torch.float32,
+                swap_dim=random.choice([True, False]),
+                label_smoothing=0,
+                reduce_loss=False,
+                ignore_idx=True,
+                check_lse=True,
             )
 
 

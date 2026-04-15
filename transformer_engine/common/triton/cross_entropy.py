@@ -92,6 +92,8 @@ def cross_entropy_kernel(
     loss_stride,
     m_d_X_y_ptr,
     m_d_X_y_stride,
+    log_sum_exp_ptr,
+    log_sum_exp_stride,
     rank,
     world_size,
     ignore_idx,
@@ -115,6 +117,8 @@ def cross_entropy_kernel(
     loss_stride (int): The stride of the loss tensor.
     m_d_X_y_ptr: Pointer to m/d/X_y tensor.
     m_d_X_y_stride: The stride of m/d/X_y tensor.
+    log_sum_exp_ptr: Pointer to tensor to store log(sum(exp(logits))) per row.
+    log_sum_exp_stride (int): The stride of the log_sum_exp tensor.
     rank (int): The rank of this device in the TP group.
     world_size (int): The size of world involved in this distributed loss calculation.
     ignore_idx (int): Tokens to be ignored for loss and gradient calculation.
@@ -165,6 +169,7 @@ def cross_entropy_kernel(
 
     # lse = log(Z): free to compute (m, d already in registers).
     lse = m + tl.log(d)
+    tl.store(log_sum_exp_ptr + program_id * log_sum_exp_stride, lse)
 
     # Label smoothing is a general case of normal cross entropy
     scaled_x_sum = 0.0

@@ -44,6 +44,9 @@ def cross_entropy_forward(
     # unreduced loss
     loss_1d = torch.zeros(n_rows, dtype=torch.float32, device=_input.device)
 
+    # log(sum(exp(logits))) per row — free byproduct of online softmax
+    log_sum_exp_1d = torch.zeros(n_rows, dtype=torch.float32, device=_input.device)
+
     # tensor to hold this rank's m/d/X_y values
     m_d_X_y = torch.zeros(n_rows * 3, dtype=torch.float32, device=_input.device)
 
@@ -93,6 +96,8 @@ def cross_entropy_forward(
         loss_stride=loss_1d.stride(-1),
         m_d_X_y_ptr=m_d_X_y_gathered,
         m_d_X_y_stride=m_d_X_y_gathered.stride(-1),
+        log_sum_exp_ptr=log_sum_exp_1d,
+        log_sum_exp_stride=log_sum_exp_1d.stride(-1),
         rank=rank,
         world_size=world_size,
         ignore_idx=ignore_idx,
@@ -110,7 +115,9 @@ def cross_entropy_forward(
         torch.reshape(loss_1d, (B, SQ)) if not reduce_loss else (torch.sum(loss_1d) / n_non_ignore)
     )
 
-    return loss, _input
+    log_sum_exp = torch.reshape(log_sum_exp_1d, (B, SQ))
+
+    return loss, _input, log_sum_exp
 
 
 def cross_entropy_backward(
