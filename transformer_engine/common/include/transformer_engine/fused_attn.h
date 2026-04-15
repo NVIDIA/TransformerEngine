@@ -196,7 +196,7 @@ NVTE_QKV_Format nvte_get_q_format(NVTE_QKV_Layout qkv_layout);
  */
 NVTE_QKV_Format nvte_get_kv_format(NVTE_QKV_Layout qkv_layout);
 
-/*! \brief Convert one NVTE_QKV_Format to another.
+/*! \brief Convert a tensor shape from one NVTE_QKV_Format to another.
  *
  *  \param[in]     src_format          The source format.
  *  \param[in]     src_shape           The source shape.
@@ -208,7 +208,7 @@ NVTE_QKV_Format nvte_get_kv_format(NVTE_QKV_Layout qkv_layout);
  *  \param[out]    d                   The head dimension.
  *  \param[out]    t                   The number of tokens.
  */
-void nvte_convert_qkv_format(NVTE_QKV_Format src_format, const size_t *src_shape,
+void nvte_convert_qkv_shape(NVTE_QKV_Format src_format, const size_t *src_shape,
                              NVTE_QKV_Format dst_format, size_t *dst_shape, size_t *b, size_t *h,
                              size_t *s, size_t *d, size_t *t);
 
