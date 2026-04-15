@@ -155,8 +155,8 @@ std::vector<py::object> fused_attn_fwd(
   auto o_shape = std::vector<size_t>{o_shape_tmp.begin(), o_shape_tmp.end()};
   size_t h = 0, d = 0;
   NVTE_QKV_Format q_format = nvte_get_q_format(qkv_layout);
-  nvte_convert_qkv_format(q_format, o_shape_tmp, o_format, o_shape, nullptr, &h, nullptr, &d,
-                          nullptr);
+  nvte_convert_qkv_format(q_format, o_shape_tmp.data(), o_format, o_shape.data(),
+                          nullptr, &h, nullptr, &d, nullptr);
   const DType fake_dtype_te = GetTransformerEngineDType(fake_dtype);
   std::tie(te_O, py_O) = quantizer_helper(o_quantizer, o_shape, fake_dtype_te, true, std::nullopt);
 
@@ -375,12 +375,12 @@ std::vector<py::object> fused_attn_bwd(
   NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
   NVTE_QKV_Format dq_format = nvte_get_q_format(dqkv_layout);
   NVTE_QKV_Format dkv_format = nvte_get_kv_format(dqkv_layout);
-  nvte_convert_qkv_format(q_format, q_shape, dq_format, dQ_shape, nullptr, &h_q, nullptr, &d_qk,
-                          nullptr);
-  nvte_convert_qkv_format(kv_format, k_shape, dkv_format, dK_shape, nullptr, &h_kv, nullptr,
-                          nullptr, nullptr);
-  nvte_convert_qkv_format(kv_format, v_shape, dkv_format, dV_shape, nullptr, nullptr, nullptr, &d_v,
-                          nullptr);
+  nvte_convert_qkv_format(q_format, q_shape.data(), dq_format, dQ_shape.data(),
+                          nullptr, &h_q, nullptr, &d_qk, nullptr);
+  nvte_convert_qkv_format(kv_format, k_shape.data(), dkv_format, dK_shape.data(),
+                          nullptr, &h_kv, nullptr, nullptr, nullptr);
+  nvte_convert_qkv_format(kv_format, v_shape.data(), dkv_format, dV_shape.data(),
+                          nullptr, nullptr, nullptr, &d_v, nullptr);
   at::Tensor dQ, dK, dV, dQKV, dKV;
   // FP16/BF16: dqkv_fake_dtype = kFloat16/kBFloat16, dQ/dK/dV.dtype = torch.float16/torch.bfloat16
   // FP8DS: dqkv_fake_dtype = kFloat16/kBFloat16, dQ/dK/dV.dtype = torch.uint8

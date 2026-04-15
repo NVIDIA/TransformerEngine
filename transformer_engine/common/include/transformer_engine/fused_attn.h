@@ -208,9 +208,9 @@ NVTE_QKV_Format nvte_get_kv_format(NVTE_QKV_Layout qkv_layout);
  *  \param[out]    d                   The head dimension.
  *  \param[out]    t                   The number of tokens.
  */
-void nvte_convert_qkv_format(NVTE_QKV_Format src_format, std::vector<size_t> src_shape,
-                             NVTE_QKV_Format dst_format, std::vector<size_t> &dst_shape, size_t *b,
-                             size_t *h, size_t *s, size_t *d, size_t *t);
+void nvte_convert_qkv_format(NVTE_QKV_Format src_format, const size_t *src_shape,
+                             NVTE_QKV_Format dst_format, size_t *dst_shape,
+                             size_t *b, size_t *h, size_t *s, size_t *d, size_t *t);
 
 /*! \brief Get fused attention backend based on input parameters.
  *
