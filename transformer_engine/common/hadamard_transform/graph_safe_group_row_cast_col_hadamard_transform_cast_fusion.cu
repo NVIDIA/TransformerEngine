@@ -533,21 +533,20 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device_g
       // the 2nd arrival, firing the barrier. Epilogue warps wait on tma_barrier[0] before reading
       // offsets_smem/first_dims_smem.
       // For kEnableRHTColQuant=false: cpasync_barrier[0] is used instead.
-      constexpr int kWarpSize = 32;
-      const int local_tidx = threadIdx.x % kWarpSize;
+      const int local_tidx = threadIdx.x % cutlass::NumThreadsPerWarp;
       auto async_op = cute::SM80_CP_ASYNC_CACHEALWAYS<int64_t>{};
-      for (size_t i = local_tidx; i <= num_tensors; i += kWarpSize) {
+      for (size_t i = local_tidx; i <= num_tensors; i += cutlass::NumThreadsPerWarp) {
         async_op.copy(offsets[i], shared_storage.smem_offsets[i]);
       }
-      for (size_t i = local_tidx; i < num_tensors; i += kWarpSize) {
+      for (size_t i = local_tidx; i < num_tensors; i += cutlass::NumThreadsPerWarp) {
         async_op.copy(first_dims[i], shared_storage.smem_first_dims[i]);
       }
       if constexpr (kEnableRHTColQuant) {
         // Wait for all cp.async offsets/first_dims copies to complete, then provide the
         // 1st of 2 required arrivals at tma_barrier[0] (with release semantics so consumers
         // see the smem writes). The 2nd arrival comes from TMA B hardware completion below.
-        asm volatile("cp.async.commit_group;\n" ::);
-        asm volatile("cp.async.wait_all;\n" ::);
+        cute::cp_async_fence();
+        cute::cp_async_wait<0>();
         __threadfence_block();
         if (elect_one_sync()) {
           transformer_engine::ptx::mbarrier_arrive(&shared_storage.tma_barrier[0]);
@@ -555,8 +554,8 @@ __launch_bounds__(512, 1) __global__ static void group_row_col_rht_gemm_device_g
       } else {
         // No TMA B in this path. Block until all cp.async ops issued above are complete, then
         // signal cpasync_barrier[0] so the row quant warp can safely read offsets_smem.
-        asm volatile("cp.async.commit_group;\n" ::);
-        asm volatile("cp.async.wait_all;\n" ::);
+        cute::cp_async_fence();
+        cute::cp_async_wait<0>();
         __threadfence_block();
         if (elect_one_sync()) {
           transformer_engine::ptx::mbarrier_arrive(&shared_storage.cpasync_barrier[0]);
