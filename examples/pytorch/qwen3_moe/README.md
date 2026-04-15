@@ -1,3 +1,7 @@
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
 # Qwen3 MoE with TransformerEngine
 
 Single-GPU implementation of [Qwen3 MoE](https://huggingface.co/Qwen/Qwen3-235B-A22B)

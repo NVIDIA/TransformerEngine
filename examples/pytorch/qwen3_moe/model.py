@@ -1,3 +1,7 @@
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
 """Qwen3 MoE model implementation using TransformerEngine modules.
 
 Same architecture as HuggingFace Transformers Qwen3MoeForCausalLM, with PyTorch modules replaced by TransformerEngine

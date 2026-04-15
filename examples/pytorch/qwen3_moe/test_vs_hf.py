@@ -1,3 +1,7 @@
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
 """Compare Qwen3 MoE TE implementation against HuggingFace reference.
 
 Runs forward and backward passes on both models with identical weights and
