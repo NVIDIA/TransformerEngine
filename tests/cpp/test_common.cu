@@ -1020,9 +1020,12 @@ bool isFp4Type(DType type) {
 }
 
 int32_t getDeviceComputeCapability() {
-  cudaDeviceProp deviceProp;
-  cudaGetDeviceProperties(&deviceProp, 0);
-  return 10 * deviceProp.major + deviceProp.minor;
+  static int32_t compute_capability = [] () -> int32_t {
+    cudaDeviceProp deviceProp;
+    cudaGetDeviceProperties(&deviceProp, 0);
+    return 10 * deviceProp.major + deviceProp.minor;
+  }();
+  return compute_capability;
 }
 
 size_t first_dimension(const std::vector<size_t> &shape) {

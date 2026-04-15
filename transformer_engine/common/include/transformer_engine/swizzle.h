@@ -107,6 +107,22 @@ void nvte_swizzle_block_scaling_to_mxfp8_scaling_factors(const NVTETensor input,
 void nvte_swizzle_grouped_scaling_factors(const NVTEGroupedTensor input, NVTEGroupedTensor output,
                                           cudaStream_t stream);
 
+/*! \brief Unswizzling scaling factors from the interleaved GEMM layout back to row-major (grouped)
+ *
+ *  \param[in]     input        Input grouped tensor with swizzled scale_inv.
+ *  \param[in,out] output       Output grouped tensor which hosts non-swizzled scale_inv.
+ *  \param[in]     stream       CUDA stream used for the operation.
+ *
+ *  Requirements:
+ *  - scaling mode must be MXFP8 1D scaling.
+ *  - scale_inv is stored in row-major in output.
+ *  - scale_inv size is padded to 128x4 for row-scale and 4x128 for col-scale.
+ *  - data is quantized along K-dimension, i.e. 1D-scaling block lies along the K-dimension.
+ *  - all tensors in the grouped tensor must have the same shape.
+ */
+void nvte_unswizzle_grouped_scaling_factors(const NVTEGroupedTensor input, NVTEGroupedTensor output,
+                                            cudaStream_t stream);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

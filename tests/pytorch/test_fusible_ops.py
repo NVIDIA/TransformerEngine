@@ -3686,6 +3686,7 @@ class TestSequentialModules:
         hidden_size: int = 256,
         split_alignment: int = 256,
         glu_interleave_size: int = 32,
+        token_padding: int = 2048,
     ) -> None:
         """Grouped MLP forward+backward should be CUDA graph capturable (MXFP8)."""
 
@@ -3703,8 +3704,8 @@ class TestSequentialModules:
         split_sizes = [split_alignment * (i + 1) for i in range(group_size)]
         random.shuffle(split_sizes)
         split_sizes = torch.tensor(split_sizes, dtype=torch.int64, device=device)
-        in_shape = (split_sizes.sum().item(), hidden_size)
-
+        # Pad the input tokens to validate the sync-free MOE
+        in_shape = (split_sizes.sum().item() + token_padding, hidden_size)
         recipe = make_recipe("mxfp8")
         with te.quantized_model_init(enabled=True, recipe=recipe):
             fc1 = te_ops.GroupedLinear(
