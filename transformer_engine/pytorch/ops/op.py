@@ -57,6 +57,22 @@ class OperationContext:
 class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
     """Tensor operation supported by the operation fuser"""
 
+    _use_split_forward: bool = False
+
+    def __init_subclass__(cls, **kwargs) -> None:
+        super().__init_subclass__(**kwargs)
+        has_fuser_compute = "fuser_forward_compute" in cls.__dict__
+        has_fuser_save_ctx = "fuser_forward_save_ctx" in cls.__dict__
+
+        if has_fuser_save_ctx and not has_fuser_compute:
+            raise TypeError(
+                f"{cls.__name__} defines fuser_forward_save_ctx without "
+                "fuser_forward_compute. fuser_forward_save_ctx requires "
+                "fuser_forward_compute."
+            )
+        if has_fuser_compute:
+            cls._use_split_forward = True
+
     @property
     @abc.abstractmethod
     def is_fused_op(self) -> bool:
@@ -90,6 +106,9 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
     ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
         """Forward pass
 
+        Subclasses should implement either this method or both
+        ``fuser_forward_compute`` and ``fuser_forward_save_ctx``.
+
         This op is either a basic op or the fusion of basic ops, so
         several of this function's arguments are lists of arguments to
         forward functions of corresponding basic ops.
@@ -122,6 +141,99 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
         """
         raise NotImplementedError(
             f"Forward pass is not implemented for operation ({self.__class__.__name__})"
+        )
+
+    def fuser_forward_compute(
+        self,
+        input_: torch.Tensor,
+        *,
+        requires_grad: list[bool],
+        basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
+        prev_op_grad_output_quantizer: Optional[Quantizer],
+        next_op_input_quantizer: Optional[Quantizer],
+        basic_op_kwargs: list[dict[str, Any]],
+    ) -> tuple[
+        torch.Tensor,
+        Iterable[Iterable[torch.Tensor]],
+        list[tuple[Optional[torch.Tensor], ...]],
+    ]:
+        """Forward computation without contexts
+
+        Alternative to ``fuser_forward`` that separates computation
+        from context saving. Must be paired with
+        ``fuser_forward_save_ctx``.
+
+        Parameters
+        ----------
+        input_: torch.Tensor
+            Input tensor
+        requires_grad: list of bool
+            Whether backward pass is required, per basic op
+        basic_op_extra_inputs: list of tuple of torch.Tensor
+            Extra tensor inputs to basic operations
+        prev_op_grad_output_quantizer: Quantizer, optional
+            The grad_output_quantizer of the preceeding operation
+        next_op_input_quantizer: Quantizer, optional
+            The input_quantizer of the following operation
+        basic_op_kwargs: list of dict
+            Keyword arguments to forward functions of basic
+            operations.
+
+        Returns
+        -------
+        torch.Tensor
+            Output tensor
+        Iterable of iterable of torch.Tensor
+            Extra tensor outputs from basic operations
+        list of tuple of Optional[torch.Tensor]
+            Tensors to save for backward, per basic op
+
+        """
+        raise NotImplementedError(
+            f"fuser_forward_compute is not implemented for operation "
+            f"({self.__class__.__name__})"
+        )
+
+    def fuser_forward_save_ctx(
+        self,
+        basic_op_ctxs: list[OperationContext],
+        input_: torch.Tensor,
+        tensors_to_save: list[tuple[Optional[torch.Tensor], ...]],
+        *,
+        requires_grad: list[bool],
+        basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
+        prev_op_grad_output_quantizer: Optional[Quantizer],
+        next_op_input_quantizer: Optional[Quantizer],
+        basic_op_kwargs: list[dict[str, Any]],
+    ) -> None:
+        """Save forward state to contexts for backward pass
+
+        Companion to ``fuser_forward_compute``.
+
+        Parameters
+        ----------
+        basic_op_ctxs: list of OperationContext
+            Contexts for basic operations
+        input_: torch.Tensor
+            Input tensor (same as passed to ``fuser_forward_compute``)
+        tensors_to_save: list of tuple of Optional[torch.Tensor]
+            Tensors returned by ``fuser_forward_compute``, per basic op
+        requires_grad: list of bool
+            Whether backward pass is required, per basic op
+        basic_op_extra_inputs: list of tuple of torch.Tensor
+            Extra tensor inputs to basic operations
+        prev_op_grad_output_quantizer: Quantizer, optional
+            The grad_output_quantizer of the preceeding operation
+        next_op_input_quantizer: Quantizer, optional
+            The input_quantizer of the following operation
+        basic_op_kwargs: list of dict
+            Keyword arguments to forward functions of basic
+            operations.
+
+        """
+        raise NotImplementedError(
+            f"fuser_forward_save_ctx is not implemented for operation "
+            f"({self.__class__.__name__})"
         )
 
     def fuser_backward(
@@ -181,6 +293,26 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
     num_extra_inputs: int = 0
     # Number of extra tensor outputs
     num_extra_outputs: int = 0
+
+    def __init_subclass__(cls, **kwargs) -> None:
+        super().__init_subclass__(**kwargs)
+        has_op_forward = "op_forward" in cls.__dict__
+        has_compute = "op_forward_compute" in cls.__dict__
+        has_save_ctx = "op_forward_save_ctx" in cls.__dict__
+
+        if has_op_forward and has_compute:
+            raise TypeError(
+                f"{cls.__name__} defines both op_forward and op_forward_compute. "
+                "Implement either op_forward (legacy) or "
+                "op_forward_compute + op_forward_save_ctx (split API), not both."
+            )
+        if has_save_ctx and not has_compute:
+            raise TypeError(
+                f"{cls.__name__} defines op_forward_save_ctx without op_forward_compute. "
+                "op_forward_save_ctx requires op_forward_compute."
+            )
+        if has_compute:
+            cls._use_split_forward = True
 
     def __init__(self) -> None:
         super().__init__()
@@ -410,17 +542,19 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                 self._fp8_metas[mode][fp8_meta_key].scale.copy_(scale)
                 self._fp8_metas[mode][fp8_meta_key].amax_history.copy_(amax_history)
 
-    @abc.abstractmethod
     def op_forward(
         self,
         ctx: OperationContext,
         input_: torch.Tensor,
         *,
-        prev_op_grad_output_quantizer: Optional[Quantizer],
-        next_op_input_quantizer: Optional[Quantizer],
+        prev_op_grad_output_quantizer: Optional[Quantizer] = None,
+        next_op_input_quantizer: Optional[Quantizer] = None,
         **kwargs: Any,
     ) -> torch.Tensor:
         """Forward pass
+
+        Subclasses should implement either this method or both
+        ``op_forward_compute`` and ``op_forward_save_ctx``.
 
         Parameters
         ----------
@@ -439,6 +573,86 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             Output tensor
 
         """
+        raise NotImplementedError(
+            f"Forward pass is not implemented for operation ({self.__class__.__name__}). "
+            "Implement either op_forward or both op_forward_compute and op_forward_save_ctx."
+        )
+
+    def op_forward_compute(
+        self,
+        input_: torch.Tensor,
+        *,
+        requires_grad: bool,
+        prev_op_grad_output_quantizer: Optional[Quantizer] = None,
+        next_op_input_quantizer: Optional[Quantizer] = None,
+        **kwargs: Any,
+    ) -> tuple[torch.Tensor, tuple[Optional[torch.Tensor], ...]]:
+        """Forward computation without context
+
+        Alternative to ``op_forward`` that separates computation from
+        context saving. Must be paired with ``op_forward_save_ctx``.
+
+        Parameters
+        ----------
+        input_: torch.Tensor
+            Input tensor
+        requires_grad: bool
+            Whether backward pass is required
+        prev_op_grad_output_quantizer: Quantizer, optional
+            The grad_output_quantizer of the preceeding operation
+        next_op_input_quantizer: Quantizer, optional
+            The input_quantizer of the following operation
+
+        Returns
+        -------
+        torch.Tensor
+            Output tensor
+        tuple of Optional[torch.Tensor]
+            Tensors to save for backward pass
+
+        """
+        raise NotImplementedError(
+            f"op_forward_compute is not implemented for operation ({self.__class__.__name__})"
+        )
+
+    def op_forward_save_ctx(
+        self,
+        ctx: OperationContext,
+        input_: torch.Tensor,
+        tensors_to_save: tuple[Optional[torch.Tensor], ...],
+        *,
+        requires_grad: bool,
+        prev_op_grad_output_quantizer: Optional[Quantizer] = None,
+        next_op_input_quantizer: Optional[Quantizer] = None,
+        **kwargs: Any,
+    ) -> None:
+        """Save forward state to context for backward pass
+
+        Companion to ``op_forward_compute``. Receives the same
+        arguments as ``op_forward_compute`` plus ``ctx`` and
+        ``tensors_to_save``. Override to save additional non-tensor
+        state needed for the backward pass.
+
+        Parameters
+        ----------
+        ctx: OperationContext
+            Context to coordinate between forward and backward passes
+        input_: torch.Tensor
+            Input tensor (same as passed to ``op_forward_compute``)
+        tensors_to_save: tuple of Optional[torch.Tensor]
+            Tensors returned by ``op_forward_compute``
+        requires_grad: bool
+            Whether backward pass is required
+        prev_op_grad_output_quantizer: Quantizer, optional
+            The grad_output_quantizer of the preceeding operation
+        next_op_input_quantizer: Quantizer, optional
+            The input_quantizer of the following operation
+
+        """
+        raise NotImplementedError(
+            f"op_forward_save_ctx is not implemented for operation "
+            f"({self.__class__.__name__})"
+        )
 
     @abc.abstractmethod
     def op_backward(
@@ -464,6 +678,16 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
 
         """
 
+    def _check_no_extra_io(self, fuser_method: str, op_method: str) -> None:
+        """Raise if op has extra inputs/outputs and must override fuser-level method."""
+        if self.num_extra_inputs > 0 or self.num_extra_outputs > 0:
+            raise RuntimeError(
+                f"{self.__class__.__name__} operation has "
+                f"{self.num_extra_inputs} extra tensor inputs "
+                f"and {self.num_extra_outputs} extra tensor outputs. "
+                f"It should override `{fuser_method}` instead of `{op_method}`."
+            )
+
     def fuser_forward(
         self,
         basic_op_ctxs: list[OperationContext],
@@ -474,13 +698,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         next_op_input_quantizer: Optional[Quantizer],
         basic_op_kwargs: list[dict[str, Any]],
     ) -> tuple[torch.Tensor, list[tuple[()]]]:
-        if self.num_extra_inputs > 0 or self.num_extra_outputs > 0:
-            raise RuntimeError(
-                "{self.__class__.__name__} operation has "
-                f"{self.num_extra_inputs} extra tensor inputs "
-                f"and {self.num_extra_outputs} extra tensor outputs. "
-                "It should override `fuser_forward` instead of `op_forward`."
-            )
+        self._check_no_extra_io("fuser_forward", "op_forward")
         output = self.op_forward(
             basic_op_ctxs[0],
             input_,
@@ -489,6 +707,53 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             **basic_op_kwargs[0],
         )
         return output, [()]
+
+    def fuser_forward_compute(
+        self,
+        input_: torch.Tensor,
+        *,
+        requires_grad: list[bool],
+        basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
+        prev_op_grad_output_quantizer: Optional[Quantizer],
+        next_op_input_quantizer: Optional[Quantizer],
+        basic_op_kwargs: list[dict[str, Any]],
+    ) -> tuple[
+        torch.Tensor,
+        list[tuple[()]],
+        list[tuple[Optional[torch.Tensor], ...]],
+    ]:
+        self._check_no_extra_io("fuser_forward_compute", "op_forward_compute")
+        output, tensors_to_save = self.op_forward_compute(
+            input_,
+            requires_grad=requires_grad[0],
+            prev_op_grad_output_quantizer=prev_op_grad_output_quantizer,
+            next_op_input_quantizer=next_op_input_quantizer,
+            **basic_op_kwargs[0],
+        )
+        return output, [()], [tensors_to_save]
+
+    def fuser_forward_save_ctx(
+        self,
+        basic_op_ctxs: list[OperationContext],
+        input_: torch.Tensor,
+        tensors_to_save: list[tuple[Optional[torch.Tensor], ...]],
+        *,
+        requires_grad: list[bool],
+        basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
+        prev_op_grad_output_quantizer: Optional[Quantizer],
+        next_op_input_quantizer: Optional[Quantizer],
+        basic_op_kwargs: list[dict[str, Any]],
+    ) -> None:
+        self._check_no_extra_io("fuser_forward_save_ctx", "op_forward_save_ctx")
+        self.op_forward_save_ctx(
+            basic_op_ctxs[0],
+            input_,
+            tensors_to_save[0],
+            requires_grad=requires_grad[0],
+            prev_op_grad_output_quantizer=prev_op_grad_output_quantizer,
+            next_op_input_quantizer=next_op_input_quantizer,
+            **basic_op_kwargs[0],
+        )
 
     def fuser_backward(
         self,
@@ -501,13 +766,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         list[Iterable[Optional[torch.Tensor]]],
         list[tuple[()]],
     ]:
-        if self.num_extra_inputs > 0 or self.num_extra_outputs > 0:
-            raise RuntimeError(
-                "{self.__class__.__name__} operation has "
-                f"{self.num_extra_inputs} extra tensor inputs "
-                f"and {self.num_extra_outputs} extra tensor outputs. "
-                "It should override `fuser_backward` instead of `op_backward`."
-            )
+        self._check_no_extra_io("fuser_backward", "op_backward")
         grad_input, grad_params = self.op_backward(basic_op_ctxs[0], grad_output)
         return grad_input, [grad_params], [()]
 

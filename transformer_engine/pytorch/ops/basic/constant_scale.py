@@ -23,14 +23,27 @@ class ConstantScale(BasicOperation):
         super().__init__()
         self.scale = scale
 
-    def op_forward(
+    def op_forward_compute(
+        self,
+        input_: torch.Tensor,
+        *,
+        requires_grad: bool,
+        prev_op_grad_output_quantizer: Optional[Quantizer] = None,
+        next_op_input_quantizer: Optional[Quantizer] = None,
+    ) -> tuple[torch.Tensor, tuple[()]]:
+        return input_ * self.scale, ()
+
+    def op_forward_save_ctx(
         self,
         ctx: OperationContext,
         input_: torch.Tensor,
-        prev_op_grad_output_quantizer: Optional[Quantizer],
-        next_op_input_quantizer: Optional[Quantizer],
-    ) -> torch.Tensor:
-        return input_ * self.scale
+        tensors_to_save: tuple[()],
+        *,
+        requires_grad: bool,
+        prev_op_grad_output_quantizer: Optional[Quantizer] = None,
+        next_op_input_quantizer: Optional[Quantizer] = None,
+    ) -> None:
+        pass
 
     def op_backward(
         self,

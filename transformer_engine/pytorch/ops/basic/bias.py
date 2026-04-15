@@ -113,24 +113,35 @@ class Bias(BasicOperation):
         if self.bias.device.type == "meta":
             self.reset_parameters()
 
-    def op_forward(
+    def op_forward_compute(
+        self,
+        input_: torch.Tensor,
+        *,
+        requires_grad: bool,
+        prev_op_grad_output_quantizer: Optional[Quantizer] = None,
+        next_op_input_quantizer: Optional[Quantizer] = None,
+    ) -> tuple[torch.Tensor, tuple[()]]:
+        x = input_
+        b = self.bias.view([1] * (x.dim() - 1) + [self.local_size])
+        return x + b, ()
+
+    def op_forward_save_ctx(
         self,
         ctx: OperationContext,
         input_: torch.Tensor,
-        prev_op_grad_output_quantizer: Optional[Quantizer],
-        next_op_input_quantizer: Optional[Quantizer],
-    ) -> torch.Tensor:
-        x = input_
-        b = self.bias.view([1] * (x.dim() - 1) + [self.local_size])
-
-        if ctx.requires_grad:
-            ctx.grad_input_quantizer = prev_op_grad_output_quantizer
-            if FP8GlobalStateManager.is_fp8_enabled():
-                fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
-                if fp8_recipe.backward_override is not None:
-                    ctx.grad_input_quantizer = None
-
-        return x + b
+        tensors_to_save: tuple[()],
+        *,
+        requires_grad: bool,
+        prev_op_grad_output_quantizer: Optional[Quantizer] = None,
+        next_op_input_quantizer: Optional[Quantizer] = None,
+    ) -> None:
+        if not requires_grad:
+            return
+        ctx.grad_input_quantizer = prev_op_grad_output_quantizer
+        if FP8GlobalStateManager.is_fp8_enabled():
+            fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
+            if fp8_recipe.backward_override is not None:
+                ctx.grad_input_quantizer = None
 
     def op_backward(
         self,

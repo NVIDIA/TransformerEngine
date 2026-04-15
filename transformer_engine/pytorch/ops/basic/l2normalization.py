@@ -77,36 +77,39 @@ class L2Normalization(BasicOperation):
                 for hidden_size in common_hidden_sizes:
                     warmup_jit_l2normalization_all_dtypes(hidden_size, seq_length, micro_batch_size)
 
-    def op_forward(
+    def op_forward_compute(
+        self,
+        input_: torch.Tensor,
+        *,
+        requires_grad: bool,
+        prev_op_grad_output_quantizer: Optional[Quantizer] = None,
+        next_op_input_quantizer: Optional[Quantizer] = None,
+    ) -> tuple[torch.Tensor, tuple[Optional[torch.Tensor], ...]]:
+        x = maybe_dequantize(input_)
+
+        if requires_grad:
+            y, rsqrt_norm = l2normalization_fwd_fused(x, self.eps)
+            return y, (x, rsqrt_norm)
+        else:
+            y = l2normalization_fused(x, self.eps)
+            return y, (None, None)
+
+    def op_forward_save_ctx(
         self,
         ctx: OperationContext,
         input_: torch.Tensor,
-        prev_op_grad_output_quantizer: Optional[Quantizer],
-        next_op_input_quantizer: Optional[Quantizer],
-    ) -> torch.Tensor:
-        # Use input directly - torch.compile can handle multi-dimensional tensors
-        x = maybe_dequantize(input_)
-
-        # Check if backward pass is needed
-        requires_grad = ctx.requires_grad
-
-        # Compute L2 normalization using fused implementation
-        # L2 norm: x / sqrt(sum(x^2) + eps) = x * rsqrt(sum(x^2) + eps)
-        if requires_grad:
-            # Training: use version that returns output and intermediate values for backward pass
-            y, rsqrt_norm = l2normalization_fwd_fused(x, self.eps)
-        else:
-            # Inference: use lightweight version that only returns output
-            y = l2normalization_fused(x, self.eps)
-            rsqrt_norm = None  # Not needed for inference
-
-        # Save state for backward pass
-        if requires_grad:
-            if is_cpu_offload_enabled():
-                mark_activation_offload(x, rsqrt_norm)
-            ctx.save_for_backward(x, rsqrt_norm)
-
-        return y
+        tensors_to_save: tuple[Optional[torch.Tensor], ...],
+        *,
+        requires_grad: bool,
+        prev_op_grad_output_quantizer: Optional[Quantizer] = None,
+        next_op_input_quantizer: Optional[Quantizer] = None,
+    ) -> None:
+        if not requires_grad:
+            return
+        x, rsqrt_norm = tensors_to_save
+        if is_cpu_offload_enabled():
+            mark_activation_offload(x, rsqrt_norm)
+        ctx.save_for_backward(x, rsqrt_norm)
 
     def op_backward(
         self,

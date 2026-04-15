@@ -38,22 +38,35 @@ class AllReduce(BasicOperation):
         self.process_group: Optional[torch.distributed.ProcessGroup] = process_group
         self._reduce_in_backward: bool = reduce_in_backward
 
-    def op_forward(
+    def op_forward_compute(
         self,
-        ctx: OperationContext,
         input_: torch.Tensor,
-        prev_op_grad_output_quantizer: Optional[Quantizer],
-        next_op_input_quantizer: Optional[Quantizer],
-    ) -> torch.Tensor:
+        *,
+        requires_grad: bool,
+        prev_op_grad_output_quantizer: Optional[Quantizer] = None,
+        next_op_input_quantizer: Optional[Quantizer] = None,
+    ) -> tuple[torch.Tensor, tuple[()]]:
 
         # Trivial case
         if torch.distributed.get_world_size(self.process_group) == 1:
-            return input_
+            return input_, ()
 
         # Perform all-reduce
         x = maybe_dequantize(input_.contiguous())
         torch.distributed.all_reduce(x, group=self.process_group)
-        return x
+        return x, ()
+
+    def op_forward_save_ctx(
+        self,
+        ctx: OperationContext,
+        input_: torch.Tensor,
+        tensors_to_save: tuple[()],
+        *,
+        requires_grad: bool,
+        prev_op_grad_output_quantizer: Optional[Quantizer] = None,
+        next_op_input_quantizer: Optional[Quantizer] = None,
+    ) -> None:
+        pass
 
     def op_backward(
         self,
