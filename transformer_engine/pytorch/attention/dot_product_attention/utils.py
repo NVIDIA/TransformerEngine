@@ -2468,8 +2468,8 @@ def mxfp8_quantize_fast_path(tensor_quantizer_pairs, src_format):
         )
 
     # swizzle in place; batched
-    tex.multi_tensor_swizzle_scales_for_gemm_(result, True, False, check_scale_inv_shapes=False)
-    tex.multi_tensor_swizzle_scales_for_gemm_(result, False, True, check_scale_inv_shapes=False)
+    tex.multi_tensor_swizzle_scales_for_gemm_unchecked_(result, True, False)
+    tex.multi_tensor_swizzle_scales_for_gemm_unchecked_(result, False, True)
     for t in result:
         t._with_gemm_swizzled_scales = True
 

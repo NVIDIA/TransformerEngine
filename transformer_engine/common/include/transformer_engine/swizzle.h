@@ -36,9 +36,6 @@ void nvte_swizzle_scaling_factors(const NVTETensor input, NVTETensor output, cud
  *  \param[in,out] outputs                 Output tensors which hosts swizzled scale_inv.
  *  \param[in]     num_tensors             Number of input and output tensors.
  *  \param[in]     stream                  CUDA stream used for the operation.
- *  \param[in]     check_scale_inv_shapes  Whether to verify scale_inv shape/padding
- *                                         requirements. Set to false when data and scale_inv
- *                                         have different shapes, e.g. in MXFP8.
  *
  *  Requirements:
  *  - scale_inv is stored in row-major.
@@ -46,8 +43,18 @@ void nvte_swizzle_scaling_factors(const NVTETensor input, NVTETensor output, cud
  *  - data is quantized along K-dimension, i.e. 1D-scaling block lies along the K-dimension.
  */
 void nvte_multi_tensor_swizzle_scaling_factors(const NVTETensor* inputs, NVTETensor* outputs,
-                                               const size_t num_tensors, cudaStream_t stream,
-                                               bool check_scale_inv_shapes = true);
+                                               const size_t num_tensors, cudaStream_t stream);
+
+/*! \brief Same as nvte_multi_tensor_swizzle_scaling_factors, but skips
+ *         scale_inv shape/padding validation.
+ *
+ *  Use this variant when the data and scale_inv tensors intentionally have
+ *  different shapes, e.g. when scale_invs have been transposed for attention.
+ */
+void nvte_multi_tensor_swizzle_scaling_factors_unchecked(const NVTETensor* inputs,
+                                                        NVTETensor* outputs,
+                                                        const size_t num_tensors,
+                                                        cudaStream_t stream);
 
 /*! \brief Unswizzling scaling factors from the interleaved layout used by GEMM back to row-major
  *

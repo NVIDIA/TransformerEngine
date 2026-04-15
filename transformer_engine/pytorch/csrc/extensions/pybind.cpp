@@ -392,8 +392,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("multi_tensor_swizzle_scales_for_gemm_",
         &transformer_engine::pytorch::inplace_multi_tensor_swizzle_scales_for_gemm,
         "Convert multiple tensors' block scales into GEMM swizzled format", py::arg("tensors"),
-        py::arg("rowwise_usage"), py::arg("columnwise_usage"),
-        py::arg("check_scale_inv_shapes") = true);
+        py::arg("rowwise_usage"), py::arg("columnwise_usage"));
+  m.def("multi_tensor_swizzle_scales_for_gemm_unchecked_",
+        &transformer_engine::pytorch::inplace_multi_tensor_swizzle_scales_for_gemm_unchecked,
+        "Convert multiple tensors' block scales into GEMM swizzled format (skip scale shape checks)",
+        py::arg("tensors"), py::arg("rowwise_usage"), py::arg("columnwise_usage"));
   m.def("grouped_swizzle_for_gemm", &transformer_engine::pytorch::grouped_swizzle_for_gemm,
         "In-place swizzle of grouped tensor scales for GEMM", py::arg("tensor"), py::arg("rowwise"),
         py::arg("columnwise"));

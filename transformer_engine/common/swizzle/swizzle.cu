@@ -1813,8 +1813,7 @@ void nvte_swizzle_scaling_factors(const NVTETensor input, NVTETensor output, cud
 }
 
 void nvte_multi_tensor_swizzle_scaling_factors(const NVTETensor* inputs, NVTETensor* outputs,
-                                               const size_t num_tensors, cudaStream_t stream,
-                                               bool check_scale_inv_shapes) {
+                                               const size_t num_tensors, cudaStream_t stream) {
   NVTE_API_CALL(nvte_multi_tensor_swizzle_scaling_factors);
   using namespace transformer_engine;
   NVTE_CHECK(num_tensors > 0, "Number of tensors should be greater than 0.");
@@ -1823,7 +1822,24 @@ void nvte_multi_tensor_swizzle_scaling_factors(const NVTETensor* inputs, NVTETen
     input_list.push_back(convertNVTETensorCheck(inputs[i]));
     output_list.push_back(convertNVTETensorCheck(outputs[i]));
   }
-  multi_tensor_swizzle_scaling_factors(input_list, output_list, stream, check_scale_inv_shapes);
+  multi_tensor_swizzle_scaling_factors(input_list, output_list, stream,
+                                       /*check_scale_inv_shapes=*/true);
+}
+
+void nvte_multi_tensor_swizzle_scaling_factors_unchecked(const NVTETensor* inputs,
+                                                        NVTETensor* outputs,
+                                                        const size_t num_tensors,
+                                                        cudaStream_t stream) {
+  NVTE_API_CALL(nvte_multi_tensor_swizzle_scaling_factors_unchecked);
+  using namespace transformer_engine;
+  NVTE_CHECK(num_tensors > 0, "Number of tensors should be greater than 0.");
+  std::vector<Tensor*> input_list, output_list;
+  for (size_t i = 0; i < num_tensors; i++) {
+    input_list.push_back(convertNVTETensorCheck(inputs[i]));
+    output_list.push_back(convertNVTETensorCheck(outputs[i]));
+  }
+  multi_tensor_swizzle_scaling_factors(input_list, output_list, stream,
+                                       /*check_scale_inv_shapes=*/false);
 }
 
 void nvte_unswizzle_scaling_factors(const NVTETensor input, NVTETensor output,
