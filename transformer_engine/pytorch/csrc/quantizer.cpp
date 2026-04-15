@@ -1445,15 +1445,6 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(const std::ve
   return {std::move(out_cpp), std::move(out_py)};
 }
 
-std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_unquantized_tensor(
-    const std::vector<size_t>& shape, DType dtype, std::optional<at::Tensor> data) {
-  auto out = data.has_value() ? NoneQuantizer(py::none()).create_tensor(shape, dtype, data.value())
-                              : NoneQuantizer(py::none()).create_tensor(shape, dtype);
-  TensorWrapper out_cpp = std::move(out.first);
-  py::object out_py = std::move(out.second);
-  return {std::move(out_cpp), std::move(out_py)};
-}
-
 std::pair<GroupedTensorWrapper, py::object> MXFP8Quantizer::create_grouped_tensor(
     const size_t num_tensors, const std::vector<size_t>& logical_shape, const DType dtype,
     py::object quantizer, const std::optional<at::Tensor>& first_dims,

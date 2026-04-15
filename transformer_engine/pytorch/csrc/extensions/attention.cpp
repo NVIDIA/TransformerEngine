@@ -93,15 +93,14 @@ std::pair<TensorWrapper, py::object> quantizer_helper(py::handle quantizer,
     }
   } else if (detail::IsMXFP8Quantizers(quantizer.ptr())) {
     // MXFP8
-    auto *T_quantizer_fp8 = dynamic_cast<MXFP8Quantizer *>(T_quantizer.get());
     if (create_hp_tensor) {
       if (data.has_value()) {
-        std::tie(te_T, py_T) =
-            T_quantizer_fp8->create_unquantized_tensor(shape, dtype, data.value());
+        std::tie(te_T, py_T) = NoneQuantizer(py::none()).create_tensor(shape, dtype, data.value());
       } else {
-        std::tie(te_T, py_T) = T_quantizer_fp8->create_unquantized_tensor(shape, dtype);
+        std::tie(te_T, py_T) = NoneQuantizer(py::none()).create_tensor(shape, dtype);
       }
     } else {
+      auto *T_quantizer_fp8 = dynamic_cast<MXFP8Quantizer *>(T_quantizer.get());
       std::tie(te_T, py_T) = T_quantizer_fp8->create_tensor(shape, dtype);
       NVTE_CHECK(!data.has_value(),
                  "MXFP8Quantizer::create_tensor() does not take data tensor as input!");

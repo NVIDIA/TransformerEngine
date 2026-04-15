@@ -301,9 +301,6 @@ class MXFP8Quantizer : public Quantizer {
   std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
                                                      DType dtype) const override;
 
-  std::pair<TensorWrapper, py::object> create_unquantized_tensor(
-      const std::vector<size_t>& shape, DType dtype, std::optional<at::Tensor> data = std::nullopt);
-
   std::pair<GroupedTensorWrapper, py::object> create_grouped_tensor(
       size_t num_tensors, const std::vector<size_t>& logical_shape, DType dtype,
       py::object quantizer, const std::optional<at::Tensor>& first_dims, size_t logical_first_dim,
