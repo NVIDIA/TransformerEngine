@@ -503,8 +503,13 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             fc1_weight_tensors = (
                 [grouped_fc1_weight] if fc1_op.single_grouped_weight else grouped_fc1_weight
             )
-            fc1_saved = [split_sizes, split_points, *fc1_weight_tensors, *fc1_input_tensors,
-                         base_offsets]
+            fc1_saved = [
+                split_sizes,
+                split_points,
+                *fc1_weight_tensors,
+                *fc1_input_tensors,
+                base_offsets,
+            ]
 
             swiglu_saved = (swiglu_in, scales)
 
@@ -550,9 +555,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         fc1_weight_param = fc1_op.weight if fc1_op.single_grouped_weight else fc1_op.weight0
         fc2_weight_param = fc2_op.weight if fc2_op.single_grouped_weight else fc2_op.weight0
         input_requires_grad = True
-        weight_requires_grad = (
-            fc1_weight_param.requires_grad or fc2_weight_param.requires_grad
-        )
+        weight_requires_grad = fc1_weight_param.requires_grad or fc2_weight_param.requires_grad
 
         if torch.is_autocast_enabled():
             dtype = torch.get_autocast_dtype("cuda")

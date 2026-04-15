@@ -190,8 +190,7 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
 
         """
         raise NotImplementedError(
-            f"fuser_forward_compute is not implemented for operation "
-            f"({self.__class__.__name__})"
+            f"fuser_forward_compute is not implemented for operation ({self.__class__.__name__})"
         )
 
     def fuser_forward_save_ctx(
@@ -232,8 +231,7 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
 
         """
         raise NotImplementedError(
-            f"fuser_forward_save_ctx is not implemented for operation "
-            f"({self.__class__.__name__})"
+            f"fuser_forward_save_ctx is not implemented for operation ({self.__class__.__name__})"
         )
 
     def fuser_backward(
@@ -652,8 +650,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
 
         """
         raise NotImplementedError(
-            f"op_forward_save_ctx is not implemented for operation "
-            f"({self.__class__.__name__})"
+            f"op_forward_save_ctx is not implemented for operation ({self.__class__.__name__})"
         )
 
     @abc.abstractmethod

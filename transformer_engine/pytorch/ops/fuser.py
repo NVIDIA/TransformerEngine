@@ -138,11 +138,14 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                     basic_op_kwargs=[basic_op_kwargs[idx] for idx in basic_op_idxs],
                 )
                 x_input = x
-                x, fused_op_extra_outputs, tensors_to_save = (
-                    op.fuser_forward_compute(x_input, **fwd_kwargs)
+                x, fused_op_extra_outputs, tensors_to_save = op.fuser_forward_compute(
+                    x_input, **fwd_kwargs
                 )
                 op.fuser_forward_save_ctx(
-                    op_ctxs, x_input, tensors_to_save, **fwd_kwargs,
+                    op_ctxs,
+                    x_input,
+                    tensors_to_save,
+                    **fwd_kwargs,
                 )
             else:
                 x, fused_op_extra_outputs = op.fuser_forward(
