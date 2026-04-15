@@ -1329,10 +1329,10 @@ void group_row_col_rht_gemm_ntt_w_sfc_graph_safe(
   // on kMaxStages is negligible (<0.01% of the 232KB budget).
   static int constexpr kSmemOffsetCacheBytes =
       sizeof(int64_t) * (kMaxTensorsPerKernel + 1) + sizeof(int64_t) * kMaxTensorsPerKernel;
-  static int constexpr kReservedBytes = SchedulerWorkspaceBytes + SchedulerThrottlePipelineBytes +
-                                        SchedulerPipelineBytes + TmemBasePtrsBytes +
-                                        TmemDeallocBytes + BTensorBytes +
-                                        AccPipelineBytes + kSmemOffsetCacheBytes;  // Reserve for barriers and other uses
+  static int constexpr kReservedBytes =
+      SchedulerWorkspaceBytes + SchedulerThrottlePipelineBytes + SchedulerPipelineBytes +
+      TmemBasePtrsBytes + TmemDeallocBytes + BTensorBytes + AccPipelineBytes +
+      kSmemOffsetCacheBytes;  // Reserve for barriers and other uses
   static int constexpr kMaxStages = (kBlackwellSmemSize - kReservedBytes) / kBytesPerStage;
   auto sP = Int<kMaxStages>{};  // SMEM pipelines
 
