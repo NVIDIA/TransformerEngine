@@ -160,8 +160,7 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
       NVTE_CHECK(ret.lda % 16 == 0,
                  "FP8 GEMM requires leading dimension of A to be divisible by 16,"
                  " got lda=", ret.lda, " (m=", m, ", n=", n, ", k=", k, ")."
-                 " Ensure all tensor dimensions meet FP8 alignment requirements"
-                 " (see https://docs.nvidia.com/cuda/cublas/#tensor-core-usage).");
+                 " See https://docs.nvidia.com/cuda/cublas/#tensor-core-usage.");
     }
   } else if (nvfp4) {
     // NVFP4 GEMM. Either the pure NVFP4 recipe or the FWD pass of the Hybrid NVFP4/MXFP8 recipe.
@@ -267,8 +266,7 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
       NVTE_CHECK(ret.ldb % 16 == 0,
                  "FP8 GEMM requires leading dimension of B to be divisible by 16,"
                  " got ldb=", ret.ldb, " (m=", m, ", n=", n, ", k=", k, ")."
-                 " Ensure all tensor dimensions meet FP8 alignment requirements"
-                 " (see https://docs.nvidia.com/cuda/cublas/#tensor-core-usage).");
+                 " See https://docs.nvidia.com/cuda/cublas/#tensor-core-usage.");
     }
   } else if (nvfp4) {
     if (is_B_transposed) {
