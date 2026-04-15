@@ -1223,7 +1223,7 @@ class GroupedLinear(BasicOperation):
                     grad_weight = grad_weights[0] if grad_weights else None
             final_weight_grads = [grad_weight]
         else:
-            if delay_wgrad and ctx.weight_requires_grad:
+            if delay_wgrad and ctx.weight_requires_grad and not accumulate_into_main_grad:
                 final_weight_grads = [None] * num_groups
             else:
                 final_weight_grads = grad_weights

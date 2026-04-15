@@ -77,6 +77,13 @@ if nvfp4_available:
     _quantization_list.append("nvfp4")
 
 
+@pytest.fixture(autouse=True, scope="class")
+def _reset_rng_states_per_test():
+    """Restore torch, CUDA, and Python ``random`` before each test in this module."""
+    reset_rng_states()
+    yield
+
+
 def maybe_skip_quantization(
     quantization: Optional[str],
     *,
@@ -364,10 +371,6 @@ class TestSequentialContainer:
 class TestFuser:
     """Tests for operation fusion infrastructure"""
 
-    @staticmethod
-    def setup_class(cls) -> None:
-        reset_rng_states()
-
     @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
     def test_fp8_scale_update(
         self,
@@ -579,10 +582,6 @@ class TestFuser:
 
 class TestBasicOps:
     """Tests for individual operations"""
-
-    @staticmethod
-    def setup_class(cls) -> None:
-        reset_rng_states()
 
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("device", ("cuda", "cpu"))
@@ -2327,10 +2326,6 @@ class TestBasicOps:
 class TestFusedOps:
     """Tests for fused operations"""
 
-    @staticmethod
-    def setup_class(cls) -> None:
-        reset_rng_states()
-
     @pytest.mark.parametrize("weight_shape", ((32, 64), (3, 5)))
     @pytest.mark.parametrize("in_shape", ((-1,), (1, 7, -1), (8, 2, 10, -1)))
     @pytest.mark.parametrize("dtype", _dtypes)
@@ -3035,10 +3030,6 @@ class TestFusedOps:
 class TestCheckpointing:
     """Tests for checkpointing"""
 
-    @staticmethod
-    def setup_class(cls) -> None:
-        reset_rng_states()
-
     @pytest.mark.parametrize("quantization", _quantization_list)
     @pytest.mark.parametrize("quantized_weight", (False, True))
     def test_linear(
@@ -3150,10 +3141,6 @@ class TestCheckpointing:
 
 class TestSequentialModules:
     """Test for larger Sequentials with modules commonly used together"""
-
-    @staticmethod
-    def setup_class(cls) -> None:
-        reset_rng_states()
 
     @pytest.mark.parametrize("requires_grad", (False, True))
     @pytest.mark.parametrize("bias", (False, True))
@@ -3338,13 +3325,14 @@ class TestSequentialModules:
     @pytest.mark.parametrize("accumulate_into_main_grad", (False, True))
     @pytest.mark.parametrize("glu_interleave_size", (None, 32))
     @pytest.mark.parametrize("delay_wgrad_compute", (False, True))
+    @pytest.mark.parametrize("hidden_size", (128, 256))
     @pytest.mark.parametrize("activation", ("scaled_swiglu", "scaled_clamped_qgeglu"))
     def test_grouped_mlp(
         self,
         *,
         group_size: int = 4,
         bias: bool,
-        hidden_size: int = 256,
+        hidden_size: int,
         dtype: torch.dtype,
         quantization: Optional[str],
         single_grouped_weight: bool,
@@ -3698,6 +3686,7 @@ class TestSequentialModules:
         hidden_size: int = 256,
         split_alignment: int = 256,
         glu_interleave_size: int = 32,
+        token_padding: int = 2048,
     ) -> None:
         """Grouped MLP forward+backward should be CUDA graph capturable (MXFP8)."""
 
@@ -3715,8 +3704,8 @@ class TestSequentialModules:
         split_sizes = [split_alignment * (i + 1) for i in range(group_size)]
         random.shuffle(split_sizes)
         split_sizes = torch.tensor(split_sizes, dtype=torch.int64, device=device)
-        in_shape = (split_sizes.sum().item(), hidden_size)
-
+        # Pad the input tokens to validate the sync-free MOE
+        in_shape = (split_sizes.sum().item() + token_padding, hidden_size)
         recipe = make_recipe("mxfp8")
         with te.quantized_model_init(enabled=True, recipe=recipe):
             fc1 = te_ops.GroupedLinear(
