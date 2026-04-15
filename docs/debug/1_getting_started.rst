@@ -149,10 +149,11 @@ Inspecting the logs
 -------------------
 
 
-Let's look at the files with the logs. Two files will be created:
+Let's look at the files with the logs. At least two files will be created:
 
 1. debug logs.
 2. statistics logs.
+3. optional feature-specific logs (for example AutoswitchGemm metrics).
 
 Let's look inside them!
 
@@ -213,6 +214,51 @@ The second log file (``nvdlfw_inspect_statistics_logs/nvdlfw_inspect_globalrank-
     INFO - transformer_layer.self_attention.layernorm_qkv_activation_mean                iteration=000004                  value=0.0000
     INFO - transformer_layer.self_attention.layernorm_qkv_activation_std                 iteration=000004                  value=0.9996
     INFO - transformer_layer.self_attention.layernorm_qkv_activation_l1_norm             iteration=000004                  value=130776.7969
+
+AutoswitchGemm quick guide
+--------------------------
+
+``AutoswitchGemm`` monitors quantization quality and can dynamically switch selected GEMMs
+to high precision when thresholds are exceeded.
+
+Minimal config example:
+
+.. code-block:: yaml
+
+    autoswitch_fc_layers:
+      enabled: True
+      layers:
+        layer_types: [fc1, fc2]
+      transformer_engine:
+        AutoswitchGemm:
+          enabled: True
+          gemms: [fprop, dgrad, wgrad]
+          underflow_threshold_pct: 1.0
+          mse_threshold: 1.0e-4
+          # Needed only if the layer uses fp8 model parameters and
+          # you want fprop/dgrad to be able to switch to high precision.
+          allow_fp8_model_params_dequantized_weight: False
+          freq: 1
+
+Behavior summary:
+
+1. For each ``(layer, gemm)``, AutoswitchGemm tracks the latest tensor metrics and applies
+   OR logic across monitored tensors: if any tensor breaches thresholds, that GEMM switches.
+2. Metrics computed in iteration ``n`` are consumed in iteration ``n`` only.
+3. If thresholds are not breached in the current iteration, the GEMM stays quantized.
+
+When AutoswitchGemm is enabled, an additional directory is created under ``log_dir``:
+
+``nvdlfw_inspect_autoswitchgemm_logs/nvdlfw_inspect_globalrank-<rank>.log``
+
+It contains per-rank, per-iteration metrics such as:
+
+- ``<layer>_<gemm>_<tensor>_underflow_pct``
+- ``<layer>_<gemm>_<tensor>_mse``
+- ``<layer>_<gemm>_quantized_enabled``
+- ``<layer>_<gemm>_disable_until_iter``
+- ``<layer>_<gemm>_switch_blocked_fp8_model_params``
+- ``<layer>_<gemm>_fp8_model_params_dequantized_fallback``
 
 Logging using TensorBoard
 -------------------------

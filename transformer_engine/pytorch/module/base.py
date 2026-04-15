@@ -1444,7 +1444,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             )
 
             if isinstance(quantizer, DebugQuantizer):
-                tensor = quantizer.wrap_quantized_tensor(tensor)
+                tensor = quantizer.wrap_quantized_tensor(tensor, dtype=workspace_dtype)
 
             return tensor
 

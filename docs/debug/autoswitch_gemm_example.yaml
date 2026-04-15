@@ -1,0 +1,72 @@
+# Example config for transformer_engine.debug.features.autoswitch_gemm.AutoswitchGemm
+#
+# Usage:
+#   import nvdlfw_inspect.api as debug_api
+#   debug_api.initialize(
+#       config_file="docs/debug/autoswitch_gemm_example.yaml",
+#       feature_dirs=["transformer_engine/debug/features"],
+#       log_dir="./log",
+#   )
+#   ...
+#   debug_api.step()  # call once per training step
+
+autoswitch_attention_blocks:
+  enabled: True
+  layers:
+    # Match attention linear layers, e.g. *.qkv / *.proj
+    layer_name_regex_pattern: ".*(qkv|proj).*"
+  transformer_engine:
+    AutoswitchGemm:
+      enabled: True
+
+      # Optional. If omitted, tensors are inferred from selected gemms:
+      # fprop -> [activation, weight], dgrad -> [gradient, weight],
+      # wgrad -> [activation, gradient].
+      tensors: [activation, weight, gradient]
+
+      # Per-GEMM switching policy.
+      gemms_struct:
+        - gemm: fprop
+          underflow_threshold_pct: 1.0
+          mse_threshold: 1.0e-4
+        - gemm: dgrad
+          underflow_threshold_pct: 1.5
+          mse_threshold: 1.5e-4
+        - gemm: wgrad
+          underflow_threshold_pct: 2.0
+          mse_threshold: 2.0e-4
+
+      # For layers with fp8 model parameters:
+      # - False: keep fprop/dgrad quantized
+      # - True: allow high-precision switch via temporary dequantized weights
+      allow_fp8_model_params_dequantized_weight: False
+
+      # Collect metrics every step after warmup.
+      freq: 1
+      start_step: 10
+      end_step: 5000
+
+
+autoswitch_mlp_blocks:
+  enabled: True
+  layers:
+    layer_types: [fc1, fc2]
+  transformer_engine:
+    AutoswitchGemm:
+      enabled: True
+
+      # Simpler global policy (shared by selected GEMMs).
+      gemms: [fprop, wgrad]
+      tensors: [activation, weight, gradient]
+
+      underflow_threshold_pct: 3.0
+      mse_threshold: 3.0e-4
+
+      # Example sparse monitoring windows.
+      freq: 2
+      start_end_list:
+        - [0, 300]
+        - [800, 3000]
+
+# Autoswitch per-rank metrics are written to:
+#   <log_dir>/nvdlfw_inspect_autoswitchgemm_logs/nvdlfw_inspect_globalrank-<rank>.log
