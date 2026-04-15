@@ -1723,6 +1723,8 @@ void unswizzle_grouped_scaling_factors(const GroupedTensor* input, GroupedTensor
              "Expected output grouped tensor with scales in compact format.");
   NVTE_CHECK(input->scaling_mode == output->scaling_mode,
              "Input and output grouped tensors must have matching scaling modes.");
+  NVTE_CHECK(input->num_tensors == output->num_tensors,
+             "Input and output grouped tensors must have the same number of tensors.");
 
   const bool has_rowwise_scale_inv = output->scale_inv.has_data();
   const bool has_columnwise_scale_inv = output->columnwise_scale_inv.has_data();
@@ -1730,7 +1732,8 @@ void unswizzle_grouped_scaling_factors(const GroupedTensor* input, GroupedTensor
     return;
   }
 
-  NVTE_CHECK(output->all_same_shape(), "Grouped unswizzle requires uniform tensor shapes.");
+  NVTE_CHECK(input->all_same_shape() && output->all_same_shape(),
+             "Grouped unswizzle requires uniform tensor shapes.");
 
   const size_t first_dim = output->get_common_first_dim();
   const size_t last_dim = output->get_common_last_dim();
