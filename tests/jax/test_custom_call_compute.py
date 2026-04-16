@@ -2003,15 +2003,17 @@ class TestAirTopK:
 
         prng_key = jax.random.PRNGKey(0)
         keys = jax.random.split(prng_key, 3)
-        topk_vals   = jax.random.uniform(keys[0], shape=(k,),     dtype=dtype, minval=1.5, maxval=2.5)
-        bottom_vals = jax.random.uniform(keys[1], shape=(n - k,), dtype=dtype, minval=0.0, maxval=1.0)
+        topk_vals = jax.random.uniform(keys[0], shape=(k,), dtype=dtype, minval=1.5, maxval=2.5)
+        bottom_vals = jax.random.uniform(
+            keys[1], shape=(n - k,), dtype=dtype, minval=0.0, maxval=1.0
+        )
         x = jax.random.permutation(keys[2], jnp.concatenate([topk_vals, bottom_vals]))
 
         ref_vals, ref_idx = jax.jit(jax.lax.top_k, static_argnums=(1,))(x, k)
         prim_vals, prim_idx = jax.jit(air_topk, static_argnums=(1,))(x, k)
 
         # AIR TopK output is unordered; sort before comparing.
-        ref_vals,  ref_idx  = jax.lax.sort_key_val(ref_vals,  ref_idx)
+        ref_vals, ref_idx = jax.lax.sort_key_val(ref_vals, ref_idx)
         prim_vals, prim_idx = jax.lax.sort_key_val(prim_vals, prim_idx)
 
         assert_allclose(prim_vals, ref_vals, dtype=dtype)
@@ -2028,18 +2030,20 @@ class TestAirTopK:
 
         prng_key = jax.random.PRNGKey(42)
         keys = jax.random.split(prng_key, 3)
-        topk_vals   = jax.random.uniform(keys[0], shape=(bs, k),     dtype=dtype, minval=1.5, maxval=2.5)
-        bottom_vals = jax.random.uniform(keys[1], shape=(bs, n - k), dtype=dtype, minval=0.0, maxval=1.0)
-        x_unsorted  = jnp.concatenate([topk_vals, bottom_vals], axis=1)
+        topk_vals = jax.random.uniform(keys[0], shape=(bs, k), dtype=dtype, minval=1.5, maxval=2.5)
+        bottom_vals = jax.random.uniform(
+            keys[1], shape=(bs, n - k), dtype=dtype, minval=0.0, maxval=1.0
+        )
+        x_unsorted = jnp.concatenate([topk_vals, bottom_vals], axis=1)
         # Shuffle columns independently per row.
         col_perm = jax.random.permutation(keys[2], n)
         x = x_unsorted[:, col_perm]
 
-        ref_vals, ref_idx   = jax.jit(jax.lax.top_k, static_argnums=(1,))(x, k)
+        ref_vals, ref_idx = jax.jit(jax.lax.top_k, static_argnums=(1,))(x, k)
         prim_vals, prim_idx = jax.jit(air_topk, static_argnums=(1,))(x, k)
 
         # Sort each row independently for comparison.
-        ref_vals,  ref_idx  = jax.vmap(jax.lax.sort_key_val)(ref_vals,  ref_idx)
+        ref_vals, ref_idx = jax.vmap(jax.lax.sort_key_val)(ref_vals, ref_idx)
         prim_vals, prim_idx = jax.vmap(jax.lax.sort_key_val)(prim_vals, prim_idx)
 
         assert_allclose(prim_vals, ref_vals, dtype=dtype)
@@ -2050,5 +2054,5 @@ class TestAirTopK:
 
         # Values at returned indices must match reference values.
         prim_gathered = jnp.take_along_axis(x, prim_idx, axis=1)
-        ref_gathered  = jnp.take_along_axis(x, ref_idx,  axis=1)
+        ref_gathered = jnp.take_along_axis(x, ref_idx, axis=1)
         assert_allclose(prim_gathered, ref_gathered, dtype=dtype)

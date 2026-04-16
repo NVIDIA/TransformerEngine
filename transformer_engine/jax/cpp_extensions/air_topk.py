@@ -50,9 +50,10 @@ class AirTopKPrimitive(BasePrimitive):
         k_value,
     ):
         keys_dtype = dtypes.canonicalize_dtype(in_keys_aval.dtype)
-        assert keys_dtype in [jnp.float32, jnp.bfloat16], (
-            f"air_topk: unsupported key dtype {keys_dtype}; supported: float32, bfloat16"
-        )
+        assert keys_dtype in [
+            jnp.float32,
+            jnp.bfloat16,
+        ], f"air_topk: unsupported key dtype {keys_dtype}; supported: float32, bfloat16"
         assert in_keys_aval.ndim == 2, "air_topk: keys input must be 2D (batch_size, seq_len)"
         assert dtypes.canonicalize_dtype(in_lengths_aval.dtype) == jnp.int32
 
@@ -60,9 +61,9 @@ class AirTopKPrimitive(BasePrimitive):
         workspace_bytes = get_air_topk_workspace_bytes(batch_size, seq_len, k_value)
 
         out_shape = (batch_size, k_value)
-        out_keys_aval      = jax.core.ShapedArray(shape=out_shape, dtype=keys_dtype)
-        out_indices_aval   = jax.core.ShapedArray(shape=out_shape, dtype=jnp.int32)
-        workspace_aval     = jax.core.ShapedArray(shape=(workspace_bytes,), dtype=jnp.uint8)
+        out_keys_aval = jax.core.ShapedArray(shape=out_shape, dtype=keys_dtype)
+        out_indices_aval = jax.core.ShapedArray(shape=out_shape, dtype=jnp.int32)
+        workspace_aval = jax.core.ShapedArray(shape=(workspace_bytes,), dtype=jnp.uint8)
         return (out_keys_aval, out_indices_aval, workspace_aval)
 
     @staticmethod
@@ -130,7 +131,7 @@ def air_topk(
     )
 
     if squeezed:
-        out_keys    = out_keys[0]     # (k_value,)
+        out_keys = out_keys[0]  # (k_value,)
         out_indices = out_indices[0]  # (k_value,)
 
     return out_keys, out_indices
