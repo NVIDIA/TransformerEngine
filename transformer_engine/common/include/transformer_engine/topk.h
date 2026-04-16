@@ -38,8 +38,8 @@ extern "C" {
  *  Index dtype: int32.
  */
 void nvte_topk(cudaStream_t stream, const NVTETensor keys_in, const NVTETensor lengths_in,
-               NVTETensor keys_out, NVTETensor indices_out, NVTETensor workspace,
-               int batch_size, int seq_len, int k, size_t workspace_bytes);
+               NVTETensor keys_out, NVTETensor indices_out, NVTETensor workspace, int batch_size,
+               int seq_len, int k, size_t workspace_bytes);
 
 /*! \brief Query the workspace size required by nvte_topk.
  *

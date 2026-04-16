@@ -17,8 +17,8 @@ namespace jax {
 // ---------------------------------------------------------------------------
 
 Error_Type TopkFFI(cudaStream_t stream, Buffer_Type keys_in_buf, Buffer_Type lengths_buf,
-                   Result_Type keys_out_buf, Result_Type indices_out_buf,
-                   Result_Type workspace_buf, int64_t k_value, int64_t workbuf_bytes) {
+                   Result_Type keys_out_buf, Result_Type indices_out_buf, Result_Type workspace_buf,
+                   int64_t k_value, int64_t workbuf_bytes) {
   auto keys_in_dtype = convert_ffi_datatype_to_te_dtype(keys_in_buf.element_type());
   auto keys_out_dtype = convert_ffi_datatype_to_te_dtype(keys_out_buf->element_type());
   auto idx_out_dtype = convert_ffi_datatype_to_te_dtype(indices_out_buf->element_type());

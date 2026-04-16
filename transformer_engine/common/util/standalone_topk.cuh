@@ -1173,7 +1173,7 @@ void standalone_radix_topk_(void *buf, size_t &buf_size, const T *in, const IdxT
 
   for (int pass = 0; pass < num_passes; ++pass) {
     topk::set_buf_pointers(in, in_idx, buf1, idx_buf1, buf2, idx_buf2, pass, in_buf, in_idx_buf,
-                               out_buf, out_idx_buf);
+                           out_buf, out_idx_buf);
 
     if (fused_last_filter && pass == num_passes - 1 && out != nullptr) {
       kernel = topk::radix_kernel<T, IdxT, BitsPerPass, BlockSize, true, true>;
@@ -1240,8 +1240,8 @@ void standalone_radix_topk_one_block_(void *buf, size_t &buf_size, const T *in, 
 
 template <typename T, typename idxT>
 void standalone_topk(void *buf, size_t &buf_size, const T *in, int batch_size, idxT len, idxT k,
-                         T *out, idxT *out_idx, bool greater, cudaStream_t stream = 0,
-                         idxT *lengths = nullptr, bool is_prefill = false) {
+                     T *out, idxT *out_idx, bool greater, cudaStream_t stream = 0,
+                     idxT *lengths = nullptr, bool is_prefill = false) {
   constexpr int items_per_thread = 32;
   constexpr int multi_block_dim = 256;
   constexpr int single_block_dim = 1024;
@@ -1265,8 +1265,7 @@ void standalone_topk(void *buf, size_t &buf_size, const T *in, int batch_size, i
       }
       sm_cnt = cached_sm_cnt;
     }
-    unsigned grid_dim =
-        topk::calc_grid_dim<T, idxT, 11, multi_block_dim>(batch_size, len, sm_cnt);
+    unsigned grid_dim = topk::calc_grid_dim<T, idxT, 11, multi_block_dim>(batch_size, len, sm_cnt);
 
     if (grid_dim == 1) {
       standalone_radix_topk_one_block_<T, idxT, 11, single_block_dim>(

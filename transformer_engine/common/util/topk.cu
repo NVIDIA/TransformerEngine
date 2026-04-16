@@ -10,8 +10,8 @@
 #include "standalone_topk.cuh"
 
 void nvte_topk(cudaStream_t stream, const NVTETensor keys_in, const NVTETensor lengths_in,
-               NVTETensor keys_out, NVTETensor indices_out, NVTETensor workspace,
-               int batch_size, int seq_len, int k, size_t workspace_bytes) {
+               NVTETensor keys_out, NVTETensor indices_out, NVTETensor workspace, int batch_size,
+               int seq_len, int k, size_t workspace_bytes) {
   NVTE_API_CALL(nvte_topk);
   using namespace transformer_engine;
 
@@ -27,13 +27,13 @@ void nvte_topk(cudaStream_t stream, const NVTETensor keys_in, const NVTETensor l
 
   auto dtype = keys_in_tensor->data.dtype;
 
-#define DISPATCH_TOPK(T, d_in_cast, d_out_cast)                                                   \
+#define DISPATCH_TOPK(T, d_in_cast, d_out_cast)                                                    \
   do {                                                                                             \
-    const T *d_in = reinterpret_cast<const T *>(keys_in_tensor->data.dptr);                       \
-    T *d_out = reinterpret_cast<T *>(keys_out_tensor->data.dptr);                                 \
-    nv::standalone_topk<T, int>(d_workspace, workspace_bytes, d_in, batch_size, seq_len, k,       \
-                                d_out, d_indices, /*greater=*/true, stream,                        \
-                                const_cast<int *>(d_lengths), /*is_prefill=*/false);               \
+    const T *d_in = reinterpret_cast<const T *>(keys_in_tensor->data.dptr);                        \
+    T *d_out = reinterpret_cast<T *>(keys_out_tensor->data.dptr);                                  \
+    nv::standalone_topk<T, int>(d_workspace, workspace_bytes, d_in, batch_size, seq_len, k, d_out, \
+                                d_indices, /*greater=*/true, stream, const_cast<int *>(d_lengths), \
+                                /*is_prefill=*/false);                                             \
   } while (0)
 
   if (dtype == DType::kBFloat16) {

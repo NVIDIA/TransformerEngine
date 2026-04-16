@@ -68,9 +68,7 @@ class TopKPrimitive(BasePrimitive):
 
     @staticmethod
     def outer_abstract(*args, **kwargs):
-        out_keys_aval, out_indices_aval, _workspace_aval = TopKPrimitive.abstract(
-            *args, **kwargs
-        )
+        out_keys_aval, out_indices_aval, _workspace_aval = TopKPrimitive.abstract(*args, **kwargs)
         return (out_keys_aval, out_indices_aval)
 
     @staticmethod
