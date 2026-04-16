@@ -1330,13 +1330,10 @@ class DotProductAttention(TransformerEngineBaseModule):
             # check if there is padding between sequences when qkv_format='thd'
             if pad_between_seqs is None:
                 if qkv_format == "thd":
-                    pad_between_seqs = (
-                        cu_seqlens_q_padded is not None
-                        and not torch.equal(cu_seqlens_q_padded[:-1], cu_seqlens_q[:-1])
-                    ) or (
-                        cu_seqlens_kv_padded is not None
-                        and not torch.equal(cu_seqlens_kv_padded[:-1], cu_seqlens_kv[:-1])
-                    )
+                    # THD + CUDA Graph fix: torch.equal() triggers GPU->CPU sync,
+                    # which is forbidden during CUDA graph capture.
+                    # pad_between_seqs=True is always safe for THD with padded cu_seqlens.
+                    pad_between_seqs = True
                 else:
                     pad_between_seqs = False
 
