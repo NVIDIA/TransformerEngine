@@ -3335,7 +3335,10 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                         full_kv_seqlen = ctx.max_seqlen_kv * (2 * cp_size)
                         if causal:
                             max_seqlen_kv = ctx.max_seqlen_kv * (chunk_id + 1)
-                            if window_size_per_step[i] is not None and window_size_per_step[i][1] > 0:
+                            if (
+                                window_size_per_step[i] is not None
+                                and window_size_per_step[i][1] > 0
+                            ):
                                 max_seqlen_kv = min(
                                     max_seqlen_kv + window_size_per_step[i][1], full_kv_seqlen
                                 )
