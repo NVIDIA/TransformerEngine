@@ -3673,12 +3673,14 @@ class TestSequentialModules:
         "dtype",
         tuple(dtype for dtype in _dtypes if dtype in (torch.float16, torch.bfloat16)),
     )
+    @pytest.mark.parametrize("bias", (False, True))
     @pytest.mark.parametrize("activation", ("scaled_swiglu", "scaled_clamped_qgeglu"))
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
     def test_grouped_mlp_single_weight_numerics(
         self,
         *,
         dtype: torch.dtype,
+        bias: bool,
         activation: str,
         device: torch.device = "cuda",
         group_size: int = 4,
@@ -3720,6 +3722,22 @@ class TestSequentialModules:
             )
             for _ in range(group_size)
         ]
+        fc1_bs_base = (
+            [
+                torch.empty((2 * hidden_size,), device=device, dtype=dtype).uniform_(-0.5, 0.5)
+                for _ in range(group_size)
+            ]
+            if bias
+            else None
+        )
+        fc2_bs_base = (
+            [
+                torch.empty((hidden_size,), device=device, dtype=dtype).uniform_(-0.5, 0.5)
+                for _ in range(group_size)
+            ]
+            if bias
+            else None
+        )
 
         def _run_case(single_grouped_weight: bool) -> tuple[torch.Tensor, ...]:
             with te.quantized_model_init(enabled=True, recipe=recipe):
@@ -3732,7 +3750,7 @@ class TestSequentialModules:
                     group_size,
                     hidden_size,
                     2 * hidden_size,
-                    bias=False,
+                    bias=bias,
                     device=device,
                     dtype=dtype,
                     single_grouped_weight=single_grouped_weight,
@@ -3741,10 +3759,11 @@ class TestSequentialModules:
                     group_size,
                     hidden_size,
                     hidden_size,
-                    bias=False,
+                    bias=bias,
                     device=device,
                     dtype=dtype,
                     single_grouped_weight=single_grouped_weight,
+                    scale_bias=bias,
                 )
                 module = te_ops.Sequential(fc1, scaled_act, fc2)
 
@@ -3763,13 +3782,17 @@ class TestSequentialModules:
                     else:
                         getattr(fc1, f"weight{group_idx}").copy_(fc1_ws_base[group_idx])
                         getattr(fc2, f"weight{group_idx}").copy_(fc2_ws_base[group_idx])
+                    if bias:
+                        getattr(fc1, f"bias{group_idx}").copy_(fc1_bs_base[group_idx])
+                        getattr(fc2, f"bias{group_idx}").copy_(fc2_bs_base[group_idx])
 
             x = x_base.detach().clone().requires_grad_(True)
             probs = probs_base.detach().clone().requires_grad_(True)
             dy = dy_base.detach().clone()
 
             with te.autocast(enabled=True, recipe=recipe):
-                y = module(x, split_sizes, probs, split_sizes)
+                fc2_extra = (split_sizes, probs) if bias else (split_sizes,)
+                y = module(x, split_sizes, probs, *fc2_extra)
             y.backward(dy)
 
             forward_ops = module._module_groups[0]._forward_ops
@@ -3804,22 +3827,62 @@ class TestSequentialModules:
                     dim=0,
                 )
 
+            fc1_db = None
+            fc2_db = None
+            if bias:
+                fc1_db = torch.stack(
+                    [
+                        getattr(fc1, f"bias{group_idx}").grad.detach().clone()
+                        for group_idx in range(group_size)
+                    ],
+                    dim=0,
+                )
+                fc2_db = torch.stack(
+                    [
+                        getattr(fc2, f"bias{group_idx}").grad.detach().clone()
+                        for group_idx in range(group_size)
+                    ],
+                    dim=0,
+                )
+
             return (
                 y.detach().clone(),
                 x.grad.detach().clone(),
                 probs.grad.detach().clone(),
                 fc1_dw,
                 fc2_dw,
+                fc1_db,
+                fc2_db,
             )
 
-        y_false, dx_false, dprobs_false, fc1_dw_false, fc2_dw_false = _run_case(False)
-        y_true, dx_true, dprobs_true, fc1_dw_true, fc2_dw_true = _run_case(True)
+        (
+            y_false,
+            dx_false,
+            dprobs_false,
+            fc1_dw_false,
+            fc2_dw_false,
+            fc1_db_false,
+            fc2_db_false,
+        ) = _run_case(False)
+        (
+            y_true,
+            dx_true,
+            dprobs_true,
+            fc1_dw_true,
+            fc2_dw_true,
+            fc1_db_true,
+            fc2_db_true,
+        ) = _run_case(True)
 
         torch.testing.assert_close(y_false, y_true, rtol=0, atol=0)
         torch.testing.assert_close(dx_false, dx_true, rtol=0, atol=0)
         torch.testing.assert_close(dprobs_false, dprobs_true, rtol=0, atol=0)
         torch.testing.assert_close(fc1_dw_false, fc1_dw_true, rtol=0, atol=0)
         torch.testing.assert_close(fc2_dw_false, fc2_dw_true, rtol=0, atol=0)
+        if bias:
+            bias_tols = {"rtol": 0.05, "atol": 0.015625}
+            torch.testing.assert_close(fc1_db_false, fc1_db_true, **bias_tols)
+            torch.testing.assert_close(fc2_db_false, fc2_db_true, **bias_tols)
 
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("single_grouped_weight", (False, True))
