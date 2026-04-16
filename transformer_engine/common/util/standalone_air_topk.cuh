@@ -1259,7 +1259,8 @@ void standalone_air_topk(void *buf, size_t &buf_size, const T *in, int batch_siz
       int dev;
       NVTE_CHECK_CUDA(cudaGetDevice(&dev));
       if (dev != cached_dev) {
-        NVTE_CHECK_CUDA(cudaDeviceGetAttribute(&cached_sm_cnt, cudaDevAttrMultiProcessorCount, dev));
+        NVTE_CHECK_CUDA(
+            cudaDeviceGetAttribute(&cached_sm_cnt, cudaDevAttrMultiProcessorCount, dev));
         cached_dev = dev;
       }
       sm_cnt = cached_sm_cnt;
