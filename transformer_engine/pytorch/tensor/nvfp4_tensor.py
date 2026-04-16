@@ -308,10 +308,9 @@ class NVFP4Quantizer(Quantizer):
         if device is None:
             device = torch.device("cuda")
 
-        assert shape[-1] % 32 == 0, (
-            f"Incorrect shape {shape} for NVFP4."
-            f" Last dimension must be divisible by 32."
-        )
+        assert (
+            shape[-1] % 32 == 0
+        ), f"Incorrect shape {shape} for NVFP4. Last dimension must be divisible by 32."
 
         # Allocate FP4 data
         data = None

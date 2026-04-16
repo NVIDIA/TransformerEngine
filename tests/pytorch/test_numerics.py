@@ -1314,10 +1314,7 @@ def test_linear_tight_dims(recipe, inference, dtype):
     if recipe.nvfp4():
         if dtype not in get_nvfp4_inp_supported_dtypes(recipe, dtype):
             pytest.skip(f"{dtype} not supported for this NVFP4 recipe")
-        if (
-            not inference
-            and recipe.fp4_quant_bwd_grad.random_hadamard_transform
-        ):
+        if not inference and recipe.fp4_quant_bwd_grad.random_hadamard_transform:
             # The reference baseline cannot express the Hadamard transform that
             # TE's wgrad GEMM applies to grad_output and input; their product is
             # grad^T · H^T · H · x which is only ≈ grad^T · x after quantization

@@ -471,7 +471,6 @@ def cast_if_needed(tensor: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
         return tensor.to(dtype=dtype)
 
 
-
 def is_bf16_compatible() -> bool:
     """Replaces torch.cuda.is_bf16_compatible() with an explicit
     check on device compute capability to enforce sm_80 or higher.

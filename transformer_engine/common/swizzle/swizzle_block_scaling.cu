@@ -143,7 +143,8 @@ void launch_kernel(const void* const in, void* const out, uint32_t data_rows, ui
              "Output scaling factor pointer must be aligned to ", alignof(uint4), " bytes");
   NVTE_CHECK(data_rows % 4 == 0,
              "Block scaling swizzle requires data_rows to be divisible by 4,"
-             " got data_rows=", data_rows);
+             " got data_rows=",
+             data_rows);
 
   const uint32_t tiles_x = DIVUP(data_cols, 128u);
   const uint32_t tiles_y = DIVUP(data_rows, 128u);

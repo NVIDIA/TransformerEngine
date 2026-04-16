@@ -115,10 +115,9 @@ class MXFP8Quantizer(Quantizer):
         if device is None:
             device = torch.device("cuda")
 
-        assert shape[-1] % 16 == 0, (
-            f"Incorrect shape {shape} for MXFP8."
-            f" Last dimension must be divisible by 16."
-        )
+        assert (
+            shape[-1] % 16 == 0
+        ), f"Incorrect shape {shape} for MXFP8. Last dimension must be divisible by 16."
 
         # Allocate FP8 data
         data = None
