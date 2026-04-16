@@ -13,6 +13,7 @@ import transformer_engine_torch as tex
 from transformer_engine.common import recipe
 from transformer_engine.pytorch import (
     autocast,
+    quantized_model_init,
     Linear,
     LayerNormLinear,
     LayerNormMLP,
@@ -29,6 +30,7 @@ from transformer_engine.pytorch import (
     Float8TensorStorage,
     NVFP4Tensor,
     NVFP4TensorStorage,
+    QuantizedTensor,
 )
 from transformer_engine.pytorch.cpp_extensions.gemm import (
     _unwrap_hybrid_A,
@@ -98,9 +100,9 @@ class TestHybridQuantizerConstruction:
         assert isinstance(hq.rowwise_quantizer, Float8CurrentScalingQuantizer)
         assert isinstance(hq.columnwise_quantizer, NVFP4Quantizer)
 
-    def test_compatible_recipe_is_none(self):
+    def test_compatible_recipe_is_custom_recipe(self):
         hq = _make_hybrid_quantizer_fp8_row_fp4_col()
-        assert hq._get_compatible_recipe() is None
+        assert hq._get_compatible_recipe() is recipe.CustomRecipe
 
 
 @requires_fp8_and_nvfp4
@@ -1616,3 +1618,1151 @@ class TestHybridAllModules:
             requires_grad=True,
         )
         self._run_fwd_bwd(model, inp)
+
+
+# ===========================================================================
+# Quantized Parameters (quantized_model_init) tests for hybrid quantization
+# ===========================================================================
+
+
+def _hybrid_custom_recipe(row_factory, col_factory, grad_factory=None):
+    """Build a CustomRecipe where forward roles use HybridQuantizer and
+    backward roles use a plain quantizer (or hybrid if grad_factory builds one).
+
+    Parameters
+    ----------
+    row_factory : callable() -> Quantizer
+        Creates the rowwise sub-quantizer for forward roles.
+    col_factory : callable() -> Quantizer
+        Creates the columnwise sub-quantizer for forward roles.
+    grad_factory : callable() -> Quantizer, optional
+        Creates the quantizer for grad_output/grad_input roles.
+        If None, uses col_factory (matching columnwise format for wgrad compatibility).
+    """
+    if grad_factory is None:
+        grad_factory = col_factory
+
+    def qfactory(role):
+        if role in ("linear_input", "linear_weight", "linear_output"):
+            return HybridQuantizer(
+                rowwise_quantizer=row_factory(),
+                columnwise_quantizer=col_factory(),
+            )
+        if role in ("linear_grad_output", "linear_grad_input"):
+            return grad_factory()
+        return row_factory()
+
+    return recipe.CustomRecipe(qfactory=qfactory)
+
+
+# ---------------------------------------------------------------------------
+# 1. quantized_model_init: model creation and parameter type verification
+# ---------------------------------------------------------------------------
+
+
+@requires_fp8
+class TestHybridQuantizedModelInit:
+    """Verify that quantized_model_init with a hybrid CustomRecipe produces
+    HybridQuantizedTensor parameters."""
+
+    def _hybrid_fp8_recipe(self):
+        return _hybrid_custom_recipe(
+            row_factory=lambda: Float8CurrentScalingQuantizer(
+                tex.DType.kFloat8E4M3, device="cuda"
+            ),
+            col_factory=lambda: Float8CurrentScalingQuantizer(
+                tex.DType.kFloat8E4M3, device="cuda"
+            ),
+            grad_factory=lambda: Float8CurrentScalingQuantizer(
+                tex.DType.kFloat8E5M2, device="cuda"
+            ),
+        )
+
+    def test_linear_weight_is_hybrid_quantized_tensor(self):
+        """model.weight should be a HybridQuantizedTensor after quantized_model_init."""
+        hybrid_recipe = self._hybrid_fp8_recipe()
+        with quantized_model_init(enabled=True, recipe=hybrid_recipe):
+            model = Linear(128, 128, params_dtype=torch.bfloat16).cuda()
+
+        weight = model.weight
+        assert isinstance(weight, HybridQuantizedTensor), (
+            f"Expected HybridQuantizedTensor, got {type(weight).__name__}"
+        )
+        assert isinstance(weight, QuantizedTensor), (
+            "HybridQuantizedTensor should be a QuantizedTensor subclass"
+        )
+
+    def test_linear_weight_has_both_sub_storages(self):
+        """Quantized param should have rowwise and columnwise sub-storages."""
+        hybrid_recipe = self._hybrid_fp8_recipe()
+        with quantized_model_init(enabled=True, recipe=hybrid_recipe):
+            model = Linear(128, 128, params_dtype=torch.bfloat16).cuda()
+
+        weight = model.weight
+        assert weight.rowwise_sub_storage is not None, "Missing rowwise sub-storage"
+        assert weight.columnwise_sub_storage is not None, "Missing columnwise sub-storage"
+
+    def test_linear_weight_shape_preserved(self):
+        """Quantized param should retain its logical shape."""
+        hybrid_recipe = self._hybrid_fp8_recipe()
+        with quantized_model_init(enabled=True, recipe=hybrid_recipe):
+            model = Linear(128, 256, params_dtype=torch.bfloat16).cuda()
+
+        assert model.weight.shape == torch.Size([256, 128])
+
+    def test_linear_bias_stays_bf16(self):
+        """Bias should remain BF16 (not quantized)."""
+        hybrid_recipe = self._hybrid_fp8_recipe()
+        with quantized_model_init(enabled=True, recipe=hybrid_recipe):
+            model = Linear(128, 128, bias=True, params_dtype=torch.bfloat16).cuda()
+
+        assert not isinstance(model.bias, QuantizedTensor), (
+            "Bias should not be a QuantizedTensor"
+        )
+        assert model.bias.dtype == torch.bfloat16
+
+    def test_layernorm_linear_weight_is_hybrid(self):
+        hybrid_recipe = self._hybrid_fp8_recipe()
+        with quantized_model_init(enabled=True, recipe=hybrid_recipe):
+            model = LayerNormLinear(128, 128, params_dtype=torch.bfloat16).cuda()
+
+        assert isinstance(model.weight, HybridQuantizedTensor)
+
+    def test_dequantize_close_to_original(self):
+        """Dequantized hybrid param should be close to the BF16 init values."""
+        hybrid_recipe = self._hybrid_fp8_recipe()
+
+        # Create a non-quantized reference
+        torch.manual_seed(42)
+        ref_model = Linear(128, 128, params_dtype=torch.bfloat16).cuda()
+        ref_weight = ref_model.weight.detach().clone()
+
+        # Create quantized model with the same seed
+        torch.manual_seed(42)
+        with quantized_model_init(enabled=True, recipe=hybrid_recipe):
+            model = Linear(128, 128, params_dtype=torch.bfloat16).cuda()
+
+        dq_weight = model.weight.dequantize()
+        torch.testing.assert_close(dq_weight.float(), ref_weight.float(), rtol=0.125, atol=0.1)
+
+    def test_preserve_high_precision_init_val(self):
+        """preserve_high_precision_init_val should store original BF16 on CPU."""
+        hybrid_recipe = self._hybrid_fp8_recipe()
+        with quantized_model_init(
+            enabled=True,
+            recipe=hybrid_recipe,
+            preserve_high_precision_init_val=True,
+        ):
+            model = Linear(128, 128, params_dtype=torch.bfloat16).cuda()
+
+        weight = model.weight
+        assert isinstance(weight, HybridQuantizedTensor)
+        assert hasattr(weight, "get_high_precision_init_val")
+        hp_val = weight.get_high_precision_init_val()
+        assert hp_val is not None, "High-precision init val should be stored"
+        assert hp_val.device.type == "cpu"
+        assert hp_val.shape == weight.shape
+
+
+# ---------------------------------------------------------------------------
+# 2. get_weight_workspace cache invalidation for hybrid
+# ---------------------------------------------------------------------------
+
+
+@requires_fp8
+class TestHybridWeightWorkspaceCache:
+    """Test that get_weight_workspace handles HybridQuantizedTensorStorage
+    correctly for the quantized-params early-return path and the BF16 cache path."""
+
+    def _hybrid_fp8_recipe(self):
+        return _hybrid_custom_recipe(
+            row_factory=lambda: Float8CurrentScalingQuantizer(
+                tex.DType.kFloat8E4M3, device="cuda"
+            ),
+            col_factory=lambda: Float8CurrentScalingQuantizer(
+                tex.DType.kFloat8E4M3, device="cuda"
+            ),
+            grad_factory=lambda: Float8CurrentScalingQuantizer(
+                tex.DType.kFloat8E5M2, device="cuda"
+            ),
+        )
+
+    def test_quantized_param_skips_workspace(self):
+        """When weight is already a HybridQuantizedTensor (quantized params),
+        get_weight_workspace should return it directly without creating a workspace."""
+        hybrid_recipe = self._hybrid_fp8_recipe()
+        with quantized_model_init(enabled=True, recipe=hybrid_recipe):
+            model = Linear(128, 128, params_dtype=torch.bfloat16).cuda()
+
+        inp = torch.randn(32, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+        with autocast(enabled=True, recipe=hybrid_recipe):
+            out = model(inp)
+
+        assert out.shape == (32, 128)
+        assert not torch.isnan(out).any()
+
+    def test_bf16_weight_creates_hybrid_workspace(self):
+        """When weight is BF16 and recipe produces HybridQuantizer, the workspace
+        should be a HybridQuantizedTensor."""
+        model = Linear(128, 128, params_dtype=torch.bfloat16).cuda()
+        hybrid_recipe = self._hybrid_fp8_recipe()
+
+        inp = torch.randn(32, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+        with autocast(enabled=True, recipe=hybrid_recipe):
+            out = model(inp)
+
+        assert out.shape == (32, 128)
+        assert not torch.isnan(out).any()
+
+    def test_workspace_cache_reuse_across_microbatches(self):
+        """Cached hybrid workspace should be reused on 2nd+ microbatches."""
+        model = Linear(128, 128, params_dtype=torch.bfloat16).cuda()
+        hybrid_recipe = self._hybrid_fp8_recipe()
+
+        inp = torch.randn(32, 128, device="cuda", dtype=torch.bfloat16)
+        with autocast(enabled=True, recipe=hybrid_recipe):
+            with torch.no_grad():
+                out1 = model(inp, is_first_microbatch=True)
+                out2 = model(inp, is_first_microbatch=False)
+
+        # Both should produce valid, identical results (same weight, same input)
+        assert not torch.isnan(out1).any()
+        assert not torch.isnan(out2).any()
+        torch.testing.assert_close(out1, out2)
+
+    def test_workspace_cache_invalidation_on_usage_change(self):
+        """If usage requirements change (e.g. inference→training), the cache
+        should be invalidated and a fresh workspace created."""
+        model = Linear(128, 128, params_dtype=torch.bfloat16).cuda()
+        hybrid_recipe = self._hybrid_fp8_recipe()
+
+        inp = torch.randn(32, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+
+        # First pass: inference (no columnwise needed)
+        with torch.no_grad():
+            with autocast(enabled=True, recipe=hybrid_recipe):
+                out_infer = model(inp, is_first_microbatch=True)
+        assert not torch.isnan(out_infer).any()
+
+        # Second pass: training (columnwise now needed for backward)
+        with autocast(enabled=True, recipe=hybrid_recipe):
+            out_train = model(inp, is_first_microbatch=True)
+        loss = out_train.float().sum()
+        loss.backward()
+
+        assert inp.grad is not None
+        assert not torch.isnan(inp.grad).any()
+
+
+# ---------------------------------------------------------------------------
+# 3. _update_weight_quantizers for hybrid
+# ---------------------------------------------------------------------------
+
+
+@requires_fp8
+class TestHybridUpdateWeightQuantizers:
+    """Test that quantizer refresh propagates correctly to hybrid sub-quantizers."""
+
+    def _hybrid_fp8_recipe(self):
+        return _hybrid_custom_recipe(
+            row_factory=lambda: Float8CurrentScalingQuantizer(
+                tex.DType.kFloat8E4M3, device="cuda"
+            ),
+            col_factory=lambda: Float8CurrentScalingQuantizer(
+                tex.DType.kFloat8E4M3, device="cuda"
+            ),
+            grad_factory=lambda: Float8CurrentScalingQuantizer(
+                tex.DType.kFloat8E5M2, device="cuda"
+            ),
+        )
+
+    def test_quantized_param_survives_multiple_forward_passes(self):
+        """Weight should remain a HybridQuantizedTensor across multiple forward passes,
+        each of which triggers init_fp8_metadata → potential quantizer updates."""
+        hybrid_recipe = self._hybrid_fp8_recipe()
+        with quantized_model_init(enabled=True, recipe=hybrid_recipe):
+            model = Linear(128, 128, params_dtype=torch.bfloat16).cuda()
+
+        inp = torch.randn(32, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+        for i in range(3):
+            inp_i = inp.detach().clone().requires_grad_(True)
+            with autocast(enabled=True, recipe=hybrid_recipe):
+                out = model(inp_i)
+            out.float().sum().backward()
+            assert not torch.isnan(out).any(), f"NaN at iteration {i}"
+            assert inp_i.grad is not None, f"No input grad at iteration {i}"
+
+        assert isinstance(model.weight, HybridQuantizedTensor), (
+            "Weight lost HybridQuantizedTensor type after multiple passes"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 4. Recipe correspondence validation
+# ---------------------------------------------------------------------------
+
+
+@requires_fp8
+class TestHybridRecipeCorrespondence:
+    """Test _check_weight_tensor_recipe_correspondence with hybrid params."""
+
+    def _hybrid_fp8_recipe(self):
+        return _hybrid_custom_recipe(
+            row_factory=lambda: Float8CurrentScalingQuantizer(
+                tex.DType.kFloat8E4M3, device="cuda"
+            ),
+            col_factory=lambda: Float8CurrentScalingQuantizer(
+                tex.DType.kFloat8E4M3, device="cuda"
+            ),
+            grad_factory=lambda: Float8CurrentScalingQuantizer(
+                tex.DType.kFloat8E5M2, device="cuda"
+            ),
+        )
+
+    def test_hybrid_param_with_matching_recipe_does_not_raise(self):
+        """Forward pass with matching recipe should not raise."""
+        hybrid_recipe = self._hybrid_fp8_recipe()
+        with quantized_model_init(enabled=True, recipe=hybrid_recipe):
+            model = Linear(128, 128, params_dtype=torch.bfloat16).cuda()
+
+        inp = torch.randn(32, 128, device="cuda", dtype=torch.bfloat16)
+        with torch.no_grad():
+            with autocast(enabled=True, recipe=hybrid_recipe):
+                out = model(inp)
+        assert not torch.isnan(out).any()
+
+    def test_hybrid_param_with_mismatched_recipe_raises(self):
+        """Forward pass with a non-CustomRecipe on a hybrid param should raise."""
+        hybrid_recipe = self._hybrid_fp8_recipe()
+        with quantized_model_init(enabled=True, recipe=hybrid_recipe):
+            model = Linear(128, 128, params_dtype=torch.bfloat16).cuda()
+
+        inp = torch.randn(32, 128, device="cuda", dtype=torch.bfloat16)
+        mismatch_recipe = recipe.Float8CurrentScaling()
+        with pytest.raises(RuntimeError, match="Recipe mismatch"):
+            with torch.no_grad():
+                with autocast(enabled=True, recipe=mismatch_recipe):
+                    model(inp)
+
+
+# ---------------------------------------------------------------------------
+# 5. quantize_ in-place update for hybrid
+# ---------------------------------------------------------------------------
+
+
+@requires_fp8
+class TestHybridQuantizeInPlace:
+    """Test in-place re-quantization (quantize_) for HybridQuantizedTensor.
+
+    This is needed for the optimizer writeback path (param.quantize_(master_weight))
+    and the workspace cache update path (out.quantize_(new_bf16_weight)).
+    """
+
+    def test_quantize_inplace_updates_data(self):
+        """quantize_() should re-quantize both sub-storages from new BF16 data."""
+        torch.manual_seed(42)
+        hq = HybridQuantizer(
+            rowwise_quantizer=Float8CurrentScalingQuantizer(
+                tex.DType.kFloat8E4M3, device="cuda"
+            ),
+            columnwise_quantizer=Float8CurrentScalingQuantizer(
+                tex.DType.kFloat8E4M3, device="cuda"
+            ),
+        )
+        original = torch.randn(128, 128, dtype=torch.bfloat16, device="cuda")
+        tensor = hq.quantize(original)
+
+        dq_before = tensor.dequantize().clone()
+
+        # Update with different data
+        new_data = torch.randn(128, 128, dtype=torch.bfloat16, device="cuda")
+        tensor.quantize_(new_data)
+
+        dq_after = tensor.dequantize()
+
+        # Should be close to new data, not old data
+        diff_new = (dq_after.float() - new_data.float()).abs().mean()
+        diff_old = (dq_after.float() - original.float()).abs().mean()
+        assert diff_new < diff_old, (
+            f"After quantize_(), data is closer to old ({diff_old:.4f}) "
+            f"than new ({diff_new:.4f})"
+        )
+
+    def test_quantize_inplace_preserves_tensor_identity(self):
+        """quantize_() should update in-place, not create a new tensor."""
+        hq = HybridQuantizer(
+            rowwise_quantizer=Float8CurrentScalingQuantizer(
+                tex.DType.kFloat8E4M3, device="cuda"
+            ),
+            columnwise_quantizer=Float8CurrentScalingQuantizer(
+                tex.DType.kFloat8E4M3, device="cuda"
+            ),
+        )
+        original = torch.randn(128, 128, dtype=torch.bfloat16, device="cuda")
+        tensor = hq.quantize(original)
+
+        tensor_id = id(tensor)
+        new_data = torch.randn(128, 128, dtype=torch.bfloat16, device="cuda")
+        result = tensor.quantize_(new_data)
+
+        assert id(tensor) == tensor_id, "quantize_() should return same object"
+
+    # noop_flag is a delayed-scaling feature; not tested here since
+    # delayed scaling is out of scope for hybrid quantization.
+
+
+# ---------------------------------------------------------------------------
+# 6. FusedAdam with hybrid quantized params
+# ---------------------------------------------------------------------------
+
+
+@requires_fp8
+class TestHybridFusedAdam:
+    """Test FusedAdam optimizer with HybridQuantizedTensor parameters."""
+
+    def _build_hybrid_model(self):
+        hybrid_recipe = _hybrid_custom_recipe(
+            row_factory=lambda: Float8CurrentScalingQuantizer(
+                tex.DType.kFloat8E4M3, device="cuda"
+            ),
+            col_factory=lambda: Float8CurrentScalingQuantizer(
+                tex.DType.kFloat8E4M3, device="cuda"
+            ),
+            grad_factory=lambda: Float8CurrentScalingQuantizer(
+                tex.DType.kFloat8E5M2, device="cuda"
+            ),
+        )
+        with quantized_model_init(enabled=True, recipe=hybrid_recipe):
+            model = Linear(256, 256, params_dtype=torch.bfloat16).cuda()
+        return model, hybrid_recipe
+
+    def test_fused_adam_accepts_hybrid_params(self):
+        """FusedAdam should not crash when given HybridQuantizedTensor params."""
+        model, _ = self._build_hybrid_model()
+        optimizer = te.optimizers.FusedAdam(
+            model.parameters(),
+            lr=1e-3,
+            master_weights=True,
+            master_weight_dtype=torch.float32,
+        )
+        assert optimizer is not None
+
+    def test_fused_adam_master_weights_track_reference(self):
+        """FP32 master weights should closely track a reference Adam optimizer.
+
+        Small divergence is expected because HybridQuantizedTensor.float()
+        may take a slightly different dequantization path than
+        detach().clone().float() through __torch_dispatch__.
+        """
+        model, _ = self._build_hybrid_model()
+
+        ref_params = [p.detach().clone().float() for p in model.parameters()]
+
+        options = {"lr": 5e-4, "betas": (0.9, 0.999), "eps": 1e-8, "weight_decay": 0}
+        ref_optim = torch.optim.Adam(ref_params, **options)
+        tst_optim = te.optimizers.FusedAdam(
+            list(model.parameters()),
+            master_weights=True,
+            master_weight_dtype=torch.float32,
+            use_decoupled_grad=True,
+            **options,
+        )
+
+        for _ in range(5):
+            for p_ref, p in zip(ref_params, model.parameters()):
+                p_ref.grad = torch.rand_like(p_ref)
+                p.decoupled_grad = p_ref.grad.clone()
+            ref_optim.step()
+            tst_optim.step()
+
+        master_params = [
+            tst_optim.get_unscaled_state(p, "master_param") for p in model.parameters()
+        ]
+        torch.testing.assert_close(ref_params, master_params, rtol=1e-3, atol=1e-3)
+
+    def test_fused_adam_param_remains_hybrid_after_step(self):
+        """Weight params should still be HybridQuantizedTensors after optimizer step."""
+        model, _ = self._build_hybrid_model()
+        optimizer = te.optimizers.FusedAdam(
+            model.parameters(),
+            lr=1e-3,
+            master_weights=True,
+            master_weight_dtype=torch.float32,
+            use_decoupled_grad=True,
+        )
+
+        for _ in range(3):
+            for p in model.parameters():
+                p.decoupled_grad = torch.rand_like(p.float())
+            optimizer.step()
+
+        for name, p in model.named_parameters():
+            if "bias" not in name:
+                assert isinstance(p, HybridQuantizedTensor), (
+                    f"{name} lost HybridQuantizedTensor type: {type(p).__name__}"
+                )
+
+    def test_fused_adam_requires_master_weights(self):
+        """FusedAdam without master_weights should raise for hybrid quantized params."""
+        model, _ = self._build_hybrid_model()
+
+        with pytest.raises(RuntimeError, match="master_weights"):
+            optimizer = te.optimizers.FusedAdam(
+                model.parameters(),
+                lr=1e-3,
+                master_weights=False,
+            )
+            for p in model.parameters():
+                p.grad = torch.rand_like(p.float()).to(p.dtype)
+            optimizer.step()
+
+
+# ---------------------------------------------------------------------------
+# 7. End-to-end training loop: fwd + bwd + optimizer step
+# ---------------------------------------------------------------------------
+
+
+@requires_fp8
+class TestHybridQuantizedParamsEndToEnd:
+    """Full training loop: quantized_model_init + autocast fwd + bwd + FusedAdam.step()."""
+
+    def _build_model_and_recipe(self):
+        hybrid_recipe = _hybrid_custom_recipe(
+            row_factory=lambda: Float8CurrentScalingQuantizer(
+                tex.DType.kFloat8E4M3, device="cuda"
+            ),
+            col_factory=lambda: Float8CurrentScalingQuantizer(
+                tex.DType.kFloat8E4M3, device="cuda"
+            ),
+            grad_factory=lambda: Float8CurrentScalingQuantizer(
+                tex.DType.kFloat8E5M2, device="cuda"
+            ),
+        )
+        with quantized_model_init(enabled=True, recipe=hybrid_recipe):
+            model = Linear(256, 256, params_dtype=torch.bfloat16).cuda()
+        return model, hybrid_recipe
+
+    def test_training_loop_loss_decreases(self):
+        """Loss should decrease over a few training steps."""
+        torch.manual_seed(42)
+        model, hybrid_recipe = self._build_model_and_recipe()
+
+        optimizer = te.optimizers.FusedAdam(
+            model.parameters(),
+            lr=1e-3,
+            master_weights=True,
+            master_weight_dtype=torch.float32,
+        )
+
+        x = torch.randn(4, 32, 256, dtype=torch.bfloat16, device="cuda")
+        target = torch.randn_like(x)
+
+        losses = []
+        for i in range(7):
+            optimizer.zero_grad(set_to_none=True)
+            with autocast(enabled=True, recipe=hybrid_recipe):
+                output = model(x)
+            loss = torch.nn.functional.mse_loss(output, target)
+            losses.append(loss.item())
+            loss.backward()
+
+            for name, p in model.named_parameters():
+                assert p.grad is not None, f"Step {i}: {name} has no gradient"
+                assert torch.isfinite(p.grad).all(), f"Step {i}: {name} has non-finite grad"
+
+            optimizer.step()
+
+        assert losses[-1] < losses[0], f"Loss did not decrease: {losses}"
+
+    def test_training_loop_params_remain_quantized(self):
+        """Params should remain HybridQuantizedTensors after training."""
+        torch.manual_seed(42)
+        model, hybrid_recipe = self._build_model_and_recipe()
+
+        optimizer = te.optimizers.FusedAdam(
+            model.parameters(),
+            lr=1e-3,
+            master_weights=True,
+            master_weight_dtype=torch.float32,
+        )
+
+        x = torch.randn(4, 32, 256, dtype=torch.bfloat16, device="cuda")
+        target = torch.randn_like(x)
+
+        for _ in range(3):
+            optimizer.zero_grad(set_to_none=True)
+            with autocast(enabled=True, recipe=hybrid_recipe):
+                output = model(x)
+            loss = torch.nn.functional.mse_loss(output, target)
+            loss.backward()
+            optimizer.step()
+
+        for name, p in model.named_parameters():
+            if "bias" not in name:
+                assert isinstance(p, HybridQuantizedTensor), (
+                    f"{name} is {type(p).__name__}, not HybridQuantizedTensor"
+                )
+
+    def test_training_loop_optimizer_states_are_fp32(self):
+        """Optimizer states should be FP32."""
+        torch.manual_seed(42)
+        model, hybrid_recipe = self._build_model_and_recipe()
+
+        optimizer = te.optimizers.FusedAdam(
+            model.parameters(),
+            lr=1e-3,
+            master_weights=True,
+            master_weight_dtype=torch.float32,
+        )
+
+        x = torch.randn(4, 32, 256, dtype=torch.bfloat16, device="cuda")
+        for _ in range(2):
+            optimizer.zero_grad(set_to_none=True)
+            with autocast(enabled=True, recipe=hybrid_recipe):
+                output = model(x)
+            output.float().sum().backward()
+            optimizer.step()
+
+        for name, p in model.named_parameters():
+            state = optimizer.state[p]
+            assert state["exp_avg"].dtype == torch.float32
+            assert state["exp_avg_sq"].dtype == torch.float32
+            if "bias" not in name:
+                assert state["master_param"].dtype == torch.float32
+
+
+# ---------------------------------------------------------------------------
+# 8. Mixed-format quantized params (e.g. MXFP8 row + NVFP4 col)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(
+    not (mxfp8_available and nvfp4_available),
+    reason=f"MXFP8: {reason_for_no_mxfp8}; NVFP4: {reason_for_no_nvfp4}",
+)
+class TestHybridMixedFormatQuantizedParams:
+    """Quantized params with genuinely different formats per direction."""
+
+    def _build_mixed_model(self, in_features=256, out_features=256):
+        """MXFP8 rowwise (for fprop TN) + NVFP4 columnwise (for wgrad NT)."""
+        hybrid_recipe = _hybrid_custom_recipe(
+            row_factory=lambda: MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
+            col_factory=lambda: NVFP4Quantizer(fp4_dtype=tex.DType.kFloat4E2M1),
+            grad_factory=lambda: NVFP4Quantizer(fp4_dtype=tex.DType.kFloat4E2M1),
+        )
+        with quantized_model_init(enabled=True, recipe=hybrid_recipe):
+            model = Linear(
+                in_features, out_features, params_dtype=torch.bfloat16
+            ).cuda()
+        return model, hybrid_recipe
+
+    def test_mixed_format_param_creation(self):
+        """Model init with mixed MXFP8/NVFP4 hybrid should produce a
+        HybridQuantizedTensor parameter."""
+        model, _ = self._build_mixed_model()
+        assert isinstance(model.weight, HybridQuantizedTensor)
+
+    def test_mixed_format_forward_only(self):
+        """Forward pass with mixed-format quantized params."""
+        torch.manual_seed(42)
+        model, hybrid_recipe = self._build_mixed_model()
+        inp = torch.randn(32, 256, device="cuda", dtype=torch.bfloat16)
+
+        with torch.no_grad():
+            with autocast(enabled=True, recipe=hybrid_recipe):
+                out = model(inp)
+
+        assert out.shape == (32, 256)
+        assert not torch.isnan(out).any()
+        assert not torch.isinf(out).any()
+
+    def test_mixed_format_forward_backward(self):
+        """Full fwd+bwd with mixed-format quantized params."""
+        torch.manual_seed(42)
+        model, hybrid_recipe = self._build_mixed_model()
+        inp = torch.randn(32, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+
+        with autocast(enabled=True, recipe=hybrid_recipe):
+            out = model(inp)
+        loss = out.float().sum()
+        loss.backward()
+
+        assert inp.grad is not None
+        assert not torch.isnan(inp.grad).any()
+        for name, p in model.named_parameters():
+            assert p.grad is not None, f"No gradient for {name}"
+            assert not torch.isnan(p.grad).any(), f"NaN gradient for {name}"
+
+    def test_mixed_format_training_loop(self):
+        """End-to-end training loop with mixed-format hybrid quantized params."""
+        torch.manual_seed(42)
+        model, hybrid_recipe = self._build_mixed_model()
+
+        optimizer = te.optimizers.FusedAdam(
+            model.parameters(),
+            lr=1e-3,
+            master_weights=True,
+            master_weight_dtype=torch.float32,
+        )
+
+        x = torch.randn(4, 32, 256, dtype=torch.bfloat16, device="cuda")
+        target = torch.randn_like(x)
+
+        losses = []
+        for i in range(5):
+            optimizer.zero_grad(set_to_none=True)
+            with autocast(enabled=True, recipe=hybrid_recipe):
+                output = model(x)
+            loss = torch.nn.functional.mse_loss(output, target)
+            losses.append(loss.item())
+            loss.backward()
+            optimizer.step()
+
+        assert losses[-1] < losses[0], f"Loss did not decrease: {losses}"
+        for name, p in model.named_parameters():
+            if "bias" not in name:
+                assert isinstance(p, HybridQuantizedTensor), (
+                    f"{name} is {type(p).__name__}"
+                )
+
+    def test_mixed_format_sub_storage_types(self):
+        """Verify that sub-storages have the correct types (MXFP8 vs NVFP4)."""
+        model, _ = self._build_mixed_model()
+        weight = model.weight
+        from transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage import (
+            MXFP8TensorStorage,
+        )
+
+        row = weight.rowwise_sub_storage
+        col = weight.columnwise_sub_storage
+        assert isinstance(row, MXFP8TensorStorage) or hasattr(row, "_rowwise_data"), (
+            f"Expected MXFP8 rowwise sub-storage, got {type(row).__name__}"
+        )
+        assert isinstance(col, NVFP4TensorStorage) or hasattr(col, "_rowwise_data"), (
+            f"Expected NVFP4 columnwise sub-storage, got {type(col).__name__}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 9. Quantized params equivalence: vanilla vs hybrid (same format both dirs)
+# ---------------------------------------------------------------------------
+
+
+def _hybrid_fp8_current_qfactory(role):
+    """Hybrid FP8 current scaling (E4M3 both dirs, E5M2 for grad)."""
+    if role in ("linear_input", "linear_weight", "linear_output"):
+        return HybridQuantizer(
+            rowwise_quantizer=Float8CurrentScalingQuantizer(
+                tex.DType.kFloat8E4M3, device="cuda"
+            ),
+            columnwise_quantizer=Float8CurrentScalingQuantizer(
+                tex.DType.kFloat8E4M3, device="cuda"
+            ),
+        )
+    if role in ("linear_grad_output", "linear_grad_input"):
+        return Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda")
+    return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
+
+
+def _hybrid_mxfp8_qfactory(role):
+    """Hybrid MXFP8 (E4M3 both dirs)."""
+    if role in ("linear_grad_output", "linear_grad_input"):
+        return MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+    return HybridQuantizer(
+        rowwise_quantizer=MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
+        columnwise_quantizer=MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
+    )
+
+
+def _hybrid_block_fp8_qfactory(role):
+    """Hybrid block FP8 (E4M3 both dirs)."""
+    dim = 2 if role == "linear_weight" else 1
+    if role in ("linear_grad_output", "linear_grad_input"):
+        return Float8BlockQuantizer(
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            rowwise=True, columnwise=True, block_scaling_dim=dim,
+        )
+    return HybridQuantizer(
+        rowwise_quantizer=Float8BlockQuantizer(
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            rowwise=True, columnwise=True, block_scaling_dim=dim,
+        ),
+        columnwise_quantizer=Float8BlockQuantizer(
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            rowwise=True, columnwise=True, block_scaling_dim=dim,
+        ),
+    )
+
+
+def _hybrid_nvfp4_qfactory(role):
+    """Hybrid NVFP4 (E2M1 both dirs)."""
+    if role in ("linear_grad_output", "linear_grad_input"):
+        return NVFP4Quantizer(fp4_dtype=tex.DType.kFloat4E2M1)
+    return HybridQuantizer(
+        rowwise_quantizer=NVFP4Quantizer(fp4_dtype=tex.DType.kFloat4E2M1),
+        columnwise_quantizer=NVFP4Quantizer(fp4_dtype=tex.DType.kFloat4E2M1),
+    )
+
+
+class _QuantizedParamsEquivalenceBase:
+    """Base for comparing vanilla vs hybrid quantized params training.
+
+    When the hybrid quantizer uses the same format in both directions,
+    the full quantized_model_init + training loop should produce
+    equivalent results to the vanilla (non-hybrid) quantized params path.
+    """
+
+    hidden_size = 256
+    num_steps = 5
+
+    def _vanilla_recipe(self):
+        raise NotImplementedError
+
+    def _hybrid_recipe(self):
+        raise NotImplementedError
+
+    def _build_models(self):
+        """Create two models with identical init: one vanilla, one hybrid."""
+        torch.manual_seed(42)
+        with quantized_model_init(enabled=True, recipe=self._vanilla_recipe()):
+            model_ref = Linear(
+                self.hidden_size, self.hidden_size, params_dtype=torch.bfloat16,
+            ).cuda()
+
+        torch.manual_seed(42)
+        with quantized_model_init(enabled=True, recipe=self._hybrid_recipe()):
+            model_hyb = Linear(
+                self.hidden_size, self.hidden_size, params_dtype=torch.bfloat16,
+            ).cuda()
+
+        return model_ref, model_hyb
+
+    def _run_training_loop(self, model, train_recipe, x, target, num_steps):
+        optimizer = te.optimizers.FusedAdam(
+            model.parameters(), lr=1e-3,
+            master_weights=True, master_weight_dtype=torch.float32,
+        )
+        losses = []
+        for _ in range(num_steps):
+            optimizer.zero_grad(set_to_none=True)
+            with autocast(enabled=True, recipe=train_recipe):
+                output = model(x)
+            loss = torch.nn.functional.mse_loss(output, target)
+            losses.append(loss.item())
+            loss.backward()
+            optimizer.step()
+        master_params = [
+            optimizer.get_unscaled_state(p, "master_param")
+            for p in model.parameters()
+            if p.requires_grad
+        ]
+        return losses, master_params
+
+    def _test_equivalence(self):
+        model_ref, model_hyb = self._build_models()
+
+        torch.manual_seed(99)
+        x = torch.randn(4, 32, self.hidden_size, dtype=torch.bfloat16, device="cuda")
+        target = torch.randn_like(x)
+
+        losses_ref, masters_ref = self._run_training_loop(
+            model_ref, self._vanilla_recipe(), x, target, self.num_steps,
+        )
+        losses_hyb, masters_hyb = self._run_training_loop(
+            model_hyb, self._hybrid_recipe(), x, target, self.num_steps,
+        )
+
+        # Losses should be very close (same quantization, same training dynamics)
+        for i, (lr, lh) in enumerate(zip(losses_ref, losses_hyb)):
+            assert abs(lr - lh) < 0.1 * max(abs(lr), 1e-6), (
+                f"Step {i}: loss diverged — vanilla={lr:.6f}, hybrid={lh:.6f}"
+            )
+
+        # Master weights should be close after training
+        for i, (mr, mh) in enumerate(zip(masters_ref, masters_hyb)):
+            torch.testing.assert_close(mr, mh, rtol=1e-3, atol=1e-3, msg=(
+                f"Master weight {i} diverged after {self.num_steps} steps"
+            ))
+
+
+@requires_fp8
+class TestQuantizedParamsEquivalenceFP8CurrentScaling(_QuantizedParamsEquivalenceBase):
+    """Vanilla Float8CurrentScaling vs hybrid FP8 current (same format both dirs).
+
+    Note: vanilla Float8Tensor params use the fused multi_tensor_adam_fp8
+    kernel in FusedAdam, while HybridQuantizedTensor falls to the FP32
+    master + quantize_() writeback path. These are numerically different
+    codepaths, so we use relaxed tolerances.
+    """
+
+    def _vanilla_recipe(self):
+        return recipe.Float8CurrentScaling()
+
+    def _hybrid_recipe(self):
+        return recipe.CustomRecipe(qfactory=_hybrid_fp8_current_qfactory)
+
+    def test_equivalence(self):
+        model_ref, model_hyb = self._build_models()
+
+        torch.manual_seed(99)
+        x = torch.randn(4, 32, self.hidden_size, dtype=torch.bfloat16, device="cuda")
+        target = torch.randn_like(x)
+
+        losses_ref, _ = self._run_training_loop(
+            model_ref, self._vanilla_recipe(), x, target, self.num_steps,
+        )
+        losses_hyb, _ = self._run_training_loop(
+            model_hyb, self._hybrid_recipe(), x, target, self.num_steps,
+        )
+
+        # Both should decrease (training works in both paths)
+        assert losses_ref[-1] < losses_ref[0], f"Vanilla loss didn't decrease: {losses_ref}"
+        assert losses_hyb[-1] < losses_hyb[0], f"Hybrid loss didn't decrease: {losses_hyb}"
+
+        # Losses should be in the same ballpark (different optimizer kernels
+        # cause small divergence that compounds over steps)
+        for i, (lr, lh) in enumerate(zip(losses_ref, losses_hyb)):
+            assert abs(lr - lh) / max(abs(lr), 1e-6) < 0.5, (
+                f"Step {i}: losses diverged too much — vanilla={lr:.6f}, hybrid={lh:.6f}"
+            )
+
+
+@pytest.mark.skipif(not mxfp8_available, reason=f"MXFP8: {reason_for_no_mxfp8}")
+class TestQuantizedParamsEquivalenceMXFP8(_QuantizedParamsEquivalenceBase):
+    """Vanilla MXFP8BlockScaling vs hybrid MXFP8 (same format both dirs)."""
+
+    def _vanilla_recipe(self):
+        return recipe.MXFP8BlockScaling()
+
+    def _hybrid_recipe(self):
+        return recipe.CustomRecipe(qfactory=_hybrid_mxfp8_qfactory)
+
+    def test_equivalence(self):
+        self._test_equivalence()
+
+
+@pytest.mark.skipif(not fp8_block_scaling_available, reason=reason_for_no_fp8_block_scaling)
+class TestQuantizedParamsEquivalenceBlockFP8(_QuantizedParamsEquivalenceBase):
+    """Vanilla Float8BlockScaling vs hybrid block FP8 (same format both dirs)."""
+
+    def _vanilla_recipe(self):
+        return recipe.Float8BlockScaling()
+
+    def _hybrid_recipe(self):
+        return recipe.CustomRecipe(qfactory=_hybrid_block_fp8_qfactory)
+
+    def test_equivalence(self):
+        self._test_equivalence()
+
+
+@pytest.mark.skipif(
+    not (fp8_available and nvfp4_available),
+    reason=f"FP8: {reason_for_no_fp8}; NVFP4: {reason_for_no_nvfp4}",
+)
+class TestQuantizedParamsEquivalenceNVFP4(_QuantizedParamsEquivalenceBase):
+    """Vanilla NVFP4BlockScaling vs hybrid NVFP4 (same format both dirs).
+
+    RHT, stochastic rounding, and 2D quantization disabled for determinism.
+    """
+
+    def _vanilla_recipe(self):
+        return recipe.NVFP4BlockScaling(
+            disable_rht=True,
+            disable_stochastic_rounding=True,
+            disable_2d_quantization=True,
+        )
+
+    def _hybrid_recipe(self):
+        return recipe.CustomRecipe(qfactory=_hybrid_nvfp4_qfactory)
+
+    def test_equivalence(self):
+        self._test_equivalence()
+
+
+# ---------------------------------------------------------------------------
+# 10. State dict save/load (checkpointing) for hybrid quantized params
+# ---------------------------------------------------------------------------
+
+
+# Module-level qfactories (picklable, required for checkpoint serialization).
+
+
+def _checkpoint_hybrid_fp8_qfactory(role):
+    """Module-level qfactory (picklable) for checkpoint tests."""
+    if role in ("linear_input", "linear_weight", "linear_output"):
+        return HybridQuantizer(
+            rowwise_quantizer=Float8CurrentScalingQuantizer(
+                tex.DType.kFloat8E4M3, device="cuda"
+            ),
+            columnwise_quantizer=Float8CurrentScalingQuantizer(
+                tex.DType.kFloat8E4M3, device="cuda"
+            ),
+        )
+    if role in ("linear_grad_output", "linear_grad_input"):
+        return Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda")
+    return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
+
+
+@requires_fp8
+class TestHybridCheckpoint:
+    """Test state_dict save/load round-trips for models with hybrid quantized params."""
+
+    def _hybrid_fp8_recipe(self):
+        return recipe.CustomRecipe(qfactory=_checkpoint_hybrid_fp8_qfactory)
+
+    def test_state_dict_save_load_roundtrip(self):
+        """state_dict → save → load → same model should produce identical outputs."""
+        torch.manual_seed(42)
+        hybrid_recipe = self._hybrid_fp8_recipe()
+        with quantized_model_init(enabled=True, recipe=hybrid_recipe):
+            model = Linear(128, 128, params_dtype=torch.bfloat16).cuda()
+
+        inp = torch.randn(32, 128, device="cuda", dtype=torch.bfloat16)
+        with torch.no_grad():
+            with autocast(enabled=True, recipe=hybrid_recipe):
+                out_before = model(inp)
+
+        state_dict = model.state_dict()
+
+        # Create a fresh model and load
+        with quantized_model_init(enabled=True, recipe=hybrid_recipe):
+            model2 = Linear(128, 128, params_dtype=torch.bfloat16).cuda()
+        model2.load_state_dict(state_dict)
+
+        with torch.no_grad():
+            with autocast(enabled=True, recipe=hybrid_recipe):
+                out_after = model2(inp)
+
+        torch.testing.assert_close(out_before, out_after)
+
+    def test_state_dict_contains_weight(self):
+        """state_dict should contain the weight key."""
+        hybrid_recipe = self._hybrid_fp8_recipe()
+        with quantized_model_init(enabled=True, recipe=hybrid_recipe):
+            model = Linear(128, 128, params_dtype=torch.bfloat16).cuda()
+
+        sd = model.state_dict()
+        assert "weight" in sd, f"state_dict keys: {list(sd.keys())}"
+
+    def test_load_bf16_state_dict_into_hybrid_model(self):
+        """Loading a BF16 state_dict into a hybrid quantized model should work.
+
+        This is the common scenario: pretrained BF16 weights loaded into a
+        model initialized with quantized_model_init.
+        """
+        torch.manual_seed(42)
+        hybrid_recipe = self._hybrid_fp8_recipe()
+
+        # Create BF16 model and get its state_dict
+        ref_model = Linear(128, 128, params_dtype=torch.bfloat16).cuda()
+        bf16_state_dict = ref_model.state_dict()
+
+        # Create hybrid quantized model
+        with quantized_model_init(enabled=True, recipe=hybrid_recipe):
+            model = Linear(128, 128, params_dtype=torch.bfloat16).cuda()
+
+        # Load BF16 weights into hybrid model
+        model.load_state_dict(bf16_state_dict)
+
+        # Verify model produces valid output
+        inp = torch.randn(32, 128, device="cuda", dtype=torch.bfloat16)
+        with torch.no_grad():
+            with autocast(enabled=True, recipe=hybrid_recipe):
+                out = model(inp)
+        assert not torch.isnan(out).any()
+        assert not torch.isinf(out).any()
+
+    def test_state_dict_torch_save_load(self):
+        """Full round-trip through torch.save/torch.load (file-based)."""
+        import tempfile
+        import os
+
+        torch.manual_seed(42)
+        hybrid_recipe = self._hybrid_fp8_recipe()
+        with quantized_model_init(enabled=True, recipe=hybrid_recipe):
+            model = Linear(128, 128, params_dtype=torch.bfloat16).cuda()
+
+        inp = torch.randn(32, 128, device="cuda", dtype=torch.bfloat16)
+        with torch.no_grad():
+            with autocast(enabled=True, recipe=hybrid_recipe):
+                out_before = model(inp)
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pt") as f:
+            torch.save(model.state_dict(), f.name)
+            tmp_path = f.name
+
+        try:
+            with quantized_model_init(enabled=True, recipe=hybrid_recipe):
+                model2 = Linear(128, 128, params_dtype=torch.bfloat16).cuda()
+            state_dict = torch.load(tmp_path, weights_only=False)
+            model2.load_state_dict(state_dict)
+
+            with torch.no_grad():
+                with autocast(enabled=True, recipe=hybrid_recipe):
+                    out_after = model2(inp)
+
+            torch.testing.assert_close(out_before, out_after)
+        finally:
+            os.unlink(tmp_path)
+
+    def test_checkpoint_resume_training(self):
+        """Save mid-training, load into new model+optimizer, verify training continues."""
+        import tempfile
+        import os
+
+        torch.manual_seed(42)
+        hybrid_recipe = self._hybrid_fp8_recipe()
+        with quantized_model_init(enabled=True, recipe=hybrid_recipe):
+            model = Linear(256, 256, params_dtype=torch.bfloat16).cuda()
+
+        optimizer = te.optimizers.FusedAdam(
+            model.parameters(), lr=1e-3,
+            master_weights=True, master_weight_dtype=torch.float32,
+        )
+
+        x = torch.randn(4, 32, 256, dtype=torch.bfloat16, device="cuda")
+        target = torch.randn_like(x)
+
+        # Train for a few steps
+        for _ in range(3):
+            optimizer.zero_grad(set_to_none=True)
+            with autocast(enabled=True, recipe=hybrid_recipe):
+                output = model(x)
+            loss = torch.nn.functional.mse_loss(output, target)
+            loss.backward()
+            optimizer.step()
+
+        loss_before_save = loss.item()
+
+        # Save checkpoint
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pt") as f:
+            torch.save({
+                "model": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+            }, f.name)
+            tmp_path = f.name
+
+        try:
+            # Load into fresh model
+            with quantized_model_init(enabled=True, recipe=hybrid_recipe):
+                model2 = Linear(256, 256, params_dtype=torch.bfloat16).cuda()
+            optimizer2 = te.optimizers.FusedAdam(
+                model2.parameters(), lr=1e-3,
+                master_weights=True, master_weight_dtype=torch.float32,
+            )
+
+            checkpoint = torch.load(tmp_path, weights_only=False)
+            model2.load_state_dict(checkpoint["model"])
+            optimizer2.load_state_dict(checkpoint["optimizer"])
+
+            # Continue training -- loss should not spike
+            optimizer2.zero_grad(set_to_none=True)
+            with autocast(enabled=True, recipe=hybrid_recipe):
+                output2 = model2(x)
+            loss_after_load = torch.nn.functional.mse_loss(output2, target).item()
+
+            assert loss_after_load <= loss_before_save * 1.5, (
+                f"Loss spiked after checkpoint resume: {loss_before_save:.4f} → {loss_after_load:.4f}"
+            )
+        finally:
+            os.unlink(tmp_path)

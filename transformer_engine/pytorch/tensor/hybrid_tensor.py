@@ -111,13 +111,52 @@ class HybridQuantizer(Quantizer):
             quantizer=self,
         )
 
+    def update_quantized(
+        self,
+        src: torch.Tensor,
+        dst: QuantizedTensorStorage,
+        *,
+        noop_flag: Optional[torch.Tensor] = None,
+    ) -> QuantizedTensorStorage:
+        """Re-quantize both sub-storages of a hybrid tensor in-place.
+
+        Delegates to each sub-quantizer's update_quantized, which writes
+        new quantized data + scales into the existing sub-storage buffers.
+        """
+        if not isinstance(dst, HybridQuantizedTensorStorage):
+            raise ValueError(
+                f"HybridQuantizer can only update HybridQuantizedTensorStorage, got {type(dst).__name__}"
+            )
+        if dst._rowwise_storage is not None:
+            self.rowwise_quantizer.update_quantized(
+                src, dst._rowwise_storage, noop_flag=noop_flag
+            )
+        if dst._columnwise_storage is not None:
+            self.columnwise_quantizer.update_quantized(
+                src, dst._columnwise_storage, noop_flag=noop_flag
+            )
+        return dst
+
     def set_usage(
         self, *, rowwise: Optional[bool] = None, columnwise: Optional[bool] = None
     ) -> None:
         super().set_usage(rowwise=rowwise, columnwise=columnwise)
 
     def _get_compatible_recipe(self):
-        return None
+        # HybridQuantizer is only reachable via CustomRecipe (the qfactory
+        # returns HybridQuantizer per role). Checking that the autocast recipe
+        # is also CustomRecipe catches the obvious mismatch (e.g. hybrid
+        # quantized_model_init + built-in MXFP8BlockScaling autocast).
+        # We trust that users who write a CustomRecipe know what they're doing
+        # with regard to per-operand scaling mode compatibility.
+        # TODO(negvet): improve to validate that the autocast recipe's
+        # sub-quantizer scaling modes are compatible with each sub-storage's
+        # scaling mode (e.g. rowwise MXFP8 weight requires MXFP8 input for
+        # fprop TN, columnwise NVFP4 weight requires NVFP4 grad_output for
+        # wgrad NT).
+        from transformer_engine.common.recipe import CustomRecipe  # avoid circular import
+
+        return CustomRecipe
 
 
 class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
