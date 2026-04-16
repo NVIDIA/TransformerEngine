@@ -1919,7 +1919,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             out = out.view(-1, *out.shape[-2:])
 
         # update FP8 quantizers: amax across cp_size steps
-        if fp8 and use_fused_attention:
+        if fp8 and use_fused_attention and fp8_recipe.delayed():
             amax_cp_fwd = amax_per_step.amax(dim=1)
             S_quantizer.amax.copy_(amax_cp_fwd[0])
             O_quantizer.amax.copy_(amax_cp_fwd[1])
@@ -2036,11 +2036,12 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         ctx.S_quantizer = S_quantizer
         if ctx.fp8:
             ctx.QKV_quantizer = QKV_quantizer.copy()
-            ctx.QKV_quantizer.scale = QKV_quantizer.scale.clone()
             ctx.O_quantizer = O_quantizer.copy()
-            ctx.O_quantizer.scale = O_quantizer.scale.clone()
             ctx.S_quantizer = S_quantizer.copy()
-            ctx.S_quantizer.scale = S_quantizer.scale.clone()
+            if fp8_recipe.delayed():
+                ctx.QKV_quantizer.scale = QKV_quantizer.scale.clone()
+                ctx.O_quantizer.scale = O_quantizer.scale.clone()
+                ctx.S_quantizer.scale = S_quantizer.scale.clone()
 
         nvtx_range_pop(f"{nvtx_label}")
 
@@ -2645,9 +2646,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
         # sum up all cp_size for dq, dk, dv
         if ctx.fp8 and ctx.use_fused_attention:
-            amax_cp_bwd = amax_per_step.amax(dim=1)
-            ctx.dP_quantizer.amax.copy_(amax_cp_bwd[0])
-            ctx.dQKV_quantizer.amax.copy_(amax_cp_bwd[1])
+            if ctx.fp8_recipe.delayed():
+                amax_cp_bwd = amax_per_step.amax(dim=1)
+                ctx.dP_quantizer.amax.copy_(amax_cp_bwd[0])
+                ctx.dQKV_quantizer.amax.copy_(amax_cp_bwd[1])
 
             dq = dq_buffer
             if ctx.fp8_recipe.delayed():
@@ -3649,11 +3651,12 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         ctx.S_quantizer = S_quantizer
         if ctx.fp8:
             ctx.QKV_quantizer = QKV_quantizer.copy()
-            ctx.QKV_quantizer.scale = QKV_quantizer.scale.clone()
             ctx.O_quantizer = O_quantizer.copy()
-            ctx.O_quantizer.scale = O_quantizer.scale.clone()
             ctx.S_quantizer = S_quantizer.copy()
-            ctx.S_quantizer.scale = S_quantizer.scale.clone()
+            if fp8_recipe.delayed():
+                ctx.QKV_quantizer.scale = QKV_quantizer.scale.clone()
+                ctx.O_quantizer.scale = O_quantizer.scale.clone()
+                ctx.S_quantizer.scale = S_quantizer.scale.clone()
         nvtx_range_pop("transformer_engine.AttnFuncWithCPAndQKVOA2A.forward")
         if return_max_logit:
             return out_ret, max_logit
