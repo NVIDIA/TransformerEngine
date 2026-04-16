@@ -9,7 +9,7 @@ import abc
 from collections.abc import Iterable
 import dataclasses
 import pickle
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import torch
 
@@ -19,6 +19,7 @@ from ..quantization import (
     RecipeState,
     autocast,
 )
+from ..quantized_tensor import QuantizedTensorStorage
 from ..tensor import Quantizer
 
 
@@ -55,7 +56,22 @@ class OperationContext:
 
 
 class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
-    """Tensor operation supported by the operation fuser"""
+    """Tensor operation supported by the operation fuser
+
+    Subclasses can define the forward pass using one of two APIs:
+
+    - **Legacy API**: Override ``fuser_forward`` (single method that
+      performs both computation and context saving).
+    - **Split API**: Override ``fuser_forward_compute`` and optionally
+      ``fuser_forward_save_ctx`` (separates computation from context
+      saving, enabling ``torch.compile`` compatibility).
+
+    The split API is preferred for new operations. If
+    ``fuser_forward_compute`` is defined, the operation automatically
+    uses the split API. Defining ``fuser_forward_save_ctx`` without
+    ``fuser_forward_compute`` is an error.
+
+    """
 
     _use_split_forward: bool = False
 
@@ -155,7 +171,7 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
     ) -> tuple[
         torch.Tensor,
         Iterable[Iterable[torch.Tensor]],
-        list[tuple[Optional[torch.Tensor], ...]],
+        list[tuple[Optional[Union[torch.Tensor, QuantizedTensorStorage]], ...]],
     ]:
         """Forward computation without contexts
 
@@ -185,7 +201,7 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
             Output tensor
         Iterable of iterable of torch.Tensor
             Extra tensor outputs from basic operations
-        list of tuple of Optional[torch.Tensor]
+        list of tuple of Optional[Union[torch.Tensor, QuantizedTensorStorage]]
             Tensors to save for backward, per basic op
 
         """
@@ -197,7 +213,7 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
         self,
         basic_op_ctxs: list[OperationContext],
         input_: torch.Tensor,
-        tensors_to_save: list[tuple[Optional[torch.Tensor], ...]],
+        tensors_to_save: list[tuple[Optional[Union[torch.Tensor, QuantizedTensorStorage]], ...]],
         *,
         requires_grad: list[bool],
         basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
@@ -215,7 +231,7 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
             Contexts for basic operations
         input_: torch.Tensor
             Input tensor (same as passed to ``fuser_forward_compute``)
-        tensors_to_save: list of tuple of Optional[torch.Tensor]
+        tensors_to_save: list of tuple of Optional[Union[torch.Tensor, QuantizedTensorStorage]]
             Tensors returned by ``fuser_forward_compute``, per basic op
         requires_grad: list of bool
             Whether backward pass is required, per basic op
@@ -284,6 +300,19 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
 
     This class holds parameters and state, even if the actual forward
     and backward passes are performed by a fused operation.
+
+    Subclasses can define the forward pass using one of two APIs:
+
+    - **Legacy API**: Override ``op_forward`` (single method that
+      performs both computation and context saving).
+    - **Split API**: Override ``op_forward_compute`` and optionally
+      ``op_forward_save_ctx`` (separates computation from context
+      saving, enabling ``torch.compile`` compatibility).
+
+    The split API is preferred for new operations. Defining both
+    ``op_forward`` and ``op_forward_compute`` is an error. Defining
+    ``op_forward_save_ctx`` without ``op_forward_compute`` is also
+    an error.
 
     """
 
@@ -586,7 +615,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         prev_op_grad_output_quantizer: Optional[Quantizer] = None,
         next_op_input_quantizer: Optional[Quantizer] = None,
         **kwargs: Any,
-    ) -> tuple[torch.Tensor, tuple[Optional[torch.Tensor], ...]]:
+    ) -> tuple[torch.Tensor, tuple[Optional[Union[torch.Tensor, QuantizedTensorStorage]], ...]]:
         """Forward computation without context
 
         Alternative to ``op_forward`` that separates computation from
@@ -607,7 +636,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         -------
         torch.Tensor
             Output tensor
-        tuple of Optional[torch.Tensor]
+        tuple of Optional[Union[torch.Tensor, QuantizedTensorStorage]]
             Tensors to save for backward pass
 
         """
@@ -619,7 +648,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         self,
         ctx: OperationContext,
         input_: torch.Tensor,
-        tensors_to_save: tuple[Optional[torch.Tensor], ...],
+        tensors_to_save: tuple[Optional[Union[torch.Tensor, QuantizedTensorStorage]], ...],
         *,
         requires_grad: bool,
         prev_op_grad_output_quantizer: Optional[Quantizer] = None,
@@ -639,7 +668,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             Context to coordinate between forward and backward passes
         input_: torch.Tensor
             Input tensor (same as passed to ``op_forward_compute``)
-        tensors_to_save: tuple of Optional[torch.Tensor]
+        tensors_to_save: tuple of Optional[Union[torch.Tensor, QuantizedTensorStorage]]
             Tensors returned by ``op_forward_compute``
         requires_grad: bool
             Whether backward pass is required
@@ -719,7 +748,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
     ) -> tuple[
         torch.Tensor,
         list[tuple[()]],
-        list[tuple[Optional[torch.Tensor], ...]],
+        list[tuple[Optional[Union[torch.Tensor, QuantizedTensorStorage]], ...]],
     ]:
         self._check_no_extra_io("fuser_forward_compute", "op_forward_compute")
         output, tensors_to_save = self.op_forward_compute(
@@ -735,7 +764,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         self,
         basic_op_ctxs: list[OperationContext],
         input_: torch.Tensor,
-        tensors_to_save: list[tuple[Optional[torch.Tensor], ...]],
+        tensors_to_save: list[tuple[Optional[Union[torch.Tensor, QuantizedTensorStorage]], ...]],
         *,
         requires_grad: list[bool],
         basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
@@ -940,6 +969,13 @@ class FusedOperation(FusibleOperation):
     functionally equivalent to the forward/backward passes of the
     corresponding basic ops. This class should hold no parameters or
     other state, but should access them from the basic ops.
+
+    Subclasses can define the forward pass using one of two APIs
+    (inherited from ``FusibleOperation``):
+
+    - **Legacy API**: Override ``fuser_forward``.
+    - **Split API**: Override ``fuser_forward_compute`` and optionally
+      ``fuser_forward_save_ctx``.
 
     Parameters
     ----------
