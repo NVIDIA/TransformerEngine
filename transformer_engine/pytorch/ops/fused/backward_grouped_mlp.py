@@ -44,6 +44,7 @@ def _cudnn_compute_wgrad(
     accumulate: bool,
     wgrad_kernel_fn,
     single_grouped_weight: bool,
+    current_stream=None,
 ):
     """Compute wgrad using the cuDNN CuTe DSL grouped GEMM wgrad kernel.
 
@@ -68,26 +69,24 @@ def _cudnn_compute_wgrad(
     sfb_tensor = grouped_x.columnwise_scale_inv.view(in_features, -1).view(
         dtype=torch.float8_e8m0fnu
     )
-    offsets_tensor = offsets.to(dtype=torch.int32)
 
     # Prepare wgrad output
     if single_grouped_weight:
         # Dense mode: single (num_groups, out_features, in_features) tensor
-        wgrad_tensor = wgrad_output.rowwise_data.view(
-            offsets_tensor.shape[0], out_features, in_features
-        )
+        wgrad_tensor = wgrad_output.rowwise_data.view(offsets.shape[0], out_features, in_features)
         wgrad_kernel_fn(
             a_tensor=a_tensor,
             b_tensor=b_tensor,
             sfa_tensor=sfa_tensor,
             sfb_tensor=sfb_tensor,
-            offsets_tensor=offsets_tensor,
+            offsets_tensor=offsets,
             output_mode="dense",
             wgrad_tensor=wgrad_tensor,
             acc_dtype=torch.float32,
             wgrad_dtype=wgrad_tensor.dtype,
             sf_vec_size=MXFP8_BLOCK_SCALING_SIZE,
             accumulate_on_output=accumulate,
+            current_stream=current_stream,
         )
     else:
         # Discrete mode: per-expert wgrad device pointers
@@ -97,13 +96,14 @@ def _cudnn_compute_wgrad(
             b_tensor=b_tensor,
             sfa_tensor=sfa_tensor,
             sfb_tensor=sfb_tensor,
-            offsets_tensor=offsets_tensor,
+            offsets_tensor=offsets,
             output_mode="discrete",
             wgrad_ptrs=wgrad_ptrs,
             acc_dtype=torch.float32,
             wgrad_dtype=wgrad_output[0].dtype,
             sf_vec_size=MXFP8_BLOCK_SCALING_SIZE,
             accumulate_on_output=accumulate,
+            current_stream=current_stream,
         )
 
 
@@ -207,6 +207,7 @@ def _compute_grad_params(
         # Launch or defer the GEMM
         delay_wgrad = fc_op.wgrad_store is not None and fc_op.wgrad_store.delay_wgrad_compute()
         if cudnn_wgrad_kernel_fn is not None:
+            offsets = offsets if offsets.dtype == torch.int32 else offsets.to(dtype=torch.int32)
             gemm_fn = functools.partial(
                 _cudnn_compute_wgrad,
                 weight_shape=weight_shape,
@@ -214,6 +215,7 @@ def _compute_grad_params(
                 accumulate=accumulate_into_main_grad,
                 wgrad_kernel_fn=cudnn_wgrad_kernel_fn,
                 single_grouped_weight=fc_op.single_grouped_weight,
+                current_stream=torch.cuda.current_stream().cuda_stream,
             )
         else:
             gemm_fn = functools.partial(
@@ -242,8 +244,8 @@ def _compute_grad_params(
                 )
             w_list = [packed_wgrad]
         else:
-            if delay_wgrad:
-                w_list = list(w_list) if accumulate_into_main_grad else [None] * num_groups
+            if delay_wgrad or accumulate_into_main_grad:
+                w_list = [None] * num_groups
             if accumulate_into_main_grad:
                 for idx in range(num_groups):
                     wp = getattr(fc_op, f"weight{idx}")
@@ -420,8 +422,6 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         # Group splits
         if int(split_sizes.numel()) != num_groups:
             raise ValueError(f"Expected {num_groups} splits, but got {int(split_sizes.numel())}.")
-        split_sizes = split_sizes.to(dtype=torch.int64, device=device)
-        split_points = split_points.to(dtype=torch.int, device=device)
         scale_bias = fc2_op._scale_bias and fc2_op.has_bias
 
         grouped_fc1_x = None
@@ -512,7 +512,8 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         norm_const_tensor = get_cached_ones_tensor(1, dtype, device)
         current_stream = torch.cuda.current_stream().cuda_stream
 
-        scales_tensor = scales.detach().to(dtype=torch.float32).reshape(-1, 1, 1)
+        scales_f32 = scales.detach().to(dtype=torch.float32)
+        scales_tensor = scales_f32.reshape(-1, 1, 1)
         dscales_tensor = torch.zeros_like(scales_tensor)
 
         fc2_dglu_kwargs = {
@@ -590,7 +591,6 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         if scale_bias:
             fc2_biases = fc2_op._get_bias_tensors(dtype)
             bias_packed = torch.stack(fc2_biases)
-            scales_f32 = scales.detach().to(dtype=torch.float32)
             fc2_dbias_packed_result, grad_scales = _compute_grouped_dbias_dscales(
                 fc2_dy,
                 scales_f32,
@@ -604,12 +604,11 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
             else:
                 fc2_bias_grads = [fc2_dbias_packed_result[idx] for idx in range(num_groups)]
         elif fc2_dbias_packed is not None:
+            fc2_dbias_packed = fc2_dbias_packed.to(dtype=dtype)
             if fc2_op.single_grouped_bias:
-                fc2_bias_grad_packed = fc2_dbias_packed.to(dtype=dtype)
+                fc2_bias_grad_packed = fc2_dbias_packed
             else:
-                fc2_bias_grads = [
-                    fc2_dbias_packed[idx].to(dtype=dtype) for idx in range(num_groups)
-                ]
+                fc2_bias_grads = [fc2_dbias_packed[idx] for idx in range(num_groups)]
 
         grad_scales = grad_scales.to(dtype=dtype)
 
@@ -618,13 +617,11 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         if fc1_op.has_bias:
             dbias_t = fc2_dgrad_kernel_out["dbias_tensor"]
             if dbias_t is not None:
-                dbias_2d = dbias_t.squeeze(-1)
+                dbias_2d = dbias_t.squeeze(-1).to(dtype=dtype)
                 if fc1_op.single_grouped_bias:
-                    fc1_bias_grad_packed = dbias_2d.to(dtype=dtype)
+                    fc1_bias_grad_packed = dbias_2d
                 else:
-                    fc1_bias_grads = [
-                        dbias_2d[group_idx].to(dtype=dtype) for group_idx in range(num_groups)
-                    ]
+                    fc1_bias_grads = [dbias_2d[group_idx] for group_idx in range(num_groups)]
 
         # FC1 grad output for dgrad and wgrad GEMMs
         fc1_dy_tensor_offsets = fc1_ctx.base_split_offsets * fc1_weight_shape[0]
