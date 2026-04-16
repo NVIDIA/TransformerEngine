@@ -154,13 +154,7 @@ def _build_dispatcher(hyperparams: HyperParameters, te_config):
         return None  # NVMixtralSparseMoeBlock will create AllToAllTokenDispatcher
 
     if hyperparams.dispatcher_type == "fused":
-        from te_mixtral import HAVE_FUSED_ROUTER
-        if not HAVE_FUSED_ROUTER:
-            raise ImportError(
-                "FusedTokenRouter requires the bionemo_mixtral package with DeepEP and Triton. "
-                "Install DeepEP via: bash bionemo_mixtral/install_hybridep.sh"
-            )
-        from bionemo_mixtral.fused_token_router import FusedTokenRouter
+        from fused_token_router import FusedTokenRouter
 
         num_experts = te_config.num_local_experts
         ep_size = te_config.expert_parallel_size
