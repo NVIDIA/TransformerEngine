@@ -434,16 +434,20 @@ def _grouped_dense_fwd_rule(
     # obtain grouped_gemm_x / grouped_gemm_kernel for the forward-GEMM recomputation even
     # though the colwise residuals (ctx_x / ctx_kernel) are already saved.  With both
     # orientations checkpointed, all outputs of the custom-call become dead in the remat trace.
-    grouped_gemm_x = grouped_gemm_x.checkpoint(quantizer_set.x) if isinstance(
-        grouped_gemm_x, ScaledTensor
-    ) else grouped_gemm_x
+    grouped_gemm_x = (
+        grouped_gemm_x.checkpoint(quantizer_set.x)
+        if isinstance(grouped_gemm_x, ScaledTensor)
+        else grouped_gemm_x
+    )
     ctx_x = casted_x.get_tensor(usage=TensorUsage.LHS_TRANS)
     ctx_kernel = casted_kernel.get_tensor(usage=TensorUsage.RHS_TRANS)
 
     grouped_gemm_kernel = casted_kernel.get_tensor(usage=TensorUsage.RHS)
-    grouped_gemm_kernel = grouped_gemm_kernel.checkpoint(quantizer_set.kernel) if isinstance(
-        grouped_gemm_kernel, ScaledTensor
-    ) else grouped_gemm_kernel
+    grouped_gemm_kernel = (
+        grouped_gemm_kernel.checkpoint(quantizer_set.kernel)
+        if isinstance(grouped_gemm_kernel, ScaledTensor)
+        else grouped_gemm_kernel
+    )
     output = tex.grouped_gemm(
         grouped_gemm_x,
         grouped_gemm_kernel,
