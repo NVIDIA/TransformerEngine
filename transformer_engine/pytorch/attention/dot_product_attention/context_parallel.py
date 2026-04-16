@@ -3004,7 +3004,12 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                 visible_padded = [
                     padded_chunk_sizes_kv * (chunk_id + 1) for chunk_id in local_seq_chunk_ids
                 ]
-                # [AG+THD] Is this needed?
+                # SWA right window: extend visibility beyond causal boundary so the
+                # kernel can attend to tokens right of the diagonal. The minimum()
+                # below naturally caps this at actual_seqlens_kv, so the last chunk
+                # of a sequence won't extend past the sequence end.
+                if window_size is not None and window_size[1] > 0:
+                    visible_padded = [vp + window_size[1] for vp in visible_padded]
                 visible_actual = [
                     torch.minimum(actual_seqlens_kv, visible_padded_split)
                     for visible_padded_split in visible_padded
@@ -3051,10 +3056,16 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                         k_ = k_ag
                         v_ = v_ag
                         chunk_id = local_seq_chunk_ids[i]
+                        full_kv_seqlen = max_seqlen_kv * (2 * cp_size)
                         if causal:
                             max_seqlen_kv_ = max_seqlen_kv * (chunk_id + 1)
+                            # SWA right window: extend to match extended cu_seqlens_kv
+                            if window_size is not None and window_size[1] > 0:
+                                max_seqlen_kv_ = min(
+                                    max_seqlen_kv_ + window_size[1], full_kv_seqlen
+                                )
                         else:
-                            max_seqlen_kv_ = max_seqlen_kv * (2 * cp_size)
+                            max_seqlen_kv_ = full_kv_seqlen
                         cu_seqlens_kv_per_step[i] = thd_cu_seqlens_kv_per_step[i]
                         # Window size
                         if window_size is None:
@@ -3321,10 +3332,15 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                         v_ = v_ag
                         chunk_id = local_seq_chunk_ids[i]
                         causal = "causal" in ctx.attn_mask_type
+                        full_kv_seqlen = ctx.max_seqlen_kv * (2 * cp_size)
                         if causal:
                             max_seqlen_kv = ctx.max_seqlen_kv * (chunk_id + 1)
+                            if window_size_per_step[i] is not None and window_size_per_step[i][1] > 0:
+                                max_seqlen_kv = min(
+                                    max_seqlen_kv + window_size_per_step[i][1], full_kv_seqlen
+                                )
                         else:
-                            max_seqlen_kv = ctx.max_seqlen_kv * (2 * cp_size)
+                            max_seqlen_kv = full_kv_seqlen
                         out_ = out_per_step[i]
                         dout_ = dout
                     else:
