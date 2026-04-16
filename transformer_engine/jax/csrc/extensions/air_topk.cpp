@@ -32,14 +32,10 @@ Error_Type AirTopkFFI(cudaStream_t stream, Buffer_Type keys_in_buf, Buffer_Type 
   int seq_len = static_cast<int>(keys_in_shape[1]);
   int k = static_cast<int>(k_value);
 
-  // Element byte widths for computing flat buffer sizes.
-  size_t keys_element_bytes;
+  // Validate key dtype (float32 and bfloat16 only).
   switch (keys_in_dtype) {
     case DType::kFloat32:
-      keys_element_bytes = 4;
-      break;
     case DType::kBFloat16:
-      keys_element_bytes = 2;
       break;
     default:
       NVTE_ERROR("AirTopkFFI: unsupported key dtype (float32 and bfloat16 only)");

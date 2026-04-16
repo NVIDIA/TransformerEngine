@@ -6,11 +6,6 @@
 
 #pragma once
 
-constexpr int VECTORIZED_READ_SIZE = 16;
-constexpr int WARP_SIZE = 32;
-constexpr int WARP_BITS = 5;
-constexpr unsigned FULL_WARP_MASK = 0xffffffff;
-
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
 #include <cuda_bf16.h>
@@ -58,6 +53,11 @@ __host__ __device__ inline __nv_bfloat16 float_to_T<__nv_bfloat16>(float v) {
 }  // namespace nv_detail
 
 namespace nv {
+
+constexpr int VECTORIZED_READ_SIZE = 16;
+constexpr int WARP_SIZE = 32;
+constexpr int WARP_BITS = 5;
+constexpr unsigned FULL_WARP_MASK = 0xffffffff;
 
 namespace air_topk {
 using WideT = float4;
@@ -1251,11 +1251,18 @@ void standalone_air_topk(void *buf, size_t &buf_size, const T *in, int batch_siz
         buf, buf_size, in, static_cast<idxT *>(nullptr), batch_size, len, k, out, out_idx, !greater,
         stream, lengths);
   } else {
+    // Cache sm_cnt per device to avoid repeated host-side queries.
+    static int cached_dev = -1;
+    static int cached_sm_cnt = -1;
     int sm_cnt;
     {
       int dev;
       NVTE_CHECK_CUDA(cudaGetDevice(&dev));
-      NVTE_CHECK_CUDA(cudaDeviceGetAttribute(&sm_cnt, cudaDevAttrMultiProcessorCount, dev));
+      if (dev != cached_dev) {
+        NVTE_CHECK_CUDA(cudaDeviceGetAttribute(&cached_sm_cnt, cudaDevAttrMultiProcessorCount, dev));
+        cached_dev = dev;
+      }
+      sm_cnt = cached_sm_cnt;
     }
     unsigned grid_dim =
         air_topk::calc_grid_dim<T, idxT, 11, multi_block_dim>(batch_size, len, sm_cnt);
