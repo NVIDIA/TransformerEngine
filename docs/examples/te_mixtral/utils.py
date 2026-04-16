@@ -55,7 +55,7 @@ hyperparams = HyperParameters()
 
 
 def get_dataloaders(accelerator: Accelerator, hyperparams: HyperParameters):
-    from bionemo_mixtral.collator import DataCollatorWithFlattening
+    from collator import DataCollatorWithFlattening
 
     dataset = load_dataset(hyperparams.dataset_name, split="train")
     tokenizer = AutoTokenizer.from_pretrained(hyperparams.model_name)
