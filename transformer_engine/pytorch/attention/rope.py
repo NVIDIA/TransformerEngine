@@ -12,7 +12,13 @@ import transformer_engine_torch as tex
 from transformer_engine.pytorch.cpp_extensions.fused_attn import QKVFormat
 
 
-__all__ = ["RotaryPositionEmbedding", "apply_rotary_pos_emb", "apply_fused_qkv_rotary_pos_emb"]
+__all__ = [
+    "RotaryPositionEmbedding",
+    "apply_rotary_pos_emb",
+    "apply_fused_qkv_rotary_pos_emb",
+    "apply_mla_rope_for_q",
+    "apply_mla_rope_for_kv",
+]
 
 
 class RotaryPositionEmbedding(torch.nn.Module):
@@ -538,4 +544,224 @@ def apply_fused_qkv_rotary_pos_emb(
         interleaved,
         cp_size,
         cp_rank,
+    )
+
+
+
+# ---------------------------------------------------------------------------
+# MLA YARN RoPE – CUDA-backed autograd functions
+# Equivalent to Megatron-LM rotary_fwd_q_kernel / rotary_fwd_kv_kernel.
+# ---------------------------------------------------------------------------
+
+
+class MLARoPEQFunc(torch.autograd.Function):
+    """
+    Forward/backward CUDA kernels for applying YARN RoPE to MLA query tensors.
+
+    The last emb_dim (= cos.shape[-1]) elements of each head are rotated; the
+    leading qk_head_dim elements (the MLA nope region) are copied unchanged.
+
+    Input emb region: interleaved pairs (x[2i], x[2i+1]).
+    Output emb region: non-interleaved (first_half | second_half).
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        q: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        qk_head_dim: int,
+        tensor_format: str,
+        cu_seqlens: Union[torch.Tensor, None],
+        cp_size: int,
+        cp_rank: int,
+    ) -> torch.Tensor:
+        if cos.dtype != torch.float32:
+            cos = cos.float()
+        if sin.dtype != torch.float32:
+            sin = sin.float()
+        output = tex.mla_rope_q_forward(
+            q, cos, sin, qk_head_dim, cu_seqlens, cp_size, cp_rank,
+            QKVFormat[tensor_format],
+        )
+        ctx.save_for_backward(cos, sin, cu_seqlens)
+        ctx.qk_head_dim = qk_head_dim
+        ctx.tensor_format = tensor_format
+        ctx.cp_size = cp_size
+        ctx.cp_rank = cp_rank
+        return output
+
+    @staticmethod
+    def backward(ctx, grad: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
+        cos, sin, cu_seqlens = ctx.saved_tensors
+        grad_input = tex.mla_rope_q_backward(
+            grad, cos, sin, ctx.qk_head_dim, cu_seqlens, ctx.cp_size, ctx.cp_rank,
+            QKVFormat[ctx.tensor_format],
+        )
+        return grad_input, None, None, None, None, None, None, None
+
+
+class MLARoPEKVFunc(torch.autograd.Function):
+    """
+    Forward/backward CUDA kernels for MLA YARN RoPE on key-value tensors.
+
+    Splits packed kv, copies the key part, rotates k_pos_emb (shared across
+    heads) and appends it to the key, passes value through unchanged.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        kv: torch.Tensor,
+        k_pos_emb: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        k_dim: int,
+        v_dim: int,
+        tensor_format: str,
+        cu_seqlens: Union[torch.Tensor, None],
+        cp_size: int,
+        cp_rank: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if cos.dtype != torch.float32:
+            cos = cos.float()
+        if sin.dtype != torch.float32:
+            sin = sin.float()
+        key, value = tex.mla_rope_kv_forward(
+            kv, k_pos_emb, cos, sin, k_dim, v_dim, cu_seqlens, cp_size, cp_rank,
+            QKVFormat[tensor_format],
+        )
+        ctx.save_for_backward(cos, sin, cu_seqlens)
+        ctx.k_dim = k_dim
+        ctx.v_dim = v_dim
+        ctx.tensor_format = tensor_format
+        ctx.cp_size = cp_size
+        ctx.cp_rank = cp_rank
+        return key, value
+
+    @staticmethod
+    def backward(
+        ctx, dk: torch.Tensor, dv: torch.Tensor
+    ) -> Tuple[Union[torch.Tensor, None], ...]:
+        cos, sin, cu_seqlens = ctx.saved_tensors
+        d_kv, d_emb = tex.mla_rope_kv_backward(
+            dk, dv, cos, sin, ctx.k_dim, ctx.v_dim, cu_seqlens, ctx.cp_size, ctx.cp_rank,
+            QKVFormat[ctx.tensor_format],
+        )
+        return d_kv, d_emb, None, None, None, None, None, None, None, None
+
+
+def apply_mla_rope_for_q(
+    t: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    qk_head_dim: int,
+    tensor_format: str = "sbhd",
+    cu_seqlens_q: Optional[torch.Tensor] = None,
+    cp_rank: int = 0,
+    cp_size: int = 1,
+) -> torch.Tensor:
+    """
+    Apply YARN RoPE to MLA query tensors via fused CUDA kernels.
+
+    The last ``emb_dim`` (= ``cos.shape[-1]``) elements of each head are
+    rotated; the leading ``qk_head_dim`` elements (the MLA nope region) are
+    passed through unchanged.
+
+    Input emb region layout: interleaved pairs ``(x[2i], x[2i+1])``.
+    Output emb region layout: non-interleaved ``(first_half | second_half)``.
+
+    Parameters
+    ----------
+    t:
+        Query tensor.
+        ``[seq_len, batch, nheads, qk_head_dim + emb_dim]`` (sbhd) or
+        ``[total_seq, nheads, qk_head_dim + emb_dim]`` (thd).
+    cos, sin:
+        Precomputed cosine/sine, shape ``[max_seq_len, 1, 1, emb_dim]``,
+        contiguous float32.
+    qk_head_dim:
+        Number of head-dim elements that bypass rotation (nope region).
+    tensor_format:
+        ``"sbhd"`` (sequence-major) or ``"thd"`` (packed variable-length).
+    cu_seqlens_q:
+        ``[seq_num + 1]`` int32 cumulative sequence lengths; required for thd.
+    cp_rank, cp_size:
+        Context-parallel rank and world size.
+
+    Returns
+    -------
+    torch.Tensor
+        Same shape as ``t`` with the rotary region transformed.
+    """
+    assert tensor_format in ("sbhd", "thd"), f"Unsupported tensor_format: {tensor_format}."
+    assert tensor_format != "thd" or cu_seqlens_q is not None, (
+        "cu_seqlens_q required for thd format."
+    )
+    return MLARoPEQFunc.apply(
+        t, cos, sin, qk_head_dim, tensor_format, cu_seqlens_q, cp_size, cp_rank
+    )
+
+
+def apply_mla_rope_for_kv(
+    kv: torch.Tensor,
+    k_pos_emb: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    k_dim: int,
+    v_dim: int,
+    tensor_format: str = "sbhd",
+    cu_seqlens_kv: Optional[torch.Tensor] = None,
+    cp_rank: int = 0,
+    cp_size: int = 1,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Split a packed KV tensor and produce key/value tensors for MLA with YARN RoPE.
+
+    ``kv`` is split along its last head-dim axis into ``k_dim`` (key) and
+    ``v_dim`` (value) parts.  A per-token positional embedding ``k_pos_emb``
+    is rotated with YARN RoPE and appended to the key, yielding key width
+    ``k_dim + emb_dim``.  The value is returned unchanged.
+
+    ``k_pos_emb`` stores elements in interleaved order ``(x[2i], x[2i+1])``
+    and is broadcast identically across all heads.
+
+    Parameters
+    ----------
+    kv:
+        Packed KV tensor.
+        ``[seq_len, batch, nheads, k_dim + v_dim]`` (sbhd) or
+        ``[total_seq, nheads, k_dim + v_dim]`` (thd).
+    k_pos_emb:
+        Per-token key positional embedding, interleaved, shared across heads.
+        ``[seq_len, batch, 1, emb_dim]`` (sbhd) or ``[total_seq, 1, emb_dim]`` (thd).
+    cos, sin:
+        ``[max_seq_len, 1, 1, emb_dim]``, contiguous float32.
+    k_dim:
+        Per-head non-rotary key dimension.
+    v_dim:
+        Per-head value dimension.
+    tensor_format:
+        ``"sbhd"`` or ``"thd"``.
+    cu_seqlens_kv:
+        ``[seq_num + 1]`` int32; required for thd format.
+    cp_rank, cp_size:
+        Context-parallel rank and world size.
+
+    Returns
+    -------
+    key:
+        ``[seq_len, batch, nheads, k_dim + emb_dim]`` (sbhd) or
+        ``[total_seq, nheads, k_dim + emb_dim]`` (thd).
+    value:
+        ``[seq_len, batch, nheads, v_dim]`` (sbhd) or
+        ``[total_seq, nheads, v_dim]`` (thd).
+    """
+    assert tensor_format in ("sbhd", "thd"), f"Unsupported tensor_format: {tensor_format}."
+    assert tensor_format != "thd" or cu_seqlens_kv is not None, (
+        "cu_seqlens_kv required for thd format."
+    )
+    return MLARoPEKVFunc.apply(
+        kv, k_pos_emb, cos, sin, k_dim, v_dim, tensor_format, cu_seqlens_kv, cp_size, cp_rank
     )

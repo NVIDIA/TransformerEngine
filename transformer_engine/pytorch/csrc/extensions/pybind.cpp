@@ -436,6 +436,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Fused Apply QKV RoPE FWD", py::call_guard<py::gil_scoped_release>());
   m.def("fused_qkv_rope_backward", &transformer_engine::pytorch::fused_qkv_rope_backward,
         "Fused Apply QKV RoPE BWD", py::call_guard<py::gil_scoped_release>());
+  m.def("mla_rope_q_forward", &transformer_engine::pytorch::mla_rope_q_forward,
+        "MLA YARN RoPE Q FWD", py::call_guard<py::gil_scoped_release>());
+  m.def("mla_rope_q_backward", &transformer_engine::pytorch::mla_rope_q_backward,
+        "MLA YARN RoPE Q BWD", py::call_guard<py::gil_scoped_release>());
+  m.def("mla_rope_kv_forward", &transformer_engine::pytorch::mla_rope_kv_forward,
+        "MLA YARN RoPE KV FWD", py::call_guard<py::gil_scoped_release>());
+  m.def("mla_rope_kv_backward", &transformer_engine::pytorch::mla_rope_kv_backward,
+        "MLA YARN RoPE KV BWD", py::call_guard<py::gil_scoped_release>());
 
   // fused router
   m.def("fused_topk_with_score_function_fwd",

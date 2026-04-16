@@ -298,4 +298,213 @@ at::Tensor fused_qkv_rope_backward(const at::Tensor &q_grad_out, const at::Tenso
   return qkv_grad_input;
 }
 
+at::Tensor mla_rope_q_forward(const at::Tensor &q, const at::Tensor &cos, const at::Tensor &sin,
+                               const int qk_head_dim,
+                               const std::optional<at::Tensor> cu_seqlens,
+                               const int cp_size, const int cp_rank,
+                               const NVTE_QKV_Format qkv_format) {
+  TORCH_CHECK(cos.dim() == 4 && cos.size(1) == 1 && cos.size(2) == 1,
+              "cos must be [max_s, 1, 1, emb_dim]");
+  TORCH_CHECK(cos.scalar_type() == at::ScalarType::Float, "cos must be float32");
+  TORCH_CHECK(sin.scalar_type() == at::ScalarType::Float, "sin must be float32");
+  const int emb_dim = cos.size(3);
+  auto act_options = at::TensorOptions().dtype(q.scalar_type()).device(q.device());
+  auto output = at::empty(q.sizes(), act_options);
+  auto q_cu = makeTransformerEngineTensor(q);
+  auto cos_cu = makeTransformerEngineTensor(cos);
+  auto sin_cu = makeTransformerEngineTensor(sin);
+  auto output_cu = makeTransformerEngineTensor(output);
+  if (qkv_format == NVTE_QKV_Format::NVTE_THD) {
+    TORCH_CHECK(q.dim() == 3, "expected 3D tensor for THD");
+    TORCH_CHECK(cu_seqlens.has_value(), "cu_seqlens required for THD");
+    const int h = q.size(1);
+    const int max_s = cos.size(0);
+    const int b = cu_seqlens.value().size(0) - 1;
+    auto cu_seqlens_cu = makeTransformerEngineTensor(cu_seqlens.value());
+    nvte_mla_rope_q_forward(q_cu.data(), cu_seqlens_cu.data(), cos_cu.data(), sin_cu.data(),
+                            output_cu.data(), qkv_format, cp_size, cp_rank,
+                            max_s, b, h, qk_head_dim, emb_dim,
+                            q.stride(0), 0, q.stride(1),
+                            at::cuda::getCurrentCUDAStream());
+  } else {
+    TORCH_CHECK(q.dim() == 4, "expected 4D tensor");
+    const bool is_sbhd = qkv_format == NVTE_QKV_Format::NVTE_SBHD;
+    const int s = is_sbhd ? q.size(0) : q.size(1);
+    const int b = is_sbhd ? q.size(1) : q.size(0);
+    const int h = q.size(2);
+    auto cu_seqlens_cu = TensorWrapper();
+    nvte_mla_rope_q_forward(q_cu.data(), cu_seqlens_cu.data(), cos_cu.data(), sin_cu.data(),
+                            output_cu.data(), qkv_format, cp_size, cp_rank,
+                            s, b, h, qk_head_dim, emb_dim,
+                            is_sbhd ? q.stride(0) : q.stride(1),
+                            is_sbhd ? q.stride(1) : q.stride(0),
+                            q.stride(2), at::cuda::getCurrentCUDAStream());
+  }
+  return output;
+}
+
+at::Tensor mla_rope_q_backward(const at::Tensor &grad, const at::Tensor &cos, const at::Tensor &sin,
+                                const int qk_head_dim,
+                                const std::optional<at::Tensor> cu_seqlens,
+                                const int cp_size, const int cp_rank,
+                                const NVTE_QKV_Format qkv_format) {
+  const int emb_dim = cos.size(3);
+  auto act_options = at::TensorOptions().dtype(grad.scalar_type()).device(grad.device());
+  auto dst = at::empty(grad.sizes(), act_options);
+  auto grad_cu = makeTransformerEngineTensor(grad);
+  auto cos_cu = makeTransformerEngineTensor(cos);
+  auto sin_cu = makeTransformerEngineTensor(sin);
+  auto dst_cu = makeTransformerEngineTensor(dst);
+  if (qkv_format == NVTE_QKV_Format::NVTE_THD) {
+    TORCH_CHECK(cu_seqlens.has_value(), "cu_seqlens required for THD");
+    const int h = grad.size(1);
+    const int max_s = cos.size(0);
+    const int b = cu_seqlens.value().size(0) - 1;
+    auto cu_seqlens_cu = makeTransformerEngineTensor(cu_seqlens.value());
+    nvte_mla_rope_q_backward(grad_cu.data(), cu_seqlens_cu.data(), cos_cu.data(), sin_cu.data(),
+                             dst_cu.data(), qkv_format, cp_size, cp_rank,
+                             max_s, b, h, qk_head_dim, emb_dim,
+                             grad.stride(0), 0, grad.stride(1),
+                             at::cuda::getCurrentCUDAStream());
+  } else {
+    const bool is_sbhd = qkv_format == NVTE_QKV_Format::NVTE_SBHD;
+    const int s = is_sbhd ? grad.size(0) : grad.size(1);
+    const int b = is_sbhd ? grad.size(1) : grad.size(0);
+    const int h = grad.size(2);
+    auto cu_seqlens_cu = TensorWrapper();
+    nvte_mla_rope_q_backward(grad_cu.data(), cu_seqlens_cu.data(), cos_cu.data(), sin_cu.data(),
+                             dst_cu.data(), qkv_format, cp_size, cp_rank,
+                             s, b, h, qk_head_dim, emb_dim,
+                             is_sbhd ? grad.stride(0) : grad.stride(1),
+                             is_sbhd ? grad.stride(1) : grad.stride(0),
+                             grad.stride(2), at::cuda::getCurrentCUDAStream());
+  }
+  return dst;
+}
+
+std::tuple<at::Tensor, at::Tensor> mla_rope_kv_forward(
+    const at::Tensor &kv, const at::Tensor &k_pos_emb,
+    const at::Tensor &cos, const at::Tensor &sin,
+    const int k_dim, const int v_dim,
+    const std::optional<at::Tensor> cu_seqlens,
+    const int cp_size, const int cp_rank,
+    const NVTE_QKV_Format qkv_format) {
+  TORCH_CHECK(cos.scalar_type() == at::ScalarType::Float, "cos must be float32");
+  TORCH_CHECK(sin.scalar_type() == at::ScalarType::Float, "sin must be float32");
+  const int emb_dim = cos.size(3);
+  auto act_options = at::TensorOptions().dtype(kv.scalar_type()).device(kv.device());
+  auto kv_cu = makeTransformerEngineTensor(kv);
+  auto emb_cu = makeTransformerEngineTensor(k_pos_emb);
+  auto cos_cu = makeTransformerEngineTensor(cos);
+  auto sin_cu = makeTransformerEngineTensor(sin);
+  if (qkv_format == NVTE_QKV_Format::NVTE_THD) {
+    TORCH_CHECK(kv.dim() == 3, "expected 3D tensor for THD");
+    TORCH_CHECK(cu_seqlens.has_value(), "cu_seqlens required for THD");
+    const int h = kv.size(1);
+    const int max_s = cos.size(0);
+    const int b = cu_seqlens.value().size(0) - 1;
+    auto key_out = at::empty({kv.size(0), h, k_dim + emb_dim}, act_options);
+    auto val_out = at::empty({kv.size(0), h, v_dim}, act_options);
+    auto key_cu = makeTransformerEngineTensor(key_out);
+    auto val_cu = makeTransformerEngineTensor(val_out);
+    auto cu_seqlens_cu = makeTransformerEngineTensor(cu_seqlens.value());
+    // k_pos_emb: [total_t, 1, emb_dim], stride_t = emb_dim, stride_b = 0
+    nvte_mla_rope_kv_forward(kv_cu.data(), emb_cu.data(), cu_seqlens_cu.data(),
+                             cos_cu.data(), sin_cu.data(), key_cu.data(), val_cu.data(),
+                             qkv_format, cp_size, cp_rank, max_s, b, h, k_dim, v_dim, emb_dim,
+                             kv.stride(0), 0, kv.stride(1),
+                             k_pos_emb.stride(0), 0,
+                             at::cuda::getCurrentCUDAStream());
+    return std::make_tuple(key_out, val_out);
+  }
+  TORCH_CHECK(kv.dim() == 4, "expected 4D tensor");
+  const bool is_sbhd = qkv_format == NVTE_QKV_Format::NVTE_SBHD;
+  const int s = is_sbhd ? kv.size(0) : kv.size(1);
+  const int b = is_sbhd ? kv.size(1) : kv.size(0);
+  const int h = kv.size(2);
+  auto key_sizes = kv.sizes().vec();
+  key_sizes[3] = k_dim + emb_dim;
+  auto val_sizes = kv.sizes().vec();
+  val_sizes[3] = v_dim;
+  auto key_out = at::empty(key_sizes, act_options);
+  auto val_out = at::empty(val_sizes, act_options);
+  auto key_cu = makeTransformerEngineTensor(key_out);
+  auto val_cu = makeTransformerEngineTensor(val_out);
+  auto cu_seqlens_cu = TensorWrapper();
+  // k_pos_emb: [s, b, 1, emb_dim] (SBHD) or [b, s, 1, emb_dim] (BSHD)
+  nvte_mla_rope_kv_forward(kv_cu.data(), emb_cu.data(), cu_seqlens_cu.data(),
+                           cos_cu.data(), sin_cu.data(), key_cu.data(), val_cu.data(),
+                           qkv_format, cp_size, cp_rank, s, b, h, k_dim, v_dim, emb_dim,
+                           is_sbhd ? kv.stride(0) : kv.stride(1),
+                           is_sbhd ? kv.stride(1) : kv.stride(0),
+                           kv.stride(2),
+                           is_sbhd ? k_pos_emb.stride(0) : k_pos_emb.stride(1),
+                           is_sbhd ? k_pos_emb.stride(1) : k_pos_emb.stride(0),
+                           at::cuda::getCurrentCUDAStream());
+  return std::make_tuple(key_out, val_out);
+}
+
+std::tuple<at::Tensor, at::Tensor> mla_rope_kv_backward(
+    const at::Tensor &dk, const at::Tensor &dv,
+    const at::Tensor &cos, const at::Tensor &sin,
+    const int k_dim, const int v_dim,
+    const std::optional<at::Tensor> cu_seqlens,
+    const int cp_size, const int cp_rank,
+    const NVTE_QKV_Format qkv_format) {
+  const int emb_dim = cos.size(3);
+  auto act_options = at::TensorOptions().dtype(dk.scalar_type()).device(dk.device());
+  auto dk_cu = makeTransformerEngineTensor(dk);
+  auto dv_cu = makeTransformerEngineTensor(dv);
+  auto cos_cu = makeTransformerEngineTensor(cos);
+  auto sin_cu = makeTransformerEngineTensor(sin);
+  if (qkv_format == NVTE_QKV_Format::NVTE_THD) {
+    TORCH_CHECK(cu_seqlens.has_value(), "cu_seqlens required for THD");
+    const int h = dk.size(1);
+    const int total_t = dk.size(0);
+    const int max_s = cos.size(0);
+    const int b = cu_seqlens.value().size(0) - 1;
+    auto d_kv = at::empty({total_t, h, k_dim + v_dim}, act_options);
+    auto d_emb = at::empty({total_t, 1, emb_dim}, act_options);
+    auto d_kv_cu = makeTransformerEngineTensor(d_kv);
+    auto d_emb_cu = makeTransformerEngineTensor(d_emb);
+    auto cu_seqlens_cu = makeTransformerEngineTensor(cu_seqlens.value());
+    nvte_mla_rope_kv_backward(dk_cu.data(), dv_cu.data(), cu_seqlens_cu.data(),
+                              cos_cu.data(), sin_cu.data(), d_kv_cu.data(), d_emb_cu.data(),
+                              qkv_format, cp_size, cp_rank, max_s, b, h, k_dim, v_dim, emb_dim,
+                              dk.stride(0), 0, dk.stride(1),
+                              dv.stride(0), 0, dv.stride(1),
+                              d_emb.stride(0), 0,
+                              at::cuda::getCurrentCUDAStream());
+    return std::make_tuple(d_kv, d_emb);
+  }
+  TORCH_CHECK(dk.dim() == 4, "expected 4D tensor");
+  const bool is_sbhd = qkv_format == NVTE_QKV_Format::NVTE_SBHD;
+  const int s = is_sbhd ? dk.size(0) : dk.size(1);
+  const int b = is_sbhd ? dk.size(1) : dk.size(0);
+  const int h = dk.size(2);
+  auto d_kv_sizes = dk.sizes().vec();
+  d_kv_sizes[3] = k_dim + v_dim;
+  auto d_emb_sizes = dk.sizes().vec();
+  d_emb_sizes[2] = 1;
+  d_emb_sizes[3] = emb_dim;
+  auto d_kv = at::empty(d_kv_sizes, act_options);
+  auto d_emb = at::empty(d_emb_sizes, act_options);
+  auto d_kv_cu = makeTransformerEngineTensor(d_kv);
+  auto d_emb_cu = makeTransformerEngineTensor(d_emb);
+  auto cu_seqlens_cu = TensorWrapper();
+  nvte_mla_rope_kv_backward(dk_cu.data(), dv_cu.data(), cu_seqlens_cu.data(),
+                            cos_cu.data(), sin_cu.data(), d_kv_cu.data(), d_emb_cu.data(),
+                            qkv_format, cp_size, cp_rank, s, b, h, k_dim, v_dim, emb_dim,
+                            is_sbhd ? dk.stride(0) : dk.stride(1),
+                            is_sbhd ? dk.stride(1) : dk.stride(0),
+                            dk.stride(2),
+                            is_sbhd ? dv.stride(0) : dv.stride(1),
+                            is_sbhd ? dv.stride(1) : dv.stride(0),
+                            dv.stride(2),
+                            is_sbhd ? d_emb.stride(0) : d_emb.stride(1),
+                            is_sbhd ? d_emb.stride(1) : d_emb.stride(0),
+                            at::cuda::getCurrentCUDAStream());
+  return std::make_tuple(d_kv, d_emb);
+}
+
 }  // namespace transformer_engine::pytorch

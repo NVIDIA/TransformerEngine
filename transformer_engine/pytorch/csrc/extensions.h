@@ -458,6 +458,34 @@ at::Tensor fused_qkv_rope_backward(const at::Tensor &q_grad_out, const at::Tenso
                                    const NVTE_QKV_Format qkv_format, const bool interleaved,
                                    const int cp_size, const int cp_rank);
 
+at::Tensor mla_rope_q_forward(const at::Tensor &q, const at::Tensor &cos, const at::Tensor &sin,
+                               const int qk_head_dim,
+                               const std::optional<at::Tensor> cu_seqlens,
+                               const int cp_size, const int cp_rank,
+                               const NVTE_QKV_Format qkv_format);
+
+at::Tensor mla_rope_q_backward(const at::Tensor &grad, const at::Tensor &cos,
+                                const at::Tensor &sin, const int qk_head_dim,
+                                const std::optional<at::Tensor> cu_seqlens,
+                                const int cp_size, const int cp_rank,
+                                const NVTE_QKV_Format qkv_format);
+
+std::tuple<at::Tensor, at::Tensor> mla_rope_kv_forward(
+    const at::Tensor &kv, const at::Tensor &k_pos_emb,
+    const at::Tensor &cos, const at::Tensor &sin,
+    const int k_dim, const int v_dim,
+    const std::optional<at::Tensor> cu_seqlens,
+    const int cp_size, const int cp_rank,
+    const NVTE_QKV_Format qkv_format);
+
+std::tuple<at::Tensor, at::Tensor> mla_rope_kv_backward(
+    const at::Tensor &dk, const at::Tensor &dv,
+    const at::Tensor &cos, const at::Tensor &sin,
+    const int k_dim, const int v_dim,
+    const std::optional<at::Tensor> cu_seqlens,
+    const int cp_size, const int cp_rank,
+    const NVTE_QKV_Format qkv_format);
+
 /***************************************************************************************************
  * Miscellaneous
  **************************************************************************************************/
