@@ -194,14 +194,8 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         if int(split_sizes.numel()) != num_groups:
             raise ValueError(f"Expected {num_groups} splits, but got {int(split_sizes.numel())}.")
         split_sizes = split_sizes.to(dtype=torch.int64, device=device)
-        split_points = torch.cumsum(split_sizes, 0, dtype=torch.int)
-        split_points_offsets = torch.cumsum(split_sizes, 0)
-        base_offsets = torch.cat(
-            [
-                torch.zeros(1, device=split_sizes.device, dtype=split_sizes.dtype),
-                split_points_offsets,
-            ]
-        )
+        base_offsets = tex.splits_to_offsets(split_sizes, 1)
+        split_points = base_offsets[1:].to(dtype=torch.int)
         fc1_x_tensor_offsets = base_offsets * fc1_weight_shape[1]
         fc2_x_tensor_offsets = base_offsets * fc2_weight_shape[1]
 
