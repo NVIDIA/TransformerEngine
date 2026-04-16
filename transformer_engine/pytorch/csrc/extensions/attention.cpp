@@ -125,8 +125,7 @@ std::vector<py::object> fused_attn_fwd(
   const DType qkv_type = te_Q.dtype();
 
   // create S tensor
-  auto [te_S, py_S, _] =
-      quantizer_helper(s_quantizer, {0}, DType::kFloat32, false, std::nullopt);
+  auto [te_S, py_S, _] = quantizer_helper(s_quantizer, {0}, DType::kFloat32, false, std::nullopt);
 
   // create O tensor
   std::unique_ptr<Quantizer> O_quantizer = convert_quantizer(o_quantizer);
@@ -329,8 +328,7 @@ std::vector<py::object> fused_attn_bwd(
   te_dO = makeTransformerEngineTensor(dO, none);
 
   // create S and dP tensors
-  auto [te_S, py_S, _s] =
-      quantizer_helper(s_quantizer, {0}, DType::kFloat32, false, std::nullopt);
+  auto [te_S, py_S, _s] = quantizer_helper(s_quantizer, {0}, DType::kFloat32, false, std::nullopt);
   auto [te_dP, py_dP, _dp] =
       quantizer_helper(dp_quantizer, {0}, DType::kFloat32, false, std::nullopt);
 

@@ -42,7 +42,6 @@ py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::ob
   auto input_contiguous = tensor.contiguous();
   auto input_cpp = makeTransformerEngineTensor(input_contiguous);
 
-
   // Initialize output tensor
   TensorWrapper output_cpp;
   py::object output_py;
