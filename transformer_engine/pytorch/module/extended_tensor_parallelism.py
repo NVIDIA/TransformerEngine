@@ -1076,18 +1076,22 @@ def reallocate_etp_cache_to_mempool(device, mempool):
         _ETP_CACHE.reallocate_to_mempool(device, mempool)
 
 
-def wait_async_comms(chain_id: str = None):
+def wait_async_comms(chain_id: str = None, skip_rs: bool = False):
     """Wait on in-flight ETP async communications (all-gathers + reduce-scatters).
 
     Args:
         chain_id: If specified, only drain params belonging to this chain ('dense' or 'expert').
                   If None, drain all chains (backward compat).
+        skip_rs: If True, only process AG handles (record ag_event on ag_stream)
+                 and skip RS handles.  Used to record a CUDA graph completion event
+                 after AG but before RS, enabling cross-graph RS overlap.
     """
     for param in list(_inflight_comm_params):
         if chain_id is not None and getattr(param, 'chain_id', 'dense') != chain_id:
             continue
         param._wait_param_gather()
-        param._wait_reduce_scatter()
+        if not skip_rs:
+            param._wait_reduce_scatter()
 
 
 @dataclass
