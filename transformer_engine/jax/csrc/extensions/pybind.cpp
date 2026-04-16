@@ -100,6 +100,9 @@ pybind11::dict Registrations() {
   dict["te_fused_moe_aux_loss_forward_ffi"] = EncapsulateFFI(FusedMoEAuxLossForwardHandler);
   dict["te_fused_moe_aux_loss_backward_ffi"] = EncapsulateFFI(FusedMoEAuxLossBackwardHandler);
 
+  // AIR TopK
+  dict["te_air_topk_ffi"] = EncapsulateFFI(AirTopkHandler);
+
   return dict;
 }
 
@@ -117,6 +120,7 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("get_norm_bwd_workspace_sizes", &GetNormBackwardWorkspaceSizes);
   m.def("get_fused_attn_fwd_workspace_sizes", &GetFusedAttnForwardWorkspaceSizes);
   m.def("get_fused_attn_bwd_workspace_sizes", &GetFusedAttnBackwardWorkspaceSizes);
+  m.def("get_air_topk_workspace_bytes", &GetAirTopkWorkspaceBytes);
   m.def("nvte_get_qkv_format", &nvte_get_qkv_format);
   m.def("is_non_nt_fp8_gemm_supported", &nvte_is_non_tn_fp8_gemm_supported);
   m.def("initialize_cgemm_communicator", &InitializeCgemmCommunicator);
