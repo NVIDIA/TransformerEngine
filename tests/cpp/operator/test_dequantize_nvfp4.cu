@@ -4,6 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <cmath>
 #include <cstring>
 #include <memory>
 #include <random>
@@ -73,6 +74,17 @@ void compute_ref_dequantize_nvfp4(const uint8_t *packed_data,
     }
 }
 
+template <typename OutputType>
+float compute_amax(const test::Tensor &t, size_t rows, size_t cols) {
+    t.to_cpu();
+    const auto *data = t.rowwise_cpu_dptr<OutputType>();
+    float amax = 0.0f;
+    for (size_t i = 0; i < rows * cols; ++i) {
+        amax = std::max(amax, std::abs(static_cast<float>(data[i])));
+    }
+    return amax;
+}
+
 // Quantize a high-precision input to NVFP4, then dequantize and compare
 // against a CPU reference computed from the quantized data.
 template <typename OutputType>
@@ -85,7 +97,11 @@ void performTest_dequantize_nvfp4(const size_t rows, const size_t cols) {
 
     Tensor quantized("quantized", std::vector<size_t>{rows, cols},
                      DType::kFloat4E2M1, true, false, NVTE_NVFP4_1D_SCALING);
-    quantized.set_amax(0.0f);
+    if (rows > 0 && cols > 0) {
+        quantized.set_amax(compute_amax<OutputType>(input, rows, cols));
+    } else {
+        quantized.set_amax(0.0f);
+    }
     setRandomScale(&quantized);
 
     if (rows > 0 && cols > 0) {
@@ -131,7 +147,11 @@ void performTest_dequantize_nvfp4_swizzled(const size_t rows, const size_t cols)
 
     Tensor quantized_compact("quantized_compact", std::vector<size_t>{rows, cols},
                              DType::kFloat4E2M1, true, false, NVTE_NVFP4_1D_SCALING);
-    quantized_compact.set_amax(0.0f);
+    if (rows > 0 && cols > 0) {
+        quantized_compact.set_amax(compute_amax<OutputType>(input, rows, cols));
+    } else {
+        quantized_compact.set_amax(0.0f);
+    }
     setRandomScale(&quantized_compact);
 
     if (rows > 0 && cols > 0) {
@@ -156,7 +176,6 @@ void performTest_dequantize_nvfp4_swizzled(const size_t rows, const size_t cols)
     quantized_compact.to_cpu();
     quantized_swizzled.set_amax(quantized_compact.amax());
     quantized_swizzled.set_scale(quantized_compact.scale());
-    quantized_swizzled.from_cpu();
 
     // Copy FP4 data after from_cpu() to avoid being overwritten
     const size_t data_bytes = rows * cols / 2;
@@ -194,13 +213,18 @@ void performTest_dequantize_nvfp4_swizzled(const size_t rows, const size_t cols)
 }
 
 std::vector<std::pair<size_t, size_t>> nvfp4_tensor_dims = {
-    {0, 32},
+    {0, 128},
+    {0, 256},
     {32, 32},
-    {64, 64},
+    {32, 64},
+    {64, 96},
     {128, 128},
+    {128, 256},
     {256, 256},
-    {128, 512},
-    {256, 1024},
+    {256, 512},
+    {512, 1024},
+    {992, 512},
+    {768, 1024},
 };
 
 }  // namespace
