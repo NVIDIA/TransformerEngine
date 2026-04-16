@@ -673,10 +673,10 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
             # Remove padding from columnwise scale_inv
             if flattened_in_shape0 % MXFP8_BLOCK_SCALING_SIZE != 0:
                 raise NotImplementedError(
-                        "FSDP2 during the backward pass is only supported for MXFP8Tensors with "
-                        f"the flattened first dimension divisible by {MXFP8_BLOCK_SCALING_SIZE} "
-                        f"and got tensor with shape {shape} with flattened first dimension "
-                        f"{flattened_in_shape0}."
+                    "FSDP2 during the backward pass is only supported for MXFP8Tensors with "
+                    f"the flattened first dimension divisible by {MXFP8_BLOCK_SCALING_SIZE} "
+                    f"and got tensor with shape {shape} with flattened first dimension "
+                    f"{flattened_in_shape0}."
                 )
             flattened_in_shape0 = math.prod(shape[:-1]) // MXFP8_BLOCK_SCALING_SIZE
             if columnwise_scale_inv.size(0) != flattened_in_shape0:
