@@ -242,14 +242,8 @@ class Float8CurrentScalingQuantizer(Quantizer):
 
     """
 
-    """Workspace buffer for FP8 scaling factor"""
-    scale: torch.Tensor
-    """Workspace buffer for max-abs value"""
-    amax: torch.Tensor
     """FP8 datatype"""
     dtype: TE_DType
-    """amax update options"""
-    use_existing_amax: bool
     """amax reduction options"""
     with_amax_reduction: bool
     amax_reduction_group: Optional[dist_group_type]
@@ -273,14 +267,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
         amax: Optional[torch.Tensor] = None,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
-        if scale is None:
-            scale = torch.empty(1, dtype=torch.float32, device=device)
-        if amax is None:
-            amax = torch.empty(1, dtype=torch.float32, device=device)
-        self.scale = scale
-        self.amax = amax
         self.dtype = fp8_dtype
-        self.use_existing_amax = use_existing_amax
         self.with_amax_reduction = with_amax_reduction
         self.amax_reduction_group = amax_reduction_group
         self.force_pow_2_scales = force_pow_2_scales
@@ -302,11 +289,8 @@ class Float8CurrentScalingQuantizer(Quantizer):
             columnwise=self.columnwise_usage,
             with_amax_reduction=self.with_amax_reduction,
             amax_reduction_group=self.amax_reduction_group,
-            use_existing_amax=self.use_existing_amax,
             force_pow_2_scales=self.force_pow_2_scales,
             amax_epsilon=self.amax_epsilon,
-            scale=self.scale,
-            amax=self.amax,
         )
         quantizer.internal = self.internal
         quantizer.optimize_for_gemm = self.optimize_for_gemm

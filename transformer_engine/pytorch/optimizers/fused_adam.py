@@ -13,7 +13,11 @@ import warnings
 import torch
 from torch.distributed._tensor import DTensor
 import transformer_engine_torch as tex
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8Quantizer
+from transformer_engine.pytorch.tensor.float8_tensor import (
+    Float8Tensor,
+    Float8Quantizer,
+    Float8CurrentScalingQuantizer,
+)
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensor
 from .multi_tensor_apply import multi_tensor_applier
 
@@ -26,8 +30,15 @@ def get_fp8_meta(fp8_tensor):
 
     quantizer = fp8_tensor._quantizer
 
-    scale = quantizer.scale
-    amax = quantizer.amax
+    if isinstance(quantizer, Float8Quantizer):
+        scale = quantizer.scale
+        amax = quantizer.amax
+    elif isinstance(quantizer, Float8CurrentScalingQuantizer):
+        # Kernel derives scale from scale_inv when scale_ptr is null.
+        scale = torch.empty(0, dtype=torch.float32)
+        amax = torch.empty(0, dtype=torch.float32)
+    else:
+        raise TypeError(f"Unsupported quantizer type: {type(quantizer)}")
     scale_inv = fp8_tensor._scale_inv
     return scale, amax, scale_inv
 
