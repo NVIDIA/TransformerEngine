@@ -41,6 +41,13 @@ from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutpu
 from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
 from transformers.utils.generic import TransformersKwargs
 
+try:
+    from bionemo_mixtral.fused_token_router import FusedTokenRouter
+
+    HAVE_FUSED_ROUTER = True
+except ImportError:
+    HAVE_FUSED_ROUTER = False
+
 
 logger = logging.getLogger(__name__)
 

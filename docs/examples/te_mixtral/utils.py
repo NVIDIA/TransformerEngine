@@ -47,6 +47,9 @@ class HyperParameters:
         self.hf_access_token = ""
         self.expert_parallel_size = 8
 
+        # Token dispatcher: "alltoall" (NCCL all-to-all) or "fused" (DeepEP fused dispatch).
+        self.dispatcher_type = "alltoall"
+
 
 hyperparams = HyperParameters()
 
@@ -145,6 +148,32 @@ def init_baseline_model(hyperparams: HyperParameters):
     return model
 
 
+def _build_dispatcher(hyperparams: HyperParameters, te_config):
+    """Build the MoE token dispatcher based on hyperparams.dispatcher_type."""
+    if hyperparams.dispatcher_type == "alltoall":
+        return None  # NVMixtralSparseMoeBlock will create AllToAllTokenDispatcher
+
+    if hyperparams.dispatcher_type == "fused":
+        from te_mixtral import HAVE_FUSED_ROUTER
+        if not HAVE_FUSED_ROUTER:
+            raise ImportError(
+                "FusedTokenRouter requires the bionemo_mixtral package with DeepEP and Triton. "
+                "Install DeepEP via: bash bionemo_mixtral/install_hybridep.sh"
+            )
+        from bionemo_mixtral.fused_token_router import FusedTokenRouter
+
+        num_experts = te_config.num_local_experts
+        ep_size = te_config.expert_parallel_size
+        return FusedTokenRouter(
+            num_experts=num_experts,
+            num_local_experts=num_experts // ep_size,
+            hidden_size=te_config.hidden_size,
+            ep_size=ep_size,
+        )
+
+    raise ValueError(f"Unknown dispatcher_type: {hyperparams.dispatcher_type!r}. Use 'alltoall' or 'fused'.")
+
+
 def init_te_mixtral_model(hyperparams: HyperParameters):
     """Load Mixtral with TE-optimised MoE blocks."""
     ensure_model_is_downloaded(hyperparams)
@@ -176,6 +205,8 @@ def init_te_mixtral_model(hyperparams: HyperParameters):
     elif hyperparams.expert_parallel_size != 1:
         raise ValueError("expert_parallel_size > 1 requires torchrun distributed launch.")
 
+    dispatcher = _build_dispatcher(hyperparams, te_config)
+
     # Load the HF model on CPU and map weights into TE structure.
     hf_model = AutoModelForCausalLM.from_pretrained(
         hyperparams.weights_cache_dir,
@@ -183,7 +214,7 @@ def init_te_mixtral_model(hyperparams: HyperParameters):
         torch_dtype=torch.bfloat16,
         device_map="cpu",
     )
-    model = NVMixtralForCausalLM(te_config, fp8_recipe=fp8_recipe).to(
+    model = NVMixtralForCausalLM(te_config, fp8_recipe=fp8_recipe, dispatcher=dispatcher).to(
         device=f"cuda:{local_rank}",
         dtype=torch.bfloat16,
     )

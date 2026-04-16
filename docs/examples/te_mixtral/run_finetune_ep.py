@@ -4,6 +4,13 @@ Run from docs/examples/te_mixtral:
     python3 run_finetune_ep.py --improvement 1
     torchrun --standalone --nproc_per_node=8 run_finetune_ep.py --improvement 2
     torchrun --standalone --nproc_per_node=8 run_finetune_ep.py --improvement 3
+    torchrun --standalone --nproc_per_node=8 run_finetune_ep.py --improvement 4
+
+Performance tiers:
+    1 = HF baseline BF16 (device_map="auto", single process)
+    2 = TE naive EP BF16 (AllToAllTokenDispatcher, NCCL all-to-all)
+    3 = TE fused EP BF16 (FusedTokenRouter via DeepEP)
+    4 = TE fused EP FP8  (FusedTokenRouter via DeepEP + FP8 quantization)
 """
 
 import argparse
@@ -19,9 +26,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--improvement",
         type=int,
-        choices=(1, 2, 3),
+        choices=(1, 2, 3, 4),
         default=2,
-        help="Tutorial mode: 1=HF baseline BF16, 2=TE BF16, 3=TE FP8.",
+        help=(
+            "Tutorial mode: "
+            "1=HF baseline BF16, "
+            "2=TE naive EP BF16 (AllToAll), "
+            "3=TE fused EP BF16 (DeepEP), "
+            "4=TE fused EP FP8 (DeepEP+FP8)."
+        ),
     )
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--warmup-steps", type=int, default=1)
@@ -29,27 +42,47 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+IMPROVEMENT_LABELS = {
+    1: "HF baseline BF16 (device_map=auto)",
+    2: "TE naive EP BF16 (AllToAllTokenDispatcher)",
+    3: "TE fused EP BF16 (FusedTokenRouter / DeepEP)",
+    4: "TE fused EP FP8 (FusedTokenRouter / DeepEP + FP8)",
+}
+
+
 def main() -> None:
     args = parse_args()
 
     hp = HyperParameters()
-    # Smallest Mixtral checkpoint.
     hp.model_name = "mistralai/Mixtral-8x7B-v0.1"
     hp.hf_access_token = args.hf_token
-    if args.improvement == 1:
-        # Baseline is HF model-parallel path, not EP DTensor path.
-        hp.expert_parallel_size = 1
-    else:
-        hp.expert_parallel_size = args.ep_size
-    hp.mixed_precision = "bf16" if args.improvement in (1, 2) else "fp8"
     hp.batch_size = args.batch_size
     hp.num_warmup_steps = args.warmup_steps
     hp.num_training_steps = args.train_steps
 
+    if args.improvement == 1:
+        hp.expert_parallel_size = 1
+        hp.mixed_precision = "bf16"
+        hp.dispatcher_type = "alltoall"
+    elif args.improvement == 2:
+        hp.expert_parallel_size = args.ep_size
+        hp.mixed_precision = "bf16"
+        hp.dispatcher_type = "alltoall"
+    elif args.improvement == 3:
+        hp.expert_parallel_size = args.ep_size
+        hp.mixed_precision = "bf16"
+        hp.dispatcher_type = "fused"
+    elif args.improvement == 4:
+        hp.expert_parallel_size = args.ep_size
+        hp.mixed_precision = "fp8"
+        hp.dispatcher_type = "fused"
+
     print(
-        f"Running Mixtral EP improvement {args.improvement} "
-        f"with mixed_precision={hp.mixed_precision}, ep_size={hp.expert_parallel_size}"
+        f"[Tier {args.improvement}] {IMPROVEMENT_LABELS[args.improvement]}\n"
+        f"  mixed_precision={hp.mixed_precision}, ep_size={hp.expert_parallel_size}, "
+        f"dispatcher={hp.dispatcher_type}"
     )
+
     if args.improvement == 1:
         world_size = int(os.environ.get("WORLD_SIZE", "1"))
         if world_size != 1:
