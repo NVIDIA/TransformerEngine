@@ -4,8 +4,8 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#ifndef TRANSFORMER_ENGINE_AIR_TOPK_H_
-#define TRANSFORMER_ENGINE_AIR_TOPK_H_
+#ifndef TRANSFORMER_ENGINE_TOPK_H_
+#define TRANSFORMER_ENGINE_TOPK_H_
 
 #include "transformer_engine.h"
 
@@ -32,26 +32,26 @@ extern "C" {
  *  \param[in]     seq_len          Number of elements per row.
  *  \param[in]     k                Number of top-K entries to select per row.
  *  \param[in]     workspace_bytes  Workspace size in bytes; must be >=
- *                                  nvte_get_air_topk_workspace_bytes(batch_size, seq_len, k).
+ *                                  nvte_get_topk_workspace_bytes(batch_size, seq_len, k).
  *
  *  Supported key dtypes: float32, bfloat16.
  *  Index dtype: int32.
  */
-void nvte_air_topk(cudaStream_t stream, const NVTETensor keys_in, const NVTETensor lengths_in,
-                   NVTETensor keys_out, NVTETensor indices_out, NVTETensor workspace,
-                   int batch_size, int seq_len, int k, size_t workspace_bytes);
+void nvte_topk(cudaStream_t stream, const NVTETensor keys_in, const NVTETensor lengths_in,
+               NVTETensor keys_out, NVTETensor indices_out, NVTETensor workspace,
+               int batch_size, int seq_len, int k, size_t workspace_bytes);
 
-/*! \brief Query the workspace size required by nvte_air_topk.
+/*! \brief Query the workspace size required by nvte_topk.
  *
  *  \param[in]  batch_size  Number of rows.
  *  \param[in]  seq_len     Number of elements per row.
  *  \param[in]  k           Top-K count.
  *  \return     Required workspace size in bytes.
  */
-size_t nvte_get_air_topk_workspace_bytes(int batch_size, int seq_len, int k);
+size_t nvte_get_topk_workspace_bytes(int batch_size, int seq_len, int k);
 
 #ifdef __cplusplus
 }  // extern "C"
 #endif
 
-#endif  // TRANSFORMER_ENGINE_AIR_TOPK_H_
+#endif  // TRANSFORMER_ENGINE_TOPK_H_

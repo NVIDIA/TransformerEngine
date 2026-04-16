@@ -60,7 +60,6 @@ class CMakeExtension(setuptools.Extension):
             f"-DPython_SITEARCH={sysconfig.get_path('platlib')}",
             f"-DCMAKE_BUILD_TYPE={build_type}",
             f"-DCMAKE_INSTALL_PREFIX={install_dir}",
-            "-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON",
         ]
         if bool(int(os.getenv("NVTE_USE_CCACHE", "0"))):
             ccache_bin = os.getenv("NVTE_CCACHE_BIN", "ccache")

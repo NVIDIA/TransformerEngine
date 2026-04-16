@@ -59,7 +59,7 @@ constexpr int WARP_SIZE = 32;
 constexpr int WARP_BITS = 5;
 constexpr unsigned FULL_WARP_MASK = 0xffffffff;
 
-namespace air_topk {
+namespace topk {
 using WideT = float4;
 
 #ifdef __CUDA_ARCH__
@@ -1115,7 +1115,7 @@ __global__ void radix_topk_one_block_kernel(const T *in, const IdxT *in_idx, con
       in, in_idx, actual_len, k, out, out_idx, select_min, buf1, idx_buf1, buf2, idx_buf2);
 }  // end kernel
 
-}  // namespace air_topk
+}  // namespace topk
 
 /***************Runtime API****************/
 
@@ -1124,17 +1124,17 @@ void standalone_radix_topk_(void *buf, size_t &buf_size, const T *in, const IdxT
                             int batch_size, IdxT len, IdxT k, T *out, IdxT *out_idx,
                             bool select_min, bool fused_last_filter, unsigned grid_dim,
                             cudaStream_t stream, IdxT *lengths = nullptr) {
-  static_assert(air_topk::calc_num_passes<T, BitsPerPass>() > 1);
-  constexpr int num_buckets = air_topk::calc_num_buckets<BitsPerPass>();
+  static_assert(topk::calc_num_passes<T, BitsPerPass>() > 1);
+  constexpr int num_buckets = topk::calc_num_buckets<BitsPerPass>();
 
-  air_topk::Counter<T, IdxT> *counters = nullptr;
+  topk::Counter<T, IdxT> *counters = nullptr;
   IdxT *histograms = nullptr;
   T *buf1 = nullptr;
   IdxT *idx_buf1 = nullptr;
   T *buf2 = nullptr;
   IdxT *idx_buf2 = nullptr;
   {
-    IdxT len_candidates = air_topk::calc_buf_len<T>(len);
+    IdxT len_candidates = topk::calc_buf_len<T>(len);
     std::vector<size_t> sizes = {sizeof(*counters) * batch_size,
                                  sizeof(*histograms) * num_buckets * batch_size,
                                  sizeof(*buf1) * len_candidates * batch_size,
@@ -1167,20 +1167,20 @@ void standalone_radix_topk_(void *buf, size_t &buf_size, const T *in, const IdxT
 
   dim3 blocks(grid_dim, batch_size);
 
-  constexpr int num_passes = air_topk::calc_num_passes<T, BitsPerPass>();
+  constexpr int num_passes = topk::calc_num_passes<T, BitsPerPass>();
 
-  auto kernel = air_topk::radix_kernel<T, IdxT, BitsPerPass, BlockSize, false, true>;
+  auto kernel = topk::radix_kernel<T, IdxT, BitsPerPass, BlockSize, false, true>;
 
   for (int pass = 0; pass < num_passes; ++pass) {
-    air_topk::set_buf_pointers(in, in_idx, buf1, idx_buf1, buf2, idx_buf2, pass, in_buf, in_idx_buf,
+    topk::set_buf_pointers(in, in_idx, buf1, idx_buf1, buf2, idx_buf2, pass, in_buf, in_idx_buf,
                                out_buf, out_idx_buf);
 
     if (fused_last_filter && pass == num_passes - 1 && out != nullptr) {
-      kernel = air_topk::radix_kernel<T, IdxT, BitsPerPass, BlockSize, true, true>;
+      kernel = topk::radix_kernel<T, IdxT, BitsPerPass, BlockSize, true, true>;
     } else if (fused_last_filter && pass == num_passes - 1 && out == nullptr) {
-      kernel = air_topk::radix_kernel<T, IdxT, BitsPerPass, BlockSize, true, false>;
+      kernel = topk::radix_kernel<T, IdxT, BitsPerPass, BlockSize, true, false>;
     } else if (out == nullptr) {
-      kernel = air_topk::radix_kernel<T, IdxT, BitsPerPass, BlockSize, false, false>;
+      kernel = topk::radix_kernel<T, IdxT, BitsPerPass, BlockSize, false, false>;
     }
 
     kernel<<<blocks, BlockSize, 0, stream>>>(in, in_idx, in_buf, in_idx_buf, out_buf, out_idx_buf,
@@ -1190,10 +1190,10 @@ void standalone_radix_topk_(void *buf, size_t &buf_size, const T *in, const IdxT
 
   if (!fused_last_filter) {
     if (out != nullptr) {
-      air_topk::last_filter_kernel<T, IdxT, BitsPerPass, true><<<blocks, BlockSize, 0, stream>>>(
+      topk::last_filter_kernel<T, IdxT, BitsPerPass, true><<<blocks, BlockSize, 0, stream>>>(
           in, in_idx, out_buf, out_idx_buf, out, out_idx, len, k, counters, select_min);
     } else {
-      air_topk::last_filter_kernel<T, IdxT, BitsPerPass, false><<<blocks, BlockSize, 0, stream>>>(
+      topk::last_filter_kernel<T, IdxT, BitsPerPass, false><<<blocks, BlockSize, 0, stream>>>(
           in, in_idx, out_buf, out_idx_buf, out, out_idx, len, k, counters, select_min);
     }
   }
@@ -1204,7 +1204,7 @@ void standalone_radix_topk_one_block_(void *buf, size_t &buf_size, const T *in, 
                                       int batch_size, IdxT len, IdxT k, T *out, IdxT *out_idx,
                                       bool select_min, cudaStream_t stream,
                                       IdxT *lengths = nullptr) {
-  static_assert(air_topk::calc_num_passes<T, BitsPerPass>() > 1);
+  static_assert(topk::calc_num_passes<T, BitsPerPass>() > 1);
 
   T *buf1 = nullptr;
   IdxT *idx_buf1 = nullptr;
@@ -1228,18 +1228,18 @@ void standalone_radix_topk_one_block_(void *buf, size_t &buf_size, const T *in, 
   }
 
   if (out != nullptr) {
-    air_topk::radix_topk_one_block_kernel<T, IdxT, BitsPerPass, BlockSize, true, true>
+    topk::radix_topk_one_block_kernel<T, IdxT, BitsPerPass, BlockSize, true, true>
         <<<batch_size, BlockSize, 0, stream>>>(in, in_idx, len, k, out, out_idx, select_min, buf1,
                                                idx_buf1, buf2, idx_buf2, lengths);
   } else {
-    air_topk::radix_topk_one_block_kernel<T, IdxT, BitsPerPass, BlockSize, false, true>
+    topk::radix_topk_one_block_kernel<T, IdxT, BitsPerPass, BlockSize, false, true>
         <<<batch_size, BlockSize, 0, stream>>>(in, in_idx, len, k, out, out_idx, select_min, buf1,
                                                idx_buf1, buf2, idx_buf2, lengths);
   }
 }
 
 template <typename T, typename idxT>
-void standalone_air_topk(void *buf, size_t &buf_size, const T *in, int batch_size, idxT len, idxT k,
+void standalone_topk(void *buf, size_t &buf_size, const T *in, int batch_size, idxT len, idxT k,
                          T *out, idxT *out_idx, bool greater, cudaStream_t stream = 0,
                          idxT *lengths = nullptr, bool is_prefill = false) {
   constexpr int items_per_thread = 32;
@@ -1266,7 +1266,7 @@ void standalone_air_topk(void *buf, size_t &buf_size, const T *in, int batch_siz
       sm_cnt = cached_sm_cnt;
     }
     unsigned grid_dim =
-        air_topk::calc_grid_dim<T, idxT, 11, multi_block_dim>(batch_size, len, sm_cnt);
+        topk::calc_grid_dim<T, idxT, 11, multi_block_dim>(batch_size, len, sm_cnt);
 
     if (grid_dim == 1) {
       standalone_radix_topk_one_block_<T, idxT, 11, single_block_dim>(

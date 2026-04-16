@@ -1,7 +1,7 @@
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-"""AIR TopK custom op"""
+"""TopK custom op"""
 
 import functools
 from typing import Tuple
@@ -12,31 +12,31 @@ from jax import dtypes, ffi
 
 from .base import BasePrimitive, register_primitive
 
-__all__ = ["air_topk"]
+__all__ = ["topk"]
 
 
 @functools.lru_cache(maxsize=512)
-def get_air_topk_workspace_bytes(batch_size: int, seq_len: int, k: int) -> int:
-    """Query the workspace size required for AIR TopK.
+def get_topk_workspace_bytes(batch_size: int, seq_len: int, k: int) -> int:
+    """Query the workspace size required for TopK.
 
     The result is memoised per (batch_size, seq_len, k) tuple so that repeated
     JIT compilations with the same shapes incur only one host-side CUDA call.
     """
     import transformer_engine_jax as _te_jax
 
-    return int(_te_jax.get_air_topk_workspace_bytes(batch_size, seq_len, k))
+    return int(_te_jax.get_topk_workspace_bytes(batch_size, seq_len, k))
 
 
-class AirTopKPrimitive(BasePrimitive):
+class TopKPrimitive(BasePrimitive):
     """
-    AIR TopK Primitive
+    TopK Primitive
 
     Selects the top-k entries (by value) from each row of a 2-D input using the
     AIR radix-selection algorithm.  Returns both the top-k key values and their
     column indices within each row.
     """
 
-    name = "te_air_topk_ffi"
+    name = "te_topk_ffi"
     multiple_results = True
     impl_static_args = (2,)  # k_value
     inner_primitive = None
@@ -53,12 +53,12 @@ class AirTopKPrimitive(BasePrimitive):
         assert keys_dtype in [
             jnp.float32,
             jnp.bfloat16,
-        ], f"air_topk: unsupported key dtype {keys_dtype}; supported: float32, bfloat16"
-        assert in_keys_aval.ndim == 2, "air_topk: keys input must be 2D (batch_size, seq_len)"
+        ], f"topk: unsupported key dtype {keys_dtype}; supported: float32, bfloat16"
+        assert in_keys_aval.ndim == 2, "topk: keys input must be 2D (batch_size, seq_len)"
         assert dtypes.canonicalize_dtype(in_lengths_aval.dtype) == jnp.int32
 
         batch_size, seq_len = in_keys_aval.shape
-        workspace_bytes = get_air_topk_workspace_bytes(batch_size, seq_len, k_value)
+        workspace_bytes = get_topk_workspace_bytes(batch_size, seq_len, k_value)
 
         out_shape = (batch_size, k_value)
         out_keys_aval = jax.core.ShapedArray(shape=out_shape, dtype=keys_dtype)
@@ -68,7 +68,7 @@ class AirTopKPrimitive(BasePrimitive):
 
     @staticmethod
     def outer_abstract(*args, **kwargs):
-        out_keys_aval, out_indices_aval, _workspace_aval = AirTopKPrimitive.abstract(
+        out_keys_aval, out_indices_aval, _workspace_aval = TopKPrimitive.abstract(
             *args, **kwargs
         )
         return (out_keys_aval, out_indices_aval)
@@ -77,8 +77,8 @@ class AirTopKPrimitive(BasePrimitive):
     def lowering(ctx, in_keys, in_lengths, k_value):
         keys_aval = ctx.avals_in[0]
         batch_size, seq_len = keys_aval.shape
-        workspace_bytes = get_air_topk_workspace_bytes(batch_size, seq_len, k_value)
-        return ffi.ffi_lowering(AirTopKPrimitive.name)(
+        workspace_bytes = get_topk_workspace_bytes(batch_size, seq_len, k_value)
+        return ffi.ffi_lowering(TopKPrimitive.name)(
             ctx,
             in_keys,
             in_lengths,
@@ -88,8 +88,8 @@ class AirTopKPrimitive(BasePrimitive):
 
     @staticmethod
     def impl(in_keys, in_lengths, k_value):
-        assert AirTopKPrimitive.inner_primitive is not None
-        out_keys, out_indices, _workspace = AirTopKPrimitive.inner_primitive.bind(
+        assert TopKPrimitive.inner_primitive is not None
+        out_keys, out_indices, _workspace = TopKPrimitive.inner_primitive.bind(
             in_keys,
             in_lengths,
             k_value=k_value,
@@ -97,10 +97,10 @@ class AirTopKPrimitive(BasePrimitive):
         return (out_keys, out_indices)
 
 
-register_primitive(AirTopKPrimitive)
+register_primitive(TopKPrimitive)
 
 
-def air_topk(
+def topk(
     x: jnp.ndarray,
     k_value: int,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
@@ -124,7 +124,7 @@ def air_topk(
     batch_size, seq_len = x.shape
     lengths = jnp.full((batch_size,), seq_len, dtype=jnp.int32)
 
-    out_keys, out_indices = AirTopKPrimitive.outer_primitive.bind(
+    out_keys, out_indices = TopKPrimitive.outer_primitive.bind(
         x,
         lengths,
         k_value=k_value,

@@ -197,9 +197,9 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedTopkWithScoreFunctionBackwardHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedMoEAuxLossForwardHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedMoEAuxLossBackwardHandler);
 
-// AIR TopK
-XLA_FFI_DECLARE_HANDLER_SYMBOL(AirTopkHandler);
-int64_t GetAirTopkWorkspaceBytes(int batch_size, int seq_len, int k);
+// TopK
+XLA_FFI_DECLARE_HANDLER_SYMBOL(TopkHandler);
+int64_t GetTopkWorkspaceBytes(int batch_size, int seq_len, int k);
 
 }  // namespace jax
 }  // namespace transformer_engine

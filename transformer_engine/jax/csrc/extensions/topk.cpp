@@ -4,7 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "transformer_engine/air_topk.h"
+#include "transformer_engine/topk.h"
 
 #include "../extensions.h"
 #include "xla/ffi/api/c_api.h"
@@ -16,17 +16,17 @@ namespace jax {
 // JAX FFI handler
 // ---------------------------------------------------------------------------
 
-Error_Type AirTopkFFI(cudaStream_t stream, Buffer_Type keys_in_buf, Buffer_Type lengths_buf,
-                      Result_Type keys_out_buf, Result_Type indices_out_buf,
-                      Result_Type workspace_buf, int64_t k_value, int64_t workbuf_bytes) {
+Error_Type TopkFFI(cudaStream_t stream, Buffer_Type keys_in_buf, Buffer_Type lengths_buf,
+                   Result_Type keys_out_buf, Result_Type indices_out_buf,
+                   Result_Type workspace_buf, int64_t k_value, int64_t workbuf_bytes) {
   auto keys_in_dtype = convert_ffi_datatype_to_te_dtype(keys_in_buf.element_type());
   auto keys_out_dtype = convert_ffi_datatype_to_te_dtype(keys_out_buf->element_type());
   auto idx_out_dtype = convert_ffi_datatype_to_te_dtype(indices_out_buf->element_type());
-  NVTE_CHECK(keys_in_dtype == keys_out_dtype, "AirTopkFFI: input and output key dtypes must match");
-  NVTE_CHECK(idx_out_dtype == DType::kInt32, "AirTopkFFI: index output must be int32");
+  NVTE_CHECK(keys_in_dtype == keys_out_dtype, "TopkFFI: input and output key dtypes must match");
+  NVTE_CHECK(idx_out_dtype == DType::kInt32, "TopkFFI: index output must be int32");
 
   auto keys_in_shape = keys_in_buf.dimensions();
-  NVTE_CHECK(keys_in_shape.size() == 2, "AirTopkFFI: keys input must be 2D (batch_size, seq_len)");
+  NVTE_CHECK(keys_in_shape.size() == 2, "TopkFFI: keys input must be 2D (batch_size, seq_len)");
 
   int batch_size = static_cast<int>(keys_in_shape[0]);
   int seq_len = static_cast<int>(keys_in_shape[1]);
@@ -38,7 +38,7 @@ Error_Type AirTopkFFI(cudaStream_t stream, Buffer_Type keys_in_buf, Buffer_Type 
     case DType::kBFloat16:
       break;
     default:
-      NVTE_ERROR("AirTopkFFI: unsupported key dtype (float32 and bfloat16 only)");
+      NVTE_ERROR("TopkFFI: unsupported key dtype (float32 and bfloat16 only)");
   }
 
   // Build flat TensorWrappers over the full (batch_size * seq_len) / (batch_size * k) buffers.
@@ -57,14 +57,14 @@ Error_Type AirTopkFFI(cudaStream_t stream, Buffer_Type keys_in_buf, Buffer_Type 
       TensorWrapper(indices_out_buf->untyped_data(), flat_out_shape, DType::kInt32);
   auto workspace_tensor = TensorWrapper(workspace_buf->untyped_data(), ws_shape, DType::kByte);
 
-  nvte_air_topk(stream, keys_in_tensor.data(), lengths_tensor.data(), keys_out_tensor.data(),
-                idx_out_tensor.data(), workspace_tensor.data(), batch_size, seq_len, k,
-                static_cast<size_t>(workbuf_bytes));
+  nvte_topk(stream, keys_in_tensor.data(), lengths_tensor.data(), keys_out_tensor.data(),
+            idx_out_tensor.data(), workspace_tensor.data(), batch_size, seq_len, k,
+            static_cast<size_t>(workbuf_bytes));
 
   return ffi_with_cuda_error_check();
 }
 
-XLA_FFI_DEFINE_HANDLER_SYMBOL(AirTopkHandler, AirTopkFFI,
+XLA_FFI_DEFINE_HANDLER_SYMBOL(TopkHandler, TopkFFI,
                               FFI::Bind()
                                   .Ctx<FFI_Stream_Type>()  // stream
                                   .Arg<Buffer_Type>()      // keys_in
@@ -80,8 +80,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(AirTopkHandler, AirTopkFFI,
 // Workspace-size query exposed to Python
 // ---------------------------------------------------------------------------
 
-int64_t GetAirTopkWorkspaceBytes(int batch_size, int seq_len, int k) {
-  return static_cast<int64_t>(nvte_get_air_topk_workspace_bytes(batch_size, seq_len, k));
+int64_t GetTopkWorkspaceBytes(int batch_size, int seq_len, int k) {
+  return static_cast<int64_t>(nvte_get_topk_workspace_bytes(batch_size, seq_len, k));
 }
 
 }  // namespace jax

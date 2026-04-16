@@ -48,7 +48,7 @@ from transformer_engine.jax.quantize import helper
 from transformer_engine.jax.activation import activation
 from transformer_engine.jax.dense import dense, grouped_dense
 from transformer_engine.jax.layernorm_dense import layernorm_dense
-from transformer_engine.jax.cpp_extensions.air_topk import air_topk
+from transformer_engine.jax.cpp_extensions.topk import topk
 
 GEMM_CASES = [
     (256, 256, 512),
@@ -1989,15 +1989,15 @@ class TestDebugInspectFFI:
         (1, 1000000, 1000),
     ],
 )
-class TestAirTopK:
-    """Correctness tests for the AIR TopK JAX primitive.
+class TestTopK:
+    """Correctness tests for the TopK JAX primitive.
 
     Each test generates an input whose top-k entries lie in a known value range
     so that correctness can be verified without a full sort, then cross-checks
     against jax.lax.top_k as a reference.
     """
 
-    def test_air_topk_1d(self, dtype, problem_size):
+    def test_topk_1d(self, dtype, problem_size):
         """1-D input: single row."""
         _bs, n, k = problem_size
 
@@ -2010,7 +2010,7 @@ class TestAirTopK:
         x = jax.random.permutation(keys[2], jnp.concatenate([topk_vals, bottom_vals]))
 
         ref_vals, ref_idx = jax.jit(jax.lax.top_k, static_argnums=(1,))(x, k)
-        prim_vals, prim_idx = jax.jit(air_topk, static_argnums=(1,))(x, k)
+        prim_vals, prim_idx = jax.jit(topk, static_argnums=(1,))(x, k)
 
         # AIR TopK output is unordered; sort before comparing.
         ref_vals, ref_idx = jax.lax.sort_key_val(ref_vals, ref_idx)
@@ -2024,7 +2024,7 @@ class TestAirTopK:
         # Values at returned indices must match reference.
         assert_allclose(x[prim_idx], x[ref_idx], dtype=dtype)
 
-    def test_air_topk_2d(self, dtype, problem_size):
+    def test_topk_2d(self, dtype, problem_size):
         """2-D input: each row is an independent top-k problem."""
         bs, n, k = problem_size
 
@@ -2040,7 +2040,7 @@ class TestAirTopK:
         x = x_unsorted[:, col_perm]
 
         ref_vals, ref_idx = jax.jit(jax.lax.top_k, static_argnums=(1,))(x, k)
-        prim_vals, prim_idx = jax.jit(air_topk, static_argnums=(1,))(x, k)
+        prim_vals, prim_idx = jax.jit(topk, static_argnums=(1,))(x, k)
 
         # Sort each row independently for comparison.
         ref_vals, ref_idx = jax.vmap(jax.lax.sort_key_val)(ref_vals, ref_idx)
