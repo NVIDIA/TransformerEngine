@@ -854,8 +854,8 @@ template <typename T, int kVec, bool UseScale, int kBlockDim, int kRowsPerBlock>
 __global__ void grouped_bias_add_kernel(char *__restrict__ d_base,
                                         const char *__restrict__ bias_base,
                                         const float *__restrict__ scale_base,
-                                        TensorShapeInfo d_meta,
-                                        int n, int total_rows, int num_tensors) {
+                                        TensorShapeInfo d_meta, int n, int total_rows,
+                                        int num_tensors) {
   using VecStorage = transformer_engine::VectorizedStorage<T, kVec>;
   using VecType = typename VecStorage::LType;
 
@@ -878,16 +878,14 @@ __global__ void grouped_bias_add_kernel(char *__restrict__ d_base,
   // Build cumulative row prefix-sum in shared memory.
   if (tid == 0) cumsum[0] = 0;
   for (int i = tid; i < num_tensors; i += block_dim) {
-    cumsum[i + 1] = static_cast<int>(d_meta.first_dims ? d_meta.first_dims[i]
-                                                        : d_meta.uniform_first);
+    cumsum[i + 1] =
+        static_cast<int>(d_meta.first_dims ? d_meta.first_dims[i] : d_meta.uniform_first);
   }
   __syncthreads();
   if (tid == 0) {
     for (int t = 1; t <= num_tensors; t++) cumsum[t] += cumsum[t - 1];
   }
   __syncthreads();
-
-
 
   T *__restrict__ d = reinterpret_cast<T *>(d_base);
   const T *__restrict__ bias = reinterpret_cast<const T *>(bias_base);
@@ -898,8 +896,10 @@ __global__ void grouped_bias_add_kernel(char *__restrict__ d_base,
     int lo = 0, hi = num_tensors;
     while (lo < hi) {
       int mid = (lo + hi) >> 1;
-      if (cumsum[mid + 1] <= row_start) lo = mid + 1;
-      else                              hi = mid;
+      if (cumsum[mid + 1] <= row_start)
+        lo = mid + 1;
+      else
+        hi = mid;
     }
     tensor_idx = lo;
   }
@@ -929,13 +929,12 @@ __global__ void grouped_bias_add_kernel(char *__restrict__ d_base,
 #pragma unroll
       for (int i = 0; i < kVec; ++i) {
         if constexpr (UseScale) {
-          d_in.scratch_.separate[i] = static_cast<T>(
-              fmaf(static_cast<float>(b_in.scratch_.separate[i]), s_val,
-                   static_cast<float>(d_in.scratch_.separate[i])));
+          d_in.scratch_.separate[i] =
+              static_cast<T>(fmaf(static_cast<float>(b_in.scratch_.separate[i]), s_val,
+                                  static_cast<float>(d_in.scratch_.separate[i])));
         } else {
-          d_in.scratch_.separate[i] = static_cast<T>(
-              static_cast<float>(d_in.scratch_.separate[i]) +
-              static_cast<float>(b_in.scratch_.separate[i]));
+          d_in.scratch_.separate[i] = static_cast<T>(static_cast<float>(d_in.scratch_.separate[i]) +
+                                                     static_cast<float>(b_in.scratch_.separate[i]));
         }
       }
       *reinterpret_cast<VecType *>(d_ptr) = d_in.scratch_.aligned;
