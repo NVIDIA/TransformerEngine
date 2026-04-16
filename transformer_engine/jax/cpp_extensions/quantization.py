@@ -1182,11 +1182,7 @@ class GroupedQuantizePrimitive(BasePrimitive):
             # V2: CUDA-graph safe; scale is passed but ignored by the C++ handler.
             # Requires total_first_dim % 128 == 0 (checked above) and all individual
             # group sizes % 128 == 0 (dynamic constraint, enforced by the kernel).
-            # has_side_effect=False: V2 has no observable side effects beyond its output
-            # buffers (no D2H copy, no global-state mutation).  This lets XLA DCE the
-            # call in the backward-scan remat block when both rowwise and colwise outputs
-            # have been replaced by JAX checkpointed residuals.
-            return ffi.ffi_lowering(GroupedQuantizePrimitive.name_v2, has_side_effect=False)(
+            return ffi.ffi_lowering(GroupedQuantizePrimitive.name_v2)(
                 ctx,
                 x,
                 scale,

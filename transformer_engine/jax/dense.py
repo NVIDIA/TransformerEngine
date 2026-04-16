@@ -433,8 +433,7 @@ def _grouped_dense_fwd_rule(
     # backward-scan remat block.  Without this, JAX would re-run the quantize kernel to
     # obtain grouped_gemm_x / grouped_gemm_kernel for the forward-GEMM recomputation even
     # though the colwise residuals (ctx_x / ctx_kernel) are already saved.  With both
-    # orientations checkpointed, all outputs of the custom-call become dead in the remat
-    # trace and XLA can eliminate it (provided has_side_effect=False on the lowering).
+    # orientations checkpointed, all outputs of the custom-call become dead in the remat trace.
     grouped_gemm_x = grouped_gemm_x.checkpoint(quantizer_set.x) if isinstance(
         grouped_gemm_x, ScaledTensor
     ) else grouped_gemm_x
