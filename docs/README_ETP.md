@@ -28,8 +28,7 @@ TODO(shiqingf): add performance for Ultra model in nvfp4.
 | **FP8 / MXFP8 support** | Quantized shards with ETP-group amax reduction |
 | **Routed expert support** | Batched coalesced all-gather for all experts in a MoE layer (GroupedLinear) |
 | **Composable with TP/SP** | Orthogonal to tensor parallelism and sequence parallelism |
-| **CUDA Graphs compatible** | ETP is compatible with CUDA Graphs. And kernels on sidestreams are no longer required to synchronize at graph breaks
- |
+| **CUDA Graphs compatible** | Dense-chain prefetches captured in graphs; expert-chain runs eagerly. DDP RS serialized via `register_grad_accum_hook` (called from `_finalize_wgrad` for eager params, from `_CudagraphReplayNode.backward` for graphed params). Forward drains at CG/eager boundary prevent IB races. |
 | **Debug naming** | `tag_etp_params_with_names(model)` populates human-readable names on every `ETPShardedParam`; the prefetch-link table is printed atomically at the start of the second forward pass |
 
 ### Implementation Mechanisms
@@ -433,6 +432,42 @@ Both chains share the same `ag_stream` and `rs_stream`. Per-chain streams were c
 ### Buffer Cache
 
 The single global `ETPWeightCache` serves both chains. Cache keys already include `expert_idx`, so dense and expert buffers never collide. `reallocate_to_mempool()` only migrates **dense-chain** buffers into the CUDA graph memory pool; expert-chain buffers remain in regular allocator memory.
+
+### Excluding Params from the Chain
+
+Setting `weight.prefetch_initialized = True` at construction skips chain registration entirely. Megatron uses this for the embedding and output-layer weights, which perform synchronous all-gathers and must not join the dense chain (they execute outside the CUDA graph boundary, and linking them into the dense chain would cause the chain to cross the CG/eager boundary, reproducing the same NCCL deadlock as the old single-chain design). Setting `_need_weight_prefetch = False` in addition disables the async path so these weights always do synchronous AG.
+
+### ETP + DDP Serialization (`register_grad_accum_hook`)
+
+ETP bypasses autograd's normal gradient flow: `wgrad_reduce_scatter` returns `None` for async RS (chain interior params), and `_finalize_wgrad` accumulates directly into `main_grad`. As a result, autograd's grad accumulator never fires for these params, and standard DDP backward hooks (`grad_acc.register_hook`) would never trigger.
+
+Without proper serialization, DDP reduce-scatter (IB) and ETP reduce-scatter (IB) can run concurrently on different CUDA streams at 64+ GPU IB scale, causing NCCL deadlock.
+
+The solution: `register_grad_accum_hook(grad_acc, hook)` stores the DDP hook on the `ETPShardedParam`. `_finalize_wgrad` calls the hook **manually** after RS wait + gradient accumulation:
+
+```python
+# _finalize_wgrad (called after RS is waited and gradient accumulated)
+param.main_grad.add_(wgrad_rs)          # gradient accumulated
+param.grad = dummy_grad                 # Python attr set (does NOT fire autograd)
+param._grad_accum_hook()                # manually triggers DDP register_grad_ready
+```
+
+This fires `register_grad_ready` at exactly the right serialization point, ensuring DDP RS launches only after ETP RS completes. The hook trigger differs by execution mode:
+
+| Weight type | Hook trigger location | When |
+|---|---|---|
+| **Graphed dense** (mamba/attn/shared_expert) | `_CudagraphReplayNode.backward` in `cuda_graphs.py` | After graph replay (Python, not captured) |
+| **Eager expert** (grouped_fc1/fc2) | `_finalize_wgrad` in `extended_tensor_parallelism.py` | After RS wait + `main_grad.add_` (Python, every iteration) |
+| **Eager chain head** (sync RS) | `_finalize_wgrad` called directly in `wgrad_reduce_scatter` | Immediately after sync RS completes |
+
+For graphed params: `_finalize_wgrad` runs during capture but the hook returns early (`is_graph_capturing()`). At replay, `_finalize_wgrad` doesn't re-run from Python (captured GPU ops only). `_CudagraphReplayNode.backward` explicitly triggers the hook after setting `grad_added_to_main_grad = True`.
+
+### Forward-Path Drains at CG/Eager Boundary
+
+Before eager expert compute starts (`_forward_mlp_expert_compute`), two drains ensure no in-flight IB ops race with expert backward:
+
+1. `_drain_etp_side_streams('dense')` — drains the dense ETP AG prefetch (e.g., `AG(next_mamba_fc1)` launched by the preceding shared_expert GEMM on `ag_stream`)
+2. `_drain_param_gather()` — drains async DDP param all-gather from `--overlap-param-gather` + CG (the forward pre-hook `finish_param_sync` is skipped during graph capture/replay)
 
 ---
 
