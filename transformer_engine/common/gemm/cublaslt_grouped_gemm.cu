@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <type_traits>
 #include <vector>
 
 #include "../common.h"
@@ -846,67 +847,101 @@ __forceinline__ __device__ int64_t compute_grouped_tensor_offset(const TensorSha
 }
 
 // Kernel that performs (optionally scaled) bias addition to Grouped GEMM output tensors.
-// When scale_base is nullptr: output[row, col] += bias[col]
-// When scale_base is provided: output[row, col] += bias[col] * scale[row]
-// scale is a 1D float32 per-token (per-row) tensor, contiguous across all groups.
-//
-// 2D grid: blockIdx.y selects the tensor, blockIdx.x grid-strides over vectors
-// within that tensor.
-template <typename T, int kVec, bool UseScale>
-__global__ void grouped_bias_add_kernel(char *d_base, const char *bias_base,
-                                        const float *scale_base, TensorShapeInfo d_meta,
-                                        TensorShapeInfo bias_meta, size_t num_tensors) {
+// 2D grid: blockIdx.x = row chunk, blockIdx.y = column chunk.
+// Each block loads bias once for its column chunk and sweeps its rows
+// with direct vectorized load-add-store on d.
+template <typename T, int kVec, bool UseScale, int kBlockDim, int kRowsPerBlock>
+__global__ void grouped_bias_add_kernel(char *__restrict__ d_base,
+                                        const char *__restrict__ bias_base,
+                                        const float *__restrict__ scale_base,
+                                        TensorShapeInfo d_meta,
+                                        int n, int total_rows, int num_tensors) {
   using VecStorage = transformer_engine::VectorizedStorage<T, kVec>;
   using VecType = typename VecStorage::LType;
 
-  const size_t tensor_idx = blockIdx.y;
-  if (tensor_idx >= num_tensors) return;
+  constexpr int kMaxTensors = 257;
+  __shared__ int cumsum[kMaxTensors];
 
-  const int64_t n = d_meta.last_dims ? d_meta.last_dims[0] : d_meta.uniform_last;
-  const int64_t m = d_meta.first_dims ? d_meta.first_dims[tensor_idx] : d_meta.uniform_first;
-  const int64_t d_offset = compute_grouped_tensor_offset(d_meta, tensor_idx);
-  const int64_t bias_offset = compute_grouped_tensor_offset(bias_meta, tensor_idx);
+  const int tid = static_cast<int>(threadIdx.x);
+  const int block_dim = static_cast<int>(blockDim.x);
+  const int row_bid = static_cast<int>(blockIdx.x);
+  const int col_bid = static_cast<int>(blockIdx.y);
 
-  auto *d_ptr = reinterpret_cast<T *>(d_base + d_offset * sizeof(T));
-  const auto *bias_ptr = reinterpret_cast<const T *>(bias_base + bias_offset * sizeof(T));
+  const int row_start = row_bid * kRowsPerBlock;
+  const int row_end = min(row_start + kRowsPerBlock, total_rows);
+  if (row_start >= total_rows) return;
 
-  int64_t scale_row_offset = 0;
-  if constexpr (UseScale) {
-    if (d_meta.first_dims) {
-      for (size_t i = 0; i < tensor_idx; i++) {
-        scale_row_offset += d_meta.first_dims[i];
-      }
-    } else {
-      scale_row_offset = static_cast<int64_t>(tensor_idx) * d_meta.uniform_first;
-    }
+  const int block_cols = block_dim * kVec;
+  const int col = col_bid * block_cols + tid * kVec;
+  if (col >= n) return;
+
+  // Build cumulative row prefix-sum in shared memory.
+  if (tid == 0) cumsum[0] = 0;
+  for (int i = tid; i < num_tensors; i += block_dim) {
+    cumsum[i + 1] = static_cast<int>(d_meta.first_dims ? d_meta.first_dims[i]
+                                                        : d_meta.uniform_first);
   }
+  __syncthreads();
+  if (tid == 0) {
+    for (int t = 1; t <= num_tensors; t++) cumsum[t] += cumsum[t - 1];
+  }
+  __syncthreads();
 
-  const int64_t elements = m * n;
-  const int64_t vec_count = elements / kVec;
-  const int64_t stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
 
-  for (int64_t vec_id = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-       vec_id < vec_count; vec_id += stride) {
-    const int64_t vec_start = vec_id * kVec;
-    const int64_t col = vec_start % n;
-    VecStorage d_in, b_in;
-    d_in.scratch_.aligned = *reinterpret_cast<const VecType *>(d_ptr + vec_start);
-    b_in.scratch_.aligned = *reinterpret_cast<const VecType *>(bias_ptr + col);
-    float s;
-    if constexpr (UseScale) {
-      s = scale_base[scale_row_offset + vec_start / n];
+
+  T *__restrict__ d = reinterpret_cast<T *>(d_base);
+  const T *__restrict__ bias = reinterpret_cast<const T *>(bias_base);
+
+  // Binary search for the starting row's tensor.
+  int tensor_idx;
+  {
+    int lo = 0, hi = num_tensors;
+    while (lo < hi) {
+      int mid = (lo + hi) >> 1;
+      if (cumsum[mid + 1] <= row_start) lo = mid + 1;
+      else                              hi = mid;
     }
+    tensor_idx = lo;
+  }
+  int bias_idx = tensor_idx * n;
+
+  VecStorage b_in;
+  b_in.scratch_.aligned = *reinterpret_cast<const VecType *>(bias + bias_idx + col);
+
+  // Walk tensor segments within this block's row range.
+  int seg_start = row_start;
+  while (seg_start < row_end) {
+    while (tensor_idx < num_tensors - 1 && cumsum[tensor_idx + 1] <= seg_start) {
+      tensor_idx++;
+      bias_idx += n;
+    }
+    b_in.scratch_.aligned = *reinterpret_cast<const VecType *>(bias + bias_idx + col);
+    const int seg_end = min(cumsum[tensor_idx + 1], row_end);
+
+    for (int row = seg_start; row < seg_end; row++) {
+      T *d_ptr = d + row * n + col;
+      VecStorage d_in;
+      d_in.scratch_.aligned = *reinterpret_cast<const VecType *>(d_ptr);
+
+      [[maybe_unused]] float s_val;
+      if constexpr (UseScale) s_val = scale_base[row];
+
 #pragma unroll
-    for (int i = 0; i < kVec; ++i) {
-      if constexpr (UseScale) {
-        d_in.scratch_.separate[i] =
-            static_cast<T>(static_cast<float>(d_in.scratch_.separate[i]) +
-                           static_cast<float>(b_in.scratch_.separate[i]) * s);
-      } else {
-        d_in.scratch_.separate[i] = d_in.scratch_.separate[i] + b_in.scratch_.separate[i];
+      for (int i = 0; i < kVec; ++i) {
+        if constexpr (UseScale) {
+          d_in.scratch_.separate[i] = static_cast<T>(
+              fmaf(static_cast<float>(b_in.scratch_.separate[i]), s_val,
+                   static_cast<float>(d_in.scratch_.separate[i])));
+        } else {
+          d_in.scratch_.separate[i] = static_cast<T>(
+              static_cast<float>(d_in.scratch_.separate[i]) +
+              static_cast<float>(b_in.scratch_.separate[i]));
+        }
       }
+      *reinterpret_cast<VecType *>(d_ptr) = d_in.scratch_.aligned;
     }
-    *reinterpret_cast<VecType *>(d_ptr + vec_start) = d_in.scratch_.aligned;
+
+    seg_start = seg_end;
   }
 }
 
@@ -1358,10 +1393,6 @@ void nvte_grouped_bias_add(const NVTEGroupedTensor output, const NVTEGroupedTens
   NVTE_CHECK(outputD->get_common_last_dim() == bias_tensor->get_common_last_dim(),
              "Grouped bias add: output and bias last dims must match");
 
-  constexpr int kVec = 4;
-  NVTE_CHECK(outputD->get_common_last_dim() % kVec == 0,
-             "Grouped bias add requires last dim divisible by ", kVec);
-
   const float *scale_ptr = nullptr;
   if (scale_tensor->data.dptr != nullptr) {
     NVTE_CHECK(scale_tensor->dtype() == DType::kFloat32, "Grouped bias add: scale must be float32");
@@ -1374,35 +1405,53 @@ void nvte_grouped_bias_add(const NVTEGroupedTensor output, const NVTEGroupedTens
   }
 
   const TensorShapeInfo d_meta = TensorShapeInfo::from_tensor(outputD);
-  const TensorShapeInfo bias_meta = TensorShapeInfo::from_tensor(bias_tensor);
 
   const DType dtype = outputD->dtype();
   constexpr int kThreads = 256;
 
-  int device_id;
-  NVTE_CHECK_CUDA(cudaGetDevice(&device_id));
-  int num_sms;
-  NVTE_CHECK_CUDA(cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, device_id));
-  constexpr int kBlocksPerSM = 8;
   const int num_tensors = static_cast<int>(outputD->num_tensors);
-  int blocks_per_tensor = std::max(1, (num_sms * kBlocksPerSM) / num_tensors);
-  const dim3 grid(blocks_per_tensor, num_tensors);
+  NVTE_CHECK(num_tensors <= 256, "Grouped bias add supports at most 256 tensors, got ",
+             num_tensors);
+  const int total_rows = static_cast<int>(outputD->logical_shape.data[0]);
+  const int n = static_cast<int>(outputD->get_common_last_dim());
+
+  // Use 128-bit vector loads: kVec=8 for 2-byte types (bf16/fp16), kVec=4 for fp32.
+  const size_t elem_size = typeToSize(dtype);
+  const int kVec = (elem_size <= 2) ? 8 : 4;
+  NVTE_CHECK(n % kVec == 0, "Grouped bias add requires last dim divisible by ", kVec);
+
+  constexpr int kRowsPerBlock = 8;
+  const int block_cols = kThreads * kVec;
+  const int col_blocks = (n + block_cols - 1) / block_cols;
+  const int row_blocks = (total_rows + kRowsPerBlock - 1) / kRowsPerBlock;
+  const dim3 grid(row_blocks, col_blocks);
   const dim3 block(kThreads);
 
+  auto launch = [&](auto use_scale_tag) {
+    constexpr bool kUseScale = decltype(use_scale_tag)::value;
+    if (elem_size <= 2) {
+      constexpr int kV = 8;
+      TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(dtype, T, {
+        grouped_bias_add_kernel<T, kV, kUseScale, kThreads, kRowsPerBlock>
+            <<<grid, block, 0, stream>>>(static_cast<char *>(outputD->data.dptr),
+                                         static_cast<const char *>(bias_tensor->data.dptr),
+                                         scale_ptr, d_meta, n, total_rows, num_tensors);
+      });
+    } else {
+      constexpr int kV = 4;
+      TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(dtype, T, {
+        grouped_bias_add_kernel<T, kV, kUseScale, kThreads, kRowsPerBlock>
+            <<<grid, block, 0, stream>>>(static_cast<char *>(outputD->data.dptr),
+                                         static_cast<const char *>(bias_tensor->data.dptr),
+                                         scale_ptr, d_meta, n, total_rows, num_tensors);
+      });
+    }
+  };
+
   if (scale_ptr != nullptr) {
-    TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(dtype, T, {
-      grouped_bias_add_kernel<T, kVec, true>
-          <<<grid, block, 0, stream>>>(static_cast<char *>(outputD->data.dptr),
-                                       static_cast<const char *>(bias_tensor->data.dptr), scale_ptr,
-                                       d_meta, bias_meta, outputD->num_tensors);
-    });
+    launch(std::true_type{});
   } else {
-    TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(dtype, T, {
-      grouped_bias_add_kernel<T, kVec, false>
-          <<<grid, block, 0, stream>>>(static_cast<char *>(outputD->data.dptr),
-                                       static_cast<const char *>(bias_tensor->data.dptr), scale_ptr,
-                                       d_meta, bias_meta, outputD->num_tensors);
-    });
+    launch(std::false_type{});
   }
 
   NVTE_CHECK_CUDA(cudaGetLastError());
