@@ -3669,6 +3669,221 @@ class TestSequentialModules:
             assert_close(fc1.weight.grad, fc1_w_ref_grad, **tols)
             assert_close(fc2.weight.grad, fc2_w_ref_grad, **tols)
 
+    @pytest.mark.parametrize(
+        "dtype",
+        tuple(dtype for dtype in _dtypes if dtype in (torch.float16, torch.bfloat16)),
+    )
+    @pytest.mark.parametrize("bias", (False, True))
+    @pytest.mark.parametrize("activation", ("scaled_swiglu", "scaled_clamped_qgeglu"))
+    @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+    def test_grouped_mlp_single_weight_numerics(
+        self,
+        *,
+        dtype: torch.dtype,
+        bias: bool,
+        activation: str,
+        device: torch.device = "cuda",
+        group_size: int = 4,
+        hidden_size: int = 256,
+        split_alignment: int = 256,
+        glu_interleave_size: int = 32,
+    ) -> None:
+        """single_grouped_weight=True/False should match exactly for fused MXFP8 grouped MLP."""
+
+        if not te_ops.fused.ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8.is_supported():
+            pytest.skip("MXFP8 fused grouped MLP forward is not supported on this system")
+        if not te_ops.fused.BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8.is_supported():
+            pytest.skip("MXFP8 fused grouped MLP backward is not supported on this system")
+        if activation == "scaled_clamped_qgeglu" and not (
+            _nvidia_cudnn_frontend_supports_scaled_clamped_qgeglu()
+        ):
+            pytest.skip(
+                "ScaledClampedQGeGLU fused grouped MLP requires nvidia-cudnn-frontend >= 1.23.0"
+            )
+
+        split_sizes = [split_alignment * (i + 1) for i in range(group_size)]
+        random.shuffle(split_sizes)
+        split_sizes = torch.tensor(split_sizes, dtype=torch.int64, device=device)
+        in_shape = (split_sizes.sum().item(), hidden_size)
+        recipe = make_recipe("mxfp8")
+
+        x_base = torch.empty(in_shape, device=device, dtype=dtype).uniform_(-0.25, 0.25)
+        probs_base = torch.empty((in_shape[0],), device=device, dtype=dtype).uniform_(-0.25, 0.25)
+        dy_base = torch.empty(in_shape, device=device, dtype=dtype).uniform_(-0.25, 0.25)
+        fc1_ws_base = [
+            torch.empty((2 * hidden_size, hidden_size), device=device, dtype=dtype).uniform_(
+                -0.25, 0.25
+            )
+            for _ in range(group_size)
+        ]
+        fc2_ws_base = [
+            torch.empty((hidden_size, hidden_size), device=device, dtype=dtype).uniform_(
+                -0.25, 0.25
+            )
+            for _ in range(group_size)
+        ]
+        fc1_bs_base = (
+            [
+                torch.empty((2 * hidden_size,), device=device, dtype=dtype).uniform_(-0.5, 0.5)
+                for _ in range(group_size)
+            ]
+            if bias
+            else None
+        )
+        fc2_bs_base = (
+            [
+                torch.empty((hidden_size,), device=device, dtype=dtype).uniform_(-0.5, 0.5)
+                for _ in range(group_size)
+            ]
+            if bias
+            else None
+        )
+
+        def _run_case(single_grouped_weight: bool) -> tuple[torch.Tensor, ...]:
+            with te.quantized_model_init(enabled=True, recipe=recipe):
+                scaled_act = (
+                    te_ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size)
+                    if activation == "scaled_swiglu"
+                    else te_ops.ScaledClampedQGeGLU(glu_interleave_size=glu_interleave_size)
+                )
+                fc1 = te_ops.GroupedLinear(
+                    group_size,
+                    hidden_size,
+                    2 * hidden_size,
+                    bias=bias,
+                    device=device,
+                    dtype=dtype,
+                    single_grouped_weight=single_grouped_weight,
+                )
+                fc2 = te_ops.GroupedLinear(
+                    group_size,
+                    hidden_size,
+                    hidden_size,
+                    bias=bias,
+                    device=device,
+                    dtype=dtype,
+                    single_grouped_weight=single_grouped_weight,
+                    scale_bias=bias,
+                )
+                module = te_ops.Sequential(fc1, scaled_act, fc2)
+
+            with torch.no_grad():
+                if single_grouped_weight:
+                    fc1_weights = fc1.weight.quantized_tensors
+                    if fc1_weights is None:
+                        fc1_weights = fc1.weight.split_into_quantized_tensors()
+                    fc2_weights = fc2.weight.quantized_tensors
+                    if fc2_weights is None:
+                        fc2_weights = fc2.weight.split_into_quantized_tensors()
+                for group_idx in range(group_size):
+                    if single_grouped_weight:
+                        fc1_weights[group_idx].copy_(fc1_ws_base[group_idx])
+                        fc2_weights[group_idx].copy_(fc2_ws_base[group_idx])
+                    else:
+                        getattr(fc1, f"weight{group_idx}").copy_(fc1_ws_base[group_idx])
+                        getattr(fc2, f"weight{group_idx}").copy_(fc2_ws_base[group_idx])
+                    if bias:
+                        getattr(fc1, f"bias{group_idx}").copy_(fc1_bs_base[group_idx])
+                        getattr(fc2, f"bias{group_idx}").copy_(fc2_bs_base[group_idx])
+
+            x = x_base.detach().clone().requires_grad_(True)
+            probs = probs_base.detach().clone().requires_grad_(True)
+            dy = dy_base.detach().clone()
+
+            with te.autocast(enabled=True, recipe=recipe):
+                fc2_extra = (split_sizes, probs) if bias else (split_sizes,)
+                y = module(x, split_sizes, probs, *fc2_extra)
+            y.backward(dy)
+
+            forward_ops = module._module_groups[0]._forward_ops
+            backward_ops = module._module_groups[0]._backward_ops
+            assert len(forward_ops) == 1
+            assert isinstance(
+                forward_ops[0][0],
+                te_ops.fused.ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8,
+            )
+            assert len(backward_ops) == 1
+            assert isinstance(
+                backward_ops[0][0],
+                te_ops.fused.BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8,
+            )
+
+            if single_grouped_weight:
+                fc1_dw = fc1.weight.grad.detach().clone()
+                fc2_dw = fc2.weight.grad.detach().clone()
+            else:
+                fc1_dw = torch.stack(
+                    [
+                        getattr(fc1, f"weight{group_idx}").grad.detach().clone()
+                        for group_idx in range(group_size)
+                    ],
+                    dim=0,
+                )
+                fc2_dw = torch.stack(
+                    [
+                        getattr(fc2, f"weight{group_idx}").grad.detach().clone()
+                        for group_idx in range(group_size)
+                    ],
+                    dim=0,
+                )
+
+            fc1_db = None
+            fc2_db = None
+            if bias:
+                fc1_db = torch.stack(
+                    [
+                        getattr(fc1, f"bias{group_idx}").grad.detach().clone()
+                        for group_idx in range(group_size)
+                    ],
+                    dim=0,
+                )
+                fc2_db = torch.stack(
+                    [
+                        getattr(fc2, f"bias{group_idx}").grad.detach().clone()
+                        for group_idx in range(group_size)
+                    ],
+                    dim=0,
+                )
+
+            return (
+                y.detach().clone(),
+                x.grad.detach().clone(),
+                probs.grad.detach().clone(),
+                fc1_dw,
+                fc2_dw,
+                fc1_db,
+                fc2_db,
+            )
+
+        (
+            y_false,
+            dx_false,
+            dprobs_false,
+            fc1_dw_false,
+            fc2_dw_false,
+            fc1_db_false,
+            fc2_db_false,
+        ) = _run_case(False)
+        (
+            y_true,
+            dx_true,
+            dprobs_true,
+            fc1_dw_true,
+            fc2_dw_true,
+            fc1_db_true,
+            fc2_db_true,
+        ) = _run_case(True)
+
+        torch.testing.assert_close(y_false, y_true, rtol=0, atol=0)
+        torch.testing.assert_close(dx_false, dx_true, rtol=0, atol=0)
+        torch.testing.assert_close(dprobs_false, dprobs_true, rtol=0, atol=0)
+        torch.testing.assert_close(fc1_dw_false, fc1_dw_true, rtol=0, atol=0)
+        torch.testing.assert_close(fc2_dw_false, fc2_dw_true, rtol=0, atol=0)
+        if bias:
+            bias_tols = {"rtol": 0.05, "atol": 0.015625}
+            torch.testing.assert_close(fc1_db_false, fc1_db_true, **bias_tols)
+            torch.testing.assert_close(fc2_db_false, fc2_db_true, **bias_tols)
+
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("single_grouped_weight", (False, True))
     @pytest.mark.parametrize("accumulate_into_main_grad", (False, True))
