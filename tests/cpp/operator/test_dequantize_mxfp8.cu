@@ -456,48 +456,6 @@ void performTest_x1_swizzled(const size_t rows,
     compareResults("output_swizzled", output, ref_output.get(), true, atol, rtol);
 }
 
-// Quantize with swizzled scales, then dequantize — round-trip test
-template <typename InputType, typename IntermediateType>
-void performTest_quantize_then_dequantize_swizzled(const size_t rows,
-                                                   const size_t cols,
-                                                   const bool rowwise,
-                                                   const bool colwise)
-{
-    using namespace test;
-    using EncodingType = fp32;
-    DType in_type = TypeInfo<InputType>::dtype;
-    DType intermed_type = TypeInfo<IntermediateType>::dtype;
-    DType out_type = TypeInfo<InputType>::dtype;
-
-    std::unique_ptr<InputType[]> output_cpu = std::make_unique<InputType[]>(rows * cols);
-
-    Tensor input("input", std::vector<size_t>{ rows, cols }, in_type);
-    Tensor quantized("quantized", std::vector<size_t>{ rows, cols }, intermed_type,
-                     rowwise, colwise, NVTE_MXFP8_1D_SCALING);
-    quantized.set_with_gemm_swizzled_scales(true);
-
-    Tensor output("output", std::vector<size_t>{ rows, cols }, out_type, true, false);
-
-    fillCase<EncodingType>(&input, InputsFillCase::uniform);
-
-    if (rows > 0 && cols > 0) {
-        nvte_quantize(input.data(), quantized.data(), 0);
-        cudaDeviceSynchronize();
-    }
-
-    nvte_dequantize(quantized.data(), output.data(), 0);
-    cudaDeviceSynchronize();
-
-    const size_t copy_size = sizeof(InputType) * rows * cols;
-    cudaMemcpy(output_cpu.get(), output.rowwise_dptr(), copy_size, cudaMemcpyDeviceToHost);
-
-    auto err = cudaGetLastError();
-    ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
-
-    auto [atol, rtol] = getTolerances(intermed_type);
-    compareResults("Quantize-Dequantize-Swizzled", input, output_cpu.get(), true, atol, rtol);
-}
-
 std::vector<std::pair<size_t, size_t>> tensor_dims = {
     {0, 128},
     {0, 256},
@@ -610,8 +568,7 @@ class DequantizeMXFP8SwizzledTestSuite : public ::testing::TestWithParam
     <std::tuple<std::pair<size_t, size_t>,
                 std::pair<size_t, size_t>,
                 transformer_engine::DType,
-                transformer_engine::DType,
-                bool>> {};
+                transformer_engine::DType>> {};
 
 TEST_P(DequantizeMXFP8SwizzledTestSuite, TestDequantizeMXFP8Swizzled)
 {
@@ -626,7 +583,6 @@ TEST_P(DequantizeMXFP8SwizzledTestSuite, TestDequantizeMXFP8Swizzled)
     const auto block_size = std::get<1>(GetParam());
     const DType input_type = std::get<2>(GetParam());
     const DType output_type = std::get<3>(GetParam());
-    const bool quantize_then_dequantize = std::get<4>(GetParam());
 
     const bool rowwise = block_size.second != 1;
     const bool colwise = block_size.first != 1;
@@ -644,13 +600,8 @@ TEST_P(DequantizeMXFP8SwizzledTestSuite, TestDequantizeMXFP8Swizzled)
 
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP8_ONLY(input_type, InputType,
         TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(output_type, OutputType,
-            if (quantize_then_dequantize) {
-                performTest_quantize_then_dequantize_swizzled<OutputType, InputType>(
-                    tensor_size.first, tensor_size.second, rowwise, colwise);
-            } else {
-                performTest_x1_swizzled<InputType, OutputType>(
-                    tensor_size.first, tensor_size.second, rowwise, colwise);
-            }
+            performTest_x1_swizzled<InputType, OutputType>(
+                tensor_size.first, tensor_size.second, rowwise, colwise);
         );
     );
 }
@@ -662,8 +613,7 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::ValuesIn(tensor_dims),
         ::testing::ValuesIn(block_sizes),
         ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2),
-        ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
-        ::testing::Values(false)),
+        ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16)),
     [](const testing::TestParamInfo<DequantizeMXFP8SwizzledTestSuite::ParamType>& info)
     {
         std::string name = std::to_string(std::get<0>(info.param).first) + "X" +
@@ -671,8 +621,7 @@ INSTANTIATE_TEST_SUITE_P(
                            std::to_string(std::get<1>(info.param).first) + "X" +
                            std::to_string(std::get<1>(info.param).second) + "X" +
                            test::typeName(std::get<2>(info.param)) + "X" +
-                           test::typeName(std::get<3>(info.param)) + "X" +
-                           (std::get<4>(info.param) ? "QD_Swizzled" : "D_Swizzled");
+                           test::typeName(std::get<3>(info.param));
         return name;
     }
 );
