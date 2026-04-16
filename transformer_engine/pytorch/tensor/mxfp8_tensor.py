@@ -119,14 +119,18 @@ class MXFP8Quantizer(Quantizer):
             shape[-1] % 16 == 0
         ), f"Incorrect shape {shape} for MXFP8. Last dimension must be divisible by 16."
 
-        # Allocate FP8 data
+        # Allocate FP8 data. Use ceil-division for the scaling dim so partial
+        # trailing blocks (allowed by the relaxed last_dim % 16 constraint) get
+        # one scale each, matching the C++ quantizer (DIVUP in quantizer.cpp).
         data = None
         scale_inv = None
         if self.rowwise_usage:
             data = torch.empty(shape, dtype=torch.uint8, device=device, pin_memory=pin_memory)
             scale_inv = torch.empty(
                 round_up_to_nearest_multiple(math.prod(shape[:-1]), 128),
-                round_up_to_nearest_multiple(shape[-1] // MXFP8_BLOCK_SCALING_SIZE, 4),
+                round_up_to_nearest_multiple(
+                    math.ceil(shape[-1] / MXFP8_BLOCK_SCALING_SIZE), 4
+                ),
                 dtype=torch.uint8,
                 device=device,
                 pin_memory=pin_memory,
@@ -140,7 +144,9 @@ class MXFP8Quantizer(Quantizer):
                 shape, dtype=torch.uint8, device=device, pin_memory=pin_memory
             )
             columnwise_scale_inv = torch.empty(
-                round_up_to_nearest_multiple(math.prod(shape[:-1]) // MXFP8_BLOCK_SCALING_SIZE, 4),
+                round_up_to_nearest_multiple(
+                    math.ceil(math.prod(shape[:-1]) / MXFP8_BLOCK_SCALING_SIZE), 4
+                ),
                 round_up_to_nearest_multiple(shape[-1], 128),
                 dtype=torch.uint8,
                 device=device,
@@ -190,18 +196,23 @@ class MXFP8Quantizer(Quantizer):
         Swizzle kernel will be performed before GEMM to suit the need of CuBLAS.
         CuBLAS doc: https://docs.nvidia.com/cuda/cublas/index.html#d-block-scaling-factors-layout
         """
+        # Use ceil-division (mirroring C++ DIVUP in quantizer.cpp) so partial
+        # trailing blocks from the relaxed last_dim % 16 constraint get one
+        # scale each instead of collapsing to zero.
         if columnwise:
-            # Columnwise: scale_inv shape is [prod(shape[:-1]) // BLOCK_SIZE, shape[-1]]
+            # Columnwise: scale_inv shape is [ceildiv(prod(shape[:-1]), BLOCK_SIZE), shape[-1]]
             # with padding to multiples of [4, 128]
             return (
-                round_up_to_nearest_multiple(math.prod(shape[:-1]) // MXFP8_BLOCK_SCALING_SIZE, 4),
+                round_up_to_nearest_multiple(
+                    math.ceil(math.prod(shape[:-1]) / MXFP8_BLOCK_SCALING_SIZE), 4
+                ),
                 round_up_to_nearest_multiple(shape[-1], 128),
             )
-        # Rowwise: scale_inv shape is [prod(shape[:-1]), shape[-1] // BLOCK_SIZE]
+        # Rowwise: scale_inv shape is [prod(shape[:-1]), ceildiv(shape[-1], BLOCK_SIZE)]
         # with padding to multiples of [128, 4]
         return (
             round_up_to_nearest_multiple(math.prod(shape[:-1]), 128),
-            round_up_to_nearest_multiple(shape[-1] // MXFP8_BLOCK_SCALING_SIZE, 4),
+            round_up_to_nearest_multiple(math.ceil(shape[-1] / MXFP8_BLOCK_SCALING_SIZE), 4),
         )
 
     def get_columnwise_shape(self, rowwise_data_shape: Tuple[int, ...]) -> Tuple[int, ...]:
@@ -559,14 +570,17 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
             shape = args[1]
             first_dim = math.prod(shape[:-1])
             last_dim = shape[-1]
-            if (
-                first_dim % MXFP8_BLOCK_SCALING_SIZE != 0
-                or last_dim % MXFP8_BLOCK_SCALING_SIZE != 0
-            ):
+            # Fall back to high-precision for shapes the quantizer cannot
+            # represent. Only last_dim % 16 is required (matches the relaxed
+            # C++ quantizer); partial trailing blocks use ceildiv.
+            if last_dim % 16 != 0:
                 return super().__torch_dispatch__(func, types, args, kwargs)
-            rowwise_scale_inv_shape = [first_dim, last_dim // MXFP8_BLOCK_SCALING_SIZE]
+            rowwise_scale_inv_shape = [
+                first_dim,
+                math.ceil(last_dim / MXFP8_BLOCK_SCALING_SIZE),
+            ]
             columnwise_scale_inv_shape = [
-                first_dim // MXFP8_BLOCK_SCALING_SIZE,
+                math.ceil(first_dim / MXFP8_BLOCK_SCALING_SIZE),
                 last_dim,
             ]
             if tensor._rowwise_data is not None:

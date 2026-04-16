@@ -1409,6 +1409,31 @@ def test_linear_tight_dims(recipe, inference, dtype):
         torch.backends.cudnn.allow_tf32 = prev_tf32_cudnn
 
 
+def test_mxfp8_scale_shape_partial_block():
+    """MXFP8 Python tensor helpers must ceildiv the scale dim, not floor-div.
+
+    The C++ quantizer uses DIVUP so a 16-element trailing partial block gets
+    one scale; if the Python side floor-divides instead, scale tensors
+    collapse to zero size. This test exercises the newly-allowed last_dim=16
+    path that the end-to-end GEMM test can't hit (the MXFP8 GEMM kernel
+    itself still requires K >= 32).
+    """
+    if not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+
+    quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+    quantizer.set_usage(rowwise=True, columnwise=True)
+
+    rowwise = quantizer.get_scale_shape((32, 16), columnwise=False)
+    columnwise = quantizer.get_scale_shape((32, 16), columnwise=True)
+    assert all(d > 0 for d in rowwise), f"rowwise scale collapsed: {rowwise}"
+    assert all(d > 0 for d in columnwise), f"columnwise scale collapsed: {columnwise}"
+
+    empty = quantizer.make_empty((32, 16), dtype=torch.bfloat16, device="cuda")
+    assert empty._rowwise_scale_inv.numel() > 0
+    assert empty._columnwise_scale_inv.numel() > 0
+
+
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", ["small"])
