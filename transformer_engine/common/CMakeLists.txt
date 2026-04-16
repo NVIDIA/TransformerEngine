@@ -98,6 +98,39 @@ set(CUTLASS_TOOLS_INCLUDE_DIR
 # Python
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 
+function(find_nccl_version OUT_VERSION OUT_INCLUDE_DIR)
+  find_path(_nvte_nccl_include_dir
+            NAMES nccl.h
+            PATH_SUFFIXES include
+            REQUIRED)
+
+  file(STRINGS "${_nvte_nccl_include_dir}/nccl.h" _nvte_nccl_major_line
+       REGEX "^#define NCCL_MAJOR[ \t]+[0-9]+$")
+  file(STRINGS "${_nvte_nccl_include_dir}/nccl.h" _nvte_nccl_minor_line
+       REGEX "^#define NCCL_MINOR[ \t]+[0-9]+$")
+  file(STRINGS "${_nvte_nccl_include_dir}/nccl.h" _nvte_nccl_patch_line
+       REGEX "^#define NCCL_PATCH[ \t]+[0-9]+$")
+
+  string(REGEX REPLACE "^#define NCCL_MAJOR[ \t]+([0-9]+)$" "\\1"
+         _nvte_nccl_major "${_nvte_nccl_major_line}")
+  string(REGEX REPLACE "^#define NCCL_MINOR[ \t]+([0-9]+)$" "\\1"
+         _nvte_nccl_minor "${_nvte_nccl_minor_line}")
+  string(REGEX REPLACE "^#define NCCL_PATCH[ \t]+([0-9]+)$" "\\1"
+         _nvte_nccl_patch "${_nvte_nccl_patch_line}")
+
+  if ("${_nvte_nccl_major}" STREQUAL ""
+      OR "${_nvte_nccl_minor}" STREQUAL ""
+      OR "${_nvte_nccl_patch}" STREQUAL "")
+    message(FATAL_ERROR
+            "Failed to parse NCCL version from ${_nvte_nccl_include_dir}/nccl.h")
+  endif()
+
+  set(${OUT_VERSION}
+      "${_nvte_nccl_major}.${_nvte_nccl_minor}.${_nvte_nccl_patch}"
+      PARENT_SCOPE)
+  set(${OUT_INCLUDE_DIR} "${_nvte_nccl_include_dir}" PARENT_SCOPE)
+endfunction()
+
 # Configure Transformer Engine library
 include_directories(${PROJECT_SOURCE_DIR}/..)
 set(transformer_engine_SOURCES)
@@ -120,7 +153,9 @@ list(APPEND transformer_engine_cpp_sources
      util/rtc.cpp
      comm_gemm_overlap/userbuffers/ipcsocket.cc
      comm_gemm_overlap/userbuffers/userbuffers-host.cpp
-     comm_gemm_overlap/comm_gemm_overlap.cpp)
+     comm_gemm_overlap/comm_gemm_overlap.cpp
+     newton_schulz/newton_schulz.cpp
+     )
 
 list(APPEND transformer_engine_cuda_sources
      common.cu
@@ -290,6 +325,7 @@ option(NVTE_WITH_CUBLASMP "Use cuBLASMp for tensor parallel GEMMs" OFF)
 if (NVTE_WITH_CUBLASMP)
     target_compile_definitions(transformer_engine PRIVATE NVTE_WITH_CUBLASMP)
     target_include_directories(transformer_engine PRIVATE ${CUBLASMP_DIR}/include)
+    find_nccl_version(NCCL_VERSION NCCL_INCLUDE_DIR)
     find_library(CUBLASMP_LIB
                  NAMES cublasmp libcublasmp
                  PATHS ${CUBLASMP_DIR}
@@ -299,8 +335,31 @@ if (NVTE_WITH_CUBLASMP)
                  NAMES nccl libnccl
                  PATH_SUFFIXES lib
                  REQUIRED)
-  target_link_libraries(transformer_engine PUBLIC ${NCCL_LIB} ${CUBLASMP_LIB})
-  message(STATUS "Using cuBLASMp at: ${CUBLASMP_DIR}")
+    if (NCCL_VERSION VERSION_LESS 2.29.0)
+      message(FATAL_ERROR
+              "NVTE_WITH_CUBLASMP requires NCCL >= 2.29.0, but found NCCL ${NCCL_VERSION} "
+              "in ${NCCL_INCLUDE_DIR}/nccl.h")
+    endif()
+    target_link_libraries(transformer_engine PUBLIC ${NCCL_LIB} ${CUBLASMP_LIB})
+    message(STATUS "Using cuBLASMp at: ${CUBLASMP_DIR}")
+    message(STATUS "Using NCCL ${NCCL_VERSION} at: ${NCCL_LIB}")
+endif()
+
+option(NVTE_WITH_CUSOLVERMP "Use cuSolverMp for distributed Newton-Schulz" OFF)
+if (NVTE_WITH_CUSOLVERMP)
+    target_compile_definitions(transformer_engine PRIVATE NVTE_WITH_CUSOLVERMP)
+    target_include_directories(transformer_engine PRIVATE ${CUSOLVERMP_DIR}/include)
+    find_library(CUSOLVERMP_LIB
+                 NAMES cusolverMp libcusolverMp
+                 PATHS ${CUSOLVERMP_DIR}
+                 PATH_SUFFIXES lib
+                 REQUIRED)
+    find_library(NCCL_LIB
+                 NAMES nccl libnccl
+                 PATH_SUFFIXES lib
+                 REQUIRED)
+    target_link_libraries(transformer_engine PRIVATE ${NCCL_LIB} ${CUSOLVERMP_LIB})
+    message(STATUS "Using cuSolverMp at: ${CUSOLVERMP_DIR}")
 endif()
 
 # Number of philox4x32 rounds for stochastic rounding (build-time constant).
