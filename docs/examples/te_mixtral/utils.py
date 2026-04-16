@@ -37,7 +37,7 @@ class HyperParameters:
         self.dataset_text_field = "text"
         self.learning_rate = 1.41e-5
         self.batch_size = 4
-        self.max_seq_length = 256
+        self.max_seq_length = 2048
         self.gradient_accumulation_steps = 1
         self.num_warmup_steps = 5
         self.num_training_steps = 3
@@ -182,7 +182,7 @@ def init_te_mixtral_model(hyperparams: HyperParameters):
 
     fp8_recipe = None
     if hyperparams.mixed_precision == "fp8":
-        fp8_recipe = te_recipe.DelayedScaling()
+        fp8_recipe = te_recipe.MXFP8BlockScaling()
         te_config.layer_precision = ["fp8"] * te_config.num_hidden_layers
 
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))

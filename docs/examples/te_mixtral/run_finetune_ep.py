@@ -37,6 +37,7 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--max-seq-length", type=int, default=256)
     parser.add_argument("--warmup-steps", type=int, default=1)
     parser.add_argument("--train-steps", type=int, default=2)
     return parser.parse_args()
@@ -57,6 +58,7 @@ def main() -> None:
     hp.model_name = "mistralai/Mixtral-8x7B-v0.1"
     hp.hf_access_token = args.hf_token
     hp.batch_size = args.batch_size
+    hp.max_seq_length = args.max_seq_length
     hp.num_warmup_steps = args.warmup_steps
     hp.num_training_steps = args.train_steps
 
@@ -80,7 +82,8 @@ def main() -> None:
     print(
         f"[Tier {args.improvement}] {IMPROVEMENT_LABELS[args.improvement]}\n"
         f"  mixed_precision={hp.mixed_precision}, ep_size={hp.expert_parallel_size}, "
-        f"dispatcher={hp.dispatcher_type}"
+        f"dispatcher={hp.dispatcher_type}\n"
+        f"  batch_size={hp.batch_size}, max_seq_length={hp.max_seq_length}"
     )
 
     if args.improvement == 1:
