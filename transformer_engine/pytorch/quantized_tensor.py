@@ -363,9 +363,8 @@ class Quantizer(abc.ABC):
         """Returns True if the quantizer supports only rowwise all-gather"""
         return False
 
-    def supports_quantized_allgather(
-        self, inp: torch.Tensor
-    ) -> bool:  # pylint: disable=unused-argument
+    # pylint: disable-next=unused-argument
+    def supports_quantized_allgather(self, inp: torch.Tensor) -> bool:
         """Whether tensor shape supports quantized all-gather.
 
         When False, the distributed all-gather falls back to gathering

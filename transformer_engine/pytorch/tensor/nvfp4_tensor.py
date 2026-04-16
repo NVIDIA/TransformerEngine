@@ -337,7 +337,7 @@ class NVFP4Quantizer(Quantizer):
         if self.columnwise_usage:
             # enforce 2D shape to avoid [S, B, H] shape and B and be 1
             # and the transposed shape is [H, S, B], so divide last dim by 2 gives zero
-            shape_2d = tuple([flat_first_dim, shape[-1]])
+            shape_2d = (math.prod(shape[:-1]), shape[-1])
             columnwise_data = torch.empty(
                 self.convert_shape_for_fp4(self.get_columnwise_shape(shape_2d)),
                 dtype=torch.uint8,
