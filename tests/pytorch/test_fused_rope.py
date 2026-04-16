@@ -1,7 +1,7 @@
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-from typing import Callable, Tuple, Union, List
+from typing import Callable, Optional, Tuple, Union, List
 import math
 import torch
 import pytest
@@ -9,7 +9,229 @@ from transformer_engine.pytorch.attention.rope import (
     RotaryPositionEmbedding,
     apply_rotary_pos_emb,
     apply_fused_qkv_rotary_pos_emb,
+    apply_mla_rope_for_q,
+    apply_mla_rope_for_kv,
 )
+
+# ---------------------------------------------------------------------------
+# Megatron-LM Triton MLA YARN RoPE reference (self-contained copy)
+# Source: github.com/NVIDIA/Megatron-LM  megatron/core/fusions/fused_mla_yarn_rope_apply.py
+# ---------------------------------------------------------------------------
+
+try:
+    import triton
+    import triton.language as tl
+
+    HAVE_TRITON = True
+except ImportError:
+    HAVE_TRITON = False
+
+if HAVE_TRITON:
+
+    @triton.jit
+    def _megatron_get_thd_token_idx(cu_seqlens, pid_m, seq_num, cp_rank, cp_size):
+        token_idx = -1
+        this_seq_len = 0
+        seq_idx = 0
+        last_cum_seqlen = tl.load(cu_seqlens) // cp_size
+        while seq_idx < seq_num:
+            cur_cum_seqlen = tl.load(cu_seqlens + seq_idx + 1) // cp_size
+            if token_idx == -1 and cur_cum_seqlen > pid_m:
+                token_idx = pid_m - last_cum_seqlen
+                this_seq_len = cur_cum_seqlen - last_cum_seqlen
+            last_cum_seqlen = cur_cum_seqlen
+            seq_idx += 1
+        if cp_size > 1:
+            if token_idx < this_seq_len // 2:
+                token_idx = token_idx + cp_rank * this_seq_len // 2
+            else:
+                token_idx = (token_idx - this_seq_len // 2) + (
+                    2 * cp_size - cp_rank - 1
+                ) * this_seq_len // 2
+        return token_idx
+
+    @triton.autotune(
+        configs=[
+            triton.Config({"BLOCK_H": 1}),
+            triton.Config({"BLOCK_H": 2}),
+            triton.Config({"BLOCK_H": 4}),
+            triton.Config({"BLOCK_H": 8}),
+            triton.Config({"BLOCK_H": 16}),
+            triton.Config({"BLOCK_H": 32}),
+            triton.Config({"BLOCK_H": 64}),
+            triton.Config({"BLOCK_H": 128}),
+        ],
+        key=["emb_dim", "head_num"],
+        restore_value=["Q"],
+    )
+    @triton.jit
+    def _megatron_rotary_fwd_q_kernel(
+        Q, COS, SIN, qk_head_dim,
+        emb_dim: tl.constexpr, head_num: tl.constexpr,
+        batch_size, seq_num, cu_seqlens_q,
+        stride_x_seq, stride_x_nheads,
+        cp_rank, cp_size,
+        BLOCK_H: tl.constexpr,
+    ):
+        pid_m = tl.program_id(axis=0)
+        pid_head = tl.program_id(axis=1)
+        if cu_seqlens_q is None:
+            token_idx = pid_m // batch_size
+        else:
+            token_idx = _megatron_get_thd_token_idx(
+                cu_seqlens_q, pid_m, seq_num, cp_rank, cp_size
+            )
+        cos_left = tl.load(COS + token_idx * emb_dim + tl.arange(0, emb_dim // 2))
+        sin_left = tl.load(SIN + token_idx * emb_dim + tl.arange(0, emb_dim // 2))
+        cos_right = tl.load(
+            COS + token_idx * emb_dim + emb_dim // 2 + tl.arange(0, emb_dim // 2)
+        )
+        sin_right = tl.load(
+            SIN + token_idx * emb_dim + emb_dim // 2 + tl.arange(0, emb_dim // 2)
+        )
+        cos_left = cos_left.expand_dims(0).broadcast_to(BLOCK_H, emb_dim // 2)
+        sin_left = sin_left.expand_dims(0).broadcast_to(BLOCK_H, emb_dim // 2)
+        cos_right = cos_right.expand_dims(0).broadcast_to(BLOCK_H, emb_dim // 2)
+        sin_right = sin_right.expand_dims(0).broadcast_to(BLOCK_H, emb_dim // 2)
+        Q = Q + pid_m * stride_x_seq + pid_head * BLOCK_H * stride_x_nheads
+        x_off = tl.arange(0, BLOCK_H)[:, None] * stride_x_nheads + qk_head_dim
+        mask = x_off < head_num * stride_x_nheads
+        x_1_off = x_off + tl.arange(0, emb_dim // 2)[None, :] * 2
+        x_2_off = x_1_off + 1
+        x_1 = tl.load(Q + x_1_off, mask=mask)
+        x_2 = tl.load(Q + x_2_off, mask=mask)
+        x_left = x_1 * cos_left - x_2 * sin_left
+        x_right = x_2 * cos_right + x_1 * sin_right
+        x_left_off = x_off + tl.arange(0, emb_dim // 2)[None, :]
+        x_right_off = x_left_off + emb_dim // 2
+        tl.store(Q + x_left_off, x_left, mask=mask)
+        tl.store(Q + x_right_off, x_right, mask=mask)
+
+    @triton.autotune(
+        configs=[
+            triton.Config({"BLOCK_H": 1}),
+            triton.Config({"BLOCK_H": 2}),
+            triton.Config({"BLOCK_H": 4}),
+            triton.Config({"BLOCK_H": 8}),
+            triton.Config({"BLOCK_H": 16}),
+            triton.Config({"BLOCK_H": 32}),
+            triton.Config({"BLOCK_H": 64}),
+            triton.Config({"BLOCK_H": 128}),
+        ],
+        key=["emb_dim", "k_dim", "v_dim", "head_num"],
+    )
+    @triton.jit
+    def _megatron_rotary_fwd_kv_kernel(
+        KV, K_POS_EMB, O_KEY, O_VALUE, COS, SIN,
+        emb_dim: tl.constexpr, k_dim: tl.constexpr,
+        v_dim: tl.constexpr, head_num: tl.constexpr,
+        batch_size, seq_num, cu_seqlens_kv,
+        stride_kv_seq, stride_kv_nheads, stride_emb_seq,
+        stride_k_seq, stride_k_nheads,
+        stride_v_seq, stride_v_nheads,
+        cp_rank, cp_size,
+        BLOCK_H: tl.constexpr,
+    ):
+        pid_m = tl.program_id(axis=0)
+        pid_head = tl.program_id(axis=1)
+        if cu_seqlens_kv is None:
+            token_idx = pid_m // batch_size
+        else:
+            token_idx = _megatron_get_thd_token_idx(
+                cu_seqlens_kv, pid_m, seq_num, cp_rank, cp_size
+            )
+        cos_left = tl.load(COS + token_idx * emb_dim + tl.arange(0, emb_dim // 2))
+        sin_left = tl.load(SIN + token_idx * emb_dim + tl.arange(0, emb_dim // 2))
+        cos_right = tl.load(
+            COS + token_idx * emb_dim + emb_dim // 2 + tl.arange(0, emb_dim // 2)
+        )
+        sin_right = tl.load(
+            SIN + token_idx * emb_dim + emb_dim // 2 + tl.arange(0, emb_dim // 2)
+        )
+        KV_ptr = KV + pid_m * stride_kv_seq + pid_head * BLOCK_H * stride_kv_nheads
+        kv_off = tl.arange(0, BLOCK_H)[:, None] * stride_kv_nheads
+        mask = kv_off < head_num * stride_kv_nheads
+        k_in_off = kv_off + tl.arange(0, k_dim)[None, :]
+        v_in_off = kv_off + k_dim + tl.arange(0, v_dim)[None, :]
+        k = tl.load(KV_ptr + k_in_off, mask=mask)
+        v = tl.load(KV_ptr + v_in_off, mask=mask)
+        K_ptr = O_KEY + pid_m * stride_k_seq + pid_head * BLOCK_H * stride_k_nheads
+        V_ptr = O_VALUE + pid_m * stride_v_seq + pid_head * BLOCK_H * stride_v_nheads
+        k_out_off = (
+            tl.arange(0, BLOCK_H)[:, None] * stride_k_nheads
+            + tl.arange(0, k_dim)[None, :]
+        )
+        v_out_off = (
+            tl.arange(0, BLOCK_H)[:, None] * stride_v_nheads
+            + tl.arange(0, v_dim)[None, :]
+        )
+        tl.store(K_ptr + k_out_off, k, mask=mask)
+        tl.store(V_ptr + v_out_off, v, mask=mask)
+        EMB = K_POS_EMB + pid_m * stride_emb_seq
+        x_1 = tl.load(EMB + tl.arange(0, emb_dim // 2) * 2)
+        x_2 = tl.load(EMB + tl.arange(0, emb_dim // 2) * 2 + 1)
+        x_left = x_1 * cos_left - x_2 * sin_left
+        x_right = x_2 * cos_right + x_1 * sin_right
+        x_left = x_left.expand_dims(0).broadcast_to(BLOCK_H, emb_dim // 2)
+        x_right = x_right.expand_dims(0).broadcast_to(BLOCK_H, emb_dim // 2)
+        x_left_off = (
+            tl.arange(0, BLOCK_H)[:, None] * stride_k_nheads
+            + k_dim
+            + tl.arange(0, emb_dim // 2)[None, :]
+        )
+        x_right_off = x_left_off + emb_dim // 2
+        tl.store(K_ptr + x_left_off, x_left, mask=mask)
+        tl.store(K_ptr + x_right_off, x_right, mask=mask)
+
+    def _triton_mla_rope_q(
+        t: torch.Tensor,
+        cos_table: torch.Tensor,
+        sin_table: torch.Tensor,
+        qk_head_dim: int,
+        emb_dim: int,
+    ) -> torch.Tensor:
+        """Call Megatron-LM's Triton Q kernel with TE-style 2-D cos/sin tables (SBHD only)."""
+        s, b, nheads, headdim = t.shape
+        q = t.clone().view(-1, nheads, headdim)
+        total = q.shape[0]
+        cos_2d = cos_table[:s].contiguous()
+        sin_2d = sin_table[:s].contiguous()
+        grid = lambda META: (total, triton.cdiv(nheads, META["BLOCK_H"]))
+        _megatron_rotary_fwd_q_kernel[grid](
+            q, cos_2d, sin_2d, qk_head_dim, emb_dim, nheads,
+            b, None, None, q.stride(0), q.stride(1), 0, 1,
+        )
+        return q.view(s, b, nheads, headdim)
+
+    def _triton_mla_rope_kv(
+        kv: torch.Tensor,
+        k_pos_emb: torch.Tensor,
+        cos_table: torch.Tensor,
+        sin_table: torch.Tensor,
+        k_dim: int,
+        v_dim: int,
+        emb_dim: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Call Megatron-LM's Triton KV kernel with TE-style tables (SBHD only)."""
+        s, b, nheads, headdim = kv.shape
+        kv_3d = kv.contiguous().view(-1, nheads, headdim)
+        emb_2d = k_pos_emb.contiguous().view(-1, emb_dim)
+        total = kv_3d.shape[0]
+        cos_2d = cos_table[:s].contiguous()
+        sin_2d = sin_table[:s].contiguous()
+        o_key = kv_3d.new_empty(total, nheads, emb_dim + k_dim)
+        o_value = kv_3d.new_empty(total, nheads, v_dim)
+        grid = lambda META: (total, triton.cdiv(nheads, META["BLOCK_H"]))
+        _megatron_rotary_fwd_kv_kernel[grid](
+            kv_3d, emb_2d, o_key, o_value, cos_2d, sin_2d,
+            emb_dim, k_dim, v_dim, nheads,
+            b, None, None,
+            kv_3d.stride(0), kv_3d.stride(1), emb_2d.stride(0),
+            o_key.stride(0), o_key.stride(1),
+            o_value.stride(0), o_value.stride(1),
+            0, 1,
+        )
+        return o_key.view(s, b, nheads, emb_dim + k_dim), o_value.view(s, b, nheads, v_dim)
 
 
 # Gradient is a broadcasted scalar
@@ -495,3 +717,371 @@ def test_rotary_position_embedding_forward_with_autocast_gives_same_result_as_wi
         atol=1e-8,
         rtol=1e-8,
     )
+
+
+# ---------------------------------------------------------------------------
+# MLA YARN RoPE tests
+# ---------------------------------------------------------------------------
+
+
+def _make_cos_sin_tables(max_seq_len: int, emb_dim: int, device: torch.device):
+    """Generate deterministic cos/sin tables mimicking YARN-style RoPE frequencies.
+
+    Returns 4-D tensors of shape ``[max_seq_len, 1, 1, emb_dim]`` (new API format).
+    Use ``cos_table[:, 0, 0, :]`` to get the 2-D ``[max_seq_len, emb_dim]`` view
+    needed by reference functions.
+    """
+    half = emb_dim // 2
+    inv_freq = 1.0 / (10000.0 ** (torch.arange(0, half, dtype=torch.float32, device=device) / half))
+    pos = torch.arange(max_seq_len, dtype=torch.float32, device=device)
+    freqs = torch.outer(pos, inv_freq)
+    freqs_right = torch.outer(pos, inv_freq * 1.3)
+    cos_2d = torch.cat([freqs.cos(), freqs_right.cos()], dim=-1).contiguous()
+    sin_2d = torch.cat([freqs.sin(), freqs_right.sin()], dim=-1).contiguous()
+    cos_table = cos_2d.unsqueeze(1).unsqueeze(1).contiguous()
+    sin_table = sin_2d.unsqueeze(1).unsqueeze(1).contiguous()
+    return cos_table, sin_table
+
+
+def _ref_mla_yarn_rope_q(
+    t: torch.Tensor,
+    cos_table: torch.Tensor,
+    sin_table: torch.Tensor,
+    qk_head_dim: int,
+    emb_dim: int,
+    tensor_format: str = "sbhd",
+) -> torch.Tensor:
+    """Pure PyTorch reference for MLA YARN RoPE on Q."""
+    if tensor_format == "bshd":
+        t = t.transpose(0, 1)  # -> sbhd
+
+    s = t.shape[0]
+    half = emb_dim // 2
+    cos_L = cos_table[:s, :half].unsqueeze(1).unsqueeze(1)
+    sin_L = sin_table[:s, :half].unsqueeze(1).unsqueeze(1)
+    cos_R = cos_table[:s, half:].unsqueeze(1).unsqueeze(1)
+    sin_R = sin_table[:s, half:].unsqueeze(1).unsqueeze(1)
+
+    prefix = t[..., :qk_head_dim]
+    tail = t[..., qk_head_dim:]
+    x1 = tail[..., 0::2]
+    x2 = tail[..., 1::2]
+
+    out_left = x1 * cos_L - x2 * sin_L
+    out_right = x2 * cos_R + x1 * sin_R
+    out = torch.cat([prefix, out_left, out_right], dim=-1)
+
+    if tensor_format == "bshd":
+        out = out.transpose(0, 1)
+    return out
+
+
+def _ref_mla_yarn_rope_kv(
+    kv: torch.Tensor,
+    k_pos_emb: torch.Tensor,
+    cos_table: torch.Tensor,
+    sin_table: torch.Tensor,
+    k_dim: int,
+    v_dim: int,
+    emb_dim: int,
+    tensor_format: str = "sbhd",
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Pure PyTorch reference for MLA YARN RoPE on KV."""
+    if tensor_format == "bshd":
+        kv = kv.transpose(0, 1)
+        k_pos_emb = k_pos_emb.transpose(0, 1)
+
+    s, b, h, _ = kv.shape
+    half = emb_dim // 2
+    cos_L = cos_table[:s, :half]
+    sin_L = sin_table[:s, :half]
+    cos_R = cos_table[:s, half:]
+    sin_R = sin_table[:s, half:]
+
+    k_content = kv[..., :k_dim]
+    v = kv[..., k_dim:]
+
+    # k_pos_emb: [s, b, emb_dim] -> interleaved read
+    x1 = k_pos_emb[..., 0::2]
+    x2 = k_pos_emb[..., 1::2]
+
+    # cos/sin are [s, half], k_pos_emb terms are [s, b, half]
+    rope_left = x1 * cos_L.unsqueeze(1) - x2 * sin_L.unsqueeze(1)
+    rope_right = x2 * cos_R.unsqueeze(1) + x1 * sin_R.unsqueeze(1)
+
+    # Broadcast across heads: [s, b, half] -> [s, b, h, half]
+    rope_left = rope_left.unsqueeze(2).expand(s, b, h, half)
+    rope_right = rope_right.unsqueeze(2).expand(s, b, h, half)
+
+    o_key = torch.cat([k_content, rope_left, rope_right], dim=-1)
+    o_value = v
+
+    if tensor_format == "bshd":
+        o_key = o_key.transpose(0, 1)
+        o_value = o_value.transpose(0, 1)
+    return o_key, o_value
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("seq_length", [128, 512])
+@pytest.mark.parametrize("emb_dim", [64, 128])
+@pytest.mark.parametrize("qk_head_dim", [64, 128])
+@pytest.mark.parametrize("tensor_format", ["sbhd"])
+@pytest.mark.parametrize("loss_func", [_overlapping_grad, _non_overlapping_grad])
+def test_fused_mla_rope_q(
+    dtype: torch.dtype,
+    seq_length: int,
+    emb_dim: int,
+    qk_head_dim: int,
+    tensor_format: str,
+    loss_func: Callable,
+) -> None:
+    device = torch.device("cuda:0")
+    batch_size, head_num = 2, 16
+    head_dim = qk_head_dim + emb_dim
+
+    t = torch.rand(
+        (seq_length, batch_size, head_num, head_dim),
+        dtype=dtype,
+        device=device,
+    )
+    if tensor_format == "bshd":
+        t = t.transpose(0, 1).contiguous()
+    t.requires_grad = True
+
+    cos_table, sin_table = _make_cos_sin_tables(seq_length, emb_dim, device)
+    cos_2d = cos_table[:, 0, 0, :]
+    sin_2d = sin_table[:, 0, 0, :]
+
+    # --- PyTorch reference (float32 for precision, uses 2D tables) ---
+    output_ref = _ref_mla_yarn_rope_q(
+        t.float(), cos_2d, sin_2d, qk_head_dim, emb_dim, tensor_format
+    ).to(dtype)
+    loss_ref = loss_func(output_ref)
+    loss_ref.backward()
+    grad_ref = t.grad.detach().clone()
+    t.grad = None
+
+    # --- Fused CUDA kernel (4D tables, no emb_dim arg) ---
+    output_fused = apply_mla_rope_for_q(
+        t, cos_table, sin_table, qk_head_dim, tensor_format=tensor_format
+    )
+    loss_fused = loss_func(output_fused)
+    loss_fused.backward()
+    grad_fused = t.grad.detach().clone()
+    t.grad = None
+
+    torch.testing.assert_close(output_fused, output_ref)
+    torch.testing.assert_close(grad_fused, grad_ref)
+    assert output_fused.is_contiguous()
+
+    # --- Megatron-LM Triton reference (forward only, uses 2D tables) ---
+    if HAVE_TRITON and tensor_format == "sbhd":
+        output_triton = _triton_mla_rope_q(
+            t.float(), cos_2d, sin_2d, qk_head_dim, emb_dim
+        ).to(dtype)
+        torch.testing.assert_close(output_fused, output_triton)
+        torch.testing.assert_close(output_ref, output_triton)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("seq_length", [128, 512])
+@pytest.mark.parametrize("emb_dim", [64, 128])
+@pytest.mark.parametrize("k_dim", [64, 128])
+@pytest.mark.parametrize("v_dim", [64, 128])
+@pytest.mark.parametrize("tensor_format", ["sbhd"])
+@pytest.mark.parametrize("loss_func", [_overlapping_grad, _non_overlapping_grad])
+def test_fused_mla_rope_kv(
+    dtype: torch.dtype,
+    seq_length: int,
+    emb_dim: int,
+    k_dim: int,
+    v_dim: int,
+    tensor_format: str,
+    loss_func: Callable,
+) -> None:
+    device = torch.device("cuda:0")
+    batch_size, head_num = 2, 16
+
+    kv = torch.rand(
+        (seq_length, batch_size, head_num, k_dim + v_dim),
+        dtype=dtype,
+        device=device,
+    )
+    k_pos_emb = torch.rand(
+        (seq_length, batch_size, emb_dim),
+        dtype=dtype,
+        device=device,
+    )
+    if tensor_format == "bshd":
+        kv = kv.transpose(0, 1).contiguous()
+        k_pos_emb = k_pos_emb.transpose(0, 1).contiguous()
+    kv.requires_grad = True
+    k_pos_emb.requires_grad = True
+
+    cos_table, sin_table = _make_cos_sin_tables(seq_length, emb_dim, device)
+    cos_2d = cos_table[:, 0, 0, :]
+    sin_2d = sin_table[:, 0, 0, :]
+
+    # Reference (float32 for precision, uses 2D tables)
+    okey_ref, oval_ref = _ref_mla_yarn_rope_kv(
+        kv.float(), k_pos_emb.float(), cos_2d, sin_2d, k_dim, v_dim, emb_dim, tensor_format
+    )
+    okey_ref = okey_ref.to(dtype)
+    oval_ref = oval_ref.to(dtype)
+    loss_ref = loss_func([okey_ref, oval_ref])
+    loss_ref.backward()
+    grad_kv_ref = kv.grad.detach().clone()
+    grad_emb_ref = k_pos_emb.grad.detach().clone()
+    kv.grad = None
+    k_pos_emb.grad = None
+
+    # Fused CUDA kernel (4D tables, no emb_dim arg)
+    okey_fused, oval_fused = apply_mla_rope_for_kv(
+        kv, k_pos_emb, cos_table, sin_table, k_dim, v_dim, tensor_format=tensor_format
+    )
+    loss_fused = loss_func([okey_fused, oval_fused])
+    loss_fused.backward()
+    grad_kv_fused = kv.grad.detach().clone()
+    grad_emb_fused = k_pos_emb.grad.detach().clone()
+    kv.grad = None
+    k_pos_emb.grad = None
+
+    torch.testing.assert_close(okey_fused, okey_ref)
+    torch.testing.assert_close(oval_fused, oval_ref)
+    torch.testing.assert_close(grad_kv_fused, grad_kv_ref)
+    torch.testing.assert_close(grad_emb_fused, grad_emb_ref)
+    assert okey_fused.is_contiguous()
+    assert oval_fused.is_contiguous()
+
+    # --- Megatron-LM Triton reference (forward only, uses 2D tables) ---
+    if HAVE_TRITON and tensor_format == "sbhd":
+        okey_triton, oval_triton = _triton_mla_rope_kv(
+            kv.float(), k_pos_emb.float(), cos_2d, sin_2d, k_dim, v_dim, emb_dim
+        )
+        okey_triton = okey_triton.to(dtype)
+        oval_triton = oval_triton.to(dtype)
+        torch.testing.assert_close(okey_fused, okey_triton)
+        torch.testing.assert_close(oval_fused, oval_triton)
+        torch.testing.assert_close(okey_ref, okey_triton)
+        torch.testing.assert_close(oval_ref, oval_triton)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("emb_dim", [64, 128])
+@pytest.mark.parametrize("qk_head_dim", [64])
+@pytest.mark.parametrize("loss_func", [_overlapping_grad, _non_overlapping_grad])
+def test_fused_mla_rope_q_thd(
+    dtype: torch.dtype,
+    emb_dim: int,
+    qk_head_dim: int,
+    loss_func: Callable,
+) -> None:
+    device = torch.device("cuda:0")
+    head_num = 16
+    head_dim = qk_head_dim + emb_dim
+
+    cu_seqlens = torch.tensor([0, 120, 280, 512], dtype=torch.int32, device=device)
+    total_seq = int(cu_seqlens[-1].item())
+
+    t = torch.rand((total_seq, head_num, head_dim), dtype=dtype, device=device)
+    t.requires_grad = True
+
+    cos_table, sin_table = _make_cos_sin_tables(total_seq, emb_dim, device)
+    cos_2d = cos_table[:, 0, 0, :]
+    sin_2d = sin_table[:, 0, 0, :]
+
+    # Build reference by splitting into per-sequence sbhd tensors (uses 2D tables)
+    seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+    ref_outputs = []
+    for seq_start, seq_len in zip(cu_seqlens[:-1].tolist(), seqlens):
+        chunk = t[seq_start : seq_start + seq_len].unsqueeze(1)  # [s, 1, h, d]
+        ref_out = _ref_mla_yarn_rope_q(
+            chunk.float(), cos_2d[:seq_len], sin_2d[:seq_len], qk_head_dim, emb_dim
+        )
+        ref_outputs.append(ref_out.squeeze(1))
+    output_ref = torch.cat(ref_outputs, dim=0).to(dtype)
+    loss_ref = loss_func(output_ref)
+    loss_ref.backward()
+    grad_ref = t.grad.detach().clone()
+    t.grad = None
+
+    # Fused kernel with THD format (4D tables, no emb_dim arg)
+    output_fused = apply_mla_rope_for_q(
+        t, cos_table, sin_table, qk_head_dim,
+        tensor_format="thd", cu_seqlens=cu_seqlens,
+    )
+    loss_fused = loss_func(output_fused)
+    loss_fused.backward()
+    grad_fused = t.grad.detach().clone()
+    t.grad = None
+
+    torch.testing.assert_close(output_fused, output_ref)
+    torch.testing.assert_close(grad_fused, grad_ref)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("emb_dim", [64, 128])
+@pytest.mark.parametrize("k_dim", [64])
+@pytest.mark.parametrize("v_dim", [64])
+@pytest.mark.parametrize("loss_func", [_overlapping_grad, _non_overlapping_grad])
+def test_fused_mla_rope_kv_thd(
+    dtype: torch.dtype,
+    emb_dim: int,
+    k_dim: int,
+    v_dim: int,
+    loss_func: Callable,
+) -> None:
+    device = torch.device("cuda:0")
+    head_num = 16
+
+    cu_seqlens = torch.tensor([0, 120, 280, 512], dtype=torch.int32, device=device)
+    total_seq = int(cu_seqlens[-1].item())
+
+    kv = torch.rand((total_seq, head_num, k_dim + v_dim), dtype=dtype, device=device)
+    k_pos_emb = torch.rand((total_seq, emb_dim), dtype=dtype, device=device)
+    kv.requires_grad = True
+    k_pos_emb.requires_grad = True
+
+    cos_table, sin_table = _make_cos_sin_tables(total_seq, emb_dim, device)
+    cos_2d = cos_table[:, 0, 0, :]
+    sin_2d = sin_table[:, 0, 0, :]
+
+    # Build reference by splitting into per-sequence sbhd tensors (uses 2D tables)
+    seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+    ref_keys, ref_vals = [], []
+    for seq_start, seq_len in zip(cu_seqlens[:-1].tolist(), seqlens):
+        kv_chunk = kv[seq_start : seq_start + seq_len].unsqueeze(1)       # [s, 1, h, d]
+        emb_chunk = k_pos_emb[seq_start : seq_start + seq_len].unsqueeze(1)  # [s, 1, emb_dim]
+        okey, oval = _ref_mla_yarn_rope_kv(
+            kv_chunk.float(), emb_chunk.float(),
+            cos_2d[:seq_len], sin_2d[:seq_len],
+            k_dim, v_dim, emb_dim,
+        )
+        ref_keys.append(okey.squeeze(1))
+        ref_vals.append(oval.squeeze(1))
+    okey_ref = torch.cat(ref_keys, dim=0).to(dtype)
+    oval_ref = torch.cat(ref_vals, dim=0).to(dtype)
+    loss_ref = loss_func([okey_ref, oval_ref])
+    loss_ref.backward()
+    grad_kv_ref = kv.grad.detach().clone()
+    grad_emb_ref = k_pos_emb.grad.detach().clone()
+    kv.grad = None
+    k_pos_emb.grad = None
+
+    # Fused kernel with THD format (4D tables, no emb_dim arg)
+    okey_fused, oval_fused = apply_mla_rope_for_kv(
+        kv, k_pos_emb, cos_table, sin_table, k_dim, v_dim,
+        tensor_format="thd", cu_seqlens=cu_seqlens,
+    )
+    loss_fused = loss_func([okey_fused, oval_fused])
+    loss_fused.backward()
+    grad_kv_fused = kv.grad.detach().clone()
+    grad_emb_fused = k_pos_emb.grad.detach().clone()
+    kv.grad = None
+    k_pos_emb.grad = None
+
+    torch.testing.assert_close(okey_fused, okey_ref)
+    torch.testing.assert_close(oval_fused, oval_ref)
+    torch.testing.assert_close(grad_kv_fused, grad_kv_ref)
+    torch.testing.assert_close(grad_emb_fused, grad_emb_ref)

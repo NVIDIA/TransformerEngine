@@ -12,7 +12,13 @@ import transformer_engine_torch as tex
 from transformer_engine.pytorch.cpp_extensions.fused_attn import QKVFormat
 
 
-__all__ = ["RotaryPositionEmbedding", "apply_rotary_pos_emb", "apply_fused_qkv_rotary_pos_emb"]
+__all__ = [
+    "RotaryPositionEmbedding",
+    "apply_rotary_pos_emb",
+    "apply_fused_qkv_rotary_pos_emb",
+    "apply_mla_rope_for_q",
+    "apply_mla_rope_for_kv",
+]
 
 
 class RotaryPositionEmbedding(torch.nn.Module):
@@ -536,6 +542,255 @@ def apply_fused_qkv_rotary_pos_emb(
         start_positions,
         tensor_format,
         interleaved,
+        cp_size,
+        cp_rank,
+    )
+
+
+class MLARoPEQFunc(torch.autograd.Function):
+    """
+    Autograd function for applying MLA YARN RoPE to the query tensor.
+
+    YARN rotation is applied to the *tail* emb_dim elements of each head
+    (indices ``[qk_head_dim, qk_head_dim + emb_dim)``), leaving the first
+    ``qk_head_dim`` elements (the compressed latent part) untouched.
+
+    The cos/sin tables are 4-D contiguous tensors of shape
+    ``[max_seq_len, 1, 1, emb_dim]``.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        t: torch.Tensor,
+        cos_table: torch.Tensor,
+        sin_table: torch.Tensor,
+        qk_head_dim: int,
+        tensor_format: str = "sbhd",
+        cu_seqlens: Union[torch.Tensor, None] = None,
+        cp_size: int = 1,
+        cp_rank: int = 0,
+    ) -> torch.Tensor:
+        output = tex.mla_rope_q_forward(
+            t,
+            cos_table,
+            sin_table,
+            qk_head_dim,
+            QKVFormat[tensor_format],
+            cu_seqlens,
+            cp_size,
+            cp_rank,
+        )
+        ctx.save_for_backward(cos_table, sin_table)
+        ctx.qk_head_dim = qk_head_dim
+        ctx.tensor_format = tensor_format
+        ctx.cu_seqlens = cu_seqlens
+        ctx.cp_size = cp_size
+        ctx.cp_rank = cp_rank
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
+        cos_table, sin_table = ctx.saved_tensors
+        grad_input = tex.mla_rope_q_backward(
+            grad_output,
+            cos_table,
+            sin_table,
+            ctx.qk_head_dim,
+            QKVFormat[ctx.tensor_format],
+            ctx.cu_seqlens,
+            ctx.cp_size,
+            ctx.cp_rank,
+        )
+        return grad_input, None, None, None, None, None, None, None
+
+
+class MLARoPEKVFunc(torch.autograd.Function):
+    """
+    Autograd function for applying MLA YARN RoPE to the key-value tensors.
+
+    This fused kernel:
+      1. Splits the combined ``kv`` tensor into key (``k_dim``) and value (``v_dim``).
+      2. Applies YARN rotation to the single-head ``k_pos_emb`` tensor.
+      3. Broadcasts the rotated positional embedding across all heads.
+      4. Concatenates ``[k_content, rotated_emb]`` as the output key.
+
+    The cos/sin tables are 4-D contiguous tensors of shape
+    ``[max_seq_len, 1, 1, emb_dim]``.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        kv: torch.Tensor,
+        k_pos_emb: torch.Tensor,
+        cos_table: torch.Tensor,
+        sin_table: torch.Tensor,
+        k_dim: int,
+        v_dim: int,
+        tensor_format: str = "sbhd",
+        cu_seqlens: Union[torch.Tensor, None] = None,
+        cp_size: int = 1,
+        cp_rank: int = 0,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        o_key, o_value = tex.mla_rope_kv_forward(
+            kv,
+            k_pos_emb,
+            cos_table,
+            sin_table,
+            k_dim,
+            v_dim,
+            QKVFormat[tensor_format],
+            cu_seqlens,
+            cp_size,
+            cp_rank,
+        )
+        ctx.save_for_backward(cos_table, sin_table)
+        ctx.k_dim = k_dim
+        ctx.v_dim = v_dim
+        ctx.tensor_format = tensor_format
+        ctx.cu_seqlens = cu_seqlens
+        ctx.cp_size = cp_size
+        ctx.cp_rank = cp_rank
+        return o_key, o_value
+
+    @staticmethod
+    def backward(
+        ctx, grad_key: torch.Tensor, grad_value: torch.Tensor
+    ) -> Tuple[Union[torch.Tensor, None], ...]:
+        cos_table, sin_table = ctx.saved_tensors
+        dkv, d_emb = tex.mla_rope_kv_backward(
+            grad_key,
+            grad_value,
+            cos_table,
+            sin_table,
+            ctx.k_dim,
+            ctx.v_dim,
+            QKVFormat[ctx.tensor_format],
+            ctx.cu_seqlens,
+            ctx.cp_size,
+            ctx.cp_rank,
+        )
+        return dkv, d_emb, None, None, None, None, None, None, None, None
+
+
+def apply_mla_rope_for_q(
+    t: torch.Tensor,
+    cos_table: torch.Tensor,
+    sin_table: torch.Tensor,
+    qk_head_dim: int,
+    tensor_format: str = "sbhd",
+    cu_seqlens: Union[torch.Tensor, None] = None,
+    cp_size: int = 1,
+    cp_rank: int = 0,
+) -> torch.Tensor:
+    """
+    Apply MLA YARN rotary positional embedding to the query tensor.
+
+    YARN rotation is applied to the *tail* ``emb_dim`` elements of each head,
+    leaving the first ``qk_head_dim`` elements (the compressed latent part)
+    untouched.  ``emb_dim`` is inferred from ``cos_table.size(3)``.
+
+    Parameters
+    ----------
+    t : torch.Tensor
+        Input query tensor of shape ``[s, b, h, qk_head_dim + emb_dim]``,
+        ``[b, s, h, qk_head_dim + emb_dim]``, or ``[t, h, qk_head_dim + emb_dim]``.
+    cos_table : torch.Tensor
+        Pre-computed cosine table of shape ``[max_seq_len, 1, 1, emb_dim]``, dtype float32.
+    sin_table : torch.Tensor
+        Pre-computed sine table of shape ``[max_seq_len, 1, 1, emb_dim]``, dtype float32.
+    qk_head_dim : int
+        Compressed latent dimension (untouched prefix of each head).
+    tensor_format : {'sbhd', 'bshd', 'thd'}, default = 'sbhd'
+        Layout of the input tensor.
+    cu_seqlens : torch.Tensor, default = None
+        Cumulative sequence lengths, required for 'thd' format.
+    cp_size : int, default = 1
+        Context parallel world size.
+    cp_rank : int, default = 0
+        Context parallel rank.
+
+    Returns
+    -------
+    torch.Tensor
+        Output tensor with the same shape as input.
+    """
+    assert tensor_format != "thd" or cu_seqlens is not None, (
+        "cu_seqlens must not be None when tensor_format is 'thd'."
+    )
+    return MLARoPEQFunc.apply(
+        t, cos_table, sin_table, qk_head_dim, tensor_format, cu_seqlens, cp_size, cp_rank
+    )
+
+
+def apply_mla_rope_for_kv(
+    kv: torch.Tensor,
+    k_pos_emb: torch.Tensor,
+    cos_table: torch.Tensor,
+    sin_table: torch.Tensor,
+    k_dim: int,
+    v_dim: int,
+    tensor_format: str = "sbhd",
+    cu_seqlens: Union[torch.Tensor, None] = None,
+    cp_size: int = 1,
+    cp_rank: int = 0,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Apply MLA YARN rotary positional embedding to the key-value tensors.
+
+    This fused operation:
+      1. Splits the combined ``kv`` into key (``k_dim``) and value (``v_dim``).
+      2. Applies YARN rotation to the single-head ``k_pos_emb``.
+      3. Broadcasts the rotated positional embedding across all heads.
+      4. Concatenates ``[k_content, rotated_emb]`` as the output key.
+
+    ``emb_dim`` is inferred from ``cos_table.size(3)``.
+
+    Parameters
+    ----------
+    kv : torch.Tensor
+        Combined KV tensor of shape ``[s, b, h, k_dim + v_dim]``,
+        ``[b, s, h, k_dim + v_dim]``, or ``[t, h, k_dim + v_dim]``.
+    k_pos_emb : torch.Tensor
+        Positional embedding tensor of shape ``[s, b, emb_dim]`` or ``[t, emb_dim]``
+        (single-head, shared across all heads).
+    cos_table : torch.Tensor
+        Pre-computed cosine table of shape ``[max_seq_len, 1, 1, emb_dim]``, dtype float32.
+    sin_table : torch.Tensor
+        Pre-computed sine table of shape ``[max_seq_len, 1, 1, emb_dim]``, dtype float32.
+    k_dim : int
+        Compressed key dimension.
+    v_dim : int
+        Value dimension.
+    tensor_format : {'sbhd', 'bshd', 'thd'}, default = 'sbhd'
+        Layout of the input tensor.
+    cu_seqlens : torch.Tensor, default = None
+        Cumulative sequence lengths, required for 'thd' format.
+    cp_size : int, default = 1
+        Context parallel world size.
+    cp_rank : int, default = 0
+        Context parallel rank.
+
+    Returns
+    -------
+    key : torch.Tensor
+        Key tensor of shape ``[s, b, h, k_dim + emb_dim]`` or ``[t, h, k_dim + emb_dim]``.
+    value : torch.Tensor
+        Value tensor of shape ``[s, b, h, v_dim]`` or ``[t, h, v_dim]``.
+    """
+    assert tensor_format != "thd" or cu_seqlens is not None, (
+        "cu_seqlens must not be None when tensor_format is 'thd'."
+    )
+    return MLARoPEKVFunc.apply(
+        kv,
+        k_pos_emb,
+        cos_table,
+        sin_table,
+        k_dim,
+        v_dim,
+        tensor_format,
+        cu_seqlens,
         cp_size,
         cp_rank,
     )
