@@ -8,11 +8,12 @@ from __future__ import annotations
 from collections.abc import Iterable
 import math
 import os
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 
 from transformer_engine_torch import layernorm_bwd, layernorm_fwd
+from ...quantized_tensor import QuantizedTensorStorage
 from ...constants import TE_DType
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...export import is_in_onnx_export_mode
@@ -180,7 +181,7 @@ class LayerNorm(BasicOperation):
         requires_grad: bool,
         prev_op_grad_output_quantizer: Optional[Quantizer] = None,
         next_op_input_quantizer: Optional[Quantizer] = None,
-    ) -> tuple[torch.Tensor, tuple[Optional[torch.Tensor], ...]]:
+    ) -> tuple[torch.Tensor, tuple[Optional[Union[torch.Tensor, QuantizedTensorStorage]], ...]]:
         if is_in_onnx_export_mode():
             return self.op_onnx_forward(input_), ()
 
@@ -226,7 +227,7 @@ class LayerNorm(BasicOperation):
         self,
         ctx: OperationContext,
         input_: torch.Tensor,
-        tensors_to_save: tuple[Optional[torch.Tensor], ...],
+        tensors_to_save: tuple[Optional[Union[torch.Tensor, QuantizedTensorStorage]], ...],
         *,
         requires_grad: bool,
         prev_op_grad_output_quantizer: Optional[Quantizer] = None,

@@ -9,11 +9,12 @@ from collections.abc import Callable, Iterable
 import functools
 import inspect
 import os
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import torch
 
 import transformer_engine_torch as tex
+from ...quantized_tensor import QuantizedTensorStorage
 from ...quantization import Recipe
 from ...tensor import Quantizer
 from ...utils import get_cached_ones_tensor, get_device_compute_capability, mark_grouped_tensor
@@ -147,7 +148,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
     ) -> tuple[
         torch.Tensor,
         Iterable[Iterable[torch.Tensor]],
-        list[tuple[Optional[torch.Tensor], ...]],
+        list[tuple[Optional[Union[torch.Tensor, QuantizedTensorStorage]], ...]],
     ]:
         # Get basic operations
         fc1_op, _, fc2_op = self.basic_ops
@@ -538,7 +539,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         self,
         basic_op_ctxs: list[OperationContext],
         input_: torch.Tensor,
-        tensors_to_save: list[tuple[Optional[torch.Tensor], ...]],
+        tensors_to_save: list[tuple[Optional[Union[torch.Tensor, QuantizedTensorStorage]], ...]],
         *,
         requires_grad: list[bool],
         basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],

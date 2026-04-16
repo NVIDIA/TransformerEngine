@@ -6,11 +6,12 @@
 
 from __future__ import annotations
 from collections.abc import Iterable
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import torch
 
 import transformer_engine_torch as tex
+from ...quantized_tensor import QuantizedTensorStorage
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...tensor import Float8CurrentScalingQuantizer, Quantizer
 from ...utils import clear_tensor_data
@@ -86,7 +87,7 @@ class SwiGLU(BasicOperation):
         requires_grad: bool,
         prev_op_grad_output_quantizer: Optional[Quantizer] = None,
         next_op_input_quantizer: Optional[Quantizer] = None,
-    ) -> tuple[torch.Tensor, tuple[Optional[torch.Tensor], ...]]:
+    ) -> tuple[torch.Tensor, tuple[Optional[Union[torch.Tensor, QuantizedTensorStorage]], ...]]:
 
         # Compute dtype
         dtype: torch.dtype
@@ -133,7 +134,7 @@ class SwiGLU(BasicOperation):
         self,
         ctx: OperationContext,
         input_: torch.Tensor,
-        tensors_to_save: tuple[Optional[torch.Tensor], ...],
+        tensors_to_save: tuple[Optional[Union[torch.Tensor, QuantizedTensorStorage]], ...],
         *,
         requires_grad: bool,
         prev_op_grad_output_quantizer: Optional[Quantizer] = None,
@@ -283,7 +284,7 @@ class ClampedSwiGLU(BasicOperation):
         requires_grad: bool,
         prev_op_grad_output_quantizer: Optional[Quantizer] = None,
         next_op_input_quantizer: Optional[Quantizer] = None,
-    ) -> tuple[torch.Tensor, tuple[Optional[torch.Tensor], ...]]:
+    ) -> tuple[torch.Tensor, tuple[Optional[Union[torch.Tensor, QuantizedTensorStorage]], ...]]:
 
         # Compute dtype
         dtype: torch.dtype
@@ -327,7 +328,7 @@ class ClampedSwiGLU(BasicOperation):
         self,
         ctx: OperationContext,
         input_: torch.Tensor,
-        tensors_to_save: tuple[Optional[torch.Tensor], ...],
+        tensors_to_save: tuple[Optional[Union[torch.Tensor, QuantizedTensorStorage]], ...],
         *,
         requires_grad: bool,
         prev_op_grad_output_quantizer: Optional[Quantizer] = None,
@@ -437,7 +438,7 @@ class _ScaledGLU(BasicOperation):
     ) -> tuple[
         torch.Tensor,
         Iterable[Iterable[torch.Tensor]],
-        list[tuple[Optional[torch.Tensor], ...]],
+        list[tuple[Optional[Union[torch.Tensor, QuantizedTensorStorage]], ...]],
     ]:
         extra_input = basic_op_extra_inputs[0][0]
 
@@ -480,7 +481,7 @@ class _ScaledGLU(BasicOperation):
         self,
         basic_op_ctxs: list[OperationContext],
         input_: torch.Tensor,
-        tensors_to_save: list[tuple[Optional[torch.Tensor], ...]],
+        tensors_to_save: list[tuple[Optional[Union[torch.Tensor, QuantizedTensorStorage]], ...]],
         *,
         requires_grad: list[bool],
         basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],

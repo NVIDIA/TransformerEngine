@@ -5,11 +5,12 @@
 """Fusable operation for L2 Normalization."""
 
 from __future__ import annotations
-from typing import Optional
+from typing import Optional, Union
 import os
 
 import torch
 
+from ...quantized_tensor import QuantizedTensorStorage
 from ...torch_version import torch_version
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...jit import (
@@ -84,7 +85,7 @@ class L2Normalization(BasicOperation):
         requires_grad: bool,
         prev_op_grad_output_quantizer: Optional[Quantizer] = None,
         next_op_input_quantizer: Optional[Quantizer] = None,
-    ) -> tuple[torch.Tensor, tuple[Optional[torch.Tensor], ...]]:
+    ) -> tuple[torch.Tensor, tuple[Optional[Union[torch.Tensor, QuantizedTensorStorage]], ...]]:
         x = maybe_dequantize(input_)
 
         if requires_grad:
@@ -97,7 +98,7 @@ class L2Normalization(BasicOperation):
         self,
         ctx: OperationContext,
         input_: torch.Tensor,
-        tensors_to_save: tuple[Optional[torch.Tensor], ...],
+        tensors_to_save: tuple[Optional[Union[torch.Tensor, QuantizedTensorStorage]], ...],
         *,
         requires_grad: bool,
         prev_op_grad_output_quantizer: Optional[Quantizer] = None,

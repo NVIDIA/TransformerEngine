@@ -9,11 +9,12 @@ from collections.abc import Callable, Iterable, Sequence
 import contextlib
 import functools
 import math
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import torch
 
 import transformer_engine_torch as tex
+from ...quantized_tensor import QuantizedTensorStorage
 from ...cpp_extensions import general_grouped_gemm
 from ...distributed import CudaRNGStatesTracker
 from ...module._common import WeightGradStore
@@ -677,7 +678,7 @@ class GroupedLinear(BasicOperation):
     ) -> tuple[
         torch.Tensor,
         Iterable[Iterable[torch.Tensor]],
-        list[tuple[Optional[torch.Tensor], ...]],
+        list[tuple[Optional[Union[torch.Tensor, QuantizedTensorStorage]], ...]],
     ]:
         num_groups = self.num_groups
         has_bias = self.has_bias
@@ -822,7 +823,7 @@ class GroupedLinear(BasicOperation):
         self,
         basic_op_ctxs: list[OperationContext],
         input_: torch.Tensor,
-        tensors_to_save: list[tuple[Optional[torch.Tensor], ...]],
+        tensors_to_save: list[tuple[Optional[Union[torch.Tensor, QuantizedTensorStorage]], ...]],
         *,
         requires_grad: list[bool],
         basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],

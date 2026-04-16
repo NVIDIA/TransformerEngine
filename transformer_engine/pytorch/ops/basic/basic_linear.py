@@ -8,10 +8,11 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 import contextlib
 import math
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import torch
 
+from ...quantized_tensor import QuantizedTensorStorage
 from ...cpp_extensions import general_gemm
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...distributed import (
@@ -986,7 +987,7 @@ class BasicLinear(BasicOperation):
         requires_grad: bool,
         prev_op_grad_output_quantizer: Optional[Quantizer] = None,
         next_op_input_quantizer: Optional[Quantizer] = None,
-    ) -> tuple[torch.Tensor, tuple[Optional[torch.Tensor], ...]]:
+    ) -> tuple[torch.Tensor, tuple[Optional[Union[torch.Tensor, QuantizedTensorStorage]], ...]]:
 
         # Check which grads are required
         input_requires_grad = requires_grad
@@ -1043,7 +1044,7 @@ class BasicLinear(BasicOperation):
         self,
         ctx: OperationContext,
         input_: torch.Tensor,
-        tensors_to_save: tuple[Optional[torch.Tensor], ...],
+        tensors_to_save: tuple[Optional[Union[torch.Tensor, QuantizedTensorStorage]], ...],
         *,
         requires_grad: bool,
         prev_op_grad_output_quantizer: Optional[Quantizer] = None,

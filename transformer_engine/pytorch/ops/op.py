@@ -62,14 +62,13 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
 
     - **Legacy API**: Override ``fuser_forward`` (single method that
       performs both computation and context saving).
-    - **Split API**: Override ``fuser_forward_compute`` and optionally
+    - **Split API**: Override both ``fuser_forward_compute`` and
       ``fuser_forward_save_ctx`` (separates computation from context
       saving, enabling ``torch.compile`` compatibility).
 
     The split API is preferred for new operations. If
     ``fuser_forward_compute`` is defined, the operation automatically
-    uses the split API. Defining ``fuser_forward_save_ctx`` without
-    ``fuser_forward_compute`` is an error.
+    uses the split API. Both methods must be defined together.
 
     """
 
@@ -80,11 +79,15 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
         has_fuser_compute = "fuser_forward_compute" in cls.__dict__
         has_fuser_save_ctx = "fuser_forward_save_ctx" in cls.__dict__
 
+        if has_fuser_compute and not has_fuser_save_ctx:
+            raise TypeError(
+                f"{cls.__name__} defines fuser_forward_compute without "
+                "fuser_forward_save_ctx. Both must be defined together."
+            )
         if has_fuser_save_ctx and not has_fuser_compute:
             raise TypeError(
                 f"{cls.__name__} defines fuser_forward_save_ctx without "
-                "fuser_forward_compute. fuser_forward_save_ctx requires "
-                "fuser_forward_compute."
+                "fuser_forward_compute. Both must be defined together."
             )
         if has_fuser_compute:
             cls._use_split_forward = True
@@ -305,14 +308,13 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
 
     - **Legacy API**: Override ``op_forward`` (single method that
       performs both computation and context saving).
-    - **Split API**: Override ``op_forward_compute`` and optionally
+    - **Split API**: Override both ``op_forward_compute`` and
       ``op_forward_save_ctx`` (separates computation from context
       saving, enabling ``torch.compile`` compatibility).
 
     The split API is preferred for new operations. Defining both
-    ``op_forward`` and ``op_forward_compute`` is an error. Defining
-    ``op_forward_save_ctx`` without ``op_forward_compute`` is also
-    an error.
+    ``op_forward`` and ``op_forward_compute`` is an error. The
+    split API methods must be defined together.
 
     """
 
@@ -333,10 +335,15 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                 "Implement either op_forward (legacy) or "
                 "op_forward_compute + op_forward_save_ctx (split API), not both."
             )
+        if has_compute and not has_save_ctx:
+            raise TypeError(
+                f"{cls.__name__} defines op_forward_compute without op_forward_save_ctx. "
+                "Both must be defined together."
+            )
         if has_save_ctx and not has_compute:
             raise TypeError(
                 f"{cls.__name__} defines op_forward_save_ctx without op_forward_compute. "
-                "op_forward_save_ctx requires op_forward_compute."
+                "Both must be defined together."
             )
         if has_compute:
             cls._use_split_forward = True
@@ -974,7 +981,7 @@ class FusedOperation(FusibleOperation):
     (inherited from ``FusibleOperation``):
 
     - **Legacy API**: Override ``fuser_forward``.
-    - **Split API**: Override ``fuser_forward_compute`` and optionally
+    - **Split API**: Override both ``fuser_forward_compute`` and
       ``fuser_forward_save_ctx``.
 
     Parameters

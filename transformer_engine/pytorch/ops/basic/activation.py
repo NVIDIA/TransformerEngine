@@ -6,11 +6,12 @@
 
 from __future__ import annotations
 import abc
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 
 import transformer_engine_torch as tex
+from ...quantized_tensor import QuantizedTensorStorage
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...tensor.float8_tensor import Float8CurrentScalingQuantizer, Quantizer
 from ...utils import clear_tensor_data
@@ -87,7 +88,7 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
         requires_grad: bool,
         prev_op_grad_output_quantizer: Optional[Quantizer] = None,
         next_op_input_quantizer: Optional[Quantizer] = None,
-    ) -> tuple[torch.Tensor, tuple[Optional[torch.Tensor], ...]]:
+    ) -> tuple[torch.Tensor, tuple[Optional[Union[torch.Tensor, QuantizedTensorStorage]], ...]]:
 
         # Compute dtype
         dtype: torch.dtype
@@ -118,7 +119,7 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
         self,
         ctx: OperationContext,
         input_: torch.Tensor,
-        tensors_to_save: tuple[Optional[torch.Tensor], ...],
+        tensors_to_save: tuple[Optional[Union[torch.Tensor, QuantizedTensorStorage]], ...],
         *,
         requires_grad: bool,
         prev_op_grad_output_quantizer: Optional[Quantizer] = None,

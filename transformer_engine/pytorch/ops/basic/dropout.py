@@ -5,10 +5,11 @@
 """Fusible operation for dropout."""
 
 from __future__ import annotations
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 import transformer_engine_torch as tex
+from ...quantized_tensor import QuantizedTensorStorage
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...tensor import Quantizer
 from ...tensor.storage.float8_tensor_storage import Float8TensorStorage
@@ -36,7 +37,7 @@ class Dropout(BasicOperation):
         requires_grad: bool,
         prev_op_grad_output_quantizer: Optional[Quantizer] = None,
         next_op_input_quantizer: Optional[Quantizer] = None,
-    ) -> tuple[torch.Tensor, tuple[Optional[torch.Tensor], ...]]:
+    ) -> tuple[torch.Tensor, tuple[Optional[Union[torch.Tensor, QuantizedTensorStorage]], ...]]:
 
         # Output dtype
         dtype = maybe_autocast_dtype(default_dtype=input_.dtype)
@@ -76,7 +77,7 @@ class Dropout(BasicOperation):
         self,
         ctx: OperationContext,
         input_: torch.Tensor,
-        tensors_to_save: tuple[Optional[torch.Tensor], ...],
+        tensors_to_save: tuple[Optional[Union[torch.Tensor, QuantizedTensorStorage]], ...],
         *,
         requires_grad: bool,
         prev_op_grad_output_quantizer: Optional[Quantizer] = None,
