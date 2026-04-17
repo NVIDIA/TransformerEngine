@@ -498,7 +498,7 @@ def get_attention_backend(
         torch.Tensor,
         Float8Tensor,
         Float8TensorStorage,
-    ):
+    ]:
         if use_flash_attention_3 and FlashAttentionUtils.v3_is_installed:
             logger.debug(
                 "Disabling FlashAttention 3 for unsupported qkv_dtype = %s, qkv_type = %s."
