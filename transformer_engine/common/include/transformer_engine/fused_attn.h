@@ -196,22 +196,6 @@ NVTE_QKV_Format nvte_get_q_format(NVTE_QKV_Layout qkv_layout);
  */
 NVTE_QKV_Format nvte_get_kv_format(NVTE_QKV_Layout qkv_layout);
 
-/*! \brief Convert a tensor shape from one NVTE_QKV_Format to another.
- *
- *  \param[in]     src_format          The source format.
- *  \param[in]     src_shape           The source shape.
- *  \param[in]     dst_format          The destination format.
- *  \param[out]    dst_shape           The destination shape.
- *  \param[out]    b                   The batch size.
- *  \param[out]    h                   The number of heads.
- *  \param[out]    s                   The sequence length.
- *  \param[out]    d                   The head dimension.
- *  \param[out]    t                   The number of tokens.
- */
-void nvte_convert_qkv_shape(NVTE_QKV_Format src_format, const size_t *src_shape,
-                            NVTE_QKV_Format dst_format, size_t *dst_shape, size_t *b, size_t *h,
-                            size_t *s, size_t *d, size_t *t);
-
 /*! \brief Get fused attention backend based on input parameters.
  *
  *  \param[in]     is_training         Whether the model is in training mode.
@@ -652,6 +636,50 @@ void nvte_multi_tensor_pad_last_dim(NVTETensor *inputs, NVTETensor *outputs, siz
 
 #ifdef __cplusplus
 }  // extern "C"
-#endif
+
+#include <array>
+#include <cstddef>
+#include <utility>
+
+/*! \brief Parses a QKV tensor shape into canonical (b, h, s, d, t) dimensions
+ *         and converts between QKV formats.
+ */
+class AttentionShape {
+ public:
+  inline AttentionShape(NVTE_QKV_Format fmt, const size_t *shape) : canonical_{} {
+    auto [ndim, order] = dim_order(fmt);
+    for (size_t i = 0; i < ndim; ++i) canonical_[order[i]] = shape[i];
+  }
+
+  size_t b() const { return canonical_[0]; }
+  size_t h() const { return canonical_[1]; }
+  size_t s() const { return canonical_[2]; }
+  size_t d() const { return canonical_[3]; }
+  size_t t() const { return canonical_[4]; }
+
+  inline void to_format(NVTE_QKV_Format dst_fmt, size_t *dst_shape) const {
+    auto [ndim, order] = dim_order(dst_fmt);
+    for (size_t i = 0; i < ndim; ++i) dst_shape[i] = canonical_[order[i]];
+  }
+
+ private:
+  static inline std::pair<size_t, std::array<int, 4>> dim_order(NVTE_QKV_Format fmt) {
+    switch (fmt) {
+      case NVTE_QKV_Format::NVTE_BSHD:
+        return {4, {0, 2, 1, 3}};  // b s h d
+      case NVTE_QKV_Format::NVTE_SBHD:
+        return {4, {2, 0, 1, 3}};  // s b h d
+      case NVTE_QKV_Format::NVTE_BHSD:
+        return {4, {0, 1, 2, 3}};  // b h s d
+      case NVTE_QKV_Format::NVTE_THD:
+        return {3, {4, 1, 3, -1}};  // t h d
+      default:
+        return {0, {}};
+    }
+  }
+  size_t canonical_[5] = {};
+};
+
+#endif  // __cplusplus
 
 #endif

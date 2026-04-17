@@ -151,10 +151,10 @@ std::vector<py::object> fused_attn_fwd(
   auto o_shape_tmp = std::vector<size_t>{q_shape.begin(), q_shape.end()};
   o_shape_tmp[o_shape_tmp.size() - 1] = v_shape[v_shape.size() - 1];
   auto o_shape = std::vector<size_t>{o_shape_tmp.begin(), o_shape_tmp.end()};
-  size_t h = 0, d = 0;
   NVTE_QKV_Format q_format = nvte_get_q_format(qkv_layout);
-  nvte_convert_qkv_shape(q_format, o_shape_tmp.data(), o_format, o_shape.data(), nullptr, &h,
-                         nullptr, &d, nullptr);
+  AttentionShape o_parsed(q_format, o_shape_tmp.data());
+  size_t h = o_parsed.h(), d = o_parsed.d();
+  o_parsed.to_format(o_format, o_shape.data());
   const DType fake_dtype_te = GetTransformerEngineDType(fake_dtype);
   std::tie(te_O, py_O) = quantizer_helper(o_quantizer, o_shape, fake_dtype_te, true, std::nullopt);
 
@@ -365,7 +365,6 @@ std::vector<py::object> fused_attn_bwd(
   std::vector<size_t> k_shape = convertShape(te_K.shape());
   std::vector<size_t> v_shape = convertShape(te_V.shape());
   const DType dqkv_fake_dtype = GetTransformerEngineDType(fake_dtype);
-  size_t h_q = 0, h_kv = 0, d_qk = 0, d_v = 0;
   size_t ndim_q = q_shape.size();
   size_t ndim_kv = k_shape.size();
   std::vector<size_t> dQ_shape(ndim_q), dK_shape(ndim_kv), dV_shape(ndim_kv);
@@ -373,12 +372,15 @@ std::vector<py::object> fused_attn_bwd(
   NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
   NVTE_QKV_Format dq_format = nvte_get_q_format(dqkv_layout);
   NVTE_QKV_Format dkv_format = nvte_get_kv_format(dqkv_layout);
-  nvte_convert_qkv_shape(q_format, q_shape.data(), dq_format, dQ_shape.data(), nullptr, &h_q,
-                         nullptr, &d_qk, nullptr);
-  nvte_convert_qkv_shape(kv_format, k_shape.data(), dkv_format, dK_shape.data(), nullptr, &h_kv,
-                         nullptr, nullptr, nullptr);
-  nvte_convert_qkv_shape(kv_format, v_shape.data(), dkv_format, dV_shape.data(), nullptr, nullptr,
-                         nullptr, &d_v, nullptr);
+  AttentionShape q_parsed(q_format, q_shape.data());
+  size_t h_q = q_parsed.h(), d_qk = q_parsed.d();
+  q_parsed.to_format(dq_format, dQ_shape.data());
+  AttentionShape k_parsed(kv_format, k_shape.data());
+  size_t h_kv = k_parsed.h();
+  k_parsed.to_format(dkv_format, dK_shape.data());
+  AttentionShape v_parsed(kv_format, v_shape.data());
+  size_t d_v = v_parsed.d();
+  v_parsed.to_format(dkv_format, dV_shape.data());
   at::Tensor dQ, dK, dV, dQKV, dKV;
   // FP16/BF16: dqkv_fake_dtype = kFloat16/kBFloat16, dQ/dK/dV.dtype = torch.float16/torch.bfloat16
   // FP8DS: dqkv_fake_dtype = kFloat16/kBFloat16, dQ/dK/dV.dtype = torch.uint8
