@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <mutex>
 
+#include "../common.h"
 #include "transformer_engine/fused_attn.h"
 #include "transformer_engine/transformer_engine.h"
 
@@ -52,18 +53,18 @@ struct MXFP8PaddedSizes {
 inline MXFP8PaddedSizes pad_s_d_for_mxfp8(int64_t s_q, int64_t s_kv, int64_t d_qk, int64_t d_v) {
   constexpr int64_t block_size = 32;
   MXFP8PaddedSizes p;
-  p.s_q_padded = ((s_q + 127) / 128) * 128;
-  p.s_kv_padded = ((s_kv + 127) / 128) * 128;
-  p.s_q_scale = (s_q + block_size - 1) / block_size;
-  p.s_kv_scale = (s_kv + block_size - 1) / block_size;
-  p.s_q_scale_padded = ((p.s_q_scale + 3) / 4) * 4;
-  p.s_kv_scale_padded = ((p.s_kv_scale + 3) / 4) * 4;
-  p.d_qk_padded = ((d_qk + 127) / 128) * 128;
-  p.d_v_padded = ((d_v + 127) / 128) * 128;
-  p.d_qk_scale = (d_qk + block_size - 1) / block_size;
-  p.d_v_scale = (d_v + block_size - 1) / block_size;
-  p.d_qk_scale_padded = ((p.d_qk_scale + 3) / 4) * 4;
-  p.d_v_scale_padded = ((p.d_v_scale + 3) / 4) * 4;
+  p.s_q_padded = DIVUP_TO_MULTIPLE(s_q, 128);
+  p.s_kv_padded = DIVUP_TO_MULTIPLE(s_kv, 128);
+  p.s_q_scale = DIVUP(s_q, block_size);
+  p.s_kv_scale = DIVUP(s_kv, block_size);
+  p.s_q_scale_padded = DIVUP_TO_MULTIPLE(p.s_q_scale, 4);
+  p.s_kv_scale_padded = DIVUP_TO_MULTIPLE(p.s_kv_scale, 4);
+  p.d_qk_padded = DIVUP_TO_MULTIPLE(d_qk, 128);
+  p.d_v_padded = DIVUP_TO_MULTIPLE(d_v, 128);
+  p.d_qk_scale = DIVUP(d_qk, block_size);
+  p.d_v_scale = DIVUP(d_v, block_size);
+  p.d_qk_scale_padded = DIVUP_TO_MULTIPLE(p.d_qk_scale, 4);
+  p.d_v_scale_padded = DIVUP_TO_MULTIPLE(p.d_v_scale, 4);
   return p;
 }
 
