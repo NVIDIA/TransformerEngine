@@ -130,7 +130,7 @@ class TestNVFP4FSDP2Hooks:
 
     @pytest.mark.parametrize("shape", _test_shapes)
     def test_round_trip_data_integrity(self, shape: Tuple[int, int]):
-        """Verify that data and dequantized values survive the pre -> all_gather -> post round-trip."""
+        """Verify data and dequantized values survive the pre -> all_gather -> post round-trip."""
         world_size = 2
         M, K = shape
         shard_M = M // world_size
@@ -246,8 +246,8 @@ class TestNVFP4FSDP2Hooks:
 
         if not qt._with_gemm_swizzled_scales:
             pytest.skip(
-                "NVFP4Quantizer.optimize_for_gemm is not yet wired up in C++ "
-                "(see quantizer.cpp TODO). Test will be unskipped once supported."
+                "NVFP4Quantizer.optimize_for_gemm is not yet wired up in C++. "
+                "Test will be unskipped once supported."
             )
 
         with pytest.raises(NotImplementedError, match="GEMM-swizzled"):

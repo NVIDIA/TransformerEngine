@@ -716,6 +716,11 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
                 and (end is None or end >= tensor.size(dim))
             ):
                 return NVFP4Tensor.make_like(tensor)
+            raise NotImplementedError(
+                "NVFP4Tensor does not support partial slicing "
+                f"(dim={dim}, start={start}, end={end}, "
+                f"tensor.size(dim)={tensor.size(dim)})"
+            )
 
         # record_stream — FSDP2 records streams on all-gathered tensors.
         if func == torch.ops.aten.record_stream.default:

@@ -225,16 +225,12 @@ def _check_fp8_fsdp2_allgather(model):
             if device_mesh.ndim > 1
             else device_mesh.get_group()
         )
-        # Dequantize first, then create plain-tensor buffers for the manual
-        # all-gather.  Using zeros_like(local_tensor) directly would return a
-        # QuantizedTensor for types like NVFP4Tensor (whose __torch_dispatch__
-        # handles empty_like/zero_ and returns a new NVFP4Tensor), causing a
-        # dtype mismatch with the bfloat16 source.
-        deq_local = local_tensor.dequantize()
+        # Perform manual allgather on local_tensor. zeros_like will create hp tensor since
+        # torch_dispatch for local_tensor will go down the dequantization route.
         gathered_tensor = [
-            torch.zeros_like(deq_local) for _ in range(dist.get_world_size(group=dist_group))
+            torch.zeros_like(local_tensor) for _ in range(dist.get_world_size(group=dist_group))
         ]
-        dist.all_gather(gathered_tensor, deq_local, group=dist_group)
+        dist.all_gather(gathered_tensor, local_tensor.dequantize(), group=dist_group)
         full_tensor = torch.cat(gathered_tensor, dim=0)
         fp32_allgathered_params[name] = full_tensor
     # FP8 allgather using FSDP2
