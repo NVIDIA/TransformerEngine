@@ -853,6 +853,11 @@ void Float8CurrentScalingQuantizer::quantize_impl(const TensorWrapper& input, Te
 
   // Nothing to be done if input is empty
   if (input.numel() == 0) {
+    // Clear amax/scale pointers defensively: amax_buf/scale_buf are caller-owned
+    // locals that may be released right after this call, leaving dangling raw
+    // pointers in `out`.
+    out.set_amax(nullptr, DType::kFloat32, out.defaultShape);
+    out.set_scale(nullptr, DType::kFloat32, out.defaultShape);
     return;
   }
 
@@ -885,6 +890,10 @@ void Float8CurrentScalingQuantizer::quantize_impl(const TensorWrapper& input, Te
   // Cast to FP8
   out.set_amax(nullptr, DType::kFloat32, out.defaultShape);  // Avoid atomic amax updates
   NVTE_SCOPED_GIL_RELEASE({ nvte_quantize_v2(input.data(), out.data(), quant_config, stream); });
+
+  // Clear scale pointer defensively: amax_buf/scale_buf are caller-owned locals
+  // that may be released right after this call, leaving a dangling raw pointer in `out`.
+  out.set_scale(nullptr, DType::kFloat32, out.defaultShape);
 }
 
 void Float8CurrentScalingQuantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
