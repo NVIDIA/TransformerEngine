@@ -471,7 +471,8 @@ def test_distributed_hybrid_reshard_after_forward(hybrid_recipe_name):
     out_features = in_features * 3
     with te.quantized_model_init(enabled=True, recipe=hybrid_recipe):
         model = te.LayerNormLinear(
-            in_features, out_features,
+            in_features,
+            out_features,
             params_dtype=torch.bfloat16,
             device="meta",
         )

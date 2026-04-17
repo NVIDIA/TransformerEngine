@@ -40,9 +40,15 @@ def get_hybrid_recipe_from_string(recipe):
             grad=lambda: MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E5M2),
         ),
         "HybridFloat8BlockScaling": lambda: dict(
-            row=lambda: Float8BlockQuantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True),
-            col=lambda: Float8BlockQuantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True),
-            grad=lambda: Float8BlockQuantizer(fp8_dtype=tex.DType.kFloat8E5M2, rowwise=True, columnwise=True),
+            row=lambda: Float8BlockQuantizer(
+                fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True
+            ),
+            col=lambda: Float8BlockQuantizer(
+                fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True
+            ),
+            grad=lambda: Float8BlockQuantizer(
+                fp8_dtype=tex.DType.kFloat8E5M2, rowwise=True, columnwise=True
+            ),
         ),
         "HybridMixed_MXFP8_FP8": lambda: dict(
             row=lambda: MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
@@ -52,9 +58,7 @@ def get_hybrid_recipe_from_string(recipe):
     }
 
     if recipe not in _BUILDERS:
-        raise ValueError(
-            f"Unknown hybrid recipe '{recipe}'. Supported: {sorted(_BUILDERS.keys())}"
-        )
+        raise ValueError(f"Unknown hybrid recipe '{recipe}'. Supported: {sorted(_BUILDERS.keys())}")
 
     builders = _BUILDERS[recipe]()
     row_fn, col_fn, grad_fn = builders["row"], builders["col"], builders["grad"]

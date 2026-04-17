@@ -470,6 +470,7 @@ def test_transpose_cache_retained_after_backward(recipe_name, quantized_model_in
 
 # ── Hybrid quantization memory tests ─────────────────────────────────
 
+
 def _build_hybrid_model(num_layers, hybrid_recipe, use_meta_device=True):
     """Build a model with quantized_model_init using a hybrid CustomRecipe."""
     ctx = te.quantized_model_init(enabled=True, recipe=hybrid_recipe)
@@ -520,7 +521,10 @@ def test_hybrid_no_excess_forward_memory(hybrid_recipe_name):
     bf16_model = _build_model(NUM_LAYERS, fp8_init=False)
     bf16_model = _shard_model(bf16_model, world_size)
     bf16_optimizer = te.optimizers.FusedAdam(
-        bf16_model.parameters(), lr=1e-3, master_weights=True, master_weight_dtype=torch.float32,
+        bf16_model.parameters(),
+        lr=1e-3,
+        master_weights=True,
+        master_weight_dtype=torch.float32,
     )
     for _ in range(WARMUP_STEPS):
         _run_training_step(bf16_model, bf16_optimizer, None, x, target)
@@ -535,12 +539,19 @@ def test_hybrid_no_excess_forward_memory(hybrid_recipe_name):
     hybrid_model = _build_hybrid_model(NUM_LAYERS, hybrid_recipe)
     hybrid_model = _shard_model(hybrid_model, world_size)
     hybrid_optimizer = te.optimizers.FusedAdam(
-        hybrid_model.parameters(), lr=1e-3, master_weights=True, master_weight_dtype=torch.float32,
+        hybrid_model.parameters(),
+        lr=1e-3,
+        master_weights=True,
+        master_weight_dtype=torch.float32,
     )
     for _ in range(WARMUP_STEPS):
         _run_training_step(hybrid_model, hybrid_optimizer, hybrid_recipe, x, target)
     hybrid_increments = _measure_forward_increments(
-        hybrid_model, hybrid_optimizer, hybrid_recipe, x, target,
+        hybrid_model,
+        hybrid_optimizer,
+        hybrid_recipe,
+        x,
+        target,
     )
     hybrid_avg = sum(hybrid_increments) / len(hybrid_increments)
 
@@ -574,7 +585,10 @@ def test_hybrid_transpose_cache_after_backward(hybrid_recipe_name):
     bf16_model = _build_model(NUM_LAYERS, fp8_init=False)
     bf16_model = _shard_model(bf16_model, world_size)
     bf16_optimizer = te.optimizers.FusedAdam(
-        bf16_model.parameters(), lr=1e-3, master_weights=True, master_weight_dtype=torch.float32,
+        bf16_model.parameters(),
+        lr=1e-3,
+        master_weights=True,
+        master_weight_dtype=torch.float32,
     )
     for _ in range(WARMUP_STEPS):
         _run_training_step(bf16_model, bf16_optimizer, None, x, target)
@@ -588,12 +602,19 @@ def test_hybrid_transpose_cache_after_backward(hybrid_recipe_name):
     hybrid_model = _build_hybrid_model(NUM_LAYERS, hybrid_recipe)
     hybrid_model = _shard_model(hybrid_model, world_size)
     hybrid_optimizer = te.optimizers.FusedAdam(
-        hybrid_model.parameters(), lr=1e-3, master_weights=True, master_weight_dtype=torch.float32,
+        hybrid_model.parameters(),
+        lr=1e-3,
+        master_weights=True,
+        master_weight_dtype=torch.float32,
     )
     for _ in range(WARMUP_STEPS):
         _run_training_step(hybrid_model, hybrid_optimizer, hybrid_recipe, x, target)
     hybrid_bwd_delta = _measure_backward_memory_delta(
-        hybrid_model, hybrid_optimizer, hybrid_recipe, x, target,
+        hybrid_model,
+        hybrid_optimizer,
+        hybrid_recipe,
+        x,
+        target,
     )
 
     excess = hybrid_bwd_delta - bf16_bwd_delta

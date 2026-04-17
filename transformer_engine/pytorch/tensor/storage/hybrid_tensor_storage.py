@@ -136,7 +136,9 @@ class HybridQuantizedTensorStorage(QuantizedTensorStorage):
     def view(self, *shape):
         """View delegates to each sub-storage. Used by FSDP2 reset_sharded_param."""
         row_view = self._rowwise_storage.view(*shape) if self._rowwise_storage is not None else None
-        col_view = self._columnwise_storage.view(*shape) if self._columnwise_storage is not None else None
+        col_view = (
+            self._columnwise_storage.view(*shape) if self._columnwise_storage is not None else None
+        )
         return HybridQuantizedTensorStorage(
             rowwise_storage=row_view,
             columnwise_storage=col_view,

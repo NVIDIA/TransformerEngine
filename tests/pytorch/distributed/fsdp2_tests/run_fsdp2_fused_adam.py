@@ -1017,9 +1017,7 @@ def test_fused_adam_hybrid_master_weights(hybrid_recipe_name):
         if "master_param" in state:
             assert state["master_param"].dtype == torch.float32
 
-    assert losses[-1] < losses[0], (
-        f"Loss did not decrease: {losses[0]:.4f} -> {losses[-1]:.4f}"
-    )
+    assert losses[-1] < losses[0], f"Loss did not decrease: {losses[0]:.4f} -> {losses[-1]:.4f}"
 
 
 @pytest.mark.parametrize("reshard_after_forward", [True, False])
@@ -1130,9 +1128,7 @@ def test_fused_adam_hybrid_bf16_vs_hybrid_parity(hybrid_recipe_name):
     hybrid_model = _shard_model(hybrid_model, world_size)
     hybrid_losses = run_training(hybrid_model, hybrid_recipe)
 
-    assert hybrid_losses[-1] < hybrid_losses[0], (
-        f"Hybrid loss did not decrease: {hybrid_losses}"
-    )
+    assert hybrid_losses[-1] < hybrid_losses[0], f"Hybrid loss did not decrease: {hybrid_losses}"
     assert bf16_losses[-1] < bf16_losses[0], f"BF16 loss did not decrease: {bf16_losses}"
 
     # Verify hybrid and bf16 loss trajectories are within the same order of magnitude.
@@ -1266,8 +1262,7 @@ def test_fused_adam_hybrid_mxfp8_awkward_shard_shape():
         # Compare dim-0 all-gather (bytes) with FSDP2's reconstruction.
         for name, param in model.named_parameters():
             if not (
-                isinstance(param, DTensor)
-                and isinstance(param._local_tensor, QuantizedTensor)
+                isinstance(param, DTensor) and isinstance(param._local_tensor, QuantizedTensor)
             ):
                 continue
             local_shard = param._local_tensor
@@ -1288,9 +1283,7 @@ def test_fused_adam_hybrid_mxfp8_awkward_shard_shape():
                 fsdp_full_deq[: manual_full.shape[0]].float(),
                 rtol=0.0,
                 atol=0.0,
-                msg=lambda m, n=name, r=recipe_name: (
-                    f"[{r}] Allgather mismatch for {n} at awkward shard shape: {m}"
-                ),
+                msg=lambda m, n=name, r=recipe_name: f"[{r}] Allgather mismatch for {n} at awkward shard shape: {m}",
             )
 
 
@@ -1324,8 +1317,10 @@ def test_hybrid_dcp_output_parity(hybrid_recipe_name):
         model = _build_hybrid_model(hybrid_recipe)
         model = _shard_model(model, world_size)
         optimizer = te.optimizers.FusedAdam(
-            model.parameters(), lr=1e-3,
-            master_weights=True, master_weight_dtype=torch.float32,
+            model.parameters(),
+            lr=1e-3,
+            master_weights=True,
+            master_weight_dtype=torch.float32,
         )
 
         x = torch.randn(SEQ_LEN, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
@@ -1351,8 +1346,10 @@ def test_hybrid_dcp_output_parity(hybrid_recipe_name):
         model2 = _build_hybrid_model(hybrid_recipe)
         model2 = _shard_model(model2, world_size)
         optimizer2 = te.optimizers.FusedAdam(
-            model2.parameters(), lr=1e-3,
-            master_weights=True, master_weight_dtype=torch.float32,
+            model2.parameters(),
+            lr=1e-3,
+            master_weights=True,
+            master_weight_dtype=torch.float32,
         )
         optimizer2.zero_grad(set_to_none=True)
         with te.autocast(enabled=True, recipe=hybrid_recipe):
@@ -1373,13 +1370,17 @@ def test_hybrid_dcp_output_parity(hybrid_recipe_name):
                 loaded_output = model2(x)
 
         torch.testing.assert_close(
-            loaded_output, ref_output, rtol=0, atol=0,
+            loaded_output,
+            ref_output,
+            rtol=0,
+            atol=0,
             msg=lambda m: f"DCP roundtrip output mismatch: {m}",
         )
     finally:
         dist.barrier()
         if rank == 0:
             import shutil
+
             shutil.rmtree(checkpoint_dir, ignore_errors=True)
 
 

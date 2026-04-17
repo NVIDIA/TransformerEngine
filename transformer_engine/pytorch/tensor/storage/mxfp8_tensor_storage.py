@@ -369,7 +369,7 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
         names = meta["field_names"]
         if len(names) != len(gathered):
             raise RuntimeError(
-                f"MXFP8TensorStorage.fsdp_assign_gathered got "
+                "MXFP8TensorStorage.fsdp_assign_gathered got "
                 f"{len(gathered)} buffers for {len(names)} fields"
             )
         for name, buf in zip(names, gathered):

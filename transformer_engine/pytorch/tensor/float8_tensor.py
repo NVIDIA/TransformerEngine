@@ -756,7 +756,11 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                     tensor,
                     data=split_tensor,
                     data_transpose=split_transpose_tensor,
-                    shape=(split_tensor.shape if split_tensor is not None else split_transpose_tensor.shape),
+                    shape=(
+                        split_tensor.shape
+                        if split_tensor is not None
+                        else split_transpose_tensor.shape
+                    ),
                 )
                 for split_tensor, split_transpose_tensor in zip(func_out, t_func_out)
             ]

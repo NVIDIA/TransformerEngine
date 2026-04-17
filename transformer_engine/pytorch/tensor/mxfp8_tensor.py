@@ -345,7 +345,9 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
     def clone(self) -> MXFP8Tensor:
         # pylint: disable=missing-function-docstring
         # _rowwise_data may be None for columnwise-only sub-storages (hybrid quantization)
-        rowwise_data = self._rowwise_data.detach().clone() if self._rowwise_data is not None else None
+        rowwise_data = (
+            self._rowwise_data.detach().clone() if self._rowwise_data is not None else None
+        )
         columnwise_data = None
         if self._columnwise_data is not None:
             columnwise_data = self._columnwise_data.detach().clone()
@@ -462,7 +464,10 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                 if data is None:
                     return None
                 return data.__torch_dispatch__(
-                    func, types, [data] + list(args[1:]), kwargs,
+                    func,
+                    types,
+                    [data] + list(args[1:]),
+                    kwargs,
                 )
 
             row_data_splits = _split_data(tensor._rowwise_data)
@@ -478,10 +483,14 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                 if scale_inv is None:
                     scale_splits.append(None)
                     continue
-                scale_inv_out = list(scale_inv.__torch_dispatch__(
-                    func, types,
-                    [scale_inv, scale_split_size] + list(args[2:]), kwargs,
-                ))
+                scale_inv_out = list(
+                    scale_inv.__torch_dispatch__(
+                        func,
+                        types,
+                        [scale_inv, scale_split_size] + list(args[2:]),
+                        kwargs,
+                    )
+                )
                 for idx, split_scale_inv_out in enumerate(scale_inv_out):
                     current_shape = split_scale_inv_out.shape
                     pad_dim0 = (pad_multiple - current_shape[0] % pad_multiple) % pad_multiple
@@ -505,7 +514,9 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                     rowwise_data=row_data_splits[i] if row_data_splits is not None else None,
                     rowwise_scale_inv=row_scale_splits[i] if row_scale_splits is not None else None,
                     columnwise_data=col_data_splits[i] if col_data_splits is not None else None,
-                    columnwise_scale_inv=col_scale_splits[i] if col_scale_splits is not None else None,
+                    columnwise_scale_inv=(
+                        col_scale_splits[i] if col_scale_splits is not None else None
+                    ),
                     quantizer=tensor._quantizer,
                     requires_grad=False,
                     fp8_dtype=tensor._fp8_dtype,

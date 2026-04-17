@@ -1667,12 +1667,8 @@ class TestHybridQuantizedModelInit:
 
     def _hybrid_fp8_recipe(self):
         return _hybrid_custom_recipe(
-            row_factory=lambda: Float8CurrentScalingQuantizer(
-                tex.DType.kFloat8E4M3, device="cuda"
-            ),
-            col_factory=lambda: Float8CurrentScalingQuantizer(
-                tex.DType.kFloat8E4M3, device="cuda"
-            ),
+            row_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
+            col_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
             grad_factory=lambda: Float8CurrentScalingQuantizer(
                 tex.DType.kFloat8E5M2, device="cuda"
             ),
@@ -1685,12 +1681,12 @@ class TestHybridQuantizedModelInit:
             model = Linear(128, 128, params_dtype=torch.bfloat16).cuda()
 
         weight = model.weight
-        assert isinstance(weight, HybridQuantizedTensor), (
-            f"Expected HybridQuantizedTensor, got {type(weight).__name__}"
-        )
-        assert isinstance(weight, QuantizedTensor), (
-            "HybridQuantizedTensor should be a QuantizedTensor subclass"
-        )
+        assert isinstance(
+            weight, HybridQuantizedTensor
+        ), f"Expected HybridQuantizedTensor, got {type(weight).__name__}"
+        assert isinstance(
+            weight, QuantizedTensor
+        ), "HybridQuantizedTensor should be a QuantizedTensor subclass"
 
     def test_linear_weight_has_both_sub_storages(self):
         """Quantized param should have rowwise and columnwise sub-storages."""
@@ -1716,9 +1712,7 @@ class TestHybridQuantizedModelInit:
         with quantized_model_init(enabled=True, recipe=hybrid_recipe):
             model = Linear(128, 128, bias=True, params_dtype=torch.bfloat16).cuda()
 
-        assert not isinstance(model.bias, QuantizedTensor), (
-            "Bias should not be a QuantizedTensor"
-        )
+        assert not isinstance(model.bias, QuantizedTensor), "Bias should not be a QuantizedTensor"
         assert model.bias.dtype == torch.bfloat16
 
     def test_layernorm_linear_weight_is_hybrid(self):
@@ -1776,12 +1770,8 @@ class TestHybridWeightWorkspaceCache:
 
     def _hybrid_fp8_recipe(self):
         return _hybrid_custom_recipe(
-            row_factory=lambda: Float8CurrentScalingQuantizer(
-                tex.DType.kFloat8E4M3, device="cuda"
-            ),
-            col_factory=lambda: Float8CurrentScalingQuantizer(
-                tex.DType.kFloat8E4M3, device="cuda"
-            ),
+            row_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
+            col_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
             grad_factory=lambda: Float8CurrentScalingQuantizer(
                 tex.DType.kFloat8E5M2, device="cuda"
             ),
@@ -1865,12 +1855,8 @@ class TestHybridUpdateWeightQuantizers:
 
     def _hybrid_fp8_recipe(self):
         return _hybrid_custom_recipe(
-            row_factory=lambda: Float8CurrentScalingQuantizer(
-                tex.DType.kFloat8E4M3, device="cuda"
-            ),
-            col_factory=lambda: Float8CurrentScalingQuantizer(
-                tex.DType.kFloat8E4M3, device="cuda"
-            ),
+            row_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
+            col_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
             grad_factory=lambda: Float8CurrentScalingQuantizer(
                 tex.DType.kFloat8E5M2, device="cuda"
             ),
@@ -1892,9 +1878,9 @@ class TestHybridUpdateWeightQuantizers:
             assert not torch.isnan(out).any(), f"NaN at iteration {i}"
             assert inp_i.grad is not None, f"No input grad at iteration {i}"
 
-        assert isinstance(model.weight, HybridQuantizedTensor), (
-            "Weight lost HybridQuantizedTensor type after multiple passes"
-        )
+        assert isinstance(
+            model.weight, HybridQuantizedTensor
+        ), "Weight lost HybridQuantizedTensor type after multiple passes"
 
 
 # ---------------------------------------------------------------------------
@@ -1908,12 +1894,8 @@ class TestHybridRecipeCorrespondence:
 
     def _hybrid_fp8_recipe(self):
         return _hybrid_custom_recipe(
-            row_factory=lambda: Float8CurrentScalingQuantizer(
-                tex.DType.kFloat8E4M3, device="cuda"
-            ),
-            col_factory=lambda: Float8CurrentScalingQuantizer(
-                tex.DType.kFloat8E4M3, device="cuda"
-            ),
+            row_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
+            col_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
             grad_factory=lambda: Float8CurrentScalingQuantizer(
                 tex.DType.kFloat8E5M2, device="cuda"
             ),
@@ -1962,9 +1944,7 @@ class TestHybridQuantizeInPlace:
         """quantize_() should re-quantize both sub-storages from new BF16 data."""
         torch.manual_seed(42)
         hq = HybridQuantizer(
-            rowwise_quantizer=Float8CurrentScalingQuantizer(
-                tex.DType.kFloat8E4M3, device="cuda"
-            ),
+            rowwise_quantizer=Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
             columnwise_quantizer=Float8CurrentScalingQuantizer(
                 tex.DType.kFloat8E4M3, device="cuda"
             ),
@@ -1983,17 +1963,14 @@ class TestHybridQuantizeInPlace:
         # Should be close to new data, not old data
         diff_new = (dq_after.float() - new_data.float()).abs().mean()
         diff_old = (dq_after.float() - original.float()).abs().mean()
-        assert diff_new < diff_old, (
-            f"After quantize_(), data is closer to old ({diff_old:.4f}) "
-            f"than new ({diff_new:.4f})"
-        )
+        assert (
+            diff_new < diff_old
+        ), f"After quantize_(), data is closer to old ({diff_old:.4f}) than new ({diff_new:.4f})"
 
     def test_quantize_inplace_preserves_tensor_identity(self):
         """quantize_() should update in-place, not create a new tensor."""
         hq = HybridQuantizer(
-            rowwise_quantizer=Float8CurrentScalingQuantizer(
-                tex.DType.kFloat8E4M3, device="cuda"
-            ),
+            rowwise_quantizer=Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
             columnwise_quantizer=Float8CurrentScalingQuantizer(
                 tex.DType.kFloat8E4M3, device="cuda"
             ),
@@ -2022,12 +1999,8 @@ class TestHybridFusedAdam:
 
     def _build_hybrid_model(self):
         hybrid_recipe = _hybrid_custom_recipe(
-            row_factory=lambda: Float8CurrentScalingQuantizer(
-                tex.DType.kFloat8E4M3, device="cuda"
-            ),
-            col_factory=lambda: Float8CurrentScalingQuantizer(
-                tex.DType.kFloat8E4M3, device="cuda"
-            ),
+            row_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
+            col_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
             grad_factory=lambda: Float8CurrentScalingQuantizer(
                 tex.DType.kFloat8E5M2, device="cuda"
             ),
@@ -2098,9 +2071,9 @@ class TestHybridFusedAdam:
 
         for name, p in model.named_parameters():
             if "bias" not in name:
-                assert isinstance(p, HybridQuantizedTensor), (
-                    f"{name} lost HybridQuantizedTensor type: {type(p).__name__}"
-                )
+                assert isinstance(
+                    p, HybridQuantizedTensor
+                ), f"{name} lost HybridQuantizedTensor type: {type(p).__name__}"
 
     def test_fused_adam_requires_master_weights(self):
         """FusedAdam without master_weights should raise for hybrid quantized params."""
@@ -2128,12 +2101,8 @@ class TestHybridQuantizedParamsEndToEnd:
 
     def _build_model_and_recipe(self):
         hybrid_recipe = _hybrid_custom_recipe(
-            row_factory=lambda: Float8CurrentScalingQuantizer(
-                tex.DType.kFloat8E4M3, device="cuda"
-            ),
-            col_factory=lambda: Float8CurrentScalingQuantizer(
-                tex.DType.kFloat8E4M3, device="cuda"
-            ),
+            row_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
+            col_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
             grad_factory=lambda: Float8CurrentScalingQuantizer(
                 tex.DType.kFloat8E5M2, device="cuda"
             ),
@@ -2199,9 +2168,9 @@ class TestHybridQuantizedParamsEndToEnd:
 
         for name, p in model.named_parameters():
             if "bias" not in name:
-                assert isinstance(p, HybridQuantizedTensor), (
-                    f"{name} is {type(p).__name__}, not HybridQuantizedTensor"
-                )
+                assert isinstance(
+                    p, HybridQuantizedTensor
+                ), f"{name} is {type(p).__name__}, not HybridQuantizedTensor"
 
     def test_training_loop_optimizer_states_are_fp32(self):
         """Optimizer states should be FP32."""
@@ -2251,9 +2220,7 @@ class TestHybridMixedFormatQuantizedParams:
             grad_factory=lambda: NVFP4Quantizer(fp4_dtype=tex.DType.kFloat4E2M1),
         )
         with quantized_model_init(enabled=True, recipe=hybrid_recipe):
-            model = Linear(
-                in_features, out_features, params_dtype=torch.bfloat16
-            ).cuda()
+            model = Linear(in_features, out_features, params_dtype=torch.bfloat16).cuda()
         return model, hybrid_recipe
 
     def test_mixed_format_param_creation(self):
@@ -2321,9 +2288,7 @@ class TestHybridMixedFormatQuantizedParams:
         assert losses[-1] < losses[0], f"Loss did not decrease: {losses}"
         for name, p in model.named_parameters():
             if "bias" not in name:
-                assert isinstance(p, HybridQuantizedTensor), (
-                    f"{name} is {type(p).__name__}"
-                )
+                assert isinstance(p, HybridQuantizedTensor), f"{name} is {type(p).__name__}"
 
     def test_mixed_format_sub_storage_types(self):
         """Verify that sub-storages have the correct types (MXFP8 vs NVFP4)."""
@@ -2335,12 +2300,12 @@ class TestHybridMixedFormatQuantizedParams:
 
         row = weight.rowwise_sub_storage
         col = weight.columnwise_sub_storage
-        assert isinstance(row, MXFP8TensorStorage) or hasattr(row, "_rowwise_data"), (
-            f"Expected MXFP8 rowwise sub-storage, got {type(row).__name__}"
-        )
-        assert isinstance(col, NVFP4TensorStorage) or hasattr(col, "_rowwise_data"), (
-            f"Expected NVFP4 columnwise sub-storage, got {type(col).__name__}"
-        )
+        assert isinstance(row, MXFP8TensorStorage) or hasattr(
+            row, "_rowwise_data"
+        ), f"Expected MXFP8 rowwise sub-storage, got {type(row).__name__}"
+        assert isinstance(col, NVFP4TensorStorage) or hasattr(
+            col, "_rowwise_data"
+        ), f"Expected NVFP4 columnwise sub-storage, got {type(col).__name__}"
 
 
 # ---------------------------------------------------------------------------
@@ -2352,9 +2317,7 @@ def _hybrid_fp8_current_qfactory(role):
     """Hybrid FP8 current scaling (E4M3 both dirs, E5M2 for grad)."""
     if role in ("linear_input", "linear_weight", "linear_output"):
         return HybridQuantizer(
-            rowwise_quantizer=Float8CurrentScalingQuantizer(
-                tex.DType.kFloat8E4M3, device="cuda"
-            ),
+            rowwise_quantizer=Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
             columnwise_quantizer=Float8CurrentScalingQuantizer(
                 tex.DType.kFloat8E4M3, device="cuda"
             ),
@@ -2380,16 +2343,22 @@ def _hybrid_block_fp8_qfactory(role):
     if role in ("linear_grad_output", "linear_grad_input"):
         return Float8BlockQuantizer(
             fp8_dtype=tex.DType.kFloat8E4M3,
-            rowwise=True, columnwise=True, block_scaling_dim=dim,
+            rowwise=True,
+            columnwise=True,
+            block_scaling_dim=dim,
         )
     return HybridQuantizer(
         rowwise_quantizer=Float8BlockQuantizer(
             fp8_dtype=tex.DType.kFloat8E4M3,
-            rowwise=True, columnwise=True, block_scaling_dim=dim,
+            rowwise=True,
+            columnwise=True,
+            block_scaling_dim=dim,
         ),
         columnwise_quantizer=Float8BlockQuantizer(
             fp8_dtype=tex.DType.kFloat8E4M3,
-            rowwise=True, columnwise=True, block_scaling_dim=dim,
+            rowwise=True,
+            columnwise=True,
+            block_scaling_dim=dim,
         ),
     )
 
@@ -2426,21 +2395,27 @@ class _QuantizedParamsEquivalenceBase:
         torch.manual_seed(42)
         with quantized_model_init(enabled=True, recipe=self._vanilla_recipe()):
             model_ref = Linear(
-                self.hidden_size, self.hidden_size, params_dtype=torch.bfloat16,
+                self.hidden_size,
+                self.hidden_size,
+                params_dtype=torch.bfloat16,
             ).cuda()
 
         torch.manual_seed(42)
         with quantized_model_init(enabled=True, recipe=self._hybrid_recipe()):
             model_hyb = Linear(
-                self.hidden_size, self.hidden_size, params_dtype=torch.bfloat16,
+                self.hidden_size,
+                self.hidden_size,
+                params_dtype=torch.bfloat16,
             ).cuda()
 
         return model_ref, model_hyb
 
     def _run_training_loop(self, model, train_recipe, x, target, num_steps):
         optimizer = te.optimizers.FusedAdam(
-            model.parameters(), lr=1e-3,
-            master_weights=True, master_weight_dtype=torch.float32,
+            model.parameters(),
+            lr=1e-3,
+            master_weights=True,
+            master_weight_dtype=torch.float32,
         )
         losses = []
         for _ in range(num_steps):
@@ -2466,23 +2441,35 @@ class _QuantizedParamsEquivalenceBase:
         target = torch.randn_like(x)
 
         losses_ref, masters_ref = self._run_training_loop(
-            model_ref, self._vanilla_recipe(), x, target, self.num_steps,
+            model_ref,
+            self._vanilla_recipe(),
+            x,
+            target,
+            self.num_steps,
         )
         losses_hyb, masters_hyb = self._run_training_loop(
-            model_hyb, self._hybrid_recipe(), x, target, self.num_steps,
+            model_hyb,
+            self._hybrid_recipe(),
+            x,
+            target,
+            self.num_steps,
         )
 
         # Losses should be very close (same quantization, same training dynamics)
         for i, (lr, lh) in enumerate(zip(losses_ref, losses_hyb)):
-            assert abs(lr - lh) < 0.1 * max(abs(lr), 1e-6), (
-                f"Step {i}: loss diverged — vanilla={lr:.6f}, hybrid={lh:.6f}"
-            )
+            assert abs(lr - lh) < 0.1 * max(
+                abs(lr), 1e-6
+            ), f"Step {i}: loss diverged — vanilla={lr:.6f}, hybrid={lh:.6f}"
 
         # Master weights should be close after training
         for i, (mr, mh) in enumerate(zip(masters_ref, masters_hyb)):
-            torch.testing.assert_close(mr, mh, rtol=1e-3, atol=1e-3, msg=(
-                f"Master weight {i} diverged after {self.num_steps} steps"
-            ))
+            torch.testing.assert_close(
+                mr,
+                mh,
+                rtol=1e-3,
+                atol=1e-3,
+                msg=f"Master weight {i} diverged after {self.num_steps} steps",
+            )
 
 
 @requires_fp8
@@ -2509,10 +2496,18 @@ class TestQuantizedParamsEquivalenceFP8CurrentScaling(_QuantizedParamsEquivalenc
         target = torch.randn_like(x)
 
         losses_ref, _ = self._run_training_loop(
-            model_ref, self._vanilla_recipe(), x, target, self.num_steps,
+            model_ref,
+            self._vanilla_recipe(),
+            x,
+            target,
+            self.num_steps,
         )
         losses_hyb, _ = self._run_training_loop(
-            model_hyb, self._hybrid_recipe(), x, target, self.num_steps,
+            model_hyb,
+            self._hybrid_recipe(),
+            x,
+            target,
+            self.num_steps,
         )
 
         # Both should decrease (training works in both paths)
@@ -2522,9 +2517,9 @@ class TestQuantizedParamsEquivalenceFP8CurrentScaling(_QuantizedParamsEquivalenc
         # Losses should be in the same ballpark (different optimizer kernels
         # cause small divergence that compounds over steps)
         for i, (lr, lh) in enumerate(zip(losses_ref, losses_hyb)):
-            assert abs(lr - lh) / max(abs(lr), 1e-6) < 0.5, (
-                f"Step {i}: losses diverged too much — vanilla={lr:.6f}, hybrid={lh:.6f}"
-            )
+            assert (
+                abs(lr - lh) / max(abs(lr), 1e-6) < 0.5
+            ), f"Step {i}: losses diverged too much — vanilla={lr:.6f}, hybrid={lh:.6f}"
 
 
 @pytest.mark.skipif(not mxfp8_available, reason=f"MXFP8: {reason_for_no_mxfp8}")
@@ -2591,9 +2586,7 @@ def _checkpoint_hybrid_fp8_qfactory(role):
     """Module-level qfactory (picklable) for checkpoint tests."""
     if role in ("linear_input", "linear_weight", "linear_output"):
         return HybridQuantizer(
-            rowwise_quantizer=Float8CurrentScalingQuantizer(
-                tex.DType.kFloat8E4M3, device="cuda"
-            ),
+            rowwise_quantizer=Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
             columnwise_quantizer=Float8CurrentScalingQuantizer(
                 tex.DType.kFloat8E4M3, device="cuda"
             ),
@@ -2716,8 +2709,10 @@ class TestHybridCheckpoint:
             model = Linear(256, 256, params_dtype=torch.bfloat16).cuda()
 
         optimizer = te.optimizers.FusedAdam(
-            model.parameters(), lr=1e-3,
-            master_weights=True, master_weight_dtype=torch.float32,
+            model.parameters(),
+            lr=1e-3,
+            master_weights=True,
+            master_weight_dtype=torch.float32,
         )
 
         x = torch.randn(4, 32, 256, dtype=torch.bfloat16, device="cuda")
@@ -2736,10 +2731,13 @@ class TestHybridCheckpoint:
 
         # Save checkpoint
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pt") as f:
-            torch.save({
-                "model": model.state_dict(),
-                "optimizer": optimizer.state_dict(),
-            }, f.name)
+            torch.save(
+                {
+                    "model": model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                },
+                f.name,
+            )
             tmp_path = f.name
 
         try:
@@ -2747,8 +2745,10 @@ class TestHybridCheckpoint:
             with quantized_model_init(enabled=True, recipe=hybrid_recipe):
                 model2 = Linear(256, 256, params_dtype=torch.bfloat16).cuda()
             optimizer2 = te.optimizers.FusedAdam(
-                model2.parameters(), lr=1e-3,
-                master_weights=True, master_weight_dtype=torch.float32,
+                model2.parameters(),
+                lr=1e-3,
+                master_weights=True,
+                master_weight_dtype=torch.float32,
             )
 
             checkpoint = torch.load(tmp_path, weights_only=False)
@@ -2762,7 +2762,8 @@ class TestHybridCheckpoint:
             loss_after_load = torch.nn.functional.mse_loss(output2, target).item()
 
             assert loss_after_load <= loss_before_save * 1.5, (
-                f"Loss spiked after checkpoint resume: {loss_before_save:.4f} → {loss_after_load:.4f}"
+                f"Loss spiked after checkpoint resume: {loss_before_save:.4f} →"
+                f" {loss_after_load:.4f}"
             )
         finally:
             os.unlink(tmp_path)
@@ -2775,8 +2776,9 @@ class TestHybridCheckpoint:
 aten = torch.ops.aten
 
 
-def _make_hybrid_param_for_dispatch(row_factory, col_factory, grad_factory=None,
-                                    in_features=256, out_features=256):
+def _make_hybrid_param_for_dispatch(
+    row_factory, col_factory, grad_factory=None, in_features=256, out_features=256
+):
     """Create a HybridQuantizedTensor weight via quantized_model_init for dispatch tests."""
     hybrid_recipe = _hybrid_custom_recipe(row_factory, col_factory, grad_factory)
     with quantized_model_init(enabled=True, recipe=hybrid_recipe):
@@ -2811,11 +2813,14 @@ def _get_dispatch_hybrid_param(config_name):
     """Return a HybridQuantizedTensor weight for the given config."""
     if config_name == "fp8_fp8":
         return _make_hybrid_param_for_dispatch(
-            _fp8_row_factory, _fp8_col_factory, _fp8_grad_factory,
+            _fp8_row_factory,
+            _fp8_col_factory,
+            _fp8_grad_factory,
         )
     elif config_name == "mxfp8_mxfp8":
         return _make_hybrid_param_for_dispatch(
-            _mxfp8_factory, _mxfp8_factory,
+            _mxfp8_factory,
+            _mxfp8_factory,
             grad_factory=lambda: MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E5M2),
         )
     else:
@@ -2842,9 +2847,9 @@ class TestHybridTorchDispatchFSDP2Ops:
         pieces = torch.split(hybrid_param, chunk_size, dim=0)
         assert len(pieces) >= 2
         for piece in pieces:
-            assert isinstance(piece, HybridQuantizedTensor), (
-                f"Expected HybridQuantizedTensor, got {type(piece).__name__}"
-            )
+            assert isinstance(
+                piece, HybridQuantizedTensor
+            ), f"Expected HybridQuantizedTensor, got {type(piece).__name__}"
             assert piece.rowwise_sub_storage is not None
             assert piece.columnwise_sub_storage is not None
 
@@ -2870,9 +2875,9 @@ class TestHybridTorchDispatchFSDP2Ops:
         """view must return a HybridQuantizedTensor (used by FSDP2 reset_sharded_param)."""
         shape_2d = hybrid_param.shape
         result = aten.view.default(hybrid_param, list(shape_2d))
-        assert isinstance(result, HybridQuantizedTensor), (
-            f"Expected HybridQuantizedTensor, got {type(result).__name__}"
-        )
+        assert isinstance(
+            result, HybridQuantizedTensor
+        ), f"Expected HybridQuantizedTensor, got {type(result).__name__}"
         assert result.rowwise_sub_storage is not None
         assert result.columnwise_sub_storage is not None
 
@@ -2880,34 +2885,36 @@ class TestHybridTorchDispatchFSDP2Ops:
         """view with same shape must return HybridQuantizedTensor."""
         shape_2d = list(hybrid_param.shape)
         result = aten.view.default(hybrid_param, shape_2d)
-        assert isinstance(result, HybridQuantizedTensor), (
-            f"Expected HybridQuantizedTensor, got {type(result).__name__}"
-        )
+        assert isinstance(
+            result, HybridQuantizedTensor
+        ), f"Expected HybridQuantizedTensor, got {type(result).__name__}"
 
     def test_as_strided_noop_preserves_hybrid(self, hybrid_param):
         """as_strided with matching shape/strides is a no-op that preserves type."""
         shape = tuple(hybrid_param.size())
         strides = (shape[-1], 1)
         result = aten.as_strided.default(hybrid_param, list(shape), list(strides))
-        assert isinstance(result, HybridQuantizedTensor), (
-            f"Expected HybridQuantizedTensor, got {type(result).__name__}"
-        )
+        assert isinstance(
+            result, HybridQuantizedTensor
+        ), f"Expected HybridQuantizedTensor, got {type(result).__name__}"
         assert result.rowwise_sub_storage is not None
         assert result.columnwise_sub_storage is not None
 
     def test_slice_noop_preserves_hybrid(self, hybrid_param):
         """slice with full range is a no-op that preserves type."""
         result = aten.slice.Tensor(hybrid_param, 0, 0, hybrid_param.size(0))
-        assert isinstance(result, HybridQuantizedTensor), (
-            f"Expected HybridQuantizedTensor, got {type(result).__name__}"
-        )
+        assert isinstance(
+            result, HybridQuantizedTensor
+        ), f"Expected HybridQuantizedTensor, got {type(result).__name__}"
         assert result.rowwise_sub_storage is not None
 
     def test_copy_between_hybrid_tensors(self, hybrid_param):
         """copy_ between compatible HybridQuantizedTensors copies quantized data directly."""
         src_deq = hybrid_param.dequantize().clone()
         dst = hybrid_param._quantizer.make_empty(
-            shape=hybrid_param.shape, dtype=hybrid_param.dtype, device=hybrid_param.device,
+            shape=hybrid_param.shape,
+            dtype=hybrid_param.dtype,
+            device=hybrid_param.device,
         )
         assert isinstance(dst, HybridQuantizedTensor)
 
@@ -2941,9 +2948,9 @@ class TestHybridTorchDispatchFSDP2Ops:
 
         # Structural contract: FSDP2 needs a HybridQuantizedTensor with both
         # sub-storages populated so the gathered buffers have a destination.
-        assert isinstance(result, HybridQuantizedTensor), (
-            f"Expected HybridQuantizedTensor, got {type(result).__name__}"
-        )
+        assert isinstance(
+            result, HybridQuantizedTensor
+        ), f"Expected HybridQuantizedTensor, got {type(result).__name__}"
         assert result.shape == hybrid_param.shape
         assert result.rowwise_sub_storage is not None
         assert result.columnwise_sub_storage is not None
@@ -2958,18 +2965,18 @@ class TestHybridTorchDispatchFSDP2Ops:
     def test_empty_like_returns_hybrid(self, hybrid_param):
         """empty_like must return a HybridQuantizedTensor."""
         result = aten.empty_like.default(hybrid_param)
-        assert isinstance(result, HybridQuantizedTensor), (
-            f"Expected HybridQuantizedTensor, got {type(result).__name__}"
-        )
+        assert isinstance(
+            result, HybridQuantizedTensor
+        ), f"Expected HybridQuantizedTensor, got {type(result).__name__}"
         assert result.shape == hybrid_param.shape
         assert result.rowwise_sub_storage is not None
 
     def test_clone_returns_hybrid(self, hybrid_param):
         """clone must return an independent HybridQuantizedTensor with same data."""
         result = aten.clone.default(hybrid_param)
-        assert isinstance(result, HybridQuantizedTensor), (
-            f"Expected HybridQuantizedTensor, got {type(result).__name__}"
-        )
+        assert isinstance(
+            result, HybridQuantizedTensor
+        ), f"Expected HybridQuantizedTensor, got {type(result).__name__}"
         assert result is not hybrid_param
         torch.testing.assert_close(result.dequantize(), hybrid_param.dequantize())
 
@@ -3014,50 +3021,65 @@ class TestHybridFsdpPreAllGatherProtocol:
     def test_pre_all_gather_returns_tuple_pair(self, hybrid_param):
         """fsdp_pre_all_gather returns (sharded_tensors, metadata)."""
         sharded_tensors, metadata = hybrid_param.fsdp_pre_all_gather(
-            mesh=None, orig_size=hybrid_param.shape, contiguous_orig_stride=None,
-            module=None, mp_policy=None,
+            mesh=None,
+            orig_size=hybrid_param.shape,
+            contiguous_orig_stride=None,
+            module=None,
+            mp_policy=None,
         )
-        assert isinstance(sharded_tensors, tuple), (
-            f"sharded_tensors should be tuple, got {type(sharded_tensors).__name__}"
-        )
+        assert isinstance(
+            sharded_tensors, tuple
+        ), f"sharded_tensors should be tuple, got {type(sharded_tensors).__name__}"
         assert len(sharded_tensors) > 0, "sharded_tensors should not be empty"
-        assert isinstance(metadata, tuple), (
-            f"metadata should be tuple, got {type(metadata).__name__}"
-        )
+        assert isinstance(
+            metadata, tuple
+        ), f"metadata should be tuple, got {type(metadata).__name__}"
 
     def test_pre_all_gather_buffers_are_plain_tensors(self, hybrid_param):
         """Every element in sharded_tensors must be a plain torch.Tensor."""
         sharded_tensors, _ = hybrid_param.fsdp_pre_all_gather(
-            mesh=None, orig_size=hybrid_param.shape, contiguous_orig_stride=None,
-            module=None, mp_policy=None,
+            mesh=None,
+            orig_size=hybrid_param.shape,
+            contiguous_orig_stride=None,
+            module=None,
+            mp_policy=None,
         )
         for i, t in enumerate(sharded_tensors):
-            assert isinstance(t, torch.Tensor), (
-                f"sharded_tensors[{i}] should be torch.Tensor, got {type(t).__name__}"
-            )
-            assert not isinstance(t, QuantizedTensor), (
-                f"sharded_tensors[{i}] should NOT be QuantizedTensor subclass"
-            )
+            assert isinstance(
+                t, torch.Tensor
+            ), f"sharded_tensors[{i}] should be torch.Tensor, got {type(t).__name__}"
+            assert not isinstance(
+                t, QuantizedTensor
+            ), f"sharded_tensors[{i}] should NOT be QuantizedTensor subclass"
 
     def test_pre_all_gather_buffer_count_consistent(self, hybrid_param):
         """Buffer count must be the same across repeated calls (FSDP2 buffer reuse)."""
         sharded_1, _ = hybrid_param.fsdp_pre_all_gather(
-            mesh=None, orig_size=hybrid_param.shape, contiguous_orig_stride=None,
-            module=None, mp_policy=None,
+            mesh=None,
+            orig_size=hybrid_param.shape,
+            contiguous_orig_stride=None,
+            module=None,
+            mp_policy=None,
         )
         sharded_2, _ = hybrid_param.fsdp_pre_all_gather(
-            mesh=None, orig_size=hybrid_param.shape, contiguous_orig_stride=None,
-            module=None, mp_policy=None,
+            mesh=None,
+            orig_size=hybrid_param.shape,
+            contiguous_orig_stride=None,
+            module=None,
+            mp_policy=None,
         )
-        assert len(sharded_1) == len(sharded_2), (
-            f"Buffer count changed: {len(sharded_1)} vs {len(sharded_2)}"
-        )
+        assert len(sharded_1) == len(
+            sharded_2
+        ), f"Buffer count changed: {len(sharded_1)} vs {len(sharded_2)}"
 
     def test_pre_all_gather_metadata_sufficient_for_reconstruction(self, hybrid_param):
         """Metadata must contain enough info to reconstruct the tensor."""
         _, metadata = hybrid_param.fsdp_pre_all_gather(
-            mesh=None, orig_size=hybrid_param.shape, contiguous_orig_stride=None,
-            module=None, mp_policy=None,
+            mesh=None,
+            orig_size=hybrid_param.shape,
+            contiguous_orig_stride=None,
+            module=None,
+            mp_policy=None,
         )
         assert metadata is not None
         assert len(metadata) > 0, "metadata should not be empty"
@@ -3084,15 +3106,21 @@ class TestHybridFsdpPostAllGatherProtocol:
     def test_post_all_gather_first_call_returns_hybrid_tensor(self, hybrid_param):
         """With out=None, post_all_gather returns (HybridQuantizedTensor, outputs)."""
         sharded_tensors, metadata = hybrid_param.fsdp_pre_all_gather(
-            mesh=None, orig_size=hybrid_param.shape, contiguous_orig_stride=None,
-            module=None, mp_policy=None,
+            mesh=None,
+            orig_size=hybrid_param.shape,
+            contiguous_orig_stride=None,
+            module=None,
+            mp_policy=None,
         )
         result, ag_outputs = hybrid_param.fsdp_post_all_gather(
-            sharded_tensors, metadata, hybrid_param.dtype, out=None,
+            sharded_tensors,
+            metadata,
+            hybrid_param.dtype,
+            out=None,
         )
-        assert isinstance(result, HybridQuantizedTensor), (
-            f"Expected HybridQuantizedTensor, got {type(result).__name__}"
-        )
+        assert isinstance(
+            result, HybridQuantizedTensor
+        ), f"Expected HybridQuantizedTensor, got {type(result).__name__}"
         assert result.shape == hybrid_param.shape
         assert result.rowwise_sub_storage is not None
         assert result.columnwise_sub_storage is not None
@@ -3100,30 +3128,45 @@ class TestHybridFsdpPostAllGatherProtocol:
     def test_post_all_gather_buffer_reuse(self, hybrid_param):
         """On second call with out=previous, the same object is returned (buffer reuse)."""
         sharded_tensors, metadata = hybrid_param.fsdp_pre_all_gather(
-            mesh=None, orig_size=hybrid_param.shape, contiguous_orig_stride=None,
-            module=None, mp_policy=None,
+            mesh=None,
+            orig_size=hybrid_param.shape,
+            contiguous_orig_stride=None,
+            module=None,
+            mp_policy=None,
         )
         first_result, _ = hybrid_param.fsdp_post_all_gather(
-            sharded_tensors, metadata, hybrid_param.dtype, out=None,
+            sharded_tensors,
+            metadata,
+            hybrid_param.dtype,
+            out=None,
         )
 
         second_result, _ = hybrid_param.fsdp_post_all_gather(
-            sharded_tensors, metadata, hybrid_param.dtype, out=first_result,
+            sharded_tensors,
+            metadata,
+            hybrid_param.dtype,
+            out=first_result,
         )
-        assert second_result is first_result, (
-            "Buffer reuse: post_all_gather(out=prev) should return the same object"
-        )
+        assert (
+            second_result is first_result
+        ), "Buffer reuse: post_all_gather(out=prev) should return the same object"
 
     def test_post_all_gather_dequantize_matches_original(self, hybrid_param):
         """Reconstructed tensor should dequantize close to the original."""
         orig_deq = hybrid_param.dequantize()
 
         sharded_tensors, metadata = hybrid_param.fsdp_pre_all_gather(
-            mesh=None, orig_size=hybrid_param.shape, contiguous_orig_stride=None,
-            module=None, mp_policy=None,
+            mesh=None,
+            orig_size=hybrid_param.shape,
+            contiguous_orig_stride=None,
+            module=None,
+            mp_policy=None,
         )
         result, _ = hybrid_param.fsdp_post_all_gather(
-            sharded_tensors, metadata, hybrid_param.dtype, out=None,
+            sharded_tensors,
+            metadata,
+            hybrid_param.dtype,
+            out=None,
         )
         result_deq = result.dequantize()
         torch.testing.assert_close(orig_deq, result_deq)
@@ -3134,11 +3177,17 @@ class TestHybridFsdpPostAllGatherProtocol:
         orig_col_type = type(hybrid_param.columnwise_sub_storage)
 
         sharded_tensors, metadata = hybrid_param.fsdp_pre_all_gather(
-            mesh=None, orig_size=hybrid_param.shape, contiguous_orig_stride=None,
-            module=None, mp_policy=None,
+            mesh=None,
+            orig_size=hybrid_param.shape,
+            contiguous_orig_stride=None,
+            module=None,
+            mp_policy=None,
         )
         result, _ = hybrid_param.fsdp_post_all_gather(
-            sharded_tensors, metadata, hybrid_param.dtype, out=None,
+            sharded_tensors,
+            metadata,
+            hybrid_param.dtype,
+            out=None,
         )
         assert type(result.rowwise_sub_storage) is orig_row_type
         assert type(result.columnwise_sub_storage) is orig_col_type
@@ -3163,30 +3212,48 @@ class TestHybridFsdpRoundtrip:
         orig_deq = hybrid_param.dequantize()
 
         sharded_tensors, metadata = hybrid_param.fsdp_pre_all_gather(
-            mesh=None, orig_size=hybrid_param.shape, contiguous_orig_stride=None,
-            module=None, mp_policy=None,
+            mesh=None,
+            orig_size=hybrid_param.shape,
+            contiguous_orig_stride=None,
+            module=None,
+            mp_policy=None,
         )
         result, _ = hybrid_param.fsdp_post_all_gather(
-            sharded_tensors, metadata, hybrid_param.dtype, out=None,
+            sharded_tensors,
+            metadata,
+            hybrid_param.dtype,
+            out=None,
         )
         torch.testing.assert_close(orig_deq, result.dequantize())
 
     def test_pre_post_roundtrip_buffer_reuse_preserves_data(self, hybrid_param):
         """Second roundtrip with out=previous preserves data (iteration 2+ simulation)."""
         sharded_tensors, metadata = hybrid_param.fsdp_pre_all_gather(
-            mesh=None, orig_size=hybrid_param.shape, contiguous_orig_stride=None,
-            module=None, mp_policy=None,
+            mesh=None,
+            orig_size=hybrid_param.shape,
+            contiguous_orig_stride=None,
+            module=None,
+            mp_policy=None,
         )
         first_result, _ = hybrid_param.fsdp_post_all_gather(
-            sharded_tensors, metadata, hybrid_param.dtype, out=None,
+            sharded_tensors,
+            metadata,
+            hybrid_param.dtype,
+            out=None,
         )
 
         sharded_tensors_2, metadata_2 = hybrid_param.fsdp_pre_all_gather(
-            mesh=None, orig_size=hybrid_param.shape, contiguous_orig_stride=None,
-            module=None, mp_policy=None,
+            mesh=None,
+            orig_size=hybrid_param.shape,
+            contiguous_orig_stride=None,
+            module=None,
+            mp_policy=None,
         )
         second_result, _ = hybrid_param.fsdp_post_all_gather(
-            sharded_tensors_2, metadata_2, hybrid_param.dtype, out=first_result,
+            sharded_tensors_2,
+            metadata_2,
+            hybrid_param.dtype,
+            out=first_result,
         )
         assert second_result is first_result
         torch.testing.assert_close(hybrid_param.dequantize(), second_result.dequantize())
@@ -3209,7 +3276,9 @@ class TestHybridFsdpRoundtrip:
         """
         torch.manual_seed(42)
         hybrid_recipe = _hybrid_custom_recipe(
-            _fp8_row_factory, _fp8_col_factory, _fp8_grad_factory,
+            _fp8_row_factory,
+            _fp8_col_factory,
+            _fp8_grad_factory,
         )
         with quantized_model_init(enabled=True, recipe=hybrid_recipe):
             model = Linear(256, 256, params_dtype=torch.bfloat16).cuda()
@@ -3217,11 +3286,17 @@ class TestHybridFsdpRoundtrip:
 
         # Iter-1 gather with the initial (small-magnitude) weights
         sharded_tensors_1, metadata_1 = hybrid_param.fsdp_pre_all_gather(
-            mesh=None, orig_size=hybrid_param.shape, contiguous_orig_stride=None,
-            module=None, mp_policy=None,
+            mesh=None,
+            orig_size=hybrid_param.shape,
+            contiguous_orig_stride=None,
+            module=None,
+            mp_policy=None,
         )
         gathered, _ = hybrid_param.fsdp_post_all_gather(
-            sharded_tensors_1, metadata_1, hybrid_param.dtype, out=None,
+            sharded_tensors_1,
+            metadata_1,
+            hybrid_param.dtype,
+            out=None,
         )
 
         # Simulate an optimizer writeback that produces a much larger weight;
@@ -3233,11 +3308,17 @@ class TestHybridFsdpRoundtrip:
 
         # Iter-2+ path: reuse the gathered buffer
         sharded_tensors_2, metadata_2 = hybrid_param.fsdp_pre_all_gather(
-            mesh=None, orig_size=hybrid_param.shape, contiguous_orig_stride=None,
-            module=None, mp_policy=None,
+            mesh=None,
+            orig_size=hybrid_param.shape,
+            contiguous_orig_stride=None,
+            module=None,
+            mp_policy=None,
         )
         gathered_refreshed, _ = hybrid_param.fsdp_post_all_gather(
-            sharded_tensors_2, metadata_2, hybrid_param.dtype, out=gathered,
+            sharded_tensors_2,
+            metadata_2,
+            hybrid_param.dtype,
+            out=gathered,
         )
         assert gathered_refreshed is gathered
 
@@ -3287,8 +3368,11 @@ class TestHybridFsdpRoundtrip:
         # the base class.
         with pytest.raises(NotImplementedError) as exc_info:
             param.fsdp_pre_all_gather(
-                mesh=None, orig_size=param.shape, contiguous_orig_stride=None,
-                module=None, mp_policy=None,
+                mesh=None,
+                orig_size=param.shape,
+                contiguous_orig_stride=None,
+                module=None,
+                mp_policy=None,
             )
         msg = str(exc_info.value)
         assert "NVFP4Tensor" in msg
@@ -3307,7 +3391,9 @@ class TestHybridMakeLike:
 
     def _make_hybrid_param(self):
         hybrid_recipe = _hybrid_custom_recipe(
-            _fp8_row_factory, _fp8_col_factory, _fp8_grad_factory,
+            _fp8_row_factory,
+            _fp8_col_factory,
+            _fp8_grad_factory,
         )
         with quantized_model_init(enabled=True, recipe=hybrid_recipe):
             model = Linear(256, 256, params_dtype=torch.bfloat16).cuda()

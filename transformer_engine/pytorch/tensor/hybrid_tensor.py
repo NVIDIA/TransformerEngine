@@ -125,12 +125,11 @@ class HybridQuantizer(Quantizer):
         """
         if not isinstance(dst, HybridQuantizedTensorStorage):
             raise ValueError(
-                f"HybridQuantizer can only update HybridQuantizedTensorStorage, got {type(dst).__name__}"
+                "HybridQuantizer can only update HybridQuantizedTensorStorage, got"
+                f" {type(dst).__name__}"
             )
         if dst._rowwise_storage is not None:
-            self.rowwise_quantizer.update_quantized(
-                src, dst._rowwise_storage, noop_flag=noop_flag
-            )
+            self.rowwise_quantizer.update_quantized(src, dst._rowwise_storage, noop_flag=noop_flag)
         if dst._columnwise_storage is not None:
             self.columnwise_quantizer.update_quantized(
                 src, dst._columnwise_storage, noop_flag=noop_flag
@@ -286,15 +285,15 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
                 sub.fsdp_buffer_fields()
             except NotImplementedError as err:
                 raise NotImplementedError(
-                    f"Hybrid FSDP2 all-gather is not supported for a "
+                    "Hybrid FSDP2 all-gather is not supported for a "
                     f"{type(sub).__name__} {role} sub-storage: it does not "
-                    f"implement fsdp_buffer_fields. "
-                    f"See hybrid_quantization_fsdp.md section 9 (Gap 5) — "
-                    f"NVFP4 sub-storages need packed-FP4 dim-0 alignment, "
-                    f"columnwise dequantization and RHT-cache handling before "
-                    f"they can be gathered. Use a supported sub-quantizer "
-                    f"(Float8CurrentScaling, MXFP8, Float8Block) or run without "
-                    f"FSDP2."
+                    "implement fsdp_buffer_fields. "
+                    "See hybrid_quantization_fsdp.md section 9 (Gap 5) — "
+                    "NVFP4 sub-storages need packed-FP4 dim-0 alignment, "
+                    "columnwise dequantization and RHT-cache handling before "
+                    "they can be gathered. Use a supported sub-quantizer "
+                    "(Float8CurrentScaling, MXFP8, Float8Block) or run without "
+                    "FSDP2."
                 ) from err
 
         row_buffers: Tuple[Optional[torch.Tensor], ...] = ()
@@ -312,7 +311,7 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
             len(row_buffers),
             row_meta,
             col_meta,
-            self._rowwise_storage,   # original sharded sub-storage (for make_like on iter-1)
+            self._rowwise_storage,  # original sharded sub-storage (for make_like on iter-1)
             self._columnwise_storage,
             self._rowwise_quantizer,
             self._columnwise_quantizer,
@@ -411,6 +410,7 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
         that way for real slicing today). On ``None`` the caller should defer
         to ``super().__torch_dispatch__`` for a consistent BF16 fallback.
         """
+
         def _delegate(sub):
             if sub is None:
                 return None
@@ -476,11 +476,13 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
 
             row_pieces = (
                 torch.split(tensor._rowwise_storage, split_size, dim=dim)
-                if tensor._rowwise_storage is not None else None
+                if tensor._rowwise_storage is not None
+                else None
             )
             col_pieces = (
                 torch.split(tensor._columnwise_storage, split_size, dim=dim)
-                if tensor._columnwise_storage is not None else None
+                if tensor._columnwise_storage is not None
+                else None
             )
 
             if row_pieces is None and col_pieces is None:
@@ -519,8 +521,9 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
                 and tuple(shape) == tuple(tensor.size())
             ):
                 return HybridQuantizedTensor.make_like(tensor)
-            return cls._delegate_reshape_op(func, tensor, args, kwargs) or \
-                super().__torch_dispatch__(func, types, args, kwargs)
+            return cls._delegate_reshape_op(
+                func, tensor, args, kwargs
+            ) or super().__torch_dispatch__(func, types, args, kwargs)
 
         if func == aten.slice.Tensor:
             tensor = args[0]
@@ -529,8 +532,9 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
             length = args[3]
             if start == 0 and length == tensor.size(dim):
                 return HybridQuantizedTensor.make_like(tensor)
-            return cls._delegate_reshape_op(func, tensor, args, kwargs) or \
-                super().__torch_dispatch__(func, types, args, kwargs)
+            return cls._delegate_reshape_op(
+                func, tensor, args, kwargs
+            ) or super().__torch_dispatch__(func, types, args, kwargs)
 
         # ── FSDP2: copy_ ─────────────────────────────────────────────
         # Fast path for hybrid-to-hybrid (FSDP2 fills buffer allocated via
@@ -565,11 +569,13 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
             tensor = args[0]
             row_clone = (
                 torch.clone(tensor._rowwise_storage)
-                if tensor._rowwise_storage is not None else None
+                if tensor._rowwise_storage is not None
+                else None
             )
             col_clone = (
                 torch.clone(tensor._columnwise_storage)
-                if tensor._columnwise_storage is not None else None
+                if tensor._columnwise_storage is not None
+                else None
             )
             return HybridQuantizedTensor(
                 shape=tensor.shape,
