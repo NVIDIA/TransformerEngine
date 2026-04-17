@@ -669,8 +669,13 @@ std::vector<std::vector<size_t>> input_config = {
     {VARYING_FIRST_DIM,     4,      512,160,                    128,0,0,256},
     {VARYING_BOTH_DIMS,     3,      1,(128*128)+(128*128),      128,0,128,      128,0,128},
 };
-
-}  // namespace
+std::vector<std::vector<size_t>> input_config_small = {
+    {SAME_BOTH_DIMS,        2,      256,128},
+    {VARYING_FIRST_DIM,     4,      1536,160,                   128,384,512,512},
+    {VARYING_LAST_DIM,      3,      256,896,                    128,256,512},
+    {VARYING_BOTH_DIMS,     2,      1,(256*128)+(512*640),      256,512,        128,640},
+    {VARYING_FIRST_DIM,     4,      512,160,                    128,0,0,256},
+};
 
 class GroupedFusedCastMXFP8TestSuite : public ::testing::TestWithParam
     <std::tuple<ProcessingMethod,
@@ -852,14 +857,40 @@ std::string MakeGroupedFusedCastMXFP8TestName(
     return name;
 }
 
+}  // namespace
+
 INSTANTIATE_TEST_SUITE_P(
-    OperatorTest,
+    OperatorTest_GroupedFusedCastMXFP8_CastOnly,
+    GroupedFusedCastMXFP8TestSuite,
+    ::testing::Combine(
+        ::testing::Values(ProcessingMethod::CAST_ONLY),
+        ::testing::Values(ActivationKind::Identity),
+        ::testing::ValuesIn(scaling_directions),
+        ::testing::ValuesIn(input_config),
+        ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
+        ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2)),
+    MakeGroupedFusedCastMXFP8TestName);
+
+INSTANTIATE_TEST_SUITE_P(
+    OperatorTest_GroupedFusedCastMXFP8_Shapes,
     GroupedFusedCastMXFP8TestSuite,
     ::testing::Combine(
         ::testing::ValuesIn(processing_methods),
         ::testing::ValuesIn(activation_kinds),
         ::testing::ValuesIn(scaling_directions),
         ::testing::ValuesIn(input_config),
+        ::testing::Values(DType::kBFloat16),
+        ::testing::Values(DType::kFloat8E4M3)),
+    MakeGroupedFusedCastMXFP8TestName);
+
+INSTANTIATE_TEST_SUITE_P(
+    OperatorTest_GroupedFusedCastMXFP8_Dtypes,
+    GroupedFusedCastMXFP8TestSuite,
+    ::testing::Combine(
+        ::testing::ValuesIn(processing_methods),
+        ::testing::ValuesIn(activation_kinds),
+        ::testing::Values(ScalingDirection::BOTH),
+        ::testing::ValuesIn(input_config_small),
         ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
         ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2)),
     MakeGroupedFusedCastMXFP8TestName);
