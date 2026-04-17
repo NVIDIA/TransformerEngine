@@ -1691,6 +1691,8 @@ void fused_attn_fp8_fwd_impl_v1(
   NVTE_CHECK(
       is_delayed_scaling || is_current_scaling || is_mxfp8,
       "FP8 fused attention only supports FP8DelayedScaling or FP8CurrentScaling or MXFP8 recipes!");
+  NVTE_CHECK(!is_mxfp8 || cudnn_runtime_version >= 92100,
+             "MXFP8 fused attention requires cuDNN 9.21.0 or later!");
 
   try {
     FADescriptor_v1 descriptor{b,
@@ -2126,6 +2128,8 @@ void fused_attn_fp8_bwd_impl_v1(
   NVTE_CHECK(
       is_delayed_scaling || is_current_scaling || is_mxfp8,
       "FP8 fused attention only supports FP8DelayedScaling or FP8CurrentScaling or MXFP8 recipes!");
+  NVTE_CHECK(!is_mxfp8 || cudnn_runtime_version >= 92100,
+             "MXFP8 fused attention requires cuDNN 9.21.0 or later!");
 
   bool is_O_in_F16 = (o_tensor_type == cudnn_frontend::DataType_t::HALF ||
                       o_tensor_type == cudnn_frontend::DataType_t::BFLOAT16);
