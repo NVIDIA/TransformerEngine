@@ -685,8 +685,7 @@ std::vector<std::optional<at::Tensor>> multi_tensor_transpose_to_bhsd(
     if (!inputs[i].has_value()) continue;
 
     auto &input = inputs[i].value();
-    NVTE_CHECK(input.is_cuda() && input.dim() == 4,
-               "multi_tensor_transpose_to_bhsd: input ", i,
+    NVTE_CHECK(input.is_cuda() && input.dim() == 4, "multi_tensor_transpose_to_bhsd: input ", i,
                " must be a 4D CUDA tensor.");
     input = input.contiguous();
     NVTE_CHECK(input.scalar_type() == at::ScalarType::Half ||
