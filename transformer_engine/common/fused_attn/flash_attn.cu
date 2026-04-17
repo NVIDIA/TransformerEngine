@@ -465,21 +465,6 @@ __device__ __forceinline__ void issue_tma_load_strided(T *smem_buf, const CUtens
   }
 }
 
-template <typename T, bool kIsBshd>
-__device__ __forceinline__ void issue_tma_store_strided(const CUtensorMap *tma, T *smem_buf,
-                                                        size_t h_i, size_t s_tile, size_t b_i) {
-  if constexpr (kIsBshd) {
-    cp_async_bulk_tensor_4d_shared_to_global(tma, 0, static_cast<uint32_t>(h_i),
-                                             static_cast<uint32_t>(s_tile),
-                                             static_cast<uint32_t>(b_i), smem_buf);
-  } else {
-    cp_async_bulk_tensor_4d_shared_to_global(tma, 0, static_cast<uint32_t>(h_i),
-                                             static_cast<uint32_t>(b_i),
-                                             static_cast<uint32_t>(s_tile), smem_buf);
-  }
-  ptx::cp_async_bulk_commit_group();
-}
-
 __device__ __forceinline__ void st_global_cs_uint4(uint4 *ptr, uint4 val) {
   asm volatile("st.global.cs.v4.b32 [%0], {%1, %2, %3, %4};" ::"l"(ptr), "r"(val.x), "r"(val.y),
                "r"(val.z), "r"(val.w)
