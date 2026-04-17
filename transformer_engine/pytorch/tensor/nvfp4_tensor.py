@@ -737,6 +737,22 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
                     t.record_stream(stream)
             return None
 
+        # copy_ — FSDP2 may call this during resharding or parameter writeback.
+        if func == aten.copy_.default:
+            dst, src = args[0], args[1]
+            if isinstance(src, NVFP4Tensor) and isinstance(dst, NVFP4Tensor):
+                if dst._rowwise_data is not None and src._rowwise_data is not None:
+                    dst._rowwise_data.copy_(src._rowwise_data.detach())
+                    dst._rowwise_scale_inv.copy_(src._rowwise_scale_inv.detach())
+                if dst._columnwise_data is not None and src._columnwise_data is not None:
+                    dst._columnwise_data.copy_(src._columnwise_data.detach())
+                    dst._columnwise_scale_inv.copy_(src._columnwise_scale_inv.detach())
+                if dst._amax_rowwise is not None and src._amax_rowwise is not None:
+                    dst._amax_rowwise.copy_(src._amax_rowwise.detach())
+                if dst._amax_columnwise is not None and src._amax_columnwise is not None:
+                    dst._amax_columnwise.copy_(src._amax_columnwise.detach())
+                return dst
+
         # NVFP4 dequantize not supported. Add manual support for needed funcs.
         if func in (aten.empty_like.default, aten.zero_.default):
             tensor = args[0]
