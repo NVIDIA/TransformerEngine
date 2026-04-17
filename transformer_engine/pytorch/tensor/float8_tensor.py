@@ -233,12 +233,16 @@ class Float8CurrentScalingQuantizer(Quantizer):
     high-precision tensor, without the need of any history window.
 
     Unlike delayed scaling, scale and amax tensors are not needed to initialize the
-    quantizer, becuse they are simply GPU buffers that will be filled by current
+    quantizer, because they are simply GPU buffers that will be filled by current
     scaling quantization kernels, instead of using values taken from delayed scaling
-    history window. Therefore, device parameter is needed for tensor allocation.
+    history window.
 
     Both Float8CurrentScalingQuantizer and Float8Quantizer produces Float8Tensor,
     because they are both per-tensor scaling, ie. one scaling factor per tensor.
+
+    Note: The ``device``, ``use_existing_amax``, ``scale``, and ``amax``
+    parameters are accepted but unused. They are kept for backward
+    compatibility with existing callers.
 
     """
 
@@ -267,6 +271,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
         amax: Optional[torch.Tensor] = None,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
+        del device, use_existing_amax, scale, amax  # Kept for backward compatibility
         self.dtype = fp8_dtype
         self.with_amax_reduction = with_amax_reduction
         self.amax_reduction_group = amax_reduction_group
