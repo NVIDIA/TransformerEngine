@@ -10,13 +10,12 @@
 
 #include "../common.h"
 #include "../util/logging.h"
-#include "../utils.cuh"
 #include "utils.h"
 
 namespace transformer_engine {
 namespace fused_router {
 
-template <typename DataType, typename BiasType>
+template <typename DataType, typename BiasType, TopkFuncType TopkFunc = TopkFuncType::Naive>
 __global__ void fused_topk_with_score_function_forward_kernel(
     const DataType *logits, int num_tokens, int num_experts, int topk, bool use_pre_softmax,
     int num_groups, int group_topk, float scaling_factor, int score_function,
@@ -146,7 +145,7 @@ __global__ void fused_topk_with_score_function_forward_kernel(
       int group_size = num_experts / num_groups;
       // Top2
       for (int i = 0; i < num_groups; i++) {
-        naive_topk_and_mask(
+        topk_and_mask<TopkFunc>(
             /*scores ptr = */ scores + i * group_size,
             /*data size = */ group_size,
             /*topk = */ topk / group_topk,
@@ -166,7 +165,7 @@ __global__ void fused_topk_with_score_function_forward_kernel(
       }
 
       // select the topk groups
-      naive_topk_and_mask(
+      topk_and_mask<TopkFunc>(
           /*scores ptr = */ group_scores,
           /*data size = */ num_groups,
           /*topk = */ group_topk,
@@ -183,10 +182,10 @@ __global__ void fused_topk_with_score_function_forward_kernel(
         }
       }
       __syncwarp();
-      naive_topk_and_mask(masked_scores, num_experts, topk, topk_indices, topk_scores, lane_id);
+      topk_and_mask<TopkFunc>(masked_scores, num_experts, topk, topk_indices, topk_scores, lane_id);
 
     } else {
-      naive_topk_and_mask(scores, num_experts, topk, topk_indices, topk_scores, lane_id);
+      topk_and_mask<TopkFunc>(scores, num_experts, topk, topk_indices, topk_scores, lane_id);
     }
     __syncwarp();
 
@@ -254,10 +253,26 @@ void fused_topk_with_score_function_forward_kernel_launcher(
     shared_memory_size += num_groups * num_token_per_block * sizeof(CompType);   // group_scores
     shared_memory_size += num_experts * num_token_per_block * sizeof(CompType);  // maksed_scores
   }
-  fused_topk_with_score_function_forward_kernel<DataType, BiasType>
-      <<<grid_size, kThreadsPerBlock, shared_memory_size, stream>>>(
-          logits, num_tokens, num_experts, topk, use_pre_softmax, num_groups, group_topk,
-          scaling_factor, score_function, expert_bias, probs, routing_map, intermediate_output);
+  check_shared_memory_capacity_num_experts(shared_memory_size, num_experts);
+  // Radix selection is O(E), independent of K, but it needs 4 passes for 32-bit float;
+  // switch at K=16 where naive O(K^2*E) starts to dominate
+  if (topk < 16) {
+    NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+        fused_topk_with_score_function_forward_kernel<DataType, BiasType, TopkFuncType::Naive>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize, shared_memory_size));
+    fused_topk_with_score_function_forward_kernel<DataType, BiasType, TopkFuncType::Naive>
+        <<<grid_size, kThreadsPerBlock, shared_memory_size, stream>>>(
+            logits, num_tokens, num_experts, topk, use_pre_softmax, num_groups, group_topk,
+            scaling_factor, score_function, expert_bias, probs, routing_map, intermediate_output);
+  } else {
+    NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+        fused_topk_with_score_function_forward_kernel<DataType, BiasType, TopkFuncType::Radix>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize, shared_memory_size));
+    fused_topk_with_score_function_forward_kernel<DataType, BiasType, TopkFuncType::Radix>
+        <<<grid_size, kThreadsPerBlock, shared_memory_size, stream>>>(
+            logits, num_tokens, num_experts, topk, use_pre_softmax, num_groups, group_topk,
+            scaling_factor, score_function, expert_bias, probs, routing_map, intermediate_output);
+  }
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
@@ -467,6 +482,10 @@ void fused_topk_with_score_function_backward_kernel_launcher(
                               num_experts * num_token_per_block * sizeof(CompType)  // act_from_fwd
                               + num_experts * num_token_per_block * sizeof(CompType)  // comp_buf
                               + num_experts * num_token_per_block * sizeof(bool);     // routing_map
+  check_shared_memory_capacity_num_experts(shared_memory_size, num_experts);
+  NVTE_CHECK_CUDA(cudaFuncSetAttribute(fused_topk_with_score_function_backward_kernel<DataType>,
+                                       cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                       shared_memory_size));
   fused_topk_with_score_function_backward_kernel<DataType>
       <<<grid_size, kThreadsPerBlock, shared_memory_size, stream>>>(
           routing_map, intermediate_output, grad_probs, num_tokens, num_experts, topk,

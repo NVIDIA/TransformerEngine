@@ -89,7 +89,7 @@ _flash_attn_bwd = None
 _flash_attn_varlen_fwd = None
 _flash_attn_varlen_bwd = None
 try:
-    fa_utils.version = PkgVersion(get_pkg_version("flash-attn"))
+    fa_utils.version = PkgVersion(PkgVersion(get_pkg_version("flash-attn")).public)
 except PackageNotFoundError:
     pass  # only print warning if use_flash_attention_2 = True in get_attention_backend
 else:
@@ -131,22 +131,22 @@ else:
             fa_utils.version,
         )
 try:
-    fa_utils.fa3_version = PkgVersion(get_pkg_version("flash-attn-3"))
+    fa_utils.fa3_version = PkgVersion(PkgVersion(get_pkg_version("flash-attn-3")).public)
 except PackageNotFoundError:
     flash_attn_func_v3 = None
     flash_attn_varlen_func_v3 = None
     flash_attn_with_kvcache_v3 = None
     # pass  # only print warning if use_flash_attention_3 = True in get_attention_backend
 else:
-    from flash_attn_3.flash_attn_interface import flash_attn_func as flash_attn_func_v3
-    from flash_attn_3.flash_attn_interface import (
+    from flash_attn_interface import flash_attn_func as flash_attn_func_v3
+    from flash_attn_interface import (
         flash_attn_varlen_func as flash_attn_varlen_func_v3,
     )
-    from flash_attn_3.flash_attn_interface import (
+    from flash_attn_interface import (
         flash_attn_with_kvcache as flash_attn_with_kvcache_v3,
     )
-    from flash_attn_3.flash_attn_interface import _flash_attn_forward as _flash_attn_fwd_v3
-    from flash_attn_3.flash_attn_interface import _flash_attn_backward as _flash_attn_bwd_v3
+    from flash_attn_interface import _flash_attn_forward as _flash_attn_fwd_v3
+    from flash_attn_interface import _flash_attn_backward as _flash_attn_bwd_v3
 
     fa_utils.set_flash_attention_3_params()
 
