@@ -652,7 +652,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   Tensor *output_O = convertNVTETensorCheck(O);
   Tensor *wkspace = convertNVTETensor(workspace);
 
-  size_t b = 0, h_q = 0, h_kv = 0, s_q = 0, s_kv = 0, d_qk = 0, d_v = 0, t_q = 0, t_kv = 0;
+  size_t b = 0, h_q = 0, h_kv = 0, d_qk = 0, d_v = 0, t_q = 0, t_kv = 0;
   NVTE_QKV_Format q_format = nvte_get_q_format(qkv_layout);
   NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
   size_t tmp_shape[4];
@@ -661,10 +661,10 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   auto *v_dims = input_V->scaling_mode != NVTE_MXFP8_1D_SCALING
                      ? input_V->data.shape.data()
                      : input_V->columnwise_data.shape.data();
-  nvte_convert_qkv_shape(q_format, q_dims, q_format, tmp_shape, &b, &h_q, &s_q, &d_qk, &t_q);
-  nvte_convert_qkv_shape(kv_format, k_dims, kv_format, tmp_shape, nullptr, &h_kv, &s_kv, &d_qk,
+  nvte_convert_qkv_shape(q_format, q_dims, q_format, tmp_shape, &b, &h_q, nullptr, &d_qk, &t_q);
+  nvte_convert_qkv_shape(kv_format, k_dims, kv_format, tmp_shape, nullptr, &h_kv, nullptr, &d_qk,
                          &t_kv);
-  nvte_convert_qkv_shape(kv_format, v_dims, kv_format, tmp_shape, nullptr, &h_kv, &s_kv, &d_v,
+  nvte_convert_qkv_shape(kv_format, v_dims, kv_format, tmp_shape, nullptr, &h_kv, nullptr, &d_v,
                          &t_kv);
   if (q_format == NVTE_QKV_Format::NVTE_THD) {
     b = input_cu_seqlens_q->data.shape[0] - 1;
@@ -770,17 +770,17 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   Tensor *output_dSoftmaxOffset = convertNVTETensorCheck(dSoftmaxOffset);
   Tensor *wkspace = convertNVTETensor(workspace);
 
-  size_t b = 0, h_q = 0, h_kv = 0, s_q = 0, s_kv = 0, d_qk = 0, d_v = 0, t_q = 0, t_kv = 0;
+  size_t b = 0, h_q = 0, h_kv = 0, d_qk = 0, d_v = 0, t_q = 0, t_kv = 0;
   NVTE_QKV_Format q_format = nvte_get_q_format(qkv_layout);
   NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
   size_t tmp_shape[4];
   auto *q_dims = input_Q->data.shape.data();
   auto *k_dims = input_K->data.shape.data();
   auto *v_dims = input_V->data.shape.data();
-  nvte_convert_qkv_shape(q_format, q_dims, q_format, tmp_shape, &b, &h_q, &s_q, &d_qk, &t_q);
-  nvte_convert_qkv_shape(kv_format, k_dims, kv_format, tmp_shape, nullptr, &h_kv, &s_kv, &d_qk,
+  nvte_convert_qkv_shape(q_format, q_dims, q_format, tmp_shape, &b, &h_q, nullptr, &d_qk, &t_q);
+  nvte_convert_qkv_shape(kv_format, k_dims, kv_format, tmp_shape, nullptr, &h_kv, nullptr, &d_qk,
                          &t_kv);
-  nvte_convert_qkv_shape(kv_format, v_dims, kv_format, tmp_shape, nullptr, &h_kv, &s_kv, &d_v,
+  nvte_convert_qkv_shape(kv_format, v_dims, kv_format, tmp_shape, nullptr, &h_kv, nullptr, &d_v,
                          &t_kv);
   if (q_format == NVTE_QKV_Format::NVTE_THD) {
     b = input_cu_seqlens_q->data.shape[0] - 1;
