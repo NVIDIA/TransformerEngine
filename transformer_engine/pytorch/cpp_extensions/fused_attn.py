@@ -617,10 +617,10 @@ def fused_attn_bwd(
     )
 
     # THD CUDA Graph: zero-fill dQ/dK/dV at positions beyond cu_seqlens[-1].
-    if qkv_layout in ('t3hd', 'th3d', 'thd_t2hd', 'thd_th2d', 'thd_thd_thd'):
+    if qkv_layout in ("t3hd", "th3d", "thd_t2hd", "thd_th2d", "thd_thd_thd"):
         _aT_bwd = cu_seqlens_q[-1]
         for _dt in output_tensors[:3]:
-            if hasattr(_dt, 'shape') and _dt.shape[0] > 0:
+            if hasattr(_dt, "shape") and _dt.shape[0] > 0:
                 _m_bwd = torch.arange(_dt.shape[0], device=_dt.device) >= _aT_bwd
                 _dt[_m_bwd] = 0
 

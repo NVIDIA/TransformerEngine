@@ -2048,11 +2048,12 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         # cu_seqlens_q_padded is GLOBAL; divide by cp_size to get local actual_T.
         if qkv_format == "thd" and out_ret is not None and hasattr(out_ret, "shape"):
             import torch as _torch
+
             _local_aT = cu_seqlens_q_padded[-1] // cp_size
             if out_ret.shape[0] > 0:
                 _m = _torch.arange(out_ret.shape[0], device=out_ret.device) >= _local_aT
                 out_ret.data[_m] = 0
-                out.data[_m.view(-1, *([1]*(out.dim()-1))).expand_as(out)] = 0
+                out.data[_m.view(-1, *([1] * (out.dim() - 1))).expand_as(out)] = 0
 
         if return_max_logit:
             return out_ret, max_logit
@@ -2751,6 +2752,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         # THD CUDA Graph: zero-fill dQ/dK/dV at padded positions after CP backward.
         if ctx.qkv_format == "thd":
             import torch as _torch
+
             _local_aT_bwd = cu_seqlens_q_padded[-1] // get_distributed_world_size(ctx.cp_group)
             for _dg in [dq, dk, dv]:
                 if _dg is not None and hasattr(_dg, "shape") and _dg.shape[0] > 0:
