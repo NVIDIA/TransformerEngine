@@ -31,6 +31,7 @@ add_executable(test_operator
                test_multi_unpadding.cu
                test_causal_softmax.cu
                test_swizzle.cu
+               test_multi_swizzle.cu
                test_swap_first_dims.cu
                test_grouped_gemm.cu
                ../test_common.cu)
