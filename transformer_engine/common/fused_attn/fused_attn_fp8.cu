@@ -15,7 +15,6 @@ namespace fused_attn {
 
 using namespace transformer_engine;
 
-#if (CUDNN_VERSION >= 8900)
 std::unordered_map<std::string, int> tensor_name_to_uid = {{"Q", 1},
                                                            {"K", 2},
                                                            {"V", 3},
@@ -2717,11 +2716,8 @@ void fused_attn_fp8_bwd_impl_v1(
   }
 }  // NOLINT(readability/fn_size)
 
-#endif
-
 }  // namespace fused_attn
 
-#if (CUDNN_VERSION >= 8900)
 // fused attention FWD FP8 with separate Q, K, V
 void fused_attn_fp8_fwd(
     size_t batch, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
@@ -2991,5 +2987,4 @@ void fused_attn_fp8_bwd(
     return;
   }
 }
-#endif  // end of CUDNN>=8900
 }  // namespace transformer_engine

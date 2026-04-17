@@ -710,16 +710,11 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
       return_max_logit, cuda_graph, false);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
-#if (CUDNN_VERSION >= 8901)
     fused_attn_max_512_fwd(b, h_q, max_seqlen_q, max_seqlen_kv, d_qk, is_training, attn_scale,
                            dropout, qkv_layout, bias_type, attn_mask_type, input_Q, input_K,
                            input_V, input_Bias, output_O, Aux_CTX_Tensors, input_cu_seqlens_q,
                            input_cu_seqlens_kv, input_rng_state, wkspace, stream, handle);
-#else
-    NVTE_ERROR("cuDNN 8.9.1 is required for BF16/FP16 fused attention with max_seqlen<=512. \n");
-#endif
   } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen) {
-#if (CUDNN_VERSION >= 8900)
     fused_attn_arbitrary_seqlen_fwd(
         b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, t_q, t_kv, num_pages_k, num_pages_v,
         page_size_k, page_size_v, max_pages_per_seq_k, max_pages_per_seq_v, is_training,
@@ -728,22 +723,13 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
         input_V, input_Bias, input_SoftmaxOffset, output_O, Aux_CTX_Tensors, input_cu_seqlens_q,
         input_cu_seqlens_kv, input_cu_seqlens_q_padded, input_cu_seqlens_kv_padded,
         input_page_table_k, input_page_table_v, input_rng_state, wkspace, stream, handle);
-#else
-    NVTE_ERROR(
-        "cuDNN 8.9.0 is required for BF16/FP16 fused attention with arbitrary sequence length. "
-        "\n");
-#endif
   } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_FP8) {
-#if (CUDNN_VERSION >= 8900)
     fused_attn_fp8_fwd(b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, is_training,
                        attn_scale, dropout, qkv_layout, o_format, qkv_scale_inv_format, bias_type,
                        attn_mask_type, softmax_type, window_size_left, window_size_right,
                        bottom_right_diagonal, input_Q, input_K, input_V, input_SoftmaxOffset,
                        input_output_S, output_O, Aux_CTX_Tensors, input_cu_seqlens_q,
                        input_cu_seqlens_kv, input_rng_state, wkspace, stream, handle);
-#else
-    NVTE_ERROR("cuDNN 8.9.0 is required for FP8 fused attention. \n");
-#endif
   } else {
     NVTE_ERROR("Invalid combination of data type and sequence length for fused attention. \n");
   }
@@ -812,17 +798,12 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
       cuda_graph, deterministic);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
-#if (CUDNN_VERSION >= 8901)
     Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
     fused_attn_max_512_bwd(b, h_q, max_seqlen_q, max_seqlen_kv, d_qk, attn_scale, dropout,
                            qkv_layout, bias_type, attn_mask_type, input_Q, input_K, input_V,
                            input_dO, output_S, output_dQ, output_dK, output_dV, output_dBias,
                            input_cu_seqlens_q, input_cu_seqlens_kv, wkspace, stream, handle);
-#else
-    NVTE_ERROR("cuDNN 8.9.1 is required for BF16/FP16 fused attention with max_seqlen<=512. \n");
-#endif
   } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen) {
-#if (CUDNN_VERSION >= 8900)
     size_t i = 0;
     Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     Tensor *input_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
@@ -841,14 +822,7 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
         output_dV, output_dBias, output_dSoftmaxOffset, input_cu_seqlens_q, input_cu_seqlens_kv,
         input_cu_seqlens_q_padded, input_cu_seqlens_kv_padded, input_rng_state, wkspace, stream,
         handle);
-#else
-    const char *err_msg =
-        "cuDNN 8.9.0 is required for BF16/FP16 fused attention "
-        "with arbitrary sequence length. \n";
-    NVTE_ERROR(err_msg);
-#endif
   } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_FP8) {
-#if (CUDNN_VERSION >= 8900)
     size_t i = 0;
     const Tensor *input_M = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     const Tensor *input_ZInv = nullptr;
@@ -872,9 +846,6 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                        input_ZInv, input_S, input_SoftmaxOffset, input_output_dP, output_dQ,
                        output_dK, output_dV, output_dSoftmaxOffset, input_cu_seqlens_q,
                        input_cu_seqlens_kv, input_rng_state, wkspace, stream, handle);
-#else
-    NVTE_ERROR("cuDNN 8.9.0 is required for FP8 fused attention. \n");
-#endif
   } else {
     NVTE_ERROR("Invalid combination of data type and sequence length for fused attention. \n");
   }

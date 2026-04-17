@@ -17,7 +17,6 @@
 #include "transformer_engine/fused_attn.h"
 
 namespace transformer_engine {
-#if (CUDNN_VERSION >= 8900)
 void fused_attn_arbitrary_seqlen_fwd(
     size_t batch, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
     size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, size_t num_tokens_q,
@@ -48,7 +47,6 @@ void fused_attn_arbitrary_seqlen_bwd(
     const Tensor *cu_seqlens_kv_padded, const Tensor *rng_state, Tensor *workspace,
     cudaStream_t stream, cudnnHandle_t handle);
 
-#endif  // CUDNN_VERSION >= 8900
 }  // namespace transformer_engine
 
 #endif  // TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_FUSED_ATTN_ARBITRARY_SEQLEN_H_

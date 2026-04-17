@@ -19,7 +19,6 @@
 #include "fused_attn_f16_arbitrary_seqlen.h"
 #include "utils.h"
 
-#if (CUDNN_VERSION >= 8900)
 #define Q_ID 1
 #define K_ID 2
 #define V_ID 3
@@ -1335,4 +1334,3 @@ void fused_attn_arbitrary_seqlen_bwd(
   }
 }
 }  // namespace transformer_engine
-#endif  // CUDNN_VERSION >= 8900

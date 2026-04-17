@@ -12,7 +12,6 @@
 #include "transformer_engine/transformer_engine.h"
 
 namespace transformer_engine {
-#if (CUDNN_VERSION >= 8900)
 // fused attention FWD FP8 with separate Q, K, V
 void fused_attn_fp8_fwd(
     size_t batch, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
@@ -40,5 +39,4 @@ void fused_attn_fp8_bwd(
     const Tensor *output_dQ, const Tensor *output_dK, const Tensor *output_dV,
     Tensor *output_dSoftmaxOffset, const Tensor *cu_seqlens_q, const Tensor *cu_seqlens_kv,
     const Tensor *rng_state, Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle);
-#endif  // end of CUDNN>=8900
 }  // namespace transformer_engine
