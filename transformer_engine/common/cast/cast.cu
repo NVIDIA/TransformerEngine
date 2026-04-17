@@ -89,6 +89,14 @@ void nvte_dequantize(const NVTETensor input, NVTETensor output, cudaStream_t str
                               stream);
 }
 
+void nvte_group_dequantize(const NVTEGroupedTensor input, NVTEGroupedTensor output,
+                           cudaStream_t stream) {
+  NVTE_API_CALL(nvte_group_dequantize);
+  using namespace transformer_engine;
+  dispatch::group_dequantize_helper(*convertNVTEGroupedTensorCheck(input),
+                                    convertNVTEGroupedTensorCheck(output), stream);
+}
+
 void nvte_multi_tensor_quantize(const NVTETensor *inputs, NVTETensor *outputs,
                                 const NVTEQuantizationConfig quant_configs,
                                 const size_t num_tensors, cudaStream_t stream) {

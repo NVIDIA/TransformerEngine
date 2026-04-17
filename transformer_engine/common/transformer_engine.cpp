@@ -281,7 +281,18 @@ void CheckGroupedTensorShapeArrays(const GroupedTensor &t, const std::string &na
   // Validate shape arrays (all optional)
   check_shape_array(t.first_dims, "first_dims");
   check_shape_array(t.last_dims, "last_dims");
-  check_shape_array(t.tensor_offsets, "tensor_offsets");
+
+  // tensor_offsets uses CSR-style prefix-sum layout with num_tensors+1 entries:
+  // offsets[i] = start of tensor i, offsets[num_tensors] = total elements
+  if (t.tensor_offsets.has_data()) {
+    NVTE_CHECK(t.tensor_offsets.shape.size() == 1, "Grouped tensor ", name,
+               " tensor_offsets must be 1D");
+    NVTE_CHECK(t.tensor_offsets.dtype == DType::kInt64, "Grouped tensor ", name,
+               " tensor_offsets must have dtype Int64");
+    NVTE_CHECK(t.tensor_offsets.shape[0] == t.num_tensors + 1, "Grouped tensor ", name,
+               " tensor_offsets size (", t.tensor_offsets.shape[0], ") must equal num_tensors+1 (",
+               t.num_tensors + 1, ")");
+  }
 
   // tensor_offsets is required if any dimension varies
   // (i.e., required unless all_same_shape())

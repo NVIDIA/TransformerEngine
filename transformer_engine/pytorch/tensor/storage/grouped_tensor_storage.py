@@ -91,7 +91,8 @@ class GroupedTensorStorage:
             scale: Scale buffer (for FP8-DS only)
             first_dims: Device tensor of int64 array of length num_tensors (or None if uniform)
             last_dims: Device tensor of int64 array of length num_tensors (or None if uniform)
-            tensor_offsets: Device tensor of int64 array of length num_tensors (or None if uniform)
+            tensor_offsets: Device tensor of int64 array of length num_tensors+1 (CSR-style,
+                or None if uniform). offsets[i] = start of tensor i, offsets[num_tensors] = total.
             offsets: Vector of integer offsets for each tensor.
         """
         # `requires_grad` and `stride` are accepted for API symmetry with
