@@ -387,5 +387,116 @@ def test_distributed(recipe_name, fp8_init, sharding_dims, layer_type):
     _run_training(args)
 
 
+def test_distributed_hybrid(hybrid_recipe_name):
+    """FSDP2 training with hybrid quantized_model_init.
+
+    Uses quantized_model_init with a hybrid CustomRecipe and verifies that
+    training completes without error with a TransformerLayer model.
+    """
+    if hybrid_recipe_name == "HybridFloat8BlockScaling":
+        pytest.xfail(
+            "HybridFloat8BlockScaling: Float8BlockwiseQTensor sub-storage loses "
+            "quantized type through FSDP2 view(-1)."
+        )
+
+    from fsdp2_utils import get_hybrid_recipe_from_string
+
+    hybrid_recipe = get_hybrid_recipe_from_string(hybrid_recipe_name)
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    device = torch.device(f"cuda:{int(os.getenv('LOCAL_RANK', '0'))}")
+
+    torch.manual_seed(42)
+    torch.cuda.manual_seed(42)
+
+    kwargs = dict(
+        fuse_qkv_params=True,
+        params_dtype=torch.bfloat16,
+        hidden_dropout=0.0,
+        attention_dropout=0.0,
+        device="meta",
+    )
+    with te.quantized_model_init(enabled=True, recipe=hybrid_recipe):
+        model = torch.nn.Sequential(
+            *[te.TransformerLayer(512, 2048, 8, **kwargs) for _ in range(2)]
+        )
+
+    custom_attrs = save_custom_attrs(model)
+    mesh = get_device_mesh(world_size, [world_size])
+    model = shard_model_with_fsdp2(model, mesh)
+    for module in model.modules():
+        if hasattr(module, "reset_parameters"):
+            module.reset_parameters()
+    restore_custom_attrs(model, custom_attrs)
+
+    optimizer = optim.Adam(model.parameters(), lr=1e-3)
+
+    inp_shape = (128, 16, 512)
+    out_shape = (128, 16, 512)
+
+    for iteration in range(3):
+        optimizer.zero_grad()
+        input_data = torch.randn(inp_shape, device=device, dtype=torch.bfloat16)
+        target = torch.randn(out_shape, device=device, dtype=torch.bfloat16)
+        with te.autocast(enabled=True, recipe=hybrid_recipe):
+            output = model(input_data)
+            loss = F.mse_loss(output, target)
+        loss.backward()
+        optimizer.step()
+        dist_print(f"Hybrid iteration {iteration} completed with loss {loss.item()}")
+
+
+def test_distributed_hybrid_reshard_after_forward(hybrid_recipe_name):
+    """FSDP2 training with hybrid params and reshard_after_forward=True.
+
+    A single LayerNormLinear as the root module gets reshard_after_forward=True
+    from FSDP2. This exercises the forward-reshard-backward-reshard cycle where
+    split/as_strided/slice dispatch ops fire every iteration.
+    """
+    if hybrid_recipe_name == "HybridFloat8BlockScaling":
+        pytest.xfail(
+            "HybridFloat8BlockScaling: Float8BlockwiseQTensor sub-storage loses "
+            "quantized type through FSDP2 view(-1)."
+        )
+
+    from fsdp2_utils import get_hybrid_recipe_from_string
+
+    hybrid_recipe = get_hybrid_recipe_from_string(hybrid_recipe_name)
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    device = torch.device(f"cuda:{int(os.getenv('LOCAL_RANK', '0'))}")
+
+    torch.manual_seed(42)
+    torch.cuda.manual_seed(42)
+
+    in_features = 512
+    out_features = in_features * 3
+    with te.quantized_model_init(enabled=True, recipe=hybrid_recipe):
+        model = te.LayerNormLinear(
+            in_features, out_features,
+            params_dtype=torch.bfloat16,
+            device="meta",
+        )
+
+    custom_attrs = save_custom_attrs(model)
+    mesh = get_device_mesh(world_size, [world_size])
+    fully_shard(model, mesh=mesh)
+    for module in model.modules():
+        if hasattr(module, "reset_parameters"):
+            module.reset_parameters()
+    restore_custom_attrs(model, custom_attrs)
+
+    optimizer = optim.Adam(model.parameters(), lr=1e-3)
+
+    for iteration in range(5):
+        optimizer.zero_grad()
+        x = torch.randn(128, 16, in_features, device=device, dtype=torch.bfloat16)
+        target = torch.randn(128, 16, out_features, device=device, dtype=torch.bfloat16)
+        with te.autocast(enabled=True, recipe=hybrid_recipe):
+            output = model(x)
+            loss = F.mse_loss(output, target)
+        loss.backward()
+        optimizer.step()
+        dist_print(f"Hybrid reshard_after_fwd iter {iteration}, loss {loss.item():.4f}")
+
+
 if __name__ == "__main__":
     sys.exit(_train(_parse_args()))

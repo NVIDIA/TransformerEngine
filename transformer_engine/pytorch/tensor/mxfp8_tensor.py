@@ -344,8 +344,8 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
 
     def clone(self) -> MXFP8Tensor:
         # pylint: disable=missing-function-docstring
-        assert self._rowwise_data is not None
-        rowwise_data = self._rowwise_data.detach().clone()
+        # _rowwise_data may be None for columnwise-only sub-storages (hybrid quantization)
+        rowwise_data = self._rowwise_data.detach().clone() if self._rowwise_data is not None else None
         columnwise_data = None
         if self._columnwise_data is not None:
             columnwise_data = self._columnwise_data.detach().clone()
@@ -458,66 +458,60 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
             ):
                 return super().__torch_dispatch__(func, types, args, kwargs)
 
-            out_data = []
-            for data in [tensor._rowwise_data, tensor._columnwise_data]:
-                func_out = (
-                    data.__torch_dispatch__(
-                        func,
-                        types,
-                        [data] + list(args[1:]),
-                        kwargs,
-                    )
-                    if data is not None
-                    else None
+            def _split_data(data):
+                if data is None:
+                    return None
+                return data.__torch_dispatch__(
+                    func, types, [data] + list(args[1:]), kwargs,
                 )
-                out_data.append(func_out)
+
+            row_data_splits = _split_data(tensor._rowwise_data)
+            col_data_splits = _split_data(tensor._columnwise_data)
 
             scale_invs = [tensor._rowwise_scale_inv, tensor._columnwise_scale_inv]
             split_sizes_for_scale = [split_size, split_size // MXFP8_BLOCK_SCALING_SIZE]
-            # Padding requirements: rowwise dim0 should be divisble by 128, columnwise dim0 should be divisble by 4
             padding_multiples = [128, 4]
+            scale_splits = []
             for scale_inv, scale_split_size, pad_multiple in zip(
                 scale_invs, split_sizes_for_scale, padding_multiples
             ):
-                scale_inv_out = (
-                    scale_inv.__torch_dispatch__(
-                        func,
-                        types,
-                        [scale_inv, scale_split_size] + list(args[2:]),
-                        kwargs,
-                    )
-                    if scale_inv is not None
-                    else None
-                )
-                scale_inv_out = list(scale_inv_out) if scale_inv_out is not None else None
-                # Pad scale_inv_out to be a multiple of pad_multiple
-                if scale_inv_out is not None:
-                    for idx, split_scale_inv_out in enumerate(scale_inv_out):
-                        current_shape = split_scale_inv_out.shape
-                        pad_dim0 = (pad_multiple - current_shape[0] % pad_multiple) % pad_multiple
-                        if pad_dim0 > 0:
-                            scale_inv_out[idx] = torch.nn.functional.pad(
-                                split_scale_inv_out, (0, 0, 0, pad_dim0)
-                            )
-                out_data.append(scale_inv_out)
+                if scale_inv is None:
+                    scale_splits.append(None)
+                    continue
+                scale_inv_out = list(scale_inv.__torch_dispatch__(
+                    func, types,
+                    [scale_inv, scale_split_size] + list(args[2:]), kwargs,
+                ))
+                for idx, split_scale_inv_out in enumerate(scale_inv_out):
+                    current_shape = split_scale_inv_out.shape
+                    pad_dim0 = (pad_multiple - current_shape[0] % pad_multiple) % pad_multiple
+                    if pad_dim0 > 0:
+                        scale_inv_out[idx] = torch.nn.functional.pad(
+                            split_scale_inv_out, (0, 0, 0, pad_dim0)
+                        )
+                scale_splits.append(scale_inv_out)
+            row_scale_splits, col_scale_splits = scale_splits
+
+            ref_splits = row_data_splits if row_data_splits is not None else col_data_splits
+            num_splits = len(ref_splits)
             return [
                 MXFP8Tensor(
                     shape=(
-                        splitted_tensor_data[0].size()
-                        if splitted_tensor_data[0] is not None
-                        else splitted_tensor_data[1].size()
+                        row_data_splits[i].size()
+                        if row_data_splits is not None
+                        else col_data_splits[i].size()
                     ),
                     dtype=tensor.dtype,
-                    rowwise_data=splitted_tensor_data[0],
-                    rowwise_scale_inv=splitted_tensor_data[2],
-                    columnwise_data=splitted_tensor_data[1],
-                    columnwise_scale_inv=splitted_tensor_data[3],
+                    rowwise_data=row_data_splits[i] if row_data_splits is not None else None,
+                    rowwise_scale_inv=row_scale_splits[i] if row_scale_splits is not None else None,
+                    columnwise_data=col_data_splits[i] if col_data_splits is not None else None,
+                    columnwise_scale_inv=col_scale_splits[i] if col_scale_splits is not None else None,
                     quantizer=tensor._quantizer,
                     requires_grad=False,
                     fp8_dtype=tensor._fp8_dtype,
                     with_gemm_swizzled_scales=False,
                 )
-                for splitted_tensor_data in zip(*out_data)
+                for i in range(num_splits)
             ]
 
         if func == torch.ops.aten.as_strided.default:
@@ -606,6 +600,9 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                 fp8_dtype=tensor._fp8_dtype,
                 with_gemm_swizzled_scales=tensor._with_gemm_swizzled_scales,
             )
+
+        if func == torch.ops.aten.clone.default:
+            return cls.clone(args[0])
 
         # Default case
         return super().__torch_dispatch__(func, types, args, kwargs)

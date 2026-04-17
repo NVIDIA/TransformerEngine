@@ -15,7 +15,7 @@ from transformer_engine_torch import DType as TE_DType
 
 from ...quantized_tensor import QuantizedTensorStorage, Quantizer
 
-from ...constants import TE_DType as torch_to_transformer_engine_dtype
+from ...constants import TE_DType as torch_to_transformer_engine_dtype, MXFP8_BLOCK_SCALING_SIZE
 
 from ...utils import _empty_tensor
 
@@ -308,3 +308,77 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
             "rowwise": self._rowwise_data is not None,
             "columnwise": self._columnwise_data is not None,
         }
+
+    def fsdp_buffer_fields(self) -> Tuple[str, ...]:
+        """Fields gathered by FSDP2 for MXFP8.
+
+        Block scales are per-block and direction-specific — each direction
+        gathers both its data buffer and its scale-inv buffer. ``None``-valued
+        directions (e.g. a columnwise-only sub-storage in hybrid quantization)
+        are excluded so the gather tuple only contains real tensors.
+        """
+        fields = []
+        if self._rowwise_data is not None:
+            fields.extend(("_rowwise_data", "_rowwise_scale_inv"))
+        if self._columnwise_data is not None:
+            fields.extend(("_columnwise_data", "_columnwise_scale_inv"))
+        return tuple(fields)
+
+    def fsdp_extract_buffers(
+        self,
+    ) -> Tuple[Tuple[Optional[torch.Tensor], ...], Dict[str, Any]]:
+        """Extract MXFP8 buffers, unpadding block-scale alignment before gather.
+
+        MXFP8 kernels require scale-inv tensors aligned to ``[128, 4]``
+        (rowwise) and ``[4, 128]`` (columnwise). That padding is attached to
+        the local shard but would produce misaligned concatenation under
+        FSDP2's dim-0 all-gather. Strip it here and re-apply in
+        :meth:`fsdp_assign_gathered`.
+        """
+        if self._with_gemm_swizzled_scales:
+            raise NotImplementedError(
+                "FSDP2 is only supported for MXFP8Tensors with compact scales"
+            )
+        names = self.fsdp_buffer_fields()
+        buffers = []
+        shape = self.size()
+        flattened_in_shape0 = math.prod(shape[:-1])
+        for name in names:
+            t = getattr(self, name)
+            if name == "_rowwise_scale_inv" and t is not None:
+                if t.size(0) != flattened_in_shape0:
+                    t = t[:flattened_in_shape0]
+            elif name == "_columnwise_scale_inv" and t is not None:
+                expected = flattened_in_shape0 // MXFP8_BLOCK_SCALING_SIZE
+                if t.size(0) != expected:
+                    t = t[:expected]
+            buffers.append(t)
+        return tuple(buffers), {"field_names": names}
+
+    def fsdp_assign_gathered(
+        self,
+        gathered: Tuple[Optional[torch.Tensor], ...],
+        meta: Dict[str, Any],
+    ) -> None:
+        """Write gathered MXFP8 buffers back, re-padding block scales.
+
+        Inverse of :meth:`fsdp_extract_buffers`: the gathered scale-inv tensors
+        are padded back up to ``[128, 4]`` / ``[4, 128]`` alignment before
+        being assigned to the storage.
+        """
+        names = meta["field_names"]
+        if len(names) != len(gathered):
+            raise RuntimeError(
+                f"MXFP8TensorStorage.fsdp_assign_gathered got "
+                f"{len(gathered)} buffers for {len(names)} fields"
+            )
+        for name, buf in zip(names, gathered):
+            if buf is not None and name == "_rowwise_scale_inv":
+                pad = (128 - buf.size(0) % 128) % 128
+                if pad > 0:
+                    buf = torch.nn.functional.pad(buf, (0, 0, 0, pad))
+            elif buf is not None and name == "_columnwise_scale_inv":
+                pad = (4 - buf.size(0) % 4) % 4
+                if pad > 0:
+                    buf = torch.nn.functional.pad(buf, (0, 0, 0, pad))
+            setattr(self, name, buf)

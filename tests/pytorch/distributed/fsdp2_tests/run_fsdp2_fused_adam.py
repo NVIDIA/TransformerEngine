@@ -103,7 +103,7 @@ def _build_model(fp8_init, fuse_wgrad_accumulation=False, recipe=None, use_meta_
     return model
 
 
-def _shard_model(model, world_size):
+def _shard_model(model, world_size, reshard_after_forward=None):
     """Apply FSDP2 sharding with save/restore custom attrs.
 
     If the model was created on the meta device (e.g. for FP8 init),
@@ -112,12 +112,24 @@ def _shard_model(model, world_size):
     restore_custom_attrs is called last so it applies to the final parameter
     objects. For meta-device models, reset_parameters() replaces params via
     module_setattr (base.py:1336-1339), so attrs must be restored afterward.
+
+    Parameters
+    ----------
+    reshard_after_forward : bool, optional
+        Passed through to ``fully_shard``. ``None`` (default) keeps FSDP2's
+        own default: ``True`` for child modules, ``False`` for the root.
+        ``False`` on child modules keeps the full-precision gathered weight
+        alive through backward, exercising the iter-2+ buffer-reuse path
+        inside the same forward/backward rather than across training steps.
     """
     has_meta_params = any(p.is_meta for p in model.parameters())
     custom_attrs = save_custom_attrs(model)
     mesh = DeviceMesh("cuda", list(range(world_size)))
+    shard_kwargs = {"mesh": mesh}
+    if reshard_after_forward is not None:
+        shard_kwargs["reshard_after_forward"] = reshard_after_forward
     for child in model.children():
-        fully_shard(child, mesh=mesh)
+        fully_shard(child, **shard_kwargs)
     fully_shard(model, mesh=mesh)
     if has_meta_params:
         for module in model.modules():
@@ -915,6 +927,462 @@ def test_dcp_resharding_load(recipe_name):
                 os.remove(ref_output_path)
 
 
+# ---------------------------------------------------------------------------
+# Hybrid quantization + FSDP2 tests
+# ---------------------------------------------------------------------------
+
+
+def _build_hybrid_model(hybrid_recipe, use_meta_device=True):
+    """Build a model with quantized_model_init using a hybrid CustomRecipe."""
+    ctx = te.quantized_model_init(enabled=True, recipe=hybrid_recipe)
+    kwargs = dict(
+        fuse_qkv_params=True,
+        params_dtype=torch.bfloat16,
+        hidden_dropout=0.0,
+        attention_dropout=0.0,
+    )
+    if use_meta_device:
+        kwargs["device"] = "meta"
+    with ctx:
+        model = torch.nn.Sequential(
+            *[
+                te.TransformerLayer(
+                    HIDDEN_SIZE,
+                    FFN_HIDDEN_SIZE,
+                    NUM_ATTENTION_HEADS,
+                    **kwargs,
+                )
+                for _ in range(NUM_LAYERS)
+            ]
+        )
+    return model
+
+
+def test_fused_adam_hybrid_master_weights(hybrid_recipe_name):
+    """FusedAdam + master_weights + FSDP2 + hybrid quantized_model_init.
+
+    Verifies:
+    - Params are DTensors wrapping HybridQuantizedTensor local shards
+    - Training loop completes without error
+    - Optimizer states are FP32
+    - Loss decreases over training steps
+    """
+    if hybrid_recipe_name == "HybridFloat8BlockScaling":
+        pytest.xfail(
+            "HybridFloat8BlockScaling: Float8BlockwiseQTensor sub-storage loses "
+            "quantized type through FSDP2 view(-1) in reset_sharded_param. "
+            "Same root cause as vanilla Float8BlockScaling + quantized_model_init."
+        )
+
+    from transformer_engine.pytorch import HybridQuantizedTensor
+    from fsdp2_utils import get_hybrid_recipe_from_string
+
+    hybrid_recipe = get_hybrid_recipe_from_string(hybrid_recipe_name)
+    world_size, device = _get_dist_info()
+
+    model = _build_hybrid_model(hybrid_recipe)
+    model = _shard_model(model, world_size)
+
+    hybrid_count = sum(
+        1
+        for _, p in model.named_parameters()
+        if isinstance(p, DTensor) and isinstance(p._local_tensor, HybridQuantizedTensor)
+    )
+    assert hybrid_count > 0, "No HybridQuantizedTensor local tensors after sharding"
+
+    optimizer = te.optimizers.FusedAdam(
+        model.parameters(),
+        lr=1e-3,
+        master_weights=True,
+        master_weight_dtype=torch.float32,
+    )
+
+    x = torch.randn(SEQ_LEN, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
+    target = torch.randn_like(x)
+
+    losses = []
+    for step in range(NUM_STEPS):
+        optimizer.zero_grad(set_to_none=True)
+        with te.autocast(enabled=True, recipe=hybrid_recipe):
+            output = model(x)
+        loss = F.mse_loss(output, target)
+        losses.append(loss.item())
+        loss.backward()
+        optimizer.step()
+
+    for param in model.parameters():
+        state = optimizer.state[param]
+        assert state["exp_avg"].dtype == torch.float32
+        assert state["exp_avg_sq"].dtype == torch.float32
+        if "master_param" in state:
+            assert state["master_param"].dtype == torch.float32
+
+    assert losses[-1] < losses[0], (
+        f"Loss did not decrease: {losses[0]:.4f} -> {losses[-1]:.4f}"
+    )
+
+
+@pytest.mark.parametrize("reshard_after_forward", [True, False])
+def test_fused_adam_hybrid_reshard_variants(hybrid_recipe_name, reshard_after_forward):
+    """Hybrid FusedAdam loop under both ``reshard_after_forward`` settings.
+
+    ``reshard_after_forward=True`` is FSDP2's default: the gathered weight is
+    dropped after forward and a second all-gather happens in backward —
+    meaning ``fsdp_post_all_gather(out=...)`` is invoked twice per training
+    step (once per pass) on the same gathered buffer. ``False`` keeps the
+    gathered weight alive through backward — only one gather per step, and
+    the gathered copy persists across forward/backward within the same step.
+
+    Both modes must complete cleanly and produce a decreasing loss. This
+    locks in that the hybrid hooks handle both FSDP2 schedules, and forms a
+    regression harness for a future bandwidth optimization (P1.1) that would
+    split forward-only / backward-only buffers.
+    """
+    if hybrid_recipe_name == "HybridFloat8BlockScaling":
+        pytest.xfail(
+            "HybridFloat8BlockScaling: Float8BlockwiseQTensor sub-storage loses "
+            "quantized type through FSDP2 view(-1) in reset_sharded_param."
+        )
+
+    from fsdp2_utils import get_hybrid_recipe_from_string
+
+    hybrid_recipe = get_hybrid_recipe_from_string(hybrid_recipe_name)
+    world_size, device = _get_dist_info()
+
+    model = _build_hybrid_model(hybrid_recipe)
+    model = _shard_model(model, world_size, reshard_after_forward=reshard_after_forward)
+
+    optimizer = te.optimizers.FusedAdam(
+        model.parameters(),
+        lr=1e-3,
+        master_weights=True,
+        master_weight_dtype=torch.float32,
+    )
+
+    x = torch.randn(SEQ_LEN, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
+    target = torch.randn_like(x)
+
+    losses = []
+    for _ in range(NUM_STEPS):
+        optimizer.zero_grad(set_to_none=True)
+        with te.autocast(enabled=True, recipe=hybrid_recipe):
+            output = model(x)
+        loss = F.mse_loss(output, target)
+        losses.append(loss.item())
+        loss.backward()
+        optimizer.step()
+
+    assert losses[-1] < losses[0], (
+        f"[reshard_after_forward={reshard_after_forward}] "
+        f"loss did not decrease: {losses[0]:.4f} -> {losses[-1]:.4f}"
+    )
+
+
+def test_fused_adam_hybrid_bf16_vs_hybrid_parity(hybrid_recipe_name):
+    """Compare hybrid+FSDP2 loss trajectory against BF16+FSDP2 within tolerance.
+
+    This is a sanity check that hybrid quantized training converges similarly
+    to BF16 training, not a bitwise-exact comparison.
+    """
+    if hybrid_recipe_name == "HybridFloat8BlockScaling":
+        pytest.xfail(
+            "HybridFloat8BlockScaling: Float8BlockwiseQTensor sub-storage loses "
+            "quantized type through FSDP2 view(-1)."
+        )
+
+    from fsdp2_utils import get_hybrid_recipe_from_string
+
+    hybrid_recipe = get_hybrid_recipe_from_string(hybrid_recipe_name)
+    world_size, device = _get_dist_info()
+
+    x = torch.randn(SEQ_LEN, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
+    target = torch.randn_like(x)
+
+    def run_training(model, recipe_for_autocast):
+        optimizer = te.optimizers.FusedAdam(
+            model.parameters(),
+            lr=1e-3,
+            master_weights=True,
+            master_weight_dtype=torch.float32,
+        )
+        losses = []
+        for _ in range(NUM_STEPS):
+            optimizer.zero_grad(set_to_none=True)
+            with te.autocast(enabled=(recipe_for_autocast is not None), recipe=recipe_for_autocast):
+                output = model(x)
+            loss = F.mse_loss(output, target)
+            losses.append(loss.item())
+            loss.backward()
+            optimizer.step()
+        return losses
+
+    # BF16 baseline
+    torch.manual_seed(42)
+    torch.cuda.manual_seed(42)
+    bf16_model = _build_model(fp8_init=False)
+    bf16_model = _shard_model(bf16_model, world_size)
+    bf16_losses = run_training(bf16_model, None)
+
+    # Hybrid
+    torch.manual_seed(42)
+    torch.cuda.manual_seed(42)
+    hybrid_model = _build_hybrid_model(hybrid_recipe)
+    hybrid_model = _shard_model(hybrid_model, world_size)
+    hybrid_losses = run_training(hybrid_model, hybrid_recipe)
+
+    assert hybrid_losses[-1] < hybrid_losses[0], (
+        f"Hybrid loss did not decrease: {hybrid_losses}"
+    )
+    assert bf16_losses[-1] < bf16_losses[0], f"BF16 loss did not decrease: {bf16_losses}"
+
+    # Verify hybrid and bf16 loss trajectories are within the same order of magnitude.
+    # Quantized training may diverge from bf16, but should not be wildly different.
+    for step, (h_loss, b_loss) in enumerate(zip(hybrid_losses, bf16_losses)):
+        ratio = h_loss / max(b_loss, 1e-10)
+        assert 0.1 < ratio < 10.0, (
+            f"Step {step}: hybrid loss ({h_loss:.4f}) and bf16 loss ({b_loss:.4f}) "
+            f"differ by more than 10x (ratio={ratio:.2f})"
+        )
+
+
+def test_fused_adam_hybrid_allgather_correctness(hybrid_recipe_name):
+    """Validate that FSDP2 all-gather + post-gather reconstruction produces
+    correct results by comparing ``unshard(param).dequantize()`` with a manual
+    all-gather of dequantized local shards.
+
+    For the stateless formats supported here (per-tensor FP8, MXFP8), FSDP2's
+    all-gather concatenates rowwise bytes along dim-0 and the per-block /
+    per-tensor scales follow the same concatenation. Dequantizing the gathered
+    bytes is therefore bitwise-identical to concatenating the dequantized
+    shards — the tolerance is effectively ``assert_equal``.
+    """
+    if hybrid_recipe_name == "HybridFloat8BlockScaling":
+        pytest.xfail(
+            "HybridFloat8BlockScaling: Float8BlockwiseQTensor sub-storage loses "
+            "quantized type through FSDP2 view(-1)."
+        )
+
+    from transformer_engine.pytorch import HybridQuantizedTensor
+    from fsdp2_utils import get_hybrid_recipe_from_string
+
+    hybrid_recipe = get_hybrid_recipe_from_string(hybrid_recipe_name)
+    world_size, device = _get_dist_info()
+
+    model = _build_hybrid_model(hybrid_recipe)
+    model = _shard_model(model, world_size)
+
+    x = torch.randn(SEQ_LEN, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
+    with te.autocast(enabled=True, recipe=hybrid_recipe):
+        _ = model(x)
+
+    # Stateless formats gather identical bytes; dequantize must match exactly.
+    _TIGHT_TOLERANCE = {
+        "HybridFP8CurrentScaling": dict(rtol=0.0, atol=0.0),
+        "HybridMXFP8": dict(rtol=0.0, atol=0.0),
+        "HybridMixed_MXFP8_FP8": dict(rtol=0.0, atol=0.0),
+    }
+    tolerance = _TIGHT_TOLERANCE.get(hybrid_recipe_name, dict(rtol=1e-6, atol=1e-6))
+
+    checked = 0
+    for name, param in model.named_parameters():
+        if not (isinstance(param, DTensor) and isinstance(param._local_tensor, QuantizedTensor)):
+            continue
+        local_shard = param._local_tensor
+
+        local_deq = local_shard.dequantize().contiguous()
+        gathered_list = [torch.zeros_like(local_deq) for _ in range(world_size)]
+        dist.all_gather(gathered_list, local_deq)
+        manual_full = torch.cat(gathered_list, dim=0)
+
+        full_param = param.full_tensor()
+        if isinstance(full_param, QuantizedTensor):
+            fsdp_full_deq = full_param.dequantize()
+        else:
+            fsdp_full_deq = full_param.float()
+
+        torch.testing.assert_close(
+            manual_full.float(),
+            fsdp_full_deq[: manual_full.shape[0]].float(),
+            msg=lambda m, n=name: f"Allgather mismatch for {n}: {m}",
+            **tolerance,
+        )
+        checked += 1
+
+    assert checked > 0, "No quantized DTensor params found to validate"
+
+
+def test_fused_adam_hybrid_mxfp8_awkward_shard_shape():
+    """Exercise MXFP8 block-scale unpad/pad on a sharded Linear whose shard
+    dim-0 is block-aligned (divisible by 32) but NOT divisible by 128.
+
+    MXFP8 block scales are stored with ``[128, 4]`` / ``[4, 128]`` alignment
+    padding, which must be stripped before FSDP2's dim-0 all-gather and
+    re-applied after. With ``HIDDEN_SIZE`` and ``FFN_HIDDEN_SIZE`` both
+    divisible by 128, the default model never forces this code path, so this
+    test uses a hand-picked Linear size.
+
+    Regression test for the "pre-fix" bug where
+    ``HybridQuantizedTensor.fsdp_pre_all_gather`` pulled raw tensor fields via
+    ``get_metadata()`` without unpadding the scale — the padded bytes would
+    have been interleaved at every rank boundary in the gather output.
+    """
+    from fsdp2_utils import get_hybrid_recipe_from_string
+
+    world_size, device = _get_dist_info()
+
+    # FSDP2 shards a Linear weight of shape (out_features, in_features) along
+    # dim-0, so each rank holds `out_features / world_size` rows. Pick
+    # per-rank shard dim-0 = 96: divisible by MXFP8_BLOCK_SCALING_SIZE (32)
+    # so data alignment holds, but NOT divisible by 128 so the rowwise
+    # scale-inv needs alignment padding on the sharded copy. This is the
+    # shape that exercises the unpad-before-gather / pad-after-gather
+    # behaviour in MXFP8TensorStorage.fsdp_{extract,assign}_buffers.
+    per_rank_out = 96
+    out_features = per_rank_out * world_size
+    in_features = 128  # arbitrary, divisible by 32; not sharded by FSDP2 here
+    assert per_rank_out % 32 == 0, "MXFP8 data alignment precondition"
+    assert per_rank_out % 128 != 0, "Test precondition: shard must need scale padding"
+
+    for recipe_name in ("HybridMXFP8", "HybridMixed_MXFP8_FP8"):
+        hybrid_recipe = get_hybrid_recipe_from_string(recipe_name)
+
+        with te.quantized_model_init(enabled=True, recipe=hybrid_recipe):
+            model = torch.nn.Sequential(
+                te.Linear(
+                    in_features,
+                    out_features,
+                    params_dtype=torch.bfloat16,
+                    device="meta",
+                ),
+            )
+        model = _shard_model(model, world_size)
+
+        # Batch (leading) dim must be divisible by MXFP8_BLOCK_SCALING_SIZE (32).
+        x = torch.randn(32, in_features, dtype=torch.bfloat16, device=device)
+        with te.autocast(enabled=True, recipe=hybrid_recipe):
+            out = model(x)
+        out.sum().backward()
+
+        # Compare dim-0 all-gather (bytes) with FSDP2's reconstruction.
+        for name, param in model.named_parameters():
+            if not (
+                isinstance(param, DTensor)
+                and isinstance(param._local_tensor, QuantizedTensor)
+            ):
+                continue
+            local_shard = param._local_tensor
+            local_deq = local_shard.dequantize().contiguous()
+            gathered_list = [torch.zeros_like(local_deq) for _ in range(world_size)]
+            dist.all_gather(gathered_list, local_deq)
+            manual_full = torch.cat(gathered_list, dim=0)
+
+            full_param = param.full_tensor()
+            fsdp_full_deq = (
+                full_param.dequantize()
+                if isinstance(full_param, QuantizedTensor)
+                else full_param.float()
+            )
+
+            torch.testing.assert_close(
+                manual_full.float(),
+                fsdp_full_deq[: manual_full.shape[0]].float(),
+                rtol=0.0,
+                atol=0.0,
+                msg=lambda m, n=name, r=recipe_name: (
+                    f"[{r}] Allgather mismatch for {n} at awkward shard shape: {m}"
+                ),
+            )
+
+
+def test_hybrid_dcp_output_parity(hybrid_recipe_name):
+    """DCP save+load roundtrip: output after load matches output before save.
+
+    Trains a hybrid model, saves with DCP, loads into fresh model,
+    and asserts forward output parity.
+    """
+    import torch.distributed.checkpoint as dcp
+
+    pytest.xfail(
+        "CustomRecipe with closure-based qfactory cannot be pickled by DCP. "
+        "Requires module-level picklable factory functions for DCP compatibility."
+    )
+
+    if hybrid_recipe_name == "HybridFloat8BlockScaling":
+        pytest.xfail(
+            "HybridFloat8BlockScaling: Float8BlockwiseQTensor sub-storage loses "
+            "quantized type through FSDP2 view(-1)."
+        )
+
+    from fsdp2_utils import get_hybrid_recipe_from_string
+
+    hybrid_recipe = get_hybrid_recipe_from_string(hybrid_recipe_name)
+    world_size, device = _get_dist_info()
+    rank = int(os.environ["LOCAL_RANK"])
+    checkpoint_dir = os.path.join("/tmp", f"hybrid_dcp_test_{os.getpid()}")
+
+    try:
+        model = _build_hybrid_model(hybrid_recipe)
+        model = _shard_model(model, world_size)
+        optimizer = te.optimizers.FusedAdam(
+            model.parameters(), lr=1e-3,
+            master_weights=True, master_weight_dtype=torch.float32,
+        )
+
+        x = torch.randn(SEQ_LEN, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
+        target = torch.randn_like(x)
+
+        for _ in range(NUM_STEPS):
+            optimizer.zero_grad(set_to_none=True)
+            with te.autocast(enabled=True, recipe=hybrid_recipe):
+                output = model(x)
+            F.mse_loss(output, target).backward()
+            optimizer.step()
+
+        with torch.no_grad():
+            with te.autocast(enabled=True, recipe=hybrid_recipe):
+                ref_output = model(x).clone()
+
+        save_state = {
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+        }
+        dcp.save(save_state, checkpoint_id=checkpoint_dir)
+
+        model2 = _build_hybrid_model(hybrid_recipe)
+        model2 = _shard_model(model2, world_size)
+        optimizer2 = te.optimizers.FusedAdam(
+            model2.parameters(), lr=1e-3,
+            master_weights=True, master_weight_dtype=torch.float32,
+        )
+        optimizer2.zero_grad(set_to_none=True)
+        with te.autocast(enabled=True, recipe=hybrid_recipe):
+            out_tmp = model2(x)
+        F.mse_loss(out_tmp, target).backward()
+        optimizer2.step()
+
+        state_to_load = {
+            "model": model2.state_dict(),
+            "optimizer": optimizer2.state_dict(),
+        }
+        dcp.load(state_to_load, checkpoint_id=checkpoint_dir)
+        model2.load_state_dict(state_to_load["model"])
+        optimizer2.load_state_dict(state_to_load["optimizer"])
+
+        with torch.no_grad():
+            with te.autocast(enabled=True, recipe=hybrid_recipe):
+                loaded_output = model2(x)
+
+        torch.testing.assert_close(
+            loaded_output, ref_output, rtol=0, atol=0,
+            msg=lambda m: f"DCP roundtrip output mismatch: {m}",
+        )
+    finally:
+        dist.barrier()
+        if rank == 0:
+            import shutil
+            shutil.rmtree(checkpoint_dir, ignore_errors=True)
+
+
 TESTS = {
     "fused_adam_fp8_master_weights": test_fused_adam_fp8_master_weights,
     "fused_adam_fp8_master_weights_no_meta": test_fused_adam_fp8_master_weights_no_meta,
@@ -927,6 +1395,18 @@ TESTS = {
     "dcp_resharding_save": test_dcp_resharding_save,
     "dcp_resharding_load": test_dcp_resharding_load,
     "safetensors_fp32_export": test_safetensors_fp32_export,
+    "fused_adam_hybrid_master_weights": test_fused_adam_hybrid_master_weights,
+    "fused_adam_hybrid_bf16_vs_hybrid_parity": test_fused_adam_hybrid_bf16_vs_hybrid_parity,
+    "fused_adam_hybrid_allgather_correctness": test_fused_adam_hybrid_allgather_correctness,
+    "fused_adam_hybrid_mxfp8_awkward_shard_shape": (
+        test_fused_adam_hybrid_mxfp8_awkward_shard_shape
+    ),
+    "hybrid_dcp_output_parity": test_hybrid_dcp_output_parity,
+}
+
+# Hybrid tests that are NOT parametrized by recipe (they sweep internally).
+_HYBRID_NON_PARAMETRIZED_TESTS = {
+    "fused_adam_hybrid_mxfp8_awkward_shard_shape",
 }
 
 
@@ -944,6 +1424,10 @@ if __name__ == "__main__":
             "Float8BlockScaling",
             "MXFP8BlockScaling",
             "NVFP4BlockScaling",
+            "HybridFP8CurrentScaling",
+            "HybridMXFP8",
+            "HybridFloat8BlockScaling",
+            "HybridMixed_MXFP8_FP8",
         ],
     )
     args = parser.parse_args()
@@ -953,7 +1437,10 @@ if __name__ == "__main__":
     torch.manual_seed(42)
     torch.cuda.manual_seed(42)
     try:
-        TESTS[args.test](args.recipe)
+        if args.test in _HYBRID_NON_PARAMETRIZED_TESTS:
+            TESTS[args.test]()
+        else:
+            TESTS[args.test](args.recipe)
     finally:
         if dist.is_initialized():
             dist.destroy_process_group()

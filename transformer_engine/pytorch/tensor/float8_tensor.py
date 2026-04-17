@@ -547,8 +547,12 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
 
     def clone(self) -> Float8Tensor:
         # pylint: disable=missing-function-docstring
-        assert self._data is not None
-        data = self._data.detach().clone()
+        # ``_data`` may be None for columnwise-only sub-storages of a
+        # HybridQuantizedTensor on architectures without native non-TN FP8
+        # GEMM (Hopper / L40), where columnwise-only Float8 allocates
+        # ``_transpose`` instead of ``_data``. On Blackwell+ the C++
+        # override keeps ``_data`` populated even in columnwise-only mode.
+        data = self._data.detach().clone() if self._data is not None else None
         data_transpose = None
         if self._transpose is not None:
             data_transpose = self._transpose.detach().clone()
@@ -710,23 +714,25 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         if func == aten.split.Tensor:
             tensor = args[0]
             data = tensor._data
-            func_out = data.__torch_dispatch__(
-                func,
-                types,
-                [data] + list(args[1:]),
-                kwargs,
-            )
-            t_func_out = [None] * len(func_out)
-            # Compute corresponding split of the transpose cache if available
+            # _data may be None for columnwise-only sub-storages (hybrid quantization)
+            if data is not None:
+                func_out = data.__torch_dispatch__(
+                    func,
+                    types,
+                    [data] + list(args[1:]),
+                    kwargs,
+                )
+            else:
+                func_out = None
+
+            t_func_out = None
             if tensor._transpose is not None and not tensor._transpose_invalid:
                 transpose = tensor._transpose
-                ndim = data.dim()
-                # Figure out the original split dim
+                ndim = tensor.dim()
                 if "dim" in kwargs:
                     dim_to_split = kwargs["dim"]
                 else:
                     dim_to_split = args[2] if len(args) > 2 else 0
-                # Dimension along which transpose needs to be split
                 t_dim = 0 if dim_to_split == ndim - 1 else dim_to_split + 1
                 t_func_out = transpose.__torch_dispatch__(
                     func,
@@ -734,12 +740,23 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                     [transpose, args[1], t_dim],
                     kwargs,
                 )
+
+            ref_out = func_out if func_out is not None else t_func_out
+            if ref_out is None:
+                return super().__torch_dispatch__(func, types, args, kwargs)
+
+            num_splits = len(ref_out)
+            if func_out is None:
+                func_out = [None] * num_splits
+            if t_func_out is None:
+                t_func_out = [None] * num_splits
+
             outs = [
                 Float8Tensor.make_like(
                     tensor,
                     data=split_tensor,
                     data_transpose=split_transpose_tensor,
-                    shape=split_tensor.shape,
+                    shape=(split_tensor.shape if split_tensor is not None else split_transpose_tensor.shape),
                 )
                 for split_tensor, split_transpose_tensor in zip(func_out, t_func_out)
             ]

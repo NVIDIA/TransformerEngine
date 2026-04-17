@@ -149,11 +149,27 @@ class HybridQuantizer(Quantizer):
         # quantized_model_init + built-in MXFP8BlockScaling autocast).
         # We trust that users who write a CustomRecipe know what they're doing
         # with regard to per-operand scaling mode compatibility.
-        # TODO(negvet): improve to validate that the autocast recipe's
-        # sub-quantizer scaling modes are compatible with each sub-storage's
-        # scaling mode (e.g. rowwise MXFP8 weight requires MXFP8 input for
-        # fprop TN, columnwise NVFP4 weight requires NVFP4 grad_output for
-        # wgrad NT).
+        #
+        # TODO(negvet): validate per-operand scaling-mode compatibility at
+        # recipe-build time instead of at cuBLAS-dispatch time. Concretely:
+        #   1. Walk the qfactory outputs for a given module_type (``linear``,
+        #      ``grouped_linear``, ``dpa``) — call the factory for each
+        #      ``QuantizerRole.tensor_type`` the module uses.
+        #   2. Extract the scaling_mode of each sub-quantizer:
+        #        weight_row, weight_col   (from HybridQuantizer)
+        #        input_row,  input_col    (from HybridQuantizer)
+        #        grad_output_row, grad_output_col   (plain quantizer OR
+        #                                            HybridQuantizer)
+        #   3. Assert the three GEMM pairs share a scaling_mode each:
+        #        fprop  TN: weight_row  == input_row         (FormatA)
+        #        dgrad  NN: weight_col  == grad_output_row   (FormatB)
+        #        wgrad  NT: input_col   == grad_output_col   (FormatC)
+        #      Mismatches raise ``ValueError`` naming the offending slots, e.g.
+        #      "dgrad GEMM: weight columnwise format (MXFP8) does not match
+        #      grad_output rowwise format (NVFP4)".
+        #   4. Blocked on `semantic_quantizer_roles` / PR #2620 for the
+        #      ``QuantizerRole`` dataclass — the factory signature is role-
+        #      aware only on that branch.
         from transformer_engine.common.recipe import CustomRecipe  # avoid circular import
 
         return CustomRecipe
@@ -233,9 +249,336 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
     def get_metadata(self) -> Dict[str, Any]:
         return HybridQuantizedTensorStorage.get_metadata(self)
 
+    # ── FSDP2 protocol ──────────────────────────────────────────────
+
+    def fsdp_pre_all_gather(self, mesh, orig_size, contiguous_orig_stride, module, mp_policy):
+        """Extract plain tensor buffers from both sub-storages for FSDP2 all-gather.
+
+        Always send both directions. This gives a stable buffer count/shape
+        across forward and backward, at the cost of gathering the unused
+        direction each pass. No requantization, no BF16 fallback.
+
+        Buffer extraction is delegated to each sub-storage's
+        :meth:`QuantizedTensorStorage.fsdp_extract_buffers`, which strips any
+        format-specific padding (e.g. MXFP8 block-scale alignment) before the
+        gather so concatenation along dim-0 is well-defined.
+
+        TODO(negvet): bandwidth optimization — pack both directions into a
+        single flat buffer sized ``max(row_bytes, col_bytes)`` (not
+        ``row_bytes + col_bytes``) to halve comm volume for asymmetric format
+        pairs. Planned implementation: a new per-sub-storage
+        ``fsdp_pack_into(flat_buffer, offset, meta)`` helper that layouts
+        both directions back-to-back with offsets stored in the metadata
+        tuple; ``fsdp_post_all_gather`` would slice the gathered flat buffer
+        using those offsets.
+        """
+        # Quick, targeted error for sub-storages whose FSDP2 support isn't
+        # implemented yet (e.g. NVFP4). Without this, users hit
+        # NotImplementedError from deep inside fsdp_extract_buffers with a
+        # generic message.
+        for role, sub in (
+            ("rowwise", self._rowwise_storage),
+            ("columnwise", self._columnwise_storage),
+        ):
+            if sub is None:
+                continue
+            try:
+                sub.fsdp_buffer_fields()
+            except NotImplementedError as err:
+                raise NotImplementedError(
+                    f"Hybrid FSDP2 all-gather is not supported for a "
+                    f"{type(sub).__name__} {role} sub-storage: it does not "
+                    f"implement fsdp_buffer_fields. "
+                    f"See hybrid_quantization_fsdp.md section 9 (Gap 5) — "
+                    f"NVFP4 sub-storages need packed-FP4 dim-0 alignment, "
+                    f"columnwise dequantization and RHT-cache handling before "
+                    f"they can be gathered. Use a supported sub-quantizer "
+                    f"(Float8CurrentScaling, MXFP8, Float8Block) or run without "
+                    f"FSDP2."
+                ) from err
+
+        row_buffers: Tuple[Optional[torch.Tensor], ...] = ()
+        col_buffers: Tuple[Optional[torch.Tensor], ...] = ()
+        row_meta: Optional[Dict[str, Any]] = None
+        col_meta: Optional[Dict[str, Any]] = None
+        if self._rowwise_storage is not None:
+            row_buffers, row_meta = self._rowwise_storage.fsdp_extract_buffers()
+        if self._columnwise_storage is not None:
+            col_buffers, col_meta = self._columnwise_storage.fsdp_extract_buffers()
+
+        sharded_tensors = row_buffers + col_buffers
+
+        metadata = (
+            len(row_buffers),
+            row_meta,
+            col_meta,
+            self._rowwise_storage,   # original sharded sub-storage (for make_like on iter-1)
+            self._columnwise_storage,
+            self._rowwise_quantizer,
+            self._columnwise_quantizer,
+            self._quantizer,
+        )
+        return sharded_tensors, metadata
+
+    def fsdp_post_all_gather(
+        self,
+        all_gather_outputs: Tuple[torch.Tensor, ...],
+        metadata: Any,
+        param_dtype: torch.dtype,
+        *,
+        out: Optional[HybridQuantizedTensor] = None,
+    ):
+        """Reconstruct HybridQuantizedTensor from all-gathered buffers.
+
+        On iteration 1 (``out=None``): clone each sub-storage via
+        :meth:`make_like` from the sharded original, then delegate the
+        gathered-buffer writeback (and any format-specific re-padding) to
+        :meth:`QuantizedTensorStorage.fsdp_assign_gathered`.
+        On iteration 2+ (``out=prev``): delegate directly to the existing
+        sub-storages' ``fsdp_assign_gathered``.
+        """
+        (
+            n_row_buffers,
+            row_meta,
+            col_meta,
+            orig_row_sub,
+            orig_col_sub,
+            row_quantizer,
+            col_quantizer,
+            hybrid_quantizer,
+        ) = metadata
+
+        row_gathered = all_gather_outputs[:n_row_buffers]
+        col_gathered = all_gather_outputs[n_row_buffers:]
+
+        def _infer_shape(gathered_buffers):
+            for buf in gathered_buffers:
+                if buf is not None:
+                    return buf.shape
+            return None
+
+        if out is not None:
+            # Iteration 2+: in-place field update on existing sub-storages
+            if out._rowwise_storage is not None and row_meta is not None:
+                out._rowwise_storage.fsdp_assign_gathered(row_gathered, row_meta)
+            if out._columnwise_storage is not None and col_meta is not None:
+                out._columnwise_storage.fsdp_assign_gathered(col_gathered, col_meta)
+        else:
+            # First iteration: clone the original sharded sub-storages via make_like,
+            # then write gathered (full-size) buffers via each sub-storage's own
+            # fsdp_assign_gathered so padding is re-applied where applicable.
+            row_sub = None
+            if orig_row_sub is not None and isinstance(orig_row_sub, QuantizedTensor):
+                gathered_shape = _infer_shape(row_gathered)
+                row_sub = type(orig_row_sub).make_like(orig_row_sub, shape=gathered_shape)
+                if row_meta is not None:
+                    row_sub.fsdp_assign_gathered(row_gathered, row_meta)
+
+            col_sub = None
+            if orig_col_sub is not None and isinstance(orig_col_sub, QuantizedTensor):
+                gathered_shape = _infer_shape(col_gathered)
+                col_sub = type(orig_col_sub).make_like(orig_col_sub, shape=gathered_shape)
+                if col_meta is not None:
+                    col_sub.fsdp_assign_gathered(col_gathered, col_meta)
+
+            ref_sub = row_sub if row_sub is not None else col_sub
+            out = HybridQuantizedTensor(
+                shape=(
+                    ref_sub.shape
+                    if ref_sub is not None
+                    else _infer_shape(row_gathered + col_gathered)
+                ),
+                dtype=param_dtype,
+                rowwise_storage=row_sub,
+                columnwise_storage=col_sub,
+                rowwise_quantizer=row_quantizer,
+                columnwise_quantizer=col_quantizer,
+                quantizer=hybrid_quantizer,
+            )
+
+        return out, all_gather_outputs
+
+    @classmethod
+    def _delegate_reshape_op(cls, func, tensor, args, kwargs):
+        """Delegate a shape-altering op (slice, as_strided) to each sub-storage.
+
+        Returns a new ``HybridQuantizedTensor`` when every non-None sub-storage
+        returns a ``QuantizedTensorStorage`` of the same kind (i.e. real
+        op support, as Float8Tensor provides via its own
+        ``__torch_dispatch__``). Returns ``None`` when any sub-storage
+        dequantized to a plain ``torch.Tensor`` (i.e. the sub-storage does not
+        support this op — MXFP8Tensor / Float8BlockwiseQTensor fall through
+        that way for real slicing today). On ``None`` the caller should defer
+        to ``super().__torch_dispatch__`` for a consistent BF16 fallback.
+        """
+        def _delegate(sub):
+            if sub is None:
+                return None
+            return func(sub, *args[1:], **kwargs)
+
+        row_out = _delegate(tensor._rowwise_storage)
+        col_out = _delegate(tensor._columnwise_storage)
+
+        row_ok = row_out is None or isinstance(row_out, QuantizedTensorStorage)
+        col_ok = col_out is None or isinstance(col_out, QuantizedTensorStorage)
+        if not (row_ok and col_ok):
+            return None
+        if row_out is None and col_out is None:
+            return None
+
+        ref = row_out if row_out is not None else col_out
+        return HybridQuantizedTensor(
+            shape=ref.shape,
+            dtype=tensor.dtype,
+            rowwise_storage=row_out,
+            columnwise_storage=col_out,
+            rowwise_quantizer=tensor._rowwise_quantizer,
+            columnwise_quantizer=tensor._columnwise_quantizer,
+            quantizer=tensor._quantizer,
+        )
+
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):
+        if kwargs is None:
+            kwargs = {}
+
         if func == aten.detach.default:
             return args[0].detach()
+
+        # ── FSDP2: view ──────────────────────────────────────────────
+        if func == aten.view.default:
+            tensor = args[0]
+            shape = args[1]
+            row_view = None
+            col_view = None
+            if tensor._rowwise_storage is not None:
+                row_view = tensor._rowwise_storage.view(shape)
+            if tensor._columnwise_storage is not None:
+                col_view = tensor._columnwise_storage.view(shape)
+            return HybridQuantizedTensor(
+                shape=shape,
+                dtype=tensor.dtype,
+                rowwise_storage=row_view,
+                columnwise_storage=col_view,
+                rowwise_quantizer=tensor._rowwise_quantizer,
+                columnwise_quantizer=tensor._columnwise_quantizer,
+                quantizer=tensor._quantizer,
+            )
+
+        # ── FSDP2: split ─────────────────────────────────────────────
+        if func == aten.split.Tensor:
+            tensor = args[0]
+            split_size = args[1]
+            dim = kwargs.get("dim", args[2] if len(args) > 2 else 0)
+
+            if dim != 0:
+                return super().__torch_dispatch__(func, types, args, kwargs)
+
+            row_pieces = (
+                torch.split(tensor._rowwise_storage, split_size, dim=dim)
+                if tensor._rowwise_storage is not None else None
+            )
+            col_pieces = (
+                torch.split(tensor._columnwise_storage, split_size, dim=dim)
+                if tensor._columnwise_storage is not None else None
+            )
+
+            if row_pieces is None and col_pieces is None:
+                return super().__torch_dispatch__(func, types, args, kwargs)
+
+            num_pieces = len(row_pieces) if row_pieces is not None else len(col_pieces)
+            return [
+                HybridQuantizedTensor(
+                    shape=(row_pieces[i].shape if row_pieces is not None else col_pieces[i].shape),
+                    dtype=tensor.dtype,
+                    rowwise_storage=row_pieces[i] if row_pieces is not None else None,
+                    columnwise_storage=col_pieces[i] if col_pieces is not None else None,
+                    rowwise_quantizer=tensor._rowwise_quantizer,
+                    columnwise_quantizer=tensor._columnwise_quantizer,
+                    quantizer=tensor._quantizer,
+                )
+                for i in range(num_pieces)
+            ]
+
+        # ── FSDP2: as_strided / slice ────────────────────────────────
+        # Fast path for no-op (common during FSDP2 reset_sharded_param);
+        # otherwise delegate per sub-storage so we inherit each sub-storage's
+        # own support level. Float8Tensor implements real slicing/as_strided
+        # via `_data.__torch_dispatch__`; MXFP8Tensor and Float8BlockwiseQTensor
+        # handle only the no-op case and fall through to dequantize for real
+        # ops (matching their vanilla FSDP2 behaviour). If any sub-storage
+        # returns a plain torch.Tensor (dequantized), we can't rewrap into a
+        # hybrid so we fall through to super() for a consistent BF16 fallback.
+        if func == aten.as_strided.default:
+            tensor = args[0]
+            shape = args[1]
+            strides = args[2]
+            if (
+                len(shape) == len(strides) == 2
+                and tuple(strides) == (shape[-1], 1)
+                and tuple(shape) == tuple(tensor.size())
+            ):
+                return HybridQuantizedTensor.make_like(tensor)
+            return cls._delegate_reshape_op(func, tensor, args, kwargs) or \
+                super().__torch_dispatch__(func, types, args, kwargs)
+
+        if func == aten.slice.Tensor:
+            tensor = args[0]
+            dim = args[1]
+            start = args[2]
+            length = args[3]
+            if start == 0 and length == tensor.size(dim):
+                return HybridQuantizedTensor.make_like(tensor)
+            return cls._delegate_reshape_op(func, tensor, args, kwargs) or \
+                super().__torch_dispatch__(func, types, args, kwargs)
+
+        # ── FSDP2: copy_ ─────────────────────────────────────────────
+        # Fast path for hybrid-to-hybrid (FSDP2 fills buffer allocated via
+        # new_zeros/make_empty). Other src types (e.g. a BF16 master weight
+        # during checkpoint load) fall through to QuantizedTensor's base
+        # dispatch which routes to ``dst.quantize_(src)``.
+        if func == aten.copy_.default:
+            dst, src = args[0], args[1]
+            if isinstance(dst, HybridQuantizedTensor) and isinstance(src, HybridQuantizedTensor):
+                if dst._rowwise_storage is not None and src._rowwise_storage is not None:
+                    aten.copy_.default(dst._rowwise_storage, src._rowwise_storage)
+                if dst._columnwise_storage is not None and src._columnwise_storage is not None:
+                    aten.copy_.default(dst._columnwise_storage, src._columnwise_storage)
+                return dst
+
+        # ── FSDP2: new_zeros ─────────────────────────────────────────
+        if func == aten.new_zeros.default:
+            tensor = args[0]
+            new_shape = args[1]
+            if tensor._quantizer is not None:
+                # FSDP2 allocates new_zeros buffers as all-gather destinations
+                # that are immediately overwritten by copy_. Use make_empty
+                # (uninitialized storage with the right container shape/fields).
+                return tensor._quantizer.make_empty(
+                    new_shape,
+                    dtype=tensor.dtype,
+                    device=tensor.device,
+                )
+
+        # ── FSDP2: clone ─────────────────────────────────────────────
+        if func == aten.clone.default:
+            tensor = args[0]
+            row_clone = (
+                torch.clone(tensor._rowwise_storage)
+                if tensor._rowwise_storage is not None else None
+            )
+            col_clone = (
+                torch.clone(tensor._columnwise_storage)
+                if tensor._columnwise_storage is not None else None
+            )
+            return HybridQuantizedTensor(
+                shape=tensor.shape,
+                dtype=tensor.dtype,
+                rowwise_storage=row_clone,
+                columnwise_storage=col_clone,
+                rowwise_quantizer=tensor._rowwise_quantizer,
+                columnwise_quantizer=tensor._columnwise_quantizer,
+                quantizer=tensor._quantizer,
+            )
 
         return super().__torch_dispatch__(func, types, args, kwargs)

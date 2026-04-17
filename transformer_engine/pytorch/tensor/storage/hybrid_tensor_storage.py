@@ -133,8 +133,18 @@ class HybridQuantizedTensorStorage(QuantizedTensorStorage):
             return self._columnwise_storage.device
         raise RuntimeError("HybridQuantizedTensorStorage has no data")
 
-    def view(self, shape: torch.Size):
-        raise NotImplementedError("HybridQuantizedTensorStorage does not support view operations")
+    def view(self, *shape):
+        """View delegates to each sub-storage. Used by FSDP2 reset_sharded_param."""
+        row_view = self._rowwise_storage.view(*shape) if self._rowwise_storage is not None else None
+        col_view = self._columnwise_storage.view(*shape) if self._columnwise_storage is not None else None
+        return HybridQuantizedTensorStorage(
+            rowwise_storage=row_view,
+            columnwise_storage=col_view,
+            rowwise_quantizer=self._rowwise_quantizer,
+            columnwise_quantizer=self._columnwise_quantizer,
+            quantizer=self._quantizer,
+            fake_dtype=self._dtype,
+        )
 
     def get_metadata(self) -> Dict[str, Any]:
         return {

@@ -2766,3 +2766,567 @@ class TestHybridCheckpoint:
             )
         finally:
             os.unlink(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# 11. FSDP2 prerequisites: __torch_dispatch__ ops that FSDP2 relies on
+# ---------------------------------------------------------------------------
+
+aten = torch.ops.aten
+
+
+def _make_hybrid_param_for_dispatch(row_factory, col_factory, grad_factory=None,
+                                    in_features=256, out_features=256):
+    """Create a HybridQuantizedTensor weight via quantized_model_init for dispatch tests."""
+    hybrid_recipe = _hybrid_custom_recipe(row_factory, col_factory, grad_factory)
+    with quantized_model_init(enabled=True, recipe=hybrid_recipe):
+        model = Linear(in_features, out_features, params_dtype=torch.bfloat16).cuda()
+    return model.weight
+
+
+def _fp8_row_factory():
+    return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
+
+
+def _fp8_col_factory():
+    return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
+
+
+def _fp8_grad_factory():
+    return Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda")
+
+
+def _mxfp8_factory():
+    return MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+
+
+_dispatch_configs = [
+    pytest.param("fp8_fp8", id="same-format-fp8"),
+]
+if mxfp8_available:
+    _dispatch_configs.append(pytest.param("mxfp8_mxfp8", id="same-format-mxfp8"))
+
+
+def _get_dispatch_hybrid_param(config_name):
+    """Return a HybridQuantizedTensor weight for the given config."""
+    if config_name == "fp8_fp8":
+        return _make_hybrid_param_for_dispatch(
+            _fp8_row_factory, _fp8_col_factory, _fp8_grad_factory,
+        )
+    elif config_name == "mxfp8_mxfp8":
+        return _make_hybrid_param_for_dispatch(
+            _mxfp8_factory, _mxfp8_factory,
+            grad_factory=lambda: MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E5M2),
+        )
+    else:
+        raise ValueError(f"Unknown config: {config_name}")
+
+
+@requires_fp8
+class TestHybridTorchDispatchFSDP2Ops:
+    """Test aten ops that FSDP2 relies on to preserve the HybridQuantizedTensor type.
+
+    Each op is called directly via torch.ops.aten and the result is verified to
+    still be HybridQuantizedTensor with valid sub-storages.
+    """
+
+    @pytest.fixture(params=_dispatch_configs)
+    def hybrid_param(self, request):
+        torch.manual_seed(42)
+        return _get_dispatch_hybrid_param(request.param)
+
+    def test_split_preserves_hybrid_type(self, hybrid_param):
+        """torch.split must return a list of HybridQuantizedTensor pieces."""
+        dim0 = hybrid_param.shape[0]
+        chunk_size = dim0 // 2
+        pieces = torch.split(hybrid_param, chunk_size, dim=0)
+        assert len(pieces) >= 2
+        for piece in pieces:
+            assert isinstance(piece, HybridQuantizedTensor), (
+                f"Expected HybridQuantizedTensor, got {type(piece).__name__}"
+            )
+            assert piece.rowwise_sub_storage is not None
+            assert piece.columnwise_sub_storage is not None
+
+        total_rows = sum(p.shape[0] for p in pieces)
+        assert total_rows == dim0
+
+        orig_deq = hybrid_param.dequantize()
+        reassembled = torch.cat([p.dequantize() for p in pieces], dim=0)
+        torch.testing.assert_close(orig_deq, reassembled)
+
+    def test_split_sub_storage_types_preserved(self, hybrid_param):
+        """After split, sub-storage types must match the original."""
+        orig_row_type = type(hybrid_param.rowwise_sub_storage)
+        orig_col_type = type(hybrid_param.columnwise_sub_storage)
+
+        chunk_size = hybrid_param.shape[0] // 2
+        pieces = torch.split(hybrid_param, chunk_size, dim=0)
+        for piece in pieces:
+            assert type(piece.rowwise_sub_storage) is orig_row_type
+            assert type(piece.columnwise_sub_storage) is orig_col_type
+
+    def test_view_preserves_hybrid_type(self, hybrid_param):
+        """view must return a HybridQuantizedTensor (used by FSDP2 reset_sharded_param)."""
+        shape_2d = hybrid_param.shape
+        result = aten.view.default(hybrid_param, list(shape_2d))
+        assert isinstance(result, HybridQuantizedTensor), (
+            f"Expected HybridQuantizedTensor, got {type(result).__name__}"
+        )
+        assert result.rowwise_sub_storage is not None
+        assert result.columnwise_sub_storage is not None
+
+    def test_view_same_shape_preserves_hybrid(self, hybrid_param):
+        """view with same shape must return HybridQuantizedTensor."""
+        shape_2d = list(hybrid_param.shape)
+        result = aten.view.default(hybrid_param, shape_2d)
+        assert isinstance(result, HybridQuantizedTensor), (
+            f"Expected HybridQuantizedTensor, got {type(result).__name__}"
+        )
+
+    def test_as_strided_noop_preserves_hybrid(self, hybrid_param):
+        """as_strided with matching shape/strides is a no-op that preserves type."""
+        shape = tuple(hybrid_param.size())
+        strides = (shape[-1], 1)
+        result = aten.as_strided.default(hybrid_param, list(shape), list(strides))
+        assert isinstance(result, HybridQuantizedTensor), (
+            f"Expected HybridQuantizedTensor, got {type(result).__name__}"
+        )
+        assert result.rowwise_sub_storage is not None
+        assert result.columnwise_sub_storage is not None
+
+    def test_slice_noop_preserves_hybrid(self, hybrid_param):
+        """slice with full range is a no-op that preserves type."""
+        result = aten.slice.Tensor(hybrid_param, 0, 0, hybrid_param.size(0))
+        assert isinstance(result, HybridQuantizedTensor), (
+            f"Expected HybridQuantizedTensor, got {type(result).__name__}"
+        )
+        assert result.rowwise_sub_storage is not None
+
+    def test_copy_between_hybrid_tensors(self, hybrid_param):
+        """copy_ between compatible HybridQuantizedTensors copies quantized data directly."""
+        src_deq = hybrid_param.dequantize().clone()
+        dst = hybrid_param._quantizer.make_empty(
+            shape=hybrid_param.shape, dtype=hybrid_param.dtype, device=hybrid_param.device,
+        )
+        assert isinstance(dst, HybridQuantizedTensor)
+
+        aten.copy_.default(dst, hybrid_param)
+        dst_deq = dst.dequantize()
+        torch.testing.assert_close(src_deq, dst_deq)
+
+    def test_copy_from_bf16_to_hybrid(self, hybrid_param):
+        """copy_ from BF16 into HybridQuantizedTensor triggers quantize_."""
+        param = hybrid_param.detach()
+        bf16_data = torch.randn_like(param.dequantize())
+        aten.copy_.default(param, bf16_data)
+        result_deq = param.dequantize()
+        assert isinstance(param, HybridQuantizedTensor)
+        assert result_deq.shape == bf16_data.shape
+
+    def test_new_zeros_returns_hybrid(self, hybrid_param):
+        """new_zeros must return a usable HybridQuantizedTensor container.
+
+        FSDP2 calls ``new_zeros`` only to allocate an all-gather destination
+        buffer that is immediately overwritten by ``copy_``; the initial
+        contents are never observed. The hybrid dispatch therefore delegates
+        to ``HybridQuantizer.make_empty`` (uninitialized bytes) rather than
+        quantizing a BF16 zeros temporary. This test asserts the contract
+        we actually depend on — correct container type / shape / sub-storage
+        presence, and the ability to copy into it and read back — NOT that
+        the raw dequantize value happens to be zero.
+        """
+        new_shape = list(hybrid_param.shape)
+        result = aten.new_zeros.default(hybrid_param, new_shape)
+
+        # Structural contract: FSDP2 needs a HybridQuantizedTensor with both
+        # sub-storages populated so the gathered buffers have a destination.
+        assert isinstance(result, HybridQuantizedTensor), (
+            f"Expected HybridQuantizedTensor, got {type(result).__name__}"
+        )
+        assert result.shape == hybrid_param.shape
+        assert result.rowwise_sub_storage is not None
+        assert result.columnwise_sub_storage is not None
+        assert type(result.rowwise_sub_storage) is type(hybrid_param.rowwise_sub_storage)
+        assert type(result.columnwise_sub_storage) is type(hybrid_param.columnwise_sub_storage)
+
+        # Functional contract: the container must be writable via copy_ from
+        # another hybrid (how FSDP2 populates the buffer post-gather).
+        aten.copy_.default(result, hybrid_param)
+        torch.testing.assert_close(result.dequantize(), hybrid_param.dequantize())
+
+    def test_empty_like_returns_hybrid(self, hybrid_param):
+        """empty_like must return a HybridQuantizedTensor."""
+        result = aten.empty_like.default(hybrid_param)
+        assert isinstance(result, HybridQuantizedTensor), (
+            f"Expected HybridQuantizedTensor, got {type(result).__name__}"
+        )
+        assert result.shape == hybrid_param.shape
+        assert result.rowwise_sub_storage is not None
+
+    def test_clone_returns_hybrid(self, hybrid_param):
+        """clone must return an independent HybridQuantizedTensor with same data."""
+        result = aten.clone.default(hybrid_param)
+        assert isinstance(result, HybridQuantizedTensor), (
+            f"Expected HybridQuantizedTensor, got {type(result).__name__}"
+        )
+        assert result is not hybrid_param
+        torch.testing.assert_close(result.dequantize(), hybrid_param.dequantize())
+
+
+# ---------------------------------------------------------------------------
+# 12. FSDP2 prerequisites: fsdp_pre_all_gather protocol
+# ---------------------------------------------------------------------------
+
+
+def _make_fsdp_protocol_param(config_name):
+    """Create a HybridQuantizedTensor weight for FSDP protocol tests."""
+    if config_name == "fp8_fp8":
+        r = _hybrid_custom_recipe(_fp8_row_factory, _fp8_col_factory, _fp8_grad_factory)
+    elif config_name == "mxfp8_fp8":
+        r = _hybrid_custom_recipe(_mxfp8_factory, _fp8_col_factory, _fp8_grad_factory)
+    else:
+        raise ValueError(f"Unknown config: {config_name}")
+    with quantized_model_init(enabled=True, recipe=r):
+        model = Linear(256, 256, params_dtype=torch.bfloat16).cuda()
+    return model.weight
+
+
+_fsdp_protocol_configs = [pytest.param("fp8_fp8", id="same-format")]
+if mxfp8_available:
+    _fsdp_protocol_configs.append(pytest.param("mxfp8_fp8", id="mixed-mxfp8-fp8"))
+
+
+@requires_fp8
+class TestHybridFsdpPreAllGatherProtocol:
+    """Test the fsdp_pre_all_gather method on HybridQuantizedTensor.
+
+    These tests call the method directly (no actual all-gather communication)
+    to verify the protocol contract: returns (sharded_tensors, metadata) where
+    sharded_tensors is a tuple of plain torch.Tensor.
+    """
+
+    @pytest.fixture(params=_fsdp_protocol_configs)
+    def hybrid_param(self, request):
+        torch.manual_seed(42)
+        return _make_fsdp_protocol_param(request.param)
+
+    def test_pre_all_gather_returns_tuple_pair(self, hybrid_param):
+        """fsdp_pre_all_gather returns (sharded_tensors, metadata)."""
+        sharded_tensors, metadata = hybrid_param.fsdp_pre_all_gather(
+            mesh=None, orig_size=hybrid_param.shape, contiguous_orig_stride=None,
+            module=None, mp_policy=None,
+        )
+        assert isinstance(sharded_tensors, tuple), (
+            f"sharded_tensors should be tuple, got {type(sharded_tensors).__name__}"
+        )
+        assert len(sharded_tensors) > 0, "sharded_tensors should not be empty"
+        assert isinstance(metadata, tuple), (
+            f"metadata should be tuple, got {type(metadata).__name__}"
+        )
+
+    def test_pre_all_gather_buffers_are_plain_tensors(self, hybrid_param):
+        """Every element in sharded_tensors must be a plain torch.Tensor."""
+        sharded_tensors, _ = hybrid_param.fsdp_pre_all_gather(
+            mesh=None, orig_size=hybrid_param.shape, contiguous_orig_stride=None,
+            module=None, mp_policy=None,
+        )
+        for i, t in enumerate(sharded_tensors):
+            assert isinstance(t, torch.Tensor), (
+                f"sharded_tensors[{i}] should be torch.Tensor, got {type(t).__name__}"
+            )
+            assert not isinstance(t, QuantizedTensor), (
+                f"sharded_tensors[{i}] should NOT be QuantizedTensor subclass"
+            )
+
+    def test_pre_all_gather_buffer_count_consistent(self, hybrid_param):
+        """Buffer count must be the same across repeated calls (FSDP2 buffer reuse)."""
+        sharded_1, _ = hybrid_param.fsdp_pre_all_gather(
+            mesh=None, orig_size=hybrid_param.shape, contiguous_orig_stride=None,
+            module=None, mp_policy=None,
+        )
+        sharded_2, _ = hybrid_param.fsdp_pre_all_gather(
+            mesh=None, orig_size=hybrid_param.shape, contiguous_orig_stride=None,
+            module=None, mp_policy=None,
+        )
+        assert len(sharded_1) == len(sharded_2), (
+            f"Buffer count changed: {len(sharded_1)} vs {len(sharded_2)}"
+        )
+
+    def test_pre_all_gather_metadata_sufficient_for_reconstruction(self, hybrid_param):
+        """Metadata must contain enough info to reconstruct the tensor."""
+        _, metadata = hybrid_param.fsdp_pre_all_gather(
+            mesh=None, orig_size=hybrid_param.shape, contiguous_orig_stride=None,
+            module=None, mp_policy=None,
+        )
+        assert metadata is not None
+        assert len(metadata) > 0, "metadata should not be empty"
+
+
+# ---------------------------------------------------------------------------
+# 13. FSDP2 prerequisites: fsdp_post_all_gather protocol
+# ---------------------------------------------------------------------------
+
+
+@requires_fp8
+class TestHybridFsdpPostAllGatherProtocol:
+    """Test the fsdp_post_all_gather method on HybridQuantizedTensor.
+
+    Simulates the post-all-gather phase by passing the sharded_tensors
+    from pre_all_gather directly (mimicking a single-rank all-gather).
+    """
+
+    @pytest.fixture(params=_fsdp_protocol_configs)
+    def hybrid_param(self, request):
+        torch.manual_seed(42)
+        return _make_fsdp_protocol_param(request.param)
+
+    def test_post_all_gather_first_call_returns_hybrid_tensor(self, hybrid_param):
+        """With out=None, post_all_gather returns (HybridQuantizedTensor, outputs)."""
+        sharded_tensors, metadata = hybrid_param.fsdp_pre_all_gather(
+            mesh=None, orig_size=hybrid_param.shape, contiguous_orig_stride=None,
+            module=None, mp_policy=None,
+        )
+        result, ag_outputs = hybrid_param.fsdp_post_all_gather(
+            sharded_tensors, metadata, hybrid_param.dtype, out=None,
+        )
+        assert isinstance(result, HybridQuantizedTensor), (
+            f"Expected HybridQuantizedTensor, got {type(result).__name__}"
+        )
+        assert result.shape == hybrid_param.shape
+        assert result.rowwise_sub_storage is not None
+        assert result.columnwise_sub_storage is not None
+
+    def test_post_all_gather_buffer_reuse(self, hybrid_param):
+        """On second call with out=previous, the same object is returned (buffer reuse)."""
+        sharded_tensors, metadata = hybrid_param.fsdp_pre_all_gather(
+            mesh=None, orig_size=hybrid_param.shape, contiguous_orig_stride=None,
+            module=None, mp_policy=None,
+        )
+        first_result, _ = hybrid_param.fsdp_post_all_gather(
+            sharded_tensors, metadata, hybrid_param.dtype, out=None,
+        )
+
+        second_result, _ = hybrid_param.fsdp_post_all_gather(
+            sharded_tensors, metadata, hybrid_param.dtype, out=first_result,
+        )
+        assert second_result is first_result, (
+            "Buffer reuse: post_all_gather(out=prev) should return the same object"
+        )
+
+    def test_post_all_gather_dequantize_matches_original(self, hybrid_param):
+        """Reconstructed tensor should dequantize close to the original."""
+        orig_deq = hybrid_param.dequantize()
+
+        sharded_tensors, metadata = hybrid_param.fsdp_pre_all_gather(
+            mesh=None, orig_size=hybrid_param.shape, contiguous_orig_stride=None,
+            module=None, mp_policy=None,
+        )
+        result, _ = hybrid_param.fsdp_post_all_gather(
+            sharded_tensors, metadata, hybrid_param.dtype, out=None,
+        )
+        result_deq = result.dequantize()
+        torch.testing.assert_close(orig_deq, result_deq)
+
+    def test_post_all_gather_sub_storage_types_correct(self, hybrid_param):
+        """Reconstructed tensor's sub-storages match the original types."""
+        orig_row_type = type(hybrid_param.rowwise_sub_storage)
+        orig_col_type = type(hybrid_param.columnwise_sub_storage)
+
+        sharded_tensors, metadata = hybrid_param.fsdp_pre_all_gather(
+            mesh=None, orig_size=hybrid_param.shape, contiguous_orig_stride=None,
+            module=None, mp_policy=None,
+        )
+        result, _ = hybrid_param.fsdp_post_all_gather(
+            sharded_tensors, metadata, hybrid_param.dtype, out=None,
+        )
+        assert type(result.rowwise_sub_storage) is orig_row_type
+        assert type(result.columnwise_sub_storage) is orig_col_type
+
+
+# ---------------------------------------------------------------------------
+# 14. FSDP2 prerequisites: pre/post roundtrip
+# ---------------------------------------------------------------------------
+
+
+@requires_fp8
+class TestHybridFsdpRoundtrip:
+    """End-to-end single-process roundtrip (pre -> post) without communication."""
+
+    @pytest.fixture(params=_fsdp_protocol_configs)
+    def hybrid_param(self, request):
+        torch.manual_seed(42)
+        return _make_fsdp_protocol_param(request.param)
+
+    def test_pre_post_roundtrip_preserves_data(self, hybrid_param):
+        """pre_all_gather -> post_all_gather(out=None) -> dequantize matches original."""
+        orig_deq = hybrid_param.dequantize()
+
+        sharded_tensors, metadata = hybrid_param.fsdp_pre_all_gather(
+            mesh=None, orig_size=hybrid_param.shape, contiguous_orig_stride=None,
+            module=None, mp_policy=None,
+        )
+        result, _ = hybrid_param.fsdp_post_all_gather(
+            sharded_tensors, metadata, hybrid_param.dtype, out=None,
+        )
+        torch.testing.assert_close(orig_deq, result.dequantize())
+
+    def test_pre_post_roundtrip_buffer_reuse_preserves_data(self, hybrid_param):
+        """Second roundtrip with out=previous preserves data (iteration 2+ simulation)."""
+        sharded_tensors, metadata = hybrid_param.fsdp_pre_all_gather(
+            mesh=None, orig_size=hybrid_param.shape, contiguous_orig_stride=None,
+            module=None, mp_policy=None,
+        )
+        first_result, _ = hybrid_param.fsdp_post_all_gather(
+            sharded_tensors, metadata, hybrid_param.dtype, out=None,
+        )
+
+        sharded_tensors_2, metadata_2 = hybrid_param.fsdp_pre_all_gather(
+            mesh=None, orig_size=hybrid_param.shape, contiguous_orig_stride=None,
+            module=None, mp_policy=None,
+        )
+        second_result, _ = hybrid_param.fsdp_post_all_gather(
+            sharded_tensors_2, metadata_2, hybrid_param.dtype, out=first_result,
+        )
+        assert second_result is first_result
+        torch.testing.assert_close(hybrid_param.dequantize(), second_result.dequantize())
+
+    def test_scale_refresh_across_iterations(self):
+        """After a sharded optimizer-style requantize, iter-2+ gathers see the new scale.
+
+        Per-tensor FP8 does NOT include ``_scale_inv`` in ``fsdp_buffer_fields``
+        (only ``_data`` is gathered; the scalar scale travels via iter-1
+        metadata). This relies on the invariant that the sharded and gathered
+        ``Float8Tensor`` s share the same ``_scale_inv`` tensor object, and
+        that ``Float8CurrentScalingQuantizer.update_quantized`` writes the new
+        scale in place rather than replacing the tensor reference. If either
+        invariant broke, the gathered copy would carry a stale scale on
+        iter-2+ and silently apply the wrong dequantization.
+
+        This test locks the invariant down by forcing a radically different
+        scale between iterations and asserting the gathered tensor's
+        dequantization tracks the sharded one.
+        """
+        torch.manual_seed(42)
+        hybrid_recipe = _hybrid_custom_recipe(
+            _fp8_row_factory, _fp8_col_factory, _fp8_grad_factory,
+        )
+        with quantized_model_init(enabled=True, recipe=hybrid_recipe):
+            model = Linear(256, 256, params_dtype=torch.bfloat16).cuda()
+        hybrid_param = model.weight
+
+        # Iter-1 gather with the initial (small-magnitude) weights
+        sharded_tensors_1, metadata_1 = hybrid_param.fsdp_pre_all_gather(
+            mesh=None, orig_size=hybrid_param.shape, contiguous_orig_stride=None,
+            module=None, mp_policy=None,
+        )
+        gathered, _ = hybrid_param.fsdp_post_all_gather(
+            sharded_tensors_1, metadata_1, hybrid_param.dtype, out=None,
+        )
+
+        # Simulate an optimizer writeback that produces a much larger weight;
+        # Float8CurrentScalingQuantizer.update_quantized must recompute
+        # _scale_inv for this range. If the gathered copy didn't see the new
+        # scale, the dequantize below would disagree with the sharded copy.
+        huge_master = torch.randn_like(hybrid_param.dequantize()) * 100.0
+        hybrid_param._quantizer.update_quantized(huge_master, hybrid_param)
+
+        # Iter-2+ path: reuse the gathered buffer
+        sharded_tensors_2, metadata_2 = hybrid_param.fsdp_pre_all_gather(
+            mesh=None, orig_size=hybrid_param.shape, contiguous_orig_stride=None,
+            module=None, mp_policy=None,
+        )
+        gathered_refreshed, _ = hybrid_param.fsdp_post_all_gather(
+            sharded_tensors_2, metadata_2, hybrid_param.dtype, out=gathered,
+        )
+        assert gathered_refreshed is gathered
+
+        # The gathered copy must now reflect the new sharded scale, not the
+        # tiny original scale.
+        torch.testing.assert_close(
+            hybrid_param.dequantize(),
+            gathered_refreshed.dequantize(),
+        )
+        # And the magnitude really did change (sanity: this test would pass
+        # vacuously if update_quantized didn't actually change anything).
+        assert gathered_refreshed.dequantize().abs().max() > 10.0, (
+            "update_quantized did not produce a sufficiently different "
+            "weight; the scale-refresh invariant is not being exercised"
+        )
+
+    def test_nvfp4_sub_storage_raises_on_pre_all_gather(self):
+        """Hybrid FSDP2 with an NVFP4 sub-storage must raise a clear error.
+
+        Per the hybrid FSDP2 design (see ``hybrid_quantization_fsdp.md`` §9
+        Gap 5), NVFP4 FSDP2 support is not implemented yet — packed FP4 data
+        alignment for dim-0 splitting, columnwise dequant, and RHT cache
+        handling all need work. Until that lands, hybrid pre-all-gather must
+        refuse an NVFP4 sub-storage cleanly via the ``fsdp_buffer_fields``
+        protocol rather than silently producing wrong data.
+
+        This test pins that contract: any hybrid whose sub-storage does not
+        implement ``fsdp_buffer_fields`` raises ``NotImplementedError`` at
+        ``fsdp_pre_all_gather`` time. The prior version of this test
+        inadvertently asserted the opposite when buffer extraction used
+        implicit ``get_metadata()``-based tensor scanning.
+        """
+        if not (fp8_available and nvfp4_available):
+            pytest.skip("Requires FP8 + NVFP4 support")
+
+        hybrid_recipe = _hybrid_custom_recipe(
+            row_factory=lambda: NVFP4Quantizer(),
+            col_factory=lambda: NVFP4Quantizer(),
+        )
+        with quantized_model_init(enabled=True, recipe=hybrid_recipe):
+            model = Linear(256, 256, params_dtype=torch.bfloat16).cuda()
+        param = model.weight
+
+        # Clean refusal: hybrid's pre_all_gather raises an NVFP4-specific
+        # message pointing to the design doc, not a generic
+        # "NVFP4Tensor does not implement fsdp_buffer_fields" from deep inside
+        # the base class.
+        with pytest.raises(NotImplementedError) as exc_info:
+            param.fsdp_pre_all_gather(
+                mesh=None, orig_size=param.shape, contiguous_orig_stride=None,
+                module=None, mp_policy=None,
+            )
+        msg = str(exc_info.value)
+        assert "NVFP4Tensor" in msg
+        assert "hybrid_quantization_fsdp.md" in msg
+        assert "fsdp_buffer_fields" in msg
+
+
+# ---------------------------------------------------------------------------
+# 15. FSDP2 prerequisites: make_like correctness
+# ---------------------------------------------------------------------------
+
+
+@requires_fp8
+class TestHybridMakeLike:
+    """Test that make_like produces correct copies for __torch_dispatch__ usage."""
+
+    def _make_hybrid_param(self):
+        hybrid_recipe = _hybrid_custom_recipe(
+            _fp8_row_factory, _fp8_col_factory, _fp8_grad_factory,
+        )
+        with quantized_model_init(enabled=True, recipe=hybrid_recipe):
+            model = Linear(256, 256, params_dtype=torch.bfloat16).cuda()
+        return model.weight
+
+    def test_make_like_preserves_sub_storages(self):
+        """make_like result has the same sub-storage types, quantizers, and dtype."""
+        param = self._make_hybrid_param()
+        copy = HybridQuantizedTensor.make_like(param)
+
+        assert isinstance(copy, HybridQuantizedTensor)
+        assert copy.dtype == param.dtype
+        assert copy.shape == param.shape
+        assert type(copy.rowwise_sub_storage) is type(param.rowwise_sub_storage)
+        assert type(copy.columnwise_sub_storage) is type(param.columnwise_sub_storage)
+        torch.testing.assert_close(copy.dequantize(), param.dequantize())
+
+    def test_make_like_is_independent(self):
+        """make_like result should not share the same tensor identity."""
+        param = self._make_hybrid_param()
+        copy = HybridQuantizedTensor.make_like(param)
+        assert copy is not param
