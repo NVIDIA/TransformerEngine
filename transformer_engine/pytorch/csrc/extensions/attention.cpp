@@ -683,9 +683,10 @@ std::vector<std::optional<at::Tensor>> multi_tensor_transpose_to_bhsd(
     if (!inputs[i].has_value()) continue;
 
     auto &input = inputs[i].value();
-    NVTE_CHECK(input.is_cuda() && input.is_contiguous() && input.dim() == 4,
+    NVTE_CHECK(input.is_cuda() && input.dim() == 4,
                "multi_tensor_transpose_to_bhsd: input ", i,
-               " must be a contiguous 4D CUDA tensor.");
+               " must be a 4D CUDA tensor.");
+    input = input.contiguous();
     NVTE_CHECK(input.scalar_type() == at::ScalarType::Half ||
                    input.scalar_type() == at::ScalarType::BFloat16 ||
                    input.scalar_type() == at::ScalarType::Byte,
@@ -747,8 +748,7 @@ std::vector<at::Tensor> multi_tensor_pad_last_dim(std::vector<at::Tensor> inputs
                ", got ", input.dim(), "D.");
     NVTE_CHECK(input.is_cuda(), "multi_tensor_pad_last_dim: input must be a CUDA tensor at index ",
                i, ".");
-    NVTE_CHECK(input.is_contiguous(),
-               "multi_tensor_pad_last_dim: input must be contiguous at index ", i, ".");
+    input = input.contiguous();
 
     const int64_t rows = input.size(0);
     const int64_t in_cols = input.size(1);
