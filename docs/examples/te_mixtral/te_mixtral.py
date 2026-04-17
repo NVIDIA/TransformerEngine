@@ -1,17 +1,6 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: LicenseRef-Apache2
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# See LICENSE for license information.
 
 """TransformerEngine-optimized Mixtral model with Mixture of Experts."""
 
@@ -22,7 +11,14 @@ import warnings
 from collections import OrderedDict
 from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Any, ClassVar, ContextManager, Protocol, Unpack
+import sys
+
+from typing import Any, ClassVar, ContextManager, Protocol
+
+if sys.version_info >= (3, 11):
+    from typing import Unpack
+else:
+    from typing_extensions import Unpack
 
 import torch
 import torch.distributed as dist

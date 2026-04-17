@@ -1,3 +1,7 @@
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
 """Minimal Expert Parallel (EP) smoke test for TE Mixtral.
 
 Run on 8 GPUs:
