@@ -605,9 +605,26 @@ class NVMixtralSparseMoeBlock(nn.Module):
         self._sync_expert_views()
 
         dispatch_output = self.dispatcher.dispatch(hidden_states, selected_experts, routing_weights)
-        expert_output = self._expert_ffn(
-            dispatch_output.expert_input, dispatch_output.tokens_per_expert
-        )
+
+        expert_input = dispatch_output.expert_input
+        tokens_per_expert = dispatch_output.tokens_per_expert
+        orig_num_tokens = expert_input.shape[0]
+
+        # MXFP8 block scaling requires both dims divisible by 32. The hidden dim
+        # (4096) is inherently aligned, but the token dim after all-to-all dispatch
+        # is data-dependent. Pad to the next multiple of 32 if needed.
+        remainder = orig_num_tokens % 32
+        if remainder != 0:
+            pad_count = 32 - remainder
+            expert_input = torch.nn.functional.pad(expert_input, (0, 0, 0, pad_count))
+            tokens_per_expert = list(tokens_per_expert)
+            tokens_per_expert[-1] += pad_count
+
+        expert_output = self._expert_ffn(expert_input, tokens_per_expert)
+
+        if remainder != 0:
+            expert_output = expert_output[:orig_num_tokens]
+
         output = self.dispatcher.combine(expert_output, dispatch_output.handle)
 
         return output.reshape(original_shape)
@@ -801,6 +818,19 @@ class NVMixtralModel(NVMixtralPreTrainedModel):
             hidden_states, indices, cu_seqlens, max_seqlen, _ = _unpad_input(
                 hidden_states, attention_mask
             )
+
+            # MXFP8 block scaling requires the token dim divisible by 32.
+            # After THD unpadding the total token count is data-dependent.
+            thd_orig_tokens = hidden_states.shape[0]
+            thd_remainder = thd_orig_tokens % 32
+            if thd_remainder != 0:
+                thd_pad = 32 - thd_remainder
+                hidden_states = torch.nn.functional.pad(hidden_states, (0, 0, 0, thd_pad))
+                # Extend cu_seqlens: add padding tokens to the last sequence
+                cu_seqlens = cu_seqlens.clone()
+                cu_seqlens[-1] = cu_seqlens[-1] + thd_pad
+                max_seqlen = max_seqlen + thd_pad
+
             kwargs["cu_seq_lens_q"] = kwargs["cu_seq_lens_k"] = cu_seqlens
             kwargs["max_length_q"] = kwargs["max_length_k"] = max_seqlen
 
@@ -858,6 +888,8 @@ class NVMixtralModel(NVMixtralPreTrainedModel):
             all_hidden_states = (*all_hidden_states, hidden_states)
 
         if should_pack_inputs:
+            if thd_remainder != 0:
+                hidden_states = hidden_states[:thd_orig_tokens]
             hidden_states = _pad_input(hidden_states, indices, batch_size, padded_seq_len)
 
         return BaseModelOutputWithPast(
