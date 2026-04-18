@@ -17,8 +17,8 @@ std::vector<at::Tensor> bulk_allocate(const std::vector<std::vector<size_t>> &sh
                                       const std::vector<size_t> &alignments) {
   const size_t n = shapes.size();
   NVTE_CHECK(dtypes.size() == n, "Got ", shapes.size(), " shapes and ", dtypes.size(), " dtypes.");
-  NVTE_CHECK(alignments.size() == n, "Got ", shapes.size(), " shapes and ",
-             alignments.size(), " alignments.");
+  NVTE_CHECK(alignments.size() == n, "Got ", shapes.size(), " shapes and ", alignments.size(),
+             " alignments.");
   if (n == 0) return {};
 
   // Compute per-tensor sizes and offsets
@@ -53,9 +53,7 @@ std::vector<at::Tensor> bulk_allocate(const std::vector<std::vector<size_t>> &sh
       out.emplace_back(at::empty(shape_int64, at::device(at::kCUDA).dtype(dtypes[i])));
     } else {
       out.emplace_back(at::from_blob(
-          data_ptr + offsets[i],
-          shape_int64,
-          [buffer](void *) {},  // Deleter keeps buffer alive
+          data_ptr + offsets[i], shape_int64, [buffer](void *) {},  // Deleter keeps buffer alive
           at::device(at::kCUDA).dtype(dtypes[i])));
     }
   }
