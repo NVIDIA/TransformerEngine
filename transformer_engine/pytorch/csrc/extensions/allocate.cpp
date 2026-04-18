@@ -26,7 +26,9 @@ std::vector<at::Tensor> bulk_allocate(const std::vector<std::vector<size_t>> &sh
   std::vector<size_t> byte_sizes(n);
   std::vector<size_t> offsets(n);
   for (size_t i = 0; i < n; ++i) {
-    total_bytes = roundup(total_bytes, alignments[i]);
+    if (alignments[i] > 0) {
+      total_bytes = roundup(total_bytes, alignments[i]);
+    }
     offsets[i] = total_bytes;
     byte_sizes[i] = product(shapes[i]) * at::elementSize(dtypes[i]);
     total_bytes += byte_sizes[i];
@@ -44,8 +46,8 @@ std::vector<at::Tensor> bulk_allocate(const std::vector<std::vector<size_t>> &sh
   for (size_t i = 0; i < n; ++i) {
     shape_int64.assign(shapes[i].begin(), shapes[i].end());
     if (byte_sizes[i] == 0) {
-      // Work around problems with constructing an empty tensor with
-      // from_blob. Passing a null pointer fails because it checks
+      // Work around problems with from_blob when constructing an
+      // empty tensor. Passing a null pointer fails because it checks
       // that the pointer is on GPU. Passing a non-null pointer can
       // cause bugs in TE kernels.
       out.emplace_back(at::empty(shape_int64, at::device(at::kCUDA).dtype(dtypes[i])));
