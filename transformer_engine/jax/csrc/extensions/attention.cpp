@@ -146,13 +146,20 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
     DType dtype, bool is_training, size_t max_segments_per_seq, int64_t window_size_left,
     int64_t window_size_right, bool bottom_right_diagonal) {
   auto is_ragged = nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD;
-  auto q_shape = is_ragged ? std::vector<size_t>{input_batch*q_max_seqlen, attn_heads, qk_head_dim} : std::vector<size_t>{input_batch, q_max_seqlen, attn_heads, qk_head_dim};
+  auto q_shape = is_ragged
+                     ? std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, qk_head_dim}
+                     : std::vector<size_t>{input_batch, q_max_seqlen, attn_heads, qk_head_dim};
   auto q_tensor = TensorWrapper(nullptr, q_shape, dtype);
-  auto k_shape = is_ragged ? std::vector<size_t>{input_batch*kv_max_seqlen, num_gqa_groups, qk_head_dim} : std::vector<size_t>{input_batch, kv_max_seqlen, num_gqa_groups, qk_head_dim};
+  auto k_shape = is_ragged
+                     ? std::vector<size_t>{input_batch * kv_max_seqlen, num_gqa_groups, qk_head_dim}
+                     : std::vector<size_t>{input_batch, kv_max_seqlen, num_gqa_groups, qk_head_dim};
   auto k_tensor = TensorWrapper(nullptr, k_shape, dtype);
-  auto v_shape = is_ragged ? std::vector<size_t>{input_batch*kv_max_seqlen, num_gqa_groups, v_head_dim} : std::vector<size_t>{input_batch, kv_max_seqlen, num_gqa_groups, v_head_dim};
+  auto v_shape = is_ragged
+                     ? std::vector<size_t>{input_batch * kv_max_seqlen, num_gqa_groups, v_head_dim}
+                     : std::vector<size_t>{input_batch, kv_max_seqlen, num_gqa_groups, v_head_dim};
   auto v_tensor = TensorWrapper(nullptr, v_shape, dtype);
-  auto o_shape = is_ragged ? std::vector<size_t>{input_batch*q_max_seqlen, attn_heads, v_head_dim} : std::vector<size_t>{input_batch, q_max_seqlen, attn_heads, v_head_dim};
+  auto o_shape = is_ragged ? std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, v_head_dim}
+                           : std::vector<size_t>{input_batch, q_max_seqlen, attn_heads, v_head_dim};
 
   auto bias_shape = std::vector<size_t>{bias_batch, bias_heads, q_max_seqlen, kv_max_seqlen};
   auto bias_tensor = TensorWrapper(nullptr, bias_shape, dtype);
@@ -258,9 +265,8 @@ static void FusedAttnForwardImpl(
 
   /* Output tensors */
   auto s_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, dtype);  // not used in F16
-  auto o_shape = is_ragged
-                     ? std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, v_head_dim}
-                     : std::vector<size_t>{input_batch, q_max_seqlen, attn_heads, v_head_dim};
+  auto o_shape = is_ragged ? std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, v_head_dim}
+                           : std::vector<size_t>{input_batch, q_max_seqlen, attn_heads, v_head_dim};
   auto o_tensor = TensorWrapper(output, o_shape, dtype);
 
   /* Prepare RNG state */
@@ -429,17 +435,25 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
     DType dtype, bool is_training, bool deterministic, size_t max_segments_per_seq,
     int64_t window_size_left, int64_t window_size_right, bool bottom_right_diagonal) {
   auto is_ragged = nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD;
-  auto q_shape = is_ragged ? std::vector<size_t>{input_batch*q_max_seqlen, attn_heads, qk_head_dim} : std::vector<size_t>{input_batch, q_max_seqlen, attn_heads, qk_head_dim};
+  auto q_shape = is_ragged
+                     ? std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, qk_head_dim}
+                     : std::vector<size_t>{input_batch, q_max_seqlen, attn_heads, qk_head_dim};
   auto q_tensor = TensorWrapper(nullptr, q_shape, dtype);
   auto dq_tensor = TensorWrapper(nullptr, q_shape, dtype);
-  auto k_shape = is_ragged ? std::vector<size_t>{input_batch*kv_max_seqlen, num_gqa_groups, qk_head_dim} : std::vector<size_t>{input_batch, kv_max_seqlen, num_gqa_groups, qk_head_dim};
+  auto k_shape = is_ragged
+                     ? std::vector<size_t>{input_batch * kv_max_seqlen, num_gqa_groups, qk_head_dim}
+                     : std::vector<size_t>{input_batch, kv_max_seqlen, num_gqa_groups, qk_head_dim};
   auto k_tensor = TensorWrapper(nullptr, k_shape, dtype);
   auto dk_tensor = TensorWrapper(nullptr, k_shape, dtype);
-  auto v_shape = is_ragged ? std::vector<size_t>{input_batch*kv_max_seqlen, num_gqa_groups, v_head_dim} : std::vector<size_t>{input_batch, kv_max_seqlen, num_gqa_groups, v_head_dim};
+  auto v_shape = is_ragged
+                     ? std::vector<size_t>{input_batch * kv_max_seqlen, num_gqa_groups, v_head_dim}
+                     : std::vector<size_t>{input_batch, kv_max_seqlen, num_gqa_groups, v_head_dim};
   auto v_tensor = TensorWrapper(nullptr, v_shape, dtype);
   auto dv_tensor = TensorWrapper(nullptr, v_shape, dtype);
 
-  auto output_shape = is_ragged ? std::vector<size_t>{input_batch*q_max_seqlen, attn_heads, v_head_dim} : std::vector<size_t>{input_batch, q_max_seqlen, attn_heads, v_head_dim};
+  auto output_shape = is_ragged
+                          ? std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, v_head_dim}
+                          : std::vector<size_t>{input_batch, q_max_seqlen, attn_heads, v_head_dim};
   auto doutput_tensor = TensorWrapper(nullptr, output_shape, dtype);
   auto output_tensor = TensorWrapper(nullptr, output_shape, dtype);
 
@@ -514,9 +528,9 @@ static void FusedAttnBackwardImpl(
   FUSED_ATTN_IMPL_COMMON_BLOCK;
 
   /* Input tensors */
-  auto output_shape =
-      is_ragged ? std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, v_head_dim}
-                : std::vector<size_t>{input_batch, q_max_seqlen, attn_heads, v_head_dim};
+  auto output_shape = is_ragged
+                          ? std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, v_head_dim}
+                          : std::vector<size_t>{input_batch, q_max_seqlen, attn_heads, v_head_dim};
   auto output_tensor = TensorWrapper(output, output_shape, dtype);
   auto doutput_tensor = TensorWrapper(doutput, output_shape, dtype);
 
