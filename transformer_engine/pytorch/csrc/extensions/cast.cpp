@@ -511,60 +511,30 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
   const auto scaling_mode = quantizer_cpp_list[0]->get_scaling_mode();
   const auto is_2D_scaled = scaling_mode == NVTE_BLOCK_SCALING_2D;
   const auto fp8_dtype = quantizer_cpp_list[0]->dtype;
-  constexpr size_t fp8_elem_size = 1;
-  constexpr size_t scale_elem_size = 4;
-
-  // Helper function to construct tensor view
-  // Note: Deleter holds a shared_ptr for the buffer, so the buffer
-  // will survive until all views are deleted.
-  auto make_torch_view = [](std::shared_ptr<at::Tensor> &buffer, const std::vector<size_t> &shape,
-                            size_t offset, at::ScalarType dtype) -> at::Tensor {
-    std::vector<int64_t> shape_int64(shape.begin(), shape.end());
-    bool is_empty_shape = product(shape) == 0;
-    if (buffer->data_ptr<uint8_t>() == nullptr || is_empty_shape) {
-      return at::empty(shape_int64, at::device(at::kCUDA).dtype(dtype));
-    }
-    return at::from_blob(
-        buffer->data_ptr<uint8_t>() + offset, shape_int64,
-        [buffer](void *) {},  // deleter holds shared_ptr
-        at::device(at::kCUDA).dtype(dtype));
-  };
 
   // Allocate row-wise data
   std::vector<at::Tensor> rowwise_data_list, rowwise_scale_list;
   std::vector<std::vector<size_t>> rowwise_data_shapes, rowwise_scale_shapes;
   if (rowwise_usage) {
-    // Tensor sizes
     for (size_t i = 0; i < num_tensors; ++i) {
       rowwise_data_shapes.emplace_back(shape_list[i]);
       rowwise_scale_shapes.emplace_back(
           quantizer_cpp_list[i]->get_scale_shape(shape_list[i], false));
     }
 
-    // Offsets in full buffer
-    size_t buffer_size = 0;
-    std::vector<size_t> data_offsets, scale_offsets;
-    for (size_t i = 0; i < num_tensors; ++i) {
-      buffer_size = roundup(buffer_size, 256);  // align to 256B
-      data_offsets.push_back(buffer_size);
-      buffer_size += product(rowwise_data_shapes[i]) * fp8_elem_size;
-    }
-    for (size_t i = 0; i < num_tensors; ++i) {
-      buffer_size = roundup(buffer_size, 16);  // align to 16B
-      scale_offsets.push_back(buffer_size);
-      buffer_size += product(rowwise_scale_shapes[i]) * scale_elem_size;
-    }
+    // Bulk-allocate data and scale tensors
+    std::vector<std::vector<size_t>> shapes = rowwise_data_shapes;
+    std::vector<at::ScalarType> dtypes(num_tensors, torch::kUInt8);
+    std::vector<size_t> alignments(num_tensors, 256);
+    shapes.insert(shapes.end(), rowwise_scale_shapes.begin(), rowwise_scale_shapes.end());
+    dtypes.insert(dtypes.end(), num_tensors, torch::kFloat32);
+    alignments.insert(alignments.end(), num_tensors, 16);
+    auto tensors = bulk_allocate(shapes, dtypes, alignments);
 
-    // Allocate full buffer
-    auto buffer = std::make_shared<at::Tensor>(
-        at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
-
-    // Construct tensor views
+    // Split data and scale tensors
     for (size_t i = 0; i < num_tensors; ++i) {
-      rowwise_data_list.emplace_back(
-          make_torch_view(buffer, rowwise_data_shapes[i], data_offsets[i], torch::kUInt8));
-      rowwise_scale_list.emplace_back(
-          make_torch_view(buffer, rowwise_scale_shapes[i], scale_offsets[i], torch::kFloat32));
+      rowwise_data_list.emplace_back(std::move(tensors[i]));
+      rowwise_scale_list.emplace_back(std::move(tensors[num_tensors + i]));
     }
   }
 
@@ -572,7 +542,6 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
   std::vector<at::Tensor> columnwise_data_list, columnwise_scale_list;
   std::vector<std::vector<size_t>> columnwise_data_shapes, columnwise_scale_shapes;
   if (columnwise_usage) {
-    // Tensor sizes
     for (size_t i = 0; i < num_tensors; ++i) {
       columnwise_data_shapes.emplace_back();
       auto &shape = columnwise_data_shapes.back();
@@ -584,30 +553,19 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
           quantizer_cpp_list[i]->get_scale_shape(shape_list[i], true));
     }
 
-    // Offsets in full buffer
-    size_t buffer_size = 0;
-    std::vector<size_t> data_offsets, scale_offsets;
-    for (size_t i = 0; i < num_tensors; ++i) {
-      buffer_size = roundup(buffer_size, 256);  // align to 256B
-      data_offsets.push_back(buffer_size);
-      buffer_size += product(columnwise_data_shapes[i]) * fp8_elem_size;
-    }
-    for (size_t i = 0; i < num_tensors; ++i) {
-      buffer_size = roundup(buffer_size, 16);  // align to 16B
-      scale_offsets.push_back(buffer_size);
-      buffer_size += product(columnwise_scale_shapes[i]) * scale_elem_size;
-    }
+    // Bulk-allocate data and scale tensors
+    std::vector<std::vector<size_t>> shapes = columnwise_data_shapes;
+    std::vector<at::ScalarType> dtypes(num_tensors, torch::kUInt8);
+    std::vector<size_t> alignments(num_tensors, 256);
+    shapes.insert(shapes.end(), columnwise_scale_shapes.begin(), columnwise_scale_shapes.end());
+    dtypes.insert(dtypes.end(), num_tensors, torch::kFloat32);
+    alignments.insert(alignments.end(), num_tensors, 16);
+    auto tensors = bulk_allocate(shapes, dtypes, alignments);
 
-    // Allocate full buffer
-    auto buffer = std::make_shared<at::Tensor>(
-        at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
-
-    // Construct tensor views
+    // Split data and scale tensors
     for (size_t i = 0; i < num_tensors; ++i) {
-      columnwise_data_list.emplace_back(
-          make_torch_view(buffer, columnwise_data_shapes[i], data_offsets[i], torch::kUInt8));
-      columnwise_scale_list.emplace_back(
-          make_torch_view(buffer, columnwise_scale_shapes[i], scale_offsets[i], torch::kFloat32));
+      columnwise_data_list.push_back(tensors[i]);
+      columnwise_scale_list.push_back(tensors[num_tensors + i]);
     }
   }
 
@@ -664,60 +622,29 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
   const auto fp8_dtype = quantizer_cpp_list[0]->dtype;
   const bool with_gemm_swizzled_scales = quantizer_cpp_list[0]->optimize_for_gemm;
 
-  constexpr size_t fp8_elem_size = 1;
-  constexpr size_t scale_elem_size = 1;
-
-  // Helper function to construct tensor view
-  // Note: Deleter holds a shared_ptr for the buffer, so the buffer
-  // will survive until all views are deleted.
-  auto make_torch_view = [](std::shared_ptr<at::Tensor> &buffer, const std::vector<size_t> &shape,
-                            size_t offset, at::ScalarType dtype) -> at::Tensor {
-    std::vector<int64_t> shape_int64(shape.begin(), shape.end());
-    bool is_empty_shape = product(shape) == 0;
-    if (buffer->data_ptr<uint8_t>() == nullptr || is_empty_shape) {
-      return at::empty(shape_int64, at::device(at::kCUDA).dtype(dtype));
-    }
-    return at::from_blob(
-        buffer->data_ptr<uint8_t>() + offset, shape_int64,
-        [buffer](void *) {},  // deleter holds shared_ptr
-        at::device(at::kCUDA).dtype(dtype));
-  };
-
   // Allocate row-wise data
   std::vector<at::Tensor> rowwise_data_list, rowwise_scale_list;
   std::vector<std::vector<size_t>> rowwise_data_shapes, rowwise_scale_shapes;
   if (rowwise_usage) {
-    // Tensor sizes
     for (size_t i = 0; i < num_tensors; ++i) {
       rowwise_data_shapes.emplace_back(shape_list[i]);
       rowwise_scale_shapes.emplace_back(
           quantizer_cpp_list[i]->get_scale_shape(shape_list[i], false));
     }
 
-    // Offsets in full buffer
-    size_t buffer_size = 0;
-    std::vector<size_t> data_offsets, scale_offsets;
-    for (size_t i = 0; i < num_tensors; ++i) {
-      buffer_size = roundup(buffer_size, 256);  // align to 256B
-      data_offsets.push_back(buffer_size);
-      buffer_size += product(rowwise_data_shapes[i]) * fp8_elem_size;
-    }
-    for (size_t i = 0; i < num_tensors; ++i) {
-      buffer_size = roundup(buffer_size, 16);  // align to 16B
-      scale_offsets.push_back(buffer_size);
-      buffer_size += product(rowwise_scale_shapes[i]) * scale_elem_size;
-    }
+    // Bulk-allocate data and scale tensors
+    std::vector<std::vector<size_t>> shapes = rowwise_data_shapes;
+    std::vector<at::ScalarType> dtypes(num_tensors, torch::kUInt8);
+    std::vector<size_t> alignments(num_tensors, 256);
+    shapes.insert(shapes.end(), rowwise_scale_shapes.begin(), rowwise_scale_shapes.end());
+    dtypes.insert(dtypes.end(), num_tensors, torch::kUInt8);
+    alignments.insert(alignments.end(), num_tensors, 16);
+    auto tensors = bulk_allocate(shapes, dtypes, alignments);
 
-    // Allocate full buffer
-    auto buffer = std::make_shared<at::Tensor>(
-        at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
-
-    // Construct tensor views
+    // Split data and scale tensors
     for (size_t i = 0; i < num_tensors; ++i) {
-      rowwise_data_list.emplace_back(
-          make_torch_view(buffer, rowwise_data_shapes[i], data_offsets[i], torch::kUInt8));
-      rowwise_scale_list.emplace_back(
-          make_torch_view(buffer, rowwise_scale_shapes[i], scale_offsets[i], torch::kUInt8));
+      rowwise_data_list.emplace_back(std::move(tensors[i]));
+      rowwise_scale_list.emplace_back(std::move(tensors[num_tensors + i]));
     }
   }
 
@@ -725,7 +652,6 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
   std::vector<at::Tensor> columnwise_data_list, columnwise_scale_list;
   std::vector<std::vector<size_t>> columnwise_data_shapes, columnwise_scale_shapes;
   if (columnwise_usage) {
-    // Tensor sizes
     for (size_t i = 0; i < num_tensors; ++i) {
       // For MXFP8, the columnwise data doesn't need transpose
       // because of TN, NT, NN layout support in SM100
@@ -734,30 +660,19 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
           quantizer_cpp_list[i]->get_scale_shape(shape_list[i], true));
     }
 
-    // Offsets in full buffer
-    size_t buffer_size = 0;
-    std::vector<size_t> data_offsets, scale_offsets;
-    for (size_t i = 0; i < num_tensors; ++i) {
-      buffer_size = roundup(buffer_size, 256);  // align to 256B
-      data_offsets.push_back(buffer_size);
-      buffer_size += product(columnwise_data_shapes[i]) * fp8_elem_size;
-    }
-    for (size_t i = 0; i < num_tensors; ++i) {
-      buffer_size = roundup(buffer_size, 16);  // align to 16B
-      scale_offsets.push_back(buffer_size);
-      buffer_size += product(columnwise_scale_shapes[i]) * scale_elem_size;
-    }
+    // Bulk-allocate data and scale tensors
+    std::vector<std::vector<size_t>> shapes = columnwise_data_shapes;
+    std::vector<at::ScalarType> dtypes(num_tensors, torch::kUInt8);
+    std::vector<size_t> alignments(num_tensors, 256);
+    shapes.insert(shapes.end(), columnwise_scale_shapes.begin(), columnwise_scale_shapes.end());
+    dtypes.insert(dtypes.end(), num_tensors, torch::kUInt8);
+    alignments.insert(alignments.end(), num_tensors, 16);
+    auto tensors = bulk_allocate(shapes, dtypes, alignments);
 
-    // Allocate full buffer
-    auto buffer = std::make_shared<at::Tensor>(
-        at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
-
-    // Construct tensor views
+    // Split data and scale tensors
     for (size_t i = 0; i < num_tensors; ++i) {
-      columnwise_data_list.emplace_back(
-          make_torch_view(buffer, columnwise_data_shapes[i], data_offsets[i], torch::kUInt8));
-      columnwise_scale_list.emplace_back(
-          make_torch_view(buffer, columnwise_scale_shapes[i], scale_offsets[i], torch::kUInt8));
+      columnwise_data_list.push_back(tensors[i]);
+      columnwise_scale_list.push_back(tensors[num_tensors + i]);
     }
   }
 
@@ -818,23 +733,6 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
   const auto scaling_mode = quantizer_cpp_list[0]->get_scaling_mode();
   const auto fp4_dtype = quantizer_cpp_list[0]->dtype;
   const bool with_gemm_swizzled_scales = false;  /// TODO (tmoon) Enable based on optimize_for_gemm;
-  constexpr size_t scale_elem_size = 1;
-
-  // Helper function to construct tensor view
-  // Note: Deleter holds a shared_ptr for the buffer, so the buffer
-  // will survive until all views are deleted.
-  auto make_torch_view = [](std::shared_ptr<at::Tensor> &buffer, const std::vector<size_t> &shape,
-                            size_t offset, at::ScalarType dtype) -> at::Tensor {
-    std::vector<int64_t> shape_int64(shape.begin(), shape.end());
-    bool is_empty_shape = product(shape) == 0;
-    if (buffer->data_ptr<uint8_t>() == nullptr || is_empty_shape) {
-      return at::empty(shape_int64, at::device(at::kCUDA).dtype(dtype));
-    }
-    return at::from_blob(
-        buffer->data_ptr<uint8_t>() + offset, shape_int64,
-        [buffer](void *) {},  // deleter holds shared_ptr
-        at::device(at::kCUDA).dtype(dtype));
-  };
 
   // Lambda function for converting std::vector<size_t> shape to NVFP4 shape (last dim divided by 2)
   auto to_fp4_shape = [](const std::vector<size_t> &shape) {
@@ -849,54 +747,44 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
   std::vector<at::Tensor> rowwise_data_list, rowwise_scale_list, amax_rowwise_list;
   std::vector<std::vector<size_t>> rowwise_data_shapes, rowwise_scale_shapes;
   if (rowwise_usage) {
-    // Tensor sizes
     for (size_t i = 0; i < num_tensors; ++i) {
       rowwise_data_shapes.emplace_back(shape_list[i]);
       rowwise_scale_shapes.emplace_back(
           quantizer_cpp_list[i]->get_scale_shape(shape_list[i], false));
     }
 
-    // Offsets in full buffer
-    size_t buffer_size = 0;
-    std::vector<size_t> data_offsets, scale_offsets, amax_offsets;
+    // Check whether data and scales can be packed in contiguous
+    // buffer. Amaxes are not contiguous since they are aligned to
+    // 16B.
     for (size_t i = 0; i < num_tensors; ++i) {
-      // FP4 data is aligned to 256B
-      const auto offset = roundup(buffer_size, 256);
-      if (offset != buffer_size) {
+      if (product(rowwise_data_shapes[i]) / 2 % 256 != 0) {
         contiguous_data_and_scale = false;
       }
-      data_offsets.push_back(offset);
-      buffer_size = offset + (product(rowwise_data_shapes[i]) + 1) / 2;
-    }
-    for (size_t i = 0; i < num_tensors; ++i) {
-      // Scales are aligned to 16B
-      const auto offset = roundup(buffer_size, 16);
-      if (offset != buffer_size) {
+      if (product(rowwise_scale_shapes[i]) % 16 != 0) {
         contiguous_data_and_scale = false;
       }
-      scale_offsets.push_back(offset);
-      buffer_size = offset + product(rowwise_scale_shapes[i]) * scale_elem_size;
-    }
-    for (size_t i = 0; i < num_tensors; ++i) {
-      // Amaxes (FP32) are aligned to 16B
-      // Note: Multi-quantize kernel does not require contiguous amaxes.
-      const auto offset = roundup(buffer_size, 16);
-      amax_offsets.push_back(offset);
-      buffer_size = offset + 4;
     }
 
-    // Allocate full buffer
-    auto buffer = std::make_shared<at::Tensor>(
-        at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
-
-    // Construct tensor views
+    // Bulk-allocate tensors data, scale, and amax tensors
+    std::vector<std::vector<size_t>> shapes;
     for (size_t i = 0; i < num_tensors; ++i) {
-      rowwise_data_list.emplace_back(make_torch_view(buffer, to_fp4_shape(rowwise_data_shapes[i]),
-                                                     data_offsets[i], torch::kUInt8));
-      rowwise_scale_list.emplace_back(
-          make_torch_view(buffer, rowwise_scale_shapes[i], scale_offsets[i], torch::kUInt8));
-      amax_rowwise_list.emplace_back(
-          make_torch_view(buffer, std::vector<size_t>{1}, amax_offsets[i], torch::kFloat32));
+      shapes.emplace_back(to_fp4_shape(rowwise_data_shapes[i]));
+    }
+    std::vector<at::ScalarType> dtypes(num_tensors, torch::kUInt8);
+    std::vector<size_t> alignments(num_tensors, 256);
+    shapes.insert(shapes.end(), rowwise_scale_shapes.begin(), rowwise_scale_shapes.end());
+    dtypes.insert(dtypes.end(), num_tensors, torch::kUInt8);
+    alignments.insert(alignments.end(), num_tensors, 16);
+    shapes.insert(shapes.end(), num_tensors, std::vector<size_t>{1});
+    dtypes.insert(dtypes.end(), num_tensors, torch::kFloat32);
+    alignments.insert(alignments.end(), num_tensors, 16);
+    auto tensors = bulk_allocate(shapes, dtypes, alignments);
+
+    // Split data, scale, and amax tensors
+    for (size_t i = 0; i < num_tensors; ++i) {
+      rowwise_data_list.push_back(tensors[i]);
+      rowwise_scale_list.push_back(tensors[num_tensors + i]);
+      amax_rowwise_list.push_back(tensors[2 * num_tensors + i]);
     }
   }
 
@@ -904,7 +792,6 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
   std::vector<at::Tensor> columnwise_data_list, columnwise_scale_list, amax_columnwise_list;
   std::vector<std::vector<size_t>> columnwise_data_shapes, columnwise_scale_shapes;
   if (columnwise_usage) {
-    // Tensor sizes
     for (size_t i = 0; i < num_tensors; ++i) {
       // push the transposed shape into NVFP4 columnwise shape
       // NVFP4 on SM100 is TN only
@@ -918,47 +805,38 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
           quantizer_cpp_list[i]->get_scale_shape(shape_list[i], true));
     }
 
-    // Offsets in full buffer
-    size_t buffer_size = 0;
-    std::vector<size_t> data_offsets, scale_offsets, amax_offsets;
+    // Check whether data and scales can be packed in contiguous
+    // buffer. Amaxes are not contiguous since they are aligned to
+    // 16B.
     for (size_t i = 0; i < num_tensors; ++i) {
-      // FP4 data is aligned to 256B
-      const auto offset = roundup(buffer_size, 256);
-      if (offset != buffer_size) {
+      if (product(columnwise_data_shapes[i]) / 2 % 256 != 0) {
         contiguous_data_and_scale = false;
       }
-      data_offsets.push_back(offset);
-      buffer_size = offset + (product(columnwise_data_shapes[i]) + 1) / 2;
-    }
-    for (size_t i = 0; i < num_tensors; ++i) {
-      // Scales are aligned to 16B
-      const auto offset = roundup(buffer_size, 16);
-      if (offset != buffer_size) {
+      if (product(columnwise_scale_shapes[i]) % 16 != 0) {
         contiguous_data_and_scale = false;
       }
-      scale_offsets.push_back(offset);
-      buffer_size = offset + product(columnwise_scale_shapes[i]) * scale_elem_size;
-    }
-    for (size_t i = 0; i < num_tensors; ++i) {
-      // Amaxes (FP32) are aligned to 16B
-      // Note: Multi-quantize kernel does not require contiguous amaxes.
-      const auto offset = roundup(buffer_size, 16);
-      amax_offsets.push_back(offset);
-      buffer_size = offset + 4;
     }
 
-    // Allocate full buffer
-    auto buffer = std::make_shared<at::Tensor>(
-        at::empty({(int64_t)buffer_size}, at::device(at::kCUDA).dtype(torch::kUInt8)));
-
-    // Construct tensor views
+    // Bulk-allocate tensors data, scale, and amax tensors
+    std::vector<std::vector<size_t>> shapes;
     for (size_t i = 0; i < num_tensors; ++i) {
-      columnwise_data_list.emplace_back(make_torch_view(
-          buffer, to_fp4_shape(columnwise_data_shapes[i]), data_offsets[i], torch::kUInt8));
-      columnwise_scale_list.emplace_back(
-          make_torch_view(buffer, columnwise_scale_shapes[i], scale_offsets[i], torch::kUInt8));
-      amax_columnwise_list.emplace_back(
-          make_torch_view(buffer, std::vector<size_t>{1}, amax_offsets[i], torch::kFloat32));
+      shapes.emplace_back(to_fp4_shape(columnwise_data_shapes[i]));
+    }
+    std::vector<at::ScalarType> dtypes(num_tensors, torch::kUInt8);
+    std::vector<size_t> alignments(num_tensors, 256);
+    shapes.insert(shapes.end(), columnwise_scale_shapes.begin(), columnwise_scale_shapes.end());
+    dtypes.insert(dtypes.end(), num_tensors, torch::kUInt8);
+    alignments.insert(alignments.end(), num_tensors, 16);
+    shapes.insert(shapes.end(), num_tensors, std::vector<size_t>{1});
+    dtypes.insert(dtypes.end(), num_tensors, torch::kFloat32);
+    alignments.insert(alignments.end(), num_tensors, 16);
+    auto tensors = bulk_allocate(shapes, dtypes, alignments);
+
+    // Split data, scale, and amax tensors
+    for (size_t i = 0; i < num_tensors; ++i) {
+      columnwise_data_list.push_back(tensors[i]);
+      columnwise_scale_list.push_back(tensors[num_tensors + i]);
+      amax_columnwise_list.push_back(tensors[2 * num_tensors + i]);
     }
   }
 

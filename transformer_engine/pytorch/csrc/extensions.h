@@ -298,6 +298,15 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
                                     const int sm_margin, const bool zero_centered_gamma);
 
 /***************************************************************************************************
+ * Memory allocation
+ **************************************************************************************************/
+
+// Allocates tensors all backed by a single contiguous buffer.
+std::vector<at::Tensor> bulk_allocate(const std::vector<std::vector<size_t>> &shapes,
+                                      const std::vector<at::ScalarType> &dtypes,
+                                      const std::vector<size_t> &alignments);
+
+/***************************************************************************************************
  * Cast
  **************************************************************************************************/
 
