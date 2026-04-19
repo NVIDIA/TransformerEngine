@@ -868,9 +868,7 @@ __forceinline__ __device__ int find_tensor_for_row(
 // SM-filling grid with grid-stride over row chunks.
 // 2D grid: blockIdx.x = SM-filling row blocks, blockIdx.y = column chunk.
 // Each block grid-strides over kRowsPerBlock-sized row chunks, processing
-// all chunks that map to it. Safe when sum(first_dims) < total_rows.
-// A single-warp reduction computes valid_rows = sum(first_dims) so that
-// blocks in the overallocated region exit after a cheap check.
+// all chunks that map to it. Safe when sum(first_dims) <= total_rows.
 template <typename T, int kVec, bool UseScale, int kBlockDim, int kRowsPerBlock>
 __global__ void grouped_bias_add_kernel(char *__restrict__ d_base,
                                         const char *__restrict__ bias_base,
