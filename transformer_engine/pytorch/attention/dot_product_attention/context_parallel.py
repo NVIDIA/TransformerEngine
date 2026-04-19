@@ -1561,6 +1561,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         k_shape = k.shape
         k_numel = k.numel()
         v_shape = v.shape
+        mla_out_shape = (*q.shape[:-1], v.shape[-1])
         p2p_comm_buffers[0] = torch.cat((k.view(-1), v.view(-1)), dim=-1)
         send_recv_reqs = [[], []]
 
@@ -1795,9 +1796,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         softmax_lse = torch.clone(softmax_lse_per_step[0])
                         if qkv_format == "thd":
                             if enable_mla:
-                                out = torch.zeros_like(v if not fp8 else out_per_step[0]).view(
-                                    v_shape
-                                )
+                                out = (v if not fp8 else out_per_step[0]).new_zeros(mla_out_shape)
                             else:
                                 # MHA or GQA
                                 out = torch.zeros_like(q if not fp8 else out_per_step[0]).view(
@@ -1851,7 +1850,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             seq_dim,
                         )
                         if enable_mla:
-                            out = out.view(v_shape)
+                            out = out.view(mla_out_shape)
                         else:
                             out = out.view(q.shape)
                     else:
@@ -2023,6 +2022,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         ctx.use_flash_attn_3 = use_flash_attn_3
 
         ctx.enable_mla = enable_mla
+        ctx.mla_out_shape = mla_out_shape
         ctx.k_numel = k_numel
         ctx.k_shape = k_shape
         ctx.v_shape = v_shape
@@ -2266,8 +2266,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             )
 
         if ctx.enable_mla:
-            out = out.view(*ctx.v_shape)
-            dout = dout.view(*ctx.v_shape)
+            out = out.view(*ctx.mla_out_shape)
+            dout = dout.view(*ctx.mla_out_shape)
         else:
             # MHA or GQA
             out = out.view(*q.shape)

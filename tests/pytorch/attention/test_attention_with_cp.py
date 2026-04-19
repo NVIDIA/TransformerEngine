@@ -51,6 +51,12 @@ model_configs_flash_attn = {
         2, 4096, 12, 192, attn_mask_type="causal", window_size=(512, 0), head_dim_v=128
     ),  # MLA
     "cp_3_3": ModelConfig(2, 4096, 12, 192, window_size=(512, 512), head_dim_v=128),  # MLA
+    "cp_3_4": ModelConfig(
+        2, 4096, 12, 192, num_gqa_groups=2, attn_mask_type="causal", head_dim_v=128
+    ),  # GQA + asymmetric qk/v
+    "cp_3_5": ModelConfig(
+        2, 4096, 12, 192, num_gqa_groups=2, head_dim_v=128
+    ),  # GQA + asymmetric qk/v
 }
 
 
@@ -73,7 +79,7 @@ dtypes = ["bf16", "fp16"]
 qkv_formats = ["bshd", "sbhd", "thd"]
 cp_comm_types = ["p2p", "all_gather", "a2a", "a2a+p2p"]
 if test_essential:
-    configs = ["cp_1_0", "cp_1_2", "cp_2_1", "cp_3_2", "cp_3_3"]
+    configs = ["cp_1_0", "cp_1_2", "cp_2_1", "cp_3_2", "cp_3_3", "cp_3_4"]
     model_configs_flash_attn = {k: model_configs_flash_attn[k] for k in configs}
     dtypes = ["bf16"]
     qkv_formats = ["sbhd", "thd"]
@@ -197,6 +203,12 @@ model_configs_fused_attn = {
     "cp_3_4": ModelConfig(
         2, 4096, 12, 128, attn_bias_type="post_scale_bias", bias_shape="b1ss", head_dim_v=64
     ),  # MLA
+    "cp_3_5": ModelConfig(
+        2, 4096, 12, 128, num_gqa_groups=2, attn_mask_type="causal", head_dim_v=64
+    ),  # GQA + asymmetric qk/v
+    "cp_3_6": ModelConfig(
+        2, 4096, 12, 128, num_gqa_groups=2, head_dim_v=64
+    ),  # GQA + asymmetric qk/v
     "cp_4_0": ModelConfig(
         2, 4096, 64, 64, num_gqa_groups=8, attn_mask_type="causal", softmax_type="vanilla"
     ),  # GQA
@@ -224,6 +236,7 @@ if test_essential:
         "cp_2_4",
         "cp_3_2",
         "cp_3_4",
+        "cp_3_5",
         "cp_4_2",
     ]
     model_configs_fused_attn = {k: model_configs_fused_attn[k] for k in configs}
