@@ -398,9 +398,6 @@ def general_grouped_gemm_for_grouped_tensor(
     sm_count = get_sm_count()
     sm_count = sm_count - int(os.getenv("NVTE_EXT_MARGIN_SM", str(sm_count)))
 
-    if bias_scale is None:
-        bias_scale = torch.empty(0, dtype=torch.float32, device=device)
-
     return grouped_gemm_impl(
         A,
         transa,
