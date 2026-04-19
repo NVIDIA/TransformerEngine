@@ -753,8 +753,7 @@ py::object te_general_grouped_gemm_for_discrete_out(py::handle A, bool transa, p
                                                     at::Tensor alpha, at::Tensor beta,
                                                     at::Tensor workspace_setup,
                                                     at::Tensor workspace_cublas,
-                                                    bool use_split_accumulator,
-                                                    int math_sm_count) {
+                                                    bool use_split_accumulator, int math_sm_count) {
   using namespace transformer_engine::pytorch::detail;
 
   init_extension();
@@ -809,8 +808,7 @@ py::object te_general_grouped_gemm_for_discrete_out(py::handle A, bool transa, p
   return py::reinterpret_borrow<py::object>(D);
 }
 
-void te_grouped_bias_add(py::handle output, py::handle bias,
-                         std::optional<at::Tensor> bias_scale) {
+void te_grouped_bias_add(py::handle output, py::handle bias, std::optional<at::Tensor> bias_scale) {
   using namespace transformer_engine::pytorch::detail;
 
   init_extension();

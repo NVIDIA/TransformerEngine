@@ -848,9 +848,9 @@ __forceinline__ __device__ int64_t compute_grouped_tensor_offset(const TensorSha
 
 // Linear scan to find which tensor contains the given row.
 // Returns the tensor index and writes the exclusive end-row of that tensor to *out_tensor_row_end.
-__forceinline__ __device__ int find_tensor_for_row(
-    const int64_t *first_dims, int64_t uniform_first, int row, int num_tensors,
-    int *out_tensor_row_end) {
+__forceinline__ __device__ int find_tensor_for_row(const int64_t *first_dims, int64_t uniform_first,
+                                                   int row, int num_tensors,
+                                                   int *out_tensor_row_end) {
   int offset = 0;
   for (int i = 0; i < num_tensors; i++) {
     int dim = first_dims ? static_cast<int>(first_dims[i]) : static_cast<int>(uniform_first);
@@ -873,8 +873,8 @@ template <typename T, int kVec, bool UseScale, int kBlockDim, int kRowsPerBlock>
 __global__ void grouped_bias_add_kernel(char *__restrict__ d_base,
                                         const char *__restrict__ bias_base,
                                         const float *__restrict__ scale_base,
-                                        TensorShapeInfo d_meta,
-                                        int n, int total_rows, int num_tensors) {
+                                        TensorShapeInfo d_meta, int n, int total_rows,
+                                        int num_tensors) {
   using VecStorage = transformer_engine::VectorizedStorage<T, kVec>;
   using VecType = typename VecStorage::LType;
 
@@ -908,16 +908,15 @@ __global__ void grouped_bias_add_kernel(char *__restrict__ d_base,
   const T *__restrict__ bias = reinterpret_cast<const T *>(bias_base);
 
   // Grid-stride loop over row chunks.
-  for (int chunk_start = row_bid * kRowsPerBlock;
-       chunk_start < valid_rows;
+  for (int chunk_start = row_bid * kRowsPerBlock; chunk_start < valid_rows;
        chunk_start += row_grid_stride * kRowsPerBlock) {
     const int row_start = chunk_start;
     const int row_end = min(row_start + kRowsPerBlock, valid_rows);
 
     // Linear scan to find the starting row's tensor and its boundary.
     int tensor_row_end;
-    int tensor_idx = find_tensor_for_row(d_meta.first_dims, d_meta.uniform_first,
-                                         row_start, num_tensors, &tensor_row_end);
+    int tensor_idx = find_tensor_for_row(d_meta.first_dims, d_meta.uniform_first, row_start,
+                                         num_tensors, &tensor_row_end);
     int bias_idx = tensor_idx * n;
 
     VecStorage b_in;
@@ -947,13 +946,13 @@ __global__ void grouped_bias_add_kernel(char *__restrict__ d_base,
 #pragma unroll
         for (int i = 0; i < kVec; ++i) {
           if constexpr (UseScale) {
-            d_in.scratch_.separate[i] = static_cast<T>(
-                fmaf(static_cast<float>(b_in.scratch_.separate[i]), s_val,
-                     static_cast<float>(d_in.scratch_.separate[i])));
+            d_in.scratch_.separate[i] =
+                static_cast<T>(fmaf(static_cast<float>(b_in.scratch_.separate[i]), s_val,
+                                    static_cast<float>(d_in.scratch_.separate[i])));
           } else {
-            d_in.scratch_.separate[i] = static_cast<T>(
-                static_cast<float>(d_in.scratch_.separate[i]) +
-                static_cast<float>(b_in.scratch_.separate[i]));
+            d_in.scratch_.separate[i] =
+                static_cast<T>(static_cast<float>(d_in.scratch_.separate[i]) +
+                               static_cast<float>(b_in.scratch_.separate[i]));
           }
         }
         *reinterpret_cast<VecType *>(d_ptr) = d_in.scratch_.aligned;
@@ -1397,20 +1396,19 @@ void launch_grouped_bias_add(const transformer_engine::GroupedTensor *outputD,
   const char *api_name = use_scale ? "Grouped scaled bias add" : "Grouped bias add";
 
   NVTE_CHECK(outputD->num_tensors >= 1, api_name, ": number of tensors must be at least 1");
-  NVTE_CHECK(outputD->num_tensors == bias_tensor->num_tensors,
-             api_name, ": output and bias must have the same number of tensors");
+  NVTE_CHECK(outputD->num_tensors == bias_tensor->num_tensors, api_name,
+             ": output and bias must have the same number of tensors");
   NVTE_CHECK(outputD->has_data(), api_name, ": output is missing row-wise data");
   NVTE_CHECK(bias_tensor->has_data(), api_name, ": bias is missing row-wise data");
-  NVTE_CHECK(outputD->dtype() == bias_tensor->dtype(),
-             api_name, ": output and bias must have matching dtypes");
-  NVTE_CHECK(bias_tensor->all_same_first_dim(),
-             api_name, ": bias must have uniform first dim (expected 1)");
-  NVTE_CHECK(bias_tensor->get_common_first_dim() == 1,
-             api_name, ": bias first dim must be 1");
-  NVTE_CHECK(outputD->all_same_last_dim() && bias_tensor->all_same_last_dim(),
-             api_name, ": requires uniform last dim for output and bias");
-  NVTE_CHECK(outputD->get_common_last_dim() == bias_tensor->get_common_last_dim(),
-             api_name, ": output and bias last dims must match");
+  NVTE_CHECK(outputD->dtype() == bias_tensor->dtype(), api_name,
+             ": output and bias must have matching dtypes");
+  NVTE_CHECK(bias_tensor->all_same_first_dim(), api_name,
+             ": bias must have uniform first dim (expected 1)");
+  NVTE_CHECK(bias_tensor->get_common_first_dim() == 1, api_name, ": bias first dim must be 1");
+  NVTE_CHECK(outputD->all_same_last_dim() && bias_tensor->all_same_last_dim(), api_name,
+             ": requires uniform last dim for output and bias");
+  NVTE_CHECK(outputD->get_common_last_dim() == bias_tensor->get_common_last_dim(), api_name,
+             ": output and bias last dims must match");
 
   const TensorShapeInfo d_meta = TensorShapeInfo::from_tensor(outputD);
 
@@ -1418,8 +1416,8 @@ void launch_grouped_bias_add(const transformer_engine::GroupedTensor *outputD,
   constexpr int kThreads = 128;
 
   const int num_tensors = static_cast<int>(outputD->num_tensors);
-  NVTE_CHECK(num_tensors <= kMaxGroups,
-             api_name, " supports at most ", kMaxGroups, " tensors, got ", num_tensors);
+  NVTE_CHECK(num_tensors <= kMaxGroups, api_name, " supports at most ", kMaxGroups,
+             " tensors, got ", num_tensors);
   const int total_rows = static_cast<int>(outputD->logical_shape.data[0]);
   const int n = static_cast<int>(outputD->get_common_last_dim());
 
@@ -1493,11 +1491,10 @@ void nvte_grouped_scaled_bias_add(const NVTEGroupedTensor output, const NVTEGrou
   NVTE_CHECK(scale_tensor->dtype() == DType::kFloat32,
              "Grouped scaled bias add: scale must be float32");
   NVTE_CHECK(scale_tensor->data.shape.size() == 1,
-             "Grouped scaled bias add: scale must be 1D, got ",
-             scale_tensor->data.shape.size(), "D");
+             "Grouped scaled bias add: scale must be 1D, got ", scale_tensor->data.shape.size(),
+             "D");
   const size_t total_rows = static_cast<size_t>(outputD->logical_shape.data[0]);
-  NVTE_CHECK(scale_tensor->data.shape[0] == total_rows,
-             "Grouped scaled bias add: scale size (",
+  NVTE_CHECK(scale_tensor->data.shape[0] == total_rows, "Grouped scaled bias add: scale size (",
              scale_tensor->data.shape[0], ") must equal total rows (", total_rows, ")");
 
   const float *scale_ptr = static_cast<const float *>(scale_tensor->data.dptr);
@@ -1548,9 +1545,10 @@ void nvte_grouped_bias_add(const NVTEGroupedTensor output, const NVTEGroupedTens
 
 void nvte_grouped_scaled_bias_add(const NVTEGroupedTensor output, const NVTEGroupedTensor bias,
                                   const NVTETensor scale, cudaStream_t stream) {
-  NVTE_ERROR("nvte_grouped_scaled_bias_add requires cuBLAS 13.3+, but compile-time cuBLAS version "
-             "is ", CUBLAS_VERSION,
-             ". Please upgrade to cuBLAS 13.3 (shipped with CUDA 13.2) or newer.");
+  NVTE_ERROR(
+      "nvte_grouped_scaled_bias_add requires cuBLAS 13.3+, but compile-time cuBLAS version "
+      "is ",
+      CUBLAS_VERSION, ". Please upgrade to cuBLAS 13.3 (shipped with CUDA 13.2) or newer.");
 }
 
 size_t nvte_get_grouped_gemm_setup_workspace_size(size_t num_tensors) {

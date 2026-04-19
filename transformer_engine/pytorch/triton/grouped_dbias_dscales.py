@@ -16,10 +16,8 @@ from transformer_engine.common.triton.grouped_dbias_dscales import _grouped_dbia
 
 @lru_cache(maxsize=1)
 def _is_deterministic_mode() -> bool:
-    """Return True if TE is currently requesting deterministic execution.
-    """
+    """Return True if TE is currently requesting deterministic execution."""
     return not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
-
 
 
 def _launch_grouped_dbias(
@@ -48,9 +46,9 @@ def _launch_grouped_dbias(
     BLOCK_H = 128
     N_ROW_SPLITS = 4
     has_scales = scales is not None
-    assert has_scales == (bias is not None) == (dscales is not None), (
-        "_launch_grouped_dbias: scales, bias and dscales must be provided together"
-    )
+    assert (
+        has_scales == (bias is not None) == (dscales is not None)
+    ), "_launch_grouped_dbias: scales, bias and dscales must be provided together"
 
     hidden = dy.shape[1]
     num_groups = dbias.shape[0]
