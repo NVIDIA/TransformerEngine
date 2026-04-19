@@ -27,6 +27,111 @@ import transformer_engine_torch as tex
 DEBUG_TENSOR = None
 
 
+class ETPChain(str, Enum):
+    """Prefetch chain identifier for an ETPShardedParam.
+
+    GRAPHED   — fwd/bwd captured by a CUDA graph (MLM _CudaGraphRunner).
+    UNGRAPHED — fwd/bwd runs eagerly; includes embedding/output_layer and
+                routed grouped experts always, plus router/shared_experts
+                when their scope tag is not in cuda_graph_scope.
+
+    Chains never cross-link (prev_w/next_w stay within one chain). CG
+    disabled → single UNGRAPHED chain; full-iteration graph → single GRAPHED.
+    """
+    GRAPHED = "ETP_graphed"
+    UNGRAPHED = "ETP_ungraphed"
+
+
+# Module-level cuda_graph_scope, set by MLM at init via set_cuda_graph_scope().
+# None or empty → CG is disabled; every ETP param classifies as UNGRAPHED.
+# Value is a set of scope tags; e.g. {"mamba","attn","moe_router"}.
+_CUDA_GRAPH_SCOPE: Optional[set] = None
+# Whether shared_experts are run with overlap (cannot be captured). When True,
+# shared_experts stay UNGRAPHED regardless of moe_router scope inclusion, matching
+# the transformer_layer.py guard that excludes them from the captured submodules.
+_MOE_SHARED_EXPERT_OVERLAP: bool = False
+
+
+def set_cuda_graph_scope(scope, moe_shared_expert_overlap: bool = False):
+    """Record the active cuda_graph_scope for ETP chain classification.
+
+    Called by MLM at init, BEFORE classify_etp_chains(). ``scope`` may be
+    None, an empty iterable (CG disabled), or an iterable of scope tags.
+    """
+    global _CUDA_GRAPH_SCOPE, _MOE_SHARED_EXPERT_OVERLAP
+    _CUDA_GRAPH_SCOPE = set(scope) if scope else None
+    _MOE_SHARED_EXPERT_OVERLAP = bool(moe_shared_expert_overlap)
+
+
+def _classify_param_chain(param_name: str) -> 'ETPChain':
+    """Classify an ETPShardedParam by name + active cuda_graph_scope.
+
+    embedding / output_layer are always UNGRAPHED. Other kinds (mamba mixer,
+    self/cross_attention, shared_experts, routed experts) are GRAPHED iff
+    their scope tag is present in cuda_graph_scope; otherwise UNGRAPHED.
+    """
+    n = param_name
+
+    # Always ungraphed — embedding and output_layer live outside any CG runner.
+    if "embedding" in n or "output_layer" in n:
+        return ETPChain.UNGRAPHED
+
+    scope = _CUDA_GRAPH_SCOPE
+    if not scope:
+        # CG disabled: every ETP param goes to the single UNGRAPHED chain.
+        return ETPChain.UNGRAPHED
+
+    if ".mlp.shared_experts." in n:
+        if _MOE_SHARED_EXPERT_OVERLAP:
+            return ETPChain.UNGRAPHED
+        return ETPChain.GRAPHED if ("moe" in scope or "moe_router" in scope) else ETPChain.UNGRAPHED
+
+    if ".mlp.experts." in n:
+        return ETPChain.GRAPHED if "moe" in scope else ETPChain.UNGRAPHED
+
+    if ".self_attention." in n or ".cross_attention." in n:
+        return ETPChain.GRAPHED if "attn" in scope else ETPChain.UNGRAPHED
+
+    if ".mixer." in n:
+        return ETPChain.GRAPHED if "mamba" in scope else ETPChain.UNGRAPHED
+
+    return ETPChain.UNGRAPHED
+
+
+def classify_etp_chains(model) -> None:
+    """Walk model.named_parameters() and set chain_id on every ETPShardedParam.
+
+    Call once at init, AFTER set_cuda_graph_scope() and BEFORE the first fwd
+    of any graphed param. Raises if an already chain-initialized param would
+    be reclassified into a different chain (its prev/next links are already
+    wired into the wrong list).
+    """
+    conflicts = []
+    for name, param in model.named_parameters():
+        if not isinstance(param, ETPShardedParam):
+            continue
+        target = _classify_param_chain(name).value
+        if param.prefetch_initialized and param.chain_id != target:
+            conflicts.append((name, param.chain_id, target))
+            continue
+        param.chain_id = target
+
+        # Bwd-prefetch opt-out: embedding.word_embeddings.weight does not need
+        # an AG in the bwd pass (its wgrad is a scatter-add on sharded rows
+        # and its input has no dgrad). Skipping its bwd AG saves one collective.
+        if "embedding" in name:
+            param._need_weight_prefetch_bwd = False
+    if conflicts:
+        raise RuntimeError(
+            "classify_etp_chains: the following params were already chain-initialized "
+            "with a different chain_id than the classifier would assign — this means "
+            "their chain links are already wired into the wrong list. Move classification "
+            "earlier in init. Conflicts: "
+            + ", ".join(f"{n}: {old!r}->{new!r}" for n, old, new in conflicts[:3])
+            + ("..." if len(conflicts) > 3 else "")
+        )
+
+
 class ETPWeightState(Enum):
     NONE = "NONE"              # Sharded, no pending operation
     ASYNC_WAIT = "ASYNC_WAIT"  # Async all-gather in progress
@@ -50,54 +155,83 @@ _inflight_comm_params: set = set()
 _AG_STREAMS: Dict[str, torch.cuda.Stream] = {}
 _RS_STREAMS: Dict[str, torch.cuda.Stream] = {}
 
-# Standalone wgrad input buffer pool, keyed by (shape, dtype).
-# Separate from ETPWeightCache because:
-# 1. Wgrad buffers are expert-chain only (never graphed)
-# 2. They need true release-then-reuse (the pool shrinks/grows), whereas
-#    ETPWeightCache keeps slot.buf set for CUDA graph address stability
+# Wgrad input buffer pool, keyed by (shape, dtype). UNGRAPHED-only: GRAPHED
+# wgrad bufs need address stability for CG replay and are not pool-recycled.
 _wgrad_buf_pool: Dict[tuple, list] = {}
 
 
 def _wgrad_pool_get(shape: tuple, dtype: torch.dtype, device) -> torch.Tensor:
-    """Get a wgrad buffer from the pool, or allocate a fresh one."""
+    """Get a pool buffer or allocate fresh. Tagged so _wgrad_pool_put accepts
+    only pool-owned buffers — callers that don't use _wgrad_pool_get (e.g.
+    Megatron layers.py wgrad GEMM, aten F.embedding bwd) fall through to the
+    caching allocator on release."""
     key = (shape, dtype)
     pool = _wgrad_buf_pool.get(key)
     if pool:
-        return pool.pop()
-    return torch.empty(shape, dtype=dtype, device=device, requires_grad=False)
+        buf = pool.pop()
+    else:
+        buf = torch.empty(shape, dtype=dtype, device=device, requires_grad=False)
+    buf._from_etp_wgrad_pool = True
+    return buf
 
 
 def _wgrad_pool_put(buf: torch.Tensor):
-    """Return a wgrad buffer to the pool for reuse."""
+    """Return a pool-owned buffer for reuse (no-op for untagged buffers; see
+    _wgrad_pool_get)."""
+    if not getattr(buf, '_from_etp_wgrad_pool', False):
+        return
     key = (tuple(buf.shape), buf.dtype)
     if key not in _wgrad_buf_pool:
         _wgrad_buf_pool[key] = []
     _wgrad_buf_pool[key].append(buf)
 
 
-def get_ag_stream(chain_id: str = 'dense') -> torch.cuda.Stream:
-    # All chains share one AG stream. The ag_event CUDA event object is recorded on
-    # this stream during graph capture; using a different stream at replay would cause
-    # ag_event.wait() to see a stale recording, producing Inf gradients.
-    key = 'shared'
+def _stream_key(chain_id: str, group) -> tuple:
+    """Key for the per-(chain, group) AG/RS stream dicts.
+
+    Two partitioning axes:
+      - chain_id: captured (GRAPHED) vs eager (UNGRAPHED) ops must not share
+        a stream (eager ops would contaminate capture/replay state).
+      - group: independent NCCL communicators (e.g. ETP vs EETP) get their
+        own user-level stream to avoid cross-group serialization.
+    """
+    return (chain_id, id(group) if group is not None else 0)
+
+
+def get_ag_stream(chain_id: str = ETPChain.GRAPHED.value, group=None) -> torch.cuda.Stream:
+    """Return the ETP all-gather stream for (chain_id, group). See _stream_key."""
+    key = _stream_key(chain_id, group)
     if key not in _AG_STREAMS:
         _AG_STREAMS[key] = torch.cuda.Stream()
     return _AG_STREAMS[key]
 
-def get_rs_stream(chain_id: str = 'dense') -> torch.cuda.Stream:
-    # All chains share one RS stream (same reason as AG stream).
-    key = 'shared'
+
+def get_rs_stream(chain_id: str = ETPChain.GRAPHED.value, group=None) -> torch.cuda.Stream:
+    """Return the ETP reduce-scatter stream for (chain_id, group). See _stream_key."""
+    key = _stream_key(chain_id, group)
     if key not in _RS_STREAMS:
         _RS_STREAMS[key] = torch.cuda.Stream()
     return _RS_STREAMS[key]
 
+
 def get_all_ag_streams() -> list:
-    """Return all AG streams that have been created."""
+    """All AG streams created so far, across chains and groups."""
     return list(_AG_STREAMS.values())
 
+
 def get_all_rs_streams() -> list:
-    """Return all RS streams that have been created."""
+    """All RS streams created so far, across chains and groups."""
     return list(_RS_STREAMS.values())
+
+
+def get_ag_streams_for_chain(chain_id: str) -> list:
+    """AG streams for one chain (all groups that chain has touched)."""
+    return [s for k, s in _AG_STREAMS.items() if k[0] == chain_id]
+
+
+def get_rs_streams_for_chain(chain_id: str) -> list:
+    """RS streams for one chain (all groups that chain has touched)."""
+    return [s for k, s in _RS_STREAMS.items() if k[0] == chain_id]
 
 @dataclass
 class ETPConfig:
@@ -170,7 +304,10 @@ def wrap_module_params_etp(module, weight_names, etp_group, is_grouped=None):
         if is_grouped:
             etp_shard.expert_idx = idx
             etp_shard.is_routed_expert = True
-            etp_shard.chain_id = 'expert'
+            # Grouped routed experts are UNGRAPHED unless the "moe" scope captures
+            # them; classify_etp_chains() will fix this up at init time based on
+            # the actual cuda_graph_scope. We set UNGRAPHED here as a safe default.
+            etp_shard.chain_id = ETPChain.UNGRAPHED.value
         etp_shard.group = etp_group
         etp_shard.ps_size = etp_size
         # register the newly sharded param back to the module
@@ -206,7 +343,9 @@ class ETPShardedParam(torch.nn.Parameter):
 
     _pending_rs_weight = None
     _first_weight_flag = True
-    # Per-chain state: each chain_id ('dense', 'expert') has its own linked list.
+    # Per-chain state: each chain_id (ETPChain.GRAPHED / ETPChain.UNGRAPHED) has
+    # its own linked list. Chains never cross-link: prev_w/next_w only connect
+    # params with the same chain_id.
     _chain_state: Dict[str, dict] = {}
 
     @classmethod
@@ -231,7 +370,7 @@ class ETPShardedParam(torch.nn.Parameter):
 
         chain['link_node_count'] += 1
         if chain['link_node_count'] == 1:
-            chain_id = getattr(curr, 'chain_id', 'dense')
+            chain_id = getattr(curr, 'chain_id', ETPChain.UNGRAPHED.value)
             chain['link_table_buffer'].append(
                 f"\n[{chain_id} chain]"
                 f"\n{'node_id':>7} | {'layer_id':>8} | {'curr_weight_name':<{_W}} | prev_weight_name"
@@ -260,6 +399,11 @@ class ETPShardedParam(torch.nn.Parameter):
         self._ag_ticket_bwd = None
         self._prefetch_handle = None
         self._need_weight_prefetch = True
+        # Per-direction prefetch opt-outs. Default True. The embedding weight
+        # never needs an AG during bwd (its wgrad is a scatter-add indexed by
+        # token ids, and its input is non-differentiable, so no dgrad either).
+        # classify_etp_chains() sets this to False for embedding.word_embeddings.weight.
+        self._need_weight_prefetch_bwd = True
         self.ag_event = torch.cuda.Event(external=True)
         # DDP backward hook (set by register_grad_accum_hook)
         self._grad_accum_node = None
@@ -272,8 +416,11 @@ class ETPShardedParam(torch.nn.Parameter):
         self.prefetch_initialized = False
         self.next_w = None
         self.prev_w = None
-        # Chain identity: 'dense' for mamba/attn/shared_expert, 'expert' for grouped experts
-        self.chain_id = 'dense'
+        # Chain identity (ETPChain.GRAPHED / ETPChain.UNGRAPHED). Defaults to
+        # UNGRAPHED as a safe fallback; classify_etp_chains(model) walks the
+        # model at init time (after set_cuda_graph_scope) and reclassifies
+        # based on param name + active cuda_graph_scope.
+        self.chain_id = ETPChain.UNGRAPHED.value
         # Grouped gemm
         self.is_routed_expert = False
         self.expert_idx = None
@@ -533,14 +680,22 @@ class ETPShardedParam(torch.nn.Parameter):
         return result, handle
 
     def _wait_param_gather(self):
-            # Since wait() may sychronize against a different stream than the current stream,
-            # an event is recorded and waited on when the data is retrieved, which ensures the
-            # AG always finishes before returning the unsharded param
-            with torch.cuda.stream(get_ag_stream(self.chain_id)):
-                if self._prefetch_handle is not None:
-                    self._prefetch_handle.wait()
-                    self._prefetch_handle = None
-                    self.ag_event.record()
+        # Wait-site for the async AG. Issuer (all_gather_and_prefetch{,_bwd})
+        # and wait-site both use the TARGET's ag_stream so the caller-stream
+        # "preEvent" PyTorch records at issue time lives on an idle stream.
+        # A busy issue-stream would queue the preEvent behind pending work,
+        # delay NCCL start, and — even with the sync chain main ← ag_event ←
+        # ag_stream handle.wait() ← NCCL endEvent — leave the consumer GEMM
+        # reading a partial AG buffer. (NCCL kernel itself runs on PyTorch's
+        # per-PG ncclStream, not ag_stream.) handle.wait() here inserts the
+        # wait on NCCL's completion event into ag_stream; ag_event.record()
+        # then marks ag_stream for consumers (main_stream via ag_event.wait
+        # or MLM drains via main.wait_stream).
+        with torch.cuda.stream(get_ag_stream(self.chain_id, self.group)):
+            if self._prefetch_handle is not None:
+                self._prefetch_handle.wait()
+                self._prefetch_handle = None
+                self.ag_event.record()
 
     def _all_gather_weight_on_demand(self, fwd, skip_weight_cast=False, cast_noop_flag=None):
         result, _ = self._all_gather_weight(
@@ -555,6 +710,20 @@ class ETPShardedParam(torch.nn.Parameter):
         return result if self.is_routed_expert else result[0]
 
     def _get_prefetched_weight(self, fwd, skip_weight_cast=False, cast_noop_flag=None):
+        # Stale-read guard: state must reflect an AG issued for this cycle;
+        # otherwise cache.get() would return the prior iter's AG buffer.
+        if ETP_CONFIG.check_param_states:
+            for w in self._weights:
+                assert w.state in (
+                    ETPWeightState.ASYNC_WAIT,
+                    ETPWeightState.DATA_READY,
+                    ETPWeightState.DATA_READY_SYNC,
+                ), (
+                    f"[ETP] _get_prefetched_weight({'fwd' if fwd else 'bwd'}) on "
+                    f"{self._debug_name} with state={w.state!r} — no AG issued; "
+                    f"cache.get() would return stale data. Check the chain's "
+                    f"_need_weight_prefetch flag and issuer's prefetch logic."
+                )
         # Wait for async prefetch if in progress
         self._wait_param_gather()
         self.ag_event.wait()
@@ -593,11 +762,15 @@ class ETPShardedParam(torch.nn.Parameter):
             ETP_CONFIG.weight_prefetch
             and self.prev_w is not None
             and self.prev_w._need_weight_prefetch
+            and self.prev_w._need_weight_prefetch_bwd
         ):
-            _, handle = self.prev_w._all_gather_weight(
-                async_op=True, skip_weight_cast=True, cast_noop_flag=None,
-                fwd=False, nvtx_label=nvtx_label,
-            )
+            # Issue on the target's ag_stream (see _wait_param_gather).
+            target_stream = get_ag_stream(self.prev_w.chain_id, self.prev_w.group)
+            with torch.cuda.stream(target_stream):
+                _, handle = self.prev_w._all_gather_weight(
+                    async_op=True, skip_weight_cast=True, cast_noop_flag=None,
+                    fwd=False, nvtx_label=nvtx_label,
+                )
             self.prev_w._prefetch_handle = handle
 
         # The unsharded tensor has been returned, no pending work so reset state to NONE
@@ -640,12 +813,15 @@ class ETPShardedParam(torch.nn.Parameter):
             and self.next_w is not None
             and self.next_w._need_weight_prefetch
         ):
-            _, handle = self.next_w._all_gather_weight(
-                async_op=True, 
-                skip_weight_cast=skip_weight_cast,
-                cast_noop_flag=cast_noop_flag, 
-                fwd=fwd, nvtx_label=nvtx_label,
-            )
+            # Issue on the target's ag_stream (see _wait_param_gather).
+            target_stream = get_ag_stream(self.next_w.chain_id, self.next_w.group)
+            with torch.cuda.stream(target_stream):
+                _, handle = self.next_w._all_gather_weight(
+                    async_op=True,
+                    skip_weight_cast=skip_weight_cast,
+                    cast_noop_flag=cast_noop_flag,
+                    fwd=fwd, nvtx_label=nvtx_label,
+                )
             self.next_w._prefetch_handle = handle
 
         # The unsharded tensor has been returned, no pending work so reset state to NONE
@@ -735,17 +911,19 @@ class ETPShardedParam(torch.nn.Parameter):
 
 
     def _wait_reduce_scatter(self):
-        # assert self._wgrad_rs_handle is not None or is_graph_capturing()
-        with torch.cuda.stream(get_rs_stream(self.chain_id)):
+        # Asymmetric wrt _wait_param_gather: RS is issued from main_stream
+        # (not rs_stream) because main produced the RS input (wgrad) and
+        # naturally holds the write→read ordering. Wait-site enters rs_stream
+        # so it observes NCCL completion and rs_event marks it for consumers.
+        with torch.cuda.stream(get_rs_stream(self.chain_id, self.group)):
             if self._wgrad_rs_handle is not None:
                 self._wgrad_rs_handle.wait()
                 self._wgrad_rs_handle = None
                 self.rs_event.record()
-        # RS is done — drop stashed wgrad input buffer refs.
-        # Safe because handle.wait() above guarantees the RS kernel finished reading them.
-        # Expert-chain buffers go back to pool for reuse; dense-chain buffers just drop refs.
+        # Release stashed wgrad inputs: UNGRAPHED buffers go back to the pool;
+        # GRAPHED just drops Python refs (addresses must stay stable for CG).
         if getattr(self, '_wgrad_input_bufs', None) is not None:
-            if self.chain_id == 'expert':
+            if self.chain_id == ETPChain.UNGRAPHED.value:
                 for buf in self._wgrad_input_bufs:
                     _wgrad_pool_put(buf)
             self._wgrad_input_bufs = None
@@ -818,10 +996,10 @@ class ETPShardedParam(torch.nn.Parameter):
         wgrads = list(wgrad) if batched else [wgrad]
         weights = self._weights
 
-        # Expert-chain wgrads are recycled via the standalone pool (_wgrad_pool_put).
-        # All ungraphed weights (expert + output layer) benefit from the stash
-        # (_wgrad_input_bufs) which drops Python refs once the RS is waited.
-        poolable = self.chain_id == 'expert'
+        # UNGRAPHED-chain wgrads are recycled via the standalone pool (_wgrad_pool_put).
+        # GRAPHED-chain wgrads cannot pool-recycle because CUDA graphs require
+        # stable buffer addresses across replay.
+        poolable = self.chain_id == ETPChain.UNGRAPHED.value
 
         if ETP_CONFIG.weight_prefetch and self.prev_w is not None:
             # Async reduce-scatter (not last weight — deferred finish)
@@ -893,7 +1071,7 @@ class _TicketSlot:
     dtype: object                                # torch.dtype or tex.DType
     reduce_scatter: bool
     fwd: bool
-    chain_id: str = 'dense'                      # chain this slot belongs to
+    chain_id: str = ETPChain.GRAPHED.value       # chain this slot belongs to
     buf: Optional[torch.Tensor] = field(default=None)  # None when released or after clear()
 
 
@@ -975,7 +1153,7 @@ class ETPWeightCache:
 
         self._slots[ticket] = _TicketSlot(
             key=key, param=param, dtype=dtype, reduce_scatter=reduce_scatter, fwd=fwd,
-            chain_id=getattr(param, 'chain_id', 'dense'),
+            chain_id=getattr(param, 'chain_id', ETPChain.UNGRAPHED.value),
         )
         return ticket
 
@@ -1014,25 +1192,26 @@ class ETPWeightCache:
         self._total_bytes = 0
 
     def reallocate_to_mempool(self, device, mempool):
-        """Re-allocate dense-chain ticket buffers into a CUDA graph memory pool.
+        """Re-allocate GRAPHED-chain ticket buffers into a CUDA graph memory pool.
 
-        Call BEFORE graph capture so every dense-chain buffer lives in the capture
-        pool and no allocations are recorded inside the graph.  Expert-chain buffers
-        are left in regular memory (expert compute runs eagerly, not in graphs).
+        Call BEFORE graph capture so every GRAPHED-chain buffer lives in the capture
+        pool and no allocations are recorded inside the graph. UNGRAPHED-chain
+        buffers are left in regular memory (they are never referenced by any
+        captured graph).
         """
 
-        # Identify keys that belong to the dense chain
-        dense_keys = set()
+        # Identify keys that belong to the GRAPHED chain
+        graphed_keys = set()
         for slot in self._slots.values():
-            if slot.chain_id == 'dense':
-                dense_keys.add(slot.key)
+            if slot.chain_id == ETPChain.GRAPHED.value:
+                graphed_keys.add(slot.key)
 
-        # Clone only dense-chain pool buffers into the passed in mempool
+        # Clone only GRAPHED-chain pool buffers into the passed in mempool
         self._total_bytes = 0
         new_pool = defaultdict(list)
         torch._C._cuda_beginAllocateCurrentThreadToPool(device, mempool)
         for key, buffers in self._pool.items():
-            if key not in dense_keys:
+            if key not in graphed_keys:
                 continue
             new_buffers = []
             for _ in range(len(buffers)):
@@ -1041,23 +1220,23 @@ class ETPWeightCache:
             new_pool[key] = new_buffers
         torch._C._cuda_endAllocateToPool(device, mempool)
 
-        # Map each buffer in the old pool to its corresponding new one (dense only)
+        # Map each buffer in the old pool to its corresponding new one (GRAPHED only)
         old_to_new_buff = {}
         for key, old_pool in self._pool.items():
-            if key not in dense_keys:
+            if key not in graphed_keys:
                 continue
             new = new_pool[key]
             for old_buf, new_buf in zip(old_pool, new):
                 old_to_new_buff[old_buf] = new_buf
 
-        # Replace each dense slot's reference; keep expert slots unchanged
+        # Replace each GRAPHED slot's reference; keep UNGRAPHED slots unchanged
         for slot in self._slots.values():
-            if slot.chain_id == 'dense' and slot.buf is not None and slot.buf in old_to_new_buff:
+            if slot.chain_id == ETPChain.GRAPHED.value and slot.buf is not None and slot.buf in old_to_new_buff:
                 slot.buf = old_to_new_buff[slot.buf]
 
-        # Merge: dense keys get new buffers, expert keys keep old ones
+        # Merge: GRAPHED keys get new buffers, UNGRAPHED keys keep old ones
         for key, buffers in self._pool.items():
-            if key not in dense_keys:
+            if key not in graphed_keys:
                 new_pool[key] = buffers
         self._pool = new_pool
         return
@@ -1080,11 +1259,12 @@ def wait_async_comms(chain_id: str = None):
     """Wait on in-flight ETP async communications (all-gathers + reduce-scatters).
 
     Args:
-        chain_id: If specified, only drain params belonging to this chain ('dense' or 'expert').
-                  If None, drain all chains (backward compat).
+        chain_id: If specified, only drain params belonging to this chain
+                  (ETPChain.GRAPHED.value or ETPChain.UNGRAPHED.value).
+                  If None, drain all chains.
     """
     for param in list(_inflight_comm_params):
-        if chain_id is not None and getattr(param, 'chain_id', 'dense') != chain_id:
+        if chain_id is not None and getattr(param, 'chain_id', ETPChain.UNGRAPHED.value) != chain_id:
             continue
         param._wait_param_gather()
         param._wait_reduce_scatter()
