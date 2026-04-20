@@ -53,6 +53,9 @@ def moe_permute_index_map_forward(
             f"Permute not possible: inp.size(0) ({inp.size(0)}) must match "
             f"index.size(0) ({index.size(0)})."
         )
+    assert (
+        num_out_tokens >= 0
+    ), f"moe_permute (index map) requires num_out_tokens >= 0, got {num_out_tokens}."
     if index.dtype != torch.int32:
         warnings.warn(
             f"The data type of the input `index` of Permute is {index.dtype}! "
@@ -91,6 +94,10 @@ def _moe_permute_index_map_fake(  # pylint: disable=unused-argument
     """Fake implementation for shape inference."""
     num_tokens = inp.shape[0]
     topK = index.shape[1]
+    if num_tokens > 0:
+        assert (
+            num_out_tokens >= 0
+        ), f"moe_permute (index map) requires num_out_tokens >= 0, got {num_out_tokens}."
 
     # Infer output shape
     output_tokens = num_out_tokens if num_out_tokens > 0 else num_tokens * topK
@@ -304,6 +311,10 @@ def moe_permute_mask_map_forward(
             f"Permute not possible: inp.size(0) ({inp.size(0)}) must match "
             f"routing_map.size(0) ({routing_map.size(0)})."
         )
+    assert num_out_tokens > 0, (
+        f"moe_permute (mask map) requires num_out_tokens > 0, got {num_out_tokens}. "
+        "Use int(routing_map.sum()) or num_tokens * top_k."
+    )
     num_tokens, hidden_size = inp.size()
     num_experts = routing_map.size(1)
 
@@ -424,13 +435,26 @@ def _moe_permute_mask_map_forward_fake(  # pylint: disable=unused-argument
     num_tokens = inp.shape[0]
     hidden_size = inp.shape[1]
     num_experts = routing_map.shape[1]
+    if num_tokens > 0:
+        assert num_out_tokens > 0, (
+            f"moe_permute (mask map) requires num_out_tokens > 0, got {num_out_tokens}. "
+            "Use int(routing_map.sum()) or num_tokens * top_k."
+        )
+        out_rows = num_out_tokens
+    else:
+        # Match `moe_permute_mask_map_forward` empty-input fast path (ignores num_out_tokens).
+        out_rows = 0
     # row_id_map: (num_tokens, num_experts * 2 + 1)
-    fake_output = torch.empty((num_out_tokens, hidden_size), dtype=inp.dtype, device=inp.device)
+    fake_output = torch.empty((out_rows, hidden_size), dtype=inp.dtype, device=inp.device)
     fake_row_id_map = torch.empty(
         (num_tokens, num_experts * 2 + 1), dtype=torch.int32, device=inp.device
     )
     if probs is not None:
-        fake_permuted_probs = torch.empty((num_out_tokens,), dtype=probs.dtype, device=inp.device)
+        fake_permuted_probs = (
+            torch.empty((out_rows,), dtype=probs.dtype, device=inp.device)
+            if out_rows > 0
+            else torch.empty(0, device=inp.device)
+        )
     else:
         fake_permuted_probs = torch.empty(0, device=inp.device)
     return fake_output, fake_row_id_map, fake_permuted_probs
@@ -852,7 +876,7 @@ _quantized_tensor_passthrough_ops.update(
 def moe_permute(
     inp: torch.Tensor,
     routing_map: torch.Tensor,
-    num_out_tokens: int = -1,
+    num_out_tokens: int,
     max_token_num: int = -1,
     map_type: str = "mask",
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -871,13 +895,13 @@ def moe_permute(
         The values in it: 1 means the token is routed to this expert and 0 means not.
         If map_type is 'index', routing_map is of shape [num_tokens, topK] and dtype 'int32'.
         The values in it are the routed expert indices.
-    num_out_tokens : int, default = -1
-        The effective output token count, representing the number of tokens not dropped.
-        By default, set to '-1', meaning no tokens are dropped.
+    num_out_tokens : int
+        Number of output tokens (rows in the permuted buffer).
+        mask map: must be > 0, e.g. int(routing_map.sum()) or num_tokens * top_k.
+        index map: must be >= 0; 0 means infer as num_tokens * top_k.
     max_token_num : int, default = -1
-        The maximum number of tokens, used for workspace allocation.
-        By default, set to '-1', meaning the calculation of the size of workspace is
-        automatically taken over by the operator.
+        Workspace sizing hint, only used for map_type='index'. Ignored for 'mask'.
+
     map_type : str, default = 'mask'
         Type of the routing map tensor.
         Options are: 'mask', 'index'.
@@ -902,7 +926,7 @@ def moe_permute_with_probs(
     inp: torch.Tensor,
     probs: torch.Tensor,
     routing_map: torch.Tensor,
-    num_out_tokens: int = -1,
+    num_out_tokens: int,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Permute the tokens and probs based on the routing_map.
@@ -921,9 +945,9 @@ def moe_permute_with_probs(
     routing_map : torch.Tensor
         The token to expert mapping tensor of shape [num_tokens, num_experts] and dtype 'int32'.
         The values in it: 1 means the token is routed to this expert and 0 means not.
-    num_out_tokens : int, default = -1
-        The effective output token count, representing the number of tokens not dropped.
-        By default, set to '-1', meaning no tokens are dropped.
+    num_out_tokens : int
+        Number of output tokens (rows in the permuted buffer). Must be > 0,
+        e.g. int(routing_map.sum()) or num_tokens * top_k.
     """
     if isinstance(inp, QuantizedTensor) and torch.compiler.is_compiling():
         raise RuntimeError(
