@@ -920,7 +920,6 @@ __global__ void grouped_bias_add_kernel(char *__restrict__ d_base,
     int bias_idx = tensor_idx * n;
 
     VecStorage b_in;
-    b_in.scratch_.aligned = *reinterpret_cast<const VecType *>(bias + bias_idx + col);
 
     // Walk tensor segments within this chunk's row range.
     int seg_start = row_start;
