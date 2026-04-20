@@ -16,6 +16,9 @@ from jax import lax
 from jax import random as jax_random
 from jax.ad_checkpoint import checkpoint_name
 
+from transformer_engine.common.recipe import (
+    MXFP8BlockScaling,
+)
 
 from ..dense import dense, grouped_dense
 
@@ -1358,7 +1361,12 @@ class LayerNormMLP(TransformerEngineBase):
         return out, ln_output  # Output, layer_norm_output
 
 
-def wrap_function_in_te_state_module(f, quantization_recipe, name: Optional[str] = None):
+def wrap_function_in_te_state_module(
+    f,
+    quantization_recipe,
+    name: Optional[str] = None,
+    quantization_checkpoint_name: Optional[str] = None,
+):
     """Wraps the given function `f` to support TransformerEngine quantization.
 
     This method does a couple things:
@@ -1386,6 +1394,7 @@ def wrap_function_in_te_state_module(f, quantization_recipe, name: Optional[str]
             return super().generate_quantizer_set(
                 postfix=postfix,
                 variable_collection=OVERWRITE_WITH_GRADIENT,
+                quantization_checkpoint_name=quantization_checkpoint_name,
                 fp8_recipe=quantization_recipe,
                 n_groups=n_groups,
             )
@@ -1443,10 +1452,15 @@ def make_dot_general_cls(quantization_recipe):
     return wrap_function_in_te_state_module(te_dot_general, quantization_recipe, "dot_general")
 
 
-def make_grouped_dense_cls(quantization_recipe):
+def make_grouped_dense_cls(quantization_recipe, quantization_checkpoint_name: Optional[str] = None):
     """Creates a grouped dense (grouped GEMM) instance for use with TE state module."""
     if quantization_recipe is not None:
-        raise ValueError("Ragged dot grouped GEMM does not support quantization yet")
+        allowed_grouped_gemm_recipes = [MXFP8BlockScaling]
+        assert any(isinstance(quantization_recipe, r) for r in allowed_grouped_gemm_recipes), (
+            "Only the following quantization recipes are supported for grouped GEMM or `None` for"
+            f" BF16 without quantization: {allowed_grouped_gemm_recipes}. Got"
+            f" {type(quantization_recipe)}."
+        )
 
     def te_grouped_dot_general(generate_quantizer_set, x, kernel, group_sizes, **kwargs):
         del kwargs  # Unused
@@ -1463,5 +1477,8 @@ def make_grouped_dense_cls(quantization_recipe):
         return out
 
     return wrap_function_in_te_state_module(
-        te_grouped_dot_general, quantization_recipe, "ragged_dot"
+        te_grouped_dot_general,
+        quantization_recipe,
+        "ragged_dot",
+        quantization_checkpoint_name=quantization_checkpoint_name,
     )()
