@@ -4,6 +4,7 @@
 
 """PyTorch wrapper functions for mHC (manifold Hyper-Connection) Triton kernels."""
 
+import os
 import torch
 import triton
 
@@ -24,6 +25,9 @@ from transformer_engine.common.triton.mhc import (
     _mhc_sinkhorn_bwd_fused_recompute,
 )
 
+def check_deterministic(operator: str):
+    allow_nondeterministic = os.environ.get("ALLOW_NONDETERMINISTIC_MHC_KERNELS", "0") == "1"
+    assert allow_nondeterministic, f"[{operator}]: This operation uses atomic add which violates determinism. Set ALLOW_NONDETERMINISTIC_MHC_KERNELS=1 to allow this non-deterministic behavior."
 
 def mhc_fused_sinkhorn(
     H_res: torch.Tensor, n: int = 4, recompute_hist: bool = True, iters: int = 20
@@ -31,8 +35,8 @@ def mhc_fused_sinkhorn(
     """
     Sinkhorn operation to compute the final H_res matrix (see eq. 19, section 4.3.1 of the DeepSeek mHC paper):
 
-    Sinkhorn operation conducts iterative normalization process that alternately rescales rows and columns to sum to 1.
-    This kernel performance this operation in the log space for numerical stability.
+    The Sinkhorn operation conducts an iterative normalization process that alternately rescales rows and columns to sum to 1.
+    This kernel performs this operation in the log space for numerical stability.
 
     Parameters
     ----------
@@ -98,6 +102,7 @@ def mhc_fused_scale(
 
     """
     assert n == 4, "Only n=4 is supported in this implementation"
+    check_deterministic("mhc_fused_scale")
     out = mHCScaleFusedOp.apply(H, alpha, beta, ms, n)
     h_pre = out[..., :n]
     h_post = out[..., n : 2 * n]
@@ -107,7 +112,7 @@ def mhc_fused_scale(
 
 def mhc_fused_aggregate(x: torch.Tensor, H_pre: torch.Tensor, n: int, use_tf32: bool = True):
     """
-    Aggregate operation to merge n activation streams to one (see section 4.3.1 of the DeepSeek mHC paper):
+    Aggregate operation to merge n activation streams into one (see section 4.3.1 of the DeepSeek mHC paper):
     out = x @ H_pre: (s, b, C, n) @ (s, b, n, 1) -> (s, b, C, 1) -> (s, b, C) after squeezing the last dimension
 
     Parameters
@@ -129,6 +134,7 @@ def mhc_fused_aggregate(x: torch.Tensor, H_pre: torch.Tensor, n: int, use_tf32: 
          output activation tensor of shape (s, b, C), which is the aggregated output after merging n hyper connections
     """
     assert n == 4, "Only n=4 is supported in this implementation"
+    check_deterministic("mhc_fused_aggregate")
     out = mHCAggregateOp.apply(x, H_pre, n, use_tf32)
     return out
 
@@ -152,7 +158,7 @@ def mhc_fused_expand_combine(
     f : torch.Tensor
         input activation tensor of shape (s, b, C), which is the output from the attention / FFN sub-layer in a transformer block
     bias : torch.Tensor or None
-        optional bias tensor of shape C from the last linear layer, where f + bias is fused in this kernel for better performance
+        optional bias tensor of shape (C,) from the last linear layer, where f + bias is fused in this kernel for better performance
     H_post : torch.Tensor
         input H_post matrix of shape (s, b, n)
     x : torch.Tensor
@@ -171,6 +177,7 @@ def mhc_fused_expand_combine(
         out of shape (s, b, C, n), which is the expanded and combined output after merging n hyper connections
     """
     assert n == 4, "Only n=4 is supported in this implementation"
+    check_deterministic("mhc_fused_expand_combine")
     out = mHCExpandCombineOp.apply(
         f,
         bias,
@@ -185,7 +192,7 @@ def mhc_fused_expand_combine(
 
 def mhc_fused_projection(x: torch.Tensor, phi: torch.Tensor, use_tf32: bool = True):
     """
-    Fused projection operation to compute H matrices and mean square for RMSNorm (see eq. 14-15, seciton 4.3.1 of the DeepSeek mHC paper):
+    Fused projection operation to compute H matrices and mean square for RMSNorm (see eq. 14-15, section 4.3.1 of the DeepSeek mHC paper):
 
     H = x @ phi^T: (M, K) @ (K, N) -> (M, N), which is padded to (M, 32) for better memory access pattern in the next kernels.
     ms = mean(x^2, dim=-1): (M,)
@@ -212,6 +219,7 @@ def mhc_fused_projection(x: torch.Tensor, phi: torch.Tensor, use_tf32: bool = Tr
     assert (
         phi.shape[0] == 24
     ), "Currently only n=4 is supported, which means phi should have 24 in its first dimension"
+    check_deterministic("mhc_fused_projection")
     H, ms = mHCProjectionOp.apply(x, phi, use_tf32)
     return H, ms
 
@@ -250,7 +258,7 @@ class mHCProjectionOp(torch.autograd.Function):
         # Pad H to (s, b, 32) for better memory access pattern in the kernel, but only the first N elements in the last dimension are valid
         H = torch.zeros((M, 32), device=device, dtype=torch.float32)
         ms = torch.zeros(
-            (M), device=device, dtype=torch.float32
+            (M,), device=device, dtype=torch.float32
         )  # Mean square for s, used to compute RMSNorm in the next kernel
 
         # pylint: disable=unnecessary-lambda-assignment
@@ -259,44 +267,24 @@ class mHCProjectionOp(torch.autograd.Function):
             triton.cdiv(K, META["BLOCK_SIZE_K"]),
         )
 
-        if use_tf32:
-            _mhc_projection_fwd_fused[grid](
-                x_ptr=x,  # (M, K)
-                phi_ptr=phi,  # (N, K)
-                h_ptr=H,  # (M, 32)
-                ms_ptr=ms,  # (M,)
-                M=M,
-                N=N,
-                K=K,
-                stride_xm=K,
-                stride_xk=1,
-                stride_phin=K,
-                stride_phik=1,
-                stride_hm=32,
-                stride_hn=1,
-                stride_ms=1,
-                BLOCK_SIZE_N=32,
-                precision="tf32",
-            )
-        else:
-            _mhc_projection_fwd_fused[grid](
-                x_ptr=x,  # (M, K)
-                phi_ptr=phi,  # (N, K)
-                h_ptr=H,  # (M, 32)
-                ms_ptr=ms,  # (M,)
-                M=M,
-                N=N,
-                K=K,
-                stride_xm=K,
-                stride_xk=1,
-                stride_phin=K,
-                stride_phik=1,
-                stride_hm=32,
-                stride_hn=1,
-                stride_ms=1,
-                BLOCK_SIZE_N=32,
-                precision="ieee",
-            )
+        _mhc_projection_fwd_fused[grid](
+            x_ptr=x,  # (M, K)
+            phi_ptr=phi,  # (N, K)
+            h_ptr=H,  # (M, 32)
+            ms_ptr=ms,  # (M,)
+            M=M,
+            N=N,
+            K=K,
+            stride_xm=K,
+            stride_xk=1,
+            stride_phin=K,
+            stride_phik=1,
+            stride_hm=32,
+            stride_hn=1,
+            stride_ms=1,
+            BLOCK_SIZE_N=32,
+            precision="tf32" if use_tf32 else "ieee",
+        )
 
         ctx.save_for_backward(x, phi, ms)
         ctx.phi_dtype = phi.dtype
@@ -345,54 +333,29 @@ class mHCProjectionOp(torch.autograd.Function):
             triton.cdiv(K, META["BLOCK_SIZE_K"]),
         )
 
-        if ctx.use_tf32:
-            _mhc_projection_bwd_fused[grid](
-                x_ptr=x,
-                grad_x_ptr=grad_x,  # (M, K)
-                phi_ptr=phi,  # (N, K)
-                grad_h_ptr=grad_H,  # (M, 32)
-                grad_ms_ptr=grad_ms,  # (M,)
-                M=M,
-                N=N,
-                K=K,
-                stride_xm=K,
-                stride_xk=1,
-                stride_grad_xm=K,
-                stride_grad_xk=1,
-                stride_phin=K,
-                stride_phik=1,
-                stride_grad_phin=K,
-                stride_grad_phik=1,
-                stride_grad_hm=32,
-                stride_grad_hn=1,
-                stride_grad_ms=1,
-                BLOCK_SIZE_N=32,
-                precision="tf32",
-            )
-        else:
-            _mhc_projection_bwd_fused[grid](
-                x_ptr=x,
-                grad_x_ptr=grad_x,  # (M, K)
-                phi_ptr=phi,  # (N, K)
-                grad_h_ptr=grad_H,  # (M, 32)
-                grad_ms_ptr=grad_ms,  # (M,),
-                M=M,
-                N=N,
-                K=K,
-                stride_xm=K,
-                stride_xk=1,
-                stride_grad_xm=K,
-                stride_grad_xk=1,
-                stride_phin=K,
-                stride_phik=1,
-                stride_grad_phin=K,
-                stride_grad_phik=1,
-                stride_grad_hm=32,
-                stride_grad_hn=1,
-                stride_grad_ms=1,
-                BLOCK_SIZE_N=32,
-                precision="ieee",
-            )
+        _mhc_projection_bwd_fused[grid](
+            x_ptr=x,
+            grad_x_ptr=grad_x,  # (M, K)
+            phi_ptr=phi,  # (N, K)
+            grad_h_ptr=grad_H,  # (M, 32)
+            grad_ms_ptr=grad_ms,  # (M,)
+            M=M,
+            N=N,
+            K=K,
+            stride_xm=K,
+            stride_xk=1,
+            stride_grad_xm=K,
+            stride_grad_xk=1,
+            stride_phin=K,
+            stride_phik=1,
+            stride_grad_phin=K,
+            stride_grad_phik=1,
+            stride_grad_hm=32,
+            stride_grad_hn=1,
+            stride_grad_ms=1,
+            BLOCK_SIZE_N=32,
+            precision="tf32" if ctx.use_tf32 else "ieee",
+        )
 
         return grad_x.to(ctx.dtype), grad_phi.to(ctx.dtype), None
 
@@ -650,7 +613,6 @@ class mHCSinkhornOp(torch.autograd.Function):
         else:
             H_res, H_res_out, hist_f, hist_g = ctx.saved_tensors
 
-        iters = ctx.iters
         n = ctx.n
 
         grad_res_out = grad_out.clone().contiguous().view(M, n * n)
@@ -800,42 +762,23 @@ class mHCAggregateOp(torch.autograd.Function):
             triton.cdiv(M, META["BLOCK_SIZE_M"]),
         )
 
-        if ctx.use_tf32:
-            _mhc_aggregate_bwd[grid](
-                grad_output_ptr=grad_output,
-                H_pre_ptr=H_pre,
-                grad_H_pre_ptr=grad_H_pre,
-                x_ptr=x,
-                grad_x_ptr=grad_x,
-                M=M,
-                C=C,
-                n=n,
-                stride_grad_output_m=C,
-                stride_grad_output_c=1,
-                stride_xm=nC,
-                stride_xCn=1,
-                stride_grad_xm=nC,
-                stride_grad_xCn=1,
-                precision="tf32",
-            )
-        else:
-            _mhc_aggregate_bwd[grid](
-                grad_output_ptr=grad_output,
-                H_pre_ptr=H_pre,
-                grad_H_pre_ptr=grad_H_pre,
-                x_ptr=x,
-                grad_x_ptr=grad_x,
-                M=M,
-                C=C,
-                n=n,
-                stride_grad_output_m=C,
-                stride_grad_output_c=1,
-                stride_xm=nC,
-                stride_xCn=1,
-                stride_grad_xm=nC,
-                stride_grad_xCn=1,
-                precision="ieee",
-            )
+        _mhc_aggregate_bwd[grid](
+            grad_output_ptr=grad_output,
+            H_pre_ptr=H_pre,
+            grad_H_pre_ptr=grad_H_pre,
+            x_ptr=x,
+            grad_x_ptr=grad_x,
+            M=M,
+            C=C,
+            n=n,
+            stride_grad_output_m=C,
+            stride_grad_output_c=1,
+            stride_xm=nC,
+            stride_xCn=1,
+            stride_grad_xm=nC,
+            stride_grad_xCn=1,
+            precision="tf32" if ctx.use_tf32 else "ieee",
+        )
 
         grad_H_pre = grad_H_pre.to(H_pre.dtype)  # Cast back to the original dtype of H_pre
 
@@ -979,120 +922,62 @@ class mHCExpandCombineOp(torch.autograd.Function):
             triton.cdiv(M, META["BLOCK_SIZE_M"]),
         )
 
-        if ctx.use_tf32:
-            if bias is None:
-                _mhc_expand_combine_bwd[grid](
-                    grad_output_ptr=grad_output,
-                    f_ptr=f,
-                    H_post_ptr=H_post,
-                    x_ptr=x,
-                    H_res_ptr=H_res,
-                    grad_H_post_ptr=grad_H_post,
-                    grad_f_ptr=grad_f,
-                    grad_H_res_ptr=grad_H_res,
-                    grad_x_ptr=grad_x,
-                    M=M,
-                    C=C,
-                    n=n,
-                    stride_grad_output_m=n * C,
-                    stride_grad_output_Cn=1,
-                    stride_fm=C,
-                    stride_fc=1,
-                    stride_xm=n * C,
-                    stride_xCn=1,
-                    stride_grad_fm=C,
-                    stride_grad_fc=1,
-                    stride_grad_xm=n * C,
-                    stride_grad_xCn=1,
-                    precision="tf32",
-                )
-            else:
-                _mhc_expand_combine_with_bias_bwd[grid](
-                    grad_output_ptr=grad_output,
-                    f_ptr=f,
-                    bias_ptr=bias,
-                    H_post_ptr=H_post,
-                    x_ptr=x,
-                    H_res_ptr=H_res,
-                    grad_H_post_ptr=grad_H_post,
-                    grad_f_ptr=grad_f,
-                    grad_bias_ptr=grad_bias,
-                    grad_H_res_ptr=grad_H_res,
-                    grad_x_ptr=grad_x,
-                    M=M,
-                    C=C,
-                    n=n,
-                    stride_grad_output_m=n * C,
-                    stride_grad_output_Cn=1,
-                    stride_fm=C,
-                    stride_fc=1,
-                    stride_bias=1,
-                    stride_xm=n * C,
-                    stride_xCn=1,
-                    stride_grad_fm=C,
-                    stride_grad_fc=1,
-                    stride_grad_bias=1,
-                    stride_grad_xm=n * C,
-                    stride_grad_xCn=1,
-                    precision="tf32",
-                )
+        if bias is None:
+            _mhc_expand_combine_bwd[grid](
+                grad_output_ptr=grad_output,
+                f_ptr=f,
+                H_post_ptr=H_post,
+                x_ptr=x,
+                H_res_ptr=H_res,
+                grad_H_post_ptr=grad_H_post,
+                grad_f_ptr=grad_f,
+                grad_H_res_ptr=grad_H_res,
+                grad_x_ptr=grad_x,
+                M=M,
+                C=C,
+                n=n,
+                stride_grad_output_m=n * C,
+                stride_grad_output_Cn=1,
+                stride_fm=C,
+                stride_fc=1,
+                stride_xm=n * C,
+                stride_xCn=1,
+                stride_grad_fm=C,
+                stride_grad_fc=1,
+                stride_grad_xm=n * C,
+                stride_grad_xCn=1,
+                precision="tf32" if ctx.use_tf32 else "ieee",
+            )
         else:
-            if bias is None:
-                _mhc_expand_combine_bwd[grid](
-                    grad_output_ptr=grad_output,
-                    f_ptr=f,
-                    H_post_ptr=H_post,
-                    x_ptr=x,
-                    H_res_ptr=H_res,
-                    grad_H_post_ptr=grad_H_post,
-                    grad_f_ptr=grad_f,
-                    grad_H_res_ptr=grad_H_res,
-                    grad_x_ptr=grad_x,
-                    M=M,
-                    C=C,
-                    n=n,
-                    stride_grad_output_m=n * C,
-                    stride_grad_output_Cn=1,
-                    stride_fm=C,
-                    stride_fc=1,
-                    stride_xm=n * C,
-                    stride_xCn=1,
-                    stride_grad_fm=C,
-                    stride_grad_fc=1,
-                    stride_grad_xm=n * C,
-                    stride_grad_xCn=1,
-                    precision="ieee",
-                )
-            else:
-                _mhc_expand_combine_with_bias_bwd[grid](
-                    grad_output_ptr=grad_output,
-                    f_ptr=f,
-                    bias_ptr=bias,
-                    H_post_ptr=H_post,
-                    x_ptr=x,
-                    H_res_ptr=H_res,
-                    grad_H_post_ptr=grad_H_post,
-                    grad_f_ptr=grad_f,
-                    grad_bias_ptr=grad_bias,
-                    grad_H_res_ptr=grad_H_res,
-                    grad_x_ptr=grad_x,
-                    M=M,
-                    C=C,
-                    n=n,
-                    stride_grad_output_m=n * C,
-                    stride_grad_output_Cn=1,
-                    stride_fm=C,
-                    stride_fc=1,
-                    stride_bias=1,
-                    stride_xm=n * C,
-                    stride_xCn=1,
-                    stride_grad_fm=C,
-                    stride_grad_fc=1,
-                    stride_grad_bias=1,
-                    stride_grad_xm=n * C,
-                    stride_grad_xCn=1,
-                    precision="ieee",
-                )
+            _mhc_expand_combine_with_bias_bwd[grid](
+                grad_output_ptr=grad_output,
+                f_ptr=f,
+                bias_ptr=bias,
+                H_post_ptr=H_post,
+                x_ptr=x,
+                H_res_ptr=H_res,
+                grad_H_post_ptr=grad_H_post,
+                grad_f_ptr=grad_f,
+                grad_bias_ptr=grad_bias,
+                grad_H_res_ptr=grad_H_res,
+                grad_x_ptr=grad_x,
+                M=M,
+                C=C,
+                n=n,
+                stride_grad_output_m=n * C,
+                stride_grad_output_Cn=1,
+                stride_fm=C,
+                stride_fc=1,
+                stride_bias=1,
+                stride_xm=n * C,
+                stride_xCn=1,
+                stride_grad_fm=C,
+                stride_grad_fc=1,
+                stride_grad_bias=1,
+                stride_grad_xm=n * C,
+                stride_grad_xCn=1,
+                precision="tf32" if ctx.use_tf32 else "ieee",
+            )
 
         grad_H_post = grad_H_post.to(H_post.dtype)  # Cast back to the original dtype of H_post
         grad_H_res = grad_H_res.to(H_res.dtype)  # Cast back to the original dtype of H_res
