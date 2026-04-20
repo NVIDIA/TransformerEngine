@@ -268,7 +268,7 @@ class mHCProjectionOp(torch.autograd.Function):
         H = torch.zeros((M, 32), device=device, dtype=torch.float32)
         ms = torch.zeros(
             (M,), device=device, dtype=torch.float32
-        )  # Mean square for s, used to compute RMSNorm in the next kernel
+        )  # Mean square for x, used to compute RMSNorm in the next kernel
 
         # pylint: disable=unnecessary-lambda-assignment
         grid = lambda META: (
@@ -554,7 +554,7 @@ class mHCSinkhornOp(torch.autograd.Function):
         H_res_out = torch.empty_like(H_res)  # (s*b, n*n)
 
         # pylint: disable=unnecessary-lambda-assignment
-        grid = lambda meta: (triton.cdiv(s * b * n * n, meta["BLOCK_SIZE"]),)
+        grid = lambda META: (triton.cdiv(s * b * n * n, META["BLOCK_SIZE"]),)
 
         if recompute_hist:
             _mhc_sinkhorn_fwd_fused_recompute[grid](
@@ -629,7 +629,7 @@ class mHCSinkhornOp(torch.autograd.Function):
         grad_res = torch.empty_like(H_res)
 
         # pylint: disable=unnecessary-lambda-assignment
-        grid = lambda meta: (triton.cdiv(M * n * n, meta["BLOCK_SIZE"]),)
+        grid = lambda META: (triton.cdiv(M * n * n, META["BLOCK_SIZE"]),)
 
         if recompute_hist:
             _mhc_sinkhorn_bwd_fused_recompute[grid](
