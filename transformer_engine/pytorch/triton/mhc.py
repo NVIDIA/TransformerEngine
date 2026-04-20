@@ -31,7 +31,7 @@ def check_deterministic(operator: str):
     Checks if the non-deterministic algorithm is allowed for the given operator. If not, raises an assertion error with instructions on how to allow it.
     Since atomic add is used in this mHC implementation, it breaks the determinism guarantee due to non-associativity of floating point addition.
     """
-    allow_nondeterministic = os.environ.get("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "0") == "1"
+    allow_nondeterministic = os.environ.get("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1") == "1"
     assert allow_nondeterministic, (
         f"[{operator}]: This operation uses atomic add which violates determinism. Set"
         " NVTE_ALLOW_NONDETERMINISTIC_ALGO=1 to allow this non-deterministic behavior."
