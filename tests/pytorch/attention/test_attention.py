@@ -49,11 +49,11 @@ import transformer_engine_torch as tex
 from transformer_engine.pytorch.quantized_tensor import (
     Quantizer,
     prepare_for_saving,
-    restore_from_saved,
+    restore_from_func_ctx,
 )
 
 _current_file = pathlib.Path(__file__).resolve()
-sys.path.append(str(_current_file.parent.parent))
+sys.path = [str(_current_file.parent.parent)] + sys.path
 from utils import (
     reset_rng_states,
     compare_and_assert,
@@ -360,6 +360,139 @@ def test_dpa_num_splits(dtype, model_configs, model):
         False,
         False,
     )
+
+
+# ==============================
+# Flash Attention 4 (FA4) tests
+# ==============================
+
+model_configs_fa4_base = {
+    # test: ModelConfig(b, sq, hq, dqk)
+    # Standard head dims
+    "fa4_base_1": ModelConfig(4, 128, 16, 64),
+    "fa4_base_2": ModelConfig(2, 2048, 24, 128, attn_mask_type="causal"),
+    "fa4_base_3": ModelConfig(2, 1024, 8, 96, attn_mask_type="causal"),
+    # GQA
+    "fa4_gqa_1": ModelConfig(2, 1024, 32, 128, num_gqa_groups=8, attn_mask_type="causal"),
+    "fa4_gqa_2": ModelConfig(2, 1024, 16, 128, num_gqa_groups=1, attn_mask_type="causal"),
+    # num_splits
+    "fa4_splits_1": ModelConfig(2, 2048, 24, 128, num_splits=2),
+    "fa4_splits_2": ModelConfig(1, 2048, 24, 128, max_seqlen_kv=4096, num_splits=4),
+}
+
+
+@pytest.mark.skipif(
+    not FlashAttentionUtils.v4_is_installed, reason="Flash-attn v4 (flash-attn-4) is required."
+)
+@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
+@pytest.mark.parametrize("dtype", param_types_lean)
+@pytest.mark.parametrize("model_configs", [model_configs_fa4_base])
+@pytest.mark.parametrize("model", model_configs_fa4_base.keys())
+def test_dpa_fa4_base(dtype, model_configs, model):
+    """Test DotProductAttention with FA4: base configs, extended head dims, GQA, num_splits"""
+    test_dot_product_attention(dtype, model_configs, model, False, True, None, False, False)
+
+
+model_configs_fa4_mla = {
+    # test: ModelConfig(b, sq, hq, dqk, head_dim_v=dv)
+    "fa4_mla_1": ModelConfig(4, 128, 16, 128, head_dim_v=64),
+    "fa4_mla_2": ModelConfig(2, 128, 16, 64, max_seqlen_kv=256, head_dim_v=128),
+    "fa4_mla_3": ModelConfig(2, 1024, 16, 96, head_dim_v=64, attn_mask_type="causal"),
+    # dqk=128, dv=96: FA4 SM100 backward has dK_reduce_ncol misalignment for dV;
+    # the backend filter should reject FA4 and fall back to another backend.
+    "fa4_mla_4": ModelConfig(2, 1024, 16, 128, head_dim_v=96, attn_mask_type="causal"),
+    # DeepSeek-style MLA: dqk=192, dv=128 (supported on SM100 as special case)
+    "fa4_mla_deepseek": ModelConfig(2, 1024, 16, 192, head_dim_v=128, attn_mask_type="causal"),
+}
+
+
+@pytest.mark.skipif(
+    not FlashAttentionUtils.v4_is_installed, reason="Flash-attn v4 (flash-attn-4) is required."
+)
+@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
+@pytest.mark.parametrize("dtype", param_types_lean)
+@pytest.mark.parametrize("model_configs", [model_configs_fa4_mla])
+@pytest.mark.parametrize("model", model_configs_fa4_mla.keys())
+def test_dpa_fa4_mla(dtype, model_configs, model):
+    """Test DotProductAttention with FA4: MLA (head_dim_qk != head_dim_v)"""
+    test_dot_product_attention(
+        dtype, model_configs, model, False, True, "bshd_bshd_bshd", False, False
+    )
+
+
+model_configs_fa4_swa = {
+    # test: ModelConfig(b, sq, hq, dqk, window_size=(left, right))
+    "fa4_swa_1": ModelConfig(2, 2048, 16, 128, attn_mask_type="causal", window_size=(128, 0)),
+    "fa4_swa_2": ModelConfig(2, 2048, 24, 64, attn_mask_type="causal", window_size=(64, 0)),
+    "fa4_swa_3": ModelConfig(
+        2, 2048, 16, 128, num_gqa_groups=4, attn_mask_type="causal", window_size=(256, 0)
+    ),
+    "fa4_swa_4": ModelConfig(
+        2, 2048, 16, 128, attn_mask_type="padding_causal", window_size=(128, 0)
+    ),
+}
+
+
+@pytest.mark.skipif(
+    not FlashAttentionUtils.v4_is_installed, reason="Flash-attn v4 (flash-attn-4) is required."
+)
+@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
+@pytest.mark.parametrize("dtype", param_types_lean)
+@pytest.mark.parametrize("model_configs", [model_configs_fa4_swa])
+@pytest.mark.parametrize("model", model_configs_fa4_swa.keys())
+@pytest.mark.parametrize("qkv_layout", ["sbhd_sbhd_sbhd", "bshd_bshd_bshd"])
+def test_dpa_fa4_sliding_window(dtype, model_configs, model, qkv_layout):
+    """Test DotProductAttention with FA4: sliding window attention"""
+    test_dot_product_attention(dtype, model_configs, model, False, True, qkv_layout, True, False)
+
+
+model_configs_fa4_varlen = {
+    # test: ModelConfig(b, sq, hq, dqk)
+    "fa4_varlen_1": ModelConfig(4, 128, 16, 64, attn_mask_type="padding"),
+    "fa4_varlen_2": ModelConfig(2, 2048, 24, 128, attn_mask_type="padding_causal"),
+    "fa4_varlen_3": ModelConfig(
+        2, 2048, 24, 128, num_gqa_groups=4, attn_mask_type="padding_causal"
+    ),
+    "fa4_varlen_4": ModelConfig(2, 128, 16, 64, max_seqlen_kv=256, attn_mask_type="padding"),
+}
+
+
+@pytest.mark.skipif(
+    not FlashAttentionUtils.v4_is_installed, reason="Flash-attn v4 (flash-attn-4) is required."
+)
+@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
+@pytest.mark.parametrize("dtype", param_types_lean)
+@pytest.mark.parametrize("model_configs", [model_configs_fa4_varlen])
+@pytest.mark.parametrize("model", model_configs_fa4_varlen.keys())
+@pytest.mark.parametrize("qkv_layout", ["thd_thd_thd", "bshd_bshd_bshd"])
+def test_dpa_fa4_varlen(dtype, model_configs, model, qkv_layout):
+    """Test DotProductAttention with FA4: variable-length sequences (varlen/thd)"""
+    test_dot_product_attention(dtype, model_configs, model, False, True, qkv_layout, False, False)
+
+
+model_configs_fa4_mask = {
+    # test: ModelConfig(b, sq, hq, dqk)
+    "fa4_mask_no_mask": ModelConfig(2, 1024, 16, 128),
+    "fa4_mask_causal": ModelConfig(2, 1024, 16, 128, attn_mask_type="causal"),
+    "fa4_mask_causal_br": ModelConfig(2, 1024, 16, 128, attn_mask_type="causal_bottom_right"),
+    "fa4_mask_padding": ModelConfig(2, 1024, 16, 128, attn_mask_type="padding"),
+    "fa4_mask_padding_causal": ModelConfig(2, 1024, 16, 128, attn_mask_type="padding_causal"),
+    "fa4_mask_padding_causal_br": ModelConfig(
+        2, 1024, 16, 128, attn_mask_type="padding_causal_bottom_right"
+    ),
+}
+
+
+@pytest.mark.skipif(
+    not FlashAttentionUtils.v4_is_installed, reason="Flash-attn v4 (flash-attn-4) is required."
+)
+@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
+@pytest.mark.parametrize("dtype", param_types_lean)
+@pytest.mark.parametrize("model_configs", [model_configs_fa4_mask])
+@pytest.mark.parametrize("model", model_configs_fa4_mask.keys())
+def test_dpa_fa4_mask(dtype, model_configs, model):
+    """Test DotProductAttention with FA4: various attention mask types"""
+    test_dot_product_attention(dtype, model_configs, model, False, True, None, False, False)
 
 
 model_configs_softmax = {
@@ -2701,10 +2834,7 @@ class _custom_mha_fp8(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
         with torch.cuda.nvtx.range("_DPA"):
-            saved_tensors = ctx.saved_tensors
-            (q, k, v, inp_fp8, qkv_weight_fp8, out) = restore_from_saved(
-                ctx.tensor_objects, saved_tensors
-            )
+            (q, k, v, inp_fp8, qkv_weight_fp8, out) = restore_from_func_ctx(ctx)
 
             proj_dgrad = ctx.dO_quantizer(grad_output)
             fp8_dtype_backward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=False)

@@ -709,7 +709,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 autocast_key = FP8GlobalStateManager.get_unique_autocast_key(
                     fp8_recipe_dpa, fp8_group
                 )
-                FP8GlobalStateManager.autocast_arguments[autocast_key] = (
+                FP8GlobalStateManager.quantization_state.autocast_arguments[autocast_key] = (
                     fp8_recipe_dpa,
                     fp8_group,
                 )
@@ -741,7 +741,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 autocast_key = FP8GlobalStateManager.get_unique_autocast_key(
                     fp8_recipe_dpa, fp8_group
                 )
-                FP8GlobalStateManager.autocast_arguments[autocast_key] = (
+                FP8GlobalStateManager.quantization_state.autocast_arguments[autocast_key] = (
                     fp8_recipe_dpa,
                     fp8_group,
                 )

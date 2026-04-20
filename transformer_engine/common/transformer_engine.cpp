@@ -33,35 +33,6 @@ size_t typeToSize(const DType type) {
   return typeToNumBits(type) / 8;
 }
 
-std::string to_string(const DType type) {
-  switch (type) {
-    case DType::kByte:
-      return "Byte";
-    case DType::kBFloat16:
-      return "BFloat16";
-    case DType::kFloat16:
-      return "Float16";
-    case DType::kFloat32:
-      return "Float32";
-    case DType::kFloat8E4M3:
-      return "Float8E4M3";
-    case DType::kFloat8E5M2:
-      return "Float8E5M2";
-    case DType::kFloat8E8M0:
-      return "Float8E8M0";
-    case DType::kFloat4E2M1:
-      return "Float4E2M1";
-    case DType::kInt16:
-      return "Int16";
-    case DType::kInt32:
-      return "Int32";
-    case DType::kInt64:
-      return "Int64";
-    default:
-      return concat_strings("Invalid type ", static_cast<int>(type));
-  }
-}
-
 std::string to_string(const NVTEScalingMode &mode) {
   switch (mode) {
     case NVTE_DELAYED_TENSOR_SCALING:
@@ -310,7 +281,18 @@ void CheckGroupedTensorShapeArrays(const GroupedTensor &t, const std::string &na
   // Validate shape arrays (all optional)
   check_shape_array(t.first_dims, "first_dims");
   check_shape_array(t.last_dims, "last_dims");
-  check_shape_array(t.tensor_offsets, "tensor_offsets");
+
+  // tensor_offsets uses CSR-style prefix-sum layout with num_tensors+1 entries:
+  // offsets[i] = start of tensor i, offsets[num_tensors] = total elements
+  if (t.tensor_offsets.has_data()) {
+    NVTE_CHECK(t.tensor_offsets.shape.size() == 1, "Grouped tensor ", name,
+               " tensor_offsets must be 1D");
+    NVTE_CHECK(t.tensor_offsets.dtype == DType::kInt64, "Grouped tensor ", name,
+               " tensor_offsets must have dtype Int64");
+    NVTE_CHECK(t.tensor_offsets.shape[0] == t.num_tensors + 1, "Grouped tensor ", name,
+               " tensor_offsets size (", t.tensor_offsets.shape[0], ") must equal num_tensors+1 (",
+               t.num_tensors + 1, ")");
+  }
 
   // tensor_offsets is required if any dimension varies
   // (i.e., required unless all_same_shape())

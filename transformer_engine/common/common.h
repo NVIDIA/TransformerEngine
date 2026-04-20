@@ -41,7 +41,34 @@ static_assert(NVTE_BUILD_NUM_PHILOX_ROUNDS > 0,
 
 namespace transformer_engine {
 
-std::string to_string(const DType type);
+inline std::string to_string(const DType type) {
+  switch (type) {
+    case DType::kByte:
+      return "Byte";
+    case DType::kBFloat16:
+      return "BFloat16";
+    case DType::kFloat16:
+      return "Float16";
+    case DType::kFloat32:
+      return "Float32";
+    case DType::kFloat8E4M3:
+      return "Float8E4M3";
+    case DType::kFloat8E5M2:
+      return "Float8E5M2";
+    case DType::kFloat8E8M0:
+      return "Float8E8M0";
+    case DType::kFloat4E2M1:
+      return "Float4E2M1";
+    case DType::kInt16:
+      return "Int16";
+    case DType::kInt32:
+      return "Int32";
+    case DType::kInt64:
+      return "Int64";
+    default:
+      return std::string("Invalid type ") + std::to_string(static_cast<int>(type));
+  }
+}
 std::string to_string(const NVTEScalingMode &mode);
 
 inline std::string to_string_like(const DType &val) { return to_string(val); }
@@ -877,6 +904,48 @@ struct TypeInfo {
     { __VA_ARGS__ }                                               \
   }
 
+#define TRANSFORMER_ENGINE_SCALING_TYPE_SWITCH(SCALING_TYPE, SCALING_T, ...) \
+  switch (SCALING_TYPE) {                                                    \
+    case ScalingType::ROWWISE: {                                             \
+      constexpr ScalingType SCALING_T = ScalingType::ROWWISE;                \
+      { __VA_ARGS__ }                                                        \
+    } break;                                                                 \
+    case ScalingType::COLWISE: {                                             \
+      constexpr ScalingType SCALING_T = ScalingType::COLWISE;                \
+      { __VA_ARGS__ }                                                        \
+    } break;                                                                 \
+    case ScalingType::BIDIMENSIONAL: {                                       \
+      constexpr ScalingType SCALING_T = ScalingType::BIDIMENSIONAL;          \
+      { __VA_ARGS__ }                                                        \
+    } break;                                                                 \
+    default: {                                                               \
+      NVTE_ERROR("Unsupported scaling type.");                               \
+    }                                                                        \
+  }
+
+#define TRANSFORMER_ENGINE_GROUP_TENSOR_SHAPE_REPRESENTATION_SWITCH(SHAPE_REP, SHAPE, ...) \
+  switch (SHAPE_REP) {                                                                     \
+    case ShapeRepresentation::SAME_BOTH_DIMS: {                                            \
+      constexpr ShapeRepresentation SHAPE = ShapeRepresentation::SAME_BOTH_DIMS;           \
+      { __VA_ARGS__ }                                                                      \
+    } break;                                                                               \
+    case ShapeRepresentation::VARYING_FIRST_DIM: {                                         \
+      constexpr ShapeRepresentation SHAPE = ShapeRepresentation::VARYING_FIRST_DIM;        \
+      { __VA_ARGS__ }                                                                      \
+    } break;                                                                               \
+    case ShapeRepresentation::VARYING_LAST_DIM: {                                          \
+      constexpr ShapeRepresentation SHAPE = ShapeRepresentation::VARYING_LAST_DIM;         \
+      { __VA_ARGS__ }                                                                      \
+    } break;                                                                               \
+    case ShapeRepresentation::VARYING_BOTH_DIMS: {                                         \
+      constexpr ShapeRepresentation SHAPE = ShapeRepresentation::VARYING_BOTH_DIMS;        \
+      { __VA_ARGS__ }                                                                      \
+    } break;                                                                               \
+    default: {                                                                             \
+      NVTE_ERROR("Unsupported grouped tensor shape representation.");                      \
+    }                                                                                      \
+  }
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 inline int log2_ceil(int value) {
@@ -915,6 +984,8 @@ constexpr size_t scale_tensor_alignment_X_rowwise = 4;
 constexpr size_t scale_tensor_alignment_Y_rowwise = 128;
 constexpr size_t scale_tensor_alignment_X_colwise = 128;
 constexpr size_t scale_tensor_alignment_Y_colwise = 4;
+
+constexpr size_t SCALING_FACTORS_SWIZZLE_ALIGNMENT = 128;
 
 // Alignment requirements for the Tensor Memory Accelerator (TMA)
 constexpr size_t TMA_GMEM_ALIGNMENT = 16;    // global memory address alignment

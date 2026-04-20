@@ -147,9 +147,7 @@ def check_quantization_nvfp4_versus_reference(
     ],
 )
 @pytest.mark.parametrize("x_dtype", [torch.float32, torch.bfloat16], ids=str)
-@pytest.mark.parametrize(
-    "return_transpose", [True, False], ids=["quantize_transpose", "skip_transpose"]
-)
+@pytest.mark.parametrize("return_transpose", [True, False], ids=["both_directions", "rowwise_only"])
 @pytest.mark.parametrize("swizzled_scale", [False], ids=["linear_scale"])
 @pytest.mark.parametrize(
     "use_cpp_allocator", [True, False], ids=["cpp_allocator", "python_allocator"]
@@ -186,9 +184,7 @@ def test_quantization_block_tiling_versus_reference(
 )
 @pytest.mark.parametrize("x_dtype", [torch.float32, torch.bfloat16], ids=str)
 @pytest.mark.parametrize("extrema_high", [False, True], ids=["zeros", "maxes"])
-@pytest.mark.parametrize(
-    "return_transpose", [True, False], ids=["quantize_transpose", "skip_transpose"]
-)
+@pytest.mark.parametrize("return_transpose", [True, False], ids=["both_directions", "rowwise_only"])
 @pytest.mark.parametrize(
     "use_cpp_allocator", [True, False], ids=["cpp_allocator", "python_allocator"]
 )
@@ -286,9 +282,7 @@ def test_nvfp4_quantization_extrema_versus_reference(
     ],
 )
 @pytest.mark.parametrize("x_dtype", [torch.float32, torch.bfloat16], ids=str)
-@pytest.mark.parametrize(
-    "return_transpose", [True, False], ids=["quantize_transpose", "skip_transpose"]
-)
+@pytest.mark.parametrize("return_transpose", [True, False], ids=["both_directions", "rowwise_only"])
 @pytest.mark.parametrize(
     "use_cpp_allocator", [True, False], ids=["cpp_allocator", "python_allocator"]
 )
@@ -399,9 +393,7 @@ def test_nvfp4_quantization_boundary_values(
     ],
 )
 @pytest.mark.parametrize("x_dtype", [torch.float32, torch.bfloat16], ids=str)
-@pytest.mark.parametrize(
-    "return_transpose", [True, False], ids=["quantize_transpose", "skip_transpose"]
-)
+@pytest.mark.parametrize("return_transpose", [True, False], ids=["both_directions", "rowwise_only"])
 @pytest.mark.parametrize(
     "use_cpp_allocator", [True, False], ids=["cpp_allocator", "python_allocator"]
 )
