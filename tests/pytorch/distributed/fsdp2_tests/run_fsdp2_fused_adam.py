@@ -160,12 +160,6 @@ def test_fused_adam_fp8_master_weights(recipe_name):
     """
     recipe = get_recipe_from_string(recipe_name)
 
-    if recipe_name == "NVFP4BlockScaling":
-        pytest.xfail(
-            f"{recipe_name}: quantized_model_init and FSDP2 is not currently supported, since the "
-            "block tensor is dequantized before we flatten it for FSDP2."
-        )
-
     world_size, device = _get_dist_info()
 
     model = _build_model(fp8_init=True, recipe=recipe)
