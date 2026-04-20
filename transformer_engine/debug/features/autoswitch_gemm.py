@@ -66,7 +66,7 @@ class _AutoswitchGemmMetricLogger:
             logger.removeHandler(handler)
             handler.close()
 
-        file_handler = logging.FileHandler(log_file, mode="a")
+        file_handler = logging.FileHandler(log_file, mode="w")
         file_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
         logger.addHandler(file_handler)
 

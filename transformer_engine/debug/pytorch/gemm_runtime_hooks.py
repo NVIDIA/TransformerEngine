@@ -2,17 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Optional
 
 import torch
 
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage, Quantizer
 from transformer_engine.pytorch.utils import cast_if_needed
-
-_AUTOSWITCH_FEATURE_NAME = "AutoswitchGemm"
-_AUTOSWITCH_ENABLED_CACHE = {}
-
 
 def _is_fp8_debug_quantizer(quantizer: Optional[Quantizer]) -> bool:
     """Return True for DebugQuantizer objects wrapping an FP8/NVFP4 quantizer."""
@@ -23,95 +19,12 @@ def _is_fp8_debug_quantizer(quantizer: Optional[Quantizer]) -> bool:
     )
 
 
-def _feature_block_enabled(feature_config: Any) -> bool:
-    """Return whether an Autoswitch feature block is enabled."""
-    if isinstance(feature_config, dict):
-        return bool(feature_config.get("enabled", True))
-    if isinstance(feature_config, bool):
-        return feature_config
-    return feature_config is not None
-
-
-def _contains_enabled_autoswitch(config: Any, visited: Optional[set] = None) -> bool:
-    """Recursively check whether config contains enabled AutoswitchGemm feature."""
-    if visited is None:
-        visited = set()
-    obj_id = id(config)
-    if obj_id in visited:
-        return False
-    visited.add(obj_id)
-
-    if isinstance(config, dict):
-        for key, value in config.items():
-            if key == _AUTOSWITCH_FEATURE_NAME and _feature_block_enabled(value):
-                return True
-        for value in config.values():
-            if _contains_enabled_autoswitch(value, visited):
-                return True
-        return False
-
-    if isinstance(config, (list, tuple, set)):
-        for item in config:
-            if _contains_enabled_autoswitch(item, visited):
-                return True
-        return False
-
-    return False
-
-
-def _autoswitch_feature_enabled() -> bool:
-    """Best-effort detection for whether AutoswitchGemm is enabled in debug config."""
-    try:
-        import nvdlfw_inspect.api as debug_api
-    except ImportError:
-        return False
-
-    manager = getattr(debug_api, "DEBUG_MANAGER", None)
-    if manager is None:
-        return False
-
-    manager_id = id(manager)
-    cached = _AUTOSWITCH_ENABLED_CACHE.get(manager_id)
-    if cached is not None:
-        return cached
-
-    candidate_configs = []
-    for attr in (
-        "config",
-        "_config",
-        "debug_config",
-        "_debug_config",
-        "user_config",
-        "_user_config",
-        "raw_config",
-        "_raw_config",
-    ):
-        value = getattr(manager, attr, None)
-        if value is not None:
-            candidate_configs.append(value)
-
-    for attr_name, value in getattr(manager, "__dict__", {}).items():
-        if "config" in attr_name.lower() and value is not None:
-            candidate_configs.append(value)
-
-    if not candidate_configs:
-        # Keep previous behavior if manager internals cannot be introspected.
-        _AUTOSWITCH_ENABLED_CACHE[manager_id] = True
-        return True
-
-    enabled = any(_contains_enabled_autoswitch(config) for config in candidate_configs)
-    _AUTOSWITCH_ENABLED_CACHE[manager_id] = enabled
-    return enabled
-
-
 def should_resolve_inputs_after_sampling(
     lhs_quantizer: Optional[Quantizer],
     rhs_quantizer: Optional[Quantizer],
 ) -> bool:
     """Return True when runtime GEMM decision path should be applied."""
-    if not (_is_fp8_debug_quantizer(lhs_quantizer) or _is_fp8_debug_quantizer(rhs_quantizer)):
-        return False
-    return _autoswitch_feature_enabled()
+    return _is_fp8_debug_quantizer(lhs_quantizer) or _is_fp8_debug_quantizer(rhs_quantizer)
 
 
 def _to_high_precision_gemm_input(tensor, dtype: torch.dtype):
