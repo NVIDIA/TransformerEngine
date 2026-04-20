@@ -125,13 +125,17 @@ class IndicesToMultihot(torch.autograd.Function):
         assert indices.shape == probs_indices.shape
         topk = indices.shape[1]
         device = indices.device
-        multihot_indices = torch.empty((num_of_tokens, num_of_local_experts), dtype=torch.bool, device=device)
+        multihot_indices = torch.empty(
+            (num_of_tokens, num_of_local_experts), dtype=torch.bool, device=device
+        )
         probs_in_multihot = torch.empty(
             (num_of_tokens, num_of_local_experts),
             dtype=probs_indices.dtype,
             device=device,
         )
-        position_map = torch.empty((num_of_tokens, num_of_local_experts), dtype=torch.int32, device=device)
+        position_map = torch.empty(
+            (num_of_tokens, num_of_local_experts), dtype=torch.int32, device=device
+        )
         topk_next_power_of_2 = 2 ** math.ceil(math.log2(topk))
         num_of_local_experts_next_power_of_2 = 2 ** math.ceil(math.log2(num_of_local_experts))
         grid = (num_of_tokens,)
@@ -164,7 +168,9 @@ class IndicesToMultihot(torch.autograd.Function):
         topk = ctx.topk
 
         grad_probs_indices = torch.empty(
-            (num_of_tokens, topk), dtype=grad_probs_in_multihot.dtype, device=grad_probs_in_multihot.device
+            (num_of_tokens, topk),
+            dtype=grad_probs_in_multihot.dtype,
+            device=grad_probs_in_multihot.device,
         )
         topk_next_power_of_2 = 2 ** math.ceil(math.log2(topk))
         num_of_local_experts_next_power_of_2 = 2 ** math.ceil(math.log2(num_of_local_experts))

@@ -165,7 +165,9 @@ def _build_dispatcher(hyperparams: HyperParameters, te_config):
             ep_size=ep_size,
         )
 
-    raise ValueError(f"Unknown dispatcher_type: {hyperparams.dispatcher_type!r}. Use 'alltoall' or 'fused'.")
+    raise ValueError(
+        f"Unknown dispatcher_type: {hyperparams.dispatcher_type!r}. Use 'alltoall' or 'fused'."
+    )
 
 
 def init_te_mixtral_model(hyperparams: HyperParameters):
@@ -193,8 +195,9 @@ def init_te_mixtral_model(hyperparams: HyperParameters):
             dist.init_process_group(backend="nccl", init_method="env://")
         if world_size != hyperparams.expert_parallel_size:
             raise ValueError(
-                "For this minimal EP setup, WORLD_SIZE must match expert_parallel_size. "
-                f"Got WORLD_SIZE={world_size}, expert_parallel_size={hyperparams.expert_parallel_size}."
+                "For this minimal EP setup, WORLD_SIZE must match expert_parallel_size. Got"
+                f" WORLD_SIZE={world_size},"
+                f" expert_parallel_size={hyperparams.expert_parallel_size}."
             )
     elif hyperparams.expert_parallel_size != 1:
         raise ValueError("expert_parallel_size > 1 requires torchrun distributed launch.")
@@ -290,7 +293,9 @@ def wrap_with_accelerator(model, hyperparams: HyperParameters):
         )
         return accelerator, model, optimizer, train_dataloader, lr_scheduler
 
-    model, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(model, optimizer, train_dataloader, lr_scheduler)
+    model, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+        model, optimizer, train_dataloader, lr_scheduler
+    )
     return accelerator, model, optimizer, train_dataloader, lr_scheduler
 
 
@@ -343,14 +348,18 @@ def finetune_model(model, hyperparams, accelerator, train_dataloader, optimizer,
 def run_te_mixtral_finetune(hyperparams: HyperParameters):
     """Convenience entrypoint: init TE Mixtral, wrap, and run fine-tuning."""
     model = init_te_mixtral_model(hyperparams)
-    accelerator, model, optimizer, train_dataloader, lr_scheduler = wrap_with_accelerator(model, hyperparams)
+    accelerator, model, optimizer, train_dataloader, lr_scheduler = wrap_with_accelerator(
+        model, hyperparams
+    )
     finetune_model(model, hyperparams, accelerator, train_dataloader, optimizer, lr_scheduler)
 
 
 def run_hf_baseline_finetune(hyperparams: HyperParameters):
     """Convenience entrypoint: run HuggingFace Mixtral baseline fine-tuning."""
     model = init_baseline_model(hyperparams)
-    accelerator, model, optimizer, train_dataloader, lr_scheduler = wrap_with_accelerator(model, hyperparams)
+    accelerator, model, optimizer, train_dataloader, lr_scheduler = wrap_with_accelerator(
+        model, hyperparams
+    )
     finetune_model(model, hyperparams, accelerator, train_dataloader, optimizer, lr_scheduler)
 
 

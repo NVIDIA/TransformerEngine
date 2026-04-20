@@ -54,9 +54,13 @@ def get_buffer(group: torch.distributed.ProcessGroup, hidden_bytes: int):
         Buffer.get_dispatch_config(group.size()),
         Buffer.get_combine_config(group.size()),
     ):
-        num_nvl_bytes = max(config.get_nvl_buffer_size_hint(hidden_bytes, group.size()), num_nvl_bytes)
+        num_nvl_bytes = max(
+            config.get_nvl_buffer_size_hint(hidden_bytes, group.size()), num_nvl_bytes
+        )
         if nvshmem:
-            num_rdma_bytes = max(config.get_rdma_buffer_size_hint(hidden_bytes, group.size()), num_rdma_bytes)
+            num_rdma_bytes = max(
+                config.get_rdma_buffer_size_hint(hidden_bytes, group.size()), num_rdma_bytes
+            )
 
     if (
         _buffer is None

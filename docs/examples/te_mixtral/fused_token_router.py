@@ -51,9 +51,13 @@ class FusedTokenRouter:
     def __init__(self, num_experts: int, num_local_experts: int, hidden_size: int, ep_size: int):
         """Initialize the FusedTokenRouter."""
         if fused_dispatch is None or fused_combine is None:
-            raise ImportError("deep_ep is required for FusedTokenRouter. Install via: bash install_hybridep.sh")
+            raise ImportError(
+                "deep_ep is required for FusedTokenRouter. Install via: bash install_hybridep.sh"
+            )
         if not HAVE_TRITON:
-            raise ImportError("Triton is required for FusedTokenRouter. Install via: pip install triton")
+            raise ImportError(
+                "Triton is required for FusedTokenRouter. Install via: pip install triton"
+            )
         self.num_experts = num_experts
         self.num_local_experts = num_local_experts
         self.hidden_size = hidden_size
@@ -81,7 +85,9 @@ class FusedTokenRouter:
             self._ep_group,
         )
 
-        multihot_mask, probs_multihot = fused_indices_to_multihot(recv_indices, recv_probs, self.num_local_experts)
+        multihot_mask, probs_multihot = fused_indices_to_multihot(
+            recv_indices, recv_probs, self.num_local_experts
+        )
 
         num_out_tokens = int(tokens_per_expert.sum().item())
         permuted_x, row_id_map = transformer_engine.pytorch.moe_permute(

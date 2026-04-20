@@ -47,24 +47,30 @@ def _pt_flatten_collate(features: list[dict[str, list[int]]], return_position_id
     return batch
 
 
-def _pt_pad_to_multiple_of(batch: dict[str, Any], pad_to_multiple_of: int, token_pad: int, label_pad: int):
+def _pt_pad_to_multiple_of(
+    batch: dict[str, Any], pad_to_multiple_of: int, token_pad: int, label_pad: int
+):
     """Pad a batch to a multiple of ``pad_to_multiple_of`` by appending a mock sequence."""
     remainder = -batch["input_ids"].numel() % pad_to_multiple_of
     if remainder == 0:
         return batch
 
     batch["input_ids"] = torch.cat(
-        [batch["input_ids"], torch.full((1, remainder), token_pad, dtype=batch["input_ids"].dtype)], dim=1
+        [batch["input_ids"], torch.full((1, remainder), token_pad, dtype=batch["input_ids"].dtype)],
+        dim=1,
     )
     if "labels" in batch:
         batch["labels"] = torch.cat(
-            [batch["labels"], torch.full((1, remainder), label_pad, dtype=batch["labels"].dtype)], dim=1
+            [batch["labels"], torch.full((1, remainder), label_pad, dtype=batch["labels"].dtype)],
+            dim=1,
         )
     if "cu_seq_lens_q" in batch:
         batch["cu_seq_lens_q"] = torch.cat(
             [
                 batch["cu_seq_lens_q"],
-                torch.tensor([batch["cu_seq_lens_q"][-1] + remainder], dtype=batch["cu_seq_lens_q"].dtype),
+                torch.tensor(
+                    [batch["cu_seq_lens_q"][-1] + remainder], dtype=batch["cu_seq_lens_q"].dtype
+                ),
             ],
             dim=0,
         )
@@ -74,11 +80,19 @@ def _pt_pad_to_multiple_of(batch: dict[str, Any], pad_to_multiple_of: int, token
         batch["max_length_k"] = batch["max_length_q"]
     if "attention_mask" in batch:
         batch["attention_mask"] = torch.cat(
-            [batch["attention_mask"], torch.zeros((1, remainder), dtype=batch["attention_mask"].dtype)], dim=1
+            [
+                batch["attention_mask"],
+                torch.zeros((1, remainder), dtype=batch["attention_mask"].dtype),
+            ],
+            dim=1,
         )
     if "position_ids" in batch:
         batch["position_ids"] = torch.cat(
-            [batch["position_ids"], torch.arange(remainder, dtype=batch["position_ids"].dtype).unsqueeze(0)], dim=1
+            [
+                batch["position_ids"],
+                torch.arange(remainder, dtype=batch["position_ids"].dtype).unsqueeze(0),
+            ],
+            dim=1,
         )
 
     return batch
@@ -104,7 +118,9 @@ class DataCollatorWithFlattening:
     def __call__(self, features, return_tensors=None):
         """Pack features into a single THD batch with flash-attention metadata."""
         if return_tensors is not None and return_tensors != "pt":
-            raise NotImplementedError(f"Only return_tensors='pt' is supported, got '{return_tensors}'")
+            raise NotImplementedError(
+                f"Only return_tensors='pt' is supported, got '{return_tensors}'"
+            )
 
         bshd_batch = self.collator(features, return_tensors=return_tensors)
         packed_batch = _pt_flatten_collate(features)
@@ -121,7 +137,9 @@ class DataCollatorWithFlattening:
         if self.pad_to_multiple_of is not None:
             pad_token_id = self.collator.tokenizer.pad_token_id
             if not isinstance(pad_token_id, int):
-                logger.warning(f"tokenizer.pad_token_id is not an integer, using 1 instead: {pad_token_id}")
+                logger.warning(
+                    f"tokenizer.pad_token_id is not an integer, using 1 instead: {pad_token_id}"
+                )
                 pad_token_id = 1
             packed_batch = _pt_pad_to_multiple_of(
                 packed_batch,
