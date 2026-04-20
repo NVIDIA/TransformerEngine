@@ -299,7 +299,7 @@ def test_mhc_projection(cfg: MHCConfig, dtype):
 
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
 @pytest.mark.parametrize("dtype", [torch.float32], ids=["fp32"])
-def test_mhc_elementwise(cfg: MHCConfig, dtype):
+def test_mhc_scale(cfg: MHCConfig, dtype):
     reset_rng_states()
 
     s, b, C, n = cfg.s, cfg.b, cfg.C, cfg.n
@@ -409,7 +409,7 @@ def test_mhc_combined(cfg: MHCConfig, dtype):
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
 @pytest.mark.parametrize("recompute", [False, True], ids=["no_recompute", "recompute"])
-def test_mhc_sinkhorn_knopp(cfg: MHCConfig, dtype, recompute):
+def test_mhc_sinkhorn(cfg: MHCConfig, dtype, recompute):
     reset_rng_states()
 
     s, b, C, n = cfg.s, cfg.b, cfg.C, cfg.n
