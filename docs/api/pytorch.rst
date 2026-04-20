@@ -227,15 +227,15 @@ Operation fuser
 
 .. autoapiclass:: transformer_engine.pytorch.ops.SwiGLU
 
-.. autoapiclass:: transformer_engine.pytorch.triton.mhc.mhc_fused_sinkhorn
+.. autoapifunction:: transformer_engine.pytorch.triton.mhc.mhc_fused_sinkhorn
 
-.. autoapiclass:: transformer_engine.pytorch.triton.mhc.mhc_fused_scale
+.. autoapifunction:: transformer_engine.pytorch.triton.mhc.mhc_fused_scale
 
-.. autoapiclass:: transformer_engine.pytorch.triton.mhc.mhc_fused_aggregate
+.. autoapifunction:: transformer_engine.pytorch.triton.mhc.mhc_fused_aggregate
 
-.. autoapiclass:: transformer_engine.pytorch.triton.mhc.mhc_fused_expand_combine
+.. autoapifunction:: transformer_engine.pytorch.triton.mhc.mhc_fused_expand_combine
 
-.. autoapiclass:: transformer_engine.pytorch.triton.mhc.mhc_fused_projection
+.. autoapifunction:: transformer_engine.pytorch.triton.mhc.mhc_fused_projection
 
 Deprecated functions
 --------------------
