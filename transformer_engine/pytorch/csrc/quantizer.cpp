@@ -1346,10 +1346,6 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(const std::ve
     }
   }
   const size_t flat_last_dim = shape.size() > 0 ? shape.back() : 1;
-  NVTE_CHECK(flat_last_dim % 16 == 0,
-             "MXFP8 requires the last tensor dimension to be divisible by 16,"
-             " got tensor with shape ",
-             shape, " (flat_first_dim=", flat_first_dim, ", flat_last_dim=", flat_last_dim, ")");
   const auto rowwise_scale_inv_shape = get_scale_shape(shape, false);
   const auto columnwise_scale_inv_shape = get_scale_shape(shape, true);
 
@@ -1666,11 +1662,6 @@ std::vector<size_t> MXFP8Quantizer::get_scale_shape(const std::vector<size_t>& s
 
   auto last_dim = shape.back();
 
-  NVTE_CHECK(last_dim % 16 == 0,
-             "MXFP8 requires the last tensor dimension to be divisible by 16,"
-             " got tensor with shape ",
-             shape);
-
   std::vector<size_t> scale_shape;
 
   bool rowwise_usage = !columnwise;
@@ -1741,8 +1732,8 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
     }
   }
   const size_t flat_last_dim = shape.size() > 0 ? shape.back() : 1;
-  NVTE_CHECK(flat_last_dim % 32 == 0,
-             "NVFP4 requires the last tensor dimension to be divisible by 32,"
+  NVTE_CHECK(flat_last_dim % 2 == 0,
+             "NVFP4 requires the last tensor dimension to be divisible by 2,"
              " got tensor with shape ",
              shape, " (flat_first_dim=", flat_first_dim, ", flat_last_dim=", flat_last_dim, ")");
   if (this->with_rht) {
@@ -2445,11 +2436,6 @@ std::vector<size_t> NVFP4Quantizer::get_scale_shape(const std::vector<size_t>& s
 
   auto last_dim = shape.back();
   auto flat_first_dim = numel / last_dim;
-
-  NVTE_CHECK(last_dim % 32 == 0,
-             "NVFP4 requires the last tensor dimension to be divisible by 32,"
-             " got tensor with shape ",
-             shape);
 
   std::vector<size_t> scale_shape;
 
