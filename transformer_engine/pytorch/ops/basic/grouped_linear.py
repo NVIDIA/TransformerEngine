@@ -114,6 +114,7 @@ class GroupedLinear(BasicOperation):
             self.num_extra_inputs = 2
 
         self.wgrad_store = WeightGradStore(delay_wgrad_compute)
+        self.wgrad_accumulation_and_reduce_hooks: list = []
 
         # Weight tensor dimensions
         self.num_groups: int = num_groups
@@ -193,6 +194,23 @@ class GroupedLinear(BasicOperation):
             for group_idx in range(self.num_groups):
                 getattr(self, f"weight{group_idx}").skip_backward_post_hook = True
 
+    def register_wgrad_accumulation_and_reduce_hooks(
+        self, wgrad_accumulation_and_reduce_hook: Callable
+    ) -> None:
+        """Register a hook to run after delayed wgrad computation completes.
+
+        Mirrors ``TransformerEngineBaseModule.register_wgrad_accumulation_and_reduce_hooks``
+        so that DDP can wire its ``param.grad = None`` / reduce-scatter callback here
+        instead of directly on the AccumulateGrad node (which is bypassed when
+        ``skip_backward_post_hook`` is set).
+        """
+        self.wgrad_accumulation_and_reduce_hooks.append(wgrad_accumulation_and_reduce_hook)
+
+    def _trigger_wgrad_accumulation_and_reduce_hooks(self) -> None:
+        """Call all registered wgrad accumulation and reduce hooks."""
+        for hook in self.wgrad_accumulation_and_reduce_hooks:
+            hook()
+
     def need_backward_dw(self) -> bool:
         """Return whether :meth:`backward_dw` must run to finish weight gradients."""
         return self.wgrad_store is not None and self.wgrad_store.delay_wgrad_compute()
@@ -217,6 +235,7 @@ class GroupedLinear(BasicOperation):
                 activations.columnwise_scale_inv,
             )
         if self._accumulate_into_main_grad:
+            self._trigger_wgrad_accumulation_and_reduce_hooks()
             return
         if self.single_grouped_weight:
             if isinstance(grad_weights, list):
@@ -231,6 +250,7 @@ class GroupedLinear(BasicOperation):
             for group_idx in range(self.num_groups):
                 w = getattr(self, f"weight{group_idx}")
                 w.grad = grad_weights[group_idx].to(w.dtype)
+        self._trigger_wgrad_accumulation_and_reduce_hooks()
 
     def _get_bias_tensors(self, dtype: torch.dtype) -> list[torch.Tensor]:
         """Retrieve per-group bias tensors in the given dtype."""
@@ -1045,7 +1065,7 @@ class GroupedLinear(BasicOperation):
                     grad_weight = torch.stack(grad_weights, dim=0)
             final_weight_grads = [grad_weight]
         else:
-            if delay_wgrad and ctx.weight_requires_grad:
+            if delay_wgrad and ctx.weight_requires_grad and not accumulate_into_main_grad:
                 final_weight_grads = [None] * num_groups
             else:
                 final_weight_grads = grad_weights
