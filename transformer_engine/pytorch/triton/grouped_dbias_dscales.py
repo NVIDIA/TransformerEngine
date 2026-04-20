@@ -5,7 +5,6 @@
 """PyTorch wrappers for the fused grouped-dbias (+optional dscales) Triton kernel."""
 
 import os
-from functools import lru_cache
 from typing import Optional, Tuple
 
 import torch
@@ -14,7 +13,6 @@ import triton
 from transformer_engine.common.triton.grouped_dbias_dscales import _grouped_dbias_kernel
 
 
-@lru_cache(maxsize=1)
 def _is_deterministic_mode() -> bool:
     """Return True if TE is currently requesting deterministic execution."""
     return not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
