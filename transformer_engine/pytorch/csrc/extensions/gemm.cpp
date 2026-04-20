@@ -753,8 +753,7 @@ py::object te_general_grouped_gemm_for_discrete_out(py::handle A, bool transa, p
                                                     at::Tensor alpha, at::Tensor beta,
                                                     at::Tensor workspace_setup,
                                                     at::Tensor workspace_cublas,
-                                                    bool use_split_accumulator,
-                                                    int math_sm_count) {
+                                                    bool use_split_accumulator, int math_sm_count) {
   using namespace transformer_engine::pytorch::detail;
 
   init_extension();
@@ -808,28 +807,4 @@ py::object te_general_grouped_gemm_for_discrete_out(py::handle A, bool transa, p
 
   return py::reinterpret_borrow<py::object>(D);
 }
-
-void te_grouped_bias_add(py::handle output, py::handle bias,
-                         std::optional<at::Tensor> bias_scale) {
-  using namespace transformer_engine::pytorch::detail;
-
-  init_extension();
-
-  auto grouped_output = GroupedTensorFromPyTorchGroupedTensor(output);
-  auto grouped_bias = GroupedTensorFromPyTorchGroupedTensor(bias);
-
-  if (bias_scale.has_value()) {
-    auto te_bias_scale = makeTransformerEngineTensor(*bias_scale);
-    NVTE_SCOPED_GIL_RELEASE({
-      nvte_grouped_scaled_bias_add(grouped_output.data(), grouped_bias.data(), te_bias_scale.data(),
-                                   at::cuda::getCurrentCUDAStream());
-    });
-  } else {
-    NVTE_SCOPED_GIL_RELEASE({
-      nvte_grouped_bias_add(grouped_output.data(), grouped_bias.data(),
-                            at::cuda::getCurrentCUDAStream());
-    });
-  }
-}
-
 }  // namespace transformer_engine::pytorch
