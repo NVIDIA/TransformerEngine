@@ -16,9 +16,7 @@ from transformer_engine.pytorch.triton.mhc import (
     mhc_fused_projection,
 )
 
-reset_rng_states()
-
-# Enable TF32 for matmul to ensure consistency between the fused and reference implementations
+# Disable TF32 for matmul to ensure consistency between the fused and reference implementations
 torch.backends.cuda.matmul.allow_tf32 = False
 
 
@@ -271,6 +269,8 @@ def get_tols(dtype):
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
 def test_mhc_projection(cfg: MHCConfig, dtype):
+    reset_rng_states()
+
     s, b, C, n = cfg.s, cfg.b, cfg.C, cfg.n
     nC = n * C
     N = 2 * n + n * n
@@ -300,6 +300,8 @@ def test_mhc_projection(cfg: MHCConfig, dtype):
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
 @pytest.mark.parametrize("dtype", [torch.float32], ids=["fp32"])
 def test_mhc_elementwise(cfg: MHCConfig, dtype):
+    reset_rng_states()
+
     s, b, C, n = cfg.s, cfg.b, cfg.C, cfg.n
     N = 2 * n + n * n
 
@@ -335,6 +337,8 @@ def test_mhc_elementwise(cfg: MHCConfig, dtype):
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
 def test_mhc_combined(cfg: MHCConfig, dtype):
+    reset_rng_states()
+
     s, b, C, n = cfg.s, cfg.b, cfg.C, cfg.n
     N = 2 * n + n * n
     nC = n * C
@@ -406,6 +410,8 @@ def test_mhc_combined(cfg: MHCConfig, dtype):
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
 @pytest.mark.parametrize("recompute", [False, True], ids=["no_recompute", "recompute"])
 def test_mhc_sinkhorn_knopp(cfg: MHCConfig, dtype, recompute):
+    reset_rng_states()
+
     s, b, C, n = cfg.s, cfg.b, cfg.C, cfg.n
 
     tols = get_tols(dtype)
@@ -427,6 +433,8 @@ def test_mhc_sinkhorn_knopp(cfg: MHCConfig, dtype, recompute):
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
 def test_mhc_aggregate(cfg: MHCConfig, dtype):
+    reset_rng_states()
+
     s, b, C, n = cfg.s, cfg.b, cfg.C, cfg.n
 
     tols = get_tols(dtype)
@@ -453,6 +461,8 @@ def test_mhc_aggregate(cfg: MHCConfig, dtype):
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
 @pytest.mark.parametrize("with_bias", [True, False], ids=["with_bias", "no_bias"])
 def test_mhc_expand_combine(cfg: MHCConfig, dtype, with_bias):
+    reset_rng_states()
+
     s, b, C, n = cfg.s, cfg.b, cfg.C, cfg.n
 
     tols = get_tols(dtype)
