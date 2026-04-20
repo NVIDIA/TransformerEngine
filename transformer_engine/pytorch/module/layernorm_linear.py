@@ -5,6 +5,7 @@
 """LayerNormLinear API"""
 import os
 import warnings
+import weakref
 from typing import Callable, Dict, Optional, Tuple, Union, List
 from functools import reduce
 from operator import mul as multiply_op
@@ -20,6 +21,7 @@ from transformer_engine.pytorch.tensor.utils import is_custom
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
     get_ub,
+    quantize_weight,
     TransformerEngineBaseModule,
     get_dummy_wgrad,
     _2X_ACC_FPROP,
@@ -93,9 +95,10 @@ class _LayerNormLinear(torch.autograd.Function):
         ln_weight: torch.Tensor,
         ln_bias: Union[torch.Tensor, None],
         weight: torch.Tensor,
+        weight_workspace: Optional[torch.Tensor],
         bias: torch.Tensor,
         non_tensor_args: Tuple,
-    ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
+    ) -> Tuple[torch.Tensor, ...]:
         # pylint: disable=missing-function-docstring
 
         # Reduce number of arguments to autograd function in order
@@ -135,7 +138,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ub_bulk_dgrad,
             ub_name,
             fsdp_group,
-            module,
+            cache_weight,
             skip_fp8_weight_update,
             symmetric_ar_type,
             debug,
@@ -293,6 +296,7 @@ class _LayerNormLinear(torch.autograd.Function):
         # ------------------------------------------------------
         # Prepare weight tensor
         # ------------------------------------------------------
+        new_weight_workspace = None
         weightmat = weight
         is_weight_param_quantized = False
         if fp8 or debug:
@@ -310,15 +314,16 @@ class _LayerNormLinear(torch.autograd.Function):
                 )
 
             # Get quantized weight
-            update_workspace = is_first_microbatch is None or is_first_microbatch
-            weightmat = module.get_weight_workspace(
+            update_ws = is_first_microbatch is None or is_first_microbatch
+            weightmat, new_weight_workspace = quantize_weight(
                 tensor=weight,
                 quantizer=weight_quantizer,
-                cache_name=(None if is_first_microbatch is None else "weight"),
-                update_workspace=update_workspace,
+                workspace=weight_workspace,
+                update_workspace=update_ws,
                 skip_update_flag=skip_fp8_weight_update,
                 fsdp_group=fsdp_group,
                 workspace_dtype=activation_dtype,
+                cache=cache_weight,
             )
             weightmat.update_usage(rowwise_usage=True)
 
@@ -465,14 +470,6 @@ class _LayerNormLinear(torch.autograd.Function):
                     ln_weight,
                     ln_bias,
                 )
-                ctx.grad_added_to_main_grad = hasattr(weight, "grad_added_to_main_grad")
-                if ctx.grad_added_to_main_grad:
-                    # If you are passing torch.nn.Parameter through the Torch hooks, you will
-                    # get back torch.Tensor. Torch rips off the Parameter wrapper.
-                    # You need to preserve the weight object to have all the attributes user
-                    # sets for the weights. Because of this, it is not recommended to offload
-                    # weights if weights are externally touched outside this module
-                    ctx.weight_object = weight
 
             tensors_to_save, tensor_objects = prepare_for_saving(
                 inputmat,
@@ -490,6 +487,13 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.requires_wgrad = weight.requires_grad
             ctx.is_weight_param_quantized = is_weight_param_quantized
             if fuse_wgrad_accumulation and weight.requires_grad:
+                # Keep weakref to weight to preserve attributes like main_grad
+                # when we need to modify the weight python object
+                ctx.origin_weight_ref = weakref.ref(weight)
+                # Save overwrite_main_grad flag now while we have access to weight object
+                ctx.origin_weight_overwrites_main_grad = getattr(
+                    weight, "overwrite_main_grad", False
+                )
                 # This check is needed to ensure that main_grad is not created
                 # during the forward pass when using MCore FSDP as it creates
                 # the main_grad buffer lazily before backprop
@@ -531,10 +535,11 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.normalization = normalization
             ctx.reduce_and_update_bwd_fp8_tensors = False
             if ctx.fp8 and requires_grad(inp, ln_weight, ln_bias, weight, bias):
-                _first_fp8_module = FP8GlobalStateManager.IS_FIRST_FP8_MODULE
+                qstate = FP8GlobalStateManager.quantization_state
+                _first_fp8_module = qstate.is_first_fp8_module
                 ctx.reduce_and_update_bwd_fp8_tensors = FP8GlobalStateManager.is_first_fp8_module()
                 if in_fp8_activation_recompute_phase():
-                    FP8GlobalStateManager.IS_FIRST_FP8_MODULE = _first_fp8_module
+                    qstate.is_first_fp8_module = _first_fp8_module
             ctx.wgrad_store = wgrad_store
             ctx.debug = debug
 
@@ -555,13 +560,15 @@ class _LayerNormLinear(torch.autograd.Function):
         # Cached state for backward pass is ready...
         # ------------------------------------------------------
 
+        ln_out_for_return = None
         if return_layernorm_output:
             if return_layernorm_output_gathered:
                 shape = list(inp_shape)
                 shape[0] *= tp_size if with_input_all_gather else 1
-                return out, ln_out_return.view(shape)
-            return out, ln_out_return.view(inp_shape)
-        return out
+                ln_out_for_return = ln_out_return.view(shape)
+            else:
+                ln_out_for_return = ln_out_return.view(inp_shape)
+        return out, ln_out_for_return, new_weight_workspace
 
     @staticmethod
     def backward(
@@ -578,7 +585,7 @@ class _LayerNormLinear(torch.autograd.Function):
             (  # pylint: disable=unbalanced-tuple-unpacking
                 inputmat,
                 weight,
-                origin_weight,
+                saved_weight,
                 bias,
                 ln_weight,
                 ln_out,
@@ -586,12 +593,25 @@ class _LayerNormLinear(torch.autograd.Function):
                 rsigma,
             ) = restore_from_func_ctx(ctx)
 
-            # Since main_grad can be modified inplace, it should not be a part of saved_tensors
-            main_grad = (
-                ctx.main_grad_func()
-                if weight is not None and ctx.fuse_wgrad_accumulation and ctx.requires_wgrad
-                else None
+            # Restore from weakref to get original weight python object
+            # (preserves attributes like main_grad, grad_added_to_main_grad, etc.)
+            # Only needed when fuse_wgrad_accumulation is enabled.
+            origin_weight = None
+            origin_weight_overwrites_main_grad = getattr(
+                ctx, "origin_weight_overwrites_main_grad", False
             )
+            main_grad = None
+            if ctx.fuse_wgrad_accumulation and ctx.requires_wgrad:
+                origin_weight_ref = ctx.origin_weight_ref
+                ctx.origin_weight_ref = None
+                origin_weight = origin_weight_ref() if origin_weight_ref is not None else None
+                assert (
+                    origin_weight is not None
+                ), "weight was removed while fuse_wgrad_accumulation=True"
+                # Since main_grad can be modified inplace, it should not be a part of saved_tensors
+                main_grad = ctx.main_grad_func() if weight is not None else None
+                if main_grad is not None:
+                    origin_weight.main_grad = main_grad
 
             # Gather intermediate/activation tensors if needed
             # NOTE: weight_fp8 = weight when ctx.fp8 == False and torch.disttributed.FSDP already
@@ -606,14 +626,6 @@ class _LayerNormLinear(torch.autograd.Function):
                 ln_out,
             )
             nvtx_range_pop(f"{nvtx_label}.fsdp_gather")
-
-            # For CPU offloading, we offloaded weight and weight.main_grad to different tensors,
-            # we need to connect them into one.
-            if ctx.cpu_offloading:
-                if ctx.grad_added_to_main_grad:
-                    origin_weight = ctx.weight_object
-            if ctx.requires_wgrad and ctx.fuse_wgrad_accumulation:
-                origin_weight.main_grad = main_grad
 
             # Configure Userbuffers communication (comm+GEMM overlap)
             ctx.ub_obj_gradout = None
@@ -769,7 +781,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 else:
                     weight_for_dgrad = cast_if_needed(weight_for_dgrad, ctx.activation_dtype)
             elif ctx.backward_override == "high_precision":
-                weight_for_dgrad = origin_weight
+                weight_for_dgrad = saved_weight
                 if isinstance(weight_for_dgrad, QuantizedTensorStorage):
                     weight_for_dgrad = weight_for_dgrad.dequantize(dtype=ctx.activation_dtype)
             gemm_out, *_, reduce_scatter_out = general_gemm(
@@ -907,7 +919,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     "quantization_params": ctx.grad_weight_quantizer,
                     "accumulate": (
                         accumulate_wgrad_into_param_main_grad
-                        if not getattr(weight, "overwrite_main_grad", False)
+                        if not origin_weight_overwrites_main_grad
                         else False
                     ),
                     "layout": "NT",
@@ -1039,13 +1051,13 @@ class _LayerNormLinear(torch.autograd.Function):
                 origin_weight.grad_added_to_main_grad = True
                 if getattr(origin_weight, "zero_out_wgrad", False):
                     wgrad = get_dummy_wgrad(
-                        list(origin_weight.main_grad.shape),
+                        list(main_grad.shape),
                         origin_weight.dtype,
                         zero=True,
                     )
                 else:
                     wgrad = get_dummy_wgrad(
-                        list(origin_weight.main_grad.shape),
+                        list(main_grad.shape),
                         origin_weight.dtype,
                     )
             elif ctx.fuse_wgrad_accumulation:
@@ -1067,6 +1079,7 @@ class _LayerNormLinear(torch.autograd.Function):
             dgamma,
             dbeta,
             wgrad,
+            None,  # weight_workspace
             grad_bias,
             None,
         )
@@ -1536,7 +1549,9 @@ class LayerNormLinear(TransformerEngineBaseModule):
         debug = self.is_debug_iter()
 
         if FP8GlobalStateManager.fp8_graph_capturing():
-            skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()
+            skip_fp8_weight_update = (
+                FP8GlobalStateManager.quantization_state.skip_fp8_weight_update_tensor
+            )
         else:
             skip_fp8_weight_update = None
         if skip_fp8_weight_update is not None:
@@ -1586,6 +1601,11 @@ class LayerNormLinear(TransformerEngineBaseModule):
             else:
                 fwd_fn = _LayerNormLinear.forward
                 autograd_ctx = [None]
+            cache_name = None if is_first_microbatch is None else "weight"
+            weight_workspace = (
+                self._fp8_workspaces.get(cache_name) if cache_name is not None else None
+            )
+
             non_tensor_args = (
                 self.eps,
                 is_first_microbatch,
@@ -1621,26 +1641,29 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.ub_bulk_dgrad,
                 self.ub_name,
                 self.fsdp_group,
-                self,
+                cache_name is not None,
                 skip_fp8_weight_update,
                 self.symmetric_ar_type,
                 debug,
             )
-            out = fwd_fn(
+            out, ln_out, new_weight_workspace = fwd_fn(
                 *autograd_ctx,
                 inp,
                 self.layer_norm_weight,
                 self.layer_norm_bias,
                 weight_tensor,
+                weight_workspace,
                 bias_tensor if self.apply_bias and not self.gemm_bias_unfused_add else None,
                 non_tensor_args,
             )
 
+            if new_weight_workspace is not None and cache_name is not None:
+                if isinstance(new_weight_workspace, torch.Tensor):
+                    new_weight_workspace = new_weight_workspace.detach()
+                self._fp8_workspaces[cache_name] = new_weight_workspace
+
         finally:
             self.end_forward()
-
-        if self.return_layernorm_output:
-            out, ln_out = out
 
         if self.gemm_bias_unfused_add:
             out = out + cast_if_needed(bias_tensor, self.activation_dtype)

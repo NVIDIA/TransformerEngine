@@ -154,6 +154,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         fc2_weight_shape = (fc2_op.out_features, fc2_op.in_features)
         input_ = input_.reshape(-1, fc1_weight_shape[1])
         in_shape = list(input_.size())
+        assert in_shape[0] % 128 == 0, "Unsupported input shape for fused grouped MLP."
 
         num_groups = fc1_op.num_groups
         fc1_weight_param = fc1_op.weight if fc1_op.single_grouped_weight else fc1_op.weight0
@@ -193,14 +194,8 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         if int(split_sizes.numel()) != num_groups:
             raise ValueError(f"Expected {num_groups} splits, but got {int(split_sizes.numel())}.")
         split_sizes = split_sizes.to(dtype=torch.int64, device=device)
-        split_points = torch.cumsum(split_sizes, 0, dtype=torch.int)
-        split_points_offsets = torch.cumsum(split_sizes, 0)
-        base_offsets = torch.cat(
-            [
-                torch.zeros(1, device=split_sizes.device, dtype=split_sizes.dtype),
-                split_points_offsets,
-            ]
-        )
+        base_offsets = tex.splits_to_offsets(split_sizes, 1)
+        split_points = base_offsets[1:].to(dtype=torch.int)
         fc1_x_tensor_offsets = base_offsets * fc1_weight_shape[1]
         fc2_x_tensor_offsets = base_offsets * fc2_weight_shape[1]
 
@@ -312,8 +307,8 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         fc1_x_scales = fc1_x_scales.view(dtype=torch.float8_e8m0fnu)
         fc1_x_scales = fc1_x_scales.view(
             1,
-            in_shape[0] // 128,
-            in_shape[1] // 128,
+            (in_shape[0] + 127) // 128,
+            (in_shape[1] + 127) // 128,
             MXFP8_BLOCK_SCALING_SIZE,
             4,
             4,
@@ -361,8 +356,8 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             fc1_w_scales = fc1_weight_for_gemm.scale_inv.view(dtype=torch.float8_e8m0fnu)
             fc1_w_scales = fc1_w_scales.view(
                 num_groups,
-                fc1_weight_shape[0] // 128,
-                fc1_weight_shape[1] // 128,
+                (fc1_weight_shape[0] + 127) // 128,
+                (fc1_weight_shape[1] + 127) // 128,
                 MXFP8_BLOCK_SCALING_SIZE,
                 4,
                 4,
@@ -427,13 +422,19 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
 
         # FC2 GEMM
         fc2_out_shape = in_shape[:-1] + [fc2_weight_shape[0]]
+        fc2_scales = basic_op_extra_inputs[2][1] if fc2_op._scale_bias else None
+        fc2_scales_tensor = (
+            fc2_scales.detach().to(dtype=torch.float32).reshape(-1, 1, 1)
+            if fc2_scales is not None
+            else torch.ones((in_shape[0], 1, 1), dtype=torch.float32, device=device)
+        )
         fc2_quant_kwargs = {
             "a_tensor": fc1_kernel_out["d_tensor"],
             "sfa_tensor": fc1_kernel_out["sfd_row_tensor"],
             "padded_offsets": split_points,
             "alpha_tensor": alpha_tensor.float(),
             "norm_const_tensor": None,
-            "prob_tensor": torch.ones((in_shape[0], 1, 1), dtype=torch.float32, device=device),
+            "prob_tensor": fc2_scales_tensor,
             "acc_dtype": torch.float32,
             "c_dtype": dtype,
             "d_dtype": dtype,
@@ -458,8 +459,8 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             fc2_w_scales = fc2_weight_for_gemm.scale_inv.view(dtype=torch.float8_e8m0fnu)
             fc2_w_scales = fc2_w_scales.view(
                 num_groups,
-                fc2_weight_shape[0] // 128,
-                fc2_weight_shape[1] // 128,
+                (fc2_weight_shape[0] + 127) // 128,
+                (fc2_weight_shape[1] + 127) // 128,
                 MXFP8_BLOCK_SCALING_SIZE,
                 4,
                 4,

@@ -309,6 +309,8 @@ py::object dequantize(const py::handle &input, DType otype);
 py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const size_t num_tensors,
                           std::optional<at::Tensor> first_dims);
 
+py::object group_dequantize(const py::handle &input, DType otype);
+
 py::object bgrad_group_quantize(const at::Tensor &tensor, py::handle quantizer,
                                 const size_t num_tensors, std::optional<at::Tensor> first_dims);
 
@@ -592,6 +594,17 @@ void nvshmem_finalize();
 
 void bulk_overlap_ag_with_external_gemm(CommOverlap &allgather_communicator, at::Stream send_stream,
                                         at::Stream recv_stream);
+
+/***************************************************************************************************
+ * Newton-Schulz (cuSolverMp)
+ **************************************************************************************************/
+
+int64_t cusolvermp_ctx_create(int64_t nccl_comm_ptr, int nranks, int rank);
+
+void cusolvermp_ctx_destroy(int64_t ctx_ptr);
+
+void newton_schulz(int64_t ctx_ptr, int64_t m, int64_t n, at::Tensor x, int64_t num_iterations,
+                   std::vector<float> coefficients);
 
 }  // namespace transformer_engine::pytorch
 

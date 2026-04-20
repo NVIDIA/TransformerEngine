@@ -6,6 +6,7 @@
 from typing import Union, Optional, Callable, Tuple, List
 from itertools import chain
 import warnings
+import weakref
 
 import functools
 import torch
@@ -16,6 +17,7 @@ from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
 from .base import (
     get_dummy_wgrad,
+    quantize_weight,
     TransformerEngineBaseModule,
     _2X_ACC_FPROP,
     _2X_ACC_DGRAD,
@@ -69,7 +71,7 @@ class _GroupedLinear(torch.autograd.Function):
         inp: torch.Tensor,
         non_tensor_args: Tuple,
         *weights_and_biases,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, list]:
         # pylint: disable=missing-function-docstring
 
         # Reduce number of arguments to autograd function in order
@@ -92,7 +94,8 @@ class _GroupedLinear(torch.autograd.Function):
             sequence_parallel,
             activation_dtype,
             is_grad_enabled,
-            module,
+            weight_workspaces,
+            cache_weight,
             skip_fp8_weight_update,
             save_original_input,
             debug,
@@ -177,18 +180,19 @@ class _GroupedLinear(torch.autograd.Function):
 
         # Initialize weights
         weights_fp8: list
+        new_workspaces = [None] * num_gemms
         if fp8 or debug:
-            # FP8 cast to workspace buffer
             weights_fp8 = []
-            update_workspace = is_first_microbatch is None or is_first_microbatch
+            update_ws = is_first_microbatch is None or is_first_microbatch
             for i in range(num_gemms):
-                weight_fp8 = module.get_weight_workspace(
+                weight_fp8, new_workspaces[i] = quantize_weight(
                     tensor=weights[i],
                     quantizer=weight_quantizers[i],
-                    cache_name=(None if is_first_microbatch is None else f"weight{i}"),
-                    update_workspace=update_workspace,
+                    workspace=weight_workspaces[i] if weight_workspaces else None,
+                    update_workspace=update_ws,
                     skip_update_flag=skip_fp8_weight_update,
                     workspace_dtype=activation_dtype,
+                    cache=cache_weight,
                 )
                 weights_fp8.append(weight_fp8)
 
@@ -260,19 +264,6 @@ class _GroupedLinear(torch.autograd.Function):
             else:
                 inputmats = [None] * num_gemms
 
-            if cpu_offloading:
-                ctx.grad_added_to_main_grad = hasattr(weights[0], "grad_added_to_main_grad")
-
-                if ctx.grad_added_to_main_grad:
-                    # If you are passing torch.nn.Parameter through the Torch hooks, you will
-                    # get back torch.Tensor. Torch rips off the Parameter wrapper.
-                    # You need to preserve the weight object to have all the attributes user
-                    # sets for the weights. Because of this, it is not recommended to offload
-                    # weights if weights are externally touched outside this module
-                    ctx.weight_objects = []
-                    for weight in weights:
-                        ctx.weight_objects.append(weight)
-
             tensors_to_save, tensor_objects = prepare_for_saving(
                 *inputmats,
                 *weights_fp8,
@@ -288,6 +279,12 @@ class _GroupedLinear(torch.autograd.Function):
 
             ctx.weights_requires_grad = weights[0].requires_grad
             if fuse_wgrad_accumulation and ctx.weights_requires_grad:
+                # Keep weakrefs to weights to preserve attributes like main_grad
+                # when we need to modify the weight python objects
+                ctx.origin_weight_refs = [weakref.ref(w) for w in weights]
+                ctx.origin_weights_overwrite_main_grad = getattr(
+                    weights[0], "overwrite_main_grad", False
+                )
                 # This check is needed to ensure that main_grad is not created
                 # during the forward pass when using MCore FSDP as it creates
                 # the main_grad buffer lazily before backprop
@@ -298,8 +295,6 @@ class _GroupedLinear(torch.autograd.Function):
                     ctx.main_grad_funcs = [
                         lambda j=i: weights[j].main_grad for i in range(num_gemms)
                     ]
-            else:
-                ctx.main_grad_funcs = [lambda: None for i in range(num_gemms)]
             ctx.device = device
             ctx.output_quantizers = output_quantizers
             ctx.m_splits = m_splits
@@ -340,29 +335,37 @@ class _GroupedLinear(torch.autograd.Function):
                 ctx.reduce_and_update_bwd_fp8_tensors = False
 
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
-        return out.view(-1, *inp.shape[1:-1], out.shape[-1])
+        return out.view(-1, *inp.shape[1:-1], out.shape[-1]), new_workspaces
 
     @staticmethod
-    def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
+    def backward(
+        ctx, grad_output: torch.Tensor, _grad_workspaces
+    ) -> Tuple[Union[torch.Tensor, None], ...]:
         # pylint: disable=missing-function-docstring
         with get_nvtx_range_context("_GroupedLinear_backward"):
             saved_tensors = restore_from_func_ctx(ctx)
             N = ctx.num_gemms
             inputmats = saved_tensors[:N]
             weights = saved_tensors[N : 2 * N]
-            origin_weights = saved_tensors[2 * N : 3 * N]
+            saved_weights = saved_tensors[2 * N : 3 * N]
             biases = saved_tensors[3 * N : 4 * N]
-            main_grads = [main_grad_func() for main_grad_func in ctx.main_grad_funcs]
 
-            if ctx.cpu_offloading:
-                if ctx.grad_added_to_main_grad:
-                    for i, weight in enumerate(ctx.weight_objects):
-                        origin_weights[i] = ctx.weight_objects[i]
-                        ctx.weight_objects[i] = None
-
-            if ctx.fuse_wgrad_accumulation:
-                for i in range(N):
-                    origin_weights[i].main_grad = main_grads[i]
+            # Restore from weakrefs to get original weight python objects
+            # (preserves attributes like main_grad, grad_added_to_main_grad, etc.)
+            # Only needed when fuse_wgrad_accumulation is enabled.
+            origin_weights = [None] * N
+            main_grads = [None] * N
+            if ctx.fuse_wgrad_accumulation and ctx.weights_requires_grad:
+                origin_weight_refs = ctx.origin_weight_refs
+                ctx.origin_weight_refs = None
+                origin_weights = [ref() if ref is not None else None for ref in origin_weight_refs]
+                assert all(
+                    w is not None for w in origin_weights
+                ), "weight was removed while fuse_wgrad_accumulation=True"
+                main_grads = [main_grad_func() for main_grad_func in ctx.main_grad_funcs]
+                for origin_weight, main_grad in zip(origin_weights, main_grads):
+                    if main_grad is not None:
+                        origin_weight.main_grad = main_grad
 
             # Preprocess grad output
             grad_output_view = grad_output.contiguous().view(-1, grad_output.shape[-1])
@@ -450,7 +453,7 @@ class _GroupedLinear(torch.autograd.Function):
                             if isinstance(weight, QuantizedTensorStorage)
                             else cast_if_needed(weight, ctx.activation_dtype)
                         )
-                        for weight in origin_weights
+                        for weight in saved_weights
                     ]
                 # Make sure weights are available in column-wise format
                 # for dgrad computation.
@@ -549,7 +552,7 @@ class _GroupedLinear(torch.autograd.Function):
                     use_split_accumulator=wgrad_gemm_use_split_accumulator,
                     accumulate=(
                         accumulate_wgrad_into_param_main_grad
-                        if not getattr(weights[0], "overwrite_main_grad", False)
+                        if not getattr(ctx, "origin_weights_overwrite_main_grad", False)
                         else False
                     ),
                 )
@@ -567,7 +570,7 @@ class _GroupedLinear(torch.autograd.Function):
                     # Deallocate input tensor
                     clear_tensor_data(*inputmats)
 
-                def handle_custom_ddp_from_mcore(weight, wgrad):
+                def handle_custom_ddp_from_mcore(weight, main_grad, wgrad):
                     if ctx.weights_requires_grad:
                         # Handle custom DDP from mcore.
                         if ctx.fuse_wgrad_accumulation and hasattr(
@@ -576,13 +579,13 @@ class _GroupedLinear(torch.autograd.Function):
                             weight.grad_added_to_main_grad = True
                             if getattr(weight, "zero_out_wgrad", False):
                                 wgrad = get_dummy_wgrad(
-                                    list(weight.main_grad.shape),
+                                    list(main_grad.shape),
                                     weight.dtype,
                                     zero=True,
                                 )
                             else:
                                 wgrad = get_dummy_wgrad(
-                                    list(weight.main_grad.shape),
+                                    list(main_grad.shape),
                                     weight.dtype,
                                 )
                         elif ctx.fuse_wgrad_accumulation:
@@ -592,8 +595,8 @@ class _GroupedLinear(torch.autograd.Function):
                     return wgrad
 
                 wgrad_list = [
-                    handle_custom_ddp_from_mcore(weight, wgrad)
-                    for weight, wgrad in zip(origin_weights, wgrad_list)
+                    handle_custom_ddp_from_mcore(weight, main_grad, wgrad)
+                    for weight, main_grad, wgrad in zip(origin_weights, main_grads, wgrad_list)
                 ]
             else:
                 wgrad_list = [None] * ctx.num_gemms
@@ -1133,6 +1136,14 @@ class GroupedLinear(TransformerEngineBaseModule):
                 linear_fn = _GroupedLinear.forward
                 autograd_ctx = [None]
 
+            num_gemms = len(m_splits)
+            cache_weight = is_first_microbatch is not None
+            weight_workspaces = (
+                [self._fp8_workspaces.get(f"weight{i}") for i in range(num_gemms)]
+                if cache_weight
+                else [None] * num_gemms
+            )
+
             non_tensor_args = (
                 m_splits,
                 self.apply_bias,
@@ -1151,12 +1162,22 @@ class GroupedLinear(TransformerEngineBaseModule):
                 self.sequence_parallel,
                 self.activation_dtype,
                 is_grad_enabled,
-                self,
+                weight_workspaces,
+                cache_weight,
                 None,  # skip_fp8_weight_update
                 self.save_original_input,
                 debug,
             )
-            out = linear_fn(*autograd_ctx, inp, non_tensor_args, *weight_tensors, *bias_tensors)
+            out, new_workspaces = linear_fn(
+                *autograd_ctx, inp, non_tensor_args, *weight_tensors, *bias_tensors
+            )
+
+            if cache_weight:
+                for i, ws in enumerate(new_workspaces):
+                    if ws is not None:
+                        if isinstance(ws, torch.Tensor):
+                            ws = ws.detach()
+                        self._fp8_workspaces[f"weight{i}"] = ws
 
         finally:
             self.end_forward()
