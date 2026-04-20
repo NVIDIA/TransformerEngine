@@ -2667,11 +2667,15 @@ register_primitive(FusedRingAttnStripedBwdPrimitive)
 
 def _maybe_context_parallel_axis(cp_axis: str):
     if not cp_axis:
-        gmr = global_mesh_resource()
-        if gmr is not None:
-            cp_axis = gmr.cp_resource
-        else:
-            cp_axis = ""
+        try:
+            gmr = global_mesh_resource()
+            if gmr is not None:
+                cp_axis = gmr.cp_resource
+            else:
+                cp_axis = ""
+        except AssertionError:
+            warnings.warn("Failed at global_mesh_resource(), returning cp_axis=None")
+            cp_axis = None
     return cp_axis
 
 
