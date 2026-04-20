@@ -341,8 +341,7 @@ at::Tensor convert_block_scaling_to_mxfp8_tensor(transformer_engine::TensorWrapp
 std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor(GroupedTensorWrapper &input,
                                                                   bool rowwise_usage,
                                                                   bool columnwise_usage) {
-  if (input.scaling_mode() != NVTE_MXFP8_1D_SCALING &&
-      input.scaling_mode() != NVTE_NVFP4_1D_SCALING) {
+  if (input.scaling_mode() != NVTE_MXFP8_1D_SCALING) {
     return std::nullopt;
   }
   if (input.get_with_gemm_swizzled_scales()) {
