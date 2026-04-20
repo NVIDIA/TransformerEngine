@@ -519,15 +519,11 @@ class FP8GlobalStateManager:
             # Determine recipe + buffers: built-in DS or custom with DS requests
             if isinstance(state, CustomRecipeState) and state._has_delayed_scaling:
                 inner_recipe = state._inner_delayed_scaling_recipe
-                amax_hist = state.amax_history
-                scale_tensor = state.scale
                 key = cls.get_key_in_buffer(forward, inner_recipe, fp8_meta["fp8_group"])
                 # Register inner recipe in autocast_arguments for reduction
                 autocast_key = cls.get_unique_autocast_key(inner_recipe, fp8_meta["fp8_group"])
                 cls.autocast_arguments[autocast_key] = (inner_recipe, fp8_meta["fp8_group"])
             else:
-                amax_hist = state.amax_history
-                scale_tensor = state.scale
                 key = cls.get_key_in_buffer(forward, fp8_meta["recipe"], fp8_meta["fp8_group"])
 
             if key not in qstate.global_amax_buffer:

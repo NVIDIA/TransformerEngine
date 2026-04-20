@@ -115,7 +115,7 @@ class _GroupedLinear(torch.autograd.Function):
 
         # Configure quantizers
         if save_original_input and isinstance(input_quantizers[0], Float8Quantizer):
-            if module.fp8_meta["recipe"].custom():
+            if FP8GlobalStateManager.get_fp8_recipe().custom():
                 # Custom recipe factory may produce DS quantizers unknown to caller.
                 # TODO(negvet): fix on Megatron side — guard should also exclude 'custom', or
                 # better: check at runtime whether quantizers are DS-based.
