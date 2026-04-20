@@ -9,18 +9,9 @@
 
 #include <gtest/gtest.h>
 
-#include "util/cuda_runtime.h"
 #include "util/rtc.h"
 
 using namespace transformer_engine;
-
-TEST(UtilTest, CUDAHeaders) {
-  if (!rtc::is_enabled()) {
-    GTEST_SKIP() << "NVRTC not enabled, skipping tests";
-  }
-  EXPECT_FALSE(cuda::include_directory().empty());
-  EXPECT_EQ(cuda::include_directory_version(), CUDART_VERSION);
-}
 
 TEST(UtilTest, NVRTC) {
   if (!rtc::is_enabled()) {

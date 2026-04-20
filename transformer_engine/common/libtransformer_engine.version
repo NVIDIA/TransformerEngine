@@ -2,11 +2,15 @@
 	global:
 		extern "C++" {
 			nvte_*;
-			transformer_engine::cuda::*;
+			transformer_engine::cuda::sm_count*;
+			transformer_engine::cuda::sm_arch*;
+			transformer_engine::cuda::supports_multicast*;
+			transformer_engine::cuda::stream_priority_range*;
+			transformer_engine::cuda::current_device*;
 			transformer_engine::cuda_driver::get_symbol*;
 			transformer_engine::cuda_driver::ensure_context_exists*;
 			transformer_engine::ubuf_built_with_mpi*;
-			*transformer_engine::rtc::*;
+			*transformer_engine::rtc*;
 			transformer_engine::nvte_cudnn_handle_init*;
 			transformer_engine::nvte_cublas_handle_init*;
 			transformer_engine::typeToSize*;
