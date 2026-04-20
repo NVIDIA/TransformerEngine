@@ -26,8 +26,8 @@ from transformer_engine.common.triton.mhc import (
 )
 
 def check_deterministic(operator: str):
-    allow_nondeterministic = os.environ.get("ALLOW_NONDETERMINISTIC_MHC_KERNELS", "0") == "1"
-    assert allow_nondeterministic, f"[{operator}]: This operation uses atomic add which violates determinism. Set ALLOW_NONDETERMINISTIC_MHC_KERNELS=1 to allow this non-deterministic behavior."
+    allow_nondeterministic = os.environ.get("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "0") == "1"
+    assert allow_nondeterministic, f"[{operator}]: This operation uses atomic add which violates determinism. Set NVTE_ALLOW_NONDETERMINISTIC_ALGO=1 to allow this non-deterministic behavior."
 
 def mhc_fused_sinkhorn(
     H_res: torch.Tensor, n: int = 4, recompute_hist: bool = True, iters: int = 20
