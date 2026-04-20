@@ -331,7 +331,7 @@ class mHCProjectionOp(torch.autograd.Function):
             M,
         )
 
-        grad_x = torch.zeros((M, K), device=device, dtype=x.dtype)
+        grad_x = torch.empty((M, K), device=device, dtype=x.dtype)
         grad_phi = (grad_H.T @ x)[:N, :].to(
             ctx.phi_dtype
         )  # (2n + n^2, M) @ (M, nC) = (2n + n^2, nC), note that the last dimension of grad_H is already padded to 32
