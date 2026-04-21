@@ -7,33 +7,17 @@
 /*! \file quantize_pertoken_nvfp4.cuh
  *  \brief CUDA kernels to cast to NVFP4 with per-token (per-row) global scaling.
  *
- *  Unlike standard NVFP4 quantization which uses a single per-tensor global scale
- *  (amax / (fp8_max * fp4_max)), per-token NVFP4 computes a separate global scale
- *  for each row (token) of the input tensor. This preserves more dynamic range
- *  information per token, improving accuracy for MoE grouped GEMM workloads.
+ *  Unlike standard NVFP4 quantization which uses a single per-tensor global scale,
+ *  per-token NVFP4 computes a separate global scale for each row. This preserves
+ *  more dynamic range per token, improving accuracy for MoE workloads.
  *
  *  Scaling hierarchy:
- *    x_quantized = round_to_fp4(x / (global_scale[row] * block_scale[row, block]))
- *    x_dequantized = x_quantized * block_scale[row, block] * global_scale[row]
+ *    global_scale[row] = row_amax / (fp8_max * fp4_max)
+ *    block_scale[row, block] = block_amax / (fp4_max * global_scale[row])
+ *    x_fp4 = quantize_to_fp4(x / (global_scale[row] * block_scale[row, block]))
  *
- *  Where:
- *    - global_scale[row] = row_amax / (fp8_max * fp4_max)     [FP32, per-row]
- *    - block_scale[row, block] = block_amax / (fp4_max * global_scale[row])  [FP8 E4M3, per-16-element block]
- *
- *  Output tensors:
- *    - data: uint8 packed FP4 (same as standard NVFP4)
- *    - block_scales: uint8 reinterpreted as FP8 E4M3 (same layout as standard NVFP4)
- *    - per_token_scales: float32 tensor of shape (num_rows,) containing global_scale per row
- *
- *  TODO: Implement the CUDA kernel. The kernel should:
- *    1. Compute per-row amax via parallel reduction
- *    2. Derive per-row global_scale = row_amax / (fp8_max * fp4_max)
- *    3. For each 16-element block: compute block_amax, derive block_scale, quantize to FP4
- *    4. Store per-row global_scale to output tensor
- *
- *  For now, per-token scaling is approximated by using the per-tensor amax
- *  broadcast to all rows. The fused grouped MLP path in TransformerEngine
- *  handles this via the global_scale_tensor parameter in cuDNN Frontend.
+ *  Based on the approach from FlashInfer (flashinfer-ai/flashinfer#3027):
+ *  two-pass design with one CUDA block per row.
  */
 
 #ifndef TRANSFORMER_ENGINE_QUANTIZE_PERTOKEN_NVFP4_CUH_
@@ -41,10 +25,17 @@
 
 #include <cuda.h>
 #include <cuda_runtime.h>
-#include <transformer_engine/transformer_engine.h>
+#include <cub/cub.cuh>
 
 #include "../../common.h"
+#include "../../util/math.h"
+#include "../../util/ptx.cuh"
+#include "../../utils.cuh"
 #include "core_nvfp4.cuh"
+
+#if FP4_TYPE_SUPPORTED
+#include <cuda_fp4.h>
+#endif
 
 namespace transformer_engine {
 namespace dispatch {
@@ -53,20 +44,178 @@ namespace quantize_pertoken_kernel {
 
 using namespace core;
 
+constexpr int PERTOKEN_BLOCK_SIZE = 256;
+constexpr int PERTOKEN_SF_VEC_SIZE = 16;
+
 /*
- * Per-token NVFP4 quantization kernel placeholder.
+ * Per-token NVFP4 quantization kernel.
+ *
+ * One CUDA block per row. Two passes:
+ *   Pass 1: Vectorized load + per-row amax reduction via cub::BlockReduce
+ *   Pass 2: Reload data, compute per-block E4M3 scale, quantize to FP4
+ *
+ * Template parameters:
+ *   IType           - Input type (half, __nv_bfloat16)
+ *   BLOCK_SIZE      - Threads per block
  *
  * Parameters:
- *   input          - Input tensor (rows x cols), high-precision (BF16/FP32)
- *   output_data    - Output packed FP4 data (rows x cols/2), uint8
- *   output_scales  - Output block scales (rows x ceil(cols/16)), FP8 E4M3
- *   output_per_token_scales - Output per-row global scales (rows,), FP32
- *   rows           - Number of rows (tokens)
- *   cols           - Number of columns (hidden dim), must be multiple of 16
- *
- * TODO: Implement kernel body. See quantize_nvfp4.cuh for reference implementation
- *       of the per-tensor variant.
+ *   num_rows        - Number of rows (tokens)
+ *   num_cols        - Number of columns (hidden dim), must be multiple of 16
+ *   input           - Input tensor (num_rows, num_cols), IType
+ *   row_offsets     - Optional row index remapping (for MoE expert routing), or nullptr
+ *   output_data     - Output packed FP4 data (num_rows, num_cols/2), uint8
+ *   output_scales   - Output block scales, fp8e4m3
+ *   output_per_token_scales - Output per-row global scales (num_rows,), FP32
+ *   scale_stride    - Stride of scale factor output (number of SF vectors per row)
  */
+template <typename IType, int BLOCK_SIZE>
+__global__ void
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+__launch_bounds__(BLOCK_SIZE)
+#endif
+    quantize_pertoken_nvfp4_kernel(
+        const int num_rows,
+        const int num_cols,
+        const IType *__restrict__ input,
+        const int *__restrict__ row_offsets,  // optional: nullptr for identity mapping
+        uint8_t *__restrict__ output_data,
+        fp8e4m3 *__restrict__ output_scales,
+        float *__restrict__ output_per_token_scales,
+        const int scale_stride) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+
+  using namespace detail;
+  constexpr float fp8_max = TypeExtrema<fp8e4m3>::max;   // 448.0f
+  constexpr float fp4_max = TypeExtrema<fp4e2m1>::max;   // 6.0f
+  constexpr float fp4_max_inv = 1.0f / fp4_max;
+
+  // Packed type: 4 elements per float2 pair for FP4 conversion
+  using IType2 = typename std::conditional<std::is_same<IType, half>::value,
+                                           half2, __nv_bfloat162>::type;
+
+  const int row_idx = blockIdx.x;
+  if (row_idx >= num_rows) return;
+
+  // Optional row remapping (for MoE routing)
+  const int actual_row = (row_offsets != nullptr) ? row_offsets[row_idx] : row_idx;
+  if (actual_row < 0) return;
+
+  const int num_vec2 = num_cols / 2;  // number of IType2 elements per row
+  const IType2 *input_row = reinterpret_cast<const IType2 *>(input + actual_row * num_cols);
+
+  // =========================================================================
+  // Pass 1: Per-row amax reduction
+  // =========================================================================
+  float thread_max = 0.0f;
+  for (int i = threadIdx.x; i < num_vec2; i += BLOCK_SIZE) {
+    IType2 val = input_row[i];
+    float2 fval;
+    if constexpr (std::is_same_v<IType, half>) {
+      fval = __half22float2(val);
+    } else {
+      fval = __bfloat1622float2(val);
+    }
+    thread_max = fmaxf(thread_max, fabsf(fval.x));
+    thread_max = fmaxf(thread_max, fabsf(fval.y));
+  }
+
+  // Block-wide max reduction
+  using BlockReduce = cub::BlockReduce<float, BLOCK_SIZE>;
+  __shared__ typename BlockReduce::TempStorage temp_storage;
+  float row_amax = BlockReduce(temp_storage).Reduce(thread_max, cub::Max());
+
+  // Compute and store per-token global scale
+  // global_scale = row_amax / (fp8_max * fp4_max)
+  // S_enc = fp8_max * fp4_max / row_amax  (encoding scale, inverse of global_scale)
+  __shared__ float shared_s_enc;
+  if (threadIdx.x == 0) {
+    float s_enc = compute_global_encode_scaling_factor_FP4(row_amax);
+    float global_scale = (s_enc > 0.0f) ? (1.0f / s_enc) : 0.0f;
+    output_per_token_scales[row_idx] = global_scale;
+    shared_s_enc = s_enc;
+  }
+  __syncthreads();
+  const float S_enc = shared_s_enc;
+
+  // =========================================================================
+  // Pass 2: Quantize to FP4 with per-token scale
+  // =========================================================================
+  // Process in chunks of SF_VEC_SIZE (16) elements.
+  // Each chunk produces one FP8 E4M3 block scale factor.
+  const int num_sf_blocks = num_cols / PERTOKEN_SF_VEC_SIZE;
+
+  for (int sf_idx = threadIdx.x; sf_idx < num_sf_blocks; sf_idx += BLOCK_SIZE) {
+    const int col_start = sf_idx * PERTOKEN_SF_VEC_SIZE;
+
+    // Load 16 elements and find block amax
+    float block_max = 0.0f;
+    float vals[PERTOKEN_SF_VEC_SIZE];
+    for (int j = 0; j < PERTOKEN_SF_VEC_SIZE; j++) {
+      if constexpr (std::is_same_v<IType, half>) {
+        vals[j] = __half2float(input[actual_row * num_cols + col_start + j]);
+      } else {
+        vals[j] = __bfloat162float(input[actual_row * num_cols + col_start + j]);
+      }
+      block_max = fmaxf(block_max, fabsf(vals[j]));
+    }
+
+    // Compute per-block E4M3 scale factor
+    fp8e4m3 S_dec_b = quantization_SF::compute_decoding_scaling_factor(block_max, S_enc);
+    float S_dec_b_f = static_cast<float>(S_dec_b);
+
+    // Store block scale
+    output_scales[row_idx * scale_stride + sf_idx] = S_dec_b;
+
+    // Compute inverse block scale for quantization
+    float block_encode_scale = (S_dec_b_f != 0.0f)
+                                   ? __fdividef(S_enc, S_dec_b_f)
+                                   : 0.0f;
+
+    // Quantize 16 elements to FP4 and pack into 8 bytes
+    uint8_t *out_ptr = output_data + actual_row * (num_cols / 2) + col_start / 2;
+    for (int j = 0; j < PERTOKEN_SF_VEC_SIZE; j += 4) {
+      float2 in01 = {vals[j] * block_encode_scale, vals[j + 1] * block_encode_scale};
+      float2 in23 = {vals[j + 2] * block_encode_scale, vals[j + 3] * block_encode_scale};
+      fp4e2m1x4 fp4_packed;
+      ptx::mul_cvt_4x(fp4_packed, in01, in23, 1.0f, 0);
+      // Pack 4 FP4 values (2 bytes) into output
+      reinterpret_cast<uint16_t *>(out_ptr)[j / 4] =
+          *reinterpret_cast<const uint16_t *>(&fp4_packed);
+    }
+  }
+#endif  // __CUDA_ARCH__ >= 1000
+}
+
+/*
+ * Host-side launcher for per-token NVFP4 quantization.
+ */
+template <typename IType>
+void launch_quantize_pertoken_nvfp4(
+    const int num_rows,
+    const int num_cols,
+    const IType *input,
+    const int *row_offsets,
+    uint8_t *output_data,
+    fp8e4m3 *output_scales,
+    float *output_per_token_scales,
+    cudaStream_t stream) {
+  if (num_rows == 0 || num_cols == 0) return;
+
+  NVTE_CHECK(num_cols % PERTOKEN_SF_VEC_SIZE == 0,
+             "num_cols must be a multiple of ", PERTOKEN_SF_VEC_SIZE,
+             " for per-token NVFP4 quantization, got ", num_cols);
+
+  const int scale_stride = num_cols / PERTOKEN_SF_VEC_SIZE;
+  dim3 grid(num_rows);
+  dim3 block(PERTOKEN_BLOCK_SIZE);
+
+  quantize_pertoken_nvfp4_kernel<IType, PERTOKEN_BLOCK_SIZE>
+      <<<grid, block, 0, stream>>>(
+          num_rows, num_cols, input, row_offsets,
+          output_data, output_scales, output_per_token_scales,
+          scale_stride);
+  NVTE_CHECK_CUDA(cudaGetLastError());
+}
 
 }  // namespace quantize_pertoken_kernel
 }  // namespace nvfp4

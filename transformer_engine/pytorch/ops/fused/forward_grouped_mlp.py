@@ -775,18 +775,28 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_NVFP4(FusedOperation):
         )
         fc1_x_scales = fc1_x_scales.permute(3, 4, 1, 5, 2, 0)
 
-        # Per-token global scale from NVFP4 quantizer
-        # amax_rowwise is per-tensor (1,); broadcast to per-token for now.
-        # TODO: Implement true per-token global scale in NVFP4Quantizer.
-        nvfp4_amax = grouped_fc1_x.amax
-        if nvfp4_amax is not None and nvfp4_amax.numel() == 1:
-            # global_scale = amax / (fp4_max * fp8_max) per NVFP4 spec
-            fp4_max = 6.0
-            fp8_max = 448.0
-            global_scale_val = nvfp4_amax.float() / (fp4_max * fp8_max)
-            global_scale_tensor = global_scale_val.expand(in_shape[0]).reshape(-1, 1, 1)
-        else:
-            global_scale_tensor = None
+        # Per-token global scale.
+        # The per-token NVFP4 kernel (tex.quantize_nvfp4_pertoken) produces
+        # data + block_scales + per_token_scales in one pass. Here we call it
+        # to get the per-token scales. The quantized data from group_quantize
+        # (above) is used for the GEMM since it handles grouped layout/swizzle.
+        # TODO: Unify into a single quantization call once the grouped per-token
+        #       kernel supports the full TE scale factor layout.
+        global_scale_tensor = None
+        try:
+            _, _, fc1_per_token_scales = tex.quantize_nvfp4_pertoken(
+                fc1_x.reshape(in_shape[0], in_shape[1]) if not isinstance(input_, GroupedTensor)
+                else input_.dequantize(dtype=dtype).reshape(in_shape[0], in_shape[1])
+            )
+            global_scale_tensor = fc1_per_token_scales.reshape(-1, 1, 1)
+        except (AttributeError, RuntimeError):
+            # Fallback: per-tensor amax broadcast to all tokens
+            nvfp4_amax = grouped_fc1_x.amax
+            if nvfp4_amax is not None and nvfp4_amax.numel() == 1:
+                fp4_max = 6.0
+                fp8_max = 448.0
+                global_scale_val = nvfp4_amax.float() / (fp4_max * fp8_max)
+                global_scale_tensor = global_scale_val.expand(in_shape[0]).reshape(-1, 1, 1)
 
         alpha_tensor = get_cached_ones_tensor(num_groups, dtype, device)
         norm_const_tensor = get_cached_ones_tensor(1, dtype, device)
