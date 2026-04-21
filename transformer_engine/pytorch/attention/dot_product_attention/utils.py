@@ -1174,8 +1174,10 @@ def get_attention_backend(
             fused_attention_backend = None
 
         # head_dim=256 on SM100+ is serviced by the cuDNN frontend Python SDPA
-        # (CuTe DSL), which has narrower config coverage than the C++ path.
-        # Verify the config actually fits and that the Python module is importable.
+        # (CuTe DSL) rather than the C++ kernel. Promote the backend to the
+        # Python-only sentinel so ``fused_attn_fwd`` / ``fused_attn_bwd`` route
+        # through ``cudnn_fe_sdpa`` without re-checking. Disable FusedAttention
+        # if the Python kernel can't service this config.
         if (
             use_fused_attention
             and fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
@@ -1185,7 +1187,7 @@ def get_attention_backend(
         ):
             from .cudnn_fe_sdpa import is_supported as _cudnn_fe_supported
 
-            if not _cudnn_fe_supported(
+            if _cudnn_fe_supported(
                 head_dim_qk=head_dim_qk,
                 head_dim_v=head_dim_v,
                 qkv_dtype=qkv_dtype,
@@ -1202,6 +1204,8 @@ def get_attention_backend(
                 device_compute_capability=device_compute_capability,
                 return_max_logit=return_max_logit,
             ):
+                fused_attention_backend = FusedAttnBackend["F16_cudnn_fe_sdpa"]
+            else:
                 logger.debug(
                     "Disabling FusedAttention: cuDNN frontend Python SDPA (d=256) does not"
                     " support this config or is not importable"

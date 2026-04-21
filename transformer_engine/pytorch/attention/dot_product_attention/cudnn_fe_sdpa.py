@@ -141,7 +141,7 @@ def _causal_and_window(
     attn_mask_type: str, window_size: Tuple[int, int]
 ) -> Tuple[bool, Tuple[int, int]]:
     is_causal = "causal" in attn_mask_type
-    left, right = window_size
+    left, _ = window_size
     if is_causal:
         return True, (left if left is not None else -1, 0)
     return False, (-1, -1)

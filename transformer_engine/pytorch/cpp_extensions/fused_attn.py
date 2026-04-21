@@ -97,51 +97,15 @@ FusedAttnBackend = {
     "F16_max512_seqlen": NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen,
     "F16_arbitrary_seqlen": NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
     "FP8": NVTE_Fused_Attn_Backend.NVTE_FP8,
+    # Python-only sentinel (no C++ counterpart). Set by ``get_attention_backend``
+    # when the cuDNN frontend CuTe-DSL d=256 SDPA path is applicable; checked
+    # in ``fused_attn_fwd`` / ``fused_attn_bwd`` to route to the Python kernel.
+    "F16_cudnn_fe_sdpa": "F16_cudnn_fe_sdpa",
     "No_Backend": NVTE_Fused_Attn_Backend.NVTE_No_Backend,
 }
 
 BACKEND_F16m512_FP8_THREADS_PER_CTA = 128
 BACKEND_F16arb_ELTS_PER_THREADS = 16
-
-
-def _should_use_cudnn_fe_sdpa(
-    q: torch.Tensor,
-    v: torch.Tensor,
-    fused_attention_backend: "tex.NVTE_Fused_Attn_Backend",
-    page_table_k: Optional[torch.Tensor] = None,
-    page_table_v: Optional[torch.Tensor] = None,
-    attn_bias: Optional[torch.Tensor] = None,
-    softmax_offset: Optional[torch.Tensor] = None,
-    dropout: float = 0.0,
-    return_max_logit: bool = False,
-) -> bool:
-    """Whether to dispatch to the cuDNN-FE Python SDPA (CuTe DSL) for head_dim=256
-    on SM100+. Assumes the remaining config has already been vetted by the
-    attention-backend selection in ``get_attention_backend``.
-    """
-    if fused_attention_backend != FusedAttnBackend["F16_arbitrary_seqlen"]:
-        return False
-    if q.size(-1) != 256 or v.size(-1) != 256:
-        return False
-    if not q.is_cuda:
-        return False
-    if page_table_k is not None or page_table_v is not None:
-        return False
-    # The cuDNN-FE kernel doesn't accept bias, softmax offset, or dropout, and
-    # doesn't produce max_logit. Fall through to the C++ path rather than
-    # silently dropping any of them.
-    if attn_bias is not None or softmax_offset is not None or dropout != 0.0:
-        return False
-    if return_max_logit:
-        return False
-    if torch.cuda.get_device_capability(q.device)[0] < 10:
-        return False
-    # Confirm the Python kernel is importable. Callers that bypass
-    # ``get_attention_backend`` (which already gates on ``is_supported``) would
-    # otherwise hit an unhandled ImportError at the dispatch site.
-    from ..attention.dot_product_attention import cudnn_fe_sdpa
-
-    return cudnn_fe_sdpa.is_available()
 
 
 META_QKV = FP8FwdTensorIdx.GEMM1_OUTPUT
@@ -322,19 +286,9 @@ def fused_attn_fwd(
             )
 
     # Route head_dim=256 on SM100+ through the cuDNN frontend Python SDPA (CuTe DSL).
-    # The C++ kernel does not handle head_dim=256 on Blackwell (backward in particular),
-    # so interception happens here regardless of training/inference.
-    if _should_use_cudnn_fe_sdpa(
-        q,
-        v,
-        fused_attention_backend,
-        page_table_k=page_table_k,
-        page_table_v=page_table_v,
-        attn_bias=attn_bias,
-        softmax_offset=softmax_offset,
-        dropout=dropout,
-        return_max_logit=return_max_logit,
-    ):
+    # Eligibility was already decided in ``get_attention_backend``; a matching
+    # backend value here means "use the Python kernel".
+    if fused_attention_backend == FusedAttnBackend["F16_cudnn_fe_sdpa"]:
         from ..attention.dot_product_attention import cudnn_fe_sdpa
 
         qkv_format = qkv_layout.replace("3", "").replace("2", "").split("_")[0]
@@ -351,8 +305,9 @@ def fused_attn_fwd(
             attn_scale=attn_scale,
             window_size=window_size,
         )
-        # _should_use_cudnn_fe_sdpa filters out return_max_logit=True, so we
-        # never need to produce a max_logit tensor here.
+        # ``is_supported`` rejects ``return_max_logit=True``, return None to make the linter happy
+        if return_max_logit:
+            return out, aux_ctx_tensors, None
         return out, aux_ctx_tensors
 
     if fused_attention_backend == FusedAttnBackend["No_Backend"]:
@@ -612,7 +567,8 @@ def fused_attn_bwd(
         attn_scale = 1.0 / math.sqrt(d)
 
     # Route head_dim=256 on SM100+ through the cuDNN frontend Python SDPA backward.
-    if _should_use_cudnn_fe_sdpa(q, v, fused_attention_backend, dropout=dropout):
+    # ``ctx.fused_attention_backend`` carries the sentinel forward-to-backward.
+    if fused_attention_backend == FusedAttnBackend["F16_cudnn_fe_sdpa"]:
         from ..attention.dot_product_attention import cudnn_fe_sdpa
 
         qkv_format = qkv_layout.replace("3", "").replace("2", "").split("_")[0]
