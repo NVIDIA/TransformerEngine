@@ -56,8 +56,11 @@ std::tuple<at::Tensor, at::Tensor, std::vector<at::Tensor>> moe_permute_fwd(
   // valid suffix, and pre-fill row_id_map with -1 so the dropped slots are marked
   // without the kernel ever dereferencing a sentinel.
   num_out_tokens = (num_out_tokens > 0) ? num_out_tokens : num_tokens * topK;
+  NVTE_CHECK(num_out_tokens <= num_tokens * topK, "num_out_tokens (", num_out_tokens,
+             ") must not exceed num_tokens*topK (", num_tokens * topK, ")");
   const int num_minus_ones = num_tokens * topK - num_out_tokens;
-  sorted_row_id_ptr = reinterpret_cast<char *>(sorted_row_id_ptr) + num_minus_ones * sizeof(int);
+  sorted_row_id_ptr = reinterpret_cast<char *>(sorted_row_id_ptr) +
+                      static_cast<size_t>(num_minus_ones) * sizeof(int);
   at::Tensor permuted_output =
       torch::empty({num_out_tokens, num_cols},
                    torch::dtype(input.scalar_type()).device(torch::kCUDA).requires_grad(false));
