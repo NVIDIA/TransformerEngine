@@ -374,18 +374,6 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         update_usage can be used to clear out one of two possible copies of the data.
         """
 
-        # Fast path: clear one dimension without touching the other.
-        # Avoids resolving None to a boolean and hitting assertions
-        # when the other dimension's data is missing (e.g., FSDP2 cleanup).
-        if columnwise_usage is False and rowwise_usage is None:
-            self._columnwise_data = None
-            self._columnwise_scale_inv = None
-            return
-        if rowwise_usage is False and columnwise_usage is None:
-            self._rowwise_data = None
-            self._rowwise_scale_inv = None
-            return
-
         if rowwise_usage is None:
             rowwise_usage = self._rowwise_data is not None
         if columnwise_usage is None:

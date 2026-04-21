@@ -240,16 +240,6 @@ class Float8TensorStorage(QuantizedTensorStorage):
         Generate or remove FP8 data based on provided usage. For
         FP8, data cannot be generated even if transpose is available.
         """
-        # Fast path: clear columnwise (transpose) without touching rowwise.
-        # Avoids resolving None to a boolean when the other dimension's
-        # data is missing (e.g., FSDP2 post-GEMM cleanup).
-        # Note: only columnwise clearing is safe here because Float8Tensor's
-        # _data is shared between rowwise and columnwise when
-        # is_non_tn_fp8_gemm_supported() is True.
-        if columnwise_usage is False and rowwise_usage is None:
-            self._transpose = None
-            self._transpose_invalid = True
-            return
 
         has_data = self._data is not None
         has_data_transpose = self._transpose is not None and not self._transpose_invalid

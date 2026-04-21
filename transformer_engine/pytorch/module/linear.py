@@ -20,6 +20,7 @@ from .base import (
     fill_userbuffers_buffer_for_all_gather,
     get_dummy_wgrad,
     get_ub,
+    quantize_weight,
     TransformerEngineBaseModule,
     _2X_ACC_FPROP,
     _2X_ACC_DGRAD,
@@ -88,10 +89,11 @@ class _Linear(torch.autograd.Function):
     def forward(
         ctx,
         weight: torch.Tensor,
+        weight_workspace: Optional[torch.Tensor],
         inp: torch.Tensor,
         bias: Optional[torch.Tensor],
         non_tensor_args: Tuple,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         # pylint: disable=missing-function-docstring
 
         (
@@ -123,11 +125,12 @@ class _Linear(torch.autograd.Function):
             ub_name,
             fp8_output,  # pylint: disable=unused-variable
             fsdp_group,
-            module,
+            cache_weight,
             skip_fp8_weight_update,
             symmetric_ar_type,
             save_original_input,
             debug,
+            is_fsdp2,
         ) = non_tensor_args
         if fp8:
             backward_override = FP8GlobalStateManager.get_fp8_recipe().backward_override
@@ -262,13 +265,15 @@ class _Linear(torch.autograd.Function):
         # ------------------------------------------------------
         # Prepare weight tensor
         # ------------------------------------------------------
+        new_weight_workspace = None
         weightmat = weight
-        is_fsdp2 = module.is_fsdp2
         if fp8 or debug:
             # Configure quantizer
-            # No need to set the quantizer states if weight is already quantized
+            # If weight is already quantized, weight._quantizer is its true quantizer.
             # for debug mode we create quantizer every iteration, thus we need to set the quantizer states
-            if weight_quantizer is not None and (not isinstance(weight, QuantizedTensor) or debug):
+            if isinstance(weight, QuantizedTensor) and not debug:
+                weight_quantizer = weight._quantizer
+            elif weight_quantizer is not None:
                 columnwise_usage = is_grad_enabled and inp.requires_grad
                 if backward_override is not None:
                     columnwise_usage = False
@@ -277,49 +282,22 @@ class _Linear(torch.autograd.Function):
                         is_fp8_activation_recompute_enabled()
                         and not in_fp8_activation_recompute_phase()
                     )
-                # FSDP2: Skip columnwise/transpose creation during forward
-                # to avoid accumulating caches across layers. Backward's
-                # FSDP2 all-gather will recreate them. (Issue #2681)
                 if is_fsdp2:
                     columnwise_usage = False
                 weight_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
-            elif isinstance(weight, QuantizedTensor):
-                # If weight is already quantized, no need to set quantizer states
-                weight_quantizer = weight._quantizer
-                # FSDP2: Disable columnwise on pre-quantized block-scaled weights
-                # whose _create_columnwise() can regenerate in backward. (#2681)
-                from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
-                from ..tensor.nvfp4_tensor import NVFP4Quantizer as _NVFP4Quantizer
-
-                if is_fsdp2 and isinstance(
-                    weight_quantizer, (Float8BlockQuantizer, _NVFP4Quantizer)
-                ):
-                    weight_quantizer.set_usage(rowwise=True, columnwise=False)
             # Get quantized weight
-            # FSDP2: Don't cache workspaces — they would persist across
-            # layers, defeating FSDP2 memory savings. (Issue #2681)
-            update_workspace = is_first_microbatch is None or is_first_microbatch
-            wt_cache = None if (is_first_microbatch is None or is_fsdp2) else "weight"
-            weightmat = module.get_weight_workspace(
+            update_ws = is_first_microbatch is None or is_first_microbatch
+            weightmat, new_weight_workspace = quantize_weight(
                 tensor=weight,
                 quantizer=weight_quantizer,
-                cache_name=wt_cache,
-                update_workspace=update_workspace,
+                workspace=weight_workspace,
+                update_workspace=update_ws,
                 skip_update_flag=skip_fp8_weight_update,
                 fsdp_group=fsdp_group,
                 workspace_dtype=activation_dtype,
+                cache=cache_weight,
             )
-            # FSDP2: Discard columnwise data on block-scaled pre-quantized
-            # weights whose _create_columnwise() can regenerate in backward.
-            # (Issue #2681)
-            if (
-                is_fsdp2
-                and isinstance(weight, QuantizedTensor)
-                and isinstance(weight_quantizer, (Float8BlockQuantizer, _NVFP4Quantizer))
-            ):
-                weightmat.update_usage(rowwise_usage=True, columnwise_usage=False)
-            else:
-                weightmat.update_usage(rowwise_usage=True)
+            weightmat.update_usage(rowwise_usage=True)
 
         else:
             weightmat = cast_if_needed(weightmat, activation_dtype)  # Cast for AMP
@@ -533,10 +511,11 @@ class _Linear(torch.autograd.Function):
 
             ctx.owns_input = saved_inputmat is not inp
             if ctx.fp8 and requires_grad(inp, weight, bias):
-                _first_fp8_module = FP8GlobalStateManager.IS_FIRST_FP8_MODULE
+                qstate = FP8GlobalStateManager.quantization_state
+                _first_fp8_module = qstate.is_first_fp8_module
                 ctx.reduce_and_update_bwd_fp8_tensors = FP8GlobalStateManager.is_first_fp8_module()
                 if in_fp8_activation_recompute_phase():
-                    FP8GlobalStateManager.IS_FIRST_FP8_MODULE = _first_fp8_module
+                    qstate.is_first_fp8_module = _first_fp8_module
             ctx.wgrad_store = wgrad_store
 
             # backward overrides
@@ -556,10 +535,12 @@ class _Linear(torch.autograd.Function):
         # Cached state for backward pass is ready...
         # ------------------------------------------------------
 
-        return out
+        return out, new_weight_workspace
 
     @staticmethod
-    def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
+    def backward(
+        ctx, grad_output: torch.Tensor, _grad_weight_workspace
+    ) -> Tuple[Union[torch.Tensor, None], ...]:
         # pylint: disable=missing-function-docstring
 
         # NVTX label for profiling
@@ -764,7 +745,6 @@ class _Linear(torch.autograd.Function):
                 # when workspace was not saved. (Issue #2681)
                 if weight_fp8 is None:
                     if isinstance(saved_weight, QuantizedTensorStorage):
-                        saved_weight.update_usage(columnwise_usage=True)
                         weight_fp8 = saved_weight
                     elif ctx.weight_quantizer is not None:
                         ctx.weight_quantizer.set_usage(rowwise=True, columnwise=True)
@@ -1078,6 +1058,7 @@ class _Linear(torch.autograd.Function):
             _fsdp_scatter_tensors(ctx.fsdp_group, weight_fp8)
         return (
             wgrad,
+            None,  # weight_workspace
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             grad_bias,
             None,
@@ -1478,7 +1459,9 @@ class Linear(TransformerEngineBaseModule):
         debug = self.is_debug_iter()
 
         if FP8GlobalStateManager.fp8_graph_capturing():
-            skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()
+            skip_fp8_weight_update = (
+                FP8GlobalStateManager.quantization_state.skip_fp8_weight_update_tensor
+            )
         else:
             skip_fp8_weight_update = None
         if skip_fp8_weight_update is not None:
@@ -1525,6 +1508,11 @@ class Linear(TransformerEngineBaseModule):
                 linear_fn = _Linear.forward
                 autograd_ctx = [None]
 
+            cache_name = None if (is_first_microbatch is None or self.is_fsdp2) else "weight"
+            weight_workspace = (
+                self._fp8_workspaces.get(cache_name) if cache_name is not None else None
+            )
+
             non_tensor_args = (
                 is_first_microbatch,
                 self.fp8,
@@ -1554,19 +1542,27 @@ class Linear(TransformerEngineBaseModule):
                 self.ub_name,
                 fp8_output,
                 self.fsdp_group,
-                self,
+                cache_name is not None,
                 skip_fp8_weight_update,
                 self.symmetric_ar_type,
                 self.save_original_input,
                 debug,
+                self.is_fsdp2,
             )
-            out = linear_fn(
+            out, new_weight_workspace = linear_fn(
                 *autograd_ctx,
                 weight_tensor,
+                weight_workspace,
                 inp,
                 bias_tensor if (self.apply_bias and not self.gemm_bias_unfused_add) else None,
                 non_tensor_args,
             )
+
+            if new_weight_workspace is not None and cache_name is not None:
+                if isinstance(new_weight_workspace, torch.Tensor):
+                    new_weight_workspace = new_weight_workspace.detach()
+                self._fp8_workspaces[cache_name] = new_weight_workspace
+
         finally:
             self.end_forward()
         if self.gemm_bias_unfused_add:

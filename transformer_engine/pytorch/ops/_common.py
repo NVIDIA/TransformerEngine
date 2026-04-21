@@ -29,6 +29,15 @@ def _nvidia_cudnn_frontend_supports_scaled_clamped_qgeglu() -> bool:
         return False
 
 
+@functools.lru_cache(maxsize=1)
+def _nvidia_cudnn_frontend_supports_wgrad() -> bool:
+    """Check cuDNN FE min version for grouped GEMM wgrad kernel."""
+    try:
+        return PkgVersion(get_pkg_version("nvidia-cudnn-frontend")) >= PkgVersion("1.23.0")
+    except PackageNotFoundError:
+        return False
+
+
 def is_quantized_tensor(tensor: torch.Tensor | QuantizedTensorStorage) -> bool:
     """Check if tensor is a quantized tensor"""
     return isinstance(tensor, QuantizedTensorStorage)
@@ -88,12 +97,12 @@ def get_fp8_meta_from_fp8_tensor(tensor: Float8Tensor) -> tuple[FP8TensorMeta, i
 def validate_grouped_mlp_dims(fc1, glu_op, fc2) -> None:
     """Validate FC1 / scaled GLU / FC2 dimensions for fused grouped MLP."""
 
-    if fc1.in_features % 256 != 0 or fc1.out_features % 256 != 0:
+    if fc1.in_features % 64 != 0 or fc1.out_features % 64 != 0:
         raise ValueError(
             f"Unsupported dims for FC1 (num_groups={fc1.num_groups}, "
             f"in_features={fc1.in_features}, out_features={fc1.out_features})."
         )
-    if fc2.in_features % 256 != 0 or fc2.out_features % 256 != 0:
+    if fc2.in_features % 64 != 0 or fc2.out_features % 64 != 0:
         raise ValueError(
             f"Unsupported dims for FC2 (num_groups={fc2.num_groups}, "
             f"in_features={fc2.in_features}, out_features={fc2.out_features})."
@@ -176,10 +185,10 @@ def fuse_grouped_mlp_ops(
         elif window[0].num_groups != window[2].num_groups:
             matches_pattern = False
         elif (
-            window[0].in_features % 256 != 0
-            or window[0].out_features % 256 != 0
-            or window[2].in_features % 256 != 0
-            or window[2].out_features % 256 != 0
+            window[0].in_features % 64 != 0
+            or window[0].out_features % 64 != 0
+            or window[2].in_features % 64 != 0
+            or window[2].out_features % 64 != 0
         ):
             matches_pattern = False
         elif window[1].glu_interleave_size != 32:
