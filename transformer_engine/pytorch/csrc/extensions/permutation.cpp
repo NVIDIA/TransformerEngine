@@ -51,13 +51,19 @@ std::tuple<at::Tensor, at::Tensor, std::vector<at::Tensor>> moe_permute_fwd(
       reinterpret_cast<int *>(sorted_indices_ptr), reinterpret_cast<int *>(row_id_ptr),
       reinterpret_cast<int *>(sorted_row_id_ptr), num_tokens * topK);
 
-  // Output buffer alloc
+  // Signed radix sort places -1 sentinel entries (e.g. expert-parallel rank mask)
+  // at the HEAD of sorted_row_id.  Skip that prefix so the kernel sees only the
+  // valid suffix, and pre-fill row_id_map with -1 so the dropped slots are marked
+  // without the kernel ever dereferencing a sentinel.
   num_out_tokens = (num_out_tokens > 0) ? num_out_tokens : num_tokens * topK;
+  const int num_minus_ones = num_tokens * topK - num_out_tokens;
+  sorted_row_id_ptr = reinterpret_cast<char *>(sorted_row_id_ptr) + num_minus_ones * sizeof(int);
   at::Tensor permuted_output =
       torch::empty({num_out_tokens, num_cols},
                    torch::dtype(input.scalar_type()).device(torch::kCUDA).requires_grad(false));
-  at::Tensor row_id_map = torch::empty(
-      {num_tokens * topK}, torch::dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false));
+  at::Tensor row_id_map = torch::full(
+      {num_tokens * topK}, -1,
+      torch::dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false));
 
   auto stream = at::cuda::getCurrentCUDAStream().stream();
 
@@ -71,7 +77,7 @@ std::tuple<at::Tensor, at::Tensor, std::vector<at::Tensor>> moe_permute_fwd(
                                                       static_cast<size_t>(num_cols)},
                                   dtype);
   auto sorted_row_id_cu = makeTransformerEngineTensor(
-      sorted_row_id_ptr, std::vector<size_t>{static_cast<size_t>(num_tokens * topK)},
+      sorted_row_id_ptr, std::vector<size_t>{static_cast<size_t>(num_out_tokens)},
       DType::kInt32);
   auto row_id_map_cu = makeTransformerEngineTensor(row_id_map);
 
