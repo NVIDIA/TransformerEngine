@@ -2855,8 +2855,7 @@ def _apply_grouped_bias_ref(
     m_sizes: List[int],
     dtype: torch.dtype,
 ) -> List[torch.Tensor]:
-    """Reference: add (optionally per-row scaled) bias to each group's output, cast to ``dtype``.
-    """
+    """Reference: add (optionally per-row scaled) bias to each group's output, cast to ``dtype``."""
     if bias is None:
         return list(base_outs)
     if bias_scale is None:
