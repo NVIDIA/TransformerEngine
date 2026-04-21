@@ -1094,7 +1094,9 @@ class GroupedTensorStorage:
                     columnwise_scale_inv=columnwise_scale_inv,
                     fp8_dtype=quantizer.dtype,
                     quantizer=quantizer,
-                    with_gemm_swizzled_scales=quantizer.optimize_for_gemm,
+                    # Preserve actual grouped-output layout. This can differ from the requested
+                    # quantizer flag in architecture-specific fallback paths.
+                    with_gemm_swizzled_scales=self._with_gemm_swizzled_scales,
                 )
                 result.append(tensor)
 
@@ -1229,7 +1231,9 @@ class GroupedTensorStorage:
                     amax_columnwise=amax_columnwise,
                     fp4_dtype=quantizer.dtype,
                     quantizer=quantizer,
-                    with_gemm_swizzled_scales=quantizer.optimize_for_gemm,
+                    # Preserve actual grouped-output layout. This can differ from the requested
+                    # quantizer flag in architecture-specific fallback paths.
+                    with_gemm_swizzled_scales=self._with_gemm_swizzled_scales,
                     row_scaled_nvfp4=row_scaled_nvfp4,
                     nvfp4_use_4over6=nvfp4_use_4over6,
                     nvfp4_e4m3_max=nvfp4_e4m3_max,
