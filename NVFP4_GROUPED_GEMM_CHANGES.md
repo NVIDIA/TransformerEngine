@@ -192,7 +192,7 @@ print('backward_override:', r_dq.backward_override)  # dequantized
 ### 2. Verify Fused Op Class Loads
 
 ```bash
-NVTE_CUTEDSL_FUSED_GROUPED_MLP_NVFP4=1 python -c "
+NVTE_CUTEDSL_FUSED_GROUPED_MLP=1 NVTE_CUTEDSL_FUSED_GROUPED_MLP_NVFP4=1 python -c "
 from transformer_engine.pytorch.ops.fused.forward_grouped_mlp import (
     ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8,
     ForwardGroupedMLP_CuTeGEMMSwiGLU_NVFP4,
@@ -200,6 +200,8 @@ from transformer_engine.pytorch.ops.fused.forward_grouped_mlp import (
 print('MXFP8 supported:', ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8.is_supported())
 print('NVFP4 supported:', ForwardGroupedMLP_CuTeGEMMSwiGLU_NVFP4.is_supported())
 # Both should be True on Blackwell (SM100) with cuDNN frontend installed
+# MXFP8 requires NVTE_CUTEDSL_FUSED_GROUPED_MLP=1
+# NVFP4 requires NVTE_CUTEDSL_FUSED_GROUPED_MLP_NVFP4=1
 "
 ```
 
@@ -207,18 +209,18 @@ print('NVFP4 supported:', ForwardGroupedMLP_CuTeGEMMSwiGLU_NVFP4.is_supported())
 
 ```bash
 python -c "
-from transformer_engine.pytorch.quantization import make_recipe_state
+from transformer_engine.pytorch.quantization import RecipeState
 from transformer_engine.common.recipe import (
     NVFP4BlockScaling,
     NVFP4PerTokenBlockScaling,
 )
 
 # Standard NVFP4 -> NVFP4BlockScalingRecipeState
-state1 = make_recipe_state(NVFP4BlockScaling(), mode='forward')
+state1 = RecipeState.create(NVFP4BlockScaling(), mode='forward')
 print('NVFP4:', type(state1).__name__)
 
 # Per-token NVFP4 -> NVFP4PerTokenBlockScalingRecipeState
-state2 = make_recipe_state(NVFP4PerTokenBlockScaling(), mode='forward')
+state2 = RecipeState.create(NVFP4PerTokenBlockScaling(), mode='forward')
 print('NVFP4 PerToken:', type(state2).__name__)
 "
 ```
@@ -259,19 +261,18 @@ python -m pytest fe_api/test_grouped_gemm_swiglu.py -v --tb=short
 python -m pytest fe_api/test_grouped_gemm_glu.py -v --tb=short
 ```
 
-### 6. Run TE Grouped Linear Tests (requires full TE build)
+### 6. Run TE Backward Override Tests (requires full TE build)
 
 ```bash
 cd /path/to/TransformerEngine
 
-# Existing MXFP8 grouped MLP tests (regression check)
-NVTE_CUTEDSL_FUSED_GROUPED_MLP=1 python -m pytest test/pytorch/test_grouped_linear.py -v --tb=short -k "mxfp8" 2>&1 | tail -20
-
-# NVFP4 per-token path (end-to-end, requires fused op + kernel support)
-NVTE_CUTEDSL_FUSED_GROUPED_MLP_NVFP4=1 python -m pytest test/pytorch/test_grouped_linear.py -v --tb=short -k "nvfp4" 2>&1 | tail -20
+# Existing MXFP8 backward override tests (regression check)
+NVTE_CUTEDSL_FUSED_GROUPED_MLP=1 python -m pytest tests/pytorch/test_backward_override.py -v --tb=short -k "mxfp8" 2>&1 | tail -20
 ```
 
 ### 7. Smoke Test: NVFP4 Per-Token Forward Pass (manual)
+
+Note: tokens per expert must be 64-aligned for NVFP4's Hadamard transform.
 
 ```bash
 NVTE_CUTEDSL_FUSED_GROUPED_MLP_NVFP4=1 python -c "
@@ -281,22 +282,21 @@ from transformer_engine.common.recipe import NVFP4PerTokenBlockScaling
 
 recipe = NVFP4PerTokenBlockScaling(backward_override='high_precision')
 
-# Simple MoE-like grouped linear test
-num_groups = 4
+num_gemms = 4
 in_features = 256
 out_features = 512
-batch = 128
+tokens_per_expert = 64  # must be 64-aligned for NVFP4 RHT
 
 with te.fp8_autocast(fp8_recipe=recipe):
     fc1 = te.GroupedLinear(
-        in_features, out_features, num_groups,
+        num_gemms, in_features, out_features,
         bias=False, params_dtype=torch.bfloat16,
     ).cuda()
 
-    x = torch.randn(batch, in_features, dtype=torch.bfloat16, device='cuda')
-    split_sizes = torch.tensor([32, 32, 32, 32], dtype=torch.int64, device='cuda')
+    x = torch.randn(tokens_per_expert * num_gemms, in_features, dtype=torch.bfloat16, device='cuda')
+    m_splits = [tokens_per_expert] * num_gemms
 
-    y = fc1(x, extra_inputs=(split_sizes,))
+    y = fc1(x, m_splits)
     print(f'Input: {x.shape}, Output: {y.shape}')
     print(f'Output dtype: {y.dtype}')
     print('Forward pass OK')
@@ -311,23 +311,23 @@ import torch
 import transformer_engine.pytorch as te
 from transformer_engine.common.recipe import NVFP4PerTokenBlockScaling
 
-# Test high_precision backward override
 recipe = NVFP4PerTokenBlockScaling(backward_override='high_precision')
 
-num_groups = 4
+num_gemms = 4
 in_features = 256
 out_features = 512
+tokens_per_expert = 64  # must be 64-aligned for NVFP4 RHT
 
 with te.fp8_autocast(fp8_recipe=recipe):
     fc1 = te.GroupedLinear(
-        in_features, out_features, num_groups,
+        num_gemms, in_features, out_features,
         bias=False, params_dtype=torch.bfloat16,
     ).cuda()
 
-    x = torch.randn(32 * num_groups, in_features, dtype=torch.bfloat16, device='cuda', requires_grad=True)
-    split_sizes = torch.tensor([32] * num_groups, dtype=torch.int64, device='cuda')
+    x = torch.randn(tokens_per_expert * num_gemms, in_features, dtype=torch.bfloat16, device='cuda', requires_grad=True)
+    m_splits = [tokens_per_expert] * num_gemms
 
-    y = fc1(x, extra_inputs=(split_sizes,))
+    y = fc1(x, m_splits)
     loss = y.sum()
     loss.backward()
     print(f'Grad shape: {x.grad.shape}')
