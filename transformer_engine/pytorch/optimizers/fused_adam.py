@@ -321,11 +321,14 @@ class FusedAdam(torch.optim.Optimizer):
         """
         state = self.state[param]
         dtype = self.name_to_dtype_map[state_name]
+        unscaled_local_state = state[state_name]
+        if isinstance(unscaled_local_state, DTensor):
+            unscaled_local_state = unscaled_local_state._local_tensor
         if dtype == torch.uint8:
-            unscaled = state[state_name].float()
+            unscaled = unscaled_local_state.float()
         elif dtype == torch.float16:
-            assert state[state_name].dtype == torch.float16
-            unscaled = state[state_name].float()
+            assert unscaled_local_state.dtype == torch.float16
+            unscaled = unscaled_local_state.float()
             unscaled.mul_(self._scales[param][state_name])
         elif dtype == torch.float32:
             if (
@@ -333,16 +336,16 @@ class FusedAdam(torch.optim.Optimizer):
                 and state_name == "master_param"
                 and param.dtype == torch.bfloat16
             ):
-                assert state[state_name].dtype == torch.int16
+                assert unscaled_local_state.dtype == torch.int16
             else:
-                assert state[state_name].dtype == torch.float32
-            unscaled = state[state_name]
+                assert unscaled_local_state.dtype == torch.float32
+            unscaled = unscaled_local_state
         elif dtype == torch.bfloat16:
-            assert state[state_name].dtype == torch.bfloat16
+            assert unscaled_local_state.dtype == torch.bfloat16
             if skip_unscale:
-                unscaled = state[state_name]
+                unscaled = unscaled_local_state
             else:
-                unscaled = state[state_name].float()
+                unscaled = unscaled_local_state.float()
         else:
             raise RuntimeError(f"Dtype of {state_name} can only be fp8/fp16/bf16/fp32.")
         return unscaled
@@ -357,7 +360,7 @@ class FusedAdam(torch.optim.Optimizer):
             param (torch.nn.Parameter): One of parameters in this optimizer.
             state_name (string): Name of optimizer states, can be one of 'exp_avg', 'exp_avg_sq',
                 and 'master_param`.
-            unscaled_state (torch.Tensor): The original high-precision(FP32) state.
+            unscaled_state (torch.Tensor): The original high-precision (FP32) state.
         """
 
         store_param_remainders = (
@@ -374,12 +377,17 @@ class FusedAdam(torch.optim.Optimizer):
         if state_name not in state:
             self._initialize_state(param, state_name, False, store_param_remainders)
 
+        # If the state is a DTensor, retrieve its local Tensor for scaling.
+        local_state = state[state_name]
+        if isinstance(local_state, DTensor):
+            local_state = local_state._local_tensor
+
         dtype = self.name_to_dtype_map[state_name]
         if dtype != torch.float32:
             scale = self._scales[param]
-            self._apply_scale(state_name, unscaled_state, state[state_name], scale[state_name])
+            self._apply_scale(state_name, unscaled_state, local_state, scale[state_name])
         else:
-            state[state_name].copy_(unscaled_state)
+            local_state.copy_(unscaled_state)
 
     def _initialize_state(
         self, param, state_name, zero_buffer: bool, store_param_remainders: bool = False
@@ -394,8 +402,14 @@ class FusedAdam(torch.optim.Optimizer):
             store_param_remainders (bool): Store only trailing remainder bits.
         """
         dtype = self.name_to_dtype_map[state_name]
-        # Handle QuantizedTensor by dequantizing first
-        param_for_empty = param.dequantize() if isinstance(param, QuantizedTensor) else param
+        # Extract local tensor from DTensor (e.g. from FSDP2) to avoid
+        # QuantizedTensor.__torch_dispatch__ ignoring the dtype kwarg in
+        # torch.empty_like.
+        local_param = param._local_tensor if isinstance(param, DTensor) else param
+        # Handle QuantizedTensor by dequantizing first.
+        param_for_empty = (
+            local_param.dequantize() if isinstance(local_param, QuantizedTensor) else local_param
+        )
         if store_param_remainders:
             data = torch.zeros_like(param_for_empty, dtype=torch.int16)
         else:
@@ -403,17 +417,28 @@ class FusedAdam(torch.optim.Optimizer):
         if zero_buffer:
             data.zero_()
 
+        # Install the quantized or un-quantized optimizer state.
         if dtype == torch.uint8:
             quantizer = Float8Quantizer(
                 scale=torch.ones([1], dtype=torch.float32, device=param.device),
                 amax=torch.zeros([1], dtype=torch.float32, device=param.device),
                 fp8_dtype=tex.DType.kFloat8E4M3,
             )
-            self.state[param][state_name] = quantizer.make_empty(param.shape)
+            self.state[param][state_name] = quantizer.make_empty(data.shape)
             self.state[param][state_name].quantize_(data.float())
         else:
-
             self.state[param][state_name] = data
+
+        # If the original Parameter was a DTensor, re-wrap the state
+        # into DTensor to support Torch DCP checkpointing.
+        if isinstance(param, DTensor):
+            self.state[param][state_name] = DTensor.from_local(
+                self.state[param][state_name],
+                device_mesh=param.device_mesh,
+                placements=param.placements,
+                shape=param.size(),
+                stride=param.stride(),
+            )
 
         # Create scale if necessary.
         if dtype != torch.float32:
@@ -440,7 +465,14 @@ class FusedAdam(torch.optim.Optimizer):
                 store_param_remainders=store_param_remainders,
             )
             if not store_param_remainders:
-                self.set_scaled_state(param, "master_param", param.clone().detach().float())
+                # Extract local tensor from DTensor and dequantize QuantizedTensor
+                # to set scales for the optimizer state's main weights.
+                local_param = param._local_tensor if isinstance(param, DTensor) else param
+                if isinstance(local_param, QuantizedTensor):
+                    master = local_param.dequantize(dtype=torch.float32).clone().detach()
+                else:
+                    master = local_param.clone().detach().float()
+                self.set_scaled_state(param, "master_param", master)
 
     def state_dict(self):
         """Override the state_dict() of pytorch. Before returning the state_dict, cast all
@@ -462,6 +494,15 @@ class FusedAdam(torch.optim.Optimizer):
                 new_v = {}
                 for name in v:
                     new_v[name] = self.get_unscaled_state(param, name)
+                    if isinstance(param, DTensor):
+                        # Re-wrap the optimizer state as a DTensor.
+                        new_v[name] = DTensor.from_local(
+                            new_v[name],
+                            device_mesh=param.device_mesh,
+                            placements=param.placements,
+                            shape=param.size(),
+                            stride=param.stride(),
+                        )
                 state_dict["state"][k] = new_v
 
         return state_dict
@@ -487,15 +528,19 @@ class FusedAdam(torch.optim.Optimizer):
                 for name in v:
                     if v[name] is None:
                         continue
+                    state = v[name]
+                    if isinstance(state, DTensor):
+                        # Un-pack the local Tensor state for set_scaled_state.
+                        state = state._local_tensor
                     if (
                         self.store_param_remainders
                         and name == "master_param"
                         and param.dtype == torch.bfloat16
                     ):
-                        self.set_scaled_state(param, name, v[name])
-                        assert v[name].dtype == torch.int16
+                        self.set_scaled_state(param, name, state)
+                        assert state.dtype == torch.int16
                     else:
-                        self.set_scaled_state(param, name, v[name].float())
+                        self.set_scaled_state(param, name, state.float())
 
     def step(self, closure=None, grad_scaler=None):
         """Performs a single optimization step.
@@ -558,6 +603,7 @@ class FusedAdam(torch.optim.Optimizer):
 
             has_fp16 = False
             has_bf16 = False
+            quantized_params_to_update = []
 
             for p in group["params"]:
                 state = self.state[p]
@@ -578,12 +624,28 @@ class FusedAdam(torch.optim.Optimizer):
                 if p_grad.data.is_sparse:
                     raise RuntimeError("FusedAdam does not support sparse gradients.")
 
+                # Validate parameter, gradient, and state DTensor parity for the step.
+                dtensor_param = isinstance(p, DTensor)
+                assert dtensor_param == isinstance(p_grad, DTensor), (
+                    f"[FusedAdam DTensor Disparity] Parameter {p} and Gradient {p_grad} do not"
+                    " match!"
+                )
+                for name in ["exp_avg", "exp_avg_sq", "master_param"]:
+                    if name in state:
+                        assert dtensor_param == isinstance(state[name], DTensor), (
+                            f"[FusedAdam DTensor Disparity] Parameter {p} and"
+                            f" {name} {state[name]} do not match!"
+                        )
+
                 # Unscaling
                 unscaled_state = {}
                 for name in ["exp_avg", "exp_avg_sq", "master_param"]:
                     if name in state:
+                        state_tensor = state[name]
+                        if isinstance(state_tensor, DTensor):
+                            state_tensor = state_tensor._local_tensor
                         if name == "master_param" and store_param_remainders:
-                            unscaled_state[name] = self.state[p][name]
+                            unscaled_state[name] = state_tensor
                             assert unscaled_state[name].dtype == torch.int16
                         else:
                             unscaled = self.get_unscaled_state(
@@ -592,7 +654,7 @@ class FusedAdam(torch.optim.Optimizer):
                             unscaled_state[name] = unscaled
                         if self.name_to_dtype_map[name] != torch.float32:
                             unscaled_lists[name].append(unscaled)
-                            scaled_lists[name].append(state[name])
+                            scaled_lists[name].append(state_tensor)
                             state_scales[name].append(self._scales[p][name])
                 if isinstance(p, Float8Tensor) or (
                     isinstance(p, DTensor) and isinstance(p._local_tensor, Float8Tensor)
@@ -609,6 +671,29 @@ class FusedAdam(torch.optim.Optimizer):
                     g_of_fp8_model.append(p_grad.data)
                     m_of_fp8_model.append(unscaled_state["exp_avg"])
                     v_of_fp8_model.append(unscaled_state["exp_avg_sq"])
+                elif isinstance(p, QuantizedTensor) or (
+                    isinstance(p, DTensor) and isinstance(p._local_tensor, QuantizedTensor)
+                ):
+                    # Block-scaling quantized params (MXFP8Tensor, Float8BlockwiseQTensor,
+                    # NVFP4Tensor). Operate on FP32 master weights, requantize back after
+                    # Adam update.
+                    # Note: a fused Adam+requantize kernel (like multi_tensor_adam_fp8
+                    # for Float8Tensor) would avoid the FP32 round-trip here.
+                    if not self.master_weights:
+                        local_p = p._local_tensor if isinstance(p, DTensor) else p
+                        raise RuntimeError(
+                            "FusedAdam without master_weights does not support "
+                            f"{type(local_p).__name__} parameters. Use master_weights=True."
+                        )
+                    # Route to the FP32 master-weight path: Adam updates the FP32 master,
+                    # then we write back to the quantized param after kernels run.
+                    # Gradients may be BF16/FP16 from the backward pass — cast to FP32
+                    # to match the FP32 Adam kernel expectations.
+                    p_f32_model.append(unscaled_state["master_param"].data)
+                    g_of_f32_model.append(p_grad.data.float())
+                    m_of_f32_model.append(unscaled_state["exp_avg"])
+                    v_of_f32_model.append(unscaled_state["exp_avg_sq"])
+                    quantized_params_to_update.append((p, unscaled_state["master_param"]))
                 elif p.dtype in [torch.float16, torch.bfloat16]:
                     has_fp16 = has_fp16 or p.dtype == torch.float16
                     has_bf16 = has_bf16 or p.dtype == torch.bfloat16
@@ -631,6 +716,13 @@ class FusedAdam(torch.optim.Optimizer):
                 if self.capturable and len(p_fp8_model) > 0:
                     raise RuntimeError(
                         "FusedAdam does not support FP8 model weights with capturable=True."
+                    )
+
+                if self.capturable and len(quantized_params_to_update) > 0:
+                    raise RuntimeError(
+                        "FusedAdam does not support block-scaling quantized weights "
+                        "with capturable=True. The post-step quantize_() writeback "
+                        "cannot be captured in a CUDA graph."
                     )
 
                 if has_fp16 and has_bf16:
@@ -768,6 +860,11 @@ class FusedAdam(torch.optim.Optimizer):
                 if len(p_f32_model) > 0:
                     tensor_lists = [g_of_f32_model, p_f32_model, m_of_f32_model, v_of_f32_model]
                     apply_multi_tensor_adam(self.multi_tensor_adam, tensor_lists)
+
+            # Write updated FP32 master weights back to quantized parameters
+            for qt_param, master_w in quantized_params_to_update:
+                local_p = qt_param._local_tensor if isinstance(qt_param, DTensor) else qt_param
+                local_p.quantize_(master_w.data)
 
             # Scaling
             for name in ["exp_avg", "exp_avg_sq", "master_param"]:

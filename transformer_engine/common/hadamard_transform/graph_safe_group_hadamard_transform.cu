@@ -25,13 +25,6 @@ namespace {
 constexpr int kMaxTensorsPerKernel = 64;
 constexpr int kThreadsPerWarp = 32;
 
-enum ShapeRepresentation {
-  SAME_BOTH_DIMS = 0,
-  VARYING_FIRST_DIM = 1,
-  VARYING_LAST_DIM = 2,
-  VARYING_BOTH_DIMS = 3
-};
-
 __device__ __forceinline__ size_t get_current_tensor_id(
     const ShapeRepresentation shape_rep, const size_t num_tensors, const size_t current_offset,
     const size_t first_logical_dim, const size_t last_logical_dim,
@@ -251,6 +244,11 @@ __global__ void GraphSafeGroupHadamardAmaxTmaKernel(
 
   // calculate the global offset to get tensor id
   size_t global_offset = blockIdx.y * CHUNK_DIM_Y * last_logical_dim;
+  // paged stashing: will have input buffer [M, N], where M is larger than sum(first_dims)
+  // also need to early return if this CTA is processing a region larger than the last offsets[num_tensors]
+  if (global_offset >= offsets_ptr[num_tensors]) {
+    return;
+  }
   int tensor_id = get_current_tensor_id(shape_rep, num_tensors, global_offset, first_logical_dim,
                                         last_logical_dim, offsets_ptr);
   output_pre_rht_amax_ptr = static_cast<float*>(amax_rowwise_ptr) + tensor_id;
@@ -441,9 +439,8 @@ void group_hadamard_transform_amax_graph_safe(const GroupedTensor* input, Groupe
   float* const amax_rowwise_ptr = reinterpret_cast<float*>(output->amax.dptr);
   float* const amax_colwise_ptr = reinterpret_cast<float*>(output->columnwise_amax.dptr);
 
-  const int64_t* const offsets_ptr = reinterpret_cast<const int64_t*>(input->tensor_offsets.dptr);
-  const int64_t* const first_dims_ptr = reinterpret_cast<const int64_t*>(input->first_dims.dptr);
-  // const int64_t *const last_dims_ptr = reinterpret_cast<const int64_t *>(input->last_dims.dptr);
+  const int64_t* const offsets_ptr = reinterpret_cast<const int64_t*>(output->tensor_offsets.dptr);
+  const int64_t* const first_dims_ptr = reinterpret_cast<const int64_t*>(output->first_dims.dptr);
 
   // some sanity checks
   if (all_return_pre_rht_amax) {

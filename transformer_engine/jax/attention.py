@@ -569,6 +569,8 @@ def _segment_ids_pos_to_seqlens_offsets(
     # using the segment ids and pos along with mask type (causal or brcm) is sufficient.
     # It does not need to involve SW for this mask's creation
 
+    # Currently, this function is only exercised for THD qkv_layout.
+
     # TODO(KshitijLakhani): Try exercising the fast path for BRCM as well
     if (attn_mask_type.is_causal() and window_size is None) or (
         window_size == (-1, -1) and not attn_mask_type.is_bottom_right()
@@ -693,26 +695,83 @@ class SequenceDescriptor:
         self, attn_mask_type, qkv_layout, window_size, max_segments_per_seq
     ):
         """
-        Acquire the seqlens/offsets for cuDNN backend
+        Acquire the seqlens/offsets for cuDNN backend.
         """
         q_segment_ids, kv_segment_ids = self.segment_ids
         q_segment_pos, kv_segment_pos = self.segment_pos
-        assert q_segment_ids.shape == q_segment_pos.shape
-        assert kv_segment_ids.shape == kv_segment_pos.shape
         # No segment_ids/segment_pos
         if q_segment_ids.size + kv_segment_ids.size == 0:
             return self.seqlens, self.seq_offsets
 
-        if qkv_layout.is_thd():
-            q_seqlens, kv_seqlens, q_offsets, kv_offsets = _segment_ids_pos_to_seqlens_offsets(
-                q_segment_ids,
-                kv_segment_ids,
-                q_segment_pos,
-                kv_segment_pos,
-                attn_mask_type,
-                window_size,
-                max_segments_per_seq,
+        # Allow segment_pos to have fewer leading dims than segment_ids if vmapped segment_ids and non-vmapped segment_pos
+        # e.g. when using from_segment_ids_and_pos() for segment_pos generation from segment_ids it is acceptable to have
+        # something like : segment_ids (B, batch, seq), segment_pos (batch, seq)).
+        if q_segment_ids.ndim < q_segment_pos.ndim or kv_segment_ids.ndim < kv_segment_pos.ndim:
+            raise AssertionError(
+                "segment_ids must not have fewer dims than segment_pos; got"
+                f" q_segment_ids.ndim={q_segment_ids.ndim},"
+                f" q_segment_pos.ndim={q_segment_pos.ndim},"
+                f" kv_segment_ids.ndim={kv_segment_ids.ndim},"
+                f" kv_segment_pos.ndim={kv_segment_pos.ndim}"
             )
+        if not (
+            q_segment_ids.shape[-q_segment_pos.ndim :] == q_segment_pos.shape
+            and kv_segment_ids.shape[-kv_segment_pos.ndim :] == kv_segment_pos.shape
+        ):
+            raise AssertionError(
+                "segment_pos trailing shape must match segment_ids; got"
+                f" q_segment_ids.shape={q_segment_ids.shape},"
+                f" q_segment_pos.shape={q_segment_pos.shape},"
+                f" kv_segment_ids.shape={kv_segment_ids.shape},"
+                f" kv_segment_pos.shape={kv_segment_pos.shape}"
+            )
+        # THD: compute seqlens/offsets.
+        if qkv_layout.is_thd():
+            # If there are more leading dims on segment_ids, e.g. vmap
+            if q_segment_ids.ndim > q_segment_pos.ndim or kv_segment_ids.ndim > kv_segment_pos.ndim:
+                # Flatten leading batch dims so that segment_ids and segment_pos have the same number of leading dims,
+                # vmap seqlens/offsets computation with segment_pos broadcast,
+                # reshape back to the original leading batch dims.
+                n_extra_batch_dims_q = q_segment_ids.ndim - q_segment_pos.ndim
+                n_extra_batch_dims_kv = kv_segment_ids.ndim - kv_segment_pos.ndim
+                extra_batch_shape_q = q_segment_ids.shape[:n_extra_batch_dims_q]
+                extra_batch_shape_kv = kv_segment_ids.shape[:n_extra_batch_dims_kv]
+                extra_flat_batch_size_q = jnp.prod(extra_batch_shape_q)
+                extra_flat_batch_size_kv = jnp.prod(extra_batch_shape_kv)
+                # vmap below requires same batch size on axis 0 for q_flat and kv_flat; JAX will raise if they differ.
+                q_flat = q_segment_ids.reshape(
+                    extra_flat_batch_size_q, *q_segment_ids.shape[n_extra_batch_dims_q:]
+                )
+                kv_flat = kv_segment_ids.reshape(
+                    extra_flat_batch_size_kv, *kv_segment_ids.shape[n_extra_batch_dims_kv:]
+                )
+
+                single_extra_batch = partial(
+                    _segment_ids_pos_to_seqlens_offsets,
+                    attn_mask_type=attn_mask_type,
+                    window_size=window_size,
+                    max_segments_per_seq=max_segments_per_seq,
+                )
+
+                q_sl, kv_sl, q_off, kv_off = jax.vmap(
+                    single_extra_batch, in_axes=(0, 0, None, None)
+                )(q_flat, kv_flat, q_segment_pos, kv_segment_pos)
+
+                q_seqlens = q_sl.reshape(*extra_batch_shape_q, *q_sl.shape[1:])
+                kv_seqlens = kv_sl.reshape(*extra_batch_shape_kv, *kv_sl.shape[1:])
+                q_offsets = q_off.reshape(*extra_batch_shape_q, *q_off.shape[1:])
+                kv_offsets = kv_off.reshape(*extra_batch_shape_kv, *kv_off.shape[1:])
+            else:
+                q_seqlens, kv_seqlens, q_offsets, kv_offsets = _segment_ids_pos_to_seqlens_offsets(
+                    q_segment_ids,
+                    kv_segment_ids,
+                    q_segment_pos,
+                    kv_segment_pos,
+                    attn_mask_type,
+                    window_size,
+                    max_segments_per_seq,
+                )
+        # BSHD: compute seqlens/offsets.
         else:
             q_seqlens, kv_seqlens = _segment_ids_to_seqlens(
                 q_segment_ids,
@@ -796,14 +855,9 @@ class SequenceDescriptor:
         cls,
         segment_ids: Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]],
         segment_pos: Optional[Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]] = None,
-        *,
-        is_thd: bool,
-        is_segment_ids_reordered: bool,
     ) -> SequenceDescriptor:
         """
-        Experimental factory method for inputs with segment IDs and optional positions.
-        segment_pos = None to be used only for: BSHD with or without load balancing and,
-                                                THD without load balancing
+        Experimental factory method for inputs with segment IDs and positions.
         Args:
             segment_ids(Tuple(jnp.ndarray, jnp.ndarray)) = (q_segment_ids, kv_segment_ids):
                 - q_segment_ids (jnp.ndarray):
@@ -817,88 +871,35 @@ class SequenceDescriptor:
                   The position inside each segment for query, with shape [batch, max_seqlen].
                 - kv_segment_pos (jnp.ndarray):
                   The position inside each segment for key, value, with shape [batch, max_seqlen].
-            is_thd(bool): If True, QKVLayout is of type THD, else it is BSHD
-            is_segment_ids_reordered(bool): If True, the segment ids have been reordered for load balancing.
-            Only THD with load balancing is expected to have this flag set to True
         Return:
             A SequenceDescriptor with segment_ids/segment_pos initialized.
         """
-        q_seg_ids, kv_seg_ids = cls._expand_to_pair(segment_ids)
-
-        # Using defaults : segment pos has to be generated.
+        # Examples (0 in segment_ids means padding):
+        # THD (three segments packed together in a sequence of length 16 with no intra-segment padding):
+        # segment_ids = [1, 1, 1, 2, 2, 3, 3, 3, 3, 3, 0, 0, 0, 0, 0, 0]
+        # segment_pos = [0, 1, 2, 0, 1, 0, 1, 2, 3, 4, 0, 0, 0, 0, 0, 0]
+        # THD (three segments packed together in a sequence of length 16 with intra-segment padding):
+        # segment_ids = [1, 1, 1, 2, 2, 3, 3, 3, 0, 0, 4, 4, 0, 0, 0, 0]
+        # segment_pos = [0, 1, 2, 0, 1, 0, 1, 2, 3, 4, 0, 1, 0, 0, 0, 0]
+        # BSHD (only one segment per sequence):
+        # segment_ids = [1, 1, 1, 1, 1, 1, 1, 0, 0]
+        # segment_pos = [0, 1, 2, 3, 4, 5, 6, 7, 8]
+        # TODO(@KshitijLakhani): Make segment_pos Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]] and remove below check (starting June 2026)
         if segment_pos is None:
-            # THD + load balanced segment_ids are not supported in this function
-            # BSHD + load balanced segment_ids are incorrect as BSHD handles reordering within the primitive itself
-            if is_segment_ids_reordered:
-                assert not is_thd, (
-                    f"{segment_pos=} default arg is not supported for load balanced reordered"
-                    " (Striped) THD inputs. Please pass the load balanced reordered segment_pos"
-                    " and segment_ids explicitly to {from_segment_ids_and_pos.__qualname__}"
-                    " using convenience function reorder_causal_load_balancing()"
-                )
-                assert is_thd, (
-                    f"{segment_pos=} default arg is not supported for load balanced reordered (Dual"
-                    " Chunk) BSHD inputs. BSHD segment_pos and segment_ids do not need to be load"
-                    " balanced reordered. The reordering for these is performed within the"
-                    " primitive"
-                )
+            raise ValueError(
+                "segment_pos is now required. Automatic segment_pos generation was removed because"
+                " it did not have sufficient context to generate a correct segment_pos across all"
+                " load-balancing and context-parallel strategies. Please generate the segment_pos"
+                " explicitly.See tests/jax/test_fused_attn.py generate_random_segment_ids_and_pos()"
+                " and generate_valid_segment_ids_and_pos()"
+            )
 
-            # Generate the default pos for THD and BSHD non-reordered segment_ids
-            def generate_default_pos(seg_ids):
-                if is_thd:
-                    batch_size, seq_size = seg_ids.shape
-                    # Assume that the first token belongs to a segment and is not a padded token
-                    first_is_segment = jnp.full((batch_size, 1), True, dtype=bool)
-                    # Get segment start positions
-                    segment_start = jnp.concatenate(
-                        [
-                            first_is_segment,
-                            (seg_ids[..., 1:] != seg_ids[..., :-1]) & (seg_ids[..., 1:] != 0),
-                        ],
-                        axis=-1,
-                    )
-                    # Get offset for location where new segment starts
-                    segment_start_idx = jax.vmap(lambda row: jnp.arange(row.size) * row)(
-                        segment_start
-                    )
-                    segment_start_offsets = jax.vmap(jnp.maximum.accumulate)(segment_start_idx)
-
-                    # Get the last non-zero index - after this everything is padding
-                    # (B,)
-                    last_nonzero_idx = jax.vmap(
-                        lambda segids_row: jnp.max(
-                            jnp.where(segids_row != 0, jnp.arange(seq_size), -1)
-                        )
-                    )(seg_ids)
-                    seg_pos_no_thd = jnp.arange(seq_size)
-                    # Get a mask which can be used to zero out all the padding at the end (after the non-zero index)
-                    mask = seg_pos_no_thd <= last_nonzero_idx[:, None]
-
-                    # Get the unmasked seg_pos for the THD sequence
-                    seg_pos = (
-                        jnp.broadcast_to(jnp.arange(seq_size), seg_ids.shape)
-                        - segment_start_offsets
-                    )
-
-                    # Use the mask to zero out the padding at the end (after the non-zero index)
-                    segment_pos = jax.vmap(
-                        lambda pos_row, mask_row: jnp.where(mask_row, pos_row, 0)
-                    )(seg_pos, mask)
-                    return segment_pos
-
-                seqlen = seg_ids.shape[-1]
-                return jnp.broadcast_to(jnp.arange(seqlen), seg_ids.shape)
-
-            q_seg_pos = generate_default_pos(q_seg_ids)
-            kv_seg_pos = generate_default_pos(kv_seg_ids)
-            segment_pos = (q_seg_pos, kv_seg_pos)
-        # Explicitly passed segment_pos
-        else:
-            segment_pos = cls._expand_to_pair(segment_pos)
+        q_seg_ids, kv_seg_ids = cls._expand_to_pair(segment_ids)
+        q_seg_pos, kv_seg_pos = cls._expand_to_pair(segment_pos)
 
         return cls(
             segment_ids=(q_seg_ids, kv_seg_ids),
-            segment_pos=segment_pos,
+            segment_pos=(q_seg_pos, kv_seg_pos),
         )
 
 
