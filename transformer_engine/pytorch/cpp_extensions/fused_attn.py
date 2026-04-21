@@ -18,7 +18,6 @@ from transformer_engine_torch import (
 from ..quantized_tensor import Quantizer
 from ..constants import FP8BwdTensorIdx, FP8FwdTensorIdx
 
-
 __all__ = [
     "fused_attn_fwd",
     "fused_attn_bwd",
@@ -114,6 +113,7 @@ def _should_use_cudnn_fe_sdpa(
     attn_bias: Optional[torch.Tensor] = None,
     softmax_offset: Optional[torch.Tensor] = None,
     dropout: float = 0.0,
+    return_max_logit: bool = False,
 ) -> bool:
     """Whether to dispatch to the cuDNN-FE Python SDPA (CuTe DSL) for head_dim=256
     on SM100+. Assumes the remaining config has already been vetted by the
@@ -123,15 +123,25 @@ def _should_use_cudnn_fe_sdpa(
         return False
     if q.size(-1) != 256 or v.size(-1) != 256:
         return False
-    if not (isinstance(q, torch.Tensor) and q.is_cuda):
+    if not q.is_cuda:
         return False
     if page_table_k is not None or page_table_v is not None:
         return False
-    # The cuDNN-FE kernel doesn't accept bias, softmax offset, or dropout.
-    # Fall through to the C++ path rather than silently dropping them.
+    # The cuDNN-FE kernel doesn't accept bias, softmax offset, or dropout, and
+    # doesn't produce max_logit. Fall through to the C++ path rather than
+    # silently dropping any of them.
     if attn_bias is not None or softmax_offset is not None or dropout != 0.0:
         return False
-    return torch.cuda.get_device_capability(q.device)[0] >= 10
+    if return_max_logit:
+        return False
+    if torch.cuda.get_device_capability(q.device)[0] < 10:
+        return False
+    # Confirm the Python kernel is importable. Callers that bypass
+    # ``get_attention_backend`` (which already gates on ``is_supported``) would
+    # otherwise hit an unhandled ImportError at the dispatch site.
+    from ..attention.dot_product_attention import cudnn_fe_sdpa
+
+    return cudnn_fe_sdpa.is_available()
 
 
 META_QKV = FP8FwdTensorIdx.GEMM1_OUTPUT
@@ -323,6 +333,7 @@ def fused_attn_fwd(
         attn_bias=attn_bias,
         softmax_offset=softmax_offset,
         dropout=dropout,
+        return_max_logit=return_max_logit,
     ):
         from ..attention.dot_product_attention import cudnn_fe_sdpa
 
@@ -340,9 +351,8 @@ def fused_attn_fwd(
             attn_scale=attn_scale,
             window_size=window_size,
         )
-        if return_max_logit:
-            # cuDNN-FE SDPA does not return max_logit; callers must not request it.
-            return out, aux_ctx_tensors, None
+        # _should_use_cudnn_fe_sdpa filters out return_max_logit=True, so we
+        # never need to produce a max_logit tensor here.
         return out, aux_ctx_tensors
 
     if fused_attention_backend == FusedAttnBackend["No_Backend"]:

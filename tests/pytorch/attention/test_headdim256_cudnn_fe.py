@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import os
 import pytest
 import torch
 
@@ -121,11 +120,14 @@ def test_cudnn_fe_fwd_bwd_bshd(dtype, attn_mask_type, seqlen):
     )
 
 
-def test_cudnn_fe_fused_attention_module():
+def test_cudnn_fe_fused_attention_module(monkeypatch):
     """Integration test: exercise through the DotProductAttention module."""
-    os.environ["NVTE_FUSED_ATTN"] = "1"
-    os.environ["NVTE_FLASH_ATTN"] = "0"
-    os.environ["NVTE_UNFUSED_ATTN"] = "0"
+    # Scope env var mutations to this test — pytest shares a process across
+    # tests, so a bare ``os.environ[...] = ...`` would leak these flags into
+    # every later test in the session.
+    monkeypatch.setenv("NVTE_FUSED_ATTN", "1")
+    monkeypatch.setenv("NVTE_FLASH_ATTN", "0")
+    monkeypatch.setenv("NVTE_UNFUSED_ATTN", "0")
 
     dtype = torch.bfloat16
     batch, seqlen, heads, head_dim = 2, 1024, 4, 256
