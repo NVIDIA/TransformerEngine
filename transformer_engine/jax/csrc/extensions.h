@@ -199,7 +199,7 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedMoEAuxLossBackwardHandler);
 
 // TopK
 XLA_FFI_DECLARE_HANDLER_SYMBOL(TopkHandler);
-int64_t GetTopkWorkspaceBytes(int batch_size, int seq_len, int k);
+pybind11::tuple GetTopkWorkspaceSizes(int batch_size, int seq_len, int k);
 
 }  // namespace jax
 }  // namespace transformer_engine

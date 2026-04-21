@@ -11,20 +11,22 @@ import jax.numpy as jnp
 from jax import dtypes, ffi
 
 from .base import BasePrimitive, register_primitive
+from .misc import te_dtype_to_jax_dtype
 
 __all__ = ["topk"]
 
 
 @functools.lru_cache(maxsize=512)
-def get_topk_workspace_bytes(batch_size: int, seq_len: int, k: int) -> int:
-    """Query the workspace size required for TopK.
+def get_topk_workspace_sizes(batch_size: int, seq_len: int, k: int):
+    """Query the workspace shape and dtype required for TopK.
 
     The result is memoised per (batch_size, seq_len, k) tuple so that repeated
     JIT compilations with the same shapes incur only one host-side CUDA call.
     """
     import transformer_engine_jax as _te_jax
 
-    return int(_te_jax.get_topk_workspace_bytes(batch_size, seq_len, k))
+    (wkspace_info,) = _te_jax.get_topk_workspace_sizes(batch_size, seq_len, k)
+    return wkspace_info
 
 
 class TopKPrimitive(BasePrimitive):
@@ -58,12 +60,14 @@ class TopKPrimitive(BasePrimitive):
         assert dtypes.canonicalize_dtype(in_lengths_aval.dtype) == jnp.int32
 
         batch_size, seq_len = in_keys_aval.shape
-        workspace_bytes = get_topk_workspace_bytes(batch_size, seq_len, k_value)
+        wkspace_info = get_topk_workspace_sizes(batch_size, seq_len, k_value)
 
         out_shape = (batch_size, k_value)
         out_keys_aval = jax.core.ShapedArray(shape=out_shape, dtype=keys_dtype)
         out_indices_aval = jax.core.ShapedArray(shape=out_shape, dtype=jnp.int32)
-        workspace_aval = jax.core.ShapedArray(shape=(workspace_bytes,), dtype=jnp.uint8)
+        workspace_aval = jax.core.ShapedArray(
+            shape=wkspace_info[0], dtype=te_dtype_to_jax_dtype(wkspace_info[1])
+        )
         return (out_keys_aval, out_indices_aval, workspace_aval)
 
     @staticmethod
@@ -73,15 +77,11 @@ class TopKPrimitive(BasePrimitive):
 
     @staticmethod
     def lowering(ctx, in_keys, in_lengths, k_value):
-        keys_aval = ctx.avals_in[0]
-        batch_size, seq_len = keys_aval.shape
-        workspace_bytes = get_topk_workspace_bytes(batch_size, seq_len, k_value)
         return ffi.ffi_lowering(TopKPrimitive.name)(
             ctx,
             in_keys,
             in_lengths,
             k_value=k_value,
-            workbuf_bytes=workspace_bytes,
         )
 
     @staticmethod

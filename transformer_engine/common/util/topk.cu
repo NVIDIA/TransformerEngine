@@ -11,23 +11,35 @@
 
 void nvte_topk(cudaStream_t stream, const NVTETensor keys_in, const NVTETensor lengths_in,
                NVTETensor keys_out, NVTETensor indices_out, NVTETensor workspace, int batch_size,
-               int seq_len, int k, size_t workspace_bytes) {
+               int seq_len, int k) {
   NVTE_API_CALL(nvte_topk);
   using namespace transformer_engine;
+
+  Tensor *workspace_tensor = convertNVTETensor(workspace);
+
+  if (workspace_tensor->data.numel() == 0) {
+    size_t workspace_bytes = 0;
+    nv::standalone_topk<float, int>(nullptr, workspace_bytes, nullptr, batch_size, seq_len, k,
+                                    nullptr, nullptr, /*greater=*/true, /*stream=*/nullptr,
+                                    /*lengths=*/nullptr, /*is_prefill=*/false);
+    workspace_tensor->data.shape = {workspace_bytes};
+    workspace_tensor->data.dtype = DType::kByte;
+    return;
+  }
 
   const Tensor *keys_in_tensor = convertNVTETensorCheck(keys_in);
   const Tensor *lengths_tensor = convertNVTETensorCheck(lengths_in);
   Tensor *keys_out_tensor = convertNVTETensor(keys_out);
   Tensor *indices_tensor = convertNVTETensor(indices_out);
-  Tensor *workspace_tensor = convertNVTETensor(workspace);
 
   void *d_workspace = workspace_tensor->data.dptr;
+  size_t workspace_bytes = workspace_tensor->data.numel();
   const int *d_lengths = reinterpret_cast<const int *>(lengths_tensor->data.dptr);
   int *d_indices = reinterpret_cast<int *>(indices_tensor->data.dptr);
 
   auto dtype = keys_in_tensor->data.dtype;
 
-#define DISPATCH_TOPK(T, d_in_cast, d_out_cast)                                                    \
+#define DISPATCH_TOPK(T)                                                                           \
   do {                                                                                             \
     const T *d_in = reinterpret_cast<const T *>(keys_in_tensor->data.dptr);                        \
     T *d_out = reinterpret_cast<T *>(keys_out_tensor->data.dptr);                                  \
@@ -37,21 +49,12 @@ void nvte_topk(cudaStream_t stream, const NVTETensor keys_in, const NVTETensor l
   } while (0)
 
   if (dtype == DType::kBFloat16) {
-    DISPATCH_TOPK(__nv_bfloat16, , );
+    DISPATCH_TOPK(__nv_bfloat16);
   } else if (dtype == DType::kFloat32) {
-    DISPATCH_TOPK(float, , );
+    DISPATCH_TOPK(float);
   } else {
     NVTE_ERROR("nvte_topk: unsupported key dtype (supported: float32, bfloat16)");
   }
 
 #undef DISPATCH_TOPK
-}
-
-size_t nvte_get_topk_workspace_bytes(int batch_size, int seq_len, int k) {
-  // Call with buf=nullptr to perform a size query (no GPU work is launched).
-  size_t buf_size = 0;
-  nv::standalone_topk<float, int>(nullptr, buf_size, nullptr, batch_size, seq_len, k, nullptr,
-                                  nullptr, /*greater=*/true, /*stream=*/nullptr,
-                                  /*lengths=*/nullptr, /*is_prefill=*/false);
-  return buf_size;
 }

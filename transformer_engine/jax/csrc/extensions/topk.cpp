@@ -18,7 +18,7 @@ namespace jax {
 
 Error_Type TopkFFI(cudaStream_t stream, Buffer_Type keys_in_buf, Buffer_Type lengths_buf,
                    Result_Type keys_out_buf, Result_Type indices_out_buf, Result_Type workspace_buf,
-                   int64_t k_value, int64_t workbuf_bytes) {
+                   int64_t k_value) {
   auto keys_in_dtype = convert_ffi_datatype_to_te_dtype(keys_in_buf.element_type());
   auto keys_out_dtype = convert_ffi_datatype_to_te_dtype(keys_out_buf->element_type());
   auto idx_out_dtype = convert_ffi_datatype_to_te_dtype(indices_out_buf->element_type());
@@ -41,13 +41,15 @@ Error_Type TopkFFI(cudaStream_t stream, Buffer_Type keys_in_buf, Buffer_Type len
       NVTE_ERROR("TopkFFI: unsupported key dtype (float32 and bfloat16 only)");
   }
 
+  auto workbuf_bytes = product(workspace_buf->dimensions());
+
   // Build flat TensorWrappers over the full (batch_size * seq_len) / (batch_size * k) buffers.
   auto flat_in_shape =
       std::vector<size_t>{static_cast<size_t>(batch_size) * static_cast<size_t>(seq_len)};
   auto flat_out_shape =
       std::vector<size_t>{static_cast<size_t>(batch_size) * static_cast<size_t>(k)};
   auto len_shape = std::vector<size_t>{static_cast<size_t>(batch_size)};
-  auto ws_shape = std::vector<size_t>{static_cast<size_t>(workbuf_bytes)};
+  auto ws_shape = std::vector<size_t>{workbuf_bytes};
 
   auto keys_in_tensor = TensorWrapper(keys_in_buf.untyped_data(), flat_in_shape, keys_in_dtype);
   auto lengths_tensor = TensorWrapper(lengths_buf.untyped_data(), len_shape, DType::kInt32);
@@ -58,8 +60,7 @@ Error_Type TopkFFI(cudaStream_t stream, Buffer_Type keys_in_buf, Buffer_Type len
   auto workspace_tensor = TensorWrapper(workspace_buf->untyped_data(), ws_shape, DType::kByte);
 
   nvte_topk(stream, keys_in_tensor.data(), lengths_tensor.data(), keys_out_tensor.data(),
-            idx_out_tensor.data(), workspace_tensor.data(), batch_size, seq_len, k,
-            static_cast<size_t>(workbuf_bytes));
+            idx_out_tensor.data(), workspace_tensor.data(), batch_size, seq_len, k);
 
   return ffi_with_cuda_error_check();
 }
@@ -72,16 +73,31 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(TopkHandler, TopkFFI,
                                   .Ret<Buffer_Type>()      // keys_out
                                   .Ret<Buffer_Type>()      // indices_out
                                   .Ret<Buffer_Type>()      // workspace
-                                  .Attr<int64_t>("k_value")
-                                  .Attr<int64_t>("workbuf_bytes"),
+                                  .Attr<int64_t>("k_value"),
                               FFI_CudaGraph_Traits);
 
 // ---------------------------------------------------------------------------
 // Workspace-size query exposed to Python
 // ---------------------------------------------------------------------------
 
-int64_t GetTopkWorkspaceBytes(int batch_size, int seq_len, int k) {
-  return static_cast<int64_t>(nvte_get_topk_workspace_bytes(batch_size, seq_len, k));
+pybind11::tuple GetTopkWorkspaceSizes(int batch_size, int seq_len, int k) {
+  auto flat_in_shape =
+      std::vector<size_t>{static_cast<size_t>(batch_size) * static_cast<size_t>(seq_len)};
+  auto flat_out_shape =
+      std::vector<size_t>{static_cast<size_t>(batch_size) * static_cast<size_t>(k)};
+  auto len_shape = std::vector<size_t>{static_cast<size_t>(batch_size)};
+
+  auto keys_in_tensor = TensorWrapper(nullptr, flat_in_shape, DType::kFloat32);
+  auto lengths_tensor = TensorWrapper(nullptr, len_shape, DType::kInt32);
+  auto keys_out_tensor = TensorWrapper(nullptr, flat_out_shape, DType::kFloat32);
+  auto idx_out_tensor = TensorWrapper(nullptr, flat_out_shape, DType::kInt32);
+  TensorWrapper workspace_tensor;
+
+  nvte_topk(nullptr, keys_in_tensor.data(), lengths_tensor.data(), keys_out_tensor.data(),
+            idx_out_tensor.data(), workspace_tensor.data(), batch_size, seq_len, k);
+
+  auto work_shape = MakeShapeVector(workspace_tensor.shape());
+  return pybind11::make_tuple(std::make_pair(work_shape, workspace_tensor.dtype()));
 }
 
 }  // namespace jax

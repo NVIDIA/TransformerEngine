@@ -37,21 +37,6 @@ inline std::vector<void *> calc_aligned_pointers(const void *p, const std::vecto
   return ptrs;
 }
 
-// Helper: convert a float literal to type T without relying on implicit
-// conversions (needed when __CUDA_NO_BFLOAT16_CONVERSIONS__ is defined).
-namespace nv_detail {
-template <typename T>
-__host__ __device__ inline T float_to_T(float v) {
-  return static_cast<T>(v);
-}
-#if defined(__CUDACC__)
-template <>
-__host__ __device__ inline __nv_bfloat16 float_to_T<__nv_bfloat16>(float v) {
-  return __float2bfloat16(v);
-}
-#endif
-}  // namespace nv_detail
-
 namespace nv {
 
 constexpr int VECTORIZED_READ_SIZE = 16;
@@ -65,8 +50,8 @@ using WideT = float4;
 #ifdef __CUDA_ARCH__
 using ::atomicAdd;
 inline __device__ size_t atomicAdd(size_t *address, size_t value) {
-  static_assert(sizeof(size_t) == sizeof(unsigned long long int));
-  return atomicAdd((unsigned long long int *)address, (unsigned long long int)value);
+  static_assert(sizeof(size_t) == sizeof(uint64_t));
+  return atomicAdd(reinterpret_cast<uint64_t *>(address), static_cast<uint64_t>(value));
 }
 #endif
 
@@ -199,7 +184,7 @@ __device__ void vectorized_process(size_t thread_rank, size_t num_threads, const
     // TODO: it's UB
     union {
       WideT scalar;
-      T array[items_per_scalar];
+      T array[items_per_scalar];  // NOLINT(runtime/arrays)
     } wide;
 
     int skip_cnt =
@@ -253,7 +238,7 @@ __device__ void vectorized_process(const T *in, idxT len, Func f, int sync_width
     constexpr int items_per_scalar = sizeof(WideT) / sizeof(T);
     union {
       WideT scalar;
-      T array[items_per_scalar];
+      T array[items_per_scalar];  // NOLINT(runtime/arrays)
     } wide;
 
     int skip_cnt =
@@ -405,7 +390,7 @@ __device__ void filter_and_histogram(const T *in_buf, const IdxT *in_idx_buf, T 
       // writing, values will be written in `last_filter_kernel()` at last. But
       // when `early_stop` is true, we need to write to `out` since it's the
       // last chance.
-      else if ((out_buf || early_stop) && previous_bits < kth_value_bits) {
+      else if ((out_buf || early_stop) && previous_bits < kth_value_bits) {  // NOLINT
         IdxT pos = atomicAdd(p_out_cnt, static_cast<IdxT>(1));
         if constexpr (store_out) {
           out[pos] = value;
@@ -449,7 +434,7 @@ __device__ void scan(volatile IdxT *histogram) {
       typename BlockScan::TempStorage scan;
       typename BlockStore::TempStorage store;
     } temp_storage;
-    IdxT thread_data[items_per_thread];
+    IdxT thread_data[items_per_thread];  // NOLINT(runtime/arrays)
 
     BlockLoad(temp_storage.load).Load(histogram, thread_data);
     __syncthreads();
@@ -736,7 +721,7 @@ __device__ void radix_kernel_func(const T *in, const IdxT *in_idx, const T *in_b
       }
       for (int index = threadIdx.x + len; index < k; index += BlockSize) {
         if constexpr (store_out) {
-          out[index] = nv_detail::float_to_T<T>(-1.0f);
+          out[index] = static_cast<T>(-1.0f);
         }
         out_idx[index] = -1;
       }
@@ -1024,7 +1009,7 @@ __device__ void radix_topk_one_block_func(const T *in, const IdxT *in_idx, const
     }
     for (int index = threadIdx.x + len; index < k; index += BlockSize) {
       if constexpr (store_out) {
-        out[index] = nv_detail::float_to_T<T>(-1.0f);
+        out[index] = static_cast<T>(-1.0f);
       }
       out_idx[index] = -1;
     }

@@ -79,11 +79,6 @@ if(NOT arch_120_index EQUAL -1)
   endif()
 endif()
 
-# If all architectures were special-cased and removed, disable CMake's automatic
-# CUDA_ARCHITECTURES management — compilation flags are set via COMPILE_OPTIONS below.
-if(NOT CMAKE_CUDA_ARCHITECTURES)
-  set(CMAKE_CUDA_ARCHITECTURES OFF)
-endif()
 # cuDNN frontend API
 set(CUDNN_FRONTEND_INCLUDE_DIR
     "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cudnn-frontend/include")
