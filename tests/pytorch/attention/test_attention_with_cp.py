@@ -390,7 +390,7 @@ def test_cp_with_fused_attention(
     if fused_attn_supported and config.attn_mask_type in ["causal", "padding_causal"]:
         config_copy = copy.deepcopy(config)
         config_copy.context_parallel = False
-        config_copy.attn_mask_type = config.attn_mask_type+"_bottom_right"
+        config_copy.attn_mask_type = config.attn_mask_type + "_bottom_right"
         available_backends, _, fused_attn_backends = get_available_attention_backends(
             config_copy,
             qkv_dtype=dtypes[dtype] if dtype != "fp8" else torch.float8_e4m3fn,
