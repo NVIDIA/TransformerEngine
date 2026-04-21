@@ -1173,6 +1173,42 @@ def get_attention_backend(
             use_fused_attention = False
             fused_attention_backend = None
 
+        # head_dim=256 on SM100+ is serviced by the cuDNN frontend Python SDPA
+        # (CuTe DSL), which has narrower config coverage than the C++ path.
+        # Verify the config actually fits and that the Python module is importable.
+        if (
+            use_fused_attention
+            and fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
+            and head_dim_qk == 256
+            and head_dim_v == 256
+            and device_compute_capability[0] >= 10
+        ):
+            from .cudnn_fe_sdpa import is_supported as _cudnn_fe_supported
+
+            if not _cudnn_fe_supported(
+                head_dim_qk=head_dim_qk,
+                head_dim_v=head_dim_v,
+                qkv_dtype=qkv_dtype,
+                qkv_format=qkv_format,
+                attn_mask_type=attn_mask_type,
+                attn_bias_type=fu_core_attention_bias_type,
+                softmax_type=softmax_type,
+                dropout=attention_dropout,
+                window_size=window_size,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_kv=max_seqlen_kv,
+                is_training=is_training,
+                deterministic=deterministic,
+                device_compute_capability=device_compute_capability,
+                return_max_logit=return_max_logit,
+            ):
+                logger.debug(
+                    "Disabling FusedAttention: cuDNN frontend Python SDPA (d=256) does not"
+                    " support this config or is not importable"
+                )
+                use_fused_attention = False
+                fused_attention_backend = None
+
     # Filter: Determinism
     # backend                      | deterministic
     # ---------------------------------------------

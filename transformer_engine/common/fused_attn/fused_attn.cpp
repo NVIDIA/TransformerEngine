@@ -339,7 +339,11 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
              attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK))) ||
           // 9.11: d_qk = 192, d_v = 128 + Blackwell + bprop + non-paged
           (head_dim_qk == 192 && head_dim_v == 128 && is_training && sm_arch_ >= 100 &&
-           cudnn_runtime_version >= 91100)) &&
+           cudnn_runtime_version >= 91100) ||
+          // cuDNN-FE Python SDPA (CuTe DSL): d=256 + Blackwell + training + non-paged
+          // C++ kernel does not handle this; intercepted in Python for fwd+bwd.
+          (head_dim_qk == 256 && head_dim_v == 256 && is_training && sm_arch_ >= 100 &&
+           layout_group != NVTE_QKV_Layout_Group::NVTE_Paged_KV_HD_HD_HD)) &&
          // 9.11+ bug: 128 < d_qk <= 256, 128 < d_v <= 256 + Hopper + bprop + MLA
          // Conditional to temporarily use blanket cudnn_runtime_version >= 9.11 until fixed
          (!((cudnn_runtime_version >= 91100) && is_training && sm_arch_ == 90 &&

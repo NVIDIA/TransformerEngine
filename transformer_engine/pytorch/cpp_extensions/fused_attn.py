@@ -104,6 +104,36 @@ FusedAttnBackend = {
 BACKEND_F16m512_FP8_THREADS_PER_CTA = 128
 BACKEND_F16arb_ELTS_PER_THREADS = 16
 
+
+def _should_use_cudnn_fe_sdpa(
+    q: torch.Tensor,
+    v: torch.Tensor,
+    fused_attention_backend: "tex.NVTE_Fused_Attn_Backend",
+    page_table_k: Optional[torch.Tensor] = None,
+    page_table_v: Optional[torch.Tensor] = None,
+    attn_bias: Optional[torch.Tensor] = None,
+    softmax_offset: Optional[torch.Tensor] = None,
+    dropout: float = 0.0,
+) -> bool:
+    """Whether to dispatch to the cuDNN-FE Python SDPA (CuTe DSL) for head_dim=256
+    on SM100+. Assumes the remaining config has already been vetted by the
+    attention-backend selection in ``get_attention_backend``.
+    """
+    if fused_attention_backend != FusedAttnBackend["F16_arbitrary_seqlen"]:
+        return False
+    if q.size(-1) != 256 or v.size(-1) != 256:
+        return False
+    if not (isinstance(q, torch.Tensor) and q.is_cuda):
+        return False
+    if page_table_k is not None or page_table_v is not None:
+        return False
+    # The cuDNN-FE kernel doesn't accept bias, softmax offset, or dropout.
+    # Fall through to the C++ path rather than silently dropping them.
+    if attn_bias is not None or softmax_offset is not None or dropout != 0.0:
+        return False
+    return torch.cuda.get_device_capability(q.device)[0] >= 10
+
+
 META_QKV = FP8FwdTensorIdx.GEMM1_OUTPUT
 META_DQKV = FP8BwdTensorIdx.GRAD_OUTPUT1
 META_O = FP8FwdTensorIdx.GEMM2_INPUT
@@ -280,6 +310,40 @@ def fused_attn_fwd(
                 "attn_bias tensor must have the same dtype as q and kv: "
                 f"attn_bias.dtype={attn_bias.dtype} but q.dtype={q.dtype}."
             )
+
+    # Route head_dim=256 on SM100+ through the cuDNN frontend Python SDPA (CuTe DSL).
+    # The C++ kernel does not handle head_dim=256 on Blackwell (backward in particular),
+    # so interception happens here regardless of training/inference.
+    if _should_use_cudnn_fe_sdpa(
+        q,
+        v,
+        fused_attention_backend,
+        page_table_k=page_table_k,
+        page_table_v=page_table_v,
+        attn_bias=attn_bias,
+        softmax_offset=softmax_offset,
+        dropout=dropout,
+    ):
+        from ..attention.dot_product_attention import cudnn_fe_sdpa
+
+        qkv_format = qkv_layout.replace("3", "").replace("2", "").split("_")[0]
+        out, aux_ctx_tensors = cudnn_fe_sdpa.fused_attn_fwd(
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_kv=max_seqlen_kv,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_kv=cu_seqlens_kv,
+            q=q,
+            k=k,
+            v=v,
+            qkv_format=qkv_format,
+            attn_mask_type=attn_mask_type,
+            attn_scale=attn_scale,
+            window_size=window_size,
+        )
+        if return_max_logit:
+            # cuDNN-FE SDPA does not return max_logit; callers must not request it.
+            return out, aux_ctx_tensors, None
+        return out, aux_ctx_tensors
 
     if fused_attention_backend == FusedAttnBackend["No_Backend"]:
         raise ValueError(
@@ -536,6 +600,29 @@ def fused_attn_bwd(
     if attn_scale is None:
         d = q.size(-1)
         attn_scale = 1.0 / math.sqrt(d)
+
+    # Route head_dim=256 on SM100+ through the cuDNN frontend Python SDPA backward.
+    if _should_use_cudnn_fe_sdpa(q, v, fused_attention_backend, dropout=dropout):
+        from ..attention.dot_product_attention import cudnn_fe_sdpa
+
+        qkv_format = qkv_layout.replace("3", "").replace("2", "").split("_")[0]
+        dq, dk, dv = cudnn_fe_sdpa.fused_attn_bwd(
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_kv=max_seqlen_kv,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_kv=cu_seqlens_kv,
+            q=q,
+            k=k,
+            v=v,
+            o=o,
+            d_o=d_o,
+            aux_ctx_tensors=aux_ctx_tensors,
+            qkv_format=qkv_format,
+            attn_mask_type=attn_mask_type,
+            attn_scale=attn_scale,
+            window_size=window_size,
+        )
+        return dq, dk, dv
 
     if fused_attention_backend == FusedAttnBackend["No_Backend"]:
         raise ValueError(
