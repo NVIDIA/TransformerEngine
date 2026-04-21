@@ -266,7 +266,6 @@ def wrap_with_accelerator(model, hyperparams: HyperParameters):
     accelerator_mixed_precision = "bf16" if use_ep_fp8 else hyperparams.mixed_precision
 
     accelerator = Accelerator(
-        log_with="wandb",
         gradient_accumulation_steps=hyperparams.gradient_accumulation_steps,
         mixed_precision=accelerator_mixed_precision,
         kwargs_handlers=fp8_kwarg_handler,
