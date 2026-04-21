@@ -19,19 +19,12 @@ static __global__ void moe_permute_row_map(const int *sorted_row_id, int *row_id
   const int tid = threadIdx.x;
   const int idx = bid * blockDim.x + tid;
 
-  if (idx >= num_rows * topK) return;
+  if (idx >= num_out_tokens) return;
 
   int source_row = sorted_row_id[idx];
   int source_token_id = source_row / topK;
   int source_topK_id = source_row % topK;
-
-  if (idx >= num_out_tokens) {
-    // Set the indices of dropped tokens to -1
-    row_id_map[source_topK_id * num_rows + source_token_id] = -1;
-  } else {
-    // Create a row id map for subsequent unpermute operation
-    row_id_map[source_topK_id * num_rows + source_token_id] = idx;
-  }
+  row_id_map[source_topK_id * num_rows + source_token_id] = idx;
 }
 
 template <typename T, typename TCompute, bool hasProb>
@@ -42,7 +35,7 @@ __global__ void moe_unpermute_kernel(const T *input, T *unpermuted_output, const
   TCompute *s_prob = reinterpret_cast<TCompute *>(s_mem);
 
   // Each block corresponds to one dest token
-  const int source_token = blockIdx.x;
+  const int64_t source_token = blockIdx.x;
   const int tid = threadIdx.x;
 
   if (hasProb) {
@@ -65,7 +58,7 @@ __global__ void moe_unpermute_kernel(const T *input, T *unpermuted_output, const
     TCompute frag_elem[kElementsPerAccess];
     TCompute frag_sum[kElementsPerAccess];
 
-    int source_row = row_id_map[source_token];
+    int64_t source_row = row_id_map[source_token];
 
     // source_row == -1 represents a dropped token
     if (source_row != -1) {
@@ -134,7 +127,7 @@ __global__ void moe_permute_kernel(const T *input_bwd, const T *input_fwd, T *ac
   TCompute *s_prob = reinterpret_cast<TCompute *>(s_mem);
 
   // Each block corresponds to one source token
-  const int source_token = blockIdx.x;
+  const int64_t source_token = blockIdx.x;
   const int tid = threadIdx.x;
 
   if (hasProb) {
@@ -172,7 +165,7 @@ __global__ void moe_permute_kernel(const T *input_bwd, const T *input_fwd, T *ac
     for (int k = 0; k < topKTile; k++) {
       if (k == topK) break;
 
-      int dest_row = row_id_map[index];
+      int64_t dest_row = row_id_map[index];
       index += num_rows;
 
       if (dest_row != -1) {
@@ -239,7 +232,7 @@ void nvte_permute_launcher(const T *input, T *output, const int *sorted_row_id, 
     // moe_permute_fwd
 
     int threads = 64;
-    int blocks = (num_rows * topK + threads - 1) / threads;
+    int blocks = (num_out_tokens + threads - 1) / threads;
 
     moe_permute_row_map<<<blocks, threads, 0, stream>>>(sorted_row_id, row_id_map, num_rows, topK,
                                                         num_out_tokens);
