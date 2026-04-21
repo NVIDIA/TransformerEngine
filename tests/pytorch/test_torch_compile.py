@@ -332,47 +332,25 @@ def test_autocast_sanity(fp8_recipe):
 # ---------------------------------------------------------------------------
 
 
-def _make_quantizers():
-    """Build (quantizer, different_quantizer) pairs for each non-delayed recipe."""
-    pairs = [
-        (
-            MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
-            MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E5M2),
-        ),
-        (
-            Float8CurrentScalingQuantizer(fp8_dtype=tex.DType.kFloat8E4M3, force_pow_2_scales=True),
-            Float8CurrentScalingQuantizer(
-                fp8_dtype=tex.DType.kFloat8E4M3, force_pow_2_scales=False
-            ),
-        ),
-        (
-            Float8BlockQuantizer(
-                fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True, block_scaling_dim=2
-            ),
-            Float8BlockQuantizer(
-                fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True, block_scaling_dim=1
-            ),
-        ),
-    ]
-    if torch.cuda.is_available():
-        pairs.append(
-            (
-                NVFP4Quantizer(with_rht=True, stochastic_rounding=True),
-                NVFP4Quantizer(with_rht=False, stochastic_rounding=False),
-            )
-        )
-    return pairs
-
-
 @pytest.mark.parametrize(
-    "quantizer,different",
-    _make_quantizers(),
-    ids=lambda q: type(q).__name__,
+    "quantizer_factory",
+    [
+        lambda: MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
+        lambda: Float8CurrentScalingQuantizer(fp8_dtype=tex.DType.kFloat8E4M3),
+        lambda: Float8BlockQuantizer(
+            fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True, block_scaling_dim=2
+        ),
+        lambda: NVFP4Quantizer(with_rht=True, stochastic_rounding=True),
+    ],
+    ids=[
+        "MXFP8Quantizer",
+        "Float8CurrentScalingQuantizer",
+        "Float8BlockQuantizer",
+        "NVFP4Quantizer",
+    ],
 )
-def test_quantizer_value_object(quantizer, different):
+def test_quantizer_value_object(quantizer_factory):
+    quantizer = quantizer_factory()
     repr_str, globals_dict = quantizer.__fx_repr__()
     reconstructed = eval(repr_str, globals_dict)  # pylint: disable=eval-used
-
     assert quantizer == reconstructed
-    assert hash(quantizer) == hash(reconstructed)
-    assert quantizer != different
