@@ -1834,7 +1834,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     if i == 1:
                         softmax_lse = torch.clone(softmax_lse_per_step[0])
                         if qkv_format == "thd":
-                            out = out_per_step[0].to(torch.float32)
+                            out = out_per_step[0].clone()
                             if enable_mla:
                                 out = out.view(v_shape)
                             else:
