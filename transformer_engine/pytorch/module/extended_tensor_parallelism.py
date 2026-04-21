@@ -9,7 +9,6 @@ from dataclasses import dataclass, field
 import math
 import re
 import torch
-from contextlib import nullcontext
 
 from ..distributed import (
     gather_along_first_dim,
@@ -149,6 +148,7 @@ _STATE_TRANSITIONS = {
 
 # Global ETP buffer cache (persists across clear(); never set to None after creation).
 _ETP_CACHE = None
+_ETP_PARAMS = []
 
 # Global set of ETPShardedParam with in-flight async comms (AG or RS).
 _inflight_comm_params: set = set()
@@ -402,6 +402,9 @@ def wrap_module_params_etp(module, weight_names, etp_group, is_grouped=None):
         etp_shard.ps_size = etp_size
         # register the newly sharded param back to the module
         module._parameters[name] = etp_shard
+
+        global _ETP_PARAMS
+        _ETP_PARAMS.append(etp_shard)
 
     if is_grouped:
         allweights = [getattr(module, name) for name in weight_names]
@@ -1350,6 +1353,29 @@ class ETPWeightCache:
             if key not in graphed_keys:
                 new_pool[key] = buffers
         self._pool = new_pool
+
+        # Now remap the quantized params:
+        torch._C._cuda_beginAllocateCurrentThreadToPool(device, mempool)
+        for param in _ETP_PARAMS:
+            weights = param.weight_list if param.is_routed_expert and param.weight_list is not None else [param]
+            for w in weights:
+                if w.quantized is not None:
+                    if isinstance(w.quantized, NVFP4TensorStorage):
+                        w.quantized._rowwise_data = torch.clone(w.quantized._rowwise_data)
+                        w.quantized._columnwise_data = torch.clone(w.quantized._columnwise_data)
+                        w.quantized._rowwise_scale_inv = torch.clone(w.quantized._rowwise_scale_inv)
+                        w.quantized._columnwise_scale_inv = torch.clone(w.quantized._columnwise_scale_inv)
+                        w.quantized._amax_columnwise = torch.clone(w.quantized._amax_columnwise)
+                        w.quantized._amax_rowwise = torch.clone(w.quantized._amax_rowwise)
+                    elif isinstance(w.quantized, MXFP8TensorStorage):
+                        w.quantized._rowwise_data = torch.clone(w.quantized._rowwise_data)
+                        w.quantized._columnwise_data = torch.clone(w.quantized._columnwise_data)
+                        w.quantized._rowwise_scale_inv = torch.clone(w.quantized._rowwise_scale_inv)
+                        w.quantized._columnwise_scale_inv = torch.clone(w.quantized._columnwise_scale_inv)
+                    else:
+                        assert False
+        torch._C._cuda_endAllocateToPool(device, mempool)
+
         return
 
 def get_global_ETP_cache() -> ETPWeightCache:
