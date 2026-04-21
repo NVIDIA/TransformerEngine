@@ -61,9 +61,9 @@ std::tuple<at::Tensor, at::Tensor, std::vector<at::Tensor>> moe_permute_fwd(
   at::Tensor permuted_output =
       torch::empty({num_out_tokens, num_cols},
                    torch::dtype(input.scalar_type()).device(torch::kCUDA).requires_grad(false));
-  at::Tensor row_id_map = torch::full(
-      {num_tokens * topK}, -1,
-      torch::dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false));
+  at::Tensor row_id_map =
+      torch::full({num_tokens * topK}, -1,
+                  torch::dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false));
 
   auto stream = at::cuda::getCurrentCUDAStream().stream();
 
@@ -77,8 +77,7 @@ std::tuple<at::Tensor, at::Tensor, std::vector<at::Tensor>> moe_permute_fwd(
                                                       static_cast<size_t>(num_cols)},
                                   dtype);
   auto sorted_row_id_cu = makeTransformerEngineTensor(
-      sorted_row_id_ptr, std::vector<size_t>{static_cast<size_t>(num_out_tokens)},
-      DType::kInt32);
+      sorted_row_id_ptr, std::vector<size_t>{static_cast<size_t>(num_out_tokens)}, DType::kInt32);
   auto row_id_map_cu = makeTransformerEngineTensor(row_id_map);
 
   nvte_permute(input_cu.data(), permuted_output_cu.data(), sorted_row_id_cu.data(),
