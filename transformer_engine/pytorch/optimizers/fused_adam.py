@@ -677,7 +677,7 @@ class FusedAdam(torch.optim.Optimizer):
                 elif isinstance(local_p, QuantizedTensor):
                     if not self.master_weights:
                         raise RuntimeError(
-                            f"FusedAdam without master_weights does not support "
+                            "FusedAdam without master_weights does not support "
                             f"{type(local_p).__name__} parameters. Use master_weights=True."
                         )
                     p_f32_model.append(unscaled_state["master_param"].data)
