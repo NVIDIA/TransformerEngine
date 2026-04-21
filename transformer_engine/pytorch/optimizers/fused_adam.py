@@ -659,7 +659,9 @@ class FusedAdam(torch.optim.Optimizer):
                 local_p = p._local_tensor if isinstance(p, DTensor) else p
                 # Only delayed-scaling Float8Tensor uses the fused FP8 Adam kernel.
                 # Everything else (MXFP8/NVFP4/blockwise, current-scaling Float8) goes
-                # through the FP32 master + requantize path.
+                # through the FP32 master + requantize path. A fused Adam+requantize
+                # kernel (like multi_tensor_adam_fp8 for delayed-scaling Float8Tensor)
+                # would avoid the FP32 round-trip in that path.
                 if isinstance(local_p, Float8Tensor) and isinstance(
                     local_p._quantizer, Float8Quantizer
                 ):
@@ -680,6 +682,8 @@ class FusedAdam(torch.optim.Optimizer):
                             "FusedAdam without master_weights does not support "
                             f"{type(local_p).__name__} parameters. Use master_weights=True."
                         )
+                    # Gradients may be BF16/FP16 from the backward pass — cast to FP32
+                    # to match the FP32 Adam kernel expectations.
                     p_f32_model.append(unscaled_state["master_param"].data)
                     g_of_f32_model.append(p_grad.data.float())
                     m_of_f32_model.append(unscaled_state["exp_avg"])
