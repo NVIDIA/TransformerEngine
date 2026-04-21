@@ -1557,7 +1557,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         # synchronize fwd results correction across steps
         fwd_results_correction_done = torch.cuda.Event()
 
-        p2p_comm_buffers = [None for _ in range(cp_size)]
+        p2p_comm_buffers = [None, None]
         k_shape = k.shape
         k_numel = k.numel()
         v_shape = v.shape
@@ -1576,18 +1576,20 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         req.wait()
 
                     if i < (cp_size - 1):
-                        p2p_comm_buffers[i + 1] = torch.empty_like(p2p_comm_buffers[i])
+                        p2p_comm_buffers[(i + 1) % 2] = torch.empty_like(
+                            p2p_comm_buffers[i % 2]
+                        )
                         send_recv_reqs[i % 2] = flash_attn_p2p_communicate(
                             rank,
-                            p2p_comm_buffers[i],
+                            p2p_comm_buffers[i % 2],
                             send_dst,
-                            p2p_comm_buffers[i + 1],
+                            p2p_comm_buffers[(i + 1) % 2],
                             recv_src,
                             cp_group,
                             batch_p2p_comm,
                         )
 
-                    kv_inputs[i % 2] = p2p_comm_buffers[i]
+                    kv_inputs[i % 2] = p2p_comm_buffers[i % 2]
                     k_part = kv_inputs[i % 2][:k_numel].view(*k_shape)
                     v_part = kv_inputs[i % 2][k_numel:].view(*v_shape)
                     q_part = q
@@ -1952,7 +1954,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         ctx.fp8 = fp8 and is_bwd_fp8
 
         kv_fp8 = None
-        kv = p2p_comm_buffers[-1]
+        kv = p2p_comm_buffers[(cp_size - 1) % 2]
         if fp8:
             q_fp8, kv_fp8 = [
                 Float8Tensor.make_like(x, data=y, dtype=fwd_nominal_dtype)

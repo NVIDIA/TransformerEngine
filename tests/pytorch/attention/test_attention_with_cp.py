@@ -51,6 +51,8 @@ model_configs_flash_attn = {
         2, 4096, 12, 192, attn_mask_type="causal", window_size=(512, 0), head_dim_v=128
     ),  # MLA
     "cp_3_3": ModelConfig(2, 4096, 12, 192, window_size=(512, 512), head_dim_v=128),  # MLA
+    "bariamis_4k": ModelConfig(2, 4096, 16, 128, attn_mask_type="causal"),  # bariamis default
+    "bariamis_8k": ModelConfig(2, 8192, 16, 128, attn_mask_type="causal"),
 }
 
 
