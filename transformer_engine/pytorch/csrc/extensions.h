@@ -285,6 +285,13 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
 py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::object &output,
                     std::optional<at::Tensor> noop_flag);
 
+// NVFP4-only split-phase quantize: compute amax, coalesce allreduce externally, then cast.
+py::object compute_amax_nvfp4(const at::Tensor &tensor, py::handle quantizer,
+                              const py::object &output);
+py::object quantize_cast_only_nvfp4(const at::Tensor &tensor, py::handle quantizer,
+                                    const py::object &output,
+                                    std::optional<at::Tensor> noop_flag);
+
 py::object dequantize(const py::handle &input, DType otype);
 
 py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const size_t num_tensors,

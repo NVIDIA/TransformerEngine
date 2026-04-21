@@ -233,12 +233,102 @@ def get_rs_streams_for_chain(chain_id: str) -> list:
     """RS streams for one chain (all groups that chain has touched)."""
     return [s for k, s in _RS_STREAMS.items() if k[0] == chain_id]
 
+# Cached once per process: whether the TE build exposes the split-phase APIs.
+_COALESCED_AMAX_TE_APIS_AVAILABLE = (
+    hasattr(tex, "compute_amax_nvfp4") and hasattr(tex, "quantize_cast_only_nvfp4")
+)
+
+
+def _coalesced_amax_static_eligible(weights):
+    """Walk the weight list once and decide whether the coalesced-amax path
+    is applicable. Depends only on fields that are fixed after model
+    construction (quantizer class, flags, amax_reduction_group, group size)."""
+    if not _COALESCED_AMAX_TE_APIS_AVAILABLE:
+        return False
+    if len(weights) <= 1:
+        return False
+
+    group = None
+    for w in weights:
+        q = w._quantizer
+        if q is None or not isinstance(w.quantized, NVFP4TensorStorage):
+            return False
+        if not getattr(q, "with_amax_reduction", False):
+            return False
+        if getattr(q, "with_rht", False):
+            # RHT path does amax on RHT-rotated view, can't split compute
+            # from cast the way compute_amax_only assumes.
+            return False
+        g = getattr(q, "amax_reduction_group", None)
+        if g is None:
+            return False
+        if group is None:
+            group = g
+        elif g is not group:
+            return False
+    return group.size() > 1
+
+
+def _quantize_with_coalesced_amax(weights, skip_weight_cast, cast_noop_flag):
+    """Replace the per-weight (compute_amax + allreduce + cast) loop with:
+       compute_amax loop  →  one coalesced allreduce  →  cast loop."""
+    group = weights[0]._quantizer.amax_reduction_group
+
+    # Materialize padded shards once; on padded last-rank get_padded_shard()
+    # launches an F.pad kernel, and we'd otherwise pay it twice per expert.
+    padded_shards = [w.get_padded_shard() for w in weights]
+
+    # Phase 1: per-weight local amax into each w.quantized's amax buffers.
+    # Keep rowwise/columnwise both populated so the group allreduce sees
+    # whichever the consumer GEMM will read.
+    for w, shard in zip(weights, padded_shards):
+        w._quantizer.set_usage(rowwise=True, columnwise=True)
+        tex.compute_amax_nvfp4(
+            tensor=shard,
+            quantizer=w._quantizer,
+            output=w.quantized,
+        )
+
+    # Phase 2: one coalesced allreduce across every weight's amax tensors.
+    amax_tensors = []
+    for w in weights:
+        rw = w.quantized._amax_rowwise
+        cw = w.quantized._amax_columnwise
+        if rw is not None:
+            amax_tensors.append(rw)
+        if cw is not None and (rw is None or cw.data_ptr() != rw.data_ptr()):
+            amax_tensors.append(cw)
+    torch.distributed.all_reduce_coalesced(
+        amax_tensors,
+        op=torch.distributed.ReduceOp.MAX,
+        group=group,
+    )
+
+    # Phase 3: per-weight cast using the pre-reduced amax; skips the internal
+    # allreduce inside the quantizer.
+    for w, shard in zip(weights, padded_shards):
+        tex.quantize_cast_only_nvfp4(
+            tensor=shard,
+            quantizer=w._quantizer,
+            output=w.quantized,
+            noop=cast_noop_flag,
+        )
+        w.did_cast_to_low_precision = True
+
+
 @dataclass
 class ETPConfig:
     """Global configuration for Extended Tensor Parallelism."""
     pad_for_alignment: int = 16
     check_param_states: bool = True
     weight_prefetch: bool = True
+    # When True and the weight list in _all_gather_weight contains >1 NVFP4
+    # shards that share an amax reduction group, coalesce their per-expert
+    # amax allreduces into a single NCCL call. Requires TE with
+    # tex.compute_amax_nvfp4 / tex.quantize_cast_only_nvfp4; the eligibility
+    # guard in _coalesced_amax_static_eligible falls back to the per-weight
+    # path when either binding is missing.
+    coalesce_amax_allreduce: bool = True
 
 ETP_CONFIG = ETPConfig()
 
@@ -614,8 +704,29 @@ class ETPShardedParam(torch.nn.Parameter):
                 w._set_state(ETPWeightState.DATA_READY_SYNC)
 
         # 2. Prepare: quantize, set usage direction.
+        # Static eligibility (quantizer class, flags, amax group) is fixed
+        # after model construction — compute once and cache on self so the
+        # hot path only pays the cheap per-call skip_weight_cast check.
+        if ETP_CONFIG.coalesce_amax_allreduce:
+            static_ok = getattr(self, "_coalesced_amax_static", None)
+            if static_ok is None:
+                static_ok = _coalesced_amax_static_eligible(weights)
+                self._coalesced_amax_static = static_ok
+            # Per-call: match the skip_weight_cast gate in _quantize_if_needed
+            # (fire when either skip_weight_cast is False or cast_noop_flag
+            # was provided by the FP8/NVFP4 recipe).
+            use_coalesced = static_ok and not (
+                skip_weight_cast is True and cast_noop_flag is None
+            )
+        else:
+            use_coalesced = False
+
+        if use_coalesced:
+            _quantize_with_coalesced_amax(weights, skip_weight_cast, cast_noop_flag)
+        else:
+            for w in weights:
+                w._quantize_if_needed(skip_weight_cast, cast_noop_flag)
         for w in weights:
-            w._quantize_if_needed(skip_weight_cast, cast_noop_flag)
             if w.did_cast_to_low_precision:
                 w._quantizer.set_usage(rowwise=fwd, columnwise=not fwd)
 

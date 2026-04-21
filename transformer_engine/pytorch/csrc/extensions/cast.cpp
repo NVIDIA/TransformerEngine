@@ -80,6 +80,72 @@ py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::ob
   return output_py;
 }
 
+/*! @brief NVFP4-only: compute local amax into `output`'s amax buffers, no cast, no allreduce.
+ *
+ * Pair with an external coalesced allreduce of the returned amax tensors,
+ * then call `quantize_cast_only_nvfp4` to finish the cast.
+ */
+py::object compute_amax_nvfp4(const at::Tensor &tensor, py::handle quantizer,
+                                const py::object &output) {
+  NVTE_CHECK(detail::IsNVFP4Quantizers(quantizer.ptr()),
+             "compute_amax_nvfp4 requires an NVFP4Quantizer");
+  auto quantizer_cpp = convert_quantizer(quantizer);
+  auto *nvfp4_quantizer = dynamic_cast<NVFP4Quantizer *>(quantizer_cpp.get());
+  NVTE_CHECK(nvfp4_quantizer != nullptr, "Failed to cast quantizer to NVFP4Quantizer");
+
+  auto input_contiguous = tensor.contiguous();
+  auto input_cpp = makeTransformerEngineTensor(input_contiguous);
+
+  TensorWrapper output_cpp;
+  py::object output_py;
+  if (output.is_none()) {
+    const auto shape = get_tensor_shape(input_cpp);
+    const auto fake_dtype = input_cpp.dtype();
+    std::tie(output_cpp, output_py) = quantizer_cpp->create_tensor(shape, fake_dtype);
+  } else {
+    std::tie(output_cpp, output_py) = quantizer_cpp->convert_and_update_tensor(output);
+  }
+
+  nvfp4_quantizer->compute_amax_only(input_cpp, output_cpp);
+  return output_py;
+}
+
+/*! @brief NVFP4-only: cast to FP4 using pre-reduced amax in `output`'s amax buffers.
+ *
+ * Skips both local amax compute and the internal allreduce. Caller must have
+ * already populated `output`'s amax via compute_amax_nvfp4 + coalesced allreduce.
+ */
+py::object quantize_cast_only_nvfp4(const at::Tensor &tensor, py::handle quantizer,
+                                      const py::object &output,
+                                      std::optional<at::Tensor> noop_flag) {
+  NVTE_CHECK(detail::IsNVFP4Quantizers(quantizer.ptr()),
+             "quantize_cast_only_nvfp4 requires an NVFP4Quantizer");
+  auto quantizer_cpp = convert_quantizer(quantizer);
+  auto *nvfp4_quantizer = dynamic_cast<NVFP4Quantizer *>(quantizer_cpp.get());
+  NVTE_CHECK(nvfp4_quantizer != nullptr, "Failed to cast quantizer to NVFP4Quantizer");
+
+  auto input_contiguous = tensor.contiguous();
+  auto input_cpp = makeTransformerEngineTensor(input_contiguous);
+
+  TensorWrapper output_cpp;
+  py::object output_py;
+  if (output.is_none()) {
+    const auto shape = get_tensor_shape(input_cpp);
+    const auto fake_dtype = input_cpp.dtype();
+    std::tie(output_cpp, output_py) = quantizer_cpp->create_tensor(shape, fake_dtype);
+  } else {
+    std::tie(output_cpp, output_py) = quantizer_cpp->convert_and_update_tensor(output);
+  }
+
+  std::optional<TensorWrapper> noop_flag_cpp;
+  if (noop_flag.has_value()) {
+    noop_flag_cpp = makeTransformerEngineTensor(*noop_flag);
+  }
+
+  nvfp4_quantizer->quantize_cast_only(input_cpp, output_cpp, noop_flag_cpp);
+  return output_py;
+}
+
 namespace {
 
 // helper functions for NVFP4 grouped quantization (cuda graph safe with shapes stored in device without D2H copy)

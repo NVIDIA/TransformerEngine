@@ -365,11 +365,30 @@ class NVFP4Quantizer : public Quantizer {
    */
   void quantize_with_amax(TensorWrapper& input, TensorWrapper& out);
 
+  /*! @brief Compute (and D2D fill) local amax only — no cast, no allreduce.
+   *
+   * Writes the local amax into out's rowwise and/or columnwise amax
+   * buffers. Callers are expected to perform a coalesced allreduce
+   * across the amax reduction group afterwards, then invoke
+   * quantize_cast_only to finish the cast with the reduced amax.
+   */
+  void compute_amax_only(const TensorWrapper& input, TensorWrapper& out);
+
+  /*! @brief Cast to NVFP4 assuming amax already reduced externally.
+   *
+   * Skips both local amax compute and the internal amax allreduce.
+   * Callers must guarantee out's amax buffers already hold the reduced
+   * amax (e.g. via compute_amax_only + allreduce_coalesced).
+   */
+  void quantize_cast_only(const TensorWrapper& input, TensorWrapper& out,
+                          const std::optional<TensorWrapper>& noop_flag = std::nullopt);
+
   std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape, bool columnwise) const;
 
  private:
   void quantize_impl(const TensorWrapper& input, TensorWrapper& out,
-                     const std::optional<TensorWrapper>& noop_flag, bool compute_amax);
+                     const std::optional<TensorWrapper>& noop_flag, bool compute_amax,
+                     bool skip_amax_reduction = false);
 };
 
 std::unique_ptr<Quantizer> convert_quantizer(py::handle quantizer);

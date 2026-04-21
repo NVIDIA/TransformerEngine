@@ -2121,7 +2121,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
 
 void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& out,
                                    const std::optional<TensorWrapper>& noop_flag,
-                                   bool compute_amax) {
+                                   bool compute_amax, bool skip_amax_reduction) {
   // Nothing to be done if input is empty
   if (input.numel() == 0) {
     return;
@@ -2225,7 +2225,7 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
   }
 
   // amax reduction
-  if (this->with_amax_reduction) {
+  if (this->with_amax_reduction && !skip_amax_reduction) {
     std::vector<at::Tensor> amax_tensors;
     // push amax tensors inside if they need to be reduced
     auto make_amax_tensor = [](void* data_ptr) {
@@ -2376,6 +2376,54 @@ void NVFP4Quantizer::quantize_with_amax(TensorWrapper& input, TensorWrapper& out
 
   // Perform quantization
   this->quantize_impl(input, out, std::nullopt, false);
+}
+
+void NVFP4Quantizer::compute_amax_only(const TensorWrapper& input, TensorWrapper& out) {
+  // Nothing to be done if input is empty
+  if (input.numel() == 0) {
+    return;
+  }
+
+  // Only the non-RHT path is supported for the split-phase API today.
+  // RHT path's amax depends on the RHT-rotated view, which is produced
+  // alongside the cast; decoupling amax from cast is not meaningful there.
+  NVTE_CHECK(!this->with_rht,
+             "NVFP4Quantizer::compute_amax_only does not support with_rht=true");
+
+  auto stream = at::cuda::getCurrentCUDAStream();
+
+  QuantizationConfigWrapper quant_config;
+  quant_config.set_nvfp4_2d_quantization(this->with_2d_quantization);
+
+  // Mirror the compute-amax block of quantize_impl exactly.
+  auto rowwise_amax_ptr = out.get_amax().data_ptr;
+  auto columnwise_amax_ptr = out.get_columnwise_amax().data_ptr;
+  void* amax_ptr = rowwise_amax_ptr != nullptr ? rowwise_amax_ptr : columnwise_amax_ptr;
+  NVTE_CHECK(amax_ptr != nullptr, "Could not find amax pointer");
+
+  out.set_amax(amax_ptr, DType::kFloat32, std::vector<size_t>{1});
+  NVTE_SCOPED_GIL_RELEASE(
+      { nvte_compute_amax_with_config(input.data(), out.data(), quant_config, stream); });
+  out.set_amax(rowwise_amax_ptr, DType::kFloat32, std::vector<size_t>{1});
+
+  // Replicate amax into whichever of rowwise/columnwise slots were requested.
+  if (rowwise_amax_ptr != amax_ptr && rowwise_amax_ptr != nullptr) {
+    NVTE_CHECK_CUDA(cudaMemcpyAsync(rowwise_amax_ptr, amax_ptr, sizeof(float),
+                                    cudaMemcpyDeviceToDevice, stream));
+  }
+  if (columnwise_amax_ptr != amax_ptr && columnwise_amax_ptr != nullptr) {
+    NVTE_CHECK_CUDA(cudaMemcpyAsync(columnwise_amax_ptr, amax_ptr, sizeof(float),
+                                    cudaMemcpyDeviceToDevice, stream));
+  }
+}
+
+void NVFP4Quantizer::quantize_cast_only(const TensorWrapper& input, TensorWrapper& out,
+                                         const std::optional<TensorWrapper>& noop_flag) {
+  // Amax is expected to already live in out's amax buffers (e.g. from
+  // compute_amax_only + an external coalesced allreduce). Skip both local
+  // amax compute and the internal allreduce.
+  this->quantize_impl(input, out, noop_flag, /*compute_amax=*/false,
+                      /*skip_amax_reduction=*/true);
 }
 
 std::vector<size_t> NVFP4Quantizer::get_scale_shape(const std::vector<size_t>& shape,
