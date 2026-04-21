@@ -89,6 +89,43 @@ inline bool is_sm120_device() {
   return device_prop.major == 12 && device_prop.minor == 0;
 }
 
+void split_quantize_nvfp4_impl(const TensorWrapper &input,
+                               const std::vector<TensorWrapper> &input_list,
+                               std::vector<TensorWrapper> &output_list,
+                               const std::vector<size_t> &split_sections,
+                               const std::vector<NVFP4Quantizer *> &quantizers);
+
+std::vector<size_t> get_split_sections_for_sm120_fallback(std::optional<at::Tensor> first_dims,
+                                                          size_t num_tensors) {
+  auto first_dims_tensor = first_dims.value();
+  NVTE_CHECK(first_dims_tensor.scalar_type() == at::kLong,
+             "Expected first_dims dtype=int64, got scalar_type enum=",
+             static_cast<int>(first_dims_tensor.scalar_type()));
+  auto first_dims_cpu = first_dims_tensor.contiguous().to(at::kCPU);
+  NVTE_CHECK(static_cast<size_t>(first_dims_cpu.numel()) == num_tensors, "Expected ", num_tensors,
+             " first_dims entries, but got ", first_dims_cpu.numel(), ".");
+  std::vector<size_t> split_sections(num_tensors, 0);
+  const int64_t *first_dims_ptr = first_dims_cpu.data_ptr<int64_t>();
+  for (size_t i = 0; i < num_tensors; ++i) {
+    NVTE_CHECK(first_dims_ptr[i] >= 0, "first_dims must be non-negative, got ",
+               first_dims_ptr[i], " at index ", i, ".");
+    split_sections[i] = static_cast<size_t>(first_dims_ptr[i]);
+  }
+  return split_sections;
+}
+
+std::vector<TensorWrapper> get_grouped_outputs_for_sm120_fallback(const py::object &grouped_output_py,
+                                                                  size_t num_tensors) {
+  py::list split_outputs = grouped_output_py.attr("split_into_quantized_tensors")();
+  NVTE_CHECK(static_cast<size_t>(py::len(split_outputs)) == num_tensors, "Expected ", num_tensors,
+             " output tensors, but got ", py::len(split_outputs), ".");
+  std::vector<TensorWrapper> output_list;
+  output_list.reserve(num_tensors);
+  for (size_t i = 0; i < num_tensors; ++i) {
+    output_list.emplace_back(makeTransformerEngineTensor(split_outputs[i], py::none()));
+  }
+  return output_list;
+}
 
 // helper functions for NVFP4 grouped quantization (cuda graph safe with shapes stored in device without D2H copy)
 void group_quantize_nvfp4_impl(const GroupedTensorWrapper &grouped_input_tensor,
@@ -170,10 +207,11 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
   using namespace transformer_engine::pytorch::detail;
   init_extension();
 
-  NVTE_CHECK(tensor.dim() == 2, "Tensor must be 2D");
+  auto input_contiguous = tensor.contiguous();
+  NVTE_CHECK(input_contiguous.dim() == 2, "Tensor must be 2D");
 
   std::vector<size_t> logical_shape;
-  for (const auto &d : tensor.sizes()) {
+  for (const auto &d : input_contiguous.sizes()) {
     logical_shape.push_back(d);
   }
   const auto logical_first_dim = logical_shape[0];
@@ -186,7 +224,8 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
   // Create input GroupedTensor.
   auto grouped_input_tensor = GroupedTensorWrapper(num_tensors, logical_shape);
   grouped_input_tensor.set_rowwise_data(
-      tensor.data_ptr(), GetTransformerEngineDType(tensor.scalar_type()), getTensorShape(tensor));
+      input_contiguous.data_ptr(), GetTransformerEngineDType(input_contiguous.scalar_type()),
+      getTensorShape(input_contiguous));
 
   // Create output GroupedTensor.
   auto [grouped_output_tensor_cpp, grouped_output_py] = quantizer_cpp->create_grouped_tensor(
@@ -219,8 +258,49 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
     case GroupedQuantizationMode::NVFP4_GROUPED_QUANTIZE: {
       // NVFP4 grouped quantization
       NVFP4Quantizer *nvfp4_quantizer_cpp = static_cast<NVFP4Quantizer *>(quantizer_cpp.get());
-      group_quantize_nvfp4_impl(grouped_input_tensor, grouped_output_tensor_cpp,
-                                nvfp4_quantizer_cpp, at::cuda::getCurrentCUDAStream());
+      const bool enable_sm120_grouped_nvfp4_fallback =
+          is_sm120_device() && first_dims.has_value();
+      if (enable_sm120_grouped_nvfp4_fallback) {
+        // SM120 fallback does not support GEMM-swizzled NVFP4 scale layouts in this path.
+        // Treat optimize_for_gemm as a no-op and keep scales in regular layout.
+        const bool original_optimize_for_gemm = nvfp4_quantizer_cpp->optimize_for_gemm;
+        if (original_optimize_for_gemm) {
+          nvfp4_quantizer_cpp->optimize_for_gemm = false;
+        }
+        auto split_sections = get_split_sections_for_sm120_fallback(first_dims, num_tensors);
+        std::vector<TensorWrapper> input_list;
+        input_list.reserve(num_tensors);
+        auto *input_dptr = reinterpret_cast<uint8_t *>(input_contiguous.data_ptr());
+        const auto input_dtype = GetTransformerEngineDType(input_contiguous.scalar_type());
+        const size_t dim0_stride =
+            logical_first_dim == 0
+                ? 0
+                : static_cast<size_t>(input_contiguous.element_size()) *
+                      static_cast<size_t>(input_contiguous.numel()) / logical_first_dim;
+        size_t dim0_offset = 0;
+        for (size_t i = 0; i < num_tensors; ++i) {
+          NVTE_CHECK(dim0_offset + split_sections[i] <= logical_first_dim,
+                     "Split sections exceed input tensor first dimension.");
+          std::vector<size_t> split_shape = {split_sections[i], logical_last_dim};
+          void *split_dptr = static_cast<void *>(input_dptr + dim0_offset * dim0_stride);
+          input_list.emplace_back(makeTransformerEngineTensor(split_dptr, split_shape, input_dtype));
+          dim0_offset += split_sections[i];
+        }
+        auto output_list = get_grouped_outputs_for_sm120_fallback(grouped_output_py, num_tensors);
+        std::vector<NVFP4Quantizer *> quantizers(num_tensors, nvfp4_quantizer_cpp);
+        auto input_tensor_cpp = makeTransformerEngineTensor(input_contiguous);
+        try {
+          split_quantize_nvfp4_impl(input_tensor_cpp, input_list, output_list, split_sections,
+                                    quantizers);
+        } catch (...) {
+          nvfp4_quantizer_cpp->optimize_for_gemm = original_optimize_for_gemm;
+          throw;
+        }
+        nvfp4_quantizer_cpp->optimize_for_gemm = original_optimize_for_gemm;
+      } else {
+        group_quantize_nvfp4_impl(grouped_input_tensor, grouped_output_tensor_cpp,
+                                  nvfp4_quantizer_cpp, at::cuda::getCurrentCUDAStream());
+      }
       break;
     }
     case GroupedQuantizationMode::MXFP8_GROUPED_QUANTIZE: {
@@ -1199,9 +1279,9 @@ void split_quantize_nvfp4_impl_with_rht_helper(const TensorWrapper &input,
           auto rht_output_t = allocateTorchTensor(cols, rows, input_list[i].dtype());
           rht_output_t_tensors.push_back(rht_output_t);
           TensorWrapper rht_output_t_cpp;
-          rht_output_t_cpp.set_rowwise_data(rht_output_t.data_ptr(), input_list[i].dtype(),
-                                            std::vector<size_t>{static_cast<size_t>(cols),
-                                                                static_cast<size_t>(rows)});
+          rht_output_t_cpp.set_rowwise_data(
+              rht_output_t.data_ptr(), input_list[i].dtype(),
+              std::vector<size_t>{static_cast<size_t>(cols), static_cast<size_t>(rows)});
           nvte_hadamard_transform(input_list[i].data(), rht_output_t_cpp.data(), 0,
                                   quantizer.rht_matrix_random_sign_mask_t, stream);
           nvte_quantize_v2(rht_output_t_cpp.data(), out_transpose_list[i].data(),

@@ -1931,7 +1931,19 @@ std::pair<GroupedTensorWrapper, py::object> NVFP4Quantizer::create_grouped_tenso
                                getTensorShape(*tensor_offsets));
   }
 
-  out_cpp.set_with_gemm_swizzled_scales(this->optimize_for_gemm);
+  const bool enable_sm120_grouped_nvfp4_fallback =
+      first_dims.has_value() &&
+      ([]() {
+        cudaDeviceProp device_prop{};
+        NVTE_CHECK_CUDA(cudaGetDeviceProperties(&device_prop, c10::cuda::current_device()));
+        return device_prop.major == 12 && device_prop.minor == 0;
+      })();
+  // Keep grouped metadata aligned with runtime behavior:
+  // - default: follow optimize_for_gemm
+  // - SM120 fallback path: force unswizzled layout
+  const bool with_gemm_swizzled_scales =
+      this->optimize_for_gemm && !enable_sm120_grouped_nvfp4_fallback;
+  out_cpp.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
 
   py::handle GroupedTensorClass = grouped_tensor_python_class(this->internal);
   py::dict kwargs;
@@ -1954,7 +1966,7 @@ std::pair<GroupedTensorWrapper, py::object> NVFP4Quantizer::create_grouped_tenso
   kwargs["first_dims"] = first_dims.has_value() ? py::cast(*first_dims) : py::none();
   kwargs["last_dims"] = py::none();
   kwargs["tensor_offsets"] = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none();
-  kwargs["with_gemm_swizzled_scales"] = this->optimize_for_gemm;
+  kwargs["with_gemm_swizzled_scales"] = with_gemm_swizzled_scales;
   PyObject* result = PyObject_Call(GroupedTensorClass.ptr(), args.ptr(), kwargs.ptr());
   if (result == nullptr) {
     PyErr_Print();
