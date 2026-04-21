@@ -32,7 +32,7 @@ from .._common import (
 )
 from ...cpp_extensions import general_grouped_gemm_for_grouped_tensor
 from ...module.base import _2X_ACC_WGRAD
-from ...triton.grouped_dbias_dscales import _compute_grouped_dbias_dscales
+from ...triton.grouped_dbias_dscales import compute_grouped_dbias_dscales
 
 
 def _cudnn_compute_wgrad(
@@ -591,7 +591,7 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         if scale_bias:
             fc2_biases = fc2_op._get_bias_tensors(dtype)
             bias_packed = torch.stack(fc2_biases)
-            fc2_dbias_packed_result, grad_scales = _compute_grouped_dbias_dscales(
+            fc2_dbias_packed_result, grad_scales = compute_grouped_dbias_dscales(
                 fc2_dy,
                 scales_f32,
                 bias_packed,

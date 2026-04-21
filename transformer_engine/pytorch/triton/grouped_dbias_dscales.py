@@ -74,7 +74,7 @@ def _launch_grouped_dbias(
     )
 
 
-def _compute_grouped_dbias_dscales(
+def compute_grouped_dbias_dscales(
     dy: torch.Tensor,
     scales: torch.Tensor,
     bias: torch.Tensor,
@@ -116,19 +116,19 @@ def _compute_grouped_dbias_dscales(
     else:
         assert (
             dbias.dtype == torch.float32
-        ), f"_compute_grouped_dbias_dscales: dbias must be float32, got {dbias.dtype}"
+        ), f"compute_grouped_dbias_dscales: dbias must be float32, got {dbias.dtype}"
     if dscales is None:
         dscales = torch.zeros(total_tokens, dtype=torch.float32, device=dy.device)
     else:
         assert (
             dscales.dtype == torch.float32
-        ), f"_compute_grouped_dbias_dscales: dscales must be float32, got {dscales.dtype}"
+        ), f"compute_grouped_dbias_dscales: dscales must be float32, got {dscales.dtype}"
 
     _launch_grouped_dbias(dy, offsets, dbias, scales, bias, dscales)
     return dbias, dscales
 
 
-def _compute_grouped_dbias(
+def compute_grouped_dbias(
     dy: torch.Tensor,
     offsets: torch.Tensor,
     num_groups: int,
@@ -159,7 +159,7 @@ def _compute_grouped_dbias(
     else:
         assert (
             dbias.dtype == torch.float32
-        ), f"_compute_grouped_dbias: dbias must be float32, got {dbias.dtype}"
+        ), f"compute_grouped_dbias: dbias must be float32, got {dbias.dtype}"
 
     _launch_grouped_dbias(dy, offsets, dbias, scales=None, bias=None, dscales=None)
     return dbias
