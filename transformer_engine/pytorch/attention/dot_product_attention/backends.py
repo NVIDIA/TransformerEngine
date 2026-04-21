@@ -1542,9 +1542,11 @@ class FusedAttnFunc(torch.autograd.Function):
         rest = [None]
         if ctx.use_FAv2_bwd:
             softmax_lse, rng_state = aux_ctx_tensors
-            dq = torch.empty_like(q)
-            dk = torch.empty_like(k)
-            dv = torch.empty_like(v)
+            # THD + CP fix: zeros_like ensures padded positions start from safe values,
+            # preventing garbage from propagating through backward gradient accumulation.
+            dq = torch.zeros_like(q)
+            dk = torch.zeros_like(k)
+            dv = torch.zeros_like(v)
             d_out, q, k, v, out = [dpa_utils.maybe_contiguous(x) for x in (d_out, q, k, v, out)]
             # from transformer_engine.pytorch.attention.dot_product_attention import flash_attn_cuda_bwd
             flash_attn_cuda_bwd(

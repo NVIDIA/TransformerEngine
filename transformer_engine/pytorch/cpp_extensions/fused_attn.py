@@ -351,6 +351,15 @@ def fused_attn_fwd(
         cuda_graph,
     )
 
+    # THD CUDA Graph: zero-fill output at positions beyond cu_seqlens[-1].
+    # Uses pure CUDA ops (no CPU sync) for CUDA graph capture compatibility.
+    if qkv_layout in ("t3hd", "th3d", "thd_t2hd", "thd_th2d", "thd_thd_thd"):
+        _out = output_tensors[0]
+        _aT_fwd = cu_seqlens_q[-1]
+        if _out.shape[0] > 0:
+            _m_fwd = torch.arange(_out.shape[0], device=_out.device) >= _aT_fwd
+            _out[_m_fwd] = 0
+
     if return_max_logit:
         qkv_format = qkv_layout.replace("3", "").replace("2", "").split("_")[0]
         # thd (newer cuDNN runtimes, non-sm120): output_tensors: out [tq, h, d],    Stats [tq, h, 1],    Max [tq, h, 1]
@@ -606,5 +615,13 @@ def fused_attn_bwd(
         dqkv_quantizer,
         cuda_graph,
     )
+
+    # THD CUDA Graph: zero-fill dQ/dK/dV at positions beyond cu_seqlens[-1].
+    if qkv_layout in ("t3hd", "th3d", "thd_t2hd", "thd_th2d", "thd_thd_thd"):
+        _aT_bwd = cu_seqlens_q[-1]
+        for _dt in output_tensors[:3]:
+            if hasattr(_dt, "shape") and _dt.shape[0] > 0:
+                _m_bwd = torch.arange(_dt.shape[0], device=_dt.device) >= _aT_bwd
+                _dt[_m_bwd] = 0
 
     return output_tensors

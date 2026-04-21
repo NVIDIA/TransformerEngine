@@ -2044,6 +2044,17 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
         nvtx_range_pop(f"{nvtx_label}")
 
+        # THD CUDA Graph: zero-fill output at padded positions after CP assembly.
+        # cu_seqlens_q_padded is GLOBAL; divide by cp_size to get local actual_T.
+        if qkv_format == "thd" and out_ret is not None and hasattr(out_ret, "shape"):
+            import torch as _torch
+
+            _local_aT = cu_seqlens_q_padded[-1] // cp_size
+            if out_ret.shape[0] > 0:
+                _m = _torch.arange(out_ret.shape[0], device=out_ret.device) >= _local_aT
+                out_ret.data[_m] = 0
+                out.data[_m.view(-1, *([1] * (out.dim() - 1))).expand_as(out)] = 0
+
         if return_max_logit:
             return out_ret, max_logit
         return out_ret
@@ -2680,10 +2691,17 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             dim = ctx.qkv_format.index("s")
             dq, dk, dv = [x.view(*x.shape[:dim], -1, *x.shape[dim + 2 :]) for x in [dq, dk, dv]]
 
+        # THD CUDA Graph fix: reading cu_seqlens[-1] as a Python index triggers
+        # GPU->CPU sync during graph capture. Use .shape[0] instead when capturing.
         if ctx.qkv_format == "thd" and not ctx.use_fused_attention:
-            dq[cu_seqlens_q_padded[-1] :].fill_(0)
-            dk[cu_seqlens_kv_padded[-1] :].fill_(0)
-            dv[cu_seqlens_kv_padded[-1] :].fill_(0)
+            if torch.cuda.is_current_stream_capturing():
+                _q_end, _kv_end = dq.shape[0], dk.shape[0]
+            else:
+                _q_end = cu_seqlens_q_padded[-1]
+                _kv_end = cu_seqlens_kv_padded[-1]
+            dq[_q_end:].fill_(0)
+            dk[_kv_end:].fill_(0)
+            dv[_kv_end:].fill_(0)
 
         if ctx.fp8 and ctx.is_input_fp8:
             dq, dk, dv = combine_and_quantize(qkv_layout, dq, dk, dv, ctx.dQKV_quantizer)
@@ -2730,6 +2748,16 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             attn_dbias = attn_dbias.view(*attn_dbias.shape[:-2], -1)
 
         nvtx_range_pop(f"{nvtx_label}")
+
+        # THD CUDA Graph: zero-fill dQ/dK/dV at padded positions after CP backward.
+        if ctx.qkv_format == "thd":
+            import torch as _torch
+
+            _local_aT_bwd = cu_seqlens_q_padded[-1] // get_distributed_world_size(ctx.cp_group)
+            for _dg in [dq, dk, dv]:
+                if _dg is not None and hasattr(_dg, "shape") and _dg.shape[0] > 0:
+                    _mb = _torch.arange(_dg.shape[0], device=_dg.device) >= _local_aT_bwd
+                    _dg[_mb] = 0
 
         return (
             None,
