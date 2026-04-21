@@ -682,10 +682,7 @@ def get_attention_backend(
     if (  # pylint: disable=too-many-boolean-expressions
         use_flash_attention_2
         and FlashAttentionUtils.is_installed
-        and (
-            head_dim_qk > 256
-            or head_dim_qk % 8 != 0
-        )
+        and (head_dim_qk > 256 or head_dim_qk % 8 != 0)
     ):
         logger.debug(
             "Disabling FlashAttention 2 due to unsupported head_dim_qk and head_dim_v. "
