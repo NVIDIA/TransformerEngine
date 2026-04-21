@@ -105,6 +105,66 @@ std::vector<T> CopyMatrix(const std::vector<T>& data, size_t mstart, size_t nsta
 }
 
 template <typename T>
+std::vector<float> CastToFloat(const std::vector<T>& in) {
+  std::vector<float> out(in.size());
+  for (size_t i = 0; i < in.size(); ++i) {
+    out[i] = static_cast<float>(in[i]);
+  }
+  return out;
+}
+
+template <typename T>
+std::vector<T> AllGatherColsSharded(const std::vector<T>& local, int64_t rows, int64_t local_cols,
+                                    int64_t global_cols) {
+  std::vector<int64_t> cols_per_rank{};
+  int nranks{};
+  CHECK_MPI(MPI_Comm_size(MPI_COMM_WORLD, &nranks));
+  cols_per_rank.resize(nranks);
+  CHECK_MPI(MPI_Allgather(&local_cols, 1, MPI_INT64_T, cols_per_rank.data(), 1, MPI_INT64_T,
+                          MPI_COMM_WORLD));
+
+  std::vector<int> counts(nranks);
+  std::vector<int> displs(nranks, 0);
+  for (int r = 0; r < nranks; ++r) {
+    counts[r] = static_cast<int>(cols_per_rank[r] * rows * sizeof(T));
+    if (r > 0) displs[r] = displs[r - 1] + counts[r - 1];
+  }
+
+  std::vector<T> gathered(rows * global_cols);
+  CHECK_MPI(MPI_Allgatherv(local.data(), static_cast<int>(local.size() * sizeof(T)), MPI_BYTE,
+                           gathered.data(), counts.data(), displs.data(), MPI_BYTE,
+                           MPI_COMM_WORLD));
+  return gathered;
+}
+
+template <typename T>
+std::vector<T> AllGatherRowsSharded(const std::vector<T>& local, int64_t local_rows, int64_t cols,
+                                    int64_t global_rows) {
+  std::vector<int64_t> rows_per_rank{};
+  int nranks{};
+  CHECK_MPI(MPI_Comm_size(MPI_COMM_WORLD, &nranks));
+  rows_per_rank.resize(nranks);
+  CHECK_MPI(MPI_Allgather(&local_rows, 1, MPI_INT64_T, rows_per_rank.data(), 1, MPI_INT64_T,
+                          MPI_COMM_WORLD));
+
+  std::vector<int> counts(nranks);
+  std::vector<int> displs(nranks, 0);
+  for (int r = 0; r < nranks; ++r) {
+    counts[r] = static_cast<int>(rows_per_rank[r] * sizeof(T));
+    if (r > 0) displs[r] = displs[r - 1] + counts[r - 1];
+  }
+
+  std::vector<T> gathered(global_rows * cols);
+  for (int64_t col = 0; col < cols; ++col) {
+    const auto* send = reinterpret_cast<const uint8_t*>(local.data() + col * local_rows);
+    auto* recv = reinterpret_cast<uint8_t*>(gathered.data() + col * global_rows);
+    CHECK_MPI(MPI_Allgatherv(send, static_cast<int>(local_rows * sizeof(T)), MPI_BYTE, recv,
+                             counts.data(), displs.data(), MPI_BYTE, MPI_COMM_WORLD));
+  }
+  return gathered;
+}
+
+template <typename T>
 test::Tensor Make(size_t m, size_t n, float scale) {
   test::Tensor ret("", std::vector{n, m}, TypeInfo<T>::dtype);
   ret.set_scale(scale);
@@ -144,6 +204,12 @@ struct Params {
 
 class CommGemmFixure : public ::testing::TestWithParam<Params> {
  protected:
+  enum class OverlapType {
+    kAllGather,
+    kReduceScatter,
+    kAllReduce,
+  };
+
   CommGemmFixure() {
     CHECK_MPI(MPI_Comm_size(MPI_COMM_WORLD, &nranks_));
     CHECK_MPI(MPI_Comm_rank(MPI_COMM_WORLD, &rank_));
@@ -175,6 +241,8 @@ class CommGemmFixure : public ::testing::TestWithParam<Params> {
   };
 
   virtual PatternDims DistributeTensors(int64_t m, int64_t n, int64_t k) = 0;
+
+  virtual OverlapType overlap_type() const = 0;
 
   virtual void CommGemm(int64_t m, int64_t n, int64_t k, const NVTETensor a, const NVTETensor b,
                         const NVTETensor d, const NVTETensor bias, const NVTETensor pre_act_out,
@@ -209,14 +277,6 @@ class CommGemmFixure : public ::testing::TestWithParam<Params> {
       return static_cast<BiasType>(dist(rng) * bias_scale);
     });
 
-    auto ga = transa ? MakeFromData<AType>(adata, 0, 0, k, m, k, a_scale)
-                     : MakeFromData<AType>(adata, 0, 0, m, k, m, a_scale);
-    auto gb = transb ? MakeFromData<BType>(bdata, 0, 0, n, k, n, b_scale)
-                     : MakeFromData<BType>(bdata, 0, 0, k, n, k, b_scale);
-    auto gbias = MakeFromData<BiasType>(biasdata, 0, 0, m, 1, m, bias_scale);
-    auto gd = Make<DType>(m, n, d_scale);
-    auto gaux = Make<DType>(m, n, d_scale);
-
     auto dims = DistributeTensors(m, n, k);
     auto a = transa ? MakeFromData<AType>(adata, dims.a_rows_start, dims.a_cols_start,
                                           dims.a_rows_num, dims.a_cols_num, k, a_scale)
@@ -236,24 +296,101 @@ class CommGemmFixure : public ::testing::TestWithParam<Params> {
     CommGemm(m, n, k, a.data(), b.data(), d.data(), bias.data(), aux.data(), transa, transb, grad,
              accumulate, 0 /*comm_sm_count*/, stream);
     auto workspace = Make<uint8_t>(1, 32 << 20, 1.0);
-    nvte_cublas_gemm(ga.data(), gb.data(), gd.data(), gbias.data(), gaux.data(), transa, transb,
-                     grad, workspace.data(), accumulate, true /* use_split_accumulator */,
-                     0 /* math_sm_count */, stream);
+
+    std::vector<float> out_golden{};
+    if (overlap_type() == OverlapType::kAllGather) {
+      // Build AG reference input by explicitly all-gathering the sharded input operand.
+      std::vector<BType> b_global_data{};
+      if (transb) {
+        auto b_local = CopyMatrix(bdata, dims.b_cols_start, dims.b_rows_start, dims.b_cols_num,
+                                  dims.b_rows_num, n);
+        b_global_data = AllGatherRowsSharded(b_local, dims.b_cols_num, k, n);
+      } else {
+        auto b_local = CopyMatrix(bdata, dims.b_rows_start, dims.b_cols_start, dims.b_rows_num,
+                                  dims.b_cols_num, k);
+        b_global_data = AllGatherColsSharded(b_local, k, dims.b_cols_num, n);
+      }
+
+      auto b_ref =
+          transb ? MakeFromData<BType>(b_global_data, 0, 0, n, k, n, b_scale)
+                 : MakeFromData<BType>(b_global_data, 0, 0, k, n, k, b_scale);
+      auto d_ref = Make<DType>(dims.d_rows_num, dims.d_cols_num, d_scale);
+      auto aux_ref = Make<DType>(dims.d_rows_num, dims.d_cols_num, d_scale);
+      nvte_cublas_gemm(a.data(), b_ref.data(), d_ref.data(), bias.data(), aux_ref.data(), transa,
+                       transb, grad, workspace.data(), accumulate,
+                       true /* use_split_accumulator */, 0 /* math_sm_count */, stream);
+
+      std::vector<DType> out_ref(dims.d_rows_num * dims.d_cols_num);
+      NVTE_CHECK_CUDA(cudaMemcpy(out_ref.data(), d_ref.rowwise_dptr(),
+                                 out_ref.size() * sizeof(out_ref[0]), cudaMemcpyDefault));
+      out_golden = CastToFloat(out_ref);
+    } else {
+      // RS/AR reference: local partial GEMM, then overlap-matching reduction on output.
+      auto d_partial = Make<DType>(m, n, d_scale);
+      auto aux_partial = Make<DType>(m, n, d_scale);
+      nvte_cublas_gemm(a.data(), b.data(), d_partial.data(), bias.data(), aux_partial.data(), transa,
+                       transb, grad, workspace.data(), accumulate,
+                       true /* use_split_accumulator */, 0 /* math_sm_count */, stream);
+
+      std::vector<DType> partial_host(m * n);
+      NVTE_CHECK_CUDA(cudaMemcpy(partial_host.data(), d_partial.rowwise_dptr(),
+                                 partial_host.size() * sizeof(partial_host[0]),
+                                 cudaMemcpyDefault));
+      std::vector<float> partial = CastToFloat(partial_host);
+
+      // Bias is applied in each local partial GEMM above, so compensate after reduction.
+      std::vector<float> bias_host(m);
+      for (size_t row = 0; row < m; ++row) {
+        bias_host[row] = static_cast<float>(biasdata[row]);
+      }
+
+      if (overlap_type() == OverlapType::kReduceScatter) {
+        std::vector<int64_t> cols_per_rank(nranks_);
+        CHECK_MPI(MPI_Allgather(&dims.d_cols_num, 1, MPI_INT64_T, cols_per_rank.data(), 1,
+                                MPI_INT64_T, MPI_COMM_WORLD));
+        std::vector<int> recvcounts(nranks_);
+        for (int r = 0; r < nranks_; ++r) {
+          recvcounts[r] = static_cast<int>(m * cols_per_rank[r]);
+        }
+
+        std::vector<float> reduced_scattered(dims.d_rows_num * dims.d_cols_num);
+        CHECK_MPI(MPI_Reduce_scatter(partial.data(), reduced_scattered.data(), recvcounts.data(),
+                                     MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD));
+
+        if (nranks_ > 1) {
+          const float correction = static_cast<float>(nranks_ - 1);
+          for (size_t col = 0; col < dims.d_cols_num; ++col) {
+            for (size_t row = 0; row < m; ++row) {
+              reduced_scattered[col * m + row] -= correction * bias_host[row];
+            }
+          }
+        }
+        out_golden = std::move(reduced_scattered);
+      } else {
+        std::vector<float> reduced(m * n, 0.0f);
+        CHECK_MPI(MPI_Allreduce(partial.data(), reduced.data(), static_cast<int>(reduced.size()),
+                                MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD));
+
+        if (nranks_ > 1) {
+          const float correction = static_cast<float>(nranks_ - 1);
+          for (size_t col = 0; col < n; ++col) {
+            for (size_t row = 0; row < m; ++row) {
+              reduced[col * m + row] -= correction * bias_host[row];
+            }
+          }
+        }
+        out_golden = std::move(reduced);
+      }
+    }
+
     NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
     NVTE_CHECK_CUDA(cudaStreamDestroy(stream));
     std::vector<DType> out(dims.d_rows_num * dims.d_cols_num);
     NVTE_CHECK_CUDA(
         cudaMemcpy(out.data(), d.rowwise_dptr(), out.size() * sizeof out[0], cudaMemcpyDefault));
-    std::vector<DType> out_golden_global(m * n);
-    NVTE_CHECK_CUDA(cudaMemcpy(out_golden_global.data(), gd.rowwise_dptr(),
-                               out_golden_global.size() * sizeof out_golden_global[0],
-                               cudaMemcpyDefault));
-
-    auto out_golden = CopyMatrix(out_golden_global, dims.d_rows_start, dims.d_cols_start,
-                                 dims.d_rows_num, dims.d_cols_num, m);
     NVTE_CHECK(out.size() == out_golden.size());
     for (size_t i = 0; i < out.size(); ++i) {
-      EXPECT_NEAR(static_cast<float>(out[i]), static_cast<float>(out_golden[i]), tol);
+      EXPECT_NEAR(static_cast<float>(out[i]), out_golden[i], tol);
     }
   }
 
@@ -264,6 +401,8 @@ class CommGemmFixure : public ::testing::TestWithParam<Params> {
 };
 
 struct AgGemm : public CommGemmFixure {
+  OverlapType overlap_type() const override { return OverlapType::kAllGather; }
+
   PatternDims DistributeTensors(int64_t m, int64_t n, int64_t k) override {
     auto a_cols_num = nvte_comm_gemm_numroc(ctx_, m);
     auto b_cols_num = nvte_comm_gemm_numroc(ctx_, n);
@@ -299,6 +438,8 @@ struct AgGemm : public CommGemmFixure {
 };
 
 struct GemmRs : public CommGemmFixure {
+  OverlapType overlap_type() const override { return OverlapType::kReduceScatter; }
+
   PatternDims DistributeTensors(int64_t m, int64_t n, int64_t k) override {
     auto rows_num = nvte_comm_gemm_numroc(ctx_, k);
     auto d_cols_num = nvte_comm_gemm_numroc(ctx_, n);
@@ -334,6 +475,8 @@ struct GemmRs : public CommGemmFixure {
 };
 
 struct GemmAr : public CommGemmFixure {
+  OverlapType overlap_type() const override { return OverlapType::kAllReduce; }
+
   PatternDims DistributeTensors(int64_t m, int64_t n, int64_t k) override {
     auto rows_num = nvte_comm_gemm_numroc(ctx_, k);
 
