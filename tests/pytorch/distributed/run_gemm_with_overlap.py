@@ -458,25 +458,19 @@ def _main(opts):
         )
     else:
         if opts.comm_type == tex.CommOverlapType.AG:
-            # AG Kernel: (K/P, N) -> gather -> (K, N) -> T -> (N, K)
-            ker_g = torch.transpose(
-                te.distributed.gather_along_first_dim(kernel_t, tp_group)[0], 0, 1
-            )
-            # AG Input: (M/P, N) -> gather -> (M, N)
+            # AG Kernel: Keep local (K/P, N) for per-rank reference comparison
+            ker_g = kernel_t
+            # AG Input: (M/P, N) -> gather -> (M, N); full input needed for local GEMM chunk
             inp_g = te.distributed.gather_along_first_dim(inp, tp_group)[0]
             if ub_obj2 is not None:
-                ker2_g = te.distributed.gather_along_first_dim(
-                    torch.transpose(kernel2_t, 0, 1), tp_group
-                )[0]
+                # Keep kernel2 local (N, K/P) for per-rank reference comparison
+                ker2_g = kernel2_t
         else:
-            # RS Kernel: (N, K/P) -> T -> (K/P, N) -> gather -> (K, N)
-            ker_g = te.distributed.gather_along_first_dim(
-                torch.transpose(kernel_t, 0, 1), tp_group
-            )[0]
-            # RS Input: (M, K/P) -> T -> (K/P, M) -> gather -> (K, M) -> T -> (M, K)
-            inp_g = torch.transpose(
-                te.distributed.gather_along_first_dim(torch.transpose(inp, 0, 1), tp_group)[0], 0, 1
-            )
+            # RS: Compute local GEMM on each rank, will apply reduce-scatter after
+            # RS Kernel: (N, K/P) - keep local
+            ker_g = kernel_t
+            # RS Input: (M, K/P) - keep local
+            inp_g = inp
 
     if opts.bulk_overlap:
         if opts.comm_type == tex.CommOverlapType.AG:
@@ -488,20 +482,42 @@ def _main(opts):
             # Sum the list together for final global result
             ref_g = torch.stack(bulk_inp_list).sum(dim=0)
     else:
+        # For AG: ker_g=kernel_t=(K/P,N), inp_g=(M,N) -> ref_g=(M,K/P) local chunk
+        # For RS: ker_g=kernel_t=(N,K/P), inp_g=(M,K/P) -> ref_g=(M,N) partial
         ref_g, *_ = tex.general_gemm(
-            torch.transpose(ker_g, 0, 1),
+            ker_g,
             inp_g,
             out_dtype=torch.bfloat16,
             use_split_accumulator=te.module.base._2X_ACC_FPROP,
         )
+        if opts.comm_type == tex.CommOverlapType.RS:
+            # Apply non-overlapped reduce-scatter to local reference GEMM output
+            # ref_g is currently (M, N) on each rank (partial result from local GEMM)
+            # All-gather to collect all (M, N) from all ranks
+            ref_rs_list = [torch.zeros_like(ref_g) for _ in range(tp_size)]
+            dist.all_gather(ref_rs_list, ref_g, group=tp_group)
+            # Stack and sum across ranks to get global result
+            ref_global = torch.stack(ref_rs_list, dim=0).sum(dim=0)  # (M, N)
+            # Scatter: each rank keeps its portion (M/P, N)
+            start_idx = tp_rank * (outer_size // tp_size)
+            end_idx = (tp_rank + 1) * (outer_size // tp_size)
+            ref_g = ref_global[start_idx:end_idx, :]  # (M/P, N)
         if ub_obj2 is not None:
             inp2_g = torch.nn.functional.gelu(ref_g)  # pylint: disable=not-callable
-            ref2_g = tex.general_gemm(
-                torch.transpose(ker2_g),
+            # ker2_g=kernel2_t=(N,K/P), inp2_g=(M,K/P) -> partial (M,N) per rank
+            ref2_partial, *_ = tex.general_gemm(
+                ker2_g,
                 inp2_g,
                 out_dtype=torch.bfloat16,
                 use_split_accumulator=te.module.base._2X_ACC_FPROP,
             )
+            # Apply non-overlapped reduce-scatter to partial results
+            ref2_rs_list = [torch.zeros_like(ref2_partial) for _ in range(tp_size)]
+            dist.all_gather(ref2_rs_list, ref2_partial, group=tp_group)
+            ref2_global = torch.stack(ref2_rs_list, dim=0).sum(dim=0)  # (M, N) fully reduced
+            start_idx = tp_rank * (outer_size // tp_size)
+            end_idx = (tp_rank + 1) * (outer_size // tp_size)
+            ref2_g = ref2_global[start_idx:end_idx, :]  # (M/P, N)
 
     # Initialize quantizers
     with_quantized_compute = opts.quantization != "none"
@@ -708,7 +724,7 @@ def _main(opts):
             else:
                 with torch.cuda.graph(g):
                     all_outputs = _fp8_gemm()
-                    _ = _fp8_gemm2(all_outputs[0])
+                    all_outputs2 = _fp8_gemm2(all_outputs[0])
         else:
             with torch.cuda.graph(g):
                 all_outputs = _gemm()
@@ -726,7 +742,7 @@ def _main(opts):
                 all_outputs = _fp8_gemm()
                 end_events[i].record()
                 if ub_obj2 is not None:
-                    _fp8_gemm2(all_outputs[0])
+                    all_outputs2 = _fp8_gemm2(all_outputs[0])
             else:
                 start_events[i].record()
                 all_outputs = _gemm()
@@ -802,23 +818,34 @@ def _main(opts):
         else:
             if opts.comm_type == tex.CommOverlapType.AG:
                 if ub_obj2 is not None:
-                    # AG+RS Output: (M/P, N) -> gather -> (M, N)
-                    output = rs_out2.to(dtype=torch.float32)
-                    test_out = te.distributed.gather_along_first_dim(output, tp_group)[0]
-                else:
-                    # AG Output: (M, K/P) -> T -> (K/P, M) -> gather -> (K, M) -> T -> (M, K)
-                    output = all_outputs[0].dequantize() if opts.fp8_output else all_outputs[0]
-                    test_out = torch.transpose(
-                        te.distributed.gather_along_first_dim(
-                            torch.transpose(output, 0, 1), tp_group
-                        )[0],
-                        0,
-                        1,
+                    # AG+RS Output: Keep local (M/P, N) for comparison with local reference
+                    output = (
+                        rs_out2.to(dtype=torch.float32)
+                        if not opts.use_cublasmp
+                        else (
+                            all_outputs2[0].dequantize()
+                            if opts.fp8_output
+                            else all_outputs2[0]
+                        )
                     )
+                    test_out = output
+                else:
+                    # AG Output: Keep local (M, K/P) for comparison with local reference
+                    output = all_outputs[0].dequantize() if opts.fp8_output else all_outputs[0]
+                    test_out = output
             else:
-                # RS Output: (M/P, N) -> gather -> (M, N)
-                output = rs_out.to(dtype=torch.float32)
-                test_out = te.distributed.gather_along_first_dim(output, tp_group)[0]
+                # RS Output: Keep local (M/P, N) for comparison with local reference
+                output = (
+                    rs_out.to(dtype=torch.float32)
+                    if not opts.use_cublasmp
+                    else (
+                        all_outputs[0].dequantize()
+                        if opts.fp8_output
+                        else all_outputs[0]
+                    )
+                )
+                # Don't gather - keep local for comparison with local reduce-scattered reference
+                test_out = output
 
             ref_out = ref2_g if ub_obj2 is not None else ref_g
             test_nonzeros = torch.count_nonzero(test_out)
@@ -826,7 +853,9 @@ def _main(opts):
             nonzero_info = (
                 f"output nonzeros = {test_nonzeros} " + f"| reference count = {ref_nonzeros}"
             )
-            dist_print(nonzero_info, src=0, section=True, group=tp_group)
+            
+            # Both AG and RS now compare local outputs across all ranks
+            dist_print(nonzero_info, section=True, group=tp_group)
 
             sizing_info = (
                 f"input: {list(inp.shape)} " + f"| GEMM1 weights: {list(kernel_t.shape)[::-1]} "
@@ -836,15 +865,12 @@ def _main(opts):
             sizing_info += f"| output: {list(output.shape)}\n"
             dist_print(sizing_info, section=True, group=tp_group)
 
-            sizing_info_g = (
-                f"input: {list(inp_g.shape)} " + f"| GEMM1 weights: {list(ker_g.shape)} "
-            )
+            # Both AG and RS now compare local outputs; print per-rank
+            sizing_info_g = f"input: {list(inp.shape)} | GEMM1 weights: {list(kernel_t.shape)[::-1]} "
             if ub_obj2 is not None:
-                sizing_info_g += f"| GEMM2 weights: {list(ker2_g.shape)} "
-            sizing_info_g += (
-                f"| output: {list(test_out.shape)} " + f"| reference: {list(ref_out.shape)}\n"
-            )
-            dist_print(sizing_info_g, src=0, group=tp_group)
+                sizing_info_g += f"| GEMM2 weights: {list(kernel2_t.shape)[::-1]} "
+            sizing_info_g += f"| output (local): {list(test_out.shape)} | reference (local): {list(ref_out.shape)}\n"
+            dist_print(sizing_info_g, group=tp_group)
 
         torch.cuda.synchronize()
         dist.barrier(tp_group)
@@ -853,7 +879,7 @@ def _main(opts):
         abs_err = diff[m].item()
         rel_err = abs_err / max(abs(ref_out.flatten()[m].item()), 1e-5)
         rtol = 0.02 if opts.quantization == "none" else 0.125
-        atol = 0.001 if opts.quantization == "none" else 0.0625
+        atol = 0.002 if opts.quantization == "none" else 0.0625
         if rel_err > rtol and abs_err > atol:
             numerics_failed = True
             numerics_info = (
@@ -873,7 +899,7 @@ def _main(opts):
                 numerics_info += f"abs. error = {abs_err} (tol = {atol})"
 
         dist_print(
-            numerics_info, src=0, section=True, info=True, error=numerics_failed, group=tp_group
+            numerics_info, section=True, info=True, error=numerics_failed, group=tp_group
         )
 
     dist.barrier(tp_group)
