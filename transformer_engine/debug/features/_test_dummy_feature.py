@@ -43,7 +43,7 @@ class TestDummyFeature(TEConfigAPIMapper):
         """
         # Access counter via full module path to ensure we're modifying the same module-level
         # variable regardless of import context (debug framework vs test import)
-        import transformer_engine.debug.features._test_dummy_feature as dummy_feature  # pylint: disable=import-self
+        import transformer_engine.debug.features._test_dummy_feature as dummy_feature  # noqa: PLW0406  # pylint: disable=import-self
 
         dummy_feature._inspect_tensor_enabled_call_count += 1
 
@@ -56,6 +56,6 @@ class TestDummyFeature(TEConfigAPIMapper):
     def inspect_tensor(self, _config, *_args, **_kwargs):
         """This method does nothing but always tracks invocations for testing."""
         # Access counter via full module path to ensure shared state across import contexts
-        import transformer_engine.debug.features._test_dummy_feature as dummy_feature  # pylint: disable=import-self
+        import transformer_engine.debug.features._test_dummy_feature as dummy_feature  # noqa: PLW0406  # pylint: disable=import-self
 
         dummy_feature._inspect_tensor_call_count += 1

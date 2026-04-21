@@ -418,8 +418,7 @@ class DebugQuantizer(Quantizer):
             self.inspect_tensor_enabled
             or self.inspect_tensor_postquantize_enabled_rowwise
             or self.inspect_tensor_postquantize_enabled_columnwise
-            or self.rowwise_tensor_plan == API_CALL_MODIFY
-            or self.columnwise_tensor_plan == API_CALL_MODIFY
+            or API_CALL_MODIFY in (self.rowwise_tensor_plan, self.columnwise_tensor_plan)
         ):
             return True
         if self.parent_quantizer is not None:
