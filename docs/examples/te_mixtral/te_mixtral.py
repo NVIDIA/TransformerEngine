@@ -11,14 +11,9 @@ import warnings
 from collections import OrderedDict
 from contextlib import nullcontext
 from dataclasses import dataclass
-import sys
 
 from typing import Any, ClassVar, ContextManager, Protocol
-
-if sys.version_info >= (3, 11):
-    from typing import Unpack
-else:
-    from typing_extensions import Unpack
+from typing_extensions import Unpack
 
 import torch
 import torch.distributed as dist
@@ -814,7 +809,7 @@ class NVMixtralModel(NVMixtralPreTrainedModel):
                 attention_mask is not None
             ), "Attention mask is required when packing BSHD inputs."
             batch_size = hidden_states.size(0)
-            padded_seq_len = input_ids.size(1)
+            padded_seq_len = hidden_states.size(1)
             hidden_states, indices, cu_seqlens, max_seqlen, _ = _unpad_input(
                 hidden_states, attention_mask
             )
