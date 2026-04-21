@@ -261,14 +261,11 @@ class activation_recompute_forward(AbstractContextManager, ContextDecorator):
         )
         _FP8_ACTIVATION_RECOMPUTE_PHASE = self.recompute_phase
 
+        qstate = FP8GlobalStateManager.quantization_state
         if self.activation_recompute and not self.recompute_phase:
-            activation_recompute_forward._is_first_fp8_module.append(
-                FP8GlobalStateManager.IS_FIRST_FP8_MODULE
-            )
+            activation_recompute_forward._is_first_fp8_module.append(qstate.is_first_fp8_module)
         if self.activation_recompute and self.recompute_phase:
-            FP8GlobalStateManager.IS_FIRST_FP8_MODULE = (
-                activation_recompute_forward._is_first_fp8_module.pop(0)
-            )
+            qstate.is_first_fp8_module = activation_recompute_forward._is_first_fp8_module.pop(0)
 
     def __exit__(self, *exc_details):
         global _FP8_ACTIVATION_RECOMPUTE_ENABLED, _FP8_ACTIVATION_RECOMPUTE_PHASE

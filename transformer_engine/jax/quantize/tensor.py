@@ -369,11 +369,15 @@ class GroupedScaledTensor1x(ScaledTensor1x):
         first_dims: Per-group sizes of the first (row) 2D dim, or None if not ragged
         last_dims: Per-group sizes of the last (col) 2D dim, or None if not ragged
         original_shape: The original shape of the tensor before grouping
+        pre_swizzled: Whether the scale_inv is already swizzled for GEMM. True when produced
+            by V2 grouped quantize (nvte_group_quantize fuses the swizzle). The V2 grouped
+            GEMM FFI requires pre_swizzled=True for MXFP8 inputs and will not re-swizzle.
     """
 
     first_dims: Optional[jnp.ndarray]
     last_dims: Optional[jnp.ndarray]
     original_shape: Tuple
+    pre_swizzled: bool = False
 
     def __init__(
         self,
@@ -389,11 +393,13 @@ class GroupedScaledTensor1x(ScaledTensor1x):
         data_layout,
         flatten_axis,
         original_shape,
+        pre_swizzled=False,
     ):
         self.flatten_axis = flatten_axis
         self.first_dims = first_dims
         self.last_dims = last_dims
         self.original_shape = original_shape
+        self.pre_swizzled = pre_swizzled
         # TODO(Phuong):Handle RHT for grouped quantization once grouped quantization supports NVFP4
         super().__init__(
             data=data,
@@ -407,6 +413,18 @@ class GroupedScaledTensor1x(ScaledTensor1x):
             flatten_axis=flatten_axis,
             has_rht_applied=False,
         )
+
+    @property
+    def group_sizes(self) -> jnp.ndarray:
+        """Per-group sizes along the group axis.
+
+        When first_dims is set (ragged groups), returns first_dims.
+        When first_dims is None (equal-sized groups), returns an array of ones with
+        length equal to the number of groups.
+        """
+        if self.first_dims is not None and self.first_dims.size > 0:
+            return self.first_dims
+        return jnp.ones((self.original_shape[0],), dtype=jnp.int32)
 
     def __post_init__(self):
         assert self.scale_inv.ndim == 1, "Only support flattened scale_inv"
@@ -456,6 +474,7 @@ class GroupedScaledTensor1x(ScaledTensor1x):
             self.data_layout,
             self.flatten_axis,
             self.original_shape,
+            self.pre_swizzled,
         )
         return (children, aux_data)
 
@@ -653,6 +672,7 @@ class ScaledTensorFactory:
         last_dims=None,
         original_shape=None,
         has_rht_applied=False,
+        pre_swizzled=False,
     ):
         """Creates a single-scale quantized tensor.
 
@@ -722,6 +742,7 @@ class ScaledTensorFactory:
                 first_dims=first_dims,
                 last_dims=last_dims,
                 original_shape=original_shape,
+                pre_swizzled=pre_swizzled,
             )
 
         # Handling attrs of transposed tensors
@@ -759,6 +780,7 @@ class ScaledTensorFactory:
         original_shape=None,
         rowwise_has_rht_applied=False,
         colwise_has_rht_applied=False,
+        pre_swizzled=False,
     ):
         """Creates a double-scale quantized tensor.
 
@@ -800,6 +822,7 @@ class ScaledTensorFactory:
             last_dims=last_dims,
             original_shape=original_shape,
             has_rht_applied=rowwise_has_rht_applied,
+            pre_swizzled=pre_swizzled,
         )
         colwise_tensor = ScaledTensorFactory.create_1x(
             colwise_data,
@@ -814,6 +837,7 @@ class ScaledTensorFactory:
             last_dims=last_dims,
             original_shape=original_shape,
             has_rht_applied=colwise_has_rht_applied,
+            pre_swizzled=pre_swizzled,
         )
         return ScaledTensor2x(rowwise_tensor, colwise_tensor)
 
@@ -835,6 +859,7 @@ class ScaledTensorFactory:
         original_shape: Tuple[int] = None,
         rowwise_has_rht_applied: bool = False,
         colwise_has_rht_applied: bool = False,
+        pre_swizzled: bool = False,
     ):
         """Creates a scaled tensor based on the quantization axis.
 
@@ -853,6 +878,7 @@ class ScaledTensorFactory:
             original_shape: The original shape of the tensor before grouping (default: None)
             rowwise_has_rht_applied: Whether the row-wise tensor uses the Randomized Hadamard Transform (RHT) (default: False)
             colwise_has_rht_applied: Whether the col-wise tensor uses the Randomized Hadamard Transform (RHT) (default: False)
+            pre_swizzled: Whether scale_inv is already swizzled (produced by V2 grouped quantize).
 
         Returns:
             Either a ScaledTensor1x or ScaledTensor2x instance depending on q_layout
@@ -876,6 +902,7 @@ class ScaledTensorFactory:
                 original_shape=original_shape,
                 rowwise_has_rht_applied=rowwise_has_rht_applied,
                 colwise_has_rht_applied=colwise_has_rht_applied,
+                pre_swizzled=pre_swizzled,
             )
 
         if q_layout.is_colwise_only:
@@ -892,6 +919,7 @@ class ScaledTensorFactory:
                 last_dims=last_dims,
                 original_shape=original_shape,
                 has_rht_applied=colwise_has_rht_applied,
+                pre_swizzled=pre_swizzled,
             )
 
         return ScaledTensorFactory.create_1x(
@@ -907,6 +935,7 @@ class ScaledTensorFactory:
             last_dims=last_dims,
             original_shape=original_shape,
             has_rht_applied=rowwise_has_rht_applied,
+            pre_swizzled=pre_swizzled,
         )
 
 

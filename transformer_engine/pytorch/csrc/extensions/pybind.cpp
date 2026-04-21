@@ -141,6 +141,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("otype"));
   m.def("group_quantize", transformer_engine::pytorch::group_quantize, py::arg("tensor"),
         py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"));
+  m.def("group_dequantize", transformer_engine::pytorch::group_dequantize,
+        "Dequantize group tensor", py::arg("input"), py::arg("otype"));
   m.def("bgrad_group_quantize", transformer_engine::pytorch::bgrad_group_quantize,
         py::arg("tensor"), py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"));
   m.def("bgrad_quantize", transformer_engine::pytorch::bgrad_quantize,
@@ -558,6 +560,17 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("multi_tensor_compute_scale_inv_e8m0",
         &transformer_engine::pytorch::multi_tensor_compute_scale_inv_e8m0_cuda,
         "Fused compute E8M0 scale_inv from amax", py::call_guard<py::gil_scoped_release>());
+
+  // Newton-Schulz (cuSolverMp)
+  m.def("cusolvermp_ctx_create", &transformer_engine::pytorch::cusolvermp_ctx_create,
+        "Create cuSolverMp context for Newton-Schulz", py::arg("nccl_comm_ptr"), py::arg("nranks"),
+        py::arg("rank"), py::call_guard<py::gil_scoped_release>());
+  m.def("cusolvermp_ctx_destroy", &transformer_engine::pytorch::cusolvermp_ctx_destroy,
+        "Destroy cuSolverMp context", py::arg("ctx_ptr"), py::call_guard<py::gil_scoped_release>());
+  m.def("newton_schulz", &transformer_engine::pytorch::newton_schulz,
+        "Newton-Schulz matrix orthogonalization", py::arg("ctx_ptr"), py::arg("m"), py::arg("n"),
+        py::arg("x"), py::arg("num_iterations"), py::arg("coefficients"),
+        py::call_guard<py::gil_scoped_release>());
 
   // Comm+GEMM Overlap
   m.def("bulk_overlap_ag_with_external_gemm",
