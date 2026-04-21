@@ -120,7 +120,7 @@ void CheckScaleTensorShape(const Tensor &t, const std::string &name) {
 
         const auto &expected = std::vector<size_t>{expected_x, expected_y};
         NVTE_CHECK(t.columnwise_scale_inv.shape == expected, "Tensor \"", name,
-                   "\"  has invalid columnwise_scale_inv shape (expected ", expected, ", got ",
+                   "\" has invalid columnwise_scale_inv shape (expected ", expected, ", got ",
                    t.columnwise_scale_inv.shape, ")");
       }
     } else if (t.scaling_mode == NVTE_NVFP4_1D_SCALING) {
@@ -144,7 +144,7 @@ void CheckScaleTensorShape(const Tensor &t, const std::string &name) {
   }
 }
 
-void CheckInputTensor(const Tensor &t, const std::string &name) {
+void CheckInputTensor(const Tensor &t, const std::string &name, bool check_scale_inv_shapes) {
   const DType type = t.dtype();
   if (is_fp8_dtype(type)) {
     // FP8 input needs to have scale_inv
@@ -195,7 +195,9 @@ void CheckInputTensor(const Tensor &t, const std::string &name) {
   }
   NVTE_CHECK(t.has_data() || t.has_columnwise_data(), "Input ", name, " is not allocated!");
 
-  CheckScaleTensorShape(t, name);
+  if (check_scale_inv_shapes) {
+    CheckScaleTensorShape(t, name);
+  }
 }
 
 void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empty) {
