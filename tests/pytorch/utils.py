@@ -149,6 +149,13 @@ def make_recipe(name: Optional[str], **recipe_kwargs: Any) -> Optional[Recipe]:
             disable_2d_quantization=True,
             **recipe_kwargs,
         )
+    if name == "nvfp4_pertoken":
+        return transformer_engine.common.recipe.NVFP4PerTokenBlockScaling(
+            disable_rht=True,
+            disable_stochastic_rounding=True,
+            disable_2d_quantization=True,
+            **recipe_kwargs,
+        )
     raise ValueError(f"Unsupported quantization scheme ({name})")
 
 

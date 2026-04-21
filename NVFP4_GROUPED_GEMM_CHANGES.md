@@ -148,7 +148,7 @@ No module-level changes needed — `grouped_linear.py` automatically respects th
 
 2. **FC2 input re-quantization overhead** — The MXFP8 path avoids re-quantization by having FC1 output SFD (scale factor D) directly in FP8 format. The NVFP4 path outputs BF16 from FC1 and re-quantizes to NVFP4 for FC2 input. This can be optimized by enabling `discrete_col_sfd=True` with NVFP4 output dtype in a future iteration.
 
-3. **Backward pass** — `global_scale_tensor` is forward-pass only. The backward kernels (`grouped_gemm_dglu`, `grouped_gemm_dswiglu`) do not yet support it. Backward falls back to the unfused path.
+3. **Backward pass** — By design, backward runs in higher precision (BF16) via `backward_override`, not with fused NVFP4 kernels. This matches the MXFP8 pattern from PR #2644.
 
 4. **No runtime overhead for existing MXFP8 path** — `enable_global_scale` is a compile-time constant (`cutlass.const_expr`). When `False`, the compiler eliminates dead branches entirely.
 

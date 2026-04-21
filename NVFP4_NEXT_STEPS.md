@@ -74,36 +74,15 @@ global_scale_tensor = grouped_fc1_x.per_token_global_scale.reshape(-1, 1, 1)
 - cuDNN kernel: verify FP4 output with SFD generation works (may already work, needs testing)
 - TE fused op: update FC2 input path to use FC1's SFD output instead of re-quantizing
 
-### 5. Backward Pass Kernels
+### 5. Backward Pass
 
-**Status:** Not implemented. Backward falls back to unfused path via `backward_override`.
+**Status:** By design, backward uses higher precision via `backward_override`.
 
-**What's needed for fused backward:**
-- Add `global_scale_tensor` to cuDNN `grouped_gemm_dglu_wrapper_sm100` (backward GLU kernel)
-- Add `global_scale_tensor` to cuDNN `grouped_gemm_dswiglu_wrapper_sm100` (backward SwiGLU kernel)
-- Same kernel pattern as the forward: `enable_global_scale` flag, per-token load in epilogue
-- Add `BackwardGroupedMLP_CuTeGEMMDSwiGLU_NVFP4` class in TE
-- Wire up backward fusion registration
+The `NVFP4PerTokenBlockScaling` recipe intentionally runs forward in NVFP4 for throughput and backward in BF16 for training stability. This is controlled by `backward_override`:
+- `"high_precision"`: saves original BF16 tensors for backward (more memory, best accuracy)
+- `"dequantized"`: dequantizes saved FP4 tensors to BF16 for backward (less memory, slightly less accurate)
 
-**Files (cuDNN Frontend):**
-- `python/cudnn/grouped_gemm/grouped_gemm_dglu/moe_blockscaled_grouped_gemm_dglu_dbias.py`
-- `python/cudnn/grouped_gemm/grouped_gemm_dglu/api.py`
-- `python/cudnn/grouped_gemm/grouped_gemm_dswiglu/grouped_gemm_dswiglu_quant.py`
-- `python/cudnn/grouped_gemm/grouped_gemm_dswiglu/api.py`
-
-**Files (TE):**
-- `transformer_engine/pytorch/ops/fused/backward_grouped_mlp.py`
-- `transformer_engine/pytorch/ops/fused/__init__.py`
-
-### 6. Weight Gradient Kernel
-
-**Status:** Not in scope yet
-
-The weight gradient path (`grouped_gemm_wgrad_wrapper_sm100`) also needs `global_scale_tensor` support if wgrad computation uses NVFP4-quantized activations.
-
-**File (cuDNN Frontend):**
-- `python/cudnn/grouped_gemm/grouped_gemm_wgrad/api.py`
-- `python/cudnn/grouped_gemm/grouped_gemm_wgrad/moe_blockscaled_grouped_gemm_wgrad.py`
+No fused NVFP4 backward kernels are needed. The unfused BF16 backward path handles gradient computation. This matches the pattern established by MXFP8 in PR #2644.
 
 ### 7. Tests
 
@@ -130,12 +109,7 @@ The weight gradient path (`grouped_gemm_wgrad_wrapper_sm100`) also needs `global
 7. Update `NVFP4Quantizer` to support per-token mode
 8. Update fused op to use real per-token global scales
 
-### Phase 3: Fused backward pass
-9. Add `global_scale_tensor` to backward cuDNN kernels (dglu, dswiglu)
-10. Add `BackwardGroupedMLP_CuTeGEMMDSwiGLU_NVFP4` in TE
-11. Remove `backward_override` requirement for NVFP4 fused path
-
-### Phase 4: Benchmarking and validation
-12. Benchmark per-token vs per-tensor NVFP4 on DeepSeek-V3 / Mixtral MoE workloads
-13. Compare training loss curves: NVFP4 per-token vs MXFP8 vs BF16
-14. Measure throughput: fused NVFP4 per-token vs unfused NVFP4 vs MXFP8 fused
+### Phase 3: Benchmarking and validation
+9. Benchmark per-token vs per-tensor NVFP4 on DeepSeek-V3 / Mixtral MoE workloads
+10. Compare training loss curves: NVFP4 per-token vs MXFP8 vs BF16
+11. Measure throughput: fused NVFP4 per-token vs unfused NVFP4 vs MXFP8 fused
