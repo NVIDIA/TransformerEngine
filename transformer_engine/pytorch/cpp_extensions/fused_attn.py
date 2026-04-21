@@ -18,7 +18,6 @@ from transformer_engine_torch import (
 from ..quantized_tensor import Quantizer
 from ..constants import FP8BwdTensorIdx, FP8FwdTensorIdx
 
-
 __all__ = [
     "fused_attn_fwd",
     "fused_attn_bwd",
@@ -98,11 +97,16 @@ FusedAttnBackend = {
     "F16_max512_seqlen": NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen,
     "F16_arbitrary_seqlen": NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
     "FP8": NVTE_Fused_Attn_Backend.NVTE_FP8,
+    # Python-only sentinel (no C++ counterpart). Set by ``get_attention_backend``
+    # when the cuDNN frontend CuTe-DSL d=256 SDPA path is applicable; checked
+    # in ``fused_attn_fwd`` / ``fused_attn_bwd`` to route to the Python kernel.
+    "F16_cudnn_fe_sdpa": "F16_cudnn_fe_sdpa",
     "No_Backend": NVTE_Fused_Attn_Backend.NVTE_No_Backend,
 }
 
 BACKEND_F16m512_FP8_THREADS_PER_CTA = 128
 BACKEND_F16arb_ELTS_PER_THREADS = 16
+
 
 META_QKV = FP8FwdTensorIdx.GEMM1_OUTPUT
 META_DQKV = FP8BwdTensorIdx.GRAD_OUTPUT1
@@ -280,6 +284,31 @@ def fused_attn_fwd(
                 "attn_bias tensor must have the same dtype as q and kv: "
                 f"attn_bias.dtype={attn_bias.dtype} but q.dtype={q.dtype}."
             )
+
+    # Route head_dim=256 on SM100+ through the cuDNN frontend Python SDPA (CuTe DSL).
+    # Eligibility was already decided in ``get_attention_backend``; a matching
+    # backend value here means "use the Python kernel".
+    if fused_attention_backend == FusedAttnBackend["F16_cudnn_fe_sdpa"]:
+        from ..attention.dot_product_attention import cudnn_fe_sdpa
+
+        qkv_format = qkv_layout.replace("3", "").replace("2", "").split("_")[0]
+        out, aux_ctx_tensors = cudnn_fe_sdpa.fused_attn_fwd(
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_kv=max_seqlen_kv,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_kv=cu_seqlens_kv,
+            q=q,
+            k=k,
+            v=v,
+            qkv_format=qkv_format,
+            attn_mask_type=attn_mask_type,
+            attn_scale=attn_scale,
+            window_size=window_size,
+        )
+        # ``is_supported`` rejects ``return_max_logit=True``, return None to make the linter happy
+        if return_max_logit:
+            return out, aux_ctx_tensors, None
+        return out, aux_ctx_tensors
 
     if fused_attention_backend == FusedAttnBackend["No_Backend"]:
         raise ValueError(
@@ -536,6 +565,30 @@ def fused_attn_bwd(
     if attn_scale is None:
         d = q.size(-1)
         attn_scale = 1.0 / math.sqrt(d)
+
+    # Route head_dim=256 on SM100+ through the cuDNN frontend Python SDPA backward.
+    # ``ctx.fused_attention_backend`` carries the sentinel forward-to-backward.
+    if fused_attention_backend == FusedAttnBackend["F16_cudnn_fe_sdpa"]:
+        from ..attention.dot_product_attention import cudnn_fe_sdpa
+
+        qkv_format = qkv_layout.replace("3", "").replace("2", "").split("_")[0]
+        dq, dk, dv = cudnn_fe_sdpa.fused_attn_bwd(
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_kv=max_seqlen_kv,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_kv=cu_seqlens_kv,
+            q=q,
+            k=k,
+            v=v,
+            o=o,
+            d_o=d_o,
+            aux_ctx_tensors=aux_ctx_tensors,
+            qkv_format=qkv_format,
+            attn_mask_type=attn_mask_type,
+            attn_scale=attn_scale,
+            window_size=window_size,
+        )
+        return dq, dk, dv
 
     if fused_attention_backend == FusedAttnBackend["No_Backend"]:
         raise ValueError(
