@@ -119,6 +119,7 @@ def topk(
     if squeezed:
         x = x[jnp.newaxis, :]  # (1, seq_len)
 
+    assert x.ndim == 2, f"topk expected 2D input tensor 'x' but {x.shape=}"
     batch_size, seq_len = x.shape
     lengths = jnp.full((batch_size,), seq_len, dtype=jnp.int32)
 
