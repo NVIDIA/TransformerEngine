@@ -240,7 +240,6 @@ class Float8TensorStorage(QuantizedTensorStorage):
         Generate or remove FP8 data based on provided usage. For
         FP8, data cannot be generated even if transpose is available.
         """
-
         has_data = self._data is not None
         has_data_transpose = self._transpose is not None and not self._transpose_invalid
         needs_data = has_data
