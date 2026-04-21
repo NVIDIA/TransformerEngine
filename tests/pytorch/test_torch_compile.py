@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 import abc
+import os
 
 import pytest
 import torch
@@ -33,6 +34,9 @@ from transformer_engine.pytorch import (
     is_nvfp4_available,
 )
 from utils import recipe_id
+from transformer_engine.pytorch.attention.dot_product_attention.backends import (
+    UnfusedDotProductAttention,
+)
 
 fp8_available, reason_for_no_fp8 = is_fp8_available(return_reason=True)
 mxfp8_available, reason_for_no_mxfp8 = is_mxfp8_available(return_reason=True)
@@ -363,3 +367,162 @@ def test_autocast_sanity(fp8_recipe):
 
     out = compiled(inp)
     out.sum().backward()
+
+
+
+_UNFUSED_DPA_CONFIG = dict(
+    batch_size=2,
+    num_heads=4,
+    head_dim=64,
+    max_seqlen_q=128,
+    max_seqlen_kv=128,
+)
+
+
+def _make_unfused_attention(dtype: torch.dtype) -> UnfusedDotProductAttention:
+    cfg = _UNFUSED_DPA_CONFIG
+    softmax_scale = cfg["head_dim"] ** -0.5
+    module = UnfusedDotProductAttention(
+        softmax_scale=softmax_scale,
+        attention_type="self",
+        attention_dropout=0.0,
+        layer_number=1,
+        softmax_type="vanilla",
+        return_max_logit=False,
+    )
+    return module.to(dtype=dtype, device="cuda")
+
+
+_EMPTY_ALIBI_CACHE = {
+    "_num_heads": None,
+    "_alibi_slopes": None,
+    "_max_seqlen_q": None,
+    "_max_seqlen_kv": None,
+    "_bottom_right_alignment": True,
+    "_alibi_bias": None,
+    "_alibi_slopes_require_update": False,
+    "_alibi_bias_require_update": False,
+}
+
+
+def _make_unfused_qkv(qkv_layout: str, dtype: torch.dtype, requires_grad: bool = True):
+    """Build (q, k, v) tensors matching `qkv_layout`. Returns also the
+    extra kwargs (`cu_seqlens_*`, `max_seqlen_*`) that the unfused module
+    needs for `thd` layouts (empty dict otherwise)."""
+    cfg = _UNFUSED_DPA_CONFIG
+    b, s_q, s_kv = cfg["batch_size"], cfg["max_seqlen_q"], cfg["max_seqlen_kv"]
+    h, d = cfg["num_heads"], cfg["head_dim"]
+    qkv_format = "".join(c for c in qkv_layout.split("_")[0] if c.isalpha())
+
+    extra: dict = {}
+
+    def _separate(shape):
+        return tuple(
+            torch.randn(shape, dtype=dtype, device="cuda", requires_grad=requires_grad)
+            for _ in range(3)
+        )
+
+    if qkv_layout == "bshd_bshd_bshd":
+        q, k, v = _separate((b, s_q, h, d))
+    elif qkv_layout == "sbhd_sbhd_sbhd":
+        q, k, v = _separate((s_q, b, h, d))
+    elif qkv_layout == "thd_thd_thd":
+        # All sequences in the batch have the maximum length; no padding.
+        cu = torch.arange(0, (b + 1) * s_q, step=s_q, dtype=torch.int32, device="cuda")
+        q, k, v = _separate((b * s_q, h, d))
+        extra = dict(
+            cu_seqlens_q=cu,
+            cu_seqlens_kv=cu,
+            max_seqlen_q=s_q,
+            max_seqlen_kv=s_kv,
+        )
+    elif qkv_layout == "bs3hd":
+        # Packed: shape (b, s, 3, h, d), q/k/v are views along dim=-3.
+        qkv = torch.randn(
+            (b, s_q, 3, h, d),
+            dtype=dtype,
+            device="cuda",
+            requires_grad=requires_grad,
+        )
+        q, k, v = qkv[:, :, 0], qkv[:, :, 1], qkv[:, :, 2]
+        # q/k/v are non-leaf views; retain their grads so the assertions in
+        # the test (`q.grad is not None` etc.) work for packed layouts.
+        if requires_grad:
+            for t in (q, k, v):
+                t.retain_grad()
+    elif qkv_layout == "sbh3d":
+        # Packed: shape (s, b, h, 3, d), q/k/v are views along dim=-2.
+        qkv = torch.randn(
+            (s_q, b, h, 3, d),
+            dtype=dtype,
+            device="cuda",
+            requires_grad=requires_grad,
+        )
+        q, k, v = qkv[:, :, :, 0], qkv[:, :, :, 1], qkv[:, :, :, 2]
+        if requires_grad:
+            for t in (q, k, v):
+                t.retain_grad()
+    else:
+        raise ValueError(f"Unsupported qkv_layout in test: {qkv_layout}")
+
+    return q, k, v, extra, qkv_format
+
+
+def _call_unfused(
+    module: UnfusedDotProductAttention,
+    qkv_layout: str,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    extra: dict,
+) -> torch.Tensor:
+    return module(
+        _EMPTY_ALIBI_CACHE,
+        q,
+        k,
+        v,
+        qkv_layout=qkv_layout,
+        attn_mask_type="causal",
+        **extra,
+    )
+
+
+@pytest.mark.parametrize(
+    "qkv_layout",
+    [
+        "bshd_bshd_bshd",
+        "sbhd_sbhd_sbhd",
+        "thd_thd_thd",
+        "bs3hd",
+        "sbh3d",
+    ],
+)
+def test_unfused_dpa_torch_compile(qkv_layout):
+    """Compile UnfusedDotProductAttention.forward with
+    `torch.compile(fullgraph=True, mode="reduce-overhead")` for several
+    qkv layouts.
+
+    - `fullgraph=True` makes the test fail on any graph break inside the
+      unfused attention path.
+    - `mode="reduce-overhead"` uses the inductor cudagraphs backend, so
+      forward+backward are captured into CUDA graphs and replayed on
+      subsequent iterations."""
+    dtype = torch.bfloat16
+
+    module = _make_unfused_attention(dtype)
+
+    def fn(q, k, v, extra):
+        return _call_unfused(module, qkv_layout, q, k, v, extra)
+
+    torch._dynamo.reset()
+    compiled = torch.compile(fn, fullgraph=True, mode="reduce-overhead")
+
+    for _ in range(3):
+        q, k, v, extra, _ = _make_unfused_qkv(qkv_layout, dtype, requires_grad=True)
+        out = compiled(q, k, v, extra)
+        out.sum().backward()
+        torch.cuda.synchronize()
+        assert torch.isfinite(out).all()
+        assert q.grad is not None
+        assert k.grad is not None
+        assert v.grad is not None

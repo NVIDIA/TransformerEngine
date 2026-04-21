@@ -52,15 +52,20 @@ at::Tensor scaled_softmax_backward(at::Tensor output_grad_, at::Tensor softmax_r
                  (softmax_results.scalar_type() == at::ScalarType::BFloat16),
              "Only fp16 and bf16 are supported");
 
+  // Allocate a fresh output buffer so the op does not alias / mutate its
+  // inputs (required by `torch.library.custom_op`).
+  auto input_grads =
+      torch::empty(output_grads.sizes(), output_grads.options().requires_grad(false));
+
   auto output_grads_cu = makeTransformerEngineTensor(output_grads);
   auto softmax_results_cu = makeTransformerEngineTensor(softmax_results);
+  auto input_grads_cu = makeTransformerEngineTensor(input_grads);
 
-  // Produce gradients in place.
   nvte_scaled_softmax_backward(output_grads_cu.data(), softmax_results_cu.data(),
-                               output_grads_cu.data(), scale_factor,
+                               input_grads_cu.data(), scale_factor,
                                at::cuda::getCurrentCUDAStream());
 
-  return output_grads;
+  return input_grads;
 }
 
 at::Tensor scaled_masked_softmax_forward(at::Tensor input, at::Tensor mask, float scale_factor) {
@@ -115,15 +120,20 @@ at::Tensor scaled_masked_softmax_backward(at::Tensor output_grad_, at::Tensor so
                  (softmax_results.scalar_type() == at::ScalarType::BFloat16),
              "Only fp16 and bf16 are supported");
 
+  // Allocate a fresh output buffer so the op does not alias / mutate its
+  // inputs (required by `torch.library.custom_op`).
+  auto input_grads =
+      torch::empty(output_grads.sizes(), output_grads.options().requires_grad(false));
+
   auto output_grads_cu = makeTransformerEngineTensor(output_grads);
   auto softmax_results_cu = makeTransformerEngineTensor(softmax_results);
+  auto input_grads_cu = makeTransformerEngineTensor(input_grads);
 
-  // Produce gradients in place.
   nvte_scaled_softmax_backward(output_grads_cu.data(), softmax_results_cu.data(),
-                               output_grads_cu.data(), scale_factor,
+                               input_grads_cu.data(), scale_factor,
                                at::cuda::getCurrentCUDAStream());
 
-  return output_grads;
+  return input_grads;
 }
 
 at::Tensor scaled_upper_triang_masked_softmax_forward(at::Tensor input, float scale_factor) {
@@ -167,15 +177,20 @@ at::Tensor scaled_upper_triang_masked_softmax_backward(at::Tensor output_grads_,
 
   TORCH_CHECK(output_grads.size(1) == output_grads.size(2));
 
+  // Allocate a fresh output buffer so the op does not alias / mutate its
+  // inputs (required by `torch.library.custom_op`).
+  auto input_grads =
+      torch::empty(output_grads.sizes(), output_grads.options().requires_grad(false));
+
   auto output_grads_cu = makeTransformerEngineTensor(output_grads);
   auto softmax_results_cu = makeTransformerEngineTensor(softmax_results);
+  auto input_grads_cu = makeTransformerEngineTensor(input_grads);
 
-  // Produce gradients in place.
   nvte_scaled_upper_triang_masked_softmax_backward(
-      output_grads_cu.data(), softmax_results_cu.data(), output_grads_cu.data(), scale_factor,
+      output_grads_cu.data(), softmax_results_cu.data(), input_grads_cu.data(), scale_factor,
       at::cuda::getCurrentCUDAStream());
 
-  return output_grads;
+  return input_grads;
 }
 
 at::Tensor scaled_aligned_causal_masked_softmax_forward(at::Tensor input, float scale_factor) {
@@ -223,15 +238,20 @@ at::Tensor scaled_aligned_causal_masked_softmax_backward(at::Tensor output_grad_
                  (softmax_results.scalar_type() == at::ScalarType::BFloat16),
              "Only fp16 and bf16 are supported");
 
+  // Allocate a fresh output buffer so the op does not alias / mutate its
+  // inputs (required by `torch.library.custom_op`).
+  auto input_grads =
+      torch::empty(output_grads.sizes(), output_grads.options().requires_grad(false));
+
   auto output_grads_cu = makeTransformerEngineTensor(output_grads);
   auto softmax_results_cu = makeTransformerEngineTensor(softmax_results);
+  auto input_grads_cu = makeTransformerEngineTensor(input_grads);
 
-  // Produce gradients in place.
   nvte_scaled_aligned_causal_masked_softmax_backward(
-      output_grads_cu.data(), softmax_results_cu.data(), output_grads_cu.data(), scale_factor,
+      output_grads_cu.data(), softmax_results_cu.data(), input_grads_cu.data(), scale_factor,
       at::cuda::getCurrentCUDAStream());
 
-  return output_grads;
+  return input_grads;
 }
 
 }  // namespace transformer_engine::pytorch

@@ -4,7 +4,7 @@
 
 """Fused scaled masked softmax functions"""
 import os
-from typing import Callable, Tuple, Union, Optional
+from typing import Callable, Optional
 import torch
 from torch import nn
 import transformer_engine_torch as tex
@@ -13,6 +13,234 @@ from transformer_engine.pytorch.export import is_in_onnx_export_mode
 
 THREADS_PER_WARP = 32
 THREADS_PER_BLOCK = 128
+
+
+_default_causal_mask = {}
+
+
+def _scale_to_tensor(scale: float) -> torch.Tensor:
+    """Wrap a Python float in a 0-D tensor expected by the tex kernels."""
+    return torch.tensor([scale])[0]
+
+
+# ----------------------------- ScaledSoftmax -------------------------------
+
+
+@torch.library.custom_op("te_softmax::scaled_softmax_fwd", mutates_args=())
+def scaled_softmax_forward(inputs: torch.Tensor, scale: float) -> torch.Tensor:
+    """Forward pass for ScaledSoftmax."""
+    return tex.scaled_softmax_forward(inputs, _scale_to_tensor(scale))
+
+
+@scaled_softmax_forward.register_fake
+def _scaled_softmax_forward_fake(inputs: torch.Tensor, scale: float) -> torch.Tensor:
+    del scale
+    return torch.empty_like(inputs)
+
+
+@torch.library.custom_op("te_softmax::scaled_softmax_bwd", mutates_args=())
+def scaled_softmax_backward(
+    output_grads: torch.Tensor, softmax_results: torch.Tensor, scale: float
+) -> torch.Tensor:
+    """Backward pass for ScaledSoftmax."""
+    return tex.scaled_softmax_backward(output_grads, softmax_results, _scale_to_tensor(scale))
+
+
+@scaled_softmax_backward.register_fake
+def _scaled_softmax_backward_fake(
+    output_grads: torch.Tensor, softmax_results: torch.Tensor, scale: float
+) -> torch.Tensor:
+    del softmax_results, scale
+    return torch.empty_like(output_grads)
+
+
+def _scaled_softmax_setup_context(ctx, inputs, output):
+    _inp, scale = inputs
+    ctx.scale = scale
+    ctx.save_for_backward(output)
+
+
+def _scaled_softmax_backward_wrapper(ctx, grad_output):
+    (softmax_results,) = ctx.saved_tensors
+    grad_inputs = torch.ops.te_softmax.scaled_softmax_bwd(grad_output, softmax_results, ctx.scale)
+    return grad_inputs, None
+
+
+scaled_softmax_forward.register_autograd(
+    _scaled_softmax_backward_wrapper,
+    setup_context=_scaled_softmax_setup_context,
+)
+
+
+# --------------------------- ScaledMaskedSoftmax ---------------------------
+
+
+@torch.library.custom_op("te_softmax::scaled_masked_softmax_fwd", mutates_args=())
+def scaled_masked_softmax_forward(
+    inputs: torch.Tensor, mask: torch.Tensor, scale: float
+) -> torch.Tensor:
+    """Forward pass for ScaledMaskedSoftmax."""
+    return tex.scaled_masked_softmax_forward(inputs, mask, _scale_to_tensor(scale))
+
+
+@scaled_masked_softmax_forward.register_fake
+def _scaled_masked_softmax_forward_fake(
+    inputs: torch.Tensor, mask: torch.Tensor, scale: float
+) -> torch.Tensor:
+    del mask, scale
+    return torch.empty_like(inputs)
+
+
+@torch.library.custom_op("te_softmax::scaled_masked_softmax_bwd", mutates_args=())
+def scaled_masked_softmax_backward(
+    output_grads: torch.Tensor, softmax_results: torch.Tensor, scale: float
+) -> torch.Tensor:
+    """Backward pass for ScaledMaskedSoftmax."""
+    return tex.scaled_masked_softmax_backward(
+        output_grads, softmax_results, _scale_to_tensor(scale)
+    )
+
+
+@scaled_masked_softmax_backward.register_fake
+def _scaled_masked_softmax_backward_fake(
+    output_grads: torch.Tensor, softmax_results: torch.Tensor, scale: float
+) -> torch.Tensor:
+    del softmax_results, scale
+    return torch.empty_like(output_grads)
+
+
+def _scaled_masked_softmax_setup_context(ctx, inputs, output):
+    _inp, _mask, scale = inputs
+    ctx.scale = scale
+    ctx.save_for_backward(output)
+
+
+def _scaled_masked_softmax_backward_wrapper(ctx, grad_output):
+    (softmax_results,) = ctx.saved_tensors
+    grad_inputs = torch.ops.te_softmax.scaled_masked_softmax_bwd(
+        grad_output, softmax_results, ctx.scale
+    )
+    return grad_inputs, None, None
+
+
+scaled_masked_softmax_forward.register_autograd(
+    _scaled_masked_softmax_backward_wrapper,
+    setup_context=_scaled_masked_softmax_setup_context,
+)
+
+
+# ---------------------- ScaledUpperTriangMaskedSoftmax ----------------------
+
+
+@torch.library.custom_op("te_softmax::scaled_upper_triang_masked_softmax_fwd", mutates_args=())
+def scaled_upper_triang_masked_softmax_forward(
+    inputs: torch.Tensor, scale: float
+) -> torch.Tensor:
+    """Forward pass for ScaledUpperTriangMaskedSoftmax."""
+    return tex.scaled_upper_triang_masked_softmax_forward(inputs, _scale_to_tensor(scale))
+
+
+@scaled_upper_triang_masked_softmax_forward.register_fake
+def _scaled_upper_triang_masked_softmax_forward_fake(
+    inputs: torch.Tensor, scale: float
+) -> torch.Tensor:
+    del scale
+    return torch.empty_like(inputs)
+
+
+@torch.library.custom_op("te_softmax::scaled_upper_triang_masked_softmax_bwd", mutates_args=())
+def scaled_upper_triang_masked_softmax_backward(
+    output_grads: torch.Tensor, softmax_results: torch.Tensor, scale: float
+) -> torch.Tensor:
+    """Backward pass for ScaledUpperTriangMaskedSoftmax."""
+    return tex.scaled_upper_triang_masked_softmax_backward(
+        output_grads, softmax_results, _scale_to_tensor(scale)
+    )
+
+
+@scaled_upper_triang_masked_softmax_backward.register_fake
+def _scaled_upper_triang_masked_softmax_backward_fake(
+    output_grads: torch.Tensor, softmax_results: torch.Tensor, scale: float
+) -> torch.Tensor:
+    del softmax_results, scale
+    return torch.empty_like(output_grads)
+
+
+def _scaled_upper_triang_masked_softmax_setup_context(ctx, inputs, output):
+    _inp, scale = inputs
+    ctx.scale = scale
+    ctx.save_for_backward(output)
+
+
+def _scaled_upper_triang_masked_softmax_backward_wrapper(ctx, grad_output):
+    (softmax_results,) = ctx.saved_tensors
+    grad_inputs = torch.ops.te_softmax.scaled_upper_triang_masked_softmax_bwd(
+        grad_output, softmax_results, ctx.scale
+    )
+    return grad_inputs, None
+
+
+scaled_upper_triang_masked_softmax_forward.register_autograd(
+    _scaled_upper_triang_masked_softmax_backward_wrapper,
+    setup_context=_scaled_upper_triang_masked_softmax_setup_context,
+)
+
+
+# -------------------- ScaledAlignedCausalMaskedSoftmax ---------------------
+
+
+@torch.library.custom_op("te_softmax::scaled_aligned_causal_masked_softmax_fwd", mutates_args=())
+def scaled_aligned_causal_masked_softmax_forward(
+    inputs: torch.Tensor, scale: float
+) -> torch.Tensor:
+    """Forward pass for ScaledAlignedCausalMaskedSoftmax."""
+    return tex.scaled_aligned_causal_masked_softmax_forward(inputs, _scale_to_tensor(scale))
+
+
+@scaled_aligned_causal_masked_softmax_forward.register_fake
+def _scaled_aligned_causal_masked_softmax_forward_fake(
+    inputs: torch.Tensor, scale: float
+) -> torch.Tensor:
+    del scale
+    return torch.empty_like(inputs)
+
+
+@torch.library.custom_op("te_softmax::scaled_aligned_causal_masked_softmax_bwd", mutates_args=())
+def scaled_aligned_causal_masked_softmax_backward(
+    output_grads: torch.Tensor, softmax_results: torch.Tensor, scale: float
+) -> torch.Tensor:
+    """Backward pass for ScaledAlignedCausalMaskedSoftmax."""
+    return tex.scaled_aligned_causal_masked_softmax_backward(
+        output_grads, softmax_results, _scale_to_tensor(scale)
+    )
+
+
+@scaled_aligned_causal_masked_softmax_backward.register_fake
+def _scaled_aligned_causal_masked_softmax_backward_fake(
+    output_grads: torch.Tensor, softmax_results: torch.Tensor, scale: float
+) -> torch.Tensor:
+    del softmax_results, scale
+    return torch.empty_like(output_grads)
+
+
+def _scaled_aligned_causal_masked_softmax_setup_context(ctx, inputs, output):
+    _inp, scale = inputs
+    ctx.scale = scale
+    ctx.save_for_backward(output)
+
+
+def _scaled_aligned_causal_masked_softmax_backward_wrapper(ctx, grad_output):
+    (softmax_results,) = ctx.saved_tensors
+    grad_inputs = torch.ops.te_softmax.scaled_aligned_causal_masked_softmax_bwd(
+        grad_output, softmax_results, ctx.scale
+    )
+    return grad_inputs, None
+
+
+scaled_aligned_causal_masked_softmax_forward.register_autograd(
+    _scaled_aligned_causal_masked_softmax_backward_wrapper,
+    setup_context=_scaled_aligned_causal_masked_softmax_setup_context,
+)
 
 
 _default_causal_mask = {}
@@ -33,112 +261,6 @@ def _get_default_causal_mask(mask_type: str, sq: int, sk: int) -> torch.Tensor:
     if matrix_identifiers not in _default_causal_mask:
         _default_causal_mask[matrix_identifiers] = _get_mask()
     return _default_causal_mask[matrix_identifiers]
-
-
-class ScaledUpperTriangMaskedSoftmax(torch.autograd.Function):
-    """
-    Fused operation which performs following three operations in sequence
-    1. Scale the tensor.
-    2. Apply upper triangular mask (typically used in gpt models).
-    3. Perform softmax.
-    """
-
-    @staticmethod
-    def forward(ctx, inputs: torch.Tensor, scale: float) -> torch.Tensor:
-        """ScaledUpperTriangMaskedSoftmax fwd"""
-        scale_t = torch.tensor([scale])
-        softmax_results = tex.scaled_upper_triang_masked_softmax_forward(inputs, scale_t[0])
-
-        ctx.save_for_backward(softmax_results, scale_t)
-        return softmax_results
-
-    @staticmethod
-    def backward(ctx, output_grads: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
-        """ScaledUpperTriangMaskedSoftmax bwd"""
-        softmax_results, scale_t = ctx.saved_tensors
-        input_grads = tex.scaled_upper_triang_masked_softmax_backward(
-            output_grads, softmax_results, scale_t[0]
-        )
-
-        return input_grads, None
-
-
-class ScaledAlignedCausalMaskedSoftmax(torch.autograd.Function):
-    """
-    Fused operation which performs following three operations in sequence
-    1. Scale the tensor.
-    2. Apply causal mask aligned to the bottom right corner of the input matrix
-    3. Perform softmax.
-    """
-
-    @staticmethod
-    def forward(ctx, inputs: torch.Tensor, scale: float) -> torch.Tensor:
-        """ScaledAlignedCausalMaskedSoftmax fwd"""
-        scale_t = torch.tensor([scale])
-        softmax_results = tex.scaled_aligned_causal_masked_softmax_forward(inputs, scale_t[0])
-        ctx.save_for_backward(softmax_results, scale_t)
-        return softmax_results
-
-    @staticmethod
-    def backward(ctx, output_grads: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
-        """ScaledAlignedCausalMaskedSoftmax bwd"""
-        softmax_results, scale_t = ctx.saved_tensors
-        input_grads = tex.scaled_aligned_causal_masked_softmax_backward(
-            output_grads, softmax_results, scale_t[0]
-        )
-
-        return input_grads, None
-
-
-class ScaledMaskedSoftmax(torch.autograd.Function):
-    """
-    Fused operation which performs following three operations in sequence
-    1. Scale the tensor.
-    2. Apply the mask.
-    3. Perform softmax.
-    """
-
-    @staticmethod
-    def forward(ctx, inputs: torch.Tensor, mask: torch.Tensor, scale: float) -> torch.Tensor:
-        """ScaledMaskedSoftmax fwd"""
-        scale_t = torch.tensor([scale])
-
-        softmax_results = tex.scaled_masked_softmax_forward(inputs, mask, scale_t[0])
-        ctx.save_for_backward(softmax_results, scale_t)
-        return softmax_results
-
-    @staticmethod
-    def backward(ctx, output_grads: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
-        """ScaledMaskedSoftmax bwd"""
-        softmax_results, scale_t = ctx.saved_tensors
-
-        input_grads = tex.scaled_masked_softmax_backward(output_grads, softmax_results, scale_t[0])
-        return input_grads, None, None
-
-
-class ScaledSoftmax(torch.autograd.Function):
-    """
-    Fused operation which performs following two operations in sequence
-    1. Scale the tensor.
-    2. Perform softmax.
-    """
-
-    @staticmethod
-    def forward(ctx, inputs: torch.Tensor, scale: float) -> torch.Tensor:
-        """ScaledSoftmax fwd"""
-        scale_t = torch.tensor([scale])
-
-        softmax_results = tex.scaled_softmax_forward(inputs, scale_t[0])
-        ctx.save_for_backward(softmax_results, scale_t)
-        return softmax_results
-
-    @staticmethod
-    def backward(ctx, output_grads: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
-        """ScaledSoftmax bwd"""
-        softmax_results, scale_t = ctx.saved_tensors
-
-        input_grads = tex.scaled_softmax_backward(output_grads, softmax_results, scale_t[0])
-        return input_grads, None, None
 
 
 class FusedScaleMaskSoftmax(nn.Module):
@@ -234,16 +356,16 @@ class FusedScaleMaskSoftmax(nn.Module):
           padding, padding_causal, padding_causal_bottom_right | ScaledMaskedSoftmax
           arbitrary ([1, 1, sq, sk] or [b, 1, sq, sk])         | ScaledMaskedSoftmax
         """
-        scale = 1.0 if scale is None else scale
+        scale = 1.0 if scale is None else float(scale)
 
         # Disable for now until unalignment bug is fixed.
         # if self.attn_mask_type in ["causal", "causal_bottom_right"]:
-        #    return ScaledAlignedCausalMaskedSoftmax.apply(inp, scale)
+        #    return torch.ops.te_softmax.scaled_aligned_causal_masked_softmax_fwd(inp, scale)
 
         # input is 4D tensor (1, 1, sq, sk) or (b, 1, sq, sk)
         if mask is not None and self.attn_mask_type != "no_mask":
-            return ScaledMaskedSoftmax.apply(inp, mask, scale)
-        return ScaledSoftmax.apply(inp, scale)
+            return torch.ops.te_softmax.scaled_masked_softmax_fwd(inp, mask, scale)
+        return torch.ops.te_softmax.scaled_softmax_fwd(inp, scale)
 
     def forward_torch_softmax(
         self, inp: torch.Tensor, mask: torch.Tensor, scale: Optional[float] = None
