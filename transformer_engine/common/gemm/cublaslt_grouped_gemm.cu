@@ -1424,8 +1424,8 @@ void launch_grouped_bias_add(const transformer_engine::GroupedTensor *outputD,
   const int kVec = (elem_size <= 2) ? 8 : 4;
   NVTE_CHECK(n % kVec == 0, api_name, ": requires last dim divisible by ", kVec);
 
-  constexpr int kRowsPerBlock = 8;
-  constexpr int kBlocksPerSM = 16;
+  constexpr int kRowsPerBlock = 16;
+  constexpr int kBlocksPerSM = 32;
 
   const int num_sms = transformer_engine::cuda::sm_count();
 
