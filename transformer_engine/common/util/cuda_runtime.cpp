@@ -117,6 +117,11 @@ bool supports_multicast(int device_id) {
   }
   NVTE_CHECK(0 <= device_id && device_id < num_devices(), "invalid CUDA device ID");
   auto init = [&]() {
+    // Multicast requires Hopper (SM 9.0) or newer
+    if (sm_arch(device_id) < 90) {
+      cache[device_id] = false;
+      return;
+    }
     CUdevice cudev;
     NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGet, &cudev, device_id);
     // Multicast support requires both CUDA12.1 UMD + KMD
@@ -128,7 +133,26 @@ bool supports_multicast(int device_id) {
       NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGetAttribute, &result,
                                   CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED, cudev);
     }
-    cache[device_id] = static_cast<bool>(result);
+    if (!result) {
+      cache[device_id] = false;
+      return;
+    }
+
+    // Verify NVLink/NVSwitch topology by testing multicast granularity query
+    // This will fail if NVLink is not properly configured or devices are not in the same domain
+    CUmulticastObjectProp testProp = {};
+    testProp.numDevices = 1;
+    testProp.size = 4096;  // 4KB test size
+    testProp.handleTypes = CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
+    size_t gran;
+    CUresult gran_result = cuda_driver::call("cuMulticastGetGranularity", &gran, &testProp,
+                                             CU_MULTICAST_GRANULARITY_RECOMMENDED);
+    if (gran_result != CUDA_SUCCESS) {
+      cache[device_id] = false;
+      return;
+    }
+
+    cache[device_id] = true;
   };
   std::call_once(flags[device_id], init);
   return cache[device_id];
