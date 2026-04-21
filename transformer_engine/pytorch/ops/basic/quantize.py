@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -9,7 +9,7 @@ from typing import Optional
 
 import torch
 
-from ...fp8 import FP8GlobalStateManager
+from ...quantization import FP8GlobalStateManager
 from .._common import is_quantized_tensor
 from ..op import BasicOperation, OperationContext
 from ...tensor import Quantizer
@@ -18,14 +18,14 @@ from ...tensor import Quantizer
 class Quantize(BasicOperation):
     """Quantize tensor data
 
-    Uses FP8 recipe from `fp8_autocast` context. When called outside
-    of an `fp8_autocast` context, this is an identity operation.
+    Uses recipe from ``autocast`` context. When called outside
+    of an ``autocast`` context, this is an identity operation.
 
     Parameters
     ----------
-    forward: bool, default = `True`
+    forward : bool, default = True
         Perform quantization in forward pass
-    backward: bool, default = `False`
+    backward : bool, default = False
         Perform quantization in backward pass
 
     """
@@ -58,6 +58,11 @@ class Quantize(BasicOperation):
         fp8_enabled = FP8GlobalStateManager.is_fp8_enabled()
         quantize_forward = fp8_enabled and self._quantize_forward
         quantize_backward = fp8_enabled and self._quantize_backward
+
+        # Backward quantization is controlled by recipe backward override.
+        if fp8_enabled:
+            recipe = FP8GlobalStateManager.get_fp8_recipe()
+            quantize_backward = quantize_backward and recipe.backward_override is None
 
         # Quantize if needed
         out = input_

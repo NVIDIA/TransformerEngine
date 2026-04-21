@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -15,10 +15,10 @@ from transformer_engine.pytorch.ops.fuser import OperationFuser
 
 
 class Sequential(torch.nn.Module):
-    """Sequential container for fusible operations
+    """Sequential container for fusible operations.
 
-    This is a drop-in replacement for `torch.nn.Sequential`, with
-    support for fusing `FusibleOperation`s.
+    This is a drop-in replacement for ``torch.nn.Sequential`` with
+    support for fusing ``FusibleOperation`` s.
 
     Parameters
     ----------

@@ -1,10 +1,11 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
 """Fused optimizers and multi-tensor kernels."""
 from transformer_engine_torch import (
     multi_tensor_scale,
+    multi_tensor_scale_tensor,
     multi_tensor_l2norm,
     multi_tensor_unscale_l2norm,
     multi_tensor_adam,

@@ -1,25 +1,39 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
 """PyTorch related extensions."""
+
 import os
 from pathlib import Path
 
 import setuptools
 
-from .utils import all_files_in_dir, cuda_version, get_cuda_include_dirs, debug_build_enabled
+from .utils import (
+    all_files_in_dir,
+    cuda_version,
+    get_cuda_include_dirs,
+    debug_build_enabled,
+    setup_mpi_flags,
+)
 from typing import List
 
 
 def install_requirements() -> List[str]:
     """Install dependencies for TE/PyTorch extensions."""
-    return ["torch>=2.1", "einops", "onnxscript==0.3.1", "onnx"]
+    return ["torch>=2.1", "einops", "onnxscript", "onnx", "packaging", "pydantic", "nvdlfw-inspect"]
 
 
 def test_requirements() -> List[str]:
-    """Test dependencies for TE/JAX extensions."""
-    return ["numpy", "torchvision", "transformers"]
+    """Test dependencies for TE/PyTorch extensions."""
+    return [
+        "numpy",
+        "torchvision",
+        "transformers",
+        "torchao==0.13",
+        "onnxruntime",
+        "onnxruntime_extensions",
+    ]
 
 
 def setup_pytorch_extension(
@@ -60,13 +74,7 @@ def setup_pytorch_extension(
         if version < (12, 0):
             raise RuntimeError("Transformer Engine requires CUDA 12.0 or newer")
 
-    if bool(int(os.getenv("NVTE_UB_WITH_MPI", "0"))):
-        assert (
-            os.getenv("MPI_HOME") is not None
-        ), "MPI_HOME=/path/to/mpi must be set when compiling with NVTE_UB_WITH_MPI=1!"
-        mpi_path = Path(os.getenv("MPI_HOME"))
-        include_dirs.append(mpi_path / "include")
-        cxx_flags.append("-DNVTE_UB_WITH_MPI")
+    setup_mpi_flags(include_dirs, cxx_flags)
 
     library_dirs = []
     libraries = []

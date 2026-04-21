@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -8,12 +8,12 @@ from pathlib import Path
 
 import pytest
 import torch
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+import transformer_engine.pytorch as te
 
 """
     Distributed numerics tests
 
-    These tests test the numerical corectness of the TransformerEngine layers.
+    These tests test the numerical correctness of the TransformerEngine layers.
     Tests are parametrized by the layer and fp8 precision.
     One test consists of running multiple configurations from file run_numerics.py
     Such design is due to the fact the initialization of one test is long
@@ -26,11 +26,12 @@ from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 if torch.cuda.device_count() < 2:
     pytest.skip("Distributed training needs at least 2 GPUs.")
 
-fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
-mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
-fp8_block_scaling_available, reason_for_no_fp8_block_scaling = (
-    FP8GlobalStateManager.is_fp8_block_scaling_available()
+fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
+mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
+fp8_block_scaling_available, reason_for_no_fp8_block_scaling = te.is_fp8_block_scaling_available(
+    return_reason=True
 )
+nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available(return_reason=True)
 
 TEST_ROOT = Path(__file__).parent.resolve()
 NUM_PROCS: int = min(4, torch.cuda.device_count())
@@ -51,7 +52,9 @@ def _run_test(quantization):
 all_boolean = [True, False]
 
 
-@pytest.mark.parametrize("quantization", [None, "fp8", "mxfp8", "fp8_cs", "fp8_block_scaling"])
+@pytest.mark.parametrize(
+    "quantization", [None, "fp8", "mxfp8", "fp8_cs", "fp8_block_scaling", "nvfp4"]
+)
 def test_distributed(quantization):
     if quantization == "fp8" and not fp8_available:
         pytest.skip(reason_for_no_fp8)
@@ -61,4 +64,6 @@ def test_distributed(quantization):
         pytest.skip(reason_for_no_mxfp8)
     if quantization == "fp8_block_scaling" and not fp8_block_scaling_available:
         pytest.skip(reason_for_no_fp8_block_scaling)
+    if quantization == "nvfp4" and not nvfp4_available:
+        pytest.skip(reason_for_no_nvfp4)
     _run_test(quantization)

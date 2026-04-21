@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -8,14 +8,12 @@ import os
 import pathlib
 import pytest
 import torch
-import transformer_engine as te
-import transformer_engine_torch as tex
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+import transformer_engine.pytorch as te
 from transformer_engine.common.recipe import Float8BlockScaling
 from transformer_engine.pytorch.constants import TE_DType
-from transformer_engine.pytorch.tensor.float8_blockwise_tensor import (
+from transformer_engine.pytorch import (
     Float8BlockQuantizer,
-    Float8BlockwiseQTensor,
+    get_device_compute_capability,
 )
 from references.blockwise_quantizer_reference import (
     BlockwiseQuantizerReference,
@@ -31,7 +29,8 @@ TENSOR_DUMP_DIR = pathlib.Path(__file__).resolve().parent.parent.parent / "tenso
 tensor_dump_dir_env = os.getenv("NVTE_TEST_BLOCK_CURRENT_SCALING_EXACT_TENSOR_DUMP_DIR")
 if tensor_dump_dir_env is not None:
     TENSOR_DUMP_DIR = pathlib.Path(tensor_dump_dir_env)
-recipe_available, reason_for_no_recipe = FP8GlobalStateManager.is_fp8_block_scaling_available()
+recipe_available, reason_for_no_recipe = te.is_fp8_block_scaling_available(return_reason=True)
+recipe_emulated = get_device_compute_capability() >= (10, 0)
 
 
 class GetRecipes:
@@ -88,126 +87,6 @@ def initialize_for_many_scales(
     return result
 
 
-@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
-@pytest.mark.parametrize(
-    "M, N",
-    [
-        # full tile cases
-        (128, 128),
-        (256, 256),
-        (256, 1024),
-        (1024, 256),
-        # Padding required cases
-        (256, 272),
-        (303, 300),
-        (305, 256),
-        # Some larger tiles.
-        (2000, 2000),
-        (2048, 2000),
-        (2000, 1024),
-        (2048, 1024),
-    ],
-)
-@pytest.mark.parametrize("x_dtype", [torch.float32, torch.bfloat16], ids=str)
-@pytest.mark.parametrize("quant_dtype", [torch.float8_e4m3fn, torch.float8_e5m2], ids=str)
-@pytest.mark.parametrize("eps", [0], ids=["eps_0"])
-@pytest.mark.parametrize("pow_2_scales", [True], ids=["pow2scales"])
-def test_quantization_1D_block_tiling_with_compact_data_and_scales(
-    x_dtype: torch.dtype,
-    M: int,
-    N: int,
-    quant_dtype: torch.dtype,
-    eps: float,
-    pow_2_scales: bool,
-) -> None:
-    te_dtype = TE_DType[quant_dtype]
-    tile_size = (1, 128)
-    # This test runs a comparison of the ref class versus the class using
-    # CUDA kernels to quantize. They should quantize identically for pixels
-    # that are not DC values in the scale factor shape.
-    ref_quantizer = BlockwiseQuantizerReference()
-    sut_quantizer = Float8BlockQuantizer(
-        fp8_dtype=te_dtype,
-        rowwise=True,
-        columnwise=True,
-        amax_epsilon=eps,
-        force_pow_2_scales=pow_2_scales,
-        block_scaling_dim=1,
-        all_gather_usage=True,
-    )
-
-    # Setup device and random seed
-    device = "cuda"
-    seed = 0
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-
-    # Input
-    x = initialize_for_many_scales((M, N), tile_size, dtype=x_dtype, device=device)
-
-    x_fp8_sut = sut_quantizer.make_empty((M, N), dtype=x_dtype, device=device, requires_grad=False)
-    x_fp8_sut = sut_quantizer.update_quantized(x, x_fp8_sut)
-    x_fp8_sut_cpp_alloc = sut_quantizer(x)
-
-    assert x_fp8_sut._rowwise_data is not None
-    qx: torch.Tensor = x_fp8_sut._rowwise_data.view(dtype=quant_dtype)
-    assert x_fp8_sut._rowwise_scale_inv is not None
-    sx: torch.Tensor = x_fp8_sut._rowwise_scale_inv
-    qx_t = x_fp8_sut._columnwise_data
-    sx_t = x_fp8_sut._columnwise_scale_inv
-
-    qresult_ref = ref_quantizer.quantize(
-        x,
-        quant_dtype=quant_dtype,
-        return_transpose=True,
-        eps=eps,
-        pow_2_scales=pow_2_scales,
-        quant_tile_shape=tile_size,
-        munge_scale_shapes=False,
-    )
-    qx_ref, sx_ref, qx_t_ref, sx_t_ref = (
-        qresult_ref.data,
-        qresult_ref.scale,
-        qresult_ref.data_t,
-        qresult_ref.scale_t,
-    )
-
-    # match the reference quantize transpose output with the columnwise non-transpose method
-    qx_t_ref = qx_t_ref.transpose(-1, -2).contiguous()
-    sx_t_ref = sx_t_ref.transpose(-1, -2).contiguous()
-
-    # Check
-    torch.testing.assert_close(qx.float(), qx_ref.float(), atol=0.0, rtol=0.0)
-    torch.testing.assert_close(sx, sx_ref, atol=0.0, rtol=0.0)
-    assert qx_t is not None
-    qx_t = qx_t.view(dtype=quant_dtype)
-    assert qx_t_ref is not None
-    assert sx_t is not None
-    assert sx_t_ref is not None
-    torch.testing.assert_close(qx_t.float(), qx_t_ref.float(), atol=0.0, rtol=0.0)
-    torch.testing.assert_close(sx_t, sx_t_ref, atol=0.0, rtol=0.0)
-
-    # check that the C++ and Python allocators are equivalent
-    torch.testing.assert_close(
-        x_fp8_sut._rowwise_data, x_fp8_sut_cpp_alloc._rowwise_data, atol=0.0, rtol=0.0
-    )
-    torch.testing.assert_close(
-        x_fp8_sut._rowwise_scale_inv, x_fp8_sut_cpp_alloc._rowwise_scale_inv, atol=0.0, rtol=0.0
-    )
-    torch.testing.assert_close(
-        x_fp8_sut._columnwise_data, x_fp8_sut_cpp_alloc._columnwise_data, atol=0.0, rtol=0.0
-    )
-    torch.testing.assert_close(
-        x_fp8_sut._columnwise_scale_inv,
-        x_fp8_sut_cpp_alloc._columnwise_scale_inv,
-        atol=0.0,
-        rtol=0.0,
-    )
-
-    # check if the fp8 output between C++ and Python are the same
-    assert x_fp8_sut._data_format == x_fp8_sut_cpp_alloc._data_format
-
-
 def check_quantization_block_tiling_versus_reference(
     x_dtype: torch.dtype,
     M: int,
@@ -218,6 +97,12 @@ def check_quantization_block_tiling_versus_reference(
     pow_2_scales: bool,
     tile_size: Tuple[int, int],
 ) -> None:
+    if recipe_emulated and not pow_2_scales:
+        pytest.skip(
+            "On Blackwell and newer, the FP8 block scaling recipe is emulated "
+            "with MXFP8, which requires using power of two scaling factors."
+        )
+
     te_dtype = TE_DType[quant_dtype]
     if tile_size == (1, 128):
         block_scaling_dim = 1
@@ -409,6 +294,12 @@ def test_quantization_block_tiling_extrema_versus_reference(
     tile_size: Tuple[int, int],
     extrema_high: bool,
 ) -> None:
+    if recipe_emulated and not pow_2_scales:
+        pytest.skip(
+            "On Blackwell and newer, the FP8 block scaling recipe is emulated "
+            "with MXFP8, which requires using power of two scaling factors."
+        )
+
     # This test runs a single tile through a quantizer as a way to test
     # branch coverage of scale computation.
     te_dtype = TE_DType[quant_dtype]

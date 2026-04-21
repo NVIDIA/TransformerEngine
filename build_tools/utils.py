@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -12,10 +12,29 @@ import re
 import shutil
 import subprocess
 import sys
+import platform
 from pathlib import Path
-from importlib.metadata import version
+from importlib.metadata import version as get_version
 from subprocess import CalledProcessError
 from typing import List, Optional, Tuple, Union
+
+
+# Needs to stay consistent with .pre-commit-config.yaml config.
+def min_python_version() -> Tuple[int]:
+    """Minimum supported Python version."""
+    return (3, 10, 0)
+
+
+def min_python_version_str() -> str:
+    """String representing minimum supported Python version."""
+    return ".".join(map(str, min_python_version()))
+
+
+if sys.version_info < min_python_version():
+    raise RuntimeError(
+        f"Transformer Engine requires Python {min_python_version_str()} or newer, "
+        f"but found Python {platform.python_version()}."
+    )
 
 
 @functools.lru_cache(maxsize=None)
@@ -209,9 +228,10 @@ def nvcc_path() -> Tuple[str, str]:
 def get_cuda_include_dirs() -> Tuple[str, str]:
     """Returns the CUDA header directory."""
 
+    force_wheels = bool(int(os.getenv("NVTE_BUILD_USE_NVIDIA_WHEELS", "0")))
     # If cuda is installed via toolkit, all necessary headers
     # are bundled inside the top level cuda directory.
-    if cuda_toolkit_include_path() is not None:
+    if not force_wheels and cuda_toolkit_include_path() is not None:
         return [cuda_toolkit_include_path()]
 
     # Use pip wheels to include all headers.
@@ -220,29 +240,29 @@ def get_cuda_include_dirs() -> Tuple[str, str]:
     except ModuleNotFoundError as e:
         raise RuntimeError("CUDA not found.")
 
-    cuda_root = Path(nvidia.__file__).parent
+    if nvidia.__file__ is not None:
+        cuda_root = Path(nvidia.__file__).parent
+    else:
+        cuda_root = Path(nvidia.__path__[0])  # namespace
     return [
-        cuda_root / "cuda_nvcc" / "include",
-        cuda_root / "cublas" / "include",
-        cuda_root / "cuda_runtime" / "include",
-        cuda_root / "cudnn" / "include",
-        cuda_root / "cuda_cccl" / "include",
-        cuda_root / "nvtx" / "include",
-        cuda_root / "cuda_nvrtc" / "include",
+        subdir / "include"
+        for subdir in cuda_root.iterdir()
+        if subdir.is_dir() and (subdir / "include").is_dir()
     ]
 
 
 @functools.lru_cache(maxsize=None)
 def cuda_archs() -> str:
-    version = cuda_version()
-    if os.getenv("NVTE_CUDA_ARCHS") is None:
+    archs = os.getenv("NVTE_CUDA_ARCHS")
+    if archs is None:
+        version = cuda_version()
         if version >= (13, 0):
-            os.environ["NVTE_CUDA_ARCHS"] = "75;80;89;90;100;120"
+            archs = "75;80;89;90;100;120"
         elif version >= (12, 8):
-            os.environ["NVTE_CUDA_ARCHS"] = "70;80;89;90;100;120"
+            archs = "70;80;89;90;100;120"
         else:
-            os.environ["NVTE_CUDA_ARCHS"] = "70;80;89;90"
-    return os.getenv("NVTE_CUDA_ARCHS")
+            archs = "70;80;89;90"
+    return archs
 
 
 def cuda_version() -> Tuple[int, ...]:
@@ -269,7 +289,7 @@ def cuda_version() -> Tuple[int, ...]:
         return tuple(int(v) for v in version)
 
     try:
-        version_str = version("nvidia-cuda-runtime-cu12")
+        version_str = get_version("nvidia-cuda-runtime-cu12")
         version_tuple = tuple(int(part) for part in version_str.split(".") if part.isdigit())
         return version_tuple
     except importlib.metadata.PackageNotFoundError:
@@ -319,6 +339,17 @@ def get_frameworks() -> List[str]:
             raise ValueError(f"Transformer Engine does not support framework={framework}")
 
     return _frameworks
+
+
+def setup_mpi_flags(include_dirs: List, cxx_flags: List) -> None:
+    """Add MPI include path and compile definition if NVTE_UB_WITH_MPI is enabled."""
+    if bool(int(os.getenv("NVTE_UB_WITH_MPI", "0"))):
+        assert (
+            os.getenv("MPI_HOME") is not None
+        ), "MPI_HOME=/path/to/mpi must be set when compiling with NVTE_UB_WITH_MPI=1!"
+        mpi_path = Path(os.getenv("MPI_HOME"))
+        include_dirs.append(mpi_path / "include")
+        cxx_flags.append("-DNVTE_UB_WITH_MPI")
 
 
 def copy_common_headers(

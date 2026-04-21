@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -35,7 +35,7 @@ class MakeExtraOutput(BasicOperation):
     operations break some autograd assumptions and they can result
     in subtle, esoteric bugs.
 
-    Compare to `AddExtraInput`, which does a similar operation in the
+    Compare to ``AddExtraInput``, which does a similar operation in the
     backward pass.
 
     """

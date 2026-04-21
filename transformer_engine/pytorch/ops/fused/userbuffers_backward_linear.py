@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -14,13 +14,13 @@ from transformer_engine_torch import CommOverlapType, bulk_overlap_ag_with_exter
 from ...cpp_extensions import general_gemm
 from ...distributed import get_distributed_world_size
 from ...module.base import (
-    fill_userbuffers_buffer_for_all_gather,
-    get_ub,
-    get_workspace,
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
+    fill_userbuffers_buffer_for_all_gather,
+    get_dummy_wgrad,
+    get_ub,
 )
-from ...tensor.quantized_tensor import Quantizer
+from ...quantized_tensor import Quantizer
 from ...tensor.mxfp8_tensor import MXFP8Quantizer
 from ...utils import canonicalize_device, canonicalize_dtype, clear_tensor_data
 from ..basic import BasicLinear, Bias, ReduceScatter
@@ -125,18 +125,18 @@ class UserbuffersBackwardLinear(FusedOperation):
             Tensor datatype
         grad_weight: torch.Tensor, optional
             Loss gradient w.r.t. weight tensor
-        accumulate_into_grad_weight: bool, default = `False`
+        accumulate_into_grad_weight: bool, default = False
             Add result to weight grad instead of overwriting
-        tensor_parallel_mode: {`None`, "column", "row"}, default = `None`
+        tensor_parallel_mode: {None, "column", "row"}, default = None
             Mode for tensor parallelism
         tensor_parallel_group: torch.distributed.ProcessGroup, default = world group
             Process group for tensor parallelism
-        sequence_parallel: bool, default = `False`
+        sequence_parallel: bool, default = False
             Whether to apply sequence parallelism together with tensor
             parallelism, i.e. distributing input or output tensors
             along outer dimension (sequence or batch dim) when not
             distributing along inner dimension (embedding dim)
-        with_quantized_compute: bool, default = `False`
+        with_quantized_compute: bool, default = False
             Whether to perform compute with quantized data.
         input_quantizer: Quantizer, optional
             Builder class for quantized input tensor.
@@ -240,16 +240,16 @@ class UserbuffersBackwardLinear(FusedOperation):
         with_dgrad_all_gather_x = False
         with_wgrad_reduce_scatter_dx = False
         if tensor_parallel_mode == "row":
-            ub_comm_dgrad = get_ub(ub_comm_name + "_dgrad")
+            ub_comm_dgrad = get_ub(ub_comm_name + "_dgrad", with_quantized_compute)
             ub_type_dgrad = CommOverlapType.AG
             with_dgrad_all_gather_dy = True
         elif tensor_parallel_mode == "column":
             if input_requires_grad and weight_requires_grad:
                 with_bulk_overlap = True
-                ub_comm_dgrad = get_ub(ub_comm_name + "_dgrad")
+                ub_comm_dgrad = get_ub(ub_comm_name + "_dgrad", with_quantized_compute)
                 ub_type_dgrad = CommOverlapType.AG
                 with_dgrad_all_gather_x = True
-                ub_comm_wgrad = get_ub(ub_comm_name + "_wgrad")
+                ub_comm_wgrad = get_ub(ub_comm_name + "_wgrad", with_quantized_compute)
                 ub_type_wgrad = CommOverlapType.RS
                 with_wgrad_reduce_scatter_dx = True
                 if ub_comm_wgrad.is_fp8_ubuf():
@@ -257,7 +257,7 @@ class UserbuffersBackwardLinear(FusedOperation):
                         "Userbuffers reduce-scatter is not supported with FP8 buffers"
                     )
             else:
-                ub_comm_dgrad = get_ub(ub_comm_name + "_dgrad")
+                ub_comm_dgrad = get_ub(ub_comm_name + "_dgrad", with_quantized_compute)
                 ub_type_dgrad = CommOverlapType.RS
                 with_dgrad_reduce_scatter_dx = True
                 if ub_comm_dgrad.is_fp8_ubuf():
@@ -292,6 +292,7 @@ class UserbuffersBackwardLinear(FusedOperation):
                     rowwise=True,
                     columnwise=with_columnwise,
                 )
+                grad_output_quantizer.optimize_for_gemm = False
                 dy_local = grad_output_quantizer(dy_local)
         else:
             dy_local = maybe_dequantize(dy_local, dtype)
@@ -377,7 +378,6 @@ class UserbuffersBackwardLinear(FusedOperation):
             dx, *_ = general_gemm(
                 w,
                 dy,
-                get_workspace(),
                 out_dtype=dtype,
                 quantization_params=grad_input_quantizer,
                 layout="NN",
@@ -408,7 +408,7 @@ class UserbuffersBackwardLinear(FusedOperation):
                 # Get the communication stream from the dgrad GEMM to use for the AG
                 dgrad_send_stream, dgrad_recv_stream = ub_comm_dgrad.get_communication_stream()
 
-                ub_obj_overlap_wgrad = get_ub(ub_comm_name + "_wgrad")
+                ub_obj_overlap_wgrad = get_ub(ub_comm_name + "_wgrad", with_quantized_compute)
 
                 grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
 
@@ -463,7 +463,6 @@ class UserbuffersBackwardLinear(FusedOperation):
             dw, *_ = general_gemm(
                 x,
                 dy,
-                get_workspace(),
                 out_dtype=dw_dtype,
                 accumulate=accumulate_into_grad_weight,
                 layout="NT",
@@ -504,7 +503,7 @@ class UserbuffersBackwardLinear(FusedOperation):
         # Get basic operations
         idx = self._op_idxs["linear"]
         linear_op = self.basic_ops[idx]
-        linear_op_ctx = basic_op_ctxs[-1]
+        linear_op_ctx = basic_op_ctxs[0]
         bias_op = None
         if self._op_idxs["bias"] is not None:
             idx = self._op_idxs["bias"]
@@ -513,20 +512,23 @@ class UserbuffersBackwardLinear(FusedOperation):
         # Saved tensors from forward pass
         (x_local, w) = linear_op_ctx.saved_tensors
 
-        # wgrad fusion
+        # Megatron-LM wgrad fusion
+        # Note: Get grad tensor from param so we can accumulate
+        # directly into it.
         accumulate_into_main_grad = linear_op._accumulate_into_main_grad
         grad_weight = None
         if linear_op_ctx.weight_requires_grad and accumulate_into_main_grad:
-            if hasattr(linear_op.weight, "__fsdp_param__"):
-                linear_op.weight.main_grad = linear_op.weight.get_main_grad()
-
-            if not hasattr(linear_op.weight, "main_grad"):
+            weight_param = linear_op.weight
+            if hasattr(weight_param, "__fsdp_param__"):
+                weight_param.main_grad = weight_param.get_main_grad()
+            accumulate_into_main_grad = not getattr(weight_param, "overwrite_main_grad", False)
+            if not hasattr(weight_param, "main_grad"):
                 raise RuntimeError(
                     "BasicLinear op is configured with "
                     "accumulate_into_main_grad=True, "
                     "but weight parameter does not have main_grad attribute"
                 )
-            grad_weight = linear_op.weight.main_grad.detach()
+            grad_weight = weight_param.main_grad.detach()
         else:
             accumulate_into_main_grad = False
 
@@ -558,106 +560,102 @@ class UserbuffersBackwardLinear(FusedOperation):
         # Clear input tensor if possible
         clear_tensor_data(x_local)
 
-        # Return gradients
-        grad_params = [() for _ in range(len(self.basic_ops))]
+        # Megatron-LM wgrad fusion
+        # Note: Return dummy tensor for grad weight if needed.
         if accumulate_into_main_grad:
             grad_weight = None
+            weight_param = linear_op.weight
+            if hasattr(weight_param, "grad_added_to_main_grad"):
+                weight_param.grad_added_to_main_grad = True
+                grad_weight = get_dummy_wgrad(
+                    list(weight_param.size()),
+                    weight_param.dtype,
+                    zero=getattr(weight_param, "zero_out_wgrad", False),
+                )
+
+        # Return gradients
+        grad_params = [() for _ in range(len(self.basic_ops))]
         grad_params[self._op_idxs["linear"]] = (grad_weight,)
         if bias_op is not None:
             grad_params[self._op_idxs["bias"]] = (grad_bias,)
-        grad_params.reverse()
         grad_extra_inputs = [() for _ in range(len(self.basic_ops))]
         return grad_input, grad_params, grad_extra_inputs
 
+    @staticmethod
+    def fuse_backward_ops(
+        ops: list[FusibleOperation],
+        **unused,  # pylint: disable=unused-argument
+    ) -> list[FusibleOperation]:
+        """Apply operation fusion for backward pass.
 
-def fuse_userbuffers_backward_linear(
-    ops: list[tuple[FusibleOperation, list[int]]],
-) -> list[tuple[FusibleOperation, list[int]]]:
-    """Substitute linear operations with Userbuffers implementation
+        Parameters
+        ----------
+        ops : list of FusibleOperation
+            Backward pass operations.
+        recipe : Recipe, optional
+            Quantization recipe.
 
-    Parameters
-    ----------
-    ops: list of tuples
-        Backward pass operations and the indices of the corresponding
-        basic operations.
+        Returns
+        -------
+        ops : list of FusibleOperation
+            Updated backward pass operations
 
-    Returns
-    -------
-    ops: list of tuples
-        Updated backward pass operations
+        """
 
-    """
+        # Return immediately if environment is not distributed
+        if not torch.distributed.is_initialized() or torch.distributed.get_world_size() == 1:
+            return ops
 
-    # Return immediately if environment is not distributed
-    if not torch.distributed.is_initialized() or torch.distributed.get_world_size() == 1:
-        return ops
+        # Scan through ops, fusing if possible
+        out = []
+        window = []
+        while ops:
 
-    # Sliding window in list of ops
-    window = []
+            # Shift window
+            out.extend(window)
+            window, ops = ops[:1], ops[1:]
 
-    def peek_next_op() -> Optional[FusibleOperation]:
-        """Get next op in list of ops"""
-        nonlocal ops
-        if not ops:
-            return None
-        return ops[-1][0]
-
-    def pop_next_op() -> FusibleOperation:
-        """Remove next op from list of ops and add to sliding window"""
-        nonlocal ops, window
-        window.insert(0, ops[-1])
-        ops = ops[:-1]
-        return window[0][0]
-
-    # Scan through ops in reverse order, fusing if possible
-    out_reversed = []
-    while ops:
-        out_reversed.extend(reversed(window))
-        window.clear()
-
-        # Check if next op is linear
-        next_op = pop_next_op()
-        if not isinstance(next_op, BasicLinear):
-            continue
-        linear = next_op
-        if linear._userbuffers_options is None:
-            continue
-
-        # Check if next op is bias
-        bias = None
-        if linear.tensor_parallel_mode != "row" and isinstance(peek_next_op(), Bias):
-            bias = pop_next_op()
-
-        # Check if next op is reduce-scatter
-        reduce_scatter = None
-        if linear.tensor_parallel_mode is None and isinstance(peek_next_op(), ReduceScatter):
-            reduce_scatter = pop_next_op()
-
-        # Check for invalid combinations
-        if reduce_scatter is None:
-            if linear.tensor_parallel_mode is None:
+            # Check if first op is linear
+            if not isinstance(window[0], BasicLinear):
                 continue
-            if linear.tensor_parallel_size == 1:
-                continue
-            if linear.tensor_parallel_mode == "row" and bias is not None:
-                continue
-        else:
-            if linear.tensor_parallel_mode is not None:
-                continue
-            if reduce_scatter.process_group_size == 1:
+            linear = window[0]
+            if linear._userbuffers_options is None:
                 continue
 
-        # Replace window with fused op
-        op = UserbuffersBackwardLinear(
-            linear=linear,
-            bias=bias,
-            reduce_scatter=reduce_scatter,
-        )
-        basic_op_idxs = [basic_op_idxs[0] for _, basic_op_idxs in window]
-        window = [(op, basic_op_idxs)]
+            # Check if next op is bias
+            bias = None
+            if linear.tensor_parallel_mode != "row" and ops and isinstance(ops[0], Bias):
+                bias, ops = ops[0], ops[1:]
+                window.append(bias)
 
-    # Return list of ops
-    out_reversed.extend(reversed(window))
-    out = out_reversed
-    out.reverse()
-    return out
+            # Check if next op is reduce-scatter
+            reduce_scatter = None
+            if linear.tensor_parallel_mode is None and ops and isinstance(ops[0], ReduceScatter):
+                reduce_scatter, ops = ops[0], ops[1:]
+                window.append(reduce_scatter)
+
+            # Check for invalid combinations
+            if reduce_scatter is None:
+                if linear.tensor_parallel_mode is None:
+                    continue
+                if linear.tensor_parallel_size == 1:
+                    continue
+                if linear.tensor_parallel_mode == "row" and bias is not None:
+                    continue
+            else:
+                if linear.tensor_parallel_mode is not None:
+                    continue
+                if reduce_scatter.process_group_size == 1:
+                    continue
+
+            # Replace window with fused op
+            op = UserbuffersBackwardLinear(
+                linear=linear,
+                bias=bias,
+                reduce_scatter=reduce_scatter,
+            )
+            window = [op]
+
+        # Return list of ops
+        out.extend(window)
+        return out

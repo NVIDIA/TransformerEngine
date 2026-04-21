@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -34,8 +34,9 @@ import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.export import is_in_onnx_export_mode, te_translation_table
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 from transformer_engine.pytorch.utils import get_default_init_method
+import tensorrt as trt
 
 # Global test configuration knobs.
 
@@ -56,17 +57,18 @@ NVTE_TEST_ARTIFACTS_DIR = NVTE_TEST_ARTIFACTS_DIR or os.path.join(
 # The directory where this file is stored.
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 
-fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
-mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
+fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
+mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
 
 fp8_recipes = []
 if mxfp8_available:
     fp8_recipes.append(recipe.MXFP8BlockScaling())
 if fp8_available:
     fp8_recipes.append(recipe.DelayedScaling())
+    fp8_recipes.append(recipe.Float8CurrentScaling())
 fp8_recipes.append(None)
 
-supported_activations = ["gelu", "relu", "reglu", "geglu", "swiglu"]
+supported_activations = ["gelu", "relu", "reglu", "geglu", "swiglu", "clamped_swiglu"]
 
 all_normalizations = ["LayerNorm", "RMSNorm"]
 
@@ -80,11 +82,11 @@ all_normalizations = ["LayerNorm", "RMSNorm"]
     ],
     outputs=[PyCustomOpDef.dt_uint8],
 )
-def trt_fp8_quantize(t, scale):
+def trt_fp8_quantize(t, scale_inv):
     """FP8 quantization extension for ONNX Runtime."""
     x = torch.from_numpy(t).cuda()
     q = te.tensor.float8_tensor.Float8Quantizer(
-        scale=1 / torch.from_numpy(scale).cuda(),
+        scale=1 / torch.from_numpy(scale_inv).cuda(),
         amax=torch.zeros([1]).cuda(),
         fp8_dtype=tex.DType.kFloat8E4M3,
     )
@@ -100,11 +102,11 @@ def trt_fp8_quantize(t, scale):
     ],
     outputs=[PyCustomOpDef.dt_float],
 )
-def trt_fp8_dequantize(t, scale):
+def trt_fp8_dequantize(t, scale_inv):
     """FP8 dequantization extension for ONNX Runtime."""
     x = torch.from_numpy(t).cuda()
     q = te.tensor.float8_tensor.Float8Quantizer(
-        scale=1 / torch.from_numpy(scale).cuda(),
+        scale=1 / torch.from_numpy(scale_inv).cuda(),
         amax=torch.zeros([1]).cuda(),
         fp8_dtype=tex.DType.kFloat8E4M3,
     )
@@ -113,7 +115,7 @@ def trt_fp8_dequantize(t, scale):
 
 
 @onnx_op(
-    op_type="trt::TRT_MXFP8QuantizeLinear",
+    op_type="trt::TRT_MXFP8DynamicQuantize",
     domain="trt",
     inputs=[
         PyCustomOpDef.dt_float,
@@ -176,8 +178,8 @@ def do_export(
     input_names = input_names or ["input"]
     output_names = output_names or ["output"]
 
-    with torch.inference_mode(), te.fp8_autocast(
-        enabled=fp8_recipe is not None, fp8_recipe=fp8_recipe
+    with torch.inference_mode(), te.autocast(
+        enabled=fp8_recipe is not None, recipe=fp8_recipe
     ), warnings.catch_warnings():
         warnings.filterwarnings(action="ignore", category=torch.jit.TracerWarning, module=r".*")
 
@@ -231,8 +233,8 @@ def te_infer(
     fp8_recipe: recipe.Recipe,
 ):
     """Transformer Engine forward propagation."""
-    with torch.inference_mode(), te.fp8_autocast(
-        enabled=is_fp8, fp8_recipe=fp8_recipe
+    with torch.inference_mode(), te.autocast(
+        enabled=is_fp8, recipe=fp8_recipe
     ), warnings.catch_warnings():
         te_outputs = model(*inps if isinstance(inps, tuple) else (inps,))
         if not isinstance(te_outputs, tuple):
@@ -438,7 +440,7 @@ def _test_export_linear(
     bias_str = "_bias" if use_bias else ""
     high_prec_str = dtype2str(precision)
     fname = f"te.linear{fp8_str}{bias_str}{high_prec_str}.onnx"
-    with te.fp8_autocast(enabled=fp8_recipe is not None, fp8_recipe=fp8_recipe):
+    with te.autocast(enabled=fp8_recipe is not None, recipe=fp8_recipe):
         model = Test_Linear(in_features, out_features, use_bias, return_bias, precision).to(
             device="cuda"
         )
@@ -498,7 +500,7 @@ def _test_export_layernorm(
     fname = f"te.layernorm_linear{fp8_str}{high_prec_str}.onnx"
 
     with torch.no_grad():
-        with te.fp8_autocast(enabled=fp8_recipe is not None, fp8_recipe=fp8_recipe):
+        with te.autocast(enabled=fp8_recipe is not None, recipe=fp8_recipe):
             layernorm_cls = te.LayerNorm if normalization == "LayerNorm" else te.RMSNorm
             model = layernorm_cls(
                 hidden_size,
@@ -566,7 +568,7 @@ def _test_export_layernorm_linear(
     fname = f"te.layernorm_linear{fp8_str}{bias_str}{high_prec_str}.onnx"
 
     with torch.no_grad():
-        with te.fp8_autocast(enabled=fp8_recipe is not None, fp8_recipe=fp8_recipe):
+        with te.autocast(enabled=fp8_recipe is not None, recipe=fp8_recipe):
             model = te.LayerNormLinear(
                 hidden_size,
                 3 * hidden_size,
@@ -592,7 +594,9 @@ def _test_export_layernorm_linear(
                     fname,
                     inp,
                     model,
-                    atol=1e-3,
+                    # For current scaling we use Float8Quantizer in tests + amax computed by hand,
+                    # which has slightly different numerics than Float8CurrentScalingQuantizer.
+                    atol=1e-3 if fp8_recipe.__class__ is not recipe.Float8CurrentScaling else 2e-2,
                     is_fp8=fp8_recipe is not None,
                     te_outputs=te_outputs,
                 )
@@ -650,7 +654,7 @@ def _test_export_layernorm_mlp(
     bias_str = "_bias" if use_bias else ""
     high_prec_str = dtype2str(precision)
     fname = f"te.layernorm_mlp{fp8_str}{bias_str}{high_prec_str}_{activation}.onnx"
-    with te.fp8_autocast(enabled=fp8_recipe is not None, fp8_recipe=fp8_recipe):
+    with te.autocast(enabled=fp8_recipe is not None, recipe=fp8_recipe):
         model = te.LayerNormMLP(
             hidden_size,
             ffn_hidden_size,
@@ -709,6 +713,14 @@ def test_export_layernorm_mlp_activation(seed_default_rng, activation):
     _test_export_layernorm_mlp(activation=activation)
 
 
+# Quantization recipes with fp8_dpa=True for attention emulation export test
+dpa_quantization_recipes = [None]  # None = no quantization
+if fp8_available:
+    dpa_quantization_recipes.append(recipe.DelayedScaling(fp8_dpa=True))
+    dpa_quantization_recipes.append(recipe.Float8CurrentScaling(fp8_dpa=True))
+
+
+@pytest.mark.parametrize("fp8_recipe", dpa_quantization_recipes)
 @pytest.mark.parametrize(
     "precision,      use_mask, attn_mask_type",
     [
@@ -726,6 +738,7 @@ def test_export_core_attention(
     precision: torch.dtype,
     use_mask: bool,
     attn_mask_type: str,
+    fp8_recipe: recipe.Recipe,
 ):
     # Set dimensions (these are arbitrary).
     seq_len, batch_size, num_attention_heads, kv_channels = (64, 4, 1, 64)
@@ -745,22 +758,25 @@ def test_export_core_attention(
 
     mask_str = get_attn_mask_str(use_mask, attn_mask_type)
     high_prec_str = dtype2str(precision)
-    fname = f"te.core_attention{mask_str}{high_prec_str}.onnx"
+    fp8_str = "_fp8_dpa" if fp8_recipe is not None else ""
+    fname = f"te.core_attention{fp8_str}{mask_str}{high_prec_str}.onnx"
+
+    is_fp8 = fp8_recipe is not None
 
     model = te.attention.DotProductAttention(
         num_attention_heads=num_attention_heads,
         kv_channels=kv_channels,
-        attention_dropout=0.5,
         qkv_format=qkv_format,
         attn_mask_type=attn_mask_type,
     ).to(device="cuda")
-    do_export(model, inp, fname, input_names=input_names, fp8_recipe=None)
-    te_outputs = te_infer(model, inp, is_fp8=False, fp8_recipe=None)
+    do_export(model, inp, fname, input_names=input_names, fp8_recipe=fp8_recipe)
+    te_outputs = te_infer(model, inp, is_fp8=is_fp8, fp8_recipe=fp8_recipe)
     serialize_inputs_outputs(fname, inp, te_outputs, input_names=input_names)
     if precision in (torch.bfloat16,):
         return
+    atol = 5e-1 if is_fp8 else 1e-2
     validate_result(
-        fname, inp, model, is_fp8=True, atol=1e-2, input_names=input_names, te_outputs=te_outputs
+        fname, inp, model, is_fp8=True, atol=atol, input_names=input_names, te_outputs=te_outputs
     )
 
 
@@ -1139,3 +1155,64 @@ def test_export_ctx_manager(enabled):
     with te.onnx_export(enabled):
         assert is_in_onnx_export_mode() == enabled
     assert is_in_onnx_export_mode() == False
+
+
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+def test_trt_integration(fp8_recipe: recipe.Recipe):
+
+    model = te.TransformerLayer(
+        hidden_size=128,
+        ffn_hidden_size=128,
+        num_attention_heads=4,
+    ).eval()
+
+    if type(fp8_recipe) == recipe.Float8CurrentScaling:
+        # TODO(pgadzinski): Attention does not work with TRT for FP8CurrentScaling
+        model = te.LayerNormMLP(128, 128)
+
+    inps = (torch.randn([16, 16, 128], device="cuda", requires_grad=False),)
+
+    with te.autocast(enabled=fp8_recipe is not None, recipe=fp8_recipe):
+        out_ref = model(*inps)
+
+    onnx_fd, onnx_path = tempfile.mkstemp(suffix=".onnx")
+    os.close(onnx_fd)
+    try:
+        with te.autocast(enabled=fp8_recipe is not None, recipe=fp8_recipe):
+            with te.onnx_export(enabled=True):
+                torch.onnx.export(
+                    model,
+                    inps,
+                    onnx_path,
+                    output_names=["output"],
+                    dynamo=True,
+                    custom_translation_table=te_translation_table,
+                )
+
+        os.system(f"trtexec --onnx={onnx_path} --saveEngine={onnx_path}.engine")
+
+        # Run TRT engine
+        logger = trt.Logger(trt.Logger.WARNING)
+        runtime = trt.Runtime(logger)
+        with open(onnx_path + ".engine", "rb") as f:
+            engine_data = f.read()
+        engine = runtime.deserialize_cuda_engine(engine_data)
+        context = engine.create_execution_context()
+        context.set_tensor_address(engine.get_tensor_name(0), inps[0].data_ptr())
+        stream = torch.cuda.Stream()
+
+        out = torch.zeros_like(out_ref)
+        context.set_tensor_address("output", out.data_ptr())
+
+        context.execute_async_v3(stream_handle=stream.cuda_stream)
+        stream.synchronize()
+
+        # Compare TRT and TE outputs
+        atol = 5e-2 if fp8_recipe is not None else 1e-4
+        rtol = 5e-2 if fp8_recipe is not None else 1e-4
+        torch.testing.assert_close(out, out_ref, atol=atol, rtol=rtol)
+    finally:
+        try:
+            os.remove(onnx_path)
+        except FileNotFoundError:
+            pass

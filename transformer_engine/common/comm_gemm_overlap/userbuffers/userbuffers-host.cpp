@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -122,10 +122,11 @@ bool has_mnnvl_fabric(int device_id) {
     NVTE_CALL_CHECK_CUDA_NVML(nvmlDeviceGetHandleByIndex_v2, device_id, &local_device);
     nvmlGpuFabricInfoV_t fabricInfo = {};
     fabricInfo.version = nvmlGpuFabricInfo_v2;
-    fabricInfo.clusterUuid[0] = '\0';
     NVTE_CALL_CHECK_CUDA_NVML(nvmlDeviceGetGpuFabricInfoV, local_device, &fabricInfo);
     NVTE_CALL_CHECK_CUDA_NVML(nvmlShutdown);
-    if (fabricInfo.state >= NVML_GPU_FABRIC_STATE_COMPLETED && fabricInfo.clusterUuid[0] != '\0') {
+    const unsigned char zero_uuid[NVML_GPU_FABRIC_UUID_LEN] = {0};
+    if (fabricInfo.state == NVML_GPU_FABRIC_STATE_COMPLETED &&
+        memcmp(fabricInfo.clusterUuid, zero_uuid, NVML_GPU_FABRIC_UUID_LEN) != 0) {
       mnnvl_fabric_support = true;
     }
   }
@@ -511,7 +512,7 @@ void destroy_communicator_mpi(communicator *comm) {
 }
 
 int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *comm, bool alloc) {
-  if (comm->free_region > NVTE_MAX_REGIONS) return -1;
+  if (comm->free_region >= NVTE_MAX_REGIONS) return -1;
   int hndl = comm->free_region;
   comm->peer_ptr[hndl] = reinterpret_cast<void **>(malloc(sizeof(void *) * (comm->nvsize)));
   size_t aligned_size = bytes;
@@ -661,18 +662,59 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
     }
 
     NVTE_CHECK(comm->nvsize <= 8, "CUDA IPC supports only up to 8 GPUs in an NVLink domain.");
-    cudaIpcMemHandle_t memhndl;
-    NVTE_CHECK_CUDA(cudaIpcGetMemHandle(&memhndl, *gpubuff));
 
-    cudaIpcMemHandle_t *tmp =
-        reinterpret_cast<cudaIpcMemHandle_t *>(malloc(comm->nvsize * sizeof(cudaIpcMemHandle_t)));
+    // Use cudaMallocHost (pinned host memory) so these buffers are CPU-accessible (plain memcpy)
+    // and GPU DMA-accessible, allowing the allgather callback to pass them directly to NCCL
+    // without additional staging copies. RAII guards ensure the pinned pages are released on
+    // every exit path, including exceptions thrown by NVTE_CHECK_CUDA / NVTE_ERROR.
+    struct PinnedDeleter {
+      void operator()(void *p) const {
+        if (p) cudaFreeHost(p);
+      }
+    };
+    cudaIpcMemHandle_t *memhndl;
+    NVTE_CHECK_CUDA(
+        cudaMallocHost(reinterpret_cast<void **>(&memhndl), sizeof(cudaIpcMemHandle_t)));
+    std::unique_ptr<void, PinnedDeleter> memhndl_guard(memhndl);
+    NVTE_CHECK_CUDA(cudaIpcGetMemHandle(memhndl, *gpubuff));
+
+    cudaIpcMemHandle_t *tmp;
+    NVTE_CHECK_CUDA(
+        cudaMallocHost(reinterpret_cast<void **>(&tmp), comm->nvsize * sizeof(cudaIpcMemHandle_t)));
+    std::unique_ptr<void, PinnedDeleter> tmp_guard(tmp);
     comm->_allgather(reinterpret_cast<void *>(tmp), comm->nvsize * sizeof(cudaIpcMemHandle_t),
-                     reinterpret_cast<void *>(&memhndl), sizeof(cudaIpcMemHandle_t),
+                     reinterpret_cast<void *>(memhndl), sizeof(cudaIpcMemHandle_t),
                      comm->comm_intra);
+
+    // Check for NVLINK support before attempting IPC operations
+    if (comm->nvsize > 1) {
+      int current_device;
+      NVTE_CHECK_CUDA(cudaGetDevice(&current_device));
+      cudaDeviceProp deviceProp;
+      NVTE_CHECK_CUDA(cudaGetDeviceProperties(&deviceProp, current_device));
+      bool peer_access_available = false;
+      for (int i = 0; i < comm->nvsize; i++) {
+        if (i != comm->nvrank) {
+          int can_access_peer;
+          cudaError_t peer_result = cudaDeviceCanAccessPeer(&can_access_peer, current_device, i);
+          if (peer_result == cudaSuccess && can_access_peer) {
+            peer_access_available = true;
+            break;
+          }
+        }
+      }
+      if (!peer_access_available) {
+        NVTE_ERROR(
+            "No peer-to-peer access available between GPUs. This platform does not support the "
+            "GPU-to-GPU "
+            "communication required for multi-GPU userbuffers. Consider using single-GPU mode.");
+        return 1;
+      }
+    }
 
     for (int i = 0; i < comm->nvsize; i++) {
       if (i != comm->nvrank) {
-        NVTE_CHECK_CUDA(cudaIpcOpenMemHandle(&(comm->peer_ptr[hndl][i]), tmp[i],  // NOLINT(*)
+        NVTE_CHECK_CUDA(cudaIpcOpenMemHandle(&(comm->peer_ptr[hndl][i]), tmp[i],
                                              cudaIpcMemLazyEnablePeerAccess));
       }
     }
@@ -684,7 +726,6 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
         comm->peer_ptr[hndl], comm->nvsize * sizeof(void *), cudaMemcpyHostToDevice));
 
     NVTE_CHECK_CUDA(cudaDeviceSynchronize());
-    free(tmp);
 #if CUDART_VERSION >= 12010
   }
 #endif
@@ -693,4 +734,5 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
   comm->mem_ptr[hndl] = *gpubuff;
 
   return comm->free_region++;
+  printf("***** Returning *****\n");
 }

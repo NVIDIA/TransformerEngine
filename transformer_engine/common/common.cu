@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -26,12 +26,35 @@ __global__ void __launch_bounds__(1)
 
 }  // namespace
 
+cudaDataType_t get_cuda_dtype(const transformer_engine::DType t) {
+  using namespace transformer_engine;
+  switch (t) {
+    case DType::kFloat16:
+      return CUDA_R_16F;
+    case DType::kFloat32:
+      return CUDA_R_32F;
+    case DType::kBFloat16:
+      return CUDA_R_16BF;
+    case DType::kFloat8E4M3:
+      return CUDA_R_8F_E4M3;
+    case DType::kFloat8E5M2:
+      return CUDA_R_8F_E5M2;
+#if CUDA_VERSION >= 12080
+    case DType::kFloat4E2M1:
+      return CUDA_R_4F_E2M1;
+#endif
+    default:
+      NVTE_ERROR("Invalid type");
+  }
+}
+
 void update_tensor_scale_inv(Tensor *t, cudaStream_t stream) {
   if (is_fp8_dtype(t->data.dtype) && is_tensor_scaling(t->scaling_mode)) {
     NVTE_CHECK(t->scale_inv.dptr != nullptr, "Tensor should have allocated scale_inv.");
     update_tensor_scale_inv_kernel<<<1, 1, 0, stream>>>(
         reinterpret_cast<const float *>(t->scale.dptr),
         reinterpret_cast<float *>(t->scale_inv.dptr));
+    NVTE_CHECK_CUDA(cudaGetLastError());
   }
 }
 
@@ -64,6 +87,48 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   reinterpret_cast<TVectorized *>(ptr)[idx] = data.value;
 }
 
+__global__ void __launch_bounds__(kThreadsPerBlock)
+    splits_to_offsets_kernel(const int64_t *__restrict__ first_dims, int64_t *__restrict__ output,
+                             size_t num_tensors, int64_t logical_last_dim) {
+  __shared__ int64_t block_scan[kThreadsPerBlock];
+  __shared__ int64_t chunk_prefix;
+
+  const size_t tid = threadIdx.x;
+  if (tid == 0) {
+    output[0] = 0;
+    chunk_prefix = 0;
+  }
+  __syncthreads();
+
+  for (size_t chunk_start = 0; chunk_start < num_tensors; chunk_start += kThreadsPerBlock) {
+    const size_t idx = chunk_start + tid;
+    int64_t value = 0;
+    if (idx < num_tensors) {
+      value = first_dims[idx] * logical_last_dim;
+    }
+    block_scan[tid] = value;
+    __syncthreads();
+
+    // Inclusive scan in shared memory.
+    for (size_t offset = 1; offset < kThreadsPerBlock; offset <<= 1) {
+      const int64_t addend = (tid >= offset) ? block_scan[tid - offset] : 0;
+      __syncthreads();
+      block_scan[tid] += addend;
+      __syncthreads();
+    }
+
+    if (idx < num_tensors) {
+      output[idx + 1] = chunk_prefix + block_scan[tid];
+    }
+    __syncthreads();
+
+    if (tid == kThreadsPerBlock - 1) {
+      chunk_prefix += block_scan[tid];
+    }
+    __syncthreads();
+  }
+}
+
 }  // namespace
 
 #define MEMSET_VECTORIZED_KERNEL_DISPATCH(ptr, size_in_bytes, value, vectorizedType, stream) \
@@ -73,6 +138,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
     dim3 grid(numBlocks, 1, 1);                                                              \
     memset_kernel<vectorizedType>                                                            \
         <<<grid, kThreadsPerBlock, 0, stream>>>(ptr, value, size_in_bytes);                  \
+    NVTE_CHECK_CUDA(cudaGetLastError());                                                     \
     return;                                                                                  \
   }
 
@@ -83,7 +149,7 @@ void nvte_memset(void *ptr, int value, size_t size_in_bytes, cudaStream_t stream
 
   if (size_in_bytes > 4096) {
     // Use cudaMemsetAsync for larger sizes.
-    cudaMemsetAsync(ptr, value, size_in_bytes, stream);
+    NVTE_CHECK_CUDA(cudaMemsetAsync(ptr, value, size_in_bytes, stream));
     return;
   }
 
@@ -92,9 +158,25 @@ void nvte_memset(void *ptr, int value, size_t size_in_bytes, cudaStream_t stream
   MEMSET_VECTORIZED_KERNEL_DISPATCH(ptr, size_in_bytes, value, float, stream);
   MEMSET_VECTORIZED_KERNEL_DISPATCH(ptr, size_in_bytes, value, uint8_t, stream);
 }
+
+void nvte_splits_to_offsets(const int64_t *first_dims, int64_t *output, size_t num_tensors,
+                            int64_t logical_last_dim, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_splits_to_offsets);
+  NVTE_CHECK(output != nullptr, "Output pointer must be allocated.");
+  NVTE_CHECK(num_tensors > 0, "num_tensors must be greater than 0.");
+  NVTE_CHECK(first_dims != nullptr, "first_dims pointer must be allocated.");
+  NVTE_CHECK(logical_last_dim > 0, "logical_last_dim must be greater than 0.");
+
+  splits_to_offsets_kernel<<<1, kThreadsPerBlock, 0, stream>>>(first_dims, output, num_tensors,
+                                                               logical_last_dim);
+  NVTE_CHECK_CUDA(cudaGetLastError());
+}
 }  // extern "C"
 
 void checkCuDriverContext(CUstream stream) {
+  // Ensure the thread's "current" CUDA context is set.
+  cuda_driver::ensure_context_exists();
+
   CUcontext ctx;
   const CUresult driver_status = cuda_driver::call("cuStreamGetCtx", stream, &ctx);
   switch (driver_status) {
@@ -137,7 +219,8 @@ CUtensorMapDataType get_CUtensorMapDataType(DType dtype) {
 void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
                           const uint64_t globalY, const uint64_t globalX, const uint32_t shmemY,
                           const uint32_t shmemX, const uint32_t stride_elems,
-                          const uint32_t offset_elems, const size_t type_num_bits) {
+                          const uint32_t offset_elems, const size_t type_num_bits,
+                          const CUtensorMapSwizzle swizzle) {
   cuda_driver::ensure_context_exists();
   // Get a function pointer to the cuTensorMapEncodeTiled driver API
   // Note: PFN_cuTensorMapEncodeTiled is not defined in cuda13
@@ -147,6 +230,8 @@ void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
   }();
   // rank is the number of dimensions of the array
   constexpr uint32_t rank = 2;
+
+  // Dimension for the packed data types must reflect the number of individual U# values.
   uint64_t size[rank] = {globalX, globalY};
 
   // The stride is the number of bytes to traverse from the first element of one row to the next
@@ -185,7 +270,7 @@ void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
       CUtensorMapInterleave::CU_TENSOR_MAP_INTERLEAVE_NONE,
 
       // Swizzling can be used to avoid shared memory bank conflicts.
-      CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_NONE,
+      swizzle,
 
       // L2 Promotion can be used to widen the effect of a cache-policy to a wider
       // set of L2 cache lines.

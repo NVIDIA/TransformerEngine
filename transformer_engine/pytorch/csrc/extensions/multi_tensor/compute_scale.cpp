@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -18,6 +18,16 @@ void multi_tensor_compute_scale_and_scale_inv_cuda(
   nvte_multi_tensor_compute_scale_and_scale_inv_cuda(
       chunk_size, noop_flag_cu.data(), tensor_lists_ptr.data(), num_lists, num_tensors, max_fp8,
       force_pow_2_scales, epsilon, at::cuda::getCurrentCUDAStream());
+}
+
+void multi_tensor_compute_scale_inv_e8m0_cuda(int chunk_size, const py::object &dummy,
+                                              std::vector<std::vector<at::Tensor>> tensor_lists) {
+  NVTE_CHECK(dummy.is_none(), "No-op flag is not supported.");
+  auto [_, __, tensor_lists_ptr, num_lists, num_tensors] =
+      makeTransformerEngineTensorList(tensor_lists);
+
+  nvte_multi_tensor_compute_scale_inv_e8m0_cuda(chunk_size, tensor_lists_ptr.data(), num_lists,
+                                                num_tensors, at::cuda::getCurrentCUDAStream());
 }
 
 }  // namespace transformer_engine::pytorch

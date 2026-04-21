@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -14,6 +14,9 @@ import torch
 
 from transformer_engine_torch import layernorm_bwd, layernorm_fwd
 from ...constants import TE_DType
+from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
+from ...export import is_in_onnx_export_mode
+from ...tensor import Quantizer
 from ...utils import (
     canonicalize_device,
     canonicalize_dtype,
@@ -22,15 +25,13 @@ from ...utils import (
 )
 from ..op import BasicOperation, OperationContext
 from .._common import maybe_autocast_dtype, maybe_dequantize
-from ...export import is_in_onnx_export_mode
-from ...tensor import Quantizer
 
 
 class LayerNorm(BasicOperation):
     r"""Layer Normalization
 
     Applies Layer Normalization over a mini-batch of inputs as described in
-    the paper `Layer Normalization <https://arxiv.org/abs/1607.06450>`__
+    the paper `Layer Normalization <https://arxiv.org/abs/1607.06450>`__ .
 
     .. math::
         y = \frac{x - \mathrm{E}[x]}{\sqrt{\mathrm{Var}[x] + \varepsilon}} * \gamma + \beta
@@ -41,23 +42,23 @@ class LayerNorm(BasicOperation):
 
     Parameters
     ----------
-    normalized_shape: int or iterable of int
+    normalized_shape : int or iterable of int
         Inner dimensions of input tensor
     eps : float, default = 1e-5
         A value added to the denominator of layer normalization for
         numerical stability
-    device: torch.device, default = default CUDA device
+    device : torch.device, default = default CUDA device
         Tensor device
-    dtype: torch.dtype, default = default dtype
+    dtype : torch.dtype, default = default dtype
         Tensor datatype
-    zero_centered_gamma : bool, default = 'False'
-        If `True`, the :math:`\gamma` parameter is initialized to zero
-        and the calculation changes to
+    zero_centered_gamma : bool, default = False
+        If ``True``, the :math:`\gamma` parameter is initialized to
+        zero and the calculation changes to
 
             .. math::
                 y = \frac{x - \mathrm{E}[x]}{\sqrt{\mathrm{Var}[x] + \varepsilon}} * (1 + \gamma) + \beta
 
-    sm_margin: int or dict, default = 0
+    sm_margin : int or dict, default = 0
         Number of SMs to exclude when launching CUDA kernels. This
         helps overlap with other kernels, e.g. communication kernels.
         For more fine-grained control, provide a dict with the SM
@@ -215,6 +216,8 @@ class LayerNorm(BasicOperation):
 
         # Save state for backward pass
         if ctx.requires_grad:
+            if is_cpu_offload_enabled():
+                mark_activation_offload(x, means, rstdevs)
             ctx.save_for_backward(x, means, rstdevs)
             ctx.dtype = dtype
 

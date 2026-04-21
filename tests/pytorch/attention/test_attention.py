@@ -1,8 +1,7 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 import logging
-import math
 import os
 import sys
 import pathlib
@@ -11,13 +10,22 @@ from typing import Any, Dict, Tuple, Union
 import pytest
 import torch
 
+from transformer_engine.pytorch.quantization import FP8GlobalStateManager, get_fp8_te_dtype
 from transformer_engine.common import recipe
-from transformer_engine.pytorch import TransformerLayer, fp8_autocast, fp8_model_init
-from transformer_engine.pytorch.attention.dot_product_attention import (
+from transformer_engine.pytorch import (
+    TransformerLayer,
+    autocast,
+    quantized_model_init,
     DotProductAttention,
+    MultiheadAttention,
+    get_device_compute_capability,
+    Quantizer,
+    is_fp8_available,
+    is_bf16_available,
+)
+from transformer_engine.pytorch.attention.dot_product_attention import (
     _attention_backends,
 )
-from transformer_engine.pytorch.attention.multi_head_attention import MultiheadAttention
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     FlashAttentionUtils,
     check_set_window_size,
@@ -30,47 +38,69 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     fused_attn_fwd,
 )
 from transformer_engine.pytorch.distributed import CudaRNGStatesTracker
-import transformer_engine.pytorch.fp8 as fp8
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.utils import (
-    get_device_compute_capability,
     init_method_normal,
     scaled_init_method_normal,
-    is_bf16_compatible,
 )
 from transformer_engine.pytorch.utils import get_cudnn_version
+from transformer_engine.pytorch.constants import FP8BwdTensorIdx, FP8FwdTensorIdx
 import transformer_engine_torch as tex
-from transformer_engine.pytorch.tensor.quantized_tensor import (
+from transformer_engine.pytorch.quantized_tensor import (
     Quantizer,
     prepare_for_saving,
-    restore_from_saved,
+    restore_from_func_ctx,
 )
 
 _current_file = pathlib.Path(__file__).resolve()
-sys.path.append(str(_current_file.parent.parent))
+sys.path = [str(_current_file.parent.parent)] + sys.path
 from utils import (
     reset_rng_states,
+    compare_and_assert,
     ModelConfig,
     dtype_tols,
     get_available_attention_backends,
 )
 
-# Only run FP8 tests on H100
-fp8_available, reason_for_no_fp8 = fp8.FP8GlobalStateManager.is_fp8_available()
+# Check if hardware supports FP8 attention.
+fp8_available, reason_for_no_fp8 = is_fp8_available(return_reason=True)
+fp8_attn_available, reason_for_no_fp8_attn = fp8_available, reason_for_no_fp8
+device_compute_capability = get_device_compute_capability()
+if fp8_available and (device_compute_capability < (9, 0) or device_compute_capability >= (12, 0)):
+    fp8_attn_available = False
+    reason_for_no_fp8_attn = (
+        "FP8 attention is not supported for compute capability ="
+        f" sm{device_compute_capability[0] * 10 + device_compute_capability[1]}"
+    )
 
+
+# Get determinism
+_deterministic = (
+    not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
+    or torch.are_deterministic_algorithms_enabled()
+)
+
+
+# Reset RNG seed and states
 seed = 1234
-# Reset RNG states
 reset_rng_states()
 
 
+# Reset FP8 global state manager
 @pytest.fixture(autouse=True)
 def reset_global_fp8_state():
     yield
-    fp8.FP8GlobalStateManager.reset()
+    FP8GlobalStateManager.reset()
 
+
+# Define F16 data types to test
+param_types = [torch.float16]
+if is_bf16_available():
+    param_types.append(torch.bfloat16)
+param_types_lean = [torch.bfloat16]
 
 model_configs_base = {
-    #     test:             b,  h, hg,  d,  sq, skv,   p,      mask,      bias
+    # test: ModelConfig(b, sq, hq, dqk)
     "base_1_0": ModelConfig(8, 128, 16, 64),
     "base_1_1": ModelConfig(4, 128, 16, 64, max_seqlen_kv=256),
     "base_2_0": ModelConfig(2, 2048, 24, 128),
@@ -86,12 +116,6 @@ model_configs_base = {
 }
 
 
-param_types = [torch.float16]
-if is_bf16_compatible():  # bf16 requires sm_80 or higher
-    param_types.append(torch.bfloat16)
-param_types_lean = [torch.bfloat16]
-
-
 @pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("model_configs", [model_configs_base])
@@ -102,7 +126,14 @@ param_types_lean = [torch.bfloat16]
 @pytest.mark.parametrize("swa", [False])
 @pytest.mark.parametrize("pad_between_seqs", [False])
 def test_dot_product_attention(
-    dtype, model_configs, model, ckpt_attn, workspace_opt, qkv_layout, swa, pad_between_seqs
+    dtype,
+    model_configs,
+    model,
+    ckpt_attn,
+    workspace_opt,
+    qkv_layout,
+    swa,
+    pad_between_seqs,
 ):
     """Test DotProductAttention module"""
 
@@ -123,27 +154,44 @@ def test_dot_product_attention(
 
     if config.window_size == (-1, -1) and swa:
         config.window_size = [2, 2]
-    config.window_size = check_set_window_size(config.attn_mask_type, config.window_size)
 
+    config.window_size = check_set_window_size(config.attn_mask_type, config.window_size)
+    qkv_format = qkv_layout.replace("3", "").replace("2", "").split("_")[0]
+    if qkv_format == "thd" and "padding" not in config.attn_mask_type:
+        config.attn_mask_type = (
+            "padding_" + config.attn_mask_type if config.attn_mask_type != "no_mask" else "padding"
+        )
+
+    # Get backends
+    # For 111s, dbias calculation is not supported as of cuDNN 9.18, hence, test fwd only for 111s.
+    # For all other shapes test fwd+bwd
     is_training = True
+    # TODO(KshitijLakhani): Set is_training to True for all cases once cuDNN supports dbias for 111s.
+    if config.bias_shape == "111s":
+        is_training = False
+        logging.info(
+            "Setting is_training to False as cuDNN does not support dbias for"
+            f" {config.bias_shape=} "
+        )
     available_backends, _, fused_attn_backends = get_available_attention_backends(
         config,
         qkv_dtype=dtype,
         qkv_layout=qkv_layout,
-        window_size=config.window_size,
         pad_between_seqs=pad_between_seqs,
         is_training=is_training,
+        deterministic=_deterministic,
     )
     flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
+
     if not fused_attn_supported:
         is_training = False
         available_backends, _, fused_attn_backends = get_available_attention_backends(
             config,
             qkv_dtype=dtype,
             qkv_layout=qkv_layout,
-            window_size=config.window_size,
             pad_between_seqs=pad_between_seqs,
             is_training=is_training,
+            deterministic=_deterministic,
         )
         flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
 
@@ -166,7 +214,7 @@ def test_dot_product_attention(
 
     # UnfusedDotProductAttention backend
     if unfused_attn_supported:
-        unfused_attn_fwd, unfused_attn_bwd = _run_dot_product_attention(
+        unfused_attn_fwd, unfused_max_logit, unfused_attn_bwd = _run_dot_product_attention(
             dtype,
             config,
             "UnfusedDotProductAttention",
@@ -180,7 +228,7 @@ def test_dot_product_attention(
     # FusedAttention backend
     if fused_attn_supported:
         if len(fused_attn_backends) == 1:
-            fused_attn_fwd, fused_attn_bwd = _run_dot_product_attention(
+            fused_attn_fwd, fused_max_logit, fused_attn_bwd = _run_dot_product_attention(
                 dtype,
                 config,
                 "FusedAttention",
@@ -192,7 +240,7 @@ def test_dot_product_attention(
             )
         if len(fused_attn_backends) == 2:
             os.environ["NVTE_FUSED_ATTN_BACKEND"] = "0"
-            fused_attn_fwd, fused_attn_bwd = _run_dot_product_attention(
+            fused_attn_fwd, _, fused_attn_bwd = _run_dot_product_attention(
                 dtype,
                 config,
                 "FusedAttention",
@@ -203,7 +251,7 @@ def test_dot_product_attention(
                 is_training,
             )
             os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
-            fused_attn_fwd_1, fused_attn_bwd_1 = _run_dot_product_attention(
+            fused_attn_fwd_1, _, fused_attn_bwd_1 = _run_dot_product_attention(
                 dtype,
                 config,
                 "FusedAttention",
@@ -216,7 +264,7 @@ def test_dot_product_attention(
 
     # FlashAttention backend
     if flash_attn_supported:
-        flash_attn_fwd, flash_attn_bwd = _run_dot_product_attention(
+        flash_attn_fwd, _, flash_attn_bwd = _run_dot_product_attention(
             dtype,
             config,
             "FlashAttention",
@@ -227,6 +275,7 @@ def test_dot_product_attention(
             is_training,
         )
 
+    # Compare results
     logging.info(f"[test_dot_product_attention]: is_training = {is_training}")
     if unfused_attn_supported and flash_attn_supported:
         logging.info("[test_dot_product_attention]: unfused attn vs flash attn")
@@ -236,6 +285,8 @@ def test_dot_product_attention(
     if unfused_attn_supported and fused_attn_supported:
         logging.info("[test_dot_product_attention]: unfused attn vs fused attn")
         torch.testing.assert_close(fused_attn_fwd, unfused_attn_fwd, **tols)
+        if config.return_max_logit:
+            torch.testing.assert_close(fused_max_logit, unfused_max_logit, **tols)
         for i, _ in enumerate(unfused_attn_bwd):
             torch.testing.assert_close(fused_attn_bwd[i], unfused_attn_bwd[i], **tols)
     if fused_attn_supported and flash_attn_supported:
@@ -259,21 +310,296 @@ def test_dpa_checkpoint(dtype, model_configs, model):
     test_dot_product_attention(dtype, model_configs, model, True, True, None, False, False)
 
 
+model_configs_max_logit = {
+    # test: ModelConfig(b, sq, hq, dqk)
+    "max_logit_1": ModelConfig(1, 2048, 24, 128, max_seqlen_kv=4096),
+    "max_logit_2": ModelConfig(2, 2048, 24, 128, attn_mask_type="causal"),
+    "max_logit_3": ModelConfig(2, 1, 16, 128, max_seqlen_kv=2048, attn_mask_type="padding_causal"),
+    "max_logit_4": ModelConfig(
+        8, 128, 16, 192, max_seqlen_kv=2048, attn_bias_type="post_scale_bias"
+    ),
+    "max_logit_5": ModelConfig(
+        8, 128, 16, 512, max_seqlen_kv=2048, attn_mask_type="causal", window_size=(20, 0)
+    ),
+    "max_logit_6": ModelConfig(8, 1, 16, 1024, max_seqlen_kv=2048),
+}
+
+
+@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("model_configs", [model_configs_max_logit])
+@pytest.mark.parametrize("model", model_configs_max_logit.keys())
+@pytest.mark.parametrize("qkv_layout", ["sbhd_sbhd_sbhd", "thd_thd_thd"])
+def test_dpa_max_logit(dtype, model_configs, model, qkv_layout):
+    """Test DotProductAttention module with checkpointing"""
+    config = model_configs[model]
+    config.return_max_logit = True
+    test_dot_product_attention(dtype, model_configs, model, False, True, qkv_layout, False, False)
+
+
+model_configs_num_splits = {
+    # test: ModelConfig(b, sq, hq, dqk)
+    "num_splits_1_0": ModelConfig(2, 2048, 24, 128, num_splits=2),
+    "num_splits_1_1": ModelConfig(1, 2048, 24, 128, max_seqlen_kv=4096, num_splits=4),
+}
+
+
+@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("model_configs", [model_configs_num_splits])
+@pytest.mark.parametrize("model", model_configs_num_splits.keys())
+def test_dpa_num_splits(dtype, model_configs, model):
+    """Test DotProductAttention with FlashAttention-3 num_splits enabled"""
+    test_dot_product_attention(
+        dtype,
+        model_configs,
+        model,
+        False,
+        True,
+        None,
+        False,
+        False,
+    )
+
+
+# ==============================
+# Flash Attention 4 (FA4) tests
+# ==============================
+
+model_configs_fa4_base = {
+    # test: ModelConfig(b, sq, hq, dqk)
+    # Standard head dims
+    "fa4_base_1": ModelConfig(4, 128, 16, 64),
+    "fa4_base_2": ModelConfig(2, 2048, 24, 128, attn_mask_type="causal"),
+    "fa4_base_3": ModelConfig(2, 1024, 8, 96, attn_mask_type="causal"),
+    # GQA
+    "fa4_gqa_1": ModelConfig(2, 1024, 32, 128, num_gqa_groups=8, attn_mask_type="causal"),
+    "fa4_gqa_2": ModelConfig(2, 1024, 16, 128, num_gqa_groups=1, attn_mask_type="causal"),
+    # num_splits
+    "fa4_splits_1": ModelConfig(2, 2048, 24, 128, num_splits=2),
+    "fa4_splits_2": ModelConfig(1, 2048, 24, 128, max_seqlen_kv=4096, num_splits=4),
+}
+
+
+@pytest.mark.skipif(
+    not FlashAttentionUtils.v4_is_installed, reason="Flash-attn v4 (flash-attn-4) is required."
+)
+@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
+@pytest.mark.parametrize("dtype", param_types_lean)
+@pytest.mark.parametrize("model_configs", [model_configs_fa4_base])
+@pytest.mark.parametrize("model", model_configs_fa4_base.keys())
+def test_dpa_fa4_base(dtype, model_configs, model):
+    """Test DotProductAttention with FA4: base configs, extended head dims, GQA, num_splits"""
+    test_dot_product_attention(dtype, model_configs, model, False, True, None, False, False)
+
+
+model_configs_fa4_mla = {
+    # test: ModelConfig(b, sq, hq, dqk, head_dim_v=dv)
+    "fa4_mla_1": ModelConfig(4, 128, 16, 128, head_dim_v=64),
+    "fa4_mla_2": ModelConfig(2, 128, 16, 64, max_seqlen_kv=256, head_dim_v=128),
+    "fa4_mla_3": ModelConfig(2, 1024, 16, 96, head_dim_v=64, attn_mask_type="causal"),
+    # dqk=128, dv=96: FA4 SM100 backward has dK_reduce_ncol misalignment for dV;
+    # the backend filter should reject FA4 and fall back to another backend.
+    "fa4_mla_4": ModelConfig(2, 1024, 16, 128, head_dim_v=96, attn_mask_type="causal"),
+    # DeepSeek-style MLA: dqk=192, dv=128 (supported on SM100 as special case)
+    "fa4_mla_deepseek": ModelConfig(2, 1024, 16, 192, head_dim_v=128, attn_mask_type="causal"),
+}
+
+
+@pytest.mark.skipif(
+    not FlashAttentionUtils.v4_is_installed, reason="Flash-attn v4 (flash-attn-4) is required."
+)
+@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
+@pytest.mark.parametrize("dtype", param_types_lean)
+@pytest.mark.parametrize("model_configs", [model_configs_fa4_mla])
+@pytest.mark.parametrize("model", model_configs_fa4_mla.keys())
+def test_dpa_fa4_mla(dtype, model_configs, model):
+    """Test DotProductAttention with FA4: MLA (head_dim_qk != head_dim_v)"""
+    test_dot_product_attention(
+        dtype, model_configs, model, False, True, "bshd_bshd_bshd", False, False
+    )
+
+
+model_configs_fa4_swa = {
+    # test: ModelConfig(b, sq, hq, dqk, window_size=(left, right))
+    "fa4_swa_1": ModelConfig(2, 2048, 16, 128, attn_mask_type="causal", window_size=(128, 0)),
+    "fa4_swa_2": ModelConfig(2, 2048, 24, 64, attn_mask_type="causal", window_size=(64, 0)),
+    "fa4_swa_3": ModelConfig(
+        2, 2048, 16, 128, num_gqa_groups=4, attn_mask_type="causal", window_size=(256, 0)
+    ),
+    "fa4_swa_4": ModelConfig(
+        2, 2048, 16, 128, attn_mask_type="padding_causal", window_size=(128, 0)
+    ),
+}
+
+
+@pytest.mark.skipif(
+    not FlashAttentionUtils.v4_is_installed, reason="Flash-attn v4 (flash-attn-4) is required."
+)
+@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
+@pytest.mark.parametrize("dtype", param_types_lean)
+@pytest.mark.parametrize("model_configs", [model_configs_fa4_swa])
+@pytest.mark.parametrize("model", model_configs_fa4_swa.keys())
+@pytest.mark.parametrize("qkv_layout", ["sbhd_sbhd_sbhd", "bshd_bshd_bshd"])
+def test_dpa_fa4_sliding_window(dtype, model_configs, model, qkv_layout):
+    """Test DotProductAttention with FA4: sliding window attention"""
+    test_dot_product_attention(dtype, model_configs, model, False, True, qkv_layout, True, False)
+
+
+model_configs_fa4_varlen = {
+    # test: ModelConfig(b, sq, hq, dqk)
+    "fa4_varlen_1": ModelConfig(4, 128, 16, 64, attn_mask_type="padding"),
+    "fa4_varlen_2": ModelConfig(2, 2048, 24, 128, attn_mask_type="padding_causal"),
+    "fa4_varlen_3": ModelConfig(
+        2, 2048, 24, 128, num_gqa_groups=4, attn_mask_type="padding_causal"
+    ),
+    "fa4_varlen_4": ModelConfig(2, 128, 16, 64, max_seqlen_kv=256, attn_mask_type="padding"),
+}
+
+
+@pytest.mark.skipif(
+    not FlashAttentionUtils.v4_is_installed, reason="Flash-attn v4 (flash-attn-4) is required."
+)
+@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
+@pytest.mark.parametrize("dtype", param_types_lean)
+@pytest.mark.parametrize("model_configs", [model_configs_fa4_varlen])
+@pytest.mark.parametrize("model", model_configs_fa4_varlen.keys())
+@pytest.mark.parametrize("qkv_layout", ["thd_thd_thd", "bshd_bshd_bshd"])
+def test_dpa_fa4_varlen(dtype, model_configs, model, qkv_layout):
+    """Test DotProductAttention with FA4: variable-length sequences (varlen/thd)"""
+    test_dot_product_attention(dtype, model_configs, model, False, True, qkv_layout, False, False)
+
+
+model_configs_fa4_mask = {
+    # test: ModelConfig(b, sq, hq, dqk)
+    "fa4_mask_no_mask": ModelConfig(2, 1024, 16, 128),
+    "fa4_mask_causal": ModelConfig(2, 1024, 16, 128, attn_mask_type="causal"),
+    "fa4_mask_causal_br": ModelConfig(2, 1024, 16, 128, attn_mask_type="causal_bottom_right"),
+    "fa4_mask_padding": ModelConfig(2, 1024, 16, 128, attn_mask_type="padding"),
+    "fa4_mask_padding_causal": ModelConfig(2, 1024, 16, 128, attn_mask_type="padding_causal"),
+    "fa4_mask_padding_causal_br": ModelConfig(
+        2, 1024, 16, 128, attn_mask_type="padding_causal_bottom_right"
+    ),
+}
+
+
+@pytest.mark.skipif(
+    not FlashAttentionUtils.v4_is_installed, reason="Flash-attn v4 (flash-attn-4) is required."
+)
+@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
+@pytest.mark.parametrize("dtype", param_types_lean)
+@pytest.mark.parametrize("model_configs", [model_configs_fa4_mask])
+@pytest.mark.parametrize("model", model_configs_fa4_mask.keys())
+def test_dpa_fa4_mask(dtype, model_configs, model):
+    """Test DotProductAttention with FA4: various attention mask types"""
+    test_dot_product_attention(dtype, model_configs, model, False, True, None, False, False)
+
+
+model_configs_softmax = {
+    # test: ModelConfig(b, sq, hq, dqk)
+    "softmax_1_0": ModelConfig(2, 2048, 64, 64, num_gqa_groups=8),
+    "softmax_1_1": ModelConfig(2, 2048, 64, 64, num_gqa_groups=8, softmax_type="off-by-one"),
+    "softmax_1_2": ModelConfig(2, 2048, 64, 64, num_gqa_groups=8, softmax_type="learnable"),
+    "softmax_2_0": ModelConfig(2, 2048, 64, 64, num_gqa_groups=8, attn_mask_type="causal"),
+    "softmax_2_1": ModelConfig(
+        2, 2048, 64, 64, num_gqa_groups=8, attn_mask_type="causal", softmax_type="off-by-one"
+    ),
+    "softmax_2_2": ModelConfig(
+        2, 2048, 64, 64, num_gqa_groups=8, attn_mask_type="causal", softmax_type="learnable"
+    ),
+    "softmax_3_0": ModelConfig(2, 2048, 64, 64, num_gqa_groups=8, attn_mask_type="padding"),
+    "softmax_3_1": ModelConfig(
+        2, 2048, 64, 64, num_gqa_groups=8, attn_mask_type="padding", softmax_type="off-by-one"
+    ),
+    "softmax_3_2": ModelConfig(
+        2, 2048, 64, 64, num_gqa_groups=8, attn_mask_type="padding", softmax_type="learnable"
+    ),
+    "softmax_4_0": ModelConfig(
+        2, 2048, 64, 64, num_gqa_groups=8, window_size=(128, 0), attn_mask_type="causal"
+    ),
+    "softmax_4_1": ModelConfig(
+        2,
+        2048,
+        64,
+        64,
+        num_gqa_groups=8,
+        window_size=(128, 0),
+        attn_mask_type="causal",
+        softmax_type="off-by-one",
+    ),
+    "softmax_4_2": ModelConfig(
+        2,
+        2048,
+        64,
+        64,
+        num_gqa_groups=8,
+        window_size=(128, 0),
+        attn_mask_type="causal",
+        softmax_type="learnable",
+    ),
+    "softmax_5_0": ModelConfig(
+        2, 2048, 64, 64, num_gqa_groups=8, window_size=(128, 0), attn_mask_type="padding_causal"
+    ),
+    "softmax_5_1": ModelConfig(
+        2,
+        2048,
+        64,
+        64,
+        num_gqa_groups=8,
+        window_size=(128, 0),
+        attn_mask_type="padding_causal",
+        softmax_type="off-by-one",
+    ),
+    "softmax_5_2": ModelConfig(
+        2,
+        2048,
+        64,
+        64,
+        num_gqa_groups=8,
+        window_size=(128, 0),
+        attn_mask_type="padding_causal",
+        softmax_type="learnable",
+    ),
+}
+
+
+@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("model_configs", [model_configs_softmax])
+@pytest.mark.parametrize("model", model_configs_softmax.keys())
+def test_dpa_softmax(dtype, model_configs, model):
+    """Test DotProductAttention module with different softmax types"""
+    test_dot_product_attention(
+        dtype, model_configs, model, True, True, "bshd_bshd_bshd", False, False
+    )
+
+
+@pytest.mark.skipif(get_cudnn_version() < (9, 18, 0), reason="cuDNN 9.18.0+ is required.")
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("model_configs", [model_configs_softmax])
+@pytest.mark.parametrize("model", model_configs_softmax.keys())
+def test_dpa_softmax_thd(dtype, model_configs, model):
+    """Test DotProductAttention module with different softmax types"""
+    test_dot_product_attention(dtype, model_configs, model, True, True, "thd_thd_thd", False, False)
+
+
 model_configs_mla = {
-    #    test:             b,  h, hg, dqk, sq, skv,   p,      mask,      bias   # attn , backend
-    "mla_1_0": ModelConfig(8, 128, 16, 64, head_dim_v=128),  # self , 0
-    "mla_1_1": ModelConfig(4, 128, 16, 64, max_seqlen_kv=256, head_dim_v=128),  # cross, 0
-    "mla_1_2": ModelConfig(4, 128, 16, 192, max_seqlen_kv=256, head_dim_v=128),  # cross, 0
-    "mla_2_0": ModelConfig(2, 2048, 24, 128, attn_mask_type="causal", head_dim_v=64),  # self , 1
+    # test: ModelConfig(b, sq, hq, dqk)
+    "mla_1_0": ModelConfig(8, 128, 16, 64, head_dim_v=128),
+    "mla_1_1": ModelConfig(4, 128, 16, 64, max_seqlen_kv=256, head_dim_v=128),
+    "mla_1_2": ModelConfig(4, 128, 16, 192, max_seqlen_kv=256, head_dim_v=128),
+    "mla_2_0": ModelConfig(2, 2048, 24, 128, attn_mask_type="causal", head_dim_v=64),
     "mla_2_1": ModelConfig(
         1, 2048, 24, 128, max_seqlen_kv=4096, attn_mask_type="causal", head_dim_v=64
-    ),  # cross, 1
+    ),
     "mla_2_2": ModelConfig(
         1, 2048, 24, 192, max_seqlen_kv=4096, attn_mask_type="causal", head_dim_v=128
-    ),  # cross, 1
-    "mla_3_0": ModelConfig(8, 1, 16, 128, max_seqlen_kv=2048, head_dim_v=64),  # inference
-    "mla_3_1": ModelConfig(8, 1, 16, 256, max_seqlen_kv=2048, head_dim_v=128),  # inference
-    "mla_3_2": ModelConfig(8, 1, 16, 192, max_seqlen_kv=2048, head_dim_v=128),  # inference
+    ),
+    "mla_3_0": ModelConfig(8, 1, 16, 128, max_seqlen_kv=2048, head_dim_v=64),
+    "mla_3_1": ModelConfig(8, 1, 16, 256, max_seqlen_kv=2048, head_dim_v=128),
+    "mla_3_2": ModelConfig(8, 1, 16, 192, max_seqlen_kv=2048, head_dim_v=128),
+    "mla_3_3": ModelConfig(8, 1, 16, 160, max_seqlen_kv=2048, head_dim_v=128),
+    "mla_3_4": ModelConfig(8, 1, 16, 160, max_seqlen_kv=2048, head_dim_v=160),
 }
 
 
@@ -287,7 +613,7 @@ def test_dpa_mla(dtype, model_configs, model):
 
 
 model_configs_mask = {
-    #     test:             b,  h, hg,   d,   sq,  skv,   p,             mask,      bias
+    # test: ModelConfig(b, sq, hq, dqk)
     "mask_1_0": ModelConfig(2, 2048, 16, 64, attn_mask_type="causal"),
     "mask_1_1": ModelConfig(2, 2048, 24, 128, num_gqa_groups=1, attn_mask_type="causal"),
     "mask_1_2": ModelConfig(2, 2048, 24, 128, max_seqlen_kv=4096, attn_mask_type="causal"),
@@ -342,18 +668,16 @@ def test_dpa_mask(dtype, model_configs, model):
 
 
 model_configs_bias = {
-    #     test:             b,  h, hg,   d,   sq,  skv,   p,             mask,             bias
+    # test: ModelConfig(b, sq, hq, dqk)
     "bias_1_0": ModelConfig(4, 128, 16, 64, attn_bias_type="post_scale_bias"),
     "bias_1_1": ModelConfig(2, 128, 16, 64, max_seqlen_kv=256, attn_bias_type="post_scale_bias"),
     "bias_1_2": ModelConfig(4, 2048, 24, 128, attn_bias_type="post_scale_bias"),
     "bias_1_3": ModelConfig(2, 2048, 24, 128, max_seqlen_kv=4096, attn_bias_type="post_scale_bias"),
-    "bias_1_4": ModelConfig(4, 2048, 24, 128, attn_bias_type="alibi"),  # skipped
-    "bias_1_5": ModelConfig(
-        2, 2048, 24, 128, max_seqlen_kv=4096, attn_bias_type="alibi"
-    ),  # skipped
+    "bias_1_4": ModelConfig(4, 2048, 24, 128, attn_bias_type="alibi"),
+    "bias_1_5": ModelConfig(2, 2048, 24, 128, max_seqlen_kv=4096, attn_bias_type="alibi"),
     "bias_2_0": ModelConfig(
         4, 128, 16, 64, attn_mask_type="padding", attn_bias_type="post_scale_bias"
-    ),  # skipped
+    ),
     "bias_2_1": ModelConfig(
         2,
         128,
@@ -362,10 +686,10 @@ model_configs_bias = {
         max_seqlen_kv=256,
         attn_mask_type="padding",
         attn_bias_type="post_scale_bias",
-    ),  # skipped
+    ),
     "bias_2_2": ModelConfig(
         4, 2048, 24, 128, attn_mask_type="padding", attn_bias_type="post_scale_bias"
-    ),  # skipped
+    ),
     "bias_2_3": ModelConfig(
         2,
         2048,
@@ -374,13 +698,11 @@ model_configs_bias = {
         max_seqlen_kv=4096,
         attn_mask_type="padding",
         attn_bias_type="post_scale_bias",
-    ),  # skipped
-    "bias_2_4": ModelConfig(
-        4, 2048, 24, 128, attn_mask_type="padding", attn_bias_type="alibi"
-    ),  # skipped
+    ),
+    "bias_2_4": ModelConfig(4, 2048, 24, 128, attn_mask_type="padding", attn_bias_type="alibi"),
     "bias_2_5": ModelConfig(
         2, 2048, 24, 128, max_seqlen_kv=4096, attn_mask_type="padding", attn_bias_type="alibi"
-    ),  # skipped
+    ),
     "bias_3_0": ModelConfig(
         4, 128, 16, 64, attn_mask_type="causal", attn_bias_type="post_scale_bias"
     ),
@@ -398,14 +720,14 @@ model_configs_bias = {
         max_seqlen_kv=4096,
         attn_mask_type="causal",
         attn_bias_type="post_scale_bias",
-    ),  # skipped
+    ),
     "bias_3_4": ModelConfig(4, 2048, 24, 128, attn_mask_type="causal", attn_bias_type="alibi"),
     "bias_3_5": ModelConfig(
         2, 2048, 24, 128, max_seqlen_kv=4096, attn_mask_type="causal", attn_bias_type="alibi"
-    ),  # skipped
+    ),
     "bias_4_0": ModelConfig(
         4, 128, 16, 64, attn_mask_type="padding_causal", attn_bias_type="post_scale_bias"
-    ),  # skipped
+    ),
     "bias_4_1": ModelConfig(
         2,
         128,
@@ -414,10 +736,10 @@ model_configs_bias = {
         max_seqlen_kv=256,
         attn_mask_type="padding_causal",
         attn_bias_type="post_scale_bias",
-    ),  # skipped
+    ),
     "bias_4_2": ModelConfig(
         4, 2048, 24, 128, attn_mask_type="padding_causal", attn_bias_type="post_scale_bias"
-    ),  # skipped
+    ),
     "bias_4_3": ModelConfig(
         2,
         2048,
@@ -426,10 +748,10 @@ model_configs_bias = {
         max_seqlen_kv=4096,
         attn_mask_type="padding_causal",
         attn_bias_type="post_scale_bias",
-    ),  # skipped
+    ),
     "bias_4_4": ModelConfig(
         4, 2048, 24, 128, attn_mask_type="padding_causal", attn_bias_type="alibi"
-    ),  # skipped
+    ),
     "bias_4_5": ModelConfig(
         2,
         2048,
@@ -438,7 +760,7 @@ model_configs_bias = {
         max_seqlen_kv=4096,
         attn_mask_type="padding_causal",
         attn_bias_type="alibi",
-    ),  # skipped
+    ),
 }
 
 
@@ -452,12 +774,13 @@ def test_dpa_bias(dtype, model_configs, model):
 
 
 model_configs_bias_shapes = {
-    #     test:             b,  h, hg,   d,   sq,  skv,   p,
+    # test: ModelConfig(b, sq, hq, dqk)
     "bias_1_0": ModelConfig(4, 128, 16, 64, attn_bias_type="post_scale_bias", bias_shape="11ss"),
     "bias_1_1": ModelConfig(2, 128, 16, 64, attn_bias_type="post_scale_bias", bias_shape="1hss"),
     "bias_1_2": ModelConfig(4, 2048, 24, 128, attn_bias_type="post_scale_bias", bias_shape="b1ss"),
     "bias_1_3": ModelConfig(2, 2048, 24, 128, attn_bias_type="post_scale_bias", bias_shape="bhss"),
-    "bias_1_4": ModelConfig(
+    "bias_1_4": ModelConfig(2, 2048, 24, 128, attn_bias_type="post_scale_bias", bias_shape="111s"),
+    "bias_1_5": ModelConfig(
         4,
         2048,
         24,
@@ -467,7 +790,7 @@ model_configs_bias_shapes = {
         bias_shape="1hss",
         alibi_type="custom",
     ),
-    "bias_1_5": ModelConfig(
+    "bias_1_6": ModelConfig(
         2,
         2048,
         24,
@@ -490,7 +813,7 @@ def test_dpa_bias_shapes(dtype, model_configs, model):
 
 
 model_configs_swa = {
-    #    test:             b,  h, hg,   d,   sq,  skv,   p,             mask,             bias
+    # test: ModelConfig(b, sq, hq, dqk)
     "swa_1_1": ModelConfig(2, 2048, 16, 64),
     "swa_1_2": ModelConfig(2, 2048, 24, 128, num_gqa_groups=4),
     "swa_1_3": ModelConfig(2, 2048, 24, 128, max_seqlen_kv=4096),
@@ -524,13 +847,14 @@ model_configs_swa = {
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_swa])
 @pytest.mark.parametrize("model", model_configs_swa.keys())
-def test_dpa_sliding_window(dtype, model_configs, model):
+@pytest.mark.parametrize("qkv_layout", ["thd_thd_thd", "sbhd_sbhd_sbhd"])
+def test_dpa_sliding_window(dtype, model_configs, model, qkv_layout):
     """Test DotProductAttention module with sliding window attention"""
-    test_dot_product_attention(dtype, model_configs, model, False, True, None, True, False)
+    test_dot_product_attention(dtype, model_configs, model, False, True, qkv_layout, True, False)
 
 
 model_configs_alibi_slopes = {
-    #     test:             b,  h, hg,   d,   sq,  skv,   p,      mask,    bias, alibi_type
+    # test: ModelConfig(b, sq, hq, dqk)
     "alibi_1_0": ModelConfig(
         2, 128, 16, 64, attn_mask_type="causal", attn_bias_type="alibi", alibi_type="vanilla"
     ),
@@ -584,7 +908,7 @@ qkv_layouts = [
 
 
 model_configs_layout = {
-    #       test:             b,  h, hg,   d,   sq,  skv,   p,             mask,             bias
+    # test: ModelConfig(b, sq, hq, dqk)
     "layout_0_0": ModelConfig(2, 128, 16, 64),
     "layout_0_1": ModelConfig(
         2, 128, 16, 64, attn_mask_type="causal", attn_bias_type="post_scale_bias"
@@ -632,7 +956,7 @@ def test_dpa_qkv_layout(dtype, model_configs, model, qkv_layout):
 
 qkv_layouts_thd = ["t3hd", "th3d", "thd_t2hd", "thd_th2d", "thd_thd_thd"]
 model_configs_layout_thd = {
-    #       test:             b,  h, hg,   d,   sq,  skv,   p,             mask,             bias
+    # test: ModelConfig(b, sq, hq, dqk)
     "layout_0_0": ModelConfig(2, 2048, 16, 64, attn_mask_type="padding"),
     "layout_0_1": ModelConfig(2, 2048, 24, 128, num_gqa_groups=1, attn_mask_type="padding"),
     "layout_0_2": ModelConfig(2, 2048, 24, 128, max_seqlen_kv=4096, attn_mask_type="padding"),
@@ -724,16 +1048,18 @@ def _run_dot_product_attention(
     is_training: bool,
 ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
     """Run DotProductAttention module with one forward pass and one backward pass"""
-
     # Set RNG and environment varables
     reset_rng_states()
     os.environ["NVTE_FLASH_ATTN"] = "0"
     os.environ["NVTE_FUSED_ATTN"] = "0"
+    os.environ["NVTE_UNFUSED_ATTN"] = "0"
     if backend == "FlashAttention":
         os.environ["NVTE_FLASH_ATTN"] = "1"
     if backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
         os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] = "1" if workspace_opt else "0"
+    if backend == "UnfusedDotProductAttention":
+        os.environ["NVTE_UNFUSED_ATTN"] = "1"
     _attention_backends["backend_selection_requires_update"] = True
 
     # Create seqlens
@@ -879,6 +1205,8 @@ def _run_dot_product_attention(
             layout = layout.replace("d", "dqk")
         tensor_shape = [dim_to_num[j] for j in layout.split("_")]
         tensor = 0.1 * torch.randn(tensor_shape, dtype=dtype, device="cuda")
+        # tensor: with padding tokens
+        # tensor_orig: without padding tokens
         tensor_orig = tensor
         if qkv_format == "thd" and pad_between_seqs:
             tensor_orig = torch.Tensor([]).to(device="cuda", dtype=dtype)
@@ -959,10 +1287,16 @@ def _run_dot_product_attention(
         bias = None
     if config.attn_bias_type == "post_scale_bias":
         shape = "_".join(config.bias_shape)
+        # For 1hss, 11ss, b1ss, bhss
+        shape_cache = shape
         shape = shape.replace("_s_s", "_sq_skv")
+        # For 111s
+        if shape == shape_cache:
+            shape = shape.replace("_1_s", "_1_skv")
         tensor_shape = [dim_to_num[j] for j in shape.split("_")]
         bias = torch.randn(tensor_shape, dtype=dtype, device="cuda")
-        if config.bias_shape != "1hss":
+        # For 111s, dbias calculation is not supported as of cuDNN 9.18
+        if config.bias_shape == "111s":
             bias.requires_grad = False
 
     # Create RNG
@@ -987,9 +1321,13 @@ def _run_dot_product_attention(
         tp_group=None,
         layer_number=1,
         attention_type=config.attn_type,
+        softmax_type=config.softmax_type,
+        return_max_logit=config.return_max_logit,
     ).to(dtype=dtype, device="cuda")
     if not is_training:
         block = block.eval()
+    if is_training and config.softmax_type != "vanilla":
+        block.softmax_offset.requires_grad = True
 
     # Run a forward and backward pass
     if backend in ["FlashAttention", "UnfusedDotProductAttention"]:
@@ -1021,15 +1359,24 @@ def _run_dot_product_attention(
         core_attention_bias=bias,
         alibi_slopes=alibi_slopes,
         fast_zero_fill=True,
+        # Only pass num_splits when exercising the FlashAttention path
+        num_splits=config.num_splits if backend == "FlashAttention" else 1,
     )
+    max_logit = None
+    if config.return_max_logit:
+        out, max_logit = out
     if is_training:
         out.backward(d_out)
 
+    d_softmax_offset = None
+    if is_training and config.softmax_type != "vanilla":
+        d_softmax_offset = block.softmax_offset.grad
+
     if backend in ["FlashAttention", "UnfusedDotProductAttention"]:
         if is_training:
-            return out, (q.grad, k.grad, v.grad)
+            return out, max_logit, (q.grad, k.grad, v.grad, d_softmax_offset)
         else:
-            return out, (None, None, None)
+            return out, max_logit, (None, None, None, d_softmax_offset)
     if backend == "FusedAttention":
         if qkv_format == "thd" and pad_between_seqs:
             out_orig = torch.Tensor([]).to(device="cuda", dtype=dtype)
@@ -1058,18 +1405,22 @@ def _run_dot_product_attention(
                         [v_grad_orig, v.grad[valid_range_kv[0] : valid_range_kv[1]]], dim=0
                     )
             if is_training:
-                return out_orig, (q_grad_orig, k_grad_orig, v_grad_orig)
+                return (
+                    out_orig,
+                    max_logit,
+                    (q_grad_orig, k_grad_orig, v_grad_orig, d_softmax_offset),
+                )
             else:
-                return out_orig, (None, None, None)
+                return out_orig, max_logit, (None, None, None, d_softmax_offset)
         else:
             if is_training:
-                return out, (q.grad, k.grad, v.grad)
+                return out, max_logit, (q.grad, k.grad, v.grad, d_softmax_offset)
             else:
-                return out, (None, None, None)
+                return out, max_logit, (None, None, None, d_softmax_offset)
 
 
 model_configs_te_layer = {
-    #   test:             b,  h, hg,   d,   sq,  skv,   p,      mask,             bias
+    # test: ModelConfig(b, sq, hq, dqk)
     "te_1_0": ModelConfig(2, 128, 16, 64, attn_bias_type="post_scale_bias"),
     "te_1_1": ModelConfig(
         4, 128, 16, 64, attn_mask_type="causal", attn_bias_type="post_scale_bias"
@@ -1116,6 +1467,7 @@ def test_transformer_layer(
             qkv_format.replace("hd", "h3d") if fused_qkv_params else qkv_format.replace("hd", "3hd")
         ),
         is_training=is_training,
+        deterministic=_deterministic,
     )
     flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
     if not fused_attn_supported:
@@ -1129,6 +1481,7 @@ def test_transformer_layer(
                 else qkv_format.replace("hd", "3hd")
             ),
             is_training=is_training,
+            deterministic=_deterministic,
         )
         flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
 
@@ -1256,10 +1609,13 @@ def _run_transformer_layer(
     reset_rng_states()
     os.environ["NVTE_FLASH_ATTN"] = "0"
     os.environ["NVTE_FUSED_ATTN"] = "0"
+    os.environ["NVTE_UNFUSED_ATTN"] = "0"
     if backend == "FlashAttention":
         os.environ["NVTE_FLASH_ATTN"] = "1"
     if backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
+    if backend == "UnfusedDotProductAttention":
+        os.environ["NVTE_UNFUSED_ATTN"] = "1"
     _attention_backends["backend_selection_requires_update"] = True
 
     # Create input tensor
@@ -1434,16 +1790,17 @@ def _run_transformer_layer(
 
 
 model_configs_fp8_extra_state = {
+    # test: ModelConfig(b, sq, hq, dqk)
     "large": ModelConfig(2, 128, 4, 128, num_layers=1),
 }
 
 
-@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
-@pytest.mark.skipif(get_device_compute_capability() < (9, 0), reason="FP8 tests require Hopper.")
+@pytest.mark.skipif(not fp8_attn_available, reason=reason_for_no_fp8_attn)
 @pytest.mark.skipif(get_cudnn_version() < (9, 3, 0), reason="cuDNN 9.3.0+ is required.")
 @pytest.mark.parametrize("model", ["large"])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_sanity_attention_extra_state(model, dtype):
+def test_dpa_fp8_extra_state(model, dtype):
+    """Test DotProductAttention module in FP8 with checkpointing"""
     config = model_configs_fp8_extra_state[model]
     # Test backend availability
     is_training = True
@@ -1452,14 +1809,15 @@ def test_sanity_attention_extra_state(model, dtype):
         qkv_dtype=torch.float8_e4m3fn,
         qkv_layout="sb3hd",
         is_training=is_training,
+        deterministic=_deterministic,
     )
     flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
     if not fused_attn_supported and not flash_attn_supported:
         pytest.skip("No attention backend available.")
 
-    outputs = _run_attention_extra_state(dtype, config, checkpoint=False)
-    outputs_checkpoint = _run_attention_extra_state(dtype, config, checkpoint=True)
-    outputs_checkpoint_v1_6 = _run_attention_extra_state(
+    outputs = _run_dpa_fp8_extra_state(dtype, config, checkpoint=False)
+    outputs_checkpoint = _run_dpa_fp8_extra_state(dtype, config, checkpoint=True)
+    outputs_checkpoint_v1_6 = _run_dpa_fp8_extra_state(
         dtype, config, mimic_v1_6=True, checkpoint=True
     )
 
@@ -1481,7 +1839,8 @@ def test_sanity_attention_extra_state(model, dtype):
         )
 
 
-def _run_attention_extra_state(dtype, config, checkpoint=False, mimic_v1_6=False):
+def _run_dpa_fp8_extra_state(dtype, config, checkpoint=False, mimic_v1_6=False):
+    """Run DotProductAttention module in FP8 with checkpointing"""
     steps = 10
     path = "checkpoint.pt"
     fp8_enabled = True
@@ -1507,7 +1866,7 @@ def _run_attention_extra_state(dtype, config, checkpoint=False, mimic_v1_6=False
         init_method = init_method_normal(sigma)
         output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
 
-        with fp8_model_init(enabled=fp8_enabled, recipe=fp8_recipe):
+        with quantized_model_init(enabled=fp8_enabled, recipe=fp8_recipe):
             block = TransformerLayer(
                 config.hidden_size,
                 4 * config.hidden_size,
@@ -1524,7 +1883,7 @@ def _run_attention_extra_state(dtype, config, checkpoint=False, mimic_v1_6=False
 
     block = get_model(dtype, config)
     for i in range(steps // 2):
-        with fp8_autocast(enabled=fp8_enabled, fp8_recipe=fp8_recipe):
+        with autocast(enabled=fp8_enabled, recipe=fp8_recipe):
             output = block(hidden_states, None)
             loss = output.sum()
             loss.backward()
@@ -1559,7 +1918,7 @@ def _run_attention_extra_state(dtype, config, checkpoint=False, mimic_v1_6=False
         assert not param_grads, "Oops!"
 
     for i in range((steps + 1) // 2):
-        with fp8_autocast(enabled=fp8_enabled, fp8_recipe=fp8_recipe):
+        with autocast(enabled=fp8_enabled, recipe=fp8_recipe):
             output = block(hidden_states, None)
             loss = output.sum()
             loss.backward()
@@ -1578,7 +1937,7 @@ def _run_attention_extra_state(dtype, config, checkpoint=False, mimic_v1_6=False
 
 
 model_configs_fp8_vs_f16 = {
-    #  test:             b,  h, hg,   d,   sq,  skv,   p,      mask,      bias
+    # test: ModelConfig(b, sq, hq, dqk)
     "fp8_9": ModelConfig(2, 2048, 16, 128),
     "fp8_10": ModelConfig(2, 2048, 24, 128, num_gqa_groups=12),
     "fp8_11": ModelConfig(1, 8192, 32, 128, num_gqa_groups=4),
@@ -1598,36 +1957,8 @@ qkv_layout_fp8_vs_f16 = ["sbh3d", "bshd_bshd_bshd", "sbhd_sbhd_sbhd"]
 qkv_format_fp8_vs_f16 = ["bshd", "sbhd"]
 
 
-def _rmse(a, b):
-    return math.sqrt((torch.pow((a - b), 2) / a.numel()).sum())
-
-
-def _error(a, b, name_a, name_b, atol, rtol, rmse_tol):
-    logging.debug(name_a + " min {:.6f} max {:.6f}".format(a.min().item(), a.max().item()))
-    logging.debug(name_b + " min {:.6f} max {:.6f}".format(b.min().item(), b.max().item()))
-    try:
-        if a.dtype != b.dtype:
-            a = a.to(b.dtype)
-        torch.testing.assert_close(a, b, atol=atol, rtol=rtol)
-    except Exception as e:
-        logging.debug(e)
-
-    rmse = _rmse(a, b)
-    logging.debug(name_a + " vs " + name_b + " RMSE: {:.6f}".format(rmse))
-    rmse_range = max(a.max().item(), b.max().item()) - min(a.min().item(), b.min().item())
-    assert rmse < rmse_tol * rmse_range, (
-        name_a
-        + " vs "
-        + name_b
-        + " RMSE {:.5f} is over tolerance {:.5f} ({:.5f} * {:.5f})".format(
-            rmse, rmse_tol * rmse_range, rmse_tol, rmse_range
-        )
-    )
-
-
 @pytest.mark.skipif(get_cudnn_version() < (9, 2, 1), reason="cuDNN 9.2.1+ is required.")
-@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
-@pytest.mark.skipif(get_device_compute_capability() < (9, 0), reason="FP8 tests require Hopper+.")
+@pytest.mark.skipif(not fp8_attn_available, reason=reason_for_no_fp8_attn)
 @pytest.mark.parametrize("dtype", param_types_fp8_vs_f16)
 @pytest.mark.parametrize("model", model_configs_fp8_vs_f16.keys())
 @pytest.mark.parametrize("qkv_format", qkv_format_fp8_vs_f16)
@@ -1635,61 +1966,99 @@ def _error(a, b, name_a, name_b, atol, rtol, rmse_tol):
 @pytest.mark.parametrize("fp8_dpa_bwd", [True, False])
 @pytest.mark.parametrize("RoPE", [True, False])
 @pytest.mark.parametrize("is_training", [True, False])
-def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, RoPE, is_training):
-    os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "1"
+@pytest.mark.parametrize("scaling_mode", ["delayed", "current"])
+def test_mha_fp8_vs_f16(
+    dtype,
+    model,
+    qkv_format,
+    input_layernorm,
+    fp8_dpa_bwd,
+    RoPE,
+    is_training,
+    scaling_mode,
+):
+    """Test MultiHeadAttention module in FP8"""
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
     config = model_configs_fp8_vs_f16[model]
 
     # Test backend availability
-    available_backends, _, fused_attn_backends = get_available_attention_backends(
+    if scaling_mode == "delayed":
+        fp8_recipe = recipe.DelayedScaling(
+            margin=0,
+            fp8_format=recipe.Format.HYBRID,
+            amax_history_len=1,
+            amax_compute_algo="most_recent",
+            fp8_dpa=True,
+            fp8_mha=True,
+        )
+    elif scaling_mode == "current":
+        fp8_recipe = recipe.Float8CurrentScaling(
+            fp8_format=recipe.Format.HYBRID,
+            fp8_dpa=True,
+            fp8_mha=True,
+        )
+    fp8_meta = {}
+    fp8_meta["recipe"] = fp8_recipe
+    available_backends, _, _ = get_available_attention_backends(
         config,
         qkv_dtype=torch.float8_e4m3fn,
         qkv_layout=qkv_format.replace("hd", "h3d"),
+        fp8=True,
+        fp8_meta=fp8_meta,
         is_training=is_training,
+        deterministic=_deterministic,
     )
-    flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
-    # Skip if only unfused backend is supported
-    if (len(fused_attn_backends) + flash_attn_supported + unfused_attn_supported) < 2:
-        pytest.skip("Less than two backends to compare.")
-    if not fp8_dpa_bwd:
-        available_backends, _, fused_attn_backends = get_available_attention_backends(
-            config,
-            qkv_dtype=dtype,
-            qkv_layout=qkv_format.replace("hd", "h3d"),
-            is_training=is_training,
-        )
-        _, fused_attn_supported, _ = available_backends
-        if not fused_attn_supported:
-            pytest.skip("No attention backend available.")
+    flash_attn_supported, fused_attn_supported_fp8, unfused_attn_supported = available_backends
+    available_backends, _, fused_attn_backends = get_available_attention_backends(
+        config,
+        qkv_dtype=dtype,
+        qkv_layout=qkv_format.replace("hd", "h3d"),
+        is_training=is_training,
+        deterministic=_deterministic,
+    )
+    _, fused_attn_supported_f16, _ = available_backends
+    if flash_attn_supported + fused_attn_supported_fp8 < 1:
+        pytest.skip("No FP8 attention backend available.")
+    if not fused_attn_supported_f16:
+        pytest.skip("No reference backend available.")
 
     if flash_attn_supported:
         os.environ["NVTE_FLASH_ATTN"] = "1"
         os.environ["NVTE_FUSED_ATTN"] = "0"
+        os.environ["NVTE_UNFUSED_ATTN"] = "0"
         _attention_backends["backend_selection_requires_update"] = True
         logging.info("[test_mha_fp8_vs_f16]: run with fp8_mha = True")
         flash_attn_fwd_fp8, param_names, flash_attn_bwd_fp8 = _run_mha_fp8_vs_f16(
-            dtype, config, True, qkv_format, input_layernorm, RoPE, is_training
+            dtype, config, True, qkv_format, input_layernorm, RoPE, is_training, fp8_recipe
         )
 
-    os.environ["NVTE_FLASH_ATTN"] = "0"
-    os.environ["NVTE_FUSED_ATTN"] = "1"
-    _attention_backends["backend_selection_requires_update"] = True
-    logging.info("[test_mha_fp8_vs_f16]: run with fp8_mha = True")
-    fused_attn_fwd_fp8, param_names, fused_attn_bwd_fp8 = _run_mha_fp8_vs_f16(
-        dtype, config, True, qkv_format, input_layernorm, RoPE, is_training
-    )
+    if fused_attn_supported_fp8:
+        os.environ["NVTE_FLASH_ATTN"] = "0"
+        os.environ["NVTE_FUSED_ATTN"] = "1"
+        os.environ["NVTE_UNFUSED_ATTN"] = "0"
+        _attention_backends["backend_selection_requires_update"] = True
+        logging.info("[test_mha_fp8_vs_f16]: run with fp8_mha = True")
+        fused_attn_fwd_fp8, param_names, fused_attn_bwd_fp8 = _run_mha_fp8_vs_f16(
+            dtype, config, True, qkv_format, input_layernorm, RoPE, is_training, fp8_recipe
+        )
 
-    logging.info("[test_mha_fp8_vs_f16]: run with fp8_mha = False")
-    fused_attn_fwd_f16, param_names, fused_attn_bwd_f16 = _run_mha_fp8_vs_f16(
-        dtype, config, False, qkv_format, input_layernorm, RoPE, is_training
-    )
+    if fused_attn_supported_f16:
+        os.environ["NVTE_FLASH_ATTN"] = "0"
+        os.environ["NVTE_FUSED_ATTN"] = "1"
+        os.environ["NVTE_UNFUSED_ATTN"] = "0"
+        _attention_backends["backend_selection_requires_update"] = True
+        logging.info("[test_mha_fp8_vs_f16]: run with fp8_mha = False")
+        fused_attn_fwd_f16, param_names, fused_attn_bwd_f16 = _run_mha_fp8_vs_f16(
+            dtype, config, False, qkv_format, input_layernorm, RoPE, is_training, fp8_recipe
+        )
 
     atol = 5e-1
     rtol = 5e-1
     rmse_tol = 0.15
-    logging.debug("========== {:^25s} ==========".format("forward output"))
-    if flash_attn_supported:
-        _error(
+    if flash_attn_supported and fused_attn_supported_f16:
+        logging.debug("========== {:^25s} ==========".format("flash fp8 vs fused f16:"))
+        logging.debug("========== {:^25s} ==========".format("forward output"))
+        compare_and_assert(
             flash_attn_fwd_fp8,
             fused_attn_fwd_f16,
             "flash_attn_fwd_fp8",
@@ -1697,32 +2066,41 @@ def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, 
             atol,
             rtol,
             rmse_tol,
+            True,
         )
-    _error(
-        fused_attn_fwd_fp8,
-        fused_attn_fwd_f16,
-        "fused_attn_fwd_fp8",
-        "fused_attn_fwd_f16",
-        atol,
-        rtol,
-        rmse_tol,
-    )
+    if fused_attn_supported_fp8 and fused_attn_supported_f16:
+        logging.debug("========== {:^25s} ==========".format("fused fp8 vs fused f16:"))
+        logging.debug("========== {:^25s} ==========".format("forward output"))
+        compare_and_assert(
+            fused_attn_fwd_fp8,
+            fused_attn_fwd_f16,
+            "fused_attn_fwd_fp8",
+            "fused_attn_fwd_f16",
+            atol,
+            rtol,
+            rmse_tol,
+            True,
+        )
 
-    if is_training:
-        for i in range(len(param_names[:1])):
-            logging.debug("========== {:^25s} ==========".format(param_names[i]))
-            _error(
-                fused_attn_bwd_fp8[i],
-                fused_attn_bwd_f16[i],
-                f"fused_attn_bwd_fp8[{i}]",
-                f"fused_attn_bwd_f16[{i}]",
-                atol,
-                rtol,
-                rmse_tol,
-            )
+        if is_training:
+            for i in range(len(param_names[:1])):
+                logging.debug("========== {:^25s} ==========".format(param_names[i]))
+                compare_and_assert(
+                    fused_attn_bwd_fp8[i],
+                    fused_attn_bwd_f16[i],
+                    f"fused_attn_bwd_fp8[{i}]",
+                    f"fused_attn_bwd_f16[{i}]",
+                    atol,
+                    rtol,
+                    rmse_tol,
+                    True,
+                )
 
 
-def _run_mha_fp8_vs_f16(dtype, config, fp8_mha, qkv_format, input_layernorm, RoPE, is_training):
+def _run_mha_fp8_vs_f16(
+    dtype, config, fp8_mha, qkv_format, input_layernorm, RoPE, is_training, fp8_recipe
+):
+    """Run MultiHeadAttention module in FP8"""
     reset_rng_states()
     _DUMMY_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
     _DUMMY_CUDA_RNG_STATE_TRACKER.add("model-parallel-rng", seed)
@@ -1731,16 +2109,7 @@ def _run_mha_fp8_vs_f16(dtype, config, fp8_mha, qkv_format, input_layernorm, RoP
         """Get cuda rng tracker."""
         return _DUMMY_CUDA_RNG_STATE_TRACKER
 
-    fp8_recipe = recipe.DelayedScaling(
-        margin=0,
-        fp8_format=recipe.Format.HYBRID,
-        amax_history_len=1,
-        amax_compute_algo="most_recent",
-        fp8_dpa=fp8_mha,
-        fp8_mha=fp8_mha,
-    )
-
-    with fp8_model_init(enabled=fp8_mha, recipe=fp8_recipe):
+    with quantized_model_init(enabled=fp8_mha, recipe=fp8_recipe):
         rotary_pos_emb = None
         if RoPE:
             PE = RotaryPositionEmbedding(dim=config.head_dim_qk)
@@ -1812,7 +2181,7 @@ def _run_mha_fp8_vs_f16(dtype, config, fp8_mha, qkv_format, input_layernorm, RoP
     tensor = 0.01 * torch.randn(tensor_shape, dtype=dtype, device="cuda")
     out_grad = tensor.view(*tensor.shape[:-2], -1)
 
-    with fp8_autocast(enabled=fp8_mha, fp8_recipe=fp8_recipe):
+    with autocast(enabled=fp8_mha, recipe=fp8_recipe):
         out = mha(
             hidden_states,
             attn_mask_type=config.attn_mask_type,
@@ -1841,14 +2210,15 @@ def _run_mha_fp8_vs_f16(dtype, config, fp8_mha, qkv_format, input_layernorm, RoP
 
 
 @pytest.mark.skipif(get_cudnn_version() < (9, 2, 1), reason="cuDNN 9.2.1+ is required.")
-@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
-@pytest.mark.skipif(get_device_compute_capability() < (9, 0), reason="FP8 tests require Hopper+.")
+@pytest.mark.skipif(not fp8_attn_available, reason=reason_for_no_fp8_attn)
 @pytest.mark.parametrize("dtype", param_types_fp8_vs_f16)
 @pytest.mark.parametrize("model", model_configs_fp8_vs_f16.keys())
 @pytest.mark.parametrize("qkv_layout", qkv_layout_fp8_vs_f16)
 @pytest.mark.parametrize("fp8_dpa_bwd", [True, False])
 @pytest.mark.parametrize("is_training", [True, False])
-def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training):
+@pytest.mark.parametrize("scaling_mode", ["delayed", "current"])
+def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scaling_mode):
+    """Test DotProductAttention module in FP8"""
     config = model_configs_fp8_vs_f16[model]
 
     # TODO(cyang): think of another way to verify dropout results
@@ -1862,63 +2232,98 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training):
     #        config.dropout_p = 0.1
 
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
-    os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "1"
+    os.environ["NVTE_UnfusedDPA_Emulate_FP8"] = "1"
 
     # Test backend availability
-    available_backends, _, fused_attn_backends = get_available_attention_backends(
+    if scaling_mode == "delayed":
+        fp8_recipe = recipe.DelayedScaling(
+            margin=0,
+            fp8_format=recipe.Format.HYBRID,
+            amax_history_len=1,
+            amax_compute_algo="most_recent",
+            fp8_dpa=True,
+        )
+    elif scaling_mode == "current":
+        fp8_recipe = recipe.Float8CurrentScaling(
+            fp8_format=recipe.Format.HYBRID,
+            fp8_dpa=True,
+        )
+    fp8_meta = {}
+    fp8_meta["recipe"] = fp8_recipe
+    available_backends, _, _ = get_available_attention_backends(
         config,
         qkv_dtype=torch.float8_e4m3fn,
         qkv_layout=qkv_layout,
+        fp8=True,
+        fp8_meta=fp8_meta,
         is_training=is_training,
+        deterministic=_deterministic,
     )
-    flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
-    # Skip if only unfused backend is supported
-    if flash_attn_supported + fused_attn_supported < 1:
+    flash_attn_supported, fused_attn_supported_fp8, unfused_attn_supported = available_backends
+    available_backends, _, _ = get_available_attention_backends(
+        config,
+        qkv_dtype=dtype,
+        qkv_layout=qkv_layout,
+        is_training=is_training,
+        deterministic=_deterministic,
+    )
+    _, fused_attn_supported_f16, _ = available_backends
+    if flash_attn_supported + fused_attn_supported_fp8 < 1:
         pytest.skip("No FP8 attention backend available.")
-    if not fp8_dpa_bwd:
-        available_backends, _, fused_attn_backends = get_available_attention_backends(
-            config,
-            qkv_dtype=dtype,
-            qkv_layout=qkv_layout,
-            is_training=is_training,
-        )
-        _, fused_attn_supported, _ = available_backends
-        if not fused_attn_supported:
-            pytest.skip("No attention backend available.")
+    if not fused_attn_supported_f16:
+        pytest.skip("No reference backend available.")
     if config.num_heads != config.num_gqa_groups and "3" in qkv_layout:
         pytest.skip("qkv_layout not applicable for MQA/GQA")
 
     if flash_attn_supported:
         os.environ["NVTE_FLASH_ATTN"] = "1"
         os.environ["NVTE_FUSED_ATTN"] = "0"
+        os.environ["NVTE_UNFUSED_ATTN"] = "0"
         _attention_backends["backend_selection_requires_update"] = True
-        logging.info("[test_dpa_fp8_vs_f16]: run with fp8_dpa = True")
+        logging.info("[test_dpa_fp8_vs_f16]: run with fp8_dpa = True (FlashAttention)")
         flash_attn_fwd_fp8, flash_attn_bwd_fp8 = _run_dpa_fp8_vs_f16(
-            dtype, config, True, qkv_layout, is_training
+            dtype, config, True, qkv_layout, is_training, fp8_recipe
         )
 
-    os.environ["NVTE_FLASH_ATTN"] = "0"
-    os.environ["NVTE_FUSED_ATTN"] = "1"
-    _attention_backends["backend_selection_requires_update"] = True
-    logging.info("[test_dpa_fp8_vs_f16]: run with fp8_dpa = True")
-    fused_attn_fwd_fp8, fused_attn_bwd_fp8 = _run_dpa_fp8_vs_f16(
-        dtype, config, True, qkv_layout, is_training
-    )
-
-    if config.dropout_p == 0.0:
-        # test cuDNN FP8 dropout: need a FP16/BF16 reference on Blackwell
-        logging.info("[test_dpa_fp8_vs_f16]: run with fp8_dpa = False")
-        fused_attn_fwd_f16, fused_attn_bwd_f16 = _run_dpa_fp8_vs_f16(
-            dtype, config, False, qkv_layout, is_training
+    if unfused_attn_supported:
+        os.environ["NVTE_FLASH_ATTN"] = "0"
+        os.environ["NVTE_FUSED_ATTN"] = "0"
+        os.environ["NVTE_UNFUSED_ATTN"] = "1"
+        _attention_backends["backend_selection_requires_update"] = True
+        logging.info("[test_dpa_fp8_vs_f16]: run with fp8_dpa = True (UnfusedDotProductAttention)")
+        unfused_attn_fwd_fp8, unfused_attn_bwd_fp8 = _run_dpa_fp8_vs_f16(
+            dtype, config, True, qkv_layout, is_training, fp8_recipe
         )
+
+    if fused_attn_supported_fp8:
+        os.environ["NVTE_FLASH_ATTN"] = "0"
+        os.environ["NVTE_FUSED_ATTN"] = "1"
+        os.environ["NVTE_UNFUSED_ATTN"] = "0"
+        _attention_backends["backend_selection_requires_update"] = True
+        logging.info("[test_dpa_fp8_vs_f16]: run with fp8_dpa = True (FusedAttention)")
+        fused_attn_fwd_fp8, fused_attn_bwd_fp8 = _run_dpa_fp8_vs_f16(
+            dtype, config, True, qkv_layout, is_training, fp8_recipe
+        )
+
+    if fused_attn_supported_f16:
+        os.environ["NVTE_FLASH_ATTN"] = "0"
+        os.environ["NVTE_FUSED_ATTN"] = "1"
+        os.environ["NVTE_UNFUSED_ATTN"] = "0"
+        if config.dropout_p == 0.0:
+            # test cuDNN FP8 dropout: need a FP16/BF16 reference on Blackwell
+            logging.info("[test_dpa_fp8_vs_f16]: run with fp8_dpa = False (FusedAttention)")
+            fused_attn_fwd_f16, fused_attn_bwd_f16 = _run_dpa_fp8_vs_f16(
+                dtype, config, False, qkv_layout, is_training, fp8_recipe
+            )
 
     atol = 5e-1
     rtol = 5e-2
     rmse_tol = 0.11
     bwd_names = ["dq", "dk", "dv"]
-    logging.debug("========== {:^25s} ==========".format("forward output"))
-    if flash_attn_supported:
-        _error(
+    if flash_attn_supported and fused_attn_supported_f16:
+        logging.debug("========== {:^25s} ==========".format("flash fp8 vs fused f16:"))
+        logging.debug("========== {:^25s} ==========".format("forward output"))
+        compare_and_assert(
             flash_attn_fwd_fp8,
             fused_attn_fwd_f16,
             "flash_attn_fwd_fp8",
@@ -1926,38 +2331,71 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training):
             atol,
             rtol,
             rmse_tol,
+            True,
         )
-    if config.dropout_p != 0.0:
-        # test cuDNN FP8 dropout
-        assert torch.all(
-            fused_attn_fwd_fp8 == 1
-        ), "fused_attn_fwd_fp8 must be all 1s when Q/K/V are all 1s."
-    else:
-        _error(
-            fused_attn_fwd_fp8,
+    if unfused_attn_supported and fused_attn_supported_f16:
+        logging.debug("========== {:^25s} ==========".format("unfused fp8 vs fused f16:"))
+        logging.debug("========== {:^25s} ==========".format("forward output"))
+        compare_and_assert(
+            unfused_attn_fwd_fp8,
             fused_attn_fwd_f16,
-            "fused_attn_fwd_fp8",
+            "unfused_attn_fwd_fp8",
             "fused_attn_fwd_f16",
             atol,
             rtol,
             rmse_tol,
+            True,
         )
         if is_training:
             for i, _ in enumerate(fused_attn_bwd_f16):
                 logging.debug("========== {:^25s} ==========".format(bwd_names[i]))
-                _error(
-                    fused_attn_bwd_fp8[i],
+                compare_and_assert(
+                    unfused_attn_bwd_fp8[i],
                     fused_attn_bwd_f16[i],
-                    f"fused_attn_bwd_fp8[{i}]",
+                    f"unfused_attn_bwd_fp8[{i}]",
                     f"fused_attn_bwd_f16[{i}]",
                     atol,
                     rtol,
                     rmse_tol,
+                    True,
                 )
+    if fused_attn_supported_fp8 and fused_attn_supported_f16:
+        if config.dropout_p != 0.0:
+            # test cuDNN FP8 dropout
+            assert torch.all(
+                fused_attn_fwd_fp8 == 1
+            ), "fused_attn_fwd_fp8 must be all 1s when Q/K/V are all 1s."
+        else:
+            logging.debug("========== {:^25s} ==========".format("fused fp8 vs fused f16:"))
+            logging.debug("========== {:^25s} ==========".format("forward output"))
+            compare_and_assert(
+                fused_attn_fwd_fp8,
+                fused_attn_fwd_f16,
+                "fused_attn_fwd_fp8",
+                "fused_attn_fwd_f16",
+                atol,
+                rtol,
+                rmse_tol,
+                True,
+            )
+            if is_training:
+                for i, _ in enumerate(fused_attn_bwd_f16):
+                    logging.debug("========== {:^25s} ==========".format(bwd_names[i]))
+                    compare_and_assert(
+                        fused_attn_bwd_fp8[i],
+                        fused_attn_bwd_f16[i],
+                        f"fused_attn_bwd_fp8[{i}]",
+                        f"fused_attn_bwd_f16[{i}]",
+                        atol,
+                        rtol,
+                        rmse_tol,
+                        True,
+                    )
+    os.environ["NVTE_UnfusedDPA_Emulate_FP8"] = "0"
 
 
-def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout, is_training):
-
+def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout, is_training, fp8_recipe):
+    """Run DotProductAttention module in FP8"""
     reset_rng_states()
     _DUMMY_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
     _DUMMY_CUDA_RNG_STATE_TRACKER.add("model-parallel-rng", seed)
@@ -1966,16 +2404,8 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout, is_training):
         """Get cuda rng tracker."""
         return _DUMMY_CUDA_RNG_STATE_TRACKER
 
-    fp8_recipe = recipe.DelayedScaling(
-        margin=0,
-        fp8_format=recipe.Format.HYBRID,
-        amax_history_len=1,
-        amax_compute_algo="most_recent",
-        fp8_dpa=fp8_dpa,
-    )
-
     qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
-    with fp8_model_init(enabled=fp8_dpa):
+    with quantized_model_init(enabled=fp8_dpa):
         dpa = DotProductAttention(
             config.num_heads,
             config.head_dim_qk,
@@ -2067,7 +2497,7 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout, is_training):
     out_grad_shape_new = [*out_grad_shape[:-2], out_grad_shape[-2] * out_grad_shape[-1]]
     out_grad = torch.randn(out_grad_shape_new, dtype=dtype, device="cuda")
 
-    with fp8_autocast(enabled=fp8_dpa, fp8_recipe=fp8_recipe):
+    with autocast(enabled=fp8_dpa, recipe=fp8_recipe):
         out = dpa(
             inp[0],
             inp[1],
@@ -2080,6 +2510,7 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout, is_training):
             attn_mask_type=config.attn_mask_type,
             checkpoint_core_attention=False,
             core_attention_bias_type=config.attn_bias_type,
+            fp8_output=fp8_dpa,
         )
     if is_training:
         out.backward(out_grad)
@@ -2090,7 +2521,7 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout, is_training):
 
 
 model_configs_fp8 = {
-    #  test:             b,  h, hg,   d,   sq,  skv,   p,      mask,      bias
+    # test: ModelConfig(b, sq, hq, dqk)
     "fp8_1": ModelConfig(1, 512, 1, 64),
     "fp8_2": ModelConfig(4, 512, 16, 64),
     "fp8_3": ModelConfig(1, 2048, 1, 128),
@@ -2114,8 +2545,7 @@ models_v1 = ["fp8_3", "fp8_4", "fp8_7", "fp8_8"]
     ),
     reason=f"""cuDNN {"8.9.3" if cudnn_frontend_version == 0 else "9.2.1"}+ is required.""",
 )
-@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
-@pytest.mark.skipif(get_device_compute_capability() < (9, 0), reason="FP8 tests require Hopper+.")
+@pytest.mark.skipif(not fp8_attn_available, reason=reason_for_no_fp8_attn)
 @pytest.mark.parametrize("dtype", param_types_fp8)
 @pytest.mark.parametrize("model", models_v1 if cudnn_frontend_version == 1 else models_v0)
 def test_custom_mha_fp8_vs_f16(dtype, model):
@@ -2134,18 +2564,21 @@ def test_custom_mha_fp8_vs_f16(dtype, model):
         qkv_dtype=torch.float8_e4m3fn,
         qkv_layout="t3hd" if cudnn_frontend_version == 0 else "bs3hd",
         is_training=is_training,
+        deterministic=_deterministic,
     )
     flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
     if not (fused_attn_backends and unfused_attn_supported):
         pytest.skip("Not enough backends to run this test with.")
 
     fused_attn_fwd_fp8, fused_attn_bwd_fp8 = _run_custom_mha_fp8(dtype, config, "FusedAttention")
-    unfused_attn_fwd_f16, unfused_attn_bwd_f16 = _run_ref_mha_f16(dtype, config, "UnfusedAttention")
+    unfused_attn_fwd_f16, unfused_attn_bwd_f16 = _run_ref_mha_f16(
+        dtype, config, "UnfusedDotProductAttention"
+    )
 
     atol = 5e-1
     rtol = 5e-1
     rmse_tol = 0.13
-    _error(
+    compare_and_assert(
         fused_attn_fwd_fp8,
         unfused_attn_fwd_f16,
         "fused_attn_fwd_fp8",
@@ -2153,8 +2586,9 @@ def test_custom_mha_fp8_vs_f16(dtype, model):
         atol,
         rtol,
         rmse_tol,
+        True,
     )
-    _error(
+    compare_and_assert(
         fused_attn_bwd_fp8,
         unfused_attn_bwd_f16,
         "fused_attn_bwd_fp8",
@@ -2162,6 +2596,7 @@ def test_custom_mha_fp8_vs_f16(dtype, model):
         atol,
         rtol,
         rmse_tol,
+        True,
     )
 
 
@@ -2171,10 +2606,13 @@ def _run_custom_mha_fp8(dtype, config, backend):
     reset_rng_states()
     os.environ["NVTE_FLASH_ATTN"] = "0"
     os.environ["NVTE_FUSED_ATTN"] = "0"
+    os.environ["NVTE_UNFUSED_ATTN"] = "0"
     if backend == "FlashAttention":
         os.environ["NVTE_FLASH_ATTN"] = "1"
     if backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
+    if backend == "UnfusedDotProductAttention":
+        os.environ["NVTE_UNFUSED_ATTN"] = "1"
     _attention_backends["backend_selection_requires_update"] = True
 
     inp = 0.0001 * torch.randint(
@@ -2205,7 +2643,7 @@ def _run_custom_mha_fp8(dtype, config, backend):
     )
 
     mha = Custom_MHA_FP8(config).to(dtype=dtype, device="cuda")
-    with fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
+    with autocast(enabled=True, recipe=fp8_recipe):
         out = mha(inp, cu_seqlens, config.max_seqlen_q)
     out.backward(out_grad)
 
@@ -2225,10 +2663,13 @@ def _run_ref_mha_f16(dtype, config, backend):
 
     os.environ["NVTE_FLASH_ATTN"] = "0"
     os.environ["NVTE_FUSED_ATTN"] = "0"
+    os.environ["NVTE_UNFUSED_ATTN"] = "0"
     if backend == "FlashAttention":
         os.environ["NVTE_FLASH_ATTN"] = "1"
     if backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
+    if backend == "UnfusedDotProductAttention":
+        os.environ["NVTE_UNFUSED_ATTN"] = "1"
     _attention_backends["backend_selection_requires_update"] = True
 
     inp = torch.load("qkv.pt").to(device="cuda")
@@ -2274,12 +2715,12 @@ _2X_ACC_FPROP = False
 _2X_ACC_DGRAD = False
 _2X_ACC_WGRAD = False
 
-META_QKV = tex.FP8FwdTensors.GEMM1_OUTPUT
-META_DQKV = tex.FP8BwdTensors.GRAD_OUTPUT1
-META_O = tex.FP8FwdTensors.GEMM2_INPUT
-META_DO = tex.FP8BwdTensors.GRAD_INPUT2
-META_S = tex.FP8FwdTensors.GEMM3_OUTPUT
-META_DP = tex.FP8BwdTensors.GRAD_INPUT3
+META_QKV = FP8FwdTensorIdx.GEMM1_OUTPUT
+META_DQKV = FP8BwdTensorIdx.GRAD_OUTPUT1
+META_O = FP8FwdTensorIdx.GEMM2_INPUT
+META_DO = FP8BwdTensorIdx.GRAD_INPUT2
+META_S = FP8FwdTensorIdx.GEMM3_OUTPUT
+META_DP = FP8BwdTensorIdx.GRAD_INPUT3
 
 
 class _custom_mha_fp8(torch.autograd.Function):
@@ -2295,7 +2736,6 @@ class _custom_mha_fp8(torch.autograd.Function):
         max_s: int,
         fast_zero_fill: bool,
         fp8_meta: Dict[str, Any],
-        workspace: torch.Tensor,
         is_training: bool,
         mask_type: str,
         quantizers: list[Quantizer],
@@ -2308,14 +2748,14 @@ class _custom_mha_fp8(torch.autograd.Function):
         d = in_features // h
         b = cu_seqlens.numel() - 1
 
-        input_quantizer = quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT]
-        qkv_quantizer = quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM2_INPUT]
-        qkv_weight_quantizer = quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
-        o_quantizer = quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_OUTPUT]
-        dO_quantizer = quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT1]
-        dQKV_quantizer = quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_INPUT1]
-        s_quantizer = quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT2]
-        dP_quantizer = quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT3]
+        input_quantizer = quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM1_INPUT]
+        qkv_quantizer = quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM2_INPUT]
+        qkv_weight_quantizer = quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM1_WEIGHT]
+        o_quantizer = quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM1_OUTPUT]
+        dO_quantizer = quantizers["scaling_bwd"][FP8BwdTensorIdx.GRAD_OUTPUT1]
+        dQKV_quantizer = quantizers["scaling_bwd"][FP8BwdTensorIdx.GRAD_INPUT1]
+        s_quantizer = quantizers["scaling_bwd"][FP8BwdTensorIdx.GRAD_OUTPUT2]
+        dP_quantizer = quantizers["scaling_bwd"][FP8BwdTensorIdx.GRAD_OUTPUT3]
 
         inp_fp8 = input_quantizer(inp)
 
@@ -2324,7 +2764,6 @@ class _custom_mha_fp8(torch.autograd.Function):
         qkv, *_ = ext.general_gemm(
             qkv_weight_fp8,
             inp_fp8,
-            workspace,
             bias=qkv_bias,
             out_dtype=qkv_weight_fp8.dtype,
             quantization_params=qkv_quantizer,
@@ -2366,9 +2805,7 @@ class _custom_mha_fp8(torch.autograd.Function):
             s_quantizer=s_quantizer,
         )
 
-        tensors_to_save, tensor_objects = prepare_for_saving(
-            q, k, v, inp_fp8, qkv_weight_fp8, workspace, out
-        )
+        tensors_to_save, tensor_objects = prepare_for_saving(q, k, v, inp_fp8, qkv_weight_fp8, out)
 
         ctx.save_for_backward(*tensors_to_save)
         ctx.tensor_objects = tensor_objects
@@ -2397,13 +2834,10 @@ class _custom_mha_fp8(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
         with torch.cuda.nvtx.range("_DPA"):
-            saved_tensors = ctx.saved_tensors
-            (q, k, v, inp_fp8, qkv_weight_fp8, workspace, out) = restore_from_saved(
-                ctx.tensor_objects, saved_tensors
-            )
+            (q, k, v, inp_fp8, qkv_weight_fp8, out) = restore_from_func_ctx(ctx)
 
             proj_dgrad = ctx.dO_quantizer(grad_output)
-            fp8_dtype_backward = fp8.get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=False)
+            fp8_dtype_backward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=False)
 
             dq, dk, dv, *rest = fused_attn_bwd(
                 ctx.max_s,
@@ -2454,7 +2888,6 @@ class _custom_mha_fp8(torch.autograd.Function):
             qkv_dgrad, *_ = ext.general_gemm(
                 qkv_weight_fp8,
                 dqkv_c,
-                workspace,
                 ctx.dtype,
                 use_split_accumulator=_2X_ACC_DGRAD,
                 layout="NN",
@@ -2464,7 +2897,6 @@ class _custom_mha_fp8(torch.autograd.Function):
             qkv_wgrad, *_ = ext.general_gemm(
                 inp_fp8,
                 dqkv,
-                workspace,
                 ctx.dtype,
                 use_split_accumulator=_2X_ACC_WGRAD,
                 layout="NT",
@@ -2515,9 +2947,6 @@ class Custom_MHA_FP8(TransformerEngineBaseModule):
         with torch.no_grad():
             self.qkv_bias.zero_()
             self.qkv_weight.fill_(1.0)
-        self.workspace = torch.empty(
-            _CUBLASLT_WORKSPACE_SIZE_BYTES, dtype=torch.int8, device="cuda"
-        )
 
     def forward(
         self,
@@ -2525,7 +2954,7 @@ class Custom_MHA_FP8(TransformerEngineBaseModule):
         cu_seqlens,
         max_s,
     ) -> torch.Tensor:
-        with self.prepare_forward(inp, num_gemms=3) as inp:
+        with self.prepare_forward_ctx(inp, num_gemms=3) as inp:
             out = _custom_mha_fp8.apply(
                 inp,
                 self.qkv_weight,
@@ -2536,7 +2965,6 @@ class Custom_MHA_FP8(TransformerEngineBaseModule):
                 max_s,
                 self.fast_zero_fill,
                 self.fp8_meta,
-                self.workspace,
                 self.training,
                 self.mask_type,
                 self.quantizers,

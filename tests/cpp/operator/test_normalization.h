@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -15,6 +15,7 @@
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
+#include <cudnn.h>
 
 #include <transformer_engine/normalization.h>
 #include <transformer_engine/transformer_engine.h>
@@ -114,8 +115,18 @@ void compute_ref_output(NormType norm_type,
         tmp = current * rsigma[i] * g;
       }
 
+      // Write output (scaled only for fp8 paths)
       output[i * H + j] = static_cast<OutputType>(tmp * scale);
-      current_max = fmaxf(current_max, fabsf(tmp));
+
+      // amax semantics:
+      // - fp8_out (scale != 1): amax on pre-scale compute value 'tmp'
+      // - non-fp8_out (scale == 1): amax on value converted to OutputType (e.g., bf16)
+      if (scale != 1.f) {
+        current_max = fmaxf(current_max, fabsf(tmp));
+      } else {
+        OutputType out_t_val = static_cast<OutputType>(tmp);
+        current_max = fmaxf(current_max, fabsf(static_cast<compute_t>(out_t_val)));
+      }
     }
   }
 
@@ -126,7 +137,8 @@ void compute_ref_output(NormType norm_type,
 
 
 template <typename InputType, typename OutputType>
-void compute_ref_backward(const NormType norm_type, const OutputType *output_grad, const InputType *data,
+void compute_ref_backward(const NormType norm_type, const OutputType *output_grad,
+                          const OutputType *add, const InputType *data,
                           const float *mu, const float *rsigma,
                           const InputType *gamma,
                           InputType *data_grad,
@@ -165,7 +177,8 @@ void compute_ref_backward(const NormType norm_type, const OutputType *output_gra
       compute_t g = compute_gamma(gamma[j], zero_centered_gamma, use_cudnn, cudnn_zero_centered_gamma_in_weight_dtype);
       const compute_t dz = static_cast<compute_t>(output_grad[i * H + j]);
       const compute_t dy = g * dz;
-      const compute_t dx = rsigma[i] * (dy - mdyy * y - mdy);
+      const compute_t a = static_cast<compute_t>(add[i * H + j]);
+      const compute_t dx = a + rsigma[i] * (dy - mdyy * y - mdy);
       data_grad[i * H + j] = static_cast<InputType>(dx);
     }
   }

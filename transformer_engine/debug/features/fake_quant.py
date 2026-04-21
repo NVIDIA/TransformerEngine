@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -19,7 +19,7 @@ from transformer_engine.common.recipe import Format
 from transformer_engine.pytorch.tensor import Quantizer
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
-from transformer_engine.pytorch.fp8 import _default_sf_compute
+from transformer_engine.pytorch.quantization import _default_sf_compute
 
 
 def fake_quantize(tensor: torch.Tensor, fp8_format: tex.DType, out=None):

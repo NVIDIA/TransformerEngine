@@ -1,9 +1,9 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
 import torch
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8Quantizer
+from transformer_engine.pytorch import Float8Tensor, Float8Quantizer
 
 import nvdlfw_inspect.api as debug_api
 
@@ -34,11 +34,6 @@ def test_transformer_engine_no_config(feature_dirs):
         # inspect_tensor_enabled - (False, None) by default
         assert not debug_api.transformer_engine.inspect_tensor_enabled(
             "decoder.1.attn.qkv", tensor_name="activation", iteration=0
-        )[0]
-
-        # inspect_tensor_postquantize - (False, None) by default
-        assert not debug_api.transformer_engine.inspect_tensor_postquantize_enabled(
-            "decoder.1.attn.qkv", gemm="fprop", tensor_name="activation", iteration=0
         )[0]
 
     finally:
@@ -236,13 +231,12 @@ def test_statistics_collection(configs_dir, feature_dirs):
         )
 
         tensor = torch.randn((100, 100, 5)).cuda()
-        tensor_fp8 = Float8Tensor(
-            data=tensor.to(torch.uint8).cuda(),
-            fp8_scale_inv=torch.full([1], 1.0).cuda(),
+        quantizer = Float8Quantizer(
+            scale=torch.full([1], 1.0).cuda(),
+            amax=torch.full([1], 1.0).cuda(),
             fp8_dtype=tex.DType.kFloat8E4M3,
-            shape=tensor.shape,
-            dtype=torch.float32,
         )
+        tensor_fp8 = quantizer(tensor)
 
         def log():
             from transformer_engine.debug.features.utils.stats_buffer import STATS_BUFFERS
@@ -260,6 +254,9 @@ def test_statistics_collection(configs_dir, feature_dirs):
             tensor_name="activation",
             iteration=200,
             tp_group=None,
+            quantizer=quantizer,
+            rowwise_quantized_tensor=tensor_fp8,
+            columnwise_quantized_tensor=tensor_fp8,
         )
         stats = log()
         assert stats[("decoder.1.mlp.fc1", "activation", "cur_amax", 200)] == tensor.abs().max()
@@ -269,61 +266,74 @@ def test_statistics_collection(configs_dir, feature_dirs):
         assert not debug_api.transformer_engine.inspect_tensor_enabled(
             "decoder.2.mlp.fc1", tensor_name="activation", iteration=200
         )[0]
-        assert not debug_api.transformer_engine.inspect_tensor_enabled(
+
+        expected_underflows = (
+            ((tensor_fp8.dequantize() == 0).sum() - (tensor == 0).sum()) * 100 / (100 * 100 * 5)
+        )
+
+        assert debug_api.transformer_engine.inspect_tensor_enabled(
             "decoder.1.mlp.fc1", tensor_name="gradient", iteration=200
         )[0]
 
-        expected_underflows = (tensor_fp8._data == 0).sum() * 100 / (100 * 100 * 5)
-
         # TE FP8 tensor stats --
-        assert debug_api.transformer_engine.inspect_tensor_postquantize_enabled(
-            "decoder.1.mlp.fc1", tensor_name="gradient", gemm="wgrad", iteration=200
+        assert debug_api.transformer_engine.inspect_tensor_enabled(
+            "decoder.1.mlp.fc1", tensor_name="gradient", iteration=200
         )[0]
-        debug_api.transformer_engine.inspect_tensor_postquantize(
+        debug_api.transformer_engine.inspect_tensor(
             "decoder.1.mlp.fc1",
-            tensor=tensor_fp8,
             tensor_name="gradient",
             iteration=200,
-            rowwise=True,
             tp_group=None,
+            tensor=tensor,
+            quantizer=quantizer,
+            rowwise_quantized_tensor=tensor_fp8,
+            columnwise_quantized_tensor=tensor_fp8,
         )
         stats = log()
         torch.testing.assert_close(
             stats[("decoder.1.mlp.fc1", "gradient", "underflows%", 200)], expected_underflows
         )
 
-        assert not debug_api.transformer_engine.inspect_tensor_postquantize_enabled(
-            "decoder.1.mlp.fc1", tensor_name="activation", gemm="fprop", iteration=201
+        assert not debug_api.transformer_engine.inspect_tensor_enabled(
+            "decoder.1.mlp.fc1", tensor_name="activation", iteration=201
         )[0]
-        assert not debug_api.transformer_engine.inspect_tensor_postquantize_enabled(
-            "decoder.2.mlp.fc1", tensor_name="gradient", gemm="wgrad", iteration=200
+        assert not debug_api.transformer_engine.inspect_tensor_enabled(
+            "decoder.2.mlp.fc1", tensor_name="gradient", iteration=200
         )[0]
 
         # Second config in same yaml
-        tensor = torch.rand((100, 100, 5))
+        tensor = torch.rand((100, 100, 5)).cuda()
         debug_api.transformer_engine.inspect_tensor(
             "decoder.6.mlp.fc1",
-            tensor=tensor,
             tensor_name="activation",
             iteration=200,
             tp_group=None,
+            tensor=tensor,
+            quantizer=quantizer,
+            rowwise_quantized_tensor=tensor_fp8,
+            columnwise_quantized_tensor=tensor_fp8,
         )
         stats = log()
         stats_names = [x[3] for x in stats.keys()]
         all(s in stats_names for s in ["cur_amax", "dynamic_range", "mean", "std", "l1_norm"])
-        assert stats[("decoder.6.mlp.fc1", "activation", "mean", 200)] == tensor.mean()
+        torch.testing.assert_close(
+            stats[("decoder.6.mlp.fc1", "activation", "mean", 200)], tensor.mean()
+        )
 
         debug_api.transformer_engine.inspect_tensor(
             "decoder.7.mlp.fc1",
-            tensor=tensor,
             tensor_name="weight",
             iteration=200,
             tp_group=None,
+            tensor=tensor,
+            quantizer=quantizer,
+            rowwise_quantized_tensor=tensor_fp8,
+            columnwise_quantized_tensor=tensor_fp8,
         )
         stats = log()
         stats_names = [x[3] for x in stats.keys()]
         all(s in stats_names for s in ["mean", "std", "l1_norm", "min", "max"])
-        assert stats[("decoder.7.mlp.fc1", "weight", "max", 200)] == tensor.max()
+        torch.testing.assert_close(stats[("decoder.7.mlp.fc1", "weight", "max", 200)], tensor.max())
 
         assert not debug_api.transformer_engine.inspect_tensor_enabled(
             "decoder.7.mlp.fc1", tensor_name="weight", iteration=201
@@ -342,21 +352,16 @@ def test_statistics_multi_run(configs_dir, feature_dirs):
             default_logging_enabled=False,
         )
 
-        def feed(tensor, tensor_fp8):
+        def feed(tensor, tensor_fp8, quantizer):
             debug_api.transformer_engine.inspect_tensor(
                 "decoder.5.mlp.fc1",
                 tensor=tensor,
                 tensor_name="activation",
                 iteration=1,
                 tp_group=None,
-            )
-            debug_api.transformer_engine.inspect_tensor_postquantize(
-                "decoder.5.mlp.fc1",
-                tensor=tensor_fp8,
-                tensor_name="activation",
-                iteration=1,
-                rowwise=True,
-                tp_group=None,
+                quantizer=quantizer,
+                rowwise_quantized_tensor=tensor_fp8,
+                columnwise_quantized_tensor=tensor_fp8,
             )
 
         def log_stats():
@@ -364,26 +369,26 @@ def test_statistics_multi_run(configs_dir, feature_dirs):
 
             return STATS_BUFFERS.log_stats()
 
+        quantizer = Float8Quantizer(
+            scale=torch.full([1], 1.0).cuda(),
+            amax=torch.full([1], 1.0).cuda(),
+            fp8_dtype=tex.DType.kFloat8E4M3,
+        )
+
         def fp8_tensor(t):
-            return Float8Tensor(
-                data=t.to(torch.uint8).cuda(),
-                fp8_scale_inv=torch.ones([1]).cuda(),
-                fp8_dtype=tex.DType.kFloat8E4M3,
-                shape=t.shape,
-                dtype=torch.float32,
-            )
+            return quantizer(t.cuda())
 
         shape = [1024, 1024]
-        tensors = [torch.randn(shape) for _ in range(2)]
+        tensors = [torch.randn(shape).cuda() for _ in range(2)]
         tensors_fp8 = [fp8_tensor(tensors[i]) for i in range(2)]
 
-        feed(tensors[0], tensors_fp8[0])
-        feed(tensors[1], tensors_fp8[1])
+        feed(tensors[0], tensors_fp8[0], quantizer)
+        feed(tensors[1], tensors_fp8[1], quantizer)
         stats1 = log_stats()
 
         tensor2 = torch.cat((tensors[0], tensors[1])).cuda()
         fp8tensor2 = fp8_tensor(tensor2)
-        feed(tensor2, fp8tensor2)
+        feed(tensor2, fp8tensor2, quantizer)
         stats2 = log_stats()
 
         assert len(stats1.keys()) > 0

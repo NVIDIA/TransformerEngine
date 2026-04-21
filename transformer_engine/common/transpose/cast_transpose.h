@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -8,6 +8,7 @@
 #define TRANSFORMER_ENGINE_COMMON_TRANSPOSE_CAST_TRANSPOSE_H_
 
 #include "../common.h"
+#include "transformer_engine/transformer_engine.h"
 
 namespace transformer_engine::detail {
 
@@ -27,7 +28,7 @@ void quantize_transpose_square_blockwise(const SimpleTensor &input, SimpleTensor
                                          SimpleTensor &scale_inv_t, SimpleTensor &output,
                                          SimpleTensor &output_t, const float epsilon,
                                          const bool return_transpose, const bool pow_2_scale,
-                                         cudaStream_t stream);
+                                         const SimpleTensor &noop_tensor, cudaStream_t stream);
 
 // enum class for rowwise usage
 enum class FP8BlockwiseRowwiseOption {
@@ -35,7 +36,7 @@ enum class FP8BlockwiseRowwiseOption {
   NONE,
   // Rowwise data, scales in GEMM format
   ROWWISE_GEMM_READY,
-  // Rowwise data, scales in compact format, needs extra processing (padding, transposing) before GEMM
+  // Deprecated
   ROWWISE_COMPACT
 };
 
@@ -49,8 +50,7 @@ enum class FP8BlockwiseColumnwiseOption {
   // On Hopper sm90, GEMM_READY means that columnwise quantization also fuses transpose op
   // On higher sm versions with TN,NT,NN fp8 gemm, GEMM_READY doesn't fuse transpose
   COLUMNWISE_GEMM_READY,
-  // Columnwise data in original shape
-  // Scales in compact format, needs extra processing (padding, transposing) before GEMM
+  // Deprecated
   COLUMNWISE_COMPACT
 };
 
@@ -59,7 +59,16 @@ void quantize_transpose_vector_blockwise(const SimpleTensor &input, SimpleTensor
                                          SimpleTensor &output_t, const float epsilon,
                                          FP8BlockwiseRowwiseOption rowwise_option,
                                          FP8BlockwiseColumnwiseOption columnwise_option,
-                                         const bool pow_2_scale, cudaStream_t stream);
+                                         const bool pow_2_scale, const SimpleTensor &noop_tensor,
+                                         cudaStream_t stream);
+
+void quantize_transpose_vector_blockwise_fp4(
+    const SimpleTensor &input, const SimpleTensor &global_amax, SimpleTensor &scale_inv,
+    SimpleTensor &scale_inv_t, SimpleTensor &output, SimpleTensor &output_t, const float epsilon,
+    const bool return_identity, const bool return_transpose, const bool pow2_scale,
+    const bool swizzled_scale, const bool use_stochastic_rounding,
+    const NVTETensor rng_state_tensor, const bool use_2d_quantization,
+    const SimpleTensor &noop_tensor, cudaStream_t stream);
 
 }  // namespace transformer_engine::detail
 

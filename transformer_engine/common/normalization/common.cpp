@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -116,7 +116,9 @@ void TeNormalizationPlan<BackwardKernelParams>::execute(Tensor* z, void* x_dptr,
                                                         void* beta_dptr, void* mean_dptr,
                                                         void* eps_dptr, void* rsigma_dptr,
                                                         void* workspace_dptr, cudaStream_t stream) {
-  NVTE_ERROR("Backward normalization should not call the forward execute function!");
+  NVTE_ERROR(
+      "Backward normalization should not call the forward execute function. "
+      "Use the backward-specific execute overload instead.");
 }
 
 template <typename KernelParamsType>
@@ -127,7 +129,13 @@ void TeNormalizationPlan<KernelParamsType>::_build() {
 
 template <typename KernelParamsType>
 std::vector<size_t> TeNormalizationPlan<KernelParamsType>::getWorkspaceShape() const {
-  return {_launch_params.getTotalWorkspaceBytes(_is_layernorm)};
+  size_t workspace_size = _launch_params.getTotalWorkspaceBytes(_is_layernorm);
+  if (workspace_size == 0) {
+    // Workspace size must not be zero since that corresponds to a
+    // workspace size query
+    workspace_size = 1;
+  }
+  return {workspace_size};
 }
 
 template <typename KernelParamsType>
@@ -138,8 +146,8 @@ void TeNormalizationPlan<KernelParamsType>::_set_workspace() {
     if (_launch_params.barrier_bytes > 0) {
       _launch_params.params.barrier =
           reinterpret_cast<int*>(workspace_dptr + _launch_params.workspace_bytes);
-      cudaMemsetAsync(_launch_params.params.barrier, 0, _launch_params.barrier_bytes,
-                      _launch_params.stream);
+      NVTE_CHECK_CUDA(cudaMemsetAsync(_launch_params.params.barrier, 0,
+                                      _launch_params.barrier_bytes, _launch_params.stream));
     }
     if constexpr (std::is_same_v<KernelParamsType, BackwardKernelParams>) {
       _launch_params.params.dgamma_part =
@@ -156,18 +164,21 @@ void TeNormalizationPlan<KernelParamsType>::_set_workspace() {
 template <>
 void TeNormalizationPlan<ForwardKernelParams>::execute(void* x_dptr, void* gamma_dptr,
                                                        void* mean_dptr, void* rsigma_dptr,
-                                                       void* dx_dptr, void* dz_dptr,
+                                                       void* dx_dptr, void* dz_dptr, void* add_dptr,
                                                        void* dbeta_dptr, void* dgamma_dptr,
                                                        void* workspace_dptr, cudaStream_t stream) {
-  NVTE_ERROR("Forward normalization should not call the backward execute function!");
+  NVTE_ERROR(
+      "Forward normalization should not call the backward execute function. "
+      "Use the forward-specific execute overload instead.");
 }
 
 template <>
 void TeNormalizationPlan<BackwardKernelParams>::execute(void* x_dptr, void* gamma_dptr,
                                                         void* mean_dptr, void* rsigma_dptr,
                                                         void* dx_dptr, void* dz_dptr,
-                                                        void* dbeta_dptr, void* dgamma_dptr,
-                                                        void* workspace_dptr, cudaStream_t stream) {
+                                                        void* add_dptr, void* dbeta_dptr,
+                                                        void* dgamma_dptr, void* workspace_dptr,
+                                                        cudaStream_t stream) {
   _launch_params.stream = stream;
 
   auto& kernel_params = _launch_params.params;
@@ -177,6 +188,7 @@ void TeNormalizationPlan<BackwardKernelParams>::execute(void* x_dptr, void* gamm
   kernel_params.rs = rsigma_dptr;
   kernel_params.dx = dx_dptr;
   kernel_params.dz = dz_dptr;
+  kernel_params.add = add_dptr;
   kernel_params.dgamma = dgamma_dptr;
 
   if (_is_layernorm) {
@@ -383,6 +395,23 @@ CudnnNormalizationPlan::CudnnNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Nor
       std::tie(_dx, _dgamma, _dbeta) = std::make_tuple(ret[0], ret[1], ret[2]);
       if (_dbeta != nullptr) NVTE_ERROR("cuDNN rmsnorm dbias incorrectly returned.");
     }
+    // Fuse the add for BackwardAdd stage
+    if (_norm_stage == NVTE_Norm_Stage::BackwardAdd) {
+      NVTE_CHECK(cudnnGetVersion() >= 92100,
+                 "Fused BackwardAdd requires cuDNN >= 9.21.0, but found ", cudnnGetVersion());
+
+      _add = _graph.tensor(fe::graph::Tensor_attributes()
+                               .set_name("add")
+                               .set_dim({batch_dim, hidden_dim, 1, 1})
+                               .set_stride({hidden_dim, 1, hidden_dim, hidden_dim})
+                               .set_data_type(get_cudnn_fe_dtype(wtype)));
+      auto add_options = fe::graph::Pointwise_attributes()
+                             .set_mode(fe::PointwiseMode_t::ADD)
+                             .set_compute_data_type(get_cudnn_fe_dtype(ctype));
+      auto _dx_with_add = _graph.pointwise(_dx, _add, add_options);
+      _dx->set_output(false).set_data_type(get_cudnn_fe_dtype(itype));
+      _dx = _dx_with_add;
+    }
     _dx->set_output(true).set_data_type(get_cudnn_fe_dtype(otype));
     _dgamma->set_output(true).set_data_type(get_cudnn_fe_dtype(otype));
   }
@@ -403,7 +432,13 @@ void CudnnNormalizationPlan::_build() {
 }
 
 std::vector<size_t> CudnnNormalizationPlan::getWorkspaceShape() const {
-  return {static_cast<size_t>(_graph.get_workspace_size())};
+  size_t workspace_size = _graph.get_workspace_size();
+  if (workspace_size == 0) {
+    // Workspace size must not be zero since that corresponds to a
+    // workspace size query
+    workspace_size = 1;
+  }
+  return {workspace_size};
 }
 
 void CudnnNormalizationPlan::execute(Tensor* z, void* x_dptr, void* gamma_dptr, void* beta_dptr,
@@ -447,11 +482,17 @@ void CudnnNormalizationPlan::execute(Tensor* z, void* x_dptr, void* gamma_dptr, 
 
 void CudnnNormalizationPlan::execute(void* x_dptr, void* gamma_dptr, void* mean_dptr,
                                      void* rsigma_dptr, void* dx_dptr, void* dz_dptr,
-                                     void* dbeta_dptr, void* dgamma_dptr, void* workspace_dptr,
-                                     cudaStream_t stream) {
+                                     void* add_dptr, void* dbeta_dptr, void* dgamma_dptr,
+                                     void* workspace_dptr, cudaStream_t stream) {
   // Binding data pointers to graph tensors
   _variant_pack = {
       {_x, x_dptr}, {_rsigma, rsigma_dptr}, {_dz, dz_dptr}, {_dgamma, dgamma_dptr}, {_dx, dx_dptr}};
+
+  // Bind the add tensor for fused backward+add
+  if (_norm_stage == NVTE_Norm_Stage::BackwardAdd) {
+    NVTE_CHECK(add_dptr != nullptr, "add_dptr must not be null for BackwardAdd");
+    _variant_pack.insert({{_add, add_dptr}});
+  }
 
   if (_zero_centered)
     _variant_pack.insert({{_scalar_offset, reinterpret_cast<void*>(this->_scalar_dptr.get())},

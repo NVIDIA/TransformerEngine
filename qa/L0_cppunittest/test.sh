@@ -1,8 +1,11 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
 set -e
+
+: ${XML_LOG_DIR:=/logs}
+mkdir -p "$XML_LOG_DIR"
 
 # Find TE
 : ${TE_PATH:=/opt/transformerengine}
@@ -17,4 +20,4 @@ cd $TE_PATH/tests/cpp
 cmake -GNinja -Bbuild .
 cmake --build build
 export OMP_NUM_THREADS=$((NUM_PHYSICAL_CORES / NUM_PARALLEL_JOBS))
-ctest --test-dir build -j$NUM_PARALLEL_JOBS
+ctest --test-dir build -j$NUM_PARALLEL_JOBS --output-junit $XML_LOG_DIR/ctest_cppunittest.xml

@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -45,16 +45,19 @@ void *get_symbol(const char *symbol, int cuda_version) {
 }
 
 void ensure_context_exists() {
-  CUcontext context;
-  NVTE_CALL_CHECK_CUDA_DRIVER(cuCtxGetCurrent, &context);
-  if (context == nullptr) {
-    // Add primary context to context stack
-    CUdevice device;
-    NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGet, &device, cuda::current_device());
-    NVTE_CALL_CHECK_CUDA_DRIVER(cuDevicePrimaryCtxRetain, &context, device);
-    NVTE_CALL_CHECK_CUDA_DRIVER(cuCtxSetCurrent, context);
-    NVTE_CALL_CHECK_CUDA_DRIVER(cuDevicePrimaryCtxRelease, device);
-  }
+  static thread_local bool need_check = []() {
+    CUcontext context;
+    NVTE_CALL_CHECK_CUDA_DRIVER(cuCtxGetCurrent, &context);
+    if (context == nullptr) {
+      // Add primary context to context stack
+      CUdevice device;
+      NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGet, &device, cuda::current_device());
+      NVTE_CALL_CHECK_CUDA_DRIVER(cuDevicePrimaryCtxRetain, &context, device);
+      NVTE_CALL_CHECK_CUDA_DRIVER(cuCtxSetCurrent, context);
+      NVTE_CALL_CHECK_CUDA_DRIVER(cuDevicePrimaryCtxRelease, device);
+    }
+    return false;
+  }();
 }
 
 }  // namespace cuda_driver

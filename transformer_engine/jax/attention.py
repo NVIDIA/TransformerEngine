@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """JAX multi-head attention modules"""
@@ -18,6 +18,7 @@ from transformer_engine_jax import NVTE_Mask_Type
 from transformer_engine_jax import NVTE_QKV_Layout
 from transformer_engine_jax import NVTE_QKV_Format
 from transformer_engine_jax import nvte_get_qkv_format
+from transformer_engine_jax import NVTE_Softmax_Type
 
 from . import cpp_extensions as tex
 
@@ -72,6 +73,35 @@ class AttnMaskType(Enum):
             AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK,
             AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK,
         ]
+
+
+class AttnSoftmaxType(Enum):
+    """
+    VANILLA_SOFTMAX: S[:,:,:,i] = exp(S[:,:,:,i])/sum(exp(S[:,:,:,:]), dim=-1),
+    OFF_BY_ONE_SOFTMAX: S[:,:,:,i] = exp(S[:,:,:,i])/(1 + sum(exp(S[:,:,:,:]), dim=-1)),
+    LEARNABLE_SOFTMAX: S[:,j,:,i] = exp(S[:,j,:,i])/(exp(alpha[j]) + sum(exp(S[:,j,:,:]), dim=-1)),
+    where alpha is a learnable parameter in shape [H].
+    """
+
+    VANILLA_SOFTMAX = NVTE_Softmax_Type.NVTE_VANILLA_SOFTMAX
+    OFF_BY_ONE_SOFTMAX = NVTE_Softmax_Type.NVTE_OFF_BY_ONE_SOFTMAX
+    LEARNABLE_SOFTMAX = NVTE_Softmax_Type.NVTE_LEARNABLE_SOFTMAX
+
+    @classmethod
+    def from_str(cls, softmax_type: str) -> "AttnSoftmaxType":
+        """Convert string to AttnSoftmaxType: 'vanilla', 'off_by_one', or 'learnable'."""
+        softmax_type_map = {
+            "vanilla": cls.VANILLA_SOFTMAX,
+            "off_by_one": cls.OFF_BY_ONE_SOFTMAX,
+            "learnable": cls.LEARNABLE_SOFTMAX,
+        }
+        result = softmax_type_map.get(softmax_type)
+        if result is None:
+            raise ValueError(
+                f"Unknown softmax_type: {softmax_type}. "
+                "Valid options: 'vanilla', 'off_by_one', 'learnable'"
+            )
+        return result
 
 
 class QKVFormat(Enum):
@@ -209,6 +239,8 @@ def make_swa_mask(
     segment_pos_kv: jnp.ndarray,
     window_size: Optional[Tuple[int, int]] = None,
     dtype: jax.typing.DTypeLike = jnp.float32,
+    segment_ids_q: jnp.ndarray = None,
+    segment_ids_kv: jnp.ndarray = None,
 ):
     """
     Generate a sliding window mask (1 = attend, 0 = masked).
@@ -227,6 +259,10 @@ def make_swa_mask(
             Defaults to None.
         dtype (jax.typing.DTypeLike, optional):
             Mask data type. Defaults to jnp.float32.
+        segment_ids_q (jnp.ndarray):
+            Query segment id that each token belongs to
+        segment_ids_kv (jnp.ndarray):
+            Key/value segment id that each token belongs to
 
     Returns:
         jnp.ndarray:
@@ -240,6 +276,18 @@ def make_swa_mask(
     right_window = jnp.inf if right_window < 0 else right_window
     pos_q = jnp.expand_dims(segment_pos_q, axis=-1)
     pos_kv = jnp.expand_dims(segment_pos_kv, axis=-2)
+    # For Bottom Right Causal Mask (BRCM)
+    if segment_ids_q is not None and segment_ids_kv is not None:
+        run_length_q = run_length_fill(segment_ids_q)
+        run_length_kv = run_length_fill(segment_ids_kv)
+        run_length_q_exp = jnp.expand_dims(run_length_q, axis=-1)
+        run_length_kv_exp = jnp.expand_dims(run_length_kv, axis=-2)
+        bottom_right_inv_swa_mask = (
+            run_length_q_exp - pos_q + left_window >= run_length_kv_exp - pos_kv
+        )
+        bottom_right_inv_swa_mask = jnp.expand_dims(bottom_right_inv_swa_mask, axis=-3)
+        return bottom_right_inv_swa_mask.astype(dtype)
+    # All other cases other than BRCM
     inv_swa_mask = (pos_kv >= pos_q - left_window) & (pos_kv <= pos_q + right_window)
     inv_swa_mask = jnp.expand_dims(inv_swa_mask, axis=-3)
     return inv_swa_mask.astype(dtype)
@@ -283,6 +331,7 @@ def is_fused_attn_kernel_available(
     qkv_layout,
     attn_bias_type,
     attn_mask_type,
+    softmax_type,
     dropout_probability,
     q_num_heads,
     kv_num_heads,
@@ -295,6 +344,7 @@ def is_fused_attn_kernel_available(
     """
     To check whether the fused attention kernel is supported
     """
+    window_size_tuple = (-1, -1) if window_size is None else window_size
 
     def make_helper(attn_mask_type):
         return tex.FusedAttnHelper(
@@ -304,6 +354,7 @@ def is_fused_attn_kernel_available(
             qkv_layout,
             attn_bias_type,
             attn_mask_type,
+            softmax_type,
             dropout_probability,
             q_num_heads,
             kv_num_heads,
@@ -311,7 +362,7 @@ def is_fused_attn_kernel_available(
             kv_max_seqlen,
             head_dim_qk,
             head_dim_v,
-            (-1, -1) if window_size is None else window_size,
+            window_size_tuple,
         )
 
     return make_helper(attn_mask_type).is_fused_attn_kernel_available()
@@ -335,23 +386,57 @@ def _obtain_batch_and_max_seqlen(qkv, qkv_layout):
     return batch, q_max_seqlen, kv_max_seqlen
 
 
-def reorder_causal_load_balancing(tensor, strategy: ReorderStrategy, cp_size: int, seq_dim: int):
+def reorder_causal_load_balancing(
+    tensor, strategy: ReorderStrategy, cp_size: int, seq_dim: int, stripe_size: int | None = None
+):
     """Reorders a tensor for load balancing the compute of causal attention."""
     if strategy == ReorderStrategy.DualChunkSwap:
+        if stripe_size is not None:
+            raise ValueError(
+                f"Incorrect value for CP dual chunk reordering {stripe_size=}. stripe_size must be"
+                " None"
+            )
         return tex.attention.reorder_causal_dual_chunk_swap(tensor, cp_size, seq_dim, False)
     if strategy == ReorderStrategy.Striped:
-        return tex.attention.reorder_causal_striped(tensor, cp_size, seq_dim, False)
+        # stripe_size > 1 is only supported for CP+THD+AG+Striped>1+SWA
+        # stripe_size = 128 is recommended for CP+THD+AG+Striped>1+SWA
+        if stripe_size is not None and stripe_size <= 0:
+            raise ValueError(
+                f"Incorrect value for CP striped reordering {stripe_size=}. stripe_size must be a"
+                " positive integer"
+            )
+        # Supporting old API defaults of stripe_size=1
+        effective_stripe_size = 1 if stripe_size is None else stripe_size
+        return tex.attention.reorder_causal_striped(
+            tensor, cp_size, seq_dim, False, effective_stripe_size
+        )
     raise ValueError(f"Unsupported {strategy=}")
 
 
 def inverse_reorder_causal_load_balancing(
-    tensor, strategy: ReorderStrategy, cp_size: int, seq_dim: int
+    tensor, strategy: ReorderStrategy, cp_size: int, seq_dim: int, stripe_size: int | None = None
 ):
     """Inverse operation of `reorder_causal_load_balancing`."""
     if strategy == ReorderStrategy.DualChunkSwap:
+        if stripe_size is not None:
+            raise ValueError(
+                f"Incorrect value for CP dual chunk reordering {stripe_size=}. stripe_size must be"
+                " None"
+            )
         return tex.attention.reorder_causal_dual_chunk_swap(tensor, cp_size, seq_dim, True)
     if strategy == ReorderStrategy.Striped:
-        return tex.attention.reorder_causal_striped(tensor, cp_size, seq_dim, True)
+        # stripe_size > 1 is only supported for CP+THD+AG+Striped>1+SWA
+        # stripe_size = 128 is recommended for CP+THD+AG+Striped>1+SWA
+        if stripe_size is not None and stripe_size <= 0:
+            raise ValueError(
+                f"Incorrect value for CP reordering {stripe_size=}. stripe_size must be a positive"
+                " integer"
+            )
+        # Supporting old API defaults of stripe_size=1
+        effective_stripe_size = 1 if stripe_size is None else stripe_size
+        return tex.attention.reorder_causal_striped(
+            tensor, cp_size, seq_dim, True, effective_stripe_size
+        )
     raise ValueError(f"Unsupported {strategy=}")
 
 
@@ -420,6 +505,42 @@ def _segment_ids_pos_to_seqlens_offsets_fast_causal_path(
     )
 
 
+def run_length_fill_flattened(segment_ids_flattened) -> jnp.ndarray:
+    """
+    Returns an array of run-lengths of the flattened segment ids
+    """
+    # Example for run_length_fill_flattened:
+    # Input segment_ids_flattened:       [[1 1 2 2 2 0 3 0 4 4 4 4 4 0 0 0], [1 0 0 2 2 2 0 0 3 3 4 4 4 4 0 0]]
+    # run_ids:                           [[0 0 1 1 1 2 3 4 5 5 5 5 5 6 6 6], [0 1 1 2 2 2 3 3 4 4 5 5 5 5 6 6]]
+    # counts:                            [[2 3 1 1 1 5 3 0 0 0 0 0 0 0 0 0], [1 2 3 2 2 4 2 0 0 0 0 0 0 0 0 0]]
+    # Returns segment_ids_run_length_1d: [[2 2 3 3 3 0 1 0 5 5 5 5 5 0 0 0], [1 0 0 3 3 3 0 0 2 2 4 4 4 4 0 0]]
+    boundary = jnp.concatenate(
+        [jnp.broadcast_to(True, (1,)), segment_ids_flattened[1:] != segment_ids_flattened[:-1]]
+    )
+    run_ids = jnp.cumsum(boundary) - 1
+    # Each element could, in worst case, start a run
+    max_runs = segment_ids_flattened.shape[-1]
+    counts = jnp.bincount(run_ids, length=max_runs)
+    # Fill in the missing values
+    segment_ids_run_length_1d = counts[run_ids]
+    segment_ids_run_length_1d = jnp.where(segment_ids_flattened == 0, 0, segment_ids_run_length_1d)
+    return segment_ids_run_length_1d
+
+
+def run_length_fill(segment_ids) -> jnp.ndarray:
+    """
+    Returns an array of run-lengths of the segment ids, with shape preserved
+    """
+    # Example for run_length_fill:
+    # Input segment_ids:  [[1 1 2 2 2 0 3 0 4 4 4 4 4 0 0 0], [1 0 0 2 2 2 0 0 3 3 4 4 4 4 0 0]]
+    # Returns run length: [[2 2 3 3 3 0 1 0 5 5 5 5 5 0 0 0], [1 0 0 3 3 3 0 0 2 2 4 4 4 4 0 0]]
+    # Flatten all dimension except the last one prior to executing vmap run length
+    orig_shape = segment_ids.shape
+    segment_ids_flat = segment_ids.reshape(-1, orig_shape[-1])
+    run_length_segment_id_shape = jax.vmap(run_length_fill_flattened, in_axes=0)(segment_ids_flat)
+    return run_length_segment_id_shape.reshape(orig_shape)
+
+
 def _segment_ids_pos_to_seqlens_offsets(
     segment_ids_q,
     segment_ids_kv,
@@ -443,7 +564,17 @@ def _segment_ids_pos_to_seqlens_offsets(
     #
     # This fast path avoids expanding the mask to Q * KV matrix and instead allows us to
     # examine only O(Q+KV) elements.
-    if attn_mask_type.is_causal() and window_size is None or window_size == (-1, -1):
+
+    # For seqlens and seqoffsets calculations, the intermediate(temp) attn_mask creation
+    # using the segment ids and pos along with mask type (causal or brcm) is sufficient.
+    # It does not need to involve SW for this mask's creation
+
+    # Currently, this function is only exercised for THD qkv_layout.
+
+    # TODO(KshitijLakhani): Try exercising the fast path for BRCM as well
+    if (attn_mask_type.is_causal() and window_size is None) or (
+        window_size == (-1, -1) and not attn_mask_type.is_bottom_right()
+    ):
         return _segment_ids_pos_to_seqlens_offsets_fast_causal_path(
             segment_ids_q, segment_ids_kv, segment_pos_q, segment_pos_kv, max_segments_per_seq
         )
@@ -459,17 +590,47 @@ def _segment_ids_pos_to_seqlens_offsets(
         segment_ids_kv,
         lambda x, y: jnp.equal(x, y) * x,
     )
+    # TE JAX Attn expects the THD segments to have q_token <= kv_tokens so that a correct cross-attn type BRCM can be applied
     attn_mask = segment_mask
-    if attn_mask_type.is_causal():
+    if attn_mask_type.is_bottom_right():
+        run_length_out_q = run_length_fill(segment_ids_q)
+        run_length_out_kv = run_length_fill(segment_ids_kv)
+        # Example for brcm:
+        # run_length_out_q:  [3 3 3 0 4 4 4 4]
+        # segment_pos_q:     [0 1 2 3 0 1 2 3]
+        # segment_ids_q:     [1 1 1 0 2 2 2 2]
+        # run_length_out_kv: [4 4 4 4 0 0 10 10 10 10 10 10 10 10 10 10]
+        # segment_pos_kv:    [0 1 2 3 4 5 0 1 2 3 4 5 6 7 8 9]
+        # segment_ids_kv:    [1 1 1 1 0 0 2 2 2 2 2 2 2 2 2 2]
+        # brcm:            [[[1 1 0 0 0 0 1 1 1 1 1 1 1 1 0 0]
+        #                    [1 1 1 0 0 0 1 1 1 1 1 1 1 1 1 0]
+        #                    [1 1 1 1 0 0 1 1 1 1 1 1 1 1 1 1]
+        #                    [1 1 1 1 0 0 1 1 1 1 1 1 1 1 1 1]
+        #                    [1 0 0 0 0 0 1 1 1 1 1 1 1 0 0 0]
+        #                    [1 1 0 0 0 0 1 1 1 1 1 1 1 1 0 0]
+        #                    [1 1 1 0 0 0 1 1 1 1 1 1 1 1 1 0]
+        #                    [1 1 1 1 0 0 1 1 1 1 1 1 1 1 1 1]]]
+        # attn_mask(noswa):[[[1 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+        #                    [1 1 1 0 0 0 0 0 0 0 0 0 0 0 0 0]
+        #                    [1 1 1 1 0 0 0 0 0 0 0 0 0 0 0 0]
+        #                    [0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+        #                    [0 0 0 0 0 0 1 1 1 1 1 1 1 0 0 0]
+        #                    [0 0 0 0 0 0 1 1 1 1 1 1 1 1 0 0]
+        #                    [0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 0]
+        #                    [0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1]]]
+        bottom_right_causal_mask = make_attention_mask(
+            run_length_out_q - segment_pos_q,
+            run_length_out_kv - segment_pos_kv,
+            jnp.less_equal,
+        )
+        attn_mask = jnp.logical_and(segment_mask, bottom_right_causal_mask)
+    elif attn_mask_type.is_causal():
         causal_mask = make_attention_mask(
             segment_pos_q,
             segment_pos_kv,
             jnp.greater_equal,
         )
         attn_mask = jnp.logical_and(segment_mask, causal_mask)
-
-    swa_mask = make_swa_mask(segment_pos_q, segment_pos_kv, window_size, dtype=jnp.bool)
-    attn_mask = jnp.logical_and(attn_mask, swa_mask)
 
     attn_mask_with_id = jnp.where(attn_mask, segment_mask_with_id, 0)
     q_seqlen, q_offset, kv_seqlen, kv_offset = _mask_to_seqlens_offset(
@@ -499,7 +660,7 @@ class SequenceDescriptor:
     - SequenceDescriptor.from_seqlens_and_offsets
       For THD (packed) cases, where each batch may have not only 1 sequence.
     - SequenceDescriptor.from_segment_ids_and_pos
-      Experimental feature for THD (packed) cases with context parallelism.
+      Experimental feature for BSHD (with and without reordering) and THD (packed) cases without reordering
     """
 
     seqlens: Optional[Tuple[jnp.ndarray, jnp.ndarray]]
@@ -534,26 +695,83 @@ class SequenceDescriptor:
         self, attn_mask_type, qkv_layout, window_size, max_segments_per_seq
     ):
         """
-        Acquire the seqlens/offsets for cuDNN backend
+        Acquire the seqlens/offsets for cuDNN backend.
         """
         q_segment_ids, kv_segment_ids = self.segment_ids
         q_segment_pos, kv_segment_pos = self.segment_pos
-        assert q_segment_ids.shape == q_segment_pos.shape
-        assert kv_segment_ids.shape == kv_segment_pos.shape
         # No segment_ids/segment_pos
         if q_segment_ids.size + kv_segment_ids.size == 0:
             return self.seqlens, self.seq_offsets
 
-        if qkv_layout.is_thd():
-            q_seqlens, kv_seqlens, q_offsets, kv_offsets = _segment_ids_pos_to_seqlens_offsets(
-                q_segment_ids,
-                kv_segment_ids,
-                q_segment_pos,
-                kv_segment_pos,
-                attn_mask_type,
-                window_size,
-                max_segments_per_seq,
+        # Allow segment_pos to have fewer leading dims than segment_ids if vmapped segment_ids and non-vmapped segment_pos
+        # e.g. when using from_segment_ids_and_pos() for segment_pos generation from segment_ids it is acceptable to have
+        # something like : segment_ids (B, batch, seq), segment_pos (batch, seq)).
+        if q_segment_ids.ndim < q_segment_pos.ndim or kv_segment_ids.ndim < kv_segment_pos.ndim:
+            raise AssertionError(
+                "segment_ids must not have fewer dims than segment_pos; got"
+                f" q_segment_ids.ndim={q_segment_ids.ndim},"
+                f" q_segment_pos.ndim={q_segment_pos.ndim},"
+                f" kv_segment_ids.ndim={kv_segment_ids.ndim},"
+                f" kv_segment_pos.ndim={kv_segment_pos.ndim}"
             )
+        if not (
+            q_segment_ids.shape[-q_segment_pos.ndim :] == q_segment_pos.shape
+            and kv_segment_ids.shape[-kv_segment_pos.ndim :] == kv_segment_pos.shape
+        ):
+            raise AssertionError(
+                "segment_pos trailing shape must match segment_ids; got"
+                f" q_segment_ids.shape={q_segment_ids.shape},"
+                f" q_segment_pos.shape={q_segment_pos.shape},"
+                f" kv_segment_ids.shape={kv_segment_ids.shape},"
+                f" kv_segment_pos.shape={kv_segment_pos.shape}"
+            )
+        # THD: compute seqlens/offsets.
+        if qkv_layout.is_thd():
+            # If there are more leading dims on segment_ids, e.g. vmap
+            if q_segment_ids.ndim > q_segment_pos.ndim or kv_segment_ids.ndim > kv_segment_pos.ndim:
+                # Flatten leading batch dims so that segment_ids and segment_pos have the same number of leading dims,
+                # vmap seqlens/offsets computation with segment_pos broadcast,
+                # reshape back to the original leading batch dims.
+                n_extra_batch_dims_q = q_segment_ids.ndim - q_segment_pos.ndim
+                n_extra_batch_dims_kv = kv_segment_ids.ndim - kv_segment_pos.ndim
+                extra_batch_shape_q = q_segment_ids.shape[:n_extra_batch_dims_q]
+                extra_batch_shape_kv = kv_segment_ids.shape[:n_extra_batch_dims_kv]
+                extra_flat_batch_size_q = jnp.prod(extra_batch_shape_q)
+                extra_flat_batch_size_kv = jnp.prod(extra_batch_shape_kv)
+                # vmap below requires same batch size on axis 0 for q_flat and kv_flat; JAX will raise if they differ.
+                q_flat = q_segment_ids.reshape(
+                    extra_flat_batch_size_q, *q_segment_ids.shape[n_extra_batch_dims_q:]
+                )
+                kv_flat = kv_segment_ids.reshape(
+                    extra_flat_batch_size_kv, *kv_segment_ids.shape[n_extra_batch_dims_kv:]
+                )
+
+                single_extra_batch = partial(
+                    _segment_ids_pos_to_seqlens_offsets,
+                    attn_mask_type=attn_mask_type,
+                    window_size=window_size,
+                    max_segments_per_seq=max_segments_per_seq,
+                )
+
+                q_sl, kv_sl, q_off, kv_off = jax.vmap(
+                    single_extra_batch, in_axes=(0, 0, None, None)
+                )(q_flat, kv_flat, q_segment_pos, kv_segment_pos)
+
+                q_seqlens = q_sl.reshape(*extra_batch_shape_q, *q_sl.shape[1:])
+                kv_seqlens = kv_sl.reshape(*extra_batch_shape_kv, *kv_sl.shape[1:])
+                q_offsets = q_off.reshape(*extra_batch_shape_q, *q_off.shape[1:])
+                kv_offsets = kv_off.reshape(*extra_batch_shape_kv, *kv_off.shape[1:])
+            else:
+                q_seqlens, kv_seqlens, q_offsets, kv_offsets = _segment_ids_pos_to_seqlens_offsets(
+                    q_segment_ids,
+                    kv_segment_ids,
+                    q_segment_pos,
+                    kv_segment_pos,
+                    attn_mask_type,
+                    window_size,
+                    max_segments_per_seq,
+                )
+        # BSHD: compute seqlens/offsets.
         else:
             q_seqlens, kv_seqlens = _segment_ids_to_seqlens(
                 q_segment_ids,
@@ -639,7 +857,7 @@ class SequenceDescriptor:
         segment_pos: Optional[Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]] = None,
     ) -> SequenceDescriptor:
         """
-        Experimental factory method for inputs with segment IDs and optional positions. (THD)
+        Experimental factory method for inputs with segment IDs and positions.
         Args:
             segment_ids(Tuple(jnp.ndarray, jnp.ndarray)) = (q_segment_ids, kv_segment_ids):
                 - q_segment_ids (jnp.ndarray):
@@ -656,23 +874,32 @@ class SequenceDescriptor:
         Return:
             A SequenceDescriptor with segment_ids/segment_pos initialized.
         """
+        # Examples (0 in segment_ids means padding):
+        # THD (three segments packed together in a sequence of length 16 with no intra-segment padding):
+        # segment_ids = [1, 1, 1, 2, 2, 3, 3, 3, 3, 3, 0, 0, 0, 0, 0, 0]
+        # segment_pos = [0, 1, 2, 0, 1, 0, 1, 2, 3, 4, 0, 0, 0, 0, 0, 0]
+        # THD (three segments packed together in a sequence of length 16 with intra-segment padding):
+        # segment_ids = [1, 1, 1, 2, 2, 3, 3, 3, 0, 0, 4, 4, 0, 0, 0, 0]
+        # segment_pos = [0, 1, 2, 0, 1, 0, 1, 2, 3, 4, 0, 1, 0, 0, 0, 0]
+        # BSHD (only one segment per sequence):
+        # segment_ids = [1, 1, 1, 1, 1, 1, 1, 0, 0]
+        # segment_pos = [0, 1, 2, 3, 4, 5, 6, 7, 8]
+        # TODO(@KshitijLakhani): Make segment_pos Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]] and remove below check (starting June 2026)
+        if segment_pos is None:
+            raise ValueError(
+                "segment_pos is now required. Automatic segment_pos generation was removed because"
+                " it did not have sufficient context to generate a correct segment_pos across all"
+                " load-balancing and context-parallel strategies. Please generate the segment_pos"
+                " explicitly.See tests/jax/test_fused_attn.py generate_random_segment_ids_and_pos()"
+                " and generate_valid_segment_ids_and_pos()"
+            )
+
         q_seg_ids, kv_seg_ids = cls._expand_to_pair(segment_ids)
-
-        if segment_pos is not None:
-            segment_pos = cls._expand_to_pair(segment_pos)
-        else:
-
-            def generate_default_pos(segment_ids):
-                seqlen = segment_ids.shape[-1]
-                return jnp.broadcast_to(jnp.arange(seqlen), segment_ids.shape)
-
-            q_seg_pos = generate_default_pos(q_seg_ids)
-            kv_seg_pos = generate_default_pos(kv_seg_ids)
-            segment_pos = (q_seg_pos, kv_seg_pos)
+        q_seg_pos, kv_seg_pos = cls._expand_to_pair(segment_pos)
 
         return cls(
             segment_ids=(q_seg_ids, kv_seg_ids),
-            segment_pos=segment_pos,
+            segment_pos=(q_seg_pos, kv_seg_pos),
         )
 
 
@@ -684,6 +911,7 @@ def _legacy_fused_attn(
     attn_bias_type: AttnBiasType,
     attn_mask_type: AttnMaskType,
     qkv_layout: QKVLayout,
+    softmax_type: AttnSoftmaxType,
     scaling_factor: float,
     dropout_probability: float,
     is_training: bool,
@@ -691,6 +919,7 @@ def _legacy_fused_attn(
     context_parallel_strategy: CPStrategy = CPStrategy.DEFAULT,
     context_parallel_causal_load_balanced: bool = False,
     context_parallel_axis: str = "",
+    softmax_offset: Optional[jnp.ndarray] = None,
 ):
     """
     Perform non-THD (non-packed) cuDNN fused attention.
@@ -713,6 +942,7 @@ def _legacy_fused_attn(
         seed (Optional[jnp.ndarray]): Optional random seed for dropout.
         attn_bias_type (AttnBiasType): Type of attention bias.
         attn_mask_type (AttnMaskType): Type of attention mask.
+        softmax_type (AttnSoftmaxType): Type of attention softmax.
         qkv_layout (QKVLayout): Layout of the QKV tensors.
         scaling_factor (float): Scaling factor for the attention scores.
         dropout_probability (float): Dropout probability to apply during attention.
@@ -761,10 +991,12 @@ def _legacy_fused_attn(
     output = _fused_attn(
         qkv,
         bias,
+        softmax_offset,
         SequenceDescriptor.from_seqlens((q_seq_lens, kv_seq_lens)),
         seed,
         attn_bias_type=attn_bias_type,
         attn_mask_type=attn_mask_type,
+        softmax_type=softmax_type,
         qkv_layout=qkv_layout,
         scaling_factor=scaling_factor,
         dropout_probability=dropout_probability,
@@ -798,6 +1030,7 @@ def fused_attn_thd(
     context_parallel_strategy: CPStrategy = CPStrategy.DEFAULT,
     context_parallel_causal_load_balanced: bool = False,
     context_parallel_axis: str = "",
+    softmax_offset: Optional[jnp.ndarray] = None,
 ):
     """
     Deprecated THD fused attn, please use fusd_attn with SequenceDescriptor
@@ -835,6 +1068,7 @@ def fused_attn_thd(
     output = _fused_attn(
         qkv,
         bias,
+        softmax_offset,
         SequenceDescriptor.from_seqlens_and_offsets(
             (q_seq_lens, kv_seq_lens), (q_seq_offsets, kv_seq_offsets)
         ),
@@ -843,6 +1077,7 @@ def fused_attn_thd(
         attn_mask_type=attn_mask_type,
         qkv_layout=qkv_layout,
         scaling_factor=scaling_factor,
+        softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
         dropout_probability=dropout_probability,
         is_training=is_training,
         max_segments_per_seq=max_segments_per_seq,
@@ -855,15 +1090,17 @@ def fused_attn_thd(
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15))
+@partial(jax.custom_vjp, nondiff_argnums=(5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18))
 def _fused_attn(
     qkv: Tuple[jnp.ndarray, ...],
     bias: Optional[jnp.ndarray],
+    softmax_offset: Optional[jnp.ndarray],
     sequence_descriptor: SequenceDescriptor,
     seed: Optional[jnp.ndarray],
     attn_bias_type: AttnBiasType,
     attn_mask_type: AttnMaskType,
     qkv_layout: QKVLayout,
+    softmax_type: AttnSoftmaxType,
     scaling_factor: float,
     dropout_probability: float,
     is_training: bool,
@@ -873,15 +1110,18 @@ def _fused_attn(
     context_parallel_causal_load_balanced: bool,
     context_parallel_axis: str,
     context_checkpoint_name: str = "context",
+    stripe_size: int | None = None,
 ):
     output, _ = _fused_attn_fwd_rule(
         qkv,
         bias,
+        softmax_offset,
         sequence_descriptor,
         seed,
         attn_bias_type,
         attn_mask_type,
         qkv_layout,
+        softmax_type,
         scaling_factor,
         dropout_probability,
         is_training,
@@ -891,6 +1131,7 @@ def _fused_attn(
         context_parallel_causal_load_balanced,
         context_parallel_axis,
         context_checkpoint_name=context_checkpoint_name,
+        stripe_size=stripe_size,
     )
     return output
 
@@ -898,11 +1139,13 @@ def _fused_attn(
 def _fused_attn_fwd_rule(
     qkv,
     bias,
+    softmax_offset,
     sequence_descriptor,
     seed,
     attn_bias_type,
     attn_mask_type,
     qkv_layout,
+    softmax_type,
     scaling_factor,
     dropout_probability,
     is_training,
@@ -912,14 +1155,17 @@ def _fused_attn_fwd_rule(
     context_parallel_causal_load_balanced,
     context_parallel_axis,
     context_checkpoint_name,
+    stripe_size,
 ):
     output, softmax_aux, rng_state = tex.fused_attn_fwd(
         qkv,
         bias,
+        softmax_offset,
         sequence_descriptor,
         seed,
         attn_bias_type=attn_bias_type,
         attn_mask_type=attn_mask_type,
+        softmax_type=softmax_type,
         qkv_layout=qkv_layout,
         scaling_factor=scaling_factor,
         dropout_probability=dropout_probability,
@@ -929,6 +1175,7 @@ def _fused_attn_fwd_rule(
         context_parallel_strategy=context_parallel_strategy,
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
         context_parallel_axis=context_parallel_axis,
+        stripe_size=stripe_size,
     )
     output = checkpoint_name(output, context_checkpoint_name)
     softmax_aux = checkpoint_name(softmax_aux, context_checkpoint_name)
@@ -939,6 +1186,7 @@ def _fused_attn_fwd_rule(
         sequence_descriptor,
         softmax_aux,
         rng_state,
+        softmax_offset,
         output,
     )
 
@@ -947,6 +1195,7 @@ def _fused_attn_bwd_rule(
     attn_bias_type,
     attn_mask_type,
     qkv_layout,
+    softmax_type,
     scaling_factor,
     dropout_probability,
     is_training,
@@ -956,6 +1205,7 @@ def _fused_attn_bwd_rule(
     context_parallel_causal_load_balanced,
     context_parallel_axis,
     context_checkpoint_name,
+    stripe_size,
     ctx,
     dz,
 ):
@@ -966,11 +1216,13 @@ def _fused_attn_bwd_rule(
         sequence_descriptor,
         softmax_aux,
         rng_state,
+        softmax_offset,
         output,
     ) = ctx
-    grad_qkv, grad_bias = tex.fused_attn_bwd(
+    grad_qkv, grad_bias, grad_softmax_offset = tex.fused_attn_bwd(
         qkv,
         bias,
+        softmax_offset,
         softmax_aux,
         rng_state,
         output,
@@ -978,6 +1230,7 @@ def _fused_attn_bwd_rule(
         sequence_descriptor,
         attn_bias_type=attn_bias_type,
         attn_mask_type=attn_mask_type,
+        softmax_type=softmax_type,
         qkv_layout=qkv_layout,
         scaling_factor=scaling_factor,
         dropout_probability=dropout_probability,
@@ -987,12 +1240,16 @@ def _fused_attn_bwd_rule(
         context_parallel_strategy=context_parallel_strategy,
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
         context_parallel_axis=context_parallel_axis,
+        stripe_size=stripe_size,
     )
     if attn_bias_type == AttnBiasType.NO_BIAS:
         grad_bias = None
+    if softmax_type != AttnSoftmaxType.LEARNABLE_SOFTMAX:
+        grad_softmax_offset = None
     return (
         grad_qkv,
         grad_bias,
+        grad_softmax_offset,
         None,
         None,
     )
@@ -1009,6 +1266,7 @@ def fused_attn(
     attn_bias_type: AttnBiasType,
     attn_mask_type: AttnMaskType,
     qkv_layout: QKVLayout,
+    softmax_type: AttnSoftmaxType,
     scaling_factor: float,
     dropout_probability: float,
     is_training: bool,
@@ -1018,6 +1276,8 @@ def fused_attn(
     context_parallel_causal_load_balanced: bool = False,
     context_parallel_axis: str = "",
     context_checkpoint_name: str = "context",
+    softmax_offset: Optional[jnp.ndarray] = None,
+    stripe_size: int | None = None,
 ):
     """
     Perform cuDNN fused attention.
@@ -1037,6 +1297,7 @@ def fused_attn(
         seed (Optional[jnp.ndarray]): Optional random seed for dropout.
         attn_bias_type (AttnBiasType): Type of attention bias.
         attn_mask_type (AttnMaskType): Type of attention mask.
+        softmax_type (AttnSoftmaxType): Type of attention softmax.
         qkv_layout (QKVLayout): Layout of the QKV tensors.
         scaling_factor (float): Scaling factor for the attention scores.
         dropout_probability (float): Dropout probability to apply during attention.
@@ -1051,6 +1312,14 @@ def fused_attn(
             Indicates the sequences are ordered for causal mask load balancing when running context parallelism.
         context_parallel_axis (str): The name of the context parallel axis.
         context_checkpoint_name (str): The name of the context checkpoint for the custom VJP forward pass.
+        softmax_offset (Optional[jnp.ndarray]): An optional learnable softmax offset tensor with shape
+            [1, num_heads, 1, 1]. Used when softmax_type is AttnSoftmaxType.LEARNABLE_SOFTMAX.
+            If provided, this parameter will receive gradients during backpropagation.
+        stripe_size (int |  None):
+            Indicates the striping size to be used when using ReorderStrategy.Striped.
+            Currently, a stripe_size > 1 is only supported for CP + THD + Striped + AG, whereas a stripe_size=1
+            is supported for both, CP + THD + Striped + AG and CP + THD + Striped + P2P(Ring)
+            None indicates no striping strategy
     Returns:
         (jnp.ndarray): The output tensor from the fused attention.
 
@@ -1098,6 +1367,7 @@ def fused_attn(
             seed,
             attn_bias_type=attn_bias_type,
             attn_mask_type=attn_mask_type,
+            softmax_type=softmax_type,
             qkv_layout=qkv_layout,
             scaling_factor=scaling_factor,
             dropout_probability=dropout_probability,
@@ -1106,15 +1376,27 @@ def fused_attn(
             context_parallel_strategy=context_parallel_strategy,
             context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
             context_parallel_axis=context_parallel_axis,
+            softmax_offset=softmax_offset,
+        )
+    if max_segments_per_seq > 1 and not qkv_layout.is_thd():
+        warnings.warn(
+            f"max_segments_per_seq={max_segments_per_seq} is set but qkv_layout={qkv_layout} is "
+            "not a THD layout. max_segments_per_seq > 1 only applies when using THD layouts "
+            "(e.g. QKVLayout.T3HD, QKVLayout.THD_T2HD, QKVLayout.THD_THD_THD) for sequence "
+            "packing.",
+            UserWarning,
+            stacklevel=2,
         )
     output = _fused_attn(
         qkv,
         bias,
+        softmax_offset,
         sequence_descriptor,
         seed,
         attn_bias_type=attn_bias_type,
         attn_mask_type=attn_mask_type,
         qkv_layout=qkv_layout,
+        softmax_type=softmax_type,
         scaling_factor=scaling_factor,
         dropout_probability=dropout_probability,
         is_training=is_training,
@@ -1124,6 +1406,6 @@ def fused_attn(
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
         context_parallel_axis=context_parallel_axis,
         context_checkpoint_name=context_checkpoint_name,
+        stripe_size=stripe_size,
     )
-
     return output

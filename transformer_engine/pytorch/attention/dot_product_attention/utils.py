@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -17,6 +17,7 @@ import numpy as np
 from packaging.version import Version as PkgVersion
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 import transformer_engine_torch as tex
 import transformer_engine as te
@@ -24,6 +25,7 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     QKVLayout,
     AttnBiasType,
     AttnMaskType,
+    SoftmaxType,
     FusedAttnBackend,
     META_QKV,
     META_DQKV,
@@ -31,18 +33,22 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     META_DO,
     META_S,
     META_DP,
-    META_O_CP,
-    META_DQKV_CP,
 )
 from transformer_engine.pytorch.attention.inference import InferenceParams
-from transformer_engine.pytorch.float8_tensor import Float8Tensor
-from transformer_engine.pytorch.fp8 import get_fp8_te_dtype
+from transformer_engine.pytorch.tensor.float8_tensor import (
+    Float8Tensor,
+    Float8Quantizer,
+    Float8CurrentScalingQuantizer,
+)
+from transformer_engine.pytorch.quantization import get_fp8_te_dtype
 from transformer_engine.pytorch.constants import TE_DType
 
 
 from transformer_engine.pytorch.utils import (
     get_device_compute_capability,
     get_cudnn_version,
+    SplitAlongDim,
+    combine_tensors,
 )
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
 
@@ -53,6 +59,9 @@ _NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
 # NVTE_DEBUG_LEVEL = 0/1/2 # enables more and more verbose debug mode, default = 0
 _NVTE_DEBUG_LEVEL = int(os.getenv("NVTE_DEBUG_LEVEL", "0"))
 _NVTE_FLASH_ATTN = int(os.getenv("NVTE_FLASH_ATTN", "1"))
+# print quantizer info for a particular layer on a particular rank
+_print_layer = int(os.getenv("NVTE_PRINT_LAYER_NUMBER", "1"))
+_print_rank = int(os.getenv("NVTE_PRINT_RANK", "0"))
 
 _cu_seqlens_cache = {}
 
@@ -106,7 +115,7 @@ class FlashAttentionUtils:
     version = PkgVersion("0")
     version_required = PkgVersion("2.1.1")
     version_required_blackwell = PkgVersion("2.7.3")
-    max_version = PkgVersion("2.8.1")
+    max_version = PkgVersion("2.8.3")
     v2_plus = False
     v2_1_plus = False
     v2_3_plus = False
@@ -126,11 +135,15 @@ class FlashAttentionUtils:
     # Please follow these instructions to install FA3
     v3_installation_steps = """\
 (1) git clone https://github.com/Dao-AILab/flash-attention.git
-(2) cd flash-attention/ && git checkout 27f501d && cd hopper/ && python setup.py install
-(3) python_path=`python -c "import site; print(site.getsitepackages()[0])"`
-(4) mkdir -p $python_path/flash_attn_3
-(5) wget -P $python_path/flash_attn_3 https://raw.githubusercontent.com/Dao-AILab/flash-attention/27f501dbe011f4371bff938fe7e09311ab3002fa/hopper/flash_attn_interface.py"""
+(2) cd flash-attention/hopper && python setup.py install"""
     v3_warning_printed = False
+
+    v4_is_installed = False
+    fa4_version = PkgVersion("0")
+    use_v4 = False
+    v4_installation_steps = """\
+pip install flash-attn-4==4.0.0b8 nvidia-cutlass-dsl[cu13]"""
+    v4_warning_printed = False
 
     @staticmethod
     def set_flash_attention_version():
@@ -158,6 +171,13 @@ class FlashAttentionUtils:
             PkgVersion("3.0.0b") < FlashAttentionUtils.fa3_version < PkgVersion("3.0.0")
         )
 
+    @staticmethod
+    def set_flash_attention_4_params():
+        """
+        Setup version info for FA v4.x
+        """
+        FlashAttentionUtils.v4_is_installed = True
+
 
 @dataclass(eq=True)
 class AttentionParams:
@@ -166,56 +186,69 @@ class AttentionParams:
 
     Parameters
     ----------
-    qkv_type: Union[torch.Tensor, Float8Tensor], default = `torch.Tensor`
+    qkv_type : Union[torch.Tensor, Float8Tensor], default = torch.Tensor
         Type of query/key/value tensors, {`torch.Tensor`, `Float8Tensor`}.
-    qkv_dtype: torch.dtype, default = `torch.bfloat16`
+    qkv_dtype : torch.dtype, default = torch.bfloat16
         Data type of query/key/value tensors.
-    qkv_layout: str, default = "sbh3d"
+    qkv_layout : str, default = "sbh3d"
         Query/key/value tensor memory layout.
-    batch_size: int, default = 1
+    batch_size : int, default = 1
         Batch size.
-    num_heads: int, default = 16
+    num_heads : int, default = 16
         Number of attention heads in the query tensor.
-    num_gqa_groups: int, default = 16
+    num_gqa_groups : int, default = 16
         Number of attention heads in key and value tensors.
-    max_seqlen_q: int, default = 128
+    max_seqlen_q : int, default = 128
         Maximum sequence length of the query tensor.
-    max_seqlen_kv: int, default = 128
+    max_seqlen_kv : int, default = 128
         Maximum sequence length of the key and value tensors.
-    head_dim_qk: int, default = 64
+    head_dim_qk : int, default = 64
         The size of each attention head in query and key tensors.
-    head_dim_v: int, default = 64
+    head_dim_v : int, default = 64
         The size of each attention head in the value tensor.
-    attn_mask_type: str, default = `no_mask`
+    attn_mask_type : str, default = no_mask
         Attention mask type, {`no_mask`, `padding`, `causal`, `padding_causal`,
         `causal_bottom_right`, `padding_causal_bottom_right`, `arbitrary`}
-    window_size: Tuple[int, int], default = None
+    window_size : Tuple[int, int], default = None
         Sliding window attention size.
-    alibi_slopes_shape: Optional[Union[torch.Size, List]], default = `None`
+    bottom_right_diagonal: bool, default = `None`
+        Whether to align sliding window and ALiBi diagonal to the bottom right corner
+        of the softmax matrix.
+    alibi_slopes_shape : Optional[Union[torch.Size, List]], default = None
         Tensor shape of :attr:`alibi_slopes` in `DotProductAttention`.
-    core_attention_bias_type: str, default = `no_bias`
+    core_attention_bias_type : str, default = no_bias
         Attention bias type, {`no_bias`, `pre_scale_bias`, `post_scale_bias`, `alibi`}.
-    core_attention_bias_shape: str, default = `1hss`
+    core_attention_bias_shape : str, default = 1hss
         Attention bias shape, {`1hss`, `b1ss`, `bhss`}.
-    core_attention_bias_requires_grad: bool, default = `True`
+    core_attention_bias_requires_grad : bool, default = True
         Whether attention bias requires gradient.
-    pad_between_seqs: bool, default = `False`
+    pad_between_seqs : bool, default = False
         Whether there is padding between sequences in a batch.
         This only applies to `qkv_format=thd`.
-    attention_dropout: float, default = 0.0
+    attention_dropout : float, default = 0.0
         Attention dropout.
-    context_parallel: bool, default = `False`
+    context_parallel : bool, default = False
         Whether context parallelism is used or not.
-    deterministic: bool, default = `False`
+    cp_comm_type : str, default = "p2p"
+        The communication type of context parallelism.
+    deterministic : bool, default = False
         Whether to run `DotProductAttention` with determinism or not.
-    is_training: bool, default = `True`
+    is_training : bool, default = True
         Whether in training mode (`True`) or inference mode (`False`)
-    fp8: bool, default = `False`
-        Whether `DotProductAttention` is in an `fp8_autocast` region.
-    fp8_meta: Optional[Dict[str Any]], default = `None`
+    fp8 : bool, default = False
+        Whether `DotProductAttention` is in an `autocast` region.
+    fp8_meta : Optional[Dict[str Any]], default = None
         The FP8 metadata tensor of `DotProductAttention`.
-    inference_params: Optional[InferenceParams], default = `None`
+    inference_params : Optional[InferenceParams], default = None
         Inference-related parameters. See InferenceParams for details.
+    softmax_type : str, default = "vanilla"
+        The type of softmax operation. See DotProductAttention for details.
+    return_max_logit : bool, default = False
+        Whether to output max_logit.
+    cuda_graph : bool, default = `False`
+        Whether support for cuda graph capture is needed or not.
+    num_splits : int, default = 1
+        The number of kernels to split attention to.
     """
 
     qkv_type: Union[torch.Tensor, Float8Tensor] = torch.Tensor
@@ -230,6 +263,7 @@ class AttentionParams:
     head_dim_v: int = 64
     attn_mask_type: str = "no_mask"
     window_size: Union[Tuple[int, int], None] = None
+    bottom_right_diagonal: bool = True
     alibi_slopes_shape: Union[torch.Size, List, None] = None
     core_attention_bias_type: str = "no_bias"
     core_attention_bias_shape: str = "1hss"
@@ -237,11 +271,16 @@ class AttentionParams:
     pad_between_seqs: bool = False
     attention_dropout: float = 0.0
     context_parallel: bool = False
+    cp_comm_type: str = "p2p"
     deterministic: bool = False
     is_training: bool = True
     fp8: bool = False
     fp8_meta: Union[Dict[str, Any], None] = None
     inference_params: Optional[InferenceParams] = None
+    softmax_type: str = "vanilla"
+    return_max_logit: bool = False
+    cuda_graph: bool = False
+    num_splits: int = 1
 
     def __eq__(self, other):
         """
@@ -274,15 +313,15 @@ def get_attention_backend(
 
     Returns
     ----------
-    use_flash_attention: bool
+    use_flash_attention : bool
         Whether the `FlashAttention` backend has been selected.
-    use_fused_attention: bool
+    use_fused_attention : bool
         Whether the `FusedAttention` backend has been selected.
-    fused_attention_backend: tex.NVTE_Fused_Attn_Backend
+    fused_attention_backend : tex.NVTE_Fused_Attn_Backend
         If `use_fused_attention = True`, one of `FusedAttention` three sub-backends, else `None`.
-    use_unfused_attention: bool
+    use_unfused_attention : bool
         Whether the `UnfusedDotProductAttention` backend has been selected.
-    available_backends: List[bool]
+    available_backends : List[bool]
         All available backends that could support the provided input. A list of Booleans
         in the form of [use_flash_attention, use_fused_attention, use_unfused_attention].
     """
@@ -301,6 +340,7 @@ def get_attention_backend(
     head_dim_v = attention_params.head_dim_v
     attn_mask_type = attention_params.attn_mask_type
     window_size = attention_params.window_size
+    bottom_right_diagonal = attention_params.bottom_right_diagonal
     alibi_slopes_shape = attention_params.alibi_slopes_shape
     core_attention_bias_type = attention_params.core_attention_bias_type
     core_attention_bias_shape = attention_params.core_attention_bias_shape
@@ -308,11 +348,16 @@ def get_attention_backend(
     pad_between_seqs = attention_params.pad_between_seqs
     attention_dropout = attention_params.attention_dropout
     context_parallel = attention_params.context_parallel
+    cp_comm_type = attention_params.cp_comm_type
     deterministic = attention_params.deterministic
     is_training = attention_params.is_training
     fp8 = attention_params.fp8
     fp8_meta = attention_params.fp8_meta
     inference_params = attention_params.inference_params
+    softmax_type = attention_params.softmax_type
+    return_max_logit = attention_params.return_max_logit
+    cuda_graph = attention_params.cuda_graph
+    num_splits = attention_params.num_splits
 
     # Run config
     logger = logging.getLogger("DotProductAttention")
@@ -323,8 +368,9 @@ def get_attention_backend(
     cudnn_version = get_cudnn_version()
     run_config = {
         "transformer_engine_version": te.__version__,
-        "compute_capability": "sm"
-        + str(10 * device_compute_capability[0] + device_compute_capability[1]),
+        "compute_capability": (
+            "sm" + str(10 * device_compute_capability[0] + device_compute_capability[1])
+        ),
         "flash_attn_version": (
             str(FlashAttentionUtils.version)
             if FlashAttentionUtils.is_installed
@@ -335,14 +381,42 @@ def get_attention_backend(
             if FlashAttentionUtils.v3_is_installed
             else "not installed"
         ),
+        "flash_attn_4_version": (
+            str(FlashAttentionUtils.fa4_version)
+            if FlashAttentionUtils.v4_is_installed
+            else "not installed"
+        ),
         "cudnn_version": ".".join([str(i) for i in cudnn_version]),
     }
     attention_params_dict = {
         field.name: getattr(attention_params, field.name) for field in fields(attention_params)
     }
     run_config.update(attention_params_dict)
+    # Add FP8 environment variables to config
     if fp8:
+        # all FP8 recipes: 1: (FP8 fwd, FP8 bwd), 0: (FP8 fwd, F16 bwd)
         run_config["NVTE_FP8_DPA_BWD"] = int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
+        # Float8CurrentScaling: 1: use F16 O in bwd, 0: use FP8 O in bwd
+        run_config["NVTE_DPA_FP8CS_O_in_F16"] = int(os.getenv("NVTE_DPA_FP8CS_O_in_F16", "1"))
+        # switch recipe to "F16", "DelayedScaling", or "Float8CurrentScaling"
+        _dpa_fp8_recipe = os.getenv("NVTE_DPA_FP8_RECIPE", "")
+        run_config["NVTE_DPA_FP8_RECIPE"] = _dpa_fp8_recipe
+        if _dpa_fp8_recipe != "":
+            # config new recipe if switched
+            run_config["NVTE_DPA_FP8_FORMAT"] = os.getenv("NVTE_DPA_FP8_FORMAT", "HYBRID")
+            run_config["NVTE_DPA_FP8DS_AMAX_ALGO"] = os.getenv(
+                "NVTE_DPA_FP8DS_AMAX_ALGO", "most_recent"
+            )
+            run_config["NVTE_DPA_FP8DS_AMAX_HISTLEN"] = int(
+                os.getenv("NVTE_DPA_FP8DS_AMAX_HISTLEN", "1")
+            )
+            run_config["NVTE_DPA_FP8DS_REDUCE_AMAX"] = int(
+                os.getenv("NVTE_DPA_FP8DS_REDUCE_AMAX", "1")
+            )
+        # UnfusedDotProductAttention: 1: allow FP8 emulation, 0: do not allow
+        run_config["NVTE_UnfusedDPA_Emulate_FP8"] = int(
+            os.getenv("NVTE_UnfusedDPA_Emulate_FP8", "0")
+        )
     logger.debug("Running with config=%s", run_config)
 
     # The following sections check if `FlashAttention` supports the provided attention params,
@@ -355,6 +429,7 @@ def get_attention_backend(
     use_flash_attention = int(os.getenv("NVTE_FLASH_ATTN", "1"))
     use_flash_attention_2 = use_flash_attention
     use_flash_attention_3 = use_flash_attention
+    use_flash_attention_4 = use_flash_attention
     flash_attention_backend = None
     use_fused_attention = int(os.getenv("NVTE_FUSED_ATTN", "1"))
     use_unfused_attention = int(os.getenv("NVTE_UNFUSED_ATTN", "1"))
@@ -362,6 +437,8 @@ def get_attention_backend(
         logger.debug("Disabling FlashAttention 2 due to NVTE_FLASH_ATTN=0")
     if not use_flash_attention_3 and FlashAttentionUtils.v3_is_installed:
         logger.debug("Disabling FlashAttention 3 due to NVTE_FLASH_ATTN=0")
+    if not use_flash_attention_4 and FlashAttentionUtils.v4_is_installed:
+        logger.debug("Disabling FlashAttention 4 due to NVTE_FLASH_ATTN=0")
     if not use_fused_attention:
         logger.debug("Disabling FusedAttention due to NVTE_FUSED_ATTN=0")
     if not use_unfused_attention:
@@ -379,6 +456,18 @@ def get_attention_backend(
         if use_flash_attention_3 and FlashAttentionUtils.v3_is_installed:
             logger.debug("Disabling FlashAttention 3 for compute capability != sm90")
         use_flash_attention_3 = False
+    # FA4 supports SM80, SM90, SM100, SM120
+    if device_compute_capability < (8, 0):
+        if use_flash_attention_4 and FlashAttentionUtils.v4_is_installed:
+            logger.debug("Disabling FlashAttention 4 for compute capability < sm80")
+        use_flash_attention_4 = False
+    # On SM90, prefer FA3 over FA4 when FA3 is available.
+    # FA3 is more mature on Hopper; FA4's SM90 backward has limitations
+    # (MLA, non-standard head dims, SplitKV).
+    if use_flash_attention_4 and use_flash_attention_3 and device_compute_capability == (9, 0):
+        if FlashAttentionUtils.v4_is_installed:
+            logger.debug("Disabling FlashAttention 4 to prefer FlashAttention 3 on SM90")
+        use_flash_attention_4 = False
 
     # Filter: Data type
     if qkv_dtype not in [torch.bfloat16, torch.float16]:
@@ -389,6 +478,13 @@ def get_attention_backend(
                 qkv_dtype,
             )
         use_flash_attention_2 = False
+        if use_flash_attention_4 and FlashAttentionUtils.v4_is_installed:
+            logger.debug(
+                "Disabling FlashAttention 4 for unsupported qkv_dtype = %s. "
+                "Supported: qkv_dtype = {torch.bfloat16, torch.float16}. ",
+                qkv_dtype,
+            )
+        use_flash_attention_4 = False
     if qkv_dtype not in [torch.bfloat16, torch.float16, torch.float8_e4m3fn] or qkv_type not in [
         torch.Tensor,
         Float8Tensor,
@@ -416,14 +512,85 @@ def get_attention_backend(
     if fp8 and fp8_meta["recipe"].fp8_dpa:
         if use_flash_attention_2 and FlashAttentionUtils.is_installed:
             logger.debug("Disabling FlashAttention 2 for FP8 attention")
-        use_flash_attention_2 = False
+            use_flash_attention_2 = False
+        if use_flash_attention_4 and FlashAttentionUtils.v4_is_installed:
+            logger.debug("Disabling FlashAttention 4 for FP8 attention")
+            use_flash_attention_4 = False
         if use_flash_attention_3 and is_training:
             if FlashAttentionUtils.v3_is_installed:
                 logger.debug("Disabling FlashAttention 3 for FP8 training")
             use_flash_attention_3 = False
         if use_unfused_attention:
-            logger.debug("Disabling UnfusedDotProductAttention for FP8 attention")
+            allow_emulation = (
+                os.getenv("NVTE_UnfusedDPA_Emulate_FP8", "0") == "1" or is_in_onnx_export_mode()
+            )
+            if not allow_emulation:
+                logger.debug("Disabling UnfusedDotProductAttention for FP8 attention")
+                use_unfused_attention = False
+        fp8_recipe = fp8_meta["recipe"]
+        if fp8_meta.get("local_recipes", None) is not None:
+            fp8_recipe = fp8_meta["local_recipes"][0]
+        if use_fused_attention and fp8_recipe.float8_current_scaling():
+            if device_compute_capability < (10, 0):
+                logger.debug("Disabling FusedAttention for FP8 current scaling on arch < sm100")
+                use_fused_attention = False
+            # TODO(cyanguwa): Modify the min cuDNN version supporting FP8 current scaling
+            # determinism for Blackwell
+            else:
+                if cudnn_version < (9, 14, 0):
+                    logger.debug(
+                        "Disabling FusedAttention for FP8 current scaling with cuDNN < 9.14.0"
+                    )
+                    use_fused_attention = False
+                else:
+                    if deterministic and cudnn_version < (9, 18, 0):
+                        logger.debug(
+                            "Disabling FusedAttention for FP8 current scaling requiring determinism"
+                            " with cuDNN < 9.18.0"
+                        )
+                        use_fused_attention = False
+
+        if device_compute_capability == (12, 0):
+            if use_flash_attention:
+                logger.debug(
+                    "Disabling FlashAttention as FP8 is not supported"
+                    " for compute capability = sm120"
+                )
+            if use_fused_attention:
+                logger.debug(
+                    "Disabling FusedAttention as FP8 is not supported"
+                    " for compute capability = sm120"
+                )
+            use_flash_attention = False
+            use_fused_attention = False
+
+    # Filter: num_splits
+    if num_splits != 1:
+        if use_flash_attention_2 and FlashAttentionUtils.is_installed:
+            logger.debug("Disabling FlashAttention 2 for num_splits")
+            use_flash_attention_2 = False
+        # FA4 SplitKV is only supported on SM100+
+        if use_flash_attention_4 and device_compute_capability < (10, 0):
+            if FlashAttentionUtils.v4_is_installed:
+                logger.debug("Disabling FlashAttention 4 for num_splits on SM < 100")
+            use_flash_attention_4 = False
+        if use_fused_attention:
+            logger.debug("Disabling FusedAttention for num_splits")
+            use_fused_attention = False
+        if use_unfused_attention:
+            logger.debug("Disabling UnfusedDotProductAttention for num_splits")
             use_unfused_attention = False
+
+    # Filter: Return max_logit
+    if return_max_logit:
+        if use_flash_attention:
+            use_flash_attention = False
+            logger.debug("Disabling FlashAttention for max_logit")
+        if fp8 and fp8_meta["recipe"].fp8_dpa:
+            use_flash_attention = False
+            use_fused_attention = False
+            use_unfused_attention = False
+            logger.debug("Disabling all backends for max_logit with FP8 attention")
 
     # Filter: KV cache
     # backend  | precision      |    KV cache     | architecture | qkv_format    | page_size
@@ -432,11 +599,18 @@ def get_attention_backend(
     # Flash v2 | FP16/BF16      | non-paged/paged | sm80+        | bshd,sbhd,thd | >= 256
     # Flash v3 | FP16/BF16      | non-paged/paged | sm90         | bshd,sbhd,thd | >= 1
     #          | FP8            | non-paged/paged | sm90         | thd           | >= 1
+    # Flash v4 | FP16/BF16      | TODO            | sm80+        | bshd,sbhd,thd | TODO
     # Unfused  | FP32/FP16/BF16 | non-paged/paged | all          | bshd,sbhd,thd | >= 1
     if inference_params is not None:
-        if device_compute_capability == (8, 9) and cudnn_version <= (9, 12, 0):
-            logger.debug("Disabling FusedAttention for KV caching for sm89 and cuDNN <= 9.12")
+        # Temporarily disabling fused attention for kv caching for sm89/sm120 irrespective of
+        # cuDNN version until the cuDNN bug is resolved.
+        if device_compute_capability in ((8, 9), (12, 0)):
+            logger.debug("Disabling FusedAttention for KV caching for sm89/sm120")
             use_fused_attention = False
+        # Temporarily disable FlashAttention for KV caching on sm120
+        if device_compute_capability == (12, 0):
+            logger.debug("Disabling FlashAttention for KV caching for sm120")
+            use_flash_attention = False
         if context_parallel:
             logger.debug("Disabling all backends for KV caching with context parallelism")
             use_flash_attention = False
@@ -474,64 +648,218 @@ def get_attention_backend(
                         "Disabling FlashAttention 2 as paged attention requires flash-attn 2.5+"
                     )
                     use_flash_attention_2 = False
+        if use_flash_attention_4 and FlashAttentionUtils.v4_is_installed:
+            logger.debug("Disabling FlashAttention 4 as it does not support KV cache.")
+            use_flash_attention_4 = False
 
     # Filter: Head dimension
     if head_dim_qk != head_dim_v:
-        if (use_flash_attention_2 and FlashAttentionUtils.is_installed) or (
-            use_flash_attention_3 and FlashAttentionUtils.v3_is_installed
-        ):
-            logger.debug("Disabling FlashAttention as it does not support MLA.")
-        use_flash_attention = False
+        if use_flash_attention_2 and FlashAttentionUtils.is_installed:
+            logger.debug("Disabling FlashAttention 2 as it does not support MLA.")
+            use_flash_attention_2 = False
+
         qkv_layout_group = qkv_layout.replace("b", "").replace("s", "").replace("t", "")
         if use_fused_attention and qkv_layout_group != "hd_hd_hd":
             logger.debug(
-                "Disabling FusedAttention as MLA is not supported with qkv_layout = %s",
+                "Disabling FusedAttention as MLA is not supported with qkv_layout = %s.",
                 qkv_layout,
             )
             use_fused_attention = False
-    if use_flash_attention_2 and (
-        head_dim_qk > 256
-        or head_dim_qk % 8 != 0
-        or (
-            head_dim_qk > 192
-            and device_compute_capability not in ((8, 0), (9, 0), (10, 0), (12, 0))
+        if (
+            device_compute_capability == (12, 0)
+            and (head_dim_qk > 128 or head_dim_qk % 8 != 0)
+            and is_training
+        ):
+            if use_fused_attention:
+                logger.debug(
+                    "Disabling FusedAttention as MLA for backward pass is not supported for compute"
+                    " capability = sm120 for a head_dim_qk > 128 or head_dim_qk %%8 != 0. Found:"
+                    " head_dim_qk = %s",
+                    head_dim_qk,
+                )
+            use_fused_attention = False
+
+    if (  # pylint: disable=too-many-boolean-expressions
+        use_flash_attention_2
+        and FlashAttentionUtils.is_installed
+        and (
+            head_dim_qk > 256
+            or head_dim_qk % 8 != 0
+            or (
+                head_dim_qk > 192
+                and device_compute_capability not in ((8, 0), (9, 0), (10, 0), (12, 0))
+            )
         )
     ):
-        if FlashAttentionUtils.is_installed:
+        logger.debug(
+            "Disabling FlashAttention 2 due to unsupported head_dim_qk and head_dim_v. "
+            "Supported: head_dim_qk = head_dim_v, head_dim_qk %%8 = 0, "
+            "head_dim_qk <= 256 (>192 requires sm80/90/100+). "
+            "Found: head_dim_qk = %s, head_dim_v = %s, on sm%s.",
+            head_dim_qk,
+            head_dim_v,
+            ".".join([str(i) for i in device_compute_capability]),
+        )
+        use_flash_attention_2 = False
+
+    if use_flash_attention_3 and FlashAttentionUtils.v3_is_installed:
+
+        def _is_fa3_supported(num_heads, num_gqa_groups, head_dim_qk, head_dim_v, qkv_dtype):
+            if head_dim_qk > 256 or num_heads % num_gqa_groups != 0:
+                return False
+            if head_dim_qk != head_dim_v:
+                cond1 = 128 < head_dim_qk <= 192
+                cond2 = 96 < head_dim_v <= 128
+                cond3 = head_dim_qk <= 64 and head_dim_v <= 512
+                if not ((cond1 and cond2) or cond3):
+                    return False
+                if head_dim_v > 256 and qkv_dtype not in (torch.bfloat16, torch.float16):
+                    return False
+            return True
+
+        if not _is_fa3_supported(num_heads, num_gqa_groups, head_dim_qk, head_dim_v, qkv_dtype):
             logger.debug(
-                "Disabling FlashAttention 2 due to unsupported head_dim_qk and head_dim_v. "
-                "Supported: head_dim_qk = head_dim_v, head_dim_qk %%8 = 0, "
-                "head_dim_qk <= 256 (>192 requires sm80/90/100+). "
+                "Disabling FlashAttention 3 due to unsupported num_heads, num_gqa_groups, "
+                "head_dim_qk, head_dim_v or qkv_dtype. "
+                "Supported: head_dim_qk <= 256, and num_heads %% num_gqa_groups = 0, and "
+                "if head_dim_qk is different from head_dim_v, then "
+                "(head_dim_qk must in (128, 192] and head_dim_v in (96, 128]) or "
+                "(head_dim_qk <= 64 and head_dim_v <= 512), and "
+                "if head_dim_qk is different from head_dim_v and head_dim_v > 256, then "
+                "qkv_dtype requires fp16 and bf16 data type. "
+                "Found: num_heads = %s, num_gqa_groups = %s, "
+                "head_dim_qk = %s, head_dim_v = %s and qkv_dtype = %s.",
+                num_heads,
+                num_gqa_groups,
+                head_dim_qk,
+                head_dim_v,
+                qkv_dtype,
+            )
+            use_flash_attention_3 = False
+
+    if use_flash_attention_4 and FlashAttentionUtils.v4_is_installed:
+        # FA4 head dimension support is architecture-dependent
+        # (matches _validate_head_dims in flash_attn.cute.interface):
+        #   SM90:      head_dim <= 256 and head_dim_v <= 256
+        #   SM100/110: head_dim <= 128 and head_dim_v <= 128,
+        #              OR DeepSeek MLA shape (head_dim=192, head_dim_v=128)
+        #   SM80/120:  constrained by shared memory (~256 max in practice)
+        _fa4_hdim_ok = True
+        if (10, 0) <= device_compute_capability < (12, 0):
+            _is_standard = head_dim_qk <= 128 and head_dim_v <= 128
+            _is_deepseek = head_dim_qk == 192 and head_dim_v == 128
+            _fa4_hdim_ok = _is_standard or _is_deepseek
+        else:
+            _fa4_hdim_ok = head_dim_qk <= 256 and head_dim_v <= 256
+        if not _fa4_hdim_ok:
+            logger.debug(
+                "Disabling FlashAttention 4 due to unsupported head dimensions. "
                 "Found: head_dim_qk = %s, head_dim_v = %s, on sm%s.",
                 head_dim_qk,
                 head_dim_v,
-                ".".join([str(i) for i in device_compute_capability]),
+                device_compute_capability[0] * 10 + device_compute_capability[1],
             )
-        use_flash_attention_2 = False
-    if use_flash_attention_3 and (head_dim_qk > 128 or head_dim_v > 128):
-        if FlashAttentionUtils.v3_is_installed:
-            logger.debug("Disabling FlashAttention 3 for head_dim > 128")
-        use_flash_attention_3 = False
+            use_flash_attention_4 = False
+        # Workaround: SM100 backward kernel bug when MLA + 2CTA (head_dim_qk >= 128).
+        # FlashAttentionBackwardSm100 computes dK_reduce_ncol = gcd(32, tile_hdim // 2)
+        # based on Q/K head_dim but reuses it for dV TMEM load atoms. When
+        # (tile_hdimv // 2) % dK_reduce_ncol != 0, dV reads are misaligned.
+        # See: flash_attn/cute/flash_bwd_sm100.py, line ~262 and ~3890.
+        elif (
+            _fa4_hdim_ok
+            and is_training
+            and head_dim_qk != head_dim_v
+            and head_dim_qk >= 128
+            and (10, 0) <= device_compute_capability < (12, 0)
+        ):
+            _tile_hdim = math.ceil(head_dim_qk / 16) * 16
+            _tile_hdimv = math.ceil(head_dim_v / 16) * 16
+            _dk_reduce_ncol = math.gcd(32, _tile_hdim // 2)
+            if (_tile_hdimv // 2) % _dk_reduce_ncol != 0:
+                logger.debug(
+                    "Disabling FlashAttention 4 for training due to SM100 backward kernel "
+                    "bug with MLA head dimensions (dK_reduce_ncol misalignment for dV). "
+                    "Found: head_dim_qk = %s, head_dim_v = %s.",
+                    head_dim_qk,
+                    head_dim_v,
+                )
+                use_flash_attention_4 = False
 
     # Filter: QKV layout
     if qkv_format == "thd":
-        if use_unfused_attention:
-            logger.debug("Disabling UnfusedDotProductAttention for qkv_format = thd")
-            use_unfused_attention = False
         if pad_between_seqs:
-            if (use_flash_attention_2 and FlashAttentionUtils.is_installed) or (
-                use_flash_attention_3 and FlashAttentionUtils.v3_is_installed
+            if (  # pylint: disable=too-many-boolean-expressions
+                (use_flash_attention_2 and FlashAttentionUtils.is_installed)
+                or (use_flash_attention_3 and FlashAttentionUtils.v3_is_installed)
+                or (use_flash_attention_4 and FlashAttentionUtils.v4_is_installed)
             ):
                 logger.debug(
                     "Disabling FlashAttention for qkv_format = thd when there is "
                     "padding between sequences, i.e. [a, a, PAD, b, b, b, PAD, c, PAD]"
                 )
             use_flash_attention = False
+        if device_compute_capability == (12, 0):
+            if cudnn_version < (9, 18, 1):
+                if use_fused_attention:
+                    logger.debug(
+                        "Disabling FusedAttention as qkv_format = thd is"
+                        " not supported for compute capability = sm120 and cuDNN version < 9.18.1"
+                    )
+                use_fused_attention = False
+            elif qkv_layout in {"t3hd", "th3d"}:
+                if use_fused_attention:
+                    logger.debug(
+                        "Disabling FusedAttention as qkv_layout = %s is not supported for"
+                        " compute capability = sm120",
+                        qkv_layout,
+                    )
+                use_fused_attention = False
 
     # Filter: Dropout
-    if attention_dropout != 0.0 and use_flash_attention_3:
-        logger.debug("Disabling FlashAttention 3 for dropout")
-        use_flash_attention_3 = False
+    if attention_dropout != 0.0:
+        if use_flash_attention_3 and FlashAttentionUtils.v3_is_installed:
+            logger.debug("Disabling FlashAttention 3 for dropout")
+            use_flash_attention_3 = False
+        if use_flash_attention_4 and FlashAttentionUtils.v4_is_installed:
+            logger.debug("Disabling FlashAttention 4 for dropout")
+            use_flash_attention_4 = False
+
+    # Filter: Softmax type
+    # context_parallel | softmax_type | supported backends
+    # ----------------------------------------------------------------------------------------------------
+    # no               | vanilla      | All
+    # no               | off-by-one   | FusedAttention, UnfusedDotProductAttention
+    # no               | learnable    | FusedAttention, UnfusedDotProductAttention
+    # yes              | vanilla      | FusedAttention, FlashAttention
+    # yes              | off-by-one   | FusedAttention
+    # yes              | learnable    | FusedAttention
+    if softmax_type != "vanilla":
+        logger.debug("Disabling FlashAttention for softmax_type = %s", softmax_type)
+        use_flash_attention = False
+        if fp8 and fp8_meta["recipe"].fp8_dpa:
+            logger.debug("Disabling FusedAttention for softmax_type = %s in FP8", softmax_type)
+            use_fused_attention = False
+            logger.debug(
+                "Disabling UnfusedDotProductAttention for softmax_type = %s in FP8", softmax_type
+            )
+            use_unfused_attention = False
+        if qkv_format == "thd":
+            if cudnn_version < (9, 18, 0):
+                logger.debug(
+                    "Disabling FusedAttention for softmax_type = %s, qkv_format = thd and cuDNN"
+                    " version < 9.18",
+                    softmax_type,
+                )
+                use_fused_attention = False
+        if context_parallel:
+            if cp_comm_type != "a2a":
+                logger.debug(
+                    "Disabling FusedAttention for context parallelism with softmax_type = %s and"
+                    " cp_comm_type = %s",
+                    softmax_type,
+                    cp_comm_type,
+                )
+                use_fused_attention = False
 
     # Filter: Context parallelism
     # qkv_format | attn_mask_type              | attn_bias_type           | supported backends
@@ -550,8 +878,17 @@ def get_attention_backend(
             "Disabling UnfusedDotProductAttention as it does not support context parallelism"
         )
         use_unfused_attention = False
-    if context_parallel and (use_flash_attention_2 or use_flash_attention_3):
-        if FlashAttentionUtils.is_installed or FlashAttentionUtils.v3_is_installed:
+    if context_parallel and use_flash_attention_4 and FlashAttentionUtils.v4_is_installed:
+        logger.debug("Disabling FlashAttention 4 as it does not support context parallelism yet")
+        use_flash_attention_4 = False
+    if context_parallel and (
+        use_flash_attention_2 or use_flash_attention_3 or use_flash_attention_4
+    ):
+        if (
+            FlashAttentionUtils.is_installed
+            or FlashAttentionUtils.v3_is_installed
+            or FlashAttentionUtils.v4_is_installed
+        ):
             if fp8 and fp8_meta["recipe"].fp8_dpa:
                 logger.debug(
                     "Disabling FlashAttention as it does not support context parallelism with FP8"
@@ -621,8 +958,8 @@ def get_attention_backend(
     # ----------------------------------------------------------------------------------------
     # no_mask                     | None                                 | All
     # padding                     |                                      | All
-    #     self-attention          | One tensor in shape [b, 1, 1, sq]    |
-    #     cross-attention         | Tuple of two tensors in shapes       |
+    #     self-attention          | One tensor of shape [b, 1, 1, sq]    |
+    #     cross-attention         | Tuple of two tensors of shapes       |
     #                             | [b, 1, 1, sq] and [b, 1, 1, skv]     |
     # causal                      | None                                 |
     #     self-attention          |                                      | All
@@ -632,11 +969,13 @@ def get_attention_backend(
     #     cross-attention         |                                      | FusedAttention, UnfusedDotProductAttention
     # causal_bottom_right         | None                                 | All
     # padding_causal_bottom_right | Same as "padding"                    | All
-    # arbitrary                   | One tensor in shape broadcastable to | UnfusedDotProductAttention
+    # arbitrary                   | One tensor of shape broadcastable to | UnfusedDotProductAttention
     #                             | [b, h, sq, skv]                      |
     if attn_mask_type == "arbitrary":
-        if (use_flash_attention_2 and FlashAttentionUtils.is_installed) or (
-            use_flash_attention_3 and FlashAttentionUtils.v3_is_installed
+        if (  # pylint: disable=too-many-boolean-expressions
+            (use_flash_attention_2 and FlashAttentionUtils.is_installed)
+            or (use_flash_attention_3 and FlashAttentionUtils.v3_is_installed)
+            or (use_flash_attention_4 and FlashAttentionUtils.v4_is_installed)
         ):
             logger.debug("Disabling FlashAttention for arbitrary mask")
         use_flash_attention = False
@@ -644,7 +983,7 @@ def get_attention_backend(
             logger.debug("Disabling FusedAttention for arbitrary mask")
         use_fused_attention = False
     if (
-        (use_flash_attention_2 or use_flash_attention_3)
+        (use_flash_attention_2 or use_flash_attention_3 or use_flash_attention_4)
         and attn_mask_type in ["causal", "padding_causal"]
         and max_seqlen_q != max_seqlen_kv
     ):
@@ -659,39 +998,43 @@ def get_attention_backend(
     #    backend                 |      window_size       | diagonal alignment
     # ---------------------------------------------------------------------------------
     # FlashAttention             | (-1, -1) or (>=0, >=0) | bottom right
-    # FusedAttention             | (-1,  0) or (>=0, 0)   | top left
-    # UnfusedDotProductAttention | (-1, -1) or (>=0, >=0) | both;
+    # FusedAttention             | (-1,  0) or (>=0, >=0) | top left, bottom right
+    # UnfusedDotProductAttention | (-1, -1) or (>=0, >=0) | top left, bottom right
     #                            |                        | converts window_size to an 'arbitrary' mask
     if window_size is None:
         window_size = check_set_window_size(attn_mask_type, window_size)
-    else:
-        if use_fused_attention and (window_size[0] != -1 or window_size[1] not in [-1, 0]):
-            if fp8 and (fp8_meta["recipe"].fp8_dpa or fp8_meta["recipe"].fp8_mha):
-                logger.debug(
-                    "Disabling FusedAttention as it does not support sliding window attention"
-                    " for FP8"
-                )
-                use_fused_attention = False
-            elif window_size[1] != 0 or attention_dropout != 0.0:
-                logger.debug(
-                    "Disabling FusedAttention as it only supports sliding window attention "
-                    "with (left, 0) and no dropout"
-                )
-                use_fused_attention = False
-            elif max_seqlen_q > max_seqlen_kv:
-                logger.debug(
-                    "Disabling FusedAttention as it does not support sliding window attention "
-                    "with s_q > s_kv for cross-attention"
-                )
-                use_fused_attention = False
-        if use_flash_attention_2 and (window_size[0] != -1 or window_size[1] not in [-1, 0]):
-            if not FlashAttentionUtils.is_installed:
-                FlashAttentionUtils.version_required = PkgVersion("2.3")
-            elif not FlashAttentionUtils.v2_3_plus:
-                logger.debug(
-                    "Disabling FlashAttention as sliding window attention requires flash-attn 2.3+"
-                )
-                use_flash_attention_2 = False
+    if use_fused_attention and (window_size[0] != -1 or window_size[1] not in [-1, 0]):
+        if fp8 and (fp8_meta["recipe"].fp8_dpa or fp8_meta["recipe"].fp8_mha):
+            logger.debug(
+                "Disabling FusedAttention as it does not support sliding window attention for FP8"
+            )
+            use_fused_attention = False
+        elif attention_dropout != 0.0:
+            logger.debug(
+                "Disabling FusedAttention as it only supports sliding window attention "
+                "without dropout"
+            )
+            use_fused_attention = False
+        elif max_seqlen_q > max_seqlen_kv:
+            logger.debug(
+                "Disabling FusedAttention as it does not support sliding window attention "
+                "with s_q > s_kv for cross-attention"
+            )
+            use_fused_attention = False
+    if use_flash_attention_2 and (window_size[0] != -1 or window_size[1] not in [-1, 0]):
+        if not FlashAttentionUtils.is_installed:
+            FlashAttentionUtils.version_required = PkgVersion("2.3")
+        elif not FlashAttentionUtils.v2_3_plus:
+            logger.debug(
+                "Disabling FlashAttention as sliding window attention requires flash-attn 2.3+"
+            )
+            use_flash_attention_2 = False
+        elif not bottom_right_diagonal and max_seqlen_q != max_seqlen_kv:
+            logger.debug(
+                "Disabling FlashAttention as it only supports sliding window with bottom right"
+                " diagonal alignment for cross-attention"
+            )
+            use_flash_attention = False
 
     # Filter: Attention bias
     #    backend                 |      bias types              | ALiBi diagonal alignment
@@ -713,13 +1056,25 @@ def get_attention_backend(
             elif not FlashAttentionUtils.v2_4_plus:
                 logger.debug("Disabling FlashAttention as ALiBi requires flash-attn 2.4+")
                 use_flash_attention_2 = False
+            elif not bottom_right_diagonal and max_seqlen_q != max_seqlen_kv:
+                logger.debug(
+                    "Disabling FlashAttention as it only supports ALiBi with bottom right diagonal"
+                    " alignment for cross-attention"
+                )
+                use_flash_attention = False
+        if use_flash_attention_4:
+            if FlashAttentionUtils.v4_is_installed:
+                logger.debug("Disabling FlashAttention 4 for ALiBi")
+            use_flash_attention_4 = False
 
     if (
         core_attention_bias_type not in ["no_bias", "alibi"]
         or core_attention_bias_shape is not None
     ):
-        if (use_flash_attention_2 and FlashAttentionUtils.is_installed) or (
-            use_flash_attention_3 and FlashAttentionUtils.v3_is_installed
+        if (  # pylint: disable=too-many-boolean-expressions
+            (use_flash_attention_2 and FlashAttentionUtils.is_installed)
+            or (use_flash_attention_3 and FlashAttentionUtils.v3_is_installed)
+            or (use_flash_attention_4 and FlashAttentionUtils.v4_is_installed)
         ):
             logger.debug("Disabling FlashAttention for pre/post_scale_bias")
         use_flash_attention = False
@@ -730,13 +1085,12 @@ def get_attention_backend(
     if (
         use_fused_attention
         and core_attention_bias_type == "alibi"
-        and (alibi_slopes_shape is not None or max_seqlen_q != max_seqlen_kv)
+        and (alibi_slopes_shape is not None)
     ):
         fu_core_attention_bias_type = "post_scale_bias"
         fu_core_attention_bias_requires_grad = False
-        if alibi_slopes_shape is None:
-            fu_core_attention_bias_shape = "1hss"
-        elif len(alibi_slopes_shape) == 1 and alibi_slopes_shape[0] == num_heads:
+
+        if len(alibi_slopes_shape) == 1 and alibi_slopes_shape[0] == num_heads:
             fu_core_attention_bias_shape = "1hss"
         elif (
             len(alibi_slopes_shape) == 2
@@ -750,12 +1104,13 @@ def get_attention_backend(
         and fu_core_attention_bias_type == "post_scale_bias"
         and fu_core_attention_bias_shape != "1hss"
     ):
-        if fu_core_attention_bias_requires_grad:
-            # remove this line when cuDNN adds bwd support for
-            # [1, 1, s, s], [b, 1, s, s] and [b, h, s, s]
-            logger.debug("Disabling FusedAttention for dBias in [1, H, S, S] shape")
+        # dbias calculation is not supported for 111s as of cuDNN 9.18. So, use fused attention backend only if bias does not require grad.
+        if fu_core_attention_bias_requires_grad and fu_core_attention_bias_shape == "111s":
+            logger.warning(
+                "Disabling FusedAttention as dbias calculation is not supported for 111s"
+            )
             use_fused_attention = False
-        else:
+        elif not fu_core_attention_bias_requires_grad:
             # max512 backend will only support [1, h, s, s]
             os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
 
@@ -774,6 +1129,7 @@ def get_attention_backend(
             QKVLayout[qkv_layout],
             AttnBiasType[fu_core_attention_bias_type],
             AttnMaskType[attn_mask_type],
+            SoftmaxType[softmax_type],
             attention_dropout,
             num_heads,
             num_gqa_groups,
@@ -783,6 +1139,9 @@ def get_attention_backend(
             head_dim_v,
             window_size[0],
             window_size[1],
+            return_max_logit,
+            cuda_graph,
+            deterministic,
         )
         if fused_attention_backend == FusedAttnBackend["No_Backend"]:
             logger.debug("Disabling FusedAttention as no backend supports the provided input")
@@ -822,7 +1181,7 @@ def get_attention_backend(
     #     flash-attn >=2.4.1       | yes
     # FusedAttention               |
     #     sub-backend 0            | yes
-    #     sub-backend 1            | workspace optimization path and sm90+: yes;
+    #     sub-backend 1            | workspace optimization path and sm90: yes;
     #                              | otherwise: no
     #     sub-backend 2            | no
     # UnfusedDotProductAttention   | yes
@@ -836,10 +1195,33 @@ def get_attention_backend(
                 "please install flash-attn >= 2.4.1."
             )
             use_flash_attention_2 = False
+    if use_flash_attention_3 and deterministic and FlashAttentionUtils.v3_is_installed:
+        if head_dim_qk >= 256:
+            logger.debug(
+                "Disabling FlashAttention 3 for deterministic execution with head_dim_qk >= 256."
+            )
+            use_flash_attention_3 = False
     if use_fused_attention and deterministic:
-        if fused_attention_backend == FusedAttnBackend["FP8"] and is_training:
-            logger.debug("Disabling FusedAttention for determinism reasons")
+        if softmax_type != "vanilla":
+            logger.debug(
+                "Disabling FusedAttention for determinism reasons with softmax_type = %s. "
+                "Sink attention (off-by-one and learnable softmax) requires "
+                "NVTE_ALLOW_NONDETERMINISTIC_ALGO=1",
+                softmax_type,
+            )
             use_fused_attention = False
+            fused_attention_backend = None
+        if (
+            fused_attention_backend == FusedAttnBackend["FP8"]
+            and is_training
+            and (device_compute_capability < (9, 0) or cudnn_version < (9, 19, 0))
+        ):
+            logger.debug(
+                "Disabling FusedAttention for determinism reasons with FP8 on arch < sm90 or cuDNN"
+                " < 9.19.0"
+            )
+            use_fused_attention = False
+            fused_attention_backend = None
         if (
             fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
             and is_training
@@ -849,18 +1231,32 @@ def get_attention_backend(
                 or cudnn_version < (8, 9, 5)
             )
         ):
-            logger.debug("Disabling FusedAttention for determinism reasons")
+            logger.debug("Disabling FusedAttention for determinism reasons with post_scale_bias")
             use_fused_attention = False
+            fused_attention_backend = None
 
     # use_flash_attention may have been set above
     use_flash_attention_2 = use_flash_attention and use_flash_attention_2
     use_flash_attention_3 = use_flash_attention and use_flash_attention_3
+    use_flash_attention_4 = use_flash_attention and use_flash_attention_4
 
     # `FusedAttention` and `FlashAttention` are faster backends than `UnfusedDotProductAttention`.
     # When `FusedAttention` does not support the provided attention params, and `FlashAttention`
     # does, we recommend users to install flash-attn if not installed already.
     if not use_fused_attention and _NVTE_FLASH_ATTN:
         if (
+            use_flash_attention_4
+            and not FlashAttentionUtils.v4_is_installed
+            and not FlashAttentionUtils.v4_warning_printed
+            and torch.cuda.current_device() == 0
+        ):
+            logger.warning(
+                "flash-attn v4 may provide important feature support or performance improvement."
+                " Please install flash-attn v4 by \n%s",
+                FlashAttentionUtils.v4_installation_steps,
+            )
+            FlashAttentionUtils.v4_warning_printed = True
+        elif (
             use_flash_attention_3
             and not FlashAttentionUtils.v3_is_installed
             and not FlashAttentionUtils.v3_warning_printed
@@ -892,12 +1288,16 @@ def get_attention_backend(
         use_flash_attention_2 = False
     if use_flash_attention_3 and not FlashAttentionUtils.v3_is_installed:
         use_flash_attention_3 = False
-    use_flash_attention = use_flash_attention_2 or use_flash_attention_3
+    if use_flash_attention_4 and not FlashAttentionUtils.v4_is_installed:
+        use_flash_attention_4 = False
+    use_flash_attention = use_flash_attention_2 or use_flash_attention_3 or use_flash_attention_4
     available_backends = [use_flash_attention, use_fused_attention, use_unfused_attention]
     if use_flash_attention_2:
         flash_attention_backend = FlashAttentionUtils.version
     if use_flash_attention_3:
         flash_attention_backend = FlashAttentionUtils.fa3_version
+    if use_flash_attention_4:
+        flash_attention_backend = FlashAttentionUtils.fa4_version
 
     logger.debug(
         "Available backends = {FlashAttention=%s%s, FusedAttention=%s%s,"
@@ -934,7 +1334,7 @@ def get_attention_backend(
         selected_backend = f"FusedAttention (sub-backend {int(fused_attention_backend)})"
     elif use_unfused_attention:
         selected_backend = "UnfusedDotProductAttention"
-    logger.debug("Selected backend = %s", selected_backend)
+    logger.debug("Selected backend = %s.", selected_backend)
 
     return (
         use_flash_attention,
@@ -1048,42 +1448,42 @@ def get_full_mask(
 
     Parameters
     ----------
-    max_seqlen_q: int
+    max_seqlen_q : int
         Maximum sequence length for queries.
-    max_seqlen_kv: int
+    max_seqlen_kv : int
         Maximum sequence length for keys and values.
-    attn_mask_type: str, default = `no_mask`
-        Attention mask type, {"`no_mask`", "`padding`", "`causal`", "`padding_causal`",
-        "`causal_bottom_right`", "`padding_causal_bottom_right`", "`arbitrary`"}
-    attention_mask: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
-        default = `None`
+    attn_mask_type : str, default = no_mask
+        Attention mask type, {``"no_mask"``, ``"padding"``, ``"causal"``, ``"padding_causal"``,
+        ``"causal_bottom_right"``, ``"padding_causal_bottom_right"``, ``"arbitrary"``}
+    attention_mask : Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
+        default = None
         Boolean tensor(s) used to mask out attention softmax input. Please see DotProductAttention
         for the requirements of `attention_mask` for different `attn_mask_type`s.
-    window_size: Tuple[int, int], default = `None`
+    window_size : Tuple[int, int], default = None
         Sliding window size for local attention, where query at position i attends to keys
         in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
         + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
         window and causal mask specifically. Both `causal` and `causal_bottom_right` masks
         map to `window_size = (-1, 0)` and Transformer Engine distinguishes them based on
         `attn_mask_type`.
-    attention_type: str, default = "self"
+    attention_type : str, default = "self"
         Attention type, {"self", "cross"}
-    bottom_right_alignment: bool, default = `True`
+    bottom_right_alignment : bool, default = True
         Whether to align the diagonal of the sliding window attention to the bottom right (`True`)
         or top left (`False`) corner of the softmax matrix. Ignored if `attn_mask_type` explicitly
         specifies "causal" or "causal_bottom_right".
 
     Returns
     ----------
-    attn_mask_type: str
+    attn_mask_type : str
         For sliding window attention (>=0, >0), "arbitrary"; otherwise, the same as input `attn_mask_type`
-    attention_mask: torch.Tensor
+    attention_mask : torch.Tensor
         The full attention mask based on `attn_mask_type`, `attention_mask` and `window_size`
-    actual_seqlens_q: torch.Tensor
-        For padding masks, the actual sequence lengths for queries, in shape [batch_size].
+    actual_seqlens_q : torch.Tensor
+        For padding masks, the actual sequence lengths for queries, of shape [batch_size].
         For other masks, `None`.
-    actual_seqlens_kv: Optional[torch.Tensor], default = `None`
-        For padding masks, the actual sequence lengths for keys and values, in shape [batch_size].
+    actual_seqlens_kv : Optional[torch.Tensor], default = None
+        For padding masks, the actual sequence lengths for keys and values, of shape [batch_size].
         For other masks, `None`.
     """
     # perform basic checks
@@ -1169,29 +1569,29 @@ def get_alibi(
     """
     Parameters
     ----------
-    num_heads: int
+    num_heads : int
         Number of heads.
-    max_seqlen_q: int
+    max_seqlen_q : int
         Maximum sequence length for queries.
-    max_seqlen_kv: int
+    max_seqlen_kv : int
         Maximum sequence length for keys and values.
-    actual_seqlens_q: Optional[torch.Tensor], default = `None`
-        Actual sequence lengths for queries, in shape [batch_size].
-    actual_seqlens_kv: Optional[torch.Tensor], default = `None`
-        Actual sequence lengths for keys and values, in shape [batch_size].
-    alibi_slopes: Optional[torch.Tensor], default = `None`
-        Custom ALiBi slopes, FP32, CUDA tensor, in shape [num_heads] or [batch_size, num_heads].
-    bias_dtype: Optional[torch.dtype], default = `None`
+    actual_seqlens_q : Optional[torch.Tensor], default = None
+        Actual sequence lengths for queries, of shape [batch_size].
+    actual_seqlens_kv : Optional[torch.Tensor], default = None
+        Actual sequence lengths for keys and values, of shape [batch_size].
+    alibi_slopes : Optional[torch.Tensor], default = None
+        Custom ALiBi slopes, FP32, CUDA tensor, of shape [num_heads] or [batch_size, num_heads].
+    bias_dtype : Optional[torch.dtype], default = None
         Dtype of the generated ALiBi bias. If None, use torch.float32.
-    bottom_right_alignment: bool, default = `True`
+    bottom_right_alignment : bool, default = True
         Whether to align the diagonal of the ALiBi bias to the bottom right corner of
         the matrix (`True`) or top left (`False`).
 
     Returns
     ----------
-    alibi_slopes: torch.Tensor
+    alibi_slopes : torch.Tensor
         ALiBi slopes in FP32 and shape [num_heads] or [batch_size, num_heads].
-    alibi_bias: torch.Tensor
+    alibi_bias : torch.Tensor
         ALiBi bias in FP32 or `bias_dtype`. Its shape is
         (1) [1, num_heads, max_seqlen_q, max_seqlen_kv] if `alibi_slopes` is in [num_heads] shape,
         and `actual_seqlens_q` and `actual_seqlens_kv` are `None`; or
@@ -1359,8 +1759,9 @@ def _pack_tensor(
     """
     Packs the given tensor using the `indices`.
     """
+    dtype = tensor.dtype if not isinstance(tensor, Float8Tensor) else torch.uint8
     padding_indice = torch.zeros(
-        1, tensor.shape[1], tensor.shape[2], dtype=tensor.dtype, device=tensor.device
+        1, tensor.shape[1], tensor.shape[2], dtype=dtype, device=tensor.device
     )
     indices = indices.repeat(1, tensor.shape[1], tensor.shape[2])
     if isinstance(tensor, Float8Tensor):
@@ -1415,8 +1816,9 @@ def _unpack_tensor(
     Inverse of `_pack_tensor`.
     """
     indices = indices.repeat(1, tensor.shape[1], tensor.shape[2])
+    dtype = tensor.dtype if not isinstance(tensor, Float8Tensor) else torch.uint8
     unpacked = torch.zeros(
-        dim0 + 1, tensor.shape[1], tensor.shape[2], dtype=tensor.dtype, device=tensor.device
+        dim0 + 1, tensor.shape[1], tensor.shape[2], dtype=dtype, device=tensor.device
     )
     if isinstance(tensor, Float8Tensor):
         unpacked.scatter_(0, indices, tensor._data)
@@ -1513,6 +1915,78 @@ class UnpackTensor(torch.autograd.Function):
         return None, None, _pack_tensor(indices, grad_output)
 
 
+class ConvertTHDtoBSHD(torch.autograd.Function):
+    """
+    Convert a tensor from qkv_format = thd to qkv_format = bshd.
+    """
+
+    @staticmethod
+    def forward(ctx, thd_tensor, cu_seqlens, max_seqlen):
+        # pylint: disable=missing-function-docstring
+        batch_size = cu_seqlens.shape[0] - 1
+        if not thd_tensor.is_contiguous():
+            thd_tensor = thd_tensor.contiguous()
+        bshd_tensor = tex.convert_thd_to_bshd(
+            thd_tensor,
+            cu_seqlens,
+            batch_size,
+            max_seqlen,
+        )
+        ctx.save_for_backward(cu_seqlens)
+        ctx.num_tokens = thd_tensor.shape[0]
+        return bshd_tensor
+
+    @staticmethod
+    def backward(ctx, bshd_tensor):
+        # pylint: disable=missing-function-docstring
+        (cu_seqlens,) = ctx.saved_tensors
+        if not bshd_tensor.is_contiguous():
+            bshd_tensor = bshd_tensor.contiguous()
+        thd_tensor = tex.convert_bshd_to_thd(
+            bshd_tensor,
+            cu_seqlens,
+            ctx.num_tokens,
+        )
+        return thd_tensor, None, None
+
+
+class ConvertBSHDtoTHD(torch.autograd.Function):
+    """
+    Convert a tensor from qkv_format = bshd to qkv_format = thd.
+    """
+
+    @staticmethod
+    def forward(ctx, bshd_tensor, cu_seqlens):
+        # pylint: disable=missing-function-docstring
+        num_tokens = cu_seqlens[-1]
+        max_seqlen = bshd_tensor.shape[1]
+        if not bshd_tensor.is_contiguous():
+            bshd_tensor = bshd_tensor.contiguous()
+        thd_tensor = tex.convert_bshd_to_thd(
+            bshd_tensor,
+            cu_seqlens,
+            num_tokens,
+        )
+        ctx.save_for_backward(cu_seqlens)
+        ctx.max_seqlen = max_seqlen
+        return thd_tensor
+
+    @staticmethod
+    def backward(ctx, thd_tensor):
+        # pylint: disable=missing-function-docstring
+        (cu_seqlens,) = ctx.saved_tensors
+        batch_size = cu_seqlens.shape[0] - 1
+        if not thd_tensor.is_contiguous():
+            thd_tensor = thd_tensor.contiguous()
+        bshd_tensor = tex.convert_thd_to_bshd(
+            thd_tensor,
+            cu_seqlens,
+            batch_size,
+            ctx.max_seqlen,
+        )
+        return bshd_tensor, None
+
+
 def get_qkv_format(
     qkv_layout: str = "bshd_bshd_bshd",
     inference_params: InferenceParams = None,
@@ -1521,18 +1995,18 @@ def get_qkv_format(
 
     Parameters
     ----------
-    qkv_layout: str
+    qkv_layout : str
        Memory layout of `q`, `k` and `v`. See get_qkv_layout() for more details.
-    inference_params: InferenceParams, default = `None`
+    inference_params : InferenceParams, default = None
         InferenceParams related to KV caching.
 
     Returns
     ----------
-    qkv_format: str, default = `sbhd`
+    qkv_format : str, default = sbhd
         Dimension format for `q`, `k` and `v`, {`sbhd`, `bshd`, `thd`}.
-    q_format: str
+    q_format : str
         Format of the `q` tensor, {`bshd`, `sbhd`, `thd`}.
-    kv_format: str
+    kv_format : str
         Format of the `k` and `v` tensors, {`bshd`, `sbhd`, `thd`}.
     """
     splited = qkv_layout.replace("paged_kv_", "").split("_")
@@ -1558,23 +2032,23 @@ def get_qkv_layout(
 
     Parameters
     ----------
-    q: torch.Tensor
+    q : torch.Tensor
         Query tensor.
-    k: torch.Tensor
+    k : torch.Tensor
         Key tensor.
-    v: torch.Tensor
+    v : torch.Tensor
         Value tensor.
-    qkv_format: str, default = `sbhd`
+    qkv_format : str, default = sbhd
         Dimension format for `q`, `k` and `v`, {`sbhd`, `bshd`, `thd`}. `s` stands for
         the sequence length dimension, `b` batch size, `h` the number of attention heads,
         `d` head size, and `t` the total number of tokens in a batch, i.e.
         `t = sum(s_i) for i = 0...b-1`.
-    inference_params: InferenceParams, default = `None`
+    inference_params : InferenceParams, default = None
         InferenceParams related to KV caching.
 
     Returns
     ----------
-    qkv_layout: str
+    qkv_layout : str
        Memory layout of `q`, `k` and `v`. Each `qkv_layout` maps to a pair of `q_format` and
        `kv_format` in {`bshd`, `sbhd`, `thd`}. The `paged_kv_` prefix is used to indicate that
        paged KV caching is in play. A few examples of the layouts are as follows.
@@ -1596,18 +2070,18 @@ def get_qkv_layout(
        `thd_2bshd`: {`thd_bshd_bshd`, `paged_kv_thd_bshd_bshd`}
        `thd_2sbhd`: {`thd_sbhd_sbhd`, `paged_kv_thd_sbhd_sbhd`}
 
-    q: torch.Tensor
+    q : torch.Tensor
         Query tensor. It may be different from input `q` as we try to fit tensors to
         a supported layout.
-    k: torch.Tensor
+    k : torch.Tensor
         Key tensor. It may be different from input `k` as we try to fit tensors to
         a supported layout.
-    v: torch.Tensor
+    v : torch.Tensor
         Value tensor. It may be different from input `v` as we try to fit tensors to
         a supported layout.
-    q_format: str
+    q_format : str
         Format of the query tensor, {`bshd`, `sbhd`, `thd`}.
-    kv_format: str
+    kv_format : str
         Format of the key and value tensors, {`bshd`, `sbhd`, `thd`}.
     """
 
@@ -1782,11 +2256,10 @@ def check_set_window_size(
     return window_size
 
 
-def get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=False):
+def get_attention_quantizers(fp8, quantizers):
     """Get the list of quantizers used in attention from the quantizers list."""
     if not fp8:
-        num_of_nones = 8 if cp_specific_quantizers else 6
-        return [None] * num_of_nones
+        return [None] * 6
     QKV_quantizer = quantizers["scaling_fwd"][META_QKV]
     QKV_quantizer.internal = True
     QKV_quantizer.set_usage(rowwise=True, columnwise=False)
@@ -1795,6 +2268,7 @@ def get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=False):
     S_quantizer = quantizers["scaling_fwd"][META_S]
     S_quantizer.internal = True
     S_quantizer.set_usage(rowwise=True, columnwise=False)
+
     dQKV_quantizer = quantizers["scaling_bwd"][META_DQKV]
     dQKV_quantizer.interal = True
     dQKV_quantizer.set_usage(rowwise=True, columnwise=False)
@@ -1804,22 +2278,158 @@ def get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=False):
     dP_quantizer = quantizers["scaling_bwd"][META_DP]
     dP_quantizer.set_usage(rowwise=True, columnwise=False)
     dP_quantizer.interal = True
-    dQKV_CP_quantizer = quantizers["scaling_bwd"][META_DQKV_CP]
-    dQKV_CP_quantizer.set_usage(rowwise=True, columnwise=False)
-    dQKV_CP_quantizer.internal = True
-    O_CP_quantizer = quantizers["scaling_fwd"][META_O_CP]
-    O_CP_quantizer.set_usage(rowwise=True, columnwise=False)
-
-    if cp_specific_quantizers:
-        return (
-            QKV_quantizer,
-            O_quantizer,
-            O_CP_quantizer,
-            S_quantizer,
-            dQKV_quantizer,
-            dQKV_CP_quantizer,
-            dO_quantizer,
-            dP_quantizer,
-        )
 
     return QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer
+
+
+def print_quantizers(
+    label,
+    layer_number,
+    QKV_quantizer,
+    O_quantizer,
+    S_quantizer,
+    dQKV_quantizer,
+    dO_quantizer,
+    dP_quantizer,
+):
+    """Print the type and scale/amax of attention quantizers"""
+    _to_print = _NVTE_DEBUG * _NVTE_DEBUG_LEVEL == 2
+    if (
+        _to_print
+        and _print_layer == layer_number
+        and (
+            not dist.is_initialized() or (dist.is_initialized() and dist.get_rank() == _print_rank)
+        )
+    ):
+        names = [
+            "QKV_quantizer",
+            "S_quantizer",
+            "O_quantizer",
+            "dO_quantizer",
+            "dP_quantizer",
+            "dQKV_quantizer",
+        ]
+        quantizers = [
+            QKV_quantizer,
+            S_quantizer,
+            O_quantizer,
+            dO_quantizer,
+            dP_quantizer,
+            dQKV_quantizer,
+        ]
+        if "forward" in label:
+            names = names[:3]
+            quantizers = quantizers[:3]
+        if "backward" in label:
+            names = names[3:]
+            quantizers = quantizers[3:]
+        for i, q in enumerate(quantizers):
+            type_str = ""
+            if q is None:
+                type_str = "None"
+            elif isinstance(q, Float8Quantizer):
+                type_str = "DS"
+            elif isinstance(q, Float8CurrentScalingQuantizer):
+                type_str = "CS"
+            print(
+                f"{label} >> {names[i]:14s}: {type_str}, {q.scale.item():.4e} x"
+                f" {q.amax.item():.4e} = {q.scale.item()*q.amax.item():.4e}"
+            )
+
+
+def combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer):
+    """Combine q,k,v based on qkv_layout and quantize them together"""
+    # 1: qkv packed, 2: kv packed, 3: qkv separate
+    qkv_layout = qkv_layout.replace("paged_kv_", "")
+    qkv_group = len(qkv_layout.split("_"))
+    src_nominal_dtype = q.dtype
+    match qkv_group:
+        case 1:
+            dim = qkv_layout.find("3")
+            qkv = combine_tensors([q, k, v], dim)
+            qkv_fp8 = qkv_quantizer(qkv)
+            q_data, k_data, v_data = SplitAlongDim.apply(qkv_fp8._data, dim, [1, 1, 1], True)
+        case 2:
+            dim = qkv_layout.split("_")[1].find("2")
+            kv = combine_tensors([k, v], dim)
+            tensors = [q, kv]
+            num_tensors = len(tensors)
+            shapes = [x.shape for x in tensors]
+            numels = [x.numel() for x in tensors]
+            numels = [sum(numels[:i]) for i in range(num_tensors + 1)]
+            qkv = torch.cat([x.view(-1) for x in tensors], dim=0)
+            qkv_fp8 = qkv_quantizer(qkv)
+            q_data, kv_data = [
+                qkv_fp8._data[numels[i] : numels[i + 1]].view(shapes[i]) for i in range(num_tensors)
+            ]
+            k_data, v_data = SplitAlongDim.apply(kv_data, dim, [1, 1], True)
+        case 3:
+            tensors = [q, k, v]
+            num_tensors = len(tensors)
+            shapes = [x.shape for x in tensors]
+            numels = [x.numel() for x in tensors]
+            numels = [sum(numels[:i]) for i in range(num_tensors + 1)]
+            qkv = torch.cat([x.view(-1) for x in tensors], dim=0)
+            qkv_fp8 = qkv_quantizer(qkv)
+            q_data, k_data, v_data = [
+                qkv_fp8._data[numels[i] : numels[i + 1]].view(shapes[i]) for i in range(num_tensors)
+            ]
+        case _:
+            raise RuntimeError("Invalid qkv_layout " + qkv_layout)
+
+    q_fp8, k_fp8, v_fp8 = [
+        Float8Tensor.make_like(qkv_fp8, data=x, dtype=src_nominal_dtype)
+        for x in [q_data, k_data, v_data]
+    ]
+
+    return q_fp8, k_fp8, v_fp8
+
+
+def combine_and_dequantize(
+    qkv_layout, q_fp8, k_fp8, v_fp8, src_nominal_dtype=None, des_nominal_dtype=None
+):
+    """Combine q,k,v based on qkv_layout and dequantize them together"""
+    # 1: qkv packed, 2: kv packed, 3: qkv separate
+    qkv_layout = qkv_layout.replace("paged_kv_", "")
+    qkv_group = len(qkv_layout.split("_"))
+    if all(isinstance(x, Float8Tensor) for x in [q_fp8, k_fp8, v_fp8]):
+        src_nominal_dtype = q_fp8.dtype
+    else:
+        assert src_nominal_dtype is not None, "The nominal dtype of input tensors is required!"
+    if des_nominal_dtype is None:
+        des_nominal_dtype = src_nominal_dtype
+
+    q_data, k_data, v_data = [x._data for x in [q_fp8, k_fp8, v_fp8]]
+    match qkv_group:
+        case 1:
+            dim = qkv_layout.find("3")
+            qkv_data = combine_tensors([q_data, k_data, v_data], dim)
+            qkv_fp8 = Float8Tensor.make_like(q_fp8, data=qkv_data)
+            qkv = qkv_fp8.dequantize(dtype=des_nominal_dtype)
+            q, k, v = SplitAlongDim.apply(qkv, dim, [1, 1, 1], True)
+        case 2:
+            dim = qkv_layout.split("_")[1].find("2")
+            kv_data = combine_tensors([k_data, v_data], dim)
+            tensors = [q_data, kv_data]
+            num_tensors = len(tensors)
+            shapes = [x.shape for x in tensors]
+            numels = [x.numel() for x in tensors]
+            numels = [sum(numels[:i]) for i in range(num_tensors + 1)]
+            qkv_data = torch.cat([x.reshape(-1) for x in tensors], dim=0)
+            qkv_fp8 = Float8Tensor.make_like(q_fp8, data=qkv_data, dtype=src_nominal_dtype)
+            qkv = qkv_fp8.dequantize(dtype=des_nominal_dtype)
+            q, kv = [qkv[numels[i] : numels[i + 1]].view(shapes[i]) for i in range(num_tensors)]
+            k, v = SplitAlongDim.apply(kv, dim, [1, 1], True)
+        case 3:
+            tensors = [q_data, k_data, v_data]
+            num_tensors = len(tensors)
+            shapes = [x.shape for x in tensors]
+            numels = [x.numel() for x in tensors]
+            numels = [sum(numels[:i]) for i in range(num_tensors + 1)]
+            qkv_data = torch.cat([x.contiguous().reshape(-1) for x in tensors], dim=0)
+            qkv_fp8 = Float8Tensor.make_like(q_fp8, data=qkv_data, dtype=src_nominal_dtype)
+            qkv = qkv_fp8.dequantize(dtype=des_nominal_dtype)
+            q, k, v = [qkv[numels[i] : numels[i + 1]].view(shapes[i]) for i in range(num_tensors)]
+        case _:
+            raise RuntimeError("Invalid qkv_layout " + qkv_layout)
+    return q, k, v

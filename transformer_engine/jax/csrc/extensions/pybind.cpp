@@ -1,10 +1,13 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
 
 #include "../extensions.h"
+#include "cgemm_helper.h"
+#include "common/util/cuda_runtime.h"
+#include "transformer_engine/gemm.h"
 
 namespace transformer_engine {
 namespace jax {
@@ -20,12 +23,17 @@ pybind11::dict Registrations() {
   pybind11::dict dict;
 
   // Activation
-  dict["te_act_lu_ffi"] = EncapsulateFFI(ActLuHandler);
-  dict["te_dact_dbias_quantize_ffi"] = EncapsulateFFI(DActLuDBiasQuantizeHandler);
+  dict["te_act_lu_ffi"] =
+      pybind11::dict(pybind11::arg("initialize") = EncapsulateFFI(ActLuInitializeHandler),
+                     pybind11::arg("execute") = EncapsulateFFI(ActLuHandler));
+  dict["te_dact_dbias_quantize_ffi"] = pybind11::dict(
+      pybind11::arg("initialize") = EncapsulateFFI(DActLuDBiasQuantizeInitializeHandler),
+      pybind11::arg("execute") = EncapsulateFFI(DActLuDBiasQuantizeHandler));
 
   // Quantization
   dict["te_dbias_quantize_ffi"] = EncapsulateFFI(DBiasQuantizeHandler);
   dict["te_grouped_quantize_ffi"] = EncapsulateFFI(GroupedQuantizeHandler);
+  dict["te_grouped_quantize_v2_ffi"] = EncapsulateFFI(GroupedQuantizeV2Handler);
   dict["te_dequantize_ffi"] = EncapsulateFFI(DequantizeHandler);
 
   // Softmax
@@ -42,9 +50,11 @@ pybind11::dict Registrations() {
   // Normalization
   dict["te_norm_forward_ffi"] =
       pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CudnnHandleInitHandler),
+                     pybind11::arg("initialize") = EncapsulateFFI(NormForwardInitializeHandler),
                      pybind11::arg("execute") = EncapsulateFFI(NormForwardHandler));
   dict["te_norm_backward_ffi"] =
       pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CudnnHandleInitHandler),
+                     pybind11::arg("initialize") = EncapsulateFFI(NormBackwardInitializeHandler),
                      pybind11::arg("execute") = EncapsulateFFI(NormBackwardHandler));
 
   // Attention
@@ -57,13 +67,39 @@ pybind11::dict Registrations() {
 
   // GEMM
   dict["te_gemm_ffi"] =
-      pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CublasHandleInitHandler),
+      pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CollectiveGemmInitHandler),
                      pybind11::arg("execute") = EncapsulateFFI(GemmHandler));
 
+  dict["te_gemm_v2_ffi"] =
+      pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(GemmInitV2Handler),
+                     pybind11::arg("execute") = EncapsulateFFI(GemmV2Handler));
+
   // Grouped GEMM
+  dict["te_grouped_gemm_d2h_group_sizes_ffi"] =
+      pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CublasHandleInitHandler),
+                     pybind11::arg("execute") = EncapsulateFFI(GroupedGemmD2HGroupSizesHandler));
   dict["te_grouped_gemm_ffi"] =
       pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CublasHandleInitHandler),
                      pybind11::arg("execute") = EncapsulateFFI(GroupedGemmHandler));
+  dict["te_grouped_gemm_v2_ffi"] =
+      pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CublasHandleInitHandler),
+                     pybind11::arg("execute") = EncapsulateFFI(GroupedGemmV2Handler));
+
+  // Amax
+  dict["te_rht_amax_ffi"] = pybind11::dict(
+      pybind11::arg("initialize") = EncapsulateFFI(RHTAmaxCalculationInitializeHandler),
+      pybind11::arg("execute") = EncapsulateFFI(RHTAmaxCalculationHandler));
+
+  dict["te_inspect_ffi"] =
+      pybind11::dict(pybind11::arg("execute") = EncapsulateFFI(InspectHandler));
+
+  // Router
+  dict["te_fused_topk_with_score_function_forward_ffi"] =
+      EncapsulateFFI(FusedTopkWithScoreFunctionForwardHandler);
+  dict["te_fused_topk_with_score_function_backward_ffi"] =
+      EncapsulateFFI(FusedTopkWithScoreFunctionBackwardHandler);
+  dict["te_fused_moe_aux_loss_forward_ffi"] = EncapsulateFFI(FusedMoEAuxLossForwardHandler);
+  dict["te_fused_moe_aux_loss_backward_ffi"] = EncapsulateFFI(FusedMoEAuxLossBackwardHandler);
 
   return dict;
 }
@@ -84,6 +120,9 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("get_fused_attn_bwd_workspace_sizes", &GetFusedAttnBackwardWorkspaceSizes);
   m.def("nvte_get_qkv_format", &nvte_get_qkv_format);
   m.def("is_non_nt_fp8_gemm_supported", &nvte_is_non_tn_fp8_gemm_supported);
+  m.def("initialize_cgemm_communicator", &InitializeCgemmCommunicator);
+  m.def("get_cgemm_num_max_streams", &GetCgemmNumMaxStreams);
+  m.def("get_grouped_gemm_setup_workspace_size", &nvte_get_grouped_gemm_setup_workspace_size);
 
   pybind11::enum_<DType>(m, "DType", pybind11::module_local())
       .value("kByte", DType::kByte)
@@ -93,7 +132,9 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
       .value("kFloat16", DType::kFloat16)
       .value("kBFloat16", DType::kBFloat16)
       .value("kFloat8E4M3", DType::kFloat8E4M3)
-      .value("kFloat8E5M2", DType::kFloat8E5M2);
+      .value("kFloat8E5M2", DType::kFloat8E5M2)
+      .value("kFloat8E8M0", DType::kFloat8E8M0)
+      .value("kFloat4E2M1", DType::kFloat4E2M1);
 
   pybind11::enum_<NVTE_Bias_Type>(m, "NVTE_Bias_Type", pybind11::module_local())
       .value("NVTE_NO_BIAS", NVTE_Bias_Type::NVTE_NO_BIAS)
@@ -122,9 +163,15 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
       .value("NVTE_BSHD", NVTE_QKV_Format::NVTE_BSHD)
       .value("NVTE_THD", NVTE_QKV_Format::NVTE_THD);
 
+  pybind11::enum_<NVTE_Softmax_Type>(m, "NVTE_Softmax_Type", pybind11::module_local())
+      .value("NVTE_VANILLA_SOFTMAX", NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX)
+      .value("NVTE_OFF_BY_ONE_SOFTMAX", NVTE_Softmax_Type::NVTE_OFF_BY_ONE_SOFTMAX)
+      .value("NVTE_LEARNABLE_SOFTMAX", NVTE_Softmax_Type::NVTE_LEARNABLE_SOFTMAX);
+
   pybind11::enum_<NVTE_Activation_Type>(m, "NVTE_Activation_Type", pybind11::module_local())
       .value("GELU", NVTE_Activation_Type::GELU)
       .value("GEGLU", NVTE_Activation_Type::GEGLU)
+      .value("GLU", NVTE_Activation_Type::GLU)
       .value("SILU", NVTE_Activation_Type::SILU)
       .value("SWIGLU", NVTE_Activation_Type::SWIGLU)
       .value("RELU", NVTE_Activation_Type::RELU)
@@ -133,6 +180,7 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
       .value("QGEGLU", NVTE_Activation_Type::QGEGLU)
       .value("SRELU", NVTE_Activation_Type::SRELU)
       .value("SREGLU", NVTE_Activation_Type::SREGLU)
+      .value("CLAMPED_SWIGLU", NVTE_Activation_Type::CLAMPED_SWIGLU)
       .export_values();
 
   pybind11::enum_<NVTE_Fused_Attn_Backend>(m, "NVTE_Fused_Attn_Backend", pybind11::module_local())
@@ -151,13 +199,25 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
       .value("DELAYED_TENSOR_SCALING", JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING)
       .value("MXFP8_1D_SCALING", JAXX_Scaling_Mode::MXFP8_1D_SCALING)
       .value("CURRENT_TENSOR_SCALING", JAXX_Scaling_Mode::CURRENT_TENSOR_SCALING)
+      .value("NVFP4_1D_SCALING", JAXX_Scaling_Mode::NVFP4_1D_SCALING)
+      .value("NVFP4_2D_SCALING", JAXX_Scaling_Mode::NVFP4_2D_SCALING)
       .export_values();
 
-  pybind11::enum_<transformer_engine::jax::QuantizeLayout>(m, "QuantizeLayout",
-                                                           pybind11::module_local())
-      .value("ROWWISE", transformer_engine::jax::QuantizeLayout::ROWWISE)
-      .value("COLWISE", transformer_engine::jax::QuantizeLayout::COLWISE)
-      .value("ROWWISE_COLWISE", transformer_engine::jax::QuantizeLayout::ROWWISE_COLWISE)
+  pybind11::enum_<JAXX_Quantize_Layout>(m, "JAXX_Quantize_Layout", pybind11::module_local())
+      .value("ROWWISE", JAXX_Quantize_Layout::ROWWISE)
+      .value("COLWISE", JAXX_Quantize_Layout::COLWISE)
+      .value("ROWWISE_COLWISE", JAXX_Quantize_Layout::ROWWISE_COLWISE)
+      .export_values();
+
+  pybind11::enum_<JAXX_Score_Function>(m, "JAXX_Score_Function", pybind11::module_local())
+      .value("SIGMOID", JAXX_Score_Function::SIGMOID)
+      .value("SOFTMAX", JAXX_Score_Function::SOFTMAX)
+      .export_values();
+
+  pybind11::enum_<JAXX_Collective_Op>(m, "JAXX_Collective_Op", pybind11::module_local())
+      .value("NONE", JAXX_Collective_Op::NONE)
+      .value("ALL_GATHER", JAXX_Collective_Op::ALL_GATHER)
+      .value("REDUCE_SCATTER", JAXX_Collective_Op::REDUCE_SCATTER)
       .export_values();
 }
 

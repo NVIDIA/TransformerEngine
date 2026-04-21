@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -124,6 +124,24 @@ enum NVTE_Mask_Type {
   NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK = 5,
 };
 
+/*! \enum NVTE_Softmax_Type
+ *  \brief Attention softmax types as described in
+ *  Efficient Streaming Language Models with Attention Sinks (https://arxiv.org/pdf/2309.17453v3).
+ *  For a given attention score S = Q*K^T, different softmax types perform different operations on S,
+ *  NVTE_VANILLA_SOFTMAX: S[:,:,:,i] = exp(S[:,:,:,i])/sum(exp(S[:,:,:,:]), dim=-1),
+ *  NVTE_OFF_BY_ONE_SOFTMAX: S[:,:,:,i] = exp(S[:,:,:,i])/(1 + sum(exp(S[:,:,:,:]), dim=-1)), and
+ *  NVTE_LEARNABLE_SOFTMAX: S[:,j,:,i] = exp(S[:,j,:,i])/(exp(alpha[j]) + sum(exp(S[:,j,:,:]), dim=-1)),
+ *  where alpha is a learnable parameter of shape [H].
+ */
+enum NVTE_Softmax_Type {
+  /*! Vanilla softmax */
+  NVTE_VANILLA_SOFTMAX = 0,
+  /*! Off-by-one softmax */
+  NVTE_OFF_BY_ONE_SOFTMAX = 1,
+  /*! Learnable softmax */
+  NVTE_LEARNABLE_SOFTMAX = 2,
+};
+
 /*! \enum NVTE_Fused_Attn_Backend
  *  \brief Fused attention backends
  */
@@ -172,271 +190,32 @@ NVTE_QKV_Format nvte_get_kv_format(NVTE_QKV_Layout qkv_layout);
 
 /*! \brief Get fused attention backend based on input parameters.
  *
- *  \param[in]     is_training       Whether the model is in training mode.
- *  \param[in]     q_dtype           The data type of Tensor Q.
- *  \param[in]     kv_dtype          The data type of Tensors K, V.
- *  \param[in]     qkv_layout        The layout of Tensors Q, K, V.
- *  \param[in]     bias_type         The attention bias type.
- *  \param[in]     attn_mask_type    The attention mask type.
- *  \param[in]     dropout           The dropout probability.
- *  \param[in]     num_attn_heads    The number of heads in Q.
- *  \param[in]     num_gqa_groups    The number of heads in K, V.
- *  \param[in]     max_seqlen_q      The sequence length of Q.
- *  \param[in]     max_seqlen_kv     The sequence length of K, V.
- *  \param[in]     head_dim_qk       The head dimension of Q, K.
- *  \param[in]     head_dim_v        The head dimension of V.
- *  \param[in]     window_size_left  Sliding window size (the left half).
- *  \param[in]     window_size_right Sliding window size (the right half).
+ *  \param[in]     is_training         Whether the model is in training mode.
+ *  \param[in]     q_dtype             The data type of Tensor Q.
+ *  \param[in]     kv_dtype            The data type of Tensors K, V.
+ *  \param[in]     qkv_layout          The layout of Tensors Q, K, V.
+ *  \param[in]     bias_type           The attention bias type.
+ *  \param[in]     attn_mask_type      The attention mask type.
+ *  \param[in]     softmax_type        The attention softmax type.
+ *  \param[in]     dropout             The dropout probability.
+ *  \param[in]     num_attn_heads      The number of heads in Q.
+ *  \param[in]     num_gqa_groups      The number of heads in K, V.
+ *  \param[in]     max_seqlen_q        The sequence length of Q.
+ *  \param[in]     max_seqlen_kv       The sequence length of K, V.
+ *  \param[in]     head_dim_qk         The head dimension of Q, K.
+ *  \param[in]     head_dim_v          The head dimension of V.
+ *  \param[in]     window_size_left    Sliding window size (the left half).
+ *  \param[in]     window_size_right   Sliding window size (the right half).
+ *  \param[in]     return_max_logit    Whether to produce Max along with Stats.
+ *  \param[in]     cuda_graph          Whether cuda graph capture is enabled or not.
+ *  \param[in]     deterministic       Whether determinism is required or not.
  */
 NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     bool is_training, NVTEDType q_dtype, NVTEDType kv_dtype, NVTE_QKV_Layout qkv_layout,
-    NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, float dropout, size_t num_attn_heads,
-    size_t num_gqa_groups, size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim_qk,
-    size_t head_dim_v, int64_t window_size_left, int64_t window_size_right);
-
-/*! \brief Compute dot product attention with packed QKV input.
- *
- * Computes:
- *  - P = Q * Transpose(K) + Bias
- *  - S = ScaleMaskSoftmax(P)
- *  - D = Dropout(S)
- *  - O = D * Transpose(V)
- *
- * Support Matrix:
-   \verbatim
-   | backend | precision |        qkv layout       |           bias           |                 mask                  | dropout |  sequence length  | head_dim         |
-   |   0     | FP16/BF16 |       BS3HD,SB3HD       |   NO/POST_SCALE_BIAS     | NO/PADDING/CAUSAL/PADDING_CAUSAL_MASK |   Yes   | <= 512, % 64 == 0 |    64            |
-   |   1     | FP16/BF16 | BS3HD,SB3HD,BSH3D,SBH3D | NO/POST_SCALE_BIAS/ALIBI | NO/PADDING/CAUSAL/PADDING_CAUSAL_MASK |   Yes   |  > 512, % 64 == 0 | <= 128, % 8 == 0 |
-   |   2     |   FP8     |          T3HD           |          NO_BIAS         |               PADDING_MASK            |   Yes   | <= 512, % 64 == 0 |    64            |
-   \endverbatim
- *
- * Notes:
- *
- * Tensor `cu_seqlens_padded` helps identify the correct offsets of different sequences
- * in tensors Q, K, V and O.
- * When the QKV format (`nvte_get_qkv_format(qkv_layout)`) is `bshd` or `sbhd`,
- * the offset tensor is not used in the attention calculation and can be set to empty `NVTETensor`.
- * When the QKV format is `thd`, this tensor should follow the following rules.
- * When there is no padding between sequences, the offset tensor should be equal to `cu_seqlens`,
- * When there is padding between sequences, users are responsible to adjust the offsets as needed.
- * For example, a tensor of 4 sequences `[a, PAD, b, b, c, PAD, PAD, d, d]` should have
- * `cu_seqlens = [0, 1, 3, 4, 6]` and `cu_seqlens_padded= [0, 2, 4, 7, 9]`.
- *
- *  \param[in]     QKV                      The QKV tensor in packed format, H3D or 3HD.
- *  \param[in]     Bias                     The Bias tensor.
- *  \param[in,out] S                        The S tensor.
- *  \param[out]    O                        The output O tensor.
- *  \param[out]    Aux_CTX_Tensors          Auxiliary output tensors when training,
- *                                          e.g. M, ZInv, rng_state.
- *  \param[in]     cu_seqlens               Cumulative sequence lengths, [batch_size + 1].
- *  \param[in]     cu_seqlens_padded        Cumulative sequence offsets for QKV, [batch_size + 1].
- *  \param[in]     rng_state                Seed and offset of CUDA random number generator.
- *  \param[in]     max_seqlen               Max sequence length used for computing,
- *                                          it may be >= max(seqlen_i) for i=0,...batch_size-1.
- *  \param[in]     is_training              Whether this is in training mode or inference.
- *  \param[in]     attn_scale               Scaling factor for Q * K.T.
- *  \param[in]     dropout                  Dropout probability.
- *  \param[in]     qkv_layout               QKV tensor's layout.
- *  \param[in]     bias_type                Bias type.
- *  \param[in]     attn_mask_type           Attention mask type.
- *  \param[in]     window_size_left         Sliding window size (the left half).
- *  \param[in]     window_size_right        Sliding window size (the right half).
- *  \param[in]     workspace                Workspace tensor.
- *  \param[in]     stream                   CUDA stream used for this operation.
- */
-void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias, NVTETensor S,
-                                   NVTETensor O, NVTETensorPack *Aux_CTX_Tensors,
-                                   const NVTETensor cu_seqlens, const NVTETensor cu_seqlens_padded,
-                                   const NVTETensor rng_state, size_t max_seqlen, bool is_training,
-                                   float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout,
-                                   NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
-                                   int64_t window_size_left, int64_t window_size_right,
-                                   NVTETensor workspace, cudaStream_t stream);
-
-/*! \brief Compute the backward of the dot product attention with packed QKV input.
- *
- * Support Matrix:
-   \verbatim
-   | backend | precision |        qkv layout       |           bias           |                 mask                  | dropout |  sequence length  | head_dim         |
-   |   0     | FP16/BF16 |       BS3HD,SB3HD       |   NO/POST_SCALE_BIAS     | NO/PADDING/CAUSAL/PADDING_CAUSAL_MASK |   Yes   | <= 512, % 64 == 0 |    64            |
-   |   1     | FP16/BF16 | BS3HD,SB3HD,BSH3D,SBH3D | NO/POST_SCALE_BIAS/ALIBI | NO/PADDING/CAUSAL/PADDING_CAUSAL_MASK |   Yes   |  > 512, % 64 == 0 | <= 128, % 8 == 0 |
-   |   2     |   FP8     |          T3HD           |          NO_BIAS         |               PADDING_MASK            |   Yes   | <= 512, % 64 == 0 |    64            |
-   \endverbatim
- *
- * Notes:
- *
- * Tensor `cu_seqlens_padded` helps identify the correct offsets of different sequences
- * in tensors Q, K, V and O.
- * When the QKV format (`nvte_get_qkv_format(qkv_layout)`) is `bshd` or `sbhd`,
- * the offset tensor is not used in the attention calculation and can be set to empty `NVTETensor`.
- * When the QKV format is `thd`, this tensor should follow the following rules.
- * When there is no padding between sequences, the offset tensor should be equal to `cu_seqlens`,
- * When there is padding between sequences, users are responsible to adjust the offsets as needed.
- * For example, a tensor of 4 sequences `[a, PAD, b, b, c, PAD, PAD, d, d]` should have
- * `cu_seqlens = [0, 1, 3, 4, 6]` and `cu_seqlens_padded= [0, 2, 4, 7, 9]`.
- *
- *  \param[in]     QKV                      The QKV tensor in packed format, H3D or 3HD.
- *  \param[in]     O                        The O tensor from forward.
- *  \param[in]     dO                       The gradient of the O tensor.
- *  \param[in]     S                        The S tensor.
- *  \param[in,out] dP                       The gradient of the P tensor.
- *  \param[in]     Aux_CTX_Tensors          Auxiliary tensors from context when in training mode,
- *                                          e.g. M, ZInv, rng_state.
- *  \param[out]    dQKV                     The gradient of the QKV tensor.
- *  \param[out]    dBias                    The gradient of the Bias tensor.
- *  \param[in]     cu_seqlens               Cumulative sequence lengths, [batch_size + 1].
- *  \param[in]     cu_seqlens_padded        Cumulative sequence offsets for QKV, [batch_size + 1].
- *  \param[in]     max_seqlen               Max sequence length used for computing,
- *                                          it may be >= max(seqlen_i) for i=0,...batch_size-1.
- *  \param[in]     attn_scale               Scaling factor for Q * K.T.
- *  \param[in]     dropout                  Dropout probability.
- *  \param[in]     qkv_layout               QKV tensor's layout.
- *  \param[in]     bias_type                Bias type.
- *  \param[in]     attn_mask_type           Attention mask type.
- *  \param[in]     window_size_left         Sliding window size (the left half).
- *  \param[in]     window_size_right        Sliding window size (the right half).
- *  \param[in]     deterministic            Whether to execute with deterministic behaviours.
- *  \param[in]     workspace                Workspace tensor.
- *  \param[in]     stream                   CUDA stream used for this operation.
- */
-void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, const NVTETensor dO,
-                                   const NVTETensor S, NVTETensor dP,
-                                   const NVTETensorPack *Aux_CTX_Tensors, NVTETensor dQKV,
-                                   NVTETensor dBias, const NVTETensor cu_seqlens,
-                                   const NVTETensor cu_seqlens_padded, size_t max_seqlen,
-                                   float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout,
-                                   NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
-                                   int64_t window_size_left, int64_t window_size_right,
-                                   bool deterministic, NVTETensor workspace, cudaStream_t stream);
-
-/*! \brief Compute dot product attention with packed KV input.
- *
- * Computes:
- *  - P = Q * Transpose(K) + Bias
- *  - S = ScaleMaskSoftmax(P)
- *  - D = Dropout(S)
- *  - O = D * Transpose(V)
- *
- * Support Matrix:
-   \verbatim
-   | backend | precision |                 qkv layout                  |           bias           |                 mask                  | dropout |  sequence length  | head_dim         |
-   |   0     | FP16/BF16 |            BSHD_BS2HD,SBHD_SB2HD            |   NO/POST_SCALE_BIAS     | NO/PADDING/CAUSAL/PADDING_CAUSAL_MASK |   Yes   | <= 512, % 64 == 0 |    64            |
-   |   1     | FP16/BF16 | BSHD_BS2HD,BSHD_BSH2D,SBHD_SB2HD,SBHD_SBH2D | NO/POST_SCALE_BIAS/ALIBI | NO/PADDING/CAUSAL/PADDING_CAUSAL_MASK |   Yes   |  > 512, % 64 == 0 | <= 128, % 8 == 0 |
-   \endverbatim
- *
- * Notes:
- *
- * Tensors `cu_seqlens_q_padded` and `cu_seqlens_kv_padded`
- * help identify the correct offsets of different sequences in tensors Q, K, V and O.
- * When the QKV format (`nvte_get_qkv_format(qkv_layout)`) is `bshd` or `sbhd`,
- * offset tensors are not used in the attention calculation and can be set to empty `NVTETensor`s.
- * When the QKV format is `thd`, these tensors should follow the following rules.
- * When there is no padding between sequences, the offset tensors should be equal to
- * `cu_seqlens_q` and `cu_seqlens_kv` respectively.
- * When there is padding between sequences, users are responsible to adjust the offsets as needed.
- * For example, a tensor of 4 sequences `[a, PAD, b, b, c, PAD, PAD, d, d]` should have
- * `cu_seqlens = [0, 1, 3, 4, 6]` and `cu_seqlens_padded= [0, 2, 4, 7, 9]`.
- *
- *  \param[in]     Q                         The Q tensor, in HD layouts.
- *  \param[in]     KV                        The KV tensor, in 2HD or H2D layouts.
- *  \param[in]     Bias                      The Bias tensor.
- *  \param[in,out] S                         The S tensor.
- *  \param[out]    O                         The output O tensor.
- *  \param[out]    Aux_CTX_Tensors           Auxiliary output tensors when training,
- *                                           e.g. M, ZInv, rng_state.
- *  \param[in]     cu_seqlens_q              Cumulative sequence lengths for Q, [batch_size + 1].
- *  \param[in]     cu_seqlens_kv             Cumulative sequence lengths for KV, [batch_size + 1].
- *  \param[in]     cu_seqlens_q_padded       Cumulative sequence offsets for Q, [batch_size + 1].
- *  \param[in]     cu_seqlens_kv_padded      Cumulative sequence offsets for KV, [batch_size + 1].
- *  \param[in]     page_table_k              Page table for K cache, [batch_size, max_pages_per_seq_k].
- *  \param[in]     page_table_v              Page table for V cache, [batch_size, max_pages_per_seq_v].
- *  \param[in]     rng_state                 Seed and offset of CUDA random number generator.
- *  \param[in]     max_seqlen_q              Max sequence length used for computing for Q.
- *                                           it may be >= max(seqlen_q_i) for i=0,...batch_size-1.
- *  \param[in]     max_seqlen_kv             Max sequence length used for computing for KV.
- *                                           it may be >= max(seqlen_kv_i) for i=0,...batch_size-1.
- *  \param[in]     is_training               Whether this is in training mode or inference.
- *  \param[in]     attn_scale                Scaling factor for Q * K.T.
- *  \param[in]     dropout                   Dropout probability.
- *  \param[in]     qkv_layout                QKV tensor's layout.
- *  \param[in]     bias_type                 Bias type.
- *  \param[in]     attn_mask_type            Attention mask type.
- *  \param[in]     window_size_left          Sliding window size (the left half).
- *  \param[in]     window_size_right         Sliding window size (the right half).
- *  \param[in]     deterministic             Whether to execute with deterministic behaviours.
- *  \param[in]     workspace                 Workspace tensor.
- *  \param[in]     stream                    CUDA stream used for this operation.
- */
-void nvte_fused_attn_fwd_kvpacked(
-    const NVTETensor Q, const NVTETensor KV, const NVTETensor Bias, NVTETensor S, NVTETensor O,
-    NVTETensorPack *Aux_CTX_Tensors, const NVTETensor cu_seqlens_q, const NVTETensor cu_seqlens_kv,
-    const NVTETensor cu_seqlens_q_padded, const NVTETensor cu_seqlens_kv_padded,
-    const NVTETensor page_table_k, const NVTETensor page_table_v, const NVTETensor rng_state,
-    size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training, float attn_scale, float dropout,
-    NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
-    int64_t window_size_left, int64_t window_size_right, NVTETensor workspace, cudaStream_t stream);
-
-/*! \brief Compute the backward of the dot product attention with packed KV input.
- *
- * Support Matrix:
-   \verbatim
-   | backend | precision |                 qkv layout                  |           bias           |                 mask                  | dropout |  sequence length  | head_dim         |
-   |   0     | FP16/BF16 |            BSHD_BS2HD,SBHD_SB2HD            |   NO/POST_SCALE_BIAS     | NO/PADDING/CAUSAL/PADDING_CAUSAL_MASK |   Yes   | <= 512, % 64 == 0 |    64            |
-   |   1     | FP16/BF16 | BSHD_BS2HD,BSHD_BSH2D,SBHD_SB2HD,SBHD_SBH2D | NO/POST_SCALE_BIAS/ALIBI | NO/PADDING/CAUSAL/PADDING_CAUSAL_MASK |   Yes   |  > 512, % 64 == 0 | <= 128, % 8 == 0 |
-   \endverbatim
- *
- * Notes:
- *
- * Tensors `cu_seqlens_q_padded` and `cu_seqlens_kv_padded`
- * help identify the correct offsets of different sequences in tensors Q, K, V and O.
- * When the QKV format (`nvte_get_qkv_format(qkv_layout)`) is `bshd` or `sbhd`,
- * offset tensors are not used in the attention calculation and can be set to empty `NVTETensor`s.
- * When the QKV format is `thd`, these tensors should follow the following rules.
- * When there is no padding between sequences, the offset tensors should be equal to
- * `cu_seqlens_q` and `cu_seqlens_kv` respectively.
- * When there is padding between sequences, users are responsible to adjust the offsets as needed.
- * For example, a tensor of 4 sequences `[a, PAD, b, b, c, PAD, PAD, d, d]` should have
- * `cu_seqlens = [0, 1, 3, 4, 6]` and `cu_seqlens_padded= [0, 2, 4, 7, 9]`.
- *
- *  \param[in]     Q                         The Q tensor, in HD layouts.
- *  \param[in]     KV                        The KV tensor, in H2D or 2HD layouts.
- *  \param[in]     O                         The O tensor from forward.
- *  \param[in]     dO                        The gradient of the O tensor.
- *  \param[in]     S                         The S tensor.
- *  \param[in,out] dP                        The gradient of the P tensor.
- *  \param[in]     Aux_CTX_Tensors           Auxiliary tensors from context when in training mode,
- *                                           e.g. M, ZInv, rng_state.
- *  \param[out]    dQ                        The gradient of the Q tensor.
- *  \param[out]    dKV                       The gradient of the KV tensor.
- *  \param[out]    dBias                     The gradient of the Bias tensor.
- *  \param[in]     cu_seqlens_q              Cumulative sequence lengths for Q, [batch_size + 1].
- *  \param[in]     cu_seqlens_kv             Cumulative sequence lengths for KV, [batch_size + 1].
- *  \param[in]     cu_seqlens_q_padded       Cumulative sequence offsets for Q, [batch_size + 1].
- *  \param[in]     cu_seqlens_kv_padded      Cumulative sequence offsets for KV, [batch_size + 1].
- *  \param[in]     max_seqlen_q              Max sequence length used for computing for Q.
- *                                           it may be >= max(seqlen_q_i) for i=0,...batch_size-1.
- *  \param[in]     max_seqlen_kv             Max sequence length used for computing for KV.
- *                                           it may be >= max(seqlen_kv_i) for i=0,...batch_size-1.
- *  \param[in]     attn_scale                Scaling factor for Q * K.T.
- *  \param[in]     dropout                   Dropout probability.
- *  \param[in]     qkv_layout                QKV tensor's layout.
- *  \param[in]     bias_type                 Bias type.
- *  \param[in]     attn_mask_type            Attention mask type.
- *  \param[in]     window_size_left          Sliding window size (the left half).
- *  \param[in]     window_size_right         Sliding window size (the right half).
- *  \param[in]     deterministic             Whether to execute with deterministic behaviours.
- *  \param[in]     workspace                 Workspace tensor.
- *  \param[in]     stream                    CUDA stream used for this operation.
- */
-void nvte_fused_attn_bwd_kvpacked(
-    const NVTETensor Q, const NVTETensor KV, const NVTETensor O, const NVTETensor dO,
-    const NVTETensor S, NVTETensor dP, const NVTETensorPack *Aux_CTX_Tensors, NVTETensor dQ,
-    NVTETensor dKV, NVTETensor dBias, const NVTETensor cu_seqlens_q, const NVTETensor cu_seqlens_kv,
-    const NVTETensor cu_seqlens_q_padded, const NVTETensor cu_seqlens_kv_padded,
-    size_t max_seqlen_q, size_t max_seqlen_kv, float attn_scale, float dropout,
-    NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
-    int64_t window_size_left, int64_t window_size_right, bool deterministic, NVTETensor workspace,
-    cudaStream_t stream);
+    NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
+    float dropout, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
+    size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, int64_t window_size_left,
+    int64_t window_size_right, bool return_max_logit, bool cuda_graph, bool deterministic);
 
 /*! \brief Compute dot product attention with separate Q, K and V.
  *
@@ -473,6 +252,7 @@ void nvte_fused_attn_bwd_kvpacked(
  *  \param[in]     K                         The K tensor.
  *  \param[in]     V                         The V tensor.
  *  \param[in]     Bias                      The Bias tensor.
+ *  \param[in]     SoftmaxOffset             The SoftmaxOffset tensor.
  *  \param[in,out] S                         The S tensor.
  *  \param[out]    O                         The output O tensor.
  *  \param[out]    Aux_CTX_Tensors           Auxiliary output tensors when training,
@@ -489,27 +269,33 @@ void nvte_fused_attn_bwd_kvpacked(
  *  \param[in]     max_seqlen_kv             Max sequence length used for computing for K and V.
  *                                           it may be >= max(seqlen_kv_i) for i=0,...batch_size-1.
  *  \param[in]     is_training               Whether this is in training mode or inference.
+ *  \param[in]     return_max_logit          Whether to produce Max along with Stats.
+ *  \param[in]     cuda_graph                Whether cuda graph capture is enabled or not.
  *  \param[in]     attn_scale                Scaling factor for Q * K.T.
  *  \param[in]     dropout                   Dropout probability.
  *  \param[in]     qkv_layout                QKV tensors' layout.
  *  \param[in]     bias_type                 Bias type.
  *  \param[in]     attn_mask_type            Attention mask type.
+ *  \param[in]     softmax_type              Attention softmax type.
  *  \param[in]     window_size_left          Sliding window size (the left half).
  *  \param[in]     window_size_right         Sliding window size (the right half).
+ *  \param[in]     bottom_right_diagonal     Whether to align sliding window and ALiBi diagonal to the bottom right corner of the softmax matrix.
  *  \param[in]     workspace                 Workspace tensor.
  *  \param[in]     stream                    CUDA stream used for this operation.
  */
 void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETensor V,
-                         const NVTETensor Bias, NVTETensor S, NVTETensor O,
-                         NVTETensorPack *Aux_CTX_Tensors, const NVTETensor cu_seqlens_q,
-                         const NVTETensor cu_seqlens_kv, const NVTETensor cu_seqlens_q_padded,
+                         const NVTETensor Bias, const NVTETensor SoftmaxOffset, NVTETensor S,
+                         NVTETensor O, NVTETensorPack *Aux_CTX_Tensors,
+                         const NVTETensor cu_seqlens_q, const NVTETensor cu_seqlens_kv,
+                         const NVTETensor cu_seqlens_q_padded,
                          const NVTETensor cu_seqlens_kv_padded, const NVTETensor page_table_k,
                          const NVTETensor page_table_v, const NVTETensor rng_state,
                          size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training,
-                         float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout,
-                         NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
-                         int64_t window_size_left, int64_t window_size_right, NVTETensor workspace,
-                         cudaStream_t stream);
+                         bool return_max_logit, bool cuda_graph, float attn_scale, float dropout,
+                         NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
+                         NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
+                         int64_t window_size_left, int64_t window_size_right,
+                         bool bottom_right_diagonal, NVTETensor workspace, cudaStream_t stream);
 
 /*! \brief Compute the backward of the dot product attention with separate Q, K and V.
  *
@@ -549,6 +335,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
  *  \param[out]    dK                        The gradient of the K tensor.
  *  \param[out]    dV                        The gradient of the V tensor.
  *  \param[out]    dBias                     The gradient of the Bias tensor.
+ *  \param[out]    dSoftmaxOffset            The gradient of the SoftmaxOffset tensor.
  *  \param[in]     cu_seqlens_q              Cumulative sequence lengths for Q, [batch_size + 1].
  *  \param[in]     cu_seqlens_kv             Cumulative sequence lengths for K and V, [batch_size + 1].
  *  \param[in]     cu_seqlens_q_padded       Cumulative sequence offsets for Q, [batch_size + 1].
@@ -562,23 +349,28 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
  *  \param[in]     qkv_layout                QKV tensors' layout.
  *  \param[in]     bias_type                 Bias type.
  *  \param[in]     attn_mask_type            Attention mask type.
+ *  \param[in]     softmax_type              Attention softmax type.
  *  \param[in]     window_size_left          Sliding window size (the left half).
  *  \param[in]     window_size_right         Sliding window size (the right half).
+ *  \param[in]     bottom_right_diagonal     Whether to align sliding window and ALiBi diagonal to the bottom right corner of the softmax matrix.
  *  \param[in]     deterministic             Whether to execute with deterministic behaviours.
+ *  \param[in]     cuda_graph                Whether cuda graph capture is enabled or not.
  *  \param[in]     workspace                 Workspace tensor.
  *  \param[in]     stream                    CUDA stream used for this operation.
  */
 void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETensor V,
                          const NVTETensor O, const NVTETensor dO, const NVTETensor S, NVTETensor dP,
                          const NVTETensorPack *Aux_CTX_Tensors, NVTETensor dQ, NVTETensor dK,
-                         NVTETensor dV, NVTETensor dBias, const NVTETensor cu_seqlens_q,
-                         const NVTETensor cu_seqlens_kv, const NVTETensor cu_seqlens_q_padded,
+                         NVTETensor dV, NVTETensor dBias, NVTETensor dSoftmaxOffset,
+                         const NVTETensor cu_seqlens_q, const NVTETensor cu_seqlens_kv,
+                         const NVTETensor cu_seqlens_q_padded,
                          const NVTETensor cu_seqlens_kv_padded, size_t max_seqlen_q,
                          size_t max_seqlen_kv, float attn_scale, float dropout,
                          NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
-                         NVTE_Mask_Type attn_mask_type, int64_t window_size_left,
-                         int64_t window_size_right, bool deterministic, NVTETensor workspace,
-                         cudaStream_t stream);
+                         NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
+                         int64_t window_size_left, int64_t window_size_right,
+                         bool bottom_right_diagonal, bool deterministic, bool cuda_graph,
+                         NVTETensor workspace, cudaStream_t stream);
 
 /*!  \brief Update the RNG state with the seed and calculated offset.
  *
@@ -606,7 +398,7 @@ void nvte_populate_rng_state_async(NVTETensor rng_state_dst, const NVTETensor se
  *  \param[in]     len                      batch_size x sequence_length.
  *  \param[in]     stream                   CUDA stream used for this operation.
  */
-uint32_t nvte_get_runtime_num_segments(NVTETensor cu_seqlen, NVTETensor workspace, size_t len,
+uint32_t nvte_get_runtime_num_segments(NVTETensor cu_seqlens, NVTETensor workspace, size_t len,
                                        cudaStream_t stream);
 
 /*!  \brief Set the seed and offset for RNG state.
@@ -763,8 +555,7 @@ void nvte_convert_thd_to_bshd(NVTETensor tensor, NVTETensor cu_seqlens, NVTETens
  *  \param[in]     tensor           Input tensor.
  *  \param[in]     cu_seqlens       Cumulative sequence lengths, [batch_size + 1].
  *  \param[out]    new_tensor       Output tensor.
- *  \param[in]     b                Batch size.
- *  \param[in]     max_seq_len      Maximum sequence length.
+ *  \param[in]     t                Packed sequence length.
  *  \param[in]     stream           CUDA stream used for this operation.
  */
 void nvte_convert_bshd_to_thd(NVTETensor tensor, NVTETensor cu_seqlens, NVTETensor new_tensor,

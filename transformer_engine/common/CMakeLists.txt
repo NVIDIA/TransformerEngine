@@ -1,19 +1,10 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
 cmake_minimum_required(VERSION 3.21)
 
 # Language options
-if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-  if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 13.0)
-    set(CMAKE_CUDA_ARCHITECTURES 75 80 89 90 100 120)
-  elseif (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.8)
-    set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90 100 120)
-  else ()
-    set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90)
-  endif()
-endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
@@ -30,9 +21,71 @@ project(transformer_engine LANGUAGES CUDA CXX)
 
 # CUDA Toolkit
 find_package(CUDAToolkit REQUIRED)
-if (CUDAToolkit_VERSION VERSION_LESS 12.0)
-  message(FATAL_ERROR "CUDA 12.0+ is required, but found CUDA ${CUDAToolkit_VERSION}")
+if (CUDAToolkit_VERSION VERSION_LESS 12.1)
+  message(FATAL_ERROR "CUDA 12.1+ is required, but found CUDA ${CUDAToolkit_VERSION}")
 endif()
+
+# Process GPU architectures
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+  if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 13.0)
+    set(CMAKE_CUDA_ARCHITECTURES 75 80 89 90 100 120)
+  elseif (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.8)
+    set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90 100 120)
+  else ()
+    set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90)
+  endif()
+endif()
+
+# Process CMAKE_CUDA_ARCHITECTURES to separate standard, generic, and specific architectures.
+# - NVTE_STANDARD_ARCHS: pre-Blackwell archs (e.g. 75, 80, 89, 90). Applied to all CUDA sources.
+# - NVTE_GENERIC_ARCHS: Blackwell family heads (e.g. 100, 120). Applied to non-arch-specific sources only.
+# - NVTE_SPECIFIC_ARCHS: Blackwell specific targets (e.g. 100a, 120f). Applied to arch-specific sources only.
+set(NVTE_STANDARD_ARCHS)
+set(NVTE_GENERIC_ARCHS)
+set(NVTE_SPECIFIC_ARCHS)
+
+# Check for architecture 100
+list(FIND CMAKE_CUDA_ARCHITECTURES "100" arch_100_index)
+if(NOT arch_100_index EQUAL -1)
+  list(REMOVE_ITEM CMAKE_CUDA_ARCHITECTURES "100")
+  list(APPEND NVTE_GENERIC_ARCHS "100")
+  list(APPEND NVTE_SPECIFIC_ARCHS "100a")
+  if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.9)
+    list(APPEND NVTE_SPECIFIC_ARCHS "103a")
+  endif()
+endif()
+
+# Check for architecture 101 (if we see this we are in toolkit <= 12.9)
+list(FIND CMAKE_CUDA_ARCHITECTURES "101" arch_101_index)
+if(NOT arch_101_index EQUAL -1)
+  list(REMOVE_ITEM CMAKE_CUDA_ARCHITECTURES "101")
+  list(APPEND NVTE_GENERIC_ARCHS "101")
+  list(APPEND NVTE_SPECIFIC_ARCHS "101a")
+endif()
+
+# Check for architecture 110 (if we see this we are in toolkit >= 13.0)
+list(FIND CMAKE_CUDA_ARCHITECTURES "110" arch_110_index)
+if(NOT arch_110_index EQUAL -1)
+  list(REMOVE_ITEM CMAKE_CUDA_ARCHITECTURES "110")
+  list(APPEND NVTE_GENERIC_ARCHS "110")
+  list(APPEND NVTE_SPECIFIC_ARCHS "110f")
+endif()
+
+# Check for architecture 120
+list(FIND CMAKE_CUDA_ARCHITECTURES "120" arch_120_index)
+if(NOT arch_120_index EQUAL -1)
+  list(REMOVE_ITEM CMAKE_CUDA_ARCHITECTURES "120")
+  list(APPEND NVTE_GENERIC_ARCHS "120")
+  if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.9)
+    list(APPEND NVTE_SPECIFIC_ARCHS "120f")
+  else()
+    list(APPEND NVTE_SPECIFIC_ARCHS "120a")
+  endif()
+endif()
+
+# Move remaining standard (pre-Blackwell) architectures into NVTE_STANDARD_ARCHS.
+# These are applied to all CUDA sources (both generic and arch-specific).
+set(NVTE_STANDARD_ARCHS ${CMAKE_CUDA_ARCHITECTURES})
 
 # cuDNN frontend API
 set(CUDNN_FRONTEND_INCLUDE_DIR
@@ -45,18 +98,76 @@ if(NOT EXISTS "${CUDNN_FRONTEND_INCLUDE_DIR}")
 endif()
 include(${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cudnn-frontend/cmake/cuDNN.cmake)
 
+set(CUTLASS_INCLUDE_DIR
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cutlass/include")
+set(CUTLASS_TOOLS_INCLUDE_DIR
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cutlass/tools/util/include")
+
 # Python
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
+
+function(find_nccl_version OUT_VERSION OUT_INCLUDE_DIR)
+  find_path(_nvte_nccl_include_dir
+            NAMES nccl.h
+            PATH_SUFFIXES include
+            REQUIRED)
+
+  file(STRINGS "${_nvte_nccl_include_dir}/nccl.h" _nvte_nccl_major_line
+       REGEX "^#define NCCL_MAJOR[ \t]+[0-9]+$")
+  file(STRINGS "${_nvte_nccl_include_dir}/nccl.h" _nvte_nccl_minor_line
+       REGEX "^#define NCCL_MINOR[ \t]+[0-9]+$")
+  file(STRINGS "${_nvte_nccl_include_dir}/nccl.h" _nvte_nccl_patch_line
+       REGEX "^#define NCCL_PATCH[ \t]+[0-9]+$")
+
+  string(REGEX REPLACE "^#define NCCL_MAJOR[ \t]+([0-9]+)$" "\\1"
+         _nvte_nccl_major "${_nvte_nccl_major_line}")
+  string(REGEX REPLACE "^#define NCCL_MINOR[ \t]+([0-9]+)$" "\\1"
+         _nvte_nccl_minor "${_nvte_nccl_minor_line}")
+  string(REGEX REPLACE "^#define NCCL_PATCH[ \t]+([0-9]+)$" "\\1"
+         _nvte_nccl_patch "${_nvte_nccl_patch_line}")
+
+  if ("${_nvte_nccl_major}" STREQUAL ""
+      OR "${_nvte_nccl_minor}" STREQUAL ""
+      OR "${_nvte_nccl_patch}" STREQUAL "")
+    message(FATAL_ERROR
+            "Failed to parse NCCL version from ${_nvte_nccl_include_dir}/nccl.h")
+  endif()
+
+  set(${OUT_VERSION}
+      "${_nvte_nccl_major}.${_nvte_nccl_minor}.${_nvte_nccl_patch}"
+      PARENT_SCOPE)
+  set(${OUT_INCLUDE_DIR} "${_nvte_nccl_include_dir}" PARENT_SCOPE)
+endfunction()
 
 # Configure Transformer Engine library
 include_directories(${PROJECT_SOURCE_DIR}/..)
 set(transformer_engine_SOURCES)
-list(APPEND transformer_engine_SOURCES
+set(transformer_engine_cpp_sources)
+set(transformer_engine_cuda_sources)
+set(transformer_engine_cuda_arch_specific_sources)
+
+list(APPEND transformer_engine_cpp_sources
      cudnn_utils.cpp
      transformer_engine.cpp
+     fused_attn/fused_attn.cpp
+     gemm/config.cpp
+     normalization/common.cpp
+     normalization/layernorm/ln_api.cpp
+     normalization/rmsnorm/rmsnorm_api.cpp
+     util/cuda_driver.cpp
+     util/cuda_nvml.cpp
+     util/cuda_runtime.cpp
+     util/multi_stream.cpp
+     util/rtc.cpp
+     comm_gemm_overlap/userbuffers/ipcsocket.cc
+     comm_gemm_overlap/userbuffers/userbuffers-host.cpp
+     comm_gemm_overlap/comm_gemm_overlap.cpp
+     newton_schulz/newton_schulz.cpp
+     )
+
+list(APPEND transformer_engine_cuda_sources
      common.cu
      multi_tensor/adam.cu
-     multi_tensor/compute_scale.cu
      multi_tensor/l2norm.cu
      multi_tensor/scale.cu
      multi_tensor/sgd.cu
@@ -65,37 +176,27 @@ list(APPEND transformer_engine_SOURCES
      transpose/cast_transpose_fusion.cu
      transpose/transpose_fusion.cu
      transpose/multi_cast_transpose.cu
-     transpose/quantize_transpose_square_blockwise.cu
      transpose/quantize_transpose_vector_blockwise.cu
      transpose/swap_first_dims.cu
-     activation/gelu.cu
+     dropout/dropout.cu
      fused_attn/flash_attn.cu
      fused_attn/context_parallel.cu
      fused_attn/kv_cache.cu
      fused_attn/fused_attn_f16_max512_seqlen.cu
      fused_attn/fused_attn_f16_arbitrary_seqlen.cu
-     activation/relu.cu
-     activation/swiglu.cu
      fused_attn/fused_attn_fp8.cu
-     fused_attn/fused_attn.cpp
      fused_attn/utils.cu
      gemm/cublaslt_gemm.cu
-     normalization/common.cpp
-     normalization/layernorm/ln_api.cpp
+     gemm/cublaslt_grouped_gemm.cu
      normalization/layernorm/ln_bwd_semi_cuda_kernel.cu
      normalization/layernorm/ln_fwd_cuda_kernel.cu
-     normalization/rmsnorm/rmsnorm_api.cpp
      normalization/rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu
      normalization/rmsnorm/rmsnorm_fwd_cuda_kernel.cu
      permutation/permutation.cu
-     util/cast.cu
+     util/utils.cu
      util/padding.cu
-     util/cuda_driver.cpp
-     util/cuda_nvml.cpp
-     util/cuda_runtime.cpp
-     util/multi_stream.cpp
-     util/rtc.cpp
      swizzle/swizzle.cu
+     swizzle/swizzle_block_scaling.cu
      fused_softmax/scaled_masked_softmax.cu
      fused_softmax/scaled_upper_triang_masked_softmax.cu
      fused_softmax/scaled_aligned_causal_masked_softmax.cu
@@ -106,24 +207,124 @@ list(APPEND transformer_engine_SOURCES
      recipe/current_scaling.cu
      recipe/delayed_scaling.cu
      recipe/fp8_block_scaling.cu
-     comm_gemm_overlap/userbuffers/ipcsocket.cc
-     comm_gemm_overlap/userbuffers/userbuffers-host.cpp
-     comm_gemm_overlap/userbuffers/userbuffers.cu
-     comm_gemm_overlap/comm_gemm_overlap.cpp)
+     comm_gemm_overlap/userbuffers/userbuffers.cu)
+
+list(APPEND transformer_engine_cuda_arch_specific_sources
+     activation/gelu.cu
+     activation/glu.cu
+     activation/relu.cu
+     activation/swiglu.cu
+     cast/cast.cu
+     gemm/cutlass_grouped_gemm.cu
+     hadamard_transform/group_hadamard_transform.cu
+     hadamard_transform/graph_safe_group_hadamard_transform.cu
+     hadamard_transform/hadamard_transform.cu
+     hadamard_transform/hadamard_transform_cast_fusion.cu
+     hadamard_transform/row_cast_col_hadamard_transform_cast_fusion.cu
+     hadamard_transform/group_hadamard_transform_cast_fusion.cu
+     hadamard_transform/group_row_cast_col_hadamard_transform_cast_fusion.cu
+     hadamard_transform/graph_safe_group_row_cast_col_hadamard_transform_cast_fusion.cu
+     multi_tensor/compute_scale.cu
+     recipe/mxfp8_scaling.cu
+     recipe/nvfp4.cu
+     transpose/quantize_transpose_square_blockwise.cu
+     transpose/quantize_transpose_vector_blockwise_fp4.cu)
+
+# Compiling the files with the worst compilation time first to hopefully overlap
+# better with the faster-compiling cpp files
+list(APPEND transformer_engine_SOURCES ${transformer_engine_cuda_arch_specific_sources}
+                                       ${transformer_engine_cuda_sources}
+                                       ${transformer_engine_cpp_sources})
+
+# Set compile options for CUDA sources with generic architectures.
+# These get standard archs (pre-Blackwell) + generic Blackwell family heads.
+foreach(cuda_source IN LISTS transformer_engine_cuda_sources)
+  set(arch_compile_options)
+  foreach(arch IN LISTS NVTE_STANDARD_ARCHS)
+    list(APPEND arch_compile_options "--generate-code=arch=compute_${arch},code=sm_${arch}")
+  endforeach()
+  foreach(arch IN LISTS NVTE_GENERIC_ARCHS)
+    list(APPEND arch_compile_options "--generate-code=arch=compute_${arch},code=sm_${arch}")
+  endforeach()
+
+  if(arch_compile_options)
+    set_property(
+      SOURCE ${cuda_source}
+      APPEND
+      PROPERTY
+      COMPILE_OPTIONS ${arch_compile_options}
+    )
+  endif()
+endforeach()
+
+# Set compile options for CUDA sources with arch-specific features.
+# These get standard archs (pre-Blackwell) + Blackwell specific targets (a/f suffix).
+# They must NOT get generic Blackwell archs, as they use family/arch-specific PTX features.
+foreach(cuda_source IN LISTS transformer_engine_cuda_arch_specific_sources)
+  set(arch_compile_options)
+  foreach(arch IN LISTS NVTE_STANDARD_ARCHS)
+    list(APPEND arch_compile_options "--generate-code=arch=compute_${arch},code=sm_${arch}")
+  endforeach()
+  foreach(arch IN LISTS NVTE_SPECIFIC_ARCHS)
+    list(APPEND arch_compile_options "--generate-code=arch=compute_${arch},code=sm_${arch}")
+  endforeach()
+
+  if(arch_compile_options)
+    set_property(
+      SOURCE ${cuda_source}
+      APPEND
+      PROPERTY
+      COMPILE_OPTIONS ${arch_compile_options}
+    )
+  endif()
+endforeach()
+
+if (NVTE_WITH_CUBLASMP)
+list(APPEND transformer_engine_SOURCES
+     comm_gemm/comm_gemm.cpp)
+endif()
+
 add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
+# Disable CMake's automatic architecture flag injection.
+# All architectures are handled explicitly via per-source COMPILE_OPTIONS
+# using NVTE_STANDARD_ARCHS, NVTE_GENERIC_ARCHS, and NVTE_SPECIFIC_ARCHS above.
+set_target_properties(transformer_engine PROPERTIES CUDA_ARCHITECTURES OFF)
 target_include_directories(transformer_engine PUBLIC
                            "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
+# Grouped GEMM kernels require SM90a
+set_property(
+  SOURCE gemm/cutlass_grouped_gemm.cu
+  APPEND
+  PROPERTY
+  COMPILE_OPTIONS "--generate-code=arch=compute_90a,code=sm_90a")
 
+# CUTLASS kernels could cause hang in debug build
+set(CUTLASS_KERNEL_SOURCES
+    gemm/cutlass_grouped_gemm.cu
+    hadamard_transform/group_hadamard_transform_cast_fusion.cu
+    hadamard_transform/group_row_cast_col_hadamard_transform_cast_fusion.cu
+    hadamard_transform/hadamard_transform_cast_fusion.cu)
+set_property(
+  SOURCE ${CUTLASS_KERNEL_SOURCES}
+  APPEND
+  PROPERTY
+  COMPILE_OPTIONS "-g0;-dopt=on")
 
 # Configure dependencies
 target_link_libraries(transformer_engine PUBLIC
                       CUDA::cublas
                       CUDA::cudart
                       CUDNN::cudnn_all)
+
 target_include_directories(transformer_engine PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+target_include_directories(transformer_engine SYSTEM PRIVATE
+                           ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}/cccl)
 target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_DIR}")
+target_include_directories(transformer_engine PRIVATE
+                          ${CUTLASS_INCLUDE_DIR}
+                          ${CUTLASS_TOOLS_INCLUDE_DIR})
 
 # Compiling Userbuffers with native MPI bootstrapping requires linking against MPI
 option(NVTE_UB_WITH_MPI "Bootstrap Userbuffers with MPI" OFF)
@@ -140,6 +341,63 @@ if (NVTE_ENABLE_NVSHMEM)
     target_link_libraries(transformer_engine PUBLIC nvshmemapi)
     target_include_directories(transformer_engine PUBLIC ${NVSHMEMAPI_INCLUDE_DIR})
 endif()
+
+option(NVTE_WITH_CUBLASMP "Use cuBLASMp for tensor parallel GEMMs" OFF)
+if (NVTE_WITH_CUBLASMP)
+    target_compile_definitions(transformer_engine PRIVATE NVTE_WITH_CUBLASMP)
+    target_include_directories(transformer_engine PRIVATE ${CUBLASMP_DIR}/include)
+    find_nccl_version(NCCL_VERSION NCCL_INCLUDE_DIR)
+    find_library(CUBLASMP_LIB
+                 NAMES cublasmp libcublasmp
+                 PATHS ${CUBLASMP_DIR}
+                 PATH_SUFFIXES lib
+                 REQUIRED)
+    find_library(NCCL_LIB
+                 NAMES nccl libnccl
+                 PATH_SUFFIXES lib
+                 REQUIRED)
+    if (NCCL_VERSION VERSION_LESS 2.29.0)
+      message(FATAL_ERROR
+              "NVTE_WITH_CUBLASMP requires NCCL >= 2.29.0, but found NCCL ${NCCL_VERSION} "
+              "in ${NCCL_INCLUDE_DIR}/nccl.h")
+    endif()
+    target_link_libraries(transformer_engine PUBLIC ${NCCL_LIB} ${CUBLASMP_LIB})
+    message(STATUS "Using cuBLASMp at: ${CUBLASMP_DIR}")
+    message(STATUS "Using NCCL ${NCCL_VERSION} at: ${NCCL_LIB}")
+endif()
+
+option(NVTE_WITH_CUSOLVERMP "Use cuSolverMp for distributed Newton-Schulz" OFF)
+if (NVTE_WITH_CUSOLVERMP)
+    target_compile_definitions(transformer_engine PRIVATE NVTE_WITH_CUSOLVERMP)
+    target_include_directories(transformer_engine PRIVATE ${CUSOLVERMP_DIR}/include)
+    find_library(CUSOLVERMP_LIB
+                 NAMES cusolverMp libcusolverMp
+                 PATHS ${CUSOLVERMP_DIR}
+                 PATH_SUFFIXES lib
+                 REQUIRED)
+    find_library(NCCL_LIB
+                 NAMES nccl libnccl
+                 PATH_SUFFIXES lib
+                 REQUIRED)
+    target_link_libraries(transformer_engine PRIVATE ${NCCL_LIB} ${CUSOLVERMP_LIB})
+    message(STATUS "Using cuSolverMp at: ${CUSOLVERMP_DIR}")
+endif()
+
+# Number of philox4x32 rounds for stochastic rounding (build-time constant).
+set(NVTE_BUILD_NUM_PHILOX_ROUNDS_STR $ENV{NVTE_BUILD_NUM_PHILOX_ROUNDS})
+if (NOT NVTE_BUILD_NUM_PHILOX_ROUNDS_STR)
+  set(NVTE_BUILD_NUM_PHILOX_ROUNDS_STR "10")
+endif()
+if (NOT NVTE_BUILD_NUM_PHILOX_ROUNDS_STR MATCHES "^[1-9][0-9]*$")
+  message(FATAL_ERROR
+          "Environment variable NVTE_BUILD_NUM_PHILOX_ROUNDS must be a positive integer, "
+          "but got '${NVTE_BUILD_NUM_PHILOX_ROUNDS_STR}'.")
+endif()
+set(NVTE_BUILD_NUM_PHILOX_ROUNDS ${NVTE_BUILD_NUM_PHILOX_ROUNDS_STR})
+
+target_compile_definitions(transformer_engine
+                           PUBLIC NVTE_BUILD_NUM_PHILOX_ROUNDS=${NVTE_BUILD_NUM_PHILOX_ROUNDS})
+message(STATUS "Philox rounds for stochastic rounding: ${NVTE_BUILD_NUM_PHILOX_ROUNDS}")
 
 # Hack to enable dynamic loading in cuDNN frontend
 target_compile_definitions(transformer_engine PUBLIC NV_CUDNN_FRONTEND_USE_DYNAMIC_LOADING)
@@ -177,36 +435,43 @@ target_include_directories(transformer_engine PRIVATE
                            "${CMAKE_CURRENT_BINARY_DIR}/string_headers")
 
 # Compiler options
-set_source_files_properties(fused_softmax/scaled_masked_softmax.cu
-                            fused_softmax/scaled_upper_triang_masked_softmax.cu
-                            fused_softmax/scaled_aligned_causal_masked_softmax.cu
-                            multi_tensor/adam.cu
-                            multi_tensor/compute_scale.cu
-                            multi_tensor/l2norm.cu
-                            multi_tensor/scale.cu
-                            multi_tensor/sgd.cu
-                            fused_attn/flash_attn.cu
-                            fused_attn/context_parallel.cu
-                            fused_attn/kv_cache.cu
-                            PROPERTIES
-                            COMPILE_OPTIONS "--use_fast_math")
+set(nvte_sources_with_fast_math)
+list(APPEND nvte_sources_with_fast_math fused_softmax/scaled_masked_softmax.cu
+                                        fused_softmax/scaled_upper_triang_masked_softmax.cu
+                                        fused_softmax/scaled_aligned_causal_masked_softmax.cu
+                                        multi_tensor/adam.cu
+                                        multi_tensor/compute_scale.cu
+                                        multi_tensor/l2norm.cu
+                                        multi_tensor/scale.cu
+                                        multi_tensor/sgd.cu
+                                        fused_attn/flash_attn.cu
+                                        fused_attn/context_parallel.cu
+                                        fused_attn/kv_cache.cu)
+
 option(NVTE_BUILD_ACTIVATION_WITH_FAST_MATH "Compile activation kernels with --use_fast_math option" OFF)
 if (NVTE_BUILD_ACTIVATION_WITH_FAST_MATH)
-  set_source_files_properties(activation/gelu.cu
-                              activation/relu.cu
-                              activation/swiglu.cu
-                              util/cast.cu
-                              PROPERTIES
-                              COMPILE_OPTIONS "--use_fast_math")
+  list(APPEND nvte_sources_with_fast_math activation/gelu.cu
+                                          activation/glu.cu
+                                          activation/relu.cu
+                                          activation/swiglu.cu)
 endif()
+
+foreach(cuda_source IN LISTS nvte_sources_with_fast_math)
+  set_property(
+    SOURCE ${cuda_source}
+    APPEND
+    PROPERTY
+    COMPILE_OPTIONS "--use_fast_math")
+endforeach()
+
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3")
 
 # Number of parallel build jobs
-if(ENV{MAX_JOBS})
-  set(BUILD_JOBS_STR "$ENV{MAX_JOBS}")
-elseif(ENV{NVTE_BUILD_MAX_JOBS})
-  set(BUILD_JOBS_STR "$ENV{NVTE_BUILD_MAX_JOBS}")
+if($ENV{MAX_JOBS})
+  set(BUILD_JOBS_STR $ENV{MAX_JOBS})
+elseif($ENV{NVTE_BUILD_MAX_JOBS})
+  set(BUILD_JOBS_STR $ENV{NVTE_BUILD_MAX_JOBS})
 else()
   set(BUILD_JOBS_STR "max")
 endif()

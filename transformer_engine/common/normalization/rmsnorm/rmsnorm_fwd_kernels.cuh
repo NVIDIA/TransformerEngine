@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -115,7 +115,14 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_fwd_tuned_ke
 
         if (requires_amax) {
           __builtin_assume(amax >= 0);
-          amax = fmaxf(amax, fabsf(temp_output));
+          if (params.fp8_out) {
+            // For fp8_out, keep amax on pre-scale compute_t
+            amax = fmaxf(amax, fabsf(temp_output));
+          } else {
+            // Otherwise compute amax on the value converted to output_t (e.g., bf16)
+            output_t out_t_val = output_t(temp_output);
+            amax = fmaxf(amax, fabsf(compute_t(out_t_val)));
+          }
         }
         if (params.fp8_out) {
           temp_output = temp_output * scale;
@@ -205,6 +212,7 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_fwd_general_
     scale = *reinterpret_cast<compute_t *>(params.scale);
   }
   compute_t amax = 0;
+  const bool requires_amax = params.amax != nullptr;
 
   for (int cta_row = bidm * bdimm; cta_row < params.rows; cta_row += gdimm) {
     const int row = cta_row + warp_m;
@@ -258,14 +266,23 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_fwd_general_
       }
 
       // Apply fp8 factors
-      if (params.fp8_out) {
+      if (params.fp8_out || requires_amax) {
 #pragma unroll
         for (int jt = 0; jt < NUM_ELTS; jt++) {
           if (col + jt < params.cols) {
             compute_t z_ij = z.data.elt[jt];
             __builtin_assume(amax >= 0);
-            amax = fmaxf(amax, fabsf(z_ij));
-            z.data.elt[jt] = z_ij * scale;
+            if (params.fp8_out) {
+              // For fp8_out, keep amax on pre-scale compute_t
+              amax = fmaxf(amax, fabsf(z_ij));
+            } else {
+              // Otherwise compute amax on the value converted to output_t (e.g., bf16)
+              output_t out_t_val = output_t(z_ij);
+              amax = fmaxf(amax, fabsf(compute_t(out_t_val)));
+            }
+            if (params.fp8_out) {
+              z.data.elt[jt] = z_ij * scale;
+            }
           }
         }
       }
@@ -277,17 +294,16 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_fwd_general_
     }
   }
 
-  // Finalize fp8 factors
-  if (params.fp8_out) {
-    // Reduce amax over block
-    if (params.amax != nullptr) {
-      amax = reduce_max<WARPS_M * WARPS_N>(amax, warp);
-      if (threadIdx.x == 0) {
-        static_assert(std::is_same<compute_t, float>::value);
-        atomicMaxFloat(reinterpret_cast<compute_t *>(params.amax), amax);
-      }
+  // Reduce amax over block
+  if (requires_amax) {
+    amax = reduce_max<WARPS_M * WARPS_N>(amax, warp);
+    if (threadIdx.x == 0) {
+      static_assert(std::is_same<compute_t, float>::value);
+      atomicMaxFloat(reinterpret_cast<compute_t *>(params.amax), amax);
     }
+  }
 
+  if (params.fp8_out) {
     // Update scale-inverse
     if (blockIdx.x == 0 && threadIdx.x == 0 && params.scale_inv != nullptr) {
       reciprocal<compute_t>(reinterpret_cast<compute_t *>(params.scale_inv), scale);

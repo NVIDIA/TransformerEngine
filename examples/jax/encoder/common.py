@@ -1,8 +1,11 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """Shared functions for the encoder tests"""
 from functools import lru_cache
+import os
+import pathlib
+import zipfile
 
 import jax
 import jax.numpy
@@ -28,6 +31,13 @@ def is_fp8_supported():
 
 @lru_cache
 def is_mxfp8_supported():
+    """Return if FP8 has hardware supported"""
+    gpu_arch = get_device_compute_capability(0)
+    return gpu_arch >= 100
+
+
+@lru_cache
+def is_nvfp4_supported():
     """Return if FP8 has hardware supported"""
     gpu_arch = get_device_compute_capability(0)
     return gpu_arch >= 100
@@ -98,7 +108,7 @@ def assert_params_sufficiently_sharded(params, mesh, tolerance=0.01, print_info=
     )
 
 
-def get_fp8_recipe_from_name_string(name: str):
+def get_quantization_recipe_from_name_string(name: str):
     """Query recipe from a given name string"""
     match name:
         case "DelayedScaling":
@@ -107,5 +117,54 @@ def get_fp8_recipe_from_name_string(name: str):
             return recipe.MXFP8BlockScaling()
         case "Float8CurrentScaling":
             return recipe.Float8CurrentScaling()
+        case "NVFP4BlockScaling":
+            return recipe.NVFP4BlockScaling()
         case _:
-            raise ValueError(f"Invalid fp8_recipe, got {name}")
+            raise ValueError(f"Invalid quantization_recipe, got {name}")
+
+
+@lru_cache(maxsize=None)
+def _get_example_artifacts_dir() -> pathlib.Path:
+    """Path to directory with pre-downloaded datasets"""
+
+    # Check environment variable
+    path = os.getenv("NVTE_TEST_CHECKPOINT_ARTIFACT_PATH")
+    if path:
+        return pathlib.Path(path).resolve()
+
+    # Fallback to path in root dir
+    root_dir = pathlib.Path(__file__).resolve().parent.parent.parent
+    return root_dir / "artifacts" / "examples" / "jax"
+
+
+def _unpack_cached_dataset(artifacts_dir: pathlib.Path, folder_name: str) -> None:
+    """Unpack a cached dataset if available"""
+    dataset_dir = artifacts_dir / folder_name
+    if not dataset_dir.exists():
+        print(f"Cached dataset {folder_name} not found at {dataset_dir}, skipping unpack")
+        return
+
+    # Disable any HF network calls since the dataset is cached locally
+    os.environ["HF_HUB_OFFLINE"] = "1"
+
+    for filename in os.listdir(dataset_dir):
+        filepath = dataset_dir / filename
+        if not filename.endswith(".zip"):
+            continue
+        print(f"Unpacking cached dataset {folder_name} from {filepath}")
+
+        with zipfile.ZipFile(filepath, "r") as zip_ref:
+            zip_ref.extractall(pathlib.Path.home() / ".cache" / "huggingface")
+        print(
+            f"Unpacked cached dataset {folder_name} to"
+            f" {pathlib.Path.home() / '.cache' / 'huggingface'}"
+        )
+
+
+# This is cached so we don't have to unpack datasets multiple times
+@lru_cache(maxsize=None)
+def unpack_cached_datasets_if_available() -> None:
+    """Unpack cached datasets if available"""
+    artifacts_dir = _get_example_artifacts_dir()
+    _unpack_cached_dataset(artifacts_dir, "mnist")
+    _unpack_cached_dataset(artifacts_dir, "encoder")

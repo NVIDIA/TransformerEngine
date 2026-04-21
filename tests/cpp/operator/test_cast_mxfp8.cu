@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -81,6 +81,7 @@ void compute_ref(const ProcessingMethod processing_method,
             // Cache computations
             for (size_t i = i_min; i < i_max; ++i) {
                 for (size_t j = j_min; j < j_max; ++j) {
+
                     const size_t idx = i * cols + j;
                     const size_t cache_idx = (i - i_min) * tile_size_X + (j - j_min);
 
@@ -310,12 +311,13 @@ void performTest_x1(const ProcessingMethod processing_method,
     const double rel_tolerable_mismatches_limit = 0.0;
 
     size_t mismatches_scales = 0;
-    compare_e8m0_scaling_factors("scales", gpu_scales_ptr, ref_output_scales.get(),
-                                 unpadded_blocks_Y, unpadded_blocks_X, scales_stride,
-                                 mismatches_scales,
-                                 scale_diff_abs_tolerance,
-                                 abs_tolerable_mismatches_limit,
-                                 rel_tolerable_mismatches_limit);
+
+    compare_scaling_factors("scales", gpu_scales_ptr, ref_output_scales.get(),
+                            unpadded_blocks_Y, unpadded_blocks_X, scales_stride,
+                            mismatches_scales,
+                            scale_diff_abs_tolerance,
+                            abs_tolerable_mismatches_limit,
+                            rel_tolerable_mismatches_limit);
 
     const size_t mismatches_elts = 32 * mismatches_scales;
     auto [atol, rtol] = getTolerances(otype);
@@ -481,22 +483,22 @@ void performTest_x2(const ProcessingMethod processing_method,
     const double rel_tolerable_mismatches_limit = 0.0;
 
     size_t mismatches_scales_rowwise = 0;
-    compare_e8m0_scaling_factors("scales_rowwise", output.rowwise_cpu_scale_inv_ptr<fp8e8m0>(),
-                                 ref_scales_rowwise.get(), unpadded_blocks_Y_rowwise,
-                                 unpadded_blocks_X_rowwise, scales_stride_rowwise,
-                                 mismatches_scales_rowwise,
-                                 scale_diff_abs_tolerance,
-                                 abs_tolerable_mismatches_limit,
-                                 rel_tolerable_mismatches_limit);
+    compare_scaling_factors("scales_rowwise", output.rowwise_cpu_scale_inv_ptr<fp8e8m0>(),
+                            ref_scales_rowwise.get(), unpadded_blocks_Y_rowwise,
+                            unpadded_blocks_X_rowwise, scales_stride_rowwise,
+                            mismatches_scales_rowwise,
+                            scale_diff_abs_tolerance,
+                            abs_tolerable_mismatches_limit,
+                            rel_tolerable_mismatches_limit);
 
     size_t mismatches_scales_colwise = 0;
-    compare_e8m0_scaling_factors("scales_colwise", output.columnwise_cpu_scale_inv_ptr<fp8e8m0>(),
-                                 ref_scales_colwise.get(), unpadded_blocks_Y_colwise,
-                                 unpadded_blocks_X_colwise, scales_stride_colwise,
-                                 mismatches_scales_colwise,
-                                 scale_diff_abs_tolerance,
-                                 abs_tolerable_mismatches_limit,
-                                 rel_tolerable_mismatches_limit);
+    compare_scaling_factors("scales_colwise", output.columnwise_cpu_scale_inv_ptr<fp8e8m0>(),
+                            ref_scales_colwise.get(), unpadded_blocks_Y_colwise,
+                            unpadded_blocks_X_colwise, scales_stride_colwise,
+                            mismatches_scales_colwise,
+                            scale_diff_abs_tolerance,
+                            abs_tolerable_mismatches_limit,
+                            rel_tolerable_mismatches_limit);
 
     const size_t mismatches_elts_rowwise = 32 * mismatches_scales_rowwise;
     const size_t mismatches_elts_colwise = 32 * mismatches_scales_colwise;
@@ -522,17 +524,12 @@ void performTest_x2(const ProcessingMethod processing_method,
 std::vector<std::vector<size_t>> matrix_sizes = {
     {1, 16},
     {16, 48},
-    {65, 96},
     {128, 128},
-    {256, 256},
     {993, 512},
-    {511, 6144},
-    {8192, 128},
-    {2048, 160},
-    {577, 1632},
     {1024},
     {8, 32, 1024},
     {16, 8, 4, 512},
+    {8192, 7168},
 };
 
 std::vector<std::pair<size_t, size_t>> block_sizes = {
@@ -566,8 +563,6 @@ std::vector<ActivationType> Activation_types = {
     // ActivationType::QGeLU,
     // ActivationType::SReLU,
 };
-
-}  // namespace
 
 class FusedCastMXFP8TestSuite : public ::testing::TestWithParam
     <std::tuple<ProcessingMethod,
@@ -681,28 +676,62 @@ std::string to_string(const ActivationType Act_type) {
     }
 }
 
+std::string test_name_generator(
+    const testing::TestParamInfo<FusedCastMXFP8TestSuite::ParamType>& info) {
+    std::string name = to_string(std::get<0>(info.param)) + "X" +
+        to_string(std::get<1>(info.param));
+    const auto& shape = std::get<2>(info.param);
+    for ( const auto& s: shape) {
+        name += "X" + std::to_string(s);
+    }
+    name += "X" + std::to_string(std::get<3>(info.param).first) +
+            "X" + std::to_string(std::get<3>(info.param).second) +
+            "X" + test::typeName(std::get<4>(info.param)) +
+            "X" + test::typeName(std::get<5>(info.param)) +
+            "X" + test::caseName(std::get<6>(info.param));
+    return name;
+}
+
+}  // namespace
+
+// Test cases with only cast kernels
 INSTANTIATE_TEST_SUITE_P(
-    OperatorTest,
+    OperatorTest_FusedCastMXFP8_CastOnly,
+    FusedCastMXFP8TestSuite,
+    ::testing::Combine(
+        ::testing::Values(ProcessingMethod::CAST_ONLY),
+        ::testing::Values(ActivationType::Identity),
+        ::testing::ValuesIn(matrix_sizes),
+        ::testing::ValuesIn(block_sizes),
+        ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
+        ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2),
+        ::testing::ValuesIn(input_scenarios)),
+    test_name_generator);
+
+// Test cases with varying matrix shapes and block shapes
+INSTANTIATE_TEST_SUITE_P(
+    OperatorTest_FusedCastMXFP8_Sizes,
     FusedCastMXFP8TestSuite,
     ::testing::Combine(
         ::testing::ValuesIn(processing_methods),
         ::testing::ValuesIn(Activation_types),
         ::testing::ValuesIn(matrix_sizes),
         ::testing::ValuesIn(block_sizes),
+        ::testing::Values(DType::kBFloat16),
+        ::testing::Values(DType::kFloat8E4M3),
+        ::testing::ValuesIn(input_scenarios)),
+    test_name_generator);
+
+// Test cases with varying dtypes
+INSTANTIATE_TEST_SUITE_P(
+    OperatorTest_FusedCastMXFP8_Dtypes,
+    FusedCastMXFP8TestSuite,
+    ::testing::Combine(
+        ::testing::ValuesIn(processing_methods),
+        ::testing::ValuesIn(Activation_types),
+        ::testing::Values(std::vector<size_t>{256, 384}),
+        ::testing::Values(std::pair<size_t, size_t>{32, 32}),
         ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
         ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2),
         ::testing::ValuesIn(input_scenarios)),
-    [](const testing::TestParamInfo<FusedCastMXFP8TestSuite::ParamType>& info) {
-        std::string name = to_string(std::get<0>(info.param)) + "X" +
-                           to_string(std::get<1>(info.param));
-      const auto& shape = std::get<2>(info.param);
-      for ( const auto& s: shape) {
-        name += "X" + std::to_string(s);
-      }
-      name += "X" + std::to_string(std::get<3>(info.param).first) +
-              "X" + std::to_string(std::get<3>(info.param).second) +
-              "X" + test::typeName(std::get<4>(info.param)) +
-              "X" + test::typeName(std::get<5>(info.param)) +
-              "X" + test::caseName(std::get<6>(info.param));
-        return name;
-    });
+    test_name_generator);
