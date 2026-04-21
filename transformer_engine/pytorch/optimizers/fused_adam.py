@@ -13,11 +13,7 @@ import warnings
 import torch
 from torch.distributed._tensor import DTensor
 import transformer_engine_torch as tex
-from transformer_engine.pytorch.tensor.float8_tensor import (
-    Float8Tensor,
-    Float8Quantizer,
-    Float8CurrentScalingQuantizer,
-)
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8Quantizer
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensor
 from .multi_tensor_apply import multi_tensor_applier
 
@@ -30,15 +26,8 @@ def get_fp8_meta(fp8_tensor):
 
     quantizer = fp8_tensor._quantizer
 
-    if isinstance(quantizer, Float8Quantizer):
-        scale = quantizer.scale
-        amax = quantizer.amax
-    elif isinstance(quantizer, Float8CurrentScalingQuantizer):
-        # Kernel derives scale from scale_inv when scale_ptr is null.
-        scale = torch.empty(0, dtype=torch.float32)
-        amax = torch.empty(0, dtype=torch.float32)
-    else:
-        raise TypeError(f"Unsupported quantizer type: {type(quantizer)}")
+    scale = quantizer.scale
+    amax = quantizer.amax
     scale_inv = fp8_tensor._scale_inv
     return scale, amax, scale_inv
 
@@ -667,13 +656,16 @@ class FusedAdam(torch.optim.Optimizer):
                             unscaled_lists[name].append(unscaled)
                             scaled_lists[name].append(state_tensor)
                             state_scales[name].append(self._scales[p][name])
-                if isinstance(p, Float8Tensor) or (
-                    isinstance(p, DTensor) and isinstance(p._local_tensor, Float8Tensor)
+                local_p = p._local_tensor if isinstance(p, DTensor) else p
+                # Only delayed-scaling Float8Tensor uses the fused FP8 Adam kernel.
+                # Everything else (MXFP8/NVFP4/blockwise, current-scaling Float8) goes
+                # through the FP32 master + requantize path.
+                if isinstance(local_p, Float8Tensor) and isinstance(
+                    local_p._quantizer, Float8Quantizer
                 ):
-                    p = p._local_tensor if isinstance(p, DTensor) else p
-                    out_dtype = p._fp8_dtype
-                    p_fp8_model.append(p._data.data)
-                    scale, amax, scale_inv = get_fp8_meta(p)
+                    out_dtype = local_p._fp8_dtype
+                    p_fp8_model.append(local_p._data.data)
+                    scale, amax, scale_inv = get_fp8_meta(local_p)
                     scales.append(scale)
                     amaxes.append(amax)
                     scale_invs.append(scale_inv)
@@ -682,24 +674,12 @@ class FusedAdam(torch.optim.Optimizer):
                     g_of_fp8_model.append(p_grad.data)
                     m_of_fp8_model.append(unscaled_state["exp_avg"])
                     v_of_fp8_model.append(unscaled_state["exp_avg_sq"])
-                elif isinstance(p, QuantizedTensor) or (
-                    isinstance(p, DTensor) and isinstance(p._local_tensor, QuantizedTensor)
-                ):
-                    # Block-scaling quantized params (MXFP8Tensor, Float8BlockwiseQTensor,
-                    # NVFP4Tensor). Operate on FP32 master weights, requantize back after
-                    # Adam update.
-                    # Note: a fused Adam+requantize kernel (like multi_tensor_adam_fp8
-                    # for Float8Tensor) would avoid the FP32 round-trip here.
+                elif isinstance(local_p, QuantizedTensor):
                     if not self.master_weights:
-                        local_p = p._local_tensor if isinstance(p, DTensor) else p
                         raise RuntimeError(
-                            "FusedAdam without master_weights does not support "
+                            f"FusedAdam without master_weights does not support "
                             f"{type(local_p).__name__} parameters. Use master_weights=True."
                         )
-                    # Route to the FP32 master-weight path: Adam updates the FP32 master,
-                    # then we write back to the quantized param after kernels run.
-                    # Gradients may be BF16/FP16 from the backward pass — cast to FP32
-                    # to match the FP32 Adam kernel expectations.
                     p_f32_model.append(unscaled_state["master_param"].data)
                     g_of_f32_model.append(p_grad.data.float())
                     m_of_f32_model.append(unscaled_state["exp_avg"])

@@ -44,7 +44,6 @@ struct FP8Data {
   float *scale_inv_ptr;
   float max;
   int warp_id;
-  bool write_meta;
 };
 
 template <>
@@ -93,16 +92,9 @@ struct AdamFunctorMaster {
 
     if constexpr (is_fp8_type) {
       float *scale_ptr = reinterpret_cast<float *>(tl.fp8_meta_addresses[0][tensor_loc]);
+      fp8_data.scale = scale_ptr != nullptr ? *scale_ptr : 1;
       fp8_data.amax_ptr = reinterpret_cast<float *>(tl.fp8_meta_addresses[1][tensor_loc]);
       fp8_data.scale_inv_ptr = reinterpret_cast<float *>(tl.fp8_meta_addresses[2][tensor_loc]);
-      if (scale_ptr != nullptr) {
-        fp8_data.scale = *scale_ptr;
-      } else if (fp8_data.scale_inv_ptr != nullptr) {
-        fp8_data.scale = __frcp_rn(*fp8_data.scale_inv_ptr);
-      } else {
-        fp8_data.scale = 1.0f;
-      }
-      fp8_data.write_meta = (scale_ptr != nullptr);
       fp8_data.warp_id = threadIdx.x / THREADS_PER_WARP;
       fp8_data.max = 0;
     }
@@ -169,16 +161,14 @@ struct AdamFunctorMaster {
     }
 
     if constexpr (is_fp8_type) {
-      if (fp8_data.write_meta) {
-        fp8_data.max = transformer_engine::reduce_max<BLOCK_SIZE / THREADS_PER_WARP>(
-            fp8_data.max, fp8_data.warp_id);
-        if (threadIdx.x == 0) {
-          if (fp8_data.amax_ptr != nullptr) {
-            transformer_engine::atomicMaxFloat(fp8_data.amax_ptr, fp8_data.max);
-          }
-          if (fp8_data.scale_inv_ptr != nullptr) {
-            *fp8_data.scale_inv_ptr = __frcp_rn(fp8_data.scale);
-          }
+      fp8_data.max = transformer_engine::reduce_max<BLOCK_SIZE / THREADS_PER_WARP>(
+          fp8_data.max, fp8_data.warp_id);
+      if (threadIdx.x == 0) {
+        if (fp8_data.amax_ptr != nullptr) {
+          transformer_engine::atomicMaxFloat(fp8_data.amax_ptr, fp8_data.max);
+        }
+        if (fp8_data.scale_inv_ptr != nullptr) {
+          *fp8_data.scale_inv_ptr = __frcp_rn(fp8_data.scale);
         }
       }
     }
