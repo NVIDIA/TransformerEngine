@@ -337,7 +337,7 @@ void CommOverlapCore::cublasmp_ag_gemm(const TensorWrapper &A, bool transa, cons
   int64_t n = n_local * _tp_size;
   // contracting dimension not distributed
   int64_t k = transa ? A.size(1) : A.size(0);
-  
+
   // col-major GEMM compute overlapped with all-gather on input B
   // (M/P, K) x [(K, N/P) -(AG)-> (K, N)] = (M/P, N)
   nvte_all_gather_gemm(_cublasmp_ctx, m, n, k, A.data(), B.data(), D.data(), bias.data(),
@@ -356,7 +356,7 @@ void CommOverlapCore::cublasmp_gemm_rs(const TensorWrapper &A, bool transa, cons
   // contracting dimension is distributed
   int64_t k_local = transa ? A.size(1) : A.size(0);
   int64_t k = k_local * _tp_size;
-  
+
   // col-major GEMM compute overlapped with reduce-scatter on the output
   // (M, K/P) x (K/P, N) = (M, N) -(RS)-> (M, N/P)
   nvte_gemm_reduce_scatter(_cublasmp_ctx, m, n, k, A.data(), B.data(), D.data(), bias.data(),
@@ -375,7 +375,7 @@ void CommOverlapCore::cublasmp_gemm_ar(const TensorWrapper &A, bool transa, cons
   // contracting dimension is distributed
   int64_t k_local = transa ? A.size(1) : A.size(0);
   int64_t k = k_local * _tp_size;
-  
+
   // col-major GEMM compute overlapped with all-reduce on the output
   // (M, K/P) x (K/P, N) = (M, N) -(AR)-> (M, N)
   nvte_gemm_all_reduce(_cublasmp_ctx, m, n, k, A.data(), B.data(), D.data(), bias.data(),

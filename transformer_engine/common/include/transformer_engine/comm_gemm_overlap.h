@@ -138,7 +138,7 @@ class CommOverlapCore {
 
   void cublasmp_gemm_ar(const TensorWrapper &A, bool transa, const TensorWrapper &B, bool transb,
                         TensorWrapper &D, TensorWrapper &bias, TensorWrapper &pre_gelu_out,
-                        bool grad, bool accumulate, cudaStream_t stream_main);                   
+                        bool grad, bool accumulate, cudaStream_t stream_main);
 
   virtual void bulk_overlap(const TensorWrapper &A, bool transa, const TensorWrapper &B,
                             bool transb, TensorWrapper &D, TensorWrapper &bias,

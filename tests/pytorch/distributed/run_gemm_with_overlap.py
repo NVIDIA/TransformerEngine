@@ -822,11 +822,7 @@ def _main(opts):
                     output = (
                         rs_out2.to(dtype=torch.float32)
                         if not opts.use_cublasmp
-                        else (
-                            all_outputs2[0].dequantize()
-                            if opts.fp8_output
-                            else all_outputs2[0]
-                        )
+                        else (all_outputs2[0].dequantize() if opts.fp8_output else all_outputs2[0])
                     )
                     test_out = output
                 else:
@@ -838,11 +834,7 @@ def _main(opts):
                 output = (
                     rs_out.to(dtype=torch.float32)
                     if not opts.use_cublasmp
-                    else (
-                        all_outputs[0].dequantize()
-                        if opts.fp8_output
-                        else all_outputs[0]
-                    )
+                    else (all_outputs[0].dequantize() if opts.fp8_output else all_outputs[0])
                 )
                 # Don't gather - keep local for comparison with local reduce-scattered reference
                 test_out = output
@@ -853,7 +845,7 @@ def _main(opts):
             nonzero_info = (
                 f"output nonzeros = {test_nonzeros} " + f"| reference count = {ref_nonzeros}"
             )
-            
+
             # Both AG and RS now compare local outputs across all ranks
             dist_print(nonzero_info, section=True, group=tp_group)
 
@@ -866,10 +858,15 @@ def _main(opts):
             dist_print(sizing_info, section=True, group=tp_group)
 
             # Both AG and RS now compare local outputs; print per-rank
-            sizing_info_g = f"input: {list(inp.shape)} | GEMM1 weights: {list(kernel_t.shape)[::-1]} "
+            sizing_info_g = (
+                f"input: {list(inp.shape)} | GEMM1 weights: {list(kernel_t.shape)[::-1]} "
+            )
             if ub_obj2 is not None:
                 sizing_info_g += f"| GEMM2 weights: {list(kernel2_t.shape)[::-1]} "
-            sizing_info_g += f"| output (local): {list(test_out.shape)} | reference (local): {list(ref_out.shape)}\n"
+            sizing_info_g += (
+                f"| output (local): {list(test_out.shape)} | reference (local):"
+                f" {list(ref_out.shape)}\n"
+            )
             dist_print(sizing_info_g, group=tp_group)
 
         torch.cuda.synchronize()
@@ -898,9 +895,7 @@ def _main(opts):
             if abs_err <= atol:
                 numerics_info += f"abs. error = {abs_err} (tol = {atol})"
 
-        dist_print(
-            numerics_info, section=True, info=True, error=numerics_failed, group=tp_group
-        )
+        dist_print(numerics_info, section=True, info=True, error=numerics_failed, group=tp_group)
 
     dist.barrier(tp_group)
     if LOCAL_RANK == 0:
