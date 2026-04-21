@@ -707,6 +707,13 @@ void quantize_gated(const Tensor &gated_input, const Tensor &grad, Tensor *outpu
   using namespace gated_kernel;
   checkCuDriverContext(stream);
 
+  const size_t rows = gated_input.flat_first_dim();
+  const size_t cols = gated_input.flat_last_dim() / 2;
+  const size_t output_cols = (IS_BWD ? 2 : 1) * cols;
+  if (rows == 0 || cols == 0) {
+    return;
+  }
+
   const bool USE_ROWWISE_SCALING = output->has_data();
   const bool USE_COLWISE_SCALING = output->has_columnwise_data();
   const bool with_gemm_swizzled_scales = output->with_gemm_swizzled_scales;
@@ -725,11 +732,9 @@ void quantize_gated(const Tensor &gated_input, const Tensor &grad, Tensor *outpu
     scaling_type = ScalingType::COLWISE;
   } else if (USE_ROWWISE_SCALING && USE_COLWISE_SCALING) {
     scaling_type = ScalingType::BIDIMENSIONAL;
+  } else {
+    NVTE_ERROR("Missing both row-wise and column-wise data.");
   }
-
-  const size_t rows = gated_input.flat_first_dim();
-  const size_t cols = gated_input.flat_last_dim() / 2;
-  const size_t output_cols = (IS_BWD ? 2 : 1) * cols;
 
   const size_t blocks_Y = DIVUP(rows, CHUNK_DIM_Y);
   const size_t blocks_X = DIVUP(cols, CHUNK_DIM_X);

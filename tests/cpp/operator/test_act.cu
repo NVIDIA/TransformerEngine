@@ -193,7 +193,8 @@ void performTestGLU(const size_t N, const size_t H) {
   auto err = cudaGetLastError();
   ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
 
-  if (otype == DType::kFloat8E4M3 || otype == DType::kFloat8E5M2) {
+  if ((otype == DType::kFloat8E4M3 || otype == DType::kFloat8E5M2)
+      && N * H > 0) {
     auto [atol, rtol] = getTolerances(DType::kFloat32);
     compareResults("amax", output.amax(), ref_amax, atol, rtol);
     if (output.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING) {
@@ -392,7 +393,9 @@ std::vector<std::pair<size_t, size_t>> act_test_cases = {{2048, 12288},
                                                          {65536, 128},
                                                          {256, 256},
                                                          {257, 259},
-                                                         {128, 128+1}};
+                                                         {128, 128+1},
+                                                         {0, 128},
+                                                         {128, 0}};
 
 std::string test_name_generator(
     const testing::TestParamInfo<ActTestSuite::ParamType>& info) {

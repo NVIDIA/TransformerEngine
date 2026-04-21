@@ -97,7 +97,7 @@ void performTest(const std::vector<size_t>& shape) {
                                  rows,
                                  cols);
 
-  if (isFp8Type(otype)) {
+  if (isFp8Type(otype) && input_size > 0) {
     auto [atol_amax, rtol_amax] = getTolerances(DType::kFloat32);
     compareResults("amax", output_c.amax(), ref_amax, atol_amax, rtol_amax);
     float ref_scale_inv = 1.f / output_c.scale();
@@ -118,6 +118,8 @@ std::vector<std::vector<size_t>> test_cases = {
   {217, 256},
   {1296},
   {5, 4, 3, 160},
+  {0, 128},
+  {128, 0},
 };
 
 }  // namespace
