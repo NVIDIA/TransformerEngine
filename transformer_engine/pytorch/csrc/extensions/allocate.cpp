@@ -19,8 +19,8 @@ std::vector<at::Tensor> bulk_allocate(const std::vector<std::vector<size_t>> &sh
   // Check shapes and dtypes
   const size_t n = shapes.size();
   NVTE_CHECK(dtypes.size() == n, "Got ", shapes.size(), " shapes and ", dtypes.size(), " dtypes.");
-  NVTE_CHECK(!alignments || alignments->size() == n,
-             "Got ", shapes.size(), " shapes and ", alignments->size(), " alignments.");
+  NVTE_CHECK(!alignments || alignments->size() == n, "Got ", shapes.size(), " shapes and ",
+             alignments->size(), " alignments.");
 
   // Return immediately if no tensors are needed
   if (n == 0) return {};
@@ -57,8 +57,8 @@ std::vector<at::Tensor> bulk_allocate(const std::vector<std::vector<size_t>> &sh
   auto base_buffer = std::make_shared<at::Tensor>(
       at::empty({static_cast<int64_t>(base_byte_size)}, at::device(*device).dtype(torch::kUInt8)));
   uint8_t *base_ptr = base_buffer->data_ptr<uint8_t>();
-  base_ptr = reinterpret_cast<uint8_t *>(roundup(reinterpret_cast<uintptr_t>(base_ptr),
-                                                 base_alignment));
+  base_ptr =
+      reinterpret_cast<uint8_t *>(roundup(reinterpret_cast<uintptr_t>(base_ptr), base_alignment));
 
   // Create views into base buffer
   std::vector<at::Tensor> out;

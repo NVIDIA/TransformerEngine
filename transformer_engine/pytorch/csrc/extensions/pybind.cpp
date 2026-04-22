@@ -408,9 +408,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // Tensor allocation
   m.def("bulk_allocate", &transformer_engine::pytorch::bulk_allocate,
         "Allocate tensors backed by a single contiguous buffer", py::arg("shapes"),
-        py::arg("dtypes"),
-        py::arg("device") = py::none(),
-        py::arg("alignments") = py::none(),
+        py::arg("dtypes"), py::arg("device") = py::none(), py::arg("alignments") = py::none(),
         py::call_guard<py::gil_scoped_release>());
 
   // attention kernels
