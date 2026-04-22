@@ -198,6 +198,10 @@ def reset_rng_states() -> None:
 
 
 def compare_and_assert(a, b, name_a, name_b, atol, rtol, rmse_tol, is_fp8):
+    if a is None and b is None:
+        logging.debug(f"{name_a} vs {name_b}: both are None")
+        return
+
     if not is_fp8:
         torch.testing.assert_close(a, b, atol=atol, rtol=rtol)
         return

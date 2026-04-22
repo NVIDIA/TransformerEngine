@@ -70,16 +70,14 @@ def _build_model(
     """Build a Sequential of TransformerLayers, optionally with FP8 init.
 
     When fp8_init=True and use_meta_device=True (the default), the model is
-    created on the meta device to avoid FSDP2 incompatibility with
-    QuantizedTensor wrapper subclasses (e.g. MXFP8Tensor) whose storage is
-    inaccessible via data_ptr().  Parameters are materialized after FSDP2
-    sharding via reset_parameters() in _shard_model().
+    created on the meta device so parameters are materialized after FSDP2
+    sharding via reset_parameters() in _shard_model().  This ensures the
+    sharded parameter format is compatible with the FSDP2 all-gather hooks.
 
     When use_meta_device=False, the model is created directly on CUDA.
-    This is the legacy path that does NOT work for block-scaling quantized
-    tensors (MXFP8, Float8Blockwise, NVFP4) because FSDP2's
-    reset_sharded_param() crashes on wrapper subclass tensors with
-    data_ptr() == 0.
+    This only works for per-tensor FP8 (DelayedScaling, Float8CurrentScaling).
+    Block-scaling types (MXFP8, Float8Blockwise, NVFP4) fail because their
+    FSDP2 all-gather hooks do not support CUDA-initialized parameters.
     """
     if fp8_init:
         ctx = te.quantized_model_init(
@@ -160,12 +158,6 @@ def test_fused_adam_fp8_master_weights(recipe_name):
     """
     recipe = get_recipe_from_string(recipe_name)
 
-    if recipe_name == "NVFP4BlockScaling":
-        pytest.xfail(
-            f"{recipe_name}: quantized_model_init and FSDP2 is not currently supported, since the "
-            "block tensor is dequantized before we flatten it for FSDP2."
-        )
-
     world_size, device = _get_dist_info()
 
     model = _build_model(fp8_init=True, recipe=recipe)
@@ -226,18 +218,20 @@ def test_fused_adam_fp8_master_weights_no_meta(recipe_name):
     """FusedAdam with master_weights + FSDP2 + quantized_model_init WITHOUT meta device.
 
     This is the legacy path that creates quantized params directly on CUDA.
-    FSDP2's reset_sharded_param() crashes on block-scaling QuantizedTensor
-    wrapper subclasses (data_ptr() == 0). This test documents that failure.
+    FSDP2's forward-time all-gather hooks for block-scaling QuantizedTensor
+    subclasses fail when parameters are initialized directly on CUDA rather
+    than on the meta device. NVFP4Tensor does not implement the FSDP all-gather
+    hooks at all.
 
-    For per-tensor FP8 (DelayedScaling, Float8CurrentScaling) this works
-    because Float8Tensor's storage is accessible via data_ptr().
+    For per-tensor FP8 (DelayedScaling, Float8CurrentScaling) the all-gather
+    hooks handle CUDA-initialized Float8Tensor parameters correctly.
     """
     recipe = get_recipe_from_string(recipe_name)
 
     if recipe_name in ("MXFP8BlockScaling", "Float8BlockScaling", "NVFP4BlockScaling"):
         pytest.xfail(
-            f"{recipe_name}: FSDP2 without meta-device init crashes on block-scaling "
-            "QuantizedTensor wrapper subclasses (data_ptr() == 0). "
+            f"{recipe_name}: FSDP2 all-gather hooks for block-scaling QuantizedTensor "
+            "subclasses fail when parameters are initialized on CUDA. "
             "Use device='meta' + reset_parameters() after sharding."
         )
 
