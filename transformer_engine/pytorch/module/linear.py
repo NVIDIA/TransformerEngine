@@ -137,7 +137,7 @@ def _linear_forward_impl(
         backward_override,
         custom,
         backward_input_needs_gather,
-        _is_fsdp2,
+        is_fsdp2,
     ) = non_tensor_args
     if backward_override == "high_precision":
         save_original_input = True
