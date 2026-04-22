@@ -243,7 +243,51 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
         return HybridQuantizedTensorStorage.dequantize(self, dtype=dtype)
 
     def detach(self) -> HybridQuantizedTensor:
-        return HybridQuantizedTensor.make_like(self)
+        """Return a new HybridQuantizedTensor with cloned sub-storage wrappers.
+
+        Each sub-storage is re-wrapped via its own ``make_like`` so the
+        new hybrid tensor has independent sub-storage objects that share
+        the *underlying* buffer tensors with ``self``. This is required for
+        the cpu_offload_v2 pattern at ``cpu_offload.py:378-382``::
+
+            tensor_copy = tensor.detach()
+            saved_tensors, _ = tensor_copy.prepare_for_saving()  # nulls fields
+
+        If ``detach()`` merely shared sub-storage objects, the
+        ``prepare_for_saving`` call above would null out fields on the
+        original ``tensor`` too (since both hybrids would point at the same
+        sub-storage Python objects), and subsequent operations — even a
+        bare ``.device`` read during ``_check_if_offload`` for a follow-up
+        ``push_tensor`` on the same original — would crash with
+        ``<native> has no data!``.
+        """
+        row = None
+        if self._rowwise_storage is not None:
+            row_cls = type(self._rowwise_storage)
+            if hasattr(row_cls, "make_like"):
+                row = row_cls.make_like(self._rowwise_storage)
+            else:
+                # Storage-only sub-storages (HybridQuantizer.internal=True
+                # path) don't have make_like; the cpu_offload_v2 path does
+                # not hit this branch, but keep the behaviour safe by
+                # sharing the reference as before.
+                row = self._rowwise_storage
+        col = None
+        if self._columnwise_storage is not None:
+            col_cls = type(self._columnwise_storage)
+            if hasattr(col_cls, "make_like"):
+                col = col_cls.make_like(self._columnwise_storage)
+            else:
+                col = self._columnwise_storage
+        return HybridQuantizedTensor(
+            shape=self.shape,
+            dtype=self.dtype,
+            rowwise_storage=row,
+            columnwise_storage=col,
+            rowwise_quantizer=self._rowwise_quantizer,
+            columnwise_quantizer=self._columnwise_quantizer,
+            quantizer=self._quantizer,
+        )
 
     def get_metadata(self) -> Dict[str, Any]:
         return HybridQuantizedTensorStorage.get_metadata(self)

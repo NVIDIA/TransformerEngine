@@ -71,6 +71,21 @@ class HybridQuantizedTensorStorage(QuantizedTensorStorage):
         if columnwise_usage is not None and not columnwise_usage:
             self._columnwise_storage = None
 
+    def clear(self):
+        """Deallocate both sub-storages' buffers.
+
+        Delegates to each sub-storage's own ``clear()``; no-op when a
+        sub-storage is ``None`` (columnwise-only or rowwise-only hybrid).
+
+        Used by ``cpu_offload_v1`` after the offloader has taken its own
+        reference to the extracted buffers, to release the GPU-resident
+        originals.
+        """
+        if self._rowwise_storage is not None:
+            self._rowwise_storage.clear()
+        if self._columnwise_storage is not None:
+            self._columnwise_storage.clear()
+
     def get_usages(self) -> Dict[str, bool]:
         return {
             "rowwise": self._rowwise_storage is not None,

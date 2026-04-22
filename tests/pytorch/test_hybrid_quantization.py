@@ -262,6 +262,176 @@ class TestHybridUpdateUsage:
         assert "columnwise=None" in r
 
 
+requires_mxfp8 = pytest.mark.skipif(
+    not mxfp8_available,
+    reason=f"MXFP8: {reason_for_no_mxfp8}",
+)
+
+
+@requires_fp8_and_nvfp4
+class TestHybridClear:
+    """Test HybridQuantizedTensorStorage.clear() — buffer deallocation.
+
+    ``clear()`` is invoked by cpu_offload_v1 after the offloader has taken
+    its own reference to the extracted buffers, to free the GPU-resident
+    originals. HybridQuantizedTensorStorage delegates to each sub-storage's
+    own clear(), which replaces primary data buffers with empty tensors.
+    """
+
+    @pytest.fixture
+    def input_tensor(self):
+        torch.manual_seed(42)
+        return torch.randn(128, 256, dtype=torch.bfloat16, device="cuda")
+
+    @staticmethod
+    def _primary_data_numels(sub_storage):
+        """Collect numel() of primary data buffers on a sub-storage.
+
+        After ``clear()`` every entry should be 0 (native sub-storages set
+        ``t.data = _empty_tensor()`` on the primary buffers).
+        """
+        if sub_storage is None:
+            return []
+        data = sub_storage.get_data_tensors()
+        if not isinstance(data, tuple):
+            data = (data,)
+        return [t.numel() for t in data if t is not None]
+
+    def test_clear_delegates_to_both_sub_storages(self, input_tensor):
+        hq = _make_hybrid_quantizer_fp8_row_fp4_col()
+        ht = hq.quantize(input_tensor)
+
+        row_before = self._primary_data_numels(ht.rowwise_sub_storage)
+        col_before = self._primary_data_numels(ht.columnwise_sub_storage)
+        assert row_before and all(n > 0 for n in row_before)
+        assert col_before and all(n > 0 for n in col_before)
+
+        ht.clear()
+
+        row_after = self._primary_data_numels(ht.rowwise_sub_storage)
+        col_after = self._primary_data_numels(ht.columnwise_sub_storage)
+        assert all(n == 0 for n in row_after)
+        assert all(n == 0 for n in col_after)
+
+    @requires_mxfp8
+    def test_clear_delegates_mxfp8_nvfp4(self, input_tensor):
+        """Per-block sub-storage path (MXFP8 rowwise + NVFP4 columnwise)."""
+        hq = HybridQuantizer(
+            rowwise_quantizer=_make_mxfp8_quantizer(),
+            columnwise_quantizer=_make_nvfp4_quantizer(),
+        )
+        ht = hq.quantize(input_tensor)
+        ht.clear()
+        for sub in (ht.rowwise_sub_storage, ht.columnwise_sub_storage):
+            for n in self._primary_data_numels(sub):
+                assert n == 0
+
+    def test_clear_with_rowwise_only(self, input_tensor):
+        """columnwise sub-storage is None — clear() must not crash."""
+        hq = _make_hybrid_quantizer_fp8_row_fp4_col()
+        ht = hq.quantize(input_tensor)
+        ht.update_usage(columnwise_usage=False)
+        assert ht.columnwise_sub_storage is None
+
+        ht.clear()
+
+        assert all(n == 0 for n in self._primary_data_numels(ht.rowwise_sub_storage))
+
+    def test_clear_with_columnwise_only(self, input_tensor):
+        """rowwise sub-storage is None — clear() must not crash."""
+        hq = _make_hybrid_quantizer_fp8_row_fp4_col()
+        ht = hq.quantize(input_tensor)
+        ht.update_usage(rowwise_usage=False)
+        assert ht.rowwise_sub_storage is None
+
+        ht.clear()
+
+        assert all(n == 0 for n in self._primary_data_numels(ht.columnwise_sub_storage))
+
+    def test_clear_with_both_sub_storages_dropped(self, input_tensor):
+        """Both sub-storages are None — clear() must not crash."""
+        hq = _make_hybrid_quantizer_fp8_row_fp4_col()
+        ht = hq.quantize(input_tensor)
+        ht.update_usage(rowwise_usage=False, columnwise_usage=False)
+        assert ht.rowwise_sub_storage is None
+        assert ht.columnwise_sub_storage is None
+
+        ht.clear()  # must not raise
+
+    def test_clear_is_idempotent(self, input_tensor):
+        """Calling clear() twice must not raise and leaves buffers empty."""
+        hq = _make_hybrid_quantizer_fp8_row_fp4_col()
+        ht = hq.quantize(input_tensor)
+        ht.clear()
+        ht.clear()
+        for sub in (ht.rowwise_sub_storage, ht.columnwise_sub_storage):
+            for n in self._primary_data_numels(sub):
+                assert n == 0
+
+
+@requires_fp8_and_nvfp4
+class TestHybridDetachIsolation:
+    """``HybridQuantizedTensor.detach()`` must produce a hybrid whose
+    sub-storage wrappers are NOT shared with ``self`` — so that
+    ``detached.prepare_for_saving()`` does not null out fields on the
+    original.
+
+    This is the property cpu_offload_v2 relies on at
+    ``cpu_offload.py:378-382``:
+
+        tensor_copy = tensor.detach()
+        saved_tensors, _ = tensor_copy.prepare_for_saving()
+    """
+
+    @pytest.fixture
+    def input_tensor(self):
+        torch.manual_seed(42)
+        return torch.randn(128, 256, dtype=torch.bfloat16, device="cuda")
+
+    def test_detach_produces_distinct_sub_storage_wrappers(self, input_tensor):
+        hq = _make_hybrid_quantizer_fp8_row_fp4_col()
+        ht = hq.quantize(input_tensor)
+        detached = ht.detach()
+
+        assert detached is not ht
+        assert detached._rowwise_storage is not ht._rowwise_storage
+        assert detached._columnwise_storage is not ht._columnwise_storage
+
+    def test_detach_prepare_for_saving_does_not_affect_original(self, input_tensor):
+        """prepare_for_saving on the detach() copy must not null the original.
+
+        This is the specific invariant the cpu_offload_v2 push/reload cycle
+        depends on. Without it, a second push on the same tensor — or even
+        a bare ``.device`` read during offload eligibility checks — hits
+        ``<native sub-storage> has no data!``.
+        """
+        hq = _make_hybrid_quantizer_fp8_row_fp4_col()
+        ht = hq.quantize(input_tensor)
+
+        detached = ht.detach()
+        _ = detached.prepare_for_saving()
+
+        # Original must still be usable: dequantize, .device, repeated clone
+        _ = ht.dequantize()
+        _ = ht.device
+
+    def test_detach_shares_underlying_buffers(self, input_tensor):
+        """Buffer tensors are shared (no GPU allocation) — only wrappers differ."""
+        hq = _make_hybrid_quantizer_fp8_row_fp4_col()
+        ht = hq.quantize(input_tensor)
+        detached = ht.detach()
+
+        orig_row_buffers = ht._rowwise_storage.get_data_tensors()
+        new_row_buffers = detached._rowwise_storage.get_data_tensors()
+        if not isinstance(orig_row_buffers, tuple):
+            orig_row_buffers = (orig_row_buffers,)
+            new_row_buffers = (new_row_buffers,)
+        for a, b in zip(orig_row_buffers, new_row_buffers):
+            if a is None and b is None:
+                continue
+            assert a is b, "detach() must share buffer tensors, not copy them"
+
+
 @requires_fp8_and_nvfp4
 class TestHybridSaveRestore:
     """Test prepare_for_saving / restore_from_saved round-trip."""
@@ -1306,6 +1476,169 @@ class TestHybridCrossFormatParametrized:
             assert not torch.isnan(
                 p.grad
             ).any(), f"Gradient for '{name}' NaN ({row_name} row × {col_name} col)"
+
+
+# ---------------------------------------------------------------------------
+# CPU offload push/pop protocol (v2 OffloadableLayerState path)
+# ---------------------------------------------------------------------------
+
+
+class TestHybridCpuOffloadPushPop:
+    """Exercise the cpu_offload_v2 push/pop protocol on HybridQuantizedTensor.
+
+    Uses :class:`OffloadableLayerState` directly — same pattern as
+    ``test_cpu_offloading.py::TestsOffloadableLayerState::test_general``.
+    Each test runs the full cycle:
+
+        push → start_offload → release_activation_forward_gpu_memory
+        → start_reload → pop → release_all_memory
+
+    The push path decomposes the hybrid via ``prepare_for_saving``
+    (HybridQuantizedTensorStorage), recursively pushes each sub-storage
+    buffer, then reconstructs on pop via ``restore_from_saved``. Sub-buffers
+    below the 256K-element offload threshold (e.g. small block scales) are
+    returned unchanged; large data buffers round-trip through CPU.
+    """
+
+    # Hybrid tensor shape — each sub-storage primary buffer must exceed the
+    # cpu_offload _check_if_offload threshold (256K elements) so the path is
+    # actually exercised end-to-end.
+    _SHAPE = (1024, 1024)
+
+    def _run_roundtrip(self, hybrid_tensor):
+        """Push → offload → release → reload → pop one hybrid tensor.
+
+        Returns the reloaded tensor (a new HybridQuantizedTensor instance
+        reconstructed from the gathered-back buffers).
+        """
+        from transformer_engine.pytorch.cpu_offload import OffloadableLayerState
+
+        stream = torch.cuda.Stream()
+        state = OffloadableLayerState(offload_stream=stream)
+
+        tid = state.push_tensor(hybrid_tensor)
+        state.start_offload()
+        state.release_activation_forward_gpu_memory()
+        state.start_reload()
+        reloaded = state.pop_tensor(tid)
+        torch.cuda.synchronize()
+
+        try:
+            return reloaded
+        finally:
+            state.release_all_memory()
+
+    @pytest.mark.parametrize("row_name,col_name", _build_cross_format_params())
+    def test_push_pop_roundtrip(self, row_name, col_name):
+        """Dequantize-equivalence round-trip across the full 14-pair matrix."""
+        torch.manual_seed(42)
+        inp = torch.randn(*self._SHAPE, dtype=torch.bfloat16, device="cuda")
+
+        row_cfg = _QUANTIZER_CONFIGS[row_name]
+        col_cfg = _QUANTIZER_CONFIGS[col_name]
+        hq = HybridQuantizer(
+            rowwise_quantizer=row_cfg[0](),
+            columnwise_quantizer=col_cfg[0](),
+        )
+        hybrid = hq.quantize(inp)
+        expected = hybrid.dequantize()
+
+        reloaded = self._run_roundtrip(hybrid)
+
+        assert isinstance(reloaded, HybridQuantizedTensor)
+        torch.testing.assert_close(reloaded.dequantize(), expected)
+
+    @requires_fp8_and_nvfp4
+    def test_push_pop_preserves_sub_storage_types(self):
+        """Reconstructed hybrid preserves each sub-storage's concrete type."""
+        torch.manual_seed(7)
+        inp = torch.randn(*self._SHAPE, dtype=torch.bfloat16, device="cuda")
+
+        hq = _make_hybrid_quantizer_fp8_row_fp4_col()
+        hybrid = hq.quantize(inp)
+        row_type = type(hybrid.rowwise_sub_storage)
+        col_type = type(hybrid.columnwise_sub_storage)
+
+        reloaded = self._run_roundtrip(hybrid)
+
+        assert isinstance(reloaded.rowwise_sub_storage, row_type)
+        assert isinstance(reloaded.columnwise_sub_storage, col_type)
+
+    @requires_fp8_and_nvfp4
+    def test_push_pop_with_rowwise_only(self):
+        """Columnwise sub-storage dropped pre-push — roundtrip still works."""
+        torch.manual_seed(11)
+        inp = torch.randn(*self._SHAPE, dtype=torch.bfloat16, device="cuda")
+
+        hq = _make_hybrid_quantizer_fp8_row_fp4_col()
+        hybrid = hq.quantize(inp)
+        hybrid.update_usage(columnwise_usage=False)
+        assert hybrid.columnwise_sub_storage is None
+        expected = hybrid.dequantize()
+
+        reloaded = self._run_roundtrip(hybrid)
+
+        assert isinstance(reloaded, HybridQuantizedTensor)
+        assert reloaded.columnwise_sub_storage is None
+        assert reloaded.rowwise_sub_storage is not None
+        torch.testing.assert_close(reloaded.dequantize(), expected)
+
+    @requires_fp8_and_nvfp4
+    def test_push_pop_with_columnwise_only(self):
+        """Rowwise sub-storage dropped pre-push — roundtrip still works.
+
+        Uses the reversed hybrid (NVFP4 rowwise + FP8 columnwise) so that
+        ``hybrid.dequantize()`` can fall through to the columnwise sub-storage.
+        ``HybridQuantizedTensorStorage.dequantize`` prefers rowwise and only
+        falls back to columnwise when rowwise is ``None``; NVFP4 does not yet
+        support columnwise-only dequantize, but Float8 does.
+        """
+        torch.manual_seed(13)
+        inp = torch.randn(*self._SHAPE, dtype=torch.bfloat16, device="cuda")
+
+        hq = _make_hybrid_quantizer_fp4_row_fp8_col()
+        hybrid = hq.quantize(inp)
+        hybrid.update_usage(rowwise_usage=False)
+        assert hybrid.rowwise_sub_storage is None
+        expected = hybrid.dequantize()
+
+        reloaded = self._run_roundtrip(hybrid)
+
+        assert isinstance(reloaded, HybridQuantizedTensor)
+        assert reloaded.rowwise_sub_storage is None
+        assert reloaded.columnwise_sub_storage is not None
+        torch.testing.assert_close(reloaded.dequantize(), expected)
+
+    @requires_fp8_and_nvfp4
+    def test_push_pop_roundtrip_does_not_leak_intermediate_buffers(self):
+        """After release_all_memory the offloader holds no hybrid buffers.
+
+        Sanity check that the v2 cycle completes cleanly — no dangling CPU
+        pinned buffers left behind on a one-shot push/pop.
+        """
+        from transformer_engine.pytorch.cpu_offload import OffloadableLayerState
+
+        torch.manual_seed(17)
+        inp = torch.randn(*self._SHAPE, dtype=torch.bfloat16, device="cuda")
+
+        hq = _make_hybrid_quantizer_fp8_row_fp4_col()
+        hybrid = hq.quantize(inp)
+
+        stream = torch.cuda.Stream()
+        state = OffloadableLayerState(offload_stream=stream)
+
+        tid = state.push_tensor(hybrid)
+        state.start_offload()
+        state.release_activation_forward_gpu_memory()
+        state.start_reload()
+        _ = state.pop_tensor(tid)
+        torch.cuda.synchronize()
+        state.release_all_memory()
+
+        assert len(state.fwd_gpu_tensor_group.tensor_list) == 0
+        assert len(state.cpu_tensor_group.tensor_list) == 0
+        assert len(state.bwd_gpu_tensor_group.tensor_list) == 0
+        assert state.state == "not_offloaded"
 
 
 # ---------------------------------------------------------------------------

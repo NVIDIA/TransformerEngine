@@ -11,6 +11,7 @@ import pytest
 import torch
 
 import transformer_engine.pytorch as te
+import transformer_engine_torch as tex
 from transformer_engine.common import recipe
 from transformer_engine.pytorch.attention.dot_product_attention import _attention_backends
 from transformer_engine.pytorch.utils import is_non_tn_fp8_gemm_supported
@@ -19,10 +20,53 @@ from utils import ModelConfig, get_available_attention_backends
 # Check supported quantization schemes
 fp8_available = te.is_fp8_available()
 mxfp8_available = te.is_mxfp8_available()
+nvfp4_available = te.is_nvfp4_available()
+
+
+def _hybrid_fp8_mxfp8_qfactory(role):
+    """Hybrid CustomRecipe factory: FP8 current-scaling rowwise + MXFP8 columnwise.
+
+    Forward roles get a HybridQuantizer; backward/grad roles get a plain
+    MXFP8 quantizer so dgrad/wgrad GEMMs see a single scaling mode per
+    operand pair. Catch-all returns plain FP8 for non-``linear_*`` roles
+    (layernorm_linear, layernorm_mlp, multihead_attention, transformer_layer).
+    """
+    if role in ("linear_input", "linear_weight", "linear_output"):
+        return te.HybridQuantizer(
+            rowwise_quantizer=te.Float8CurrentScalingQuantizer(
+                tex.DType.kFloat8E4M3, device="cuda"
+            ),
+            columnwise_quantizer=te.MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
+        )
+    if role in ("linear_grad_output", "linear_grad_input"):
+        return te.MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E5M2)
+    return te.Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
+
+
+def _hybrid_mxfp8_nvfp4_qfactory(role):
+    """Hybrid CustomRecipe factory: MXFP8 rowwise + NVFP4 columnwise.
+
+    Mirrors the ``mxfp8_fwd_nvfp4_bwd_quantizer_factory`` headline recipe
+    from ``custom_recipes/quantization_nvfp4.py``. grad_output uses plain
+    NVFP4 (both directions) so wgrad's columnwise operand matches.
+    """
+    if role in ("linear_input", "linear_weight", "linear_output"):
+        return te.HybridQuantizer(
+            rowwise_quantizer=te.MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
+            columnwise_quantizer=te.NVFP4Quantizer(fp4_dtype=tex.DType.kFloat4E2M1),
+        )
+    if role in ("linear_grad_output", "linear_grad_input"):
+        return te.NVFP4Quantizer(fp4_dtype=tex.DType.kFloat4E2M1)
+    return te.MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+
 
 quantization_recipes: Optional[recipe.Recipe] = [None]
 if fp8_available:
     quantization_recipes.extend((recipe.Float8CurrentScaling(), recipe.DelayedScaling()))
+if fp8_available and mxfp8_available:
+    quantization_recipes.append(recipe.CustomRecipe(qfactory=_hybrid_fp8_mxfp8_qfactory))
+if mxfp8_available and nvfp4_available:
+    quantization_recipes.append(recipe.CustomRecipe(qfactory=_hybrid_mxfp8_nvfp4_qfactory))
 
 model_config = {
     "small": ModelConfig(8, 512, 8, 64, num_layers=5, eps=0.1),
@@ -99,6 +143,15 @@ def _estimate_cached_weight_size(
     # The weight params are cached directly for unquantized compute
     if quantization_recipe is None:
         return 0
+
+    # Hybrid (CustomRecipe) caches two sub-storages per weight with
+    # potentially different formats. Returning ``None`` signals the caller
+    # to skip the exact memory-accounting assertion — the ``memory_with_offload
+    # < memory_without_offload`` check still applies. Deriving an analytical
+    # estimate here is blocked on the FSDP2-style packing optimization still
+    # being a TODO in hybrid_quantization_design.md.
+    if quantization_recipe.custom():
+        return None
 
     # Count number of weight param elements
     param_elements = 0
@@ -184,6 +237,21 @@ def _measure_cached_memory(
 def test_cpu_offload(quantization_recipe: Optional[recipe.Recipe], model_name: str) -> None:
     """Check that CPU offloading runs and has expected memory usage."""
 
+    # Skip hybrid (CustomRecipe) on module types whose integration with hybrid
+    # is not yet complete (preexisting, independent of CPU offload):
+    # - layernorm_mlp_ops: the ops-based LayerNorm passes the quantizer
+    #   directly to the fused C++ kernel which does not recognize
+    #   HybridQuantizer (cf. design doc; the regular layernorm_mlp.py has
+    #   an unfused fallback but the ops path does not yet).
+    if (
+        model_name in ("layernorm_mlp_ops",)
+        and quantization_recipe is not None
+        and quantization_recipe.custom()
+    ):
+        pytest.skip(
+            f"Hybrid CustomRecipe + {model_name} integration is not yet complete"
+        )
+
     # Construct model
     modules_list = [model_types[model_name]() for _ in range(NUM_LAYERS)]
     if model_name in ["multihead_attention", "transformer_layer"]:
@@ -212,4 +280,8 @@ def test_cpu_offload(quantization_recipe: Optional[recipe.Recipe], model_name: s
         modules_list,
         quantization_recipe,
     )
-    assert abs(memory_with_offload - memory_from_cached_weights) < EPSILON
+    # ``_estimate_cached_weight_size`` returns ``None`` for recipes whose
+    # analytical cached-weight size is not worked out (CustomRecipe / hybrid);
+    # in that case the memory-savings assertion above is the only check.
+    if memory_from_cached_weights is not None:
+        assert abs(memory_with_offload - memory_from_cached_weights) < EPSILON
