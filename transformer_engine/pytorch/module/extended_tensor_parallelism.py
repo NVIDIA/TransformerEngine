@@ -1116,8 +1116,16 @@ class ETPShardedParam(torch.nn.Parameter):
         poolable = self.chain_id == ETPChain.UNGRAPHED.value
 
         if ETP_CONFIG.weight_prefetch and self.prev_w is not None:
-            # Async reduce-scatter (not last weight — deferred finish)
-            _, rs_handle = self._reduce_scatter(wgrads, async_op=True, nvtx_label=nvtx_label)
+            # Async reduce-scatter (not last weight — deferred finish).  Issue on rs_stream to
+            # match wait-site (issue-site invariant; see _wait_param_gather).  wgrad is produced
+            # on outer stream by bwd GEMM, so sync outer → rs_stream first.
+            outer_stream = torch.cuda.current_stream()
+            rs_stream = get_rs_stream(self.chain_id, self.group)
+            outer_sync_event = torch.cuda.Event()
+            outer_sync_event.record(outer_stream)
+            rs_stream.wait_event(outer_sync_event)
+            with torch.cuda.stream(rs_stream):
+                _, rs_handle = self._reduce_scatter(wgrads, async_op=True, nvtx_label=nvtx_label)
             self._wgrad_rs_handle = ETPShardHandle(rs_handle, weights, reduce_scatter=True)
             # Stash wgrad input buffers — cannot recycle yet because the async RS
             # kernel is still reading them on rs_stream.
