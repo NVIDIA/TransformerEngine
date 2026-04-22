@@ -152,32 +152,36 @@ void nvte_quantize_nvfp4_pertoken(const NVTETensor input, NVTETensor output_data
                                   NVTETensor output_scales, NVTETensor output_per_token_scales,
                                   size_t num_rows, size_t num_cols, cudaStream_t stream) {
   NVTE_API_CALL(nvte_quantize_nvfp4_pertoken);
-  using namespace transformer_engine;
-
-  const auto &input_tensor = *reinterpret_cast<const Tensor *>(input);
-  auto *data_tensor = reinterpret_cast<Tensor *>(output_data);
-  auto *scales_tensor = reinterpret_cast<Tensor *>(output_scales);
-  auto *pertoken_tensor = reinterpret_cast<Tensor *>(output_per_token_scales);
-
-  const auto itype = input_tensor.data.dtype;
 
   NVTE_CHECK(num_cols % 16 == 0,
              "num_cols must be a multiple of 16 for per-token NVFP4 quantization");
 
-  if (itype == DType::kBFloat16) {
+  const void *input_ptr = nvte_tensor_data(input);
+  void *data_ptr = nvte_tensor_data(output_data);
+  void *scales_ptr = nvte_tensor_data(output_scales);
+  void *pertoken_ptr = nvte_tensor_data(output_per_token_scales);
+  const NVTEDType itype = nvte_tensor_type(input);
+
+  using namespace transformer_engine;
+
+  if (itype == NVTEDType::kNVTEBFloat16) {
     dispatch::nvfp4::quantize_pertoken_kernel::launch_quantize_pertoken_nvfp4<__nv_bfloat16>(
-        num_rows, num_cols, reinterpret_cast<const __nv_bfloat16 *>(input_tensor.data.dptr),
-        nullptr,  // row_offsets
-        reinterpret_cast<uint8_t *>(data_tensor->data.dptr),
-        reinterpret_cast<fp8e4m3 *>(scales_tensor->data.dptr),
-        reinterpret_cast<float *>(pertoken_tensor->data.dptr), stream);
-  } else if (itype == DType::kFloat16) {
+        num_rows, num_cols,
+        reinterpret_cast<const __nv_bfloat16 *>(input_ptr),
+        nullptr,
+        reinterpret_cast<uint8_t *>(data_ptr),
+        reinterpret_cast<fp8e4m3 *>(scales_ptr),
+        reinterpret_cast<float *>(pertoken_ptr),
+        stream);
+  } else if (itype == NVTEDType::kNVTEFloat16) {
     dispatch::nvfp4::quantize_pertoken_kernel::launch_quantize_pertoken_nvfp4<half>(
-        num_rows, num_cols, reinterpret_cast<const half *>(input_tensor.data.dptr),
-        nullptr,  // row_offsets
-        reinterpret_cast<uint8_t *>(data_tensor->data.dptr),
-        reinterpret_cast<fp8e4m3 *>(scales_tensor->data.dptr),
-        reinterpret_cast<float *>(pertoken_tensor->data.dptr), stream);
+        num_rows, num_cols,
+        reinterpret_cast<const half *>(input_ptr),
+        nullptr,
+        reinterpret_cast<uint8_t *>(data_ptr),
+        reinterpret_cast<fp8e4m3 *>(scales_ptr),
+        reinterpret_cast<float *>(pertoken_ptr),
+        stream);
   } else {
     NVTE_ERROR(
         "Unsupported input dtype for per-token NVFP4 quantization. "

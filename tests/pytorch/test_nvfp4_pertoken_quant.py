@@ -53,12 +53,12 @@ def nvfp4_pertoken_quantize_ref(input_tensor: torch.Tensor):
     # Per-row amax
     row_amax = input_f32.abs().amax(dim=1)  # (num_rows,)
 
-    # Per-token global scale = row_amax / (fp8_max * fp4_max)
+    # S_enc = fp8_max * fp4_max / row_amax
+    # global_scale = 1 / S_enc = row_amax / (fp8_max * fp4_max)
+    # When amax=0, S_enc=1.0 (fallback), so global_scale=1.0
     per_token_scales = row_amax / (FP8_E4M3_MAX * FP4_MAX)
-
-    # Handle zero rows
     per_token_scales = torch.where(
-        row_amax == 0, torch.zeros_like(per_token_scales), per_token_scales
+        row_amax == 0, torch.ones_like(per_token_scales), per_token_scales
     )
 
     return per_token_scales
@@ -129,11 +129,15 @@ class TestQuantizeNvfp4Pertoken:
 
     @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
     def test_zero_input(self, dtype):
-        """Zero input should produce zero per-token scales."""
+        """Zero input: S_enc = 1.0 (fallback), so global_scale = 1/1 = 1.0."""
         x = torch.zeros(16, 256, dtype=dtype, device="cuda")
         _, _, per_token_scales = tex.quantize_nvfp4_pertoken(x)
 
-        assert (per_token_scales == 0).all(), "Zero input should give zero per-token scales"
+        # When amax=0, compute_global_encode_scaling_factor_FP4 returns 1.0
+        # so global_scale = 1/S_enc = 1/1 = 1.0
+        assert (per_token_scales == 1.0).all(), (
+            f"Zero input should give global_scale=1.0 (S_enc fallback), got {per_token_scales}"
+        )
 
     @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
     def test_uniform_rows_same_scale(self, dtype):
@@ -251,8 +255,8 @@ class TestPertokenScaleReference:
         torch.testing.assert_close(scales[1], torch.tensor(10.0 / (FP8_E4M3_MAX * FP4_MAX)))
 
     def test_reference_zero_row(self):
-        """Zero row should produce zero scale."""
+        """Zero row: S_enc=1.0 fallback, so global_scale=1.0."""
         x = torch.zeros(2, 16, dtype=torch.float32)
         x[0] = 5.0
         scales = nvfp4_pertoken_quantize_ref(x)
-        assert scales[1] == 0.0
+        assert scales[1] == 1.0
