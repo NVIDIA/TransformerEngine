@@ -308,14 +308,14 @@ class _LayerNormLinear(torch.autograd.Function):
             # for debug mode we create quantizer every iteration, thus we need to set the quantizer states
             if is_weight_param_quantized and not debug:
                 weight_quantizer = weight._quantizer
-
-            # FSDP2: Skip columnwise/transpose creation during forward
-            # to avoid accumulating caches across layers. Backward's
-            # FSDP2 all-gather will recreate them. (Issue #2681)
-            weight_quantizer.set_usage(
-                rowwise=True,
-                columnwise=is_grad_enabled and not is_fsdp2 and backward_override is None,
-            )
+            elif weight_quantizer is not None:
+                # FSDP2: Skip columnwise/transpose creation during forward
+                # to avoid accumulating caches across layers. Backward's
+                # FSDP2 all-gather will recreate them. (Issue #2681)
+                weight_quantizer.set_usage(
+                    rowwise=True,
+                    columnwise=is_grad_enabled and not is_fsdp2 and backward_override is None,
+                )
 
             # Get quantized weight
             update_ws = is_first_microbatch is None or is_first_microbatch

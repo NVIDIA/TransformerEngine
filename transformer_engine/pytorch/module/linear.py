@@ -106,55 +106,103 @@ def _linear_forward_impl(
     three are None when gradients are disabled.
     """
 
-    @staticmethod
-    def forward(
-        ctx,
-        weight: torch.Tensor,
-        weight_workspace: Optional[torch.Tensor],
-        inp: torch.Tensor,
-        bias: Optional[torch.Tensor],
-        non_tensor_args: Tuple,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        # pylint: disable=missing-function-docstring
+    (
+        is_first_microbatch,
+        fp8,
+        fp8_calibration,
+        _wgrad_store,
+        _fuse_wgrad_accumulation,
+        cpu_offloading,
+        tp_group,
+        tp_size,
+        sequence_parallel,
+        tensor_parallel,
+        activation_dtype,
+        parallel_mode,
+        is_grad_enabled,
+        ub_overlap_rs_fprop,
+        _ub_overlap_ag_dgrad,
+        ub_overlap_ag_fprop,
+        _ub_overlap_rs_dgrad,
+        _ub_bulk_dgrad,
+        _ub_bulk_wgrad,
+        ub_name,
+        _fp8_output,
+        fsdp_group,
+        cache_weight,
+        skip_fp8_weight_update,
+        symmetric_ar_type,
+        save_original_input,
+        debug,
+        backward_override,
+        custom,
+        backward_input_needs_gather,
+    ) = non_tensor_args
+    if backward_override == "high_precision":
+        save_original_input = True
 
-        (
-            is_first_microbatch,
-            fp8,
-            fp8_calibration,
-            wgrad_store,
-            input_quantizer,
-            weight_quantizer,
-            output_quantizer,
-            grad_input_quantizer,
-            grad_weight_quantizer,
-            grad_output_quantizer,
-            fuse_wgrad_accumulation,
-            cpu_offloading,
-            tp_group,
-            tp_size,
-            sequence_parallel,
-            tensor_parallel,
-            activation_dtype,
-            parallel_mode,
-            is_grad_enabled,
-            ub_overlap_rs_fprop,
-            ub_overlap_ag_dgrad,
-            ub_overlap_ag_fprop,
-            ub_overlap_rs_dgrad,
-            ub_bulk_dgrad,
-            ub_bulk_wgrad,
-            ub_name,
-            fp8_output,  # pylint: disable=unused-variable
-            fsdp_group,
-            cache_weight,
-            skip_fp8_weight_update,
-            symmetric_ar_type,
-            save_original_input,
-            debug,
-            is_fsdp2,
-        ) = non_tensor_args
-        if fp8:
-            backward_override = FP8GlobalStateManager.get_fp8_recipe().backward_override
+    # NVTX label for profiling
+    nvtx_label = "transformer_engine._Linear.forward"
+    if ub_name is not None:
+        nvtx_label = f"{nvtx_label}.{ub_name}"
+
+    # Make sure input dimensions are compatible
+    out_features, in_features = weight.shape
+    assert inp.shape[-1] == in_features, "GEMM not possible"
+
+    # Configure tensor-parallel communication
+    tp_world_size = get_distributed_world_size(tp_group)
+    backward_needs_input = is_grad_enabled and weight.requires_grad
+    with_input_all_gather_nccl = (
+        parallel_mode == "column" and sequence_parallel and not ub_overlap_ag_fprop
+    )
+
+    # Configure Userbuffers communication (comm+GEMM overlap)
+    ub_obj = None
+    ub_type = None
+    if ub_overlap_rs_fprop:
+        ub_obj = get_ub(ub_name + "_fprop", fp8)
+        ub_type = tex.CommOverlapType.RS
+    elif ub_overlap_ag_fprop:
+        ub_obj = get_ub(ub_name + "_fprop", fp8)
+        ub_type = tex.CommOverlapType.AG
+
+    # ------------------------------------------------------
+    # Prepare input tensor
+    # Note: Cast to expected dtype and perform tensor-parallel communication
+    # ------------------------------------------------------
+    nvtx_range_push(f"{nvtx_label}.input_cast_comm")
+    inputmat = inp  # Input tensor to save for backward (maybe sharded)
+    inputmat_total = None  # Input tensor to pass to GEMM (gathered)
+    own_quantized_input = False
+    if fp8:
+        assert_dim_for_fp8_exec(inputmat, weight)
+        if save_original_input:
+            assert not isinstance(
+                input_quantizer, Float8Quantizer
+            ), "DelayedScaling recipe is not supported with save_original_input"
+
+    if with_input_all_gather_nccl or ub_overlap_ag_fprop:  # All-gather input tensor
+
+        # Cast local input tensor if needed
+        if fp8 or debug:
+            if input_quantizer is None:
+                raise ValueError("Missing quantizer for input tensor")
+            if not isinstance(inputmat, QuantizedTensorStorage) and not custom:
+                own_quantized_input = True
+                input_quantizer.set_usage(
+                    rowwise=True,
+                    columnwise=backward_needs_input and backward_override is None,
+                )
+                if isinstance(input_quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)):
+                    # All-gather is not supported with FP8 column-wise data
+                    input_quantizer.set_usage(columnwise=False)
+                if save_original_input:
+                    # No need for column-wise data since this
+                    # tensor will not be cached for backward pass
+                    input_quantizer.set_usage(columnwise=False)
+                    own_quantized_input = False
+                inputmat = input_quantizer(inputmat)
         else:
             inputmat = cast_if_needed(inp, activation_dtype)  # Cast for AMP
 
@@ -357,49 +405,10 @@ def _linear_forward_impl(
                 # Discard row-wise data since it is not needed in backward pass
                 inputmat.update_usage(rowwise_usage=False, columnwise_usage=True)
 
-        if is_cpu_offload_enabled():
-            start_offload(inputmat)
-        nvtx_range_pop(f"{nvtx_label}.input_cast_comm")
-        # ------------------------------------------------------
-        # Input tensor is ready for GEMM...
-        # ------------------------------------------------------
-
-        # ------------------------------------------------------
-        # Prepare weight tensor
-        # ------------------------------------------------------
-        new_weight_workspace = None
-        weightmat = weight
-        if fp8 or debug:
-            # Configure quantizer
-            # If weight is already quantized, weight._quantizer is its true quantizer.
-            # for debug mode we create quantizer every iteration, thus we need to set the quantizer states
-            if isinstance(weight, QuantizedTensor) and not debug:
-                weight_quantizer = weight._quantizer
-            elif weight_quantizer is not None:
-                columnwise_usage = is_grad_enabled and inp.requires_grad
-                if backward_override is not None:
-                    columnwise_usage = False
-                if not columnwise_usage:
-                    columnwise_usage = (
-                        is_fp8_activation_recompute_enabled()
-                        and not in_fp8_activation_recompute_phase()
-                    )
-                if is_fsdp2:
-                    columnwise_usage = False
-                weight_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
-            # Get quantized weight
-            update_ws = is_first_microbatch is None or is_first_microbatch
-            weightmat, new_weight_workspace = quantize_weight(
-                tensor=weight,
-                quantizer=weight_quantizer,
-                workspace=weight_workspace,
-                update_workspace=update_ws,
-                skip_update_flag=skip_fp8_weight_update,
-                fsdp_group=fsdp_group,
-                workspace_dtype=activation_dtype,
-                cache=cache_weight,
-            )
-            weightmat.update_usage(rowwise_usage=True)
+        # Cached input tensor
+        saved_inputmat = None
+        if backward_needs_input:
+            saved_inputmat = inputmat
 
         if cpu_offloading and saved_inputmat is not None:
             mark_activation_offload(saved_inputmat)
@@ -642,90 +651,8 @@ def _linear_backward(
         # Note: Cast to expected dtype and perform tensor-parallel communication
         # --------------------------------------------------
 
-            # TODO(ksivamani): Check memory usage
-            # FSDP2: Don't save FP8 workspace for non-quantized weights.
-            # Backward will re-quantize from FSDP2 all-gathered weight.
-            # (Issue #2681)
-            wt_save = weightmat
-            if is_fsdp2 and weightmat is not weight:
-                wt_save = None
-            tensors_to_save, tensor_objects = prepare_for_saving(
-                saved_inputmat,
-                wt_save,
-                weight,
-                bias,
-            )
-            ctx.save_for_backward(*tensors_to_save)
-            ctx.tensor_objects = tensor_objects
-            ctx.is_fsdp2 = is_fsdp2
-
-            ctx.activation_dtype = activation_dtype
-            ctx.fp8 = fp8
-            ctx.fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
-            ctx.backward_override = backward_override
-            ctx.input_quantizer = input_quantizer
-            ctx.grad_input_quantizer = grad_input_quantizer
-            ctx.grad_weight_quantizer = grad_weight_quantizer
-            ctx.grad_output_quantizer = grad_output_quantizer
-            ctx.is_weight_param_quantized = isinstance(weight, QuantizedTensorStorage)
-            ctx.fuse_wgrad_accumulation = fuse_wgrad_accumulation
-            if fuse_wgrad_accumulation and weight.requires_grad:
-                # Keep a weakref to the original Python object because save_for_backward
-                # may return a plain Tensor without custom Parameter attributes.
-                ctx.origin_weight_ref = weakref.ref(weight)
-                ctx.origin_weight_overwrites_main_grad = getattr(
-                    weight, "overwrite_main_grad", False
-                )
-                # This check is needed to ensure that main_grad is not created
-                # during the forward pass when using MCore FSDP as it creates
-                # the main_grad buffer lazily before backprop
-                if hasattr(weight, "__fsdp_param__"):
-                    # MCore FSDP creates main_grad lazily before backward
-                    ctx.main_grad_func = weight.get_main_grad
-                else:
-                    ctx.main_grad_func = lambda: weight.main_grad
-
-            ctx.debug = debug
-            ctx.custom = custom
-            ctx.cpu_offloading = cpu_offloading
-            ctx.is_first_microbatch = is_first_microbatch
-            ctx.use_bias = bias is not None
-            ctx.sequence_parallel = sequence_parallel
-            ctx.tensor_parallel = tensor_parallel
-            ctx.inp_shape = inp.shape
-            ctx.parallel_mode = parallel_mode
-            ctx.tp_group = tp_group
-            ctx.ub_overlap_ag = ub_overlap_ag_dgrad
-            ctx.ub_overlap_rs_dgrad = ub_overlap_rs_dgrad
-            ctx.ub_bulk_dgrad = ub_bulk_dgrad
-            ctx.ub_bulk_wgrad = ub_bulk_wgrad
-            ctx.ub_name = ub_name
-            ctx.tp_size = tp_size
-            ctx.requires_dgrad = inp.requires_grad
-            ctx.requires_wgrad = weight.requires_grad
-            ctx.reduce_and_update_bwd_fp8_tensors = False
-
-            ctx.owns_input = saved_inputmat is not inp
-            if ctx.fp8 and requires_grad(inp, weight, bias):
-                qstate = FP8GlobalStateManager.quantization_state
-                _first_fp8_module = qstate.is_first_fp8_module
-                ctx.reduce_and_update_bwd_fp8_tensors = FP8GlobalStateManager.is_first_fp8_module()
-                if in_fp8_activation_recompute_phase():
-                    qstate.is_first_fp8_module = _first_fp8_module
-            ctx.wgrad_store = wgrad_store
-
-            # backward overrides
-            if backward_override is not None:
-                ctx.fp8 = False
-                ctx.debug = False
-                ctx.ub_overlap_ag = False
-                ctx.ub_overlap_rs_dgrad = False
-                ctx.ub_bulk_dgrad = False
-                ctx.ub_bulk_wgrad = False
-                ctx.grad_input_quantizer = None
-                ctx.grad_weight_quantizer = None
-                ctx.grad_output_quantizer = None
-                ctx.reduce_and_update_bwd_fp8_tensors = False
+        # Unmodified grad output tensor
+        grad_output_arg = grad_output
 
         # Configure quantizer for grad output tensor
         # Note: dgrad GEMM requires row-wise usage, wgrad GEMM
@@ -979,16 +906,7 @@ def _linear_backward(
                     ub_obj_overlap_wgrad, dgrad_send_stream, dgrad_recv_stream
                 )
 
-                # FSDP2: Re-create workspace from all-gathered weight
-                # when workspace was not saved. (Issue #2681)
-                if weight_fp8 is None:
-                    if isinstance(saved_weight, QuantizedTensorStorage):
-                        weight_fp8 = saved_weight
-                    elif ctx.weight_quantizer is not None:
-                        ctx.weight_quantizer.set_usage(rowwise=True, columnwise=True)
-                        weight_fp8 = ctx.weight_quantizer(saved_weight)
-
-                # Make sure required data is available
+            if ctx.fp8 or ctx.debug:
                 if isinstance(grad_output, QuantizedTensorStorage):
                     grad_output.update_usage(columnwise_usage=True)
                 else:
@@ -1072,17 +990,28 @@ def _linear_backward(
                 ctx.wgrad_store.put([inputmat_total, grad_output], wgrad_gemm)
             else:
 
-                # FSDP2: Clear columnwise/transpose caches after dgrad GEMM
-                # to prevent them from persisting on the all-gathered buffer.
-                # (Issues #2681, #2717)
-                if getattr(ctx, "is_fsdp2", False) and isinstance(
-                    weight_fp8, QuantizedTensorStorage
-                ):
-                    weight_fp8.update_usage(columnwise_usage=False)
+                # Call wgrad GEMM now
+                wgrad, grad_bias_ = wgrad_gemm(inputmat_total, grad_output)
 
-                # Prepare grad input tensor
-                # Note: Perform tensor-parallel communication
-                if ctx.ub_overlap_rs_dgrad:
+                # Update grad bias if needed
+                if grad_bias is None:
+                    grad_bias = grad_bias_
+                del grad_bias_
+
+                # Deallocate tensors if permitted
+                if ctx.owns_input:
+                    # Input tensor is internal
+                    clear_tensor_data(inputmat_total)
+                elif ctx.backward_input_needs_gather:
+                    # Gathered input tensor is internal
+                    clear_tensor_data(inputmat_total)
+                if ctx.parallel_mode == "row" and ctx.sequence_parallel:
+                    # Gathered grad output tensor is internal
+                    clear_tensor_data(grad_output)
+
+            # Update grad input if overlapping reduce-scatter with wgrad GEMM
+            if ctx.ub_bulk_wgrad:
+                if ub_obj_wgrad.is_fp8_ubuf():
                     dgrad = reduce_scatter_out
                 else:
                     dgrad = ub_obj_wgrad.get_buffer(local_chunk=True).clone()
@@ -1668,7 +1597,7 @@ class Linear(TransformerEngineBaseModule):
                 linear_fn = _Linear.forward
                 autograd_ctx = [None]
 
-            cache_name = None if (is_first_microbatch is None or self.is_fsdp2) else "weight"
+            cache_name = None if is_first_microbatch is None else "weight"
             weight_workspace = (
                 self._fp8_workspaces.get(cache_name) if cache_name is not None else None
             )
@@ -1727,7 +1656,9 @@ class Linear(TransformerEngineBaseModule):
                 self.symmetric_ar_type,
                 self.save_original_input,
                 debug,
-                self.is_fsdp2,
+                backward_override,
+                custom,
+                backward_input_needs_gather,
             )
             out, new_weight_workspace = linear_fn(
                 *autograd_ctx,
