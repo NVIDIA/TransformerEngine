@@ -2848,6 +2848,27 @@ def _make_grouped_tensor_uniform(
     )
 
 
+def _apply_grouped_bias_ref(
+    base_outs: List[torch.Tensor],
+    bias: Optional[List[torch.Tensor]],
+    bias_scale: Optional[torch.Tensor],
+    m_sizes: List[int],
+    dtype: torch.dtype,
+) -> List[torch.Tensor]:
+    """Reference: add (optionally per-row scaled) bias to each group's output, cast to ``dtype``."""
+    if bias is None:
+        return list(base_outs)
+    if bias_scale is None:
+        return [(o.float() + b.float()).to(dtype) for o, b in zip(base_outs, bias)]
+    out = []
+    offset = 0
+    for i, ms in enumerate(m_sizes):
+        s = bias_scale[offset : offset + ms].unsqueeze(-1)
+        out.append((base_outs[i].float() + bias[i].float() * s).to(dtype))
+        offset += ms
+    return out
+
+
 @pytest.mark.parametrize(
     "z, m, n, k",
     [
@@ -2860,7 +2881,8 @@ def _make_grouped_tensor_uniform(
 @pytest.mark.parametrize("case", ["no_discrete", "discrete_in", "discrete_out"])
 @pytest.mark.parametrize("layout", ["TN", "NN", "NT"])
 @pytest.mark.parametrize("accumulate", [False, True])
-def test_grouped_gemm_grouped_tensor(z, m, n, k, case, layout, accumulate) -> None:
+@pytest.mark.parametrize("use_bias_scale", [False, True])
+def test_grouped_gemm_grouped_tensor(z, m, n, k, case, layout, accumulate, use_bias_scale) -> None:
     if tex.get_cublasLt_version() < 130300:
         pytest.skip("Grouped GEMM requires cuBLAS 13.3+.")
     if torch.cuda.get_device_capability() < (10, 0):
@@ -2914,12 +2936,11 @@ def test_grouped_gemm_grouped_tensor(z, m, n, k, case, layout, accumulate) -> No
         if case != "discrete_out"
         else None
     )
+    bias_scale = None
+    if use_bias_scale and bias is not None and layout != "NT":
+        bias_scale = torch.randn(m, device="cuda", dtype=torch.float32)
     # Bias add in grouped kernel accumulates in FP32 for BF16/FP16.
-    out_ref = (
-        [(o.float() + b.float()).to(dtype) for o, b in zip(out_ref_no_bias, bias)]
-        if bias is not None
-        else out_ref_no_bias
-    )
+    out_ref = _apply_grouped_bias_ref(out_ref_no_bias, bias, bias_scale, m_sizes, dtype)
     # Create grouped tensors based on case
     device = A[0].device
     grouped_A = A
@@ -2983,6 +3004,7 @@ def test_grouped_gemm_grouped_tensor(z, m, n, k, case, layout, accumulate) -> No
         layout=layout,
         accumulate=accumulate,
         bias=grouped_bias,
+        bias_scale=bias_scale,
     )
     out_grouped_no_bias = (
         grouped_out_no_bias
@@ -2995,10 +3017,8 @@ def test_grouped_gemm_grouped_tensor(z, m, n, k, case, layout, accumulate) -> No
         else grouped_out_bias.split_into_quantized_tensors()
     )
 
-    out_grouped_manual_bias = (
-        [(o.float() + b.float()).to(dtype) for o, b in zip(out_grouped_no_bias, bias)]
-        if bias is not None
-        else out_grouped_no_bias
+    out_grouped_manual_bias = _apply_grouped_bias_ref(
+        out_grouped_no_bias, bias, bias_scale, m_sizes, dtype
     )
     tols = dtype_tols(dtype)
     for o, o_ref in zip(out_grouped_no_bias, out_ref_no_bias):

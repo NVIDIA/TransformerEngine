@@ -429,12 +429,22 @@ void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
                                          NVTETensor workspace_setup, NVTETensor workspace_cublas,
                                          NVTEGroupedMatmulConfig config, cudaStream_t stream);
 
-/*! \brief Grouped bias add for grouped GEMM outputs.
+/*! \brief Grouped Bias add for grouped GEMM outputs.
 *
+* output[row,col] += bias[col].
 * Requires uniform last-dimension across all output tensors and bias tensors.
 */
 void nvte_grouped_bias_add(const NVTEGroupedTensor output, const NVTEGroupedTensor bias,
                            cudaStream_t stream);
+
+/*! \brief Grouped Scaled Bias add for grouped GEMM outputs.
+*
+* output[row,col] += bias[col] * scale[row], where biases are per-group
+* and scales are per-token (per-row across all groups).
+* Requires uniform last-dimension across all output tensors and bias tensors.
+*/
+void nvte_grouped_scaled_bias_add(const NVTEGroupedTensor output, const NVTEGroupedTensor bias,
+                                  const NVTETensor scale, cudaStream_t stream);
 
 #ifdef __cplusplus
 }  // extern "C"

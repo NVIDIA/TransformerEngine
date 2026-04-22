@@ -981,14 +981,14 @@ class FlashAttention(torch.nn.Module):
                         batch_size * context_len,
                     )
 
-        use_flash_attn_4 = False
-        if flash_attention_backend is not None and flash_attention_backend > PkgVersion("4.0.0b"):
-            use_flash_attn_4 = True
-        use_flash_attn_3 = False
-        if flash_attention_backend is not None and PkgVersion(
-            "3.0.0b"
-        ) < flash_attention_backend < PkgVersion("4.0.0"):
-            use_flash_attn_3 = True
+        # FA4 prereleases such as 4.0.0b8 sort below 4.0.0, so key off the major
+        # version instead of a stable-version range check when selecting the API.
+        use_flash_attn_4 = (
+            flash_attention_backend is not None and flash_attention_backend.major == 4
+        )
+        use_flash_attn_3 = (
+            flash_attention_backend is not None and flash_attention_backend.major == 3
+        )
         if context_parallel and all(
             not isinstance(x, Float8Tensor) for x in [query_layer, key_layer, value_layer]
         ):

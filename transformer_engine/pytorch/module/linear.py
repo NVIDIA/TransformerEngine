@@ -67,7 +67,7 @@ from ..quantized_tensor import (
 )
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
-from ..tensor.utils import is_custom
+from ..tensor.utils import clear_columnwise_cache, is_custom
 from ..export import is_in_onnx_export_mode, assert_warmed_up
 from ..cpu_offload import (
     is_cpu_offload_enabled,
@@ -137,6 +137,7 @@ def _linear_forward_impl(
         backward_override,
         custom,
         backward_input_needs_gather,
+        is_fsdp2,
     ) = non_tensor_args
     if backward_override == "high_precision":
         save_original_input = True
@@ -263,7 +264,7 @@ def _linear_forward_impl(
         # No need to set the quantizer states if weight is already quantized
         # for debug mode we create quantizer every iteration, thus we need to set the quantizer states
         if weight_quantizer is not None and (not isinstance(weight, QuantizedTensor) or debug):
-            columnwise_usage = is_grad_enabled and inp.requires_grad
+            columnwise_usage = is_grad_enabled and inp.requires_grad and not is_fsdp2
             if backward_override is not None:
                 columnwise_usage = False
             if not columnwise_usage:
@@ -427,9 +428,15 @@ def _linear_forward_impl(
             mark_not_offload(weight, weightmat, bias)
 
         # TODO(ksivamani): Check memory usage
+        # FSDP2: Don't save FP8 workspace for non-quantized weights.
+        # Backward will re-quantize from the FSDP2 all-gathered weight.
+        # (Issue #2681)
+        wt_save = weightmat
+        if is_fsdp2 and weightmat is not weight:
+            wt_save = None
         tensors_to_save, tensor_objects = prepare_for_saving(
             saved_inputmat,
-            weightmat,
+            wt_save,
             weight,
             bias,
         )
@@ -440,6 +447,7 @@ def _linear_forward_impl(
             "weight_quantizer": weight_quantizer,
             "fsdp_shapes": fsdp_shapes,
             "owns_input": owns_input,
+            "is_fsdp2": is_fsdp2,
         }
 
     return out, new_weight_workspace, tensors_to_save, tensor_objects, ctx_attrs
@@ -494,6 +502,7 @@ def _linear_setup_ctx(
         backward_override,
         custom,
         backward_input_needs_gather,
+        _is_fsdp2,
     ) = non_tensor_args
 
     # Values derived from input tensors
@@ -549,6 +558,7 @@ def _linear_setup_ctx(
     ctx.weight_quantizer = ctx_attrs["weight_quantizer"]
     ctx.fsdp_shapes = ctx_attrs["fsdp_shapes"]
     ctx.owns_input = ctx_attrs["owns_input"]
+    ctx.is_fsdp2 = ctx_attrs["is_fsdp2"]
 
     # backward overrides
     if backward_override is not None:
@@ -765,6 +775,19 @@ def _linear_backward(
         dgrad_work = None
         if ctx.requires_dgrad:
 
+            # FSDP2: Re-create workspace from all-gathered weight when
+            # workspace was not saved. (Issue #2681)
+            # Use saved_weight (the original weight parameter) since
+            # weight_fp8 is only set when workspace was saved.
+            if weight_fp8 is None:
+                if isinstance(saved_weight, QuantizedTensorStorage):
+                    # saved weight is already set to right usages by
+                    # fsdp2 quantized-tensor hooks when workspace was not saved.
+                    weight_fp8 = saved_weight
+                elif ctx.weight_quantizer is not None:
+                    ctx.weight_quantizer.set_usage(rowwise=True, columnwise=True)
+                    weight_fp8 = ctx.weight_quantizer(saved_weight)
+
             # Make sure required data is available
             if isinstance(grad_output, QuantizedTensorStorage):
                 grad_output.update_usage(rowwise_usage=True)
@@ -825,6 +848,14 @@ def _linear_backward(
                 bulk_overlap=ctx.ub_bulk_dgrad,
             )
             nvtx_range_pop(f"{nvtx_label}.dgrad_gemm")
+
+            # FSDP2 only handles deallocation all-gathered weights that it allocates.
+            # Columnwise data is derived from rowwise data after allgather for fp8
+            # and 2d block-scaled weights in TE managed memory. So we need to clear
+            # it here.
+            # (Issues #2681, #2717)
+            if getattr(ctx, "is_fsdp2", False) and isinstance(weight_fp8, QuantizedTensorStorage):
+                clear_columnwise_cache(weight_fp8)
 
             # Prepare grad input tensor
             # Note: Perform tensor-parallel communication
@@ -1597,7 +1628,7 @@ class Linear(TransformerEngineBaseModule):
                 linear_fn = _Linear.forward
                 autograd_ctx = [None]
 
-            cache_name = None if is_first_microbatch is None else "weight"
+            cache_name = None if (is_first_microbatch is None or self.is_fsdp2) else "weight"
             weight_workspace = (
                 self._fp8_workspaces.get(cache_name) if cache_name is not None else None
             )
@@ -1659,6 +1690,7 @@ class Linear(TransformerEngineBaseModule):
                 backward_override,
                 custom,
                 backward_input_needs_gather,
+                self.is_fsdp2,
             )
             out, new_weight_workspace = linear_fn(
                 *autograd_ctx,

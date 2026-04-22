@@ -327,6 +327,7 @@ def general_grouped_gemm_for_grouped_tensor(
     accumulate: bool = False,
     use_split_accumulator: bool = False,
     bias=None,
+    bias_scale: Optional[torch.Tensor] = None,
     grad: bool = False,
     alpha: Optional[torch.Tensor] = None,
     beta: Optional[torch.Tensor] = None,
@@ -365,6 +366,9 @@ def general_grouped_gemm_for_grouped_tensor(
             "Apply bias manually after the GEMM."
         )
 
+    if bias_scale is not None and bias is None:
+        raise ValueError("bias_scale requires bias to be provided.")
+
     num_tensors = B.num_tensors
     rowwise = B.rowwise_data
     device = rowwise.device if rowwise is not None else B.columnwise_data.device
@@ -401,6 +405,7 @@ def general_grouped_gemm_for_grouped_tensor(
         transb,
         out,
         bias,
+        bias_scale,
         alpha,
         beta,
         workspace_setup,
