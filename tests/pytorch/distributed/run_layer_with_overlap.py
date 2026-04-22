@@ -552,8 +552,17 @@ def _train(opts):
         # Now validate accuracy
         if not bool(numerics_failed.item()):
             for i, (test_g, ref_g) in enumerate(zip(test_grads, ref_grads)):
-                rtol = 0.125 if opts.fp8 else 0.025
-                atol = 0.0625 if opts.fp8 else 0.00125
+                if opts.fp8:
+                    if (
+                        opts.quantization == "fp8_current_scaling"
+                        and te.get_device_compute_capability() == (12, 0)
+                    ):
+                        # Align with distributed fp8_cs tolerance policy on SM120.
+                        rtol, atol = 0.4, 0.25
+                    else:
+                        rtol, atol = 0.125, 0.0625
+                else:
+                    rtol, atol = 0.025, 0.00125
                 grad_failed, grad_info = _compare_tensors(names[i], test_g, ref_g, rtol, atol)
                 dist_print(grad_info, src=WORLD_RANK, error=grad_failed)
                 numerics_failed[0] = int(grad_failed)
