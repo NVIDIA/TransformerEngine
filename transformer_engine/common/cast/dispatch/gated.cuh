@@ -48,9 +48,10 @@ void quantize_gated_fwd_helper(const NVTETensor nvte_input, NVTETensor nvte_outp
     case NVTE_DELAYED_TENSOR_SCALING: {
       //const bool use_tma_kernels = (cols % 32 == 0) && is_supported_by_CC_100();
       // sm120 shared memory capapbilities are much smaller than sm100, so we disable TMA kernels on sm120
-      // KL: It is possible that for fwd, the limits are not exceeded for sm120. To be investigated - 
+      // KL: It is possible that for fwd, the limits are not exceeded for sm120. To be investigated -
       // are there any forward only tests we'd like to keep enabled on sm120?
-      const bool use_tma_kernels = (cols % 32 == 0) && is_supported_by_CC_100() && !is_supported_by_CC_120();
+      const bool use_tma_kernels =
+          (cols % 32 == 0) && is_supported_by_CC_100() && !is_supported_by_CC_120();
       if (use_tma_kernels) {
         Tensor dummy_grad_tensor;
         fp8::cast_gated_tma</*IS_BWD=*/false, ParamOP, ActOP, nullptr>(input, dummy_grad_tensor,
@@ -143,7 +144,8 @@ void quantize_gated_bwd_helper(const NVTETensor nvte_grad, const NVTETensor nvte
     case NVTE_DELAYED_TENSOR_SCALING: {
       //const bool use_tma_kernels = (cols % 32 == 0) && is_supported_by_CC_100();
       // sm120 shared memory capapbilities are much smaller than sm100, so we disable TMA kernels on sm120
-      const bool use_tma_kernels = (cols % 32 == 0) && is_supported_by_CC_100() && !is_supported_by_CC_120();
+      const bool use_tma_kernels =
+          (cols % 32 == 0) && is_supported_by_CC_100() && !is_supported_by_CC_120();
       if (use_tma_kernels) {
         fp8::cast_gated_tma</*IS_BWD=*/true, ParamOP, ActOP, DActOP>(gated_input, grad, output, p,
                                                                      stream);

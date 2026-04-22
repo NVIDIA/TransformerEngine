@@ -161,9 +161,7 @@ def check_grouped_tensor_nvfp4_versus_reference(
                     columnwise=False,
                     with_gemm_swizzled_scales=expected_swizzled_layout,
                 )
-                torch.testing.assert_close(
-                    x_sx_i, x_sx_ref_i, atol=scale_atol, rtol=scale_rtol
-                )
+                torch.testing.assert_close(x_sx_i, x_sx_ref_i, atol=scale_atol, rtol=scale_rtol)
 
     if return_transpose:
         x_qx_t = [
@@ -196,9 +194,7 @@ def check_grouped_tensor_nvfp4_versus_reference(
                     columnwise=True,
                     with_gemm_swizzled_scales=expected_swizzled_layout,
                 )
-                torch.testing.assert_close(
-                    x_sx_t_i, x_sx_t_ref_i, atol=scale_atol, rtol=scale_rtol
-                )
+                torch.testing.assert_close(x_sx_t_i, x_sx_t_ref_i, atol=scale_atol, rtol=scale_rtol)
 
 
 def check_grouped_tensor_nvfp4_with_paged_stashing(
@@ -305,9 +301,7 @@ def check_grouped_tensor_nvfp4_with_paged_stashing(
                     columnwise=False,
                     with_gemm_swizzled_scales=expected_swizzled_layout,
                 )
-                torch.testing.assert_close(
-                    x_sx_i, x_sx_ref_i, atol=scale_atol, rtol=scale_rtol
-                )
+                torch.testing.assert_close(x_sx_i, x_sx_ref_i, atol=scale_atol, rtol=scale_rtol)
 
     if return_transpose:
         x_qx_t = [
@@ -337,9 +331,7 @@ def check_grouped_tensor_nvfp4_with_paged_stashing(
                     columnwise=True,
                     with_gemm_swizzled_scales=expected_swizzled_layout,
                 )
-                torch.testing.assert_close(
-                    x_sx_t_i, x_sx_t_ref_i, atol=scale_atol, rtol=scale_rtol
-                )
+                torch.testing.assert_close(x_sx_t_i, x_sx_t_ref_i, atol=scale_atol, rtol=scale_rtol)
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)

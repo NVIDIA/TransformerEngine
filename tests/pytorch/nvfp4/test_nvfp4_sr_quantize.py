@@ -376,7 +376,9 @@ def check_group_quantization_nvfp4_versus_reference(
             torch.testing.assert_close(me_sr, me_rn, atol=2e-7, rtol=0.0)
             torch.testing.assert_close(me_t_sr, me_t_rn, atol=2e-7, rtol=0.0)
         else:
-            assert me_sr < me_rn, "Stochastic rounding failed - error larger than the round to nearest."
+            assert (
+                me_sr < me_rn
+            ), "Stochastic rounding failed - error larger than the round to nearest."
             assert (
                 me_t_sr < me_t_rn
             ), "Stochastic rounding failed - error larger than the round to nearest."
