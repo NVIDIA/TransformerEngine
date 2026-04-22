@@ -165,16 +165,14 @@ __launch_bounds__(BLOCK_SIZE)
     output_scales[row_idx * scale_stride + sf_idx] = S_dec_b;
 
     // Compute encoding scale for this block: maps input range to [-6, 6] (FP4 range)
-    float block_encode_scale = (S_dec_b_f != 0.0f)
-                                   ? __fdividef(S_enc, S_dec_b_f)
-                                   : 0.0f;
+    float block_encode_scale = (S_dec_b_f != 0.0f) ? __fdividef(S_enc, S_dec_b_f) : 0.0f;
 
     // Scale values and pack to FP4 using PTX cvt.rn.satfinite.e2m1x2
     // Process 8 elements (4 pairs) at a time -> 4 bytes -> 1 uint32_t
     // Matching FlashInfer's fp32_vec_to_e2m1 pattern.
     uint8_t *out_ptr = output_data + actual_row * (num_cols / 2) + col_start / 2;
     for (int j = 0; j < PERTOKEN_SF_VEC_SIZE; j += 8) {
-      float s0 = vals[j]     * block_encode_scale;
+      float s0 = vals[j] * block_encode_scale;
       float s1 = vals[j + 1] * block_encode_scale;
       float s2 = vals[j + 2] * block_encode_scale;
       float s3 = vals[j + 3] * block_encode_scale;
@@ -193,8 +191,7 @@ __launch_bounds__(BLOCK_SIZE)
           "mov.b32 %0, {byte0, byte1, byte2, byte3};\n"
           "}\n"
           : "=r"(packed)
-          : "f"(s0), "f"(s1), "f"(s2), "f"(s3),
-            "f"(s4), "f"(s5), "f"(s6), "f"(s7));
+          : "f"(s0), "f"(s1), "f"(s2), "f"(s3), "f"(s4), "f"(s5), "f"(s6), "f"(s7));
       reinterpret_cast<uint32_t *>(out_ptr)[j / 8] = packed;
     }
     // Handle remaining 8 elements (PERTOKEN_SF_VEC_SIZE=16, so exactly 2 iterations of 8)

@@ -28,8 +28,24 @@ FP8_E4M3_MAX = 448.0
 
 # FP4 E2M1 look-up table: 4-bit index -> float value
 # Lower nibble = first element, upper nibble = second element
-_FP4_E2M1_LUT = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
-                 -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0]
+_FP4_E2M1_LUT = [
+    0.0,
+    0.5,
+    1.0,
+    1.5,
+    2.0,
+    3.0,
+    4.0,
+    6.0,
+    -0.0,
+    -0.5,
+    -1.0,
+    -1.5,
+    -2.0,
+    -3.0,
+    -4.0,
+    -6.0,
+]
 
 
 def unpack_fp4(packed: torch.Tensor) -> torch.Tensor:
@@ -40,7 +56,7 @@ def unpack_fp4(packed: torch.Tensor) -> torch.Tensor:
     """
     repeated = packed.repeat_interleave(2, dim=1)
     repeated[:, 0::2] = repeated[:, 0::2] & 0x0F  # Lower 4 bits
-    repeated[:, 1::2] = repeated[:, 1::2] >> 4     # Upper 4 bits
+    repeated[:, 1::2] = repeated[:, 1::2] >> 4  # Upper 4 bits
     return repeated
 
 
@@ -50,8 +66,9 @@ def fp4_to_fp32(unpacked: torch.Tensor) -> torch.Tensor:
     return lut[unpacked.long()]
 
 
-def dequantize_pertoken_fp4(data: torch.Tensor, scales: torch.Tensor,
-                            per_token_scales: torch.Tensor) -> torch.Tensor:
+def dequantize_pertoken_fp4(
+    data: torch.Tensor, scales: torch.Tensor, per_token_scales: torch.Tensor
+) -> torch.Tensor:
     """Dequantize per-token NVFP4: result = fp4_val * block_scale * per_token_scale.
 
     Args:
@@ -285,8 +302,7 @@ class TestQuantizeNvfp4Pertoken:
         x_f32 = x.float()
         nonzero = x_f32.abs() > 0.1  # skip very small values where relative error is meaningless
         if nonzero.any():
-            rel_error = ((dequant[nonzero] - x_f32[nonzero]).abs() /
-                         x_f32[nonzero].abs()).mean()
+            rel_error = ((dequant[nonzero] - x_f32[nonzero]).abs() / x_f32[nonzero].abs()).mean()
             assert rel_error < 0.5, (
                 f"Mean relative error {rel_error:.3f} too high for FP4 round-trip "
                 f"(shape={num_rows}x{num_cols}, dtype={dtype})"
@@ -299,9 +315,9 @@ class TestQuantizeNvfp4Pertoken:
         data, _, _ = tex.quantize_nvfp4_pertoken(x)
 
         unpacked = unpack_fp4(data)
-        assert (unpacked >= 0).all() and (unpacked <= 15).all(), (
-            f"FP4 indices out of range: min={unpacked.min()}, max={unpacked.max()}"
-        )
+        assert (unpacked >= 0).all() and (
+            unpacked <= 15
+        ).all(), f"FP4 indices out of range: min={unpacked.min()}, max={unpacked.max()}"
 
     def test_input_validation_not_2d(self):
         """Should reject non-2D input."""
