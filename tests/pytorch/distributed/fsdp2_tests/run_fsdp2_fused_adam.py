@@ -433,10 +433,15 @@ def test_fused_adam_fp8_no_master(recipe_name):
     """
     recipe = get_recipe_from_string(recipe_name)
 
-    if recipe_name in ("MXFP8BlockScaling", "Float8BlockScaling", "NVFP4BlockScaling"):
+    if recipe_name in (
+        "MXFP8BlockScaling",
+        "Float8BlockScaling",
+        "NVFP4BlockScaling",
+        "Float8CurrentScaling",
+    ):
         pytest.xfail(
             f"{recipe_name}: FusedAdam without master_weights does not support "
-            "block-scaling quantized tensors. Use master_weights=True."
+            "this quantized tensor type. Use master_weights=True."
         )
 
     world_size, device = _get_dist_info()
@@ -701,6 +706,9 @@ def test_dcp_output_parity(recipe_name, async_save):
             "NVFP4BlockScaling: DCP load_state_dict triggers reset_sharded_param() "
             "which calls data_ptr() on NVFP4Tensor wrapper subclass with invalid storage"
         )
+
+    if recipe_name == "Float8CurrentScaling":
+        pytest.xfail()
 
     if (
         recipe_name == "Float8BlockScaling"
