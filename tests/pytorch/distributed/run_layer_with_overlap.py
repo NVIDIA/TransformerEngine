@@ -557,12 +557,25 @@ def _train(opts):
                         opts.quantization == "fp8_current_scaling"
                         and te.get_device_compute_capability() == (12, 0)
                     ):
-                        # Align with distributed fp8_cs tolerance policy on SM120.
+                        # SM120 deterministic mode disables fused attention for this input shape,
+                        # so runtime uses alternate attention backends (FlashAttention or Unfused).
+                        # Combined with FP8 current-scaling overlap/reduction behavior, this path
+                        # needs the looser distributed fp8_cs tolerance policy.
                         rtol, atol = 0.4, 0.25
                     else:
                         rtol, atol = 0.125, 0.0625
                 else:
                     rtol, atol = 0.025, 0.00125
+                    if (
+                        te.get_device_compute_capability() == (12, 0)
+                        and opts.layer_type == te.TransformerLayer
+                        and opts.num_layers > 1
+                        and opts.overlap_rs_dgrad
+                    ):
+                        # SM120 + deterministic training disables fused attention for this input shape.
+                        # Runtime then selects an alternate attention backend (typically FlashAttention),
+                        # and the overlap path can show tiny BF16 accumulation-order drift vs reference.
+                        rtol, atol = 0.05, 0.01
                 grad_failed, grad_info = _compare_tensors(names[i], test_g, ref_g, rtol, atol)
                 dist_print(grad_info, src=WORLD_RANK, error=grad_failed)
                 numerics_failed[0] = int(grad_failed)
