@@ -17,7 +17,7 @@ import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch.torch_version import torch_version
-from transformer_engine.pytorch.tensor.utils import is_custom
+from transformer_engine.pytorch.tensor.utils import clear_columnwise_cache, is_custom
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
     get_ub,
@@ -831,7 +831,7 @@ class _LayerNormLinear(torch.autograd.Function):
             # it here.
             # (Issues #2681, #2717)
             if getattr(ctx, "is_fsdp2", False) and isinstance(weight, QuantizedTensorStorage):
-                weight.update_usage(columnwise_usage=False)
+                clear_columnwise_cache(weight)
 
             # Prepare grad input tensor
             # Note: Perform tensor-parallel communication

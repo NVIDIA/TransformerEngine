@@ -1043,6 +1043,21 @@ def _nvfp4_2d_multi_tensor_transpose(nvfp4_tensors: List[NVFP4Tensor]):
     )
 
 
+def clear_columnwise_cache(tensor: QuantizedTensorStorage) -> None:
+    """Clear the columnwise cache of a quantized tensor.
+    Use-case: FSDP2, where TE allocates allgathered
+    columnwise data(by deriving it out of allgathered rowwise data)
+    in fsdp2 hooks. And so FSDP2 cant deallocate it when it's done with it"""
+    if hasattr(tensor, "_columnwise_data"):
+        tensor._columnwise_data = None
+    if hasattr(tensor, "_columnwise_scale_inv"):
+        tensor._columnwise_scale_inv = None
+    if hasattr(tensor, "_transpose"):
+        tensor._transpose = None
+    if hasattr(tensor, "_transpose_invalid"):
+        tensor._transpose_invalid = True
+
+
 def is_custom(x: Optional[Union[Quantizer, QuantizedTensorStorage]] = None) -> bool:
     """Check if an object is custom.
 

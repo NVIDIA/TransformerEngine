@@ -18,7 +18,7 @@ import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch.torch_version import torch_version
-from transformer_engine.pytorch.tensor.utils import is_custom
+from transformer_engine.pytorch.tensor.utils import clear_columnwise_cache, is_custom
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
     _ub_communicators,
@@ -1241,7 +1241,7 @@ class _LayerNormMLP(torch.autograd.Function):
             # even when backward follows gradient-checkpoint recomputation.
             # (Issues #2681, #2717)
             if getattr(ctx, "is_fsdp2", False) and isinstance(fc2_weight, QuantizedTensorStorage):
-                fc2_weight.update_usage(columnwise_usage=False)
+                clear_columnwise_cache(fc2_weight)
 
             # Prepare input grad tensor
             dact = None
@@ -1517,7 +1517,7 @@ class _LayerNormMLP(torch.autograd.Function):
             # even when backward follows gradient-checkpoint recomputation.
             # (Issues #2681, #2717)
             if getattr(ctx, "is_fsdp2", False) and isinstance(fc1_weight, QuantizedTensorStorage):
-                fc1_weight.update_usage(columnwise_usage=False)
+                clear_columnwise_cache(fc1_weight)
 
             # Prepare grad input tensor
             # Note: Perform tensor-parallel communication
