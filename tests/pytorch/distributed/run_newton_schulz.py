@@ -21,11 +21,12 @@ from transformer_engine.pytorch.newton_schulz import (
 )
 
 
-def newton_schulz_reference(in_x: torch.Tensor, coefficients: list[float]) -> torch.Tensor:
+def newton_schulz_reference(
+    in_x: torch.Tensor, coefficients: list[tuple[float, float, float]]
+) -> torch.Tensor:
     """Local Newton-Schulz reference mirroring the provided Octave update."""
     x = in_x.clone()
-    for i in range(len(coefficients) // 3):
-        a, b, c = coefficients[3 * i : 3 * (i + 1)]
+    for a, b, c in coefficients:
         xxt = x @ x.mT
         x = a * x + b * xxt @ x + c * xxt @ xxt @ x
     return x
