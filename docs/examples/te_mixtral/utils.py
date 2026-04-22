@@ -317,12 +317,19 @@ def finetune_model(model, hyperparams, accelerator, train_dataloader, optimizer,
             lr_scheduler.step()
             optimizer.zero_grad()
 
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
+    # Per-step timing: record CUDA events around each step and print as we go.
+    # One sync per step is negligible overhead relative to a multi-hundred-ms step
+    # and gives us the full distribution for steady-state analysis.
+    step_times_ms: list[float] = []
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    is_printer = local_rank == 0
     torch.cuda.synchronize()
-    start.record()
 
-    for _ in range(hyperparams.num_training_steps):
+    for step_idx in range(hyperparams.num_training_steps):
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+
         _, batch = next(train_dataloader)
         with accelerator.accumulate(model):
             outputs = model(**batch)
@@ -333,14 +340,25 @@ def finetune_model(model, hyperparams, accelerator, train_dataloader, optimizer,
             lr_scheduler.step()
             optimizer.zero_grad()
 
-    torch.cuda.synchronize()
-    end.record()
+        end.record()
+        end.synchronize()
+        step_ms = start.elapsed_time(end)
+        step_times_ms.append(step_ms)
+        if is_printer:
+            print(
+                f"[step {step_idx + 1}/{hyperparams.num_training_steps}] {step_ms:.1f} ms",
+                flush=True,
+            )
+
     accelerator.end_training()
 
-    ms_per_step = start.elapsed_time(end) / hyperparams.num_training_steps
+    n = len(step_times_ms)
+    # Steady-state estimate: median of the last few steps, after warmup/transients settle.
+    tail = step_times_ms[-5:]
+    steady_ms = sorted(tail)[len(tail) // 2]
     print(
-        f"{hyperparams.num_training_steps} fine-tuning steps complete!\n"
-        f"Average time per step: {ms_per_step:.0f} ms"
+        f"{n} fine-tuning steps complete!\n"
+        f"Steady-state step time (median of last {len(tail)}): {steady_ms:.0f} ms"
     )
 
 

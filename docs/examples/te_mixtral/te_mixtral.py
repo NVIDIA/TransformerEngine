@@ -845,10 +845,12 @@ class NVMixtralModel(NVMixtralPreTrainedModel):
             attention_mask = ~attention_mask[:, None, None, :].bool()
 
         if isinstance(past_key_values, InferenceParams):
+            # input_ids is None when the caller supplies inputs_embeds directly.
+            _ref = input_ids if input_ids is not None else inputs_embeds
             lengths = (
                 attention_mask.sum(dim=1).tolist()
-                if attention_mask.shape == input_ids.shape
-                else [1] * input_ids.shape[0]
+                if attention_mask.shape[:2] == _ref.shape[:2]
+                else [1] * _ref.shape[0]
             )
             past_key_values.pre_step(OrderedDict(zip(list(range(len(lengths))), lengths)))
 
