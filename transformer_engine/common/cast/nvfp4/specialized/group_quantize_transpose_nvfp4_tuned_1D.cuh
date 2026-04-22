@@ -344,10 +344,10 @@ __device__ __forceinline__ size_t get_nvfp4_scale_stride(const size_t block_scal
 }
 
 template <ShapeRepresentation SHAPE_REP, bool USE_SINGLE_WORK_GRID>
-__device__ __forceinline__ BlockDescriptor decode_block(
-    const JobDescriptor &job,
-    const size_t first_logical_dim, const size_t last_logical_dim, const size_t num_tensors,
-    const int32_t ctaid_X, const int32_t ctaid_Y, const int64_t *const __restrict__ offsets_ptr) {
+__device__ __forceinline__ BlockDescriptor
+decode_block(const JobDescriptor &job, const size_t first_logical_dim,
+             const size_t last_logical_dim, const size_t num_tensors, const int32_t ctaid_X,
+             const int32_t ctaid_Y, const int64_t *const __restrict__ offsets_ptr) {
   (void)first_logical_dim;
   (void)num_tensors;
   (void)ctaid_X;
@@ -378,7 +378,8 @@ __device__ __forceinline__ BlockDescriptor decode_block(
 
   const size_t block_offset_Y = block_id_Y * CHUNK_DIM_Y;
   const size_t block_offset_X = block_id_X * CHUNK_DIM_X;
-  return BlockDescriptor(tensor_base, block_id_in_current_tensor, block_id_Y, block_id_X, block_offset_Y, block_offset_X);
+  return BlockDescriptor(tensor_base, block_id_in_current_tensor, block_id_Y, block_id_X,
+                         block_offset_Y, block_offset_X);
 }
 
 __device__ __forceinline__ void fence_acquire_tensormap(const CUtensorMap *tensor_map) {
@@ -393,8 +394,7 @@ template <bool USE_STOCHASTIC_ROUNDING, bool USE_FAST_MATH, bool RETURN_TRANSPOS
           ShapeRepresentation SHAPE_REP>
 __global__ void __launch_bounds__(THREADS_NUM) group_quantize_transpose_nvfp4_tuned_1D_kernel(
     const size_t num_tensors, const size_t first_logical_dim, const size_t last_logical_dim,
-    const int64_t *const __restrict__ offsets_ptr,
-    const int64_t *const __restrict__ first_dims_ptr,
+    const int64_t *const __restrict__ offsets_ptr, const int64_t *const __restrict__ first_dims_ptr,
     const int64_t *const __restrict__ last_dims_ptr, nvfp4_scale_t *const scales_ptr,
     nvfp4_scale_t *const scales_t_ptr, const float *noop, const float *const amax_rowwise_ptr,
     const float *const amax_colwise_ptr, const size_t amax_rowwise_numel,
@@ -515,17 +515,17 @@ __global__ void __launch_bounds__(THREADS_NUM) group_quantize_transpose_nvfp4_tu
   size_t acquired_tensor_id = MAX_SUPPORTED_TENSOR_DESCRIPTORS + 1;
 
   {
-    current_job = decode_job<SHAPE_REP,CHUNK_DIM_Y,CHUNK_DIM_X>(
-        num_tensors, first_logical_dim, last_logical_dim, work_blocks_X,
-        ctaid_X, ctaid_Y, offsets_ptr, first_dims_ptr, last_dims_ptr);
+    current_job = decode_job<SHAPE_REP, CHUNK_DIM_Y, CHUNK_DIM_X>(
+        num_tensors, first_logical_dim, last_logical_dim, work_blocks_X, ctaid_X, ctaid_Y,
+        offsets_ptr, first_dims_ptr, last_dims_ptr);
 
     current_job_is_valid = is_job_valid<SHAPE_REP>(current_job, total_work_blocks, offsets_ptr);
     if (!current_job_is_valid) {
       return;
     }
-    current_block = decode_block<SHAPE_REP, use_single_work_grid>(
-        current_job, first_logical_dim, last_logical_dim, num_tensors, ctaid_X, ctaid_Y,
-        offsets_ptr);
+    current_block = decode_block<SHAPE_REP, use_single_work_grid>(current_job, first_logical_dim,
+                                                                  last_logical_dim, num_tensors,
+                                                                  ctaid_X, ctaid_Y, offsets_ptr);
     const CUtensorMap &tensor_map_input = g_tensor_maps.input[current_job.tensor_id];
     if (leading_thread) {
       fence_acquire_tensormap(&tensor_map_input);
@@ -625,7 +625,7 @@ __global__ void __launch_bounds__(THREADS_NUM) group_quantize_transpose_nvfp4_tu
     }
 
     if (can_prefetch_next_job && !job_finished) {
-      next_job = decode_job<SHAPE_REP,CHUNK_DIM_Y,CHUNK_DIM_X>(
+      next_job = decode_job<SHAPE_REP, CHUNK_DIM_Y, CHUNK_DIM_X>(
           num_tensors, first_logical_dim, last_logical_dim, work_blocks_X, next_ctaid_X,
           next_ctaid_Y, offsets_ptr, first_dims_ptr, last_dims_ptr);
       next_job_is_valid = is_job_valid<SHAPE_REP>(next_job, total_work_blocks, offsets_ptr);
@@ -654,7 +654,8 @@ __global__ void __launch_bounds__(THREADS_NUM) group_quantize_transpose_nvfp4_tu
         }
       }
 
-      const bool allow_prefetch = (stage < STAGES - PREFETCH_STAGES) || (can_prefetch_next_job && !job_finished);
+      const bool allow_prefetch =
+          (stage < STAGES - PREFETCH_STAGES) || (can_prefetch_next_job && !job_finished);
       if (allow_prefetch) {
         const int next_prefetch_buff = (buff_in + PREFETCH_STAGES) % BUFFS_NUM;
         const int next_prefetch_stage = (stage + PREFETCH_STAGES) % STAGES;
@@ -669,7 +670,7 @@ __global__ void __launch_bounds__(THREADS_NUM) group_quantize_transpose_nvfp4_tu
             static_cast<int>(prefetch_block.block_offset_X) + next_prefetch_stage_offset_X;
 
         const CUtensorMap &prefetch_tensor_map_input = g_tensor_maps.input[prefetch_job.tensor_id];
-        if (leading_thread && stage == STAGES - PREFETCH_STAGES && 
+        if (leading_thread && stage == STAGES - PREFETCH_STAGES &&
             prefetch_job.tensor_id != acquired_tensor_id) {
           fence_acquire_tensormap(&prefetch_tensor_map_input);
         }
@@ -955,17 +956,16 @@ inline void group_quantize_transpose(const GroupedTensor *input, const Tensor *n
 
   const IType *const input_dptr = reinterpret_cast<const IType *>(input->data.dptr);
   const OType *const output_dptr = reinterpret_cast<const OType *>(output->data.dptr);
-  const OType *const output_t_dptr = reinterpret_cast<const OType *>(
-      return_transpose ? output->columnwise_data.dptr : nullptr);
+  const OType *const output_t_dptr =
+      reinterpret_cast<const OType *>(return_transpose ? output->columnwise_data.dptr : nullptr);
 
-  TRANSFORMER_ENGINE_GROUP_TENSOR_SHAPE_REPRESENTATION_SWITCH(shape_rep, SHAPE_REP,
-      common::update_tma_descriptors<IType, OType, SHAPE_REP>
-          <<<num_tensors, 1, 0, stream>>>
-              (tensor_map_input, dummy_tensor_map, tensor_map_output, tensor_map_output_transpose,
-               input_dptr, /*act_input_data_ptr=*/nullptr, output_dptr, output_t_dptr, num_tensors,
-               first_logical_dim, last_logical_dim, offsets_ptr, first_dims_ptr, last_dims_ptr,
-               /*rowwise=*/true, return_transpose, /*compute_dactivations=*/false);
-  );
+  TRANSFORMER_ENGINE_GROUP_TENSOR_SHAPE_REPRESENTATION_SWITCH(
+      shape_rep, SHAPE_REP,
+      common::update_tma_descriptors<IType, OType, SHAPE_REP><<<num_tensors, 1, 0, stream>>>(
+          tensor_map_input, dummy_tensor_map, tensor_map_output, tensor_map_output_transpose,
+          input_dptr, /*act_input_data_ptr=*/nullptr, output_dptr, output_t_dptr, num_tensors,
+          first_logical_dim, last_logical_dim, offsets_ptr, first_dims_ptr, last_dims_ptr,
+          /*rowwise=*/true, return_transpose, /*compute_dactivations=*/false););
   NVTE_CHECK_CUDA(cudaGetLastError());
 
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
@@ -974,25 +974,18 @@ inline void group_quantize_transpose(const GroupedTensor *input, const Tensor *n
           use_fast_math, USE_FAST_MATH,
           TRANSFORMER_ENGINE_SWITCH_CONDITION(
               return_transpose, RETURN_TRANSPOSE,
-              TRANSFORMER_ENGINE_GROUP_TENSOR_SHAPE_REPRESENTATION_SWITCH(
-                  shape_rep, SHAPE_REP,
-                  {
-                    auto kernel = group_quantize_transpose_nvfp4_tuned_1D_kernel<
-                        USE_STOCHASTIC_ROUNDING, USE_FAST_MATH, RETURN_TRANSPOSE,
-                        SHAPE_REP>;
-                    NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-                        kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
-                    kernel<<<grid, block_size, dshmem_size, stream>>>(
-                        num_tensors, first_logical_dim, last_logical_dim, offsets_ptr, first_dims_ptr,
-                        last_dims_ptr, scales_ptr, scales_t_ptr, noop_ptr, amax_rowwise_ptr,
-                        amax_colwise_ptr, amax_rowwise_numel, amax_colwise_numel, work_blocks_X,
-                        work_blocks_Y, rng_state);
-                    NVTE_CHECK_CUDA(cudaGetLastError());
-                  }
-              );
-          );
-      );
-  );
+              TRANSFORMER_ENGINE_GROUP_TENSOR_SHAPE_REPRESENTATION_SWITCH(shape_rep, SHAPE_REP, {
+                auto kernel = group_quantize_transpose_nvfp4_tuned_1D_kernel<
+                    USE_STOCHASTIC_ROUNDING, USE_FAST_MATH, RETURN_TRANSPOSE, SHAPE_REP>;
+                NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+                    kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
+                kernel<<<grid, block_size, dshmem_size, stream>>>(
+                    num_tensors, first_logical_dim, last_logical_dim, offsets_ptr, first_dims_ptr,
+                    last_dims_ptr, scales_ptr, scales_t_ptr, noop_ptr, amax_rowwise_ptr,
+                    amax_colwise_ptr, amax_rowwise_numel, amax_colwise_numel, work_blocks_X,
+                    work_blocks_Y, rng_state);
+                NVTE_CHECK_CUDA(cudaGetLastError());
+              }););););
 #else
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
 #endif

@@ -974,12 +974,13 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
                               use_colwise_scaling
                                   ? reinterpret_cast<OType *>(output->columnwise_data.dptr)
                                   : nullptr;
-                          update_tma_descriptors<IType, OType, SHAPE_REP><<<num_tensors, 1, 0, stream>>>(
-                              tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
-                              tensor_map_output_colwise, input_dptr, act_input_dptr,
-                              output_rowwise_dptr, output_colwise_dptr, num_tensors,
-                              first_logical_dim, last_logical_dim, offsets_ptr, first_dims_ptr,
-                              last_dims_ptr, use_rowwise_scaling, use_colwise_scaling, IS_DACT);
+                          update_tma_descriptors<IType, OType, SHAPE_REP>
+                              <<<num_tensors, 1, 0, stream>>>(
+                                  tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
+                                  tensor_map_output_colwise, input_dptr, act_input_dptr,
+                                  output_rowwise_dptr, output_colwise_dptr, num_tensors,
+                                  first_logical_dim, last_logical_dim, offsets_ptr, first_dims_ptr,
+                                  last_dims_ptr, use_rowwise_scaling, use_colwise_scaling, IS_DACT);
                         }
 
                         auto kernel =
