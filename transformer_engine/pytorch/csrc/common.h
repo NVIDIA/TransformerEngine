@@ -42,6 +42,7 @@
 #include <transformer_engine/swizzle.h>
 #include <transformer_engine/transformer_engine.h>
 #include <transformer_engine/transpose.h>
+#include <transformer_engine/utils.h>
 
 #include <ATen/cuda/CUDAGraphsUtils.cuh>
 #include <cassert>
@@ -123,6 +124,7 @@ class Quantizer {
 
   virtual ~Quantizer() = default;
 
+  DType dtype = DType::kNumTypes;
   bool rowwise_usage = true;
   bool columnwise_usage = true;
   bool internal = false;
@@ -164,7 +166,6 @@ class Float8Quantizer : public Quantizer {
   at::Tensor scale;
   at::Tensor scale_inv;
   at::Tensor amax;
-  DType dtype;
 
   explicit Float8Quantizer(const py::handle& quantizer);
 
@@ -197,7 +198,6 @@ class Float8CurrentScalingQuantizer : public Quantizer {
   at::Tensor scale;
   at::Tensor scale_inv;
   at::Tensor amax;
-  DType dtype;
   bool with_amax_reduction;
   c10::intrusive_ptr<dist_group_type> amax_reduction_group;
   bool force_pow_2_scales = false;
@@ -246,8 +246,6 @@ class Float8CurrentScalingQuantizer : public Quantizer {
 
 class Float8BlockQuantizer : public Quantizer {
  public:
-  // Which float8 type is used for q data.
-  DType dtype;
   // Options about how to quantize the tensor
   // Quantization scales are rounded down to powers of 2.
   bool force_pow_2_scales = false;
@@ -289,8 +287,6 @@ class Float8BlockQuantizer : public Quantizer {
 
 class MXFP8Quantizer : public Quantizer {
  public:
-  DType dtype;
-
   explicit MXFP8Quantizer(const py::handle& quantizer);
 
   NVTEScalingMode get_scaling_mode() const override { return NVTE_MXFP8_1D_SCALING; }
@@ -315,8 +311,6 @@ class MXFP8Quantizer : public Quantizer {
 
 class NVFP4Quantizer : public Quantizer {
  public:
-  // fp4 dtype
-  DType dtype;
   // amax reduction for low precision FP4 AG
   bool with_amax_reduction;
   c10::intrusive_ptr<dist_group_type> amax_reduction_group;

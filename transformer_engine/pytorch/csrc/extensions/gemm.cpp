@@ -9,9 +9,7 @@
 #include <optional>
 #include <string>
 
-#include "../common.h"
 #include "../extensions.h"
-#include "common.h"
 #include "common/util/cuda_runtime.h"
 #include "common/util/system.h"
 #include "pybind.h"
@@ -612,8 +610,9 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
 
 py::object te_general_grouped_gemm_for_grouped_tensor(
     py::handle A, bool transa, py::handle B, bool transb, py::handle D, py::object bias,
-    at::Tensor alpha, at::Tensor beta, at::Tensor workspace_setup, at::Tensor workspace_cublas,
-    bool use_split_accumulator, int math_sm_count) {
+    std::optional<at::Tensor> bias_scale, at::Tensor alpha, at::Tensor beta,
+    at::Tensor workspace_setup, at::Tensor workspace_cublas, bool use_split_accumulator,
+    int math_sm_count) {
   using namespace transformer_engine::pytorch::detail;
 
   init_extension();
@@ -637,8 +636,10 @@ py::object te_general_grouped_gemm_for_grouped_tensor(
   auto gemm_config = prepare_grouped_gemm_config(alpha, beta, workspace_setup, workspace_cublas,
                                                  num_tensors, math_sm_count, use_split_accumulator);
 
-  [[maybe_unused]] auto swizzled_scales_A = maybe_swizzle_grouped_tensor_for_gemm(grouped_A);
-  [[maybe_unused]] auto swizzled_scales_B = maybe_swizzle_grouped_tensor_for_gemm(grouped_B);
+  [[maybe_unused]] auto swizzled_scales_A =
+      maybe_swizzle_grouped_tensor(grouped_A, transa, !transa);
+  [[maybe_unused]] auto swizzled_scales_B =
+      maybe_swizzle_grouped_tensor(grouped_B, transb, !transb);
 
   NVTE_SCOPED_GIL_RELEASE({
     nvte_grouped_gemm(grouped_A.data(), transa, grouped_B.data(), transb, grouped_D.data(),
@@ -652,10 +653,18 @@ py::object te_general_grouped_gemm_for_grouped_tensor(
 
   if (!bias.is_none()) {
     auto grouped_bias = GroupedTensorFromPyTorchGroupedTensor(bias);
-    NVTE_SCOPED_GIL_RELEASE({
-      nvte_grouped_bias_add(grouped_D.data(), grouped_bias.data(),
-                            at::cuda::getCurrentCUDAStream());
-    });
+    if (bias_scale.has_value()) {
+      auto te_bias_scale = makeTransformerEngineTensor(*bias_scale);
+      NVTE_SCOPED_GIL_RELEASE({
+        nvte_grouped_scaled_bias_add(grouped_D.data(), grouped_bias.data(), te_bias_scale.data(),
+                                     at::cuda::getCurrentCUDAStream());
+      });
+    } else {
+      NVTE_SCOPED_GIL_RELEASE({
+        nvte_grouped_bias_add(grouped_D.data(), grouped_bias.data(),
+                              at::cuda::getCurrentCUDAStream());
+      });
+    }
   }
 
   return py::reinterpret_borrow<py::object>(D);
@@ -663,6 +672,7 @@ py::object te_general_grouped_gemm_for_grouped_tensor(
 
 py::object te_general_grouped_gemm_for_discrete_in(py::handle A, bool transa, py::handle B,
                                                    bool transb, py::handle D, py::object bias,
+                                                   std::optional<at::Tensor> bias_scale,
                                                    at::Tensor alpha, at::Tensor beta,
                                                    at::Tensor workspace_setup,
                                                    at::Tensor workspace_cublas,
@@ -704,7 +714,8 @@ py::object te_general_grouped_gemm_for_discrete_in(py::handle A, bool transa, py
   swizzled_scale_inverses_list.emplace_back(
       multi_tensor_swizzle_scales_for_gemm(te_A_wrappers, transa, !transa));
 
-  [[maybe_unused]] auto swizzled_scales_B = maybe_swizzle_grouped_tensor_for_gemm(grouped_B);
+  [[maybe_unused]] auto swizzled_scales_B =
+      maybe_swizzle_grouped_tensor(grouped_B, transb, !transb);
 
   NVTE_SCOPED_GIL_RELEASE({
     nvte_grouped_gemm_with_discrete_inputA(
@@ -719,10 +730,18 @@ py::object te_general_grouped_gemm_for_discrete_in(py::handle A, bool transa, py
 
   if (!bias.is_none()) {
     auto grouped_bias = GroupedTensorFromPyTorchGroupedTensor(bias);
-    NVTE_SCOPED_GIL_RELEASE({
-      nvte_grouped_bias_add(grouped_D.data(), grouped_bias.data(),
-                            at::cuda::getCurrentCUDAStream());
-    });
+    if (bias_scale.has_value()) {
+      auto te_bias_scale = makeTransformerEngineTensor(*bias_scale);
+      NVTE_SCOPED_GIL_RELEASE({
+        nvte_grouped_scaled_bias_add(grouped_D.data(), grouped_bias.data(), te_bias_scale.data(),
+                                     at::cuda::getCurrentCUDAStream());
+      });
+    } else {
+      NVTE_SCOPED_GIL_RELEASE({
+        nvte_grouped_bias_add(grouped_D.data(), grouped_bias.data(),
+                              at::cuda::getCurrentCUDAStream());
+      });
+    }
   }
 
   return py::reinterpret_borrow<py::object>(D);
@@ -730,6 +749,7 @@ py::object te_general_grouped_gemm_for_discrete_in(py::handle A, bool transa, py
 
 py::object te_general_grouped_gemm_for_discrete_out(py::handle A, bool transa, py::handle B,
                                                     bool transb, py::handle D, py::object bias,
+                                                    std::optional<at::Tensor> bias_scale,
                                                     at::Tensor alpha, at::Tensor beta,
                                                     at::Tensor workspace_setup,
                                                     at::Tensor workspace_cublas,
@@ -769,8 +789,10 @@ py::object te_general_grouped_gemm_for_discrete_out(py::handle A, bool transa, p
     te_D_vector.emplace_back(te_D_wrappers.back().data());
   }
 
-  [[maybe_unused]] auto swizzled_scales_A = maybe_swizzle_grouped_tensor_for_gemm(grouped_A);
-  [[maybe_unused]] auto swizzled_scales_B = maybe_swizzle_grouped_tensor_for_gemm(grouped_B);
+  [[maybe_unused]] auto swizzled_scales_A =
+      maybe_swizzle_grouped_tensor(grouped_A, transa, !transa);
+  [[maybe_unused]] auto swizzled_scales_B =
+      maybe_swizzle_grouped_tensor(grouped_B, transb, !transb);
 
   NVTE_SCOPED_GIL_RELEASE({
     nvte_grouped_gemm_with_discrete_out(
@@ -785,5 +807,4 @@ py::object te_general_grouped_gemm_for_discrete_out(py::handle A, bool transa, p
 
   return py::reinterpret_borrow<py::object>(D);
 }
-
 }  // namespace transformer_engine::pytorch
