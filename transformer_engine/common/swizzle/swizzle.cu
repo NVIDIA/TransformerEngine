@@ -1566,7 +1566,9 @@ __global__ void __launch_bounds__(TB_DIM* TB_DIM)
         const size_t* scale_offsets,
         int* global_counter,
         int num_tensors,
-        bool rowwise) {
+        bool rowwise,
+        size_t common_m,
+        size_t common_k) {
 
   __shared__ int linear_block_id;
   while (true) {
@@ -1594,8 +1596,10 @@ __global__ void __launch_bounds__(TB_DIM* TB_DIM)
 
   int local_block_id = linear_block_id - block_offsets[tensor_id];
   
-  size_t M = rowwise ? m_array[tensor_id] : k_array[tensor_id];
-  size_t K = rowwise ? k_array[tensor_id] : m_array[tensor_id];
+  size_t M = rowwise ? (m_array ? m_array[tensor_id] : common_m) 
+                     : (k_array ? k_array[tensor_id] : common_k);
+  size_t K = rowwise ? (k_array ? k_array[tensor_id] : common_k) 
+                     : (m_array ? m_array[tensor_id] : common_m);
   
   size_t padded_m = round_up_to_multiple(M, 128);
   size_t padded_k = round_up_to_multiple(DIVUP(K, static_cast<size_t>(MXFP8_BLOCK_SIZE)), 4);
@@ -1661,7 +1665,9 @@ __global__ void compute_grouped_swizzle_setup(
     int* global_counter,
     size_t num_tensors,
     bool rowwise,
-    size_t scale_elem_size) {
+    size_t scale_elem_size,
+    size_t common_m,
+    size_t common_k) {
 
   if (blockIdx.x == 0 && threadIdx.x == 0) {
     int current_block_offset = 0;
@@ -1671,8 +1677,10 @@ __global__ void compute_grouped_swizzle_setup(
       block_offsets[i] = current_block_offset;
       scale_offsets[i] = current_scale_offset;
       
-      size_t m = rowwise ? m_array[i] : k_array[i];
-      size_t k = rowwise ? k_array[i] : m_array[i];
+      size_t m = rowwise ? (m_array ? m_array[i] : common_m) 
+                         : (k_array ? k_array[i] : common_k);
+      size_t k = rowwise ? (k_array ? k_array[i] : common_k) 
+                         : (m_array ? m_array[i] : common_m);
       
       size_t padded_m = round_up_to_multiple(m, 128);
       size_t padded_k = round_up_to_multiple(DIVUP(k, static_cast<size_t>(MXFP8_BLOCK_SIZE)), 4);
@@ -1724,7 +1732,7 @@ void swizzle_grouped_scaling_factors(const GroupedTensor* input, GroupedTensor* 
 
   const int64_t* m_array = reinterpret_cast<const int64_t*>(input->first_dims.dptr);
   const int64_t* k_array = reinterpret_cast<const int64_t*>(input->last_dims.dptr);
-  const bool is_variable_shape = (m_array != nullptr && k_array != nullptr);
+  const bool is_variable_shape = !input->all_same_shape();
 
   if (!is_variable_shape) {
     // Fallback to uniform shape implementation
@@ -1881,9 +1889,13 @@ void swizzle_grouped_scaling_factors(const GroupedTensor* input, GroupedTensor* 
       const size_t scale_elem_size = rowwise ? typeToSize(input->scale_inv.dtype)
                                              : typeToSize(input->columnwise_scale_inv.dtype);
       
+      size_t common_m = input->all_same_first_dim() ? input->get_common_first_dim() : 0;
+      size_t common_k = input->all_same_last_dim() ? input->get_common_last_dim() : 0;
+
       compute_grouped_swizzle_setup<<<1, 1, 0, stream>>>(
           m_array, k_array, d_block_offsets, d_scale_offsets, d_total_blocks,
-          d_global_counter, num_tensors, rowwise, scale_elem_size);
+          d_global_counter, num_tensors, rowwise, scale_elem_size,
+          common_m, common_k);
 
       NVTE_CHECK_CUDA(cudaFuncSetAttribute(
           grouped_swizzle_scaling_variable_shape_kernel<SF_TILE_DIM_M, SF_TILE_DIM_K>,
@@ -1910,7 +1922,8 @@ void swizzle_grouped_scaling_factors(const GroupedTensor* input, GroupedTensor* 
       grouped_swizzle_scaling_variable_shape_kernel<SF_TILE_DIM_M, SF_TILE_DIM_K>
           <<<num_blocks, block_size, max_slm_size, stream>>>(
               input_ptr, output_ptr, m_array, k_array, d_block_offsets,
-              d_scale_offsets, d_global_counter, num_tensors, rowwise);
+              d_scale_offsets, d_global_counter, num_tensors, rowwise,
+              common_m, common_k);
 
       NVTE_CHECK_CUDA(cudaGetLastError());
     };

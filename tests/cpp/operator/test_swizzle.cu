@@ -637,10 +637,14 @@ INSTANTIATE_TEST_SUITE_P(
     // Case 3: Mixed small/irregular shapes.
     std::vector<std::pair<size_t, size_t>>{{200, 160}, {33, 64}, {1, 32}},
     
-    // Case 4: Large workload to verify persistent grid (looping behavior).
-    // 10 tensors * (4096x4096 data) = 10 * (32x32 tiles) = 10,240 tiles total.
-    // This reliably exceeds the grid size on all modern GPUs.
-    std::vector<std::pair<size_t, size_t>>(10, {4096, 4096})
+    // Case 4: Large workload to verify persistent grid
+    std::vector<std::pair<size_t, size_t>>(10, {4096, 4096}),
+
+    // Case 5: Variable M, Uniform K (Semi-variable)
+    std::vector<std::pair<size_t, size_t>>{{128, 256}, {512, 256}, {64, 256}},
+
+    // Case 6: Uniform M, Variable K (Semi-variable)
+    std::vector<std::pair<size_t, size_t>>{{512, 128}, {512, 1024}, {512, 32}}
   ),
   [](const testing::TestParamInfo<SwizzleGroupedVariableTestSuite::ParamType>& info) {
     return "VariableShapes_" + std::to_string(info.index) + "_N" + std::to_string(info.param.size());
