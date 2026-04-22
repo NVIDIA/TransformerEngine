@@ -1354,26 +1354,30 @@ class ETPWeightCache:
                 new_pool[key] = buffers
         self._pool = new_pool
 
-        # Now remap the quantized params:
+        # Remap quantized params into the CG mempool — but only for params on
+        # the GRAPHED chain. UNGRAPHED-chain params (embedding, output_layer,
+        # and MoE paths whose scope is not captured) run eagerly and don't
+        # need their quantized storage in the CG mempool.
         torch._C._cuda_beginAllocateCurrentThreadToPool(device, mempool)
-        for param in _ETP_PARAMS:
-            weights = param.weight_list if param.is_routed_expert and param.weight_list is not None else [param]
-            for w in weights:
-                if w.quantized is not None:
-                    if isinstance(w.quantized, NVFP4TensorStorage):
-                        w.quantized._rowwise_data = torch.clone(w.quantized._rowwise_data)
-                        w.quantized._columnwise_data = torch.clone(w.quantized._columnwise_data)
-                        w.quantized._rowwise_scale_inv = torch.clone(w.quantized._rowwise_scale_inv)
-                        w.quantized._columnwise_scale_inv = torch.clone(w.quantized._columnwise_scale_inv)
-                        w.quantized._amax_columnwise = torch.clone(w.quantized._amax_columnwise)
-                        w.quantized._amax_rowwise = torch.clone(w.quantized._amax_rowwise)
-                    elif isinstance(w.quantized, MXFP8TensorStorage):
-                        w.quantized._rowwise_data = torch.clone(w.quantized._rowwise_data)
-                        w.quantized._columnwise_data = torch.clone(w.quantized._columnwise_data)
-                        w.quantized._rowwise_scale_inv = torch.clone(w.quantized._rowwise_scale_inv)
-                        w.quantized._columnwise_scale_inv = torch.clone(w.quantized._columnwise_scale_inv)
-                    else:
-                        assert False
+        for w in _ETP_PARAMS:
+            if getattr(w, "chain_id", ETPChain.GRAPHED.value) != ETPChain.GRAPHED.value:
+                continue
+            if w.quantized is None:
+                continue
+            if isinstance(w.quantized, NVFP4TensorStorage):
+                w.quantized._rowwise_data = torch.clone(w.quantized._rowwise_data)
+                w.quantized._columnwise_data = torch.clone(w.quantized._columnwise_data)
+                w.quantized._rowwise_scale_inv = torch.clone(w.quantized._rowwise_scale_inv)
+                w.quantized._columnwise_scale_inv = torch.clone(w.quantized._columnwise_scale_inv)
+                w.quantized._amax_columnwise = torch.clone(w.quantized._amax_columnwise)
+                w.quantized._amax_rowwise = torch.clone(w.quantized._amax_rowwise)
+            elif isinstance(w.quantized, MXFP8TensorStorage):
+                w.quantized._rowwise_data = torch.clone(w.quantized._rowwise_data)
+                w.quantized._columnwise_data = torch.clone(w.quantized._columnwise_data)
+                w.quantized._rowwise_scale_inv = torch.clone(w.quantized._rowwise_scale_inv)
+                w.quantized._columnwise_scale_inv = torch.clone(w.quantized._columnwise_scale_inv)
+            else:
+                assert False
         torch._C._cuda_endAllocateToPool(device, mempool)
 
         return
