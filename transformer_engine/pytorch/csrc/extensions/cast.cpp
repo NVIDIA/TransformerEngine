@@ -529,7 +529,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
     shapes.insert(shapes.end(), rowwise_scale_shapes.begin(), rowwise_scale_shapes.end());
     dtypes.insert(dtypes.end(), num_tensors, torch::kFloat32);
     alignments.insert(alignments.end(), num_tensors, 16);
-    auto tensors = bulk_allocate(shapes, dtypes, alignments);
+    auto tensors = bulk_allocate(shapes, dtypes, std::nullopt, alignments);
 
     // Split data and scale tensors
     for (size_t i = 0; i < num_tensors; ++i) {
@@ -560,7 +560,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_fp
     shapes.insert(shapes.end(), columnwise_scale_shapes.begin(), columnwise_scale_shapes.end());
     dtypes.insert(dtypes.end(), num_tensors, torch::kFloat32);
     alignments.insert(alignments.end(), num_tensors, 16);
-    auto tensors = bulk_allocate(shapes, dtypes, alignments);
+    auto tensors = bulk_allocate(shapes, dtypes, std::nullopt, alignments);
 
     // Split data and scale tensors
     for (size_t i = 0; i < num_tensors; ++i) {
@@ -639,7 +639,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
     shapes.insert(shapes.end(), rowwise_scale_shapes.begin(), rowwise_scale_shapes.end());
     dtypes.insert(dtypes.end(), num_tensors, torch::kUInt8);
     alignments.insert(alignments.end(), num_tensors, 16);
-    auto tensors = bulk_allocate(shapes, dtypes, alignments);
+    auto tensors = bulk_allocate(shapes, dtypes, std::nullopt, alignments);
 
     // Split data and scale tensors
     for (size_t i = 0; i < num_tensors; ++i) {
@@ -667,7 +667,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
     shapes.insert(shapes.end(), columnwise_scale_shapes.begin(), columnwise_scale_shapes.end());
     dtypes.insert(dtypes.end(), num_tensors, torch::kUInt8);
     alignments.insert(alignments.end(), num_tensors, 16);
-    auto tensors = bulk_allocate(shapes, dtypes, alignments);
+    auto tensors = bulk_allocate(shapes, dtypes, std::nullopt, alignments);
 
     // Split data and scale tensors
     for (size_t i = 0; i < num_tensors; ++i) {
@@ -778,7 +778,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
     shapes.insert(shapes.end(), num_tensors, std::vector<size_t>{1});
     dtypes.insert(dtypes.end(), num_tensors, torch::kFloat32);
     alignments.insert(alignments.end(), num_tensors, 16);
-    auto tensors = bulk_allocate(shapes, dtypes, alignments);
+    auto tensors = bulk_allocate(shapes, dtypes, std::nullopt, alignments);
 
     // Split data, scale, and amax tensors
     for (size_t i = 0; i < num_tensors; ++i) {
@@ -830,7 +830,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
     shapes.insert(shapes.end(), num_tensors, std::vector<size_t>{1});
     dtypes.insert(dtypes.end(), num_tensors, torch::kFloat32);
     alignments.insert(alignments.end(), num_tensors, 16);
-    auto tensors = bulk_allocate(shapes, dtypes, alignments);
+    auto tensors = bulk_allocate(shapes, dtypes, std::nullopt, alignments);
 
     // Split data, scale, and amax tensors
     for (size_t i = 0; i < num_tensors; ++i) {

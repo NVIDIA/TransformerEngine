@@ -14,30 +14,51 @@ namespace pytorch {
 
 std::vector<at::Tensor> bulk_allocate(const std::vector<std::vector<size_t>> &shapes,
                                       const std::vector<at::ScalarType> &dtypes,
-                                      const std::vector<size_t> &alignments) {
+                                      std::optional<at::Device> device,
+                                      std::optional<std::vector<size_t>> alignments) {
+  // Check shapes and dtypes
   const size_t n = shapes.size();
   NVTE_CHECK(dtypes.size() == n, "Got ", shapes.size(), " shapes and ", dtypes.size(), " dtypes.");
-  NVTE_CHECK(alignments.size() == n, "Got ", shapes.size(), " shapes and ", alignments.size(),
-             " alignments.");
+  NVTE_CHECK(!alignments || alignments->size() == n,
+             "Got ", shapes.size(), " shapes and ", alignments->size(), " alignments.");
+
+  // Return immediately if no tensors are needed
   if (n == 0) return {};
 
-  // Compute per-tensor sizes and offsets
-  size_t total_bytes = 0;
-  std::vector<size_t> byte_sizes(n);
-  std::vector<size_t> offsets(n);
-  for (size_t i = 0; i < n; ++i) {
-    if (alignments[i] > 0) {
-      total_bytes = roundup(total_bytes, alignments[i]);
+  // Set defaults for optional arguments
+  if (!device) {
+    device = at::Device(at::kCUDA);
+  }
+  if (!alignments) {
+    alignments = std::vector<size_t>{};
+    alignments->reserve(n);
+    for (const auto &dtype : dtypes) {
+      alignments->push_back(c10::elementSize(dtype));
     }
-    offsets[i] = total_bytes;
-    byte_sizes[i] = product(shapes[i]) * at::elementSize(dtypes[i]);
-    total_bytes += byte_sizes[i];
   }
 
-  // Single backing allocation
-  auto buffer = std::make_shared<at::Tensor>(
-      at::empty({static_cast<int64_t>(total_bytes)}, at::device(at::kCUDA).dtype(torch::kUInt8)));
-  uint8_t *data_ptr = buffer->data_ptr<uint8_t>();
+  // Compute offsets in base buffer
+  std::vector<size_t> byte_sizes(n);
+  std::vector<size_t> offsets(n);
+  size_t base_byte_size = 0;
+  size_t base_alignment = 1;
+  for (size_t i = 0; i < n; ++i) {
+    byte_sizes[i] = product(shapes[i]) * at::elementSize(dtypes[i]);
+    offsets[i] = roundup(base_byte_size, (*alignments)[i]);
+    base_byte_size = offsets[i] + byte_sizes[i];
+    base_alignment = std::max(base_alignment, (*alignments)[i]);
+  }
+  if (base_alignment > 1) {
+    // Pad in case data pointer is not aligned
+    base_byte_size += base_alignment;
+  }
+
+  // Allocate base buffer
+  auto base_buffer = std::make_shared<at::Tensor>(
+      at::empty({static_cast<int64_t>(base_byte_size)}, at::device(*device).dtype(torch::kUInt8)));
+  uint8_t *base_ptr = base_buffer->data_ptr<uint8_t>();
+  base_ptr = reinterpret_cast<uint8_t *>(roundup(reinterpret_cast<uintptr_t>(base_ptr),
+                                                 base_alignment));
 
   // Create views into the buffer
   std::vector<at::Tensor> out;
@@ -50,11 +71,11 @@ std::vector<at::Tensor> bulk_allocate(const std::vector<std::vector<size_t>> &sh
       // empty tensor. Passing a null pointer fails because it checks
       // that the pointer is on GPU. Passing a non-null pointer can
       // cause bugs in TE kernels.
-      out.emplace_back(at::empty(shape_int64, at::device(at::kCUDA).dtype(dtypes[i])));
+      out.emplace_back(at::empty(shape_int64, at::device(*device).dtype(dtypes[i])));
     } else {
       out.emplace_back(at::from_blob(
-          data_ptr + offsets[i], shape_int64, [buffer](void *) {},  // Deleter keeps buffer alive
-          at::device(at::kCUDA).dtype(dtypes[i])));
+          base_ptr + offsets[i], shape_int64, [base_buffer](void *) {},  // Deleter keeps buffer alive
+          at::device(*device).dtype(dtypes[i])));
     }
   }
   return out;

@@ -959,7 +959,8 @@ class GroupedLinear(BasicOperation):
                 grad_weights = tex.bulk_allocate(
                     [weight_shape] * num_groups,
                     [ctx.dtype] * num_groups,
-                    [0] * num_groups,  # alignment
+                    device,
+                    [256] * num_groups,  # alignment
                 )
         else:
             accumulate_into_main_grad = False

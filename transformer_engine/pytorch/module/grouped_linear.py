@@ -488,7 +488,8 @@ class _GroupedLinear(torch.autograd.Function):
                     wgrad_list = tex.bulk_allocate(
                         [weight_shape] * ctx.num_gemms,
                         [ctx.activation_dtype] * ctx.num_gemms,
-                        [0] * ctx.num_gemms,  # alignment
+                        ctx.device,
+                        [256] * ctx.num_gemms,  # alignment
                     )
 
                 if ctx.save_original_input:
