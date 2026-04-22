@@ -247,7 +247,7 @@ def check_quantization_nvfp4_versus_reference(
     me_t_rn = torch.sqrt((error_t_rn * error_t_rn).mean())
     sr_result = torch.zeros_like(x).float()
     sr_t_result = torch.zeros_like(x).float().t().contiguous()
-    for i in range(n_iters):
+    for _ in range(n_iters):
         q_sr, s_sr, q_t_sr, s_t_sr = quantize_fp4(
             x, use_stochastic_rounding=True, use_2D=use_2D, use_RHT=use_RHT
         )
@@ -278,8 +278,16 @@ def check_quantization_nvfp4_versus_reference(
 
     print(f"RMSE SR: {me_sr:.3e} | RMSE RN: {me_rn:.3e}")
     print(f"RMSE SR_t: {me_t_sr:.3e} | RMSE RN_t: {me_t_rn:.3e}")
-    assert me_sr < me_rn, "Stochastic rounding failed - error larger than the round to nearest."
-    assert me_t_sr < me_t_rn, "Stochastic rounding failed - error larger than the round to nearest."
+    if torch.cuda.get_device_capability() == (12, 0):
+        # SM120 currently disables NVFP4 stochastic rounding in backend paths,
+        # so SR and RN should be numerically equivalent.
+        torch.testing.assert_close(me_sr, me_rn, atol=2e-7, rtol=0.0)
+        torch.testing.assert_close(me_t_sr, me_t_rn, atol=2e-7, rtol=0.0)
+    else:
+        assert me_sr < me_rn, "Stochastic rounding failed - error larger than the round to nearest."
+        assert (
+            me_t_sr < me_t_rn
+        ), "Stochastic rounding failed - error larger than the round to nearest."
 
 
 def check_group_quantization_nvfp4_versus_reference(
@@ -362,10 +370,16 @@ def check_group_quantization_nvfp4_versus_reference(
 
         print(f"RMSE SR: {me_sr:.3e} | RMSE RN: {me_rn:.3e}")
         print(f"RMSE SR_t: {me_t_sr:.3e} | RMSE RN_t: {me_t_rn:.3e}")
-        assert me_sr < me_rn, "Stochastic rounding failed - error larger than the round to nearest."
-        assert (
-            me_t_sr < me_t_rn
-        ), "Stochastic rounding failed - error larger than the round to nearest."
+        if torch.cuda.get_device_capability() == (12, 0):
+            # SM120 currently disables NVFP4 stochastic rounding in backend paths,
+            # so SR and RN should be numerically equivalent.
+            torch.testing.assert_close(me_sr, me_rn, atol=2e-7, rtol=0.0)
+            torch.testing.assert_close(me_t_sr, me_t_rn, atol=2e-7, rtol=0.0)
+        else:
+            assert me_sr < me_rn, "Stochastic rounding failed - error larger than the round to nearest."
+            assert (
+                me_t_sr < me_t_rn
+            ), "Stochastic rounding failed - error larger than the round to nearest."
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
