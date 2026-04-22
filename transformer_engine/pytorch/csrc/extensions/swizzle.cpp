@@ -141,9 +141,11 @@ std::tuple<std::optional<at::Tensor>, std::optional<at::Tensor>> swizzle_scales_
   return {std::move(rowwise_scales_pyt), std::move(columnwise_scales_pyt)};
 }
 
-std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm(
+namespace {
+
+std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm_impl(
     std::vector<transformer_engine::TensorWrapper> &tensors, bool rowwise_usage,
-    bool columnwise_usage) {
+    bool columnwise_usage, bool check_scale_inv_shapes) {
   // Checks and trivial cases
   NVTE_CHECK(rowwise_usage != columnwise_usage,
              "Expect exactly one of rowwise_usage=", rowwise_usage,
@@ -243,9 +245,15 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm(
 
   // Launch kernel
   NVTE_SCOPED_GIL_RELEASE({
-    nvte_multi_tensor_swizzle_scaling_factors(inputs_nvte_raw.data(), outputs_nvte_raw.data(),
-                                              inputs_nvte_raw.size(),
-                                              at::cuda::getCurrentCUDAStream());
+    if (check_scale_inv_shapes) {
+      nvte_multi_tensor_swizzle_scaling_factors(inputs_nvte_raw.data(), outputs_nvte_raw.data(),
+                                                inputs_nvte_raw.size(),
+                                                at::cuda::getCurrentCUDAStream());
+    } else {
+      nvte_multi_tensor_swizzle_scaling_factors_unchecked(
+          inputs_nvte_raw.data(), outputs_nvte_raw.data(), inputs_nvte_raw.size(),
+          at::cuda::getCurrentCUDAStream());
+    }
   });
 
   // Update tensors with swizzled scales
@@ -267,6 +275,22 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm(
   }
 
   return std::move(output_scales_pyt);
+}
+
+}  // anonymous namespace
+
+std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm(
+    std::vector<transformer_engine::TensorWrapper> &tensors, bool rowwise_usage,
+    bool columnwise_usage) {
+  return multi_tensor_swizzle_scales_for_gemm_impl(tensors, rowwise_usage, columnwise_usage,
+                                                   /*check_scale_inv_shapes=*/true);
+}
+
+std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm_unchecked(
+    std::vector<transformer_engine::TensorWrapper> &tensors, bool rowwise_usage,
+    bool columnwise_usage) {
+  return multi_tensor_swizzle_scales_for_gemm_impl(tensors, rowwise_usage, columnwise_usage,
+                                                   /*check_scale_inv_shapes=*/false);
 }
 
 at::Tensor convert_block_scaling_to_mxfp8_tensor(transformer_engine::TensorWrapper &input,
@@ -441,6 +465,105 @@ void grouped_swizzle_for_gemm(py::handle &tensor, bool rowwise, bool columnwise)
     }
     tensor.attr("_with_gemm_swizzled_scales") = py::cast(true);
   }
+}
+
+namespace {
+
+void inplace_multi_tensor_swizzle_scales_for_gemm_impl(std::vector<py::object> &tensors,
+                                                       bool rowwise_usage, bool columnwise_usage,
+                                                       bool check_scale_inv_shapes) {
+  NVTE_CHECK(rowwise_usage != columnwise_usage,
+             "Expect exactly one of rowwise_usage and columnwise_usage.");
+  if (tensors.empty()) {
+    return;
+  }
+
+  // Convert Python tensors to TensorWrappers, filtering those that need swizzling
+  std::vector<size_t> swizzle_indices;
+  std::vector<transformer_engine::TensorWrapper> wrappers_to_swizzle;
+
+  for (size_t i = 0; i < tensors.size(); ++i) {
+    auto tw = makeTransformerEngineTensor(tensors[i], py::none());
+
+    if (i == 0) {
+      switch (tw.scaling_mode()) {
+        case NVTE_MXFP8_1D_SCALING:
+        case NVTE_NVFP4_1D_SCALING:
+          break;
+        case NVTE_INVALID_SCALING:
+          NVTE_ERROR("Invalid scaling mode for swizzling scaling factors.");
+        default:
+          return;
+      }
+    }
+
+    if (tw.get_with_gemm_swizzled_scales()) {
+      continue;
+    }
+    const auto scales_nvte =
+        rowwise_usage ? tw.get_rowwise_scale_inv() : tw.get_columnwise_scale_inv();
+    if (scales_nvte.data_ptr == nullptr ||
+        (scales_nvte.shape.ndim == 1 && scales_nvte.shape.data[0] == 0)) {
+      continue;
+    }
+
+    swizzle_indices.push_back(i);
+    wrappers_to_swizzle.push_back(std::move(tw));
+  }
+
+  if (wrappers_to_swizzle.empty()) {
+    return;
+  }
+
+  // Delegate to core C++ function
+  auto swizzle_fn = check_scale_inv_shapes ? multi_tensor_swizzle_scales_for_gemm
+                                           : multi_tensor_swizzle_scales_for_gemm_unchecked;
+  auto output_buffer = swizzle_fn(wrappers_to_swizzle, rowwise_usage, columnwise_usage);
+  if (!output_buffer.has_value()) {
+    return;
+  }
+
+  // Update Python objects with properly-shaped views into the contiguous output buffer
+  const uint8_t *base = reinterpret_cast<const uint8_t *>(output_buffer->data_ptr());
+  for (size_t j = 0; j < wrappers_to_swizzle.size(); ++j) {
+    const auto scales_nvte = rowwise_usage ? wrappers_to_swizzle[j].get_rowwise_scale_inv()
+                                           : wrappers_to_swizzle[j].get_columnwise_scale_inv();
+
+    const size_t offset = reinterpret_cast<const uint8_t *>(scales_nvte.data_ptr) - base;
+    const auto dtype = static_cast<DType>(scales_nvte.dtype);
+    const size_t num_elements = product(scales_nvte.shape, 0, scales_nvte.shape.ndim);
+    const size_t num_bytes =
+        ceildiv(num_elements * transformer_engine::pytorch::typeToNumBits(dtype), size_t(8));
+
+    std::vector<int64_t> torch_shape;
+    for (size_t d = 0; d < scales_nvte.shape.ndim; ++d) {
+      torch_shape.push_back(static_cast<int64_t>(scales_nvte.shape.data[d]));
+    }
+    auto scale_view =
+        output_buffer->narrow(0, static_cast<int64_t>(offset), static_cast<int64_t>(num_bytes))
+            .view(torch_shape);
+
+    if (rowwise_usage) {
+      tensors[swizzle_indices[j]].attr("_rowwise_scale_inv") = py::cast(scale_view);
+    } else {
+      tensors[swizzle_indices[j]].attr("_columnwise_scale_inv") = py::cast(scale_view);
+    }
+  }
+}
+
+}  // anonymous namespace
+
+void inplace_multi_tensor_swizzle_scales_for_gemm(std::vector<py::object> &tensors,
+                                                  bool rowwise_usage, bool columnwise_usage) {
+  inplace_multi_tensor_swizzle_scales_for_gemm_impl(tensors, rowwise_usage, columnwise_usage,
+                                                    /*check_scale_inv_shapes=*/true);
+}
+
+void inplace_multi_tensor_swizzle_scales_for_gemm_unchecked(std::vector<py::object> &tensors,
+                                                            bool rowwise_usage,
+                                                            bool columnwise_usage) {
+  inplace_multi_tensor_swizzle_scales_for_gemm_impl(tensors, rowwise_usage, columnwise_usage,
+                                                    /*check_scale_inv_shapes=*/false);
 }
 
 void inplace_swizzle_scale_for_gemm(py::handle &tensor) {

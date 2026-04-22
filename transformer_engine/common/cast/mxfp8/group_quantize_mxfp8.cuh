@@ -109,11 +109,15 @@ __device__ __forceinline__ void process_colwise_stage(
   const size_t global_scales_offset_Y = scales_offset_Y_colwise + stage;
   const size_t global_scales_offset_X = scales_offset_X_colwise;
 
+  const bool colwise_scale_is_within_bounds = global_scales_offset_X < cols;
+
   size_t scale_idx = 0;
   if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
     const size_t tensor_base_row = tensor_base_for_scales / cols;
     const size_t tensor_scales_offset_Y_base = tensor_base_row / SCALE_DIM_Y;
-    const size_t tensor_scales_offset_colwise_base = tensor_base_for_scales / SCALE_DIM_Y;
+    const size_t cols_padded = DIVUP(cols, static_cast<size_t>(scale_tensor_alignment_X_colwise)) *
+                               static_cast<size_t>(scale_tensor_alignment_X_colwise);
+    const size_t tensor_scales_offset_colwise_base = tensor_base_row * cols_padded / SCALE_DIM_Y;
     const size_t local_scales_offset_Y = global_scales_offset_Y - tensor_scales_offset_Y_base;
     scale_idx = tensor_scales_offset_colwise_base +
                 transformer_engine::dispatch::mxfp8::swizzle::gemm_swizzled_scale_idx(
@@ -164,7 +168,9 @@ __device__ __forceinline__ void process_colwise_stage(
 
     const e8m0_t biased_exponent =
         ptx::float_to_e8m0(thread_amax * Quantized_Limits<OType>::max_norm_rcp);
-    scales_colwise[scale_idx] = biased_exponent;
+    // OOB padded region needs to be zeroed out.
+    scales_colwise[scale_idx] =
+        colwise_scale_is_within_bounds ? biased_exponent : static_cast<e8m0_t>(0);
 
     const bf16 block_scale_inverse = ptx::exp2f_rcp<bf16>(biased_exponent);
     const ptx::bf16x2 block_scale_inverse_bf16_x2 = {block_scale_inverse, block_scale_inverse};
@@ -234,7 +240,9 @@ __device__ __forceinline__ void process_colwise_stage(
 
     const e8m0_t biased_exponent =
         ptx::float_to_e8m0(thread_amax * Quantized_Limits<OType>::max_norm_rcp);
-    scales_colwise[scale_idx] = biased_exponent;
+    // OOB padded region needs to be zeroed out.
+    scales_colwise[scale_idx] =
+        colwise_scale_is_within_bounds ? biased_exponent : static_cast<e8m0_t>(0);
 
     const float block_scale_inverse = ptx::exp2f_rcp<float>(biased_exponent);
 #pragma unroll
@@ -393,9 +401,9 @@ __device__ __forceinline__ void process_rowwise_stage(
   } else {
     scale_idx = stage_scales_offset_Y * scale_stride_rowwise + stage_scales_offset_X;
   }
-  if (rowwise_scale_is_within_bounds) {
-    scales_rowwise[scale_idx] = biased_exponent;
-  }
+  // OOB padded region needs to be zeroed out.
+  scales_rowwise[scale_idx] =
+      rowwise_scale_is_within_bounds ? biased_exponent : static_cast<e8m0_t>(0);
 
   const bf16 block_scale_inverse_bf16 = ptx::exp2f_rcp<bf16>(biased_exponent);
   const ptx::bf16x2 block_scale_inverse_bf16_x2 = {block_scale_inverse_bf16,
