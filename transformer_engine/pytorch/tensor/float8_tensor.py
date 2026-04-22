@@ -271,6 +271,13 @@ class Float8CurrentScalingQuantizer(Quantizer):
         amax: Optional[torch.Tensor] = None,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
+        if use_existing_amax or scale is not None or amax is not None:
+            warnings.warn(
+                "Float8CurrentScalingQuantizer ignores `use_existing_amax`, `scale`, "
+                "and `amax`; kept for backward compatibility and will be removed.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         del device, use_existing_amax, scale, amax  # Kept for backward compatibility
         self.dtype = fp8_dtype
         self.with_amax_reduction = with_amax_reduction
