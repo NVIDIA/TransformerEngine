@@ -1131,7 +1131,8 @@ void fused_attn_arbitrary_seqlen_fwd(
 
     Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     output_S->data.dptr = nullptr;
-    if ((q_format == NVTE_QKV_Format::NVTE_THD && cudnn_runtime_version >= 90600) && (sm_arch_ != 120)) {
+    if ((q_format == NVTE_QKV_Format::NVTE_THD && cudnn_runtime_version >= 90600) &&
+        (sm_arch_ != 120)) {
       output_S->data.shape = {num_tokens_q, num_attn_heads, 1};
     } else {
       output_S->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};

@@ -121,7 +121,7 @@ def test_custom_recipe_grouped_linear_sanity():
     out_features = 64
     # Use 16-aligned splits on SM120 to satisfy FP8 GEMM leading-dimension requirements in backward.
     is_sm120 = torch.cuda.get_device_capability() == (12, 0)
-    if is_sm120:    
+    if is_sm120:
         split_m = 16
         batch = num_gemms * split_m
         m_splits = [split_m] * num_gemms

@@ -107,15 +107,15 @@ std::vector<size_t> get_split_sections_for_sm120_fallback(std::optional<at::Tens
   std::vector<size_t> split_sections(num_tensors, 0);
   const int64_t *first_dims_ptr = first_dims_cpu.data_ptr<int64_t>();
   for (size_t i = 0; i < num_tensors; ++i) {
-    NVTE_CHECK(first_dims_ptr[i] >= 0, "first_dims must be non-negative, got ",
-               first_dims_ptr[i], " at index ", i, ".");
+    NVTE_CHECK(first_dims_ptr[i] >= 0, "first_dims must be non-negative, got ", first_dims_ptr[i],
+               " at index ", i, ".");
     split_sections[i] = static_cast<size_t>(first_dims_ptr[i]);
   }
   return split_sections;
 }
 
-std::vector<TensorWrapper> get_grouped_outputs_for_sm120_fallback(const py::object &grouped_output_py,
-                                                                  size_t num_tensors) {
+std::vector<TensorWrapper> get_grouped_outputs_for_sm120_fallback(
+    const py::object &grouped_output_py, size_t num_tensors) {
   py::list split_outputs = grouped_output_py.attr("split_into_quantized_tensors")();
   NVTE_CHECK(static_cast<size_t>(py::len(split_outputs)) == num_tensors, "Expected ", num_tensors,
              " output tensors, but got ", py::len(split_outputs), ".");
@@ -223,9 +223,9 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
 
   // Create input GroupedTensor.
   auto grouped_input_tensor = GroupedTensorWrapper(num_tensors, logical_shape);
-  grouped_input_tensor.set_rowwise_data(
-      input_contiguous.data_ptr(), GetTransformerEngineDType(input_contiguous.scalar_type()),
-      getTensorShape(input_contiguous));
+  grouped_input_tensor.set_rowwise_data(input_contiguous.data_ptr(),
+                                        GetTransformerEngineDType(input_contiguous.scalar_type()),
+                                        getTensorShape(input_contiguous));
 
   // Create output GroupedTensor.
   auto [grouped_output_tensor_cpp, grouped_output_py] = quantizer_cpp->create_grouped_tensor(
@@ -258,8 +258,7 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
     case GroupedQuantizationMode::NVFP4_GROUPED_QUANTIZE: {
       // NVFP4 grouped quantization
       NVFP4Quantizer *nvfp4_quantizer_cpp = static_cast<NVFP4Quantizer *>(quantizer_cpp.get());
-      const bool enable_sm120_grouped_nvfp4_fallback =
-          is_sm120_device() && first_dims.has_value();
+      const bool enable_sm120_grouped_nvfp4_fallback = is_sm120_device() && first_dims.has_value();
       if (enable_sm120_grouped_nvfp4_fallback) {
         // SM120 fallback does not support GEMM-swizzled NVFP4 scale layouts in this path.
         // Treat optimize_for_gemm as a no-op and keep scales in regular layout.
@@ -272,18 +271,19 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
         input_list.reserve(num_tensors);
         auto *input_dptr = reinterpret_cast<uint8_t *>(input_contiguous.data_ptr());
         const auto input_dtype = GetTransformerEngineDType(input_contiguous.scalar_type());
-        const size_t dim0_stride =
-            logical_first_dim == 0
-                ? 0
-                : static_cast<size_t>(input_contiguous.element_size()) *
-                      static_cast<size_t>(input_contiguous.numel()) / logical_first_dim;
+        const size_t dim0_stride = logical_first_dim == 0
+                                       ? 0
+                                       : static_cast<size_t>(input_contiguous.element_size()) *
+                                             static_cast<size_t>(input_contiguous.numel()) /
+                                             logical_first_dim;
         size_t dim0_offset = 0;
         for (size_t i = 0; i < num_tensors; ++i) {
           NVTE_CHECK(dim0_offset + split_sections[i] <= logical_first_dim,
                      "Split sections exceed input tensor first dimension.");
           std::vector<size_t> split_shape = {split_sections[i], logical_last_dim};
           void *split_dptr = static_cast<void *>(input_dptr + dim0_offset * dim0_stride);
-          input_list.emplace_back(makeTransformerEngineTensor(split_dptr, split_shape, input_dtype));
+          input_list.emplace_back(
+              makeTransformerEngineTensor(split_dptr, split_shape, input_dtype));
           dim0_offset += split_sections[i];
         }
         auto output_list = get_grouped_outputs_for_sm120_fallback(grouped_output_py, num_tensors);

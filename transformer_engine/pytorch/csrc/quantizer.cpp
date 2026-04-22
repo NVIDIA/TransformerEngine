@@ -1932,8 +1932,7 @@ std::pair<GroupedTensorWrapper, py::object> NVFP4Quantizer::create_grouped_tenso
   }
 
   const bool enable_sm120_grouped_nvfp4_fallback =
-      first_dims.has_value() &&
-      ([]() {
+      first_dims.has_value() && ([]() {
         cudaDeviceProp device_prop{};
         NVTE_CHECK_CUDA(cudaGetDeviceProperties(&device_prop, c10::cuda::current_device()));
         return device_prop.major == 12 && device_prop.minor == 0;
