@@ -109,15 +109,11 @@ __device__ __forceinline__ void process_colwise_stage(
   const size_t global_scales_offset_Y = scales_offset_Y_colwise + stage;
   const size_t global_scales_offset_X = scales_offset_X_colwise;
 
-  const bool colwise_scale_is_within_bounds = global_scales_offset_X < cols;
-
   size_t scale_idx = 0;
   if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
     const size_t tensor_base_row = tensor_base_for_scales / cols;
     const size_t tensor_scales_offset_Y_base = tensor_base_row / SCALE_DIM_Y;
-    const size_t cols_padded = DIVUP(cols, static_cast<size_t>(scale_tensor_alignment_X_colwise)) *
-                               static_cast<size_t>(scale_tensor_alignment_X_colwise);
-    const size_t tensor_scales_offset_colwise_base = tensor_base_row * cols_padded / SCALE_DIM_Y;
+    const size_t tensor_scales_offset_colwise_base = tensor_base_for_scales / SCALE_DIM_Y;
     const size_t local_scales_offset_Y = global_scales_offset_Y - tensor_scales_offset_Y_base;
     scale_idx = tensor_scales_offset_colwise_base +
                 transformer_engine::dispatch::mxfp8::swizzle::gemm_swizzled_scale_idx(
@@ -168,9 +164,7 @@ __device__ __forceinline__ void process_colwise_stage(
 
     const e8m0_t biased_exponent =
         ptx::float_to_e8m0(thread_amax * Quantized_Limits<OType>::max_norm_rcp);
-    // OOB padded region needs to be zeroed out.
-    scales_colwise[scale_idx] =
-        colwise_scale_is_within_bounds ? biased_exponent : static_cast<e8m0_t>(0);
+    scales_colwise[scale_idx] = biased_exponent;
 
     const bf16 block_scale_inverse = ptx::exp2f_rcp<bf16>(biased_exponent);
     const ptx::bf16x2 block_scale_inverse_bf16_x2 = {block_scale_inverse, block_scale_inverse};
@@ -240,9 +234,7 @@ __device__ __forceinline__ void process_colwise_stage(
 
     const e8m0_t biased_exponent =
         ptx::float_to_e8m0(thread_amax * Quantized_Limits<OType>::max_norm_rcp);
-    // OOB padded region needs to be zeroed out.
-    scales_colwise[scale_idx] =
-        colwise_scale_is_within_bounds ? biased_exponent : static_cast<e8m0_t>(0);
+    scales_colwise[scale_idx] = biased_exponent;
 
     const float block_scale_inverse = ptx::exp2f_rcp<float>(biased_exponent);
 #pragma unroll
@@ -401,9 +393,9 @@ __device__ __forceinline__ void process_rowwise_stage(
   } else {
     scale_idx = stage_scales_offset_Y * scale_stride_rowwise + stage_scales_offset_X;
   }
-  // OOB padded region needs to be zeroed out.
-  scales_rowwise[scale_idx] =
-      rowwise_scale_is_within_bounds ? biased_exponent : static_cast<e8m0_t>(0);
+  if (rowwise_scale_is_within_bounds) {
+    scales_rowwise[scale_idx] = biased_exponent;
+  }
 
   const bf16 block_scale_inverse_bf16 = ptx::exp2f_rcp<bf16>(biased_exponent);
   const ptx::bf16x2 block_scale_inverse_bf16_x2 = {block_scale_inverse_bf16,
@@ -444,6 +436,26 @@ __device__ __forceinline__ void process_rowwise_stage(
       out.store_to(&sOutRowwise[buff][i][j]);
     }
   }
+}
+
+template <ShapeRepresentation SHAPE_REP, size_t CHUNK_DIM_Y, size_t CHUNK_DIM_X>
+__device__ __forceinline__ BlockDescriptor
+decode_block(const JobDescriptor &job, const int64_t *const __restrict__ offsets_ptr) {
+  constexpr bool is_single_tensor = (SHAPE_REP == ShapeRepresentation::SAME_BOTH_DIMS ||
+                                     SHAPE_REP == ShapeRepresentation::VARYING_FIRST_DIM);
+  constexpr size_t ELTS_PER_CHUNK = CHUNK_DIM_Y * CHUNK_DIM_X;
+  const size_t blocks_X_num_in_current_tensor = DIVUP(job.cols, CHUNK_DIM_X);
+  // SAME_BOTH_DIMS and VARYING_FIRST_DIM still use a single static tensor map that spans the
+  // entire logical matrix, so CTA coordinates must remain in global logical-space.
+  const size_t tensor_base = is_single_tensor ? 0 : static_cast<size_t>(offsets_ptr[job.tensor_id]);
+  const size_t block_id_in_current_tensor =
+      is_single_tensor ? job.block_id : (job.block_id - tensor_base / ELTS_PER_CHUNK);
+  const size_t block_id_Y = block_id_in_current_tensor / blocks_X_num_in_current_tensor;
+  const size_t block_id_X = block_id_in_current_tensor % blocks_X_num_in_current_tensor;
+  const size_t block_offset_Y = block_id_Y * CHUNK_DIM_Y;
+  const size_t block_offset_X = block_id_X * CHUNK_DIM_X;
+  return BlockDescriptor(tensor_base, block_id_in_current_tensor, block_id_Y, block_id_X,
+                         block_offset_Y, block_offset_X);
 }
 
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
@@ -962,10 +974,10 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
                               use_colwise_scaling
                                   ? reinterpret_cast<OType *>(output->columnwise_data.dptr)
                                   : nullptr;
-                          update_tma_descriptors<IType, OType><<<num_tensors, 1, 0, stream>>>(
+                          update_tma_descriptors<IType, OType, SHAPE_REP><<<num_tensors, 1, 0, stream>>>(
                               tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
                               tensor_map_output_colwise, input_dptr, act_input_dptr,
-                              output_rowwise_dptr, output_colwise_dptr, shape_rep, num_tensors,
+                              output_rowwise_dptr, output_colwise_dptr, num_tensors,
                               first_logical_dim, last_logical_dim, offsets_ptr, first_dims_ptr,
                               last_dims_ptr, use_rowwise_scaling, use_colwise_scaling, IS_DACT);
                         }
