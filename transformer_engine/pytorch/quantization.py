@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import abc
+import dataclasses
 import itertools
 import warnings
 import os
@@ -41,6 +42,9 @@ __all__ = [
     "is_nvfp4_available",
     "get_default_recipe",
     "get_align_size_for_quantization",
+    "QuantizerRole",
+    "QuantizerRequest",
+    "DelayedScalingRequest",
 ]
 
 
@@ -48,6 +52,99 @@ _FP8_SUPPORT: Optional[Tuple[bool, str]] = None
 _MXFP8_SUPPORT: Optional[Tuple[bool, str]] = None
 _NVFP4_SUPPORT: Optional[Tuple[bool, str]] = None
 _FP8_BLOCK_SCALING_SUPPORT: Optional[Tuple[bool, str]] = None
+
+
+@dataclasses.dataclass(frozen=True)
+class QuantizerRole:
+    """Identity of a tensor slot requesting a quantizer.
+
+    TE modules populate all fields they know about.
+    User factories inspect only the fields they care about.
+
+    .. warning::
+        **EXPERIMENTAL**: QuantizerRole is experimental, still under active development,
+        and the API is subject to change without notice. Use at your own risk.
+
+    Fields
+    ------
+    module_type : str
+        Module type that emits this role, e.g. `"linear"`, `"grouped_linear"`, `"dpa"`.
+        Empty string when not provided.
+    tensor_type : str
+        What tensor is being quantized, in the module's own vocabulary.
+        Linear modules: `"input"`, `"weight"`, `"grad_output"`, etc.
+        DPA: `"qkv"`, `"s"`, etc.
+        Empty string when not provided.
+    name : str
+        Caller-provided module instance name (e.g. set by the training
+        framework), e.g.
+        `"qkv"`, `"proj"`, `"fc1"`, `"fc2"`, `"linear_39"`.
+        Empty string when not provided.
+    """
+
+    module_type: str = ""
+    tensor_type: str = ""
+    name: str = ""
+
+    def __str__(self) -> str:
+        parts = []
+        if self.module_type:
+            parts.append(f"module_type={self.module_type}")
+        if self.tensor_type:
+            parts.append(f"tensor_type={self.tensor_type}")
+        if self.name:
+            parts.append(f"name={self.name}")
+        return "|".join(parts) if parts else "QuantizerRole()"
+
+
+@dataclasses.dataclass(frozen=True)
+class QuantizerRequest:
+    """Base class for stateful quantizer requests.
+
+    Custom recipe factories return ``QuantizerRequest`` subclasses (instead of
+    quantizer instances) when the quantizer requires TE-managed shared state.
+    TE detects these requests, allocates the required state, and replaces them
+    with real quantizer instances.
+
+    .. warning::
+        **EXPERIMENTAL**: QuantizerRequest is experimental, still under active
+        development, and the API is subject to change without notice.
+    """
+
+
+@dataclasses.dataclass(frozen=True)
+class DelayedScalingRequest(QuantizerRequest):
+    """Request a Float8Quantizer with TE-managed delayed scaling state.
+
+    .. warning::
+        **EXPERIMENTAL**: DelayedScalingRequest is experimental, still under active
+        development, and the API is subject to change without notice.
+
+    All ``DelayedScalingRequest`` instances within the same ``CustomRecipeState``
+    must share identical parameter values.
+
+    Parameters
+    ----------
+    fp8_format : Format, default = Format.HYBRID
+        Controls fwd/bwd dtype (HYBRID = E4M3 fwd, E5M2 bwd).
+    margin : int, default = 0
+        Margin for scaling factor computation.
+    amax_history_len : int, default = 1024
+        Length of the amax history window.
+    amax_compute_algo : str or Callable, default = "max"
+        Algorithm for choosing amax from history.
+    scaling_factor_compute_algo : Callable or None, default = None
+        Custom scaling factor computation.
+    reduce_amax : bool, default = True
+        Whether to all-reduce amax across the distributed group.
+    """
+
+    fp8_format: Format = Format.HYBRID
+    margin: int = 0
+    amax_history_len: int = 1024
+    amax_compute_algo: Union[str, Callable] = "max"
+    scaling_factor_compute_algo: Optional[Callable] = None
+    reduce_amax: bool = True
 
 
 def _compute_fp8_support() -> Tuple[bool, str]:
@@ -383,7 +480,7 @@ class FP8GlobalStateManager:
         fp8_meta: Dict[str, Any],
     ) -> None:
         """
-        Delayed scaling only.
+        Delayed scaling only (built-in or custom recipe with DS requests).
 
         The amax reduction process happens completely outside the FP8 modules.
         To participate in the reduction, the only role played by a module is
@@ -398,8 +495,8 @@ class FP8GlobalStateManager:
         wrapper. For non CG case, it's called from within the module.
         """
 
-        # delayed scaling only function, noop for any other recipe
-        if not fp8_meta["recipe"].delayed():
+        # noop unless delayed scaling state is present
+        if not _has_delayed_scaling_state(fp8_meta):
             return
 
         # Every module must call this function exactly once since
@@ -417,7 +514,17 @@ class FP8GlobalStateManager:
                 # Handles non-parameter FP8 modules, e.g. DPA.
                 continue
 
-            key = cls.get_key_in_buffer(forward, fp8_meta["recipe"], fp8_meta["fp8_group"])
+            state = fp8_meta[fp8_meta_tensor_key]
+
+            # Determine recipe + buffers: built-in DS or custom with DS requests
+            if isinstance(state, CustomRecipeState) and state._has_delayed_scaling:
+                inner_recipe = state._inner_delayed_scaling_recipe
+                key = cls.get_key_in_buffer(forward, inner_recipe, fp8_meta["fp8_group"])
+                # Register inner recipe in autocast_arguments for reduction
+                autocast_key = cls.get_unique_autocast_key(inner_recipe, fp8_meta["fp8_group"])
+                cls.autocast_arguments[autocast_key] = (inner_recipe, fp8_meta["fp8_group"])
+            else:
+                key = cls.get_key_in_buffer(forward, fp8_meta["recipe"], fp8_meta["fp8_group"])
 
             if key not in qstate.global_amax_buffer:
                 qstate.global_amax_buffer[key] = [fp8_meta[fp8_meta_tensor_key].amax_history[0]]
@@ -655,7 +762,7 @@ class FP8GlobalStateManager:
         """
 
         # delayed scaling only function, noop for any other recipe
-        if not fp8_meta["recipe"].delayed():
+        if not _has_delayed_scaling_state(fp8_meta):
             return
 
         buffer_position_key = "global_fp8_buffer_pos_fwd_recompute"
@@ -682,7 +789,7 @@ class FP8GlobalStateManager:
         1 forward for indentical numerical outputs.
         """
         # delayed scaling only function, noop for any other recipe
-        if not fp8_meta["recipe"].delayed():
+        if not _has_delayed_scaling_state(fp8_meta):
             return
 
         # Store updated amaxes and scales from phase 1 post forward.
@@ -703,7 +810,7 @@ class FP8GlobalStateManager:
     def restore_fp8_meta_tensors(fp8_meta: Dict[str, Any]) -> None:
         """Restore latest scaling factors and amaxes after recompute forward run."""
         # delayed scaling only function, noop for any other recipe
-        if not fp8_meta["recipe"].delayed():
+        if not _has_delayed_scaling_state(fp8_meta):
             return
 
         fp8_meta["scaling_fwd"].amax_history.copy_(fp8_meta["updated_amax_history_fwd"])
@@ -1035,6 +1142,7 @@ class RecipeState(abc.ABC):
         mode: str,
         num_quantizers: int = 1,
         device: Optional[torch.device] = None,
+        roles: Optional[list[QuantizerRole]] = None,
     ) -> RecipeState:
         """Factory method to create the state for a quantization recipe
 
@@ -1048,6 +1156,8 @@ class RecipeState(abc.ABC):
             Number of quantizers to create state for.
         device: torch.device, default = default CUDA device
             Device for quantized tensors.
+        roles: list of QuantizerRole, optional
+            Semantic roles for each quantizer slot.
 
         Returns
         -------
@@ -1071,12 +1181,15 @@ class RecipeState(abc.ABC):
             cls = CustomRecipeState
         else:
             raise ValueError(f"{recipe.__class__.__name__} is not supported")
-        return cls(
+        state = cls(
             recipe,
             mode=mode,
             num_quantizers=num_quantizers,
             device=device,
         )
+        # Optional QuantizerRole objects
+        state.roles = roles
+        return state
 
     @abc.abstractmethod
     def make_quantizers(self) -> list:
@@ -1396,13 +1509,95 @@ class NVFP4BlockScalingRecipeState(RecipeState):
         raise RuntimeError(f"Unexpected recipe mode ({self.mode})")
 
 
+def _handle_delayed_scaling_requests(
+    raw: list,
+    device: torch.device,
+    mode: str,
+) -> Optional["DelayedScalingRecipeState"]:
+    """Detect DelayedScalingRequest items, allocate shared state, replace with real quantizers.
+
+    All DS requests in the same RecipeState must share identical parameters.
+
+    Returns a ``DelayedScalingRecipeState`` owning the shared buffers, or
+    ``None`` when no DS requests are present.
+    """
+    ds_items = [(i, r) for i, r in enumerate(raw) if isinstance(r, DelayedScalingRequest)]
+    if not ds_items:
+        return None
+
+    r0 = ds_items[0][1]
+
+    # Validate all DS requests share same params
+    for idx, req in ds_items[1:]:
+        for field_name in (
+            "fp8_format",
+            "margin",
+            "amax_history_len",
+            "amax_compute_algo",
+            "scaling_factor_compute_algo",
+            "reduce_amax",
+        ):
+            v0 = getattr(r0, field_name)
+            vi = getattr(req, field_name)
+            if v0 != vi:
+                raise ValueError(
+                    "All DelayedScalingRequests in one CustomRecipeState must match. "
+                    f"Slot 0 has {field_name}={v0!r}, slot {idx} has {vi!r}."
+                )
+
+    # Build a real DelayedScalingRecipeState to own the shared buffers.
+    inner_recipe = DelayedScaling(
+        fp8_format=r0.fp8_format,
+        margin=r0.margin,
+        amax_history_len=r0.amax_history_len,
+        amax_compute_algo=r0.amax_compute_algo,
+        scaling_factor_compute_algo=r0.scaling_factor_compute_algo,
+        reduce_amax=r0.reduce_amax,
+    )
+    n = len(ds_items)
+    dsrs = DelayedScalingRecipeState(
+        inner_recipe,
+        mode=mode,
+        num_quantizers=n,
+        device=device,
+    )
+
+    # Splice Float8Quantizer instances (backed by dsrs buffers) into raw list.
+    quantizers = dsrs.make_quantizers()
+    for j, (idx, _req) in enumerate(ds_items):
+        raw[idx] = quantizers[j]
+
+    return dsrs
+
+
+def _has_delayed_scaling_state(fp8_meta: Dict[str, Any]) -> bool:
+    """Check if fp8_meta has delayed scaling state (built-in or custom)."""
+    if fp8_meta["recipe"].delayed():
+        return True
+    if fp8_meta["recipe"].custom():
+        for key in ("scaling_fwd", "scaling_bwd"):
+            state = fp8_meta.get(key)
+            if isinstance(state, CustomRecipeState) and state._has_delayed_scaling:
+                return True
+    return False
+
+
 class CustomRecipeState(RecipeState):
-    """State for CustomRecipe: produce quantizers per tensor."""
+    """State for CustomRecipe: produce quantizers per tensor.
+
+    Stateful quantizer support:
+    - Supports stateful quantizers (e.g. delayed scaling) via ``DelayedScalingRequest``.
+    - The factory returns request dataclasses for stateful quantizers; TE detects them,
+      allocates shared buffers, and replaces with real quantizer instances.
+    - Stateful recipe state is composed via real TE recipe state objects (e.g.
+      ``DelayedScalingRecipeState``), not reimplemented.
+    """
 
     recipe: CustomRecipe
     mode: str
     num_quantizers: int
     device: Optional[torch.device]
+    _ds_state: Optional[DelayedScalingRecipeState]
 
     def __init__(
         self,
@@ -1418,32 +1613,61 @@ class CustomRecipeState(RecipeState):
         if device is None:
             device = torch.device("cuda")
         self.device = device
+        self._ds_state = None
 
         if getattr(recipe, "qfactory", None) is None:
             raise ValueError("CustomRecipe requires `qfactory`.")
 
     def make_quantizers(self) -> list:
         qfactory = self.recipe.qfactory
-        out = []
 
-        # TODO(negvet): make_quantizers() should take roles from the operation
-        # Hardcode linear-specific roles for now
-        roles: List[str]
-        if self.mode == "forward":
-            roles = [
-                ("linear_input", "linear_weight", "linear_output")[i % 3]
-                for i in range(self.num_quantizers)
-            ]
-        elif self.mode == "backward":
-            roles = [
-                ("linear_grad_output", "linear_grad_input")[i % 2]
-                for i in range(self.num_quantizers)
-            ]
-        else:
-            roles = ["unknown"] * self.num_quantizers
+        roles: List[QuantizerRole] = getattr(self, "roles", None)
+        if roles is None:
+            warnings.warn(
+                "CustomRecipeState: no QuantizerRole list provided by the module/op. "
+                "Falling back to bare QuantizerRole() defaults. "
+                "Override get_quantizer_roles() to provide meaningful roles.",
+                stacklevel=2,
+            )
+            roles = [QuantizerRole() for _ in range(self.num_quantizers)]
+        if len(roles) != self.num_quantizers:
+            raise ValueError(
+                "CustomRecipeState requires roles to match num_quantizers "
+                f"({len(roles)=} vs {self.num_quantizers=})"
+            )
 
-        for i in range(self.num_quantizers):
-            # Get quantizer from the user defined factory
-            quantizer = qfactory(roles[i])
-            out.append(quantizer)
-        return out
+        # qfactory must return a Quantizer or QuantizerRequest for every slot.
+        # None is not a valid return value — it would silently disable quantization
+        # for that tensor, risking hard-to-detect performance regressions.
+        # TODO(negvet): Introduce an explicit IdentityQuantizer for intentional no-op
+        # quantization. Until then, None is rejected.
+        raw = [qfactory(roles[i]) for i in range(self.num_quantizers)]
+        for i, q in enumerate(raw):
+            if q is None:
+                raise ValueError(
+                    f"CustomRecipe qfactory returned None for slot {i} "
+                    f"(role={roles[i]}). Every slot must return a Quantizer "
+                    "instance or a QuantizerRequest."
+                )
+        self._ds_state = _handle_delayed_scaling_requests(raw, self.device, self.mode)
+        return raw
+
+    # -- Delegation to composed DelayedScalingRecipeState --
+
+    @property
+    def _has_delayed_scaling(self) -> bool:
+        return self._ds_state is not None
+
+    @property
+    def amax_history(self) -> Optional[torch.Tensor]:
+        """Amax history from the composed delayed-scaling state, if any."""
+        return self._ds_state.amax_history if self._ds_state else None
+
+    @property
+    def scale(self) -> Optional[torch.Tensor]:
+        """Current scale from the composed delayed-scaling state, if any."""
+        return self._ds_state.scale if self._ds_state else None
+
+    @property
+    def _inner_delayed_scaling_recipe(self) -> Optional[DelayedScaling]:
+        return self._ds_state.recipe if self._ds_state else None
