@@ -35,7 +35,10 @@ from ...utils import (
 from .._common import is_quantized_tensor, maybe_dequantize
 from ..op import BasicOperation, OperationContext
 from ...tensor import GroupedTensor
-from ...triton.grouped_dbias_dscales import _compute_grouped_dbias_dscales
+from ...triton.grouped_dbias_dscales import (
+    compute_grouped_dbias,
+    compute_grouped_dbias_dscales,
+)
 
 
 class GroupedLinear(BasicOperation):
@@ -114,6 +117,7 @@ class GroupedLinear(BasicOperation):
             self.num_extra_inputs = 2
 
         self.wgrad_store = WeightGradStore(delay_wgrad_compute)
+        self.wgrad_accumulation_and_reduce_hooks: list = []
 
         # Weight tensor dimensions
         self.num_groups: int = num_groups
@@ -193,6 +197,23 @@ class GroupedLinear(BasicOperation):
             for group_idx in range(self.num_groups):
                 getattr(self, f"weight{group_idx}").skip_backward_post_hook = True
 
+    def register_wgrad_accumulation_and_reduce_hooks(
+        self, wgrad_accumulation_and_reduce_hook: Callable
+    ) -> None:
+        """Register a hook to run after delayed wgrad computation completes.
+
+        Mirrors ``TransformerEngineBaseModule.register_wgrad_accumulation_and_reduce_hooks``
+        so that DDP can wire its ``param.grad = None`` / reduce-scatter callback here
+        instead of directly on the AccumulateGrad node (which is bypassed when
+        ``skip_backward_post_hook`` is set).
+        """
+        self.wgrad_accumulation_and_reduce_hooks.append(wgrad_accumulation_and_reduce_hook)
+
+    def _trigger_wgrad_accumulation_and_reduce_hooks(self) -> None:
+        """Call all registered wgrad accumulation and reduce hooks."""
+        for hook in self.wgrad_accumulation_and_reduce_hooks:
+            hook()
+
     def need_backward_dw(self) -> bool:
         """Return whether :meth:`backward_dw` must run to finish weight gradients."""
         return self.wgrad_store is not None and self.wgrad_store.delay_wgrad_compute()
@@ -217,6 +238,7 @@ class GroupedLinear(BasicOperation):
                 activations.columnwise_scale_inv,
             )
         if self._accumulate_into_main_grad:
+            self._trigger_wgrad_accumulation_and_reduce_hooks()
             return
         if self.single_grouped_weight:
             if isinstance(grad_weights, list):
@@ -231,6 +253,7 @@ class GroupedLinear(BasicOperation):
             for group_idx in range(self.num_groups):
                 w = getattr(self, f"weight{group_idx}")
                 w.grad = grad_weights[group_idx].to(w.dtype)
+        self._trigger_wgrad_accumulation_and_reduce_hooks()
 
     def _get_bias_tensors(self, dtype: torch.dtype) -> list[torch.Tensor]:
         """Retrieve per-group bias tensors in the given dtype."""
@@ -870,27 +893,25 @@ class GroupedLinear(BasicOperation):
                     columnwise=ctx.weight_requires_grad,
                 )
             dys = tex.split_quantize(dy, split_sizes_int, ctx.grad_output_quantizers)
-            if has_bias and not self._scale_bias:
-                dy_splits = list(torch.split(grad_output, split_sizes_int))
-                grad_biases = [dy_s.reshape(-1, dy_s.size(-1)).sum(dim=0) for dy_s in dy_splits]
         else:
             dys = torch.split(dy, split_sizes_int)
-            if has_bias and not self._scale_bias:
-                grad_biases = [dy_s.reshape(-1, dy_s.size(-1)).sum(dim=0) for dy_s in dys]
 
-        if self._scale_bias and has_bias:
-            bias_packed = torch.stack(self._get_bias_tensors(ctx.dtype))
-            scales_f32 = scales.to(dtype=torch.float32)
+        if has_bias:
+            dy_2d = dy.reshape(-1, dy.size(-1))
             offsets = torch.zeros(num_groups + 1, dtype=torch.int64, device=device)
             offsets[1:] = split_sizes.cumsum(0)
-            dy_2d = dy.reshape(-1, dy.size(-1))
-            dbias_packed, grad_scales = _compute_grouped_dbias_dscales(
-                dy_2d,
-                scales_f32,
-                bias_packed,
-                offsets=offsets,
-            )
-            grad_biases = [dbias_packed[idx] for idx in range(num_groups)]
+            if self._scale_bias:
+                bias_packed = torch.stack(self._get_bias_tensors(ctx.dtype))
+                scales_f32 = scales.to(dtype=torch.float32)
+                dbias_packed, grad_scales = compute_grouped_dbias_dscales(
+                    dy_2d,
+                    scales_f32,
+                    bias_packed,
+                    offsets=offsets,
+                )
+            else:
+                dbias_packed = compute_grouped_dbias(dy_2d, offsets, num_groups)
+            grad_biases = [dbias_packed[idx].to(dtype=ctx.dtype) for idx in range(num_groups)]
 
         # Initialize grad weight buffers
         accumulate_into_main_grad = self._accumulate_into_main_grad
