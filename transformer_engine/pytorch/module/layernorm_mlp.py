@@ -2234,8 +2234,12 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 fwd_fn = _LayerNormMLP.forward
                 autograd_ctx = [None]
 
-            cache_name_fc1 = None if (is_first_microbatch is None or self.is_fsdp2) else "fc1_weight"
-            cache_name_fc2 = None if (is_first_microbatch is None or self.is_fsdp2) else "fc2_weight"
+            cache_name_fc1 = (
+                None if (is_first_microbatch is None or self.is_fsdp2) else "fc1_weight"
+            )
+            cache_name_fc2 = (
+                None if (is_first_microbatch is None or self.is_fsdp2) else "fc2_weight"
+            )
             fc1_weight_workspace = (
                 self._fp8_workspaces.get(cache_name_fc1) if cache_name_fc1 is not None else None
             )
