@@ -204,7 +204,8 @@ def _compute_grad_params(
                 w_list = tex.bulk_allocate(
                     [list(weight_shape)] * num_groups,
                     [dtype] * num_groups,
-                    [0] * num_groups,  # alignment
+                    device,
+                    [256] * num_groups,  # alignment
                 )
             wgrad_output = w_list
 
