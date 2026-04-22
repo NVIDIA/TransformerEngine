@@ -379,19 +379,19 @@ class CommGemmFixure : public ::testing::TestWithParam<Params> {
                                    partial_host.size() * sizeof(partial_host[0]),
                                    cudaMemcpyDefault));
         std::vector<float> partial_float = CastToFloat(partial_host);
-        
+
         // Create float buffers for ReduceScatter
         auto d_partial_float = Make<float>(m, n, 1.0f);
         NVTE_CHECK_CUDA(cudaMemcpy(d_partial_float.rowwise_dptr(), partial_float.data(),
                                    partial_float.size() * sizeof(float), cudaMemcpyDefault));
-        
+
         // Create output buffer for scattered results
         auto d_reduced_float = Make<float>(dims.d_rows_num, dims.d_cols_num, 1.0f);
-        
+
         CHECK_NCCL(ncclReduceScatter(d_partial_float.rowwise_dptr(), d_reduced_float.rowwise_dptr(),
                                      dims.d_rows_num * dims.d_cols_num, ncclFloat, ncclSum,
                                      comm_, stream));
-        
+
         std::vector<float> reduced_scattered(dims.d_rows_num * dims.d_cols_num);
         NVTE_CHECK_CUDA(cudaMemcpy(reduced_scattered.data(), d_reduced_float.rowwise_dptr(),
                                    reduced_scattered.size() * sizeof(float), cudaMemcpyDefault));
@@ -416,19 +416,19 @@ class CommGemmFixure : public ::testing::TestWithParam<Params> {
                                    partial_host.size() * sizeof(partial_host[0]),
                                    cudaMemcpyDefault));
         std::vector<float> partial_float = CastToFloat(partial_host);
-        
+
         // Create float buffers for AllReduce
         auto d_partial_float = Make<float>(m, n, 1.0f);
         NVTE_CHECK_CUDA(cudaMemcpy(d_partial_float.rowwise_dptr(), partial_float.data(),
                                    partial_float.size() * sizeof(float), cudaMemcpyDefault));
-        
+
         CHECK_NCCL(ncclAllReduce(d_partial_float.rowwise_dptr(), d_partial_float.rowwise_dptr(),
                                  m * n, ncclFloat, ncclSum, comm_, stream));
-        
+
         std::vector<float> partial_host_float(m * n);
         NVTE_CHECK_CUDA(cudaMemcpy(partial_host_float.data(), d_partial_float.rowwise_dptr(),
                                    partial_host_float.size() * sizeof(float), cudaMemcpyDefault));
-        
+
         // AR fused kernel applies bias per-rank before AR; reference does the same,
         // so no correction needed.
         out_golden = std::move(partial_host_float);
