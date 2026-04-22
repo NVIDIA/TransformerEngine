@@ -707,9 +707,6 @@ def test_dcp_output_parity(recipe_name, async_save):
             "which calls data_ptr() on NVFP4Tensor wrapper subclass with invalid storage"
         )
 
-    if recipe_name == "Float8CurrentScaling":
-        pytest.xfail()
-
     if (
         recipe_name == "Float8BlockScaling"
         and not async_save
@@ -833,11 +830,21 @@ def test_dcp_output_parity(recipe_name, async_save):
             with te.autocast(enabled=True, recipe=recipe):
                 loaded_output = model2(x)
 
-        if isinstance(recipe, transformer_engine.common.recipe.DelayedScaling):
-            # DelayedScaling stores amax history and scaling factors in _extra_state,
-            # which cannot be saved via DCP due to non-deterministic pickle sizes
-            # across ranks. The fresh model therefore uses default scaling factors,
-            # producing small numerical differences from FP8 re-quantization.
+        # DelayedScaling: amax history and scaling factors live in _extra_state,
+        # which cannot be saved via DCP due to non-deterministic pickle sizes
+        # across ranks; the fresh model uses default scaling factors, producing
+        # small numerical differences from FP8 re-quantization.
+        # Float8CurrentScaling: Float8Tensor._scale_inv is passed via
+        # fsdp_pre_all_gather metadata rather than as a sharded tensor, so DCP
+        # saves it cast to the model's param_dtype (bf16) instead of fp32; the
+        # precision loss in the reloaded scale_inv prevents bitwise parity.
+        if isinstance(
+            recipe,
+            (
+                transformer_engine.common.recipe.DelayedScaling,
+                transformer_engine.common.recipe.Float8CurrentScaling,
+            ),
+        ):
             torch.testing.assert_close(
                 loaded_output,
                 ref_output,
@@ -869,7 +876,13 @@ def test_dcp_output_parity(recipe_name, async_save):
         loss2.backward()
         optimizer2.step()
 
-        if isinstance(recipe, transformer_engine.common.recipe.DelayedScaling):
+        if isinstance(
+            recipe,
+            (
+                transformer_engine.common.recipe.DelayedScaling,
+                transformer_engine.common.recipe.Float8CurrentScaling,
+            ),
+        ):
             torch.testing.assert_close(
                 out2,
                 out1,
@@ -1031,7 +1044,18 @@ def test_dcp_resharding_load(recipe_name):
         if rank == 0:
             ref_output = torch.load(ref_output_path, weights_only=True)
 
-            if isinstance(recipe, transformer_engine.common.recipe.DelayedScaling):
+            # DelayedScaling and Float8CurrentScaling use loose tolerance because
+            # Float8Tensor._scale_inv is passed via fsdp_pre_all_gather metadata
+            # rather than as a sharded tensor, so DCP saves it cast to the model's
+            # param_dtype (bf16) instead of fp32. The resulting precision loss in
+            # the reloaded scale_inv prevents bitwise-identical output parity.
+            if isinstance(
+                recipe,
+                (
+                    transformer_engine.common.recipe.DelayedScaling,
+                    transformer_engine.common.recipe.Float8CurrentScaling,
+                ),
+            ):
                 torch.testing.assert_close(
                     loaded_output,
                     ref_output,
