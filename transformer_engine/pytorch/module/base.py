@@ -809,6 +809,19 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         """
         super().__setattr__(name, value)
 
+    @property
+    def is_fsdp2(self) -> bool:
+        """Whether this module is wrapped with FSDP2."""
+        if not hasattr(self, "_is_fsdp2"):
+            try:
+                from ..distributed import _get_module_fsdp_state
+
+                _get_module_fsdp_state(self)
+                self._is_fsdp2 = True
+            except (RuntimeError, ImportError):
+                self._is_fsdp2 = False
+        return self._is_fsdp2
+
     def adjust_amax_history_length(self, length: int, fwd: Optional[bool] = None) -> None:
         """
         Delayed scaling only.

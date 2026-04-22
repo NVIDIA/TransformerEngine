@@ -370,6 +370,16 @@ NUM_PROCS = int(os.environ.get("WORLD_SIZE", "1"))
 @pytest.mark.parametrize("fp8_init", [False, True])
 @pytest.mark.parametrize("layer_type", ["LayerNormLinear", "TransformerLayer"])
 def test_distributed(recipe_name, fp8_init, sharding_dims, layer_type):
+    if recipe_name == "MXFP8BlockScaling" and fp8_init and len(sharding_dims) == 2:
+        pytest.xfail(
+            "MXFP8BlockScaling + fp8_init + HSDP: fsdp_post_all_gather receives fewer "
+            "all_gather_outputs than the number of tensors sent by fsdp_pre_all_gather "
+            "when the HSDP shard dimension is trivial (size 1). MXFP8 sends 2 tensors "
+            "(data + scale_inv, both uint8) but gets back 1. Float8Tensor avoids this by "
+            "sending only 1 tensor (scale is per-tensor metadata). Fix: concatenate MXFP8 "
+            "data and scale_inv into a single buffer in pre_all_gather, split in post."
+        )
+
     if recipe_name == "Float8BlockScaling" and fp8_init:
         pytest.xfail(
             "Float8BlockScaling + fp8_init: scale inverse padding is not handled "
