@@ -398,18 +398,18 @@ std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor(GroupedTensorW
   }
 
   swizzle_output.set_with_gemm_swizzled_scales(true);
-  
+
   size_t num_tensors = input.num_tensors();
-  size_t num_int_elems = num_tensors + 3;               // n+1 block_offsets + gc + tb
-  if (num_int_elems % 2 != 0) num_int_elems++;          // pad to even for size_t alignment
+  size_t num_int_elems = num_tensors + 3;       // n+1 block_offsets + gc + tb
+  if (num_int_elems % 2 != 0) num_int_elems++;  // pad to even for size_t alignment
   size_t workspace_size = num_int_elems * sizeof(int) + (num_tensors + 1) * sizeof(size_t);
   workspace_size = roundup(workspace_size, 256);
-  auto workspace = allocateSpace(std::vector<size_t>{workspace_size}, transformer_engine::DType::kByte, false);
+  auto workspace =
+      allocateSpace(std::vector<size_t>{workspace_size}, transformer_engine::DType::kByte, false);
 
   NVTE_SCOPED_GIL_RELEASE({
     nvte_swizzle_grouped_scaling_factors(swizzle_input.data(), swizzle_output.data(),
-                                         getDataPtr(workspace),
-                                         at::cuda::getCurrentCUDAStream());
+                                         getDataPtr(workspace), at::cuda::getCurrentCUDAStream());
   });
 
   if (swizzle_rowwise) {

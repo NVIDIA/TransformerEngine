@@ -552,7 +552,7 @@ void performTestGroupedSwizzleMXFP8Variable(const std::vector<std::pair<size_t, 
 
   GroupedBuffers grouped_input = build_grouped_tensor(input_ptrs, NVTE_MXFP8_1D_SCALING);
   GroupedBuffers grouped_output = build_grouped_tensor(output_ptrs, NVTE_MXFP8_1D_SCALING);
-  
+
   const uint8_t input_swizzled = 0;
   nvte_set_grouped_tensor_param(grouped_input.get_handle(),
                                 kNVTEGroupedWithGEMMSwizzledScales,
@@ -571,7 +571,7 @@ void performTestGroupedSwizzleMXFP8Variable(const std::vector<std::pair<size_t, 
   NVTE_CHECK_CUDA(cudaMalloc(&d_workspace, workspace_size));
 
   nvte_swizzle_grouped_scaling_factors(grouped_input.get_handle(),
-                                       grouped_output.get_handle(), 
+                                       grouped_output.get_handle(),
                                        d_workspace, 0);
 
   cudaDeviceSynchronize();
@@ -588,11 +588,11 @@ void performTestGroupedSwizzleMXFP8Variable(const std::vector<std::pair<size_t, 
 
     std::vector<uint8_t> output_row_host(row_numel);
     std::vector<uint8_t> output_col_host(col_numel);
-    NVTE_CHECK_CUDA(cudaMemcpy(output_row_host.data(), 
-                               static_cast<uint8_t*>(grouped_output.scale_inv.get()) + row_offset, 
+    NVTE_CHECK_CUDA(cudaMemcpy(output_row_host.data(),
+                               static_cast<uint8_t*>(grouped_output.scale_inv.get()) + row_offset,
                                row_numel, cudaMemcpyDeviceToHost));
-    NVTE_CHECK_CUDA(cudaMemcpy(output_col_host.data(), 
-                               static_cast<uint8_t*>(grouped_output.columnwise_scale_inv.get()) + col_offset, 
+    NVTE_CHECK_CUDA(cudaMemcpy(output_col_host.data(),
+                               static_cast<uint8_t*>(grouped_output.columnwise_scale_inv.get()) + col_offset,
                                col_numel, cudaMemcpyDeviceToHost));
 
     std::vector<uint8_t> ref_row(row_numel);
@@ -605,9 +605,9 @@ void performTestGroupedSwizzleMXFP8Variable(const std::vector<std::pair<size_t, 
         ref_col.data(),
         col_shape.data[1], col_shape.data[0]);
 
-    compareResults("grouped_swizzle_variable_rowwise_" + std::to_string(i), 
+    compareResults("grouped_swizzle_variable_rowwise_" + std::to_string(i),
                    output_row_host.data(), ref_row.data(), row_numel);
-    compareResults("grouped_swizzle_variable_colwise_" + std::to_string(i), 
+    compareResults("grouped_swizzle_variable_colwise_" + std::to_string(i),
                    output_col_host.data(), ref_col.data(), col_numel);
 
     row_offset += row_numel;
@@ -630,13 +630,13 @@ INSTANTIATE_TEST_SUITE_P(
   ::testing::Values(
     // Case 1: num_tensors = 1 (n+3 = 4, even). Check simple alignment.
     std::vector<std::pair<size_t, size_t>>{{1024, 1024}},
-    
+
     // Case 2: num_tensors = 2 (n+3 = 5, odd). Forces padding logic to trigger.
     std::vector<std::pair<size_t, size_t>>{{128, 128}, {256, 256}},
 
     // Case 3: Mixed small/irregular shapes.
     std::vector<std::pair<size_t, size_t>>{{200, 160}, {33, 64}, {1, 32}},
-    
+
     // Case 4: Large workload to verify persistent grid
     std::vector<std::pair<size_t, size_t>>(10, {4096, 4096}),
 
