@@ -502,7 +502,7 @@ def _linear_setup_ctx(
         backward_override,
         custom,
         backward_input_needs_gather,
-        is_fsdp2,
+        _is_fsdp2,
     ) = non_tensor_args
 
     # Values derived from input tensors
