@@ -138,9 +138,8 @@ __launch_bounds__(BLOCK_SIZE)
   // =========================================================================
   // Pass 2: Compute block scales and quantize to FP4
   // =========================================================================
-  // TODO: FP4 data packing is disabled pending alignment investigation.
-  // For now, only per-token scales and block scales are computed.
-  // The FP4 data output is zeroed.
+  // Each thread processes one 16-element block: computes block amax,
+  // derives E4M3 block scale, then quantizes 16 elements to 8 packed FP4 bytes.
   const int num_sf_blocks = num_cols / PERTOKEN_SF_VEC_SIZE;
 
   for (int sf_idx = threadIdx.x; sf_idx < num_sf_blocks; sf_idx += BLOCK_SIZE) {
@@ -148,25 +147,58 @@ __launch_bounds__(BLOCK_SIZE)
 
     // Load 16 elements and find block amax
     float block_max = 0.0f;
+    float vals[PERTOKEN_SF_VEC_SIZE];
     for (int j = 0; j < PERTOKEN_SF_VEC_SIZE; j++) {
-      float val;
       if constexpr (std::is_same_v<IType, half>) {
-        val = __half2float(input[actual_row * num_cols + col_start + j]);
+        vals[j] = __half2float(input[actual_row * num_cols + col_start + j]);
       } else {
-        val = __bfloat162float(input[actual_row * num_cols + col_start + j]);
+        vals[j] = __bfloat162float(input[actual_row * num_cols + col_start + j]);
       }
-      block_max = fmaxf(block_max, fabsf(val));
+      block_max = fmaxf(block_max, fabsf(vals[j]));
     }
 
-    // Compute and store per-block E4M3 scale factor
+    // Compute per-block E4M3 scale factor: S_dec_b = block_max / (fp4_max / S_enc)
     fp8e4m3 S_dec_b = quantization_SF::compute_decoding_scaling_factor(block_max, S_enc);
-    output_scales[row_idx * scale_stride + sf_idx] = S_dec_b;
-  }
+    float S_dec_b_f = static_cast<float>(S_dec_b);
 
-  // Zero out FP4 data output (placeholder until FP4 packing is validated)
-  const int data_bytes_per_row = num_cols / 2;
-  for (int i = threadIdx.x; i < data_bytes_per_row; i += BLOCK_SIZE) {
-    output_data[actual_row * data_bytes_per_row + i] = 0;
+    // Store block scale (LINEAR layout: row-major)
+    output_scales[row_idx * scale_stride + sf_idx] = S_dec_b;
+
+    // Compute encoding scale for this block: maps input range to [-6, 6] (FP4 range)
+    float block_encode_scale = (S_dec_b_f != 0.0f)
+                                   ? __fdividef(S_enc, S_dec_b_f)
+                                   : 0.0f;
+
+    // Scale values and pack to FP4 using PTX cvt.rn.satfinite.e2m1x2
+    // Process 8 elements (4 pairs) at a time -> 4 bytes -> 1 uint32_t
+    // Matching FlashInfer's fp32_vec_to_e2m1 pattern.
+    uint8_t *out_ptr = output_data + actual_row * (num_cols / 2) + col_start / 2;
+    for (int j = 0; j < PERTOKEN_SF_VEC_SIZE; j += 8) {
+      float s0 = vals[j]     * block_encode_scale;
+      float s1 = vals[j + 1] * block_encode_scale;
+      float s2 = vals[j + 2] * block_encode_scale;
+      float s3 = vals[j + 3] * block_encode_scale;
+      float s4 = vals[j + 4] * block_encode_scale;
+      float s5 = vals[j + 5] * block_encode_scale;
+      float s6 = vals[j + 6] * block_encode_scale;
+      float s7 = vals[j + 7] * block_encode_scale;
+      uint32_t packed;
+      asm volatile(
+          "{\n"
+          ".reg .b8 byte0, byte1, byte2, byte3;\n"
+          "cvt.rn.satfinite.e2m1x2.f32 byte0, %2, %1;\n"
+          "cvt.rn.satfinite.e2m1x2.f32 byte1, %4, %3;\n"
+          "cvt.rn.satfinite.e2m1x2.f32 byte2, %6, %5;\n"
+          "cvt.rn.satfinite.e2m1x2.f32 byte3, %8, %7;\n"
+          "mov.b32 %0, {byte0, byte1, byte2, byte3};\n"
+          "}\n"
+          : "=r"(packed)
+          : "f"(s0), "f"(s1), "f"(s2), "f"(s3),
+            "f"(s4), "f"(s5), "f"(s6), "f"(s7));
+      reinterpret_cast<uint32_t *>(out_ptr)[j / 8] = packed;
+    }
+    // Handle remaining 8 elements (PERTOKEN_SF_VEC_SIZE=16, so exactly 2 iterations of 8)
+    // The loop above covers j=0..7 and j=8..15, so all 16 elements are handled.
   }
 #endif  // __CUDA_ARCH__ >= 1000
 }

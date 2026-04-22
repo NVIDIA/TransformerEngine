@@ -26,6 +26,58 @@ pytestmark = pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4)
 FP4_MAX = 6.0
 FP8_E4M3_MAX = 448.0
 
+# FP4 E2M1 look-up table: 4-bit index -> float value
+# Lower nibble = first element, upper nibble = second element
+_FP4_E2M1_LUT = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
+                 -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0]
+
+
+def unpack_fp4(packed: torch.Tensor) -> torch.Tensor:
+    """Unpack uint8 packed FP4 data to two columns per byte.
+
+    Each byte contains 2 FP4 values: lower nibble = first, upper nibble = second.
+    Returns a uint8 tensor with 2x the columns.
+    """
+    repeated = packed.repeat_interleave(2, dim=1)
+    repeated[:, 0::2] = repeated[:, 0::2] & 0x0F  # Lower 4 bits
+    repeated[:, 1::2] = repeated[:, 1::2] >> 4     # Upper 4 bits
+    return repeated
+
+
+def fp4_to_fp32(unpacked: torch.Tensor) -> torch.Tensor:
+    """Convert unpacked FP4 indices to float32 values using E2M1 LUT."""
+    lut = torch.tensor(_FP4_E2M1_LUT, dtype=torch.float32, device=unpacked.device)
+    return lut[unpacked.long()]
+
+
+def dequantize_pertoken_fp4(data: torch.Tensor, scales: torch.Tensor,
+                            per_token_scales: torch.Tensor) -> torch.Tensor:
+    """Dequantize per-token NVFP4: result = fp4_val * block_scale * per_token_scale.
+
+    Args:
+        data: (M, K/2) uint8 packed FP4
+        scales: (M, K/16) uint8 block scales (FP8 E4M3)
+        per_token_scales: (M,) FP32 per-token global scales
+
+    Returns:
+        (M, K) float32 dequantized tensor
+    """
+    num_rows = data.shape[0]
+    num_cols = data.shape[1] * 2  # 2 FP4 values per byte
+
+    # Unpack FP4 -> float32
+    fp4_vals = fp4_to_fp32(unpack_fp4(data))  # (M, K)
+
+    # Expand block scales: each scale covers 16 elements
+    block_scales_f32 = scales.view(torch.float8_e4m3fn).float()  # (M, K/16)
+    block_scales_expanded = block_scales_f32.repeat_interleave(16, dim=1)  # (M, K)
+    block_scales_expanded = block_scales_expanded[:, :num_cols]
+
+    # Expand per-token scales: one per row
+    token_scales_expanded = per_token_scales.unsqueeze(1)  # (M, 1)
+
+    return fp4_vals * block_scales_expanded * token_scales_expanded
+
 
 def _has_pertoken_kernel():
     """Check if the per-token kernel binding is available."""
@@ -207,6 +259,49 @@ class TestQuantizeNvfp4Pertoken:
             x = torch.randn(4, num_cols, dtype=dtype, device="cuda")
             data, _, _ = tex.quantize_nvfp4_pertoken(x)
             assert data.shape[1] == num_cols // 2
+
+    @pytest.mark.parametrize(
+        "num_rows,num_cols",
+        [
+            (4, 256),
+            (32, 256),
+            (64, 4096),
+        ],
+    )
+    @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+    def test_dequantized_data_close_to_input(self, num_rows, num_cols, dtype):
+        """Dequantized FP4 data should be close to the original input.
+
+        Quantize -> dequantize round-trip should preserve values within FP4 precision.
+        FP4 E2M1 has ~1 bit mantissa, so expect ~25% relative error for non-tiny values.
+        """
+        torch.manual_seed(42)
+        x = torch.randn(num_rows, num_cols, dtype=dtype, device="cuda")
+        data, scales, per_token_scales = tex.quantize_nvfp4_pertoken(x)
+
+        dequant = dequantize_pertoken_fp4(data, scales, per_token_scales)
+
+        # Compare against original (allow FP4 quantization error)
+        x_f32 = x.float()
+        nonzero = x_f32.abs() > 0.1  # skip very small values where relative error is meaningless
+        if nonzero.any():
+            rel_error = ((dequant[nonzero] - x_f32[nonzero]).abs() /
+                         x_f32[nonzero].abs()).mean()
+            assert rel_error < 0.5, (
+                f"Mean relative error {rel_error:.3f} too high for FP4 round-trip "
+                f"(shape={num_rows}x{num_cols}, dtype={dtype})"
+            )
+
+    @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+    def test_fp4_values_in_valid_range(self, dtype):
+        """Unpacked FP4 indices should be in [0, 15] (valid 4-bit range)."""
+        x = torch.randn(16, 256, dtype=dtype, device="cuda")
+        data, _, _ = tex.quantize_nvfp4_pertoken(x)
+
+        unpacked = unpack_fp4(data)
+        assert (unpacked >= 0).all() and (unpacked <= 15).all(), (
+            f"FP4 indices out of range: min={unpacked.min()}, max={unpacked.max()}"
+        )
 
     def test_input_validation_not_2d(self):
         """Should reject non-2D input."""
