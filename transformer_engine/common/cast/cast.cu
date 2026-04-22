@@ -166,22 +166,14 @@ void nvte_quantize_nvfp4_pertoken(const NVTETensor input, NVTETensor output_data
 
   if (itype == NVTEDType::kNVTEBFloat16) {
     dispatch::nvfp4::quantize_pertoken_kernel::launch_quantize_pertoken_nvfp4<__nv_bfloat16>(
-        num_rows, num_cols,
-        reinterpret_cast<const __nv_bfloat16 *>(input_ptr),
-        nullptr,
-        reinterpret_cast<uint8_t *>(data_ptr),
-        reinterpret_cast<fp8e4m3 *>(scales_ptr),
-        reinterpret_cast<float *>(pertoken_ptr),
-        stream);
+        num_rows, num_cols, reinterpret_cast<const __nv_bfloat16 *>(input_ptr), nullptr,
+        reinterpret_cast<uint8_t *>(data_ptr), reinterpret_cast<fp8e4m3 *>(scales_ptr),
+        reinterpret_cast<float *>(pertoken_ptr), stream);
   } else if (itype == NVTEDType::kNVTEFloat16) {
     dispatch::nvfp4::quantize_pertoken_kernel::launch_quantize_pertoken_nvfp4<half>(
-        num_rows, num_cols,
-        reinterpret_cast<const half *>(input_ptr),
-        nullptr,
-        reinterpret_cast<uint8_t *>(data_ptr),
-        reinterpret_cast<fp8e4m3 *>(scales_ptr),
-        reinterpret_cast<float *>(pertoken_ptr),
-        stream);
+        num_rows, num_cols, reinterpret_cast<const half *>(input_ptr), nullptr,
+        reinterpret_cast<uint8_t *>(data_ptr), reinterpret_cast<fp8e4m3 *>(scales_ptr),
+        reinterpret_cast<float *>(pertoken_ptr), stream);
   } else {
     NVTE_ERROR(
         "Unsupported input dtype for per-token NVFP4 quantization. "

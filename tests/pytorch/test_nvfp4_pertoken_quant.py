@@ -135,9 +135,9 @@ class TestQuantizeNvfp4Pertoken:
 
         # When amax=0, compute_global_encode_scaling_factor_FP4 returns 1.0
         # so global_scale = 1/S_enc = 1/1 = 1.0
-        assert (per_token_scales == 1.0).all(), (
-            f"Zero input should give global_scale=1.0 (S_enc fallback), got {per_token_scales}"
-        )
+        assert (
+            per_token_scales == 1.0
+        ).all(), f"Zero input should give global_scale=1.0 (S_enc fallback), got {per_token_scales}"
 
     @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
     def test_uniform_rows_same_scale(self, dtype):

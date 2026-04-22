@@ -1592,9 +1592,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> quantize_nvfp4_pertoken(at::Tenso
   auto te_scales = makeTransformerEngineTensor(output_scales);
   auto te_pertoken = makeTransformerEngineTensor(output_per_token_scales);
 
-  nvte_quantize_nvfp4_pertoken(
-      te_input.data(), te_data.data(), te_scales.data(), te_pertoken.data(),
-      num_rows, num_cols, stream);
+  nvte_quantize_nvfp4_pertoken(te_input.data(), te_data.data(), te_scales.data(),
+                               te_pertoken.data(), num_rows, num_cols, stream);
 
   return {output_data, output_scales, output_per_token_scales};
 }

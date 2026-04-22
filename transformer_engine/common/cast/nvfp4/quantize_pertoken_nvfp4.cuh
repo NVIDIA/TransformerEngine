@@ -119,8 +119,8 @@ __launch_bounds__(BLOCK_SIZE)
   // Block-wide max reduction
   using BlockReduce = cub::BlockReduce<float, BLOCK_SIZE>;
   __shared__ typename BlockReduce::TempStorage temp_storage;
-  float row_amax = BlockReduce(temp_storage).Reduce(thread_max,
-      [](float a, float b) { return fmaxf(a, b); });
+  float row_amax =
+      BlockReduce(temp_storage).Reduce(thread_max, [](float a, float b) { return fmaxf(a, b); });
 
   // Compute and store per-token global scale
   // global_scale = row_amax / (fp8_max * fp4_max)
