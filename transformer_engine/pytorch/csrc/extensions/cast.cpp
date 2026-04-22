@@ -1556,8 +1556,7 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
   return output_py_list;
 }
 
-std::tuple<at::Tensor, at::Tensor, at::Tensor> quantize_nvfp4_pertoken(
-    at::Tensor input) {
+std::tuple<at::Tensor, at::Tensor, at::Tensor> quantize_nvfp4_pertoken(at::Tensor input) {
   // Input validation
   NVTE_CHECK(input.dim() == 2, "Input must be 2D (num_rows, num_cols)");
   NVTE_CHECK(input.is_cuda(), "Input must be on CUDA device");
@@ -1574,8 +1573,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> quantize_nvfp4_pertoken(
 
   // Allocate outputs
   auto output_data = at::empty({num_rows, num_cols / 2}, options.dtype(at::kByte));
-  auto output_scales = at::empty(
-      {num_rows, (num_cols + 15) / 16}, options.dtype(at::kByte));
+  auto output_scales = at::empty({num_rows, (num_cols + 15) / 16}, options.dtype(at::kByte));
   auto output_per_token_scales = at::empty({num_rows}, options.dtype(at::kFloat));
 
   // Wrap as NVTETensors
@@ -1586,9 +1584,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> quantize_nvfp4_pertoken(
 
   auto stream = at::cuda::getCurrentCUDAStream().stream();
 
-  nvte_quantize_nvfp4_pertoken(
-      te_input.data(), te_data.data(), te_scales.data(), te_pertoken.data(),
-      num_rows, num_cols, stream);
+  nvte_quantize_nvfp4_pertoken(te_input.data(), te_data.data(), te_scales.data(),
+                               te_pertoken.data(), num_rows, num_cols, stream);
 
   return {output_data, output_scales, output_per_token_scales};
 }

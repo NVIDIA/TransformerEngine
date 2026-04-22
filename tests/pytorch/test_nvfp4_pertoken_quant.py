@@ -95,7 +95,9 @@ class TestQuantizeNvfp4Pertoken:
 
         assert data.shape == (num_rows, num_cols // 2), f"data shape: {data.shape}"
         assert scales.shape == (num_rows, num_cols // 16), f"scales shape: {scales.shape}"
-        assert per_token_scales.shape == (num_rows,), f"per_token_scales shape: {per_token_scales.shape}"
+        assert per_token_scales.shape == (
+            num_rows,
+        ), f"per_token_scales shape: {per_token_scales.shape}"
         assert data.dtype == torch.uint8
         assert scales.dtype == torch.uint8
         assert per_token_scales.dtype == torch.float32

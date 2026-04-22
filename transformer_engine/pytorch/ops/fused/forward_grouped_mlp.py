@@ -751,9 +751,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_NVFP4(FusedOperation):
             grouped_fc1_x = input_
         else:
             fc1_x = maybe_dequantize(input_, dtype)
-            grouped_fc1_x = tex.group_quantize(
-                fc1_x, fc1_input_quantizer, num_groups, split_sizes
-            )
+            grouped_fc1_x = tex.group_quantize(fc1_x, fc1_input_quantizer, num_groups, split_sizes)
 
         # Pack data tensors for cuDNN kernel
         # NVFP4: data is uint8 (packed FP4), reinterpret as float4_e2m1fn_x2
@@ -785,7 +783,8 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_NVFP4(FusedOperation):
         global_scale_tensor = None
         try:
             _, _, fc1_per_token_scales = tex.quantize_nvfp4_pertoken(
-                fc1_x.reshape(in_shape[0], in_shape[1]) if not isinstance(input_, GroupedTensor)
+                fc1_x.reshape(in_shape[0], in_shape[1])
+                if not isinstance(input_, GroupedTensor)
                 else input_.dequantize(dtype=dtype).reshape(in_shape[0], in_shape[1])
             )
             global_scale_tensor = fc1_per_token_scales.reshape(-1, 1, 1)
@@ -831,9 +830,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_NVFP4(FusedOperation):
 
             fc1_w_data = fc1_weight_for_gemm.rowwise_data
             fc1_w_data = fc1_w_data.view(dtype=torch.float4_e2m1fn_x2)
-            fc1_w_data = fc1_w_data.view(
-                num_groups, fc1_weight_shape[0], fc1_weight_shape[1] // 2
-            )
+            fc1_w_data = fc1_w_data.view(num_groups, fc1_weight_shape[0], fc1_weight_shape[1] // 2)
             fc1_w_data = fc1_w_data.permute(1, 2, 0)
             fc1_w_scales = fc1_weight_for_gemm.scale_inv.view(dtype=torch.float8_e4m3fn)
             fc1_w_scales = fc1_w_scales.view(
@@ -930,9 +927,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_NVFP4(FusedOperation):
 
             fc2_w_data = fc2_weight_for_gemm.rowwise_data
             fc2_w_data = fc2_w_data.view(dtype=torch.float4_e2m1fn_x2)
-            fc2_w_data = fc2_w_data.view(
-                num_groups, fc2_weight_shape[0], fc2_weight_shape[1] // 2
-            )
+            fc2_w_data = fc2_w_data.view(num_groups, fc2_weight_shape[0], fc2_weight_shape[1] // 2)
             fc2_w_data = fc2_w_data.permute(1, 2, 0)
 
             fc2_w_scales = fc2_weight_for_gemm.scale_inv.view(dtype=torch.float8_e4m3fn)

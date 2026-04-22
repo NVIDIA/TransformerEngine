@@ -25,6 +25,7 @@
 
 #include <cuda.h>
 #include <cuda_runtime.h>
+
 #include <cub/cub.cuh>
 
 #include "../../common.h"
@@ -74,24 +75,20 @@ __global__ void
 __launch_bounds__(BLOCK_SIZE)
 #endif
     quantize_pertoken_nvfp4_kernel(
-        const int num_rows,
-        const int num_cols,
-        const IType *__restrict__ input,
+        const int num_rows, const int num_cols, const IType *__restrict__ input,
         const int *__restrict__ row_offsets,  // optional: nullptr for identity mapping
-        uint8_t *__restrict__ output_data,
-        fp8e4m3 *__restrict__ output_scales,
-        float *__restrict__ output_per_token_scales,
-        const int scale_stride) {
+        uint8_t *__restrict__ output_data, fp8e4m3 *__restrict__ output_scales,
+        float *__restrict__ output_per_token_scales, const int scale_stride) {
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 
   using namespace detail;
-  constexpr float fp8_max = TypeExtrema<fp8e4m3>::max;   // 448.0f
-  constexpr float fp4_max = TypeExtrema<fp4e2m1>::max;   // 6.0f
+  constexpr float fp8_max = TypeExtrema<fp8e4m3>::max;  // 448.0f
+  constexpr float fp4_max = TypeExtrema<fp4e2m1>::max;  // 6.0f
   constexpr float fp4_max_inv = 1.0f / fp4_max;
 
   // Packed type: 4 elements per float2 pair for FP4 conversion
-  using IType2 = typename std::conditional<std::is_same<IType, half>::value,
-                                           half2, __nv_bfloat162>::type;
+  using IType2 =
+      typename std::conditional<std::is_same<IType, half>::value, half2, __nv_bfloat162>::type;
 
   const int row_idx = blockIdx.x;
   if (row_idx >= num_rows) return;
@@ -167,9 +164,7 @@ __launch_bounds__(BLOCK_SIZE)
     output_scales[row_idx * scale_stride + sf_idx] = S_dec_b;
 
     // Compute inverse block scale for quantization
-    float block_encode_scale = (S_dec_b_f != 0.0f)
-                                   ? __fdividef(S_enc, S_dec_b_f)
-                                   : 0.0f;
+    float block_encode_scale = (S_dec_b_f != 0.0f) ? __fdividef(S_enc, S_dec_b_f) : 0.0f;
 
     // Quantize 16 elements to FP4 and pack into 8 bytes
     uint8_t *out_ptr = output_data + actual_row * (num_cols / 2) + col_start / 2;
@@ -190,30 +185,22 @@ __launch_bounds__(BLOCK_SIZE)
  * Host-side launcher for per-token NVFP4 quantization.
  */
 template <typename IType>
-void launch_quantize_pertoken_nvfp4(
-    const int num_rows,
-    const int num_cols,
-    const IType *input,
-    const int *row_offsets,
-    uint8_t *output_data,
-    fp8e4m3 *output_scales,
-    float *output_per_token_scales,
-    cudaStream_t stream) {
+void launch_quantize_pertoken_nvfp4(const int num_rows, const int num_cols, const IType *input,
+                                    const int *row_offsets, uint8_t *output_data,
+                                    fp8e4m3 *output_scales, float *output_per_token_scales,
+                                    cudaStream_t stream) {
   if (num_rows == 0 || num_cols == 0) return;
 
-  NVTE_CHECK(num_cols % PERTOKEN_SF_VEC_SIZE == 0,
-             "num_cols must be a multiple of ", PERTOKEN_SF_VEC_SIZE,
-             " for per-token NVFP4 quantization, got ", num_cols);
+  NVTE_CHECK(num_cols % PERTOKEN_SF_VEC_SIZE == 0, "num_cols must be a multiple of ",
+             PERTOKEN_SF_VEC_SIZE, " for per-token NVFP4 quantization, got ", num_cols);
 
   const int scale_stride = num_cols / PERTOKEN_SF_VEC_SIZE;
   dim3 grid(num_rows);
   dim3 block(PERTOKEN_BLOCK_SIZE);
 
   quantize_pertoken_nvfp4_kernel<IType, PERTOKEN_BLOCK_SIZE>
-      <<<grid, block, 0, stream>>>(
-          num_rows, num_cols, input, row_offsets,
-          output_data, output_scales, output_per_token_scales,
-          scale_stride);
+      <<<grid, block, 0, stream>>>(num_rows, num_cols, input, row_offsets, output_data,
+                                   output_scales, output_per_token_scales, scale_stride);
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 

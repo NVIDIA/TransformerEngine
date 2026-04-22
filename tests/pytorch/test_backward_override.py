@@ -200,7 +200,9 @@ def _maybe_skip_unsupported_recipe_shape(
                 " by 32."
             )
             return
-        if recipe_name in ("nvfp4", "nvfp4_pertoken") and (flat_first_dim % 16 != 0 or last_dim % 16 != 0):
+        if recipe_name in ("nvfp4", "nvfp4_pertoken") and (
+            flat_first_dim % 16 != 0 or last_dim % 16 != 0
+        ):
             pytest.skip(
                 "Linear/LayerNormLinear + NVFP4 requires prod(shape[:-1]) and shape[-1] divisible"
                 " by 16."
@@ -225,7 +227,9 @@ def _maybe_skip_unsupported_recipe_shape(
             pytest.skip(
                 "te_ops.Linear + MXFP8 requires prod(shape[:-1]) and shape[-1] divisible by 32."
             )
-        if recipe_name in ("nvfp4", "nvfp4_pertoken") and (flat_first_dim % 16 != 0 or last_dim % 16 != 0):
+        if recipe_name in ("nvfp4", "nvfp4_pertoken") and (
+            flat_first_dim % 16 != 0 or last_dim % 16 != 0
+        ):
             pytest.skip(
                 "te_ops.Linear + NVFP4 requires prod(shape[:-1]) and shape[-1] divisible by 16."
             )

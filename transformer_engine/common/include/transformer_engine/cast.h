@@ -466,13 +466,9 @@ void nvte_group_nvfp4_quantize_with_amax(const NVTETensor input, NVTETensor *out
  *  \param[in]      num_cols                Number of columns (must be multiple of 16).
  *  \param[in]      stream                  CUDA stream.
  */
-void nvte_quantize_nvfp4_pertoken(const NVTETensor input,
-                                  NVTETensor output_data,
-                                  NVTETensor output_scales,
-                                  NVTETensor output_per_token_scales,
-                                  size_t num_rows,
-                                  size_t num_cols,
-                                  cudaStream_t stream);
+void nvte_quantize_nvfp4_pertoken(const NVTETensor input, NVTETensor output_data,
+                                  NVTETensor output_scales, NVTETensor output_per_token_scales,
+                                  size_t num_rows, size_t num_cols, cudaStream_t stream);
 
 #ifdef __cplusplus
 }  // extern "C"
