@@ -1,7 +1,19 @@
+# TE Mixtral tutorial dependencies.
+#
+# Tested on 8x Blackwell B300 inside the NGC PyTorch container
+#   pytorch-25.12-py3
+# which ships torch 2.10.0a0 and transformer_engine 2.10.0 -- those are left
+# unpinned so this file stays compatible with any recent NGC release. The
+# HuggingFace framework stack is pinned because API changes there have
+# historically broken similar tutorials.
+
 torch
 torchao!=0.14.0
 transformer_engine[pytorch]
-transformers
-accelerate
-datasets
-safetensors
+
+transformers==5.5.4
+accelerate==1.13.0
+datasets==4.4.1
+safetensors==0.7.0
+huggingface_hub==1.11.0
+tokenizers==0.22.1
