@@ -60,7 +60,7 @@ std::vector<at::Tensor> bulk_allocate(const std::vector<std::vector<size_t>> &sh
   base_ptr = reinterpret_cast<uint8_t *>(roundup(reinterpret_cast<uintptr_t>(base_ptr),
                                                  base_alignment));
 
-  // Create views into the buffer
+  // Create views into base buffer
   std::vector<at::Tensor> out;
   out.reserve(n);
   std::vector<int64_t> shape_int64;
@@ -73,8 +73,9 @@ std::vector<at::Tensor> bulk_allocate(const std::vector<std::vector<size_t>> &sh
       // cause bugs in TE kernels.
       out.emplace_back(at::empty(shape_int64, at::device(*device).dtype(dtypes[i])));
     } else {
+      // Construct tensor with custom deleter to keep base buffer alive
       out.emplace_back(at::from_blob(
-          base_ptr + offsets[i], shape_int64, [base_buffer](void *) {},  // Deleter keeps buffer alive
+          base_ptr + offsets[i], shape_int64, [base_buffer](void *) {},
           at::device(*device).dtype(dtypes[i])));
     }
   }
