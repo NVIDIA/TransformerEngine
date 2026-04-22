@@ -336,10 +336,12 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   // FP8 alignment: cuBLAS requires m%16==0, k%16==0 for FP8 GEMM.
   // With sequence packing, token dims (m or k) may be unaligned.
   // Pad to multiples of 16 BEFORE CanonicalizeGemmInput.
-  const bool is_fp8_a = is_fp8_dtype(inputA->data.dtype) ||
-                         (inputA->has_columnwise_data() && is_fp8_dtype(inputA->columnwise_data.dtype));
-  const bool is_fp8_b = is_fp8_dtype(inputB->data.dtype) ||
-                         (inputB->has_columnwise_data() && is_fp8_dtype(inputB->columnwise_data.dtype));
+  const bool is_fp8_a =
+      is_fp8_dtype(inputA->data.dtype) ||
+      (inputA->has_columnwise_data() && is_fp8_dtype(inputA->columnwise_data.dtype));
+  const bool is_fp8_b =
+      is_fp8_dtype(inputB->data.dtype) ||
+      (inputB->has_columnwise_data() && is_fp8_dtype(inputB->columnwise_data.dtype));
   const bool need_fp8_pad = is_fp8_a || is_fp8_b;
   const int m = need_fp8_pad ? ((m_real + 15) / 16) * 16 : m_real;
   const int k = need_fp8_pad ? ((k_real + 15) / 16) * 16 : k_real;
@@ -386,10 +388,8 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
     if (a_lda != a_orig_ld) {
       cudaMallocAsync(&_pad_A, (size_t)a_lda * a_cols * a_elem, stream);
       cudaMemsetAsync(_pad_A, 0, (size_t)a_lda * a_cols * a_elem, stream);
-      cudaMemcpy2DAsync(_pad_A, (size_t)a_lda * a_elem,
-                         param.A, (size_t)a_orig_ld * a_elem,
-                         (size_t)a_orig_ld * a_elem, a_cols,
-                         cudaMemcpyDeviceToDevice, stream);
+      cudaMemcpy2DAsync(_pad_A, (size_t)a_lda * a_elem, param.A, (size_t)a_orig_ld * a_elem,
+                        (size_t)a_orig_ld * a_elem, a_cols, cudaMemcpyDeviceToDevice, stream);
       param.A = _pad_A;
     }
 
@@ -397,10 +397,8 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
     if (b_ldb != b_orig_ld) {
       cudaMallocAsync(&_pad_B, (size_t)b_ldb * b_cols * b_elem, stream);
       cudaMemsetAsync(_pad_B, 0, (size_t)b_ldb * b_cols * b_elem, stream);
-      cudaMemcpy2DAsync(_pad_B, (size_t)b_ldb * b_elem,
-                         param.B, (size_t)b_orig_ld * b_elem,
-                         (size_t)b_orig_ld * b_elem, b_cols,
-                         cudaMemcpyDeviceToDevice, stream);
+      cudaMemcpy2DAsync(_pad_B, (size_t)b_ldb * b_elem, param.B, (size_t)b_orig_ld * b_elem,
+                        (size_t)b_orig_ld * b_elem, b_cols, cudaMemcpyDeviceToDevice, stream);
       param.B = _pad_B;
     }
   }
@@ -866,10 +864,8 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   if (_pad_D) {
     const size_t d_elem = typeToSize(outputD->data.dtype);
     // Column-major: output is [m, n], copy m_real rows from each column
-    cudaMemcpy2DAsync(outputD->data.dptr, (size_t)m_real * d_elem,
-                       _pad_D, (size_t)m * d_elem,
-                       (size_t)m_real * d_elem, n,
-                       cudaMemcpyDeviceToDevice, stream);
+    cudaMemcpy2DAsync(outputD->data.dptr, (size_t)m_real * d_elem, _pad_D, (size_t)m * d_elem,
+                      (size_t)m_real * d_elem, n, cudaMemcpyDeviceToDevice, stream);
     cudaFreeAsync(_pad_D, stream);
   }
   if (_pad_A) {
