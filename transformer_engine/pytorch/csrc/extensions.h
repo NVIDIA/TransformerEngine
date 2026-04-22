@@ -84,11 +84,11 @@ NVTE_Fused_Attn_Backend get_fused_attn_backend(
 
 std::vector<py::object> fused_attn_fwd(
     size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training, float attn_scale, float p_dropout,
-    bool set_zero, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
-    NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
-    const std::vector<int64_t> window_size, bool bottom_right_diagonal,
-    const at::Tensor cu_seqlens_q, const at::Tensor cu_seqlens_kv, const py::handle Q,
-    const py::handle K, const py::handle V, const at::ScalarType fake_dtype,
+    bool set_zero, NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format,
+    NVTE_QKV_Format qkv_scale_inv_format, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
+    NVTE_Softmax_Type softmax_type, const std::vector<int64_t> window_size,
+    bool bottom_right_diagonal, const at::Tensor cu_seqlens_q, const at::Tensor cu_seqlens_kv,
+    const py::handle Q, const py::handle K, const py::handle V, const at::ScalarType fake_dtype,
     const std::optional<at::Tensor> cu_seqlens_q_padded,
     const std::optional<at::Tensor> cu_seqlens_kv_padded,
     const std::optional<at::Tensor> page_table_k, const std::optional<at::Tensor> page_table_v,
@@ -98,11 +98,13 @@ std::vector<py::object> fused_attn_fwd(
 
 std::vector<py::object> fused_attn_bwd(
     size_t max_seqlen_q, size_t max_seqlen_kv, float attn_scale, float p_dropout, bool set_zero,
-    NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
+    NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format, NVTE_QKV_Format do_format,
+    NVTE_QKV_Layout dqkv_layout, NVTE_QKV_Format qkv_scale_inv_format,
+    NVTE_QKV_Format do_scale_inv_format, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
     NVTE_Softmax_Type softmax_type, const std::vector<int64_t> window_size,
     bool bottom_right_diagonal, bool deterministic, const at::Tensor cu_seqlens_q,
     const at::Tensor cu_seqlens_kv, const py::handle Q, const py::handle K, const py::handle V,
-    const py::handle O, const py::handle dO, const at::ScalarType fake_dtype, const DType dqkv_type,
+    const py::handle O, const py::handle dO, const at::ScalarType fake_dtype,
     const std::vector<at::Tensor> Aux_CTX_Tensors,
     const std::optional<at::Tensor> cu_seqlens_q_padded,
     const std::optional<at::Tensor> cu_seqlens_kv_padded, py::handle s_quantizer,
@@ -110,6 +112,13 @@ std::vector<py::object> fused_attn_bwd(
 
 at::Tensor fa_prepare_fwd(at::Tensor qkvi);
 at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v);
+
+std::vector<std::optional<at::Tensor>> multi_tensor_transpose_to_bhsd(
+    std::vector<std::optional<at::Tensor>> inputs, const std::string &original_format,
+    std::vector<std::optional<at::Tensor>> outputs = {});
+
+std::vector<at::Tensor> multi_tensor_pad_last_dim(std::vector<at::Tensor> inputs,
+                                                  int64_t alignment);
 
 at::Tensor convert_thd_to_bshd(at::Tensor tensor, at::Tensor cu_seqlens, int b, int max_seq_len);
 at::Tensor convert_bshd_to_thd(at::Tensor tensor, at::Tensor cu_seqlens, int t);
@@ -308,6 +317,8 @@ py::object dequantize(const py::handle &input, DType otype);
 
 py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const size_t num_tensors,
                           std::optional<at::Tensor> first_dims);
+
+py::object group_dequantize(const py::handle &input, DType otype);
 
 py::object bgrad_group_quantize(const at::Tensor &tensor, py::handle quantizer,
                                 const size_t num_tensors, std::optional<at::Tensor> first_dims);
@@ -570,6 +581,13 @@ void fused_multi_row_unpadding(at::Tensor input, at::Tensor output,
 
 void inplace_swizzle_scale_for_gemm(py::handle &tensor);
 
+void inplace_multi_tensor_swizzle_scales_for_gemm(std::vector<py::object> &tensors,
+                                                  bool rowwise_usage, bool columnwise_usage);
+
+void inplace_multi_tensor_swizzle_scales_for_gemm_unchecked(std::vector<py::object> &tensors,
+                                                            bool rowwise_usage,
+                                                            bool columnwise_usage);
+
 void grouped_swizzle_for_gemm(py::handle &tensor, bool rowwise, bool columnwise);
 
 /***************************************************************************************************
@@ -592,6 +610,17 @@ void nvshmem_finalize();
 
 void bulk_overlap_ag_with_external_gemm(CommOverlap &allgather_communicator, at::Stream send_stream,
                                         at::Stream recv_stream);
+
+/***************************************************************************************************
+ * Newton-Schulz (cuSolverMp)
+ **************************************************************************************************/
+
+int64_t cusolvermp_ctx_create(int64_t nccl_comm_ptr, int nranks, int rank);
+
+void cusolvermp_ctx_destroy(int64_t ctx_ptr);
+
+void newton_schulz(int64_t ctx_ptr, int64_t m, int64_t n, at::Tensor x, int64_t num_iterations,
+                   std::vector<float> coefficients);
 
 }  // namespace transformer_engine::pytorch
 
