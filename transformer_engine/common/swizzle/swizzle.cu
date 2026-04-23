@@ -132,19 +132,35 @@ __device__ void swizzle_col_scaling_kernel_impl(const void* input, void* output,
   extern __shared__ int slm[];
 
   // load, global -> regs
+  // Each register read for a given i is along the M direction at K-coord
+  // (bid_x * TB_DIM * SF_TILE_DIM_K + threadIdx.y * SF_TILE_DIM_K + i). When that
+  // K-coord is past original_K, the entire register is out of the per-tensor data
+  // region (which may be the unpadded compact extent), so we must NOT issue the
+  // __ldg there -- it could read past the per-tensor buffer (and, for the last
+  // tensor in a grouped allocation, past the end of the allocation entirely).
   LType regs_vec[N_SF_PER_TD_PER_TILE];
   if (threadIdx.x * N_TILE_PER_TD < m_tiles_in_tb * SF_TILE_DIM_M_I32 &&
       threadIdx.y < k_tiles_in_tb) {
+    const int k_base = bid_x * TB_DIM * SF_TILE_DIM_K + threadIdx.y * SF_TILE_DIM_K;
 #pragma unroll
     for (int i = 0; i < N_SF_PER_TD_PER_TILE; i++) {
       const int thread_offset =
           (threadIdx.y * SF_TILE_DIM_K_I32 + i) * M_i32 + threadIdx.x * N_TILE_PER_TD;
+      const int k_coord = k_base + i;
+      if (padding_k && k_coord >= original_K) {
+        // Entire register is past original_K: zero directly without loading.
+        uint8_t* zero_bytes = reinterpret_cast<uint8_t*>(regs_vec + i);
+#pragma unroll
+        for (int j = 0; j < static_cast<int>(sizeof(LType)); j++) zero_bytes[j] = 0;
+        continue;
+      }
       regs_vec[i] = __ldg(reinterpret_cast<const LType*>(input_i32 + thread_offset));
-      // Pad zeros
-      if (padding_m || padding_k) {
+      // Per-byte M masking is still needed when only part of the register is past
+      // original_M (i.e. K-coord is in range but the M position spans the boundary).
+      if (padding_m) {
         for (int j = 0; j < N_TILE_PER_TD * sizeof(int); j++) {
           const int index = (input_offset + thread_offset) * sizeof(int) + j;
-          if (index / M >= original_K || index % M >= original_M) {
+          if (index % M >= original_M) {
             reinterpret_cast<uint8_t*>(regs_vec + i)[j] = 0;
           }
         }
@@ -254,17 +270,32 @@ __device__ void swizzle_row_scaling_kernel_impl(const void* input, void* output,
   extern __shared__ int4 slm_v4i[];
 
   // load, global -> regs
+  // Each register read for a given i is along the K direction at row
+  // (bid_y * SF_TILE_DIM_M + i * TB_DIM + threadIdx.y). When that row is past
+  // original_M, the entire register is out of the per-tensor data region (which
+  // may be the unpadded compact extent), so we must NOT issue the __ldg there --
+  // it could read past the per-tensor buffer (and, for the last tensor in a
+  // grouped allocation, past the end of the allocation entirely).
   LType regs_vec[N_SF_PER_TD_PER_TILE];
   if (threadIdx.x * N_TILE_PER_TD < n_tiles_in_tb) {
 #pragma unroll
     for (int i = 0; i < N_SF_PER_TD_PER_TILE; i++) {
+      const int row = bid_y * SF_TILE_DIM_M + i * TB_DIM + threadIdx.y;
       const int thread_offset = (i * TB_DIM + threadIdx.y) * K_i32 + threadIdx.x * N_TILE_PER_TD;
+      if (padding_m && row >= original_M) {
+        // Entire register is past original_M: zero directly without loading.
+        uint8_t* zero_bytes = reinterpret_cast<uint8_t*>(regs_vec + i);
+#pragma unroll
+        for (int j = 0; j < static_cast<int>(sizeof(LType)); j++) zero_bytes[j] = 0;
+        continue;
+      }
       regs_vec[i] = __ldg(reinterpret_cast<const LType*>(input_i32 + thread_offset));
-      if (padding_m || padding_k) {
-        // Pad zeros
+      // Per-byte K masking is still needed when only part of the register is past
+      // original_K (i.e. row is in range but the K position spans the boundary).
+      if (padding_k) {
         for (int j = 0; j < N_TILE_PER_TD * sizeof(int); j++) {
           const int index = (input_offset + thread_offset) * sizeof(int) + j;
-          if (index / K >= original_M || index % K >= original_K) {
+          if (index % K >= original_K) {
             reinterpret_cast<uint8_t*>(regs_vec + i)[j] = 0;
           }
         }
@@ -628,11 +659,16 @@ __global__ void __launch_bounds__(TB_DIM* TB_DIM)
     grouped_swizzle_row_scaling_uniform_shape_kernel(const void* input, void* output, const int M,
                                                      const int K, const int original_M,
                                                      const int original_K,
-                                                     const size_t scale_stride_bytes) {
+                                                     const size_t input_stride_bytes,
+                                                     const size_t output_stride_bytes) {
   const int tensor_id = blockIdx.z;
+  // Input and output strides may differ: input is in the kernel-produced "compact"
+  // layout (per-tensor stride = original_M * padded_k * elem_size) when callers
+  // pass the unswizzled grouped scale buffer as-is, while the output is always in
+  // the per-tensor padded ("swizzle-ready") layout (padded_m * padded_k * elem_size).
   const uint8_t* input_base =
-      reinterpret_cast<const uint8_t*>(input) + tensor_id * scale_stride_bytes;
-  uint8_t* output_base = reinterpret_cast<uint8_t*>(output) + tensor_id * scale_stride_bytes;
+      reinterpret_cast<const uint8_t*>(input) + tensor_id * input_stride_bytes;
+  uint8_t* output_base = reinterpret_cast<uint8_t*>(output) + tensor_id * output_stride_bytes;
   swizzle_row_scaling_kernel_impl<LType, SF_TILE_DIM_M, SF_TILE_DIM_K>(
       input_base, output_base, M, K, original_M, original_K, blockIdx.x, blockIdx.y, gridDim.x,
       gridDim.y);
@@ -643,11 +679,15 @@ __global__ void __launch_bounds__(TB_DIM* TB_DIM)
     grouped_swizzle_col_scaling_uniform_shape_kernel(const void* input, void* output, const int M,
                                                      const int K, const int original_M,
                                                      const int original_K,
-                                                     const size_t scale_stride_bytes) {
+                                                     const size_t input_stride_bytes,
+                                                     const size_t output_stride_bytes) {
   const int tensor_id = blockIdx.z;
+  // See the rowwise kernel for stride semantics. For columnwise the per-tensor
+  // compact stride is DIVUP(original_K, 1) * padded_m * elem_size (i.e. the
+  // unpadded scale-row count in the K direction times the padded M extent).
   const uint8_t* input_base =
-      reinterpret_cast<const uint8_t*>(input) + tensor_id * scale_stride_bytes;
-  uint8_t* output_base = reinterpret_cast<uint8_t*>(output) + tensor_id * scale_stride_bytes;
+      reinterpret_cast<const uint8_t*>(input) + tensor_id * input_stride_bytes;
+  uint8_t* output_base = reinterpret_cast<uint8_t*>(output) + tensor_id * output_stride_bytes;
   swizzle_col_scaling_kernel_impl<LType, SF_TILE_DIM_M, SF_TILE_DIM_K>(
       input_base, output_base, M, K, original_M, original_K, blockIdx.x, blockIdx.y, gridDim.x,
       gridDim.y);
@@ -1924,23 +1964,59 @@ void swizzle_grouped_scaling_factors(const GroupedTensor* input, GroupedTensor* 
     const size_t padded_m = round_up_to_multiple(m, 128);
     const size_t padded_k =
         round_up_to_multiple(DIVUP(k, static_cast<size_t>(MXFP8_BLOCK_SIZE)), 4);
-    const size_t scale_elems = padded_m * padded_k;
+    // Per-tensor scale-element counts:
+    //  - "padded" layout: each tensor occupies padded_m * padded_k elements
+    //    (total buffer = num_tensors * padded_m * padded_k).
+    //  - "compact" layout (what the grouped MXFP8 quantize kernel actually writes):
+    //      per-tensor stride is m * padded_k (rowwise) or DIVUP(k,32) * padded_m
+    //      (columnwise) and the total buffer the C++ allocator hands out has its
+    //      grouped first dim padded up to a multiple of 128 (rowwise) or 4
+    //      (columnwise) -- so the buffer may be slightly larger than
+    //      num_tensors * compact_scale_elems, with trailing alignment slack at
+    //      the very end (never read because of the per-tensor row/k guard in the
+    //      kernel impl).
+    // The output is always written in the padded layout. The input may be in
+    // either layout; the kernel handles the compact case safely by using
+    // different per-tensor strides for input vs output and skipping loads past
+    // the per-tensor extent.
+    const size_t padded_scale_elems = padded_m * padded_k;
+    const size_t compact_scale_elems =
+        rowwise ? m * padded_k
+                : DIVUP(k, static_cast<size_t>(MXFP8_BLOCK_SIZE)) * padded_m;
+    const size_t compact_total_scale_elems =
+        rowwise
+            ? round_up_to_multiple(input->num_tensors * m, 128) * padded_k
+            : round_up_to_multiple(input->num_tensors * DIVUP(k, static_cast<size_t>(MXFP8_BLOCK_SIZE)),
+                                   4) *
+                  padded_m;
 
     const size_t scale_elem_size = rowwise ? typeToSize(input->scale_inv.dtype)
                                            : typeToSize(input->columnwise_scale_inv.dtype);
-    const size_t scale_stride_bytes = scale_elems * scale_elem_size;
 
-    if (rowwise) {
-      NVTE_CHECK(input->scale_inv.numel() == input->num_tensors * scale_elems,
-                 "Grouped input scale_inv size does not match expected packed size.");
-      NVTE_CHECK(output->scale_inv.numel() == output->num_tensors * scale_elems,
-                 "Grouped output scale_inv size does not match expected packed size.");
+    const size_t input_scale_numel =
+        rowwise ? input->scale_inv.numel() : input->columnwise_scale_inv.numel();
+    const size_t output_scale_numel =
+        rowwise ? output->scale_inv.numel() : output->columnwise_scale_inv.numel();
+
+    bool input_is_compact;
+    if (input_scale_numel == input->num_tensors * padded_scale_elems) {
+      input_is_compact = false;
+    } else if (input_scale_numel == compact_total_scale_elems) {
+      input_is_compact = true;
     } else {
-      NVTE_CHECK(input->columnwise_scale_inv.numel() == input->num_tensors * scale_elems,
-                 "Grouped input columnwise_scale_inv size does not match expected packed size.");
-      NVTE_CHECK(output->columnwise_scale_inv.numel() == output->num_tensors * scale_elems,
-                 "Grouped output columnwise_scale_inv size does not match expected packed size.");
+      NVTE_ERROR(
+          "Grouped input ", (rowwise ? "scale_inv" : "columnwise_scale_inv"),
+          " size does not match expected packed size (got ", input_scale_numel,
+          ", expected either ", input->num_tensors * padded_scale_elems, " (per-tensor padded) or ",
+          compact_total_scale_elems, " (compact)).");
     }
+    NVTE_CHECK(output_scale_numel == input->num_tensors * padded_scale_elems,
+               "Grouped output ", (rowwise ? "scale_inv" : "columnwise_scale_inv"),
+               " size does not match expected per-tensor padded size.");
+
+    const size_t input_stride_bytes =
+        (input_is_compact ? compact_scale_elems : padded_scale_elems) * scale_elem_size;
+    const size_t output_stride_bytes = padded_scale_elems * scale_elem_size;
 
     const int num_tiles_m = padded_m / SF_TILE_DIM_M;
     const int num_tiles_k = padded_k / SF_TILE_DIM_K;
@@ -1971,7 +2047,8 @@ void swizzle_grouped_scaling_factors(const GroupedTensor* input, GroupedTensor* 
           grouped_swizzle_row_scaling_uniform_shape_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>
               <<<num_blocks, block_size, slm_size, stream>>>(input_ptr, output_ptr, padded_m,
                                                              padded_k, original_M, original_K,
-                                                             scale_stride_bytes);
+                                                             input_stride_bytes,
+                                                             output_stride_bytes);
           break;
         case 2:
           NVTE_CHECK_CUDA(cudaFuncSetAttribute(
@@ -1980,7 +2057,8 @@ void swizzle_grouped_scaling_factors(const GroupedTensor* input, GroupedTensor* 
           grouped_swizzle_row_scaling_uniform_shape_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>
               <<<num_blocks, block_size, slm_size, stream>>>(input_ptr, output_ptr, padded_m,
                                                              padded_k, original_M, original_K,
-                                                             scale_stride_bytes);
+                                                             input_stride_bytes,
+                                                             output_stride_bytes);
           break;
         case 1:
           NVTE_CHECK_CUDA(cudaFuncSetAttribute(
@@ -1989,7 +2067,8 @@ void swizzle_grouped_scaling_factors(const GroupedTensor* input, GroupedTensor* 
           grouped_swizzle_row_scaling_uniform_shape_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>
               <<<num_blocks, block_size, slm_size, stream>>>(input_ptr, output_ptr, padded_m,
                                                              padded_k, original_M, original_K,
-                                                             scale_stride_bytes);
+                                                             input_stride_bytes,
+                                                             output_stride_bytes);
           break;
         default:
           NVTE_ERROR("Not valid vec_load_size.");
@@ -2003,7 +2082,8 @@ void swizzle_grouped_scaling_factors(const GroupedTensor* input, GroupedTensor* 
           grouped_swizzle_col_scaling_uniform_shape_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>
               <<<num_blocks, block_size, slm_size, stream>>>(input_ptr, output_ptr, padded_m,
                                                              padded_k, original_M, original_K,
-                                                             scale_stride_bytes);
+                                                             input_stride_bytes,
+                                                             output_stride_bytes);
           break;
         case 2:
           NVTE_CHECK_CUDA(cudaFuncSetAttribute(
@@ -2012,7 +2092,8 @@ void swizzle_grouped_scaling_factors(const GroupedTensor* input, GroupedTensor* 
           grouped_swizzle_col_scaling_uniform_shape_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>
               <<<num_blocks, block_size, slm_size, stream>>>(input_ptr, output_ptr, padded_m,
                                                              padded_k, original_M, original_K,
-                                                             scale_stride_bytes);
+                                                             input_stride_bytes,
+                                                             output_stride_bytes);
           break;
         case 1:
           NVTE_CHECK_CUDA(cudaFuncSetAttribute(
@@ -2021,7 +2102,8 @@ void swizzle_grouped_scaling_factors(const GroupedTensor* input, GroupedTensor* 
           grouped_swizzle_col_scaling_uniform_shape_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>
               <<<num_blocks, block_size, slm_size, stream>>>(input_ptr, output_ptr, padded_m,
                                                              padded_k, original_M, original_K,
-                                                             scale_stride_bytes);
+                                                             input_stride_bytes,
+                                                             output_stride_bytes);
           break;
         default:
           NVTE_ERROR("Not valid vec_load_size.");
