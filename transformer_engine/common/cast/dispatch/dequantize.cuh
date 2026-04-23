@@ -16,6 +16,7 @@
 #include "../../common.h"
 #include "../fp8/dequantize_fp8.cuh"
 #include "../mxfp8/dequantize_mxfp8.cuh"
+#include "../mxfp8/group_dequantize_mxfp8.cuh"
 #include "../nvfp4/dequantize_nvfp4.cuh"
 
 namespace transformer_engine {
@@ -47,6 +48,26 @@ inline void dequantize_helper(const Tensor &input, Tensor *output, cudaStream_t 
     }
     default:
       NVTE_ERROR("Not implemented scaling mode: " + to_string(input.scaling_mode) + ".");
+  }
+}
+
+inline void group_dequantize_helper(const GroupedTensor &input, GroupedTensor *output,
+                                    cudaStream_t stream) {
+  CheckInputGroupedTensor(input, "group_dequantize_input");
+  CheckOutputGroupedTensor(*output, "group_dequantize_output");
+
+  switch (input.scaling_mode) {
+    case NVTE_MXFP8_1D_SCALING: {
+      if (is_supported_by_CC_100()) {
+        mxfp8::group_dequantize(&input, output, stream);
+      } else {
+        NVTE_ERROR("MXFP8 Grouped Dequantization is NOT supported by architectures < 10.0");
+      }
+      break;
+    }
+    default:
+      NVTE_ERROR("Grouped dequantize not implemented for scaling mode: " +
+                 to_string(input.scaling_mode) + ".");
   }
 }
 
