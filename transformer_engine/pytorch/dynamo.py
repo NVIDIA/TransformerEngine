@@ -9,7 +9,7 @@ torch.compile can bake them as constants and guard on __eq__.
 Float8Quantizer (delayed scaling) is not registered here as delayed scaling
 is being deprecated and slated for removal.
 
-Requires PyTorch >= 2.14 (opaque object API). On older versions this module
+Requires PyTorch >= 2.11 (opaque object API). On older versions this module
 is a no-op.
 """
 
