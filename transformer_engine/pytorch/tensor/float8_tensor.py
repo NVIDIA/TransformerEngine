@@ -345,6 +345,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
 
         quantizer = Float8CurrentScalingQuantizer(
             fp8_dtype=self.dtype,
+            device=self.device,
             rowwise=self.rowwise_usage,
             columnwise=self.columnwise_usage,
             with_amax_reduction=self.with_amax_reduction,
