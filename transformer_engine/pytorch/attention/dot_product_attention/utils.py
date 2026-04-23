@@ -472,12 +472,13 @@ def get_attention_backend(
         use_flash_attention_4 = False
     # TODO: Instead of hard hammer approach, selectively disable FA4 for
     # only unsupported cases on SM120.
-    # FA4 is temporarily disabled on SM120 due to failures observed with 
+    # FA4 is temporarily disabled on SM120 due to failures observed with
     # SplitKV, Block sparsity / paged KV and likely FAv4/DSL integration issues.
     if device_compute_capability == (12, 0):
         if use_flash_attention_4 and FlashAttentionUtils.v4_is_installed:
             logger.warning(
-                "Disabling FlashAttention 4 on sm120 due to missings bits of support for SplitKV, Block sparsity / paged KV and likely FAv4/DSL integration issues."
+                "Disabling FlashAttention 4 on sm120 due to missings bits of support for SplitKV,"
+                " Block sparsity / paged KV and likely FAv4/DSL integration issues."
             )
         use_flash_attention_4 = False
     # On SM90, prefer FA3 over FA4 when FA3 is available.
