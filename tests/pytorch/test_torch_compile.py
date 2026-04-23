@@ -2,13 +2,10 @@
 #
 # See LICENSE for license information.
 
-import abc
-
 import pytest
 import torch
 
 try:
-    from torch._opaque_base import OpaqueBaseMeta
     from torch._library.opaque_object import (
         get_opaque_type_name,
         is_opaque_type,
@@ -59,11 +56,7 @@ if nvfp4_available:
 # ---------------------------------------------------------------------------
 
 if _opaque_available:
-
-    class _ToyQuantizerMeta(OpaqueBaseMeta, abc.ABCMeta):
-        pass
-
-    class ToyQuantizer(Float8CurrentScalingQuantizer, metaclass=_ToyQuantizerMeta):
+    class ToyQuantizer(Float8CurrentScalingQuantizer):
         """Quantizer with a string tag, registered as an
         opaque value type so torch.compile can treat it as a baked-in constant."""
 
