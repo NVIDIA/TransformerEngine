@@ -19,6 +19,7 @@
 #include "common.h"
 #include "common/util/system.h"
 #include "pybind.h"
+#include "../util.h"
 #include "transformer_engine/transformer_engine.h"
 
 namespace transformer_engine {
@@ -74,12 +75,6 @@ py::object create_empty_quantized_tensor(py::handle quantizer, const std::vector
 }
 
 namespace {
-
-inline bool is_sm120_device() {
-  cudaDeviceProp device_prop{};
-  NVTE_CHECK_CUDA(cudaGetDeviceProperties(&device_prop, c10::cuda::current_device()));
-  return device_prop.major == 12 && device_prop.minor == 0;
-}
 
 void split_quantize_nvfp4_impl(const TensorWrapper &input,
                                const std::vector<TensorWrapper> &input_list,
