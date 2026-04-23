@@ -14,7 +14,7 @@ is a no-op.
 """
 
 try:
-    from torch._library.opaque_object import is_opaque_type, register_opaque_type, MemberType
+    from torch._library.opaque_object import register_opaque_type, MemberType
 except ImportError:
     # PyTorch too old -- opaque object API not available.
     pass
@@ -30,16 +30,9 @@ else:
         "set_usage": MemberType.USE_REAL,
     }
 
-    if not is_opaque_type(Float8CurrentScalingQuantizer):
-        register_opaque_type(
-            Float8CurrentScalingQuantizer, typ="value", members=_quantizer_value_members
-        )
-
-    if not is_opaque_type(MXFP8Quantizer):
-        register_opaque_type(MXFP8Quantizer, typ="value", members=_quantizer_value_members)
-
-    if not is_opaque_type(Float8BlockQuantizer):
-        register_opaque_type(Float8BlockQuantizer, typ="value", members=_quantizer_value_members)
-
-    if not is_opaque_type(NVFP4Quantizer):
-        register_opaque_type(NVFP4Quantizer, typ="value", members=_quantizer_value_members)
+    register_opaque_type(
+        Float8CurrentScalingQuantizer, typ="value", members=_quantizer_value_members
+    )
+    register_opaque_type(MXFP8Quantizer, typ="value", members=_quantizer_value_members)
+    register_opaque_type(Float8BlockQuantizer, typ="value", members=_quantizer_value_members)
+    register_opaque_type(NVFP4Quantizer, typ="value", members=_quantizer_value_members)

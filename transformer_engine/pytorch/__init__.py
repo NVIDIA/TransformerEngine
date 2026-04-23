@@ -87,6 +87,10 @@ from transformer_engine.pytorch.tensor import MXFP8Tensor
 from transformer_engine.pytorch.tensor import Float8BlockwiseQTensor
 from transformer_engine.pytorch.tensor import NVFP4Tensor
 
+# Register quantizers as torch.compile opaque value types (no-op on
+# PyTorch versions without opaque object API).
+from transformer_engine.pytorch import dynamo as _dynamo  # noqa: F401
+
 try:
     torch._dynamo.config.error_on_nested_jit_trace = False
 except AttributeError:
