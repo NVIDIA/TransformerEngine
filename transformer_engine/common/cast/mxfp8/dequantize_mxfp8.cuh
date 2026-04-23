@@ -163,11 +163,11 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     size_t scale_idx;
     if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
       if constexpr (USE_ROWWISE_SCALING) {
-        scale_idx = swizzle::gemm_swizzled_scale_idx(scale_offset_Y, scale_offset_X,
-                                                     num_scale_tiles_X);
+        scale_idx =
+            swizzle::gemm_swizzled_scale_idx(scale_offset_Y, scale_offset_X, num_scale_tiles_X);
       } else {
-        scale_idx = swizzle::gemm_swizzled_scale_idx(scale_offset_X, scale_offset_Y,
-                                                     num_scale_tiles_X);
+        scale_idx =
+            swizzle::gemm_swizzled_scale_idx(scale_offset_X, scale_offset_Y, num_scale_tiles_X);
       }
     } else {
       scale_idx = scale_offset_Y * scales_stride + scale_offset_X;
