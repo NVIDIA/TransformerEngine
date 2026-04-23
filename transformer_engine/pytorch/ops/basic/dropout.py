@@ -5,10 +5,11 @@
 """Fusible operation for dropout."""
 
 from __future__ import annotations
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 import transformer_engine_torch as tex
+from ...quantized_tensor import QuantizedTensorStorage
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...tensor import Quantizer
 from ...tensor.storage.float8_tensor_storage import Float8TensorStorage
@@ -29,13 +30,14 @@ class Dropout(BasicOperation):
         super().__init__()
         self.dropout_probability: float = p
 
-    def op_forward(
+    def op_forward_compute(
         self,
-        ctx: OperationContext,
         input_: torch.Tensor,
-        prev_op_grad_output_quantizer: Optional[Quantizer],
-        next_op_input_quantizer: Optional[Quantizer],
-    ) -> torch.Tensor:
+        *,
+        requires_grad: bool,
+        prev_op_grad_output_quantizer: Optional[Quantizer] = None,
+        next_op_input_quantizer: Optional[Quantizer] = None,
+    ) -> tuple[torch.Tensor, tuple[Optional[Union[torch.Tensor, QuantizedTensorStorage]], ...]]:
 
         # Output dtype
         dtype = maybe_autocast_dtype(default_dtype=input_.dtype)
@@ -69,16 +71,34 @@ class Dropout(BasicOperation):
         else:
             raise ValueError(f"Unsupported forward implementation {impl}")
 
-        # Save context for backward
-        if ctx.requires_grad:
-            if is_cpu_offload_enabled():
-                mark_activation_offload(mask)
-            ctx.save_for_backward(mask)
-            ctx.impl = impl
-            ctx.dropout_probability = self.dropout_probability
-            ctx.dtype = dtype
+        return out, (mask,)
 
-        return out
+    def op_forward_save_ctx(
+        self,
+        ctx: OperationContext,
+        input_: torch.Tensor,
+        tensors_to_save: tuple[Optional[Union[torch.Tensor, QuantizedTensorStorage]], ...],
+        *,
+        requires_grad: bool,
+        prev_op_grad_output_quantizer: Optional[Quantizer] = None,
+        next_op_input_quantizer: Optional[Quantizer] = None,
+    ) -> None:
+        if not requires_grad:
+            return
+        (mask,) = tensors_to_save
+        if is_cpu_offload_enabled():
+            mark_activation_offload(mask)
+        ctx.save_for_backward(mask)
+
+        dtype = maybe_autocast_dtype(default_dtype=input_.dtype)
+        if not self.training:
+            ctx.impl = "evaluation"
+        elif input_.numel() % 16 == 0 and dtype in (torch.float16, torch.bfloat16):
+            ctx.impl = "fused"
+        else:
+            ctx.impl = "unfused"
+        ctx.dropout_probability = self.dropout_probability
+        ctx.dtype = dtype
 
     def op_backward(
         self,

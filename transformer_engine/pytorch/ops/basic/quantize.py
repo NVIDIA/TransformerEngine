@@ -46,32 +46,44 @@ class Quantize(BasicOperation):
             return 1
         return 0
 
-    def op_forward(
+    def op_forward_compute(
         self,
-        ctx: OperationContext,
         input_: torch.Tensor,
-        prev_op_grad_output_quantizer: Optional[Quantizer],
-        next_op_input_quantizer: Optional[Quantizer],
-    ) -> torch.Tensor:
+        *,
+        requires_grad: bool,
+        prev_op_grad_output_quantizer: Optional[Quantizer] = None,
+        next_op_input_quantizer: Optional[Quantizer] = None,
+    ) -> tuple[torch.Tensor, tuple[()]]:
 
         # Check if FP8 is enabled
         fp8_enabled = FP8GlobalStateManager.is_fp8_enabled()
         quantize_forward = fp8_enabled and self._quantize_forward
-        quantize_backward = fp8_enabled and self._quantize_backward
-
-        # Backward quantization is controlled by recipe backward override.
-        if fp8_enabled:
-            recipe = FP8GlobalStateManager.get_fp8_recipe()
-            quantize_backward = quantize_backward and recipe.backward_override is None
 
         # Quantize if needed
         out = input_
         if quantize_forward and not is_quantized_tensor(out):
             out = self.get_quantizer("forward", 0)(out)
 
-        if ctx.requires_grad:
-            ctx.quantize_backward = quantize_backward
-        return out
+        return out, ()
+
+    def op_forward_save_ctx(
+        self,
+        ctx: OperationContext,
+        input_: torch.Tensor,
+        tensors_to_save: tuple[()],
+        *,
+        requires_grad: bool,
+        prev_op_grad_output_quantizer: Optional[Quantizer] = None,
+        next_op_input_quantizer: Optional[Quantizer] = None,
+    ) -> None:
+        if not requires_grad:
+            return
+        fp8_enabled = FP8GlobalStateManager.is_fp8_enabled()
+        quantize_backward = fp8_enabled and self._quantize_backward
+        if fp8_enabled:
+            recipe = FP8GlobalStateManager.get_fp8_recipe()
+            quantize_backward = quantize_backward and recipe.backward_override is None
+        ctx.quantize_backward = quantize_backward
 
     def op_backward(
         self,

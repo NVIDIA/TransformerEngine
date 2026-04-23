@@ -36,19 +36,32 @@ class AllGather(BasicOperation):
         self.process_group: Optional[torch.distributed.ProcessGroup] = process_group
         self.process_group_size: int = torch.distributed.get_world_size(process_group)
 
-    def op_forward(
+    def op_forward_compute(
         self,
-        ctx: OperationContext,
         input_: torch.Tensor,
-        prev_op_grad_output_quantizer: Optional[Quantizer],
-        next_op_input_quantizer: Optional[Quantizer],
-    ) -> torch.Tensor:
+        *,
+        requires_grad: bool,
+        prev_op_grad_output_quantizer: Optional[Quantizer] = None,
+        next_op_input_quantizer: Optional[Quantizer] = None,
+    ) -> tuple[torch.Tensor, tuple[()]]:
         out: torch.Tensor
         if self.process_group_size == 1:
             out = input_.detach()
         else:
             out, _ = gather_along_first_dim(input_, self.process_group)
-        return out
+        return out, ()
+
+    def op_forward_save_ctx(
+        self,
+        ctx: OperationContext,
+        input_: torch.Tensor,
+        tensors_to_save: tuple[()],
+        *,
+        requires_grad: bool,
+        prev_op_grad_output_quantizer: Optional[Quantizer] = None,
+        next_op_input_quantizer: Optional[Quantizer] = None,
+    ) -> None:
+        pass
 
     def op_backward(
         self,

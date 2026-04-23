@@ -9,11 +9,12 @@ from collections.abc import Callable, Iterable
 import functools
 import inspect
 import os
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import torch
 
 import transformer_engine_torch as tex
+from ...quantized_tensor import QuantizedTensorStorage
 from ...quantization import Recipe
 from ...tensor import Quantizer
 from ...utils import get_cached_ones_tensor, get_device_compute_capability, mark_grouped_tensor
@@ -135,19 +136,22 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         # The act_func string should be fixed on the cuDNN FE side.
         self._cudnn_act_func: str = "geglu" if isinstance(swiglu, ScaledClampedQGeGLU) else "swiglu"
 
-    def fuser_forward(
+    def fuser_forward_compute(
         self,
-        basic_op_ctxs: list[OperationContext],
         input_: torch.Tensor,
         *,
+        requires_grad: list[bool],
         basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
         prev_op_grad_output_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
         basic_op_kwargs: list[dict[str, Any]],
-    ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
+    ) -> tuple[
+        torch.Tensor,
+        Iterable[Iterable[torch.Tensor]],
+        list[tuple[Optional[Union[torch.Tensor, QuantizedTensorStorage]], ...]],
+    ]:
         # Get basic operations
         fc1_op, _, fc2_op = self.basic_ops
-        fc1_ctx, swiglu_ctx, fc2_ctx = basic_op_ctxs
 
         # Tensor properties
         fc1_weight_shape = (fc1_op.out_features, fc1_op.in_features)
@@ -166,19 +170,17 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             dtype = fc1_weight_param.dtype
 
         # Check which grads are required
-        requires_grad = any(ctx.requires_grad for ctx in basic_op_ctxs)
-        input_requires_grad = requires_grad
-        weight_requires_grad = requires_grad and (
+        any_requires_grad = any(requires_grad)
+        input_requires_grad = any_requires_grad
+        weight_requires_grad = any_requires_grad and (
             fc1_weight_param.requires_grad or fc2_weight_param.requires_grad
         )
 
         # Quantizers
         fc1_input_quantizer = fc1_op.get_quantizer("forward", 0)
         fc1_weight_quantizer = fc1_op.get_quantizer("forward", 1)
-        fc1_grad_output_quantizer = fc1_op.get_quantizer("backward", 0)
         fc2_input_quantizer = fc2_op.get_quantizer("forward", 0)
         fc2_weight_quantizer = fc2_op.get_quantizer("forward", 1)
-        fc2_grad_output_quantizer = fc2_op.get_quantizer("backward", 0)
 
         # Extract split sizes from extra input
         fc1_split_sizes = basic_op_extra_inputs[0][0]
@@ -485,38 +487,27 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         fc2_kernel_out = self.grouped_gemm_quant_kernel()(**fc2_quant_kwargs)
         fc2_out = fc2_kernel_out["d_tensor"].permute(2, 0, 1).view(fc2_out_shape).contiguous()
 
-        # Save state for backward pass
-        if requires_grad:
+        # Prepare tensors for backward pass
+        if any_requires_grad:
             mark_grouped_tensor(grouped_fc1_x, swiglu_in, scales, grouped_fc2_x)
             fc1_input_tensors = (
                 grouped_fc1_x.columnwise_data,
                 grouped_fc1_x.columnwise_scale_inv,
                 fc1_x_tensor_offsets,
             )
-            # FC1
             fc1_weight_tensors = (
                 [grouped_fc1_weight] if fc1_op.single_grouped_weight else grouped_fc1_weight
             )
-            fc1_ctx.save_for_backward(
-                split_sizes, split_points, *fc1_weight_tensors, *fc1_input_tensors
-            )
-            fc1_ctx.with_quantized_compute = True
-            fc1_ctx.input_quantizer = fc1_input_quantizer
-            fc1_ctx.weight_quantizer = fc1_weight_quantizer
-            fc1_ctx.grad_output_quantizer = fc1_grad_output_quantizer
-            fc1_ctx.grad_input_quantizers = None
-            fc1_ctx.dtype = dtype
-            fc1_ctx.input_requires_grad = input_requires_grad
-            fc1_ctx.weight_requires_grad = weight_requires_grad
-            fc1_ctx.base_split_offsets = base_offsets
+            fc1_saved = [
+                split_sizes,
+                split_points,
+                *fc1_weight_tensors,
+                *fc1_input_tensors,
+                base_offsets,
+            ]
 
-            # Scaled SwiGLU
-            swiglu_ctx.save_for_backward(swiglu_in, scales)
-            swiglu_ctx.input_requires_grad = True
-            swiglu_ctx.extra_input_requires_grad = True
-            swiglu_ctx.dtype = dtype
+            swiglu_saved = (swiglu_in, scales)
 
-            # FC2 state
             if grouped_fc2_x is not None:
                 fc2_input_tensors = (
                     grouped_fc2_x.columnwise_data,
@@ -525,22 +516,76 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
                 )
             else:
                 fc2_input_tensors = (None, None, None)
-
+            fc2_saved = [split_sizes]
             if fc2_op.single_grouped_weight:
-                fc2_ctx.save_for_backward(split_sizes, grouped_fc2_weight, *fc2_input_tensors)
+                fc2_saved.append(grouped_fc2_weight)
             else:
-                fc2_ctx.save_for_backward(split_sizes, *grouped_fc2_weight, *fc2_input_tensors)
+                fc2_saved.extend(grouped_fc2_weight)
+            fc2_saved.extend(fc2_input_tensors)
 
-            fc2_ctx.with_quantized_compute = True
-            fc2_ctx.input_quantizer = fc2_input_quantizer
-            fc2_ctx.weight_quantizer = fc2_weight_quantizer
-            fc2_ctx.grad_output_quantizer = fc2_grad_output_quantizer
-            fc2_ctx.grad_input_quantizers = None
-            fc2_ctx.dtype = dtype
-            fc2_ctx.input_requires_grad = input_requires_grad
-            fc2_ctx.weight_requires_grad = weight_requires_grad
+            tensors_to_save = [tuple(fc1_saved), swiglu_saved, tuple(fc2_saved)]
+        else:
+            tensors_to_save = [(), (), ()]
 
-        return fc2_out, [(), (), ()]
+        return fc2_out, [(), (), ()], tensors_to_save
+
+    def fuser_forward_save_ctx(
+        self,
+        basic_op_ctxs: list[OperationContext],
+        input_: torch.Tensor,
+        tensors_to_save: list[tuple[Optional[Union[torch.Tensor, QuantizedTensorStorage]], ...]],
+        *,
+        requires_grad: list[bool],
+        basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
+        prev_op_grad_output_quantizer: Optional[Quantizer],
+        next_op_input_quantizer: Optional[Quantizer],
+        basic_op_kwargs: list[dict[str, Any]],
+    ) -> None:
+        if not any(requires_grad):
+            return
+
+        fc1_op, _, fc2_op = self.basic_ops
+        fc1_ctx, swiglu_ctx, fc2_ctx = basic_op_ctxs
+
+        fc1_weight_param = fc1_op.weight if fc1_op.single_grouped_weight else fc1_op.weight0
+        fc2_weight_param = fc2_op.weight if fc2_op.single_grouped_weight else fc2_op.weight0
+        input_requires_grad = True
+        weight_requires_grad = fc1_weight_param.requires_grad or fc2_weight_param.requires_grad
+
+        if torch.is_autocast_enabled():
+            dtype = torch.get_autocast_dtype("cuda")
+        else:
+            dtype = fc1_weight_param.dtype
+
+        # FC1 context
+        *fc1_bwd_tensors, base_offsets = tensors_to_save[0]
+        fc1_ctx.save_for_backward(*fc1_bwd_tensors)
+        fc1_ctx.with_quantized_compute = True
+        fc1_ctx.input_quantizer = fc1_op.get_quantizer("forward", 0)
+        fc1_ctx.weight_quantizer = fc1_op.get_quantizer("forward", 1)
+        fc1_ctx.grad_output_quantizer = fc1_op.get_quantizer("backward", 0)
+        fc1_ctx.grad_input_quantizers = None
+        fc1_ctx.dtype = dtype
+        fc1_ctx.input_requires_grad = input_requires_grad
+        fc1_ctx.weight_requires_grad = weight_requires_grad
+        fc1_ctx.base_split_offsets = base_offsets
+
+        # Scaled SwiGLU context
+        swiglu_ctx.save_for_backward(*tensors_to_save[1])
+        swiglu_ctx.input_requires_grad = True
+        swiglu_ctx.extra_input_requires_grad = True
+        swiglu_ctx.dtype = dtype
+
+        # FC2 context
+        fc2_ctx.save_for_backward(*tensors_to_save[2])
+        fc2_ctx.with_quantized_compute = True
+        fc2_ctx.input_quantizer = fc2_op.get_quantizer("forward", 0)
+        fc2_ctx.weight_quantizer = fc2_op.get_quantizer("forward", 1)
+        fc2_ctx.grad_output_quantizer = fc2_op.get_quantizer("backward", 0)
+        fc2_ctx.grad_input_quantizers = None
+        fc2_ctx.dtype = dtype
+        fc2_ctx.input_requires_grad = input_requires_grad
+        fc2_ctx.weight_requires_grad = weight_requires_grad
 
 
 def fuse_forward_ops(

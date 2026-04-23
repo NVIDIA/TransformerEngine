@@ -6,11 +6,12 @@
 
 from __future__ import annotations
 import abc
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 
 import transformer_engine_torch as tex
+from ...quantized_tensor import QuantizedTensorStorage
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...tensor.float8_tensor import Float8CurrentScalingQuantizer, Quantizer
 from ...utils import clear_tensor_data
@@ -80,13 +81,14 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
 
         """
 
-    def op_forward(
+    def op_forward_compute(
         self,
-        ctx: OperationContext,
         input_: torch.Tensor,
-        prev_op_grad_output_quantizer: Optional[Quantizer],
-        next_op_input_quantizer: Optional[Quantizer],
-    ) -> torch.Tensor:
+        *,
+        requires_grad: bool,
+        prev_op_grad_output_quantizer: Optional[Quantizer] = None,
+        next_op_input_quantizer: Optional[Quantizer] = None,
+    ) -> tuple[torch.Tensor, tuple[Optional[Union[torch.Tensor, QuantizedTensorStorage]], ...]]:
 
         # Compute dtype
         dtype: torch.dtype
@@ -109,15 +111,31 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
             input_quantizer.set_usage(rowwise=True, columnwise=False)
             x = input_quantizer(x)
 
-        # Save state for backward pass
-        if ctx.requires_grad:
-            if is_cpu_offload_enabled():
-                mark_activation_offload(x)
-            ctx.save_for_backward(x)
-            ctx.dtype = dtype
-            ctx.prev_op_grad_output_quantizer = prev_op_grad_output_quantizer
+        if requires_grad:
+            return y, (x,)
+        return y, (None,)
 
-        return y
+    def op_forward_save_ctx(
+        self,
+        ctx: OperationContext,
+        input_: torch.Tensor,
+        tensors_to_save: tuple[Optional[Union[torch.Tensor, QuantizedTensorStorage]], ...],
+        *,
+        requires_grad: bool,
+        prev_op_grad_output_quantizer: Optional[Quantizer] = None,
+        next_op_input_quantizer: Optional[Quantizer] = None,
+    ) -> None:
+        if not requires_grad:
+            return
+        (x,) = tensors_to_save
+        if is_cpu_offload_enabled():
+            mark_activation_offload(x)
+        ctx.save_for_backward(x)
+        if torch.is_autocast_enabled():
+            ctx.dtype = torch.get_autocast_dtype("cuda")
+        else:
+            ctx.dtype = input_.dtype
+        ctx.prev_op_grad_output_quantizer = prev_op_grad_output_quantizer
 
     def op_backward(
         self,

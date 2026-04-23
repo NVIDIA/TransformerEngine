@@ -6,13 +6,13 @@
 
 from __future__ import annotations
 from collections.abc import Iterable
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import torch
 
 from transformer_engine_torch import CommOverlapType
+from ...quantized_tensor import QuantizedTensorStorage
 from ...cpp_extensions import general_gemm
-from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...distributed import get_distributed_world_size
 from ...quantization import FP8GlobalStateManager
 from ...module.base import (
@@ -275,41 +275,36 @@ class UserbuffersForwardLinear(FusedOperation):
         extra_outputs = {"input": x_local, "weight": w}
         return y_local, extra_outputs
 
-    def fuser_forward(
+    def fuser_forward_compute(
         self,
-        basic_op_ctxs: list[OperationContext],
         input_: torch.Tensor,
         *,
+        requires_grad: list[bool],
         basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
         prev_op_grad_output_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
         basic_op_kwargs: list[dict[str, Any]],
-    ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
+    ) -> tuple[
+        torch.Tensor,
+        Iterable[Iterable[torch.Tensor]],
+        list[tuple[Optional[Union[torch.Tensor, QuantizedTensorStorage]], ...]],
+    ]:
 
         # Get basic operations
-        idx = self._op_idxs["linear"]
-        linear_op = self.basic_ops[idx]
-        linear_op_ctx = basic_op_ctxs[idx]
-        bias_op = None
-        bias_op_ctx = None
+        linear_idx = self._op_idxs["linear"]
+        linear_op = self.basic_ops[linear_idx]
         bias = None
         if self._op_idxs["bias"] is not None:
-            idx = self._op_idxs["bias"]
-            bias_op = self.basic_ops[idx]
-            bias_op_ctx = basic_op_ctxs[idx]
-            bias = bias_op.bias
-            if basic_op_kwargs[idx]:
+            bias_idx = self._op_idxs["bias"]
+            bias = self.basic_ops[bias_idx].bias
+            if basic_op_kwargs[bias_idx]:
                 raise ValueError("Bias operation forward does not expect keyword arguments")
 
         # Check which grads are required
-        input_requires_grad = linear_op_ctx.requires_grad
-        weight_requires_grad = linear_op_ctx.requires_grad and linear_op.weight.requires_grad
+        input_requires_grad = requires_grad[linear_idx]
+        weight_requires_grad = requires_grad[linear_idx] and linear_op.weight.requires_grad
 
         # Quantization metadata
-        input_quantizer = linear_op.get_quantizer("forward", 0)
-        weight_quantizer = linear_op.get_quantizer("forward", 1)
-        grad_output_quantizer = linear_op.get_quantizer("backward", 0)
-        grad_input_quantizer = prev_op_grad_output_quantizer
         with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
         if with_quantized_compute:
             recipe = FP8GlobalStateManager.get_fp8_recipe()
@@ -317,6 +312,9 @@ class UserbuffersForwardLinear(FusedOperation):
                 raise RuntimeError(
                     f"Unsupported recipe for Userbuffers ({recipe.__class__.__name__})"
                 )
+
+        input_quantizer = linear_op.get_quantizer("forward", 0)
+        weight_quantizer = linear_op.get_quantizer("forward", 1)
 
         # Get autocast dtype if needed
         if torch.is_autocast_enabled():
@@ -350,24 +348,44 @@ class UserbuffersForwardLinear(FusedOperation):
         x_local = extra_outputs["input"]
         w = extra_outputs["weight"]
 
-        # Save state for backward pass
-        if linear_op_ctx.requires_grad:
-            if is_cpu_offload_enabled():
-                mark_activation_offload(x_local)
-            linear_op_ctx.save_for_backward(x_local, w)
-            linear_op_ctx.with_quantized_compute = with_quantized_compute
-            linear_op_ctx.input_quantizer = input_quantizer
-            linear_op_ctx.weight_quantizer = weight_quantizer
-            linear_op_ctx.grad_output_quantizer = grad_output_quantizer
-            linear_op_ctx.grad_input_quantizer = grad_input_quantizer
-            linear_op_ctx.dtype = dtype
-            linear_op_ctx.input_dims = input_.size()
-            linear_op_ctx.input_requires_grad = input_requires_grad
-            linear_op_ctx.weight_requires_grad = weight_requires_grad
-        if bias_op is not None and bias_op_ctx.requires_grad:
-            bias_op_ctx.grad_input_quantizer = linear_op.get_grad_output_quantizer()
+        tensors_to_save = [() for _ in range(len(self.basic_ops))]
+        tensors_to_save[linear_idx] = (x_local, w)
 
-        return output, [() for _ in range(len(self.basic_ops))]
+        return output, [() for _ in range(len(self.basic_ops))], tensors_to_save
+
+    def fuser_forward_save_ctx(
+        self,
+        basic_op_ctxs: list[OperationContext],
+        input_: torch.Tensor,
+        tensors_to_save: list[tuple[Optional[Union[torch.Tensor, QuantizedTensorStorage]], ...]],
+        *,
+        requires_grad: list[bool],
+        basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
+        prev_op_grad_output_quantizer: Optional[Quantizer],
+        next_op_input_quantizer: Optional[Quantizer],
+        basic_op_kwargs: list[dict[str, Any]],
+    ) -> None:
+        linear_idx = self._op_idxs["linear"]
+        linear_op = self.basic_ops[linear_idx]
+        linear_op.op_forward_save_ctx(
+            basic_op_ctxs[linear_idx],
+            input_,
+            tensors_to_save[linear_idx],
+            requires_grad=requires_grad[linear_idx],
+            prev_op_grad_output_quantizer=prev_op_grad_output_quantizer,
+        )
+        if requires_grad[linear_idx]:
+            basic_op_ctxs[linear_idx].input_dims = input_.size()
+        if self._op_idxs["bias"] is not None:
+            bias_idx = self._op_idxs["bias"]
+            bias_op = self.basic_ops[bias_idx]
+            bias_op.op_forward_save_ctx(
+                basic_op_ctxs[bias_idx],
+                input_,
+                tensors_to_save[bias_idx],
+                requires_grad=requires_grad[bias_idx],
+                prev_op_grad_output_quantizer=linear_op.get_grad_output_quantizer(),
+            )
 
     @staticmethod
     def fuse_forward_ops(

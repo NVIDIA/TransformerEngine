@@ -9,11 +9,12 @@ from collections.abc import Callable, Iterable, Sequence
 import contextlib
 import functools
 import math
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import torch
 
 import transformer_engine_torch as tex
+from ...quantized_tensor import QuantizedTensorStorage
 from ...cpp_extensions import general_grouped_gemm
 from ...distributed import CudaRNGStatesTracker
 from ...module._common import WeightGradStore
@@ -680,14 +681,6 @@ class GroupedLinear(BasicOperation):
                         recipe.fp8_quant_bwd_grad.amax_epsilon
                     )
 
-    def op_forward(self, *args, **kwargs):
-        raise RuntimeError(
-            f"{self.__class__.__name__} operation has "
-            f"{self.num_extra_inputs} extra tensor inputs "
-            f"and {self.num_extra_outputs} extra tensor outputs. "
-            "It overrides `fuser_forward` instead of `op_forward`."
-        )
-
     def op_backward(self, *args, **kwargs):
         raise RuntimeError(
             f"{self.__class__.__name__} operation has "
@@ -696,16 +689,20 @@ class GroupedLinear(BasicOperation):
             "It overrides `fuser_backward` instead of `op_backward`."
         )
 
-    def fuser_forward(
+    def fuser_forward_compute(
         self,
-        basic_op_ctxs: list[OperationContext],
         input_: torch.Tensor,
         *,
+        requires_grad: list[bool],
         basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
         prev_op_grad_output_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
         basic_op_kwargs: list[dict[str, Any]],
-    ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
+    ) -> tuple[
+        torch.Tensor,
+        Iterable[Iterable[torch.Tensor]],
+        list[tuple[Optional[Union[torch.Tensor, QuantizedTensorStorage]], ...]],
+    ]:
         num_groups = self.num_groups
         has_bias = self.has_bias
         weight_param = self.weight if self.single_grouped_weight else self.weight0
@@ -718,20 +715,17 @@ class GroupedLinear(BasicOperation):
                 raise RuntimeError("MAIN GRAD IS NONE")
 
         # Check which grads are required
-        ctx = basic_op_ctxs[0]
-        input_requires_grad = ctx.requires_grad
-        weight_requires_grad = ctx.requires_grad and weight_param.requires_grad
+        input_requires_grad = requires_grad[0]
+        weight_requires_grad = requires_grad[0] and weight_param.requires_grad
 
         # Quantizers
         input_quantizers = [None] * num_groups
         weight_quantizers = [None] * num_groups
-        grad_output_quantizers = [None] * num_groups
         with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
         if with_quantized_compute:
             for group_idx in range(num_groups):
                 input_quantizers[group_idx] = self.get_quantizer("forward", 2 * group_idx)
                 weight_quantizers[group_idx] = self.get_quantizer("forward", 2 * group_idx + 1)
-                grad_output_quantizers[group_idx] = self.get_quantizer("backward", group_idx)
 
         # Get autocast dtype if needed
         if torch.is_autocast_enabled():
@@ -835,24 +829,60 @@ class GroupedLinear(BasicOperation):
             for x in xs:
                 x.update_usage(rowwise_usage=False, columnwise_usage=True)
 
-        # Save state for backward pass
-        if ctx.requires_grad:
+        # Build tensors to save for backward pass
+        if requires_grad[0]:
             saved = [split_sizes]
             if self._scale_bias:
                 saved.append(scales)
             saved.extend(xs)
             saved.extend(ws)
-            ctx.save_for_backward(*saved)
-            ctx.with_quantized_compute = with_quantized_compute
-            ctx.input_quantizers = input_quantizers
-            ctx.weight_quantizers = weight_quantizers
-            ctx.grad_output_quantizers = grad_output_quantizers
-            ctx.grad_input_quantizers = None
-            ctx.dtype = dtype
-            ctx.input_requires_grad = input_requires_grad
-            ctx.weight_requires_grad = weight_requires_grad
+            tensors_to_save = [tuple(saved)]
+        else:
+            tensors_to_save = [()]
 
-        return out, [()]
+        return out, [()], tensors_to_save
+
+    def fuser_forward_save_ctx(
+        self,
+        basic_op_ctxs: list[OperationContext],
+        input_: torch.Tensor,
+        tensors_to_save: list[tuple[Optional[Union[torch.Tensor, QuantizedTensorStorage]], ...]],
+        *,
+        requires_grad: list[bool],
+        basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
+        prev_op_grad_output_quantizer: Optional[Quantizer],
+        next_op_input_quantizer: Optional[Quantizer],
+        basic_op_kwargs: list[dict[str, Any]],
+    ) -> None:
+        if not requires_grad[0]:
+            return
+        ctx = basic_op_ctxs[0]
+        ctx.save_for_backward(*tensors_to_save[0])
+
+        num_groups = self.num_groups
+        weight_param = self.weight if self.single_grouped_weight else self.weight0
+
+        with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
+        input_quantizers = [None] * num_groups
+        weight_quantizers = [None] * num_groups
+        grad_output_quantizers = [None] * num_groups
+        if with_quantized_compute:
+            for group_idx in range(num_groups):
+                input_quantizers[group_idx] = self.get_quantizer("forward", 2 * group_idx)
+                weight_quantizers[group_idx] = self.get_quantizer("forward", 2 * group_idx + 1)
+                grad_output_quantizers[group_idx] = self.get_quantizer("backward", group_idx)
+
+        ctx.with_quantized_compute = with_quantized_compute
+        ctx.input_quantizers = input_quantizers
+        ctx.weight_quantizers = weight_quantizers
+        ctx.grad_output_quantizers = grad_output_quantizers
+        ctx.grad_input_quantizers = None
+        if torch.is_autocast_enabled():
+            ctx.dtype = torch.get_autocast_dtype("cuda")
+        else:
+            ctx.dtype = weight_param.dtype
+        ctx.input_requires_grad = requires_grad[0]
+        ctx.weight_requires_grad = requires_grad[0] and weight_param.requires_grad
 
     def fuser_backward(
         self,

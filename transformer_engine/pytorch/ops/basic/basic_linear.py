@@ -8,10 +8,11 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 import contextlib
 import math
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import torch
 
+from ...quantized_tensor import QuantizedTensorStorage
 from ...cpp_extensions import general_gemm
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...distributed import (
@@ -979,24 +980,23 @@ class BasicLinear(BasicOperation):
         _wait_async(dx_async)
         return dx, dw
 
-    def op_forward(
+    def op_forward_compute(
         self,
-        ctx: OperationContext,
         input_: torch.Tensor,
-        prev_op_grad_output_quantizer: Optional[Quantizer],
-        next_op_input_quantizer: Optional[Quantizer],
-    ) -> torch.Tensor:
+        *,
+        requires_grad: bool,
+        prev_op_grad_output_quantizer: Optional[Quantizer] = None,
+        next_op_input_quantizer: Optional[Quantizer] = None,
+    ) -> tuple[torch.Tensor, tuple[Optional[Union[torch.Tensor, QuantizedTensorStorage]], ...]]:
 
         # Check which grads are required
-        input_requires_grad = ctx.requires_grad
-        weight_requires_grad = ctx.requires_grad and self.weight.requires_grad
+        input_requires_grad = requires_grad
+        weight_requires_grad = requires_grad and self.weight.requires_grad
 
         # Quantizers
         input_quantizer = self.get_quantizer("forward", 0)
         weight_quantizer = self.get_quantizer("forward", 1)
         output_quantizer = next_op_input_quantizer
-        grad_output_quantizer = self.get_quantizer("backward", 0)
-        grad_input_quantizer = prev_op_grad_output_quantizer
         with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
         if with_quantized_compute:
             backward_override = FP8GlobalStateManager.get_fp8_recipe().backward_override
@@ -1026,28 +1026,56 @@ class BasicLinear(BasicOperation):
             weight_requires_grad=weight_requires_grad,
         )
 
-        # Save state for backward pass
-        if ctx.requires_grad:
+        # Determine tensors to save for backward pass
+        if requires_grad:
             if backward_override == "high_precision":
                 saved_input = input_ if weight_requires_grad else None
                 saved_weight = self.weight if input_requires_grad else None
             else:
                 saved_input = x_local
                 saved_weight = w
-            if is_cpu_offload_enabled():
-                mark_activation_offload(saved_input)
-            ctx.save_for_backward(saved_input, saved_weight)
-            ctx.with_quantized_compute = with_quantized_compute and backward_override is None
-            ctx.backward_override = backward_override
-            ctx.input_quantizer = input_quantizer
-            ctx.weight_quantizer = weight_quantizer
-            ctx.grad_output_quantizer = grad_output_quantizer
-            ctx.grad_input_quantizer = grad_input_quantizer
-            ctx.dtype = dtype
-            ctx.input_requires_grad = input_requires_grad
-            ctx.weight_requires_grad = weight_requires_grad
+        else:
+            saved_input = None
+            saved_weight = None
 
-        return output
+        return output, (saved_input, saved_weight)
+
+    def op_forward_save_ctx(
+        self,
+        ctx: OperationContext,
+        input_: torch.Tensor,
+        tensors_to_save: tuple[Optional[Union[torch.Tensor, QuantizedTensorStorage]], ...],
+        *,
+        requires_grad: bool,
+        prev_op_grad_output_quantizer: Optional[Quantizer] = None,
+        next_op_input_quantizer: Optional[Quantizer] = None,
+    ) -> None:
+        if not requires_grad:
+            return
+
+        saved_input, saved_weight = tensors_to_save
+        if is_cpu_offload_enabled():
+            mark_activation_offload(saved_input)
+        ctx.save_for_backward(saved_input, saved_weight)
+
+        with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
+        if with_quantized_compute:
+            backward_override = FP8GlobalStateManager.get_fp8_recipe().backward_override
+        else:
+            backward_override = None
+
+        ctx.with_quantized_compute = with_quantized_compute and backward_override is None
+        ctx.backward_override = backward_override
+        ctx.input_quantizer = self.get_quantizer("forward", 0)
+        ctx.weight_quantizer = self.get_quantizer("forward", 1)
+        ctx.grad_output_quantizer = self.get_quantizer("backward", 0)
+        ctx.grad_input_quantizer = prev_op_grad_output_quantizer
+        if torch.is_autocast_enabled():
+            ctx.dtype = torch.get_autocast_dtype("cuda")
+        else:
+            ctx.dtype = self.weight.dtype
+        ctx.input_requires_grad = requires_grad
+        ctx.weight_requires_grad = requires_grad and self.weight.requires_grad
 
     def op_backward(
         self,

@@ -42,32 +42,24 @@ class AddExtraInput(BasicOperation):
         super().__init__()
         self._in_place = in_place
 
-    def op_forward(self, *args, **kwargs) -> None:
-        raise RuntimeError(
-            "{self.__class__.__name__} operation has "
-            f"{self.num_extra_inputs} extra tensor inputs "
-            f"and {self.num_extra_outputs} extra tensor outputs. "
-            "It overrides `fuser_forward` instead of `op_forward`."
-        )
-
     def op_backward(self, *args, **kwargs) -> None:
         raise RuntimeError(
-            "{self.__class__.__name__} operation has "
+            f"{self.__class__.__name__} operation has "
             f"{self.num_extra_inputs} extra tensor inputs "
             f"and {self.num_extra_outputs} extra tensor outputs. "
             "It overrides `fuser_backward` instead of `op_backward`."
         )
 
-    def fuser_forward(
+    def fuser_forward_compute(
         self,
-        basic_op_ctxs: list[OperationContext],
         input_: torch.Tensor,
         *,
+        requires_grad: list[bool],
         basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
         prev_op_grad_output_quantizer: Optional[Quantizer],
         next_op_input_quantizer: Optional[Quantizer],
         basic_op_kwargs: list[dict[str, Any]],
-    ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
+    ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]], list[tuple[()]]]:
         extra_input = basic_op_extra_inputs[0][0]
         if self._in_place:
             extra_input = extra_input.detach()
@@ -75,7 +67,21 @@ class AddExtraInput(BasicOperation):
             output = extra_input
         else:
             output = extra_input + input_
-        return output, [()]
+        return output, [()], [()]
+
+    def fuser_forward_save_ctx(
+        self,
+        basic_op_ctxs: list[OperationContext],
+        input_: torch.Tensor,
+        tensors_to_save: list[tuple[()]],
+        *,
+        requires_grad: list[bool],
+        basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
+        prev_op_grad_output_quantizer: Optional[Quantizer],
+        next_op_input_quantizer: Optional[Quantizer],
+        basic_op_kwargs: list[dict[str, Any]],
+    ) -> None:
+        pass
 
     def fuser_backward(
         self,
