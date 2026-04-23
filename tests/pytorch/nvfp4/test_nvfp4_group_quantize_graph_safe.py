@@ -27,18 +27,21 @@ from nvfp4_utils import (
 
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
 
+SM120_SWIZZLED_SCALE_RTOL_ATOL = (1e-3, 1e-3)
+STRICT_SCALE_RTOL_ATOL = (0.0, 0.0)
 
-def _scale_compare_tolerances(optimize_for_gemm: bool) -> tuple[float, float]:
+
+def _scale_compare_tolerances(expected_swizzled_layout: bool) -> tuple[float, float]:
     """Return comparison tolerances for NVFP4 scale tensors.
 
-    On SM120 with optimize_for_gemm=True, grouped NVFP4 can route through a
+    On SM120 with swizzled scale layout enabled, grouped NVFP4 can route through a
     fallback path whose scale accumulation order differs slightly from the
     Python reference. Layout must still match, but exact bitwise equality of
     scale values is not guaranteed.
     """
-    if torch.cuda.get_device_capability() == (12, 0) and optimize_for_gemm:
-        return (1e-3, 1e-3)
-    return (0.0, 0.0)
+    if torch.cuda.get_device_capability() == (12, 0) and expected_swizzled_layout:
+        return SM120_SWIZZLED_SCALE_RTOL_ATOL
+    return STRICT_SCALE_RTOL_ATOL
 
 
 def _reference_scale_for_layout(
