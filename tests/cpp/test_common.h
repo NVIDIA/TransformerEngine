@@ -164,6 +164,14 @@ class Tensor {
     if (columnwise_scale_inv != nullptr) {
       cudaFree(columnwise_scale_inv);
     }
+    float *amax_ptr = tensor_.amax();
+    if (amax_ptr != nullptr) {
+      cudaFree(amax_ptr);
+    }
+    float *scale_ptr = tensor_.scale();
+    if (scale_ptr != nullptr) {
+      cudaFree(scale_ptr);
+    }
   }
 
   NVTETensor data() const noexcept { return tensor_.data(); }
