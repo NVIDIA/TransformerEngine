@@ -16,10 +16,10 @@
 #include <vector>
 
 #include "../extensions.h"
+#include "../util.h"
 #include "common.h"
 #include "common/util/system.h"
 #include "pybind.h"
-#include "../util.h"
 #include "transformer_engine/transformer_engine.h"
 
 namespace transformer_engine {

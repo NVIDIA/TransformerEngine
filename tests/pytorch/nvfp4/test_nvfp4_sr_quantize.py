@@ -20,6 +20,7 @@ seed = 12345
 torch.manual_seed(seed)
 torch.cuda.manual_seed(seed)
 
+
 def _assert_sr_vs_rn_behavior(
     me_sr: torch.Tensor,
     me_rn: torch.Tensor,
@@ -33,7 +34,9 @@ def _assert_sr_vs_rn_behavior(
         torch.testing.assert_close(me_t_sr, me_t_rn, atol=SM120_SR_EQUIVALENCE_ATOL, rtol=0.0)
     else:
         assert me_sr < me_rn, "Stochastic rounding failed - error larger than the round to nearest."
-        assert me_t_sr < me_t_rn, "Stochastic rounding failed - error larger than the round to nearest."
+        assert (
+            me_t_sr < me_t_rn
+        ), "Stochastic rounding failed - error larger than the round to nearest."
 
 
 def unpack_fp4(x: torch.Tensor) -> torch.Tensor:
