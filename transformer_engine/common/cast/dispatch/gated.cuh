@@ -46,10 +46,8 @@ void quantize_gated_fwd_helper(const NVTETensor nvte_input, NVTETensor nvte_outp
 
   switch (output->scaling_mode) {
     case NVTE_DELAYED_TENSOR_SCALING: {
-      //const bool use_tma_kernels = (cols % 32 == 0) && is_supported_by_CC_100();
-      // sm120 shared memory capapbilities are much smaller than sm100, so we disable TMA kernels on sm120
-      // KL: It is possible that for fwd, the limits are not exceeded for sm120. To be investigated -
-      // are there any forward only tests we'd like to keep enabled on sm120?
+      // SM120 has lower shared-memory headroom than SM100 for this kernel family.
+      // Keep TMA kernels disabled on SM120 and use the non-TMA fallback path.
       const bool use_tma_kernels =
           (cols % 32 == 0) && is_supported_by_CC_100() && !is_supported_by_CC_120();
       if (use_tma_kernels) {
@@ -142,8 +140,8 @@ void quantize_gated_bwd_helper(const NVTETensor nvte_grad, const NVTETensor nvte
 
   switch (output->scaling_mode) {
     case NVTE_DELAYED_TENSOR_SCALING: {
-      //const bool use_tma_kernels = (cols % 32 == 0) && is_supported_by_CC_100();
-      // sm120 shared memory capapbilities are much smaller than sm100, so we disable TMA kernels on sm120
+      // SM120 has lower shared-memory headroom than SM100 for this kernel family.
+      // Keep TMA kernels disabled on SM120 and use the non-TMA fallback path.
       const bool use_tma_kernels =
           (cols % 32 == 0) && is_supported_by_CC_100() && !is_supported_by_CC_120();
       if (use_tma_kernels) {

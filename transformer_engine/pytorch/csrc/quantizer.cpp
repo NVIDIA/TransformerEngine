@@ -10,6 +10,7 @@
 #include "common/util/system.h"
 #include "pybind.h"
 #include "torch/torch.h"
+#include "util.h"
 
 namespace transformer_engine::pytorch {
 
@@ -1931,12 +1932,7 @@ std::pair<GroupedTensorWrapper, py::object> NVFP4Quantizer::create_grouped_tenso
                                getTensorShape(*tensor_offsets));
   }
 
-  const bool enable_sm120_grouped_nvfp4_fallback =
-      first_dims.has_value() && ([]() {
-        cudaDeviceProp device_prop{};
-        NVTE_CHECK_CUDA(cudaGetDeviceProperties(&device_prop, c10::cuda::current_device()));
-        return device_prop.major == 12 && device_prop.minor == 0;
-      })();
+  const bool enable_sm120_grouped_nvfp4_fallback = first_dims.has_value() && is_sm120_device();
   // Keep grouped metadata aligned with runtime behavior:
   // - default: follow optimize_for_gemm
   // - SM120 fallback path: force unswizzled layout
@@ -2241,10 +2237,8 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
   quant_config.set_nvfp4_2d_quantization(this->with_2d_quantization);
 
   // Disable stochastic-rounding FP4 cast path for SM120, which relies on arch-specific PTX
-  // instructions
-  cudaDeviceProp device_prop{};
-  NVTE_CHECK_CUDA(cudaGetDeviceProperties(&device_prop, c10::cuda::current_device()));
-  const bool sm120_device = (device_prop.major == 12 && device_prop.minor == 0);
+  // instructions.
+  const bool sm120_device = is_sm120_device();
   const bool use_stochastic_rounding = this->stochastic_rounding && !sm120_device;
   quant_config.set_stochastic_rounding(use_stochastic_rounding);
 
