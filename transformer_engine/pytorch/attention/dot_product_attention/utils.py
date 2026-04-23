@@ -473,9 +473,14 @@ def get_attention_backend(
     # On SM90, prefer FA3 over FA4 when FA3 is available.
     # FA3 is more mature on Hopper; FA4's SM90 backward has limitations
     # (MLA, non-standard head dims, SplitKV).
-    if use_flash_attention_4 and use_flash_attention_3 and device_compute_capability == (9, 0):
-        if FlashAttentionUtils.v4_is_installed:
-            logger.debug("Disabling FlashAttention 4 to prefer FlashAttention 3 on SM90")
+    if (
+        device_compute_capability == (9, 0)
+        and use_flash_attention_3
+        and FlashAttentionUtils.v3_is_installed
+        and use_flash_attention_4
+        and FlashAttentionUtils.v4_is_installed
+    ):
+        logger.debug("Disabling FlashAttention 4 to prefer FlashAttention 3 on SM90")
         use_flash_attention_4 = False
 
     # Filter: Data type
@@ -1846,11 +1851,12 @@ def get_full_cu_seqlens(
 
     if is_in_onnx_export_mode():
         return _get_cu_seqlens(batch_size, max_seqlen, device)
-    if (batch_size, max_seqlen) not in _cu_seqlens_cache:
-        _cu_seqlens_cache[(batch_size, max_seqlen)] = _get_cu_seqlens(
-            batch_size, max_seqlen, device
-        )
-    return _cu_seqlens_cache[(batch_size, max_seqlen)]
+
+    is_inference = torch.is_inference_mode_enabled()
+    cu_seqlens_cache_key = (batch_size, max_seqlen, device, is_inference)
+    if cu_seqlens_cache_key not in _cu_seqlens_cache:
+        _cu_seqlens_cache[cu_seqlens_cache_key] = _get_cu_seqlens(batch_size, max_seqlen, device)
+    return _cu_seqlens_cache[cu_seqlens_cache_key]
 
 
 @jit_fuser
@@ -2452,7 +2458,7 @@ def print_quantizers(
                 type_str = "CS"
             elif isinstance(q, MXFP8Quantizer):
                 type_str = "MXFP8"
-            if type_str in ["DS", "CS"]:
+            if type_str == "DS":
                 print(
                     f"{label} >> {names[i]:14s}: {type_str}, {q.scale.item():.4e} x"
                     f" {q.amax.item():.4e} = {q.scale.item()*q.amax.item():.4e}"

@@ -55,13 +55,13 @@ NVTE_Fused_Attn_Backend get_fused_attn_backend(
 }
 
 // helper function for S and dP quantizers
-std::pair<TensorWrapper, py::object> quantizer_helper(py::handle quantizer,
-                                                      const std::vector<size_t> &shape, DType dtype,
-                                                      bool create_hp_tensor,
-                                                      std::optional<at::Tensor> data) {
+std::tuple<TensorWrapper, py::object, std::optional<at::Tensor>> quantizer_helper(
+    py::handle quantizer, const std::vector<size_t> &shape, DType dtype, bool create_hp_tensor,
+    std::optional<at::Tensor> data) {
   std::unique_ptr<Quantizer> T_quantizer = convert_quantizer(quantizer);
   TensorWrapper te_T;
   py::object py_T;
+  std::optional<at::Tensor> amax_buf;
   if (quantizer.is_none()) {
     // high precision
     auto *none_quantizer = dynamic_cast<NoneQuantizer *>(T_quantizer.get());
@@ -80,10 +80,11 @@ std::pair<TensorWrapper, py::object> quantizer_helper(py::handle quantizer,
     auto *T_quantizer_fp8 = dynamic_cast<Float8CurrentScalingQuantizer *>(T_quantizer.get());
     if (create_hp_tensor) {
       if (data.has_value()) {
-        std::tie(te_T, py_T) =
+        std::tie(te_T, py_T, amax_buf) =
             T_quantizer_fp8->create_unquantized_tensor_with_amax(shape, dtype, data.value());
       } else {
-        std::tie(te_T, py_T) = T_quantizer_fp8->create_unquantized_tensor_with_amax(shape, dtype);
+        std::tie(te_T, py_T, amax_buf) =
+            T_quantizer_fp8->create_unquantized_tensor_with_amax(shape, dtype);
       }
     } else {
       std::tie(te_T, py_T) = T_quantizer_fp8->create_tensor(shape, dtype);
@@ -106,7 +107,7 @@ std::pair<TensorWrapper, py::object> quantizer_helper(py::handle quantizer,
                  "MXFP8Quantizer::create_tensor() does not take data tensor as input!");
     }
   }
-  return {std::move(te_T), std::move(py_T)};
+  return {std::move(te_T), std::move(py_T), std::move(amax_buf)};
 }
 
 // fused attention FWD with separate Q, K and V tensors
@@ -138,13 +139,9 @@ std::vector<py::object> fused_attn_fwd(
   const DType qkv_type = te_Q.dtype();
 
   // create S tensor
-  TensorWrapper te_S;
-  py::object py_S;
-  std::tie(te_S, py_S) = quantizer_helper(s_quantizer, {0}, DType::kFloat32, false, std::nullopt);
+  auto [te_S, py_S, _] = quantizer_helper(s_quantizer, {0}, DType::kFloat32, false, std::nullopt);
 
   // create O tensor
-  TensorWrapper te_O;
-  py::object py_O;
   std::unique_ptr<Quantizer> O_quantizer = convert_quantizer(o_quantizer);
   std::vector<size_t> q_shape = convertShape(te_Q.shape());
   std::vector<size_t> v_shape = convertShape(te_V.shape());
@@ -156,7 +153,8 @@ std::vector<py::object> fused_attn_fwd(
   size_t h = o_parsed.h(), d = o_parsed.d();
   o_parsed.to_format(o_format, o_shape.data());
   const DType fake_dtype_te = GetTransformerEngineDType(fake_dtype);
-  std::tie(te_O, py_O) = quantizer_helper(o_quantizer, o_shape, fake_dtype_te, true, std::nullopt);
+  auto [te_O, py_O, o_amax_buf] =
+      quantizer_helper(o_quantizer, o_shape, fake_dtype_te, true, std::nullopt);
 
   // construct NVTE tensors
   TensorWrapper te_Bias;
@@ -351,15 +349,14 @@ std::vector<py::object> fused_attn_bwd(
   te_dO = makeTransformerEngineTensor(dO, none);
 
   // create S and dP tensors
-  TensorWrapper te_S, te_dP;
-  py::object py_S, py_dP;
-  std::tie(te_S, py_S) = quantizer_helper(s_quantizer, {0}, DType::kFloat32, false, std::nullopt);
-  std::tie(te_dP, py_dP) =
+  auto [te_S, py_S, _s] = quantizer_helper(s_quantizer, {0}, DType::kFloat32, false, std::nullopt);
+  auto [te_dP, py_dP, _dp] =
       quantizer_helper(dp_quantizer, {0}, DType::kFloat32, false, std::nullopt);
 
   // create dQ, dK, dV tensors
   TensorWrapper te_dQ, te_dK, te_dV;
   py::object py_dQ, py_dK, py_dV;
+  std::optional<at::Tensor> dq_amax_buf, dk_amax_buf, dv_amax_buf;
   std::unique_ptr<Quantizer> dQKV_quantizer = convert_quantizer(dqkv_quantizer);
   std::vector<size_t> q_shape = convertShape(te_Q.shape());
   std::vector<size_t> k_shape = convertShape(te_K.shape());
@@ -465,9 +462,12 @@ std::vector<py::object> fused_attn_bwd(
       NVTE_ERROR("QKV layout not supported!");
   }
 
-  std::tie(te_dQ, py_dQ) = quantizer_helper(dqkv_quantizer, dQ_shape, dqkv_fake_dtype, true, dQ);
-  std::tie(te_dK, py_dK) = quantizer_helper(dqkv_quantizer, dK_shape, dqkv_fake_dtype, true, dK);
-  std::tie(te_dV, py_dV) = quantizer_helper(dqkv_quantizer, dV_shape, dqkv_fake_dtype, true, dV);
+  std::tie(te_dQ, py_dQ, dq_amax_buf) =
+      quantizer_helper(dqkv_quantizer, dQ_shape, dqkv_fake_dtype, true, dQ);
+  std::tie(te_dK, py_dK, dk_amax_buf) =
+      quantizer_helper(dqkv_quantizer, dK_shape, dqkv_fake_dtype, true, dK);
+  std::tie(te_dV, py_dV, dv_amax_buf) =
+      quantizer_helper(dqkv_quantizer, dV_shape, dqkv_fake_dtype, true, dV);
 
   // construct NVTE tensors
   if (detail::IsFloat8Quantizers(dqkv_quantizer.ptr())) {

@@ -233,23 +233,21 @@ class Float8CurrentScalingQuantizer(Quantizer):
     high-precision tensor, without the need of any history window.
 
     Unlike delayed scaling, scale and amax tensors are not needed to initialize the
-    quantizer, becuse they are simply GPU buffers that will be filled by current
+    quantizer, because they are simply GPU buffers that will be filled by current
     scaling quantization kernels, instead of using values taken from delayed scaling
-    history window. Therefore, device parameter is needed for tensor allocation.
+    history window.
 
     Both Float8CurrentScalingQuantizer and Float8Quantizer produces Float8Tensor,
     because they are both per-tensor scaling, ie. one scaling factor per tensor.
 
+    Note: The ``device``, ``use_existing_amax``, ``scale``, and ``amax``
+    parameters are accepted but unused. They are kept for backward
+    compatibility with existing callers.
+
     """
 
-    """Workspace buffer for FP8 scaling factor"""
-    scale: torch.Tensor
-    """Workspace buffer for max-abs value"""
-    amax: torch.Tensor
     """FP8 datatype"""
     dtype: TE_DType
-    """amax update options"""
-    use_existing_amax: bool
     """amax reduction options"""
     with_amax_reduction: bool
     amax_reduction_group: Optional[dist_group_type]
@@ -273,14 +271,15 @@ class Float8CurrentScalingQuantizer(Quantizer):
         amax: Optional[torch.Tensor] = None,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
-        if scale is None:
-            scale = torch.empty(1, dtype=torch.float32, device=device)
-        if amax is None:
-            amax = torch.empty(1, dtype=torch.float32, device=device)
-        self.scale = scale
-        self.amax = amax
+        if use_existing_amax or scale is not None or amax is not None:
+            warnings.warn(
+                "Float8CurrentScalingQuantizer ignores `use_existing_amax`, `scale`, "
+                "and `amax`; kept for backward compatibility and will be removed.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        del device, use_existing_amax, scale, amax  # Kept for backward compatibility
         self.dtype = fp8_dtype
-        self.use_existing_amax = use_existing_amax
         self.with_amax_reduction = with_amax_reduction
         self.amax_reduction_group = amax_reduction_group
         self.force_pow_2_scales = force_pow_2_scales
@@ -302,11 +301,8 @@ class Float8CurrentScalingQuantizer(Quantizer):
             columnwise=self.columnwise_usage,
             with_amax_reduction=self.with_amax_reduction,
             amax_reduction_group=self.amax_reduction_group,
-            use_existing_amax=self.use_existing_amax,
             force_pow_2_scales=self.force_pow_2_scales,
             amax_epsilon=self.amax_epsilon,
-            scale=self.scale,
-            amax=self.amax,
         )
         quantizer.internal = self.internal
         quantizer.optimize_for_gemm = self.optimize_for_gemm
