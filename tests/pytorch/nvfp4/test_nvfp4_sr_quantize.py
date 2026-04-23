@@ -14,9 +14,26 @@ from transformer_engine.pytorch import NVFP4Quantizer
 
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
 
+SM120_SR_EQUIVALENCE_ATOL = 2e-7
+
 seed = 12345
 torch.manual_seed(seed)
 torch.cuda.manual_seed(seed)
+
+def _assert_sr_vs_rn_behavior(
+    me_sr: torch.Tensor,
+    me_rn: torch.Tensor,
+    me_t_sr: torch.Tensor,
+    me_t_rn: torch.Tensor,
+) -> None:
+    if torch.cuda.get_device_capability() == (12, 0):
+        # SM120 currently disables NVFP4 stochastic rounding in backend paths,
+        # so SR and RN should be numerically equivalent.
+        torch.testing.assert_close(me_sr, me_rn, atol=SM120_SR_EQUIVALENCE_ATOL, rtol=0.0)
+        torch.testing.assert_close(me_t_sr, me_t_rn, atol=SM120_SR_EQUIVALENCE_ATOL, rtol=0.0)
+    else:
+        assert me_sr < me_rn, "Stochastic rounding failed - error larger than the round to nearest."
+        assert me_t_sr < me_t_rn, "Stochastic rounding failed - error larger than the round to nearest."
 
 
 def unpack_fp4(x: torch.Tensor) -> torch.Tensor:
@@ -278,16 +295,7 @@ def check_quantization_nvfp4_versus_reference(
 
     print(f"RMSE SR: {me_sr:.3e} | RMSE RN: {me_rn:.3e}")
     print(f"RMSE SR_t: {me_t_sr:.3e} | RMSE RN_t: {me_t_rn:.3e}")
-    if torch.cuda.get_device_capability() == (12, 0):
-        # SM120 currently disables NVFP4 stochastic rounding in backend paths,
-        # so SR and RN should be numerically equivalent.
-        torch.testing.assert_close(me_sr, me_rn, atol=2e-7, rtol=0.0)
-        torch.testing.assert_close(me_t_sr, me_t_rn, atol=2e-7, rtol=0.0)
-    else:
-        assert me_sr < me_rn, "Stochastic rounding failed - error larger than the round to nearest."
-        assert (
-            me_t_sr < me_t_rn
-        ), "Stochastic rounding failed - error larger than the round to nearest."
+    _assert_sr_vs_rn_behavior(me_sr, me_rn, me_t_sr, me_t_rn)
 
 
 def check_group_quantization_nvfp4_versus_reference(
@@ -370,18 +378,7 @@ def check_group_quantization_nvfp4_versus_reference(
 
         print(f"RMSE SR: {me_sr:.3e} | RMSE RN: {me_rn:.3e}")
         print(f"RMSE SR_t: {me_t_sr:.3e} | RMSE RN_t: {me_t_rn:.3e}")
-        if torch.cuda.get_device_capability() == (12, 0):
-            # SM120 currently disables NVFP4 stochastic rounding in backend paths,
-            # so SR and RN should be numerically equivalent.
-            torch.testing.assert_close(me_sr, me_rn, atol=2e-7, rtol=0.0)
-            torch.testing.assert_close(me_t_sr, me_t_rn, atol=2e-7, rtol=0.0)
-        else:
-            assert (
-                me_sr < me_rn
-            ), "Stochastic rounding failed - error larger than the round to nearest."
-            assert (
-                me_t_sr < me_t_rn
-            ), "Stochastic rounding failed - error larger than the round to nearest."
+        _assert_sr_vs_rn_behavior(me_sr, me_rn, me_t_sr, me_t_rn)
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
