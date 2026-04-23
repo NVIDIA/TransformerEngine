@@ -1053,27 +1053,20 @@ class ETPShardedParam(torch.nn.Parameter):
         self._grad_accum_hook = hook
 
     @staticmethod
-    def _finalize_wgrad(param, wgrad_rs):
-        """Post-RS per-param processing: strip padding, accumulate, call DDP hook.
+    def _handle_megatron_grad_accum(param):
+        """Handle megatron DDP and gradient accumulation fusion.
 
-        Accumulates the reduce-scattered wgrad into main_grad and triggers
-        the DDP backward hook (register_grad_ready) so the DP reduce-scatter
-        fires at the correct time during backward.
+        Do NOT set param.grad before calling the hook — the hook checks
+        param.grad and would accumulate it into main_grad if zero_out_wgrad
+        is True, corrupting the gradient with a non-zero dummy.
         """
-
-        param._set_rs_state(ETPWeightState.NONE)
-
-        if param.is_padded_last_rank:
-            wgrad_rs = param._strip_padding(wgrad_rs)
-
-        param.main_grad.add_(wgrad_rs)
         if hasattr(param, "grad_added_to_main_grad"):
             param.grad_added_to_main_grad = True
         dummy_grad = get_dummy_wgrad(list(param.main_grad.shape), param.dtype)
-
         if getattr(param, '_grad_accum_hook', None) is not None:
             param._grad_accum_hook()
 
+        param._set_rs_state(ETPWeightState.NONE)
         return dummy_grad
 
 
@@ -1213,8 +1206,13 @@ class ETPShardedParam(torch.nn.Parameter):
             ret = tuple([None] * len(wgrads)) if batched else None
         else:
             # Sync reduce-scatter (last weight in chain) — RS done, recycle immediately
-            sharded, _ = self._reduce_scatter(wgrads, async_op=False, nvtx_label=nvtx_label)
-            result = [self._finalize_wgrad(p, g) for p, g in zip(weights, sharded)]
+            wgrads, _ = self._reduce_scatter(wgrads, async_op=False, nvtx_label=nvtx_label)
+            wgrads = [
+                w._strip_padding(g) if w.is_padded_last_rank else w for w, g in zip(weights, wgrads)
+            ]
+            torch._foreach_add_([p.main_grad for p in weights], wgrads)
+            result = [self._handle_megatron_grad_accum(p) for p in weights]
+            
             if poolable:
                 for buf in wgrads:
                     _wgrad_pool_put(buf)
@@ -1230,8 +1228,15 @@ class ETPShardedParam(torch.nn.Parameter):
             else:
                 self.next_w.rs_event.wait()
                 cache = get_global_ETP_cache()
-                for w in self.next_w._weights:
-                    self._finalize_wgrad(w, cache.get(w._rs_ticket))
+                next_weights = self.next_w._weights
+                wgrads = [cache.get(w._rs_ticket) for w in next_weights]
+                wgrads = [
+                    w._strip_padding(g) if w.is_padded_last_rank else g for w, g in zip(next_weights, wgrads)
+                ]
+
+                torch._foreach_add_([w.main_grad for w in next_weights], wgrads)
+                for w in next_weights:
+                    self._handle_megatron_grad_accum(w)
                     cache.release(w._rs_ticket)
 
         return ret
