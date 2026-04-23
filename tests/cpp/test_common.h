@@ -295,12 +295,7 @@ class Tensor {
   }
 
   void set_amax(float amax_val) {
-    if (!amax_cpu_data_) {
-      amax_cpu_data_ = std::make_shared<float>(0);
-      float* amax_gpu = nullptr;
-      cudaMalloc((void**)&amax_gpu, sizeof(float));  // NOLINT(*)
-      tensor_.set_amax(amax_gpu, DType::kFloat32, std::vector<size_t>{1});
-    }
+    NVTE_CHECK(amax_cpu_data_);
     *amax_cpu_data_ = amax_val;
   }
 
