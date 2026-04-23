@@ -32,7 +32,7 @@ from .._common import (
 )
 from ...cpp_extensions import general_grouped_gemm_for_grouped_tensor
 from ...module.base import _2X_ACC_WGRAD
-from ...triton.grouped_dbias_dscales import _compute_grouped_dbias_dscales
+from ...triton.grouped_dbias_dscales import compute_grouped_dbias_dscales
 
 
 def _cudnn_compute_wgrad(
@@ -63,10 +63,12 @@ def _cudnn_compute_wgrad(
     # b_tensor = X = (total_tokens, in_features) column-major
     b_tensor = grouped_x.columnwise_data.view(dtype=fp8_dtype).view(total_tokens, in_features)
 
-    sfa_tensor = grouped_dy.columnwise_scale_inv.view(out_features, -1).view(
+    sfa_leading_dim = ((out_features + 127) // 128) * 128
+    sfb_leading_dim = ((in_features + 127) // 128) * 128
+    sfa_tensor = grouped_dy.columnwise_scale_inv.view(sfa_leading_dim, -1).view(
         dtype=torch.float8_e8m0fnu
     )
-    sfb_tensor = grouped_x.columnwise_scale_inv.view(in_features, -1).view(
+    sfb_tensor = grouped_x.columnwise_scale_inv.view(sfb_leading_dim, -1).view(
         dtype=torch.float8_e8m0fnu
     )
 
@@ -591,7 +593,7 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         if scale_bias:
             fc2_biases = fc2_op._get_bias_tensors(dtype)
             bias_packed = torch.stack(fc2_biases)
-            fc2_dbias_packed_result, grad_scales = _compute_grouped_dbias_dscales(
+            fc2_dbias_packed_result, grad_scales = compute_grouped_dbias_dscales(
                 fc2_dy,
                 scales_f32,
                 bias_packed,
