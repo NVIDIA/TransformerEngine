@@ -23,14 +23,12 @@ def _reference_orthogonalize(
     grad: torch.Tensor,
     *,
     partition_dim: int,
-    world_size: int,
     coefficients: list[tuple[float, float, float]],
     scale_mode: str,
     extra_scale_factor: float,
     eps: float,
 ) -> torch.Tensor:
     global_shape = [grad.size(0), grad.size(1)]
-    global_shape[partition_dim] *= world_size
 
     x = grad.clone()
     if partition_dim == 0:
@@ -60,7 +58,6 @@ def _reference_step(
     weight_decay: float,
     use_decoupled_weight_decay: bool,
     partition_dim: int,
-    world_size: int,
     coefficients: list[tuple[float, float, float]],
     scale_mode: str,
     extra_scale_factor: float,
@@ -84,7 +81,6 @@ def _reference_step(
     orth_update = _reference_orthogonalize(
         update,
         partition_dim=partition_dim,
-        world_size=world_size,
         coefficients=coefficients,
         scale_mode=scale_mode,
         extra_scale_factor=extra_scale_factor,
@@ -187,7 +183,6 @@ def main():
             weight_decay=weight_decay,
             use_decoupled_weight_decay=use_decoupled_weight_decay,
             partition_dim=args.partition_dim,
-            world_size=world_size,
             coefficients=coefficients,
             scale_mode=scale_mode,
             extra_scale_factor=extra_scale_factor,
