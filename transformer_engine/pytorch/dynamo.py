@@ -6,8 +6,8 @@
 
 Non-delayed quantizers are registered as value-typed opaque objects so that
 torch.compile can bake them as constants and guard on __eq__.
-Delayed quantizers (Float8Quantizer) stay as reference types because their
-scale/amax state is mutated every step by FP8GlobalStateManager.
+Float8Quantizer (delayed scaling) is not registered here as delayed scaling
+is being deprecated and slated for removal.
 
 Requires PyTorch >= 2.14 (opaque object API). On older versions this module
 is a no-op.
