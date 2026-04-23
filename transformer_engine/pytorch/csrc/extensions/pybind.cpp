@@ -144,6 +144,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "NVFP4: cast using pre-reduced amax in output's amax buffers; skips amax compute and allreduce",
         py::arg("tensor"), py::arg("quantizer"), py::arg("output") = py::none(),
         py::arg("noop") = py::none());
+  m.def("compute_multi_amax_nvfp4", transformer_engine::pytorch::compute_multi_amax_nvfp4,
+        "NVFP4: fused multi-tensor amax compute (writes both rowwise+columnwise amax per output)",
+        py::arg("tensor_list"), py::arg("quantizer_list"), py::arg("output_list"));
   m.def("dequantize", &transformer_engine::pytorch::dequantize, "Dequantize", py::arg("input"),
         py::arg("otype"));
   m.def("group_quantize", transformer_engine::pytorch::group_quantize, py::arg("tensor"),

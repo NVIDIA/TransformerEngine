@@ -292,6 +292,14 @@ py::object quantize_cast_only_nvfp4(const at::Tensor &tensor, py::handle quantiz
                                     const py::object &output,
                                     std::optional<at::Tensor> noop_flag);
 
+// NVFP4-only multi-tensor amax: fuses N per-expert (zero_amax + amax + D2D replicate)
+// chains into a single pair of kernel launches (one multi-zero + one multi-amax) that
+// writes amax into every output's rowwise AND columnwise buffers.  Outputs must be
+// pre-allocated; amax is written in place, no return.
+void compute_multi_amax_nvfp4(const std::vector<at::Tensor> &tensor_list,
+                              std::vector<py::handle> quantizer_list,
+                              const std::vector<py::object> &output_list);
+
 py::object dequantize(const py::handle &input, DType otype);
 
 py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const size_t num_tensors,

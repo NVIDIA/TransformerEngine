@@ -238,6 +238,10 @@ _COALESCED_AMAX_TE_APIS_AVAILABLE = (
     hasattr(tex, "compute_amax_nvfp4") and hasattr(tex, "quantize_cast_only_nvfp4")
 )
 
+# Tier-2: multi-tensor amax kernel fuses N per-expert (zero_amax + amax + D2D) chains
+# into two multi-tensor kernel launches.  Independent of Tier-1 coalesced allreduce.
+_MULTI_AMAX_TE_API_AVAILABLE = hasattr(tex, "compute_multi_amax_nvfp4")
+
 
 def _coalesced_amax_static_eligible(weights):
     """Walk the weight list once and decide whether the coalesced-amax path
@@ -281,13 +285,32 @@ def _quantize_with_coalesced_amax(weights, skip_weight_cast, cast_noop_flag):
     # Phase 1: per-weight local amax into each w.quantized's amax buffers.
     # Keep rowwise/columnwise both populated so the group allreduce sees
     # whichever the consumer GEMM will read.
-    for w, shard in zip(weights, padded_shards):
+    for w in weights:
         w._quantizer.set_usage(rowwise=True, columnwise=True)
-        tex.compute_amax_nvfp4(
-            tensor=shard,
-            quantizer=w._quantizer,
-            output=w.quantized,
+    if _MULTI_AMAX_TE_API_AVAILABLE:
+        # Tier-2: single multi-tensor launch writes both rowwise and columnwise
+        # amax directly (no per-expert D2D replicate), fusing N per-expert chains.
+        # w._quantizer is set once by _configure_quantizer and never rebinds, so
+        # cache the list on weights[0] alongside _coalesced_amax_static.  Output
+        # list is NOT cached because w.quantized can rebind if the weight is
+        # re-quantized externally.
+        anchor = weights[0]
+        quantizer_list = getattr(anchor, "_multi_amax_quantizer_list", None)
+        if quantizer_list is None:
+            quantizer_list = [w._quantizer for w in weights]
+            anchor._multi_amax_quantizer_list = quantizer_list
+        tex.compute_multi_amax_nvfp4(
+            padded_shards,
+            quantizer_list,
+            [w.quantized for w in weights],
         )
+    else:
+        for w, shard in zip(weights, padded_shards):
+            tex.compute_amax_nvfp4(
+                tensor=shard,
+                quantizer=w._quantizer,
+                output=w.quantized,
+            )
 
     # Phase 2: one coalesced allreduce across every weight's amax tensors.
     amax_tensors = []

@@ -146,6 +146,82 @@ py::object quantize_cast_only_nvfp4(const at::Tensor &tensor, py::handle quantiz
   return output_py;
 }
 
+/*! @brief NVFP4-only: compute amax for N input tensors in a single launch.
+ *
+ * Each output's rowwise AND columnwise amax buffers are populated directly by the
+ * kernel (atomicMaxFloat), fusing the per-expert zero_amax + amax_kernel + D2D
+ * replicate chain into two multi-tensor launches.  Caller pairs this with an
+ * external coalesced allreduce and then N calls to quantize_cast_only_nvfp4.
+ *
+ * Amax is written into the outputs passed in via output_list; no return value is
+ * needed — caller already holds references to those objects.
+ */
+void compute_multi_amax_nvfp4(const std::vector<at::Tensor> &tensor_list,
+                              std::vector<py::handle> quantizer_list,
+                              const std::vector<py::object> &output_list) {
+  const size_t num_tensors = tensor_list.size();
+  NVTE_CHECK(num_tensors > 0, "compute_multi_amax_nvfp4 requires at least one tensor");
+  NVTE_CHECK(quantizer_list.size() == num_tensors,
+             "compute_multi_amax_nvfp4: quantizer_list size mismatch");
+  NVTE_CHECK(output_list.size() == num_tensors,
+             "compute_multi_amax_nvfp4: output_list size mismatch");
+
+  // Locals held for the duration of this call (destroyed at function return).
+  // TensorWrappers only hold NVTETensor handles (opaque indexes into a global pool
+  // released by ~TensorWrapper); they do NOT reference quantizer_cpp or py::object,
+  // so we do not need to preserve quantizer unique_ptrs past this scope.
+  std::vector<at::Tensor> input_contiguous;
+  input_contiguous.reserve(num_tensors);
+  std::vector<TensorWrapper> input_wrappers;
+  input_wrappers.reserve(num_tensors);
+  std::vector<TensorWrapper> output_wrappers;
+  output_wrappers.reserve(num_tensors);
+
+  std::vector<NVTETensor> inputs_nvte;
+  std::vector<NVTETensor> outputs_nvte;
+  inputs_nvte.reserve(num_tensors);
+  outputs_nvte.reserve(num_tensors);
+
+  for (size_t i = 0; i < num_tensors; ++i) {
+    NVTE_CHECK(detail::IsNVFP4Quantizers(quantizer_list[i].ptr()),
+               "compute_multi_amax_nvfp4: quantizer[", i, "] is not an NVFP4Quantizer");
+    auto quantizer_cpp = convert_quantizer(quantizer_list[i]);
+    auto *nvfp4_quantizer = dynamic_cast<NVFP4Quantizer *>(quantizer_cpp.get());
+    NVTE_CHECK(nvfp4_quantizer != nullptr && !nvfp4_quantizer->with_rht,
+               "compute_multi_amax_nvfp4 requires NVFP4Quantizer with with_rht=false (idx=", i,
+               ")");
+
+    input_contiguous.emplace_back(tensor_list[i].contiguous());
+    input_wrappers.emplace_back(makeTransformerEngineTensor(input_contiguous.back()));
+
+    TensorWrapper out_cpp;
+    py::object out_py;
+    NVTE_CHECK(!output_list[i].is_none(),
+               "compute_multi_amax_nvfp4: output_list[", i, "] is None; caller must pre-allocate");
+    std::tie(out_cpp, out_py) = quantizer_cpp->convert_and_update_tensor(output_list[i]);
+
+    NVTE_CHECK(out_cpp.get_amax().data_ptr != nullptr ||
+                   out_cpp.get_columnwise_amax().data_ptr != nullptr,
+               "compute_multi_amax_nvfp4: output[", i, "] has no amax buffer");
+
+    output_wrappers.emplace_back(std::move(out_cpp));
+    // quantizer_cpp and out_py are released here at end-of-iteration.
+
+    if (input_wrappers.back().numel() == 0) continue;
+    inputs_nvte.push_back(input_wrappers.back().data());
+    outputs_nvte.push_back(output_wrappers.back().data());
+  }
+
+  if (inputs_nvte.empty()) return;
+
+  QuantizationConfigWrapper quant_config;
+  auto stream = at::cuda::getCurrentCUDAStream();
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_multi_compute_amax(inputs_nvte.data(), outputs_nvte.data(), inputs_nvte.size(),
+                            quant_config, stream);
+  });
+}
+
 namespace {
 
 // helper functions for NVFP4 grouped quantization (cuda graph safe with shapes stored in device without D2H copy)

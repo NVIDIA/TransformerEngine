@@ -99,6 +99,26 @@ void nvte_compute_amax(const NVTETensor input, NVTETensor output, cudaStream_t s
 void nvte_compute_amax_with_config(const NVTETensor input, NVTETensor output,
                                    const NVTEQuantizationConfig config, cudaStream_t stream);
 
+/*! \brief Compute amax for a list of independent tensors in a single kernel launch.
+ *
+ *  Unlike nvte_group_amax (which requires a single contiguous input split along dim 0),
+ *  this API accepts arrays of independent input tensors, each with its own allocation.
+ *  Designed for the ETP grouped-experts case where per-expert weights live in separate
+ *  buffers.  For each i in [0, num_tensors), computes amax(inputs[i]) and writes it to
+ *  outputs[i]'s amax buffer.  outputs[i] must be an FP8 per-tensor scaling or NVFP4 1D
+ *  scaling tensor.  All inputs must share the same dtype.  If the list exceeds the
+ *  per-launch batch capacity, it is internally chunked.
+ *
+ *  \param[in]      inputs        Array of input tensors (unquantized).  Size num_tensors.
+ *  \param[in,out]  outputs       Array of output tensors.  Only the amax is updated.
+ *                                Size num_tensors.
+ *  \param[in]      num_tensors   Number of tensors.
+ *  \param[in]      config        Quantization configuration (for noop_tensor).  May be NULL.
+ *  \param[in]      stream        CUDA stream used for the operation.
+ */
+void nvte_multi_compute_amax(const NVTETensor *inputs, NVTETensor *outputs, size_t num_tensors,
+                             const NVTEQuantizationConfig config, cudaStream_t stream);
+
 /*! \brief Update an FP8 tensor's scale based on its amax.
  *
  *  This is only supported for FP8 tensors with per-tensor scaling.
