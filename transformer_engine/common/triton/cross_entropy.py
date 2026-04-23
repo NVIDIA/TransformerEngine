@@ -92,6 +92,8 @@ def cross_entropy_kernel(
     loss_stride,
     m_d_X_y_ptr,
     m_d_X_y_stride,
+    log_sum_exp_ptr,
+    log_sum_exp_stride,
     rank,
     world_size,
     ignore_idx,
@@ -100,6 +102,7 @@ def cross_entropy_kernel(
     n_non_ignore,
     reduce_loss: tl.constexpr,
     label_smoothing: tl.constexpr,
+    z_loss_weight: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     """
@@ -114,6 +117,8 @@ def cross_entropy_kernel(
     loss_stride (int): The stride of the loss tensor.
     m_d_X_y_ptr: Pointer to m/d/X_y tensor.
     m_d_X_y_stride: The stride of m/d/X_y tensor.
+    log_sum_exp_ptr: Pointer to tensor to store log(sum(exp(logits))) per row.
+    log_sum_exp_stride (int): The stride of the log_sum_exp tensor.
     rank (int): The rank of this device in the TP group.
     world_size (int): The size of world involved in this distributed loss calculation.
     ignore_idx (int): Tokens to be ignored for loss and gradient calculation.
@@ -121,6 +126,8 @@ def cross_entropy_kernel(
     n_rows (int): The number of rows in the batch (B * SQ), used for buffer indexing.
     n_non_ignore: The number of non-ignored elements in the batch.
     label_smoothing (float): The amount of smoothing when computing the loss, where 0.0 means no smoothing.
+    z_loss_weight (float): Weight for z-loss regularization. Adds z_loss_weight * log(Z)^2 per token.
+        Compile-time constant (tl.constexpr); varying it across calls triggers kernel recompilation.
     BLOCK_SIZE (int): The block size for Triton operations.
     """
 
@@ -160,6 +167,10 @@ def cross_entropy_kernel(
         m = tl.maximum(m, m_new)
         ori_X_y = tl.maximum(ori_X_y, X_y_new)
 
+    # lse = log(Z): free to compute (m, d already in registers).
+    lse = m + tl.log(d)
+    tl.store(log_sum_exp_ptr + program_id * log_sum_exp_stride, lse)
+
     # Label smoothing is a general case of normal cross entropy
     scaled_x_sum = 0.0
     eps = label_smoothing / (n_cols * world_size)
@@ -180,13 +191,16 @@ def cross_entropy_kernel(
         if label_smoothing > 0:
             # scale X beforehand to avoid overflow
             scaled_x_sum += tl.sum(tl.where(X_offsets < n_cols, -eps * X_block, 0.0))
+        # Softmax gradient
+        X_block = tl.exp(X_block - m) / d
+        # Z-loss gradient: d/dx_i[z_loss_weight * lse^2] = 2 * z_loss_weight * lse * softmax(x_i).
+        # Applied before eps subtraction so only pure softmax is scaled.
+        if z_loss_weight > 0:
+            X_block = X_block * (1.0 + 2.0 * z_loss_weight * lse)
+        X_block = X_block - eps
         # Scale gradients based on reduction mode
-        # For reduce_loss=True: PyTorch will scale by 1/n_rows, so we need to scale by n_rows/n_non_ignore
-        # For reduce_loss=False: No additional scaling from PyTorch, so we don't scale here
         if reduce_loss:
-            X_block = (tl.exp(X_block - m) / d - eps) / (n_non_ignore)
-        else:
-            X_block = tl.exp(X_block - m) / d - eps
+            X_block = X_block / n_non_ignore
         tl.store(X_ptr + X_offsets, X_block.to(grad_dtype), mask=X_offsets < n_cols)
 
     # We need tl.debug_barrier() to ensure the new result of X_ptr is written
@@ -196,7 +210,8 @@ def cross_entropy_kernel(
 
     # loss = log (softmax(X_y)) = log ((e ^ (X_y - max(X)) / sum(e ^ (X - max(X))))
     #      = (X_y - max(X)) - log(sum(e ^ (X - max(X))))
-    loss = -(ori_X_y - m - tl.log(d))
+    #      = lse - ori_X_y  (reusing lse = m + log(d) already computed above)
+    loss = lse - ori_X_y
 
     # Orginal loss = H(q, p),  with label smoothing regularization = H(q', p) and (label_smoothing / V) = eps
     # H(q', p) = (1 - label_smoothing) * H(q, p) + label_smoothing * H(u, p)
@@ -205,8 +220,12 @@ def cross_entropy_kernel(
     #          = (1 - label_smoothing) * H(q, p) + (-sum(x_i * eps) + label_smoothing * (m + logd))
     # Refer to H(q', p) in section 7 of the paper: https://arxiv.org/pdf/1512.00567
     if label_smoothing > 0:
-        smooth_loss = scaled_x_sum + label_smoothing * (m + tl.log(d))
+        smooth_loss = scaled_x_sum + label_smoothing * lse
         loss = loss * (1 - label_smoothing) + smooth_loss
+
+    # Z-loss regularization: adds z_loss_weight * log(Z)^2 per token.
+    if z_loss_weight > 0:
+        loss += z_loss_weight * lse * lse
 
     # 6. Specially handle the i==y case where `dx_y = (softmax(x_y) - (1 - label_smoothing) / N`
     vocab_start_idx = rank * n_cols
