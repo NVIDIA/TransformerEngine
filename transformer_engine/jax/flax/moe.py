@@ -425,7 +425,7 @@ class MoEBlock(TransformerEngineBase):
         gate_logits: jnp.ndarray,
         params: dict,
     ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-        """Wrap :meth:`_forward_body` in a ring-of-experts ``shard_map``.
+        """Wrap ``_forward_body`` in a ring-of-experts ``shard_map``.
 
         For each EP shard the wrapper:
           1. ``all_gather`` s the local inputs / logits / expert_bias along
@@ -566,7 +566,7 @@ class MoEBlock(TransformerEngineBase):
             # The score-for-aux kernel runs independently (no data dependency
             # on the main kernel), so XLA can overlap them on the GPU.
             aux_scores, aux_routing_map = fused_topk_with_score_function(
-                logits_2d,
+                logits_2d.astype(jnp.float32),
                 topk=self.num_experts_per_tok,
                 score_function=self.score_function,
                 compute_aux_scores=True,
@@ -575,7 +575,7 @@ class MoEBlock(TransformerEngineBase):
                 aux_routing_map.astype(jnp.int32), axis=0
             )
             aux_loss = fused_moe_aux_loss(
-                aux_scores,
+                aux_scores.astype(jnp.float32),
                 aux_tokens_per_expert,
                 topk=self.num_experts_per_tok,
                 coeff=self.aux_loss_coeff,
@@ -619,11 +619,21 @@ class MoEBlock(TransformerEngineBase):
             )
             # Slice group_sizes to just this shard's experts. When not using
             # EP, ``num_experts_local == self.num_experts`` so this is a no-op.
+            #
+            # NOTE on padded buffers (``align_size > 0``):
+            # ``unfused_token_dispatch`` pads ``sorted_inputs`` to a static
+            # worst-case row count so JIT shape inference is happy. The
+            # returned ``group_sizes`` deliberately tracks only real + real
+            # alignment-padding tokens; the remaining rows are zero-input
+            # placeholders that ``grouped_dense`` does not need to touch.
+            #
+            # TE's ``grouped_dense`` FFI today asserts strictly
+            # ``sum(group_sizes) == sorted_inputs.shape[0]``. When that
+            # assertion is relaxed to ``>=`` (the GEMM only iterates over the
+            # first ``sum(group_sizes)`` rows anyway), this code works as-is.
+            # Folding the gap into a single expert would create a per-shard
+            # load imbalance and is intentionally avoided here.
             group_sizes = group_sizes[:num_experts_local]
-            # ``local_real_size = sum(group_sizes)`` is the number of permuted
-            # rows that actually correspond to tokens routed to this shard's
-            # experts. Used by the ring-EP caller to zero out garbage rows
-            # before combine.
             combine_state = {
                 "backend": "pure_jax",
                 "perm_state": perm_state,
