@@ -291,6 +291,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
         return (
             self.dtype == other.dtype
             and self.with_amax_reduction == other.with_amax_reduction
+            and self.amax_reduction_group is other.amax_reduction_group
             and self.force_pow_2_scales == other.force_pow_2_scales
             and self.amax_epsilon == other.amax_epsilon
             and self.rowwise_usage == other.rowwise_usage
@@ -303,6 +304,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
                 type(self),
                 self.dtype,
                 self.with_amax_reduction,
+                id(self.amax_reduction_group),
                 self.force_pow_2_scales,
                 self.amax_epsilon,
                 self.rowwise_usage,
@@ -311,6 +313,9 @@ class Float8CurrentScalingQuantizer(Quantizer):
         )
 
     def __fx_repr__(self):
+        # Process groups cannot be embedded in source, so smuggle the
+        # reference through the globals dict under a unique name.
+        group_name = f"_amax_reduction_group_{id(self.amax_reduction_group):x}"
         return (
             (
                 "Float8CurrentScalingQuantizer("
@@ -318,12 +323,14 @@ class Float8CurrentScalingQuantizer(Quantizer):
                 f"rowwise={self.rowwise_usage}, "
                 f"columnwise={self.columnwise_usage}, "
                 f"with_amax_reduction={self.with_amax_reduction}, "
+                f"amax_reduction_group={group_name}, "
                 f"force_pow_2_scales={self.force_pow_2_scales}, "
                 f"amax_epsilon={self.amax_epsilon})"
             ),
             {
                 "Float8CurrentScalingQuantizer": Float8CurrentScalingQuantizer,
                 "TE_DType": TE_DType,
+                group_name: self.amax_reduction_group,
             },
         )
 
