@@ -261,11 +261,9 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
       const bool enable_sm120_grouped_nvfp4_fallback = is_sm120_device() && first_dims.has_value();
       if (enable_sm120_grouped_nvfp4_fallback) {
         // SM120 fallback does not support GEMM-swizzled NVFP4 scale layouts in this path.
-        // Treat optimize_for_gemm as a no-op and keep scales in regular layout.
-        const bool original_optimize_for_gemm = nvfp4_quantizer_cpp->optimize_for_gemm;
-        if (original_optimize_for_gemm) {
-          nvfp4_quantizer_cpp->optimize_for_gemm = false;
-        }
+        // Use a local quantizer copy so fallback behavior does not mutate shared quantizer state.
+        NVFP4Quantizer fallback_quantizer = *nvfp4_quantizer_cpp;
+        fallback_quantizer.optimize_for_gemm = false;
         auto split_sections = get_split_sections_for_sm120_fallback(first_dims, num_tensors);
         std::vector<TensorWrapper> input_list;
         input_list.reserve(num_tensors);
@@ -287,16 +285,10 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
           dim0_offset += split_sections[i];
         }
         auto output_list = get_grouped_outputs_for_sm120_fallback(grouped_output_py, num_tensors);
-        std::vector<NVFP4Quantizer *> quantizers(num_tensors, nvfp4_quantizer_cpp);
+        std::vector<NVFP4Quantizer *> quantizers(num_tensors, &fallback_quantizer);
         auto input_tensor_cpp = makeTransformerEngineTensor(input_contiguous);
-        try {
-          split_quantize_nvfp4_impl(input_tensor_cpp, input_list, output_list, split_sections,
-                                    quantizers);
-        } catch (...) {
-          nvfp4_quantizer_cpp->optimize_for_gemm = original_optimize_for_gemm;
-          throw;
-        }
-        nvfp4_quantizer_cpp->optimize_for_gemm = original_optimize_for_gemm;
+        split_quantize_nvfp4_impl(input_tensor_cpp, input_list, output_list, split_sections,
+                                  quantizers);
       } else {
         group_quantize_nvfp4_impl(grouped_input_tensor, grouped_output_tensor_cpp,
                                   nvfp4_quantizer_cpp, at::cuda::getCurrentCUDAStream());
