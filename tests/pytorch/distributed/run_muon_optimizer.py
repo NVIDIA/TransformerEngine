@@ -99,7 +99,9 @@ def main():
     parser = argparse.ArgumentParser(description="Distributed Muon optimizer test")
     parser.add_argument("--dtype", type=str, default="float32", choices=["float32", "bfloat16"])
     parser.add_argument("--partition-dim", type=int, default=1, choices=[0, 1])
-    parser.add_argument("--weight-decay-mode", type=str, default="decoupled", choices=["decoupled", "l2"])
+    parser.add_argument(
+        "--weight-decay-mode", type=str, default="decoupled", choices=["decoupled", "l2"]
+    )
     parser.add_argument("--num-steps", type=int, default=2)
     args = parser.parse_args()
 
