@@ -202,6 +202,7 @@ def restore_from_func_ctx(ctx: torch.autograd.function.FunctionCtx, return_saved
     out = restore_from_saved(
         ctx.tensor_objects, ctx.saved_tensors, return_saved_tensors=return_saved_tensors
     )
+    # Delete the references to tensor objects once they've been consumed by the `restore_from_saved` method to construct back the actual tensors.
     ctx.tensor_objects = None
     return out
 
