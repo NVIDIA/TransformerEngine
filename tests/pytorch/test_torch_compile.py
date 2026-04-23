@@ -11,6 +11,7 @@ try:
     from torch._opaque_base import OpaqueBaseMeta
     from torch._library.opaque_object import (
         get_opaque_type_name,
+        is_opaque_type,
         register_opaque_type,
         MemberType,
     )
@@ -349,8 +350,10 @@ def test_autocast_sanity(fp8_recipe):
         "NVFP4Quantizer",
     ],
 )
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
 def test_quantizer_value_object(quantizer_factory):
     quantizer = quantizer_factory()
+    assert is_opaque_type(type(quantizer))
     repr_str, globals_dict = quantizer.__fx_repr__()
     reconstructed = eval(repr_str, globals_dict)  # pylint: disable=eval-used
     assert quantizer == reconstructed
