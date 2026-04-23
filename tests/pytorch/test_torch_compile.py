@@ -56,6 +56,7 @@ if nvfp4_available:
 # ---------------------------------------------------------------------------
 
 if _opaque_available:
+
     class ToyQuantizer(Float8CurrentScalingQuantizer):
         """Quantizer with a string tag, registered as an
         opaque value type so torch.compile can treat it as a baked-in constant."""
