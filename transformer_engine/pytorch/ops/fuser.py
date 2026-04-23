@@ -138,7 +138,8 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             )
             for idx, ys in zip(basic_op_idxs, fused_op_extra_outputs):
                 for y in ys:
-                    y.requires_grad_(idx >= fuser.first_op_requiring_backward)
+                    if func_ctx is not None:
+                        y.requires_grad_(idx >= fuser.first_op_requiring_backward)
                 extra_outputs[idx] = ys
 
         # Flatten list of extra outputs
@@ -190,7 +191,8 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         for tensor in [x] + extra_outputs_flat:
             tensor._do_not_clear = True
 
-        x.requires_grad_(fuser.first_op_requiring_backward < fuser._num_basic_ops)
+        if func_ctx is not None:
+            x.requires_grad_(fuser.first_op_requiring_backward < fuser._num_basic_ops)
 
         if extra_outputs_flat:
             return x, *extra_outputs_flat
