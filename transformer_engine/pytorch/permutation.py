@@ -192,6 +192,7 @@ class _moe_permute_mask_map(torch.autograd.Function):
         num_out_tokens: int,
         probs: torch.Tensor,
         pad_offsets: Optional[torch.Tensor],
+        preallocated_act_b: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # pylint: disable=missing-function-docstring
         if not inp.numel():
@@ -301,6 +302,7 @@ class _moe_permute_mask_map(torch.autograd.Function):
         ctx.num_experts = num_experts
         ctx.num_tokens = num_tokens
         ctx.hidden_size = hidden_size
+        ctx.preallocated_act_b = preallocated_act_b
         return output, row_id_map, permuted_probs
 
     @staticmethod
@@ -313,6 +315,8 @@ class _moe_permute_mask_map(torch.autograd.Function):
         # pylint: disable=missing-function-docstring
         if not permuted_act_grad.numel():
             return permuted_act_grad, None, None, ctx.probs, None
+        
+        preallocated_act_b = ctx.preallocated_act_b
 
         act_grad = None
         probs_grad = None
@@ -330,10 +334,11 @@ class _moe_permute_mask_map(torch.autograd.Function):
                 ctx.num_tokens,
                 ctx.num_experts,
                 ctx.hidden_size,
+                preallocated_act_b,
             )
         if not ctx.needs_input_grad[3]:
             probs_grad = None
-        return act_grad, None, None, probs_grad, None
+        return act_grad, None, None, probs_grad, None, None
 
 
 class _moe_unpermute_mask_map(torch.autograd.Function):
@@ -347,6 +352,7 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
         merging_probs: Optional[torch.Tensor],
         restore_shape: Optional[torch.Size],
         pad_offsets: Optional[torch.Tensor],
+        preallocated_act_f: torch.Tensor = None,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
         if not inp.numel():
@@ -380,6 +386,7 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
             num_tokens,
             num_experts,
             hidden_size,
+            preallocated_act_f,
         )
 
         if with_probs:
@@ -510,7 +517,7 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
 
         if not ctx.needs_input_grad[2]:
             probs_grad = None
-        return act_grad, None, probs_grad, None, None
+        return act_grad, None, probs_grad, None, None, None
 
 
 def moe_permute(
@@ -562,6 +569,7 @@ def moe_permute_with_probs(
     probs: torch.Tensor,
     routing_map: torch.Tensor,
     num_out_tokens: int = -1,
+    preallocated_act_b: torch.Tensor = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Permute the tokens and probs based on the routing_map.
@@ -585,7 +593,7 @@ def moe_permute_with_probs(
         By default, set to '-1', meaning no tokens are dropped.
     """
     output, row_id_map, permuted_probs = _moe_permute_mask_map.apply(
-        inp, routing_map, num_out_tokens, probs, None
+        inp, routing_map, num_out_tokens, probs, None, preallocated_act_b
     )
     return output, permuted_probs, row_id_map
 
@@ -654,6 +662,7 @@ def moe_unpermute(
     map_type: str = "mask",
     probs: Optional[torch.Tensor] = None,
     pad_offsets: Optional[torch.Tensor] = None,
+    preallocated_act_f: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """
     Unpermute a tensor with permuted tokens, and optionally merge the tokens with their
@@ -693,7 +702,7 @@ def moe_unpermute(
         return _moe_unpermute_index_map.apply(inp, row_id_map, merging_probs)
     if map_type == "mask":
         return _moe_unpermute_mask_map.apply(
-            inp, row_id_map, merging_probs, restore_shape, pad_offsets
+            inp, row_id_map, merging_probs, restore_shape, pad_offsets, preallocated_act_f
         )
     raise ValueError("map_type should be one of 'mask' or 'index'")
 

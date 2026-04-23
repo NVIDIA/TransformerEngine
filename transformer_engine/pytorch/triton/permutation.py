@@ -218,6 +218,7 @@ def unpermute_with_mask_map(
     num_tokens: int,
     num_experts: int,
     hidden_size: int,
+    preallocated_out: Union[torch.Tensor, None] = None,
 ):
     """
     Unpermute the input tensor based on the row_id_map.
@@ -243,7 +244,12 @@ def unpermute_with_mask_map(
     hidden_size : int
         Hidden size of the permuted tensor.
     """
-    output = torch.empty((num_tokens, hidden_size), dtype=inp.dtype, device="cuda")
+    if preallocated_out is None:
+        output = torch.empty((num_tokens, hidden_size), dtype=inp.dtype, device="cuda")
+    else:
+        preallocated_out = preallocated_out.view(inp.dtype)
+        preallocated_out = preallocated_out[:num_tokens * hidden_size]
+        output = preallocated_out.view((num_tokens, hidden_size))
     if permuted_probs is not None:
         unpermuted_probs = torch.empty(
             (num_tokens, num_experts), dtype=permuted_probs.dtype, device="cuda"
