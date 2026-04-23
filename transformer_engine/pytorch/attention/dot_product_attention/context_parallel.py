@@ -1556,7 +1556,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             for i in range(cp_size):
                 S_quantizer_per_step[i] = S_quantizer.copy() if S_quantizer is not None else None
                 O_quantizer_per_step[i] = O_quantizer.copy()
-                if not fp8_recipe.mxfp8():
+                if fp8_recipe.delayed():
                     S_quantizer_per_step[i].amax = amax_per_step[0][i].reshape((1,))
                     O_quantizer_per_step[i].amax = amax_per_step[1][i].reshape((1,))
         else:
@@ -2042,7 +2042,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 )
 
         # update FP8 quantizers: amax across cp_size steps
-        if fp8 and use_fused_attention and not fp8_recipe.mxfp8():
+        if fp8 and use_fused_attention and fp8_recipe.delayed():
             amax_cp_fwd = amax_per_step.amax(dim=1)
             S_quantizer.amax.copy_(amax_cp_fwd[0])
             O_quantizer.amax.copy_(amax_cp_fwd[1])
@@ -2182,7 +2182,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             ctx.QKV_quantizer = QKV_quantizer.copy()
             ctx.O_quantizer = O_quantizer.copy()
             ctx.S_quantizer = S_quantizer.copy() if S_quantizer is not None else None
-            if not ctx.fp8_recipe.mxfp8():
+            if fp8_recipe.delayed():
                 ctx.QKV_quantizer.scale = QKV_quantizer.scale.clone()
                 ctx.O_quantizer.scale = O_quantizer.scale.clone()
                 ctx.S_quantizer.scale = S_quantizer.scale.clone()
@@ -2380,7 +2380,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     ctx.dP_quantizer.copy() if ctx.dP_quantizer is not None else None
                 )
                 dQKV_quantizer_per_step[i] = ctx.dQKV_quantizer.copy()
-                if not ctx.fp8_recipe.mxfp8():
+                if ctx.fp8_recipe.delayed():
                     dP_quantizer_per_step[i].amax = amax_per_step[0][i].reshape((1,))
                     dQKV_quantizer_per_step[i].amax = amax_per_step[1][i].reshape((1,))
         else:
@@ -2793,7 +2793,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
         # sum up all cp_size for dq, dk, dv
         if ctx.fp8 and ctx.use_fused_attention:
-            if not ctx.fp8_recipe.mxfp8():
+            if ctx.fp8_recipe.delayed():
                 amax_cp_bwd = amax_per_step.amax(dim=1)
                 ctx.dP_quantizer.amax.copy_(amax_cp_bwd[0])
                 ctx.dQKV_quantizer.amax.copy_(amax_cp_bwd[1])
@@ -3405,7 +3405,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             ctx.QKV_quantizer = QKV_quantizer.copy()
             ctx.O_quantizer = O_quantizer.copy()
             ctx.S_quantizer = S_quantizer.copy() if S_quantizer is not None else None
-            if not ctx.fp8_recipe.mxfp8():
+            if ctx.fp8_recipe.delayed():
                 ctx.QKV_quantizer.scale = QKV_quantizer.scale.clone()
                 ctx.O_quantizer.scale = O_quantizer.scale.clone()
                 ctx.S_quantizer.scale = S_quantizer.scale.clone()
@@ -4232,7 +4232,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             ctx.QKV_quantizer = QKV_quantizer.copy()
             ctx.O_quantizer = O_quantizer.copy()
             ctx.S_quantizer = S_quantizer.copy() if S_quantizer is not None else None
-            if not ctx.fp8_recipe.mxfp8():
+            if fp8_recipe.delayed():
                 ctx.QKV_quantizer.scale = QKV_quantizer.scale.clone()
                 ctx.O_quantizer.scale = O_quantizer.scale.clone()
                 ctx.S_quantizer.scale = S_quantizer.scale.clone()

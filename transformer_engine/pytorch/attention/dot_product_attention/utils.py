@@ -2452,7 +2452,7 @@ def print_quantizers(
                 type_str = "CS"
             elif isinstance(q, MXFP8Quantizer):
                 type_str = "MXFP8"
-            if type_str in ["DS", "CS"]:
+            if type_str == "DS":
                 print(
                     f"{label} >> {names[i]:14s}: {type_str}, {q.scale.item():.4e} x"
                     f" {q.amax.item():.4e} = {q.scale.item()*q.amax.item():.4e}"
