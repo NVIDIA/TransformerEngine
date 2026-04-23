@@ -172,6 +172,8 @@ class NVFP4Quantizer(Quantizer):
             and self.with_random_sign_mask == other.with_random_sign_mask
             and self.rowwise_usage == other.rowwise_usage
             and self.columnwise_usage == other.columnwise_usage
+            and self.internal == other.internal
+            and self.optimize_for_gemm == other.optimize_for_gemm
         )
 
     def __hash__(self):
@@ -187,6 +189,8 @@ class NVFP4Quantizer(Quantizer):
                 self.with_random_sign_mask,
                 self.rowwise_usage,
                 self.columnwise_usage,
+                self.internal,
+                self.optimize_for_gemm,
             )
         )
 
@@ -203,6 +207,8 @@ class NVFP4Quantizer(Quantizer):
                 f"with_2d_quantization={self.with_2d_quantization}, "
                 f"stochastic_rounding={self.stochastic_rounding}, "
                 f"with_random_sign_mask={self.with_random_sign_mask})"
+                f"._with_runtime_flags(internal={self.internal}, "
+                f"optimize_for_gemm={self.optimize_for_gemm})"
             ),
             {"NVFP4Quantizer": NVFP4Quantizer, "TE_DType": TE_DType},
         )

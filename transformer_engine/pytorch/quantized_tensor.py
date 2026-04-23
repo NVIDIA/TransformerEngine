@@ -270,6 +270,13 @@ class Quantizer(metaclass=_TEQuantizerMeta):
         self.internal = False
         self.optimize_for_gemm = False
 
+    def _with_runtime_flags(self, *, internal: bool, optimize_for_gemm: bool) -> "Quantizer":
+        # Helper used by __fx_repr__ to set post-construction flags in a
+        # single chained expression so the repr remains a pure expression.
+        self.internal = internal
+        self.optimize_for_gemm = optimize_for_gemm
+        return self
+
     def __repr__(self):
         return (
             f"{self.__class__.__name__}("

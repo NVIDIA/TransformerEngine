@@ -296,6 +296,8 @@ class Float8CurrentScalingQuantizer(Quantizer):
             and self.amax_epsilon == other.amax_epsilon
             and self.rowwise_usage == other.rowwise_usage
             and self.columnwise_usage == other.columnwise_usage
+            and self.internal == other.internal
+            and self.optimize_for_gemm == other.optimize_for_gemm
         )
 
     def __hash__(self):
@@ -309,6 +311,8 @@ class Float8CurrentScalingQuantizer(Quantizer):
                 self.amax_epsilon,
                 self.rowwise_usage,
                 self.columnwise_usage,
+                self.internal,
+                self.optimize_for_gemm,
             )
         )
 
@@ -326,6 +330,8 @@ class Float8CurrentScalingQuantizer(Quantizer):
                 f"amax_reduction_group={group_name}, "
                 f"force_pow_2_scales={self.force_pow_2_scales}, "
                 f"amax_epsilon={self.amax_epsilon})"
+                f"._with_runtime_flags(internal={self.internal}, "
+                f"optimize_for_gemm={self.optimize_for_gemm})"
             ),
             {
                 "Float8CurrentScalingQuantizer": Float8CurrentScalingQuantizer,
@@ -345,7 +351,6 @@ class Float8CurrentScalingQuantizer(Quantizer):
 
         quantizer = Float8CurrentScalingQuantizer(
             fp8_dtype=self.dtype,
-            device=self.device,
             rowwise=self.rowwise_usage,
             columnwise=self.columnwise_usage,
             with_amax_reduction=self.with_amax_reduction,

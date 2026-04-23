@@ -63,6 +63,8 @@ class Float8BlockQuantizer(Quantizer):
             and self.block_scaling_dim == other.block_scaling_dim
             and self.rowwise_usage == other.rowwise_usage
             and self.columnwise_usage == other.columnwise_usage
+            and self.internal == other.internal
+            and self.optimize_for_gemm == other.optimize_for_gemm
         )
 
     def __hash__(self):
@@ -75,6 +77,8 @@ class Float8BlockQuantizer(Quantizer):
                 self.block_scaling_dim,
                 self.rowwise_usage,
                 self.columnwise_usage,
+                self.internal,
+                self.optimize_for_gemm,
             )
         )
 
@@ -88,6 +92,8 @@ class Float8BlockQuantizer(Quantizer):
                 f"amax_epsilon={self.amax_epsilon}, "
                 f"force_pow_2_scales={self.force_pow_2_scales}, "
                 f"block_scaling_dim={self.block_scaling_dim})"
+                f"._with_runtime_flags(internal={self.internal}, "
+                f"optimize_for_gemm={self.optimize_for_gemm})"
             ),
             {"Float8BlockQuantizer": Float8BlockQuantizer, "TE_DType": TE_DType},
         )
