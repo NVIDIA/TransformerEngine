@@ -332,9 +332,20 @@ class mHCProjectionOp(torch.autograd.Function):
         )
 
         grad_x = torch.empty((M, K), device=device, dtype=x.dtype)
+
+        allow_bf16_reduced_precision_reduction = (
+            torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction
+        )
+        # Use FP32 accumulator in case of pytorch choosing a path with BF16 accumulator which hurts accuracy,
+        # which seems to happen on Ampere but not on Hopper and Blackwell
+        torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
         grad_phi = (grad_H.T @ x)[:N, :].to(
             ctx.phi_dtype
         )  # (2n + n^2, M) @ (M, nC) = (2n + n^2, nC), note that the last dimension of grad_H is already padded to 32
+        # Recover the original pytorch setting
+        torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = (
+            allow_bf16_reduced_precision_reduction
+        )
 
         # pylint: disable=unnecessary-lambda-assignment
         grid = lambda META: (
