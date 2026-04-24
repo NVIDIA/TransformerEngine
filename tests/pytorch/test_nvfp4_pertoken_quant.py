@@ -109,28 +109,71 @@ def _has_pertoken_kernel():
 def nvfp4_pertoken_quantize_ref(input_tensor: torch.Tensor):
     """Pure PyTorch reference for per-token NVFP4 quantization.
 
+    Reproduces the exact logic of quantize_pertoken_nvfp4_kernel:
+      Pass 1: per-row amax → S_enc → per_token_scale
+      Pass 2: per-block(16) amax → S_dec_b (E4M3) → scale + quantize to FP4
+
     Returns:
-        per_token_scales: (num_rows,) FP32 tensor
-            global_scale[row] = row_amax / (fp8_max * fp4_max)
+        data: (M, K/2) uint8 packed FP4
+        scales: (M, K/16) uint8 (FP8 E4M3 block scales)
+        per_token_scales: (M,) FP32
     """
+    from transformer_engine.pytorch.custom_recipes.quantization_nvfp4 import cast_to_fp4x2
+
     assert input_tensor.dim() == 2
     num_rows, num_cols = input_tensor.shape
     assert num_cols % 16 == 0
 
-    input_f32 = input_tensor.float()
+    x = input_tensor.float()
 
-    # Per-row amax
-    row_amax = input_f32.abs().amax(dim=1)  # (num_rows,)
+    # --- Pass 1: Per-row amax → S_enc → per_token_scale ---
+    row_amax = x.abs().amax(dim=1)  # (M,)
 
-    # S_enc = fp8_max * fp4_max / row_amax
-    # global_scale = 1 / S_enc = row_amax / (fp8_max * fp4_max)
-    # When amax=0, S_enc=1.0 (fallback), so global_scale=1.0
-    per_token_scales = row_amax / (FP8_E4M3_MAX * FP4_MAX)
+    # compute_global_encode_scaling_factor_FP4: S_enc = fp8_max * fp4_max / amax
+    S_enc = FP8_E4M3_MAX * FP4_MAX / row_amax
+    S_enc = torch.clamp(S_enc, max=torch.finfo(torch.float32).max)
+    S_enc = torch.where((row_amax == 0) | (S_enc == 0), torch.ones_like(S_enc), S_enc)
+
+    per_token_scales = 1.0 / S_enc  # global_scale = 1 / S_enc
     per_token_scales = torch.where(
         row_amax == 0, torch.ones_like(per_token_scales), per_token_scales
     )
 
-    return per_token_scales
+    # --- Pass 2: Per-block quantization ---
+    num_blocks = num_cols // 16
+    x_blocks = x.view(num_rows, num_blocks, 16)  # (M, K/16, 16)
+
+    # Per-block amax
+    block_amax = x_blocks.abs().amax(dim=-1)  # (M, K/16)
+
+    # compute_decoding_scaling_factor: S_dec_b = block_amax * S_enc / fp4_max
+    # Then cast to FP8 E4M3
+    S_enc_expanded = S_enc.unsqueeze(1)  # (M, 1)
+    S_dec_b = block_amax * S_enc_expanded / FP4_MAX
+    S_dec_b = torch.clamp(S_dec_b, max=FP8_E4M3_MAX)
+    S_dec_b_fp8 = S_dec_b.to(torch.float8_e4m3fn)
+    S_dec_b_f = S_dec_b_fp8.float()
+
+    # Block encode scale = S_enc / S_dec_b_f (inverse for quantization)
+    block_encode_scale = torch.where(
+        S_dec_b_f != 0,
+        S_enc_expanded / S_dec_b_f,
+        torch.zeros_like(S_dec_b_f),
+    )  # (M, K/16)
+
+    # Scale input and clamp to FP4 range [-6, 6]
+    block_encode_expanded = block_encode_scale.unsqueeze(-1)  # (M, K/16, 1)
+    scaled_x = x_blocks * block_encode_expanded  # (M, K/16, 16)
+    scaled_x = scaled_x.reshape(num_rows, num_cols)
+    clamped_x = torch.clamp(scaled_x, -FP4_MAX, FP4_MAX)
+
+    # Pack to FP4 using TE's reference cast_to_fp4x2
+    data = cast_to_fp4x2(clamped_x)
+
+    # Block scales as uint8 (FP8 E4M3 raw bytes)
+    scales = S_dec_b_fp8.view(torch.uint8)
+
+    return data, scales, per_token_scales
 
 
 # ---------------------------------------------------------------------------
@@ -186,11 +229,11 @@ class TestQuantizeNvfp4Pertoken:
         x = torch.randn(num_rows, num_cols, dtype=dtype, device="cuda")
         _, _, per_token_scales = tex.quantize_nvfp4_pertoken(x)
 
-        ref_scales = nvfp4_pertoken_quantize_ref(x)
+        _, _, ref_scales = nvfp4_pertoken_quantize_ref(x)
 
         torch.testing.assert_close(
             per_token_scales,
-            ref_scales,
+            ref_scales.to(device="cuda"),
             atol=1e-5,
             rtol=1e-3,
             msg="Per-token scales should match reference",
@@ -337,6 +380,95 @@ class TestQuantizeNvfp4Pertoken:
         with pytest.raises(RuntimeError):
             tex.quantize_nvfp4_pertoken(x)
 
+    # -----------------------------------------------------------------------
+    #  Exact byte-match tests (following test_nvfp4_quantize_exact.py pattern)
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "M, N",
+        [
+            (4, 256),
+            (16, 256),
+            (32, 1024),
+            (128, 4096),
+        ],
+    )
+    @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+    def test_fp4_data_exact_match(self, M, N, dtype):
+        """FP4 packed data must exactly match Python reference (byte-for-byte)."""
+        torch.manual_seed(0)
+        torch.cuda.manual_seed(0)
+        x = torch.randn(M, N, dtype=dtype, device="cuda")
+
+        data, scales, pts = tex.quantize_nvfp4_pertoken(x)
+        ref_data, ref_scales, ref_pts = nvfp4_pertoken_quantize_ref(x)
+
+        # Unpack both to 4-bit indices for comparison
+        kernel_unpacked = unpack_fp4(data)
+        ref_unpacked = unpack_fp4(ref_data.to(device="cuda"))
+
+        torch.testing.assert_close(
+            kernel_unpacked,
+            ref_unpacked,
+            atol=0.0,
+            rtol=0.0,
+            msg=f"FP4 data mismatch for shape ({M}, {N}), dtype={dtype}",
+        )
+
+    @pytest.mark.parametrize(
+        "M, N",
+        [
+            (4, 256),
+            (16, 256),
+            (32, 1024),
+            (128, 4096),
+        ],
+    )
+    @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+    def test_block_scales_exact_match(self, M, N, dtype):
+        """Block scales must exactly match Python reference (byte-for-byte)."""
+        torch.manual_seed(0)
+        torch.cuda.manual_seed(0)
+        x = torch.randn(M, N, dtype=dtype, device="cuda")
+
+        _, scales, _ = tex.quantize_nvfp4_pertoken(x)
+        _, ref_scales, _ = nvfp4_pertoken_quantize_ref(x)
+
+        torch.testing.assert_close(
+            scales,
+            ref_scales.to(device="cuda"),
+            atol=0.0,
+            rtol=0.0,
+            msg=f"Block scales mismatch for shape ({M}, {N}), dtype={dtype}",
+        )
+
+    @pytest.mark.parametrize(
+        "M, N",
+        [
+            (4, 256),
+            (16, 256),
+            (32, 1024),
+            (128, 4096),
+        ],
+    )
+    @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+    def test_per_token_scales_exact_match(self, M, N, dtype):
+        """Per-token scales must exactly match Python reference."""
+        torch.manual_seed(0)
+        torch.cuda.manual_seed(0)
+        x = torch.randn(M, N, dtype=dtype, device="cuda")
+
+        _, _, pts = tex.quantize_nvfp4_pertoken(x)
+        _, _, ref_pts = nvfp4_pertoken_quantize_ref(x)
+
+        torch.testing.assert_close(
+            pts,
+            ref_pts.to(device="cuda"),
+            atol=0.0,
+            rtol=0.0,
+            msg=f"Per-token scales mismatch for shape ({M}, {N}), dtype={dtype}",
+        )
+
 
 # ---------------------------------------------------------------------------
 #  Standalone test (can run without tex binding for reference validation)
@@ -349,9 +481,9 @@ class TestPertokenScaleReference:
     def test_reference_basic(self):
         """Basic reference test on CPU."""
         x = torch.tensor([[1.0, 2.0, 3.0, 4.0] * 4], dtype=torch.float32)
-        scales = nvfp4_pertoken_quantize_ref(x)
+        _, _, pts = nvfp4_pertoken_quantize_ref(x)
         expected = torch.tensor([4.0 / (FP8_E4M3_MAX * FP4_MAX)])
-        torch.testing.assert_close(scales, expected)
+        torch.testing.assert_close(pts, expected)
 
     def test_reference_multi_row(self):
         """Multi-row reference test."""
@@ -359,15 +491,15 @@ class TestPertokenScaleReference:
         x[0] = 1.0
         x[1] = 10.0
         x[2] = 0.1
-        scales = nvfp4_pertoken_quantize_ref(x)
+        _, _, pts = nvfp4_pertoken_quantize_ref(x)
 
-        assert scales[1] > scales[0] > scales[2]
-        torch.testing.assert_close(scales[0], torch.tensor(1.0 / (FP8_E4M3_MAX * FP4_MAX)))
-        torch.testing.assert_close(scales[1], torch.tensor(10.0 / (FP8_E4M3_MAX * FP4_MAX)))
+        assert pts[1] > pts[0] > pts[2]
+        torch.testing.assert_close(pts[0], torch.tensor(1.0 / (FP8_E4M3_MAX * FP4_MAX)))
+        torch.testing.assert_close(pts[1], torch.tensor(10.0 / (FP8_E4M3_MAX * FP4_MAX)))
 
     def test_reference_zero_row(self):
         """Zero row: S_enc=1.0 fallback, so global_scale=1.0."""
         x = torch.zeros(2, 16, dtype=torch.float32)
         x[0] = 5.0
-        scales = nvfp4_pertoken_quantize_ref(x)
-        assert scales[1] == 1.0
+        _, _, pts = nvfp4_pertoken_quantize_ref(x)
+        assert pts[1] == 1.0
