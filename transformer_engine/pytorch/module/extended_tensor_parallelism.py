@@ -290,15 +290,12 @@ def _quantize_with_coalesced_amax(weights, skip_weight_cast, cast_noop_flag):
     if _MULTI_AMAX_TE_API_AVAILABLE:
         # Tier-2: single multi-tensor launch writes both rowwise and columnwise
         # amax directly (no per-expert D2D replicate), fusing N per-expert chains.
-        # w._quantizer is set once by _configure_quantizer and never rebinds, so
-        # cache the list on weights[0] alongside _coalesced_amax_static.  Output
-        # list is NOT cached because w.quantized can rebind if the weight is
-        # re-quantized externally.
+        # Reuse the _cached_quantizers list already populated by _all_gather_weight
         anchor = weights[0]
-        quantizer_list = getattr(anchor, "_multi_amax_quantizer_list", None)
+        quantizer_list = anchor._cached_quantizers
         if quantizer_list is None:
             quantizer_list = [w._quantizer for w in weights]
-            anchor._multi_amax_quantizer_list = quantizer_list
+            anchor._cached_quantizers = quantizer_list
         tex.compute_multi_amax_nvfp4(
             padded_shards,
             quantizer_list,
@@ -553,6 +550,13 @@ class ETPShardedParam(torch.nn.Parameter):
         self.pad_length = 0
         # Debug
         self._debug_name = ""
+        # Hot-path caches (populated lazily on first use).  chain_id/group are
+        # set after __init__, so we can't resolve streams eagerly here.
+        self._cached_ag_stream = None
+        self._cached_rs_stream = None
+        self._cached_quantizers = None
+        self._cached_dtypes = None
+        self._cached_etp_group = None
 
     def setup(self, weight_quantizer=None):
         """Set quantizer and create quantized shard."""
@@ -757,7 +761,13 @@ class ETPShardedParam(torch.nn.Parameter):
                 w._quantizer.set_usage(rowwise=fwd, columnwise=not fwd)
 
         # 3. Build gather inputs.
-        quantizers = [w._quantizer for w in weights]
+        # quantizers / dtypes / etp_group are stable after model construction —
+        # cache on the anchor (self == weights[0]) to avoid rebuilding lists
+        # every call.  w.quantized is NOT cached because it can rebind.
+        quantizers = self._cached_quantizers
+        if quantizers is None:
+            quantizers = [w._quantizer for w in weights]
+            self._cached_quantizers = quantizers
         if weights[0].did_cast_to_low_precision:
             gather_weights = [w.quantized for w in weights]
         else:
@@ -765,7 +775,10 @@ class ETPShardedParam(torch.nn.Parameter):
 
         # 4. Cache checkout — use pooled buffers for both async and sync gathers
         #    to avoid allocating fresh memory each iteration.
-        dtypes = [q.dtype if q is not None else w.dtype for q, w in zip(quantizers, weights)]
+        dtypes = self._cached_dtypes
+        if dtypes is None:
+            dtypes = [q.dtype if q is not None else w.dtype for q, w in zip(quantizers, weights)]
+            self._cached_dtypes = dtypes
         out_buffers = []
         cache = get_global_ETP_cache()
         for p, dt in zip(weights, dtypes):
@@ -781,8 +794,12 @@ class ETPShardedParam(torch.nn.Parameter):
                 out_buffers.append(cache.get(p._ag_ticket_bwd))
 
         # 5. Communicate.
-        etp_group = weights[0].group
-        if out_buffers is not None and len(gather_weights) > 1:
+        etp_group = self._cached_etp_group
+        if etp_group is None:
+            etp_group = weights[0].group
+            self._cached_etp_group = etp_group
+        if ETP_CONFIG.check_param_states and len(gather_weights) > 1:
+            # Debug invariant: batched AG needs distinct output buffers per expert.
             assert len(set(id(b) for b in out_buffers)) == len(out_buffers), \
                 "Duplicate output buffers in batched all-gather — experts need distinct cache keys"
 
@@ -828,7 +845,11 @@ class ETPShardedParam(torch.nn.Parameter):
         # wait on NCCL's completion event into ag_stream; ag_event.record()
         # then marks ag_stream for consumers (main_stream via ag_event.wait
         # or MLM drains via main.wait_stream).
-        with torch.cuda.stream(get_ag_stream(self.chain_id, self.group)):
+        ag_stream = self._cached_ag_stream
+        if ag_stream is None:
+            ag_stream = get_ag_stream(self.chain_id, self.group)
+            self._cached_ag_stream = ag_stream
+        with torch.cuda.stream(ag_stream):
             if self._prefetch_handle is not None:
                 self._prefetch_handle.wait()
                 self._prefetch_handle = None
@@ -1052,7 +1073,11 @@ class ETPShardedParam(torch.nn.Parameter):
         # (not rs_stream) because main produced the RS input (wgrad) and
         # naturally holds the write→read ordering. Wait-site enters rs_stream
         # so it observes NCCL completion and rs_event marks it for consumers.
-        with torch.cuda.stream(get_rs_stream(self.chain_id, self.group)):
+        rs_stream = self._cached_rs_stream
+        if rs_stream is None:
+            rs_stream = get_rs_stream(self.chain_id, self.group)
+            self._cached_rs_stream = rs_stream
+        with torch.cuda.stream(rs_stream):
             if self._wgrad_rs_handle is not None:
                 self._wgrad_rs_handle.wait()
                 self._wgrad_rs_handle = None
