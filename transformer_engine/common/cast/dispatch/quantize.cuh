@@ -23,6 +23,7 @@
 #include "../nvfp4/group_quantize_transpose_nvfp4.cuh"
 #include "../nvfp4/quantize_nvfp4.cuh"
 #include "../nvfp4/quantize_transpose_nvfp4.cuh"
+#include "../nvfp4/specialized/group_quantize_transpose_nvfp4_tuned_1D.cuh"
 
 namespace transformer_engine {
 namespace dispatch {
@@ -412,6 +413,19 @@ void group_quantize_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTensor 
           workspace_tensor, &quant_config_cpp, stream);
       break;
     }
+    case NVTE_NVFP4_1D_SCALING: {
+      NVTE_CHECK(!IS_ACT, "IS_ACT is not supported by FWD NVTE_NVFP4_1D_SCALING");
+
+      const bool is_bf16_input_type = input_tensor->dtype() == DType::kBFloat16;
+      NVTE_CHECK(is_bf16_input_type, "Optimized grouped NVFP4 kernel supports only BF16 input.");
+
+      const bool is_2D_quantization = quant_config_cpp.nvfp4_2d_quantization;
+      NVTE_CHECK(!is_2D_quantization, "2D quantization is not supported for group quantize.");
+
+      nvfp4::group_quantize_transpose(input_tensor, noop_tensor, output_tensor, &quant_config_cpp,
+                                      stream);
+      break;
+    }
     default:
       NVTE_ERROR("Not implemented scaling mode: " + to_string(scaling_mode) + ".");
   }
@@ -451,6 +465,19 @@ void group_quantize_bwd_helper(const NVTEGroupedTensor grad, const NVTEGroupedTe
       mxfp8::group_quantize<IS_DBIAS, IS_DACT, /*IS_ACT=*/false, ParamOP, OP>(
           grad_tensor, input_tensor, noop_tensor, output_tensor, dbias_tensor, workspace_tensor,
           &quant_config_cpp, stream);
+      break;
+    }
+    case NVTE_NVFP4_1D_SCALING: {
+      NVTE_CHECK((!IS_DBIAS && !IS_DACT),
+                 "IS_DBIAS and IS_DACT are not supported by BWD NVTE_NVFP4_1D_SCALING");
+      const bool is_bf16_input_type = grad_tensor->dtype() == DType::kBFloat16;
+      NVTE_CHECK(is_bf16_input_type, "Optimized grouped NVFP4 kernel supports only BF16 input.");
+
+      const bool is_2D_quantization = quant_config_cpp.nvfp4_2d_quantization;
+      NVTE_CHECK(!is_2D_quantization, "2D quantization is not supported for group quantize.");
+
+      nvfp4::group_quantize_transpose(grad_tensor, noop_tensor, output_tensor, &quant_config_cpp,
+                                      stream);
       break;
     }
     default:
