@@ -340,7 +340,7 @@ def _quantize_with_coalesced_amax(weights, skip_weight_cast, cast_noop_flag):
 class ETPConfig:
     """Global configuration for Extended Tensor Parallelism."""
     pad_for_alignment: int = 16
-    check_param_states: bool = True
+    check_param_states: bool = False
     weight_prefetch: bool = True
     # When True and the weight list in _all_gather_weight contains >1 NVFP4
     # shards that share an amax reduction group, coalesce their per-expert
