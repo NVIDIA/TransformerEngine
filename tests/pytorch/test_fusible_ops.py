@@ -2285,9 +2285,7 @@ class TestBasicOps:
             with torch.no_grad():
                 for w in _weight_params():
                     if getattr(w, "main_grad", None) is None:
-                        w.main_grad = torch.empty(
-                            w.size(), device=device, dtype=torch.float32
-                        )
+                        w.main_grad = torch.empty(w.size(), device=device, dtype=torch.float32)
                     w.main_grad.fill_(value)
 
         def _collect_main_grads() -> list[torch.Tensor]:
@@ -2349,9 +2347,7 @@ class TestBasicOps:
 
         # Replay the graph
         graph_out = (
-            train_step(static_x, static_dy, static_out_buf, use_graphed=True)
-            .detach()
-            .clone()
+            train_step(static_x, static_dy, static_out_buf, use_graphed=True).detach().clone()
         )
         torch.cuda.synchronize()
         graph_dx = static_x.grad.detach().clone()
@@ -2360,9 +2356,7 @@ class TestBasicOps:
             graph_param_grads: list[torch.Tensor] = []
         else:
             graph_main_grads = []
-            graph_param_grads = [
-                param.grad.detach().clone() for param in op.parameters()
-            ]
+            graph_param_grads = [param.grad.detach().clone() for param in op.parameters()]
 
         # Reference: same op invoked eagerly with the same fresh inputs and
         # the same starting grad/main_grad state.
