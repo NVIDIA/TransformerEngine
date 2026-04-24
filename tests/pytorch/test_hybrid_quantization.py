@@ -3749,3 +3749,689 @@ class TestHybridMakeLike:
         param = self._make_hybrid_param()
         copy = HybridQuantizedTensor.make_like(param)
         assert copy is not param
+
+
+# ---------------------------------------------------------------------------
+# 16. Activation recomputation (torch.utils.checkpoint / te.checkpoint)
+# ---------------------------------------------------------------------------
+
+
+def _reset_rng(seed: int = 1234):
+    """Reset deterministic RNG for reproducible forward/backward comparisons.
+
+    Activation recompute relies on RNG equality between the first forward
+    and the recomputed forward. These tests use dropout-free modules, so
+    RNG advancement doesn't affect numerics, but we still reset between
+    runs so the reference (no-recompute) and checkpointed paths see
+    identical weight init, input, and grad_output seeds.
+    """
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+
+def _collect_outputs(out, inp, model):
+    """Gather forward output, input grad, and parameter grads into a flat list.
+
+    Mirrors ``test_numerics.py::_test_e2e_*_recompute`` conventions so the
+    comparison against a non-recomputed baseline is a simple zip.
+    """
+    results = [out.detach().clone()]
+    if inp.grad is not None:
+        results.append(inp.grad.detach().clone())
+    for _, p in model.named_parameters():
+        if p.requires_grad and p.grad is not None:
+            results.append(p.grad.detach().clone())
+    return results
+
+
+def _assert_outputs_bitwise_equal(ref, test, label):
+    """All stateless same-format hybrid recipes should be bitwise-identical
+    under activation recompute: same input bytes → same quantized bytes →
+    same GEMM result. Any drift means the recompute path silently diverged
+    (e.g. fell back to a different quantization path)."""
+    assert len(ref) == len(test), f"{label}: output count mismatch"
+    for i, (r, t) in enumerate(zip(ref, test)):
+        torch.testing.assert_close(
+            t, r, rtol=0, atol=0, msg=f"{label}: bitwise mismatch at output {i}"
+        )
+
+
+@requires_fp8
+class TestHybridActivationRecompute:
+    """Activation recomputation around TE modules with a hybrid CustomRecipe.
+
+    Probes the interaction between ``HybridQuantizedTensor`` /
+    ``HybridQuantizedTensorStorage`` and the three activation-checkpoint
+    paths in use today:
+
+    * ``te.checkpoint(fn, ..., use_reentrant=True)`` — reentrant path; wraps
+      ``torch.autograd.Function`` that re-runs the forward under
+      ``activation_recompute_forward(recompute_phase=True)``. This is the
+      Megatron-style path.
+    * ``te.checkpoint(fn, ..., use_reentrant=False)`` — non-reentrant path;
+      uses ``_checkpoint_hook`` (torch saved-tensors hooks) to discard
+      saved tensors on the first forward and recompute them on unpack.
+    * ``torch.utils.checkpoint.checkpoint(fn, ..., use_reentrant=False)``
+      — vanilla PyTorch path without TE wrapper. Exercised because users
+      (and some Megatron configs) invoke it directly around TE modules.
+
+    Failure modes it catches:
+
+    * Silent BF16 fallback during recompute (would break bitwise parity
+      but pass loose tolerance — hence the bitwise assertion for
+      same-format stateless recipes).
+    * ``HybridQuantizedTensorStorage.prepare_for_saving`` /
+      ``restore_from_saved`` chain losing a sub-storage across the
+      save-for-backward boundary.
+    * ``HybridQuantizedTensor`` subclass being stripped by the autograd
+      engine (would manifest as ``AttributeError`` on the recomputed
+      tensor).
+    """
+
+    in_features = 128
+    out_features = 128
+    batch = 32
+
+    # ----- helpers ---------------------------------------------------
+
+    def _same_format_fp8_recipe(self):
+        """Same-format FP8 current scaling both directions → bitwise-safe
+        baseline. Matches
+        :class:`TestHybridGemmBitwiseIdentical` construction so
+        recompute parity can be asserted bitwise-equal."""
+        return _hybrid_custom_recipe(
+            row_factory=_fp8_row_factory,
+            col_factory=_fp8_col_factory,
+            grad_factory=_fp8_grad_factory,
+        )
+
+    def _same_format_mxfp8_recipe(self):
+        """Same-format MXFP8 both directions — stateless, per-block scales
+        computed from the tensor content; bitwise-stable under recompute."""
+        return _hybrid_custom_recipe(
+            row_factory=_mxfp8_factory,
+            col_factory=_mxfp8_factory,
+            grad_factory=lambda: MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E5M2),
+        )
+
+    def _cross_format_fp8_mxfp8_recipe(self):
+        """Cross-format FP8 row + MXFP8 col — the canonical hybrid
+        scenario. Numerical parity is not bitwise because the wgrad GEMM
+        uses MXFP8 scaling modes on both operands (so grad_output must be
+        MXFP8 columnwise), pairing differently from the fprop path."""
+        return _hybrid_custom_recipe(
+            row_factory=_fp8_row_factory,
+            col_factory=_mxfp8_factory,
+            grad_factory=_mxfp8_factory,
+        )
+
+    def _run_linear(self, recipe_obj, *, checkpoint_fn=None):
+        """Build a fresh Linear, run forward+backward, return collected
+        outputs. ``checkpoint_fn`` is an optional callable of the form
+        ``fn(model, inp) -> output`` that wraps the forward in an
+        activation-checkpoint implementation; ``None`` is the reference
+        (non-recompute) baseline.
+        """
+        _reset_rng(seed=4242)
+        model = Linear(
+            self.in_features, self.out_features, params_dtype=torch.bfloat16
+        ).cuda()
+        inp = torch.randn(
+            self.batch,
+            self.in_features,
+            device="cuda",
+            dtype=torch.bfloat16,
+            requires_grad=True,
+        )
+        inp.retain_grad()
+
+        with autocast(enabled=True, recipe=recipe_obj):
+            out = checkpoint_fn(model, inp) if checkpoint_fn is not None else model(inp)
+        out.float().sum().backward()
+        return _collect_outputs(out, inp, model)
+
+    def _run_transformer_layer(self, recipe_obj, *, checkpoint_fn=None):
+        """Small TransformerLayer (no dropout, fuse_qkv) with optional
+        activation checkpointing around the whole block."""
+        _reset_rng(seed=5151)
+        hidden = 128
+        ffn = 128
+        nheads = 4
+        seq = 8
+        bs = 4
+
+        model = TransformerLayer(
+            hidden,
+            ffn,
+            nheads,
+            hidden_dropout=0.0,
+            attention_dropout=0.0,
+            fuse_qkv_params=True,
+            params_dtype=torch.bfloat16,
+        ).cuda()
+
+        inp = torch.randn(
+            seq, bs, hidden, device="cuda", dtype=torch.bfloat16, requires_grad=True
+        )
+        inp.retain_grad()
+
+        with autocast(enabled=True, recipe=recipe_obj):
+            out = checkpoint_fn(model, inp) if checkpoint_fn is not None else model(inp)
+        out.float().sum().backward()
+        return _collect_outputs(out, inp, model)
+
+    # ----- te.checkpoint, reentrant ---------------------------------
+
+    def test_te_checkpoint_reentrant_linear_fp8_bitwise(self):
+        """te.checkpoint(use_reentrant=True) around te.Linear with
+        same-format FP8 hybrid → bitwise parity with non-recompute.
+
+        This is the Megatron-style activation-recompute path. Bitwise
+        parity catches silent BF16 fallback (would pass loose tolerance).
+        """
+        import transformer_engine.pytorch as te_pytorch
+
+        def fn(model, inp):
+            return te_pytorch.checkpoint(model, inp, use_reentrant=True)
+
+        ref = self._run_linear(self._same_format_fp8_recipe(), checkpoint_fn=None)
+        test = self._run_linear(self._same_format_fp8_recipe(), checkpoint_fn=fn)
+        _assert_outputs_bitwise_equal(ref, test, "te.checkpoint(reentrant) FP8")
+
+    @pytest.mark.skipif(not mxfp8_available, reason=f"MXFP8: {reason_for_no_mxfp8}")
+    def test_te_checkpoint_reentrant_linear_mxfp8_bitwise(self):
+        """Same as FP8 but MXFP8 hybrid — per-block scales must recompute
+        identically. Asserts that the MXFP8 path does not get disabled
+        during recompute."""
+        import transformer_engine.pytorch as te_pytorch
+
+        def fn(model, inp):
+            return te_pytorch.checkpoint(model, inp, use_reentrant=True)
+
+        ref = self._run_linear(self._same_format_mxfp8_recipe(), checkpoint_fn=None)
+        test = self._run_linear(self._same_format_mxfp8_recipe(), checkpoint_fn=fn)
+        _assert_outputs_bitwise_equal(ref, test, "te.checkpoint(reentrant) MXFP8")
+
+    # ----- te.checkpoint, non-reentrant -----------------------------
+
+    def test_te_checkpoint_non_reentrant_linear_fp8_bitwise(self):
+        """te.checkpoint(use_reentrant=False) — the saved-tensors-hooks
+        path. Different recompute infra (``_checkpoint_hook``) than the
+        reentrant path; validates the hybrid activation survives the
+        pack/unpack transport."""
+        import transformer_engine.pytorch as te_pytorch
+
+        def fn(model, inp):
+            return te_pytorch.checkpoint(model, inp, use_reentrant=False)
+
+        ref = self._run_linear(self._same_format_fp8_recipe(), checkpoint_fn=None)
+        test = self._run_linear(self._same_format_fp8_recipe(), checkpoint_fn=fn)
+        _assert_outputs_bitwise_equal(ref, test, "te.checkpoint(non-reentrant) FP8")
+
+    @pytest.mark.skipif(not mxfp8_available, reason=f"MXFP8: {reason_for_no_mxfp8}")
+    def test_te_checkpoint_non_reentrant_linear_mxfp8_bitwise(self):
+        import transformer_engine.pytorch as te_pytorch
+
+        def fn(model, inp):
+            return te_pytorch.checkpoint(model, inp, use_reentrant=False)
+
+        ref = self._run_linear(self._same_format_mxfp8_recipe(), checkpoint_fn=None)
+        test = self._run_linear(self._same_format_mxfp8_recipe(), checkpoint_fn=fn)
+        _assert_outputs_bitwise_equal(ref, test, "te.checkpoint(non-reentrant) MXFP8")
+
+    # ----- torch.utils.checkpoint (vanilla, non-reentrant) ----------
+    #
+    # These tests document a *known* TE-level incompatibility between
+    # vanilla ``torch.utils.checkpoint.checkpoint(..., use_reentrant=False)``
+    # and TE's weight-workspace cache (``_linear_forward_impl`` in
+    # ``module/linear.py``). The mechanism:
+    #
+    #   * First forward: ``quantize_weight`` takes the cache-miss path,
+    #     creating a fresh hybrid workspace and threading it into
+    #     ``prepare_for_saving`` → ``ctx.save_for_backward``.
+    #   * Recompute forward: the workspace is already populated on the
+    #     module, so ``quantize_weight`` takes the cache-hit path and
+    #     saves a different tensor-count.
+    #
+    # Vanilla ``torch.utils.checkpoint`` (``use_reentrant=False``)
+    # enforces a strict count match between original-forward and
+    # recompute-forward ``save_for_backward`` calls, and rejects the
+    # discrepancy with ``CheckpointError: A different number of tensors
+    # was saved``. The 2:1 count ratio (``8`` forward vs ``4`` recompute)
+    # is a hybrid signature — both sub-storages are saved on cache-miss
+    # and only the remaining one on cache-hit.
+    #
+    # ``te.checkpoint`` avoids this by threading ``is_first_microbatch``
+    # / ``skip_fp8_weight_update`` correctly across the recompute phase,
+    # which is why the ``te.checkpoint`` tests above pass bitwise.
+    #
+    # Keeping the xfail'd tests here:
+    #   1. pins the boundary — users hitting this failure get a clear
+    #      diagnosis and pointer to ``te.checkpoint``;
+    #   2. becomes a regression signal if the underlying cache-vs-
+    #      checkpoint interaction is ever resolved (the xfail flips to
+    #      an unexpected pass).
+    #
+    # Not hybrid-specific *in nature* (any quantized TE module with
+    # weight-workspace caching hits it under vanilla torch checkpoint),
+    # but hybrid amplifies and surfaces it via the 2x sub-storage count.
+
+    _TORCH_CHECKPOINT_CACHE_XFAIL = pytest.mark.xfail(
+        raises=torch.utils.checkpoint.CheckpointError,
+        strict=True,
+        reason=(
+            "Vanilla torch.utils.checkpoint(use_reentrant=False) is"
+            " incompatible with TE's weight-workspace cache: cache-miss"
+            " on the first forward saves a different tensor count than"
+            " cache-hit on recompute. Use te.checkpoint instead (tested"
+            " above)."
+        ),
+    )
+
+    @_TORCH_CHECKPOINT_CACHE_XFAIL
+    def test_torch_checkpoint_non_reentrant_linear_fp8_bitwise(self):
+        """Vanilla ``torch.utils.checkpoint.checkpoint`` without TE wrapper
+        around a hybrid-quantized te.Linear.
+
+        Users invoke ``torch.utils.checkpoint`` directly in many Megatron
+        branches and custom recomputation schemes. Currently fails due to
+        the weight-workspace cache interaction documented above; pins the
+        boundary so a future fix would flip this to an unexpected pass.
+        """
+        def fn(model, inp):
+            return torch.utils.checkpoint.checkpoint(model, inp, use_reentrant=False)
+
+        ref = self._run_linear(self._same_format_fp8_recipe(), checkpoint_fn=None)
+        test = self._run_linear(self._same_format_fp8_recipe(), checkpoint_fn=fn)
+        _assert_outputs_bitwise_equal(ref, test, "torch.utils.checkpoint FP8")
+
+    @pytest.mark.skipif(not mxfp8_available, reason=f"MXFP8: {reason_for_no_mxfp8}")
+    @_TORCH_CHECKPOINT_CACHE_XFAIL
+    def test_torch_checkpoint_non_reentrant_linear_mxfp8_bitwise(self):
+        def fn(model, inp):
+            return torch.utils.checkpoint.checkpoint(model, inp, use_reentrant=False)
+
+        ref = self._run_linear(self._same_format_mxfp8_recipe(), checkpoint_fn=None)
+        test = self._run_linear(self._same_format_mxfp8_recipe(), checkpoint_fn=fn)
+        _assert_outputs_bitwise_equal(ref, test, "torch.utils.checkpoint MXFP8")
+
+    # ----- cross-format + recompute (functional, loose tolerance) ---
+
+    @pytest.mark.skipif(not mxfp8_available, reason=f"MXFP8: {reason_for_no_mxfp8}")
+    def test_te_checkpoint_reentrant_linear_cross_format(self):
+        """Cross-format hybrid (FP8 row + MXFP8 col) under activation
+        recompute. Numerics are allowed to drift from non-recompute only
+        through paths recompute is allowed to affect; in practice they
+        should still match tightly because the recipe is stateless. Loose
+        tolerance catches only catastrophic silent fallbacks."""
+        import transformer_engine.pytorch as te_pytorch
+
+        def fn(model, inp):
+            return te_pytorch.checkpoint(model, inp, use_reentrant=True)
+
+        ref = self._run_linear(self._cross_format_fp8_mxfp8_recipe(), checkpoint_fn=None)
+        test = self._run_linear(self._cross_format_fp8_mxfp8_recipe(), checkpoint_fn=fn)
+        # Expected to match bitwise since both quantizers are stateless
+        # and the input bytes are identical between the two runs. Use a
+        # strict tolerance; if this ever drifts it's a real bug.
+        _assert_outputs_bitwise_equal(
+            ref, test, "te.checkpoint(reentrant) FP8xMXFP8 cross-format"
+        )
+
+    # ----- TransformerLayer -----------------------------------------
+
+    def test_te_checkpoint_reentrant_transformer_layer_fp8(self):
+        """te.checkpoint(reentrant) around a full TransformerLayer under
+        hybrid FP8. Exercises LayerNormLinear + DPA + LayerNormMLP in one
+        shot — the ``with_quantized_norm=False`` unfused path for hybrid
+        in ``layernorm_linear.py`` / ``layernorm_mlp.py`` must produce
+        the same result when recomputed.
+
+        Asserted bitwise: the module uses ``hidden_dropout=0.0``,
+        ``attention_dropout=0.0``, and ``te.checkpoint`` restores RNG
+        state before recompute, so every kernel sees identical inputs and
+        there are no stochastic ops. Non-determinism at this level would
+        indicate a real regression (e.g. a kernel quietly taking a
+        non-deterministic code path) — not measurement noise."""
+        import transformer_engine.pytorch as te_pytorch
+
+        def fn(model, inp):
+            return te_pytorch.checkpoint(model, inp, use_reentrant=True)
+
+        ref = self._run_transformer_layer(
+            self._same_format_fp8_recipe(), checkpoint_fn=None
+        )
+        test = self._run_transformer_layer(
+            self._same_format_fp8_recipe(), checkpoint_fn=fn
+        )
+        _assert_outputs_bitwise_equal(
+            ref, test, "te.checkpoint(reentrant) TransformerLayer FP8"
+        )
+
+    def test_te_checkpoint_non_reentrant_transformer_layer_fp8(self):
+        """Same TransformerLayer setup but through the non-reentrant
+        saved-tensors-hooks recompute path. Same bitwise-equality
+        rationale as the reentrant variant above."""
+        import transformer_engine.pytorch as te_pytorch
+
+        def fn(model, inp):
+            return te_pytorch.checkpoint(model, inp, use_reentrant=False)
+
+        ref = self._run_transformer_layer(
+            self._same_format_fp8_recipe(), checkpoint_fn=None
+        )
+        test = self._run_transformer_layer(
+            self._same_format_fp8_recipe(), checkpoint_fn=fn
+        )
+        _assert_outputs_bitwise_equal(
+            ref, test, "te.checkpoint(non-reentrant) TransformerLayer FP8"
+        )
+
+    # ----- quantized_model_init + recompute -------------------------
+
+    def test_te_checkpoint_reentrant_quantized_model_init_fp8_bitwise(self):
+        """Combine ``quantized_model_init`` (persistent
+        HybridQuantizedTensor weights) with activation recompute —
+        verifies the recompute path doesn't try to re-quantize an already-
+        quantized weight incorrectly, and the HybridQuantizer workspace
+        caching stays consistent across first-forward + recomputed-forward."""
+        import transformer_engine.pytorch as te_pytorch
+
+        hybrid_recipe = self._same_format_fp8_recipe()
+
+        def _build_and_run(use_checkpoint):
+            _reset_rng(seed=7777)
+            with quantized_model_init(enabled=True, recipe=hybrid_recipe):
+                model = Linear(
+                    self.in_features, self.out_features, params_dtype=torch.bfloat16
+                ).cuda()
+            inp = torch.randn(
+                self.batch,
+                self.in_features,
+                device="cuda",
+                dtype=torch.bfloat16,
+                requires_grad=True,
+            )
+            inp.retain_grad()
+            with autocast(enabled=True, recipe=hybrid_recipe):
+                if use_checkpoint:
+                    out = te_pytorch.checkpoint(model, inp, use_reentrant=True)
+                else:
+                    out = model(inp)
+            out.float().sum().backward()
+            return _collect_outputs(out, inp, model)
+
+        ref = _build_and_run(use_checkpoint=False)
+        test = _build_and_run(use_checkpoint=True)
+        _assert_outputs_bitwise_equal(
+            ref, test, "quantized_model_init + te.checkpoint(reentrant) FP8"
+        )
+
+    # ----- GroupedLinear + recompute --------------------------------
+
+    def _run_grouped_linear(self, recipe_obj, *, checkpoint_fn=None):
+        """Build a GroupedLinear, run forward+backward with optional
+        activation checkpointing around the module. Exercises the
+        ``_hybrid_split_quantize`` code path under recompute.
+
+        GroupedLinear is the MoE token-dispatch kernel: a single batch
+        is split along dim-0 into ``num_gemms`` chunks and each chunk
+        goes through its own weight matrix. Under hybrid quantization,
+        ``_hybrid_split_quantize`` (``module/grouped_linear.py``) runs
+        ``tex.split_quantize`` twice (once per sub-quantizer direction)
+        and zips the results into a list of ``HybridQuantizedTensor``
+        chunks — save-for-backward then receives a *list* of hybrid
+        tensors, not a single one, so the ``prepare_for_saving`` chain
+        has to handle an extended tensor-object list.
+        """
+        _reset_rng(seed=9090)
+        num_gemms = 3
+        hidden = 128
+        ffn = 128
+        bs = 24
+
+        model = GroupedLinear(
+            num_gemms, hidden, ffn, params_dtype=torch.bfloat16
+        ).cuda()
+        inp = torch.randn(
+            bs, hidden, device="cuda", dtype=torch.bfloat16, requires_grad=True
+        )
+        inp.retain_grad()
+        base = bs // num_gemms
+        rem = bs % num_gemms
+        m_splits = [base + (1 if i < rem else 0) for i in range(num_gemms)]
+
+        with autocast(enabled=True, recipe=recipe_obj):
+            if checkpoint_fn is not None:
+                out = checkpoint_fn(model, inp, m_splits)
+            else:
+                out = model(inp, m_splits)
+        out.float().sum().backward()
+        return _collect_outputs(out, inp, model)
+
+    def test_te_checkpoint_reentrant_grouped_linear_fp8_bitwise(self):
+        """GroupedLinear + te.checkpoint(reentrant) under same-format FP8
+        hybrid. Exercises the MoE ``_hybrid_split_quantize`` + list-of-
+        hybrid-tensors save-for-backward path under recompute."""
+        import transformer_engine.pytorch as te_pytorch
+
+        def fn(model, inp, m_splits):
+            return te_pytorch.checkpoint(
+                model, inp, m_splits, use_reentrant=True
+            )
+
+        ref = self._run_grouped_linear(
+            self._same_format_fp8_recipe(), checkpoint_fn=None
+        )
+        test = self._run_grouped_linear(
+            self._same_format_fp8_recipe(), checkpoint_fn=fn
+        )
+        _assert_outputs_bitwise_equal(
+            ref, test, "te.checkpoint(reentrant) GroupedLinear FP8"
+        )
+
+    def test_te_checkpoint_non_reentrant_grouped_linear_fp8_bitwise(self):
+        """Same GroupedLinear recompute setup but through the non-
+        reentrant saved-tensors-hooks path — verifies that the list of
+        hybrid activations survives the pack/unpack transport (one hook
+        invocation per split × per sub-storage buffer, not just one)."""
+        import transformer_engine.pytorch as te_pytorch
+
+        def fn(model, inp, m_splits):
+            return te_pytorch.checkpoint(
+                model, inp, m_splits, use_reentrant=False
+            )
+
+        ref = self._run_grouped_linear(
+            self._same_format_fp8_recipe(), checkpoint_fn=None
+        )
+        test = self._run_grouped_linear(
+            self._same_format_fp8_recipe(), checkpoint_fn=fn
+        )
+        _assert_outputs_bitwise_equal(
+            ref, test, "te.checkpoint(non-reentrant) GroupedLinear FP8"
+        )
+
+    # ----- Selective attention recompute ----------------------------
+
+    def test_selective_attention_recompute_transformer_layer_fp8_bitwise(self):
+        """``TransformerLayer(..., checkpoint_core_attention=True)`` —
+        the Megatron default memory-savings pattern.
+
+        Unlike full-layer recompute (``te.checkpoint(layer, inp)``),
+        selective attention recompute is a TransformerLayer-internal
+        option: only the DPA (dot-product attention) block is wrapped
+        in a checkpoint, everything else runs normally. This is a
+        *different* code path in ``transformer.py`` from the
+        ``te.checkpoint(...)`` tests above — DPA internally invokes its
+        own checkpoint context around the attention kernel.
+
+        For hybrid, the question is whether a hybrid activation produced
+        by LayerNormLinear (QKV projection) survives the DPA-internal
+        recompute boundary (which saves it for backward) and is
+        consumable by the backward GEMM unchanged.
+
+        Bitwise because the model uses ``hidden_dropout=0.0``,
+        ``attention_dropout=0.0``, and the DPA checkpoint restores RNG
+        state — so reference and recomputed paths should be identical
+        to the last bit."""
+        _reset_rng(seed=5151)
+        hidden = 128
+        ffn = 128
+        nheads = 4
+        seq = 8
+        bs = 4
+
+        def _run(checkpoint_core_attention):
+            _reset_rng(seed=5151)
+            model = TransformerLayer(
+                hidden,
+                ffn,
+                nheads,
+                hidden_dropout=0.0,
+                attention_dropout=0.0,
+                fuse_qkv_params=True,
+                params_dtype=torch.bfloat16,
+            ).cuda()
+            inp = torch.randn(
+                seq, bs, hidden, device="cuda", dtype=torch.bfloat16, requires_grad=True
+            )
+            inp.retain_grad()
+            with autocast(enabled=True, recipe=self._same_format_fp8_recipe()):
+                out = model(inp, checkpoint_core_attention=checkpoint_core_attention)
+            out.float().sum().backward()
+            return _collect_outputs(out, inp, model)
+
+        ref = _run(checkpoint_core_attention=False)
+        test = _run(checkpoint_core_attention=True)
+        _assert_outputs_bitwise_equal(
+            ref, test, "checkpoint_core_attention TransformerLayer FP8"
+        )
+
+    # ----- Linear bitwise parametrized across all 4 stateless formats -----
+
+    @pytest.mark.parametrize(
+        "format_name,reentrant",
+        [
+            pytest.param("fp8_current", True, id="fp8_current-reentrant"),
+            pytest.param("fp8_current", False, id="fp8_current-nonreentrant"),
+            pytest.param(
+                "mxfp8",
+                True,
+                id="mxfp8-reentrant",
+                marks=pytest.mark.skipif(
+                    not mxfp8_available, reason=f"MXFP8: {reason_for_no_mxfp8}"
+                ),
+            ),
+            pytest.param(
+                "mxfp8",
+                False,
+                id="mxfp8-nonreentrant",
+                marks=pytest.mark.skipif(
+                    not mxfp8_available, reason=f"MXFP8: {reason_for_no_mxfp8}"
+                ),
+            ),
+            pytest.param(
+                "block_fp8",
+                True,
+                id="block_fp8-reentrant",
+                marks=pytest.mark.skipif(
+                    not fp8_block_scaling_available,
+                    reason=f"BlockFP8: {reason_for_no_fp8_block_scaling}",
+                ),
+            ),
+            pytest.param(
+                "block_fp8",
+                False,
+                id="block_fp8-nonreentrant",
+                marks=pytest.mark.skipif(
+                    not fp8_block_scaling_available,
+                    reason=f"BlockFP8: {reason_for_no_fp8_block_scaling}",
+                ),
+            ),
+            pytest.param(
+                "nvfp4",
+                True,
+                id="nvfp4-reentrant",
+                marks=pytest.mark.skipif(
+                    not nvfp4_available, reason=f"NVFP4: {reason_for_no_nvfp4}"
+                ),
+            ),
+            pytest.param(
+                "nvfp4",
+                False,
+                id="nvfp4-nonreentrant",
+                marks=pytest.mark.skipif(
+                    not nvfp4_available, reason=f"NVFP4: {reason_for_no_nvfp4}"
+                ),
+            ),
+        ],
+    )
+    def test_te_checkpoint_linear_all_stateless_formats_bitwise(
+        self, format_name, reentrant
+    ):
+        """Bitwise parity of Linear + te.checkpoint across all four
+        stateless hybrid formats (FP8 current, MXFP8, BlockFP8, NVFP4),
+        both reentrant and non-reentrant.
+
+        Each format has a distinct history of columnwise-only kernel
+        support — BlockFP8 required C++ null-check patches before
+        columnwise-only mode worked, NVFP4 has packed FP4 layout plus
+        optional RHT cache, MXFP8 has [128,4]/[4,128] scale padding.
+        The recompute path exercises columnwise-only sub-quantizers
+        (rowwise is freed after fprop and only recreated on backward),
+        so format-specific columnwise-only handling is on the critical
+        path.
+
+        A regression in any of these would silently fall back to BF16
+        during recompute; bitwise equality catches that immediately."""
+        import transformer_engine.pytorch as te_pytorch
+
+        row_factory, col_factory_for_grad, hw_skip, hw_reason = _QUANTIZER_CONFIGS[
+            format_name
+        ]
+        # Most formats have a distinct E5M2 variant for grad; NVFP4 has
+        # only one format (col_factory_for_grad is None → reuse
+        # row_factory, which is what the existing hybrid NVFP4 tests do).
+        grad_factory = col_factory_for_grad if col_factory_for_grad is not None else row_factory
+
+        hybrid_recipe = _hybrid_custom_recipe(
+            row_factory=row_factory,
+            col_factory=row_factory,
+            grad_factory=grad_factory,
+        )
+
+        def fn(model, inp):
+            return te_pytorch.checkpoint(model, inp, use_reentrant=reentrant)
+
+        ref = self._run_linear(hybrid_recipe, checkpoint_fn=None)
+        test = self._run_linear(hybrid_recipe, checkpoint_fn=fn)
+        label = f"te.checkpoint({'reentrant' if reentrant else 'non-reentrant'}) Linear {format_name}"
+        _assert_outputs_bitwise_equal(ref, test, label)
+
+    # ----- save_for_backward round-trip (unit-level) ----------------
+
+    def test_prepare_restore_roundtrip_is_identity(self):
+        """Unit-level guarantee: the
+        ``prepare_for_saving`` / ``restore_from_saved`` chain used by
+        activation-recompute ``ctx.save_for_backward`` preserves both
+        sub-storages bitwise.
+
+        This is the primitive the recompute path is built on; pinning it
+        here gives a focused failure signal independent of the module-
+        level recompute tests above."""
+        torch.manual_seed(0)
+        inp = torch.randn(256, 256, dtype=torch.bfloat16, device="cuda")
+        hq = HybridQuantizer(
+            rowwise_quantizer=_fp8_row_factory(),
+            columnwise_quantizer=_fp8_col_factory(),
+        )
+        hybrid = hq.quantize(inp)
+        expected = hybrid.dequantize()
+
+        saved_tensors, saved_obj = hybrid.prepare_for_saving()
+        # Mimic the autograd ctx round-trip: all saved tensors pass
+        # through ``ctx.save_for_backward`` (a no-op for semantics).
+        leftover = saved_obj.restore_from_saved(list(saved_tensors))
+        assert leftover == [], "restore_from_saved should consume every element"
+        torch.testing.assert_close(saved_obj.dequantize(), expected, rtol=0, atol=0)
