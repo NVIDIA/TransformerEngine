@@ -580,7 +580,7 @@ def _train(opts):
                         and opts.overlap_rs_dgrad
                     ):
                         # SM120 + deterministic training disables fused attn .
-                        # Rt then selects an alternate attn backend, and 
+                        # Rt then selects an alternate attn backend, and
                         # the overlap path can show tiny BF16 accumulation-order drift vs reference.
                         rtol, atol = BF16_SM120_DETERMINISTIC_OVERLAP_RTOL_ATOL
                 grad_failed, grad_info = _compare_tensors(names[i], test_g, ref_g, rtol, atol)

@@ -95,8 +95,7 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
 // The returned vector is used by NVFP4 grouped-quantize to split the input
 // tensor into per-group sub-tensors.
 // Currently, only used for SM120 NVFP4 grouped-quantize fallback.
-std::vector<size_t> get_split_sections(std::optional<at::Tensor> first_dims,
-                                                          size_t num_tensors) {
+std::vector<size_t> get_split_sections(std::optional<at::Tensor> first_dims, size_t num_tensors) {
   auto first_dims_tensor = first_dims.value();
   NVTE_CHECK(first_dims_tensor.scalar_type() == at::kLong,
              "Expected first_dims dtype=int64, got scalar_type enum=",
@@ -118,8 +117,8 @@ std::vector<size_t> get_split_sections(std::optional<at::Tensor> first_dims,
 // Converts the Python GroupedTensor into a C++ vector of TensorWrappers,
 // which are used by NVFP4 grouped-quantize to store the quantized output tensors.
 // Currently, only used for SM120 NVFP4 grouped-quantize fallback.
-std::vector<TensorWrapper> get_grouped_outputs(
-    const py::object &grouped_output_py, size_t num_tensors) {
+std::vector<TensorWrapper> get_grouped_outputs(const py::object &grouped_output_py,
+                                               size_t num_tensors) {
   py::list split_outputs = grouped_output_py.attr("split_into_quantized_tensors")();
   NVTE_CHECK(static_cast<size_t>(py::len(split_outputs)) == num_tensors, "Expected ", num_tensors,
              " output tensors, but got ", py::len(split_outputs), ".");
@@ -1368,7 +1367,7 @@ void split_quantize_nvfp4_impl_with_rht_helper(const TensorWrapper &input,
                                   quantizer.rht_matrix_random_sign_mask_t, stream);
           // 2) NVFP4-quantize the RHT(x_t) output into the columnwise (out_transpose) slot.
           nvte_quantize_v2(rht_output_t_cpp.data(), out_transpose_list[i].data(),
-                          quant_config_list_colwise_to_use[i], stream);
+                           quant_config_list_colwise_to_use[i], stream);
         }
       } else {
         nvte_group_hadamard_transform_cast_fusion_columnwise(
