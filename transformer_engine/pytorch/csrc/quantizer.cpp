@@ -15,6 +15,17 @@ namespace transformer_engine::pytorch {
 
 namespace {
 
+/*! @brief Resolve an optional device to a concrete CUDA device
+ *
+ * If no device is provided, uses the current CUDA device.
+ */
+at::Device resolve_device(std::optional<at::Device> device) {
+  if (device.has_value()) {
+    return *device;
+  }
+  return at::Device(torch::kCUDA, c10::cuda::current_device());
+}
+
 /*! @brief Transposed tensor shape
  *
  * The tensor is interpreted as a 2D matrix by flattening all but the
@@ -128,10 +139,13 @@ Float8Quantizer::Float8Quantizer(const py::handle& quantizer) : Quantizer(quanti
   this->dtype = type;
 }
 
-std::pair<TensorWrapper, py::object> NoneQuantizer::create_tensor(const std::vector<size_t>& shape,
-                                                                  DType dtype) const {
+std::pair<TensorWrapper, py::object> NoneQuantizer::create_tensor(
+    const std::vector<size_t>& shape, DType dtype, std::optional<at::Device> device_opt,
+    bool pin_memory) const {
+  const auto device = resolve_device(device_opt);
   const std::vector<int64_t> shape_int64(shape.begin(), shape.end());
-  const auto opts = at::TensorOptions().dtype(GetATenDType(dtype)).device(torch::kCUDA);
+  const auto opts =
+      at::TensorOptions().dtype(GetATenDType(dtype)).device(device).pinned_memory(pin_memory);
   return create_tensor(shape, dtype, at::empty(shape_int64, opts));
 }
 
@@ -239,22 +253,29 @@ void Float8Quantizer::set_quantization_params(TensorWrapper* tensor) const {
 }
 
 std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
-    const std::vector<size_t>& shape, DType dtype) const {
-  const auto opts = at::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    const std::vector<size_t>& shape, DType dtype, std::optional<at::Device> device_opt,
+    bool pin_memory) const {
+  const auto device = resolve_device(device_opt);
+  const auto opts =
+      at::TensorOptions().dtype(torch::kFloat32).device(device).pinned_memory(pin_memory);
   at::Tensor scale_inv = at::empty(std::vector<int64_t>{1}, opts);
-  return create_tensor(shape, dtype, std::nullopt, std::nullopt, std::move(scale_inv));
+  return create_tensor(shape, dtype, std::nullopt, std::nullopt, std::move(scale_inv), device,
+                       pin_memory);
 }
 
 std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
     const std::vector<size_t>& shape, DType dtype, std::optional<at::Tensor> data,
-    std::optional<at::Tensor> transpose, std::optional<at::Tensor> scale_inv) const {
+    std::optional<at::Tensor> transpose, std::optional<at::Tensor> scale_inv,
+    std::optional<at::Device> device_opt, bool pin_memory) const {
+  const auto device = resolve_device(device_opt);
   using namespace pybind11::literals;
   int is_non_tn_fp8_gemm_supported = nvte_is_non_tn_fp8_gemm_supported();
   // Initialize data tensor
   const bool with_data = rowwise_usage || is_non_tn_fp8_gemm_supported;
   if (with_data && !data) {
     const std::vector<int64_t> shape_int64(shape.begin(), shape.end());
-    const auto opts = at::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
+    const auto opts =
+        at::TensorOptions().dtype(torch::kUInt8).device(device).pinned_memory(pin_memory);
     data = at::empty(shape_int64, opts);
   } else if (!with_data && data) {
     data.reset();
@@ -265,7 +286,8 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
   const bool with_transpose = columnwise_usage && !is_non_tn_fp8_gemm_supported;
   if (with_transpose && !transpose) {
     const auto transpose_shape = make_transpose_shape<int64_t>(shape);
-    const auto opts = at::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
+    const auto opts =
+        at::TensorOptions().dtype(torch::kUInt8).device(device).pinned_memory(pin_memory);
     transpose = at::empty(transpose_shape, opts);
   } else if (!with_transpose && transpose) {
     transpose.reset();
@@ -276,10 +298,6 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
     scale_inv = at::reciprocal(scale);
   }
   py::object scale_inv_py = py::cast(*scale_inv);
-  at::Device device =
-      with_data ? data->device()
-                : (with_transpose ? transpose->device()
-                                  : at::Device(torch::kCUDA, c10::cuda::current_device()));
   // Construct Python FP8 tensor
   py::object out_py;
   if (internal) {
@@ -554,7 +572,9 @@ Float8CurrentScalingQuantizer::Float8CurrentScalingQuantizer(const py::handle& q
 void Float8CurrentScalingQuantizer::set_quantization_params(TensorWrapper* tensor) const {}
 
 std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tensor(
-    const std::vector<size_t>& shape, DType dtype) const {
+    const std::vector<size_t>& shape, DType dtype, std::optional<at::Device> device_opt,
+    bool pin_memory) const {
+  const auto device = resolve_device(device_opt);
   using namespace pybind11::literals;
 
   // Initialize data tensor
@@ -563,7 +583,8 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tenso
   const bool with_data = rowwise_usage || is_non_tn_fp8_gemm_supported;
   if (with_data) {
     const std::vector<int64_t> shape_int64(shape.begin(), shape.end());
-    const auto opts = at::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
+    const auto opts =
+        at::TensorOptions().dtype(torch::kUInt8).device(device).pinned_memory(pin_memory);
     data_tensor = at::empty(shape_int64, opts);
   }
 
@@ -572,20 +593,18 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tenso
   const bool with_transpose = columnwise_usage && !is_non_tn_fp8_gemm_supported;
   if (with_transpose) {
     const auto transpose_shape = make_transpose_shape<int64_t>(shape);
-    const auto opts = at::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
+    const auto opts =
+        at::TensorOptions().dtype(torch::kUInt8).device(device).pinned_memory(pin_memory);
     transpose_tensor = at::empty(transpose_shape, opts);
   }
   // Initialize scale-inverse tensor
   at::Tensor scale_inv_tensor;
   {
     const std::vector<int64_t> scale_inv_shape = {1};
-    const auto opts = at::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    const auto opts =
+        at::TensorOptions().dtype(torch::kFloat32).device(device).pinned_memory(pin_memory);
     scale_inv_tensor = at::empty(scale_inv_shape, opts);
   }
-  at::Device device =
-      with_data ? data_tensor.device()
-                : (with_transpose ? transpose_tensor.device()
-                                  : at::Device(torch::kCUDA, c10::cuda::current_device()));
   // Construct Python FP8 tensor
   py::object out_py;
   py::object scale_inv_py = py::cast(scale_inv_tensor);
@@ -923,7 +942,9 @@ Float8BlockQuantizer::Float8BlockQuantizer(const py::handle& quantizer) : Quanti
 void Float8BlockQuantizer::set_quantization_params(TensorWrapper* tensor) const {}
 
 std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
-    const std::vector<size_t>& shape, DType dtype) const {
+    const std::vector<size_t>& shape, DType dtype, std::optional<at::Device> device_opt,
+    bool pin_memory) const {
+  const auto device = resolve_device(device_opt);
   using namespace pybind11::literals;
   std::vector<int64_t> torch_shape;
   for (auto s : shape) {
@@ -934,8 +955,8 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
   at::TensorOptions opts;
   at::TensorOptions scale_opts;
   at::Tensor data_rowwise, data_colwise, scale_inv_rowwise, scale_inv_colwise;
-  opts = opts.dtype(torch::kUInt8).device(torch::kCUDA);
-  scale_opts = scale_opts.dtype(torch::kFloat32).device(torch::kCUDA);
+  opts = opts.dtype(torch::kUInt8).device(device).pinned_memory(pin_memory);
+  scale_opts = scale_opts.dtype(torch::kFloat32).device(device).pinned_memory(pin_memory);
 
   if (rowwise_usage) {
     data_rowwise = at::empty(torch_shape, opts);
@@ -1014,6 +1035,7 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
     kwargs["fp8_dtype"] = py::cast(this->dtype);
     kwargs["quantizer"] = this->quantizer;
     kwargs["is_2D_scaled"] = py::cast(block_scaling_dim == 2);
+    kwargs["device"] = py::cast(device);
 
     py::tuple args(0);
     PyObject* result = PyObject_Call(reinterpret_cast<PyObject*>(Float8BlockwiseQTensorPythonClass),
@@ -1333,8 +1355,10 @@ MXFP8Quantizer::MXFP8Quantizer(const py::handle& quantizer) : Quantizer(quantize
 
 void MXFP8Quantizer::set_quantization_params(TensorWrapper* tensor) const {}
 
-std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(const std::vector<size_t>& shape,
-                                                                   DType dtype) const {
+std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(
+    const std::vector<size_t>& shape, DType dtype, std::optional<at::Device> device_opt,
+    bool pin_memory) const {
+  const auto device = resolve_device(device_opt);
   using namespace pybind11::literals;
 
   // Scaling factor format
@@ -1358,7 +1382,8 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(const std::ve
   // Allocate tensors
   at::Tensor rowwise_data_tensor, rowwise_scale_inv_tensor;
   at::Tensor columnwise_data_tensor, columnwise_scale_inv_tensor;
-  const auto uint8_tensor_opts = at::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
+  const auto uint8_tensor_opts =
+      at::TensorOptions().dtype(torch::kUInt8).device(device).pinned_memory(pin_memory);
   if (rowwise_usage) {
     const std::vector<int64_t> scale_inv_shape_int64(rowwise_scale_inv_shape.begin(),
                                                      rowwise_scale_inv_shape.end());
@@ -1418,6 +1443,7 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(const std::ve
     kwargs["fp8_dtype"] = py::cast(this->dtype);
     kwargs["quantizer"] = this->quantizer;
     kwargs["with_gemm_swizzled_scales"] = py::cast(with_gemm_swizzled_scales);
+    kwargs["device"] = py::cast(device);
 
     py::tuple args(0);
     PyObject* result = PyObject_Call(reinterpret_cast<PyObject*>(MXFP8TensorPythonClass),
@@ -1726,8 +1752,10 @@ void NVFP4Quantizer::set_quantization_params(TensorWrapper* tensor) const {
                               columnwise_data.shape);
 }
 
-std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::vector<size_t>& shape,
-                                                                   DType dtype) const {
+std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
+    const std::vector<size_t>& shape, DType dtype, std::optional<at::Device> device_opt,
+    bool pin_memory) const {
+  const auto device = resolve_device(device_opt);
   using namespace pybind11::literals;
 
   // Scaling factor format
@@ -1753,8 +1781,10 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
   // Allocate tensors
   at::Tensor rowwise_data_tensor, rowwise_scale_inv_tensor, amax_rowwise;
   at::Tensor columnwise_data_tensor, columnwise_scale_inv_tensor, amax_columnwise;
-  const auto bit8_tensor_opts = at::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
-  const auto bit32_tensor_opts = at::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+  const auto bit8_tensor_opts =
+      at::TensorOptions().dtype(torch::kUInt8).device(device).pinned_memory(pin_memory);
+  const auto bit32_tensor_opts =
+      at::TensorOptions().dtype(torch::kFloat32).device(device).pinned_memory(pin_memory);
   if (rowwise_usage) {
     const std::vector<int64_t> scale_inv_shape_int64(rowwise_scale_inv_shape.begin(),
                                                      rowwise_scale_inv_shape.end());
@@ -1833,6 +1863,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
     kwargs["fp4_dtype"] = py::cast(this->dtype);
     kwargs["quantizer"] = this->quantizer;
     kwargs["with_gemm_swizzled_scales"] = py::cast(with_gemm_swizzled_scales);
+    kwargs["device"] = py::cast(device);
     py::tuple args(0);
     PyObject* result = PyObject_Call(reinterpret_cast<PyObject*>(NVFP4TensorPythonClass),
                                      args.ptr(), kwargs.ptr());
