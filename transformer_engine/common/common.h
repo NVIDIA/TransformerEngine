@@ -1027,7 +1027,9 @@ void create_2D_tensor_map(
     const uint32_t stride_elems, const uint32_t offset_elems, const size_t type_num_bits,
     const CUtensorMapSwizzle swizzle = CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_NONE);
 
-bool is_supported_by_CC_100();
+bool is_supported_by_CC_100_or_newer();
+
+bool is_supported_by_CC_120();
 
 std::vector<std::vector<Tensor *>> convert_tensor_array(NVTETensor **nvte_tensors,
                                                         size_t outer_size, size_t inner_size);

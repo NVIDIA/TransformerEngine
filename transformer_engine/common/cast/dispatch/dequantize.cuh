@@ -35,7 +35,7 @@ inline void dequantize_helper(const Tensor &input, Tensor *output, cudaStream_t 
       break;
     }
     case NVTE_MXFP8_1D_SCALING: {
-      if (is_supported_by_CC_100()) {
+      if (is_supported_by_CC_100_or_newer()) {
         mxfp8::dequantize(input, output, stream);
       } else {
         NVTE_ERROR("MXFP8 Dequantization is NOT supported by architectures < 10.0");
@@ -58,7 +58,7 @@ inline void group_dequantize_helper(const GroupedTensor &input, GroupedTensor *o
 
   switch (input.scaling_mode) {
     case NVTE_MXFP8_1D_SCALING: {
-      if (is_supported_by_CC_100()) {
+      if (is_supported_by_CC_100_or_newer()) {
         mxfp8::group_dequantize(&input, output, stream);
       } else {
         NVTE_ERROR("MXFP8 Grouped Dequantization is NOT supported by architectures < 10.0");

@@ -46,7 +46,10 @@ void quantize_gated_fwd_helper(const NVTETensor nvte_input, NVTETensor nvte_outp
 
   switch (output->scaling_mode) {
     case NVTE_DELAYED_TENSOR_SCALING: {
-      const bool use_tma_kernels = (cols % 32 == 0) && is_supported_by_CC_100();
+      // SM120 has lower shared-memory headroom than SM100 for this kernel family.
+      // Keep TMA kernels disabled on SM120 and use the non-TMA fallback path.
+      const bool use_tma_kernels =
+          (cols % 32 == 0) && is_supported_by_CC_100_or_newer() && !is_supported_by_CC_120();
       if (use_tma_kernels) {
         Tensor dummy_grad_tensor;
         fp8::cast_gated_tma</*IS_BWD=*/false, ParamOP, ActOP, nullptr>(input, dummy_grad_tensor,
@@ -83,7 +86,7 @@ void quantize_gated_fwd_helper(const NVTETensor nvte_input, NVTETensor nvte_outp
         NVTE_CHECK(is_fp8_dtype(output->columnwise_data.dtype),
                    "The type of the columnwise output tensor should be FP8.");
       }
-      NVTE_CHECK(is_supported_by_CC_100(),
+      NVTE_CHECK(is_supported_by_CC_100_or_newer(),
                  "Gated FWD NVTE_MXFP8_1D_SCALING is only supported on SM 10.0+");
       Tensor dummy_grad_tensor;
       mxfp8::quantize_gated</*IS_BWD=*/false, ParamOP, ActOP, nullptr>(input, dummy_grad_tensor,
@@ -137,7 +140,10 @@ void quantize_gated_bwd_helper(const NVTETensor nvte_grad, const NVTETensor nvte
 
   switch (output->scaling_mode) {
     case NVTE_DELAYED_TENSOR_SCALING: {
-      const bool use_tma_kernels = (cols % 32 == 0) && is_supported_by_CC_100();
+      // SM120 has lower shared-memory headroom than SM100 for this kernel family.
+      // Keep TMA kernels disabled on SM120 and use the non-TMA fallback path.
+      const bool use_tma_kernels =
+          (cols % 32 == 0) && is_supported_by_CC_100_or_newer() && !is_supported_by_CC_120();
       if (use_tma_kernels) {
         fp8::cast_gated_tma</*IS_BWD=*/true, ParamOP, ActOP, DActOP>(gated_input, grad, output, p,
                                                                      stream);
@@ -173,7 +179,7 @@ void quantize_gated_bwd_helper(const NVTETensor nvte_grad, const NVTETensor nvte
         NVTE_CHECK(is_fp8_dtype(output->columnwise_data.dtype),
                    "The type of the columnwise output tensor should be FP8.");
       }
-      NVTE_CHECK(is_supported_by_CC_100(),
+      NVTE_CHECK(is_supported_by_CC_100_or_newer(),
                  "Gated BWD NVTE_MXFP8_1D_SCALING is only supported on SM 10.0+");
 
       mxfp8::quantize_gated</*IS_BWD=*/true, ParamOP, ActOP, DActOP>(gated_input, grad, output, p,
