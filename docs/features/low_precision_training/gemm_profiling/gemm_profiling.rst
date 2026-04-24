@@ -299,15 +299,15 @@ Forward Summary
 .. table::
    :align: center
 
-   ===============  =======  ======  =====  ======  ================  ==============
-   Op               Pass     M       K      N       Shape (MxKxN)     FLOPs (2*M*K*N)
-   ===============  =======  ======  =====  ======  ================  ==============
-   QKV proj         Forward  15,872  4,096  12,288  15872x4096x12288  ~1.60T
-   Attn out proj    Forward  15,872  4,096  4,096   15872x4096x4096   ~0.53T
-   MLP up           Forward  15,872  4,096  16,384  15872x4096x16384  ~2.13T
-   MLP down         Forward  15,872  16,384 4,096   15872x16384x4096  ~2.13T
-   **Total/layer**                                                    **~6.39T**
-   ===============  =======  ======  =====  ======  ================  ==============
+   ===============  =======  ======  ======  ======  ================  ===============
+   Op               Pass     M       K       N       Shape (MxKxN)     FLOPs (2*M*K*N)
+   ===============  =======  ======  ======  ======  ================  ===============
+   QKV proj         Forward  15,872  4,096   12,288  15872x4096x12288  ~1.60T
+   Attn out proj    Forward  15,872  4,096   4,096   15872x4096x4096   ~0.53T
+   MLP up           Forward  15,872  4,096   16,384  15872x4096x16384  ~2.13T
+   MLP down         Forward  15,872  16,384  4,096   15872x16384x4096  ~2.13T
+   **Total/layer**                                                     **~6.39T**
+   ===============  =======  ======  ======  ======  ================  ===============
 
 
 Backward Pass GEMMs
@@ -376,13 +376,13 @@ GEMM actually runs at in each Transformer Engine mode. Each linear layer has thr
 .. table::
    :align: center
 
-   ==============  ============  ============
-   Pass            Operand A     Operand B
-   ==============  ============  ============
-   Forward (Fprop) activations   weights
-   dX (Dgrad)      gradients     weights^T
-   dW (Wgrad)      activations^T gradients
-   ==============  ============  ============
+   ================  =============  ============
+   Pass              Operand A      Operand B
+   ================  =============  ============
+   Forward (Fprop)   activations    weights
+   dX (Dgrad)        gradients      weights^T
+   dW (Wgrad)        activations^T  gradients
+   ================  =============  ============
 
 According to the `NVFP4 training paper <https://arxiv.org/abs/2509.25149>`__,
 in NVFP4 mode **all three GEMMs quantize both operands to NVFP4** -- not just the

@@ -16,7 +16,7 @@ Timing back-ends
   hide CPU dispatch latency.  Measures the full GPU-side duration of
   the timed loop (includes quantisation when using autocast mode).
 * **profiler** -- ``torch.profiler`` (CUPTI) kernel timestamps.
-  Only the matched GEMM compute kernels (nvjet, xmma, cutlass, cublas)
+  Only the matched GEMM compute kernels (gemm, nvjet, xmma, cutlass)
   are summed, giving a kernel-only measurement.
 
 Usage examples::
@@ -1097,7 +1097,7 @@ def run_model_config_benchmarks(
     dgrad_sums: dict[str, float] = {p: 0.0 for p in precisions}
 
     if verify_dgrad:
-        print(f"\nDgrad Shapes:")
+        print("\nDgrad Shapes:")
         print(dash)
         print(f"{'Op':<22} {'Shape':<24}{_ms_cols(precisions)}")
         print(dash)
@@ -1130,11 +1130,11 @@ def run_model_config_benchmarks(
         print(f"{'Fprop + Dgrad (measured):':<46}{_ms_sums(fprop_dgrad_sums, precisions)}")
         print(f"{'Fprop + Dgrad (assumed x2):':<46}{_ms_sums(fprop_dgrad_assumed, precisions)}")
 
-        print(f"\nFprop vs Dgrad per-shape comparison:")
+        print("\nFprop vs Dgrad per-shape comparison:")
         print(dash)
         for p in precisions:
             print(f"  {p}:")
-            for i, ((fp_label, *_), (dg_label, *_)) in enumerate(zip(fprop_shapes, dgrad_shapes)):
+            for i, ((fp_label, *_), (_, *_)) in enumerate(zip(fprop_shapes, dgrad_shapes)):
                 fp_res = fprop_results[i].get(p)
                 dg_res = dgrad_results[i].get(p)
                 if fp_res and dg_res:
@@ -1155,7 +1155,7 @@ def run_model_config_benchmarks(
                 )
 
     # --- Benchmark Wgrad shapes ---
-    print(f"\nWgrad Shapes:")
+    print("\nWgrad Shapes:")
     print(dash)
     print(f"{'Op':<22} {'Shape':<24}{_ms_cols(precisions)}")
     print(dash)
@@ -1218,7 +1218,7 @@ def run_model_config_benchmarks(
     print(f"\nFull Model ({config.num_hidden_layers} layers):")
     print(f"{'Total GEMM time (ms):':<30}{_ms_sums(full_model, precisions)}")
 
-    print(f"\nEstimated GEMM Speedups:")
+    print("\nEstimated GEMM Speedups:")
     bf16_total = full_model.get("BF16", 0)
     if run_fp8 and bf16_total > 0:
         fp8_total = full_model.get("MXFP8", 0)
@@ -1354,7 +1354,7 @@ def create_model_config_plot(
             bottom=total_fprop_bottom,
             color=op_color,
             alpha=0.9,
-            label=f"{op_label} (Fprop+Dgrad)" if i == 0 or True else "",
+            label=f"{op_label} (Fprop+Dgrad)",
         )
         ax.bar(
             x,
@@ -1363,7 +1363,7 @@ def create_model_config_plot(
             bottom=all_fprop_total + total_wgrad_bottom,
             color=op_color,
             alpha=0.5,
-            label=f"{op_label} (Wgrad)" if i == 0 or True else "",
+            label=f"{op_label} (Wgrad)",
         )
 
     # Speedup annotations
