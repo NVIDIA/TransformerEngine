@@ -2015,6 +2015,8 @@ class TestBasicOps:
     @pytest.mark.parametrize("input_requires_grad", (False, True))
     @pytest.mark.parametrize("weight_requires_grad", (False, True))
     @pytest.mark.parametrize("delay_wgrad_compute", (False, True))
+    @pytest.mark.parametrize("single_grouped_weight", (False, True))
+    @pytest.mark.parametrize("single_grouped_bias", (False, True))
     def test_grouped_linear(
         self,
         *,
@@ -2030,6 +2032,8 @@ class TestBasicOps:
         input_requires_grad: bool,
         weight_requires_grad: bool,
         delay_wgrad_compute: bool,
+        single_grouped_weight: bool,
+        single_grouped_bias: bool,
     ) -> None:
         """Grouped GEMM"""
 
@@ -2052,6 +2056,18 @@ class TestBasicOps:
             pytest.skip("Quantization scheme is not used")
         if quantization is not None and dtype not in (torch.bfloat16, torch.float16):
             pytest.skip("Quantized group GEMM is only supported with BF16/FP16")
+
+        if single_grouped_bias and not bias:
+            pytest.skip("single_grouped_bias requires bias=True")
+        if (
+            single_grouped_weight
+            and quantized_weight
+            and quantization in ("fp8_delayed_scaling", "fp8_current_scaling")
+        ):
+            pytest.skip(
+                "single_grouped_weight does not support FP8 delayed/current scaling "
+                "with quantized_model_init"
+            )
 
         # Random data
         x_ref, x_test = make_reference_and_test_tensors(
@@ -2111,12 +2127,26 @@ class TestBasicOps:
                 device=device,
                 dtype=dtype,
                 delay_wgrad_compute=delay_wgrad_compute,
+                single_grouped_weight=single_grouped_weight,
+                single_grouped_bias=single_grouped_bias,
             )
         with torch.no_grad():
+            if single_grouped_weight:
+                op_weights = op.weight.quantized_tensors
+                if op_weights is None:
+                    op_weights = op.weight.split_into_quantized_tensors()
+            if single_grouped_bias:
+                op_bias_parts = op.bias.split_into_quantized_tensors()
             for group_idx in range(group_size):
-                getattr(op, f"weight{group_idx}").copy_(ws_test[group_idx])
+                if single_grouped_weight:
+                    op_weights[group_idx].copy_(ws_test[group_idx])
+                else:
+                    getattr(op, f"weight{group_idx}").copy_(ws_test[group_idx])
                 if bias:
-                    getattr(op, f"bias{group_idx}").copy_(bs_test[group_idx])
+                    if single_grouped_bias:
+                        op_bias_parts[group_idx].reshape(-1).copy_(bs_test[group_idx])
+                    else:
+                        getattr(op, f"bias{group_idx}").copy_(bs_test[group_idx])
             del ws_test, bs_test
             for param in op.parameters():
                 param.requires_grad_(requires_grad=weight_requires_grad)
@@ -2144,20 +2174,37 @@ class TestBasicOps:
             torch.testing.assert_close(dx_test, x_ref.grad, **tols)
         else:
             assert x_test.grad is None
-        for group_idx in range(group_size):
-            w_test = getattr(op, f"weight{group_idx}")
+        if single_grouped_weight:
             if weight_requires_grad:
-                dw_test = w_test.grad.to(dtype=torch.float64, device="cpu")
-                torch.testing.assert_close(dw_test, ws_ref[group_idx].grad, **tols)
+                dw_test_all = op.weight.grad.to(dtype=torch.float64, device="cpu")
+                w_ref_grad = torch.stack([w.grad for w in ws_ref], dim=0)
+                torch.testing.assert_close(dw_test_all, w_ref_grad, **tols)
             else:
-                assert w_test.grad is None
-            if bias:
-                b_test = getattr(op, f"bias{group_idx}")
+                assert op.weight.grad is None
+        else:
+            for group_idx in range(group_size):
+                w_test = getattr(op, f"weight{group_idx}")
                 if weight_requires_grad:
-                    db_test = b_test.grad.to(dtype=torch.float64, device="cpu")
-                    torch.testing.assert_close(db_test, bs_ref[group_idx].grad, **tols)
+                    dw_test = w_test.grad.to(dtype=torch.float64, device="cpu")
+                    torch.testing.assert_close(dw_test, ws_ref[group_idx].grad, **tols)
                 else:
-                    assert b_test.grad is None
+                    assert w_test.grad is None
+        if bias:
+            if single_grouped_bias:
+                if weight_requires_grad:
+                    db_test_all = op.bias.grad.to(dtype=torch.float64, device="cpu")
+                    b_ref_grad = torch.stack([b.grad for b in bs_ref], dim=0)
+                    torch.testing.assert_close(db_test_all, b_ref_grad, **tols)
+                else:
+                    assert op.bias.grad is None
+            else:
+                for group_idx in range(group_size):
+                    b_test = getattr(op, f"bias{group_idx}")
+                    if weight_requires_grad:
+                        db_test = b_test.grad.to(dtype=torch.float64, device="cpu")
+                        torch.testing.assert_close(db_test, bs_ref[group_idx].grad, **tols)
+                    else:
+                        assert b_test.grad is None
 
     @pytest.mark.parametrize("in_shape", ((71, 192), (5, 7, 128)))
     @pytest.mark.parametrize("input_requires_grad", (False, True))

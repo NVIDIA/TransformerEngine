@@ -41,24 +41,6 @@ from ...triton.grouped_dbias_dscales import (
 )
 
 
-# Quantizer types that support graph-safe `tex.group_quantize` /
-# `tex.bgrad_group_quantize` and are eligible for the GroupedTensor + cublas
-# `general_grouped_gemm_for_grouped_tensor` flow. All other recipes fall back
-# to the legacy `tex.split_quantize` + `general_grouped_gemm` flow that uses
-# CPU-side `m_splits` and is not CUDA-graph capturable.
-# Quantizer types eligible for the graph-safe grouped-tensor flow
-# (``tex.group_quantize`` + ``general_grouped_gemm_for_grouped_tensor``).
-#
-# NVFP4 is intentionally NOT included yet:
-#   * ``tex.group_quantize`` only implements the RHT (Random Hadamard Transform)
-#     code path for NVFP4 today (non-RHT raises in cast.cpp), and
-#   * grouped-swizzle support for NVFP4 in the cublas grouped GEMM is not
-#     implemented yet.
-# When both land, add ``NVFP4Quantizer`` here (and update
-# ``_is_grouped_quantize_supported`` accordingly).
-_GROUPED_QUANTIZE_SUPPORTED_QUANTIZERS = (MXFP8Quantizer,)
-
-
 class GroupedLinear(BasicOperation):
     r"""Apply multiple linear transformations: :math:``y_i = x_i W_i^T + b_i``
 
@@ -728,7 +710,7 @@ class GroupedLinear(BasicOperation):
         legacy ``tex.split_quantize`` + ``general_grouped_gemm`` flow.
         """
         return all(
-            isinstance(q, _GROUPED_QUANTIZE_SUPPORTED_QUANTIZERS) for q in input_quantizers
+            isinstance(q, MXFP8Quantizer) for q in input_quantizers
         )
 
     def fuser_forward(
@@ -754,7 +736,7 @@ class GroupedLinear(BasicOperation):
         # Check which grads are required
         ctx = basic_op_ctxs[0]
         input_requires_grad = ctx.requires_grad
-        weight_requires_grad = ctx.requires_grad and weight_param.requires_grad
+        weight_requires_grad = weight_param.requires_grad
 
         # Quantizers
         input_quantizers = [None] * num_groups
@@ -1001,12 +983,11 @@ class GroupedLinear(BasicOperation):
     def _quantize_weights_for_grouped_gemm(
         self,
         weight_quantizers: list[Optional[Quantizer]],
-        *,
         columnwise_usage: bool,
+        with_quantized_compute: bool,
+        dtype: torch.dtype,
     ) -> "GroupedTensor | list[torch.Tensor]":
         """Prepare weights for ``general_grouped_gemm_for_grouped_tensor``.
-
-        Mirrors the ``forward_grouped_mlp.py`` pattern. Four distinct cases:
 
         ``single_grouped_weight=True``:
           * **quantized_model_init**: ``self.weight`` is already a quantized
@@ -1033,24 +1014,46 @@ class GroupedLinear(BasicOperation):
 
         if self.single_grouped_weight:
             grouped_weight = self.weight
-            if not isinstance(grouped_weight, GroupedTensor):
-                raise RuntimeError(
-                    "GroupedLinear with single_grouped_weight=True expected the weight "
-                    f"parameter to be a GroupedTensor, got {type(grouped_weight).__name__}."
+            is_weight_quantized = grouped_weight.quantizer is not None
+            if is_weight_quantized and with_quantized_compute:
+                return grouped_weight
+            if is_weight_quantized and not with_quantized_compute:
+                # Quantized parameter (``quantized_model_init``) but the
+                # forward is running in unquantized compute. Dequantize each
+                # member back to high precision and re-wrap as a
+                # high-precision ``GroupedTensor`` so the grouped GEMM gets
+                # matching A/B element types.
+                weight_parts = grouped_weight.quantized_tensors
+                if weight_parts is None:
+                    weight_parts = grouped_weight.split_into_quantized_tensors()
+                dequantized = [maybe_dequantize(w, dtype) for w in weight_parts]
+                weight_data = torch.stack(dequantized, dim=0).contiguous()
+                return GroupedTensor(
+                    shape=(num_groups * self.out_features, self.in_features),
+                    dtype=dtype,
+                    num_tensors=num_groups,
+                    shapes=[(self.out_features, self.in_features)] * num_groups,
+                    quantizer=None,
+                    data=weight_data.reshape(-1),
+                )
+            if not with_quantized_compute:
+                # High-precision parameter and unquantized compute: just hand
+                # the existing high-precision ``GroupedTensor`` to the GEMM.
+                # Cast its rowwise buffer to ``dtype`` only if it differs (no
+                # copy in the common case).
+                if grouped_weight.rowwise_data.dtype == dtype:
+                    return grouped_weight
+                weight_data = grouped_weight.rowwise_data.to(dtype=dtype)
+                return GroupedTensor(
+                    shape=(num_groups * self.out_features, self.in_features),
+                    dtype=dtype,
+                    num_tensors=num_groups,
+                    shapes=[(self.out_features, self.in_features)] * num_groups,
+                    quantizer=None,
+                    data=weight_data.reshape(-1),
                 )
             weight_quantizer = weight_quantizers[0]
             weight_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
-
-            if grouped_weight.quantizer is not None:
-                # quantized_model_init: weight is already quantized.
-                grouped_weight.quantizer = weight_quantizer
-                return grouped_weight
-
-            # Normal init: high-precision GroupedTensor.
-            if grouped_weight.rowwise_data is None:
-                raise RuntimeError(
-                    "GroupedLinear: grouped weight has no rowwise_data to quantize."
-                )
             return tex.group_quantize(
                 grouped_weight.rowwise_data.view(grouped_weight.logical_shape),
                 weight_quantizer,
@@ -1062,13 +1065,12 @@ class GroupedLinear(BasicOperation):
         out: list[torch.Tensor] = []
         for idx, quantizer in enumerate(weight_quantizers):
             w = getattr(self, f"weight{idx}")
-            if is_quantized_tensor(w):
-                # quantized_model_init: weight{idx} is already quantized.
-                out.append(w)
-            else:
-                # Normal init: quantize the high-precision parameter.
+            if not with_quantized_compute:
+                w = maybe_dequantize(w, dtype)
+            elif with_quantized_compute and not is_quantized_tensor(w):
                 quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
-                out.append(quantizer(w))
+                w = quantizer(w)
+            out.append(w)
         return out
 
     def _fuser_forward_grouped_tensor(
@@ -1137,21 +1139,12 @@ class GroupedLinear(BasicOperation):
         # ``GroupedTensor``) for ``single_grouped_weight=True`` -- dispatches
         # the GEMM to ``no_discrete`` mode -- or the per-group ``weight{idx}``
         # tensors otherwise -- ``discrete_in`` mode.
-        if with_quantized_compute:
-            grouped_weights = self._quantize_weights_for_grouped_gemm(
-                weight_quantizers,
-                columnwise_usage=input_requires_grad,
-            )
-        elif self.single_grouped_weight:
-            # ``self.weight`` may itself be a quantized GroupedTensor when the
-            # caller used ``quantized_model_init``. Dequantize back to the
-            # compute dtype so cublas grouped GEMM sees matching A/B dtypes.
-            grouped_weights = maybe_dequantize(self.weight, dtype)
-        else:
-            grouped_weights = [
-                maybe_dequantize(getattr(self, f"weight{idx}"), dtype)
-                for idx in range(num_groups)
-            ]
+        grouped_weights = self._quantize_weights_for_grouped_gemm(
+            weight_quantizers,
+            columnwise_usage=input_requires_grad,
+            with_quantized_compute=with_quantized_compute,
+            dtype=dtype,
+        )
 
         # Allocate output buffer and wrap as a GroupedTensor view (no copy).
         out_shape = original_shape[:-1] + [self.out_features]
@@ -1200,9 +1193,8 @@ class GroupedLinear(BasicOperation):
         # by dgrad has already been populated up-front via
         # ``quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)``.
         # This mirrors the behavior in ``forward_grouped_mlp.py``.
-        weight_is_grouped = isinstance(grouped_weights, GroupedTensor)
         if not input_requires_grad:
-            grouped_weights = None if weight_is_grouped else [None] * num_groups
+            grouped_weights = None if self.single_grouped_weight else [None] * num_groups
 
         # ``grouped_x`` already has all the data we need to save for backward
         # (rowwise for the unquantized path; columnwise too for the quantized
@@ -1234,13 +1226,12 @@ class GroupedLinear(BasicOperation):
                     saved.extend([grouped_x.rowwise_data, None])
             else:
                 saved.extend([None, None])
-            if weight_is_grouped:
+            if self.single_grouped_weight:
                 saved.append(grouped_weights)
             else:
                 saved.extend(grouped_weights)
             ctx.save_for_backward(*saved)
             ctx.use_grouped_tensor_path = True
-            ctx.weight_is_grouped = weight_is_grouped
             ctx.with_quantized_compute = with_quantized_compute
             ctx.input_quantizers = input_quantizers
             ctx.weight_quantizers = weight_quantizers
@@ -1547,15 +1538,14 @@ class GroupedLinear(BasicOperation):
             scales, saved_tensors = saved_tensors[0], saved_tensors[1:]
         x_data, saved_tensors = saved_tensors[0], saved_tensors[1:]
         x_scale, saved_tensors = saved_tensors[0], saved_tensors[1:]
-        if getattr(ctx, "weight_is_grouped", False):
+        if self.single_grouped_weight:
             ws, saved_tensors = saved_tensors[0], saved_tensors[1:]
         else:
             ws, saved_tensors = saved_tensors[:num_groups], saved_tensors[num_groups:]
 
-        # Flatten grad_output to 2D (total_tokens, out_features), matching the
-        # forward convention. The grouped GEMMs and dbias kernels all operate
-        # on this 2D view.
-        dy_2d = maybe_dequantize(grad_output, dtype).reshape(-1, self.out_features)
+        # Flatten grad_output to 2D (total_tokens, out_features)
+        # to figure out total tokens and use it to build the grouped input tensor.
+        dy_2d = grad_output.reshape(-1, self.out_features)
         total_tokens = dy_2d.size(0)
 
         # Rebuild the grouped input tensor used by wgrad.
@@ -1585,13 +1575,8 @@ class GroupedLinear(BasicOperation):
                 )
 
         # Build the grad_output GroupedTensor.
-        #   * Quantized: ``tex.group_quantize`` (or ``bgrad_group_quantize``
-        #     when bias gradient can be fused for MXFP8).
-        #   * Unquantized: just wrap the contiguous bf16/fp16/fp32 buffer.
-        grad_biases: list[Optional[torch.Tensor]] = [None] * num_groups
-        grad_scales = None
+        # Optionally get dbias is fusion available with bgrad_group_quantize
         dbias_packed = None
-
         if with_quantized_compute:
             grad_output_quantizer = ctx.grad_output_quantizers[0]
             grad_output_quantizer.set_usage(
@@ -1599,12 +1584,7 @@ class GroupedLinear(BasicOperation):
             )
             grad_output_quantizer.optimize_for_gemm = True
 
-            use_fused_bgrad = (
-                has_bias
-                and not self._scale_bias
-                and isinstance(grad_output_quantizer, MXFP8Quantizer)
-            )
-            if use_fused_bgrad:
+            if has_bias and not self._scale_bias:
                 grouped_dy, dbias_packed = tex.bgrad_group_quantize(
                     dy_2d, grad_output_quantizer, num_groups, split_sizes
                 )
@@ -1613,6 +1593,8 @@ class GroupedLinear(BasicOperation):
                     dy_2d, grad_output_quantizer, num_groups, split_sizes
                 )
         else:
+            dy_2d = maybe_dequantize(dy_2d, dtype)
+            # Wrap BF16/FP16 buffer as a GroupedTensor for grouped gemm
             grouped_dy = GroupedTensor(
                 shape=(total_tokens, self.out_features),
                 dtype=dtype,
@@ -1623,7 +1605,9 @@ class GroupedLinear(BasicOperation):
                 tensor_offsets=base_offsets * self.out_features,
             )
 
-        # Bias / scale-bias gradients (graph-safe; offsets are GPU tensors).
+        # Bias Grads compute if not already computed in bgrad_group_quantize
+        final_bias_grads: Optional[torch.Tensor] = None
+        grad_scales: Optional[torch.Tensor] = None
         if has_bias:
             if self._scale_bias:
                 bias_packed = torch.stack(self._get_bias_tensors(dtype))
@@ -1635,14 +1619,15 @@ class GroupedLinear(BasicOperation):
                     offsets=base_offsets,
                 )
             elif dbias_packed is None:
-                # NVFP4 (or any path without a fused bgrad kernel) falls back
-                # to the standalone Triton dbias.
+                # BF16/FP16 path
                 dbias_packed = compute_grouped_dbias(dy_2d, base_offsets, num_groups)
-            grad_biases = [dbias_packed[idx].to(dtype=dtype) for idx in range(num_groups)]
+
+            if self.single_grouped_bias:
+                final_bias_grads = [dbias_packed.to(dtype=dtype)]
+            else:
+                final_bias_grads = [dbias_packed[idx].to(dtype=dtype) for idx in range(num_groups)]
 
         # ---- dgrad GEMM ----------------------------------------------------
-        # grad_input mirrors grad_output's leading dims (batch / seq) and uses
-        # in_features for the trailing dim.
         grad_input = None
         if ctx.input_requires_grad:
             grad_input_shape = list(grad_output.size())[:-1] + [self.in_features]
@@ -1664,15 +1649,17 @@ class GroupedLinear(BasicOperation):
                 use_split_accumulator=_2X_ACC_DGRAD,
             )
 
-        # ---- wgrad GEMM ----------------------------------------------------
+        # params init for wgrad GEMM 
         accumulate_into_main_grad = self._accumulate_into_main_grad
         weight_shape = (self.out_features, self.in_features)
         wgrad_output: Any = None
         grouped_wgrad: Optional[GroupedTensor] = None
-        w_list: list[Optional[torch.Tensor]] = (
+        final_weight_grads: list[Optional[torch.Tensor]] = (
             [None] if self.single_grouped_weight else [None] * num_groups
         )
 
+        # Get the right wgrad buffers for grouped gemm.
+        # Can we GroupedTensor of list of tensors based on single_grouped_weight.
         if ctx.weight_requires_grad:
             if self.single_grouped_weight:
                 if accumulate_into_main_grad:
@@ -1680,14 +1667,12 @@ class GroupedLinear(BasicOperation):
                         weight_param.main_grad = weight_param.get_main_grad()
                     main_grad = weight_param.main_grad
                     grouped_shape = (num_groups, *weight_shape)
-                    if main_grad.shape != grouped_shape:
-                        if main_grad.numel() != math.prod(grouped_shape):
-                            raise RuntimeError(
-                                "GroupedLinear expected grouped weight main_grad to have "
-                                f"shape {grouped_shape} or matching numel, "
-                                f"but got shape {tuple(main_grad.shape)}"
-                            )
-                        main_grad = main_grad.view(grouped_shape)
+                    if main_grad.numel() != math.prod(grouped_shape):
+                        raise RuntimeError(
+                            "GroupedLinear expected grouped weight main_grad to have "
+                            f"shape {grouped_shape} or matching numel, "
+                            f"but got shape {tuple(main_grad.shape)}"
+                        )
                     accumulate_into_main_grad = not getattr(
                         weight_param, "overwrite_main_grad", False
                     )
@@ -1695,7 +1680,7 @@ class GroupedLinear(BasicOperation):
                         grouped_wgrad = GroupedTensor.make_grouped_tensor_from_rowwise_data(
                             num_tensors=num_groups,
                             tensor_shape=weight_shape,
-                            rowwise_data=main_grad,
+                            rowwise_data=main_grad.view(-1),
                             dtype=main_grad.dtype,
                         )
                 if grouped_wgrad is None:
@@ -1706,6 +1691,7 @@ class GroupedLinear(BasicOperation):
                         device=device,
                         dtype=dtype,
                     )
+                final_weight_grads[0] = grouped_wgrad.rowwise_data.view(num_groups, *weight_shape)
                 wgrad_output = grouped_wgrad
             else:
                 if accumulate_into_main_grad:
@@ -1713,17 +1699,18 @@ class GroupedLinear(BasicOperation):
                         wp = getattr(self, f"weight{idx}")
                         if hasattr(wp, "__fsdp_param__"):
                             wp.main_grad = wp.get_main_grad()
-                        w_list[idx] = wp.main_grad
+                        final_weight_grads[idx] = wp.main_grad
                     accumulate_into_main_grad = not getattr(
                         self.weight0, "overwrite_main_grad", False
                     )
                 else:
                     for idx in range(num_groups):
-                        w_list[idx] = torch.empty(weight_shape, dtype=dtype, device=device)
-                wgrad_output = w_list
+                        final_weight_grads[idx] = torch.empty(weight_shape, dtype=dtype, device=device)
+                wgrad_output = final_weight_grads
         else:
             accumulate_into_main_grad = False
-
+   
+        # wgrad GEMM
         delay_wgrad = (
             ctx.weight_requires_grad
             and self.wgrad_store is not None
@@ -1741,70 +1728,39 @@ class GroupedLinear(BasicOperation):
             else:
                 wgrad_gemm(grouped_x, grouped_dy, wgrad_output)
 
-        # ---- Assemble grad_params (mirrors split-quantize path layout) ----
-        grad_weights: list[Optional[torch.Tensor]] = [None] * num_groups
-        if ctx.weight_requires_grad and not delay_wgrad:
-            if self.single_grouped_weight:
-                if grouped_wgrad is not None and not accumulate_into_main_grad:
-                    packed = grouped_wgrad.rowwise_data.view(num_groups, *weight_shape)
-                    grad_weights = [packed[idx] for idx in range(num_groups)]
-            else:
-                grad_weights = list(w_list)
-
+        # Dummy out the weight grad params if accumulating into main grad is true.
         if accumulate_into_main_grad:
             if self.single_grouped_weight:
+                final_weight_grads[0] = None
                 if hasattr(weight_param, "grad_added_to_main_grad"):
                     weight_param.grad_added_to_main_grad = True
-                    grad_weight_dummy = get_dummy_wgrad(
+                    final_weight_grads[0] = get_dummy_wgrad(
                         list(weight_param.size()),
                         weight_param.dtype,
                         zero=getattr(weight_param, "zero_out_wgrad", False),
                     )
-                else:
-                    grad_weight_dummy = None
-                if has_bias:
-                    if self.single_grouped_bias:
-                        final_bias_grads = torch.stack(grad_biases, dim=0).to(dtype)
-                        grad_params = [grad_weight_dummy, final_bias_grads]
-                    else:
-                        grad_params = grad_biases + [grad_weight_dummy]
-                else:
-                    grad_params = [grad_weight_dummy]
-                grad_extra = (None, grad_scales) if self._scale_bias else (None,)
-                return grad_input, [grad_params], [grad_extra]
-
-            grad_weights = [None] * num_groups
-            for group_idx in range(num_groups):
-                wp = getattr(self, f"weight{group_idx}")
-                if hasattr(wp, "grad_added_to_main_grad"):
-                    wp.grad_added_to_main_grad = True
-                    grad_weights[group_idx] = get_dummy_wgrad(
-                        list(wp.size()),
-                        wp.dtype,
-                        zero=getattr(wp, "zero_out_wgrad", False),
-                    )
-
-        if self.single_grouped_weight:
-            grad_weight = None
-            if ctx.weight_requires_grad and not delay_wgrad:
-                grad_weight = torch.stack(grad_weights, dim=0)
-            final_weight_grads = [grad_weight]
-        else:
-            if delay_wgrad and ctx.weight_requires_grad and not accumulate_into_main_grad:
-                final_weight_grads = [None] * num_groups
             else:
-                final_weight_grads = grad_weights
+                final_weight_grads = [None] * num_groups
+                for group_idx in range(num_groups):
+                    wp = getattr(self, f"weight{group_idx}")
+                    if hasattr(wp, "grad_added_to_main_grad"):
+                        wp.grad_added_to_main_grad = True
+                        final_weight_grads[group_idx] = get_dummy_wgrad(
+                            list(wp.size()),
+                            wp.dtype,
+                            zero=getattr(wp, "zero_out_wgrad", False),
+                        )
 
+        # Assemble grad params in parameter registration order and return.
         if not has_bias:
-            grad_params = list(final_weight_grads)
+            grad_params = final_weight_grads
         elif self.single_grouped_bias:
-            final_bias_grads = torch.stack(grad_biases, dim=0).to(dtype)
-            grad_params = list(final_weight_grads) + [final_bias_grads]
+            grad_params = final_weight_grads + final_bias_grads
         else:
             if self.single_grouped_weight:
-                grad_params = list(grad_biases) + list(final_weight_grads)
+                grad_params = final_bias_grads + final_weight_grads
             else:
-                grad_params = list(final_weight_grads) + list(grad_biases)
+                grad_params = final_weight_grads + final_bias_grads
 
         grad_extra = (None, grad_scales) if self._scale_bias else (None,)
         return grad_input, [grad_params], [grad_extra]
