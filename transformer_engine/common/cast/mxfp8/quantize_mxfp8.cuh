@@ -498,6 +498,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     if constexpr (COLWISE_SCALING) {
       thread_partial_dbias = partial_dbias_colwise;
     } else {
+      ptx::cp_async_bulk_wait_group_read<0>();
+      __syncthreads();
       // Reusing dshmem (in_sh) as dbias buffer [HEIGHT x WIDTH]
       // HEIGHT = THREADS_Y
       // WIDTH = THREADS_X * (SCALE_DIM_X + 1)

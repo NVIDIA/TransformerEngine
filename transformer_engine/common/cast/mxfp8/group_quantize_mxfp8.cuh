@@ -713,6 +713,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
         if constexpr (COLWISE_SCALING) {
           thread_partial_dbias = partial_dbias_colwise;
         } else {
+          ptx::cp_async_bulk_wait_group_read<0>();
+          __syncthreads();
           float *partial_dbias_rowwise = reinterpret_cast<float *>(dshmem);
 
           constexpr size_t DBIAS_BUFF_WIDTH = THREADS_X * (SCALE_DIM_X + 1);
