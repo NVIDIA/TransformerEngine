@@ -164,6 +164,14 @@ class Tensor {
     if (columnwise_scale_inv != nullptr) {
       cudaFree(columnwise_scale_inv);
     }
+    float *amax_ptr = tensor_.amax();
+    if (amax_ptr != nullptr) {
+      cudaFree(amax_ptr);
+    }
+    float *scale_ptr = tensor_.scale();
+    if (scale_ptr != nullptr) {
+      cudaFree(scale_ptr);
+    }
   }
 
   NVTETensor data() const noexcept { return tensor_.data(); }
@@ -284,6 +292,12 @@ class Tensor {
 
   void set_tensor_amax_nullptr(){
     tensor_.set_amax(nullptr, DType::kFloat32, tensor_.defaultShape);
+  }
+
+  void set_amax(float amax_val) {
+    NVTE_CHECK(amax_cpu_data_);
+    *amax_cpu_data_ = amax_val;
+    from_cpu();
   }
 
   void set_with_gemm_swizzled_scales(bool with_gemm_swizzled_scales){
