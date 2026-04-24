@@ -834,17 +834,8 @@ class ETPShardedParam(torch.nn.Parameter):
         return result, handle
 
     def _wait_param_gather(self):
-        # Wait-site for the async AG. Issuer (all_gather_and_prefetch{,_bwd})
-        # and wait-site both use the TARGET's ag_stream so the caller-stream
-        # "preEvent" PyTorch records at issue time lives on an idle stream.
-        # A busy issue-stream would queue the preEvent behind pending work,
-        # delay NCCL start, and — even with the sync chain main ← ag_event ←
-        # ag_stream handle.wait() ← NCCL endEvent — leave the consumer GEMM
-        # reading a partial AG buffer. (NCCL kernel itself runs on PyTorch's
-        # per-PG ncclStream, not ag_stream.) handle.wait() here inserts the
-        # wait on NCCL's completion event into ag_stream; ag_event.record()
-        # then marks ag_stream for consumers (main_stream via ag_event.wait
-        # or MLM drains via main.wait_stream).
+        # Wait on ag_stream so ag_event.record() marks ag_stream's tail —
+        # MLM's external drains (wait_stream(ag_stream)) need that to block.
         ag_stream = self._cached_ag_stream
         if ag_stream is None:
             ag_stream = get_ag_stream(self.chain_id, self.group)
@@ -922,13 +913,14 @@ class ETPShardedParam(torch.nn.Parameter):
             and self.prev_w._need_weight_prefetch
             and self.prev_w._need_weight_prefetch_bwd
         ):
-            # Issue on the target's ag_stream (see _wait_param_gather).
-            target_stream = get_ag_stream(self.prev_w.chain_id, self.prev_w.group)
-            with torch.cuda.stream(target_stream):
-                _, handle = self.prev_w._all_gather_weight(
-                    async_op=True, skip_weight_cast=True, cast_noop_flag=None,
-                    fwd=False, nvtx_label=nvtx_label,
-                )
+            # Issue on caller's stream — preEvent then captures the AG input
+            # writer via program order. Do NOT wrap in torch.cuda.stream(ag_stream):
+            # that drops the writer edge (ag_stream's tail has no dependency
+            # on capture_stream's writer) and NCCL reads partial data.
+            _, handle = self.prev_w._all_gather_weight(
+                async_op=True, skip_weight_cast=True, cast_noop_flag=None,
+                fwd=False, nvtx_label=nvtx_label,
+            )
             self.prev_w._prefetch_handle = handle
 
         # The unsharded tensor has been returned, no pending work so reset state to NONE
@@ -971,15 +963,13 @@ class ETPShardedParam(torch.nn.Parameter):
             and self.next_w is not None
             and self.next_w._need_weight_prefetch
         ):
-            # Issue on the target's ag_stream (see _wait_param_gather).
-            target_stream = get_ag_stream(self.next_w.chain_id, self.next_w.group)
-            with torch.cuda.stream(target_stream):
-                _, handle = self.next_w._all_gather_weight(
-                    async_op=True,
-                    skip_weight_cast=skip_weight_cast,
-                    cast_noop_flag=cast_noop_flag,
-                    fwd=fwd, nvtx_label=nvtx_label,
-                )
+            # Issue on caller's stream. See all_gather_and_prefetch_bwd.
+            _, handle = self.next_w._all_gather_weight(
+                async_op=True,
+                skip_weight_cast=skip_weight_cast,
+                cast_noop_flag=cast_noop_flag,
+                fwd=fwd, nvtx_label=nvtx_label,
+            )
             self.next_w._prefetch_handle = handle
 
         # The unsharded tensor has been returned, no pending work so reset state to NONE
@@ -1069,10 +1059,7 @@ class ETPShardedParam(torch.nn.Parameter):
 
 
     def _wait_reduce_scatter(self):
-        # Asymmetric wrt _wait_param_gather: RS is issued from main_stream
-        # (not rs_stream) because main produced the RS input (wgrad) and
-        # naturally holds the write→read ordering. Wait-site enters rs_stream
-        # so it observes NCCL completion and rs_event marks it for consumers.
+        # Wait on rs_stream — mirrors _wait_param_gather for the RS path.
         rs_stream = self._cached_rs_stream
         if rs_stream is None:
             rs_stream = get_rs_stream(self.chain_id, self.group)
@@ -1164,9 +1151,12 @@ class ETPShardedParam(torch.nn.Parameter):
         poolable = self.chain_id == ETPChain.UNGRAPHED.value
 
         if ETP_CONFIG.weight_prefetch and self.prev_w is not None:
-            # Async reduce-scatter (not last weight — deferred finish).  Issue on rs_stream to
-            # match wait-site (issue-site invariant; see _wait_param_gather).  wgrad is produced
-            # on outer stream by bwd GEMM, so sync outer → rs_stream first.
+            # Async reduce-scatter (not last weight — deferred finish). Issue on
+            # rs_stream with an explicit outer→rs_stream event so the bwd GEMM's
+            # wgrad writer edge is preserved. (NCCL runs on ncclStream regardless;
+            # the wrap only gives wait_stream(rs_stream) a useful tail before
+            # _wait_reduce_scatter runs. Do NOT copy this pattern without the
+            # event — see all_gather_and_prefetch_bwd.)
             outer_stream = torch.cuda.current_stream()
             rs_stream = get_rs_stream(self.chain_id, self.group)
             outer_sync_event = torch.cuda.Event()
