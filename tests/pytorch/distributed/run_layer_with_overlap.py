@@ -565,10 +565,8 @@ def _train(opts):
                         and is_sm120
                         and is_deterministic_mode
                     ):
-                        # SM120 deterministic mode disables fused attention for this input shape,
-                        # so runtime uses alternate attention backends (FlashAttention or Unfused).
-                        # Combined with FP8 current-scaling overlap/reduction behavior, this path
-                        # needs the looser distributed fp8_cs tolerance policy.
+                        # SM120 deterministic mode disables fused attn, so rt uses alternate attn backends.
+                        # Combined with FP8 CS, this path needs the looser distributed fp8_cs tolerance policy.
                         rtol, atol = FP8_CS_SM120_DETERMINISTIC_RTOL_ATOL
                     else:
                         rtol, atol = FP8_DEFAULT_RTOL_ATOL
@@ -581,9 +579,9 @@ def _train(opts):
                         and opts.num_layers > 1
                         and opts.overlap_rs_dgrad
                     ):
-                        # SM120 + deterministic training disables fused attention for this input shape.
-                        # Runtime then selects an alternate attention backend (typically FlashAttention),
-                        # and the overlap path can show tiny BF16 accumulation-order drift vs reference.
+                        # SM120 + deterministic training disables fused attn .
+                        # Rt then selects an alternate attn backend, and 
+                        # the overlap path can show tiny BF16 accumulation-order drift vs reference.
                         rtol, atol = BF16_SM120_DETERMINISTIC_OVERLAP_RTOL_ATOL
                 grad_failed, grad_info = _compare_tensors(names[i], test_g, ref_g, rtol, atol)
                 dist_print(grad_info, src=WORLD_RANK, error=grad_failed)

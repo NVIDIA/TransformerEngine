@@ -90,12 +90,18 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
                                const std::vector<size_t> &split_sections,
                                const std::vector<NVFP4Quantizer *> &quantizers);
 
-std::vector<size_t> get_split_sections_for_sm120_fallback(std::optional<at::Tensor> first_dims,
+// Converts the per-group GPU row counts (first_dims, int64 CUDA tensor)
+// into a host vector of per-group row counts and returns it.
+// The returned vector is used by NVFP4 grouped-quantize to split the input
+// tensor into per-group sub-tensors.
+// Currently, only used for SM120 NVFP4 grouped-quantize fallback.
+std::vector<size_t> get_split_sections(std::optional<at::Tensor> first_dims,
                                                           size_t num_tensors) {
   auto first_dims_tensor = first_dims.value();
   NVTE_CHECK(first_dims_tensor.scalar_type() == at::kLong,
              "Expected first_dims dtype=int64, got scalar_type enum=",
              static_cast<int>(first_dims_tensor.scalar_type()));
+  // D2H copy to CPU
   auto first_dims_cpu = first_dims_tensor.contiguous().to(at::kCPU);
   NVTE_CHECK(static_cast<size_t>(first_dims_cpu.numel()) == num_tensors, "Expected ", num_tensors,
              " first_dims entries, but got ", first_dims_cpu.numel(), ".");
@@ -109,7 +115,10 @@ std::vector<size_t> get_split_sections_for_sm120_fallback(std::optional<at::Tens
   return split_sections;
 }
 
-std::vector<TensorWrapper> get_grouped_outputs_for_sm120_fallback(
+// Converts the Python GroupedTensor into a C++ vector of TensorWrappers,
+// which are used by NVFP4 grouped-quantize to store the quantized output tensors.
+// Currently, only used for SM120 NVFP4 grouped-quantize fallback.
+std::vector<TensorWrapper> get_grouped_outputs(
     const py::object &grouped_output_py, size_t num_tensors) {
   py::list split_outputs = grouped_output_py.attr("split_into_quantized_tensors")();
   NVTE_CHECK(static_cast<size_t>(py::len(split_outputs)) == num_tensors, "Expected ", num_tensors,
@@ -254,12 +263,15 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
       // NVFP4 grouped quantization
       NVFP4Quantizer *nvfp4_quantizer_cpp = static_cast<NVFP4Quantizer *>(quantizer_cpp.get());
       const bool enable_sm120_grouped_nvfp4_fallback = is_sm120_device() && first_dims.has_value();
+      // SM120 fallback does not support GEMM-swizzled NVFP4 scale layouts in this path.
       if (enable_sm120_grouped_nvfp4_fallback) {
-        // SM120 fallback does not support GEMM-swizzled NVFP4 scale layouts in this path.
         // Use a local quantizer copy so fallback behavior does not mutate shared quantizer state.
         NVFP4Quantizer fallback_quantizer = *nvfp4_quantizer_cpp;
         fallback_quantizer.optimize_for_gemm = false;
-        auto split_sections = get_split_sections_for_sm120_fallback(first_dims, num_tensors);
+
+        // As SM120 does not support GEMM-swizzled NVFP4 scale layouts in this path,
+        // we need to split the input tensor into per-group sub-tensors and quantize them separately.
+        auto split_sections = get_split_sections(first_dims, num_tensors);
         std::vector<TensorWrapper> input_list;
         input_list.reserve(num_tensors);
         auto *input_dptr = reinterpret_cast<uint8_t *>(input_contiguous.data_ptr());
@@ -279,7 +291,8 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
               makeTransformerEngineTensor(split_dptr, split_shape, input_dtype));
           dim0_offset += split_sections[i];
         }
-        auto output_list = get_grouped_outputs_for_sm120_fallback(grouped_output_py, num_tensors);
+        // Get the quantized output tensors from the Python GroupedTensor.
+        auto output_list = get_grouped_outputs(grouped_output_py, num_tensors);
         std::vector<NVFP4Quantizer *> quantizers(num_tensors, &fallback_quantizer);
         auto input_tensor_cpp = makeTransformerEngineTensor(input_contiguous);
         split_quantize_nvfp4_impl(input_tensor_cpp, input_list, output_list, split_sections,
@@ -1348,10 +1361,14 @@ void split_quantize_nvfp4_impl_with_rht_helper(const TensorWrapper &input,
           rht_output_t_cpp.set_rowwise_data(
               rht_output_t.data_ptr(), input_list[i].dtype(),
               std::vector<size_t>{static_cast<size_t>(cols), static_cast<size_t>(rows)});
+          // SM120 unfused columnwise path (per split):
+          // 1) Apply RHT on the input and write the result in transposed layout (shape [cols, rows]) into rht_output_t_cpp.
+          //    Columnwise NVFP4 scales are obtained by running rowwise NVFP4 on x_t, so we need the transposed layout here.
           nvte_hadamard_transform(input_list[i].data(), rht_output_t_cpp.data(), 0,
                                   quantizer.rht_matrix_random_sign_mask_t, stream);
+          // 2) NVFP4-quantize the RHT(x_t) output into the columnwise (out_transpose) slot.
           nvte_quantize_v2(rht_output_t_cpp.data(), out_transpose_list[i].data(),
-                           quant_config_list_colwise_to_use[i], stream);
+                          quant_config_list_colwise_to_use[i], stream);
         }
       } else {
         nvte_group_hadamard_transform_cast_fusion_columnwise(

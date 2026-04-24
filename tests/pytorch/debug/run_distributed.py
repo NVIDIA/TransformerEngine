@@ -458,16 +458,7 @@ def test_disable_fp8_gemms(fprop_fp8, dgrad_fp8, wgrad_fp8, parallel_mode, **kwa
 
     x.grad.zero_()
     ground_truth = _emulate_linear_distributed(x, weight, parallel_mode=parallel_mode, **fp8_kwargs)
-    if parallel_mode == "column" and torch.cuda.get_device_capability() == (12, 0):
-        # SM120: distributed column-parallel path may show a single-element
-        # activation outlier slightly above default fp32 atol, while grads match.
-        torch.testing.assert_close(
-            ground_truth["activation"], output["activation"], atol=1.2e-5, rtol=1.3e-6
-        )
-        torch.testing.assert_close(ground_truth["wgrad"], output["wgrad"])
-        torch.testing.assert_close(ground_truth["dgrad"], output["dgrad"])
-    else:
-        _cmp_dist(ground_truth, output, parallel_mode)
+    _cmp_dist(ground_truth, output, parallel_mode)
 
 
 @run_debug_test
@@ -488,17 +479,7 @@ def test_disable_fp8_layer(parallel_mode, **kwargs):
     y = _run_forward_backward(x, model, parallel_mode)
 
     output = {"activation": y.clone(), "wgrad": model.weight.grad.clone(), "dgrad": x.grad.clone()}
-    if parallel_mode == "column" and torch.cuda.get_device_capability() == (12, 0):
-        # SM120: distributed column-parallel path may show a single-element
-        # activation outlier slightly above default fp32 atol, while grads match.
-        # Allow for new atol/rtol values (on SM120) = 1.2e-5, 1.3e-6 instead of 1e-5, 1e-6
-        torch.testing.assert_close(
-            ground_truth["activation"], output["activation"], atol=1.2e-5, rtol=1.3e-6
-        )
-        torch.testing.assert_close(ground_truth["wgrad"], output["wgrad"])
-        torch.testing.assert_close(ground_truth["dgrad"], output["dgrad"])
-    else:
-        _cmp_dist(ground_truth, output, parallel_mode)
+    _cmp_dist(ground_truth, output, parallel_mode)
 
 
 @run_debug_test

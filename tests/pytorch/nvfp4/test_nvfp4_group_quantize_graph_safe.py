@@ -133,6 +133,7 @@ def check_grouped_tensor_nvfp4_versus_reference(
             "Grouped output and split output disagree on swizzled-scale metadata "
             f"(split {i}: grouped={expected_swizzled_layout}, split={split_flag})"
         )
+    # Fetch appropriate scale comparison tolerances based on expected swizzled layout and CC
     scale_atol, scale_rtol = _scale_compare_tolerances(expected_swizzled_layout)
 
     if return_rowwise:
@@ -157,6 +158,7 @@ def check_grouped_tensor_nvfp4_versus_reference(
                 ), "The scale shape is not correctly aligned"
                 x_sx_i = x_sx[i].clone()
                 x_sx_ref_i = x_sx_ref[i].clone()
+                # Swizzle the reference scale based on expected_swizzled_layout
                 x_sx_ref_i = _reference_scale_for_layout(
                     ref_unswizzled=x_sx_ref_i,
                     split_m=split_sections[i],
@@ -273,6 +275,7 @@ def check_grouped_tensor_nvfp4_with_paged_stashing(
             "Grouped output and split output disagree on swizzled-scale metadata "
             f"(split {i}: grouped={expected_swizzled_layout}, split={split_flag})"
         )
+    # Fetch appropriate scale comparison tolerances based on expected swizzled layout and CC
     scale_atol, scale_rtol = _scale_compare_tolerances(expected_swizzled_layout)
 
     if return_rowwise:
@@ -297,6 +300,7 @@ def check_grouped_tensor_nvfp4_with_paged_stashing(
                 ), "The scale shape is not correctly aligned"
                 x_sx_i = x_sx[i].clone()
                 x_sx_ref_i = x_sx_ref[i].clone()
+                # Swizzle the reference scale based on expected swizzled layout
                 x_sx_ref_i = _reference_scale_for_layout(
                     ref_unswizzled=x_sx_ref_i,
                     split_m=split_sections[i],
@@ -459,8 +463,8 @@ def test_grouped_tensor_nvfp4_with_paged_stashing(
 ) -> None:
     if torch.cuda.get_device_capability() == (12, 0):
         pytest.skip(
-            "SM120: paged-stashing grouped NVFP4 path is currently unsupported "
-            "(group_hadamard_transform_amax assumes sum(split_sections) == input rows)."
+            "SM120: paged-stashing grouped NVFP4 path is currently unsupported. "
+            "group_hadamard_transform_amax assumes sum(split_sections) == input rows)."
         )
 
     # paged stashing means that the sum of total tokens is less than

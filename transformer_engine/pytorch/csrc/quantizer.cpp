@@ -2250,7 +2250,8 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
   }
   size_t cols = input.size(input.ndim() - 1);
 
-  // Disable fused RHT+cast path for SM120 because it requires dynamic smem over-request
+  // Restriction for the RHT cast fusion kernel because we are using MMA hardware for computing RHT
+  // Disable this fusion path for SM120 because it requires dynamic smem over-request
   bool eligible_for_rht_cast_fusion =
       input.dtype() == DType::kBFloat16 && rows % 64 == 0 && cols % 128 == 0 && !sm120_device;
 
