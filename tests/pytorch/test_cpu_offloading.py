@@ -28,6 +28,7 @@ fp8_block_scaling_available, _ = FP8GlobalStateManager.is_fp8_block_scaling_avai
 mxfp8_available, _ = FP8GlobalStateManager.is_mxfp8_available()
 nvfp4_available, _ = FP8GlobalStateManager.is_nvfp4_available()
 
+
 def _hybrid_fp8_mxfp8_qfactory(role):
     """Hybrid CustomRecipe factory: FP8 current-scaling rowwise + MXFP8 columnwise.
 
@@ -490,14 +491,8 @@ class TestTELayers:
         # grouped_linear is NOT skipped here — it passes test_sanity with
         # hybrid; only memory-accounting assertions trip it in test_memory /
         # test_manual_synchronization.
-        if (
-            layer_type in ("layernorm_mlp_ops",)
-            and recipe is not None
-            and recipe.custom()
-        ):
-            pytest.skip(
-                f"Hybrid CustomRecipe + {layer_type} integration is not yet complete"
-            )
+        if layer_type in ("layernorm_mlp_ops",) and recipe is not None and recipe.custom():
+            pytest.skip(f"Hybrid CustomRecipe + {layer_type} integration is not yet complete")
 
         recipe_ctx = Utils.create_recipe_ctx(recipe)
         init_cuda_memory = Utils.get_cuda_memory_mb()
@@ -556,9 +551,7 @@ class TestTELayers:
             and recipe is not None
             and recipe.custom()
         ):
-            pytest.skip(
-                f"Hybrid CustomRecipe + {layer_type} integration is not yet complete"
-            )
+            pytest.skip(f"Hybrid CustomRecipe + {layer_type} integration is not yet complete")
 
         offload_ctx, sync_function = get_cpu_offload_context(
             enabled=True,
@@ -656,9 +649,7 @@ class TestTELayers:
             and recipe is not None
             and recipe.custom()
         ):
-            pytest.skip(
-                f"Hybrid CustomRecipe + {layer_type} integration is not yet complete"
-            )
+            pytest.skip(f"Hybrid CustomRecipe + {layer_type} integration is not yet complete")
 
         offload_ctx, sync_function, manual_controller = get_cpu_offload_context(
             enabled=True,
@@ -738,14 +729,8 @@ class TestTELayers:
             and recipe.float8_block_scaling()
         ):
             pytest.skip("Fusible operations do not support FP8 block scaling recipe")
-        if (
-            layer_type in ("layernorm_mlp_ops",)
-            and recipe is not None
-            and recipe.custom()
-        ):
-            pytest.skip(
-                f"Hybrid CustomRecipe + {layer_type} integration is not yet complete"
-            )
+        if layer_type in ("layernorm_mlp_ops",) and recipe is not None and recipe.custom():
+            pytest.skip(f"Hybrid CustomRecipe + {layer_type} integration is not yet complete")
 
         recipe_ctx = Utils.create_recipe_ctx(recipe)
 

@@ -2019,9 +2019,7 @@ class TestHybridGroupedLinearClassifier:
             _is_hybrid_quantizer_list,
         )
 
-        quantizers = [
-            _make_hybrid_quantizer_fp8_row_fp4_col() for _ in range(3)
-        ]
+        quantizers = [_make_hybrid_quantizer_fp8_row_fp4_col() for _ in range(3)]
         assert _is_hybrid_quantizer_list(quantizers) is True
 
     def test_all_plain_returns_false(self):
@@ -4022,9 +4020,7 @@ class TestHybridActivationRecompute:
         (non-recompute) baseline.
         """
         _reset_rng(seed=4242)
-        model = Linear(
-            self.in_features, self.out_features, params_dtype=torch.bfloat16
-        ).cuda()
+        model = Linear(self.in_features, self.out_features, params_dtype=torch.bfloat16).cuda()
         inp = torch.randn(
             self.batch,
             self.in_features,
@@ -4059,9 +4055,7 @@ class TestHybridActivationRecompute:
             params_dtype=torch.bfloat16,
         ).cuda()
 
-        inp = torch.randn(
-            seq, bs, hidden, device="cuda", dtype=torch.bfloat16, requires_grad=True
-        )
+        inp = torch.randn(seq, bs, hidden, device="cuda", dtype=torch.bfloat16, requires_grad=True)
         inp.retain_grad()
 
         with autocast(enabled=True, recipe=recipe_obj):
@@ -4187,6 +4181,7 @@ class TestHybridActivationRecompute:
         the weight-workspace cache interaction documented above; pins the
         boundary so a future fix would flip this to an unexpected pass.
         """
+
         def fn(model, inp):
             return torch.utils.checkpoint.checkpoint(model, inp, use_reentrant=False)
 
@@ -4223,9 +4218,7 @@ class TestHybridActivationRecompute:
         # Expected to match bitwise since both quantizers are stateless
         # and the input bytes are identical between the two runs. Use a
         # strict tolerance; if this ever drifts it's a real bug.
-        _assert_outputs_bitwise_equal(
-            ref, test, "te.checkpoint(reentrant) FP8xMXFP8 cross-format"
-        )
+        _assert_outputs_bitwise_equal(ref, test, "te.checkpoint(reentrant) FP8xMXFP8 cross-format")
 
     # ----- TransformerLayer -----------------------------------------
 
@@ -4247,15 +4240,9 @@ class TestHybridActivationRecompute:
         def fn(model, inp):
             return te_pytorch.checkpoint(model, inp, use_reentrant=True)
 
-        ref = self._run_transformer_layer(
-            self._same_format_fp8_recipe(), checkpoint_fn=None
-        )
-        test = self._run_transformer_layer(
-            self._same_format_fp8_recipe(), checkpoint_fn=fn
-        )
-        _assert_outputs_bitwise_equal(
-            ref, test, "te.checkpoint(reentrant) TransformerLayer FP8"
-        )
+        ref = self._run_transformer_layer(self._same_format_fp8_recipe(), checkpoint_fn=None)
+        test = self._run_transformer_layer(self._same_format_fp8_recipe(), checkpoint_fn=fn)
+        _assert_outputs_bitwise_equal(ref, test, "te.checkpoint(reentrant) TransformerLayer FP8")
 
     def test_te_checkpoint_non_reentrant_transformer_layer_fp8(self):
         """Same TransformerLayer setup but through the non-reentrant
@@ -4266,12 +4253,8 @@ class TestHybridActivationRecompute:
         def fn(model, inp):
             return te_pytorch.checkpoint(model, inp, use_reentrant=False)
 
-        ref = self._run_transformer_layer(
-            self._same_format_fp8_recipe(), checkpoint_fn=None
-        )
-        test = self._run_transformer_layer(
-            self._same_format_fp8_recipe(), checkpoint_fn=fn
-        )
+        ref = self._run_transformer_layer(self._same_format_fp8_recipe(), checkpoint_fn=None)
+        test = self._run_transformer_layer(self._same_format_fp8_recipe(), checkpoint_fn=fn)
         _assert_outputs_bitwise_equal(
             ref, test, "te.checkpoint(non-reentrant) TransformerLayer FP8"
         )
@@ -4339,12 +4322,8 @@ class TestHybridActivationRecompute:
         ffn = 128
         bs = 24
 
-        model = GroupedLinear(
-            num_gemms, hidden, ffn, params_dtype=torch.bfloat16
-        ).cuda()
-        inp = torch.randn(
-            bs, hidden, device="cuda", dtype=torch.bfloat16, requires_grad=True
-        )
+        model = GroupedLinear(num_gemms, hidden, ffn, params_dtype=torch.bfloat16).cuda()
+        inp = torch.randn(bs, hidden, device="cuda", dtype=torch.bfloat16, requires_grad=True)
         inp.retain_grad()
         base = bs // num_gemms
         rem = bs % num_gemms
@@ -4365,19 +4344,11 @@ class TestHybridActivationRecompute:
         import transformer_engine.pytorch as te_pytorch
 
         def fn(model, inp, m_splits):
-            return te_pytorch.checkpoint(
-                model, inp, m_splits, use_reentrant=True
-            )
+            return te_pytorch.checkpoint(model, inp, m_splits, use_reentrant=True)
 
-        ref = self._run_grouped_linear(
-            self._same_format_fp8_recipe(), checkpoint_fn=None
-        )
-        test = self._run_grouped_linear(
-            self._same_format_fp8_recipe(), checkpoint_fn=fn
-        )
-        _assert_outputs_bitwise_equal(
-            ref, test, "te.checkpoint(reentrant) GroupedLinear FP8"
-        )
+        ref = self._run_grouped_linear(self._same_format_fp8_recipe(), checkpoint_fn=None)
+        test = self._run_grouped_linear(self._same_format_fp8_recipe(), checkpoint_fn=fn)
+        _assert_outputs_bitwise_equal(ref, test, "te.checkpoint(reentrant) GroupedLinear FP8")
 
     def test_te_checkpoint_non_reentrant_grouped_linear_fp8_bitwise(self):
         """Same GroupedLinear recompute setup but through the non-
@@ -4387,19 +4358,11 @@ class TestHybridActivationRecompute:
         import transformer_engine.pytorch as te_pytorch
 
         def fn(model, inp, m_splits):
-            return te_pytorch.checkpoint(
-                model, inp, m_splits, use_reentrant=False
-            )
+            return te_pytorch.checkpoint(model, inp, m_splits, use_reentrant=False)
 
-        ref = self._run_grouped_linear(
-            self._same_format_fp8_recipe(), checkpoint_fn=None
-        )
-        test = self._run_grouped_linear(
-            self._same_format_fp8_recipe(), checkpoint_fn=fn
-        )
-        _assert_outputs_bitwise_equal(
-            ref, test, "te.checkpoint(non-reentrant) GroupedLinear FP8"
-        )
+        ref = self._run_grouped_linear(self._same_format_fp8_recipe(), checkpoint_fn=None)
+        test = self._run_grouped_linear(self._same_format_fp8_recipe(), checkpoint_fn=fn)
+        _assert_outputs_bitwise_equal(ref, test, "te.checkpoint(non-reentrant) GroupedLinear FP8")
 
     # ----- Selective attention recompute ----------------------------
 
@@ -4453,9 +4416,7 @@ class TestHybridActivationRecompute:
 
         ref = _run(checkpoint_core_attention=False)
         test = _run(checkpoint_core_attention=True)
-        _assert_outputs_bitwise_equal(
-            ref, test, "checkpoint_core_attention TransformerLayer FP8"
-        )
+        _assert_outputs_bitwise_equal(ref, test, "checkpoint_core_attention TransformerLayer FP8")
 
     # ----- Linear bitwise parametrized across all 4 stateless formats -----
 
@@ -4516,9 +4477,7 @@ class TestHybridActivationRecompute:
             ),
         ],
     )
-    def test_te_checkpoint_linear_all_stateless_formats_bitwise(
-        self, format_name, reentrant
-    ):
+    def test_te_checkpoint_linear_all_stateless_formats_bitwise(self, format_name, reentrant):
         """Bitwise parity of Linear + te.checkpoint across all four
         stateless hybrid formats (FP8 current, MXFP8, BlockFP8, NVFP4),
         both reentrant and non-reentrant.
@@ -4536,9 +4495,7 @@ class TestHybridActivationRecompute:
         during recompute; bitwise equality catches that immediately."""
         import transformer_engine.pytorch as te_pytorch
 
-        row_factory, col_factory_for_grad, hw_skip, hw_reason = _QUANTIZER_CONFIGS[
-            format_name
-        ]
+        row_factory, col_factory_for_grad, hw_skip, hw_reason = _QUANTIZER_CONFIGS[format_name]
         # Most formats have a distinct E5M2 variant for grad; NVFP4 has
         # only one format (col_factory_for_grad is None → reuse
         # row_factory, which is what the existing hybrid NVFP4 tests do).
@@ -4555,7 +4512,9 @@ class TestHybridActivationRecompute:
 
         ref = self._run_linear(hybrid_recipe, checkpoint_fn=None)
         test = self._run_linear(hybrid_recipe, checkpoint_fn=fn)
-        label = f"te.checkpoint({'reentrant' if reentrant else 'non-reentrant'}) Linear {format_name}"
+        label = (
+            f"te.checkpoint({'reentrant' if reentrant else 'non-reentrant'}) Linear {format_name}"
+        )
         _assert_outputs_bitwise_equal(ref, test, label)
 
     # ----- save_for_backward round-trip (unit-level) ----------------

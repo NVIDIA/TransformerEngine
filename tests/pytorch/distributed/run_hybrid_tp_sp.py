@@ -244,9 +244,7 @@ def _match_param_sizes(dist_param, single_param):
 
 def _check_outputs(output_single, output_dist, label="outputs"):
     failed = torch.tensor([0], dtype=torch.uint8, device="cuda")
-    f, info = _compare_tensors(
-        label, output_dist, output_single, **_get_tolerances()
-    )
+    f, info = _compare_tensors(label, output_dist, output_single, **_get_tolerances())
     if f:
         dist_print(info, src=WORLD_RANK, error=True)
     failed[0] = int(f)
@@ -262,9 +260,7 @@ def _check_gradients(model_dist, model_single):
             continue
         failed = torch.tensor([0], dtype=torch.uint8, device="cuda")
         ps_grad = _match_param_sizes(pd.grad, ps.grad)
-        f, info = _compare_tensors(
-            f"grad[{i}].{name}", pd.grad, ps_grad, **_get_tolerances()
-        )
+        f, info = _compare_tensors(f"grad[{i}].{name}", pd.grad, ps_grad, **_get_tolerances())
         if f:
             dist_print(info, src=WORLD_RANK, error=True)
         failed[0] = int(f)
@@ -325,9 +321,7 @@ def _test_linear(parallel_mode, sequence_parallel, params_dtype=torch.bfloat16):
     elif parallel_mode == "column":
         if sequence_parallel:
             # SP column: input is sharded along batch/sequence dim 0.
-            inp_single = torch.empty(
-                (WORLD_SIZE * BATCH_SIZE, HIDDEN_SIZE)
-            ).cuda().to(params_dtype)
+            inp_single = torch.empty((WORLD_SIZE * BATCH_SIZE, HIDDEN_SIZE)).cuda().to(params_dtype)
             inp_dist = torch.randn((BATCH_SIZE, HIDDEN_SIZE)).cuda().to(params_dtype)
             inp_single = _gather(inp_dist, dim=0).detach()
         else:
@@ -368,16 +362,12 @@ def _test_layernorm_linear(sequence_parallel, params_dtype=torch.bfloat16):
     that runs BEFORE quantization for hybrid (since
     ``with_quantized_norm=False`` for HybridQuantizer — see
     ``layernorm_linear.py:220``)."""
-    dist_print(
-        f"layernorm_linear: parallel_mode=column sequence_parallel={sequence_parallel}"
-    )
+    dist_print(f"layernorm_linear: parallel_mode=column sequence_parallel={sequence_parallel}")
 
     torch.manual_seed(23456)
     torch.cuda.manual_seed(23456)
 
-    model_single = te.LayerNormLinear(
-        HIDDEN_SIZE, HIDDEN_SIZE, params_dtype=params_dtype
-    ).cuda()
+    model_single = te.LayerNormLinear(HIDDEN_SIZE, HIDDEN_SIZE, params_dtype=params_dtype).cuda()
     model_dist = te.LayerNormLinear(
         HIDDEN_SIZE,
         HIDDEN_SIZE,
@@ -420,9 +410,7 @@ def _test_transformer_layer(sequence_parallel, params_dtype=torch.bfloat16):
     quantizers. If any of the unfused/hybrid code paths break something
     visible to the backward graph, this catches it with a concrete
     forward-output mismatch."""
-    dist_print(
-        f"transformer_layer: parallel_mode=set sequence_parallel={sequence_parallel}"
-    )
+    dist_print(f"transformer_layer: parallel_mode=set sequence_parallel={sequence_parallel}")
 
     torch.manual_seed(34567)
     torch.cuda.manual_seed(34567)
@@ -457,9 +445,7 @@ def _test_transformer_layer(sequence_parallel, params_dtype=torch.bfloat16):
         torch.randn((WORLD_SIZE * SEQ_LEN, BATCH_SIZE, HIDDEN_SIZE)).cuda().to(params_dtype)
     )
     if sequence_parallel:
-        inp_dist = inp_single[
-            WORLD_RANK * SEQ_LEN : (WORLD_RANK + 1) * SEQ_LEN, :, :
-        ].contiguous()
+        inp_dist = inp_single[WORLD_RANK * SEQ_LEN : (WORLD_RANK + 1) * SEQ_LEN, :, :].contiguous()
     else:
         inp_dist = inp_single.clone()
 

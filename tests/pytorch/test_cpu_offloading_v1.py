@@ -248,9 +248,7 @@ def test_cpu_offload(quantization_recipe: Optional[recipe.Recipe], model_name: s
         and quantization_recipe is not None
         and quantization_recipe.custom()
     ):
-        pytest.skip(
-            f"Hybrid CustomRecipe + {model_name} integration is not yet complete"
-        )
+        pytest.skip(f"Hybrid CustomRecipe + {model_name} integration is not yet complete")
 
     # Construct model
     modules_list = [model_types[model_name]() for _ in range(NUM_LAYERS)]
