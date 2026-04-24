@@ -16,6 +16,7 @@
 #include "../utils.cuh"
 #include "dispatch/dequantize.cuh"
 #include "dispatch/quantize.cuh"
+#include "nvfp4/quantize_pertoken_nvfp4.cuh"
 #include "transformer_engine/transpose.h"
 
 void nvte_quantize(const NVTETensor input, NVTETensor output, cudaStream_t stream) {
@@ -145,4 +146,37 @@ void nvte_group_nvfp4_quantize_with_amax(const NVTETensor input, NVTETensor *out
 
   dispatch::group_quantize_fwd_host_aware_helper<IS_ACT, Empty, nullptr>(
       input, outputs, split_sections, num_tensors, quant_config, stream);
+}
+
+void nvte_quantize_nvfp4_pertoken(const NVTETensor input, NVTETensor output_data,
+                                  NVTETensor output_scales, NVTETensor output_per_token_scales,
+                                  size_t num_rows, size_t num_cols, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_quantize_nvfp4_pertoken);
+
+  NVTE_CHECK(num_cols % 16 == 0,
+             "num_cols must be a multiple of 16 for per-token NVFP4 quantization");
+
+  const void *input_ptr = nvte_tensor_data(input);
+  void *data_ptr = nvte_tensor_data(output_data);
+  void *scales_ptr = nvte_tensor_data(output_scales);
+  void *pertoken_ptr = nvte_tensor_data(output_per_token_scales);
+  const NVTEDType itype = nvte_tensor_type(input);
+
+  using namespace transformer_engine;
+
+  if (itype == NVTEDType::kNVTEBFloat16) {
+    dispatch::nvfp4::quantize_pertoken_kernel::launch_quantize_pertoken_nvfp4<__nv_bfloat16>(
+        num_rows, num_cols, reinterpret_cast<const __nv_bfloat16 *>(input_ptr), nullptr,
+        reinterpret_cast<uint8_t *>(data_ptr), reinterpret_cast<fp8e4m3 *>(scales_ptr),
+        reinterpret_cast<float *>(pertoken_ptr), stream);
+  } else if (itype == NVTEDType::kNVTEFloat16) {
+    dispatch::nvfp4::quantize_pertoken_kernel::launch_quantize_pertoken_nvfp4<half>(
+        num_rows, num_cols, reinterpret_cast<const half *>(input_ptr), nullptr,
+        reinterpret_cast<uint8_t *>(data_ptr), reinterpret_cast<fp8e4m3 *>(scales_ptr),
+        reinterpret_cast<float *>(pertoken_ptr), stream);
+  } else {
+    NVTE_ERROR(
+        "Unsupported input dtype for per-token NVFP4 quantization. "
+        "Expected BFloat16 or Float16.");
+  }
 }

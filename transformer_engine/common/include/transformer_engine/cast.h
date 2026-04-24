@@ -453,6 +453,23 @@ void nvte_group_nvfp4_quantize_with_amax(const NVTETensor input, NVTETensor *out
                                          const NVTEQuantizationConfig quant_config,
                                          cudaStream_t stream);
 
+/*! \brief Per-token NVFP4 quantization.
+ *
+ *  Quantizes an input tensor to NVFP4 with per-row (per-token) global scaling.
+ *  Each row gets its own FP32 global scale derived from its row-wise amax.
+ *
+ *  \param[in]      input                   Input tensor (num_rows, num_cols).
+ *  \param[out]     output_data             Packed FP4 data (num_rows, num_cols/2), uint8.
+ *  \param[out]     output_scales           Block scales (num_rows, num_cols/16), FP8 E4M3.
+ *  \param[out]     output_per_token_scales Per-row global scales (num_rows,), FP32.
+ *  \param[in]      num_rows                Number of rows.
+ *  \param[in]      num_cols                Number of columns (must be multiple of 16).
+ *  \param[in]      stream                  CUDA stream.
+ */
+void nvte_quantize_nvfp4_pertoken(const NVTETensor input, NVTETensor output_data,
+                                  NVTETensor output_scales, NVTETensor output_per_token_scales,
+                                  size_t num_rows, size_t num_cols, cudaStream_t stream);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

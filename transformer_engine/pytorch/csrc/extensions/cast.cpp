@@ -1540,5 +1540,47 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
   return output_py_list;
 }
 
+std::tuple<at::Tensor, at::Tensor, at::Tensor> quantize_nvfp4_pertoken(at::Tensor input) {
+  // Input validation
+  NVTE_CHECK(input.dim() == 2, "Input must be 2D (num_rows, num_cols)");
+  NVTE_CHECK(input.is_cuda(), "Input must be on CUDA device");
+  NVTE_CHECK(input.scalar_type() == at::ScalarType::BFloat16 ||
+                 input.scalar_type() == at::ScalarType::Half,
+             "Input must be BFloat16 or Half");
+
+  const int num_rows = input.size(0);
+  const int num_cols = input.size(1);
+  NVTE_CHECK(num_cols % 16 == 0,
+             "num_cols must be a multiple of 16 for per-token NVFP4 quantization");
+
+  if (num_rows == 0) {
+    auto options = input.options();
+    return {at::empty({0, num_cols / 2}, options.dtype(at::kByte)),
+            at::empty({0, num_cols / 16}, options.dtype(at::kByte)),
+            at::empty({0}, options.dtype(at::kFloat))};
+  }
+
+  auto input_contig = input.contiguous();
+  auto options = input_contig.options();
+
+  // Allocate outputs
+  auto output_data = at::empty({num_rows, num_cols / 2}, options.dtype(at::kByte));
+  auto output_scales = at::empty({num_rows, num_cols / 16}, options.dtype(at::kByte));
+  auto output_per_token_scales = at::empty({num_rows}, options.dtype(at::kFloat));
+
+  auto stream = at::cuda::getCurrentCUDAStream().stream();
+
+  // Call C API
+  auto te_input = makeTransformerEngineTensor(input_contig);
+  auto te_data = makeTransformerEngineTensor(output_data);
+  auto te_scales = makeTransformerEngineTensor(output_scales);
+  auto te_pertoken = makeTransformerEngineTensor(output_per_token_scales);
+
+  nvte_quantize_nvfp4_pertoken(te_input.data(), te_data.data(), te_scales.data(),
+                               te_pertoken.data(), num_rows, num_cols, stream);
+
+  return {output_data, output_scales, output_per_token_scales};
+}
+
 }  // namespace pytorch
 }  // namespace transformer_engine

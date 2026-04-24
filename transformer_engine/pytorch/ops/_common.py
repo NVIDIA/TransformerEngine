@@ -156,7 +156,7 @@ def fuse_grouped_mlp_ops(
 
     if not fused_op_cls.is_supported():
         return ops
-    if recipe is None or not recipe.mxfp8():
+    if recipe is None or not (recipe.mxfp8() or recipe.nvfp4_pertoken()):
         return ops
 
     fc1_bias_ok = (
