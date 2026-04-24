@@ -258,7 +258,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
     def __init__(
         self,
         fp8_dtype: TE_DType,
-        device: torch.device,
+        device: Optional[torch.device] = None,
         *,
         rowwise: bool = True,
         columnwise: bool = True,
@@ -285,6 +285,61 @@ class Float8CurrentScalingQuantizer(Quantizer):
         self.force_pow_2_scales = force_pow_2_scales
         self.amax_epsilon = amax_epsilon
 
+    def __eq__(self, other):
+        if not isinstance(other, Float8CurrentScalingQuantizer):
+            return NotImplemented
+        return (
+            self.dtype == other.dtype
+            and self.with_amax_reduction == other.with_amax_reduction
+            and self.amax_reduction_group is other.amax_reduction_group
+            and self.force_pow_2_scales == other.force_pow_2_scales
+            and self.amax_epsilon == other.amax_epsilon
+            and self.rowwise_usage == other.rowwise_usage
+            and self.columnwise_usage == other.columnwise_usage
+            and self.internal == other.internal
+            and self.optimize_for_gemm == other.optimize_for_gemm
+        )
+
+    def __hash__(self):
+        return hash(
+            (
+                type(self),
+                self.dtype,
+                self.with_amax_reduction,
+                id(self.amax_reduction_group),
+                self.force_pow_2_scales,
+                self.amax_epsilon,
+                self.rowwise_usage,
+                self.columnwise_usage,
+                self.internal,
+                self.optimize_for_gemm,
+            )
+        )
+
+    def __fx_repr__(self):
+        # Process groups cannot be embedded in source, so smuggle the
+        # reference through the globals dict under a unique name.
+        group_name = f"_amax_reduction_group_{id(self.amax_reduction_group):x}"
+        return (
+            (
+                "Float8CurrentScalingQuantizer("
+                f"fp8_dtype=TE_DType.{self.dtype.name}, "
+                f"rowwise={self.rowwise_usage}, "
+                f"columnwise={self.columnwise_usage}, "
+                f"with_amax_reduction={self.with_amax_reduction}, "
+                f"amax_reduction_group={group_name}, "
+                f"force_pow_2_scales={self.force_pow_2_scales}, "
+                f"amax_epsilon={self.amax_epsilon})"
+                f"._with_runtime_flags(internal={self.internal}, "
+                f"optimize_for_gemm={self.optimize_for_gemm})"
+            ),
+            {
+                "Float8CurrentScalingQuantizer": Float8CurrentScalingQuantizer,
+                "TE_DType": TE_DType,
+                group_name: self.amax_reduction_group,
+            },
+        )
+
     def __getstate__(self):
         """Exclude unpicklable process group from serialized state."""
         state = self.__dict__.copy()
@@ -296,7 +351,6 @@ class Float8CurrentScalingQuantizer(Quantizer):
 
         quantizer = Float8CurrentScalingQuantizer(
             fp8_dtype=self.dtype,
-            device=0,
             rowwise=self.rowwise_usage,
             columnwise=self.columnwise_usage,
             with_amax_reduction=self.with_amax_reduction,
