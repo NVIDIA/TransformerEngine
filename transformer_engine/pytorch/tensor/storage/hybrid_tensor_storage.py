@@ -174,9 +174,17 @@ class HybridQuantizedTensorStorage(QuantizedTensorStorage):
         }
 
     def __repr__(self):
+        row_type = (
+            type(self._rowwise_storage).__name__ if self._rowwise_storage is not None else "None"
+        )
+        col_type = (
+            type(self._columnwise_storage).__name__
+            if self._columnwise_storage is not None
+            else "None"
+        )
         return (
             "HybridQuantizedTensorStorage("
-            f"rowwise={type(self._rowwise_storage).__name__}, "
-            f"columnwise={type(self._columnwise_storage).__name__}, "
+            f"rowwise={row_type}, "
+            f"columnwise={col_type}, "
             f"dtype={self._dtype})"
         )

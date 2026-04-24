@@ -1999,6 +1999,109 @@ class TestHybridAllModules:
         self._run_fwd_bwd(model, inp)
 
 
+@requires_fp8
+class TestHybridGroupedLinearClassifier:
+    """Unit tests for ``grouped_linear._is_hybrid_quantizer_list``.
+
+    ``GroupedLinear`` dispatches its split-quantize between two mutually-
+    exclusive backends: ``tex.split_quantize`` (plain) and
+    ``_hybrid_split_quantize`` (all-hybrid). Neither can consume a mixed
+    list — ``tex.split_quantize`` doesn't recognise ``HybridQuantizer``,
+    and ``_hybrid_split_quantize`` calls ``q.rowwise_quantizer`` on every
+    element. Before the classifier was tightened, ``_has_hybrid_quantizer``
+    used ``any(...)`` semantics: a single hybrid entry in a mixed list
+    would route to ``_hybrid_split_quantize`` and raise ``AttributeError``
+    deep inside a grouped C++ call. These tests pin the new strict
+    classifier contract."""
+
+    def test_all_hybrid_returns_true(self):
+        from transformer_engine.pytorch.module.grouped_linear import (
+            _is_hybrid_quantizer_list,
+        )
+
+        quantizers = [
+            _make_hybrid_quantizer_fp8_row_fp4_col() for _ in range(3)
+        ]
+        assert _is_hybrid_quantizer_list(quantizers) is True
+
+    def test_all_plain_returns_false(self):
+        from transformer_engine.pytorch.module.grouped_linear import (
+            _is_hybrid_quantizer_list,
+        )
+
+        quantizers = [_make_fp8_quantizer() for _ in range(3)]
+        assert _is_hybrid_quantizer_list(quantizers) is False
+
+    def test_all_none_returns_false(self):
+        """No quantizers at all (BF16 path) — classifier returns False so
+        the caller takes the non-fp8 branch."""
+        from transformer_engine.pytorch.module.grouped_linear import (
+            _is_hybrid_quantizer_list,
+        )
+
+        assert _is_hybrid_quantizer_list([None, None, None]) is False
+
+    def test_mixed_hybrid_and_plain_raises(self):
+        """The actual bug: a mixed list used to silently route to
+        ``_hybrid_split_quantize`` and crash with ``AttributeError`` on
+        ``plain_q.rowwise_quantizer``. Now it fails fast at the
+        classifier with a user-actionable error."""
+        from transformer_engine.pytorch.module.grouped_linear import (
+            _is_hybrid_quantizer_list,
+        )
+
+        quantizers = [
+            _make_hybrid_quantizer_fp8_row_fp4_col(),
+            _make_fp8_quantizer(),
+            _make_hybrid_quantizer_fp8_row_fp4_col(),
+        ]
+        with pytest.raises(ValueError) as exc_info:
+            _is_hybrid_quantizer_list(quantizers)
+        msg = str(exc_info.value)
+        # Error names both counts and points at the root cause so users
+        # can fix their ``qfactory`` without digging.
+        assert "mixes HybridQuantizer" in msg
+        assert "2 hybrid" in msg
+        assert "1 non-hybrid" in msg
+        assert "CustomRecipe" in msg and "qfactory" in msg
+
+    def test_none_entries_ignored_when_remainder_is_uniform(self):
+        """None entries are filtered before uniformity check — a list
+        of hybrids plus a None must still classify as hybrid (not
+        mixed)."""
+        from transformer_engine.pytorch.module.grouped_linear import (
+            _is_hybrid_quantizer_list,
+        )
+
+        quantizers = [
+            _make_hybrid_quantizer_fp8_row_fp4_col(),
+            None,
+            _make_hybrid_quantizer_fp8_row_fp4_col(),
+        ]
+        assert _is_hybrid_quantizer_list(quantizers) is True
+
+    def test_hybrid_split_quantize_rejects_plain_element(self):
+        """Defense-in-depth: even if a caller bypasses the classifier,
+        ``_hybrid_split_quantize`` itself asserts uniformity and raises
+        ``TypeError`` with a list of received types, rather than the
+        opaque ``AttributeError: 'Float8CurrentScalingQuantizer' object
+        has no attribute 'rowwise_quantizer'`` from the old code."""
+        from transformer_engine.pytorch.module.grouped_linear import (
+            _hybrid_split_quantize,
+        )
+
+        tensor = torch.randn(32, 128, dtype=torch.bfloat16, device="cuda")
+        quantizers = [
+            _make_hybrid_quantizer_fp8_row_fp4_col(),
+            _make_fp8_quantizer(),  # Not hybrid — should trigger TypeError
+        ]
+        with pytest.raises(TypeError) as exc_info:
+            _hybrid_split_quantize(tensor, [16, 16], quantizers)
+        msg = str(exc_info.value)
+        assert "HybridQuantizer" in msg
+        assert "Float8CurrentScalingQuantizer" in msg
+
+
 # ===========================================================================
 # Quantized Parameters (quantized_model_init) tests for hybrid quantization
 # ===========================================================================

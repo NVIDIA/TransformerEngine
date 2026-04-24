@@ -81,23 +81,28 @@ class HybridQuantizer(Quantizer):
         requires_grad: bool = False,
         pin_memory: bool = False,
     ) -> HybridQuantizedTensor:
-        self.rowwise_quantizer.internal = True
-        rowwise_empty = self.rowwise_quantizer.make_empty(
-            shape,
-            dtype=dtype,
-            device=device,
-            pin_memory=pin_memory,
-        )
-        self.rowwise_quantizer.internal = False
+        # The ``internal`` flag toggles a shared-state mode on each sub-
+        # quantizer (returns bare ``*TensorStorage`` rather than a
+        # ``QuantizedTensor`` subclass from ``make_empty``). It is
+        # global to the quantizer instance, so a raise between
+        # ``internal=True`` and ``internal=False`` would leak the flag
+        # and corrupt subsequent non-hybrid quantize calls on the same
+        # sub-quantizer. ``try/finally`` guarantees the reset.
+        def _make_empty_internal(sub_quantizer):
+            prev_internal = sub_quantizer.internal
+            sub_quantizer.internal = True
+            try:
+                return sub_quantizer.make_empty(
+                    shape,
+                    dtype=dtype,
+                    device=device,
+                    pin_memory=pin_memory,
+                )
+            finally:
+                sub_quantizer.internal = prev_internal
 
-        self.columnwise_quantizer.internal = True
-        columnwise_empty = self.columnwise_quantizer.make_empty(
-            shape,
-            dtype=dtype,
-            device=device,
-            pin_memory=pin_memory,
-        )
-        self.columnwise_quantizer.internal = False
+        rowwise_empty = _make_empty_internal(self.rowwise_quantizer)
+        columnwise_empty = _make_empty_internal(self.columnwise_quantizer)
 
         return HybridQuantizedTensor(
             shape=shape,
@@ -135,11 +140,6 @@ class HybridQuantizer(Quantizer):
                 src, dst._columnwise_storage, noop_flag=noop_flag
             )
         return dst
-
-    def set_usage(
-        self, *, rowwise: Optional[bool] = None, columnwise: Optional[bool] = None
-    ) -> None:
-        super().set_usage(rowwise=rowwise, columnwise=columnwise)
 
     def supports_only_rowwise_all_gather(self) -> bool:
         """Whether TP activation all-gather must preserve rowwise data.
