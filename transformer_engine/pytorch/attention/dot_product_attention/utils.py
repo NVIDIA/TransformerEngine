@@ -1315,9 +1315,12 @@ def get_attention_backend(
             )
             use_flash_attention_2 = False
     if use_flash_attention_3 and deterministic and FlashAttentionUtils.v3_is_installed:
-        if head_dim_qk > 128:
+        if is_training and max(head_dim_qk, head_dim_v) >= 256:
             logger.debug(
-                "Disabling FlashAttention 3 for deterministic execution with head_dim_qk > 128."
+                "Disabling FlashAttention 3 for deterministic backward with"
+                " max(head_dim_qk, head_dim_v) >= 256. Found: head_dim_qk = %s, head_dim_v = %s.",
+                head_dim_qk,
+                head_dim_v,
             )
             use_flash_attention_3 = False
     if use_fused_attention and deterministic:
