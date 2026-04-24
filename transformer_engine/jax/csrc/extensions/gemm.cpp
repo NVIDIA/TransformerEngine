@@ -300,18 +300,27 @@ Error_Type GemmV2FFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale
         buffer_shape, buffer_dtype, config.collective_op);
     auto pre_gelu_ = TensorWrapper(nullptr, std::vector<size_t>{0}, DType::kByte);
     if (config.collective_op == JAXX_Collective_Op::REDUCE_SCATTER) {
-      auto ubuf_out_ = TensorWrapper(executor->get_ubuf_dptr(), buffer_shape, out_dtype);
-      // Prepare the auxiliary buffer for the reduce-scattered GEMM output
       auto out_ = TensorWrapper(output->untyped_data(), out_shape, out_dtype);
       NVTE_CHECK(out_.numel() == output->element_count(),
                  "cuBLAS GEMM output buffer size is incorrect, expected ", out_.numel(),
                  " elements ", to_string_like(out_shape), " but got ", output->element_count(),
                  " elements ", to_string_like(output->dimensions()));
 
-      // Launch GEMM+RS
-      executor->split_overlap_rs(rhs_, config.rhs_transposed, lhs_, config.lhs_transposed,
-                                 ubuf_out_, bias_, pre_gelu_, workspace_, false /*grad*/,
-                                 false /*accumulate*/, config.use_split_accumulator, out_, stream);
+      if (IsCollectiveGemmWithCublasmp()) {
+        // cuBLASMp writes the reduce-scattered result directly into D
+        auto rs_out_ = TensorWrapper(nullptr, std::vector<size_t>{0}, out_dtype);
+        executor->split_overlap_rs(rhs_, config.rhs_transposed, lhs_, config.lhs_transposed,
+                                   out_, bias_, pre_gelu_, workspace_, false /*grad*/,
+                                   false /*accumulate*/, config.use_split_accumulator, rs_out_,
+                                   stream);
+      } else {
+        // Userbuffers writes the full GEMM result into ubuf, then reduce-scatters into rs_output
+        auto ubuf_out_ = TensorWrapper(executor->get_ubuf_dptr(), buffer_shape, out_dtype);
+        executor->split_overlap_rs(rhs_, config.rhs_transposed, lhs_, config.lhs_transposed,
+                                   ubuf_out_, bias_, pre_gelu_, workspace_, false /*grad*/,
+                                   false /*accumulate*/, config.use_split_accumulator, out_,
+                                   stream);
+      }
 
     } else if (config.collective_op == JAXX_Collective_Op::ALL_GATHER) {
       auto aux_out_ = TensorWrapper(nullptr, std::vector<size_t>{0}, out_dtype);  // Empty

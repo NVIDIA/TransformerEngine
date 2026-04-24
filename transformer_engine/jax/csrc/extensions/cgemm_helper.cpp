@@ -18,11 +18,9 @@ ncclUniqueId CommunicatorHandler::coordinate_nccl_unique_id(const std::string &i
   int tp_domain_id = get_tp_domain_id();
   bool is_tp_leader = (get_local_device_id_within_tp_domain() == 0);
 
-  pid_t pgid = getpgid(0);
-
   std::string base_path = getenv<std::string>("NVTE_JAX_NCCL_FILE_PATH", "/tmp");
-  std::string id_file = base_path + "/nccl_" + id_type + "_unique_id_pgid_" + std::to_string(pgid) +
-                        "_" + std::to_string(num_total_devices) + "_" + std::to_string(tp_size) +
+  std::string id_file = base_path + "/nccl_" + id_type + "_unique_id_" +
+                        std::to_string(num_total_devices) + "_" + std::to_string(tp_size) +
                         "_domain_" + std::to_string(tp_domain_id) + ".bin";
 
   if (is_tp_leader) {

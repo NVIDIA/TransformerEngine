@@ -5,6 +5,9 @@
 """config for collective_gemm tests"""
 import pytest
 
+import transformer_engine.jax  # noqa: F401 - must load libtransformer_engine.so before transformer_engine_jax
+from transformer_engine_jax import nvte_built_with_cublasmp
+
 
 def pytest_addoption(parser):
     """Pytest hook for collective_gemm tests"""
@@ -19,6 +22,12 @@ def pytest_addoption(parser):
 def distributed_args(request):
     """Fixture for querying distributed initialization arguments"""
     if request.cls:
+        use_cublasmp = request.config.getoption("--use-cublasmp")
+        if use_cublasmp and not nvte_built_with_cublasmp():
+            pytest.skip(
+                "Collective GEMM cuBLASMp backend tests require Transformer Engine to be built "
+                "with NVTE_WITH_CUBLASMP=1."
+            )
         request.cls.coordinator_address = request.config.getoption("--coordinator-address")
         request.cls.num_processes = int(request.config.getoption("--num-processes"))
         request.cls.process_id = int(request.config.getoption("--process-id"))
@@ -28,4 +37,4 @@ def distributed_args(request):
             if request.cls.local_device_ids is None
             else len(request.cls.local_device_ids.split(","))
         )
-        request.cls.use_cublasmp = request.config.getoption("--use-cublasmp")
+        request.cls.use_cublasmp = use_cublasmp

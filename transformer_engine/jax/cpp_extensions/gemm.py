@@ -23,6 +23,7 @@ from transformer_engine_jax import (
     get_num_compute_streams,
     JAXX_Collective_Op,
     get_device_compute_capability,
+    nvte_built_with_cublasmp,
     initialize_cgemm_communicator,
     is_collective_gemm_with_cublasmp,
     get_cgemm_num_max_streams,
@@ -262,6 +263,9 @@ def collective_gemm_bootstrap(
             Can improve performance by offloading memory operations. Default: True.
         aggregate_all_gather (bool, optional): Aggregate multiple small all-gather operations
             into larger ones for better efficiency. Default: False.
+        use_cublasmp (bool, optional): Use cuBLASMp backend for Collective GEMM overlap.
+            Requires Transformer Engine to be compiled with NVTE_WITH_CUBLASMP=1.
+            Default: False.
 
     Raises:
         AssertionError: If num_total_devices is not divisible by num_devices_per_process,
@@ -297,6 +301,23 @@ def collective_gemm_bootstrap(
         This function must be called after JAX distributed initialization
         and before any collective GEMM operations. Each process should call
         this function with its own unique process_id.
+
+        Both the Userbuffers and cuBLASMp backends use internal CUDA streams
+        to overlap NCCL collectives with GEMM compute.  XLA command buffers
+        (CUDA graph capture) cannot record work that spans multiple streams,
+        so command buffers must be disabled when executing collective GEMM
+        with communication overlap.  Set the following **before** calling
+        ``jax.distributed.initialize()``::
+
+            import os
+            os.environ["XLA_FLAGS"] = (
+                os.environ.get("XLA_FLAGS", "")
+                + " --xla_gpu_enable_command_buffer="
+            )
+
+        This is not required for non-overlapped collective GEMM (i.e., when
+        ``collective_op`` is ``CollectiveOp.NONE`` and JAX/XLA handles the
+        collective via its own graph-level optimization).
     """
 
     if not (num_devices_per_process == 1 and jax.local_device_count() == 1):
@@ -308,6 +329,12 @@ def collective_gemm_bootstrap(
         )
     if not 0 <= process_id < num_total_devices:
         raise ValueError(f"Invalid process_id={process_id}")
+    if use_cublasmp and not nvte_built_with_cublasmp():
+        raise RuntimeError(
+            "Collective GEMM with cuBLASMp backend was requested, but Transformer Engine "
+            "was not built with cuBLASMp support. Rebuild with NVTE_WITH_CUBLASMP=1 or "
+            "disable use_cublasmp."
+        )
     initialize_cgemm_communicator(
         num_total_devices,
         num_devices_per_process,
@@ -1964,7 +1991,25 @@ def gemm(
     transpose_batch_sequence: bool, default = False
         Transpose the batch and sequence dimensions of the input tensor.
     collective_op: CollectiveOp, default = CollectiveOp.NONE
-        Collective operation type for collective GEMM.
+        Collective operation type for collective GEMM. When set to
+        ``CollectiveOp.ALL_GATHER`` or ``CollectiveOp.REDUCE_SCATTER``, the GEMM
+        is executed with communication overlap via the Userbuffers or cuBLASMp
+        backend (see :func:`collective_gemm_bootstrap`).
+
+        .. note::
+            Collective GEMM with communication overlap uses internal CUDA streams
+            for NCCL collectives that run concurrently with the GEMM compute.
+            This is incompatible with XLA command buffers (CUDA graph capture).
+            Disable command buffers before JAX initialization::
+
+                os.environ["XLA_FLAGS"] = (
+                    os.environ.get("XLA_FLAGS", "")
+                    + " --xla_gpu_enable_command_buffer="
+                )
+
+            This is **not** required when ``collective_op`` is
+            ``CollectiveOp.NONE`` (the default), even if
+            :func:`collective_gemm_bootstrap` has been called.
 
     Returns
     -------

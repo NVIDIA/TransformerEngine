@@ -23,6 +23,30 @@ else
   echo "NVLINK support detected"
 fi
 
+echo "*** Checking cuBLASMp support in TE build ***"
+CUBLASMP_SUPPORT=$(python3 - <<'PY'
+try:
+    import transformer_engine.jax
+    from transformer_engine_jax import nvte_built_with_cublasmp
+except Exception as exc:
+    print(f"error:{exc}")
+    raise SystemExit(0)
+
+print("1" if nvte_built_with_cublasmp() else "0")
+PY
+)
+
+if [[ "$CUBLASMP_SUPPORT" == "1" ]]; then
+  echo "cuBLASMp backend support detected"
+  BACKENDS=("cublasmp" "userbuffers")
+elif [[ "$CUBLASMP_SUPPORT" == "0" ]]; then
+  echo "cuBLASMp backend support not detected; skipping cuBLASMp backend tests"
+  BACKENDS=("userbuffers")
+else
+  echo "Failed to query cuBLASMp support from transformer_engine_jax: $CUBLASMP_SUPPORT"
+  exit 1
+fi
+
 # Define individual test cases to run (file::class::method)
 # DelayedScalingFP8 and CurrentScalingFP8 use the same GEMM so we don't need to test both cases all
 # the time.
@@ -93,7 +117,6 @@ for TEST_CASE in "${TEST_CASES[@]}"; do
   # Clear PIDs array for this test case
   PIDS=()
 
-  BACKENDS=("cublasmp" "userbuffers")
   for BACKEND in "${BACKENDS[@]}"; do
     echo "Setting backend to $BACKEND for test $TEST_NAME"
 
