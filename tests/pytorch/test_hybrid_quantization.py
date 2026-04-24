@@ -104,6 +104,52 @@ class TestHybridQuantizerConstruction:
         hq = _make_hybrid_quantizer_fp8_row_fp4_col()
         assert hq._get_compatible_recipe() is recipe.CustomRecipe
 
+    def test_supports_only_rowwise_all_gather_nvfp4_columnwise(self):
+        """NVFP4 columnwise sub-quantizer forces rowwise-only AG.
+
+        ``NVFP4Tensor.dequantize()`` raises ``NotImplementedError`` for
+        columnwise-only data, so the BF16 fallback in
+        ``gather_along_first_dim`` cannot operate on a columnwise-only
+        NVFP4 hybrid sub-storage. ``HybridQuantizer.supports_only_rowwise_all_gather``
+        must return True in this case so ``_linear_forward_impl`` /
+        ``_linear_backward`` preserve rowwise data (which NVFP4 can
+        dequantize) instead.
+        """
+        hq = HybridQuantizer(
+            rowwise_quantizer=_make_fp8_quantizer(),
+            columnwise_quantizer=_make_nvfp4_quantizer(),
+        )
+        assert hq.supports_only_rowwise_all_gather() is True
+
+    def test_supports_only_rowwise_all_gather_mxfp8_both(self):
+        """MXFP8 in both directions → columnwise dequant works → default
+        False so the save-columnwise (for wgrad) path stays active."""
+        if not mxfp8_available:
+            pytest.skip(f"MXFP8: {reason_for_no_mxfp8}")
+        hq = HybridQuantizer(
+            rowwise_quantizer=MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
+            columnwise_quantizer=MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
+        )
+        assert hq.supports_only_rowwise_all_gather() is False
+
+    def test_supports_only_rowwise_all_gather_fp8_current_propagates(self):
+        """Float8CurrentScalingQuantizer returns True for its own flag;
+        hybrid must propagate (not swallow) that semantics."""
+        hq = HybridQuantizer(
+            rowwise_quantizer=_make_fp8_quantizer(),
+            columnwise_quantizer=_make_fp8_quantizer(),
+        )
+        assert hq.supports_only_rowwise_all_gather() is True
+
+    def test_supports_only_rowwise_all_gather_nvfp4_both(self):
+        """NVFP4 in both directions → columnwise sub-quantizer is NVFP4
+        → forces rowwise-only AG regardless of rowwise flag."""
+        hq = HybridQuantizer(
+            rowwise_quantizer=_make_nvfp4_quantizer(),
+            columnwise_quantizer=_make_nvfp4_quantizer(),
+        )
+        assert hq.supports_only_rowwise_all_gather() is True
+
 
 @requires_fp8_and_nvfp4
 class TestHybridQuantize:
