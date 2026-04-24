@@ -396,8 +396,6 @@ Tensor::Tensor(const std::string& name,
         cudaMemset(scale, 0, sizeof(float));
         scale_cpu_data_ = std::make_shared<float>(0);
         tensor_.set_scale(scale, DType::kFloat32, std::vector<size_t>{1});
-
-        // Allocate amax alongside other GPU buffers
         float *amax_gpu = nullptr;
         cudaMalloc((void**)&amax_gpu, sizeof(float));  // NOLINT(*)
         cudaMemset(amax_gpu, 0, sizeof(float));

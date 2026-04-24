@@ -297,6 +297,7 @@ class Tensor {
   void set_amax(float amax_val) {
     NVTE_CHECK(amax_cpu_data_);
     *amax_cpu_data_ = amax_val;
+    from_cpu();
   }
 
   void set_with_gemm_swizzled_scales(bool with_gemm_swizzled_scales){
