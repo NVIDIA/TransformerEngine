@@ -687,7 +687,6 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
                 "norm_const_tensor": None,
                 "prob_tensor": torch.ones((out_shape[0], 1, 1), dtype=torch.float32, device=device),
                 "acc_dtype": torch.float32,
-                "c_dtype": dtype,
                 "d_dtype": dtype,
                 "cd_major": "n",
                 "sf_vec_size": MXFP8_BLOCK_SCALING_SIZE,

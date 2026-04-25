@@ -436,7 +436,6 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             "norm_const_tensor": None,
             "prob_tensor": fc2_scales_tensor,
             "acc_dtype": torch.float32,
-            "c_dtype": dtype,
             "d_dtype": dtype,
             "cd_major": "n",
             "sf_vec_size": MXFP8_BLOCK_SCALING_SIZE,

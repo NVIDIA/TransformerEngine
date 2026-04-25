@@ -4658,7 +4658,6 @@ def test_grouped_gemm_quant_cute_matches_mxfp8_quantized() -> None:
         norm_const_tensor=None,
         prob_tensor=inputs["prob_tensor"],
         acc_dtype=torch.float32,
-        c_dtype=torch.bfloat16,
         d_dtype=torch.bfloat16,
         cd_major="n",
         sf_vec_size=32,
