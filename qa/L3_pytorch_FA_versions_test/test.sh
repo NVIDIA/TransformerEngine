@@ -52,6 +52,9 @@ do
     cd ../../
   fi
 
+  # Ensure local test utils is found before nvidia-cutlass-dsl's utils package
+  export PYTHONPATH=$TE_PATH/tests/pytorch:${PYTHONPATH:-}
+
   # Run tests
   NUM_GPUS=$(nvidia-smi -L | wc -l)
   echo "Detected $NUM_GPUS GPU(s)"
