@@ -398,7 +398,7 @@ std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor(GroupedTensorW
   }
 
   swizzle_output.set_with_gemm_swizzled_scales(true);
-  
+
   NVTE_SCOPED_GIL_RELEASE({
     nvte_swizzle_grouped_scaling_factors(swizzle_input.data(), swizzle_output.data(),
                                          at::cuda::getCurrentCUDAStream());

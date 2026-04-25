@@ -1556,133 +1556,124 @@ namespace transformer_engine {
 
 template <int SF_TILE_DIM_M, int SF_TILE_DIM_K>
 __global__ void __launch_bounds__(TB_DIM* TB_DIM)
-    grouped_swizzle_scaling_variable_shape_kernel(
-        const void* input, 
-        void* output, 
-        const int64_t* m_array,
-        const int64_t* k_array,
-        int num_tensors,
-        bool rowwise,
-        size_t scale_elem_size,
-        size_t common_m,
-        size_t common_k) {
-
+    grouped_swizzle_scaling_variable_shape_kernel(const void* input, void* output,
+                                                  const int64_t* m_array, const int64_t* k_array,
+                                                  int num_tensors, bool rowwise,
+                                                  size_t scale_elem_size, size_t common_m,
+                                                  size_t common_k) {
   extern __shared__ int s_metadata[];
   int* s_total_blocks = &s_metadata[0];
-  
+
   // Warp reduction to compute total workload
   if (threadIdx.x < 32 && threadIdx.y == 0) {
-      int local_blocks = 0;
-      for (int i = threadIdx.x; i < num_tensors; i += 32) {
-          size_t m = rowwise ? (m_array ? m_array[i] : common_m) 
-                             : (k_array ? k_array[i] : common_k);
-          size_t k = rowwise ? (k_array ? k_array[i] : common_k) 
-                             : (m_array ? m_array[i] : common_m);
-          
-          size_t padded_m = round_up_to_multiple(m, 128);
-          size_t padded_k = round_up_to_multiple(DIVUP(k, static_cast<size_t>(MXFP8_BLOCK_SIZE)), 4);
-          
-          int num_tiles_m = padded_m / SF_TILE_DIM_M;
-          int num_tiles_k = padded_k / SF_TILE_DIM_K;
-          
-          int vec_load_size = (rowwise ? ((num_tiles_k - 1) % 4 + 1) : ((num_tiles_m - 1) % 4 + 1));
-          if (vec_load_size == 3) vec_load_size = 1;
-          int n_tiles_in_tb = TB_DIM * vec_load_size;
+    int local_blocks = 0;
+    for (int i = threadIdx.x; i < num_tensors; i += 32) {
+      size_t m = rowwise ? (m_array ? m_array[i] : common_m) : (k_array ? k_array[i] : common_k);
+      size_t k = rowwise ? (k_array ? k_array[i] : common_k) : (m_array ? m_array[i] : common_m);
 
-          int grid_dim_x = rowwise ? DIVUP(num_tiles_k, n_tiles_in_tb) : DIVUP(num_tiles_k, TB_DIM);
-          int grid_dim_y = rowwise ? num_tiles_m : DIVUP(num_tiles_m, vec_load_size);
-          local_blocks += grid_dim_x * grid_dim_y;
-      }
-      
-      for (int offset = 16; offset > 0; offset /= 2) {
-          local_blocks += __shfl_down_sync(0xffffffff, local_blocks, offset);
-      }
-      if (threadIdx.x == 0) *s_total_blocks = local_blocks;
+      size_t padded_m = round_up_to_multiple(m, 128);
+      size_t padded_k = round_up_to_multiple(DIVUP(k, static_cast<size_t>(MXFP8_BLOCK_SIZE)), 4);
+
+      int num_tiles_m = padded_m / SF_TILE_DIM_M;
+      int num_tiles_k = padded_k / SF_TILE_DIM_K;
+
+      int vec_load_size = (rowwise ? ((num_tiles_k - 1) % 4 + 1) : ((num_tiles_m - 1) % 4 + 1));
+      if (vec_load_size == 3) vec_load_size = 1;
+      int n_tiles_in_tb = TB_DIM * vec_load_size;
+
+      int grid_dim_x = rowwise ? DIVUP(num_tiles_k, n_tiles_in_tb) : DIVUP(num_tiles_k, TB_DIM);
+      int grid_dim_y = rowwise ? num_tiles_m : DIVUP(num_tiles_m, vec_load_size);
+      local_blocks += grid_dim_x * grid_dim_y;
+    }
+
+    for (int offset = 16; offset > 0; offset /= 2) {
+      local_blocks += __shfl_down_sync(0xffffffff, local_blocks, offset);
+    }
+    if (threadIdx.x == 0) *s_total_blocks = local_blocks;
   }
   __syncthreads();
 
   const int total_blocks = *s_total_blocks;
 
   // Persistent-grid loop
-  for (int linear_block_id = blockIdx.x; linear_block_id < total_blocks; linear_block_id += gridDim.x) {
-      // Discover tensor_id and local_block_id via linear scan
-      int tensor_id = 0;
-      int current_block_base = 0;
-      size_t current_scale_base = 0;
-      int grid_dim_x = 0;
-      int grid_dim_y = 0;
-      size_t M = 0, K = 0;
-      int vec_load_size = 0;
+  for (int linear_block_id = blockIdx.x; linear_block_id < total_blocks;
+       linear_block_id += gridDim.x) {
+    // Discover tensor_id and local_block_id via linear scan
+    int tensor_id = 0;
+    int current_block_base = 0;
+    size_t current_scale_base = 0;
+    int grid_dim_x = 0;
+    int grid_dim_y = 0;
+    size_t M = 0, K = 0;
+    int vec_load_size = 0;
 
-      for (int i = 0; i < num_tensors; ++i) {
-          M = rowwise ? (m_array ? m_array[i] : common_m) 
-                      : (k_array ? k_array[i] : common_k);
-          K = rowwise ? (k_array ? k_array[i] : common_k) 
-                      : (m_array ? m_array[i] : common_m);
-          
-          size_t padded_m = round_up_to_multiple(M, 128);
-          size_t padded_k = round_up_to_multiple(DIVUP(K, static_cast<size_t>(MXFP8_BLOCK_SIZE)), 4);
-          
-          int num_tiles_m = padded_m / SF_TILE_DIM_M;
-          int num_tiles_k = padded_k / SF_TILE_DIM_K;
-          
-          vec_load_size = (rowwise ? ((num_tiles_k - 1) % 4 + 1) : ((num_tiles_m - 1) % 4 + 1));
-          if (vec_load_size == 3) vec_load_size = 1;
-          int n_tiles_in_tb = TB_DIM * vec_load_size;
-
-          grid_dim_x = rowwise ? DIVUP(num_tiles_k, n_tiles_in_tb) : DIVUP(num_tiles_k, TB_DIM);
-          grid_dim_y = rowwise ? num_tiles_m : DIVUP(num_tiles_m, vec_load_size);
-          int blocks_i = grid_dim_x * grid_dim_y;
-
-          if (linear_block_id < current_block_base + blocks_i) {
-              tensor_id = i;
-              break;
-          }
-          current_block_base += blocks_i;
-          current_scale_base += padded_m * padded_k * scale_elem_size;
-      }
-
-      int local_block_id = linear_block_id - current_block_base;
-      int block_x = local_block_id % grid_dim_x;
-      int block_y = local_block_id / grid_dim_x;
-
-      const uint8_t* input_base = reinterpret_cast<const uint8_t*>(input) + current_scale_base;
-      uint8_t* output_base = reinterpret_cast<uint8_t*>(output) + current_scale_base;
+    for (int i = 0; i < num_tensors; ++i) {
+      M = rowwise ? (m_array ? m_array[i] : common_m) : (k_array ? k_array[i] : common_k);
+      K = rowwise ? (k_array ? k_array[i] : common_k) : (m_array ? m_array[i] : common_m);
 
       size_t padded_m = round_up_to_multiple(M, 128);
       size_t padded_k = round_up_to_multiple(DIVUP(K, static_cast<size_t>(MXFP8_BLOCK_SIZE)), 4);
-      int original_M = static_cast<int>(M);
-      int original_K = static_cast<int>(DIVUP(K, static_cast<size_t>(MXFP8_BLOCK_SIZE)));
 
-      if (rowwise) {
-          if (vec_load_size == 4) {
-              swizzle_row_scaling_kernel_impl<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>(
-                  input_base, output_base, padded_m, padded_k, original_M, original_K, 
-                  block_x, block_y, grid_dim_x, grid_dim_y);
-          } else if (vec_load_size == 2) {
-              swizzle_row_scaling_kernel_impl<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>(
-                  input_base, output_base, padded_m, padded_k, original_M, original_K, 
-                  block_x, block_y, grid_dim_x, grid_dim_y);
-          } else {
-              swizzle_row_scaling_kernel_impl<int, SF_TILE_DIM_M, SF_TILE_DIM_K>(
-                  input_base, output_base, padded_m, padded_k, original_M, original_K, 
-                  block_x, block_y, grid_dim_x, grid_dim_y);
-          }
-      } else {
-          if (vec_load_size == 4) {
-              swizzle_col_scaling_kernel_impl<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>(
-                  input_base, output_base, padded_m, padded_k, original_M, original_K, 
-                  block_x, block_y, grid_dim_x, grid_dim_y);
-          } else if (vec_load_size == 2) {
-              swizzle_col_scaling_kernel_impl<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>(
-                  input_base, output_base, padded_m, padded_k, original_M, original_K, 
-                  block_x, block_y, grid_dim_x, grid_dim_y);
-          } else {
-              swizzle_col_scaling_kernel_impl<int, SF_TILE_DIM_M, SF_TILE_DIM_K>(
-                  input_base, output_base, padded_m, padded_k, original_M, original_K, 
-                  block_x, block_y, grid_dim_x, grid_dim_y);
-          }
+      int num_tiles_m = padded_m / SF_TILE_DIM_M;
+      int num_tiles_k = padded_k / SF_TILE_DIM_K;
+
+      vec_load_size = (rowwise ? ((num_tiles_k - 1) % 4 + 1) : ((num_tiles_m - 1) % 4 + 1));
+      if (vec_load_size == 3) vec_load_size = 1;
+      int n_tiles_in_tb = TB_DIM * vec_load_size;
+
+      grid_dim_x = rowwise ? DIVUP(num_tiles_k, n_tiles_in_tb) : DIVUP(num_tiles_k, TB_DIM);
+      grid_dim_y = rowwise ? num_tiles_m : DIVUP(num_tiles_m, vec_load_size);
+      int blocks_i = grid_dim_x * grid_dim_y;
+
+      if (linear_block_id < current_block_base + blocks_i) {
+        tensor_id = i;
+        break;
       }
+      current_block_base += blocks_i;
+      current_scale_base += padded_m * padded_k * scale_elem_size;
+    }
+
+    int local_block_id = linear_block_id - current_block_base;
+    int block_x = local_block_id % grid_dim_x;
+    int block_y = local_block_id / grid_dim_x;
+
+    const uint8_t* input_base = reinterpret_cast<const uint8_t*>(input) + current_scale_base;
+    uint8_t* output_base = reinterpret_cast<uint8_t*>(output) + current_scale_base;
+
+    size_t padded_m = round_up_to_multiple(M, 128);
+    size_t padded_k = round_up_to_multiple(DIVUP(K, static_cast<size_t>(MXFP8_BLOCK_SIZE)), 4);
+    int original_M = static_cast<int>(M);
+    int original_K = static_cast<int>(DIVUP(K, static_cast<size_t>(MXFP8_BLOCK_SIZE)));
+
+    if (rowwise) {
+      if (vec_load_size == 4) {
+        swizzle_row_scaling_kernel_impl<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>(
+            input_base, output_base, padded_m, padded_k, original_M, original_K, block_x, block_y,
+            grid_dim_x, grid_dim_y);
+      } else if (vec_load_size == 2) {
+        swizzle_row_scaling_kernel_impl<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>(
+            input_base, output_base, padded_m, padded_k, original_M, original_K, block_x, block_y,
+            grid_dim_x, grid_dim_y);
+      } else {
+        swizzle_row_scaling_kernel_impl<int, SF_TILE_DIM_M, SF_TILE_DIM_K>(
+            input_base, output_base, padded_m, padded_k, original_M, original_K, block_x, block_y,
+            grid_dim_x, grid_dim_y);
+      }
+    } else {
+      if (vec_load_size == 4) {
+        swizzle_col_scaling_kernel_impl<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>(
+            input_base, output_base, padded_m, padded_k, original_M, original_K, block_x, block_y,
+            grid_dim_x, grid_dim_y);
+      } else if (vec_load_size == 2) {
+        swizzle_col_scaling_kernel_impl<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>(
+            input_base, output_base, padded_m, padded_k, original_M, original_K, block_x, block_y,
+            grid_dim_x, grid_dim_y);
+      } else {
+        swizzle_col_scaling_kernel_impl<int, SF_TILE_DIM_M, SF_TILE_DIM_K>(
+            input_base, output_base, padded_m, padded_k, original_M, original_K, block_x, block_y,
+            grid_dim_x, grid_dim_y);
+      }
+    }
   }
 }
 
@@ -1868,12 +1859,12 @@ void swizzle_grouped_scaling_factors(const GroupedTensor* input, GroupedTensor* 
       constexpr int SF_TILE_DIM_M = 128;
       constexpr int SF_TILE_DIM_K = 4;
       const int max_slm_size = TB_DIM * 4 * SF_TILE_DIM_M * SF_TILE_DIM_K * sizeof(int8_t);
-      const int metadata_shmem = sizeof(int); // s_total_blocks
+      const int metadata_shmem = sizeof(int);  // s_total_blocks
 
       NVTE_CHECK_CUDA(cudaFuncSetAttribute(
           grouped_swizzle_scaling_variable_shape_kernel<SF_TILE_DIM_M, SF_TILE_DIM_K>,
           cudaFuncAttributeMaxDynamicSharedMemorySize, max_slm_size + metadata_shmem));
-      
+
       int device_id;
       cudaGetDevice(&device_id);
       int num_SMs;
@@ -1882,9 +1873,7 @@ void swizzle_grouped_scaling_factors(const GroupedTensor* input, GroupedTensor* 
       cudaOccupancyMaxActiveBlocksPerMultiprocessor(
           &max_active_blocks_per_sm,
           grouped_swizzle_scaling_variable_shape_kernel<SF_TILE_DIM_M, SF_TILE_DIM_K>,
-          TB_DIM * TB_DIM, 
-          max_slm_size + metadata_shmem
-      );
+          TB_DIM * TB_DIM, max_slm_size + metadata_shmem);
       int persistent_blocks = num_SMs * max_active_blocks_per_sm;
       dim3 num_blocks(persistent_blocks);
 
@@ -1893,8 +1882,8 @@ void swizzle_grouped_scaling_factors(const GroupedTensor* input, GroupedTensor* 
 
       grouped_swizzle_scaling_variable_shape_kernel<SF_TILE_DIM_M, SF_TILE_DIM_K>
           <<<num_blocks, block_size, max_slm_size + metadata_shmem, stream>>>(
-              input_ptr, output_ptr, m_array, k_array, num_tensors, rowwise,
-              scale_elem_size, common_m, common_k);
+              input_ptr, output_ptr, m_array, k_array, num_tensors, rowwise, scale_elem_size,
+              common_m, common_k);
 
       NVTE_CHECK_CUDA(cudaGetLastError());
     };
