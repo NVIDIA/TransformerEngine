@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 from collections import defaultdict
+from contextlib import nullcontext
 from typing import Dict, List, Optional
 from enum import Enum
 from dataclasses import dataclass, field
@@ -340,7 +341,7 @@ def _quantize_with_coalesced_amax(weights, skip_weight_cast, cast_noop_flag):
 class ETPConfig:
     """Global configuration for Extended Tensor Parallelism."""
     pad_for_alignment: int = 16
-    check_param_states: bool = False
+    check_param_states: bool = True
     weight_prefetch: bool = True
     # When True and the weight list in _all_gather_weight contains >1 NVFP4
     # shards that share an amax reduction group, coalesce their per-expert
@@ -803,25 +804,43 @@ class ETPShardedParam(torch.nn.Parameter):
             assert len(set(id(b) for b in out_buffers)) == len(out_buffers), \
                 "Duplicate output buffers in batched all-gather — experts need distinct cache keys"
 
-        if len(gather_weights) > 1:
-            nvtx_range_push(f"{nvtx_label}.batched_etp_ag")
-            results, handle = grouped_gather_along_first_dim(
-                gather_weights, etp_group,
-                async_op=async_op,
-                quantizers=quantizers,
-                output_tensors=out_buffers,
-            )
-            nvtx_range_pop(f"{nvtx_label}.batched_etp_ag")
+        # ASYNC AG: wrap issue on ag_stream so both issue (NCCL preEvent) and
+        # wait land on the same stream — ag_stream's tail then reflects the
+        # collective's full lifecycle, which is what external
+        # wait_stream(ag_stream) drains depend on. Explicit outer→ag_stream
+        # event preserves the quantize writer edge (a bare stream context
+        # would drop it).
+        # SYNC AG: stay on caller — output ready on return.
+        if async_op:
+            outer_stream = torch.cuda.current_stream()
+            ag_stream = get_ag_stream(self.chain_id, etp_group)
+            outer_sync_event = torch.cuda.Event()
+            outer_sync_event.record(outer_stream)
+            ag_stream.wait_event(outer_sync_event)
+            ag_ctx = torch.cuda.stream(ag_stream)
         else:
-            nvtx_range_push(f"{nvtx_label}.etp_ag")
-            weight_total, handle = gather_along_first_dim(
-                gather_weights[0], etp_group,
-                quantizer=quantizers[0],
-                async_op=async_op,
-                output_tensor=out_buffers[0] if out_buffers is not None else None,
-            )
-            nvtx_range_pop(f"{nvtx_label}.etp_ag")
-            results = [weight_total]
+            ag_ctx = nullcontext()
+
+        with ag_ctx:
+            if len(gather_weights) > 1:
+                nvtx_range_push(f"{nvtx_label}.batched_etp_ag")
+                results, handle = grouped_gather_along_first_dim(
+                    gather_weights, etp_group,
+                    async_op=async_op,
+                    quantizers=quantizers,
+                    output_tensors=out_buffers,
+                )
+                nvtx_range_pop(f"{nvtx_label}.batched_etp_ag")
+            else:
+                nvtx_range_push(f"{nvtx_label}.etp_ag")
+                weight_total, handle = gather_along_first_dim(
+                    gather_weights[0], etp_group,
+                    quantizer=quantizers[0],
+                    async_op=async_op,
+                    output_tensor=out_buffers[0] if out_buffers is not None else None,
+                )
+                nvtx_range_pop(f"{nvtx_label}.etp_ag")
+                results = [weight_total]
 
         result = results if self.is_routed_expert else results[0]
 
@@ -834,8 +853,10 @@ class ETPShardedParam(torch.nn.Parameter):
         return result, handle
 
     def _wait_param_gather(self):
-        # Wait on ag_stream so ag_event.record() marks ag_stream's tail —
-        # MLM's external drains (wait_stream(ag_stream)) need that to block.
+        # Enter ag_stream context so handle.wait() + ag_event.record() both
+        # land on ag_stream. That makes ag_event mark ag_stream's tail, which
+        # is what external drains (wait_stream(ag_stream) in finalize_model_grads
+        # and cuda_graphs._wait_side_streams) actually block on.
         ag_stream = self._cached_ag_stream
         if ag_stream is None:
             ag_stream = get_ag_stream(self.chain_id, self.group)
@@ -913,10 +934,9 @@ class ETPShardedParam(torch.nn.Parameter):
             and self.prev_w._need_weight_prefetch
             and self.prev_w._need_weight_prefetch_bwd
         ):
-            # Issue on caller's stream — preEvent then captures the AG input
-            # writer via program order. Do NOT wrap in torch.cuda.stream(ag_stream):
-            # that drops the writer edge (ag_stream's tail has no dependency
-            # on capture_stream's writer) and NCCL reads partial data.
+            # Pre-AG work (quantize, ticket lookup) runs on caller's stream;
+            # the NCCL collective itself is wrapped on ag_stream inside
+            # _all_gather_weight (see the async/sync gate there for rationale).
             _, handle = self.prev_w._all_gather_weight(
                 async_op=True, skip_weight_cast=True, cast_noop_flag=None,
                 fwd=False, nvtx_label=nvtx_label,
@@ -963,7 +983,8 @@ class ETPShardedParam(torch.nn.Parameter):
             and self.next_w is not None
             and self.next_w._need_weight_prefetch
         ):
-            # Issue on caller's stream. See all_gather_and_prefetch_bwd.
+            # Pre-AG work on caller; NCCL wrap lives at the collective site
+            # inside _all_gather_weight. See all_gather_and_prefetch_bwd.
             _, handle = self.next_w._all_gather_weight(
                 async_op=True,
                 skip_weight_cast=skip_weight_cast,
@@ -1059,7 +1080,8 @@ class ETPShardedParam(torch.nn.Parameter):
 
 
     def _wait_reduce_scatter(self):
-        # Wait on rs_stream — mirrors _wait_param_gather for the RS path.
+        # Enter rs_stream context so handle.wait() + rs_event.record() land
+        # on rs_stream — mirrors _wait_param_gather for the RS path.
         rs_stream = self._cached_rs_stream
         if rs_stream is None:
             rs_stream = get_rs_stream(self.chain_id, self.group)
@@ -1110,27 +1132,43 @@ class ETPShardedParam(torch.nn.Parameter):
         else:
             out_buffers = [None] * len(wgrads)
 
-        if len(wgrads) == 1:
-            nvtx_range_push(f"{nvtx_label}.etp_rs")
-            out, handle = reduce_scatter_along_first_dim(
-                wgrads[0], self.group, async_op=async_op, output=out_buffers[0]
-            )
-            nvtx_range_pop(f"{nvtx_label}.etp_rs")
-            return [out], handle
+        # ASYNC RS: wrap issue on rs_stream — issue and wait on the same stream
+        # means rs_stream's tail reflects the full NCCL lifecycle, what
+        # external wait_stream(rs_stream) drains depend on. Explicit outer→
+        # rs_stream event preserves the wgrad-GEMM writer edge. Mirrors AG.
+        # SYNC RS: stay on caller — same constraint as sync AG.
+        if async_op:
+            outer_stream = torch.cuda.current_stream()
+            rs_stream = get_rs_stream(self.chain_id, self.group)
+            outer_sync_event = torch.cuda.Event()
+            outer_sync_event.record(outer_stream)
+            rs_stream.wait_event(outer_sync_event)
+            rs_ctx = torch.cuda.stream(rs_stream)
         else:
-            outputs = []
-            nvtx_range_push(f"{nvtx_label}.batched_etp_rs")
-            with torch.distributed._coalescing_manager(
-                group=self.group,
-                device=wgrads[0].device,
-                async_ops=async_op,
-            ) as cm:
-                for out_buffer, tensor in zip(out_buffers, wgrads):
-                    out, _ = reduce_scatter_along_first_dim(tensor, self.group, output=out_buffer)
-                    outputs.append(out)
-            nvtx_range_pop(f"{nvtx_label}.batched_etp_rs")
+            rs_ctx = nullcontext()
 
-            return outputs, cm if async_op else None
+        with rs_ctx:
+            if len(wgrads) == 1:
+                nvtx_range_push(f"{nvtx_label}.etp_rs")
+                out, handle = reduce_scatter_along_first_dim(
+                    wgrads[0], self.group, async_op=async_op, output=out_buffers[0]
+                )
+                nvtx_range_pop(f"{nvtx_label}.etp_rs")
+                return [out], handle
+            else:
+                outputs = []
+                nvtx_range_push(f"{nvtx_label}.batched_etp_rs")
+                with torch.distributed._coalescing_manager(
+                    group=self.group,
+                    device=wgrads[0].device,
+                    async_ops=async_op,
+                ) as cm:
+                    for out_buffer, tensor in zip(out_buffers, wgrads):
+                        out, _ = reduce_scatter_along_first_dim(tensor, self.group, output=out_buffer)
+                        outputs.append(out)
+                nvtx_range_pop(f"{nvtx_label}.batched_etp_rs")
+
+                return outputs, cm if async_op else None
 
     def wgrad_reduce_scatter(self, wgrad, nvtx_label=None):
         """Reduce-scatter wgrad(s). Sync for last weight, async+deferred for others.
@@ -1151,19 +1189,10 @@ class ETPShardedParam(torch.nn.Parameter):
         poolable = self.chain_id == ETPChain.UNGRAPHED.value
 
         if ETP_CONFIG.weight_prefetch and self.prev_w is not None:
-            # Async reduce-scatter (not last weight — deferred finish). Issue on
-            # rs_stream with an explicit outer→rs_stream event so the bwd GEMM's
-            # wgrad writer edge is preserved. (NCCL runs on ncclStream regardless;
-            # the wrap only gives wait_stream(rs_stream) a useful tail before
-            # _wait_reduce_scatter runs. Do NOT copy this pattern without the
-            # event — see all_gather_and_prefetch_bwd.)
-            outer_stream = torch.cuda.current_stream()
-            rs_stream = get_rs_stream(self.chain_id, self.group)
-            outer_sync_event = torch.cuda.Event()
-            outer_sync_event.record(outer_stream)
-            rs_stream.wait_event(outer_sync_event)
-            with torch.cuda.stream(rs_stream):
-                _, rs_handle = self._reduce_scatter(wgrads, async_op=True, nvtx_label=nvtx_label)
+            # Async reduce-scatter (not last weight — deferred finish). Pre-RS
+            # work on caller; NCCL wrap lives at the collective site inside
+            # _reduce_scatter (mirrors the AG prefetch sites).
+            _, rs_handle = self._reduce_scatter(wgrads, async_op=True, nvtx_label=nvtx_label)
             self._wgrad_rs_handle = ETPShardHandle(rs_handle, weights, reduce_scatter=True)
             # Stash wgrad input buffers — cannot recycle yet because the async RS
             # kernel is still reading them on rs_stream.
