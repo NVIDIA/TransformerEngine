@@ -4571,6 +4571,14 @@ class TestTrainingLoops:
             tols = quantization_tols(quantization)
 
         for _ in range(steps):
+            # Update parameters with random values to simulate
+            # optimizer step or FSDP param all-gather
+            with torch.no_grad():
+                module.weight.copy_(torch.empty_like(module.weight).uniform_())
+                module.bias.copy_(torch.empty_like(module.bias).uniform_())
+                for param in module.parameters():
+                    param.grad = None
+
             # Random data
             x_ref, x_test = make_reference_and_test_tensors(
                 in_shape,
@@ -4601,13 +4609,6 @@ class TestTrainingLoops:
             assert_close_grads(x_test, x_ref, **tols)
             assert_close_grads(module.weight, w_ref, **tols)
             assert_close_grads(module.bias, b_ref, **tols)
-
-            # Update parameters with random values
-            with torch.no_grad():
-                module.weight.copy_(torch.empty_like(module.weight).uniform_())
-                module.bias.copy_(torch.empty_like(module.bias).uniform_())
-                for param in module.parameters():
-                    param.grad = None
 
     @torch.inference_mode
     def _linear_infer_stage(
