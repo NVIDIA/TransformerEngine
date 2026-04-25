@@ -144,17 +144,6 @@ def _compute_grad_params(
     """
 
     # Allocate grad buffers, determine accumulate flag.
-    # ``request_main_grad_fusion`` records the user-facing opt-in to
-    # Megatron-LM main-grad fusion. ``accumulate_into_main_grad`` is the
-    # local GEMM ``accumulate`` flag, which gets downgraded to ``False`` when
-    # ``weight.overwrite_main_grad`` is set (e.g. Megatron-FSDP). The two must
-    # stay separated: the GEMM flag controls overwrite vs. accumulate, but the
-    # post-GEMM bookkeeping (dummy ``.grad`` + ``grad_added_to_main_grad=True``)
-    # must always fire when fusion was requested -- otherwise FSDP's
-    # post-backward hook would also touch ``main_grad`` and double-count
-    # (or, with ``delay_wgrad``, copy uninitialized data before the deferred
-    # GEMM ever runs).
-    request_main_grad_fusion = ctx.weight_requires_grad and fc_op._accumulate_into_main_grad
     accumulate_into_main_grad = False
     grouped_wgrad = None
     wgrad_output = None
@@ -255,7 +244,8 @@ def _compute_grad_params(
             packed_wgrad = None
             if not delay_wgrad:
                 packed_wgrad = grouped_wgrad.rowwise_data.view(num_groups, *weight_shape)
-            if request_main_grad_fusion and hasattr(weight_param, "grad_added_to_main_grad"):
+            if ctx.weight_requires_grad and fc_op._accumulate_into_main_grad\
+                and hasattr(weight_param, "grad_added_to_main_grad"):
                 weight_param.grad_added_to_main_grad = True
                 packed_wgrad = get_dummy_wgrad(
                     list(weight_param.size()),
@@ -264,9 +254,9 @@ def _compute_grad_params(
                 )
             w_list = [packed_wgrad]
         else:
-            if delay_wgrad or request_main_grad_fusion:
+            if delay_wgrad or (ctx.weight_requires_grad and fc_op._accumulate_into_main_grad):
                 w_list = [None] * num_groups
-            if request_main_grad_fusion:
+            if ctx.weight_requires_grad and fc_op._accumulate_into_main_grad:
                 for idx in range(num_groups):
                     wp = getattr(fc_op, f"weight{idx}")
                     if hasattr(wp, "grad_added_to_main_grad"):

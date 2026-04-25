@@ -1292,19 +1292,7 @@ class GroupedLinear(BasicOperation):
                 dbias_packed = compute_grouped_dbias(dy_2d, offsets, num_groups)
             grad_biases = [dbias_packed[idx].to(dtype=ctx.dtype) for idx in range(num_groups)]
 
-        # Initialize grad weight buffers and the autograd-return
-        # ``final_weight_grads`` upfront (mirrors the grouped-tensor
-        # flow). For ``single_grouped_weight=True`` we pre-allocate a
-        # stacked ``[num_groups, out, in]`` buffer and feed per-group
-        # views of it to the GEMM, so the buffer itself is the autograd
-        # return -- no post-GEMM ``torch.stack`` copy needed.
-        # ``request_main_grad_fusion`` records the user-facing opt-in to
-        # Megatron-LM main-grad fusion; ``accumulate_into_main_grad`` is the
-        # local GEMM ``accumulate`` flag (downgraded to ``False`` when
-        # ``weight.overwrite_main_grad`` is set, e.g. Megatron-FSDP). The
-        # post-GEMM bookkeeping (dummy ``.grad`` + ``grad_added_to_main_grad``)
-        # always fires when fusion was requested -- see comment at the
-        # post-GEMM dummy block below.
+        # Initialize grad weight buffers.
         accumulate_into_main_grad = self._accumulate_into_main_grad
         grad_weights = [None] * num_groups
         final_weight_grads: list[Optional[torch.Tensor]] = (
