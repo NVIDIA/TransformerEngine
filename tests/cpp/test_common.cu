@@ -1099,7 +1099,7 @@ GroupedBuffers build_grouped_tensor(const std::vector<Tensor*>& tensors,
   const bool same_last = std::all_of(last_dims.begin(), last_dims.end(),
                                      [&](int64_t v) { return v == last_dims[0]; });
 
-  std::vector<int64_t> offsets(num_tensors, 0);
+  std::vector<int64_t> offsets(num_tensors + 1, 0);
   auto random_padding = [&]() -> int64_t {
     // Random padding ensuring 16-byte alignment regardless of element size
     // cuBLAS requires aligned pointers for vectorized loads
@@ -1118,12 +1118,11 @@ GroupedBuffers build_grouped_tensor(const std::vector<Tensor*>& tensors,
   const bool need_offsets = !same_first || !same_last;
   const bool use_random_padding = need_offsets && scaling_mode != NVTE_MXFP8_1D_SCALING;
   if (need_offsets) {
-    offsets[0] = 0;
-    for (size_t i = 1; i < num_tensors; ++i) {
+    for (size_t i = 1; i < num_tensors + 1; ++i) {
       offsets[i] = offsets[i - 1] + numel(i - 1) + (use_random_padding ? random_padding() : 0);
     }
   } else {
-    for (size_t i = 0; i < num_tensors; ++i) {
+    for (size_t i = 0; i < num_tensors + 1; ++i) {
       offsets[i] = static_cast<int64_t>(i) * numel(0);
     }
   }
@@ -1211,10 +1210,11 @@ GroupedBuffers build_grouped_tensor(const std::vector<Tensor*>& tensors,
   }
 
   if (!same_first || !same_last) {
-    grouped.offsets_dev = cuda_alloc<int64_t>(num_tensors * sizeof(int64_t));
+    size_t num_off = num_tensors + 1;
+    grouped.offsets_dev = cuda_alloc<int64_t>(num_off * sizeof(int64_t));
     NVTE_CHECK_CUDA(cudaMemcpy(grouped.offsets_dev.get(), offsets.data(),
-                               num_tensors * sizeof(int64_t), cudaMemcpyHostToDevice));
-    NVTEShape off_shape = nvte_make_shape(&num_tensors, 1);
+                               num_off * sizeof(int64_t), cudaMemcpyHostToDevice));
+    NVTEShape off_shape = nvte_make_shape(&num_off, 1);
     NVTEBasicTensor off_tensor{grouped.offsets_dev.get(), kNVTEInt64, off_shape};
     nvte_set_grouped_tensor_param(h, kNVTEGroupedTensorOffsets, &off_tensor, sizeof(off_tensor));
   }
