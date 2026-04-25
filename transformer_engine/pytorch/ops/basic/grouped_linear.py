@@ -705,10 +705,8 @@ class GroupedLinear(BasicOperation):
         current scaling, fp8 block scaling, NVFP4, ...) falls back to the
         legacy ``tex.split_quantize`` + ``general_grouped_gemm`` flow.
         """
-        return all(
-            isinstance(q, MXFP8Quantizer) for q in input_quantizers
-        )
-        
+        return all(isinstance(q, MXFP8Quantizer) for q in input_quantizers)
+
     def _get_grouped_weight_for_gemm(
         self,
         weight_param: GroupedTensor,
@@ -765,7 +763,8 @@ class GroupedLinear(BasicOperation):
             None,
         )
 
-    def _get_discrete_weights_for_gemm(self,
+    def _get_discrete_weights_for_gemm(
+        self,
         weight_params: Optional[GroupedTensor] | list[torch.Tensor],
         weight_quantizers: list[Optional[Quantizer]],
         columnwise_usage: bool,
@@ -1066,7 +1065,6 @@ class GroupedLinear(BasicOperation):
 
         return out, [()]
 
-
     def _fuser_forward_grouped_tensor(
         self,
         *,
@@ -1083,8 +1081,7 @@ class GroupedLinear(BasicOperation):
         weight_requires_grad: bool,
         device: torch.device,
     ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
-        """Graph-safe GroupedTensor forward path.
-        """
+        """Graph-safe GroupedTensor forward path."""
         num_groups = self.num_groups
         has_bias = self.has_bias
 
@@ -1649,7 +1646,9 @@ class GroupedLinear(BasicOperation):
                     )
                 else:
                     for idx in range(num_groups):
-                        final_weight_grads[idx] = torch.empty(weight_shape, dtype=dtype, device=device)
+                        final_weight_grads[idx] = torch.empty(
+                            weight_shape, dtype=dtype, device=device
+                        )
                 wgrad_output = final_weight_grads
 
         # wgrad GEMM

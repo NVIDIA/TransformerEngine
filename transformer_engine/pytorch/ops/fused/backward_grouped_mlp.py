@@ -154,9 +154,7 @@ def _compute_grad_params(
     # post-backward hook would also touch ``main_grad`` and double-count
     # (or, with ``delay_wgrad``, copy uninitialized data before the deferred
     # GEMM ever runs).
-    request_main_grad_fusion = (
-        ctx.weight_requires_grad and fc_op._accumulate_into_main_grad
-    )
+    request_main_grad_fusion = ctx.weight_requires_grad and fc_op._accumulate_into_main_grad
     accumulate_into_main_grad = False
     grouped_wgrad = None
     wgrad_output = None
@@ -195,9 +193,7 @@ def _compute_grad_params(
                     rowwise_data=main_grad,
                     dtype=main_grad.dtype,
                 )
-                accumulate_into_main_grad = not getattr(
-                    weight_param, "overwrite_main_grad", False
-                )
+                accumulate_into_main_grad = not getattr(weight_param, "overwrite_main_grad", False)
             else:
                 grouped_wgrad = GroupedTensor.make_grouped_tensor_with_shapes(
                     num_tensors=num_groups,
