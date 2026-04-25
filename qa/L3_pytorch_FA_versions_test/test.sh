@@ -2,13 +2,25 @@
 #
 # See LICENSE for license information.
 
-set -e
+function error_exit() {
+    echo "Error: $1"
+    exit 1
+}
+
+function test_fail() {
+    RET=1
+    FAILED_CASES="$FAILED_CASES $1"
+    echo "Error: sub-test failed: $1"
+}
+
+RET=0
+FAILED_CASES=""
 
 : ${TE_PATH:=/opt/transformerengine}
 : ${XML_LOG_DIR:=/logs}
 mkdir -p "$XML_LOG_DIR"
 
-pip3 install pytest==8.2.1
+pip3 install pytest==8.2.1 || error_exit "Failed to install pytest"
 
 # Limit parallel build jobs to avoid overwhelming system resources
 export MAX_JOBS=32
@@ -40,7 +52,39 @@ do
     cd ../../
   fi
 
-  # Run tests
-  NVTE_TORCH_COMPILE=0 python3 -m pytest -v -s --junitxml=$XML_LOG_DIR/pytest.xml $TE_PATH/tests/pytorch/attention/test_attention.py
+  # Ensure local test utils is found before nvidia-cutlass-dsl's utils package
+  export PYTHONPATH=$TE_PATH/tests/pytorch:${PYTHONPATH:-}
 
+  # Run tests
+  NUM_GPUS=$(nvidia-smi -L | wc -l)
+  echo "Detected $NUM_GPUS GPU(s)"
+  if [ "$NUM_GPUS" -ge 5 ]; then
+    CP_NUM_GPUS=$(( NUM_GPUS - 1 > 4 ? 4 : NUM_GPUS - 1 ))
+    CP_GPUS=$(seq -s, 1 $CP_NUM_GPUS)
+    echo "Running tests in parallel: test_attention.py on GPU 0, test_attention_with_cp.py on GPUs $CP_GPUS ($CP_NUM_GPUS GPUs)"
+
+    CUDA_VISIBLE_DEVICES=0 NVTE_TORCH_COMPILE=0 python3 -m pytest -v -s \
+      --junitxml=$XML_LOG_DIR/pytest.xml \
+      $TE_PATH/tests/pytorch/attention/test_attention.py &
+    PID_ATTN=$!
+
+    CUDA_VISIBLE_DEVICES=$CP_GPUS NVTE_TORCH_COMPILE=0 python3 -m pytest -v -s \
+      --junitxml=$XML_LOG_DIR/pytest_test_attention_with_cp.xml \
+      $TE_PATH/tests/pytorch/attention/test_attention_with_cp.py &
+    PID_CP=$!
+
+    wait $PID_ATTN || test_fail "test_attention.py"
+    wait $PID_CP || test_fail "test_attention_with_cp.py"
+  else
+    echo "Running tests sequentially: need >=5 GPUs for parallel execution (1 for test_attention + 4 for test_attention_with_cp)"
+    NVTE_TORCH_COMPILE=0 python3 -m pytest -v -s --junitxml=$XML_LOG_DIR/pytest.xml $TE_PATH/tests/pytorch/attention/test_attention.py || test_fail "test_attention.py"
+    NVTE_TORCH_COMPILE=0 python3 -m pytest -v -s --junitxml=$XML_LOG_DIR/pytest_test_attention_with_cp.xml $TE_PATH/tests/pytorch/attention/test_attention_with_cp.py || test_fail "test_attention_with_cp.py"
+  fi
 done
+
+if [ "$RET" -ne 0 ]; then
+    echo "Error in the following test cases:$FAILED_CASES"
+    exit 1
+fi
+echo "All tests passed"
+exit 0
