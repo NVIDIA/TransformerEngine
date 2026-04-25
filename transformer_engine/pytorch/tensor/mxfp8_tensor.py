@@ -667,9 +667,9 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         # If not resharded after forward pass, the same weights allgathered in forward
         # are used again in backward. And hence if we need the columnwise data/scale_inv,
         # we need to send them as well for allgather in forward pass itself.
+        training_state = param_group._training_state
+        is_backward_pass = training_state == TrainingState.PRE_BACKWARD
         if reshard_after_forward:
-            training_state = param_group._training_state
-            is_backward_pass = training_state == TrainingState.PRE_BACKWARD
             # Allgather only the necessary tensors based on forward/backward pass
             rowwise_usage = not is_backward_pass
             columnwise_usage = is_backward_pass
@@ -681,9 +681,16 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         else:
             # rowwise usage is always needed for forward pass.
             rowwise_usage = True
+            columnwise_usage = is_backward_pass or torch.is_grad_enabled()
             sharded_tensors = (self._rowwise_data, rowwise_scale_inv)
-            columnwise_usage = self._quantizer.columnwise_usage
             if columnwise_usage:
+                if self._columnwise_data is None or columnwise_scale_inv is None:
+                    raise RuntimeError(
+                        "FSDP2 (reshard_after_forward=False) needs columnwise MXFP8 data "
+                        "for the upcoming backward pass, but the local shard has none. "
+                        "Ensure the weight is quantized with columnwise_usage=True before "
+                        "this all-gather."
+                    )
                 # If weights are not resharded after forward, then both
                 # rowwise and columnwise data/scale_inv need to be allgathered.
                 sharded_tensors += (self._columnwise_data, columnwise_scale_inv)

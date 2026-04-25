@@ -261,9 +261,9 @@ def _linear_forward_impl(
     weightmat = weight
     if fp8 or debug:
         # Configure quantizer
-        # No need to set the quantizer states if weight is already quantized
-        # for debug mode we create quantizer every iteration, thus we need to set the quantizer states
-        if weight_quantizer is not None and (not isinstance(weight, QuantizedTensor) or debug):
+        if weight_quantizer is not None:
+            if isinstance(weight, QuantizedTensor) and not debug:
+                weight_quantizer = weight._quantizer
             columnwise_usage = is_grad_enabled and inp.requires_grad and not is_fsdp2
             if backward_override is not None:
                 columnwise_usage = False
@@ -273,8 +273,6 @@ def _linear_forward_impl(
                     and not in_fp8_activation_recompute_phase()
                 )
             weight_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
-        elif isinstance(weight, QuantizedTensor):
-            weight_quantizer = weight._quantizer
         # Get quantized weight
         update_ws = is_first_microbatch is None or is_first_microbatch
         weightmat, new_weight_workspace = quantize_weight(
