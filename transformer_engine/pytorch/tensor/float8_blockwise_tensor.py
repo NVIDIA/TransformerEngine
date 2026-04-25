@@ -653,14 +653,14 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
         # is needed based on whether it's a forward or backward pass.
         # If not resharded, the same all-gathered weights are reused in backward,
         # so both usages may be needed.
+        training_state = param_group._training_state
+        is_backward_pass = training_state == TrainingState.PRE_BACKWARD
         if reshard_after_forward:
-            training_state = param_group._training_state
-            is_backward_pass = training_state == TrainingState.PRE_BACKWARD
             rowwise_usage = not is_backward_pass
             columnwise_usage = is_backward_pass
         else:
             rowwise_usage = True
-            columnwise_usage = self._quantizer.columnwise_usage
+            columnwise_usage = is_backward_pass or torch.is_grad_enabled()
 
         # For 2D block scaling (128x128 blocks), columnwise data and scales are
         # the transpose of rowwise data and scales. Only all-gather the rowwise

@@ -1233,3 +1233,92 @@ def test_inference_mode(
         with autocast(enabled=with_quantization, recipe=quantization_recipe):
             y = module(x, **kwargs)
     check_weights()
+
+
+@pytest.mark.parametrize(
+    "module_name",
+    ("Linear", "LayerNormLinear", "LayerNormMLP", "GroupedLinear"),
+)
+@pytest.mark.parametrize(
+    "quantization",
+    ("fp8_delayed_scaling", "fp8_current_scaling", "mxfp8"),
+)
+def test_quantizer_columnwise_usage_after_eval(
+    module_name: str,
+    quantization: str,
+) -> None:
+    """
+    Eval mode removes the columnwise usage from the quantizer, so modules
+    need to reset columnwise mode each time in backward instead of using it
+    from quantizer state, which may be stale.
+    """
+
+    if quantization in ("fp8_delayed_scaling", "fp8_current_scaling") and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+    if quantization == "mxfp8" and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+
+    sequence_length = 32
+    hidden_size = 32
+
+    if quantization == "fp8_delayed_scaling":
+        quantization_recipe = recipe.DelayedScaling()
+    elif quantization == "fp8_current_scaling":
+        quantization_recipe = recipe.Float8CurrentScaling()
+    else:
+        quantization_recipe = recipe.MXFP8BlockScaling()
+
+    with quantized_model_init(enabled=True, recipe=quantization_recipe):
+        if module_name == "Linear":
+            module = Linear(hidden_size, hidden_size, bias=False)
+        elif module_name == "LayerNormLinear":
+            module = LayerNormLinear(hidden_size, hidden_size, bias=False)
+        elif module_name == "LayerNormMLP":
+            module = LayerNormMLP(hidden_size, hidden_size, bias=False)
+        elif module_name == "GroupedLinear":
+            module = GroupedLinear(1, hidden_size, hidden_size, bias=False)
+        else:
+            raise AssertionError(f"Unhandled module_name {module_name}")
+    module = module.cuda()
+
+    def get_weight_quantizers():
+        """Return the per-weight ``_quantizer`` objects whose state matters."""
+        if module_name == "LayerNormMLP":
+            return [module.fc1_weight._quantizer, module.fc2_weight._quantizer]
+        if module_name == "GroupedLinear":
+            return [module.weight0._quantizer]
+        return [module.weight._quantizer]
+
+    def run_forward(is_eval: bool):
+        x = torch.randn(sequence_length, hidden_size, device="cuda", requires_grad=not is_eval)
+        kwargs = {}
+        if module_name == "GroupedLinear":
+            kwargs["m_splits"] = [sequence_length]
+        ctx = torch.no_grad() if is_eval else torch.enable_grad()
+        with ctx, autocast(enabled=True, recipe=quantization_recipe):
+            y = module(x, **kwargs)
+        if not is_eval:
+            y.sum().backward()
+
+    # 1. Training forward -- should set columnwise=True.
+    run_forward(is_eval=False)
+    for q in get_weight_quantizers():
+        assert (
+            q.columnwise_usage
+        ), "After an initial training forward, weight quantizer should have columnwise_usage=True"
+
+    # 2. Eval forward -- should set columnwise=False on primary FP8 weight
+    # quantizers, simulating the start of an evaluation loop.
+    run_forward(is_eval=True)
+    for q in get_weight_quantizers():
+        assert (
+            not q.columnwise_usage
+        ), "After an eval forward, weight quantizer should have columnwise_usage=False"
+
+    # 3. Training forward again without eval.
+    run_forward(is_eval=False)
+    for q in get_weight_quantizers():
+        assert q.columnwise_usage, (
+            "After resuming training following an eval forward, the weight "
+            "quantizer must have columnwise_usage=True."
+        )

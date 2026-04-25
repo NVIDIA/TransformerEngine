@@ -885,16 +885,16 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         # If not resharded after forward pass, the same weights allgathered in forward
         # are used again in backward and so we dont change the quantizer usages which might need
         # both rowwise and columnwise usages.
+        training_state = param_group._training_state
+        is_backward_pass = training_state == TrainingState.PRE_BACKWARD
         if reshard_after_forward:
-            training_state = param_group._training_state
-            is_backward_pass = training_state == TrainingState.PRE_BACKWARD
             # In case of hopper/L40, only one of data/transpose is needed
             # based on forward or backward pass. So setting the quantizer usages appropriately.
             rowwise_usage = not is_backward_pass
             columnwise_usage = is_backward_pass
         else:
             rowwise_usage = True
-            columnwise_usage = self._quantizer.columnwise_usage
+            columnwise_usage = is_backward_pass or torch.is_grad_enabled()
         sharded_tensors = (self._data,)
         metadata = (self._scale_inv, rowwise_usage, columnwise_usage, self._fp8_dtype)
         return sharded_tensors, metadata
