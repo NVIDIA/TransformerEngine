@@ -281,7 +281,7 @@ void performTestGroupedSwizzleMXFP8(const int num_tensors, const size_t M, const
   NVTE_CHECK_CUDA(cudaMemset(grouped_output.columnwise_scale_inv.get(), 0, num_tensors * col_numel));
 
   nvte_swizzle_grouped_scaling_factors(grouped_input.get_handle(),
-                                       grouped_output.get_handle(), nullptr, 0);
+                                       grouped_output.get_handle(), 0);
 
   std::vector<uint8_t> output_row(num_tensors * row_numel);
   std::vector<uint8_t> output_col(num_tensors * col_numel);
@@ -481,7 +481,7 @@ void performTestGroupedSwizzleUnswizzleRoundtrip(const int num_tensors, const si
   NVTE_CHECK_CUDA(cudaMemset(grouped_fin.scale_inv.get(), 0, num_tensors * row_numel));
   NVTE_CHECK_CUDA(cudaMemset(grouped_fin.columnwise_scale_inv.get(), 0, num_tensors * col_numel));
 
-  nvte_swizzle_grouped_scaling_factors(grouped_orig.get_handle(), grouped_mid.get_handle(), nullptr, 0);
+  nvte_swizzle_grouped_scaling_factors(grouped_orig.get_handle(), grouped_mid.get_handle(), 0);
   nvte_unswizzle_grouped_scaling_factors(grouped_mid.get_handle(), grouped_fin.get_handle(), 0);
 
   std::vector<uint8_t> result_row(num_tensors * row_numel);
@@ -562,17 +562,9 @@ void performTestGroupedSwizzleMXFP8Variable(const std::vector<std::pair<size_t, 
                                 kNVTEGroupedWithGEMMSwizzledScales,
                                 &output_swizzled, sizeof(output_swizzled));
 
-  // Workspace allocation
-  size_t num_int_elems = num_tensors + 3;
-  if (num_int_elems % 2 != 0) num_int_elems++;
-  size_t workspace_size = num_int_elems * sizeof(int) + (num_tensors + 1) * sizeof(size_t);
-  workspace_size = (workspace_size + 255) & ~255; // roundup to 256
-  void* d_workspace;
-  NVTE_CHECK_CUDA(cudaMalloc(&d_workspace, workspace_size));
-
   nvte_swizzle_grouped_scaling_factors(grouped_input.get_handle(),
                                        grouped_output.get_handle(),
-                                       d_workspace, 0);
+                                       0);
 
   cudaDeviceSynchronize();
   NVTE_CHECK_CUDA(cudaGetLastError());
@@ -613,7 +605,6 @@ void performTestGroupedSwizzleMXFP8Variable(const std::vector<std::pair<size_t, 
     row_offset += row_numel;
     col_offset += col_numel;
   }
-  NVTE_CHECK_CUDA(cudaFree(d_workspace));
 }
 
 class SwizzleGroupedVariableTestSuite
