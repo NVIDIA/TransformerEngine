@@ -626,9 +626,7 @@ class GroupedLinear(BasicOperation):
             weight_is_quantized = False
             if getattr(self, "single_grouped_weight", False):
                 weight = getattr(self, "weight", None)
-                weight_is_quantized = (
-                    weight is not None and weight.quantizer is not None
-                )
+                weight_is_quantized = weight is not None and weight.quantizer is not None
             else:
                 weight = getattr(self, f"weight{group_idx}", None)
                 weight_is_quantized = is_quantized_tensor(weight)
