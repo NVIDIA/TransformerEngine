@@ -18,6 +18,7 @@
 #include "../extensions.h"
 #include "common.h"
 #include "common/util/system.h"
+#include "nvfp4_1x64.h"
 #include "pybind.h"
 #include "transformer_engine/transformer_engine.h"
 
@@ -1184,53 +1185,13 @@ void split_quantize_nvfp4_impl_with_rht_helper(const TensorWrapper &input,
   }
 }
 
-void split_quantize_nvfp4_impl_helper(const TensorWrapper &input,
-                                      const std::vector<TensorWrapper> &input_list,
-                                      std::vector<TensorWrapper> &output_list,
-                                      const std::vector<size_t> &split_sections,
-                                      const std::vector<NVFP4Quantizer *> &quantizers,
-                                      cudaStream_t stream) {
-  const size_t num_tensors = input_list.size();
-  const auto &quantizer = *quantizers.front();
-
-  std::vector<NVTETensor> nvte_tensor_input_list;
-  std::vector<NVTETensor> nvte_tensor_output_list;
-  for (size_t i = 0; i < num_tensors; ++i) {
-    nvte_tensor_input_list.push_back(input_list[i].data());
-    nvte_tensor_output_list.push_back(output_list[i].data());
-  }
-
-  // In this case without RHT, the rowwise and colwise quantization are fused
-  // we don't need separate rng states for rowwise and colwise
-  bool need_separate_rng_states = false;
-
-  // Objects for TE C API
-  std::vector<QuantizationConfigWrapper> quant_config_list;
-  for (size_t i = 0; i < num_tensors; ++i) {
-    quant_config_list.emplace_back(QuantizationConfigWrapper());
-  }
-
-  // TODO: this is only true because the non-RHT path doesn't have grouped kernels yet, which we can be optimized
-  // so that we can generate all rng states at once
-  bool with_bulk_generate_rng_states = false;
-
-  bool need_stochastic_rounding = quantizer.stochastic_rounding;
-
-  // place holder for colwise rng states, which are not needed in this case
-  std::vector<QuantizationConfigWrapper> dummy_quant_config_list_colwise;
-
-  auto stochastic_rng_state_resources = setup_stochastic_rounding_rng_states_helper(
-      num_tensors, need_stochastic_rounding, with_bulk_generate_rng_states,
-      need_separate_rng_states, quant_config_list,
-      dummy_quant_config_list_colwise);  // colwise rng states are not needed in this case
-
-  // We need:
-  // 1. Rowwise amax = amax for input
-  // 2. Columnwise amax = amax for input too
-  // Columnwise amax will be filled with a fused D2D copy from rowwise amax
-  // Note that the multi compute amax API expects rowwise amax pointer to be not null
-  // So we need to set the pointer accordingly to make colwise-only quantization work
+/// Non-RHT split: grouped amax over splits, then optional D2D copy rowwise amax -> columnwise amax.
+static void split_nvfp4_non_rht_run_grouped_amax(
+    const TensorWrapper &input, std::vector<TensorWrapper> &output_list,
+    std::vector<NVTETensor> &nvte_tensor_output_list, const std::vector<size_t> &split_sections,
+    size_t num_tensors, bool copy_colwise_amax_from_rowwise, cudaStream_t stream) {
   std::vector<void *> orig_amax_ptr_list;
+  orig_amax_ptr_list.reserve(num_tensors);
   for (size_t i = 0; i < num_tensors; i++) {
     auto rowwise_amax_ptr = output_list[i].get_amax().data_ptr;
     orig_amax_ptr_list.push_back(rowwise_amax_ptr);
@@ -1244,14 +1205,93 @@ void split_quantize_nvfp4_impl_helper(const TensorWrapper &input,
   for (size_t i = 0; i < num_tensors; i++) {
     output_list[i].set_amax(orig_amax_ptr_list[i], DType::kFloat32, std::vector<size_t>{1});
   }
-
-  // Quantize tensors individually
-  for (size_t i = 0; i < num_tensors; i++) {
-    // skip this round if input is empty
-    if (input_list[i].numel() == 0) {
-      continue;
+  if (copy_colwise_amax_from_rowwise) {
+    for (size_t i = 0; i < num_tensors; i++) {
+      auto rowwise_amax_ptr = output_list[i].get_amax().data_ptr;
+      auto colwise_amax_ptr = output_list[i].get_columnwise_amax().data_ptr;
+      if (rowwise_amax_ptr != nullptr && colwise_amax_ptr != nullptr &&
+          rowwise_amax_ptr != colwise_amax_ptr) {
+        NVTE_CHECK_CUDA(cudaMemcpyAsync(colwise_amax_ptr, rowwise_amax_ptr, sizeof(float),
+                                        cudaMemcpyDeviceToDevice, stream));
+      }
     }
-    nvte_quantize_v2(input_list[i].data(), output_list[i].data(), quant_config_list[i], stream);
+  }
+}
+
+void split_quantize_nvfp4_impl_helper(const TensorWrapper &input,
+                                      const std::vector<TensorWrapper> &input_list,
+                                      std::vector<TensorWrapper> &output_list,
+                                      const std::vector<size_t> &split_sections,
+                                      const std::vector<NVFP4Quantizer *> &quantizers,
+                                      cudaStream_t stream) {
+  const size_t num_tensors = input_list.size();
+  const auto &quantizer = *quantizers.front();
+
+  std::vector<NVTETensor> nvte_tensor_output_list;
+  for (size_t i = 0; i < num_tensors; ++i) {
+    nvte_tensor_output_list.push_back(output_list[i].data());
+  }
+
+  // Objects for TE C API
+  std::vector<QuantizationConfigWrapper> quant_config_list;
+  for (size_t i = 0; i < num_tensors; ++i) {
+    quant_config_list.emplace_back(QuantizationConfigWrapper());
+  }
+
+  bool with_bulk_generate_rng_states = true;
+  bool need_separate_rng_states = false;
+  bool need_stochastic_rounding = quantizer.stochastic_rounding;
+  std::vector<QuantizationConfigWrapper> quant_config_list_colwise;
+  for (size_t i = 0; i < num_tensors; ++i) {
+    quant_config_list_colwise.emplace_back(QuantizationConfigWrapper());
+  }
+  auto stochastic_rng_state_resources = setup_stochastic_rounding_rng_states_helper(
+      num_tensors, need_stochastic_rounding, with_bulk_generate_rng_states,
+      need_separate_rng_states, quant_config_list, quant_config_list_colwise);
+
+  const auto use_fast_math = transformer_engine::getenv<bool>("NVTE_USE_FAST_MATH");
+  if (use_fast_math) {
+    for (auto &config : quant_config_list) {
+      config.set_use_fast_math(true);
+    }
+  }
+
+  // 1x64: per-tensor nvte_quantize_v2 (see quantize.cuh), not the grouped amax+kernel.
+  const bool use_rowwise_1x64 = nvfp4_1x64::local_encode_from_env();
+  for (size_t i = 0; i < num_tensors; ++i) {
+    nvfp4_1x64::config_apply(quant_config_list[i], quantizer.with_2d_quantization,
+                             quantizer.stochastic_rounding, use_rowwise_1x64);
+  }
+  nvfp4_1x64::require_ok_for_split(quantizer.rowwise_usage, quantizer.columnwise_usage,
+                                    quantizer.stochastic_rounding);
+
+  if (!use_rowwise_1x64) {
+    split_nvfp4_non_rht_run_grouped_amax(
+        input, output_list, nvte_tensor_output_list, split_sections, num_tensors,
+        quantizer.rowwise_usage && quantizer.columnwise_usage, stream);
+  }
+
+  if (use_rowwise_1x64 && quantizer.rowwise_usage) {
+    for (size_t i = 0; i < num_tensors; i++) {
+      if (input_list[i].numel() == 0) {
+        continue;
+      }
+      nvte_quantize_v2(input_list[i].data(), output_list[i].data(), quant_config_list[i], stream);
+    }
+  } else if (quantizer.rowwise_usage) {
+    // Grouped rowwise (+ columnwise if output tensors carry colwise buffers)
+    // in a single kernel launch. When the output has columnwise data, the kernel
+    // template parameter RETURN_TRANSPOSE=true enables the colwise write-back path.
+    nvte_group_nvfp4_quantize_with_amax(input.data(), nvte_tensor_output_list.data(),
+                                        split_sections.data(), num_tensors, quant_config_list[0],
+                                        stream);
+  } else if (quantizer.columnwise_usage) {
+    // Colwise-only: the grouped kernel requires a contiguous rowwise output
+    // buffer for TMA, so fall back to per-tensor quantization.
+    for (size_t i = 0; i < num_tensors; i++) {
+      if (input_list[i].numel() == 0) continue;
+      nvte_quantize_v2(input_list[i].data(), output_list[i].data(), quant_config_list[i], stream);
+    }
   }
 }
 

@@ -8,6 +8,7 @@
 
 #include "common.h"
 #include "common/util/system.h"
+#include "nvfp4_1x64.h"
 #include "pybind.h"
 #include "torch/torch.h"
 
@@ -2227,8 +2228,9 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
     quant_config.set_noop_tensor(noop_flag->data());
     quant_config_columnwise.set_noop_tensor(noop_flag->data());
   }
-  quant_config.set_nvfp4_2d_quantization(this->with_2d_quantization);
-  quant_config.set_stochastic_rounding(this->stochastic_rounding);
+  nvfp4_1x64::config_apply(quant_config, this->with_2d_quantization, this->stochastic_rounding,
+                           nvfp4_1x64::local_encode_from_env());
+  nvfp4_1x64::require_ok_for_non_split(this->with_rht, this->columnwise_usage, this->stochastic_rounding);
 
   // We only need RHT for columnwise usage.
   // flat first dim and last dim for multi dimensional input
