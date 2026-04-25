@@ -22,6 +22,7 @@
 #include "../mxfp8/quantize_mxfp8.cuh"
 #include "../nvfp4/group_quantize_transpose_nvfp4.cuh"
 #include "../nvfp4/quantize_nvfp4.cuh"
+#include "../nvfp4/quantize_nvfp4_1x64_rowwise.cuh"
 #include "../nvfp4/quantize_transpose_nvfp4.cuh"
 
 namespace transformer_engine {
@@ -104,8 +105,17 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
       bool use_optimized_kernel = (dtype == DType::kBFloat16) && (rows % 32 == 0) &&
                                   (cols % 32 == 0) && output_tensor->has_data();
 
-      // Launch NVFP4 quantize kernel
-      if (use_optimized_kernel) {
+      // Per-1x64-K-tile S_enc (non-RHT rowwise only). Fused window kernel; no columnwise / no GEMM.
+      if (quant_config_cpp.nvfp4_rowwise_1x64_local_encode) {
+        NVTE_CHECK(!output_tensor->has_columnwise_data(),
+                   "NVFP4 rowwise 1x64 local encode does not support columnwise (transposed) output.");
+        NVTE_CHECK(!quant_config_cpp.nvfp4_2d_quantization,
+                   "NVFP4 rowwise 1x64 local encode is incompatible with 2D block scaling.");
+        NVTE_CHECK(!quant_config_cpp.stochastic_rounding,
+                   "NVFP4 rowwise 1x64 local encode does not support stochastic rounding yet.");
+        nvfp4::quantize_rowwise_1x64_local_encode(*input_tensor, *noop_tensor, output_tensor,
+                                                  quant_config_cpp, stream);
+      } else if (use_optimized_kernel) {
         if (quant_config_cpp.nvfp4_2d_quantization) {
           nvfp4::quantize_transpose</*use_2d_quantization=*/true>(
               *input_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
@@ -235,6 +245,9 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
       CheckNoopTensor(*noop_tensor, "cast_noop");
       CheckInputTensor(*grad_tensor, "input");
       CheckOutputTensor(*output_tensor, "output", false);
+
+      NVTE_CHECK(!quant_config_cpp.nvfp4_rowwise_1x64_local_encode,
+                 "NVFP4 rowwise 1x64 local encode is not implemented for backward quantization yet.");
 
       // Choose kernel
       int32_t rows = grad_tensor->flat_first_dim();
