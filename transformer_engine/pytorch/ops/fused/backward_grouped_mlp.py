@@ -143,7 +143,7 @@ def _compute_grad_params(
     Returns the grad_params list in parameter registration order.
     """
 
-    # Allocate grad buffers, determine accumulate flag
+    # Allocate grad buffers, determine accumulate flag.
     accumulate_into_main_grad = False
     grouped_wgrad = None
     wgrad_output = None
@@ -152,6 +152,10 @@ def _compute_grad_params(
         if ctx.weight_requires_grad:
             weight_param = fc_op.weight
             if fc_op._accumulate_into_main_grad:
+                # Main-grad fusion: GEMM writes directly into ``main_grad``.
+                # ``overwrite_main_grad`` only flips the GEMM's ``accumulate``
+                # flag (overwrite vs. accumulate); it does not change the
+                # output buffer.
                 if hasattr(weight_param, "__fsdp_param__"):
                     weight_param.main_grad = weight_param.get_main_grad()
                 main_grad = weight_param.main_grad
@@ -172,16 +176,14 @@ def _compute_grad_params(
                             f" {tuple(main_grad.shape)} and stride"
                             f" {tuple(main_grad.stride())}"
                         ) from e
+                grouped_wgrad = GroupedTensor.make_grouped_tensor_from_rowwise_data(
+                    num_tensors=num_groups,
+                    tensor_shape=weight_shape,
+                    rowwise_data=main_grad,
+                    dtype=main_grad.dtype,
+                )
                 accumulate_into_main_grad = not getattr(weight_param, "overwrite_main_grad", False)
-                if accumulate_into_main_grad:
-                    grouped_wgrad = GroupedTensor.make_grouped_tensor_from_rowwise_data(
-                        num_tensors=num_groups,
-                        tensor_shape=weight_shape,
-                        rowwise_data=main_grad,
-                        dtype=main_grad.dtype,
-                    )
-
-            if grouped_wgrad is None:
+            else:
                 grouped_wgrad = GroupedTensor.make_grouped_tensor_with_shapes(
                     num_tensors=num_groups,
                     shapes=[weight_shape] * num_groups,
@@ -232,12 +234,21 @@ def _compute_grad_params(
         else:
             gemm_fn(grouped_x, grouped_dy, wgrad_output)
 
-        # Extract results, mark accumulated if needed
+        # Extract results, mark accumulated if needed. Gate the post-GEMM
+        # ``grad_added_to_main_grad`` + dummy ``.grad`` on the user-requested
+        # fusion flag, NOT on the (possibly-downgraded) GEMM accumulate flag.
+        # This matches ``module/linear.py`` and prevents FSDP's post-backward
+        # hook from re-touching ``main_grad`` when ``overwrite_main_grad=True``
+        # (Megatron-FSDP) or when wgrad is delayed.
         if fc_op.single_grouped_weight:
             packed_wgrad = None
             if not delay_wgrad:
                 packed_wgrad = grouped_wgrad.rowwise_data.view(num_groups, *weight_shape)
-            if accumulate_into_main_grad and hasattr(weight_param, "grad_added_to_main_grad"):
+            if (
+                ctx.weight_requires_grad
+                and fc_op._accumulate_into_main_grad
+                and hasattr(weight_param, "grad_added_to_main_grad")
+            ):
                 weight_param.grad_added_to_main_grad = True
                 packed_wgrad = get_dummy_wgrad(
                     list(weight_param.size()),
@@ -246,9 +257,9 @@ def _compute_grad_params(
                 )
             w_list = [packed_wgrad]
         else:
-            if delay_wgrad or accumulate_into_main_grad:
+            if delay_wgrad or (ctx.weight_requires_grad and fc_op._accumulate_into_main_grad):
                 w_list = [None] * num_groups
-            if accumulate_into_main_grad:
+            if ctx.weight_requires_grad and fc_op._accumulate_into_main_grad:
                 for idx in range(num_groups):
                     wp = getattr(fc_op, f"weight{idx}")
                     if hasattr(wp, "grad_added_to_main_grad"):
