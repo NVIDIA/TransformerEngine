@@ -30,7 +30,6 @@ from .base import (
 )
 from ..quantization import FP8GlobalStateManager
 from ..utils import (
-    assert_dim_for_fp8_exec,
     cast_if_needed,
     clear_tensor_data,
     divide,
@@ -163,8 +162,6 @@ class _LayerNormLinear(torch.autograd.Function):
         assert inp_shape[-1] == in_features, "GEMM not possible"
         inp = inp.view((-1, in_features))
         inputmat = inp
-        if fp8:
-            assert_dim_for_fp8_exec(inputmat, weight)
 
         # Cast for native AMP
         nvtx_range_push(f"{nvtx_label}.norm_input_cast")
