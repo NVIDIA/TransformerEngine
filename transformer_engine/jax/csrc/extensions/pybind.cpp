@@ -124,7 +124,9 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("get_topk_workspace_sizes", &GetTopkWorkspaceSizes);
   m.def("nvte_get_qkv_format", &nvte_get_qkv_format);
   m.def("is_non_nt_fp8_gemm_supported", &nvte_is_non_tn_fp8_gemm_supported);
+  m.def("nvte_built_with_cublasmp", &::nvte_built_with_cublasmp);
   m.def("initialize_cgemm_communicator", &InitializeCgemmCommunicator);
+  m.def("is_collective_gemm_with_cublasmp", &IsCollectiveGemmWithCublasmp);
   m.def("get_cgemm_num_max_streams", &GetCgemmNumMaxStreams);
   m.def("get_grouped_gemm_setup_workspace_size", &nvte_get_grouped_gemm_setup_workspace_size);
 
