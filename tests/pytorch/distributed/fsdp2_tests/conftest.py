@@ -45,10 +45,27 @@ _FP8_RECIPE_CONFIGS = [
     ("NVFP4BlockScaling", _check_nvfp4_support),
 ]
 
+_HYBRID_RECIPE_CONFIGS = [
+    ("HybridFP8CurrentScaling", fp8.check_fp8_support),
+    ("HybridMXFP8", fp8.check_mxfp8_support),
+    ("HybridFloat8BlockScaling", fp8.check_fp8_block_scaling_support),
+    ("HybridMixed_MXFP8_FP8", fp8.check_mxfp8_support),
+]
+
 
 def _parametrize_recipes():
     params = []
     for name, check_fn in _FP8_RECIPE_CONFIGS:
+        supported, reason = check_fn()
+        params.append(
+            pytest.param(name, id=name, marks=pytest.mark.skipif(not supported, reason=reason))
+        )
+    return params
+
+
+def _parametrize_hybrid_recipes():
+    params = []
+    for name, check_fn in _HYBRID_RECIPE_CONFIGS:
         supported, reason = check_fn()
         params.append(
             pytest.param(name, id=name, marks=pytest.mark.skipif(not supported, reason=reason))
@@ -82,4 +99,9 @@ def _cleanup():
 
 @pytest.fixture(params=_parametrize_recipes())
 def recipe_name(request):
+    return request.param
+
+
+@pytest.fixture(params=_parametrize_hybrid_recipes())
+def hybrid_recipe_name(request):
     return request.param

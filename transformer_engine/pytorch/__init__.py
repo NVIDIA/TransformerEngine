@@ -86,6 +86,9 @@ from transformer_engine.pytorch.tensor import Float8Tensor
 from transformer_engine.pytorch.tensor import MXFP8Tensor
 from transformer_engine.pytorch.tensor import Float8BlockwiseQTensor
 from transformer_engine.pytorch.tensor import NVFP4Tensor
+from transformer_engine.pytorch.tensor import HybridQuantizer
+from transformer_engine.pytorch.tensor import HybridQuantizedTensorStorage
+from transformer_engine.pytorch.tensor import HybridQuantizedTensor
 
 try:
     torch._dynamo.config.error_on_nested_jit_trace = False

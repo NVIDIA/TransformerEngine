@@ -53,8 +53,97 @@ from ..quantized_tensor import (
     prepare_for_saving,
     restore_from_func_ctx,
 )
+from ..tensor.hybrid_tensor import HybridQuantizer
 from ...debug.pytorch.debug_quantization import DebugQuantizer
 from ...debug.pytorch.debug_state import TEDebugState
+
+
+def _is_hybrid_quantizer_list(quantizers):
+    """Classify a GroupedLinear quantizer list as hybrid-uniform or plain-uniform.
+
+    Returns ``True`` when every non-``None`` entry is a ``HybridQuantizer``,
+    ``False`` when none are. Raises :class:`ValueError` on a mixed list.
+
+    Why it's a hard "or": neither dispatch branch at the call sites
+    supports a mixed list. ``tex.split_quantize`` (the plain path) does
+    not recognize ``HybridQuantizer``. :func:`_hybrid_split_quantize`
+    (the hybrid path) treats every entry as hybrid — it calls
+    ``q.rowwise_quantizer`` / ``q.columnwise_quantizer`` unconditionally,
+    which would ``AttributeError`` on a plain quantizer. Rejecting at
+    the classifier gives a clear actionable error instead of failing
+    deep inside a grouped C++ call.
+
+    Supporting mixed would require a per-element grouped kernel that
+    accepts a heterogeneous quantizer vector; no such kernel exists
+    today. If that becomes a real requirement (e.g. per-expert hybrid
+    recipes in MoE), implement element-wise fallback here rather than
+    silently masking the mismatch.
+    """
+    non_none = [q for q in quantizers if q is not None]
+    if not non_none:
+        return False
+    hybrid_count = sum(1 for q in non_none if isinstance(q, HybridQuantizer))
+    if hybrid_count == 0:
+        return False
+    if hybrid_count == len(non_none):
+        return True
+    raise ValueError(
+        "GroupedLinear quantizer list mixes HybridQuantizer and non-hybrid"
+        f" quantizers ({hybrid_count} hybrid, {len(non_none) - hybrid_count}"
+        " non-hybrid). This combination is not supported: neither"
+        " `tex.split_quantize` nor `_hybrid_split_quantize` can consume a"
+        " heterogeneous list. Make the CustomRecipe `qfactory` return a"
+        " consistent type (all HybridQuantizer or all non-hybrid) across"
+        " every GEMM for the same role."
+    )
+
+
+def _hybrid_split_quantize(tensor, m_splits, quantizers):
+    """Grouped split+quantize for an **all-hybrid** quantizer list.
+
+    Precondition: every ``q`` in ``quantizers`` is a ``HybridQuantizer``.
+    Enforce via :func:`_is_hybrid_quantizer_list` at the call site (or
+    the explicit assert below as a defense-in-depth).
+
+    Runs ``tex.split_quantize`` twice — once over the rowwise sub-
+    quantizers, once over the columnwise sub-quantizers — then zips
+    the two per-split results back into ``HybridQuantizedTensorStorage``
+    per GEMM. Two grouped C++ calls instead of ``2 * num_gemms``
+    ungrouped Python calls.
+    """
+    from ..tensor.storage.hybrid_tensor_storage import HybridQuantizedTensorStorage as HybridStorage
+
+    if not all(isinstance(q, HybridQuantizer) for q in quantizers):
+        raise TypeError(
+            "_hybrid_split_quantize requires every quantizer to be a"
+            " HybridQuantizer; callers must gate on _is_hybrid_quantizer_list."
+            f" Got types: {[type(q).__name__ for q in quantizers]}"
+        )
+
+    row_quantizers = [q.rowwise_quantizer for q in quantizers]
+    col_quantizers = [q.columnwise_quantizer for q in quantizers]
+
+    row_results = tex.split_quantize(tensor, m_splits, row_quantizers)
+    col_results = tex.split_quantize(tensor, m_splits, col_quantizers)
+
+    return [
+        HybridStorage(
+            rowwise_storage=row,
+            columnwise_storage=col,
+            rowwise_quantizer=rq,
+            columnwise_quantizer=cq,
+            quantizer=q,
+            fake_dtype=tensor.dtype,
+        )
+        for row, col, rq, cq, q in zip(
+            row_results,
+            col_results,
+            row_quantizers,
+            col_quantizers,
+            quantizers,
+        )
+    ]
+
 
 __all__ = ["GroupedLinear"]
 
@@ -158,7 +247,8 @@ class _GroupedLinear(torch.autograd.Function):
             )
         inp_view = inp.reshape(-1, in_features)
         inputmats: list
-        if fp8 and not debug:
+        hybrid = _is_hybrid_quantizer_list(input_quantizers)
+        if fp8 and not debug and not hybrid:
             # Disable bulk allocation when CPU offloading is active: offloading skips small
             # tensors (like scales), but bulk allocation shares storage across all tensors,
             # so if scales can't be offloaded, nothing in the group can be offloaded.
@@ -168,6 +258,8 @@ class _GroupedLinear(torch.autograd.Function):
                 input_quantizers,
                 disable_bulk_allocation=cpu_offloading,
             )
+        elif fp8 and hybrid:
+            inputmats = _hybrid_split_quantize(inp_view, m_splits, input_quantizers)
         elif debug:
             inputmats = DebugQuantizer.multi_tensor_quantize(
                 inp_view, input_quantizers, m_splits, activation_dtype
@@ -371,7 +463,8 @@ class _GroupedLinear(torch.autograd.Function):
             grad_output_view = grad_output.contiguous().view(-1, grad_output.shape[-1])
             grad_output = [None] * ctx.num_gemms
             grad_biases = [None] * ctx.num_gemms
-            if ctx.fp8 and not ctx.debug:
+            grad_output_hybrid = _is_hybrid_quantizer_list(ctx.grad_output_quantizers)
+            if ctx.fp8 and not ctx.debug and not grad_output_hybrid:
                 if ctx.use_bias:
                     grad_output_mats = torch.split(grad_output_view, ctx.m_splits)
                     recipe = ctx.fp8_recipe
@@ -398,6 +491,16 @@ class _GroupedLinear(torch.autograd.Function):
                         ctx.m_splits,
                         ctx.grad_output_quantizers,
                     )
+            elif ctx.fp8 and grad_output_hybrid:
+                if ctx.use_bias:
+                    grad_output_mats = torch.split(grad_output_view, ctx.m_splits)
+                    for i in range(ctx.num_gemms):
+                        grad_biases[i] = grad_output_mats[i].sum(dim=0)
+                grad_output = _hybrid_split_quantize(
+                    grad_output_view,
+                    ctx.m_splits,
+                    ctx.grad_output_quantizers,
+                )
             elif ctx.debug:
                 grad_output_mats = torch.split(grad_output_view, ctx.m_splits)
                 for i in range(ctx.num_gemms):
@@ -503,8 +606,13 @@ class _GroupedLinear(torch.autograd.Function):
                             else:
                                 input_quantizer.set_usage(rowwise=False, columnwise=True)
                     inputmats: list
-                    if ctx.fp8 and not ctx.debug:
+                    input_hybrid = _is_hybrid_quantizer_list(ctx.input_quantizers)
+                    if ctx.fp8 and not ctx.debug and not input_hybrid:
                         inputmats = tex.split_quantize(inp_view, ctx.m_splits, ctx.input_quantizers)
+                    elif ctx.fp8 and input_hybrid:
+                        inputmats = _hybrid_split_quantize(
+                            inp_view, ctx.m_splits, ctx.input_quantizers
+                        )
                     elif ctx.debug:
                         inputmats = DebugQuantizer.multi_tensor_quantize(
                             inp_view,

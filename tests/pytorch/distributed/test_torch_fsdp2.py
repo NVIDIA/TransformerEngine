@@ -165,6 +165,57 @@ def test_fsdp2_fused_adam_dcp_resharding(recipe):
     assert result.returncode == 0, f"DCP resharding load phase failed: {result.returncode}"
 
 
+@pytest.mark.skipif(NUM_PROCS < 2, reason="Requires 2+ GPUs")
+@pytest.mark.skipif(not te.torch_version() >= (2, 4, 0), reason="Requires PyTorch 2.4.0+")
+def test_fsdp2_hybrid_fused_adam_tests():
+    """FSDP2 FusedAdam tests with hybrid quantized params (parametrized by hybrid recipe)."""
+    test_path = _FSDP2_DIR / "run_fsdp2_fused_adam.py"
+    nproc = min(NUM_PROCS, 2)
+    run_distributed(
+        [
+            "torchrun",
+            f"--nproc_per_node={nproc}",
+            "--local-ranks-filter=0",
+            "-m",
+            "pytest",
+            str(test_path),
+            "-v",
+            "-s",
+            "--tb=short",
+            "-k",
+            "hybrid",
+        ],
+        valid_returncodes=(0, 5),
+        env=os.environ,
+        timeout=600,
+    )
+
+
+@pytest.mark.skipif(NUM_PROCS % 2 != 0, reason="Requires even number of GPUs")
+@pytest.mark.skipif(not te.torch_version() >= (2, 4, 0), reason="Requires PyTorch 2.4.0+")
+def test_fsdp2_hybrid_model_tests():
+    """FSDP2 model tests with hybrid quantized params (parametrized by hybrid recipe)."""
+    test_path = _FSDP2_DIR / "run_fsdp2_model.py"
+    run_distributed(
+        [
+            "torchrun",
+            f"--nproc_per_node={NUM_PROCS}",
+            "--local-ranks-filter=0",
+            "-m",
+            "pytest",
+            str(test_path),
+            "-v",
+            "-s",
+            "--tb=short",
+            "-k",
+            "hybrid",
+        ],
+        valid_returncodes=(0, 5),
+        env=os.environ,
+        timeout=600,
+    )
+
+
 def test_dummy() -> None:
     """Dummy test
 

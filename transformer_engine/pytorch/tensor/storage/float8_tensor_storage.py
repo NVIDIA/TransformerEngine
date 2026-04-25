@@ -226,6 +226,10 @@ class Float8TensorStorage(QuantizedTensorStorage):
     def _create_transpose(self):
         """Update FP8 transpose cache"""
         data = self._data
+        # Columnwise-only Float8Tensors (e.g. hybrid quantization sub-storages)
+        # have _data=None — nothing to transpose.
+        if data is None:
+            return
         if not data.is_contiguous():
             data = data.contiguous()
         self._transpose = tex.fp8_transpose(data, self._fp8_dtype, out=self._transpose)
@@ -279,3 +283,11 @@ class Float8TensorStorage(QuantizedTensorStorage):
         else:
             usages["columnwise"] = self._transpose is not None and not self._transpose_invalid
         return usages
+
+    def fsdp_buffer_fields(self) -> Tuple[str, ...]:
+        """Fields gathered by FSDP2 for per-tensor FP8.
+
+        ``_scale_inv`` is a per-tensor scalar; it travels through the hook's
+        metadata tuple (mirroring :meth:`Float8Tensor.fsdp_pre_all_gather`).
+        """
+        return ("_data",)
