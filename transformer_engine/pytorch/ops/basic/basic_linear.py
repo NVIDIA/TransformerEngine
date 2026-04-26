@@ -325,6 +325,21 @@ class BasicLinear(BasicOperation):
         if self.weight.device.type == "meta":
             self.reset_parameters()
 
+    def pre_fuser_forward(self, *, requires_grad: bool) -> None:
+        super().pre_fuser_forward(requires_grad=requires_grad)
+        if FP8GlobalStateManager.is_fp8_enabled():
+            # Configure quantizer usages
+            weight_requires_grad = requires_grad and self.weight.requires_grad
+            columnwise_usage = weight_requires_grad
+            if FP8GlobalStateManager.get_fp8_recipe().backward_override is not None:
+                columnwise_usage = False
+            input_quantizer = self.get_quantizer("forward", 0)
+            weight_quantizer = self.get_quantizer("forward", 1)
+            grad_output_quantizer = self.get_quantizer("backward", 0)
+            input_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
+            weight_quantizer.set_usage(rowwise=True, columnwise=requires_grad)
+            grad_output_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
+
     def reset_recipe_state(self, *, recipe: Optional[Recipe]) -> None:
         super().reset_recipe_state(recipe=recipe)
 

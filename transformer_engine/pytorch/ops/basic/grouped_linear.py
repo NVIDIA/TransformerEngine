@@ -607,6 +607,26 @@ class GroupedLinear(BasicOperation):
                             f"Expected no biases, but bias {group_idx} is initialized"
                         )
 
+    def pre_fuser_forward(self, *, requires_grad: bool) -> None:
+        super().pre_fuser_forward(requires_grad=requires_grad)
+        if FP8GlobalStateManager.is_fp8_enabled():
+            # Assume weights have consistent grad requirement
+            weight_requires_grad = (
+                self.weight.requires_grad
+                if self.single_grouped_weight
+                else self.weight0.requires_grad
+            )
+            weight_requires_grad = requires_grad and weight_requires_grad
+
+            # Configure quantizer usages
+            for group_idx in range(self.num_groups):
+                input_quantizer = self.get_quantizer("forward", 2 * group_idx)
+                weight_quantizer = self.get_quantizer("forward", 2 * group_idx + 1)
+                grad_output_quantizer = self.get_quantizer("backward", group_idx)
+                input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
+                weight_quantizer.set_usage(rowwise=True, columnwise=requires_grad)
+                grad_output_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
+
     def reset_recipe_state(self, *, recipe: Optional[Recipe]) -> None:
         super().reset_recipe_state(recipe=recipe)
 
