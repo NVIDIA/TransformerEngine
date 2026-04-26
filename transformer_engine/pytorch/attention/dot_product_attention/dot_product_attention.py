@@ -1536,10 +1536,13 @@ class DotProductAttention(TransformerEngineBaseModule):
                     fp8=self.fp8 and self.fp8_meta["recipe"].fp8_dpa,
                     fp8_meta=self.fp8_meta,
                     quantizers=self.quantizers,
+                    pad_between_seqs=pad_between_seqs,
                     inference_params=inference_params,
                     flash_attention_backend=flash_attention_backend,
                     fp8_output=fp8_output,
                     num_splits=num_splits,
+                    cu_seqlens_q_padded=cu_seqlens_q_padded,
+                    cu_seqlens_kv_padded=cu_seqlens_kv_padded,
                 )
 
             if use_fused_attention:
