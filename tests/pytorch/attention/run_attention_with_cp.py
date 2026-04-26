@@ -595,19 +595,22 @@ def run_dpa_with_cp(
             )
             cu_pads_q = cu_seqlens_q_padded - cu_seqlens_q
             num_pads_q = cu_pads_q[1:] - cu_pads_q[:-1]
-            for x in [dq, out, dq_, out_]:
-                assert torch.count_nonzero(x[cu_seqlens_q_padded[-1] :]).item() == 0
+            for x_name, x in [("dq", dq), ("out", out), ("dq_", dq_), ("out_", out_)]:
+                tail_nz = torch.count_nonzero(x[cu_seqlens_q_padded[-1] :]).item()
+                assert tail_nz == 0, f"[rank={rank}] {x_name}: tail nonzero count = {tail_nz}"
                 for b in range(config.batch_size):
-                    assert (
-                        num_pads_q[b] == 0
-                        or torch.count_nonzero(
-                            x[
-                                (cu_seqlens_q_padded[b + 1] - num_pads_q[b]) : cu_seqlens_q_padded[
-                                    b + 1
-                                ]
-                            ]
-                        ).item()
-                        == 0
+                    if num_pads_q[b] == 0:
+                        continue
+                    pad_nz = torch.count_nonzero(
+                        x[
+                            (cu_seqlens_q_padded[b + 1] - num_pads_q[b]) : cu_seqlens_q_padded[b + 1]
+                        ]
+                    ).item()
+                    assert pad_nz == 0, (
+                        f"[rank={rank}] {x_name} batch {b}: pad_nz={pad_nz}, "
+                        f"num_pads_q[{b}]={num_pads_q[b].item()}, "
+                        f"range=[{cu_seqlens_q_padded[b+1].item() - num_pads_q[b].item()},"
+                        f"{cu_seqlens_q_padded[b+1].item()})"
                     )
             cu_seqlens_kv_padded = cu_seqlens_kv_padded // world_size
             cu_seqlens_kv = get_cu_seqlens_on_cp_rank(
