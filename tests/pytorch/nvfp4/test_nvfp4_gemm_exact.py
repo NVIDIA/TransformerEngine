@@ -17,13 +17,10 @@ recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=Tru
 
 
 def maybe_skip_pertoken_nvfp4_gemm(
-    x_dtype: torch.dtype,
     *,
     accumulate: bool,
     x_columnwise: bool,
 ) -> None:
-    if x_dtype == torch.float32:
-        pytest.skip("Per-token NVFP4 kernel supports BF16/FP16 inputs only")
     if accumulate:
         pytest.skip("Per-token NVFP4 GEMM output rescale does not support accumulation")
     if x_columnwise:
@@ -284,7 +281,6 @@ def test_nvfp4_gemm_versus_reference(
 ):
     if per_token_activation:
         maybe_skip_pertoken_nvfp4_gemm(
-            x_dtype=x_dtype,
             accumulate=accumulate,
             x_columnwise=is_x_columnwise,
         )

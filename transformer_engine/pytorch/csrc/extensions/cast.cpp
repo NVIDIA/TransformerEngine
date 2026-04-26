@@ -1608,9 +1608,6 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> quantize_nvfp4_pertoken(at::Tenso
 
   NVTE_CHECK(input.dim() == 2, "Input must be 2D (num_rows, num_cols)");
   NVTE_CHECK(input.is_cuda(), "Input must be on CUDA device");
-  NVTE_CHECK(input.scalar_type() == at::ScalarType::BFloat16 ||
-                 input.scalar_type() == at::ScalarType::Half,
-             "Input must be BFloat16 or Half");
 
   const int num_rows = input.size(0);
   const int num_cols = input.size(1);

@@ -24,13 +24,10 @@ def unpack_fp4(x: torch.Tensor) -> torch.Tensor:
 
 
 def maybe_skip_pertoken_nvfp4(
-    x_dtype: torch.dtype = torch.bfloat16,
     *,
     return_transpose: bool = False,  # pylint: disable=unused-argument
     with_2d_quantization: bool = False,
 ) -> None:
-    if x_dtype == torch.float32:
-        pytest.skip("Per-token NVFP4 kernel supports BF16/FP16 inputs only")
     if with_2d_quantization:
         pytest.skip("Per-token NVFP4 does not support 2D quantization")
 
@@ -185,7 +182,6 @@ def test_quantization_block_tiling_versus_reference(
 ) -> None:
     if per_token_activation:
         maybe_skip_pertoken_nvfp4(
-            x_dtype=x_dtype,
             return_transpose=return_transpose,
             with_2d_quantization=with_2d_quantization,
         )
@@ -239,7 +235,7 @@ def test_nvfp4_quantization_extrema_versus_reference(
         x = torch.zeros((M, N), dtype=x_dtype, device=device)
 
     if per_token_activation:
-        maybe_skip_pertoken_nvfp4(x_dtype=x_dtype, return_transpose=return_transpose)
+        maybe_skip_pertoken_nvfp4(return_transpose=return_transpose)
 
     nvfp4_quantizer = NVFP4Quantizer(
         fp4_dtype=te_dtype,
@@ -359,7 +355,7 @@ def test_nvfp4_quantization_boundary_values(
     x = row.unsqueeze(0).repeat(M, 1).to(dtype=x_dtype)
 
     if per_token_activation:
-        maybe_skip_pertoken_nvfp4(x_dtype=x_dtype, return_transpose=return_transpose)
+        maybe_skip_pertoken_nvfp4(return_transpose=return_transpose)
 
     nvfp4_quantizer = NVFP4Quantizer(
         fp4_dtype=te_dtype,
@@ -465,7 +461,7 @@ def test_nvfp4_quantization_noncontiguous_inputs(
     assert not x_nc.is_contiguous()
 
     if per_token_activation:
-        maybe_skip_pertoken_nvfp4(x_dtype=x_dtype, return_transpose=return_transpose)
+        maybe_skip_pertoken_nvfp4(return_transpose=return_transpose)
 
     nvfp4_quantizer = NVFP4Quantizer(
         fp4_dtype=te_dtype,
