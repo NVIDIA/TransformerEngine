@@ -160,12 +160,27 @@ def make_recipe(name: Optional[str], **recipe_kwargs: Any) -> Optional[Recipe]:
     raise ValueError(f"Unsupported quantization scheme ({name})")
 
 
+def recipe_id(fp8_recipe: Optional[Recipe]) -> str:
+    """Readable pytest id for FP8/FP4 recipes."""
+    if fp8_recipe is None:
+        return "None"
+    if fp8_recipe.nvfp4() and getattr(fp8_recipe, "per_token_activation", False):
+        return "NVFP4PerTokenBlockScaling"
+    return type(fp8_recipe).__name__
+
+
 def skip_unsupported_backward_override(
     layer_type: str,
     quant_recipe: Optional[Recipe],
     backward_override: Optional[str],
 ) -> None:
     """Skip known unsupported layer/recipe/backward-override combinations used in tests."""
+    if (
+        quant_recipe is not None
+        and getattr(quant_recipe, "per_token_activation", False)
+        and backward_override is None
+    ):
+        pytest.skip("Per-token NVFP4 requires an explicit backward override.")
     if backward_override is None:
         return
     if quant_recipe is None and backward_override is not None:

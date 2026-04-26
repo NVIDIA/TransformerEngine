@@ -1042,6 +1042,7 @@ def test_grouped_linear_backward_override_matches_reference(
 
     quantized_ref_recipe = make_recipe(recipe_name)
     mode_recipe = make_recipe(recipe_name, backward_override=backward_override)
+    skip_unsupported_backward_override("grouped_linear", mode_recipe, backward_override)
 
     module_quantized_ref = te.GroupedLinear(
         num_gemms,
@@ -1280,6 +1281,7 @@ def test_grouped_linear_runtime_backward_override_switch_updates_ctx(
 
     default_recipe = make_recipe(recipe_name)
     mode_recipe = make_recipe(recipe_name, backward_override=backward_override)
+    skip_unsupported_backward_override("grouped_linear", mode_recipe, backward_override)
 
     *_, default_ctx = _run_grouped_linear_single_step_with_ctx_state(
         module,
@@ -1724,7 +1726,11 @@ def test_backward_override_memory_peak_report(
     x = torch.randn(*input_shape, dtype=dtype, device="cuda")
     dy = torch.randn(*input_shape[:-1], out_features, dtype=dtype, device="cuda")
 
-    modes = (None, "high_precision", "dequantized")
+    modes = (
+        ("high_precision", "dequantized")
+        if recipe_name == "nvfp4_pertoken"
+        else (None, "high_precision", "dequantized")
+    )
     mode_results: dict[str, dict[str, float] | str] = {}
 
     for mode in modes:
