@@ -227,6 +227,95 @@ class MXFP8Quantizer(Quantizer):
             with_gemm_swizzled_scales=False,
         )
 
+    def quantize_rowwise_transpose(
+        self,
+        tensor: torch.Tensor,
+        columnwise_scale_inv: torch.Tensor,
+        *,
+        fake_dtype: Optional[torch.dtype] = None,
+        with_gemm_swizzled_scales: Optional[bool] = None,
+    ) -> MXFP8Tensor:
+        """Quantize ``tensor.T`` into row-wise MXFP8 storage.
+
+        ``columnwise_scale_inv`` must be the compact E8M0 column-wise scale
+        tensor computed for ``tensor``. This path emits the transposed row-wise
+        payload directly from the high-precision source instead of copying an
+        existing MXFP8 column-wise payload. If ``with_gemm_swizzled_scales`` is
+        true, the emitted row-wise scales are written directly in the layout
+        expected by MXFP8 GEMM.
+        """
+
+        if not hasattr(tex, "mxfp8_scaling_transpose_cast"):
+            raise RuntimeError("TransformerEngine extension is missing mxfp8_scaling_transpose_cast")
+        if tensor.dim() < 2:
+            raise ValueError(
+                f"MXFP8 transpose quantization requires at least 2D input: {tensor.shape}"
+            )
+        if not tensor.is_cuda or not columnwise_scale_inv.is_cuda:
+            raise ValueError("MXFP8 transpose quantization requires CUDA tensors")
+        if self.dtype not in (tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2):
+            raise TypeError(f"MXFP8 transpose quantization only supports E4M3/E5M2, got {self.dtype}")
+        if tensor.dtype not in (torch.float32, torch.float16, torch.bfloat16):
+            raise TypeError(f"Unsupported MXFP8 transpose source dtype: {tensor.dtype}")
+        if columnwise_scale_inv.dtype != torch.uint8:
+            raise TypeError(f"columnwise_scale_inv must be uint8, got {columnwise_scale_inv.dtype}")
+        if columnwise_scale_inv.dim() != 2:
+            raise ValueError("columnwise_scale_inv must be 2D")
+
+        source_2d = tensor.contiguous().reshape(-1, tensor.shape[-1])
+        columnwise_scale_inv = columnwise_scale_inv.contiguous()
+        rows, cols = source_2d.shape
+        if rows % MXFP8_BLOCK_SCALING_SIZE != 0 or cols % MXFP8_BLOCK_SCALING_SIZE != 0:
+            raise ValueError(
+                "MXFP8 transpose quantization requires flattened source dims "
+                f"divisible by {MXFP8_BLOCK_SCALING_SIZE}, got {(rows, cols)}"
+            )
+
+        expected_scale_shape = (
+            round_up_to_nearest_multiple(rows // MXFP8_BLOCK_SCALING_SIZE, 4),
+            round_up_to_nearest_multiple(cols, 128),
+        )
+        if tuple(columnwise_scale_inv.shape) != expected_scale_shape:
+            raise ValueError(
+                "columnwise_scale_inv has wrong compact MXFP8 shape: "
+                f"expected {expected_scale_shape}, got {tuple(columnwise_scale_inv.shape)}"
+            )
+
+        rowwise_data = torch.empty((cols, rows), dtype=torch.uint8, device=tensor.device)
+        rowwise_scale_inv = torch.empty(
+            (columnwise_scale_inv.shape[1], columnwise_scale_inv.shape[0]),
+            dtype=torch.uint8,
+            device=tensor.device,
+        )
+        if with_gemm_swizzled_scales is None:
+            with_gemm_swizzled_scales = self.optimize_for_gemm
+        tex.mxfp8_scaling_transpose_cast(
+            source_2d,
+            columnwise_scale_inv,
+            rowwise_data,
+            rowwise_scale_inv,
+            rows,
+            cols,
+            int(self.dtype),
+            bool(with_gemm_swizzled_scales),
+        )
+
+        quantizer = self.copy()
+        quantizer.set_usage(rowwise=True, columnwise=False)
+        quantizer.optimize_for_gemm = bool(with_gemm_swizzled_scales)
+        return MXFP8Tensor(
+            shape=rowwise_data.shape,
+            dtype=tensor.dtype if fake_dtype is None else fake_dtype,
+            rowwise_data=rowwise_data,
+            rowwise_scale_inv=rowwise_scale_inv,
+            columnwise_data=None,
+            columnwise_scale_inv=None,
+            fp8_dtype=self.dtype,
+            quantizer=quantizer,
+            requires_grad=False,
+            with_gemm_swizzled_scales=bool(with_gemm_swizzled_scales),
+        )
+
     def onnx_quantize(self, tensor: torch.Tensor) -> QuantizedTensor:
         if tensor.dtype != torch.float32:
             tensor = tensor.to(dtype=torch.float32)
