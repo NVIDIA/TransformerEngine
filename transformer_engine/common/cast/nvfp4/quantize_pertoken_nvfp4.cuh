@@ -37,6 +37,26 @@ using namespace ptx;
 constexpr int PERTOKEN_BLOCK_SIZE = 256;
 constexpr int PERTOKEN_SF_VEC_SIZE = 16;
 
+template <typename IType>
+__device__ __forceinline__ void abs_max_2x_update(ptx::FPx2<IType> &dst,
+                                                  const ptx::FPx2<IType> &val) {
+  if constexpr (std::is_same_v<IType, float>) {
+    dst.x = fmaxf(fabsf(dst.x), fabsf(val.x));
+    dst.y = fmaxf(fabsf(dst.y), fabsf(val.y));
+  } else {
+    ptx::abs_max_2x(dst, dst, val);
+  }
+}
+
+template <typename IType>
+__device__ __forceinline__ float abs_max_2x_to_float(const ptx::FPx2<IType> &val) {
+  if constexpr (std::is_same_v<IType, float>) {
+    return fmaxf(fabsf(val.x), fabsf(val.y));
+  } else {
+    return static_cast<float>(__hmax(__habs(val.x), __habs(val.y)));
+  }
+}
+
 template <typename IType, int BLOCK_SIZE>
 __global__ void
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
@@ -67,10 +87,9 @@ __launch_bounds__(BLOCK_SIZE)
   IType2 thread_amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
   for (int i = threadIdx.x; i < num_vec2; i += BLOCK_SIZE) {
     const IType2 val = input_row[i];
-    ptx::abs_max_2x(thread_amax_2x, thread_amax_2x, val);
+    abs_max_2x_update(thread_amax_2x, val);
   }
-  const float thread_max =
-      static_cast<float>(__hmax(__habs(thread_amax_2x.x), __habs(thread_amax_2x.y)));
+  const float thread_max = abs_max_2x_to_float(thread_amax_2x);
 
   using BlockReduce = cub::BlockReduce<float, BLOCK_SIZE>;
   __shared__ typename BlockReduce::TempStorage temp_storage;
@@ -99,10 +118,9 @@ __launch_bounds__(BLOCK_SIZE)
         reinterpret_cast<const IType2 *>(input + actual_row * num_cols + col_start);
     for (int j = 0; j < PERTOKEN_SF_VEC_SIZE / 2; ++j) {
       vals[j] = input_block[j];
-      ptx::abs_max_2x(block_amax_2x, block_amax_2x, vals[j]);
+      abs_max_2x_update(block_amax_2x, vals[j]);
     }
-    const float block_max =
-        static_cast<float>(__hmax(__habs(block_amax_2x.x), __habs(block_amax_2x.y)));
+    const float block_max = abs_max_2x_to_float(block_amax_2x);
 
     const float S_dec_b_f32 =
         fminf(block_max * global_encode_scale_multiplier, detail::TypeExtrema<float>::max);
@@ -186,10 +204,9 @@ __launch_bounds__(BLOCK_SIZE)
   IType2 thread_amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
   for (int i = threadIdx.x; i < num_vec2; i += BLOCK_SIZE) {
     const IType2 val = input_row[i];
-    ptx::abs_max_2x(thread_amax_2x, thread_amax_2x, val);
+    abs_max_2x_update(thread_amax_2x, val);
   }
-  const float thread_max =
-      static_cast<float>(__hmax(__habs(thread_amax_2x.x), __habs(thread_amax_2x.y)));
+  const float thread_max = abs_max_2x_to_float(thread_amax_2x);
 
   using BlockReduce = cub::BlockReduce<float, BLOCK_SIZE>;
   __shared__ typename BlockReduce::TempStorage temp_storage;
@@ -414,10 +431,43 @@ inline void quantize_pertoken(const Tensor &input, const Tensor *noop, Tensor *o
           static_cast<int>(rows), static_cast<int>(cols), input_ptr, data_t_ptr, scale_t_ptr,
           per_token_amax_ptr, scale_stride_t, stream, noop_ptr);
     }
+  } else if (input.dtype() == DType::kFloat32) {
+    const auto *input_ptr = reinterpret_cast<const float *>(input.data.dptr);
+    if (output->has_data()) {
+      NVTE_CHECK(is_fp4_dtype(output->data.dtype), "Rowwise output must have FP4 type.");
+      NVTE_CHECK(output->scale_inv.dptr != nullptr, "Rowwise scaling tensor must be allocated.");
+      NVTE_CHECK(output->amax.dptr != nullptr, "Rowwise per-token amax tensor must be allocated.");
+      auto *data_ptr = reinterpret_cast<uint8_t *>(output->data.dptr);
+      auto *scale_ptr = reinterpret_cast<fp8e4m3 *>(output->scale_inv.dptr);
+      const int scale_stride = static_cast<int>(output->scale_inv.shape.back());
+      quantize_pertoken_kernel::launch_quantize_pertoken_nvfp4<float>(
+          static_cast<int>(rows), static_cast<int>(cols), input_ptr, row_offsets, data_ptr,
+          scale_ptr, amax_ptr, scale_stride, stream, noop_ptr);
+    } else {
+      quantize_pertoken_kernel::launch_compute_pertoken_amax<float>(
+          static_cast<int>(rows), static_cast<int>(cols), input_ptr, per_token_amax_ptr, stream,
+          noop_ptr);
+    }
+    if (output->has_columnwise_data()) {
+      NVTE_CHECK(is_fp4_dtype(output->columnwise_data.dtype),
+                 "Columnwise output must have FP4 type.");
+      NVTE_CHECK(output->columnwise_scale_inv.dptr != nullptr,
+                 "Columnwise scaling tensor must be allocated.");
+      if (amax_ptr != nullptr && amax_colwise_ptr != nullptr && amax_ptr != amax_colwise_ptr) {
+        NVTE_CHECK_CUDA(cudaMemcpyAsync(amax_colwise_ptr, amax_ptr, rows * sizeof(float),
+                                        cudaMemcpyDeviceToDevice, stream));
+      }
+      auto *data_t_ptr = reinterpret_cast<uint8_t *>(output->columnwise_data.dptr);
+      auto *scale_t_ptr = reinterpret_cast<fp8e4m3 *>(output->columnwise_scale_inv.dptr);
+      const int scale_stride_t = static_cast<int>(output->columnwise_scale_inv.shape.back());
+      quantize_pertoken_kernel::launch_quantize_pertoken_nvfp4_columnwise<float>(
+          static_cast<int>(rows), static_cast<int>(cols), input_ptr, data_t_ptr, scale_t_ptr,
+          per_token_amax_ptr, scale_stride_t, stream, noop_ptr);
+    }
   } else {
     NVTE_ERROR(
         "Unsupported input dtype for per-token NVFP4 quantization. "
-        "Expected BFloat16 or Float16.");
+        "Expected BFloat16, Float16, or Float32.");
   }
 #else
   NVTE_ERROR("CUDA 12.8 or higher is needed for FP4 calculation!");

@@ -170,9 +170,6 @@ def _maybe_skip_recipe_dtype(
 ) -> None:
     if dtype == torch.bfloat16 and not bf16_available:
         pytest.skip(reason_for_no_bf16)
-    if recipe_name == "nvfp4_pertoken" and module_type in ("linear", "layernorm_linear"):
-        if dtype != torch.bfloat16:
-            pytest.skip("Per-token NVFP4 activation supports BF16 inputs only in this test")
     if recipe_name in ("nvfp4", "nvfp4_pertoken"):
         if module_type in ("linear", "layernorm_linear") and dtype not in (
             torch.bfloat16,

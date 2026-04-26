@@ -2263,8 +2263,6 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
                "Per-token NVFP4 activation does not support stochastic rounding.");
     NVTE_CHECK(!this->with_amax_reduction,
                "Per-token NVFP4 activation does not support amax reduction.");
-    NVTE_CHECK(input.dtype() == DType::kBFloat16 || input.dtype() == DType::kFloat16,
-               "Per-token NVFP4 activation supports BF16/FP16 inputs only.");
     NVTE_CHECK(cols % 16 == 0, "Per-token NVFP4 activation requires last dim divisible by 16.");
     quant_config.set_nvfp4_per_token_activation(true);
   }
