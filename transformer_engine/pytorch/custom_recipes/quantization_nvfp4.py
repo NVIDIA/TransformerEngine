@@ -546,6 +546,71 @@ class NVFP4QuantizerRef(Quantizer):
 
         return cast_to_fp4x2(clipped_x), decode_scale.squeeze(-1)
 
+    @classmethod
+    def _quantize_blockwise_pertoken_columnwise_reference(
+        cls,
+        x: torch.Tensor,
+        global_amax: torch.Tensor,
+        tile_len_x: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if x.ndim != 2:
+            raise ValueError(
+                "_quantize_blockwise_pertoken_columnwise_reference expects a 2D tensor, got"
+                f" {x.ndim}D with shape {x.shape}"
+            )
+
+        m, n = x.shape
+        x = x.view(m, n // tile_len_x, tile_len_x)
+        FLOAT4_E2M1_MAX = torch.tensor(6.0, device=x.device, dtype=torch.float32)
+        FLOAT8_E4M3_MAX = torch.tensor(448.0, device=x.device, dtype=torch.float32)
+
+        global_amax = global_amax.to(torch.float32).view(1, n // tile_len_x, tile_len_x)
+        global_encode_scale = torch.div(FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX, global_amax)
+        global_encode_scale = torch.min(
+            global_encode_scale,
+            torch.tensor(
+                torch.finfo(torch.float32).max,
+                device=global_encode_scale.device,
+                dtype=torch.float32,
+            ),
+        )
+        global_encode_scale = torch.where(
+            global_encode_scale == 0.0,
+            torch.ones_like(global_encode_scale),
+            global_encode_scale,
+        )
+        global_decode_scale = torch.div(1.0, global_encode_scale)
+        global_encode_scale_multiplier = global_encode_scale * torch.reciprocal(FLOAT4_E2M1_MAX)
+
+        decode_scale = torch.amax(
+            torch.abs(x.to(torch.float32)) * global_encode_scale_multiplier,
+            dim=-1,
+            keepdim=True,
+        )
+        decode_scale = torch.min(
+            decode_scale,
+            torch.tensor(
+                torch.finfo(torch.float32).max,
+                device=decode_scale.device,
+                dtype=torch.float32,
+            ),
+        )
+        decode_scale = torch.clamp(decode_scale, min=-FLOAT8_E4M3_MAX, max=FLOAT8_E4M3_MAX)
+        decode_scale = decode_scale.to(torch.float8_e4m3fn)
+
+        encode_scale = torch.min(
+            torch.div(1.0, decode_scale.to(torch.float32) * global_decode_scale),
+            torch.tensor(
+                torch.finfo(torch.float32).max,
+                device=decode_scale.device,
+                dtype=torch.float32,
+            ),
+        )
+        scaled_x = x.to(torch.float32) * encode_scale
+        clipped_x = torch.clamp(scaled_x, -FLOAT4_E2M1_MAX, FLOAT4_E2M1_MAX).reshape(m, n)
+
+        return cast_to_fp4x2(clipped_x), decode_scale.squeeze(-1)
+
     @staticmethod
     def _pad_tensor(
         tensor: torch.Tensor, row_divisor: Optional[int], col_divisor: Optional[int]
@@ -650,8 +715,6 @@ class NVFP4QuantizerRef(Quantizer):
                         "Per-token activation only supports NVFP4 1x16 tile shape, "
                         f"got {self.quant_tile_shape}"
                     )
-                if self.columnwise_usage:
-                    raise ValueError("Per-token activation reference supports rowwise-only usage.")
                 global_amax_row = torch.max(torch.abs(row_input), dim=1).values.to(torch.float32)
                 global_amax_col = global_amax_row
             else:
@@ -696,15 +759,22 @@ class NVFP4QuantizerRef(Quantizer):
                 x_t, row_divisor=self.quant_tile_shape[0], col_divisor=self.quant_tile_shape[1]
             )
 
-            qx_t, sx_t = self._quantize_blockwise_reference(
-                x_t_padded,
-                global_amax_col,
-                self.quant_tile_shape[1],
-                self.quant_tile_shape[0],
-                pow_2_scales=self.pow_2_scales,
-                per_token_activation=False,
-                eps=self.eps,
-            )
+            if self.per_token_activation:
+                qx_t, sx_t = self._quantize_blockwise_pertoken_columnwise_reference(
+                    x_t_padded,
+                    global_amax_col,
+                    self.quant_tile_shape[1],
+                )
+            else:
+                qx_t, sx_t = self._quantize_blockwise_reference(
+                    x_t_padded,
+                    global_amax_col,
+                    self.quant_tile_shape[1],
+                    self.quant_tile_shape[0],
+                    pow_2_scales=self.pow_2_scales,
+                    per_token_activation=False,
+                    eps=self.eps,
+                )
 
             qx_t = self._rm_pad_tensor(qx_t, (N, M // 2))
 
@@ -895,22 +965,15 @@ class NVFP4QuantizerRef(Quantizer):
             sw = sw.to(torch.float32)
 
             factor = 6.0 * 6.0 * 448.0 * 448.0
-            if (
-                qresult_x.global_amax_row.numel() != 1
-                or qresult_w.global_amax_row.numel() != 1
-                or qresult_w.global_amax_col.numel() != 1
-                or qresult_x.global_amax_col.numel() != 1
-            ):
-                raise ValueError(
-                    "NVFP4QuantizerRef.qgemm expects scalar global amax values; "
-                    "per-token amax vectors are not supported in reference GEMM."
-                )
-
             if gemm_type == quantization.GEMMType.WGRAD:
                 partial_alpha = qresult_x.global_amax_col * qresult_w.global_amax_col
             else:
                 partial_alpha = qresult_x.global_amax_row * qresult_w.global_amax_row
-            alpha = torch.div(partial_alpha, factor).squeeze(-1)
+            if partial_alpha.numel() > 1 and partial_alpha.numel() == high_precision_x.shape[0]:
+                partial_alpha = partial_alpha.view(-1, 1)
+            else:
+                partial_alpha = partial_alpha.squeeze(-1)
+            alpha = torch.div(partial_alpha, factor)
 
         M, K = high_precision_x.shape
         N, K_w = high_precision_w.shape

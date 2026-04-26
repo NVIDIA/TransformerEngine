@@ -170,6 +170,9 @@ def _maybe_skip_recipe_dtype(
 ) -> None:
     if dtype == torch.bfloat16 and not bf16_available:
         pytest.skip(reason_for_no_bf16)
+    if recipe_name == "nvfp4_pertoken" and module_type in ("linear", "layernorm_linear"):
+        if dtype != torch.bfloat16:
+            pytest.skip("Per-token NVFP4 activation supports BF16 inputs only in this test")
     if recipe_name in ("nvfp4", "nvfp4_pertoken"):
         if module_type in ("linear", "layernorm_linear") and dtype not in (
             torch.bfloat16,
@@ -183,16 +186,6 @@ def _maybe_skip_recipe_dtype(
 def _maybe_skip_unsupported_recipe_module_combo(recipe_name: str, module_type: str) -> None:
     if module_type == "ops_linear" and recipe_name == "fp8_block_scaling":
         pytest.skip("Fusible ops (te_ops.Linear) do not support Float8BlockScaling recipe")
-    if recipe_name == "nvfp4_pertoken" and module_type in (
-        "linear",
-        "layernorm_linear",
-        "ops_linear",
-        "grouped_linear",
-    ):
-        pytest.skip(
-            "Per-token NVFP4 currently supports rowwise-only quantization paths "
-            "(columnwise usage is unsupported for these modules)."
-        )
 
 
 def _maybe_skip_unsupported_recipe_shape(

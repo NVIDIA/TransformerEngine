@@ -944,7 +944,8 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
       // Note: Multi-quantize kernel does not require contiguous amaxes.
       const auto offset = roundup(buffer_size, 16);
       amax_offsets.push_back(offset);
-      buffer_size = offset + 4;
+      const size_t amax_size = per_token_activation ? 4 * flat_first_dim(shape_list[i]) : 4;
+      buffer_size = offset + amax_size;
     }
 
     // Allocate full buffer
@@ -957,8 +958,11 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
           buffer, to_fp4_shape(columnwise_data_shapes[i]), data_offsets[i], torch::kUInt8));
       columnwise_scale_list.emplace_back(
           make_torch_view(buffer, columnwise_scale_shapes[i], scale_offsets[i], torch::kUInt8));
+      const std::vector<size_t> amax_shape =
+          per_token_activation ? std::vector<size_t>{flat_first_dim(shape_list[i])}
+                               : std::vector<size_t>{1};
       amax_columnwise_list.emplace_back(
-          make_torch_view(buffer, std::vector<size_t>{1}, amax_offsets[i], torch::kFloat32));
+          make_torch_view(buffer, amax_shape, amax_offsets[i], torch::kFloat32));
     }
   }
 
@@ -1003,7 +1007,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
       }
       if (columnwise_usage) {
         tensor_wrapper.set_columnwise_amax(amax_columnwise_list[i].data_ptr(), DType::kFloat32,
-                                           std::vector<size_t>{1});
+                                           getTensorShape(amax_columnwise_list[i]));
       }
 
       tensor_cpp_list.emplace_back(std::move(tensor_wrapper));
@@ -1281,8 +1285,6 @@ void split_quantize_nvfp4_impl_helper(const TensorWrapper &input,
 
   if (quantizer.per_token_activation) {
     NVTE_CHECK(!quantizer.with_rht, "Per-token NVFP4 split quantize does not support RHT.");
-    NVTE_CHECK(!quantizer.columnwise_usage,
-               "Per-token NVFP4 split quantize currently supports rowwise-only quantization.");
     NVTE_CHECK(!quantizer.with_2d_quantization,
                "Per-token NVFP4 split quantize does not support 2D quantization.");
     NVTE_CHECK(!quantizer.stochastic_rounding,

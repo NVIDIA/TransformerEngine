@@ -26,13 +26,11 @@ def unpack_fp4(x: torch.Tensor) -> torch.Tensor:
 def maybe_skip_pertoken_nvfp4(
     x_dtype: torch.dtype = torch.bfloat16,
     *,
-    return_transpose: bool = False,
+    return_transpose: bool = False,  # pylint: disable=unused-argument
     with_2d_quantization: bool = False,
 ) -> None:
     if x_dtype == torch.float32:
         pytest.skip("Per-token NVFP4 kernel supports BF16/FP16 inputs only")
-    if return_transpose:
-        pytest.skip("Per-token NVFP4 currently supports rowwise-only quantization")
     if with_2d_quantization:
         pytest.skip("Per-token NVFP4 does not support 2D quantization")
 
