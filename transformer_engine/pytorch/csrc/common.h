@@ -320,6 +320,7 @@ class NVFP4Quantizer : public Quantizer {
   // 2D block scaling
   bool with_2d_quantization;
   bool stochastic_rounding;
+  bool per_token_activation;
 
   int rht_matrix_random_sign_mask_t;
   at::Tensor rht_matrix;

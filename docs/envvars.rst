@@ -281,6 +281,12 @@ Kernel Configuration
    :Default: ``0``
    :Description: Emit a warning when falling back from CUTLASS to cuBLAS for grouped GEMM operations.
 
+.. envvar:: NVTE_NVFP4_PER_TOKEN_ACTIVATION
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Enable per-token activation quantization for the ``NVFP4BlockScaling`` recipe in GroupedLinear split-quantize paths. When set to ``1`` (or when ``NVFP4BlockScaling(per_token_activation=True)`` is used), NVFP4 rowwise ``amax`` metadata stores one FP32 value per token (row) instead of a single scalar.
+
 Torch Compilation and Fusion
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
