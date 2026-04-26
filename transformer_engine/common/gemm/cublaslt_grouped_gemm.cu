@@ -560,11 +560,12 @@ inline MultiTensorGroupGemmInputArgs build_grouped_gemm_multi_inputA_args(
                " is missing required data.");
     NVTE_CHECK(data.shape.size() == 2, "Grouped GEMM: ", name, "_list tensor ", i, " must be 2D.");
     args.data_ptrs[i] = data.dptr;
-    // For NVFP4/MXFP8 columnwise data, the logical shape stored in `data.shape` matches the
-    // rowwise shape, but the data is physically transposed. `swap_dims=true` (set by
-    // choose_grouped_operand_storage when columnwise == transposed) instructs us to expose
-    // the physical (transposed) layout to cuBLAS so that rows/cols and avg_first/last match
-    // the actual storage. This mirrors `select_grouped_operand`'s use_columnwise(swap_dims=true).
+    // swap_dims tells us whether `data.shape` matches the physical storage layout or its
+    // transpose. swap_dims=false => shape == physical layout, keep dims as-is.
+    // swap_dims=true => shape is the logical (un-transposed) shape but data is physically
+    // transposed, so swap first/last so rows/cols and avg_first/last reflect the physical
+    // layout cuBLAS sees. The value is decided by choose_grouped_operand_storage and this
+    // mirrors select_grouped_operand's use_columnwise(swap_dims=...).
     const size_t first_dim = swap_dims ? data.shape[1] : data.shape[0];
     const size_t last_dim  = swap_dims ? data.shape[0] : data.shape[1];
     args.rows[i] = static_cast<int>(last_dim);
