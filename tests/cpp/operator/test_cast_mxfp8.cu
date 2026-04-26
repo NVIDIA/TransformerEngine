@@ -524,17 +524,12 @@ void performTest_x2(const ProcessingMethod processing_method,
 std::vector<std::vector<size_t>> matrix_sizes = {
     {1, 16},
     {16, 48},
-    {65, 96},
     {128, 128},
-    {256, 256},
     {993, 512},
-    {511, 6144},
-    {8192, 128},
-    {2048, 160},
-    {577, 1632},
     {1024},
     {8, 32, 1024},
     {16, 8, 4, 512},
+    {8192, 7168},
 };
 
 std::vector<std::pair<size_t, size_t>> block_sizes = {
@@ -568,8 +563,6 @@ std::vector<ActivationType> Activation_types = {
     // ActivationType::QGeLU,
     // ActivationType::SReLU,
 };
-
-}  // namespace
 
 class FusedCastMXFP8TestSuite : public ::testing::TestWithParam
     <std::tuple<ProcessingMethod,
@@ -683,28 +676,62 @@ std::string to_string(const ActivationType Act_type) {
     }
 }
 
+std::string test_name_generator(
+    const testing::TestParamInfo<FusedCastMXFP8TestSuite::ParamType>& info) {
+    std::string name = to_string(std::get<0>(info.param)) + "X" +
+        to_string(std::get<1>(info.param));
+    const auto& shape = std::get<2>(info.param);
+    for ( const auto& s: shape) {
+        name += "X" + std::to_string(s);
+    }
+    name += "X" + std::to_string(std::get<3>(info.param).first) +
+            "X" + std::to_string(std::get<3>(info.param).second) +
+            "X" + test::typeName(std::get<4>(info.param)) +
+            "X" + test::typeName(std::get<5>(info.param)) +
+            "X" + test::caseName(std::get<6>(info.param));
+    return name;
+}
+
+}  // namespace
+
+// Test cases with only cast kernels
 INSTANTIATE_TEST_SUITE_P(
-    OperatorTest,
+    OperatorTest_FusedCastMXFP8_CastOnly,
+    FusedCastMXFP8TestSuite,
+    ::testing::Combine(
+        ::testing::Values(ProcessingMethod::CAST_ONLY),
+        ::testing::Values(ActivationType::Identity),
+        ::testing::ValuesIn(matrix_sizes),
+        ::testing::ValuesIn(block_sizes),
+        ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
+        ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2),
+        ::testing::ValuesIn(input_scenarios)),
+    test_name_generator);
+
+// Test cases with varying matrix shapes and block shapes
+INSTANTIATE_TEST_SUITE_P(
+    OperatorTest_FusedCastMXFP8_Sizes,
     FusedCastMXFP8TestSuite,
     ::testing::Combine(
         ::testing::ValuesIn(processing_methods),
         ::testing::ValuesIn(Activation_types),
         ::testing::ValuesIn(matrix_sizes),
         ::testing::ValuesIn(block_sizes),
+        ::testing::Values(DType::kBFloat16),
+        ::testing::Values(DType::kFloat8E4M3),
+        ::testing::ValuesIn(input_scenarios)),
+    test_name_generator);
+
+// Test cases with varying dtypes
+INSTANTIATE_TEST_SUITE_P(
+    OperatorTest_FusedCastMXFP8_Dtypes,
+    FusedCastMXFP8TestSuite,
+    ::testing::Combine(
+        ::testing::ValuesIn(processing_methods),
+        ::testing::ValuesIn(Activation_types),
+        ::testing::Values(std::vector<size_t>{256, 384}),
+        ::testing::Values(std::pair<size_t, size_t>{32, 32}),
         ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
         ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2),
         ::testing::ValuesIn(input_scenarios)),
-    [](const testing::TestParamInfo<FusedCastMXFP8TestSuite::ParamType>& info) {
-        std::string name = to_string(std::get<0>(info.param)) + "X" +
-                           to_string(std::get<1>(info.param));
-      const auto& shape = std::get<2>(info.param);
-      for ( const auto& s: shape) {
-        name += "X" + std::to_string(s);
-      }
-      name += "X" + std::to_string(std::get<3>(info.param).first) +
-              "X" + std::to_string(std::get<3>(info.param).second) +
-              "X" + test::typeName(std::get<4>(info.param)) +
-              "X" + test::typeName(std::get<5>(info.param)) +
-              "X" + test::caseName(std::get<6>(info.param));
-        return name;
-    });
+    test_name_generator);

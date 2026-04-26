@@ -86,7 +86,7 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
       {
         auto fp8_quantizer_cpp = dynamic_cast<Float8CurrentScalingQuantizer*>(quantizer_cpp.get());
         NVTE_CHECK(fp8_quantizer_cpp != nullptr, "Could not cast to FP8 current scaling quantizer");
-        auto [temp_nvte, _] =
+        auto [temp_nvte, _, amax_buf] =
             fp8_quantizer_cpp->create_unquantized_tensor_with_amax(output_shape, fake_dtype);
         NVTE_SCOPED_GIL_RELEASE({
           if constexpr (act_func == nullptr) {
@@ -96,7 +96,7 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
             act_func(input_nvte.data(), temp_nvte.data(), stream);
           }
         });
-        fp8_quantizer_cpp->quantize_with_amax(temp_nvte, out_nvte);
+        fp8_quantizer_cpp->quantize_with_amax(temp_nvte, out_nvte, amax_buf);
       }
       break;
     case Impl::FUSED_ACTIVATION_AMAX_NVFP4:
@@ -198,7 +198,7 @@ py::object dactivation_helper(const at::Tensor& grad_output, const at::Tensor& i
       {
         auto fp8_quantizer_cpp = dynamic_cast<Float8CurrentScalingQuantizer*>(quantizer_cpp.get());
         NVTE_CHECK(fp8_quantizer_cpp != nullptr, "Could not cast to FP8 current scaling quantizer");
-        auto [temp_nvte, _] =
+        auto [temp_nvte, _, amax_buf] =
             fp8_quantizer_cpp->create_unquantized_tensor_with_amax(input_shape, fake_dtype);
         NVTE_SCOPED_GIL_RELEASE({
           if constexpr (dact_func == nullptr) {
@@ -208,7 +208,7 @@ py::object dactivation_helper(const at::Tensor& grad_output, const at::Tensor& i
             dact_func(grad_output_nvte.data(), input_nvte.data(), temp_nvte.data(), stream);
           }
         });
-        fp8_quantizer_cpp->quantize_with_amax(temp_nvte, grad_input_nvte);
+        fp8_quantizer_cpp->quantize_with_amax(temp_nvte, grad_input_nvte, amax_buf);
       }
       break;
     case Impl::FUSED_ACTIVATION_AMAX_NVFP4:

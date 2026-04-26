@@ -221,6 +221,8 @@ GroupedTensorWrapper GroupedTensorFromPyTorchGroupedTensor(py::handle tensor) {
     DType data_dtype =
         quantizer.is_none() ? GetTransformerEngineDType(data.scalar_type()) : quantizer_dtype;
     ret.set_rowwise_data(data.data_ptr(), data_dtype, getTensorShape(data));
+  } else if (quantizer_dtype != DType::kNumTypes) {
+    ret.set_rowwise_data(nullptr, quantizer_dtype, std::vector<size_t>{0});
   }
 
   // Columnwise data
@@ -229,6 +231,8 @@ GroupedTensorWrapper GroupedTensorFromPyTorchGroupedTensor(py::handle tensor) {
     DType data_dtype =
         quantizer.is_none() ? GetTransformerEngineDType(data.scalar_type()) : quantizer_dtype;
     ret.set_columnwise_data(data.data_ptr(), data_dtype, getTensorShape(data));
+  } else if (quantizer_dtype != DType::kNumTypes) {
+    ret.set_columnwise_data(nullptr, quantizer_dtype, std::vector<size_t>{0});
   }
 
   // Scale

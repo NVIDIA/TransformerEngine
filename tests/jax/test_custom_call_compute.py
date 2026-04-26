@@ -27,6 +27,7 @@ from transformer_engine.jax.cpp_extensions.normalization import (
 from transformer_engine.jax.cpp_extensions.quantization import (
     _jax_quantize,
     _jax_quantize_dbias,
+    GroupedQuantizePrimitive,
 )
 from transformer_engine.jax.cpp_extensions.misc import get_cudnn_version
 from transformer_engine.jax import cpp_extensions as tex
@@ -36,6 +37,7 @@ from transformer_engine.jax.quantize import (
     ScaledTensor1x,
     ScaledTensor2x,
     GroupedScaledTensor1x,
+    GroupedNoScaleTensor,
     ScalingMode,
     QuantizerFactory,
     QuantizeLayout,
@@ -47,6 +49,7 @@ from transformer_engine.jax.quantize import helper
 from transformer_engine.jax.activation import activation
 from transformer_engine.jax.dense import dense, grouped_dense
 from transformer_engine.jax.layernorm_dense import layernorm_dense
+from transformer_engine.jax.cpp_extensions.topk import topk
 
 GEMM_CASES = [
     (256, 256, 512),
@@ -150,8 +153,13 @@ def assert_dequantized_grouped_scaled_tensor(
     a: Union[GroupedScaledTensor1x, ScaledTensor2x], b: jnp.ndarray
 ):
     if isinstance(a, GroupedScaledTensor1x):
-        assert a.group_sizes.sum() == b.shape[0]
-        b = jnp.split(b, jnp.cumulative_sum(a.group_sizes)[:-1], axis=0)
+        group_sizes = (
+            a.first_dims
+            if a.first_dims is not None
+            else jnp.ones(a.original_shape[0], dtype=jnp.int32)
+        )
+        assert group_sizes.sum() == b.shape[0]
+        b = jnp.split(b, jnp.cumulative_sum(group_sizes)[:-1], axis=0)
         dq_a = a.dequantize()
         for dq_a_i, b_i in zip(dq_a, b):
             if len(dq_a_i) == 0:
@@ -1062,7 +1070,24 @@ class TestRandomizedHadamardTransform:
 
 @pytest.mark.skipif(not is_fp8_supported, reason=fp8_unsupported_reason)
 @pytest_parametrize_wrapper("in_dtype", QUANTIZATION_INPUT_DTYPE)
-@pytest_parametrize_wrapper("input_shape", [(8, 16, 32)])
+@pytest_parametrize_wrapper(
+    "input_shape",
+    [
+        (8, 16, 32),  # V1 MXFP8: K=32 not 128-aligned
+        (
+            4,
+            8,
+            128,
+        ),  # V2 MXFP8 eligible: K=128, M*32=256 both 128-aligned. Alignment is required due to V2 grouped quantize and grouped GEMM kernel requirements.
+    ],
+)
+@pytest_parametrize_wrapper(
+    "group_size_multiplier",
+    [
+        32,  # V1 MXFP8: group size must be multiple of 32
+        128,  # V2 MXFP8 eligible: group size must be multiple of 128. Alignment is required due to V2 grouped quantize and grouped GEMM kernel requirements.
+    ],
+)
 @pytest_parametrize_wrapper("q_dtype", [jnp.float8_e4m3fn])
 @pytest_parametrize_wrapper("scaling_mode", non_fp4_supported_scaling_modes)
 @pytest_parametrize_wrapper("flatten_axis", [-1])
@@ -1072,14 +1097,21 @@ class TestRandomizedHadamardTransform:
 )
 class TestGroupedQuantize:
     def test_grouped_qdq(
-        self, in_dtype, input_shape, q_dtype, scaling_mode, q_layout, flatten_axis, with_group_sizes
+        self,
+        in_dtype,
+        input_shape,
+        group_size_multiplier,
+        q_dtype,
+        scaling_mode,
+        q_layout,
+        flatten_axis,
+        with_group_sizes,
     ):
         n_groups, m, n = input_shape
         key = jax.random.PRNGKey(0)
         subkeys = jax.random.split(key, 2)
 
-        # *32 so that the input shapes works for MXFP8
-        input_shape = (m * 32, n)
+        input_shape = (m * group_size_multiplier, n)
 
         if with_group_sizes:
             group_sizes = jnp.sort(jax.random.randint(subkeys[0], (n_groups - 1,), 0, m))
@@ -1087,13 +1119,30 @@ class TestGroupedQuantize:
             group_sizes = jnp.diff(group_sizes)
             assert group_sizes.sum() == m
             assert jnp.any(group_sizes == 0)  # make sure that at least one group has 0 row
-            group_sizes = group_sizes * 32
+            group_sizes = group_sizes * group_size_multiplier
         else:
             group_sizes = None
             input_shape = (n_groups, input_shape[0] // n_groups, input_shape[1])
 
         if flatten_axis == -2:
             input_shape = input_shape[:-1] + (2,) + input_shape[-1:]
+
+        # V2 MXFP8 quantize kernel requires every individual group size to be a multiple of 128.
+        # for padding and alignment constraints in the kernel and in the V2 grouped GEMM kernel.
+        # group_size_multiplier=32 can produce groups of 32 or 64 rows which violate this.
+        # This cannot be checked at runtime (group sizes live on device), so we skip the
+        # test configuration rather than weaken the kernel-selection logic.
+        if (
+            scaling_mode == ScalingMode.MXFP8_1D_SCALING
+            and group_size_multiplier % 128 != 0
+            and GroupedQuantizePrimitive._use_v2_kernel(
+                scaling_mode.value, input_shape, flatten_axis
+            )
+        ):
+            pytest.skip(
+                "MXFP8 V2 quantize requires each group to be 128-aligned; "
+                f"group_size_multiplier={group_size_multiplier} may produce smaller groups"
+            )
 
         x = jax.random.uniform(subkeys[1], input_shape, in_dtype)
 
@@ -1707,10 +1756,21 @@ fwd_bwd_dtypes = [
 ]
 
 GROUPED_DENSE_INPUT_SHAPES = [
-    # (n_groups, m, n, k), the actual m will be multiplied by 32
-    (5, 32, 128, 64),  # Test the case where n_groups is not a multiple of 4
-    (8, 64, 32, 128),
-    (8, 64, 128, 256),
+    # (n_groups, m, n, k), the actual m will be multiplied by group_size_multiplier
+    (5, 32, 128, 64),  # V1 MXFP8: K=64 not 128-aligned; also tests n_groups not a multiple of 4
+    (8, 64, 32, 128),  # V1 MXFP8 GEMM: N=32 not 128-aligned
+    (
+        8,
+        64,
+        128,
+        256,
+    ),  # V2 MXFP8 eligible: K=256, N=128 both 128-aligned. Alignment is required due to V2 grouped quantize and grouped GEMM kernel requirements.
+    (
+        4,
+        4,
+        128,
+        128,
+    ),  # V2 MXFP8 eligible: K=128, N=128 both 128-aligned (smaller shape). Alignment is required due to V2 grouped quantize and grouped GEMM kernel requirements.
 ]
 
 
@@ -1736,7 +1796,9 @@ class TestGroupedDense:
             ref_out.append(jnp.squeeze(out_i))
         return ref_out
 
-    def _generate_grouped_dense_input(self, dtype, input_shape, data_layout="NN", with_bias=False):
+    def _generate_grouped_dense_input(
+        self, dtype, input_shape, data_layout="NN", with_bias=False, group_size_multiplier=32
+    ):
         key = jax.random.PRNGKey(0)
         subkeys = jax.random.split(key, 4)
         n_groups, m, n, k = input_shape
@@ -1749,9 +1811,9 @@ class TestGroupedDense:
         group_sizes = group_sizes.at[1].set(0)
         assert group_sizes.sum() == m
 
-        # *32 to make sure that input shape works for MXFP8
-        group_sizes = group_sizes * 32
-        m = m * 32
+        # Scale group sizes by the multiplier for alignment requirements.
+        group_sizes = group_sizes * group_size_multiplier
+        m = m * group_size_multiplier
 
         lhs_shape = (m if data_layout[0] == "N" else k, k if data_layout[0] == "N" else m)
         rhs_shape = (n_groups, k if data_layout[1] == "N" else n, n if data_layout[1] == "N" else k)
@@ -1787,13 +1849,18 @@ class TestGroupedDense:
         ref_out = self._ref_grouped_dense(lhs, rhs, None, group_sizes, contracting_dims)
 
         # jitting grouped_gemm
+        lhs_tensor = GroupedNoScaleTensor(
+            data=lhs, amax=None, first_dims=group_sizes, last_dims=None, original_shape=lhs.shape
+        )
+        rhs_tensor = GroupedNoScaleTensor(
+            data=rhs, amax=None, first_dims=None, last_dims=None, original_shape=rhs.shape
+        )
         prim_out = jax.jit(
             tex.grouped_gemm, static_argnames=("contracting_dims", "use_async_d2h_group_sizes")
         )(
-            lhs,
-            rhs,
-            group_sizes,
-            contracting_dims,
+            lhs_tensor,
+            rhs_tensor,
+            contracting_dims=contracting_dims,
             use_async_d2h_group_sizes=True,
         )
 
@@ -1820,13 +1887,24 @@ class TestGroupedDense:
             quantizer.q_dtype = bwd_dtype
 
         out_dtype = jnp.bfloat16
+        # MXFP8 V2 kernel requires each group's row count to be divisible by due to V2 grouped quantize and grouped GEMM kernel requirements.
+        is_mxfp8 = scaling_mode == ScalingMode.MXFP8_1D_SCALING
         lhs, rhs, group_sizes, contracting_dims, _ = self._generate_grouped_dense_input(
-            out_dtype, input_shape, layout
+            out_dtype, input_shape, layout, group_size_multiplier=128 if is_mxfp8 else 32
         )
         ref_out = self._ref_grouped_dense(lhs, rhs, None, group_sizes, contracting_dims)
 
+        lhs_tensor = GroupedNoScaleTensor(
+            data=lhs, amax=None, first_dims=group_sizes, last_dims=None, original_shape=lhs.shape
+        )
+        rhs_tensor = GroupedNoScaleTensor(
+            data=rhs, amax=None, first_dims=None, last_dims=None, original_shape=rhs.shape
+        )
         prim_out = jax.jit(tex.grouped_gemm, static_argnames=("contracting_dims",))(
-            lhs, rhs, group_sizes, contracting_dims, quantizer_set=quantizer_set
+            lhs_tensor,
+            rhs_tensor,
+            contracting_dims=contracting_dims,
+            quantizer_set=quantizer_set,
         )
 
         allclose_dtype = jnp.float8_e4m3fn
@@ -1886,10 +1964,13 @@ class TestGroupedDense:
     def test_grouped_dense_grad_fp8(self, fwd_bwd_dtype, scaling_mode, input_shape):
         fwd_dtype, bwd_dtype = fwd_bwd_dtype
         dtype = jnp.bfloat16
+        # MXFP8 V2 kernel requires each group's row count to be divisible by 128 due to V2 grouped quantize and grouped GEMM kernel requirements.
+        is_mxfp8 = scaling_mode == ScalingMode.MXFP8_1D_SCALING
         x, kernel, group_sizes, contracting_dims, bias = self._generate_grouped_dense_input(
             dtype,
             input_shape,
             with_bias=True,
+            group_size_multiplier=128 if is_mxfp8 else 32,
         )
 
         quantizer_set = QuantizerFactory.create_set(
@@ -1955,3 +2036,83 @@ class TestDebugInspectFFI:
         actual = load_array_dump("my_tensor_gpu0.bin", shape, dtype)
 
         assert_allclose(actual, expected, dtype=dtype)
+
+
+@pytest.mark.parametrize("dtype", [jnp.bfloat16, jnp.float32])
+@pytest.mark.parametrize(
+    "problem_size",
+    [
+        (1, 10000, 100),
+        (1, 50000, 200),
+        (4, 16384, 256),
+        (8, 65536, 512),
+        (1, 1000000, 1000),
+    ],
+)
+class TestTopK:
+    """Correctness tests for the TopK JAX primitive.
+
+    Each test generates an input whose top-k entries lie in a known value range
+    so that correctness can be verified without a full sort, then cross-checks
+    against jax.lax.top_k as a reference.
+    """
+
+    def test_topk_1d(self, dtype, problem_size):
+        """1-D input: single row."""
+        _bs, n, k = problem_size
+
+        prng_key = jax.random.PRNGKey(0)
+        keys = jax.random.split(prng_key, 3)
+        topk_vals = jax.random.uniform(keys[0], shape=(k,), dtype=dtype, minval=1.5, maxval=2.5)
+        bottom_vals = jax.random.uniform(
+            keys[1], shape=(n - k,), dtype=dtype, minval=0.0, maxval=1.0
+        )
+        x = jax.random.permutation(keys[2], jnp.concatenate([topk_vals, bottom_vals]))
+
+        ref_vals, ref_idx = jax.jit(jax.lax.top_k, static_argnums=(1,))(x, k)
+        prim_vals, prim_idx = jax.jit(topk, static_argnums=(1,))(x, k)
+
+        # AIR TopK output is unordered; sort before comparing.
+        ref_vals, ref_idx = jax.lax.sort_key_val(ref_vals, ref_idx)
+        prim_vals, prim_idx = jax.lax.sort_key_val(prim_vals, prim_idx)
+
+        assert_allclose(prim_vals, ref_vals, dtype=dtype)
+
+        sorted_x = jax.lax.sort(x)
+        assert prim_vals[0] >= sorted_x[-(k + 1)]
+
+        # Values at returned indices must match reference.
+        assert_allclose(x[prim_idx], x[ref_idx], dtype=dtype)
+
+    def test_topk_2d(self, dtype, problem_size):
+        """2-D input: each row is an independent top-k problem."""
+        bs, n, k = problem_size
+
+        prng_key = jax.random.PRNGKey(42)
+        keys = jax.random.split(prng_key, 3)
+        topk_vals = jax.random.uniform(keys[0], shape=(bs, k), dtype=dtype, minval=1.5, maxval=2.5)
+        bottom_vals = jax.random.uniform(
+            keys[1], shape=(bs, n - k), dtype=dtype, minval=0.0, maxval=1.0
+        )
+        x_unsorted = jnp.concatenate([topk_vals, bottom_vals], axis=1)
+        # Shuffle columns independently per row.
+        col_perm = jax.random.permutation(keys[2], n)
+        x = x_unsorted[:, col_perm]
+
+        ref_vals, ref_idx = jax.jit(jax.lax.top_k, static_argnums=(1,))(x, k)
+        prim_vals, prim_idx = jax.jit(topk, static_argnums=(1,))(x, k)
+
+        # Sort each row independently for comparison.
+        ref_vals, ref_idx = jax.vmap(jax.lax.sort_key_val)(ref_vals, ref_idx)
+        prim_vals, prim_idx = jax.vmap(jax.lax.sort_key_val)(prim_vals, prim_idx)
+
+        assert_allclose(prim_vals, ref_vals, dtype=dtype)
+
+        # For each row, the smallest selected value must be >= the (k+1)-th largest in that row.
+        sorted_x = jnp.sort(x, axis=1)
+        assert jnp.all(prim_vals[:, 0] >= sorted_x[:, -(k + 1)])
+
+        # Values at returned indices must match reference values.
+        prim_gathered = jnp.take_along_axis(x, prim_idx, axis=1)
+        ref_gathered = jnp.take_along_axis(x, ref_idx, axis=1)
+        assert_allclose(prim_gathered, ref_gathered, dtype=dtype)

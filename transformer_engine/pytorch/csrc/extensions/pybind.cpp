@@ -141,6 +141,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("otype"));
   m.def("group_quantize", transformer_engine::pytorch::group_quantize, py::arg("tensor"),
         py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"));
+  m.def("group_dequantize", transformer_engine::pytorch::group_dequantize,
+        "Dequantize group tensor", py::arg("input"), py::arg("otype"));
+  m.def("bgrad_group_quantize", transformer_engine::pytorch::bgrad_group_quantize,
+        py::arg("tensor"), py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"));
   m.def("bgrad_quantize", transformer_engine::pytorch::bgrad_quantize,
         "Compute bias gradient and quantize", py::arg("input"), py::arg("quantizer"));
   m.def("generic_gemm", transformer_engine::pytorch::gemm, "Compute GEMM (matrix-matrix multiply)",
@@ -389,6 +393,18 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Fused Multi-tensor unpadding", py::call_guard<py::gil_scoped_release>());
   m.def("swizzle_scales_for_gemm_", &transformer_engine::pytorch::inplace_swizzle_scale_for_gemm,
         "Convert tensor block scales into GEMM swizzled format");
+  m.def("multi_tensor_swizzle_scales_for_gemm_",
+        &transformer_engine::pytorch::inplace_multi_tensor_swizzle_scales_for_gemm,
+        "Convert multiple tensors' block scales into GEMM swizzled format", py::arg("tensors"),
+        py::arg("rowwise_usage"), py::arg("columnwise_usage"));
+  m.def(
+      "multi_tensor_swizzle_scales_for_gemm_unchecked_",
+      &transformer_engine::pytorch::inplace_multi_tensor_swizzle_scales_for_gemm_unchecked,
+      "Convert multiple tensors' block scales into GEMM swizzled format (skip scale shape checks)",
+      py::arg("tensors"), py::arg("rowwise_usage"), py::arg("columnwise_usage"));
+  m.def("grouped_swizzle_for_gemm", &transformer_engine::pytorch::grouped_swizzle_for_gemm,
+        "In-place swizzle of grouped tensor scales for GEMM", py::arg("tensor"), py::arg("rowwise"),
+        py::arg("columnwise"));
 
   // attention kernels
   m.def("fa_prepare_fwd", &transformer_engine::pytorch::fa_prepare_fwd,
@@ -396,6 +412,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fa_prepare_bwd", &transformer_engine::pytorch::fa_prepare_bwd,
         "Backward of QKV preparation for Flash Attention",
         py::call_guard<py::gil_scoped_release>());
+  m.def("multi_tensor_transpose_to_bhsd",
+        &transformer_engine::pytorch::multi_tensor_transpose_to_bhsd,
+        "Permute multiple tensors from BSHD/SBHD to BHSD.", py::arg("inputs"),
+        py::arg("original_format"), py::arg("outputs") = std::vector<std::optional<at::Tensor>>{},
+        py::call_guard<py::gil_scoped_release>());
+  m.def("multi_tensor_pad_last_dim", &transformer_engine::pytorch::multi_tensor_pad_last_dim,
+        "Pad multiple tensors' last dimension to a common alignment.", py::arg("inputs"),
+        py::arg("alignment"), py::call_guard<py::gil_scoped_release>());
   m.def("fused_attn_fwd", &transformer_engine::pytorch::fused_attn_fwd,
         "Fused Attention FP8/BF16/FP16 FWD with separate Q, K and V");
   m.def("fused_attn_bwd", &transformer_engine::pytorch::fused_attn_bwd,
@@ -456,6 +480,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Get cublasLt version", py::call_guard<py::gil_scoped_release>());
   m.def("get_cudnn_version", &transformer_engine::pytorch::get_cudnn_version, "Get cuDNN version",
         py::call_guard<py::gil_scoped_release>());
+  m.def("convert_host_pointers_to_tensor",
+        &transformer_engine::pytorch::convert_host_pointers_to_tensor,
+        "Copy host-side device pointers into device tensors", py::arg("tensor_lists"),
+        py::call_guard<py::gil_scoped_release>());
+  m.def("get_device_pointer_for_data_and_scales",
+        &transformer_engine::pytorch::get_device_pointer_for_data_and_scales,
+        "Swizzle scales and collect data/scale device pointers into device tensors",
+        py::arg("data_tensors"), py::arg("scale_tensors"), py::arg("swizzle") = false,
+        py::arg("rowwise"), py::arg("data_dtype"), py::call_guard<py::gil_scoped_release>());
   m.def("splits_to_offsets", &transformer_engine::pytorch::splits_to_offsets,
         "Compute grouped tensor offsets from split sizes", py::arg("first_dims"),
         py::arg("logical_last_dim"), py::call_guard<py::gil_scoped_release>());
@@ -546,6 +579,17 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("multi_tensor_compute_scale_inv_e8m0",
         &transformer_engine::pytorch::multi_tensor_compute_scale_inv_e8m0_cuda,
         "Fused compute E8M0 scale_inv from amax", py::call_guard<py::gil_scoped_release>());
+
+  // Newton-Schulz (cuSolverMp)
+  m.def("cusolvermp_ctx_create", &transformer_engine::pytorch::cusolvermp_ctx_create,
+        "Create cuSolverMp context for Newton-Schulz", py::arg("nccl_comm_ptr"), py::arg("nranks"),
+        py::arg("rank"), py::call_guard<py::gil_scoped_release>());
+  m.def("cusolvermp_ctx_destroy", &transformer_engine::pytorch::cusolvermp_ctx_destroy,
+        "Destroy cuSolverMp context", py::arg("ctx_ptr"), py::call_guard<py::gil_scoped_release>());
+  m.def("newton_schulz", &transformer_engine::pytorch::newton_schulz,
+        "Newton-Schulz matrix orthogonalization", py::arg("ctx_ptr"), py::arg("m"), py::arg("n"),
+        py::arg("x"), py::arg("num_iterations"), py::arg("coefficients"),
+        py::call_guard<py::gil_scoped_release>());
 
   // Comm+GEMM Overlap
   m.def("bulk_overlap_ag_with_external_gemm",

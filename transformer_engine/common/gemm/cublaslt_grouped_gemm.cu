@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <type_traits>
 #include <vector>
 
 #include "../common.h"
@@ -42,7 +43,6 @@ inline void CreateCublasHandle(cublasLtHandle_t *handle) {
 #define CUBLAS_FP8_BLOCK_GROUPED_GEMM_VERSION 130400
 
 // BF16 support for grouped GEMM requires cuBLAS 13.3+
-// cuBLAS 13.2 is mostly functional but contains a bug for wgrad when a group has k=0, the weight gradient will be uninitialized random data instead of zeros.
 #define CUBLAS_GROUPED_GEMM_VERSION 130300
 
 #if CUBLAS_VERSION >= CUBLAS_GROUPED_GEMM_VERSION
@@ -103,12 +103,29 @@ struct TensorShapeInfo {
   }
 };
 
-// Helper functions to compute average dimensions from logical_shape for heuristics
-// These are hints for cuBLASLt algorithm selection, don't need to be exact
+// Helper functions to compute average dimensions for cuBLASLt algorithm-selection heuristics.
+//
+// logical_shape encoding (from build_grouped_tensor):
+//   all_same:      {num_tensors * M, N}
+//   varying_first: {sum_of_first_dims, common_last}
+//   varying_last:  {common_first, sum_of_last_dims}
+//   varying_both:  {1, total_elements}   <-- lossy, can't recover per-dim averages
+//
+// We use all_same_first/last_dim() + get_common_first/last_dim() to get exact
+// answers whenever possible, falling back to logical_shape division otherwise.
+// For varying_both, per-dim averages are unrecoverable without a D2H copy,
+// so we return 1 — a valid non-zero hint that won't skip work.
 inline int64_t compute_avg_first_dim(const transformer_engine::GroupedTensor *t) {
-  // logical_shape[0] is either num_tensors*M (uniform) or sum_of_M (varying first)
-  // In both cases, dividing by num_tensors gives the average
-  return static_cast<int64_t>(t->logical_shape.data[0]) / static_cast<int64_t>(t->num_tensors);
+  if (t->all_same_first_dim()) {
+    return static_cast<int64_t>(t->get_common_first_dim());
+  }
+  const int64_t n = static_cast<int64_t>(t->num_tensors);
+  if (t->all_same_last_dim()) {
+    // varying_first only: logical_shape = {sum_of_first_dims, common_last}
+    return static_cast<int64_t>(t->logical_shape.data[0]) / n;
+  }
+  // varying_both: logical_shape = {1, total_elements}, no way to recover avg first dim
+  return 1;
 }
 
 inline int64_t compute_avg_last_dim(const transformer_engine::GroupedTensor *t) {
@@ -256,31 +273,37 @@ inline size_t validate_grouped_gemm_inputs(
            dtype == transformer_engine::DType::kFloat16 ||
            dtype == transformer_engine::DType::kFloat4E2M1;
   };
-  bool dtype_ok = true;
   for (const auto *tensor : inputs) {
-    dtype_ok = dtype_ok && is_supported_input_dtype(tensor->dtype());
+    if (tensor->has_data() || tensor->has_columnwise_data()) {
+      NVTE_CHECK(is_supported_input_dtype(tensor->dtype()),
+                 "Grouped GEMM inputs must be FP8, BF16, or FP16, got ",
+                 transformer_engine::to_string(tensor->dtype()), ".");
+    }
   }
-  NVTE_CHECK(dtype_ok, "Grouped GEMM inputs must be FP8, BF16, or FP16.");
+  // Cross-operand consistency across all inputs (skip tensors without data).
+  const transformer_engine::GroupedTensor *ref = nullptr;
   for (const auto *tensor : inputs) {
-    NVTE_CHECK(tensor->has_data() || tensor->has_columnwise_data(),
-               "Grouped GEMM: input tensor is missing both row-wise and column-wise data");
+    if (tensor->has_data() || tensor->has_columnwise_data()) {
+      ref = tensor;
+      break;
+    }
   }
-
-  // Cross-operand consistency across all inputs.
-  const auto *ref = *inputs.begin();
-  const bool ref_is_fp8 = is_fp8_dtype(ref->dtype());
-  const bool ref_is_mxfp8 = transformer_engine::is_mxfp_scaling(ref->scaling_mode);
-  const bool ref_is_fp8_block = transformer_engine::is_fp8_block_scaling(ref->scaling_mode);
-  for (const auto *tensor : inputs) {
-    NVTE_CHECK(is_fp8_dtype(tensor->dtype()) == ref_is_fp8,
-               "Grouped GEMM: A and B must both be FP8 or both be non-FP8.");
-    NVTE_CHECK(transformer_engine::is_mxfp_scaling(tensor->scaling_mode) == ref_is_mxfp8,
-               "Grouped GEMM: A and B must both use MXFP8 scaling or both not.");
-    NVTE_CHECK(transformer_engine::is_fp8_block_scaling(tensor->scaling_mode) == ref_is_fp8_block,
-               "Grouped GEMM: A and B must both use FP8 block scaling or both not.");
-    if (ref_is_mxfp8 || transformer_engine::is_nvfp_scaling(tensor->scaling_mode)) {
-      NVTE_CHECK(tensor->with_gemm_swizzled_scales,
-                 "Grouped GEMM: scales must be swizzled for GEMM (MXFP8/NVFP4).");
+  if (ref != nullptr) {
+    const bool ref_is_fp8 = is_fp8_dtype(ref->dtype());
+    const bool ref_is_mxfp8 = transformer_engine::is_mxfp_scaling(ref->scaling_mode);
+    const bool ref_is_fp8_block = transformer_engine::is_fp8_block_scaling(ref->scaling_mode);
+    for (const auto *tensor : inputs) {
+      if (!(tensor->has_data() || tensor->has_columnwise_data())) continue;
+      NVTE_CHECK(is_fp8_dtype(tensor->dtype()) == ref_is_fp8,
+                 "Grouped GEMM: A and B must both be FP8 or both be non-FP8.");
+      NVTE_CHECK(transformer_engine::is_mxfp_scaling(tensor->scaling_mode) == ref_is_mxfp8,
+                 "Grouped GEMM: A and B must both use MXFP8 scaling or both not.");
+      NVTE_CHECK(transformer_engine::is_fp8_block_scaling(tensor->scaling_mode) == ref_is_fp8_block,
+                 "Grouped GEMM: A and B must both use FP8 block scaling or both not.");
+      if (ref_is_mxfp8 || transformer_engine::is_nvfp_scaling(tensor->scaling_mode)) {
+        NVTE_CHECK(tensor->with_gemm_swizzled_scales,
+                   "Grouped GEMM: scales must be swizzled for GEMM (MXFP8/NVFP4).");
+      }
     }
   }
   return num_tensors;
@@ -363,22 +386,23 @@ struct GroupedGemmConfig {
   int64_t avg_m = 0;
   int64_t avg_n = 0;
   int64_t avg_k = 0;
+  int sm_count = 0;
 };
 
-constexpr int kMaxTensorsPerKernel = 64;
+constexpr int kMaxGroups = 64;
 // Arguments for the grouped GEMM kernel that operates on multiple output tensors.
 struct MultiTensorGroupGemmOutputArgs {
-  void *data_ptrs[kMaxTensorsPerKernel];
-  int rows[kMaxTensorsPerKernel];
-  int cols[kMaxTensorsPerKernel];
+  void *data_ptrs[kMaxGroups];
+  int rows[kMaxGroups];
+  int cols[kMaxGroups];
 };
 
 // Arguments for the grouped GEMM kernel that operates on multiple inputA tensors.
 struct MultiTensorGroupGemmInputArgs {
-  void *data_ptrs[kMaxTensorsPerKernel];
-  void *scale_inv_ptrs[kMaxTensorsPerKernel];
-  int rows[kMaxTensorsPerKernel];
-  int cols[kMaxTensorsPerKernel];
+  void *data_ptrs[kMaxGroups];
+  void *scale_inv_ptrs[kMaxGroups];
+  int rows[kMaxGroups];
+  int cols[kMaxGroups];
 };
 struct MultiTensorListInfo {
   bool all_row = true;
@@ -493,8 +517,8 @@ inline MultiTensorGroupGemmOutputArgs build_grouped_gemm_multi_out_args(
              "_tensors=", list_size);
   NVTE_CHECK(list_size == expected_num_tensors, "Grouped GEMM: ", name,
              "_list must have num_tensors (", expected_num_tensors, ") entries, got ", list_size);
-  NVTE_CHECK(list_size <= static_cast<size_t>(kMaxTensorsPerKernel), "Grouped GEMM: ", name,
-             "_list supports up to ", kMaxTensorsPerKernel, " tensors per kernel, got ", list_size);
+  NVTE_CHECK(list_size <= static_cast<size_t>(kMaxGroups), "Grouped GEMM: ", name,
+             "_list supports up to ", kMaxGroups, " tensors per kernel, got ", list_size);
 
   for (size_t i = 0; i < list_size; ++i) {
     const transformer_engine::Tensor *t =
@@ -569,8 +593,8 @@ inline MultiTensorListInfo validate_grouped_gemm_multi_inputA_list(const NVTETen
              "_tensors=", list_size);
   NVTE_CHECK(list_size == expected_num_tensors, "Grouped GEMM: ", name,
              "_list must have num_tensors (", expected_num_tensors, ") entries, got ", list_size);
-  NVTE_CHECK(list_size <= static_cast<size_t>(kMaxTensorsPerKernel), "Grouped GEMM: ", name,
-             "_list supports up to ", kMaxTensorsPerKernel, " tensors per kernel, got ", list_size);
+  NVTE_CHECK(list_size <= static_cast<size_t>(kMaxGroups), "Grouped GEMM: ", name,
+             "_list supports up to ", kMaxGroups, " tensors per kernel, got ", list_size);
 
   const transformer_engine::Tensor *t0 = transformer_engine::convertNVTETensorCheck(tensor_list[0]);
   info.scaling_mode = t0->scaling_mode;
@@ -649,8 +673,15 @@ inline GroupedOperandSelection select_grouped_operand(const transformer_engine::
   using namespace transformer_engine;
   const bool has_row = t->has_data();
   const bool has_col = t->has_columnwise_data();
-  NVTE_CHECK(has_row || has_col,
-             "Grouped GEMM operand is missing both row-wise and column-wise data");
+
+  if (!has_row && !has_col) {
+    GroupedOperandSelection sel{};
+    sel.trans = trans;
+    sel.scaling_mode = t->scaling_mode;
+    sel.dtype = t->dtype();
+    sel.shape = create_shape_info(t, /*swap_dims=*/false);
+    return sel;
+  }
 
   const auto sm = t->scaling_mode;
   const bool mxfp8 = is_mxfp_scaling(sm);
@@ -956,7 +987,11 @@ inline void execute_grouped_gemm(const GroupedGemmSetupWorkspace &setup_workspac
     set_fp8_scale_pointers(matmulDesc, setup_workspace.a_scale_inv_ptrs,
                            setup_workspace.b_scale_inv_ptrs);
   }
-
+  if (config.sm_count != 0) {
+    NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(&matmulDesc,
+                                                     CUBLASLT_MATMUL_DESC_SM_COUNT_TARGET,
+                                                     &config.sm_count, sizeof(config.sm_count)));
+  }
   cublasLtMatmulAlgo_t algo = select_grouped_gemm_algo(handle, matmulDesc, descA, descB, descC,
                                                        descD, config.avg_m, config.avg_n,
                                                        config.avg_k);
@@ -1000,45 +1035,120 @@ __forceinline__ __device__ int64_t compute_grouped_tensor_offset(const TensorSha
   }
 }
 
+// Linear scan to find which tensor contains the given row.
+// Returns the tensor index and writes the exclusive end-row of that tensor to *out_tensor_row_end.
+__forceinline__ __device__ int find_tensor_for_row(const int64_t *first_dims, int64_t uniform_first,
+                                                   int row, int num_tensors,
+                                                   int *out_tensor_row_end) {
+  int offset = 0;
+  for (int i = 0; i < num_tensors; i++) {
+    int dim = first_dims ? static_cast<int>(first_dims[i]) : static_cast<int>(uniform_first);
+    offset += dim;
+    if (row < offset) {
+      *out_tensor_row_end = offset;
+      return i;
+    }
+  }
+  *out_tensor_row_end = offset;
+  return num_tensors - 1;
+}
 
-// Kernel that performs bias addition to the Grouped GEMM output tensors.
-// Bias itself is a grouped tensor with the collections of same number of tensors
-// as the output tensors.
-template <typename T, int kVec>
-__global__ void grouped_bias_add_kernel(char *d_base, const char *bias_base, TensorShapeInfo d_meta,
-                                        TensorShapeInfo bias_meta, size_t num_tensors) {
-  const size_t tensor_idx = blockIdx.x;
-  if (tensor_idx >= num_tensors) return;
-
-  const int64_t m = d_meta.first_dims ? d_meta.first_dims[tensor_idx] : d_meta.uniform_first;
-  const int64_t n = d_meta.last_dims ? d_meta.last_dims[tensor_idx] : d_meta.uniform_last;
-  if (m == 0 || n == 0) return;
-
-  const int64_t d_offset = compute_grouped_tensor_offset(d_meta, tensor_idx);
-  const int64_t bias_offset = compute_grouped_tensor_offset(bias_meta, tensor_idx);
-
-  auto *d_ptr = reinterpret_cast<T *>(d_base + d_offset * sizeof(T));
-  const auto *bias_ptr = reinterpret_cast<const T *>(bias_base + bias_offset * sizeof(T));
-
-  const int64_t elements = m * n;
-  const int64_t vec_count = elements / kVec;
+// Kernel that performs (optionally scaled) bias addition to Grouped GEMM output tensors.
+// SM-filling grid with grid-stride over row chunks.
+// 2D grid: blockIdx.x = SM-filling row blocks, blockIdx.y = column chunk.
+// Each block grid-strides over kRowsPerBlock-sized row chunks, processing
+// all chunks that map to it. Safe when sum(first_dims) <= total_rows.
+template <typename T, int kVec, bool UseScale, int kBlockDim, int kRowsPerBlock>
+__global__ void grouped_bias_add_kernel(char *__restrict__ d_base,
+                                        const char *__restrict__ bias_base,
+                                        const float *__restrict__ scale_base,
+                                        TensorShapeInfo d_meta, int n, int total_rows,
+                                        int num_tensors) {
   using VecStorage = transformer_engine::VectorizedStorage<T, kVec>;
   using VecType = typename VecStorage::LType;
-  transformer_engine::VectorizedLoader<T, kVec, true> loader(d_ptr, elements);
-  transformer_engine::VectorizedStorer<T, kVec, true> storer(d_ptr, elements);
-  const int64_t vec_id = static_cast<int64_t>(blockIdx.y) * blockDim.x + threadIdx.x;
-  if (vec_id >= vec_count) return;
-  const int64_t vec_start = vec_id * kVec;
-  const int64_t col = vec_start % n;
-  loader.load(vec_id, elements);
-  const auto *b_vec = reinterpret_cast<const VecType *>(bias_ptr + col);
-  VecStorage b_in;
-  b_in.scratch_.aligned = *b_vec;
-#pragma unroll
-  for (int i = 0; i < kVec; ++i) {
-    storer.separate()[i] = loader.separate()[i] + b_in.scratch_.separate[i];
+
+  const int tid = static_cast<int>(threadIdx.x);
+  const int row_bid = static_cast<int>(blockIdx.x);
+  const int col_bid = static_cast<int>(blockIdx.y);
+  const int row_grid_stride = static_cast<int>(gridDim.x);
+
+  // Single-warp reduction to compute valid_rows = sum(first_dims).
+  // kMaxGroups <= 64 so warp 0 (32 lanes) covers it with <=2 loads each.
+  __shared__ int s_valid_rows;
+  if (tid < 32) {
+    int local_sum = 0;
+    for (int i = tid; i < num_tensors; i += 32) {
+      local_sum += d_meta.first_dims ? static_cast<int>(d_meta.first_dims[i])
+                                     : static_cast<int>(d_meta.uniform_first);
+    }
+    for (int offset = 16; offset > 0; offset >>= 1) {
+      local_sum += __shfl_down_sync(0xffffffff, local_sum, offset);
+    }
+    if (tid == 0) s_valid_rows = local_sum;
   }
-  storer.store(vec_id, elements);
+  __syncthreads();
+  const int valid_rows = s_valid_rows;
+
+  const int block_cols = kBlockDim * kVec;
+  const int col = col_bid * block_cols + tid * kVec;
+  if (col >= n) return;
+
+  T *__restrict__ d = reinterpret_cast<T *>(d_base);
+  const T *__restrict__ bias = reinterpret_cast<const T *>(bias_base);
+
+  // Grid-stride loop over row chunks.
+  for (int chunk_start = row_bid * kRowsPerBlock; chunk_start < valid_rows;
+       chunk_start += row_grid_stride * kRowsPerBlock) {
+    const int row_start = chunk_start;
+    const int row_end = min(row_start + kRowsPerBlock, valid_rows);
+
+    // Linear scan to find the starting row's tensor and its boundary.
+    int tensor_row_end;
+    int tensor_idx = find_tensor_for_row(d_meta.first_dims, d_meta.uniform_first, row_start,
+                                         num_tensors, &tensor_row_end);
+    int bias_idx = tensor_idx * n;
+
+    VecStorage b_in;
+
+    // Walk tensor segments within this chunk's row range.
+    int seg_start = row_start;
+    while (seg_start < row_end) {
+      while (tensor_idx < num_tensors - 1 && tensor_row_end <= seg_start) {
+        tensor_idx++;
+        bias_idx += n;
+        int dim = d_meta.first_dims ? static_cast<int>(d_meta.first_dims[tensor_idx])
+                                    : static_cast<int>(d_meta.uniform_first);
+        tensor_row_end += dim;
+      }
+      b_in.scratch_.aligned = *reinterpret_cast<const VecType *>(bias + bias_idx + col);
+      const int seg_end = min(tensor_row_end, row_end);
+
+      for (int row = seg_start; row < seg_end; row++) {
+        T *d_ptr = d + row * n + col;
+        VecStorage d_in;
+        d_in.scratch_.aligned = *reinterpret_cast<const VecType *>(d_ptr);
+
+        [[maybe_unused]] float s_val;
+        if constexpr (UseScale) s_val = scale_base[row];
+
+#pragma unroll
+        for (int i = 0; i < kVec; ++i) {
+          if constexpr (UseScale) {
+            d_in.scratch_.separate[i] =
+                static_cast<T>(fmaf(static_cast<float>(b_in.scratch_.separate[i]), s_val,
+                                    static_cast<float>(d_in.scratch_.separate[i])));
+          } else {
+            d_in.scratch_.separate[i] =
+                static_cast<T>(static_cast<float>(d_in.scratch_.separate[i]) +
+                               static_cast<float>(b_in.scratch_.separate[i]));
+          }
+        }
+        *reinterpret_cast<VecType *>(d_ptr) = d_in.scratch_.aligned;
+      }
+
+      seg_start = seg_end;
+    }
+  }
 }
 
 // Single kernel that sets up all GEMM parameters.
@@ -1269,32 +1379,13 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
   NVTE_API_CALL(nvte_grouped_gemm);
   using namespace transformer_engine;
 
-  // Grouped GEMM requires Blackwell (SM100) or newer with cuBLAS 13.2+,
+  // Grouped GEMM requires Blackwell (SM100) or newer with cuBLAS 13.3+,
   // or Hopper (SM90) with cuBLAS 13.4+.
+  check_grouped_gemm_requirements("nvte_grouped_gemm");
+
   const int current_device = transformer_engine::cuda::current_device();
-  const int cublas_ver = transformer_engine::cuda::cublas_version();
   const int sm = transformer_engine::cuda::sm_arch(current_device);
   const bool use_per_group_alpha_beta = grouped_gemm_supports_per_group_alpha_beta(sm);
-
-#if CUBLAS_VERSION >= CUBLAS_GROUPED_GEMM_HOPPER_VERSION
-  // Compiled with cuBLAS 13.4+: Hopper (SM90) and Blackwell+ are both supported at runtime.
-  NVTE_CHECK(sm >= 90,
-             "nvte_grouped_gemm requires Hopper (SM90) or newer architecture.");
-  NVTE_CHECK(cublas_ver >= 130200,
-             "nvte_grouped_gemm requires cuBLAS 13.2+, but run-time cuBLAS version is ", cublas_ver);
-  // Hopper (SM90-SM9x) additionally requires cuBLAS 13.4+ at runtime
-  if (sm < 100) {
-    NVTE_CHECK(cublas_ver >= CUBLAS_GROUPED_GEMM_HOPPER_VERSION,
-               "nvte_grouped_gemm on Hopper (SM90) requires cuBLAS 13.4+, but run-time cuBLAS "
-               "version is ", cublas_ver);
-  }
-#else
-  // Compiled with cuBLAS 13.2: only Blackwell+ is supported.
-  NVTE_CHECK(sm >= 100,
-             "nvte_grouped_gemm requires Blackwell (SM100) or newer architecture.");
-  NVTE_CHECK(cublas_ver >= 130200,
-             "nvte_grouped_gemm requires cuBLAS 13.2+, but run-time cuBLAS version is ", cublas_ver);
-#endif  // CUBLAS_VERSION >= CUBLAS_GROUPED_GEMM_HOPPER_VERSION
 
   // Convert to internal types
   const GroupedTensor *inputA = convertNVTEGroupedTensorCheck(A);
@@ -1353,6 +1444,7 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
   gemm_config.avg_n = config_.avg_n.value_or(compute_avg_last_dim(outputD));
   gemm_config.avg_k =
       config_.avg_k.value_or(transa ? compute_avg_first_dim(inputA) : compute_avg_last_dim(inputA));
+  gemm_config.sm_count = config_.sm_count;
   execute_grouped_gemm(workspace.setup_workspace, A_sel, B_sel, outputD->dtype(), num_tensors,
                        gemm_config, workspace.cublas_workspace_ptr, stream);
 }
@@ -1514,6 +1606,7 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
       config_.avg_n.value_or(transb ? compute_avg_first_dim(inputB) : compute_avg_last_dim(inputB));
   gemm_config.avg_k =
       config_.avg_k.value_or(static_cast<bool>(transa) ? avg_last_dim : avg_first_dim);
+  gemm_config.sm_count = config_.sm_count;
   execute_grouped_gemm(workspace.setup_workspace, A_sel, B_sel, outputD->dtype(), num_tensors,
                        gemm_config, workspace.cublas_workspace_ptr, stream);
 }
@@ -1596,56 +1689,124 @@ void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
       config_.avg_n.value_or(transb ? compute_avg_first_dim(inputB) : compute_avg_last_dim(inputB));
   gemm_config.avg_k =
       config_.avg_k.value_or(transa ? compute_avg_first_dim(inputA) : compute_avg_last_dim(inputA));
+  gemm_config.sm_count = config_.sm_count;
   execute_grouped_gemm(workspace.setup_workspace, A_sel, B_sel, d_dtype, num_tensors,
                        gemm_config, workspace.cublas_workspace_ptr, stream);
 }
+
+namespace {
+
+void launch_grouped_bias_add(const transformer_engine::GroupedTensor *outputD,
+                             const transformer_engine::GroupedTensor *bias_tensor,
+                             const float *scale_ptr, bool use_scale, cudaStream_t stream) {
+  using namespace transformer_engine;
+
+  const char *api_name = use_scale ? "Grouped scaled bias add" : "Grouped bias add";
+
+  NVTE_CHECK(outputD->num_tensors >= 1, api_name, ": number of tensors must be at least 1");
+  NVTE_CHECK(outputD->num_tensors == bias_tensor->num_tensors, api_name,
+             ": output and bias must have the same number of tensors");
+  NVTE_CHECK(outputD->has_data(), api_name, ": output is missing row-wise data");
+  NVTE_CHECK(bias_tensor->has_data(), api_name, ": bias is missing row-wise data");
+  NVTE_CHECK(outputD->dtype() == bias_tensor->dtype(), api_name,
+             ": output and bias must have matching dtypes");
+  NVTE_CHECK(bias_tensor->all_same_first_dim(), api_name,
+             ": bias must have uniform first dim (expected 1)");
+  NVTE_CHECK(bias_tensor->get_common_first_dim() == 1, api_name, ": bias first dim must be 1");
+  NVTE_CHECK(outputD->all_same_last_dim() && bias_tensor->all_same_last_dim(), api_name,
+             ": requires uniform last dim for output and bias");
+  NVTE_CHECK(outputD->get_common_last_dim() == bias_tensor->get_common_last_dim(), api_name,
+             ": output and bias last dims must match");
+
+  const TensorShapeInfo d_meta = TensorShapeInfo::from_tensor(outputD);
+
+  const DType dtype = outputD->dtype();
+  constexpr int kThreads = 128;
+
+  const int num_tensors = static_cast<int>(outputD->num_tensors);
+  NVTE_CHECK(num_tensors <= kMaxGroups, api_name, " supports at most ", kMaxGroups,
+             " tensors, got ", num_tensors);
+  const int total_rows = static_cast<int>(outputD->logical_shape.data[0]);
+  const int n = static_cast<int>(outputD->get_common_last_dim());
+
+  const size_t elem_size = typeToSize(dtype);
+  const int kVec = (elem_size <= 2) ? 8 : 4;
+  NVTE_CHECK(n % kVec == 0, api_name, ": requires last dim divisible by ", kVec);
+
+  constexpr int kRowsPerBlock = 16;
+  constexpr int kBlocksPerSM = 32;
+
+  const int num_sms = transformer_engine::cuda::sm_count();
+
+  const int block_cols = kThreads * kVec;
+  const int col_blocks = (n + block_cols - 1) / block_cols;
+  const int max_row_chunks = (total_rows + kRowsPerBlock - 1) / kRowsPerBlock;
+  const int row_blocks = std::min(max_row_chunks, num_sms * kBlocksPerSM / col_blocks);
+  const dim3 grid(std::max(1, row_blocks), col_blocks);
+  const dim3 block(kThreads);
+
+  auto launch = [&](auto use_scale_tag) {
+    constexpr bool kUseScale = decltype(use_scale_tag)::value;
+    if (elem_size <= 2) {
+      constexpr int kV = 8;
+      TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(dtype, T, {
+        grouped_bias_add_kernel<T, kV, kUseScale, kThreads, kRowsPerBlock>
+            <<<grid, block, 0, stream>>>(static_cast<char *>(outputD->data.dptr),
+                                         static_cast<const char *>(bias_tensor->data.dptr),
+                                         scale_ptr, d_meta, n, total_rows, num_tensors);
+      });
+    } else {
+      constexpr int kV = 4;
+      TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(dtype, T, {
+        grouped_bias_add_kernel<T, kV, kUseScale, kThreads, kRowsPerBlock>
+            <<<grid, block, 0, stream>>>(static_cast<char *>(outputD->data.dptr),
+                                         static_cast<const char *>(bias_tensor->data.dptr),
+                                         scale_ptr, d_meta, n, total_rows, num_tensors);
+      });
+    }
+  };
+
+  if (use_scale) {
+    launch(std::true_type{});
+  } else {
+    launch(std::false_type{});
+  }
+
+  NVTE_CHECK_CUDA(cudaGetLastError());
+}
+
+}  // namespace
 
 void nvte_grouped_bias_add(const NVTEGroupedTensor output, const NVTEGroupedTensor bias,
                            cudaStream_t stream) {
   NVTE_API_CALL(nvte_grouped_bias_add);
   using namespace transformer_engine;
-
   const GroupedTensor *outputD = convertNVTEGroupedTensorCheck(output);
   const GroupedTensor *bias_tensor = convertNVTEGroupedTensorCheck(bias);
+  launch_grouped_bias_add(outputD, bias_tensor, nullptr, false, stream);
+}
 
-  NVTE_CHECK(outputD->num_tensors >= 1, "Grouped bias add: number of tensors must be at least 1");
-  NVTE_CHECK(outputD->num_tensors == bias_tensor->num_tensors,
-             "Grouped bias add: output and bias must have the same number of tensors");
-  NVTE_CHECK(outputD->has_data(), "Grouped bias add: output is missing row-wise data");
-  NVTE_CHECK(bias_tensor->has_data(), "Grouped bias add: bias is missing row-wise data");
-  NVTE_CHECK(outputD->dtype() == bias_tensor->dtype(),
-             "Grouped bias add: output and bias must have matching dtypes");
-  NVTE_CHECK(bias_tensor->all_same_first_dim(),
-             "Grouped bias add: bias must have uniform first dim (expected 1)");
-  NVTE_CHECK(bias_tensor->get_common_first_dim() == 1,
-             "Grouped bias add: bias first dim must be 1");
-  NVTE_CHECK(outputD->all_same_last_dim() && bias_tensor->all_same_last_dim(),
-             "Grouped bias add requires uniform last dim for output and bias");
-  NVTE_CHECK(outputD->get_common_last_dim() == bias_tensor->get_common_last_dim(),
-             "Grouped bias add: output and bias last dims must match");
-  constexpr int kVec = 4;
-  NVTE_CHECK(outputD->get_common_last_dim() % kVec == 0,
-             "Grouped bias add requires last dim divisible by ", kVec);
+void nvte_grouped_scaled_bias_add(const NVTEGroupedTensor output, const NVTEGroupedTensor bias,
+                                  const NVTETensor scale, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_grouped_scaled_bias_add);
+  using namespace transformer_engine;
+  const GroupedTensor *outputD = convertNVTEGroupedTensorCheck(output);
+  const GroupedTensor *bias_tensor = convertNVTEGroupedTensorCheck(bias);
+  const Tensor *scale_tensor = convertNVTETensorCheck(scale);
 
-  const TensorShapeInfo d_meta = TensorShapeInfo::from_tensor(outputD);
-  const TensorShapeInfo bias_meta = TensorShapeInfo::from_tensor(bias_tensor);
+  NVTE_CHECK(scale_tensor->data.dptr != nullptr,
+             "Grouped scaled bias add: scale tensor must not be null");
+  NVTE_CHECK(scale_tensor->dtype() == DType::kFloat32,
+             "Grouped scaled bias add: scale must be float32");
+  NVTE_CHECK(scale_tensor->data.shape.size() == 1,
+             "Grouped scaled bias add: scale must be 1D, got ", scale_tensor->data.shape.size(),
+             "D");
+  const size_t total_rows = static_cast<size_t>(outputD->logical_shape.data[0]);
+  NVTE_CHECK(scale_tensor->data.shape[0] == total_rows, "Grouped scaled bias add: scale size (",
+             scale_tensor->data.shape[0], ") must equal total rows (", total_rows, ")");
 
-  const DType dtype = outputD->dtype();
-  constexpr int kThreads = 256;
-  const size_t total_elements = static_cast<size_t>(outputD->logical_shape.data[0]) *
-                                static_cast<size_t>(outputD->logical_shape.data[1]);
-  const size_t total_vec_count = (total_elements + kVec - 1) / kVec;
-  int blocks_per_tensor = static_cast<int>((total_vec_count + kThreads - 1) / kThreads);
-  const dim3 grid(outputD->num_tensors, blocks_per_tensor);
-  const dim3 block(kThreads);
-
-  TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(dtype, T, {
-    grouped_bias_add_kernel<T, kVec><<<grid, block, 0, stream>>>(
-        static_cast<char *>(outputD->data.dptr), static_cast<const char *>(bias_tensor->data.dptr),
-        d_meta, bias_meta, outputD->num_tensors);
-  });
-
-  NVTE_CHECK_CUDA(cudaGetLastError());
+  const float *scale_ptr = static_cast<const float *>(scale_tensor->data.dptr);
+  launch_grouped_bias_add(outputD, bias_tensor, scale_ptr, true, stream);
 }
 
 #else  // CUBLAS_VERSION < CUBLAS_GROUPED_GEMM_VERSION
@@ -1656,7 +1817,7 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
                        NVTETensor workspace_cublas, NVTEGroupedMatmulConfig config,
                        cudaStream_t stream) {
   NVTE_ERROR("nvte_grouped_gemm requires cuBLAS 13.3+, but compile-time cuBLAS version is ",
-             CUBLAS_VERSION, ". Please upgrade to CUDA 13.3 or newer.");
+             CUBLAS_VERSION, ". Please upgrade to cuBLAS 13.3 (shipped with CUDA 13.2) or newer.");
 }
 
 void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num_a_tensors,
@@ -1668,7 +1829,7 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
   NVTE_ERROR(
       "nvte_grouped_gemm_with_discrete_inputA requires cuBLAS 13.3+, but compile-time "
       "cuBLAS version is ",
-      CUBLAS_VERSION, ". Please upgrade to CUDA 13.3 or newer.");
+      CUBLAS_VERSION, ". Please upgrade to cuBLAS 13.3 (shipped with CUDA 13.2) or newer.");
 }
 
 void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
@@ -1681,20 +1842,28 @@ void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
   NVTE_ERROR(
       "nvte_grouped_gemm_with_discrete_out requires cuBLAS 13.3+, but compile-time "
       "cuBLAS version is ",
-      CUBLAS_VERSION, ". Please upgrade to CUDA 13.3 or newer.");
+      CUBLAS_VERSION, ". Please upgrade to cuBLAS 13.3 (shipped with CUDA 13.2) or newer.");
 }
 
 void nvte_grouped_bias_add(const NVTEGroupedTensor output, const NVTEGroupedTensor bias,
                            cudaStream_t stream) {
   NVTE_ERROR("nvte_grouped_bias_add requires cuBLAS 13.3+, but compile-time cuBLAS version is ",
-             CUBLAS_VERSION, ". Please upgrade to CUDA 13.3 or newer.");
+             CUBLAS_VERSION, ". Please upgrade to cuBLAS 13.3 (shipped with CUDA 13.2) or newer.");
+}
+
+void nvte_grouped_scaled_bias_add(const NVTEGroupedTensor output, const NVTEGroupedTensor bias,
+                                  const NVTETensor scale, cudaStream_t stream) {
+  NVTE_ERROR(
+      "nvte_grouped_scaled_bias_add requires cuBLAS 13.3+, but compile-time cuBLAS version "
+      "is ",
+      CUBLAS_VERSION, ". Please upgrade to cuBLAS 13.3 (shipped with CUDA 13.2) or newer.");
 }
 
 size_t nvte_get_grouped_gemm_setup_workspace_size(size_t num_tensors) {
   NVTE_ERROR(
       "nvte_get_grouped_gemm_setup_workspace_size requires cuBLAS 13.3+, but compile-time cuBLAS "
       "version is ",
-      CUBLAS_VERSION, ". Please upgrade to CUDA 13.3 or newer.");
+      CUBLAS_VERSION, ". Please upgrade to cuBLAS 13.3 (shipped with CUDA 13.2) or newer.");
   return 0;
 }
 
@@ -1707,6 +1876,24 @@ __global__ void convert_int32_to_int64_kernel(const int32_t *src, int64_t *dst, 
   if (idx < n) dst[idx] = static_cast<int64_t>(src[idx]);
 }
 
+// Like convert_int32_to_int64_kernel but scales each element by multiplier.
+// Used to convert per-expert slice counts to per-expert row counts for multi-dim tensors.
+__global__ void convert_int32_to_int64_with_multiplier_kernel(const int32_t *src, int64_t *dst,
+                                                              size_t n, int64_t multiplier) {
+  size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx < n) dst[idx] = static_cast<int64_t>(src[idx]) * multiplier;
+}
+
+// Computes exclusive prefix sums: offsets[0]=0, offsets[i]=sum(first_dims[0..i-1]*last_dim).
+// Produces n_groups+1 values. Single-threaded sequential scan; n_groups is typically small.
+__global__ void compute_grouped_tensor_offsets_kernel(const int64_t *first_dims, int64_t *offsets,
+                                                      size_t n_groups, int64_t last_dim) {
+  offsets[0] = 0;
+  for (size_t i = 0; i < n_groups; i++) {
+    offsets[i + 1] = offsets[i] + first_dims[i] * last_dim;
+  }
+}
+
 }  // namespace
 
 void nvte_convert_int32_to_int64(const int32_t *src, int64_t *dst, size_t n, cudaStream_t stream) {
@@ -1715,5 +1902,25 @@ void nvte_convert_int32_to_int64(const int32_t *src, int64_t *dst, size_t n, cud
   const int threads = 256;
   const int blocks = static_cast<int>((n + threads - 1) / threads);
   convert_int32_to_int64_kernel<<<blocks, threads, 0, stream>>>(src, dst, n);
+  NVTE_CHECK_CUDA(cudaGetLastError());
+}
+
+void nvte_convert_int32_to_int64_with_multiplier(const int32_t *src, int64_t *dst, size_t n,
+                                                 int64_t multiplier, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_convert_int32_to_int64_with_multiplier);
+  if (n == 0) return;
+  const int threads = 256;
+  const int blocks = static_cast<int>((n + threads - 1) / threads);
+  convert_int32_to_int64_with_multiplier_kernel<<<blocks, threads, 0, stream>>>(src, dst, n,
+                                                                                multiplier);
+  NVTE_CHECK_CUDA(cudaGetLastError());
+}
+
+void nvte_compute_grouped_tensor_offsets(const int64_t *first_dims, int64_t *offsets,
+                                         size_t n_groups, int64_t last_dim, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_compute_grouped_tensor_offsets);
+  // Always write at least offsets[0]=0 (needed even for n_groups==0).
+  compute_grouped_tensor_offsets_kernel<<<1, 1, 0, stream>>>(first_dims, offsets, n_groups,
+                                                             last_dim);
   NVTE_CHECK_CUDA(cudaGetLastError());
 }

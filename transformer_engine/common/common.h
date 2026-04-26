@@ -908,6 +908,48 @@ struct TypeInfo {
     { __VA_ARGS__ }                                               \
   }
 
+#define TRANSFORMER_ENGINE_SCALING_TYPE_SWITCH(SCALING_TYPE, SCALING_T, ...) \
+  switch (SCALING_TYPE) {                                                    \
+    case ScalingType::ROWWISE: {                                             \
+      constexpr ScalingType SCALING_T = ScalingType::ROWWISE;                \
+      { __VA_ARGS__ }                                                        \
+    } break;                                                                 \
+    case ScalingType::COLWISE: {                                             \
+      constexpr ScalingType SCALING_T = ScalingType::COLWISE;                \
+      { __VA_ARGS__ }                                                        \
+    } break;                                                                 \
+    case ScalingType::BIDIMENSIONAL: {                                       \
+      constexpr ScalingType SCALING_T = ScalingType::BIDIMENSIONAL;          \
+      { __VA_ARGS__ }                                                        \
+    } break;                                                                 \
+    default: {                                                               \
+      NVTE_ERROR("Unsupported scaling type.");                               \
+    }                                                                        \
+  }
+
+#define TRANSFORMER_ENGINE_GROUP_TENSOR_SHAPE_REPRESENTATION_SWITCH(SHAPE_REP, SHAPE, ...) \
+  switch (SHAPE_REP) {                                                                     \
+    case ShapeRepresentation::SAME_BOTH_DIMS: {                                            \
+      constexpr ShapeRepresentation SHAPE = ShapeRepresentation::SAME_BOTH_DIMS;           \
+      { __VA_ARGS__ }                                                                      \
+    } break;                                                                               \
+    case ShapeRepresentation::VARYING_FIRST_DIM: {                                         \
+      constexpr ShapeRepresentation SHAPE = ShapeRepresentation::VARYING_FIRST_DIM;        \
+      { __VA_ARGS__ }                                                                      \
+    } break;                                                                               \
+    case ShapeRepresentation::VARYING_LAST_DIM: {                                          \
+      constexpr ShapeRepresentation SHAPE = ShapeRepresentation::VARYING_LAST_DIM;         \
+      { __VA_ARGS__ }                                                                      \
+    } break;                                                                               \
+    case ShapeRepresentation::VARYING_BOTH_DIMS: {                                         \
+      constexpr ShapeRepresentation SHAPE = ShapeRepresentation::VARYING_BOTH_DIMS;        \
+      { __VA_ARGS__ }                                                                      \
+    } break;                                                                               \
+    default: {                                                                             \
+      NVTE_ERROR("Unsupported grouped tensor shape representation.");                      \
+    }                                                                                      \
+  }
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 inline int log2_ceil(int value) {
@@ -947,6 +989,8 @@ constexpr size_t scale_tensor_alignment_Y_rowwise = 128;
 constexpr size_t scale_tensor_alignment_X_colwise = 128;
 constexpr size_t scale_tensor_alignment_Y_colwise = 4;
 
+constexpr size_t SCALING_FACTORS_SWIZZLE_ALIGNMENT = 128;
+
 // Alignment requirements for the Tensor Memory Accelerator (TMA)
 constexpr size_t TMA_GMEM_ALIGNMENT = 16;    // global memory address alignment
 constexpr size_t TMA_SHMEM_ALIGNMENT = 128;  // shared memory address alignment
@@ -963,7 +1007,7 @@ size_t typeToSize(const DType type);
 size_t typeToNumBits(const DType type);
 
 void CheckNoopTensor(const Tensor &t, const std::string &name);
-void CheckInputTensor(const Tensor &t, const std::string &name);
+void CheckInputTensor(const Tensor &t, const std::string &name, bool check_scale_inv_shapes = true);
 void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empty = false);
 
 /*! \brief Update a tensor's FP8 scale-inverse

@@ -443,6 +443,21 @@ JAX-Specific Variables
    :Default: None
    :Description: Test level for JAX unit tests (``"L0"``, ``"L1"``, ``"L2"``). Used internally by the test suite.
 
+JAX Triton Extensions
+^^^^^^^^^^^^^^^^^^^^^
+
+.. envvar:: NVTE_USE_PYTORCH_TRITON
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Explicitly acknowledge using ``pytorch-triton`` for JAX Triton kernels. When both JAX and PyTorch are installed in the same environment, PyTorch's ``pytorch-triton`` package may be imported instead of the standard ``triton`` package from OpenAI. Setting this to ``1`` suppresses the compatibility warning emitted in that situation. ``pytorch-triton`` (the real package from PyTorch's package index, not the placeholder on PyPI) is compatible with JAX Triton kernels.
+
+.. envvar:: NVTE_JAX_ENFORCE_TRITON_AUTOTUNING
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Raise a ``RuntimeError`` when the installed JAX is too old to safely run ``TritonAutotunedKernelCall`` (`jax-ml/jax#35218 <https://github.com/jax-ml/jax/pull/35218>`_) instead of silently falling back to non-autotuned dispatch. Useful for CI or debugging to ensure Triton autotuning is active. When set to ``0`` (default), old JAX versions silently fall back to single-config (non-autotuned) kernel dispatch for compatibility.
+
 Examples
 --------
 

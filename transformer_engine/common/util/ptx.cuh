@@ -19,6 +19,7 @@
 #if FP4_TYPE_SUPPORTED
 #include <cuda_fp4.h>
 #endif  // FP4_TYPE_SUPPORTED
+#include <cuda_bf16.h>
 
 #include "common/utils.cuh"
 
@@ -326,10 +327,15 @@ __device__ __forceinline__ void get_cancelled_cta_id_2D(__uint128_t *response_da
   }
 }
 
+constexpr uint32_t BF16_MANTISSA_BITS = 7;
 constexpr uint32_t FP32_MANTISSA_BITS = 23;
 constexpr uint32_t FP32_EXPONENT_BIAS = 127;
 
-__device__ __forceinline__ float exp2f_rcp(e8m0_t biased_exp) {
+template <typename T>
+__device__ __forceinline__ T exp2f_rcp(e8m0_t biased_exp);
+
+template <>
+__device__ __forceinline__ float exp2f_rcp<float>(e8m0_t biased_exp) {
   // Handle the special case of NaN.
   if (biased_exp == 255) return __int_as_float(0x7fffffff);
   // Handle the special case where the unbiased exponent is 127, so the reciprocal is 2^-127 which needs the first bit of
@@ -337,6 +343,22 @@ __device__ __forceinline__ float exp2f_rcp(e8m0_t biased_exp) {
   if (biased_exp == 254) return __int_as_float(0x00400000);
   // Fast calculation when the unbiased exp is in [-126, 126], and only the exponent part is used to express the reciprocal.
   return __int_as_float((254 - biased_exp) << FP32_MANTISSA_BITS);
+}
+
+template <>
+__device__ __forceinline__ bf16 exp2f_rcp<bf16>(e8m0_t biased_exp) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  // Handle the special case of NaN.
+  if (biased_exp == 255) return __ushort_as_bfloat16(0x7fff);
+  // Handle the special case where the unbiased exponent is 127, so the reciprocal is 2^-127 which needs the first bit of
+  // the mantissa to be 1, which can't be obtained by shifting `BF16_MANTISSA_BITS` bits to the left.
+  if (biased_exp == 254) return __ushort_as_bfloat16(0x0040);
+  // Fast calculation when the unbiased exp is in [-126, 126], and only the exponent part is used to express the reciprocal.
+  return __ushort_as_bfloat16((254 - biased_exp) << BF16_MANTISSA_BITS);
+#else
+  NVTE_DEVICE_ERROR("exp2f_rcp<bf16> is only supported on SM 9.0+.");
+  return static_cast<bf16>(0.0f);
+#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 }
 
 __device__ __forceinline__ float exp2f(e8m0_t biased_exp) {
@@ -493,7 +515,7 @@ struct alignas(2 * sizeof(T)) FPx2 {
 };
 
 template <typename T>
-struct FPx4 {
+struct alignas(4 * sizeof(T)) FPx4 {
   T x1;
   T x2;
   T x3;
@@ -1166,6 +1188,142 @@ __device__ __forceinline__ fp16 get_amax(fp16 a, fp16 b) {
 #else
   NVTE_DEVICE_ERROR("get_amax is only supported on SM 10.0+.");
   return 0.f;
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+}
+
+__device__ __forceinline__ void mul_cvt_4x(fp8e4m3x4 &out, const bf16x4 &in, const bf16x2 scale) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+#if (defined CUDA_VERSION) && (CUDA_VERSION >= 13010)
+  asm volatile(
+      "{\n\t"
+      ".reg.b32 x01,x23; \n\t"
+      "mov.b64 {x01,x23}, %1; \n\t"
+      ".reg.b32 y01,y23; \n\t"
+      "mul.rn.bf16x2 y01, x01, %2; \n\t"
+      "mul.rn.bf16x2 y23, x23, %2; \n\t"
+      ".reg.b16 z01, z23; \n\t"
+      "cvt.rn.satfinite.e4m3x2.bf16x2 z01, y01; \n\t"
+      "cvt.rn.satfinite.e4m3x2.bf16x2 z23, y23; \n\t"
+      "mov.b32 %0, {z01, z23}; \n"
+      "}\n"
+      : "=r"(reinterpret_cast<uint32_t &>(out))
+      : "l"(reinterpret_cast<const uint64_t &>(in)),
+        "r"(reinterpret_cast<const uint32_t &>(scale)));
+#else
+  asm volatile(
+      "{\n\t"
+      ".reg.b16 scale, scale_flush; \n\t"
+      "mov.b32 {scale, scale_flush}, %2; \n\t"
+      ".reg.b16 x0,x1,x2,x3; \n\t"
+      "mov.b64 {x0,x1,x2,x3}, %1; \n\t"
+      ".reg.f32 y0,y1,y2,y3; \n\t"
+      "fma.rn.f32.bf16 y0, x0, scale, 0f00000000; \n\t"
+      "fma.rn.f32.bf16 y1, x1, scale, 0f00000000; \n\t"
+      "fma.rn.f32.bf16 y2, x2, scale, 0f00000000; \n\t"
+      "fma.rn.f32.bf16 y3, x3, scale, 0f00000000; \n\t"
+      ".reg.b16 z01, z23; \n\t"
+      "cvt.rn.satfinite.e4m3x2.f32 z01, y1, y0; \n\t"
+      "cvt.rn.satfinite.e4m3x2.f32 z23, y3, y2; \n\t"
+      "mov.b32 %0, {z01, z23}; \n"
+      "}\n"
+      : "=r"(reinterpret_cast<uint32_t &>(out))
+      : "l"(reinterpret_cast<const uint64_t &>(in)),
+        "r"(reinterpret_cast<const uint32_t &>(scale)));
+#endif
+#else
+  NVTE_DEVICE_ERROR("mul_cvt_4x is only supported on SM 10.0+.");
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+}
+
+__device__ __forceinline__ void mul_cvt_4x(fp8e5m2x4 &out, const bf16x4 &in, const bf16x2 scale) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+#if (defined CUDA_VERSION) && (CUDA_VERSION >= 13010)
+  asm volatile(
+      "{\n\t"
+      ".reg.b32 x01,x23; \n\t"
+      "mov.b64 {x01,x23}, %1; \n\t"
+      ".reg.b32 y01,y23; \n\t"
+      "mul.rn.bf16x2 y01, x01, %2; \n\t"
+      "mul.rn.bf16x2 y23, x23, %2; \n\t"
+      ".reg.b16 z01, z23; \n\t"
+      "cvt.rn.satfinite.e5m2x2.bf16x2 z01, y01; \n\t"
+      "cvt.rn.satfinite.e5m2x2.bf16x2 z23, y23; \n\t"
+      "mov.b32 %0, {z01, z23}; \n"
+      "}\n"
+      : "=r"(reinterpret_cast<uint32_t &>(out))
+      : "l"(reinterpret_cast<const uint64_t &>(in)),
+        "r"(reinterpret_cast<const uint32_t &>(scale)));
+#else
+  asm volatile(
+      "{\n\t"
+      ".reg.b16 scale, scale_flush; \n\t"
+      "mov.b32 {scale, scale_flush}, %2; \n\t"
+      ".reg.b16 x0,x1,x2,x3; \n\t"
+      "mov.b64 {x0,x1,x2,x3}, %1; \n\t"
+      ".reg.f32 y0,y1,y2,y3; \n\t"
+      "fma.rn.f32.bf16 y0, x0, scale, 0f00000000; \n\t"
+      "fma.rn.f32.bf16 y1, x1, scale, 0f00000000; \n\t"
+      "fma.rn.f32.bf16 y2, x2, scale, 0f00000000; \n\t"
+      "fma.rn.f32.bf16 y3, x3, scale, 0f00000000; \n\t"
+      ".reg.b16 z01, z23; \n\t"
+      "cvt.rn.satfinite.e5m2x2.f32 z01, y1, y0; \n\t"
+      "cvt.rn.satfinite.e5m2x2.f32 z23, y3, y2; \n\t"
+      "mov.b32 %0, {z01, z23}; \n"
+      "}\n"
+      : "=r"(reinterpret_cast<uint32_t &>(out))
+      : "l"(reinterpret_cast<const uint64_t &>(in)),
+        "r"(reinterpret_cast<const uint32_t &>(scale)));
+#endif
+#else
+  NVTE_DEVICE_ERROR("mul_cvt_4x is only supported on SM 10.0+.");
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+}
+
+__device__ __forceinline__ void mul_cvt_4x(fp8e4m3x4 &out, const fp16x4 &in, const fp16 scale) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  asm volatile(
+      "{\n\t"
+      ".reg.b16 x0,x1,x2,x3; \n\t"
+      "mov.b64 {x0,x1,x2,x3}, %1; \n\t"
+      ".reg.f32 y0,y1,y2,y3; \n\t"
+      "fma.rn.f32.f16 y0, x0, %2, 0f00000000; \n\t"
+      "fma.rn.f32.f16 y1, x1, %2, 0f00000000; \n\t"
+      "fma.rn.f32.f16 y2, x2, %2, 0f00000000; \n\t"
+      "fma.rn.f32.f16 y3, x3, %2, 0f00000000; \n\t"
+      ".reg.b16 z01, z23; \n\t"
+      "cvt.rn.satfinite.e4m3x2.f32 z01, y1, y0; \n\t"
+      "cvt.rn.satfinite.e4m3x2.f32 z23, y3, y2; \n\t"
+      "mov.b32 %0, {z01, z23}; \n"
+      "}\n"
+      : "=r"(reinterpret_cast<uint32_t &>(out))
+      : "l"(reinterpret_cast<const uint64_t &>(in)),
+        "h"(reinterpret_cast<const uint16_t &>(scale)));
+#else
+  NVTE_DEVICE_ERROR("mul_cvt_4x is only supported on SM 10.0+.");
+#endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+}
+
+__device__ __forceinline__ void mul_cvt_4x(fp8e5m2x4 &out, const fp16x4 &in, const fp16 scale) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  asm volatile(
+      "{\n\t"
+      ".reg.b16 x0,x1,x2,x3; \n\t"
+      "mov.b64 {x0,x1,x2,x3}, %1; \n\t"
+      ".reg.f32 y0,y1,y2,y3; \n\t"
+      "fma.rn.f32.f16 y0, x0, %2, 0f00000000; \n\t"
+      "fma.rn.f32.f16 y1, x1, %2, 0f00000000; \n\t"
+      "fma.rn.f32.f16 y2, x2, %2, 0f00000000; \n\t"
+      "fma.rn.f32.f16 y3, x3, %2, 0f00000000; \n\t"
+      ".reg.b16 z01, z23; \n\t"
+      "cvt.rn.satfinite.e5m2x2.f32 z01, y1, y0; \n\t"
+      "cvt.rn.satfinite.e5m2x2.f32 z23, y3, y2; \n\t"
+      "mov.b32 %0, {z01, z23}; \n"
+      "}\n"
+      : "=r"(reinterpret_cast<uint32_t &>(out))
+      : "l"(reinterpret_cast<const uint64_t &>(in)),
+        "h"(reinterpret_cast<const uint16_t &>(scale)));
+#else
+  NVTE_DEVICE_ERROR("mul_cvt_4x is only supported on SM 10.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 

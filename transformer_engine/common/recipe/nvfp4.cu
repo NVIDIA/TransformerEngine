@@ -331,8 +331,8 @@ void nvfp4_2d_partial_cast(const Tensor inp, Tensor out, const Tensor scale,
  */
 
 // Vectorized transpose kernel parameters
-constexpr int TRANSPOSE_TILE_DIM = 64;     // Logical FP4 elements per tile dimension
-constexpr int TRANSPOSE_TILE_PACKED = 32;  // TILE_DIM / 2 bytes
+constexpr int TRANSPOSE_TILE_DIM = 64;  // Logical FP4 elements per tile dimension
+// constexpr int TRANSPOSE_TILE_PACKED = 32;  // TILE_DIM / 2 bytes
 constexpr int TRANSPOSE_BLOCK_SIZE = 256;  // threads per block
 
 // Shared memory: store unpacked 4-bit values as bytes for easy transpose

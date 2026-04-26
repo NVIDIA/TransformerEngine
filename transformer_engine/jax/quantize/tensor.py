@@ -9,7 +9,7 @@ both single-scale (1x) and double-scale (2x) quantization schemes. It supports
 rowwise and colwise quantization modes with proper scaling and dequantization.
 """
 from dataclasses import dataclass
-from typing import Callable, Tuple
+from typing import Callable, Optional, Tuple
 from abc import ABC, abstractmethod
 
 import jax.numpy as jnp
@@ -32,6 +32,7 @@ __all__ = [
     "ScaledTensor1x",
     "ScaledTensor2x",
     "GroupedScaledTensor1x",
+    "GroupedNoScaleTensor",
     "ScaledTensorFactory",
     "with_sharding_constraint_by_logical_axes",
 ]
@@ -365,21 +366,26 @@ class GroupedScaledTensor1x(ScaledTensor1x):
     where elements are grouped along a specified axis.
 
     Attributes:
-        group_sizes: Array containing the size of each group
+        first_dims: Per-group sizes of the first (row) 2D dim, or None if not ragged
+        last_dims: Per-group sizes of the last (col) 2D dim, or None if not ragged
         original_shape: The original shape of the tensor before grouping
-        group_axis: The axis along which grouping is performed (default: 0)
+        pre_swizzled: Whether the scale_inv is already swizzled for GEMM. True when produced
+            by V2 grouped quantize (nvte_group_quantize fuses the swizzle). The V2 grouped
+            GEMM FFI requires pre_swizzled=True for MXFP8 inputs and will not re-swizzle.
     """
 
-    group_sizes: jnp.ndarray
+    first_dims: Optional[jnp.ndarray]
+    last_dims: Optional[jnp.ndarray]
     original_shape: Tuple
-    group_axis: int
+    pre_swizzled: bool = False
 
     def __init__(
         self,
         data,
         scale_inv,
         amax,
-        group_sizes,
+        first_dims,
+        last_dims,
         scaling_mode,
         dq_dtype,
         _dq_func,
@@ -387,12 +393,13 @@ class GroupedScaledTensor1x(ScaledTensor1x):
         data_layout,
         flatten_axis,
         original_shape,
-        group_axis=0,
+        pre_swizzled=False,
     ):
         self.flatten_axis = flatten_axis
-        self.group_sizes = group_sizes
+        self.first_dims = first_dims
+        self.last_dims = last_dims
         self.original_shape = original_shape
-        self.group_axis = group_axis
+        self.pre_swizzled = pre_swizzled
         # TODO(Phuong):Handle RHT for grouped quantization once grouped quantization supports NVFP4
         super().__init__(
             data=data,
@@ -407,10 +414,21 @@ class GroupedScaledTensor1x(ScaledTensor1x):
             has_rht_applied=False,
         )
 
+    @property
+    def group_sizes(self) -> jnp.ndarray:
+        """Per-group sizes along the group axis.
+
+        When first_dims is set (ragged groups), returns first_dims.
+        When first_dims is None (equal-sized groups), returns an array of ones with
+        length equal to the number of groups.
+        """
+        if self.first_dims is not None and self.first_dims.size > 0:
+            return self.first_dims
+        return jnp.ones((self.original_shape[0],), dtype=jnp.int32)
+
     def __post_init__(self):
         assert self.scale_inv.ndim == 1, "Only support flattened scale_inv"
         assert self.data.ndim == 1, "Only support flattened data"
-        assert self.group_axis >= 0
         assert self.flatten_axis > 0
 
         data_ndim = len(self.original_shape)
@@ -418,14 +436,19 @@ class GroupedScaledTensor1x(ScaledTensor1x):
             0 < self.flatten_axis < data_ndim
         ), f"flatten_axis {self.flatten_axis} is out of bounds for data.ndim = {data_ndim}"
 
-        assert (
-            0 <= self.group_axis < data_ndim
-        ), f"group_axis {self.group_axis} is out of bounds for shape {self.original_shape}"
+        active_dims = (
+            self.first_dims
+            if self.first_dims is not None and self.first_dims.size > 0
+            else self.last_dims
+        )
+        if active_dims is not None:
+            num_groups = active_dims.size
+        else:
+            num_groups = self.original_shape[0]
 
         expected_scale_shape = self.scaling_mode.get_grouped_scale_shape(
             self.original_shape,
-            self.group_sizes.size,
-            self.group_axis,
+            num_groups,
             self.is_colwise,
             is_padded=True,
             flatten_axis=self.flatten_axis,
@@ -442,7 +465,7 @@ class GroupedScaledTensor1x(ScaledTensor1x):
         Returns:
             A tuple containing (children, aux_data) for tree operations
         """
-        children = (self.data, self.scale_inv, self.amax, self.group_sizes)
+        children = (self.data, self.scale_inv, self.amax, self.first_dims, self.last_dims)
         aux_data = (
             self.scaling_mode,
             self.dq_dtype,
@@ -451,7 +474,7 @@ class GroupedScaledTensor1x(ScaledTensor1x):
             self.data_layout,
             self.flatten_axis,
             self.original_shape,
-            self.group_axis,
+            self.pre_swizzled,
         )
         return (children, aux_data)
 
@@ -471,6 +494,81 @@ class GroupedScaledTensor1x(ScaledTensor1x):
             return self
 
         return jax_checkpoint_name(self, name=quantizer.checkpoint_name)
+
+
+@register_pytree_node_class
+@dataclass
+class GroupedNoScaleTensor(AbstractBaseTensor1x):
+    """Unquantized grouped tensor.
+
+    Stores N-D data with per-group dimension sizes so that grouped_gemm()
+    can extract first/last dims automatically without explicit parameters.
+
+    Attributes:
+        data: The raw (unquantized) tensor data in N-D layout
+        first_dims: Per-group sizes of the first (row) 2D dim, or None if not ragged
+        last_dims: Per-group sizes of the last (col) 2D dim, or None if not ragged
+        original_shape: Shape of data (same as data.shape for N-D unquantized)
+    """
+
+    first_dims: Optional[jnp.ndarray]
+    last_dims: Optional[jnp.ndarray]
+    original_shape: Tuple
+
+    def tree_flatten(self):
+        """Flattens the tensor for JAX tree operations."""
+        children = (self.data, self.amax, self.first_dims, self.last_dims)
+        aux_data = (self.original_shape,)
+        return (children, aux_data)
+
+    @property
+    def ndim(self):
+        """Number of dimensions of the underlying array."""
+        return self.data.ndim
+
+    def dequantize(self):
+        """This is a no-op for a higher-precision tensor so this simply returns the tensor's data."""
+        return self.data
+
+    def get_tensor(self, usage: TensorUsage):
+        """Returns the tensor based on the tensor usage."""
+        q_layout = ScalingMode.NO_SCALING.get_quantize_layout(usage)
+        assert q_layout.is_rowwise_only, "Only ROWWISE layout is supported for NoScaleTensor"
+        return self
+
+    def apply_sharding_constraint_by_logical_axes(self, logical_axis_names: Tuple[str, ...]):
+        """Applies sharding constraints to a tensor based on logical axis names.
+
+        Args:
+            logical_axis_names: Tuple of logical axis names for sharding
+
+        Returns:
+            The tensor with applied sharding constraints
+        """
+        if not logical_axis_names:
+            return self
+
+        data = with_sharding_constraint_by_logical_axes(self.data, logical_axis_names)
+
+        return GroupedNoScaleTensor(
+            data=data,
+            amax=self.amax,
+            first_dims=self.first_dims,
+            last_dims=self.last_dims,
+            original_shape=self.original_shape,
+        )
+
+    def checkpoint(self, quantizer):
+        """Checkpoints the tensor with the given quantizer's checkpoint name if available.
+
+        Args:
+            quantizer: The quantizer to use for checkpointing. If None, no checkpointing is applied.
+
+        Returns:
+            The checkpointed tensor
+        """
+        assert quantizer is None, "NoScaleTensor does not support quantization."
+        return self
 
 
 @register_pytree_node_class
@@ -570,10 +668,11 @@ class ScaledTensorFactory:
         is_colwise=False,
         data_layout="N",
         flatten_axis=-1,
-        group_sizes=None,
+        first_dims=None,
+        last_dims=None,
         original_shape=None,
-        group_axis=0,
         has_rht_applied=False,
+        pre_swizzled=False,
     ):
         """Creates a single-scale quantized tensor.
 
@@ -586,29 +685,37 @@ class ScaledTensorFactory:
             is_colwise: Whether to use column-wise quantization (default: False)
             data_layout: The data_layout specification (default: "N")
             flatten_axis: The quantization axis for the tensor
-            group_sizes: Array of ints containing the size of each group (default: None)
+            first_dims: Per-group sizes of the first (row) 2D dim (default: None)
+            last_dims: Per-group sizes of the last (col) 2D dim (default: None)
             original_shape: The original shape of the tensor before grouping (default: None)
-            group_axis: The axis along which grouping is performed (default: 0)
             has_rht_applied: Whether the tensor had the Randomized Hadamard Transform (RHT) applied during quantization (default: False)
 
         Returns:
-            A ScaledTensor1x or GroupedScaledTensor1x instance depending on whether group_sizes is provided
+            A ScaledTensor1x or GroupedScaledTensor1x instance depending on whether first_dims or last_dims is provided
         """
         if amax is None:
             amax = jnp.empty((1,), dtype=jnp.float32)
 
         dequantizer = ScalingModeToDequantizerMap.get(scaling_mode)
 
-        if group_sizes is not None:
-            flatten_axis = (len(original_shape) + flatten_axis) % len(original_shape)
+        if first_dims is not None or last_dims is not None or original_shape is not None:
             assert (
                 original_shape is not None
             ), "original_shape is not given for GroupedScaledTensor1x"
+            flatten_axis = (len(original_shape) + flatten_axis) % len(original_shape)
+
+            # Determine num_groups from whichever dims array is provided, or from original_shape
+            active_dims = (
+                first_dims if first_dims is not None and first_dims.size > 0 else last_dims
+            )
+            if active_dims is not None:
+                num_groups = active_dims.size
+            else:
+                num_groups = original_shape[0]
 
             # Handling attrs of transposed tensors
-            group_axis = (len(original_shape) + group_axis) % len(original_shape)
             if data_layout == "T":
-                if original_shape[0] == group_sizes.size:
+                if original_shape[0] == num_groups:
                     original_shape = (
                         original_shape[0],
                         *original_shape[flatten_axis:],
@@ -620,7 +727,6 @@ class ScaledTensorFactory:
                         *original_shape[flatten_axis:],
                         *original_shape[:flatten_axis],
                     )
-                    group_axis = flatten_axis
                     flatten_axis = len(original_shape) - flatten_axis
 
             return GroupedScaledTensor1x(
@@ -633,9 +739,10 @@ class ScaledTensorFactory:
                 is_colwise=is_colwise,
                 data_layout=data_layout,
                 flatten_axis=flatten_axis,
-                group_sizes=group_sizes,
+                first_dims=first_dims,
+                last_dims=last_dims,
                 original_shape=original_shape,
-                group_axis=group_axis,
+                pre_swizzled=pre_swizzled,
             )
 
         # Handling attrs of transposed tensors
@@ -668,11 +775,12 @@ class ScaledTensorFactory:
         dq_dtype=jnp.bfloat16,
         data_layout="NN",
         flatten_axis=-1,
-        group_sizes=None,
+        first_dims=None,
+        last_dims=None,
         original_shape=None,
-        group_axis=0,
         rowwise_has_rht_applied=False,
         colwise_has_rht_applied=False,
+        pre_swizzled=False,
     ):
         """Creates a double-scale quantized tensor.
 
@@ -686,9 +794,9 @@ class ScaledTensorFactory:
             dq_dtype: The data type for dequantized values (default: bfloat16)
             data_layout: The data_layout specification (default: "NN")
             flatten_axis: The quantization axis for the tensor
-            group_sizes: Array containing the size of each group (default: None)
+            first_dims: Per-group sizes of the first (row) 2D dim (default: None)
+            last_dims: Per-group sizes of the last (col) 2D dim (default: None)
             original_shape: The original shape of the tensor before grouping (default: None)
-            group_axis: The axis along which grouping is performed (default: 0)
             rowwise_has_rht_applied: Whether the row-wise tensor uses the Randomized Hadamard Transform (RHT) (default: False)
             colwise_has_rht_applied: Whether the column-wise tensor uses the Randomized Hadamard Transform (RHT) (default: False)
 
@@ -710,10 +818,11 @@ class ScaledTensorFactory:
             is_colwise=False,
             data_layout=data_layout[0],
             flatten_axis=flatten_axis,
-            group_sizes=group_sizes,
+            first_dims=first_dims,
+            last_dims=last_dims,
             original_shape=original_shape,
-            group_axis=group_axis,
             has_rht_applied=rowwise_has_rht_applied,
+            pre_swizzled=pre_swizzled,
         )
         colwise_tensor = ScaledTensorFactory.create_1x(
             colwise_data,
@@ -724,10 +833,11 @@ class ScaledTensorFactory:
             is_colwise=True,
             data_layout=data_layout[1],
             flatten_axis=flatten_axis,
-            group_sizes=group_sizes,
+            first_dims=first_dims,
+            last_dims=last_dims,
             original_shape=original_shape,
-            group_axis=group_axis,
             has_rht_applied=colwise_has_rht_applied,
+            pre_swizzled=pre_swizzled,
         )
         return ScaledTensor2x(rowwise_tensor, colwise_tensor)
 
@@ -744,11 +854,12 @@ class ScaledTensorFactory:
         data_layout: str = "NN",
         q_layout: QuantizeLayout = QuantizeLayout.ROWWISE,
         flatten_axis: int = -1,
-        group_sizes: jnp.ndarray = None,
+        first_dims: jnp.ndarray = None,
+        last_dims: jnp.ndarray = None,
         original_shape: Tuple[int] = None,
-        group_axis: int = 0,
         rowwise_has_rht_applied: bool = False,
         colwise_has_rht_applied: bool = False,
+        pre_swizzled: bool = False,
     ):
         """Creates a scaled tensor based on the quantization axis.
 
@@ -762,11 +873,12 @@ class ScaledTensorFactory:
             data_layout: The data_layout specification (default: "NN")
             q_layout: The quantization axis (default: ROWWISE)
             flatten_axis: The axis along which the tensor could be flattened to 2D (default: -1)
-            group_sizes: Array containing the size of each group (default: None)
+            first_dims: Per-group sizes of the first (row) 2D dim (default: None)
+            last_dims: Per-group sizes of the last (col) 2D dim (default: None)
             original_shape: The original shape of the tensor before grouping (default: None)
-            group_axis: The axis along which grouping is performed (default: 0)
             rowwise_has_rht_applied: Whether the row-wise tensor uses the Randomized Hadamard Transform (RHT) (default: False)
             colwise_has_rht_applied: Whether the col-wise tensor uses the Randomized Hadamard Transform (RHT) (default: False)
+            pre_swizzled: Whether scale_inv is already swizzled (produced by V2 grouped quantize).
 
         Returns:
             Either a ScaledTensor1x or ScaledTensor2x instance depending on q_layout
@@ -785,11 +897,12 @@ class ScaledTensorFactory:
                 dq_dtype,
                 data_layout=data_layout,
                 flatten_axis=flatten_axis,
-                group_sizes=group_sizes,
+                first_dims=first_dims,
+                last_dims=last_dims,
                 original_shape=original_shape,
-                group_axis=group_axis,
                 rowwise_has_rht_applied=rowwise_has_rht_applied,
                 colwise_has_rht_applied=colwise_has_rht_applied,
+                pre_swizzled=pre_swizzled,
             )
 
         if q_layout.is_colwise_only:
@@ -802,10 +915,11 @@ class ScaledTensorFactory:
                 is_colwise=True,
                 data_layout=data_layout[0],
                 flatten_axis=flatten_axis,
-                group_sizes=group_sizes,
+                first_dims=first_dims,
+                last_dims=last_dims,
                 original_shape=original_shape,
-                group_axis=group_axis,
                 has_rht_applied=colwise_has_rht_applied,
+                pre_swizzled=pre_swizzled,
             )
 
         return ScaledTensorFactory.create_1x(
@@ -817,10 +931,11 @@ class ScaledTensorFactory:
             is_colwise=False,
             data_layout=data_layout[0],
             flatten_axis=flatten_axis,
-            group_sizes=group_sizes,
+            first_dims=first_dims,
+            last_dims=last_dims,
             original_shape=original_shape,
-            group_axis=group_axis,
             has_rht_applied=rowwise_has_rht_applied,
+            pre_swizzled=pre_swizzled,
         )
 
 

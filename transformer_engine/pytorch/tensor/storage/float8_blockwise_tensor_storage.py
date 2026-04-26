@@ -222,6 +222,10 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         """
         if dtype is None:
             dtype = self._dtype
+
+        if self._rowwise_data is not None and self._rowwise_data.numel() == 0:
+            return torch.empty(self.size(), dtype=dtype, device=self.device)
+
         block_len = 128
         if not self._is_2D_scaled:
             return self._dequantize_vectorwise(dtype=dtype)

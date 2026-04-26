@@ -7,6 +7,7 @@ from typing import Optional, List
 import torch
 import pytest
 import os
+import copy
 
 import transformer_engine
 import transformer_engine.pytorch as te
@@ -37,7 +38,7 @@ from transformer_engine.common import recipe
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.cpp_extensions import general_gemm
 from transformer_engine.pytorch.tensor.utils import replace_raw_data
-from utils import ModelConfig
+from utils import ModelConfig, skip_unsupported_backward_override
 
 # Only run FP8 tests on supported devices.
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
@@ -155,6 +156,18 @@ def check_grouped_weight(
     )
 
 
+def check_grouped_bias(module: GroupedLinear, num_gemms: int, out_features: int):
+    """Verify GroupedLinear exposes one grouped bias parameter with shape [num_gemms, out_features]."""
+    bias_params = [(name, p) for name, p in module.named_parameters() if name == "bias"]
+    assert len(bias_params) == 1, f"Expected 1 grouped bias parameter, got {len(bias_params)}"
+    name, bias = bias_params[0]
+    assert name == "bias", f"Expected grouped parameter name 'bias', got {name}"
+    assert tuple(bias.shape) == (num_gemms, out_features), (
+        "Grouped bias has unexpected shape. "
+        f"Expected {(num_gemms, out_features)}, got {tuple(bias.shape)}"
+    )
+
+
 def _test_sanity_e2e_amp(block, dtype, config, fp8_recipe, skip_wgrad):
     te_inp_hidden_states = torch.randn(
         (config.max_seqlen_q, config.batch_size, config.hidden_size),
@@ -212,6 +225,7 @@ def _test_sanity_e2e_gradient_accumulation_fusion(block, dtype, config, fp8_reci
             continue
         elif "weight" in name and p.requires_grad:
             p.main_grad = torch.zeros_like(p)
+            p.grad_added_to_main_grad = False  # Should be set to True after backward
 
     use_fp8 = fp8_recipe is not None
     with autocast(enabled=use_fp8, recipe=fp8_recipe):
@@ -221,13 +235,19 @@ def _test_sanity_e2e_gradient_accumulation_fusion(block, dtype, config, fp8_reci
     torch.cuda.synchronize()
 
     failed_grads = []
+    failed_grad_added_flags = []
     for name, p in block.named_parameters():
         if "layer_norm_weight" in name:
             continue
         elif "weight" in name and p.requires_grad:
             if not torch.count_nonzero(p.main_grad) > 0:
                 failed_grads.append(name)
+            if not getattr(p, "grad_added_to_main_grad", False):
+                failed_grad_added_flags.append(name)
     assert len(failed_grads) == 0, f"Gradient not accumulated for {failed_grads}."
+    assert (
+        len(failed_grad_added_flags) == 0
+    ), f"grad_added_to_main_grad not set to True for {failed_grad_added_flags}."
 
 
 def _test_sanity_e2e(block, dtype, config, fp8_recipe, skip_wgrad):
@@ -383,6 +403,7 @@ def test_sanity_normalization_amp(dtype, model, skip_wgrad, skip_dgrad, normaliz
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("backward_override", [None, "high_precision", "dequantized"])
 @pytest.mark.parametrize("model", ["small", "weird"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
@@ -392,6 +413,7 @@ def test_sanity_normalization_amp(dtype, model, skip_wgrad, skip_dgrad, normaliz
 def test_sanity_layernorm_linear(
     dtype,
     fp8_recipe,
+    backward_override,
     model,
     skip_wgrad,
     zero_centered_gamma,
@@ -400,6 +422,11 @@ def test_sanity_layernorm_linear(
     microbatching,
 ):
     config = model_configs[model]
+
+    skip_unsupported_backward_override("layernorm_linear", fp8_recipe, backward_override)
+    if fp8_recipe is not None:
+        fp8_recipe = copy.deepcopy(fp8_recipe)
+        fp8_recipe.backward_override = backward_override
 
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
@@ -424,12 +451,20 @@ def test_sanity_layernorm_linear(
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("backward_override", [None, "high_precision", "dequantized"])
 @pytest.mark.parametrize("model", ["small", "weird"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 @pytest.mark.parametrize("skip_dgrad", all_boolean)
 @pytest.mark.parametrize("microbatching", all_boolean)
-def test_sanity_linear(dtype, fp8_recipe, model, skip_wgrad, skip_dgrad, microbatching):
+def test_sanity_linear(
+    dtype, fp8_recipe, backward_override, model, skip_wgrad, skip_dgrad, microbatching
+):
     config = model_configs[model]
+
+    skip_unsupported_backward_override("linear", fp8_recipe, backward_override)
+    if fp8_recipe is not None:
+        fp8_recipe = copy.deepcopy(fp8_recipe)
+        fp8_recipe.backward_override = backward_override
 
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
@@ -454,12 +489,20 @@ def test_sanity_linear(dtype, fp8_recipe, model, skip_wgrad, skip_dgrad, microba
 @pytest.mark.parametrize("bs", batch_sizes_with_zero)
 @pytest.mark.parametrize("model", ["small", "weird"])
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("backward_override", [None, "high_precision", "dequantized"])
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 @pytest.mark.parametrize("use_bias", all_boolean)
-def test_sanity_linear_with_zero_tokens(dtype, bs, model, fp8_recipe, fp8_model_params, use_bias):
+def test_sanity_linear_with_zero_tokens(
+    dtype, bs, model, fp8_recipe, backward_override, fp8_model_params, use_bias
+):
     config = model_configs[model]
     ffn_hidden_size = 4 * config.hidden_size
     num_tokens = bs * config.max_seqlen_q
+
+    skip_unsupported_backward_override("linear", fp8_recipe, backward_override)
+    if fp8_recipe is not None:
+        fp8_recipe = copy.deepcopy(fp8_recipe)
+        fp8_recipe.backward_override = backward_override
 
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
@@ -487,6 +530,7 @@ def test_sanity_linear_with_zero_tokens(dtype, bs, model, fp8_recipe, fp8_model_
 @pytest.mark.parametrize("bs", batch_sizes_with_zero)
 @pytest.mark.parametrize("model", ["small", "weird"])
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("backward_override", [None, "high_precision", "dequantized"])
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 @pytest.mark.parametrize("use_bias", all_boolean)
 @pytest.mark.parametrize("single_param", all_boolean)
@@ -497,6 +541,7 @@ def test_sanity_grouped_linear(
     bs,
     model,
     fp8_recipe,
+    backward_override,
     fp8_model_params,
     use_bias,
     single_param,
@@ -508,6 +553,11 @@ def test_sanity_grouped_linear(
     # Small batch size used to catch bug from https://github.com/NVIDIA/TransformerEngine/pull/1527.
     bs = bs * 16
     num_tokens = bs * config.max_seqlen_q * (num_gemms - 1)
+
+    skip_unsupported_backward_override("grouped_linear", fp8_recipe, backward_override)
+    if fp8_recipe is not None:
+        fp8_recipe = copy.deepcopy(fp8_recipe)
+        fp8_recipe.backward_override = backward_override
 
     if fp8_recipe is not None:
         if not is_fp8_supported(config):
@@ -523,13 +573,16 @@ def test_sanity_grouped_linear(
             ffn_hidden_size,
             bias=use_bias,
             params_dtype=dtype,
-            single_grouped_parameter=single_param,
+            single_grouped_weight=single_param,
+            single_grouped_bias=single_param,
         ).cuda()
 
-    # Verify grouped linear exposes a single grouped weight parameter.
+    # Verify grouped linear exposes a single grouped weight parameter(and bias when applicable).
     if fp8_recipe is None or not (fp8_recipe.delayed() or fp8_recipe.float8_current_scaling()):
         if single_param:
             check_grouped_weight(te_grouped_linear, num_gemms, ffn_hidden_size, config.hidden_size)
+            if use_bias:
+                check_grouped_bias(te_grouped_linear, num_gemms, ffn_hidden_size)
 
     inp_hidden_states = torch.randn(
         num_tokens, config.hidden_size, dtype=dtype, requires_grad=True

@@ -42,6 +42,7 @@
 #include <transformer_engine/swizzle.h>
 #include <transformer_engine/transformer_engine.h>
 #include <transformer_engine/transpose.h>
+#include <transformer_engine/utils.h>
 
 #include <ATen/cuda/CUDAGraphsUtils.cuh>
 #include <cassert>
@@ -123,6 +124,7 @@ class Quantizer {
 
   virtual ~Quantizer() = default;
 
+  DType dtype = DType::kNumTypes;
   bool rowwise_usage = true;
   bool columnwise_usage = true;
   bool internal = false;
@@ -164,7 +166,6 @@ class Float8Quantizer : public Quantizer {
   at::Tensor scale;
   at::Tensor scale_inv;
   at::Tensor amax;
-  DType dtype;
 
   explicit Float8Quantizer(const py::handle& quantizer);
 
@@ -194,9 +195,6 @@ class Float8Quantizer : public Quantizer {
 
 class Float8CurrentScalingQuantizer : public Quantizer {
  public:
-  at::Tensor scale;
-  at::Tensor scale_inv;
-  at::Tensor amax;
   DType dtype;
   bool with_amax_reduction;
   c10::intrusive_ptr<dist_group_type> amax_reduction_group;
@@ -217,12 +215,13 @@ class Float8CurrentScalingQuantizer : public Quantizer {
       py::object quantizer, const std::optional<at::Tensor>& first_dims, size_t logical_first_dim,
       size_t logical_last_dim) const override;
 
-  /*! @brief Construct an unquantized tensor that shares the quantizer's amax pointer.
+  /*! @brief Construct an unquantized tensor with a freshly allocated amax buffer.
    *
    * The amax is zeroed out. Most TE kernels that output amax expect
-   * amax to be initialized to zero.
+   * amax to be initialized to zero. The amax tensor is returned as
+   * the third element to keep it alive in the caller's scope.
   */
-  std::pair<TensorWrapper, py::object> create_unquantized_tensor_with_amax(
+  std::tuple<TensorWrapper, py::object, at::Tensor> create_unquantized_tensor_with_amax(
       const std::vector<size_t>& shape, DType dtype, std::optional<at::Tensor> data = std::nullopt);
 
   std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
@@ -232,22 +231,21 @@ class Float8CurrentScalingQuantizer : public Quantizer {
 
   /*! @brief Quantize to FP8, skipping local amax computation
    *
-   * The quantizer's amax pointer is assumed to already hold the local
+   * The provided amax tensor is assumed to already hold the local
    * amax. The amax may still be reduced across the amax reduction
    * group.
    */
-  void quantize_with_amax(TensorWrapper& input, TensorWrapper& out,
+  void quantize_with_amax(TensorWrapper& input, TensorWrapper& out, at::Tensor amax,
                           const std::optional<TensorWrapper>& noop_flag = std::nullopt);
 
  private:
   void quantize_impl(const TensorWrapper& input, TensorWrapper& out,
-                     const std::optional<TensorWrapper>& noop_flag, bool compute_amax);
+                     const std::optional<TensorWrapper>& noop_flag, bool compute_amax,
+                     at::Tensor amax_buf, at::Tensor scale_buf);
 };
 
 class Float8BlockQuantizer : public Quantizer {
  public:
-  // Which float8 type is used for q data.
-  DType dtype;
   // Options about how to quantize the tensor
   // Quantization scales are rounded down to powers of 2.
   bool force_pow_2_scales = false;
@@ -289,8 +287,6 @@ class Float8BlockQuantizer : public Quantizer {
 
 class MXFP8Quantizer : public Quantizer {
  public:
-  DType dtype;
-
   explicit MXFP8Quantizer(const py::handle& quantizer);
 
   NVTEScalingMode get_scaling_mode() const override { return NVTE_MXFP8_1D_SCALING; }
@@ -315,8 +311,6 @@ class MXFP8Quantizer : public Quantizer {
 
 class NVFP4Quantizer : public Quantizer {
  public:
-  // fp4 dtype
-  DType dtype;
   // amax reduction for low precision FP4 AG
   bool with_amax_reduction;
   c10::intrusive_ptr<dist_group_type> amax_reduction_group;

@@ -55,6 +55,32 @@ struct GemmConfig {
   bool use_split_accumulator;
 };
 
+struct GroupedGemmV2Config {
+  bool lhs_is_trans;
+  bool rhs_is_trans;
+  JAXX_Scaling_Mode scaling_mode;
+  int64_t lhs_axis_boundary;
+  int64_t rhs_axis_boundary;
+  int64_t lhs_left_size;
+  int64_t lhs_right_size;
+  int64_t rhs_left_size;
+  int64_t rhs_right_size;
+};
+
+struct GroupedGemmConfig {
+  bool lhs_is_trans;
+  bool rhs_is_trans;
+  JAXX_Scaling_Mode scaling_mode;
+  bool has_bias;
+  bool use_async_d2h_group_sizes;
+  int64_t lhs_axis_boundary;
+  int64_t rhs_axis_boundary;
+  int64_t lhs_left_size;
+  int64_t lhs_right_size;
+  int64_t rhs_left_size;
+  int64_t rhs_right_size;
+};
+
 inline bool use_fp8(DType type) { return type == DType::kFloat8E4M3 || type == DType::kFloat8E5M2; }
 
 // Activation
@@ -92,6 +118,8 @@ pybind11::tuple GetNormBackwardWorkspaceSizes(size_t batch_size, size_t hidden_s
 XLA_FFI_DECLARE_HANDLER_SYMBOL(DBiasQuantizeHandler);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedQuantizeHandler);
+
+XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedQuantizeV2Handler);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(DequantizeHandler);
 
@@ -171,6 +199,10 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedTopkWithScoreFunctionBackwardHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedMoEAuxLossForwardHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedMoEAuxLossBackwardHandler);
 
+// TopK
+XLA_FFI_DECLARE_HANDLER_SYMBOL(TopkHandler);
+pybind11::tuple GetTopkWorkspaceSizes(int batch_size, int seq_len, int k);
+
 }  // namespace jax
 }  // namespace transformer_engine
 
@@ -191,6 +223,30 @@ XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(
     ::xla::ffi::StructMember<bool>("lhs_transposed"),
     ::xla::ffi::StructMember<bool>("rhs_transposed"),
     ::xla::ffi::StructMember<bool>("use_split_accumulator"));
+
+XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(
+    transformer_engine::jax::GroupedGemmV2Config, ::xla::ffi::StructMember<bool>("lhs_is_trans"),
+    ::xla::ffi::StructMember<bool>("rhs_is_trans"),
+    ::xla::ffi::StructMember<transformer_engine::jax::JAXX_Scaling_Mode>("scaling_mode"),
+    ::xla::ffi::StructMember<int64_t>("lhs_axis_boundary"),
+    ::xla::ffi::StructMember<int64_t>("rhs_axis_boundary"),
+    ::xla::ffi::StructMember<int64_t>("lhs_left_size"),
+    ::xla::ffi::StructMember<int64_t>("lhs_right_size"),
+    ::xla::ffi::StructMember<int64_t>("rhs_left_size"),
+    ::xla::ffi::StructMember<int64_t>("rhs_right_size"));
+
+XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(
+    transformer_engine::jax::GroupedGemmConfig, ::xla::ffi::StructMember<bool>("lhs_is_trans"),
+    ::xla::ffi::StructMember<bool>("rhs_is_trans"),
+    ::xla::ffi::StructMember<transformer_engine::jax::JAXX_Scaling_Mode>("scaling_mode"),
+    ::xla::ffi::StructMember<bool>("has_bias"),
+    ::xla::ffi::StructMember<bool>("use_async_d2h_group_sizes"),
+    ::xla::ffi::StructMember<int64_t>("lhs_axis_boundary"),
+    ::xla::ffi::StructMember<int64_t>("rhs_axis_boundary"),
+    ::xla::ffi::StructMember<int64_t>("lhs_left_size"),
+    ::xla::ffi::StructMember<int64_t>("lhs_right_size"),
+    ::xla::ffi::StructMember<int64_t>("rhs_left_size"),
+    ::xla::ffi::StructMember<int64_t>("rhs_right_size"));
 
 // ENUM_ATTR and DICT_ATTR recoding need to be registered in the global namespace
 XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Scaling_Mode);

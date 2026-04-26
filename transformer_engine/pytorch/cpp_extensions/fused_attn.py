@@ -35,6 +35,7 @@ TORCH_DType = {
 }
 
 QKVFormat = {
+    None: NVTE_QKV_Format.NVTE_QKV_Format_NOT_SET,
     "bshd": NVTE_QKV_Format.NVTE_BSHD,
     "sbhd": NVTE_QKV_Format.NVTE_SBHD,
     "thd": NVTE_QKV_Format.NVTE_THD,
@@ -42,6 +43,7 @@ QKVFormat = {
     "bshd_2sbhd": NVTE_QKV_Format.NVTE_BSHD_2SBHD,
     "thd_2bshd": NVTE_QKV_Format.NVTE_THD_2BSHD,
     "thd_2sbhd": NVTE_QKV_Format.NVTE_THD_2SBHD,
+    "bhsd": NVTE_QKV_Format.NVTE_BHSD,
 }
 
 QKVLayout = {
@@ -70,6 +72,7 @@ QKVLayout = {
     "paged_kv_sbhd_sbhd_sbhd": NVTE_QKV_Layout.NVTE_Paged_KV_SBHD_SBHD_SBHD,
     "paged_kv_thd_bshd_bshd": NVTE_QKV_Layout.NVTE_Paged_KV_THD_BSHD_BSHD,
     "paged_kv_thd_sbhd_sbhd": NVTE_QKV_Layout.NVTE_Paged_KV_THD_SBHD_SBHD,
+    "bhsd_bhsd_bhsd": NVTE_QKV_Layout.NVTE_BHSD_BHSD_BHSD,
 }
 
 AttnBiasType = {
@@ -134,6 +137,8 @@ def fused_attn_fwd(
     dropout: float = 0.0,
     fast_zero_fill: bool = True,
     qkv_layout: str = "sbh3d",
+    o_format: str = "sbhd",
+    qkv_scale_inv_format: str = None,
     attn_bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
     softmax_type: str = "vanilla",
@@ -203,6 +208,11 @@ def fused_attn_fwd(
                 {"sb3hd", "sbh3d", "sbhd_sb2hd", "sbhd_sbh2d", "sbhd_sbhd_sbhd",
                 "bs3hd", "bsh3d", "bshd_bs2hd", "bshd_bsh2d", "bshd_bshd_bshd",
                 "t3hd", "th3d", "thd_t2hd", "thd_th2d", "thd_thd_thd"}
+    o_format : str, default = "sbhd"
+                format of O; {"sbhd", "bshd", "thd"}
+    qkv_scale_inv_format : str, default = None
+                format of the scale-inverse tensors for QKV; {"sbhd", "bshd", "thd", "bhsd"};
+                if None, defaults to the format inferred from qkv_layout.
     attn_bias_type : str, default = "no_bias"
                 type of the bias; {"no_bias", "pre_scale_bias", "post_scale_bias", "alibi"}
     attn_mask_type : str, default = "padding"
@@ -251,7 +261,7 @@ def fused_attn_fwd(
                        M: torch.Tensor
                            max(Q*K.T)
                            shape [batch_size, num_heads, max_seqlen_q, 1], dtype float32
-                       ZInv: torch.Tensor
+                       ZInv: torch.Tensor, only allocated for T3HD path
                            1/sum(e^(x - max(x))), where x=Q*K.T
                            shape [batch_size, num_heads, max_seqlen_q, 1], dtype float32
                 rng_state: torch.Tensor, optional, if backend is not F16_max512_seqlen
@@ -302,17 +312,6 @@ def fused_attn_fwd(
         rng_elts_per_thread = (
             max_seqlen_q * max_seqlen_q + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1
         ) // BACKEND_F16m512_FP8_THREADS_PER_CTA
-
-        if s_quantizer is None:
-            raise ValueError(
-                "s_quantizer is required for FP8 fused attention forward"
-                f" (backend={fused_attention_backend}, qkv_layout={qkv_layout!r})."
-            )
-        if o_quantizer is None:
-            raise ValueError(
-                "o_quantizer is required for FP8 fused attention forward"
-                f" (backend={fused_attention_backend}, qkv_layout={qkv_layout!r})."
-            )
     else:
         raise ValueError(f"Unsupported backend {fused_attention_backend}")
 
@@ -326,6 +325,8 @@ def fused_attn_fwd(
         dropout,
         fast_zero_fill,
         QKVLayout[qkv_layout],
+        QKVFormat[o_format],
+        QKVFormat[qkv_scale_inv_format],
         AttnBiasType[attn_bias_type],
         AttnMaskType[attn_mask_type],
         SoftmaxType[softmax_type],
@@ -353,15 +354,51 @@ def fused_attn_fwd(
 
     if return_max_logit:
         qkv_format = qkv_layout.replace("3", "").replace("2", "").split("_")[0]
-        # thd:  output_tensors: out [tq, h, d],    Max [tq, h, 1],    Sum_Exp [tq, h, 1]
-        # bshd: output_tensors: out [b, sq, h, d], Max [b, h, sq, 1], Sum_Exp [b, h, sq, 1]
-        # sbhd: output_tensors: out [sq, b, h, d], Max [b, h, sq, 1], Sum_Exp [b, h, sq, 1]
-        stats = output_tensors[1] + torch.log(output_tensors[2])
-        amax_dims = (0, 2) if qkv_format == "thd" else (0, 2, 3)
+        # thd (newer cuDNN runtimes, non-sm120): output_tensors: out [tq, h, d],    Stats [tq, h, 1],    Max [tq, h, 1]
+        # thd (older cuDNN runtimes or sm120):   output_tensors: out [tq, h, d],    Stats [b, h, sq, 1], Max [b, h, sq, 1]
+        # bshd:                                  output_tensors: out [b, sq, h, d], Stats [b, h, sq, 1], Max [b, h, sq, 1]
+        # sbhd:                                  output_tensors: out [sq, b, h, d], Stats [b, h, sq, 1], Max [b, h, sq, 1]
+        aux_ctx_tensors = [output_tensors[1]] + list(
+            output_tensors[3:]
+        )  # Stats + rng_state + optional tensors
+        max_tensor = output_tensors[2]
+        amax_dims = (0, 2) if max_tensor.ndim == 3 else (0, 2, 3)
+
+        if qkv_format == "thd":
+            if max_tensor.ndim == 4:
+                # For THD on cuDNN <= 9.6 or THD on sm120, Max tensor can be [b, h, sq, 1]
+                # with padded sequence positions. Exclude those padded positions when computing max_logit.
+                seqlens_q = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).to(device=max_tensor.device)
+                sq_idx = torch.arange(max_tensor.shape[2], device=max_tensor.device).view(
+                    1, 1, -1, 1
+                )
+                valid = sq_idx < seqlens_q.view(-1, 1, 1, 1)
+                max_tensor = max_tensor.masked_fill(~valid, float("-inf"))
+            elif max_tensor.ndim == 3:
+                if cu_seqlens_q_padded is not None:
+                    # For THD + pad_between_seqs=True + non-sm120 + cuDNN>9.6, Max tensor is [tq, h, 1]
+                    # and padding positions could be uninitialized. Exclude those padded positions when
+                    # computing max_logit.
+                    actual_seqlens = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).to(
+                        device=max_tensor.device
+                    )
+                    padded_seqlens = (cu_seqlens_q_padded[1:] - cu_seqlens_q_padded[:-1]).to(
+                        device=max_tensor.device
+                    )
+                    pad_lens = (padded_seqlens - actual_seqlens).to(device=max_tensor.device)
+                    b = pad_lens.shape[0]
+
+                    # Stack [actual, pad] per batch into counts: e.g. [3,1, 3,1, 2,2, 7,1]
+                    counts = torch.stack([actual_seqlens, pad_lens], dim=1).flatten()
+                    # Tile [T, F] per sequence: [T,F, T,F, T,F, T,F]
+                    values = torch.tensor([True, False], device=max_tensor.device).repeat(b)
+                    # Expand: T×3, F×1, T×3, F×1, T×2, F×2, T×7, F×1 → TTTF|TTTF|TTFF|TTTTTTTF
+                    valid = torch.repeat_interleave(values, counts)
+                    # Finally, replace invalid (F) positions with -inf
+                    max_tensor = max_tensor.masked_fill(~valid.view(-1, 1, 1), float("-inf"))
+
         # Max -> max_logit [h]
-        max_logit = torch.amax(output_tensors[1], dim=amax_dims).to(dtype=output_tensors[0].dtype)
-        aux_ctx_tensors = [stats]
-        aux_ctx_tensors.extend(output_tensors[3:])
+        max_logit = torch.amax(max_tensor, dim=amax_dims).to(dtype=output_tensors[0].dtype)
         return output_tensors[0], aux_ctx_tensors, max_logit
 
     # out, aux_ctx_tensors
@@ -379,7 +416,6 @@ def fused_attn_bwd(
     o: torch.Tensor,
     d_o: torch.Tensor,
     fake_dtype: torch.dtype,
-    dqkv_dtype: tex.DType,
     aux_ctx_tensors: List[torch.Tensor],
     fused_attention_backend: tex.NVTE_Fused_Attn_Backend,
     cu_seqlens_q_padded: torch.Tensor = None,
@@ -391,6 +427,11 @@ def fused_attn_bwd(
     dropout: float = 0.0,
     fast_zero_fill: bool = True,
     qkv_layout: str = "sbh3d",
+    o_format: str = "sbhd",
+    do_format: str = "sbhd",
+    dqkv_layout: str = "sbh3d",
+    qkv_scale_inv_format: str = None,
+    do_scale_inv_format: str = None,
     attn_bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
     softmax_type: str = "vanilla",
@@ -429,8 +470,6 @@ def fused_attn_bwd(
     fake_dtype : tex.DType
                 data type of Q, K and V - in case of high precision, fake dtype in case of FP8;
                 in torch.dtype
-    dqkv_dtype : tex.DType
-                data type of dQ, dK and dV; in tex.DType, not torch.dtype
     aux_ctx_tensors : List[torch.Tensor]
                 auxiliary output tensors of the forward pass when its is_training is True,
                 e.g. aux_ctx_tensors = [M, ZInv, rng_state]
@@ -446,6 +485,9 @@ def fused_attn_bwd(
                 Quantizer object for the intermediate value dP.
     dqkv_quantizer : Quantizer, default = None
                 Quantizer object for the output values of the fused_attn_bwd.
+    attn_scale : float, default = None
+                if not None, use attn_scale as the attention scale for Q*K.T BMM;
+                if None, use 1.0/sqrt(head_dim_qk) as the default
     dropout : float, default = 0.0
                 dropout probability, 0.0 means no dropout, 1.0 means no output;
                 dropout must be 0.0 if is_training is False
@@ -457,6 +499,21 @@ def fused_attn_bwd(
                 {"sb3hd", "sbh3d", "sbhd_sb2hd", "sbhd_sbh2d", "sbhd_sbhd_sbhd",
                 "bs3hd", "bsh3d", "bshd_bs2hd", "bshd_bsh2d", "bshd_bshd_bshd",
                 "t3hd", "th3d", "thd_t2hd", "thd_th2d", "thd_thd_thd"}
+    o_format : str, default = "sbhd"
+                format of O; {"sbhd", "bshd", "thd"}
+    do_format : str, default = "sbhd"
+                format of dO; {"sbhd", "bshd", "thd"}
+    dqkv_layout : str, default = "sbh3d"
+                layout of dQ, dK and dV;
+                {"sb3hd", "sbh3d", "sbhd_sb2hd", "sbhd_sbh2d", "sbhd_sbhd_sbhd",
+                "bs3hd", "bsh3d", "bshd_bs2hd", "bshd_bsh2d", "bshd_bshd_bshd",
+                "t3hd", "th3d", "thd_t2hd", "thd_th2d", "thd_thd_thd"}
+    qkv_scale_inv_format : str, default = None
+                format of the scale-inverse tensors for QKV; {"sbhd", "bshd", "thd", "bhsd"};
+                if None, defaults to the format inferred from qkv_layout.
+    do_scale_inv_format : str, default = None
+                format of the scale-inverse tensors for dO; {"sbhd", "bshd", "thd", "bhsd"};
+                if None, defaults to the format inferred from the output layout.
     attn_bias_type : str, default = "no_bias"
                 type of the bias; {"no_bias", "pre_scale_bias", "post_scale_bias", "alibi"}
     attn_mask_type : str, default = "padding"
@@ -517,29 +574,6 @@ def fused_attn_bwd(
                 f" for backend={fused_attention_backend}."
             )
 
-    if fused_attention_backend == FusedAttnBackend["FP8"]:
-        if s_quantizer is None:
-            raise ValueError(
-                "s_quantizer is required for FP8 fused attention backward"
-                f" (backend={fused_attention_backend}, qkv_layout={qkv_layout!r})."
-            )
-        if dp_quantizer is None:
-            raise ValueError(
-                "dp_quantizer is required for FP8 fused attention backward"
-                f" (backend={fused_attention_backend}, qkv_layout={qkv_layout!r})."
-            )
-        if dqkv_dtype is None:
-            raise ValueError(
-                "dqkv_dtype is required for FP8 fused attention backward"
-                f" (backend={fused_attention_backend}, qkv_layout={qkv_layout!r})."
-            )
-        if len(aux_ctx_tensors) != 3:
-            raise ValueError(
-                "aux_ctx_tensors must be [M, ZInv, rng_state] for FP8 fused attention,"
-                f" but got len(aux_ctx_tensors)={len(aux_ctx_tensors)}"
-                f" (backend={fused_attention_backend})."
-            )
-
     output_tensors = tex.fused_attn_bwd(
         max_seqlen_q,
         max_seqlen_kv,
@@ -547,6 +581,11 @@ def fused_attn_bwd(
         dropout,
         fast_zero_fill,
         QKVLayout[qkv_layout],
+        QKVFormat[o_format],
+        QKVFormat[do_format],
+        QKVLayout[dqkv_layout],
+        QKVFormat[qkv_scale_inv_format],
+        QKVFormat[do_scale_inv_format],
         AttnBiasType[attn_bias_type],
         AttnMaskType[attn_mask_type],
         SoftmaxType[softmax_type],
@@ -561,7 +600,6 @@ def fused_attn_bwd(
         o,
         d_o,
         fake_dtype,
-        dqkv_dtype,
         aux_ctx_tensors,
         cu_seqlens_q_padded,
         cu_seqlens_kv_padded,
