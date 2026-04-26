@@ -541,7 +541,7 @@ inline MultiTensorGroupGemmOutputArgs build_grouped_gemm_multi_out_args(
 inline MultiTensorGroupGemmInputArgs build_grouped_gemm_multi_inputA_args(
     const NVTETensor *tensor_list, size_t list_size, bool use_rowwise, bool is_fp8,
     int64_t *avg_first_dim, int64_t *avg_last_dim, const char *name,
-    bool needs_scale_inv = false) {
+    bool needs_scale_inv = false, bool swap_dims = false) {
   using namespace transformer_engine;
   MultiTensorGroupGemmInputArgs args{};
   *avg_first_dim = 0;
@@ -560,10 +560,17 @@ inline MultiTensorGroupGemmInputArgs build_grouped_gemm_multi_inputA_args(
                " is missing required data.");
     NVTE_CHECK(data.shape.size() == 2, "Grouped GEMM: ", name, "_list tensor ", i, " must be 2D.");
     args.data_ptrs[i] = data.dptr;
-    args.rows[i] = static_cast<int>(data.shape[1]);
-    args.cols[i] = static_cast<int>(data.shape[0]);
-    *avg_first_dim += static_cast<int64_t>(data.shape[0]);
-    *avg_last_dim += static_cast<int64_t>(data.shape[1]);
+    // For NVFP4/MXFP8 columnwise data, the logical shape stored in `data.shape` matches the
+    // rowwise shape, but the data is physically transposed. `swap_dims=true` (set by
+    // choose_grouped_operand_storage when columnwise == transposed) instructs us to expose
+    // the physical (transposed) layout to cuBLAS so that rows/cols and avg_first/last match
+    // the actual storage. This mirrors `select_grouped_operand`'s use_columnwise(swap_dims=true).
+    const size_t first_dim = swap_dims ? data.shape[1] : data.shape[0];
+    const size_t last_dim  = swap_dims ? data.shape[0] : data.shape[1];
+    args.rows[i] = static_cast<int>(last_dim);
+    args.cols[i] = static_cast<int>(first_dim);
+    *avg_first_dim += static_cast<int64_t>(first_dim);
+    *avg_last_dim += static_cast<int64_t>(last_dim);
 
     if (requires_scale) {
       NVTE_CHECK(scale_inv.has_data(), "Grouped GEMM: ", name, "_list tensor ", i,
@@ -1550,13 +1557,17 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
     A_sel.dtype = A_list_info.row_dtype;
     a_multi_tensor_args = build_grouped_gemm_multi_inputA_args(
         A_list, num_a_tensors, /*use_rowwise=*/true, is_fp8, &avg_first_dim, &avg_last_dim, "A",
-        /*needs_scale_inv=*/nvfp4 || fp8_block);
+        /*needs_scale_inv=*/nvfp4 || fp8_block,
+        /*swap_dims=*/false);
   } else {
     NVTE_CHECK(A_list_info.all_col, "Grouped GEMM: A_list is missing column-wise data");
     A_sel.dtype = A_list_info.col_dtype;
+    // NVFP4/MXFP8 columnwise data is physically transposed (logical shape == rowwise shape);
+    // pass swap_dims so rows/cols and avg_first/last match the physical layout cuBLAS sees.
     a_multi_tensor_args = build_grouped_gemm_multi_inputA_args(
         A_list, num_a_tensors, /*use_rowwise=*/false, is_fp8, &avg_first_dim, &avg_last_dim, "A",
-        /*needs_scale_inv=*/nvfp4 || fp8_block);
+        /*needs_scale_inv=*/nvfp4 || fp8_block,
+        /*swap_dims=*/choice.swap_dims);
   }
 
   // For discrete A_list, scale pointers are per-tensor; use multi-tensor args.
@@ -1604,8 +1615,11 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
   gemm_config.avg_m = config_.avg_m.value_or(compute_avg_first_dim(outputD));
   gemm_config.avg_n =
       config_.avg_n.value_or(transb ? compute_avg_first_dim(inputB) : compute_avg_last_dim(inputB));
+  // After choose_grouped_operand_storage / swap_dims, avg_first/last reflect the physical
+  // layout cuBLAS sees, and A_sel.trans is the post-flip transpose flag. Use those (not the
+  // raw `transa`) so K is selected from the correct dim.
   gemm_config.avg_k =
-      config_.avg_k.value_or(static_cast<bool>(transa) ? avg_last_dim : avg_first_dim);
+      config_.avg_k.value_or(A_sel.trans ? avg_last_dim : avg_first_dim);
   gemm_config.sm_count = config_.sm_count;
   execute_grouped_gemm(workspace.setup_workspace, A_sel, B_sel, outputD->dtype(), num_tensors,
                        gemm_config, workspace.cublas_workspace_ptr, stream);

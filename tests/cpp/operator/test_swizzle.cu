@@ -261,8 +261,10 @@ void performTestGroupedSwizzleMXFP8(const int num_tensors, const size_t M, const
     output_tensors.emplace_back(std::move(output));
   }
 
-  GroupedBuffers grouped_input = build_grouped_tensor(input_ptrs, NVTE_MXFP8_1D_SCALING);
-  GroupedBuffers grouped_output = build_grouped_tensor(output_ptrs, NVTE_MXFP8_1D_SCALING);
+  GroupedBuffers grouped_input = build_grouped_tensor(input_ptrs, NVTE_MXFP8_1D_SCALING,
+                                                      /*enforce_grouped_gemm_alignment=*/false);
+  GroupedBuffers grouped_output = build_grouped_tensor(output_ptrs, NVTE_MXFP8_1D_SCALING,
+                                                       /*enforce_grouped_gemm_alignment=*/false);
   const uint8_t input_swizzled = 0;
   nvte_set_grouped_tensor_param(grouped_input.get_handle(),
                                 kNVTEGroupedWithGEMMSwizzledScales,
@@ -369,8 +371,10 @@ void performTestGroupedUnswizzleMXFP8(const int num_tensors, const size_t M, con
     output_tensors.emplace_back(std::move(output));
   }
 
-  GroupedBuffers grouped_input = build_grouped_tensor(input_ptrs, NVTE_MXFP8_1D_SCALING);
-  GroupedBuffers grouped_output = build_grouped_tensor(output_ptrs, NVTE_MXFP8_1D_SCALING);
+  GroupedBuffers grouped_input = build_grouped_tensor(input_ptrs, NVTE_MXFP8_1D_SCALING,
+                                                      /*enforce_grouped_gemm_alignment=*/false);
+  GroupedBuffers grouped_output = build_grouped_tensor(output_ptrs, NVTE_MXFP8_1D_SCALING,
+                                                       /*enforce_grouped_gemm_alignment=*/false);
   const uint8_t input_swizzled = 1;
   nvte_set_grouped_tensor_param(grouped_input.get_handle(),
                                 kNVTEGroupedWithGEMMSwizzledScales,
@@ -459,9 +463,12 @@ void performTestGroupedSwizzleUnswizzleRoundtrip(const int num_tensors, const si
     final_tensors.emplace_back(std::move(fin));
   }
 
-  GroupedBuffers grouped_orig = build_grouped_tensor(orig_ptrs, NVTE_MXFP8_1D_SCALING);
-  GroupedBuffers grouped_mid = build_grouped_tensor(mid_ptrs, NVTE_MXFP8_1D_SCALING);
-  GroupedBuffers grouped_fin = build_grouped_tensor(final_ptrs, NVTE_MXFP8_1D_SCALING);
+  GroupedBuffers grouped_orig = build_grouped_tensor(orig_ptrs, NVTE_MXFP8_1D_SCALING,
+                                                     /*enforce_grouped_gemm_alignment=*/false);
+  GroupedBuffers grouped_mid = build_grouped_tensor(mid_ptrs, NVTE_MXFP8_1D_SCALING,
+                                                    /*enforce_grouped_gemm_alignment=*/false);
+  GroupedBuffers grouped_fin = build_grouped_tensor(final_ptrs, NVTE_MXFP8_1D_SCALING,
+                                                    /*enforce_grouped_gemm_alignment=*/false);
 
   const NVTEShape row_shape = orig_tensors[0]->rowwise_scale_inv_shape();
   const NVTEShape col_shape = orig_tensors[0]->columnwise_scale_inv_shape();

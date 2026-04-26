@@ -563,7 +563,8 @@ struct GroupedBuffers {
 };
 
 GroupedBuffers build_grouped_tensor(const std::vector<Tensor*>& tensors,
-                                    const NVTEScalingMode scaling_mode);
+                                    const NVTEScalingMode scaling_mode,
+                                    bool enforce_grouped_gemm_alignment = true);
 
 }  // namespace test
 
