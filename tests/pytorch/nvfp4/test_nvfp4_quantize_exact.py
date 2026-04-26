@@ -23,6 +23,20 @@ def unpack_fp4(x: torch.Tensor) -> torch.Tensor:
     return repeated
 
 
+def maybe_skip_pertoken_nvfp4(
+    x_dtype: torch.dtype = torch.bfloat16,
+    *,
+    return_transpose: bool = False,
+    with_2d_quantization: bool = False,
+) -> None:
+    if x_dtype == torch.float32:
+        pytest.skip("Per-token NVFP4 kernel supports BF16/FP16 inputs only")
+    if return_transpose:
+        pytest.skip("Per-token NVFP4 currently supports rowwise-only quantization")
+    if with_2d_quantization:
+        pytest.skip("Per-token NVFP4 does not support 2D quantization")
+
+
 def check_quantization_nvfp4_versus_reference(
     x_dtype: torch.dtype,
     M: int,
@@ -31,6 +45,7 @@ def check_quantization_nvfp4_versus_reference(
     swizzled_scale: bool,
     use_cpp_allocator: bool,
     with_2d_quantization: bool,
+    per_token_activation: bool = False,
 ) -> None:
     te_dtype = tex.DType.kFloat4E2M1
 
@@ -52,6 +67,7 @@ def check_quantization_nvfp4_versus_reference(
         with_rht=False,
         with_post_rht_amax=False,
         with_2d_quantization=with_2d_quantization,
+        per_token_activation=per_token_activation,
     )
     if use_cpp_allocator:
         x_nvfp4_sut = nvfp4_quantizer(x)
@@ -83,6 +99,7 @@ def check_quantization_nvfp4_versus_reference(
         pow_2_scales=False,
         eps=0.0,
         quant_tile_shape=quant_tile_shape,
+        per_token_activation=per_token_activation,
     )
     x_nvfp4_ref = ref_quantizer.quantize(x)
 
@@ -155,6 +172,9 @@ def check_quantization_nvfp4_versus_reference(
 @pytest.mark.parametrize(
     "with_2d_quantization", [True, False], ids=["2d_quantization", "1d_quantization"]
 )
+@pytest.mark.parametrize(
+    "per_token_activation", [False, True], ids=["nvfp4_per_tensor", "nvfp4_pertoken"]
+)
 def test_quantization_block_tiling_versus_reference(
     x_dtype: torch.dtype,
     M: int,
@@ -163,7 +183,14 @@ def test_quantization_block_tiling_versus_reference(
     swizzled_scale: bool,
     use_cpp_allocator: bool,
     with_2d_quantization: bool,
+    per_token_activation: bool,
 ) -> None:
+    if per_token_activation:
+        maybe_skip_pertoken_nvfp4(
+            x_dtype=x_dtype,
+            return_transpose=return_transpose,
+            with_2d_quantization=with_2d_quantization,
+        )
     check_quantization_nvfp4_versus_reference(
         x_dtype=x_dtype,
         M=M,
@@ -172,6 +199,7 @@ def test_quantization_block_tiling_versus_reference(
         swizzled_scale=swizzled_scale,
         use_cpp_allocator=use_cpp_allocator,
         with_2d_quantization=with_2d_quantization,
+        per_token_activation=per_token_activation,
     )
 
 
@@ -188,6 +216,9 @@ def test_quantization_block_tiling_versus_reference(
 @pytest.mark.parametrize(
     "use_cpp_allocator", [True, False], ids=["cpp_allocator", "python_allocator"]
 )
+@pytest.mark.parametrize(
+    "per_token_activation", [False, True], ids=["nvfp4_per_tensor", "nvfp4_pertoken"]
+)
 def test_nvfp4_quantization_extrema_versus_reference(
     x_dtype: torch.dtype,
     M: int,
@@ -195,6 +226,7 @@ def test_nvfp4_quantization_extrema_versus_reference(
     extrema_high: bool,
     return_transpose: bool,
     use_cpp_allocator: bool,
+    per_token_activation: bool,
 ):
     te_dtype = tex.DType.kFloat4E2M1
 
@@ -208,6 +240,9 @@ def test_nvfp4_quantization_extrema_versus_reference(
     else:
         x = torch.zeros((M, N), dtype=x_dtype, device=device)
 
+    if per_token_activation:
+        maybe_skip_pertoken_nvfp4(x_dtype=x_dtype, return_transpose=return_transpose)
+
     nvfp4_quantizer = NVFP4Quantizer(
         fp4_dtype=te_dtype,
         rowwise=True,
@@ -216,6 +251,7 @@ def test_nvfp4_quantization_extrema_versus_reference(
         amax_reduction_group=None,
         with_rht=False,
         with_post_rht_amax=False,
+        per_token_activation=per_token_activation,
     )
 
     if use_cpp_allocator:
@@ -245,6 +281,7 @@ def test_nvfp4_quantization_extrema_versus_reference(
         pow_2_scales=False,
         eps=0.0,
         quant_tile_shape=(1, 16),
+        per_token_activation=per_token_activation,
     )
     x_nvfp4_ref = ref_quantizer.quantize(x)
 
@@ -286,12 +323,16 @@ def test_nvfp4_quantization_extrema_versus_reference(
 @pytest.mark.parametrize(
     "use_cpp_allocator", [True, False], ids=["cpp_allocator", "python_allocator"]
 )
+@pytest.mark.parametrize(
+    "per_token_activation", [False, True], ids=["nvfp4_per_tensor", "nvfp4_pertoken"]
+)
 def test_nvfp4_quantization_boundary_values(
     x_dtype: torch.dtype,
     M: int,
     N: int,
     return_transpose: bool,
     use_cpp_allocator: bool,
+    per_token_activation: bool,
 ):
     """
     Stress rounding/threshold behavior by placing values just below/above
@@ -319,6 +360,9 @@ def test_nvfp4_quantization_boundary_values(
     row[1::2] = upper
     x = row.unsqueeze(0).repeat(M, 1).to(dtype=x_dtype)
 
+    if per_token_activation:
+        maybe_skip_pertoken_nvfp4(x_dtype=x_dtype, return_transpose=return_transpose)
+
     nvfp4_quantizer = NVFP4Quantizer(
         fp4_dtype=te_dtype,
         rowwise=True,
@@ -327,6 +371,7 @@ def test_nvfp4_quantization_boundary_values(
         amax_reduction_group=None,
         with_rht=False,
         with_post_rht_amax=False,
+        per_token_activation=per_token_activation,
     )
 
     if use_cpp_allocator:
@@ -356,6 +401,7 @@ def test_nvfp4_quantization_boundary_values(
         pow_2_scales=False,
         eps=0.0,
         quant_tile_shape=(1, 16),
+        per_token_activation=per_token_activation,
     )
     x_nvfp4_ref = ref_quantizer.quantize(x)
 
@@ -397,12 +443,16 @@ def test_nvfp4_quantization_boundary_values(
 @pytest.mark.parametrize(
     "use_cpp_allocator", [True, False], ids=["cpp_allocator", "python_allocator"]
 )
+@pytest.mark.parametrize(
+    "per_token_activation", [False, True], ids=["nvfp4_per_tensor", "nvfp4_pertoken"]
+)
 def test_nvfp4_quantization_noncontiguous_inputs(
     x_dtype: torch.dtype,
     M: int,
     N: int,
     return_transpose: bool,
     use_cpp_allocator: bool,
+    per_token_activation: bool,
 ):
     te_dtype = tex.DType.kFloat4E2M1
 
@@ -416,6 +466,9 @@ def test_nvfp4_quantization_noncontiguous_inputs(
     x_nc = x_base.t()  # shape (N, M), non-contiguous
     assert not x_nc.is_contiguous()
 
+    if per_token_activation:
+        maybe_skip_pertoken_nvfp4(x_dtype=x_dtype, return_transpose=return_transpose)
+
     nvfp4_quantizer = NVFP4Quantizer(
         fp4_dtype=te_dtype,
         rowwise=True,
@@ -424,6 +477,7 @@ def test_nvfp4_quantization_noncontiguous_inputs(
         amax_reduction_group=None,
         with_rht=False,
         with_post_rht_amax=False,
+        per_token_activation=per_token_activation,
     )
 
     if use_cpp_allocator:
@@ -453,6 +507,7 @@ def test_nvfp4_quantization_noncontiguous_inputs(
         pow_2_scales=False,
         eps=0.0,
         quant_tile_shape=(1, 16),
+        per_token_activation=per_token_activation,
     )
     x_nvfp4_ref = ref_quantizer.quantize(x_nc)
 

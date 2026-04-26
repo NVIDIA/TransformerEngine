@@ -15,6 +15,7 @@ from ..utils import get_sm_count, _empty_tensor
 
 from ..quantized_tensor import Quantizer
 from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
+from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 from ..tensor.utils import is_custom
 from ..custom_recipes.gemm import custom_gemm
 from ...debug.pytorch.debug_quantization import DebugQuantizer
@@ -67,6 +68,50 @@ def validate_gemm_scale(scale: Optional[float], required: bool) -> float:
     if scale not in (0.0, None):
         raise ValueError("scale must be zero")
     return 0.0
+
+
+def _maybe_apply_nvfp4_pertoken_output_rescale(
+    out: torch.Tensor,
+    B: torch.Tensor,
+    *,
+    layout: str,
+    bias: Optional[torch.Tensor],
+    grad: bool,
+    gelu: bool,
+    accumulate: bool,
+) -> None:
+    """Apply per-token NVFP4 global-scale correction for TN forward GEMM outputs.
+
+    Current NVFP4 GEMM alpha path consumes one scalar amax. Per-token NVFP4 stores
+    rowwise amax vector in B._amax_rowwise, so we correct by row using ratio
+    (amax[row] / amax[0]). If bias was fused in epilogue, remove/reapply it around
+    the row rescale to avoid bias distortion.
+    """
+
+    if grad or gelu or accumulate or layout != "TN":
+        return
+    if not isinstance(B, NVFP4TensorStorage):
+        return
+    if not isinstance(out, torch.Tensor) or is_custom(out):
+        return
+    if out.numel() == 0:
+        return
+    amax = B._amax_rowwise
+    if amax is None or amax.numel() <= 1:
+        return
+
+    out_2d = out.reshape(-1, out.shape[-1])
+    if amax.numel() != out_2d.shape[0]:
+        return
+
+    ratios = (amax / amax[0]).to(dtype=out.dtype).view(-1, 1)
+    if bias is not None:
+        bias_cast = bias.to(dtype=out.dtype)
+        out_2d.sub_(bias_cast)
+        out_2d.mul_(ratios)
+        out_2d.add_(bias_cast)
+    else:
+        out_2d.mul_(ratios)
 
 
 def general_gemm(
@@ -147,6 +192,22 @@ def general_gemm(
         # FP8 block-scaling requires split accumulator
         use_split_accumulator = True
 
+    requested_out_dtype = out_dtype
+    needs_fp32_rescale_path = (
+        layout == "TN"
+        and not grad
+        and not gelu
+        and not accumulate
+        and isinstance(B, NVFP4TensorStorage)
+        and B._amax_rowwise is not None
+        and B._amax_rowwise.numel() > 1
+        and quantization_params is None
+        and out is None
+        and requested_out_dtype is not None
+        and requested_out_dtype != torch.float32
+    )
+    effective_out_dtype = torch.float32 if needs_fp32_rescale_path else requested_out_dtype
+
     args = (
         A,
         transa,  # transa
@@ -154,7 +215,7 @@ def general_gemm(
         transb,  # transb
         out,
         quantization_params,
-        TE_DType[out_dtype] if out_dtype is not None else None,
+        TE_DType[effective_out_dtype] if effective_out_dtype is not None else None,
         bias,
         bias_dtype,
         gelu,
@@ -175,6 +236,17 @@ def general_gemm(
     }
 
     out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
+    _maybe_apply_nvfp4_pertoken_output_rescale(
+        out,
+        B,
+        layout=layout,
+        bias=bias,
+        grad=grad,
+        gelu=gelu,
+        accumulate=accumulate,
+    )
+    if needs_fp32_rescale_path:
+        out = out.to(dtype=requested_out_dtype)
 
     if debug_quantizer is not None:
         out = debug_quantizer.process_gemm_output(out)

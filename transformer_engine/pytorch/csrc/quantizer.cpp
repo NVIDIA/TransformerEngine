@@ -1696,6 +1696,7 @@ NVFP4Quantizer::NVFP4Quantizer(const py::handle& quantizer) : Quantizer(quantize
   this->with_post_rht_amax = quantizer.attr("with_post_rht_amax").cast<bool>();
   this->with_2d_quantization = quantizer.attr("with_2d_quantization").cast<bool>();
   this->stochastic_rounding = quantizer.attr("stochastic_rounding").cast<bool>();
+  this->per_token_activation = quantizer.attr("per_token_activation").cast<bool>();
 
   // Get amax reduction group if needed for NVFP4 AG
   const bool with_amax_reduction = quantizer.attr("with_amax_reduction").cast<bool>();
@@ -1760,9 +1761,10 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
                                                      rowwise_scale_inv_shape.end());
     rowwise_data_tensor = at::empty(convert_shape_for_fp4(shape_int64), bit8_tensor_opts);
     rowwise_scale_inv_tensor = at::empty(scale_inv_shape_int64, bit8_tensor_opts);
+    const int64_t amax_rows = this->per_token_activation ? static_cast<int64_t>(flat_first_dim) : 1;
     // hadamard amax kernel will zero out pointer with ZeroAmaxKernel
     // nvte_compute_amax_with_config will zero out the pointer if needed
-    amax_rowwise = at::empty({1}, bit32_tensor_opts);
+    amax_rowwise = at::empty({amax_rows}, bit32_tensor_opts);
   }
   if (columnwise_usage) {
     const std::vector<int64_t> scale_inv_shape_int64(columnwise_scale_inv_shape.begin(),
@@ -1850,7 +1852,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
     out_cpp.set_rowwise_data(rowwise_data_tensor.data_ptr(), DType::kFloat4E2M1, shape);
     out_cpp.set_rowwise_scale_inv(rowwise_scale_inv_tensor.data_ptr(), DType::kFloat8E4M3,
                                   rowwise_scale_inv_shape);
-    out_cpp.set_amax(amax_rowwise.data_ptr(), DType::kFloat32, std::vector<size_t>{1});
+    out_cpp.set_amax(amax_rowwise.data_ptr(), DType::kFloat32, getTensorShape(amax_rowwise));
   }
   if (columnwise_usage) {
     // enforce 2D shape to avoid [S, B, H] shape and B and be 1
@@ -1862,7 +1864,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
     out_cpp.set_columnwise_scale_inv(columnwise_scale_inv_tensor.data_ptr(), DType::kFloat8E4M3,
                                      columnwise_scale_inv_shape);
     out_cpp.set_columnwise_amax(amax_columnwise.data_ptr(), DType::kFloat32,
-                                std::vector<size_t>{1});
+                                getTensorShape(amax_columnwise));
   }
   out_cpp.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
   this->set_quantization_params(&out_cpp);
@@ -1975,15 +1977,22 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_unquantized_tensor_w
   auto [out_cpp, out_py] = NoneQuantizer(py::none()).create_tensor(shape, dtype);
 
   // Register amax pointer from quantized tensor
-  void* amax_ptr = quantized_tensor.amax();
+  auto rowwise_amax = quantized_tensor.get_amax();
+  auto columnwise_amax = quantized_tensor.get_columnwise_amax();
+
+  void* amax_ptr = rowwise_amax.data_ptr;
+  std::vector<size_t> amax_shape = convertShape(rowwise_amax.shape);
   if (amax_ptr == nullptr) {
-    amax_ptr = quantized_tensor.get_columnwise_amax().data_ptr;
+    amax_ptr = columnwise_amax.data_ptr;
+    amax_shape = convertShape(columnwise_amax.shape);
   }
   NVTE_CHECK(amax_ptr != nullptr, "Could not extract amax pointer from NVFP4 tensor.");
-  out_cpp.set_amax(amax_ptr, DType::kFloat32, std::vector<size_t>{1});
+  out_cpp.set_amax(amax_ptr, DType::kFloat32, amax_shape);
 
   // Zero out amax
-  NVTE_CHECK_CUDA(cudaMemsetAsync(amax_ptr, 0, sizeof(float), at::cuda::getCurrentCUDAStream()));
+  const size_t amax_numel = product(amax_shape);
+  NVTE_CHECK_CUDA(
+      cudaMemsetAsync(amax_ptr, 0, amax_numel * sizeof(float), at::cuda::getCurrentCUDAStream()));
 
   return {std::move(out_cpp), std::move(out_py)};
 }
@@ -2050,9 +2059,11 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
     }
     if (!amax_rowwise) {
       const auto opts = at::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+      const int64_t amax_rows =
+          this->per_token_activation ? static_cast<int64_t>(flat_first_dim) : 1;
       // hadamard amax kernel will zero out pointer with ZeroAmaxKernel
       // nvte_compute_amax_with_config will zero out the pointer if needed
-      amax_rowwise = at::empty({1}, opts);
+      amax_rowwise = at::empty({amax_rows}, opts);
       tensor.attr("_amax_rowwise") = *amax_rowwise;
     }
   } else {  // rowwise_usage == false
@@ -2118,7 +2129,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
     out_cpp.set_rowwise_data(rowwise_data->data_ptr(), DType::kFloat4E2M1, shape);
     out_cpp.set_rowwise_scale_inv(rowwise_scale_inv->data_ptr(), DType::kFloat8E4M3,
                                   getTensorShape(*rowwise_scale_inv));
-    out_cpp.set_amax(amax_rowwise->data_ptr(), DType::kFloat32, std::vector<size_t>{1});
+    out_cpp.set_amax(amax_rowwise->data_ptr(), DType::kFloat32, getTensorShape(*amax_rowwise));
   }
   if (columnwise_usage) {
     // enforce 2D shape to avoid [S, B, H] shape and B and be 1
@@ -2241,6 +2252,22 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
   }
   size_t cols = input.size(input.ndim() - 1);
 
+  if (this->per_token_activation) {
+    NVTE_CHECK(!this->with_rht, "Per-token NVFP4 activation does not support RHT.");
+    NVTE_CHECK(!this->with_2d_quantization,
+               "Per-token NVFP4 activation does not support 2D quantization.");
+    NVTE_CHECK(!this->stochastic_rounding,
+               "Per-token NVFP4 activation does not support stochastic rounding.");
+    NVTE_CHECK(!this->columnwise_usage,
+               "Per-token NVFP4 activation currently supports rowwise-only quantization.");
+    NVTE_CHECK(!this->with_amax_reduction,
+               "Per-token NVFP4 activation does not support amax reduction.");
+    NVTE_CHECK(input.dtype() == DType::kBFloat16 || input.dtype() == DType::kFloat16,
+               "Per-token NVFP4 activation supports BF16/FP16 inputs only.");
+    NVTE_CHECK(cols % 16 == 0, "Per-token NVFP4 activation requires last dim divisible by 16.");
+    quant_config.set_nvfp4_per_token_activation(true);
+  }
+
   // Restriction for the RHT cast fusion kernel because we are using MMA hardware for computing RHT
   bool eligible_for_rht_cast_fusion =
       input.dtype() == DType::kBFloat16 && rows % 64 == 0 && cols % 128 == 0;
@@ -2307,7 +2334,7 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
           "Use with_post_rht_amax=true instead.");
     }
   } else {  // Without RHT
-    if (compute_amax) {
+    if (compute_amax && !this->per_token_activation) {
       // Amax pointers
       auto rowwise_amax_ptr = out.get_amax().data_ptr;
       auto columnwise_amax_ptr = out.get_columnwise_amax().data_ptr;
@@ -2408,6 +2435,8 @@ void NVFP4Quantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
 }
 
 void NVFP4Quantizer::quantize_with_amax(TensorWrapper& input, TensorWrapper& out) {
+  NVTE_CHECK(!this->per_token_activation,
+             "quantize_with_amax is not supported for per-token NVFP4 activation.");
   // Update output tensor amaxes with input tensor amax
   auto input_amax_ptr = input.amax();
   auto output_rowwise_amax_ptr = out.get_amax().data_ptr;

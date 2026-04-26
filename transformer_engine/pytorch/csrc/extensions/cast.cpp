@@ -801,6 +801,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
   const auto columnwise_usage = quantizer_cpp_list[0]->columnwise_usage;
   const auto scaling_mode = quantizer_cpp_list[0]->get_scaling_mode();
   const auto fp4_dtype = quantizer_cpp_list[0]->dtype;
+  const bool per_token_activation = quantizer_cpp_list[0]->per_token_activation;
   const bool with_gemm_swizzled_scales = false;  /// TODO (tmoon) Enable based on optimize_for_gemm;
   constexpr size_t scale_elem_size = 1;
 
@@ -827,6 +828,16 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
       fp4_shape.back() /= 2;
     }
     return fp4_shape;
+  };
+  auto flat_first_dim = [](const std::vector<size_t> &shape) -> size_t {
+    if (shape.empty()) {
+      return 1;
+    }
+    size_t rows = 1;
+    for (size_t i = 0; i + 1 < shape.size(); ++i) {
+      rows *= shape[i];
+    }
+    return rows;
   };
 
   // Allocate row-wise data
@@ -866,7 +877,9 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
       // Note: Multi-quantize kernel does not require contiguous amaxes.
       const auto offset = roundup(buffer_size, 16);
       amax_offsets.push_back(offset);
-      buffer_size = offset + 4;
+      const size_t amax_size =
+          per_token_activation ? 4 * flat_first_dim(rowwise_data_shapes[i]) : 4;
+      buffer_size = offset + amax_size;
     }
 
     // Allocate full buffer
@@ -879,8 +892,11 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
                                                      data_offsets[i], torch::kUInt8));
       rowwise_scale_list.emplace_back(
           make_torch_view(buffer, rowwise_scale_shapes[i], scale_offsets[i], torch::kUInt8));
+      const std::vector<size_t> amax_shape =
+          per_token_activation ? std::vector<size_t>{flat_first_dim(rowwise_data_shapes[i])}
+                               : std::vector<size_t>{1};
       amax_rowwise_list.emplace_back(
-          make_torch_view(buffer, std::vector<size_t>{1}, amax_offsets[i], torch::kFloat32));
+          make_torch_view(buffer, amax_shape, amax_offsets[i], torch::kFloat32));
     }
   }
 
@@ -983,7 +999,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
       // Set the amax rowwise and amax columnwise if available
       if (rowwise_usage) {
         tensor_wrapper.set_amax(amax_rowwise_list[i].data_ptr(), DType::kFloat32,
-                                std::vector<size_t>{1});
+                                getTensorShape(amax_rowwise_list[i]));
       }
       if (columnwise_usage) {
         tensor_wrapper.set_columnwise_amax(amax_columnwise_list[i].data_ptr(), DType::kFloat32,
@@ -1263,6 +1279,35 @@ void split_quantize_nvfp4_impl_helper(const TensorWrapper &input,
     nvte_tensor_output_list.push_back(output_list[i].data());
   }
 
+  if (quantizer.per_token_activation) {
+    NVTE_CHECK(!quantizer.with_rht, "Per-token NVFP4 split quantize does not support RHT.");
+    NVTE_CHECK(!quantizer.columnwise_usage,
+               "Per-token NVFP4 split quantize currently supports rowwise-only quantization.");
+    NVTE_CHECK(!quantizer.with_2d_quantization,
+               "Per-token NVFP4 split quantize does not support 2D quantization.");
+    NVTE_CHECK(!quantizer.stochastic_rounding,
+               "Per-token NVFP4 split quantize does not support stochastic rounding.");
+
+    std::vector<QuantizationConfigWrapper> quant_config_list;
+    quant_config_list.reserve(num_tensors);
+    for (size_t i = 0; i < num_tensors; ++i) {
+      quant_config_list.emplace_back(QuantizationConfigWrapper());
+      quant_config_list.back().set_nvfp4_per_token_activation(true);
+    }
+
+    for (size_t i = 0; i < num_tensors; i++) {
+      if (input_list[i].numel() == 0) {
+        continue;
+      }
+      const size_t input_ndim = input_list[i].ndim();
+      const size_t cols = input_ndim > 0 ? input_list[i].size(input_ndim - 1) : 1;
+      NVTE_CHECK(cols % 16 == 0,
+                 "Per-token NVFP4 split quantize requires split inner dim divisible by 16.");
+      nvte_quantize_v2(input_list[i].data(), output_list[i].data(), quant_config_list[i], stream);
+    }
+    return;
+  }
+
   // In this case without RHT, the rowwise and colwise quantization are fused
   // we don't need separate rng states for rowwise and colwise
   bool need_separate_rng_states = false;
@@ -1360,8 +1405,13 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
 
   // Check input tensor shape
   const size_t input_last_dim = input.ndim() > 0 ? input.size(input.ndim() - 1) : 1;
-  NVTE_CHECK(input_last_dim % 128 == 0,
-             "NVFP4 multi-quantize requires inner dim to be multiple of 128.");
+  if (quantizer.per_token_activation) {
+    NVTE_CHECK(input_last_dim % 16 == 0,
+               "Per-token NVFP4 split-quantize requires inner dim to be multiple of 16.");
+  } else {
+    NVTE_CHECK(input_last_dim % 128 == 0,
+               "NVFP4 multi-quantize requires inner dim to be multiple of 128.");
+  }
 
   // CUDA stream
   auto stream = at::cuda::getCurrentCUDAStream();
@@ -1433,12 +1483,25 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
   for (size_t i = 0; i < num_splits; i++) {
     quantizer_cpp_list.push_back(convert_quantizer(quantizer_list[i]));
   }
+  const bool all_nvfp4_quantizers = std::all_of(quantizer_list.begin(), quantizer_list.end(),
+                                                [](const py::handle &quantizer) -> bool {
+                                                  return detail::IsNVFP4Quantizers(quantizer.ptr());
+                                                });
+  const bool all_nvfp4_per_token_activation =
+      all_nvfp4_quantizers &&
+      std::all_of(quantizer_cpp_list.begin(), quantizer_cpp_list.end(),
+                  [](const std::unique_ptr<Quantizer> &quantizer) -> bool {
+                    return static_cast<NVFP4Quantizer *>(quantizer.get())->per_token_activation;
+                  });
 
   // Choose implementation for allocating and populating tensors
   enum class AllocationMethod { UNFUSED, BULK_FP8_BLOCKWISE, BULK_MXFP8, BULK_NVFP4 };
   enum class QuantizationMethod { UNFUSED, FUSED_NVFP4 };
   AllocationMethod allocation_method = AllocationMethod::UNFUSED;
   QuantizationMethod quantization_method = QuantizationMethod::UNFUSED;
+  if (all_nvfp4_per_token_activation) {
+    quantization_method = QuantizationMethod::FUSED_NVFP4;
+  }
   if (!disable_bulk_allocation) {
     if (std::all_of(quantizer_list.begin(), quantizer_list.end(),
                     [](const py::handle &quantizer) -> bool {
@@ -1450,10 +1513,7 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
                              return detail::IsMXFP8Quantizers(quantizer.ptr());
                            })) {
       allocation_method = AllocationMethod::BULK_MXFP8;
-    } else if (std::all_of(quantizer_list.begin(), quantizer_list.end(),
-                           [](const py::handle &quantizer) -> bool {
-                             return detail::IsNVFP4Quantizers(quantizer.ptr());
-                           })) {
+    } else if (all_nvfp4_quantizers) {
       allocation_method = AllocationMethod::BULK_NVFP4;
       quantization_method = QuantizationMethod::FUSED_NVFP4;
     }
@@ -1492,7 +1552,8 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
       bool contiguous_data_and_scale = false;
       std::tie(output_py_list, output_cpp_list, contiguous_data_and_scale) =
           bulk_allocate_nvfp4_tensors(split_shapes, quantizer_list, nvfp4_quantizers);
-      if (!input_shape.empty() && input_shape.back() % 128 != 0) {
+      if (!all_nvfp4_per_token_activation && !input_shape.empty() &&
+          input_shape.back() % 128 != 0) {
         static std::once_flag once_unfused_nvfp4_fallback_warning;
         std::call_once(once_unfused_nvfp4_fallback_warning, []() {
           NVTE_WARN(
@@ -1502,7 +1563,7 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
         });
         quantization_method = QuantizationMethod::UNFUSED;
       }
-      if (!contiguous_data_and_scale) {
+      if (!all_nvfp4_per_token_activation && !contiguous_data_and_scale) {
         // Avoid fused quantize kernel if data is not contiguous
         quantization_method = QuantizationMethod::UNFUSED;
       }
@@ -1538,6 +1599,54 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
   }
 
   return output_py_list;
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> quantize_nvfp4_pertoken(at::Tensor input) {
+  init_extension();
+
+  NVTE_CHECK(input.dim() == 2, "Input must be 2D (num_rows, num_cols)");
+  NVTE_CHECK(input.is_cuda(), "Input must be on CUDA device");
+  NVTE_CHECK(input.scalar_type() == at::ScalarType::BFloat16 ||
+                 input.scalar_type() == at::ScalarType::Half,
+             "Input must be BFloat16 or Half");
+
+  const int num_rows = input.size(0);
+  const int num_cols = input.size(1);
+  NVTE_CHECK(num_cols % 16 == 0,
+             "num_cols must be a multiple of 16 for per-token NVFP4 quantization");
+
+  if (num_rows == 0) {
+    auto options = input.options();
+    return {at::empty({0, num_cols / 2}, options.dtype(at::kByte)),
+            at::empty({0, num_cols / 16}, options.dtype(at::kByte)),
+            at::empty({0}, options.dtype(at::kFloat))};
+  }
+
+  auto input_contig = input.contiguous();
+  auto options = input_contig.options();
+
+  auto output_data = at::empty({num_rows, num_cols / 2}, options.dtype(at::kByte));
+  auto output_scales = at::empty({num_rows, num_cols / 16}, options.dtype(at::kByte));
+  auto output_per_token_amax = at::empty({num_rows}, options.dtype(at::kFloat));
+
+  auto te_input = makeTransformerEngineTensor(input_contig);
+  TensorWrapper te_output(NVTE_NVFP4_1D_SCALING);
+  te_output.set_rowwise_data(
+      output_data.data_ptr(), DType::kFloat4E2M1,
+      std::vector<size_t>{static_cast<size_t>(num_rows), static_cast<size_t>(num_cols)});
+  te_output.set_rowwise_scale_inv(
+      output_scales.data_ptr(), DType::kFloat8E4M3,
+      std::vector<size_t>{static_cast<size_t>(num_rows), static_cast<size_t>(num_cols / 16)});
+  te_output.set_amax(output_per_token_amax.data_ptr(), DType::kFloat32,
+                     std::vector<size_t>{static_cast<size_t>(num_rows)});
+  QuantizationConfigWrapper quant_config;
+  quant_config.set_nvfp4_per_token_activation(true);
+  auto stream = at::cuda::getCurrentCUDAStream().stream();
+
+  NVTE_SCOPED_GIL_RELEASE(
+      { nvte_quantize_v2(te_input.data(), te_output.data(), quant_config, stream); });
+
+  return {output_data, output_scales, output_per_token_amax};
 }
 
 }  // namespace pytorch
