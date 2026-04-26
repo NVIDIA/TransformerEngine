@@ -114,6 +114,14 @@ def _maybe_apply_nvfp4_pertoken_output_rescale(
         out_2d.mul_(ratios)
 
 
+def _is_nvfp4_pertoken_tensor(tensor: torch.Tensor) -> bool:
+    """Whether tensor carries per-token NVFP4 global amax metadata."""
+    if not isinstance(tensor, NVFP4TensorStorage):
+        return False
+    amax = tensor._amax_rowwise if tensor._amax_rowwise is not None else tensor._amax_columnwise
+    return amax is not None and amax.numel() > 1
+
+
 def general_gemm(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -302,6 +310,43 @@ def general_grouped_gemm(
         bias_dtype = TE_DType[grad_bias[0].dtype] if grad else TE_DType[bias[0].dtype]
     else:
         bias_dtype = TE_DType[torch.bfloat16]
+
+    use_pertoken_unfused_fprop = (
+        not grad
+        and not gelu
+        and not accumulate
+        and layout[1] == "N"
+        and D_dtype is None
+        and all(q is None for q in quantization_params)
+        and any(_is_nvfp4_pertoken_tensor(tensor) for tensor in B)
+    )
+    if use_pertoken_unfused_fprop:
+        out_init = out[0] if single_output else None
+        if single_output:
+            start_idx = 0
+            out_views = []
+            for i in range(num_gemms):
+                size = m_splits[i]
+                out_views.append(out_init[start_idx : start_idx + size])
+                start_idx += size
+        else:
+            out_views = out
+        for i in range(num_gemms):
+            if out_views[i].numel() == 0:
+                continue
+            gemm_out, _, _, _ = general_gemm(
+                A[i],
+                B[i],
+                quantization_params=None,
+                out_dtype=out_views[i].dtype,
+                layout=layout,
+                bias=bias[i] if use_bias else None,
+                use_split_accumulator=use_split_accumulator,
+            )
+            out_views[i].copy_(gemm_out)
+        if single_output:
+            out = out_init
+        return out, bias, gelu_input
 
     if isinstance(quantization_params[0], DebugQuantizer):
         assert not gelu, "GELU not supported in debug mode"
