@@ -246,7 +246,9 @@ class MXFP8Quantizer(Quantizer):
         """
 
         if not hasattr(tex, "mxfp8_scaling_transpose_cast"):
-            raise RuntimeError("TransformerEngine extension is missing mxfp8_scaling_transpose_cast")
+            raise RuntimeError(
+                "TransformerEngine extension is missing mxfp8_scaling_transpose_cast"
+            )
         if tensor.dim() < 2:
             raise ValueError(
                 f"MXFP8 transpose quantization requires at least 2D input: {tensor.shape}"
@@ -254,7 +256,9 @@ class MXFP8Quantizer(Quantizer):
         if not tensor.is_cuda or not columnwise_scale_inv.is_cuda:
             raise ValueError("MXFP8 transpose quantization requires CUDA tensors")
         if self.dtype not in (tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2):
-            raise TypeError(f"MXFP8 transpose quantization only supports E4M3/E5M2, got {self.dtype}")
+            raise TypeError(
+                f"MXFP8 transpose quantization only supports E4M3/E5M2, got {self.dtype}"
+            )
         if tensor.dtype not in (torch.float32, torch.float16, torch.bfloat16):
             raise TypeError(f"Unsupported MXFP8 transpose source dtype: {tensor.dtype}")
         if columnwise_scale_inv.dtype != torch.uint8:

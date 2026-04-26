@@ -72,6 +72,6 @@ def test_swizzled_scales_match_native_transpose(rows, cols):
 
     # Scales must also be exact byte-equal — both paths target the GEMM
     # swizzled layout for the same logical row-wise tensor.
-    assert torch.equal(transposed._rowwise_scale_inv, native_t._rowwise_scale_inv), (
-        "Swizzled row-wise scale bytes differ from native transposed quantization"
-    )
+    assert torch.equal(
+        transposed._rowwise_scale_inv, native_t._rowwise_scale_inv
+    ), "Swizzled row-wise scale bytes differ from native transposed quantization"

@@ -6,8 +6,8 @@
 
 #include <transformer_engine/recipe.h>
 
-#include "../common.h"
 #include "../cast/mxfp8/swizzle.cuh"
+#include "../common.h"
 #include "../util/ptx.cuh"
 #include "../utils.cuh"
 
@@ -157,9 +157,10 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
 constexpr int kTransposeTileDim = 16;
 
 template <typename IType, typename OType>
-__global__ void mxfp8_scaling_transpose_cast_kernel(
-    const IType *input, const e8m0_t *scale_inv_colwise, OType *output_rowwise, int rows, int cols,
-    int colwise_scale_stride) {
+__global__ void mxfp8_scaling_transpose_cast_kernel(const IType *input,
+                                                    const e8m0_t *scale_inv_colwise,
+                                                    OType *output_rowwise, int rows, int cols,
+                                                    int colwise_scale_stride) {
   __shared__ OType tile[kTransposeTileDim][kTransposeTileDim + 1];
 
   const int64_t c = blockIdx.x * kTransposeTileDim + threadIdx.x;
@@ -167,8 +168,8 @@ __global__ void mxfp8_scaling_transpose_cast_kernel(
   if (r < rows && c < cols) {
     const e8m0_t biased_exponent = scale_inv_colwise[(r / 32) * colwise_scale_stride + c];
     const float block_scale_inverse = ptx::exp2f_rcp<float>(biased_exponent);
-    tile[threadIdx.y][threadIdx.x] = static_cast<OType>(
-        static_cast<float>(input[r * cols + c]) * block_scale_inverse);
+    tile[threadIdx.y][threadIdx.x] =
+        static_cast<OType>(static_cast<float>(input[r * cols + c]) * block_scale_inverse);
   }
 
   __syncthreads();
@@ -324,8 +325,7 @@ void mxfp8_scaling_transpose_cast(const Tensor input, const Tensor scale_inv_col
         reinterpret_cast<e8m0_t *>(output_rowwise_scale_inv.data.dptr),
         static_cast<int>(scale_inv_colwise.data.shape[0]),
         static_cast<int>(scale_inv_colwise.data.shape[1]),
-        static_cast<int>(output_rowwise_scale_inv.data.shape[1]), rows,
-        with_gemm_swizzled_scales);
+        static_cast<int>(output_rowwise_scale_inv.data.shape[1]), rows, with_gemm_swizzled_scales);
   }
 
   if (input.numel() > 0) {
@@ -387,18 +387,15 @@ void nvte_mxfp8_scaling_transpose_cast_v2(const NVTETensor input,
   using namespace transformer_engine;
   mxfp8_scaling_recipe::mxfp8_scaling_transpose_cast(
       *convertNVTETensorCheck(input), *convertNVTETensorCheck(scale_inv_colwise),
-      *convertNVTETensorCheck(output_rowwise),
-      *convertNVTETensorCheck(output_rowwise_scale_inv), rows, cols,
-      static_cast<DType>(fp8_dtype), with_gemm_swizzled_scales, stream);
+      *convertNVTETensorCheck(output_rowwise), *convertNVTETensorCheck(output_rowwise_scale_inv),
+      rows, cols, static_cast<DType>(fp8_dtype), with_gemm_swizzled_scales, stream);
 }
 
-void nvte_mxfp8_scaling_transpose_cast(const NVTETensor input,
-                                       const NVTETensor scale_inv_colwise,
+void nvte_mxfp8_scaling_transpose_cast(const NVTETensor input, const NVTETensor scale_inv_colwise,
                                        NVTETensor output_rowwise,
                                        NVTETensor output_rowwise_scale_inv, int rows, int cols,
                                        cudaStream_t stream) {
   nvte_mxfp8_scaling_transpose_cast_v2(input, scale_inv_colwise, output_rowwise,
-                                       output_rowwise_scale_inv, rows, cols,
-                                       kNVTEFloat8E4M3, /*with_gemm_swizzled_scales=*/false,
-                                       stream);
+                                       output_rowwise_scale_inv, rows, cols, kNVTEFloat8E4M3,
+                                       /*with_gemm_swizzled_scales=*/false, stream);
 }

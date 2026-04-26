@@ -87,9 +87,9 @@ void mxfp8_scaling_partial_cast(const at::Tensor &input, at::Tensor output_rowwi
 }
 
 void mxfp8_scaling_transpose_cast(const at::Tensor &input, const at::Tensor &scale_inv_colwise,
-                                  at::Tensor output_rowwise,
-                                  at::Tensor output_rowwise_scale_inv, int rows, int cols,
-                                  int64_t fp8_dtype, bool with_gemm_swizzled_scales) {
+                                  at::Tensor output_rowwise, at::Tensor output_rowwise_scale_inv,
+                                  int rows, int cols, int64_t fp8_dtype,
+                                  bool with_gemm_swizzled_scales) {
   TORCH_CHECK(input.is_contiguous(), "input must be contiguous");
   TORCH_CHECK(scale_inv_colwise.is_contiguous(), "scale_inv_colwise must be contiguous");
   TORCH_CHECK(output_rowwise.is_contiguous(), "output_rowwise must be contiguous");
@@ -99,13 +99,12 @@ void mxfp8_scaling_transpose_cast(const at::Tensor &input, const at::Tensor &sca
   const TensorWrapper input_cu = makeTransformerEngineTensor(input);
   const TensorWrapper scale_inv_colwise_cu = makeTransformerEngineTensor(scale_inv_colwise);
   TensorWrapper output_rowwise_cu = makeTransformerEngineTensor(output_rowwise);
-  TensorWrapper output_rowwise_scale_inv_cu =
-      makeTransformerEngineTensor(output_rowwise_scale_inv);
+  TensorWrapper output_rowwise_scale_inv_cu = makeTransformerEngineTensor(output_rowwise_scale_inv);
 
-  nvte_mxfp8_scaling_transpose_cast_v2(
-      input_cu.data(), scale_inv_colwise_cu.data(), output_rowwise_cu.data(),
-      output_rowwise_scale_inv_cu.data(), rows, cols, static_cast<NVTEDType>(fp8_dtype),
-      with_gemm_swizzled_scales, at::cuda::getCurrentCUDAStream());
+  nvte_mxfp8_scaling_transpose_cast_v2(input_cu.data(), scale_inv_colwise_cu.data(),
+                                       output_rowwise_cu.data(), output_rowwise_scale_inv_cu.data(),
+                                       rows, cols, static_cast<NVTEDType>(fp8_dtype),
+                                       with_gemm_swizzled_scales, at::cuda::getCurrentCUDAStream());
 }
 
 }  // namespace transformer_engine::pytorch

@@ -309,8 +309,7 @@ void nvte_mxfp8_scaling_partial_cast(const NVTETensor input, NVTETensor output_r
  *  \param[in]     cols                     Number of columns in the source logical tensor.
  *  \param[in]     stream                   CUDA stream used for the operation.
  */
-void nvte_mxfp8_scaling_transpose_cast(const NVTETensor input,
-                                       const NVTETensor scale_inv_colwise,
+void nvte_mxfp8_scaling_transpose_cast(const NVTETensor input, const NVTETensor scale_inv_colwise,
                                        NVTETensor output_rowwise,
                                        NVTETensor output_rowwise_scale_inv, int rows, int cols,
                                        cudaStream_t stream);

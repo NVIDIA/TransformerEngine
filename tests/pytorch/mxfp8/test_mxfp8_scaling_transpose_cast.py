@@ -101,12 +101,12 @@ def test_transpose_cast_matches_copy_adapter_bytes(rows, cols, fp8_dtype):
     )
     torch.cuda.synchronize()
 
-    assert torch.equal(rowwise_data.view(torch.uint8), expected_payload.view(torch.uint8)), (
-        "Row-wise MXFP8 payload bytes differ from copy-adapter reference"
-    )
-    assert torch.equal(rowwise_scale, expected_scale), (
-        "Row-wise MXFP8 scale bytes differ from copy-adapter reference"
-    )
+    assert torch.equal(
+        rowwise_data.view(torch.uint8), expected_payload.view(torch.uint8)
+    ), "Row-wise MXFP8 payload bytes differ from copy-adapter reference"
+    assert torch.equal(
+        rowwise_scale, expected_scale
+    ), "Row-wise MXFP8 scale bytes differ from copy-adapter reference"
 
 
 @pytest.mark.parametrize("rows,cols", [(64, 128), (256, 4096)])

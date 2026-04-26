@@ -385,14 +385,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("output_rowwise"), py::arg("output_colwise"), py::arg("scale_inv_rowwise"),
         py::arg("scale_inv_colwise"), py::arg("rows"), py::arg("cols"), py::arg("start_offset"),
         py::call_guard<py::gil_scoped_release>());
-  m.def("mxfp8_scaling_transpose_cast",
-        &transformer_engine::pytorch::mxfp8_scaling_transpose_cast,
+  m.def("mxfp8_scaling_transpose_cast", &transformer_engine::pytorch::mxfp8_scaling_transpose_cast,
         "Cast source into row-wise MXFP8 storage for its logical transpose", py::arg("input"),
         py::arg("scale_inv_colwise"), py::arg("output_rowwise"),
         py::arg("output_rowwise_scale_inv"), py::arg("rows"), py::arg("cols"),
         py::arg("fp8_dtype") = static_cast<int>(transformer_engine::DType::kFloat8E4M3),
-        py::arg("with_gemm_swizzled_scales") = false,
-        py::call_guard<py::gil_scoped_release>());
+        py::arg("with_gemm_swizzled_scales") = false, py::call_guard<py::gil_scoped_release>());
   m.def("fused_multi_row_padding", &transformer_engine::pytorch::fused_multi_row_padding,
         "Fused Multi-tensor padding", py::call_guard<py::gil_scoped_release>());
   m.def("fused_multi_row_unpadding", &transformer_engine::pytorch::fused_multi_row_unpadding,
