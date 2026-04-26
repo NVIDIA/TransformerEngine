@@ -194,6 +194,7 @@ list(APPEND transformer_engine_cuda_sources
      permutation/permutation.cu
      util/utils.cu
      util/padding.cu
+     util/topk.cu
      swizzle/swizzle.cu
      swizzle/swizzle_block_scaling.cu
      fused_softmax/scaled_masked_softmax.cu

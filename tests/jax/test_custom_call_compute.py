@@ -49,6 +49,7 @@ from transformer_engine.jax.quantize import helper
 from transformer_engine.jax.activation import activation
 from transformer_engine.jax.dense import dense, grouped_dense
 from transformer_engine.jax.layernorm_dense import layernorm_dense
+from transformer_engine.jax.cpp_extensions.topk import topk
 
 GEMM_CASES = [
     (256, 256, 512),
@@ -2035,3 +2036,83 @@ class TestDebugInspectFFI:
         actual = load_array_dump("my_tensor_gpu0.bin", shape, dtype)
 
         assert_allclose(actual, expected, dtype=dtype)
+
+
+@pytest.mark.parametrize("dtype", [jnp.bfloat16, jnp.float32])
+@pytest.mark.parametrize(
+    "problem_size",
+    [
+        (1, 10000, 100),
+        (1, 50000, 200),
+        (4, 16384, 256),
+        (8, 65536, 512),
+        (1, 1000000, 1000),
+    ],
+)
+class TestTopK:
+    """Correctness tests for the TopK JAX primitive.
+
+    Each test generates an input whose top-k entries lie in a known value range
+    so that correctness can be verified without a full sort, then cross-checks
+    against jax.lax.top_k as a reference.
+    """
+
+    def test_topk_1d(self, dtype, problem_size):
+        """1-D input: single row."""
+        _bs, n, k = problem_size
+
+        prng_key = jax.random.PRNGKey(0)
+        keys = jax.random.split(prng_key, 3)
+        topk_vals = jax.random.uniform(keys[0], shape=(k,), dtype=dtype, minval=1.5, maxval=2.5)
+        bottom_vals = jax.random.uniform(
+            keys[1], shape=(n - k,), dtype=dtype, minval=0.0, maxval=1.0
+        )
+        x = jax.random.permutation(keys[2], jnp.concatenate([topk_vals, bottom_vals]))
+
+        ref_vals, ref_idx = jax.jit(jax.lax.top_k, static_argnums=(1,))(x, k)
+        prim_vals, prim_idx = jax.jit(topk, static_argnums=(1,))(x, k)
+
+        # AIR TopK output is unordered; sort before comparing.
+        ref_vals, ref_idx = jax.lax.sort_key_val(ref_vals, ref_idx)
+        prim_vals, prim_idx = jax.lax.sort_key_val(prim_vals, prim_idx)
+
+        assert_allclose(prim_vals, ref_vals, dtype=dtype)
+
+        sorted_x = jax.lax.sort(x)
+        assert prim_vals[0] >= sorted_x[-(k + 1)]
+
+        # Values at returned indices must match reference.
+        assert_allclose(x[prim_idx], x[ref_idx], dtype=dtype)
+
+    def test_topk_2d(self, dtype, problem_size):
+        """2-D input: each row is an independent top-k problem."""
+        bs, n, k = problem_size
+
+        prng_key = jax.random.PRNGKey(42)
+        keys = jax.random.split(prng_key, 3)
+        topk_vals = jax.random.uniform(keys[0], shape=(bs, k), dtype=dtype, minval=1.5, maxval=2.5)
+        bottom_vals = jax.random.uniform(
+            keys[1], shape=(bs, n - k), dtype=dtype, minval=0.0, maxval=1.0
+        )
+        x_unsorted = jnp.concatenate([topk_vals, bottom_vals], axis=1)
+        # Shuffle columns independently per row.
+        col_perm = jax.random.permutation(keys[2], n)
+        x = x_unsorted[:, col_perm]
+
+        ref_vals, ref_idx = jax.jit(jax.lax.top_k, static_argnums=(1,))(x, k)
+        prim_vals, prim_idx = jax.jit(topk, static_argnums=(1,))(x, k)
+
+        # Sort each row independently for comparison.
+        ref_vals, ref_idx = jax.vmap(jax.lax.sort_key_val)(ref_vals, ref_idx)
+        prim_vals, prim_idx = jax.vmap(jax.lax.sort_key_val)(prim_vals, prim_idx)
+
+        assert_allclose(prim_vals, ref_vals, dtype=dtype)
+
+        # For each row, the smallest selected value must be >= the (k+1)-th largest in that row.
+        sorted_x = jnp.sort(x, axis=1)
+        assert jnp.all(prim_vals[:, 0] >= sorted_x[:, -(k + 1)])
+
+        # Values at returned indices must match reference values.
+        prim_gathered = jnp.take_along_axis(x, prim_idx, axis=1)
+        ref_gathered = jnp.take_along_axis(x, ref_idx, axis=1)
+        assert_allclose(prim_gathered, ref_gathered, dtype=dtype)
