@@ -362,8 +362,9 @@ class NVFP4Quantizer(Quantizer):
                 device=device,
                 pin_memory=pin_memory,
             )
+            amax_rows = flat_first_dim if self.per_token_activation else 1
             amax_columnwise = torch.zeros(
-                1, dtype=torch.float32, device=device, pin_memory=pin_memory
+                amax_rows, dtype=torch.float32, device=device, pin_memory=pin_memory
             )
 
         # Construct FP8 tensor

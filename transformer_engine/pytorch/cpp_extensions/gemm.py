@@ -80,15 +80,15 @@ def _maybe_apply_nvfp4_pertoken_output_rescale(
     gelu: bool,
     accumulate: bool,
 ) -> None:
-    """Apply per-token NVFP4 global-scale correction for TN forward GEMM outputs.
+    """Apply per-token NVFP4 global-scale correction for forward GEMM outputs.
 
     Current NVFP4 GEMM alpha path consumes one scalar amax. Per-token NVFP4 stores
-    rowwise amax vector in B._amax_rowwise, so we correct by row using ratio
-    (amax[row] / amax[0]). If bias was fused in epilogue, remove/reapply it around
+    rowwise amax vector in B, so we correct by row using ratio (amax[row] / amax[0])
+    when B is not transposed. If bias was fused in epilogue, remove/reapply it around
     the row rescale to avoid bias distortion.
     """
 
-    if grad or gelu or accumulate or layout != "TN":
+    if grad or gelu or accumulate or layout[1] != "N":
         return
     if not isinstance(B, NVFP4TensorStorage):
         return
@@ -96,7 +96,7 @@ def _maybe_apply_nvfp4_pertoken_output_rescale(
         return
     if out.numel() == 0:
         return
-    amax = B._amax_rowwise
+    amax = B._amax_rowwise if B._amax_rowwise is not None else B._amax_columnwise
     if amax is None or amax.numel() <= 1:
         return
 
@@ -194,13 +194,15 @@ def general_gemm(
 
     requested_out_dtype = out_dtype
     needs_fp32_rescale_path = (
-        layout == "TN"
+        layout[1] == "N"
         and not grad
         and not gelu
         and not accumulate
         and isinstance(B, NVFP4TensorStorage)
-        and B._amax_rowwise is not None
-        and B._amax_rowwise.numel() > 1
+        and (
+            (B._amax_rowwise is not None and B._amax_rowwise.numel() > 1)
+            or (B._amax_columnwise is not None and B._amax_columnwise.numel() > 1)
+        )
         and quantization_params is None
         and out is None
         and requested_out_dtype is not None

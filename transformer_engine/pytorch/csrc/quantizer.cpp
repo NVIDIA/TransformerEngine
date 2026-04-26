@@ -1779,7 +1779,8 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
     columnwise_scale_inv_tensor = at::empty(scale_inv_shape_int64, bit8_tensor_opts);
     // hadamard amax kernel will zero out pointer with ZeroAmaxKernel
     // nvte_compute_amax_with_config will zero out the pointer if needed
-    amax_columnwise = at::empty({1}, bit32_tensor_opts);
+    const int64_t amax_rows = this->per_token_activation ? static_cast<int64_t>(flat_first_dim) : 1;
+    amax_columnwise = at::empty({amax_rows}, bit32_tensor_opts);
   }
 
   // Convert tensors to Python
@@ -2105,7 +2106,9 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
       const auto opts = at::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
       // hadamard amax kernel will zero out pointer with ZeroAmaxKernel
       // nvte_compute_amax_with_config will zero out the pointer if needed
-      amax_columnwise = at::empty({1}, opts);
+      const int64_t amax_rows =
+          this->per_token_activation ? static_cast<int64_t>(flat_first_dim) : 1;
+      amax_columnwise = at::empty({amax_rows}, opts);
       tensor.attr("_amax_columnwise") = *amax_columnwise;
     }
   } else {  // columnwise_usage == false
@@ -2141,7 +2144,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
     out_cpp.set_columnwise_scale_inv(columnwise_scale_inv->data_ptr(), DType::kFloat8E4M3,
                                      getTensorShape(*columnwise_scale_inv));
     out_cpp.set_columnwise_amax(amax_columnwise->data_ptr(), DType::kFloat32,
-                                std::vector<size_t>{1});
+                                getTensorShape(*amax_columnwise));
   }
   out_cpp.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
   this->set_quantization_params(&out_cpp);
@@ -2258,8 +2261,6 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
                "Per-token NVFP4 activation does not support 2D quantization.");
     NVTE_CHECK(!this->stochastic_rounding,
                "Per-token NVFP4 activation does not support stochastic rounding.");
-    NVTE_CHECK(!this->columnwise_usage,
-               "Per-token NVFP4 activation currently supports rowwise-only quantization.");
     NVTE_CHECK(!this->with_amax_reduction,
                "Per-token NVFP4 activation does not support amax reduction.");
     NVTE_CHECK(input.dtype() == DType::kBFloat16 || input.dtype() == DType::kFloat16,

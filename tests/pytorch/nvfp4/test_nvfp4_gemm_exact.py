@@ -8,11 +8,26 @@ import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.constants import TE_DType
 from transformer_engine.pytorch import NVFP4Quantizer
+from transformer_engine.pytorch.cpp_extensions import general_gemm
 from transformer_engine.pytorch.custom_recipes.quantization_nvfp4 import NVFP4QuantizerRef
 from transformer_engine.pytorch.custom_recipes import utils
 
 
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
+
+
+def maybe_skip_pertoken_nvfp4_gemm(
+    x_dtype: torch.dtype,
+    *,
+    accumulate: bool,
+    x_columnwise: bool,
+) -> None:
+    if x_dtype == torch.float32:
+        pytest.skip("Per-token NVFP4 kernel supports BF16/FP16 inputs only")
+    if accumulate:
+        pytest.skip("Per-token NVFP4 GEMM output rescale does not support accumulation")
+    if x_columnwise:
+        pytest.skip("Per-token NVFP4 GEMM output rescale requires rowwise activation usage")
 
 
 def check_nvfp4_gemm_versus_reference(
@@ -26,6 +41,7 @@ def check_nvfp4_gemm_versus_reference(
     *,
     x_columnwise: bool = False,
     w_columnwise: bool = False,
+    per_token_activation: bool = False,
 ):
     te_dtype = tex.DType.kFloat4E2M1
 
@@ -56,6 +72,7 @@ def check_nvfp4_gemm_versus_reference(
         amax_reduction_group=None,
         with_rht=False,
         with_post_rht_amax=False,
+        per_token_activation=per_token_activation,
     )
     w_quantizer = NVFP4Quantizer(
         fp4_dtype=te_dtype,
@@ -112,7 +129,16 @@ def check_nvfp4_gemm_versus_reference(
     sw_trimmed = sw_trimmed.view(torch.float8_e4m3fn)
 
     # Create reference quantizer for reference GEMM
-    ref_quantizer = NVFP4QuantizerRef(
+    x_ref_quantizer = NVFP4QuantizerRef(
+        dtype=utils.Fp4Formats.E2M1,
+        rowwise=True,
+        columnwise=not per_token_activation,
+        pow_2_scales=False,
+        eps=0.0,
+        quant_tile_shape=(1, 16),
+        per_token_activation=per_token_activation,
+    )
+    w_ref_quantizer = NVFP4QuantizerRef(
         dtype=utils.Fp4Formats.E2M1,
         rowwise=True,
         columnwise=True,
@@ -124,16 +150,16 @@ def check_nvfp4_gemm_versus_reference(
     # Create reference quantized tensors needed by reference GEMM
     # Reference GEMM is only rowwise.
     if x_columnwise:
-        x_nvfp4_ref = ref_quantizer.quantize(x.t().contiguous())
+        x_nvfp4_ref = x_ref_quantizer.quantize(x.t().contiguous())
     else:
-        x_nvfp4_ref = ref_quantizer.quantize(x)
+        x_nvfp4_ref = x_ref_quantizer.quantize(x)
     if w_columnwise:
-        w_nvfp4_ref = ref_quantizer.quantize(w.t().contiguous())
+        w_nvfp4_ref = w_ref_quantizer.quantize(w.t().contiguous())
     else:
-        w_nvfp4_ref = ref_quantizer.quantize(w)
+        w_nvfp4_ref = w_ref_quantizer.quantize(w)
 
     # Reference GEMM using quantizer's qgemm method
-    y_ref = ref_quantizer.qgemm(
+    y_ref = x_ref_quantizer.qgemm(
         qx=qx_data,
         qw=qw_data,
         m_params=None,  # MMParams not used in reference
@@ -148,7 +174,7 @@ def check_nvfp4_gemm_versus_reference(
         qresult_w=w_nvfp4_ref,
     )
 
-    # Native TE GEMM using tex.generic_gemm (cuBLAS GEMM)
+    # Native TE GEMM path
     # Allocate cuBLAS workspace
     workspace = torch.empty(4, dtype=torch.uint8, device=device)
 
@@ -166,27 +192,38 @@ def check_nvfp4_gemm_versus_reference(
         x_nvfp4_native.update_usage(rowwise_usage=False)
     if w_columnwise:
         w_nvfp4_native.update_usage(rowwise_usage=False)
-    # Native cuBLAS GEMM
-    # return type is out, bias_grad, gelu_input, extra_output
-    # We are just capturing out.
-    y_native = tex.generic_gemm(
-        w_nvfp4_native,
-        transa,
-        x_nvfp4_native,
-        transb,
-        out.clone() if accumulate else None,
-        out_quantizer,
-        TE_DType[out_dtype],
-        bias,
-        bias_dtype,
-        use_gelu,
-        gelu_input,
-        use_grad,
-        workspace,
-        workspace.shape[0],
-        accumulate,
-        use_split_accumulator,
-    )[0]
+    if per_token_activation:
+        layout = ("T" if transa else "N") + ("T" if transb else "N")
+        y_native = general_gemm(
+            w_nvfp4_native,
+            x_nvfp4_native,
+            out_dtype=out_dtype,
+            accumulate=accumulate,
+            layout=layout,
+            out=out.clone() if accumulate else None,
+        )[0]
+    else:
+        # Native cuBLAS GEMM
+        # return type is out, bias_grad, gelu_input, extra_output
+        # We are just capturing out.
+        y_native = tex.generic_gemm(
+            w_nvfp4_native,
+            transa,
+            x_nvfp4_native,
+            transb,
+            out.clone() if accumulate else None,
+            out_quantizer,
+            TE_DType[out_dtype],
+            bias,
+            bias_dtype,
+            use_gelu,
+            gelu_input,
+            use_grad,
+            workspace,
+            workspace.shape[0],
+            accumulate,
+            use_split_accumulator,
+        )[0]
 
     # just in case of accumulation, make sure y_ref and y_native are not the same tensor
     assert y_ref is not y_native, "y_ref and y_native should not be the same tensor"
@@ -224,10 +261,14 @@ def check_nvfp4_gemm_versus_reference(
     "is_x_columnwise, is_w_columnwise",
     [
         (False, False),  # TN
-        (True, False),  # NN
+        (False, True),  # NN
+        (True, False),  # TT
         (True, True),  # NT
     ],
-    ids=["rowxrow", "colxrow", "colxcol"],
+    ids=["rowxrow", "rowxcol", "colxrow", "colxcol"],
+)
+@pytest.mark.parametrize(
+    "per_token_activation", [False, True], ids=["nvfp4_per_tensor", "nvfp4_pertoken"]
 )
 def test_nvfp4_gemm_versus_reference(
     M: int,
@@ -239,7 +280,15 @@ def test_nvfp4_gemm_versus_reference(
     accumulate: bool,
     is_x_columnwise: bool,
     is_w_columnwise: bool,
+    per_token_activation: bool,
 ):
+    if per_token_activation:
+        maybe_skip_pertoken_nvfp4_gemm(
+            x_dtype=x_dtype,
+            accumulate=accumulate,
+            x_columnwise=is_x_columnwise,
+        )
+
     check_nvfp4_gemm_versus_reference(
         x_dtype=x_dtype,
         w_dtype=w_dtype,
@@ -250,4 +299,5 @@ def test_nvfp4_gemm_versus_reference(
         accumulate=accumulate,
         x_columnwise=is_x_columnwise,
         w_columnwise=is_w_columnwise,
+        per_token_activation=per_token_activation,
     )
