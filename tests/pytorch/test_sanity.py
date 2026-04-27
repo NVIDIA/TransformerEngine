@@ -542,7 +542,7 @@ def test_sanity_linear_with_zero_tokens(
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes_with_zero)
 @pytest.mark.parametrize("model", ["small", "weird"])
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes_with_per_token, ids=recipe_id)
 @pytest.mark.parametrize("backward_override", [None, "high_precision", "dequantized"])
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 @pytest.mark.parametrize("use_bias", all_boolean)
@@ -576,7 +576,10 @@ def test_sanity_grouped_linear(
         if not is_fp8_supported(config):
             pytest.skip("Model config does not support FP8")
         if fp8_recipe.nvfp4():
-            pytest.skip("NVFP4 not supported for grouped linear")
+            if not getattr(fp8_recipe, "per_token_activation", False):
+                pytest.skip("NVFP4 not supported for grouped linear")
+            if dtype == torch.float16:
+                pytest.skip("FP16 output for NVFP4 not supported")
 
     use_fp8 = fp8_recipe is not None
     with quantized_model_init(enabled=use_fp8 and fp8_model_params, recipe=fp8_recipe):
