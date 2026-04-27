@@ -70,50 +70,6 @@ def validate_gemm_scale(scale: Optional[float], required: bool) -> float:
     return 0.0
 
 
-def _maybe_apply_nvfp4_pertoken_output_rescale(
-    out: torch.Tensor,
-    B: torch.Tensor,
-    *,
-    layout: str,
-    bias: Optional[torch.Tensor],
-    grad: bool,
-    gelu: bool,
-    accumulate: bool,
-) -> None:
-    """Apply per-token NVFP4 global-scale correction for forward GEMM outputs.
-
-    Current NVFP4 GEMM alpha path consumes one scalar amax. Per-token NVFP4 stores
-    rowwise amax vector in B, so we correct by row using ratio (amax[row] / amax[0])
-    when B is not transposed. If bias was fused in epilogue, remove/reapply it around
-    the row rescale to avoid bias distortion.
-    """
-
-    if grad or gelu or accumulate or layout[1] != "N":
-        return
-    if not isinstance(B, NVFP4TensorStorage):
-        return
-    if not isinstance(out, torch.Tensor) or is_custom(out):
-        return
-    if out.numel() == 0:
-        return
-    amax = B._amax_rowwise if B._amax_rowwise is not None else B._amax_columnwise
-    if amax is None or amax.numel() <= 1:
-        return
-
-    out_2d = out.reshape(-1, out.shape[-1])
-    if amax.numel() != out_2d.shape[0]:
-        return
-
-    ratios = (amax / amax[0]).to(dtype=out.dtype).view(-1, 1)
-    if bias is not None:
-        bias_cast = bias.to(dtype=out.dtype)
-        out_2d.sub_(bias_cast)
-        out_2d.mul_(ratios)
-        out_2d.add_(bias_cast)
-    else:
-        out_2d.mul_(ratios)
-
-
 def _is_nvfp4_pertoken_tensor(tensor: torch.Tensor) -> bool:
     """Whether tensor carries per-token NVFP4 global amax metadata."""
     if not isinstance(tensor, NVFP4TensorStorage):
@@ -200,24 +156,6 @@ def general_gemm(
         # FP8 block-scaling requires split accumulator
         use_split_accumulator = True
 
-    requested_out_dtype = out_dtype
-    needs_fp32_rescale_path = (
-        layout[1] == "N"
-        and not grad
-        and not gelu
-        and not accumulate
-        and isinstance(B, NVFP4TensorStorage)
-        and (
-            (B._amax_rowwise is not None and B._amax_rowwise.numel() > 1)
-            or (B._amax_columnwise is not None and B._amax_columnwise.numel() > 1)
-        )
-        and quantization_params is None
-        and out is None
-        and requested_out_dtype is not None
-        and requested_out_dtype != torch.float32
-    )
-    effective_out_dtype = torch.float32 if needs_fp32_rescale_path else requested_out_dtype
-
     args = (
         A,
         transa,  # transa
@@ -225,7 +163,7 @@ def general_gemm(
         transb,  # transb
         out,
         quantization_params,
-        TE_DType[effective_out_dtype] if effective_out_dtype is not None else None,
+        TE_DType[out_dtype] if out_dtype is not None else None,
         bias,
         bias_dtype,
         gelu,
@@ -245,18 +183,57 @@ def general_gemm(
         "beta": beta,
     }
 
-    out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
-    _maybe_apply_nvfp4_pertoken_output_rescale(
-        out,
-        B,
-        layout=layout,
-        bias=bias,
-        grad=grad,
-        gelu=gelu,
-        accumulate=accumulate,
-    )
-    if needs_fp32_rescale_path:
-        out = out.to(dtype=requested_out_dtype)
+    if not _is_nvfp4_pertoken_tensor(B):
+        out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
+    else:
+        assert layout[1] == "N", "Per-token NVFP4 GEMM currently supports N-layout B only."
+        assert not grad, "Per-token NVFP4 GEMM currently supports fprop only."
+        assert not gelu, "Per-token NVFP4 GEMM currently does not support fused GELU."
+        assert not accumulate, "Per-token NVFP4 GEMM currently does not support accumulation."
+        assert (
+            quantization_params is None
+        ), "Per-token NVFP4 GEMM currently does not support output quantization."
+        assert out is None or (
+            isinstance(out, torch.Tensor) and not is_custom(out)
+        ), "Per-token NVFP4 GEMM currently supports only plain torch.Tensor outputs."
+        requested_out = out
+        requested_out_dtype = out_dtype
+        fp32_out = (
+            torch.empty_like(requested_out, dtype=torch.float32)
+            if requested_out is not None
+            else None
+        )
+        # Override only output, output quantizer, and output dtype for the FP32 correction path.
+        args = (
+            *args[:4],
+            fp32_out,
+            None,
+            TE_DType[torch.float32],
+            *args[7:],
+        )
+        out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
+
+        assert isinstance(out, torch.Tensor) and not is_custom(out)
+        assert out.numel() > 0
+        amax = B._amax_rowwise if B._amax_rowwise is not None else B._amax_columnwise
+        assert amax is not None and amax.numel() > 1
+
+        out_2d = out.reshape(-1, out.shape[-1])
+        assert amax.numel() == out_2d.shape[0]
+        ratios = (amax / amax[0]).to(dtype=out.dtype).view(-1, 1)
+        if bias is not None:
+            bias_cast = bias.to(dtype=out.dtype)
+            out_2d.sub_(bias_cast)
+            out_2d.mul_(ratios)
+            out_2d.add_(bias_cast)
+        else:
+            out_2d.mul_(ratios)
+
+        if requested_out is not None:
+            requested_out.copy_(out.to(dtype=requested_out.dtype))
+            out = requested_out
+        elif requested_out_dtype is not None and requested_out_dtype != torch.float32:
+            out = out.to(dtype=requested_out_dtype)
 
     if debug_quantizer is not None:
         out = debug_quantizer.process_gemm_output(out)
@@ -311,16 +288,21 @@ def general_grouped_gemm(
     else:
         bias_dtype = TE_DType[torch.bfloat16]
 
-    use_pertoken_unfused_fprop = (
-        not grad
-        and not gelu
-        and not accumulate
-        and layout[1] == "N"
-        and D_dtype is None
-        and all(q is None for q in quantization_params)
-        and any(_is_nvfp4_pertoken_tensor(tensor) for tensor in B)
-    )
-    if use_pertoken_unfused_fprop:
+    if any(_is_nvfp4_pertoken_tensor(tensor) for tensor in B):
+        assert layout[1] == "N", "Per-token NVFP4 grouped GEMM currently supports N-layout B only."
+        assert not grad, "Per-token NVFP4 grouped GEMM currently supports fprop only."
+        assert not gelu, "Per-token NVFP4 grouped GEMM currently does not support fused GELU."
+        assert (
+            not accumulate
+        ), "Per-token NVFP4 grouped GEMM currently does not support accumulation."
+        assert D_dtype is None, "Per-token NVFP4 grouped GEMM currently does not support D_dtype."
+        assert all(
+            q is None for q in quantization_params
+        ), "Per-token NVFP4 grouped GEMM currently does not support output quantization."
+        if single_output:
+            assert (
+                m_splits is not None
+            ), "Per-token NVFP4 grouped GEMM requires m_splits with single output."
         out_init = out[0] if single_output else None
         if single_output:
             start_idx = 0
