@@ -158,9 +158,7 @@ def check_quantization_nvfp4_versus_reference(
 @pytest.mark.parametrize(
     "with_2d_quantization", [True, False], ids=["2d_quantization", "1d_quantization"]
 )
-@pytest.mark.parametrize(
-    "per_token_activation", [False, True], ids=["nvfp4", "nvfp4_pertoken"]
-)
+@pytest.mark.parametrize("per_token_activation", [False, True], ids=["nvfp4", "nvfp4_pertoken"])
 def test_quantization_block_tiling_versus_reference(
     x_dtype: torch.dtype,
     M: int,
@@ -199,9 +197,7 @@ def test_quantization_block_tiling_versus_reference(
 @pytest.mark.parametrize(
     "use_cpp_allocator", [True, False], ids=["cpp_allocator", "python_allocator"]
 )
-@pytest.mark.parametrize(
-    "per_token_activation", [False, True], ids=["nvfp4", "nvfp4_pertoken"]
-)
+@pytest.mark.parametrize("per_token_activation", [False, True], ids=["nvfp4", "nvfp4_pertoken"])
 def test_nvfp4_quantization_extrema_versus_reference(
     x_dtype: torch.dtype,
     M: int,
@@ -303,9 +299,7 @@ def test_nvfp4_quantization_extrema_versus_reference(
 @pytest.mark.parametrize(
     "use_cpp_allocator", [True, False], ids=["cpp_allocator", "python_allocator"]
 )
-@pytest.mark.parametrize(
-    "per_token_activation", [False, True], ids=["nvfp4", "nvfp4_pertoken"]
-)
+@pytest.mark.parametrize("per_token_activation", [False, True], ids=["nvfp4", "nvfp4_pertoken"])
 def test_nvfp4_quantization_boundary_values(
     x_dtype: torch.dtype,
     M: int,
@@ -420,9 +414,7 @@ def test_nvfp4_quantization_boundary_values(
 @pytest.mark.parametrize(
     "use_cpp_allocator", [True, False], ids=["cpp_allocator", "python_allocator"]
 )
-@pytest.mark.parametrize(
-    "per_token_activation", [False, True], ids=["nvfp4", "nvfp4_pertoken"]
-)
+@pytest.mark.parametrize("per_token_activation", [False, True], ids=["nvfp4", "nvfp4_pertoken"])
 def test_nvfp4_quantization_noncontiguous_inputs(
     x_dtype: torch.dtype,
     M: int,

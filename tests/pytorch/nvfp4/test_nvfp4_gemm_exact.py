@@ -252,9 +252,7 @@ def check_nvfp4_gemm_versus_reference(
     ],
     ids=["rowxrow", "colxrow", "colxcol"],
 )
-@pytest.mark.parametrize(
-    "per_token_activation", [False, True], ids=["nvfp4", "nvfp4_pertoken"]
-)
+@pytest.mark.parametrize("per_token_activation", [False, True], ids=["nvfp4", "nvfp4_pertoken"])
 def test_nvfp4_gemm_versus_reference(
     M: int,
     K: int,
