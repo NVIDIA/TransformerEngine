@@ -563,12 +563,20 @@ def _get_seqlens_thd(segment_ids, max_segments_per_seq):
 
 
 def _get_seqoffsets_thd(segment_ids, segment_pos, max_segments_per_seq):
+    # NOTE: we detect segment boundaries from segment_ids changes, not segment_pos gaps.
+    # Under Striped CP reorder (used by P2P ring attention for THD+BALANCED) segment_pos
+    # values become non-sequential within a single logical segment (e.g. [0,2,4,6] on
+    # rank 0, [1,3,5,7] on rank 1), which would make a pos-gap detector flag every step
+    # as a new segment. segment_ids, however, stay contiguous per rank under striping so
+    # id-change detection is both correct and reorder-invariant, matching the pre-O(N)
+    # mask-based path.
+    del segment_pos
     segment_changes = jnp.concatenate(
         [
             jnp.full(
-                (segment_pos.shape[0], 1), True, dtype=bool
+                (segment_ids.shape[0], 1), True, dtype=bool
             ),  # First valid element starts a segment
-            (segment_pos[..., 1:] != segment_pos[..., :-1] + 1),  # Segment pos changed
+            (segment_ids[..., 1:] != segment_ids[..., :-1]),  # Segment id changed
         ],
         axis=-1,
     )
