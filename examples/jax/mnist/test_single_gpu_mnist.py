@@ -356,18 +356,16 @@ class TestMNIST(unittest.TestCase):
         desired_traing_accuracy = 0.98
         desired_test_loss = 0.05
         desired_test_accuracy = 0.98
-        assert best_train_loss < desired_traing_loss, (
-            f"best train loss over last {tail} epochs {best_train_loss} "
-            f">= {desired_traing_loss}"
-        )
+        assert (
+            best_train_loss < desired_traing_loss
+        ), f"best train loss over last {tail} epochs {best_train_loss} >= {desired_traing_loss}"
         assert best_train_accuracy > desired_traing_accuracy, (
             f"best train accuracy over last {tail} epochs {best_train_accuracy} "
             f"<= {desired_traing_accuracy}"
         )
-        assert best_test_loss < desired_test_loss, (
-            f"best test loss over last {tail} epochs {best_test_loss} "
-            f">= {desired_test_loss}"
-        )
+        assert (
+            best_test_loss < desired_test_loss
+        ), f"best test loss over last {tail} epochs {best_test_loss} >= {desired_test_loss}"
         assert best_test_accuracy > desired_test_accuracy, (
             f"best test accuracy over last {tail} epochs {best_test_accuracy} "
             f"<= {desired_test_accuracy}"
