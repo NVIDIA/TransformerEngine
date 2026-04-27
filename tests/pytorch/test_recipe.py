@@ -509,6 +509,7 @@ class TestFP8Recipe:
 
 @pytest.mark.skipif(not fp4_available, reason=reason_for_no_fp4)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=str)
+@pytest.mark.parametrize("per_token_activation", [False, True], ids=["nvfp4", "nvfp4_per_token"])
 @pytest.mark.parametrize(
     "M, N",
     [
@@ -524,8 +525,8 @@ class TestFP8Recipe:
         (8192, 8192),
     ],
 )
-def test_fp4_dequantize(dtype, M, N):
-    q = NVFP4Quantizer()
+def test_fp4_dequantize(dtype, per_token_activation, M, N):
+    q = NVFP4Quantizer(per_token_activation=per_token_activation)
     a = torch.rand((M, N)).cuda().to(dtype=dtype)
     starting_tensor = q(a)
     dequantized_tensor = starting_tensor.dequantize()
