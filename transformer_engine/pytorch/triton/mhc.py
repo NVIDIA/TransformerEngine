@@ -335,9 +335,9 @@ class mHCProjectionOp(torch.autograd.Function):
         grad_x = torch.empty((M, K), device=device, dtype=x.dtype)
 
         grad_x = torch.empty((M, K), device=device, dtype=x.dtype)
-        grad_phi = general_gemm(x, grad_H, out_dtype=phi.dtype, layout="NT")[0][
+        grad_phi = general_gemm(x, grad_H, out_dtype=torch.float32, layout="NT")[0][
             :N, :
-        ]  # (2n + n^2, M) @ (M, nC) = (2n + n^2, nC); grad_H's last dim is padded to 32
+        ].to(phi.dtype)  # (2n + n^2, M) @ (M, nC) = (2n + n^2, nC); grad_H's last dim is padded to 32
 
         # pylint: disable=unnecessary-lambda-assignment
         grid = lambda META: (
