@@ -17,10 +17,11 @@ import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch.torch_version import torch_version
-from transformer_engine.pytorch.tensor.utils import is_custom
+from transformer_engine.pytorch.tensor.utils import clear_columnwise_cache, is_custom
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
     get_ub,
+    quantize_weight,
     TransformerEngineBaseModule,
     get_dummy_wgrad,
     _2X_ACC_FPROP,
@@ -94,9 +95,10 @@ class _LayerNormLinear(torch.autograd.Function):
         ln_weight: torch.Tensor,
         ln_bias: Union[torch.Tensor, None],
         weight: torch.Tensor,
+        weight_workspace: Optional[torch.Tensor],
         bias: torch.Tensor,
         non_tensor_args: Tuple,
-    ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
+    ) -> Tuple[torch.Tensor, ...]:
         # pylint: disable=missing-function-docstring
 
         # Reduce number of arguments to autograd function in order
@@ -136,10 +138,11 @@ class _LayerNormLinear(torch.autograd.Function):
             ub_bulk_dgrad,
             ub_name,
             fsdp_group,
-            module,
+            cache_weight,
             skip_fp8_weight_update,
             symmetric_ar_type,
             debug,
+            is_fsdp2,
         ) = non_tensor_args
         if fp8:
             backward_override = FP8GlobalStateManager.get_fp8_recipe().backward_override
@@ -294,33 +297,39 @@ class _LayerNormLinear(torch.autograd.Function):
         # ------------------------------------------------------
         # Prepare weight tensor
         # ------------------------------------------------------
+        new_weight_workspace = None
         weightmat = weight
         is_weight_param_quantized = False
         if fp8 or debug:
             is_weight_param_quantized = isinstance(weight, QuantizedTensorStorage)
 
             # Configure quantizer
-            # If weight is already quantized, no need to set quantizer states
+            # If weight is already quantized, weight._quantizer is its true quantizer.
             # for debug mode we create quantizer every iteration, thus we need to set the quantizer states
             if is_weight_param_quantized and not debug:
                 weight_quantizer = weight._quantizer
             elif weight_quantizer is not None:
+                # FSDP2: Skip columnwise/transpose creation during forward
+                # to avoid accumulating caches across layers. Backward's
+                # FSDP2 all-gather will recreate them. (Issue #2681)
                 weight_quantizer.set_usage(
                     rowwise=True,
-                    columnwise=is_grad_enabled and backward_override is None,
+                    columnwise=is_grad_enabled and not is_fsdp2 and backward_override is None,
                 )
 
             # Get quantized weight
-            update_workspace = is_first_microbatch is None or is_first_microbatch
-            weightmat = module.get_weight_workspace(
+            update_ws = is_first_microbatch is None or is_first_microbatch
+            weightmat, new_weight_workspace = quantize_weight(
                 tensor=weight,
                 quantizer=weight_quantizer,
-                cache_name=(None if is_first_microbatch is None else "weight"),
-                update_workspace=update_workspace,
+                workspace=weight_workspace,
+                update_workspace=update_ws,
                 skip_update_flag=skip_fp8_weight_update,
                 fsdp_group=fsdp_group,
                 workspace_dtype=activation_dtype,
+                cache=cache_weight,
             )
+
             weightmat.update_usage(rowwise_usage=True)
 
         else:
@@ -467,9 +476,15 @@ class _LayerNormLinear(torch.autograd.Function):
                     ln_bias,
                 )
 
+            # FSDP2: Don't save FP8 workspace for non-quantized weights.
+            # Backward will re-quantize from FSDP2 all-gathered weight.
+            # (Issue #2681)
+            wt_save = weightmat
+            if is_fsdp2 and weightmat is not weight:
+                wt_save = None
             tensors_to_save, tensor_objects = prepare_for_saving(
                 inputmat,
-                weightmat,
+                wt_save,
                 weight,
                 bias,
                 ln_weight,
@@ -482,6 +497,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.requires_dgrad = inp_requires_grad
             ctx.requires_wgrad = weight.requires_grad
             ctx.is_weight_param_quantized = is_weight_param_quantized
+            ctx.is_fsdp2 = is_fsdp2
             if fuse_wgrad_accumulation and weight.requires_grad:
                 # Keep weakref to weight to preserve attributes like main_grad
                 # when we need to modify the weight python object
@@ -531,10 +547,11 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.normalization = normalization
             ctx.reduce_and_update_bwd_fp8_tensors = False
             if ctx.fp8 and requires_grad(inp, ln_weight, ln_bias, weight, bias):
-                _first_fp8_module = FP8GlobalStateManager.IS_FIRST_FP8_MODULE
+                qstate = FP8GlobalStateManager.quantization_state
+                _first_fp8_module = qstate.is_first_fp8_module
                 ctx.reduce_and_update_bwd_fp8_tensors = FP8GlobalStateManager.is_first_fp8_module()
                 if in_fp8_activation_recompute_phase():
-                    FP8GlobalStateManager.IS_FIRST_FP8_MODULE = _first_fp8_module
+                    qstate.is_first_fp8_module = _first_fp8_module
             ctx.wgrad_store = wgrad_store
             ctx.debug = debug
 
@@ -555,13 +572,15 @@ class _LayerNormLinear(torch.autograd.Function):
         # Cached state for backward pass is ready...
         # ------------------------------------------------------
 
+        ln_out_for_return = None
         if return_layernorm_output:
             if return_layernorm_output_gathered:
                 shape = list(inp_shape)
                 shape[0] *= tp_size if with_input_all_gather else 1
-                return out, ln_out_return.view(shape)
-            return out, ln_out_return.view(inp_shape)
-        return out
+                ln_out_for_return = ln_out_return.view(shape)
+            else:
+                ln_out_for_return = ln_out_return.view(inp_shape)
+        return out, ln_out_for_return, new_weight_workspace
 
     @staticmethod
     def backward(
@@ -733,6 +752,19 @@ class _LayerNormLinear(torch.autograd.Function):
             # Note: Gradient w.r.t. GEMM input (i.e. norm output).
             # --------------------------------------------------
 
+            # FSDP2: Re-create workspace from all-gathered weight when
+            # workspace was not saved. (Issue #2681)
+            # Use saved_weight (the original weight parameter) since
+            # origin_weight is only set when fuse_wgrad_accumulation=True.
+            if weight is None:
+                if isinstance(saved_weight, QuantizedTensorStorage):
+                    # saved weight is already set to right usages by
+                    # fsdp2 quantized-tensor hooks when workspace was not saved.
+                    weight = saved_weight
+                elif ctx.weight_quantizer is not None:
+                    ctx.weight_quantizer.set_usage(rowwise=True, columnwise=True)
+                    weight = ctx.weight_quantizer(saved_weight)
+
             # Make sure required data is available
             if isinstance(grad_output, QuantizedTensorStorage):
                 grad_output.update_usage(rowwise_usage=True)
@@ -792,6 +824,14 @@ class _LayerNormLinear(torch.autograd.Function):
                 bulk_overlap=ctx.ub_bulk_dgrad,
             )
             nvtx_range_pop(f"{nvtx_label}.dgrad_gemm")
+
+            # FSDP2 only handles deallocation all-gathered weights that it allocates.
+            # Columnwise data is derived from rowwise data after allgather for fp8
+            # and 2d block-scaled weights in TE managed memory. So we need to clear
+            # it here.
+            # (Issues #2681, #2717)
+            if getattr(ctx, "is_fsdp2", False) and isinstance(weight, QuantizedTensorStorage):
+                clear_columnwise_cache(weight)
 
             # Prepare grad input tensor
             # Note: Perform tensor-parallel communication
@@ -1072,6 +1112,7 @@ class _LayerNormLinear(torch.autograd.Function):
             dgamma,
             dbeta,
             wgrad,
+            None,  # weight_workspace
             grad_bias,
             None,
         )
@@ -1541,7 +1582,9 @@ class LayerNormLinear(TransformerEngineBaseModule):
         debug = self.is_debug_iter()
 
         if FP8GlobalStateManager.fp8_graph_capturing():
-            skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()
+            skip_fp8_weight_update = (
+                FP8GlobalStateManager.quantization_state.skip_fp8_weight_update_tensor
+            )
         else:
             skip_fp8_weight_update = None
         if skip_fp8_weight_update is not None:
@@ -1591,6 +1634,11 @@ class LayerNormLinear(TransformerEngineBaseModule):
             else:
                 fwd_fn = _LayerNormLinear.forward
                 autograd_ctx = [None]
+            cache_name = None if (is_first_microbatch is None or self.is_fsdp2) else "weight"
+            weight_workspace = (
+                self._fp8_workspaces.get(cache_name) if cache_name is not None else None
+            )
+
             non_tensor_args = (
                 self.eps,
                 is_first_microbatch,
@@ -1626,26 +1674,30 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.ub_bulk_dgrad,
                 self.ub_name,
                 self.fsdp_group,
-                self,
+                cache_name is not None,
                 skip_fp8_weight_update,
                 self.symmetric_ar_type,
                 debug,
+                self.is_fsdp2,
             )
-            out = fwd_fn(
+            out, ln_out, new_weight_workspace = fwd_fn(
                 *autograd_ctx,
                 inp,
                 self.layer_norm_weight,
                 self.layer_norm_bias,
                 weight_tensor,
+                weight_workspace,
                 bias_tensor if self.apply_bias and not self.gemm_bias_unfused_add else None,
                 non_tensor_args,
             )
 
+            if new_weight_workspace is not None and cache_name is not None:
+                if isinstance(new_weight_workspace, torch.Tensor):
+                    new_weight_workspace = new_weight_workspace.detach()
+                self._fp8_workspaces[cache_name] = new_weight_workspace
+
         finally:
             self.end_forward()
-
-        if self.return_layernorm_output:
-            out, ln_out = out
 
         if self.gemm_bias_unfused_add:
             out = out + cast_if_needed(bias_tensor, self.activation_dtype)
