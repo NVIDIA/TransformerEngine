@@ -1603,7 +1603,7 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
   return output_py_list;
 }
 
-std::tuple<at::Tensor, at::Tensor, at::Tensor> quantize_nvfp4_pertoken(at::Tensor input) {
+std::tuple<at::Tensor, at::Tensor, at::Tensor> quantize_nvfp4_per_token(at::Tensor input) {
   init_extension();
 
   NVTE_CHECK(input.dim() == 2, "Input must be 2D (num_rows, num_cols)");

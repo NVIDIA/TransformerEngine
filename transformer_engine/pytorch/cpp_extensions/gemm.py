@@ -70,7 +70,7 @@ def validate_gemm_scale(scale: Optional[float], required: bool) -> float:
     return 0.0
 
 
-def _is_nvfp4_pertoken_tensor(tensor: torch.Tensor) -> bool:
+def _is_nvfp4_per_token_tensor(tensor: torch.Tensor) -> bool:
     """Whether tensor carries per-token NVFP4 global amax metadata."""
     if not isinstance(tensor, NVFP4TensorStorage):
         return False
@@ -78,7 +78,7 @@ def _is_nvfp4_pertoken_tensor(tensor: torch.Tensor) -> bool:
     return amax is not None and amax.numel() > 1
 
 
-def _nvfp4_pertoken_gemm_input(
+def _nvfp4_per_token_gemm_input(
     tensor: NVFP4TensorStorage,
 ) -> Tuple[NVFP4TensorStorage, torch.Tensor]:
     """Return a GEMM alias with identity activation amax and the original per-token amax."""
@@ -199,7 +199,7 @@ def general_gemm(
         "beta": beta,
     }
 
-    if not _is_nvfp4_pertoken_tensor(B):
+    if not _is_nvfp4_per_token_tensor(B):
         out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
     else:
         assert layout[1] == "N", "Per-token NVFP4 GEMM currently supports N-layout B only."
@@ -214,7 +214,7 @@ def general_gemm(
         ), "Per-token NVFP4 GEMM currently supports only plain torch.Tensor outputs."
         # cuBLAS folds the first activation amax into GEMM alpha. Keep per-token amax out of
         # alpha by using identity here, then apply the true per-token scale in FP32 below.
-        gemm_B, amax = _nvfp4_pertoken_gemm_input(B)
+        gemm_B, amax = _nvfp4_per_token_gemm_input(B)
         per_token_scales = amax.view(-1, 1)
 
         requested_out, requested_out_dtype = out, out_dtype
@@ -301,7 +301,7 @@ def general_grouped_gemm(
     else:
         bias_dtype = TE_DType[torch.bfloat16]
 
-    if any(_is_nvfp4_pertoken_tensor(tensor) for tensor in B):
+    if any(_is_nvfp4_per_token_tensor(tensor) for tensor in B):
         assert layout[1] == "N", "Per-token NVFP4 grouped GEMM currently supports N-layout B only."
         assert not grad, "Per-token NVFP4 grouped GEMM currently supports fprop only."
         assert not gelu, "Per-token NVFP4 grouped GEMM currently does not support fused GELU."
