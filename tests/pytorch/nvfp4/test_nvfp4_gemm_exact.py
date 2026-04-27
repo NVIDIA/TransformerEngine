@@ -8,7 +8,7 @@ import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.constants import TE_DType
 from transformer_engine.pytorch import NVFP4Quantizer
-from transformer_engine.pytorch.cpp_extensions import general_gemm
+from transformer_engine.pytorch.cpp_extensions import general_gemm, general_grouped_gemm
 from transformer_engine.pytorch.custom_recipes.quantization_nvfp4 import NVFP4QuantizerRef
 from transformer_engine.pytorch.custom_recipes import utils
 
@@ -222,6 +222,98 @@ def check_nvfp4_gemm_versus_reference(
     torch.testing.assert_close(y_native, y_ref, atol=8e-3, rtol=8e-3)
 
 
+def check_nvfp4_pertoken_grouped_gemm_matches_per_gemm(
+    x_dtype: torch.dtype,
+    w_dtype: torch.dtype,
+    out_dtype: torch.dtype,
+    m_splits: list[int],
+    k: int,
+    n: int,
+    *,
+    use_bias: bool,
+    single_output: bool,
+):
+    te_dtype = tex.DType.kFloat4E2M1
+    device = "cuda"
+    torch.manual_seed(23)
+    torch.cuda.manual_seed(23)
+
+    num_gemms = len(m_splits)
+
+    x_quantizer = NVFP4Quantizer(
+        fp4_dtype=te_dtype,
+        rowwise=True,
+        columnwise=True,
+        with_amax_reduction=False,
+        amax_reduction_group=None,
+        with_rht=False,
+        with_post_rht_amax=False,
+        per_token_activation=True,
+    )
+    w_quantizer = NVFP4Quantizer(
+        fp4_dtype=te_dtype,
+        rowwise=True,
+        columnwise=True,
+        with_amax_reduction=False,
+        amax_reduction_group=None,
+        with_rht=False,
+        with_post_rht_amax=False,
+    )
+
+    x_nvfp4 = []
+    w_nvfp4 = []
+    bias = []
+    expected = []
+    for m in m_splits:
+        x = torch.randn((m, k), dtype=x_dtype, device=device)
+        w = torch.randn((n, k), dtype=w_dtype, device=device)
+        x_nvfp4.append(
+            x_quantizer.update_quantized(
+                x, x_quantizer.make_empty(x.shape, dtype=x_dtype, device=device)
+            )
+        )
+        w_nvfp4.append(
+            w_quantizer.update_quantized(
+                w, w_quantizer.make_empty(w.shape, dtype=w_dtype, device=device)
+            )
+        )
+        bias.append(torch.randn(n, dtype=torch.bfloat16, device=device) if use_bias else None)
+        expected.append(
+            general_gemm(
+                w_nvfp4[-1],
+                x_nvfp4[-1],
+                out_dtype=out_dtype,
+                layout="TN",
+                bias=bias[-1],
+            )[0]
+        )
+
+    if single_output:
+        out = [torch.empty((sum(m_splits), n), dtype=out_dtype, device=device)]
+    else:
+        out = [torch.empty((m, n), dtype=out_dtype, device=device) for m in m_splits]
+
+    grouped_out, _, _ = general_grouped_gemm(
+        w_nvfp4,
+        x_nvfp4,
+        out,
+        quantization_params=[None] * num_gemms,
+        out_dtype=out_dtype,
+        layout="TN",
+        m_splits=m_splits,
+        bias=bias,
+        use_bias=use_bias,
+        single_output=single_output,
+    )
+
+    if single_output:
+        grouped_slices = torch.split(grouped_out, m_splits, dim=0)
+    else:
+        grouped_slices = grouped_out
+    for grouped, ref in zip(grouped_slices, expected):
+        torch.testing.assert_close(grouped, ref, atol=0.0, rtol=0.0)
+
+
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 @pytest.mark.parametrize(
     "M, K, N",
@@ -282,4 +374,48 @@ def test_nvfp4_gemm_versus_reference(
         x_columnwise=is_x_columnwise,
         w_columnwise=is_w_columnwise,
         per_token_activation=per_token_activation,
+    )
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize(
+    "m_splits, k, n",
+    [
+        ([32, 48, 48], 128, 128),
+        ([64, 80, 112], 128, 256),
+        ([64, 80, 112], 256, 256),
+        ([64, 80, 112], 1024, 256),
+        ([256, 256, 512], 1024, 1024),
+        ([1024, 1536, 1536], 512, 3072),
+        ([16, 32, 64], 128, 96),
+        ([80, 96, 128], 640, 304),
+        ([320, 336, 352], 3072, 992),
+        ([64, 80, 112], 64, 256),
+        ([32, 48, 48], 128, 112),
+    ],
+)
+@pytest.mark.parametrize("x_dtype", [torch.float32, torch.bfloat16], ids=str)
+@pytest.mark.parametrize("w_dtype", [torch.float32, torch.bfloat16], ids=str)
+@pytest.mark.parametrize("out_dtype", [torch.float32, torch.bfloat16], ids=str)
+@pytest.mark.parametrize("use_bias", [False, True], ids=["no_bias", "bias"])
+@pytest.mark.parametrize("single_output", [False, True], ids=["list_output", "single_output"])
+def test_nvfp4_pertoken_grouped_gemm_matches_per_gemm(
+    m_splits: list[int],
+    k: int,
+    n: int,
+    x_dtype: torch.dtype,
+    w_dtype: torch.dtype,
+    out_dtype: torch.dtype,
+    use_bias: bool,
+    single_output: bool,
+):
+    check_nvfp4_pertoken_grouped_gemm_matches_per_gemm(
+        x_dtype=x_dtype,
+        w_dtype=w_dtype,
+        out_dtype=out_dtype,
+        m_splits=m_splits,
+        k=k,
+        n=n,
+        use_bias=use_bias,
+        single_output=single_output,
     )
