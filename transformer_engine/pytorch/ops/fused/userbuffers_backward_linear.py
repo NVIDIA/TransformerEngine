@@ -524,9 +524,7 @@ class UserbuffersBackwardLinear(FusedOperation):
         grad_weight = None
         if linear_op_ctx.weight_requires_grad and accumulate_into_main_grad:
             weight_param = linear_op.weight
-            main_grad = get_main_grad_from_param(
-                weight_param, op_label="UserbuffersBackwardLinear"
-            )
+            main_grad = get_main_grad_from_param(weight_param, op_label="UserbuffersBackwardLinear")
             accumulate_into_main_grad = get_accumulate_flag_in_param(weight_param)
             grad_weight = main_grad.detach()
         else:

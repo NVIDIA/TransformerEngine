@@ -1290,9 +1290,7 @@ class GroupedLinear(BasicOperation):
                 if accumulate_into_main_grad:
                     # Megatron-LM wgrad fusion: GEMM accumulates into the
                     # parameter's ``main_grad`` directly.
-                    main_grad = get_main_grad_from_param(
-                        weights[0], op_label="GroupedLinear"
-                    )
+                    main_grad = get_main_grad_from_param(weights[0], op_label="GroupedLinear")
                     main_grad = view_main_grad_as_grouped_buffer(
                         main_grad, num_groups, weight_shape, label="GroupedLinear weight"
                     )
@@ -1307,8 +1305,7 @@ class GroupedLinear(BasicOperation):
             else:
                 if accumulate_into_main_grad:
                     grad_weights = [
-                        get_main_grad_from_param(w, op_label="GroupedLinear")
-                        for w in weights
+                        get_main_grad_from_param(w, op_label="GroupedLinear") for w in weights
                     ]
                     accumulate_into_main_grad = get_accumulate_flag_in_param(weights[0])
                 else:
@@ -1561,9 +1558,7 @@ class GroupedLinear(BasicOperation):
                     # Main-grad fusion: GEMM writes directly into ``main_grad``.
                     # ``overwrite_main_grad`` only flips the GEMM's
                     # ``accumulate`` flag.
-                    main_grad = get_main_grad_from_param(
-                        weights[0], op_label="GroupedLinear"
-                    )
+                    main_grad = get_main_grad_from_param(weights[0], op_label="GroupedLinear")
                     main_grad = view_main_grad_as_grouped_buffer(
                         main_grad, num_groups, weight_shape, label="GroupedLinear weight"
                     )
@@ -1587,8 +1582,7 @@ class GroupedLinear(BasicOperation):
             else:
                 if accumulate_into_main_grad:
                     final_weight_grads = [
-                        get_main_grad_from_param(w, op_label="GroupedLinear")
-                        for w in weights
+                        get_main_grad_from_param(w, op_label="GroupedLinear") for w in weights
                     ]
                     accumulate_into_main_grad = get_accumulate_flag_in_param(weights[0])
                 else:
