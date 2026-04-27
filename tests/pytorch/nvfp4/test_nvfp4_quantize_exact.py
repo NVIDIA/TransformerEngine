@@ -75,6 +75,7 @@ def check_quantization_nvfp4_versus_reference(
     )
     sx_t = x_nvfp4_sut._columnwise_scale_inv
     qx_amax = x_nvfp4_sut._amax_rowwise
+    qx_amax_t = x_nvfp4_sut._amax_columnwise
 
     # Reference quantization
     quant_tile_shape = (1, 16) if not with_2d_quantization else (16, 16)
@@ -105,6 +106,7 @@ def check_quantization_nvfp4_versus_reference(
         x_nvfp4_ref.scale_t.view(dtype=torch.uint8) if x_nvfp4_ref.scale_t is not None else None
     )
     ref_amax = x_nvfp4_ref.global_amax_row
+    ref_amax_t = x_nvfp4_ref.global_amax_col
 
     qx = unpack_fp4(qx)
     qx_t = unpack_fp4(qx_t) if qx_t is not None else None
@@ -124,6 +126,7 @@ def check_quantization_nvfp4_versus_reference(
         ref_sx_t_shape = sx_t_ref.shape
         sx_t_valid = sx_t[: ref_sx_t_shape[0], : ref_sx_t_shape[1]]
         torch.testing.assert_close(sx_t_valid, sx_t_ref, atol=0.0, rtol=0.0)
+        torch.testing.assert_close(qx_amax_t, ref_amax_t, atol=0.0, rtol=0.0)
 
     torch.testing.assert_close(qx_amax, ref_amax, atol=0.0, rtol=0.0)
 
@@ -249,6 +252,7 @@ def test_nvfp4_quantization_extrema_versus_reference(
     )
     sx_t = x_nvfp4_sut._columnwise_scale_inv
     qx_amax = x_nvfp4_sut._amax_rowwise
+    qx_amax_t = x_nvfp4_sut._amax_columnwise
 
     ref_quantizer = NVFP4QuantizerRef(
         dtype=utils.Fp4Formats.E2M1,
@@ -270,6 +274,7 @@ def test_nvfp4_quantization_extrema_versus_reference(
         x_nvfp4_ref.scale_t.view(dtype=torch.uint8) if x_nvfp4_ref.scale_t is not None else None
     )
     ref_amax = x_nvfp4_ref.global_amax_row
+    ref_amax_t = x_nvfp4_ref.global_amax_col
 
     torch.testing.assert_close(qx, qx_ref, atol=0.0, rtol=0.0)
 
@@ -282,6 +287,7 @@ def test_nvfp4_quantization_extrema_versus_reference(
         ref_sx_t_shape = sx_t_ref.shape
         sx_t_valid = sx_t[: ref_sx_t_shape[0], : ref_sx_t_shape[1]]
         torch.testing.assert_close(sx_t_valid, sx_t_ref, atol=0.0, rtol=0.0)
+        torch.testing.assert_close(qx_amax_t, ref_amax_t, atol=0.0, rtol=0.0)
 
     torch.testing.assert_close(qx_amax, ref_amax, atol=0.0, rtol=0.0)
 
@@ -364,6 +370,7 @@ def test_nvfp4_quantization_boundary_values(
     )
     sx_t = x_nvfp4_sut._columnwise_scale_inv
     qx_amax = x_nvfp4_sut._amax_rowwise
+    qx_amax_t = x_nvfp4_sut._amax_columnwise
 
     ref_quantizer = NVFP4QuantizerRef(
         dtype=utils.Fp4Formats.E2M1,
@@ -385,6 +392,7 @@ def test_nvfp4_quantization_boundary_values(
         x_nvfp4_ref.scale_t.view(dtype=torch.uint8) if x_nvfp4_ref.scale_t is not None else None
     )
     ref_amax = x_nvfp4_ref.global_amax_row
+    ref_amax_t = x_nvfp4_ref.global_amax_col
 
     torch.testing.assert_close(qx, qx_ref, atol=0.0, rtol=0.0)
 
@@ -398,6 +406,7 @@ def test_nvfp4_quantization_boundary_values(
         ref_sx_t_shape = sx_t_ref.shape
         sx_t_valid = sx_t[: ref_sx_t_shape[0], : ref_sx_t_shape[1]]
         torch.testing.assert_close(sx_t_valid, sx_t_ref, atol=0.0, rtol=0.0)
+        torch.testing.assert_close(qx_amax_t, ref_amax_t, atol=0.0, rtol=0.0)
 
     torch.testing.assert_close(qx_amax, ref_amax, atol=0.0, rtol=0.0)
 
@@ -465,6 +474,7 @@ def test_nvfp4_quantization_noncontiguous_inputs(
     )
     sx_t = x_nvfp4_sut._columnwise_scale_inv
     qx_amax = x_nvfp4_sut._amax_rowwise
+    qx_amax_t = x_nvfp4_sut._amax_columnwise
 
     ref_quantizer = NVFP4QuantizerRef(
         dtype=utils.Fp4Formats.E2M1,
@@ -486,6 +496,7 @@ def test_nvfp4_quantization_noncontiguous_inputs(
         x_nvfp4_ref.scale_t.view(dtype=torch.uint8) if x_nvfp4_ref.scale_t is not None else None
     )
     ref_amax = x_nvfp4_ref.global_amax_row
+    ref_amax_t = x_nvfp4_ref.global_amax_col
 
     # Quantized must match
     torch.testing.assert_close(qx, qx_ref, atol=0.0, rtol=0.0)
@@ -500,5 +511,6 @@ def test_nvfp4_quantization_noncontiguous_inputs(
         ref_sx_t_shape = sx_t_ref.shape
         sx_t_valid = sx_t[: ref_sx_t_shape[0], : ref_sx_t_shape[1]]
         torch.testing.assert_close(sx_t_valid, sx_t_ref, atol=0.0, rtol=0.0)
+        torch.testing.assert_close(qx_amax_t, ref_amax_t, atol=0.0, rtol=0.0)
 
     torch.testing.assert_close(qx_amax, ref_amax, atol=0.0, rtol=0.0)
