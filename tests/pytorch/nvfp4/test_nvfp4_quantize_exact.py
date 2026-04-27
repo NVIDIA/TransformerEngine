@@ -23,15 +23,6 @@ def unpack_fp4(x: torch.Tensor) -> torch.Tensor:
     return repeated
 
 
-def maybe_skip_pertoken_nvfp4(
-    *,
-    return_transpose: bool = False,  # pylint: disable=unused-argument
-    with_2d_quantization: bool = False,
-) -> None:
-    if with_2d_quantization:
-        pytest.skip("Per-token NVFP4 does not support 2D quantization")
-
-
 def check_quantization_nvfp4_versus_reference(
     x_dtype: torch.dtype,
     M: int,
@@ -168,7 +159,7 @@ def check_quantization_nvfp4_versus_reference(
     "with_2d_quantization", [True, False], ids=["2d_quantization", "1d_quantization"]
 )
 @pytest.mark.parametrize(
-    "per_token_activation", [False, True], ids=["nvfp4_per_tensor", "nvfp4_pertoken"]
+    "per_token_activation", [False, True], ids=["nvfp4", "nvfp4_pertoken"]
 )
 def test_quantization_block_tiling_versus_reference(
     x_dtype: torch.dtype,
@@ -180,11 +171,9 @@ def test_quantization_block_tiling_versus_reference(
     with_2d_quantization: bool,
     per_token_activation: bool,
 ) -> None:
-    if per_token_activation:
-        maybe_skip_pertoken_nvfp4(
-            return_transpose=return_transpose,
-            with_2d_quantization=with_2d_quantization,
-        )
+    if per_token_activation and with_2d_quantization:
+        pytest.skip("Per-token NVFP4 does not support 2D quantization")
+
     check_quantization_nvfp4_versus_reference(
         x_dtype=x_dtype,
         M=M,
@@ -211,7 +200,7 @@ def test_quantization_block_tiling_versus_reference(
     "use_cpp_allocator", [True, False], ids=["cpp_allocator", "python_allocator"]
 )
 @pytest.mark.parametrize(
-    "per_token_activation", [False, True], ids=["nvfp4_per_tensor", "nvfp4_pertoken"]
+    "per_token_activation", [False, True], ids=["nvfp4", "nvfp4_pertoken"]
 )
 def test_nvfp4_quantization_extrema_versus_reference(
     x_dtype: torch.dtype,
@@ -233,9 +222,6 @@ def test_nvfp4_quantization_extrema_versus_reference(
         x = torch.full((M, N), torch.finfo(x_dtype).max, dtype=x_dtype, device=device)
     else:
         x = torch.zeros((M, N), dtype=x_dtype, device=device)
-
-    if per_token_activation:
-        maybe_skip_pertoken_nvfp4(return_transpose=return_transpose)
 
     nvfp4_quantizer = NVFP4Quantizer(
         fp4_dtype=te_dtype,
@@ -318,7 +304,7 @@ def test_nvfp4_quantization_extrema_versus_reference(
     "use_cpp_allocator", [True, False], ids=["cpp_allocator", "python_allocator"]
 )
 @pytest.mark.parametrize(
-    "per_token_activation", [False, True], ids=["nvfp4_per_tensor", "nvfp4_pertoken"]
+    "per_token_activation", [False, True], ids=["nvfp4", "nvfp4_pertoken"]
 )
 def test_nvfp4_quantization_boundary_values(
     x_dtype: torch.dtype,
@@ -353,9 +339,6 @@ def test_nvfp4_quantization_boundary_values(
     row[0::2] = lower
     row[1::2] = upper
     x = row.unsqueeze(0).repeat(M, 1).to(dtype=x_dtype)
-
-    if per_token_activation:
-        maybe_skip_pertoken_nvfp4(return_transpose=return_transpose)
 
     nvfp4_quantizer = NVFP4Quantizer(
         fp4_dtype=te_dtype,
@@ -438,7 +421,7 @@ def test_nvfp4_quantization_boundary_values(
     "use_cpp_allocator", [True, False], ids=["cpp_allocator", "python_allocator"]
 )
 @pytest.mark.parametrize(
-    "per_token_activation", [False, True], ids=["nvfp4_per_tensor", "nvfp4_pertoken"]
+    "per_token_activation", [False, True], ids=["nvfp4", "nvfp4_pertoken"]
 )
 def test_nvfp4_quantization_noncontiguous_inputs(
     x_dtype: torch.dtype,
@@ -459,9 +442,6 @@ def test_nvfp4_quantization_noncontiguous_inputs(
     x_base = torch.randn((M, N), dtype=x_dtype, device=device)
     x_nc = x_base.t()  # shape (N, M), non-contiguous
     assert not x_nc.is_contiguous()
-
-    if per_token_activation:
-        maybe_skip_pertoken_nvfp4(return_transpose=return_transpose)
 
     nvfp4_quantizer = NVFP4Quantizer(
         fp4_dtype=te_dtype,
