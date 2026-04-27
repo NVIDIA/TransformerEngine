@@ -66,7 +66,7 @@ class _AutoswitchGemmMetricLogger:
             logger.removeHandler(handler)
             handler.close()
 
-        file_handler = logging.FileHandler(log_file, mode="w")
+        file_handler = logging.FileHandler(log_file, mode="a")
         file_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
         logger.addHandler(file_handler)
 
@@ -481,6 +481,11 @@ class AutoswitchGemm(TEConfigAPIMapper):
         state = self._get_or_create_state(layer_name, gemm)
         metric_logger = self._get_metrics_logger()
 
+        # Keep plan-time behavior quantized. Autoswitch decisions are applied only
+        # at final decision points right before GEMM launch.
+        if not final_decision:
+            return True, iteration + 1
+
         fp8_model_params_layer = self._layer_has_fp8_model_params.get(layer_name, False)
         allow_fp8_model_params_fallback = self._config_bool(
             config,
@@ -544,6 +549,18 @@ class AutoswitchGemm(TEConfigAPIMapper):
         if final_decision and metric_logger is not None:
             metric_logger.log_scalar(layer_name, gemm, "quantized_enabled", iteration, 1.0)
         return True, iteration + 1
+
+    @api_method
+    def modify_tensor_enabled(
+        self,
+        config: Dict,  # pylint: disable=unused-argument
+        layer_name: str,  # pylint: disable=unused-argument
+        gemm: str,  # pylint: disable=unused-argument
+        tensor_name: str,  # pylint: disable=unused-argument
+        iteration: int,  # pylint: disable=unused-argument
+    ):
+        """AutoswitchGemm does not participate in modify_tensor routing."""
+        return False, None
 
     @api_method
     def inspect_tensor_enabled(

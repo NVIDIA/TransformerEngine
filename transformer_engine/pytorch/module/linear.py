@@ -339,8 +339,10 @@ class _Linear(torch.autograd.Function):
         # Forward GEMM
         # Note: y = x * w^T
         # ------------------------------------------------------
+        fprop_weightmat = weightmat
+        fprop_inputmat_total = inputmat_total
         if debug and should_resolve_inputs_after_sampling(weight_quantizer, input_quantizer):
-            weightmat, inputmat_total = resolve_gemm_inputs_after_sampling(
+            fprop_weightmat, fprop_inputmat_total = resolve_gemm_inputs_after_sampling(
                 "fprop",
                 weightmat,
                 inputmat_total,
@@ -350,8 +352,8 @@ class _Linear(torch.autograd.Function):
             )
         nvtx_range_push(f"{nvtx_label}.gemm")
         gemm_out, *_, reduce_scatter_out = general_gemm(
-            weightmat,
-            inputmat_total,
+            fprop_weightmat,
+            fprop_inputmat_total,
             quantization_params=output_quantizer,
             out_dtype=activation_dtype,
             bias=bias,
