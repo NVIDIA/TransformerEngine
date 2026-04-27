@@ -82,7 +82,14 @@ __global__ void __launch_bounds__(64) nvfp4_rowwise_1x64_per_tile(
         bmx = fmaxf(bmx, fabsf(v));
       }
       const fp8e4m3 s_dec = compute_decoding_scaling_factor(bmx, S_enc_tile);
-      const float block_scale = __fdiv_rn(S_enc_tile, static_cast<float>(s_dec));
+      // Match the reference's all-zero-block branch: when ``bmx == 0`` the
+      // FP8 cast saturates ``s_dec`` to 0, so the naive ``S_enc / s_dec``
+      // would yield ``+inf`` and the subsequent ``0 * +inf`` a NaN that
+      // ``cvt.rn.satfinite.e2m1x4.f32`` resolves to ``+FP4_MAX`` (0x7) on
+      // SM10, not 0x0. Short-circuiting here keeps the kernel byte-exact
+      // with ``NVFP4Quantizer1x64Ref``.
+      const float s_dec_f = static_cast<float>(s_dec);
+      const float block_scale = (s_dec_f == 0.f) ? 0.f : __fdiv_rn(S_enc_tile, s_dec_f);
 
       const int c16 = cs / 16;
       row_scales[static_cast<size_t>(r) * scale_stride + static_cast<size_t>(c16)] = s_dec;
