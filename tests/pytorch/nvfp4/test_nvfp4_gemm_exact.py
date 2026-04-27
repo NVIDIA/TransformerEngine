@@ -222,7 +222,7 @@ def check_nvfp4_gemm_versus_reference(
     torch.testing.assert_close(y_native, y_ref, atol=8e-3, rtol=8e-3)
 
 
-def check_nvfp4_pertoken_grouped_gemm_matches_per_gemm(
+def check_nvfp4_per_token_grouped_gemm_matches_per_gemm(
     x_dtype: torch.dtype,
     w_dtype: torch.dtype,
     out_dtype: torch.dtype,
@@ -399,7 +399,7 @@ def test_nvfp4_gemm_versus_reference(
 @pytest.mark.parametrize("out_dtype", [torch.float32, torch.bfloat16], ids=str)
 @pytest.mark.parametrize("use_bias", [False, True], ids=["no_bias", "bias"])
 @pytest.mark.parametrize("single_output", [False, True], ids=["list_output", "single_output"])
-def test_nvfp4_pertoken_grouped_gemm_matches_per_gemm(
+def test_nvfp4_per_token_grouped_gemm_matches_per_gemm(
     m_splits: list[int],
     k: int,
     n: int,
@@ -409,7 +409,7 @@ def test_nvfp4_pertoken_grouped_gemm_matches_per_gemm(
     use_bias: bool,
     single_output: bool,
 ):
-    check_nvfp4_pertoken_grouped_gemm_matches_per_gemm(
+    check_nvfp4_per_token_grouped_gemm_matches_per_gemm(
         x_dtype=x_dtype,
         w_dtype=w_dtype,
         out_dtype=out_dtype,

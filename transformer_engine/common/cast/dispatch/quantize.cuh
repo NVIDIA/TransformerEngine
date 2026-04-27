@@ -22,7 +22,7 @@
 #include "../mxfp8/quantize_mxfp8.cuh"
 #include "../nvfp4/group_quantize_transpose_nvfp4.cuh"
 #include "../nvfp4/quantize_nvfp4.cuh"
-#include "../nvfp4/quantize_pertoken_nvfp4.cuh"
+#include "../nvfp4/quantize_per_token_nvfp4.cuh"
 #include "../nvfp4/quantize_transpose_nvfp4.cuh"
 
 namespace transformer_engine {
@@ -106,7 +106,7 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
       if (per_token_activation) {
         NVTE_CHECK(!quant_config_cpp.nvfp4_2d_quantization,
                    "Per-token NVFP4 quantization does not support 2D quantization.");
-        nvfp4::quantize_pertoken(*input_tensor, noop_tensor, output_tensor, stream);
+        nvfp4::quantize_per_token(*input_tensor, noop_tensor, output_tensor, stream);
         break;
       }
       bool use_optimized_kernel = (dtype == DType::kBFloat16) && (rows % 32 == 0) &&
@@ -252,7 +252,7 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
       if (per_token_activation) {
         NVTE_CHECK(!quant_config_cpp.nvfp4_2d_quantization,
                    "Per-token NVFP4 quantization does not support 2D quantization.");
-        nvfp4::quantize_pertoken(*grad_tensor, noop_tensor, output_tensor, stream);
+        nvfp4::quantize_per_token(*grad_tensor, noop_tensor, output_tensor, stream);
         break;
       }
       bool use_optimized_kernel = (dtype == DType::kBFloat16) && (rows % 32 == 0) &&
