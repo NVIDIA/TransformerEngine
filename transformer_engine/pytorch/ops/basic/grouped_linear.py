@@ -21,7 +21,6 @@ from ...module.base import (
     _2X_ACC_FPROP,
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
-    get_dummy_wgrad,
 )
 from ...quantization import FP8GlobalStateManager, Recipe
 from ...tensor import MXFP8Quantizer, MXFP8Tensor, Quantizer
@@ -32,7 +31,14 @@ from ...utils import (
     devices_match,
     round_up_to_nearest_multiple,
 )
-from .._common import is_quantized_tensor, maybe_dequantize
+from .._common import (
+    get_accumulate_flag_in_param,
+    get_dummy_wgrads_for_params,
+    get_main_grad_from_param,
+    is_quantized_tensor,
+    maybe_dequantize,
+    view_main_grad_as_grouped_buffer,
+)
 from ..op import BasicOperation, OperationContext
 from ...tensor import GroupedTensor
 from ...triton.grouped_dbias_dscales import (
@@ -784,36 +790,15 @@ class GroupedLinear(BasicOperation):
             out.append(w)
         return out
 
-    def _dummy_main_grad_wgrads(self) -> list[Optional[torch.Tensor]]:
-        """Return a NEW list of per-output dummy weight gradients for the
-        ``accumulate_into_main_grad`` (Megatron-LM wgrad fusion) path.
-        Length: 1 for ``single_grouped_weight=True``, ``num_groups``
-        otherwise.
+    def _get_weight_tensors(self) -> list[torch.nn.Parameter]:
+        """Return the weight parameters in registration order.
+
+        Length is 1 when ``single_grouped_weight=True`` (one
+        ``GroupedTensor`` parameter), otherwise ``num_groups``.
         """
         if self.single_grouped_weight:
-            weight_param = self.weight
-            if hasattr(weight_param, "grad_added_to_main_grad"):
-                weight_param.grad_added_to_main_grad = True
-                return [
-                    get_dummy_wgrad(
-                        list(weight_param.size()),
-                        weight_param.dtype,
-                        zero=getattr(weight_param, "zero_out_wgrad", False),
-                    )
-                ]
-            return [None]
-
-        out: list[Optional[torch.Tensor]] = [None] * self.num_groups
-        for group_idx in range(self.num_groups):
-            wp = getattr(self, f"weight{group_idx}")
-            if hasattr(wp, "grad_added_to_main_grad"):
-                wp.grad_added_to_main_grad = True
-                out[group_idx] = get_dummy_wgrad(
-                    list(wp.size()),
-                    wp.dtype,
-                    zero=getattr(wp, "zero_out_wgrad", False),
-                )
-        return out
+            return [self.weight]
+        return [getattr(self, f"weight{idx}") for idx in range(self.num_groups)]
 
     def _get_grouped_bias_for_gemm(
         self,
@@ -1247,8 +1232,8 @@ class GroupedLinear(BasicOperation):
     ]:
         num_groups = self.num_groups
         has_bias = self.has_bias
-        weight_param = self.weight if self.single_grouped_weight else self.weight0
-        device = weight_param.device
+        weights = self._get_weight_tensors()
+        device = weights[0].device
 
         # Saved tensors from forward pass
         saved_tensors = ctx.saved_tensors
@@ -1305,29 +1290,15 @@ class GroupedLinear(BasicOperation):
                 if accumulate_into_main_grad:
                     # Megatron-LM wgrad fusion: GEMM accumulates into the
                     # parameter's ``main_grad`` directly.
-                    if hasattr(weight_param, "__fsdp_param__"):
-                        weight_param.main_grad = weight_param.get_main_grad()
-                    main_grad = weight_param.main_grad
-                    if isinstance(main_grad, GroupedTensor):
-                        # Legacy path: no contiguous backing; per-group
-                        # quantized tensors as discrete GEMM outputs.
-                        grad_weights = main_grad.quantized_tensors
-                        if grad_weights is None:
-                            grad_weights = main_grad.split_into_quantized_tensors()
-                    else:
-                        if main_grad.shape != grouped_shape:
-                            if main_grad.numel() != math.prod(grouped_shape):
-                                raise RuntimeError(
-                                    "GroupedLinear expected grouped weight main_grad to have "
-                                    f"shape {grouped_shape} or matching numel, "
-                                    f"but got shape {tuple(main_grad.shape)}"
-                                )
-                            main_grad = main_grad.reshape(grouped_shape)
-                        final_weight_grads[0] = main_grad
-                        grad_weights = [main_grad[idx] for idx in range(num_groups)]
-                    accumulate_into_main_grad = not getattr(
-                        weight_param, "overwrite_main_grad", False
+                    main_grad = get_main_grad_from_param(
+                        weights[0], op_label="GroupedLinear"
                     )
+                    main_grad = view_main_grad_as_grouped_buffer(
+                        main_grad, num_groups, weight_shape, label="GroupedLinear weight"
+                    )
+                    final_weight_grads[0] = main_grad
+                    grad_weights = [main_grad[idx] for idx in range(num_groups)]
+                    accumulate_into_main_grad = get_accumulate_flag_in_param(weights[0])
                 else:
                     final_weight_grads[0] = torch.empty(
                         grouped_shape, dtype=ctx.dtype, device=device
@@ -1335,19 +1306,16 @@ class GroupedLinear(BasicOperation):
                     grad_weights = [final_weight_grads[0][idx] for idx in range(num_groups)]
             else:
                 if accumulate_into_main_grad:
-                    for group_idx in range(num_groups):
-                        weight_param = getattr(self, f"weight{group_idx}")
-                        if hasattr(weight_param, "__fsdp_param__"):
-                            weight_param.main_grad = weight_param.get_main_grad()
-                        grad_weights[group_idx] = weight_param.main_grad
-                    accumulate_into_main_grad = not getattr(
-                        self.weight0, "overwrite_main_grad", False
-                    )
+                    grad_weights = [
+                        get_main_grad_from_param(w, op_label="GroupedLinear")
+                        for w in weights
+                    ]
+                    accumulate_into_main_grad = get_accumulate_flag_in_param(weights[0])
                 else:
-                    for group_idx in range(num_groups):
-                        grad_weights[group_idx] = torch.empty(
-                            weight_shape, dtype=ctx.dtype, device=device
-                        )
+                    grad_weights = [
+                        torch.empty(weight_shape, dtype=ctx.dtype, device=device)
+                        for _ in range(num_groups)
+                    ]
                 final_weight_grads = list(grad_weights)
 
         # Perform dgrad GEMMs
@@ -1411,7 +1379,7 @@ class GroupedLinear(BasicOperation):
         # ``.grad`` with a dummy so DDP/FSDP hooks won't add ``.grad`` into
         # ``main_grad`` again.
         if ctx.weight_requires_grad and self._accumulate_into_main_grad:
-            final_weight_grads = self._dummy_main_grad_wgrads()
+            final_weight_grads = get_dummy_wgrads_for_params(weights)
 
         if not has_bias:
             grad_params = list(final_weight_grads)
@@ -1442,8 +1410,8 @@ class GroupedLinear(BasicOperation):
     ]:
         num_groups = self.num_groups
         has_bias = self.has_bias
-        weight_param = self.weight if self.single_grouped_weight else self.weight0
-        device = weight_param.device
+        weights = self._get_weight_tensors()
+        device = weights[0].device
         dtype = ctx.dtype
 
         with_quantized_compute = bool(getattr(ctx, "with_quantized_compute", False))
@@ -1593,25 +1561,19 @@ class GroupedLinear(BasicOperation):
                     # Main-grad fusion: GEMM writes directly into ``main_grad``.
                     # ``overwrite_main_grad`` only flips the GEMM's
                     # ``accumulate`` flag.
-                    if hasattr(weight_param, "__fsdp_param__"):
-                        weight_param.main_grad = weight_param.get_main_grad()
-                    main_grad = weight_param.main_grad
-                    grouped_shape = (num_groups, *weight_shape)
-                    if main_grad.numel() != math.prod(grouped_shape):
-                        raise RuntimeError(
-                            "GroupedLinear expected grouped weight main_grad to have "
-                            f"shape {grouped_shape} or matching numel, "
-                            f"but got shape {tuple(main_grad.shape)}"
-                        )
+                    main_grad = get_main_grad_from_param(
+                        weights[0], op_label="GroupedLinear"
+                    )
+                    main_grad = view_main_grad_as_grouped_buffer(
+                        main_grad, num_groups, weight_shape, label="GroupedLinear weight"
+                    )
                     grouped_wgrad = GroupedTensor.make_grouped_tensor_from_rowwise_data(
                         num_tensors=num_groups,
                         tensor_shape=weight_shape,
                         rowwise_data=main_grad.view(-1),
                         dtype=main_grad.dtype,
                     )
-                    accumulate_into_main_grad = not getattr(
-                        weight_param, "overwrite_main_grad", False
-                    )
+                    accumulate_into_main_grad = get_accumulate_flag_in_param(weights[0])
                 else:
                     grouped_wgrad = GroupedTensor.make_grouped_tensor_with_shapes(
                         num_tensors=num_groups,
@@ -1624,19 +1586,16 @@ class GroupedLinear(BasicOperation):
                 wgrad_output = grouped_wgrad
             else:
                 if accumulate_into_main_grad:
-                    for idx in range(num_groups):
-                        wp = getattr(self, f"weight{idx}")
-                        if hasattr(wp, "__fsdp_param__"):
-                            wp.main_grad = wp.get_main_grad()
-                        final_weight_grads[idx] = wp.main_grad
-                    accumulate_into_main_grad = not getattr(
-                        self.weight0, "overwrite_main_grad", False
-                    )
+                    final_weight_grads = [
+                        get_main_grad_from_param(w, op_label="GroupedLinear")
+                        for w in weights
+                    ]
+                    accumulate_into_main_grad = get_accumulate_flag_in_param(weights[0])
                 else:
-                    for idx in range(num_groups):
-                        final_weight_grads[idx] = torch.empty(
-                            weight_shape, dtype=dtype, device=device
-                        )
+                    final_weight_grads = [
+                        torch.empty(weight_shape, dtype=dtype, device=device)
+                        for _ in range(num_groups)
+                    ]
                 wgrad_output = final_weight_grads
 
         # wgrad GEMM
@@ -1662,7 +1621,7 @@ class GroupedLinear(BasicOperation):
         # ``.grad`` with a dummy so DDP/FSDP hooks won't add ``.grad`` into
         # ``main_grad`` again.
         if ctx.weight_requires_grad and self._accumulate_into_main_grad:
-            final_weight_grads = self._dummy_main_grad_wgrads()
+            final_weight_grads = get_dummy_wgrads_for_params(weights)
 
         # Assemble grad params in parameter registration order and return.
         if not has_bias:
