@@ -511,6 +511,7 @@ class NVFP4BlockScaling(Recipe):
         assert (
             self.backward_override in _BACKWARD_OVERRIDES
         ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
+
         # Quantization params
         # Note: RHT is currently only applied to column-wise usage so that
         # it can be used for wgrad GEMM.
