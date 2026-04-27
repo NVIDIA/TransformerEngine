@@ -894,9 +894,15 @@ class ETPShardedParam(torch.nn.Parameter):
                     f"cache.get() would return stale data. Check the chain's "
                     f"_need_weight_prefetch flag and issuer's prefetch logic."
                 )
-        # Wait for async prefetch if in progress
-        self._wait_param_gather()
-        self.ag_event.wait()
+        if getattr(self, '_already_ag_drained', False):
+            # Producer already drained via wait_async_comms; skip the captured
+            # cross-graph wait (CUDA no-op anyway). Correctness is provided by
+            # the eager main_stream sync chain in the surrounding training loop.
+            self._already_ag_drained = False
+        else:
+            # Intra-graph or eager consume: drain inline.
+            self._wait_param_gather()
+            self.ag_event.wait()
 
         # Retrieve prefetched results from cache
         result = []
@@ -1057,31 +1063,26 @@ class ETPShardedParam(torch.nn.Parameter):
 
         param._set_rs_state(ETPWeightState.NONE)
 
-        # 1. Strip padding
         if param.is_padded_last_rank:
             wgrad_rs = param._strip_padding(wgrad_rs)
 
-        # 2. Accumulation: accumulate wgrad into main_grad
         param.main_grad.add_(wgrad_rs)
         if hasattr(param, "grad_added_to_main_grad"):
             param.grad_added_to_main_grad = True
         dummy_grad = get_dummy_wgrad(list(param.main_grad.shape), param.dtype)
 
-        # 3. Trigger DDP backward hook (register_grad_ready).
-        # ETP bypasses autograd's normal gradient flow (returns None for async RS,
-        # accumulates directly into main_grad), so we must trigger the DDP hook
-        # manually. Do NOT set param.grad before calling — the hook checks
-        # param.grad and would accumulate it into main_grad if zero_out_wgrad
-        # is True, corrupting the gradient with a non-zero dummy.
         if getattr(param, '_grad_accum_hook', None) is not None:
             param._grad_accum_hook()
 
         return dummy_grad
 
 
-    def _wait_reduce_scatter(self):
+    def _wait_reduce_scatter(self, finalize_grad=False):
         # Enter rs_stream context so handle.wait() + rs_event.record() land
         # on rs_stream — mirrors _wait_param_gather for the RS path.
+        # When finalize_grad=True, main_grad.add_ also runs on rs_stream
+        # (right after NCCL RS), so it starts during AG drain rather than
+        # after it — avoids SM-saturation blocking cross-graph overlap.
         rs_stream = self._cached_rs_stream
         if rs_stream is None:
             rs_stream = get_rs_stream(self.chain_id, self.group)
@@ -1091,6 +1092,18 @@ class ETPShardedParam(torch.nn.Parameter):
                 self._wgrad_rs_handle.wait()
                 self._wgrad_rs_handle = None
                 self.rs_event.record()
+                if finalize_grad:
+                    cache = get_global_ETP_cache()
+                    for w in self._weights:
+                        w._set_rs_state(ETPWeightState.NONE)
+                        wgrad_rs = cache.get(w._rs_ticket)
+                        if w.is_padded_last_rank:
+                            wgrad_rs = w._strip_padding(wgrad_rs)
+                        w.main_grad.add_(wgrad_rs)
+                        cache.release(w._rs_ticket)
+                        if hasattr(w, "grad_added_to_main_grad"):
+                            w.grad_added_to_main_grad = True
+                    self._already_finalized = True
         # Release stashed wgrad inputs: UNGRAPHED buffers go back to the pool;
         # GRAPHED just drops Python refs (addresses must stay stable for CG).
         if getattr(self, '_wgrad_input_bufs', None) is not None:
@@ -1211,12 +1224,15 @@ class ETPShardedParam(torch.nn.Parameter):
         # Currently only support reduce scattering in reverse order
         if ETP_CONFIG.weight_prefetch and self.next_w is not None:
             self.next_w._wait_reduce_scatter()
-            self.next_w.rs_event.wait()
 
-            cache = get_global_ETP_cache()
-            for w in self.next_w._weights:
-                self._finalize_wgrad(w, cache.get(w._rs_ticket))
-                cache.release(w._rs_ticket)
+            if getattr(self.next_w, '_already_finalized', False):
+                self.next_w._already_finalized = False
+            else:
+                self.next_w.rs_event.wait()
+                cache = get_global_ETP_cache()
+                for w in self.next_w._weights:
+                    self._finalize_wgrad(w, cache.get(w._rs_ticket))
+                    cache.release(w._rs_ticket)
 
         return ret
 
@@ -1471,19 +1487,45 @@ def reallocate_etp_cache_to_mempool(device, mempool):
         _ETP_CACHE.reallocate_to_mempool(device, mempool)
 
 
-def wait_async_comms(chain_id: str = None):
-    """Wait on in-flight ETP async communications (all-gathers + reduce-scatters).
+def wait_async_comms(chain_id: str = None, skip_rs: bool = False, finalize_after_drain: bool = False):
+    """Drain in-flight ETP async AG / RS handles.
+
+    When called inside CUDA graph capture, the drains are captured into that
+    graph. This is the producer-side hook for cross-graph AG/RS overlap:
+    captured cudaStreamWaitEvent on an event recorded in a different capture
+    session is a CUDA no-op, so consumer graphs can't safely wait on
+    cross-graph events. Instead, the producer drains here and flags the
+    param; the consumer reads the flag and skips its captured wait.
 
     Args:
-        chain_id: If specified, only drain params belonging to this chain
-                  (ETPChain.GRAPHED.value or ETPChain.UNGRAPHED.value).
-                  If None, drain all chains.
+        chain_id: If specified, only drain params on this chain.
+        skip_rs:  Drain AG only; leave RS in flight.
+        finalize_after_drain: After RS drain, also accumulate wgrad into
+                 main_grad. Runs main_grad.add_ on rs_stream (right after
+                 NCCL RS) so it starts during AG drain rather than after,
+                 avoiding SM-saturation that blocks cross-graph overlap.
+                 Falls back to caller-stream _finalize_wgrad if no RS handle.
+
+    Per-param side effects:
+        * _already_ag_drained = True   (if an AG handle was drained)
+        * _already_finalized  = True   (if finalize_after_drain=True)
     """
     for param in list(_inflight_comm_params):
         if chain_id is not None and getattr(param, 'chain_id', ETPChain.UNGRAPHED.value) != chain_id:
             continue
+        had_ag = param._prefetch_handle is not None
         param._wait_param_gather()
-        param._wait_reduce_scatter()
+        if had_ag:
+            param._already_ag_drained = True
+        if not skip_rs:
+            param._wait_reduce_scatter(finalize_grad=finalize_after_drain)
+            if finalize_after_drain and not getattr(param, '_already_finalized', False):
+                cache = get_global_ETP_cache()
+                param.rs_event.wait()
+                for w in param._weights:
+                    ETPShardedParam._finalize_wgrad(w, cache.get(w._rs_ticket))
+                    cache.release(w._rs_ticket)
+                param._already_finalized = True
 
 
 @dataclass
