@@ -1208,7 +1208,7 @@ class ETPShardedParam(torch.nn.Parameter):
             # Sync reduce-scatter (last weight in chain) — RS done, recycle immediately
             wgrads, _ = self._reduce_scatter(wgrads, async_op=False, nvtx_label=nvtx_label)
             wgrads = [
-                w._strip_padding(g) if w.is_padded_last_rank else w for w, g in zip(weights, wgrads)
+                w._strip_padding(g) if w.is_padded_last_rank else g for w, g in zip(weights, wgrads)
             ]
             torch._foreach_add_([p.main_grad for p in weights], wgrads)
             result = [self._handle_megatron_grad_accum(p) for p in weights]
