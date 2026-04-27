@@ -27,12 +27,12 @@ void nvte_quantize(const NVTETensor input, NVTETensor output, cudaStream_t strea
 }
 
 void nvte_group_quantize(const NVTEGroupedTensor input, NVTEGroupedTensor output,
-                         cudaStream_t stream) {
+                         const NVTEQuantizationConfig quant_config, cudaStream_t stream) {
   NVTE_API_CALL(nvte_group_quantize);
   using namespace transformer_engine;
 
   constexpr bool IS_ACT = false;
-  dispatch::group_quantize_fwd_helper<IS_ACT, Empty, nullptr>(input, output, nullptr, stream);
+  dispatch::group_quantize_fwd_helper<IS_ACT, Empty, nullptr>(input, output, quant_config, stream);
 }
 
 void nvte_quantize_noop(const NVTETensor input, NVTETensor output, NVTETensor noop,
@@ -87,6 +87,14 @@ void nvte_dequantize(const NVTETensor input, NVTETensor output, cudaStream_t str
   using namespace transformer_engine;
   dispatch::dequantize_helper(*convertNVTETensorCheck(input), convertNVTETensorCheck(output),
                               stream);
+}
+
+void nvte_group_dequantize(const NVTEGroupedTensor input, NVTEGroupedTensor output,
+                           cudaStream_t stream) {
+  NVTE_API_CALL(nvte_group_dequantize);
+  using namespace transformer_engine;
+  dispatch::group_dequantize_helper(*convertNVTEGroupedTensorCheck(input),
+                                    convertNVTEGroupedTensorCheck(output), stream);
 }
 
 void nvte_multi_tensor_quantize(const NVTETensor *inputs, NVTETensor *outputs,

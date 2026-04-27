@@ -278,7 +278,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       }
       scales_colwise[scale_idx] = biased_exponent;
 
-      const float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
+      const float block_scale_inverse = ptx::exp2f_rcp<float>(biased_exponent);
       const ptx::floatx2 block_scale_inverse_2x = {block_scale_inverse, block_scale_inverse};
 
 // 3. Scale elements
@@ -430,7 +430,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         scales_rowwise[scale_idx] = biased_exponent;
       }
 
-      const float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
+      const float block_scale_inverse = ptx::exp2f_rcp<float>(biased_exponent);
       const ptx::floatx2 block_scale_inverse_2x = {block_scale_inverse, block_scale_inverse};
 
       // 3. Scale elements
@@ -498,6 +498,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     if constexpr (COLWISE_SCALING) {
       thread_partial_dbias = partial_dbias_colwise;
     } else {
+      ptx::cp_async_bulk_wait_group_read<0>();
+      __syncthreads();
       // Reusing dshmem (in_sh) as dbias buffer [HEIGHT x WIDTH]
       // HEIGHT = THREADS_Y
       // WIDTH = THREADS_X * (SCALE_DIM_X + 1)

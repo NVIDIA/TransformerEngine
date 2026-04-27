@@ -356,8 +356,9 @@ class TestGroupedTensor:
         "shape",
         [[(256, 512), (512, 512), (768, 512)], [(512, 512), (512, 512), (512, 512)]],
     )
+    @pytest.mark.parametrize("output_dbias", [False, True])
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
-    def test_quantize_grouped_mxfp8(self, shape: List[Tuple[int, int]]) -> None:
+    def test_quantize_grouped_mxfp8(self, shape: List[Tuple[int, int]], output_dbias: bool) -> None:
         """Test grouped quantization for MXFP8 against per-tensor quantization."""
         # Test wont pass until the grouped quantization PR from Oleg is merged.
         num_tensors = 2
@@ -377,12 +378,20 @@ class TestGroupedTensor:
         )
 
         # Quantize using grouped API
-        grouped_output = tex.group_quantize(
-            grouped_input,
-            quantizer,
-            num_tensors,
-            first_dims,
-        )
+        if output_dbias:
+            grouped_output, dbias = tex.bgrad_group_quantize(
+                grouped_input,
+                quantizer,
+                num_tensors,
+                first_dims,
+            )
+        else:
+            grouped_output = tex.group_quantize(
+                grouped_input,
+                quantizer,
+                num_tensors,
+                first_dims,
+            )
         # Build expected output by quantizing each tensor independently
         expected_data = []
         expected_scale_inv = []
@@ -397,8 +406,34 @@ class TestGroupedTensor:
         assert torch.equal(grouped_output.rowwise_data, expected_data)
         assert torch.equal(grouped_output.scale_inv, expected_scale_inv)
 
+        if output_dbias:
+            expected_dbias = torch.stack([t.sum(dim=0) for t in input_tensors])
+            assert torch.allclose(dbias, expected_dbias)
+
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
-    def test_group_quantize_cudagraph_capturable(self) -> None:
+    def test_bgrad_group_quantize_zero_size_tensor(self) -> None:
+        """Test bgrad_group_quantize handles zero-row input without error."""
+        num_tensors = 3
+        last_dim = 1024
+        grouped_input = torch.empty(0, last_dim, dtype=torch.bfloat16, device="cuda")
+
+        quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+        quantizer.set_usage(rowwise=True, columnwise=False)
+        first_dims = torch.zeros(num_tensors, dtype=torch.int64, device="cuda")
+
+        grouped_output, dbias = tex.bgrad_group_quantize(
+            grouped_input,
+            quantizer,
+            num_tensors,
+            first_dims,
+        )
+
+        assert dbias.shape == (num_tensors, last_dim)
+        assert torch.all(dbias == 0)
+
+    @pytest.mark.parametrize("output_dbias", [False, True])
+    @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+    def test_group_quantize_cudagraph_capturable(self, output_dbias: bool) -> None:
         """Ensure group_quantize is CUDA graph capturable."""
         num_tensors = 2
         shape = [(512, 1024) for _ in range(num_tensors)]
@@ -418,17 +453,28 @@ class TestGroupedTensor:
         static_first_dims = first_dims.clone()
 
         # Warmup to initialize kernels and allocator state
-        _ = tex.group_quantize(static_input, quantizer, num_tensors, static_first_dims)
+        if output_dbias:
+            _ = tex.bgrad_group_quantize(static_input, quantizer, num_tensors, static_first_dims)
+        else:
+            _ = tex.group_quantize(static_input, quantizer, num_tensors, static_first_dims)
         torch.cuda.synchronize()
 
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
-            static_output = tex.group_quantize(
-                static_input,
-                quantizer,
-                num_tensors,
-                static_first_dims,
-            )
+            if output_dbias:
+                static_output, static_dbias = tex.bgrad_group_quantize(
+                    static_input,
+                    quantizer,
+                    num_tensors,
+                    static_first_dims,
+                )
+            else:
+                static_output = tex.group_quantize(
+                    static_input,
+                    quantizer,
+                    num_tensors,
+                    static_first_dims,
+                )
 
         fresh_input = torch.cat(
             [torch.randn(s, dtype=torch.bfloat16, device="cuda") for s in shape],
@@ -438,9 +484,102 @@ class TestGroupedTensor:
         graph.replay()
         torch.cuda.synchronize()
 
-        expected = tex.group_quantize(static_input, quantizer, num_tensors, static_first_dims)
-        assert torch.equal(static_output.rowwise_data, expected.rowwise_data)
-        assert torch.equal(static_output.scale_inv, expected.scale_inv)
+        if output_dbias:
+            expected_out, expected_dbias = tex.bgrad_group_quantize(
+                static_input,
+                quantizer,
+                num_tensors,
+                static_first_dims,
+            )
+        else:
+            expected_out = tex.group_quantize(
+                static_input, quantizer, num_tensors, static_first_dims
+            )
+        assert torch.equal(static_output.rowwise_data, expected_out.rowwise_data)
+        assert torch.equal(static_output.scale_inv, expected_out.scale_inv)
+        if output_dbias:
+            assert torch.allclose(static_dbias, expected_dbias)
+
+    @pytest.mark.parametrize(
+        "shape",
+        [[(512, 1024), (512, 1024)], [(256, 512), (512, 512), (768, 512)]],
+    )
+    @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+    def test_group_dequantize(self, shape: List[Tuple[int, int]]) -> None:
+        """Test grouped dequantization for MXFP8 back to BF16."""
+        num_tensors = len(shape)
+
+        # Create BF16 input tensors and quantize them with MXFP8.
+        input_tensors = [torch.randn(s, dtype=torch.bfloat16, device="cuda") for s in shape]
+        grouped_input = torch.cat(input_tensors, dim=0)
+
+        quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+        quantizer.set_usage(rowwise=True, columnwise=False)
+        first_dims = torch.tensor([s[0] for s in shape], dtype=torch.int64, device="cuda")
+
+        # Quantize.
+        quantized = tex.group_quantize(grouped_input, quantizer, num_tensors, first_dims)
+
+        # Dequantize.
+        dequantized = tex.group_dequantize(quantized, tex.DType.kBFloat16)
+
+        # Verify output metadata.
+        assert dequantized.num_tensors == num_tensors
+        assert dequantized.logical_shape == quantized.logical_shape
+        assert torch.equal(dequantized.first_dims, quantized.first_dims)
+        assert torch.equal(dequantized.tensor_offsets, quantized.tensor_offsets)
+
+        # Verify dequantized values are close to original (per-tensor).
+        dequantized_tensors = dequantized.split_into_quantized_tensors()
+        assert len(dequantized_tensors) == num_tensors
+        for orig, deq in zip(input_tensors, dequantized_tensors):
+            torch.testing.assert_close(deq, orig, atol=0.125, rtol=0.1)
+
+    @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+    def test_group_dequantize_cudagraph_capturable(self) -> None:
+        """Ensure group_dequantize is CUDA graph capturable."""
+        num_tensors = 2
+        shape = [(512, 1024) for _ in range(num_tensors)]
+        input_tensors = [torch.randn(s, dtype=torch.bfloat16, device="cuda") for s in shape]
+        grouped_input = torch.cat(input_tensors, dim=0)
+
+        quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+        quantizer.set_usage(rowwise=True, columnwise=False)
+        first_dims = torch.tensor(
+            [shape[0][0] for _ in range(num_tensors)],
+            dtype=torch.int64,
+            device="cuda",
+        )
+
+        # Quantize to get MXFP8 grouped tensor.
+        quantized = tex.group_quantize(grouped_input, quantizer, num_tensors, first_dims)
+
+        # Warmup dequantize.
+        torch.cuda.synchronize()
+        _ = tex.group_dequantize(quantized, tex.DType.kBFloat16)
+        torch.cuda.synchronize()
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            static_output = tex.group_dequantize(quantized, tex.DType.kBFloat16)
+
+        # Replay with different input data.
+        fresh_input = torch.cat(
+            [torch.randn(s, dtype=torch.bfloat16, device="cuda") for s in shape],
+            dim=0,
+        )
+        fresh_quantized = tex.group_quantize(fresh_input, quantizer, num_tensors, first_dims)
+        quantized.rowwise_data.copy_(fresh_quantized.rowwise_data)
+        quantized.scale_inv.copy_(fresh_quantized.scale_inv)
+
+        graph.replay()
+        torch.cuda.synchronize()
+
+        expected = tex.group_dequantize(quantized, tex.DType.kBFloat16)
+        expected_tensors = expected.split_into_quantized_tensors()
+        static_tensors = static_output.split_into_quantized_tensors()
+        for exp, got in zip(expected_tensors, static_tensors):
+            assert torch.equal(got, exp)
 
     def test_clear(self) -> None:
         """Test clear method"""
@@ -477,7 +616,7 @@ class TestGroupedTensor:
             in_features=in_features,
             out_features=out_features,
             params_dtype=dtype,
-            single_grouped_parameter=False,
+            single_grouped_weight=False,
         ).cuda()
         with torch.no_grad():
             for i in range(num_gemms):
@@ -489,6 +628,7 @@ class TestGroupedTensor:
                         torch.randn(out_features, device="cuda", dtype=dtype)
                     )
         expected_weights = [getattr(src, f"weight{i}").detach().clone() for i in range(num_gemms)]
+        expected_biases = [getattr(src, f"bias{i}").detach().clone() for i in range(num_gemms)]
         ckpt_path = tmp_path / "grouped_linear_per_gemm.pt"
         torch.save(src.state_dict(), ckpt_path)
         del src
@@ -500,7 +640,8 @@ class TestGroupedTensor:
             in_features=in_features,
             out_features=out_features,
             params_dtype=dtype,
-            single_grouped_parameter=True,
+            single_grouped_weight=True,
+            single_grouped_bias=True,
         ).cuda()
         load_result = dst.load_state_dict(src_state_dict, strict=True)
         assert len(load_result.missing_keys) == 0
@@ -511,6 +652,12 @@ class TestGroupedTensor:
         assert len(loaded_weights) == num_gemms
         for loaded_weight, expected_weight in zip(loaded_weights, expected_weights):
             assert torch.equal(loaded_weight, expected_weight)
+
+        assert getattr(dst, "bias", None) is not None
+        loaded_biases = dst.bias.split_into_quantized_tensors()
+        assert len(loaded_biases) == num_gemms
+        for loaded_bias, expected_bias in zip(loaded_biases, expected_biases):
+            assert torch.equal(loaded_bias.reshape(-1), expected_bias.reshape(-1))
 
     def test_grouped_linear_load_state_dict_single_to_multi_param(self, tmp_path) -> None:
         """Load grouped-parameter checkpoint from disk into per-GEMM parameter format."""
@@ -524,7 +671,8 @@ class TestGroupedTensor:
             in_features=in_features,
             out_features=out_features,
             params_dtype=dtype,
-            single_grouped_parameter=True,
+            single_grouped_weight=True,
+            single_grouped_bias=True,
         ).cuda()
         with torch.no_grad():
             source_weights = src.weight.split_into_quantized_tensors()
@@ -533,6 +681,10 @@ class TestGroupedTensor:
                     torch.randn(out_features, in_features, device="cuda", dtype=dtype)
                 )
         expected_weights = [weight.detach().clone() for weight in source_weights]
+        source_biases = src.bias.split_into_quantized_tensors()
+        for i in range(num_gemms):
+            source_biases[i].copy_(torch.randn(out_features, device="cuda", dtype=dtype))
+        expected_biases = [b.detach().clone() for b in source_biases]
         ckpt_path = tmp_path / "grouped_linear_single_param.pt"
         torch.save(src.state_dict(), ckpt_path)
         del src
@@ -544,7 +696,7 @@ class TestGroupedTensor:
             in_features=in_features,
             out_features=out_features,
             params_dtype=dtype,
-            single_grouped_parameter=False,
+            single_grouped_weight=False,
         ).cuda()
         load_result = dst.load_state_dict(src_state_dict, strict=True)
         assert len(load_result.missing_keys) == 0
@@ -552,3 +704,5 @@ class TestGroupedTensor:
 
         for i, expected_weight in enumerate(expected_weights):
             assert torch.equal(getattr(dst, f"weight{i}"), expected_weight)
+        for i, expected_bias in enumerate(expected_biases):
+            assert torch.equal(getattr(dst, f"bias{i}"), expected_bias.reshape(-1))

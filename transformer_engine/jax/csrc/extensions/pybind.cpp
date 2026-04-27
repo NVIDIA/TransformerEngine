@@ -33,6 +33,7 @@ pybind11::dict Registrations() {
   // Quantization
   dict["te_dbias_quantize_ffi"] = EncapsulateFFI(DBiasQuantizeHandler);
   dict["te_grouped_quantize_ffi"] = EncapsulateFFI(GroupedQuantizeHandler);
+  dict["te_grouped_quantize_v2_ffi"] = EncapsulateFFI(GroupedQuantizeV2Handler);
   dict["te_dequantize_ffi"] = EncapsulateFFI(DequantizeHandler);
 
   // Softmax
@@ -100,6 +101,9 @@ pybind11::dict Registrations() {
   dict["te_fused_moe_aux_loss_forward_ffi"] = EncapsulateFFI(FusedMoEAuxLossForwardHandler);
   dict["te_fused_moe_aux_loss_backward_ffi"] = EncapsulateFFI(FusedMoEAuxLossBackwardHandler);
 
+  // TopK
+  dict["te_topk_ffi"] = EncapsulateFFI(TopkHandler);
+
   return dict;
 }
 
@@ -117,6 +121,7 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("get_norm_bwd_workspace_sizes", &GetNormBackwardWorkspaceSizes);
   m.def("get_fused_attn_fwd_workspace_sizes", &GetFusedAttnForwardWorkspaceSizes);
   m.def("get_fused_attn_bwd_workspace_sizes", &GetFusedAttnBackwardWorkspaceSizes);
+  m.def("get_topk_workspace_sizes", &GetTopkWorkspaceSizes);
   m.def("nvte_get_qkv_format", &nvte_get_qkv_format);
   m.def("is_non_nt_fp8_gemm_supported", &nvte_is_non_tn_fp8_gemm_supported);
   m.def("initialize_cgemm_communicator", &InitializeCgemmCommunicator);

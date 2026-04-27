@@ -12,7 +12,7 @@ from typing import Any, Optional, TypeAlias
 import torch
 
 from ..quantization import FP8GlobalStateManager, Recipe, DelayedScaling
-from ..quantized_tensor import prepare_for_saving, restore_from_saved
+from ..quantized_tensor import prepare_for_saving, restore_from_func_ctx
 from .op import (
     BasicOperation,
     FusibleOperation,
@@ -212,8 +212,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         basic_op_ctxs = func_ctx.basic_op_ctxs
 
         # Restore saved tensors
-        saved_tensors = restore_from_saved(func_ctx.tensor_objects, func_ctx.saved_tensors)
-        func_ctx.tensor_objects = None
+        saved_tensors = restore_from_func_ctx(func_ctx)
 
         # Unflatten list of saved tensors
         for ctx in basic_op_ctxs:
@@ -339,6 +338,7 @@ class OperationFuser:
         # Cache and detect change of state relevant for fusing operations
         self.recipe_type = None
         self.first_op_requiring_backward = 0
+        self.backward_override = None
         self._last_amax_history_len = 0
 
         # Flatten list of parameters
@@ -415,9 +415,14 @@ class OperationFuser:
         # Early exit if fusion parameters haven't changed
         need_reset = False
         recipe_type = type(recipe)
-        fusion_params = (recipe_type, first_op_requiring_backward)
-        if fusion_params != (self.recipe_type, self.first_op_requiring_backward):
-            # Recipe type or grad requirmenets have changed
+        backward_override = recipe.backward_override if recipe is not None else None
+        fusion_params = (recipe_type, first_op_requiring_backward, backward_override)
+        if fusion_params != (
+            self.recipe_type,
+            self.first_op_requiring_backward,
+            self.backward_override,
+        ):
+            # Recipe type, backward override, or grad requirements have changed
             need_reset = True
         elif (
             recipe is not None
@@ -451,7 +456,7 @@ class OperationFuser:
         )
 
         # Save current fusion params
-        self.recipe_type, self.first_op_requiring_backward = fusion_params
+        self.recipe_type, self.first_op_requiring_backward, self.backward_override = fusion_params
 
         # Save amax history length
         if isinstance(recipe, DelayedScaling):
