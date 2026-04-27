@@ -78,6 +78,22 @@ def _is_nvfp4_pertoken_tensor(tensor: torch.Tensor) -> bool:
     return amax is not None and amax.numel() > 1
 
 
+def _nvfp4_pertoken_gemm_input(
+    tensor: NVFP4TensorStorage,
+) -> Tuple[NVFP4TensorStorage, torch.Tensor]:
+    """Return a GEMM alias with identity activation amax and the original per-token amax."""
+    metadata = tensor.get_metadata()
+    if tensor._amax_rowwise is not None:
+        amax = tensor._amax_rowwise
+        assert amax is not None and amax.numel() > 1
+        metadata["amax_rowwise"] = amax.new_ones(1)
+    else:
+        amax = tensor._amax_columnwise
+        assert amax is not None and amax.numel() > 1
+        metadata["amax_columnwise"] = amax.new_ones(1)
+    return NVFP4TensorStorage(**metadata), amax
+
+
 def general_gemm(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -196,38 +212,35 @@ def general_gemm(
         assert out is None or (
             isinstance(out, torch.Tensor) and not is_custom(out)
         ), "Per-token NVFP4 GEMM currently supports only plain torch.Tensor outputs."
-        requested_out = out
-        requested_out_dtype = out_dtype
+        # cuBLAS folds the first activation amax into GEMM alpha. Keep per-token amax out of
+        # alpha by using identity here, then apply the true per-token scale in FP32 below.
+        gemm_B, amax = _nvfp4_pertoken_gemm_input(B)
+        per_token_scales = amax.view(-1, 1)
+
+        requested_out, requested_out_dtype = out, out_dtype
         fp32_out = (
             torch.empty_like(requested_out, dtype=torch.float32)
             if requested_out is not None
             else None
         )
-        # Override only output, output quantizer, and output dtype for the FP32 correction path.
-        args = (
-            *args[:4],
-            fp32_out,
-            None,
-            TE_DType[torch.float32],
-            *args[7:],
-        )
-        out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
-
-        assert isinstance(out, torch.Tensor) and not is_custom(out)
-        assert out.numel() > 0
-        amax = B._amax_rowwise if B._amax_rowwise is not None else B._amax_columnwise
-        assert amax is not None and amax.numel() > 1
-
+        gemm_args = list(args)
+        gemm_args[2] = gemm_B  # B
+        gemm_args[4] = fp32_out  # out
+        gemm_args[5] = None  # quantization_params
+        gemm_args[6] = TE_DType[torch.float32]  # out_dtype
+        out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*gemm_args, **kwargs)
         out_2d = out.reshape(-1, out.shape[-1])
+
+        assert amax.dtype == torch.float32 and out.dtype == torch.float32
         assert amax.numel() == out_2d.shape[0]
-        ratios = (amax / amax[0]).to(dtype=out.dtype).view(-1, 1)
+
         if bias is not None:
-            bias_cast = bias.to(dtype=out.dtype)
+            bias_cast = bias.to(dtype=torch.float32)
             out_2d.sub_(bias_cast)
-            out_2d.mul_(ratios)
+            out_2d.mul_(per_token_scales)
             out_2d.add_(bias_cast)
         else:
-            out_2d.mul_(ratios)
+            out_2d.mul_(per_token_scales)
 
         if requested_out is not None:
             requested_out.copy_(out.to(dtype=requested_out.dtype))
