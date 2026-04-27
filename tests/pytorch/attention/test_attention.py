@@ -372,6 +372,8 @@ model_configs_fa4_base = {
     "fa4_base_1": ModelConfig(4, 128, 16, 64),
     "fa4_base_2": ModelConfig(2, 2048, 24, 128, attn_mask_type="causal"),
     "fa4_base_3": ModelConfig(2, 1024, 8, 96, attn_mask_type="causal"),
+    # head_dim=256 (SM100 only via dedicated kernel; flash-attn-4 > 4.0.0b10)
+    "fa4_base_hdim256": ModelConfig(2, 1024, 8, 256, attn_mask_type="causal"),
     # GQA
     "fa4_gqa_1": ModelConfig(2, 1024, 32, 128, num_gqa_groups=8, attn_mask_type="causal"),
     "fa4_gqa_2": ModelConfig(2, 1024, 16, 128, num_gqa_groups=1, attn_mask_type="causal"),
