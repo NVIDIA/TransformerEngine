@@ -62,11 +62,13 @@ __global__ void
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 __launch_bounds__(BLOCK_SIZE)
 #endif
-    quantize_pertoken_nvfp4_kernel(
-        const int num_rows, const int num_cols, const IType *__restrict__ input,
-        const int *__restrict__ row_offsets, uint8_t *__restrict__ output_data,
-        fp8e4m3 *__restrict__ output_scales, float *__restrict__ output_per_token_amax,
-        const int scale_stride, const float *__restrict__ noop) {
+    quantize_pertoken_nvfp4_kernel(const int num_rows, const int num_cols,
+                                   const IType *__restrict__ input,
+                                   const int *__restrict__ row_offsets,
+                                   uint8_t *__restrict__ output_data,
+                                   fp8e4m3 *__restrict__ output_scales,
+                                   float *__restrict__ output_per_token_amax,
+                                   const int scale_stride, const float *__restrict__ noop) {
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   using namespace detail;
   if (noop != nullptr && noop[0] == 1.0f) {
@@ -244,11 +246,13 @@ __global__ void
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 __launch_bounds__(BLOCK_SIZE)
 #endif
-    quantize_pertoken_nvfp4_columnwise_kernel(
-        const int num_rows, const int num_cols, const IType *__restrict__ input,
-        uint8_t *__restrict__ output_data_t, fp8e4m3 *__restrict__ output_scales_t,
-        const float *__restrict__ per_token_amax, const int scale_stride_t,
-        const float *__restrict__ noop) {
+    quantize_pertoken_nvfp4_columnwise_kernel(const int num_rows, const int num_cols,
+                                              const IType *__restrict__ input,
+                                              uint8_t *__restrict__ output_data_t,
+                                              fp8e4m3 *__restrict__ output_scales_t,
+                                              const float *__restrict__ per_token_amax,
+                                              const int scale_stride_t,
+                                              const float *__restrict__ noop) {
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   using namespace detail;
   if (noop != nullptr && noop[0] == 1.0f) {
@@ -307,16 +311,17 @@ __launch_bounds__(BLOCK_SIZE)
 }
 
 template <typename IType>
-void launch_quantize_pertoken_nvfp4_columnwise(
-    const int num_rows, const int num_cols, const IType *input, uint8_t *output_data_t,
-    fp8e4m3 *output_scales_t, const float *per_token_amax, const int scale_stride_t,
-    cudaStream_t stream, const float *noop = nullptr) {
+void launch_quantize_pertoken_nvfp4_columnwise(const int num_rows, const int num_cols,
+                                               const IType *input, uint8_t *output_data_t,
+                                               fp8e4m3 *output_scales_t,
+                                               const float *per_token_amax,
+                                               const int scale_stride_t, cudaStream_t stream,
+                                               const float *noop = nullptr) {
 #if FP4_TYPE_SUPPORTED
   if (num_rows == 0 || num_cols == 0) return;
 
   NVTE_CHECK(num_rows % PERTOKEN_SF_VEC_SIZE == 0, "num_rows must be a multiple of ",
-             PERTOKEN_SF_VEC_SIZE, " for per-token NVFP4 columnwise quantization, got ",
-             num_rows);
+             PERTOKEN_SF_VEC_SIZE, " for per-token NVFP4 columnwise quantization, got ", num_rows);
   dim3 grid(num_cols);
   dim3 block(PERTOKEN_BLOCK_SIZE);
 
