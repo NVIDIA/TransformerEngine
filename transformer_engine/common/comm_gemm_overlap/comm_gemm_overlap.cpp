@@ -1157,6 +1157,10 @@ void CommOverlapP2PBase::split_overlap_rs(const TensorWrapper &A, bool transa,
     NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_compute[i], _start_compute, 0));
   }
 
+  // Launch the tiny delay kernel
+  userbuffers_tiny_delay(_stream_send[0]);
+  NVTE_CHECK_CUDA(cudaEventRecord(_start_compute, _stream_send[0]));
+
   // GEMM and send/recv chunks
   for (int i = 0; i < _tp_size; i++) {
     // GEMM chunk
@@ -1169,6 +1173,13 @@ void CommOverlapP2PBase::split_overlap_rs(const TensorWrapper &A, bool transa,
     auto workspace_chunk =
         get_tensor_chunk(workspace, stream_id * workspace_size_chunk, {workspace_size_chunk});
 
+    if (i == 1) {
+      NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_compute[stream_id], _start_compute));
+    } else if (i > 1) {
+      NVTE_CHECK_CUDA(
+          cudaEventRecord(_start_compute, _stream_compute[(i - 2) % _stream_compute.size()]));
+      NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_compute[stream_id], _start_compute));
+    }
     nvte_cublas_gemm(A.data(), input_b_chunk.data(), output_chunk.data(), bias.data(),
                      pre_gelu_out.data(), transa, transb, grad, workspace_chunk.data(), accumulate,
                      use_split_accumulator, _math_sms, _stream_compute[stream_id]);
