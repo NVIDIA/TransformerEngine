@@ -118,7 +118,7 @@ def check_nvfp4_gemm_versus_reference(
     x_ref_quantizer = NVFP4QuantizerRef(
         dtype=utils.Fp4Formats.E2M1,
         rowwise=True,
-        columnwise=not per_token_activation,
+        columnwise=True,
         pow_2_scales=False,
         eps=0.0,
         quant_tile_shape=(1, 16),
