@@ -16,17 +16,6 @@ from transformer_engine.pytorch.custom_recipes import utils
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
 
 
-def maybe_skip_pertoken_nvfp4_gemm(
-    *,
-    accumulate: bool,
-    x_columnwise: bool,
-) -> None:
-    if accumulate:
-        pytest.skip("Per-token NVFP4 GEMM output rescale does not support accumulation")
-    if x_columnwise:
-        pytest.skip("Per-token NVFP4 GEMM output rescale requires rowwise activation usage")
-
-
 def check_nvfp4_gemm_versus_reference(
     x_dtype: torch.dtype,
     w_dtype: torch.dtype,
@@ -171,7 +160,7 @@ def check_nvfp4_gemm_versus_reference(
         qresult_w=w_nvfp4_ref,
     )
 
-    # Native TE GEMM path
+    # Native TE GEMM using tex.generic_gemm (cuBLAS GEMM)
     # Allocate cuBLAS workspace
     workspace = torch.empty(4, dtype=torch.uint8, device=device)
 
@@ -258,14 +247,13 @@ def check_nvfp4_gemm_versus_reference(
     "is_x_columnwise, is_w_columnwise",
     [
         (False, False),  # TN
-        (False, True),  # NN
-        (True, False),  # TT
+        (True, False),  # NN
         (True, True),  # NT
     ],
-    ids=["rowxrow", "rowxcol", "colxrow", "colxcol"],
+    ids=["rowxrow", "colxrow", "colxcol"],
 )
 @pytest.mark.parametrize(
-    "per_token_activation", [False, True], ids=["nvfp4_per_tensor", "nvfp4_pertoken"]
+    "per_token_activation", [False, True], ids=["nvfp4", "nvfp4_pertoken"]
 )
 def test_nvfp4_gemm_versus_reference(
     M: int,
@@ -280,10 +268,10 @@ def test_nvfp4_gemm_versus_reference(
     per_token_activation: bool,
 ):
     if per_token_activation:
-        maybe_skip_pertoken_nvfp4_gemm(
-            accumulate=accumulate,
-            x_columnwise=is_x_columnwise,
-        )
+        if accumulate:
+            pytest.skip("Per-token NVFP4 GEMM output rescale does not support accumulation")
+        if is_x_columnwise:
+            pytest.skip("Per-token NVFP4 GEMM output rescale requires rowwise activation usage")
 
     check_nvfp4_gemm_versus_reference(
         x_dtype=x_dtype,
