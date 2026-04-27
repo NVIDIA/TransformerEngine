@@ -195,7 +195,6 @@ def test_transpose_cast_rejects_fp8_input():
 
 
 def test_transpose_cast_requires_block_aligned_dims():
-    source = _make_source(64, 128)
     quantizer = _make_quantizer(tex.DType.kFloat8E4M3)
     quantizer.set_usage(rowwise=True, columnwise=False)
     bad_source = torch.randn(48, 128, dtype=torch.bfloat16, device="cuda")

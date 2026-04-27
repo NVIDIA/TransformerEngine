@@ -157,10 +157,10 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
 constexpr int kTransposeTileDim = 16;
 
 template <typename IType, typename OType>
-__global__ void mxfp8_scaling_transpose_cast_kernel(const IType *input,
-                                                    const e8m0_t *scale_inv_colwise,
-                                                    OType *output_rowwise, int rows, int cols,
-                                                    int colwise_scale_stride) {
+__global__ void __launch_bounds__(kTransposeTileDim *kTransposeTileDim)
+    mxfp8_scaling_transpose_cast_kernel(const IType *input, const e8m0_t *scale_inv_colwise,
+                                        OType *output_rowwise, int rows, int cols,
+                                        int colwise_scale_stride) {
   __shared__ OType tile[kTransposeTileDim][kTransposeTileDim + 1];
 
   const int64_t c = blockIdx.x * kTransposeTileDim + threadIdx.x;
@@ -395,6 +395,7 @@ void nvte_mxfp8_scaling_transpose_cast(const NVTETensor input, const NVTETensor 
                                        NVTETensor output_rowwise,
                                        NVTETensor output_rowwise_scale_inv, int rows, int cols,
                                        cudaStream_t stream) {
+  NVTE_API_CALL(nvte_mxfp8_scaling_transpose_cast);
   nvte_mxfp8_scaling_transpose_cast_v2(input, scale_inv_colwise, output_rowwise,
                                        output_rowwise_scale_inv, rows, cols, kNVTEFloat8E4M3,
                                        /*with_gemm_swizzled_scales=*/false, stream);
