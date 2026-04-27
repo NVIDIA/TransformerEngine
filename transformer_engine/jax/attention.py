@@ -542,19 +542,29 @@ def run_length_fill(segment_ids) -> jnp.ndarray:
 
 
 def _get_seqlens_thd(segment_ids, max_segments_per_seq):
-    # Create mask for non-zero seg ids and get the non-zero indices associated with the same
+    """O(T) per-row segment-length computation for packed-THD layouts.
+
+    Returns a [B, max_segments_per_seq] array whose k-th entry is
+    the length of the k-th segment in that row (or -1 if no k-th segment
+    exists). Valid segment ids are >= 1; id 0 is padding and is excluded from the counts.
+    """
+    # Gather the indices of non-padding tokens per row into a dense prefix; 
+    # slots past the last valid token are filled with -1. 
     non_zero_mask = segment_ids != 0
     max_size = segment_ids.shape[-1]
     non_zero_indices = jax.vmap(
         lambda mask_row: jnp.where(mask_row, size=max_size, fill_value=-1)[0]
     )(non_zero_mask)
 
-    # Pick non-zero seg ids and seg pos using take_along_axis to index within the seg ids and pos
-    # Clip -1 to 0 for safe indexing
+    # Materialise a padding-free view of segment_ids by gathering at
+    # non_zero_indices. Slots whose index was -1 are explicitly set
+    # to 0 so they end up in the id=0 bucket (that we drop below).
     clipped_indices = jnp.clip(non_zero_indices, 0, None)
     valid_segment_ids = jnp.where(
         non_zero_indices >= 0, jnp.take_along_axis(segment_ids, clipped_indices, axis=-1), 0
     )
+    # Per-row bincount of ids -> segment length, discarding the
+    # id=0 bucket (padding) and capping at max_segments_per_seq.
     seqlens_all = jax.vmap(
         lambda sp_row: jnp.bincount(sp_row, length=max_segments_per_seq + 1)[1:]
     )(valid_segment_ids)
@@ -562,15 +572,14 @@ def _get_seqlens_thd(segment_ids, max_segments_per_seq):
     return seqlens_all_pad_neg
 
 
-def _get_seqoffsets_thd(segment_ids, segment_pos, max_segments_per_seq):
-    # NOTE: we detect segment boundaries from segment_ids changes, not segment_pos gaps.
-    # Under Striped CP reorder (used by P2P ring attention for THD+BALANCED) segment_pos
-    # values become non-sequential within a single logical segment (e.g. [0,2,4,6] on
-    # rank 0, [1,3,5,7] on rank 1), which would make a pos-gap detector flag every step
-    # as a new segment. segment_ids, however, stay contiguous per rank under striping so
-    # id-change detection is both correct and reorder-invariant, matching the pre-O(N)
-    # mask-based path.
-    del segment_pos
+def _get_seqoffsets_thd(segment_ids, max_segments_per_seq):
+    """O(T) per-row segment start-offset computation for packed-THD layouts.
+
+    Returns a [B, max_segments_per_seq + 1] array whose k-th entry
+    is the starting index of the k-th segment in that row (or -1 if no k-th
+    segment exists). Boundaries are detected from segment_ids transitions
+    """
+    # Detect segment boundaries from segment_ids changes
     segment_changes = jnp.concatenate(
         [
             jnp.full(
@@ -580,9 +589,9 @@ def _get_seqoffsets_thd(segment_ids, segment_pos, max_segments_per_seq):
         ],
         axis=-1,
     )
-    # Remove any padded region segment changes
+    # Remove any padded region segment changes (this also handles intra-segment padding correctly)
     segment_changes_masked = jnp.where(segment_ids != 0, segment_changes, False)
-    # Get the indices for segment changes (these are the offsets)
+    # Get the indices for segment changes (these are the start offsets)
     seq_offsets = jax.vmap(
         lambda scm_row: jnp.where(scm_row, size=max_segments_per_seq + 1, fill_value=-1)[0]
     )(segment_changes_masked)
@@ -634,12 +643,10 @@ def _segment_ids_pos_to_seqlens_offsets(
     )
     q_offset = _get_seqoffsets_thd(
         segment_ids=segment_ids_q,
-        segment_pos=segment_pos_q,
         max_segments_per_seq=max_segments_per_seq,
     )
     kv_offset = _get_seqoffsets_thd(
         segment_ids=segment_ids_kv,
-        segment_pos=segment_pos_kv,
         max_segments_per_seq=max_segments_per_seq,
     )
     return q_seqlen, kv_seqlen, q_offset, kv_offset
