@@ -148,19 +148,19 @@ std::tuple<at::Tensor, at::Tensor> fused_moe_aux_loss_fwd(at::Tensor probs,
 
   // Create the output tensor
   at::Tensor aux_loss = at::empty({}, at::dtype(probs.scalar_type()).device(at::kCUDA));
-  at::Tensor accum_buf = at::empty({}, at::dtype(at::kFloat).device(at::kCUDA));
+  at::Tensor Const_buf = at::empty({2}, at::dtype(at::kFloat).device(at::kCUDA));
 
   auto probs_cu = makeTransformerEngineTensor(probs);
   auto tokens_per_expert_cu = makeTransformerEngineTensor(tokens_per_expert);
   auto aux_loss_cu = makeTransformerEngineTensor(aux_loss);
-  auto accum_buf_cu = makeTransformerEngineTensor(accum_buf);
+  auto Const_buf_cu = makeTransformerEngineTensor(Const_buf);
 
   nvte_fused_moe_aux_loss_forward_v2(probs_cu.data(), tokens_per_expert_cu.data(), total_num_tokens,
                                      num_experts, num_rows, num_cols, topk, coeff,
-                                     aux_loss_cu.data(), accum_buf_cu.data(),
+                                     aux_loss_cu.data(), Const_buf_cu.data(),
                                      at::cuda::getCurrentCUDAStream());
 
-  return std::make_tuple(aux_loss, accum_buf);
+  return std::make_tuple(aux_loss, Const_buf);
 }
 
 at::Tensor fused_moe_aux_loss_bwd(at::Tensor Const_buf, at::Tensor tokens_per_expert, int num_rows,
