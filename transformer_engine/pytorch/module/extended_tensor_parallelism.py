@@ -459,24 +459,21 @@ def wrap_module_params_etp(module, weight_names, etp_group, is_grouped=None):
         delattr(module, name)
 
         if ETP_CONFIG.pad_for_alignment > 0:
-            # Ensure each shard's dim0 is a multiple of 16 for quantization (NVFP4/FP8) by padding 
-            # the last rank such that the total padded length of dim0 is a multiple of ETP size * 16
+            # Pad the full tensor BEFORE sharding so every rank gets exactly
+            # shard_size rows and each shard's dim0 is alignment-divisible.
+            # Padding stays contiguous at the tail of the gathered result —
+            # no interleaved-padding reshuffle needed after all-gather.
             alignment = ETP_CONFIG.pad_for_alignment * etp_size
             tensor = param.data
             dim0 = tensor.shape[0]
             pad_length = (alignment - dim0 % alignment) % alignment if alignment > 0 else 0
+            if pad_length > 0:
+                tensor = torch.nn.functional.pad(tensor, (0, 0, 0, pad_length))
             padded_dim0 = dim0 + pad_length
-            is_padded_last_rank = pad_length > 0 and etp_rank == etp_size - 1
-            # Create the ETP sharded param, pass a clone of the shard so that the original unsharded
-            # buffer may be deallocated
             shard_size = padded_dim0 // etp_size
-            start_idx = etp_rank * shard_size
-            end_idx = min((etp_rank + 1) * shard_size, tensor.shape[0])
-            shard = tensor[start_idx: end_idx]
+            shard = tensor[etp_rank * shard_size : (etp_rank + 1) * shard_size]
             etp_shard = ETPShardedParam(shard.clone())
-            # finally, set attributes
             etp_shard.pad_length = pad_length
-            etp_shard.is_padded_last_rank = is_padded_last_rank
         else:
             shard_size = tensor.shape[0] // etp_group.size()
             shard = tensor[etp_rank * shard_size: (etp_rank + 1) * shard_size]
@@ -617,7 +614,6 @@ class ETPShardedParam(torch.nn.Parameter):
         self.rs_event = torch.cuda.Event(external=True)
         self._rs_ticket = None
         # Padding
-        self.is_padded_last_rank = False
         self.pad_length = 0
         # Debug
         self._debug_name = ""
@@ -666,11 +662,8 @@ class ETPShardedParam(torch.nn.Parameter):
     @property
     def _unsharded_shape_padded(self):
         out_shape = list(self.size())
-        if self.pad_length > 0 and self.group.rank() == self.group.size() - 1:
-            out_shape[0] = (out_shape[0]+ self.pad_length) * self.group.size()
-        else:
-            out_shape[0] = out_shape[0] * self.group.size()
-        return tuple(out_shape)   
+        out_shape[0] = out_shape[0] * self.group.size()
+        return tuple(out_shape)
 
     @property
     def _unsharded_shape(self):
@@ -680,14 +673,9 @@ class ETPShardedParam(torch.nn.Parameter):
 
     @property
     def _sharded_padded_shape(self):
-        out_shape = list(self.size())
-        if self.pad_length > 0 and self.group.rank() == self.group.size() - 1:
-            out_shape[0] += self.pad_length
-        return tuple(out_shape)
+        return tuple(self.size())
 
     def get_padded_shard(self):
-        if self.pad_length > 0 and self.is_padded_last_rank:
-            return torch.nn.functional.pad(self, (0, 0, 0, self.pad_length))  
         return self
 
     def _set_state(self, new_state: ETPWeightState):
@@ -1197,8 +1185,6 @@ class ETPShardedParam(torch.nn.Parameter):
                     for w in self._weights:
                         w._set_rs_state(ETPWeightState.NONE)
                         wgrad_rs = cache.get(w._rs_ticket)
-                        if w.is_padded_last_rank:
-                            wgrad_rs = w._strip_padding(wgrad_rs)
                         w.main_grad.add_(wgrad_rs)
                         if ETP_CONFIG.debug_numerics > 0 and not _etp_dbg_capturing():
                             if bool(torch.isinf(w.main_grad).any()) or bool(torch.isnan(w.main_grad).any()):
@@ -1327,9 +1313,6 @@ class ETPShardedParam(torch.nn.Parameter):
         else:
             # Sync reduce-scatter (last weight in chain) — RS done, recycle immediately
             wgrads, _ = self._reduce_scatter(wgrads, async_op=False, nvtx_label=nvtx_label)
-            wgrads = [
-                w._strip_padding(g) if w.is_padded_last_rank else g for w, g in zip(weights, wgrads)
-            ]
             torch._foreach_add_([p.main_grad for p in weights], wgrads)
             if ETP_CONFIG.debug_numerics > 0 and not _etp_dbg_capturing():
                 for w in weights[:3]:
@@ -1357,10 +1340,6 @@ class ETPShardedParam(torch.nn.Parameter):
                 cache = get_global_ETP_cache()
                 next_weights = self.next_w._weights
                 wgrads = [cache.get(w._rs_ticket) for w in next_weights]
-                wgrads = [
-                    w._strip_padding(g) if w.is_padded_last_rank else g for w, g in zip(next_weights, wgrads)
-                ]
-
                 torch._foreach_add_([w.main_grad for w in next_weights], wgrads)
                 if ETP_CONFIG.debug_numerics > 0 and not _etp_dbg_capturing():
                     for w in next_weights[:3]:
