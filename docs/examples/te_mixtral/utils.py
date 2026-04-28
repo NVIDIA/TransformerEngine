@@ -328,6 +328,7 @@ def finetune_model(model, hyperparams, accelerator, train_dataloader, optimizer,
     model.train()
     total_loss = 0
     optimizer.zero_grad()
+
     # Cycle the dataloader so benchmark sweeps with a small dataset (e.g.
     # openassistant-guanaco at 9846 samples) don't hit StopIteration when
     # batch * world_size * num_steps exceeds the dataset size.
@@ -335,6 +336,7 @@ def finetune_model(model, hyperparams, accelerator, train_dataloader, optimizer,
         while True:
             for x in loader:
                 yield x
+
     train_dataloader = enumerate(_cycle(train_dataloader))
 
     # Warmup iterations (not timed).

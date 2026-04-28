@@ -567,9 +567,7 @@ class NVMixtralSparseMoeBlock(nn.Module):
                     continue
                 gate, up = torch.nn.functional.linear(chunk, gate_up_w[i]).chunk(2, dim=-1)
                 outputs.append(
-                    torch.nn.functional.linear(
-                        torch.nn.functional.silu(gate) * up, down_w[i]
-                    )
+                    torch.nn.functional.linear(torch.nn.functional.silu(gate) * up, down_w[i])
                 )
             return torch.cat(outputs, dim=0)
 
