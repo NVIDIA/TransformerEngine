@@ -613,6 +613,14 @@ std::vector<std::pair<int, int>> num_tiles = {
   {65, 257},
   {65, 258},
   {65, 259},
+  // Additional narrow-path coverage: narrow_k (row) when num_tiles_K < 32,
+  // narrow_m (col) when num_tiles_M < 32.
+  {1, 4},     // narrow_k with 4 K-tiles
+  {1, 8},     // narrow_k with 8 K-tiles
+  {4, 1},     // narrow_m with 4 M-tiles
+  {8, 1},     // narrow_m with 8 M-tiles
+  {31, 1},    // narrow_m at boundary (31 < TB_DIM=32)
+  {1, 31},    // narrow_k at boundary (31 < TB_DIM=32)
 };
 
 // Raw {M, K} data shapes for unswizzle tests. Includes aligned cases (scale dims
