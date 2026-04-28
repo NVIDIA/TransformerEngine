@@ -1114,9 +1114,9 @@ def test_custom_recipe_dpa_mxfp8():
         ), f"DPA bwd slot {i}: expected MXFP8Quantizer, got {type(q).__name__}"
 
     # MXFP8 attention has no delayed-scaling state (no S/dP DS-request slots).
-    assert not fwd_state._has_delayed_scaling, (
-        "DPA fwd state should NOT have delayed scaling for the all-MXFP8 factory"
-    )
+    assert (
+        not fwd_state._has_delayed_scaling
+    ), "DPA fwd state should NOT have delayed scaling for the all-MXFP8 factory"
 
     # Linear modules should still be NVFP4
     qkv_fwd = qkv_proj.fp8_meta["scaling_fwd"]
