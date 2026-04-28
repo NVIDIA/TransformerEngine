@@ -243,9 +243,7 @@ class MegatronTrainingHelper:
         ``main_grad += grad`` would be a no-op rather than double-counting).
         """
         for wp, expected in zip(weight_params, expected_main_grads):
-            torch.testing.assert_close(
-                wp.main_grad.to(expected), expected, rtol=rtol, atol=atol
-            )
+            torch.testing.assert_close(wp.main_grad.to(expected), expected, rtol=rtol, atol=atol)
 
             assert wp.grad_added_to_main_grad is True, (
                 "weight.grad_added_to_main_grad was not flipped to True; "
@@ -255,10 +253,9 @@ class MegatronTrainingHelper:
             # ``.grad`` should be the cached dummy tensor returned by
             # ``get_dummy_wgrad`` -- shared storage, not the real wgrad.
             expected_dummy = get_dummy_wgrad(list(wp.size()), wp.dtype)
-            assert wp.grad is not None, (
-                "weight.grad is None; the Megatron protocol expects a dummy "
-                "tensor stand-in here."
-            )
+            assert (
+                wp.grad is not None
+            ), "weight.grad is None; the Megatron protocol expects a dummy tensor stand-in here."
             assert wp.grad.data_ptr() == expected_dummy.data_ptr(), (
                 "weight.grad does not share storage with the cached dummy "
                 "wgrad; downstream wrapper hooks risk double-accumulating."
@@ -3610,9 +3607,7 @@ class TestSequentialModules:
                     weight_params_for_main_grad = [fc1.weight, fc2.weight]
                 else:
                     weight_params_for_main_grad = [
-                        getattr(fc, f"weight{i}")
-                        for fc in (fc1, fc2)
-                        for i in range(group_size)
+                        getattr(fc, f"weight{i}") for fc in (fc1, fc2) for i in range(group_size)
                     ]
                 MegatronTrainingHelper.init_main_grad_buffers(
                     weight_params_for_main_grad,
