@@ -181,7 +181,8 @@ Error_Type FusedMoEAuxLossForwardFFI(cudaStream_t stream,
   auto probs_tensor = TensorWrapper(probs_buf.untyped_data(), probs_shape, dtype);
   auto tpe_tensor = TensorWrapper(tokens_per_expert_buf.untyped_data(), tpe_shape, tpe_dtype);
   auto aux_loss_tensor = TensorWrapper(aux_loss_buf->untyped_data(), std::vector<size_t>{1}, dtype);
-  auto const_buf_tensor = TensorWrapper(const_buf->untyped_data(), std::vector<size_t>{2}, DType::kFloat32);
+  auto const_buf_tensor =
+      TensorWrapper(const_buf->untyped_data(), std::vector<size_t>{2}, DType::kFloat32);
 
   nvte_fused_moe_aux_loss_forward_v2(probs_tensor.data(), tpe_tensor.data(), num_tokens,
                                      num_experts, num_tokens, num_experts, static_cast<int>(topk),

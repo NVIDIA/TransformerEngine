@@ -21,8 +21,9 @@ template <typename DataType, typename IndexType>
 __global__ void fused_moe_aux_loss_forward_kernel_v2(const DataType* probs,
                                                      const IndexType* tokens_per_expert,
                                                      int total_num_tokens, int num_experts,
-                                                     int num_rows, int num_cols, int topk, float coeff,
-                                                     DataType* aux_loss, float* Const_buf) {
+                                                     int num_rows, int num_cols, int topk,
+                                                     float coeff, DataType* aux_loss,
+                                                     float* Const_buf) {
   // -----------------------------------------------------------------------
   // 1) Compute the constant coefficient (identical for all threads)
   // -----------------------------------------------------------------------
@@ -64,10 +65,8 @@ __global__ void fused_moe_aux_loss_forward_kernel_v2(const DataType* probs,
   const int warp_id = threadIdx.x / kThreadsPerWarp;
   const int lane_id = threadIdx.x % kThreadsPerWarp;
   if (warp_id == 0) {
-    CompType block_sum = warp_reduce_on_shmem(shmem_block,
-                                              static_cast<int>(blockDim.x),
-                                              ReduceFuncType::SUM,
-                                              lane_id);
+    CompType block_sum = warp_reduce_on_shmem(shmem_block, static_cast<int>(blockDim.x),
+                                              ReduceFuncType::SUM, lane_id);
     if (lane_id == 0) {
       atomicAdd(&Const_buf[1], block_sum * Const_buf[0]);
     }
@@ -89,9 +88,9 @@ void fused_moe_aux_loss_forward_kernel_launcher_v2(const DataType* probs,
                                                    float coeff, DataType* aux_loss,
                                                    float* Const_buf, cudaStream_t stream) {
   // Round up to a multiple of warp size for correct warp shuffles.
-  const int block_size =
-      ((std::min(1024, num_cols) + static_cast<int>(kThreadsPerWarp) - 1)
-       / static_cast<int>(kThreadsPerWarp)) * static_cast<int>(kThreadsPerWarp);
+  const int block_size = ((std::min(1024, num_cols) + static_cast<int>(kThreadsPerWarp) - 1) /
+                          static_cast<int>(kThreadsPerWarp)) *
+                         static_cast<int>(kThreadsPerWarp);
   const int grid_size = cuda::sm_count() * 2;
 
   // One CompType per thread in shared memory.
@@ -102,16 +101,9 @@ void fused_moe_aux_loss_forward_kernel_launcher_v2(const DataType* probs,
   NVTE_CHECK_CUDA(cudaMemsetAsync(Const_buf + 1, 0, sizeof(float), stream));
 
   fused_moe_aux_loss_forward_kernel_v2<DataType, IndexType>
-      <<<grid_size, block_size, smem_size, stream>>>(probs,
-                                                     tokens_per_expert,
-                                                     total_num_tokens,
-                                                     num_experts,
-                                                     num_rows,
-                                                     num_cols,
-                                                     topk,
-                                                     coeff,
-                                                     aux_loss,
-                                                     Const_buf);
+      <<<grid_size, block_size, smem_size, stream>>>(probs, tokens_per_expert, total_num_tokens,
+                                                     num_experts, num_rows, num_cols, topk, coeff,
+                                                     aux_loss, Const_buf);
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
