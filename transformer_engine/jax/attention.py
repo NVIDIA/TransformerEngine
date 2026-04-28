@@ -548,8 +548,8 @@ def _get_seqlens_thd(segment_ids, max_segments_per_seq):
     the length of the k-th segment in that row (or -1 if no k-th segment
     exists). Valid segment ids are >= 1; id 0 is padding and is excluded from the counts.
     """
-    # Gather the indices of non-padding tokens per row into a dense prefix; 
-    # slots past the last valid token are filled with -1. 
+    # Gather the indices of non-padding tokens per row into a dense prefix;
+    # slots past the last valid token are filled with -1.
     non_zero_mask = segment_ids != 0
     max_size = segment_ids.shape[-1]
     non_zero_indices = jax.vmap(
