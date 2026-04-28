@@ -68,13 +68,10 @@ __global__ void fused_moe_aux_loss_forward_kernel_v2(const DataType* probs,
   const int warp_id = threadIdx.x / kThreadsPerWarp;
   const int lane_id = threadIdx.x % kThreadsPerWarp;
   if (warp_id == 0) {
-<<<<<<< HEAD
     CompType block_sum = warp_reduce_on_shmem(shmem_block,
                                               static_cast<int>(blockDim.x),
                                               ReduceFuncType::SUM,
                                               lane_id);
-    CompType block_sum =
-        warp_reduce_on_shmem(shmem_block, blockDim.x, ReduceFuncType::SUM, lane_id);
 
     __syncwarp();
     // -----------------------------------------------------------------------
@@ -110,6 +107,7 @@ void fused_moe_aux_loss_forward_kernel_launcher_v2(const DataType* probs,
   const size_t smem_size = block_size * sizeof(CompType);
 
   // Zero the float accumulator (Const_buf[1]) before launch.
+  check_shared_memory_capacity_num_experts(smem_size, num_experts);
   NVTE_CHECK_CUDA(cudaMemsetAsync(Const_buf + 1, 0, sizeof(float), stream));
 
   fused_moe_aux_loss_forward_kernel_v2<DataType, IndexType>
@@ -152,7 +150,7 @@ void nvte_fused_moe_aux_loss_forward_v2(const NVTETensor probs, const NVTETensor
                                         int total_num_tokens, int num_experts, int num_rows,
                                         int num_cols, int topk, float coeff, NVTETensor aux_loss,
                                         NVTETensor Const_buf, cudaStream_t stream) {
-  NVTE_API_CALL(nvte_fused_moe_aux_loss_forward);
+  NVTE_API_CALL(nvte_fused_moe_aux_loss_forward_v2);
   using namespace transformer_engine;
   fused_router::fused_moe_aux_loss_forward_v2(
       *convertNVTETensorCheck(probs), *convertNVTETensorCheck(tokens_per_expert), total_num_tokens,
