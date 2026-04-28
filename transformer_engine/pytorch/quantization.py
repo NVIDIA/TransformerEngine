@@ -522,7 +522,7 @@ class FP8GlobalStateManager:
                 key = cls.get_key_in_buffer(forward, inner_recipe, fp8_meta["fp8_group"])
                 # Register inner recipe in autocast_arguments for reduction
                 autocast_key = cls.get_unique_autocast_key(inner_recipe, fp8_meta["fp8_group"])
-                cls.autocast_arguments[autocast_key] = (inner_recipe, fp8_meta["fp8_group"])
+                qstate.autocast_arguments[autocast_key] = (inner_recipe, fp8_meta["fp8_group"])
             else:
                 key = cls.get_key_in_buffer(forward, fp8_meta["recipe"], fp8_meta["fp8_group"])
 
@@ -1135,6 +1135,20 @@ class RecipeState(abc.ABC):
 
     """
 
+    roles: Optional[List[QuantizerRole]]
+
+    @staticmethod
+    def _validate_roles(
+        roles: Optional[List[QuantizerRole]],
+        num_quantizers: int,
+    ) -> None:
+        """Validate that ``roles``, if provided, has length ``num_quantizers``."""
+        if roles is not None and len(roles) != num_quantizers:
+            raise ValueError(
+                "RecipeState requires roles to match num_quantizers "
+                f"({len(roles)=} vs {num_quantizers=})"
+            )
+
     @staticmethod
     def create(
         recipe: Recipe,
@@ -1142,7 +1156,7 @@ class RecipeState(abc.ABC):
         mode: str,
         num_quantizers: int = 1,
         device: Optional[torch.device] = None,
-        roles: Optional[list[QuantizerRole]] = None,
+        roles: Optional[List[QuantizerRole]] = None,
     ) -> RecipeState:
         """Factory method to create the state for a quantization recipe
 
@@ -1157,7 +1171,8 @@ class RecipeState(abc.ABC):
         device: torch.device, default = default CUDA device
             Device for quantized tensors.
         roles: list of QuantizerRole, optional
-            Semantic roles for each quantizer slot.
+            Semantic roles for each quantizer slot. When provided, must
+            have length ``num_quantizers``.
 
         Returns
         -------
@@ -1181,15 +1196,13 @@ class RecipeState(abc.ABC):
             cls = CustomRecipeState
         else:
             raise ValueError(f"{recipe.__class__.__name__} is not supported")
-        state = cls(
+        return cls(
             recipe,
             mode=mode,
             num_quantizers=num_quantizers,
             device=device,
+            roles=roles,
         )
-        # Optional QuantizerRole objects
-        state.roles = roles
-        return state
 
     @abc.abstractmethod
     def make_quantizers(self) -> list:
@@ -1225,10 +1238,13 @@ class DelayedScalingRecipeState(RecipeState):
         mode: str,
         num_quantizers: int = 1,
         device: Optional[torch.device] = None,
+        roles: Optional[List[QuantizerRole]] = None,
     ) -> None:
+        self._validate_roles(roles, num_quantizers)
         self.recipe = recipe
         self.mode = mode
         self.num_quantizers = num_quantizers
+        self.roles = roles
         self.dtype = get_fp8_te_dtype(recipe, mode == "forward")
 
         # Allocate buffers
@@ -1271,10 +1287,13 @@ class Float8CurrentScalingRecipeState(RecipeState):
         mode: str,
         num_quantizers: int = 1,
         device: Optional[torch.device] = None,
+        roles: Optional[List[QuantizerRole]] = None,
     ) -> None:
+        self._validate_roles(roles, num_quantizers)
         self.recipe = recipe
         self.mode = mode
         self.num_quantizers = num_quantizers
+        self.roles = roles
         self.dtype = get_fp8_te_dtype(recipe, mode == "forward")
 
         # Allocate buffers
@@ -1311,10 +1330,13 @@ class MXFP8BlockScalingRecipeState(RecipeState):
         mode: str,
         num_quantizers: int = 1,
         device: Optional[torch.device] = None,
+        roles: Optional[List[QuantizerRole]] = None,
     ) -> None:
+        self._validate_roles(roles, num_quantizers)
         self.recipe = recipe
         self.mode = mode
         self.num_quantizers = num_quantizers
+        self.roles = roles
         self.dtype = get_fp8_te_dtype(recipe, mode == "forward")
 
         # Allocate buffers
@@ -1348,10 +1370,13 @@ class Float8BlockScalingRecipeState(RecipeState):
         mode: str,
         num_quantizers: int = 1,
         device: Optional[torch.device] = None,
+        roles: Optional[List[QuantizerRole]] = None,
     ) -> None:
+        self._validate_roles(roles, num_quantizers)
         self.recipe = recipe
         self.mode = mode
         self.num_quantizers = num_quantizers
+        self.roles = roles
         self.qx_dtype = get_fp8_te_dtype(recipe, True)
         self.qw_dtype = get_fp8_te_dtype(recipe, True)
         self.qgrad_dtype = get_fp8_te_dtype(recipe, False)
@@ -1451,10 +1476,13 @@ class NVFP4BlockScalingRecipeState(RecipeState):
         mode: str,
         num_quantizers: int = 1,
         device: Optional[torch.device] = None,
+        roles: Optional[List[QuantizerRole]] = None,
     ) -> None:
+        self._validate_roles(roles, num_quantizers)
         self.recipe = recipe
         self.mode = mode
         self.num_quantizers = num_quantizers
+        self.roles = roles
         self.dtype = get_fp4_te_dtype(recipe)
 
         # Allocate buffers
@@ -1606,10 +1634,13 @@ class CustomRecipeState(RecipeState):
         mode: str,
         num_quantizers: int = 1,
         device: Optional[torch.device] = None,
+        roles: Optional[List[QuantizerRole]] = None,
     ) -> None:
+        self._validate_roles(roles, num_quantizers)
         self.recipe = recipe
         self.mode = mode
         self.num_quantizers = num_quantizers
+        self.roles = roles
         if device is None:
             device = torch.device("cuda")
         self.device = device
@@ -1621,7 +1652,7 @@ class CustomRecipeState(RecipeState):
     def make_quantizers(self) -> list:
         qfactory = self.recipe.qfactory
 
-        roles: List[QuantizerRole] = getattr(self, "roles", None)
+        roles = self.roles
         if roles is None:
             warnings.warn(
                 "CustomRecipeState: no QuantizerRole list provided by the module/op. "
@@ -1630,11 +1661,6 @@ class CustomRecipeState(RecipeState):
                 stacklevel=2,
             )
             roles = [QuantizerRole() for _ in range(self.num_quantizers)]
-        if len(roles) != self.num_quantizers:
-            raise ValueError(
-                "CustomRecipeState requires roles to match num_quantizers "
-                f"({len(roles)=} vs {self.num_quantizers=})"
-            )
 
         # qfactory must return a Quantizer or QuantizerRequest for every slot.
         # None is not a valid return value — it would silently disable quantization
