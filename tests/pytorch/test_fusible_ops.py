@@ -199,6 +199,57 @@ def make_reference_and_test_tensors(
     return ref, test
 
 
+class MegatronTrainingHelper:
+    """Test-side stand-in for the Megatron-Core DDP / MegatronFSDP wrapper.
+    Megatron's DDP wrapper (and MegatronFSDP) owns the per-parameter
+    ``main_grad`` buffer and the ``overwrite_main_grad`` /
+    ``grad_added_to_main_grad`` attributes that coordinate
+    ``fuse_wgrad_accumulation`` with TE modules. These helpers reproduce the
+    relevant slice of that protocol so TE tests can exercise the
+    accumulate-into-``main_grad`` code path without pulling in the full
+    Megatron-Core dependency.
+    """
+
+    @staticmethod
+    def init_main_grad_buffers(
+        weight_params: Iterable[torch.nn.Parameter],
+        *,
+        fill_value: float,
+        overwrite_main_grad: bool,
+        dtype: torch.dtype = torch.float32,
+    ) -> None:
+        """Allocate ``main_grad`` and stamp the wrapper attributes on each
+        param, mirroring what the Megatron DDP/FSDP wrapper does before
+        backward."""
+        for wp in weight_params:
+            wp.main_grad = torch.full(wp.size(), fill_value, device=wp.device, dtype=dtype)
+            wp.overwrite_main_grad = overwrite_main_grad
+            wp.grad_added_to_main_grad = False
+
+    @staticmethod
+    def verify_main_grad_accumulation(
+        weight_params: Iterable[torch.nn.Parameter],
+        *,
+        expected_main_grads: Iterable[torch.Tensor],
+        rtol: float = 0.0,
+        atol: float = 0.0,
+    ) -> None:
+        """Check that backward produced what the Megatron wrapper expects:
+        each ``main_grad`` matches ``expected_main_grads``,
+        ``grad_added_to_main_grad`` was flipped to ``True`` so the wrapper's
+        post-backward hooks won't double-accumulate.
+        """
+        for wp, expected in zip(weight_params, expected_main_grads):
+            torch.testing.assert_close(
+                wp.main_grad.to(expected.dtype), expected, rtol=rtol, atol=atol
+            )
+
+            assert wp.grad_added_to_main_grad is True, (
+                "weight.grad_added_to_main_grad was not flipped to True; "
+                "the Megatron DDP/FSDP wrapper hook will double-accumulate."
+            )
+
+
 class TestSequentialContainer:
     """Tests for sequential container"""
 
@@ -3883,6 +3934,161 @@ class TestSequentialModules:
             bias_tols = {"rtol": 0.05, "atol": 0.015625}
             torch.testing.assert_close(fc1_db_false, fc1_db_true, **bias_tols)
             torch.testing.assert_close(fc2_db_false, fc2_db_true, **bias_tols)
+
+    @pytest.mark.parametrize("single_grouped_weight", (False, True))
+    @pytest.mark.parametrize("delay_wgrad_compute", (False, True))
+    @pytest.mark.parametrize("overwrite_main_grad", (False, True))
+    @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
+    def test_grouped_mlp_main_grad_buffer(
+        self,
+        *,
+        single_grouped_weight: bool,
+        delay_wgrad_compute: bool,
+        overwrite_main_grad: bool,
+        dtype: torch.dtype = torch.bfloat16,
+        device: torch.device = "cuda",
+        group_size: int = 4,
+        hidden_size: int = 256,
+        split_alignment: int = 256,
+        glu_interleave_size: int = 32,
+    ) -> None:
+        """End-to-end check that the fused grouped-MLP backward writes the
+        wgrad into ``weight.main_grad`` correctly under both Megatron-LM and
+        MegatronFSDP conventions.
+
+        Two configurations are exercised:
+
+        * ``overwrite_main_grad=False`` -- standard Megatron-LM
+          ``fuse_wgrad_accumulation`` path(DDP). The wgrad GEMM must *accumulate*
+          into ``main_grad``, so ``main_grad`` after backward equals
+          ``sentinel + wgrad``.
+
+        * ``overwrite_main_grad=True`` -- MegatronFSDP path. The wgrad GEMM
+          must *overwrite* ``main_grad`` (because FSDP has already
+          ReduceScattered the previous accumulation), so ``main_grad`` after
+          backward equals ``wgrad`` regardless of the prior contents.
+        """
+
+        if not te_ops.fused.ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8.is_supported():
+            pytest.skip("MXFP8 fused grouped MLP forward is not supported on this system")
+        if not te_ops.fused.BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8.is_supported():
+            pytest.skip("MXFP8 fused grouped MLP backward is not supported on this system")
+
+        recipe = make_recipe("mxfp8")
+        split_sizes = [split_alignment * (i + 1) for i in range(group_size)]
+        random.shuffle(split_sizes)
+        split_sizes = torch.tensor(split_sizes, dtype=torch.int64, device=device)
+        in_shape = (split_sizes.sum().item(), hidden_size)
+        x_base = torch.empty(in_shape, device=device, dtype=dtype).uniform_(-0.25, 0.25)
+        probs_base = torch.empty((in_shape[0],), device=device, dtype=dtype).uniform_(-0.25, 0.25)
+        dy_base = torch.empty(in_shape, device=device, dtype=dtype).uniform_(-0.25, 0.25)
+        fc1_ws_base = [
+            torch.empty((2 * hidden_size, hidden_size), device=device, dtype=dtype).uniform_(
+                -0.25, 0.25
+            )
+            for _ in range(group_size)
+        ]
+        fc2_ws_base = [
+            torch.empty((hidden_size, hidden_size), device=device, dtype=dtype).uniform_(
+                -0.25, 0.25
+            )
+            for _ in range(group_size)
+        ]
+
+        def _build_module(*, accumulate_into_main_grad: bool):
+            with te.quantized_model_init(enabled=True, recipe=recipe):
+                fc1 = te_ops.GroupedLinear(
+                    group_size,
+                    hidden_size,
+                    2 * hidden_size,
+                    bias=False,
+                    device=device,
+                    dtype=dtype,
+                    single_grouped_weight=single_grouped_weight,
+                    accumulate_into_main_grad=accumulate_into_main_grad,
+                    delay_wgrad_compute=delay_wgrad_compute,
+                )
+                fc2 = te_ops.GroupedLinear(
+                    group_size,
+                    hidden_size,
+                    hidden_size,
+                    bias=False,
+                    device=device,
+                    dtype=dtype,
+                    single_grouped_weight=single_grouped_weight,
+                    accumulate_into_main_grad=accumulate_into_main_grad,
+                    delay_wgrad_compute=delay_wgrad_compute,
+                )
+                scaled_act = te_ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size)
+                module = te_ops.Sequential(fc1, scaled_act, fc2)
+
+            # Seed both runs with identical weights so the wgrad GEMM is
+            # bitwise reproducible across the reference and test invocations.
+            with torch.no_grad():
+                if single_grouped_weight:
+                    fc1_weights = (
+                        fc1.weight.quantized_tensors
+                        or fc1.weight.split_into_quantized_tensors()
+                    )
+                    fc2_weights = (
+                        fc2.weight.quantized_tensors
+                        or fc2.weight.split_into_quantized_tensors()
+                    )
+                    for group_idx in range(group_size):
+                        fc1_weights[group_idx].copy_(fc1_ws_base[group_idx])
+                        fc2_weights[group_idx].copy_(fc2_ws_base[group_idx])
+                else:
+                    for group_idx in range(group_size):
+                        getattr(fc1, f"weight{group_idx}").copy_(fc1_ws_base[group_idx])
+                        getattr(fc2, f"weight{group_idx}").copy_(fc2_ws_base[group_idx])
+            return module, fc1, fc2
+
+        def _weight_params(fc):
+            if single_grouped_weight:
+                return [fc.weight]
+            return [getattr(fc, f"weight{i}") for i in range(group_size)]
+
+        def _run_backward(module, fc1, fc2):
+            x = x_base.detach().clone().requires_grad_(True)
+            probs = probs_base.detach().clone().requires_grad_(True)
+            with te.autocast(enabled=True, recipe=recipe):
+                y = module(x, split_sizes, probs, split_sizes)
+            y.backward(dy_base)
+            if delay_wgrad_compute:
+                fc1.backward_dw()
+                fc2.backward_dw()
+
+        # ---- Reference run: vanilla autograd, no Megatron protocol. ----------
+        ref_module, ref_fc1, ref_fc2 = _build_module(accumulate_into_main_grad=False)
+        _run_backward(ref_module, ref_fc1, ref_fc2)
+        ref_fc1_grads = [wp.grad.detach().clone() for wp in _weight_params(ref_fc1)]
+        ref_fc2_grads = [wp.grad.detach().clone() for wp in _weight_params(ref_fc2)]
+
+        # ---- Test run: main_grad fusion + parametrized overwrite_main_grad. --
+        sentinel = float("nan") if overwrite_main_grad else 0.5
+        test_module, test_fc1, test_fc2 = _build_module(accumulate_into_main_grad=True)
+        for fc in (test_fc1, test_fc2):
+            MegatronTrainingHelper.init_main_grad_buffers(
+                _weight_params(fc),
+                fill_value=sentinel,
+                overwrite_main_grad=overwrite_main_grad,
+            )
+        _run_backward(test_module, test_fc1, test_fc2)
+
+        # ---- Assert on main_grad values ---------------------------------------
+        if overwrite_main_grad:
+            expected_fc1 = ref_fc1_grads
+            expected_fc2 = ref_fc2_grads
+        else:
+            expected_fc1 = [g + sentinel for g in ref_fc1_grads]
+            expected_fc2 = [g + sentinel for g in ref_fc2_grads]
+        tols = dtype_tols(dtype)
+        MegatronTrainingHelper.verify_main_grad_accumulation(
+            _weight_params(test_fc1), expected_main_grads=expected_fc1, **tols
+        )
+        MegatronTrainingHelper.verify_main_grad_accumulation(
+            _weight_params(test_fc2), expected_main_grads=expected_fc2, **tols
+        )
 
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("single_grouped_weight", (False, True))
