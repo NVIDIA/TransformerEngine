@@ -217,6 +217,7 @@ class MegatronTrainingHelper:
         *,
         fill_value: float,
         overwrite_main_grad: bool,
+        zero_out_wgrad: bool = False,
         dtype: torch.dtype = torch.float32,
     ) -> None:
         """Allocate ``main_grad`` and stamp the wrapper attributes on each
@@ -225,6 +226,7 @@ class MegatronTrainingHelper:
         for wp in weight_params:
             wp.main_grad = torch.full(wp.size(), fill_value, device=wp.device, dtype=dtype)
             wp.overwrite_main_grad = overwrite_main_grad
+            wp.zero_out_wgrad = zero_out_wgrad
             wp.grad_added_to_main_grad = False
 
     @staticmethod
@@ -263,6 +265,12 @@ class MegatronTrainingHelper:
                 "weight.grad does not share storage with the cached dummy "
                 "wgrad; downstream wrapper hooks risk double-accumulating."
             )
+            if getattr(wp, "zero_out_wgrad", False):
+                assert torch.all(wp.grad == 0), (
+                    "weight.zero_out_wgrad=True but the dummy weight.grad "
+                    "was not zeroed; downstream hooks reading .grad would "
+                    "see stale bytes from the previous step."
+                )
 
 
 class TestSequentialContainer:
@@ -3933,12 +3941,14 @@ class TestSequentialModules:
 
     @pytest.mark.parametrize("single_grouped_weight", (False, True))
     @pytest.mark.parametrize("delay_wgrad_compute", (False, True))
+    @pytest.mark.parametrize("zero_out_wgrad", (False, True))
     @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)
     def test_grouped_mlp_overwrite_main_grad(
         self,
         *,
         single_grouped_weight: bool,
         delay_wgrad_compute: bool,
+        zero_out_wgrad: bool,
         dtype: torch.dtype = torch.bfloat16,
         device: torch.device = "cuda",
         group_size: int = 4,
@@ -3956,6 +3966,11 @@ class TestSequentialModules:
         ``main_grad`` (because FSDP has already ReduceScattered the previous
         accumulation), so ``main_grad`` after backward equals ``wgrad``
         regardless of the prior contents.
+
+        Also exercises the MegatronFSDP ``zero_out_wgrad`` flag, which is
+        independent of ``main_grad`` and only controls whether the dummy
+        ``param.grad`` returned to autograd is zeroed (so downstream hooks
+        that read ``.grad`` don't see stale bytes from the cached dummy).
         """
 
         if not te_ops.fused.ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8.is_supported():
@@ -4057,6 +4072,7 @@ class TestSequentialModules:
                 _weight_params(fc),
                 fill_value=float("nan"),
                 overwrite_main_grad=True,
+                zero_out_wgrad=zero_out_wgrad,
             )
         _run_backward(test_module, test_fc1, test_fc2)
 
