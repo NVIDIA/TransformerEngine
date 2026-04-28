@@ -4014,12 +4014,10 @@ class TestSequentialModules:
             with torch.no_grad():
                 if single_grouped_weight:
                     fc1_weights = (
-                        fc1.weight.quantized_tensors
-                        or fc1.weight.split_into_quantized_tensors()
+                        fc1.weight.quantized_tensors or fc1.weight.split_into_quantized_tensors()
                     )
                     fc2_weights = (
-                        fc2.weight.quantized_tensors
-                        or fc2.weight.split_into_quantized_tensors()
+                        fc2.weight.quantized_tensors or fc2.weight.split_into_quantized_tensors()
                     )
                     for group_idx in range(group_size):
                         fc1_weights[group_idx].copy_(fc1_ws_base[group_idx])
