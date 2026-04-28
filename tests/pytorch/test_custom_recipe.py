@@ -326,9 +326,15 @@ def test_factories_return_distinct_instances_and_buffers():
     if not torch.cuda.is_available() or not available:
         pytest.skip(f"FP8 unsupported on this device: {reason}")
 
-    # Two calls should produce distinct quantizer objects and distinct tensor buffers
+    from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
+
+    # Two calls should produce distinct quantizer objects with distinct
+    # scale/amax buffers (Float8Quantizer / delayed-scaling is the class
+    # that owns persistent per-quantizer state; current scaling has none).
     def factory():
-        return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device=torch.device("cuda"))
+        scale = torch.ones(1, dtype=torch.float32, device="cuda")
+        amax = torch.zeros(1, dtype=torch.float32, device="cuda")
+        return Float8Quantizer(scale=scale, amax=amax, fp8_dtype=tex.DType.kFloat8E4M3)
 
     q1 = factory()
     q2 = factory()
@@ -757,12 +763,16 @@ def test_delayed_scaling_request_wiring():
     custom_recipe = recipe.CustomRecipe(qfactory=ds_factory)
 
     # 3 quantizers (input, weight, output) like a Linear fwd
-    state = CustomRecipeState(custom_recipe, mode="forward", num_quantizers=3)
-    state.roles = [
-        QuantizerRole(module_type="linear", tensor_type="input"),
-        QuantizerRole(module_type="linear", tensor_type="weight"),
-        QuantizerRole(module_type="linear", tensor_type="output"),
-    ]
+    state = CustomRecipeState(
+        custom_recipe,
+        mode="forward",
+        num_quantizers=3,
+        roles=[
+            QuantizerRole(module_type="linear", tensor_type="input"),
+            QuantizerRole(module_type="linear", tensor_type="weight"),
+            QuantizerRole(module_type="linear", tensor_type="output"),
+        ],
+    )
     quantizers = state.make_quantizers()
 
     # All quantizers should be Float8Quantizer
@@ -816,12 +826,16 @@ def test_custom_recipe_mixed_ds_and_stateless():
     custom_recipe = recipe.CustomRecipe(qfactory=mixed_factory)
 
     # 3 quantizers: input(current), weight(DS), output(current)
-    state = CustomRecipeState(custom_recipe, mode="forward", num_quantizers=3)
-    state.roles = [
-        QuantizerRole(module_type="linear", tensor_type="input"),
-        QuantizerRole(module_type="linear", tensor_type="weight"),
-        QuantizerRole(module_type="linear", tensor_type="output"),
-    ]
+    state = CustomRecipeState(
+        custom_recipe,
+        mode="forward",
+        num_quantizers=3,
+        roles=[
+            QuantizerRole(module_type="linear", tensor_type="input"),
+            QuantizerRole(module_type="linear", tensor_type="weight"),
+            QuantizerRole(module_type="linear", tensor_type="output"),
+        ],
+    )
     quantizers = state.make_quantizers()
     assert len(quantizers) == 3
 
