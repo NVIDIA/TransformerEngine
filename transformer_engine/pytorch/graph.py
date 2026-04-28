@@ -407,6 +407,15 @@ def _make_graphed_callables(
     bwd_dw_graphs = [torch.cuda.CUDAGraph() for _ in range(len(flatten_sample_args))]
     graph_callables = [None for _ in range(len(flatten_sample_args))]
 
+    def _is_returned_param_grad_slot(idx, static_grad_inputs, module_params):
+        """Return whether a static grad slot is consumed through Graphed.backward."""
+        module_param_start = len(static_grad_inputs) - len(module_params)
+        if idx < module_param_start:
+            return False
+        return not getattr(
+            module_params[idx - module_param_start], "skip_backward_post_hook", False
+        )
+
     # For cases with multiple active RNG states, e.g. TP.
     if graph_safe_rng_available():
         for _, state in get_all_rng_states().items():
@@ -728,6 +737,24 @@ def _make_graphed_callables(
                             static_outputs
                         )
 
+                        # Parameter grads are cloned before being returned from
+                        # Graphed.backward, so their static buffers can be weak-refed now.
+                        static_grad_inputs = per_callable_static_grad_inputs[per_callable_bwd_idx]
+                        module_params = per_callable_module_params[per_callable_bwd_idx]
+                        per_callable_static_grad_inputs[per_callable_bwd_idx] = tuple(
+                            (
+                                make_weak_ref(grad_input)
+                                if (
+                                    _is_returned_param_grad_slot(
+                                        idx, static_grad_inputs, module_params
+                                    )
+                                    and grad_input is not None
+                                )
+                                else grad_input
+                            )
+                            for idx, grad_input in enumerate(static_grad_inputs)
+                        )
+
                         # Weak ref the static grad inputs of the previous backward pass within the
                         # same chunk.
                         if previous_per_callable_bwd_idx is not None:
@@ -911,9 +938,17 @@ def _make_graphed_callables(
                         "Expected static_grad_inputs to be a tuple, but got"
                         f" {type(static_grad_inputs).__name__}"
                     )
-                return (None, None, None) + tuple(
-                    b.detach() if b is not None else b for b in static_grad_inputs
-                )
+                grad_inputs = []
+                for idx, grad_input in enumerate(static_grad_inputs):
+                    if grad_input is None:
+                        grad_inputs.append(None)
+                    elif _is_returned_param_grad_slot(idx, static_grad_inputs, module_params):
+                        # Returned parameter grads may be installed directly as param.grad.
+                        # Clone to avoid exposing CUDA graph static buffers to autograd users.
+                        grad_inputs.append(grad_input.detach().clone())
+                    else:
+                        grad_inputs.append(grad_input.detach())
+                return (None, None, None) + tuple(grad_inputs)
 
         def functionalized(*user_args, **user_kwargs):
 
