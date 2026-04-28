@@ -250,16 +250,35 @@ def _coalesced_amax_static_eligible(weights):
     Caller already gates on ETP_CONFIG.coalesce_amax_allreduce (False for
     non-NVFP4). Here we additionally verify TE API availability, batch size,
     quantizer type (must have amax reduction), and the RHT flag."""
+    dbg = ETP_CONFIG.debug_numerics > 0
     if not _COALESCED_AMAX_TE_APIS_AVAILABLE:
+        if dbg:
+            print_rank_0("[ETP_DEBUG] coalesced_amax_static: REJECTED (TE APIs unavailable)")
         return False
     if len(weights) <= 1:
         return False
     has_amax = [getattr(w._quantizer, "with_amax_reduction", False) for w in weights]
     if not all(has_amax):
+        if dbg:
+            qtypes = [type(w._quantizer).__name__ for w in weights[:3]]
+            print_rank_0(
+                f"[ETP_DEBUG] coalesced_amax_static: REJECTED "
+                f"(with_amax_reduction={has_amax[:3]}{'...' if len(has_amax)>3 else ''}, "
+                f"quantizer_types={qtypes}{'...' if len(weights)>3 else ''}, "
+                f"n_weights={len(weights)})"
+            )
         return False
     has_rht = any(getattr(w._quantizer, "with_rht", False) for w in weights)
     if has_rht:
+        if dbg:
+            print_rank_0("[ETP_DEBUG] coalesced_amax_static: REJECTED (with_rht=True)")
         return False
+    if dbg:
+        qtypes = [type(w._quantizer).__name__ for w in weights[:3]]
+        print_rank_0(
+            f"[ETP_DEBUG] coalesced_amax_static: *** ACCEPTED *** "
+            f"(n_weights={len(weights)}, quantizer_types={qtypes}{'...' if len(weights)>3 else ''})"
+        )
     return True
 
 
@@ -339,8 +358,69 @@ class ETPConfig:
     # guard in _coalesced_amax_static_eligible falls back to the per-weight
     # path when either binding is missing.
     coalesce_amax_allreduce: bool = True
+    # Log numeric diagnostics for the first N AG/RS calls per param.
+    # 0 = off; 3 = good default for triage (covers iter 1-2 fwd+bwd).
+    debug_numerics: int = 0
 
 ETP_CONFIG = ETPConfig()
+
+# ---------------------------------------------------------------------------
+# Debug helpers (gated by ETP_CONFIG.debug_numerics > 0)
+# ---------------------------------------------------------------------------
+_etp_debug_counts: Dict[tuple, int] = {}
+
+def _etp_dbg_capturing():
+    """True when a CUDA graph is being captured — D2H syncs are forbidden."""
+    return torch.cuda.is_current_stream_capturing()
+
+def _etp_dbg_should_log(param_name, label):
+    if ETP_CONFIG.debug_numerics <= 0 or _etp_dbg_capturing():
+        return False
+    key = (param_name, label)
+    count = _etp_debug_counts.get(key, 0)
+    if count >= ETP_CONFIG.debug_numerics:
+        return False
+    _etp_debug_counts[key] = count + 1
+    return True
+
+def _etp_dbg_tensor(name, t):
+    """One-line NaN/Inf summary for a BF16/FP32 tensor."""
+    if t is None:
+        return f"{name}=None"
+    if t.numel() == 0:
+        return f"{name}:{list(t.shape)},empty"
+    if not t.is_floating_point():
+        return f"{name}:non-float({t.dtype})"
+    has_nan = bool(torch.isnan(t).any())
+    has_inf = bool(torch.isinf(t).any())
+    amax = t.abs().max().item()
+    tag = " ***BAD***" if (has_nan or has_inf) else ""
+    return f"{name}:{list(t.shape)},amax={amax:.4e},nan={has_nan},inf={has_inf}{tag}"
+
+def _etp_dbg_quantized(name, qt):
+    """Multi-line check of a quantized tensor's metadata fields."""
+    if qt is None:
+        return f"{name}=None"
+    md = qt.get_metadata()
+    parts = [f"{name}:type={type(qt).__name__}"]
+    for k in ("rowwise_data", "columnwise_data"):
+        v = md.get(k)
+        parts.append(f"  {k}={'shape=' + str(list(v.shape)) if v is not None else 'NONE'}")
+    for k in ("rowwise_scale_inv", "columnwise_scale_inv"):
+        v = md.get(k)
+        if v is not None and v.numel() == 0:
+            parts.append(f"  {k}:{list(v.shape)},empty")
+        elif v is not None and v.is_floating_point():
+            has_nan = bool(torch.isnan(v).any())
+            has_inf = bool(torch.isinf(v).any())
+            amax = v.abs().max().item()
+            tag = " ***BAD***" if (has_nan or has_inf) else ""
+            parts.append(f"  {k}:{list(v.shape)},amax={amax:.4e},nan={has_nan},inf={has_inf}{tag}")
+        elif v is not None:
+            parts.append(f"  {k}:{list(v.shape)},dtype={v.dtype}")
+        else:
+            parts.append(f"  {k}:NONE")
+    return "\n".join(parts)
 
 def update_config(**kwargs):
     """Update the global ETP configuration."""
@@ -742,6 +822,17 @@ class ETPShardedParam(torch.nn.Parameter):
         else:
             use_coalesced = False
 
+        if _etp_dbg_should_log(self._debug_name, 'ag_decision'):
+            qtypes = [type(w._quantizer).__name__ for w in weights[:3]]
+            print_rank_0(
+                f"[ETP_DEBUG] AG {self._debug_name} fwd={fwd} chain={self.chain_id} "
+                f"coalesced={use_coalesced} skip_cast={skip_weight_cast} "
+                f"noop={'set' if cast_noop_flag is not None else 'None'} "
+                f"coalesce_cfg={ETP_CONFIG.coalesce_amax_allreduce} "
+                f"static_ok={getattr(self, '_coalesced_amax_static', 'N/A')} "
+                f"qtypes={qtypes}{'...' if len(weights)>3 else ''}"
+            )
+
         if use_coalesced:
             _quantize_with_coalesced_amax(weights, skip_weight_cast, cast_noop_flag)
         else:
@@ -750,6 +841,15 @@ class ETPShardedParam(torch.nn.Parameter):
         for w in weights:
             if w.did_cast_to_low_precision:
                 w._quantizer.set_usage(rowwise=fwd, columnwise=not fwd)
+
+        if _etp_dbg_should_log(self._debug_name, f'ag_numerics_{"fwd" if fwd else "bwd"}'):
+            lines = [f"[ETP_DEBUG] post-quantize {self._debug_name} fwd={fwd} "
+                     f"usage=row:{fwd},col:{not fwd}"]
+            for i, w in enumerate(weights[:3]):
+                lines.append(f"  w[{i}] shard: {_etp_dbg_tensor(f'{w._debug_name}', w.data)}")
+                if w.did_cast_to_low_precision:
+                    lines.append(_etp_dbg_quantized(f'  w[{i}] quantized', w.quantized))
+            print_rank_0("\n".join(lines))
 
         # 3. Build gather inputs.
         # quantizers / dtypes / etp_group are stable after model construction —
@@ -884,7 +984,8 @@ class ETPShardedParam(torch.nn.Parameter):
                     f"cache.get() would return stale data. Check the chain's "
                     f"_need_weight_prefetch flag and issuer's prefetch logic."
                 )
-        if getattr(self, '_already_ag_drained', False):
+        _was_drained = getattr(self, '_already_ag_drained', False)
+        if _was_drained:
             # Producer already drained via wait_async_comms; skip the captured
             # cross-graph wait (CUDA no-op anyway). Correctness is provided by
             # the eager main_stream sync chain in the surrounding training loop.
@@ -902,6 +1003,17 @@ class ETPShardedParam(torch.nn.Parameter):
             result.append(cache.get(ticket))
 
         result = [self._strip_padding(r) for r in result]
+
+        if _etp_dbg_should_log(self._debug_name, f'prefetch_{"fwd" if fwd else "bwd"}'):
+            lines = [f"[ETP_DEBUG] prefetched {self._debug_name} fwd={fwd} "
+                     f"already_drained={_was_drained}"]
+            for i, r in enumerate(result[:3]):
+                if isinstance(r, (NVFP4TensorStorage, MXFP8TensorStorage)):
+                    lines.append(_etp_dbg_quantized(f'  gathered[{i}]', r))
+                else:
+                    lines.append(f"  gathered[{i}]: {_etp_dbg_tensor('', r)}")
+            print_rank_0("\n".join(lines))
+
         result = [r.detach().requires_grad_(w.requires_grad) for r, w in zip(result, self._weights)]
         return result if self.is_routed_expert else result[0]
 
@@ -1083,6 +1195,12 @@ class ETPShardedParam(torch.nn.Parameter):
                         if w.is_padded_last_rank:
                             wgrad_rs = w._strip_padding(wgrad_rs)
                         w.main_grad.add_(wgrad_rs)
+                        if ETP_CONFIG.debug_numerics > 0 and not _etp_dbg_capturing():
+                            if bool(torch.isinf(w.main_grad).any()) or bool(torch.isnan(w.main_grad).any()):
+                                print_rank_0(
+                                    f"[ETP_DEBUG] *** main_grad ANOMALY after finalize_grad RS *** "
+                                    f"{w._debug_name}: {_etp_dbg_tensor('main_grad', w.main_grad)}"
+                                )
                         cache.release(w._rs_ticket)
                         if hasattr(w, "grad_added_to_main_grad"):
                             w.grad_added_to_main_grad = True
@@ -1184,6 +1302,13 @@ class ETPShardedParam(torch.nn.Parameter):
         # stable buffer addresses across replay.
         poolable = self.chain_id == ETPChain.UNGRAPHED.value
 
+        if _etp_dbg_should_log(self._debug_name, 'rs_input'):
+            lines = [f"[ETP_DEBUG] RS input {self._debug_name} "
+                     f"async={self.prev_w is not None and ETP_CONFIG.weight_prefetch}"]
+            for i, g in enumerate(wgrads[:3]):
+                lines.append(f"  wgrad[{i}]: {_etp_dbg_tensor('', g)}")
+            print_rank_0("\n".join(lines))
+
         if ETP_CONFIG.weight_prefetch and self.prev_w is not None:
             # Async reduce-scatter (not last weight — deferred finish). Pre-RS
             # work on caller; NCCL wrap lives at the collective site inside
@@ -1201,6 +1326,13 @@ class ETPShardedParam(torch.nn.Parameter):
                 w._strip_padding(g) if w.is_padded_last_rank else g for w, g in zip(weights, wgrads)
             ]
             torch._foreach_add_([p.main_grad for p in weights], wgrads)
+            if ETP_CONFIG.debug_numerics > 0 and not _etp_dbg_capturing():
+                for w in weights[:3]:
+                    if bool(torch.isinf(w.main_grad).any()) or bool(torch.isnan(w.main_grad).any()):
+                        print_rank_0(
+                            f"[ETP_DEBUG] *** main_grad ANOMALY after sync RS *** "
+                            f"{w._debug_name}: {_etp_dbg_tensor('main_grad', w.main_grad)}"
+                        )
             result = [self._handle_megatron_grad_accum(p) for p in weights]
             
             if poolable:
@@ -1225,6 +1357,13 @@ class ETPShardedParam(torch.nn.Parameter):
                 ]
 
                 torch._foreach_add_([w.main_grad for w in next_weights], wgrads)
+                if ETP_CONFIG.debug_numerics > 0 and not _etp_dbg_capturing():
+                    for w in next_weights[:3]:
+                        if bool(torch.isinf(w.main_grad).any()) or bool(torch.isnan(w.main_grad).any()):
+                            print_rank_0(
+                                f"[ETP_DEBUG] *** main_grad ANOMALY after async RS finalize *** "
+                                f"{w._debug_name}: {_etp_dbg_tensor('main_grad', w.main_grad)}"
+                            )
                 for w in next_weights:
                     self._handle_megatron_grad_accum(w)
                     cache.release(w._rs_ticket)
