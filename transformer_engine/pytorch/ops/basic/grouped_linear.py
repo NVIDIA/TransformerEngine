@@ -703,7 +703,7 @@ class GroupedLinear(BasicOperation):
         )
 
     @staticmethod
-    def _is_grouped_quantize_supported(input_quantizers: Sequence[Optional[Quantizer]]) -> bool:
+    def _is_graph_safe_path_supported(input_quantizers: Sequence[Optional[Quantizer]]) -> bool:
         """Whether all input quantizers support the graph-safe grouped-tensor flow.
 
         See ``_GROUPED_QUANTIZE_SUPPORTED_QUANTIZERS`` for the gating rationale.
@@ -896,10 +896,10 @@ class GroupedLinear(BasicOperation):
         #   * We just wrap the existing high-precision data as a ``GroupedTensor`` (no quantize call).
         #   * FP32 is excluded because the cublasLt grouped GEMM doesnt support it.
         # Quantized compute path:
-        #   * Only when the quantizer supports the graph-safe ``tex.group_quantize`` kernel
-        #    (see ``_GROUPED_QUANTIZE_SUPPORTED_QUANTIZERS``; currently MXFP8).
+        #   * Currently only supported for MXFP8. NVFP4 support will be enabled once
+        #    the NVFP4 GGEMM support is added.
         use_grouped_tensor_path = (
-            with_quantized_compute and self._is_grouped_quantize_supported(input_quantizers)
+            with_quantized_compute and self._is_graph_safe_path_supported(input_quantizers)
         ) or (not with_quantized_compute and dtype in (torch.bfloat16, torch.float16))
         if use_grouped_tensor_path:
             return self._fuser_forward_grouped_tensor(
@@ -1007,8 +1007,6 @@ class GroupedLinear(BasicOperation):
         )
 
         # Add bias * scales when scale_bias is enabled
-        # Would be done as part of larger refactor for GroupedLinear + GroupedTensor
-        # integration.
         if self._scale_bias and has_bias:
             scales_splits = torch.split(scales, split_sizes_int)
             out_splits = torch.split(out, split_sizes_int)
@@ -1414,15 +1412,6 @@ class GroupedLinear(BasicOperation):
         with_quantized_compute = bool(getattr(ctx, "with_quantized_compute", False))
 
         # Saved tensors from forward pass (see _fuser_forward_grouped_tensor).
-        # ``base_offsets`` is the cumulative-token offset tensor (computed once
-        # in forward via ``tex.splits_to_offsets``); we scale it by the
-        # appropriate last dim to get any GroupedTensor's ``tensor_offsets``.
-        # ``ws`` is either a single ``GroupedTensor`` (single_grouped_weight)
-        # or a list of per-group tensors; it is passed straight to
-        # ``general_grouped_gemm_for_grouped_tensor`` in dgrad.
-        # ``x_data`` / ``x_scale`` carry the saved input for the wgrad pass:
-        #   * Quantized path: columnwise data + scale.
-        #   * Unquantized path: raw rowwise data + ``None`` scale.
         saved_tensors = ctx.saved_tensors
         split_sizes, saved_tensors = saved_tensors[0], saved_tensors[1:]
         base_offsets, saved_tensors = saved_tensors[0], saved_tensors[1:]
@@ -1542,7 +1531,7 @@ class GroupedLinear(BasicOperation):
             )
 
         # params init for wgrad GEMM
-        accumulate_into_main_grad = self._accumulate_into_main_grad
+        accumulate_into_main_grad = False
         weight_shape = (self.out_features, self.in_features)
         wgrad_output: Any = None
         grouped_wgrad: Optional[GroupedTensor] = None
@@ -1554,7 +1543,7 @@ class GroupedLinear(BasicOperation):
         # Can be a GroupedTensor or list of tensors based on single_grouped_weight.
         if ctx.weight_requires_grad:
             if self.single_grouped_weight:
-                if accumulate_into_main_grad:
+                if self._accumulate_into_main_grad:
                     # Main-grad fusion: GEMM writes directly into ``main_grad``.
                     # ``overwrite_main_grad`` only flips the GEMM's
                     # ``accumulate`` flag.
@@ -1580,7 +1569,7 @@ class GroupedLinear(BasicOperation):
                 final_weight_grads[0] = grouped_wgrad.rowwise_data.view(num_groups, *weight_shape)
                 wgrad_output = grouped_wgrad
             else:
-                if accumulate_into_main_grad:
+                if self._accumulate_into_main_grad:
                     final_weight_grads = [
                         get_main_grad_from_param(w, op_label="GroupedLinear") for w in weights
                     ]
