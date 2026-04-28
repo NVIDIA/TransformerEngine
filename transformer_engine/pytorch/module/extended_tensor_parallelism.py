@@ -245,33 +245,22 @@ _MULTI_AMAX_TE_API_AVAILABLE = hasattr(tex, "compute_multi_amax_nvfp4")
 
 
 def _coalesced_amax_static_eligible(weights):
-    """Walk the weight list once and decide whether the coalesced-amax path
-    is applicable. Depends only on fields that are fixed after model
-    construction (quantizer class, flags, amax_reduction_group, group size)."""
+    """Check whether the coalesced-amax path is applicable (NVFP4 only).
+
+    Caller already gates on ETP_CONFIG.coalesce_amax_allreduce (False for
+    non-NVFP4). Here we additionally verify TE API availability, batch size,
+    quantizer type (must have amax reduction), and the RHT flag."""
     if not _COALESCED_AMAX_TE_APIS_AVAILABLE:
         return False
     if len(weights) <= 1:
         return False
-
-    group = None
-    for w in weights:
-        q = w._quantizer
-        if q is None or not isinstance(w.quantized, NVFP4TensorStorage):
-            return False
-        if not getattr(q, "with_amax_reduction", False):
-            return False
-        if getattr(q, "with_rht", False):
-            # RHT path does amax on RHT-rotated view, can't split compute
-            # from cast the way compute_amax_only assumes.
-            return False
-        g = getattr(q, "amax_reduction_group", None)
-        if g is None:
-            return False
-        if group is None:
-            group = g
-        elif g is not group:
-            return False
-    return group.size() > 1
+    has_amax = [getattr(w._quantizer, "with_amax_reduction", False) for w in weights]
+    if not all(has_amax):
+        return False
+    has_rht = any(getattr(w._quantizer, "with_rht", False) for w in weights)
+    if has_rht:
+        return False
+    return True
 
 
 def _quantize_with_coalesced_amax(weights, skip_weight_cast, cast_noop_flag):
@@ -565,8 +554,9 @@ class ETPShardedParam(torch.nn.Parameter):
         if self._quantizer is None:
             def _configure_quantizer(q, group):
                 q = q.copy()
-                q.with_amax_reduction = True
-                q.amax_reduction_group = group
+                if hasattr(q, 'with_amax_reduction'):
+                    q.with_amax_reduction = True
+                    q.amax_reduction_group = group
                 q.internal = False
                 q.optimize_for_gemm = True
                 return q
@@ -1597,10 +1587,10 @@ def grouped_gather_along_first_dim(
 
     if async_op:
         handle = gather_coalescing_manager
-        if (
-            quantizers is not None
-            and getattr(quantizers[0], "columnwise_usage", False)
-        ):
+        has_nvfp4_handles = any(
+            isinstance(wh, _NVFP4AllGatherAsyncHandle) for wh in weight_handles
+        )
+        if has_nvfp4_handles:
             handle = BatchedNVFP4AllGatherAsyncHandle(weight_handles, handle)
     else:
         for wh in weight_handles:
