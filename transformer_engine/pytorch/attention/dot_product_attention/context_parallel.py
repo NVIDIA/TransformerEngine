@@ -3255,7 +3255,10 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         out_per_step = [None, None]
         softmax_lse_per_step = [None, None]
         rng_states = [None, None]
-        out = torch.zeros_like(q) if qkv_format == "thd" else torch.empty_like(q)
+        if qkv_format == "thd":
+            out = torch.zeros(o_shape, dtype=fwd_nominal_dtype, device=q.device)
+        else:
+            out = torch.empty_like(q)
         max_logit_per_step = [None, None]
         max_logit = None
 
@@ -3523,7 +3526,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             )
 
         if qkv_format == "thd":
-            pass  # out is already [t_rank, h, d], no reshape needed
+            out_f16 = out
         else:
             # out_f16: fwd_nominal_dtype
             # [b, 2, s//2, h, d] -> [b, s, h, d]
@@ -3850,7 +3853,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                                 )
                         else:
                             max_seqlen_kv = full_kv_seqlen
-                        out_part = out.select(seq_dim_o, i).contiguous()
+                        out_part = out
                         dout_part = dout
                     else:
                         # [b, 2, s//2, h, d] -> [b, s//2, h, d]
