@@ -236,7 +236,9 @@ def _compute_grad_params(
             packed_wgrad = None
             if not delay_wgrad:
                 packed_wgrad = grouped_wgrad.rowwise_data.view(num_groups, *weight_shape)
-            if fc_op._accumulate_into_main_grad and hasattr(weight_param, "grad_added_to_main_grad"):
+            if fc_op._accumulate_into_main_grad and hasattr(
+                weight_param, "grad_added_to_main_grad"
+            ):
                 weight_param.grad_added_to_main_grad = True
                 packed_wgrad = get_dummy_wgrad(
                     list(weight_param.size()),
