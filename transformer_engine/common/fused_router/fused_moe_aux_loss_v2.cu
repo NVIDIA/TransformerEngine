@@ -22,8 +22,7 @@ __global__ void fused_moe_aux_loss_forward_kernel_v2(const DataType* probs,
                                                      const IndexType* tokens_per_expert,
                                                      int total_num_tokens, int num_experts,
                                                      int num_rows, int num_cols, int topk,
-                                                     float coeff, DataType* aux_loss,
-                                                     float* Const_buf) {
+                                                     float coeff, float* Const_buf) {
   // -----------------------------------------------------------------------
   // 1) Compute the constant coefficient (identical for all threads)
   // -----------------------------------------------------------------------
@@ -72,11 +71,12 @@ __global__ void fused_moe_aux_loss_forward_kernel_v2(const DataType* probs,
       atomicAdd(&Const_buf[1], block_sum * Const_buf[0]);
     }
   }
+}
 
-  __syncthreads();
-  if (blockIdx.x == 0 && threadIdx.x == 0) {
-    aux_loss[0] = static_cast<DataType>(Const_buf[1]);
-  }
+// Small kernel to convert the float accumulator to the output DataType.
+template <typename DataType>
+__global__ void convert_accum_to_output(const float* accum_buf, DataType* aux_loss) {
+  aux_loss[0] = static_cast<DataType>(accum_buf[1]);
 }
 
 /* -------------------------------------------------------------------------
@@ -105,7 +105,11 @@ void fused_moe_aux_loss_forward_kernel_launcher_v2(const DataType* probs,
   fused_moe_aux_loss_forward_kernel_v2<DataType, IndexType>
       <<<grid_size, block_size, smem_size, stream>>>(probs, tokens_per_expert, total_num_tokens,
                                                      num_experts, num_rows, num_cols, topk, coeff,
-                                                     aux_loss, Const_buf);
+                                                     Const_buf);
+  NVTE_CHECK_CUDA(cudaGetLastError());
+
+  // Convert the float accumulator to the output DataType.
+  convert_accum_to_output<DataType><<<1, 1, 0, stream>>>(Const_buf, aux_loss);
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
