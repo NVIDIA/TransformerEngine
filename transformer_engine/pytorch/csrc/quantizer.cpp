@@ -1753,6 +1753,24 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
   at::Tensor columnwise_data_tensor, columnwise_scale_inv_tensor, amax_columnwise;
   const auto bit8_tensor_opts = at::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
   const auto bit32_tensor_opts = at::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+
+  // In hierarchical 1x64 mode the ``amax`` slot is repurposed from a global
+  // ``(1,)`` scalar to a per-window FP32 buffer: ``(M, N/64)`` for rowwise
+  // and ``(N, M/64)`` for the transposed columnwise output. The kernel
+  // requires ``flat_first_dim % 64 == 0`` and ``flat_last_dim % 64 == 0``,
+  // which the dispatcher re-checks; we duplicate it here so allocation
+  // failures surface before we ever launch the kernel.
+  const bool use_1x64 = nvfp4_1x64::local_encode_from_env();
+  if (use_1x64) {
+    NVTE_CHECK(flat_first_dim % 64 == 0,
+               "NVFP4 1x64 local encode requires the leading flattened dim to be a multiple of "
+               "64, got ",
+               flat_first_dim);
+    NVTE_CHECK(flat_last_dim % 64 == 0,
+               "NVFP4 1x64 local encode requires the last dim to be a multiple of 64, got ",
+               flat_last_dim);
+  }
+
   if (rowwise_usage) {
     const std::vector<int64_t> scale_inv_shape_int64(rowwise_scale_inv_shape.begin(),
                                                      rowwise_scale_inv_shape.end());
@@ -1760,7 +1778,13 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
     rowwise_scale_inv_tensor = at::empty(scale_inv_shape_int64, bit8_tensor_opts);
     // hadamard amax kernel will zero out pointer with ZeroAmaxKernel
     // nvte_compute_amax_with_config will zero out the pointer if needed
-    amax_rowwise = at::empty({1}, bit32_tensor_opts);
+    if (use_1x64) {
+      amax_rowwise = at::empty({static_cast<int64_t>(flat_first_dim),
+                                static_cast<int64_t>(flat_last_dim) / 64},
+                               bit32_tensor_opts);
+    } else {
+      amax_rowwise = at::empty({1}, bit32_tensor_opts);
+    }
   }
   if (columnwise_usage) {
     const std::vector<int64_t> scale_inv_shape_int64(columnwise_scale_inv_shape.begin(),
@@ -1775,7 +1799,13 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
     columnwise_scale_inv_tensor = at::empty(scale_inv_shape_int64, bit8_tensor_opts);
     // hadamard amax kernel will zero out pointer with ZeroAmaxKernel
     // nvte_compute_amax_with_config will zero out the pointer if needed
-    amax_columnwise = at::empty({1}, bit32_tensor_opts);
+    if (use_1x64) {
+      amax_columnwise = at::empty({static_cast<int64_t>(flat_last_dim),
+                                   static_cast<int64_t>(flat_first_dim) / 64},
+                                  bit32_tensor_opts);
+    } else {
+      amax_columnwise = at::empty({1}, bit32_tensor_opts);
+    }
   }
 
   // Convert tensors to Python
@@ -1848,7 +1878,10 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
     out_cpp.set_rowwise_data(rowwise_data_tensor.data_ptr(), DType::kFloat4E2M1, shape);
     out_cpp.set_rowwise_scale_inv(rowwise_scale_inv_tensor.data_ptr(), DType::kFloat8E4M3,
                                   rowwise_scale_inv_shape);
-    out_cpp.set_amax(amax_rowwise.data_ptr(), DType::kFloat32, std::vector<size_t>{1});
+    const std::vector<size_t> amax_row_shape =
+        use_1x64 ? std::vector<size_t>{flat_first_dim, flat_last_dim / 64}
+                 : std::vector<size_t>{1};
+    out_cpp.set_amax(amax_rowwise.data_ptr(), DType::kFloat32, amax_row_shape);
   }
   if (columnwise_usage) {
     // enforce 2D shape to avoid [S, B, H] shape and B and be 1
@@ -1859,8 +1892,10 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
                                 col_data_shape_fp4);
     out_cpp.set_columnwise_scale_inv(columnwise_scale_inv_tensor.data_ptr(), DType::kFloat8E4M3,
                                      columnwise_scale_inv_shape);
-    out_cpp.set_columnwise_amax(amax_columnwise.data_ptr(), DType::kFloat32,
-                                std::vector<size_t>{1});
+    const std::vector<size_t> amax_col_shape =
+        use_1x64 ? std::vector<size_t>{flat_last_dim, flat_first_dim / 64}
+                 : std::vector<size_t>{1};
+    out_cpp.set_columnwise_amax(amax_columnwise.data_ptr(), DType::kFloat32, amax_col_shape);
   }
   out_cpp.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
   this->set_quantization_params(&out_cpp);
@@ -2306,7 +2341,12 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
           "Use with_post_rht_amax=true instead.");
     }
   } else {  // Without RHT
-    if (compute_amax) {
+    // The hierarchical 1x64 cast computes per-window amax inside the kernel
+    // (writing ``(M, N/64)`` / ``(N, M/64)`` buffers into the ``amax`` slots);
+    // running ``nvte_compute_amax_with_config`` here would overwrite the
+    // per-window allocation with a single FP32 global amax and clobber the
+    // shape back to ``(1,)``. Skip the precompute for that path entirely.
+    if (compute_amax && !nvfp4_1x64::local_encode_from_env()) {
       // Amax pointers
       auto rowwise_amax_ptr = out.get_amax().data_ptr;
       auto columnwise_amax_ptr = out.get_columnwise_amax().data_ptr;
