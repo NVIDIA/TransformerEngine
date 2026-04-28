@@ -18,6 +18,7 @@ from ..distributed import (
 )
 from ..quantized_tensor import QuantizedTensor
 from ..tensor import NVFP4TensorStorage, MXFP8TensorStorage
+from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..utils import nvtx_range_pop, nvtx_range_push, round_up_to_nearest_multiple
 from ..constants import NVFP4_BLOCK_SCALING_SIZE, MXFP8_BLOCK_SCALING_SIZE
 from .base import get_dummy_wgrad
@@ -638,7 +639,11 @@ class ETPShardedParam(torch.nn.Parameter):
                     q.with_amax_reduction = True
                     q.amax_reduction_group = group
                 q.internal = False
-                q.optimize_for_gemm = True
+                # MXFP8 scales must stay in compact (unswizzled) layout so that
+                # per-shard scale_inv can be all-gathered via byte concatenation.
+                # GEMM-swizzled scales from independent shards don't compose into
+                # a valid swizzled layout for the full tensor after AG.
+                q.optimize_for_gemm = not isinstance(q, MXFP8Quantizer)
                 return q
 
             weights = self.weight_list if self.is_routed_expert and self.weight_list is not None else [self]
