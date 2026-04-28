@@ -21,17 +21,13 @@ template <typename DataType, typename IndexType>
 __global__ void fused_moe_aux_loss_forward_kernel_v2(const DataType* probs,
                                                      const IndexType* tokens_per_expert,
                                                      int total_num_tokens, int num_experts,
-                                                     int num_rows, int num_cols, int topk,
-                                                     float coeff,
-                                                     float* accum_buf) {
+                                                     int num_rows, int num_cols, int topk, float coeff,
+                                                     DataType* aux_loss, float* Const_buf) {
   // -----------------------------------------------------------------------
   // 1) Compute the constant coefficient (identical for all threads)
-  //    accum_buf layout: [0] = C_coeff, [1] = accumulator (zeroed by host)
   // -----------------------------------------------------------------------
-  const float C_coeff = (num_experts * coeff) / topk / total_num_tokens / total_num_tokens;
-
-  if (blockIdx.x == 0 && threadIdx.x == 0) {
-    accum_buf[0] = C_coeff;
+  if (threadIdx.x == 0 && blockIdx.x == 0) {
+    Const_buf[0] = (num_experts * coeff) / topk / total_num_tokens / total_num_tokens;
   }
 
   // -----------------------------------------------------------------------
@@ -73,15 +69,13 @@ __global__ void fused_moe_aux_loss_forward_kernel_v2(const DataType* probs,
                                               ReduceFuncType::SUM,
                                               lane_id);
     if (lane_id == 0) {
-      atomicAdd(&accum_buf[1], block_sum * C_coeff);
+      atomicAdd(&Const_buf[1], block_sum * Const_buf[0]);
     }
   }
-}
 
-// Small kernel to convert the float accumulator to the output DataType.
-template <typename DataType>
-__global__ void convert_accum_to_output(const float* accum_buf, DataType* aux_loss) {
-  aux_loss[0] = static_cast<DataType>(accum_buf[1]);
+  if (threadIdx.x == 0 && blockIdx.x == 0) {
+    aux_loss[0] = static_cast<DataType>(Const_buf[1]);
+  }
 }
 
 /* -------------------------------------------------------------------------
@@ -102,9 +96,9 @@ void fused_moe_aux_loss_forward_kernel_launcher_v2(const DataType* probs,
 
   // One CompType per thread in shared memory.
   const size_t smem_size = block_size * sizeof(CompType);
+  check_shared_memory_capacity_num_experts(smem_size, num_experts);
 
   // Zero the float accumulator (Const_buf[1]) before launch.
-  check_shared_memory_capacity_num_experts(smem_size, num_experts);
   NVTE_CHECK_CUDA(cudaMemsetAsync(Const_buf + 1, 0, sizeof(float), stream));
 
   fused_moe_aux_loss_forward_kernel_v2<DataType, IndexType>
@@ -116,11 +110,8 @@ void fused_moe_aux_loss_forward_kernel_launcher_v2(const DataType* probs,
                                                      num_cols,
                                                      topk,
                                                      coeff,
+                                                     aux_loss,
                                                      Const_buf);
-  NVTE_CHECK_CUDA(cudaGetLastError());
-
-  // Convert the float accumulator to the output DataType.
-  convert_accum_to_output<DataType><<<1, 1, 0, stream>>>(Const_buf, aux_loss);
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 

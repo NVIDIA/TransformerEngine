@@ -401,7 +401,7 @@ class FusedMoEAuxLossFwdPrimitive(BasePrimitive):
         del topk, coeff, tokens_per_expert_aval
         i_dtype = dtypes.canonicalize_dtype(probs_aval.dtype)
         aux_loss_aval = probs_aval.update(shape=(), dtype=i_dtype)
-        const_buf_aval = probs_aval.update(shape=(1,), dtype=jnp.float32)
+        const_buf_aval = probs_aval.update(shape=(2,), dtype=jnp.float32)
         return aux_loss_aval, const_buf_aval
 
     @staticmethod
