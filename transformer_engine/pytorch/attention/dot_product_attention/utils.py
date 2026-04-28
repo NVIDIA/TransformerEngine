@@ -470,8 +470,6 @@ def get_attention_backend(
         if use_flash_attention_4 and FlashAttentionUtils.v4_is_installed:
             logger.debug("Disabling FlashAttention 4 for compute capability < sm80")
         use_flash_attention_4 = False
-    # TODO: Instead of hard hammer approach, selectively disable FA4 for
-    # only unsupported cases on SM120.
     # FA4 is temporarily disabled on SM120 due to failures observed with
     # SplitKV, Block sparsity / paged KV and likely FAv4/DSL integration issues.
     if device_compute_capability == (12, 0):
