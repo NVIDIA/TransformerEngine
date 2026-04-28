@@ -248,11 +248,11 @@ void performTestGroupedSwizzleMXFP8(const int num_tensors, const size_t M, const
     const NVTEShape rs = input->rowwise_scale_inv_shape();
     zero_scale_inv_padding(input->rowwise_cpu_scale_inv_ptr<uint8_t>(),
                            rs.data[0], rs.data[1],
-                           M, (K + BLOCK_SIZE - 1) / BLOCK_SIZE);
+                           M, divide_round_up(K, BLOCK_SIZE));
     const NVTEShape cs = input->columnwise_scale_inv_shape();
     zero_scale_inv_padding(input->columnwise_cpu_scale_inv_ptr<uint8_t>(),
                            cs.data[0], cs.data[1],
-                           (M + BLOCK_SIZE - 1) / BLOCK_SIZE, K);
+                           divide_round_up(M, BLOCK_SIZE), K);
     input->from_cpu();
 
     input_ptrs.push_back(input.get());
@@ -444,11 +444,11 @@ void performTestGroupedSwizzleUnswizzleRoundtrip(const int num_tensors, const si
     const NVTEShape rs = orig->rowwise_scale_inv_shape();
     zero_scale_inv_padding(orig->rowwise_cpu_scale_inv_ptr<uint8_t>(),
                            rs.data[0], rs.data[1],
-                           M, (K + BLOCK_SIZE - 1) / BLOCK_SIZE);
+                           M, divide_round_up(K, BLOCK_SIZE));
     const NVTEShape cs = orig->columnwise_scale_inv_shape();
     zero_scale_inv_padding(orig->columnwise_cpu_scale_inv_ptr<uint8_t>(),
                            cs.data[0], cs.data[1],
-                           (M + BLOCK_SIZE - 1) / BLOCK_SIZE, K);
+                           divide_round_up(M, BLOCK_SIZE), K);
     orig->from_cpu();
 
     orig_ptrs.push_back(orig.get());
@@ -569,20 +569,19 @@ CompactScaleBuffer gather_compact_grouped_scale(
   size_t group_first_align;
   if (rowwise) {
     per_tensor_first_unpadded = M_per_tensor;
-    const size_t scale_K = (K_per_tensor + BLOCK - 1) / BLOCK;
-    per_tensor_last_padded = ((scale_K + 4 - 1) / 4) * 4;
+    per_tensor_last_padded =
+        round_up_to_nearest_multiple(divide_round_up(K_per_tensor, BLOCK), 4);
     group_first_align = 128;
   } else {
-    per_tensor_first_unpadded = (M_per_tensor + BLOCK - 1) / BLOCK;
-    per_tensor_last_padded = ((K_per_tensor + 128 - 1) / 128) * 128;
+    per_tensor_first_unpadded = divide_round_up(M_per_tensor, BLOCK);
+    per_tensor_last_padded = round_up_to_nearest_multiple(K_per_tensor, 128);
     group_first_align = 4;
   }
 
   const size_t per_tensor_compact_numel =
       per_tensor_first_unpadded * per_tensor_last_padded;
-  const size_t total_first =
-      ((num_tensors * per_tensor_first_unpadded + group_first_align - 1)
-       / group_first_align) * group_first_align;
+  const size_t total_first = round_up_to_nearest_multiple(
+      num_tensors * per_tensor_first_unpadded, group_first_align);
   const size_t total_numel = total_first * per_tensor_last_padded;
 
   std::vector<uint8_t> host_buf(total_numel, 0);
@@ -649,11 +648,11 @@ void performTestGroupedSwizzleMXFP8CompactInput(const int num_tensors, const siz
     const NVTEShape rs = input->rowwise_scale_inv_shape();
     zero_scale_inv_padding(input->rowwise_cpu_scale_inv_ptr<uint8_t>(),
                            rs.data[0], rs.data[1],
-                           M, (K + BLOCK_SIZE - 1) / BLOCK_SIZE);
+                           M, divide_round_up(K, BLOCK_SIZE));
     const NVTEShape cs = input->columnwise_scale_inv_shape();
     zero_scale_inv_padding(input->columnwise_cpu_scale_inv_ptr<uint8_t>(),
                            cs.data[0], cs.data[1],
-                           (M + BLOCK_SIZE - 1) / BLOCK_SIZE, K);
+                           divide_round_up(M, BLOCK_SIZE), K);
     input->from_cpu();
 
     input_ptrs.push_back(input.get());
