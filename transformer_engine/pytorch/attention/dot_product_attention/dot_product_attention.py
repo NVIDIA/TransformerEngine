@@ -11,6 +11,7 @@ import warnings
 import logging
 
 import torch
+import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
 import transformer_engine_torch as tex
@@ -177,6 +178,18 @@ _dpa_fp8ds_reduce_amax = os.getenv("NVTE_DPA_FP8DS_REDUCE_AMAX", "1") == "1"
 
 
 __all__ = ["DotProductAttention"]
+
+
+def _pad_thd_value_layer(value_layer, head_dim_qk):
+    """Pad V for THD FlashAttention when Q/K and V head dimensions differ."""
+    orig_head_dim_v = value_layer.shape[-1]
+    return F.pad(value_layer, (0, head_dim_qk - orig_head_dim_v)), orig_head_dim_v
+
+
+def _trim_thd_output(attn_out, num_attention_heads, padded_head_dim_v, orig_head_dim_v):
+    """Trim FlashAttention THD output after padding V to the Q/K head dimension."""
+    attn_out = attn_out.reshape(attn_out.shape[0], num_attention_heads, padded_head_dim_v)
+    return attn_out[..., :orig_head_dim_v].reshape(attn_out.shape[0], -1)
 
 
 class DotProductAttention(TransformerEngineBaseModule):
@@ -1508,6 +1521,16 @@ class DotProductAttention(TransformerEngineBaseModule):
             )
 
             if use_flash_attention:
+                orig_v_dim = None
+                if (
+                    q_format == "thd"
+                    and kv_format == "thd"
+                    and not isinstance(value_layer, Float8TensorStorage)
+                    and head_dim_qk != head_dim_v
+                    and value_layer.shape[-1] < head_dim_qk
+                ):
+                    value_layer, orig_v_dim = _pad_thd_value_layer(value_layer, head_dim_qk)
+
                 if core_attention_bias_type == "alibi":
                     alibi_slopes, _ = dpa_utils.get_alibi(
                         _alibi_cache,
@@ -1516,7 +1539,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         max_seqlen_kv,
                         alibi_slopes=alibi_slopes,
                     )
-                return self.flash_attention(
+                attn_out = self.flash_attention(
                     query_layer,
                     key_layer,
                     value_layer,
@@ -1541,6 +1564,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                     fp8_output=fp8_output,
                     num_splits=num_splits,
                 )
+                if orig_v_dim is not None:
+                    return _trim_thd_output(attn_out, num_attention_heads, head_dim_qk, orig_v_dim)
+                return attn_out
 
             if use_fused_attention:
                 fu_core_attention_bias_type = core_attention_bias_type
