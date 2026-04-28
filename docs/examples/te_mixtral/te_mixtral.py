@@ -101,7 +101,12 @@ def replace_params(hf_state_dict: dict, te_state_dict: dict, config: MixtralConf
     and older per-expert tensors (`experts.{i}.w{1,2,3}.weight`).
     """
     ep_size = int(getattr(config, "expert_parallel_size", 1))
-    ep_rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
+    # EP-rank is the rank *within* the EP group, not the global rank. With a
+    # DP x EP layout, multiple global ranks share the same EP position and need
+    # the same expert slice. (Contiguous-rank EP grouping: global rank r maps
+    # to ep_rank = r % ep_size.)
+    _world_rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
+    ep_rank = _world_rank % ep_size if ep_size > 1 else 0
 
     all_layer_prefixes = set()
     for param_key in hf_state_dict.keys():
@@ -244,6 +249,11 @@ class NVMixtralConfig(MixtralConfig):
     use_quantized_model_init: bool = False
     expert_parallel_size: int = 1
     moe_aux_loss_coeff: float = 0.0
+    # Expert FFN execution mode:
+    #   "grouped" — fuse all per-rank experts into a single TE GroupedLinear call (default)
+    #   "loop"    — naive Python loop, one F.linear per expert. Pedagogical baseline so
+    #               the tutorial can isolate the GroupedLinear win at EP < num_experts.
+    expert_ffn_mode: str = "grouped"
 
     def __init__(self, **kwargs):
         """Initialize the NVMixtralConfig with additional TE-related config options."""
@@ -259,6 +269,11 @@ class NVMixtralConfig(MixtralConfig):
                     raise ValueError(
                         f'layer_precision element must be "fp8", "fp4", or None, got {precision!r}'
                     )
+
+        if self.expert_ffn_mode not in ("grouped", "loop"):
+            raise ValueError(
+                f'expert_ffn_mode must be "grouped" or "loop", got {self.expert_ffn_mode!r}'
+            )
 
         if self.num_local_experts % self.expert_parallel_size != 0:
             raise ValueError(
@@ -394,6 +409,7 @@ class NVMixtralSparseMoeBlock(nn.Module):
         # Expert parallelism
         self.ep_size = getattr(config, "expert_parallel_size", 1)
         self.num_local_experts = self.num_experts // self.ep_size
+        self.expert_ffn_mode = getattr(config, "expert_ffn_mode", "grouped")
         self.moe_aux_loss_coeff = getattr(config, "moe_aux_loss_coeff", 0.0)
         self._aux_loss: torch.Tensor = torch.tensor(0.0)
         self.initializer_range = config.initializer_range
@@ -533,15 +549,30 @@ class NVMixtralSparseMoeBlock(nn.Module):
             )
 
     def _expert_ffn(self, tokens: torch.Tensor, m_splits: list[int]) -> torch.Tensor:
-        """Run the expert SwiGLU FFN (gate_up -> silu -> down).
+        """Run the expert SwiGLU FFN (gate_up -> silu -> down) per local expert."""
+        if self.expert_ffn_mode == "loop":
+            # Naive HF-style loop: one F.linear per expert against a slice of the
+            # stacked weight. Same checkpoint as the grouped path; only kernel
+            # dispatch differs.
+            gate_up_w = self.experts_gate_up_weight
+            if isinstance(gate_up_w.data, DTensor):
+                gate_up_w = gate_up_w.data.to_local()
+            down_w = self.experts_down_weight
+            if isinstance(down_w.data, DTensor):
+                down_w = down_w.data.to_local()
+            outputs = []
+            for i, chunk in enumerate(torch.split(tokens, m_splits, dim=0)):
+                if chunk.shape[0] == 0:
+                    outputs.append(chunk)
+                    continue
+                gate, up = torch.nn.functional.linear(chunk, gate_up_w[i]).chunk(2, dim=-1)
+                outputs.append(
+                    torch.nn.functional.linear(
+                        torch.nn.functional.silu(gate) * up, down_w[i]
+                    )
+                )
+            return torch.cat(outputs, dim=0)
 
-        Args:
-            tokens: Input tensor of shape [total_tokens, H], sorted by expert.
-            m_splits: Number of tokens per local expert.
-
-        Returns:
-            Output tensor of shape [total_tokens, H].
-        """
         gate_up_output = self.experts_gate_up(tokens, m_splits=m_splits)
         gate_output, up_output = gate_up_output.chunk(2, dim=-1)
         intermediate = torch.nn.functional.silu(gate_output) * up_output
@@ -845,12 +876,10 @@ class NVMixtralModel(NVMixtralPreTrainedModel):
             attention_mask = ~attention_mask[:, None, None, :].bool()
 
         if isinstance(past_key_values, InferenceParams):
-            # input_ids is None when the caller supplies inputs_embeds directly.
-            _ref = input_ids if input_ids is not None else inputs_embeds
             lengths = (
                 attention_mask.sum(dim=1).tolist()
-                if attention_mask.shape[:2] == _ref.shape[:2]
-                else [1] * _ref.shape[0]
+                if attention_mask.shape == input_ids.shape
+                else [1] * input_ids.shape[0]
             )
             past_key_values.pre_step(OrderedDict(zip(list(range(len(lengths))), lengths)))
 

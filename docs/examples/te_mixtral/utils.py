@@ -50,6 +50,10 @@ class HyperParameters:
         # Token dispatcher: "alltoall" (NCCL all-to-all) or "fused" (DeepEP fused dispatch).
         self.dispatcher_type = "alltoall"
 
+        # Expert FFN execution: "grouped" (TE GroupedLinear, batched) or
+        # "loop" (Python loop over experts with one F.linear each, HF-style).
+        self.expert_ffn_mode = "grouped"
+
 
 hyperparams = HyperParameters()
 
@@ -181,10 +185,16 @@ def init_te_mixtral_model(hyperparams: HyperParameters):
     base_config._attn_implementation = "flash_attention_2"
     te_config = NVMixtralForCausalLM.config_class(**base_config.to_dict())
     te_config.expert_parallel_size = hyperparams.expert_parallel_size
+    te_config.expert_ffn_mode = hyperparams.expert_ffn_mode
 
     fp8_recipe = None
     if hyperparams.mixed_precision == "fp8":
-        fp8_recipe = te_recipe.MXFP8BlockScaling()
+        # Float8CurrentScaling: per-tensor FP8 with current-step amax (no history,
+        # no 32-aligned tile constraint). Avoids the MXFP8 split_quantize per-expert
+        # padding requirement at EP < num_experts. Memory savings on activations are
+        # the same as MXFP8 (1 byte/elem); raw GEMM throughput is slightly lower than
+        # MXFP8 on Blackwell because it doesn't use the block-scaling tensor cores.
+        fp8_recipe = te_recipe.Float8CurrentScaling()
         te_config.layer_precision = ["fp8"] * te_config.num_hidden_layers
 
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
@@ -193,11 +203,11 @@ def init_te_mixtral_model(hyperparams: HyperParameters):
         torch.cuda.set_device(local_rank)
         if not dist.is_initialized():
             dist.init_process_group(backend="nccl", init_method="env://")
-        if world_size != hyperparams.expert_parallel_size:
+        if world_size % hyperparams.expert_parallel_size != 0:
             raise ValueError(
-                "For this minimal EP setup, WORLD_SIZE must match expert_parallel_size. Got"
-                f" WORLD_SIZE={world_size},"
-                f" expert_parallel_size={hyperparams.expert_parallel_size}."
+                f"WORLD_SIZE ({world_size}) must be a multiple of "
+                f"expert_parallel_size ({hyperparams.expert_parallel_size}). "
+                "Extra ranks become data-parallel replicas."
             )
     elif hyperparams.expert_parallel_size != 1:
         raise ValueError("expert_parallel_size > 1 requires torchrun distributed launch.")
@@ -221,8 +231,23 @@ def init_te_mixtral_model(hyperparams: HyperParameters):
     del hf_model
 
     if hyperparams.expert_parallel_size > 1:
-        ep_mesh = DeviceMesh("cuda", torch.arange(world_size))
-        model.model.set_ep_groups(ep_group=dist.group.WORLD, ep_mesh=ep_mesh)
+        ep_size = hyperparams.expert_parallel_size
+        dp_size = world_size // ep_size
+        if dp_size == 1:
+            # Single EP group spans the whole world (original path).
+            ep_mesh = DeviceMesh("cuda", torch.arange(world_size))
+            ep_group = dist.group.WORLD
+        else:
+            # 2D mesh: (DP, EP). Each EP group holds ep_size consecutive ranks.
+            # Data is naturally sharded across the DP dimension by Accelerate.
+            full_mesh = DeviceMesh(
+                "cuda",
+                torch.arange(world_size).view(dp_size, ep_size),
+                mesh_dim_names=("dp", "ep"),
+            )
+            ep_mesh = full_mesh["ep"]
+            ep_group = ep_mesh.get_group()
+        model.model.set_ep_groups(ep_group=ep_group, ep_mesh=ep_mesh)
 
     model.config.use_cache = False
     return model
@@ -303,7 +328,14 @@ def finetune_model(model, hyperparams, accelerator, train_dataloader, optimizer,
     model.train()
     total_loss = 0
     optimizer.zero_grad()
-    train_dataloader = enumerate(train_dataloader)
+    # Cycle the dataloader so benchmark sweeps with a small dataset (e.g.
+    # openassistant-guanaco at 9846 samples) don't hit StopIteration when
+    # batch * world_size * num_steps exceeds the dataset size.
+    def _cycle(loader):
+        while True:
+            for x in loader:
+                yield x
+    train_dataloader = enumerate(_cycle(train_dataloader))
 
     # Warmup iterations (not timed).
     for _ in range(hyperparams.num_warmup_steps):
@@ -353,12 +385,12 @@ def finetune_model(model, hyperparams, accelerator, train_dataloader, optimizer,
     accelerator.end_training()
 
     n = len(step_times_ms)
-    # Steady-state estimate: median of the last few steps, after warmup/transients settle.
-    tail = step_times_ms[-5:]
-    steady_ms = sorted(tail)[len(tail) // 2]
+    median_ms = sorted(step_times_ms)[n // 2]
+    last_ms = step_times_ms[-1]
     print(
         f"{n} fine-tuning steps complete!\n"
-        f"Steady-state step time (median of last {len(tail)}): {steady_ms:.0f} ms"
+        f"Median time per step:  {median_ms:.0f} ms\n"
+        f"Last step time:        {last_ms:.0f} ms"
     )
 
 
