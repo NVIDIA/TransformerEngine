@@ -72,9 +72,6 @@ __global__ void fused_moe_aux_loss_forward_kernel_v2(const DataType* probs,
                                               static_cast<int>(blockDim.x),
                                               ReduceFuncType::SUM,
                                               lane_id);
-
-    __syncwarp();
-    // -----------------------------------------------------------------------
     if (lane_id == 0) {
       atomicAdd(&accum_buf[1], block_sum * C_coeff);
     }
