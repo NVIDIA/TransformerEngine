@@ -27,8 +27,9 @@ __global__ void fused_moe_aux_loss_forward_kernel_v2(const DataType* probs,
   // -----------------------------------------------------------------------
   // 1) Compute the constant coefficient (identical for all threads)
   // -----------------------------------------------------------------------
-  if (threadIdx.x == 0 && blockIdx.x == 0) {
-    Const_buf[0] = (num_experts * coeff) / topk / total_num_tokens / total_num_tokens;
+  const float C_coeff = (num_experts * coeff) / topk / total_num_tokens / total_num_tokens;
+  if (blockIdx.x == 0 && threadIdx.x == 0) {
+    Const_buf[0] = C_coeff;
   }
 
   // -----------------------------------------------------------------------
@@ -72,7 +73,8 @@ __global__ void fused_moe_aux_loss_forward_kernel_v2(const DataType* probs,
     }
   }
 
-  if (threadIdx.x == 0 && blockIdx.x == 0) {
+  __syncthreads();
+  if (blockIdx.x == 0 && threadIdx.x == 0) {
     aux_loss[0] = static_cast<DataType>(Const_buf[1]);
   }
 }
