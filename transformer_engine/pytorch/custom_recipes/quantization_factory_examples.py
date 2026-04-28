@@ -15,6 +15,7 @@ Usage::
     from transformer_engine.pytorch.custom_recipes.quantization_factory_examples import (
         nvfp4_linear_mxfp8_grouped_linear_factory,
         nvfp4_linear_fp8_dpa_factory,
+        nvfp4_linear_mxfp8_dpa_factory,
     )
 
     # Mixed module types: NVFP4 for Linear, MXFP8 for GroupedLinear
@@ -24,6 +25,11 @@ Usage::
 
     # NVFP4 for Linear, FP8 current-scaling + delayed-scaling for DPA
     recipe = CustomRecipe(qfactory=nvfp4_linear_fp8_dpa_factory, fp8_dpa=True)
+    with autocast(recipe=recipe):
+        output = model(input)
+
+    # NVFP4 for Linear, MXFP8 for DPA
+    recipe = CustomRecipe(qfactory=nvfp4_linear_mxfp8_dpa_factory, fp8_dpa=True)
     with autocast(recipe=recipe):
         output = model(input)
 """
@@ -190,5 +196,76 @@ def nvfp4_linear_fp8_dpa_factory(
             fp8_dtype=tex.DType.kFloat8E4M3,
             device="cuda",
         )
+
+    return _make_nvfp4_quantizer(role)
+
+
+def nvfp4_linear_mxfp8_dpa_factory(
+    role: Optional[QuantizerRole],
+):
+    """Quantizer factory: NVFP4 for ``Linear``, MXFP8 for ``DotProductAttention``.
+
+    Mirrors the documented "NVFP4 linear + MXFP8 attention" combo from
+    :mod:`transformer_engine.pytorch.attention.dot_product_attention.dot_product_attention`
+    (see the recipe-combination table at the top of that module). With
+    ``CustomRecipe`` the per-tensor decision is made directly here, so the
+    ``NVTE_DPA_FP8_RECIPE="MXFP8BlockScaling"`` env override that the
+    built-in recipes would otherwise need is unnecessary.
+
+    DPA tensor types (``role.module_type == "dpa"``):
+
+    =========== ============================================================
+    tensor_type Description
+    =========== ============================================================
+    ``"qkv"``  Query, Key, Value inputs to the first attention GEMM
+    ``"s"``    Softmax output (S = softmax(Q·K^T)), fed into the second GEMM
+    ``"o"``    Attention output (O = S·V)
+    ``"do"``   Gradient of the attention output (dO), backward input
+    ``"dp"``   Gradient of the softmax output (dP = dO·V^T), backward
+    ``"dqkv"`` Gradient flowing back to Q, K, V
+    =========== ============================================================
+
+    Dispatch logic:
+        * ``role.module_type == "dpa"`` -> MXFP8 (E4M3, block-32)
+          The MXFP8 fused-attention kernel handles the S/dP slots
+          internally, so any quantizer returned for those roles is later
+          nulled out by ``get_attention_quantizers``.  Returning MXFP8 is
+          the simplest valid choice.
+        * DPA boundary hints (``"dpa_output"`` / ``"dpa_grad_input"`` in
+          ``role.name``) -> MXFP8 placeholder.  The fused attention kernel
+          requires FP8-compatible quantizers in all DPA slots.
+        * everything else (``"linear"`` / ``"grouped_linear"`` / ``None``)
+          -> NVFP4 (E2M1), configured per tensor role.
+
+    Usage::
+
+        from transformer_engine.common.recipe import CustomRecipe
+        from transformer_engine.pytorch.quantization import autocast
+        from transformer_engine.pytorch.custom_recipes.quantization_factory_examples import (
+            nvfp4_linear_mxfp8_dpa_factory,
+        )
+
+        recipe = CustomRecipe(
+            qfactory=nvfp4_linear_mxfp8_dpa_factory,
+            fp8_dpa=True,
+        )
+        with autocast(recipe=recipe):
+            output = model(input)
+    """
+    is_dpa = role is not None and role.module_type == "dpa"
+    if is_dpa:
+        return _make_mxfp8_quantizer()
+
+    # DPA boundary slots (O output / dQKV grad-input): emitted by DPA with
+    # empty `module_type` and a `name` like "<dpa>.dpa_output". The fused
+    # attention kernel requires an FP8-compatible quantizer here even when
+    # the downstream consumer is unknown.
+    is_dpa_boundary = (
+        role is not None
+        and not role.module_type
+        and ("dpa_output" in role.name or "dpa_grad_input" in role.name)
+    )
+    if is_dpa_boundary:
+        return _make_mxfp8_quantizer()
 
     return _make_nvfp4_quantizer(role)

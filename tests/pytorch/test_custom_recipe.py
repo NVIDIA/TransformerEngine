@@ -1018,6 +1018,119 @@ def test_custom_recipe_dpa_fp8():
             ), f"qkv_proj fwd slot {i}: expected NVFP4Quantizer, got {type(q).__name__}"
 
 
+def test_custom_recipe_dpa_mxfp8():
+    """DotProductAttention forward+backward with CustomRecipe and MXFP8 attention.
+
+    Uses the nvfp4_linear_mxfp8_dpa_factory which dispatches:
+      * DPA roles (QKV/O/S/dO/dP/dQKV) -> MXFP8Quantizer (S/dP later nulled
+        out by ``get_attention_quantizers`` since the MXFP8 fused-attention
+        kernel handles those slots internally)
+      * DPA boundary hints -> MXFP8Quantizer
+      * Linear slots -> NVFP4Quantizer
+
+    Mirrors the documented "NVFP4 linear + MXFP8 attention" combo from
+    ``dot_product_attention.py``'s recipe-combination table.
+    """
+    available, reason = te.is_fp8_available(return_reason=True)
+    if not torch.cuda.is_available() or not available:
+        pytest.skip(f"FP8 unsupported on this device: {reason}")
+    if not te.is_mxfp8_available():
+        pytest.skip("MXFP8 unsupported on this device")
+    if not te.is_nvfp4_available():
+        pytest.skip("NVFP4 unsupported on this device")
+
+    from transformer_engine.pytorch.utils import get_device_compute_capability
+
+    cc = get_device_compute_capability()
+    if cc < (9, 0) or cc >= (12, 0):
+        pytest.skip(f"FP8 attention not supported on sm{cc[0]*10+cc[1]}")
+
+    from transformer_engine.pytorch.quantization import CustomRecipeState
+    from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
+    from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
+    from transformer_engine.pytorch.custom_recipes.quantization_factory_examples import (
+        nvfp4_linear_mxfp8_dpa_factory,
+    )
+
+    torch.manual_seed(42)
+
+    # MXFP8 fused attention requires s_q % 128 == 0, s_kv % 128 == 0,
+    # d_qk % 32 == 0, d_v % 32 == 0.
+    H = 128
+    NH = 4
+    KV = H // NH  # 32
+    B = 2
+    S = 128
+
+    # Build a small model: Linear -> DPA -> Linear
+    qkv_proj = Linear(H, 3 * H, params_dtype=torch.bfloat16, bias=False, name="qkv").cuda()
+    dpa = te.DotProductAttention(
+        NH, KV, attention_dropout=0.0, qkv_format="bshd", name="core_attention"
+    )
+    out_proj = Linear(H, H, params_dtype=torch.bfloat16, bias=False, name="proj").cuda()
+
+    custom_recipe = recipe.CustomRecipe(
+        qfactory=nvfp4_linear_mxfp8_dpa_factory,
+        fp8_dpa=True,
+    )
+
+    inp = torch.randn(B, S, H, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+
+    with autocast(enabled=True, recipe=custom_recipe):
+        qkv = qkv_proj(inp).view(B, S, 3, NH, KV)
+        q, k, v = qkv[:, :, 0], qkv[:, :, 1], qkv[:, :, 2]
+        # MXFP8 fused attention requires s_q % 128 == 0, s_kv % 128 == 0,
+        # d_qk % 32 == 0, d_v % 32 == 0. The B/S/H values above are picked
+        # to satisfy all four constraints (S=128, KV=32).
+        attn_out = dpa(q, k, v, qkv_format="bshd").reshape(B, S, H)
+        out = out_proj(attn_out)
+
+    loss = out.float().sum()
+    loss.backward()
+
+    assert inp.grad is not None, "Input gradient should exist"
+
+    # DPA recipe state should be CustomRecipeState
+    fwd_state = dpa.fp8_meta["scaling_fwd"]
+    assert isinstance(
+        fwd_state, CustomRecipeState
+    ), f"Expected CustomRecipeState for DPA fwd, got {type(fwd_state).__name__}"
+
+    # All DPA slots should resolve to MXFP8Quantizer (the factory returns MXFP8
+    # uniformly for DPA roles; S/dP nulling happens inside get_attention_quantizers
+    # at fused-attn dispatch time, not here).
+    fwd_quantizers = dpa.quantizers["scaling_fwd"]
+    assert len(fwd_quantizers) == 9, f"Expected 9 fwd quantizers, got {len(fwd_quantizers)}"
+    for i, q in enumerate(fwd_quantizers):
+        assert isinstance(
+            q, MXFP8Quantizer
+        ), f"DPA fwd slot {i}: expected MXFP8Quantizer, got {type(q).__name__}"
+
+    bwd_quantizers = dpa.quantizers["scaling_bwd"]
+    assert len(bwd_quantizers) == 6, f"Expected 6 bwd quantizers, got {len(bwd_quantizers)}"
+    for i, q in enumerate(bwd_quantizers):
+        assert isinstance(
+            q, MXFP8Quantizer
+        ), f"DPA bwd slot {i}: expected MXFP8Quantizer, got {type(q).__name__}"
+
+    # MXFP8 attention has no delayed-scaling state (no S/dP DS-request slots).
+    assert not fwd_state._has_delayed_scaling, (
+        "DPA fwd state should NOT have delayed scaling for the all-MXFP8 factory"
+    )
+
+    # Linear modules should still be NVFP4
+    qkv_fwd = qkv_proj.fp8_meta["scaling_fwd"]
+    assert isinstance(
+        qkv_fwd, CustomRecipeState
+    ), f"Expected CustomRecipeState for qkv_proj, got {type(qkv_fwd).__name__}"
+    qkv_fwd_quantizers = qkv_proj.quantizers["scaling_fwd"]
+    for i, q in enumerate(qkv_fwd_quantizers):
+        if q is not None:
+            assert isinstance(
+                q, NVFP4Quantizer
+            ), f"qkv_proj fwd slot {i}: expected NVFP4Quantizer, got {type(q).__name__}"
+
+
 def test_custom_recipe_debug_tool_compat():
     """Custom recipe quantizers should work when wrapped by DebugQuantizer.
 

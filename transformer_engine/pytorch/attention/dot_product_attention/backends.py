@@ -175,6 +175,27 @@ else:
 _dpa_fp8_cs_o_in_f16 = os.getenv("NVTE_DPA_FP8CS_O_in_F16", "1") == "1"
 
 
+def _qkv_quantizer_type(qkv_quantizer):
+    """Map a DPA QKV quantizer instance to its kernel-facing FP8 sub-recipe label.
+
+    Returns one of ``'delayed'`` / ``'current'`` / ``'mxfp8'``. Used by FP8
+    attention forward/backward to dispatch save-for-backward and
+    re-quantization decisions from the *quantizer instance* rather than
+    the top-level ``Recipe`` type, so that ``CustomRecipe`` 
+    is handled correctly. Built-in recipes already
+    produce the matching quantizer instances, so behavior is preserved.
+    """
+    if isinstance(qkv_quantizer, Float8Quantizer):
+        return "delayed"
+    if isinstance(qkv_quantizer, Float8CurrentScalingQuantizer):
+        return "current"
+    if isinstance(qkv_quantizer, MXFP8Quantizer):
+        return "mxfp8"
+    raise TypeError(
+        f"Unsupported FP8 attention QKV quantizer: {type(qkv_quantizer).__name__}"
+    )
+
+
 class FP8EmulationFunc(torch.autograd.Function):
     """
     Emulate the effects of FP8 quantization on tensors. Used in UnfusedDotProductAttention as follows:
@@ -1321,6 +1342,12 @@ class FusedAttnFunc(torch.autograd.Function):
             dpa_utils.get_attention_quantizers(fp8, fp8_recipe, quantizers)
         )
 
+        # Effective FP8 sub-recipe label inferred from the QKV quantizer
+        # instance. Drives save-for-backward and re-quantization dispatch
+        # below so that CustomRecipe (and built-in recipes alike) work
+        # without depending on `fp8_recipe.<predicate>()`.
+        qkv_type = _qkv_quantizer_type(QKV_quantizer) if fp8 else None
+
         # get nominal data type for out
         # FP16/BF16 attention: torch.float16 or torch.bfloat16
         # FP8 attention:       torch.float16 or torch.bfloat16
@@ -1403,8 +1430,8 @@ class FusedAttnFunc(torch.autograd.Function):
                 or (
                     is_bwd_fp8
                     and (
-                        (fp8_recipe.float8_current_scaling() and _dpa_fp8_cs_o_in_f16)
-                        or fp8_recipe.mxfp8()
+                        (qkv_type == "current" and _dpa_fp8_cs_o_in_f16)
+                        or qkv_type == "mxfp8"
                     )
                 )
             )
@@ -1412,8 +1439,8 @@ class FusedAttnFunc(torch.autograd.Function):
                 is_training
                 and is_bwd_fp8
                 and (
-                    fp8_recipe.delayed()
-                    or (fp8_recipe.float8_current_scaling() and not _dpa_fp8_cs_o_in_f16)
+                    qkv_type == "delayed"
+                    or (qkv_type == "current" and not _dpa_fp8_cs_o_in_f16)
                 )
             )
             if isinstance(out_, QuantizedTensorStorage):
@@ -1443,12 +1470,12 @@ class FusedAttnFunc(torch.autograd.Function):
             f16_tensors = (None, None, None, None)
             if is_bwd_fp8:
                 if (
-                    fp8_recipe.float8_current_scaling() and _dpa_fp8_cs_o_in_f16
-                ) or fp8_recipe.mxfp8():
+                    qkv_type == "current" and _dpa_fp8_cs_o_in_f16
+                ) or qkv_type == "mxfp8":
                     fp8_tensors = (q_fp8, k_fp8, v_fp8, None)
                     f16_tensors = (None, None, None, out_f16)
-                elif fp8_recipe.delayed() or (
-                    fp8_recipe.float8_current_scaling() and not _dpa_fp8_cs_o_in_f16
+                elif qkv_type == "delayed" or (
+                    qkv_type == "current" and not _dpa_fp8_cs_o_in_f16
                 ):
                     fp8_tensors = (q_fp8, k_fp8, v_fp8, out_fp8)
             else:
@@ -1536,6 +1563,7 @@ class FusedAttnFunc(torch.autograd.Function):
         ctx.dO_quantizer = dO_quantizer
         ctx.dP_quantizer = dP_quantizer
         ctx.S_quantizer = S_quantizer
+        ctx.qkv_type = qkv_type
         if ctx.fp8 and isinstance(ctx.S_quantizer, Float8Quantizer):
             ctx.S_quantizer = S_quantizer.copy()
             ctx.S_quantizer.scale = S_quantizer.scale.clone()
@@ -1706,9 +1734,9 @@ class FusedAttnFunc(torch.autograd.Function):
                     # MXFP8BlockScaling:
                     #   out_, dq_, dk_, dv_, d_out: torch.Tensor; dtype = torch.float16 or torch.bfloat16
                     out_ = out_fp8
-                    if ctx.fp8_recipe.float8_current_scaling() and _dpa_fp8_cs_o_in_f16:
+                    if ctx.qkv_type == "current" and _dpa_fp8_cs_o_in_f16:
                         out_ = out
-                    if ctx.fp8_recipe.mxfp8():
+                    if ctx.qkv_type == "mxfp8":
                         out_ = out
                         aux_ctx_tensors.append(d_out)
                     dq_, dk_, dv_, *rest = fused_attn_bwd(
