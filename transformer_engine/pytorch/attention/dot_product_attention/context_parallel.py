@@ -53,6 +53,7 @@ _cu_seqlens_info_with_cp_cache = {}
 _seq_chunk_ids_cache_for_reordering_before_attn = {}
 _seq_chunk_ids_cache_for_reordering_after_attn = {}
 _softmax_offset_chunk_ids_cache = {}
+_thd_reorder_perm_cache = {}
 
 # Float8CurrentScaling: fused_attn_bwd takes O in FP8 by default, this flag allows it in F16
 _dpa_fp8_cs_o_in_f16 = os.getenv("NVTE_DPA_FP8CS_O_in_F16", "1") == "1"
@@ -272,10 +273,34 @@ def reorder_seq_chunks_for_a2a_after_attn(x, chunk_ids_for_a2a, seq_dim, cp_size
     return x
 
 
-def reorder_seq_chunks_before_a2a_after_attn_thd(x, cu_seqlens, cp_size, seq_dim=0):
+def _get_thd_reorder_perms(cu_seqlens, cp_size):
+    """Build and cache (P, P_inv) permutation tensors for THD reordering.
+
+    P maps contiguous sequence order -> rank-concatenated dual-chunk order.
+    P_inv is the inverse (rank-concat -> contiguous).
+
+    Uses the existing thd_partition_indices CUDA kernel which builds per-rank
+    dual-chunk indices entirely on-device, replacing the previous Python loop
+    of 2*cp_size*batch torch.arange calls.
     """
-    Reorder sequence chunks for A2A communication that happens after attention
-    compute.
+    global _thd_reorder_perm_cache
+    key = (tuple(cu_seqlens.tolist()), cp_size)
+    if key not in _thd_reorder_perm_cache:
+        total_tokens = int(cu_seqlens[-1].item())
+        P = torch.cat([
+            tex.thd_get_partitioned_indices(cu_seqlens, total_tokens, cp_size, rank)
+            for rank in range(cp_size)
+        ])
+        P_inv = torch.empty_like(P)
+        P_inv[P.long()] = torch.arange(total_tokens, dtype=P.dtype, device=P.device)
+        _thd_reorder_perm_cache[key] = (P, P_inv)
+    return _thd_reorder_perm_cache[key]
+
+
+def reorder_thd_sequences_to_rank_sharded(x, cu_seqlens, cp_size, seq_dim=0):
+    """
+    Reorder THD sequences from contiguous to rank sharded according to sharding
+    strategy (DualChunking here).
 
     Args:
         x:              The input tensor to be reordered.
@@ -310,38 +335,14 @@ def reorder_seq_chunks_before_a2a_after_attn_thd(x, cu_seqlens, cp_size, seq_dim
                 3.,  4.,  3.,  4.,  3.,  4.,  6.,  7.,  8.,  9.   # chunk on rank 3
              ]
     """
-    total_slices_of_any_sequence = 2 * cp_size
-    slice_sizes = (cu_seqlens[1:] - cu_seqlens[:-1]) // total_slices_of_any_sequence
-
-    indices = [
-        (
-            # 1st segment
-            torch.arange(
-                seq_start + (cp_rank * slice_size),
-                seq_start + ((cp_rank + 1) * slice_size),
-                device=cu_seqlens.device,
-            ),
-            # 2nd segment
-            torch.arange(
-                seq_start + ((total_slices_of_any_sequence - cp_rank - 1) * slice_size),
-                seq_start + ((total_slices_of_any_sequence - cp_rank) * slice_size),
-                device=cu_seqlens.device,
-            ),
-        )
-        for cp_rank in range(cp_size)
-        for slice_size, seq_start in zip(slice_sizes, cu_seqlens[:-1])
-    ]
-
-    # flatten the list of tuples to a list
-    indices = list(itertools.chain(*indices))
-    indices = torch.cat(indices)
-    return x.index_select(seq_dim, indices)
+    P, _ = _get_thd_reorder_perms(cu_seqlens, cp_size)
+    return x.index_select(seq_dim, P)
 
 
-def reorder_seq_chunks_after_a2a_before_attn_thd(x, cu_seqlens, seq_chunk_ids, cp_size, seq_dim=0):
+def reorder_thd_sequences_to_contiguous(x, cu_seqlens, seq_chunk_ids, cp_size, seq_dim=0):
     """
-    Reorder sequence chunks for A2A communication that happens before attention
-    compute.
+    Reorder THD sequences from rank sharded according to sharding strategy
+    (DualChunking here) to contiguous.
 
     Args:
         x:              The input tensor to be reordered.
@@ -383,33 +384,8 @@ def reorder_seq_chunks_after_a2a_before_attn_thd(x, cu_seqlens, seq_chunk_ids, c
             1b. Concatenate the indices of the first half and the second half.
         2. Reorder the entire input tensor by those indices.
     """
-
-    max_cum_seqlen_per_cp_rank = cu_seqlens[-1] // cp_size
-    cu_seqlens_on_any_cp_rank = cu_seqlens // cp_size
-
-    # Go through all the sequence segments (the sizes should be the same from all the ranks)
-    indices = [
-        torch.arange(
-            # Calculate 'left' boundary
-            (
-                start + max_cum_seqlen_per_cp_rank * (chunk_id // 2)
-                if loc < cp_size
-                else (start + end) // 2 + max_cum_seqlen_per_cp_rank * (chunk_id // 2)
-            ),
-            # Calculate 'right' boundary
-            (
-                (start + end) // 2 + max_cum_seqlen_per_cp_rank * (chunk_id // 2)
-                if loc < cp_size
-                else end + max_cum_seqlen_per_cp_rank * (chunk_id // 2)
-            ),
-            device=cu_seqlens.device,
-        )
-        for start, end in zip(cu_seqlens_on_any_cp_rank[:-1], cu_seqlens_on_any_cp_rank[1:])
-        for loc, chunk_id in enumerate(seq_chunk_ids)
-    ]
-
-    indices = torch.cat(indices)
-    return x.index_select(seq_dim, indices)
+    _, P_inv = _get_thd_reorder_perms(cu_seqlens, cp_size)
+    return x.index_select(seq_dim, P_inv)
 
 
 def flash_attn_a2a_communicate(
@@ -478,7 +454,7 @@ def flash_attn_a2a_communicate(
                         # [cp, t, h//cp, d] -> [cp*t, h//cp, d]
                         x = x.view(-1, *x.shape[2:])
                         # reorder the sequence chunks
-                        a2a_outputs[i - 2] = reorder_seq_chunks_after_a2a_before_attn_thd(
+                        a2a_outputs[i - 2] = reorder_thd_sequences_to_contiguous(
                             x, cu_seqlens_padded, chunk_ids_for_a2a, cp_size
                         )
 
@@ -524,7 +500,7 @@ def flash_attn_a2a_communicate(
                         else cu_seqlens_kv_padded
                     )
                     # reorder the sequence chunks
-                    x = reorder_seq_chunks_before_a2a_after_attn_thd(x, cu_seqlens_padded, cp_size)
+                    x = reorder_thd_sequences_to_rank_sharded(x, cu_seqlens_padded, cp_size)
                     # [cp*t, h//cp, d] -> [cp, t, h//cp, d]
                     a2a_inputs[i] = x.view(cp_size, -1, *x.shape[-2:])
             if i > 1:
@@ -3216,10 +3192,10 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             # Use padded cu_seqlens since reorder computes slice boundaries via integer
             # division by 2*cp_size, which requires divisible values.
             chunk_ids_for_kv_ag = get_seq_chunk_ids_for_reordering_before_attn(cp_size, k.device)
-            k_ag = reorder_seq_chunks_after_a2a_before_attn_thd(
+            k_ag = reorder_thd_sequences_to_contiguous(
                 k_ag, cu_seqlens_kv_padded, chunk_ids_for_kv_ag, cp_size
             )
-            v_ag = reorder_seq_chunks_after_a2a_before_attn_thd(
+            v_ag = reorder_thd_sequences_to_contiguous(
                 v_ag, cu_seqlens_kv_padded, chunk_ids_for_kv_ag, cp_size
             )
         else:
@@ -3777,10 +3753,10 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             # [cp*t, h, d] -> reorder to contiguous per-sequence order
             # Use padded cu_seqlens (divisible by 2*cp_size) for correct reorder
             chunk_ids_for_kv_ag = get_seq_chunk_ids_for_reordering_before_attn(cp_size, k.device)
-            k_ag = reorder_seq_chunks_after_a2a_before_attn_thd(
+            k_ag = reorder_thd_sequences_to_contiguous(
                 k_ag, cu_seqlens_kv_padded, chunk_ids_for_kv_ag, cp_size
             )
-            v_ag = reorder_seq_chunks_after_a2a_before_attn_thd(
+            v_ag = reorder_thd_sequences_to_contiguous(
                 v_ag, cu_seqlens_kv_padded, chunk_ids_for_kv_ag, cp_size
             )
 
@@ -4076,8 +4052,8 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             # Reverse-reorder dK/dV from contiguous order back to dual-chunk order,
             # then reduce-scatter across CP ranks.
             # Use padded cu_seqlens for correct slice boundaries.
-            dk = reorder_seq_chunks_before_a2a_after_attn_thd(dk, cu_seqlens_kv_padded, cp_size)
-            dv = reorder_seq_chunks_before_a2a_after_attn_thd(dv, cu_seqlens_kv_padded, cp_size)
+            dk = reorder_thd_sequences_to_rank_sharded(dk, cu_seqlens_kv_padded, cp_size)
+            dv = reorder_thd_sequences_to_rank_sharded(dv, cu_seqlens_kv_padded, cp_size)
             dk, _ = reduce_scatter_along_first_dim(dk, ctx.cp_group)
             dv, _ = reduce_scatter_along_first_dim(dv, ctx.cp_group)
             # dQ is already [t_rank, h, d], no reshape needed
