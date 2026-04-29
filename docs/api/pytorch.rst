@@ -154,13 +154,13 @@ Operation fuser
    :members: forward
 
 .. autoapiclass:: transformer_engine.pytorch.ops.FusibleOperation
-   :members: fuser_forward, fuser_backward
+   :members: fuser_forward, fuser_forward_compute, fuser_forward_save_ctx, fuser_backward
 
 .. autoapiclass:: transformer_engine.pytorch.ops.BasicOperation
-   :members: op_forward, op_backward
+   :members: op_forward, op_forward_compute, op_forward_save_ctx, op_backward
 
 .. autoapiclass:: transformer_engine.pytorch.ops.FusedOperation
-   :members: fuser_forward, fuser_backward
+   :members: fuser_forward, fuser_forward_compute, fuser_forward_save_ctx, fuser_backward
 
 .. autoapifunction:: transformer_engine.pytorch.ops.register_forward_fusion
 

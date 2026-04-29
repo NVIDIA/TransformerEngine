@@ -34,16 +34,28 @@ class Reshape(BasicOperation):
         super().__init__()
         self._shape = tuple(shape)
 
-    def op_forward(
+    def op_forward_compute(
+        self,
+        input_: torch.Tensor,
+        *,
+        requires_grad: bool,
+        prev_op_grad_output_quantizer: Optional[Quantizer] = None,
+        next_op_input_quantizer: Optional[Quantizer] = None,
+    ) -> tuple[torch.Tensor, tuple[()]]:
+        return input_.reshape(*self._shape), ()
+
+    def op_forward_save_ctx(
         self,
         ctx: OperationContext,
         input_: torch.Tensor,
-        prev_op_grad_output_quantizer: Optional[Quantizer],
-        next_op_input_quantizer: Optional[Quantizer],
-    ) -> torch.Tensor:
-        if ctx.requires_grad:
+        tensors_to_save: tuple[()],
+        *,
+        requires_grad: bool,
+        prev_op_grad_output_quantizer: Optional[Quantizer] = None,
+        next_op_input_quantizer: Optional[Quantizer] = None,
+    ) -> None:
+        if requires_grad:
             ctx.input_shape = input_.size()
-        return input_.reshape(*self._shape)
 
     def op_backward(
         self,

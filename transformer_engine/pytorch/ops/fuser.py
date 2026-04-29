@@ -128,14 +128,34 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             if next_op is not None:
                 next_op_input_quantizer = next_op.get_input_quantizer()
 
-            x, fused_op_extra_outputs = op.fuser_forward(
-                [basic_op_ctxs[idx] for idx in basic_op_idxs],
-                x,
-                basic_op_extra_inputs=extra_inputs,
-                prev_op_grad_output_quantizer=prev_op_grad_output_quantizer,
-                next_op_input_quantizer=next_op_input_quantizer,
-                basic_op_kwargs=[basic_op_kwargs[idx] for idx in basic_op_idxs],
-            )
+            if op._use_split_forward:
+                op_ctxs = [basic_op_ctxs[idx] for idx in basic_op_idxs]
+                fwd_kwargs = {
+                    "requires_grad": [basic_op_ctxs[idx].requires_grad for idx in basic_op_idxs],
+                    "basic_op_extra_inputs": extra_inputs,
+                    "prev_op_grad_output_quantizer": prev_op_grad_output_quantizer,
+                    "next_op_input_quantizer": next_op_input_quantizer,
+                    "basic_op_kwargs": [basic_op_kwargs[idx] for idx in basic_op_idxs],
+                }
+                x_input = x
+                x, fused_op_extra_outputs, tensors_to_save = op.fuser_forward_compute(
+                    x_input, **fwd_kwargs
+                )
+                op.fuser_forward_save_ctx(
+                    op_ctxs,
+                    x_input,
+                    tensors_to_save,
+                    **fwd_kwargs,
+                )
+            else:
+                x, fused_op_extra_outputs = op.fuser_forward(
+                    [basic_op_ctxs[idx] for idx in basic_op_idxs],
+                    x,
+                    basic_op_extra_inputs=extra_inputs,
+                    prev_op_grad_output_quantizer=prev_op_grad_output_quantizer,
+                    next_op_input_quantizer=next_op_input_quantizer,
+                    basic_op_kwargs=[basic_op_kwargs[idx] for idx in basic_op_idxs],
+                )
             for idx, ys in zip(basic_op_idxs, fused_op_extra_outputs):
                 for y in ys:
                     y.requires_grad_(idx >= fuser.first_op_requiring_backward)

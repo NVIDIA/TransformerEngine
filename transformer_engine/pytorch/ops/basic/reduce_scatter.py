@@ -36,17 +36,18 @@ class ReduceScatter(BasicOperation):
         self.process_group: Optional[torch.distributed.ProcessGroup] = process_group
         self.process_group_size: int = torch.distributed.get_world_size(process_group)
 
-    def op_forward(
+    def op_forward_compute(
         self,
-        ctx: OperationContext,
         input_: torch.Tensor,
-        prev_op_grad_output_quantizer: Optional[Quantizer],
-        next_op_input_quantizer: Optional[Quantizer],
-    ) -> torch.Tensor:
+        *,
+        requires_grad: bool,
+        prev_op_grad_output_quantizer: Optional[Quantizer] = None,
+        next_op_input_quantizer: Optional[Quantizer] = None,
+    ) -> tuple[torch.Tensor, tuple[()]]:
 
         # Trivial case
         if self.process_group_size == 1:
-            return input_.detach()
+            return input_.detach(), ()
 
         # Tensor dimensions
         input_dims = input_.size()
@@ -65,7 +66,19 @@ class ReduceScatter(BasicOperation):
         # Perform reduce-scatter
         y = torch.empty(output_dims, dtype=x.dtype, device=x.device)
         torch.distributed.reduce_scatter_tensor(y, x, group=self.process_group)
-        return y
+        return y, ()
+
+    def op_forward_save_ctx(
+        self,
+        ctx: OperationContext,
+        input_: torch.Tensor,
+        tensors_to_save: tuple[()],
+        *,
+        requires_grad: bool,
+        prev_op_grad_output_quantizer: Optional[Quantizer] = None,
+        next_op_input_quantizer: Optional[Quantizer] = None,
+    ) -> None:
+        pass
 
     def op_backward(
         self,
