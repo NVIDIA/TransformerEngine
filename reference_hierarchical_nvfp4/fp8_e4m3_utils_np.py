@@ -28,9 +28,7 @@ def _decode_e4m3_byte(b: int) -> float:
 
 
 # Precompute 256 float32 values for all E4M3 codes
-_E4M3_TABLE: np.ndarray = np.array(
-    [_decode_e4m3_byte(i) for i in range(256)], dtype=np.float32
-)
+_E4M3_TABLE: np.ndarray = np.array([_decode_e4m3_byte(i) for i in range(256)], dtype=np.float32)
 
 
 def f32_to_e4m3_u8(x: np.ndarray) -> np.ndarray:

@@ -39,8 +39,22 @@ FINE = 16
 
 FP4_E2M1_GRID = np.array(
     [
-        0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
-        -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,
+        0.0,
+        0.5,
+        1.0,
+        1.5,
+        2.0,
+        3.0,
+        4.0,
+        6.0,
+        -0.0,
+        -0.5,
+        -1.0,
+        -1.5,
+        -2.0,
+        -3.0,
+        -4.0,
+        -6.0,
     ],
     dtype=np.float32,
 )
@@ -170,9 +184,7 @@ def quantize_rowwise_1x64_1x16(x: np.ndarray, eps: float = 1e-12) -> Hierarchica
             w[row, lo:hi] = segx * bsi
             t16b += 1
     q = _round_to_nearest_fp4(w)
-    return HierarchicalNVFP4RowwiseNp(
-        m, k, _pack_fp4_along_k(q), S_enc, S_dec_u8, amax_64
-    )
+    return HierarchicalNVFP4RowwiseNp(m, k, _pack_fp4_along_k(q), S_enc, S_dec_u8, amax_64)
 
 
 def dequantize_rowwise(p: HierarchicalNVFP4RowwiseNp) -> np.ndarray:
@@ -197,9 +209,7 @@ def _amax_64_m(x: np.ndarray, m: int, k: int) -> np.ndarray:
     return out
 
 
-def quantize_columnwise_1x64_1x16(
-    x: np.ndarray, eps: float = 1e-12
-) -> HierarchicalNVFP4ColwiseNp:
+def quantize_columnwise_1x64_1x16(x: np.ndarray, eps: float = 1e-12) -> HierarchicalNVFP4ColwiseNp:
     x = np.asarray(x, dtype=np.float32)
     assert x.ndim == 2
     m, k = int(x.shape[0]), int(x.shape[1])
@@ -225,14 +235,14 @@ def quantize_columnwise_1x64_1x16(
             raw = compute_S_dec_f32_before_cast_te(bamax, S)
             u = f32_to_e4m3_u8(np.array(raw, dtype=np.float32).reshape(1))
             S_dec_u8[t16b, col] = u.ravel()[0]
-            s_dec_f = max(float(e4m3_u8_to_f32(S_dec_u8[t16b : t16b + 1, col : col + 1])[0, 0]), TINY)
+            s_dec_f = max(
+                float(e4m3_u8_to_f32(S_dec_u8[t16b : t16b + 1, col : col + 1])[0, 0]), TINY
+            )
             bsi = S / s_dec_f
             w[lo:hi, col] = segx * bsi
             t16b += 1
     q = _round_to_nearest_fp4(w)
-    return HierarchicalNVFP4ColwiseNp(
-        m, k, _pack_fp4_along_m(q), S_enc, S_dec_u8, amax_64
-    )
+    return HierarchicalNVFP4ColwiseNp(m, k, _pack_fp4_along_m(q), S_enc, S_dec_u8, amax_64)
 
 
 def dequantize_colwise(p: HierarchicalNVFP4ColwiseNp) -> np.ndarray:

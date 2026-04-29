@@ -14,9 +14,10 @@
 #ifndef TRANSFORMER_ENGINE_PYTORCH_NVFP4_1X64_H_
 #define TRANSFORMER_ENGINE_PYTORCH_NVFP4_1X64_H_
 
+#include <transformer_engine/transformer_engine.h>
+
 #include "common/util/logging.h"
 #include "common/util/system.h"
-#include <transformer_engine/transformer_engine.h>
 
 namespace transformer_engine::pytorch::nvfp4_1x64 {
 
@@ -29,7 +30,7 @@ namespace transformer_engine::pytorch::nvfp4_1x64 {
 
 /// Apply 2D mode, SR, and optional 1x64 flag to a quantization config.
 inline void config_apply(QuantizationConfigWrapper& cfg, bool nvfp4_2d, bool stochastic_rounding,
-                          bool use_1x64) {
+                         bool use_1x64) {
   cfg.set_nvfp4_2d_quantization(nvfp4_2d);
   cfg.set_stochastic_rounding(stochastic_rounding);
   cfg.set_nvfp4_rowwise_1x64_local_encode(use_1x64);
@@ -43,7 +44,8 @@ inline void require_ok_for_non_split(bool with_rht, bool /* columnwise */, bool 
   NVTE_CHECK(
       !with_rht,
       "NVTE_NVFP4_ROWWISE_1X64_LOCAL_ENCODE=1 requires non-RHT (e.g. NVTE_NVFP4_DISABLE_RHT=1).");
-  NVTE_CHECK(!sr, "NVTE_NVFP4_ROWWISE_1X64_LOCAL_ENCODE=1 is incompatible with stochastic rounding.");
+  NVTE_CHECK(!sr,
+             "NVTE_NVFP4_ROWWISE_1X64_LOCAL_ENCODE=1 is incompatible with stochastic rounding.");
 }
 
 /// Preconditions for \p split_quantize (non-RHT path).
@@ -51,8 +53,8 @@ inline void require_ok_for_split(bool /* want_rowwise */, bool /* have_columnwis
   if (!local_encode_from_env()) {
     return;
   }
-  NVTE_CHECK(
-      !sr, "NVTE_NVFP4_ROWWISE_1X64_LOCAL_ENCODE in split_quantize is incompatible with SR.");
+  NVTE_CHECK(!sr,
+             "NVTE_NVFP4_ROWWISE_1X64_LOCAL_ENCODE in split_quantize is incompatible with SR.");
 }
 
 }  // namespace transformer_engine::pytorch::nvfp4_1x64

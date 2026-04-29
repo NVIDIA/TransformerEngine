@@ -4,9 +4,9 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "common/common.h"
-#include "common/cast/nvfp4/quantize_nvfp4_1x64.cuh"
 #include "common/cast/nvfp4/core_nvfp4.cuh"
+#include "common/cast/nvfp4/quantize_nvfp4_1x64.cuh"
+#include "common/common.h"
 #include "common/util/ptx.cuh"
 #include "common/utils.cuh"
 
@@ -17,9 +17,9 @@ namespace {
 
 #if FP4_TYPE_SUPPORTED
 
+using core::compute_global_encode_scaling_factor_FP4;
 using ptx::FPx2;
 using quantization_SF::compute_decoding_scaling_factor;
-using core::compute_global_encode_scaling_factor_FP4;
 
 // One CUDA block = one 64x64 input tile in (M, N) row-major space.
 //
@@ -36,17 +36,17 @@ using core::compute_global_encode_scaling_factor_FP4;
 // (``in_sm[e][tid]`` walking down a column) does not fall on the same
 // 32-bank lane for every row.
 template <typename IType>
-__global__ void __launch_bounds__(64) nvfp4_1x64_fused_per_tile(
-    const IType* __restrict__ in, const size_t rows, const size_t cols, const int ld_row_elts,
-    // Rowwise outputs (all three are non-null together, or all null).
-    uint8_t* __restrict__ q_row, fp8e4m3* __restrict__ s_dec_row,
-    float* __restrict__ w_amax_row, const size_t s_dec_row_stride,
-    const size_t w_amax_row_stride,
-    // Columnwise (transposed) outputs (all three together, or all null).
-    uint8_t* __restrict__ q_col, fp8e4m3* __restrict__ s_dec_col,
-    float* __restrict__ w_amax_col, const size_t s_dec_col_stride,
-    const size_t w_amax_col_stride,
-    const float* __restrict__ noop) {
+__global__ void __launch_bounds__(64)
+    nvfp4_1x64_fused_per_tile(const IType* __restrict__ in, const size_t rows, const size_t cols,
+                              const int ld_row_elts,
+                              // Rowwise outputs (all three are non-null together, or all null).
+                              uint8_t* __restrict__ q_row, fp8e4m3* __restrict__ s_dec_row,
+                              float* __restrict__ w_amax_row, const size_t s_dec_row_stride,
+                              const size_t w_amax_row_stride,
+                              // Columnwise (transposed) outputs (all three together, or all null).
+                              uint8_t* __restrict__ q_col, fp8e4m3* __restrict__ s_dec_col,
+                              float* __restrict__ w_amax_col, const size_t s_dec_col_stride,
+                              const size_t w_amax_col_stride, const float* __restrict__ noop) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   if (noop != nullptr && noop[0] == 1.0f) {
     return;
@@ -79,8 +79,7 @@ __global__ void __launch_bounds__(64) nvfp4_1x64_fused_per_tile(
 #pragma unroll
       for (int e = 0; e < 64; e++) {
         const int gc = col_base + e;
-        in_sm[tid][e] =
-            static_cast<float>(in[static_cast<size_t>(gr) * ld_row_elts + gc]);
+        in_sm[tid][e] = static_cast<float>(in[static_cast<size_t>(gr) * ld_row_elts + gc]);
       }
     } else {
 #pragma unroll
@@ -235,8 +234,7 @@ void quantize_1x64_local_encode(const Tensor& input, const Tensor& noop, Tensor*
     s_dec_row_stride = output->scale_inv.shape.size() > 1 ? output->scale_inv.shape[1] : 1;
     w_amax_row_stride = output->amax.shape.size() > 1 ? output->amax.shape[1] : 1;
     NVTE_CHECK(s_dec_row_stride == cols / 16,
-               "NVFP4 1x64: rowwise scale_inv stride must equal cols/16, got ",
-               s_dec_row_stride);
+               "NVFP4 1x64: rowwise scale_inv stride must equal cols/16, got ", s_dec_row_stride);
     NVTE_CHECK(w_amax_row_stride == cols / 64,
                "NVFP4 1x64: rowwise amax stride must equal cols/64, got ", w_amax_row_stride);
   }
@@ -254,12 +252,10 @@ void quantize_1x64_local_encode(const Tensor& input, const Tensor& noop, Tensor*
     q_col = reinterpret_cast<uint8_t*>(output->columnwise_data.dptr);
     s_dec_col = reinterpret_cast<fp8e4m3*>(output->columnwise_scale_inv.dptr);
     w_amax_col = reinterpret_cast<float*>(output->columnwise_amax.dptr);
-    s_dec_col_stride = output->columnwise_scale_inv.shape.size() > 1
-                           ? output->columnwise_scale_inv.shape[1]
-                           : 1;
-    w_amax_col_stride = output->columnwise_amax.shape.size() > 1
-                            ? output->columnwise_amax.shape[1]
-                            : 1;
+    s_dec_col_stride =
+        output->columnwise_scale_inv.shape.size() > 1 ? output->columnwise_scale_inv.shape[1] : 1;
+    w_amax_col_stride =
+        output->columnwise_amax.shape.size() > 1 ? output->columnwise_amax.shape[1] : 1;
     NVTE_CHECK(s_dec_col_stride == rows / 16,
                "NVFP4 1x64: columnwise scale_inv stride must equal rows/16, got ",
                s_dec_col_stride);
@@ -272,16 +268,14 @@ void quantize_1x64_local_encode(const Tensor& input, const Tensor& noop, Tensor*
   dim3 grid(static_cast<unsigned>(n_win), static_cast<unsigned>(m_tiles), 1);
   constexpr int kBlock = 64;
 
-  TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
-      input.dtype(), IType, {
-        const IType* in_t = reinterpret_cast<const IType*>(input.data.dptr);
-        nvfp4_1x64_fused_per_tile<IType><<<grid, kBlock, 0, stream>>>(
-            in_t, rows, cols, static_cast<int>(cols), q_row, s_dec_row, w_amax_row,
-            s_dec_row_stride, w_amax_row_stride, q_col, s_dec_col, w_amax_col,
-            s_dec_col_stride, w_amax_col_stride,
-            reinterpret_cast<const float*>(noop.data.dptr));
-        NVTE_CHECK_CUDA(cudaGetLastError());
-      });
+  TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(input.dtype(), IType, {
+    const IType* in_t = reinterpret_cast<const IType*>(input.data.dptr);
+    nvfp4_1x64_fused_per_tile<IType><<<grid, kBlock, 0, stream>>>(
+        in_t, rows, cols, static_cast<int>(cols), q_row, s_dec_row, w_amax_row, s_dec_row_stride,
+        w_amax_row_stride, q_col, s_dec_col, w_amax_col, s_dec_col_stride, w_amax_col_stride,
+        reinterpret_cast<const float*>(noop.data.dptr));
+    NVTE_CHECK_CUDA(cudaGetLastError());
+  });
 
 #else
   (void)input;

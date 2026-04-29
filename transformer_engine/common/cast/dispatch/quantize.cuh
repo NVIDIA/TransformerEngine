@@ -248,8 +248,9 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
       CheckInputTensor(*grad_tensor, "input");
       CheckOutputTensor(*output_tensor, "output", false);
 
-      NVTE_CHECK(!quant_config_cpp.nvfp4_rowwise_1x64_local_encode,
-                 "NVFP4 rowwise 1x64 local encode is not implemented for backward quantization yet.");
+      NVTE_CHECK(
+          !quant_config_cpp.nvfp4_rowwise_1x64_local_encode,
+          "NVFP4 rowwise 1x64 local encode is not implemented for backward quantization yet.");
 
       // Choose kernel
       int32_t rows = grad_tensor->flat_first_dim();

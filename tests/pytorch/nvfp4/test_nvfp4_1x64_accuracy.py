@@ -152,9 +152,7 @@ def _err_metrics(x: torch.Tensor, recon: torch.Tensor) -> Tuple[float, float, fl
     return rmse, max_err, frob_rel
 
 
-def _gen_gaussian(
-    M: int, N: int, *, seed: int, device: str, dtype: torch.dtype
-) -> torch.Tensor:
+def _gen_gaussian(M: int, N: int, *, seed: int, device: str, dtype: torch.dtype) -> torch.Tensor:
     """Uniform N(0, 1) -- a benign baseline where both schemes should tie."""
     g = torch.Generator(device=device).manual_seed(seed)
     return torch.randn((M, N), generator=g, device=device, dtype=dtype)
@@ -189,9 +187,7 @@ def _gen_per_window_dynamic_range(
     log_scales = torch.empty((M, n_win, 1), device=device, dtype=torch.float32)
     log_scales.uniform_(log10_lo, log10_hi, generator=g)
     scales = torch.pow(torch.tensor(10.0, device=device, dtype=torch.float32), log_scales)
-    base = torch.randn(
-        (M, n_win, WINDOW_K), generator=g, device=device, dtype=torch.float32
-    )
+    base = torch.randn((M, n_win, WINDOW_K), generator=g, device=device, dtype=torch.float32)
     x = (base * scales).reshape(M, n_win * WINDOW_K)[:, :N].contiguous()
     return x.to(dtype)
 
@@ -243,9 +239,13 @@ def _gen_sparse_extreme_outliers(
     flat_idx = torch.randperm(total_windows, generator=g, device=device)[:n_outlier_windows]
     outlier_rows = flat_idx // n_win
     outlier_cols = (flat_idx % n_win) * WINDOW_K
-    signs = torch.randint(
-        0, 2, (n_outlier_windows,), generator=g, device=device, dtype=torch.int32
-    ).to(torch.float32) * 2 - 1
+    signs = (
+        torch.randint(0, 2, (n_outlier_windows,), generator=g, device=device, dtype=torch.int32).to(
+            torch.float32
+        )
+        * 2
+        - 1
+    )
     x[outlier_rows, outlier_cols] = signs * float(outlier_mag)
 
     return x.to(dtype)
@@ -288,7 +288,7 @@ def test_1x64_at_least_as_good_as_per_tensor_on_gaussian(
         )
 
     assert rmse_1x64 <= rmse_pt * 1.05, (
-        f"1x64 RMSE unexpectedly worse than per-tensor on uniform input: "
+        "1x64 RMSE unexpectedly worse than per-tensor on uniform input: "
         f"rmse_1x64={rmse_1x64:.4e} > 1.05 * rmse_pt={rmse_pt:.4e}"
     )
 
@@ -341,8 +341,8 @@ def test_1x64_better_than_per_tensor_on_sparse_extreme_outliers(
         )
 
     assert rmse_1x64 < rmse_pt, (
-        f"1x64 was not strictly better than per-tensor on "
-        f"sparse-extreme-outlier input: "
+        "1x64 was not strictly better than per-tensor on "
+        "sparse-extreme-outlier input: "
         f"rmse_1x64={rmse_1x64:.4e} >= rmse_pt={rmse_pt:.4e}"
     )
 
@@ -382,6 +382,6 @@ def test_1x64_at_least_tied_on_modest_per_window_dynamic_range(
         )
 
     assert rmse_1x64 <= rmse_pt * 1.05, (
-        f"1x64 unexpectedly worse than per-tensor on modest dynamic-range "
+        "1x64 unexpectedly worse than per-tensor on modest dynamic-range "
         f"input: rmse_1x64={rmse_1x64:.4e} > 1.05 * rmse_pt={rmse_pt:.4e}"
     )

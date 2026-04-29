@@ -135,9 +135,7 @@ class NVFP4Quantizer1x64Ref:
             )
 
         device = x.device
-        fp32_max = torch.tensor(
-            torch.finfo(torch.float32).max, device=device, dtype=torch.float32
-        )
+        fp32_max = torch.tensor(torch.finfo(torch.float32).max, device=device, dtype=torch.float32)
         fp4_max = torch.tensor(FLOAT4_E2M1_MAX, device=device, dtype=torch.float32)
         fp8_max = torch.tensor(FLOAT8_E4M3_MAX, device=device, dtype=torch.float32)
 
@@ -197,7 +195,9 @@ class NVFP4Quantizer1x64Ref:
         # SM10 -- we do NOT want that). Short-circuit to 0 to mirror the
         # kernel's ``s_dec_f == 0.f`` branch.
         zero_blk = decode_scale_back_fp32 == 0
-        denom = torch.where(zero_blk, torch.ones_like(decode_scale_back_fp32), decode_scale_back_fp32)
+        denom = torch.where(
+            zero_blk, torch.ones_like(decode_scale_back_fp32), decode_scale_back_fp32
+        )
         encode_scale = S_enc_per_blk / denom
         encode_scale = torch.where(zero_blk, torch.zeros_like(encode_scale), encode_scale)
         encode_scale = torch.minimum(encode_scale, fp32_max)

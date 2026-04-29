@@ -94,9 +94,7 @@ def _check_quantization_1x64_versus_reference_with_input(
         torch.testing.assert_close(
             sxt_sut[: sxt_ref.shape[0], : sxt_ref.shape[1]], sxt_ref, atol=0.0, rtol=0.0
         )
-        torch.testing.assert_close(
-            sut._amax_columnwise, ref.window_amax_col, atol=0.0, rtol=0.0
-        )
+        torch.testing.assert_close(sut._amax_columnwise, ref.window_amax_col, atol=0.0, rtol=0.0)
 
 
 def _check_random(
@@ -113,9 +111,7 @@ def _check_random(
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     x = torch.randn((M, N), dtype=x_dtype, device=device)
-    _check_quantization_1x64_versus_reference_with_input(
-        x, rowwise=rowwise, columnwise=columnwise
-    )
+    _check_quantization_1x64_versus_reference_with_input(x, rowwise=rowwise, columnwise=columnwise)
 
 
 # Shapes where both M and N are multiples of 64 -- the 1x64 hierarchy's
@@ -141,9 +137,7 @@ _SHAPES_64x64_MULTIPLE = [
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 @pytest.mark.parametrize("M, N", _SHAPES_64x64_MULTIPLE)
 @pytest.mark.parametrize("x_dtype", [torch.float32, torch.bfloat16], ids=str)
-def test_nvfp4_1x64_quantize_rowwise(
-    monkeypatch, x_dtype: torch.dtype, M: int, N: int
-) -> None:
+def test_nvfp4_1x64_quantize_rowwise(monkeypatch, x_dtype: torch.dtype, M: int, N: int) -> None:
     """Rowwise-only configuration -- preserves the original PR's coverage."""
     monkeypatch.setenv("NVTE_NVFP4_ROWWISE_1X64_LOCAL_ENCODE", "1")
     monkeypatch.setenv("NVTE_NVFP4_DISABLE_RHT", "1")
@@ -153,9 +147,7 @@ def test_nvfp4_1x64_quantize_rowwise(
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 @pytest.mark.parametrize("M, N", _SHAPES_64x64_MULTIPLE)
 @pytest.mark.parametrize("x_dtype", [torch.float32, torch.bfloat16], ids=str)
-def test_nvfp4_1x64_quantize_columnwise(
-    monkeypatch, x_dtype: torch.dtype, M: int, N: int
-) -> None:
+def test_nvfp4_1x64_quantize_columnwise(monkeypatch, x_dtype: torch.dtype, M: int, N: int) -> None:
     """Columnwise-only -- exercises the transposed output path on its own."""
     monkeypatch.setenv("NVTE_NVFP4_ROWWISE_1X64_LOCAL_ENCODE", "1")
     monkeypatch.setenv("NVTE_NVFP4_DISABLE_RHT", "1")
@@ -230,6 +222,4 @@ def test_nvfp4_1x64_quantize_extrema(
     # path simultaneously for that row's columns it spans.
     x[2] = 0.75
 
-    _check_quantization_1x64_versus_reference_with_input(
-        x, rowwise=rowwise, columnwise=columnwise
-    )
+    _check_quantization_1x64_versus_reference_with_input(x, rowwise=rowwise, columnwise=columnwise)
