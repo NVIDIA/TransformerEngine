@@ -1795,6 +1795,7 @@ class TestBasicOps:
     @pytest.mark.parametrize("quantization", _quantization_list)
     @pytest.mark.parametrize("quantize_forward", (False, True))
     @pytest.mark.parametrize("quantize_backward", (False, True))
+    @pytest.mark.parametrize("glu_linear_offset", (1.0, 0.0))
     def test_clamped_swiglu(
         self,
         *,
@@ -1805,6 +1806,7 @@ class TestBasicOps:
         quantization: Optional[str],
         quantize_forward: bool,
         quantize_backward: bool,
+        glu_linear_offset: float,
         limit: float = 0.75,
         alpha: float = 1.702,
     ):
@@ -1847,7 +1849,7 @@ class TestBasicOps:
         x_glu = x_glu.clamp(min=None, max=limit)
         x_linear = x_linear.clamp(min=-limit, max=limit)
         out_glu = x_glu * torch.sigmoid(alpha * x_glu)
-        y_ref = out_glu * (x_linear + 1)
+        y_ref = out_glu * (x_linear + glu_linear_offset)
         y_ref.backward(dy_ref)
 
         # Implementation with fusible operation
@@ -1858,6 +1860,7 @@ class TestBasicOps:
             te_ops.ClampedSwiGLU(
                 limit=limit,
                 alpha=alpha,
+                glu_linear_offset=glu_linear_offset,
                 glu_interleave_size=glu_interleave_size,
             ),
             te_ops.Quantize(forward=quantize_forward, backward=False),
@@ -2240,6 +2243,7 @@ class TestBasicOps:
     @pytest.mark.parametrize("in_shape", ((71, 192), (5, 7, 128)))
     @pytest.mark.parametrize("input_requires_grad", (False, True))
     @pytest.mark.parametrize("scales_requires_grad", (False, True))
+    @pytest.mark.parametrize("glu_linear_offset", (1.0, 0.0))
     def test_scaled_clamped_qgeglu(
         self,
         *,
@@ -2249,6 +2253,7 @@ class TestBasicOps:
         device: torch.device = "cuda",
         input_requires_grad: bool,
         scales_requires_grad: bool,
+        glu_linear_offset: float,
         limit: float = 7.0,
         alpha: float = 1.702,
     ) -> None:
@@ -2293,7 +2298,7 @@ class TestBasicOps:
         x_glu = x_glu.clamp(min=None, max=limit)
         x_linear = x_linear.clamp(min=-limit, max=limit)
         out_glu = x_glu * torch.sigmoid(alpha * x_glu)
-        y = out_glu * (x_linear + 1)
+        y = out_glu * (x_linear + glu_linear_offset)
         y_ref = scales_ref.unsqueeze(-1) * y
         if input_requires_grad or scales_requires_grad:
             y_ref.backward(dy_ref)
@@ -2302,6 +2307,7 @@ class TestBasicOps:
             glu_interleave_size=glu_interleave_size,
             limit=limit,
             alpha=alpha,
+            glu_linear_offset=glu_linear_offset,
         )
         y_test = op(x_test, scales_test)
         if input_requires_grad or scales_requires_grad:

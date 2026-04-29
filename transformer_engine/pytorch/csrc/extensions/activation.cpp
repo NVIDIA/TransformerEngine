@@ -328,13 +328,16 @@ py::object dswiglu(const at::Tensor& grad, const at::Tensor& input, py::handle q
 }
 
 /* clamped functions */
-py::object clamped_swiglu(const at::Tensor& input, py::handle quantizer, float limit, float alpha) {
-  return activation_helper<nullptr, nvte_clamped_swiglu>(input, quantizer, 2, limit, alpha);
+py::object clamped_swiglu(const at::Tensor& input, py::handle quantizer, float limit, float alpha,
+                          float glu_linear_offset) {
+  return activation_helper<nullptr, nvte_clamped_swiglu>(input, quantizer, 2, limit, alpha,
+                                                         glu_linear_offset);
 }
 
 py::object clamped_dswiglu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer,
-                           float limit, float alpha) {
-  return dactivation_helper<nullptr, nvte_clamped_dswiglu>(grad, input, quantizer, limit, alpha);
+                           float limit, float alpha, float glu_linear_offset) {
+  return dactivation_helper<nullptr, nvte_clamped_dswiglu>(grad, input, quantizer, limit, alpha,
+                                                           glu_linear_offset);
 }
 
 }  // namespace pytorch

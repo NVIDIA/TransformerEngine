@@ -208,6 +208,9 @@ class ClampedSwiGLU(BasicOperation):
         The clamp limit.
     alpha : float
         The scaling factor for the sigmoid function used in the activation.
+    glu_linear_offset : float
+        Offset added to the linear (gate) component after clamping.
+        Set to ``0.0`` to disable the offset.
     cache_quantized_input : bool, default = ``False``
         Quantize input tensor when caching for use in the backward pass.
     glu_interleave_size : int, optional
@@ -222,12 +225,14 @@ class ClampedSwiGLU(BasicOperation):
         *,
         limit: float = 7.0,
         alpha: float = 1.702,
+        glu_linear_offset: float = 1.0,
         cache_quantized_input: bool = False,
         glu_interleave_size: Optional[int] = None,
     ):
         super().__init__()
         self.limit: float = limit
         self.alpha: float = alpha
+        self.glu_linear_offset: float = glu_linear_offset
         self.cache_quantized_input: bool = cache_quantized_input
         self.glu_interleave_size: Optional[int] = glu_interleave_size
 
@@ -236,12 +241,13 @@ class ClampedSwiGLU(BasicOperation):
         swiglu_in: torch.Tensor,
         next_op_input_quantizer: Optional[Quantizer],
     ) -> torch.Tensor:
-        """Call :func:`tex.clamped_swiglu` with this op's ``limit`` / ``alpha``."""
+        """Call :func:`tex.clamped_swiglu` with this op's ``limit`` / ``alpha`` / ``glu_linear_offset``."""
         return tex.clamped_swiglu(
             swiglu_in,
             next_op_input_quantizer,
             self.limit,
             self.alpha,
+            self.glu_linear_offset,
         )
 
     def _tex_clamped_dswiglu(
@@ -250,13 +256,14 @@ class ClampedSwiGLU(BasicOperation):
         swiglu_in: torch.Tensor,
         quantizer: Optional[Quantizer],
     ) -> torch.Tensor:
-        """Call :func:`tex.clamped_dswiglu` with this op's ``limit`` / ``alpha``."""
+        """Call :func:`tex.clamped_dswiglu` with this op's ``limit`` / ``alpha`` / ``glu_linear_offset``."""
         return tex.clamped_dswiglu(
             dy,
             swiglu_in,
             quantizer,
             self.limit,
             self.alpha,
+            self.glu_linear_offset,
         )
 
     def op_forward(
@@ -557,6 +564,9 @@ class ScaledClampedQGeGLU(_ScaledGLU):
         Clamp limit (see :class:`ClampedSwiGLU`).
     alpha : float, default ``1.702``
         Sigmoid scale (see :class:`ClampedSwiGLU`).
+    glu_linear_offset : float, default ``1.0``
+        Offset added to the linear component after clamping
+        (see :class:`ClampedSwiGLU`).
 
     """
 
@@ -566,11 +576,13 @@ class ScaledClampedQGeGLU(_ScaledGLU):
         *,
         limit: float = 7.0,
         alpha: float = 1.702,
+        glu_linear_offset: float = 1.0,
     ) -> None:
         super().__init__(glu_interleave_size)
         self._clamped: ClampedSwiGLU = ClampedSwiGLU(
             limit=limit,
             alpha=alpha,
+            glu_linear_offset=glu_linear_offset,
         )
 
     def _glu_forward(self, swiglu_in: torch.Tensor) -> torch.Tensor:
