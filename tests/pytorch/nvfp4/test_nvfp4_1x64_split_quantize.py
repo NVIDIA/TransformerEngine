@@ -142,12 +142,8 @@ def _check_axis_a_against_oracle(
                 assert sut._amax_rowwise.shape[0] == 0, f"chunk {i} rowwise amax not empty"
             if columnwise:
                 # columnwise tensors are transposed: (N, M_chunk//2) etc.
-                assert sut._columnwise_data.shape[1] == 0, (
-                    f"chunk {i} columnwise data not empty"
-                )
-                assert sut._amax_columnwise.shape[1] == 0, (
-                    f"chunk {i} columnwise amax not empty"
-                )
+                assert sut._columnwise_data.shape[1] == 0, f"chunk {i} columnwise data not empty"
+                assert sut._amax_columnwise.shape[1] == 0, f"chunk {i} columnwise amax not empty"
             continue
 
         ref = NVFP4Quantizer1x64Ref(rowwise=rowwise, columnwise=columnwise).quantize(chunk)
@@ -166,9 +162,7 @@ def _check_axis_a_against_oracle(
             torch.testing.assert_close(
                 sx_sut[: sx_ref.shape[0], : sx_ref.shape[1]], sx_ref, atol=0.0, rtol=0.0
             )
-            torch.testing.assert_close(
-                sut._amax_rowwise, ref.window_amax_row, atol=0.0, rtol=0.0
-            )
+            torch.testing.assert_close(sut._amax_rowwise, ref.window_amax_row, atol=0.0, rtol=0.0)
 
         if columnwise:
             qxt_sut = _unpack_fp4(sut._columnwise_data.view(dtype=torch.uint8))
