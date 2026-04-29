@@ -21,8 +21,8 @@ template <typename DataType, typename IndexType>
 __global__ void fused_moe_aux_loss_forward_kernel(const DataType* probs,
                                                   const IndexType* tokens_per_expert,
                                                   int total_num_tokens, int num_experts,
-                                                  int num_rows, int num_cols, int topk,
-                                                  float coeff, float* Coeff_buf) {
+                                                  int num_rows, int num_cols, int topk, float coeff,
+                                                  float* Coeff_buf) {
   // -----------------------------------------------------------------------
   // 1) Write the CPU-computed coefficient into a device buffer to re-use in BWD
   // -----------------------------------------------------------------------
@@ -84,10 +84,10 @@ __global__ void convert_accum_to_output(const float* Coeff_buf, DataType* aux_lo
 template <typename DataType, typename IndexType>
 void fused_moe_aux_loss_forward_kernel_launcher(const DataType* probs,
                                                 const IndexType* tokens_per_expert,
-                                                int total_num_tokens, int num_experts,
-                                                int num_rows, int num_cols, int topk,
-                                                float coeff, DataType* aux_loss,
-                                                float* Coeff_buf, cudaStream_t stream) {
+                                                int total_num_tokens, int num_experts, int num_rows,
+                                                int num_cols, int topk, float coeff,
+                                                DataType* aux_loss, float* Coeff_buf,
+                                                cudaStream_t stream) {
   // Round up to a multiple of warp size for correct warp shuffles.
   const int block_size = ((std::min(1024, num_cols) + static_cast<int>(kThreadsPerWarp) - 1) /
                           static_cast<int>(kThreadsPerWarp)) *
@@ -113,9 +113,9 @@ void fused_moe_aux_loss_forward_kernel_launcher(const DataType* probs,
 }
 
 void fused_moe_aux_loss_forward(const Tensor& probs, const Tensor& tokens_per_expert,
-                                int total_num_tokens, int num_experts, int num_rows,
-                                int num_cols, int topk, float coeff, Tensor& aux_loss,
-                                Tensor& Coeff_buf, cudaStream_t stream) {
+                                int total_num_tokens, int num_experts, int num_rows, int num_cols,
+                                int topk, float coeff, Tensor& aux_loss, Tensor& Coeff_buf,
+                                cudaStream_t stream) {
   TE_ROUTER_PROBS_TYPE_SWITCH_ALL(
       probs.data.dtype, DataType,
       TE_ROUTER_INDEX_TYPE_SWITCH_ALL(
