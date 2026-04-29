@@ -70,16 +70,14 @@ def _build_model(
     """Build a Sequential of TransformerLayers, optionally with FP8 init.
 
     When fp8_init=True and use_meta_device=True (the default), the model is
-    created on the meta device to avoid FSDP2 incompatibility with
-    QuantizedTensor wrapper subclasses (e.g. MXFP8Tensor) whose storage is
-    inaccessible via data_ptr().  Parameters are materialized after FSDP2
-    sharding via reset_parameters() in _shard_model().
+    created on the meta device so parameters are materialized after FSDP2
+    sharding via reset_parameters() in _shard_model().  This ensures the
+    sharded parameter format is compatible with the FSDP2 all-gather hooks.
 
     When use_meta_device=False, the model is created directly on CUDA.
-    This is the legacy path that does NOT work for block-scaling quantized
-    tensors (MXFP8, Float8Blockwise, NVFP4) because FSDP2's
-    reset_sharded_param() crashes on wrapper subclass tensors with
-    data_ptr() == 0.
+    This only works for per-tensor FP8 (DelayedScaling, Float8CurrentScaling).
+    Block-scaling types (MXFP8, Float8Blockwise, NVFP4) fail because their
+    FSDP2 all-gather hooks do not support CUDA-initialized parameters.
     """
     if fp8_init:
         ctx = te.quantized_model_init(
@@ -220,18 +218,20 @@ def test_fused_adam_fp8_master_weights_no_meta(recipe_name):
     """FusedAdam with master_weights + FSDP2 + quantized_model_init WITHOUT meta device.
 
     This is the legacy path that creates quantized params directly on CUDA.
-    FSDP2's reset_sharded_param() crashes on block-scaling QuantizedTensor
-    wrapper subclasses (data_ptr() == 0). This test documents that failure.
+    FSDP2's forward-time all-gather hooks for block-scaling QuantizedTensor
+    subclasses fail when parameters are initialized directly on CUDA rather
+    than on the meta device. NVFP4Tensor does not implement the FSDP all-gather
+    hooks at all.
 
-    For per-tensor FP8 (DelayedScaling, Float8CurrentScaling) this works
-    because Float8Tensor's storage is accessible via data_ptr().
+    For per-tensor FP8 (DelayedScaling, Float8CurrentScaling) the all-gather
+    hooks handle CUDA-initialized Float8Tensor parameters correctly.
     """
     recipe = get_recipe_from_string(recipe_name)
 
     if recipe_name in ("MXFP8BlockScaling", "Float8BlockScaling", "NVFP4BlockScaling"):
         pytest.xfail(
-            f"{recipe_name}: FSDP2 without meta-device init crashes on block-scaling "
-            "QuantizedTensor wrapper subclasses (data_ptr() == 0). "
+            f"{recipe_name}: FSDP2 all-gather hooks for block-scaling QuantizedTensor "
+            "subclasses fail when parameters are initialized on CUDA. "
             "Use device='meta' + reset_parameters() after sharding."
         )
 
@@ -433,10 +433,15 @@ def test_fused_adam_fp8_no_master(recipe_name):
     """
     recipe = get_recipe_from_string(recipe_name)
 
-    if recipe_name in ("MXFP8BlockScaling", "Float8BlockScaling", "NVFP4BlockScaling"):
+    if recipe_name in (
+        "MXFP8BlockScaling",
+        "Float8BlockScaling",
+        "NVFP4BlockScaling",
+        "Float8CurrentScaling",
+    ):
         pytest.xfail(
             f"{recipe_name}: FusedAdam without master_weights does not support "
-            "block-scaling quantized tensors. Use master_weights=True."
+            "this quantized tensor type. Use master_weights=True."
         )
 
     world_size, device = _get_dist_info()
@@ -825,11 +830,21 @@ def test_dcp_output_parity(recipe_name, async_save):
             with te.autocast(enabled=True, recipe=recipe):
                 loaded_output = model2(x)
 
-        if isinstance(recipe, transformer_engine.common.recipe.DelayedScaling):
-            # DelayedScaling stores amax history and scaling factors in _extra_state,
-            # which cannot be saved via DCP due to non-deterministic pickle sizes
-            # across ranks. The fresh model therefore uses default scaling factors,
-            # producing small numerical differences from FP8 re-quantization.
+        # DelayedScaling: amax history and scaling factors live in _extra_state,
+        # which cannot be saved via DCP due to non-deterministic pickle sizes
+        # across ranks; the fresh model uses default scaling factors, producing
+        # small numerical differences from FP8 re-quantization.
+        # Float8CurrentScaling: Float8Tensor._scale_inv is passed via
+        # fsdp_pre_all_gather metadata rather than as a sharded tensor, so DCP
+        # saves it cast to the model's param_dtype (bf16) instead of fp32; the
+        # precision loss in the reloaded scale_inv prevents bitwise parity.
+        if isinstance(
+            recipe,
+            (
+                transformer_engine.common.recipe.DelayedScaling,
+                transformer_engine.common.recipe.Float8CurrentScaling,
+            ),
+        ):
             torch.testing.assert_close(
                 loaded_output,
                 ref_output,
@@ -861,7 +876,13 @@ def test_dcp_output_parity(recipe_name, async_save):
         loss2.backward()
         optimizer2.step()
 
-        if isinstance(recipe, transformer_engine.common.recipe.DelayedScaling):
+        if isinstance(
+            recipe,
+            (
+                transformer_engine.common.recipe.DelayedScaling,
+                transformer_engine.common.recipe.Float8CurrentScaling,
+            ),
+        ):
             torch.testing.assert_close(
                 out2,
                 out1,
@@ -1023,7 +1044,18 @@ def test_dcp_resharding_load(recipe_name):
         if rank == 0:
             ref_output = torch.load(ref_output_path, weights_only=True)
 
-            if isinstance(recipe, transformer_engine.common.recipe.DelayedScaling):
+            # DelayedScaling and Float8CurrentScaling use loose tolerance because
+            # Float8Tensor._scale_inv is passed via fsdp_pre_all_gather metadata
+            # rather than as a sharded tensor, so DCP saves it cast to the model's
+            # param_dtype (bf16) instead of fp32. The resulting precision loss in
+            # the reloaded scale_inv prevents bitwise-identical output parity.
+            if isinstance(
+                recipe,
+                (
+                    transformer_engine.common.recipe.DelayedScaling,
+                    transformer_engine.common.recipe.Float8CurrentScaling,
+                ),
+            ):
                 torch.testing.assert_close(
                     loaded_output,
                     ref_output,
