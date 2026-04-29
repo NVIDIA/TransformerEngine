@@ -423,7 +423,11 @@ def test_cp_with_fused_attention(
             )
         if config.attn_bias_type == "post_scale_bias" and is_training:
             pytest.skip("Deterministic mode does not support post_scale_bias with requires_grad")
-        if qkv_format == "thd" and config.num_heads >= 20 and get_device_compute_capability() == (9, 0):
+        if (
+            qkv_format == "thd"
+            and config.num_heads >= 20
+            and get_device_compute_capability() == (9, 0)
+        ):
             pytest.skip(
                 "Deterministic FusedAttention backward with THD format OOMs on sm90"
                 " for this particular test config since cuDNN reserves memory"
