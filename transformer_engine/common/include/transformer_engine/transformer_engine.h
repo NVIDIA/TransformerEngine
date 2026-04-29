@@ -370,6 +370,9 @@ enum NVTEQuantizationConfigAttribute {
    *  inconsistently between kernels.
    */
   kNVTEQuantizationConfigUseFastMath = 7,
+  /*! When true, NVFP4 non-RHT rowwise cast uses a per-1x64-K-tile amax to compute
+   *  S_enc = (fp8_max*fp4_max)/tile_amax, instead of a single per-tensor global amax. */
+  kNVTEQuantizationConfigNVFP4Rowwise1x64LocalEncode = 8,
   kNVTEQuantizationConfigNumAttributes
 };
 
@@ -1294,6 +1297,13 @@ class QuantizationConfigWrapper {
     const auto val = static_cast<uint8_t>(use_fast_math);
     nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigUseFastMath, &val,
                                            sizeof(val));
+  }
+
+  /*! \brief When true, use per-1x64 (along K) local amax for NVFP4 S_enc in rowwise non-RHT cast. */
+  void set_nvfp4_rowwise_1x64_local_encode(bool v) {
+    const auto val = static_cast<uint8_t>(v);
+    nvte_set_quantization_config_attribute(
+        config_, kNVTEQuantizationConfigNVFP4Rowwise1x64LocalEncode, &val, sizeof(val));
   }
 
  private:

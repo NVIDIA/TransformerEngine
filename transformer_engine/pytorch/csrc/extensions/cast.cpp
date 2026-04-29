@@ -18,6 +18,7 @@
 #include "../extensions.h"
 #include "common.h"
 #include "common/util/system.h"
+#include "nvfp4_1x64.h"
 #include "pybind.h"
 #include "transformer_engine/transformer_engine.h"
 
@@ -1256,10 +1257,8 @@ void split_quantize_nvfp4_impl_helper(const TensorWrapper &input,
   const size_t num_tensors = input_list.size();
   const auto &quantizer = *quantizers.front();
 
-  std::vector<NVTETensor> nvte_tensor_input_list;
   std::vector<NVTETensor> nvte_tensor_output_list;
   for (size_t i = 0; i < num_tensors; ++i) {
-    nvte_tensor_input_list.push_back(input_list[i].data());
     nvte_tensor_output_list.push_back(output_list[i].data());
   }
 
@@ -1273,8 +1272,8 @@ void split_quantize_nvfp4_impl_helper(const TensorWrapper &input,
     quant_config_list.emplace_back(QuantizationConfigWrapper());
   }
 
-  // TODO: this is only true because the non-RHT path doesn't have grouped kernels yet, which we can be optimized
-  // so that we can generate all rng states at once
+  // Per-tensor quantize: each tensor gets its own kernel launch, so RNG states
+  // are advanced once per tensor on the host.
   bool with_bulk_generate_rng_states = false;
 
   bool need_stochastic_rounding = quantizer.stochastic_rounding;
@@ -1287,25 +1286,39 @@ void split_quantize_nvfp4_impl_helper(const TensorWrapper &input,
       need_separate_rng_states, quant_config_list,
       dummy_quant_config_list_colwise);  // colwise rng states are not needed in this case
 
-  // We need:
-  // 1. Rowwise amax = amax for input
-  // 2. Columnwise amax = amax for input too
-  // Columnwise amax will be filled with a fused D2D copy from rowwise amax
-  // Note that the multi compute amax API expects rowwise amax pointer to be not null
-  // So we need to set the pointer accordingly to make colwise-only quantization work
-  std::vector<void *> orig_amax_ptr_list;
-  for (size_t i = 0; i < num_tensors; i++) {
-    auto rowwise_amax_ptr = output_list[i].get_amax().data_ptr;
-    orig_amax_ptr_list.push_back(rowwise_amax_ptr);
-    auto columnwise_amax_ptr = output_list[i].get_columnwise_amax().data_ptr;
-    void *amax_ptr = rowwise_amax_ptr != nullptr ? rowwise_amax_ptr : columnwise_amax_ptr;
-    NVTE_CHECK(amax_ptr != nullptr, "Could not find amax pointer");
-    output_list[i].set_amax(amax_ptr, DType::kFloat32, std::vector<size_t>{1});
+  // Optional NVFP4 1x64 local-encode: per-window amax is computed inside the
+  // kernel (see quantize.cuh), so the global per-tensor amax pre-pass is
+  // skipped. Otherwise the per-tensor nvte_quantize_v2 path remains identical
+  // to the non-1x64 baseline.
+  const bool use_rowwise_1x64 = nvfp4_1x64::local_encode_from_env();
+  for (size_t i = 0; i < num_tensors; ++i) {
+    nvfp4_1x64::config_apply(quant_config_list[i], quantizer.with_2d_quantization,
+                             quantizer.stochastic_rounding, use_rowwise_1x64);
   }
-  nvte_group_amax(input.data(), reinterpret_cast<NVTETensor *>(nvte_tensor_output_list.data()),
-                  split_sections.data(), num_tensors, stream);
-  for (size_t i = 0; i < num_tensors; i++) {
-    output_list[i].set_amax(orig_amax_ptr_list[i], DType::kFloat32, std::vector<size_t>{1});
+  nvfp4_1x64::require_ok_for_split(quantizer.rowwise_usage, quantizer.columnwise_usage,
+                                   quantizer.stochastic_rounding);
+
+  if (!use_rowwise_1x64) {
+    // We need:
+    // 1. Rowwise amax = amax for input
+    // 2. Columnwise amax = amax for input too
+    // Columnwise amax will be filled with a fused D2D copy from rowwise amax
+    // Note that the multi compute amax API expects rowwise amax pointer to be not null
+    // So we need to set the pointer accordingly to make colwise-only quantization work
+    std::vector<void *> orig_amax_ptr_list;
+    for (size_t i = 0; i < num_tensors; i++) {
+      auto rowwise_amax_ptr = output_list[i].get_amax().data_ptr;
+      orig_amax_ptr_list.push_back(rowwise_amax_ptr);
+      auto columnwise_amax_ptr = output_list[i].get_columnwise_amax().data_ptr;
+      void *amax_ptr = rowwise_amax_ptr != nullptr ? rowwise_amax_ptr : columnwise_amax_ptr;
+      NVTE_CHECK(amax_ptr != nullptr, "Could not find amax pointer");
+      output_list[i].set_amax(amax_ptr, DType::kFloat32, std::vector<size_t>{1});
+    }
+    nvte_group_amax(input.data(), reinterpret_cast<NVTETensor *>(nvte_tensor_output_list.data()),
+                    split_sections.data(), num_tensors, stream);
+    for (size_t i = 0; i < num_tensors; i++) {
+      output_list[i].set_amax(orig_amax_ptr_list[i], DType::kFloat32, std::vector<size_t>{1});
+    }
   }
 
   // Quantize tensors individually
@@ -1454,8 +1467,24 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
                            [](const py::handle &quantizer) -> bool {
                              return detail::IsNVFP4Quantizers(quantizer.ptr());
                            })) {
-      allocation_method = AllocationMethod::BULK_NVFP4;
-      quantization_method = QuantizationMethod::FUSED_NVFP4;
+      // bulk_allocate_nvfp4_tensors only knows the stock (1,) amax layout; the
+      // 1x64 kernel needs a per-window amax buffer of shape (M_chunk, N/64).
+      // When 1x64 is requested, fall back to per-tensor allocation
+      // (NVFP4Quantizer::create_tensor is 1x64-aware) but keep the fused
+      // quantize path so split_quantize_nvfp4_impl_helper still drives the
+      // kernel. Mirror the BULK_NVFP4 case's `% 128 != 0` fallback so
+      // non-aligned inner dims still go through the unfused per-tensor path
+      // (split_quantize_nvfp4_impl asserts inner dim is a multiple of 128).
+      if (nvfp4_1x64::local_encode_from_env()) {
+        if (!input_shape.empty() && input_shape.back() % 128 != 0) {
+          quantization_method = QuantizationMethod::UNFUSED;
+        } else {
+          quantization_method = QuantizationMethod::FUSED_NVFP4;
+        }
+      } else {
+        allocation_method = AllocationMethod::BULK_NVFP4;
+        quantization_method = QuantizationMethod::FUSED_NVFP4;
+      }
     }
   }
 
