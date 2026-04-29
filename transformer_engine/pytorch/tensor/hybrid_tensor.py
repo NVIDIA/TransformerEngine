@@ -52,9 +52,7 @@ class HybridQuantizer(Quantizer):
         # Gate each sub-quantizer call on the parent usage flag. Sub-quantizers
         # are pinned to one direction in ``__init__``; the parent flag decides
         # whether to invoke them.
-        rowwise_result = (
-            self.rowwise_quantizer.quantize(tensor) if self.rowwise_usage else None
-        )
+        rowwise_result = self.rowwise_quantizer.quantize(tensor) if self.rowwise_usage else None
         columnwise_result = (
             self.columnwise_quantizer.quantize(tensor) if self.columnwise_usage else None
         )
@@ -108,9 +106,7 @@ class HybridQuantizer(Quantizer):
             finally:
                 sub_quantizer.internal = prev_internal
 
-        rowwise_empty = (
-            _make_empty_internal(self.rowwise_quantizer) if self.rowwise_usage else None
-        )
+        rowwise_empty = _make_empty_internal(self.rowwise_quantizer) if self.rowwise_usage else None
         columnwise_empty = (
             _make_empty_internal(self.columnwise_quantizer) if self.columnwise_usage else None
         )

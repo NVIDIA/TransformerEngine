@@ -670,9 +670,9 @@ class TestHybridUsageFlagsRespected:
         current = sub_storage.get_data_tensors()
         if not isinstance(current, tuple):
             current = (current,)
-        assert len(snapshot) == len(current), (
-            f"Buffer count changed: {len(snapshot)} → {len(current)}"
-        )
+        assert len(snapshot) == len(
+            current
+        ), f"Buffer count changed: {len(snapshot)} → {len(current)}"
         for before, after in zip(snapshot, current):
             if before is None:
                 assert after is None
@@ -769,12 +769,8 @@ class TestHybridUsageFlagsRespected:
         both directions.
         """
         hybrid_recipe = _hybrid_custom_recipe(
-            row_factory=lambda: Float8CurrentScalingQuantizer(
-                tex.DType.kFloat8E4M3, device="cuda"
-            ),
-            col_factory=lambda: Float8CurrentScalingQuantizer(
-                tex.DType.kFloat8E4M3, device="cuda"
-            ),
+            row_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
+            col_factory=lambda: Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
         )
         torch.manual_seed(2026)
         model = Linear(128, 256, bias=False, params_dtype=torch.bfloat16).cuda()
