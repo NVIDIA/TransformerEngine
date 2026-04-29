@@ -43,6 +43,7 @@ from .tensor.float8_tensor import Float8Quantizer, Float8Tensor, Float8CurrentSc
 from .tensor.mxfp8_tensor import MXFP8Quantizer
 from .tensor.nvfp4_tensor import NVFP4Quantizer
 from .tensor.float8_blockwise_tensor import Float8BlockQuantizer
+from .tensor.hybrid_tensor import HybridQuantizer
 from .quantized_tensor import QuantizedTensorStorage, QuantizedTensor, Quantizer
 from .tensor.storage.float8_tensor_storage import Float8TensorStorage
 from .tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
@@ -1755,7 +1756,23 @@ def gather_along_first_dim(
             memory_format=torch.contiguous_format,
         )
         torch.distributed.all_gather_into_tensor(out, inp, group=process_group)
-        out = quantizer(out)
+        # Hybrid override: callers drop columnwise before AG, expecting to
+        # synthesize it post-AG via ``update_usage(columnwise_usage=True)``
+        # (native FP8's ``_create_transpose``). Hybrid has no synthesis path —
+        # that update_usage is a no-op — so re-quantize with both directions,
+        # mirroring what the planned native hybrid AG dispatch would produce
+        # (see the TODO in
+        # :meth:`HybridQuantizer.supports_only_rowwise_all_gather`); once
+        # native AG lands, hybrid won't reach this fallback.
+        if isinstance(quantizer, HybridQuantizer):
+            prev_row, prev_col = quantizer.rowwise_usage, quantizer.columnwise_usage
+            quantizer.set_usage(rowwise=True, columnwise=True)
+            try:
+                out = quantizer(out)
+            finally:
+                quantizer.set_usage(rowwise=prev_row, columnwise=prev_col)
+        else:
+            out = quantizer(out)
         return out, None
 
     # Dequantize quantized tensor if not supported

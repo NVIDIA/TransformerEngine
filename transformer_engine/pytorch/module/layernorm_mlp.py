@@ -2362,7 +2362,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 rowwise=True,
                 columnwise=isinstance(
                     fc2_input_quantizer,
-                    (MXFP8Quantizer, Float8BlockQuantizer, NVFP4Quantizer),
+                    (MXFP8Quantizer, Float8BlockQuantizer, NVFP4Quantizer, HybridQuantizer),
                 ),
             )
             fc2_input_quantizer.internal = True

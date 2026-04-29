@@ -540,6 +540,266 @@ class TestHybridMakeEmpty:
 
 
 @requires_fp8_and_nvfp4
+class TestHybridUsageFlagsRespected:
+    """``HybridQuantizer`` must skip directions whose parent usage flag is
+    False. Native quantizers honor ``rowwise_usage`` / ``columnwise_usage``
+    inside the C++ kernel; hybrid sub-quantizers are pinned to one direction
+    in ``__init__``, so the parent's flags never reach C++ — the equivalent
+    skip lives in the Python composition layer. Modules call ``set_usage``
+    extensively before each ``quantize`` (inference, output / grad_input
+    quantizers, AG paths), so honoring the flags avoids 2x quantization waste.
+    """
+
+    @pytest.fixture
+    def input_tensor(self):
+        torch.manual_seed(42)
+        return torch.randn(128, 256, dtype=torch.bfloat16, device="cuda")
+
+    # ── quantize_impl ────────────────────────────────────────────
+
+    def test_quantize_rowwise_only(self, input_tensor):
+        hq = _make_hybrid_quantizer_fp8_row_fp4_col()
+        hq.set_usage(rowwise=True, columnwise=False)
+        out = hq.quantize(input_tensor)
+        assert out.rowwise_sub_storage is not None
+        assert out.columnwise_sub_storage is None
+
+    def test_quantize_columnwise_only(self, input_tensor):
+        hq = _make_hybrid_quantizer_fp8_row_fp4_col()
+        hq.set_usage(rowwise=False, columnwise=True)
+        out = hq.quantize(input_tensor)
+        assert out.rowwise_sub_storage is None
+        assert out.columnwise_sub_storage is not None
+
+    def test_quantize_both_false(self, input_tensor):
+        """``set_usage(False, False)`` mirrors ``update_usage(False, False)`` —
+        both produce an empty hybrid. No defensive assert (matches native)."""
+        hq = _make_hybrid_quantizer_fp8_row_fp4_col()
+        hq.set_usage(rowwise=False, columnwise=False)
+        out = hq.quantize(input_tensor)
+        assert out.rowwise_sub_storage is None
+        assert out.columnwise_sub_storage is None
+
+    def test_quantize_both_true_default(self, input_tensor):
+        """Default state (both flags True) keeps both directions populated."""
+        hq = _make_hybrid_quantizer_fp8_row_fp4_col()
+        out = hq.quantize(input_tensor)
+        assert out.rowwise_sub_storage is not None
+        assert out.columnwise_sub_storage is not None
+
+    def test_quantize_internal_storage_rowwise_only(self, input_tensor):
+        """Internal storage path (used by FSDP2 / make_like flows) also
+        honors the gate."""
+        hq = _make_hybrid_quantizer_fp8_row_fp4_col()
+        hq.set_usage(rowwise=True, columnwise=False)
+        hq.internal = True
+        try:
+            out = hq.quantize(input_tensor)
+            assert isinstance(out, HybridQuantizedTensorStorage)
+            assert out.rowwise_sub_storage is not None
+            assert out.columnwise_sub_storage is None
+        finally:
+            hq.internal = False
+
+    def test_quantize_flag_change_between_calls(self, input_tensor):
+        """A single quantizer can be re-used with different flags across
+        calls (which is exactly how modules use one ``input_quantizer`` /
+        ``weight_quantizer`` across forward / backward phases)."""
+        hq = _make_hybrid_quantizer_fp8_row_fp4_col()
+
+        hq.set_usage(rowwise=True, columnwise=False)
+        out_row = hq.quantize(input_tensor)
+        assert out_row.rowwise_sub_storage is not None
+        assert out_row.columnwise_sub_storage is None
+
+        hq.set_usage(rowwise=False, columnwise=True)
+        out_col = hq.quantize(input_tensor)
+        assert out_col.rowwise_sub_storage is None
+        assert out_col.columnwise_sub_storage is not None
+
+        hq.set_usage(rowwise=True, columnwise=True)
+        out_both = hq.quantize(input_tensor)
+        assert out_both.rowwise_sub_storage is not None
+        assert out_both.columnwise_sub_storage is not None
+
+    # ── make_empty ───────────────────────────────────────────────
+
+    def test_make_empty_rowwise_only(self):
+        hq = _make_hybrid_quantizer_fp8_row_fp4_col()
+        hq.set_usage(rowwise=True, columnwise=False)
+        empty = hq.make_empty((128, 256), dtype=torch.bfloat16, device="cuda")
+        assert empty.rowwise_sub_storage is not None
+        assert empty.columnwise_sub_storage is None
+
+    def test_make_empty_columnwise_only(self):
+        hq = _make_hybrid_quantizer_fp8_row_fp4_col()
+        hq.set_usage(rowwise=False, columnwise=True)
+        empty = hq.make_empty((128, 256), dtype=torch.bfloat16, device="cuda")
+        assert empty.rowwise_sub_storage is None
+        assert empty.columnwise_sub_storage is not None
+
+    def test_make_empty_both_false(self):
+        hq = _make_hybrid_quantizer_fp8_row_fp4_col()
+        hq.set_usage(rowwise=False, columnwise=False)
+        empty = hq.make_empty((128, 256), dtype=torch.bfloat16, device="cuda")
+        assert empty.rowwise_sub_storage is None
+        assert empty.columnwise_sub_storage is None
+
+    # ── update_quantized ─────────────────────────────────────────
+    #
+    # Comparison strategy: snapshot raw data buffers via ``get_data_tensors()``
+    # and compare bytes pre/post-update (same pattern as ``TestHybridClear``).
+    # Avoids per-format ``dequantize()`` limitations (NVFP4 columnwise raises
+    # NotImplementedError) and is a strictly stronger check — if the kernel
+    # writes, raw bytes differ regardless of whether dequant is reversible.
+
+    @staticmethod
+    def _clone_data_tensors(sub_storage):
+        """Deep-clone the primary data buffers of a sub-storage."""
+        if sub_storage is None:
+            return ()
+        data = sub_storage.get_data_tensors()
+        if not isinstance(data, tuple):
+            data = (data,)
+        return tuple(t.clone() if t is not None else None for t in data)
+
+    @staticmethod
+    def _assert_data_tensors_equal(snapshot, sub_storage):
+        """Assert sub-storage's current data buffers byte-match a prior snapshot."""
+        assert sub_storage is not None
+        current = sub_storage.get_data_tensors()
+        if not isinstance(current, tuple):
+            current = (current,)
+        assert len(snapshot) == len(current), (
+            f"Buffer count changed: {len(snapshot)} → {len(current)}"
+        )
+        for before, after in zip(snapshot, current):
+            if before is None:
+                assert after is None
+                continue
+            assert after is not None
+            torch.testing.assert_close(before, after, rtol=0, atol=0)
+
+    @staticmethod
+    def _assert_data_tensors_differ(snapshot, sub_storage):
+        """Assert at least one buffer changed bytes vs the prior snapshot."""
+        assert sub_storage is not None
+        current = sub_storage.get_data_tensors()
+        if not isinstance(current, tuple):
+            current = (current,)
+        any_changed = False
+        for before, after in zip(snapshot, current):
+            if before is None or after is None:
+                continue
+            if not torch.equal(before, after):
+                any_changed = True
+                break
+        assert any_changed, "Expected at least one data buffer to change but none did"
+
+    def test_update_quantized_rowwise_only_preserves_columnwise_data(self, input_tensor):
+        """``update_quantized`` must not refresh a direction whose parent flag
+        is False, even if the dst storage has that direction allocated.
+
+        Mirrors how native ``tex.quantize(src, quantizer, dst, noop_flag)``
+        skips a direction when ``quantizer.rowwise_usage=False`` even if the
+        dst storage has that direction allocated.
+        """
+        hq = _make_hybrid_quantizer_fp8_row_fp4_col()
+        # Fully populate both directions
+        dst = hq.quantize(input_tensor)
+        # Snapshot the columnwise raw buffers before the targeted rowwise-only update
+        col_before = self._clone_data_tensors(dst._columnwise_storage)
+
+        # Switch to rowwise-only refresh and feed a substantially different src
+        hq.set_usage(rowwise=True, columnwise=False)
+        new_src = torch.randn(128, 256, dtype=torch.bfloat16, device="cuda") * 100
+        hq.update_quantized(new_src, dst)
+
+        # Both sub-storage objects survive in-place; columnwise bytes untouched
+        self._assert_data_tensors_equal(col_before, dst._columnwise_storage)
+
+    def test_update_quantized_columnwise_only_preserves_rowwise_data(self, input_tensor):
+        hq = _make_hybrid_quantizer_fp8_row_fp4_col()
+        dst = hq.quantize(input_tensor)
+        row_before = self._clone_data_tensors(dst._rowwise_storage)
+
+        hq.set_usage(rowwise=False, columnwise=True)
+        new_src = torch.randn(128, 256, dtype=torch.bfloat16, device="cuda") * 100
+        hq.update_quantized(new_src, dst)
+
+        self._assert_data_tensors_equal(row_before, dst._rowwise_storage)
+
+    def test_update_quantized_both_false_is_noop(self, input_tensor):
+        """``set_usage(False, False)`` then ``update_quantized`` must leave
+        both sub-storages' bytes untouched."""
+        hq = _make_hybrid_quantizer_fp8_row_fp4_col()
+        dst = hq.quantize(input_tensor)
+        row_before = self._clone_data_tensors(dst._rowwise_storage)
+        col_before = self._clone_data_tensors(dst._columnwise_storage)
+
+        hq.set_usage(rowwise=False, columnwise=False)
+        new_src = torch.randn(128, 256, dtype=torch.bfloat16, device="cuda") * 100
+        hq.update_quantized(new_src, dst)
+
+        self._assert_data_tensors_equal(row_before, dst._rowwise_storage)
+        self._assert_data_tensors_equal(col_before, dst._columnwise_storage)
+
+    def test_update_quantized_actually_refreshes_requested(self, input_tensor):
+        """Sanity check: when the parent flag is True, the corresponding
+        sub-storage IS refreshed (otherwise the previous tests would pass
+        vacuously by not refreshing anything)."""
+        hq = _make_hybrid_quantizer_fp8_row_fp4_col()
+        dst = hq.quantize(input_tensor)
+        row_before = self._clone_data_tensors(dst._rowwise_storage)
+
+        hq.set_usage(rowwise=True, columnwise=False)
+        new_src = torch.randn(128, 256, dtype=torch.bfloat16, device="cuda") * 100
+        hq.update_quantized(new_src, dst)
+
+        # Rowwise bytes must differ — confirms update_quantized actually ran
+        self._assert_data_tensors_differ(row_before, dst._rowwise_storage)
+
+    # ── te.Linear integration: inference path takes rowwise-only ─
+
+    def test_te_linear_inference_workspace_rowwise_only(self):
+        """``te.Linear`` forward under ``torch.no_grad()`` with a hybrid
+        ``CustomRecipe`` must produce a rowwise-only weight workspace.
+        ``linear.py:266-274`` sets ``weight_quantizer.set_usage(columnwise=False)``
+        in inference; without the parent-flag gate, hybrid would still allocate
+        both directions.
+        """
+        hybrid_recipe = _hybrid_custom_recipe(
+            row_factory=lambda: Float8CurrentScalingQuantizer(
+                tex.DType.kFloat8E4M3, device="cuda"
+            ),
+            col_factory=lambda: Float8CurrentScalingQuantizer(
+                tex.DType.kFloat8E4M3, device="cuda"
+            ),
+        )
+        torch.manual_seed(2026)
+        model = Linear(128, 256, bias=False, params_dtype=torch.bfloat16).cuda()
+        x = torch.randn(64, 128, dtype=torch.bfloat16, device="cuda")
+
+        # is_first_microbatch=True forces the cache_name="weight" path
+        # (see linear.py:1631) so the hybrid workspace persists in
+        # model._fp8_workspaces and we can inspect its sub-storages.
+        with torch.no_grad():
+            with autocast(enabled=True, recipe=hybrid_recipe):
+                _ = model(x, is_first_microbatch=True)
+
+        ws = model._fp8_workspaces.get("weight")
+        assert isinstance(
+            ws, HybridQuantizedTensorStorage
+        ), f"Expected hybrid weight workspace, got {type(ws).__name__}"
+        assert ws.rowwise_sub_storage is not None, "Rowwise sub-storage must be populated for fprop"
+        assert ws.columnwise_sub_storage is None, (
+            "Inference forward must produce rowwise-only hybrid weight workspace; "
+            "columnwise quantization should have been skipped per "
+            "weight_quantizer.set_usage(rowwise=True, columnwise=False)."
+        )
+
+
+@requires_fp8_and_nvfp4
 class TestHybridTorchDispatch:
     """Test torch dispatch operations."""
 

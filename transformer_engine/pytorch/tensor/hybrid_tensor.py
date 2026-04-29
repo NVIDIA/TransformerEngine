@@ -49,8 +49,15 @@ class HybridQuantizer(Quantizer):
         self.columnwise_quantizer.set_usage(rowwise=False, columnwise=True)
 
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
-        rowwise_result = self.rowwise_quantizer.quantize(tensor)
-        columnwise_result = self.columnwise_quantizer.quantize(tensor)
+        # Gate each sub-quantizer call on the parent usage flag. Sub-quantizers
+        # are pinned to one direction in ``__init__``; the parent flag decides
+        # whether to invoke them.
+        rowwise_result = (
+            self.rowwise_quantizer.quantize(tensor) if self.rowwise_usage else None
+        )
+        columnwise_result = (
+            self.columnwise_quantizer.quantize(tensor) if self.columnwise_usage else None
+        )
 
         if self.internal:
             return HybridQuantizedTensorStorage(
@@ -101,8 +108,12 @@ class HybridQuantizer(Quantizer):
             finally:
                 sub_quantizer.internal = prev_internal
 
-        rowwise_empty = _make_empty_internal(self.rowwise_quantizer)
-        columnwise_empty = _make_empty_internal(self.columnwise_quantizer)
+        rowwise_empty = (
+            _make_empty_internal(self.rowwise_quantizer) if self.rowwise_usage else None
+        )
+        columnwise_empty = (
+            _make_empty_internal(self.columnwise_quantizer) if self.columnwise_usage else None
+        )
 
         return HybridQuantizedTensor(
             shape=shape,
@@ -123,19 +134,19 @@ class HybridQuantizer(Quantizer):
         *,
         noop_flag: Optional[torch.Tensor] = None,
     ) -> QuantizedTensorStorage:
-        """Re-quantize both sub-storages of a hybrid tensor in-place.
+        """Re-quantize sub-storages of a hybrid tensor in-place.
 
-        Delegates to each sub-quantizer's update_quantized, which writes
-        new quantized data + scales into the existing sub-storage buffers.
+        Each direction is refreshed only when the parent usage flag is set
+        **and** the corresponding sub-storage exists.
         """
         if not isinstance(dst, HybridQuantizedTensorStorage):
             raise ValueError(
                 "HybridQuantizer can only update HybridQuantizedTensorStorage, got"
                 f" {type(dst).__name__}"
             )
-        if dst._rowwise_storage is not None:
+        if self.rowwise_usage and dst._rowwise_storage is not None:
             self.rowwise_quantizer.update_quantized(src, dst._rowwise_storage, noop_flag=noop_flag)
-        if dst._columnwise_storage is not None:
+        if self.columnwise_usage and dst._columnwise_storage is not None:
             self.columnwise_quantizer.update_quantized(
                 src, dst._columnwise_storage, noop_flag=noop_flag
             )
