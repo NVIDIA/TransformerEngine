@@ -29,6 +29,7 @@ from ...utils import (
     canonicalize_dtype,
     clear_tensor_data,
     devices_match,
+    get_device_compute_capability,
     round_up_to_nearest_multiple,
 )
 from .._common import (
@@ -703,15 +704,28 @@ class GroupedLinear(BasicOperation):
         )
 
     @staticmethod
-    def _is_graph_safe_path_supported(input_quantizers: Sequence[Optional[Quantizer]]) -> bool:
-        """Whether all input quantizers support the graph-safe grouped-tensor flow.
+    def _is_graph_safe_path_supported(
+        *,
+        with_quantized_compute: bool,
+        input_quantizers: Sequence[Optional[Quantizer]],
+        dtype: torch.dtype,
+    ) -> bool:
+        """Whether the graph-safe grouped-tensor flow can be used.
 
-        See ``_GROUPED_QUANTIZE_SUPPORTED_QUANTIZERS`` for the gating rationale.
-        Currently this is MXFP8 only; every other quantization recipe (fp8 delayed /
-        current scaling, fp8 block scaling, NVFP4, ...) falls back to the
-        legacy ``tex.split_quantize`` + ``general_grouped_gemm`` flow.
+        * The graph-safe path dispatches to ``general_grouped_gemm_for_grouped_tensor``,
+          which is backed by ``nvte_grouped_gemm_with_discrete_inputA`` in the common
+          library. That kernel requires Blackwell (SM100) or newer with cuBLAS 13.3+.
+        * Quantized compute is currently MXFP8-only; every other quantization
+          recipe (fp8 delayed / current scaling, fp8 block scaling, NVFP4, ...)
+          falls back to the legacy flow.
+        * Unquantized compute supports BF16/FP16 only -- FP32 is excluded
+          because the cublasLt grouped GEMM doesn't support it.
         """
-        return all(isinstance(q, MXFP8Quantizer) for q in input_quantizers)
+        if get_device_compute_capability() < (10, 0):
+            return False
+        if with_quantized_compute:
+            return all(isinstance(q, MXFP8Quantizer) for q in input_quantizers)
+        return dtype in (torch.bfloat16, torch.float16)
 
     def _get_grouped_weight_for_gemm(
         self,
@@ -891,16 +905,16 @@ class GroupedLinear(BasicOperation):
         if self._scale_bias:
             scales = basic_op_extra_inputs[0][1]
 
-        # Dispatch: graph-safe GroupedTensor flow whenever it can be used --
-        # Unquantized (bf16/fp16) compute path:
-        #   * We just wrap the existing high-precision data as a ``GroupedTensor`` (no quantize call).
-        #   * FP32 is excluded because the cublasLt grouped GEMM doesnt support it.
-        # Quantized compute path:
-        #   * Currently only supported for MXFP8. NVFP4 support will be enabled once
-        #    the NVFP4 GGEMM support is added.
-        use_grouped_tensor_path = (
-            with_quantized_compute and self._is_graph_safe_path_supported(input_quantizers)
-        ) or (not with_quantized_compute and dtype in (torch.bfloat16, torch.float16))
+        # Dispatch: graph-safe GroupedTensor flow whenever it can be used.
+        # See ``_is_graph_safe_path_supported`` for the gating rationale --
+        # in short it requires Blackwell (SM100+) plus a supported dtype /
+        # quantization recipe. Otherwise we fall back to the legacy
+        # ``tex.split_quantize`` + ``general_grouped_gemm`` flow.
+        use_grouped_tensor_path = self._is_graph_safe_path_supported(
+            with_quantized_compute=with_quantized_compute,
+            input_quantizers=input_quantizers,
+            dtype=dtype,
+        )
         if use_grouped_tensor_path:
             return self._fuser_forward_grouped_tensor(
                 ctx=ctx,

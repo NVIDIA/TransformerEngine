@@ -2310,6 +2310,8 @@ class TestBasicOps:
         GPU-resident split offsets and is the only flow safe to capture.
         """
 
+        if torch.cuda.get_device_capability() < (10, 0):
+            pytest.skip("Grouped GEMM CUDA-graph-safe path requires SM100+ (Blackwell)")
         # Skip invalid configurations
         if quantization is None and quantized_weight:
             pytest.skip("quantized_weight requires a quantization recipe")
