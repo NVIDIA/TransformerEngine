@@ -1220,3 +1220,464 @@ def test_custom_recipe_debug_tool_compat():
         import os
 
         os.unlink(config_path)
+
+
+# ----------------------------------------------------------------------
+# Role-aware dispatch in built-in block-scaling recipe states
+# ----------------------------------------------------------------------
+#
+# These tests exercise ``Float8BlockScalingRecipeState.make_quantizers`` and
+# ``NVFP4BlockScalingRecipeState.make_quantizers`` directly to verify that
+# per-slot dispatch is driven by ``QuantizerRole.tensor_type`` with a
+# positional fallback that matches the legacy behavior. They construct the
+# recipe state objects directly (no autocast / no fwd pass) so they don't
+# depend on any module's ``get_quantizer_roles`` implementation.
+
+
+def _fp8block_role(tensor_type):
+    """QuantizerRole helper for FP8-block tests."""
+    return QuantizerRole(module_type="linear", tensor_type=tensor_type, name="t")
+
+
+def test_fp8block_recipe_state_role_dispatch_forward():
+    """Forward dispatch: input/output -> x cfg, weight -> w cfg."""
+    available, reason = te.is_fp8_block_scaling_available(return_reason=True)
+    if not torch.cuda.is_available() or not available:
+        pytest.skip(f"FP8 block scaling unsupported: {reason}")
+
+    from transformer_engine.pytorch.quantization import Float8BlockScalingRecipeState
+
+    fp8_recipe = recipe.Float8BlockScaling()
+    state = Float8BlockScalingRecipeState(
+        fp8_recipe,
+        mode="forward",
+        num_quantizers=3,
+        roles=[
+            _fp8block_role("input"),
+            _fp8block_role("weight"),
+            _fp8block_role("output"),
+        ],
+    )
+    quantizers = state.make_quantizers()
+    assert len(quantizers) == 3
+    # input slot uses x cfg
+    assert quantizers[0].block_scaling_dim == fp8_recipe.x_block_scaling_dim
+    # weight slot uses w cfg
+    assert quantizers[1].block_scaling_dim == fp8_recipe.w_block_scaling_dim
+    # output slot mirrors input cfg (legacy behavior preserved)
+    assert quantizers[2].block_scaling_dim == fp8_recipe.x_block_scaling_dim
+    # Sanity: the recipe defaults distinguish x and w block scaling dims so
+    # the test would fail if dispatch were uniform.
+    assert fp8_recipe.x_block_scaling_dim != fp8_recipe.w_block_scaling_dim
+
+
+def test_fp8block_recipe_state_role_dispatch_backward():
+    """Backward dispatch: grad_output / grad_input both -> grad cfg."""
+    available, reason = te.is_fp8_block_scaling_available(return_reason=True)
+    if not torch.cuda.is_available() or not available:
+        pytest.skip(f"FP8 block scaling unsupported: {reason}")
+
+    from transformer_engine.pytorch.quantization import Float8BlockScalingRecipeState
+
+    fp8_recipe = recipe.Float8BlockScaling()
+    state = Float8BlockScalingRecipeState(
+        fp8_recipe,
+        mode="backward",
+        num_quantizers=2,
+        roles=[
+            _fp8block_role("grad_output"),
+            _fp8block_role("grad_input"),
+        ],
+    )
+    quantizers = state.make_quantizers()
+    assert len(quantizers) == 2
+    for q in quantizers:
+        assert q.block_scaling_dim == fp8_recipe.grad_block_scaling_dim
+
+
+def test_fp8block_recipe_state_positional_fallback_matches_explicit_roles():
+    """``roles=None`` produces the same per-slot configs as explicit ``[input, weight, output]``."""
+    available, reason = te.is_fp8_block_scaling_available(return_reason=True)
+    if not torch.cuda.is_available() or not available:
+        pytest.skip(f"FP8 block scaling unsupported: {reason}")
+
+    from transformer_engine.pytorch.quantization import Float8BlockScalingRecipeState
+
+    fp8_recipe = recipe.Float8BlockScaling()
+
+    explicit = Float8BlockScalingRecipeState(
+        fp8_recipe,
+        mode="forward",
+        num_quantizers=3,
+        roles=[
+            _fp8block_role("input"),
+            _fp8block_role("weight"),
+            _fp8block_role("output"),
+        ],
+    ).make_quantizers()
+
+    fallback = Float8BlockScalingRecipeState(
+        fp8_recipe,
+        mode="forward",
+        num_quantizers=3,
+        roles=None,
+    ).make_quantizers()
+
+    assert len(explicit) == len(fallback) == 3
+    for a, b in zip(explicit, fallback):
+        assert a.block_scaling_dim == b.block_scaling_dim
+        assert a.dtype == b.dtype
+        assert a.amax_epsilon == b.amax_epsilon
+        assert a.force_pow_2_scales == b.force_pow_2_scales
+
+
+def test_fp8block_recipe_state_supports_non_multiple_of_three():
+    """Two-slot forward (fusible-Linear shape) used to fail ``% 3 == 0`` assert."""
+    available, reason = te.is_fp8_block_scaling_available(return_reason=True)
+    if not torch.cuda.is_available() or not available:
+        pytest.skip(f"FP8 block scaling unsupported: {reason}")
+
+    from transformer_engine.pytorch.quantization import Float8BlockScalingRecipeState
+
+    fp8_recipe = recipe.Float8BlockScaling()
+    state = Float8BlockScalingRecipeState(
+        fp8_recipe,
+        mode="forward",
+        num_quantizers=2,
+        roles=[
+            _fp8block_role("input"),
+            _fp8block_role("weight"),
+        ],
+    )
+    quantizers = state.make_quantizers()
+    assert len(quantizers) == 2
+    assert quantizers[0].block_scaling_dim == fp8_recipe.x_block_scaling_dim
+    assert quantizers[1].block_scaling_dim == fp8_recipe.w_block_scaling_dim
+
+
+def test_fp8block_recipe_state_unknown_or_none_role_falls_back_positionally():
+    """Per-slot ``None`` and unknown ``tensor_type`` use the positional pattern."""
+    available, reason = te.is_fp8_block_scaling_available(return_reason=True)
+    if not torch.cuda.is_available() or not available:
+        pytest.skip(f"FP8 block scaling unsupported: {reason}")
+
+    from transformer_engine.pytorch.quantization import Float8BlockScalingRecipeState
+
+    fp8_recipe = recipe.Float8BlockScaling()
+    # Slot 0: bare role (empty tensor_type) -> positional "input" -> x cfg
+    # Slot 1: unknown tensor_type "qkv" (DPA-style) -> positional "weight" -> w cfg
+    # Slot 2: None role -> positional "output" -> x cfg
+    state = Float8BlockScalingRecipeState(
+        fp8_recipe,
+        mode="forward",
+        num_quantizers=3,
+        roles=[
+            QuantizerRole(),
+            QuantizerRole(module_type="dpa", tensor_type="qkv"),
+            None,
+        ],
+    )
+    quantizers = state.make_quantizers()
+    assert len(quantizers) == 3
+    assert quantizers[0].block_scaling_dim == fp8_recipe.x_block_scaling_dim
+    assert quantizers[1].block_scaling_dim == fp8_recipe.w_block_scaling_dim
+    assert quantizers[2].block_scaling_dim == fp8_recipe.x_block_scaling_dim
+
+
+def _nvfp4_role(tensor_type):
+    return QuantizerRole(module_type="linear", tensor_type=tensor_type, name="t")
+
+
+def test_nvfp4_recipe_state_role_dispatch_forward():
+    """Forward dispatch: input/output -> inp cfg (RHT, 1D), weight -> weight cfg (no RHT, 2D)."""
+    if not torch.cuda.is_available() or not te.is_nvfp4_available():
+        pytest.skip("NVFP4 unsupported on this device")
+
+    from transformer_engine.pytorch.quantization import NVFP4BlockScalingRecipeState
+
+    nvfp4_recipe = recipe.NVFP4BlockScaling()
+    state = NVFP4BlockScalingRecipeState(
+        nvfp4_recipe,
+        mode="forward",
+        num_quantizers=3,
+        roles=[
+            _nvfp4_role("input"),
+            _nvfp4_role("weight"),
+            _nvfp4_role("output"),
+        ],
+    )
+    quantizers = state.make_quantizers()
+    assert len(quantizers) == 3
+    # input slot
+    assert quantizers[0].with_rht == nvfp4_recipe.fp4_quant_fwd_inp.random_hadamard_transform
+    assert quantizers[0].with_2d_quantization == nvfp4_recipe.fp4_quant_fwd_inp.fp4_2d_quantization
+    # weight slot
+    assert quantizers[1].with_rht == nvfp4_recipe.fp4_quant_fwd_weight.random_hadamard_transform
+    assert (
+        quantizers[1].with_2d_quantization
+        == nvfp4_recipe.fp4_quant_fwd_weight.fp4_2d_quantization
+    )
+    # output slot mirrors input cfg
+    assert quantizers[2].with_rht == nvfp4_recipe.fp4_quant_fwd_inp.random_hadamard_transform
+    assert quantizers[2].with_2d_quantization == nvfp4_recipe.fp4_quant_fwd_inp.fp4_2d_quantization
+    # Sanity: defaults distinguish input vs weight (RHT and 2D toggles differ).
+    assert (
+        nvfp4_recipe.fp4_quant_fwd_inp.random_hadamard_transform
+        != nvfp4_recipe.fp4_quant_fwd_weight.random_hadamard_transform
+    ) or (
+        nvfp4_recipe.fp4_quant_fwd_inp.fp4_2d_quantization
+        != nvfp4_recipe.fp4_quant_fwd_weight.fp4_2d_quantization
+    )
+
+
+def test_nvfp4_recipe_state_role_dispatch_backward():
+    """Backward dispatch: any slot -> grad cfg (uniform)."""
+    if not torch.cuda.is_available() or not te.is_nvfp4_available():
+        pytest.skip("NVFP4 unsupported on this device")
+
+    from transformer_engine.pytorch.quantization import NVFP4BlockScalingRecipeState
+
+    nvfp4_recipe = recipe.NVFP4BlockScaling()
+    state = NVFP4BlockScalingRecipeState(
+        nvfp4_recipe,
+        mode="backward",
+        num_quantizers=2,
+        roles=[
+            _nvfp4_role("grad_output"),
+            _nvfp4_role("grad_input"),
+        ],
+    )
+    quantizers = state.make_quantizers()
+    assert len(quantizers) == 2
+    for q in quantizers:
+        assert q.with_rht == nvfp4_recipe.fp4_quant_bwd_grad.random_hadamard_transform
+        assert q.with_2d_quantization == nvfp4_recipe.fp4_quant_bwd_grad.fp4_2d_quantization
+        assert q.stochastic_rounding == nvfp4_recipe.fp4_quant_bwd_grad.stochastic_rounding
+
+
+def test_nvfp4_recipe_state_positional_fallback_matches_explicit_roles():
+    """``roles=None`` matches explicit ``[input, weight, output]`` slot-for-slot."""
+    if not torch.cuda.is_available() or not te.is_nvfp4_available():
+        pytest.skip("NVFP4 unsupported on this device")
+
+    from transformer_engine.pytorch.quantization import NVFP4BlockScalingRecipeState
+
+    nvfp4_recipe = recipe.NVFP4BlockScaling()
+
+    explicit = NVFP4BlockScalingRecipeState(
+        nvfp4_recipe,
+        mode="forward",
+        num_quantizers=3,
+        roles=[
+            _nvfp4_role("input"),
+            _nvfp4_role("weight"),
+            _nvfp4_role("output"),
+        ],
+    ).make_quantizers()
+
+    fallback = NVFP4BlockScalingRecipeState(
+        nvfp4_recipe,
+        mode="forward",
+        num_quantizers=3,
+        roles=None,
+    ).make_quantizers()
+
+    assert len(explicit) == len(fallback) == 3
+    for a, b in zip(explicit, fallback):
+        assert a.with_rht == b.with_rht
+        assert a.with_post_rht_amax == b.with_post_rht_amax
+        assert a.with_2d_quantization == b.with_2d_quantization
+        assert a.stochastic_rounding == b.stochastic_rounding
+        assert a.dtype == b.dtype
+
+
+def test_nvfp4_recipe_state_supports_non_multiple_of_three():
+    """Two-slot forward (fusible-Linear shape) succeeds with role-driven dispatch."""
+    if not torch.cuda.is_available() or not te.is_nvfp4_available():
+        pytest.skip("NVFP4 unsupported on this device")
+
+    from transformer_engine.pytorch.quantization import NVFP4BlockScalingRecipeState
+
+    nvfp4_recipe = recipe.NVFP4BlockScaling()
+    state = NVFP4BlockScalingRecipeState(
+        nvfp4_recipe,
+        mode="forward",
+        num_quantizers=2,
+        roles=[
+            _nvfp4_role("input"),
+            _nvfp4_role("weight"),
+        ],
+    )
+    quantizers = state.make_quantizers()
+    assert len(quantizers) == 2
+    assert quantizers[0].with_rht == nvfp4_recipe.fp4_quant_fwd_inp.random_hadamard_transform
+    assert quantizers[1].with_rht == nvfp4_recipe.fp4_quant_fwd_weight.random_hadamard_transform
+
+
+def test_nvfp4_recipe_state_unknown_or_none_role_falls_back_positionally():
+    """Per-slot ``None`` and unknown ``tensor_type`` use the positional pattern."""
+    if not torch.cuda.is_available() or not te.is_nvfp4_available():
+        pytest.skip("NVFP4 unsupported on this device")
+
+    from transformer_engine.pytorch.quantization import NVFP4BlockScalingRecipeState
+
+    nvfp4_recipe = recipe.NVFP4BlockScaling()
+    # Slot 0: bare role (empty tensor_type) -> positional "input" -> inp cfg
+    # Slot 1: DPA-style unknown tensor_type "qkv" -> positional "weight" -> weight cfg
+    # Slot 2: None role -> positional "output" -> inp cfg
+    state = NVFP4BlockScalingRecipeState(
+        nvfp4_recipe,
+        mode="forward",
+        num_quantizers=3,
+        roles=[
+            QuantizerRole(),
+            QuantizerRole(module_type="dpa", tensor_type="qkv"),
+            None,
+        ],
+    )
+    quantizers = state.make_quantizers()
+    assert len(quantizers) == 3
+    assert quantizers[0].with_rht == nvfp4_recipe.fp4_quant_fwd_inp.random_hadamard_transform
+    assert quantizers[1].with_rht == nvfp4_recipe.fp4_quant_fwd_weight.random_hadamard_transform
+    assert quantizers[2].with_rht == nvfp4_recipe.fp4_quant_fwd_inp.random_hadamard_transform
+
+
+# ----------------------------------------------------------------------
+# RecipeState._slot_role primitive
+# ----------------------------------------------------------------------
+#
+# `_slot_role` is the primitive that role-driven recipe states use to
+# resolve per-slot dispatch info. It returns the real role when one was
+# provided and synthesizes one with the positional ``tensor_type`` fallback
+# (and empty ``module_type``/``name``) otherwise. Future recipes that
+# dispatch on ``module_type`` / ``name`` rely on this contract.
+#
+# We exercise these via a concrete ``Float8BlockScalingRecipeState`` since
+# ``RecipeState`` is abstract; the helper itself is mode-aware but
+# recipe-agnostic.
+
+
+def _make_fp8block_state(*, mode, num_quantizers, roles):
+    from transformer_engine.pytorch.quantization import Float8BlockScalingRecipeState
+
+    return Float8BlockScalingRecipeState(
+        recipe.Float8BlockScaling(),
+        mode=mode,
+        num_quantizers=num_quantizers,
+        roles=roles,
+    )
+
+
+def test_slot_role_passes_real_role_through_unchanged():
+    """A real ``QuantizerRole`` from the producer is returned as-is."""
+    available, reason = te.is_fp8_block_scaling_available(return_reason=True)
+    if not torch.cuda.is_available() or not available:
+        pytest.skip(f"FP8 block scaling unsupported: {reason}")
+
+    real = QuantizerRole(module_type="linear", tensor_type="weight", name="layer37.fc1")
+    state = _make_fp8block_state(mode="forward", num_quantizers=1, roles=[real])
+    resolved = state._slot_role(0)
+    # Identity: no copying, the real instance is returned.
+    assert resolved is real
+    assert resolved.module_type == "linear"
+    assert resolved.tensor_type == "weight"
+    assert resolved.name == "layer37.fc1"
+
+
+def test_slot_role_passes_unknown_tensor_type_through_unchanged():
+    """A real role with non-canonical ``tensor_type`` is NOT remapped by ``_slot_role``.
+
+    ``_slot_tensor_type`` would fall back to positional, but ``_slot_role``
+    must preserve the original so module-type / name dispatch still works.
+    """
+    available, reason = te.is_fp8_block_scaling_available(return_reason=True)
+    if not torch.cuda.is_available() or not available:
+        pytest.skip(f"FP8 block scaling unsupported: {reason}")
+
+    dpa_role = QuantizerRole(module_type="dpa", tensor_type="qkv", name="self_attention.dpa")
+    state = _make_fp8block_state(mode="forward", num_quantizers=1, roles=[dpa_role])
+    resolved = state._slot_role(0)
+    assert resolved is dpa_role
+    assert resolved.tensor_type == "qkv"  # unchanged, NOT folded into known set
+    # ``_slot_tensor_type`` still falls back to positional pattern[0] = "input".
+    assert state._slot_tensor_type(0) == "input"
+
+
+def test_slot_role_returns_bare_role_when_per_slot_role_is_none():
+    """Boundary slot (``roles[i] is None``) returns a bare ``QuantizerRole()``.
+
+    The primitive does NOT synthesize a positional ``tensor_type`` — that's
+    a tensor-type-dispatch policy owned by ``_slot_tensor_type``.
+    """
+    available, reason = te.is_fp8_block_scaling_available(return_reason=True)
+    if not torch.cuda.is_available() or not available:
+        pytest.skip(f"FP8 block scaling unsupported: {reason}")
+
+    real_input = QuantizerRole(module_type="linear", tensor_type="input", name="t")
+    real_weight = QuantizerRole(module_type="linear", tensor_type="weight", name="t")
+    # Slot 2 (output) is None: typical for Linear without parent setting
+    # ``_output_quantizer_role``.
+    state = _make_fp8block_state(
+        mode="forward", num_quantizers=3, roles=[real_input, real_weight, None]
+    )
+    # Real slots pass through.
+    assert state._slot_role(0) is real_input
+    assert state._slot_role(1) is real_weight
+    # None slot returns a bare QuantizerRole(): all fields empty, no
+    # tensor-type-specific synthesis.
+    bare = state._slot_role(2)
+    assert bare.tensor_type == ""
+    assert bare.module_type == ""
+    assert bare.name == ""
+    # Consumers get positional fallback through _slot_tensor_type, not _slot_role.
+    assert state._slot_tensor_type(2) == "output"
+
+
+def test_slot_role_returns_bare_role_when_roles_list_is_none():
+    """``roles=None`` yields bare ``QuantizerRole()`` for every slot, fwd and bwd.
+
+    Positional fallback for tensor types lives in ``_slot_tensor_type``, not here.
+    """
+    available, reason = te.is_fp8_block_scaling_available(return_reason=True)
+    if not torch.cuda.is_available() or not available:
+        pytest.skip(f"FP8 block scaling unsupported: {reason}")
+
+    fwd = _make_fp8block_state(mode="forward", num_quantizers=4, roles=None)
+    # _slot_role is field-agnostic: every slot is a bare QuantizerRole().
+    for i in range(4):
+        role = fwd._slot_role(i)
+        assert role.tensor_type == ""
+        assert role.module_type == ""
+        assert role.name == ""
+    # _slot_tensor_type applies the positional fallback (with wrap).
+    fwd_types = [fwd._slot_tensor_type(i) for i in range(4)]
+    assert fwd_types == ["input", "weight", "output", "input"]
+
+    bwd = _make_fp8block_state(mode="backward", num_quantizers=3, roles=None)
+    for i in range(3):
+        assert bwd._slot_role(i).tensor_type == ""
+    bwd_types = [bwd._slot_tensor_type(i) for i in range(3)]
+    assert bwd_types == ["grad_output", "grad_input", "grad_output"]
+
+
+def test_slot_role_supports_module_type_only_role():
+    """A role that fills ONLY ``module_type`` is preserved as-is.
+
+    This is the producer convention for future module-type-driven recipes:
+    fill only the field(s) you have signal for. ``_slot_role`` must not
+    invent a ``tensor_type`` to mask the empty one (otherwise the module-type
+    branch in a mixed recipe would never see a clean signal).
+    """
+    available, reason = te.is_fp8_block_scaling_available(return_reason=True)
+    if not torch.cuda.is_available() or not available:
+        pytest.skip(f"FP8 block scaling unsupported: {reason}")
+
+    moe = QuantizerRole(module_type="moe_expert")
+    state = _make_fp8block_state(mode="forward", num_quantizers=1, roles=[moe])
+    resolved = state._slot_role(0)
+    assert resolved is moe
+    assert resolved.module_type == "moe_expert"
+    assert resolved.tensor_type == ""  # NOT auto-filled
+    assert resolved.name == ""
+    # Tensor-type-only recipes fall back to positional for this slot.
+    assert state._slot_tensor_type(0) == "input"

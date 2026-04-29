@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import abc
 import dataclasses
-import itertools
 import warnings
 import os
 from dataclasses import dataclass, field
@@ -1136,6 +1135,17 @@ class RecipeState(abc.ABC):
     """
 
     roles: Optional[List[QuantizerRole]]
+    mode: str
+
+    # Canonical tensor types that a recipe state can dispatch on.
+    _KNOWN_TENSOR_TYPES = ("input", "weight", "output", "grad_output", "grad_input")
+    # Positional fallback used when no role information is available: the
+    # tensor type at slot ``i`` defaults to ``_FWD_DEFAULT_TENSOR_TYPES[i % len]``
+    # (forward) or ``_BWD_DEFAULT_TENSOR_TYPES[i % len]`` (backward). Mirrors
+    # the ``[input, weight, output, ...]`` / ``[grad_output, grad_input, ...]``
+    # convention assumed by ``module/base.py::set_meta_tensor``.
+    _FWD_DEFAULT_TENSOR_TYPES = ("input", "weight", "output")
+    _BWD_DEFAULT_TENSOR_TYPES = ("grad_output", "grad_input")
 
     @staticmethod
     def _validate_roles(
@@ -1148,6 +1158,72 @@ class RecipeState(abc.ABC):
                 "RecipeState requires roles to match num_quantizers "
                 f"({len(roles)=} vs {num_quantizers=})"
             )
+
+    def _slot_role(self, idx: int) -> QuantizerRole:
+        """Resolve slot ``idx`` to a non-``None`` :class:`QuantizerRole`.
+
+        This is the field-agnostic primitive that role-driven recipe states
+        use to dispatch on any combination of role fields (``tensor_type``,
+        ``module_type``, ``name``, future fields).
+
+        Resolution rules:
+
+        * If a real ``QuantizerRole`` was provided for this slot, it is
+          returned unchanged. Producers fill only the fields they know about;
+          the rest carry the dataclass defaults (empty strings). Consumers
+          should treat an empty field as "no signal" rather than as "no role
+          provided".
+        * Otherwise (whole ``roles`` list missing, or this slot is ``None``),
+          a bare ``QuantizerRole()`` with all fields empty is returned.
+          Field-specific fallback policies belong to the individual
+          dispatch convenience accessors (e.g. :meth:`_slot_tensor_type`),
+          not to this primitive — that way a future recipe state that
+          dispatches on, say, ``module_type`` is free to define its own
+          fallback policy without impacting tensor-type dispatch.
+
+        The "real role vs bare-default role" distinction is hidden from
+        dispatch logic here. Recipe states that need to *warn* on missing
+        roles (as :class:`CustomRecipeState` does) should consult
+        ``self.roles[idx]`` directly.
+        """
+        if self.roles is not None:
+            role = self.roles[idx]
+            if role is not None:
+                return role
+        return QuantizerRole()
+
+    def _slot_tensor_type(self, idx: int) -> str:
+        """Convenience accessor: tensor-type dispatch with positional fallback.
+
+        Resolves to one of :attr:`_KNOWN_TENSOR_TYPES`. Used by recipe states
+        whose dispatch only depends on the tensor's role within a GEMM
+        (input / weight / output / grad_output / grad_input), e.g.
+        Float8BlockScalingRecipeState, NVFP4BlockScalingRecipeState.
+
+        Behavior:
+
+        * If the resolved :meth:`_slot_role` carries a ``tensor_type`` in
+          :attr:`_KNOWN_TENSOR_TYPES`, return it.
+        * Otherwise (no role provided, a role with empty / non-canonical
+          ``tensor_type`` like DPA's ``"qkv"``, or a role that intentionally
+          only sets           ``module_type``/``name``), fall back to the positional
+          default (forward: ``[input, weight, output, ...]``;
+          backward: ``[grad_output, grad_input, ...]``) indexed by
+          ``idx % len(default_tensor_types)``.
+
+        This fallback policy is local to tensor-type dispatch; it does not
+        affect :meth:`_slot_role` or any other accessor.
+        """
+        role = self._slot_role(idx)
+        if role.tensor_type in self._KNOWN_TENSOR_TYPES:
+            return role.tensor_type
+        # Positional fallback: tensor_type is missing or non-canonical.
+        default_tensor_types = (
+            self._FWD_DEFAULT_TENSOR_TYPES
+            if self.mode == "forward"
+            else self._BWD_DEFAULT_TENSOR_TYPES
+        )
+        return default_tensor_types[idx % len(default_tensor_types)]
 
     @staticmethod
     def create(
@@ -1387,75 +1463,54 @@ class Float8BlockScalingRecipeState(RecipeState):
         self.device = device
 
     def make_quantizers(self) -> list:
+        """Build one ``Float8BlockQuantizer`` per slot, dispatched by tensor type.
+
+        Per-slot behavior, resolved via :meth:`RecipeState._slot_tensor_type`:
+
+        * ``"weight"`` uses ``recipe.fp8_quant_fwd_weight`` and
+          ``recipe.w_block_scaling_dim``.
+        * ``"input"`` / ``"output"`` (and any unknown forward slot) use
+          ``recipe.fp8_quant_fwd_inp`` and ``recipe.x_block_scaling_dim``.
+        * ``"grad_output"`` / ``"grad_input"`` (and any unknown backward slot)
+          use ``recipe.fp8_quant_bwd_grad`` and ``recipe.grad_block_scaling_dim``.
+
+        When the owning module/op provides a role list via
+        ``get_quantizer_roles``, the per-slot ``tensor_type`` drives dispatch.
+        Otherwise (or for boundary slots whose role is ``None``), the
+        positional fallback ``[input, weight, output, ...]`` /
+        ``[grad_output, grad_input, ...]`` is used. This matches the legacy
+        index-based convention, so behavior is unchanged for
+        modules that haven't adopted roles yet.
+        """
         # TODO(ksivamani); Find better design for this, adding here to avoid circular import.
         from .tensor.float8_blockwise_tensor import Float8BlockQuantizer
 
-        if self.mode == "forward":
-            # The index convention (coming from base.py set_meta_tensor)
-            # is somewhat awkward, and doesn't play nicely with QuantizeOp,
-            # which is not associated with a GEMM.
-            assert self.num_quantizers % 3 == 0  # x, w, output per gemm
-            return list(
-                itertools.chain.from_iterable(
-                    [
-                        [
-                            Float8BlockQuantizer(
-                                fp8_dtype=self.qx_dtype,
-                                rowwise=True,
-                                columnwise=True,
-                                amax_epsilon=self.recipe.fp8_quant_fwd_inp.amax_epsilon,
-                                force_pow_2_scales=self.recipe.fp8_quant_fwd_inp.power_2_scale,
-                                block_scaling_dim=self.recipe.x_block_scaling_dim,
-                            ),
-                            Float8BlockQuantizer(
-                                fp8_dtype=self.qw_dtype,
-                                rowwise=True,
-                                columnwise=True,
-                                amax_epsilon=self.recipe.fp8_quant_fwd_weight.amax_epsilon,
-                                force_pow_2_scales=self.recipe.fp8_quant_fwd_weight.power_2_scale,
-                                block_scaling_dim=self.recipe.w_block_scaling_dim,
-                            ),
-                            Float8BlockQuantizer(
-                                fp8_dtype=self.qx_dtype,
-                                rowwise=True,
-                                columnwise=True,
-                                amax_epsilon=self.recipe.fp8_quant_fwd_inp.amax_epsilon,
-                                force_pow_2_scales=self.recipe.fp8_quant_fwd_inp.power_2_scale,
-                                block_scaling_dim=self.recipe.x_block_scaling_dim,
-                            ),
-                        ]
-                        for _ in range(self.num_quantizers // 3)
-                    ]
-                )
+        def _make(tensor_type: str) -> Float8BlockQuantizer:
+            if tensor_type == "weight":
+                qparams = self.recipe.fp8_quant_fwd_weight
+                fp8_dtype = self.qw_dtype
+                block_scaling_dim = self.recipe.w_block_scaling_dim
+            elif tensor_type in ("grad_output", "grad_input"):
+                qparams = self.recipe.fp8_quant_bwd_grad
+                fp8_dtype = self.qgrad_dtype
+                block_scaling_dim = self.recipe.grad_block_scaling_dim
+            else:
+                # "input", "output", or any unknown forward type fall back to
+                # the input config, matching the legacy positional behavior.
+                qparams = self.recipe.fp8_quant_fwd_inp
+                fp8_dtype = self.qx_dtype
+                block_scaling_dim = self.recipe.x_block_scaling_dim
+            return Float8BlockQuantizer(
+                fp8_dtype=fp8_dtype,
+                rowwise=True,
+                columnwise=True,
+                amax_epsilon=qparams.amax_epsilon,
+                force_pow_2_scales=qparams.power_2_scale,
+                block_scaling_dim=block_scaling_dim,
             )
 
-        assert self.mode == "backward", f"Unexpected mode {self.mode}"
-        assert self.num_quantizers % 2 == 0  # grad_output and grad_input per gemm
-        return list(
-            itertools.chain.from_iterable(
-                [
-                    [
-                        Float8BlockQuantizer(
-                            fp8_dtype=self.qgrad_dtype,
-                            rowwise=True,
-                            columnwise=True,
-                            amax_epsilon=self.recipe.fp8_quant_bwd_grad.amax_epsilon,
-                            force_pow_2_scales=self.recipe.fp8_quant_bwd_grad.power_2_scale,
-                            block_scaling_dim=self.recipe.grad_block_scaling_dim,
-                        ),
-                        Float8BlockQuantizer(
-                            fp8_dtype=self.qgrad_dtype,
-                            rowwise=True,
-                            columnwise=True,
-                            amax_epsilon=self.recipe.fp8_quant_bwd_grad.amax_epsilon,
-                            force_pow_2_scales=self.recipe.fp8_quant_bwd_grad.power_2_scale,
-                            block_scaling_dim=self.recipe.grad_block_scaling_dim,
-                        ),
-                    ]
-                    for _ in range(self.num_quantizers // 2)
-                ]
-            )
-        )
+        assert self.mode in ("forward", "backward"), f"Unexpected mode {self.mode}"
+        return [_make(self._slot_tensor_type(idx)) for idx in range(self.num_quantizers)]
 
 
 class NVFP4BlockScalingRecipeState(RecipeState):
@@ -1490,51 +1545,47 @@ class NVFP4BlockScalingRecipeState(RecipeState):
             device = torch.device("cuda")
 
     def make_quantizers(self) -> list:
+        """Build one ``NVFP4Quantizer`` per slot, dispatched by tensor type.
+
+        Per-slot behavior, resolved via :meth:`RecipeState._slot_tensor_type`:
+
+        * Forward, ``"weight"`` -> ``recipe.fp4_quant_fwd_weight``.
+        * Forward, ``"input"`` / ``"output"`` (and any unknown forward type) ->
+          ``recipe.fp4_quant_fwd_inp``.
+        * Backward, any slot -> ``recipe.fp4_quant_bwd_grad``.
+
+        When the owning module/op provides a role list via
+        ``get_quantizer_roles``, the per-slot ``tensor_type`` drives dispatch.
+        Otherwise (or for boundary slots whose role is ``None``), the
+        positional fallback ``[input, weight, output, ...]`` is used; on this
+        layout slot ``idx % 3 == 1`` is always weight and the rest fall into
+        the input config, matching the legacy index-based behavior.
+        """
         from .tensor.nvfp4_tensor import NVFP4Quantizer
 
-        # The index convention (coming from base.py set_meta_tensor)
-        # is somewhat awkward. It assumes forward quantizers are
-        # ordered [input, weight, output, ...] and backward quantizers
-        # are ordered [grad_output, grad_input, ...]. This doesn't
-        # play nicely with fusible ops: Linear op doesn't own output
-        # or grad input quantizers, Quantize op only owns input and
-        # grad output quantizers.
+        def _qparams(tensor_type: str):
+            if self.mode == "backward":
+                return self.recipe.fp4_quant_bwd_grad
+            if tensor_type == "weight":
+                return self.recipe.fp4_quant_fwd_weight
+            return self.recipe.fp4_quant_fwd_inp
 
-        if self.mode == "forward":
+        def _make(tensor_type: str) -> NVFP4Quantizer:
+            qparams = _qparams(tensor_type)
+            return NVFP4Quantizer(
+                fp4_dtype=self.dtype,
+                rowwise=True,
+                columnwise=True,
+                with_rht=qparams.random_hadamard_transform,
+                with_post_rht_amax=qparams.random_hadamard_transform,
+                with_2d_quantization=qparams.fp4_2d_quantization,
+                stochastic_rounding=qparams.stochastic_rounding,
+            )
 
-            def _make_quantizer(idx: int) -> NVFP4Quantizer:
-                qparams = (
-                    self.recipe.fp4_quant_fwd_weight
-                    if idx % 3 == 1
-                    else self.recipe.fp4_quant_fwd_inp
-                )
-                return NVFP4Quantizer(
-                    fp4_dtype=self.dtype,
-                    rowwise=True,
-                    columnwise=True,
-                    with_rht=qparams.random_hadamard_transform,
-                    with_post_rht_amax=qparams.random_hadamard_transform,
-                    with_2d_quantization=qparams.fp4_2d_quantization,
-                    stochastic_rounding=qparams.stochastic_rounding,
-                )
+        if self.mode not in ("forward", "backward"):
+            raise RuntimeError(f"Unexpected recipe mode ({self.mode})")
 
-            return [_make_quantizer(idx) for idx in range(self.num_quantizers)]
-
-        if self.mode == "backward":
-            return [
-                NVFP4Quantizer(
-                    fp4_dtype=self.dtype,
-                    rowwise=True,
-                    columnwise=True,
-                    with_rht=self.recipe.fp4_quant_bwd_grad.random_hadamard_transform,
-                    with_post_rht_amax=self.recipe.fp4_quant_bwd_grad.random_hadamard_transform,
-                    with_2d_quantization=self.recipe.fp4_quant_bwd_grad.fp4_2d_quantization,
-                    stochastic_rounding=self.recipe.fp4_quant_bwd_grad.stochastic_rounding,
-                )
-                for _ in range(self.num_quantizers)
-            ]
-
-        raise RuntimeError(f"Unexpected recipe mode ({self.mode})")
+        return [_make(self._slot_tensor_type(idx)) for idx in range(self.num_quantizers)]
 
 
 def _handle_delayed_scaling_requests(
