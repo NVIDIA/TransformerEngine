@@ -1414,8 +1414,7 @@ def test_nvfp4_recipe_state_role_dispatch_forward():
     # weight slot
     assert quantizers[1].with_rht == nvfp4_recipe.fp4_quant_fwd_weight.random_hadamard_transform
     assert (
-        quantizers[1].with_2d_quantization
-        == nvfp4_recipe.fp4_quant_fwd_weight.fp4_2d_quantization
+        quantizers[1].with_2d_quantization == nvfp4_recipe.fp4_quant_fwd_weight.fp4_2d_quantization
     )
     # output slot mirrors input cfg
     assert quantizers[2].with_rht == nvfp4_recipe.fp4_quant_fwd_inp.random_hadamard_transform
