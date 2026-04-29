@@ -155,10 +155,10 @@ std::tuple<at::Tensor, at::Tensor> fused_moe_aux_loss_fwd(at::Tensor probs,
   auto aux_loss_cu = makeTransformerEngineTensor(aux_loss);
   auto Const_buf_cu = makeTransformerEngineTensor(Const_buf);
 
-  nvte_fused_moe_aux_loss_forward_v2(probs_cu.data(), tokens_per_expert_cu.data(), total_num_tokens,
-                                     num_experts, num_rows, num_cols, topk, coeff,
-                                     aux_loss_cu.data(), Const_buf_cu.data(),
-                                     at::cuda::getCurrentCUDAStream());
+  nvte_fused_moe_aux_loss_forward(probs_cu.data(), tokens_per_expert_cu.data(), total_num_tokens,
+                                  num_experts, num_rows, num_cols, topk, coeff,
+                                  aux_loss_cu.data(), Const_buf_cu.data(),
+                                  at::cuda::getCurrentCUDAStream());
 
   return std::make_tuple(aux_loss, Const_buf);
 }
