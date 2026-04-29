@@ -516,7 +516,7 @@ class OperationFuser:
             input,
             self,
             basic_op_kwargs,
-            is_grad_enabled,  # set_output_requires_grad
+            is_grad_enabled,
             *self._flat_basic_op_params,
             *extra_inputs,
         )
