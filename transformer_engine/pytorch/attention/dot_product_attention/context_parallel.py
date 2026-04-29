@@ -3341,6 +3341,9 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                         if use_fused_attention:
                             new_qkv_layout = qkv_layout
                             qkv_scale_inv_format = None
+                            cu_seqlens_kv_per_step[i] = dpa_utils.get_full_cu_seqlens(
+                                cu_seqlens_q.shape[0] - 1, max_seqlen_kv_, q.device
+                            )
                             if fp8:
                                 if not fp8_recipe.mxfp8():
                                     q_part, k_part, v_part = [
