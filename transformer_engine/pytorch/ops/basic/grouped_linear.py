@@ -35,7 +35,10 @@ from ...utils import (
 from .._common import is_quantized_tensor, maybe_dequantize
 from ..op import BasicOperation, OperationContext
 from ...tensor import GroupedTensor
-from ...triton.grouped_dbias_dscales import _compute_grouped_dbias_dscales
+from ...triton.grouped_dbias_dscales import (
+    compute_grouped_dbias,
+    compute_grouped_dbias_dscales,
+)
 
 
 class GroupedLinear(BasicOperation):
@@ -890,27 +893,25 @@ class GroupedLinear(BasicOperation):
                     columnwise=ctx.weight_requires_grad,
                 )
             dys = tex.split_quantize(dy, split_sizes_int, ctx.grad_output_quantizers)
-            if has_bias and not self._scale_bias:
-                dy_splits = list(torch.split(grad_output, split_sizes_int))
-                grad_biases = [dy_s.reshape(-1, dy_s.size(-1)).sum(dim=0) for dy_s in dy_splits]
         else:
             dys = torch.split(dy, split_sizes_int)
-            if has_bias and not self._scale_bias:
-                grad_biases = [dy_s.reshape(-1, dy_s.size(-1)).sum(dim=0) for dy_s in dys]
 
-        if self._scale_bias and has_bias:
-            bias_packed = torch.stack(self._get_bias_tensors(ctx.dtype))
-            scales_f32 = scales.to(dtype=torch.float32)
+        if has_bias:
+            dy_2d = dy.reshape(-1, dy.size(-1))
             offsets = torch.zeros(num_groups + 1, dtype=torch.int64, device=device)
             offsets[1:] = split_sizes.cumsum(0)
-            dy_2d = dy.reshape(-1, dy.size(-1))
-            dbias_packed, grad_scales = _compute_grouped_dbias_dscales(
-                dy_2d,
-                scales_f32,
-                bias_packed,
-                offsets=offsets,
-            )
-            grad_biases = [dbias_packed[idx] for idx in range(num_groups)]
+            if self._scale_bias:
+                bias_packed = torch.stack(self._get_bias_tensors(ctx.dtype))
+                scales_f32 = scales.to(dtype=torch.float32)
+                dbias_packed, grad_scales = compute_grouped_dbias_dscales(
+                    dy_2d,
+                    scales_f32,
+                    bias_packed,
+                    offsets=offsets,
+                )
+            else:
+                dbias_packed = compute_grouped_dbias(dy_2d, offsets, num_groups)
+            grad_biases = [dbias_packed[idx].to(dtype=ctx.dtype) for idx in range(num_groups)]
 
         # Initialize grad weight buffers
         accumulate_into_main_grad = self._accumulate_into_main_grad

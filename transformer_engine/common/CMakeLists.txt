@@ -179,7 +179,6 @@ list(APPEND transformer_engine_cuda_sources
      transpose/quantize_transpose_vector_blockwise.cu
      transpose/swap_first_dims.cu
      dropout/dropout.cu
-     fused_attn/flash_attn.cu
      fused_attn/context_parallel.cu
      fused_attn/kv_cache.cu
      fused_attn/fused_attn_f16_max512_seqlen.cu
@@ -195,6 +194,7 @@ list(APPEND transformer_engine_cuda_sources
      permutation/permutation.cu
      util/utils.cu
      util/padding.cu
+     util/topk.cu
      swizzle/swizzle.cu
      swizzle/swizzle_block_scaling.cu
      fused_softmax/scaled_masked_softmax.cu
@@ -210,6 +210,7 @@ list(APPEND transformer_engine_cuda_sources
      comm_gemm_overlap/userbuffers/userbuffers.cu)
 
 list(APPEND transformer_engine_cuda_arch_specific_sources
+     fused_attn/flash_attn.cu
      activation/gelu.cu
      activation/glu.cu
      activation/relu.cu
