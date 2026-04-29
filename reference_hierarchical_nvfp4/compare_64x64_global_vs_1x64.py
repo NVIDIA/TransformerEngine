@@ -106,7 +106,10 @@ def main() -> None:
     fn = float(np.linalg.norm(x, "fro"))
     if fn > 0:
         print("||x||_F =", fn)
-        print("Fro 相对: ||recon_1x64 - recon_global||_F / ||x||_F =", float(np.linalg.norm(dg, "fro") / fn))
+        print(
+            "Fro 相对: ||recon_1x64 - recon_global||_F / ||x||_F =",
+            float(np.linalg.norm(dg, "fro") / fn),
+        )
 
 
 if __name__ == "__main__":

@@ -1263,7 +1263,7 @@ void split_quantize_nvfp4_impl_helper(const TensorWrapper &input,
                              quantizer.stochastic_rounding, use_rowwise_1x64);
   }
   nvfp4_1x64::require_ok_for_split(quantizer.rowwise_usage, quantizer.columnwise_usage,
-                                    quantizer.stochastic_rounding);
+                                   quantizer.stochastic_rounding);
 
   if (!use_rowwise_1x64) {
     split_nvfp4_non_rht_run_grouped_amax(

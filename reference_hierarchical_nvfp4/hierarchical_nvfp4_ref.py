@@ -177,11 +177,7 @@ def quantize_rowwise_1x64_1x16(x: torch.Tensor, eps: float = 1e-12) -> Hierarchi
             if bamax < eps:
                 bamax = float(eps)
             raw = compute_S_dec_f32_before_cast_te(bamax, float(s_e.item()))
-            u = int(
-                _f32_e4m3_u8_np(np.array([raw], dtype=np.float32).reshape(1))[
-                    0
-                ]
-            )
+            u = int(_f32_e4m3_u8_np(np.array([raw], dtype=np.float32).reshape(1))[0])
             S_dec_u8[row, t16b] = u
             s_dec_f = max(float(_e4m3_u8_f32_np(np.array([u], dtype=np.uint8))[0]), TINY)
             bsi = float(s_e.item()) / s_dec_f
@@ -196,9 +192,9 @@ def dequantize_rowwise(p: HierarchicalNVFP4Rowwise) -> torch.Tensor:
     q = _unpack_fp4_along_k(p.data_u8, k)
     j16 = (torch.arange(k, device=device) // FINE).long()
     j64 = (torch.arange(k, device=device) // COARSE).long()
-    sdec = torch.from_numpy(
-        _e4m3_u8_f32_np(p.S_dec_u8[:, j16].cpu().numpy().astype(np.uint8))
-    ).to(device=device, dtype=torch.float32)
+    sdec = torch.from_numpy(_e4m3_u8_f32_np(p.S_dec_u8[:, j16].cpu().numpy().astype(np.uint8))).to(
+        device=device, dtype=torch.float32
+    )
     senc = p.S_enc[:, j64]
     sdec = torch.clamp(sdec, min=TINY)
     return (q * (sdec / senc)).to(torch.float32)
@@ -214,9 +210,7 @@ def _amax_64_m(x: torch.Tensor) -> torch.Tensor:
     return a
 
 
-def quantize_columnwise_1x64_1x16(
-    x: torch.Tensor, eps: float = 1e-12
-) -> HierarchicalNVFP4Colwise:
+def quantize_columnwise_1x64_1x16(x: torch.Tensor, eps: float = 1e-12) -> HierarchicalNVFP4Colwise:
     assert x.dim() == 2
     m, k = int(x.size(0)), int(x.size(1))
     device = x.device
@@ -242,11 +236,7 @@ def quantize_columnwise_1x64_1x16(
             if bamax < eps:
                 bamax = float(eps)
             raw = compute_S_dec_f32_before_cast_te(bamax, float(s_e.item()))
-            u = int(
-                _f32_e4m3_u8_np(np.array([raw], dtype=np.float32).reshape(1))[
-                    0
-                ]
-            )
+            u = int(_f32_e4m3_u8_np(np.array([raw], dtype=np.float32).reshape(1))[0])
             S_dec_u8[t16b, col] = u
             s_dec_f = max(float(_e4m3_u8_f32_np(np.array([u], dtype=np.uint8))[0]), TINY)
             bsi = float(s_e.item()) / s_dec_f
@@ -261,9 +251,9 @@ def dequantize_colwise(p: HierarchicalNVFP4Colwise) -> torch.Tensor:
     q = _unpack_fp4_along_m(p.data_u8, m, k)
     r16 = (torch.arange(m, device=device) // FINE).long()
     r64 = (torch.arange(m, device=device) // COARSE).long()
-    sdec = torch.from_numpy(
-        _e4m3_u8_f32_np(p.S_dec_u8[r16, :].cpu().numpy().astype(np.uint8))
-    ).to(device=device, dtype=torch.float32)
+    sdec = torch.from_numpy(_e4m3_u8_f32_np(p.S_dec_u8[r16, :].cpu().numpy().astype(np.uint8))).to(
+        device=device, dtype=torch.float32
+    )
     senc = p.S_enc[r64, :]
     sdec = torch.clamp(sdec, min=TINY)
     return (q * (sdec / senc)).to(torch.float32)
@@ -276,9 +266,7 @@ def reference_matmul_tn(
     return dequantize_rowwise(a_rows) @ dequantize_colwise(b_cols).T
 
 
-def roundtrip_error(
-    x: torch.Tensor, mode: str
-) -> Tuple[torch.Tensor, torch.Tensor]:
+def roundtrip_error(x: torch.Tensor, mode: str) -> Tuple[torch.Tensor, torch.Tensor]:
     if mode == "rowwise":
         p = quantize_rowwise_1x64_1x16(x)
         y = dequantize_rowwise(p)
