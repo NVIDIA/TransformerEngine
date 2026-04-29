@@ -281,10 +281,16 @@ void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
       CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE));
 }
 
-bool is_supported_by_CC_100() {
+bool is_supported_by_CC_100_or_newer() {
   int deviceComputeCapability = cuda::sm_arch(cuda::current_device());
 
   return deviceComputeCapability >= 100;
+}
+
+bool is_supported_by_CC_120() {
+  int deviceComputeCapability = cuda::sm_arch(cuda::current_device());
+
+  return deviceComputeCapability == 120;
 }
 
 std::vector<std::vector<Tensor *>> convert_tensor_array(NVTETensor **nvte_tensors,

@@ -532,7 +532,7 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
   NVTE_CHECK(output->data.shape == input.data.shape, "Input and output shapes need to match.");
 
   // Supported by the Arch >= 10.0
-  if (is_supported_by_CC_100()) {
+  if (is_supported_by_CC_100_or_newer()) {
     if (!IS_DBIAS && !IS_DACT) {
       if (common::full_tile_1D_tensor(output, ELEMS_PER_BLOCK) && is_fp8_dtype(output->dtype()) &&
           is_aligned_tensor_data(input, TMA_GMEM_ALIGNMENT) &&

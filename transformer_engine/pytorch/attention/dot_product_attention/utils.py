@@ -465,10 +465,19 @@ def get_attention_backend(
         if use_flash_attention_3 and FlashAttentionUtils.v3_is_installed:
             logger.debug("Disabling FlashAttention 3 for compute capability != sm90")
         use_flash_attention_3 = False
-    # FA4 supports SM80, SM90, SM100, SM120
+    # FA4 supports SM80, SM90, SM100
     if device_compute_capability < (8, 0):
         if use_flash_attention_4 and FlashAttentionUtils.v4_is_installed:
             logger.debug("Disabling FlashAttention 4 for compute capability < sm80")
+        use_flash_attention_4 = False
+    # FA4 is temporarily disabled on SM120 due to failures observed with
+    # SplitKV, Block sparsity / paged KV and likely FAv4/DSL integration issues.
+    if device_compute_capability == (12, 0):
+        if use_flash_attention_4 and FlashAttentionUtils.v4_is_installed:
+            logger.warning(
+                "Disabling FlashAttention 4 on sm120 due to missings bits of support for SplitKV,"
+                " Block sparsity / paged KV and likely FAv4/DSL integration issues."
+            )
         use_flash_attention_4 = False
     # On SM90, prefer FA3 over FA4 when FA3 is available.
     # FA3 is more mature on Hopper; FA4's SM90 backward has limitations
