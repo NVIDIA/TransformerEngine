@@ -410,18 +410,14 @@ class BasicLinear(BasicOperation):
 
         # Update quantizer in quantized weight tensor
         if weight_quantizer is not None and is_quantized_tensor(weight):
-            # Set quantizer usages
-            # Note: Avoid disabling usages that are already set. The
-            # weight tensor may be reused across steps, so future
-            # steps may need usages that are currently unnecessary.
-            weight_quantizer.set_usage(rowwise=True)
-            columnwise_usage = torch.is_grad_enabled()
-            if weight._quantizer is not None and weight._quantizer.columnwise_usage:
-                columnwise_usage = True
-            if columnwise_usage:
-                weight_quantizer.set_usage(columnwise=True)
-
-            # Update weight tensor
+            if weight._quantizer is not None:
+                # Preserve existing usages in weight tensor. Even if a
+                # usage is currently unnecessary, the weight tensor
+                # may be used elsewhere.
+                weight_quantizer.set_usage(
+                    rowwise=weight._quantizer.rowwise_usage,
+                    columnwise=weight._quantizer.columnwise_usage,
+                )
             weight.update_quantizer(weight_quantizer.copy())
 
     @staticmethod

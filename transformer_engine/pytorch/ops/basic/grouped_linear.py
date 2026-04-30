@@ -682,16 +682,14 @@ class GroupedLinear(BasicOperation):
                     weight.quantizer if self.single_grouped_weight else weight._quantizer
                 )
 
-                # Set quantizer usages
-                # Note: Avoid disabling usages that are already set. The
-                # weight tensor may be reused across steps, so future
-                # steps may need usages that are currently unnecessary.
-                weight_quantizer.set_usage(rowwise=True)
-                columnwise_usage = torch.is_grad_enabled()
-                if weight_tensor_quantizer is not None and weight_tensor_quantizer.columnwise_usage:
-                    columnwise_usage = True
-                if columnwise_usage:
-                    weight_quantizer.set_usage(columnwise=True)
+                # Preserve existing usages in weight tensor. Even if a
+                # usage is currently unnecessary, the weight tensor
+                # may be used elsewhere.
+                if weight_tensor_quantizer is not None:
+                    weight_quantizer.set_usage(
+                        rowwise=weight_tensor_quantizer.rowwise_usage,
+                        columnwise=weight_tensor_quantizer.columnwise_usage,
+                    )
 
                 # Update weight tensor
                 if self.single_grouped_weight:
