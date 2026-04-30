@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 import functools
+import inspect
 from importlib.metadata import PackageNotFoundError, version as get_pkg_version
 from typing import Optional
 
