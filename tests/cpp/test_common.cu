@@ -466,9 +466,9 @@ void Tensor::to_cpu() const {
                    sizeof(float),
                    cudaMemcpyDeviceToHost);
       }
-      if (columnwise_ && (tensor_.amax() != nullptr)){
+      if (columnwise_ && (tensor_.get_columnwise_amax().data_ptr != nullptr)){
         cudaMemcpy(amax_cpu_data_columnwise_.get(),
-                   tensor_.amax(),
+                   tensor_.get_columnwise_amax().data_ptr,
                    sizeof(float),
                    cudaMemcpyDeviceToHost);
       }
@@ -512,8 +512,9 @@ void Tensor::from_cpu() const {
       if (rowwise_ && (tensor_.amax() != nullptr)) {
         cudaMemcpy(tensor_.amax(), amax_cpu_data_.get(), sizeof(float), cudaMemcpyHostToDevice);
       }
-      if (columnwise_ && (tensor_.amax() != nullptr)) {
-        cudaMemcpy(tensor_.amax(), amax_cpu_data_columnwise_.get(), sizeof(float), cudaMemcpyHostToDevice);
+      if (columnwise_ && (tensor_.get_columnwise_amax().data_ptr != nullptr)) {
+        cudaMemcpy(tensor_.get_columnwise_amax().data_ptr, amax_cpu_data_columnwise_.get(),
+                   sizeof(float), cudaMemcpyHostToDevice);
       }
     } 
     auto [rowwise_scale_meta, colwise_scale_meta] = get_scales(s, tensor_.scaling_mode());

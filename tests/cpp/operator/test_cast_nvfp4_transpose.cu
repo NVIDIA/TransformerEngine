@@ -571,11 +571,12 @@ void performTest(float (*OP)(const float),
     for (size_t i = 0; i < rows; ++i) {
         for (size_t j = 0; j < cols; ++j) {
             const size_t idx = i * cols + j;
-            amax = fmaxf(amax, static_cast<float>(input_dptr[idx]));
+            amax = fmaxf(amax, fabsf(static_cast<float>(input_dptr[idx])));
         }
     }
     // Set 2nd stage NVFP4 scaling factor
     output.set_tensor_amax(amax);
+    output.set_tensor_amax_columnwise(amax);
 
     bool use_2d_quantization = false;
 
