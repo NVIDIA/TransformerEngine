@@ -1544,10 +1544,10 @@ class DotProductAttention(TransformerEngineBaseModule):
                 # kernel's right-aligned diagonal) or via FlashAttention-style
                 # ``window_size=(-1, 0)`` (left=infinite, right=0 → causal).
                 # Both paths must map to the kernel's ``is_causal=True``.
-                is_causal_dispatch = (
-                    attn_mask_type in ("causal", "causal_bottom_right")
-                    or window_size == (-1, 0)
-                )
+                is_causal_dispatch = attn_mask_type in (
+                    "causal",
+                    "causal_bottom_right",
+                ) or window_size == (-1, 0)
                 self.logger.info("Running with MLATriton backend (NVTE_MLA_TRITON=1)")
                 return self.mla_triton_attention(
                     query_layer,
