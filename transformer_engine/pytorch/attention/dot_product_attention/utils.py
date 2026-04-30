@@ -2364,7 +2364,7 @@ def check_set_window_size(
     return window_size
 
 
-def get_attention_quantizers(fp8, fp8_recipe, quantizers):
+def get_attention_quantizers(fp8, quantizers):
     """Get the list of quantizers used in attention from the quantizers list."""
     if not fp8:
         return [None] * 6

@@ -510,7 +510,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
                 fp8_recipe = fp8_meta["local_recipes"][0]
             # get quantizers from DPA; all Nones if not fp8
             QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer = (
-                dpa_utils.get_attention_quantizers(fp8, fp8_recipe, quantizers)
+                dpa_utils.get_attention_quantizers(fp8, quantizers)
             )
             # S/dP are forced to use DS quantizers in DPA.init_fp8_metadata; revert them here for true CS emulation
             if fp8_recipe.float8_current_scaling():
@@ -1337,7 +1337,7 @@ class FusedAttnFunc(torch.autograd.Function):
 
         # get quantizers from DPA; all Nones if not fp8
         QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer = (
-            dpa_utils.get_attention_quantizers(fp8, fp8_recipe, quantizers)
+            dpa_utils.get_attention_quantizers(fp8, quantizers)
         )
 
         # Effective FP8 sub-recipe label inferred from the QKV quantizer
@@ -2094,7 +2094,7 @@ class FusedAttention(torch.nn.Module):
                     " with FP8!"
                 )
             if fp8_recipe.float8_current_scaling() and context_parallel:
-                all_quantizers = dpa_utils.get_attention_quantizers(fp8, fp8_recipe, quantizers)
+                all_quantizers = dpa_utils.get_attention_quantizers(fp8, quantizers)
                 for q in all_quantizers:
                     if isinstance(q, Float8CurrentScalingQuantizer):
                         q.with_amax_reduction = True

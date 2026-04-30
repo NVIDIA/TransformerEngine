@@ -1507,7 +1507,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             dQKV_quantizer,
             dO_quantizer,
             dP_quantizer,
-        ) = dpa_utils.get_attention_quantizers(fp8, fp8_recipe, quantizers)
+        ) = dpa_utils.get_attention_quantizers(fp8, quantizers)
 
         # q, k, v a2a: gather s and split h
         # FP8DS/CS: Float8Tensor -> torch.uint8 -> Float8Tensor
@@ -3098,7 +3098,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             dQKV_quantizer,
             dO_quantizer,
             dP_quantizer,
-        ) = dpa_utils.get_attention_quantizers(fp8, fp8_recipe, quantizers)
+        ) = dpa_utils.get_attention_quantizers(fp8, quantizers)
         fwd_nominal_dtype = q.dtype
         q_fp8, k_fp8, v_fp8 = (q, k, v) if is_input_fp8 else (None, None, None)
         q_f16, k_f16, v_f16 = (None, None, None) if is_input_fp8 else (q, k, v)
@@ -3969,7 +3969,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         max_logit = None
 
         QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer = (
-            dpa_utils.get_attention_quantizers(fp8, fp8_recipe, quantizers)
+            dpa_utils.get_attention_quantizers(fp8, quantizers)
         )
 
         q_fp8, k_fp8, v_fp8 = (None, None, None)
