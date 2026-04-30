@@ -245,13 +245,17 @@ class TestMoEBlockSingleDevice:
 
     @pytest.mark.xfail(
         reason=(
-            "TE grouped_dense FFI currently asserts sum(group_sizes) == M "
-            "(see csrc/extensions/gemm.cpp). With align_size > 0 the dispatch "
-            "buffer is padded to a static worst-case size, so M can exceed "
-            "sum(group_sizes). The MoE block deliberately does not fold the "
-            "gap into a single expert (that would create per-shard load "
-            "imbalance under EP). Re-enable once the FFI check is relaxed to "
-            "M >= sum(group_sizes)."
+            "TE grouped_dense FFI asserts sum(group_sizes) == M at "
+            "transformer_engine/jax/csrc/extensions/gemm.cpp:1029. With "
+            "align_size > 0 both backends produce a buffer where M >= "
+            "sum(group_sizes) (the slack is structural padding for JIT). "
+            "The kernel itself iterates over per-expert m_i from "
+            "group_sizes via nvte_multi_tensor_gemm and never reads past "
+            "sum(group_sizes), so relaxing that assertion to "
+            "`m >= sum_group_sizes` is the cleanest fix. The MoE block "
+            "deliberately does not fold the gap into a single expert "
+            "(that would create per-shard load imbalance under EP). "
+            "Re-enable once the FFI check is relaxed."
         ),
         strict=False,
     )

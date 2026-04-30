@@ -52,6 +52,11 @@ __all__ = [
     "unfused_token_dispatch",
     "unfused_token_combine",
     "UnfusedPermState",
+    # Ragged-all-to-all expert-parallelism helpers
+    "compute_ragged_all_to_all_params",
+    "compute_reverse_ragged_all_to_all_params",
+    "local_permute_after_a2a",
+    "local_unpermute_before_a2a",
 ]
 
 
@@ -989,3 +994,334 @@ def unfused_token_combine(
             reshaped_weights,
         )
     return output.reshape(batch_size, sequence_length, hidden_size)
+
+
+# =============================================================================
+# Ragged-all-to-all expert-parallelism helpers
+# =============================================================================
+#
+# These helpers support the ragged-all-to-all (A2A / A2Av) EP strategy used by
+# :class:`transformer_engine.jax.flax.MoEBlock`. The forward EP path looks
+# like::
+#
+#     route -> global_permute -> AG(group_sizes, ep)
+#                             -> ragged_all_to_all(fwd, ep)
+#                             -> local_permute_after_a2a
+#                             -> grouped_dense x3 + activation
+#                             -> local_unpermute_before_a2a
+#                             -> ragged_all_to_all(reverse, ep)
+#                             -> global_combine
+#
+# The two ``compute_*_ragged_all_to_all_params`` functions translate
+# ``all_shards_tokens_per_expert`` (an EP-axis ``all_gather`` of each shard's
+# global ``group_sizes``) into the four ``ragged_all_to_all`` arguments
+# (``input_offsets``, ``send_sizes``, ``output_offsets``, ``recv_sizes``).
+# ``shard_id`` may be a traced value (e.g. from :func:`jax.lax.axis_index`),
+# which is why every slice into ``all_shards_tokens_per_expert`` uses
+# :func:`jax.lax.dynamic_slice`.
+#
+# These functions are pure JAX (no MaxText / TE dependencies) and equivalent
+# to :func:`maxtext.layers.te_permutation.compute_ragged_all_to_all_params`
+# / :func:`compute_reverse_ragged_all_to_all_params`.
+
+
+def compute_ragged_all_to_all_params(
+    all_shards_tokens_per_expert: jnp.ndarray,
+    shard_id: jnp.ndarray,
+    num_expert_shards: int,
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Forward-direction ragged_all_to_all parameters.
+
+    Computes the four index/size arrays that :func:`jax.lax.ragged_all_to_all`
+    consumes for the **forward** EP shuffle, where each shard sends its
+    expert-grouped tokens to the shard that owns those experts.
+
+    Parameters
+    ----------
+    all_shards_tokens_per_expert : jnp.ndarray
+        Per-shard, per-expert token counts gathered across the EP axis. Shape
+        ``[num_expert_shards, num_experts]`` and integer dtype.
+    shard_id : jnp.ndarray
+        Index of the current shard along the EP axis (typically
+        :func:`jax.lax.axis_index` of the EP axis). Must be a 0-d integer.
+    num_expert_shards : int
+        Static EP-axis size. Must match
+        ``all_shards_tokens_per_expert.shape[0]``.
+
+    Returns
+    -------
+    input_offsets : jnp.ndarray
+        Shape ``[num_expert_shards]``. Cumulative ``send_sizes`` (with a
+        leading 0) -- where in the local source buffer each destination
+        shard's chunk begins.
+    send_sizes : jnp.ndarray
+        Shape ``[num_expert_shards]``. ``send_sizes[i]`` is the number of
+        tokens this shard sends to shard ``i`` (= the sum of token counts
+        for the experts owned by shard ``i``).
+    output_offsets : jnp.ndarray
+        Shape ``[num_expert_shards]``. ``output_offsets[i]`` is the row in
+        shard ``i``'s receive buffer where this shard's contribution should
+        land. Sender-side semantics, per :func:`jax.lax.ragged_all_to_all`.
+    recv_sizes : jnp.ndarray
+        Shape ``[num_expert_shards]``. ``recv_sizes[i]`` is the number of
+        tokens shard ``i`` sends to this shard.
+    """
+    num_experts = all_shards_tokens_per_expert.shape[1]
+    assert num_experts % num_expert_shards == 0, (
+        f"num_experts={num_experts} must be divisible by num_expert_shards"
+        f"={num_expert_shards}"
+    )
+    local_expert_size = num_experts // num_expert_shards
+
+    # This shard's row of the gathered table, reshaped so axis 0 indexes the
+    # destination shard and axis 1 indexes its local experts.
+    local_tokens_per_expert = jax.lax.dynamic_slice(
+        all_shards_tokens_per_expert,
+        start_indices=(shard_id, 0),
+        slice_sizes=(1, num_experts),
+    ).squeeze(0)
+    local_reshaped = local_tokens_per_expert.reshape(
+        num_expert_shards, local_expert_size
+    )
+
+    # send_sizes[i] = sum of token counts for shard i's experts in our buffer.
+    send_sizes = jnp.sum(local_reshaped, axis=1)
+    input_offsets = jnp.concatenate(
+        [
+            jnp.array([0], dtype=send_sizes.dtype),
+            jnp.cumsum(send_sizes)[:-1],
+        ]
+    )
+
+    # recv_sizes[i] = how many tokens shard i sends to this shard, i.e. the
+    # sum across our local-expert columns of shard i's row.
+    local_expert_start = shard_id * local_expert_size
+    local_expert_columns = jax.lax.dynamic_slice(
+        all_shards_tokens_per_expert,
+        start_indices=(0, local_expert_start),
+        slice_sizes=(num_expert_shards, local_expert_size),
+    )
+    recv_sizes = jnp.sum(local_expert_columns, axis=1)
+
+    # output_offsets uses sender-side semantics for ragged_all_to_all:
+    # output_offsets[j] = row in shard j's buffer where THIS shard's chunk
+    # should be placed. That's the cumulative sum (over source shards 0..j-1)
+    # of how many tokens those earlier source shards already sent to shard j.
+    sends_to_target = jnp.sum(
+        all_shards_tokens_per_expert.reshape(
+            num_expert_shards, num_expert_shards, local_expert_size
+        ),
+        axis=2,
+    )  # [src_shard, dst_shard]
+    zero_row = jnp.zeros((1, num_expert_shards), dtype=sends_to_target.dtype)
+    cumulated = jnp.cumsum(
+        jnp.concatenate([zero_row, sends_to_target], axis=0),
+        axis=0,
+        dtype=sends_to_target.dtype,
+    )  # [src_shard + 1, dst_shard]; row r = total sent by sources 0..r-1
+    output_offsets = jax.lax.dynamic_slice(
+        cumulated,
+        start_indices=(shard_id, 0),
+        slice_sizes=(1, num_expert_shards),
+    ).squeeze(0)
+
+    return input_offsets, send_sizes, output_offsets, recv_sizes
+
+
+def compute_reverse_ragged_all_to_all_params(
+    all_shards_tokens_per_expert: jnp.ndarray,
+    shard_id: jnp.ndarray,
+    num_expert_shards: int,
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Reverse-direction ragged_all_to_all parameters.
+
+    Mirror of :func:`compute_ragged_all_to_all_params` for the **reverse**
+    EP shuffle that returns expert outputs to their source shards. The
+    sender / receiver roles are swapped: what we received in the forward
+    shuffle we now send back, and vice versa.
+
+    Parameters and shapes are identical to
+    :func:`compute_ragged_all_to_all_params`.
+    """
+    num_experts = all_shards_tokens_per_expert.shape[1]
+    assert num_experts % num_expert_shards == 0, (
+        f"num_experts={num_experts} must be divisible by num_expert_shards"
+        f"={num_expert_shards}"
+    )
+    local_expert_size = num_experts // num_expert_shards
+
+    local_expert_start = shard_id * local_expert_size
+
+    # In reverse, what we received becomes what we send. send_sizes[i] is how
+    # many tokens we send back to source shard i (= what shard i originally
+    # sent us, summed across our local experts).
+    local_expert_columns = jax.lax.dynamic_slice(
+        all_shards_tokens_per_expert,
+        start_indices=(0, local_expert_start),
+        slice_sizes=(num_expert_shards, local_expert_size),
+    )
+    send_sizes = jnp.sum(local_expert_columns, axis=1)
+    input_offsets = jnp.concatenate(
+        [
+            jnp.array([0], dtype=send_sizes.dtype),
+            jnp.cumsum(send_sizes)[:-1],
+        ]
+    )
+
+    # recv_sizes[i] = how many tokens we receive back from shard i (= what
+    # we originally sent to shard i in the forward).
+    local_tokens_per_expert = jax.lax.dynamic_slice(
+        all_shards_tokens_per_expert,
+        start_indices=(shard_id, 0),
+        slice_sizes=(1, num_experts),
+    ).squeeze(0)
+    local_reshaped = local_tokens_per_expert.reshape(
+        num_expert_shards, local_expert_size
+    )
+    recv_sizes = jnp.sum(local_reshaped, axis=1)
+
+    # output_offsets: the reverse sends-to-target matrix is the transpose of
+    # the forward one (row i = what shard i sends in reverse = what shard i
+    # received in forward). Cumsum down source-shard axis, then index our row.
+    fwd_sends_to = jnp.sum(
+        all_shards_tokens_per_expert.reshape(
+            num_expert_shards, num_expert_shards, local_expert_size
+        ),
+        axis=2,
+    )  # forward: [src, dst]
+    rev_sends_to = jnp.transpose(fwd_sends_to)  # reverse: [src, dst]
+    zero_row = jnp.zeros((1, num_expert_shards), dtype=rev_sends_to.dtype)
+    rev_cumulated = jnp.cumsum(
+        jnp.concatenate([zero_row, rev_sends_to], axis=0),
+        axis=0,
+        dtype=rev_sends_to.dtype,
+    )
+    output_offsets = jax.lax.dynamic_slice(
+        rev_cumulated,
+        start_indices=(shard_id, 0),
+        slice_sizes=(1, num_expert_shards),
+    ).squeeze(0)
+
+    return input_offsets, send_sizes, output_offsets, recv_sizes
+
+
+# -----------------------------------------------------------------------------
+# Local permute / unpermute
+# -----------------------------------------------------------------------------
+#
+# After the forward ragged_all_to_all the receive buffer is laid out as
+# ``[from_shard_0_chunk | from_shard_1_chunk | ... ]`` and within each chunk
+# tokens are sorted by local-expert id. To feed ``grouped_dense`` we want
+# ``[expert_0_block | expert_1_block | ... ]`` where each expert's block
+# contains tokens from every source shard. ``local_permute_after_a2a``
+# performs that reorder; ``local_unpermute_before_a2a`` undoes it before the
+# reverse ragged_all_to_all.
+#
+# Implementation uses :func:`sort_chunks_by_index`, which is Triton-backed
+# (see ``transformer_engine.jax.triton_extensions.permutation``) and has a
+# paired custom-VJP backward. There is no pure-JAX alternative here -- the
+# global :func:`unfused_token_dispatch` / :func:`token_dispatch` choice is
+# unaffected by this; only the (small) post-A2A chunk reorder uses Triton
+# unconditionally.
+
+
+def local_permute_after_a2a(
+    x_recv: jnp.ndarray,
+    all_shards_tokens_per_expert: jnp.ndarray,
+    shard_id: jnp.ndarray,
+    num_expert_shards: int,
+) -> Tuple[jnp.ndarray, jnp.ndarray, dict]:
+    """Reorder tokens received via ragged_all_to_all so each local expert's
+    tokens are contiguous.
+
+    This is the EP-side complement to the global :func:`token_dispatch` /
+    :func:`unfused_token_dispatch`. Internally uses
+    :func:`sort_chunks_by_index` (Triton-backed) for both the forward sort
+    and -- via :func:`local_unpermute_before_a2a` -- the inverse.
+
+    Parameters
+    ----------
+    x_recv : jnp.ndarray
+        Output of the forward ``ragged_all_to_all`` of shape
+        ``[buffer_size, hidden_size]``. Layout: source-shard major, then
+        local-expert id within each source chunk.
+    all_shards_tokens_per_expert : jnp.ndarray
+        Per-shard, per-expert token counts of shape
+        ``[num_expert_shards, num_experts]``.
+    shard_id : jnp.ndarray
+        Current EP shard index (typically a traced
+        :func:`jax.lax.axis_index`).
+    num_expert_shards : int
+        Static EP-axis size.
+
+    Returns
+    -------
+    sorted_x : jnp.ndarray
+        Tokens reordered into expert-major layout. Same shape as ``x_recv``.
+    local_group_sizes : jnp.ndarray
+        Per-local-expert token counts of shape ``[local_expert_size]``.
+    state : dict
+        Opaque state for :func:`local_unpermute_before_a2a`.
+    """
+    num_experts = all_shards_tokens_per_expert.shape[1]
+    assert num_experts % num_expert_shards == 0, (
+        f"num_experts={num_experts} must be divisible by num_expert_shards"
+        f"={num_expert_shards}"
+    )
+    local_expert_size = num_experts // num_expert_shards
+    local_expert_start = shard_id * local_expert_size
+    local_expert_columns = jax.lax.dynamic_slice(
+        all_shards_tokens_per_expert,
+        start_indices=(0, local_expert_start),
+        slice_sizes=(num_expert_shards, local_expert_size),
+    )
+
+    # Flat sizes in source-major order, matching the receive buffer layout:
+    # [(s0,e0), (s0,e1), ..., (s1,e0), (s1,e1), ...]
+    split_sizes = local_expert_columns.reshape(-1)
+
+    # Permutation that maps source-major -> expert-major:
+    #   original index = s * E_local + e
+    #   target   index = e * num_shards + s
+    indices_matrix = jnp.arange(
+        num_expert_shards * local_expert_size, dtype=jnp.int32
+    ).reshape(num_expert_shards, local_expert_size)
+    sorted_chunk_indices = indices_matrix.T.reshape(-1)
+
+    sorted_x, _ = sort_chunks_by_index(x_recv, split_sizes, sorted_chunk_indices)
+    sorted_split_sizes = split_sizes[sorted_chunk_indices]
+    inverse_chunk_indices = jnp.argsort(sorted_chunk_indices)
+    local_group_sizes = jnp.sum(local_expert_columns, axis=0)
+    state = {
+        "sorted_split_sizes": sorted_split_sizes,
+        "inverse_chunk_indices": inverse_chunk_indices,
+    }
+    return sorted_x, local_group_sizes, state
+
+
+def local_unpermute_before_a2a(
+    expert_outputs: jnp.ndarray,
+    state: dict,
+) -> jnp.ndarray:
+    """Inverse of :func:`local_permute_after_a2a`.
+
+    Parameters
+    ----------
+    expert_outputs : jnp.ndarray
+        Output of the local expert FFN of shape ``[buffer_size, hidden_size]``,
+        in expert-major layout.
+    state : dict
+        Opaque state returned by :func:`local_permute_after_a2a`.
+
+    Returns
+    -------
+    unsorted_x : jnp.ndarray
+        Tokens reordered back into source-shard-major layout, ready for the
+        reverse ``ragged_all_to_all``. Same shape as ``expert_outputs``.
+    """
+    out, _ = sort_chunks_by_index(
+        expert_outputs,
+        state["sorted_split_sizes"],
+        state["inverse_chunk_indices"],
+    )
+    return out
