@@ -208,17 +208,33 @@ def _launch_mla_bwd(q_bhsd, k_bhsd, v_bhsd, o_bhsd, lse, do_bhsd, softmax_scale,
     common_shape_args = (B, H, S_q, S_kv, D_qk, D_v)
     common_strides = (
         # Q
-        q_bhsd.stride(0), q_bhsd.stride(1), q_bhsd.stride(2), 1,
+        q_bhsd.stride(0),
+        q_bhsd.stride(1),
+        q_bhsd.stride(2),
+        1,
         # K
-        k_bhsd.stride(0), k_bhsd.stride(1), k_bhsd.stride(2), 1,
+        k_bhsd.stride(0),
+        k_bhsd.stride(1),
+        k_bhsd.stride(2),
+        1,
         # V
-        v_bhsd.stride(0), v_bhsd.stride(1), v_bhsd.stride(2), 1,
+        v_bhsd.stride(0),
+        v_bhsd.stride(1),
+        v_bhsd.stride(2),
+        1,
         # dO
-        do_bhsd.stride(0), do_bhsd.stride(1), do_bhsd.stride(2), 1,
+        do_bhsd.stride(0),
+        do_bhsd.stride(1),
+        do_bhsd.stride(2),
+        1,
         # LSE
-        lse.stride(0), lse.stride(1), 1,
+        lse.stride(0),
+        lse.stride(1),
+        1,
         # Delta
-        delta.stride(0), delta.stride(1), 1,
+        delta.stride(0),
+        delta.stride(1),
+        1,
     )
 
     # 2) dQ
@@ -230,7 +246,10 @@ def _launch_mla_bwd(q_bhsd, k_bhsd, v_bhsd, o_bhsd, lse, do_bhsd, softmax_scale,
         *common_shape_args,
         *common_strides,
         # dQ strides
-        dq.stride(0), dq.stride(1), dq.stride(2), 1,
+        dq.stride(0),
+        dq.stride(1),
+        dq.stride(2),
+        1,
         IS_CAUSAL=is_causal,
         BLOCK_DMODEL_QK=block_dmodel_qk,
         BLOCK_DMODEL_V=block_dmodel_v,
@@ -246,9 +265,15 @@ def _launch_mla_bwd(q_bhsd, k_bhsd, v_bhsd, o_bhsd, lse, do_bhsd, softmax_scale,
         *common_shape_args,
         *common_strides,
         # dK strides
-        dk.stride(0), dk.stride(1), dk.stride(2), 1,
+        dk.stride(0),
+        dk.stride(1),
+        dk.stride(2),
+        1,
         # dV strides
-        dv.stride(0), dv.stride(1), dv.stride(2), 1,
+        dv.stride(0),
+        dv.stride(1),
+        dv.stride(2),
+        1,
         IS_CAUSAL=is_causal,
         BLOCK_DMODEL_QK=block_dmodel_qk,
         BLOCK_DMODEL_V=block_dmodel_v,
@@ -267,9 +292,7 @@ class MLAttentionFn(torch.autograd.Function):
                 f"qkv_format must be one of {_SUPPORTED_QKV_FORMATS}, got {qkv_format!r}"
             )
         if q.dtype not in (torch.float16, torch.bfloat16):
-            raise ValueError(
-                f"mla_attention requires fp16 or bf16 inputs, got {q.dtype}"
-            )
+            raise ValueError(f"mla_attention requires fp16 or bf16 inputs, got {q.dtype}")
         if not (q.dtype == k.dtype == v.dtype):
             raise ValueError("q, k, v must share the same dtype")
         if not q.is_cuda:
@@ -281,8 +304,7 @@ class MLAttentionFn(torch.autograd.Function):
 
         if q_bhsd.shape[3] != k_bhsd.shape[3]:
             raise ValueError(
-                "q.head_dim and k.head_dim must match"
-                f" (got {q_bhsd.shape[3]} vs {k_bhsd.shape[3]})"
+                f"q.head_dim and k.head_dim must match (got {q_bhsd.shape[3]} vs {k_bhsd.shape[3]})"
             )
         if q_bhsd.shape[:2] != k_bhsd.shape[:2] or q_bhsd.shape[:2] != v_bhsd.shape[:2]:
             raise ValueError("q, k, v must share batch and head dimensions")
@@ -419,9 +441,7 @@ def _launch_mla_decode_fwd(q_nope_abs, q_rope, c_kv, k_rope, softmax_scale, is_c
     S_kv = c_kv.shape[1]
     R_rope = q_rope.shape[3]
 
-    o_inter = torch.empty(
-        (B, H, S_q, R), device=q_nope_abs.device, dtype=q_nope_abs.dtype
-    )
+    o_inter = torch.empty((B, H, S_q, R), device=q_nope_abs.device, dtype=q_nope_abs.dtype)
     lse = torch.empty((B, H, S_q), device=q_nope_abs.device, dtype=torch.float32)
 
     block_dmodel_r = max(16, triton.next_power_of_2(R))
@@ -444,17 +464,32 @@ def _launch_mla_decode_fwd(q_nope_abs, q_rope, c_kv, k_rope, softmax_scale, is_c
         R,
         R_rope,
         # Q_nope_abs strides
-        q_nope_abs.stride(0), q_nope_abs.stride(1), q_nope_abs.stride(2), 1,
+        q_nope_abs.stride(0),
+        q_nope_abs.stride(1),
+        q_nope_abs.stride(2),
+        1,
         # Q_rope strides
-        q_rope.stride(0), q_rope.stride(1), q_rope.stride(2), 1,
+        q_rope.stride(0),
+        q_rope.stride(1),
+        q_rope.stride(2),
+        1,
         # c_kv strides (no H)
-        c_kv.stride(0), c_kv.stride(1), 1,
+        c_kv.stride(0),
+        c_kv.stride(1),
+        1,
         # k_rope strides (no H)
-        k_rope.stride(0), k_rope.stride(1), 1,
+        k_rope.stride(0),
+        k_rope.stride(1),
+        1,
         # O_inter strides
-        o_inter.stride(0), o_inter.stride(1), o_inter.stride(2), 1,
+        o_inter.stride(0),
+        o_inter.stride(1),
+        o_inter.stride(2),
+        1,
         # LSE strides
-        lse.stride(0), lse.stride(1), 1,
+        lse.stride(0),
+        lse.stride(1),
+        1,
         IS_CAUSAL=is_causal,
         BLOCK_DMODEL_R=block_dmodel_r,
         BLOCK_DMODEL_RR=block_dmodel_rr,
@@ -507,9 +542,7 @@ def mla_decode_attention(
         raise ValueError(
             f"mla_decode_attention requires fp16 or bf16 inputs, got {q_nope_abs.dtype}"
         )
-    if not (
-        q_nope_abs.dtype == q_rope.dtype == c_kv.dtype == k_rope.dtype
-    ):
+    if not (q_nope_abs.dtype == q_rope.dtype == c_kv.dtype == k_rope.dtype):
         raise ValueError("q_nope_abs, q_rope, c_kv, k_rope must share dtype")
     if not q_nope_abs.is_cuda:
         raise ValueError("mla_decode_attention requires CUDA tensors")

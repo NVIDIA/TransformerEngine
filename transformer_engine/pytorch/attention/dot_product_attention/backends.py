@@ -2192,9 +2192,7 @@ class MLATritonAttention(torch.nn.Module):
         super().__init__()
         self.softmax_scale = softmax_scale
         if attention_dropout != 0.0:
-            raise ValueError(
-                "MLATritonAttention does not support attention_dropout > 0."
-            )
+            raise ValueError("MLATritonAttention does not support attention_dropout > 0.")
 
     def forward(
         self,

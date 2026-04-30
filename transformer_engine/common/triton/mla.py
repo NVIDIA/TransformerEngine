@@ -254,19 +254,9 @@ def _mla_attn_bwd_preprocess(
     mask_d = offs_d < D_v
     mask_md = mask_m[:, None] & mask_d[None, :]
 
-    o_ptrs = (
-        O_ptr
-        + off_b * sO_b
-        + off_h * sO_h
-        + offs_m[:, None] * sO_s
-        + offs_d[None, :] * sO_d
-    )
+    o_ptrs = O_ptr + off_b * sO_b + off_h * sO_h + offs_m[:, None] * sO_s + offs_d[None, :] * sO_d
     do_ptrs = (
-        DO_ptr
-        + off_b * sDO_b
-        + off_h * sDO_h
-        + offs_m[:, None] * sDO_s
-        + offs_d[None, :] * sDO_d
+        DO_ptr + off_b * sDO_b + off_h * sDO_h + offs_m[:, None] * sDO_s + offs_d[None, :] * sDO_d
     )
     o = tl.load(o_ptrs, mask=mask_md, other=0.0).to(tl.float32)
     do = tl.load(do_ptrs, mask=mask_md, other=0.0).to(tl.float32)

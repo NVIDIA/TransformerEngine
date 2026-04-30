@@ -510,10 +510,14 @@ class DotProductAttention(TransformerEngineBaseModule):
         # :meth:`forward` for the dispatch conditions. Always instantiated so
         # the env var can be flipped at runtime; the underlying triton kernel
         # is JIT-compiled lazily on first invocation.
-        self.mla_triton_attention = MLATritonAttention(
-            softmax_scale,
-            attention_dropout=attention_dropout,
-        ) if attention_dropout == 0.0 else None
+        self.mla_triton_attention = (
+            MLATritonAttention(
+                softmax_scale,
+                attention_dropout=attention_dropout,
+            )
+            if attention_dropout == 0.0
+            else None
+        )
 
         def remove_extra_states_check(self, incompatible_keys):  # pylint: disable=unused-argument
             """
@@ -1520,7 +1524,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                 int(os.getenv("NVTE_MLA_TRITON", "0"))
                 and self.mla_triton_attention is not None
                 and head_dim_qk != head_dim_v
-                and head_dim_qk in (128, 192, 256) and head_dim_v in (64, 128)
+                and head_dim_qk in (128, 192, 256)
+                and head_dim_v in (64, 128)
                 and query_layer.dtype in (torch.bfloat16, torch.float16)
                 and not self.fp8
                 and not context_parallel

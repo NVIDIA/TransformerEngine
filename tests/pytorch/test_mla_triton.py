@@ -38,10 +38,7 @@ class MLAConfig:
 
     @staticmethod
     def desc(cfg):
-        return (
-            f"b{cfg.b}_h{cfg.h}_sq{cfg.s_q}_skv{cfg.s_kv}"
-            f"_dqk{cfg.d_qk}_dv{cfg.d_v}"
-        )
+        return f"b{cfg.b}_h{cfg.h}_sq{cfg.s_q}_skv{cfg.s_kv}_dqk{cfg.d_qk}_dv{cfg.d_v}"
 
 
 mla_configs = [
@@ -191,9 +188,7 @@ def test_mla_softmax_scale_default():
     cfg = MLAConfig(1, 2, 64, 64, 192, 128)
     q, k, v = _make_qkv(cfg, torch.bfloat16, "bshd")
     out_default = mla_attention(q, k, v, qkv_format="bshd")
-    out_explicit = mla_attention(
-        q, k, v, softmax_scale=cfg.d_qk**-0.5, qkv_format="bshd"
-    )
+    out_explicit = mla_attention(q, k, v, softmax_scale=cfg.d_qk**-0.5, qkv_format="bshd")
     torch.testing.assert_close(out_default, out_explicit, atol=0.0, rtol=0.0)
 
 
@@ -221,10 +216,7 @@ class MLADecodeConfig:
 
     @staticmethod
     def desc(cfg):
-        return (
-            f"b{cfg.b}_h{cfg.h}_sq{cfg.s_q}_skv{cfg.s_kv}"
-            f"_r{cfg.r}_rrope{cfg.r_rope}"
-        )
+        return f"b{cfg.b}_h{cfg.h}_sq{cfg.s_q}_skv{cfg.s_kv}_r{cfg.r}_rrope{cfg.r_rope}"
 
 
 _decode_configs = [
@@ -256,7 +248,9 @@ def test_mla_decode_forward(cfg, dtype, is_causal):
     softmax_scale = 1.0 / (cfg.r + cfg.r_rope) ** 0.5
 
     o = mla_decode_attention(qn, qr, ck, kr, softmax_scale=softmax_scale, is_causal=is_causal)
-    o_ref = mla_decode_attention_ref(qn, qr, ck, kr, softmax_scale=softmax_scale, is_causal=is_causal)
+    o_ref = mla_decode_attention_ref(
+        qn, qr, ck, kr, softmax_scale=softmax_scale, is_causal=is_causal
+    )
 
     assert o.shape == o_ref.shape == (cfg.b, cfg.h, cfg.s_q, cfg.r)
     assert o.dtype == o_ref.dtype == dtype
@@ -299,10 +293,13 @@ def test_dpa_dispatches_to_mla_triton(monkeypatch, dtype, is_causal, qkv_format)
     monkeypatch.setenv("NVTE_MLA_TRITON", "1")
 
     # Force backend cache invalidation so the env-var check re-runs.
-    from transformer_engine.pytorch.attention.dot_product_attention import dot_product_attention as dpa_mod
+    from transformer_engine.pytorch.attention.dot_product_attention import (
+        dot_product_attention as dpa_mod,
+    )
+
     dpa_mod._attention_backends["backend_selection_requires_update"] = True
 
-    softmax_scale = cfg.d_qk ** -0.5
+    softmax_scale = cfg.d_qk**-0.5
     dpa = te.DotProductAttention(
         num_attention_heads=cfg.h,
         kv_channels=(cfg.d_qk, cfg.d_v),
@@ -323,7 +320,9 @@ def test_dpa_falls_through_when_env_var_unset(monkeypatch):
     """With NVTE_MLA_TRITON unset, dispatch must NOT route through the MLA
     Triton backend even for MLA-shaped inputs (existing behavior preserved)."""
     import transformer_engine.pytorch as te
-    from transformer_engine.pytorch.attention.dot_product_attention import dot_product_attention as dpa_mod
+    from transformer_engine.pytorch.attention.dot_product_attention import (
+        dot_product_attention as dpa_mod,
+    )
 
     reset_rng_states()
     cfg = MLAConfig(2, 4, 256, 256, 192, 128)
@@ -336,7 +335,7 @@ def test_dpa_falls_through_when_env_var_unset(monkeypatch):
         num_attention_heads=cfg.h,
         kv_channels=(cfg.d_qk, cfg.d_v),
         attention_dropout=0.0,
-        softmax_scale=cfg.d_qk ** -0.5,
+        softmax_scale=cfg.d_qk**-0.5,
         qkv_format="bshd",
         attn_mask_type="causal",
     ).cuda()
