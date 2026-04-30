@@ -6,10 +6,11 @@
 
 #pragma once
 
-#include <memory>
-#include <vector>
 #include <array>
+#include <memory>
 #include <random>
+#include <vector>
+
 #include <cudaTypedefs.h>
 #define FP4_TYPE_SUPPORTED (CUDA_VERSION >= 12080)
 
@@ -26,6 +27,11 @@
 
 namespace test {
 using namespace transformer_engine;
+
+size_t typeToNumBits(DType type);
+size_t product(const NVTEShape &shape);
+size_t product(const std::vector<size_t> &shape);
+size_t bytes(const NVTEShape& shape, const DType type);
 
 template <size_t i>
 struct BytesToType {};
@@ -141,30 +147,7 @@ class Tensor {
   Tensor(Tensor &&other) = default;
   Tensor& operator=(Tensor &&other) = default;
 
-  ~Tensor() {
-    void *data_ptr = tensor_.dptr();
-    void *scale_inv = tensor_.scale_inv();
-    void *columnwise_data_ptr = tensor_.get_columnwise_data().data_ptr;
-    void *columnwise_scale_inv = tensor_.get_columnwise_scale_inv().data_ptr;
-    if (columnwise_data_ptr == data_ptr) {
-      columnwise_data_ptr = nullptr;
-    }
-    if (columnwise_scale_inv == scale_inv) {
-      columnwise_scale_inv = nullptr;
-    }
-    if (data_ptr != nullptr) {
-      cudaFree(data_ptr);
-    }
-    if (scale_inv != nullptr) {
-      cudaFree(scale_inv);
-    }
-    if (columnwise_data_ptr != nullptr) {
-      cudaFree(columnwise_data_ptr);
-    }
-    if (columnwise_scale_inv != nullptr) {
-      cudaFree(columnwise_scale_inv);
-    }
-  }
+  ~Tensor();
 
   NVTETensor data() const noexcept { return tensor_.data(); }
 
@@ -215,24 +198,19 @@ class Tensor {
   }
 
   float amax() const {
-    if(amax_cpu_data_) {
-      to_cpu();
-      return *amax_cpu_data_;
-    } else {
-      return 0;
-    }
+    NVTE_CHECK(amax_cpu_data_);
+    NVTE_CHECK(tensor_.get_amax().dtype == kNVTEFloat32);
+    NVTE_CHECK(product(tensor_.get_amax().shape) == 1);
+    to_cpu();
+    return *amax_cpu_data_;
   }
 
   float scale() const {
-    if(scale_cpu_data_) {
-      NVTE_CHECK((tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING)
-                 || (tensor_.scaling_mode() == NVTE_NVFP4_1D_SCALING),
-                 "Invalid scaling_mode!");
-      to_cpu();
-      return *scale_cpu_data_;
-    } else {
-      return 1;
-    }
+    NVTE_CHECK(scale_cpu_data_);
+    NVTE_CHECK(tensor_.get_scale().dtype == kNVTEFloat32);
+    NVTE_CHECK(product(tensor_.get_scale().shape) == 1);
+    to_cpu();
+    return *scale_cpu_data_;
   }
 
   template <typename T>
@@ -266,12 +244,12 @@ class Tensor {
   }
 
   float rowwise_scale_inv(){
-    if(rowwise_scale_inv_cpu_data_) {
-      float scale_inv = rowwise_cpu_scale_inv_ptr<float>()[0];
-      return scale_inv;
-    } else {
-      return 1;
-    }
+    to_cpu();
+    NVTE_CHECK(rowwise_scale_inv_cpu_data_);
+    auto scale_inv_tensor = tensor_.get_rowwise_scale_inv();
+    NVTE_CHECK(product(scale_inv_tensor.shape) == 1);
+    NVTE_CHECK(scale_inv_tensor.dtype == kNVTEFloat32);
+    return *reinterpret_cast<const float *>(rowwise_scale_inv_cpu_data_.get());
   }
 
   bool rowwise() const {
@@ -292,8 +270,14 @@ class Tensor {
 
   void to_cpu() const;
   void from_cpu() const;
+
+  void set_amax(float amax);
   void set_scale(float scale);
   void set_scale_inv(float scale_inv);
+
+  void fill_uniform_rowwise_scale_inv();
+  void fill_uniform_columnwise_scale_inv();
+  void fill_uniform_scale();
   void shareFP8Meta(const Tensor &other);
 
   std::mt19937& gen() { return gen_; }
@@ -454,11 +438,6 @@ inline float silu(const float x)     { return x * sigmoid(x); }
 inline float dsilu(const float x)    { return x * dsigmoid(x) + sigmoid(x); }
 inline float srelu(const float x)    { return x > 0 ? x * x : 0; }
 inline float dsrelu(const float x)   { return fmaxf(0, 2 * x); }
-
-size_t typeToNumBits(DType type);
-size_t product(const NVTEShape &shape);
-size_t product(const std::vector<size_t> &shape);
-size_t bytes(const NVTEShape& shape, const DType type);
 
 size_t first_dimension(const std::vector<size_t> &shape);
 size_t last_dimension(const std::vector<size_t> &shape);

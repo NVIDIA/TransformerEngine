@@ -574,8 +574,7 @@ void performTest(float (*OP)(const float),
             amax = fmaxf(amax, static_cast<float>(input_dptr[idx]));
         }
     }
-    // Set 2nd stage NVFP4 scaling factor
-    output.set_scale(amax);
+    output.set_amax(amax);
 
     bool use_2d_quantization = false;
 
@@ -585,7 +584,7 @@ void performTest(float (*OP)(const float),
                            ref_output_t.get(),
                            ref_scales.get(),
                            ref_scales_t.get(),
-                           output.scale(),
+                           output.amax(),
                            rows,
                            cols,
                            scales_stride,
