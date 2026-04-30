@@ -112,7 +112,34 @@ class TestDistributedMoEBlock:
 
         with mesh, autocast(enabled=False, mesh_resource=MeshResource(fsdp_resource="fsdp")):
             with nn.logical_axis_rules(logical_axis_rules):
-                sharded_variables = sharded_block.init(init_key, inputs)
+                # ``MoEBlock`` registers params via ``with_logical_partitioning``
+                # which only attaches LogicallyPartitioned metadata; the
+                # underlying jax.Array stays single-device unless ``init``
+                # is run inside ``jax.jit`` with ``out_shardings``. Use the
+                # canonical Flax-Linen pattern (mirrors
+                # ``examples/jax/encoder/test_model_parallel_encoder.py``):
+                #   1. ``jax.eval_shape`` to trace abstract variables (keeps
+                #      the LogicallyPartitioned wrappers; only the inner
+                #      arrays become ShapeDtypeStruct);
+                #   2. ``nn.get_partition_spec`` to extract a tree of logical
+                #      PartitionSpecs from those wrappers (treats
+                #      LogicallyPartitioned as a leaf);
+                #   3. ``nn.logical_to_mesh_sharding`` to resolve those
+                #      logical specs to NamedShardings via the active rules;
+                #   4. ``jax.jit(init, out_shardings=...)`` to actually
+                #      place the params on-device with those shardings.
+                abstract_variables = jax.eval_shape(
+                    sharded_block.init, init_key, inputs
+                )
+                logical_partition_spec = nn.get_partition_spec(
+                    abstract_variables
+                )
+                out_shardings = nn.logical_to_mesh_sharding(
+                    logical_partition_spec, mesh, logical_axis_rules
+                )
+                sharded_variables = jax.jit(
+                    sharded_block.init, out_shardings=out_shardings
+                )(init_key, inputs)
                 (sharded_loss, (sharded_output, sharded_aux)), sharded_grads = (
                     jax.value_and_grad(loss_fn, argnums=1, has_aux=True)(
                         sharded_block, sharded_variables, inputs
