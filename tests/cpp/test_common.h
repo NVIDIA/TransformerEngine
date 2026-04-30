@@ -146,6 +146,9 @@ class Tensor {
     void *scale_inv = tensor_.scale_inv();
     void *columnwise_data_ptr = tensor_.get_columnwise_data().data_ptr;
     void *columnwise_scale_inv = tensor_.get_columnwise_scale_inv().data_ptr;
+    void *amax = tensor_.amax();
+    void *columnwise_amax_ptr = tensor_.get_columnwise_amax().data_ptr;
+    void *scale = tensor_.scale();
     if (columnwise_data_ptr == data_ptr) {
       columnwise_data_ptr = nullptr;
     }
@@ -163,6 +166,15 @@ class Tensor {
     }
     if (columnwise_scale_inv != nullptr) {
       cudaFree(columnwise_scale_inv);
+    }
+    if (amax != nullptr) {
+      cudaFree(amax);
+    }
+    if (columnwise_amax_ptr != nullptr) {
+      cudaFree(columnwise_amax_ptr);
+    }
+    if (scale != nullptr) {
+      cudaFree(scale);
     }
   }
 
