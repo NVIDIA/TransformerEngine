@@ -937,7 +937,7 @@ class MoEBlock(TransformerEngineBase):
         return shard_map(
             _a2a_fn,
             mesh=mesh,
-            in_specs=in_specs,
+            in_specs=(in_specs,),
             out_specs=(P(ep_axis, None, None), P()),
             check_rep=False,
         )(captured)
