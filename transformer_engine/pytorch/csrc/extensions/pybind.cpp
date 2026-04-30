@@ -183,7 +183,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("quantizer"));
   m.def("clamped_swiglu", transformer_engine::pytorch::clamped_swiglu,
         "SwiGLU activation used in GPT OSS", py::arg("input"), py::arg("quantizer"),
-        py::arg("limit") = 7.0f, py::arg("alpha") = 1.702f);
+        py::arg("limit") = 7.0f, py::arg("alpha") = 1.702f, py::arg("glu_linear_offset") = 1.0f);
   /* Backward of GLU */
   m.def("dglu", transformer_engine::pytorch::dglu, "Backward of GLU", py::arg("grad"),
         py::arg("fwd_input"), py::arg("quantizer"));
@@ -212,7 +212,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("fwd_input"), py::arg("quantizer"));
   m.def("clamped_dswiglu", transformer_engine::pytorch::clamped_dswiglu,
         "Backward of SwiGLU used in GPT OSS", py::arg("grad"), py::arg("fwd_input"),
-        py::arg("quantizer"), py::arg("limit") = 7.0f, py::arg("alpha") = 1.702f);
+        py::arg("quantizer"), py::arg("limit") = 7.0f, py::arg("alpha") = 1.702f,
+        py::arg("glu_linear_offset") = 1.0f);
   /* DBias + DAct fusions*/
   m.def("dbias_dgelu", transformer_engine::pytorch::dbias_dgelu, "DGeLU + DBias + Quantize",
         py::arg("grad"), py::arg("fwd_input"), py::arg("quantizer"));

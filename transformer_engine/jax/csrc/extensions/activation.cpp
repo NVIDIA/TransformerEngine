@@ -23,6 +23,7 @@ Error_Type ActLuFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type scal
   // parameters for clamped swiglu used in GPT OSS
   auto swiglu_limit = act_params.clamped_swiglu.limit;
   auto swiglu_alpha = act_params.clamped_swiglu.alpha;
+  auto swiglu_glu_linear_offset = act_params.clamped_swiglu.glu_linear_offset;
 
   auto in_dtype = convert_ffi_datatype_to_te_dtype(input_buf.element_type());
   auto out_dtype = convert_ffi_datatype_to_te_dtype(output_buf->element_type());
@@ -138,7 +139,7 @@ Error_Type ActLuFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type scal
       break;
     case NVTE_Activation_Type::CLAMPED_SWIGLU:
       nvte_clamped_swiglu(input_tensor.data(), output_tensor.data(), swiglu_limit, swiglu_alpha,
-                          stream);
+                          swiglu_glu_linear_offset, stream);
       break;
     default:
       NVTE_ERROR("Unsupported ActivationEnum");
@@ -271,6 +272,7 @@ Error_Type DActLuDBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf,
   // parameters for clamped swiglu used in GPT OSS
   auto swiglu_limit = act_params.clamped_swiglu.limit;
   auto swiglu_alpha = act_params.clamped_swiglu.alpha;
+  auto swiglu_glu_linear_offset = act_params.clamped_swiglu.glu_linear_offset;
 
   auto in_dtype = convert_ffi_datatype_to_te_dtype(input_buf.element_type());
   auto out_dtype = convert_ffi_datatype_to_te_dtype(output_buf->element_type());
@@ -447,7 +449,7 @@ Error_Type DActLuDBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf,
         break;
       case NVTE_Activation_Type::CLAMPED_SWIGLU:
         nvte_clamped_dswiglu(input_tensor.data(), act_input_tensor.data(), output_tensor.data(),
-                             swiglu_limit, swiglu_alpha, stream);
+                             swiglu_limit, swiglu_alpha, swiglu_glu_linear_offset, stream);
         break;
       default:
         NVTE_ERROR("Unsupported ActivationEnum");

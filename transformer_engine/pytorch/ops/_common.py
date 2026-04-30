@@ -179,6 +179,7 @@ def fuse_grouped_mlp_ops(
             matches_pattern = False
         elif isinstance(window[1], ScaledClampedQGeGLU) and (
             abs(window[1]._clamped.alpha - 1.702) > 0.001
+            or abs(window[1]._clamped.glu_linear_offset - 1.0) > 0.001
             or not _nvidia_cudnn_frontend_supports_scaled_clamped_qgeglu()
         ):
             matches_pattern = False

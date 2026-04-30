@@ -336,10 +336,11 @@ void nvte_swiglu(const NVTETensor input, NVTETensor output, cudaStream_t stream)
  *                           It computes Act(input[N, :H]) x input[N, H:]
  *  \param[in]     limit     Clipping limits for gate and pre-activation.
  *  \param[in]     alpha     Scaling factor for the sigmoid function used in the activation.
+ *  \param[in]     glu_linear_offset  Offset added to the linear component after clamping (default 1.0).
  *  \param[in]     stream    CUDA stream used for the operation.
  */
 void nvte_clamped_swiglu(const NVTETensor input, NVTETensor output, float limit, float alpha,
-                         cudaStream_t stream);
+                         float glu_linear_offset, cudaStream_t stream);
 
 /*! \brief Computes the gated ReLU activation of the input.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
@@ -413,10 +414,11 @@ void nvte_dswiglu(const NVTETensor grad, const NVTETensor input, NVTETensor outp
  *  \param[in,out] output    Outgoing gradient of shape [N, H * 2].
  *  \param[in]     limit     Clipping limits for gate and pre-activation.
  *  \param[in]     alpha     Scaling factor for the sigmoid function used in the activation.
+ *  \param[in]     glu_linear_offset  Offset added to the linear component after clamping (default 1.0).
  *  \param[in]     stream    CUDA stream used for the operation.
  */
 void nvte_clamped_dswiglu(const NVTETensor grad, const NVTETensor input, NVTETensor output,
-                          float limit, float alpha, cudaStream_t stream);
+                          float limit, float alpha, float glu_linear_offset, cudaStream_t stream);
 
 /*! \brief Computes the gated ReLU activation gradient.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
