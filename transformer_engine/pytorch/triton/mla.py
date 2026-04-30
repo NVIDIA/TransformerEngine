@@ -546,6 +546,15 @@ def mla_decode_attention(
         raise ValueError("q_nope_abs, q_rope, c_kv, k_rope must share dtype")
     if not q_nope_abs.is_cuda:
         raise ValueError("mla_decode_attention requires CUDA tensors")
+    # Forward-only in v1: the kernel is launched directly (no autograd.Function
+    # wrapper), so a tensor that needs gradients would silently lose them at
+    # the kernel boundary. Refuse loudly instead.
+    if any(t.requires_grad for t in (q_nope_abs, q_rope, c_kv, k_rope)):
+        raise NotImplementedError(
+            "mla_decode_attention is forward-only in v1; backward through the"
+            " absorbed-projection decode kernel is not implemented. Detach"
+            " inputs (or use torch.no_grad()) before calling."
+        )
 
     if q_nope_abs.shape[-1] != c_kv.shape[-1]:
         raise ValueError(

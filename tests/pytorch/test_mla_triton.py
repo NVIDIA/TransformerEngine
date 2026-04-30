@@ -273,6 +273,17 @@ def test_mla_decode_rejects_dim_mismatch():
         mla_decode_attention(qn, qr, bad_ck, kr, softmax_scale=0.1)
 
 
+def test_mla_decode_rejects_requires_grad():
+    """Decode is forward-only in v1; an input with requires_grad=True must
+    raise NotImplementedError rather than silently dropping gradients at the
+    kernel boundary."""
+    cfg = MLADecodeConfig(1, 2, 1, 64, 64, 16)
+    qn, qr, ck, kr = _make_decode_inputs(cfg, torch.bfloat16)
+    qn.requires_grad_(True)
+    with pytest.raises(NotImplementedError, match="forward-only"):
+        mla_decode_attention(qn, qr, ck, kr, softmax_scale=0.1)
+
+
 # ---------------------------------------------------------------------------
 # DotProductAttention dispatch (NVTE_MLA_TRITON=1 fast path)
 # ---------------------------------------------------------------------------

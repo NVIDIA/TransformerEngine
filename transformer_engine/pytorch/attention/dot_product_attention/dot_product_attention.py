@@ -1521,7 +1521,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             # the regular FA/Fused/Unfused cascade — defaulting to no behavior
             # change when the env var is unset.
             if (
-                int(os.getenv("NVTE_MLA_TRITON", "0"))
+                os.getenv("NVTE_MLA_TRITON", "0") == "1"
                 and self.mla_triton_attention is not None
                 and head_dim_qk != head_dim_v
                 and head_dim_qk in (128, 192, 256)
@@ -1539,10 +1539,15 @@ class DotProductAttention(TransformerEngineBaseModule):
                 and torch.cuda.is_available()
                 and torch.cuda.get_device_capability(query_layer.device)[0] >= 8
             ):
-                # TE's "causal" is bottom-right when S_q != S_kv via
-                # bottom_right_diagonal=True (default). Our kernel right-aligns
-                # the diagonal by construction, so both map to is_causal=True.
-                is_causal_dispatch = attn_mask_type in ("causal", "causal_bottom_right")
+                # Causal masking can be requested via either ``attn_mask_type``
+                # (TE's bottom-right alignment when S_q != S_kv matches our
+                # kernel's right-aligned diagonal) or via FlashAttention-style
+                # ``window_size=(-1, 0)`` (left=infinite, right=0 → causal).
+                # Both paths must map to the kernel's ``is_causal=True``.
+                is_causal_dispatch = (
+                    attn_mask_type in ("causal", "causal_bottom_right")
+                    or window_size == (-1, 0)
+                )
                 self.logger.info("Running with MLATriton backend (NVTE_MLA_TRITON=1)")
                 return self.mla_triton_attention(
                     query_layer,
