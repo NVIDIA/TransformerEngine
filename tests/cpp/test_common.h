@@ -234,9 +234,7 @@ class Tensor {
 
   float scale() const {
     if(scale_cpu_data_) {
-      NVTE_CHECK((tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING)
-                 || (tensor_.scaling_mode() == NVTE_NVFP4_1D_SCALING),
-                 "Invalid scaling_mode!");
+      NVTE_CHECK(tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING, "Invalid scaling_mode!");
       to_cpu();
       return *scale_cpu_data_;
     } else {
