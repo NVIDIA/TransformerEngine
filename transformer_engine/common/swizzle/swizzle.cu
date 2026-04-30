@@ -2090,38 +2090,41 @@ __global__ void __launch_bounds__(TB_DIM* TB_DIM)
     const uint8_t* input_base = reinterpret_cast<const uint8_t*>(input) + current_scale_base;
     uint8_t* output_base = reinterpret_cast<uint8_t*>(output) + current_scale_base;
 
-    size_t padded_m = round_up_to_multiple(M, 128);
-    size_t padded_k = round_up_to_multiple(DIVUP(K, static_cast<size_t>(MXFP8_BLOCK_SIZE)), 4);
-    int original_M = static_cast<int>(M);
-    int original_K = static_cast<int>(DIVUP(K, static_cast<size_t>(MXFP8_BLOCK_SIZE)));
+    const int padded_m = static_cast<int>(round_up_to_multiple(M, 128));
+    const int padded_k =
+        static_cast<int>(round_up_to_multiple(DIVUP(K, static_cast<size_t>(MXFP8_BLOCK_SIZE)), 4));
+    const int original_M = static_cast<int>(M);
+    const int original_K = static_cast<int>(DIVUP(K, static_cast<size_t>(MXFP8_BLOCK_SIZE)));
+    const bool padding_m = (block_y == grid_dim_y - 1) && (original_M < padded_m);
+    const bool padding_k = (block_x == grid_dim_x - 1) && (original_K < padded_k);
 
     if (rowwise) {
       if (vec_load_size == 4) {
-        swizzle_row_scaling_kernel_impl<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>(
+        dispatch_swizzle_row_scaling_kernel_impl<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>(
             input_base, output_base, padded_m, padded_k, original_M, original_K, block_x, block_y,
-            grid_dim_x, grid_dim_y);
+            grid_dim_x, grid_dim_y, padding_k, padding_m);
       } else if (vec_load_size == 2) {
-        swizzle_row_scaling_kernel_impl<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>(
+        dispatch_swizzle_row_scaling_kernel_impl<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>(
             input_base, output_base, padded_m, padded_k, original_M, original_K, block_x, block_y,
-            grid_dim_x, grid_dim_y);
+            grid_dim_x, grid_dim_y, padding_k, padding_m);
       } else {
-        swizzle_row_scaling_kernel_impl<int, SF_TILE_DIM_M, SF_TILE_DIM_K>(
+        dispatch_swizzle_row_scaling_kernel_impl<int, SF_TILE_DIM_M, SF_TILE_DIM_K>(
             input_base, output_base, padded_m, padded_k, original_M, original_K, block_x, block_y,
-            grid_dim_x, grid_dim_y);
+            grid_dim_x, grid_dim_y, padding_k, padding_m);
       }
     } else {
       if (vec_load_size == 4) {
-        swizzle_col_scaling_kernel_impl<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>(
+        dispatch_swizzle_col_scaling_kernel_impl<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>(
             input_base, output_base, padded_m, padded_k, original_M, original_K, block_x, block_y,
-            grid_dim_x, grid_dim_y);
+            grid_dim_x, grid_dim_y, padding_k, padding_m);
       } else if (vec_load_size == 2) {
-        swizzle_col_scaling_kernel_impl<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>(
+        dispatch_swizzle_col_scaling_kernel_impl<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>(
             input_base, output_base, padded_m, padded_k, original_M, original_K, block_x, block_y,
-            grid_dim_x, grid_dim_y);
+            grid_dim_x, grid_dim_y, padding_k, padding_m);
       } else {
-        swizzle_col_scaling_kernel_impl<int, SF_TILE_DIM_M, SF_TILE_DIM_K>(
+        dispatch_swizzle_col_scaling_kernel_impl<int, SF_TILE_DIM_M, SF_TILE_DIM_K>(
             input_base, output_base, padded_m, padded_k, original_M, original_K, block_x, block_y,
-            grid_dim_x, grid_dim_y);
+            grid_dim_x, grid_dim_y, padding_k, padding_m);
       }
     }
   }
