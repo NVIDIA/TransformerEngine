@@ -287,10 +287,12 @@ def _get_thd_reorder_perms(cu_seqlens, cp_size):
     key = (tuple(cu_seqlens.tolist()), cp_size)
     if key not in _thd_reorder_perm_cache:
         total_tokens = int(cu_seqlens[-1].item())
-        P = torch.cat([
-            tex.thd_get_partitioned_indices(cu_seqlens, total_tokens, cp_size, rank)
-            for rank in range(cp_size)
-        ])
+        P = torch.cat(
+            [
+                tex.thd_get_partitioned_indices(cu_seqlens, total_tokens, cp_size, rank)
+                for rank in range(cp_size)
+            ]
+        )
         P_inv = torch.empty_like(P)
         P_inv[P.long()] = torch.arange(total_tokens, dtype=P.dtype, device=P.device)
         _thd_reorder_perm_cache[key] = (P, P_inv)
@@ -3348,7 +3350,9 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                                 if not fp8_recipe.mxfp8():
                                     q_part, k_part, v_part = [
                                         Float8Tensor.make_like(x, data=y, dtype=fwd_nominal_dtype)
-                                        for x, y in zip([q_fp8, k_fp8, v_fp8], [q_part, k_part, v_part])
+                                        for x, y in zip(
+                                            [q_fp8, k_fp8, v_fp8], [q_part, k_part, v_part]
+                                        )
                                     ]
                                 else:
                                     q_part, k_part, v_part, new_qkv_layout, qkv_scale_inv_format = (
