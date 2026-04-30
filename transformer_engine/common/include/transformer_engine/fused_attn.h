@@ -156,11 +156,9 @@ enum NVTE_Softmax_Type {
 enum NVTE_Fused_Attn_Backend {
   /*! No supported backend */
   NVTE_No_Backend = -1,
-  /*! cuDNN-based FP16/BF16 fused attention for <= 512 sequence length */
-  NVTE_F16_max512_seqlen = 0,
   /*! cuDNN-based FP16/BF16 fused attention for any sequence length */
   NVTE_F16_arbitrary_seqlen = 1,
-  /*! cuDNN-based FP8 fused attention for <= 512 sequence length */
+  /*! cuDNN-based FP8 fused attention */
   NVTE_FP8 = 2,
 };
 

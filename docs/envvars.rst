@@ -142,9 +142,9 @@ Attention Backend Selection
 
 .. envvar:: NVTE_FUSED_ATTN_BACKEND
 
-   :Type: ``int`` (0, 1, or 2)
+   :Type: ``int`` (1 or 2)
    :Default: Auto-selected
-   :Description: Force a specific FusedAttention backend. ``0`` = F16_max512_seqlen (cuDNN, ≤512 seq len), ``1`` = F16_arbitrary_seqlen (cuDNN, any seq len), ``2`` = FP8 backend. If not set, the backend is automatically selected based on the input configuration.
+   :Description: Force a specific FusedAttention backend. ``1`` = F16_arbitrary_seqlen (cuDNN, any seq len), ``2`` = FP8 backend. If not set, the backend is automatically selected based on the input configuration.
 
 .. envvar:: NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT
 

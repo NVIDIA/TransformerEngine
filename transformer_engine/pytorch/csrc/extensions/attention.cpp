@@ -271,7 +271,6 @@ std::vector<py::object> fused_attn_fwd(
     nvte_set_tensor_param(&nvte_aux_tensor_pack.tensors[i], kNVTERowwiseData, &temp_data);
   };
   // allocate memory for nvte_aux_tensor_pack.tensors
-  // f16_max512   : S [b, h, sq, skv]
   // f16_arbitrary:
   // return_max_logit=false: S [b, h, sq, 1], rng_state [2], (optional) Bias [1, h, sq, skv], (optional) SoftmaxOffset [1, h, 1, 1]
   // return_max_logit=true: S [b, h, sq, 1], Max [b, h, sq, 1], rng_state [2], (optional) Bias [1, h, sq, skv], (optional) SoftmaxOffset [1, h, 1, 1]
