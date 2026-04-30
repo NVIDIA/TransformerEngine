@@ -125,7 +125,6 @@ void PrepareFusedAttnBackwardAuxTensors(NVTETensorPack *tensor_pack, const size_
                                     q_max_seqlen, kv_max_seqlen, dtype, dummy_bias_type,
                                     dummy_backend, softmax_buf, rng_state_buf, bias_buf,
                                     softmax_offset_buf);
-
 }
 
 pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
