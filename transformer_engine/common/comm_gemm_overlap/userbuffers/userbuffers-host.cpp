@@ -240,7 +240,7 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
     size_t gran;
     CUmulticastObjectProp mcProp = {};
     mcProp.numDevices = (*comm)->ar2_nvsize;
-    mcProp.size = (*comm)->mc_maxsize;
+    mcProp.size = mc_maxsize;
     mcProp.handleTypes =
         mnnvl_fabric ? CU_MEM_HANDLE_TYPE_FABRIC : CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
 
@@ -323,8 +323,9 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
       IPCCHECK(ipcSocketClose(&ipcSock));
       close(fd);
     }
-    NVTE_CALL_CHECK_CUDA_DRIVER(cuMulticastAddDevice, (*comm)->mc_handle,
-                                (CUdeviceptr)(*comm)->mydev);
+    CUdevice cudev;
+    NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGet, &cudev, (*comm)->mydev);
+    NVTE_CALL_CHECK_CUDA_DRIVER(cuMulticastAddDevice, (*comm)->mc_handle, cudev);
 
     CUdeviceptr mc_va;
     NVTE_CALL_CHECK_CUDA_DRIVER(cuMemAddressReserve, &mc_va, mc_maxsize, (size_t)0, (CUdeviceptr)0U,
@@ -692,18 +693,19 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
       NVTE_CHECK_CUDA(cudaGetDevice(&current_device));
       cudaDeviceProp deviceProp;
       NVTE_CHECK_CUDA(cudaGetDeviceProperties(&deviceProp, current_device));
-      bool peer_access_available = false;
+      bool all_peers_accessible = true;
       for (int i = 0; i < comm->nvsize; i++) {
         if (i != comm->nvrank) {
           int can_access_peer;
           cudaError_t peer_result = cudaDeviceCanAccessPeer(&can_access_peer, current_device, i);
-          if (peer_result == cudaSuccess && can_access_peer) {
-            peer_access_available = true;
+          if (peer_result != cudaSuccess || !can_access_peer) {
+            all_peers_accessible = false;
             break;
           }
         }
       }
-      if (!peer_access_available) {
+
+      if (!all_peers_accessible) {
         NVTE_ERROR(
             "No peer-to-peer access available between GPUs. This platform does not support the "
             "GPU-to-GPU "
