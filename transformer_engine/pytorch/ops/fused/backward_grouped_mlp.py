@@ -58,19 +58,41 @@ def _cudnn_compute_wgrad(
 
     fp8_dtype = torch.float8_e4m3fn
 
-    # a_tensor = DY^T = (out_features, total_tokens) row-major
-    a_tensor = grouped_dy.columnwise_data.view(dtype=fp8_dtype).view(total_tokens, out_features).T
-    # b_tensor = X = (total_tokens, in_features) column-major
-    b_tensor = grouped_x.columnwise_data.view(dtype=fp8_dtype).view(total_tokens, in_features)
-
     sfa_leading_dim = ((out_features + 127) // 128) * 128
     sfb_leading_dim = ((in_features + 127) // 128) * 128
-    sfa_tensor = grouped_dy.columnwise_scale_inv.view(sfa_leading_dim, -1).view(
-        dtype=torch.float8_e8m0fnu
-    )
-    sfb_tensor = grouped_x.columnwise_scale_inv.view(sfb_leading_dim, -1).view(
-        dtype=torch.float8_e8m0fnu
-    )
+
+    if total_tokens == 0:
+        # A workaround for the case with zero-token experts.
+        # Even for this case, cuteDSL still requires the same
+        # stride requirements for the input and scale tensors.
+        device = grouped_dy.columnwise_data.device
+        a_tensor = torch.empty_strided((out_features, 0), (16, 1), dtype=fp8_dtype, device=device)
+        b_tensor = torch.empty_strided(
+            (0, in_features), (in_features, 1), dtype=fp8_dtype, device=device
+        )
+        sfa_tensor = torch.empty_strided(
+            (sfa_leading_dim, 0),
+            (16, 1),
+            dtype=torch.float8_e8m0fnu,
+            device=device,
+        )
+        sfb_tensor = torch.empty_strided(
+            (sfb_leading_dim, 0),
+            (16, 1),
+            dtype=torch.float8_e8m0fnu,
+            device=device,
+        )
+    else:
+        a_tensor = (
+            grouped_dy.columnwise_data.view(dtype=fp8_dtype).view(total_tokens, out_features).T
+        )
+        b_tensor = grouped_x.columnwise_data.view(dtype=fp8_dtype).view(total_tokens, in_features)
+        sfa_tensor = grouped_dy.columnwise_scale_inv.view(sfa_leading_dim, -1).view(
+            dtype=torch.float8_e8m0fnu
+        )
+        sfb_tensor = grouped_x.columnwise_scale_inv.view(sfb_leading_dim, -1).view(
+            dtype=torch.float8_e8m0fnu
+        )
 
     # Prepare wgrad output
     if single_grouped_weight:
