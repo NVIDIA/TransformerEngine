@@ -880,6 +880,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 stacklevel=3,
             )
 
+    @property
     def is_fsdp2(self) -> bool:
         """Whether this module is wrapped with FSDP2."""
         if not hasattr(self, "_is_fsdp2"):
