@@ -1923,17 +1923,16 @@ class TestGroupedDense:
         # If bias is added inside _ref_grouped_dense in bf16, JAX lowers the bias
         # backward as a bf16 sum-over-m and loses precision on the largest group,
         # producing a >bf16-rtol mismatch against the primitive's grouped_dbias
-        # (which casts the cotangent to fp32 before segment_sum).
+        # (which casts the cotangent to fp32 before segment_sum). Bias is required
+        # for this helper since it is only used by the grad tests below, which all
+        # set with_bias=True.
+        assert bias is not None, "_ref_sum_grouped_dense requires a non-None bias"
         out_list = self._ref_grouped_dense(x, kernel, None, group_sizes, contracting_dims)
         out_sum_list = []
-        if bias is None:
-            for out_i in out_list:
-                out_sum_list.append(jnp.sum(out_i.astype(jnp.float32)))
-        else:
-            for out_i, bias_i in zip(out_list, bias):
-                out_with_bias_fp32 = out_i.astype(jnp.float32) + bias_i.astype(jnp.float32)
-                out_sum_list.append(jnp.sum(out_with_bias_fp32))
-        return jnp.sum(jnp.asarray(out_sum_list)) / jnp.sqrt(x.size).astype(jnp.float32)
+        for out_i, bias_i in zip(out_list, bias):
+            out_with_bias_fp32 = out_i.astype(jnp.float32) + bias_i.astype(jnp.float32)
+            out_sum_list.append(jnp.sum(out_with_bias_fp32))
+        return jnp.sum(jnp.asarray(out_sum_list)) / jnp.sqrt(x.size)
 
     def _primitive_sum_grouped_dense(
         self, x, kernel, bias, group_sizes, contracting_dims, quantizer_set=noop_quantizer_set
@@ -1943,7 +1942,7 @@ class TestGroupedDense:
         )
         # Match the fp32 accumulation in _ref_sum_grouped_dense so loss values are
         # comparable and the cotangent dtype on `out` is unambiguous.
-        return jnp.sum(out.astype(jnp.float32)) / jnp.sqrt(x.size).astype(jnp.float32)
+        return jnp.sum(out.astype(jnp.float32)) / jnp.sqrt(x.size)
 
     @pytest_parametrize_wrapper("dtype", [jnp.bfloat16, jnp.float16])
     def test_grouped_dense_grad_fp16(self, dtype, input_shape):
