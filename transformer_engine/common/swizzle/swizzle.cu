@@ -8,10 +8,13 @@
 #include <transformer_engine/swizzle.h>
 
 #include <cassert>
+#include <mutex>
 #include <numeric>
 #include <type_traits>
+#include <vector>
 
 #include "../common.h"
+#include "../util/cuda_runtime.h"
 #include "../util/logging.h"
 #include "transformer_engine/transformer_engine.h"
 
@@ -2005,6 +2008,28 @@ __global__ void __launch_bounds__(TB_DIM* TB_DIM)
   }
 }
 
+template <int SF_TILE_DIM_M, int SF_TILE_DIM_K>
+int grouped_swizzle_variable_max_active_blocks_per_sm(int device_id) {
+  static std::vector<int> cache(cuda::num_devices(), -1);
+  static std::vector<std::once_flag> flags(cuda::num_devices());
+  NVTE_CHECK(0 <= device_id && device_id < cuda::num_devices(), "invalid CUDA device ID");
+
+  auto init = [&]() {
+    constexpr int metadata_shmem = sizeof(int);  // s_total_blocks
+    constexpr int dynamic_smem_size =
+        TB_DIM * 4 * SF_TILE_DIM_M * SF_TILE_DIM_K * sizeof(int8_t) + metadata_shmem;
+    int max_active_blocks_per_sm;
+    NVTE_CHECK_CUDA(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+        &max_active_blocks_per_sm,
+        grouped_swizzle_scaling_variable_shape_kernel<SF_TILE_DIM_M, SF_TILE_DIM_K>,
+        TB_DIM * TB_DIM, dynamic_smem_size));
+    NVTE_CHECK(max_active_blocks_per_sm > 0, "Occupancy query returned 0 blocks per SM.");
+    cache[device_id] = max_active_blocks_per_sm;
+  };
+  std::call_once(flags[device_id], init);
+  return cache[device_id];
+}
+
 void swizzle_grouped_scaling_factors(const GroupedTensor* input, GroupedTensor* output,
                                      cudaStream_t stream) {
   // Check scaling mode
@@ -2032,10 +2057,6 @@ void swizzle_grouped_scaling_factors(const GroupedTensor* input, GroupedTensor* 
 
   if (!is_variable_shape) {
     // Fallback to uniform shape implementation
-    NVTE_CHECK(input->all_same_shape(), "Grouped swizzle requires uniform tensor shapes.");
-    NVTE_CHECK(input->all_same_last_dim() && input->all_same_first_dim(),
-               "Grouped swizzle requires uniform tensor shapes.");
-
     // Assumption is that all the tensors share the same shapes and are contgiuous.
     // And so we dont need to pass array of input/output pointers(due to conttiguity)
     // as well as array of shapes(due to uniform shapes).
@@ -2176,40 +2197,32 @@ void swizzle_grouped_scaling_factors(const GroupedTensor* input, GroupedTensor* 
     constexpr int SF_TILE_DIM_K = 4;
     const dim3 block_size(TB_DIM, TB_DIM);
     const int max_slm_size = TB_DIM * 4 * SF_TILE_DIM_M * SF_TILE_DIM_K * sizeof(int8_t);
+    const int metadata_shmem = sizeof(int);  // s_total_blocks
+    const int dynamic_smem_size = max_slm_size + metadata_shmem;
+
+    size_t common_m = input->all_same_first_dim() ? input->get_common_first_dim() : 0;
+    size_t common_k = input->all_same_last_dim() ? input->get_common_last_dim() : 0;
+
+    NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+        grouped_swizzle_scaling_variable_shape_kernel<SF_TILE_DIM_M, SF_TILE_DIM_K>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize, dynamic_smem_size));
+
+    const int device_id = cuda::current_device();
+    const int num_SMs = cuda::sm_count(device_id);
+    const int max_active_blocks_per_sm =
+        grouped_swizzle_variable_max_active_blocks_per_sm<SF_TILE_DIM_M, SF_TILE_DIM_K>(device_id);
+    const int persistent_blocks = num_SMs * max_active_blocks_per_sm;
+    const dim3 num_blocks(persistent_blocks);
 
     auto launch_grouped_swizzle_variable = [&](bool rowwise) {
       const size_t scale_elem_size = rowwise ? typeToSize(input->scale_inv.dtype)
                                              : typeToSize(input->columnwise_scale_inv.dtype);
 
-      size_t common_m = input->all_same_first_dim() ? input->get_common_first_dim() : 0;
-      size_t common_k = input->all_same_last_dim() ? input->get_common_last_dim() : 0;
-
-      constexpr int SF_TILE_DIM_M = 128;
-      constexpr int SF_TILE_DIM_K = 4;
-      const int max_slm_size = TB_DIM * 4 * SF_TILE_DIM_M * SF_TILE_DIM_K * sizeof(int8_t);
-      const int metadata_shmem = sizeof(int);  // s_total_blocks
-
-      NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-          grouped_swizzle_scaling_variable_shape_kernel<SF_TILE_DIM_M, SF_TILE_DIM_K>,
-          cudaFuncAttributeMaxDynamicSharedMemorySize, max_slm_size + metadata_shmem));
-
-      int device_id;
-      cudaGetDevice(&device_id);
-      int num_SMs;
-      cudaDeviceGetAttribute(&num_SMs, cudaDevAttrMultiProcessorCount, device_id);
-      int max_active_blocks_per_sm;
-      cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-          &max_active_blocks_per_sm,
-          grouped_swizzle_scaling_variable_shape_kernel<SF_TILE_DIM_M, SF_TILE_DIM_K>,
-          TB_DIM * TB_DIM, max_slm_size + metadata_shmem);
-      int persistent_blocks = num_SMs * max_active_blocks_per_sm;
-      dim3 num_blocks(persistent_blocks);
-
       const void* input_ptr = rowwise ? input->scale_inv.dptr : input->columnwise_scale_inv.dptr;
       void* output_ptr = rowwise ? output->scale_inv.dptr : output->columnwise_scale_inv.dptr;
 
       grouped_swizzle_scaling_variable_shape_kernel<SF_TILE_DIM_M, SF_TILE_DIM_K>
-          <<<num_blocks, block_size, max_slm_size + metadata_shmem, stream>>>(
+          <<<num_blocks, block_size, dynamic_smem_size, stream>>>(
               input_ptr, output_ptr, m_array, k_array, num_tensors, rowwise, scale_elem_size,
               common_m, common_k);
 

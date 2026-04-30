@@ -379,8 +379,6 @@ std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor(GroupedTensorW
   if (!swizzle_rowwise && !swizzle_columnwise) {
     return std::nullopt;
   }
-  const auto first_dims = input.get_first_dims();
-  const auto last_dims = input.get_last_dims();
 
   std::optional<at::Tensor> rowwise_scales_pyt;
   std::optional<at::Tensor> columnwise_scales_pyt;
