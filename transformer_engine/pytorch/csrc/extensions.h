@@ -310,8 +310,11 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
                                     const int sm_margin, const bool zero_centered_gamma);
 
 /***************************************************************************************************
- * Cast
+ * Quantize
  **************************************************************************************************/
+
+py::object create_empty_quantized_tensor(py::handle quantizer, const std::vector<size_t> &shape,
+                                         at::ScalarType dtype, at::Device device, bool pin_memory);
 
 py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::object &output,
                     std::optional<at::Tensor> noop_flag);

@@ -65,6 +65,14 @@ py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::ob
   return output_py;
 }
 
+py::object create_empty_quantized_tensor(py::handle quantizer, const std::vector<size_t> &shape,
+                                         at::ScalarType dtype, at::Device device, bool pin_memory) {
+  auto quantizer_cpp = convert_quantizer(quantizer);
+  auto te_dtype = GetTransformerEngineDType(dtype);
+  auto [_, output_py] = quantizer_cpp->create_tensor(shape, te_dtype, device, pin_memory);
+  return output_py;
+}
+
 namespace {
 
 // helper functions for NVFP4 grouped quantization (cuda graph safe with shapes stored in device without D2H copy)
