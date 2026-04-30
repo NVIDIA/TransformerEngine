@@ -42,7 +42,9 @@ def test_layernorm_linear_repeated_forward_bf16():
         try:
             m(x)
         except RuntimeError as exc:
-            assert DATA_PTR_MARKER not in str(exc), (
-                "makeTransformerEngineTensor still dereferences data_ptr() on a "
-                f"tensor without storage:\n  {exc}"
-            )
+            if DATA_PTR_MARKER in str(exc):
+                raise AssertionError(
+                    "makeTransformerEngineTensor still dereferences data_ptr() on a "
+                    f"tensor without storage:\n  {exc}"
+                ) from exc
+            raise
