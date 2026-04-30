@@ -100,8 +100,11 @@ TensorWrapper makeTransformerEngineTensor(py::handle tensor, py::handle quantize
   //  torch_tensor = torch_tensor.contiguous();
   //}
   auto ret = TensorWrapper(my_quantizer->get_scaling_mode());
-  ret.set_rowwise_data(torch_tensor.data_ptr(),
-                       GetTransformerEngineDType(torch_tensor.scalar_type()),
+  void* data = nullptr;
+  if (torch_tensor.has_storage() && torch_tensor.storage().nbytes() > 0) {
+    data = torch_tensor.data_ptr();
+  }
+  ret.set_rowwise_data(data, GetTransformerEngineDType(torch_tensor.scalar_type()),
                        getTensorShape(torch_tensor));
   my_quantizer->set_quantization_params(&ret);
   return ret;
