@@ -3208,7 +3208,11 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             # [cp*2, s//2, b, h, d] -> [cp*s, b, h, d]
             k_ag = k_ag.view(-1, *k.shape[1:])
             v_ag = v_ag.view(-1, *v.shape[1:])
-            cp_stream.wait_stream(torch.cuda.current_stream())
+        # cp_stream is used for step 1 of the per-step loop and must wait until
+        # k_ag/v_ag preparation finishes on the current stream — otherwise step 1
+        # races against AG/reorder writes. Manifests at high cp_size where reorder
+        # is large enough to outlast cp_stream's launch (e.g. bucket128k @ cp=8).
+        cp_stream.wait_stream(torch.cuda.current_stream())
 
         # TODO: (sudhakars) possibly add some info that THD doesn't support FP8 yet.
         # q: [b, 2, s//2, h, d] or [2, s//2, b, h, d]
