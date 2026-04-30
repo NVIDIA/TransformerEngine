@@ -550,31 +550,36 @@ class NVMixtralSparseMoeBlock(nn.Module):
 
     def _expert_ffn(self, tokens: torch.Tensor, m_splits: list[int]) -> torch.Tensor:
         """Run the expert SwiGLU FFN (gate_up -> silu -> down) per local expert."""
-        if self.expert_ffn_mode == "loop":
-            # Naive HF-style loop: one F.linear per expert against a slice of the
-            # stacked weight. Same checkpoint as the grouped path; only kernel
-            # dispatch differs.
-            gate_up_w = self.experts_gate_up_weight
-            if isinstance(gate_up_w.data, DTensor):
-                gate_up_w = gate_up_w.data.to_local()
-            down_w = self.experts_down_weight
-            if isinstance(down_w.data, DTensor):
-                down_w = down_w.data.to_local()
-            outputs = []
-            for i, chunk in enumerate(torch.split(tokens, m_splits, dim=0)):
-                if chunk.shape[0] == 0:
-                    outputs.append(chunk)
-                    continue
-                gate, up = torch.nn.functional.linear(chunk, gate_up_w[i]).chunk(2, dim=-1)
-                outputs.append(
-                    torch.nn.functional.linear(torch.nn.functional.silu(gate) * up, down_w[i])
-                )
-            return torch.cat(outputs, dim=0)
+        with torch.cuda.nvtx.range(f"my_expert_ffn_{self.expert_ffn_mode}"):
+            if self.expert_ffn_mode == "loop":
+                # Naive HF-style loop: one F.linear per expert against a slice of the
+                # stacked weight. Same checkpoint as the grouped path; only kernel
+                # dispatch differs.
+                gate_up_w = self.experts_gate_up_weight
+                if isinstance(gate_up_w.data, DTensor):
+                    gate_up_w = gate_up_w.data.to_local()
+                down_w = self.experts_down_weight
+                if isinstance(down_w.data, DTensor):
+                    down_w = down_w.data.to_local()
+                outputs = []
+                for i, chunk in enumerate(torch.split(tokens, m_splits, dim=0)):
+                    if chunk.shape[0] == 0:
+                        outputs.append(chunk)
+                        continue
+                    gate, up = torch.nn.functional.linear(chunk, gate_up_w[i]).chunk(2, dim=-1)
+                    outputs.append(
+                        torch.nn.functional.linear(
+                            torch.nn.functional.silu(gate) * up, down_w[i]
+                        )
+                    )
+                return torch.cat(outputs, dim=0)
 
-        gate_up_output = self.experts_gate_up(tokens, m_splits=m_splits)
-        gate_output, up_output = gate_up_output.chunk(2, dim=-1)
-        intermediate = torch.nn.functional.silu(gate_output) * up_output
-        return self.experts_down(intermediate, m_splits=m_splits)
+            with torch.cuda.nvtx.range("my_grouped_linear_gate_up"):
+                gate_up_output = self.experts_gate_up(tokens, m_splits=m_splits)
+            gate_output, up_output = gate_up_output.chunk(2, dim=-1)
+            intermediate = torch.nn.functional.silu(gate_output) * up_output
+            with torch.cuda.nvtx.range("my_grouped_linear_down"):
+                return self.experts_down(intermediate, m_splits=m_splits)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Forward pass for the MoE block.
@@ -708,19 +713,20 @@ class NVMixtralDecoderLayer(nn.Module):
     ) -> torch.Tensor:
         """Forward pass for the decoder layer."""
         # Self attention with fused input layernorm
-        attn_output = self.self_attention(
-            hidden_states,
-            attention_mask=attention_mask,
-            rotary_pos_emb=rotary_pos_emb,
-            inference_params=inference_params,
-            cu_seqlens_q=kwargs.get("cu_seqlens_q", None),
-            cu_seqlens_kv=kwargs.get("cu_seqlens_kv", None),
-            cu_seqlens_q_padded=kwargs.get("cu_seqlens_q_padded", None),
-            cu_seqlens_kv_padded=kwargs.get("cu_seqlens_kv_padded", None),
-            max_seqlen_q=kwargs.get("max_seqlen_q", None),
-            max_seqlen_kv=kwargs.get("max_seqlen_kv", None),
-            pad_between_seqs=kwargs.get("pad_between_seqs", None),
-        )
+        with torch.cuda.nvtx.range("my_attention"):
+            attn_output = self.self_attention(
+                hidden_states,
+                attention_mask=attention_mask,
+                rotary_pos_emb=rotary_pos_emb,
+                inference_params=inference_params,
+                cu_seqlens_q=kwargs.get("cu_seqlens_q", None),
+                cu_seqlens_kv=kwargs.get("cu_seqlens_kv", None),
+                cu_seqlens_q_padded=kwargs.get("cu_seqlens_q_padded", None),
+                cu_seqlens_kv_padded=kwargs.get("cu_seqlens_kv_padded", None),
+                max_seqlen_q=kwargs.get("max_seqlen_q", None),
+                max_seqlen_kv=kwargs.get("max_seqlen_kv", None),
+                pad_between_seqs=kwargs.get("pad_between_seqs", None),
+            )
 
         # Residual connection
         hidden_states = hidden_states + attn_output
@@ -728,7 +734,8 @@ class NVMixtralDecoderLayer(nn.Module):
         # Post-attention layernorm + MoE MLP + residual
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
+        with torch.cuda.nvtx.range("my_mlp"):
+            hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
 
         return hidden_states
@@ -889,7 +896,9 @@ class NVMixtralModel(NVMixtralPreTrainedModel):
                 if output_hidden_states:
                     all_hidden_states = (*all_hidden_states, hidden_states)
 
-                with self.get_autocast_context(layer_idx):
+                with torch.cuda.nvtx.range(f"my_layer_{layer_idx}"), self.get_autocast_context(
+                    layer_idx
+                ):
                     hidden_states = decoder_layer(
                         hidden_states,
                         attention_mask=(
