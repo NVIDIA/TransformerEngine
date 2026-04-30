@@ -60,6 +60,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.backends import 
     UnfusedDotProductAttention,
     FusedAttention,
     FlashAttention,
+    MLATritonAttention,
 )
 
 
@@ -504,6 +505,15 @@ class DotProductAttention(TransformerEngineBaseModule):
             softmax_type=self.softmax_type,
             return_max_logit=self.return_max_logit,
         )
+
+        # Triton MLA backend for SM80 (A100). Opt-in via NVTE_MLA_TRITON=1; see
+        # :meth:`forward` for the dispatch conditions. Always instantiated so
+        # the env var can be flipped at runtime; the underlying triton kernel
+        # is JIT-compiled lazily on first invocation.
+        self.mla_triton_attention = MLATritonAttention(
+            softmax_scale,
+            attention_dropout=attention_dropout,
+        ) if attention_dropout == 0.0 else None
 
         def remove_extra_states_check(self, incompatible_keys):  # pylint: disable=unused-argument
             """
@@ -1498,6 +1508,43 @@ class DotProductAttention(TransformerEngineBaseModule):
                     "No dot product attention backend is available for the provided inputs. Please"
                     " run with NVTE_DEBUG=1 NVTE_DEBUG_LEVEL=2 to find out the reasons for"
                     " disabling all backends."
+                )
+
+            # Optional MLA Triton fast path. Opt-in via NVTE_MLA_TRITON=1 and
+            # only activated when every supported precondition holds. Any
+            # mismatch (FP8, dropout, CP, sliding window, alibi, padding mask,
+            # cross-attn with top-left causal, etc.) silently falls through to
+            # the regular FA/Fused/Unfused cascade — defaulting to no behavior
+            # change when the env var is unset.
+            if (
+                int(os.getenv("NVTE_MLA_TRITON", "0"))
+                and self.mla_triton_attention is not None
+                and head_dim_qk != head_dim_v
+                and head_dim_qk in (128, 192, 256) and head_dim_v in (64, 128)
+                and query_layer.dtype in (torch.bfloat16, torch.float16)
+                and not self.fp8
+                and not context_parallel
+                and core_attention_bias_type == "no_bias"
+                and alibi_slopes is None
+                and inference_params is None
+                and self.softmax_type == "vanilla"
+                and qkv_format in ("bshd", "sbhd")
+                and attn_mask_type in (None, "no_mask", "causal", "causal_bottom_right")
+                and window_size in (None, (-1, -1), (-1, 0))
+                and torch.cuda.is_available()
+                and torch.cuda.get_device_capability(query_layer.device)[0] >= 8
+            ):
+                # TE's "causal" is bottom-right when S_q != S_kv via
+                # bottom_right_diagonal=True (default). Our kernel right-aligns
+                # the diagonal by construction, so both map to is_causal=True.
+                is_causal_dispatch = attn_mask_type in ("causal", "causal_bottom_right")
+                self.logger.info("Running with MLATriton backend (NVTE_MLA_TRITON=1)")
+                return self.mla_triton_attention(
+                    query_layer,
+                    key_layer,
+                    value_layer,
+                    qkv_format=qkv_format,
+                    is_causal=is_causal_dispatch,
                 )
 
             # run attention
