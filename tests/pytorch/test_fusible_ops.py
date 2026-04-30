@@ -20,7 +20,7 @@ import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.pytorch.ops._common import (
-    _nvidia_cudnn_frontend_supports_scaled_clamped_qgeglu,
+    _cudnn_frontend_version_supported,
 )
 
 from transformer_engine.pytorch.ops.fused import (
@@ -3638,10 +3638,7 @@ class TestSequentialModules:
             quantization == "mxfp8"
             and dtype in (torch.bfloat16, torch.float16)
             and glu_interleave_size == 32
-            and (
-                activation != "scaled_clamped_qgeglu"
-                or _nvidia_cudnn_frontend_supports_scaled_clamped_qgeglu()
-            )
+            and _cudnn_frontend_version_supported()
         ):
             if te_ops.fused.ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8.is_supported():
                 forward_ops = module._module_groups[0]._forward_ops
@@ -3744,12 +3741,6 @@ class TestSequentialModules:
             pytest.skip("MXFP8 fused grouped MLP forward is not supported on this system")
         if not te_ops.fused.BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8.is_supported():
             pytest.skip("MXFP8 fused grouped MLP backward is not supported on this system")
-        if activation == "scaled_clamped_qgeglu" and not (
-            _nvidia_cudnn_frontend_supports_scaled_clamped_qgeglu()
-        ):
-            pytest.skip(
-                "ScaledClampedQGeGLU fused grouped MLP requires nvidia-cudnn-frontend >= 1.23.0"
-            )
 
         split_sizes = [split_alignment * (i + 1) for i in range(group_size)]
         random.shuffle(split_sizes)
@@ -4106,12 +4097,6 @@ class TestSequentialModules:
             pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
         if dtype not in (torch.bfloat16, torch.float16):
             pytest.skip("MXFP8 fused grouped MLP is only supported with BF16/FP16")
-        if activation == "scaled_clamped_qgeglu" and not (
-            _nvidia_cudnn_frontend_supports_scaled_clamped_qgeglu()
-        ):
-            pytest.skip(
-                "ScaledClampedQGeGLU fused grouped MLP requires nvidia-cudnn-frontend >= 1.23.0"
-            )
 
         split_sizes = [split_alignment * (i + 1) for i in range(group_size)]
         random.shuffle(split_sizes)
