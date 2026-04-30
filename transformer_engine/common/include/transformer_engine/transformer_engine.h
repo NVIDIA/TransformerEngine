@@ -370,6 +370,8 @@ enum NVTEQuantizationConfigAttribute {
    *  inconsistently between kernels.
    */
   kNVTEQuantizationConfigUseFastMath = 7,
+  /*! Whether to enable per-token (per-row) NVFP4 quantization */
+  kNVTEQuantizationConfigNVFP4PerTokenActivation = 8,
   kNVTEQuantizationConfigNumAttributes
 };
 
@@ -1294,6 +1296,13 @@ class QuantizationConfigWrapper {
     const auto val = static_cast<uint8_t>(use_fast_math);
     nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigUseFastMath, &val,
                                            sizeof(val));
+  }
+
+  /*! \brief Set whether to enable per-token NVFP4 quantization */
+  void set_nvfp4_per_token_activation(bool nvfp4_per_token_activation) {
+    const auto val = static_cast<uint8_t>(nvfp4_per_token_activation);
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigNVFP4PerTokenActivation,
+                                           &val, sizeof(val));
   }
 
  private:

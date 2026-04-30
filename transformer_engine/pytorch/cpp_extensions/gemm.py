@@ -15,6 +15,7 @@ from ..utils import get_sm_count, _empty_tensor
 
 from ..quantized_tensor import Quantizer
 from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
+from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 from ..tensor.utils import is_custom
 from ..custom_recipes.gemm import custom_gemm
 from ...debug.pytorch.debug_quantization import DebugQuantizer
@@ -67,6 +68,30 @@ def validate_gemm_scale(scale: Optional[float], required: bool) -> float:
     if scale not in (0.0, None):
         raise ValueError("scale must be zero")
     return 0.0
+
+
+def _is_nvfp4_per_token_tensor(tensor: torch.Tensor) -> bool:
+    """Whether tensor carries per-token NVFP4 global amax metadata."""
+    if not isinstance(tensor, NVFP4TensorStorage):
+        return False
+    amax = tensor._amax_rowwise if tensor._amax_rowwise is not None else tensor._amax_columnwise
+    return amax is not None and amax.numel() > 1
+
+
+def _nvfp4_per_token_gemm_input(
+    tensor: NVFP4TensorStorage,
+) -> Tuple[NVFP4TensorStorage, torch.Tensor]:
+    """Return a GEMM alias with identity activation amax and the original per-token amax."""
+    metadata = tensor.get_metadata()
+    if tensor._amax_rowwise is not None:
+        amax = tensor._amax_rowwise
+        assert amax is not None and amax.numel() > 1
+        metadata["amax_rowwise"] = amax.new_ones(1)
+    else:
+        amax = tensor._amax_columnwise
+        assert amax is not None and amax.numel() > 1
+        metadata["amax_columnwise"] = amax.new_ones(1)
+    return NVFP4TensorStorage(**metadata), amax
 
 
 def general_gemm(
@@ -174,7 +199,54 @@ def general_gemm(
         "beta": beta,
     }
 
-    out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
+    if not _is_nvfp4_per_token_tensor(B):
+        out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
+    else:
+        assert layout[1] == "N", "Per-token NVFP4 GEMM currently supports N-layout B only."
+        assert not grad, "Per-token NVFP4 GEMM currently supports fprop only."
+        assert not gelu, "Per-token NVFP4 GEMM currently does not support fused GELU."
+        assert not accumulate, "Per-token NVFP4 GEMM currently does not support accumulation."
+        assert (
+            quantization_params is None
+        ), "Per-token NVFP4 GEMM currently does not support output quantization."
+        assert out is None or (
+            isinstance(out, torch.Tensor) and not is_custom(out)
+        ), "Per-token NVFP4 GEMM currently supports only plain torch.Tensor outputs."
+        # cuBLAS folds the first activation amax into GEMM alpha. Keep per-token amax out of
+        # alpha by using identity here, then apply the true per-token scale in FP32 below.
+        gemm_B, amax = _nvfp4_per_token_gemm_input(B)
+        per_token_scales = amax.view(-1, 1)
+
+        requested_out, requested_out_dtype = out, out_dtype
+        fp32_out = (
+            torch.empty_like(requested_out, dtype=torch.float32)
+            if requested_out is not None
+            else None
+        )
+        gemm_args = list(args)
+        gemm_args[2] = gemm_B  # B
+        gemm_args[4] = fp32_out  # out
+        gemm_args[5] = None  # quantization_params
+        gemm_args[6] = TE_DType[torch.float32]  # out_dtype
+        out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*gemm_args, **kwargs)
+        out_2d = out.reshape(-1, out.shape[-1])
+
+        assert amax.dtype == torch.float32 and out.dtype == torch.float32
+        assert amax.numel() == out_2d.shape[0]
+
+        if bias is not None:
+            bias_cast = bias.to(dtype=torch.float32)
+            out_2d.sub_(bias_cast)
+            out_2d.mul_(per_token_scales)
+            out_2d.add_(bias_cast)
+        else:
+            out_2d.mul_(per_token_scales)
+
+        if requested_out is not None:
+            requested_out.copy_(out.to(dtype=requested_out.dtype))
+            out = requested_out
+        elif requested_out_dtype is not None and requested_out_dtype != torch.float32:
+            out = out.to(dtype=requested_out_dtype)
 
     if debug_quantizer is not None:
         out = debug_quantizer.process_gemm_output(out)
@@ -228,6 +300,48 @@ def general_grouped_gemm(
         bias_dtype = TE_DType[grad_bias[0].dtype] if grad else TE_DType[bias[0].dtype]
     else:
         bias_dtype = TE_DType[torch.bfloat16]
+
+    if any(_is_nvfp4_per_token_tensor(tensor) for tensor in B):
+        assert layout[1] == "N", "Per-token NVFP4 grouped GEMM currently supports N-layout B only."
+        assert not grad, "Per-token NVFP4 grouped GEMM currently supports fprop only."
+        assert not gelu, "Per-token NVFP4 grouped GEMM currently does not support fused GELU."
+        assert (
+            not accumulate
+        ), "Per-token NVFP4 grouped GEMM currently does not support accumulation."
+        assert D_dtype is None, "Per-token NVFP4 grouped GEMM currently does not support D_dtype."
+        assert all(
+            q is None for q in quantization_params
+        ), "Per-token NVFP4 grouped GEMM currently does not support output quantization."
+        if single_output:
+            assert (
+                m_splits is not None
+            ), "Per-token NVFP4 grouped GEMM requires m_splits with single output."
+        out_init = out[0] if single_output else None
+        if single_output:
+            start_idx = 0
+            out_views = []
+            for i in range(num_gemms):
+                size = m_splits[i]
+                out_views.append(out_init[start_idx : start_idx + size])
+                start_idx += size
+        else:
+            out_views = out
+        for i in range(num_gemms):
+            if out_views[i].numel() == 0:
+                continue
+            gemm_out, _, _, _ = general_gemm(
+                A[i],
+                B[i],
+                quantization_params=None,
+                out_dtype=out_views[i].dtype,
+                layout=layout,
+                bias=bias[i] if use_bias else None,
+                use_split_accumulator=use_split_accumulator,
+            )
+            out_views[i].copy_(gemm_out)
+        if single_output:
+            out = out_init
+        return out, bias, gelu_input
 
     if isinstance(quantization_params[0], DebugQuantizer):
         assert not gelu, "GELU not supported in debug mode"

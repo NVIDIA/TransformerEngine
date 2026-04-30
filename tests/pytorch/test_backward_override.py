@@ -78,6 +78,11 @@ _quantized_numerics_recipe_list = [
         marks=pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4),
         id="NVFP4BlockScaling",
     ),
+    pytest.param(
+        "nvfp4_per_token",
+        marks=pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4),
+        id="NVFP4PerTokenBlockScaling",
+    ),
 ]
 
 
@@ -92,6 +97,12 @@ def _reset_global_fp8_state():
 def backward_override(request: pytest.FixtureRequest) -> str:
     """backward override under test."""
     return request.param
+
+
+def _make_backward_test_recipe(recipe_name: str, **recipe_kwargs) -> Optional[recipe.Recipe]:
+    if recipe_name == "nvfp4_per_token" and "backward_override" not in recipe_kwargs:
+        recipe_kwargs["backward_override"] = "dequantized"
+    return make_recipe(recipe_name, **recipe_kwargs)
 
 
 # --------------------------
@@ -165,7 +176,7 @@ def _maybe_skip_recipe_dtype(
 ) -> None:
     if dtype == torch.bfloat16 and not bf16_available:
         pytest.skip(reason_for_no_bf16)
-    if recipe_name == "nvfp4":
+    if recipe_name in ("nvfp4", "nvfp4_per_token"):
         if module_type in ("linear", "layernorm_linear") and dtype not in (
             torch.bfloat16,
             torch.float32,
@@ -178,6 +189,11 @@ def _maybe_skip_recipe_dtype(
 def _maybe_skip_unsupported_recipe_module_combo(recipe_name: str, module_type: str) -> None:
     if module_type == "ops_linear" and recipe_name == "fp8_block_scaling":
         pytest.skip("Fusible ops (te_ops.Linear) do not support Float8BlockScaling recipe")
+
+
+def _maybe_skip_unsupported_fused_ops(recipe_name: str) -> None:
+    if recipe_name == "nvfp4_per_token":
+        pytest.skip("Per-token NVFP4 currently does not support fused te_ops paths.")
 
 
 def _maybe_skip_unsupported_recipe_shape(
@@ -195,7 +211,9 @@ def _maybe_skip_unsupported_recipe_shape(
                 " by 32."
             )
             return
-        if recipe_name == "nvfp4" and (flat_first_dim % 16 != 0 or last_dim % 16 != 0):
+        if recipe_name in ("nvfp4", "nvfp4_per_token") and (
+            flat_first_dim % 16 != 0 or last_dim % 16 != 0
+        ):
             pytest.skip(
                 "Linear/LayerNormLinear + NVFP4 requires prod(shape[:-1]) and shape[-1] divisible"
                 " by 16."
@@ -220,7 +238,9 @@ def _maybe_skip_unsupported_recipe_shape(
             pytest.skip(
                 "te_ops.Linear + MXFP8 requires prod(shape[:-1]) and shape[-1] divisible by 32."
             )
-        if recipe_name == "nvfp4" and (flat_first_dim % 16 != 0 or last_dim % 16 != 0):
+        if recipe_name in ("nvfp4", "nvfp4_per_token") and (
+            flat_first_dim % 16 != 0 or last_dim % 16 != 0
+        ):
             pytest.skip(
                 "te_ops.Linear + NVFP4 requires prod(shape[:-1]) and shape[-1] divisible by 16."
             )
@@ -239,7 +259,7 @@ def _maybe_skip_unsupported_grouped_splits(recipe_name: str, m_splits: list[int]
         )
     if recipe_name == "mxfp8" and any(m % 32 != 0 for m in non_empty_splits):
         pytest.skip("GroupedLinear + MXFP8 requires each non-empty m_split divisible by 32.")
-    if recipe_name == "nvfp4" and any(m % 16 != 0 for m in non_empty_splits):
+    if recipe_name in ("nvfp4", "nvfp4_per_token") and any(m % 16 != 0 for m in non_empty_splits):
         pytest.skip("GroupedLinear + NVFP4 requires each non-empty m_split divisible by 16.")
     if recipe_name == "nvfp4" and any(m % 64 != 0 for m in non_empty_splits):
         pytest.skip(
@@ -847,7 +867,7 @@ def test_linear_like_backward_override_matches_reference(
     _maybe_skip_unsupported_recipe_shape(recipe_name, input_shape, module_type)
 
     in_features = input_shape[-1]
-    quantized_ref_recipe = make_recipe(recipe_name)
+    quantized_ref_recipe = _make_backward_test_recipe(recipe_name)
     mode_recipe = make_recipe(recipe_name, backward_override=backward_override)
     skip_unsupported_backward_override(module_type, mode_recipe, backward_override)
 
@@ -1031,8 +1051,9 @@ def test_grouped_linear_backward_override_matches_reference(
     num_gemms = len(m_splits)
     num_tokens = sum(m_splits)
 
-    quantized_ref_recipe = make_recipe(recipe_name)
+    quantized_ref_recipe = _make_backward_test_recipe(recipe_name)
     mode_recipe = make_recipe(recipe_name, backward_override=backward_override)
+    skip_unsupported_backward_override("grouped_linear", mode_recipe, backward_override)
 
     module_quantized_ref = te.GroupedLinear(
         num_gemms,
@@ -1199,9 +1220,11 @@ def test_linear_like_runtime_backward_override_switch_updates_ctx(
     x = torch.randn(*input_shape, dtype=dtype, device="cuda")
     dy = torch.randn(*input_shape[:-1], out_features, dtype=dtype, device="cuda")
 
-    default_recipe = make_recipe(recipe_name)
+    default_recipe = _make_backward_test_recipe(recipe_name)
     mode_recipe = make_recipe(recipe_name, backward_override=backward_override)
     skip_unsupported_backward_override(module_type, mode_recipe, backward_override)
+    expected_default_mode = default_recipe.backward_override
+    expected_default_fp8 = expected_default_mode is None
 
     *_, default_ctx = _run_single_step_with_ctx_state(module, x, dy, default_recipe)
     (
@@ -1210,10 +1233,10 @@ def test_linear_like_runtime_backward_override_switch_updates_ctx(
         default_grad_output_quantizer,
         default_reduce_and_update,
     ) = default_ctx
-    assert default_mode is None
-    assert default_fp8
-    assert default_grad_output_quantizer is not None
-    assert default_reduce_and_update
+    assert default_mode == expected_default_mode
+    assert default_fp8 == expected_default_fp8
+    assert (default_grad_output_quantizer is not None) == expected_default_fp8
+    assert default_reduce_and_update == expected_default_fp8
 
     *_, switched_ctx = _run_single_step_with_ctx_state(module, x, dy, mode_recipe)
     switched_mode, switched_fp8, switched_grad_output_quantizer, switched_reduce_and_update = (
@@ -1231,10 +1254,10 @@ def test_linear_like_runtime_backward_override_switch_updates_ctx(
         default_grad_output_quantizer_after,
         default_reduce_and_update_after,
     ) = default_ctx_after
-    assert default_mode_after is None
-    assert default_fp8_after
-    assert default_grad_output_quantizer_after is not None
-    assert default_reduce_and_update_after
+    assert default_mode_after == expected_default_mode
+    assert default_fp8_after == expected_default_fp8
+    assert (default_grad_output_quantizer_after is not None) == expected_default_fp8
+    assert default_reduce_and_update_after == expected_default_fp8
 
 
 @pytest.mark.parametrize("recipe_name", _quantized_numerics_recipe_list)
@@ -1269,8 +1292,11 @@ def test_grouped_linear_runtime_backward_override_switch_updates_ctx(
     x = torch.randn(num_tokens, in_features, dtype=dtype, device="cuda")
     dy = torch.randn(num_tokens, out_features, dtype=dtype, device="cuda")
 
-    default_recipe = make_recipe(recipe_name)
+    default_recipe = _make_backward_test_recipe(recipe_name)
     mode_recipe = make_recipe(recipe_name, backward_override=backward_override)
+    skip_unsupported_backward_override("grouped_linear", mode_recipe, backward_override)
+    expected_default_mode = default_recipe.backward_override
+    expected_default_fp8 = expected_default_mode is None
 
     *_, default_ctx = _run_grouped_linear_single_step_with_ctx_state(
         module,
@@ -1280,9 +1306,9 @@ def test_grouped_linear_runtime_backward_override_switch_updates_ctx(
         default_recipe,
     )
     default_mode, default_fp8, default_reduce_and_update = default_ctx
-    assert default_mode is None
-    assert default_fp8
-    assert default_reduce_and_update
+    assert default_mode == expected_default_mode
+    assert default_fp8 == expected_default_fp8
+    assert default_reduce_and_update == expected_default_fp8
 
     *_, switched_ctx = _run_grouped_linear_single_step_with_ctx_state(
         module,
@@ -1304,9 +1330,9 @@ def test_grouped_linear_runtime_backward_override_switch_updates_ctx(
         default_recipe,
     )
     default_mode_after, default_fp8_after, default_reduce_and_update_after = default_ctx_after
-    assert default_mode_after is None
-    assert default_fp8_after
-    assert default_reduce_and_update_after
+    assert default_mode_after == expected_default_mode
+    assert default_fp8_after == expected_default_fp8
+    assert default_reduce_and_update_after == expected_default_fp8
 
 
 @pytest.mark.parametrize("recipe_name", _quantized_numerics_recipe_list)
@@ -1333,10 +1359,11 @@ def test_fused_linear_paths_match_backward_override_reference(
     _maybe_skip_recipe_dtype(recipe_name, dtype, "ops_linear")
     _maybe_skip_unsupported_recipe_module_combo(recipe_name, "ops_linear")
     _maybe_skip_unsupported_recipe_shape(recipe_name, (m, in_features), "ops_linear")
+    _maybe_skip_unsupported_fused_ops(recipe_name)
 
     reset_rng_states()
 
-    quantized_ref_recipe = make_recipe(recipe_name)
+    quantized_ref_recipe = _make_backward_test_recipe(recipe_name)
     mode_recipe = make_recipe(recipe_name, backward_override=backward_override)
     skip_unsupported_backward_override("ops_linear", mode_recipe, backward_override)
 
@@ -1472,11 +1499,12 @@ def test_fused_bias_activation_matches_masked_linear_backward(
     _maybe_skip_recipe_dtype(recipe_name, dtype, "ops_linear")
     _maybe_skip_unsupported_recipe_module_combo(recipe_name, "ops_linear")
     _maybe_skip_unsupported_recipe_shape(recipe_name, input_shape, "ops_linear")
+    _maybe_skip_unsupported_fused_ops(recipe_name)
 
     reset_rng_states()
     in_features = input_shape[-1]
 
-    quantized_ref_recipe = make_recipe(recipe_name)
+    quantized_ref_recipe = _make_backward_test_recipe(recipe_name)
     mode_recipe = make_recipe(recipe_name, backward_override=backward_override)
     skip_unsupported_backward_override("ops_linear", mode_recipe, backward_override)
 
@@ -1715,7 +1743,11 @@ def test_backward_override_memory_peak_report(
     x = torch.randn(*input_shape, dtype=dtype, device="cuda")
     dy = torch.randn(*input_shape[:-1], out_features, dtype=dtype, device="cuda")
 
-    modes = (None, "high_precision", "dequantized")
+    modes = (
+        ("high_precision", "dequantized")
+        if recipe_name == "nvfp4_per_token"
+        else (None, "high_precision", "dequantized")
+    )
     mode_results: dict[str, dict[str, float] | str] = {}
 
     for mode in modes:

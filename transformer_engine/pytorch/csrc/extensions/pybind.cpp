@@ -145,6 +145,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Dequantize group tensor", py::arg("input"), py::arg("otype"));
   m.def("bgrad_group_quantize", transformer_engine::pytorch::bgrad_group_quantize,
         py::arg("tensor"), py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"));
+  m.def("quantize_nvfp4_per_token", transformer_engine::pytorch::quantize_nvfp4_per_token,
+        "Per-token NVFP4 quantization", py::arg("input"));
   m.def("bgrad_quantize", transformer_engine::pytorch::bgrad_quantize,
         "Compute bias gradient and quantize", py::arg("input"), py::arg("quantizer"));
   m.def("generic_gemm", transformer_engine::pytorch::gemm, "Compute GEMM (matrix-matrix multiply)",
