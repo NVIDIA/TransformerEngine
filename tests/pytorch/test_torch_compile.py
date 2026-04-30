@@ -2,15 +2,13 @@
 #
 # See LICENSE for license information.
 
-import abc
-
 import pytest
 import torch
 
 try:
-    from torch._opaque_base import OpaqueBaseMeta
     from torch._library.opaque_object import (
         get_opaque_type_name,
+        is_opaque_type,
         register_opaque_type,
         MemberType,
     )
@@ -26,6 +24,9 @@ from transformer_engine.pytorch.constants import FP8FwdTensorIdx, FP8BwdTensorId
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.ops.basic.basic_linear import BasicLinear
 from transformer_engine.pytorch.tensor.float8_tensor import Float8CurrentScalingQuantizer
+from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
+from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockQuantizer
+from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
 from transformer_engine.pytorch import (
     is_fp8_available,
     is_mxfp8_available,
@@ -56,10 +57,7 @@ if nvfp4_available:
 
 if _opaque_available:
 
-    class _ToyQuantizerMeta(OpaqueBaseMeta, abc.ABCMeta):
-        pass
-
-    class ToyQuantizer(Float8CurrentScalingQuantizer, metaclass=_ToyQuantizerMeta):
+    class ToyQuantizer(Float8CurrentScalingQuantizer):
         """Quantizer with a string tag, registered as an
         opaque value type so torch.compile can treat it as a baked-in constant."""
 
@@ -322,3 +320,34 @@ def test_autocast_sanity(fp8_recipe):
 
     out = compiled(inp)
     out.sum().backward()
+
+
+# ---------------------------------------------------------------------------
+# Quantizer value-object tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "quantizer_factory",
+    [
+        lambda: MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
+        lambda: Float8CurrentScalingQuantizer(fp8_dtype=tex.DType.kFloat8E4M3),
+        lambda: Float8BlockQuantizer(
+            fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True, block_scaling_dim=2
+        ),
+        lambda: NVFP4Quantizer(with_rht=True, stochastic_rounding=True),
+    ],
+    ids=[
+        "MXFP8Quantizer",
+        "Float8CurrentScalingQuantizer",
+        "Float8BlockQuantizer",
+        "NVFP4Quantizer",
+    ],
+)
+@pytest.mark.skipif(not _opaque_available, reason="torch opaque object API not available")
+def test_quantizer_value_object(quantizer_factory):
+    quantizer = quantizer_factory()
+    assert is_opaque_type(type(quantizer))
+    repr_str, globals_dict = quantizer.__fx_repr__()
+    reconstructed = eval(repr_str, globals_dict)  # pylint: disable=eval-used
+    assert quantizer == reconstructed

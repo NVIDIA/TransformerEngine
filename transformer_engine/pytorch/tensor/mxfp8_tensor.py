@@ -45,6 +45,40 @@ class MXFP8Quantizer(Quantizer):
         super().__init__(rowwise=rowwise, columnwise=columnwise)
         self.dtype = fp8_dtype
 
+    def __eq__(self, other):
+        if not isinstance(other, MXFP8Quantizer):
+            return NotImplemented
+        return (
+            self.dtype == other.dtype
+            and self.rowwise_usage == other.rowwise_usage
+            and self.columnwise_usage == other.columnwise_usage
+            and self.internal == other.internal
+            and self.optimize_for_gemm == other.optimize_for_gemm
+        )
+
+    def __hash__(self):
+        return hash(
+            (
+                type(self),
+                self.dtype,
+                self.rowwise_usage,
+                self.columnwise_usage,
+                self.internal,
+                self.optimize_for_gemm,
+            )
+        )
+
+    def __fx_repr__(self):
+        return (
+            (
+                f"MXFP8Quantizer(fp8_dtype=TE_DType.{self.dtype.name}, "
+                f"rowwise={self.rowwise_usage}, columnwise={self.columnwise_usage})"
+                f"._with_runtime_flags(internal={self.internal}, "
+                f"optimize_for_gemm={self.optimize_for_gemm})"
+            ),
+            {"MXFP8Quantizer": MXFP8Quantizer, "TE_DType": TE_DType},
+        )
+
     def copy(self) -> MXFP8Quantizer:
         """Create shallow copy"""
 

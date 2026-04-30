@@ -153,10 +153,65 @@ class NVFP4Quantizer(Quantizer):
         self.amax_reduction_group = amax_reduction_group
         self.with_2d_quantization = with_2d_quantization
         self.stochastic_rounding = stochastic_rounding
+        self.with_random_sign_mask = with_random_sign_mask
         self.rht_matrix_random_sign_mask_t = get_random_sign_mask_for_rht(
             with_random_sign_mask, torch.cuda.current_device()
         )
         self.rht_matrix = get_rht_matrix(with_random_sign_mask, torch.cuda.current_device())
+
+    def __eq__(self, other):
+        if not isinstance(other, NVFP4Quantizer):
+            return NotImplemented
+        return (
+            self.dtype == other.dtype
+            and self.with_rht == other.with_rht
+            and self.with_post_rht_amax == other.with_post_rht_amax
+            and self.with_amax_reduction == other.with_amax_reduction
+            and self.with_2d_quantization == other.with_2d_quantization
+            and self.stochastic_rounding == other.stochastic_rounding
+            and self.with_random_sign_mask == other.with_random_sign_mask
+            and self.rowwise_usage == other.rowwise_usage
+            and self.columnwise_usage == other.columnwise_usage
+            and self.internal == other.internal
+            and self.optimize_for_gemm == other.optimize_for_gemm
+        )
+
+    def __hash__(self):
+        return hash(
+            (
+                type(self),
+                self.dtype,
+                self.with_rht,
+                self.with_post_rht_amax,
+                self.with_amax_reduction,
+                self.with_2d_quantization,
+                self.stochastic_rounding,
+                self.with_random_sign_mask,
+                self.rowwise_usage,
+                self.columnwise_usage,
+                self.internal,
+                self.optimize_for_gemm,
+            )
+        )
+
+    def __fx_repr__(self):
+        return (
+            (
+                "NVFP4Quantizer("
+                f"fp4_dtype=TE_DType.{self.dtype.name}, "
+                f"rowwise={self.rowwise_usage}, "
+                f"columnwise={self.columnwise_usage}, "
+                f"with_amax_reduction={self.with_amax_reduction}, "
+                f"with_rht={self.with_rht}, "
+                f"with_post_rht_amax={self.with_post_rht_amax}, "
+                f"with_2d_quantization={self.with_2d_quantization}, "
+                f"stochastic_rounding={self.stochastic_rounding}, "
+                f"with_random_sign_mask={self.with_random_sign_mask})"
+                f"._with_runtime_flags(internal={self.internal}, "
+                f"optimize_for_gemm={self.optimize_for_gemm})"
+            ),
+            {"NVFP4Quantizer": NVFP4Quantizer, "TE_DType": TE_DType},
+        )
 
     def __getstate__(self):
         """Exclude unpicklable process group from serialized state."""
