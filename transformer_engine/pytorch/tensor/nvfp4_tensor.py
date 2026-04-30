@@ -210,13 +210,18 @@ class NVFP4Quantizer(Quantizer):
         """Quantize tensor implementation"""
         return tex.quantize(tensor, self)
 
-    def is_quantizable(self, inp: torch.Tensor) -> bool:
-        """Returns whether or not given inp can be quantized"""
+    def supports_quantized_allgather(self, inp: torch.Tensor) -> bool:
+        """Whether tensor shape supports quantized all-gather.
+
+        For distributed all-gather with columnwise scaling, the first
+        dimension must be aligned to the block size so that no scaling
+        block spans across GPU boundaries.
+        """
         if inp.ndim < 2:
             return False
-        if inp.shape[-1] % NVFP4_BLOCK_SCALING_SIZE != 0:
+        if inp.shape[-1] % 32 != 0:
             return False
-        if math.prod(inp.shape[:-1]) % NVFP4_BLOCK_SCALING_SIZE != 0:
+        if self.columnwise_usage and math.prod(inp.shape[:-1]) % NVFP4_BLOCK_SCALING_SIZE != 0:
             return False
         return True
 
@@ -303,16 +308,9 @@ class NVFP4Quantizer(Quantizer):
         if device is None:
             device = torch.device("cuda")
 
-        assert shape[-1] % NVFP4_BLOCK_SCALING_SIZE == 0, (
-            f"Incorrect shape {shape} for NVFP4. Tensor dims must be divisible by"
-            f" {NVFP4_BLOCK_SCALING_SIZE}"
-        )
-
-        flat_first_dim = math.prod(shape[:-1])
-        assert flat_first_dim % NVFP4_BLOCK_SCALING_SIZE == 0, (
-            f"Incorrect shape {shape} for NVFP4. Tensor dims must be divisible by"
-            f" {NVFP4_BLOCK_SCALING_SIZE}"
-        )
+        assert (
+            shape[-1] % 32 == 0
+        ), f"Incorrect shape {shape} for NVFP4. Last dimension must be divisible by 32."
 
         # Allocate FP4 data
         data = None
@@ -339,7 +337,7 @@ class NVFP4Quantizer(Quantizer):
         if self.columnwise_usage:
             # enforce 2D shape to avoid [S, B, H] shape and B and be 1
             # and the transposed shape is [H, S, B], so divide last dim by 2 gives zero
-            shape_2d = tuple([flat_first_dim, shape[-1]])
+            shape_2d = (math.prod(shape[:-1]), shape[-1])
             columnwise_data = torch.empty(
                 self.convert_shape_for_fp4(self.get_columnwise_shape(shape_2d)),
                 dtype=torch.uint8,

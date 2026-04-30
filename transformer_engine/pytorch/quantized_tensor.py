@@ -363,11 +363,14 @@ class Quantizer(abc.ABC):
         """Returns True if the quantizer supports only rowwise all-gather"""
         return False
 
-    def is_quantizable(self, inp: torch.Tensor) -> bool:  # pylint: disable=unused-argument
-        """Whether tensor supports quantized all-gather
+    # pylint: disable-next=unused-argument
+    def supports_quantized_allgather(self, inp: torch.Tensor) -> bool:
+        """Whether tensor shape supports quantized all-gather.
 
-        Consider a less misleading function name.
-
+        When False, the distributed all-gather falls back to gathering
+        in high precision and quantizing afterward. This is needed when
+        the local shard's shape would cause scaling factor blocks to
+        span across GPU boundaries.
         """
         return True
 
