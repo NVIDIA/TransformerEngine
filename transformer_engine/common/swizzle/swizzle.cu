@@ -2220,7 +2220,7 @@ void swizzle_grouped_scaling_factors(const GroupedTensor* input, GroupedTensor* 
                         padded_m;
 
       const size_t scale_elem_size = rowwise ? typeToSize(input->scale_inv.dtype)
-                                            : typeToSize(input->columnwise_scale_inv.dtype);
+                                             : typeToSize(input->columnwise_scale_inv.dtype);
 
       const size_t input_scale_numel =
           rowwise ? input->scale_inv.numel() : input->columnwise_scale_inv.numel();
@@ -2234,13 +2234,13 @@ void swizzle_grouped_scaling_factors(const GroupedTensor* input, GroupedTensor* 
         input_is_compact = true;
       } else {
         NVTE_ERROR("Grouped input ", (rowwise ? "scale_inv" : "columnwise_scale_inv"),
-                  " size does not match expected packed size (got ", input_scale_numel,
-                  ", expected either ", input->num_tensors * padded_scale_elems,
-                  " (per-tensor padded) or ", compact_total_scale_elems, " (compact)).");
+                   " size does not match expected packed size (got ", input_scale_numel,
+                   ", expected either ", input->num_tensors * padded_scale_elems,
+                   " (per-tensor padded) or ", compact_total_scale_elems, " (compact)).");
       }
       NVTE_CHECK(output_scale_numel == input->num_tensors * padded_scale_elems, "Grouped output ",
-                (rowwise ? "scale_inv" : "columnwise_scale_inv"),
-                " size does not match expected per-tensor padded size.");
+                 (rowwise ? "scale_inv" : "columnwise_scale_inv"),
+                 " size does not match expected per-tensor padded size.");
 
       const size_t input_stride_bytes =
           (input_is_compact ? compact_scale_elems : padded_scale_elems) * scale_elem_size;
@@ -2272,9 +2272,9 @@ void swizzle_grouped_scaling_factors(const GroupedTensor* input, GroupedTensor* 
               grouped_swizzle_row_scaling_uniform_shape_kernel<LType, SF_TILE_DIM_M, SF_TILE_DIM_K>,
               cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
           grouped_swizzle_row_scaling_uniform_shape_kernel<LType, SF_TILE_DIM_M, SF_TILE_DIM_K>
-              <<<num_blocks, block_size, slm_size, stream>>>(input_ptr, output_ptr, padded_m,
-                                                            padded_k, original_M, original_K,
-                                                            input_stride_bytes, output_stride_bytes);
+              <<<num_blocks, block_size, slm_size, stream>>>(
+                  input_ptr, output_ptr, padded_m, padded_k, original_M, original_K,
+                  input_stride_bytes, output_stride_bytes);
         });
       } else {
         TRANSFORMER_ENGINE_VECTORIZED_LOAD_INTEGER_TYPE_SWITCH(vec_load_size, LType, {
@@ -2282,9 +2282,9 @@ void swizzle_grouped_scaling_factors(const GroupedTensor* input, GroupedTensor* 
               grouped_swizzle_col_scaling_uniform_shape_kernel<LType, SF_TILE_DIM_M, SF_TILE_DIM_K>,
               cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
           grouped_swizzle_col_scaling_uniform_shape_kernel<LType, SF_TILE_DIM_M, SF_TILE_DIM_K>
-              <<<num_blocks, block_size, slm_size, stream>>>(input_ptr, output_ptr, padded_m,
-                                                            padded_k, original_M, original_K,
-                                                            input_stride_bytes, output_stride_bytes);
+              <<<num_blocks, block_size, slm_size, stream>>>(
+                  input_ptr, output_ptr, padded_m, padded_k, original_M, original_K,
+                  input_stride_bytes, output_stride_bytes);
         });
       }
       NVTE_CHECK_CUDA(cudaGetLastError());
