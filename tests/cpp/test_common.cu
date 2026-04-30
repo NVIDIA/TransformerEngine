@@ -516,7 +516,7 @@ void Tensor::from_cpu() const {
         cudaMemcpy(tensor_.get_columnwise_amax().data_ptr, amax_cpu_data_columnwise_.get(),
                    sizeof(float), cudaMemcpyHostToDevice);
       }
-    } 
+    }
     auto [rowwise_scale_meta, colwise_scale_meta] = get_scales(s, tensor_.scaling_mode());
     if (rowwise_) {
       auto scale_size = rowwise_scale_meta.bytes();
