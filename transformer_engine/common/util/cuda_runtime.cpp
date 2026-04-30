@@ -9,6 +9,7 @@
 #include <cublasLt.h>
 
 #include <filesystem>
+#include <fstream>
 #include <mutex>
 
 #include "../common.h"
@@ -200,6 +201,49 @@ const std::string &include_directory(bool required) {
 
   // Return cached path
   return path;
+}
+
+int include_directory_version(bool required) {
+  // Header path
+  const auto &include_dir = cuda::include_directory(false);
+  if (include_dir.empty()) {
+    if (required) {
+      NVTE_ERROR(
+          "Could not detect version of CUDA Toolkit headers "
+          "(CUDA Toolkit headers not found).");
+    }
+    return -1;
+  }
+
+  // Parse CUDART_VERSION from cuda_runtime_api.h.
+  const auto header_path = std::filesystem::path(include_dir) / "cuda_runtime_api.h";
+  std::ifstream header_file(header_path);
+  if (header_file.is_open()) {
+    const std::string define_prefix = "#define CUDART_VERSION ";
+    std::string line;
+    while (std::getline(header_file, line)) {
+      const auto pos = line.find(define_prefix);
+      if (pos == std::string::npos) {
+        continue;
+      }
+      try {
+        const int version = std::stoi(line.substr(pos + define_prefix.size()));
+        if (version > 0) {
+          return version;
+        }
+      } catch (...) {
+        continue;
+      }
+    }
+  }
+
+  if (required) {
+    NVTE_ERROR(
+        "Could not detect version of CUDA Toolkit headers "
+        "(Could not parse CUDART_VERSION from ",
+        header_path.string(), ").");
+  }
+  return -1;
 }
 
 int cudart_version() {
