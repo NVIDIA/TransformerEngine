@@ -223,6 +223,15 @@ class Tensor {
     }
   }
 
+  float amax_columnwise() const {
+    if(amax_cpu_data_columnwise_) {
+      to_cpu();
+      return *amax_cpu_data_columnwise_;
+    } else {
+      return 0;
+    }
+  }
+
   float scale() const {
     if(scale_cpu_data_) {
       NVTE_CHECK((tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING)
@@ -282,6 +291,20 @@ class Tensor {
     return columnwise_;
   }
 
+  void set_tensor_amax(const float amax) {
+    if (amax_cpu_data_) {
+      *amax_cpu_data_ = amax;
+      from_cpu();
+    }
+  }
+
+  void set_tensor_amax_columnwise(const float amax) {
+    if (amax_cpu_data_columnwise_) {
+      *amax_cpu_data_columnwise_ = amax;
+      from_cpu();
+    }
+  }
+
   void set_tensor_amax_nullptr(){
     tensor_.set_amax(nullptr, DType::kFloat32, tensor_.defaultShape);
   }
@@ -303,6 +326,7 @@ class Tensor {
   std::unique_ptr<unsigned char[]> cpu_data_rowwise_;
   std::unique_ptr<unsigned char[]> cpu_data_columnwise_;
   std::shared_ptr<float> amax_cpu_data_;
+  std::shared_ptr<float> amax_cpu_data_columnwise_;
   std::shared_ptr<float> scale_cpu_data_;
   std::unique_ptr<unsigned char[]> rowwise_scale_inv_cpu_data_;
   std::unique_ptr<unsigned char[]> columnwise_scale_inv_cpu_data_;
