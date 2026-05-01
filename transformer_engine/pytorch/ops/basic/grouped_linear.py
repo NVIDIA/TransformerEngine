@@ -956,13 +956,13 @@ class GroupedLinear(BasicOperation):
                         self.weight0, "overwrite_main_grad", False
                     )
             else:
-                weight_shape = (self.out_features, self.in_features)
-                for group_idx in range(num_groups):
-                    grad_weights[group_idx] = torch.empty(
-                        weight_shape,
-                        dtype=ctx.dtype,
-                        device=device,
-                    )
+                weight_shape = [self.out_features, self.in_features]
+                grad_weights = tex.bulk_allocate(
+                    [weight_shape] * num_groups,
+                    [ctx.dtype] * num_groups,
+                    device,
+                    [256] * num_groups,  # alignment
+                )
         else:
             accumulate_into_main_grad = False
 

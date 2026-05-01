@@ -200,8 +200,12 @@ def _compute_grad_params(
                     w_list[idx] = wp.main_grad
                 accumulate_into_main_grad = not getattr(fc_op.weight0, "overwrite_main_grad", False)
             else:
-                for idx in range(num_groups):
-                    w_list[idx] = torch.empty(weight_shape, dtype=dtype, device=device)
+                w_list = tex.bulk_allocate(
+                    [list(weight_shape)] * num_groups,
+                    [dtype] * num_groups,
+                    device,
+                    [256] * num_groups,  # alignment
+                )
             wgrad_output = w_list
 
     if ctx.weight_requires_grad:
