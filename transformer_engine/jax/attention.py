@@ -565,6 +565,7 @@ def _get_seqlens_offsets_thd(
       - padding:    row_ids[q] = q_seg_id iff q_seg_id appears in KV
     (and symmetrically for col_ids with max/<=).
     """
+
     # Example: For striping P2P causal attention (but this logic also applies for non-CP fused attn)
     # pre-striping and sharding: segment_ids = [[1 1 1 1 2 2 2 2]], segment_pos = [[0 1 2 3 0 1 2 3]]
     # post-striping and sharding (striped CP=2, Q from rank 0 × KV from rank 1, max_segments_per_seq=2):
@@ -674,9 +675,9 @@ def _get_seqlens_offsets_thd(
         same_as_previous = jnp.logical_and(x[..., 1:] != x[..., :-1], x[..., 1:] != 0)
         first_column = x[..., :1] != 0
         boundaries = jnp.concatenate([first_column, same_as_previous], axis=-1)
-        return jax.vmap(
-            partial(jnp.argwhere, size=(max_segments_per_seq + 1), fill_value=-1)
-        )(boundaries).squeeze(-1)
+        return jax.vmap(partial(jnp.argwhere, size=(max_segments_per_seq + 1), fill_value=-1))(
+            boundaries
+        ).squeeze(-1)
 
     q_offset = _find_offsets(row_ids)
     kv_offset = _find_offsets(col_ids)
@@ -756,9 +757,7 @@ def _segment_ids_pos_to_seqlens_offsets(
 
     # Fast path: O(T) per row.
     if (
-        attn_mask_type.is_causal()
-        and not attn_mask_type.is_bottom_right()
-        and window_size is None
+        attn_mask_type.is_causal() and not attn_mask_type.is_bottom_right() and window_size is None
     ) or (window_size == (-1, -1) and not attn_mask_type.is_bottom_right()):
         return _segment_ids_pos_to_seqlens_offsets_fast_causal_path(
             segment_ids_q, segment_ids_kv, segment_pos_q, segment_pos_kv, max_segments_per_seq
