@@ -854,21 +854,16 @@ __forceinline__ __device__ int64_t padded_mxfp8_scale_inv_bytes(int64_t first, i
                                                                 bool rowwise) {
   namespace mxfp8_swizzle = transformer_engine::dispatch::mxfp8::swizzle;
   constexpr int64_t kMxfp8BlockSize = 32;
-  const int64_t scale_tile_m =
-      static_cast<int64_t>(mxfp8_swizzle::GEMM_SWIZZLED_SCALE_TILE_DIM_Y);
-  const int64_t scale_tile_k =
-      static_cast<int64_t>(mxfp8_swizzle::GEMM_SWIZZLED_SCALE_TILE_DIM_X);
+  const int64_t scale_tile_m = static_cast<int64_t>(mxfp8_swizzle::GEMM_SWIZZLED_SCALE_TILE_DIM_Y);
+  const int64_t scale_tile_k = static_cast<int64_t>(mxfp8_swizzle::GEMM_SWIZZLED_SCALE_TILE_DIM_X);
   // Padded byte size of the swizzled MXFP8 scale_inv for a single tensor with data
   // shape (first, last). Rowwise scales use rows=first, cols=last; columnwise
   // scales swap the orientation since they are stored in column-major order.
   const int64_t scale_rows = rowwise ? first : last;
   const int64_t scale_cols = rowwise ? last : first;
-  const int64_t padded_rows =
-      ((scale_rows + scale_tile_m - 1) / scale_tile_m) * scale_tile_m;
-  const int64_t scale_blocks_cols =
-      (scale_cols + kMxfp8BlockSize - 1) / kMxfp8BlockSize;
-  const int64_t padded_k =
-      ((scale_blocks_cols + scale_tile_k - 1) / scale_tile_k) * scale_tile_k;
+  const int64_t padded_rows = ((scale_rows + scale_tile_m - 1) / scale_tile_m) * scale_tile_m;
+  const int64_t scale_blocks_cols = (scale_cols + kMxfp8BlockSize - 1) / kMxfp8BlockSize;
+  const int64_t padded_k = ((scale_blocks_cols + scale_tile_k - 1) / scale_tile_k) * scale_tile_k;
   // MXFP8 scales are E8M0 (1 byte per element), so element count == byte count.
   return padded_rows * padded_k;
 }
@@ -1022,8 +1017,8 @@ __global__ void setup_grouped_gemm_kernel(
     size_t b_elem_size, size_t c_elem_size, size_t d_elem_size, float *alpha_ptr, float *beta_ptr,
     // Scale inputs: for tensor scaling, pass float* and set mxfp8_base to nullptr
     // For MXFP8, pass nullptr for tensor_scale and set mxfp8_base
-    float *a_scale_base, float *b_scale_base,
-    bool a_scale_rowwise, bool b_scale_rowwise, NVTEScalingMode scaling_mode, size_t num_tensors,
+    float *a_scale_base, float *b_scale_base, bool a_scale_rowwise, bool b_scale_rowwise,
+    NVTEScalingMode scaling_mode, size_t num_tensors,
     MultiTensorGroupGemmInputArgs a_multi_tensor_args,
     MultiTensorGroupGemmOutputArgs c_multi_tensor_args,
     MultiTensorGroupGemmOutputArgs d_multi_tensor_args) {

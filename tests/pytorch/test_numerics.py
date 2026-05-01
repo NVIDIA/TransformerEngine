@@ -3171,9 +3171,7 @@ def _make_grouped_tensor_quantized_mxfp8(
     if is_weight:
         first_dims = None
     else:
-        first_dims = torch.tensor(
-            [t.shape[0] for t in tensors], dtype=torch.int64, device=device
-        )
+        first_dims = torch.tensor([t.shape[0] for t in tensors], dtype=torch.int64, device=device)
     return tex.group_quantize(grouped_input, quantizer, len(tensors), first_dims)
 
 
