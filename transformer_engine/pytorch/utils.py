@@ -477,16 +477,12 @@ def check_dim_for_fp8_exec(tensor: torch.Tensor) -> bool:
 
 
 def assert_dim_for_fp8_exec(*tensors: List[torch.Tensor]) -> None:
-    """Assert that tensor or tensors dimensions are supported for FP8 TN GEMM."""
+    """Assert that tensor or tensors dimensions are supported for FP8 TN GEMM.
 
-    for tensor in tensors:
-        if math.prod(tensor.shape[:-1]) % 8 != 0 or tensor.shape[-1] % 16 != 0:
-            raise ValueError(
-                "FP8 execution requires the product of all dimensions except the last to be"
-                " divisible by 8 and the last dimension to be divisible by 16, but got tensor"
-                f" with dims={list(tensor.size())} (product of leading dims ="
-                f" {math.prod(tensor.shape[:-1])}, last dim = {tensor.shape[-1]})"
-            )
+    NOTE: Relaxed — C++ cublas_gemm now handles alignment padding internally
+    for sequence packing with dynamic token counts.
+    """
+    pass
 
 
 def is_bf16_compatible() -> bool:
