@@ -184,15 +184,16 @@ void GemmRsInitMatrices(NVTECommGemmCtx* ctx, int64_t* ldd, int64_t m, int64_t n
                                                      get_cuda_dtype(a->dtype()),
                                                      ctx->grid_row_major.get(), ctx->a_desc.get()));
   }
+  // B is (K/P, N) local -- K is distributed across ranks, N is fully replicated
   if (transb) {
     NVTE_CHECK(b1 == n, "Unsupported tensor dimension in B: expected ", n, ", got ", b1);
-    NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(n, k, block_size(ctx, n), block_size(ctx, k),
+    NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(n, k, n, block_size(ctx, k),
                                                      0, 0, n, get_cuda_dtype(b->dtype()),
                                                      ctx->grid_row_major.get(), ctx->b_desc.get()));
   } else {
-    NVTE_CHECK(b0 == n, "Unsupported tensor dimension in B: expected ", n, ", got ", b0);
+    NVTE_CHECK(b1 == n, "Unsupported tensor dimension in B: expected ", n, ", got ", b1);
     NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(
-        k, n, block_size(ctx, k), block_size(ctx, n), 0, 0, block_size(ctx, k),
+        k, n, block_size(ctx, k), n, 0, 0, block_size(ctx, k),
         get_cuda_dtype(b->dtype()), ctx->grid_col_major.get(), ctx->b_desc.get()));
   }
   NVTE_CHECK(d1 == m, "Unsupported tensor dimension in D: expected ", m, ", got ", d1);
@@ -442,9 +443,6 @@ void cublasmp_gemm(InitMatricesFn init_matrices_fn, NVTECommGemmCtx* ctx, NVTECo
       std::apply(cublasMpMatmul,
                  std::tuple_cat(args, std::tuple{ctx->workspace, ctx->workspace_size,
                                                  workspace_host.data(), workspace_host.size()})));
-
-  NVTE_CHECK_CUDA(cudaEventRecord(ctx->event.get(), main_stream));
-  NVTE_CHECK_CUDA(cudaStreamWaitEvent(ctx->stream.get(), ctx->event.get(), 0));
 }
 
 }  // namespace

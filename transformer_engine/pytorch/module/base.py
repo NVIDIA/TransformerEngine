@@ -261,7 +261,7 @@ def initialize_ub(
             local_rank = world_rank
             tp_domain_ranks = list(range(world_size))
 
-            helper = tex.CommOverlapHelper(world_group)
+            helper = tex.CommOverlapHelper(world_group, world_group)
 
         if world_rank == 0:
             print(f"!!! [UB] Number of TP domains: {num_domains}\n", end="", flush=True)

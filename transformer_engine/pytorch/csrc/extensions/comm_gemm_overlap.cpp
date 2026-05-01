@@ -71,25 +71,48 @@ CommOverlapHelper::CommOverlapHelper(c10d::ProcessGroup *world_group,
   initialized = true;
 
 #ifdef NVTE_WITH_CUBLASMP
+  // Initialize world NCCL communicator via ncclCommInitRank (one GPU per process under torchrun)
+  ncclUniqueId nccl_world_id;
+  if (myrank == 0) {
+    NVTE_CHECK_NCCL(ncclGetUniqueId(&nccl_world_id));
+  }
+  auto nccl_world_id_tensor =
+      torch::from_blob(reinterpret_cast<uint8_t *>(&nccl_world_id), {sizeof(ncclUniqueId)},
+                       at::device(torch::kCPU).dtype(torch::kUInt8));
+  nccl_world_id_tensor = (backend_is_nccl) ? nccl_world_id_tensor.cuda() : nccl_world_id_tensor;
+  {
+    c10d::BroadcastOptions bcast_opts;
+    bcast_opts.rootRank = 0;
+    std::vector<at::Tensor> bcast_tensors = {nccl_world_id_tensor};
+    auto work = torch_pgs["world"]->broadcast(bcast_tensors, bcast_opts);
+    work->wait();
+  }
+  nccl_world_id_tensor = (backend_is_nccl) ? nccl_world_id_tensor.cpu() : nccl_world_id_tensor;
+  nccl_world_id = *reinterpret_cast<ncclUniqueId *>(nccl_world_id_tensor.data_ptr());
+
   ncclComm_t nccl_world;
-  NVTE_CHECK_NCCL(ncclCommInitAll(&nccl_world, numranks, nullptr));
+  NVTE_CHECK_NCCL(ncclCommInitRank(&nccl_world, numranks, nccl_world_id, myrank));
   nccl_comms.insert({"world", nccl_world});
 
   if (intra_domain_group.has_value()) {
-    // Use the global rank of the local rank 0 process as the unique ID for the intra-node communicator
+    // Generate a separate unique ID for the intra-node communicator
     ncclUniqueId nccl_intra_id;
-    NVTE_CHECK_NCCL(ncclCommGetUniqueId(nccl_world, &nccl_intra_id));
+    if (mylocal == 0) {
+      NVTE_CHECK_NCCL(ncclGetUniqueId(&nccl_intra_id));
+    }
 
     // Broadcast the intra-node unique ID from the local root to all local ranks
     auto nccl_intra_id_tensor =
         torch::from_blob(reinterpret_cast<uint8_t *>(&nccl_intra_id), {sizeof(ncclUniqueId)},
                          at::device(torch::kCPU).dtype(torch::kUInt8));
     nccl_intra_id_tensor = (backend_is_nccl) ? nccl_intra_id_tensor.cuda() : nccl_intra_id_tensor;
-    c10d::BroadcastOptions bcast_opts;
-    bcast_opts.rootRank = 0;
-    std::vector<at::Tensor> bcast_tensors = {nccl_intra_id_tensor};
-    auto work = torch_pgs["intra"]->broadcast(bcast_tensors, bcast_opts);
-    work->wait();
+    {
+      c10d::BroadcastOptions bcast_opts;
+      bcast_opts.rootRank = 0;
+      std::vector<at::Tensor> bcast_tensors = {nccl_intra_id_tensor};
+      auto work = torch_pgs["intra"]->broadcast(bcast_tensors, bcast_opts);
+      work->wait();
+    }
     nccl_intra_id_tensor = (backend_is_nccl) ? nccl_intra_id_tensor.cpu() : nccl_intra_id_tensor;
     nccl_intra_id = *reinterpret_cast<ncclUniqueId *>(nccl_intra_id_tensor.data_ptr());
 

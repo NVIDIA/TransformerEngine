@@ -82,6 +82,14 @@ def _run_gemm_with_overlap(
         if aggregate:
             test_cmd.append("--aggregate")
         if use_cublasmp:
+            if quantization == "mxfp8":
+                pytest.skip(
+                    "cuBLASMp comm+GEMM overlap does not yet support MXFP8 (block scaling)."
+                )
+            if comm_type == "RS" and not p2p and not tex.device_supports_multicast():
+                pytest.skip(
+                    "cuBLASMp non-P2P reduce-scatter requires NVSwitch (multicast support)."
+                )
             test_cmd.append("--use-cublasmp")
 
     result = subprocess.run(test_cmd, env=os.environ, capture_output=True, check=False)
@@ -128,6 +136,10 @@ def _run_layer_with_overlap(
         test_cmd.append(f"--quantization={quantization}")
 
     if use_cublasmp:
+        if quantization == "mxfp8":
+            pytest.skip(
+                "cuBLASMp comm+GEMM overlap does not yet support MXFP8 (block scaling)."
+            )
         test_cmd.append("--use-cublasmp")
 
     os.environ["PYTORCH_JIT"] = "0"
