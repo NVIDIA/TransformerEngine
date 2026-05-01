@@ -7,7 +7,6 @@
 from __future__ import annotations
 from collections.abc import Callable
 import functools
-import inspect
 import math
 import os
 from typing import Optional
@@ -15,7 +14,6 @@ from typing import Optional
 import torch
 
 import transformer_engine_torch as tex
-from ...module.base import get_dummy_wgrad
 from ...quantization import Recipe
 from ...tensor.grouped_tensor import GroupedTensor
 from ...tensor.mxfp8_tensor import MXFP8Quantizer
@@ -25,13 +23,13 @@ from ..basic import GroupedLinear, ScaledClampedQGeGLU, ScaledSwiGLU
 from ..fuser import register_backward_fusion
 from ..op import FusedOperation, FusibleOperation, OperationContext
 from .._common import (
-    _nvidia_cudnn_frontend_supports_wgrad,
+    _cudnn_frontend_version_supported,
     fuse_grouped_mlp_ops,
     maybe_dequantize,
     validate_grouped_mlp_dims,
 )
 from ...cpp_extensions import general_grouped_gemm_for_grouped_tensor
-from ...module.base import _2X_ACC_WGRAD
+from ...module.base import _2X_ACC_WGRAD, get_dummy_wgrad
 from ...triton.grouped_dbias_dscales import compute_grouped_dbias_dscales
 
 
@@ -58,19 +56,41 @@ def _cudnn_compute_wgrad(
 
     fp8_dtype = torch.float8_e4m3fn
 
-    # a_tensor = DY^T = (out_features, total_tokens) row-major
-    a_tensor = grouped_dy.columnwise_data.view(dtype=fp8_dtype).view(total_tokens, out_features).T
-    # b_tensor = X = (total_tokens, in_features) column-major
-    b_tensor = grouped_x.columnwise_data.view(dtype=fp8_dtype).view(total_tokens, in_features)
-
     sfa_leading_dim = ((out_features + 127) // 128) * 128
     sfb_leading_dim = ((in_features + 127) // 128) * 128
-    sfa_tensor = grouped_dy.columnwise_scale_inv.view(sfa_leading_dim, -1).view(
-        dtype=torch.float8_e8m0fnu
-    )
-    sfb_tensor = grouped_x.columnwise_scale_inv.view(sfb_leading_dim, -1).view(
-        dtype=torch.float8_e8m0fnu
-    )
+
+    if total_tokens == 0:
+        # A workaround for the case with zero-token experts.
+        # Even for this case, cuteDSL still requires the same
+        # stride requirements for the input and scale tensors.
+        device = grouped_dy.columnwise_data.device
+        a_tensor = torch.empty_strided((out_features, 0), (16, 1), dtype=fp8_dtype, device=device)
+        b_tensor = torch.empty_strided(
+            (0, in_features), (in_features, 1), dtype=fp8_dtype, device=device
+        )
+        sfa_tensor = torch.empty_strided(
+            (sfa_leading_dim, 0),
+            (16, 1),
+            dtype=torch.float8_e8m0fnu,
+            device=device,
+        )
+        sfb_tensor = torch.empty_strided(
+            (sfb_leading_dim, 0),
+            (16, 1),
+            dtype=torch.float8_e8m0fnu,
+            device=device,
+        )
+    else:
+        a_tensor = (
+            grouped_dy.columnwise_data.view(dtype=fp8_dtype).view(total_tokens, out_features).T
+        )
+        b_tensor = grouped_x.columnwise_data.view(dtype=fp8_dtype).view(total_tokens, in_features)
+        sfa_tensor = grouped_dy.columnwise_scale_inv.view(sfa_leading_dim, -1).view(
+            dtype=torch.float8_e8m0fnu
+        )
+        sfb_tensor = grouped_x.columnwise_scale_inv.view(sfb_leading_dim, -1).view(
+            dtype=torch.float8_e8m0fnu
+        )
 
     # Prepare wgrad output
     if single_grouped_weight:
@@ -107,20 +127,6 @@ def _cudnn_compute_wgrad(
             accumulate_on_output=accumulate,
             current_stream=current_stream,
         )
-
-
-@functools.lru_cache(maxsize=1)
-def _dglu_wrapper_has_generate_dbias_arg() -> bool:
-    """True if cudnn-frontend SM100 dGLU wrapper accepts ``generate_dbias``."""
-    try:
-        from cudnn import grouped_gemm_dglu_wrapper_sm100  # pylint: disable=import-outside-toplevel
-    except ImportError:
-        return False
-    try:
-        params = inspect.signature(grouped_gemm_dglu_wrapper_sm100).parameters
-    except (TypeError, ValueError):
-        return False
-    return "generate_dbias" in params
 
 
 def _compute_grad_params(
@@ -173,13 +179,12 @@ def _compute_grad_params(
                             f" {tuple(main_grad.stride())}"
                         ) from e
                 accumulate_into_main_grad = not getattr(weight_param, "overwrite_main_grad", False)
-                if accumulate_into_main_grad:
-                    grouped_wgrad = GroupedTensor.make_grouped_tensor_from_rowwise_data(
-                        num_tensors=num_groups,
-                        tensor_shape=weight_shape,
-                        rowwise_data=main_grad,
-                        dtype=main_grad.dtype,
-                    )
+                grouped_wgrad = GroupedTensor.make_grouped_tensor_from_rowwise_data(
+                    num_tensors=num_groups,
+                    tensor_shape=weight_shape,
+                    rowwise_data=main_grad,
+                    dtype=main_grad.dtype,
+                )
 
             if grouped_wgrad is None:
                 grouped_wgrad = GroupedTensor.make_grouped_tensor_with_shapes(
@@ -237,7 +242,9 @@ def _compute_grad_params(
             packed_wgrad = None
             if not delay_wgrad:
                 packed_wgrad = grouped_wgrad.rowwise_data.view(num_groups, *weight_shape)
-            if accumulate_into_main_grad and hasattr(weight_param, "grad_added_to_main_grad"):
+            if fc_op._accumulate_into_main_grad and hasattr(
+                weight_param, "grad_added_to_main_grad"
+            ):
                 weight_param.grad_added_to_main_grad = True
                 packed_wgrad = get_dummy_wgrad(
                     list(weight_param.size()),
@@ -246,9 +253,9 @@ def _compute_grad_params(
                 )
             w_list = [packed_wgrad]
         else:
-            if delay_wgrad or accumulate_into_main_grad:
+            if delay_wgrad or fc_op._accumulate_into_main_grad:
                 w_list = [None] * num_groups
-            if accumulate_into_main_grad:
+            if fc_op._accumulate_into_main_grad:
                 for idx in range(num_groups):
                     wp = getattr(fc_op, f"weight{idx}")
                     if hasattr(wp, "grad_added_to_main_grad"):
@@ -299,10 +306,11 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
     @functools.lru_cache(maxsize=None)
     def grouped_gemm_wgrad_kernel(cls) -> Optional[Callable]:
         """CuTe DSL kernel for grouped GEMM wgrad on SM100+.
-        Returns ``None`` when the cuDNN front-end package is older than
-        1.23.0.
+
+        Returns ``None`` when the environment variable
+        ``NVTE_DISABLE_CUTEDSL_WGRAD_FUSED_GROUPED_MLP`` is set to ``1``.
         """
-        if not _nvidia_cudnn_frontend_supports_wgrad():
+        if int(os.environ.get("NVTE_DISABLE_CUTEDSL_WGRAD_FUSED_GROUPED_MLP", "0")) >= 1:
             return None
         from cudnn import grouped_gemm_wgrad_wrapper_sm100  # pylint: disable=no-name-in-module
 
@@ -316,19 +324,14 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
             return False
         if get_device_compute_capability()[0] != 10:
             return False
+        if not _cudnn_frontend_version_supported():
+            return False
         try:
             cls.grouped_gemm_dglu_kernel()
             cls.grouped_gemm_quant_kernel()
         except ImportError:
             return False
         return True
-
-    @classmethod
-    def is_fc1_bias_supported(cls) -> bool:
-        """Whether cudnn-frontend exposes ``generate_dbias`` on the dGLU SM100 wrapper (FC1 bias grad only)."""
-        if not cls.is_supported():
-            return False
-        return _dglu_wrapper_has_generate_dbias_arg()
 
     def __init__(
         self,
@@ -687,7 +690,6 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
                 "norm_const_tensor": None,
                 "prob_tensor": torch.ones((out_shape[0], 1, 1), dtype=torch.float32, device=device),
                 "acc_dtype": torch.float32,
-                "c_dtype": dtype,
                 "d_dtype": dtype,
                 "cd_major": "n",
                 "sf_vec_size": MXFP8_BLOCK_SCALING_SIZE,
