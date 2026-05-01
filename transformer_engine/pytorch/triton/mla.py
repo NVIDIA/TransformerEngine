@@ -442,7 +442,6 @@ def _launch_mla_decode_fwd(q_nope_abs, q_rope, c_kv, k_rope, softmax_scale, is_c
     R_rope = q_rope.shape[3]
 
     o_inter = torch.empty((B, H, S_q, R), device=q_nope_abs.device, dtype=q_nope_abs.dtype)
-    lse = torch.empty((B, H, S_q), device=q_nope_abs.device, dtype=torch.float32)
 
     block_dmodel_r = max(16, triton.next_power_of_2(R))
     block_dmodel_rr = max(16, triton.next_power_of_2(R_rope))
@@ -455,7 +454,6 @@ def _launch_mla_decode_fwd(q_nope_abs, q_rope, c_kv, k_rope, softmax_scale, is_c
         c_kv,
         k_rope,
         o_inter,
-        lse,
         float(softmax_scale),
         B,
         H,
@@ -486,15 +484,11 @@ def _launch_mla_decode_fwd(q_nope_abs, q_rope, c_kv, k_rope, softmax_scale, is_c
         o_inter.stride(1),
         o_inter.stride(2),
         1,
-        # LSE strides
-        lse.stride(0),
-        lse.stride(1),
-        1,
         IS_CAUSAL=is_causal,
         BLOCK_DMODEL_R=block_dmodel_r,
         BLOCK_DMODEL_RR=block_dmodel_rr,
     )
-    return o_inter, lse
+    return o_inter
 
 
 def mla_decode_attention(
@@ -578,5 +572,4 @@ def mla_decode_attention(
     ck = c_kv.contiguous() if not c_kv.is_contiguous() else c_kv
     kr = k_rope.contiguous() if not k_rope.is_contiguous() else k_rope
 
-    o_inter, _lse = _launch_mla_decode_fwd(qn, qr, ck, kr, softmax_scale, is_causal)
-    return o_inter
+    return _launch_mla_decode_fwd(qn, qr, ck, kr, softmax_scale, is_causal)

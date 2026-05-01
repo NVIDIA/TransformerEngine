@@ -590,7 +590,6 @@ def _mla_decode_attn_fwd(
     CKV_ptr,  # (B,       S_kv, R)        compressed KV cache (shared across heads)
     KR_ptr,  # (B,       S_kv, R_rope)   decoupled rope key (shared across heads)
     O_ptr,  # (B, H,    S_q,  R)        O_inter (caller applies W_uv)
-    LSE_ptr,  # (B, H,    S_q)            fp32 LSE
     softmax_scale,
     B,
     H,
@@ -621,10 +620,6 @@ def _mla_decode_attn_fwd(
     sO_h,
     sO_s,
     sO_r: tl.constexpr,
-    # LSE strides
-    sLSE_b,
-    sLSE_h,
-    sLSE_s: tl.constexpr,
     IS_CAUSAL: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -717,7 +712,6 @@ def _mla_decode_attn_fwd(
         acc.to(O_ptr.dtype.element_ty),
         mask=mask_m[:, None] & mask_r[None, :],
     )
-
-    lse_base = LSE_ptr + off_b * sLSE_b + off_h * sLSE_h
-    lse_ptrs = lse_base + offs_m * sLSE_s
-    tl.store(lse_ptrs, m_i + tl.log(l_i), mask=mask_m)
+    # LSE is intentionally not saved here — v1 has no analytical decode
+    # backward. If a future change adds one, re-introduce a fp32 LSE buffer
+    # and ``m_i + tl.log(l_i)`` store at this point.
