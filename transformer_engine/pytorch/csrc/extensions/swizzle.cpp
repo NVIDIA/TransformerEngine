@@ -379,13 +379,6 @@ std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor(GroupedTensorW
   if (!swizzle_rowwise && !swizzle_columnwise) {
     return std::nullopt;
   }
-  const auto first_dims = input.get_first_dims();
-  const auto last_dims = input.get_last_dims();
-  if (first_dims.data_ptr != nullptr || last_dims.data_ptr != nullptr) {
-    NVTE_ERROR(
-        "Grouped GEMM swizzle requires uniform shapes for now (first_dims/last_dims must be "
-        "absent).");
-  }
 
   std::optional<at::Tensor> rowwise_scales_pyt;
   std::optional<at::Tensor> columnwise_scales_pyt;
@@ -452,6 +445,7 @@ std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor(GroupedTensorW
   }
 
   swizzle_output.set_with_gemm_swizzled_scales(true);
+
   NVTE_SCOPED_GIL_RELEASE({
     nvte_swizzle_grouped_scaling_factors(swizzle_input.data(), swizzle_output.data(),
                                          at::cuda::getCurrentCUDAStream());
