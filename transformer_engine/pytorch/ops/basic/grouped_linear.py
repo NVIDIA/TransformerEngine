@@ -616,14 +616,12 @@ class GroupedLinear(BasicOperation):
             weight_requires_grad = requires_grad and weight_requires_grad
 
             # Configure quantizer usages
-            # Note: We cache the quantized input for backward pass,
-            # but discard the quantized weights.
             for group_idx in range(self.num_groups):
                 input_quantizer = self.get_quantizer("forward", 2 * group_idx)
                 weight_quantizer = self.get_quantizer("forward", 2 * group_idx + 1)
                 grad_output_quantizer = self.get_quantizer("backward", group_idx)
                 input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
-                weight_quantizer.set_usage(rowwise=True, columnwise=False)
+                weight_quantizer.set_usage(rowwise=True, columnwise=requires_grad)
                 grad_output_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
 
     def reset_recipe_state(self, *, recipe: Optional[Recipe]) -> None:
@@ -638,32 +636,29 @@ class GroupedLinear(BasicOperation):
             if grad_output_quantizer is not None:
                 grad_output_quantizer.internal = True
 
-            # Handle weight quantizer
+            # Get weight tensor
             # Note: This function may be called in base class constructor,
-            # before any basic linear attrs have been set.
-            weight_quantizer = self.get_quantizer("forward", 2 * group_idx + 1)
-            if weight_quantizer is None:
-                pass
-            elif is_quantized_tensor(getattr(self, f"weight{group_idx}", None)):
-                # Make sure weight param has correct quantizer
-                weight_quantizer.set_usage(rowwise=True, columnwise=torch.is_grad_enabled())
-                weight_quantizer.internal = False
-                if self.single_grouped_weight:
-                    self.weight.quantizer = weight_quantizer.copy()
-                else:
-                    getattr(self, f"weight{group_idx}").update_quantizer(weight_quantizer.copy())
+            # before any grouped linear attrs have been set.
+            weight = None
+            weight_is_quantized = False
+            if getattr(self, "single_grouped_weight", False):
+                weight = getattr(self, "weight", None)
+                weight_is_quantized = weight is not None and weight.quantizer is not None
             else:
-                # Use internal tensors if quantized weights will not be
-                # exposed externally
-                weight_quantizer.internal = (
-                    not FP8GlobalStateManager.with_fp8_parameters()
-                    and not getattr(self, "_with_quantized_weight", False)
-                    and not self.single_grouped_weight
+                weight = getattr(self, f"weight{group_idx}", None)
+                weight_is_quantized = is_quantized_tensor(weight)
+
+            # Configure weight quantizer
+            weight_quantizer = self.get_quantizer("forward", 2 * group_idx + 1)
+            if weight_quantizer is not None:
+                # Determine if quantized weight is exposed as parameter
+                weight_quantizer.internal = not (
+                    FP8GlobalStateManager.with_fp8_parameters()
+                    or getattr(self, "_with_quantized_weight", False)
+                    or weight_is_quantized
                 )
 
             # Recipe-specific configuration
-            # Note: This function may be called in base class constructor,
-            # before any basic linear attrs have been set.
             if recipe is not None:
                 if recipe.float8_current_scaling():
                     input_quantizer.force_pow_2_scales = recipe.fp8_quant_fwd_inp.power_2_scale
@@ -676,6 +671,29 @@ class GroupedLinear(BasicOperation):
                     grad_output_quantizer.amax_epsilon_scales = (
                         recipe.fp8_quant_bwd_grad.amax_epsilon
                     )
+
+            # Update quantizer in quantized weight tensor
+            if weight_quantizer is not None and weight_is_quantized:
+                # Get quantizer from weight tensor
+                weight_tensor_quantizer = (
+                    weight.quantizer if self.single_grouped_weight else weight._quantizer
+                )
+
+                # Preserve existing usages in weight tensor. Even if a
+                # usage is currently unnecessary, the weight tensor
+                # may be used elsewhere.
+                if weight_tensor_quantizer is not None:
+                    weight_quantizer.set_usage(
+                        rowwise=weight_tensor_quantizer.rowwise_usage,
+                        columnwise=weight_tensor_quantizer.columnwise_usage,
+                    )
+
+                # Update weight tensor
+                if self.single_grouped_weight:
+                    if group_idx == 0:
+                        weight.quantizer = weight_quantizer.copy()
+                else:
+                    weight.update_quantizer(weight_quantizer.copy())
 
     def op_forward(self, *args, **kwargs):
         raise RuntimeError(
