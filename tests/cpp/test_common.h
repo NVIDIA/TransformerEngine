@@ -246,7 +246,8 @@ class Tensor {
 
   float scale() const {
     if(scale_cpu_data_) {
-      NVTE_CHECK(tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING, "Invalid scaling_mode!");
+      NVTE_CHECK(tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING ||
+                 tensor_.scaling_mode() == NVTE_NVFP4_1D_SCALING, "Invalid scaling_mode!");
       to_cpu();
       return *scale_cpu_data_;
     } else {
@@ -319,11 +320,6 @@ class Tensor {
     tensor_.set_amax(nullptr, DType::kFloat32, tensor_.defaultShape);
   }
 
-  void set_amax(float amax_val) {
-    NVTE_CHECK(amax_cpu_data_);
-    *amax_cpu_data_ = amax_val;
-    from_cpu();
-  }
 
   void set_with_gemm_swizzled_scales(bool with_gemm_swizzled_scales){
     tensor_.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);

@@ -98,9 +98,9 @@ void performTest_dequantize_nvfp4(const size_t rows, const size_t cols) {
     Tensor quantized("quantized", std::vector<size_t>{rows, cols},
                      DType::kFloat4E2M1, true, false, NVTE_NVFP4_1D_SCALING);
     if (rows > 0 && cols > 0) {
-        quantized.set_amax(compute_amax<OutputType>(input, rows, cols));
+        quantized.set_tensor_amax(compute_amax<OutputType>(input, rows, cols));
     } else {
-        quantized.set_amax(0.0f);
+        quantized.set_tensor_amax(0.0f);
     }
     setRandomScale(&quantized);
 
@@ -148,9 +148,9 @@ void performTest_dequantize_nvfp4_swizzled(const size_t rows, const size_t cols)
     Tensor quantized_compact("quantized_compact", std::vector<size_t>{rows, cols},
                              DType::kFloat4E2M1, true, false, NVTE_NVFP4_1D_SCALING);
     if (rows > 0 && cols > 0) {
-        quantized_compact.set_amax(compute_amax<OutputType>(input, rows, cols));
+        quantized_compact.set_tensor_amax(compute_amax<OutputType>(input, rows, cols));
     } else {
-        quantized_compact.set_amax(0.0f);
+        quantized_compact.set_tensor_amax(0.0f);
     }
     setRandomScale(&quantized_compact);
 
@@ -167,14 +167,14 @@ void performTest_dequantize_nvfp4_swizzled(const size_t rows, const size_t cols)
     // Create tensor with same FP4 data but swizzled scales
     Tensor quantized_swizzled("quantized_swizzled", std::vector<size_t>{rows, cols},
                               DType::kFloat4E2M1, true, false, NVTE_NVFP4_1D_SCALING);
-    quantized_swizzled.set_amax(0.0f);
+    quantized_swizzled.set_tensor_amax(0.0f);
     setRandomScale(&quantized_swizzled);
     quantized_swizzled.set_with_gemm_swizzled_scales(true);
 
     // Copy amax and scale from compact to swizzled before FP4 data,
     // since from_cpu() uploads all CPU buffers (including zero-init data).
     quantized_compact.to_cpu();
-    quantized_swizzled.set_amax(quantized_compact.amax());
+    quantized_swizzled.set_tensor_amax(quantized_compact.amax());
     quantized_swizzled.set_scale(quantized_compact.scale());
 
     // Copy FP4 data after from_cpu() to avoid being overwritten
