@@ -1015,6 +1015,9 @@ void fillCase_special(Tensor *t) {
   }
 
   // Try setting scale to 1, fallback to random scales
+  // Note: This is a hack to match behavior of an earlier
+  // implementation. Consider filling block scales with constant
+  // value.
   try {
     t->set_scale_inv(1.0);
   } catch (...) {
