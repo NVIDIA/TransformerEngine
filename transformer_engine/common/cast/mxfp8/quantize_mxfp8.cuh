@@ -608,8 +608,6 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
       use_rowwise_scaling ? reinterpret_cast<e8m0_t *>(output->scale_inv.dptr) : nullptr;
   e8m0_t *const scales_colwise_ptr =
       use_colwise_scaling ? reinterpret_cast<e8m0_t *>(output->columnwise_scale_inv.dptr) : nullptr;
-  const size_t dbias_rows = blocks_Y;
-  const size_t dbias_cols = cols;
 
   ScalingType scaling_type;
   if (use_rowwise_scaling && (!use_colwise_scaling)) {
@@ -620,16 +618,30 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
     scaling_type = ScalingType::BIDIMENSIONAL;
   }
 
+  // Workspace for dbias
+  const size_t dbias_rows = blocks_Y;
+  const size_t dbias_cols = cols;
   if constexpr (IS_DBIAS) {
     NVTE_CHECK(dbias->data.dtype == input.dtype(), "DBias must have the same type as input.");
     NVTE_CHECK(dbias->data.shape == std::vector<size_t>{cols}, "Wrong shape of DBias.");
     NVTE_CHECK(workspace != nullptr, "Workspace must be a tensor.");
+    NVTE_CHECK(dbias_rows > 0 && dbias_cols > 0,
+               "Invalid workspace shape for DBias computation (input shape=", input.shape(),
+               ", workspace shape=(", dbias_rows, ",", dbias_cols, ")).");
 
     if (workspace->data.dptr == nullptr) {
       workspace->data.shape = {dbias_rows, dbias_cols};
       workspace->data.dtype = DType::kFloat32;
       return;
     }
+  }
+
+  // Skip kernel if tensor size is zero
+  if (rows == 0 || cols == 0) {
+    if constexpr (IS_DBIAS) {
+      NVTE_ERROR("Invalid tensor shape for DBias computation (shape=", input.shape(), ").");
+    }
+    return;
   }
 
   float *const workspace_ptr = IS_DBIAS ? reinterpret_cast<float *>(workspace->data.dptr) : nullptr;
