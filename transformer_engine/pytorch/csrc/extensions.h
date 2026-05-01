@@ -435,6 +435,11 @@ void mxfp8_scaling_partial_cast(const at::Tensor &input, at::Tensor output_rowwi
                                 const at::Tensor &scale_inv_colwise, int rows, int cols,
                                 size_t start_offset);
 
+void mxfp8_scaling_transpose_cast(const at::Tensor &input, const at::Tensor &scale_inv_colwise,
+                                  at::Tensor output_rowwise, at::Tensor output_rowwise_scale_inv,
+                                  int rows, int cols, int64_t fp8_dtype,
+                                  bool with_gemm_swizzled_scales);
+
 /***************************************************************************************************
  * Rotary positional embedding
  **************************************************************************************************/
