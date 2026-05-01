@@ -22,11 +22,7 @@ from transformer_engine.pytorch.newton_schulz import (
 
 
 MuonScaleT = Literal["shape_scaling", "spectral", "unit_rms_norm"]
-ParamsT = (
-    Iterable[torch.Tensor]
-    | Iterable[dict[str, Any]]
-    | Iterable[tuple[str, torch.Tensor]]
-)
+ParamsT = Iterable[torch.Tensor] | Iterable[dict[str, Any]] | Iterable[tuple[str, torch.Tensor]]
 
 
 def get_muon_scale_factor(size_out: int, size_in: int, mode: MuonScaleT = "spectral") -> float:
