@@ -316,7 +316,6 @@ def fused_attn_fwd(
         raise ValueError(f"Unsupported backend {fused_attention_backend}")
 
     # execute kernel
-
     output_tensors = tex.fused_attn_fwd(
         max_seqlen_q,
         max_seqlen_kv,
@@ -378,23 +377,18 @@ def fused_attn_fwd(
                 if cu_seqlens_q_padded is not None:
                     # For THD + pad_between_seqs=True + non-sm120 + cuDNN>9.6, Max tensor is [tq, h, 1]
                     # and padding positions could be uninitialized. Exclude those padded positions when
-                    # computing max_logit.
+                    # computing max_logit. Use absolute positions from cu_seqlens_q_padded to handle
+                    # cases where cu_seqlens_q_padded may not start at 0 (e.g. CP offset-based approach).
                     actual_seqlens = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).to(
                         device=max_tensor.device
                     )
-                    padded_seqlens = (cu_seqlens_q_padded[1:] - cu_seqlens_q_padded[:-1]).to(
-                        device=max_tensor.device
-                    )
-                    pad_lens = (padded_seqlens - actual_seqlens).to(device=max_tensor.device)
-                    b = pad_lens.shape[0]
-
-                    # Stack [actual, pad] per batch into counts: e.g. [3,1, 3,1, 2,2, 7,1]
-                    counts = torch.stack([actual_seqlens, pad_lens], dim=1).flatten()
-                    # Tile [T, F] per sequence: [T,F, T,F, T,F, T,F]
-                    values = torch.tensor([True, False], device=max_tensor.device).repeat(b)
-                    # Expand: T×3, F×1, T×3, F×1, T×2, F×2, T×7, F×1 → TTTF|TTTF|TTFF|TTTTTTTF
-                    valid = torch.repeat_interleave(values, counts)
-                    # Finally, replace invalid (F) positions with -inf
+                    tq = max_tensor.shape[0]
+                    valid = torch.zeros(tq, dtype=torch.bool, device=max_tensor.device)
+                    b = actual_seqlens.shape[0]
+                    for b_idx in range(b):
+                        start = cu_seqlens_q_padded[b_idx].item()
+                        n_valid = actual_seqlens[b_idx].item()
+                        valid[start : start + n_valid] = True
                     max_tensor = max_tensor.masked_fill(~valid.view(-1, 1, 1), float("-inf"))
 
         # Max -> max_logit [h]

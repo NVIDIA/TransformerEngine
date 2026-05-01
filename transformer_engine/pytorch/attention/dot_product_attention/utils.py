@@ -651,7 +651,7 @@ def get_attention_backend(
     # backend  | precision      |    KV cache     | architecture | qkv_format    | page_size
     # ---------------------------------------------------------------------------------------
     # Fused    | FP16/BF16      | non-paged/paged | sm80+        | bshd,sbhd,thd | >= 1
-    # Flash v2 | FP16/BF16      | non-paged/paged | sm80+        | bshd,sbhd,thd | >= 256
+    # Flash v2 | FP16/BF16      | non-paged/paged | sm80+        | bshd,sbhd,thd | % 256 == 0
     # Flash v3 | FP16/BF16      | non-paged/paged | sm90         | bshd,sbhd,thd | >= 1
     #          | FP8            | non-paged/paged | sm90         | thd           | >= 1
     # Flash v4 | FP16/BF16      | TODO            | sm80+        | bshd,sbhd,thd | TODO
@@ -691,9 +691,9 @@ def get_attention_backend(
                 use_fused_attention = False
                 use_unfused_attention = False
         if inference_params.is_paged:
-            if use_flash_attention_2 and inference_params.page_size < 256:
+            if use_flash_attention_2 and inference_params.page_size % 256 != 0:
                 if FlashAttentionUtils.is_installed:
-                    logger.debug("Disabling FlashAttention 2 for page size < 256")
+                    logger.debug("Disabling FlashAttention 2 for page size not divisible by 256")
                 use_flash_attention_2 = False
             if use_flash_attention_2:
                 if not FlashAttentionUtils.is_installed:
@@ -703,6 +703,16 @@ def get_attention_backend(
                         "Disabling FlashAttention 2 as paged attention requires flash-attn 2.5+"
                     )
                     use_flash_attention_2 = False
+        else:
+            # Non-paged KV cache still passes a block_table to FA2 for thd_2bshd support,
+            # and FA2 enforces page_size % 256 == 0 on the effective page size (max_seqlen_kv).
+            if use_flash_attention_2 and max_seqlen_kv % 256 != 0:
+                if FlashAttentionUtils.is_installed:
+                    logger.debug(
+                        "Disabling FlashAttention 2 for non-paged KV cache"
+                        " with max_seqlen_kv not divisible by 256"
+                    )
+                use_flash_attention_2 = False
         if use_flash_attention_4 and FlashAttentionUtils.v4_is_installed:
             logger.debug("Disabling FlashAttention 4 as it does not support KV cache.")
             use_flash_attention_4 = False
@@ -844,15 +854,18 @@ def get_attention_backend(
     if qkv_format == "thd":
         if pad_between_seqs:
             if (  # pylint: disable=too-many-boolean-expressions
-                (use_flash_attention_2 and FlashAttentionUtils.is_installed)
-                or (use_flash_attention_3 and FlashAttentionUtils.v3_is_installed)
-                or (use_flash_attention_4 and FlashAttentionUtils.v4_is_installed)
-            ):
+                use_flash_attention_2 and FlashAttentionUtils.is_installed
+            ) or (use_flash_attention_4 and FlashAttentionUtils.v4_is_installed):
                 logger.debug(
-                    "Disabling FlashAttention for qkv_format = thd when there is "
+                    "Disabling FlashAttention 2 and 4 for qkv_format = thd when there is "
                     "padding between sequences, i.e. [a, a, PAD, b, b, b, PAD, c, PAD]"
                 )
-            use_flash_attention = False
+            use_flash_attention_2 = False
+            use_flash_attention_4 = False
+            # FA3 supports pad_between_seqs via seqused_q/seqused_k
+            if use_unfused_attention:
+                logger.debug("Disabling UnfusedDotProductAttention for pad_between_seqs = True")
+            use_unfused_attention = False
         if device_compute_capability == (12, 0):
             if cudnn_version < (9, 18, 1):
                 if use_fused_attention:
@@ -1027,7 +1040,7 @@ def get_attention_backend(
                 cp_comm_type,
             )
             use_fused_attention = False
-        elif qkv_format == "thd" and cp_comm_type in ["all_gather", "a2a+p2p"]:
+        elif qkv_format == "thd" and cp_comm_type in ["a2a+p2p"]:
             logger.debug(
                 "Disabling FusedAttention as it does not support context parallelism with THD"
                 " format and cp_comm_type = %s",
@@ -1303,9 +1316,12 @@ def get_attention_backend(
             )
             use_flash_attention_2 = False
     if use_flash_attention_3 and deterministic and FlashAttentionUtils.v3_is_installed:
-        if head_dim_qk >= 256:
+        if is_training and max(head_dim_qk, head_dim_v) >= 256:
             logger.debug(
-                "Disabling FlashAttention 3 for deterministic execution with head_dim_qk >= 256."
+                "Disabling FlashAttention 3 for deterministic backward with"
+                " max(head_dim_qk, head_dim_v) >= 256. Found: head_dim_qk = %s, head_dim_v = %s.",
+                head_dim_qk,
+                head_dim_v,
             )
             use_flash_attention_3 = False
     if use_fused_attention and deterministic:

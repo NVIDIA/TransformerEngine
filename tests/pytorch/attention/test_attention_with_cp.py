@@ -91,10 +91,19 @@ if test_essential:
 @pytest.mark.parametrize("model", model_configs_flash_attn.keys())
 @pytest.mark.parametrize("qkv_format", qkv_formats)
 @pytest.mark.parametrize("cp_comm_type", cp_comm_types)
-def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
+@pytest.mark.parametrize("pad_between_seqs", [False, True])
+def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type, pad_between_seqs):
     num_gpus = 4 if cp_comm_type == "a2a+p2p" else 2
     if num_gpus > torch.cuda.device_count():
         pytest.skip(f"Test requires {num_gpus} GPUs, but found {torch.cuda.device_count()}")
+
+    if pad_between_seqs:
+        if qkv_format != "thd":
+            pytest.skip("pad_between_seqs only applies to THD format!")
+        if not FlashAttentionUtils.v3_is_installed:
+            pytest.skip("pad_between_seqs with CP requires Flash Attention v3!")
+        if cp_comm_type == "a2a+p2p":
+            pytest.skip("pad_between_seqs is not yet supported with A2A+P2P CP comm type!")
 
     config = model_configs_flash_attn[model]
     config.context_parallel = True
@@ -105,8 +114,17 @@ def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
     if config.attn_bias_type != "no_bias" and cp_comm_type in ["all_gather", "a2a", "a2a+p2p"]:
         pytest.skip("No support for bias with cp_comm_type={all_gather, a2a, a2a+p2p}!")
 
-    if qkv_format == "thd" and cp_comm_type in ["all_gather", "a2a+p2p"]:
-        pytest.skip("No support for THD format with cp_comm_type={all_gather, a2a+p2p}!")
+    if qkv_format == "thd":
+        if cp_comm_type == "all_gather":
+            pytest.skip(
+                "FlashAttention does not support THD padding; use FusedAttention for"
+                " THD+all_gather CP."
+            )
+        if cp_comm_type == "a2a+p2p":
+            pytest.skip(
+                "CP implementation with QKVO A2A+P2P (Hierarchical A2A) does not support THD format"
+                " yet!"
+            )
 
     if (
         config.window_size != (-1, 0)
@@ -148,6 +166,7 @@ def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
             qkv_format=qkv_format,
             kernel_backend="FlashAttention",
             cp_comm_type=cp_comm_type,
+            fa_pad_between_seqs=pad_between_seqs,
             log_level=pytest_logging_level,
         ),
     )
@@ -308,8 +327,12 @@ def test_cp_with_fused_attention(
     if config.attn_bias_type != "no_bias" and cp_comm_type in ["all_gather", "a2a", "a2a+p2p"]:
         pytest.skip("No support for bias with cp_comm_type={all_gather, a2a, a2a+p2p}!")
 
-    if qkv_format == "thd" and cp_comm_type in ["all_gather", "a2a+p2p"]:
-        pytest.skip("No support for THD format with cp_comm_type={all_gather, a2a+p2p}!")
+    if qkv_format == "thd":
+        if cp_comm_type == "a2a+p2p":
+            pytest.skip(
+                "CP implementation with QKVO A2A+P2P (Hierarchical A2A) does not support THD format"
+                " yet!"
+            )
 
     if (config.window_size[0] != -1 or config.window_size[1] not in [-1, 0]) and cp_comm_type in [
         "p2p",
@@ -386,6 +409,7 @@ def test_cp_with_fused_attention(
         is_training=is_training,
         deterministic=_deterministic,
     )
+
     _, fused_attn_supported, _ = available_backends
     if fused_attn_supported and config.attn_mask_type in ["causal", "padding_causal"]:
         config_copy = copy.deepcopy(config)
@@ -403,6 +427,25 @@ def test_cp_with_fused_attention(
         _, fused_attn_supported, _ = available_backends
     if not fused_attn_supported:
         pytest.skip("No attention backend available.")
+
+    deterministic = not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
+    if deterministic:
+        if config.softmax_type != "vanilla":
+            pytest.skip(
+                "Deterministic mode does not support non-vanilla softmax with FusedAttention"
+            )
+        if config.attn_bias_type == "post_scale_bias" and is_training:
+            pytest.skip("Deterministic mode does not support post_scale_bias with requires_grad")
+        if (
+            qkv_format == "thd"
+            and config.num_heads >= 20
+            and get_device_compute_capability() == (9, 0)
+        ):
+            pytest.skip(
+                "Deterministic FusedAttention backward with THD format OOMs on sm90"
+                " for this particular test config since cuDNN reserves memory"
+                " proportional to bHSS (known cuDNN issue)."
+            )
 
     run_distributed(
         get_bash_arguments(
