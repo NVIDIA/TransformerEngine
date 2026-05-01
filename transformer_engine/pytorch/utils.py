@@ -7,6 +7,7 @@ from __future__ import annotations
 import functools
 import math
 import os
+import warnings
 from typing import Any, Callable, List, Optional, Sequence, Tuple, Union
 from contextlib import nullcontext
 import numpy as np
@@ -79,6 +80,36 @@ def _get_device_compute_capability(device: torch.device) -> Tuple[int, int]:
 def get_device_compute_capability() -> Tuple[int, int]:
     """CUDA compute capability of current GPU"""
     return _get_device_compute_capability(torch.cuda.current_device())
+
+
+def resolve_grouped_linear_single_param_flags(
+    single_grouped_weight: bool,
+    single_grouped_bias: bool,
+) -> Tuple[bool, bool]:
+    """Gate ``single_grouped_weight`` / ``single_grouped_bias`` on ``NVTE_GROUPED_LINEAR_SINGLE_PARAM``."""
+    if not (single_grouped_weight or single_grouped_bias):
+        return single_grouped_weight, single_grouped_bias
+
+    env_enabled = int(os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0")) > 0
+    if not env_enabled:
+        warnings.warn(
+            f"GroupedLinear was constructed with single_grouped_weight={single_grouped_weight} "
+            f"and single_grouped_bias={single_grouped_bias}, but the "
+            "NVTE_GROUPED_LINEAR_SINGLE_PARAM environment variable is not set. "
+            "Disabling single grouped weight/bias and falling back to per-expert parameters.",
+            UserWarning,
+            stacklevel=3,
+        )
+        return False, False
+
+    warnings.warn(
+        "GroupedLinear is using single_grouped_weight/single_grouped_bias. "
+        "This feature is experimental, may change in future "
+        "releases, and is known to be non-deterministic in certain cases.",
+        UserWarning,
+        stacklevel=3,
+    )
+    return single_grouped_weight, single_grouped_bias
 
 
 def attention_mask_func(
