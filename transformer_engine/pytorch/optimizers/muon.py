@@ -40,7 +40,9 @@ class MuonOptimizer(Optimizer):
 
     This optimizer applies SGD-momentum followed by Newton-Schulz orthogonalization
     on tensor-parallel parameter shards. The local parameter shard must represent a
-    partition of a logical 2D matrix across the provided NCCL process group.
+    contiguous row or column partition of a logical 2D matrix across the provided
+    NCCL process group. Single-GPU, unsharded parameters and TE non-parallel
+    parameters with ``partition_dim == -1`` are not supported.
 
     Args:
         params: Iterable of parameters or parameter group dicts.
@@ -53,9 +55,13 @@ class MuonOptimizer(Optimizer):
         num_ns_steps: Number of Newton-Schulz iterations.
         scale_mode: Muon update scale mode.
         extra_scale_factor: Extra multiplicative scale applied after orthogonalization.
-        process_group: NCCL process group for distributed Newton-Schulz. Defaults to world.
-        partition_dim: Dimension along which each logical 2D parameter is partitioned.
-            Must be 0 or 1.
+        process_group: Explicit NCCL tensor-parallel process group for distributed
+            Newton-Schulz. Pass ``dist.group.WORLD`` only when the world group is
+            intentionally the tensor-parallel group.
+        partition_dim: Default partition dimension for parameters that do not carry
+            TE tensor-parallel metadata. If a parameter has a ``partition_dim``
+            attribute, that per-parameter value is used instead. Must be 0 or 1
+            when provided.
         eps: Lower bound for the distributed normalization denominator.
     """
 
@@ -72,10 +78,11 @@ class MuonOptimizer(Optimizer):
         num_ns_steps: int = 5,
         scale_mode: MuonScaleT = "spectral",
         extra_scale_factor: float = 1.0,
-        process_group: Optional[dist.ProcessGroup] = None,
-        partition_dim: int = 1,
+        process_group: dist.ProcessGroup,
+        partition_dim: Optional[int] = None,
         eps: float = 1e-7,
     ) -> None:
+        self._ns_ctx: CusolverMpCtx | None = None
         if lr < 0.0:
             raise ValueError(f"Invalid learning rate: {lr}")
         if momentum < 0.0 or momentum >= 1.0:
@@ -84,14 +91,17 @@ class MuonOptimizer(Optimizer):
             raise ValueError(f"Invalid weight_decay value: {weight_decay}")
         if num_ns_steps < 1:
             raise ValueError(f"num_ns_steps must be at least 1, got {num_ns_steps}")
-        if partition_dim not in (0, 1):
+        if partition_dim is not None and partition_dim not in (0, 1):
             raise ValueError(f"partition_dim must be 0 or 1, got {partition_dim}")
         get_coefficients(num_ns_steps, coefficient_type)
 
         if process_group is None:
-            if not dist.is_initialized():
-                raise RuntimeError("MuonOptimizer requires torch.distributed to be initialized.")
-            process_group = dist.group.WORLD
+            raise ValueError(
+                "MuonOptimizer requires an explicit NCCL tensor-parallel process_group. "
+                "Pass dist.group.WORLD explicitly only if it is the intended group."
+            )
+        if not dist.is_initialized():
+            raise RuntimeError("MuonOptimizer requires torch.distributed to be initialized.")
         if dist.get_backend(process_group) != "nccl":
             raise RuntimeError("MuonOptimizer requires an NCCL process group.")
 
@@ -109,8 +119,11 @@ class MuonOptimizer(Optimizer):
             "eps": eps,
         }
         super().__init__(params, defaults)
+        for group in self.param_groups:
+            group_partition_dim = group["partition_dim"]
+            if group_partition_dim is not None and group_partition_dim not in (0, 1):
+                raise ValueError(f"partition_dim must be 0 or 1, got {group_partition_dim}")
         self.process_group = process_group
-        self._ns_ctx: CusolverMpCtx | None = None
 
     def __del__(self) -> None:
         self.destroy()
@@ -139,6 +152,36 @@ class MuonOptimizer(Optimizer):
         if param.size(partition_dim) == 0:
             raise ValueError("MuonOptimizer does not support empty tensor-parallel shards.")
 
+    @staticmethod
+    def _resolve_partition_dim(
+        param: torch.Tensor,
+        group_partition_dim: Optional[int],
+    ) -> int:
+        param_partition_dim = getattr(param, "partition_dim", None)
+        if param_partition_dim is None:
+            if group_partition_dim is None:
+                raise ValueError(
+                    "MuonOptimizer requires a partition_dim for each parameter. "
+                    "Set TE tensor-parallel metadata on the parameter or provide "
+                    "partition_dim in the optimizer defaults/parameter group."
+                )
+            partition_dim = group_partition_dim
+        else:
+            partition_dim = param_partition_dim
+            if group_partition_dim is not None and group_partition_dim != partition_dim:
+                raise ValueError(
+                    "Conflicting partition_dim values for MuonOptimizer parameter: "
+                    f"parameter has {partition_dim}, parameter group has {group_partition_dim}."
+                )
+
+        if partition_dim not in (0, 1):
+            raise ValueError(
+                "MuonOptimizer only supports tensor-parallel parameters sharded along "
+                f"dimension 0 or 1, got partition_dim={partition_dim}. Non-parallel "
+                "parameters are not supported."
+            )
+        return partition_dim
+
     def _distributed_normalize_p2_(
         self,
         x: torch.Tensor,
@@ -165,6 +208,10 @@ class MuonOptimizer(Optimizer):
         global_shape[partition_dim] *= world_size
 
         orth_grad = grad.clone()
+        # The cuSolverMp Newton-Schulz backend expects columns to be distributed.
+        # Row-parallel shards are transposed into that layout. This assumes the
+        # usual contiguous row/column TP sharding; strided or irregular layouts
+        # are outside this optimizer's contract.
         transposed = partition_dim == 0
         if transposed:
             orth_grad = orth_grad.mT.contiguous()
@@ -195,7 +242,8 @@ class MuonOptimizer(Optimizer):
                 if p.grad is None:
                     continue
 
-                self._validate_param(p, group["partition_dim"])
+                partition_dim = self._resolve_partition_dim(p, group["partition_dim"])
+                self._validate_param(p, partition_dim)
                 grad = p.grad
                 if grad.dtype != p.dtype:
                     raise ValueError(
@@ -223,7 +271,7 @@ class MuonOptimizer(Optimizer):
 
                 orth_update = self._orthogonalize(
                     update,
-                    partition_dim=group["partition_dim"],
+                    partition_dim=partition_dim,
                     coefficient_type=group["coefficient_type"],
                     num_ns_steps=group["num_ns_steps"],
                     scale_mode=group["scale_mode"],

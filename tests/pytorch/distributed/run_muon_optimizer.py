@@ -148,6 +148,7 @@ def main():
         local_param_init = full_param[:, shard_slice].contiguous()
 
     param = torch.nn.Parameter(local_param_init.clone())
+    param.partition_dim = args.partition_dim
     optimizer = te.optimizers.MuonOptimizer(
         [param],
         lr=lr,
@@ -160,7 +161,6 @@ def main():
         scale_mode=scale_mode,
         extra_scale_factor=extra_scale_factor,
         process_group=dist.group.WORLD,
-        partition_dim=args.partition_dim,
         eps=eps,
     )
 
