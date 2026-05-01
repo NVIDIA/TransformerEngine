@@ -11,7 +11,6 @@ import warnings
 from jax.ad_checkpoint import checkpoint_name
 import jax
 import jax.numpy as jnp
-from flax.linen import make_attention_mask
 
 from transformer_engine_jax import NVTE_Bias_Type
 from transformer_engine_jax import NVTE_Mask_Type
