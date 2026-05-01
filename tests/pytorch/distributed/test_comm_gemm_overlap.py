@@ -137,9 +137,7 @@ def _run_layer_with_overlap(
 
     if use_cublasmp:
         if quantization == "mxfp8":
-            pytest.skip(
-                "cuBLASMp comm+GEMM overlap does not yet support MXFP8 (block scaling)."
-            )
+            pytest.skip("cuBLASMp comm+GEMM overlap does not yet support MXFP8 (block scaling).")
         test_cmd.append("--use-cublasmp")
 
     os.environ["PYTORCH_JIT"] = "0"

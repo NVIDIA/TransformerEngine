@@ -187,14 +187,14 @@ void GemmRsInitMatrices(NVTECommGemmCtx* ctx, int64_t* ldd, int64_t m, int64_t n
   // B is (K/P, N) local -- K is distributed across ranks, N is fully replicated
   if (transb) {
     NVTE_CHECK(b1 == n, "Unsupported tensor dimension in B: expected ", n, ", got ", b1);
-    NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(n, k, n, block_size(ctx, k),
-                                                     0, 0, n, get_cuda_dtype(b->dtype()),
+    NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(n, k, n, block_size(ctx, k), 0, 0, n,
+                                                     get_cuda_dtype(b->dtype()),
                                                      ctx->grid_row_major.get(), ctx->b_desc.get()));
   } else {
     NVTE_CHECK(b1 == n, "Unsupported tensor dimension in B: expected ", n, ", got ", b1);
-    NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(
-        k, n, block_size(ctx, k), n, 0, 0, block_size(ctx, k),
-        get_cuda_dtype(b->dtype()), ctx->grid_col_major.get(), ctx->b_desc.get()));
+    NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(k, n, block_size(ctx, k), n, 0, 0,
+                                                     block_size(ctx, k), get_cuda_dtype(b->dtype()),
+                                                     ctx->grid_col_major.get(), ctx->b_desc.get()));
   }
   NVTE_CHECK(d1 == m, "Unsupported tensor dimension in D: expected ", m, ", got ", d1);
   *ldd = m;

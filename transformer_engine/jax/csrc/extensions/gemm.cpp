@@ -309,8 +309,8 @@ Error_Type GemmV2FFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale
       if (IsCollectiveGemmWithCublasmp()) {
         // cuBLASMp writes the reduce-scattered result directly into D
         auto rs_out_ = TensorWrapper(nullptr, std::vector<size_t>{0}, out_dtype);
-        executor->split_overlap_rs(rhs_, config.rhs_transposed, lhs_, config.lhs_transposed,
-                                   out_, bias_, pre_gelu_, workspace_, false /*grad*/,
+        executor->split_overlap_rs(rhs_, config.rhs_transposed, lhs_, config.lhs_transposed, out_,
+                                   bias_, pre_gelu_, workspace_, false /*grad*/,
                                    false /*accumulate*/, config.use_split_accumulator, rs_out_,
                                    stream);
       } else {
