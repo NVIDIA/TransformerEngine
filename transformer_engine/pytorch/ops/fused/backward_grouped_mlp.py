@@ -7,7 +7,6 @@
 from __future__ import annotations
 from collections.abc import Callable
 import functools
-import inspect
 import math
 import os
 from typing import Optional
@@ -15,7 +14,6 @@ from typing import Optional
 import torch
 
 import transformer_engine_torch as tex
-from ...module.base import get_dummy_wgrad
 from ...quantization import Recipe
 from ...tensor.grouped_tensor import GroupedTensor
 from ...tensor.mxfp8_tensor import MXFP8Quantizer
@@ -25,13 +23,13 @@ from ..basic import GroupedLinear, ScaledClampedQGeGLU, ScaledSwiGLU
 from ..fuser import register_backward_fusion
 from ..op import FusedOperation, FusibleOperation, OperationContext
 from .._common import (
-    _nvidia_cudnn_frontend_supports_wgrad,
+    _cudnn_frontend_version_supported,
     fuse_grouped_mlp_ops,
     maybe_dequantize,
     validate_grouped_mlp_dims,
 )
 from ...cpp_extensions import general_grouped_gemm_for_grouped_tensor
-from ...module.base import _2X_ACC_WGRAD
+from ...module.base import _2X_ACC_WGRAD, get_dummy_wgrad
 from ...triton.grouped_dbias_dscales import _compute_grouped_dbias_dscales
 
 
@@ -129,20 +127,6 @@ def _cudnn_compute_wgrad(
             accumulate_on_output=accumulate,
             current_stream=current_stream,
         )
-
-
-@functools.lru_cache(maxsize=1)
-def _dglu_wrapper_has_generate_dbias_arg() -> bool:
-    """True if cudnn-frontend SM100 dGLU wrapper accepts ``generate_dbias``."""
-    try:
-        from cudnn import grouped_gemm_dglu_wrapper_sm100  # pylint: disable=import-outside-toplevel
-    except ImportError:
-        return False
-    try:
-        params = inspect.signature(grouped_gemm_dglu_wrapper_sm100).parameters
-    except (TypeError, ValueError):
-        return False
-    return "generate_dbias" in params
 
 
 def _compute_grad_params(
@@ -322,10 +306,11 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
     @functools.lru_cache(maxsize=None)
     def grouped_gemm_wgrad_kernel(cls) -> Optional[Callable]:
         """CuTe DSL kernel for grouped GEMM wgrad on SM100+.
-        Returns ``None`` when the cuDNN front-end package is older than
-        1.23.0.
+
+        Returns ``None`` when the environment variable
+        ``NVTE_DISABLE_CUTEDSL_WGRAD_FUSED_GROUPED_MLP`` is set to ``1``.
         """
-        if not _nvidia_cudnn_frontend_supports_wgrad():
+        if int(os.environ.get("NVTE_DISABLE_CUTEDSL_WGRAD_FUSED_GROUPED_MLP", "0")) >= 1:
             return None
         from cudnn import grouped_gemm_wgrad_wrapper_sm100  # pylint: disable=no-name-in-module
 
@@ -339,19 +324,14 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
             return False
         if get_device_compute_capability()[0] != 10:
             return False
+        if not _cudnn_frontend_version_supported():
+            return False
         try:
             cls.grouped_gemm_dglu_kernel()
             cls.grouped_gemm_quant_kernel()
         except ImportError:
             return False
         return True
-
-    @classmethod
-    def is_fc1_bias_supported(cls) -> bool:
-        """Whether cudnn-frontend exposes ``generate_dbias`` on the dGLU SM100 wrapper (FC1 bias grad only)."""
-        if not cls.is_supported():
-            return False
-        return _dglu_wrapper_has_generate_dbias_arg()
 
     def __init__(
         self,
