@@ -44,6 +44,8 @@ if $BUILD_COMMON ; then
         sed -i "s/Name: transformer-engine/Name: transformer-engine-cu${CUDA_MAJOR}/g" "transformer_engine-${VERSION}/transformer_engine-${VERSION}.dist-info/METADATA"
         sed -i "s/Name: transformer_engine/Name: transformer_engine_cu${CUDA_MAJOR}/g" "transformer_engine-${VERSION}/transformer_engine-${VERSION}.dist-info/METADATA"
         mv "${WHL_BASE}/${WHL_BASE}.dist-info" "${WHL_BASE}/transformer_engine_cu${CUDA_MAJOR}-${VERSION}.dist-info"
+        # Set WHEEL Tag to match the py3-none filename written by line 54.
+        sed -i "s/Tag: cp310-cp310/Tag: py3-none/g" "${WHL_BASE}/transformer_engine_cu${CUDA_MAJOR}-${VERSION}.dist-info/WHEEL"
         /opt/python/cp310-cp310/bin/wheel pack ${WHL_BASE}
 
         # Rename the wheel to make it python version agnostic.
