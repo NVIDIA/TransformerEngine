@@ -71,6 +71,7 @@ from ..tensor.float8_tensor import (
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.nvfp4_tensor import NVFP4Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
+from ..tensor.hybrid_tensor import HybridQuantizer
 from ._common import apply_normalization, WeightGradStore
 from ..cpu_offload import (
     is_cpu_offload_enabled,
@@ -405,12 +406,14 @@ class _LayerNormMLP(torch.autograd.Function):
         # for debug: : layernorm output = High precision to enable processing of this norm
 
         custom = is_custom(fc1_input_quantizer)
+        hybrid = isinstance(fc1_input_quantizer, HybridQuantizer)
         with_quantized_norm = (
             fp8
             and not debug
             and not return_layernorm_output
             and not return_layernorm_output_gathered
             and not custom
+            and not hybrid
         )
 
         # Apply normalization
@@ -2359,7 +2362,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 rowwise=True,
                 columnwise=isinstance(
                     fc2_input_quantizer,
-                    (MXFP8Quantizer, Float8BlockQuantizer, NVFP4Quantizer),
+                    (MXFP8Quantizer, Float8BlockQuantizer, NVFP4Quantizer, HybridQuantizer),
                 ),
             )
             fc2_input_quantizer.internal = True

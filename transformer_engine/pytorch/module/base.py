@@ -42,9 +42,11 @@ from ..quantized_tensor import QuantizedTensor, QuantizedTensorStorage, Quantize
 from ..tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
+from ..tensor.hybrid_tensor import HybridQuantizer
 from ..tensor.storage.float8_tensor_storage import Float8TensorStorage
 from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
+from ..tensor.storage.hybrid_tensor_storage import HybridQuantizedTensorStorage
 from ..utils import (
     is_non_tn_fp8_gemm_supported,
     torch_get_autocast_gpu_dtype,
@@ -656,6 +658,14 @@ def _is_weight_workspace_valid(
         if quantizer.rowwise_usage and workspace._rowwise_data is None:
             return False
         if quantizer.columnwise_usage and workspace._columnwise_data is None:
+            return False
+    elif isinstance(workspace, HybridQuantizedTensorStorage):
+        # Workspace cached under one flag setting (e.g. inference with
+        # ``columnwise=False``) becomes stale when the next call needs the
+        # missing direction; invalidate so a fresh workspace is built.
+        if quantizer.rowwise_usage and workspace._rowwise_storage is None:
+            return False
+        if quantizer.columnwise_usage and workspace._columnwise_storage is None:
             return False
     if isinstance(workspace, DebugQuantizedTensor) != isinstance(quantizer, DebugQuantizer):
         return False
@@ -1398,8 +1408,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             ):
                 grad_bias = grad_output.dequantize().view(-1, grad_output.shape[-1]).sum(dim=0)
             else:
-                if isinstance(quantizer, Float8BlockQuantizer):
-                    # unfuse bgrad for now until cast_transpose + dgrad calculation is ready for Float8BlockQuantizer.
+                if isinstance(quantizer, (Float8BlockQuantizer, HybridQuantizer)):
+                    # Float8BlockQuantizer: unfused until cast_transpose + dgrad is ready.
+                    # HybridQuantizer: tex.bgrad_quantize doesn't recognize hybrid quantizers.
                     grad_bias = grad_output.view(-1, grad_output.shape[-1]).sum(dim=0)
                 else:
                     grad_bias, grad_output = tex.bgrad_quantize(grad_output, quantizer)

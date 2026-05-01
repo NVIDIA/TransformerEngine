@@ -452,12 +452,173 @@ def test_transpose_cache_retained_after_backward(recipe_name, quantized_model_in
     )
 
 
+# ── Hybrid quantization memory tests ─────────────────────────────────
+
+
+def _build_hybrid_model(num_layers, hybrid_recipe, use_meta_device=True):
+    """Build a model with quantized_model_init using a hybrid CustomRecipe."""
+    ctx = te.quantized_model_init(enabled=True, recipe=hybrid_recipe)
+    kwargs = dict(
+        fuse_qkv_params=True,
+        params_dtype=torch.bfloat16,
+        hidden_dropout=0.0,
+        attention_dropout=0.0,
+    )
+    if use_meta_device:
+        kwargs["device"] = "meta"
+    with ctx:
+        model = torch.nn.Sequential(
+            *[
+                te.TransformerLayer(
+                    HIDDEN_SIZE,
+                    FFN_HIDDEN_SIZE,
+                    NUM_ATTENTION_HEADS,
+                    **kwargs,
+                )
+                for _ in range(num_layers)
+            ]
+        )
+    return model
+
+
+def test_hybrid_no_excess_forward_memory(hybrid_recipe_name):
+    """Hybrid quantized weights should not accumulate across layers during forward.
+
+    Same methodology as test_fp8_temp_accumulation_across_layers but for
+    hybrid quantized tensors.
+    """
+    if hybrid_recipe_name == "HybridFloat8BlockScaling":
+        pytest.xfail(
+            "HybridFloat8BlockScaling: Float8BlockwiseQTensor sub-storage loses "
+            "quantized type through FSDP2 view(-1)."
+        )
+
+    from fsdp2_utils import get_hybrid_recipe_from_string
+
+    hybrid_recipe = get_hybrid_recipe_from_string(hybrid_recipe_name)
+    world_size, device = _get_dist_info()
+
+    x = torch.randn(SEQ_LEN, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
+    target = torch.randn_like(x)
+
+    # bf16 baseline
+    bf16_model = _build_model(NUM_LAYERS, fp8_init=False)
+    bf16_model = _shard_model(bf16_model, world_size)
+    bf16_optimizer = te.optimizers.FusedAdam(
+        bf16_model.parameters(),
+        lr=1e-3,
+        master_weights=True,
+        master_weight_dtype=torch.float32,
+    )
+    for _ in range(WARMUP_STEPS):
+        _run_training_step(bf16_model, bf16_optimizer, None, x, target)
+    bf16_increments = _measure_forward_increments(bf16_model, bf16_optimizer, None, x, target)
+    bf16_avg = sum(bf16_increments) / len(bf16_increments)
+
+    del bf16_model, bf16_optimizer
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    # Hybrid model
+    hybrid_model = _build_hybrid_model(NUM_LAYERS, hybrid_recipe)
+    hybrid_model = _shard_model(hybrid_model, world_size)
+    hybrid_optimizer = te.optimizers.FusedAdam(
+        hybrid_model.parameters(),
+        lr=1e-3,
+        master_weights=True,
+        master_weight_dtype=torch.float32,
+    )
+    for _ in range(WARMUP_STEPS):
+        _run_training_step(hybrid_model, hybrid_optimizer, hybrid_recipe, x, target)
+    hybrid_increments = _measure_forward_increments(
+        hybrid_model,
+        hybrid_optimizer,
+        hybrid_recipe,
+        x,
+        target,
+    )
+    hybrid_avg = sum(hybrid_increments) / len(hybrid_increments)
+
+    excess_per_layer = hybrid_avg - bf16_avg
+    tolerance_per_layer = 50 * 1024  # 50 KiB
+
+    assert excess_per_layer <= tolerance_per_layer, (
+        "Hybrid per-layer forward memory increment exceeds bf16 baseline by "
+        f"{excess_per_layer/1024:.1f} KiB/layer (tolerance: {tolerance_per_layer/1024:.1f} KiB). "
+        f"bf16 avg: {bf16_avg/1024:.1f} KiB/layer, hybrid avg: {hybrid_avg/1024:.1f} KiB/layer."
+    )
+
+
+def test_hybrid_transpose_cache_after_backward(hybrid_recipe_name):
+    """Detect transpose caches from hybrid sub-storages persisting after backward."""
+    if hybrid_recipe_name == "HybridFloat8BlockScaling":
+        pytest.xfail(
+            "HybridFloat8BlockScaling: Float8BlockwiseQTensor sub-storage loses "
+            "quantized type through FSDP2 view(-1)."
+        )
+
+    from fsdp2_utils import get_hybrid_recipe_from_string
+
+    hybrid_recipe = get_hybrid_recipe_from_string(hybrid_recipe_name)
+    world_size, device = _get_dist_info()
+
+    x = torch.randn(SEQ_LEN, BATCH_PER_RANK, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
+    target = torch.randn_like(x)
+
+    # bf16 baseline
+    bf16_model = _build_model(NUM_LAYERS, fp8_init=False)
+    bf16_model = _shard_model(bf16_model, world_size)
+    bf16_optimizer = te.optimizers.FusedAdam(
+        bf16_model.parameters(),
+        lr=1e-3,
+        master_weights=True,
+        master_weight_dtype=torch.float32,
+    )
+    for _ in range(WARMUP_STEPS):
+        _run_training_step(bf16_model, bf16_optimizer, None, x, target)
+    bf16_bwd_delta = _measure_backward_memory_delta(bf16_model, bf16_optimizer, None, x, target)
+
+    del bf16_model, bf16_optimizer
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    # Hybrid model
+    hybrid_model = _build_hybrid_model(NUM_LAYERS, hybrid_recipe)
+    hybrid_model = _shard_model(hybrid_model, world_size)
+    hybrid_optimizer = te.optimizers.FusedAdam(
+        hybrid_model.parameters(),
+        lr=1e-3,
+        master_weights=True,
+        master_weight_dtype=torch.float32,
+    )
+    for _ in range(WARMUP_STEPS):
+        _run_training_step(hybrid_model, hybrid_optimizer, hybrid_recipe, x, target)
+    hybrid_bwd_delta = _measure_backward_memory_delta(
+        hybrid_model,
+        hybrid_optimizer,
+        hybrid_recipe,
+        x,
+        target,
+    )
+
+    excess = hybrid_bwd_delta - bf16_bwd_delta
+    tolerance = 256 * 1024  # 256 KiB
+
+    assert excess <= tolerance, (
+        f"Hybrid backward retains {excess/1024**2:.2f} MiB more than bf16 baseline. "
+        f"bf16 backward delta: {bf16_bwd_delta/1024**2:.2f} MiB, "
+        f"hybrid backward delta: {hybrid_bwd_delta/1024**2:.2f} MiB."
+    )
+
+
 # ── Standalone runner ────────────────────────────────────────────────
 TESTS = {
     "bf16_no_excess_forward_memory": test_bf16_no_excess_forward_memory,
     "bf16_no_excess_backward_memory": test_bf16_no_excess_backward_memory,
     "fp8_temp_accumulation_across_layers": test_fp8_temp_accumulation_across_layers,
     "transpose_cache_retained_after_backward": test_transpose_cache_retained_after_backward,
+    "hybrid_no_excess_forward_memory": test_hybrid_no_excess_forward_memory,
+    "hybrid_transpose_cache_after_backward": test_hybrid_transpose_cache_after_backward,
 }
 
 if __name__ == "__main__":
@@ -473,6 +634,10 @@ if __name__ == "__main__":
             "Float8BlockScaling",
             "MXFP8BlockScaling",
             "NVFP4BlockScaling",
+            "HybridFP8CurrentScaling",
+            "HybridMXFP8",
+            "HybridFloat8BlockScaling",
+            "HybridMixed_MXFP8_FP8",
         ],
     )
     parser.add_argument("--quantized-model-init", action="store_true", default=False)
@@ -488,11 +653,17 @@ if __name__ == "__main__":
         "fp8_temp_accumulation_across_layers",
         "transpose_cache_retained_after_backward",
     }
+    _HYBRID_PARAMETRIZED_TESTS = {
+        "hybrid_no_excess_forward_memory",
+        "hybrid_transpose_cache_after_backward",
+    }
 
     try:
         test_fn = TESTS[args.test]
         if args.test in _PARAMETRIZED_TESTS:
             test_fn(args.recipe, args.quantized_model_init)
+        elif args.test in _HYBRID_PARAMETRIZED_TESTS:
+            test_fn(args.recipe)
         else:
             test_fn()
     finally:
