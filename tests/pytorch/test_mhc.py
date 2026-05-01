@@ -269,11 +269,15 @@ def get_tols(dtype):
 
 
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
-@pytest.mark.parametrize("dtypes", [
-    (torch.float32, torch.float32),
-    (torch.bfloat16, torch.bfloat16),
-    (torch.bfloat16, torch.float32),
-], ids=["x_fp32_phi_fp32", "x_bf16_phi_bf16", "x_bf16_phi_fp32"])
+@pytest.mark.parametrize(
+    "dtypes",
+    [
+        (torch.float32, torch.float32),
+        (torch.bfloat16, torch.bfloat16),
+        (torch.bfloat16, torch.float32),
+    ],
+    ids=["x_fp32_phi_fp32", "x_bf16_phi_bf16", "x_bf16_phi_fp32"],
+)
 @pytest.mark.parametrize("has_norm_weight", [False, True], ids=["no_norm_weight", "norm_weight"])
 @pytest.mark.parametrize("use_main_grad", [True, False], ids=["use_main_grad", "no_main_grad"])
 def test_mhc_projection(cfg: MHCConfig, dtypes, has_norm_weight, use_main_grad):
@@ -290,7 +294,7 @@ def test_mhc_projection(cfg: MHCConfig, dtypes, has_norm_weight, use_main_grad):
 
     x = torch.randn(s * b, nC, device="cuda", requires_grad=True, dtype=x_dtype)
     if use_main_grad:
-        # To enable the main grad optimization, phi needs to be padded to (32, nC) 
+        # To enable the main grad optimization, phi needs to be padded to (32, nC)
         # which will be used as the accumulator during the GEMM
         phi = torch.randn(32, nC, dtype=phi_dtype, requires_grad=True, device="cuda")
         phi.main_grad = torch.zeros_like(phi, dtype=torch.float32)
@@ -315,7 +319,6 @@ def test_mhc_projection(cfg: MHCConfig, dtypes, has_norm_weight, use_main_grad):
     fused_out_Hs_padded, fused_out_ms = mhc_fused_projection(x, phi, norm_weight, use_tf32)
     fused_out_Hs = fused_out_Hs_padded[:, :N]
 
-
     torch.testing.assert_close(fused_out_Hs, ref_out_Hs, **tols)
     torch.testing.assert_close(fused_out_ms, ref_out_ms, **tols)
     (ref_out_Hs.sum() + ref_out_ms.sum()).backward()
@@ -325,11 +328,14 @@ def test_mhc_projection(cfg: MHCConfig, dtypes, has_norm_weight, use_main_grad):
     if use_main_grad:
         torch.testing.assert_close(phi.main_grad.to(phi.dtype), phi_ref.grad, **tols)
         if has_norm_weight:
-            torch.testing.assert_close(norm_weight.main_grad.to(norm_weight.dtype), norm_weight_ref.grad, **tols)
+            torch.testing.assert_close(
+                norm_weight.main_grad.to(norm_weight.dtype), norm_weight_ref.grad, **tols
+            )
     else:
         torch.testing.assert_close(phi.grad, phi_ref.grad, **tols)
         if has_norm_weight:
             torch.testing.assert_close(norm_weight.grad, norm_weight_ref.grad, **tols)
+
 
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
@@ -378,12 +384,15 @@ def test_mhc_scale(cfg: MHCConfig, dtype, use_main_grad):
 
 
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
-@pytest.mark.parametrize("dtypes", [
-    (torch.float32, torch.float32),
-    (torch.bfloat16, torch.bfloat16),
-    (torch.bfloat16, torch.float32),
-], ids=["x_fp32_phi_fp32", "x_bf16_phi_bf16", "x_bf16_phi_fp32"])
-
+@pytest.mark.parametrize(
+    "dtypes",
+    [
+        (torch.float32, torch.float32),
+        (torch.bfloat16, torch.bfloat16),
+        (torch.bfloat16, torch.float32),
+    ],
+    ids=["x_fp32_phi_fp32", "x_bf16_phi_bf16", "x_bf16_phi_fp32"],
+)
 @pytest.mark.parametrize("has_norm_weight", [False, True], ids=["no_norm_weight", "norm_weight"])
 def test_mhc_rmsnorm(cfg: MHCConfig, dtypes, has_norm_weight):
     # Verify if the fused kernel is equivalent to applying RMSNorm in the normal order
@@ -451,7 +460,7 @@ def test_mhc_rmsnorm(cfg: MHCConfig, dtypes, has_norm_weight):
         out_post = 2 * out_post.sigmoid()
         out_res = out_res
 
-        return out_pre, out_post, out_res # Return in FP32 to match the kernel's behavior
+        return out_pre, out_post, out_res  # Return in FP32 to match the kernel's behavior
 
     combined_H_pre, combined_H_post, combined_H_res = mhc_combined(
         x_ref, phi_ref, alpha_ref, beta_ref, norm_weight_ref
@@ -468,6 +477,7 @@ def test_mhc_rmsnorm(cfg: MHCConfig, dtypes, has_norm_weight):
     torch.testing.assert_close(combined_H_pre, fused_H_pre, **tols)
     torch.testing.assert_close(combined_H_post, fused_H_post, **tols)
     torch.testing.assert_close(combined_H_res, fused_H_res, **tols)
+
 
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
 @pytest.mark.parametrize("dtype", [torch.float32], ids=["fp32"])
@@ -509,12 +519,8 @@ def test_mhc_fuse_grad_acc(cfg: MHCConfig, dtype):
 
         return expanded_combined
 
-    expanded_combined_fuse_grad  = end_to_end(
-        x_ref, phi_ref, alpha_ref, beta_ref, False
-    )
-    expanded_combined_no_fuse_grad = end_to_end(
-        x, phi, alpha, beta, True
-    )
+    expanded_combined_fuse_grad = end_to_end(x_ref, phi_ref, alpha_ref, beta_ref, False)
+    expanded_combined_no_fuse_grad = end_to_end(x, phi, alpha, beta, True)
 
     grad_output = torch.randn_like(expanded_combined_fuse_grad)
     expanded_combined_fuse_grad.backward(grad_output)

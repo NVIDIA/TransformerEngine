@@ -58,7 +58,7 @@ def _mhc_projection_fwd_fused(
     phi_ptr,  # (N, K)
     h_ptr,  # (M, 32)
     ms_ptr,  # (M,)
-    norm_weight_ptr, # (K,)
+    norm_weight_ptr,  # (K,)
     M,
     N,
     K,
@@ -122,14 +122,20 @@ def _mhc_projection_fwd_fused(
         ms_acc += tl.sum(x.to(tl.float32) * x.to(tl.float32), axis=1)
 
         # In RMSNorm, mean square should be the mean squrare of the original x, so we need to first accumulate the sum of squares of x
-        # before we let x absore norm weight and pass x with norm weight's affine transformation applied to w to do the dot product 
+        # before we let x absore norm weight and pass x with norm weight's affine transformation applied to w to do the dot product
         # to generate H. This is the correct way to fuse H = RMSNorm(x) @ phi.T.
         if HAS_NORM_WEIGHT:
             norm_weight_ptrs = norm_weight_ptr + k_offs * stride_norm_weight
-            norm_weight = tl.load(norm_weight_ptrs, mask=mask_k, other=1.0, cache_modifier=".ca") # (BLOCK_SIZE_K,)
+            norm_weight = tl.load(
+                norm_weight_ptrs, mask=mask_k, other=1.0, cache_modifier=".ca"
+            )  # (BLOCK_SIZE_K,)
             phi = phi.to(tl.float32) * norm_weight.to(tl.float32)
         h_acc = tl.dot(
-            x.to(phi.dtype), tl.trans(phi, (1, 0)), h_acc, input_precision=precision, out_dtype=tl.float32
+            x.to(phi.dtype),
+            tl.trans(phi, (1, 0)),
+            h_acc,
+            input_precision=precision,
+            out_dtype=tl.float32,
         )
 
     h_ptrs = h_ptr + offs_m[:, None] * stride_hm + offs_n_full[None, :] * stride_hn
@@ -152,7 +158,7 @@ def _mhc_projection_bwd_fused(
     x_ptr,
     grad_x_ptr,  # (M, K)
     phi_ptr,  # (N, K)
-    norm_weight_ptr, # (K,)
+    norm_weight_ptr,  # (K,)
     grad_h_ptr,  # (M, N)
     grad_ms_ptr,  # (M,)
     M,
@@ -226,7 +232,9 @@ def _mhc_projection_bwd_fused(
 
     if HAS_NORM_WEIGHT:
         norm_weight_ptrs = norm_weight_ptr + offs_k * stride_norm_weight
-        norm_weight = tl.load(norm_weight_ptrs, mask=mask_k, other=0.0, cache_modifier=".ca").to(phi.dtype) # (BLOCK_SIZE_K,)
+        norm_weight = tl.load(norm_weight_ptrs, mask=mask_k, other=0.0, cache_modifier=".ca").to(
+            phi.dtype
+        )  # (BLOCK_SIZE_K,)
         phi = phi.to(tl.float32) * norm_weight.to(tl.float32)[None, :]
 
     grad_ms = tl.load(
@@ -239,12 +247,11 @@ def _mhc_projection_bwd_fused(
     )  # (BLOCK_SIZE_M, BLOCK_SIZE_K)
     grad_x_ptrs = grad_x_ptr + offs_m[:, None] * stride_grad_xm + offs_k[None, :] * stride_grad_xk
     grad_x = grad_x.to(x.dtype)
-    if FUSE_GRAD_X_ACC: # If fused gradient accumulation is enabled, the buffer is always fp32
-        grad_x_acc = tl.load(
-            grad_x_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0
-        )
+    if FUSE_GRAD_X_ACC:  # If fused gradient accumulation is enabled, the buffer is always fp32
+        grad_x_acc = tl.load(grad_x_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0)
         grad_x = grad_x.to(tl.float32) + grad_x_acc
     tl.store(grad_x_ptrs, grad_x, mask=mask_m[:, None] & mask_k[None, :])
+
 
 def projection_config_bwd_norm_weight():
     block_m = [512, 1024, 2048]
@@ -256,25 +263,30 @@ def projection_config_bwd_norm_weight():
     configs = []
     for bm, sm, bk, w, s in itertools.product(block_m, step_m, block_k, warps, stages):
         configs.append(
-            triton.Config({"BLOCK_SIZE_M": bm, "STEP_SIZE_M": sm, "BLOCK_SIZE_K": bk}, num_warps=w, num_stages=s)
+            triton.Config(
+                {"BLOCK_SIZE_M": bm, "STEP_SIZE_M": sm, "BLOCK_SIZE_K": bk},
+                num_warps=w,
+                num_stages=s,
+            )
         )
     if os.environ.get("NVTE_DISABLE_TRITON_AUTOTUNING", "0") == "1":
         configs = configs[:1]
     return configs
 
+
 @triton.autotune(
     configs=projection_config_bwd_norm_weight(),
     key=["M", "K"],
-    reset_to_zero=["grad_phi_ptr", "grad_norm_weight_ptr"]
+    reset_to_zero=["grad_phi_ptr", "grad_norm_weight_ptr"],
 )
 @triton.jit
 def _mhc_projection_bwd_fused_norm_weight(
-    x_ptr, # (M, K)
-    grad_H_ptr, # (M, 32)
-    phi_ptr, # (N, K), N=24 in our case since n = 4
-    norm_weight_ptr, # (K,)
-    grad_phi_ptr, # (N, K), N=24 in our case since n = 4
-    grad_norm_weight_ptr, # (K,)
+    x_ptr,  # (M, K)
+    grad_H_ptr,  # (M, 32)
+    phi_ptr,  # (N, K), N=24 in our case since n = 4
+    norm_weight_ptr,  # (K,)
+    grad_phi_ptr,  # (N, K), N=24 in our case since n = 4
+    grad_norm_weight_ptr,  # (K,)
     M,
     N,
     K,
@@ -322,10 +334,10 @@ def _mhc_projection_bwd_fused_norm_weight(
     mask_n = offs_n_full < N
 
     grad_psi_acc = tl.zeros((BLOCK_SIZE_N, BLOCK_SIZE_K), dtype=tl.float32)
-    
+
     m_start = pid_m * BLOCK_SIZE_M
     m_end = tl.minimum(m_start + BLOCK_SIZE_M, M)
-    for m_idx in range(0, tl.cdiv(m_end-m_start, STEP_SIZE_M)):
+    for m_idx in range(0, tl.cdiv(m_end - m_start, STEP_SIZE_M)):
         offs_m = m_start + m_idx * STEP_SIZE_M + tl.arange(0, STEP_SIZE_M)
         mask_m = offs_m < M
         x_ptrs = x_ptr + offs_m[:, None] * stride_xm + offs_k[None, :] * stride_xk
@@ -340,7 +352,11 @@ def _mhc_projection_bwd_fused_norm_weight(
         )  # (STEP_SIZE_M, BLOCK_SIZE_N)
 
         grad_psi_acc = tl.dot(
-            tl.trans(grad_H, (1, 0)), x.to(grad_H.dtype), acc=grad_psi_acc, out_dtype=tl.float32, input_precision=precision
+            tl.trans(grad_H, (1, 0)),
+            x.to(grad_H.dtype),
+            acc=grad_psi_acc,
+            out_dtype=tl.float32,
+            input_precision=precision,
         )
 
     phi_ptrs = phi_ptr + offs_n_full[:, None] * stride_phin + offs_k[None, :] * stride_phik
@@ -348,18 +364,24 @@ def _mhc_projection_bwd_fused_norm_weight(
         phi_ptrs, mask=(offs_n_full[:, None] < N) & mask_k[None, :], other=0.0
     )  # (BLOCK_SIZE_N, BLOCK_SIZE_K)
     norm_weight_ptrs = norm_weight_ptr + offs_k * stride_norm_weight
-    norm_weight = tl.load(norm_weight_ptrs, mask=mask_k, other=0.0, cache_modifier=".cg") # (BLOCK_SIZE_K,)
+    norm_weight = tl.load(
+        norm_weight_ptrs, mask=mask_k, other=0.0, cache_modifier=".cg"
+    )  # (BLOCK_SIZE_K,)
     phi = phi.to(tl.float32)
     norm_weight = norm_weight.to(tl.float32)
 
     # Keep grad_psi in SRAM and get grad_phi & grad_norm_weight
-    grad_phi = grad_psi_acc * norm_weight[None, :].to(grad_psi_acc.dtype) # (32, BLOCK_SIZE_K)
-    grad_norm_weight = tl.sum(grad_psi_acc * phi.to(grad_psi_acc.dtype), axis=0) # (BLOCK_SIZE_K,)
+    grad_phi = grad_psi_acc * norm_weight[None, :].to(grad_psi_acc.dtype)  # (32, BLOCK_SIZE_K)
+    grad_norm_weight = tl.sum(grad_psi_acc * phi.to(grad_psi_acc.dtype), axis=0)  # (BLOCK_SIZE_K,)
 
-    grad_phi_ptrs = grad_phi_ptr + offs_n_full[:, None] * stride_grad_phin + offs_k[None, :] * stride_grad_phik
+    grad_phi_ptrs = (
+        grad_phi_ptr + offs_n_full[:, None] * stride_grad_phin + offs_k[None, :] * stride_grad_phik
+    )
     grad_norm_weight_ptrs = grad_norm_weight_ptr + offs_k * stride_grad_norm_weight
 
-    tl.atomic_add(grad_phi_ptrs, grad_phi, mask=(offs_n_full[:, None] < N) & mask_k[None, :], sem="relaxed")
+    tl.atomic_add(
+        grad_phi_ptrs, grad_phi, mask=(offs_n_full[:, None] < N) & mask_k[None, :], sem="relaxed"
+    )
     tl.atomic_add(grad_norm_weight_ptrs, grad_norm_weight, mask=mask_k, sem="relaxed")
 
 
@@ -896,6 +918,7 @@ def _mhc_sinkhorn_fwd_fused(
     output_ptrs = output_ptr + offs_batch[:, None] * stride_out_m + offs_nn[None, :] * stride_out_n
     tl.store(output_ptrs, P, mask=mask_batch[:, None])
 
+
 def aggregate_config():
     block_m = [1, 2, 4]
     block_c = [64, 128, 256]
@@ -1080,12 +1103,14 @@ def _mhc_aggregate_bwd(
 
     grad_x_ptrs = grad_x_ptr + offs_m[:, None] * stride_grad_xm + offs_cn[None, :] * stride_grad_xCn
 
-    if FUSE_GRAD_X_ACC: # If fused gradient accumulation is enabled, the buffer is always fp32
-        grad_x_acc = tl.load(
-            grad_x_ptrs, mask=mask_m[:, None] & mask_cn[None, :], other=0.0
-        )
+    if FUSE_GRAD_X_ACC:  # If fused gradient accumulation is enabled, the buffer is always fp32
+        grad_x_acc = tl.load(grad_x_ptrs, mask=mask_m[:, None] & mask_cn[None, :], other=0.0)
         grad_x = grad_x.to(tl.float32) + grad_x_acc
-    tl.store(grad_x_ptrs, grad_x, mask=mask_m[:, None] & mask_cn[None, :],)
+    tl.store(
+        grad_x_ptrs,
+        grad_x,
+        mask=mask_m[:, None] & mask_cn[None, :],
+    )
 
 
 def expand_combine_config():
