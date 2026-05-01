@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 import torch
 import torch.distributed as dist
@@ -22,6 +22,11 @@ from transformer_engine.pytorch.newton_schulz import (
 
 
 MuonScaleT = Literal["shape_scaling", "spectral", "unit_rms_norm"]
+ParamsT = (
+    Iterable[torch.Tensor]
+    | Iterable[dict[str, Any]]
+    | Iterable[tuple[str, torch.Tensor]]
+)
 
 
 def get_muon_scale_factor(size_out: int, size_in: int, mode: MuonScaleT = "spectral") -> float:
@@ -44,30 +49,44 @@ class MuonOptimizer(Optimizer):
     NCCL process group. Single-GPU, unsharded parameters and TE non-parallel
     parameters with ``partition_dim == -1`` are not supported.
 
-    Args:
-        params: Iterable of parameters or parameter group dicts.
-        lr: Learning rate.
-        momentum: Momentum coefficient.
-        nesterov: Whether to use Nesterov momentum.
-        weight_decay: Weight decay coefficient.
-        use_decoupled_weight_decay: Whether to apply decoupled weight decay.
-        coefficient_type: Newton-Schulz coefficient schedule.
-        num_ns_steps: Number of Newton-Schulz iterations.
-        scale_mode: Muon update scale mode.
-        extra_scale_factor: Extra multiplicative scale applied after orthogonalization.
-        process_group: Explicit NCCL tensor-parallel process group for distributed
-            Newton-Schulz. Pass ``dist.group.WORLD`` only when the world group is
-            intentionally the tensor-parallel group.
-        partition_dim: Default partition dimension for parameters that do not carry
-            TE tensor-parallel metadata. If a parameter has a ``partition_dim``
-            attribute, that per-parameter value is used instead. Must be 0 or 1
-            when provided.
-        eps: Lower bound for the distributed normalization denominator.
+    Parameters
+    ----------
+    params : iterable of torch.Tensor, dict, or tuple[str, torch.Tensor]
+        Parameters, parameter group dictionaries, or named parameters. The
+        optimizer delegates normalization of this input to ``torch.optim.Optimizer``.
+    lr : float, default = 3e-4
+        Learning rate.
+    momentum : float, default = 0.95
+        Momentum coefficient.
+    nesterov : bool, default = True
+        Whether to use Nesterov momentum.
+    weight_decay : float, default = 0.01
+        Weight decay coefficient.
+    use_decoupled_weight_decay : bool, default = True
+        Whether to apply decoupled weight decay.
+    coefficient_type : str, default = "quintic"
+        Newton-Schulz coefficient schedule.
+    num_ns_steps : int, default = 5
+        Number of Newton-Schulz iterations.
+    scale_mode : str, default = "spectral"
+        Muon update scale mode.
+    extra_scale_factor : float, default = 1.0
+        Extra multiplicative scale applied after orthogonalization.
+    process_group : torch.distributed.ProcessGroup
+        Explicit NCCL tensor-parallel process group for distributed Newton-Schulz.
+        Pass ``dist.group.WORLD`` only when the world group is intentionally the
+        tensor-parallel group.
+    partition_dim : int, optional
+        Default partition dimension for parameters that do not carry TE
+        tensor-parallel metadata. If a parameter has a ``partition_dim`` attribute,
+        that per-parameter value is used instead. Must be 0 or 1 when provided.
+    eps : float, default = 1e-7
+        Lower bound for the distributed normalization denominator.
     """
 
     def __init__(
         self,
-        params: Iterable[torch.nn.Parameter | dict],
+        params: ParamsT,
         lr: float = 3e-4,
         momentum: float = 0.95,
         nesterov: bool = True,
