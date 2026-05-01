@@ -24,6 +24,7 @@ from transformer_engine.common.recipe import (
     Float8CurrentScaling,
     Float8BlockScaling,
     NVFP4BlockScaling,
+    NVFP4PerTokenBlockScaling,
     CustomRecipe,
 )
 from .constants import dist_group_type
@@ -1065,6 +1066,8 @@ class RecipeState(abc.ABC):
             cls = Float8CurrentScalingRecipeState
         elif recipe.float8_block_scaling():
             cls = Float8BlockScalingRecipeState
+        elif recipe.nvfp4_pertoken():
+            cls = NVFP4PerTokenBlockScalingRecipeState
         elif recipe.nvfp4():
             cls = NVFP4BlockScalingRecipeState
         elif recipe.custom():
@@ -1394,6 +1397,21 @@ class NVFP4BlockScalingRecipeState(RecipeState):
             ]
 
         raise RuntimeError(f"Unexpected recipe mode ({self.mode})")
+
+
+class NVFP4PerTokenBlockScalingRecipeState(NVFP4BlockScalingRecipeState):
+    """State for NVFP4PerTokenBlockScaling recipe.
+
+    Inherits all quantizer creation logic from NVFP4BlockScalingRecipeState.
+    The per-token global scale is handled at the fused op level (in the cuDNN
+    kernel via global_scale_tensor), not in the quantizer itself. The quantizer
+    still produces per-tensor amax which is broadcast to per-token in the fused op.
+
+    Once the per-token quantization kernel (quantize_pertoken_nvfp4.cuh) is
+    implemented, the quantizer will produce per-row amax directly.
+    """
+
+    pass
 
 
 class CustomRecipeState(RecipeState):
