@@ -146,6 +146,9 @@ class Tensor {
     void *scale_inv = tensor_.scale_inv();
     void *columnwise_data_ptr = tensor_.get_columnwise_data().data_ptr;
     void *columnwise_scale_inv = tensor_.get_columnwise_scale_inv().data_ptr;
+    void *amax = tensor_.amax();
+    void *columnwise_amax_ptr = tensor_.get_columnwise_amax().data_ptr;
+    void *scale = tensor_.scale();
     if (columnwise_data_ptr == data_ptr) {
       columnwise_data_ptr = nullptr;
     }
@@ -163,6 +166,15 @@ class Tensor {
     }
     if (columnwise_scale_inv != nullptr) {
       cudaFree(columnwise_scale_inv);
+    }
+    if (amax != nullptr) {
+      cudaFree(amax);
+    }
+    if (columnwise_amax_ptr != nullptr) {
+      cudaFree(columnwise_amax_ptr);
+    }
+    if (scale != nullptr) {
+      cudaFree(scale);
     }
   }
 
@@ -223,11 +235,18 @@ class Tensor {
     }
   }
 
+  float amax_columnwise() const {
+    if(amax_cpu_data_columnwise_) {
+      to_cpu();
+      return *amax_cpu_data_columnwise_;
+    } else {
+      return 0;
+    }
+  }
+
   float scale() const {
     if(scale_cpu_data_) {
-      NVTE_CHECK((tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING)
-                 || (tensor_.scaling_mode() == NVTE_NVFP4_1D_SCALING),
-                 "Invalid scaling_mode!");
+      NVTE_CHECK(tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING, "Invalid scaling_mode!");
       to_cpu();
       return *scale_cpu_data_;
     } else {
@@ -282,6 +301,20 @@ class Tensor {
     return columnwise_;
   }
 
+  void set_tensor_amax(const float amax) {
+    if (amax_cpu_data_) {
+      *amax_cpu_data_ = amax;
+      from_cpu();
+    }
+  }
+
+  void set_tensor_amax_columnwise(const float amax) {
+    if (amax_cpu_data_columnwise_) {
+      *amax_cpu_data_columnwise_ = amax;
+      from_cpu();
+    }
+  }
+
   void set_tensor_amax_nullptr(){
     tensor_.set_amax(nullptr, DType::kFloat32, tensor_.defaultShape);
   }
@@ -303,6 +336,7 @@ class Tensor {
   std::unique_ptr<unsigned char[]> cpu_data_rowwise_;
   std::unique_ptr<unsigned char[]> cpu_data_columnwise_;
   std::shared_ptr<float> amax_cpu_data_;
+  std::shared_ptr<float> amax_cpu_data_columnwise_;
   std::shared_ptr<float> scale_cpu_data_;
   std::unique_ptr<unsigned char[]> rowwise_scale_inv_cpu_data_;
   std::unique_ptr<unsigned char[]> columnwise_scale_inv_cpu_data_;

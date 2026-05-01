@@ -7,7 +7,6 @@
 from __future__ import annotations
 from collections.abc import Callable, Iterable
 import functools
-import inspect
 import os
 from typing import Any, Optional
 
@@ -24,6 +23,7 @@ from ..basic import GroupedLinear, ScaledClampedQGeGLU, ScaledSwiGLU
 from ..fuser import register_forward_fusion
 from ..op import FusedOperation, FusibleOperation, OperationContext
 from .._common import (
+    _cudnn_frontend_version_supported,
     fuse_grouped_mlp_ops,
     is_quantized_tensor,
     maybe_dequantize,
@@ -76,48 +76,14 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             return False
         if get_device_compute_capability()[0] != 10:
             return False
+        if not _cudnn_frontend_version_supported():
+            return False
         try:
             cls.grouped_gemm_glu_kernel()
             cls.grouped_gemm_quant_kernel()
         except ImportError:
             return False
         return True
-
-    @classmethod
-    @functools.lru_cache(maxsize=1)
-    def is_fc1_bias_supported(cls) -> bool:
-        """Whether cudnn-frontend exposes ``bias_tensor`` on the grouped GEMM GLU SM100 wrapper (FC1)."""
-        if not cls.is_supported():
-            return False
-        try:
-            from cudnn import (
-                grouped_gemm_glu_wrapper_sm100,
-            )  # pylint: disable=import-outside-toplevel
-        except ImportError:
-            return False
-        try:
-            params = inspect.signature(grouped_gemm_glu_wrapper_sm100).parameters
-        except (TypeError, ValueError):
-            return False
-        return "bias_tensor" in params
-
-    @classmethod
-    @functools.lru_cache(maxsize=1)
-    def is_fc2_bias_supported(cls) -> bool:
-        """Whether cudnn-frontend exposes ``bias_tensor`` on the grouped GEMM Quant SM100 wrapper (FC2)."""
-        if not cls.is_supported():
-            return False
-        try:
-            from cudnn import (
-                grouped_gemm_quant_wrapper_sm100,
-            )  # pylint: disable=import-outside-toplevel
-        except ImportError:
-            return False
-        try:
-            params = inspect.signature(grouped_gemm_quant_wrapper_sm100).parameters
-        except (TypeError, ValueError):
-            return False
-        return "bias_tensor" in params
 
     def __init__(
         self,
@@ -433,6 +399,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             "sfa_tensor": fc1_kernel_out["sfd_row_tensor"],
             "padded_offsets": split_points,
             "alpha_tensor": alpha_tensor.float(),
+            "bias_tensor": fc2_bias_packed,
             "norm_const_tensor": None,
             "prob_tensor": fc2_scales_tensor,
             "acc_dtype": torch.float32,
@@ -442,8 +409,6 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             "current_stream": current_stream,
             "use_dynamic_sched": True,
         }
-        if self.is_fc2_bias_supported():
-            fc2_quant_kwargs["bias_tensor"] = fc2_bias_packed
 
         if fc2_op.single_grouped_weight:
             # Clone and swizzle scales for GEMM (original stays unmodified for save_for_backward)

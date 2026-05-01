@@ -565,17 +565,12 @@ void performTest(float (*OP)(const float),
 
     fillCase<fp32>(&input, InputsFillCase::uniform);
 
-    // Find global amax
-    float amax = 0.0f;
-    const InputType* input_dptr = input.rowwise_cpu_dptr<InputType>();
-    for (size_t i = 0; i < rows; ++i) {
-        for (size_t j = 0; j < cols; ++j) {
-            const size_t idx = i * cols + j;
-            amax = fmaxf(amax, static_cast<float>(input_dptr[idx]));
-        }
-    }
+    // Golden value of amax chosen to make the 2nd-stage scaling mantissa zero and avoid rounding issues
+    const float amax = 448.0f * 6.0f * 8.0f;
+
     // Set 2nd stage NVFP4 scaling factor
-    output.set_scale(amax);
+    output.set_tensor_amax(amax);
+    output.set_tensor_amax_columnwise(amax);
 
     bool use_2d_quantization = false;
 
@@ -585,7 +580,7 @@ void performTest(float (*OP)(const float),
                            ref_output_t.get(),
                            ref_scales.get(),
                            ref_scales_t.get(),
-                           output.scale(),
+                           amax,
                            rows,
                            cols,
                            scales_stride,
