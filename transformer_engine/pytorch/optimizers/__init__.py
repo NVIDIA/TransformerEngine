@@ -16,4 +16,5 @@ from transformer_engine_torch import (
 )
 from .fused_adam import FusedAdam
 from .fused_sgd import FusedSGD
+from .muon import MuonOptimizer, get_muon_scale_factor
 from .multi_tensor_apply import MultiTensorApply, multi_tensor_applier
