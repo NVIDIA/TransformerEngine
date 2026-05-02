@@ -582,10 +582,16 @@ void compareResults_nvfp4(const Tensor &test,
     compare_nvfp4_tensors("output_t", test_data_t, ref_data_t, cols, rows, atol, rtol);
 }
 
-void compare_per_token_amax(const float *test_amax, const std::vector<float> &ref_amax) {
+void compare_per_token_amax(const Tensor &output, const std::vector<float> &ref_amax) {
+    NVTEBasicTensor amax;
+    nvte_get_tensor_param_v2(output.data(), kNVTEAmax, &amax, sizeof(amax), nullptr);
+    ASSERT_NE(amax.data_ptr, nullptr);
+    ASSERT_EQ(amax.shape.ndim, 1);
+    ASSERT_EQ(amax.shape.data[0], ref_amax.size());
+
     std::vector<float> test_amax_data(ref_amax.size());
     ASSERT_EQ(cudaMemcpy(test_amax_data.data(),
-                         test_amax,
+                         amax.data_ptr,
                          ref_amax.size() * sizeof(float),
                          cudaMemcpyDeviceToHost),
               cudaSuccess);
@@ -593,6 +599,32 @@ void compare_per_token_amax(const float *test_amax, const std::vector<float> &re
         ASSERT_EQ(test_amax_data[row], ref_amax[row])
             << "Per-token amax mismatch at row " << row;
     }
+}
+
+void set_per_token_amax_metadata(Tensor &output, const size_t rows) {
+    const std::vector<size_t> shape = {rows};
+    NVTETensor output_tensor = output.data();
+
+    auto replace_amax = [&](const NVTETensorParam param) {
+        NVTEBasicTensor old_amax;
+        nvte_get_tensor_param_v2(output_tensor, param, &old_amax, sizeof(old_amax), nullptr);
+        if (old_amax.data_ptr != nullptr) {
+            NVTE_CHECK_CUDA(cudaFree(old_amax.data_ptr));
+        }
+
+        float *amax = nullptr;
+        NVTE_CHECK_CUDA(cudaMalloc(&amax, rows * sizeof(float)));
+        NVTE_CHECK_CUDA(cudaMemset(amax, 0, rows * sizeof(float)));
+
+        NVTEBasicTensor amax_tensor = {amax,
+                                       static_cast<NVTEDType>(DType::kFloat32),
+                                       nvte_make_shape(shape.data(), shape.size())};
+        nvte_set_tensor_param_v2(output_tensor, param, &amax_tensor, sizeof(amax_tensor));
+        return amax;
+    };
+
+    replace_amax(kNVTEAmax);
+    replace_amax(kNVTEColumnwiseAmax);
 }
 
 template <typename InputType>
@@ -627,8 +659,6 @@ void performTest(float (*OP)(const float),
 
     Tensor input("input", shape, itype);
     Tensor output("output", shape, otype, true, true, NVTE_NVFP4_1D_SCALING);
-    float *per_token_amax = nullptr;
-    float *per_token_columnwise_amax = nullptr;
 
     std::unique_ptr<fp4e2m1x2[]> ref_output   = std::make_unique<fp4e2m1x2[]>(rows * (cols / 2));
     std::unique_ptr<fp4e2m1x2[]> ref_output_t = std::make_unique<fp4e2m1x2[]>(cols * (rows / 2));
@@ -637,9 +667,12 @@ void performTest(float (*OP)(const float),
 
     fillCase<fp32>(&input, InputsFillCase::uniform);
 
-    bool use_2d_quantization = false;
+    // Golden value of amax chosen to make the 2nd-stage scaling mantissa zero and avoid rounding issues
+    const float amax = 448.0f * 6.0f * 8.0f;
     std::vector<float> ref_per_token_amax;
+    bool use_2d_quantization = false;
     if (per_token_activation) {
+        set_per_token_amax_metadata(output, rows);
         compute_ref<InputType>(OP,
                                input.rowwise_cpu_dptr<InputType>(),
                                ref_output.get(),
@@ -654,45 +687,10 @@ void performTest(float (*OP)(const float),
                                use_fast_math,
                                use_2d_quantization,
                                &ref_per_token_amax);
-
-        NVTETensor output_tensor = output.data();
-        NVTEBasicTensor old_amax;
-        NVTEBasicTensor old_columnwise_amax;
-        nvte_get_tensor_param_v2(output_tensor, kNVTEAmax, &old_amax, sizeof(old_amax), nullptr);
-        nvte_get_tensor_param_v2(output_tensor, kNVTEColumnwiseAmax, &old_columnwise_amax,
-                                 sizeof(old_columnwise_amax), nullptr);
-        if (old_amax.data_ptr != nullptr) {
-            NVTE_CHECK_CUDA(cudaFree(old_amax.data_ptr));
-        }
-        if (old_columnwise_amax.data_ptr != nullptr) {
-            NVTE_CHECK_CUDA(cudaFree(old_columnwise_amax.data_ptr));
-        }
-        NVTE_CHECK_CUDA(cudaMalloc(&per_token_amax, rows * sizeof(float)));
-        NVTE_CHECK_CUDA(cudaMalloc(&per_token_columnwise_amax, rows * sizeof(float)));
-        NVTE_CHECK_CUDA(cudaMemset(per_token_amax, 0, rows * sizeof(float)));
-        NVTE_CHECK_CUDA(cudaMemset(per_token_columnwise_amax, 0, rows * sizeof(float)));
-        std::vector<size_t> per_token_amax_shape = {rows};
-        NVTEBasicTensor amax_tensor = {per_token_amax,
-                                       static_cast<NVTEDType>(DType::kFloat32),
-                                       nvte_make_shape(per_token_amax_shape.data(),
-                                                       per_token_amax_shape.size())};
-        NVTEBasicTensor columnwise_amax_tensor = {per_token_columnwise_amax,
-                                                  static_cast<NVTEDType>(DType::kFloat32),
-                                                  nvte_make_shape(per_token_amax_shape.data(),
-                                                                  per_token_amax_shape.size())};
-        nvte_set_tensor_param_v2(output_tensor, kNVTEAmax, &amax_tensor, sizeof(amax_tensor));
-        nvte_set_tensor_param_v2(output_tensor, kNVTEColumnwiseAmax, &columnwise_amax_tensor,
-                                 sizeof(columnwise_amax_tensor));
     } else {
-        // Golden value of amax chosen to make the 2nd-stage scaling mantissa zero and avoid rounding issues
-        const float amax = 448.0f * 6.0f * 8.0f;
-
         // Set 2nd stage NVFP4 scaling factor
         output.set_tensor_amax(amax);
         output.set_tensor_amax_columnwise(amax);
-
-    bool use_2d_quantization = false;
-
         compute_ref<InputType>(OP,
                                input.rowwise_cpu_dptr<InputType>(),
                                ref_output.get(),
@@ -707,6 +705,7 @@ void performTest(float (*OP)(const float),
                                use_fast_math,
                                use_2d_quantization);
     }
+
     // Initialize stochastic rounding
     Tensor rng_state("rng_state", std::vector<size_t>{2}, DType::kInt64);
     rng_state.rowwise_cpu_dptr<int64_t>()[0] = 123;  // rng_seed
@@ -769,7 +768,7 @@ void performTest(float (*OP)(const float),
                                       scale_mismatches_num);
 
     if (per_token_activation) {
-        compare_per_token_amax(per_token_amax, ref_per_token_amax);
+        compare_per_token_amax(output, ref_per_token_amax);
     }
 }
 
