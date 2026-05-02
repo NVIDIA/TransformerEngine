@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 1240 660" width="1240" height="660"
+     font-family="Helvetica, Arial, sans-serif" font-size="12">
+  <defs>
+    <marker id="ar_p" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#9673A6"/>
+    </marker>
+    <marker id="ar_b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#6C8EBF"/>
+    </marker>
+    <marker id="ar_r" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#B85450"/>
+    </marker>
+    <marker id="ar_o" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#D79B00"/>
+    </marker>
+  </defs>
+
+  <rect width="1240" height="660" fill="#ffffff"/>
+
+  <text x="310" y="42" text-anchor="middle" font-size="20" font-weight="bold" fill="#1F4E79">HF MixtralDecoderLayer</text>
+  <text x="930" y="42" text-anchor="middle" font-size="20" font-weight="bold" fill="#1F4E79">TE NVMixtralDecoderLayer</text>
+
+  <rect x="60" y="60" width="500" height="580" fill="#FFF2CC" stroke="#D6B656" stroke-width="2"/>
+  <rect x="680" y="60" width="500" height="580" fill="#D5E8D4" stroke="#82B366" stroke-width="2"/>
+
+  <g>
+    <rect x="160" y="80" width="300" height="44" fill="#E1D5E7" stroke="#9673A6"/>
+    <text x="310" y="108" text-anchor="middle">input_layernorm.weight</text>
+
+    <rect x="80" y="140" width="460" height="150" fill="none" stroke="#6C8EBF" stroke-width="1.5" stroke-dasharray="6 3"/>
+    <text x="310" y="158" text-anchor="middle" font-style="italic" fill="#6C8EBF">self_attn  (4 separate Linear)</text>
+    <rect x="100" y="170" width="130" height="40" fill="#DAE8FC" stroke="#6C8EBF"/>
+    <text x="165" y="194" text-anchor="middle" font-size="11">self_attn.q_proj.weight</text>
+    <rect x="245" y="170" width="130" height="40" fill="#DAE8FC" stroke="#6C8EBF"/>
+    <text x="310" y="194" text-anchor="middle" font-size="11">self_attn.k_proj.weight</text>
+    <rect x="390" y="170" width="130" height="40" fill="#DAE8FC" stroke="#6C8EBF"/>
+    <text x="455" y="194" text-anchor="middle" font-size="11">self_attn.v_proj.weight</text>
+    <rect x="200" y="240" width="220" height="40" fill="#DAE8FC" stroke="#6C8EBF"/>
+    <text x="310" y="264" text-anchor="middle" font-size="11">self_attn.o_proj.weight</text>
+
+    <rect x="160" y="310" width="300" height="40" fill="#E1D5E7" stroke="#9673A6"/>
+    <text x="310" y="334" text-anchor="middle" font-size="11">post_attention_layernorm.weight</text>
+
+    <rect x="80" y="370" width="460" height="250" fill="none" stroke="#B85450" stroke-width="1.5" stroke-dasharray="6 3"/>
+    <text x="310" y="388" text-anchor="middle" font-style="italic" fill="#B85450">mlp  (block_sparse_moe : router + 8 experts, packed)</text>
+    <rect x="160" y="400" width="300" height="40" fill="#F8CECC" stroke="#B85450"/>
+    <text x="310" y="424" text-anchor="middle" font-size="11">mlp.gate.weight</text>
+    <rect x="100" y="455" width="420" height="70" fill="#FFE6CC" stroke="#D79B00"/>
+    <text x="310" y="478" text-anchor="middle" font-weight="bold" font-size="12">mlp.experts.gate_up_proj</text>
+    <text x="310" y="498" text-anchor="middle" font-size="11">[num_experts, 2 &#183; ffn, h]</text>
+    <text x="310" y="515" text-anchor="middle" font-size="10" font-style="italic" fill="#666">SwiGLU gate + up packed</text>
+    <rect x="100" y="540" width="420" height="65" fill="#FFE6CC" stroke="#D79B00"/>
+    <text x="310" y="562" text-anchor="middle" font-weight="bold" font-size="12">mlp.experts.down_proj</text>
+    <text x="310" y="582" text-anchor="middle" font-size="11">[num_experts, h, ffn]</text>
+  </g>
+
+  <g>
+    <rect x="700" y="80" width="460" height="210" fill="none" stroke="#82B366" stroke-width="1.5" stroke-dasharray="6 3"/>
+    <text x="930" y="98" text-anchor="middle" font-style="italic" fill="#82B366">self_attention  (te.MultiheadAttention,  fuse_qkv_params=True,  input_layernorm=True)</text>
+    <rect x="780" y="110" width="300" height="40" fill="#D5E8D4" stroke="#82B366"/>
+    <text x="930" y="134" text-anchor="middle" font-size="11">self_attention.layernorm_qkv.layer_norm_weight</text>
+    <rect x="720" y="160" width="420" height="70" fill="#D5E8D4" stroke="#82B366"/>
+    <text x="930" y="184" text-anchor="middle" font-weight="bold" font-size="12">self_attention.layernorm_qkv.weight</text>
+    <text x="930" y="203" text-anchor="middle" font-size="11">[3 &#183; h, h]   Q | K | V interleaved</text>
+    <text x="930" y="220" text-anchor="middle" font-size="10" font-style="italic" fill="#666">one fused GEMM replaces q_proj + k_proj + v_proj</text>
+    <rect x="780" y="240" width="300" height="40" fill="#D5E8D4" stroke="#82B366"/>
+    <text x="930" y="264" text-anchor="middle" font-size="11">self_attention.proj.weight</text>
+
+    <rect x="780" y="310" width="300" height="40" fill="#E1D5E7" stroke="#9673A6"/>
+    <text x="930" y="334" text-anchor="middle" font-size="11">post_attention_layernorm.weight</text>
+
+    <rect x="700" y="370" width="460" height="250" fill="none" stroke="#B85450" stroke-width="1.5" stroke-dasharray="6 3"/>
+    <text x="930" y="388" text-anchor="middle" font-style="italic" fill="#B85450">mlp  (NVMixtralSparseMoeBlock : router + 2 GroupedLinear)</text>
+    <rect x="780" y="400" width="300" height="40" fill="#F8CECC" stroke="#B85450"/>
+    <text x="930" y="424" text-anchor="middle" font-size="11">mlp.gate.weight</text>
+    <rect x="720" y="455" width="420" height="70" fill="#FFE6CC" stroke="#D79B00"/>
+    <text x="930" y="478" text-anchor="middle" font-weight="bold" font-size="12">mlp.experts_gate_up_weight</text>
+    <text x="930" y="498" text-anchor="middle" font-size="11">[num_local_experts, 2 &#183; ffn, h]</text>
+    <text x="930" y="515" text-anchor="middle" font-size="10" font-style="italic" fill="#666">GroupedLinear (1 batched GEMM)</text>
+    <rect x="720" y="540" width="420" height="65" fill="#FFE6CC" stroke="#D79B00"/>
+    <text x="930" y="562" text-anchor="middle" font-weight="bold" font-size="12">mlp.experts_down_weight</text>
+    <text x="930" y="582" text-anchor="middle" font-size="11">[num_local_experts, h, ffn]</text>
+  </g>
+
+  <g fill="none" stroke-width="2">
+    <path d="M 460 102 L 780 130" stroke="#9673A6" marker-end="url(#ar_p)"/>
+    <path d="M 230 190 L 720 178" stroke="#6C8EBF" marker-end="url(#ar_b)"/>
+    <path d="M 375 190 L 720 188" stroke="#6C8EBF" marker-end="url(#ar_b)"/>
+    <path d="M 520 190 L 720 198" stroke="#6C8EBF" marker-end="url(#ar_b)"/>
+    <path d="M 420 260 L 780 260" stroke="#6C8EBF" marker-end="url(#ar_b)"/>
+    <path d="M 460 330 L 780 330" stroke="#9673A6" marker-end="url(#ar_p)"/>
+    <path d="M 460 420 L 780 420" stroke="#B85450" marker-end="url(#ar_r)"/>
+    <path d="M 520 490 L 720 490" stroke="#D79B00" marker-end="url(#ar_o)"/>
+    <path d="M 520 572 L 720 572" stroke="#D79B00" marker-end="url(#ar_o)"/>
+  </g>
+
+  <text x="620" y="640" text-anchor="middle" font-size="11" font-style="italic" fill="#444">Mappings handled by replace_params() in te_mixtral.py  (also see BioNemo bionemo-recipes/models/mixtral/convert.py)</text>
+</svg>
