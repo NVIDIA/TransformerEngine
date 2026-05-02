@@ -9,6 +9,7 @@
 import itertools
 import os
 
+from torch import norm
 import triton
 import triton.language as tl
 
@@ -57,6 +58,7 @@ def _mhc_projection_fwd_fused(
     phi_ptr,  # (N, K)
     h_ptr,  # (M, 32)
     ms_ptr,  # (M,)
+    norm_weight_ptr,  # (K,)
     M,
     N,
     K,
@@ -67,12 +69,14 @@ def _mhc_projection_fwd_fused(
     stride_hm: tl.constexpr,
     stride_hn: tl.constexpr,
     stride_ms: tl.constexpr,
+    stride_norm_weight: tl.constexpr,
     # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     STEP_SIZE_K: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     precision: tl.constexpr,
+    HAS_NORM_WEIGHT: tl.constexpr,
 ):
     pid_m = tl.program_id(axis=0)
     pid_k = tl.program_id(axis=1)
@@ -86,6 +90,7 @@ def _mhc_projection_fwd_fused(
     tl.assume(stride_hm == 32)
     tl.assume(stride_hn == 1)
     tl.assume(stride_ms == 1)
+    tl.assume(stride_norm_weight == 1)
 
     tl.assume(BLOCK_SIZE_M % 32 == 0)
     tl.assume(BLOCK_SIZE_K % 32 == 0)
@@ -113,9 +118,24 @@ def _mhc_projection_fwd_fused(
             other=0.0,
             cache_modifier=".ca",
         )  # (BLOCK_SIZE_N, BLOCK_SIZE_K)
-        ms_acc += tl.sum(x * x, axis=1)
+
+        ms_acc += tl.sum(x.to(tl.float32) * x.to(tl.float32), axis=1)
+
+        # In RMSNorm, mean square should be the mean squrare of the original x, so we need to first accumulate the sum of squares of x
+        # before we let x absore norm weight and pass x with norm weight's affine transformation applied to w to do the dot product
+        # to generate H. This is the correct way to fuse H = RMSNorm(x) @ phi.T.
+        if HAS_NORM_WEIGHT:
+            norm_weight_ptrs = norm_weight_ptr + k_offs * stride_norm_weight
+            norm_weight = tl.load(
+                norm_weight_ptrs, mask=mask_k, other=1.0, cache_modifier=".ca"
+            )  # (BLOCK_SIZE_K,)
+            phi = phi.to(tl.float32) * norm_weight.to(tl.float32)
         h_acc = tl.dot(
-            x, tl.trans(phi, (1, 0)), h_acc, input_precision=precision, out_dtype=tl.float32
+            x.to(phi.dtype),
+            tl.trans(phi, (1, 0)),
+            h_acc,
+            input_precision=precision,
+            out_dtype=tl.float32,
         )
 
     h_ptrs = h_ptr + offs_m[:, None] * stride_hm + offs_n_full[None, :] * stride_hn
@@ -138,6 +158,7 @@ def _mhc_projection_bwd_fused(
     x_ptr,
     grad_x_ptr,  # (M, K)
     phi_ptr,  # (N, K)
+    norm_weight_ptr,  # (K,)
     grad_h_ptr,  # (M, N)
     grad_ms_ptr,  # (M,)
     M,
@@ -149,6 +170,7 @@ def _mhc_projection_bwd_fused(
     stride_grad_xk: tl.constexpr,
     stride_phin,
     stride_phik: tl.constexpr,
+    stride_norm_weight: tl.constexpr,
     stride_grad_phin,
     stride_grad_phik: tl.constexpr,
     stride_grad_hm: tl.constexpr,
@@ -159,6 +181,8 @@ def _mhc_projection_bwd_fused(
     BLOCK_SIZE_K: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     precision: tl.constexpr,
+    FUSE_GRAD_X_ACC: tl.constexpr,
+    HAS_NORM_WEIGHT: tl.constexpr,
 ):
     pid_m = tl.program_id(axis=0)
     pid_k = tl.program_id(axis=1)
@@ -174,6 +198,7 @@ def _mhc_projection_bwd_fused(
     tl.assume(stride_grad_phin == K)
     tl.assume(stride_grad_phik == 1)
     tl.assume(stride_grad_ms == 1)
+    tl.assume(stride_norm_weight == 1)
 
     tl.assume(BLOCK_SIZE_M % 32 == 0)
     tl.assume(BLOCK_SIZE_K % 32 == 0)
@@ -204,17 +229,160 @@ def _mhc_projection_bwd_fused(
     phi = tl.load(
         phi_ptrs, mask=(offs_n_full[:, None] < N) & mask_k[None, :], other=0.0
     )  # (BLOCK_SIZE_N, BLOCK_SIZE_K)
+
+    if HAS_NORM_WEIGHT:
+        norm_weight_ptrs = norm_weight_ptr + offs_k * stride_norm_weight
+        norm_weight = tl.load(norm_weight_ptrs, mask=mask_k, other=0.0, cache_modifier=".ca").to(
+            phi.dtype
+        )  # (BLOCK_SIZE_K,)
+        phi = phi.to(tl.float32) * norm_weight.to(tl.float32)[None, :]
+
     grad_ms = tl.load(
         grad_ms_ptrs, mask=offs_ms < M, other=0.0, cache_modifier=".ca"
     )  # (BLOCK_SIZE_M,)
 
     grad_x = x * (grad_ms * 2 / tl.cast(K, tl.float32))[:, None]
     grad_x = tl.dot(
-        grad_h, phi, acc=grad_x, input_precision=precision, out_dtype=tl.float32
+        grad_h.to(phi.dtype), phi, acc=grad_x, input_precision=precision, out_dtype=tl.float32
     )  # (BLOCK_SIZE_M, BLOCK_SIZE_K)
     grad_x_ptrs = grad_x_ptr + offs_m[:, None] * stride_grad_xm + offs_k[None, :] * stride_grad_xk
     grad_x = grad_x.to(x.dtype)
+    if FUSE_GRAD_X_ACC:  # If fused gradient accumulation is enabled, the buffer is always fp32
+        grad_x_acc = tl.load(grad_x_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0)
+        grad_x = grad_x.to(tl.float32) + grad_x_acc
     tl.store(grad_x_ptrs, grad_x, mask=mask_m[:, None] & mask_k[None, :])
+
+
+def projection_config_bwd_norm_weight():
+    block_m = [512, 1024, 2048]
+    step_m = [32]
+    block_k = [128, 256]
+    warps = [2]
+    stages = [2, 3, 4]
+
+    configs = []
+    for bm, sm, bk, w, s in itertools.product(block_m, step_m, block_k, warps, stages):
+        configs.append(
+            triton.Config(
+                {"BLOCK_SIZE_M": bm, "STEP_SIZE_M": sm, "BLOCK_SIZE_K": bk},
+                num_warps=w,
+                num_stages=s,
+            )
+        )
+    if os.environ.get("NVTE_DISABLE_TRITON_AUTOTUNING", "0") == "1":
+        configs = configs[:1]
+    return configs
+
+
+@triton.autotune(
+    configs=projection_config_bwd_norm_weight(),
+    key=["M", "K"],
+    reset_to_zero=["grad_phi_ptr", "grad_norm_weight_ptr"],
+)
+@triton.jit
+def _mhc_projection_bwd_fused_norm_weight(
+    x_ptr,  # (M, K)
+    grad_H_ptr,  # (M, 32)
+    phi_ptr,  # (N, K), N=24 in our case since n = 4
+    norm_weight_ptr,  # (K,)
+    grad_phi_ptr,  # (N, K), N=24 in our case since n = 4
+    grad_norm_weight_ptr,  # (K,)
+    M,
+    N,
+    K,
+    stride_xm,
+    stride_xk: tl.constexpr,
+    stride_grad_Hm: tl.constexpr,
+    stride_grad_Hn: tl.constexpr,
+    stride_phin,
+    stride_phik: tl.constexpr,
+    stride_norm_weight: tl.constexpr,
+    stride_grad_phin,
+    stride_grad_phik: tl.constexpr,
+    stride_grad_norm_weight: tl.constexpr,
+    # Meta-parameters
+    BLOCK_SIZE_M: tl.constexpr,
+    STEP_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    precision: tl.constexpr,
+):
+    pid_k = tl.program_id(axis=0)
+    pid_m = tl.program_id(axis=1)
+
+    tl.assume(pid_k >= 0)
+    tl.assume(stride_xm > 0)
+    tl.assume(stride_xk == 1)
+    tl.assume(stride_grad_Hm == 32)
+    tl.assume(stride_grad_Hn == 1)
+    tl.assume(stride_phin == K)
+    tl.assume(stride_phik == 1)
+    tl.assume(stride_grad_phin == K)
+    tl.assume(stride_grad_phin == stride_phin)
+    tl.assume(stride_grad_phik == 1)
+    tl.assume(stride_grad_norm_weight == 1)
+    tl.assume(stride_norm_weight == 1)
+
+    tl.assume(BLOCK_SIZE_M % 128 == 0)
+    tl.assume(BLOCK_SIZE_K % 128 == 0)
+    tl.assume(BLOCK_SIZE_N == 32)
+    tl.assume(STEP_SIZE_M % 32 == 0)
+
+    offs_k = pid_k * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
+    mask_k = offs_k < K
+    offs_n_full = tl.arange(0, BLOCK_SIZE_N)
+    mask_n = offs_n_full < N
+
+    grad_psi_acc = tl.zeros((BLOCK_SIZE_N, BLOCK_SIZE_K), dtype=tl.float32)
+
+    m_start = pid_m * BLOCK_SIZE_M
+    m_end = tl.minimum(m_start + BLOCK_SIZE_M, M)
+    for m_idx in range(0, tl.cdiv(m_end - m_start, STEP_SIZE_M)):
+        offs_m = m_start + m_idx * STEP_SIZE_M + tl.arange(0, STEP_SIZE_M)
+        mask_m = offs_m < M
+        x_ptrs = x_ptr + offs_m[:, None] * stride_xm + offs_k[None, :] * stride_xk
+        x = tl.load(
+            x_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0
+        )  # (STEP_SIZE_M, BLOCK_SIZE_K)
+        grad_H_ptrs = (
+            grad_H_ptr + offs_m[:, None] * stride_grad_Hm + offs_n_full[None, :] * stride_grad_Hn
+        )
+        grad_H = tl.load(
+            grad_H_ptrs, mask=mask_m[:, None] & mask_n[None, :], other=0.0
+        )  # (STEP_SIZE_M, BLOCK_SIZE_N)
+
+        grad_psi_acc = tl.dot(
+            tl.trans(grad_H, (1, 0)),
+            x.to(grad_H.dtype),
+            acc=grad_psi_acc,
+            out_dtype=tl.float32,
+            input_precision=precision,
+        )
+
+    phi_ptrs = phi_ptr + offs_n_full[:, None] * stride_phin + offs_k[None, :] * stride_phik
+    phi = tl.load(
+        phi_ptrs, mask=(offs_n_full[:, None] < N) & mask_k[None, :], other=0.0
+    )  # (BLOCK_SIZE_N, BLOCK_SIZE_K)
+    norm_weight_ptrs = norm_weight_ptr + offs_k * stride_norm_weight
+    norm_weight = tl.load(
+        norm_weight_ptrs, mask=mask_k, other=0.0, cache_modifier=".cg"
+    )  # (BLOCK_SIZE_K,)
+    phi = phi.to(tl.float32)
+    norm_weight = norm_weight.to(tl.float32)
+
+    # Keep grad_psi in SRAM and get grad_phi & grad_norm_weight
+    grad_phi = grad_psi_acc * norm_weight[None, :].to(grad_psi_acc.dtype)  # (32, BLOCK_SIZE_K)
+    grad_norm_weight = tl.sum(grad_psi_acc * phi.to(grad_psi_acc.dtype), axis=0)  # (BLOCK_SIZE_K,)
+
+    grad_phi_ptrs = (
+        grad_phi_ptr + offs_n_full[:, None] * stride_grad_phin + offs_k[None, :] * stride_grad_phik
+    )
+    grad_norm_weight_ptrs = grad_norm_weight_ptr + offs_k * stride_grad_norm_weight
+
+    tl.atomic_add(
+        grad_phi_ptrs, grad_phi, mask=(offs_n_full[:, None] < N) & mask_k[None, :], sem="relaxed"
+    )
+    tl.atomic_add(grad_norm_weight_ptrs, grad_norm_weight, mask=mask_k, sem="relaxed")
 
 
 def scale_config():
@@ -324,8 +492,8 @@ def _mhc_scale_fwd_fused(
 def _mhc_scale_bwd_fused(
     grad_out_ptr,
     out_ptr,  # (M, 2n + n^2), which is padded to (M, 32) in the last dimension
-    grad_h_ptr,
-    h_ptr,  # (M, 2n + n^2), which is padded to (M, 32) in the last dimension
+    grad_H_ptr,
+    H_ptr,  # (M, 2n + n^2), which is padded to (M, 32) in the last dimension
     grad_a_ptr,
     a_ptr,  # (3,)
     grad_b_ptr,  # (2n + n^2,)
@@ -337,10 +505,10 @@ def _mhc_scale_bwd_fused(
     stride_grad_out_n,
     stride_out_m,
     stride_out_n,
-    stride_grad_hm,
-    stride_grad_hn,
-    stride_hm,
-    stride_hn,
+    stride_grad_Hm,
+    stride_grad_Hn,
+    stride_Hm,
+    stride_Hn,
     stride_grad_a,
     stride_a,
     stride_grad_b,
@@ -358,10 +526,10 @@ def _mhc_scale_bwd_fused(
     tl.assume(stride_grad_out_n == 1)
     tl.assume(stride_out_m == 32)
     tl.assume(stride_out_n == 1)
-    tl.assume(stride_grad_hm == 32)
-    tl.assume(stride_grad_hn == 1)
-    tl.assume(stride_hm == 32)
-    tl.assume(stride_hn == 1)
+    tl.assume(stride_grad_Hm == 32)
+    tl.assume(stride_grad_Hn == 1)
+    tl.assume(stride_Hm == 32)
+    tl.assume(stride_Hn == 1)
     tl.assume(stride_grad_a == 1)
     tl.assume(stride_a == 1)
     tl.assume(stride_grad_b == 1)
@@ -401,21 +569,21 @@ def _mhc_scale_bwd_fused(
         mask=mask_m[:, None] & mask_n[None, :],
         other=0.0,
     )  # (BLOCK_SIZE_M, BLOCK_SIZE_N)
-    h = tl.load(
-        h_ptr + offs_m[:, None] * stride_hm + cols[None, :] * stride_hn,
+    H = tl.load(
+        H_ptr + offs_m[:, None] * stride_Hm + cols[None, :] * stride_Hn,
         mask=mask_m[:, None] & mask_n[None, :],
         other=0.0,
     )  # (BLOCK_SIZE_M, BLOCK_SIZE_N)
 
     # Gradiient of H before H_pre and H_post go through sigmoid
     grad_out_out = grad_out * out
-    grad_h_pre = grad_out_out * (1 - out)
-    grad_h_post = grad_out_out * 0.5 * (2 - out)
-    grad_h = grad_out
-    grad_h = tl.where(cols[None, :] < n, grad_h_pre, grad_h)
-    grad_h = tl.where((cols[None, :] >= n) & (cols[None, :] < 2 * n), grad_h_post, grad_h)
+    grad_H_pre = grad_out_out * (1 - out)
+    grad_H_post = grad_out_out * 0.5 * (2 - out)
+    grad_H = grad_out
+    grad_H = tl.where(cols[None, :] < n, grad_H_pre, grad_H)
+    grad_H = tl.where((cols[None, :] >= n) & (cols[None, :] < 2 * n), grad_H_post, grad_H)
 
-    grad_a = tl.sum(h * grad_h / rms[:, None], axis=0).to(a.dtype)
+    grad_a = tl.sum(H * grad_H / rms[:, None], axis=0).to(a.dtype)
     # Write grad_a[0:4].sum to grad_a_ptr[0], grad_a[4:8].sum to grad_a_ptr[1], and grad_a[8:24].sum to grad_a_ptr[2]
     tl.atomic_add(grad_a_ptr, tl.where(cols[None, :] < n, grad_a, 0.0).sum(), sem="relaxed")
     tl.atomic_add(
@@ -429,17 +597,17 @@ def _mhc_scale_bwd_fused(
         sem="relaxed",
     )
 
-    grad_b = tl.sum(grad_h, axis=0).to(a.dtype)
+    grad_b = tl.sum(grad_H, axis=0).to(a.dtype)
     tl.atomic_add(grad_b_ptr + cols * stride_grad_b, grad_b, mask=cols < N, sem="relaxed")
 
-    grad_rms = (tl.sum((-grad_h * h * a[None, :]), axis=1) / (rms * rms)).to(rms.dtype)
+    grad_rms = (tl.sum((-grad_H * H * a[None, :]), axis=1) / (rms * rms)).to(rms.dtype)
     grad_ms = grad_rms / (2 * rms)
     tl.store(grad_ms_ptr + ms_offsets * stride_grad_ms, grad_ms, mask=ms_mask)
 
-    grad_h = a[None, :] * grad_h / rms[:, None]
+    grad_H = a[None, :] * grad_H / rms[:, None]
     tl.store(
-        grad_h_ptr + offs_m[:, None] * stride_grad_hm + cols[None, :] * stride_grad_hn,
-        grad_h,
+        grad_H_ptr + offs_m[:, None] * stride_grad_Hm + cols[None, :] * stride_grad_Hn,
+        grad_H,
         mask=mask_m[:, None] & mask_n[None, :],
     )
 
@@ -527,7 +695,7 @@ def _mhc_sinkhorn_fwd_fused_recompute(
     key=["M"],
 )
 @triton.jit
-def _mhc_sinkhorn_bwd_fused_recompute(
+def _mhc_sinkhorn_bwd_fused(
     grad_out_ptr,
     output_ptr,
     grad_x_ptr,
@@ -546,6 +714,7 @@ def _mhc_sinkhorn_bwd_fused_recompute(
     n: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     iters,
+    RECOMPUTE: tl.constexpr,
 ):
     pid = tl.program_id(0)
 
@@ -578,40 +747,41 @@ def _mhc_sinkhorn_bwd_fused_recompute(
 
     sbn = M * n
 
-    # Recompute the full history of f and g
-    log_mu = tl.zeros((BATCH_SIZE, n), dtype=x.dtype)  # (BATCH_SIZE, n)
-    log_nu = tl.zeros((BATCH_SIZE, n), dtype=x.dtype)  # (BATCH_SIZE, n)
+    if RECOMPUTE:
+        # Recompute the full history of f and g
+        log_mu = tl.zeros((BATCH_SIZE, n), dtype=x.dtype)  # (BATCH_SIZE, n)
+        log_nu = tl.zeros((BATCH_SIZE, n), dtype=x.dtype)  # (BATCH_SIZE, n)
 
-    f = tl.zeros((BATCH_SIZE, n), dtype=x.dtype)  # (BATCH_SIZE, n)
-    g = tl.zeros((BATCH_SIZE, n), dtype=x.dtype)  # (BATCH_SIZE, n)
+        f = tl.zeros((BATCH_SIZE, n), dtype=x.dtype)  # (BATCH_SIZE, n)
+        g = tl.zeros((BATCH_SIZE, n), dtype=x.dtype)  # (BATCH_SIZE, n)
 
-    f_hist_ptrs = hist_f_ptr + offs_batch[:, None] * n + offs_n_hist[None, :]
-    g_hist_ptrs = hist_g_ptr + offs_batch[:, None] * n + offs_n_hist[None, :]
-    tl.store(f_hist_ptrs, f, mask=mask_batch[:, None])
-    tl.store(g_hist_ptrs, g, mask=mask_batch[:, None])
-
-    for iter_idx in range(iters):
-        # Update f: logsumexp over the column dimension (1)
-        f = x + g[:, None, :]  # Broadcast g to (BATCH_SIZE, n, n)
-        f_max = tl.max(f, axis=2)
-        f = tl.log(tl.sum(tl.exp(f - f_max[:, :, None]), axis=2))  # logsumexp over columns
-        f = log_mu - f - f_max
-
-        f_hist_ptrs = (
-            hist_f_ptr + (iter_idx + 1) * sbn + offs_batch[:, None] * n + offs_n_hist[None, :]
-        )
+        f_hist_ptrs = hist_f_ptr + offs_batch[:, None] * n + offs_n_hist[None, :]
+        g_hist_ptrs = hist_g_ptr + offs_batch[:, None] * n + offs_n_hist[None, :]
         tl.store(f_hist_ptrs, f, mask=mask_batch[:, None])
-
-        # Update g: logsumexp over the row dimension (2)
-        g = x + f[:, :, None]  # Broadcast f to (BATCH_SIZE, n, n)
-        g_max = tl.max(g, axis=1)
-        g = tl.log(tl.sum(tl.exp(g - g_max[:, None, :]), axis=1))  # logsumexp over rows
-        g = log_nu - g - g_max
-
-        g_hist_ptrs = (
-            hist_g_ptr + (iter_idx + 1) * sbn + offs_batch[:, None] * n + offs_n_hist[None, :]
-        )
         tl.store(g_hist_ptrs, g, mask=mask_batch[:, None])
+
+        for iter_idx in range(iters):
+            # Update f: logsumexp over the column dimension (1)
+            f = x + g[:, None, :]  # Broadcast g to (BATCH_SIZE, n, n)
+            f_max = tl.max(f, axis=2)
+            f = tl.log(tl.sum(tl.exp(f - f_max[:, :, None]), axis=2))  # logsumexp over columns
+            f = log_mu - f - f_max
+
+            f_hist_ptrs = (
+                hist_f_ptr + (iter_idx + 1) * sbn + offs_batch[:, None] * n + offs_n_hist[None, :]
+            )
+            tl.store(f_hist_ptrs, f, mask=mask_batch[:, None])
+
+            # Update g: logsumexp over the row dimension (2)
+            g = x + f[:, :, None]  # Broadcast f to (BATCH_SIZE, n, n)
+            g_max = tl.max(g, axis=1)
+            g = tl.log(tl.sum(tl.exp(g - g_max[:, None, :]), axis=1))  # logsumexp over rows
+            g = log_nu - g - g_max
+
+            g_hist_ptrs = (
+                hist_g_ptr + (iter_idx + 1) * sbn + offs_batch[:, None] * n + offs_n_hist[None, :]
+            )
+            tl.store(g_hist_ptrs, g, mask=mask_batch[:, None])
 
     # Backward pass
     grad_log_P = grad_out * P  # (BATCH_SIZE, n, n)
@@ -749,111 +919,6 @@ def _mhc_sinkhorn_fwd_fused(
     tl.store(output_ptrs, P, mask=mask_batch[:, None])
 
 
-@triton.autotune(
-    configs=sinkhorn_config(),
-    key=["M"],
-)
-@triton.jit
-def _mhc_sinkhorn_bwd_fused(
-    grad_out_ptr,  # (M, n*n)
-    output_ptr,  # (M, n*n)
-    grad_x_ptr,  # (M, n*n)
-    x_ptr,  # (M, n*n)
-    hist_f_ptr,  # (iters+1, M, n)
-    hist_g_ptr,  # (iters+1, M, n)
-    stride_grad_out_m,
-    stride_grad_out_n,
-    stride_out_m,
-    stride_out_n,
-    stride_grad_xm,
-    stride_grad_xn,
-    stride_xm,
-    stride_xn,
-    M,
-    n: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-    iters,
-):
-    pid = tl.program_id(0)
-
-    tl.static_assert(BLOCK_SIZE % (n * n) == 0, "BLOCK_SIZE must be divisible by n*n")
-    tl.assume(M > 0 and iters > 0)
-    tl.assume(n == 4)
-
-    BATCH_SIZE: tl.constexpr = BLOCK_SIZE // (n * n)  # Assume there's no remainder for simplicity
-
-    offs_batch = pid * BATCH_SIZE + tl.arange(0, BATCH_SIZE)
-    offs_nn = tl.arange(0, n * n)
-    offs_n_hist = tl.arange(0, n)
-    mask_batch = offs_batch < M
-
-    x_ptrs = x_ptr + offs_batch[:, None] * stride_xm + offs_nn[None, :] * stride_xn
-    x = tl.load(x_ptrs, mask=mask_batch[:, None], other=0.0)  # (BATCH_SIZE, n*n)
-    x = tl.reshape(x, (BATCH_SIZE, n, n))  # (BATCH_SIZE, n, n)
-
-    P_ptrs = output_ptr + offs_batch[:, None] * stride_out_m + offs_nn[None, :] * stride_out_n
-    P = tl.load(P_ptrs, mask=mask_batch[:, None], other=0.0)  # (BATCH_SIZE, n*n)
-    P = tl.reshape(P, (BATCH_SIZE, n, n))
-
-    grad_out_ptrs = (
-        grad_out_ptr
-        + offs_batch[:, None] * stride_grad_out_m
-        + offs_nn[None, :] * stride_grad_out_n
-    )
-    grad_out = tl.load(grad_out_ptrs, mask=mask_batch[:, None], other=0.0)  # (BATCH_SIZE, n*n)
-    grad_out = tl.reshape(grad_out, (BATCH_SIZE, n, n))  # (BATCH_SIZE, n, n)
-
-    sbn = M * n
-
-    # Backward pass
-    grad_log_P = grad_out * P  # (BATCH_SIZE, n, n)
-    zeros = tl.zeros_like(grad_log_P)
-    grad_g = tl.sum(grad_log_P, axis=1)  # (BATCH_SIZE, n)
-    grad_x = grad_log_P
-
-    g_hist_ptrs = hist_g_ptr + iters * sbn + offs_batch[:, None] * n + offs_n_hist[None, :]
-    g = tl.load(g_hist_ptrs, mask=mask_batch[:, None], other=0.0)
-    g = tl.reshape(g, (BATCH_SIZE, n))
-
-    for iter_idx in range(iters, 0, -1):
-        f_hist_ptrs = hist_f_ptr + iter_idx * sbn + offs_batch[:, None] * n + offs_n_hist[None, :]
-        f = tl.load(f_hist_ptrs, mask=mask_batch[:, None], other=0.0)
-        f = tl.reshape(f, (BATCH_SIZE, n))
-
-        g_hist_ptrs = (
-            hist_g_ptr + (iter_idx - 1) * sbn + offs_batch[:, None] * n + offs_n_hist[None, :]
-        )
-        g_next = tl.load(g_hist_ptrs, mask=mask_batch[:, None], other=0.0)
-        g_next = tl.reshape(g_next, (BATCH_SIZE, n))
-
-        term_g = -grad_g[:, None, :] * tl.exp(f[:, :, None] + x + g[:, None, :])
-        grad_f = tl.sum(term_g + grad_log_P, axis=2)  # (BATCH_SIZE, n)
-        # Only the last iteration's f will contribute to gradients with both grad_g1 and grad_log_P
-        grad_log_P = zeros  # Zero out grad_log_P for next iterations
-
-        g = g_next
-
-        term_f = -grad_f[:, :, None] * tl.exp(f[:, :, None] + x + g[:, None, :])
-        grad_g = tl.sum(term_f, axis=1)  # (BATCH_SIZE, n)
-
-        grad_x += term_f + term_g
-
-    grad_x_ptrs = (
-        grad_x_ptr + offs_batch[:, None] * stride_grad_xm + offs_nn[None, :] * stride_grad_xn
-    )
-    tl.store(
-        grad_x_ptrs,
-        tl.reshape(
-            grad_x,
-            (
-                BATCH_SIZE,
-                n * n,
-            ),
-        ),
-        mask=mask_batch[:, None],
-    )
-
-
 def aggregate_config():
     block_m = [1, 2, 4]
     block_c = [64, 128, 256]
@@ -970,6 +1035,7 @@ def _mhc_aggregate_bwd(
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_C: tl.constexpr,
     precision: tl.constexpr,
+    FUSE_GRAD_X_ACC: tl.constexpr,
 ):
     """
     Forward:
@@ -1036,6 +1102,10 @@ def _mhc_aggregate_bwd(
     grad_x = tl.reshape(grad_x, (BLOCK_SIZE_M, BLOCK_SIZE_C * n))
 
     grad_x_ptrs = grad_x_ptr + offs_m[:, None] * stride_grad_xm + offs_cn[None, :] * stride_grad_xCn
+
+    if FUSE_GRAD_X_ACC:  # If fused gradient accumulation is enabled, the buffer is always fp32
+        grad_x_acc = tl.load(grad_x_ptrs, mask=mask_m[:, None] & mask_cn[None, :], other=0.0)
+        grad_x = grad_x.to(tl.float32) + grad_x_acc
     tl.store(
         grad_x_ptrs,
         grad_x,
