@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 import functools
 import io
 import math
@@ -20,7 +20,7 @@ import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.pytorch.ops._common import (
-    _nvidia_cudnn_frontend_supports_scaled_clamped_qgeglu,
+    _cudnn_frontend_version_supported,
 )
 
 from transformer_engine.pytorch.ops.fused import (
@@ -198,6 +198,18 @@ def make_reference_and_test_tensors(
     ref.requires_grad_(requires_grad)
     test.requires_grad_(requires_grad)
     return ref, test
+
+
+def to_cpu(tensor: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+    """Convert to an FP64 CPU tensor"""
+    if tensor is None:
+        return None
+    out = tensor.detach()
+    if isinstance(out, QuantizedTensor):
+        out = out.dequantize()
+    out = out.to(dtype=torch.float64, device="cpu")
+    out = out.requires_grad_(requires_grad=tensor.requires_grad)
+    return out
 
 
 class MegatronTrainingHelper:
@@ -3368,25 +3380,17 @@ class TestSequentialModules:
             y_test = forward(x_test)
         y_test.backward(dy_test)
 
-        def to_cpu(tensor: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
-            """Convert to FP64 CPU tensor"""
-            if tensor is None:
-                return None
-            out = tensor.detach().to(dtype=torch.float64, device="cpu")
-            out = out.requires_grad_(requires_grad=tensor.requires_grad)
-            return out
-
         # Check values
         tols = {"rtol": 0.25, "atol": 0.5}  # Loose tols for sanity checking
-        torch.testing.assert_close(to_cpu(y_test), y_ref, **tols)
-        torch.testing.assert_close(to_cpu(x_test.grad), x_ref.grad, **tols)
-        torch.testing.assert_close(to_cpu(norm.weight.grad), norm_w_ref.grad, **tols)
-        torch.testing.assert_close(to_cpu(norm.bias.grad), norm_b_ref.grad, **tols)
-        torch.testing.assert_close(to_cpu(ffn2.weight.grad), w2_ref.grad, **tols)
-        torch.testing.assert_close(to_cpu(ffn1.weight.grad), w1_ref.grad, **tols)
+        assert_close(y_test, y_ref, **tols)
+        assert_close(x_test.grad, x_ref.grad, **tols)
+        assert_close_grads(norm.weight, norm_w_ref, **tols)
+        assert_close_grads(norm.bias, norm_b_ref, **tols)
+        assert_close_grads(ffn2.weight, w2_ref, **tols)
+        assert_close_grads(ffn1.weight, w1_ref, **tols)
         if bias:
-            torch.testing.assert_close(to_cpu(ffn1.bias.grad), b1_ref.grad, **tols)
-            torch.testing.assert_close(to_cpu(ffn2.bias.grad), b2_ref.grad, **tols)
+            assert_close_grads(ffn1.bias, b1_ref, **tols)
+            assert_close_grads(ffn2.bias, b2_ref, **tols)
 
     @pytest.mark.parametrize("bias", (False, True))
     @pytest.mark.parametrize("dtype", _dtypes)
@@ -3638,10 +3642,7 @@ class TestSequentialModules:
             quantization == "mxfp8"
             and dtype in (torch.bfloat16, torch.float16)
             and glu_interleave_size == 32
-            and (
-                activation != "scaled_clamped_qgeglu"
-                or _nvidia_cudnn_frontend_supports_scaled_clamped_qgeglu()
-            )
+            and _cudnn_frontend_version_supported()
         ):
             if te_ops.fused.ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8.is_supported():
                 forward_ops = module._module_groups[0]._forward_ops
@@ -3744,12 +3745,6 @@ class TestSequentialModules:
             pytest.skip("MXFP8 fused grouped MLP forward is not supported on this system")
         if not te_ops.fused.BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8.is_supported():
             pytest.skip("MXFP8 fused grouped MLP backward is not supported on this system")
-        if activation == "scaled_clamped_qgeglu" and not (
-            _nvidia_cudnn_frontend_supports_scaled_clamped_qgeglu()
-        ):
-            pytest.skip(
-                "ScaledClampedQGeGLU fused grouped MLP requires nvidia-cudnn-frontend >= 1.23.0"
-            )
 
         split_sizes = [split_alignment * (i + 1) for i in range(group_size)]
         random.shuffle(split_sizes)
@@ -4106,12 +4101,6 @@ class TestSequentialModules:
             pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
         if dtype not in (torch.bfloat16, torch.float16):
             pytest.skip("MXFP8 fused grouped MLP is only supported with BF16/FP16")
-        if activation == "scaled_clamped_qgeglu" and not (
-            _nvidia_cudnn_frontend_supports_scaled_clamped_qgeglu()
-        ):
-            pytest.skip(
-                "ScaledClampedQGeGLU fused grouped MLP requires nvidia-cudnn-frontend >= 1.23.0"
-            )
 
         split_sizes = [split_alignment * (i + 1) for i in range(group_size)]
         random.shuffle(split_sizes)
@@ -4738,6 +4727,232 @@ class TestCustomOps:
         torch.testing.assert_close(y_test, y_ref, **tols)
         torch.testing.assert_close(dx_test, x_ref.grad, **tols)
         torch.testing.assert_close(dw_test, w_ref.grad, **tols)
+
+
+class TestTrainingLoops:
+
+    def _linear_train_stage(
+        self,
+        module: te.ops.Linear,
+        *,
+        steps: int = 3,
+        in_shape: Sequence[int],
+        out_shape: Sequence[int],
+        dtype: torch.type,
+        device: torch.device,
+        quantization: Optional[str],
+        recipe: Optional[transformer_engine.common.recipe.Recipe],
+    ) -> None:
+        """Perform training steps with linear op"""
+
+        # Expected numerical error
+        tols = dtype_tols(dtype)
+        if dtype == torch.float32:
+            tols = dtype_tols(torch.float16)  # TF32 GEMM
+        if quantization is not None:
+            tols = quantization_tols(quantization)
+
+        for _ in range(steps):
+            # Update parameters with random values to simulate
+            # optimizer step or FSDP param all-gather
+            with torch.no_grad():
+                module.weight.copy_(torch.empty_like(module.weight).uniform_())
+                module.bias.copy_(torch.empty_like(module.bias).uniform_())
+                for param in module.parameters():
+                    param.grad = None
+
+            # Random data
+            x_ref, x_test = make_reference_and_test_tensors(
+                in_shape,
+                quantization=quantization,
+                test_dtype=dtype,
+                test_device=device,
+            )
+            dy_ref, dy_test = make_reference_and_test_tensors(
+                out_shape,
+                quantization=quantization,
+                test_dtype=dtype,
+                test_device=device,
+            )
+            w_ref = to_cpu(module.weight)
+            b_ref = to_cpu(module.bias)
+
+            # Plain PyTorch implementation
+            y_ref = torch.nn.functional.linear(x_ref, w_ref, bias=b_ref)
+            y_ref.backward(dy_ref)
+
+            # Implementation with linear op
+            with te.autocast(enabled=quantization is not None, recipe=recipe):
+                y_test = module(x_test)
+            y_test.backward(dy_test)
+
+            # Check results
+            assert_close(y_test, y_ref, **tols)
+            assert_close_grads(x_test, x_ref, **tols)
+            assert_close_grads(module.weight, w_ref, **tols)
+            assert_close_grads(module.bias, b_ref, **tols)
+
+    @torch.inference_mode
+    def _linear_infer_stage(
+        self,
+        module: te.ops.Linear,
+        *,
+        steps: int = 3,
+        in_shape: Sequence[int],
+        dtype: torch.type,
+        device: torch.device,
+        quantization: Optional[str],
+        recipe: Optional[transformer_engine.common.recipe.Recipe],
+    ) -> None:
+        """Perform inference steps with linear op"""
+
+        # Parameter reference values
+        w_ref = to_cpu(module.weight)
+        b_ref = to_cpu(module.bias)
+
+        # Expected numerical error
+        tols = dtype_tols(dtype)
+        if dtype == torch.float32:
+            tols = dtype_tols(torch.float16)  # TF32 GEMM
+        if quantization is not None:
+            tols = quantization_tols(quantization)
+
+        for _ in range(steps):
+            # Random data
+            x_ref, x_test = make_reference_and_test_tensors(
+                in_shape,
+                quantization=quantization,
+                test_dtype=dtype,
+                test_device=device,
+            )
+
+            # Plain PyTorch implementation
+            y_ref = torch.nn.functional.linear(x_ref, w_ref, bias=b_ref)
+
+            # Implementation with linear op
+            with te.autocast(enabled=quantization is not None, recipe=recipe):
+                y_test = module(x_test)
+
+            # Check results
+            assert_close(y_test, y_ref, **tols)
+
+    @pytest.mark.parametrize("stages", (["train", "infer"] * 2, ["infer", "train"] * 2))
+    @pytest.mark.parametrize("quantization", _quantization_list)
+    @pytest.mark.parametrize("quantized_weight", (False, True))
+    def test_linear_training_loop(
+        self,
+        *,
+        stages: Sequence[str],
+        weight_shape: tuple[int, int] = (32, 32),
+        in_shape: Sequence[int] = (32, -1),
+        dtype: Optional[torch.dtype] = None,
+        device: torch.device = "cuda",
+        quantization: Optional[str],
+        quantized_weight: bool,
+    ) -> None:
+        """Training loops with linear op"""
+        if dtype is None:
+            dtype = torch.bfloat16 if is_bf16_available() else torch.float32
+
+        # Make input and weight shapes consistent
+        out_features, in_features = weight_shape
+        in_shape = list(in_shape)[:-1] + [in_features]
+        out_shape = in_shape[:-1] + [out_features]
+
+        # Skip invalid configurations
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
+        maybe_skip_quantization(quantization, dims=out_shape)
+        if quantization is None and quantized_weight:
+            pytest.skip("Quantization scheme is not specified")
+
+        # Construct module with random weights
+        recipe = make_recipe(quantization)
+        with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
+            module = te.ops.Linear(
+                in_features,
+                out_features,
+                device=device,
+                dtype=dtype,
+            )
+        with torch.no_grad():
+            for param in module.parameters():
+                param.copy_(torch.empty_like(param).uniform_())
+
+        # Training loop stages
+        for stage in stages:
+            if stage == "train":
+                self._linear_train_stage(
+                    module,
+                    in_shape=in_shape,
+                    out_shape=out_shape,
+                    dtype=dtype,
+                    device=device,
+                    quantization=quantization,
+                    recipe=recipe,
+                )
+            elif stage == "infer":
+                self._linear_infer_stage(
+                    module,
+                    in_shape=in_shape,
+                    dtype=dtype,
+                    device=device,
+                    quantization=quantization,
+                    recipe=recipe,
+                )
+            else:
+                raise ValueError(f"Unrecognized stage ({stage})")
+
+    @pytest.mark.parametrize("quantization", _quantization_list)
+    @pytest.mark.parametrize("quantized_weight", (False, True))
+    def test_linear_inference_loop(
+        self,
+        *,
+        weight_shape: tuple[int, int] = (32, 32),
+        in_shape: Sequence[int] = (32, -1),
+        dtype: Optional[torch.dtype] = None,
+        device: torch.device = "cuda",
+        quantization: Optional[str],
+        quantized_weight: bool,
+    ) -> None:
+        """Inference loop with linear op"""
+        if dtype is None:
+            dtype = torch.bfloat16 if is_bf16_available() else torch.float32
+
+        # Make input and weight shapes consistent
+        out_features, in_features = weight_shape
+        in_shape = list(in_shape)[:-1] + [in_features]
+        out_shape = in_shape[:-1] + [out_features]
+
+        # Skip invalid configurations
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
+        maybe_skip_quantization(quantization, dims=out_shape)
+        if quantization is None and quantized_weight:
+            pytest.skip("Quantization scheme is not specified")
+
+        # Construct module with random weights
+        recipe = make_recipe(quantization)
+        with (
+            torch.inference_mode(),
+            te.quantized_model_init(enabled=quantized_weight, recipe=recipe),
+        ):
+            module = te.ops.Linear(
+                in_features,
+                out_features,
+                device=device,
+                dtype=dtype,
+            )
+            for param in module.parameters():
+                param.copy_(torch.empty_like(param).uniform_())
+
+        # Inference loop
+        self._linear_infer_stage(
+            module,
+            in_shape=in_shape,
+            dtype=dtype,
+            device=device,
+            quantization=quantization,
+            recipe=recipe,
+        )
 
 
 def test_grouped_gemm_quant_cute_matches_mxfp8_quantized() -> None:
