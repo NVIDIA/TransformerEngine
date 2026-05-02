@@ -582,9 +582,13 @@ void compareResults_nvfp4(const Tensor &test,
     compare_nvfp4_tensors("output_t", test_data_t, ref_data_t, cols, rows, atol, rtol);
 }
 
-void compare_per_token_amax(const Tensor &test_amax, const std::vector<float> &ref_amax) {
-    test_amax.to_cpu();
-    const float *test_amax_data = test_amax.rowwise_cpu_dptr<float>();
+void compare_per_token_amax(const float *test_amax, const std::vector<float> &ref_amax) {
+    std::vector<float> test_amax_data(ref_amax.size());
+    ASSERT_EQ(cudaMemcpy(test_amax_data.data(),
+                         test_amax,
+                         ref_amax.size() * sizeof(float),
+                         cudaMemcpyDeviceToHost),
+              cudaSuccess);
     for (size_t row = 0; row < ref_amax.size(); ++row) {
         ASSERT_EQ(test_amax_data[row], ref_amax[row])
             << "Per-token amax mismatch at row " << row;
@@ -623,7 +627,8 @@ void performTest(float (*OP)(const float),
 
     Tensor input("input", shape, itype);
     Tensor output("output", shape, otype, true, true, NVTE_NVFP4_1D_SCALING);
-    Tensor per_token_amax;
+    float *per_token_amax = nullptr;
+    float *per_token_columnwise_amax = nullptr;
 
     std::unique_ptr<fp4e2m1x2[]> ref_output   = std::make_unique<fp4e2m1x2[]>(rows * (cols / 2));
     std::unique_ptr<fp4e2m1x2[]> ref_output_t = std::make_unique<fp4e2m1x2[]>(cols * (rows / 2));
@@ -635,7 +640,6 @@ void performTest(float (*OP)(const float),
     bool use_2d_quantization = false;
     std::vector<float> ref_per_token_amax;
     if (per_token_activation) {
-        per_token_amax = Tensor("per_token_amax", std::vector<size_t>{rows}, DType::kFloat32);
         compute_ref<InputType>(OP,
                                input.rowwise_cpu_dptr<InputType>(),
                                ref_output.get(),
@@ -651,19 +655,43 @@ void performTest(float (*OP)(const float),
                                use_2d_quantization,
                                &ref_per_token_amax);
 
+        NVTETensor output_tensor = output.data();
+        NVTEBasicTensor old_amax;
+        NVTEBasicTensor old_columnwise_amax;
+        nvte_get_tensor_param_v2(output_tensor, kNVTEAmax, &old_amax, sizeof(old_amax), nullptr);
+        nvte_get_tensor_param_v2(output_tensor, kNVTEColumnwiseAmax, &old_columnwise_amax,
+                                 sizeof(old_columnwise_amax), nullptr);
+        if (old_amax.data_ptr != nullptr) {
+            NVTE_CHECK_CUDA(cudaFree(old_amax.data_ptr));
+        }
+        if (old_columnwise_amax.data_ptr != nullptr) {
+            NVTE_CHECK_CUDA(cudaFree(old_columnwise_amax.data_ptr));
+        }
+        NVTE_CHECK_CUDA(cudaMalloc(&per_token_amax, rows * sizeof(float)));
+        NVTE_CHECK_CUDA(cudaMalloc(&per_token_columnwise_amax, rows * sizeof(float)));
+        NVTE_CHECK_CUDA(cudaMemset(per_token_amax, 0, rows * sizeof(float)));
+        NVTE_CHECK_CUDA(cudaMemset(per_token_columnwise_amax, 0, rows * sizeof(float)));
         std::vector<size_t> per_token_amax_shape = {rows};
-        NVTEBasicTensor amax_tensor = {per_token_amax.rowwise_dptr(),
+        NVTEBasicTensor amax_tensor = {per_token_amax,
                                        static_cast<NVTEDType>(DType::kFloat32),
                                        nvte_make_shape(per_token_amax_shape.data(),
                                                        per_token_amax_shape.size())};
-        NVTETensor output_tensor = output.data();
+        NVTEBasicTensor columnwise_amax_tensor = {per_token_columnwise_amax,
+                                                  static_cast<NVTEDType>(DType::kFloat32),
+                                                  nvte_make_shape(per_token_amax_shape.data(),
+                                                                  per_token_amax_shape.size())};
         nvte_set_tensor_param_v2(output_tensor, kNVTEAmax, &amax_tensor, sizeof(amax_tensor));
+        nvte_set_tensor_param_v2(output_tensor, kNVTEColumnwiseAmax, &columnwise_amax_tensor,
+                                 sizeof(columnwise_amax_tensor));
     } else {
         // Golden value of amax chosen to make the 2nd-stage scaling mantissa zero and avoid rounding issues
         const float amax = 448.0f * 6.0f * 8.0f;
+
         // Set 2nd stage NVFP4 scaling factor
         output.set_tensor_amax(amax);
         output.set_tensor_amax_columnwise(amax);
+
+    bool use_2d_quantization = false;
 
         compute_ref<InputType>(OP,
                                input.rowwise_cpu_dptr<InputType>(),
