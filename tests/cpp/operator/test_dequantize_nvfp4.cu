@@ -42,7 +42,7 @@ float2 cvt_fp4x2_to_float2(fp4e2m1x2 fp4_pair) {
 template <typename OType>
 void compute_ref_dequantize_nvfp4(const uint8_t *packed_data,
                                   const fp8e4m3 *scales,
-                                  float amax,
+                                  const std::vector<float> &amax,
                                   OType *output,
                                   size_t rows,
                                   size_t cols,
@@ -55,7 +55,8 @@ void compute_ref_dequantize_nvfp4(const uint8_t *packed_data,
     for (size_t row = 0; row < rows; ++row) {
         for (size_t block = 0; block < Mread; ++block) {
             const fp8e4m3 scale = scales[row * scale_stride + block];
-            const float final_scale = static_cast<float>(scale) * amax * factor_inv;
+            const float final_scale =
+                static_cast<float>(scale) * (amax.size() == 1 ? amax[0] : amax[row]) * factor_inv;
 
             for (size_t pair_idx = 0; pair_idx < bytes_per_block; ++pair_idx) {
                 const size_t byte_idx =
@@ -74,6 +75,43 @@ void compute_ref_dequantize_nvfp4(const uint8_t *packed_data,
     }
 }
 
+void set_per_token_amax_metadata(Tensor &output, const size_t rows) {
+    const std::vector<size_t> shape = {rows};
+    NVTETensor output_tensor = output.data();
+
+    auto replace_amax = [&](const NVTETensorParam param) {
+        NVTEBasicTensor old_amax;
+        nvte_get_tensor_param_v2(output_tensor, param, &old_amax, sizeof(old_amax), nullptr);
+        if (old_amax.data_ptr != nullptr) {
+            NVTE_CHECK_CUDA(cudaFree(old_amax.data_ptr));
+        }
+
+        float *amax = nullptr;
+        NVTE_CHECK_CUDA(cudaMalloc(&amax, rows * sizeof(float)));
+        NVTE_CHECK_CUDA(cudaMemset(amax, 0, rows * sizeof(float)));
+
+        NVTEBasicTensor amax_tensor = {amax,
+                                       static_cast<NVTEDType>(DType::kFloat32),
+                                       nvte_make_shape(shape.data(), shape.size())};
+        nvte_set_tensor_param_v2(output_tensor, param, &amax_tensor, sizeof(amax_tensor));
+    };
+
+    replace_amax(kNVTEAmax);
+    replace_amax(kNVTEColumnwiseAmax);
+}
+
+std::vector<float> get_amax_values(const Tensor &tensor) {
+    NVTEBasicTensor amax;
+    nvte_get_tensor_param_v2(tensor.data(), kNVTEAmax, &amax, sizeof(amax), nullptr);
+    const size_t numel = amax.shape.ndim == 0 ? 1 : amax.shape.data[0];
+    std::vector<float> amax_values(numel);
+    if (numel > 0) {
+        NVTE_CHECK_CUDA(cudaMemcpy(amax_values.data(), amax.data_ptr, numel * sizeof(float),
+                                   cudaMemcpyDeviceToHost));
+    }
+    return amax_values;
+}
+
 template <typename OutputType>
 float compute_amax(const test::Tensor &t, size_t rows, size_t cols) {
     t.to_cpu();
@@ -88,7 +126,8 @@ float compute_amax(const test::Tensor &t, size_t rows, size_t cols) {
 // Quantize a high-precision input to NVFP4, then dequantize and compare
 // against a CPU reference computed from the quantized data.
 template <typename OutputType>
-void performTest_dequantize_nvfp4(const size_t rows, const size_t cols) {
+void performTest_dequantize_nvfp4(const size_t rows, const size_t cols,
+                                  const bool per_token_activation) {
     using namespace test;
     DType otype = TypeInfo<OutputType>::dtype;
 
@@ -97,14 +136,22 @@ void performTest_dequantize_nvfp4(const size_t rows, const size_t cols) {
 
     Tensor quantized("quantized", std::vector<size_t>{rows, cols},
                      DType::kFloat4E2M1, true, false, NVTE_NVFP4_1D_SCALING);
-    if (rows > 0 && cols > 0) {
+    if (per_token_activation) {
+        set_per_token_amax_metadata(quantized, rows);
+    } else if (rows > 0 && cols > 0) {
         quantized.set_tensor_amax(compute_amax<OutputType>(input, rows, cols));
     } else {
         quantized.set_tensor_amax(0.0f);
     }
 
     if (rows > 0 && cols > 0) {
-        nvte_quantize(input.data(), quantized.data(), 0);
+        if (per_token_activation) {
+            QuantizationConfigWrapper quant_config;
+            quant_config.set_nvfp4_per_token_activation(true);
+            nvte_quantize_v2(input.data(), quantized.data(), quant_config, 0);
+        } else {
+            nvte_quantize(input.data(), quantized.data(), 0);
+        }
         cudaDeviceSynchronize();
     }
 
@@ -120,7 +167,7 @@ void performTest_dequantize_nvfp4(const size_t rows, const size_t cols) {
         const uint8_t *fp4_data =
             reinterpret_cast<const uint8_t *>(quantized.rowwise_cpu_dptr<fp4e2m1>());
         const fp8e4m3 *scales = quantized.rowwise_cpu_scale_inv_ptr<fp8e4m3>();
-        const float amax_val = quantized.amax();
+        const std::vector<float> amax_val = get_amax_values(quantized);
         const NVTEShape scale_shape = quantized.rowwise_scale_inv_shape();
         const size_t scale_stride = scale_shape.data[scale_shape.ndim - 1];
 
@@ -137,7 +184,8 @@ void performTest_dequantize_nvfp4(const size_t rows, const size_t cols) {
 
 // Dequantize NVFP4 with GEMM-swizzled scales and compare against compact path.
 template <typename OutputType>
-void performTest_dequantize_nvfp4_swizzled(const size_t rows, const size_t cols) {
+void performTest_dequantize_nvfp4_swizzled(const size_t rows, const size_t cols,
+                                           const bool per_token_activation) {
     using namespace test;
     DType otype = TypeInfo<OutputType>::dtype;
 
@@ -146,14 +194,22 @@ void performTest_dequantize_nvfp4_swizzled(const size_t rows, const size_t cols)
 
     Tensor quantized_compact("quantized_compact", std::vector<size_t>{rows, cols},
                              DType::kFloat4E2M1, true, false, NVTE_NVFP4_1D_SCALING);
-    if (rows > 0 && cols > 0) {
+    if (per_token_activation) {
+        set_per_token_amax_metadata(quantized_compact, rows);
+    } else if (rows > 0 && cols > 0) {
         quantized_compact.set_tensor_amax(compute_amax<OutputType>(input, rows, cols));
     } else {
         quantized_compact.set_tensor_amax(0.0f);
     }
 
     if (rows > 0 && cols > 0) {
-        nvte_quantize(input.data(), quantized_compact.data(), 0);
+        if (per_token_activation) {
+            QuantizationConfigWrapper quant_config;
+            quant_config.set_nvfp4_per_token_activation(true);
+            nvte_quantize_v2(input.data(), quantized_compact.data(), quant_config, 0);
+        } else {
+            nvte_quantize(input.data(), quantized_compact.data(), 0);
+        }
         cudaDeviceSynchronize();
     }
 
@@ -165,13 +221,30 @@ void performTest_dequantize_nvfp4_swizzled(const size_t rows, const size_t cols)
     // Create tensor with same FP4 data but swizzled scales
     Tensor quantized_swizzled("quantized_swizzled", std::vector<size_t>{rows, cols},
                               DType::kFloat4E2M1, true, false, NVTE_NVFP4_1D_SCALING);
-    quantized_swizzled.set_tensor_amax(0.0f);
+    if (per_token_activation) {
+        set_per_token_amax_metadata(quantized_swizzled, rows);
+    } else {
+        quantized_swizzled.set_tensor_amax(0.0f);
+    }
     quantized_swizzled.set_with_gemm_swizzled_scales(true);
 
     // Copy amax and scale from compact to swizzled before FP4 data,
     // since from_cpu() uploads all CPU buffers (including zero-init data).
     quantized_compact.to_cpu();
-    quantized_swizzled.set_tensor_amax(quantized_compact.amax());
+    if (per_token_activation) {
+        NVTEBasicTensor compact_amax;
+        NVTEBasicTensor swizzled_amax;
+        nvte_get_tensor_param_v2(quantized_compact.data(), kNVTEAmax, &compact_amax,
+                                 sizeof(compact_amax), nullptr);
+        nvte_get_tensor_param_v2(quantized_swizzled.data(), kNVTEAmax, &swizzled_amax,
+                                 sizeof(swizzled_amax), nullptr);
+        if (rows > 0) {
+            NVTE_CHECK_CUDA(cudaMemcpy(swizzled_amax.data_ptr, compact_amax.data_ptr,
+                                       rows * sizeof(float), cudaMemcpyDeviceToDevice));
+        }
+    } else {
+        quantized_swizzled.set_tensor_amax(quantized_compact.amax());
+    }
 
     // Copy FP4 data after from_cpu() to avoid being overwritten
     const size_t data_bytes = rows * cols / 2;
@@ -227,7 +300,8 @@ std::vector<std::pair<size_t, size_t>> nvfp4_tensor_dims = {
 
 class DequantizeNVFP4TestSuite : public ::testing::TestWithParam
     <std::tuple<std::pair<size_t, size_t>,
-                transformer_engine::DType>> {};
+                transformer_engine::DType,
+                bool>> {};
 
 TEST_P(DequantizeNVFP4TestSuite, TestDequantizeNVFP4)
 {
@@ -237,10 +311,11 @@ TEST_P(DequantizeNVFP4TestSuite, TestDequantizeNVFP4)
 
     const auto tensor_size = std::get<0>(GetParam());
     const DType output_type = std::get<1>(GetParam());
+    const bool per_token_activation = std::get<2>(GetParam());
 
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(output_type, OutputType,
         performTest_dequantize_nvfp4<OutputType>(
-            tensor_size.first, tensor_size.second);
+            tensor_size.first, tensor_size.second, per_token_activation);
     );
 }
 
@@ -249,19 +324,22 @@ INSTANTIATE_TEST_SUITE_P(
     DequantizeNVFP4TestSuite,
     ::testing::Combine(
         ::testing::ValuesIn(nvfp4_tensor_dims),
-        ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16)),
+        ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
+        ::testing::Bool()),
     [](const testing::TestParamInfo<DequantizeNVFP4TestSuite::ParamType>& info)
     {
         std::string name = std::to_string(std::get<0>(info.param).first) + "X" +
                            std::to_string(std::get<0>(info.param).second) + "X" +
-                           test::typeName(std::get<1>(info.param));
+                           test::typeName(std::get<1>(info.param)) + "X" +
+                           (std::get<2>(info.param) ? "PerToken" : "PerTensor");
         return name;
     }
 );
 
 class DequantizeNVFP4SwizzledTestSuite : public ::testing::TestWithParam
     <std::tuple<std::pair<size_t, size_t>,
-                transformer_engine::DType>> {};
+                transformer_engine::DType,
+                bool>> {};
 
 TEST_P(DequantizeNVFP4SwizzledTestSuite, TestDequantizeNVFP4Swizzled)
 {
@@ -271,10 +349,11 @@ TEST_P(DequantizeNVFP4SwizzledTestSuite, TestDequantizeNVFP4Swizzled)
 
     const auto tensor_size = std::get<0>(GetParam());
     const DType output_type = std::get<1>(GetParam());
+    const bool per_token_activation = std::get<2>(GetParam());
 
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(output_type, OutputType,
         performTest_dequantize_nvfp4_swizzled<OutputType>(
-            tensor_size.first, tensor_size.second);
+            tensor_size.first, tensor_size.second, per_token_activation);
     );
 }
 
@@ -283,12 +362,14 @@ INSTANTIATE_TEST_SUITE_P(
     DequantizeNVFP4SwizzledTestSuite,
     ::testing::Combine(
         ::testing::ValuesIn(nvfp4_tensor_dims),
-        ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16)),
+        ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
+        ::testing::Bool()),
     [](const testing::TestParamInfo<DequantizeNVFP4SwizzledTestSuite::ParamType>& info)
     {
         std::string name = std::to_string(std::get<0>(info.param).first) + "X" +
                            std::to_string(std::get<0>(info.param).second) + "X" +
                            test::typeName(std::get<1>(info.param)) + "X" +
+                           (std::get<2>(info.param) ? "PerToken" : "PerTensor") + "X" +
                            "Swizzled";
         return name;
     }
