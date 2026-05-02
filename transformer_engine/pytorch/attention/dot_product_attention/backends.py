@@ -2175,3 +2175,42 @@ class FusedAttention(torch.nn.Module):
             return output[0].view(*output[0].shape[:-2], -1), output[1]
         # ...hd -> ...(hd)
         return output.view(*output.shape[:-2], -1)
+
+
+class MLATritonAttention(torch.nn.Module):
+    """Triton MLA backend wrapping :func:`transformer_engine.pytorch.triton.mla.mla_attention`.
+
+    Opt-in path for SM80 MLA-shaped attention (``head_dim_qk != head_dim_v``).
+    Activated by setting ``NVTE_MLA_TRITON=1``; see
+    :class:`DotProductAttention` for the dispatch conditions. Inputs are
+    expected to already be in ``[B, S, H, D]`` (``bshd``) or
+    ``[S, B, H, D]`` (``sbhd``) layout — ``thd`` and ``no_mask``-padding
+    variants fall through to the regular cascade.
+    """
+
+    def __init__(self, softmax_scale: float, attention_dropout: float = 0.0) -> None:
+        super().__init__()
+        self.softmax_scale = softmax_scale
+        if attention_dropout != 0.0:
+            raise ValueError("MLATritonAttention does not support attention_dropout > 0.")
+
+    def forward(
+        self,
+        query_layer: torch.Tensor,
+        key_layer: torch.Tensor,
+        value_layer: torch.Tensor,
+        qkv_format: str,
+        is_causal: bool,
+    ) -> torch.Tensor:
+        # Imported lazily so that environments without triton.mla don't pay
+        # the import cost when this backend is never selected.
+        from transformer_engine.pytorch.triton.mla import mla_attention
+
+        return mla_attention(
+            query_layer,
+            key_layer,
+            value_layer,
+            softmax_scale=self.softmax_scale,
+            is_causal=is_causal,
+            qkv_format=qkv_format,
+        )
