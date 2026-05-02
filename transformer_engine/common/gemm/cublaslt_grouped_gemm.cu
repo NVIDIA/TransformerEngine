@@ -861,10 +861,12 @@ __forceinline__ __device__ int64_t padded_mxfp8_scale_inv_bytes(int64_t first, i
   // shape (first, last). Rowwise scales use rows=first, cols=last; columnwise
   // scales swap the orientation since they are stored in column-major order.
   const int64_t scale_dim_y = rowwise ? first : last;
-  const int64_t padded_scale_dim_y = ((scale_dim_y + scale_tile_y - 1) / scale_tile_y) * scale_tile_y;
+  const int64_t padded_scale_dim_y =
+      ((scale_dim_y + scale_tile_y - 1) / scale_tile_y) * scale_tile_y;
   const int64_t data_dim_x = rowwise ? last : first;
   const int64_t scale_dim_x = (data_dim_x + kMxfp8BlockSize - 1) / kMxfp8BlockSize;
-  const int64_t padded_scale_dim_x = ((scale_dim_x + scale_tile_x - 1) / scale_tile_x) * scale_tile_x;
+  const int64_t padded_scale_dim_x =
+      ((scale_dim_x + scale_tile_x - 1) / scale_tile_x) * scale_tile_x;
   // MXFP8 scales are E8M0 (1 byte per element), so element count == byte count.
   return padded_scale_dim_y * padded_scale_dim_x;
 }
@@ -1172,9 +1174,8 @@ inline void launch_grouped_gemm_setup(
       A_sel.dptr, B_sel.dptr, c_base, d_base, A_meta, B_meta, C_meta, D_meta, a_elem_size,
       b_elem_size, c_elem_size, d_elem_size, static_cast<float *>(alpha_tensor->data.dptr),
       static_cast<float *>(beta_tensor->data.dptr), reinterpret_cast<float *>(A_sel.scale_inv),
-      reinterpret_cast<float *>(B_sel.scale_inv), a_rowwise, b_rowwise,
-      A_sel.scaling_mode, num_tensors, a_multi_tensor_args, c_multi_tensor_args,
-      d_multi_tensor_args);
+      reinterpret_cast<float *>(B_sel.scale_inv), a_rowwise, b_rowwise, A_sel.scaling_mode,
+      num_tensors, a_multi_tensor_args, c_multi_tensor_args, d_multi_tensor_args);
 
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
