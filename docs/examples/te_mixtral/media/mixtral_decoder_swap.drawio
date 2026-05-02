@@ -1,0 +1,104 @@
+<mxfile host="app.diagrams.net" modified="2026-05-01T00:00:00.000Z" agent="claude" version="24.0.0" type="device">
+  <diagram name="mixtral-decoder-swap" id="mixtral-decoder-swap">
+    <mxGraphModel dx="1600" dy="1100" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1240" pageHeight="660" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="title_hf" value="HF MixtralDecoderLayer" style="text;html=1;align=center;fontSize=20;fontStyle=1;fontColor=#1F4E79;" vertex="1" parent="1">
+          <mxGeometry x="60" y="20" width="500" height="32" as="geometry" />
+        </mxCell>
+        <mxCell id="title_te" value="TE NVMixtralDecoderLayer" style="text;html=1;align=center;fontSize=20;fontStyle=1;fontColor=#1F4E79;" vertex="1" parent="1">
+          <mxGeometry x="680" y="20" width="500" height="32" as="geometry" />
+        </mxCell>
+
+        <mxCell id="hf_box" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6B656;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="60" y="60" width="500" height="580" as="geometry" />
+        </mxCell>
+        <mxCell id="te_box" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#D5E8D4;strokeColor=#82B366;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="680" y="60" width="500" height="580" as="geometry" />
+        </mxCell>
+
+        <mxCell id="hf_in_ln" value="input_layernorm.weight" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#E1D5E7;strokeColor=#9673A6;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="160" y="80" width="300" height="44" as="geometry" />
+        </mxCell>
+
+        <mxCell id="hf_attn_g" value="self_attn  (4 separate Linear)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#6C8EBF;dashed=1;verticalAlign=top;fontStyle=2;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="80" y="140" width="460" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="hf_q" value="self_attn.q_proj.weight" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="100" y="170" width="130" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="hf_k" value="self_attn.k_proj.weight" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="245" y="170" width="130" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="hf_v" value="self_attn.v_proj.weight" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="390" y="170" width="130" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="hf_o" value="self_attn.o_proj.weight" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="200" y="240" width="220" height="40" as="geometry" />
+        </mxCell>
+
+        <mxCell id="hf_post_ln" value="post_attention_layernorm.weight" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#E1D5E7;strokeColor=#9673A6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="160" y="310" width="300" height="40" as="geometry" />
+        </mxCell>
+
+        <mxCell id="hf_moe_g" value="mlp  (block_sparse_moe : router + 8 experts, packed)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#B85450;dashed=1;verticalAlign=top;fontStyle=2;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="80" y="370" width="460" height="250" as="geometry" />
+        </mxCell>
+        <mxCell id="hf_gate" value="mlp.gate.weight" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#F8CECC;strokeColor=#B85450;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="160" y="400" width="300" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="hf_gu" value="mlp.experts.gate_up_proj&#10;[num_experts, 2 &#183; ffn, h]&#10;SwiGLU gate + up packed" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="100" y="455" width="420" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="hf_dn" value="mlp.experts.down_proj&#10;[num_experts, h, ffn]" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="100" y="540" width="420" height="65" as="geometry" />
+        </mxCell>
+
+        <mxCell id="te_attn_g" value="self_attention  (te.MultiheadAttention,  fuse_qkv_params=True,  input_layernorm=True)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#82B366;dashed=1;verticalAlign=top;fontStyle=2;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="700" y="80" width="460" height="210" as="geometry" />
+        </mxCell>
+        <mxCell id="te_lnq" value="self_attention.layernorm_qkv.layer_norm_weight" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#D5E8D4;strokeColor=#82B366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="780" y="110" width="300" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="te_qkv" value="self_attention.layernorm_qkv.weight&#10;[3 &#183; h, h]   Q | K | V interleaved&#10;one fused GEMM replaces q_proj + k_proj + v_proj" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#D5E8D4;strokeColor=#82B366;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="720" y="160" width="420" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="te_proj" value="self_attention.proj.weight" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#D5E8D4;strokeColor=#82B366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="780" y="240" width="300" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="te_post_ln" value="post_attention_layernorm.weight" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#E1D5E7;strokeColor=#9673A6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="780" y="310" width="300" height="40" as="geometry" />
+        </mxCell>
+
+        <mxCell id="te_moe_g" value="mlp  (NVMixtralSparseMoeBlock : router + 2 GroupedLinear)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#B85450;dashed=1;verticalAlign=top;fontStyle=2;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="700" y="370" width="460" height="250" as="geometry" />
+        </mxCell>
+        <mxCell id="te_gate" value="mlp.gate.weight" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#F8CECC;strokeColor=#B85450;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="780" y="400" width="300" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="te_gu" value="mlp.experts_gate_up_weight&#10;[num_local_experts, 2 &#183; ffn, h]&#10;GroupedLinear (1 batched GEMM)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="720" y="455" width="420" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="te_dn" value="mlp.experts_down_weight&#10;[num_local_experts, h, ffn]" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="720" y="540" width="420" height="65" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e1" style="endArrow=classic;html=1;strokeColor=#9673A6;strokeWidth=2;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="hf_in_ln" target="te_lnq"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e2" style="endArrow=classic;html=1;strokeColor=#6C8EBF;strokeWidth=2;exitX=1;exitY=0.5;entryX=0;entryY=0.3;" edge="1" parent="1" source="hf_q" target="te_qkv"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e3" style="endArrow=classic;html=1;strokeColor=#6C8EBF;strokeWidth=2;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="hf_k" target="te_qkv"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e4" style="endArrow=classic;html=1;strokeColor=#6C8EBF;strokeWidth=2;exitX=1;exitY=0.5;entryX=0;entryY=0.7;" edge="1" parent="1" source="hf_v" target="te_qkv"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e5" style="endArrow=classic;html=1;strokeColor=#6C8EBF;strokeWidth=2;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="hf_o" target="te_proj"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e6" style="endArrow=classic;html=1;strokeColor=#9673A6;strokeWidth=2;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="hf_post_ln" target="te_post_ln"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e7" style="endArrow=classic;html=1;strokeColor=#B85450;strokeWidth=2;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="hf_gate" target="te_gate"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e8" style="endArrow=classic;html=1;strokeColor=#D79B00;strokeWidth=2;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="hf_gu" target="te_gu"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e9" style="endArrow=classic;html=1;strokeColor=#D79B00;strokeWidth=2;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="hf_dn" target="te_dn"><mxGeometry relative="1" as="geometry"/></mxCell>
+
+        <mxCell id="legend" value="Mappings handled by replace_params() in te_mixtral.py  (also see BioNemo bionemo-recipes/models/mixtral/convert.py)" style="text;html=1;align=center;fontSize=11;fontStyle=2;fontColor=#444;" vertex="1" parent="1">
+          <mxGeometry x="60" y="635" width="1120" height="20" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

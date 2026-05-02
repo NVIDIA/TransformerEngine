@@ -1,0 +1,97 @@
+<mxfile host="app.diagrams.net" modified="2026-05-01T00:00:00.000Z" agent="claude" version="24.0.0" type="device">
+  <diagram name="dense-to-sparse" id="dense-to-sparse">
+    <mxGraphModel dx="1400" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1240" pageHeight="620" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="title_l" value="Dense Transformer block" style="text;html=1;align=center;fontSize=20;fontStyle=1;fontColor=#1F4E79;" vertex="1" parent="1">
+          <mxGeometry x="60" y="20" width="500" height="32" as="geometry" />
+        </mxCell>
+        <mxCell id="title_r" value="Sparse MoE Transformer block" style="text;html=1;align=center;fontSize=20;fontStyle=1;fontColor=#1F4E79;" vertex="1" parent="1">
+          <mxGeometry x="680" y="20" width="500" height="32" as="geometry" />
+        </mxCell>
+
+        <mxCell id="box_l" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6B656;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="60" y="60" width="500" height="540" as="geometry" />
+        </mxCell>
+        <mxCell id="box_r" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#D5E8D4;strokeColor=#82B366;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="680" y="60" width="500" height="540" as="geometry" />
+        </mxCell>
+
+        <mxCell id="l_in" value="hidden_states  [B, T, h]" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="160" y="80" width="300" height="36" as="geometry" />
+        </mxCell>
+        <mxCell id="l_attn" value="Self-Attention" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="160" y="140" width="300" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="l_norm1" value="Residual + RMSNorm" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#E1D5E7;strokeColor=#9673A6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="160" y="210" width="300" height="30" as="geometry" />
+        </mxCell>
+
+        <mxCell id="l_mlp" value="MLP  (dense FFN)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;fontSize=12;fontStyle=1;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="120" y="260" width="380" height="170" as="geometry" />
+        </mxCell>
+        <mxCell id="l_w13" value="gate_proj, up_proj   [ffn, h]" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#D79B00;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="140" y="295" width="340" height="36" as="geometry" />
+        </mxCell>
+        <mxCell id="l_act" value="SiLU(gate_proj &#183; x) * (up_proj &#183; x)" style="text;html=1;align=center;fontSize=11;fontStyle=2;fontColor=#666;" vertex="1" parent="1">
+          <mxGeometry x="140" y="335" width="340" height="22" as="geometry" />
+        </mxCell>
+        <mxCell id="l_w2" value="down_proj   [h, ffn]" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#D79B00;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="140" y="365" width="340" height="36" as="geometry" />
+        </mxCell>
+        <mxCell id="l_mlp_note" value="every token flows through one dense FFN" style="text;html=1;align=center;fontSize=10;fontStyle=2;fontColor=#666;" vertex="1" parent="1">
+          <mxGeometry x="120" y="405" width="380" height="20" as="geometry" />
+        </mxCell>
+
+        <mxCell id="l_norm2" value="Residual + RMSNorm" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#E1D5E7;strokeColor=#9673A6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="160" y="450" width="300" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="l_out" value="output  [B, T, h]" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="160" y="500" width="300" height="36" as="geometry" />
+        </mxCell>
+
+        <mxCell id="r_in" value="hidden_states  [B, T, h]" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="780" y="80" width="300" height="36" as="geometry" />
+        </mxCell>
+        <mxCell id="r_attn" value="Self-Attention" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="780" y="140" width="300" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="r_norm1" value="Residual + RMSNorm" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#E1D5E7;strokeColor=#9673A6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="780" y="210" width="300" height="30" as="geometry" />
+        </mxCell>
+
+        <mxCell id="r_router" value="Router  (gate.weight  [num_experts, h]  &#8594;  softmax  &#8594;  top-k=2)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#F8CECC;strokeColor=#B85450;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="720" y="260" width="420" height="46" as="geometry" />
+        </mxCell>
+
+        <mxCell id="r_experts" value="Sparse MoE  (8 experts in parallel, top-2 fire per token)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;fontSize=11;fontStyle=1;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="720" y="320" width="420" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="e0" value="E0" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#D79B00;fontSize=10;" vertex="1" parent="1"><mxGeometry x="735" y="350" width="44" height="60" as="geometry"/></mxCell>
+        <mxCell id="e1" value="E1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#D79B00;fontSize=10;" vertex="1" parent="1"><mxGeometry x="785" y="350" width="44" height="60" as="geometry"/></mxCell>
+        <mxCell id="e2" value="E2" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#D79B00;fontSize=10;" vertex="1" parent="1"><mxGeometry x="835" y="350" width="44" height="60" as="geometry"/></mxCell>
+        <mxCell id="e3" value="E3" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#D79B00;fontSize=10;" vertex="1" parent="1"><mxGeometry x="885" y="350" width="44" height="60" as="geometry"/></mxCell>
+        <mxCell id="e4" value="E4" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#D79B00;fontSize=10;" vertex="1" parent="1"><mxGeometry x="935" y="350" width="44" height="60" as="geometry"/></mxCell>
+        <mxCell id="e5" value="E5" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#D79B00;fontSize=10;" vertex="1" parent="1"><mxGeometry x="985" y="350" width="44" height="60" as="geometry"/></mxCell>
+        <mxCell id="e6" value="E6" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#D79B00;fontSize=10;" vertex="1" parent="1"><mxGeometry x="1035" y="350" width="44" height="60" as="geometry"/></mxCell>
+        <mxCell id="e7" value="E7" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#D79B00;fontSize=10;" vertex="1" parent="1"><mxGeometry x="1085" y="350" width="44" height="60" as="geometry"/></mxCell>
+
+        <mxCell id="r_combine" value="Weighted top-k combine" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#F8CECC;strokeColor=#B85450;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="780" y="440" width="300" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="r_norm2" value="Residual + RMSNorm" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#E1D5E7;strokeColor=#9673A6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="780" y="480" width="300" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="r_out" value="output  [B, T, h]" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="780" y="520" width="300" height="36" as="geometry" />
+        </mxCell>
+
+        <mxCell id="arrow_swap" value="dense MLP  &#8594;  Router + 8 experts" style="text;html=1;align=center;fontSize=11;fontStyle=2;fontColor=#444;" vertex="1" parent="1">
+          <mxGeometry x="560" y="335" width="120" height="40" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

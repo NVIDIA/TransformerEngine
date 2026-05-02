@@ -1,0 +1,102 @@
+<mxfile host="app.diagrams.net" modified="2026-05-01T00:00:00.000Z" agent="claude" version="24.0.0" type="device">
+  <diagram name="moe-loop-vs-grouped" id="moe-loop-vs-grouped">
+    <mxGraphModel dx="1400" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1240" pageHeight="660" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="title_l" value="HF MoE  -  Python loop  -&gt;  8 separate nn.Linear" style="text;html=1;align=center;fontSize=18;fontStyle=1;fontColor=#1F4E79;" vertex="1" parent="1">
+          <mxGeometry x="60" y="20" width="500" height="32" as="geometry" />
+        </mxCell>
+        <mxCell id="title_r" value="TE MoE  -  GroupedLinear  -&gt;  1 batched GEMM" style="text;html=1;align=center;fontSize=18;fontStyle=1;fontColor=#1F4E79;" vertex="1" parent="1">
+          <mxGeometry x="680" y="20" width="500" height="32" as="geometry" />
+        </mxCell>
+
+        <mxCell id="box_l" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6B656;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="60" y="60" width="500" height="580" as="geometry" />
+        </mxCell>
+        <mxCell id="box_r" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#D5E8D4;strokeColor=#82B366;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="680" y="60" width="500" height="580" as="geometry" />
+        </mxCell>
+
+        <mxCell id="lh" value="each expert sees its own (variable, small) token batch" style="text;html=1;align=center;fontSize=11;fontStyle=2;fontColor=#666;" vertex="1" parent="1">
+          <mxGeometry x="60" y="78" width="500" height="22" as="geometry" />
+        </mxCell>
+
+        <mxCell id="l_lab0" value="E0  (n=18)" style="text;html=1;align=right;fontSize=10;" vertex="1" parent="1"><mxGeometry x="70" y="115" width="48" height="22" as="geometry"/></mxCell>
+        <mxCell id="l_tok0" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;" vertex="1" parent="1"><mxGeometry x="125" y="115" width="180" height="22" as="geometry"/></mxCell>
+        <mxCell id="l_lin0" value="Expert FFN  (gate_up + down)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;fontSize=10;" vertex="1" parent="1"><mxGeometry x="380" y="115" width="160" height="22" as="geometry"/></mxCell>
+
+        <mxCell id="l_lab1" value="E1  (n=9)" style="text;html=1;align=right;fontSize=10;" vertex="1" parent="1"><mxGeometry x="70" y="150" width="48" height="22" as="geometry"/></mxCell>
+        <mxCell id="l_tok1" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;" vertex="1" parent="1"><mxGeometry x="125" y="150" width="90" height="22" as="geometry"/></mxCell>
+        <mxCell id="l_lin1" value="Expert FFN  (gate_up + down)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;fontSize=10;" vertex="1" parent="1"><mxGeometry x="380" y="150" width="160" height="22" as="geometry"/></mxCell>
+
+        <mxCell id="l_lab2" value="E2  (n=14)" style="text;html=1;align=right;fontSize=10;" vertex="1" parent="1"><mxGeometry x="70" y="185" width="48" height="22" as="geometry"/></mxCell>
+        <mxCell id="l_tok2" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;" vertex="1" parent="1"><mxGeometry x="125" y="185" width="140" height="22" as="geometry"/></mxCell>
+        <mxCell id="l_lin2" value="Expert FFN  (gate_up + down)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;fontSize=10;" vertex="1" parent="1"><mxGeometry x="380" y="185" width="160" height="22" as="geometry"/></mxCell>
+
+        <mxCell id="l_lab3" value="E3  (n=6)" style="text;html=1;align=right;fontSize=10;" vertex="1" parent="1"><mxGeometry x="70" y="220" width="48" height="22" as="geometry"/></mxCell>
+        <mxCell id="l_tok3" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;" vertex="1" parent="1"><mxGeometry x="125" y="220" width="60" height="22" as="geometry"/></mxCell>
+        <mxCell id="l_lin3" value="Expert FFN  (gate_up + down)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;fontSize=10;" vertex="1" parent="1"><mxGeometry x="380" y="220" width="160" height="22" as="geometry"/></mxCell>
+
+        <mxCell id="l_lab4" value="E4  (n=12)" style="text;html=1;align=right;fontSize=10;" vertex="1" parent="1"><mxGeometry x="70" y="255" width="48" height="22" as="geometry"/></mxCell>
+        <mxCell id="l_tok4" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;" vertex="1" parent="1"><mxGeometry x="125" y="255" width="120" height="22" as="geometry"/></mxCell>
+        <mxCell id="l_lin4" value="Expert FFN  (gate_up + down)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;fontSize=10;" vertex="1" parent="1"><mxGeometry x="380" y="255" width="160" height="22" as="geometry"/></mxCell>
+
+        <mxCell id="l_lab5" value="E5  (n=20)" style="text;html=1;align=right;fontSize=10;" vertex="1" parent="1"><mxGeometry x="70" y="290" width="48" height="22" as="geometry"/></mxCell>
+        <mxCell id="l_tok5" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;" vertex="1" parent="1"><mxGeometry x="125" y="290" width="200" height="22" as="geometry"/></mxCell>
+        <mxCell id="l_lin5" value="Expert FFN  (gate_up + down)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;fontSize=10;" vertex="1" parent="1"><mxGeometry x="380" y="290" width="160" height="22" as="geometry"/></mxCell>
+
+        <mxCell id="l_lab6" value="E6  (n=4)" style="text;html=1;align=right;fontSize=10;" vertex="1" parent="1"><mxGeometry x="70" y="325" width="48" height="22" as="geometry"/></mxCell>
+        <mxCell id="l_tok6" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;" vertex="1" parent="1"><mxGeometry x="125" y="325" width="40" height="22" as="geometry"/></mxCell>
+        <mxCell id="l_lin6" value="Expert FFN  (gate_up + down)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;fontSize=10;" vertex="1" parent="1"><mxGeometry x="380" y="325" width="160" height="22" as="geometry"/></mxCell>
+
+        <mxCell id="l_lab7" value="E7  (n=10)" style="text;html=1;align=right;fontSize=10;" vertex="1" parent="1"><mxGeometry x="70" y="360" width="48" height="22" as="geometry"/></mxCell>
+        <mxCell id="l_tok7" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;" vertex="1" parent="1"><mxGeometry x="125" y="360" width="100" height="22" as="geometry"/></mxCell>
+        <mxCell id="l_lin7" value="Expert FFN  (gate_up + down)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;fontSize=10;" vertex="1" parent="1"><mxGeometry x="380" y="360" width="160" height="22" as="geometry"/></mxCell>
+
+        <mxCell id="l_foot1" value="-&gt;  16 small Linear GEMMs / layer  (gate_up + down per expert)" style="text;html=1;align=center;fontSize=11;fontStyle=2;fontColor=#444;" vertex="1" parent="1">
+          <mxGeometry x="60" y="430" width="500" height="22" as="geometry" />
+        </mxCell>
+        <mxCell id="l_foot2" value="small per-expert m means GEMMs don't saturate tensor cores" style="text;html=1;align=center;fontSize=11;fontStyle=2;fontColor=#666;" vertex="1" parent="1">
+          <mxGeometry x="60" y="455" width="500" height="22" as="geometry" />
+        </mxCell>
+
+        <mxCell id="rh" value="all expert token batches packed; one CUDA kernel launch" style="text;html=1;align=center;fontSize=11;fontStyle=2;fontColor=#666;" vertex="1" parent="1">
+          <mxGeometry x="680" y="78" width="500" height="22" as="geometry" />
+        </mxCell>
+
+        <mxCell id="r_in_hdr" value="concatenated input tokens   [sum_n, h]   (rows = experts, widths = per-expert token counts)" style="text;html=1;align=center;fontSize=10;fontStyle=2;fontColor=#444;" vertex="1" parent="1">
+          <mxGeometry x="680" y="108" width="500" height="20" as="geometry" />
+        </mxCell>
+
+        <mxCell id="r_e0" value="E0" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=10;" vertex="1" parent="1"><mxGeometry x="720" y="135" width="180" height="20" as="geometry"/></mxCell>
+        <mxCell id="r_e1" value="E1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=10;" vertex="1" parent="1"><mxGeometry x="720" y="158" width="90" height="20" as="geometry"/></mxCell>
+        <mxCell id="r_e2" value="E2" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=10;" vertex="1" parent="1"><mxGeometry x="720" y="181" width="140" height="20" as="geometry"/></mxCell>
+        <mxCell id="r_e3" value="E3" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=10;" vertex="1" parent="1"><mxGeometry x="720" y="204" width="60" height="20" as="geometry"/></mxCell>
+        <mxCell id="r_e4" value="E4" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=10;" vertex="1" parent="1"><mxGeometry x="720" y="227" width="120" height="20" as="geometry"/></mxCell>
+        <mxCell id="r_e5" value="E5" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=10;" vertex="1" parent="1"><mxGeometry x="720" y="250" width="200" height="20" as="geometry"/></mxCell>
+        <mxCell id="r_e6" value="E6" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=10;" vertex="1" parent="1"><mxGeometry x="720" y="273" width="40" height="20" as="geometry"/></mxCell>
+        <mxCell id="r_e7" value="E7" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=10;" vertex="1" parent="1"><mxGeometry x="720" y="296" width="100" height="20" as="geometry"/></mxCell>
+
+        <mxCell id="r_grouped" value="GroupedLinear   (1 batched GEMM)&#10;fused kernel processes all 8 expert blocks in a single launch" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="710" y="345" width="440" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="r_out_hdr" value="output  [sum_n, h]   (same per-expert stacking)" style="text;html=1;align=center;fontSize=10;fontStyle=2;fontColor=#444;" vertex="1" parent="1">
+          <mxGeometry x="680" y="455" width="500" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="r_out" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#D5E8D4;strokeColor=#82B366;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="720" y="480" width="420" height="22" as="geometry" />
+        </mxCell>
+
+        <mxCell id="r_splits" value="m_splits = [18, 9, 14, 6, 12, 20, 4, 10]   (per-expert token counts)" style="text;html=1;align=center;fontSize=11;fontStyle=2;fontColor=#444;" vertex="1" parent="1">
+          <mxGeometry x="680" y="525" width="500" height="22" as="geometry" />
+        </mxCell>
+        <mxCell id="r_note" value="passed to GroupedLinear so the kernel knows how to slice the batched GEMM" style="text;html=1;align=center;fontSize=10;fontStyle=2;fontColor=#666;" vertex="1" parent="1">
+          <mxGeometry x="680" y="550" width="500" height="20" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

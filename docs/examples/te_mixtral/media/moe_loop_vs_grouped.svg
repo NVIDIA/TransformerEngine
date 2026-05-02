@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 1240 660" width="1240" height="660"
+     font-family="Helvetica, Arial, sans-serif" font-size="12">
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#444"/>
+    </marker>
+  </defs>
+
+  <rect width="1240" height="660" fill="#ffffff"/>
+
+  <text x="310" y="42" text-anchor="middle" font-size="18" font-weight="bold" fill="#1F4E79">HF MoE  -  Python loop  &#8594;  8 separate nn.Linear</text>
+  <text x="930" y="42" text-anchor="middle" font-size="18" font-weight="bold" fill="#1F4E79">TE MoE  -  GroupedLinear  &#8594;  1 batched GEMM</text>
+
+  <rect x="60" y="60" width="500" height="580" fill="#FFF2CC" stroke="#D6B656" stroke-width="2"/>
+  <rect x="680" y="60" width="500" height="580" fill="#D5E8D4" stroke="#82B366" stroke-width="2"/>
+
+  <text x="310" y="93" text-anchor="middle" font-size="11" font-style="italic" fill="#666">each expert sees its own (variable, small) token batch</text>
+
+  <g font-size="10">
+    <text x="115" y="131" text-anchor="end">E0  (n=18)</text>
+    <rect x="125" y="115" width="180" height="22" fill="#DAE8FC" stroke="#6C8EBF"/>
+    <line x1="307" y1="126" x2="378" y2="126" stroke="#444" stroke-width="1.2" marker-end="url(#ar)"/>
+    <rect x="380" y="115" width="160" height="22" fill="#FFE6CC" stroke="#D79B00"/>
+    <text x="460" y="131" text-anchor="middle">Expert FFN  (gate_up + down)</text>
+
+    <text x="115" y="166" text-anchor="end">E1  (n=9)</text>
+    <rect x="125" y="150" width="90" height="22" fill="#DAE8FC" stroke="#6C8EBF"/>
+    <line x1="217" y1="161" x2="378" y2="161" stroke="#444" stroke-width="1.2" marker-end="url(#ar)"/>
+    <rect x="380" y="150" width="160" height="22" fill="#FFE6CC" stroke="#D79B00"/>
+    <text x="460" y="166" text-anchor="middle">Expert FFN  (gate_up + down)</text>
+
+    <text x="115" y="201" text-anchor="end">E2  (n=14)</text>
+    <rect x="125" y="185" width="140" height="22" fill="#DAE8FC" stroke="#6C8EBF"/>
+    <line x1="267" y1="196" x2="378" y2="196" stroke="#444" stroke-width="1.2" marker-end="url(#ar)"/>
+    <rect x="380" y="185" width="160" height="22" fill="#FFE6CC" stroke="#D79B00"/>
+    <text x="460" y="201" text-anchor="middle">Expert FFN  (gate_up + down)</text>
+
+    <text x="115" y="236" text-anchor="end">E3  (n=6)</text>
+    <rect x="125" y="220" width="60" height="22" fill="#DAE8FC" stroke="#6C8EBF"/>
+    <line x1="187" y1="231" x2="378" y2="231" stroke="#444" stroke-width="1.2" marker-end="url(#ar)"/>
+    <rect x="380" y="220" width="160" height="22" fill="#FFE6CC" stroke="#D79B00"/>
+    <text x="460" y="236" text-anchor="middle">Expert FFN  (gate_up + down)</text>
+
+    <text x="115" y="271" text-anchor="end">E4  (n=12)</text>
+    <rect x="125" y="255" width="120" height="22" fill="#DAE8FC" stroke="#6C8EBF"/>
+    <line x1="247" y1="266" x2="378" y2="266" stroke="#444" stroke-width="1.2" marker-end="url(#ar)"/>
+    <rect x="380" y="255" width="160" height="22" fill="#FFE6CC" stroke="#D79B00"/>
+    <text x="460" y="271" text-anchor="middle">Expert FFN  (gate_up + down)</text>
+
+    <text x="115" y="306" text-anchor="end">E5  (n=20)</text>
+    <rect x="125" y="290" width="200" height="22" fill="#DAE8FC" stroke="#6C8EBF"/>
+    <line x1="327" y1="301" x2="378" y2="301" stroke="#444" stroke-width="1.2" marker-end="url(#ar)"/>
+    <rect x="380" y="290" width="160" height="22" fill="#FFE6CC" stroke="#D79B00"/>
+    <text x="460" y="306" text-anchor="middle">Expert FFN  (gate_up + down)</text>
+
+    <text x="115" y="341" text-anchor="end">E6  (n=4)</text>
+    <rect x="125" y="325" width="40" height="22" fill="#DAE8FC" stroke="#6C8EBF"/>
+    <line x1="167" y1="336" x2="378" y2="336" stroke="#444" stroke-width="1.2" marker-end="url(#ar)"/>
+    <rect x="380" y="325" width="160" height="22" fill="#FFE6CC" stroke="#D79B00"/>
+    <text x="460" y="341" text-anchor="middle">Expert FFN  (gate_up + down)</text>
+
+    <text x="115" y="376" text-anchor="end">E7  (n=10)</text>
+    <rect x="125" y="360" width="100" height="22" fill="#DAE8FC" stroke="#6C8EBF"/>
+    <line x1="227" y1="371" x2="378" y2="371" stroke="#444" stroke-width="1.2" marker-end="url(#ar)"/>
+    <rect x="380" y="360" width="160" height="22" fill="#FFE6CC" stroke="#D79B00"/>
+    <text x="460" y="376" text-anchor="middle">Expert FFN  (gate_up + down)</text>
+  </g>
+
+  <text x="310" y="445" text-anchor="middle" font-size="11" font-style="italic" fill="#444">&#8594;  16 small Linear GEMMs / layer  (gate_up + down per expert)</text>
+  <text x="310" y="468" text-anchor="middle" font-size="11" font-style="italic" fill="#666">small per-expert m means GEMMs don't saturate tensor cores</text>
+
+  <text x="930" y="93" text-anchor="middle" font-size="11" font-style="italic" fill="#666">all expert token batches packed; one CUDA kernel launch</text>
+
+  <text x="930" y="121" text-anchor="middle" font-size="10" font-style="italic" fill="#444">concatenated input tokens   [sum_n, h]   (rows = experts, widths = per-expert token counts)</text>
+
+  <g font-size="10">
+    <rect x="720" y="135" width="180" height="20" fill="#DAE8FC" stroke="#6C8EBF"/><text x="810" y="150" text-anchor="middle">E0</text>
+    <rect x="720" y="158" width="90"  height="20" fill="#DAE8FC" stroke="#6C8EBF"/><text x="765" y="173" text-anchor="middle">E1</text>
+    <rect x="720" y="181" width="140" height="20" fill="#DAE8FC" stroke="#6C8EBF"/><text x="790" y="196" text-anchor="middle">E2</text>
+    <rect x="720" y="204" width="60"  height="20" fill="#DAE8FC" stroke="#6C8EBF"/><text x="750" y="219" text-anchor="middle">E3</text>
+    <rect x="720" y="227" width="120" height="20" fill="#DAE8FC" stroke="#6C8EBF"/><text x="780" y="242" text-anchor="middle">E4</text>
+    <rect x="720" y="250" width="200" height="20" fill="#DAE8FC" stroke="#6C8EBF"/><text x="820" y="265" text-anchor="middle">E5</text>
+    <rect x="720" y="273" width="40"  height="20" fill="#DAE8FC" stroke="#6C8EBF"/><text x="740" y="288" text-anchor="middle">E6</text>
+    <rect x="720" y="296" width="100" height="20" fill="#DAE8FC" stroke="#6C8EBF"/><text x="770" y="311" text-anchor="middle">E7</text>
+  </g>
+
+  <line x1="930" y1="320" x2="930" y2="343" stroke="#444" stroke-width="1.5" marker-end="url(#ar)"/>
+
+  <rect x="710" y="345" width="440" height="90" fill="#FFE6CC" stroke="#D79B00"/>
+  <text x="930" y="375" text-anchor="middle" font-weight="bold" font-size="13">GroupedLinear   (1 batched GEMM)</text>
+  <text x="930" y="400" text-anchor="middle" font-size="11" font-style="italic" fill="#444">fused kernel processes all 8 expert blocks in a single launch</text>
+  <text x="930" y="420" text-anchor="middle" font-size="11" font-style="italic" fill="#666">gate_up_proj  &#8594;  experts_gate_up_weight    /    down_proj  &#8594;  experts_down_weight</text>
+
+  <line x1="930" y1="438" x2="930" y2="478" stroke="#444" stroke-width="1.5" marker-end="url(#ar)"/>
+
+  <text x="930" y="468" text-anchor="middle" font-size="10" font-style="italic" fill="#444">output  [sum_n, h]   (same per-expert stacking)</text>
+  <rect x="720" y="480" width="420" height="22" fill="#ffffff" stroke="#82B366" stroke-dasharray="4 3"/>
+
+  <text x="930" y="540" text-anchor="middle" font-size="11" font-weight="bold" fill="#444">m_splits = [18, 9, 14, 6, 12, 20, 4, 10]   (per-expert token counts)</text>
+  <text x="930" y="562" text-anchor="middle" font-size="10" font-style="italic" fill="#666">passed to GroupedLinear so the kernel knows how to slice the batched GEMM</text>
+</svg>
