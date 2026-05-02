@@ -18,33 +18,32 @@ def nvfp4_ref_rht_2d_quantizer_factory(role):
     """
     Quantizer factory for NVFP4 recipe reference implementation (RHT and 2D quantization for weights).
 
-    Usage with CustomRecipe and autocast:
+    Receives a :class:`~transformer_engine.pytorch.quantization.QuantizerRole`.
+
+    Usage with CustomRecipe and autocast::
+
         custom_recipe = recipe.CustomRecipe(qfactory=nvfp4_ref_rht_2d_quantizer_factory)
-        with autocast(fp8_recipe=custom_recipe):
+        with autocast(recipe=custom_recipe):
             output = model(input)
     """
-    if role == "linear_input":
-        return NVFP4QuantizerRef(
-            dtype=utils.Fp4Formats.E2M1,
-            quant_tile_shape=(1, 16),
-            pow_2_scales=False,
-            with_rht=True,
-        )
-    if role == "linear_weight":
+    is_weight_tensor_in_gemm = (
+        role is not None
+        and role.module_type in ("linear", "grouped_linear")
+        and role.tensor_type == "weight"
+    )
+    if is_weight_tensor_in_gemm:  # 2D quantization for weights in GEMM-based modules
         return NVFP4QuantizerRef(
             dtype=utils.Fp4Formats.E2M1,
             quant_tile_shape=(16, 16),
             pow_2_scales=False,
             with_rht=False,
         )
-    if role == "linear_grad_output":
-        return NVFP4QuantizerRef(
-            dtype=utils.Fp4Formats.E2M1,
-            quant_tile_shape=(1, 16),
-            pow_2_scales=False,
-            with_rht=True,
-        )
-    return None
+    return NVFP4QuantizerRef(
+        dtype=utils.Fp4Formats.E2M1,
+        quant_tile_shape=(1, 16),
+        pow_2_scales=False,
+        with_rht=True,
+    )
 
 
 def cast_to_fp4x2(x):
