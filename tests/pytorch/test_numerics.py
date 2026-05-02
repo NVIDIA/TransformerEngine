@@ -3138,14 +3138,14 @@ def test_grouped_gemm_grouped_tensor_zero_work(layout, accumulate, quant_type) -
 def _make_grouped_tensor_quantized_mxfp8(
     tensors: List[torch.Tensor],
     *,
-    is_a: bool,
-    transposed: bool,
+    rowwise: bool,
+    columnwise: bool,
     device: torch.device,
     is_weight: bool = False,
 ) -> GroupedTensor:
     """Create a quantized MXFP8 GroupedTensor from a list of per-expert tensors.
 
-    For weights (uniform per-expert shape), we generally wont keep it swizzled since we
+    For weights (uniform per-expert shape), we generally won't keep it swizzled since we
     might need for future dequantize operations. Swizzling is done internally within
     general_grouped_gemm_for_grouped_tensor call.
 
@@ -3155,12 +3155,6 @@ def _make_grouped_tensor_quantized_mxfp8(
     """
     if not tensors:
         raise ValueError("Expected non-empty tensor list for grouped quantization.")
-    if is_a:
-        rowwise = transposed
-        columnwise = not transposed
-    else:
-        rowwise = not transposed
-        columnwise = transposed
     quantizer = MXFP8Quantizer(
         fp8_dtype=tex.DType.kFloat8E4M3,
         rowwise=rowwise,
@@ -3178,18 +3172,12 @@ def _make_grouped_tensor_quantized_mxfp8(
 def _per_tensor_quantize_mxfp8(
     tensors: List[torch.Tensor],
     *,
-    is_a: bool,
-    transposed: bool,
+    rowwise: bool,
+    columnwise: bool,
 ) -> List:
     """Quantize each tensor individually with MXFP8.
     Used to build reference discrete inputs for grouped GEMM.
     """
-    if is_a:
-        rowwise = transposed
-        columnwise = not transposed
-    else:
-        rowwise = not transposed
-        columnwise = transposed
     quantizer = MXFP8Quantizer(
         fp8_dtype=tex.DType.kFloat8E4M3,
         rowwise=rowwise,
@@ -3245,15 +3233,21 @@ def test_grouped_gemm_grouped_tensor_mxfp8(
 
     transa = layout[0] == "T"
     transb = layout[1] == "T"
-    a_is_weight = layout in ("TN", "NN")
+    a_is_weight = all(t.shape == A[0].shape for t in A)
+    a_rowwise, a_columnwise = transa, not transa
+    b_rowwise, b_columnwise = not transb, transb
     grouped_A = _make_grouped_tensor_quantized_mxfp8(
-        A, is_a=True, transposed=transa, device="cuda", is_weight=a_is_weight
+        A,
+        rowwise=a_rowwise,
+        columnwise=a_columnwise,
+        device="cuda",
+        is_weight=a_is_weight,
     )
     grouped_B = _make_grouped_tensor_quantized_mxfp8(
-        B, is_a=False, transposed=transb, device="cuda"
+        B, rowwise=b_rowwise, columnwise=b_columnwise, device="cuda"
     )
-    A_fp8 = _per_tensor_quantize_mxfp8(A, is_a=True, transposed=transa)
-    B_fp8 = _per_tensor_quantize_mxfp8(B, is_a=False, transposed=transb)
+    A_fp8 = _per_tensor_quantize_mxfp8(A, rowwise=a_rowwise, columnwise=a_columnwise)
+    B_fp8 = _per_tensor_quantize_mxfp8(B, rowwise=b_rowwise, columnwise=b_columnwise)
 
     general_grouped_gemm(
         A_fp8,
