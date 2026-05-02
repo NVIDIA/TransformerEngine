@@ -7,6 +7,7 @@
 from __future__ import annotations
 from collections.abc import Callable
 import functools
+import inspect
 import math
 import os
 from typing import Optional
@@ -25,7 +26,11 @@ from ..op import FusedOperation, FusibleOperation, OperationContext
 from .._common import (
     _cudnn_frontend_version_supported,
     fuse_grouped_mlp_ops,
+    get_accumulate_flag_in_param,
+    get_dummy_wgrads_for_params,
+    get_main_grad_from_param,
     maybe_dequantize,
+    view_main_grad_as_grouped_buffer,
     validate_grouped_mlp_dims,
 )
 from ...cpp_extensions import general_grouped_gemm_for_grouped_tensor
@@ -149,44 +154,32 @@ def _compute_grad_params(
     Returns the grad_params list in parameter registration order.
     """
 
-    # Allocate grad buffers, determine accumulate flag
+    # Allocate grad buffers, determine accumulate flag.
     accumulate_into_main_grad = False
     grouped_wgrad = None
     wgrad_output = None
+    op_label = f"Grouped MLP fused backward ({label})" if label else "Grouped MLP fused backward"
+    weights = fc_op._get_weight_tensors()
     if fc_op.single_grouped_weight:
         w_list = [None]
         if ctx.weight_requires_grad:
-            weight_param = fc_op.weight
             if fc_op._accumulate_into_main_grad:
-                if hasattr(weight_param, "__fsdp_param__"):
-                    weight_param.main_grad = weight_param.get_main_grad()
-                main_grad = weight_param.main_grad
-                grouped_shape = (num_groups, *weight_shape)
-                if main_grad.shape != grouped_shape:
-                    if main_grad.numel() != math.prod(grouped_shape):
-                        raise RuntimeError(
-                            f"Grouped MLP fused backward expected {label} main_grad to have "
-                            f"shape {grouped_shape} or matching numel, "
-                            f"but got shape {tuple(main_grad.shape)}"
-                        )
-                    try:
-                        main_grad = main_grad.view(grouped_shape)
-                    except RuntimeError as e:
-                        raise RuntimeError(
-                            f"Grouped MLP fused backward requires {label} main_grad to be "
-                            f"viewable as {grouped_shape} without copy, but got shape"
-                            f" {tuple(main_grad.shape)} and stride"
-                            f" {tuple(main_grad.stride())}"
-                        ) from e
-                accumulate_into_main_grad = not getattr(weight_param, "overwrite_main_grad", False)
+                # Main-grad fusion: GEMM writes directly into ``main_grad``.
+                # ``overwrite_main_grad`` only flips the GEMM's ``accumulate``
+                # flag (overwrite vs. accumulate); it does not change the
+                # output buffer.
+                main_grad = get_main_grad_from_param(weights[0], op_label=op_label)
+                main_grad = view_main_grad_as_grouped_buffer(
+                    main_grad, num_groups, weight_shape, label=f"{op_label} weight"
+                )
                 grouped_wgrad = GroupedTensor.make_grouped_tensor_from_rowwise_data(
                     num_tensors=num_groups,
                     tensor_shape=weight_shape,
                     rowwise_data=main_grad,
                     dtype=main_grad.dtype,
                 )
-
-            if grouped_wgrad is None:
+                accumulate_into_main_grad = get_accumulate_flag_in_param(weights[0])
+            else:
                 grouped_wgrad = GroupedTensor.make_grouped_tensor_with_shapes(
                     num_tensors=num_groups,
                     shapes=[weight_shape] * num_groups,
@@ -195,19 +188,17 @@ def _compute_grad_params(
                     dtype=dtype,
                 )
             wgrad_output = grouped_wgrad
+            w_list = [grouped_wgrad.rowwise_data.view(num_groups, *weight_shape)]
     else:
         w_list = [None] * num_groups
         if ctx.weight_requires_grad:
             if fc_op._accumulate_into_main_grad:
-                for idx in range(num_groups):
-                    wp = getattr(fc_op, f"weight{idx}")
-                    if hasattr(wp, "__fsdp_param__"):
-                        wp.main_grad = wp.get_main_grad()
-                    w_list[idx] = wp.main_grad
-                accumulate_into_main_grad = not getattr(fc_op.weight0, "overwrite_main_grad", False)
+                w_list = [get_main_grad_from_param(w, op_label=op_label) for w in weights]
+                accumulate_into_main_grad = get_accumulate_flag_in_param(weights[0])
             else:
-                for idx in range(num_groups):
-                    w_list[idx] = torch.empty(weight_shape, dtype=dtype, device=device)
+                w_list = [
+                    torch.empty(weight_shape, dtype=dtype, device=device) for _ in range(num_groups)
+                ]
             wgrad_output = w_list
 
     if ctx.weight_requires_grad:
@@ -237,34 +228,9 @@ def _compute_grad_params(
         else:
             gemm_fn(grouped_x, grouped_dy, wgrad_output)
 
-        # Extract results, mark accumulated if needed
-        if fc_op.single_grouped_weight:
-            packed_wgrad = None
-            if not delay_wgrad:
-                packed_wgrad = grouped_wgrad.rowwise_data.view(num_groups, *weight_shape)
-            if fc_op._accumulate_into_main_grad and hasattr(
-                weight_param, "grad_added_to_main_grad"
-            ):
-                weight_param.grad_added_to_main_grad = True
-                packed_wgrad = get_dummy_wgrad(
-                    list(weight_param.size()),
-                    weight_param.dtype,
-                    zero=getattr(weight_param, "zero_out_wgrad", False),
-                )
-            w_list = [packed_wgrad]
-        else:
-            if delay_wgrad or fc_op._accumulate_into_main_grad:
-                w_list = [None] * num_groups
-            if fc_op._accumulate_into_main_grad:
-                for idx in range(num_groups):
-                    wp = getattr(fc_op, f"weight{idx}")
-                    if hasattr(wp, "grad_added_to_main_grad"):
-                        wp.grad_added_to_main_grad = True
-                        w_list[idx] = get_dummy_wgrad(
-                            list(wp.size()),
-                            wp.dtype,
-                            zero=getattr(wp, "zero_out_wgrad", False),
-                        )
+        # Need to return dummy wgrads for Megatron-LM wgrad fusion if grad is already added
+        if fc_op._accumulate_into_main_grad:
+            w_list = get_dummy_wgrads_for_params(weights)
 
     # Assemble grad_params in parameter registration order.
     if not fc_op.has_bias:
@@ -372,8 +338,7 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         grad_output = grad_output.reshape(-1, fc2_weight_shape[0])
         out_shape = list(grad_output.size())
         num_groups = fc1_op.num_groups
-        fc1_weight_param = fc1_op.weight if fc1_op.single_grouped_weight else fc1_op.weight0
-        device = fc1_weight_param.device
+        device = fc1_op._get_weight_tensors()[0].device
         dtype = fc1_ctx.dtype
 
         # Saved tensors from FC1 forward
