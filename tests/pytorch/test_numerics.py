@@ -3195,7 +3195,7 @@ def _per_tensor_quantize_mxfp8(
         (1, 128, 128, 512),
         (8, 1024, 128, 512),
         (16, 4096, 128, 512),
-        (2, 256, 2880, 1440),
+        (2, 256, 2880, 2880),
     ],
 )
 @pytest.mark.parametrize("accumulate", [False, True])
