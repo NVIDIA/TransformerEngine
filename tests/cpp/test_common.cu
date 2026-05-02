@@ -395,11 +395,6 @@ Tensor::Tensor(const std::string& name,
     } else {
       if (scaling_mode == NVTE_NVFP4_1D_SCALING) {
         // Used for NVFP4 second stage scaling
-        cudaMalloc((void**)&scale, sizeof(float));  // NOLINT(*)
-        cudaMemset(scale, 0, sizeof(float));
-        scale_cpu_data_ = std::make_shared<float>(0);
-        tensor_.set_scale(scale, DType::kFloat32, std::vector<size_t>{1});
-
         amax_cpu_data_ = std::make_shared<float>(0);
         amax_cpu_data_columnwise_ = std::make_shared<float>(0);
         cudaMalloc((void**)&amax, sizeof(float));  // NOLINT(*)
@@ -521,7 +516,6 @@ void Tensor::from_cpu() const {
         cudaMemcpy(tensor_.get_columnwise_amax().data_ptr, amax_cpu_data_columnwise_.get(),
                    sizeof(float), cudaMemcpyHostToDevice);
       }
-      cudaMemcpy(tensor_.scale(), scale_cpu_data_.get(), sizeof(float), cudaMemcpyHostToDevice);
     }
     auto [rowwise_scale_meta, colwise_scale_meta] = get_scales(s, tensor_.scaling_mode());
     if (rowwise_) {
@@ -542,8 +536,7 @@ void Tensor::from_cpu() const {
 void Tensor::set_scale(float scale) {
   if (isFp8Type(dtype()) || isFp4Type(dtype())) {
     NVTE_CHECK(scale_cpu_data_);
-    if (tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING ||
-        tensor_.scaling_mode() == NVTE_NVFP4_1D_SCALING) {
+    if (tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING) {
       *scale_cpu_data_ = scale;
       from_cpu();
     }

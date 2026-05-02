@@ -102,7 +102,6 @@ void performTest_dequantize_nvfp4(const size_t rows, const size_t cols) {
     } else {
         quantized.set_tensor_amax(0.0f);
     }
-    setRandomScale(&quantized);
 
     if (rows > 0 && cols > 0) {
         nvte_quantize(input.data(), quantized.data(), 0);
@@ -152,7 +151,6 @@ void performTest_dequantize_nvfp4_swizzled(const size_t rows, const size_t cols)
     } else {
         quantized_compact.set_tensor_amax(0.0f);
     }
-    setRandomScale(&quantized_compact);
 
     if (rows > 0 && cols > 0) {
         nvte_quantize(input.data(), quantized_compact.data(), 0);
@@ -168,14 +166,12 @@ void performTest_dequantize_nvfp4_swizzled(const size_t rows, const size_t cols)
     Tensor quantized_swizzled("quantized_swizzled", std::vector<size_t>{rows, cols},
                               DType::kFloat4E2M1, true, false, NVTE_NVFP4_1D_SCALING);
     quantized_swizzled.set_tensor_amax(0.0f);
-    setRandomScale(&quantized_swizzled);
     quantized_swizzled.set_with_gemm_swizzled_scales(true);
 
     // Copy amax and scale from compact to swizzled before FP4 data,
     // since from_cpu() uploads all CPU buffers (including zero-init data).
     quantized_compact.to_cpu();
     quantized_swizzled.set_tensor_amax(quantized_compact.amax());
-    quantized_swizzled.set_scale(quantized_compact.scale());
 
     // Copy FP4 data after from_cpu() to avoid being overwritten
     const size_t data_bytes = rows * cols / 2;
