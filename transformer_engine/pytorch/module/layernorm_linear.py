@@ -1731,13 +1731,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 grad_output_quantizer.optimize_for_gemm = True
             if fp8_grad:
                 grad_input_quantizer = self.quantizers["scaling_bwd"][FP8BwdTensorIdx.GRAD_INPUT1]
-        fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
-        if fp8_recipe.backward_override == "dequantized" and (
-            fp8_recipe.mxfp8() or fp8_recipe.nvfp4()
-        ):
-            input_quantizer.optimize_for_gemm = False
-            if grad_output_quantizer is not None:
-                grad_output_quantizer.optimize_for_gemm = False
 
         return (
             input_quantizer,
