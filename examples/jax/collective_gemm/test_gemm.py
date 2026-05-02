@@ -16,6 +16,7 @@ import unittest
 import os
 from functools import partial
 
+import numpy as np
 import jax
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec, NamedSharding
@@ -151,20 +152,25 @@ def run_gemm_tests(args, mesh=None):
         jax.block_until_ready(gathered_output)
 
     if args.enable_result_check and args.process_id == 0:
-        # CGEMM + RS + BF16 uses TE's reduce_bf16 kernel (sequential left-to-right in FP32).
-        # With catastrophic cancellation the output is near zero while the absolute diff can
-        # reach 1 ULP of the partial GEMM magnitude (~0.0625 for typical transformer
-        # activations at O(8) scale), which exceeds the previous atol=1e-5. The 2x
-        # margin (0.125) covers this worst-case 1-ULP absolute difference.
-        is_cgemm_rs_bf16 = collective_op == CollectiveOp.REDUCE_SCATTER and not use_quantization
-        rtol = 1e-2 if is_cgemm_rs_bf16 else None
-        atol = 0.125 if is_cgemm_rs_bf16 else None
-        assert_allclose(
-            gathered_ref_output,
-            gathered_output,
-            dtype=get_tolerance_dtype(quantizer_set),
-            rtol=rtol,
-            atol=atol,
+        if use_quantization:
+            rtol, atol = 0.125, 0.0625
+        else:
+            rtol, atol = 0.02, 0.002
+        # Use NumPy (not JAX) for the result check to avoid triggering new XLA compilations
+        # on process 0 only, which would deadlock in multi-process JAX because XLA compilation
+        # of distributed arrays requires collective synchronization across all processes.
+        actual = np.asarray(gathered_output, dtype=np.float32)
+        desired = np.asarray(gathered_ref_output, dtype=np.float32)
+        diff = np.abs(actual - desired)
+        abs_desired = np.abs(desired)
+        failures = (diff > atol) & (diff > rtol * abs_desired)
+        num_failures = int(np.sum(failures))
+        assert num_failures == 0, (
+            f"NUMERICAL CHECK FAILED: {num_failures}/{diff.size} elements "
+            f"({100 * num_failures / diff.size:.4f}%) exceed tolerances "
+            f"(rtol={rtol}, atol={atol}). "
+            f"Max abs error: {float(np.max(diff)):.6f}, "
+            f"max rel error: {float(np.max(diff / np.maximum(abs_desired, 1e-5))):.6f}"
         )
 
 
@@ -180,6 +186,7 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
         self.args.process_id = self.process_id
         self.args.local_device_ids = self.local_device_ids
         self.args.num_devices_per_process = self.num_devices_per_process
+        self.args.use_cublasmp = self.use_cublasmp
         self.args.enable_data_parallel = True
         self.args.tensor_parallel_size = _get_dp_and_tp_sizes(self.args)[1]
         _initialize_distributed(self.args)

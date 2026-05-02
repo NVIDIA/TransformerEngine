@@ -6,6 +6,7 @@
 
 import os
 from pathlib import Path
+from importlib import metadata
 
 import setuptools
 
@@ -87,6 +88,15 @@ def setup_pytorch_extension(
         library_dirs.append(nvshmem_home / "lib")
         libraries.append("nvshmem_host")
         cxx_flags.append("-DNVTE_ENABLE_NVSHMEM")
+
+    if bool(int(os.getenv("NVTE_WITH_CUBLASMP", 0))):
+        # Creating a cuBlasMp context requires direct access to the underlying NCCL
+        # communicator in a tensor-parallel process group. The header for ProcessGroupNCCL
+        # needs this CPP directive to be included properly.
+        cxx_flags.append("-DNVTE_WITH_CUBLASMP")
+        torch_lib_path = metadata.distribution("torch").locate_file("torch/lib")
+        library_dirs.append(torch_lib_path)
+        libraries.append("torch_cuda")
 
     # Construct PyTorch CUDA extension
     sources = [str(path) for path in sources]

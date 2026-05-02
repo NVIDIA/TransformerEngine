@@ -4,11 +4,14 @@
 """Shared functions for the collective GEMM tests"""
 
 import argparse
+import glob
+import os
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 from jax.experimental import mesh_utils
+from jax.experimental.multihost_utils import sync_global_devices
 
 from transformer_engine.jax.cpp_extensions.gemm import collective_gemm_bootstrap
 
@@ -56,9 +59,9 @@ def assert_allclose(actual, desired, rtol=None, atol=None, dtype=None, **kwargs)
         tols["atol"] = atol
 
     if not isinstance(actual, float):
-        actual = actual.astype(jnp.float32)
+        actual = np.asarray(actual, dtype=np.float32)
     if not isinstance(desired, float):
-        desired = desired.astype(jnp.float32)
+        desired = np.asarray(desired, dtype=np.float32)
 
     np.testing.assert_allclose(actual, desired, **tols, **kwargs)
 
@@ -96,6 +99,14 @@ def _initialize_distributed(args):
 
     assert args.num_devices_per_process == 1, "Only single process single GPU is supported!"
 
+    # Collective GEMM with communication overlap (Userbuffers or cuBLASMp) uses internal
+    # CUDA streams for overlapping NCCL collectives with compute.  XLA command buffers
+    # (CUDA graph capture) cannot record work that spans multiple streams, so we must
+    # disable them when running collective GEMM with overlap.
+    xla_flags = os.environ.get("XLA_FLAGS", "")
+    if "--xla_gpu_enable_command_buffer" not in xla_flags:
+        os.environ["XLA_FLAGS"] = xla_flags + " --xla_gpu_enable_command_buffer="
+
     print(
         f"Initializing JAX distributed with coordinator={args.coordinator_address}, "
         f"num_processes={args.num_processes}, process_id={args.process_id}"
@@ -118,6 +129,20 @@ def _initialize_distributed(args):
     devices_per_process = 1
     num_total_devices = args.num_processes
 
+    # Remove stale NCCL unique ID files from previous (possibly crashed) runs.
+    # These files are used for one-time coordination during bootstrap; stale files
+    # cause non-leader processes to read an old unique ID, breaking NCCL init.
+    # Only process 0 performs the cleanup; a global barrier ensures all processes
+    # wait for the cleanup to complete before any TP leader writes a fresh file.
+    nccl_base_path = os.environ.get("NVTE_JAX_NCCL_FILE_PATH", "/tmp")
+    if args.process_id == 0:
+        for f in glob.glob(os.path.join(nccl_base_path, "nccl_*_unique_id_*.bin")):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+    sync_global_devices("nccl_id_cleanup")
+
     print(
         f"Initializing CGEMM communicator with num_total_devices={num_total_devices},"
         f" devices_per_process={devices_per_process}, process_id={args.process_id}"
@@ -128,6 +153,7 @@ def _initialize_distributed(args):
         num_devices_per_process=devices_per_process,
         process_id=args.process_id,
         tensor_parallel_size=args.tensor_parallel_size,
+        use_cublasmp=args.use_cublasmp,
     )
 
 
@@ -223,6 +249,12 @@ def cgemm_parser(description="Collective GEMM test on multi-GPU with tensor para
     )
     parser.add_argument(
         "--enable-result-check", action="store_true", default=True, help="Enable result checking"
+    )
+    parser.add_argument(
+        "--use-cublasmp",
+        action="store_true",
+        default=False,
+        help="Use the cuBLASMp backend for overlapping collective operations with GEMM computation",
     )
 
     return parser
