@@ -3084,7 +3084,10 @@ def test_grouped_gemm_grouped_tensor_zero_work(layout, accumulate, quant_type) -
         weight_tensors = [torch.randn(n, k, dtype=dtype, device=device) for _ in range(z)]
         if use_mxfp8:
             grouped_A = _make_grouped_tensor_quantized_mxfp8(
-                weight_tensors, is_a=True, transposed=transa, device=device
+                weight_tensors,
+                rowwise=transa,
+                columnwise=not transa,
+                device=device,
             )
         else:
             grouped_A = _make_grouped_tensor_uniform(z, n, k, device, dtype)
@@ -3192,7 +3195,7 @@ def _per_tensor_quantize_mxfp8(
         (1, 128, 128, 512),
         (8, 1024, 128, 512),
         (16, 4096, 128, 512),
-        (2, 256, 2880, 2880),
+        (2, 256, 2880, 1440),
     ],
 )
 @pytest.mark.parametrize("accumulate", [False, True])
