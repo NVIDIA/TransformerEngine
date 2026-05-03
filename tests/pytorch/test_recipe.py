@@ -25,10 +25,16 @@ from transformer_engine.pytorch import (
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.quantization import (
     FP8GlobalStateManager,
+    NVFP4BlockScalingRecipeState,
     _amax_and_scale_update,
 )
 import transformer_engine.pytorch.ops as te_ops
-from transformer_engine.common.recipe import DelayedScaling, Float8BlockScaling, MXFP8BlockScaling
+from transformer_engine.common.recipe import (
+    DelayedScaling,
+    Float8BlockScaling,
+    MXFP8BlockScaling,
+    NVFP4BlockScaling,
+)
 
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
@@ -505,6 +511,25 @@ class TestFP8Recipe:
                     y = module(x, [batch_size])
                 else:
                     y = module(x)
+
+
+@pytest.mark.skipif(not fp4_available, reason=reason_for_no_fp4)
+def test_nvfp4_per_token_quantizer_roles():
+    recipe = NVFP4BlockScaling(per_token_activation=True)
+
+    forward_quantizers = NVFP4BlockScalingRecipeState(
+        recipe,
+        mode="forward",
+        num_quantizers=3,
+    ).make_quantizers()
+    assert [q.per_token_activation for q in forward_quantizers] == [True, False, True]
+
+    backward_quantizers = NVFP4BlockScalingRecipeState(
+        recipe,
+        mode="backward",
+        num_quantizers=2,
+    ).make_quantizers()
+    assert [q.per_token_activation for q in backward_quantizers] == [False, False]
 
 
 @pytest.mark.skipif(not fp4_available, reason=reason_for_no_fp4)

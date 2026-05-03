@@ -203,7 +203,11 @@ def general_gemm(
         out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
     else:
         assert layout[1] == "N", "Per-token NVFP4 GEMM currently supports N-layout B only."
-        assert not grad, "Per-token NVFP4 GEMM currently supports fprop only."
+        if grad:
+            raise RuntimeError(
+                "Per-token NVFP4 GEMM currently supports fprop only. "
+                "Backward NVFP4 gradient quantizers should use scalar global amax."
+            )
         assert not gelu, "Per-token NVFP4 GEMM currently does not support fused GELU."
         assert not accumulate, "Per-token NVFP4 GEMM currently does not support accumulation."
         assert (
@@ -303,7 +307,11 @@ def general_grouped_gemm(
 
     if any(_is_nvfp4_per_token_tensor(tensor) for tensor in B):
         assert layout[1] == "N", "Per-token NVFP4 grouped GEMM currently supports N-layout B only."
-        assert not grad, "Per-token NVFP4 grouped GEMM currently supports fprop only."
+        if grad:
+            raise RuntimeError(
+                "Per-token NVFP4 grouped GEMM currently supports fprop only. "
+                "Backward NVFP4 gradient quantizers should use scalar global amax."
+            )
         assert not gelu, "Per-token NVFP4 grouped GEMM currently does not support fused GELU."
         assert (
             not accumulate

@@ -99,12 +99,6 @@ def backward_override(request: pytest.FixtureRequest) -> str:
     return request.param
 
 
-def _make_backward_test_recipe(recipe_name: str, **recipe_kwargs) -> Optional[recipe.Recipe]:
-    if recipe_name == "nvfp4_per_token" and "backward_override" not in recipe_kwargs:
-        recipe_kwargs["backward_override"] = "dequantized"
-    return make_recipe(recipe_name, **recipe_kwargs)
-
-
 # --------------------------
 # Test cases
 # --------------------------
@@ -867,7 +861,7 @@ def test_linear_like_backward_override_matches_reference(
     _maybe_skip_unsupported_recipe_shape(recipe_name, input_shape, module_type)
 
     in_features = input_shape[-1]
-    quantized_ref_recipe = _make_backward_test_recipe(recipe_name)
+    quantized_ref_recipe = make_recipe(recipe_name)
     mode_recipe = make_recipe(recipe_name, backward_override=backward_override)
     skip_unsupported_backward_override(module_type, mode_recipe, backward_override)
 
@@ -1051,7 +1045,7 @@ def test_grouped_linear_backward_override_matches_reference(
     num_gemms = len(m_splits)
     num_tokens = sum(m_splits)
 
-    quantized_ref_recipe = _make_backward_test_recipe(recipe_name)
+    quantized_ref_recipe = make_recipe(recipe_name)
     mode_recipe = make_recipe(recipe_name, backward_override=backward_override)
     skip_unsupported_backward_override("grouped_linear", mode_recipe, backward_override)
 
@@ -1220,11 +1214,9 @@ def test_linear_like_runtime_backward_override_switch_updates_ctx(
     x = torch.randn(*input_shape, dtype=dtype, device="cuda")
     dy = torch.randn(*input_shape[:-1], out_features, dtype=dtype, device="cuda")
 
-    default_recipe = _make_backward_test_recipe(recipe_name)
+    default_recipe = make_recipe(recipe_name)
     mode_recipe = make_recipe(recipe_name, backward_override=backward_override)
     skip_unsupported_backward_override(module_type, mode_recipe, backward_override)
-    expected_default_mode = default_recipe.backward_override
-    expected_default_fp8 = expected_default_mode is None
 
     *_, default_ctx = _run_single_step_with_ctx_state(module, x, dy, default_recipe)
     (
@@ -1233,10 +1225,10 @@ def test_linear_like_runtime_backward_override_switch_updates_ctx(
         default_grad_output_quantizer,
         default_reduce_and_update,
     ) = default_ctx
-    assert default_mode == expected_default_mode
-    assert default_fp8 == expected_default_fp8
-    assert (default_grad_output_quantizer is not None) == expected_default_fp8
-    assert default_reduce_and_update == expected_default_fp8
+    assert default_mode is None
+    assert default_fp8
+    assert default_grad_output_quantizer is not None
+    assert default_reduce_and_update
 
     *_, switched_ctx = _run_single_step_with_ctx_state(module, x, dy, mode_recipe)
     switched_mode, switched_fp8, switched_grad_output_quantizer, switched_reduce_and_update = (
@@ -1254,10 +1246,10 @@ def test_linear_like_runtime_backward_override_switch_updates_ctx(
         default_grad_output_quantizer_after,
         default_reduce_and_update_after,
     ) = default_ctx_after
-    assert default_mode_after == expected_default_mode
-    assert default_fp8_after == expected_default_fp8
-    assert (default_grad_output_quantizer_after is not None) == expected_default_fp8
-    assert default_reduce_and_update_after == expected_default_fp8
+    assert default_mode_after is None
+    assert default_fp8_after
+    assert default_grad_output_quantizer_after is not None
+    assert default_reduce_and_update_after
 
 
 @pytest.mark.parametrize("recipe_name", _quantized_numerics_recipe_list)
@@ -1292,11 +1284,9 @@ def test_grouped_linear_runtime_backward_override_switch_updates_ctx(
     x = torch.randn(num_tokens, in_features, dtype=dtype, device="cuda")
     dy = torch.randn(num_tokens, out_features, dtype=dtype, device="cuda")
 
-    default_recipe = _make_backward_test_recipe(recipe_name)
+    default_recipe = make_recipe(recipe_name)
     mode_recipe = make_recipe(recipe_name, backward_override=backward_override)
     skip_unsupported_backward_override("grouped_linear", mode_recipe, backward_override)
-    expected_default_mode = default_recipe.backward_override
-    expected_default_fp8 = expected_default_mode is None
 
     *_, default_ctx = _run_grouped_linear_single_step_with_ctx_state(
         module,
@@ -1306,9 +1296,9 @@ def test_grouped_linear_runtime_backward_override_switch_updates_ctx(
         default_recipe,
     )
     default_mode, default_fp8, default_reduce_and_update = default_ctx
-    assert default_mode == expected_default_mode
-    assert default_fp8 == expected_default_fp8
-    assert default_reduce_and_update == expected_default_fp8
+    assert default_mode is None
+    assert default_fp8
+    assert default_reduce_and_update
 
     *_, switched_ctx = _run_grouped_linear_single_step_with_ctx_state(
         module,
@@ -1330,9 +1320,9 @@ def test_grouped_linear_runtime_backward_override_switch_updates_ctx(
         default_recipe,
     )
     default_mode_after, default_fp8_after, default_reduce_and_update_after = default_ctx_after
-    assert default_mode_after == expected_default_mode
-    assert default_fp8_after == expected_default_fp8
-    assert default_reduce_and_update_after == expected_default_fp8
+    assert default_mode_after is None
+    assert default_fp8_after
+    assert default_reduce_and_update_after
 
 
 @pytest.mark.parametrize("recipe_name", _quantized_numerics_recipe_list)
@@ -1363,7 +1353,7 @@ def test_fused_linear_paths_match_backward_override_reference(
 
     reset_rng_states()
 
-    quantized_ref_recipe = _make_backward_test_recipe(recipe_name)
+    quantized_ref_recipe = make_recipe(recipe_name)
     mode_recipe = make_recipe(recipe_name, backward_override=backward_override)
     skip_unsupported_backward_override("ops_linear", mode_recipe, backward_override)
 
@@ -1504,7 +1494,7 @@ def test_fused_bias_activation_matches_masked_linear_backward(
     reset_rng_states()
     in_features = input_shape[-1]
 
-    quantized_ref_recipe = _make_backward_test_recipe(recipe_name)
+    quantized_ref_recipe = make_recipe(recipe_name)
     mode_recipe = make_recipe(recipe_name, backward_override=backward_override)
     skip_unsupported_backward_override("ops_linear", mode_recipe, backward_override)
 
@@ -1743,11 +1733,7 @@ def test_backward_override_memory_peak_report(
     x = torch.randn(*input_shape, dtype=dtype, device="cuda")
     dy = torch.randn(*input_shape[:-1], out_features, dtype=dtype, device="cuda")
 
-    modes = (
-        ("high_precision", "dequantized")
-        if recipe_name == "nvfp4_per_token"
-        else (None, "high_precision", "dequantized")
-    )
+    modes = (None, "high_precision", "dequantized")
     mode_results: dict[str, dict[str, float] | str] = {}
 
     for mode in modes:
