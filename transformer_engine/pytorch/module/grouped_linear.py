@@ -663,14 +663,12 @@ class GroupedLinear(TransformerEngineBaseModule):
                        EXPERIMENTAL and subject to change. Gated by the
                        ``NVTE_GROUPED_LINEAR_SINGLE_PARAM`` environment variable: if the env var
                        is not set this argument is forced to ``False`` with a warning.
-                       When enabled, this path is known to be non-deterministic in certain cases.
     single_grouped_bias : bool, default = False
                        If set to ``True``, grouped biases are stored as a single grouped bias
                        instead of one bias per GEMM.
                        EXPERIMENTAL and subject to change. Gated by the
                        ``NVTE_GROUPED_LINEAR_SINGLE_PARAM`` environment variable: if the env var
                        is not set this argument is forced to ``False`` with a warning.
-                       When enabled, this path is known to be non-deterministic in certain cases.
 
     Notes
     -----

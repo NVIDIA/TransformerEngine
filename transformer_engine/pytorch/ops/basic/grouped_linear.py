@@ -82,7 +82,6 @@ class GroupedLinear(BasicOperation):
         EXPERIMENTAL and subject to change. Gated by the
         ``NVTE_GROUPED_LINEAR_SINGLE_PARAM`` environment variable: if the env var
         is not set this argument is forced to ``False`` with a warning.
-        When enabled, this path is known to be non-deterministic in certain cases.
     delay_wgrad_compute : bool, default = ``False``
         Whether to delay weight gradient computation
     single_grouped_bias : bool, default = ``False``
@@ -91,7 +90,6 @@ class GroupedLinear(BasicOperation):
         EXPERIMENTAL and subject to change. Gated by the
         ``NVTE_GROUPED_LINEAR_SINGLE_PARAM`` environment variable: if the env var
         is not set this argument is forced to ``False`` with a warning.
-        When enabled, this path is known to be non-deterministic in certain cases.
     scale_bias : bool, default = ``False``
         If ``True`` (and ``bias=True``), expects a probability tensor as an
         additional extra input and adds ``bias * scales`` instead of ``bias``
