@@ -255,7 +255,7 @@ def _maybe_skip_unsupported_grouped_splits(recipe_name: str, m_splits: list[int]
         pytest.skip("GroupedLinear + MXFP8 requires each non-empty m_split divisible by 32.")
     if recipe_name in ("nvfp4", "nvfp4_per_token") and any(m % 16 != 0 for m in non_empty_splits):
         pytest.skip("GroupedLinear + NVFP4 requires each non-empty m_split divisible by 16.")
-    if recipe_name == "nvfp4" and any(m % 64 != 0 for m in non_empty_splits):
+    if recipe_name in ("nvfp4", "nvfp4_per_token") and any(m % 64 != 0 for m in non_empty_splits):
         pytest.skip(
             "GroupedLinear + NVFP4 grouped split_quantize currently requires each non-empty "
             "m_split divisible by 64 due to grouped amax kernel constraints."

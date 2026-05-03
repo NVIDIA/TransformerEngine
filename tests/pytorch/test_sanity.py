@@ -580,6 +580,8 @@ def test_sanity_grouped_linear(
                 pytest.skip("NVFP4 not supported for grouped linear")
             if dtype == torch.float16:
                 pytest.skip("FP16 output for NVFP4 not supported")
+            if backward_override is None and dtype != torch.bfloat16:
+                pytest.skip("NVFP4 grouped default backward requires BF16 grad output")
 
     use_fp8 = fp8_recipe is not None
     with quantized_model_init(enabled=use_fp8 and fp8_model_params, recipe=fp8_recipe):
