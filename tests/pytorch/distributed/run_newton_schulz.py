@@ -14,7 +14,7 @@ import torch
 import torch.distributed as dist
 from torch.distributed.elastic.multiprocessing.errors import record
 
-from transformer_engine.pytorch.newton_schulz import (
+from transformer_engine.pytorch.optimizers.newton_schulz import (
     CusolverMpCtx,
     get_coefficients,
     newton_schulz,
