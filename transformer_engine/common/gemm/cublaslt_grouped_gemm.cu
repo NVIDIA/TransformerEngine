@@ -15,6 +15,7 @@
 #include <type_traits>
 #include <vector>
 
+#include "../cast/mxfp8/swizzle.cuh"
 #include "../common.h"
 #include "../util/cuda_runtime.h"
 #include "../util/handle_manager.h"
@@ -330,6 +331,7 @@ struct GroupedOperandSelection {
   NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
   bool with_gemm_swizzled_scales = false;
   bool trans = false;
+  bool rowwise = true;
 };
 
 constexpr int kMaxGroups = 64;
@@ -613,6 +615,7 @@ inline GroupedOperandSelection select_grouped_operand(const transformer_engine::
     sel.dptr = static_cast<char *>(t->columnwise_data.dptr);
     sel.scale_inv = t->columnwise_scale_inv.dptr;
     sel.dtype = col_dtype;
+    sel.rowwise = false;
     sel.shape = create_shape_info(t, swap_dims);
   };
 
@@ -621,6 +624,7 @@ inline GroupedOperandSelection select_grouped_operand(const transformer_engine::
     sel.dptr = static_cast<char *>(t->data.dptr);
     sel.scale_inv = t->scale_inv.dptr;
     sel.dtype = row_dtype;
+    sel.rowwise = true;
     sel.shape = create_shape_info(t, /*swap_dims=*/false);
   };
 
@@ -846,6 +850,45 @@ __forceinline__ __device__ int64_t compute_grouped_tensor_offset(const TensorSha
   }
 }
 
+__forceinline__ __device__ int64_t padded_mxfp8_scale_inv_bytes(int64_t first, int64_t last,
+                                                                bool rowwise) {
+  namespace mxfp8_swizzle = transformer_engine::dispatch::mxfp8::swizzle;
+  constexpr int64_t kMxfp8BlockSize = 32;
+  // x is the dimension along which quantization is applied, y is other dimension
+  const int64_t scale_tile_y = static_cast<int64_t>(mxfp8_swizzle::GEMM_SWIZZLED_SCALE_TILE_DIM_Y);
+  const int64_t scale_tile_x = static_cast<int64_t>(mxfp8_swizzle::GEMM_SWIZZLED_SCALE_TILE_DIM_X);
+  // Padded byte size of the swizzled MXFP8 scale_inv for a single tensor with data
+  // shape (first, last). Rowwise scales use rows=first, cols=last; columnwise
+  // scales swap the orientation since they are stored in column-major order.
+  const int64_t scale_dim_y = rowwise ? first : last;
+  const int64_t padded_scale_dim_y =
+      ((scale_dim_y + scale_tile_y - 1) / scale_tile_y) * scale_tile_y;
+  const int64_t data_dim_x = rowwise ? last : first;
+  const int64_t scale_dim_x = (data_dim_x + kMxfp8BlockSize - 1) / kMxfp8BlockSize;
+  const int64_t padded_scale_dim_x =
+      ((scale_dim_x + scale_tile_x - 1) / scale_tile_x) * scale_tile_x;
+  // MXFP8 scales are E8M0 (1 byte per element), so element count == byte count.
+  return padded_scale_dim_y * padded_scale_dim_x;
+}
+
+// Device helper: byte offset into a contiguous grouped MXFP8 scale_inv buffer for
+// tensor `idx`. Each expert's scale_inv is expected to be padded
+// to the 128x4 swizzled layout.
+__forceinline__ __device__ int64_t compute_grouped_tensor_mxfp8_scale_inv_offset(
+    const TensorShapeInfo &meta, size_t idx, bool rowwise) {
+  if (meta.first_dims != nullptr || meta.last_dims != nullptr) {
+    int64_t cumsum = 0;
+    for (size_t i = 0; i < idx; i++) {
+      const int64_t f = meta.first_dims ? meta.first_dims[i] : meta.uniform_first;
+      const int64_t l = meta.last_dims ? meta.last_dims[i] : meta.uniform_last;
+      cumsum += padded_mxfp8_scale_inv_bytes(f, l, rowwise);
+    }
+    return cumsum;
+  }
+  return static_cast<int64_t>(idx) *
+         padded_mxfp8_scale_inv_bytes(meta.uniform_first, meta.uniform_last, rowwise);
+}
+
 // Linear scan to find which tensor contains the given row.
 // Returns the tensor index and writes the exclusive end-row of that tensor to *out_tensor_row_end.
 __forceinline__ __device__ int find_tensor_for_row(const int64_t *first_dims, int64_t uniform_first,
@@ -977,7 +1020,8 @@ __global__ void setup_grouped_gemm_kernel(
     size_t b_elem_size, size_t c_elem_size, size_t d_elem_size, float *alpha_ptr, float *beta_ptr,
     // Scale inputs: for tensor scaling, pass float* and set mxfp8_base to nullptr
     // For MXFP8, pass nullptr for tensor_scale and set mxfp8_base
-    float *a_scale_base, float *b_scale_base, NVTEScalingMode scaling_mode, size_t num_tensors,
+    float *a_scale_base, float *b_scale_base, bool a_rowwise, bool b_rowwise,
+    NVTEScalingMode scaling_mode, size_t num_tensors,
     MultiTensorGroupGemmInputArgs a_multi_tensor_args,
     MultiTensorGroupGemmOutputArgs c_multi_tensor_args,
     MultiTensorGroupGemmOutputArgs d_multi_tensor_args) {
@@ -1038,12 +1082,13 @@ __global__ void setup_grouped_gemm_kernel(
 
   // Fill scale pointers (per-matrix).
   // The interpretation of the scale buffers depends on the shared scaling recipe:
-  //   NVTE_MXFP8_1D_SCALING : E8M0 byte stream; offset = data_offset / 32 elements
   //   otherwise             : one float per tensor, indexed by tensor index
   if (a_scale_base) {
     if (scaling_mode == NVTE_MXFP8_1D_SCALING) {
+      const int64_t a_scale_offset =
+          compute_grouped_tensor_mxfp8_scale_inv_offset(A_meta, idx, a_rowwise);
       a_scale_inv_ptrs[idx] = reinterpret_cast<void *>(
-          static_cast<char *>(static_cast<void *>(a_scale_base)) + a_offset / 32);
+          static_cast<char *>(static_cast<void *>(a_scale_base)) + a_scale_offset);
     } else {
       a_scale_inv_ptrs[idx] = static_cast<float *>(a_scale_base) + idx;
     }
@@ -1052,8 +1097,10 @@ __global__ void setup_grouped_gemm_kernel(
   }
   if (b_scale_base) {
     if (scaling_mode == NVTE_MXFP8_1D_SCALING) {
+      const int64_t b_scale_offset =
+          compute_grouped_tensor_mxfp8_scale_inv_offset(B_meta, idx, b_rowwise);
       b_scale_inv_ptrs[idx] = reinterpret_cast<void *>(
-          static_cast<char *>(static_cast<void *>(b_scale_base)) + b_offset / 32);
+          static_cast<char *>(static_cast<void *>(b_scale_base)) + b_scale_offset);
     } else {
       b_scale_inv_ptrs[idx] = static_cast<float *>(b_scale_base) + idx;
     }
@@ -1116,14 +1163,19 @@ inline void launch_grouped_gemm_setup(
 
   // A and B share the same scaling recipe (validated in validate_grouped_gemm_inputs).
   // Pass scale buffers as void* and let the kernel interpret them via scaling_mode.
+
+  // Scale rowwise flag for MXFP8/NVFP4: to calculate scale_inv padding based offsets
+  // within kernel. Ignored for tensor scaling.
+  const bool a_rowwise = A_sel.rowwise;
+  const bool b_rowwise = B_sel.rowwise;
   setup_grouped_gemm_kernel<<<num_blocks, threads_per_block, 0, stream>>>(
       ws.A_ptrs, ws.B_ptrs, ws.C_ptrs, ws.D_ptrs, ws.a_rows, ws.a_cols, ws.b_rows, ws.b_cols,
       ws.d_rows, ws.d_cols, ws.alpha_ptrs, ws.beta_ptrs, ws.a_scale_inv_ptrs, ws.b_scale_inv_ptrs,
       A_sel.dptr, B_sel.dptr, c_base, d_base, A_meta, B_meta, C_meta, D_meta, a_elem_size,
       b_elem_size, c_elem_size, d_elem_size, static_cast<float *>(alpha_tensor->data.dptr),
       static_cast<float *>(beta_tensor->data.dptr), reinterpret_cast<float *>(A_sel.scale_inv),
-      reinterpret_cast<float *>(B_sel.scale_inv), A_sel.scaling_mode, num_tensors,
-      a_multi_tensor_args, c_multi_tensor_args, d_multi_tensor_args);
+      reinterpret_cast<float *>(B_sel.scale_inv), a_rowwise, b_rowwise, A_sel.scaling_mode,
+      num_tensors, a_multi_tensor_args, c_multi_tensor_args, d_multi_tensor_args);
 
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
@@ -1276,6 +1328,7 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
       choose_grouped_operand_storage(static_cast<bool>(transa), /*is_A=*/true, mxfp8, is_fp8,
                                      non_tn_fp8_ok, A_list_info.all_row, A_list_info.all_col, "A");
   A_sel.trans = choice.trans;
+  A_sel.rowwise = choice.use_rowwise;
   if (choice.use_rowwise) {
     NVTE_CHECK(A_list_info.all_row, "Grouped GEMM: A_list is missing row-wise data");
     A_sel.dtype = A_list_info.row_dtype;

@@ -31,6 +31,7 @@ from ..utils import (
     clear_tensor_data,
     init_method_constant,
     requires_grad,
+    resolve_grouped_linear_single_param_flags,
     get_nvtx_range_context,
 )
 from ..distributed import (
@@ -659,11 +660,15 @@ class GroupedLinear(TransformerEngineBaseModule):
     single_grouped_weight : bool, default = False
                        If set to ``True``, grouped weights are stored as a single grouped parameter
                        instead of one parameter per GEMM.
-                       EXPERIMENTAL and subject to change.
+                       EXPERIMENTAL and subject to change. Gated by the
+                       ``NVTE_GROUPED_LINEAR_SINGLE_PARAM`` environment variable: if the env var
+                       is not set this argument is forced to ``False`` with a warning.
     single_grouped_bias : bool, default = False
                        If set to ``True``, grouped biases are stored as a single grouped bias
                        instead of one bias per GEMM.
-                       EXPERIMENTAL and subject to change.
+                       EXPERIMENTAL and subject to change. Gated by the
+                       ``NVTE_GROUPED_LINEAR_SINGLE_PARAM`` environment variable: if the env var
+                       is not set this argument is forced to ``False`` with a warning.
 
     Notes
     -----
@@ -712,6 +717,9 @@ class GroupedLinear(TransformerEngineBaseModule):
         self.ub_overlap_ag = ub_overlap_ag
         self.ub_name = ub_name
         self.save_original_input = save_original_input
+        single_grouped_weight, single_grouped_bias = resolve_grouped_linear_single_param_flags(
+            single_grouped_weight, single_grouped_bias
+        )
         self.single_grouped_weight = single_grouped_weight
         self.single_grouped_bias = single_grouped_bias
         if ub_overlap_rs or ub_overlap_ag:
