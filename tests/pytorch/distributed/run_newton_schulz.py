@@ -18,6 +18,7 @@ from transformer_engine.pytorch.newton_schulz import (
     CusolverMpCtx,
     get_coefficients,
     newton_schulz,
+    newton_schulz_tp,
 )
 
 
@@ -43,6 +44,11 @@ def main():
     parser.add_argument("--matrix-cols", type=int, default=None)
     parser.add_argument("--num-iterations", type=int, default=5)
     parser.add_argument("--coeff-type", type=str, default="quintic")
+    parser.add_argument("--api", type=str, default="base", choices=["base", "tp"])
+    parser.add_argument("--partition-dim", type=int, default=1, choices=[0, 1])
+    parser.add_argument(
+        "--tp-mode", type=str, default="distributed", choices=["duplicated", "distributed"]
+    )
     parser.add_argument("--atol", type=float, default=1e-2)
     parser.add_argument("--rtol", type=float, default=1e-2)
     args = parser.parse_args()
@@ -57,8 +63,15 @@ def main():
     n = args.matrix_cols if args.matrix_cols is not None else args.matrix_rows
     coefficients = get_coefficients(args.num_iterations, args.coeff_type)
 
-    # Ensure the distributed column dimension is divisible by world_size.
-    assert n % world_size == 0, f"Matrix columns {n} must be divisible by world_size {world_size}"
+    if args.api == "base" or args.partition_dim == 1:
+        # Ensure the distributed column dimension is divisible by world_size.
+        assert n % world_size == 0, (
+            f"Matrix columns {n} must be divisible by world_size {world_size}"
+        )
+    else:
+        assert m % world_size == 0, (
+            f"Matrix rows {m} must be divisible by world_size {world_size}"
+        )
 
     # Create a random matrix on rank 0 with singular values in (0, 1),
     # which keeps the Newton-Schulz iterations in the convergence regime.
@@ -80,20 +93,36 @@ def main():
     # Broadcast the full matrix to all ranks
     dist.broadcast(A, src=0)
 
-    # Scatter columns to each rank
-    local_cols = n // world_size
-    x_local = A[:, rank * local_cols : (rank + 1) * local_cols].contiguous()
+    # Scatter columns for the base API. Scatter along partition_dim for the TP API.
+    if args.api == "tp" and args.partition_dim == 0:
+        local_rows = m // world_size
+        x_local = A[rank * local_rows : (rank + 1) * local_rows, :].contiguous()
+        gather_dim = 0
+    else:
+        local_cols = n // world_size
+        x_local = A[:, rank * local_cols : (rank + 1) * local_cols].contiguous()
+        gather_dim = 1
 
     ctx = CusolverMpCtx(dist.group.WORLD)
     try:
-        newton_schulz(x_local, ctx, args.num_iterations, coefficients=coefficients)
+        if args.api == "tp":
+            newton_schulz_tp(
+                x_local,
+                ctx,
+                args.num_iterations,
+                coefficients=coefficients,
+                partition_dim=args.partition_dim,
+                tp_mode=args.tp_mode,
+            )
+        else:
+            newton_schulz(x_local, ctx, args.num_iterations, coefficients=coefficients)
     finally:
         ctx.destroy()
 
     # Gather results
     gathered = [torch.empty_like(x_local) for _ in range(world_size)]
     dist.all_gather(gathered, x_local)
-    X = torch.cat(gathered, dim=1)
+    X = torch.cat(gathered, dim=gather_dim)
 
     # Check: the resulting matrix should be orthogonal, or match a local reference.
     if rank == 0:

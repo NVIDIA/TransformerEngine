@@ -131,9 +131,11 @@ class CusolverMpCtx:
     """
 
     def __init__(self, group: dist.ProcessGroup) -> None:
+        self.group = group
         self.nranks = dist.get_world_size(group)
+        self.rank = dist.get_rank(group)
         self._ptr = tex.cusolvermp_ctx_create(
-            _get_nccl_comm_ptr(group), dist.get_world_size(group), dist.get_rank(group)
+            _get_nccl_comm_ptr(group), self.nranks, self.rank
         )
 
     def destroy(self) -> None:
@@ -206,3 +208,115 @@ def newton_schulz(
     n = x.size(1) * ctx.nranks
 
     tex.newton_schulz(ctx._ptr, m, n, x, num_iterations, flat_coefficients)
+
+
+def _orthogonalize_replicated(
+    x: torch.Tensor,
+    ctx: CusolverMpCtx,
+    num_iterations: int,
+    coefficients: Optional[Sequence[CoeffT]],
+    transpose: bool,
+) -> torch.Tensor:
+    """Orthogonalize a replicated matrix using the distributed column-sharded kernel."""
+    work = x.mT.contiguous() if transpose else x
+    if work.size(1) % ctx.nranks != 0:
+        distributed_dim = 0 if transpose else 1
+        raise ValueError(
+            f"Tensor dimension {distributed_dim} with size {x.size(distributed_dim)} "
+            f"must be divisible by tensor-parallel size {ctx.nranks}"
+        )
+
+    local_work = work.chunk(ctx.nranks, dim=1)[ctx.rank].contiguous()
+    newton_schulz(local_work, ctx, num_iterations, coefficients=coefficients)
+
+    output_shards = [torch.empty_like(local_work) for _ in range(ctx.nranks)]
+    dist.all_gather(output_shards, local_work, group=ctx.group)
+    output = torch.cat(output_shards, dim=1)
+    return output.mT.contiguous() if transpose else output
+
+
+def newton_schulz_tp(
+    x: torch.Tensor,
+    ctx: CusolverMpCtx,
+    num_iterations: int = 5,
+    coefficients: Optional[Sequence[CoeffT]] = None,
+    partition_dim: Optional[int] = None,
+    tp_mode: Literal["duplicated", "distributed"] = "duplicated",
+) -> None:
+    """Compute tensor-parallel Newton-Schulz orthogonalization in-place.
+
+    This convenience wrapper mirrors the tensor-parallel modes used by Emerging
+    Optimizers while delegating the matrix orthogonalization to :func:`newton_schulz`.
+    The underlying kernel expects columns to be distributed across ranks, so row
+    partitions are transposed before the call and transposed back afterward.
+
+    Parameters
+    ----------
+    x : torch.Tensor
+        Local tensor to orthogonalize in-place.
+    ctx : CusolverMpCtx
+        cuSolverMp context created for the tensor-parallel process group.
+    num_iterations : int, optional
+        Number of Newton-Schulz iterations. Default: 5.
+    coefficients : sequence of tuple[float, float, float], optional
+        Polynomial coefficients for the Newton-Schulz iteration.
+    partition_dim : int, optional
+        Dimension along which ``x`` is partitioned. ``None`` treats ``x`` as a
+        duplicated full tensor on every rank.
+    tp_mode : {"duplicated", "distributed"}, optional
+        ``"distributed"`` orthogonalizes the existing partition directly.
+        ``"duplicated"`` first gathers the full tensor, orthogonalizes it, and
+        copies this rank's partition back into ``x``.
+    """
+    if x.dim() != 2:
+        raise ValueError(f"Expected 2D tensor, got {x.dim()}D")
+
+    if partition_dim is not None:
+        if partition_dim not in (0, 1):
+            raise ValueError(f"Invalid partition_dim: {partition_dim}")
+        if tp_mode not in ("duplicated", "distributed"):
+            raise ValueError(f"Invalid tp_mode: {tp_mode}")
+
+    if x.dtype not in (torch.float32, torch.bfloat16):
+        raise ValueError(f"Expected float32 or bfloat16 tensor, got {x.dtype}")
+    if not x.is_contiguous():
+        raise ValueError("Input tensor must be contiguous")
+    if not x.is_cuda:
+        raise ValueError("Input tensor must be on CUDA device")
+
+    if partition_dim is None:
+        output = _orthogonalize_replicated(
+            x,
+            ctx,
+            num_iterations,
+            coefficients,
+            transpose=x.size(0) > x.size(1),
+        )
+        x.copy_(output)
+        return
+
+    if tp_mode == "duplicated":
+        x_shards = [torch.empty_like(x) for _ in range(ctx.nranks)]
+        dist.all_gather(x_shards, x, group=ctx.group)
+        global_x = torch.cat(x_shards, dim=partition_dim)
+
+        output = _orthogonalize_replicated(
+            global_x,
+            ctx,
+            num_iterations,
+            coefficients,
+            transpose=global_x.size(0) > global_x.size(1),
+        )
+
+        local_start = ctx.rank * x.size(partition_dim)
+        local_output = output.narrow(partition_dim, local_start, x.size(partition_dim))
+        x.copy_(local_output)
+    elif tp_mode == "distributed":
+        if partition_dim == 0:
+            x_t = x.mT.contiguous()
+            newton_schulz(x_t, ctx, num_iterations, coefficients=coefficients)
+            x.copy_(x_t.mT)
+        else:
+            newton_schulz(x, ctx, num_iterations, coefficients=coefficients)
+    else:
+        raise ValueError(f"Invalid tp_mode: {tp_mode}")

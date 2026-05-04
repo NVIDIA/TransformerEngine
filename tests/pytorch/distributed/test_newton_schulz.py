@@ -26,6 +26,19 @@ REFERENCE_SHAPES = [(NUM_PROCS * 64, NUM_PROCS * 64)]
 
 
 def _run_test(dtype, matrix_shape, num_iterations, coeff_type, check):
+    _run_worker(dtype, matrix_shape, num_iterations, coeff_type, check)
+
+
+def _run_worker(
+    dtype,
+    matrix_shape,
+    num_iterations,
+    coeff_type,
+    check,
+    api="base",
+    partition_dim=1,
+    tp_mode="distributed",
+):
     rows, cols = matrix_shape
     test_path = TEST_ROOT / "run_newton_schulz.py"
     test_cmd = LAUNCH_CMD + [
@@ -36,6 +49,9 @@ def _run_test(dtype, matrix_shape, num_iterations, coeff_type, check):
         f"--matrix-cols={cols}",
         f"--num-iterations={num_iterations}",
         f"--coeff-type={coeff_type}",
+        f"--api={api}",
+        f"--partition-dim={partition_dim}",
+        f"--tp-mode={tp_mode}",
     ]
     if dtype == "bfloat16":
         test_cmd += ["--atol=5e-2", "--rtol=5e-2"]
@@ -67,3 +83,19 @@ def test_orthogonality(dtype, matrix_shape, num_iterations, coeff_type):
 def test_against_reference(dtype, matrix_shape, num_iterations, coeff_type):
     """Test distributed Newton-Schulz against a local reference implementation."""
     _run_test(dtype, matrix_shape, num_iterations, coeff_type, "reference")
+
+
+@pytest.mark.parametrize("partition_dim", [0, 1])
+@pytest.mark.parametrize("tp_mode", ["duplicated", "distributed"])
+def test_tp_api_against_reference(partition_dim, tp_mode):
+    """Test tensor-parallel convenience API against a local reference implementation."""
+    _run_worker(
+        "float32",
+        REFERENCE_SHAPES[0],
+        5,
+        "quintic",
+        "reference",
+        api="tp",
+        partition_dim=partition_dim,
+        tp_mode=tp_mode,
+    )
