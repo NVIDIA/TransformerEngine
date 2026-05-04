@@ -3,7 +3,7 @@
 # See LICENSE for license information.
 
 
-"""Unified GEMM benchmark for BF16, FP8 Block, MXFP8, and NVFP4 precisions.
+"""Unified GEMM benchmark for BF16, FP8 (Current/Delayed/Block), MXFP8, and NVFP4 precisions.
 
 Compares matrix-multiplication throughput across precisions using
 Transformer Engine on NVIDIA GPUs.  Supports two timing back-ends,
@@ -56,7 +56,9 @@ try:
     import transformer_engine.pytorch as te
     import transformer_engine_torch as tex
     from transformer_engine.common.recipe import (
+        DelayedScaling,
         Float8BlockScaling,
+        Float8CurrentScaling,
         Format,
         MXFP8BlockScaling,
         NVFP4BlockScaling,
@@ -71,6 +73,8 @@ GEMM_KERNEL_PATTERNS = ("gemm", "nvjet", "xmma", "cutlass")
 
 PRECISION_COLORS = {
     "BF16": "#808080",
+    "FP8Current": "#2E8B57",
+    "FP8Delayed": "#20B2AA",
     "FP8Block": "#006400",
     "MXFP8": "#4B0082",
     "NVFP4": "#B22222",
@@ -242,6 +246,182 @@ def benchmark_bf16(
         del A_lg, B_lg
 
     return GEMMResult(tflops=tflops, avg_time_ms=avg_ms, shape=(M, K, N), precision="BF16")
+
+
+# ---------------------------------------------------------------------------
+# FP8 tensor-wise scaling benchmarks (CurrentScaling / DelayedScaling)
+# ---------------------------------------------------------------------------
+def benchmark_fp8_current(
+    M: int,
+    K: int,
+    N: int,
+    num_warmup: int = 10,
+    num_iters: int = 100,
+    timing: str = "cuda-events",
+    verbose: bool = False,
+) -> Optional[GEMMResult]:
+    """FP8 GEMM with Float8CurrentScaling recipe via te.Linear autocast."""
+    if not TE_AVAILABLE:
+        return None
+
+    device = torch.device("cuda")
+    flops = compute_gemm_flops(M, K, N)
+
+    linear = te.Linear(K, N, bias=False, params_dtype=torch.bfloat16).to(device)
+    x = torch.randn(M, K, dtype=torch.bfloat16, device=device)
+    recipe = Float8CurrentScaling()
+
+    with te.autocast(enabled=True, recipe=recipe):
+        for _ in range(num_warmup):
+            linear(x)
+        torch.cuda.synchronize()
+
+        def _run():
+            linear(x)
+
+        if timing == "profiler":
+            tflops, avg_ms = _time_with_profiler(_run, num_iters, flops, verbose=verbose)
+        else:
+            lin_lg = te.Linear(4096, 4096, bias=False, params_dtype=torch.bfloat16).to(device)
+            x_lg = torch.randn(4096, 4096, dtype=torch.bfloat16, device=device)
+            tflops, avg_ms = _time_with_cuda_events(
+                _run, num_iters, flops, leading_fn=lambda: lin_lg(x_lg)
+            )
+            del lin_lg, x_lg
+
+    return GEMMResult(tflops=tflops, avg_time_ms=avg_ms, shape=(M, K, N), precision="FP8Current")
+
+
+def benchmark_fp8_current_prequantized(
+    M: int,
+    K: int,
+    N: int,
+    num_warmup: int = 10,
+    num_iters: int = 100,
+    timing: str = "cuda-events",
+    verbose: bool = False,
+) -> Optional[GEMMResult]:
+    """Pre-quantized FP8 GEMM with Float8CurrentScaling via tex.generic_gemm."""
+    if not TE_AVAILABLE:
+        return None
+
+    device = torch.device("cuda")
+    flops = compute_gemm_flops(M, K, N)
+
+    try:
+        quantizer = te.Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device=device)
+
+        A_q = quantizer.quantize(torch.randn(K, M, dtype=torch.bfloat16, device=device))
+        B_q = quantizer.quantize(torch.randn(K, N, dtype=torch.bfloat16, device=device))
+        D = torch.empty(N, M, dtype=torch.bfloat16, device=device)
+        ws_size = 32 * 1024 * 1024
+        ws = torch.empty(ws_size, dtype=torch.uint8, device=device)
+
+        def _run():
+            tex.generic_gemm(
+                A_q,
+                False,
+                B_q,
+                True,
+                D,
+                None,
+                tex.DType.kBFloat16,
+                None,
+                tex.DType.kBFloat16,
+                False,
+                None,
+                False,
+                ws,
+                ws_size,
+                False,
+                False,
+            )
+
+        for _ in range(num_warmup):
+            _run()
+        torch.cuda.synchronize()
+
+        if timing == "profiler":
+            tflops, avg_ms = _time_with_profiler(_run, num_iters, flops, verbose=verbose)
+        else:
+            A_lg_q = quantizer.quantize(
+                torch.randn(4096, 4096, dtype=torch.bfloat16, device=device)
+            )
+            B_lg_q = quantizer.quantize(
+                torch.randn(4096, 4096, dtype=torch.bfloat16, device=device)
+            )
+            D_lg = torch.empty(4096, 4096, dtype=torch.bfloat16, device=device)
+
+            def _lead():
+                tex.generic_gemm(
+                    A_lg_q,
+                    False,
+                    B_lg_q,
+                    True,
+                    D_lg,
+                    None,
+                    tex.DType.kBFloat16,
+                    None,
+                    tex.DType.kBFloat16,
+                    False,
+                    None,
+                    False,
+                    ws,
+                    ws_size,
+                    False,
+                    False,
+                )
+
+            tflops, avg_ms = _time_with_cuda_events(_run, num_iters, flops, leading_fn=_lead)
+            del A_lg_q, B_lg_q, D_lg
+
+        return GEMMResult(
+            tflops=tflops, avg_time_ms=avg_ms, shape=(M, K, N), precision="FP8Current"
+        )
+    except Exception as e:
+        print(f"Warning: FP8 CurrentScaling prequantized benchmark failed: {e}")
+        return None
+
+
+def benchmark_fp8_delayed(
+    M: int,
+    K: int,
+    N: int,
+    num_warmup: int = 10,
+    num_iters: int = 100,
+    timing: str = "cuda-events",
+    verbose: bool = False,
+) -> Optional[GEMMResult]:
+    """FP8 GEMM with DelayedScaling recipe via te.Linear autocast."""
+    if not TE_AVAILABLE:
+        return None
+
+    device = torch.device("cuda")
+    flops = compute_gemm_flops(M, K, N)
+
+    linear = te.Linear(K, N, bias=False, params_dtype=torch.bfloat16).to(device)
+    x = torch.randn(M, K, dtype=torch.bfloat16, device=device)
+    recipe = DelayedScaling()
+
+    with te.autocast(enabled=True, recipe=recipe):
+        for _ in range(num_warmup):
+            linear(x)
+        torch.cuda.synchronize()
+
+        def _run():
+            linear(x)
+
+        if timing == "profiler":
+            tflops, avg_ms = _time_with_profiler(_run, num_iters, flops, verbose=verbose)
+        else:
+            lin_lg = te.Linear(4096, 4096, bias=False, params_dtype=torch.bfloat16).to(device)
+            x_lg = torch.randn(4096, 4096, dtype=torch.bfloat16, device=device)
+            tflops, avg_ms = _time_with_cuda_events(
+                _run, num_iters, flops, leading_fn=lambda: lin_lg(x_lg)
+            )
+            del lin_lg, x_lg
+
+    return GEMMResult(tflops=tflops, avg_time_ms=avg_ms, shape=(M, K, N), precision="FP8Delayed")
 
 
 # ---------------------------------------------------------------------------
@@ -779,7 +959,10 @@ def run_benchmarks(
     shapes: list[tuple[int, int, int]],
     num_warmup: int = 10,
     num_iters: int = 100,
+    include_fp8_current: bool = True,
+    include_fp8_delayed: bool = True,
     include_fp8: bool = True,
+    include_fp8_block: bool = True,
     include_fp4: bool = True,
     gpu_warmup_seconds: float = 5.0,
     pre_quantize: bool = False,
@@ -791,11 +974,28 @@ def run_benchmarks(
     Returns:
         Dict mapping precision name to a list of TFLOPS values, one per shape.
     """
-    results: dict[str, list[float]] = {"BF16": [], "MXFP8": [], "NVFP4": []}
-    time_results: dict[str, list[float]] = {"BF16": [], "MXFP8": [], "NVFP4": []}
+    results: dict[str, list[float]] = {
+        "BF16": [],
+        "FP8Current": [],
+        "FP8Delayed": [],
+        "FP8Block": [],
+        "MXFP8": [],
+        "NVFP4": [],
+    }
+    time_results: dict[str, list[float]] = {
+        "BF16": [],
+        "FP8Current": [],
+        "FP8Delayed": [],
+        "FP8Block": [],
+        "MXFP8": [],
+        "NVFP4": [],
+    }
 
     has_blackwell = is_blackwell_available()
+    run_fp8_current = include_fp8_current and TE_AVAILABLE
+    run_fp8_delayed = include_fp8_delayed and TE_AVAILABLE
     run_fp8 = include_fp8 and TE_AVAILABLE
+    run_fp8_block = include_fp8_block and TE_AVAILABLE
     run_fp4 = include_fp4 and TE_AVAILABLE and has_blackwell
 
     gpu_name = torch.cuda.get_device_name(0)
@@ -825,6 +1025,9 @@ def run_benchmarks(
         warmup_gpu(gpu_warmup_seconds)
 
     # Select benchmark functions
+    fp8_current_fn = benchmark_fp8_current_prequantized if pre_quantize else benchmark_fp8_current
+    fp8_delayed_fn = benchmark_fp8_delayed  # No prequantized variant (uses amax history)
+    fp8_block_fn = benchmark_fp8_block_prequantized if pre_quantize else benchmark_fp8_block
     fp8_fn = benchmark_fp8_prequantized if pre_quantize else benchmark_fp8
     fp4_fn = benchmark_fp4_prequantized if pre_quantize else benchmark_fp4
 
@@ -832,6 +1035,12 @@ def run_benchmarks(
     sep_width = 90
     print("=" * sep_width)
     hdr = f"{'Shape':<24} {'BF16 TFLOPS':>12} {'BF16 ms':>9}"
+    if run_fp8_current:
+        hdr += f" {'FP8Cur TFLOPS':>14} {'FP8Cur ms':>10}"
+    if run_fp8_delayed:
+        hdr += f" {'FP8Del TFLOPS':>14} {'FP8Del ms':>10}"
+    if run_fp8_block:
+        hdr += f" {'FP8Block TFLOPS':>16} {'FP8Block ms':>11}"
     if run_fp8:
         hdr += f" {'MXFP8 TFLOPS':>13} {'MXFP8 ms':>9}"
     if run_fp4:
@@ -861,6 +1070,63 @@ def run_benchmarks(
         time_results["BF16"].append(bf16.avg_time_ms)
         row = f"{shape_str:<24} {bf16.tflops:>12.1f} {bf16.avg_time_ms:>9.3f}"
         best_tflops = bf16.tflops
+
+        # FP8 CurrentScaling
+        if run_fp8_current:
+            if verbose:
+                print(f"  [{shape_str}] FP8Current kernel details:")
+            if is_profiling:
+                torch.cuda.nvtx.range_push(f"FP8Current_{shape_str}")
+            fp8c = fp8_current_fn(M, K, N, num_warmup, num_iters, timing=timing, verbose=verbose)
+            if is_profiling:
+                torch.cuda.nvtx.range_pop()
+            if fp8c:
+                results["FP8Current"].append(fp8c.tflops)
+                time_results["FP8Current"].append(fp8c.avg_time_ms)
+                row += f" {fp8c.tflops:>14.1f} {fp8c.avg_time_ms:>10.3f}"
+                best_tflops = max(best_tflops, fp8c.tflops)
+            else:
+                results["FP8Current"].append(0)
+                time_results["FP8Current"].append(0)
+                row += f" {'N/A':>14} {'N/A':>10}"
+
+        # FP8 DelayedScaling
+        if run_fp8_delayed:
+            if verbose:
+                print(f"  [{shape_str}] FP8Delayed kernel details:")
+            if is_profiling:
+                torch.cuda.nvtx.range_push(f"FP8Delayed_{shape_str}")
+            fp8d = fp8_delayed_fn(M, K, N, num_warmup, num_iters, timing=timing, verbose=verbose)
+            if is_profiling:
+                torch.cuda.nvtx.range_pop()
+            if fp8d:
+                results["FP8Delayed"].append(fp8d.tflops)
+                time_results["FP8Delayed"].append(fp8d.avg_time_ms)
+                row += f" {fp8d.tflops:>14.1f} {fp8d.avg_time_ms:>10.3f}"
+                best_tflops = max(best_tflops, fp8d.tflops)
+            else:
+                results["FP8Delayed"].append(0)
+                time_results["FP8Delayed"].append(0)
+                row += f" {'N/A':>14} {'N/A':>10}"
+
+        # FP8Block
+        if run_fp8_block:
+            if verbose:
+                print(f"  [{shape_str}] FP8Block kernel details:")
+            if is_profiling:
+                torch.cuda.nvtx.range_push(f"FP8Block_{shape_str}")
+            fp8b = fp8_block_fn(M, K, N, num_warmup, num_iters, timing=timing, verbose=verbose)
+            if is_profiling:
+                torch.cuda.nvtx.range_pop()
+            if fp8b:
+                results["FP8Block"].append(fp8b.tflops)
+                time_results["FP8Block"].append(fp8b.avg_time_ms)
+                row += f" {fp8b.tflops:>16.1f} {fp8b.avg_time_ms:>11.3f}"
+                best_tflops = max(best_tflops, fp8b.tflops)
+            else:
+                results["FP8Block"].append(0)
+                time_results["FP8Block"].append(0)
+                row += f" {'N/A':>16} {'N/A':>11}"
 
         # MXFP8
         if run_fp8:
@@ -927,6 +1193,8 @@ def _benchmark_single_shape(
     N: int,
     num_warmup: int,
     num_iters: int,
+    run_fp8_current: bool,
+    run_fp8_delayed: bool,
     run_fp8: bool,
     run_fp8_block: bool,
     run_fp4: bool,
@@ -938,6 +1206,8 @@ def _benchmark_single_shape(
     Returns:
         Dict mapping precision name to GEMMResult.
     """
+    fp8_current_fn = benchmark_fp8_current_prequantized if pre_quantize else benchmark_fp8_current
+    fp8_delayed_fn = benchmark_fp8_delayed  # No prequantized variant (uses amax history)
     fp8_fn = benchmark_fp8_prequantized if pre_quantize else benchmark_fp8
     fp8_block_fn = benchmark_fp8_block_prequantized if pre_quantize else benchmark_fp8_block
     fp4_fn = benchmark_fp4_prequantized if pre_quantize else benchmark_fp4
@@ -946,6 +1216,16 @@ def _benchmark_single_shape(
 
     bf16 = benchmark_bf16(M, K, N, num_warmup, num_iters, timing=timing)
     out["BF16"] = bf16
+
+    if run_fp8_current:
+        fp8c = fp8_current_fn(M, K, N, num_warmup, num_iters, timing=timing)
+        if fp8c:
+            out["FP8Current"] = fp8c
+
+    if run_fp8_delayed:
+        fp8d = fp8_delayed_fn(M, K, N, num_warmup, num_iters, timing=timing)
+        if fp8d:
+            out["FP8Delayed"] = fp8d
 
     if run_fp8_block:
         fp8b = fp8_block_fn(M, K, N, num_warmup, num_iters, timing=timing)
@@ -969,6 +1249,8 @@ def run_model_config_benchmarks(
     config: ModelConfig,
     num_warmup: int = 10,
     num_iters: int = 100,
+    include_fp8_current: bool = True,
+    include_fp8_delayed: bool = True,
     include_fp8: bool = True,
     include_fp8_block: bool = True,
     include_fp4: bool = True,
@@ -976,17 +1258,15 @@ def run_model_config_benchmarks(
     pre_quantize: bool = False,
     timing: str = "cuda-events",
     output_path: str = "gemm_benchmark.png",
-    verify_dgrad: bool = False,
 ) -> None:
     """Benchmark GEMM shapes derived from model hyperparameters.
 
-    Computes Fprop and Wgrad shapes, benchmarks each across enabled
-    precisions, and prints per-layer / full-model speedup estimates.
-
-    When *verify_dgrad* is True, Dgrad shapes are benchmarked separately
-    instead of assuming Dgrad time == Fprop time.
+    Computes Fprop, Dgrad, and Wgrad shapes, benchmarks each across
+    enabled precisions, and prints per-layer / full-model speedup estimates.
     """
     has_blackwell = is_blackwell_available()
+    run_fp8_current = include_fp8_current and TE_AVAILABLE
+    run_fp8_delayed = include_fp8_delayed and TE_AVAILABLE
     run_fp8 = include_fp8 and TE_AVAILABLE
     run_fp8_block = include_fp8_block and TE_AVAILABLE
     run_fp4 = include_fp4 and TE_AVAILABLE and has_blackwell
@@ -1027,6 +1307,10 @@ def run_model_config_benchmarks(
 
     # --- Determine active precisions for column headers ---
     precisions = ["BF16"]
+    if run_fp8_current:
+        precisions.append("FP8Current")
+    if run_fp8_delayed:
+        precisions.append("FP8Delayed")
     if run_fp8_block:
         precisions.append("FP8Block")
     if run_fp8:
@@ -1050,12 +1334,7 @@ def run_model_config_benchmarks(
         return "".join(f" {sums.get(p, 0):>10.3f}" for p in precs)
 
     # --- Benchmark Fprop shapes ---
-    fprop_header = (
-        "Fprop Shapes:"
-        if verify_dgrad
-        else "Fprop / Dgrad Shapes (each counted 2x for Fprop + Dgrad):"
-    )
-    print(f"\n{fprop_header}")
+    print("\nFprop Shapes:")
     print(dash)
     print(f"{'Op':<22} {'Shape':<24}{_ms_cols(precisions)}")
     print(dash)
@@ -1071,6 +1350,8 @@ def run_model_config_benchmarks(
             n,
             num_warmup,
             num_iters,
+            run_fp8_current,
+            run_fp8_delayed,
             run_fp8,
             run_fp8_block,
             run_fp4,
@@ -1086,73 +1367,68 @@ def run_model_config_benchmarks(
     print(dash)
     print(f"{'Fprop sum (ms):':<46}{_ms_sums(fprop_sums, precisions)}")
 
-    # Default: assume Dgrad == Fprop.  Overwritten below if --verify-dgrad.
-    fprop_dgrad_sums: dict[str, float] = {p: v * 2 for p, v in fprop_sums.items()}
-
-    if not verify_dgrad:
-        print(f"{'Fprop + Dgrad (x2):':<46}{_ms_sums(fprop_dgrad_sums, precisions)}")
-
-    # --- Benchmark Dgrad shapes (optional) ---
+    # --- Benchmark Dgrad shapes ---
     dgrad_results: list[dict[str, GEMMResult]] = []
     dgrad_sums: dict[str, float] = {p: 0.0 for p in precisions}
 
-    if verify_dgrad:
-        print("\nDgrad Shapes:")
-        print(dash)
-        print(f"{'Op':<22} {'Shape':<24}{_ms_cols(precisions)}")
-        print(dash)
+    print("\nDgrad Shapes:")
+    print(dash)
+    print(f"{'Op':<22} {'Shape':<24}{_ms_cols(precisions)}")
+    print(dash)
 
-        for label, m, k, n in dgrad_shapes:
-            shape_str = f"{m}x{k}x{n}"
-            res = _benchmark_single_shape(
-                m,
-                k,
-                n,
-                num_warmup,
-                num_iters,
-                run_fp8,
-                run_fp8_block,
-                run_fp4,
-                pre_quantize,
-                timing,
-            )
-            dgrad_results.append(res)
-            for p in precisions:
-                if p in res:
-                    dgrad_sums[p] += res[p].avg_time_ms
-            print(f"{label:<22} {shape_str:<24}{_ms_vals(res, precisions)}")
-
-        print(dash)
-        print(f"{'Dgrad sum (ms):':<46}{_ms_sums(dgrad_sums, precisions)}")
-
-        fprop_dgrad_sums = {p: fprop_sums.get(p, 0) + dgrad_sums.get(p, 0) for p in precisions}
-        fprop_dgrad_assumed = {p: v * 2 for p, v in fprop_sums.items()}
-        print(f"{'Fprop + Dgrad (measured):':<46}{_ms_sums(fprop_dgrad_sums, precisions)}")
-        print(f"{'Fprop + Dgrad (assumed x2):':<46}{_ms_sums(fprop_dgrad_assumed, precisions)}")
-
-        print("\nFprop vs Dgrad per-shape comparison:")
-        print(dash)
+    for label, m, k, n in dgrad_shapes:
+        shape_str = f"{m}x{k}x{n}"
+        res = _benchmark_single_shape(
+            m,
+            k,
+            n,
+            num_warmup,
+            num_iters,
+            run_fp8_current,
+            run_fp8_delayed,
+            run_fp8,
+            run_fp8_block,
+            run_fp4,
+            pre_quantize,
+            timing,
+        )
+        dgrad_results.append(res)
         for p in precisions:
-            print(f"  {p}:")
-            for i, ((fp_label, *_), (_, *_)) in enumerate(zip(fprop_shapes, dgrad_shapes)):
-                fp_res = fprop_results[i].get(p)
-                dg_res = dgrad_results[i].get(p)
-                if fp_res and dg_res:
-                    fp_ms = fp_res.avg_time_ms
-                    dg_ms = dg_res.avg_time_ms
-                    diff_pct = (dg_ms - fp_ms) / fp_ms * 100
-                    print(
-                        f"    {fp_label:<16} Fprop={fp_ms:7.3f}ms  Dgrad={dg_ms:7.3f}ms "
-                        f" diff={diff_pct:+.1f}%"
-                    )
-            fp_total = fprop_sums.get(p, 0)
-            dg_total = dgrad_sums.get(p, 0)
-            if fp_total > 0:
-                total_diff = (dg_total - fp_total) / fp_total * 100
+            if p in res:
+                dgrad_sums[p] += res[p].avg_time_ms
+        print(f"{label:<22} {shape_str:<24}{_ms_vals(res, precisions)}")
+
+    print(dash)
+    print(f"{'Dgrad sum (ms):':<46}{_ms_sums(dgrad_sums, precisions)}")
+
+    fprop_dgrad_sums: dict[str, float] = {
+        p: fprop_sums.get(p, 0) + dgrad_sums.get(p, 0) for p in precisions
+    }
+    print(f"{'Fprop + Dgrad (measured):':<46}{_ms_sums(fprop_dgrad_sums, precisions)}")
+
+    print("\nFprop vs Dgrad per-shape comparison:")
+    print(dash)
+    for p in precisions:
+        print(f"  {p}:")
+        for i, ((fp_label, *_), (_, *_)) in enumerate(zip(fprop_shapes, dgrad_shapes)):
+            fp_res = fprop_results[i].get(p)
+            dg_res = dgrad_results[i].get(p)
+            if fp_res and dg_res:
+                fp_ms = fp_res.avg_time_ms
+                dg_ms = dg_res.avg_time_ms
+                diff_pct = (dg_ms - fp_ms) / fp_ms * 100
                 print(
-                    f"    {'Sum':<16} Fprop={fp_total:7.3f}ms  Dgrad={dg_total:7.3f}ms "
-                    f" diff={total_diff:+.1f}%"
+                    f"    {fp_label:<16} Fprop={fp_ms:7.3f}ms  Dgrad={dg_ms:7.3f}ms "
+                    f" diff={diff_pct:+.1f}%"
                 )
+        fp_total = fprop_sums.get(p, 0)
+        dg_total = dgrad_sums.get(p, 0)
+        if fp_total > 0:
+            total_diff = (dg_total - fp_total) / fp_total * 100
+            print(
+                f"    {'Sum':<16} Fprop={fp_total:7.3f}ms  Dgrad={dg_total:7.3f}ms "
+                f" diff={total_diff:+.1f}%"
+            )
 
     # --- Benchmark Wgrad shapes ---
     print("\nWgrad Shapes:")
@@ -1171,6 +1447,8 @@ def run_model_config_benchmarks(
             n,
             num_warmup,
             num_iters,
+            run_fp8_current,
+            run_fp8_delayed,
             run_fp8,
             run_fp8_block,
             run_fp4,
@@ -1193,27 +1471,11 @@ def run_model_config_benchmarks(
     print(f"\n{sep}")
     print("Per-Layer GEMM Time:")
     print(f"{'':>30}{_ms_cols(precisions)}")
-    if verify_dgrad:
-        print(f"{'Fprop:':<30}{_ms_sums(fprop_sums, precisions)}")
-        print(f"{'Dgrad (measured):':<30}{_ms_sums(dgrad_sums, precisions)}")
-    fd_label = "Fprop + Dgrad (measured):" if verify_dgrad else "Fprop + Dgrad (x2):"
-    print(f"{fd_label:<30}{_ms_sums(fprop_dgrad_sums, precisions)}")
+    print(f"{'Fprop:':<30}{_ms_sums(fprop_sums, precisions)}")
+    print(f"{'Dgrad:':<30}{_ms_sums(dgrad_sums, precisions)}")
+    print(f"{'Fprop + Dgrad:':<30}{_ms_sums(fprop_dgrad_sums, precisions)}")
     print(f"{'Wgrad:':<30}{_ms_sums(wgrad_sums, precisions)}")
     print(f"{'Per-layer total:':<30}{_ms_sums(per_layer, precisions)}")
-
-    if verify_dgrad:
-        assumed_per_layer = {p: fprop_sums.get(p, 0) * 2 + wgrad_sums.get(p, 0) for p in precisions}
-        print(f"{'Per-layer (assumed x2):':<30}{_ms_sums(assumed_per_layer, precisions)}")
-        approx_err = {
-            p: (
-                (per_layer[p] - assumed_per_layer[p]) / assumed_per_layer[p] * 100
-                if assumed_per_layer.get(p, 0) > 0
-                else 0
-            )
-            for p in precisions
-        }
-        err_str = "".join(f" {approx_err.get(p, 0):>+9.1f}%" for p in precisions)
-        print(f"{'Approximation error:':<30}{err_str}")
 
     print(f"\nFull Model ({config.num_hidden_layers} layers):")
     print(f"{'Total GEMM time (ms):':<30}{_ms_sums(full_model, precisions)}")
@@ -1239,6 +1501,7 @@ def run_model_config_benchmarks(
     create_model_config_plot(
         config,
         fprop_results,
+        dgrad_results,
         wgrad_results,
         fprop_shapes,
         wgrad_shapes,
@@ -1304,6 +1567,7 @@ def create_plot(
 def create_model_config_plot(
     config: ModelConfig,
     fprop_results: list[dict[str, GEMMResult]],
+    dgrad_results: list[dict[str, GEMMResult]],
     wgrad_results: list[dict[str, GEMMResult]],
     fprop_shapes: list[tuple[str, int, int, int]],
     wgrad_shapes: list[tuple[str, int, int, int]],
@@ -1324,7 +1588,10 @@ def create_model_config_plot(
         wgrad_ms = []
         for p in precisions:
             fp = fprop_results[i].get(p)
-            fprop_ms.append(fp.avg_time_ms * 2 if fp else 0)  # Fprop + Dgrad
+            dg = dgrad_results[i].get(p)
+            fprop_ms.append(
+                (fp.avg_time_ms if fp else 0) + (dg.avg_time_ms if dg else 0)
+            )  # Fprop + Dgrad (measured)
             wg = wgrad_results[i].get(p)
             wgrad_ms.append(wg.avg_time_ms if wg else 0)
 
@@ -1334,7 +1601,10 @@ def create_model_config_plot(
         for j in range(i):
             for k, p in enumerate(precisions):
                 fp_prev = fprop_results[j].get(p)
-                fprop_bottom[k] += (fp_prev.avg_time_ms * 2) if fp_prev else 0
+                dg_prev = dgrad_results[j].get(p)
+                fprop_bottom[k] += (fp_prev.avg_time_ms if fp_prev else 0) + (
+                    dg_prev.avg_time_ms if dg_prev else 0
+                )
                 wg_prev = wgrad_results[j].get(p)
                 wgrad_bottom[k] += wg_prev.avg_time_ms if wg_prev else 0
 
@@ -1345,7 +1615,8 @@ def create_model_config_plot(
         for j in range(len(op_labels)):
             for k, p in enumerate(precisions):
                 fp = fprop_results[j].get(p)
-                all_fprop_total[k] += (fp.avg_time_ms * 2) if fp else 0
+                dg = dgrad_results[j].get(p)
+                all_fprop_total[k] += (fp.avg_time_ms if fp else 0) + (dg.avg_time_ms if dg else 0)
 
         ax.bar(
             x,
@@ -1372,7 +1643,8 @@ def create_model_config_plot(
         total = 0
         for i in range(len(op_labels)):
             fp = fprop_results[i].get(p)
-            total += (fp.avg_time_ms * 2) if fp else 0
+            dg = dgrad_results[i].get(p)
+            total += (fp.avg_time_ms if fp else 0) + (dg.avg_time_ms if dg else 0)
             wg = wgrad_results[i].get(p)
             total += wg.avg_time_ms if wg else 0
         totals.append(total)
@@ -1456,6 +1728,12 @@ def main() -> int:
             " disable)"
         ),
     )
+    parser.add_argument(
+        "--no-fp8-current", action="store_true", help="Skip Float8CurrentScaling benchmarks"
+    )
+    parser.add_argument(
+        "--no-fp8-delayed", action="store_true", help="Skip DelayedScaling benchmarks"
+    )
     parser.add_argument("--no-fp8", action="store_true", help="Skip MXFP8 benchmarks")
     parser.add_argument(
         "--no-fp8-block", action="store_true", help="Skip Float8BlockScaling benchmarks"
@@ -1465,14 +1743,6 @@ def main() -> int:
         "--pre-quantize",
         action="store_true",
         help="Use pre-quantized inputs (tex.generic_gemm) instead of te.Linear autocast",
-    )
-    parser.add_argument(
-        "--verify-dgrad",
-        action="store_true",
-        help=(
-            "Benchmark Dgrad shapes separately instead of assuming Dgrad time == Fprop time. "
-            "Prints a per-shape comparison and uses measured Dgrad times in the summary."
-        ),
     )
     parser.add_argument(
         "--timing",
@@ -1574,6 +1844,8 @@ def main() -> int:
             config=config,
             num_warmup=args.num_warmup,
             num_iters=args.num_iters,
+            include_fp8_current=not args.no_fp8_current,
+            include_fp8_delayed=not args.no_fp8_delayed,
             include_fp8=not args.no_fp8,
             include_fp8_block=not args.no_fp8_block,
             include_fp4=not args.no_fp4,
@@ -1581,7 +1853,6 @@ def main() -> int:
             pre_quantize=args.pre_quantize,
             timing=args.timing,
             output_path=args.output,
-            verify_dgrad=args.verify_dgrad,
         )
     else:
         shapes = parse_shapes_arg(args.shapes) if args.shapes else get_default_shapes()
@@ -1591,7 +1862,10 @@ def main() -> int:
             shapes=shapes,
             num_warmup=args.num_warmup,
             num_iters=args.num_iters,
+            include_fp8_current=not args.no_fp8_current,
+            include_fp8_delayed=not args.no_fp8_delayed,
             include_fp8=not args.no_fp8,
+            include_fp8_block=not args.no_fp8_block,
             include_fp4=not args.no_fp4,
             gpu_warmup_seconds=args.gpu_warmup,
             pre_quantize=args.pre_quantize,
