@@ -314,6 +314,78 @@ def check_nvfp4_per_token_grouped_gemm_matches_per_gemm(
         torch.testing.assert_close(grouped, ref, atol=0.0, rtol=0.0)
 
 
+def check_nvfp4_per_token_gemm_matches_emulated(
+    x_dtype: torch.dtype,
+    w_dtype: torch.dtype,
+    out_dtype: torch.dtype,
+    M: int,
+    K: int,
+    N: int,
+):
+    te_dtype = tex.DType.kFloat4E2M1
+    device = "cuda"
+    torch.manual_seed(37)
+    torch.cuda.manual_seed(37)
+
+    x = torch.randn((M, K), dtype=x_dtype, device=device)
+    w = torch.randn((N, K), dtype=w_dtype, device=device)
+
+    x_per_token_quantizer = NVFP4Quantizer(
+        fp4_dtype=te_dtype,
+        rowwise=True,
+        columnwise=True,
+        with_amax_reduction=False,
+        amax_reduction_group=None,
+        with_rht=False,
+        with_post_rht_amax=False,
+        per_token_activation=True,
+    )
+    x_tensorwise_quantizer = NVFP4Quantizer(
+        fp4_dtype=te_dtype,
+        rowwise=True,
+        columnwise=True,
+        with_amax_reduction=False,
+        amax_reduction_group=None,
+        with_rht=False,
+        with_post_rht_amax=False,
+    )
+    w_quantizer = NVFP4Quantizer(
+        fp4_dtype=te_dtype,
+        rowwise=True,
+        columnwise=True,
+        with_amax_reduction=False,
+        amax_reduction_group=None,
+        with_rht=False,
+        with_post_rht_amax=False,
+    )
+
+    x_per_token = x_per_token_quantizer.update_quantized(
+        x, x_per_token_quantizer.make_empty(x.shape, dtype=x_dtype, device=device)
+    )
+    w_nvfp4 = w_quantizer.update_quantized(
+        w, w_quantizer.make_empty(w.shape, dtype=w_dtype, device=device)
+    )
+    y_per_token = general_gemm(w_nvfp4, x_per_token, out_dtype=out_dtype, layout="TN")[0]
+
+    emulated_rows = []
+    for i in range(M):
+        x_padded = torch.zeros((16, K), dtype=x_dtype, device=device)
+        x_padded[0].copy_(x[i])
+        x_tensorwise = x_tensorwise_quantizer.update_quantized(
+            x_padded,
+            x_tensorwise_quantizer.make_empty(x_padded.shape, dtype=x_dtype, device=device),
+        )
+        emulated_rows.append(
+            general_gemm(w_nvfp4, x_tensorwise, out_dtype=out_dtype, layout="TN")[0][:1]
+        )
+
+    y_emulated = torch.cat(emulated_rows, dim=0)
+    if out_dtype == torch.bfloat16:
+        torch.testing.assert_close(y_per_token, y_emulated, atol=0.0, rtol=7.8e-3)
+    else:
+        torch.testing.assert_close(y_per_token, y_emulated, atol=3.0517578125e-5, rtol=0.0)
+
+
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 @pytest.mark.parametrize(
     "M, K, N",
@@ -418,4 +490,42 @@ def test_nvfp4_per_token_grouped_gemm_matches_per_gemm(
         n=n,
         use_bias=use_bias,
         single_output=single_output,
+    )
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize(
+    "M, K, N",
+    [
+        (128, 128, 128),
+        (256, 128, 256),
+        (256, 256, 256),
+        (256, 1024, 256),
+        (1024, 1024, 1024),
+        (4096, 512, 3072),
+        (112, 128, 96),
+        (304, 640, 304),
+        (1008, 3072, 992),
+        (256, 64, 256),
+        (128, 128, 112),
+    ],
+)
+@pytest.mark.parametrize("x_dtype", [torch.float32, torch.bfloat16], ids=str)
+@pytest.mark.parametrize("w_dtype", [torch.float32, torch.bfloat16], ids=str)
+@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32], ids=str)
+def test_nvfp4_per_token_gemm_matches_emulated(
+    M: int,
+    K: int,
+    N: int,
+    x_dtype: torch.dtype,
+    w_dtype: torch.dtype,
+    out_dtype: torch.dtype,
+):
+    check_nvfp4_per_token_gemm_matches_emulated(
+        x_dtype=x_dtype,
+        w_dtype=w_dtype,
+        out_dtype=out_dtype,
+        M=M,
+        K=K,
+        N=N,
     )

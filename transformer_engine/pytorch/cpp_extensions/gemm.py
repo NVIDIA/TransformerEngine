@@ -78,20 +78,34 @@ def _is_nvfp4_per_token_tensor(tensor: torch.Tensor) -> bool:
     return amax is not None and amax.numel() > 1
 
 
-def _nvfp4_per_token_gemm_input(
-    tensor: NVFP4TensorStorage,
-) -> Tuple[NVFP4TensorStorage, torch.Tensor]:
-    """Return a GEMM alias with identity activation amax and the original per-token amax."""
-    metadata = tensor.get_metadata()
-    if tensor._amax_rowwise is not None:
-        amax = tensor._amax_rowwise
-        assert amax is not None and amax.numel() > 1
-        metadata["amax_rowwise"] = amax.new_ones(1)
+def _nvfp4_per_token_gemm_inputs(
+    A: NVFP4TensorStorage,
+    B: NVFP4TensorStorage,
+    *,
+    transa: bool,
+) -> Tuple[NVFP4TensorStorage, NVFP4TensorStorage, torch.Tensor]:
+    """Return GEMM aliases and FP32 output scales for per-token NVFP4."""
+    A_metadata = A.get_metadata()
+    weight_amax = A._amax_rowwise if transa else A._amax_columnwise
+    assert weight_amax is not None and weight_amax.numel() == 1
+    A_metadata["amax_rowwise" if transa else "amax_columnwise"] = weight_amax.new_ones(1)
+
+    B_metadata = B.get_metadata()
+    if B._amax_rowwise is not None:
+        activation_amax = B._amax_rowwise
+        assert activation_amax.numel() > 1
+        B_metadata["amax_rowwise"] = activation_amax.new_ones(1)
     else:
-        amax = tensor._amax_columnwise
-        assert amax is not None and amax.numel() > 1
-        metadata["amax_columnwise"] = amax.new_ones(1)
-    return NVFP4TensorStorage(**metadata), amax
+        activation_amax = B._amax_columnwise
+        assert activation_amax is not None and activation_amax.numel() > 1
+        B_metadata["amax_columnwise"] = activation_amax.new_ones(1)
+
+    assert activation_amax.dtype == torch.float32 and weight_amax.dtype == torch.float32
+    return (
+        NVFP4TensorStorage(**A_metadata),
+        NVFP4TensorStorage(**B_metadata),
+        (activation_amax * weight_amax).view(-1, 1),
+    )
 
 
 def general_gemm(
@@ -216,10 +230,10 @@ def general_gemm(
         assert out is None or (
             isinstance(out, torch.Tensor) and not is_custom(out)
         ), "Per-token NVFP4 GEMM currently supports only plain torch.Tensor outputs."
-        # cuBLAS folds the first activation amax into GEMM alpha. Keep per-token amax out of
-        # alpha by using identity here, then apply the true per-token scale in FP32 below.
-        gemm_B, amax = _nvfp4_per_token_gemm_input(B)
-        per_token_scales = amax.view(-1, 1)
+        assert isinstance(A, NVFP4TensorStorage), "Per-token NVFP4 GEMM currently requires NVFP4 A."
+        # cuBLAS folds NVFP4 global amax values into GEMM alpha. Keep the per-token
+        # recipe's global scales out of alpha and apply them in FP32 below.
+        gemm_A, gemm_B, per_token_scales = _nvfp4_per_token_gemm_inputs(A, B, transa=transa)
 
         requested_out, requested_out_dtype = out, out_dtype
         fp32_out = (
@@ -228,6 +242,7 @@ def general_gemm(
             else None
         )
         gemm_args = list(args)
+        gemm_args[0] = gemm_A  # A
         gemm_args[2] = gemm_B  # B
         gemm_args[4] = fp32_out  # out
         gemm_args[5] = None  # quantization_params
@@ -235,8 +250,8 @@ def general_gemm(
         out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*gemm_args, **kwargs)
         out_2d = out.reshape(-1, out.shape[-1])
 
-        assert amax.dtype == torch.float32 and out.dtype == torch.float32
-        assert amax.numel() == out_2d.shape[0]
+        assert per_token_scales.dtype == torch.float32 and out.dtype == torch.float32
+        assert per_token_scales.numel() == out_2d.shape[0]
 
         if bias is not None:
             bias_cast = bias.to(dtype=torch.float32)
