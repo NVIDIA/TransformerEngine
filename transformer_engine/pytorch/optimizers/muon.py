@@ -13,11 +13,11 @@ import torch
 import torch.distributed as dist
 from torch.optim import Optimizer
 
-from transformer_engine.pytorch.newton_schulz import (
+from transformer_engine.pytorch.optimizers.newton_schulz import (
     CusolverMpCtx,
     NSCoeffT,
     get_coefficients,
-    newton_schulz,
+    newton_schulz_tp,
 )
 
 
@@ -223,22 +223,17 @@ class MuonOptimizer(Optimizer):
         global_shape[partition_dim] *= world_size
 
         orth_grad = grad.clone()
-        # The cuSolverMp Newton-Schulz backend expects columns to be distributed.
-        # Row-parallel shards are transposed into that layout. This assumes the
-        # usual contiguous row/column TP sharding; strided or irregular layouts
-        # are outside this optimizer's contract.
-        transposed = partition_dim == 0
-        if transposed:
-            orth_grad = orth_grad.mT.contiguous()
-        else:
-            orth_grad = orth_grad.contiguous()
-
+        orth_grad = orth_grad.contiguous()
         self._distributed_normalize_p2_(orth_grad, eps)
         coefficients = get_coefficients(num_ns_steps, coefficient_type)
-        newton_schulz(orth_grad, self._get_ctx(), num_ns_steps, coefficients=coefficients)
-
-        if transposed:
-            orth_grad = orth_grad.mT.contiguous()
+        newton_schulz_tp(
+            orth_grad,
+            self._get_ctx(),
+            num_ns_steps,
+            coefficients=coefficients,
+            partition_dim=partition_dim,
+            tp_mode="distributed",
+        )
 
         scale_factor = get_muon_scale_factor(global_shape[0], global_shape[1], mode=scale_mode)
         orth_grad.mul_(scale_factor * extra_scale_factor)

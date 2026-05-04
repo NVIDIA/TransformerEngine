@@ -15,7 +15,7 @@ import torch.distributed as dist
 from torch.distributed.elastic.multiprocessing.errors import record
 
 import transformer_engine.pytorch as te
-from transformer_engine.pytorch.newton_schulz import get_coefficients
+from transformer_engine.pytorch.optimizers.newton_schulz import get_coefficients
 from transformer_engine.pytorch.optimizers.muon import get_muon_scale_factor
 
 
