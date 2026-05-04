@@ -65,13 +65,11 @@ def main():
 
     if args.api == "base" or args.partition_dim == 1:
         # Ensure the distributed column dimension is divisible by world_size.
-        assert n % world_size == 0, (
-            f"Matrix columns {n} must be divisible by world_size {world_size}"
-        )
+        assert (
+            n % world_size == 0
+        ), f"Matrix columns {n} must be divisible by world_size {world_size}"
     else:
-        assert m % world_size == 0, (
-            f"Matrix rows {m} must be divisible by world_size {world_size}"
-        )
+        assert m % world_size == 0, f"Matrix rows {m} must be divisible by world_size {world_size}"
 
     # Create a random matrix on rank 0 with singular values in (0, 1),
     # which keeps the Newton-Schulz iterations in the convergence regime.

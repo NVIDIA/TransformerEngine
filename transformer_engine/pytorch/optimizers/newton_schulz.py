@@ -134,9 +134,7 @@ class CusolverMpCtx:
         self.group = group
         self.nranks = dist.get_world_size(group)
         self.rank = dist.get_rank(group)
-        self._ptr = tex.cusolvermp_ctx_create(
-            _get_nccl_comm_ptr(group), self.nranks, self.rank
-        )
+        self._ptr = tex.cusolvermp_ctx_create(_get_nccl_comm_ptr(group), self.nranks, self.rank)
 
     def destroy(self) -> None:
         """Destroy the underlying cuSolverMp context."""
