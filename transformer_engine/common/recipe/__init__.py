@@ -60,6 +60,14 @@ class MMParams:
 
     use_split_accumulator: bool = True
 
+    def __repr__(self) -> str:
+        cached = self.__dict__.get("_cached_repr")
+        if cached is not None:
+            return cached
+        result = f"MMParams(use_split_accumulator={self.use_split_accumulator})"
+        object.__setattr__(self, "_cached_repr", result)
+        return result
+
 
 @dataclass(frozen=True)
 class QParams:
@@ -77,19 +85,40 @@ class QParams:
     fp4_2d_quantization: bool = False
 
     def __repr__(self) -> str:
-        return (
+        cached = self.__dict__.get("_cached_repr")
+        if cached is not None:
+            return cached
+        result = (
             f"Qparams(\npower_2_scale={self.power_2_scale},\n"
             f"amax_epsilon={self.amax_epsilon},\n"
             f"random_hadamard_transform={self.random_hadamard_transform},\n"
             f"stochastic_rounding={self.stochastic_rounding},\n"
             f"fp4_2d_quantization={self.fp4_2d_quantization}\n)"
         )
+        object.__setattr__(self, "_cached_repr", result)
+        return result
 
 
 class Recipe:
     """
     Base recipe class.
     """
+
+    # Cached string representation. Lazily populated by ``__repr__`` in
+    # subclasses and invalidated by ``__setattr__`` whenever any attribute
+    # changes. This makes repeated ``str(recipe)`` calls (e.g. on the hot
+    # path in ``FP8GlobalStateManager.get_unique_autocast_key``) essentially
+    # free after the first call.
+    _cached_repr: Optional[str] = None
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        # Invalidate the cached repr on any attribute mutation. We avoid
+        # recursion by checking the name and always routing the actual
+        # assignment through ``object.__setattr__`` (which also works for
+        # pydantic frozen dataclasses that override ``__setattr__``).
+        if name != "_cached_repr":
+            object.__setattr__(self, "_cached_repr", None)
+        object.__setattr__(self, name, value)
 
     @classmethod
     def nvfp4(cls):
@@ -228,7 +257,10 @@ class DelayedScaling(Recipe):
         ), "Delayed scaling only supports backward_override=None."
 
     def __repr__(self) -> str:
-        return (
+        cached = self.__dict__.get("_cached_repr")
+        if cached is not None:
+            return cached
+        result = (
             f"recipe_type={self.__class__.__name__}, "
             f"margin={self.margin}, "
             f"format={str(self.fp8_format).split('.')[1]}, "
@@ -238,6 +270,8 @@ class DelayedScaling(Recipe):
             f"fp8_mha={self.fp8_mha}, "
             f"backward_override={self.backward_override}"
         )
+        object.__setattr__(self, "_cached_repr", result)
+        return result
 
 
 @dataclass()
@@ -276,7 +310,10 @@ class Float8CurrentScaling(Recipe):
         ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
 
     def __repr__(self) -> str:
-        return (
+        cached = self.__dict__.get("_cached_repr")
+        if cached is not None:
+            return cached
+        result = (
             f"recipe_type={self.__class__.__name__}, "
             f"format={str(self.fp8_format).split('.')[1]}, "
             f"fp8_quant_fwd_inp={self.fp8_quant_fwd_inp}, "
@@ -289,6 +326,8 @@ class Float8CurrentScaling(Recipe):
             f"fp8_mha={self.fp8_mha}, "
             f"backward_override={self.backward_override}"
         )
+        object.__setattr__(self, "_cached_repr", result)
+        return result
 
 
 @dataclass()
@@ -334,12 +373,17 @@ class MXFP8BlockScaling(Recipe):
         ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
 
     def __repr__(self) -> str:
-        return (
+        cached = self.__dict__.get("_cached_repr")
+        if cached is not None:
+            return cached
+        result = (
             f"recipe_type={self.__class__.__name__}, "
             f"margin={self.margin}, "
             f"format={str(self.fp8_format).split('.')[1]}, "
             f"backward_override={self.backward_override}"
         )
+        object.__setattr__(self, "_cached_repr", result)
+        return result
 
 
 @dataclass()
@@ -415,7 +459,10 @@ class Float8BlockScaling(Recipe):
         ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
 
     def __repr__(self) -> str:
-        return (
+        cached = self.__dict__.get("_cached_repr")
+        if cached is not None:
+            return cached
+        result = (
             f"recipe_type={self.__class__.__name__}, "
             f"format={str(self.fp8_format).split('.')[1]}, "
             f"fp8_quant_fwd_inp={self.fp8_quant_fwd_inp}, "
@@ -431,6 +478,8 @@ class Float8BlockScaling(Recipe):
             f"fp8_mha={self.fp8_mha}, "
             f"backward_override={self.backward_override}"
         )
+        object.__setattr__(self, "_cached_repr", result)
+        return result
 
 
 @dataclass()
@@ -527,7 +576,10 @@ class NVFP4BlockScaling(Recipe):
         )
 
     def __repr__(self) -> str:
-        return (
+        cached = self.__dict__.get("_cached_repr")
+        if cached is not None:
+            return cached
+        result = (
             f"recipe_type={self.__class__.__name__}, "
             f"fp4_format={str(self.fp4_format).split('.')[1]}, "
             f"fp8_format={str(self.fp8_format).split('.')[1]}, "
@@ -538,6 +590,8 @@ class NVFP4BlockScaling(Recipe):
             f"fp4_quant_fwd_weight={self.fp4_quant_fwd_weight}, "
             f"fp4_quant_bwd_grad={self.fp4_quant_bwd_grad}, "
         )
+        object.__setattr__(self, "_cached_repr", result)
+        return result
 
 
 @dataclass()
@@ -584,8 +638,13 @@ class CustomRecipe(Recipe):
         ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
 
     def __repr__(self) -> str:
-        return (
+        cached = self.__dict__.get("_cached_repr")
+        if cached is not None:
+            return cached
+        result = (
             f"recipe_type={self.__class__.__name__}, "
             f"qfactory={self.qfactory}, "
             f"backward_override={self.backward_override}"
         )
+        object.__setattr__(self, "_cached_repr", result)
+        return result
