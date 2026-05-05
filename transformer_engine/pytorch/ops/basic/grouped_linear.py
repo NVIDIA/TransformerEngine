@@ -1462,9 +1462,7 @@ class GroupedLinear(BasicOperation):
         if ctx.weight_requires_grad and self._accumulate_into_main_grad:
             final_weight_grads = get_dummy_wgrads_for_params(weights)
         elif ctx.weight_requires_grad and delay_wgrad:
-            final_weight_grads = (
-                [None] if self.single_grouped_weight else [None] * num_groups
-            )
+            final_weight_grads = [None] if self.single_grouped_weight else [None] * num_groups
 
         if not has_bias:
             grad_params = list(final_weight_grads)
@@ -1675,9 +1673,7 @@ class GroupedLinear(BasicOperation):
         if ctx.weight_requires_grad and self._accumulate_into_main_grad:
             final_weight_grads = get_dummy_wgrads_for_params(weights)
         elif ctx.weight_requires_grad and delay_wgrad:
-            final_weight_grads = (
-                [None] if self.single_grouped_weight else [None] * num_groups
-            )
+            final_weight_grads = [None] if self.single_grouped_weight else [None] * num_groups
 
         # Assemble grad params in parameter registration order and return.
         if not has_bias:
