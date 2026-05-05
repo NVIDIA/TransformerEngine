@@ -322,7 +322,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
  *  \param[in]     S                         The S tensor.
  *  \param[in,out] dP                        The gradient of the P tensor.
  *  \param[in]     Aux_CTX_Tensors           Auxiliary tensors from context when in training mode,
- *                                           e.g. for FP8: S, rng_state (insert Max after S when return_max_logit).
+ *                                           e.g. softmax stats, optional Max, rng_state.
  *  \param[out]    dQ                        The gradient of the Q tensor.
  *  \param[out]    dK                        The gradient of the K tensor.
  *  \param[out]    dV                        The gradient of the V tensor.

@@ -272,16 +272,16 @@ std::vector<py::object> fused_attn_fwd(
   };
   // allocate memory for nvte_aux_tensor_pack.tensors
   // f16_max512   : S [b, h, sq, skv]
-  // f16_arbitrary / fp8:
-  // S [b, h, sq, 1], (optional) Max [b, h, sq, 1], rng_state [2], (optional) Bias [1, h, sq, skv], (optional) SoftmaxOffset [1, h, 1, 1]
+  // f16_arbitrary: S [b, h, sq, 1]/[tq, h, 1], (optional) Max [b, h, sq, 1]/[tq, h, 1], rng_state [2], (optional) Bias [1, h, sq, skv], (optional) SoftmaxOffset [1, h, 1, 1]
+  // fp8          : S [b, h, sq, 1], rng_state [2]
   size_t i = 0;
   at::Tensor output_tensor;
-  // intermediate softmax tensor, S
+  // intermediate softmax stats tensor S
   output_tensor =
       allocateSpace(nvte_shape_to_vector(nvte_tensor_shape(nvte_aux_tensor_pack.tensors[i])),
                     static_cast<DType>(nvte_tensor_type(nvte_aux_tensor_pack.tensors[i])), false);
   set_tensor_param(i++, output_tensor);
-  // return_max_logit=true allocates an additional tensor, Max
+  // return_max_logit=true allocates Max after S
   if (return_max_logit) {
     output_tensor =
         allocateSpace(nvte_shape_to_vector(nvte_tensor_shape(nvte_aux_tensor_pack.tensors[i])),

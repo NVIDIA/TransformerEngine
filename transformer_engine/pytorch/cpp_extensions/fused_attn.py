@@ -261,6 +261,8 @@ def fused_attn_fwd(
                        softmaxStats: torch.Tensor
                            same role as F16 arbitrary softmax stats;
                            shape [batch_size, num_heads, max_seqlen_q, 1], dtype float32
+                       Max: torch.Tensor, only when return_max_logit is True
+                           shape [batch_size, num_heads, max_seqlen_q, 1], dtype float32
                 rng_state: torch.Tensor, optional, if backend is not F16_max512_seqlen
                     state of the random number generator;
                     [seed, offset], dtype uint64
