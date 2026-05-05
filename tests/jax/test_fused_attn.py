@@ -1059,6 +1059,7 @@ class FusedAttnRunner:
                 target_hlo = jitted_primitive.lower(*customcall_args).compile().as_text()
             assert_equal_collectives(target_hlo, self.coll_count_ref)
 
+
 def _swa_window_size_for_test(s_kv: int, attn_mask_type: AttnMaskType) -> Tuple[int, int]:
     """Pick a sliding-window size for SWA tests, gated on cuDNN version.
 
@@ -1078,6 +1079,7 @@ def _swa_window_size_for_test(s_kv: int, attn_mask_type: AttnMaskType) -> Tuple[
     if cudnn_v >= 90600 and attn_mask_type in (AttnMaskType.NO_MASK, AttnMaskType.PADDING_MASK):
         return (left, right)
     return (left, 0)
+
 
 @pytest.mark.parametrize(
     "attn_mask_type",
