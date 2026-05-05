@@ -256,30 +256,30 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
   if ((q_dtype == NVTEDType::kNVTEFloat8E4M3 || q_dtype == NVTEDType::kNVTEFloat8E5M2) &&
       sm_arch_ >= 90 && bias_type == NVTE_Bias_Type::NVTE_NO_BIAS &&
       (
-       // 9.2.1: {bshd, sbhd}, any seqlen, d=128, {no_mask, causal}
-       (cudnn_runtime_version >= 90201 && sm_arch_ < 100 && max_seqlen_q % 128 == 0 &&
-        max_seqlen_kv % 128 == 0 && head_dim_qk == 128 && head_dim_v == 128 &&
-        (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
-         attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK)) ||
-       // 9.7: {bshd, sbhd}, any seqlen, d<=256 for sm90 and d<=128 for sm100, {padding, padding_causal}
-       (cudnn_runtime_version >= 90700 &&
-        // TODO (cyang): add is_training to nvte_get_fused_attn_backend
-        // sm90: fwd d<=256, bwd d=128 only
-        // sm100: fwd d<=128, bwd d<=128
-        ((sm_arch_ < 100 && (!is_training) && head_dim_qk <= 256 && head_dim_v <= 256) ||
-         (sm_arch_ < 100 && is_training && head_dim_qk == 128 && head_dim_v == 128) ||
-         (sm_arch_ >= 100 && head_dim_qk <= 128 && head_dim_v <= 128)) &&
-        head_dim_qk % 16 == 0 && head_dim_v % 16 == 0 &&
-        (attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK ||
-         attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
-         attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
-         attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK)) ||
-       // 9.21: d_qk=192, d_v=128
-       (cudnn_runtime_version >= 92100 && sm_arch_ >= 100 && head_dim_qk <= 192 &&
-        head_dim_v <= 128 && head_dim_qk % 16 == 0 && head_dim_v % 16 == 0 &&
-        (attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK ||
-         attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
-         attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK))) &&
+          // 9.2.1: {bshd, sbhd}, any seqlen, d=128, {no_mask, causal}
+          (cudnn_runtime_version >= 90201 && sm_arch_ < 100 && max_seqlen_q % 128 == 0 &&
+           max_seqlen_kv % 128 == 0 && head_dim_qk == 128 && head_dim_v == 128 &&
+           (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
+            attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK)) ||
+          // 9.7: {bshd, sbhd}, any seqlen, d<=256 for sm90 and d<=128 for sm100, {padding, padding_causal}
+          (cudnn_runtime_version >= 90700 &&
+           // TODO (cyang): add is_training to nvte_get_fused_attn_backend
+           // sm90: fwd d<=256, bwd d=128 only
+           // sm100: fwd d<=128, bwd d<=128
+           ((sm_arch_ < 100 && (!is_training) && head_dim_qk <= 256 && head_dim_v <= 256) ||
+            (sm_arch_ < 100 && is_training && head_dim_qk == 128 && head_dim_v == 128) ||
+            (sm_arch_ >= 100 && head_dim_qk <= 128 && head_dim_v <= 128)) &&
+           head_dim_qk % 16 == 0 && head_dim_v % 16 == 0 &&
+           (attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK ||
+            attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
+            attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
+            attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK)) ||
+          // 9.21: d_qk=192, d_v=128
+          (cudnn_runtime_version >= 92100 && sm_arch_ >= 100 && head_dim_qk <= 192 &&
+           head_dim_v <= 128 && head_dim_qk % 16 == 0 && head_dim_v % 16 == 0 &&
+           (attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK ||
+            attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
+            attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK))) &&
       // pre-9.21: {bshd, sbhd}, {vanilla}
       // 9.21+: {bshd, sbhd, bhsd}, {vanilla, off-by-one, learnable}
       ((cudnn_runtime_version < 92100 &&
