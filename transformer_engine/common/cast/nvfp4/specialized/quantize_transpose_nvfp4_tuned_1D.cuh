@@ -313,17 +313,21 @@ __device__ __forceinline__ void rowwise_scaling(
     }
     const float block_amax = get_amax_of_pair(thread_amax_2x);
 
-    const size_t row_idx = row_offset + stage_Y * TILE_DIM_Y + it_offset_Y_rowwise;
-    float S_enc_rowwise_block = S_enc_rowwise;
+    nvfp4_scale_t S_dec_b_fp8;
+    scaling_coeff_type SFcoefficient;
     if constexpr (PER_TOKEN_ROWWISE) {
-      S_enc_rowwise_block =
+      const size_t row_idx = row_offset + stage_Y * TILE_DIM_Y + it_offset_Y_rowwise;
+      const float S_enc_rowwise_block =
           row_idx < rows ? core::compute_global_encode_scaling_factor_FP4(amax_rowwise_ptr[row_idx])
                          : 1.0f;
+      S_dec_b_fp8 = compute_decoding_scaling_factor(block_amax, S_enc_rowwise_block);
+      SFcoefficient =
+          compute_nvfp4_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8, S_enc_rowwise_block);
+    } else {
+      S_dec_b_fp8 = compute_decoding_scaling_factor(block_amax, S_enc_rowwise);
+      SFcoefficient =
+          compute_nvfp4_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8, S_enc_rowwise);
     }
-    const nvfp4_scale_t S_dec_b_fp8 =
-        compute_decoding_scaling_factor(block_amax, S_enc_rowwise_block);
-    const scaling_coeff_type SFcoefficient =
-        compute_nvfp4_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8, S_enc_rowwise_block);
 
     // Store scaling factors to SMEM buffer (R2S)
     if (SF_storing_thread) {

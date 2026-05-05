@@ -640,38 +640,58 @@ __global__ void __launch_bounds__(THREADS_NUM)
           }
         }
 
-        // 2. Compute E4M3 scaling factor
-        const size_t row_idx_global =
-            scales_offset_Y_rowwise + stage * BUFF_DIM_Y + it * THREADS_Y_ROWWISE;
-        float S_enc_rowwise_block = S_enc_rowwise;
+        float block_scale_inverse;
         if constexpr (PER_TOKEN_ROWWISE) {
-          S_enc_rowwise_block =
-              row_idx_global < rows
-                  ? compute_global_encode_scaling_factor_FP4(amax_rowwise_ptr[row_idx_global])
+          // 2. Compute E4M3 scaling factor
+          const size_t scales_offset_Y =
+              scales_offset_Y_rowwise + stage * BUFF_DIM_Y + it * THREADS_Y_ROWWISE;
+          const float S_enc_rowwise_block =
+              scales_offset_Y < rows
+                  ? compute_global_encode_scaling_factor_FP4(amax_rowwise_ptr[scales_offset_Y])
                   : 1.0f;
+          const float S_dec_rowwise_block = 1.0f / S_enc_rowwise_block;
+          const nvfp4_scale_t S_dec_b_fp8 =
+              compute_decoding_scaling_factor(block_amax, S_enc_rowwise_block);
+
+          // Check boundaries
+          const size_t scales_offset_X = scales_offset_X_rowwise;
+          const size_t scale_idx_global = scales_offset_Y * scale_stride + scales_offset_X;
+
+          // const bool rowwise_scale_is_within_bounds_Y = scales_offset_Y < rows;
+          const bool rowwise_scale_is_within_bounds_Y =
+              (stage_rowwise_scales_offset_Y + it * THREADS_Y_ROWWISE + tid_Y_rowwise) < chunk_rows;
+          if (rowwise_scale_is_within_bounds_X && rowwise_scale_is_within_bounds_Y) {
+            scales_ptr[scale_idx_global] = S_dec_b_fp8;
+          }
+
+          // Compute "correct" per-block encoding scaling factor
+          constexpr float float_max = detail::TypeExtrema<float>::max;
+          block_scale_inverse =
+              fminf(1.0f / (static_cast<float>(S_dec_b_fp8) * S_dec_rowwise_block),
+                    float_max);  // S_enc_b_fp8
+        } else {
+          // 2. Compute E4M3 scaling factor
+          const nvfp4_scale_t S_dec_b_fp8 =
+              compute_decoding_scaling_factor(block_amax, S_enc_rowwise);
+
+          // Check boundaries
+          const size_t scales_offset_Y =
+              scales_offset_Y_rowwise + stage * BUFF_DIM_Y + it * THREADS_Y_ROWWISE;
+          const size_t scales_offset_X = scales_offset_X_rowwise;
+          const size_t scale_idx_global = scales_offset_Y * scale_stride + scales_offset_X;
+
+          // const bool rowwise_scale_is_within_bounds_Y = scales_offset_Y < rows;
+          const bool rowwise_scale_is_within_bounds_Y =
+              (stage_rowwise_scales_offset_Y + it * THREADS_Y_ROWWISE + tid_Y_rowwise) < chunk_rows;
+          if (rowwise_scale_is_within_bounds_X && rowwise_scale_is_within_bounds_Y) {
+            scales_ptr[scale_idx_global] = S_dec_b_fp8;
+          }
+
+          // Compute "correct" per-block encoding scaling factor
+          constexpr float float_max = detail::TypeExtrema<float>::max;
+          block_scale_inverse = fminf(1.0f / (static_cast<float>(S_dec_b_fp8) * S_dec_rowwise),
+                                      float_max);  // S_enc_b_fp8
         }
-        const float S_dec_rowwise_block =
-            PER_TOKEN_ROWWISE ? 1.0f / S_enc_rowwise_block : S_dec_rowwise;
-        const nvfp4_scale_t S_dec_b_fp8 =
-            compute_decoding_scaling_factor(block_amax, S_enc_rowwise_block);
-
-        // Check boundaries
-        const size_t scales_offset_Y = row_idx_global;
-        const size_t scales_offset_X = scales_offset_X_rowwise;
-        const size_t scale_idx_global = scales_offset_Y * scale_stride + scales_offset_X;
-
-        // const bool rowwise_scale_is_within_bounds_Y = scales_offset_Y < rows;
-        const bool rowwise_scale_is_within_bounds_Y =
-            (stage_rowwise_scales_offset_Y + it * THREADS_Y_ROWWISE + tid_Y_rowwise) < chunk_rows;
-        if (rowwise_scale_is_within_bounds_X && rowwise_scale_is_within_bounds_Y) {
-          scales_ptr[scale_idx_global] = S_dec_b_fp8;
-        }
-
-        // Compute "correct" per-block encoding scaling factor
-        constexpr float float_max = detail::TypeExtrema<float>::max;
-        const float block_scale_inverse =
-            fminf(1.0f / (static_cast<float>(S_dec_b_fp8) * S_dec_rowwise_block),
-                  float_max);  // S_enc_b_fp8
         const float2 block_scale_inverse_2x{block_scale_inverse, block_scale_inverse};
 
 // 3. Scale elements
