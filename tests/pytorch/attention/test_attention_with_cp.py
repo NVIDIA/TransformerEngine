@@ -115,15 +115,15 @@ def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type, pad_bet
         pytest.skip("No support for bias with cp_comm_type={all_gather, a2a, a2a+p2p}!")
 
     if qkv_format == "thd":
-        if cp_comm_type == "all_gather":
-            pytest.skip(
-                "FlashAttention does not support THD padding; use FusedAttention for"
-                " THD+all_gather CP."
-            )
         if cp_comm_type == "a2a+p2p":
             pytest.skip(
                 "CP implementation with QKVO A2A+P2P (Hierarchical A2A) does not support THD format"
                 " yet!"
+            )
+        if cp_comm_type == "all_gather" and not FlashAttentionUtils.v3_is_installed:
+            pytest.skip(
+                "THD + all_gather requires FA3 (seqused_k) to separate tensor offsets from"
+                " visibility limits in the gathered KV buffer."
             )
 
     if (
