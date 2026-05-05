@@ -329,8 +329,6 @@ class BasicLinear(BasicOperation):
         super().pre_fuser_forward(requires_grad=requires_grad)
         if FP8GlobalStateManager.is_fp8_enabled():
             # Configure quantizer usages
-            # Note: We cache the quantized input for backward pass,
-            # but discard the quantized weights.
             weight_requires_grad = requires_grad and self.weight.requires_grad
             columnwise_usage = weight_requires_grad
             if FP8GlobalStateManager.get_fp8_recipe().backward_override is not None:
@@ -339,13 +337,13 @@ class BasicLinear(BasicOperation):
             weight_quantizer = self.get_quantizer("forward", 1)
             grad_output_quantizer = self.get_quantizer("backward", 0)
             input_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
-            weight_quantizer.set_usage(rowwise=True, columnwise=False)
+            weight_quantizer.set_usage(rowwise=True, columnwise=requires_grad)
             grad_output_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
 
     def reset_recipe_state(self, *, recipe: Optional[Recipe]) -> None:
         super().reset_recipe_state(recipe=recipe)
 
-        # Configure input/grad output tensor
+        # Configure input/grad output quantizers
         # Note: These tensors are only used internally. If there is no
         # tensor-parallel communication, they are only used for GEMM.
         input_quantizer = self.get_quantizer("forward", 0)
@@ -358,33 +356,18 @@ class BasicLinear(BasicOperation):
             grad_output_quantizer.internal = True
             if not (self.tensor_parallel_mode == "row" and self.sequence_parallel):
                 grad_output_quantizer.optimize_for_gemm = True
-        if FP8GlobalStateManager.is_fp8_enabled():
-            fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
-            if fp8_recipe.backward_override is not None and (
-                fp8_recipe.mxfp8() or fp8_recipe.nvfp4()
-            ):
-                if input_quantizer is not None:
-                    input_quantizer.optimize_for_gemm = False
-                if grad_output_quantizer is not None:
-                    grad_output_quantizer.optimize_for_gemm = False
 
         # Configure weight quantizer
         # Note: This function may be called in base class constructor,
-        # before any basic linear attrs have been set.
+        # before basic linear attrs have been set.
         weight_quantizer = self.get_quantizer("forward", 1)
-        if weight_quantizer is None:
-            pass
-        elif is_quantized_tensor(getattr(self, "weight", None)):
-            # Make sure weight param has correct quantizer
-            weight_quantizer.set_usage(rowwise=True, columnwise=torch.is_grad_enabled())
-            weight_quantizer.internal = False
-            self.weight.update_quantizer(weight_quantizer.copy())
-        else:
-            # Use internal tensors if quantized weights will not be
-            # exposed externally
-            weight_quantizer.internal = (
-                not FP8GlobalStateManager.with_fp8_parameters()
-                and not getattr(self, "_with_quantized_weight", False)
+        weight = getattr(self, "weight", None)
+        if weight_quantizer is not None:
+            # Determine if quantized weight is exposed as parameter
+            weight_quantizer.internal = not (
+                FP8GlobalStateManager.with_fp8_parameters()
+                or getattr(self, "_with_quantized_weight", False)
+                or is_quantized_tensor(weight)
             )
 
         # Recipe-specific configuration
@@ -415,6 +398,18 @@ class BasicLinear(BasicOperation):
                     elif tensor_parallel_mode == "row":
                         grad_output_quantizer.with_amax_reduction = True
                         grad_output_quantizer.amax_reduction_group = self.tensor_parallel_group
+
+        # Update quantizer in quantized weight tensor
+        if weight_quantizer is not None and is_quantized_tensor(weight):
+            if weight._quantizer is not None:
+                # Preserve existing usages in weight tensor. Even if a
+                # usage is currently unnecessary, the weight tensor
+                # may be used elsewhere.
+                weight_quantizer.set_usage(
+                    rowwise=weight._quantizer.rowwise_usage,
+                    columnwise=weight._quantizer.columnwise_usage,
+                )
+            weight.update_quantizer(weight_quantizer.copy())
 
     @staticmethod
     def _functional_forward(
