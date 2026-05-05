@@ -183,10 +183,7 @@ def _maybe_skip_recipe_dtype(
 def _maybe_skip_unsupported_recipe_module_combo(recipe_name: str, module_type: str) -> None:
     if module_type == "ops_linear" and recipe_name == "fp8_block_scaling":
         pytest.skip("Fusible ops (te_ops.Linear) do not support Float8BlockScaling recipe")
-
-
-def _maybe_skip_unsupported_fused_ops(recipe_name: str) -> None:
-    if recipe_name == "nvfp4_per_token":
+    if module_type == "ops_linear" and recipe_name == "nvfp4_per_token":
         pytest.skip("Per-token NVFP4 currently does not support fused te_ops paths.")
 
 
@@ -1357,7 +1354,6 @@ def test_fused_linear_paths_match_backward_override_reference(
     _maybe_skip_recipe_dtype(recipe_name, dtype, "ops_linear")
     _maybe_skip_unsupported_recipe_module_combo(recipe_name, "ops_linear")
     _maybe_skip_unsupported_recipe_shape(recipe_name, (m, in_features), "ops_linear")
-    _maybe_skip_unsupported_fused_ops(recipe_name)
 
     reset_rng_states()
 
@@ -1497,7 +1493,6 @@ def test_fused_bias_activation_matches_masked_linear_backward(
     _maybe_skip_recipe_dtype(recipe_name, dtype, "ops_linear")
     _maybe_skip_unsupported_recipe_module_combo(recipe_name, "ops_linear")
     _maybe_skip_unsupported_recipe_shape(recipe_name, input_shape, "ops_linear")
-    _maybe_skip_unsupported_fused_ops(recipe_name)
 
     reset_rng_states()
     in_features = input_shape[-1]
@@ -1644,7 +1639,6 @@ def test_operation_fuser_rebuilds_userbuffers_fusion_on_backward_override_switch
 
     reset_rng_states()
     _maybe_skip_unsupported_recipe_module_combo(recipe_name, "ops_linear")
-    _maybe_skip_unsupported_fused_ops(recipe_name)
 
     # Build a Userbuffers-eligible fuser and representative inputs.
     linear = te_ops.BasicLinear(
