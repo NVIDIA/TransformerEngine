@@ -194,10 +194,17 @@ class Tensor {
   }
 
   float amax() {
-    NVTE_CHECK(amax_.size() == 1);
-    NVTE_CHECK(amax_.dtype() == kNVTEFloat32);
-    amax_.to_cpu();
-    return *amax_.cpu_data<float>();
+    NVTE_CHECK(amax_rowwise_.size() == 1);
+    NVTE_CHECK(amax_rowwise_.dtype() == kNVTEFloat32);
+    amax_rowwise_.to_cpu();
+    return *amax_rowwise_.cpu_data<float>();
+  }
+
+  float amax_columnwise() {
+    NVTE_CHECK(amax_columnwise_.size() == 1);
+    NVTE_CHECK(amax_columnwise_.dtype() == kNVTEFloat32);
+    amax_columnwise_.to_cpu();
+    return *amax_columnwise_.cpu_data<float>();
   }
 
   float scale() {
@@ -248,6 +255,8 @@ class Tensor {
   void set_amax(float amax);
   void set_scale(float scale);
   void set_scale_inv(float scale_inv);
+  void set_tensor_amax(float amax);
+  void set_tensor_amax_columnwise(float amax);
 
   void fill_uniform_rowwise_scale_inv();
   void fill_uniform_columnwise_scale_inv();
@@ -322,7 +331,8 @@ class Tensor {
   Buffer data_columnwise_;
   Buffer scale_inv_rowwise_;
   Buffer scale_inv_columnwise_;
-  Buffer amax_;
+  Buffer amax_rowwise_;
+  Buffer amax_columnwise_;
   Buffer scale_;
 
   bool rowwise_;

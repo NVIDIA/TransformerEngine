@@ -21,17 +21,11 @@ from ..utils import canonicalize_dtype
 
 
 @functools.lru_cache(maxsize=1)
-def _nvidia_cudnn_frontend_supports_scaled_clamped_qgeglu() -> bool:
-    """Check cuDNN FE min version with fixed numerics for qgeglu."""
-    try:
-        return PkgVersion(get_pkg_version("nvidia-cudnn-frontend")) >= PkgVersion("1.23.0")
-    except PackageNotFoundError:
-        return False
+def _cudnn_frontend_version_supported() -> bool:
+    """Check cuDNN frontend is at least 1.23.0.
 
-
-@functools.lru_cache(maxsize=1)
-def _nvidia_cudnn_frontend_supports_wgrad() -> bool:
-    """Check cuDNN FE min version for grouped GEMM wgrad kernel."""
+    All grouped MLP fused-kernel features require cuDNN frontend 1.23.0.
+    """
     try:
         return PkgVersion(get_pkg_version("nvidia-cudnn-frontend")) >= PkgVersion("1.23.0")
     except PackageNotFoundError:
@@ -140,8 +134,6 @@ def fuse_grouped_mlp_ops(
         constructor accepting ``fc1``, ``glu_op``, ``fc2`` keyword args. The
         ``glu_op`` must be :class:`~transformer_engine.pytorch.ops.basic.swiglu.ScaledSwiGLU`
         or :class:`~transformer_engine.pytorch.ops.basic.swiglu.ScaledClampedQGeGLU`.
-        May also expose ``is_fc1_bias_supported()`` and/or
-        ``is_fc2_bias_supported()`` classmethods for bias eligibility.
 
     Returns
     -------
@@ -159,13 +151,6 @@ def fuse_grouped_mlp_ops(
     if recipe is None or not recipe.mxfp8():
         return ops
 
-    fc1_bias_ok = (
-        not hasattr(fused_op_cls, "is_fc1_bias_supported") or fused_op_cls.is_fc1_bias_supported()
-    )
-    fc2_bias_ok = (
-        not hasattr(fused_op_cls, "is_fc2_bias_supported") or fused_op_cls.is_fc2_bias_supported()
-    )
-
     out = []
     window, ops = ops[:3], ops[3:]
     while len(window) == 3:
@@ -179,7 +164,6 @@ def fuse_grouped_mlp_ops(
             matches_pattern = False
         elif isinstance(window[1], ScaledClampedQGeGLU) and (
             abs(window[1]._clamped.alpha - 1.702) > 0.001
-            or not _nvidia_cudnn_frontend_supports_scaled_clamped_qgeglu()
         ):
             matches_pattern = False
         elif window[0].num_groups != window[2].num_groups:
@@ -192,10 +176,6 @@ def fuse_grouped_mlp_ops(
         ):
             matches_pattern = False
         elif window[1].glu_interleave_size != 32:
-            matches_pattern = False
-        elif window[0].has_bias and not fc1_bias_ok:
-            matches_pattern = False
-        elif window[2].has_bias and not fc2_bias_ok:
             matches_pattern = False
 
         if matches_pattern:
