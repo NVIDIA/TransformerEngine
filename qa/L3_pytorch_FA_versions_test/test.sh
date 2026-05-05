@@ -30,10 +30,20 @@ sm_arch=`python3 -c "import torch; sm = torch.cuda.get_device_capability(0); pri
 export FLASH_ATTN_CUDA_ARCHS=$sm_arch
 if [ $sm_arch -gt 90 ]
 then
-  FA_versions=(2.8.3 4.0.0b8)
+  FA_versions=(2.8.3 4.0.0b11)
 elif [ $sm_arch -eq 90 ]
 then
-  FA_versions=(2.7.3 2.8.3 3.0.0b1 4.0.0b8)
+  FA_versions=(2.8.3 3.0.0b1 4.0.0b11)
+fi
+
+# CP tests are expensive and run only once per arch:
+#   - sm90 (H100): FA3 (3.0.0b1) - context_parallel.py only supports FA3 on Hopper
+#   - sm>90 (B200): latest FA4 - FA3 is not built/installed for sm>90
+# Non-CP tests still run for every FA version in the array.
+if [ $sm_arch -eq 90 ]; then
+    CP_FA_VERSION="3.0.0b1"
+else
+    CP_FA_VERSION="${FA_versions[-1]}"
 fi
 
 for fa_version in "${FA_versions[@]}"
@@ -58,27 +68,33 @@ do
   # Run tests
   NUM_GPUS=$(nvidia-smi -L | wc -l)
   echo "Detected $NUM_GPUS GPU(s)"
-  if [ "$NUM_GPUS" -ge 5 ]; then
-    CP_NUM_GPUS=$(( NUM_GPUS - 1 > 4 ? 4 : NUM_GPUS - 1 ))
-    CP_GPUS=$(seq -s, 1 $CP_NUM_GPUS)
-    echo "Running tests in parallel: test_attention.py on GPU 0, test_attention_with_cp.py on GPUs $CP_GPUS ($CP_NUM_GPUS GPUs)"
+  if [ "$fa_version" = "$CP_FA_VERSION" ]; then
+    echo "Running CP tests with FA $fa_version (CP version for sm$sm_arch)"
+    if [ "$NUM_GPUS" -ge 5 ]; then
+      CP_NUM_GPUS=$(( NUM_GPUS - 1 > 4 ? 4 : NUM_GPUS - 1 ))
+      CP_GPUS=$(seq -s, 1 $CP_NUM_GPUS)
+      echo "Running tests in parallel: test_attention.py on GPU 0, test_attention_with_cp.py on GPUs $CP_GPUS ($CP_NUM_GPUS GPUs)"
 
-    CUDA_VISIBLE_DEVICES=0 NVTE_TORCH_COMPILE=0 python3 -m pytest -v -s \
-      --junitxml=$XML_LOG_DIR/pytest.xml \
-      $TE_PATH/tests/pytorch/attention/test_attention.py &
-    PID_ATTN=$!
+      CUDA_VISIBLE_DEVICES=0 NVTE_TORCH_COMPILE=0 python3 -m pytest -v -s \
+        --junitxml=$XML_LOG_DIR/pytest.xml \
+        $TE_PATH/tests/pytorch/attention/test_attention.py &
+      PID_ATTN=$!
 
-    CUDA_VISIBLE_DEVICES=$CP_GPUS NVTE_TORCH_COMPILE=0 python3 -m pytest -v -s \
-      --junitxml=$XML_LOG_DIR/pytest_test_attention_with_cp.xml \
-      $TE_PATH/tests/pytorch/attention/test_attention_with_cp.py &
-    PID_CP=$!
+      CUDA_VISIBLE_DEVICES=$CP_GPUS NVTE_TORCH_COMPILE=0 python3 -m pytest -v -s \
+        --junitxml=$XML_LOG_DIR/pytest_test_attention_with_cp.xml \
+        $TE_PATH/tests/pytorch/attention/test_attention_with_cp.py &
+      PID_CP=$!
 
-    wait $PID_ATTN || test_fail "test_attention.py"
-    wait $PID_CP || test_fail "test_attention_with_cp.py"
+      wait $PID_ATTN || test_fail "test_attention.py"
+      wait $PID_CP || test_fail "test_attention_with_cp.py"
+    else
+      echo "Running tests sequentially: need >=5 GPUs for parallel execution (1 for test_attention + 4 for test_attention_with_cp)"
+      NVTE_TORCH_COMPILE=0 python3 -m pytest -v -s --junitxml=$XML_LOG_DIR/pytest.xml $TE_PATH/tests/pytorch/attention/test_attention.py || test_fail "test_attention.py"
+      NVTE_TORCH_COMPILE=0 python3 -m pytest -v -s --junitxml=$XML_LOG_DIR/pytest_test_attention_with_cp.xml $TE_PATH/tests/pytorch/attention/test_attention_with_cp.py || test_fail "test_attention_with_cp.py"
+    fi
   else
-    echo "Running tests sequentially: need >=5 GPUs for parallel execution (1 for test_attention + 4 for test_attention_with_cp)"
-    NVTE_TORCH_COMPILE=0 python3 -m pytest -v -s --junitxml=$XML_LOG_DIR/pytest.xml $TE_PATH/tests/pytorch/attention/test_attention.py || test_fail "test_attention.py"
-    NVTE_TORCH_COMPILE=0 python3 -m pytest -v -s --junitxml=$XML_LOG_DIR/pytest_test_attention_with_cp.xml $TE_PATH/tests/pytorch/attention/test_attention_with_cp.py || test_fail "test_attention_with_cp.py"
+    echo "Skipping CP tests for FA $fa_version (CP only runs with FA $CP_FA_VERSION on sm$sm_arch)"
+    NVTE_TORCH_COMPILE=0 python3 -m pytest -v -s --junitxml=$XML_LOG_DIR/pytest.xml $TE_PATH/tests/pytorch/attention/test_attention.py || test_fail "test_attention.py (FA $fa_version)"
   fi
 done
 
