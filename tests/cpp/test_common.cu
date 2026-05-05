@@ -277,6 +277,36 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
   NVTE_ERROR("Invalid scaling mode!");
 }
 
+Tensor::Buffer::Buffer(size_t size, DType dtype)
+  : size_{size}, dtype_{dtype}, bytes_{size * typeToNumBits(dtype) / 8} {
+  if (bytes_ > 0) {
+    cpu_buffer_ = new unsigned char[bytes_];
+    std::memset(cpu_buffer_.get(), 0, bytes_);
+    void *gpu_buffer = nullptr;
+    NVTE_CHECK_CUDA(cudaMalloc(&gpu_buffer, bytes_));
+    gpu_buffer_ = gpu_buffer;
+    NVTE_CHECK_CUDA(cudaMemset(gpu_buffer_.get(), 0, bytes_));
+  }
+}
+
+void Tensor::Buffer::to_cpu() {
+  if (bytes_ > 0) {
+    NVTE_CHECK_CUDA(cudaMemcpy(cpu_buffer_.get(), gpu_buffer_.get(), bytes_, cudaMemcpyDeviceToHost));
+  }
+}
+
+void Tensor::Buffer::from_cpu() {
+  if (bytes_ > 0) {
+    NVTE_CHECK_CUDA(cudaMemcpy(gpu_buffer_.get(), cpu_buffer_.get(), bytes_, cudaMemcpyHostToDevice));
+  }
+}
+
+void Tensor::Buffer::GPUDeleter::operator() (void *ptr) {
+  if (ptr != nullptr) {
+    cudaFree(ptr);
+  }
+}
+
 Tensor::Tensor(const std::string& name,
                const NVTEShape &shape, const DType type,
                const bool rowwise, const bool columnwise,
@@ -304,31 +334,13 @@ Tensor::Tensor(const std::string& name,
     flattened_shape = convertShape(flattened_shape_vec);
   }
 
-  // Allocate and initialize data
-  void *dptr_rowwise = nullptr, *dptr_columnwise = nullptr;
-  const size_t total_size = bytes(shape, type);
-  if (total_size != 0) {
-    if (rowwise) {
-      cudaMalloc((void**)&dptr_rowwise, total_size);  // NOLINT(*)
-      cudaMemset(dptr_rowwise, 0, total_size);
-      cpu_data_rowwise_ = std::make_unique<unsigned char[]>(total_size);
-      std::fill_n(cpu_data_rowwise_.get(), total_size, 0);
-    }
-    if (columnwise) {
-      cudaMalloc((void**)&dptr_columnwise, total_size);  // NOLINT(*)
-      cudaMemset(dptr_columnwise, 0, total_size);
-      cpu_data_columnwise_ = std::make_unique<unsigned char[]>(total_size);
-      std::fill_n(cpu_data_columnwise_.get(), total_size, 0);
-    }
-  }
-
-  // Set tensor row-wise data
+  // Allocate row-wise data
   if (rowwise) {
-    const DType rowwise_type = (scaling_mode == NVTE_NVFP4_1D_SCALING) ? DType::kFloat4E2M1 : type;
-    tensor_.set_rowwise_data(dptr_rowwise, rowwise_type, shape);
+    data_rowwise_ = Tensor::Buffer(product(shape), type);
+    tensor_.set_rowwise_data(data_rowwise_.gpu_buffer(), type, shape);
   }
 
-  // Set tensor column-wise data
+  // Allocate column-wise data
   if (columnwise) {
     // Determine shape of column-wise data
     std::vector<size_t> columnwise_shape_vec;
@@ -359,162 +371,113 @@ Tensor::Tensor(const std::string& name,
     const auto columnwise_shape = nvte_make_shape(columnwise_shape_vec.data(),
                                                   columnwise_shape_vec.size());
 
-    // Set column-wise data buffer
-    const DType colwise_type = (scaling_mode == NVTE_NVFP4_1D_SCALING) ? DType::kFloat4E2M1 : type;
-    tensor_.set_columnwise_data(dptr_columnwise, colwise_type, columnwise_shape);
+    // Allocate buffer
+    data_columnwise_ = Tensor::Buffer(product(columnwise_shape), type);
+
+    // Configure TE tensor
+    tensor_.set_columnwise_data(data_columnwise_.gpu_buffer(), type, columnwise_shape);
   }
 
-  // Configure scales, amaxes, and other tensor buffers
-  float *amax = nullptr, *scale = nullptr;
-  float *rowwise_scale_inv = nullptr, *columnwise_scale_inv = nullptr;
-  if (isFp8Type(type) || isFp4Type(type)) {
-    if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
-      cudaMalloc((void**)&amax, sizeof(float));  // NOLINT(*)
-      cudaMemset(amax, 0, sizeof(float));
-      cudaMalloc((void**)&scale, sizeof(float));  // NOLINT(*)
-      cudaMemset(scale, 0, sizeof(float));
-      amax_cpu_data_ = std::make_shared<float>(0);
-      scale_cpu_data_ = std::make_shared<float>(0);
-      tensor_.set_amax(amax, DType::kFloat32, std::vector<size_t>{1});
-      tensor_.set_scale(scale, DType::kFloat32, std::vector<size_t>{1});
-      cudaMalloc((void**)&rowwise_scale_inv, sizeof(float));  // NOLINT(*)
+  // Allocate recipe-specific buffers
+  switch (scaling_mode) {
+  case NVTE_DELAYED_TENSOR_SCALING:
+    if (isFp8Type(type)) {
+      amax_ = Tensor::Buffer(1, DType::kFloat32);
+      scale_ = Tensor::Buffer(1, DType::kFloat32);
+      scale_inv_rowwise_ = Tensor::Buffer(1, DType::kFloat32);
+      tensor_.set_amax(amax_.gpu_buffer(), DType::kFloat32, std::vector<size_t>{1});
+      tensor_.set_scale(scale_.gpu_buffer(), DType::kFloat32, std::vector<size_t>{1});
       if (rowwise) {
-        tensor_.set_rowwise_scale_inv(rowwise_scale_inv, DType::kFloat32,
-                                      std::vector<size_t>{1});
-        rowwise_scale_inv_cpu_data_ = std::make_unique<unsigned char[]>(sizeof(float));
-        std::fill_n(rowwise_scale_inv_cpu_data_.get(), sizeof(float), 0);
+        tensor_.set_rowwise_scale_inv(scale_inv_rowwise_.gpu_buffer(), DType::kFloat32, std::vector<size_t>{1});
       }
       if (columnwise) {
-        tensor_.set_columnwise_scale_inv(rowwise_scale_inv, DType::kFloat32,
-                                          std::vector<size_t>{1});
-        columnwise_scale_inv_cpu_data_ = std::make_unique<unsigned char[]>(sizeof(float));
-        std::fill_n(columnwise_scale_inv_cpu_data_.get(), sizeof(float), 0);
+        tensor_.set_columnwise_scale_inv(scale_inv_rowwise_.gpu_buffer(), DType::kFloat32, std::vector<size_t>{1});
       }
-    } else {
-      if (scaling_mode == NVTE_NVFP4_1D_SCALING) {
-        cudaMalloc((void**)&amax, sizeof(float));  // NOLINT(*)
-        cudaMemset(amax, 0, sizeof(float));
-        amax_cpu_data_ = std::make_shared<float>(0);
-        tensor_.set_amax(amax, DType::kFloat32, std::vector<size_t>{1});
-      }
+    }
+    break;
+  case NVTE_MXFP8_1D_SCALING:
+  case NVTE_BLOCK_SCALING_1D:
+  case NVTE_BLOCK_SCALING_2D:
+  case NVTE_NVFP4_1D_SCALING::
+    {
+      // Block scaling factors
       auto [rowwise_scale_meta, colwise_scale_meta] = get_scales(flattened_shape, tensor_.scaling_mode());
-      auto rowwise_scale_size = rowwise_scale_meta.bytes();
-      auto columnwise_scale_size = colwise_scale_meta.bytes();
-      auto scale_shape = rowwise_scale_meta.shape;
-      auto columnwise_scale_shape = colwise_scale_meta.shape;
       if (rowwise) {
-        cudaMalloc((void **)&rowwise_scale_inv, rowwise_scale_size);  // NOLINT(*)
-        cudaMemset(rowwise_scale_inv, 0, rowwise_scale_size);
-        rowwise_scale_inv_cpu_data_ = std::make_unique<unsigned char[]>(rowwise_scale_size);
-        std::fill_n(rowwise_scale_inv_cpu_data_.get(), rowwise_scale_size, 0);
-        auto scale_dtype = rowwise_scale_meta.type;
-        tensor_.set_rowwise_scale_inv(rowwise_scale_inv, scale_dtype, scale_shape);
+        const auto scale_shape = rowwise_scale_meta.shape;
+        const auto scale_dtype = rowwise_scale_meta.dtype;
+        scale_inv_rowwise_ = Tensor::Buffer(product(scale_shape), scale_dtype);
+        tensor_.set_rowwise_scale_inv(scale_inv_rowwise_.gpu_buffer(), scale_dtype, scale_shape);
       }
       if (columnwise) {
-        cudaMalloc((void**)&columnwise_scale_inv, columnwise_scale_size);  // NOLINT(*)
-        cudaMemset(columnwise_scale_inv, 0, columnwise_scale_size);
-        columnwise_scale_inv_cpu_data_ = std::make_unique<unsigned char[]>(columnwise_scale_size);
-        std::fill_n(columnwise_scale_inv_cpu_data_.get(), columnwise_scale_size, 0);
-        auto scale_dtype = colwise_scale_meta.type;
-        tensor_.set_columnwise_scale_inv(columnwise_scale_inv, scale_dtype, columnwise_scale_shape);
+        const auto scale_shape = columnwise_scale_meta.shape;
+        const auto scale_dtype = columnwise_scale_meta.dtype;
+        scale_inv_columnwise_ = Tensor::Buffer(product(scale_shape), scale_dtype);
+        tensor_.set_columnwise_scale_inv(scale_inv_columnwise_.gpu_buffer(), scale_dtype, scale_shape);
+      }
+
+      // NVFP4 uses amax for tensor scaling
+      if (scaling_mode == NVTE_NVFP4_1D_SCALING) {
+        amax_ = Tensor::Buffer(1, DType::kFloat32);
       }
     }
+    break;
+  default:
+    NVTE_ERROR("Unsupported tensor format (", static_cast<int>(scaling_mode), ")");
   }
-
-  // Sanity check that CPU and GPU have corresponding buffers
-  NVTE_CHECK((cpu_data_rowwise_ == nullptr) == (tensor_.dptr() == nullptr));
-  NVTE_CHECK((cpu_data_columnwise_ == nullptr) == (tensor_.columnwise_dptr() == nullptr));
-  NVTE_CHECK((rowwise_scale_inv_cpu_data_ == nullptr) == (tensor_.scale_inv() == nullptr));
-  NVTE_CHECK((columnwise_scale_inv_cpu_data_ == nullptr)
-             == (tensor_.get_columnwise_scale_inv().data_ptr == nullptr));
-  NVTE_CHECK((amax_cpu_data_ == nullptr) == (tensor_.amax() == nullptr));
-  NVTE_CHECK((scale_cpu_data_ == nullptr) == (tensor_.scale() == nullptr));
-}
-
-Tensor::~Tensor() {
-  std::unordered_set<void *> freed_ptrs;
-  auto free_cuda_buffer = [&freed_ptrs] (void *ptr) -> void {
-    if (ptr != nullptr && freed_ptrs.count(ptr) > 0) {
-      cudaFree(ptr);
-      freed_ptrs.insert(ptr);
-    }
-  };
-  free_cuda_buffer(tensor_.dptr());
-  free_cuda_buffer(tensor_.scale_inv());
-  free_cuda_buffer(tensor_.scale());
-  free_cuda_buffer(tensor_.amax());
-  free_cuda_buffer(tensor_.columnwise_dptr());
-  free_cuda_buffer(tensor_.get_columnwise_scale_inv().data_ptr);
 }
 
 void Tensor::to_cpu() const {
-  auto from_basic_tensor = [] (const NVTEBasicTensor src, void *dst) -> void {
-    if (dst != nullptr) {
-      const size_t copy_size = bytes(src.shape, static_cast<DType>(src.dtype));
-      cudaMemcpy(dst, src.data_ptr, copy_size, cudaMemcpyDeviceToHost);
-    }
-  };
-  from_basic_tensor(tensor_.get_rowwise_data(), cpu_data_rowwise_.get());
-  from_basic_tensor(tensor_.get_columnwise_data(), cpu_data_columnwise_.get());
-  from_basic_tensor(tensor_.get_rowwise_scale_inv(), rowwise_scale_inv_cpu_data_.get());
-  from_basic_tensor(tensor_.get_columnwise_scale_inv(), columnwise_scale_inv_cpu_data_.get());
-  from_basic_tensor(tensor_.get_amax(), amax_cpu_data_.get());
-  from_basic_tensor(tensor_.get_scale(), scale_cpu_data_.get());
+  data_rowwise_.to_cpu();
+  data_columnwise_.to_cpu();
+  scale_inv_rowwise_.to_cpu();
+  scale_inv_columnwise_.to_cpu();
+  amax_.to_cpu();
+  scale_.to_cpu();
 }
 
 void Tensor::from_cpu() const {
-  auto to_basic_tensor = [] (const void *src, NVTEBasicTensor dst) -> void {
-    if (src != nullptr) {
-      const size_t copy_size = bytes(dst.shape, static_cast<DType>(dst.dtype));
-      cudaMemcpy(dst.data_ptr, src, copy_size, cudaMemcpyHostToDevice);
-    }
-  };
-  to_basic_tensor(cpu_data_rowwise_.get(), tensor_.get_rowwise_data());
-  to_basic_tensor(cpu_data_columnwise_.get(), tensor_.get_columnwise_data());
-  to_basic_tensor(rowwise_scale_inv_cpu_data_.get(), tensor_.get_rowwise_scale_inv());
-  to_basic_tensor(columnwise_scale_inv_cpu_data_.get(), tensor_.get_columnwise_scale_inv());
-  to_basic_tensor(amax_cpu_data_.get(), tensor_.get_amax());
-  to_basic_tensor(scale_cpu_data_.get(), tensor_.get_scale());
+  data_rowwise_.from_cpu();
+  data_columnwise_.from_cpu();
+  scale_inv_rowwise_.from_cpu();
+  scale_inv_columnwise_.from_cpu();
+  amax_.from_cpu();
+  scale_.from_cpu();
 }
 
 void Tensor::set_amax(float amax) {
-  NVTE_CHECK(amax_cpu_data_);
-  NVTE_CHECK(tensor_.get_amax().dtype == kNVTEFloat32);
-  NVTE_CHECK(product(tensor_.get_amax().shape) == 1);
-  *amax_cpu_data_ = amax;
-  from_cpu();
+  NVTE_CHECK(amax_.size() == 1);
+  NVTE_CHECK(amax_.dtype() == kNVTEFloat32);
+  *amax_.cpu_data<float>() = amax;
+  amax_.from_gpu();
 }
 
 void Tensor::set_scale(float scale) {
-  NVTE_CHECK(scale_cpu_data_);
-  NVTE_CHECK(tensor_.get_scale().dtype == kNVTEFloat32);
-  NVTE_CHECK(product(tensor_.get_scale().shape) == 1);
-  *scale_cpu_data_ = scale;
-  from_cpu();
+  NVTE_CHECK(scale_.size() == 1);
+  NVTE_CHECK(scale_.dtype() == kNVTEFloat32);
+  *scale_.cpu_data<float>() = scale;
+  scale_.from_gpu();
 }
 
 void Tensor::set_scale_inv(float scale_inv) {
-  NVTE_CHECK(rowwise_scale_inv_cpu_data_);
-  NVTE_CHECK(columnwise_scale_inv_cpu_data_ == nullptr);  // TODO Not needed. Remove once all incorrect function calls have been removed
-  NVTE_CHECK(product(tensor_.get_rowwise_scale_inv().shape) == 1);
-  NVTE_CHECK(tensor_.get_rowwise_scale_inv().dtype == kNVTEFloat32);
-  *reinterpret_cast<float *>(rowwise_scale_inv_cpu_data_.get()) = scale_inv;
-  from_cpu();
+  NVTE_CHECK(scale_inv_rowwise_.size() == 1);
+  NVTE_CHECK(scale_inv_rowwise_.dtype() == kNVTEFloat32);
+  *scale_inv_rowwise_.cpu_data<float>() = scale_inv;
+  scale_inv_rowwise_.from_gpu();
 }
 
 void Tensor::fill_uniform_rowwise_scale_inv() {
-  if (rowwise_scale_inv_cpu_data_ == nullptr) {
+  if (scale_inv_rowwise_.size() == 0) {
     return;
   }
 
   // Generate random scales on CPU
-  const auto numel = product(tensor_.get_rowwise_scale_inv().shape);
-  const auto dtype = tensor_.get_rowwise_scale_inv().dtype;
+  const auto numel = scale_inv_rowwise_.size();
+  const auto dtype = scale_inv_rowwise_.dtype();
   switch (dtype) {
   case kNVTEFloat32:
     {
-      auto *cpu_data = reinterpret_cast<uint8_t *>(scale_cpu_data_.get());
-      std::uniform_real_distribution<> dis(-2.0, 1.0);
+      auto *cpu_data = scale_inv_rowwise_.cpu_data<float>();
+      std::uniform_real_distribution<float> dis(-2.0, 1.0);
       for (size_t i = 0; i < numel; ++i) {
         cpu_data[i] = dis(gen_);
       }
@@ -524,7 +487,7 @@ void Tensor::fill_uniform_rowwise_scale_inv() {
   case kNVTEFloat8E8M0:
   case kNVTEByte:
     {
-      auto *cpu_data = reinterpret_cast<uint8_t *>(scale_cpu_data_.get());
+      auto *cpu_data = reinterpret_cast<uint8_t *>(scale_inv_rowwise_.cpu_data());
       std::uniform_int_distribution<uint8_t> dis(0, 127);
       for (size_t i = 0; i < numel; ++i) {
         cpu_data[i] = dis(gen_);
@@ -537,22 +500,22 @@ void Tensor::fill_uniform_rowwise_scale_inv() {
   }
 
   // Update GPU tensor
-  from_cpu();
+  scale_inv_rowwise_.from_cpu();
 }
 
 void Tensor::fill_uniform_columnwise_scale_inv() {
-  if (columnwise_scale_inv_cpu_data_ == nullptr) {
+  if (scale_inv_columnwise_.size() == 0) {
     return;
   }
 
   // Generate random scales on CPU
-  const auto numel = product(tensor_.get_columnwise_scale_inv().shape);
-  const auto dtype = tensor_.get_columnwise_scale_inv().dtype;
+  const auto numel = scale_inv_columnwise_.size();
+  const auto dtype = scale_inv_columnwise_.dtype();
   switch (dtype) {
   case kNVTEFloat32:
     {
-      auto *cpu_data = reinterpret_cast<float *>(scale_cpu_data_.get());
-      std::uniform_real_distribution<> dis(-2.0, 1.0);
+      auto *cpu_data = scale_inv_columnwise_.cpu_data<float>();
+      std::uniform_real_distribution<float> dis(-2.0, 1.0);
       for (size_t i = 0; i < numel; ++i) {
         cpu_data[i] = dis(gen_);
       }
@@ -562,7 +525,7 @@ void Tensor::fill_uniform_columnwise_scale_inv() {
   case kNVTEFloat8E8M0:
   case kNVTEByte:
     {
-      auto *cpu_data = reinterpret_cast<uint8_t *>(scale_cpu_data_.get());
+      auto *cpu_data = reinterpret_cast<uint8_t *>(scale_inv_columnwise_.cpu_data());
       std::uniform_int_distribution<uint8_t> dis(0, 127);
       for (size_t i = 0; i < numel; ++i) {
         cpu_data[i] = dis(gen_);
@@ -575,55 +538,25 @@ void Tensor::fill_uniform_columnwise_scale_inv() {
   }
 
   // Update GPU tensor
-  from_cpu();
+  scale_inv_columnwise_.from_cpu();
 }
 
 void Tensor::fill_uniform_scale() {
-  if (scale_cpu_data_ == nullptr) {
+  if (scale_.size() == 0) {
     return;
   }
 
   // Generate random scales on CPU
-  auto *cpu_data = reinterpret_cast<float *>(scale_cpu_data_.get());
-  const auto numel = product(tensor_.get_columnwise_scale_inv().shape);
-  NVTE_CHECK(tensor_.get_scale().dtype == kNVTEFloat32);
-  std::uniform_real_distribution<> dis(-2.0, 1.0);
+  auto *cpu_data = scale_.cpu_data<float>();
+  const auto numel = scale_.size();
+  NVTE_CHECK(scale_.dtype() == kNVTEFloat32);
+  std::uniform_real_distribution<float> dis(-2.0, 1.0);
   for (size_t i = 0; i < numel; ++i) {
     cpu_data[i] = dis(gen_);
   }
 
   // Update GPU tensor
-  from_cpu();
-}
-
-void Tensor::shareFP8Meta(const Tensor &other) {
-  if ((isFp8Type(dtype()) && isFp8Type(other.dtype()))
-      || isFp4Type(dtype()) && isFp4Type(other.dtype())) {
-    auto new_tensor = TensorWrapper(other.tensor_.scaling_mode());
-    auto my_rowwise_data = tensor_.get_rowwise_data();
-    new_tensor.set_rowwise_data(my_rowwise_data.data_ptr, static_cast<DType>(my_rowwise_data.dtype),
-                                my_rowwise_data.shape);
-    auto my_columnwise_data = tensor_.get_columnwise_data();
-    new_tensor.set_columnwise_data(my_columnwise_data.data_ptr,
-                                   static_cast<DType>(my_columnwise_data.dtype),
-                                   my_columnwise_data.shape);
-    auto other_amax = other.tensor_.get_amax();
-    new_tensor.set_amax(other_amax.data_ptr, static_cast<DType>(other_amax.dtype),
-                        other_amax.shape);
-    auto other_scale = other.tensor_.get_scale();
-    new_tensor.set_scale(other_scale.data_ptr, static_cast<DType>(other_scale.dtype),
-                         other_scale.shape);
-    auto other_row_scale_inv = other.tensor_.get_rowwise_scale_inv();
-    new_tensor.set_rowwise_scale_inv(other_row_scale_inv.data_ptr,
-                                     static_cast<DType>(other_row_scale_inv.dtype),
-                                     other_row_scale_inv.shape);
-    auto other_col_scale_inv = other.tensor_.get_columnwise_scale_inv();
-    new_tensor.set_columnwise_scale_inv(other_col_scale_inv.data_ptr,
-                                        static_cast<DType>(other_col_scale_inv.dtype),
-                                        other_col_scale_inv.shape);
-    tensor_ = std::move(new_tensor);
-    to_cpu();
-  }
+  scale_.from_cpu();
 }
 
 using std::to_string;
