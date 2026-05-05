@@ -1059,26 +1059,25 @@ class FusedAttnRunner:
                 target_hlo = jitted_primitive.lower(*customcall_args).compile().as_text()
             assert_equal_collectives(target_hlo, self.coll_count_ref)
 
-
-def _swa_window_size_for_test(s_kv: int, attn_mask_type: AttnMaskType) -> Tuple[int, int]:
+def _get_swa_window_size_for_test(s_kv: int, attn_mask_type: AttnMaskType) -> Tuple[int, int]:
     """Pick a sliding-window size for SWA tests, gated on cuDNN version.
 
     cuDNN < 9.2: skip (no SWA support).
     cuDNN >= 9.2: left-only window (s_kv // 10, 0).
-    cuDNN >= 9.6: bidirectional window (s_kv // 10, s_kv // 10) for the mask types whose
+    cuDNN >= 9.6: bidirectional window (s_kv // 10, s_kv // 10 + 5) for the mask types whose
                   bidirectional fused dispatch is meaningful here (NO_MASK, PADDING_MASK).
                   Other mask types keep the left-only window: causal-family masks would
-                  collapse (W, W) -> (W, 0) under the causal AND, so a separate bidirectional
-                  case adds no signal.
+                  collapse (W, W) -> (W, 0), hence not tested here.
     """
-    cudnn_v = get_cudnn_version()
-    if cudnn_v < 90200:
+    cudnn_version = get_cudnn_version()
+    if cudnn_version < 90200:
         pytest.skip("Sliding window attention requires cuDNN >= 9.2")
-    left = s_kv // 10
-    right = left + 5
-    if cudnn_v >= 90600 and attn_mask_type in (AttnMaskType.NO_MASK, AttnMaskType.PADDING_MASK):
-        return (left, right)
-    return (left, 0)
+    left_window_size = s_kv // 10
+    # choose asymmetric window size for testing
+    right_window_size = left_window_size + 5
+    if cudnn_version >= 90600 and attn_mask_type in (AttnMaskType.NO_MASK, AttnMaskType.PADDING_MASK):
+        return (left_window_size, right_window_size)
+    return (left_window_size, 0)
 
 
 @pytest.mark.parametrize(
@@ -1351,7 +1350,7 @@ class TestFusedAttn:
         This test is not intended to run automatically during CI as it is time-consuming
         It is kept for development and debugging
         """
-        window_size = _swa_window_size_for_test(s_kv, attn_mask_type) if swa else None
+        window_size = _get_swa_window_size_for_test(s_kv, attn_mask_type) if swa else None
         runner = FusedAttnRunner(
             b,
             s_q,
@@ -1402,7 +1401,7 @@ class TestFusedAttn:
         """
         Test backward with parameterized configs
         """
-        window_size = _swa_window_size_for_test(s_kv, attn_mask_type) if swa else None
+        window_size = _get_swa_window_size_for_test(s_kv, attn_mask_type) if swa else None
         runner = FusedAttnRunner(
             b,
             s_q,
