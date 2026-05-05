@@ -254,7 +254,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
  *  \param[in,out] S                         The S tensor.
  *  \param[out]    O                         The output O tensor.
  *  \param[out]    Aux_CTX_Tensors           Auxiliary output tensors when training,
- *                                           e.g. softmax stats (S), optional Max, rng_state.
+ *                                           e.g. softmax stats, optional Max, rng_state.
  *  \param[in]     cu_seqlens_q              Cumulative sequence lengths for Q, [batch_size + 1].
  *  \param[in]     cu_seqlens_kv             Cumulative sequence lengths for K and V, [batch_size + 1].
  *  \param[in]     cu_seqlens_q_padded       Cumulative sequence offsets for Q, [batch_size + 1].
