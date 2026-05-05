@@ -291,14 +291,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
       !requires_64bit_ragged_offset &&
       // 9.10.0: known bugs with SDPA FP8
       (cudnn_runtime_version != 91000) && !return_max_logit) {
-    if (cudnn_runtime_version >= 8900) {
-      backend = NVTE_Fused_Attn_Backend::NVTE_FP8;
-    } else {
-      backend = NVTE_Fused_Attn_Backend::NVTE_No_Backend;
-      std::cout << "Warning: FP8 fused attention is supported by cuDNN 8.9.0+."
-                   " Please upgrade your cuDNN version if possible."
-                << std::endl;
-    }
+    backend = NVTE_Fused_Attn_Backend::NVTE_FP8;
   } else if ((q_dtype == NVTEDType::kNVTEFloat16) || (q_dtype == NVTEDType::kNVTEBFloat16)) {
     bool flag_m512 = false;
     bool flag_arb = false;
