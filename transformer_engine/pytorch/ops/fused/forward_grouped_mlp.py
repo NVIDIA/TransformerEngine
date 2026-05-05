@@ -459,7 +459,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
                     grouped_fc_x.rowwise_data = None
                     grouped_fc_x.scale_inv = None
 
-            # FC1 saved-tensor layout. 
+            # FC1 saved-tensor layout.
             #   [split_sizes, base_split_offsets, split_points,
             #    grouped_fc1_x, *fc1_weight_tensors]
             fc1_weight_tensors = (
@@ -553,4 +553,3 @@ def fuse_forward_ops(
 # Register fusion if available
 if ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8.is_supported():
     register_forward_fusion(fuse_forward_ops, prepend=True)
-

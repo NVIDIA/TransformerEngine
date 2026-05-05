@@ -1053,8 +1053,7 @@ class GroupedLinear(BasicOperation):
         weight_requires_grad: bool,
         device: torch.device,
     ) -> tuple[torch.Tensor, tuple[Optional[torch.Tensor], ...]]:
-        """Legacy ``tex.split_quantize`` + ``general_grouped_gemm`` flow.
-        """
+        """Legacy ``tex.split_quantize`` + ``general_grouped_gemm`` flow."""
         num_groups = self.num_groups
         has_bias = self.has_bias
 

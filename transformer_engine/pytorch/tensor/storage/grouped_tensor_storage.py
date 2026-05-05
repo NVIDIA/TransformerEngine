@@ -306,8 +306,7 @@ class GroupedTensorStorage:
     def prepare_for_saving(
         self,
     ) -> Tuple[list[Optional[torch.Tensor]], "GroupedTensorStorage"]:
-        """Prepare the tensor base for saving for backward.
-        """
+        """Prepare the tensor base for saving for backward."""
         tensors = [
             self.rowwise_data,
             self.columnwise_data,
@@ -336,8 +335,7 @@ class GroupedTensorStorage:
     def restore_from_saved(
         self, tensors: list[Optional[torch.Tensor]]
     ) -> list[Optional[torch.Tensor]]:
-        """Restore the tensor base data from the saved tensors list.
-        """
+        """Restore the tensor base data from the saved tensors list."""
         self.rowwise_data = tensors[0]
         self.columnwise_data = tensors[1]
         self.scale_inv = tensors[2]
