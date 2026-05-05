@@ -357,9 +357,9 @@ class MoEBlock(TransformerEngineBase):
             Scalar auxiliary load-balancing loss when
             ``aux_loss_coeff > 0``, else ``None``.
         """
-        assert inputs.ndim == 3, (
-            f"MoEBlock expects [batch, sequence, hidden] input, got shape {inputs.shape}"
-        )
+        assert (
+            inputs.ndim == 3
+        ), f"MoEBlock expects [batch, sequence, hidden] input, got shape {inputs.shape}"
         inputs = with_sharding_constraint_by_logical_axes(inputs, self.input_axes)
 
         _, _, hidden_size = inputs.shape
@@ -448,9 +448,7 @@ class MoEBlock(TransformerEngineBase):
             score_function=self.score_function,
             compute_aux_scores=True,
         )
-        aux_tokens_per_expert = jnp.sum(
-            aux_routing_map.astype(jnp.int32), axis=0
-        )
+        aux_tokens_per_expert = jnp.sum(aux_routing_map.astype(jnp.int32), axis=0)
         return fused_moe_aux_loss(
             aux_scores.astype(jnp.float32),
             aux_tokens_per_expert,
@@ -665,9 +663,7 @@ class MoEBlock(TransformerEngineBase):
             pad_offsets=perm_result["pad_offsets"],
         )
         hidden_size = out_2d.shape[-1]
-        return out_2d.reshape(batch_size, sequence_length, hidden_size).astype(
-            self.dtype
-        )
+        return out_2d.reshape(batch_size, sequence_length, hidden_size).astype(self.dtype)
 
     # ------------------------------------------------------------------
     # No-EP forward
@@ -690,9 +686,7 @@ class MoEBlock(TransformerEngineBase):
         inputs_2d = inputs.reshape(-1, hidden_size)
         logits_2d = gate_logits.reshape(-1, self.num_experts)
 
-        sparse_probs, routing_map = self._route_topk(
-            logits_2d, params.get("expert_bias")
-        )
+        sparse_probs, routing_map = self._route_topk(logits_2d, params.get("expert_bias"))
         aux_loss = self._compute_aux_loss(logits_2d)
         perm = self._global_permute(inputs_2d, sparse_probs, routing_map)
         expert_outputs = self._expert_ffn(
@@ -701,9 +695,7 @@ class MoEBlock(TransformerEngineBase):
             params,
             n_groups=self.num_experts,
         )
-        output = self._global_combine(
-            expert_outputs, perm, batch_size, sequence_length
-        )
+        output = self._global_combine(expert_outputs, perm, batch_size, sequence_length)
 
         if self.tensor_parallelism_axis is not None:
             output = jax.lax.psum_scatter(
@@ -758,10 +750,9 @@ class MoEBlock(TransformerEngineBase):
             )
         mesh = self.mesh
         num_ep = mesh.shape[ep_axis]
-        assert self.num_experts % num_ep == 0, (
-            f"num_experts={self.num_experts} must be divisible by EP"
-            f" size={num_ep}"
-        )
+        assert (
+            self.num_experts % num_ep == 0
+        ), f"num_experts={self.num_experts} must be divisible by EP size={num_ep}"
         num_experts_local = self.num_experts // num_ep
 
         # Compose the BATCH sharding axis tuple. ``ep`` is always part of
@@ -796,8 +787,7 @@ class MoEBlock(TransformerEngineBase):
         topk = self.num_experts_per_tok
         if global_batch_size % dp_size != 0:
             raise ValueError(
-                f"batch={global_batch_size} not divisible by"
-                f" prod(data_parallelism_axes)={dp_size}"
+                f"batch={global_batch_size} not divisible by prod(data_parallelism_axes)={dp_size}"
             )
         recv_buffer_rows = (global_batch_size // dp_size) * sequence_length * topk
 
@@ -848,9 +838,7 @@ class MoEBlock(TransformerEngineBase):
                 )
             else:
                 full_expert_bias = None
-            sparse_probs, routing_map = self._route_topk(
-                logits_2d, full_expert_bias
-            )
+            sparse_probs, routing_map = self._route_topk(logits_2d, full_expert_bias)
 
             # aux_loss must see the global token batch and the global
             # tokens_per_expert: its formula ``E*coeff/(k*T^2) * sum_i(
@@ -905,13 +893,11 @@ class MoEBlock(TransformerEngineBase):
             )
 
             # -- Stage 4: local permute (source_shard, expert) -> (expert, shard)
-            sorted_x, local_group_sizes, local_perm_state = (
-                local_permute_after_a2a(
-                    x_recv,
-                    all_shards_tokens_per_expert,
-                    shard_id,
-                    num_ep,
-                )
+            sorted_x, local_group_sizes, local_perm_state = local_permute_after_a2a(
+                x_recv,
+                all_shards_tokens_per_expert,
+                shard_id,
+                num_ep,
             )
 
             # -- Stage 5: per-expert FFN (E_local groups) --
@@ -932,15 +918,11 @@ class MoEBlock(TransformerEngineBase):
             )
 
             # -- Stage 6: invert local permute --
-            x_send_back = local_unpermute_before_a2a(
-                expert_outputs, local_perm_state
-            )
+            x_send_back = local_unpermute_before_a2a(expert_outputs, local_perm_state)
 
             # -- Stage 7: reverse ragged_all_to_all over EP --
-            in_off_r, send_sz_r, out_off_r, recv_sz_r = (
-                compute_reverse_ragged_all_to_all_params(
-                    all_shards_tokens_per_expert, shard_id, num_ep
-                )
+            in_off_r, send_sz_r, out_off_r, recv_sz_r = compute_reverse_ragged_all_to_all_params(
+                all_shards_tokens_per_expert, shard_id, num_ep
             )
             send_back_buf = jnp.zeros_like(perm["sorted_inputs"])
             y_back = jax.lax.ragged_all_to_all(
@@ -954,9 +936,7 @@ class MoEBlock(TransformerEngineBase):
             )
 
             # -- Stage 8: invert global permute, weighted sum over top-k --
-            output = self._global_combine(
-                y_back, perm, batch_size=local_b, sequence_length=local_s
-            )
+            output = self._global_combine(y_back, perm, batch_size=local_b, sequence_length=local_s)
 
             if self.tensor_parallelism_axis is not None:
                 output = jax.lax.psum_scatter(

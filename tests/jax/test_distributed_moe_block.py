@@ -45,9 +45,7 @@ NUM_EXPERTS_PER_TOK = 2
 
 
 def _make_inputs(key: jax.Array) -> jax.Array:
-    return jax.random.normal(
-        key, (BATCH_SIZE, SEQUENCE_LENGTH, HIDDEN_SIZE), dtype=DTYPE
-    )
+    return jax.random.normal(key, (BATCH_SIZE, SEQUENCE_LENGTH, HIDDEN_SIZE), dtype=DTYPE)
 
 
 def _unwrap_partitioned(x):
@@ -136,23 +134,17 @@ class TestDistributedMoEBlock:
                 #      logical specs to NamedShardings via the active rules;
                 #   4. ``jax.jit(init, out_shardings=...)`` to actually
                 #      place the params on-device with those shardings.
-                abstract_variables = jax.eval_shape(
-                    sharded_block.init, init_key, inputs
-                )
-                logical_partition_spec = nn.get_partition_spec(
-                    abstract_variables
-                )
+                abstract_variables = jax.eval_shape(sharded_block.init, init_key, inputs)
+                logical_partition_spec = nn.get_partition_spec(abstract_variables)
                 out_shardings = nn.logical_to_mesh_sharding(
                     logical_partition_spec, mesh, logical_axis_rules
                 )
-                sharded_variables = jax.jit(
-                    sharded_block.init, out_shardings=out_shardings
-                )(init_key, inputs)
-                (sharded_loss, (sharded_output, sharded_aux)), sharded_grads = (
-                    jax.value_and_grad(loss_fn, argnums=1, has_aux=True)(
-                        sharded_block, sharded_variables, inputs
-                    )
+                sharded_variables = jax.jit(sharded_block.init, out_shardings=out_shardings)(
+                    init_key, inputs
                 )
+                (sharded_loss, (sharded_output, sharded_aux)), sharded_grads = jax.value_and_grad(
+                    loss_fn, argnums=1, has_aux=True
+                )(sharded_block, sharded_variables, inputs)
 
         wi_0 = _unwrap_partitioned(sharded_variables["params"]["wi_0"])
         wi_1 = _unwrap_partitioned(sharded_variables["params"]["wi_1"])

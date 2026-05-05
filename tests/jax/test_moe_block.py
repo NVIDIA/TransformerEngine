@@ -64,9 +64,7 @@ NUM_EXPERTS_PER_TOK = 2
 def _make_inputs(
     key: jax.Array, batch_size: int = BATCH_SIZE, sequence_length: int = SEQUENCE_LENGTH
 ) -> jax.Array:
-    return jax.random.normal(
-        key, (batch_size, sequence_length, HIDDEN_SIZE), dtype=DTYPE
-    )
+    return jax.random.normal(key, (batch_size, sequence_length, HIDDEN_SIZE), dtype=DTYPE)
 
 
 def _init_and_apply(
@@ -108,9 +106,9 @@ class TestMoEBlockSingleDevice:
         inputs = _make_inputs(data_key)
         _variables, output, aux_loss = _init_and_apply(block, inputs, init_key)
 
-        assert output.shape == inputs.shape, (
-            f"Unexpected output shape {output.shape} for backend {permutation_backend}"
-        )
+        assert (
+            output.shape == inputs.shape
+        ), f"Unexpected output shape {output.shape} for backend {permutation_backend}"
         assert output.dtype == inputs.dtype
         assert jnp.all(jnp.isfinite(output)), "Output contains NaN/Inf"
         assert aux_loss is None, "aux_loss should be None when aux_loss_coeff=0"
@@ -171,20 +169,19 @@ class TestMoEBlockSingleDevice:
             output, _ = block.apply(variables, inputs)
             return jnp.mean(output.astype(jnp.float32) ** 2), output
 
-        (loss_pj, out_pj), grads_pj = jax.value_and_grad(
-            loss_fn, argnums=1, has_aux=True
-        )(pure_block, variables, inputs)
-        (loss_tr, out_tr), grads_tr = jax.value_and_grad(
-            loss_fn, argnums=1, has_aux=True
-        )(triton_block, variables, inputs)
+        (loss_pj, out_pj), grads_pj = jax.value_and_grad(loss_fn, argnums=1, has_aux=True)(
+            pure_block, variables, inputs
+        )
+        (loss_tr, out_tr), grads_tr = jax.value_and_grad(loss_fn, argnums=1, has_aux=True)(
+            triton_block, variables, inputs
+        )
 
         # BF16 tolerances: outputs come out of the grouped-GEMM + weighted
         # sum so they accumulate error; we use ~2 ULPs worth of slack.
         atol_out, rtol_out = 5e-2, 5e-2
-        assert jnp.allclose(out_pj, out_tr, atol=atol_out, rtol=rtol_out), (
-            f"Forward outputs differ across backends: max diff"
-            f" {jnp.max(jnp.abs(out_pj - out_tr))}"
-        )
+        assert jnp.allclose(
+            out_pj, out_tr, atol=atol_out, rtol=rtol_out
+        ), f"Forward outputs differ across backends: max diff {jnp.max(jnp.abs(out_pj - out_tr))}"
         assert jnp.allclose(loss_pj, loss_tr, atol=atol_out, rtol=rtol_out)
 
         for name in ("gate_kernel", "wi_0", "wi_1", "wo"):

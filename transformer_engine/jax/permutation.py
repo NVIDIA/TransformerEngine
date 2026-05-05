@@ -700,10 +700,9 @@ _sort_chunks_by_index.defvjp(_sort_chunks_by_index_fwd_rule, _sort_chunks_by_ind
 @jax.custom_vjp
 def _sort_activations(inputs: jax.Array, sort_indices: jax.Array) -> jax.Array:
     """Sort ``inputs`` along the leading dim by ``sort_indices``."""
-    assert inputs.shape[0] == sort_indices.shape[0], (
-        f"inputs.shape[0]={inputs.shape[0]} must match"
-        f" sort_indices.shape[0]={sort_indices.shape[0]}"
-    )
+    assert (
+        inputs.shape[0] == sort_indices.shape[0]
+    ), f"inputs.shape[0]={inputs.shape[0]} must match sort_indices.shape[0]={sort_indices.shape[0]}"
     with jax.named_scope("unfused_sort_activations"):
         return inputs[sort_indices, ...]
 
@@ -714,9 +713,7 @@ def _sort_activations_fwd(
     return _sort_activations(inputs, sort_indices), sort_indices
 
 
-def _sort_activations_bwd(
-    residuals: jax.Array, grads: jax.Array
-) -> Tuple[jax.Array, None]:
+def _sort_activations_bwd(residuals: jax.Array, grads: jax.Array) -> Tuple[jax.Array, None]:
     sort_indices = residuals
     # Inverse permutation: gather-by-argsort undoes the forward gather.
     return _sort_activations(grads, jnp.argsort(sort_indices)), None
@@ -838,12 +835,10 @@ def unfused_token_dispatch(
         # ``(align - count % align) % align`` gives 0 (not ``align``) when
         # already aligned, so we never exceed the per-expert slot capacity of
         # ``align_size - 1``.
-        token_count_per_expert = jnp.bincount(
-            flatten_selected_experts, length=num_experts
-        )
+        token_count_per_expert = jnp.bincount(flatten_selected_experts, length=num_experts)
         padding_tokens_required_per_expert = (
-            (align_size - (token_count_per_expert % align_size)) % align_size
-        )
+            align_size - (token_count_per_expert % align_size)
+        ) % align_size
 
         # Build a static-size padding buffer of shape
         # ``[num_experts * (align_size - 1)]``. Each expert ``i`` owns a slot
@@ -869,9 +864,7 @@ def unfused_token_dispatch(
         )
 
         if roll_to_expert_id is not None:
-            flatten_selected_experts = (
-                flatten_selected_experts - roll_to_expert_id
-            ) % num_experts
+            flatten_selected_experts = (flatten_selected_experts - roll_to_expert_id) % num_experts
 
         sorted_selected_experts = jnp.argsort(flatten_selected_experts)
 
@@ -900,9 +893,7 @@ def unfused_token_dispatch(
         padding_size = max_total_padding_size
     else:
         if roll_to_expert_id is not None:
-            flatten_selected_experts = (
-                flatten_selected_experts - roll_to_expert_id
-            ) % num_experts
+            flatten_selected_experts = (flatten_selected_experts - roll_to_expert_id) % num_experts
 
         sorted_selected_experts = jnp.argsort(flatten_selected_experts)
 
@@ -1067,10 +1058,9 @@ def compute_ragged_all_to_all_params(
         tokens shard ``i`` sends to this shard.
     """
     num_experts = all_shards_tokens_per_expert.shape[1]
-    assert num_experts % num_expert_shards == 0, (
-        f"num_experts={num_experts} must be divisible by num_expert_shards"
-        f"={num_expert_shards}"
-    )
+    assert (
+        num_experts % num_expert_shards == 0
+    ), f"num_experts={num_experts} must be divisible by num_expert_shards={num_expert_shards}"
     local_expert_size = num_experts // num_expert_shards
 
     # This shard's row of the gathered table, reshaped so axis 0 indexes the
@@ -1080,9 +1070,7 @@ def compute_ragged_all_to_all_params(
         start_indices=(shard_id, 0),
         slice_sizes=(1, num_experts),
     ).squeeze(0)
-    local_reshaped = local_tokens_per_expert.reshape(
-        num_expert_shards, local_expert_size
-    )
+    local_reshaped = local_tokens_per_expert.reshape(num_expert_shards, local_expert_size)
 
     # send_sizes[i] = sum of token counts for shard i's experts in our buffer.
     send_sizes = jnp.sum(local_reshaped, axis=1)
@@ -1144,10 +1132,9 @@ def compute_reverse_ragged_all_to_all_params(
     :func:`compute_ragged_all_to_all_params`.
     """
     num_experts = all_shards_tokens_per_expert.shape[1]
-    assert num_experts % num_expert_shards == 0, (
-        f"num_experts={num_experts} must be divisible by num_expert_shards"
-        f"={num_expert_shards}"
-    )
+    assert (
+        num_experts % num_expert_shards == 0
+    ), f"num_experts={num_experts} must be divisible by num_expert_shards={num_expert_shards}"
     local_expert_size = num_experts // num_expert_shards
 
     local_expert_start = shard_id * local_expert_size
@@ -1175,9 +1162,7 @@ def compute_reverse_ragged_all_to_all_params(
         start_indices=(shard_id, 0),
         slice_sizes=(1, num_experts),
     ).squeeze(0)
-    local_reshaped = local_tokens_per_expert.reshape(
-        num_expert_shards, local_expert_size
-    )
+    local_reshaped = local_tokens_per_expert.reshape(num_expert_shards, local_expert_size)
     recv_sizes = jnp.sum(local_reshaped, axis=1)
 
     # output_offsets: the reverse sends-to-target matrix is the transpose of
@@ -1264,10 +1249,9 @@ def local_permute_after_a2a(
         Opaque state for :func:`local_unpermute_before_a2a`.
     """
     num_experts = all_shards_tokens_per_expert.shape[1]
-    assert num_experts % num_expert_shards == 0, (
-        f"num_experts={num_experts} must be divisible by num_expert_shards"
-        f"={num_expert_shards}"
-    )
+    assert (
+        num_experts % num_expert_shards == 0
+    ), f"num_experts={num_experts} must be divisible by num_expert_shards={num_expert_shards}"
     local_expert_size = num_experts // num_expert_shards
     local_expert_start = shard_id * local_expert_size
     local_expert_columns = jax.lax.dynamic_slice(
@@ -1283,9 +1267,9 @@ def local_permute_after_a2a(
     # Permutation that maps source-major -> expert-major:
     #   original index = s * E_local + e
     #   target   index = e * num_shards + s
-    indices_matrix = jnp.arange(
-        num_expert_shards * local_expert_size, dtype=jnp.int32
-    ).reshape(num_expert_shards, local_expert_size)
+    indices_matrix = jnp.arange(num_expert_shards * local_expert_size, dtype=jnp.int32).reshape(
+        num_expert_shards, local_expert_size
+    )
     sorted_chunk_indices = indices_matrix.T.reshape(-1)
 
     sorted_x, _ = sort_chunks_by_index(x_recv, split_sizes, sorted_chunk_indices)
