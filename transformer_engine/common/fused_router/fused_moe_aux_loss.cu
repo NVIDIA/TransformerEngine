@@ -20,9 +20,8 @@ namespace fused_router {
 template <typename DataType, typename IndexType>
 __global__ void fused_moe_aux_loss_forward_kernel(const DataType* probs,
                                                   const IndexType* tokens_per_expert,
-                                                  int total_num_tokens, int num_experts,
-                                                  int num_rows, int num_cols, int topk,
-                                                  float coeff, float* Coeff_buf) {
+                                                  int total_num_tokens, int num_rows, int num_cols,
+                                                  int topk, float coeff, float* Coeff_buf) {
   // -----------------------------------------------------------------------
   // 1) Write the CPU-computed coefficient into a device buffer to re-use in BWD
   // -----------------------------------------------------------------------
@@ -88,6 +87,10 @@ void fused_moe_aux_loss_forward_kernel_launcher(const DataType* probs,
                                                 int num_rows, int num_cols, int topk,
                                                 float coeff, DataType* aux_loss,
                                                 float* Coeff_buf, cudaStream_t stream) {
+  NVTE_CHECK(num_experts == num_cols,
+             "Number of experts (", num_experts,
+             ") must be equal to number of input columns (", num_cols, ").");
+             
   // Round up to a multiple of warp size for correct warp shuffles.
   const int block_size = ((std::min(1024, num_cols) + static_cast<int>(kThreadsPerWarp) - 1) /
                           static_cast<int>(kThreadsPerWarp)) *
@@ -103,8 +106,7 @@ void fused_moe_aux_loss_forward_kernel_launcher(const DataType* probs,
   NVTE_CHECK_CUDA(cudaMemsetAsync(Coeff_buf + 1, 0, sizeof(float), stream));
   fused_moe_aux_loss_forward_kernel<DataType, IndexType>
       <<<grid_size, block_size, smem_size, stream>>>(probs, tokens_per_expert, total_num_tokens,
-                                                     num_experts, num_rows, num_cols, topk, C_coeff,
-                                                     Coeff_buf);
+                                                     num_rows, num_cols, topk, C_coeff, Coeff_buf);
   NVTE_CHECK_CUDA(cudaGetLastError());
 
   // Convert the float accumulator to the output DataType.
