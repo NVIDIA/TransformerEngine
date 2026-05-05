@@ -6,9 +6,9 @@
 
 """triton kernels for mHC (manifold Hyper-Connection) operations"""
 
-import torch
 import itertools
 import os
+import torch
 
 import triton
 import triton.language as tl
