@@ -8,8 +8,8 @@
  *  \brief CUDA kernels to cast to NVFP4 with per-token (per-row) global scaling.
  */
 
-#ifndef TRANSFORMER_ENGINE_QUANTIZE_PERTOKEN_NVFP4_CUH_
-#define TRANSFORMER_ENGINE_QUANTIZE_PERTOKEN_NVFP4_CUH_
+#ifndef TRANSFORMER_ENGINE_QUANTIZE_PER_TOKEN_NVFP4_CUH_
+#define TRANSFORMER_ENGINE_QUANTIZE_PER_TOKEN_NVFP4_CUH_
 
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -167,34 +167,31 @@ inline void quantize_per_token(const Tensor &input, const Tensor *noop, Tensor *
         "Expected BFloat16, Float16, or Float32.");
   }
 
-  if (output->has_data()) {
-    NVTE_CHECK(is_fp4_dtype(output->data.dtype), "Rowwise output must have FP4 type.");
-    NVTE_CHECK(output->scale_inv.dptr != nullptr, "Rowwise scaling tensor must be allocated.");
-    NVTE_CHECK(output->amax.dptr != nullptr, "Rowwise per-token amax tensor must be allocated.");
+  NVTE_CHECK(is_fp4_dtype(output->data.dtype), "Rowwise output must have FP4 type.");
+  NVTE_CHECK(output->scale_inv.dptr != nullptr, "Rowwise scaling tensor must be allocated.");
 
-    QuantizationConfig per_token_quant_config;
-    if (quant_config != nullptr) {
-      per_token_quant_config = *quant_config;
-    }
-    per_token_quant_config.nvfp4_per_token_activation = true;
-    per_token_quant_config.nvfp4_2d_quantization = false;
+  QuantizationConfig per_token_quant_config;
+  if (quant_config != nullptr) {
+    per_token_quant_config = *quant_config;
+  }
+  per_token_quant_config.nvfp4_per_token_activation = true;
+  per_token_quant_config.nvfp4_2d_quantization = false;
 
-    const bool use_optimized_kernel =
-        (input.dtype() == DType::kBFloat16) && (rows % 32 == 0) && (cols % 32 == 0);
-    if (use_optimized_kernel) {
-      quantize_transpose</*use_2d_quantization=*/false>(input, noop, output,
-                                                        &per_token_quant_config, stream);
-    } else {
-      quantize_transpose_vector_blockwise_fp4(
-          /*input=*/input.data, /*global_amax=*/output->amax,
-          /*scale_inv=*/output->scale_inv, /*scale_inv_t=*/output->columnwise_scale_inv,
-          /*output=*/output->data, /*output_t=*/output->columnwise_data,
-          /*epsilon=*/0.0f, /*return_identity=*/true, /*return_transpose=*/false,
-          /*pow2_scale=*/false, /*swizzled_scale=*/false,
-          /*use_stochastic_rounding=*/per_token_quant_config.stochastic_rounding,
-          /*rng_state=*/per_token_quant_config.rng_state, /*use_2d_quantization=*/false,
-          /*per_token_rowwise_scaling=*/true, /*noop_tensor=*/noop->data, /*stream=*/stream);
-    }
+  const bool use_optimized_kernel =
+      (input.dtype() == DType::kBFloat16) && (rows % 32 == 0) && (cols % 32 == 0);
+  if (use_optimized_kernel) {
+    quantize_transpose</*use_2d_quantization=*/false>(input, noop, output, &per_token_quant_config,
+                                                      stream);
+  } else {
+    quantize_transpose_vector_blockwise_fp4(
+        /*input=*/input.data, /*global_amax=*/output->amax,
+        /*scale_inv=*/output->scale_inv, /*scale_inv_t=*/output->columnwise_scale_inv,
+        /*output=*/output->data, /*output_t=*/output->columnwise_data,
+        /*epsilon=*/0.0f, /*return_identity=*/true, /*return_transpose=*/false,
+        /*pow2_scale=*/false, /*swizzled_scale=*/false,
+        /*use_stochastic_rounding=*/per_token_quant_config.stochastic_rounding,
+        /*rng_state=*/per_token_quant_config.rng_state, /*use_2d_quantization=*/false,
+        /*per_token_rowwise_scaling=*/true, /*noop_tensor=*/noop->data, /*stream=*/stream);
   }
 #else
   NVTE_ERROR("CUDA 12.8 or higher is needed for FP4 calculation!");
@@ -205,4 +202,4 @@ inline void quantize_per_token(const Tensor &input, const Tensor *noop, Tensor *
 }  // namespace dispatch
 }  // namespace transformer_engine
 
-#endif  // TRANSFORMER_ENGINE_QUANTIZE_PERTOKEN_NVFP4_CUH_
+#endif  // TRANSFORMER_ENGINE_QUANTIZE_PER_TOKEN_NVFP4_CUH_

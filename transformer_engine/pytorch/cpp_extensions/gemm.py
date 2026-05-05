@@ -364,7 +364,7 @@ def general_grouped_gemm(
             out_views[i].copy_(gemm_out)
         if single_output:
             out = out_init
-        return out, bias, gelu_input
+        return out, grad_bias, gelu_input
 
     if isinstance(quantization_params[0], DebugQuantizer):
         assert not gelu, "GELU not supported in debug mode"

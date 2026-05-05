@@ -285,7 +285,7 @@ Kernel Configuration
 
    :Type: ``int`` (0 or 1)
    :Default: ``0``
-   :Description: Enable per-token activation quantization for the ``NVFP4BlockScaling`` recipe in GroupedLinear split-quantize paths. When set to ``1`` (or when ``NVFP4BlockScaling(per_token_activation=True)`` is used), NVFP4 rowwise ``amax`` metadata stores one FP32 value per token (row) instead of a single scalar.
+   :Description: Enable per-token activation quantization for the ``NVFP4BlockScaling`` recipe. When set to ``1`` (or when ``NVFP4BlockScaling(per_token_activation=True)`` is used), forward activation quantizers store NVFP4 rowwise ``amax`` metadata as one FP32 value per token (row) instead of a single scalar.
 
 Torch Compilation and Fusion
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

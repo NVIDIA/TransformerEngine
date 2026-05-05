@@ -128,7 +128,7 @@ class NVFP4Quantizer(Quantizer):
     """Stochastic rounding, only applicable for gradients."""
     stochastic_rounding: bool
 
-    """Per-token activation quantization path (grouped split quantize)."""
+    """Per-token activation quantization path."""
     per_token_activation: bool
 
     """RHT matrix random sign mask"""

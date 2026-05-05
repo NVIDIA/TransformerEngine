@@ -663,6 +663,7 @@ class GroupedTensorStorage:
             amax = torch.empty(num_tensors, dtype=torch.float32, device=device)
         elif quantizer._get_compatible_recipe().nvfp4():
             per_token_activation = getattr(quantizer, "per_token_activation", False)
+            columnwise_usage = columnwise_usage and not per_token_activation
             total_amax_elements = (
                 sum(math.prod(s[:-1]) for s in shape) if per_token_activation else num_tensors
             )

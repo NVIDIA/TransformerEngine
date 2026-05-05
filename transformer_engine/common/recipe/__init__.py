@@ -479,9 +479,9 @@ class NVFP4BlockScaling(Recipe):
     disable_2d_quantization : bool, default = False
              If set to `True`, 1D block scaling with block size 16 is used for all tensors.
     per_token_activation : bool, default = False
-             If set to `True`, GroupedLinear activation split quantization uses per-token
-             (per-row) NVFP4 global amax values. In this mode, rowwise ``amax`` metadata
-             is stored as a vector with one FP32 value per token.
+             If set to `True`, forward activation quantizers use per-token (per-row)
+             NVFP4 global amax values. In this mode, rowwise ``amax`` metadata is
+             stored as a vector with one FP32 value per token.
     backward_override : {None, 'high_precision', 'dequantized'}, default = None
             Backward precision mode. None does not modify backward behavior,
             `high_precision` keeps original high-precision operands for backward,

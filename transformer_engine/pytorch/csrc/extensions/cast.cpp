@@ -1601,50 +1601,5 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
   return output_py_list;
 }
 
-std::tuple<at::Tensor, at::Tensor, at::Tensor> quantize_nvfp4_per_token(at::Tensor input) {
-  init_extension();
-
-  NVTE_CHECK(input.dim() == 2, "Input must be 2D (num_rows, num_cols)");
-  NVTE_CHECK(input.is_cuda(), "Input must be on CUDA device");
-
-  const int num_rows = input.size(0);
-  const int num_cols = input.size(1);
-  NVTE_CHECK(num_cols % 16 == 0,
-             "num_cols must be a multiple of 16 for per-token NVFP4 quantization");
-
-  if (num_rows == 0) {
-    auto options = input.options();
-    return {at::empty({0, num_cols / 2}, options.dtype(at::kByte)),
-            at::empty({0, num_cols / 16}, options.dtype(at::kByte)),
-            at::empty({0}, options.dtype(at::kFloat))};
-  }
-
-  auto input_contig = input.contiguous();
-  auto options = input_contig.options();
-
-  auto output_data = at::empty({num_rows, num_cols / 2}, options.dtype(at::kByte));
-  auto output_scales = at::empty({num_rows, num_cols / 16}, options.dtype(at::kByte));
-  auto output_per_token_amax = at::empty({num_rows}, options.dtype(at::kFloat));
-
-  auto te_input = makeTransformerEngineTensor(input_contig);
-  TensorWrapper te_output(NVTE_NVFP4_1D_SCALING);
-  te_output.set_rowwise_data(
-      output_data.data_ptr(), DType::kFloat4E2M1,
-      std::vector<size_t>{static_cast<size_t>(num_rows), static_cast<size_t>(num_cols)});
-  te_output.set_rowwise_scale_inv(
-      output_scales.data_ptr(), DType::kFloat8E4M3,
-      std::vector<size_t>{static_cast<size_t>(num_rows), static_cast<size_t>(num_cols / 16)});
-  te_output.set_amax(output_per_token_amax.data_ptr(), DType::kFloat32,
-                     std::vector<size_t>{static_cast<size_t>(num_rows)});
-  QuantizationConfigWrapper quant_config;
-  quant_config.set_nvfp4_per_token_activation(true);
-  auto stream = at::cuda::getCurrentCUDAStream().stream();
-
-  NVTE_SCOPED_GIL_RELEASE(
-      { nvte_quantize_v2(te_input.data(), te_output.data(), quant_config, stream); });
-
-  return {output_data, output_scales, output_per_token_amax};
-}
-
 }  // namespace pytorch
 }  // namespace transformer_engine

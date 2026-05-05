@@ -213,7 +213,7 @@ void performTest_dequantize_nvfp4_swizzled(const size_t rows, const size_t cols,
         cudaDeviceSynchronize();
     }
 
-    // Dequantize with compact scales → reference output
+    // Dequantize with compact scales → reference output.
     Tensor output_compact("output_compact", std::vector<size_t>{rows, cols}, otype, true, false);
     nvte_dequantize(quantized_compact.data(), output_compact.data(), 0);
     cudaDeviceSynchronize();
