@@ -16,7 +16,7 @@ namespace fused_attn {
 using namespace transformer_engine;
 
 // fused attention FWD FP8 with FE 1.0+
-void fused_attn_fp8_fwd_impl_v1(
+void fused_attn_fp8_fwd_impl(
     int64_t b, int64_t h, int64_t hg, int64_t s_q, int64_t s_kv, int64_t d_qk, int64_t d_v,
     bool is_training, float scaling_factor, float dropout_probability, NVTE_QKV_Layout qkv_layout,
     NVTE_QKV_Format o_format, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
@@ -446,7 +446,7 @@ void fused_attn_fp8_fwd_impl_v1(
 }
 
 // fused attention BWD FP8 with FE 1.0+
-void fused_attn_fp8_bwd_impl_v1(
+void fused_attn_fp8_bwd_impl(
     int64_t b, int64_t h, int64_t hg, int64_t s_q, int64_t s_kv, int64_t d_qk, int64_t d_v,
     float scaling_factor, float dropout_probability, NVTE_QKV_Layout qkv_layout,
     NVTE_QKV_Format o_format, NVTE_QKV_Format do_format, NVTE_QKV_Layout dqkv_layout,
@@ -1173,7 +1173,7 @@ void fused_attn_fp8_fwd(
   NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
   if ((qkv_format == NVTE_QKV_Format::NVTE_BSHD) || (qkv_format == NVTE_QKV_Format::NVTE_SBHD) ||
       (qkv_format == NVTE_QKV_Format::NVTE_BHSD)) {
-    fused_attn::fused_attn_fp8_fwd_impl_v1(
+    fused_attn::fused_attn_fp8_fwd_impl(
         batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim_qk, head_dim_v,
         is_training, attn_scale, p_dropout, qkv_layout, o_format, bias_type, mask_type,
         softmax_type, window_size_left, window_size_right, bottom_right_diagonal, devPtrQ, devPtrK,
@@ -1294,7 +1294,7 @@ void fused_attn_fp8_bwd(
   NVTE_QKV_Format dqkv_format = nvte_get_qkv_format(dqkv_layout);
   if ((dqkv_format == NVTE_QKV_Format::NVTE_BSHD) || (dqkv_format == NVTE_QKV_Format::NVTE_SBHD) ||
       (dqkv_format == NVTE_QKV_Format::NVTE_BHSD)) {
-    fused_attn::fused_attn_fp8_bwd_impl_v1(
+    fused_attn::fused_attn_fp8_bwd_impl(
         batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim_qk, head_dim_v,
         attn_scale, p_dropout, qkv_layout, o_format, do_format, dqkv_layout, bias_type, mask_type,
         softmax_type, window_size_left, window_size_right, bottom_right_diagonal, deterministic,
