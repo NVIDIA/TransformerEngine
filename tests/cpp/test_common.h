@@ -289,7 +289,6 @@ class Tensor {
     // Templated pointer accessors
     template <typename T>
     T *cpu_buffer() {
-      NVTE_CHECK(TypeInfo<T>::dtype == dtype_, "Invalid type.");
       return reinterpret_cast<T *>(cpu_buffer());
     }
     template <typename T>
@@ -298,7 +297,6 @@ class Tensor {
     }
     template <typename T>
     T *gpu_buffer() {
-      NVTE_CHECK(TypeInfo<T>::dtype == dtype_, "Invalid type.");
       return reinterpret_cast<T *>(gpu_buffer());
     }
     template <typename T>
