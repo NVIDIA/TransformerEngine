@@ -30,6 +30,7 @@ from ...utils import (
     canonicalize_dtype,
     clear_tensor_data,
     devices_match,
+    resolve_grouped_linear_single_param_flags,
     round_up_to_nearest_multiple,
 )
 from .._common import is_quantized_tensor, maybe_dequantize
@@ -78,11 +79,17 @@ class GroupedLinear(BasicOperation):
         ``main_grad`` instead of accumulating.
     single_grouped_weight : bool, default = ``False``
         Store all expert weights as one ``GroupedTensor`` parameter ``weight``.
+        EXPERIMENTAL and subject to change. Gated by the
+        ``NVTE_GROUPED_LINEAR_SINGLE_PARAM`` environment variable: if the env var
+        is not set this argument is forced to ``False`` with a warning.
     delay_wgrad_compute : bool, default = ``False``
         Whether to delay weight gradient computation
     single_grouped_bias : bool, default = ``False``
         If ``True`` (and ``bias=True``), store all expert biases as one ``GroupedTensor``
         parameter named ``bias`` instead of ``bias0``..``bias{N-1}``.
+        EXPERIMENTAL and subject to change. Gated by the
+        ``NVTE_GROUPED_LINEAR_SINGLE_PARAM`` environment variable: if the env var
+        is not set this argument is forced to ``False`` with a warning.
     scale_bias : bool, default = ``False``
         If ``True`` (and ``bias=True``), expects a probability tensor as an
         additional extra input and adds ``bias * scales`` instead of ``bias``
@@ -123,6 +130,9 @@ class GroupedLinear(BasicOperation):
         self.num_groups: int = num_groups
         self.in_features: int = in_features
         self.out_features: int = out_features
+        single_grouped_weight, single_grouped_bias = resolve_grouped_linear_single_param_flags(
+            single_grouped_weight, single_grouped_bias
+        )
         self.single_grouped_weight: bool = single_grouped_weight
         self.single_grouped_bias: bool = single_grouped_bias
         self.use_bias: bool = bias
