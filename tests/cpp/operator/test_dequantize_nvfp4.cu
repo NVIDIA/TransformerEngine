@@ -75,7 +75,7 @@ void compute_ref_dequantize_nvfp4(const uint8_t *packed_data,
 }
 
 template <typename OutputType>
-float compute_amax(const test::Tensor &t, size_t rows, size_t cols) {
+float compute_amax(test::Tensor &t, size_t rows, size_t cols) {
     t.to_cpu();
     const auto *data = t.rowwise_cpu_dptr<OutputType>();
     float amax = 0.0f;

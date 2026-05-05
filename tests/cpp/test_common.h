@@ -184,32 +184,32 @@ class Tensor {
   }
 
   template <typename T>
-  T *rowwise_cpu_dptr() const {
+  T *rowwise_cpu_dptr() {
     return data_rowwise_.cpu_buffer<T>();
   }
 
   template <typename T>
-  T *columnwise_cpu_dptr() const {
+  T *columnwise_cpu_dptr() {
     return data_columnwise_.cpu_buffer<T>();
   }
 
   float amax() {
     NVTE_CHECK(amax_rowwise_.size() == 1);
-    NVTE_CHECK(amax_rowwise_.dtype() == kNVTEFloat32);
+    NVTE_CHECK(amax_rowwise_.dtype() == DType::kFloat32);
     amax_rowwise_.to_cpu();
     return *amax_rowwise_.cpu_buffer<float>();
   }
 
   float amax_columnwise() {
     NVTE_CHECK(amax_columnwise_.size() == 1);
-    NVTE_CHECK(amax_columnwise_.dtype() == kNVTEFloat32);
+    NVTE_CHECK(amax_columnwise_.dtype() == DType::kFloat32);
     amax_columnwise_.to_cpu();
     return *amax_columnwise_.cpu_buffer<float>();
   }
 
   float scale() {
     NVTE_CHECK(scale_.size() == 1);
-    NVTE_CHECK(scale_.dtype() == kNVTEFloat32);
+    NVTE_CHECK(scale_.dtype() == DType::kFloat32);
     scale_.to_cpu();
     return *scale_.cpu_buffer<float>();
   }
@@ -228,7 +228,7 @@ class Tensor {
 
   float rowwise_scale_inv(){
     NVTE_CHECK(scale_inv_rowwise_.size() == 1);
-    NVTE_CHECK(scale_inv_rowwise_.dtype() == kNVTEFloat32);
+    NVTE_CHECK(scale_inv_rowwise_.dtype() == DType::kFloat32);
     scale_inv_rowwise_.to_cpu();
     return *scale_inv_rowwise_.cpu_buffer<float>();
   }
