@@ -270,11 +270,15 @@ def get_tols(dtype):
 
 
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
-@pytest.mark.parametrize("dtypes", [
-    (torch.float32, torch.float32),
-    (torch.bfloat16, torch.bfloat16),
-    (torch.bfloat16, torch.float32),
-], ids=["x_fp32_phi_fp32", "x_bf16_phi_bf16", "x_bf16_phi_fp32"])
+@pytest.mark.parametrize(
+    "dtypes",
+    [
+        (torch.float32, torch.float32),
+        (torch.bfloat16, torch.bfloat16),
+        (torch.bfloat16, torch.float32),
+    ],
+    ids=["x_fp32_phi_fp32", "x_bf16_phi_bf16", "x_bf16_phi_fp32"],
+)
 @pytest.mark.parametrize("has_norm_weight", [False, True], ids=["no_norm_weight", "norm_weight"])
 def test_mhc_projection(cfg: MHCConfig, dtypes, has_norm_weight):
     reset_rng_states()
@@ -314,6 +318,7 @@ def test_mhc_projection(cfg: MHCConfig, dtypes, has_norm_weight):
     if has_norm_weight:
         torch.testing.assert_close(norm_weight.grad, norm_weight_ref.grad, **tols)
 
+
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
 def test_mhc_scale(cfg: MHCConfig, dtype):
@@ -352,12 +357,15 @@ def test_mhc_scale(cfg: MHCConfig, dtype):
 
 
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
-@pytest.mark.parametrize("dtypes", [
-    (torch.float32, torch.float32),
-    (torch.bfloat16, torch.bfloat16),
-    (torch.bfloat16, torch.float32),
-], ids=["x_fp32_phi_fp32", "x_bf16_phi_bf16", "x_bf16_phi_fp32"])
-
+@pytest.mark.parametrize(
+    "dtypes",
+    [
+        (torch.float32, torch.float32),
+        (torch.bfloat16, torch.bfloat16),
+        (torch.bfloat16, torch.float32),
+    ],
+    ids=["x_fp32_phi_fp32", "x_bf16_phi_bf16", "x_bf16_phi_fp32"],
+)
 @pytest.mark.parametrize("has_norm_weight", [False, True], ids=["no_norm_weight", "norm_weight"])
 def test_mhc_rmsnorm(cfg: MHCConfig, dtypes, has_norm_weight):
     # Verify if the fused kernel is equivalent to applying RMSNorm in the normal order
@@ -425,7 +433,7 @@ def test_mhc_rmsnorm(cfg: MHCConfig, dtypes, has_norm_weight):
         out_post = 2 * out_post.sigmoid()
         out_res = out_res
 
-        return out_pre, out_post, out_res # Return in FP32 to match the kernel's behavior
+        return out_pre, out_post, out_res  # Return in FP32 to match the kernel's behavior
 
     combined_H_pre, combined_H_post, combined_H_res = mhc_combined(
         x_ref, phi_ref, alpha_ref, beta_ref, norm_weight_ref
@@ -443,6 +451,7 @@ def test_mhc_rmsnorm(cfg: MHCConfig, dtypes, has_norm_weight):
     torch.testing.assert_close(combined_H_post, fused_H_post, **tols)
     torch.testing.assert_close(combined_H_res, fused_H_res, **tols)
 
+
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
 @pytest.mark.parametrize("dtype", [torch.float32], ids=["fp32"])
 def test_mhc_fuse_grad_acc(cfg: MHCConfig, dtype):
@@ -450,7 +459,10 @@ def test_mhc_fuse_grad_acc(cfg: MHCConfig, dtype):
     # we accumulate 3 fp32 gradients and then cast to bf16 in the end, which causes two paths to have different precision patterns
 
     if not is_deterministic_enforced():
-        pytest.skip("This test needs to be tested under deterministic mode to avoid discrepancies from running two non-deterministic implementations twice")
+        pytest.skip(
+            "This test needs to be tested under deterministic mode to avoid discrepancies from"
+            " running two non-deterministic implementations twice"
+        )
 
     reset_rng_states()
 
@@ -490,12 +502,8 @@ def test_mhc_fuse_grad_acc(cfg: MHCConfig, dtype):
 
         return expanded_combined
 
-    expanded_combined_fuse_grad  = end_to_end(
-        x_ref, phi_ref, alpha_ref, beta_ref, False
-    )
-    expanded_combined_no_fuse_grad = end_to_end(
-        x, phi, alpha, beta, True
-    )
+    expanded_combined_fuse_grad = end_to_end(x_ref, phi_ref, alpha_ref, beta_ref, False)
+    expanded_combined_no_fuse_grad = end_to_end(x, phi, alpha, beta, True)
 
     grad_output = torch.randn_like(expanded_combined_fuse_grad)
     expanded_combined_fuse_grad.backward(grad_output)

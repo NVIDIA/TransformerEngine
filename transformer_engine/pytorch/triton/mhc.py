@@ -36,7 +36,7 @@ def mhc_generate_mix_and_aggregate(
     beta: torch.Tensor,
     norm_weight: torch.Tensor = None,
     use_tf32: bool = True,
-    fuse_grad_x_acc: bool = False
+    fuse_grad_x_acc: bool = False,
 ):
     """
     Generate the mix matrix H_pre, H_post, H_res and apply H_pre to x to aggregate n streams
@@ -55,7 +55,7 @@ def mhc_generate_mix_and_aggregate(
 
     Parameters
     ----------
-    x : torch.Tensor, 
+    x : torch.Tensor,
         input tensor of shape (s, b, C, n), where s is the sequence length, b is the batch size, C is the hidden dimension per hyper connection, and n is the number of hyper connections,
         dtype is torch.float16 or torch.float32
         Note that C is equal to the original hidden dimension divided by n.
@@ -97,17 +97,24 @@ def mhc_generate_mix_and_aggregate(
         with dtype float32
     """
     s, b, C, n = x.shape
-    assert n == 4, "Only n=4 is supported in this implementation, where n is the Hyper Connection number"
+    assert (
+        n == 4
+    ), "Only n=4 is supported in this implementation, where n is the Hyper Connection number"
     nC = n * C
     N = 2 * n + n * n
-    H, ms = mhc_fused_projection(x.view(s * b, nC), phi, norm_weight, use_tf32=use_tf32, fuse_grad_x_acc=fuse_grad_x_acc)
+    H, ms = mhc_fused_projection(
+        x.view(s * b, nC), phi, norm_weight, use_tf32=use_tf32, fuse_grad_x_acc=fuse_grad_x_acc
+    )
     h_pre, h_post, h_res = mhc_fused_scale(H, alpha, beta, ms, n)
     H_pre = h_pre.view(s, b, n)
     H_post = h_post.view(s, b, n)
     H_res = h_res.view(s, b, n, n)
     H_res = mhc_fused_sinkhorn(H_res, n, recompute_hist=True, iters=20)
-    out = mhc_fused_aggregate(x, H_pre.view(s, b, n), n, use_tf32=use_tf32, fuse_grad_x_acc=fuse_grad_x_acc)
+    out = mhc_fused_aggregate(
+        x, H_pre.view(s, b, n), n, use_tf32=use_tf32, fuse_grad_x_acc=fuse_grad_x_acc
+    )
     return out, H_post, H_res
+
 
 def mhc_fused_sinkhorn(
     H_res: torch.Tensor,
@@ -142,6 +149,7 @@ def mhc_fused_sinkhorn(
     assert n == 4, "Only n=4 is supported in this implementation"
     out = mHCSinkhornOp.apply(H_res, n, recompute_hist, iters)
     return out
+
 
 def mhc_fused_scale(
     H: torch.Tensor,
@@ -200,12 +208,13 @@ def mhc_fused_scale(
     h_res = out[..., 2 * n : n * n + 2 * n]
     return h_pre, h_post, h_res
 
+
 def mhc_fused_aggregate(
     x: torch.Tensor,
     H_pre: torch.Tensor,
     n: int,
     use_tf32: bool = True,
-    fuse_grad_x_acc: bool = False
+    fuse_grad_x_acc: bool = False,
 ):
     """
     Aggregate operation to merge n activation streams into one (see section 4.3.1 of the DeepSeek mHC paper):
@@ -239,6 +248,7 @@ def mhc_fused_aggregate(
     assert n == 4, "Only n=4 is supported in this implementation"
     out = mHCAggregateOp.apply(x, H_pre, n, use_tf32, fuse_grad_x_acc)
     return out
+
 
 def mhc_fused_expand_combine(
     f: torch.Tensor,
@@ -288,24 +298,16 @@ def mhc_fused_expand_combine(
     """
     _, _, _, n = x.shape
     assert n == 4, "Only n=4 is supported in this implementation"
-    out = mHCExpandCombineOp.apply(
-        f,
-        bias,
-        H_post,
-        x,
-        H_res,
-        n,
-        use_tf32,
-        fuse_grad_x_acc
-    )
+    out = mHCExpandCombineOp.apply(f, bias, H_post, x, H_res, n, use_tf32, fuse_grad_x_acc)
     return out
+
 
 def mhc_fused_projection(
     x: torch.Tensor,
     phi: torch.Tensor,
     norm_weight: torch.Tensor = None,
     use_tf32: bool = True,
-    fuse_grad_x_acc: bool = False
+    fuse_grad_x_acc: bool = False,
 ):
     """
     Fused projection operation to compute H matrices and mean square for RMSNorm (see eq. 14-15, section 4.3.1 of the DeepSeek mHC paper):
@@ -352,7 +354,10 @@ def mhc_fused_projection(
         Mean square of shape (M,), which is used for RMSNorm in the next kernel,
         with dtype float32
     """
-    assert phi.shape[0] == 24, "Currently only n=4 is supported, which means phi should have 24 (or 32 if you padded phi) in its first dimension"
+    assert phi.shape[0] == 24, (
+        "Currently only n=4 is supported, which means phi should have 24 (or 32 if you padded phi)"
+        " in its first dimension"
+    )
     H, ms = mHCProjectionOp.apply(x, phi, norm_weight, use_tf32, 4, fuse_grad_x_acc)
     return H, ms
 
@@ -372,7 +377,7 @@ class mHCProjectionOp(torch.autograd.Function):
         Parameters:
         ctx : The context object.
         x (tensor): The input tensor of shape (M, K), where M=s*b is the flattened batch dimension and K=nC is the hidden dimension after expansion.
-        phi (tensor): The projection matrix of shape (N, K), where N=2n+n*n (=24 for n=4). 
+        phi (tensor): The projection matrix of shape (N, K), where N=2n+n*n (=24 for n=4).
         norm_weight (tensor or None): Optional, or tensor of shape (K,). RMSNorm's learnable per-element affine parameters
         use_tf32 (bool): Whether to use TF32 precision for matmul operations. If False, uses IEEE for better precision.
         n (int): Number of hyper connections, where only n=4 is supported in the current implementation.
@@ -459,15 +464,15 @@ class mHCProjectionOp(torch.autograd.Function):
         The backward pass of the fused projection operation. Computes gradients for x and phi.
 
         - grad_psi = grad_H^T @ x: (2n + n^2, M) @ (M, nC) = (2n + n^2, nC), where grad_H's last dim is padded to 32
-        If norm_weight is None: 
+        If norm_weight is None:
         - grad_phi = grad_psi
-        Otherwise, 
+        Otherwise,
         - grad_phi = grad_psi * norm_weight: (2n + n^2, nC) * (nC,) = (2n + n^2, nC)
         - grad_norm_weight = sum(grad_psi * phi, dim=0): ((2n + n^2, nC) * (2n + n^2, nC)).sum(dim=0) -> (nC,)
         Reorder a bit:
         - grad_phi = grad_H^T @ x * norm_weight
         - grad_norm_weight = sum((grad_H^T @ x) * phi, dim=0)
-        
+
         - grad_x = grad_H @ phi + 2 * x * grad_ms / K, where the second term is the gradient contribution from
         the mean square computation fused in the forward pass.
 
@@ -493,7 +498,7 @@ class mHCProjectionOp(torch.autograd.Function):
             M,
         )
 
-        fuse_grad_x_acc = hasattr(x.untyped_storage(), 'grad_x_acc') and ctx.fuse_grad_x_acc
+        fuse_grad_x_acc = hasattr(x.untyped_storage(), "grad_x_acc") and ctx.fuse_grad_x_acc
         if fuse_grad_x_acc:
             grad_x = x.untyped_storage().grad_x_acc.view_as(x)
         else:
@@ -518,7 +523,7 @@ class mHCProjectionOp(torch.autograd.Function):
                 grad_norm_weight = torch.zeros_like(norm_weight, dtype=torch.float32)
 
             _mhc_projection_bwd_fused_dphi[grid](
-                x_ptr=x, # (M, K)
+                x_ptr=x,  # (M, K)
                 grad_H_ptr=grad_H,  # (M, 32)
                 phi_ptr=phi,  # (N, K)
                 norm_weight_ptr=norm_weight,  # (K,)
@@ -539,14 +544,16 @@ class mHCProjectionOp(torch.autograd.Function):
                 stride_grad_norm_weight=1,
                 BLOCK_SIZE_N=32,
                 precision="tf32" if ctx.use_tf32 else "ieee",
-                DETERMINISTIC=is_deterministic_enforced()
+                DETERMINISTIC=is_deterministic_enforced(),
             )
 
             grad_phi = grad_phi.to(phi.dtype)
             grad_norm_weight = grad_norm_weight.to(norm_weight.dtype)
         else:
             # Without norm_weight, this is only a GEMM with no fusion needed so we let cuBLAS handle it
-            grad_phi = general_gemm(x.to(grad_H.dtype), grad_H, out_dtype=torch.float32, layout="NT")[0][:N, :]
+            grad_phi = general_gemm(
+                x.to(grad_H.dtype), grad_H, out_dtype=torch.float32, layout="NT"
+            )[0][:N, :]
             grad_phi = grad_phi.to(phi.dtype)
             grad_norm_weight = None
 
@@ -560,7 +567,7 @@ class mHCProjectionOp(torch.autograd.Function):
             x_ptr=x,
             grad_x_ptr=grad_x,  # (M, K)
             phi_ptr=phi,  # (N, K)
-            norm_weight_ptr=norm_weight, # (K,)
+            norm_weight_ptr=norm_weight,  # (K,)
             grad_h_ptr=grad_H,  # (M, 32)
             grad_ms_ptr=grad_ms,  # (M,)
             M=M,
@@ -698,8 +705,12 @@ class mHCScaleFusedOp(torch.autograd.Function):
         if use_deterministic:
             grad_alpha = None
             grad_beta_padded = None
-            workspace_buffer_grad_alpha = torch.empty((grid[0], 4), device=grad_out.device, dtype=torch.float32)
-            workspace_buffer_grad_beta = torch.empty((grid[0], 32), device=grad_out.device, dtype=torch.float32)
+            workspace_buffer_grad_alpha = torch.empty(
+                (grid[0], 4), device=grad_out.device, dtype=torch.float32
+            )
+            workspace_buffer_grad_beta = torch.empty(
+                (grid[0], 32), device=grad_out.device, dtype=torch.float32
+            )
         else:
             grad_alpha = torch.zeros((3,), device=grad_out.device, dtype=torch.float32)
             grad_beta_padded = torch.zeros((1, 32), device=grad_out.device, dtype=torch.float32)
@@ -740,15 +751,19 @@ class mHCScaleFusedOp(torch.autograd.Function):
         )
 
         if use_deterministic:
-            grad_alpha = workspace_buffer_grad_alpha.sum(dim=0)[:3]  # Sum across blocks and take the first 3 elements for grad_alpha
-            grad_beta_padded = workspace_buffer_grad_beta.sum(dim=0, keepdim=True)  # Sum across blocks for grad_beta
+            grad_alpha = workspace_buffer_grad_alpha.sum(dim=0)[
+                :3
+            ]  # Sum across blocks and take the first 3 elements for grad_alpha
+            grad_beta_padded = workspace_buffer_grad_beta.sum(
+                dim=0, keepdim=True
+            )  # Sum across blocks for grad_beta
 
         grad_beta = grad_beta_padded[:, :N]
 
         return (
             grad_H,
             grad_alpha.to(alpha.dtype),
-            grad_beta.to(alpha.dtype), # We assume alpha and beta have the same dtype
+            grad_beta.to(alpha.dtype),  # We assume alpha and beta have the same dtype
             grad_ms,
             None,
         )
@@ -975,7 +990,7 @@ class mHCAggregateOp(torch.autograd.Function):
         assert n == 4, "Only n=4 is supported in this implementation"
         M = s * b
 
-        fuse_grad_x_acc = hasattr(x.untyped_storage(), 'grad_x_acc') and ctx.fuse_grad_x_acc
+        fuse_grad_x_acc = hasattr(x.untyped_storage(), "grad_x_acc") and ctx.fuse_grad_x_acc
         if fuse_grad_x_acc:
             grad_x = x.untyped_storage().grad_x_acc.view_as(x)
         else:
@@ -1140,13 +1155,19 @@ class mHCExpandCombineOp(torch.autograd.Function):
         # Since triton's autotune will reset grad_bias pointer when tuning, we need an empty placeholder here
         grad_bias = torch.empty(1, device=grad_output.device, dtype=grad_output.dtype)
         if use_deterministic:
-            grad_H_post = torch.empty_like(H_post, dtype=H_post.dtype)  # No need for higher precision since we don't use atomic_add
-            grad_H_res = torch.empty_like(H_res, dtype=H_res.dtype)  # No need for higher precision since we don't use atomic_add
+            grad_H_post = torch.empty_like(
+                H_post, dtype=H_post.dtype
+            )  # No need for higher precision since we don't use atomic_add
+            grad_H_res = torch.empty_like(
+                H_res, dtype=H_res.dtype
+            )  # No need for higher precision since we don't use atomic_add
             if bias is not None:
                 # Since grad_bias is reducing over M dimension, we must use a separate workspace for it
                 # because our kernel parallelizes over M dimension even in deterministic mode
                 # 4 is the hardcoded BLOCK_SIZE_M in the deterministic mode so we only need to allocate a (M // 4, C) buffer
-                grad_bias_workspace = torch.empty(triton.cdiv(M, 4), C, device=bias.device, dtype=torch.float32)
+                grad_bias_workspace = torch.empty(
+                    triton.cdiv(M, 4), C, device=bias.device, dtype=torch.float32
+                )
         else:
             grad_H_post = torch.zeros_like(
                 H_post, dtype=torch.float32
@@ -1155,7 +1176,9 @@ class mHCExpandCombineOp(torch.autograd.Function):
                 H_res, dtype=torch.float32
             )  # We need to use atomic_add for this so we need higher precision
             if bias is not None:
-                grad_bias = torch.zeros_like(bias, dtype=torch.float32) if bias is not None else None
+                grad_bias = (
+                    torch.zeros_like(bias, dtype=torch.float32) if bias is not None else None
+                )
 
         # pylint: disable=unnecessary-lambda-assignment
         grid = lambda META: (
@@ -1195,7 +1218,7 @@ class mHCExpandCombineOp(torch.autograd.Function):
             stride_grad_xCn=1,
             precision="tf32" if ctx.use_tf32 else "ieee",
             HAS_BIAS=bias is not None,
-            DETERMINISTIC=use_deterministic
+            DETERMINISTIC=use_deterministic,
         )
 
         if use_deterministic and bias is not None:
@@ -1211,9 +1234,11 @@ class mHCExpandCombineOp(torch.autograd.Function):
             grad_bias = grad_bias.to(bias.dtype)
 
         if ctx.fuse_grad_x_acc:
-            assert not hasattr(x.untyped_storage(), 'grad_x_acc'), \
-                "Unexpected: grad_x_acc is already attached in x's storage. This implies incorrect usage of `fuse_grad_x_acc` optimization. " \
-                "Please disable fuse_grad_x_acc or check if there are other places where grad_x_acc is attached to x's storage."
+            assert not hasattr(x.untyped_storage(), "grad_x_acc"), (
+                "Unexpected: grad_x_acc is already attached in x's storage. This implies incorrect"
+                " usage of `fuse_grad_x_acc` optimization. Please disable fuse_grad_x_acc or check"
+                " if there are other places where grad_x_acc is attached to x's storage."
+            )
             # When fused x gradient accumulation is enabled, use fp32 for the accumulation buffer
             x.untyped_storage().grad_x_acc = grad_x.to(torch.float32)
             grad_x = None
