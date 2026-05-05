@@ -43,7 +43,7 @@ from .._common import (
     view_main_grad_as_grouped_buffer,
 )
 from ..op import BasicOperation, OperationContext
-from ...tensor import GroupedTensor
+from ...tensor import GroupedTensor, GroupedTensorStorage
 from ...triton.grouped_dbias_dscales import (
     compute_grouped_dbias,
     compute_grouped_dbias_dscales,
@@ -900,7 +900,7 @@ class GroupedLinear(BasicOperation):
         # Check which grads are required
         ctx = basic_op_ctxs[0]
         input_requires_grad = ctx.requires_grad
-        weight_requires_grad = weight_param.requires_grad
+        weight_requires_grad = ctx.requires_grad and weight_param.requires_grad
 
         # Quantizers
         input_quantizers = [None] * num_groups
@@ -988,7 +988,7 @@ class GroupedLinear(BasicOperation):
         self,
         basic_op_ctxs: list[OperationContext],
         input_: torch.Tensor,  # pylint: disable=unused-argument
-        tensors_to_save: list[tuple[Optional[torch.Tensor | QuantizedTensorStorage], ...]],
+        tensors_to_save: list[tuple[Optional[torch.Tensor | QuantizedTensorStorage | GroupedTensorStorage], ...]],
         *,
         requires_grad: list[bool],
         basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],  # pylint: disable=unused-argument
