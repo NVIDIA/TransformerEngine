@@ -2050,8 +2050,13 @@ class TestBasicOps:
         single_grouped_bias: bool,
     ) -> None:
         """Grouped GEMM"""
-        if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0" and (single_grouped_weight or single_grouped_bias):
-            pytest.skip("single_grouped_weight/single_grouped_bias requires NVTE_GROUPED_LINEAR_SINGLE_PARAM=1")
+        if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0" and (
+            single_grouped_weight or single_grouped_bias
+        ):
+            pytest.skip(
+                "single_grouped_weight/single_grouped_bias requires"
+                " NVTE_GROUPED_LINEAR_SINGLE_PARAM=1"
+            )
         # Split sizes
         split_sizes = [split_alignment * i for i in range(group_size)]
         random.shuffle(split_sizes)
@@ -2253,8 +2258,13 @@ class TestBasicOps:
         Exercises the grouped-tensor / cublas-grouped-gemm path which uses
         GPU-resident split offsets and is the only flow safe to capture.
         """
-        if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0" and (single_grouped_weight or single_grouped_bias):
-            pytest.skip("single_grouped_weight/single_grouped_bias requires NVTE_GROUPED_LINEAR_SINGLE_PARAM=1")
+        if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0" and (
+            single_grouped_weight or single_grouped_bias
+        ):
+            pytest.skip(
+                "single_grouped_weight/single_grouped_bias requires"
+                " NVTE_GROUPED_LINEAR_SINGLE_PARAM=1"
+            )
         if torch.cuda.get_device_capability() < (10, 0):
             pytest.skip("Grouped GEMM CUDA-graph-safe path requires SM100+ (Blackwell)")
         # Skip invalid configurations

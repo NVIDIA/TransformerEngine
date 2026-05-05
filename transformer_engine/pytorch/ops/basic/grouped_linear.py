@@ -988,7 +988,9 @@ class GroupedLinear(BasicOperation):
         self,
         basic_op_ctxs: list[OperationContext],
         input_: torch.Tensor,  # pylint: disable=unused-argument
-        tensors_to_save: list[tuple[Optional[torch.Tensor | QuantizedTensorStorage | GroupedTensorStorage], ...]],
+        tensors_to_save: list[
+            tuple[Optional[torch.Tensor | QuantizedTensorStorage | GroupedTensorStorage], ...]
+        ],
         *,
         requires_grad: list[bool],
         basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],  # pylint: disable=unused-argument
