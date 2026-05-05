@@ -179,6 +179,18 @@ class MoEBlock(TransformerEngineBase):
         ragged-all-to-all EP strategy. When ``None`` (default), no
         ``shard_map`` wrapper is used; each TE primitive's
         ``custom_partitioning`` rule handles DP / FSDP / TP automatically.
+    data_parallelism_axes : tuple[str, ...]
+        Additional mesh axes that the input *batch* dim is sharded over
+        IN ADDITION to ``expert_parallelism_axis``. Setting this to e.g.
+        ``("fsdp",)`` makes the ``shard_map`` ``in_specs`` for the batch
+        dim become ``P(("ep", "fsdp"), None, None)`` -- giving each
+        device a unique slice of the batch (true FSDP) instead of
+        replicating the per-ep-shard batch across fsdp peers.
+        Routing is unaffected: ``axis_index("ep")`` still controls the
+        ragged-all-to-all; the extra fsdp peers within an ep group send
+        and receive their own batch slices in lockstep. Default ``()``
+        preserves legacy ZeRO-1-style behavior (activations replicated
+        on fsdp within an ep group).
     tensor_parallelism_axis : Optional[str]
         Mesh axis for tensor parallelism on the FFN intermediate dim. When
         set, the output of the ``wo`` grouped GEMM is ``psum_scatter`` ed
@@ -227,6 +239,7 @@ class MoEBlock(TransformerEngineBase):
 
     # Parallelism
     expert_parallelism_axis: Optional[str] = None
+    data_parallelism_axes: Tuple[str, ...] = ()
     tensor_parallelism_axis: Optional[str] = None
     # ``jax.sharding.Mesh`` to use when ``expert_parallelism_axis`` is set.
     # Required for the ``shard_map`` wrapper; ignored otherwise.
@@ -751,16 +764,42 @@ class MoEBlock(TransformerEngineBase):
         )
         num_experts_local = self.num_experts // num_ep
 
-        # Pre-compute the worst-case A2A receive buffer size (compile-time
-        # constant). Each shard contributes ``b_l*S*topk = B*S*topk/num_ep``
-        # token-expert pairs across all experts; the worst case for one
-        # shard is "every global pair lands on this shard's local
-        # experts" -- ``num_ep * (B*S*topk/num_ep) = B*S*topk`` rows. JIT
-        # needs this static, so we use the global ``batch_size`` from the
-        # outer scope (sharded layouts don't change it).
+        # Compose the BATCH sharding axis tuple. ``ep`` is always part of
+        # the batch axis (so ragged_all_to_all has data to route); any
+        # ``data_parallelism_axes`` are added on top so the per-device
+        # batch slice is genuinely unique (true FSDP / DP).
+        # Examples:
+        #   data_parallelism_axes=()              -> P('ep', None, None)
+        #   data_parallelism_axes=('fsdp',)       -> P(('ep','fsdp'), None, None)
+        #   data_parallelism_axes=('fsdp','data') -> P(('ep','fsdp','data'), ...)
+        for ax in self.data_parallelism_axes:
+            if ax not in mesh.shape:
+                raise ValueError(
+                    f"data_parallelism_axes contains {ax!r} but mesh has"
+                    f" axes {tuple(mesh.shape.keys())}"
+                )
+        if len(self.data_parallelism_axes) == 0:
+            batch_pspec_axis: Any = ep_axis
+        else:
+            batch_pspec_axis = (ep_axis, *self.data_parallelism_axes)
+        # The size by which the per-device batch is divided BEYOND ep.
+        # Used to tighten the worst-case ragged_all_to_all recv buffer:
+        # at most ``num_ep`` peers each send their entire local
+        # ``B/(num_ep*dp_size)*S*topk`` token-expert pairs, so the worst
+        # recv per device is ``num_ep * B/(num_ep*dp_size)*S*topk
+        # = B/dp_size * S * topk``.
+        dp_size = 1
+        for ax in self.data_parallelism_axes:
+            dp_size *= mesh.shape[ax]
+
         global_batch_size, sequence_length, _hidden = inputs.shape
         topk = self.num_experts_per_tok
-        recv_buffer_rows = global_batch_size * sequence_length * topk
+        if global_batch_size % dp_size != 0:
+            raise ValueError(
+                f"batch={global_batch_size} not divisible by"
+                f" prod(data_parallelism_axes)={dp_size}"
+            )
+        recv_buffer_rows = (global_batch_size // dp_size) * sequence_length * topk
 
         # Pack everything that crosses the shard_map boundary into a dict
         # pytree. shard_map fully supports pytrees: ``in_specs`` must
@@ -774,8 +813,8 @@ class MoEBlock(TransformerEngineBase):
             "wo": params["wo"],
         }
         in_specs: dict = {
-            "inputs": P(ep_axis, None, None),
-            "gate_logits": P(ep_axis, None, None),
+            "inputs": P(batch_pspec_axis, None, None),
+            "gate_logits": P(batch_pspec_axis, None, None),
             "wi_0": P(ep_axis, None, None),
             "wi_1": P(ep_axis, None, None),
             "wo": P(ep_axis, None, None),
@@ -817,13 +856,20 @@ class MoEBlock(TransformerEngineBase):
             # tokens_per_expert: its formula ``E*coeff/(k*T^2) * sum_i(
             # sum_t(probs[t,i]) * tokens[i])`` is not shard-decomposable
             # (the sum_t * tokens product is data-dependent across
-            # shards). Cheapest fix: gather logits along the EP axis and
-            # run the aux-loss kernel on the global tensor. The aux
-            # branch has no data dependency on the main routing path so
-            # XLA can overlap the two on the GPU.
+            # shards). Cheapest fix: gather logits along ALL batch
+            # axes (ep + any DP axes) so the kernel sees the full
+            # token set. The aux branch has no data dependency on the
+            # main routing path so XLA can overlap the two on the GPU.
             if self.aux_loss_coeff > 0.0:
+                # ``axis_name`` accepts a tuple ⇒ a single all_gather
+                # over the cartesian product of axes; XLA may lower
+                # this to one multi-axis collective or split it.
+                if len(self.data_parallelism_axes) == 0:
+                    aux_gather_axes: Any = ep_axis
+                else:
+                    aux_gather_axes = (ep_axis, *self.data_parallelism_axes)
                 global_logits_2d = jax.lax.all_gather(
-                    logits_2d, axis_name=ep_axis, axis=0, tiled=True
+                    logits_2d, axis_name=aux_gather_axes, axis=0, tiled=True
                 )
                 aux_loss = self._compute_aux_loss(global_logits_2d)
             else:
@@ -938,6 +984,6 @@ class MoEBlock(TransformerEngineBase):
             _a2a_fn,
             mesh=mesh,
             in_specs=(in_specs,),
-            out_specs=(P(ep_axis, None, None), P()),
+            out_specs=(P(batch_pspec_axis, None, None), P()),
             check_rep=False,
         )(captured)

@@ -34,7 +34,9 @@ def _inject_moe(request):
 
 
 DTYPE = jnp.bfloat16
-BATCH_SIZE = 2
+# Must be divisible by ep*fsdp = 4 so the batch dim can be sharded over
+# the full ('ep','fsdp') axis tuple under Experiment 3.
+BATCH_SIZE = 4
 SEQUENCE_LENGTH = 16
 HIDDEN_SIZE = 64
 INTERMEDIATE_SIZE = 128
@@ -103,8 +105,14 @@ class TestDistributedMoEBlock:
             ("batch", "fsdp"),
             ("embed", "fsdp"),
         )
+        # ``data_parallelism_axes=("fsdp",)`` opts in to the true-FSDP
+        # behavior: the ``shard_map``'s in_specs/out_specs become
+        # ``P(("ep","fsdp"), None, None)`` for the batch dim, so each
+        # device owns ``B/(ep*fsdp)`` unique tokens (no redundant compute
+        # across fsdp peers within an ep group).
         sharded_block = MoEBlock(
             expert_parallelism_axis="ep",
+            data_parallelism_axes=("fsdp",),
             mesh=mesh,
             input_axes=("batch", None, None),
             **base_kwargs,
