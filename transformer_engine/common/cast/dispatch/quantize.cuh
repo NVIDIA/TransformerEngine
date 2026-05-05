@@ -105,7 +105,8 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
       if (per_token_activation) {
         NVTE_CHECK(!quant_config_cpp.nvfp4_2d_quantization,
                    "Per-token NVFP4 quantization does not support 2D quantization.");
-        nvfp4::quantize_per_token(*input_tensor, noop_tensor, output_tensor, stream);
+        nvfp4::quantize_per_token(*input_tensor, noop_tensor, output_tensor, &quant_config_cpp,
+                                  stream);
         break;
       }
       bool use_optimized_kernel = (dtype == DType::kBFloat16) && (rows % 32 == 0) &&
@@ -134,7 +135,8 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
             /*use_stochastic_rounding=*/quant_config_cpp.stochastic_rounding,
             /*rng_state=*/quant_config_cpp.rng_state,
             /*use_2d_quantization=*/quant_config_cpp.nvfp4_2d_quantization,
-            /*noop_tensor=*/noop_tensor->data, /*stream=*/stream);
+            /*per_token_rowwise_scaling=*/false, /*noop_tensor=*/noop_tensor->data,
+            /*stream=*/stream);
       }
       break;
     }
@@ -251,7 +253,8 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
       if (per_token_activation) {
         NVTE_CHECK(!quant_config_cpp.nvfp4_2d_quantization,
                    "Per-token NVFP4 quantization does not support 2D quantization.");
-        nvfp4::quantize_per_token(*grad_tensor, noop_tensor, output_tensor, stream);
+        nvfp4::quantize_per_token(*grad_tensor, noop_tensor, output_tensor, &quant_config_cpp,
+                                  stream);
         break;
       }
       bool use_optimized_kernel = (dtype == DType::kBFloat16) && (rows % 32 == 0) &&
@@ -280,7 +283,8 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
             /*use_stochastic_rounding=*/quant_config_cpp.stochastic_rounding,
             /*rng_state=*/quant_config_cpp.rng_state,
             /*use_2d_quantization=*/quant_config_cpp.nvfp4_2d_quantization,
-            /*noop_tensor=*/noop_tensor->data, /*stream=*/stream);
+            /*per_token_rowwise_scaling=*/false, /*noop_tensor=*/noop_tensor->data,
+            /*stream=*/stream);
       }
       break;
     }

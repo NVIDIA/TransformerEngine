@@ -108,7 +108,8 @@ constexpr size_t TOTAL_BANKS_WIDTH = (32 * 4 * 8) / 4;  // 256
 constexpr size_t THREADS_PER_BANK = TOTAL_BANKS_WIDTH / SCALE_DIM;  // 8 = 128 / 16
 
 template <bool COMPUTE_ACTIVATIONS, typename ParamOP, float (*OP)(float, const ParamOP &),
-          typename IType, bool USE_STOCHASTIC_ROUNDING, bool RETURN_TRANSPOSE>
+          typename IType, bool USE_STOCHASTIC_ROUNDING, bool RETURN_TRANSPOSE,
+          bool PER_TOKEN_ROWWISE>
 __global__ void __launch_bounds__(THREADS_NUM)
     quantize_transpose_nvfp4_kernel(const __grid_constant__ CUtensorMap tensor_map_input,
                                     const __grid_constant__ CUtensorMap tensor_map_output,
@@ -509,12 +510,22 @@ __global__ void __launch_bounds__(THREADS_NUM)
         }
 
         // 2. Compute E4M3 scaling factor
+        const size_t row_idx_global =
+            scales_offset_Y_rowwise + stage * BUFF_DIM_Y + it * THREADS_Y_ROWWISE;
+        float S_enc_rowwise_block = S_enc_rowwise;
+        if constexpr (PER_TOKEN_ROWWISE) {
+          S_enc_rowwise_block =
+              row_idx_global < rows
+                  ? compute_global_encode_scaling_factor_FP4(amax_rowwise_ptr[row_idx_global])
+                  : 1.0f;
+        }
+        const float S_dec_rowwise_block =
+            PER_TOKEN_ROWWISE ? 1.0 / S_enc_rowwise_block : S_dec_rowwise;
         const nvfp4_scale_t S_dec_b_fp8 =
-            compute_decoding_scaling_factor(block_amax, S_enc_rowwise);
+            compute_decoding_scaling_factor(block_amax, S_enc_rowwise_block);
 
         // Check boundaries
-        const size_t scales_offset_Y =
-            scales_offset_Y_rowwise + stage * BUFF_DIM_Y + it * THREADS_Y_ROWWISE;
+        const size_t scales_offset_Y = row_idx_global;
         const size_t scales_offset_X = scales_offset_X_rowwise;
         const size_t scale_idx_global = scales_offset_Y * scale_stride + scales_offset_X;
 
@@ -527,8 +538,9 @@ __global__ void __launch_bounds__(THREADS_NUM)
 
         // Compute "correct" per-block encoding scaling factor
         constexpr float float_max = detail::TypeExtrema<float>::max;
-        const float block_scale_inverse = fminf(
-            1.0f / (static_cast<float>(S_dec_b_fp8) * S_dec_rowwise), float_max);  // S_enc_b_fp8
+        const float block_scale_inverse =
+            fminf(1.0f / (static_cast<float>(S_dec_b_fp8) * S_dec_rowwise_block),
+                  float_max);  // S_enc_b_fp8
         const float2 block_scale_inverse_2x{block_scale_inverse, block_scale_inverse};
 
 // 3. Scale elements
@@ -1162,11 +1174,14 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
   using namespace ptx;
 
   bool use_stochastic_rounding = quant_config ? quant_config->stochastic_rounding : false;
+  const bool per_token_rowwise = quant_config ? quant_config->nvfp4_per_token_activation : false;
+  NVTE_CHECK(!per_token_rowwise || !use_2d_quantization,
+             "Per-token NVFP4 quantization does not support 2D quantization.");
 
   // If transposed output is allocated, return the transposed data. Otherwise, it's not necesary to
   // return the transposed data.
   // TODO(Frank): Is there a better way to do this?
-  bool return_transpose = output->has_columnwise_data();
+  bool return_transpose = output->has_columnwise_data() && !per_token_rowwise;
 
   if (!use_2d_quantization && (input.dtype() == DType::kBFloat16)) {
     quantize_transpose_tuned_1D(input, noop, output, quant_config, stream);
@@ -1186,6 +1201,8 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
   NVTE_CHECK(output->has_data(), "NVFP4 output tensor must be allocated.");
   NVTE_CHECK(is_fp4_dtype(output->data.dtype), "Output must have FP4 type.");
   NVTE_CHECK(output->scale_inv.dptr != nullptr, "Scaling tensor must be allocated");
+  NVTE_CHECK(!per_token_rowwise || output->amax.dptr != nullptr,
+             "Per-token NVFP4 rowwise quantization requires rowwise amax.");
   NVTE_CHECK(!output->with_gemm_swizzled_scales, "Output must have scales in compact format.");
   if (return_transpose) {
     NVTE_CHECK(output->has_columnwise_data(), "NVFP4 transposed output tensor must be allocated.");
@@ -1268,20 +1285,23 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
       use_stochastic_rounding, USE_STOCHASTIC_ROUNDING,
 
-      TRANSFORMER_ENGINE_SWITCH_CONDITION(return_transpose, RETURN_TRANSPOSE, {
-        auto kernel = quantize_transpose_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,
-                                                      USE_STOCHASTIC_ROUNDING, RETURN_TRANSPOSE>;
+      TRANSFORMER_ENGINE_SWITCH_CONDITION(per_token_rowwise, PER_TOKEN_ROWWISE, {
+        TRANSFORMER_ENGINE_SWITCH_CONDITION(return_transpose, RETURN_TRANSPOSE, {
+          auto kernel = quantize_transpose_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,
+                                                        USE_STOCHASTIC_ROUNDING, RETURN_TRANSPOSE,
+                                                        PER_TOKEN_ROWWISE>;
 
-        if constexpr (use_2d_quantization) {
-          kernel = quantize_transpose_nvfp4_2D_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,
-                                                      USE_STOCHASTIC_ROUNDING, RETURN_TRANSPOSE>;
-        }
+          if constexpr (use_2d_quantization) {
+            kernel = quantize_transpose_nvfp4_2D_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,
+                                                        USE_STOCHASTIC_ROUNDING, RETURN_TRANSPOSE>;
+          }
 
-        cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size);
-        kernel<<<grid, block_size, dshmem_size, stream>>>(
-            tensor_map_input, tensor_map_output, tensor_map_output_transpose, scales_ptr,
-            scales_transpose_ptr, noop_ptr, amax_rowwise_ptr, amax_colwise_ptr, rows, cols,
-            scale_stride, scale_stride_transpose, rng_state);
+          cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size);
+          kernel<<<grid, block_size, dshmem_size, stream>>>(
+              tensor_map_input, tensor_map_output, tensor_map_output_transpose, scales_ptr,
+              scales_transpose_ptr, noop_ptr, amax_rowwise_ptr, amax_colwise_ptr, rows, cols,
+              scale_stride, scale_stride_transpose, rng_state);
+        });
       }););
 #else
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
