@@ -175,6 +175,13 @@ def skip_unsupported_backward_override(
     backward_override: Optional[str],
 ) -> None:
     """Skip known unsupported layer/recipe/backward-override combinations used in tests."""
+    if (
+        quant_recipe is not None
+        and quant_recipe.nvfp4()
+        and getattr(quant_recipe, "per_token_activation", False)
+        and backward_override is None
+    ):
+        pytest.skip("Per-token NVFP4 does not support default quantized backward.")
     if backward_override is None:
         return
     if quant_recipe is None and backward_override is not None:

@@ -190,6 +190,12 @@ def _maybe_skip_unsupported_fused_ops(recipe_name: str) -> None:
         pytest.skip("Per-token NVFP4 currently does not support fused te_ops paths.")
 
 
+def _make_quantized_forward_reference_recipe(recipe_name: str) -> recipe.Recipe:
+    if recipe_name == "nvfp4_per_token":
+        return make_recipe(recipe_name, backward_override="dequantized")
+    return make_recipe(recipe_name)
+
+
 def _maybe_skip_unsupported_recipe_shape(
     recipe_name: str,
     input_shape: tuple[int, ...],
@@ -861,7 +867,7 @@ def test_linear_like_backward_override_matches_reference(
     _maybe_skip_unsupported_recipe_shape(recipe_name, input_shape, module_type)
 
     in_features = input_shape[-1]
-    quantized_ref_recipe = make_recipe(recipe_name)
+    quantized_ref_recipe = _make_quantized_forward_reference_recipe(recipe_name)
     mode_recipe = make_recipe(recipe_name, backward_override=backward_override)
     skip_unsupported_backward_override(module_type, mode_recipe, backward_override)
 
@@ -1045,7 +1051,7 @@ def test_grouped_linear_backward_override_matches_reference(
     num_gemms = len(m_splits)
     num_tokens = sum(m_splits)
 
-    quantized_ref_recipe = make_recipe(recipe_name)
+    quantized_ref_recipe = _make_quantized_forward_reference_recipe(recipe_name)
     mode_recipe = make_recipe(recipe_name, backward_override=backward_override)
     skip_unsupported_backward_override("grouped_linear", mode_recipe, backward_override)
 
@@ -1215,6 +1221,7 @@ def test_linear_like_runtime_backward_override_switch_updates_ctx(
     dy = torch.randn(*input_shape[:-1], out_features, dtype=dtype, device="cuda")
 
     default_recipe = make_recipe(recipe_name)
+    skip_unsupported_backward_override(module_type, default_recipe, None)
     mode_recipe = make_recipe(recipe_name, backward_override=backward_override)
     skip_unsupported_backward_override(module_type, mode_recipe, backward_override)
 
@@ -1285,6 +1292,7 @@ def test_grouped_linear_runtime_backward_override_switch_updates_ctx(
     dy = torch.randn(num_tokens, out_features, dtype=dtype, device="cuda")
 
     default_recipe = make_recipe(recipe_name)
+    skip_unsupported_backward_override("grouped_linear", default_recipe, None)
     mode_recipe = make_recipe(recipe_name, backward_override=backward_override)
     skip_unsupported_backward_override("grouped_linear", mode_recipe, backward_override)
 
@@ -1353,7 +1361,7 @@ def test_fused_linear_paths_match_backward_override_reference(
 
     reset_rng_states()
 
-    quantized_ref_recipe = make_recipe(recipe_name)
+    quantized_ref_recipe = _make_quantized_forward_reference_recipe(recipe_name)
     mode_recipe = make_recipe(recipe_name, backward_override=backward_override)
     skip_unsupported_backward_override("ops_linear", mode_recipe, backward_override)
 
@@ -1494,7 +1502,7 @@ def test_fused_bias_activation_matches_masked_linear_backward(
     reset_rng_states()
     in_features = input_shape[-1]
 
-    quantized_ref_recipe = make_recipe(recipe_name)
+    quantized_ref_recipe = _make_quantized_forward_reference_recipe(recipe_name)
     mode_recipe = make_recipe(recipe_name, backward_override=backward_override)
     skip_unsupported_backward_override("ops_linear", mode_recipe, backward_override)
 
@@ -1636,6 +1644,7 @@ def test_operation_fuser_rebuilds_userbuffers_fusion_on_backward_override_switch
 
     reset_rng_states()
     _maybe_skip_unsupported_recipe_module_combo(recipe_name, "ops_linear")
+    _maybe_skip_unsupported_fused_ops(recipe_name)
 
     # Build a Userbuffers-eligible fuser and representative inputs.
     linear = te_ops.BasicLinear(
@@ -1733,7 +1742,11 @@ def test_backward_override_memory_peak_report(
     x = torch.randn(*input_shape, dtype=dtype, device="cuda")
     dy = torch.randn(*input_shape[:-1], out_features, dtype=dtype, device="cuda")
 
-    modes = (None, "high_precision", "dequantized")
+    modes = (
+        ("high_precision", "dequantized")
+        if recipe_name == "nvfp4_per_token"
+        else (None, "high_precision", "dequantized")
+    )
     mode_results: dict[str, dict[str, float] | str] = {}
 
     for mode in modes:

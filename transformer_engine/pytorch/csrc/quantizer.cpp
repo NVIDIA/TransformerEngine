@@ -1748,6 +1748,9 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
   NVTE_CHECK(flat_last_dim % NVFP4_BLOCK_SIZE == 0,
              "NVFP4 requires tensor dims that are divisible by ", NVFP4_BLOCK_SIZE,
              " (got shape=", shape, ")");
+  NVTE_CHECK(!this->per_token_activation || rowwise_usage,
+             "Per-token NVFP4 quantization requires rowwise usage.");
+  const bool columnwise_usage = this->columnwise_usage && !this->per_token_activation;
   const auto rowwise_scale_inv_shape = get_scale_shape(shape, false);
   const auto columnwise_scale_inv_shape = get_scale_shape(shape, true);
 
@@ -1779,8 +1782,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
     columnwise_scale_inv_tensor = at::empty(scale_inv_shape_int64, bit8_tensor_opts);
     // hadamard amax kernel will zero out pointer with ZeroAmaxKernel
     // nvte_compute_amax_with_config will zero out the pointer if needed
-    const int64_t amax_rows = this->per_token_activation ? static_cast<int64_t>(flat_first_dim) : 1;
-    amax_columnwise = at::empty({amax_rows}, bit32_tensor_opts);
+    amax_columnwise = at::empty({1}, bit32_tensor_opts);
   }
 
   // Convert tensors to Python
@@ -1865,7 +1867,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
     out_cpp.set_columnwise_scale_inv(columnwise_scale_inv_tensor.data_ptr(), DType::kFloat8E4M3,
                                      columnwise_scale_inv_shape);
     out_cpp.set_columnwise_amax(amax_columnwise.data_ptr(), DType::kFloat32,
-                                getTensorShape(amax_columnwise));
+                                std::vector<size_t>{1});
   }
   out_cpp.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
   this->set_quantization_params(&out_cpp);
@@ -1895,6 +1897,9 @@ std::pair<GroupedTensorWrapper, py::object> NVFP4Quantizer::create_grouped_tenso
   std::optional<at::Tensor> rowwise_amax;
   std::optional<at::Tensor> columnwise_amax;
   const std::vector<size_t> logical_shape_vec = {logical_first_dim, logical_last_dim};
+  NVTE_CHECK(!this->per_token_activation || rowwise_usage,
+             "Per-token NVFP4 grouped quantization requires rowwise usage.");
+  const bool columnwise_usage = this->columnwise_usage && !this->per_token_activation;
 
   const int64_t total_data_elements = total_elements / 2;
 
@@ -2041,6 +2046,9 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
     }
   }
   const size_t flat_last_dim = shape.size() > 0 ? shape.back() : 1;
+  NVTE_CHECK(!this->per_token_activation || rowwise_usage,
+             "Per-token NVFP4 quantization requires rowwise usage.");
+  const bool columnwise_usage = this->columnwise_usage && !this->per_token_activation;
 
   // Coerce row-wise data
   if (rowwise_usage) {
@@ -2106,9 +2114,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
       const auto opts = at::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
       // hadamard amax kernel will zero out pointer with ZeroAmaxKernel
       // nvte_compute_amax_with_config will zero out the pointer if needed
-      const int64_t amax_rows =
-          this->per_token_activation ? static_cast<int64_t>(flat_first_dim) : 1;
-      amax_columnwise = at::empty({amax_rows}, opts);
+      amax_columnwise = at::empty({1}, opts);
       tensor.attr("_amax_columnwise") = *amax_columnwise;
     }
   } else {  // columnwise_usage == false
@@ -2144,7 +2150,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
     out_cpp.set_columnwise_scale_inv(columnwise_scale_inv->data_ptr(), DType::kFloat8E4M3,
                                      getTensorShape(*columnwise_scale_inv));
     out_cpp.set_columnwise_amax(amax_columnwise->data_ptr(), DType::kFloat32,
-                                getTensorShape(*amax_columnwise));
+                                std::vector<size_t>{1});
   }
   out_cpp.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
   this->set_quantization_params(&out_cpp);

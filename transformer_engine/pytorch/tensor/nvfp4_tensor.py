@@ -345,7 +345,8 @@ class NVFP4Quantizer(Quantizer):
         columnwise_data = None
         columnwise_scale_inv = None
         amax_columnwise = None
-        if self.columnwise_usage:
+        columnwise_usage = self.columnwise_usage and not self.per_token_activation
+        if columnwise_usage:
             # enforce 2D shape to avoid [S, B, H] shape and B and be 1
             # and the transposed shape is [H, S, B], so divide last dim by 2 gives zero
             shape_2d = tuple([flat_first_dim, shape[-1]])
@@ -362,9 +363,8 @@ class NVFP4Quantizer(Quantizer):
                 device=device,
                 pin_memory=pin_memory,
             )
-            amax_rows = flat_first_dim if self.per_token_activation else 1
             amax_columnwise = torch.zeros(
-                amax_rows, dtype=torch.float32, device=device, pin_memory=pin_memory
+                1, dtype=torch.float32, device=device, pin_memory=pin_memory
             )
 
         # Construct FP8 tensor

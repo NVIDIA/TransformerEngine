@@ -119,99 +119,6 @@ void launch_compute_per_token_amax(const int num_rows, const int num_cols, const
 #endif
 }
 
-template <typename IType, int BLOCK_SIZE>
-__global__ void
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-__launch_bounds__(BLOCK_SIZE)
-#endif
-    quantize_per_token_nvfp4_columnwise_kernel(const int num_rows, const int num_cols,
-                                               const IType *__restrict__ input,
-                                               uint8_t *__restrict__ output_data_t,
-                                               fp8e4m3 *__restrict__ output_scales_t,
-                                               const float *__restrict__ per_token_amax,
-                                               const int scale_stride_t,
-                                               const float *__restrict__ noop) {
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-  using namespace detail;
-  if (noop != nullptr && noop[0] == 1.0f) {
-    return;
-  }
-
-  const int col_idx = blockIdx.x;
-  if (col_idx >= num_cols) return;
-
-  constexpr float fp4_max_inv = 1.0f / TypeExtrema<fp4e2m1>::max;
-  constexpr float float_max = TypeExtrema<float>::max;
-  constexpr float one = 1.0f;
-  const float2 one_2x{one, one};
-  const int num_row_blocks = num_rows / PERTOKEN_SF_VEC_SIZE;
-
-  for (int row_block = threadIdx.x; row_block < num_row_blocks; row_block += BLOCK_SIZE) {
-    const int row_start = row_block * PERTOKEN_SF_VEC_SIZE;
-
-    float vals[PERTOKEN_SF_VEC_SIZE];
-    float s_enc[PERTOKEN_SF_VEC_SIZE];
-    float scaled_block_amax = 0.0f;
-#pragma unroll
-    for (int i = 0; i < PERTOKEN_SF_VEC_SIZE; ++i) {
-      const int row_idx = row_start + i;
-      const float val = static_cast<float>(input[row_idx * num_cols + col_idx]);
-      const float S_enc = compute_global_encode_scaling_factor_FP4(per_token_amax[row_idx]);
-      vals[i] = val;
-      s_enc[i] = S_enc;
-      scaled_block_amax = fmaxf(scaled_block_amax, fabsf(val) * (S_enc * fp4_max_inv));
-    }
-
-    const float S_dec_b_f32 = fminf(scaled_block_amax, float_max);
-    const nvfp4_scale_t S_dec_b_fp8 = static_cast<nvfp4_scale_t>(S_dec_b_f32);
-    output_scales_t[col_idx * scale_stride_t + row_block] = S_dec_b_fp8;
-
-    float scaled_vals[PERTOKEN_SF_VEC_SIZE];
-#pragma unroll
-    for (int i = 0; i < PERTOKEN_SF_VEC_SIZE; ++i) {
-      const float S_dec_rowwise = 1.0f / s_enc[i];
-      const float block_scale_inverse =
-          fminf(1.0f / (static_cast<float>(S_dec_b_fp8) * S_dec_rowwise), float_max);
-      scaled_vals[i] = vals[i] * block_scale_inverse;
-    }
-
-    uint8_t *out_ptr = output_data_t + col_idx * (num_rows / 2) + row_start / 2;
-    auto *out_fp4 = reinterpret_cast<fp4e2m1x4 *>(out_ptr);
-#pragma unroll
-    for (int j = 0; j < PERTOKEN_SF_VEC_SIZE; j += 4) {
-      const float2 in01 = make_float2(scaled_vals[j], scaled_vals[j + 1]);
-      const float2 in23 = make_float2(scaled_vals[j + 2], scaled_vals[j + 3]);
-      out_fp4[j / 4] = ptx::mul_cvt_fp32_to_fp4_4x</*USE_STOCHASTIC_ROUNDING=*/false>(
-          in01, in23, one_2x, /*rbits=*/0u);
-    }
-  }
-#endif
-}
-
-template <typename IType>
-void launch_quantize_per_token_nvfp4_columnwise(const int num_rows, const int num_cols,
-                                                const IType *input, uint8_t *output_data_t,
-                                                fp8e4m3 *output_scales_t,
-                                                const float *per_token_amax,
-                                                const int scale_stride_t, cudaStream_t stream,
-                                                const float *noop = nullptr) {
-#if FP4_TYPE_SUPPORTED
-  if (num_rows == 0 || num_cols == 0) return;
-
-  NVTE_CHECK(num_rows % PERTOKEN_SF_VEC_SIZE == 0, "num_rows must be a multiple of ",
-             PERTOKEN_SF_VEC_SIZE, " for per-token NVFP4 columnwise quantization, got ", num_rows);
-  dim3 grid(num_cols);
-  dim3 block(PERTOKEN_BLOCK_SIZE);
-
-  quantize_per_token_nvfp4_columnwise_kernel<IType, PERTOKEN_BLOCK_SIZE>
-      <<<grid, block, 0, stream>>>(num_rows, num_cols, input, output_data_t, output_scales_t,
-                                   per_token_amax, scale_stride_t, noop);
-  NVTE_CHECK_CUDA(cudaGetLastError());
-#else
-  NVTE_ERROR("CUDA 12.8 or higher is needed for FP4 calculation!");
-#endif
-}
-
 }  // namespace quantize_per_token_kernel
 
 inline void quantize_per_token(const Tensor &input, const Tensor *noop, Tensor *output,
@@ -225,8 +132,9 @@ inline void quantize_per_token(const Tensor &input, const Tensor *noop, Tensor *
   CheckOutputTensor(*output, "output", false);
 
   NVTE_CHECK(input.has_data(), "Cannot quantize tensor without rowwise data.");
-  NVTE_CHECK(output->has_data() || output->has_columnwise_data(),
-             "NVFP4 output tensor must be allocated.");
+  NVTE_CHECK(output->has_data(), "Per-token NVFP4 quantization requires rowwise output.");
+  NVTE_CHECK(!output->has_columnwise_data(),
+             "Per-token NVFP4 quantization does not produce columnwise output.");
   NVTE_CHECK(!output->with_gemm_swizzled_scales, "Output must have scales in compact format.");
 
   const size_t rows = input.flat_first_dim();
@@ -237,33 +145,22 @@ inline void quantize_per_token(const Tensor &input, const Tensor *noop, Tensor *
 
   const auto *noop_ptr = reinterpret_cast<const float *>(noop->data.dptr);
   auto *amax_ptr = reinterpret_cast<float *>(output->amax.dptr);
-  auto *amax_colwise_ptr = reinterpret_cast<float *>(output->columnwise_amax.dptr);
-  auto *per_token_amax_ptr = (amax_ptr != nullptr) ? amax_ptr : amax_colwise_ptr;
-  NVTE_CHECK(per_token_amax_ptr != nullptr, "Per-token amax tensor must be allocated.");
-  if (amax_ptr != nullptr) {
-    NVTE_CHECK(output->amax.numel() == rows, "Per-token rowwise amax must have ", rows,
-               " entries, got ", output->amax.shape, ".");
-  }
-  if (amax_colwise_ptr != nullptr) {
-    NVTE_CHECK(output->columnwise_amax.numel() == rows, "Per-token columnwise amax must have ",
-               rows, " entries, got ", output->columnwise_amax.shape, ".");
-  }
+  NVTE_CHECK(amax_ptr != nullptr, "Per-token rowwise amax tensor must be allocated.");
+  NVTE_CHECK(output->amax.numel() == rows, "Per-token rowwise amax must have ", rows,
+             " entries, got ", output->amax.shape, ".");
 
   if (input.dtype() == DType::kBFloat16) {
     const auto *input_ptr = reinterpret_cast<const __nv_bfloat16 *>(input.data.dptr);
     quantize_per_token_kernel::launch_compute_per_token_amax<__nv_bfloat16>(
-        static_cast<int>(rows), static_cast<int>(cols), input_ptr, per_token_amax_ptr, stream,
-        noop_ptr);
+        static_cast<int>(rows), static_cast<int>(cols), input_ptr, amax_ptr, stream, noop_ptr);
   } else if (input.dtype() == DType::kFloat16) {
     const auto *input_ptr = reinterpret_cast<const half *>(input.data.dptr);
     quantize_per_token_kernel::launch_compute_per_token_amax<half>(
-        static_cast<int>(rows), static_cast<int>(cols), input_ptr, per_token_amax_ptr, stream,
-        noop_ptr);
+        static_cast<int>(rows), static_cast<int>(cols), input_ptr, amax_ptr, stream, noop_ptr);
   } else if (input.dtype() == DType::kFloat32) {
     const auto *input_ptr = reinterpret_cast<const float *>(input.data.dptr);
     quantize_per_token_kernel::launch_compute_per_token_amax<float>(
-        static_cast<int>(rows), static_cast<int>(cols), input_ptr, per_token_amax_ptr, stream,
-        noop_ptr);
+        static_cast<int>(rows), static_cast<int>(cols), input_ptr, amax_ptr, stream, noop_ptr);
   } else {
     NVTE_ERROR(
         "Unsupported input dtype for per-token NVFP4 quantization. "
@@ -297,36 +194,6 @@ inline void quantize_per_token(const Tensor &input, const Tensor *noop, Tensor *
           /*use_stochastic_rounding=*/per_token_quant_config.stochastic_rounding,
           /*rng_state=*/per_token_quant_config.rng_state, /*use_2d_quantization=*/false,
           /*per_token_rowwise_scaling=*/true, /*noop_tensor=*/noop->data, /*stream=*/stream);
-    }
-  }
-
-  if (output->has_columnwise_data()) {
-    NVTE_CHECK(is_fp4_dtype(output->columnwise_data.dtype),
-               "Columnwise output must have FP4 type.");
-    NVTE_CHECK(output->columnwise_scale_inv.dptr != nullptr,
-               "Columnwise scaling tensor must be allocated.");
-    if (amax_ptr != nullptr && amax_colwise_ptr != nullptr && amax_ptr != amax_colwise_ptr) {
-      NVTE_CHECK_CUDA(cudaMemcpyAsync(amax_colwise_ptr, amax_ptr, rows * sizeof(float),
-                                      cudaMemcpyDeviceToDevice, stream));
-    }
-    auto *data_t_ptr = reinterpret_cast<uint8_t *>(output->columnwise_data.dptr);
-    auto *scale_t_ptr = reinterpret_cast<fp8e4m3 *>(output->columnwise_scale_inv.dptr);
-    const int scale_stride_t = static_cast<int>(output->columnwise_scale_inv.shape.back());
-    if (input.dtype() == DType::kBFloat16) {
-      const auto *input_ptr = reinterpret_cast<const __nv_bfloat16 *>(input.data.dptr);
-      quantize_per_token_kernel::launch_quantize_per_token_nvfp4_columnwise<__nv_bfloat16>(
-          static_cast<int>(rows), static_cast<int>(cols), input_ptr, data_t_ptr, scale_t_ptr,
-          per_token_amax_ptr, scale_stride_t, stream, noop_ptr);
-    } else if (input.dtype() == DType::kFloat16) {
-      const auto *input_ptr = reinterpret_cast<const half *>(input.data.dptr);
-      quantize_per_token_kernel::launch_quantize_per_token_nvfp4_columnwise<half>(
-          static_cast<int>(rows), static_cast<int>(cols), input_ptr, data_t_ptr, scale_t_ptr,
-          per_token_amax_ptr, scale_stride_t, stream, noop_ptr);
-    } else if (input.dtype() == DType::kFloat32) {
-      const auto *input_ptr = reinterpret_cast<const float *>(input.data.dptr);
-      quantize_per_token_kernel::launch_quantize_per_token_nvfp4_columnwise<float>(
-          static_cast<int>(rows), static_cast<int>(cols), input_ptr, data_t_ptr, scale_t_ptr,
-          per_token_amax_ptr, scale_stride_t, stream, noop_ptr);
     }
   }
 #else

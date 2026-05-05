@@ -560,13 +560,12 @@ void print_detailed_tensor_comparison(const std::string& name,
 
 void compareResults_nvfp4(const Tensor &test,
                           const void *ref, const void *ref_t, const int rows, const int cols,
-                          double atol = 1e-5, double rtol = 1e-8, bool if_on_gpus = true, bool dump_data = false) {
+                          double atol = 1e-5, double rtol = 1e-8, bool if_on_gpus = true,
+                          bool dump_data = false, bool compare_columnwise = true) {
     if (if_on_gpus) test.to_cpu();
 
     const fp4e2m1 *test_data = test.rowwise_cpu_dptr<fp4e2m1>();
-    const fp4e2m1 *test_data_t = test.columnwise_cpu_dptr<fp4e2m1>();
     const fp4e2m1 *ref_data = reinterpret_cast<const fp4e2m1*>(ref);
-    const fp4e2m1 *ref_data_t = reinterpret_cast<const fp4e2m1*>(ref_t);
 
     // Print detailed element-by-element comparison
     // print_detailed_tensor_comparison("output", test_data, ref_data, rows, cols);
@@ -575,11 +574,17 @@ void compareResults_nvfp4(const Tensor &test,
     // Optionally dump tensor data to files for detailed analysis
     if (dump_data) {
         dump_nvfp4_tensor_data("output", test_data, ref_data, rows, cols);
-        dump_nvfp4_tensor_data("output_t", test_data_t, ref_data_t, cols, rows);
     }
 
     compare_nvfp4_tensors("output", test_data, ref_data, rows, cols, atol, rtol);
-    compare_nvfp4_tensors("output_t", test_data_t, ref_data_t, cols, rows, atol, rtol);
+    if (compare_columnwise) {
+        const fp4e2m1 *test_data_t = test.columnwise_cpu_dptr<fp4e2m1>();
+        const fp4e2m1 *ref_data_t = reinterpret_cast<const fp4e2m1*>(ref_t);
+        if (dump_data) {
+            dump_nvfp4_tensor_data("output_t", test_data_t, ref_data_t, cols, rows);
+        }
+        compare_nvfp4_tensors("output_t", test_data_t, ref_data_t, cols, rows, atol, rtol);
+    }
 }
 
 void compare_per_token_amax(const Tensor &output, const std::vector<float> &ref_amax) {
@@ -624,7 +629,6 @@ void set_per_token_amax_metadata(Tensor &output, const size_t rows) {
     };
 
     replace_amax(kNVTEAmax);
-    replace_amax(kNVTEColumnwiseAmax);
 }
 
 template <typename InputType>
@@ -658,7 +662,7 @@ void performTest(float (*OP)(const float),
     const size_t scales_stride_t = blocks_X_t;
 
     Tensor input("input", shape, itype);
-    Tensor output("output", shape, otype, true, true, NVTE_NVFP4_1D_SCALING);
+    Tensor output("output", shape, otype, true, !per_token_activation, NVTE_NVFP4_1D_SCALING);
 
     std::unique_ptr<fp4e2m1x2[]> ref_output   = std::make_unique<fp4e2m1x2[]>(rows * (cols / 2));
     std::unique_ptr<fp4e2m1x2[]> ref_output_t = std::make_unique<fp4e2m1x2[]>(cols * (rows / 2));
@@ -749,12 +753,8 @@ void performTest(float (*OP)(const float),
     const double rtol = 1.0E-6;
 
     // Set dump_data=true to enable dumping tensor data to files for analysis
-    compareResults_nvfp4(output, ref_output.get(), ref_output_t.get(), rows, cols, atol, rtol, true, false);
-
-    const fp8e4m3* kernel_scales = output.rowwise_cpu_scale_inv_ptr<fp8e4m3>();
-    const fp8e4m3* ref_scales_ptr = ref_scales.get();
-    const fp8e4m3* kernel_scales_t = output.columnwise_cpu_scale_inv_ptr<fp8e4m3>();
-    const fp8e4m3* ref_scales_t_ptr = ref_scales_t.get();
+    compareResults_nvfp4(output, ref_output.get(), ref_output_t.get(), rows, cols, atol, rtol, true,
+                         false, !per_token_activation);
 
     size_t scale_mismatches_num = 0;
     compare_scaling_factors<fp8e4m3>("scales", output.rowwise_cpu_scale_inv_ptr<fp8e4m3>(),
@@ -762,10 +762,12 @@ void performTest(float (*OP)(const float),
                                       unpadded_blocks_Y, unpadded_blocks_X, scales_stride,
                                       scale_mismatches_num);
 
-    compare_scaling_factors<fp8e4m3>("scales_t", output.columnwise_cpu_scale_inv_ptr<fp8e4m3>(),
-                                      ref_scales_t.get(),
-                                      unpadded_blocks_Y_t, unpadded_blocks_X_t, scales_stride_t,
-                                      scale_mismatches_num);
+    if (!per_token_activation) {
+        compare_scaling_factors<fp8e4m3>("scales_t", output.columnwise_cpu_scale_inv_ptr<fp8e4m3>(),
+                                          ref_scales_t.get(),
+                                          unpadded_blocks_Y_t, unpadded_blocks_X_t, scales_stride_t,
+                                          scale_mismatches_num);
+    }
 
     if (per_token_activation) {
         compare_per_token_amax(output, ref_per_token_amax);

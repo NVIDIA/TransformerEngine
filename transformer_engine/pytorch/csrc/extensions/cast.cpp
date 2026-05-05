@@ -798,10 +798,12 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
 
   // Quantization parameters
   const auto rowwise_usage = quantizer_cpp_list[0]->rowwise_usage;
-  const auto columnwise_usage = quantizer_cpp_list[0]->columnwise_usage;
+  const bool per_token_activation = quantizer_cpp_list[0]->per_token_activation;
+  NVTE_CHECK(!per_token_activation || rowwise_usage,
+             "Per-token NVFP4 quantization requires rowwise usage.");
+  const auto columnwise_usage = quantizer_cpp_list[0]->columnwise_usage && !per_token_activation;
   const auto scaling_mode = quantizer_cpp_list[0]->get_scaling_mode();
   const auto fp4_dtype = quantizer_cpp_list[0]->dtype;
-  const bool per_token_activation = quantizer_cpp_list[0]->per_token_activation;
   const bool with_gemm_swizzled_scales = false;  /// TODO (tmoon) Enable based on optimize_for_gemm;
   constexpr size_t scale_elem_size = 1;
 
@@ -944,8 +946,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
       // Note: Multi-quantize kernel does not require contiguous amaxes.
       const auto offset = roundup(buffer_size, 16);
       amax_offsets.push_back(offset);
-      const size_t amax_size = per_token_activation ? 4 * flat_first_dim(shape_list[i]) : 4;
-      buffer_size = offset + amax_size;
+      buffer_size = offset + 4;
     }
 
     // Allocate full buffer
@@ -958,11 +959,8 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
           buffer, to_fp4_shape(columnwise_data_shapes[i]), data_offsets[i], torch::kUInt8));
       columnwise_scale_list.emplace_back(
           make_torch_view(buffer, columnwise_scale_shapes[i], scale_offsets[i], torch::kUInt8));
-      const std::vector<size_t> amax_shape =
-          per_token_activation ? std::vector<size_t>{flat_first_dim(shape_list[i])}
-                               : std::vector<size_t>{1};
       amax_columnwise_list.emplace_back(
-          make_torch_view(buffer, amax_shape, amax_offsets[i], torch::kFloat32));
+          make_torch_view(buffer, std::vector<size_t>{1}, amax_offsets[i], torch::kFloat32));
     }
   }
 
@@ -1007,7 +1005,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
       }
       if (columnwise_usage) {
         tensor_wrapper.set_columnwise_amax(amax_columnwise_list[i].data_ptr(), DType::kFloat32,
-                                           getTensorShape(amax_columnwise_list[i]));
+                                           std::vector<size_t>{1});
       }
 
       tensor_cpp_list.emplace_back(std::move(tensor_wrapper));
