@@ -120,7 +120,7 @@ struct TypeInfo {
     }
 
     constexpr static DType dtype = getType<T>();
-    constexpr static size_t size = BitsNumber<T>::num_bits;;
+    constexpr static size_t size = BitsNumber<T>::num_bits;
 };
 
 class Tensor {
@@ -197,21 +197,21 @@ class Tensor {
     NVTE_CHECK(amax_rowwise_.size() == 1);
     NVTE_CHECK(amax_rowwise_.dtype() == kNVTEFloat32);
     amax_rowwise_.to_cpu();
-    return *amax_rowwise_.cpu_data<float>();
+    return *amax_rowwise_.cpu_buffer<float>();
   }
 
   float amax_columnwise() {
     NVTE_CHECK(amax_columnwise_.size() == 1);
     NVTE_CHECK(amax_columnwise_.dtype() == kNVTEFloat32);
     amax_columnwise_.to_cpu();
-    return *amax_columnwise_.cpu_data<float>();
+    return *amax_columnwise_.cpu_buffer<float>();
   }
 
   float scale() {
     NVTE_CHECK(scale_.size() == 1);
     NVTE_CHECK(scale_.dtype() == kNVTEFloat32);
     scale_.to_cpu();
-    return *scale_.cpu_data<float>();
+    return *scale_.cpu_buffer<float>();
   }
 
   template <typename T>
@@ -230,7 +230,7 @@ class Tensor {
     NVTE_CHECK(scale_inv_rowwise_.size() == 1);
     NVTE_CHECK(scale_inv_rowwise_.dtype() == kNVTEFloat32);
     scale_inv_rowwise_.to_cpu();
-    return *scale_inv_rowwise_.cpu_data<float>();
+    return *scale_inv_rowwise_.cpu_buffer<float>();
   }
 
   bool rowwise() const {
@@ -249,8 +249,8 @@ class Tensor {
     tensor_.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
   }
 
-  void to_cpu() const;
-  void from_cpu() const;
+  void to_cpu();
+  void from_cpu();
 
   void set_amax(float amax);
   void set_scale(float scale);
@@ -290,7 +290,7 @@ class Tensor {
     template <typename T>
     T *cpu_buffer() {
       NVTE_CHECK(TypeInfo<T>::dtype == dtype_, "Invalid type.");
-      return reinterpret_cast<T *>(cpu_buffer());;
+      return reinterpret_cast<T *>(cpu_buffer());
     }
     template <typename T>
     const T *cpu_buffer() const {
@@ -299,7 +299,7 @@ class Tensor {
     template <typename T>
     T *gpu_buffer() {
       NVTE_CHECK(TypeInfo<T>::dtype == dtype_, "Invalid type.");
-      return reinterpret_cast<T *>(gpu_buffer());;
+      return reinterpret_cast<T *>(gpu_buffer());
     }
     template <typename T>
     const T *gpu_buffer() const {
@@ -489,7 +489,7 @@ size_t last_dimension(const std::vector<size_t> &shape);
 
 bool areShapesEqual(const NVTEShape &s1, const NVTEShape &s2);
 
-void compareResults(const std::string &name, const Tensor &test, const void *ref,
+void compareResults(const std::string &name, Tensor &test, const void *ref,
                     bool rowwise, double atol = 1e-5, double rtol = 1e-8, bool if_on_gpus = true,
                     const size_t tolerable_mismatches_limit = 0);
 void compareResults(const std::string &name, const float test, const float ref,

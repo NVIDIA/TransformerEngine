@@ -194,33 +194,6 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
 
     return {ret_rowwise, ret_colwise};
   }
-  if (scaling_mode == NVTE_MXFP8_1D_SCALING) {
-    std::vector<size_t> shape_vec;
-    for (size_t i = 0; i < shape.ndim; ++i) {
-      shape_vec.push_back(shape.data[i]);
-    }
-    size_t first_dim = first_dimension(shape_vec);
-    size_t last_dim = last_dimension(shape_vec);
-
-    scale_inv_meta ret_rowwise, ret_colwise;
-
-    const size_t block_size_X_rowwise = 32;
-    size_t scale_dim_Y_rowwise = DIVUP_TO_MULTIPLE(first_dim, scale_tensor_alignment_Y_rowwise);
-    size_t scale_dim_X_rowwise = DIVUP_TO_MULTIPLE(DIVUP(last_dim, block_size_X_rowwise), scale_tensor_alignment_X_rowwise);
-    ret_rowwise.shape = {scale_dim_Y_rowwise, scale_dim_X_rowwise};
-
-    const size_t block_size_Y_colwise = 32;
-    size_t scale_dim_Y_colwise = DIVUP_TO_MULTIPLE(DIVUP(first_dim, block_size_Y_colwise), scale_tensor_alignment_Y_colwise);
-    size_t scale_dim_X_colwise = DIVUP_TO_MULTIPLE(last_dim, scale_tensor_alignment_X_colwise);
-    ret_colwise.shape = {scale_dim_Y_colwise, scale_dim_X_colwise};
-
-    ret_rowwise.type = DType::kFloat8E8M0;
-    ret_colwise.type = DType::kFloat8E8M0;
-    ret_rowwise.type_size_bits = typeToNumBits(DType::kFloat8E8M0);
-    ret_colwise.type_size_bits = typeToNumBits(DType::kFloat8E8M0);
-
-    return {ret_rowwise, ret_colwise};
-  }
   if (scaling_mode == NVTE_BLOCK_SCALING_2D) {
     std::vector<size_t> shape_vec;
     for (size_t i = 0; i < shape.ndim; ++i) {
@@ -280,11 +253,11 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
 Tensor::Buffer::Buffer(size_t size, DType dtype)
   : size_{size}, dtype_{dtype}, bytes_{size * typeToNumBits(dtype) / 8} {
   if (bytes_ > 0) {
-    cpu_buffer_ = new unsigned char[bytes_];
+    cpu_buffer_.reset(new unsigned char[bytes_]);
     std::memset(cpu_buffer_.get(), 0, bytes_);
-    void *gpu_buffer = nullptr;
+    unsigned char *gpu_buffer = nullptr;
     NVTE_CHECK_CUDA(cudaMalloc(&gpu_buffer, bytes_));
-    gpu_buffer_ = gpu_buffer;
+    gpu_buffer_.reset(gpu_buffer);
     NVTE_CHECK_CUDA(cudaMemset(gpu_buffer_.get(), 0, bytes_));
   }
 }
@@ -398,7 +371,7 @@ Tensor::Tensor(const std::string& name,
   case NVTE_MXFP8_1D_SCALING:
   case NVTE_BLOCK_SCALING_1D:
   case NVTE_BLOCK_SCALING_2D:
-  case NVTE_NVFP4_1D_SCALING::
+  case NVTE_NVFP4_1D_SCALING:
     {
       // Block scaling factors
       auto [rowwise_scale_meta, colwise_scale_meta] = get_scales(flattened_shape, tensor_.scaling_mode());
@@ -418,9 +391,9 @@ Tensor::Tensor(const std::string& name,
       // NVFP4 uses amax for tensor scaling
       if (scaling_mode == NVTE_NVFP4_1D_SCALING) {
         amax_rowwise_ = Tensor::Buffer(1, DType::kFloat32);
-        amax_columnwise__ = Tensor::Buffer(1, DType::kFloat32);
+        amax_columnwise_ = Tensor::Buffer(1, DType::kFloat32);
         tensor_.set_amax(amax_rowwise_.gpu_buffer(), DType::kFloat32, std::vector<size_t>{1});
-        tensor_.set_amax_columnwise(amax_rowwise_.gpu_buffer(), DType::kFloat32, std::vector<size_t>{1});
+        tensor_.set_amax_columnwise(amax_columnwise_.gpu_buffer(), DType::kFloat32, std::vector<size_t>{1});
       }
     }
     break;
@@ -429,7 +402,7 @@ Tensor::Tensor(const std::string& name,
   }
 }
 
-void Tensor::to_cpu() const {
+void Tensor::to_cpu() {
   data_rowwise_.to_cpu();
   data_columnwise_.to_cpu();
   scale_inv_rowwise_.to_cpu();
@@ -439,7 +412,7 @@ void Tensor::to_cpu() const {
   scale_.to_cpu();
 }
 
-void Tensor::from_cpu() const {
+void Tensor::from_cpu() {
   data_rowwise_.from_cpu();
   data_columnwise_.from_cpu();
   scale_inv_rowwise_.from_cpu();
@@ -452,21 +425,21 @@ void Tensor::from_cpu() const {
 void Tensor::set_amax(float amax) {
   NVTE_CHECK(amax_rowwise_.size() == 1);
   NVTE_CHECK(amax_rowwise_.dtype() == kNVTEFloat32);
-  *amax_rowwise_.cpu_data<float>() = amax;
+  *amax_rowwise_.cpu_buffer<float>() = amax;
   amax_rowwise_.from_cpu();
 }
 
 void Tensor::set_scale(float scale) {
   NVTE_CHECK(scale_.size() == 1);
   NVTE_CHECK(scale_.dtype() == kNVTEFloat32);
-  *scale_.cpu_data<float>() = scale;
+  *scale_.cpu_buffer<float>() = scale;
   scale_.from_cpu();
 }
 
 void Tensor::set_scale_inv(float scale_inv) {
   NVTE_CHECK(scale_inv_rowwise_.size() == 1);
   NVTE_CHECK(scale_inv_rowwise_.dtype() == kNVTEFloat32);
-  *scale_inv_rowwise_.cpu_data<float>() = scale_inv;
+  *scale_inv_rowwise_.cpu_buffer<float>() = scale_inv;
   scale_inv_rowwise_.from_cpu();
 }
 
@@ -477,7 +450,7 @@ void Tensor::set_tensor_amax(float amax) {
 void Tensor::set_tensor_amax_columnwise(float amax) {
   NVTE_CHECK(amax_columnwise_.size() == 1);
   NVTE_CHECK(amax_columnwise_.dtype() == kNVTEFloat32);
-  *amax_columnwise_.cpu_data<float>() = amax;
+  *amax_columnwise_.cpu_buffer<float>() = amax;
   amax_columnwise_.from_cpu();
 }
 
@@ -492,7 +465,7 @@ void Tensor::fill_uniform_rowwise_scale_inv() {
   switch (dtype) {
   case kNVTEFloat32:
     {
-      auto *cpu_data = scale_inv_rowwise_.cpu_data<float>();
+      auto *cpu_data = scale_inv_rowwise_.cpu_buffer<float>();
       std::uniform_real_distribution<float> dis(-2.0, 1.0);
       for (size_t i = 0; i < numel; ++i) {
         cpu_data[i] = dis(gen_);
@@ -503,7 +476,7 @@ void Tensor::fill_uniform_rowwise_scale_inv() {
   case kNVTEFloat8E8M0:
   case kNVTEByte:
     {
-      auto *cpu_data = reinterpret_cast<uint8_t *>(scale_inv_rowwise_.cpu_data());
+      auto *cpu_data = reinterpret_cast<uint8_t *>(scale_inv_rowwise_.cpu_buffer());
       std::uniform_int_distribution<uint8_t> dis(0, 127);
       for (size_t i = 0; i < numel; ++i) {
         cpu_data[i] = dis(gen_);
@@ -530,7 +503,7 @@ void Tensor::fill_uniform_columnwise_scale_inv() {
   switch (dtype) {
   case kNVTEFloat32:
     {
-      auto *cpu_data = scale_inv_columnwise_.cpu_data<float>();
+      auto *cpu_data = scale_inv_columnwise_.cpu_buffer<float>();
       std::uniform_real_distribution<float> dis(-2.0, 1.0);
       for (size_t i = 0; i < numel; ++i) {
         cpu_data[i] = dis(gen_);
@@ -541,7 +514,7 @@ void Tensor::fill_uniform_columnwise_scale_inv() {
   case kNVTEFloat8E8M0:
   case kNVTEByte:
     {
-      auto *cpu_data = reinterpret_cast<uint8_t *>(scale_inv_columnwise_.cpu_data());
+      auto *cpu_data = reinterpret_cast<uint8_t *>(scale_inv_columnwise_.cpu_buffer());
       std::uniform_int_distribution<uint8_t> dis(0, 127);
       for (size_t i = 0; i < numel; ++i) {
         cpu_data[i] = dis(gen_);
@@ -563,7 +536,7 @@ void Tensor::fill_uniform_scale() {
   }
 
   // Generate random scales on CPU
-  auto *cpu_data = scale_.cpu_data<float>();
+  auto *cpu_data = scale_.cpu_buffer<float>();
   const auto numel = scale_.size();
   NVTE_CHECK(scale_.dtype() == kNVTEFloat32);
   std::uniform_real_distribution<float> dis(-2.0, 1.0);
@@ -600,7 +573,7 @@ std::vector<size_t> unravel(const size_t i, const NVTEShape &shape) {
   return ret;
 }
 
-void compareResults_sequential(const std::string &name, const Tensor &test,
+void compareResults_sequential(const std::string &name, Tensor &test,
                                const void *ref, const bool rowwise,
                                double atol, double rtol, bool if_on_gpus,
                                const size_t tolerable_mismatches_limit) {
@@ -690,7 +663,7 @@ static size_t getFirstMismatchIdx(const DType data_type, const T* test_data, con
   return first_mismatch_idx;
 }
 
-void compareResults_parallel(const std::string &name, const Tensor &test, const void *ref,
+void compareResults_parallel(const std::string &name, Tensor &test, const void *ref,
                              const bool rowwise, double atol, double rtol, bool if_on_gpus,
                              const size_t tolerable_mismatches_limit) {
   if (if_on_gpus) test.to_cpu();
@@ -717,7 +690,7 @@ void compareResults_parallel(const std::string &name, const Tensor &test, const 
   );
 }
 
-void compareResults(const std::string &name, const Tensor &test, const void *ref,
+void compareResults(const std::string &name, Tensor &test, const void *ref,
                     const bool rowwise, double atol, double rtol, bool if_on_gpus,
                     const size_t tolerable_mismatches_limit) {
   constexpr bool sequential = false;
