@@ -32,7 +32,7 @@ from .._common import (
     validate_grouped_mlp_dims,
 )
 from ...cpp_extensions import general_grouped_gemm_for_grouped_tensor
-from ...module.base import _2X_ACC_WGRAD, get_dummy_wgrad
+from ...module.base import _2X_ACC_WGRAD
 from ...triton.grouped_dbias_dscales import compute_grouped_dbias_dscales
 
 

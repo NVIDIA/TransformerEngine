@@ -162,7 +162,6 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         split_sizes = split_sizes.to(dtype=torch.int64, device=device)
         base_split_offsets = tex.splits_to_offsets(split_sizes, 1)
         split_points = base_split_offsets[1:].to(dtype=torch.int)
-        fc1_x_tensor_offsets = base_split_offsets * fc1_weight_shape[1]
         fc2_x_tensor_offsets = base_split_offsets * fc2_weight_shape[1]
 
         # Extract post-scales from extra input
