@@ -255,11 +255,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
 
   if ((q_dtype == NVTEDType::kNVTEFloat8E4M3 || q_dtype == NVTEDType::kNVTEFloat8E5M2) &&
       sm_arch_ >= 90 && bias_type == NVTE_Bias_Type::NVTE_NO_BIAS &&
-      // 8.9: t3hd, max_s=512, d=64, padding
-      ((cudnn_runtime_version >= 8900 && sm_arch_ < 100 &&
-        qkv_layout == NVTE_QKV_Layout::NVTE_T3HD && max_seqlen_q == max_seqlen_kv &&
-        max_seqlen_q <= 512 && head_dim_qk == 64 && head_dim_v == 64 &&
-        attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK) ||
+      (
        // 9.2.1: {bshd, sbhd}, any seqlen, d=128, {no_mask, causal}
        (cudnn_runtime_version >= 90201 && sm_arch_ < 100 && max_seqlen_q % 128 == 0 &&
         max_seqlen_kv % 128 == 0 && head_dim_qk == 128 && head_dim_v == 128 &&
