@@ -229,6 +229,8 @@ def _compute_grad_params(
         # Need to return dummy wgrads for Megatron-LM wgrad fusion if grad is already added
         if fc_op._accumulate_into_main_grad:
             w_list = get_dummy_wgrads_for_params(weights)
+        elif delay_wgrad:
+            w_list = [None] if fc_op.single_grouped_weight else [None] * num_groups
 
     # Assemble grad_params in parameter registration order.
     if not fc_op.has_bias:
