@@ -21,7 +21,6 @@
 #include "../mxfp8/group_quantize_mxfp8.cuh"
 #include "../mxfp8/quantize_mxfp8.cuh"
 #include "../nvfp4/group_quantize_transpose_nvfp4.cuh"
-#include "../nvfp4/quantize_per_token_nvfp4.cuh"
 #include "../nvfp4/quantize_transpose_nvfp4.cuh"
 
 namespace transformer_engine {
@@ -105,9 +104,11 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
       if (per_token_activation) {
         NVTE_CHECK(!quant_config_cpp.nvfp4_2d_quantization,
                    "Per-token NVFP4 quantization does not support 2D quantization.");
-        nvfp4::quantize_per_token(*input_tensor, noop_tensor, output_tensor, &quant_config_cpp,
-                                  stream);
-        break;
+        NVTE_CHECK(output_tensor->has_data(),
+                   "Per-token NVFP4 quantization requires rowwise output.");
+        NVTE_CHECK(!output_tensor->has_columnwise_data(),
+                   "Per-token NVFP4 quantization does not produce columnwise output.");
+        nvfp4::compute_per_token_amax(*input_tensor, noop_tensor, output_tensor, stream);
       }
       bool use_optimized_kernel = (dtype == DType::kBFloat16) && (rows % 32 == 0) &&
                                   (cols % 32 == 0) && output_tensor->has_data();
@@ -135,7 +136,7 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
             /*use_stochastic_rounding=*/quant_config_cpp.stochastic_rounding,
             /*rng_state=*/quant_config_cpp.rng_state,
             /*use_2d_quantization=*/quant_config_cpp.nvfp4_2d_quantization,
-            /*per_token_rowwise_scaling=*/false, /*noop_tensor=*/noop_tensor->data,
+            /*per_token_rowwise_scaling=*/per_token_activation, /*noop_tensor=*/noop_tensor->data,
             /*stream=*/stream);
       }
       break;
@@ -249,14 +250,8 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
       int32_t rows = grad_tensor->flat_first_dim();
       int32_t cols = grad_tensor->flat_last_dim();
       auto dtype = grad_tensor->dtype();
-      const bool per_token_activation = quant_config_cpp.nvfp4_per_token_activation;
-      if (per_token_activation) {
-        NVTE_CHECK(!quant_config_cpp.nvfp4_2d_quantization,
-                   "Per-token NVFP4 quantization does not support 2D quantization.");
-        nvfp4::quantize_per_token(*grad_tensor, noop_tensor, output_tensor, &quant_config_cpp,
-                                  stream);
-        break;
-      }
+      NVTE_CHECK(!quant_config_cpp.nvfp4_per_token_activation,
+                 "Per-token NVFP4 quantization is only supported for forward activation tensors.");
       bool use_optimized_kernel = (dtype == DType::kBFloat16) && (rows % 32 == 0) &&
                                   (cols % 32 == 0) && output_tensor->has_data();
 

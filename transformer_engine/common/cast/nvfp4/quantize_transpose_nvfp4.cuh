@@ -16,6 +16,9 @@
 #include <cuda_runtime.h>
 #include <transformer_engine/transformer_engine.h>
 
+#include <cub/cub.cuh>
+#include <type_traits>
+
 #include "../../common.h"
 #include "../../util/math.h"
 #include "../../util/ptx.cuh"
@@ -26,6 +29,134 @@
 namespace transformer_engine {
 namespace dispatch {
 namespace nvfp4 {
+
+namespace per_token_amax_kernel {
+
+using namespace ptx;
+
+#if FP4_TYPE_SUPPORTED
+
+constexpr int PER_TOKEN_BLOCK_SIZE = 256;
+constexpr int PER_TOKEN_SF_VEC_SIZE = 16;
+
+template <typename IType>
+__device__ __forceinline__ void abs_max_2x_update(ptx::FPx2<IType> &dst,
+                                                  const ptx::FPx2<IType> &val) {
+  if constexpr (std::is_same_v<IType, float>) {
+    dst.x = fmaxf(fabsf(dst.x), fabsf(val.x));
+    dst.y = fmaxf(fabsf(dst.y), fabsf(val.y));
+  } else {
+    ptx::abs_max_2x(dst, dst, val);
+  }
+}
+
+template <typename IType>
+__device__ __forceinline__ float abs_max_2x_to_float(const ptx::FPx2<IType> &val) {
+  if constexpr (std::is_same_v<IType, float>) {
+    return fmaxf(fabsf(val.x), fabsf(val.y));
+  } else {
+    return static_cast<float>(__hmax(__habs(val.x), __habs(val.y)));
+  }
+}
+
+template <typename IType, int BLOCK_SIZE>
+__global__ void
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+__launch_bounds__(BLOCK_SIZE)
+#endif
+    compute_per_token_amax_kernel(const int num_rows, const int num_cols,
+                                  const IType *__restrict__ input,
+                                  float *__restrict__ output_per_token_amax,
+                                  const float *__restrict__ noop) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  if (noop != nullptr && noop[0] == 1.0f) {
+    return;
+  }
+
+  using IType2 = typename ptx::FPx2<IType>;
+
+  const int row_idx = blockIdx.x;
+  if (row_idx >= num_rows) return;
+
+  const int num_vec2 = num_cols / 2;
+  const IType2 *input_row = reinterpret_cast<const IType2 *>(input + row_idx * num_cols);
+
+  IType2 thread_amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
+  for (int i = threadIdx.x; i < num_vec2; i += BLOCK_SIZE) {
+    const IType2 val = input_row[i];
+    abs_max_2x_update(thread_amax_2x, val);
+  }
+  const float thread_max = abs_max_2x_to_float(thread_amax_2x);
+
+  using BlockReduce = cub::BlockReduce<float, BLOCK_SIZE>;
+  __shared__ typename BlockReduce::TempStorage temp_storage;
+  const float row_amax =
+      BlockReduce(temp_storage).Reduce(thread_max, [](float a, float b) { return fmaxf(a, b); });
+
+  if (threadIdx.x == 0) {
+    output_per_token_amax[row_idx] = row_amax;
+  }
+#endif
+}
+
+template <typename IType>
+void launch_compute_per_token_amax(const int num_rows, const int num_cols, const IType *input,
+                                   float *output_per_token_amax, cudaStream_t stream,
+                                   const float *noop = nullptr) {
+  if (num_rows == 0 || num_cols == 0) return;
+
+  NVTE_CHECK(num_cols % 2 == 0, "num_cols must be even for per-token amax computation, got ",
+             num_cols);
+  dim3 grid(num_rows);
+  dim3 block(PER_TOKEN_BLOCK_SIZE);
+
+  compute_per_token_amax_kernel<IType, PER_TOKEN_BLOCK_SIZE>
+      <<<grid, block, 0, stream>>>(num_rows, num_cols, input, output_per_token_amax, noop);
+  NVTE_CHECK_CUDA(cudaGetLastError());
+}
+
+#endif  // FP4_TYPE_SUPPORTED
+
+}  // namespace per_token_amax_kernel
+
+inline void compute_per_token_amax(const Tensor &input, const Tensor *noop, Tensor *output,
+                                   cudaStream_t stream) {
+#if FP4_TYPE_SUPPORTED
+  using namespace per_token_amax_kernel;
+
+  const size_t rows = input.flat_first_dim();
+  const size_t cols = input.flat_last_dim();
+  NVTE_CHECK(cols % PER_TOKEN_SF_VEC_SIZE == 0,
+             "Per-token NVFP4 quantization requires last dim divisible by ", PER_TOKEN_SF_VEC_SIZE,
+             ".");
+
+  auto *amax_ptr = reinterpret_cast<float *>(output->amax.dptr);
+  NVTE_CHECK(amax_ptr != nullptr, "Per-token rowwise amax tensor must be allocated.");
+  NVTE_CHECK(output->amax.numel() == rows, "Per-token rowwise amax must have ", rows,
+             " entries, got ", output->amax.shape, ".");
+
+  const auto *noop_ptr = reinterpret_cast<const float *>(noop->data.dptr);
+  if (input.dtype() == DType::kBFloat16) {
+    const auto *input_ptr = reinterpret_cast<const __nv_bfloat16 *>(input.data.dptr);
+    launch_compute_per_token_amax<__nv_bfloat16>(static_cast<int>(rows), static_cast<int>(cols),
+                                                 input_ptr, amax_ptr, stream, noop_ptr);
+  } else if (input.dtype() == DType::kFloat16) {
+    const auto *input_ptr = reinterpret_cast<const half *>(input.data.dptr);
+    launch_compute_per_token_amax<half>(static_cast<int>(rows), static_cast<int>(cols), input_ptr,
+                                        amax_ptr, stream, noop_ptr);
+  } else if (input.dtype() == DType::kFloat32) {
+    const auto *input_ptr = reinterpret_cast<const float *>(input.data.dptr);
+    launch_compute_per_token_amax<float>(static_cast<int>(rows), static_cast<int>(cols), input_ptr,
+                                         amax_ptr, stream, noop_ptr);
+  } else {
+    NVTE_ERROR(
+        "Unsupported input dtype for per-token NVFP4 quantization. "
+        "Expected BFloat16, Float16, or Float32.");
+  }
+#else
+  NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
+#endif  // FP4_TYPE_SUPPORTED
+}
 
 namespace quantize_transpose_kernel {
 

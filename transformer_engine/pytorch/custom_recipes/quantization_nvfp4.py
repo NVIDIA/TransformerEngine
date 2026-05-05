@@ -354,7 +354,7 @@ class NVFP4QuantizerRef(Quantizer):
         with_rht: bool = False,
         with_random_sign_mask: bool = True,
     ):
-        super().__init__(rowwise=rowwise, columnwise=columnwise)
+        super().__init__(rowwise=rowwise, columnwise=columnwise and not per_token_activation)
         self.internal = True
 
         self.dtype = dtype
@@ -450,13 +450,9 @@ class NVFP4QuantizerRef(Quantizer):
         *,
         pow_2_scales: bool,
         per_token_rowwise: bool = False,
-        per_token_columnwise: bool = False,
         eps: float,  # pylint: disable=unused-argument
     ) -> Tuple[torch.Tensor, torch.Tensor]:
 
-        assert not (
-            per_token_rowwise and per_token_columnwise
-        ), "Per-token rowwise and columnwise reference modes are mutually exclusive."
         if x.ndim != 2:
             raise ValueError(
                 f"_quantize_blockwise_reference expects a 2D tensor, got {x.ndim}D with shape"
@@ -497,8 +493,6 @@ class NVFP4QuantizerRef(Quantizer):
         else:
             if per_token_rowwise:
                 global_amax = global_amax.to(torch.float32).view(m, 1, 1)
-            if per_token_columnwise:
-                global_amax = global_amax.to(torch.float32).view(1, n // tile_len_x, tile_len_x)
 
             global_encode_scale = torch.div(FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX, global_amax)
             global_encode_scale = torch.min(
@@ -521,16 +515,9 @@ class NVFP4QuantizerRef(Quantizer):
             global_decode_scale = torch.div(1.0, global_encode_scale)
             global_encode_scale_multiplier = global_encode_scale * torch.reciprocal(FLOAT4_E2M1_MAX)
 
-            if per_token_columnwise:
-                decode_scale = torch.amax(
-                    torch.abs(x.to(torch.float32)) * global_encode_scale_multiplier,
-                    dim=-1,
-                    keepdim=True,
-                )
-            else:
-                # Match the kernel's default path: fold the FP4 reciprocal into the
-                # global scale multiplier, but keep the final reciprocal exact.
-                decode_scale = vec_max * global_encode_scale_multiplier
+            # Match the kernel's default path: fold the FP4 reciprocal into the
+            # global scale multiplier, but keep the final reciprocal exact.
+            decode_scale = vec_max * global_encode_scale_multiplier
             decode_scale = torch.min(
                 decode_scale,
                 torch.tensor(
@@ -711,7 +698,6 @@ class NVFP4QuantizerRef(Quantizer):
                 self.quant_tile_shape[1],
                 self.quant_tile_shape[0],
                 pow_2_scales=self.pow_2_scales,
-                per_token_columnwise=self.per_token_activation,
                 eps=self.eps,
             )
 
