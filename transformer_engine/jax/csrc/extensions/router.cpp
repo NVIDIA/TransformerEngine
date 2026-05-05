@@ -180,13 +180,12 @@ Error_Type FusedMoEAuxLossForwardFFI(cudaStream_t stream,
 
   auto probs_tensor = TensorWrapper(probs_buf.untyped_data(), probs_shape, dtype);
   auto tpe_tensor = TensorWrapper(tokens_per_expert_buf.untyped_data(), tpe_shape, tpe_dtype);
-  auto aux_loss_tensor = 
-    TensorWrapper(aux_loss_buf->untyped_data(), std::vector<size_t>{1}, dtype);
-  auto const_buf_tensor = 
-    TensorWrapper(const_buf->untyped_data(), std::vector<size_t>{2}, DType::kFloat32);
+  auto aux_loss_tensor = TensorWrapper(aux_loss_buf->untyped_data(), std::vector<size_t>{1}, dtype);
+  auto const_buf_tensor =
+      TensorWrapper(const_buf->untyped_data(), std::vector<size_t>{2}, DType::kFloat32);
 
-  nvte_fused_moe_aux_loss_forward(probs_tensor.data(), tpe_tensor.data(), num_tokens,
-                                  num_experts, num_tokens, num_experts, static_cast<int>(topk),
+  nvte_fused_moe_aux_loss_forward(probs_tensor.data(), tpe_tensor.data(), num_tokens, num_experts,
+                                  num_tokens, num_experts, static_cast<int>(topk),
                                   static_cast<float>(coeff), aux_loss_tensor.data(),
                                   const_buf_tensor.data(), stream);
 
@@ -225,7 +224,7 @@ Error_Type FusedMoEAuxLossBackwardFFI(cudaStream_t stream,
   auto grad_probs_shape =
       std::vector<size_t>{static_cast<size_t>(num_tokens), static_cast<size_t>(num_experts)};
 
-  auto const_buf_tensor = 
+  auto const_buf_tensor =
       TensorWrapper(const_buf_in.untyped_data(), std::vector<size_t>{2}, DType::kFloat32);
   auto tpe_tensor = TensorWrapper(tokens_per_expert_buf.untyped_data(), tpe_shape, tpe_dtype);
   auto grad_aux_loss_tensor =
