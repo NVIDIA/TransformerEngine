@@ -321,10 +321,6 @@ void compute_ref(float (*OP)(const float),
     std::vector<InputType> input_t = create_transpose(input, rows, cols);
 
     if (per_token_amax != nullptr) {
-        constexpr size_t kBlockSize = 16;
-        constexpr float fp4_max_inv = 1.0f / 6.0f;
-        constexpr float float_max = Numeric_Traits<float>::maxNorm;
-
         per_token_amax->resize(rows, 0.0f);
         for (size_t row = 0; row < rows; ++row) {
             float row_amax = 0.0f;
@@ -342,40 +338,6 @@ void compute_ref(float (*OP)(const float),
                            row_amax,
                            use_fast_math,
                            use_2d_quantization);
-        }
-
-        for (size_t col = 0; col < cols; ++col) {
-            for (size_t row_start = 0; row_start < rows; row_start += kBlockSize) {
-                float vals[kBlockSize];
-                float s_enc[kBlockSize];
-                float scaled_block_amax = 0.0f;
-                for (size_t i = 0; i < kBlockSize; ++i) {
-                    const size_t row = row_start + i;
-                    const float val = static_cast<float>(input[row * cols + col]);
-                    const float S_enc =
-                        compute_global_encode_scaling_factor_FP4((*per_token_amax)[row], false);
-                    vals[i] = val;
-                    s_enc[i] = S_enc;
-                    scaled_block_amax = fmaxf(scaled_block_amax, fabsf(val) * (S_enc * fp4_max_inv));
-                }
-
-                const float S_dec_b_f32 = fminf(scaled_block_amax, float_max);
-                const fp8e4m3 S_dec_b_fp8 = static_cast<fp8e4m3>(S_dec_b_f32);
-                scales_t[col * scales_stride_t + row_start / kBlockSize] = S_dec_b_fp8;
-
-                for (size_t i = 0; i < kBlockSize; i += 2) {
-                    const float S_dec_rowwise_x = 1.0f / s_enc[i];
-                    const float S_dec_rowwise_y = 1.0f / s_enc[i + 1];
-                    const float S_dec_b_fp32 = static_cast<float>(S_dec_b_fp8);
-                    const float S_enc_b_fp8_x =
-                        fminf(1.0f / (S_dec_b_fp32 * S_dec_rowwise_x), float_max);
-                    const float S_enc_b_fp8_y =
-                        fminf(1.0f / (S_dec_b_fp32 * S_dec_rowwise_y), float_max);
-                    const float2 scaled_elt_pair = {vals[i] * S_enc_b_fp8_x,
-                                                    vals[i + 1] * S_enc_b_fp8_y};
-                    output_t[(col * rows + row_start + i) / 2] = fp4e2m1x2(scaled_elt_pair);
-                }
-            }
         }
     } else if (use_2d_quantization) {
         // Step 1: Compute mathematical 8×8 scaling factors
@@ -625,7 +587,6 @@ void set_per_token_amax_metadata(Tensor &output, const size_t rows) {
                                        static_cast<NVTEDType>(DType::kFloat32),
                                        nvte_make_shape(shape.data(), shape.size())};
         nvte_set_tensor_param_v2(output_tensor, param, &amax_tensor, sizeof(amax_tensor));
-        return amax;
     };
 
     replace_amax(kNVTEAmax);

@@ -97,7 +97,6 @@ void set_per_token_amax_metadata(Tensor &output, const size_t rows) {
     };
 
     replace_amax(kNVTEAmax);
-    replace_amax(kNVTEColumnwiseAmax);
 }
 
 std::vector<float> get_amax_values(const Tensor &tensor) {
@@ -213,7 +212,7 @@ void performTest_dequantize_nvfp4_swizzled(const size_t rows, const size_t cols,
         cudaDeviceSynchronize();
     }
 
-    // Dequantize with compact scales → reference output.
+    // Dequantize with compact scales to get the reference output.
     Tensor output_compact("output_compact", std::vector<size_t>{rows, cols}, otype, true, false);
     nvte_dequantize(quantized_compact.data(), output_compact.data(), 0);
     cudaDeviceSynchronize();

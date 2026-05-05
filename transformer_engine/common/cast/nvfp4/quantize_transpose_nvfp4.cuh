@@ -520,7 +520,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
                   : 1.0f;
         }
         const float S_dec_rowwise_block =
-            PER_TOKEN_ROWWISE ? 1.0 / S_enc_rowwise_block : S_dec_rowwise;
+            PER_TOKEN_ROWWISE ? 1.0f / S_enc_rowwise_block : S_dec_rowwise;
         const nvfp4_scale_t S_dec_b_fp8 =
             compute_decoding_scaling_factor(block_amax, S_enc_rowwise_block);
 

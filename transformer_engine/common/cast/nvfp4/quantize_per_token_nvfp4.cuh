@@ -36,8 +36,8 @@ namespace quantize_per_token_kernel {
 using namespace core;
 using namespace ptx;
 
-constexpr int PERTOKEN_BLOCK_SIZE = 256;
-constexpr int PERTOKEN_SF_VEC_SIZE = 16;
+constexpr int PER_TOKEN_BLOCK_SIZE = 256;
+constexpr int PER_TOKEN_SF_VEC_SIZE = 16;
 
 template <typename IType>
 __device__ __forceinline__ void abs_max_2x_update(ptx::FPx2<IType> &dst,
@@ -109,9 +109,9 @@ void launch_compute_per_token_amax(const int num_rows, const int num_cols, const
   NVTE_CHECK(num_cols % 2 == 0, "num_cols must be even for per-token amax computation, got ",
              num_cols);
   dim3 grid(num_rows);
-  dim3 block(PERTOKEN_BLOCK_SIZE);
+  dim3 block(PER_TOKEN_BLOCK_SIZE);
 
-  compute_per_token_amax_kernel<IType, PERTOKEN_BLOCK_SIZE>
+  compute_per_token_amax_kernel<IType, PER_TOKEN_BLOCK_SIZE>
       <<<grid, block, 0, stream>>>(num_rows, num_cols, input, output_per_token_amax, noop);
   NVTE_CHECK_CUDA(cudaGetLastError());
 #else
@@ -139,9 +139,9 @@ inline void quantize_per_token(const Tensor &input, const Tensor *noop, Tensor *
 
   const size_t rows = input.flat_first_dim();
   const size_t cols = input.flat_last_dim();
-  NVTE_CHECK(cols % quantize_per_token_kernel::PERTOKEN_SF_VEC_SIZE == 0,
+  NVTE_CHECK(cols % quantize_per_token_kernel::PER_TOKEN_SF_VEC_SIZE == 0,
              "Per-token NVFP4 quantization requires last dim divisible by ",
-             quantize_per_token_kernel::PERTOKEN_SF_VEC_SIZE, ".");
+             quantize_per_token_kernel::PER_TOKEN_SF_VEC_SIZE, ".");
 
   const auto *noop_ptr = reinterpret_cast<const float *>(noop->data.dptr);
   auto *amax_ptr = reinterpret_cast<float *>(output->amax.dptr);
