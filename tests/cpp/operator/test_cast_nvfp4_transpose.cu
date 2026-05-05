@@ -550,46 +550,12 @@ void compareResults_nvfp4(const Tensor &test,
 }
 
 void compare_per_token_amax(const Tensor &output, const std::vector<float> &ref_amax) {
-    NVTEBasicTensor amax;
-    nvte_get_tensor_param_v2(output.data(), kNVTEAmax, &amax, sizeof(amax), nullptr);
-    ASSERT_NE(amax.data_ptr, nullptr);
-    ASSERT_EQ(amax.shape.ndim, 1);
-    ASSERT_EQ(amax.shape.data[0], ref_amax.size());
-
-    std::vector<float> test_amax_data(ref_amax.size());
-    ASSERT_EQ(cudaMemcpy(test_amax_data.data(),
-                         amax.data_ptr,
-                         ref_amax.size() * sizeof(float),
-                         cudaMemcpyDeviceToHost),
-              cudaSuccess);
+    const std::vector<float> test_amax_data = output.tensor_amax_values();
+    ASSERT_EQ(test_amax_data.size(), ref_amax.size());
     for (size_t row = 0; row < ref_amax.size(); ++row) {
         ASSERT_EQ(test_amax_data[row], ref_amax[row])
             << "Per-token amax mismatch at row " << row;
     }
-}
-
-void set_per_token_amax_metadata(Tensor &output, const size_t rows) {
-    const std::vector<size_t> shape = {rows};
-    NVTETensor output_tensor = output.data();
-
-    auto replace_amax = [&](const NVTETensorParam param) {
-        NVTEBasicTensor old_amax;
-        nvte_get_tensor_param_v2(output_tensor, param, &old_amax, sizeof(old_amax), nullptr);
-        if (old_amax.data_ptr != nullptr) {
-            NVTE_CHECK_CUDA(cudaFree(old_amax.data_ptr));
-        }
-
-        float *amax = nullptr;
-        NVTE_CHECK_CUDA(cudaMalloc(&amax, rows * sizeof(float)));
-        NVTE_CHECK_CUDA(cudaMemset(amax, 0, rows * sizeof(float)));
-
-        NVTEBasicTensor amax_tensor = {amax,
-                                       static_cast<NVTEDType>(DType::kFloat32),
-                                       nvte_make_shape(shape.data(), shape.size())};
-        nvte_set_tensor_param_v2(output_tensor, param, &amax_tensor, sizeof(amax_tensor));
-    };
-
-    replace_amax(kNVTEAmax);
 }
 
 template <typename InputType>
@@ -637,7 +603,7 @@ void performTest(float (*OP)(const float),
     std::vector<float> ref_per_token_amax;
     bool use_2d_quantization = false;
     if (per_token_activation) {
-        set_per_token_amax_metadata(output, rows);
+        output.set_tensor_amax_shape({rows});
         compute_ref<InputType>(OP,
                                input.rowwise_cpu_dptr<InputType>(),
                                ref_output.get(),

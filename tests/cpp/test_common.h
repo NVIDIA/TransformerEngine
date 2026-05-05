@@ -319,6 +319,10 @@ class Tensor {
     tensor_.set_amax(nullptr, DType::kFloat32, tensor_.defaultShape);
   }
 
+  void set_tensor_amax_shape(const std::vector<size_t> &shape);
+  std::vector<float> tensor_amax_values() const;
+  void copy_tensor_amax_from(const Tensor &other);
+
   void set_with_gemm_swizzled_scales(bool with_gemm_swizzled_scales){
     tensor_.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
   }

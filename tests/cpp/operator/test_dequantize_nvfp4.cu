@@ -75,42 +75,6 @@ void compute_ref_dequantize_nvfp4(const uint8_t *packed_data,
     }
 }
 
-void set_per_token_amax_metadata(Tensor &output, const size_t rows) {
-    const std::vector<size_t> shape = {rows};
-    NVTETensor output_tensor = output.data();
-
-    auto replace_amax = [&](const NVTETensorParam param) {
-        NVTEBasicTensor old_amax;
-        nvte_get_tensor_param_v2(output_tensor, param, &old_amax, sizeof(old_amax), nullptr);
-        if (old_amax.data_ptr != nullptr) {
-            NVTE_CHECK_CUDA(cudaFree(old_amax.data_ptr));
-        }
-
-        float *amax = nullptr;
-        NVTE_CHECK_CUDA(cudaMalloc(&amax, rows * sizeof(float)));
-        NVTE_CHECK_CUDA(cudaMemset(amax, 0, rows * sizeof(float)));
-
-        NVTEBasicTensor amax_tensor = {amax,
-                                       static_cast<NVTEDType>(DType::kFloat32),
-                                       nvte_make_shape(shape.data(), shape.size())};
-        nvte_set_tensor_param_v2(output_tensor, param, &amax_tensor, sizeof(amax_tensor));
-    };
-
-    replace_amax(kNVTEAmax);
-}
-
-std::vector<float> get_amax_values(const Tensor &tensor) {
-    NVTEBasicTensor amax;
-    nvte_get_tensor_param_v2(tensor.data(), kNVTEAmax, &amax, sizeof(amax), nullptr);
-    const size_t numel = amax.shape.ndim == 0 ? 1 : amax.shape.data[0];
-    std::vector<float> amax_values(numel);
-    if (numel > 0) {
-        NVTE_CHECK_CUDA(cudaMemcpy(amax_values.data(), amax.data_ptr, numel * sizeof(float),
-                                   cudaMemcpyDeviceToHost));
-    }
-    return amax_values;
-}
-
 template <typename OutputType>
 float compute_amax(const test::Tensor &t, size_t rows, size_t cols) {
     t.to_cpu();
@@ -136,7 +100,7 @@ void performTest_dequantize_nvfp4(const size_t rows, const size_t cols,
     Tensor quantized("quantized", std::vector<size_t>{rows, cols},
                      DType::kFloat4E2M1, true, false, NVTE_NVFP4_1D_SCALING);
     if (per_token_activation) {
-        set_per_token_amax_metadata(quantized, rows);
+        quantized.set_tensor_amax_shape({rows});
     } else if (rows > 0 && cols > 0) {
         quantized.set_tensor_amax(compute_amax<OutputType>(input, rows, cols));
     } else {
@@ -166,7 +130,7 @@ void performTest_dequantize_nvfp4(const size_t rows, const size_t cols,
         const uint8_t *fp4_data =
             reinterpret_cast<const uint8_t *>(quantized.rowwise_cpu_dptr<fp4e2m1>());
         const fp8e4m3 *scales = quantized.rowwise_cpu_scale_inv_ptr<fp8e4m3>();
-        const std::vector<float> amax_val = get_amax_values(quantized);
+        const std::vector<float> amax_val = quantized.tensor_amax_values();
         const NVTEShape scale_shape = quantized.rowwise_scale_inv_shape();
         const size_t scale_stride = scale_shape.data[scale_shape.ndim - 1];
 
@@ -194,7 +158,7 @@ void performTest_dequantize_nvfp4_swizzled(const size_t rows, const size_t cols,
     Tensor quantized_compact("quantized_compact", std::vector<size_t>{rows, cols},
                              DType::kFloat4E2M1, true, false, NVTE_NVFP4_1D_SCALING);
     if (per_token_activation) {
-        set_per_token_amax_metadata(quantized_compact, rows);
+        quantized_compact.set_tensor_amax_shape({rows});
     } else if (rows > 0 && cols > 0) {
         quantized_compact.set_tensor_amax(compute_amax<OutputType>(input, rows, cols));
     } else {
@@ -221,7 +185,7 @@ void performTest_dequantize_nvfp4_swizzled(const size_t rows, const size_t cols,
     Tensor quantized_swizzled("quantized_swizzled", std::vector<size_t>{rows, cols},
                               DType::kFloat4E2M1, true, false, NVTE_NVFP4_1D_SCALING);
     if (per_token_activation) {
-        set_per_token_amax_metadata(quantized_swizzled, rows);
+        quantized_swizzled.set_tensor_amax_shape({rows});
     } else {
         quantized_swizzled.set_tensor_amax(0.0f);
     }
@@ -231,16 +195,7 @@ void performTest_dequantize_nvfp4_swizzled(const size_t rows, const size_t cols,
     // since from_cpu() uploads all CPU buffers (including zero-init data).
     quantized_compact.to_cpu();
     if (per_token_activation) {
-        NVTEBasicTensor compact_amax;
-        NVTEBasicTensor swizzled_amax;
-        nvte_get_tensor_param_v2(quantized_compact.data(), kNVTEAmax, &compact_amax,
-                                 sizeof(compact_amax), nullptr);
-        nvte_get_tensor_param_v2(quantized_swizzled.data(), kNVTEAmax, &swizzled_amax,
-                                 sizeof(swizzled_amax), nullptr);
-        if (rows > 0) {
-            NVTE_CHECK_CUDA(cudaMemcpy(swizzled_amax.data_ptr, compact_amax.data_ptr,
-                                       rows * sizeof(float), cudaMemcpyDeviceToDevice));
-        }
+        quantized_swizzled.copy_tensor_amax_from(quantized_compact);
     } else {
         quantized_swizzled.set_tensor_amax(quantized_compact.amax());
     }
