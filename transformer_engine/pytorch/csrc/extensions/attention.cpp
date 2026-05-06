@@ -6,6 +6,7 @@
 
 #include "../extensions.h"
 #include "common.h"
+#include "common/cudnn_utils.h"
 #include "pybind.h"
 
 namespace {
@@ -40,17 +41,25 @@ void mha_fill(const transformer_engine::TensorWrapper &self, const at::Tensor &s
 namespace transformer_engine::pytorch {
 
 // get the fused attention backend
+//
+// NOTE: the underlying nvte_get_fused_attn_backend now takes o_dtype and scaling_mode in
+// addition to q_dtype/kv_dtype. For the F16/BF16 routing path those are ignored, so we pass
+// q_dtype as o_dtype and DELAYED_TENSOR_SCALING. This Python-facing wrapper therefore keeps
+// its existing signature; FP8 callers that want authoritative routing for non-default scaling
+// recipes should add o_dtype / scaling_mode parameters in a follow-up.
 NVTE_Fused_Attn_Backend get_fused_attn_backend(
     bool is_training, const DType q_dtype, const DType kv_dtype, NVTE_QKV_Layout qkv_layout,
     NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
     float p_dropout, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
     size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, int64_t window_size_left,
     int64_t window_size_right, bool return_max_logit, bool cuda_graph, bool deterministic) {
+  auto handle = cudnnExecutionPlanManager::Instance().GetHandle();
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
-      is_training, static_cast<NVTEDType>(q_dtype), static_cast<NVTEDType>(kv_dtype), qkv_layout,
-      bias_type, attn_mask_type, softmax_type, p_dropout, num_attn_heads, num_gqa_groups,
-      max_seqlen_q, max_seqlen_kv, head_dim_qk, head_dim_v, window_size_left, window_size_right,
-      return_max_logit, cuda_graph, deterministic);
+      is_training, static_cast<NVTEDType>(q_dtype), static_cast<NVTEDType>(kv_dtype),
+      static_cast<NVTEDType>(q_dtype), NVTE_DELAYED_TENSOR_SCALING, qkv_layout, bias_type,
+      attn_mask_type, softmax_type, p_dropout, num_attn_heads, num_gqa_groups, max_seqlen_q,
+      max_seqlen_kv, head_dim_qk, head_dim_v, window_size_left, window_size_right,
+      return_max_logit, cuda_graph, deterministic, handle, /*out_status=*/nullptr);
   return fused_attention_backend;
 }
 

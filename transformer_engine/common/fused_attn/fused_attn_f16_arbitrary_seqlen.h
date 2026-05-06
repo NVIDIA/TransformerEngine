@@ -12,6 +12,7 @@
 #define TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_FUSED_ATTN_ARBITRARY_SEQLEN_H_
 
 #include <cudnn.h>
+#include <cudnn_frontend.h>
 
 #include "common/common.h"
 #include "transformer_engine/fused_attn.h"
@@ -46,6 +47,27 @@ void fused_attn_arbitrary_seqlen_bwd(
     const Tensor *cu_seqlens_q, const Tensor *cu_seqlens_kv, const Tensor *cu_seqlens_q_padded,
     const Tensor *cu_seqlens_kv_padded, const Tensor *rng_state, Tensor *workspace,
     cudaStream_t stream, cudnnHandle_t handle);
+
+// Probe: drives cuDNN-FE (validate -> build_operation_graph -> create_execution_plans ->
+// check_support -> build_plans) for an F16/BF16 forward graph with the given configuration.
+// Returns the cuDNN-FE status: error_code_t::OK iff the graph compiles end-to-end. On OK,
+// the built graph is inserted into the same thread-local cache used by
+// fused_attn_arbitrary_seqlen_fwd_impl, so the executor cache-hits on matching descriptors.
+// On rejection, err_msg contains the underlying cuDNN-FE / NVTE_CHECK message.
+cudnn_frontend::error_t is_supported_f16_fwd(
+    size_t batch, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
+    size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, bool is_training,
+    bool return_max_logit, float p_dropout, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
+    NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type, int64_t window_size_left,
+    int64_t window_size_right, bool bottom_right_diagonal, DType q_dtype, cudnnHandle_t handle);
+
+// Probe: same as above for the F16/BF16 backward graph.
+cudnn_frontend::error_t is_supported_f16_bwd(
+    size_t batch, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
+    size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, float p_dropout,
+    NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
+    NVTE_Softmax_Type softmax_type, int64_t window_size_left, int64_t window_size_right,
+    bool bottom_right_diagonal, bool deterministic, DType q_dtype, cudnnHandle_t handle);
 
 }  // namespace transformer_engine
 

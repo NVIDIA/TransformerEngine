@@ -2991,4 +2991,105 @@ void fused_attn_fp8_bwd(
     return;
   }
 }
+
+cudnn_frontend::error_t is_supported_fp8_fwd(
+    size_t batch, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
+    size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, bool is_training, float p_dropout,
+    NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
+    NVTE_Softmax_Type softmax_type, int64_t window_size_left, int64_t window_size_right,
+    bool bottom_right_diagonal, DType q_dtype, DType o_dtype, NVTEScalingMode scaling_mode,
+    cudnnHandle_t handle) {
+  // FP8 fwd impl rejects any qkv_format other than BSHD/SBHD/BHSD with NVTE_ERROR; mirror that
+  // here so the probe returns a typed rejection instead of catching the throw.
+  const NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
+  if (qkv_format != NVTE_QKV_Format::NVTE_BSHD && qkv_format != NVTE_QKV_Format::NVTE_SBHD &&
+      qkv_format != NVTE_QKV_Format::NVTE_BHSD) {
+    return {cudnn_frontend::error_code_t::INVALID_VALUE,
+            "FP8 fused attention only supports BSHD/SBHD/BHSD layouts."};
+  }
+  size_t workspace_size = 0;
+  try {
+    fused_attn::fused_attn_fp8_fwd_impl(
+        static_cast<int64_t>(batch), static_cast<int64_t>(num_attn_heads),
+        static_cast<int64_t>(num_gqa_groups), static_cast<int64_t>(max_seqlen_q),
+        static_cast<int64_t>(max_seqlen_kv), static_cast<int64_t>(head_dim_qk),
+        static_cast<int64_t>(head_dim_v), is_training, /*scaling_factor=*/1.0f, p_dropout,
+        qkv_layout, /*o_format=*/qkv_format, bias_type, mask_type, softmax_type,
+        window_size_left, window_size_right, bottom_right_diagonal,
+        /*devPtrQ=*/nullptr, /*devPtrK=*/nullptr, /*devPtrV=*/nullptr,
+        /*devPtrSoftmaxOffset=*/nullptr, /*devPtrM=*/nullptr, /*devPtrO=*/nullptr,
+        /*devPtrDescaleQ=*/nullptr, /*devPtrDescaleK=*/nullptr, /*devPtrDescaleV=*/nullptr,
+        /*devPtrDescaleS=*/nullptr, /*devPtrScaleS=*/nullptr, /*devPtrScaleO=*/nullptr,
+        /*devPtrAmaxO=*/nullptr, /*devPtrAmaxS=*/nullptr, /*devPtrcuSeqlensQ=*/nullptr,
+        /*devPtrcuSeqlensKV=*/nullptr, /*devPtrDropoutSeed=*/nullptr,
+        /*devPtrDropoutOffset=*/nullptr, get_cudnn_fe_dtype(q_dtype),
+        get_cudnn_fe_dtype(o_dtype), scaling_mode,
+        /*qkv_scale_inv_format=*/NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET,
+        /*workspace=*/nullptr, &workspace_size,
+        /*stream=*/static_cast<cudaStream_t>(0), handle);
+    return {cudnn_frontend::error_code_t::OK, ""};
+  } catch (const std::exception &e) {
+    return {cudnn_frontend::error_code_t::GRAPH_NOT_SUPPORTED, e.what()};
+  } catch (...) {
+    return {cudnn_frontend::error_code_t::GRAPH_NOT_SUPPORTED,
+            "is_supported_fp8_fwd: unknown failure"};
+  }
+}
+
+cudnn_frontend::error_t is_supported_fp8_bwd(
+    size_t batch, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
+    size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, float p_dropout,
+    NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
+    NVTE_Softmax_Type softmax_type, int64_t window_size_left, int64_t window_size_right,
+    bool bottom_right_diagonal, bool deterministic, DType q_dtype, DType o_dtype,
+    NVTEScalingMode scaling_mode, cudnnHandle_t handle) {
+  const NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
+  if (qkv_format != NVTE_QKV_Format::NVTE_BSHD && qkv_format != NVTE_QKV_Format::NVTE_SBHD &&
+      qkv_format != NVTE_QKV_Format::NVTE_BHSD) {
+    return {cudnn_frontend::error_code_t::INVALID_VALUE,
+            "FP8 fused attention only supports BSHD/SBHD/BHSD layouts."};
+  }
+  // For FP8 bwd, dO data type matches O data type and dQKV data type matches Q data type
+  // (this mirrors the assumption used by callers of fused_attn_fp8_bwd in TE).
+  const cudnn_frontend::DataType_t qkv_t = get_cudnn_fe_dtype(q_dtype);
+  const cudnn_frontend::DataType_t o_t = get_cudnn_fe_dtype(o_dtype);
+  const cudnn_frontend::DataType_t do_t = o_t;
+  const cudnn_frontend::DataType_t dqkv_t = qkv_t;
+  size_t workspace_size = 0;
+  try {
+    fused_attn::fused_attn_fp8_bwd_impl(
+        static_cast<int64_t>(batch), static_cast<int64_t>(num_attn_heads),
+        static_cast<int64_t>(num_gqa_groups), static_cast<int64_t>(max_seqlen_q),
+        static_cast<int64_t>(max_seqlen_kv), static_cast<int64_t>(head_dim_qk),
+        static_cast<int64_t>(head_dim_v), /*scaling_factor=*/1.0f, p_dropout, qkv_layout,
+        /*o_format=*/qkv_format, /*do_format=*/qkv_format, /*dqkv_layout=*/qkv_layout, bias_type,
+        mask_type, softmax_type, window_size_left, window_size_right, bottom_right_diagonal,
+        deterministic,
+        /*devPtrQ=*/nullptr, /*devPtrK=*/nullptr, /*devPtrV=*/nullptr, /*devPtrM=*/nullptr,
+        /*devPtrO=*/nullptr, /*devPtrdO=*/nullptr, /*devPtrSoftmaxOffset=*/nullptr,
+        /*devPtrdQ=*/nullptr, /*devPtrdK=*/nullptr, /*devPtrdV=*/nullptr,
+        /*devPtrdSoftmaxOffset=*/nullptr, /*devPtrDescaleQ=*/nullptr,
+        /*devPtrDescaleK=*/nullptr, /*devPtrDescaleV=*/nullptr, /*devPtrDescaleO=*/nullptr,
+        /*devPtrDescaledO=*/nullptr, /*devPtrDescaleS=*/nullptr, /*devPtrDescaledP=*/nullptr,
+        /*devPtrScaleS=*/nullptr, /*devPtrScaledP=*/nullptr, /*devPtrScaledQ=*/nullptr,
+        /*devPtrScaledK=*/nullptr, /*devPtrScaledV=*/nullptr, /*devPtrAmaxdP=*/nullptr,
+        /*devPtrAmaxdQ=*/nullptr, /*devPtrAmaxdK=*/nullptr, /*devPtrAmaxdV=*/nullptr,
+        /*devPtrQ_t=*/nullptr, /*devPtrK_t=*/nullptr, /*devPtrdO_f16=*/nullptr,
+        /*devPtrdO_t=*/nullptr, /*devPtrDescaleQ_t=*/nullptr, /*devPtrDescaleK_t=*/nullptr,
+        /*devPtrDescaledO_t=*/nullptr, /*devPtrcuSeqlensQ=*/nullptr,
+        /*devPtrcuSeqlensKV=*/nullptr, /*devPtrDropoutSeed=*/nullptr,
+        /*devPtrDropoutOffset=*/nullptr, qkv_t, o_t, do_t, dqkv_t, scaling_mode,
+        /*qkv_scale_inv_format=*/NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET,
+        /*do_scale_inv_format=*/NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET,
+        /*workspace=*/nullptr, &workspace_size,
+        /*stream=*/static_cast<cudaStream_t>(0), handle);
+    return {cudnn_frontend::error_code_t::OK, ""};
+  } catch (const std::exception &e) {
+    return {cudnn_frontend::error_code_t::GRAPH_NOT_SUPPORTED, e.what()};
+  } catch (...) {
+    return {cudnn_frontend::error_code_t::GRAPH_NOT_SUPPORTED,
+            "is_supported_fp8_bwd: unknown failure"};
+  }
+}
+
 }  // namespace transformer_engine
