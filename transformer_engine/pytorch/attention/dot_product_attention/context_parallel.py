@@ -2969,13 +2969,38 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 def get_kv_seq_info_after_all_gather(
     local_chunk_id, cp_size, max_seqlen_q, max_seqlen_kv, window_size, causal
 ):
-    """Compute KV sequence index range and update window size after all-gather."""
+    """Compute per-step KV range, effective max_seqlen_kv, and adjusted window
+    size for one chunk in the all-gather CP forward/backward.
+
+    After all-gather, the full KV buffer spans ``2 * cp_size`` chunks of
+    ``max_seqlen_kv`` tokens each.  For a given Q chunk (``local_chunk_id``),
+    this function determines:
+
+    * **kv_range** ``(seq_start_idx, seq_end_idx)`` — the slice of the KV
+      buffer that is visible to this Q chunk.  bshd/sbhd uses this to slice
+      ``k_ag``/``v_ag``; THD ignores ``seq_start_idx`` (passes the full
+      buffer; visibility is controlled via ``cu_seqlens``/``seqused_k``)
+      but uses ``seq_end_idx`` as max_seqlen_kv.
+    * **adjusted_window** ``(window_left, window_right)`` — window size
+      compensated for the KV trim.  Under FA3's bottom_right alignment
+      ``Q[0]`` aligns to ``KV[kv_len - q_len]``, so trimming KV shifts
+      the alignment and the window must be adjusted to preserve the
+      original attention pattern.  Used by both bshd/sbhd and THD.
+
+    The caller derives max_seqlen_kv from kv_range: bshd uses
+    ``seq_end - seq_start`` (the sliced KV length), THD uses ``seq_end``
+    (full buffer from offset 0).
+
+    Returns:
+        Tuple of ``(kv_range, adjusted_window)``.
+    """
     local_chunk_end_idx = (local_chunk_id + 1) * max_seqlen_kv
     full_seq_end_idx = max_seqlen_kv * cp_size * 2
 
     if window_size is None:
         window_size = (-1, 0) if causal else (-1, -1)
 
+    # Right boundary: how far past chunk_end the kernel can see.
     if window_size[1] == -1:
         seq_end_idx = full_seq_end_idx
         window_size_right = -1
@@ -2983,6 +3008,7 @@ def get_kv_seq_info_after_all_gather(
         seq_end_idx = min(full_seq_end_idx, local_chunk_end_idx + window_size[1])
         window_size_right = local_chunk_end_idx + window_size[1] - seq_end_idx
 
+    # Left boundary: how far before chunk_end - q_len the kernel can see.
     if window_size[0] == -1:
         seq_start_idx = 0
         window_size_left = -1
@@ -3424,36 +3450,27 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                                         )
                                     )
                     elif qkv_format == "thd":
-                        # THD: pass full Q with per-step cu_seqlens_q_padded to select chunk
+                        # THD: pass full Q/KV with per-step cu_seqlens to select chunks.
+                        # Reuse get_kv_seq_info_after_all_gather for max_seqlen_kv_ and
+                        # window adjustment (same formulas as bshd). THD ignores kv_range
+                        # since visibility is controlled via cu_seqlens/seqused_k.
                         q_part = q
                         k_part = k_ag
                         v_part = v_ag
                         new_qkv_layout = qkv_layout
                         qkv_scale_inv_format = None
-                        chunk_id = local_seq_chunk_ids[i]
-                        full_kv_seqlen = max_seqlen_kv * (2 * cp_size)
-                        if causal or sliding_window_attn:
-                            max_seqlen_kv_ = max_seqlen_kv * (chunk_id + 1)
-                            if window_size is not None and window_size[1] > 0:
-                                max_seqlen_kv_ = min(
-                                    max_seqlen_kv_ + window_size[1], full_kv_seqlen
-                                )
-                        else:
-                            max_seqlen_kv_ = full_kv_seqlen
-                        cu_seqlens_kv_per_step[i] = thd_cu_seqlens_kv_per_step[i]
-                        # Window size: when KV is trimmed (causal or SWA), the
-                        # right-extension shifts Q under bottom_right alignment.
-                        # Adjust window to compensate, matching bshd logic.
-                        if window_size is None:
-                            window_size_per_step[i] = (-1, 0) if causal else (-1, -1)
-                        elif causal or sliding_window_attn:
-                            chunk_end = max_seqlen_kv * (chunk_id + 1)
-                            window_size_per_step[i] = (
-                                window_size[0] + max_seqlen_kv_ - chunk_end,
-                                chunk_end + window_size[1] - max_seqlen_kv_,
+                        kv_range, window_size_per_step[i] = (
+                            get_kv_seq_info_after_all_gather(
+                                local_seq_chunk_ids[i],
+                                cp_size,
+                                max_seqlen_q,
+                                max_seqlen_kv,
+                                window_size,
+                                causal,
                             )
-                        else:
-                            window_size_per_step[i] = window_size
+                        )
+                        max_seqlen_kv_ = kv_range[1]
+                        cu_seqlens_kv_per_step[i] = thd_cu_seqlens_kv_per_step[i]
                     if use_fused_attention:
                         # Set per-step parameters for THD vs bshd/sbhd
                         if qkv_format == "thd":
@@ -3907,27 +3924,21 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             if i < len(local_seq_chunk_ids):
                 with torch.cuda.stream(flash_attn_streams[i]):
                     if ctx.qkv_format == "thd":
-                        # THD: pass full Q/dout with per-step cu_seqlens_q_padded
+                        # THD: pass full Q/dout with per-step cu_seqlens_q_padded.
+                        # Use original window_size (not forward-adjusted) to
+                        # recompute max_seqlen_kv via the shared function.
                         q_part = q
                         k_part = k_ag
                         v_part = v_ag
-                        chunk_id = local_seq_chunk_ids[i]
-                        causal = "causal" in ctx.attn_mask_type
-                        orig_ws = ctx.window_size
-                        sliding_window_attn = (
-                            orig_ws is not None
-                            and orig_ws != (-1, 0)
-                            and orig_ws != (-1, -1)
+                        kv_range, _ = get_kv_seq_info_after_all_gather(
+                            local_seq_chunk_ids[i],
+                            cp_size,
+                            ctx.max_seqlen_q,
+                            ctx.max_seqlen_kv,
+                            ctx.window_size,
+                            "causal" in ctx.attn_mask_type,
                         )
-                        full_kv_seqlen = ctx.max_seqlen_kv * (2 * cp_size)
-                        if causal or sliding_window_attn:
-                            max_seqlen_kv = ctx.max_seqlen_kv * (chunk_id + 1)
-                            if orig_ws is not None and orig_ws[1] > 0:
-                                max_seqlen_kv = min(
-                                    max_seqlen_kv + orig_ws[1], full_kv_seqlen
-                                )
-                        else:
-                            max_seqlen_kv = full_kv_seqlen
+                        max_seqlen_kv = kv_range[1]
                         out_part = out
                         dout_part = dout
                     else:
