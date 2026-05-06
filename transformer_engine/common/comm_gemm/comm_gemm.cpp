@@ -546,11 +546,11 @@ void nvte_comm_gemm_ctx_destroy(NVTECommGemmCtx* ctx) {
   NVTE_ERROR("Transformer Engine has not been built with cuBLASMp support.");
 }
 
-void nvte_all_gather_gemm(NVTECommGemmCtx* ctx, int64_t m, int64_t n, int64_t k,
-                          const NVTETensor a, const NVTETensor b, const NVTETensor d,
-                          const NVTETensor bias, const NVTETensor pre_act_out, bool transa,
-                          bool transb, bool grad, bool accumulate, int comm_sm_count,
-                          cudaStream_t main_stream, NVTECommGemmAlgoType algo) {
+void nvte_all_gather_gemm(NVTECommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, const NVTETensor a,
+                          const NVTETensor b, const NVTETensor d, const NVTETensor bias,
+                          const NVTETensor pre_act_out, bool transa, bool transb, bool grad,
+                          bool accumulate, int comm_sm_count, cudaStream_t main_stream,
+                          NVTECommGemmAlgoType algo) {
   NVTE_ERROR("Transformer Engine has not been built with cuBLASMp support.");
 }
 
@@ -562,11 +562,11 @@ void nvte_gemm_reduce_scatter(NVTECommGemmCtx* ctx, int64_t m, int64_t n, int64_
   NVTE_ERROR("Transformer Engine has not been built with cuBLASMp support.");
 }
 
-void nvte_gemm_all_reduce(NVTECommGemmCtx* ctx, int64_t m, int64_t n, int64_t k,
-                          const NVTETensor a, const NVTETensor b, const NVTETensor d,
-                          const NVTETensor bias, const NVTETensor pre_act_out, bool transa,
-                          bool transb, bool grad, bool accumulate, int comm_sm_count,
-                          cudaStream_t main_stream, NVTECommGemmAlgoType algo) {
+void nvte_gemm_all_reduce(NVTECommGemmCtx* ctx, int64_t m, int64_t n, int64_t k, const NVTETensor a,
+                          const NVTETensor b, const NVTETensor d, const NVTETensor bias,
+                          const NVTETensor pre_act_out, bool transa, bool transb, bool grad,
+                          bool accumulate, int comm_sm_count, cudaStream_t main_stream,
+                          NVTECommGemmAlgoType algo) {
   NVTE_ERROR("Transformer Engine has not been built with cuBLASMp support.");
 }
 
