@@ -1132,10 +1132,23 @@ class RecipeState(abc.ABC):
     This class may pack together the state for multiple quantizers,
     which is helpful for applying fused kernels with less overhead.
 
+    Subclasses that own mutable training buffers (e.g. delayed scaling's
+    ``scale`` / ``amax_history``) MUST list them in
+    :attr:`_persistent_state_buffers`. These buffers are preserved across
+    role-driven rebuilds and post-checkpoint resume via
+    :meth:`inherit_state_from`. Stateless subclasses leave the attribute
+    empty.
     """
 
     roles: Optional[List[QuantizerRole]]
     mode: str
+
+    # Names of mutable torch.Tensor attributes that represent persistent
+    # training state (e.g. running scale, amax history). The default
+    # ``inherit_state_from`` rebinds these from a predecessor RecipeState
+    # so external references (e.g. ``FP8GlobalStateManager`` reduction
+    # buffers) keep pointing at the same backing tensor.
+    _persistent_state_buffers: Tuple[str, ...] = ()
 
     # Canonical tensor types that a recipe state can dispatch on.
     _KNOWN_TENSOR_TYPES = ("input", "weight", "output", "grad_output", "grad_input")
@@ -1290,6 +1303,43 @@ class RecipeState(abc.ABC):
 
         """
 
+    def inherit_state_from(self, other: "RecipeState") -> bool:
+        """Take over persistent training buffers from a predecessor state.
+
+        Used when a ``RecipeState`` is being replaced (e.g. role-driven
+        rebuild, post-checkpoint resume) but its mutable buffers must
+        survive. The default implementation rebinds attributes listed in
+        :attr:`_persistent_state_buffers` to ``other``'s tensor objects.
+        Rebinding (rather than copying values) ensures any external
+        references — most importantly the
+        :class:`FP8GlobalStateManager` reduction buffers — keep pointing
+        at storage that is also visible to this state's quantizers, so
+        amax reductions and quantization stay consistent.
+
+        Subclasses with composed sub-states (e.g. :class:`CustomRecipeState`
+        owning an inner :class:`DelayedScalingRecipeState`) override this
+        to recurse / stash for later use during ``make_quantizers``.
+
+        Returns
+        -------
+        bool
+            ``True`` if any persistent buffer was inherited; ``False`` if
+            the states are incompatible (different class, mismatched
+            shapes / dtypes) and a fresh state should be used instead.
+        """
+        if type(self) is not type(other):
+            return False
+        if not self._persistent_state_buffers:
+            return False
+        for name in self._persistent_state_buffers:
+            src = getattr(other, name)
+            dst = getattr(self, name)
+            if src.shape != dst.shape or src.dtype != dst.dtype:
+                return False
+        for name in self._persistent_state_buffers:
+            setattr(self, name, getattr(other, name))
+        return True
+
 
 class DelayedScalingRecipeState(RecipeState):
     """State for FP8 quantization with per-tensor delayed scaling.
@@ -1306,6 +1356,10 @@ class DelayedScalingRecipeState(RecipeState):
     dtype: tex.DType
     scale: torch.Tensor
     amax_history: torch.Tensor
+
+    # Persistent training state inherited across role-driven rebuilds.
+    # See ``RecipeState.inherit_state_from``.
+    _persistent_state_buffers = ("scale", "amax_history")
 
     def __init__(
         self,
@@ -1592,10 +1646,22 @@ def _handle_delayed_scaling_requests(
     raw: list,
     device: torch.device,
     mode: str,
+    *,
+    existing_ds_state: Optional["DelayedScalingRecipeState"] = None,
 ) -> Optional["DelayedScalingRecipeState"]:
     """Detect DelayedScalingRequest items, allocate shared state, replace with real quantizers.
 
     All DS requests in the same RecipeState must share identical parameters.
+
+    When ``existing_ds_state`` is provided and compatible (same dtype,
+    same number of DS slots, same ``amax_history_len``), it is reused
+    instead of allocating fresh buffers. Reusing preserves accumulated
+    ``scale`` / ``amax_history`` across role-driven rebuilds — important
+    for post-checkpoint resume and mid-training factory swaps. The
+    ``Float8Quantizer`` instances built here will then view into the
+    SAME tensor objects already registered with
+    ``FP8GlobalStateManager``'s reduction buffers, keeping reduction
+    and quantization consistent.
 
     Returns a ``DelayedScalingRecipeState`` owning the shared buffers, or
     ``None`` when no DS requests are present.
@@ -1634,12 +1700,26 @@ def _handle_delayed_scaling_requests(
         reduce_amax=r0.reduce_amax,
     )
     n = len(ds_items)
-    dsrs = DelayedScalingRecipeState(
-        inner_recipe,
-        mode=mode,
-        num_quantizers=n,
-        device=device,
-    )
+
+    # Reuse a compatible existing DSRS so its scale / amax_history (and any
+    # external references to them) survive the rebuild.
+    expected_dtype = get_fp8_te_dtype(inner_recipe, mode == "forward")
+    dsrs = None
+    if existing_ds_state is not None:
+        if (
+            existing_ds_state.num_quantizers == n
+            and existing_ds_state.dtype == expected_dtype
+            and existing_ds_state.amax_history.shape[0] == r0.amax_history_len
+        ):
+            dsrs = existing_ds_state
+
+    if dsrs is None:
+        dsrs = DelayedScalingRecipeState(
+            inner_recipe,
+            mode=mode,
+            num_quantizers=n,
+            device=device,
+        )
 
     # Splice Float8Quantizer instances (backed by dsrs buffers) into raw list.
     quantizers = dsrs.make_quantizers()
@@ -1676,7 +1756,21 @@ class CustomRecipeState(RecipeState):
     mode: str
     num_quantizers: int
     device: Optional[torch.device]
+
+    # -- Composed sub-states for stateful sub-recipes --
+    #
+    # When the qfactory returns request objects (e.g. ``DelayedScalingRequest``)
+    # for a stateful built-in recipe, ``make_quantizers`` allocates a real
+    # built-in ``RecipeState`` for those slots and reuses its persistent
+    # buffers across role-driven rebuilds via ``inherit_state_from``. One
+    # ``_<x>_state`` / ``_<x>_state_to_inherit`` pair per stateful recipe.
+
+    # Delayed scaling (``DelayedScalingRequest`` -> ``DelayedScalingRecipeState``):
+    # ``_ds_state`` owns shared ``scale`` / ``amax_history`` for DS slots in this
+    # CustomRecipeState; ``_ds_state_to_inherit`` is a transient stash set by
+    # ``inherit_state_from`` and consumed by the next ``make_quantizers`` call.
     _ds_state: Optional[DelayedScalingRecipeState]
+    _ds_state_to_inherit: Optional[DelayedScalingRecipeState]
 
     def __init__(
         self,
@@ -1695,7 +1789,11 @@ class CustomRecipeState(RecipeState):
         if device is None:
             device = torch.device("cuda")
         self.device = device
+
+        # -- Stateful sub-state slots (initialized empty) --
+        # Delayed scaling
         self._ds_state = None
+        self._ds_state_to_inherit = None
 
         if getattr(recipe, "qfactory", None) is None:
             raise ValueError("CustomRecipe requires `qfactory`.")
@@ -1726,8 +1824,44 @@ class CustomRecipeState(RecipeState):
                     f"(role={roles[i]}). Every slot must return a Quantizer "
                     "instance or a QuantizerRequest."
                 )
-        self._ds_state = _handle_delayed_scaling_requests(raw, self.device, self.mode)
+
+        # -- Delayed scaling sub-state --
+        # If a predecessor stashed a compatible inner DSRS via
+        # ``inherit_state_from``, reuse it so accumulated scale / amax_history
+        # survive the rebuild. Consume the stash so a subsequent
+        # ``make_quantizers`` doesn't reuse it again unintentionally.
+        existing_ds_state = self._ds_state_to_inherit
+        self._ds_state_to_inherit = None
+        self._ds_state = _handle_delayed_scaling_requests(
+            raw,
+            self.device,
+            self.mode,
+            existing_ds_state=existing_ds_state,
+        )
+
         return raw
+
+    def inherit_state_from(self, other: "RecipeState") -> bool:
+        """Stash ``other``'s composed sub-states for reuse on next ``make_quantizers``.
+
+        ``CustomRecipeState`` cannot inherit declaratively because its
+        persistent state lives in composed sub-states (one per stateful
+        sub-recipe) that are allocated only when ``make_quantizers`` runs.
+        For each stateful sub-recipe we stash the predecessor's sub-state
+        and let the next ``make_quantizers`` decide whether the
+        predecessor's shape is compatible with the new factory output.
+        """
+        if not isinstance(other, CustomRecipeState):
+            return False
+
+        inherited_any = False
+
+        # -- Delayed scaling sub-state --
+        if other._ds_state is not None:
+            self._ds_state_to_inherit = other._ds_state
+            inherited_any = True
+
+        return inherited_any
 
     # -- Delegation to composed DelayedScalingRecipeState --
 

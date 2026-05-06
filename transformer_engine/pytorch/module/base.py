@@ -994,6 +994,24 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             roles=roles,
         )
 
+        # Reached the rebuild path because ``fp8_meta_tensors_initialized``
+        # was flipped to False after first init — most commonly because the
+        # ``output_quantizer_role`` / ``grad_input_quantizer_role`` setter
+        # invalidated state when a parent module (e.g. ``MultiheadAttention``)
+        # wired boundary roles. That setter is recipe-agnostic, so this code
+        # fires even for built-in recipes that don't consume role information
+        # in ``make_quantizers``.
+        #
+        # Rebuilding the recipe state must preserve persistent training
+        # buffers (delayed-scaling ``scale`` / ``amax_history``) so the new
+        # quantizer instances and the ``FP8GlobalStateManager`` reduction
+        # buffers end up viewing the SAME tensor objects, and so any
+        # checkpoint-loaded state isn't silently destroyed on the first
+        # forward after ``load_state_dict``.
+        old_state = self.fp8_meta.get(fp8_meta_tensor_key)
+        if old_state is not None:
+            recipe_state.inherit_state_from(old_state)
+
         self.fp8_meta[fp8_meta_tensor_key] = recipe_state
         self.quantizers[fp8_meta_tensor_key] = recipe_state.make_quantizers()
 

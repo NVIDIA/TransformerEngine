@@ -893,6 +893,173 @@ def test_custom_recipe_ds_multi_step():
     assert not torch.all(amax_snapshots[0] == 0), "amax_history should be updated after first step"
 
 
+# ----------------------------------------------------------------------
+# State preservation across role-driven rebuilds
+# ----------------------------------------------------------------------
+#
+# Setting ``output_quantizer_role`` / ``grad_input_quantizer_role`` to a
+# different value flips ``fp8_meta_tensors_initialized = False`` so the
+# next ``set_meta_tensor`` call rebuilds the recipe state and quantizers
+# with up-to-date roles. That rebuild MUST preserve persistent training
+# buffers (delayed scaling's ``scale`` / ``amax_history``); otherwise
+# checkpointed amax history is silently destroyed on the first forward
+# pass after ``load_state_dict`` (when MHA wires boundary roles for the
+# first time on the freshly-loaded module). The buffers must also be
+# preserved by tensor-object identity, not just by value: the
+# ``FP8GlobalStateManager`` reduction buffer holds a direct reference to
+# the tensor created at first init, so any rebuild that allocates fresh
+# tensors would break amax all-reduce.
+
+
+def test_role_change_preserves_delayed_scaling_state():
+    """Built-in DelayedScaling: role-driven rebuild preserves scale / amax_history.
+
+    Stashes sentinel values into the buffers, forces a rebuild via the role
+    setter, and verifies values + tensor-object identity survive.
+    """
+    available, reason = te.is_fp8_available(return_reason=True)
+    if not torch.cuda.is_available() or not available:
+        pytest.skip(f"FP8 unsupported: {reason}")
+
+    torch.manual_seed(0)
+    model = Linear(64, 64, params_dtype=torch.bfloat16, bias=False).cuda()
+    inp = torch.randn(32, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    fp8_recipe = recipe.DelayedScaling(amax_history_len=8)
+
+    # Initialize state via a forward pass.
+    with autocast(enabled=True, recipe=fp8_recipe):
+        model(inp).float().sum().backward()
+    assert model.fp8_meta_tensors_initialized
+
+    state_before = model.fp8_meta["scaling_fwd"]
+    state_before.scale.fill_(3.14)
+    state_before.amax_history.fill_(2.71)
+    scale_obj_id = id(state_before.scale)
+    amax_obj_id = id(state_before.amax_history)
+    scale_data_ptr = state_before.scale.data_ptr()
+    amax_data_ptr = state_before.amax_history.data_ptr()
+
+    # Trigger role-driven invalidation. Setting a non-None role flips
+    # ``fp8_meta_tensors_initialized = False`` so the next ``set_meta_tensor``
+    # falls through and creates a fresh ``RecipeState``.
+    model.output_quantizer_role = QuantizerRole(
+        module_type="dpa", tensor_type="qkv", name="downstream"
+    )
+    assert not model.fp8_meta_tensors_initialized
+
+    # Trigger the rebuild directly (no forward, so we can compare buffers exactly).
+    model.init_fp8_meta_tensors(fp8_recipe)
+    assert model.fp8_meta_tensors_initialized
+
+    state_after = model.fp8_meta["scaling_fwd"]
+    assert state_after is not state_before, "state should have been rebuilt"
+    # Tensor objects must be inherited (not freshly allocated) so the
+    # FP8GlobalStateManager reduction buffer's reference stays valid.
+    assert (
+        id(state_after.scale) == scale_obj_id
+    ), "scale tensor object replaced by rebuild; global reduction buffer would dangle"
+    assert id(state_after.amax_history) == amax_obj_id
+    assert state_after.scale.data_ptr() == scale_data_ptr
+    assert state_after.amax_history.data_ptr() == amax_data_ptr
+    # Sentinel values must be preserved.
+    assert state_after.scale.eq(3.14).all(), "scale was wiped by role-driven rebuild"
+    assert state_after.amax_history.eq(2.71).all(), "amax_history was wiped"
+
+
+def test_role_change_preserves_custom_delayed_scaling_state():
+    """CustomRecipe + DelayedScalingRequest: role-driven rebuild preserves inner DSRS.
+
+    Same property as the built-in case, but for the
+    ``CustomRecipeState`` -> composed ``DelayedScalingRecipeState`` path.
+    The inner DS state must be re-used across the rebuild so its
+    accumulated buffers (and any external references to them) survive.
+    """
+    available, reason = te.is_fp8_available(return_reason=True)
+    if not torch.cuda.is_available() or not available:
+        pytest.skip(f"FP8 unsupported: {reason}")
+
+    from transformer_engine.pytorch.quantization import (
+        CustomRecipeState,
+        DelayedScalingRequest,
+    )
+    from transformer_engine.common.recipe import Format
+
+    def ds_factory(role):
+        return DelayedScalingRequest(fp8_format=Format.HYBRID, amax_history_len=8)
+
+    torch.manual_seed(0)
+    model = Linear(64, 64, params_dtype=torch.bfloat16, bias=False).cuda()
+    inp = torch.randn(32, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    custom_recipe = recipe.CustomRecipe(qfactory=ds_factory)
+
+    # Initialize state via a forward pass.
+    with autocast(enabled=True, recipe=custom_recipe):
+        model(inp).float().sum().backward()
+    assert model.fp8_meta_tensors_initialized
+
+    state_before = model.fp8_meta["scaling_fwd"]
+    assert isinstance(state_before, CustomRecipeState)
+    assert state_before._has_delayed_scaling
+    inner_before = state_before._ds_state
+    inner_before.scale.fill_(3.14)
+    inner_before.amax_history.fill_(2.71)
+    scale_obj_id = id(inner_before.scale)
+    amax_obj_id = id(inner_before.amax_history)
+
+    # Trigger role-driven invalidation.
+    model.output_quantizer_role = QuantizerRole(
+        module_type="dpa", tensor_type="qkv", name="downstream"
+    )
+    assert not model.fp8_meta_tensors_initialized
+
+    # Rebuild.
+    model.init_fp8_meta_tensors(custom_recipe)
+    assert model.fp8_meta_tensors_initialized
+
+    state_after = model.fp8_meta["scaling_fwd"]
+    assert isinstance(state_after, CustomRecipeState)
+    assert state_after is not state_before, "outer CustomRecipeState should have been rebuilt"
+    assert state_after._has_delayed_scaling, "rebuild lost the inner DS state"
+    inner_after = state_after._ds_state
+    # Inner DSRS object identity is preserved (we reuse the existing inner state),
+    # which means its buffers' tensor objects are also preserved.
+    assert (
+        inner_after is inner_before
+    ), "inner DSRS replaced; FP8GlobalStateManager reduction buffer would dangle"
+    assert id(inner_after.scale) == scale_obj_id
+    assert id(inner_after.amax_history) == amax_obj_id
+    # Sentinel values preserved.
+    assert inner_after.scale.eq(3.14).all()
+    assert inner_after.amax_history.eq(2.71).all()
+
+
+def test_role_change_does_not_invalidate_when_role_unchanged():
+    """Setting the role to its current value is a no-op (no rebuild)."""
+    available, reason = te.is_fp8_available(return_reason=True)
+    if not torch.cuda.is_available() or not available:
+        pytest.skip(f"FP8 unsupported: {reason}")
+
+    torch.manual_seed(0)
+    model = Linear(64, 64, params_dtype=torch.bfloat16, bias=False).cuda()
+    inp = torch.randn(32, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    fp8_recipe = recipe.DelayedScaling(amax_history_len=8)
+
+    role = QuantizerRole(module_type="dpa", tensor_type="qkv", name="x")
+    model.output_quantizer_role = role  # initial set: state not yet built, no-op
+
+    with autocast(enabled=True, recipe=fp8_recipe):
+        model(inp).float().sum().backward()
+    assert model.fp8_meta_tensors_initialized
+
+    # Re-setting the same role value must not invalidate.
+    model.output_quantizer_role = QuantizerRole(
+        module_type="dpa", tensor_type="qkv", name="x"
+    )
+    assert model.fp8_meta_tensors_initialized, (
+        "Setting role to an equal value should be a no-op (frozen-dataclass __eq__)"
+    )
+
+
 def test_custom_recipe_dpa_fp8():
     """DotProductAttention forward+backward with CustomRecipe and role-based mixed quantizers.
 

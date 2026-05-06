@@ -867,9 +867,33 @@ class DotProductAttention(TransformerEngineBaseModule):
             for i in range(len(recipe))
         ]
 
-        self.fp8_meta[fp8_meta_tensor_key] = (
-            recipe_states[-1] if len(recipe) == 2 else recipe_states[0]
-        )
+        # Reached the rebuild path because ``fp8_meta_tensors_initialized``
+        # was flipped to False after first init — most commonly because the
+        # base-class ``output_quantizer_role`` / ``grad_input_quantizer_role``
+        # setter invalidated state when MHA wired boundary roles. That
+        # setter is recipe-agnostic, so this code fires for built-in
+        # recipes too even though they don't consume role information here
+        # (e.g. ``test_dpa_fp8_extra_state`` reaches this path with pure
+        # DelayedScaling).
+        #
+        # Rebuilding the recipe state must preserve persistent training
+        # buffers (delayed-scaling ``scale`` / ``amax_history``) so the new
+        # quantizer instances and the ``FP8GlobalStateManager`` reduction
+        # buffers end up viewing the SAME tensor objects, and so any
+        # checkpoint-loaded state isn't silently destroyed on the first
+        # forward after ``load_state_dict``.
+        #
+        # Inheritance targets the "primary" state stored under
+        # ``fp8_meta[fp8_meta_tensor_key]`` — the one tracked across
+        # ``set_meta_tensor`` calls. Auxiliary states in a multi-recipe
+        # splice (e.g. the CS half of ``[CS, DS]``) are stateless and have
+        # nothing to inherit.
+        old_state = self.fp8_meta.get(fp8_meta_tensor_key)
+        primary_idx = -1 if len(recipe) == 2 else 0
+        if old_state is not None:
+            recipe_states[primary_idx].inherit_state_from(old_state)
+
+        self.fp8_meta[fp8_meta_tensor_key] = recipe_states[primary_idx]
         self.quantizers[fp8_meta_tensor_key] = []
         for recipe_state in recipe_states:
             self.quantizers[fp8_meta_tensor_key].extend(recipe_state.make_quantizers())
