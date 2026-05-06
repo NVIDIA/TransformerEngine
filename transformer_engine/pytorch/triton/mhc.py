@@ -436,7 +436,6 @@ class mHCProjectionOp(torch.autograd.Function):
             norm_weight_ptr=norm_weight,
             M=M,
             N=N,
-            n=n,
             K=K,
             stride_xm=K,
             stride_xk=1,
