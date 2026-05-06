@@ -1056,12 +1056,10 @@ def test_role_change_does_not_invalidate_when_role_unchanged():
     assert model.fp8_meta_tensors_initialized
 
     # Re-setting the same role value must not invalidate.
-    model.output_quantizer_role = QuantizerRole(
-        module_type="dpa", tensor_type="qkv", name="x"
-    )
-    assert model.fp8_meta_tensors_initialized, (
-        "Setting role to an equal value should be a no-op (frozen-dataclass __eq__)"
-    )
+    model.output_quantizer_role = QuantizerRole(module_type="dpa", tensor_type="qkv", name="x")
+    assert (
+        model.fp8_meta_tensors_initialized
+    ), "Setting role to an equal value should be a no-op (frozen-dataclass __eq__)"
 
 
 def test_custom_recipe_dpa_fp8():
