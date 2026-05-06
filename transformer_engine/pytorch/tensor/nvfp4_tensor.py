@@ -128,7 +128,7 @@ class NVFP4Quantizer(Quantizer):
     """Stochastic rounding, only applicable for gradients."""
     stochastic_rounding: bool
 
-    """Row-scaled NVFP4 quantization path."""
+    """Whether emitted NVFP4 tensors store one FP32 amax per row."""
     row_scaled_nvfp4: bool
 
     """RHT matrix random sign mask"""

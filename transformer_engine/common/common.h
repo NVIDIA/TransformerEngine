@@ -173,7 +173,7 @@ struct Tensor {
    *  Only meaningful for MXFP8 and NVFP4.
    */
   bool with_gemm_swizzled_scales = false;
-  /*! \brief Whether rowwise NVFP4 amax is one value per tensor row.
+  /*! \brief Whether NVFP4 rowwise amax metadata is row-scaled.
    *
    *  Only meaningful for NVFP4 tensors.
    */
@@ -189,7 +189,7 @@ struct Tensor {
       sizeof(NVTEBasicTensor),  // kNVTEColumnwiseScaleInv
       sizeof(NVTEBasicTensor),  // kNVTEColumnwiseAmax
       sizeof(uint8_t),          // kNVTEWithGEMMSwizzledScales
-      sizeof(uint8_t)           // kNVTERowwiseAmaxIsRowScaled
+      sizeof(uint8_t)           // kNVTERowScaledNVFP4
   };
 
   Tensor() : scaling_mode{NVTE_DELAYED_TENSOR_SCALING}, nvte_tensor{0} {}

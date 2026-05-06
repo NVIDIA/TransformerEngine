@@ -72,7 +72,7 @@ enum NVTETensorParam {
   kNVTEColumnwiseScaleInv = 5,     /*!< Scale inverse tensor for decoding Columnwise Data */
   kNVTEColumnwiseAmax = 6,         /*!< Columnwise Amax tensor */
   kNVTEWithGEMMSwizzledScales = 7, /*!< Whether scaling factors are in format expected by GEMM */
-  kNVTERowwiseAmaxIsRowScaled = 8, /*!< Whether rowwise amax is one value per tensor row */
+  kNVTERowScaledNVFP4 = 8,         /*!< Whether an NVFP4 tensor uses row scaling */
   kNVTENumTensorParams
 };
 
@@ -768,7 +768,7 @@ class TensorWrapper {
 
   void set_row_scaled_nvfp4(bool row_scaled_nvfp4) {
     const auto val = static_cast<uint8_t>(row_scaled_nvfp4);
-    nvte_set_tensor_param_v2(tensor_, kNVTERowwiseAmaxIsRowScaled, &val, sizeof(val));
+    nvte_set_tensor_param_v2(tensor_, kNVTERowScaledNVFP4, &val, sizeof(val));
   }
 
   // Parameter getters
@@ -809,7 +809,7 @@ class TensorWrapper {
 
   bool get_row_scaled_nvfp4() const {
     uint8_t val = 0;
-    nvte_get_tensor_param_v2(tensor_, kNVTERowwiseAmaxIsRowScaled, &val, sizeof(val), nullptr);
+    nvte_get_tensor_param_v2(tensor_, kNVTERowScaledNVFP4, &val, sizeof(val), nullptr);
     return static_cast<bool>(val);
   }
 

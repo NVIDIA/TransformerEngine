@@ -1481,7 +1481,12 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
                              return detail::IsNVFP4Quantizers(quantizer.ptr());
                            })) {
       allocation_method = AllocationMethod::BULK_NVFP4;
-      if (static_cast<NVFP4Quantizer *>(quantizer_cpp_list.front().get())->row_scaled_nvfp4) {
+      const bool has_row_scaled_nvfp4 =
+          std::any_of(quantizer_cpp_list.begin(), quantizer_cpp_list.end(),
+                      [](const std::unique_ptr<Quantizer> &quantizer) {
+                        return static_cast<NVFP4Quantizer *>(quantizer.get())->row_scaled_nvfp4;
+                      });
+      if (has_row_scaled_nvfp4) {
         quantization_method = QuantizationMethod::UNFUSED;
       } else {
         quantization_method = QuantizationMethod::FUSED_NVFP4;

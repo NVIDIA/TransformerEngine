@@ -97,7 +97,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
     # Whether scaling factors are in the swizzled format expected by
     # GEMM
     _with_gemm_swizzled_scales: bool
-    # Whether rowwise amax stores one value per tensor row
+    # Whether this NVFP4 tensor uses row-scaled amax metadata
     _row_scaled_nvfp4: bool
 
     def __new__(
