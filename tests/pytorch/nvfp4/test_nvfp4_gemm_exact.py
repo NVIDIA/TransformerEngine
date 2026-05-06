@@ -53,7 +53,7 @@ def check_nvfp4_gemm_versus_reference(
     x_quantizer = NVFP4Quantizer(
         fp4_dtype=te_dtype,
         rowwise=True,
-        columnwise=True,
+        columnwise=not rowwise_amax_is_row_scaled,
         with_amax_reduction=False,
         amax_reduction_group=None,
         with_rht=False,
@@ -243,7 +243,7 @@ def check_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
     x_quantizer = NVFP4Quantizer(
         fp4_dtype=te_dtype,
         rowwise=True,
-        columnwise=True,
+        columnwise=False,
         with_amax_reduction=False,
         amax_reduction_group=None,
         with_rht=False,
@@ -333,7 +333,7 @@ def check_nvfp4_row_scaled_gemm_matches_emulated(
     x_row_scaled_quantizer = NVFP4Quantizer(
         fp4_dtype=te_dtype,
         rowwise=True,
-        columnwise=True,
+        columnwise=False,
         with_amax_reduction=False,
         amax_reduction_group=None,
         with_rht=False,

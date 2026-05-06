@@ -800,6 +800,11 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
   const auto rowwise_usage = quantizer_cpp_list[0]->rowwise_usage;
   const bool rowwise_amax_is_row_scaled = quantizer_cpp_list[0]->rowwise_amax_is_row_scaled;
   const auto columnwise_usage = quantizer_cpp_list[0]->columnwise_usage;
+  if (rowwise_amax_is_row_scaled) {
+    NVTE_CHECK(rowwise_usage, "Row-scaled NVFP4 bulk allocation requires rowwise usage.");
+    NVTE_CHECK(!columnwise_usage,
+               "Row-scaled NVFP4 bulk allocation does not support columnwise usage.");
+  }
   const auto scaling_mode = quantizer_cpp_list[0]->get_scaling_mode();
   const auto fp4_dtype = quantizer_cpp_list[0]->dtype;
   const bool with_gemm_swizzled_scales = false;  /// TODO (tmoon) Enable based on optimize_for_gemm;

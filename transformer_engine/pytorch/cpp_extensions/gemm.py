@@ -223,6 +223,11 @@ def general_gemm(
         assert (
             quantization_params is None
         ), "Row-scaled NVFP4 GEMM currently does not support output quantization."
+        assert ub is None, "Row-scaled NVFP4 GEMM currently does not support CommOverlap."
+        assert (
+            extra_output is None
+        ), "Row-scaled NVFP4 GEMM currently does not support extra output."
+        assert not bulk_overlap, "Row-scaled NVFP4 GEMM currently does not support bulk overlap."
         assert out is None or (
             isinstance(out, torch.Tensor) and not is_custom(out)
         ), "Row-scaled NVFP4 GEMM currently supports only plain torch.Tensor outputs."
@@ -315,7 +320,11 @@ def general_grouped_gemm(
     else:
         bias_dtype = TE_DType[torch.bfloat16]
 
-    if any(_is_nvfp4_row_scaled_tensor(tensor) for tensor in B):
+    row_scaled_b = [_is_nvfp4_row_scaled_tensor(tensor) for tensor in B]
+    if any(row_scaled_b):
+        assert all(
+            row_scaled_b
+        ), "Row-scaled NVFP4 grouped GEMM requires all B tensors to be row-scaled."
         assert layout[1] == "N", "Row-scaled NVFP4 grouped GEMM currently supports N-layout B only."
         if grad:
             raise RuntimeError(

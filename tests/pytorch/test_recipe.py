@@ -553,7 +553,10 @@ def test_nvfp4_row_scaled_quantizer_roles():
     ],
 )
 def test_fp4_dequantize(dtype, rowwise_amax_is_row_scaled, M, N):
-    q = NVFP4Quantizer(rowwise_amax_is_row_scaled=rowwise_amax_is_row_scaled)
+    q = NVFP4Quantizer(
+        columnwise=not rowwise_amax_is_row_scaled,
+        rowwise_amax_is_row_scaled=rowwise_amax_is_row_scaled,
+    )
     a = torch.rand((M, N)).cuda().to(dtype=dtype)
     starting_tensor = q(a)
     dequantized_tensor = starting_tensor.dequantize()

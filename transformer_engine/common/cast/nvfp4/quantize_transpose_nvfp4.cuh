@@ -657,7 +657,6 @@ __global__ void __launch_bounds__(THREADS_NUM)
           const size_t scales_offset_X = scales_offset_X_rowwise;
           const size_t scale_idx_global = scales_offset_Y * scale_stride + scales_offset_X;
 
-          // const bool rowwise_scale_is_within_bounds_Y = scales_offset_Y < rows;
           const bool rowwise_scale_is_within_bounds_Y =
               (stage_rowwise_scales_offset_Y + it * THREADS_Y_ROWWISE + tid_Y_rowwise) < chunk_rows;
           if (rowwise_scale_is_within_bounds_X && rowwise_scale_is_within_bounds_Y) {
@@ -680,7 +679,6 @@ __global__ void __launch_bounds__(THREADS_NUM)
           const size_t scales_offset_X = scales_offset_X_rowwise;
           const size_t scale_idx_global = scales_offset_Y * scale_stride + scales_offset_X;
 
-          // const bool rowwise_scale_is_within_bounds_Y = scales_offset_Y < rows;
           const bool rowwise_scale_is_within_bounds_Y =
               (stage_rowwise_scales_offset_Y + it * THREADS_Y_ROWWISE + tid_Y_rowwise) < chunk_rows;
           if (rowwise_scale_is_within_bounds_X && rowwise_scale_is_within_bounds_Y) {
@@ -1214,7 +1212,6 @@ __global__ void __launch_bounds__(THREADS_NUM)
         const size_t scales_offset_X = scales_offset_X_rowwise;
         const size_t scale_idx_global = scales_offset_Y * scale_stride + scales_offset_X;
 
-        // const bool rowwise_scale_is_within_bounds_Y = scales_offset_Y < rows;
         const bool rowwise_scale_is_within_bounds_Y =
             (stage_rowwise_scales_offset_Y + it * THREADS_Y_ROWWISE + tid_Y_rowwise) < chunk_rows;
         if (rowwise_scale_is_within_bounds_X && rowwise_scale_is_within_bounds_Y) {

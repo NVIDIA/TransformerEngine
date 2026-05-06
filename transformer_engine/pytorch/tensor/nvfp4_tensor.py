@@ -319,6 +319,11 @@ class NVFP4Quantizer(Quantizer):
             f"Incorrect shape {shape} for NVFP4. Tensor dims must be divisible by"
             f" {NVFP4_BLOCK_SCALING_SIZE}"
         )
+        if self.rowwise_amax_is_row_scaled:
+            if not self.rowwise_usage:
+                raise ValueError("Row-scaled NVFP4 quantization requires rowwise usage.")
+            if self.columnwise_usage:
+                raise ValueError("Row-scaled NVFP4 quantization does not support columnwise usage.")
 
         # Allocate FP4 data
         data = None
@@ -345,8 +350,7 @@ class NVFP4Quantizer(Quantizer):
         columnwise_data = None
         columnwise_scale_inv = None
         amax_columnwise = None
-        columnwise_usage = self.columnwise_usage and not self.rowwise_amax_is_row_scaled
-        if columnwise_usage:
+        if self.columnwise_usage:
             # enforce 2D shape to avoid [S, B, H] shape and B and be 1
             # and the transposed shape is [H, S, B], so divide last dim by 2 gives zero
             shape_2d = tuple([flat_first_dim, shape[-1]])

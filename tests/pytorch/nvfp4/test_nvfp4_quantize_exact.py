@@ -16,6 +16,19 @@ from transformer_engine.pytorch.constants import TE_DType
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
 
 
+def maybe_skip_row_scaled_unsupported_quantization(
+    rowwise_amax_is_row_scaled: bool,
+    return_transpose: bool,
+    with_2d_quantization: bool = False,
+) -> None:
+    if not rowwise_amax_is_row_scaled:
+        return
+    if return_transpose:
+        pytest.skip("Row-scaled NVFP4 does not support columnwise usage")
+    if with_2d_quantization:
+        pytest.skip("Row-scaled NVFP4 does not support 2D quantization")
+
+
 def unpack_fp4(x: torch.Tensor) -> torch.Tensor:
     repeated = x.repeat_interleave(2, dim=1)
     repeated[:, 0::2] &= 0x0F
@@ -33,6 +46,10 @@ def check_quantization_nvfp4_versus_reference(
     with_2d_quantization: bool,
     rowwise_amax_is_row_scaled: bool = False,
 ) -> None:
+    maybe_skip_row_scaled_unsupported_quantization(
+        rowwise_amax_is_row_scaled, return_transpose, with_2d_quantization
+    )
+
     te_dtype = tex.DType.kFloat4E2M1
 
     # Setup device and random seed
@@ -82,7 +99,7 @@ def check_quantization_nvfp4_versus_reference(
     ref_quantizer = NVFP4QuantizerRef(
         dtype=utils.Fp4Formats.E2M1,
         rowwise=True,
-        columnwise=(return_transpose and not rowwise_amax_is_row_scaled),
+        columnwise=return_transpose,
         pow_2_scales=False,
         eps=0.0,
         quant_tile_shape=quant_tile_shape,
@@ -119,7 +136,7 @@ def check_quantization_nvfp4_versus_reference(
 
     torch.testing.assert_close(sx_valid, sx_ref, atol=0.0, rtol=0.0)
 
-    if return_transpose and not rowwise_amax_is_row_scaled:
+    if return_transpose:
         torch.testing.assert_close(qx_t, qx_t_ref, atol=0.0, rtol=0.0)
 
         # Compare only the valid portion of transpose scale tensors
@@ -127,10 +144,6 @@ def check_quantization_nvfp4_versus_reference(
         sx_t_valid = sx_t[: ref_sx_t_shape[0], : ref_sx_t_shape[1]]
         torch.testing.assert_close(sx_t_valid, sx_t_ref, atol=0.0, rtol=0.0)
         torch.testing.assert_close(qx_amax_t, ref_amax_t, atol=0.0, rtol=0.0)
-    elif return_transpose:
-        assert qx_t is None
-        assert sx_t is None
-        assert qx_amax_t is None
 
     torch.testing.assert_close(qx_amax, ref_amax, atol=0.0, rtol=0.0)
 
@@ -178,9 +191,6 @@ def test_quantization_block_tiling_versus_reference(
     with_2d_quantization: bool,
     rowwise_amax_is_row_scaled: bool,
 ) -> None:
-    if rowwise_amax_is_row_scaled and with_2d_quantization:
-        pytest.skip("Row-scaled NVFP4 does not support 2D quantization")
-
     check_quantization_nvfp4_versus_reference(
         x_dtype=x_dtype,
         M=M,
@@ -218,6 +228,8 @@ def test_nvfp4_quantization_extrema_versus_reference(
     use_cpp_allocator: bool,
     rowwise_amax_is_row_scaled: bool,
 ):
+    maybe_skip_row_scaled_unsupported_quantization(rowwise_amax_is_row_scaled, return_transpose)
+
     te_dtype = tex.DType.kFloat4E2M1
 
     device = "cuda"
@@ -265,7 +277,7 @@ def test_nvfp4_quantization_extrema_versus_reference(
     ref_quantizer = NVFP4QuantizerRef(
         dtype=utils.Fp4Formats.E2M1,
         rowwise=True,
-        columnwise=(return_transpose and not rowwise_amax_is_row_scaled),
+        columnwise=return_transpose,
         pow_2_scales=False,
         eps=0.0,
         quant_tile_shape=(1, 16),
@@ -290,16 +302,12 @@ def test_nvfp4_quantization_extrema_versus_reference(
     sx_valid = sx[: ref_sx_shape[0], : ref_sx_shape[1]]
     torch.testing.assert_close(sx_valid, sx_ref, atol=0.0, rtol=0.0)
 
-    if return_transpose and not rowwise_amax_is_row_scaled:
+    if return_transpose:
         torch.testing.assert_close(qx_t, qx_t_ref, atol=0.0, rtol=0.0)
         ref_sx_t_shape = sx_t_ref.shape
         sx_t_valid = sx_t[: ref_sx_t_shape[0], : ref_sx_t_shape[1]]
         torch.testing.assert_close(sx_t_valid, sx_t_ref, atol=0.0, rtol=0.0)
         torch.testing.assert_close(qx_amax_t, ref_amax_t, atol=0.0, rtol=0.0)
-    elif return_transpose:
-        assert qx_t is None
-        assert sx_t is None
-        assert qx_amax_t is None
 
     torch.testing.assert_close(qx_amax, ref_amax, atol=0.0, rtol=0.0)
 
@@ -333,6 +341,8 @@ def test_nvfp4_quantization_boundary_values(
     many potential bin edges within each 16-element microblock.
     Validates native vs reference byte-for-byte and scale parity.
     """
+    maybe_skip_row_scaled_unsupported_quantization(rowwise_amax_is_row_scaled, return_transpose)
+
     te_dtype = tex.DType.kFloat4E2M1
 
     device = "cuda"
@@ -389,7 +399,7 @@ def test_nvfp4_quantization_boundary_values(
     ref_quantizer = NVFP4QuantizerRef(
         dtype=utils.Fp4Formats.E2M1,
         rowwise=True,
-        columnwise=(return_transpose and not rowwise_amax_is_row_scaled),
+        columnwise=return_transpose,
         pow_2_scales=False,
         eps=0.0,
         quant_tile_shape=(1, 16),
@@ -415,16 +425,12 @@ def test_nvfp4_quantization_boundary_values(
     sx_valid = sx[: ref_sx_shape[0], : ref_sx_shape[1]]
     torch.testing.assert_close(sx_valid, sx_ref, atol=0.0, rtol=0.0)
 
-    if return_transpose and not rowwise_amax_is_row_scaled:
+    if return_transpose:
         torch.testing.assert_close(qx_t, qx_t_ref, atol=0.0, rtol=0.0)
         ref_sx_t_shape = sx_t_ref.shape
         sx_t_valid = sx_t[: ref_sx_t_shape[0], : ref_sx_t_shape[1]]
         torch.testing.assert_close(sx_t_valid, sx_t_ref, atol=0.0, rtol=0.0)
         torch.testing.assert_close(qx_amax_t, ref_amax_t, atol=0.0, rtol=0.0)
-    elif return_transpose:
-        assert qx_t is None
-        assert sx_t is None
-        assert qx_amax_t is None
 
     torch.testing.assert_close(qx_amax, ref_amax, atol=0.0, rtol=0.0)
 
@@ -452,6 +458,8 @@ def test_nvfp4_quantization_noncontiguous_inputs(
     use_cpp_allocator: bool,
     rowwise_amax_is_row_scaled: bool,
 ):
+    maybe_skip_row_scaled_unsupported_quantization(rowwise_amax_is_row_scaled, return_transpose)
+
     te_dtype = tex.DType.kFloat4E2M1
 
     device = "cuda"
@@ -499,7 +507,7 @@ def test_nvfp4_quantization_noncontiguous_inputs(
     ref_quantizer = NVFP4QuantizerRef(
         dtype=utils.Fp4Formats.E2M1,
         rowwise=True,
-        columnwise=(return_transpose and not rowwise_amax_is_row_scaled),
+        columnwise=return_transpose,
         pow_2_scales=False,
         eps=0.0,
         quant_tile_shape=(1, 16),
@@ -526,15 +534,11 @@ def test_nvfp4_quantization_noncontiguous_inputs(
     sx_valid = sx[: ref_sx_shape[0], : ref_sx_shape[1]]
     torch.testing.assert_close(sx_valid, sx_ref, atol=0.0, rtol=0.0)
 
-    if return_transpose and not rowwise_amax_is_row_scaled:
+    if return_transpose:
         torch.testing.assert_close(qx_t, qx_t_ref, atol=0.0, rtol=0.0)
         ref_sx_t_shape = sx_t_ref.shape
         sx_t_valid = sx_t[: ref_sx_t_shape[0], : ref_sx_t_shape[1]]
         torch.testing.assert_close(sx_t_valid, sx_t_ref, atol=0.0, rtol=0.0)
         torch.testing.assert_close(qx_amax_t, ref_amax_t, atol=0.0, rtol=0.0)
-    elif return_transpose:
-        assert qx_t is None
-        assert sx_t is None
-        assert qx_amax_t is None
 
     torch.testing.assert_close(qx_amax, ref_amax, atol=0.0, rtol=0.0)

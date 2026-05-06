@@ -354,7 +354,14 @@ class NVFP4QuantizerRef(Quantizer):
         with_rht: bool = False,
         with_random_sign_mask: bool = True,
     ):
-        super().__init__(rowwise=rowwise, columnwise=columnwise and not rowwise_amax_is_row_scaled)
+        if rowwise_amax_is_row_scaled:
+            if not rowwise:
+                raise ValueError("Row-scaled NVFP4 reference quantization requires rowwise usage.")
+            if columnwise:
+                raise ValueError(
+                    "Row-scaled NVFP4 reference quantization does not support columnwise usage."
+                )
+        super().__init__(rowwise=rowwise, columnwise=columnwise)
         self.internal = True
 
         self.dtype = dtype

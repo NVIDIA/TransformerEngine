@@ -670,7 +670,15 @@ class GroupedTensorStorage:
             amax = torch.empty(num_tensors, dtype=torch.float32, device=device)
         elif quantizer._get_compatible_recipe().nvfp4():
             rowwise_amax_is_row_scaled = quantizer.rowwise_amax_is_row_scaled
-            columnwise_usage = columnwise_usage and not rowwise_amax_is_row_scaled
+            if rowwise_amax_is_row_scaled:
+                if not rowwise_usage:
+                    raise ValueError(
+                        "Row-scaled NVFP4 grouped quantization requires rowwise usage."
+                    )
+                if columnwise_usage:
+                    raise ValueError(
+                        "Row-scaled NVFP4 grouped quantization does not support columnwise usage."
+                    )
             total_amax_elements = (
                 sum(math.prod(s[:-1]) for s in shape) if rowwise_amax_is_row_scaled else num_tensors
             )
