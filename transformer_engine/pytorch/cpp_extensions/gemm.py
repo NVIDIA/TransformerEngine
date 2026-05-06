@@ -89,10 +89,8 @@ def _nvfp4_row_scaled_gemm_inputs(
     A_metadata["rowwise_amax_is_row_scaled"] = False
 
     B_metadata = B.get_metadata()
-    assert B._rowwise_amax_is_row_scaled
     rhs_rowwise_amax = B._amax_rowwise
     assert rhs_rowwise_amax is not None
-    assert rhs_rowwise_amax.numel() == 0 or rhs_rowwise_amax.numel() > 1
     B_metadata["amax_rowwise"] = rhs_rowwise_amax.new_ones(1)
     B_metadata["rowwise_amax_is_row_scaled"] = False
 

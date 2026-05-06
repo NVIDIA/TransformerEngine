@@ -105,8 +105,6 @@ void launch_compute_rowwise_amax(const int num_rows, const int num_cols, const I
                                  const float *noop = nullptr) {
   if (num_rows == 0 || num_cols == 0) return;
 
-  NVTE_CHECK(num_cols % 2 == 0, "num_cols must be even for row-scaled amax computation, got ",
-             num_cols);
   dim3 grid(num_rows);
   dim3 block(ROWWISE_AMAX_BLOCK_SIZE);
 

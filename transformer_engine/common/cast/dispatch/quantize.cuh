@@ -104,8 +104,6 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
       if (rowwise_amax_is_row_scaled) {
         NVTE_CHECK(!quant_config_cpp.nvfp4_2d_quantization,
                    "Row-scaled NVFP4 quantization does not support 2D quantization.");
-        NVTE_CHECK(output_tensor->has_data(),
-                   "Row-scaled NVFP4 quantization requires rowwise output.");
         NVTE_CHECK(!output_tensor->has_columnwise_data(),
                    "Row-scaled NVFP4 quantization does not produce columnwise output.");
         nvfp4::compute_rowwise_amax(*input_tensor, noop_tensor, output_tensor, stream);

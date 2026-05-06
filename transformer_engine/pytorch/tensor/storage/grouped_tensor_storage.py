@@ -712,9 +712,7 @@ class GroupedTensorStorage:
                 columnwise_scale_inv = torch.empty(
                     total_columnwise_scale_elements, dtype=torch.uint8, device=device
                 )
-                columnwise_amax = torch.empty(
-                    total_amax_elements, dtype=torch.float32, device=device
-                )
+                columnwise_amax = torch.empty(num_tensors, dtype=torch.float32, device=device)
         elif quantizer._get_compatible_recipe().float8_block_scaling():
             if rowwise_usage:
                 # Allocate rowwise data buffer (1D flattened, uint8)
@@ -1121,12 +1119,7 @@ class GroupedTensorStorage:
                         amax_rowwise = self.amax[i : i + 1]
 
                 if self.columnwise_amax is not None:
-                    if nvfp4_rowwise_amax_offsets is not None:
-                        amax_start = nvfp4_rowwise_amax_offsets[i]
-                        amax_end = nvfp4_rowwise_amax_offsets[i + 1]
-                        amax_columnwise = self.columnwise_amax[amax_start:amax_end]
-                    else:
-                        amax_columnwise = self.columnwise_amax[i : i + 1]
+                    amax_columnwise = self.columnwise_amax[i : i + 1]
 
                 if quantizer.internal:
                     nvfp4_tensor_class = NVFP4TensorStorage
