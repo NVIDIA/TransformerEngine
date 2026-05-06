@@ -31,6 +31,10 @@ mkdir -p "$XML_LOG_DIR"
 NVTE_JAX_UNITTEST_LEVEL="L2" python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest_jax_not_distributed.xml $TE_PATH/tests/jax -k 'not distributed' || test_fail "tests/jax/*not_distributed_*"
 
 pip3 install -r $TE_PATH/examples/jax/mnist/requirements.txt || error_exit "Failed to install mnist requirements"
+# Note: mnist intentionally does NOT set --xla_gpu_deterministic_ops because it
+# significantly slows down small conv/GEMM kernels and was causing CI timeouts.
+# The mnist verify() already uses a tail-window min/max with relaxed thresholds
+# to be robust to run-to-run numerical noise.
 NVTE_JAX_UNITTEST_LEVEL="L2" python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest_mnist.xml $TE_PATH/examples/jax/mnist || test_fail "mnist"
 
 pip3 install -r $TE_PATH/examples/jax/encoder/requirements.txt || error_exit "Failed to install encoder requirements"

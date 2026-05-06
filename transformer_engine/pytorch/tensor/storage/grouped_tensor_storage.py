@@ -303,6 +303,51 @@ class GroupedTensorStorage:
 
         return self.fake_dtype
 
+    def prepare_for_saving(
+        self,
+    ) -> Tuple[list[Optional[torch.Tensor]], "GroupedTensorStorage"]:
+        """Prepare the tensor base for saving for backward."""
+        tensors = [
+            self.rowwise_data,
+            self.columnwise_data,
+            self.scale_inv,
+            self.columnwise_scale_inv,
+            self.amax,
+            self.columnwise_amax,
+            self.scale,
+            self.first_dims,
+            self.last_dims,
+            self.tensor_offsets,
+        ]
+        self.rowwise_data = None
+        self.columnwise_data = None
+        self.scale_inv = None
+        self.columnwise_scale_inv = None
+        self.amax = None
+        self.columnwise_amax = None
+        self.scale = None
+        self.first_dims = None
+        self.last_dims = None
+        self.tensor_offsets = None
+        self.quantized_tensors = None
+        return tensors, self
+
+    def restore_from_saved(
+        self, tensors: list[Optional[torch.Tensor]]
+    ) -> list[Optional[torch.Tensor]]:
+        """Restore the tensor base data from the saved tensors list."""
+        self.rowwise_data = tensors[0]
+        self.columnwise_data = tensors[1]
+        self.scale_inv = tensors[2]
+        self.columnwise_scale_inv = tensors[3]
+        self.amax = tensors[4]
+        self.columnwise_amax = tensors[5]
+        self.scale = tensors[6]
+        self.first_dims = tensors[7]
+        self.last_dims = tensors[8]
+        self.tensor_offsets = tensors[9]
+        return tensors[10:]
+
     def clear(self) -> None:
         """
         Reset tensor data and clear all buffers.
