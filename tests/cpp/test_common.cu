@@ -16,7 +16,6 @@
 #include <numeric>
 #include <random>
 #include <string>
-#include <unordered_set>
 
 #include <gtest/gtest.h>
 #include <omp.h>
