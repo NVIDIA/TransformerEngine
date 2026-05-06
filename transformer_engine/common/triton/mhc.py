@@ -54,7 +54,7 @@ def projection_prune_fwd(configs, named_args, **kwargs):
     M = named_args.get("M", kwargs.get("M", None))
     K = named_args.get("K", kwargs.get("K", None))
 
-    block_m = [64, 128]
+    block_m = [8, 16, 32]
     block_k = align_to(K, 32)
 
     # Use Split-K only if determinism is not enforced and M is not large enough to effectively parallelize
@@ -135,7 +135,7 @@ def _mhc_projection_fwd_fused(
     tl.assume(stride_ms == 1)
     tl.assume(stride_norm_weight == 1)
 
-    tl.assume(BLOCK_SIZE_M % 32 == 0)
+    tl.assume(BLOCK_SIZE_M % 8 == 0)
     tl.assume(BLOCK_SIZE_K % 32 == 0)
     tl.assume(BLOCK_SIZE_N == 32)
 
