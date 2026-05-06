@@ -798,7 +798,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
 
   // Quantization parameters
   const auto rowwise_usage = quantizer_cpp_list[0]->rowwise_usage;
-  const bool rowwise_amax_is_row_scaled = quantizer_cpp_list[0]->row_scaled_activation;
+  const bool rowwise_amax_is_row_scaled = quantizer_cpp_list[0]->rowwise_amax_is_row_scaled;
   NVTE_CHECK(!rowwise_amax_is_row_scaled || rowwise_usage,
              "Row-scaled NVFP4 quantization requires rowwise usage.");
   const auto columnwise_usage =
@@ -1284,7 +1284,14 @@ void split_quantize_nvfp4_impl_helper(const TensorWrapper &input,
     nvte_tensor_output_list.push_back(output_list[i].data());
   }
 
-  if (quantizer.row_scaled_activation) {
+  const bool rowwise_amax_is_row_scaled = output_list.front().get_rowwise_amax_is_row_scaled();
+  NVTE_CHECK(std::all_of(output_list.begin(), output_list.end(),
+                         [rowwise_amax_is_row_scaled](const TensorWrapper &output) {
+                           return output.get_rowwise_amax_is_row_scaled() ==
+                                  rowwise_amax_is_row_scaled;
+                         }),
+             "All NVFP4 split-quantize outputs must use the same rowwise amax scaling mode.");
+  if (rowwise_amax_is_row_scaled) {
     NVTE_CHECK(!quantizer.with_rht, "Row-scaled NVFP4 split quantize does not support RHT.");
     NVTE_CHECK(!quantizer.with_2d_quantization,
                "Row-scaled NVFP4 split quantize does not support 2D quantization.");
@@ -1299,7 +1306,6 @@ void split_quantize_nvfp4_impl_helper(const TensorWrapper &input,
       const size_t cols = input_ndim > 0 ? input_list[i].size(input_ndim - 1) : 1;
       NVTE_CHECK(cols % 16 == 0,
                  "Row-scaled NVFP4 split quantize requires split inner dim divisible by 16.");
-      output_list[i].set_rowwise_amax_is_row_scaled(true);
       QuantizationConfigWrapper quant_config;
       nvte_quantize_v2(input_list[i].data(), output_list[i].data(), quant_config, stream);
     }
@@ -1400,10 +1406,11 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
              "NVFP4 split-quantize does not support 2D quantization");
   NVTE_CHECK(!quantizer.with_amax_reduction,
              "NVFP4 split-quantize does not support amax reduction");
+  const bool rowwise_amax_is_row_scaled = output_list.front().get_rowwise_amax_is_row_scaled();
 
   // Check input tensor shape
   const size_t input_last_dim = input.ndim() > 0 ? input.size(input.ndim() - 1) : 1;
-  if (quantizer.row_scaled_activation) {
+  if (rowwise_amax_is_row_scaled) {
     NVTE_CHECK(input_last_dim % 16 == 0,
                "Row-scaled NVFP4 split-quantize requires inner dim to be multiple of 16.");
   } else {
@@ -1485,19 +1492,20 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
                                                 [](const py::handle &quantizer) -> bool {
                                                   return detail::IsNVFP4Quantizers(quantizer.ptr());
                                                 });
-  const bool all_nvfp4_row_scaled_activation =
+  const bool all_nvfp4_rowwise_amax_is_row_scaled =
       all_nvfp4_quantizers &&
-      std::all_of(quantizer_cpp_list.begin(), quantizer_cpp_list.end(),
-                  [](const std::unique_ptr<Quantizer> &quantizer) -> bool {
-                    return static_cast<NVFP4Quantizer *>(quantizer.get())->row_scaled_activation;
-                  });
+      std::all_of(
+          quantizer_cpp_list.begin(), quantizer_cpp_list.end(),
+          [](const std::unique_ptr<Quantizer> &quantizer) -> bool {
+            return static_cast<NVFP4Quantizer *>(quantizer.get())->rowwise_amax_is_row_scaled;
+          });
 
   // Choose implementation for allocating and populating tensors
   enum class AllocationMethod { UNFUSED, BULK_FP8_BLOCKWISE, BULK_MXFP8, BULK_NVFP4 };
   enum class QuantizationMethod { UNFUSED, FUSED_NVFP4 };
   AllocationMethod allocation_method = AllocationMethod::UNFUSED;
   QuantizationMethod quantization_method = QuantizationMethod::UNFUSED;
-  if (all_nvfp4_row_scaled_activation) {
+  if (all_nvfp4_rowwise_amax_is_row_scaled) {
     quantization_method = QuantizationMethod::FUSED_NVFP4;
   }
   if (!disable_bulk_allocation) {
@@ -1550,7 +1558,7 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
       bool contiguous_data_and_scale = false;
       std::tie(output_py_list, output_cpp_list, contiguous_data_and_scale) =
           bulk_allocate_nvfp4_tensors(split_shapes, quantizer_list, nvfp4_quantizers);
-      if (!all_nvfp4_row_scaled_activation && !input_shape.empty() &&
+      if (!all_nvfp4_rowwise_amax_is_row_scaled && !input_shape.empty() &&
           input_shape.back() % 128 != 0) {
         static std::once_flag once_unfused_nvfp4_fallback_warning;
         std::call_once(once_unfused_nvfp4_fallback_warning, []() {
@@ -1561,7 +1569,7 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
         });
         quantization_method = QuantizationMethod::UNFUSED;
       }
-      if (!all_nvfp4_row_scaled_activation && !contiguous_data_and_scale) {
+      if (!all_nvfp4_rowwise_amax_is_row_scaled && !contiguous_data_and_scale) {
         // Avoid fused quantize kernel if data is not contiguous
         quantization_method = QuantizationMethod::UNFUSED;
       }

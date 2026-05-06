@@ -31,7 +31,7 @@ def check_quantization_nvfp4_versus_reference(
     swizzled_scale: bool,
     use_cpp_allocator: bool,
     with_2d_quantization: bool,
-    row_scaled_activation: bool = False,
+    rowwise_amax_is_row_scaled: bool = False,
 ) -> None:
     te_dtype = tex.DType.kFloat4E2M1
 
@@ -53,7 +53,7 @@ def check_quantization_nvfp4_versus_reference(
         with_rht=False,
         with_post_rht_amax=False,
         with_2d_quantization=with_2d_quantization,
-        row_scaled_activation=row_scaled_activation,
+        rowwise_amax_is_row_scaled=rowwise_amax_is_row_scaled,
     )
     if use_cpp_allocator:
         x_nvfp4_sut = nvfp4_quantizer(x)
@@ -82,11 +82,11 @@ def check_quantization_nvfp4_versus_reference(
     ref_quantizer = NVFP4QuantizerRef(
         dtype=utils.Fp4Formats.E2M1,
         rowwise=True,
-        columnwise=(return_transpose and not row_scaled_activation),
+        columnwise=(return_transpose and not rowwise_amax_is_row_scaled),
         pow_2_scales=False,
         eps=0.0,
         quant_tile_shape=quant_tile_shape,
-        row_scaled_activation=row_scaled_activation,
+        rowwise_amax_is_row_scaled=rowwise_amax_is_row_scaled,
     )
     x_nvfp4_ref = ref_quantizer.quantize(x)
 
@@ -119,7 +119,7 @@ def check_quantization_nvfp4_versus_reference(
 
     torch.testing.assert_close(sx_valid, sx_ref, atol=0.0, rtol=0.0)
 
-    if return_transpose and not row_scaled_activation:
+    if return_transpose and not rowwise_amax_is_row_scaled:
         torch.testing.assert_close(qx_t, qx_t_ref, atol=0.0, rtol=0.0)
 
         # Compare only the valid portion of transpose scale tensors
@@ -165,7 +165,9 @@ def check_quantization_nvfp4_versus_reference(
 @pytest.mark.parametrize(
     "with_2d_quantization", [True, False], ids=["2d_quantization", "1d_quantization"]
 )
-@pytest.mark.parametrize("row_scaled_activation", [False, True], ids=["nvfp4", "nvfp4_row_scaled"])
+@pytest.mark.parametrize(
+    "rowwise_amax_is_row_scaled", [False, True], ids=["nvfp4", "nvfp4_row_scaled"]
+)
 def test_quantization_block_tiling_versus_reference(
     x_dtype: torch.dtype,
     M: int,
@@ -174,9 +176,9 @@ def test_quantization_block_tiling_versus_reference(
     swizzled_scale: bool,
     use_cpp_allocator: bool,
     with_2d_quantization: bool,
-    row_scaled_activation: bool,
+    rowwise_amax_is_row_scaled: bool,
 ) -> None:
-    if row_scaled_activation and with_2d_quantization:
+    if rowwise_amax_is_row_scaled and with_2d_quantization:
         pytest.skip("Row-scaled NVFP4 does not support 2D quantization")
 
     check_quantization_nvfp4_versus_reference(
@@ -187,7 +189,7 @@ def test_quantization_block_tiling_versus_reference(
         swizzled_scale=swizzled_scale,
         use_cpp_allocator=use_cpp_allocator,
         with_2d_quantization=with_2d_quantization,
-        row_scaled_activation=row_scaled_activation,
+        rowwise_amax_is_row_scaled=rowwise_amax_is_row_scaled,
     )
 
 
@@ -204,7 +206,9 @@ def test_quantization_block_tiling_versus_reference(
 @pytest.mark.parametrize(
     "use_cpp_allocator", [True, False], ids=["cpp_allocator", "python_allocator"]
 )
-@pytest.mark.parametrize("row_scaled_activation", [False, True], ids=["nvfp4", "nvfp4_row_scaled"])
+@pytest.mark.parametrize(
+    "rowwise_amax_is_row_scaled", [False, True], ids=["nvfp4", "nvfp4_row_scaled"]
+)
 def test_nvfp4_quantization_extrema_versus_reference(
     x_dtype: torch.dtype,
     M: int,
@@ -212,7 +216,7 @@ def test_nvfp4_quantization_extrema_versus_reference(
     extrema_high: bool,
     return_transpose: bool,
     use_cpp_allocator: bool,
-    row_scaled_activation: bool,
+    rowwise_amax_is_row_scaled: bool,
 ):
     te_dtype = tex.DType.kFloat4E2M1
 
@@ -234,7 +238,7 @@ def test_nvfp4_quantization_extrema_versus_reference(
         amax_reduction_group=None,
         with_rht=False,
         with_post_rht_amax=False,
-        row_scaled_activation=row_scaled_activation,
+        rowwise_amax_is_row_scaled=rowwise_amax_is_row_scaled,
     )
 
     if use_cpp_allocator:
@@ -261,11 +265,11 @@ def test_nvfp4_quantization_extrema_versus_reference(
     ref_quantizer = NVFP4QuantizerRef(
         dtype=utils.Fp4Formats.E2M1,
         rowwise=True,
-        columnwise=(return_transpose and not row_scaled_activation),
+        columnwise=(return_transpose and not rowwise_amax_is_row_scaled),
         pow_2_scales=False,
         eps=0.0,
         quant_tile_shape=(1, 16),
-        row_scaled_activation=row_scaled_activation,
+        rowwise_amax_is_row_scaled=rowwise_amax_is_row_scaled,
     )
     x_nvfp4_ref = ref_quantizer.quantize(x)
 
@@ -286,7 +290,7 @@ def test_nvfp4_quantization_extrema_versus_reference(
     sx_valid = sx[: ref_sx_shape[0], : ref_sx_shape[1]]
     torch.testing.assert_close(sx_valid, sx_ref, atol=0.0, rtol=0.0)
 
-    if return_transpose and not row_scaled_activation:
+    if return_transpose and not rowwise_amax_is_row_scaled:
         torch.testing.assert_close(qx_t, qx_t_ref, atol=0.0, rtol=0.0)
         ref_sx_t_shape = sx_t_ref.shape
         sx_t_valid = sx_t[: ref_sx_t_shape[0], : ref_sx_t_shape[1]]
@@ -313,14 +317,16 @@ def test_nvfp4_quantization_extrema_versus_reference(
 @pytest.mark.parametrize(
     "use_cpp_allocator", [True, False], ids=["cpp_allocator", "python_allocator"]
 )
-@pytest.mark.parametrize("row_scaled_activation", [False, True], ids=["nvfp4", "nvfp4_row_scaled"])
+@pytest.mark.parametrize(
+    "rowwise_amax_is_row_scaled", [False, True], ids=["nvfp4", "nvfp4_row_scaled"]
+)
 def test_nvfp4_quantization_boundary_values(
     x_dtype: torch.dtype,
     M: int,
     N: int,
     return_transpose: bool,
     use_cpp_allocator: bool,
-    row_scaled_activation: bool,
+    rowwise_amax_is_row_scaled: bool,
 ):
     """
     Stress rounding/threshold behavior by placing values just below/above
@@ -356,7 +362,7 @@ def test_nvfp4_quantization_boundary_values(
         amax_reduction_group=None,
         with_rht=False,
         with_post_rht_amax=False,
-        row_scaled_activation=row_scaled_activation,
+        rowwise_amax_is_row_scaled=rowwise_amax_is_row_scaled,
     )
 
     if use_cpp_allocator:
@@ -383,11 +389,11 @@ def test_nvfp4_quantization_boundary_values(
     ref_quantizer = NVFP4QuantizerRef(
         dtype=utils.Fp4Formats.E2M1,
         rowwise=True,
-        columnwise=(return_transpose and not row_scaled_activation),
+        columnwise=(return_transpose and not rowwise_amax_is_row_scaled),
         pow_2_scales=False,
         eps=0.0,
         quant_tile_shape=(1, 16),
-        row_scaled_activation=row_scaled_activation,
+        rowwise_amax_is_row_scaled=rowwise_amax_is_row_scaled,
     )
     x_nvfp4_ref = ref_quantizer.quantize(x)
 
@@ -409,7 +415,7 @@ def test_nvfp4_quantization_boundary_values(
     sx_valid = sx[: ref_sx_shape[0], : ref_sx_shape[1]]
     torch.testing.assert_close(sx_valid, sx_ref, atol=0.0, rtol=0.0)
 
-    if return_transpose and not row_scaled_activation:
+    if return_transpose and not rowwise_amax_is_row_scaled:
         torch.testing.assert_close(qx_t, qx_t_ref, atol=0.0, rtol=0.0)
         ref_sx_t_shape = sx_t_ref.shape
         sx_t_valid = sx_t[: ref_sx_t_shape[0], : ref_sx_t_shape[1]]
@@ -435,14 +441,16 @@ def test_nvfp4_quantization_boundary_values(
 @pytest.mark.parametrize(
     "use_cpp_allocator", [True, False], ids=["cpp_allocator", "python_allocator"]
 )
-@pytest.mark.parametrize("row_scaled_activation", [False, True], ids=["nvfp4", "nvfp4_row_scaled"])
+@pytest.mark.parametrize(
+    "rowwise_amax_is_row_scaled", [False, True], ids=["nvfp4", "nvfp4_row_scaled"]
+)
 def test_nvfp4_quantization_noncontiguous_inputs(
     x_dtype: torch.dtype,
     M: int,
     N: int,
     return_transpose: bool,
     use_cpp_allocator: bool,
-    row_scaled_activation: bool,
+    rowwise_amax_is_row_scaled: bool,
 ):
     te_dtype = tex.DType.kFloat4E2M1
 
@@ -464,7 +472,7 @@ def test_nvfp4_quantization_noncontiguous_inputs(
         amax_reduction_group=None,
         with_rht=False,
         with_post_rht_amax=False,
-        row_scaled_activation=row_scaled_activation,
+        rowwise_amax_is_row_scaled=rowwise_amax_is_row_scaled,
     )
 
     if use_cpp_allocator:
@@ -491,11 +499,11 @@ def test_nvfp4_quantization_noncontiguous_inputs(
     ref_quantizer = NVFP4QuantizerRef(
         dtype=utils.Fp4Formats.E2M1,
         rowwise=True,
-        columnwise=(return_transpose and not row_scaled_activation),
+        columnwise=(return_transpose and not rowwise_amax_is_row_scaled),
         pow_2_scales=False,
         eps=0.0,
         quant_tile_shape=(1, 16),
-        row_scaled_activation=row_scaled_activation,
+        rowwise_amax_is_row_scaled=rowwise_amax_is_row_scaled,
     )
     x_nvfp4_ref = ref_quantizer.quantize(x_nc)
 
@@ -518,7 +526,7 @@ def test_nvfp4_quantization_noncontiguous_inputs(
     sx_valid = sx[: ref_sx_shape[0], : ref_sx_shape[1]]
     torch.testing.assert_close(sx_valid, sx_ref, atol=0.0, rtol=0.0)
 
-    if return_transpose and not row_scaled_activation:
+    if return_transpose and not rowwise_amax_is_row_scaled:
         torch.testing.assert_close(qx_t, qx_t_ref, atol=0.0, rtol=0.0)
         ref_sx_t_shape = sx_t_ref.shape
         sx_t_valid = sx_t[: ref_sx_t_shape[0], : ref_sx_t_shape[1]]

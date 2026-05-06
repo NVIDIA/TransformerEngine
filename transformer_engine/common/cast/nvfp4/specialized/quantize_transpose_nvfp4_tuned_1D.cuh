@@ -695,7 +695,7 @@ inline void quantize_transpose_tuned_1D(const Tensor &input, const Tensor *noop,
 
   // If transposed output is allocated, return the transposed data
   // Otherwise, it's not necesary to return the transposed data.
-  const bool return_transpose = output->has_columnwise_data() && !rowwise_amax_is_row_scaled;
+  const bool return_transpose = output->has_columnwise_data();
 
   checkCuDriverContext(stream);
   CheckNoopTensor(*noop, "cast_noop");
@@ -708,6 +708,8 @@ inline void quantize_transpose_tuned_1D(const Tensor &input, const Tensor *noop,
   NVTE_CHECK(output->scale_inv.dptr != nullptr, "Scaling tensor must be allocated");
   NVTE_CHECK(!rowwise_amax_is_row_scaled || output->amax.dptr != nullptr,
              "Row-scaled NVFP4 quantization requires rowwise amax.");
+  NVTE_CHECK(!rowwise_amax_is_row_scaled || !output->has_columnwise_data(),
+             "Row-scaled NVFP4 quantization does not produce columnwise output.");
 
   if (return_transpose) {
     NVTE_CHECK(is_fp4_dtype(output->columnwise_data.dtype),

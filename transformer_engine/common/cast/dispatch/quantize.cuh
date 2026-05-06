@@ -252,7 +252,7 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
       int32_t cols = grad_tensor->flat_last_dim();
       auto dtype = grad_tensor->dtype();
       NVTE_CHECK(!output_tensor->rowwise_amax_is_row_scaled,
-                 "Row-scaled NVFP4 quantization is only supported for forward quantization.");
+                 "Backward NVFP4 quantization does not support row-scaled outputs.");
       bool use_optimized_kernel = (dtype == DType::kBFloat16) && (rows % 32 == 0) &&
                                   (cols % 32 == 0) && output_tensor->has_data();
 

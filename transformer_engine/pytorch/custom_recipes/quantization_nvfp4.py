@@ -350,18 +350,18 @@ class NVFP4QuantizerRef(Quantizer):
         pow_2_scales: bool = False,
         eps: float = 0.0,
         quant_tile_shape: Tuple[int, int] = (1, 16),
-        row_scaled_activation: bool = False,
+        rowwise_amax_is_row_scaled: bool = False,
         with_rht: bool = False,
         with_random_sign_mask: bool = True,
     ):
-        super().__init__(rowwise=rowwise, columnwise=columnwise and not row_scaled_activation)
+        super().__init__(rowwise=rowwise, columnwise=columnwise and not rowwise_amax_is_row_scaled)
         self.internal = True
 
         self.dtype = dtype
         self.pow_2_scales = pow_2_scales
         self.eps = eps
         self.quant_tile_shape = quant_tile_shape
-        self.row_scaled_activation = row_scaled_activation
+        self.rowwise_amax_is_row_scaled = rowwise_amax_is_row_scaled
         self.with_rht = with_rht
         self.with_random_sign_mask = with_random_sign_mask
 
@@ -622,10 +622,8 @@ class NVFP4QuantizerRef(Quantizer):
                 raise ValueError(
                     f"MXFP4 only supports 1x32 tile shape, got {self.quant_tile_shape}"
                 )
-            if self.row_scaled_activation:
-                raise ValueError(
-                    "Row-scaled activation is only supported for NVFP4 (non-pow2) mode."
-                )
+            if self.rowwise_amax_is_row_scaled:
+                raise ValueError("Row-scaled NVFP4 is only supported for NVFP4 (non-pow2) mode.")
             # TODO(etsykunov): Fix bug where global_amax_row and
             # global_amax_col are not defined
             # global_amax = torch.empty(0, device=tensor.device, dtype=torch.float32)
@@ -642,10 +640,10 @@ class NVFP4QuantizerRef(Quantizer):
                 if self.with_rht
                 else tensor.t().contiguous()
             )
-            if self.row_scaled_activation:
+            if self.rowwise_amax_is_row_scaled:
                 if self.quant_tile_shape != (1, 16):
                     raise ValueError(
-                        "Row-scaled activation only supports NVFP4 1x16 tile shape, "
+                        "Row-scaled NVFP4 only supports NVFP4 1x16 tile shape, "
                         f"got {self.quant_tile_shape}"
                     )
                 global_amax_row = torch.max(torch.abs(row_input), dim=1).values.to(torch.float32)
@@ -674,7 +672,7 @@ class NVFP4QuantizerRef(Quantizer):
                 self.quant_tile_shape[1],
                 self.quant_tile_shape[0],
                 pow_2_scales=self.pow_2_scales,
-                rowwise_amax_is_row_scaled=self.row_scaled_activation,
+                rowwise_amax_is_row_scaled=self.rowwise_amax_is_row_scaled,
                 eps=self.eps,
             )
             if transpose_scales:

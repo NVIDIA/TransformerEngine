@@ -522,19 +522,21 @@ def test_nvfp4_row_scaled_quantizer_roles():
         mode="forward",
         num_quantizers=3,
     ).make_quantizers()
-    assert [q.row_scaled_activation for q in forward_quantizers] == [True, False, True]
+    assert [q.rowwise_amax_is_row_scaled for q in forward_quantizers] == [True, False, True]
 
     backward_quantizers = NVFP4BlockScalingRecipeState(
         recipe,
         mode="backward",
         num_quantizers=2,
     ).make_quantizers()
-    assert [q.row_scaled_activation for q in backward_quantizers] == [False, False]
+    assert [q.rowwise_amax_is_row_scaled for q in backward_quantizers] == [False, False]
 
 
 @pytest.mark.skipif(not fp4_available, reason=reason_for_no_fp4)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=str)
-@pytest.mark.parametrize("row_scaled_activation", [False, True], ids=["nvfp4", "nvfp4_row_scaled"])
+@pytest.mark.parametrize(
+    "rowwise_amax_is_row_scaled", [False, True], ids=["nvfp4", "nvfp4_row_scaled"]
+)
 @pytest.mark.parametrize(
     "M, N",
     [
@@ -550,8 +552,8 @@ def test_nvfp4_row_scaled_quantizer_roles():
         (8192, 8192),
     ],
 )
-def test_fp4_dequantize(dtype, row_scaled_activation, M, N):
-    q = NVFP4Quantizer(row_scaled_activation=row_scaled_activation)
+def test_fp4_dequantize(dtype, rowwise_amax_is_row_scaled, M, N):
+    q = NVFP4Quantizer(rowwise_amax_is_row_scaled=rowwise_amax_is_row_scaled)
     a = torch.rand((M, N)).cuda().to(dtype=dtype)
     starting_tensor = q(a)
     dequantized_tensor = starting_tensor.dequantize()

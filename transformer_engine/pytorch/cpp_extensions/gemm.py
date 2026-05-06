@@ -90,22 +90,17 @@ def _nvfp4_row_scaled_gemm_inputs(
 
     B_metadata = B.get_metadata()
     assert B._rowwise_amax_is_row_scaled
-    if B._amax_rowwise is not None:
-        activation_amax = B._amax_rowwise
-        assert activation_amax.numel() == 0 or activation_amax.numel() > 1
-        B_metadata["amax_rowwise"] = activation_amax.new_ones(1)
-    else:
-        activation_amax = B._amax_columnwise
-        assert activation_amax is not None
-        assert activation_amax.numel() == 0 or activation_amax.numel() > 1
-        B_metadata["amax_columnwise"] = activation_amax.new_ones(1)
+    rhs_rowwise_amax = B._amax_rowwise
+    assert rhs_rowwise_amax is not None
+    assert rhs_rowwise_amax.numel() == 0 or rhs_rowwise_amax.numel() > 1
+    B_metadata["amax_rowwise"] = rhs_rowwise_amax.new_ones(1)
     B_metadata["rowwise_amax_is_row_scaled"] = False
 
-    assert activation_amax.dtype == torch.float32 and weight_amax.dtype == torch.float32
+    assert rhs_rowwise_amax.dtype == torch.float32 and weight_amax.dtype == torch.float32
     return (
         NVFP4TensorStorage(**A_metadata),
         NVFP4TensorStorage(**B_metadata),
-        (activation_amax * weight_amax).view(-1, 1),
+        (rhs_rowwise_amax * weight_amax).view(-1, 1),
     )
 
 

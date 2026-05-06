@@ -1332,7 +1332,7 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
   // If transposed output is allocated, return the transposed data. Otherwise, it's not necesary to
   // return the transposed data.
   // TODO(Frank): Is there a better way to do this?
-  bool return_transpose = output->has_columnwise_data() && !rowwise_amax_is_row_scaled;
+  bool return_transpose = output->has_columnwise_data();
 
   if (!use_2d_quantization && (input.dtype() == DType::kBFloat16)) {
     quantize_transpose_tuned_1D(input, noop, output, quant_config, stream);
@@ -1354,6 +1354,8 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
   NVTE_CHECK(output->scale_inv.dptr != nullptr, "Scaling tensor must be allocated");
   NVTE_CHECK(!rowwise_amax_is_row_scaled || output->amax.dptr != nullptr,
              "Row-scaled NVFP4 quantization requires rowwise amax.");
+  NVTE_CHECK(!rowwise_amax_is_row_scaled || !output->has_columnwise_data(),
+             "Row-scaled NVFP4 quantization does not produce columnwise output.");
   NVTE_CHECK(!output->with_gemm_swizzled_scales, "Output must have scales in compact format.");
   if (return_transpose) {
     NVTE_CHECK(output->has_columnwise_data(), "NVFP4 transposed output tensor must be allocated.");

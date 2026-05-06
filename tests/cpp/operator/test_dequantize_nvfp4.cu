@@ -90,7 +90,7 @@ float compute_amax(const test::Tensor &t, size_t rows, size_t cols) {
 // against a CPU reference computed from the quantized data.
 template <typename OutputType>
 void performTest_dequantize_nvfp4(const size_t rows, const size_t cols,
-                                  const bool row_scaled_activation) {
+                                  const bool rowwise_amax_is_row_scaled) {
     using namespace test;
     DType otype = TypeInfo<OutputType>::dtype;
 
@@ -99,7 +99,7 @@ void performTest_dequantize_nvfp4(const size_t rows, const size_t cols,
 
     Tensor quantized("quantized", std::vector<size_t>{rows, cols},
                      DType::kFloat4E2M1, true, false, NVTE_NVFP4_1D_SCALING);
-    if (row_scaled_activation) {
+    if (rowwise_amax_is_row_scaled) {
         quantized.set_tensor_amax_shape({rows});
         quantized.set_rowwise_amax_is_row_scaled(true);
     } else if (rows > 0 && cols > 0) {
@@ -143,7 +143,7 @@ void performTest_dequantize_nvfp4(const size_t rows, const size_t cols,
 // Dequantize NVFP4 with GEMM-swizzled scales and compare against compact path.
 template <typename OutputType>
 void performTest_dequantize_nvfp4_swizzled(const size_t rows, const size_t cols,
-                                           const bool row_scaled_activation) {
+                                           const bool rowwise_amax_is_row_scaled) {
     using namespace test;
     DType otype = TypeInfo<OutputType>::dtype;
 
@@ -152,7 +152,7 @@ void performTest_dequantize_nvfp4_swizzled(const size_t rows, const size_t cols,
 
     Tensor quantized_compact("quantized_compact", std::vector<size_t>{rows, cols},
                              DType::kFloat4E2M1, true, false, NVTE_NVFP4_1D_SCALING);
-    if (row_scaled_activation) {
+    if (rowwise_amax_is_row_scaled) {
         quantized_compact.set_tensor_amax_shape({rows});
         quantized_compact.set_rowwise_amax_is_row_scaled(true);
     } else if (rows > 0 && cols > 0) {
@@ -174,7 +174,7 @@ void performTest_dequantize_nvfp4_swizzled(const size_t rows, const size_t cols,
     // Create tensor with same FP4 data but swizzled scales
     Tensor quantized_swizzled("quantized_swizzled", std::vector<size_t>{rows, cols},
                               DType::kFloat4E2M1, true, false, NVTE_NVFP4_1D_SCALING);
-    if (row_scaled_activation) {
+    if (rowwise_amax_is_row_scaled) {
         quantized_swizzled.set_tensor_amax_shape({rows});
         quantized_swizzled.set_rowwise_amax_is_row_scaled(true);
     } else {
@@ -185,7 +185,7 @@ void performTest_dequantize_nvfp4_swizzled(const size_t rows, const size_t cols,
     // Copy amax and scale from compact to swizzled before FP4 data,
     // since from_cpu() uploads all CPU buffers (including zero-init data).
     quantized_compact.to_cpu();
-    if (row_scaled_activation) {
+    if (rowwise_amax_is_row_scaled) {
         quantized_swizzled.copy_tensor_amax_from(quantized_compact);
     } else {
         quantized_swizzled.set_tensor_amax(quantized_compact.amax());
@@ -256,11 +256,11 @@ TEST_P(DequantizeNVFP4TestSuite, TestDequantizeNVFP4)
 
     const auto tensor_size = std::get<0>(GetParam());
     const DType output_type = std::get<1>(GetParam());
-    const bool row_scaled_activation = std::get<2>(GetParam());
+    const bool rowwise_amax_is_row_scaled = std::get<2>(GetParam());
 
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(output_type, OutputType,
         performTest_dequantize_nvfp4<OutputType>(
-            tensor_size.first, tensor_size.second, row_scaled_activation);
+            tensor_size.first, tensor_size.second, rowwise_amax_is_row_scaled);
     );
 }
 
@@ -294,11 +294,11 @@ TEST_P(DequantizeNVFP4SwizzledTestSuite, TestDequantizeNVFP4Swizzled)
 
     const auto tensor_size = std::get<0>(GetParam());
     const DType output_type = std::get<1>(GetParam());
-    const bool row_scaled_activation = std::get<2>(GetParam());
+    const bool rowwise_amax_is_row_scaled = std::get<2>(GetParam());
 
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(output_type, OutputType,
         performTest_dequantize_nvfp4_swizzled<OutputType>(
-            tensor_size.first, tensor_size.second, row_scaled_activation);
+            tensor_size.first, tensor_size.second, rowwise_amax_is_row_scaled);
     );
 }
 

@@ -1696,7 +1696,7 @@ NVFP4Quantizer::NVFP4Quantizer(const py::handle& quantizer) : Quantizer(quantize
   this->with_post_rht_amax = quantizer.attr("with_post_rht_amax").cast<bool>();
   this->with_2d_quantization = quantizer.attr("with_2d_quantization").cast<bool>();
   this->stochastic_rounding = quantizer.attr("stochastic_rounding").cast<bool>();
-  this->row_scaled_activation = quantizer.attr("row_scaled_activation").cast<bool>();
+  this->rowwise_amax_is_row_scaled = quantizer.attr("rowwise_amax_is_row_scaled").cast<bool>();
 
   // Get amax reduction group if needed for NVFP4 AG
   const bool with_amax_reduction = quantizer.attr("with_amax_reduction").cast<bool>();
@@ -1748,10 +1748,10 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
   NVTE_CHECK(flat_last_dim % NVFP4_BLOCK_SIZE == 0,
              "NVFP4 requires tensor dims that are divisible by ", NVFP4_BLOCK_SIZE,
              " (got shape=", shape, ")");
-  const bool rowwise_amax_is_row_scaled = this->row_scaled_activation;
+  const bool rowwise_amax_is_row_scaled = this->rowwise_amax_is_row_scaled;
   NVTE_CHECK(!rowwise_amax_is_row_scaled || rowwise_usage,
              "Row-scaled NVFP4 quantization requires rowwise usage.");
-  const bool columnwise_usage = this->columnwise_usage && !this->row_scaled_activation;
+  const bool columnwise_usage = this->columnwise_usage && !rowwise_amax_is_row_scaled;
   const auto rowwise_scale_inv_shape = get_scale_shape(shape, false);
   const auto columnwise_scale_inv_shape = get_scale_shape(shape, true);
 
@@ -1901,9 +1901,10 @@ std::pair<GroupedTensorWrapper, py::object> NVFP4Quantizer::create_grouped_tenso
   std::optional<at::Tensor> rowwise_amax;
   std::optional<at::Tensor> columnwise_amax;
   const std::vector<size_t> logical_shape_vec = {logical_first_dim, logical_last_dim};
-  NVTE_CHECK(!this->row_scaled_activation || rowwise_usage,
+  const bool rowwise_amax_is_row_scaled = this->rowwise_amax_is_row_scaled;
+  NVTE_CHECK(!rowwise_amax_is_row_scaled || rowwise_usage,
              "Row-scaled NVFP4 grouped quantization requires rowwise usage.");
-  const bool columnwise_usage = this->columnwise_usage && !this->row_scaled_activation;
+  const bool columnwise_usage = this->columnwise_usage && !rowwise_amax_is_row_scaled;
 
   const int64_t total_data_elements = total_elements / 2;
 
@@ -1912,7 +1913,10 @@ std::pair<GroupedTensorWrapper, py::object> NVFP4Quantizer::create_grouped_tenso
     const auto scale_shape = get_scale_shape(logical_shape_vec, false);
     const int64_t total_scale_elements = static_cast<int64_t>(product(scale_shape));
     rowwise_scale_inv = at::empty({total_scale_elements}, uint8_opts);
-    rowwise_amax = at::empty({static_cast<int64_t>(num_tensors)}, float_opts);
+    const int64_t amax_elements = rowwise_amax_is_row_scaled
+                                      ? static_cast<int64_t>(logical_first_dim)
+                                      : static_cast<int64_t>(num_tensors);
+    rowwise_amax = at::empty({amax_elements}, float_opts);
   }
 
   if (columnwise_usage) {
@@ -1970,6 +1974,7 @@ std::pair<GroupedTensorWrapper, py::object> NVFP4Quantizer::create_grouped_tenso
   kwargs["last_dims"] = py::none();
   kwargs["tensor_offsets"] = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none();
   kwargs["with_gemm_swizzled_scales"] = this->optimize_for_gemm;
+  kwargs["rowwise_amax_is_row_scaled"] = py::cast(rowwise_amax_is_row_scaled);
   PyObject* result = PyObject_Call(GroupedTensorClass.ptr(), args.ptr(), kwargs.ptr());
   if (result == nullptr) {
     PyErr_Print();
@@ -2050,10 +2055,10 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
     }
   }
   const size_t flat_last_dim = shape.size() > 0 ? shape.back() : 1;
-  const bool rowwise_amax_is_row_scaled = this->row_scaled_activation;
+  const bool rowwise_amax_is_row_scaled = this->rowwise_amax_is_row_scaled;
   NVTE_CHECK(!rowwise_amax_is_row_scaled || rowwise_usage,
              "Row-scaled NVFP4 quantization requires rowwise usage.");
-  const bool columnwise_usage = this->columnwise_usage && !this->row_scaled_activation;
+  const bool columnwise_usage = this->columnwise_usage && !rowwise_amax_is_row_scaled;
   tensor.attr("_rowwise_amax_is_row_scaled") = py::cast(rowwise_amax_is_row_scaled);
 
   // Coerce row-wise data
@@ -2267,8 +2272,8 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
   }
   size_t cols = input.size(input.ndim() - 1);
 
-  if (this->row_scaled_activation) {
-    out.set_rowwise_amax_is_row_scaled(true);
+  const bool rowwise_amax_is_row_scaled = out.get_rowwise_amax_is_row_scaled();
+  if (rowwise_amax_is_row_scaled) {
     NVTE_CHECK(!this->with_rht, "Row-scaled NVFP4 quantization does not support RHT.");
     NVTE_CHECK(!this->with_2d_quantization,
                "Row-scaled NVFP4 quantization does not support 2D quantization.");
@@ -2277,8 +2282,6 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
     NVTE_CHECK(!this->with_amax_reduction,
                "Row-scaled NVFP4 quantization does not support amax reduction.");
     NVTE_CHECK(cols % 16 == 0, "Row-scaled NVFP4 quantization requires last dim divisible by 16.");
-  } else {
-    out.set_rowwise_amax_is_row_scaled(false);
   }
 
   // Restriction for the RHT cast fusion kernel because we are using MMA hardware for computing RHT
@@ -2347,7 +2350,7 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
           "Use with_post_rht_amax=true instead.");
     }
   } else {  // Without RHT
-    if (compute_amax && !this->row_scaled_activation) {
+    if (compute_amax && !rowwise_amax_is_row_scaled) {
       // Amax pointers
       auto rowwise_amax_ptr = out.get_amax().data_ptr;
       auto columnwise_amax_ptr = out.get_columnwise_amax().data_ptr;
@@ -2448,7 +2451,7 @@ void NVFP4Quantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
 }
 
 void NVFP4Quantizer::quantize_with_amax(TensorWrapper& input, TensorWrapper& out) {
-  NVTE_CHECK(!this->row_scaled_activation,
+  NVTE_CHECK(!out.get_rowwise_amax_is_row_scaled(),
              "quantize_with_amax is not supported for row-scaled NVFP4 quantization.");
   // Update output tensor amaxes with input tensor amax
   auto input_amax_ptr = input.amax();
