@@ -227,7 +227,7 @@ TensorWrapper CommOverlapCore::get_tensor_chunk(const TensorWrapper &source, siz
       continue;
     }
     if (param_type == NVTETensorParam::kNVTERowwiseAmaxIsRowScaled) {
-      chunk.set_rowwise_amax_is_row_scaled(source.get_rowwise_amax_is_row_scaled());
+      chunk.set_row_scaled_nvfp4(source.get_row_scaled_nvfp4());
       continue;
     }
     auto param = source.get_parameter(param_type);

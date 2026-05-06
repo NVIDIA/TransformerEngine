@@ -798,9 +798,9 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
 
   // Quantization parameters
   const auto rowwise_usage = quantizer_cpp_list[0]->rowwise_usage;
-  const bool rowwise_amax_is_row_scaled = quantizer_cpp_list[0]->rowwise_amax_is_row_scaled;
+  const bool row_scaled_nvfp4 = quantizer_cpp_list[0]->row_scaled_nvfp4;
   const auto columnwise_usage = quantizer_cpp_list[0]->columnwise_usage;
-  if (rowwise_amax_is_row_scaled) {
+  if (row_scaled_nvfp4) {
     NVTE_CHECK(rowwise_usage, "Row-scaled NVFP4 bulk allocation requires rowwise usage.");
     NVTE_CHECK(!columnwise_usage,
                "Row-scaled NVFP4 bulk allocation does not support columnwise usage.");
@@ -883,7 +883,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
       const auto offset = roundup(buffer_size, 16);
       amax_offsets.push_back(offset);
       size_t amax_size = 4;
-      if (rowwise_amax_is_row_scaled) {
+      if (row_scaled_nvfp4) {
         amax_size *= flat_first_dim(rowwise_data_shapes[i]);
       }
       buffer_size = offset + amax_size;
@@ -900,7 +900,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
       rowwise_scale_list.emplace_back(
           make_torch_view(buffer, rowwise_scale_shapes[i], scale_offsets[i], torch::kUInt8));
       std::vector<size_t> amax_shape{1};
-      if (rowwise_amax_is_row_scaled) {
+      if (row_scaled_nvfp4) {
         amax_shape = {flat_first_dim(rowwise_data_shapes[i])};
       }
       amax_rowwise_list.emplace_back(
@@ -984,10 +984,10 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
     py::object amax_columnwise = columnwise_usage ? py::cast(amax_columnwise_list[i]) : py::none();
 
     // Construct Python tensor
-    tensor_py_list.emplace_back(
-        NVFP4TensorClass(rowwise_data, rowwise_scale, columnwise_data, columnwise_scale,
-                         amax_rowwise, amax_columnwise, fp4_dtype, quantizer_py_list[i],
-                         with_gemm_swizzled_scales, rowwise_amax_is_row_scaled));
+    tensor_py_list.emplace_back(NVFP4TensorClass(rowwise_data, rowwise_scale, columnwise_data,
+                                                 columnwise_scale, amax_rowwise, amax_columnwise,
+                                                 fp4_dtype, quantizer_py_list[i],
+                                                 with_gemm_swizzled_scales, row_scaled_nvfp4));
 
     // Construct C++ tensor
     // Use a TensorWrapper variable to hold the output of makeTransformerEngineTensor,
@@ -1004,7 +1004,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
           rowwise_usage ? rowwise_scale_shapes[i] : std::vector<size_t>{0},
           columnwise_usage ? columnwise_scale_shapes[i] : std::vector<size_t>{0}, scaling_mode);
       tensor_wrapper.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
-      tensor_wrapper.set_rowwise_amax_is_row_scaled(rowwise_amax_is_row_scaled);
+      tensor_wrapper.set_row_scaled_nvfp4(row_scaled_nvfp4);
 
       // Set the amax rowwise and amax columnwise if available
       if (rowwise_usage) {
@@ -1481,8 +1481,7 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
                              return detail::IsNVFP4Quantizers(quantizer.ptr());
                            })) {
       allocation_method = AllocationMethod::BULK_NVFP4;
-      if (static_cast<NVFP4Quantizer *>(quantizer_cpp_list.front().get())
-              ->rowwise_amax_is_row_scaled) {
+      if (static_cast<NVFP4Quantizer *>(quantizer_cpp_list.front().get())->row_scaled_nvfp4) {
         quantization_method = QuantizationMethod::UNFUSED;
       } else {
         quantization_method = QuantizationMethod::FUSED_NVFP4;

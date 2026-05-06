@@ -73,7 +73,7 @@ def validate_gemm_scale(scale: Optional[float], required: bool) -> float:
 
 def _is_nvfp4_row_scaled_tensor(tensor: torch.Tensor) -> bool:
     """Whether tensor carries row-scaled NVFP4 global amax metadata."""
-    return isinstance(tensor, NVFP4TensorStorage) and tensor._rowwise_amax_is_row_scaled
+    return isinstance(tensor, NVFP4TensorStorage) and tensor._row_scaled_nvfp4
 
 
 def _nvfp4_row_scaled_gemm_inputs(
@@ -87,13 +87,13 @@ def _nvfp4_row_scaled_gemm_inputs(
     weight_amax = A._amax_rowwise if transa else A._amax_columnwise
     assert weight_amax is not None and weight_amax.numel() == 1
     A_metadata["amax_rowwise" if transa else "amax_columnwise"] = weight_amax.new_ones(1)
-    A_metadata["rowwise_amax_is_row_scaled"] = False
+    A_metadata["row_scaled_nvfp4"] = False
 
     B_metadata = B.get_metadata()
     rhs_rowwise_amax = B._amax_rowwise
     assert rhs_rowwise_amax is not None
     B_metadata["amax_rowwise"] = rhs_rowwise_amax.new_ones(1)
-    B_metadata["rowwise_amax_is_row_scaled"] = False
+    B_metadata["row_scaled_nvfp4"] = False
 
     assert rhs_rowwise_amax.dtype == torch.float32 and weight_amax.dtype == torch.float32
     return (
@@ -491,9 +491,9 @@ def general_grouped_gemm_for_grouped_tensor(
         raise ValueError("Both A and out are discrete. This is not supported yet.")
 
     if (
-        (isinstance(A, GroupedTensorStorage) and A.rowwise_amax_is_row_scaled)
-        or (isinstance(B, GroupedTensorStorage) and B.rowwise_amax_is_row_scaled)
-        or (isinstance(out, GroupedTensorStorage) and out.rowwise_amax_is_row_scaled)
+        (isinstance(A, GroupedTensorStorage) and A.row_scaled_nvfp4)
+        or (isinstance(B, GroupedTensorStorage) and B.row_scaled_nvfp4)
+        or (isinstance(out, GroupedTensorStorage) and out.row_scaled_nvfp4)
     ):
         raise NotImplementedError("Row-scaled NVFP4 GroupedTensor GEMM is not supported yet.")
 

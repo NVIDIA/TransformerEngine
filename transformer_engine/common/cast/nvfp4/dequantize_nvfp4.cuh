@@ -34,7 +34,7 @@ namespace dequantize_kernel {
 template <typename OType, bool WITH_GEMM_SWIZZLED_SCALES>
 __global__ void __launch_bounds__(512)
     dequantize_fp4_kernel(const void *const input, OType *output, const fp8e4m3 *const scales,
-                          const float *const tensor_amax, const bool rowwise_amax_is_row_scaled,
+                          const float *const tensor_amax, const bool row_scaled_nvfp4,
                           const size_t N, const size_t M, const size_t scale_stride,
                           const size_t num_scale_tiles_X) {
   const size_t thread_idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -64,7 +64,7 @@ __global__ void __launch_bounds__(512)
   fp4vec value;
   value.vec = input_vectorized[my_index];
   fp8e4m3 scale = scales[my_scale_index];
-  float amax = rowwise_amax_is_row_scaled ? tensor_amax[y] : tensor_amax[0];
+  float amax = row_scaled_nvfp4 ? tensor_amax[y] : tensor_amax[0];
   constexpr float factor_inv = 1.0 / (6.0 * 448.0);
   float final_scale = static_cast<float>(scale) * amax * factor_inv;
 #pragma unroll
@@ -91,7 +91,7 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
   NVTE_CHECK(output->data.shape == input.data.shape, "Input and output shapes need to match.");
 
   const bool with_gemm_swizzled_scales = input.with_gemm_swizzled_scales;
-  const bool rowwise_amax_is_row_scaled = input.rowwise_amax_is_row_scaled;
+  const bool row_scaled_nvfp4 = input.row_scaled_nvfp4;
 
   constexpr int FP4_BLOCK_SIZE = 16;
   const size_t N = input.flat_first_dim();
@@ -105,7 +105,7 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
   const size_t threads = 512;
   const size_t blocks = DIVUP(total, threads);
   const size_t num_scale_tiles_X = DIVUP(Mread, static_cast<size_t>(4));
-  NVTE_CHECK(!rowwise_amax_is_row_scaled || input.amax.numel() == N,
+  NVTE_CHECK(!row_scaled_nvfp4 || input.amax.numel() == N,
              "Row-scaled NVFP4 dequantization requires one rowwise amax per row.");
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
@@ -116,7 +116,7 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
           dequantize_fp4_kernel<OType, WITH_GEMM_SWIZZLED_SCALES><<<blocks, threads, 0, stream>>>(
               input.data.dptr, reinterpret_cast<OType *>(output->data.dptr),
               reinterpret_cast<fp8e4m3 *>(input.scale_inv.dptr),
-              reinterpret_cast<float *>(input.amax.dptr), rowwise_amax_is_row_scaled, N, Mread,
+              reinterpret_cast<float *>(input.amax.dptr), row_scaled_nvfp4, N, Mread,
               input.scale_inv.shape.back(),
               num_scale_tiles_X););  // NOLINT(*)
   );                                 // NOLINT(*)

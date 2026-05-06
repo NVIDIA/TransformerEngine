@@ -100,8 +100,8 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
       int32_t rows = input_tensor->flat_first_dim();
       int32_t cols = input_tensor->flat_last_dim();
       auto dtype = input_tensor->dtype();
-      const bool rowwise_amax_is_row_scaled = output_tensor->rowwise_amax_is_row_scaled;
-      if (rowwise_amax_is_row_scaled) {
+      const bool row_scaled_nvfp4 = output_tensor->row_scaled_nvfp4;
+      if (row_scaled_nvfp4) {
         NVTE_CHECK(!quant_config_cpp.nvfp4_2d_quantization,
                    "Row-scaled NVFP4 quantization does not support 2D quantization.");
         NVTE_CHECK(!output_tensor->has_columnwise_data(),
@@ -134,7 +134,7 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
             /*use_stochastic_rounding=*/quant_config_cpp.stochastic_rounding,
             /*rng_state=*/quant_config_cpp.rng_state,
             /*use_2d_quantization=*/quant_config_cpp.nvfp4_2d_quantization,
-            /*rowwise_amax_is_row_scaled=*/rowwise_amax_is_row_scaled,
+            /*row_scaled_nvfp4=*/row_scaled_nvfp4,
             /*noop_tensor=*/noop_tensor->data,
             /*stream=*/stream);
       }
@@ -249,7 +249,7 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
       int32_t rows = grad_tensor->flat_first_dim();
       int32_t cols = grad_tensor->flat_last_dim();
       auto dtype = grad_tensor->dtype();
-      NVTE_CHECK(!output_tensor->rowwise_amax_is_row_scaled,
+      NVTE_CHECK(!output_tensor->row_scaled_nvfp4,
                  "Backward NVFP4 quantization does not support row-scaled outputs.");
       bool use_optimized_kernel = (dtype == DType::kBFloat16) && (rows % 32 == 0) &&
                                   (cols % 32 == 0) && output_tensor->has_data();
@@ -277,7 +277,7 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
             /*use_stochastic_rounding=*/quant_config_cpp.stochastic_rounding,
             /*rng_state=*/quant_config_cpp.rng_state,
             /*use_2d_quantization=*/quant_config_cpp.nvfp4_2d_quantization,
-            /*rowwise_amax_is_row_scaled=*/false, /*noop_tensor=*/noop_tensor->data,
+            /*row_scaled_nvfp4=*/false, /*noop_tensor=*/noop_tensor->data,
             /*stream=*/stream);
       }
       break;

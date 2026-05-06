@@ -98,7 +98,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
     # GEMM
     _with_gemm_swizzled_scales: bool
     # Whether rowwise amax stores one value per tensor row
-    _rowwise_amax_is_row_scaled: bool
+    _row_scaled_nvfp4: bool
 
     def __new__(
         cls,
@@ -111,7 +111,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         fp4_dtype: TE_DType,
         quantizer: Optional[Quantizer],
         with_gemm_swizzled_scales: bool,
-        rowwise_amax_is_row_scaled: bool = False,
+        row_scaled_nvfp4: bool = False,
         *args,
         fake_dtype: Optional[torch.dtype] = None,
         **kwargs,
@@ -131,7 +131,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         instance._amax_rowwise = amax_rowwise
         instance._amax_columnwise = amax_columnwise
         instance._with_gemm_swizzled_scales = with_gemm_swizzled_scales
-        instance._rowwise_amax_is_row_scaled = rowwise_amax_is_row_scaled
+        instance._row_scaled_nvfp4 = row_scaled_nvfp4
 
         return instance
 
@@ -156,7 +156,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
             raise RuntimeError("FP4 dtype mismatch in copy_from_storage")
         if self._with_gemm_swizzled_scales != src._with_gemm_swizzled_scales:
             raise RuntimeError("Scale layout mismatch in copy_from_storage")
-        if self._rowwise_amax_is_row_scaled != src._rowwise_amax_is_row_scaled:
+        if self._row_scaled_nvfp4 != src._row_scaled_nvfp4:
             raise RuntimeError("Rowwise amax scaling mode mismatch in copy_from_storage")
 
         def _copy_optional(dst: Optional[torch.Tensor], src_tensor: Optional[torch.Tensor]):
@@ -182,7 +182,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
             "fp4_dtype": self._fp4_dtype,
             "quantizer": self._quantizer,
             "with_gemm_swizzled_scales": self._with_gemm_swizzled_scales,
-            "rowwise_amax_is_row_scaled": self._rowwise_amax_is_row_scaled,
+            "row_scaled_nvfp4": self._row_scaled_nvfp4,
             "fake_dtype": self._dtype,
         }
 
@@ -315,7 +315,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
             quantizer=self._quantizer,
             fp4_dtype=self._fp4_dtype,
             with_gemm_swizzled_scales=self._with_gemm_swizzled_scales,
-            rowwise_amax_is_row_scaled=self._rowwise_amax_is_row_scaled,
+            row_scaled_nvfp4=self._row_scaled_nvfp4,
             fake_dtype=self._dtype,
         )
 

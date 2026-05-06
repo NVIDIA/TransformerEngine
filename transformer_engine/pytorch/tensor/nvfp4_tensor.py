@@ -129,7 +129,7 @@ class NVFP4Quantizer(Quantizer):
     stochastic_rounding: bool
 
     """Row-scaled NVFP4 quantization path."""
-    rowwise_amax_is_row_scaled: bool
+    row_scaled_nvfp4: bool
 
     """RHT matrix random sign mask"""
     rht_matrix_random_sign_mask_t: int
@@ -146,7 +146,7 @@ class NVFP4Quantizer(Quantizer):
         with_post_rht_amax: bool = False,
         with_2d_quantization: bool = False,
         stochastic_rounding: bool = False,
-        rowwise_amax_is_row_scaled: bool = False,
+        row_scaled_nvfp4: bool = False,
         with_random_sign_mask: bool = True,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
@@ -157,7 +157,7 @@ class NVFP4Quantizer(Quantizer):
         self.amax_reduction_group = amax_reduction_group
         self.with_2d_quantization = with_2d_quantization
         self.stochastic_rounding = stochastic_rounding
-        self.rowwise_amax_is_row_scaled = rowwise_amax_is_row_scaled
+        self.row_scaled_nvfp4 = row_scaled_nvfp4
         self.rht_matrix_random_sign_mask_t = get_random_sign_mask_for_rht(
             with_random_sign_mask, torch.cuda.current_device()
         )
@@ -203,7 +203,7 @@ class NVFP4Quantizer(Quantizer):
             with_post_rht_amax=self.with_post_rht_amax,
             with_2d_quantization=self.with_2d_quantization,
             stochastic_rounding=self.stochastic_rounding,
-            rowwise_amax_is_row_scaled=self.rowwise_amax_is_row_scaled,
+            row_scaled_nvfp4=self.row_scaled_nvfp4,
         )
         quantizer.internal = self.internal
         quantizer.optimize_for_gemm = self.optimize_for_gemm
@@ -218,7 +218,7 @@ class NVFP4Quantizer(Quantizer):
 
     def is_quantizable(self, inp: torch.Tensor) -> bool:
         """Returns whether or not given inp can be quantized"""
-        if self.rowwise_amax_is_row_scaled:
+        if self.row_scaled_nvfp4:
             return False
         if inp.ndim < 2:
             return False
@@ -321,7 +321,7 @@ class NVFP4Quantizer(Quantizer):
             f"Incorrect shape {shape} for NVFP4. Tensor dims must be divisible by"
             f" {NVFP4_BLOCK_SCALING_SIZE}"
         )
-        if self.rowwise_amax_is_row_scaled:
+        if self.row_scaled_nvfp4:
             if not self.rowwise_usage:
                 raise ValueError("Row-scaled NVFP4 quantization requires rowwise usage.")
             if self.columnwise_usage:
@@ -343,7 +343,7 @@ class NVFP4Quantizer(Quantizer):
                 scale_shape, dtype=torch.uint8, device=device, pin_memory=pin_memory
             )
             # Allocate global amax metadata. Row-scaled NVFP4 stores one value per row.
-            amax_rows = flat_first_dim if self.rowwise_amax_is_row_scaled else 1
+            amax_rows = flat_first_dim if self.row_scaled_nvfp4 else 1
             amax_rowwise = torch.zeros(
                 amax_rows, dtype=torch.float32, device=device, pin_memory=pin_memory
             )
@@ -387,7 +387,7 @@ class NVFP4Quantizer(Quantizer):
             quantizer=self,
             requires_grad=requires_grad,
             with_gemm_swizzled_scales=False,
-            rowwise_amax_is_row_scaled=self.rowwise_amax_is_row_scaled,
+            row_scaled_nvfp4=self.row_scaled_nvfp4,
         )
 
     def calibrate(self, tensor: torch.Tensor) -> None:
@@ -448,7 +448,7 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
         fp4_dtype: TE_DType,
         quantizer: Quantizer,
         with_gemm_swizzled_scales: bool,
-        rowwise_amax_is_row_scaled: bool = False,
+        row_scaled_nvfp4: bool = False,
         **kwargs,
     ):
         instance = super().__new__(
@@ -462,7 +462,7 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
             fp4_dtype,
             quantizer,
             with_gemm_swizzled_scales,
-            rowwise_amax_is_row_scaled,
+            row_scaled_nvfp4,
             *args,
             **kwargs,
         )

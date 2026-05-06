@@ -177,7 +177,7 @@ struct Tensor {
    *
    *  Only meaningful for NVFP4 tensors.
    */
-  bool rowwise_amax_is_row_scaled = false;
+  bool row_scaled_nvfp4 = false;
 
   /*! Map from NVTETensorParam to parameter sizes */
   static constexpr size_t attr_sizes[] = {
@@ -205,7 +205,7 @@ struct Tensor {
     columnwise_scale_inv.clear();
     scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
     with_gemm_swizzled_scales = false;
-    rowwise_amax_is_row_scaled = false;
+    row_scaled_nvfp4 = false;
   }
 
   explicit operator NVTETensor() const noexcept { return nvte_tensor; }

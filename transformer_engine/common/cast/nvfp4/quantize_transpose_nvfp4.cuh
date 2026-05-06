@@ -238,7 +238,7 @@ constexpr size_t THREADS_PER_BANK = TOTAL_BANKS_WIDTH / SCALE_DIM;  // 8 = 128 /
 
 template <bool COMPUTE_ACTIVATIONS, typename ParamOP, float (*OP)(float, const ParamOP &),
           typename IType, bool USE_STOCHASTIC_ROUNDING, bool RETURN_TRANSPOSE,
-          bool ROWWISE_AMAX_IS_ROW_SCALED>
+          bool ROW_SCALED_NVFP4>
 __global__ void __launch_bounds__(THREADS_NUM)
     quantize_transpose_nvfp4_kernel(const __grid_constant__ CUtensorMap tensor_map_input,
                                     const __grid_constant__ CUtensorMap tensor_map_output,
@@ -639,7 +639,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
         }
 
         float block_scale_inverse;
-        if constexpr (ROWWISE_AMAX_IS_ROW_SCALED) {
+        if constexpr (ROW_SCALED_NVFP4) {
           // 2. Compute E4M3 scaling factor
           const size_t scales_offset_Y =
               scales_offset_Y_rowwise + stage * BUFF_DIM_Y + it * THREADS_Y_ROWWISE;
@@ -1320,8 +1320,8 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
   using namespace ptx;
 
   bool use_stochastic_rounding = quant_config ? quant_config->stochastic_rounding : false;
-  const bool rowwise_amax_is_row_scaled = output->rowwise_amax_is_row_scaled;
-  NVTE_CHECK(!rowwise_amax_is_row_scaled || !use_2d_quantization,
+  const bool row_scaled_nvfp4 = output->row_scaled_nvfp4;
+  NVTE_CHECK(!row_scaled_nvfp4 || !use_2d_quantization,
              "Row-scaled NVFP4 quantization does not support 2D quantization.");
 
   // If transposed output is allocated, return the transposed data. Otherwise, it's not necesary to
@@ -1347,9 +1347,9 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
   NVTE_CHECK(output->has_data(), "NVFP4 output tensor must be allocated.");
   NVTE_CHECK(is_fp4_dtype(output->data.dtype), "Output must have FP4 type.");
   NVTE_CHECK(output->scale_inv.dptr != nullptr, "Scaling tensor must be allocated");
-  NVTE_CHECK(!rowwise_amax_is_row_scaled || output->amax.dptr != nullptr,
+  NVTE_CHECK(!row_scaled_nvfp4 || output->amax.dptr != nullptr,
              "Row-scaled NVFP4 quantization requires rowwise amax.");
-  NVTE_CHECK(!rowwise_amax_is_row_scaled || !output->has_columnwise_data(),
+  NVTE_CHECK(!row_scaled_nvfp4 || !output->has_columnwise_data(),
              "Row-scaled NVFP4 quantization does not produce columnwise output.");
   NVTE_CHECK(!output->with_gemm_swizzled_scales, "Output must have scales in compact format.");
   if (return_transpose) {
@@ -1433,11 +1433,11 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
       use_stochastic_rounding, USE_STOCHASTIC_ROUNDING,
 
-      TRANSFORMER_ENGINE_SWITCH_CONDITION(rowwise_amax_is_row_scaled, ROWWISE_AMAX_IS_ROW_SCALED, {
+      TRANSFORMER_ENGINE_SWITCH_CONDITION(row_scaled_nvfp4, ROW_SCALED_NVFP4, {
         TRANSFORMER_ENGINE_SWITCH_CONDITION(return_transpose, RETURN_TRANSPOSE, {
           auto kernel = quantize_transpose_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,
                                                         USE_STOCHASTIC_ROUNDING, RETURN_TRANSPOSE,
-                                                        ROWWISE_AMAX_IS_ROW_SCALED>;
+                                                        ROW_SCALED_NVFP4>;
 
           if constexpr (use_2d_quantization) {
             kernel = quantize_transpose_nvfp4_2D_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,

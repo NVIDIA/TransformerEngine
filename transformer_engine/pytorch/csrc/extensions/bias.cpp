@@ -152,7 +152,7 @@ std::vector<py::object> dact_dbias(
   } else if (detail::IsNVFP4Quantizers(quantizer_py.ptr())) {
     auto nvfp4_quantizer_cpp = dynamic_cast<NVFP4Quantizer *>(quantizer_cpp.get());
     NVTE_CHECK(nvfp4_quantizer_cpp != nullptr, "Could not cast to NVFP4 quantizer");
-    if (nvfp4_quantizer_cpp->rowwise_amax_is_row_scaled ||
+    if (nvfp4_quantizer_cpp->row_scaled_nvfp4 ||
         (nvfp4_quantizer_cpp->with_rht && nvfp4_quantizer_cpp->with_post_rht_amax)) {
       // Amax is handled within NVFP4 quantizer
       impl = Impl::UNFUSED;

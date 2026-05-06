@@ -321,7 +321,7 @@ class NVFP4Quantizer : public Quantizer {
   bool with_2d_quantization;
   bool stochastic_rounding;
   // Whether tensors emitted by this quantizer store one rowwise amax per tensor row.
-  bool rowwise_amax_is_row_scaled;
+  bool row_scaled_nvfp4;
 
   int rht_matrix_random_sign_mask_t;
   at::Tensor rht_matrix;

@@ -27,7 +27,7 @@ def check_nvfp4_gemm_versus_reference(
     *,
     x_columnwise: bool = False,
     w_columnwise: bool = False,
-    rowwise_amax_is_row_scaled: bool = False,
+    row_scaled_nvfp4: bool = False,
 ):
     te_dtype = tex.DType.kFloat4E2M1
 
@@ -53,12 +53,12 @@ def check_nvfp4_gemm_versus_reference(
     x_quantizer = NVFP4Quantizer(
         fp4_dtype=te_dtype,
         rowwise=True,
-        columnwise=not rowwise_amax_is_row_scaled,
+        columnwise=not row_scaled_nvfp4,
         with_amax_reduction=False,
         amax_reduction_group=None,
         with_rht=False,
         with_post_rht_amax=False,
-        rowwise_amax_is_row_scaled=rowwise_amax_is_row_scaled,
+        row_scaled_nvfp4=row_scaled_nvfp4,
     )
     w_quantizer = NVFP4Quantizer(
         fp4_dtype=te_dtype,
@@ -118,11 +118,11 @@ def check_nvfp4_gemm_versus_reference(
     x_ref_quantizer = NVFP4QuantizerRef(
         dtype=utils.Fp4Formats.E2M1,
         rowwise=True,
-        columnwise=not rowwise_amax_is_row_scaled,
+        columnwise=not row_scaled_nvfp4,
         pow_2_scales=False,
         eps=0.0,
         quant_tile_shape=(1, 16),
-        rowwise_amax_is_row_scaled=rowwise_amax_is_row_scaled,
+        row_scaled_nvfp4=row_scaled_nvfp4,
     )
     w_ref_quantizer = NVFP4QuantizerRef(
         dtype=utils.Fp4Formats.E2M1,
@@ -178,7 +178,7 @@ def check_nvfp4_gemm_versus_reference(
         x_nvfp4_native.update_usage(rowwise_usage=False)
     if w_columnwise:
         w_nvfp4_native.update_usage(rowwise_usage=False)
-    if rowwise_amax_is_row_scaled:
+    if row_scaled_nvfp4:
         layout = ("T" if transa else "N") + ("T" if transb else "N")
         y_native = general_gemm(
             w_nvfp4_native,
@@ -248,7 +248,7 @@ def check_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
         amax_reduction_group=None,
         with_rht=False,
         with_post_rht_amax=False,
-        rowwise_amax_is_row_scaled=True,
+        row_scaled_nvfp4=True,
     )
     w_quantizer = NVFP4Quantizer(
         fp4_dtype=te_dtype,
@@ -338,7 +338,7 @@ def check_nvfp4_row_scaled_gemm_matches_emulated(
         amax_reduction_group=None,
         with_rht=False,
         with_post_rht_amax=False,
-        rowwise_amax_is_row_scaled=True,
+        row_scaled_nvfp4=True,
     )
     x_tensorwise_quantizer = NVFP4Quantizer(
         fp4_dtype=te_dtype,
@@ -416,9 +416,7 @@ def check_nvfp4_row_scaled_gemm_matches_emulated(
     ],
     ids=["rowxrow", "colxrow", "colxcol"],
 )
-@pytest.mark.parametrize(
-    "rowwise_amax_is_row_scaled", [False, True], ids=["nvfp4", "nvfp4_row_scaled"]
-)
+@pytest.mark.parametrize("row_scaled_nvfp4", [False, True], ids=["nvfp4", "nvfp4_row_scaled"])
 def test_nvfp4_gemm_versus_reference(
     M: int,
     K: int,
@@ -429,9 +427,9 @@ def test_nvfp4_gemm_versus_reference(
     accumulate: bool,
     is_x_columnwise: bool,
     is_w_columnwise: bool,
-    rowwise_amax_is_row_scaled: bool,
+    row_scaled_nvfp4: bool,
 ):
-    if rowwise_amax_is_row_scaled:
+    if row_scaled_nvfp4:
         if accumulate:
             pytest.skip("Row-scaled NVFP4 GEMM output rescale does not support accumulation")
         if is_x_columnwise:
@@ -447,7 +445,7 @@ def test_nvfp4_gemm_versus_reference(
         accumulate=accumulate,
         x_columnwise=is_x_columnwise,
         w_columnwise=is_w_columnwise,
-        rowwise_amax_is_row_scaled=rowwise_amax_is_row_scaled,
+        row_scaled_nvfp4=row_scaled_nvfp4,
     )
 
 

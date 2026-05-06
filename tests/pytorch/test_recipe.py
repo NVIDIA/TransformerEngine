@@ -522,7 +522,7 @@ def test_nvfp4_row_scaled_quantizer_roles():
         mode="forward",
         num_quantizers=3,
     ).make_quantizers()
-    assert [q.rowwise_amax_is_row_scaled for q in forward_quantizers] == [True, False, True]
+    assert [q.row_scaled_nvfp4 for q in forward_quantizers] == [True, False, True]
     assert not forward_quantizers[0].is_quantizable(torch.empty(16, 16))
     assert forward_quantizers[1].is_quantizable(torch.empty(16, 16))
 
@@ -531,14 +531,12 @@ def test_nvfp4_row_scaled_quantizer_roles():
         mode="backward",
         num_quantizers=2,
     ).make_quantizers()
-    assert [q.rowwise_amax_is_row_scaled for q in backward_quantizers] == [False, False]
+    assert [q.row_scaled_nvfp4 for q in backward_quantizers] == [False, False]
 
 
 @pytest.mark.skipif(not fp4_available, reason=reason_for_no_fp4)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=str)
-@pytest.mark.parametrize(
-    "rowwise_amax_is_row_scaled", [False, True], ids=["nvfp4", "nvfp4_row_scaled"]
-)
+@pytest.mark.parametrize("row_scaled_nvfp4", [False, True], ids=["nvfp4", "nvfp4_row_scaled"])
 @pytest.mark.parametrize(
     "M, N",
     [
@@ -554,19 +552,19 @@ def test_nvfp4_row_scaled_quantizer_roles():
         (8192, 8192),
     ],
 )
-def test_fp4_dequantize(dtype, rowwise_amax_is_row_scaled, M, N):
+def test_fp4_dequantize(dtype, row_scaled_nvfp4, M, N):
     q = NVFP4Quantizer(
-        columnwise=not rowwise_amax_is_row_scaled,
-        rowwise_amax_is_row_scaled=rowwise_amax_is_row_scaled,
+        columnwise=not row_scaled_nvfp4,
+        row_scaled_nvfp4=row_scaled_nvfp4,
     )
     a = torch.rand((M, N)).cuda().to(dtype=dtype)
     starting_tensor = q(a)
-    assert starting_tensor._rowwise_amax_is_row_scaled == rowwise_amax_is_row_scaled
-    assert starting_tensor._amax_rowwise.numel() == (M if rowwise_amax_is_row_scaled else 1)
+    assert starting_tensor._row_scaled_nvfp4 == row_scaled_nvfp4
+    assert starting_tensor._amax_rowwise.numel() == (M if row_scaled_nvfp4 else 1)
     dequantized_tensor = starting_tensor.dequantize()
     new_tensor = q(dequantized_tensor)
-    assert new_tensor._rowwise_amax_is_row_scaled == rowwise_amax_is_row_scaled
-    assert new_tensor._amax_rowwise.numel() == (M if rowwise_amax_is_row_scaled else 1)
+    assert new_tensor._row_scaled_nvfp4 == row_scaled_nvfp4
+    assert new_tensor._amax_rowwise.numel() == (M if row_scaled_nvfp4 else 1)
     torch.testing.assert_close(
         new_tensor._rowwise_data,
         starting_tensor._rowwise_data,

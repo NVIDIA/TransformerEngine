@@ -562,7 +562,7 @@ template <typename InputType>
 void performTest(float (*OP)(const float),
                  const std::vector<size_t>& shape,
                  const bool use_fast_math,
-                 const bool rowwise_amax_is_row_scaled = false) {
+                 const bool row_scaled_nvfp4 = false) {
     using namespace test;
 
     DType itype = TypeInfo<InputType>::dtype;
@@ -589,7 +589,7 @@ void performTest(float (*OP)(const float),
     const size_t scales_stride_t = blocks_X_t;
 
     Tensor input("input", shape, itype);
-    Tensor output("output", shape, otype, true, !rowwise_amax_is_row_scaled, NVTE_NVFP4_1D_SCALING);
+    Tensor output("output", shape, otype, true, !row_scaled_nvfp4, NVTE_NVFP4_1D_SCALING);
 
     std::unique_ptr<fp4e2m1x2[]> ref_output   = std::make_unique<fp4e2m1x2[]>(rows * (cols / 2));
     std::unique_ptr<fp4e2m1x2[]> ref_output_t = std::make_unique<fp4e2m1x2[]>(cols * (rows / 2));
@@ -602,9 +602,9 @@ void performTest(float (*OP)(const float),
     const float amax = 448.0f * 6.0f * 8.0f;
     std::vector<float> ref_rowwise_amax;
     bool use_2d_quantization = false;
-    if (rowwise_amax_is_row_scaled) {
+    if (row_scaled_nvfp4) {
         output.set_tensor_amax_shape({rows});
-        output.set_rowwise_amax_is_row_scaled(true);
+        output.set_row_scaled_nvfp4(true);
         compute_ref<InputType>(OP,
                                input.rowwise_cpu_dptr<InputType>(),
                                ref_output.get(),
@@ -681,7 +681,7 @@ void performTest(float (*OP)(const float),
 
     // Set dump_data=true to enable dumping tensor data to files for analysis
     compareResults_nvfp4(output, ref_output.get(), ref_output_t.get(), rows, cols, atol, rtol, true,
-                         false, !rowwise_amax_is_row_scaled);
+                         false, !row_scaled_nvfp4);
 
     size_t scale_mismatches_num = 0;
     compare_scaling_factors<fp8e4m3>("scales", output.rowwise_cpu_scale_inv_ptr<fp8e4m3>(),
@@ -689,14 +689,14 @@ void performTest(float (*OP)(const float),
                                       unpadded_blocks_Y, unpadded_blocks_X, scales_stride,
                                       scale_mismatches_num);
 
-    if (!rowwise_amax_is_row_scaled) {
+    if (!row_scaled_nvfp4) {
         compare_scaling_factors<fp8e4m3>("scales_t", output.columnwise_cpu_scale_inv_ptr<fp8e4m3>(),
                                           ref_scales_t.get(),
                                           unpadded_blocks_Y_t, unpadded_blocks_X_t, scales_stride_t,
                                           scale_mismatches_num);
     }
 
-    if (rowwise_amax_is_row_scaled) {
+    if (row_scaled_nvfp4) {
         compare_rowwise_amax(output, ref_rowwise_amax);
     }
 }
@@ -747,7 +747,7 @@ TEST_P(FusedCastTransposeNVFP4TestSuite, TestFusedCastTransposeNVFP4) {
     const auto tensor_dims = std::get<1>(GetParam());
     const DType input_type = std::get<2>(GetParam());
     const bool use_fast_math = std::get<3>(GetParam());
-    const bool rowwise_amax_is_row_scaled = std::get<4>(GetParam());
+    const bool row_scaled_nvfp4 = std::get<4>(GetParam());
 
     // Skip tests if the input tensor is 1D
     if (tensor_dims.size() < 2) {
@@ -765,7 +765,7 @@ TEST_P(FusedCastTransposeNVFP4TestSuite, TestFusedCastTransposeNVFP4) {
     }
 
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(input_type, InputType,
-        performTest<InputType>(OP, tensor_dims, use_fast_math, rowwise_amax_is_row_scaled);
+        performTest<InputType>(OP, tensor_dims, use_fast_math, row_scaled_nvfp4);
     );
 }
 

@@ -327,8 +327,8 @@ class Tensor {
     tensor_.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
   }
 
-  void set_rowwise_amax_is_row_scaled(bool rowwise_amax_is_row_scaled) {
-    tensor_.set_rowwise_amax_is_row_scaled(rowwise_amax_is_row_scaled);
+  void set_row_scaled_nvfp4(bool row_scaled_nvfp4) {
+    tensor_.set_row_scaled_nvfp4(row_scaled_nvfp4);
   }
 
   void to_cpu() const;

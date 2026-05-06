@@ -261,7 +261,7 @@ __device__ __forceinline__ void colwise_scaling(const IType *__restrict__ sIn_pt
   }
 }
 
-template <bool USE_STOCHASTIC_ROUNDING, bool USE_FAST_MATH, bool ROWWISE_AMAX_IS_ROW_SCALED>
+template <bool USE_STOCHASTIC_ROUNDING, bool USE_FAST_MATH, bool ROW_SCALED_NVFP4>
 __device__ __forceinline__ void rowwise_scaling(
     const IType *__restrict__ sIn_ptr, fp4e2m1x2 *__restrict__ sOut_ptr,
     nvfp4_scale_t *__restrict__ sSFrowwise_ptr, const float S_enc_rowwise, const int stage_Y,
@@ -315,7 +315,7 @@ __device__ __forceinline__ void rowwise_scaling(
 
     nvfp4_scale_t S_dec_b_fp8;
     scaling_coeff_type SFcoefficient;
-    if constexpr (ROWWISE_AMAX_IS_ROW_SCALED) {
+    if constexpr (ROW_SCALED_NVFP4) {
       const size_t row_idx = row_offset + stage_Y * TILE_DIM_Y + it_offset_Y_rowwise;
       const float S_enc_rowwise_block =
           row_idx < rows ? core::compute_global_encode_scaling_factor_FP4(amax_rowwise_ptr[row_idx])
@@ -361,7 +361,7 @@ __device__ __forceinline__ void rowwise_scaling(
 }
 
 template <bool USE_STOCHASTIC_ROUNDING, bool USE_FAST_MATH, bool RETURN_TRANSPOSE,
-          bool ROWWISE_AMAX_IS_ROW_SCALED>
+          bool ROW_SCALED_NVFP4>
 __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D_kernel(
     const __grid_constant__ CUtensorMap tensor_map_input,
     const __grid_constant__ CUtensorMap tensor_map_output,
@@ -582,7 +582,7 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D
       ptx::cp_async_bulk_wait_group_read<TunableConfig::PREFETCH_STAGES>();
 
       // NVFP4 Quantization
-      rowwise_scaling<USE_STOCHASTIC_ROUNDING, USE_FAST_MATH, ROWWISE_AMAX_IS_ROW_SCALED>(
+      rowwise_scaling<USE_STOCHASTIC_ROUNDING, USE_FAST_MATH, ROW_SCALED_NVFP4>(
           sIn_ptr, sOut_ptr, sSFrowwise_ptr, S_enc_rowwise, stage_Y, stage_X, buff_in, buff_out,
           amax_rowwise_ptr, block_offset_Y, rows, rng, random_uint4, rnd_idx);
 
@@ -691,7 +691,7 @@ inline void quantize_transpose_tuned_1D(const Tensor &input, const Tensor *noop,
 
   const bool use_stochastic_rounding = quant_config ? quant_config->stochastic_rounding : false;
   const bool use_fast_math = quant_config ? quant_config->use_fast_math : false;
-  const bool rowwise_amax_is_row_scaled = output->rowwise_amax_is_row_scaled;
+  const bool row_scaled_nvfp4 = output->row_scaled_nvfp4;
 
   // If transposed output is allocated, return the transposed data
   // Otherwise, it's not necesary to return the transposed data.
@@ -706,9 +706,9 @@ inline void quantize_transpose_tuned_1D(const Tensor &input, const Tensor *noop,
   NVTE_CHECK(output->has_data(), "NVFP4 output tensor must be allocated.");
   NVTE_CHECK(is_fp4_dtype(output->data.dtype), "Output must have FP4 type.");
   NVTE_CHECK(output->scale_inv.dptr != nullptr, "Scaling tensor must be allocated");
-  NVTE_CHECK(!rowwise_amax_is_row_scaled || output->amax.dptr != nullptr,
+  NVTE_CHECK(!row_scaled_nvfp4 || output->amax.dptr != nullptr,
              "Row-scaled NVFP4 quantization requires rowwise amax.");
-  NVTE_CHECK(!rowwise_amax_is_row_scaled || !output->has_columnwise_data(),
+  NVTE_CHECK(!row_scaled_nvfp4 || !output->has_columnwise_data(),
              "Row-scaled NVFP4 quantization does not produce columnwise output.");
 
   if (return_transpose) {
@@ -800,12 +800,11 @@ inline void quantize_transpose_tuned_1D(const Tensor &input, const Tensor *noop,
       TRANSFORMER_ENGINE_SWITCH_CONDITION(
           use_fast_math, USE_FAST_MATH,
           TRANSFORMER_ENGINE_SWITCH_CONDITION(
-              rowwise_amax_is_row_scaled, ROWWISE_AMAX_IS_ROW_SCALED,
+              row_scaled_nvfp4, ROW_SCALED_NVFP4,
               TRANSFORMER_ENGINE_SWITCH_CONDITION(return_transpose, RETURN_TRANSPOSE, {
                 auto kernel =
                     quantize_transpose_nvfp4_tuned_1D_kernel<USE_STOCHASTIC_ROUNDING, USE_FAST_MATH,
-                                                             RETURN_TRANSPOSE,
-                                                             ROWWISE_AMAX_IS_ROW_SCALED>;
+                                                             RETURN_TRANSPOSE, ROW_SCALED_NVFP4>;
 
                 cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                                      dshmem_size);

@@ -766,8 +766,8 @@ class TensorWrapper {
     nvte_set_tensor_param_v2(tensor_, kNVTEWithGEMMSwizzledScales, &val, sizeof(val));
   }
 
-  void set_rowwise_amax_is_row_scaled(bool rowwise_amax_is_row_scaled) {
-    const auto val = static_cast<uint8_t>(rowwise_amax_is_row_scaled);
+  void set_row_scaled_nvfp4(bool row_scaled_nvfp4) {
+    const auto val = static_cast<uint8_t>(row_scaled_nvfp4);
     nvte_set_tensor_param_v2(tensor_, kNVTERowwiseAmaxIsRowScaled, &val, sizeof(val));
   }
 
@@ -807,7 +807,7 @@ class TensorWrapper {
     return static_cast<bool>(val);
   }
 
-  bool get_rowwise_amax_is_row_scaled() const {
+  bool get_row_scaled_nvfp4() const {
     uint8_t val = 0;
     nvte_get_tensor_param_v2(tensor_, kNVTERowwiseAmaxIsRowScaled, &val, sizeof(val), nullptr);
     return static_cast<bool>(val);
