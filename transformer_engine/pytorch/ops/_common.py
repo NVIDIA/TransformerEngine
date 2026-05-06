@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 import functools
+import math
 from importlib.metadata import PackageNotFoundError, version as get_pkg_version
 from typing import Optional
 
@@ -86,6 +87,99 @@ def get_fp8_meta_from_fp8_tensor(tensor: Float8Tensor) -> tuple[FP8TensorMeta, i
     fp8_meta.amax_history = torch.empty(1, 1, dtype=torch.float32, device=tensor.device)
     fp8_meta.scale_inv = tensor._scale_inv
     return fp8_meta, 0
+
+
+def get_main_grad_from_param(
+    weight_param: torch.nn.Parameter,
+    *,
+    op_label: str = "",
+) -> torch.Tensor:
+    """Refresh ``main_grad`` from FSDP (if applicable) and return it.
+    Used by Megatron-LM-style wgrad fusion paths
+    (``accumulate_into_main_grad=True``) to obtain the buffer the wgrad GEMM
+    will write into.
+    Raises if the parameter does not have a ``main_grad`` attribute or if it
+    is ``None``.
+    """
+    if hasattr(weight_param, "__fsdp_param__"):
+        weight_param.main_grad = weight_param.get_main_grad()
+    if not hasattr(weight_param, "main_grad") or weight_param.main_grad is None:
+        prefix = f"{op_label} " if op_label else ""
+        raise RuntimeError(
+            f"{prefix}operation is configured with accumulate_into_main_grad=True, "
+            "but weight parameter does not have a valid main_grad attribute"
+        )
+    return weight_param.main_grad
+
+
+def get_accumulate_flag_in_param(weight_param: torch.nn.Parameter) -> bool:
+    """Return whether the wgrad GEMM should accumulate into ``main_grad``.
+
+    Returns ``False`` (i.e. overwrite) when the parameter has
+    ``overwrite_main_grad=True`` (used in Megatron-FSDP), and ``True``
+    otherwise.
+    """
+    return not getattr(weight_param, "overwrite_main_grad", False)
+
+
+def view_main_grad_as_grouped_buffer(
+    main_grad: torch.Tensor,
+    num_groups: int,
+    weight_shape: tuple[int, ...],
+    *,
+    label: str = "",
+) -> torch.Tensor:
+    """Return ``main_grad`` viewed as ``(num_groups, *weight_shape)`` without copy.
+    Raises if the numel doesn't match or if the existing stride pattern does
+    not allow a zero-copy view to the grouped layout.
+    """
+    grouped_shape = (num_groups, *weight_shape)
+    if tuple(main_grad.shape) == grouped_shape:
+        return main_grad
+    prefix = f"{label} " if label else "Grouped weight "
+    if main_grad.numel() != math.prod(grouped_shape):
+        raise RuntimeError(
+            f"{prefix}main_grad expected shape {grouped_shape} or matching numel, "
+            f"but got shape {tuple(main_grad.shape)}"
+        )
+    try:
+        return main_grad.view(grouped_shape)
+    except RuntimeError as e:
+        raise RuntimeError(
+            f"{prefix}main_grad must be viewable as {grouped_shape} without copy, "
+            f"but got shape {tuple(main_grad.shape)} and stride "
+            f"{tuple(main_grad.stride())}"
+        ) from e
+
+
+def get_dummy_wgrads_for_params(
+    weight_params: list[torch.nn.Parameter],
+) -> list[Optional[torch.Tensor]]:
+    """Build dummy ``.grad`` placeholders for Megatron-LM wgrad-fusion params.
+
+    For each parameter that exposes ``grad_added_to_main_grad``, set the flag
+    to ``True`` and return a dummy wgrad tensor (zeroed if
+    ``zero_out_wgrad`` is also set on the parameter). For parameters without
+    the flag, the corresponding entry is ``None``.
+
+    The returned list has the same length and order as ``weight_params``.
+    """
+    from ..module.base import get_dummy_wgrad  # pylint: disable=import-outside-toplevel
+
+    out: list[Optional[torch.Tensor]] = []
+    for wp in weight_params:
+        if hasattr(wp, "grad_added_to_main_grad"):
+            wp.grad_added_to_main_grad = True
+            out.append(
+                get_dummy_wgrad(
+                    list(wp.size()),
+                    wp.dtype,
+                    zero=getattr(wp, "zero_out_wgrad", False),
+                )
+            )
+        else:
+            out.append(None)
+    return out
 
 
 def validate_grouped_mlp_dims(fc1, glu_op, fc2) -> None:

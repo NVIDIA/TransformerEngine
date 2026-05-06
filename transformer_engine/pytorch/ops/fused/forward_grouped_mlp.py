@@ -160,10 +160,9 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         if int(split_sizes.numel()) != num_groups:
             raise ValueError(f"Expected {num_groups} splits, but got {int(split_sizes.numel())}.")
         split_sizes = split_sizes.to(dtype=torch.int64, device=device)
-        base_offsets = tex.splits_to_offsets(split_sizes, 1)
-        split_points = base_offsets[1:].to(dtype=torch.int)
-        fc1_x_tensor_offsets = base_offsets * fc1_weight_shape[1]
-        fc2_x_tensor_offsets = base_offsets * fc2_weight_shape[1]
+        base_split_offsets = tex.splits_to_offsets(split_sizes, 1)
+        split_points = base_split_offsets[1:].to(dtype=torch.int)
+        fc2_x_tensor_offsets = base_split_offsets * fc2_weight_shape[1]
 
         # Extract post-scales from extra input
         scales = basic_op_extra_inputs[1][0]
@@ -452,27 +451,35 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         # Save state for backward pass
         if requires_grad:
             mark_grouped_tensor(grouped_fc1_x, swiglu_in, scales, grouped_fc2_x)
-            fc1_input_tensors = (
-                grouped_fc1_x.columnwise_data,
-                grouped_fc1_x.columnwise_scale_inv,
-                fc1_x_tensor_offsets,
-            )
-            # FC1
+
+            # Save the input ``GroupedTensor``s themselves for the activations.
+            for grouped_fc_x in (grouped_fc1_x, grouped_fc2_x):
+                if grouped_fc_x is not None:
+                    grouped_fc_x.rowwise_data = None
+                    grouped_fc_x.scale_inv = None
+
+            # FC1 saved-tensor layout.
+            #   [split_sizes, base_split_offsets, split_points,
+            #    grouped_fc1_x, *fc1_weight_tensors]
             fc1_weight_tensors = (
                 [grouped_fc1_weight] if fc1_op.single_grouped_weight else grouped_fc1_weight
             )
             fc1_ctx.save_for_backward(
-                split_sizes, split_points, *fc1_weight_tensors, *fc1_input_tensors
+                split_sizes,
+                base_split_offsets,
+                split_points,
+                grouped_fc1_x,
+                *fc1_weight_tensors,
             )
+            fc1_ctx.use_grouped_tensor_path = True
             fc1_ctx.with_quantized_compute = True
-            fc1_ctx.input_quantizer = fc1_input_quantizer
-            fc1_ctx.weight_quantizer = fc1_weight_quantizer
-            fc1_ctx.grad_output_quantizer = fc1_grad_output_quantizer
+            fc1_ctx.input_quantizers = [fc1_input_quantizer]
+            fc1_ctx.weight_quantizers = [fc1_weight_quantizer]
+            fc1_ctx.grad_output_quantizers = [fc1_grad_output_quantizer]
             fc1_ctx.grad_input_quantizers = None
             fc1_ctx.dtype = dtype
             fc1_ctx.input_requires_grad = input_requires_grad
             fc1_ctx.weight_requires_grad = weight_requires_grad
-            fc1_ctx.base_split_offsets = base_offsets
 
             # Scaled SwiGLU
             swiglu_ctx.save_for_backward(swiglu_in, scales)
@@ -480,25 +487,31 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             swiglu_ctx.extra_input_requires_grad = True
             swiglu_ctx.dtype = dtype
 
-            # FC2 state
-            if grouped_fc2_x is not None:
-                fc2_input_tensors = (
-                    grouped_fc2_x.columnwise_data,
-                    grouped_fc2_x.columnwise_scale_inv,
-                    fc2_x_tensor_offsets,
-                )
-            else:
-                fc2_input_tensors = (None, None, None)
-
-            if fc2_op.single_grouped_weight:
-                fc2_ctx.save_for_backward(split_sizes, grouped_fc2_weight, *fc2_input_tensors)
-            else:
-                fc2_ctx.save_for_backward(split_sizes, *grouped_fc2_weight, *fc2_input_tensors)
-
+            # FC2 saved-tensor layout. Matches the unfused
+            # ``GroupedLinear._fuser_forward_grouped_tensor`` layout so the
+            # unfused backward (basic/grouped_linear.py) can consume the same
+            # ctx when the fused backward is unavailable.
+            #   [split_sizes, base_split_offsets, split_points,
+            #    (fc2_scales if _scale_bias),
+            #    grouped_fc2_x, *fc2_weight_tensors]
+            fc2_weight_tensors = (
+                [grouped_fc2_weight] if fc2_op.single_grouped_weight else grouped_fc2_weight
+            )
+            fc2_saved: list[Optional[torch.Tensor]] = [
+                split_sizes,
+                base_split_offsets,
+                split_points,
+            ]
+            if fc2_op._scale_bias:
+                fc2_saved.append(fc2_scales)
+            fc2_saved.append(grouped_fc2_x)
+            fc2_saved.extend(fc2_weight_tensors)
+            fc2_ctx.save_for_backward(*fc2_saved)
+            fc2_ctx.use_grouped_tensor_path = True
             fc2_ctx.with_quantized_compute = True
-            fc2_ctx.input_quantizer = fc2_input_quantizer
-            fc2_ctx.weight_quantizer = fc2_weight_quantizer
-            fc2_ctx.grad_output_quantizer = fc2_grad_output_quantizer
+            fc2_ctx.input_quantizers = [fc2_input_quantizer]
+            fc2_ctx.weight_quantizers = [fc2_weight_quantizer]
+            fc2_ctx.grad_output_quantizers = [fc2_grad_output_quantizer]
             fc2_ctx.grad_input_quantizers = None
             fc2_ctx.dtype = dtype
             fc2_ctx.input_requires_grad = input_requires_grad
