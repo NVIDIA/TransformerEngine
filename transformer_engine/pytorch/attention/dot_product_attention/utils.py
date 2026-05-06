@@ -7,7 +7,7 @@ Utils/Helper classes and methods for attention
 """
 import math
 import os
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import warnings
 import logging
 import functools
@@ -147,11 +147,11 @@ class FlashAttentionUtils:
     fa4_version = PkgVersion("0")
     use_v4 = False
     v4_installation_steps = """\
-pip install flash-attn-4==4.0.0b8 nvidia-cutlass-dsl[cu13]"""
+pip install flash-attn-4==4.0.0b11 nvidia-cutlass-dsl[cu13]"""
     v4_warning_printed = False
     # Set by backends.py if FA4 is installed; calls flash_attn.cute.interface._validate_head_dims
     # which raises AssertionError for unsupported (head_dim, head_dim_v) combinations.
-    v4_validate_head_dims = None
+    v4_validate_head_dims: Callable = None
 
     @staticmethod
     def set_flash_attention_version():
@@ -806,6 +806,7 @@ def get_attention_backend(
         # in FA4 so the call passes through silently for those archs.
         _fa4_alignment = 16 // torch.empty(0, dtype=qkv_dtype).element_size()
         try:
+            # pylint: disable-next=not-callable
             FlashAttentionUtils.v4_validate_head_dims(
                 head_dim_qk,
                 head_dim_v,
