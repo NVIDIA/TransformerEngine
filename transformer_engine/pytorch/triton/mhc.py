@@ -419,26 +419,28 @@ class mHCProjectionOp(torch.autograd.Function):
             triton.cdiv(K, META["BLOCK_SIZE_K"]),
         )
 
-        precision = "tf32" if ctx.use_tf32 else "ieee"
-        # If upcasting from bf16 to fp32 takes place inside the triton kernel, triton will ignore "ieee" precision and use tf32 anyway
-        # See https://github.com/triton-lang/triton/issues/10176 for detail.
-        # Therefore, we need to use tf32x3 instead which at least has better accuracy than tf32 just to make the tests pass. In production
-        # precision should be tf32 so it's not affected.
-        if precision == "ieee" and x.dtype == torch.bfloat16:
-            # When we have x is bf16, and either
-            # - phi is fp32, or
-            # - phi is bf16 but norm_weight is not None, where in this case inside the triton kernel,
-            #   we will promote phi to fp32 because we want better precision for phi * norm_weight
-            # In both cases we will need to upcast x to fp32 inside the kernel, and trigger the issue mentioned above
-            if norm_weight is not None or phi.dtype == torch.float32:
-                precision = "tf32x3"
-
         use_tma = _SUPPORT_TMA and _tma_aligned(x) and _tma_aligned(phi)
         if use_tma:
             # TMA descriptors require a global memory allocation
             def alloc_fn(size: int, alignment: int, stream: Optional[int]):
                 return torch.empty(size, device="cuda", dtype=torch.int8)
             triton.set_allocator(alloc_fn)
+
+        ctx.save_for_backward(x, phi, ms, norm_weight)
+        ctx.phi_dtype = phi.dtype
+        ctx.fuse_grad_x_acc = fuse_grad_x_acc
+
+        if norm_weight is not None:
+            phi = phi.to(torch.float32) * norm_weight.to(torch.float32)
+
+        precision = "tf32" if ctx.use_tf32 else "ieee"
+        # If upcasting from bf16 to fp32 takes place inside the triton kernel, triton will ignore "ieee" precision and use tf32 anyway
+        # See https://github.com/triton-lang/triton/issues/10176 for detail.
+        # Therefore, we need to use tf32x3 instead which at least has better accuracy than tf32 just to make the tests pass. In production
+        # precision should be tf32 so it's not affected.
+        if precision == "ieee" and x.dtype == torch.bfloat16 and phi.dtype == torch.float32:
+            precision = "tf32x3"
+        ctx.precision = precision
 
 
         _mhc_projection_fwd_fused[grid](
@@ -460,15 +462,9 @@ class mHCProjectionOp(torch.autograd.Function):
             stride_norm_weight=1,
             BLOCK_SIZE_N=32,
             precision=precision,
-            HAS_NORM_WEIGHT=norm_weight is not None,
             DETERMINISTIC=use_determinstic,
             USE_TMA=use_tma
         )
-
-        ctx.save_for_backward(x, phi, ms, norm_weight)
-        ctx.phi_dtype = phi.dtype
-        ctx.precision = precision
-        ctx.fuse_grad_x_acc = fuse_grad_x_acc
 
         return H, ms  # Keep both in fp32, which will be passed to sigmoid in mHCScaleFusedOp
 

@@ -117,7 +117,6 @@ def _mhc_projection_fwd_fused(
     STEP_SIZE_K: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     precision: tl.constexpr,
-    HAS_NORM_WEIGHT: tl.constexpr,
     DETERMINISTIC: tl.constexpr,  # pylint: disable=unused-argument # If user wants to enforce deterministic, which is used to prune configs
     USE_SPLIT_K: tl.constexpr,  # If we actually use split-K, which is determined by both DETERMINISTIC flag and input size
     USE_TMA: tl.constexpr, # If True, load x and phi via TMA tensor descriptors (Hopper+ only). Falls back to pointer-arith tl.load otherwise.
@@ -181,15 +180,6 @@ def _mhc_projection_fwd_fused(
 
         ms_acc += tl.sum(x.to(tl.float32) * x.to(tl.float32), axis=1)
 
-        # In RMSNorm, mean square should be the mean squrare of the original x, so we need to first accumulate the sum of squares of x
-        # before we let x absore norm weight and pass x with norm weight's affine transformation applied to w to do the dot product
-        # to generate H. This is the correct way to fuse H = RMSNorm(x) @ phi.T.
-        if HAS_NORM_WEIGHT:
-            norm_weight_ptrs = norm_weight_ptr + k_offs * stride_norm_weight
-            norm_weight = tl.load(
-                norm_weight_ptrs, mask=mask_k, other=1.0, cache_modifier=".ca"
-            )  # (BLOCK_SIZE_K,)
-            phi = phi.to(tl.float32) * norm_weight.to(tl.float32)
         # Currently triton has a bug where for small block size, tl.dot(x, phi.T) will use SMEM to transpose the matrix
         # instead of emit a ldmatrix instruction with `.trans` modifier, which leads bank conflicts and performance regression
         # See https://github.com/triton-lang/triton/issues/6569#issuecomment-2841739082
