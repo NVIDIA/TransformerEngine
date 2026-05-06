@@ -15,6 +15,7 @@ from ..utils import get_sm_count, _empty_tensor
 
 from ..quantized_tensor import Quantizer
 from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
+from ..tensor.storage.grouped_tensor_storage import GroupedTensorStorage
 from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 from ..tensor.utils import is_custom
 from ..custom_recipes.gemm import custom_gemm
@@ -488,6 +489,13 @@ def general_grouped_gemm_for_grouped_tensor(
     is_discrete_in = isinstance(A, list)
     if is_discrete_in and is_discrete_out:
         raise ValueError("Both A and out are discrete. This is not supported yet.")
+
+    if (
+        (isinstance(A, GroupedTensorStorage) and A.rowwise_amax_is_row_scaled)
+        or (isinstance(B, GroupedTensorStorage) and B.rowwise_amax_is_row_scaled)
+        or (isinstance(out, GroupedTensorStorage) and out.rowwise_amax_is_row_scaled)
+    ):
+        raise NotImplementedError("Row-scaled NVFP4 GroupedTensor GEMM is not supported yet.")
 
     if is_discrete_out:
         # wgrad case.
