@@ -1059,6 +1059,7 @@ class FusedAttnRunner:
                 target_hlo = jitted_primitive.lower(*customcall_args).compile().as_text()
             assert_equal_collectives(target_hlo, self.coll_count_ref)
 
+
 def _get_swa_window_size_for_test(s_kv: int, attn_mask_type: AttnMaskType) -> Tuple[int, int]:
     """Pick a sliding-window size for SWA tests, gated on cuDNN version.
 
@@ -1075,7 +1076,10 @@ def _get_swa_window_size_for_test(s_kv: int, attn_mask_type: AttnMaskType) -> Tu
     left_window_size = s_kv // 10
     # choose asymmetric window size for testing
     right_window_size = left_window_size + 5
-    if cudnn_version >= 90600 and attn_mask_type in (AttnMaskType.NO_MASK, AttnMaskType.PADDING_MASK):
+    if cudnn_version >= 90600 and attn_mask_type in (
+        AttnMaskType.NO_MASK,
+        AttnMaskType.PADDING_MASK,
+    ):
         return (left_window_size, right_window_size)
     return (left_window_size, 0)
 
