@@ -359,7 +359,7 @@ def mhc_fused_projection(
         "Currently only n=4 is supported, which means phi should have 24 (or 32 if you padded phi)"
         " in its first dimension"
     )
-    H, ms = mHCProjectionOp.apply(x, phi, norm_weight, use_tf32, 4, fuse_grad_x_acc)
+    H, ms = mHCProjectionOp.apply(x, phi, norm_weight, use_tf32, fuse_grad_x_acc)
     return H, ms
 
 
@@ -369,7 +369,7 @@ class mHCProjectionOp(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, x, phi, norm_weight=None, use_tf32=True, n=4, fuse_grad_x_acc=False):
+    def forward(ctx, x, phi, norm_weight=None, use_tf32=True, fuse_grad_x_acc=False):
         """
         The forward pass of the fused projection operation. Computes H = x @ phi^T and the mean
         If norm_weight is provided, it will be absorbd by phi

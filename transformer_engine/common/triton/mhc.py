@@ -54,7 +54,7 @@ def projection_prune_fwd(configs, named_args, **kwargs):
     M = named_args.get("M", kwargs.get("M", None))
     K = named_args.get("K", kwargs.get("K", None))
 
-    block_m = [8, 16, 32]
+    block_m = [8, 16, 32, 64]
     block_k = align_to(K, 32)
 
     # Use Split-K only if determinism is not enforced and M is not large enough to effectively parallelize
@@ -62,9 +62,9 @@ def projection_prune_fwd(configs, named_args, **kwargs):
     if not DETERMINISTIC and triton.cdiv(M, block_m[0]) < get_device_sms() * 4:
         pruned_configs = configs
     else:
-        step_k = [32]
-        warps = [2, 4]
-        stages = [3, 4, 5, 6]
+        step_k = [32, 64, 128]
+        warps = [1, 2, 4]
+        stages = [2, 3, 4]
 
         pruned_configs = []
         for bm, sk, w, s in itertools.product(block_m, step_k, warps, stages):
