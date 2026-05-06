@@ -115,7 +115,7 @@ def quantization_tols(name: str) -> dict[str, float]:
         "mxfp8_block_scaling",
     ):
         return dtype_tols(tex.DType.kFloat8E4M3)
-    if name in ("nvfp4", "nvfp4_per_token"):
+    if name in ("nvfp4", "nvfp4_row_scaled"):
         return dtype_tols(tex.DType.kFloat4E2M1)
     raise ValueError(f"Unsupported quantization scheme ({name})")
 
@@ -149,12 +149,12 @@ def make_recipe(name: Optional[str], **recipe_kwargs: Any) -> Optional[Recipe]:
             disable_2d_quantization=True,
             **recipe_kwargs,
         )
-    if name == "nvfp4_per_token":
+    if name == "nvfp4_row_scaled":
         return transformer_engine.common.recipe.NVFP4BlockScaling(
             disable_rht=True,
             disable_stochastic_rounding=True,
             disable_2d_quantization=True,
-            per_token_activation=True,
+            row_scaled_activation=True,
             **recipe_kwargs,
         )
     raise ValueError(f"Unsupported quantization scheme ({name})")
@@ -164,8 +164,8 @@ def recipe_id(fp8_recipe: Optional[Recipe]) -> str:
     """Readable pytest id for FP8/FP4 recipes."""
     if fp8_recipe is None:
         return "None"
-    if fp8_recipe.nvfp4() and getattr(fp8_recipe, "per_token_activation", False):
-        return "NVFP4PerTokenBlockScaling"
+    if fp8_recipe.nvfp4() and getattr(fp8_recipe, "row_scaled_activation", False):
+        return "NVFP4RowScaledBlockScaling"
     return type(fp8_recipe).__name__
 
 
@@ -178,10 +178,10 @@ def skip_unsupported_backward_override(
     if (
         quant_recipe is not None
         and quant_recipe.nvfp4()
-        and getattr(quant_recipe, "per_token_activation", False)
+        and getattr(quant_recipe, "row_scaled_activation", False)
         and backward_override is None
     ):
-        pytest.skip("Per-token NVFP4 does not support default quantized backward.")
+        pytest.skip("Row-scaled NVFP4 does not support default quantized backward.")
     if backward_override is None:
         return
     if quant_recipe is None and backward_override is not None:

@@ -327,6 +327,10 @@ class Tensor {
     tensor_.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
   }
 
+  void set_rowwise_amax_is_row_scaled(bool rowwise_amax_is_row_scaled) {
+    tensor_.set_rowwise_amax_is_row_scaled(rowwise_amax_is_row_scaled);
+  }
+
   void to_cpu() const;
   void from_cpu() const;
   void set_scale(float scale);

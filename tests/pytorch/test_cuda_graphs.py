@@ -64,8 +64,8 @@ def nvfp4_rht_and_2d_quantization():
     return nvfp4_recipe
 
 
-def nvfp4_per_token():
-    nvfp4_recipe = recipe.NVFP4BlockScaling(per_token_activation=True)
+def nvfp4_row_scaled():
+    nvfp4_recipe = recipe.NVFP4BlockScaling(row_scaled_activation=True)
     nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams()
     nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams()
     nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams()
@@ -100,7 +100,7 @@ if mxfp8_available:
     fp8_recipes.append(recipe.MXFP8BlockScaling())
 if nvfp4_available:
     fp8_recipes.append(nvfp4_rht_and_2d_quantization())
-    fp8_recipes.append(nvfp4_per_token())
+    fp8_recipes.append(nvfp4_row_scaled())
 if fp8_block_scaling_available:
     fp8_recipes.append(recipe.Float8BlockScaling())
 if fp8_available:
@@ -402,8 +402,8 @@ def test_make_graphed_callables(
             f"Module not yet supported for {fp8_recipe.__class__.__name__} with CUDA graphs"
         )
     if fp8 and fp8_recipe.nvfp4():
-        if getattr(fp8_recipe, "per_token_activation", False) and module == "mha":
-            pytest.skip("Per-token NVFP4 CUDA graph coverage applies to GEMM modules.")
+        if getattr(fp8_recipe, "row_scaled_activation", False) and module == "mha":
+            pytest.skip("Row-scaled NVFP4 CUDA graph coverage applies to GEMM modules.")
         if dtype not in get_nvfp4_inp_supported_dtypes(fp8_recipe, dtype):
             pytest.skip(
                 f"Input dtype {dtype} not supported for NVFP4 Recipe"

@@ -30,14 +30,14 @@ namespace transformer_engine {
 namespace dispatch {
 namespace nvfp4 {
 
-namespace per_token_amax_kernel {
+namespace rowwise_amax_kernel {
 
 using namespace ptx;
 
 #if FP4_TYPE_SUPPORTED
 
-constexpr int PER_TOKEN_BLOCK_SIZE = 256;
-constexpr int PER_TOKEN_SF_VEC_SIZE = 16;
+constexpr int ROWWISE_AMAX_BLOCK_SIZE = 256;
+constexpr int ROWWISE_AMAX_SF_VEC_SIZE = 16;
 
 template <typename IType>
 __device__ __forceinline__ void abs_max_2x_update(ptx::FPx2<IType> &dst,
@@ -64,10 +64,10 @@ __global__ void
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 __launch_bounds__(BLOCK_SIZE)
 #endif
-    compute_per_token_amax_kernel(const int num_rows, const int num_cols,
-                                  const IType *__restrict__ input,
-                                  float *__restrict__ output_per_token_amax,
-                                  const float *__restrict__ noop) {
+    compute_rowwise_amax_kernel(const int num_rows, const int num_cols,
+                                const IType *__restrict__ input,
+                                float *__restrict__ output_rowwise_amax,
+                                const float *__restrict__ noop) {
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   if (noop != nullptr && noop[0] == 1.0f) {
     return;
@@ -94,63 +94,63 @@ __launch_bounds__(BLOCK_SIZE)
       BlockReduce(temp_storage).Reduce(thread_max, [](float a, float b) { return fmaxf(a, b); });
 
   if (threadIdx.x == 0) {
-    output_per_token_amax[row_idx] = row_amax;
+    output_rowwise_amax[row_idx] = row_amax;
   }
 #endif
 }
 
 template <typename IType>
-void launch_compute_per_token_amax(const int num_rows, const int num_cols, const IType *input,
-                                   float *output_per_token_amax, cudaStream_t stream,
-                                   const float *noop = nullptr) {
+void launch_compute_rowwise_amax(const int num_rows, const int num_cols, const IType *input,
+                                 float *output_rowwise_amax, cudaStream_t stream,
+                                 const float *noop = nullptr) {
   if (num_rows == 0 || num_cols == 0) return;
 
-  NVTE_CHECK(num_cols % 2 == 0, "num_cols must be even for per-token amax computation, got ",
+  NVTE_CHECK(num_cols % 2 == 0, "num_cols must be even for row-scaled amax computation, got ",
              num_cols);
   dim3 grid(num_rows);
-  dim3 block(PER_TOKEN_BLOCK_SIZE);
+  dim3 block(ROWWISE_AMAX_BLOCK_SIZE);
 
-  compute_per_token_amax_kernel<IType, PER_TOKEN_BLOCK_SIZE>
-      <<<grid, block, 0, stream>>>(num_rows, num_cols, input, output_per_token_amax, noop);
+  compute_rowwise_amax_kernel<IType, ROWWISE_AMAX_BLOCK_SIZE>
+      <<<grid, block, 0, stream>>>(num_rows, num_cols, input, output_rowwise_amax, noop);
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 #endif  // FP4_TYPE_SUPPORTED
 
-}  // namespace per_token_amax_kernel
+}  // namespace rowwise_amax_kernel
 
-inline void compute_per_token_amax(const Tensor &input, const Tensor *noop, Tensor *output,
-                                   cudaStream_t stream) {
+inline void compute_rowwise_amax(const Tensor &input, const Tensor *noop, Tensor *output,
+                                 cudaStream_t stream) {
 #if FP4_TYPE_SUPPORTED
-  using namespace per_token_amax_kernel;
+  using namespace rowwise_amax_kernel;
 
   const size_t rows = input.flat_first_dim();
   const size_t cols = input.flat_last_dim();
-  NVTE_CHECK(cols % PER_TOKEN_SF_VEC_SIZE == 0,
-             "Per-token NVFP4 quantization requires last dim divisible by ", PER_TOKEN_SF_VEC_SIZE,
-             ".");
+  NVTE_CHECK(cols % ROWWISE_AMAX_SF_VEC_SIZE == 0,
+             "Row-scaled NVFP4 quantization requires last dim divisible by ",
+             ROWWISE_AMAX_SF_VEC_SIZE, ".");
 
   auto *amax_ptr = reinterpret_cast<float *>(output->amax.dptr);
-  NVTE_CHECK(amax_ptr != nullptr, "Per-token rowwise amax tensor must be allocated.");
-  NVTE_CHECK(output->amax.numel() == rows, "Per-token rowwise amax must have ", rows,
+  NVTE_CHECK(amax_ptr != nullptr, "Row-scaled rowwise amax tensor must be allocated.");
+  NVTE_CHECK(output->amax.numel() == rows, "Row-scaled rowwise amax must have ", rows,
              " entries, got ", output->amax.shape, ".");
 
   const auto *noop_ptr = reinterpret_cast<const float *>(noop->data.dptr);
   if (input.dtype() == DType::kBFloat16) {
     const auto *input_ptr = reinterpret_cast<const __nv_bfloat16 *>(input.data.dptr);
-    launch_compute_per_token_amax<__nv_bfloat16>(static_cast<int>(rows), static_cast<int>(cols),
-                                                 input_ptr, amax_ptr, stream, noop_ptr);
+    launch_compute_rowwise_amax<__nv_bfloat16>(static_cast<int>(rows), static_cast<int>(cols),
+                                               input_ptr, amax_ptr, stream, noop_ptr);
   } else if (input.dtype() == DType::kFloat16) {
     const auto *input_ptr = reinterpret_cast<const half *>(input.data.dptr);
-    launch_compute_per_token_amax<half>(static_cast<int>(rows), static_cast<int>(cols), input_ptr,
-                                        amax_ptr, stream, noop_ptr);
+    launch_compute_rowwise_amax<half>(static_cast<int>(rows), static_cast<int>(cols), input_ptr,
+                                      amax_ptr, stream, noop_ptr);
   } else if (input.dtype() == DType::kFloat32) {
     const auto *input_ptr = reinterpret_cast<const float *>(input.data.dptr);
-    launch_compute_per_token_amax<float>(static_cast<int>(rows), static_cast<int>(cols), input_ptr,
-                                         amax_ptr, stream, noop_ptr);
+    launch_compute_rowwise_amax<float>(static_cast<int>(rows), static_cast<int>(cols), input_ptr,
+                                       amax_ptr, stream, noop_ptr);
   } else {
     NVTE_ERROR(
-        "Unsupported input dtype for per-token NVFP4 quantization. "
+        "Unsupported input dtype for row-scaled NVFP4 quantization. "
         "Expected BFloat16, Float16, or Float32.");
   }
 #else
@@ -240,7 +240,7 @@ constexpr size_t THREADS_PER_BANK = TOTAL_BANKS_WIDTH / SCALE_DIM;  // 8 = 128 /
 
 template <bool COMPUTE_ACTIVATIONS, typename ParamOP, float (*OP)(float, const ParamOP &),
           typename IType, bool USE_STOCHASTIC_ROUNDING, bool RETURN_TRANSPOSE,
-          bool PER_TOKEN_ROWWISE>
+          bool ROWWISE_AMAX_IS_ROW_SCALED>
 __global__ void __launch_bounds__(THREADS_NUM)
     quantize_transpose_nvfp4_kernel(const __grid_constant__ CUtensorMap tensor_map_input,
                                     const __grid_constant__ CUtensorMap tensor_map_output,
@@ -641,7 +641,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
         }
 
         float block_scale_inverse;
-        if constexpr (PER_TOKEN_ROWWISE) {
+        if constexpr (ROWWISE_AMAX_IS_ROW_SCALED) {
           // 2. Compute E4M3 scaling factor
           const size_t scales_offset_Y =
               scales_offset_Y_rowwise + stage * BUFF_DIM_Y + it * THREADS_Y_ROWWISE;
@@ -1325,14 +1325,14 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
   using namespace ptx;
 
   bool use_stochastic_rounding = quant_config ? quant_config->stochastic_rounding : false;
-  const bool per_token_rowwise = quant_config ? quant_config->nvfp4_per_token_activation : false;
-  NVTE_CHECK(!per_token_rowwise || !use_2d_quantization,
-             "Per-token NVFP4 quantization does not support 2D quantization.");
+  const bool rowwise_amax_is_row_scaled = output->rowwise_amax_is_row_scaled;
+  NVTE_CHECK(!rowwise_amax_is_row_scaled || !use_2d_quantization,
+             "Row-scaled NVFP4 quantization does not support 2D quantization.");
 
   // If transposed output is allocated, return the transposed data. Otherwise, it's not necesary to
   // return the transposed data.
   // TODO(Frank): Is there a better way to do this?
-  bool return_transpose = output->has_columnwise_data() && !per_token_rowwise;
+  bool return_transpose = output->has_columnwise_data() && !rowwise_amax_is_row_scaled;
 
   if (!use_2d_quantization && (input.dtype() == DType::kBFloat16)) {
     quantize_transpose_tuned_1D(input, noop, output, quant_config, stream);
@@ -1352,8 +1352,8 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
   NVTE_CHECK(output->has_data(), "NVFP4 output tensor must be allocated.");
   NVTE_CHECK(is_fp4_dtype(output->data.dtype), "Output must have FP4 type.");
   NVTE_CHECK(output->scale_inv.dptr != nullptr, "Scaling tensor must be allocated");
-  NVTE_CHECK(!per_token_rowwise || output->amax.dptr != nullptr,
-             "Per-token NVFP4 rowwise quantization requires rowwise amax.");
+  NVTE_CHECK(!rowwise_amax_is_row_scaled || output->amax.dptr != nullptr,
+             "Row-scaled NVFP4 quantization requires rowwise amax.");
   NVTE_CHECK(!output->with_gemm_swizzled_scales, "Output must have scales in compact format.");
   if (return_transpose) {
     NVTE_CHECK(output->has_columnwise_data(), "NVFP4 transposed output tensor must be allocated.");
@@ -1436,11 +1436,11 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
       use_stochastic_rounding, USE_STOCHASTIC_ROUNDING,
 
-      TRANSFORMER_ENGINE_SWITCH_CONDITION(per_token_rowwise, PER_TOKEN_ROWWISE, {
+      TRANSFORMER_ENGINE_SWITCH_CONDITION(rowwise_amax_is_row_scaled, ROWWISE_AMAX_IS_ROW_SCALED, {
         TRANSFORMER_ENGINE_SWITCH_CONDITION(return_transpose, RETURN_TRANSPOSE, {
           auto kernel = quantize_transpose_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,
                                                         USE_STOCHASTIC_ROUNDING, RETURN_TRANSPOSE,
-                                                        PER_TOKEN_ROWWISE>;
+                                                        ROWWISE_AMAX_IS_ROW_SCALED>;
 
           if constexpr (use_2d_quantization) {
             kernel = quantize_transpose_nvfp4_2D_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,

@@ -662,10 +662,10 @@ class GroupedTensorStorage:
             # Amax buffer for delayed scaling - one per tensor
             amax = torch.empty(num_tensors, dtype=torch.float32, device=device)
         elif quantizer._get_compatible_recipe().nvfp4():
-            per_token_activation = getattr(quantizer, "per_token_activation", False)
-            columnwise_usage = columnwise_usage and not per_token_activation
+            row_scaled_activation = getattr(quantizer, "row_scaled_activation", False)
+            columnwise_usage = columnwise_usage and not row_scaled_activation
             total_amax_elements = (
-                sum(math.prod(s[:-1]) for s in shape) if per_token_activation else num_tensors
+                sum(math.prod(s[:-1]) for s in shape) if row_scaled_activation else num_tensors
             )
 
             if rowwise_usage:
@@ -896,13 +896,13 @@ class GroupedTensorStorage:
                     cum += math.prod(scale_shape)
                     columnwise_scale_inv_offsets.append(cum)
                 self.columnwise_scale_inv_offsets = columnwise_scale_inv_offsets
-        nvfp4_per_token_amax_offsets = None
-        if recipe.nvfp4() and getattr(self.quantizer, "per_token_activation", False):
+        nvfp4_rowwise_amax_offsets = None
+        if recipe.nvfp4() and getattr(self.quantizer, "row_scaled_activation", False):
             cum = 0
-            nvfp4_per_token_amax_offsets = [0]
+            nvfp4_rowwise_amax_offsets = [0]
             for i in range(self.num_tensors):
                 cum += math.prod(self.tensor_shapes[i][:-1])
-                nvfp4_per_token_amax_offsets.append(cum)
+                nvfp4_rowwise_amax_offsets.append(cum)
 
         for i in range(self.num_tensors):
             quantizer = self.quantizer
@@ -1096,17 +1096,17 @@ class GroupedTensorStorage:
                     )
 
                 if self.amax is not None:
-                    if nvfp4_per_token_amax_offsets is not None:
-                        amax_start = nvfp4_per_token_amax_offsets[i]
-                        amax_end = nvfp4_per_token_amax_offsets[i + 1]
+                    if nvfp4_rowwise_amax_offsets is not None:
+                        amax_start = nvfp4_rowwise_amax_offsets[i]
+                        amax_end = nvfp4_rowwise_amax_offsets[i + 1]
                         amax_rowwise = self.amax[amax_start:amax_end]
                     else:
                         amax_rowwise = self.amax[i : i + 1]
 
                 if self.columnwise_amax is not None:
-                    if nvfp4_per_token_amax_offsets is not None:
-                        amax_start = nvfp4_per_token_amax_offsets[i]
-                        amax_end = nvfp4_per_token_amax_offsets[i + 1]
+                    if nvfp4_rowwise_amax_offsets is not None:
+                        amax_start = nvfp4_rowwise_amax_offsets[i]
+                        amax_end = nvfp4_rowwise_amax_offsets[i + 1]
                         amax_columnwise = self.columnwise_amax[amax_start:amax_end]
                     else:
                         amax_columnwise = self.columnwise_amax[i : i + 1]
@@ -1128,6 +1128,7 @@ class GroupedTensorStorage:
                     fp4_dtype=quantizer.dtype,
                     quantizer=quantizer,
                     with_gemm_swizzled_scales=quantizer.optimize_for_gemm,
+                    rowwise_amax_is_row_scaled=getattr(quantizer, "row_scaled_activation", False),
                 )
                 result.append(tensor)
 

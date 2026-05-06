@@ -72,6 +72,7 @@ enum NVTETensorParam {
   kNVTEColumnwiseScaleInv = 5,     /*!< Scale inverse tensor for decoding Columnwise Data */
   kNVTEColumnwiseAmax = 6,         /*!< Columnwise Amax tensor */
   kNVTEWithGEMMSwizzledScales = 7, /*!< Whether scaling factors are in format expected by GEMM */
+  kNVTERowwiseAmaxIsRowScaled = 8, /*!< Whether rowwise amax is one value per tensor row */
   kNVTENumTensorParams
 };
 
@@ -370,8 +371,6 @@ enum NVTEQuantizationConfigAttribute {
    *  inconsistently between kernels.
    */
   kNVTEQuantizationConfigUseFastMath = 7,
-  /*! Whether to enable per-token (per-row) NVFP4 quantization */
-  kNVTEQuantizationConfigNVFP4PerTokenActivation = 8,
   kNVTEQuantizationConfigNumAttributes
 };
 
@@ -767,6 +766,11 @@ class TensorWrapper {
     nvte_set_tensor_param_v2(tensor_, kNVTEWithGEMMSwizzledScales, &val, sizeof(val));
   }
 
+  void set_rowwise_amax_is_row_scaled(bool rowwise_amax_is_row_scaled) {
+    const auto val = static_cast<uint8_t>(rowwise_amax_is_row_scaled);
+    nvte_set_tensor_param_v2(tensor_, kNVTERowwiseAmaxIsRowScaled, &val, sizeof(val));
+  }
+
   // Parameter getters
 
   NVTEBasicTensor get_parameter(const NVTETensorParam param) const noexcept {
@@ -800,6 +804,12 @@ class TensorWrapper {
   bool get_with_gemm_swizzled_scales() const {
     uint8_t val = 0;
     nvte_get_tensor_param_v2(tensor_, kNVTEWithGEMMSwizzledScales, &val, sizeof(val), nullptr);
+    return static_cast<bool>(val);
+  }
+
+  bool get_rowwise_amax_is_row_scaled() const {
+    uint8_t val = 0;
+    nvte_get_tensor_param_v2(tensor_, kNVTERowwiseAmaxIsRowScaled, &val, sizeof(val), nullptr);
     return static_cast<bool>(val);
   }
 
@@ -1296,13 +1306,6 @@ class QuantizationConfigWrapper {
     const auto val = static_cast<uint8_t>(use_fast_math);
     nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigUseFastMath, &val,
                                            sizeof(val));
-  }
-
-  /*! \brief Set whether to enable per-token NVFP4 quantization */
-  void set_nvfp4_per_token_activation(bool nvfp4_per_token_activation) {
-    const auto val = static_cast<uint8_t>(nvfp4_per_token_activation);
-    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigNVFP4PerTokenActivation,
-                                           &val, sizeof(val));
   }
 
  private:

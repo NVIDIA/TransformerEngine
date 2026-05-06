@@ -70,35 +70,36 @@ def validate_gemm_scale(scale: Optional[float], required: bool) -> float:
     return 0.0
 
 
-def _is_nvfp4_per_token_tensor(tensor: torch.Tensor) -> bool:
-    """Whether tensor carries per-token NVFP4 global amax metadata."""
-    if not isinstance(tensor, NVFP4TensorStorage):
-        return False
-    amax = tensor._amax_rowwise if tensor._amax_rowwise is not None else tensor._amax_columnwise
-    return amax is not None and amax.numel() > 1
+def _is_nvfp4_row_scaled_tensor(tensor: torch.Tensor) -> bool:
+    """Whether tensor carries row-scaled NVFP4 global amax metadata."""
+    return isinstance(tensor, NVFP4TensorStorage) and tensor._rowwise_amax_is_row_scaled
 
 
-def _nvfp4_per_token_gemm_inputs(
+def _nvfp4_row_scaled_gemm_inputs(
     A: NVFP4TensorStorage,
     B: NVFP4TensorStorage,
     *,
     transa: bool,
 ) -> Tuple[NVFP4TensorStorage, NVFP4TensorStorage, torch.Tensor]:
-    """Return GEMM aliases and FP32 output scales for per-token NVFP4."""
+    """Return GEMM aliases and FP32 output scales for row-scaled NVFP4."""
     A_metadata = A.get_metadata()
     weight_amax = A._amax_rowwise if transa else A._amax_columnwise
     assert weight_amax is not None and weight_amax.numel() == 1
     A_metadata["amax_rowwise" if transa else "amax_columnwise"] = weight_amax.new_ones(1)
+    A_metadata["rowwise_amax_is_row_scaled"] = False
 
     B_metadata = B.get_metadata()
+    assert B._rowwise_amax_is_row_scaled
     if B._amax_rowwise is not None:
         activation_amax = B._amax_rowwise
-        assert activation_amax.numel() > 1
+        assert activation_amax.numel() == 0 or activation_amax.numel() > 1
         B_metadata["amax_rowwise"] = activation_amax.new_ones(1)
     else:
         activation_amax = B._amax_columnwise
-        assert activation_amax is not None and activation_amax.numel() > 1
+        assert activation_amax is not None
+        assert activation_amax.numel() == 0 or activation_amax.numel() > 1
         B_metadata["amax_columnwise"] = activation_amax.new_ones(1)
+    B_metadata["rowwise_amax_is_row_scaled"] = False
 
     assert activation_amax.dtype == torch.float32 and weight_amax.dtype == torch.float32
     return (
@@ -213,27 +214,29 @@ def general_gemm(
         "beta": beta,
     }
 
-    if not _is_nvfp4_per_token_tensor(B):
+    if not _is_nvfp4_row_scaled_tensor(B):
         out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
     else:
-        assert layout[1] == "N", "Per-token NVFP4 GEMM currently supports N-layout B only."
+        assert layout[1] == "N", "Row-scaled NVFP4 GEMM currently supports N-layout B only."
         if grad:
             raise RuntimeError(
-                "Per-token NVFP4 GEMM currently supports fprop only. "
+                "Row-scaled NVFP4 GEMM currently supports fprop only. "
                 "Backward NVFP4 gradient quantizers should use scalar global amax."
             )
-        assert not gelu, "Per-token NVFP4 GEMM currently does not support fused GELU."
-        assert not accumulate, "Per-token NVFP4 GEMM currently does not support accumulation."
+        assert not gelu, "Row-scaled NVFP4 GEMM currently does not support fused GELU."
+        assert not accumulate, "Row-scaled NVFP4 GEMM currently does not support accumulation."
         assert (
             quantization_params is None
-        ), "Per-token NVFP4 GEMM currently does not support output quantization."
+        ), "Row-scaled NVFP4 GEMM currently does not support output quantization."
         assert out is None or (
             isinstance(out, torch.Tensor) and not is_custom(out)
-        ), "Per-token NVFP4 GEMM currently supports only plain torch.Tensor outputs."
-        assert isinstance(A, NVFP4TensorStorage), "Per-token NVFP4 GEMM currently requires NVFP4 A."
-        # cuBLAS folds NVFP4 global amax values into GEMM alpha. Keep the per-token
+        ), "Row-scaled NVFP4 GEMM currently supports only plain torch.Tensor outputs."
+        assert isinstance(
+            A, NVFP4TensorStorage
+        ), "Row-scaled NVFP4 GEMM currently requires NVFP4 A."
+        # cuBLAS folds NVFP4 global amax values into GEMM alpha. Keep the row-scaled
         # recipe's global scales out of alpha and apply them in FP32 below.
-        gemm_A, gemm_B, per_token_scales = _nvfp4_per_token_gemm_inputs(A, B, transa=transa)
+        gemm_A, gemm_B, rowwise_global_scales = _nvfp4_row_scaled_gemm_inputs(A, B, transa=transa)
 
         requested_out, requested_out_dtype = out, out_dtype
         fp32_out = (
@@ -250,16 +253,16 @@ def general_gemm(
         out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*gemm_args, **kwargs)
         out_2d = out.reshape(-1, out.shape[-1])
 
-        assert per_token_scales.dtype == torch.float32 and out.dtype == torch.float32
-        assert per_token_scales.numel() == out_2d.shape[0]
+        assert rowwise_global_scales.dtype == torch.float32 and out.dtype == torch.float32
+        assert rowwise_global_scales.numel() == out_2d.shape[0]
 
         if bias is not None:
             bias_cast = bias.to(dtype=torch.float32)
             out_2d.sub_(bias_cast)
-            out_2d.mul_(per_token_scales)
+            out_2d.mul_(rowwise_global_scales)
             out_2d.add_(bias_cast)
         else:
-            out_2d.mul_(per_token_scales)
+            out_2d.mul_(rowwise_global_scales)
 
         if requested_out is not None:
             requested_out.copy_(out.to(dtype=requested_out.dtype))
@@ -320,25 +323,25 @@ def general_grouped_gemm(
     else:
         bias_dtype = TE_DType[torch.bfloat16]
 
-    if any(_is_nvfp4_per_token_tensor(tensor) for tensor in B):
-        assert layout[1] == "N", "Per-token NVFP4 grouped GEMM currently supports N-layout B only."
+    if any(_is_nvfp4_row_scaled_tensor(tensor) for tensor in B):
+        assert layout[1] == "N", "Row-scaled NVFP4 grouped GEMM currently supports N-layout B only."
         if grad:
             raise RuntimeError(
-                "Per-token NVFP4 grouped GEMM currently supports fprop only. "
+                "Row-scaled NVFP4 grouped GEMM currently supports fprop only. "
                 "Backward NVFP4 gradient quantizers should use scalar global amax."
             )
-        assert not gelu, "Per-token NVFP4 grouped GEMM currently does not support fused GELU."
+        assert not gelu, "Row-scaled NVFP4 grouped GEMM currently does not support fused GELU."
         assert (
             not accumulate
-        ), "Per-token NVFP4 grouped GEMM currently does not support accumulation."
-        assert D_dtype is None, "Per-token NVFP4 grouped GEMM currently does not support D_dtype."
+        ), "Row-scaled NVFP4 grouped GEMM currently does not support accumulation."
+        assert D_dtype is None, "Row-scaled NVFP4 grouped GEMM currently does not support D_dtype."
         assert all(
             q is None for q in quantization_params
-        ), "Per-token NVFP4 grouped GEMM currently does not support output quantization."
+        ), "Row-scaled NVFP4 grouped GEMM currently does not support output quantization."
         if single_output:
             assert (
                 m_splits is not None
-            ), "Per-token NVFP4 grouped GEMM requires m_splits with single output."
+            ), "Row-scaled NVFP4 grouped GEMM requires m_splits with single output."
         out_init = out[0] if single_output else None
         if single_output:
             start_idx = 0

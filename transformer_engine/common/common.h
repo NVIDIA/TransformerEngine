@@ -173,6 +173,11 @@ struct Tensor {
    *  Only meaningful for MXFP8 and NVFP4.
    */
   bool with_gemm_swizzled_scales = false;
+  /*! \brief Whether rowwise NVFP4 amax is one value per tensor row.
+   *
+   *  Only meaningful for NVFP4 tensors.
+   */
+  bool rowwise_amax_is_row_scaled = false;
 
   /*! Map from NVTETensorParam to parameter sizes */
   static constexpr size_t attr_sizes[] = {
@@ -183,7 +188,8 @@ struct Tensor {
       sizeof(NVTEBasicTensor),  // kNVTERowwiseScaleInv
       sizeof(NVTEBasicTensor),  // kNVTEColumnwiseScaleInv
       sizeof(NVTEBasicTensor),  // kNVTEColumnwiseAmax
-      sizeof(uint8_t)           // kNVTEWithGEMMSwizzledScales
+      sizeof(uint8_t),          // kNVTEWithGEMMSwizzledScales
+      sizeof(uint8_t)           // kNVTERowwiseAmaxIsRowScaled
   };
 
   Tensor() : scaling_mode{NVTE_DELAYED_TENSOR_SCALING}, nvte_tensor{0} {}
@@ -199,6 +205,7 @@ struct Tensor {
     columnwise_scale_inv.clear();
     scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
     with_gemm_swizzled_scales = false;
+    rowwise_amax_is_row_scaled = false;
   }
 
   explicit operator NVTETensor() const noexcept { return nvte_tensor; }
@@ -470,7 +477,6 @@ struct QuantizationConfig {
   bool nvfp4_2d_quantization = false;
   bool stochastic_rounding = false;
   bool use_fast_math = false;
-  bool nvfp4_per_token_activation = false;
 
   static constexpr size_t attr_sizes[] = {
       sizeof(uint8_t),                       // force_pow_2_scales
@@ -480,8 +486,7 @@ struct QuantizationConfig {
       sizeof(NVTETensor),                    // rng_seed and offset
       sizeof(uint8_t),                       // nvfp4_2d_quantization
       sizeof(uint8_t),                       // stochastic_rounding
-      sizeof(uint8_t),                       // use_fast_math
-      sizeof(uint8_t)                        // nvfp4_per_token_activation
+      sizeof(uint8_t)                        // use_fast_math
   };
 };
 

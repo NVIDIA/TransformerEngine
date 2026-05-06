@@ -852,6 +852,9 @@ void nvte_set_tensor_param_v2(NVTETensor tensor, NVTETensorParam param, const vo
     case kNVTEWithGEMMSwizzledScales:
       t.with_gemm_swizzled_scales = static_cast<bool>(*reinterpret_cast<const uint8_t *>(buf));
       break;
+    case kNVTERowwiseAmaxIsRowScaled:
+      t.rowwise_amax_is_row_scaled = static_cast<bool>(*reinterpret_cast<const uint8_t *>(buf));
+      break;
     default:
       NVTE_ERROR("Unsupported tensor parameter (", static_cast<int>(param), ")");
   }
@@ -931,6 +934,9 @@ void nvte_get_tensor_param_v2(const NVTETensor tensor, NVTETensorParam param, vo
     }
     case kNVTEWithGEMMSwizzledScales:
       *reinterpret_cast<uint8_t *>(buf) = static_cast<uint8_t>(t->with_gemm_swizzled_scales);
+      break;
+    case kNVTERowwiseAmaxIsRowScaled:
+      *reinterpret_cast<uint8_t *>(buf) = static_cast<uint8_t>(t->rowwise_amax_is_row_scaled);
       break;
     default:
       NVTE_ERROR("Unsupported tensor parameter (", static_cast<int>(param), ")");
@@ -1043,9 +1049,6 @@ void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
     case kNVTEQuantizationConfigUseFastMath:
       bool_to_uint8(config_.use_fast_math, buf);
       break;
-    case kNVTEQuantizationConfigNVFP4PerTokenActivation:
-      bool_to_uint8(config_.nvfp4_per_token_activation, buf);
-      break;
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
   }
@@ -1100,9 +1103,6 @@ void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
       break;
     case kNVTEQuantizationConfigUseFastMath:
       uint8_to_bool(buf, config_.use_fast_math);
-      break;
-    case kNVTEQuantizationConfigNVFP4PerTokenActivation:
-      uint8_to_bool(buf, config_.nvfp4_per_token_activation);
       break;
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");

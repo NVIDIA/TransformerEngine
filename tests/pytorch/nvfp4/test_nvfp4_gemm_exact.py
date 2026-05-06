@@ -27,7 +27,7 @@ def check_nvfp4_gemm_versus_reference(
     *,
     x_columnwise: bool = False,
     w_columnwise: bool = False,
-    per_token_activation: bool = False,
+    row_scaled_activation: bool = False,
 ):
     te_dtype = tex.DType.kFloat4E2M1
 
@@ -58,7 +58,7 @@ def check_nvfp4_gemm_versus_reference(
         amax_reduction_group=None,
         with_rht=False,
         with_post_rht_amax=False,
-        per_token_activation=per_token_activation,
+        row_scaled_activation=row_scaled_activation,
     )
     w_quantizer = NVFP4Quantizer(
         fp4_dtype=te_dtype,
@@ -118,11 +118,11 @@ def check_nvfp4_gemm_versus_reference(
     x_ref_quantizer = NVFP4QuantizerRef(
         dtype=utils.Fp4Formats.E2M1,
         rowwise=True,
-        columnwise=not per_token_activation,
+        columnwise=not row_scaled_activation,
         pow_2_scales=False,
         eps=0.0,
         quant_tile_shape=(1, 16),
-        per_token_activation=per_token_activation,
+        row_scaled_activation=row_scaled_activation,
     )
     w_ref_quantizer = NVFP4QuantizerRef(
         dtype=utils.Fp4Formats.E2M1,
@@ -178,7 +178,7 @@ def check_nvfp4_gemm_versus_reference(
         x_nvfp4_native.update_usage(rowwise_usage=False)
     if w_columnwise:
         w_nvfp4_native.update_usage(rowwise_usage=False)
-    if per_token_activation:
+    if row_scaled_activation:
         layout = ("T" if transa else "N") + ("T" if transb else "N")
         y_native = general_gemm(
             w_nvfp4_native,
@@ -222,7 +222,7 @@ def check_nvfp4_gemm_versus_reference(
     torch.testing.assert_close(y_native, y_ref, atol=8e-3, rtol=8e-3)
 
 
-def check_nvfp4_per_token_grouped_gemm_matches_per_gemm(
+def check_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
     x_dtype: torch.dtype,
     w_dtype: torch.dtype,
     out_dtype: torch.dtype,
@@ -248,7 +248,7 @@ def check_nvfp4_per_token_grouped_gemm_matches_per_gemm(
         amax_reduction_group=None,
         with_rht=False,
         with_post_rht_amax=False,
-        per_token_activation=True,
+        row_scaled_activation=True,
     )
     w_quantizer = NVFP4Quantizer(
         fp4_dtype=te_dtype,
@@ -314,7 +314,7 @@ def check_nvfp4_per_token_grouped_gemm_matches_per_gemm(
         torch.testing.assert_close(grouped, ref, atol=0.0, rtol=0.0)
 
 
-def check_nvfp4_per_token_gemm_matches_emulated(
+def check_nvfp4_row_scaled_gemm_matches_emulated(
     x_dtype: torch.dtype,
     w_dtype: torch.dtype,
     out_dtype: torch.dtype,
@@ -330,7 +330,7 @@ def check_nvfp4_per_token_gemm_matches_emulated(
     x = torch.randn((M, K), dtype=x_dtype, device=device)
     w = torch.randn((N, K), dtype=w_dtype, device=device)
 
-    x_per_token_quantizer = NVFP4Quantizer(
+    x_row_scaled_quantizer = NVFP4Quantizer(
         fp4_dtype=te_dtype,
         rowwise=True,
         columnwise=True,
@@ -338,7 +338,7 @@ def check_nvfp4_per_token_gemm_matches_emulated(
         amax_reduction_group=None,
         with_rht=False,
         with_post_rht_amax=False,
-        per_token_activation=True,
+        row_scaled_activation=True,
     )
     x_tensorwise_quantizer = NVFP4Quantizer(
         fp4_dtype=te_dtype,
@@ -359,13 +359,13 @@ def check_nvfp4_per_token_gemm_matches_emulated(
         with_post_rht_amax=False,
     )
 
-    x_per_token = x_per_token_quantizer.update_quantized(
-        x, x_per_token_quantizer.make_empty(x.shape, dtype=x_dtype, device=device)
+    x_row_scaled = x_row_scaled_quantizer.update_quantized(
+        x, x_row_scaled_quantizer.make_empty(x.shape, dtype=x_dtype, device=device)
     )
     w_nvfp4 = w_quantizer.update_quantized(
         w, w_quantizer.make_empty(w.shape, dtype=w_dtype, device=device)
     )
-    y_per_token = general_gemm(w_nvfp4, x_per_token, out_dtype=out_dtype, layout="TN")[0]
+    y_row_scaled = general_gemm(w_nvfp4, x_row_scaled, out_dtype=out_dtype, layout="TN")[0]
 
     emulated_rows = []
     for i in range(M):
@@ -381,9 +381,9 @@ def check_nvfp4_per_token_gemm_matches_emulated(
 
     y_emulated = torch.cat(emulated_rows, dim=0)
     if out_dtype == torch.bfloat16:
-        torch.testing.assert_close(y_per_token, y_emulated, atol=0.0, rtol=7.8e-3)
+        torch.testing.assert_close(y_row_scaled, y_emulated, atol=0.0, rtol=7.8e-3)
     else:
-        torch.testing.assert_close(y_per_token, y_emulated, atol=3.0517578125e-5, rtol=0.0)
+        torch.testing.assert_close(y_row_scaled, y_emulated, atol=3.0517578125e-5, rtol=0.0)
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
@@ -416,7 +416,7 @@ def check_nvfp4_per_token_gemm_matches_emulated(
     ],
     ids=["rowxrow", "colxrow", "colxcol"],
 )
-@pytest.mark.parametrize("per_token_activation", [False, True], ids=["nvfp4", "nvfp4_per_token"])
+@pytest.mark.parametrize("row_scaled_activation", [False, True], ids=["nvfp4", "nvfp4_row_scaled"])
 def test_nvfp4_gemm_versus_reference(
     M: int,
     K: int,
@@ -427,13 +427,13 @@ def test_nvfp4_gemm_versus_reference(
     accumulate: bool,
     is_x_columnwise: bool,
     is_w_columnwise: bool,
-    per_token_activation: bool,
+    row_scaled_activation: bool,
 ):
-    if per_token_activation:
+    if row_scaled_activation:
         if accumulate:
-            pytest.skip("Per-token NVFP4 GEMM output rescale does not support accumulation")
+            pytest.skip("Row-scaled NVFP4 GEMM output rescale does not support accumulation")
         if is_x_columnwise:
-            pytest.skip("Per-token NVFP4 GEMM output rescale requires rowwise activation usage")
+            pytest.skip("Row-scaled NVFP4 GEMM output rescale requires rowwise activation usage")
 
     check_nvfp4_gemm_versus_reference(
         x_dtype=x_dtype,
@@ -445,7 +445,7 @@ def test_nvfp4_gemm_versus_reference(
         accumulate=accumulate,
         x_columnwise=is_x_columnwise,
         w_columnwise=is_w_columnwise,
-        per_token_activation=per_token_activation,
+        row_scaled_activation=row_scaled_activation,
     )
 
 
@@ -471,7 +471,7 @@ def test_nvfp4_gemm_versus_reference(
 @pytest.mark.parametrize("out_dtype", [torch.float32, torch.bfloat16], ids=str)
 @pytest.mark.parametrize("use_bias", [False, True], ids=["no_bias", "bias"])
 @pytest.mark.parametrize("single_output", [False, True], ids=["list_output", "single_output"])
-def test_nvfp4_per_token_grouped_gemm_matches_per_gemm(
+def test_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
     m_splits: list[int],
     k: int,
     n: int,
@@ -481,7 +481,7 @@ def test_nvfp4_per_token_grouped_gemm_matches_per_gemm(
     use_bias: bool,
     single_output: bool,
 ):
-    check_nvfp4_per_token_grouped_gemm_matches_per_gemm(
+    check_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
         x_dtype=x_dtype,
         w_dtype=w_dtype,
         out_dtype=out_dtype,
@@ -513,7 +513,7 @@ def test_nvfp4_per_token_grouped_gemm_matches_per_gemm(
 @pytest.mark.parametrize("x_dtype", [torch.float32, torch.bfloat16], ids=str)
 @pytest.mark.parametrize("w_dtype", [torch.float32, torch.bfloat16], ids=str)
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32], ids=str)
-def test_nvfp4_per_token_gemm_matches_emulated(
+def test_nvfp4_row_scaled_gemm_matches_emulated(
     M: int,
     K: int,
     N: int,
@@ -521,7 +521,7 @@ def test_nvfp4_per_token_gemm_matches_emulated(
     w_dtype: torch.dtype,
     out_dtype: torch.dtype,
 ):
-    check_nvfp4_per_token_gemm_matches_emulated(
+    check_nvfp4_row_scaled_gemm_matches_emulated(
         x_dtype=x_dtype,
         w_dtype=w_dtype,
         out_dtype=out_dtype,

@@ -316,18 +316,18 @@ void compute_ref(float (*OP)(const float),
                  const size_t scales_stride_t,
                  const bool use_fast_math,
                  const bool use_2d_quantization = false,
-                 std::vector<float> *per_token_amax = nullptr)
+                 std::vector<float> *rowwise_amax = nullptr)
 {
     std::vector<InputType> input_t = create_transpose(input, rows, cols);
 
-    if (per_token_amax != nullptr) {
-        per_token_amax->resize(rows, 0.0f);
+    if (rowwise_amax != nullptr) {
+        rowwise_amax->resize(rows, 0.0f);
         for (size_t row = 0; row < rows; ++row) {
             float row_amax = 0.0f;
             for (size_t col = 0; col < cols; ++col) {
                 row_amax = fmaxf(row_amax, fabsf(static_cast<float>(input[row * cols + col])));
             }
-            (*per_token_amax)[row] = row_amax;
+            (*rowwise_amax)[row] = row_amax;
             quantize_nvfp4(OP,
                            input + row * cols,
                            output + row * (cols / 2),
@@ -549,12 +549,12 @@ void compareResults_nvfp4(const Tensor &test,
     }
 }
 
-void compare_per_token_amax(const Tensor &output, const std::vector<float> &ref_amax) {
+void compare_rowwise_amax(const Tensor &output, const std::vector<float> &ref_amax) {
     const std::vector<float> test_amax_data = output.tensor_amax_values();
     ASSERT_EQ(test_amax_data.size(), ref_amax.size());
     for (size_t row = 0; row < ref_amax.size(); ++row) {
         ASSERT_EQ(test_amax_data[row], ref_amax[row])
-            << "Per-token amax mismatch at row " << row;
+            << "Row-scaled amax mismatch at row " << row;
     }
 }
 
@@ -562,7 +562,7 @@ template <typename InputType>
 void performTest(float (*OP)(const float),
                  const std::vector<size_t>& shape,
                  const bool use_fast_math,
-                 const bool per_token_activation = false) {
+                 const bool row_scaled_activation = false) {
     using namespace test;
 
     DType itype = TypeInfo<InputType>::dtype;
@@ -589,7 +589,7 @@ void performTest(float (*OP)(const float),
     const size_t scales_stride_t = blocks_X_t;
 
     Tensor input("input", shape, itype);
-    Tensor output("output", shape, otype, true, !per_token_activation, NVTE_NVFP4_1D_SCALING);
+    Tensor output("output", shape, otype, true, !row_scaled_activation, NVTE_NVFP4_1D_SCALING);
 
     std::unique_ptr<fp4e2m1x2[]> ref_output   = std::make_unique<fp4e2m1x2[]>(rows * (cols / 2));
     std::unique_ptr<fp4e2m1x2[]> ref_output_t = std::make_unique<fp4e2m1x2[]>(cols * (rows / 2));
@@ -600,10 +600,11 @@ void performTest(float (*OP)(const float),
 
     // Golden value of amax chosen to make the 2nd-stage scaling mantissa zero and avoid rounding issues
     const float amax = 448.0f * 6.0f * 8.0f;
-    std::vector<float> ref_per_token_amax;
+    std::vector<float> ref_rowwise_amax;
     bool use_2d_quantization = false;
-    if (per_token_activation) {
+    if (row_scaled_activation) {
         output.set_tensor_amax_shape({rows});
+        output.set_rowwise_amax_is_row_scaled(true);
         compute_ref<InputType>(OP,
                                input.rowwise_cpu_dptr<InputType>(),
                                ref_output.get(),
@@ -617,7 +618,7 @@ void performTest(float (*OP)(const float),
                                scales_stride_t,
                                use_fast_math,
                                use_2d_quantization,
-                               &ref_per_token_amax);
+                               &ref_rowwise_amax);
     } else {
         // Set 2nd stage NVFP4 scaling factor
         output.set_tensor_amax(amax);
@@ -650,7 +651,6 @@ void performTest(float (*OP)(const float),
 
     // Set 2D quantization based on compile-time flag
     quant_config.set_nvfp4_2d_quantization(use_2d_quantization);
-    quant_config.set_nvfp4_per_token_activation(per_token_activation);
 
     // Call appropriate function based on operation type
     // Activation functions take 3 parameters (input, output, stream)
@@ -681,7 +681,7 @@ void performTest(float (*OP)(const float),
 
     // Set dump_data=true to enable dumping tensor data to files for analysis
     compareResults_nvfp4(output, ref_output.get(), ref_output_t.get(), rows, cols, atol, rtol, true,
-                         false, !per_token_activation);
+                         false, !row_scaled_activation);
 
     size_t scale_mismatches_num = 0;
     compare_scaling_factors<fp8e4m3>("scales", output.rowwise_cpu_scale_inv_ptr<fp8e4m3>(),
@@ -689,15 +689,15 @@ void performTest(float (*OP)(const float),
                                       unpadded_blocks_Y, unpadded_blocks_X, scales_stride,
                                       scale_mismatches_num);
 
-    if (!per_token_activation) {
+    if (!row_scaled_activation) {
         compare_scaling_factors<fp8e4m3>("scales_t", output.columnwise_cpu_scale_inv_ptr<fp8e4m3>(),
                                           ref_scales_t.get(),
                                           unpadded_blocks_Y_t, unpadded_blocks_X_t, scales_stride_t,
                                           scale_mismatches_num);
     }
 
-    if (per_token_activation) {
-        compare_per_token_amax(output, ref_per_token_amax);
+    if (row_scaled_activation) {
+        compare_rowwise_amax(output, ref_rowwise_amax);
     }
 }
 
@@ -747,7 +747,7 @@ TEST_P(FusedCastTransposeNVFP4TestSuite, TestFusedCastTransposeNVFP4) {
     const auto tensor_dims = std::get<1>(GetParam());
     const DType input_type = std::get<2>(GetParam());
     const bool use_fast_math = std::get<3>(GetParam());
-    const bool per_token_activation = std::get<4>(GetParam());
+    const bool row_scaled_activation = std::get<4>(GetParam());
 
     // Skip tests if the input tensor is 1D
     if (tensor_dims.size() < 2) {
@@ -765,7 +765,7 @@ TEST_P(FusedCastTransposeNVFP4TestSuite, TestFusedCastTransposeNVFP4) {
     }
 
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(input_type, InputType,
-        performTest<InputType>(OP, tensor_dims, use_fast_math, per_token_activation);
+        performTest<InputType>(OP, tensor_dims, use_fast_math, row_scaled_activation);
     );
 }
 
@@ -804,7 +804,7 @@ INSTANTIATE_TEST_SUITE_P(
     });
 
 INSTANTIATE_TEST_SUITE_P(
-    OperatorTestPerToken,
+    OperatorTestRowScaled,
     FusedCastTransposeNVFP4TestSuite,
     ::testing::Combine(
         ::testing::Values(ActivationType::Identity),
@@ -823,7 +823,7 @@ INSTANTIATE_TEST_SUITE_P(
             name += "X_FAST_SCALING";
         }
         if (std::get<4>(info.param)) {
-            name += "XPER_TOKEN";
+            name += "XROW_SCALED";
         }
         return name;
     });

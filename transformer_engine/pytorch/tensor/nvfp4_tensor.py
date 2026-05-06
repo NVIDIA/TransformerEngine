@@ -128,8 +128,8 @@ class NVFP4Quantizer(Quantizer):
     """Stochastic rounding, only applicable for gradients."""
     stochastic_rounding: bool
 
-    """Per-token activation quantization path."""
-    per_token_activation: bool
+    """Row-scaled activation quantization path."""
+    row_scaled_activation: bool
 
     """RHT matrix random sign mask"""
     rht_matrix_random_sign_mask_t: int
@@ -146,7 +146,7 @@ class NVFP4Quantizer(Quantizer):
         with_post_rht_amax: bool = False,
         with_2d_quantization: bool = False,
         stochastic_rounding: bool = False,
-        per_token_activation: bool = False,
+        row_scaled_activation: bool = False,
         with_random_sign_mask: bool = True,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
@@ -157,7 +157,7 @@ class NVFP4Quantizer(Quantizer):
         self.amax_reduction_group = amax_reduction_group
         self.with_2d_quantization = with_2d_quantization
         self.stochastic_rounding = stochastic_rounding
-        self.per_token_activation = per_token_activation
+        self.row_scaled_activation = row_scaled_activation
         self.rht_matrix_random_sign_mask_t = get_random_sign_mask_for_rht(
             with_random_sign_mask, torch.cuda.current_device()
         )
@@ -203,7 +203,7 @@ class NVFP4Quantizer(Quantizer):
             with_post_rht_amax=self.with_post_rht_amax,
             with_2d_quantization=self.with_2d_quantization,
             stochastic_rounding=self.stochastic_rounding,
-            per_token_activation=self.per_token_activation,
+            row_scaled_activation=self.row_scaled_activation,
         )
         quantizer.internal = self.internal
         quantizer.optimize_for_gemm = self.optimize_for_gemm
@@ -336,7 +336,7 @@ class NVFP4Quantizer(Quantizer):
                 scale_shape, dtype=torch.uint8, device=device, pin_memory=pin_memory
             )
             # Allocate per tensor scale inverse. FP32 format.
-            amax_rows = flat_first_dim if self.per_token_activation else 1
+            amax_rows = flat_first_dim if self.row_scaled_activation else 1
             amax_rowwise = torch.zeros(
                 amax_rows, dtype=torch.float32, device=device, pin_memory=pin_memory
             )
@@ -345,7 +345,7 @@ class NVFP4Quantizer(Quantizer):
         columnwise_data = None
         columnwise_scale_inv = None
         amax_columnwise = None
-        columnwise_usage = self.columnwise_usage and not self.per_token_activation
+        columnwise_usage = self.columnwise_usage and not self.row_scaled_activation
         if columnwise_usage:
             # enforce 2D shape to avoid [S, B, H] shape and B and be 1
             # and the transposed shape is [H, S, B], so divide last dim by 2 gives zero
@@ -381,6 +381,7 @@ class NVFP4Quantizer(Quantizer):
             quantizer=self,
             requires_grad=requires_grad,
             with_gemm_swizzled_scales=False,
+            rowwise_amax_is_row_scaled=self.row_scaled_activation,
         )
 
     def calibrate(self, tensor: torch.Tensor) -> None:
@@ -441,6 +442,7 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
         fp4_dtype: TE_DType,
         quantizer: Quantizer,
         with_gemm_swizzled_scales: bool,
+        rowwise_amax_is_row_scaled: bool = False,
         **kwargs,
     ):
         instance = super().__new__(
@@ -454,6 +456,7 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
             fp4_dtype,
             quantizer,
             with_gemm_swizzled_scales,
+            rowwise_amax_is_row_scaled,
             *args,
             **kwargs,
         )

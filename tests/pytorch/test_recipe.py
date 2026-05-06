@@ -514,27 +514,27 @@ class TestFP8Recipe:
 
 
 @pytest.mark.skipif(not fp4_available, reason=reason_for_no_fp4)
-def test_nvfp4_per_token_quantizer_roles():
-    recipe = NVFP4BlockScaling(per_token_activation=True)
+def test_nvfp4_row_scaled_quantizer_roles():
+    recipe = NVFP4BlockScaling(row_scaled_activation=True)
 
     forward_quantizers = NVFP4BlockScalingRecipeState(
         recipe,
         mode="forward",
         num_quantizers=3,
     ).make_quantizers()
-    assert [q.per_token_activation for q in forward_quantizers] == [True, False, True]
+    assert [q.row_scaled_activation for q in forward_quantizers] == [True, False, True]
 
     backward_quantizers = NVFP4BlockScalingRecipeState(
         recipe,
         mode="backward",
         num_quantizers=2,
     ).make_quantizers()
-    assert [q.per_token_activation for q in backward_quantizers] == [False, False]
+    assert [q.row_scaled_activation for q in backward_quantizers] == [False, False]
 
 
 @pytest.mark.skipif(not fp4_available, reason=reason_for_no_fp4)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=str)
-@pytest.mark.parametrize("per_token_activation", [False, True], ids=["nvfp4", "nvfp4_per_token"])
+@pytest.mark.parametrize("row_scaled_activation", [False, True], ids=["nvfp4", "nvfp4_row_scaled"])
 @pytest.mark.parametrize(
     "M, N",
     [
@@ -550,8 +550,8 @@ def test_nvfp4_per_token_quantizer_roles():
         (8192, 8192),
     ],
 )
-def test_fp4_dequantize(dtype, per_token_activation, M, N):
-    q = NVFP4Quantizer(per_token_activation=per_token_activation)
+def test_fp4_dequantize(dtype, row_scaled_activation, M, N):
+    q = NVFP4Quantizer(row_scaled_activation=row_scaled_activation)
     a = torch.rand((M, N)).cuda().to(dtype=dtype)
     starting_tensor = q(a)
     dequantized_tensor = starting_tensor.dequantize()

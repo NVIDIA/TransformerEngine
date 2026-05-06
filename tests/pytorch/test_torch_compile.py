@@ -48,7 +48,7 @@ if mxfp8_available:
     _all_recipes.append(recipe.MXFP8BlockScaling())
 if nvfp4_available:
     _all_recipes.append(recipe.NVFP4BlockScaling())
-    _all_recipes.append(recipe.NVFP4BlockScaling(per_token_activation=True))
+    _all_recipes.append(recipe.NVFP4BlockScaling(row_scaled_activation=True))
 
 
 # ---------------------------------------------------------------------------
