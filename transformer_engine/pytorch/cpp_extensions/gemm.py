@@ -340,13 +340,16 @@ def general_grouped_gemm(
         else:
             out_views = out
         for i in range(num_gemms):
+            if out_views[i] is None:
+                raise ValueError("Row-scaled NVFP4 grouped GEMM requires pre-allocated outputs.")
             if out_views[i].numel() == 0:
                 continue
-            gemm_out, _, _, _ = general_gemm(
+            general_gemm(
                 A[i],
                 B[i],
                 quantization_params=quantization_params[i],
                 out_dtype=out_views[i].dtype,
+                out=out_views[i],
                 gelu=gelu,
                 accumulate=accumulate,
                 layout=layout,
@@ -354,7 +357,6 @@ def general_grouped_gemm(
                 use_split_accumulator=use_split_accumulator,
                 grad=grad,
             )
-            out_views[i].copy_(gemm_out)
         if single_output:
             out = out_init
         return out, grad_bias, gelu_input
