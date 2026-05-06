@@ -561,8 +561,12 @@ def test_fp4_dequantize(dtype, rowwise_amax_is_row_scaled, M, N):
     )
     a = torch.rand((M, N)).cuda().to(dtype=dtype)
     starting_tensor = q(a)
+    assert starting_tensor._rowwise_amax_is_row_scaled == rowwise_amax_is_row_scaled
+    assert starting_tensor._amax_rowwise.numel() == (M if rowwise_amax_is_row_scaled else 1)
     dequantized_tensor = starting_tensor.dequantize()
     new_tensor = q(dequantized_tensor)
+    assert new_tensor._rowwise_amax_is_row_scaled == rowwise_amax_is_row_scaled
+    assert new_tensor._amax_rowwise.numel() == (M if rowwise_amax_is_row_scaled else 1)
     torch.testing.assert_close(
         new_tensor._rowwise_data,
         starting_tensor._rowwise_data,
