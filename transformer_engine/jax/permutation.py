@@ -57,6 +57,7 @@ __all__ = [
     "compute_reverse_ragged_all_to_all_params",
     "local_permute_after_a2a",
     "local_unpermute_before_a2a",
+    "routing_map_to_selected_experts",
 ]
 
 
@@ -722,7 +723,7 @@ def _sort_activations_bwd(residuals: jax.Array, grads: jax.Array) -> Tuple[jax.A
 _sort_activations.defvjp(_sort_activations_fwd, _sort_activations_bwd)
 
 
-def _routing_map_to_selected_experts(
+def routing_map_to_selected_experts(
     sparse_probs: jnp.ndarray,
     routing_map: jnp.ndarray,
     topk: int,

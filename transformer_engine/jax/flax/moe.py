@@ -65,7 +65,7 @@ from jax.sharding import PartitionSpec as P
 
 from ..dense import grouped_dense
 from ..permutation import (
-    _routing_map_to_selected_experts,
+    routing_map_to_selected_experts,
     compute_ragged_all_to_all_params,
     compute_reverse_ragged_all_to_all_params,
     local_permute_after_a2a,
@@ -492,7 +492,7 @@ class MoEBlock(TransformerEngineBase):
         topk = self.num_experts_per_tok
 
         if self.permutation_backend == "pure_jax":
-            selected_experts, routing_weights = _routing_map_to_selected_experts(
+            selected_experts, routing_weights = routing_map_to_selected_experts(
                 sparse_probs, routing_map, topk
             )
             sorted_inputs, perm_state, group_sizes = unfused_token_dispatch(
@@ -715,7 +715,7 @@ class MoEBlock(TransformerEngineBase):
         inputs: jnp.ndarray,
         gate_logits: jnp.ndarray,
         params: dict,
-    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    ) -> Tuple[jnp.ndarray, Optional[jnp.ndarray]]:
         """Wrap the body in a ``shard_map`` that runs a forward
         ``ragged_all_to_all`` (A2A / A2Av) around the FFN.
 
@@ -785,7 +785,12 @@ class MoEBlock(TransformerEngineBase):
 
         global_batch_size, sequence_length, _hidden = inputs.shape
         topk = self.num_experts_per_tok
-        if global_batch_size % dp_size != 0:
+        # The shard_map's ``in_specs=P((ep, *dp_axes), ...)`` requires the
+        # batch dim to be divisible by ``num_ep * dp_size``; check upfront
+        # here for a clearer error than the one shard_map would raise at
+        # trace time.
+        batch_divisor = num_ep * dp_size
+        if global_batch_size % batch_divisor != 0:
             raise ValueError(
                 f"batch={global_batch_size} not divisible by prod(data_parallelism_axes)={dp_size}"
             )
