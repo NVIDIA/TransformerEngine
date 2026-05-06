@@ -127,10 +127,10 @@ def test_custom_recipe_grouped_linear_sanity():
     num_gemms = 3
     in_features = 64
     out_features = 64
-    batch = 32
-    base = batch // num_gemms
-    rem = batch % num_gemms
-    m_splits = [base + (1 if i < rem else 0) for i in range(num_gemms)]
+    # Each per-GEMM M dim must be a multiple of 16 to satisfy cuBLAS FP8 GEMM's
+    # leading-dimension alignment requirement on Hopper (sm_90).
+    m_splits = [16] * num_gemms
+    batch = sum(m_splits)
 
     model = GroupedLinear(num_gemms, in_features, out_features, params_dtype=torch.bfloat16).cuda()
     inp = torch.randn(batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True)
@@ -280,7 +280,9 @@ def test_custom_recipe_factory_invocation_counts_and_cycling():
 
     in_features = 64
     out_features = 64
-    batch = 8
+    # batch must be a multiple of 16 to satisfy cuBLAS FP8 GEMM's leading-dim
+    # alignment requirement on Hopper (sm_90).
+    batch = 16
 
     op = Linear(in_features, out_features, params_dtype=torch.bfloat16)
     inp = torch.randn(batch, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True)
@@ -707,7 +709,9 @@ def test_grouped_linear_module_type_dispatch():
     num_gemms = 2
     in_features = 64
     out_features = 64
-    batch = 16
+    # Each per-GEMM M dim must be a multiple of 16 to satisfy cuBLAS FP8 GEMM's
+    # leading-dimension alignment requirement on Hopper (sm_90).
+    batch = 32
     m_splits = [batch // num_gemms] * num_gemms
 
     model = GroupedLinear(
