@@ -340,8 +340,6 @@ def general_grouped_gemm(
         else:
             out_views = out
         for i in range(num_gemms):
-            if out_views[i] is None:
-                raise ValueError("Row-scaled NVFP4 grouped GEMM requires pre-allocated outputs.")
             if out_views[i].numel() == 0:
                 continue
             general_gemm(
@@ -482,11 +480,11 @@ def general_grouped_gemm_for_grouped_tensor(
     if is_discrete_in and is_discrete_out:
         raise ValueError("Both A and out are discrete. This is not supported yet.")
 
-    if (
-        (isinstance(A, GroupedTensorStorage) and A.row_scaled_nvfp4)
-        or (isinstance(B, GroupedTensorStorage) and B.row_scaled_nvfp4)
-        or (isinstance(out, GroupedTensorStorage) and out.row_scaled_nvfp4)
-    ):
+    if isinstance(A, GroupedTensorStorage) and A.row_scaled_nvfp4:
+        raise NotImplementedError("Row-scaled NVFP4 GroupedTensor GEMM is not supported yet.")
+    if isinstance(B, GroupedTensorStorage) and B.row_scaled_nvfp4:
+        raise NotImplementedError("Row-scaled NVFP4 GroupedTensor GEMM is not supported yet.")
+    if isinstance(out, GroupedTensorStorage) and out.row_scaled_nvfp4:
         raise NotImplementedError("Row-scaled NVFP4 GroupedTensor GEMM is not supported yet.")
 
     if is_discrete_out:

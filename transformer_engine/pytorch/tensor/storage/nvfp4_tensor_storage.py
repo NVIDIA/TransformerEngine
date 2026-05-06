@@ -111,9 +111,9 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         fp4_dtype: TE_DType,
         quantizer: Optional[Quantizer],
         with_gemm_swizzled_scales: bool,
-        row_scaled_nvfp4: bool = False,
         *args,
         fake_dtype: Optional[torch.dtype] = None,
+        row_scaled_nvfp4: bool = False,
         **kwargs,
     ):
         if cls is NVFP4TensorStorage:

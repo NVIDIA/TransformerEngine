@@ -16,7 +16,6 @@
 #include <cuda_runtime.h>
 #include <transformer_engine/transformer_engine.h>
 
-#include <cub/cub.cuh>
 #include <type_traits>
 
 #include "../../common.h"
@@ -68,7 +67,9 @@ __launch_bounds__(BLOCK_SIZE)
                                 const IType *__restrict__ input,
                                 float *__restrict__ output_rowwise_amax,
                                 const float *__restrict__ noop) {
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+#if !defined(__CUDA_ARCH__) || (__CUDA_ARCH__ < 1000)
+  NVTE_DEVICE_ERROR("SM 10.0+ is required.");
+#else
   if (noop != nullptr && noop[0] == 1.0f) {
     return;
   }
@@ -88,10 +89,8 @@ __launch_bounds__(BLOCK_SIZE)
   }
   const float thread_max = abs_max_2x_to_float(thread_amax_2x);
 
-  using BlockReduce = cub::BlockReduce<float, BLOCK_SIZE>;
-  __shared__ typename BlockReduce::TempStorage temp_storage;
   const float row_amax =
-      BlockReduce(temp_storage).Reduce(thread_max, [](float a, float b) { return fmaxf(a, b); });
+      reduce_max<BLOCK_SIZE / THREADS_PER_WARP>(thread_max, threadIdx.x / THREADS_PER_WARP);
 
   if (threadIdx.x == 0) {
     output_rowwise_amax[row_idx] = row_amax;

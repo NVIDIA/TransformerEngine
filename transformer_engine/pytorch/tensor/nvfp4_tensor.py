@@ -462,8 +462,8 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
             fp4_dtype,
             quantizer,
             with_gemm_swizzled_scales,
-            row_scaled_nvfp4,
             *args,
+            row_scaled_nvfp4=row_scaled_nvfp4,
             **kwargs,
         )
         return instance
