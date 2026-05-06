@@ -218,6 +218,8 @@ class NVFP4Quantizer(Quantizer):
 
     def is_quantizable(self, inp: torch.Tensor) -> bool:
         """Returns whether or not given inp can be quantized"""
+        if self.rowwise_amax_is_row_scaled:
+            return False
         if inp.ndim < 2:
             return False
         if inp.shape[-1] % NVFP4_BLOCK_SCALING_SIZE != 0:

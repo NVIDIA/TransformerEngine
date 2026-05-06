@@ -523,6 +523,8 @@ def test_nvfp4_row_scaled_quantizer_roles():
         num_quantizers=3,
     ).make_quantizers()
     assert [q.rowwise_amax_is_row_scaled for q in forward_quantizers] == [True, False, True]
+    assert not forward_quantizers[0].is_quantizable(torch.empty(16, 16))
+    assert forward_quantizers[1].is_quantizable(torch.empty(16, 16))
 
     backward_quantizers = NVFP4BlockScalingRecipeState(
         recipe,
