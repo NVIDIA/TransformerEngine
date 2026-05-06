@@ -102,7 +102,6 @@ def _mhc_projection_fwd_fused(
     norm_weight_ptr,  # (K,)
     M,
     N,
-    n,
     K,
     stride_xm,
     stride_xk: tl.constexpr,
@@ -119,7 +118,7 @@ def _mhc_projection_fwd_fused(
     BLOCK_SIZE_N: tl.constexpr,
     precision: tl.constexpr,
     HAS_NORM_WEIGHT: tl.constexpr,
-    DETERMINISTIC: tl.constexpr,  # If user enforces deterministic
+    DETERMINISTIC: tl.constexpr,  # pylint: disable=unused-argument # If user wants to enforce deterministic, which is used to prune configs
     USE_SPLIT_K: tl.constexpr,  # If we actually use split-K, which is determined by both DETERMINISTIC flag and input size
 ):
     pid_m = tl.program_id(axis=0)
@@ -411,7 +410,7 @@ def _mhc_projection_bwd_fused_dphi(
     BLOCK_SIZE_K: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     precision: tl.constexpr,
-    DETERMINISTIC: tl.constexpr,  # If user enforces deterministic
+    DETERMINISTIC: tl.constexpr,  # pylint: disable=unused-argument # If user wants to enforce deterministic, which is used to prune configs
     USE_SPLIT_M: tl.constexpr,  # If we actually use split-M, which is determined by both DETERMINISTIC flag and input size
 ):
     pid_k = tl.program_id(axis=0)
@@ -1194,7 +1193,7 @@ def _mhc_aggregate_bwd(
     STEP_SIZE_C: tl.constexpr,
     precision: tl.constexpr,
     FUSE_GRAD_X_ACC: tl.constexpr,
-    DETERMINISTIC: tl.constexpr,
+    DETERMINISTIC: tl.constexpr,  # pylint: disable=unused-argument # If user wants to enforce deterministic, which is used to prune configs
     USE_SPLIT_C: tl.constexpr,
 ):
     """
