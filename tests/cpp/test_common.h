@@ -185,11 +185,15 @@ class Tensor {
 
   template <typename T>
   T *rowwise_cpu_dptr() {
+    NVTE_CHECK(TypeInfo<T>::dtype == data_rowwise_.dtype(), "Invalid type!");
+    NVTE_CHECK(rowwise_, "Tensor does not have columnwise data!");
     return data_rowwise_.cpu_buffer<T>();
   }
 
   template <typename T>
   T *columnwise_cpu_dptr() {
+    NVTE_CHECK(TypeInfo<T>::dtype == data_columnwise_.dtype(), "Invalid type!");
+    NVTE_CHECK(columnwise_, "Tensor does not have columnwise data!");
     return data_columnwise_.cpu_buffer<T>();
   }
 

@@ -937,13 +937,14 @@ void fillCase_special(Tensor *t) {
     });
   }
 
-  // Try setting scale to 1, fallback to random scales
-  // Note: This is a hack to match behavior of an earlier
-  // implementation. Consider filling block scales with constant
-  // value.
-  try {
-    t->set_scale_inv(1.0);
-  } catch (...) {
+  // Fill scales
+  if (t->scaling_mode() == NVTE_DELAYED_TENSOR_SCALING) {
+    if (isFp8Type(t->dtype())) {
+      // FP8 tensor scale is set to 1
+      t->set_scale_inv(1.0);
+    }
+  } else {
+    // Block scales are filled randomly
     t->fill_uniform_rowwise_scale_inv();
     t->fill_uniform_columnwise_scale_inv();
   }
