@@ -208,9 +208,11 @@ def general_gemm(
         "beta": beta,
     }
 
-    if not _is_nvfp4_row_scaled_tensor(B):
+    if not _is_nvfp4_row_scaled_tensor(A) and not _is_nvfp4_row_scaled_tensor(B):
         out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
     else:
+        if _is_nvfp4_row_scaled_tensor(A):
+            raise NotImplementedError("Row-scaled NVFP4 GEMM does not support row-scaled A.")
         assert layout[1] == "N", "Row-scaled NVFP4 GEMM currently supports N-layout B only."
         if grad:
             raise RuntimeError(
@@ -319,25 +321,10 @@ def general_grouped_gemm(
     else:
         bias_dtype = TE_DType[torch.bfloat16]
 
-    row_scaled_b = [_is_nvfp4_row_scaled_tensor(tensor) for tensor in B]
-    if any(row_scaled_b):
-        assert all(
-            row_scaled_b
-        ), "Row-scaled NVFP4 grouped GEMM requires all B tensors to be row-scaled."
-        assert layout[1] == "N", "Row-scaled NVFP4 grouped GEMM currently supports N-layout B only."
-        if grad:
-            raise RuntimeError(
-                "Row-scaled NVFP4 grouped GEMM currently supports fprop only. "
-                "Backward NVFP4 gradient quantizers should use scalar global amax."
-            )
-        assert not gelu, "Row-scaled NVFP4 grouped GEMM currently does not support fused GELU."
-        assert (
-            not accumulate
-        ), "Row-scaled NVFP4 grouped GEMM currently does not support accumulation."
+    if any(_is_nvfp4_row_scaled_tensor(tensor) for tensor in A):
+        raise NotImplementedError("Row-scaled NVFP4 grouped GEMM does not support row-scaled A.")
+    if any(_is_nvfp4_row_scaled_tensor(tensor) for tensor in B):
         assert D_dtype is None, "Row-scaled NVFP4 grouped GEMM currently does not support D_dtype."
-        assert all(
-            q is None for q in quantization_params
-        ), "Row-scaled NVFP4 grouped GEMM currently does not support output quantization."
         if single_output:
             assert (
                 m_splits is not None
@@ -358,11 +345,14 @@ def general_grouped_gemm(
             gemm_out, _, _, _ = general_gemm(
                 A[i],
                 B[i],
-                quantization_params=None,
+                quantization_params=quantization_params[i],
                 out_dtype=out_views[i].dtype,
+                gelu=gelu,
+                accumulate=accumulate,
                 layout=layout,
                 bias=bias[i] if use_bias else None,
                 use_split_accumulator=use_split_accumulator,
+                grad=grad,
             )
             out_views[i].copy_(gemm_out)
         if single_output:
