@@ -58,7 +58,7 @@ def projection_prune_fwd(configs, named_args, **kwargs):
     block_k = align_to(K, 32)
 
     # Use Split-K only if determinism is not enforced and M is not large enough to effectively parallelize
-    # sms * 4 is a empirical threshold I found via experiments for non-split-K starts to be better
+    # sms * 4 is a empirical threshold I found via experiments on B200 for non-split-K starts to be better
     if not DETERMINISTIC and triton.cdiv(M, block_m[0]) < get_device_sms() * 4:
         pruned_configs = configs
     else:
@@ -1459,7 +1459,7 @@ def expand_combine_prune_bwd(configs, named_args, **kwargs):
     block_c = align_to(C, 32)
 
     # Use Split-K only if determinism is not enforced and M is not large enough to effectively parallelize
-    # sms * 8 is a empirical threshold I found via experiments for non-split-K starts to be better
+    # sms * 8 is a empirical threshold I found via experiments on B200 for non-split-K starts to be better
     if not DETERMINISTIC and triton.cdiv(M, block_m[0]) < get_device_sms() * 8:
         pruned_configs = configs
     else:

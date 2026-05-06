@@ -25,7 +25,9 @@ from transformer_engine.pytorch.cpp_extensions.gemm import general_gemm
 
 
 def is_deterministic_enforced():
-    # We assume non-determinism is allowed if this flag is not set
+    """
+    Check if user enforces deterministic algorithms. We assume non-determinism is allowed if this flag is not set
+    """
     return os.environ.get("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1") == "0"
 
 
@@ -57,26 +59,26 @@ def mhc_generate_mix_and_aggregate(
     ----------
     x : torch.Tensor,
         input tensor of shape (s, b, C, n), where s is the sequence length, b is the batch size, C is the hidden dimension per hyper connection, and n is the number of hyper connections,
-        dtype is torch.float16 or torch.float32
+        dtype is torch.bfloat16 or torch.float32
         Note that C is equal to the original hidden dimension divided by n.
     phi : torch.Tensor
         projection matrix of shape (N, nC), where N=2n+n*n (=24 for n=4), and nC is the hidden dimension after expansion (n times of C),
-        dtype is torch.float16 or torch.float32
+        dtype is torch.bfloat16 or torch.float32
     norm_weight : torch.Tensor or None
         optional, the weight for RMSNorm, of shape (K,), which is the learnable per-element affine parameters (gamma) applied to RMSNorm
-        dtype is torch.float16 or torch.float32
+        dtype is torch.bfloat16 or torch.float32
     alpha : torch.Tensor
         scaling factor for H, of shape (3,), where
         alpha[0] is applied to H[:, 0:n] for H_pre
         alpha[1] is applied to H[:, n:2n] for H_post
         alpha[2] is applied to H[:, 2n:2n+n*n] for H_res
-        dtype: torch.float16 or torch.float32
+        dtype: torch.bfloat16 or torch.float32
     beta : torch.Tensor
         bias term for H, of shape (1, 2*n+n*n), where
         beta[0, 0:n] is applied to H[:, 0:n] for H_pre
         beta[0, n:2n] is applied to H[:, n:2n] for H_post
         beta[0, 2n:2n+n*n] is applied to H[:, 2n:2n+n*n] for H_res
-        dtype is torch.float16 or torch.float32
+        dtype is torch.bfloat16 or torch.float32
     use_tf32 : bool
         whether to use TF32 for matrix multiplications
     fuse_grad_x_acc : bool
@@ -101,7 +103,6 @@ def mhc_generate_mix_and_aggregate(
         n == 4
     ), "Only n=4 is supported in this implementation, where n is the Hyper Connection number"
     nC = n * C
-    N = 2 * n + n * n
     H, ms = mhc_fused_projection(
         x.view(s * b, nC), phi, norm_weight, use_tf32=use_tf32, fuse_grad_x_acc=fuse_grad_x_acc
     )
@@ -132,7 +133,7 @@ def mhc_fused_sinkhorn(
     ----------
     H_res : torch.Tensor
         input H_res matrix of shape (s, b, n, n) that needs to be normalized into a doubly stochastic matrix.
-        dtype is torch.float16 or torch.float32
+        dtype is torch.bfloat16 or torch.float32
     n : int
         number of hyper connections, where only n=4 is supported in the current implementation
     recompute_hist : bool
@@ -225,10 +226,10 @@ def mhc_fused_aggregate(
     x : torch.Tensor
         input activation tensor of shape (s, b, C, n),
         where s is the sequence length, b is the batch size, C is the hidden dimension per hyper connection, and n is the number of hyper connections. Note that C is equal to the original hidden dimension divided by n.
-        dtype is torch.float16 or torch.float32
+        dtype is torch.bfloat16 or torch.float32
     H_pre: torch.Tensor
         input H_pre matrix of shape (s, b, n)
-        dtype is torch.float16 or torch.float32
+        dtype is torch.bfloat16 or torch.float32
     n: int
         number of hyper connections, where only n=4 is supported in the current implementation
     use_tf32: bool
@@ -268,19 +269,19 @@ def mhc_fused_expand_combine(
     ----------
     f : torch.Tensor
         input activation tensor of shape (s, b, C), which is the output from the attention / FFN sub-layer in a transformer block
-        dtype is torch.float16 or torch.float32
+        dtype is torch.bfloat16 or torch.float32
     bias : torch.Tensor or None
         optional bias tensor of shape (C,) from the last linear layer, where f + bias is fused in this kernel for better performance
-        dtype is torch.float16 or torch.float32
+        dtype is torch.bfloat16 or torch.float32
     H_post : torch.Tensor
         input H_post matrix of shape (s, b, n)
-        dtype is torch.float16 or torch.float32
+        dtype is torch.bfloat16 or torch.float32
     x : torch.Tensor
         input activation tensor of shape (s, b, C, n), which is the hyper connection input before the aggregation operation
-        dtype is torch.float16 or torch.float32
+        dtype is torch.bfloat16 or torch.float32
     H_res : torch.Tensor
         input H_res matrix of shape (s, b, n, n)
-        dtype is torch.float16 or torch.float32
+        dtype is torch.bfloat16 or torch.float32
     use_tf32 : bool
         whether to use TF32 precision for matmul operations. If False, it will use ieee for better precision.
         This is mainly used by our unittests since TF32 precision will introduce some errors and cause tests to fail
@@ -330,13 +331,13 @@ def mhc_fused_projection(
     ----------
     x : torch.Tensor
         input tensor of shape (M, K), where M=s*b is the batch size and K=nC is the hidden dimension after expansion.
-        dtype is torch.float16 or torch.float32
+        dtype is torch.bfloat16 or torch.float32
     phi : torch.Tensor
         projection matrix of shape (N, K), where N=2n+n*n (=24 for n=4)
-        dtype is torch.float16 or torch.float32
+        dtype is torch.bfloat16 or torch.float32
     norm_weight : torch.Tensor or None
         optional, the weight for RMSNorm, of shape (K,), which is the learnable per-element affine parameters (gamma) applied to RMSNorm
-        dtype is torch.float16 or torch.float32
+        dtype is torch.bfloat16 or torch.float32
     use_tf32 : bool
         whether to use TF32 precision for matmul operations. If False, it will use ieee for better precision.
         This is mainly used by our unittests since TF32 precision will introduce some errors and cause tests to fail.
@@ -507,6 +508,7 @@ class mHCProjectionOp(torch.autograd.Function):
         if norm_weight is not None:
             use_deterministic = is_deterministic_enforced()
             # With norm_weight, we need a fused kernel to perform GEMM and output both phi & norm_weight gradients
+            # pylint: disable=unnecessary-lambda-assignment
             grid = lambda META: (
                 triton.cdiv(K, META["BLOCK_SIZE_K"]),
                 triton.cdiv(M, META["BLOCK_SIZE_M"]),
