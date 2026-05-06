@@ -54,7 +54,7 @@ def projection_prune_fwd(configs, named_args, **kwargs):
     M = named_args.get("M", kwargs.get("M", None))
     K = named_args.get("K", kwargs.get("K", None))
 
-    block_m = [8, 16, 32, 64]
+    block_m = [8, 16, 64, 128]
     block_k = align_to(K, 32)
 
     # Use Split-K only if determinism is not enforced and M is not large enough to effectively parallelize
@@ -62,8 +62,8 @@ def projection_prune_fwd(configs, named_args, **kwargs):
     if not DETERMINISTIC and triton.cdiv(M, block_m[0]) < get_device_sms() * 4:
         pruned_configs = configs
     else:
-        step_k = [32, 64, 128]
-        warps = [1, 2, 4]
+        step_k = [128, 256]
+        warps = [2, 4, 8]
         stages = [2, 3, 4]
 
         pruned_configs = []
@@ -89,7 +89,7 @@ def projection_prune_fwd(configs, named_args, **kwargs):
 
 @triton.autotune(
     configs=projection_config_fwd(),
-    key=["M", "K", "DETERMINISTIC"],
+    key=["M", "K", "DETERMINISTIC", "USE_TMA"],
     reset_to_zero=["h_ptr", "ms_ptr"],
     prune_configs_by={"early_config_prune": projection_prune_fwd},
 )
@@ -120,6 +120,7 @@ def _mhc_projection_fwd_fused(
     HAS_NORM_WEIGHT: tl.constexpr,
     DETERMINISTIC: tl.constexpr,  # pylint: disable=unused-argument # If user wants to enforce deterministic, which is used to prune configs
     USE_SPLIT_K: tl.constexpr,  # If we actually use split-K, which is determined by both DETERMINISTIC flag and input size
+    USE_TMA: tl.constexpr, # If True, load x and phi via TMA tensor descriptors (Hopper+ only). Falls back to pointer-arith tl.load otherwise.
 ):
     pid_m = tl.program_id(axis=0)
     pid_k = tl.program_id(axis=1)
@@ -146,21 +147,37 @@ def _mhc_projection_fwd_fused(
     h_acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     ms_acc = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
 
+    if USE_TMA:
+        x_desc = tl.make_tensor_descriptor(
+            x_ptr, shape=[M, K], strides=[stride_xm, 1],
+            block_shape=[BLOCK_SIZE_M, STEP_SIZE_K],
+        )
+        phi_desc = tl.make_tensor_descriptor(
+            phi_ptr, shape=[N, K], strides=[stride_phin, 1],
+            block_shape=[BLOCK_SIZE_N, STEP_SIZE_K],
+        )
+
     k_base = pid_k * BLOCK_SIZE_K
     for k_start in range(0, tl.cdiv(BLOCK_SIZE_K, STEP_SIZE_K)):
-        k_offs = k_base + k_start * STEP_SIZE_K + tl.arange(0, STEP_SIZE_K)
+        k_off = k_base + k_start * STEP_SIZE_K
+        k_offs = k_off + tl.arange(0, STEP_SIZE_K)
         mask_k = k_offs < K
-        x_ptrs = x_ptr + offs_m[:, None] * stride_xm + k_offs[None, :] * stride_xk
-        x = tl.load(
-            x_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0
-        )  # (BLOCK_SIZE_M, BLOCK_SIZE_K)
-        phi_ptrs = phi_ptr + offs_n_full[:, None] * stride_phin + k_offs[None, :] * stride_phik
-        phi = tl.load(
-            phi_ptrs,
-            mask=(offs_n_full[:, None] < N) & mask_k[None, :],
-            other=0.0,
-            cache_modifier=".ca",
-        )  # (BLOCK_SIZE_N, BLOCK_SIZE_K)
+
+        if USE_TMA:
+            x = tl.load_tensor_descriptor(x_desc, [pid_m * BLOCK_SIZE_M, k_off])
+            phi = tl.load_tensor_descriptor(phi_desc, [0, k_off])
+        else:
+            x_ptrs = x_ptr + offs_m[:, None] * stride_xm + k_offs[None, :] * stride_xk
+            x = tl.load(
+                x_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0
+            )  # (BLOCK_SIZE_M, BLOCK_SIZE_K)
+            phi_ptrs = phi_ptr + offs_n_full[:, None] * stride_phin + k_offs[None, :] * stride_phik
+            phi = tl.load(
+                phi_ptrs,
+                mask=(offs_n_full[:, None] < N) & mask_k[None, :],
+                other=0.0,
+                cache_modifier=".ca",
+            )  # (BLOCK_SIZE_N, BLOCK_SIZE_K)
 
         ms_acc += tl.sum(x.to(tl.float32) * x.to(tl.float32), axis=1)
 
@@ -173,6 +190,9 @@ def _mhc_projection_fwd_fused(
                 norm_weight_ptrs, mask=mask_k, other=1.0, cache_modifier=".ca"
             )  # (BLOCK_SIZE_K,)
             phi = phi.to(tl.float32) * norm_weight.to(tl.float32)
+        # Currently triton has a bug where for small block size, tl.dot(x, phi.T) will use SMEM to transpose the matrix
+        # instead of emit a ldmatrix instruction with `.trans` modifier, which leads bank conflicts and performance regression
+        # See https://github.com/triton-lang/triton/issues/6569#issuecomment-2841739082
         h_acc = tl.dot(
             x.to(phi.dtype),
             tl.trans(phi, (1, 0)),

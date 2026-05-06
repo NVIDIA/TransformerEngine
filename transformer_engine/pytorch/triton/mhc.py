@@ -7,6 +7,7 @@
 import os
 import torch
 import triton
+from typing import Optional
 
 from transformer_engine.common.triton.mhc import (
     _mhc_projection_bwd_fused_dphi,
@@ -23,6 +24,10 @@ from transformer_engine.common.triton.mhc import (
 )
 from transformer_engine.pytorch.cpp_extensions.gemm import general_gemm
 
+_SUPPORT_TMA = torch.cuda.get_device_capability()[0] >= 9
+
+def _tma_aligned(t):
+    return (t.stride(0) * t.element_size()) % 16 == 0 and t.data_ptr() % 16 == 0
 
 def is_deterministic_enforced():
     """
@@ -428,6 +433,14 @@ class mHCProjectionOp(torch.autograd.Function):
             if norm_weight is not None or phi.dtype == torch.float32:
                 precision = "tf32x3"
 
+        use_tma = _SUPPORT_TMA and _tma_aligned(x) and _tma_aligned(phi)
+        if use_tma:
+            # TMA descriptors require a global memory allocation
+            def alloc_fn(size: int, alignment: int, stream: Optional[int]):
+                return torch.empty(size, device="cuda", dtype=torch.int8)
+            triton.set_allocator(alloc_fn)
+
+
         _mhc_projection_fwd_fused[grid](
             x_ptr=x,  # (M, K)
             phi_ptr=phi,  # (N, K)
@@ -449,6 +462,7 @@ class mHCProjectionOp(torch.autograd.Function):
             precision=precision,
             HAS_NORM_WEIGHT=norm_weight is not None,
             DETERMINISTIC=use_determinstic,
+            USE_TMA=use_tma
         )
 
         ctx.save_for_backward(x, phi, ms, norm_weight)
