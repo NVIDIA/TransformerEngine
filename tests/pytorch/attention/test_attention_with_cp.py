@@ -100,8 +100,8 @@ def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type, pad_bet
     if pad_between_seqs:
         if qkv_format != "thd":
             pytest.skip("pad_between_seqs only applies to THD format!")
-        if not FlashAttentionUtils.v3_is_installed:
-            pytest.skip("pad_between_seqs with CP requires Flash Attention v3!")
+        if not FlashAttentionUtils.v3_is_installed or get_device_compute_capability() > (9, 0):
+            pytest.skip("pad_between_seqs with CP requires Flash Attention v3 on Hopper (sm90)!")
         if cp_comm_type == "a2a+p2p":
             pytest.skip("pad_between_seqs is not yet supported with A2A+P2P CP comm type!")
 
