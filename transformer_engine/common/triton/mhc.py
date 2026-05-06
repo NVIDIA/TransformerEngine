@@ -1164,7 +1164,7 @@ def aggregate_prune_bwd(configs, named_args, **kwargs):
 
 @triton.autotune(
     configs=aggregate_config_bwd(),
-    key=["M", "C"],
+    key=["M", "C", "DETERMINISTIC"],
     reset_to_zero=["grad_H_pre_ptr"],
     # When FUSE_GRAD_X_ACC=True the kernel does a read-modify-write on grad_x_ptr; without
     # restore_value the autotune timing trials accumulate onto the buffer and corrupt it.
@@ -1498,7 +1498,7 @@ def expand_combine_prune_bwd(configs, named_args, **kwargs):
 
 @triton.autotune(
     configs=expand_combine_config_bwd(),
-    key=["M", "C"],
+    key=["M", "C", "DETERMINISTIC"],
     reset_to_zero=["grad_H_post_ptr", "grad_H_res_ptr", "grad_bias_ptr"],
     prune_configs_by={"early_config_prune": expand_combine_prune_bwd},
 )
