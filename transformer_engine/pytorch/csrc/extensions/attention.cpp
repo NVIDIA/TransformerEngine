@@ -58,8 +58,8 @@ NVTE_Fused_Attn_Backend get_fused_attn_backend(
       is_training, static_cast<NVTEDType>(q_dtype), static_cast<NVTEDType>(kv_dtype),
       static_cast<NVTEDType>(q_dtype), NVTE_DELAYED_TENSOR_SCALING, qkv_layout, bias_type,
       attn_mask_type, softmax_type, p_dropout, num_attn_heads, num_gqa_groups, max_seqlen_q,
-      max_seqlen_kv, head_dim_qk, head_dim_v, window_size_left, window_size_right,
-      return_max_logit, cuda_graph, deterministic, handle, /*out_status=*/nullptr);
+      max_seqlen_kv, head_dim_qk, head_dim_v, window_size_left, window_size_right, return_max_logit,
+      cuda_graph, deterministic, handle, /*out_status=*/nullptr);
   return fused_attention_backend;
 }
 

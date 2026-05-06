@@ -370,8 +370,8 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
       auto bwd_status = is_supported_fp8_bwd(
           probe_batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim_qk,
           head_dim_v, dropout, qkv_layout, bias_type, attn_mask_type, softmax_type,
-          window_size_left, window_size_right, probe_bottom_right_diagonal, deterministic, q_t,
-          o_t, scaling_mode, handle);
+          window_size_left, window_size_right, probe_bottom_right_diagonal, deterministic, q_t, o_t,
+          scaling_mode, handle);
       if (bwd_status.is_bad()) {
         set_status(out_status, bwd_status);
         return NVTE_Fused_Attn_Backend::NVTE_No_Backend;

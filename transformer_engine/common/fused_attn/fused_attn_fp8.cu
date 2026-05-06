@@ -3014,21 +3014,21 @@ cudnn_frontend::error_t is_supported_fp8_fwd(
         static_cast<int64_t>(num_gqa_groups), static_cast<int64_t>(max_seqlen_q),
         static_cast<int64_t>(max_seqlen_kv), static_cast<int64_t>(head_dim_qk),
         static_cast<int64_t>(head_dim_v), is_training, /*scaling_factor=*/1.0f, p_dropout,
-        qkv_layout, /*o_format=*/qkv_format, bias_type, mask_type, softmax_type,
-        window_size_left, window_size_right, bottom_right_diagonal,
+        qkv_layout, /*o_format=*/qkv_format, bias_type, mask_type, softmax_type, window_size_left,
+        window_size_right, bottom_right_diagonal,
         /*devPtrQ=*/nullptr, /*devPtrK=*/nullptr, /*devPtrV=*/nullptr,
         /*devPtrSoftmaxOffset=*/nullptr, /*devPtrM=*/nullptr, /*devPtrO=*/nullptr,
         /*devPtrDescaleQ=*/nullptr, /*devPtrDescaleK=*/nullptr, /*devPtrDescaleV=*/nullptr,
         /*devPtrDescaleS=*/nullptr, /*devPtrScaleS=*/nullptr, /*devPtrScaleO=*/nullptr,
         /*devPtrAmaxO=*/nullptr, /*devPtrAmaxS=*/nullptr, /*devPtrcuSeqlensQ=*/nullptr,
         /*devPtrcuSeqlensKV=*/nullptr, /*devPtrDropoutSeed=*/nullptr,
-        /*devPtrDropoutOffset=*/nullptr, get_cudnn_fe_dtype(q_dtype),
-        get_cudnn_fe_dtype(o_dtype), scaling_mode,
+        /*devPtrDropoutOffset=*/nullptr, get_cudnn_fe_dtype(q_dtype), get_cudnn_fe_dtype(o_dtype),
+        scaling_mode,
         /*qkv_scale_inv_format=*/NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET,
         /*workspace=*/nullptr, &workspace_size,
         /*stream=*/static_cast<cudaStream_t>(0), handle);
     return {cudnn_frontend::error_code_t::OK, ""};
-  } catch (const std::exception &e) {
+  } catch (const std::exception& e) {
     return {cudnn_frontend::error_code_t::GRAPH_NOT_SUPPORTED, e.what()};
   } catch (...) {
     return {cudnn_frontend::error_code_t::GRAPH_NOT_SUPPORTED,
@@ -3084,7 +3084,7 @@ cudnn_frontend::error_t is_supported_fp8_bwd(
         /*workspace=*/nullptr, &workspace_size,
         /*stream=*/static_cast<cudaStream_t>(0), handle);
     return {cudnn_frontend::error_code_t::OK, ""};
-  } catch (const std::exception &e) {
+  } catch (const std::exception& e) {
     return {cudnn_frontend::error_code_t::GRAPH_NOT_SUPPORTED, e.what()};
   } catch (...) {
     return {cudnn_frontend::error_code_t::GRAPH_NOT_SUPPORTED,
