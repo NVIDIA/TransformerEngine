@@ -245,19 +245,16 @@ def general_gemm(
         gemm_args[4] = fp32_out  # out
         gemm_args[5] = None  # quantization_params
         gemm_args[6] = TE_DType[torch.float32]  # out_dtype
+        gemm_args[7] = None  # bias
         out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*gemm_args, **kwargs)
         out_2d = out.reshape(-1, out.shape[-1])
 
         assert rowwise_global_scales.dtype == torch.float32 and out.dtype == torch.float32
         assert rowwise_global_scales.numel() == out_2d.shape[0]
 
+        out_2d.mul_(rowwise_global_scales)
         if bias is not None:
-            bias_cast = bias.to(dtype=torch.float32)
-            out_2d.sub_(bias_cast)
-            out_2d.mul_(rowwise_global_scales)
-            out_2d.add_(bias_cast)
-        else:
-            out_2d.mul_(rowwise_global_scales)
+            out_2d.add_(bias.to(dtype=torch.float32))
 
         if requested_out is not None:
             requested_out.copy_(out.to(dtype=requested_out.dtype))
