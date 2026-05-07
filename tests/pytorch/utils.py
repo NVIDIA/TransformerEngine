@@ -162,14 +162,13 @@ def make_recipe(name: Optional[str], **recipe_kwargs: Any) -> Optional[Recipe]:
     raise ValueError(f"Unsupported quantization scheme ({name})")
 
 
-def recipe_id(fp8_recipe: Optional[Recipe]) -> str:
-    """Readable pytest id for FP8/FP4 recipes."""
-    if fp8_recipe is None:
+def recipe_id(recipe: Optional[Recipe]) -> str:
+    """Readable pytest id for a quantization recipe."""
+    if not isinstance(recipe, Recipe):
         return "None"
-    nvfp4 = getattr(fp8_recipe, "nvfp4", None)
-    if nvfp4 is not None and nvfp4() and getattr(fp8_recipe, "row_scaled_activation", False):
+    if recipe.nvfp4() and recipe.row_scaled_activation:
         return "NVFP4RowScaledBlockScaling"
-    return type(fp8_recipe).__name__
+    return type(recipe).__name__
 
 
 def skip_unsupported_backward_override(
