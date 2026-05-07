@@ -168,10 +168,9 @@ __device__ __forceinline__ float groupMax(float val, unsigned int groupMask) {
 }
 
 template <typename ScaleType>
-__device__ __forceinline__ ScaleType ComputeDecodeScaleFP4(const float amax,
-                                                           const float global_encode_scale) {
-  float decode_scale = amax / TypeExtrema<fp4e2m1>::max;
-  decode_scale = decode_scale * global_encode_scale;
+__device__ __forceinline__ ScaleType
+ComputeDecodeScaleFP4(const float amax, const float global_encode_scale_multiplier) {
+  float decode_scale = amax * global_encode_scale_multiplier;
   decode_scale = fminf(decode_scale, TypeExtrema<float>::max);
   return static_cast<ScaleType>(decode_scale);
 }
@@ -201,10 +200,10 @@ __device__ __forceinline__ float ComputeGlobalEncodeScaleFP4(const float global_
   return global_encode_scale;
 }
 
-__device__ __forceinline__ uint32_t
-get_rbits(transformer_engine::curanddx::detail::philox4x32_native_state<10>&
-              rng,  // philox4x32_native_state<10>: 10 rounds of philox4_32
-          uint4& random_uint4, int& rnd_idx) {
+__device__ __forceinline__ uint32_t get_rbits(
+    transformer_engine::curanddx::detail::philox4x32_native_state<NVTE_BUILD_NUM_PHILOX_ROUNDS>&
+        rng,  // NVTE_BUILD_NUM_PHILOX_ROUNDS rounds of philox4x32
+    uint4& random_uint4, int& rnd_idx) {
   if (rnd_idx == 4) {
     rnd_idx = 0;
     random_uint4 = rng.generate4();
@@ -344,7 +343,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
   const size_t rng_seed = rng_state != nullptr ? rng_state[0] : 0;
   const size_t rng_offset = rng_state != nullptr ? rng_state[1] : 0;
 
-  transformer_engine::curanddx::detail::philox4x32_native_state<10> rng;
+  transformer_engine::curanddx::detail::philox4x32_native_state<NVTE_BUILD_NUM_PHILOX_ROUNDS> rng;
   rng.init(rng_seed, rng_sequence, rng_offset);
   uint4 random_uint4 = kApplyStochasticRounding ? rng.generate4() : uint4{0, 0, 0, 0};
 
@@ -420,6 +419,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
   const int kNumThreadsReduce = kScaleBlockDim / kNVecOut;
   const float global_encode_scale =
       kIsE8Scaling ? 1.0f : ComputeGlobalEncodeScaleFP4(global_amax[0]);
+  constexpr float fp4_max_inv = 1.0f / TypeExtrema<fp4e2m1>::max;
+  const float global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
   const float global_decode_scale = 1.0 / global_encode_scale;
 
   // Step 2: Cast and store to output_c
@@ -508,7 +509,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
         amax = amax_smem[data_row_idx / kFP4BlockScalingSize][tid_in_warp_x];
       }
       // Step 2.4: Compute scale
-      ScaleType scale_inv = ComputeDecodeScaleFP4<ScaleType>(amax, global_encode_scale);
+      ScaleType scale_inv = ComputeDecodeScaleFP4<ScaleType>(amax, global_encode_scale_multiplier);
       float encode_scale = ComputeEncodeScaleFP4<ScaleType>(scale_inv, global_decode_scale);
       // Step 2.5: Write scale_inv
       bool write_scale_inv = is_src_lane;
@@ -631,7 +632,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
           amax = __shfl_sync(mask, amax, src_lane);
         }
         // Step 3.4: Compute scale
-        ScaleType scale_inv = ComputeDecodeScaleFP4<ScaleType>(amax, global_encode_scale);
+        ScaleType scale_inv =
+            ComputeDecodeScaleFP4<ScaleType>(amax, global_encode_scale_multiplier);
         float encode_scale = ComputeEncodeScaleFP4<ScaleType>(scale_inv, global_decode_scale);
         // Step 3.5: Write scale_inv_t
         bool write_scale_inv = is_src_lane;

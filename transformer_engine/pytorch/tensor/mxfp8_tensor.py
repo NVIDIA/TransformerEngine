@@ -296,7 +296,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         )
 
     def __repr__(self, *, tensor_contents=None):
-        return f"MXFP8Tensor(fp8_dtype={self._fp8_dtype}, data={self.dequantize(dtype=self.dtype)})"
+        return f"MXFP8Tensor(fp8_dtype={self._fp8_dtype}, data={self.dequantize()})"
 
     def dequantize(self, *, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
         """
@@ -634,7 +634,13 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
 
         # Get FSDP state
         fsdp_state = _get_module_fsdp_state(module)
-        reshard_after_forward = fsdp_state._fsdp_param_group._reshard_after_forward
+        param_group = fsdp_state._fsdp_param_group
+        if param_group is None:
+            raise RuntimeError(
+                "FSDP state for this module has no parameter group; "
+                "cannot determine reshard_after_forward."
+            )
+        reshard_after_forward = param_group._reshard_after_forward
 
         # Remove padding from scale inverses before allgather
         # Rowwise scale_inv should be divisible by [128,4], columnwise by [4, 128]
@@ -662,7 +668,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         # are used again in backward. And hence if we need the columnwise data/scale_inv,
         # we need to send them as well for allgather in forward pass itself.
         if reshard_after_forward:
-            training_state = fsdp_state._fsdp_param_group._training_state
+            training_state = param_group._training_state
             is_backward_pass = training_state == TrainingState.PRE_BACKWARD
             # Allgather only the necessary tensors based on forward/backward pass
             rowwise_usage = not is_backward_pass
@@ -842,6 +848,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                 )
                 # pylint: disable=unnecessary-dunder-call
                 super(MXFP8Tensor, type(self)).data.__set__(self, dummy_tensor)
+
             self._rowwise_data = tensor._rowwise_data
             self._columnwise_data = tensor._columnwise_data
             self._quantizer = tensor._quantizer.copy()
@@ -860,6 +867,33 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
 
     # Cast to FP8 when setting MXFP8Tensor.data
     data = property(_get_data, _set_data)
+
+    @property
+    def device(self):
+        """Return the device of the tensor. Define this to avoid expensive PyObject lookups."""
+        if self._rowwise_data is not None:
+            return self._rowwise_data.device
+        if self._columnwise_data is not None:
+            return self._columnwise_data.device
+        raise RuntimeError("MXFP8Tensor has no data!")
+
+    @property
+    def shape(self):
+        """Return the shape of the tensor. Define this to avoid expensive PyObject lookups."""
+        if self._rowwise_data is not None:
+            return self._rowwise_data.shape
+        if self._columnwise_data is not None:
+            return self._columnwise_data.shape
+        return torch.Tensor.size(self)
+
+    @property
+    def is_cuda(self):
+        """Return whether the tensor is on a CUDA device."""
+        if self._rowwise_data is not None:
+            return self._rowwise_data.is_cuda
+        if self._columnwise_data is not None:
+            return self._columnwise_data.is_cuda
+        raise RuntimeError("MXFP8Tensor has no data!")
 
 
 class _ViewFunc(torch.autograd.Function):

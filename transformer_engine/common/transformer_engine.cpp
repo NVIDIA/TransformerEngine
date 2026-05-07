@@ -33,35 +33,6 @@ size_t typeToSize(const DType type) {
   return typeToNumBits(type) / 8;
 }
 
-std::string to_string(const DType type) {
-  switch (type) {
-    case DType::kByte:
-      return "Byte";
-    case DType::kBFloat16:
-      return "BFloat16";
-    case DType::kFloat16:
-      return "Float16";
-    case DType::kFloat32:
-      return "Float32";
-    case DType::kFloat8E4M3:
-      return "Float8E4M3";
-    case DType::kFloat8E5M2:
-      return "Float8E5M2";
-    case DType::kFloat8E8M0:
-      return "Float8E8M0";
-    case DType::kFloat4E2M1:
-      return "Float4E2M1";
-    case DType::kInt16:
-      return "Int16";
-    case DType::kInt32:
-      return "Int32";
-    case DType::kInt64:
-      return "Int64";
-    default:
-      return concat_strings("Invalid type ", static_cast<int>(type));
-  }
-}
-
 std::string to_string(const NVTEScalingMode &mode) {
   switch (mode) {
     case NVTE_DELAYED_TENSOR_SCALING:
@@ -149,7 +120,7 @@ void CheckScaleTensorShape(const Tensor &t, const std::string &name) {
 
         const auto &expected = std::vector<size_t>{expected_x, expected_y};
         NVTE_CHECK(t.columnwise_scale_inv.shape == expected, "Tensor \"", name,
-                   "\"  has invalid columnwise_scale_inv shape (expected ", expected, ", got ",
+                   "\" has invalid columnwise_scale_inv shape (expected ", expected, ", got ",
                    t.columnwise_scale_inv.shape, ")");
       }
     } else if (t.scaling_mode == NVTE_NVFP4_1D_SCALING) {
@@ -173,7 +144,7 @@ void CheckScaleTensorShape(const Tensor &t, const std::string &name) {
   }
 }
 
-void CheckInputTensor(const Tensor &t, const std::string &name) {
+void CheckInputTensor(const Tensor &t, const std::string &name, bool check_scale_inv_shapes) {
   const DType type = t.dtype();
   if (is_fp8_dtype(type)) {
     // FP8 input needs to have scale_inv
@@ -224,7 +195,9 @@ void CheckInputTensor(const Tensor &t, const std::string &name) {
   }
   NVTE_CHECK(t.has_data() || t.has_columnwise_data(), "Input ", name, " is not allocated!");
 
-  CheckScaleTensorShape(t, name);
+  if (check_scale_inv_shapes) {
+    CheckScaleTensorShape(t, name);
+  }
 }
 
 void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empty) {
@@ -310,7 +283,18 @@ void CheckGroupedTensorShapeArrays(const GroupedTensor &t, const std::string &na
   // Validate shape arrays (all optional)
   check_shape_array(t.first_dims, "first_dims");
   check_shape_array(t.last_dims, "last_dims");
-  check_shape_array(t.tensor_offsets, "tensor_offsets");
+
+  // tensor_offsets uses CSR-style prefix-sum layout with num_tensors+1 entries:
+  // offsets[i] = start of tensor i, offsets[num_tensors] = total elements
+  if (t.tensor_offsets.has_data()) {
+    NVTE_CHECK(t.tensor_offsets.shape.size() == 1, "Grouped tensor ", name,
+               " tensor_offsets must be 1D");
+    NVTE_CHECK(t.tensor_offsets.dtype == DType::kInt64, "Grouped tensor ", name,
+               " tensor_offsets must have dtype Int64");
+    NVTE_CHECK(t.tensor_offsets.shape[0] == t.num_tensors + 1, "Grouped tensor ", name,
+               " tensor_offsets size (", t.tensor_offsets.shape[0], ") must equal num_tensors+1 (",
+               t.num_tensors + 1, ")");
+  }
 
   // tensor_offsets is required if any dimension varies
   // (i.e., required unless all_same_shape())
@@ -650,7 +634,7 @@ NVTEShape nvte_make_shape(const size_t *data, size_t ndim) {
 NVTEShape nvte_tensor_shape(const NVTETensor tensor) {
   auto *t = transformer_engine::convertNVTETensor(tensor);
   if (t == nullptr) {
-    NVTE_ERROR("Invalid tensor");
+    NVTE_ERROR("Invalid tensor: received null pointer in nvte_tensor_shape");
   }
 
   // Determine tensor shape depending on tensor format
@@ -662,7 +646,7 @@ NVTEShape nvte_tensor_shape(const NVTETensor tensor) {
 NVTEShape nvte_tensor_columnwise_shape(const NVTETensor tensor) {
   auto *t = transformer_engine::convertNVTETensor(tensor);
   if (t == nullptr) {
-    NVTE_ERROR("Invalid tensor");
+    NVTE_ERROR("Invalid tensor: received null pointer in nvte_tensor_columnwise_shape");
   }
   const std::vector<size_t> &shape = t->columnwise_data.shape;
   return nvte_make_shape(shape.data(), shape.size());

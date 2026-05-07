@@ -479,9 +479,14 @@ class TransformerEngineAPI(BaseNamespaceAPI):
         """
         if call.__name__ == "inspect_tensor":
             kwargs_copy = kwargs.copy()
-            for k in ["quantizer", "columnwise_quantized_tensor", "rowwise_quantized_tensor"]:
+            for k in [
+                "quantizer",
+                "columnwise_quantized_tensor",
+                "rowwise_quantized_tensor",
+                "tp_size",
+            ]:
                 if k not in call.__code__.co_varnames:
-                    kwargs_copy.pop(k)
+                    kwargs_copy.pop(k, None)
         else:
             kwargs_copy = kwargs
 
@@ -490,6 +495,12 @@ class TransformerEngineAPI(BaseNamespaceAPI):
                 "inspect_tensor_postquantize is deprecated, use inspect_tensor instead.",
                 DeprecationWarning,
             )
+            kwargs_copy = kwargs.copy()
+            for k in ["tp_size"]:
+                if k not in call.__code__.co_varnames:
+                    kwargs_copy.pop(
+                        k, None
+                    )  # use None default to avoid KeyError if kwarg wasn't passed
 
         return call(feat_config, layer_name, **kwargs_copy)
 

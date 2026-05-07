@@ -5,7 +5,7 @@
 """Multi-head Attention."""
 import os
 import collections
-from typing import Callable, List, Optional, Tuple, Union
+from typing import Any, Callable, List, Optional, Tuple, Union
 import torch
 
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
@@ -355,7 +355,7 @@ class MultiheadAttention(torch.nn.Module):
         }
 
         self.q_norm, self.k_norm = self._create_qk_norm_modules(
-            qk_norm_type, qk_norm_eps, device, seq_length, micro_batch_size
+            qk_norm_type, qk_norm_eps, device, seq_length, micro_batch_size, params_dtype
         )
 
         qkv_parallel_mode = "column" if set_parallel_mode else None
@@ -478,6 +478,10 @@ class MultiheadAttention(torch.nn.Module):
             **common_gemm_kwargs,
         )
 
+    def fast_setattr(self, name: str, value: Any) -> None:
+        """Fast attribute set for non-parameter fields."""
+        self.__dict__[name] = value
+
     def _create_qk_norm_modules(
         self,
         qk_norm_type: Optional[str],
@@ -485,6 +489,7 @@ class MultiheadAttention(torch.nn.Module):
         device: Union[torch.device, str],
         seq_length: Optional[int] = None,
         micro_batch_size: Optional[int] = None,
+        params_dtype: Optional[torch.dtype] = None,
     ) -> Tuple[Optional[torch.nn.Module], Optional[torch.nn.Module]]:
         """
         Create query and key normalization modules based on the specified normalization type.
@@ -501,6 +506,8 @@ class MultiheadAttention(torch.nn.Module):
             Sequence length for L2Normalization optimization
         micro_batch_size : Optional[int], default = None
             Micro batch size for L2Normalization optimization
+        params_dtype : Optional[torch.dtype], default = None
+            Data type for the normalization modules
 
         Returns
         -------
@@ -524,11 +531,13 @@ class MultiheadAttention(torch.nn.Module):
                 normalized_shape=self.hidden_size_per_attention_head,
                 eps=qk_norm_eps,
                 device=device,
+                params_dtype=params_dtype,
             )
             k_norm = RMSNorm(
                 normalized_shape=self.hidden_size_per_attention_head,
                 eps=qk_norm_eps,
                 device=device,
+                params_dtype=params_dtype,
             )
             return q_norm, k_norm
 
@@ -537,11 +546,13 @@ class MultiheadAttention(torch.nn.Module):
                 normalized_shape=self.hidden_size_per_attention_head,
                 eps=qk_norm_eps,
                 device=device,
+                params_dtype=params_dtype,
             )
             k_norm = LayerNorm(
                 normalized_shape=self.hidden_size_per_attention_head,
                 eps=qk_norm_eps,
                 device=device,
+                params_dtype=params_dtype,
             )
             return q_norm, k_norm
 
@@ -784,15 +795,31 @@ class MultiheadAttention(torch.nn.Module):
             fp8_dpa = fp8_recipe.fp8_dpa
             fp8_mha = fp8_recipe.fp8_mha
             float8_current_scaling = fp8_recipe.float8_current_scaling()
+            mxfp8_scaling = fp8_recipe.mxfp8()
         else:
             fp8_dpa = _dpa_fp8_recipe_dpa
             fp8_mha = _dpa_fp8_recipe_mha
             float8_current_scaling = _dpa_fp8_recipe == "Float8CurrentScaling"
-        # QKV Gemm: do not produce FP8 output when in Float8CurrentScaling recipe
-        qkv_fp8_output = fp8 and fp8_mha and rotary_pos_emb is None and not float8_current_scaling
-        # DPA: always produce FP8 output when fp8=True to take advantage of the O amax
-        dpa_fp8_output = fp8 and (fp8_dpa or fp8_mha)
-        # Proj Gemm: match DPA output except for Float8CurrentScaling
+            mxfp8_scaling = _dpa_fp8_recipe == "MXFP8BlockScaling"
+
+        # QKV Gemm: do not produce FP8 output when fp8_mha = True if
+        # 1. RoPE is on: RoPE is only implemented in F16 currently
+        # 2. FP8CS recipe: due to cuBLAS limitation, FP8CS Gemms can not produce FP8 output
+        # 3. MXFP8 recipe: QKV Gemm produces QKV in bs(hd), sb(hd), t(hd) shapes, quantization of which would be along
+        # s/b/t and (hd) dimensions, whereas MXFP8 attention requires quantization along s and d, e.g. bhsd, sbhd, thd
+        qkv_fp8_output = (
+            fp8
+            and fp8_mha
+            and rotary_pos_emb is None
+            and not float8_current_scaling
+            and not mxfp8_scaling
+        )
+        # DPA: produce FP8 output to take advantage of O amax from DPA; Projection Gemm can take FP8 or F16 inputs
+        # 1. FP8DS/FP8CS recipe: produce FP8 output
+        # 2. MXFP8 recipe: produce F16 output; again, due to quantization dimensions mismatch
+        dpa_fp8_output = fp8 and (fp8_dpa or fp8_mha) and not mxfp8_scaling
+        # Projection Gemm: match DPA output except
+        # 1. FP8CS recipe: produce F16 grads; again, due to cuBLAS limitation
         proj_fp8_grad = dpa_fp8_output and not float8_current_scaling
 
         layernorm_output = None

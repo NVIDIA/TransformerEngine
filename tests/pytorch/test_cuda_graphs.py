@@ -4,6 +4,7 @@
 
 from typing import Callable, Dict, Iterable, List, Tuple, Union
 import pytest
+import copy
 
 import torch
 from transformer_engine.pytorch import (
@@ -24,7 +25,7 @@ from transformer_engine.pytorch import (
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.common import recipe
-from utils import ModelConfig, reset_rng_states
+from utils import ModelConfig, reset_rng_states, skip_unsupported_backward_override
 
 # Check if FP8 is supported.
 fp8_available = is_fp8_available()
@@ -360,6 +361,7 @@ def _test_cuda_graphs(
 @pytest.mark.parametrize("dtype", dtypes)
 @pytest.mark.parametrize("fp8_params", (False, True))
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes + [None], ids=lambda r: type(r).__name__)
+@pytest.mark.parametrize("backward_override", (None, "high_precision", "dequantized"))
 def test_make_graphed_callables(
     *,
     module: str,
@@ -368,10 +370,17 @@ def test_make_graphed_callables(
     dtype: torch.dtype,
     fp8_params: bool,
     fp8_recipe: recipe.Recipe,
+    backward_override: str,
     fp8_weight_caching: bool = False,
 ) -> None:
 
     fp8 = fp8_recipe is not None
+
+    skip_unsupported_backward_override(module, fp8_recipe, backward_override)
+    if fp8:
+        fp8_recipe = copy.deepcopy(fp8_recipe)
+        fp8_recipe.backward_override = backward_override
+
     if fp8_params and not fp8:
         pytest.skip("FP8 needed for FP8 parameters.")
     if fp8_weight_caching and not fp8:
@@ -440,18 +449,21 @@ _test_make_graphed_callables_with_fp8_weight_caching_modules = [
 @pytest.mark.parametrize("dtype", dtypes)
 @pytest.mark.parametrize("fp8_params", (False, True))
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes, ids=lambda r: type(r).__name__)
+@pytest.mark.parametrize("backward_override", (None, "high_precision", "dequantized"))
 def test_make_graphed_callables_with_fp8_weight_caching(
     *,
     module: str,
     dtype: torch.dtype,
     fp8_params: bool,
     fp8_recipe: recipe.Recipe,
+    backward_override: str,
 ) -> None:
     test_make_graphed_callables(
         module=module,
         dtype=dtype,
         fp8_params=fp8_params,
         fp8_recipe=fp8_recipe,
+        backward_override=backward_override,
         fp8_weight_caching=True,
     )
 

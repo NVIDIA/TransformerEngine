@@ -167,3 +167,24 @@ class TestParallelCrossEntropy:
                 reduce_loss=True,
                 ignore_idx=True,
             )
+
+
+def test_non_contiguous_transposed_input():
+    """Regression test: stride(-2) != shape[-1] should not produce wrong results."""
+    s, b, v = 4, 2, 8
+    torch.manual_seed(42)
+    logits = torch.randn(s, b, v, device="cuda")
+    target = torch.randint(0, v, (b, s), device="cuda")
+
+    logits_transposed = logits.transpose(0, 1)  # stride(-2) != shape[-1]
+    logits_contiguous = logits_transposed.contiguous()
+
+    assert logits_transposed.stride(-1) == 1
+    assert logits_transposed.stride(-2) != logits_transposed.shape[-1]
+
+    loss_t = parallel_cross_entropy(logits_transposed, target, 0.0, False, None)
+    loss_c = parallel_cross_entropy(logits_contiguous, target, 0.0, False, None)
+
+    assert torch.allclose(
+        loss_t, loss_c
+    ), f"Non-contiguous transposed input gave wrong results: {loss_t} vs {loss_c}"

@@ -34,11 +34,28 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from distributed_test_base import generate_configs
 from utils import assert_allclose, pytest_parametrize_wrapper
 
-# High-level API with VJP support
-from transformer_engine.jax.permutation import (
-    token_dispatch,
-    token_combine,
-)
+
+@pytest.fixture(autouse=True, scope="function")
+def _inject_permutation(request):
+    """Lazy-load permutation API only for tests marked 'triton'. Other tests run without importing.
+
+    We inject into sys.modules[__name__] so test code in this module can use
+    token_dispatch, token_combine as module-level names (fixture locals are not
+    visible to test methods).
+    """
+    if not request.node.get_closest_marker("triton"):
+        yield
+        return
+    import sys
+    from transformer_engine.jax.permutation import token_dispatch, token_combine
+
+    mod = sys.modules[__name__]
+    mod.token_dispatch = token_dispatch
+    mod.token_combine = token_combine
+    yield
+
+
+# High-level API with VJP support (injected by _inject_permutation)
 
 # Reference implementations from test_permutation.py
 from test_permutation import (
@@ -80,6 +97,7 @@ DTYPES = {
 }
 
 
+@pytest.mark.triton
 class TestDistributedPermutation:
     """Test distributed/sharded execution of MoE permutation primitives.
 
@@ -135,7 +153,6 @@ class TestDistributedPermutation:
         DISPATCH_COMBINE_CASES,
     )
     @pytest_parametrize_wrapper("dtype", DTYPES)
-    @pytest_parametrize_wrapper("use_shardy", [False, True])
     def test_local_token_dispatch(
         self,
         device_count,
@@ -147,7 +164,6 @@ class TestDistributedPermutation:
         hidden_size,
         topk,
         dtype,
-        use_shardy,
     ):
         """
         Test token_dispatch with sharded inputs.
@@ -164,7 +180,6 @@ class TestDistributedPermutation:
         matching the sharded execution's output ordering.
         Tests both forward pass (output values) and backward pass (gradients).
         """
-        jax.config.update("jax_use_shardy_partitioner", use_shardy)
         key = jax.random.PRNGKey(42)
 
         # Generate global inputs
@@ -307,7 +322,6 @@ class TestDistributedPermutation:
         DISPATCH_COMBINE_CASES,
     )
     @pytest_parametrize_wrapper("dtype", DTYPES)
-    @pytest_parametrize_wrapper("use_shardy", [False, True])
     def test_local_roundtrip(
         self,
         device_count,
@@ -319,7 +333,6 @@ class TestDistributedPermutation:
         hidden_size,
         topk,
         dtype,
-        use_shardy,
     ):
         """
         Test roundtrip: token_dispatch followed by token_combine with sharded inputs.
@@ -332,7 +345,6 @@ class TestDistributedPermutation:
 
         Tests both forward pass and backward pass (gradient should be 2*x).
         """
-        jax.config.update("jax_use_shardy_partitioner", use_shardy)
         key = jax.random.PRNGKey(42)
 
         # Generate global inputs
@@ -403,7 +415,6 @@ class TestDistributedPermutation:
         DISPATCH_COMBINE_PADDING_CASES,
     )
     @pytest_parametrize_wrapper("dtype", DTYPES)
-    @pytest_parametrize_wrapper("use_shardy", [False, True])
     def test_local_token_dispatch_with_padding(
         self,
         device_count,
@@ -416,14 +427,12 @@ class TestDistributedPermutation:
         topk,
         align_size,
         dtype,
-        use_shardy,
     ):
         """
         Test token_dispatch with padding using sharded inputs.
 
         Tests both forward pass (output values) and backward pass (gradients).
         """
-        jax.config.update("jax_use_shardy_partitioner", use_shardy)
         key = jax.random.PRNGKey(42)
 
         # Generate global inputs
@@ -502,7 +511,6 @@ class TestDistributedPermutation:
         DISPATCH_COMBINE_PADDING_CASES,
     )
     @pytest_parametrize_wrapper("dtype", DTYPES)
-    @pytest_parametrize_wrapper("use_shardy", [False, True])
     def test_local_roundtrip_with_padding(
         self,
         device_count,
@@ -515,7 +523,6 @@ class TestDistributedPermutation:
         topk,
         align_size,
         dtype,
-        use_shardy,
     ):
         """
         Test roundtrip with padding/alignment using sharded inputs.
@@ -523,7 +530,6 @@ class TestDistributedPermutation:
         With uniform merging probs, should recover original input.
         Tests both forward pass and backward pass.
         """
-        jax.config.update("jax_use_shardy_partitioner", use_shardy)
         key = jax.random.PRNGKey(42)
 
         # Generate inputs

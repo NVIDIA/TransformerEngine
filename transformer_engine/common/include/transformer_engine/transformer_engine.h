@@ -427,6 +427,22 @@ int nvte_is_non_tn_fp8_gemm_supported();
 */
 void nvte_memset(void *ptr, int value, size_t size_in_bytes, cudaStream_t stream);
 
+/*! \brief Compute scaled prefix-sum offsets for grouped tensors.
+ *
+ *  Computes:
+ *    output[0] = 0
+ *    output[i + 1] = sum_{j=0..i}(first_dims[j] * logical_last_dim)
+ *  for i in [0, num_tensors - 1].
+ *
+ *  \param[in] first_dims Pointer to device int64 array of size num_tensors.
+ *  \param[out] output Pointer to device int64 array of size num_tensors + 1.
+ *  \param[in] num_tensors Number of entries in first_dims.
+ *  \param[in] logical_last_dim Scale factor applied to each first_dims entry.
+ *  \param[in] stream CUDA stream to use for the operation.
+ */
+void nvte_splits_to_offsets(const int64_t *first_dims, int64_t *output, size_t num_tensors,
+                            int64_t logical_last_dim, cudaStream_t stream);
+
 /*! \brief TE Grouped Tensor type
  *
  * NVTEGroupedTensor is a collection of tensors with potentially different shapes

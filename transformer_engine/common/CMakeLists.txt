@@ -36,7 +36,11 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
   endif()
 endif()
 
-# Process CMAKE_CUDA_ARCHITECTURES to separate generic and specific architectures
+# Process CMAKE_CUDA_ARCHITECTURES to separate standard, generic, and specific architectures.
+# - NVTE_STANDARD_ARCHS: pre-Blackwell archs (e.g. 75, 80, 89, 90). Applied to all CUDA sources.
+# - NVTE_GENERIC_ARCHS: Blackwell family heads (e.g. 100, 120). Applied to non-arch-specific sources only.
+# - NVTE_SPECIFIC_ARCHS: Blackwell specific targets (e.g. 100a, 120f). Applied to arch-specific sources only.
+set(NVTE_STANDARD_ARCHS)
 set(NVTE_GENERIC_ARCHS)
 set(NVTE_SPECIFIC_ARCHS)
 
@@ -79,6 +83,10 @@ if(NOT arch_120_index EQUAL -1)
   endif()
 endif()
 
+# Move remaining standard (pre-Blackwell) architectures into NVTE_STANDARD_ARCHS.
+# These are applied to all CUDA sources (both generic and arch-specific).
+set(NVTE_STANDARD_ARCHS ${CMAKE_CUDA_ARCHITECTURES})
+
 # cuDNN frontend API
 set(CUDNN_FRONTEND_INCLUDE_DIR
     "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cudnn-frontend/include")
@@ -97,6 +105,39 @@ set(CUTLASS_TOOLS_INCLUDE_DIR
 
 # Python
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
+
+function(find_nccl_version OUT_VERSION OUT_INCLUDE_DIR)
+  find_path(_nvte_nccl_include_dir
+            NAMES nccl.h
+            PATH_SUFFIXES include
+            REQUIRED)
+
+  file(STRINGS "${_nvte_nccl_include_dir}/nccl.h" _nvte_nccl_major_line
+       REGEX "^#define NCCL_MAJOR[ \t]+[0-9]+$")
+  file(STRINGS "${_nvte_nccl_include_dir}/nccl.h" _nvte_nccl_minor_line
+       REGEX "^#define NCCL_MINOR[ \t]+[0-9]+$")
+  file(STRINGS "${_nvte_nccl_include_dir}/nccl.h" _nvte_nccl_patch_line
+       REGEX "^#define NCCL_PATCH[ \t]+[0-9]+$")
+
+  string(REGEX REPLACE "^#define NCCL_MAJOR[ \t]+([0-9]+)$" "\\1"
+         _nvte_nccl_major "${_nvte_nccl_major_line}")
+  string(REGEX REPLACE "^#define NCCL_MINOR[ \t]+([0-9]+)$" "\\1"
+         _nvte_nccl_minor "${_nvte_nccl_minor_line}")
+  string(REGEX REPLACE "^#define NCCL_PATCH[ \t]+([0-9]+)$" "\\1"
+         _nvte_nccl_patch "${_nvte_nccl_patch_line}")
+
+  if ("${_nvte_nccl_major}" STREQUAL ""
+      OR "${_nvte_nccl_minor}" STREQUAL ""
+      OR "${_nvte_nccl_patch}" STREQUAL "")
+    message(FATAL_ERROR
+            "Failed to parse NCCL version from ${_nvte_nccl_include_dir}/nccl.h")
+  endif()
+
+  set(${OUT_VERSION}
+      "${_nvte_nccl_major}.${_nvte_nccl_minor}.${_nvte_nccl_patch}"
+      PARENT_SCOPE)
+  set(${OUT_INCLUDE_DIR} "${_nvte_nccl_include_dir}" PARENT_SCOPE)
+endfunction()
 
 # Configure Transformer Engine library
 include_directories(${PROJECT_SOURCE_DIR}/..)
@@ -118,9 +159,12 @@ list(APPEND transformer_engine_cpp_sources
      util/cuda_runtime.cpp
      util/multi_stream.cpp
      util/rtc.cpp
+     comm_gemm/comm_gemm.cpp
      comm_gemm_overlap/userbuffers/ipcsocket.cc
      comm_gemm_overlap/userbuffers/userbuffers-host.cpp
-     comm_gemm_overlap/comm_gemm_overlap.cpp)
+     comm_gemm_overlap/comm_gemm_overlap.cpp
+     newton_schulz/newton_schulz.cpp
+     )
 
 list(APPEND transformer_engine_cuda_sources
      common.cu
@@ -136,7 +180,6 @@ list(APPEND transformer_engine_cuda_sources
      transpose/quantize_transpose_vector_blockwise.cu
      transpose/swap_first_dims.cu
      dropout/dropout.cu
-     fused_attn/flash_attn.cu
      fused_attn/context_parallel.cu
      fused_attn/kv_cache.cu
      fused_attn/fused_attn_f16_max512_seqlen.cu
@@ -150,7 +193,9 @@ list(APPEND transformer_engine_cuda_sources
      normalization/rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu
      normalization/rmsnorm/rmsnorm_fwd_cuda_kernel.cu
      permutation/permutation.cu
+     util/utils.cu
      util/padding.cu
+     util/topk.cu
      swizzle/swizzle.cu
      swizzle/swizzle_block_scaling.cu
      fused_softmax/scaled_masked_softmax.cu
@@ -163,10 +208,10 @@ list(APPEND transformer_engine_cuda_sources
      recipe/current_scaling.cu
      recipe/delayed_scaling.cu
      recipe/fp8_block_scaling.cu
-     recipe/nvfp4.cu
      comm_gemm_overlap/userbuffers/userbuffers.cu)
 
 list(APPEND transformer_engine_cuda_arch_specific_sources
+     fused_attn/flash_attn.cu
      activation/gelu.cu
      activation/glu.cu
      activation/relu.cu
@@ -177,11 +222,13 @@ list(APPEND transformer_engine_cuda_arch_specific_sources
      hadamard_transform/graph_safe_group_hadamard_transform.cu
      hadamard_transform/hadamard_transform.cu
      hadamard_transform/hadamard_transform_cast_fusion.cu
+     hadamard_transform/row_cast_col_hadamard_transform_cast_fusion.cu
      hadamard_transform/group_hadamard_transform_cast_fusion.cu
      hadamard_transform/group_row_cast_col_hadamard_transform_cast_fusion.cu
      hadamard_transform/graph_safe_group_row_cast_col_hadamard_transform_cast_fusion.cu
      multi_tensor/compute_scale.cu
      recipe/mxfp8_scaling.cu
+     recipe/nvfp4.cu
      transpose/quantize_transpose_square_blockwise.cu
      transpose/quantize_transpose_vector_blockwise_fp4.cu)
 
@@ -191,9 +238,13 @@ list(APPEND transformer_engine_SOURCES ${transformer_engine_cuda_arch_specific_s
                                        ${transformer_engine_cuda_sources}
                                        ${transformer_engine_cpp_sources})
 
-# Set compile options for CUDA sources with generic architectures
+# Set compile options for CUDA sources with generic architectures.
+# These get standard archs (pre-Blackwell) + generic Blackwell family heads.
 foreach(cuda_source IN LISTS transformer_engine_cuda_sources)
   set(arch_compile_options)
+  foreach(arch IN LISTS NVTE_STANDARD_ARCHS)
+    list(APPEND arch_compile_options "--generate-code=arch=compute_${arch},code=sm_${arch}")
+  endforeach()
   foreach(arch IN LISTS NVTE_GENERIC_ARCHS)
     list(APPEND arch_compile_options "--generate-code=arch=compute_${arch},code=sm_${arch}")
   endforeach()
@@ -208,9 +259,14 @@ foreach(cuda_source IN LISTS transformer_engine_cuda_sources)
   endif()
 endforeach()
 
-# Set compile options for CUDA sources with specific architectures
+# Set compile options for CUDA sources with arch-specific features.
+# These get standard archs (pre-Blackwell) + Blackwell specific targets (a/f suffix).
+# They must NOT get generic Blackwell archs, as they use family/arch-specific PTX features.
 foreach(cuda_source IN LISTS transformer_engine_cuda_arch_specific_sources)
   set(arch_compile_options)
+  foreach(arch IN LISTS NVTE_STANDARD_ARCHS)
+    list(APPEND arch_compile_options "--generate-code=arch=compute_${arch},code=sm_${arch}")
+  endforeach()
   foreach(arch IN LISTS NVTE_SPECIFIC_ARCHS)
     list(APPEND arch_compile_options "--generate-code=arch=compute_${arch},code=sm_${arch}")
   endforeach()
@@ -225,12 +281,11 @@ foreach(cuda_source IN LISTS transformer_engine_cuda_arch_specific_sources)
   endif()
 endforeach()
 
-if (NVTE_WITH_CUBLASMP)
-list(APPEND transformer_engine_SOURCES
-     comm_gemm/comm_gemm.cpp)
-endif()
-
 add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
+# Disable CMake's automatic architecture flag injection.
+# All architectures are handled explicitly via per-source COMPILE_OPTIONS
+# using NVTE_STANDARD_ARCHS, NVTE_GENERIC_ARCHS, and NVTE_SPECIFIC_ARCHS above.
+set_target_properties(transformer_engine PROPERTIES CUDA_ARCHITECTURES OFF)
 target_include_directories(transformer_engine PUBLIC
                            "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
@@ -288,6 +343,7 @@ option(NVTE_WITH_CUBLASMP "Use cuBLASMp for tensor parallel GEMMs" OFF)
 if (NVTE_WITH_CUBLASMP)
     target_compile_definitions(transformer_engine PRIVATE NVTE_WITH_CUBLASMP)
     target_include_directories(transformer_engine PRIVATE ${CUBLASMP_DIR}/include)
+    find_nccl_version(NCCL_VERSION NCCL_INCLUDE_DIR)
     find_library(CUBLASMP_LIB
                  NAMES cublasmp libcublasmp
                  PATHS ${CUBLASMP_DIR}
@@ -297,9 +353,48 @@ if (NVTE_WITH_CUBLASMP)
                  NAMES nccl libnccl
                  PATH_SUFFIXES lib
                  REQUIRED)
-  target_link_libraries(transformer_engine PUBLIC ${NCCL_LIB} ${CUBLASMP_LIB})
-  message(STATUS "Using cuBLASMp at: ${CUBLASMP_DIR}")
+    if (NCCL_VERSION VERSION_LESS 2.29.0)
+      message(FATAL_ERROR
+              "NVTE_WITH_CUBLASMP requires NCCL >= 2.29.0, but found NCCL ${NCCL_VERSION} "
+              "in ${NCCL_INCLUDE_DIR}/nccl.h")
+    endif()
+    target_link_libraries(transformer_engine PUBLIC ${NCCL_LIB} ${CUBLASMP_LIB})
+    message(STATUS "Using cuBLASMp at: ${CUBLASMP_DIR}")
+    message(STATUS "Using NCCL ${NCCL_VERSION} at: ${NCCL_LIB}")
 endif()
+
+option(NVTE_WITH_CUSOLVERMP "Use cuSolverMp for distributed Newton-Schulz" OFF)
+if (NVTE_WITH_CUSOLVERMP)
+    target_compile_definitions(transformer_engine PRIVATE NVTE_WITH_CUSOLVERMP)
+    target_include_directories(transformer_engine PRIVATE ${CUSOLVERMP_DIR}/include)
+    find_library(CUSOLVERMP_LIB
+                 NAMES cusolverMp libcusolverMp
+                 PATHS ${CUSOLVERMP_DIR}
+                 PATH_SUFFIXES lib
+                 REQUIRED)
+    find_library(NCCL_LIB
+                 NAMES nccl libnccl
+                 PATH_SUFFIXES lib
+                 REQUIRED)
+    target_link_libraries(transformer_engine PRIVATE ${NCCL_LIB} ${CUSOLVERMP_LIB})
+    message(STATUS "Using cuSolverMp at: ${CUSOLVERMP_DIR}")
+endif()
+
+# Number of philox4x32 rounds for stochastic rounding (build-time constant).
+set(NVTE_BUILD_NUM_PHILOX_ROUNDS_STR $ENV{NVTE_BUILD_NUM_PHILOX_ROUNDS})
+if (NOT NVTE_BUILD_NUM_PHILOX_ROUNDS_STR)
+  set(NVTE_BUILD_NUM_PHILOX_ROUNDS_STR "10")
+endif()
+if (NOT NVTE_BUILD_NUM_PHILOX_ROUNDS_STR MATCHES "^[1-9][0-9]*$")
+  message(FATAL_ERROR
+          "Environment variable NVTE_BUILD_NUM_PHILOX_ROUNDS must be a positive integer, "
+          "but got '${NVTE_BUILD_NUM_PHILOX_ROUNDS_STR}'.")
+endif()
+set(NVTE_BUILD_NUM_PHILOX_ROUNDS ${NVTE_BUILD_NUM_PHILOX_ROUNDS_STR})
+
+target_compile_definitions(transformer_engine
+                           PUBLIC NVTE_BUILD_NUM_PHILOX_ROUNDS=${NVTE_BUILD_NUM_PHILOX_ROUNDS})
+message(STATUS "Philox rounds for stochastic rounding: ${NVTE_BUILD_NUM_PHILOX_ROUNDS}")
 
 # Hack to enable dynamic loading in cuDNN frontend
 target_compile_definitions(transformer_engine PUBLIC NV_CUDNN_FRONTEND_USE_DYNAMIC_LOADING)

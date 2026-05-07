@@ -54,16 +54,25 @@ from transformer_engine.pytorch.utils import is_bf16_available
 from transformer_engine.pytorch.graph import make_graphed_callables
 from transformer_engine.pytorch.distributed import checkpoint
 from transformer_engine.pytorch.distributed import CudaRNGStatesTracker
-from transformer_engine.pytorch.cpu_offload import get_cpu_offload_context
+from transformer_engine.pytorch.cpu_offload import (
+    get_cpu_offload_context,
+    mark_not_offload,
+    ManualOffloadSynchronizer,
+)
 from transformer_engine.pytorch import ops
 from transformer_engine.pytorch import optimizers
 from transformer_engine.pytorch.export import onnx_export
 from transformer_engine.pytorch.cross_entropy import parallel_cross_entropy
+from transformer_engine.pytorch.newton_schulz import (
+    CusolverMpCtx,
+    newton_schulz,
+)
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensor
 from transformer_engine.pytorch.quantized_tensor import Quantizer
 from transformer_engine.pytorch.quantized_tensor import prepare_for_saving
 from transformer_engine.pytorch.quantized_tensor import restore_from_saved
+from transformer_engine.pytorch.quantized_tensor import restore_from_func_ctx
 from transformer_engine.pytorch.tensor import Float8Quantizer
 from transformer_engine.pytorch.tensor import Float8CurrentScalingQuantizer
 from transformer_engine.pytorch.tensor import MXFP8Quantizer

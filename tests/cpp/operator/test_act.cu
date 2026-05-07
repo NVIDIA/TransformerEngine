@@ -394,19 +394,31 @@ std::vector<std::pair<size_t, size_t>> act_test_cases = {{2048, 12288},
                                                          {257, 259},
                                                          {128, 128+1}};
 
+std::string test_name_generator(
+    const testing::TestParamInfo<ActTestSuite::ParamType>& info) {
+    std::string name = test::typeName(std::get<0>(info.param)) + "X" +
+                       test::typeName(std::get<1>(info.param)) + "X" +
+                       std::to_string(std::get<2>(info.param).first) + "X" +
+                       std::to_string(std::get<2>(info.param).second);
+    return name;
+}
+
 }  // namespace
 
 INSTANTIATE_TEST_SUITE_P(
-    OperatorTest,
+    OperatorTest_ActTestSuite_BF16,
+    ActTestSuite,
+    ::testing::Combine(
+        ::testing::Values(DType::kBFloat16),
+        ::testing::ValuesIn(test::all_fp_types),
+        ::testing::ValuesIn(act_test_cases)),
+    test_name_generator);
+
+INSTANTIATE_TEST_SUITE_P(
+    OperatorTest_ActTestSuite_DType,
     ActTestSuite,
     ::testing::Combine(
         ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
         ::testing::ValuesIn(test::all_fp_types),
-        ::testing::ValuesIn(act_test_cases)),
-    [](const testing::TestParamInfo<ActTestSuite::ParamType>& info) {
-      std::string name = test::typeName(std::get<0>(info.param)) + "X" +
-                         test::typeName(std::get<1>(info.param)) + "X" +
-                         std::to_string(std::get<2>(info.param).first) + "X" +
-                         std::to_string(std::get<2>(info.param).second);
-      return name;
-    });
+        ::testing::Values(std::pair<size_t, size_t>{768, 2816})),
+    test_name_generator);

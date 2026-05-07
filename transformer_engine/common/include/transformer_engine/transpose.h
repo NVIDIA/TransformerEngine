@@ -326,6 +326,32 @@ void nvte_dsreglu_cast_transpose(const NVTETensor input, const NVTETensor act_in
  */
 void nvte_swap_first_dims(const NVTETensor input, NVTETensor output, cudaStream_t stream);
 
+/*! \brief Transpose NVFP4 packed data.
+ *
+ *  Unlike FP8, NVFP4 packs two 4-bit values per byte. This function correctly
+ *  handles the nibble repacking during transpose.
+ *
+ *  \param[in]  input   Input tensor with packed FP4 data. Shape: [M, K/2] bytes.
+ *  \param[out] output  Output tensor with transposed packed data. Shape: [K, M/2] bytes.
+ *  \param[in]  stream  CUDA stream.
+ */
+void nvte_nvfp4_data_transpose(const NVTETensor input, NVTETensor output, cudaStream_t stream);
+
+/*! \brief Transpose NVFP4 tile-level scales from rowwise to columnwise format.
+ *
+ * Takes rowwise_scale_inv where scales are stored at every 16th row (tile boundaries)
+ * and produces columnwise_scale_inv where scales are repeated 16 times per tile row.
+ * Scale values are stored as E4M3 (fp8) in uint8 tensors.
+ *
+ *  \param[in]     input       Input tensor with rowwise scales [M_padded, K_tiles], uint8 (E4M3).
+ *  \param[out]    output      Output tensor with columnwise scales [K_padded, M_tiles], uint8 (E4M3).
+ *  \param[in]     M_tiles     Number of tiles in M dimension.
+ *  \param[in]     K_tiles     Number of tiles in K dimension.
+ *  \param[in]     stream      CUDA stream.
+ */
+void nvte_nvfp4_scale_transpose(const NVTETensor input, NVTETensor output, size_t M_tiles,
+                                size_t K_tiles, cudaStream_t stream);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

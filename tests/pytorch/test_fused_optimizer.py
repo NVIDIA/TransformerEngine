@@ -10,8 +10,9 @@ import torch
 from torch import nn
 from torch.testing._internal.common_device_type import largeTensorTest
 import transformer_engine.pytorch as te
-from transformer_engine.common.recipe import DelayedScaling
+from transformer_engine.common.recipe import DelayedScaling, MXFP8BlockScaling, Float8BlockScaling
 from transformer_engine.pytorch import MultiheadAttention, quantized_model_init, is_bf16_available
+from transformer_engine.pytorch import QuantizedTensor
 from transformer_engine.pytorch.utils import gpu_autocast_ctx
 
 # Check if FP8 is supported
@@ -517,6 +518,269 @@ class TestFusedAdam(TestFusedOptimizer):
             torch.testing.assert_close(
                 ref_params, model_params_to_fp32, rtol=1e-2, atol=1e-2, equal_nan=True
             )
+
+
+class TestFusedAdamMXFP8(TestFusedOptimizer):
+    """FusedAdam with MXFP8BlockScaling quantized primary weights (single GPU, no FSDP)."""
+
+    def setup_method(self) -> None:
+        super().setup_method(iters=5)
+        mxfp8_available, self.mxfp8_reason = te.is_mxfp8_available(return_reason=True)
+        self.mxfp8_available = mxfp8_available
+
+    def _build_model(self):
+        recipe = MXFP8BlockScaling()
+        with quantized_model_init(enabled=True, recipe=recipe):
+            model = te.Linear(256, 256, params_dtype=torch.bfloat16).cuda()
+        return model, recipe
+
+    @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+    def test_mxfp8_linear_fused_adam_master_weights(self):
+        """quantized_model_init(MXFP8) + te.Linear + FusedAdam(master_weights=True).
+
+        Verifies:
+        - Model params are MXFP8 QuantizedTensors after init
+        - FP32 master weights track a reference Adam optimizer
+        - Params remain QuantizedTensors after training
+        - Loss decreases over training steps
+        """
+        if not self.mxfp8_available:
+            pytest.skip(self.mxfp8_reason)
+
+        model, recipe = self._build_model()
+
+        # Verify weight params are QuantizedTensors (bias stays bf16)
+        for name, p in model.named_parameters():
+            if "bias" not in name:
+                assert isinstance(
+                    p, QuantizedTensor
+                ), f"Expected QuantizedTensor for {name}, got {type(p).__name__}"
+
+        # Build reference: clone dequantized weights for a plain Adam
+        ref_params = [p.detach().clone().float() for p in model.parameters()]
+
+        options = {"lr": 5e-4, "betas": (0.9, 0.999), "eps": 1e-8, "weight_decay": 0}
+        ref_optim = torch.optim.Adam(ref_params, **options)
+        tst_optim = te.optimizers.FusedAdam(
+            list(model.parameters()),
+            master_weights=True,
+            master_weight_dtype=torch.float32,
+            use_decoupled_grad=True,
+            **options,
+        )
+
+        for _ in range(self.iters):
+            for p_ref, p in zip(ref_params, model.parameters()):
+                p_ref.grad = torch.rand_like(p_ref)
+                p.decoupled_grad = p_ref.grad.clone()
+            ref_optim.step()
+            tst_optim.step()
+
+            # FP32 master weights should match reference Adam exactly
+            master_params = [
+                tst_optim.get_unscaled_state(p, "master_param") for p in model.parameters()
+            ]
+            torch.testing.assert_close(ref_params, master_params)
+
+        # Weight params should still be QuantizedTensors after training
+        for name, p in model.named_parameters():
+            if "bias" not in name:
+                assert isinstance(
+                    p, QuantizedTensor
+                ), f"{name} lost QuantizedTensor type after training: {type(p).__name__}"
+
+    @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+    def test_mxfp8_linear_forward_backward_step(self):
+        """End-to-end: quantized_model_init + autocast forward + backward + FusedAdam.step().
+
+        Uses te.autocast with MXFP8BlockScaling recipe for the forward pass,
+        verifying the full training loop works with quantized compute.
+        """
+        if not self.mxfp8_available:
+            pytest.skip(self.mxfp8_reason)
+
+        model, recipe = self._build_model()
+
+        optimizer = te.optimizers.FusedAdam(
+            model.parameters(),
+            lr=1e-3,
+            master_weights=True,
+            master_weight_dtype=torch.float32,
+        )
+
+        batch_size, seq_len, hidden = 4, 32, 256
+        x = torch.randn(batch_size, seq_len, hidden, dtype=torch.bfloat16, device="cuda")
+        target = torch.randn_like(x)
+
+        losses = []
+        for i in range(self.iters):
+            optimizer.zero_grad(set_to_none=True)
+            with te.autocast(enabled=True, recipe=recipe):
+                output = model(x)
+            loss = torch.nn.functional.mse_loss(output, target)
+            losses.append(loss.item())
+            loss.backward()
+
+            # Verify all params have non-None gradients after backward
+            for name, p in model.named_parameters():
+                assert p.grad is not None, f"Step {i}: {name} has no gradient after backward"
+                assert (
+                    p.grad.shape == p.shape
+                ), f"Step {i}: {name} grad shape {p.grad.shape} != param shape {p.shape}"
+                assert torch.isfinite(p.grad).all(), f"Step {i}: {name} has non-finite gradients"
+                assert p.grad.any(), f"Step {i}: {name} gradient is all zeros"
+
+            optimizer.step()
+
+        # Verify loss decreased
+        assert losses[-1] < losses[0], f"Loss did not decrease: {losses}"
+
+        # Verify weight params remain QuantizedTensors
+        for name, p in model.named_parameters():
+            if "bias" not in name:
+                assert isinstance(
+                    p, QuantizedTensor
+                ), f"{name} lost QuantizedTensor type: {type(p).__name__}"
+
+        # Verify optimizer states are float32
+        for name, p in model.named_parameters():
+            state = optimizer.state[p]
+            assert state["exp_avg"].dtype == torch.float32
+            assert state["exp_avg_sq"].dtype == torch.float32
+            if "bias" not in name:
+                assert state["master_param"].dtype == torch.float32
+
+
+class TestFusedAdamFloat8Block(TestFusedOptimizer):
+    """FusedAdam with Float8BlockScaling quantized primary weights (single GPU, no FSDP)."""
+
+    def setup_method(self) -> None:
+        super().setup_method(iters=5)
+        fp8_block_available, self.fp8_block_reason = te.is_fp8_block_scaling_available(
+            return_reason=True
+        )
+        self.fp8_block_available = fp8_block_available
+
+    def _build_model(self):
+        recipe = Float8BlockScaling()
+        with quantized_model_init(enabled=True, recipe=recipe):
+            model = te.Linear(256, 256, params_dtype=torch.bfloat16).cuda()
+        return model, recipe
+
+    @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+    def test_float8block_linear_fused_adam_master_weights(self):
+        """quantized_model_init(Float8BlockScaling) + te.Linear + FusedAdam(master_weights=True).
+
+        Verifies:
+        - Model params are QuantizedTensors after init
+        - FP32 master weights track a reference Adam optimizer
+        - Params remain QuantizedTensors after training
+        """
+        if not self.fp8_block_available:
+            pytest.skip(self.fp8_block_reason)
+
+        model, recipe = self._build_model()
+
+        # Verify weight params are QuantizedTensors (bias stays bf16)
+        for name, p in model.named_parameters():
+            if "bias" not in name:
+                assert isinstance(
+                    p, QuantizedTensor
+                ), f"Expected QuantizedTensor for {name}, got {type(p).__name__}"
+
+        # Build reference: clone dequantized weights for a plain Adam
+        ref_params = [p.detach().clone().float() for p in model.parameters()]
+
+        options = {"lr": 5e-4, "betas": (0.9, 0.999), "eps": 1e-8, "weight_decay": 0}
+        ref_optim = torch.optim.Adam(ref_params, **options)
+        tst_optim = te.optimizers.FusedAdam(
+            list(model.parameters()),
+            master_weights=True,
+            master_weight_dtype=torch.float32,
+            use_decoupled_grad=True,
+            **options,
+        )
+
+        for _ in range(self.iters):
+            for p_ref, p in zip(ref_params, model.parameters()):
+                p_ref.grad = torch.rand_like(p_ref)
+                p.decoupled_grad = p_ref.grad.clone()
+            ref_optim.step()
+            tst_optim.step()
+
+            # FP32 master weights should match reference Adam exactly
+            master_params = [
+                tst_optim.get_unscaled_state(p, "master_param") for p in model.parameters()
+            ]
+            torch.testing.assert_close(ref_params, master_params)
+
+        # Weight params should still be QuantizedTensors after training
+        for name, p in model.named_parameters():
+            if "bias" not in name:
+                assert isinstance(
+                    p, QuantizedTensor
+                ), f"{name} lost QuantizedTensor type after training: {type(p).__name__}"
+
+    @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+    def test_float8block_linear_forward_backward_step(self):
+        """End-to-end: quantized_model_init + autocast forward + backward + FusedAdam.step().
+
+        Uses te.autocast with Float8BlockScaling recipe for the forward pass,
+        verifying the full training loop works with quantized compute.
+        """
+        if not self.fp8_block_available:
+            pytest.skip(self.fp8_block_reason)
+
+        model, recipe = self._build_model()
+
+        optimizer = te.optimizers.FusedAdam(
+            model.parameters(),
+            lr=1e-3,
+            master_weights=True,
+            master_weight_dtype=torch.float32,
+        )
+
+        batch_size, seq_len, hidden = 4, 32, 256
+        x = torch.randn(batch_size, seq_len, hidden, dtype=torch.bfloat16, device="cuda")
+        target = torch.randn_like(x)
+
+        losses = []
+        for i in range(self.iters):
+            optimizer.zero_grad(set_to_none=True)
+            with te.autocast(enabled=True, recipe=recipe):
+                output = model(x)
+            loss = torch.nn.functional.mse_loss(output, target)
+            losses.append(loss.item())
+            loss.backward()
+
+            # Verify all params have non-None gradients after backward
+            for name, p in model.named_parameters():
+                assert p.grad is not None, f"Step {i}: {name} has no gradient after backward"
+                assert (
+                    p.grad.shape == p.shape
+                ), f"Step {i}: {name} grad shape {p.grad.shape} != param shape {p.shape}"
+                assert torch.isfinite(p.grad).all(), f"Step {i}: {name} has non-finite gradients"
+                assert p.grad.any(), f"Step {i}: {name} gradient is all zeros"
+
+            optimizer.step()
+
+        # Verify loss decreased
+        assert losses[-1] < losses[0], f"Loss did not decrease: {losses}"
+
+        # Verify weight params remain QuantizedTensors
+        for name, p in model.named_parameters():
+            if "bias" not in name:
+                assert isinstance(
+                    p, QuantizedTensor
+                ), f"{name} lost QuantizedTensor type: {type(p).__name__}"
+
+        # Verify optimizer states are float32
+        for name, p in model.named_parameters():
+            state = optimizer.state[p]
+            assert state["exp_avg"].dtype == torch.float32
+            assert state["exp_avg_sq"].dtype == torch.float32
+            if "bias" not in name:
+                assert state["master_param"].dtype == torch.float32
 
 
 class TestFusedSGD(TestFusedOptimizer):

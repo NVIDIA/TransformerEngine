@@ -84,6 +84,8 @@ enum NVTEGroupedMatmulConfigAttribute {
   kNVTEGroupedMatmulConfigAvgK = 2,
   /*! Number of streaming multiprocessors to use in GEMM kernel. */
   kNVTEGroupedMatmulConfigSMCount = 3,
+  /*! Split accumulator mode. Only taken into account on Hopper. Default: true. */
+  kNVTEGroupedMatmulConfigUseSplitAccumulator = 4,
   kNVTEGroupedMatmulConfigNumAttributes
 };
 
@@ -329,11 +331,120 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
  * - Shape compatibility: if transa=false, transb=false:
  *   - A[i]: (M[i], K[i]), B[i]: (K[i], N[i]), D[i]: (M[i], N[i])
  */
+/*! \brief Return the required size in bytes for the setup workspace of grouped GEMM.
+ *
+ * The setup workspace stores pointer arrays and per-matrix dimension arrays used
+ * by the grouped GEMM kernel. Its size depends only on the number of tensors (GEMMs)
+ * in the group and is independent of matrix dimensions.
+ *
+ * Pass the result as the size of the workspace_setup tensor in nvte_grouped_gemm.
+ *
+ *  \param[in] num_tensors  Number of tensors (GEMMs) in the group.
+ *  \return Required size in bytes for workspace_setup.
+ */
+size_t nvte_get_grouped_gemm_setup_workspace_size(size_t num_tensors);
+
+/*! \brief Convert a device array of int32 values to int64 values.
+ *
+ *  Useful for preparing group_sizes for nvte_grouped_gemm when the caller
+ *  holds int32 sizes and needs int64 values on the device.
+ *
+ *  \param[in]  src     Device pointer to source int32 array.
+ *  \param[out] dst     Device pointer to destination int64 array.
+ *  \param[in]  n       Number of elements.
+ *  \param[in]  stream  CUDA stream.
+ */
+void nvte_convert_int32_to_int64(const int32_t *src, int64_t *dst, size_t n, cudaStream_t stream);
+
+/*! \brief Convert int32 array to int64 while scaling each element by a multiplier.
+ *
+ *  Computes dst[i] = (int64_t)src[i] * multiplier for each i in [0, n).
+ *  CUDA-graph safe (no host-device synchronization).
+ *
+ *  \param[in]  src         Device pointer to source int32 array.
+ *  \param[out] dst         Device pointer to destination int64 array.
+ *  \param[in]  n           Number of elements.
+ *  \param[in]  multiplier  Scale factor applied to each element.
+ *  \param[in]  stream      CUDA stream.
+ */
+void nvte_convert_int32_to_int64_with_multiplier(const int32_t *src, int64_t *dst, size_t n,
+                                                 int64_t multiplier, cudaStream_t stream);
+
+/*! \brief Compute exclusive prefix-sum offsets from per-group first-dimension sizes.
+ *
+ *  Writes n_groups+1 values to offsets: offsets[0]=0,
+ *  offsets[i] = sum(first_dims[0..i-1] * last_dim) for i in [1, n_groups].
+ *  This is CUDA-graph safe (no host-device synchronization).
+ *
+ *  \param[in]  first_dims  Device pointer to int64 array of length n_groups.
+ *  \param[out] offsets     Device pointer to int64 array of length n_groups+1.
+ *  \param[in]  n_groups    Number of groups.
+ *  \param[in]  last_dim    Common last dimension (number of columns).
+ *  \param[in]  stream      CUDA stream.
+ */
+void nvte_compute_grouped_tensor_offsets(const int64_t *first_dims, int64_t *offsets,
+                                         size_t n_groups, int64_t last_dim, cudaStream_t stream);
+
 void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedTensor B, int transb,
                        const NVTEGroupedTensor C, NVTEGroupedTensor D, const NVTETensor alpha,
                        const NVTETensor beta, NVTETensor workspace_setup,
                        NVTETensor workspace_cublas, NVTEGroupedMatmulConfig config,
                        cudaStream_t stream);
+
+/* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
+/*! \brief Grouped matrix multiplication with discrete A input tensors.
+ *
+ * Identical to nvte_grouped_gemm, but A is provided as a list of tensors
+ * instead of NVTEGroupedTensor. This enables discrete per-expert weights as inputA
+ * for Grouped GEMM.
+ *
+ *  \param[in]  A_list           List of A tensors (length = num_tensors).
+ *  \param[in]  num_a_tensors    Number of tensors in A_list.
+ */
+void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num_a_tensors,
+                                            int transa, const NVTEGroupedTensor B, int transb,
+                                            const NVTEGroupedTensor C, NVTEGroupedTensor D,
+                                            const NVTETensor alpha, const NVTETensor beta,
+                                            NVTETensor workspace_setup, NVTETensor workspace_cublas,
+                                            NVTEGroupedMatmulConfig config, cudaStream_t stream);
+
+/* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
+/*! \brief Grouped matrix multiplication with discrete output tensors.
+*
+* Identical to nvte_grouped_gemm, but C and D are provided as lists of tensors
+* instead of NVTEGroupedTensor. This enables accumulation into non-contiguous
+* per-expert buffers (for wgrads).
+*
+*  \param[in]  C_list           Optional list of C tensors (length = num_tensors).
+*  \param[in]  num_c_tensors    Number of tensors in C_list (Can be 0 if C is not provided).
+*  \param[out] D_list           List of D tensors (length = num_tensors).
+*  \param[in]  num_d_tensors    Number of tensors in D_list.
+*  \note  All tensors in C_list and D_list must share the same dtype.
+*/
+void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
+                                         const NVTEGroupedTensor B, int transb,
+                                         const NVTETensor *C_list, size_t num_c_tensors,
+                                         NVTETensor *D_list, size_t num_d_tensors,
+                                         const NVTETensor alpha, const NVTETensor beta,
+                                         NVTETensor workspace_setup, NVTETensor workspace_cublas,
+                                         NVTEGroupedMatmulConfig config, cudaStream_t stream);
+
+/*! \brief Grouped Bias add for grouped GEMM outputs.
+*
+* output[row,col] += bias[col].
+* Requires uniform last-dimension across all output tensors and bias tensors.
+*/
+void nvte_grouped_bias_add(const NVTEGroupedTensor output, const NVTEGroupedTensor bias,
+                           cudaStream_t stream);
+
+/*! \brief Grouped Scaled Bias add for grouped GEMM outputs.
+*
+* output[row,col] += bias[col] * scale[row], where biases are per-group
+* and scales are per-token (per-row across all groups).
+* Requires uniform last-dimension across all output tensors and bias tensors.
+*/
+void nvte_grouped_scaled_bias_add(const NVTEGroupedTensor output, const NVTEGroupedTensor bias,
+                                  const NVTETensor scale, cudaStream_t stream);
 
 #ifdef __cplusplus
 }  // extern "C"
@@ -495,6 +606,13 @@ class GroupedMatmulConfigWrapper {
   void set_sm_count(int sm_count) {
     nvte_set_grouped_matmul_config_attribute(config_, kNVTEGroupedMatmulConfigSMCount, &sm_count,
                                              sizeof(int));
+  }
+
+  /*! \brief Set split accumulator mode. Only taken into account on Hopper. */
+  void set_use_split_accumulator(bool use_split_accumulator) {
+    const auto val = static_cast<uint8_t>(use_split_accumulator);
+    nvte_set_grouped_matmul_config_attribute(config_, kNVTEGroupedMatmulConfigUseSplitAccumulator,
+                                             &val, sizeof(val));
   }
 
  private:

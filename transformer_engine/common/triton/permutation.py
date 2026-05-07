@@ -599,6 +599,10 @@ def _sort_chunks_by_map_kernel(
     input_ptr,
     row_id_map_ptr,
     probs_ptr,
+    # Pre-allocated output buffer for JAX input_output_aliases.
+    # Aliased to output_ptr in JAX so they point to the same memory.
+    # In PyTorch, pass the same tensor as output_ptr.
+    output_buf_ptr,  # pylint: disable=unused-argument
     # strides
     stride_input_token,
     stride_input_hidden,

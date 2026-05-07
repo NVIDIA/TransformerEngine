@@ -16,7 +16,6 @@
 #include "fused_attn_f16_max512_seqlen.h"
 #include "utils.h"
 
-#if (CUDNN_VERSION >= 8901)
 #define Q_ID 1
 #define K_ID 2
 #define V_ID 3
@@ -1342,4 +1341,3 @@ void fused_attn_max_512_bwd(size_t batch, size_t num_head, size_t q_max_seqlen,
   }
 }
 }  // namespace transformer_engine
-#endif  // CUDNN_VERSION >= 8901
