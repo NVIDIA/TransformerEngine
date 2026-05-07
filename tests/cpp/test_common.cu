@@ -369,7 +369,7 @@ Tensor::Tensor(const std::string& name,
       }
       if (columnwise) {
         scale_inv_columnwise_ = scale_inv;
-        tensor_.set_columnwise_scale_inv(scale_inv_rowwise_->gpu_buffer(), DType::kFloat32, std::vector<size_t>{1});
+        tensor_.set_columnwise_scale_inv(scale_inv_columnwise_->gpu_buffer(), DType::kFloat32, std::vector<size_t>{1});
       }
     }
     break;
