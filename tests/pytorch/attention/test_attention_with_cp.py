@@ -174,8 +174,13 @@ def _run_batch_once(num_gpus, configs):
         launch_err = None
         try:
             run_distributed(argv)
-        except AssertionError as exc:
-            launch_err = str(exc)
+        except Exception as exc:
+            # Catch broadly: subprocess.run can raise OSError/FileNotFoundError
+            # in addition to the AssertionError that run_distributed wraps a
+            # non-zero exit in. Letting any of these propagate would tear down
+            # the session fixture and ERROR every batched test instead of
+            # marking just this batch's configs as failed.
+            launch_err = str(exc) or repr(exc)
 
         try:
             with open(results_path, "r") as f:
