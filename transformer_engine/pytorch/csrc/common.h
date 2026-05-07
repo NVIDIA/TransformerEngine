@@ -45,6 +45,7 @@
 #include <transformer_engine/utils.h>
 
 #include <ATen/cuda/CUDAGraphsUtils.cuh>
+#include <array>
 #include <cassert>
 #include <cstring>
 #include <iostream>
@@ -520,6 +521,18 @@ size_t ceildiv(size_t numer, size_t denom);
 NVTEShape convertTorchShape(const c10::IntArrayRef torch_shape);
 
 std::vector<size_t> convert_shape_back_from_fp4(const std::vector<size_t>& shape, bool transpose);
+
+// Flatten an N-D shape to 2D: {product(shape[:-1]), shape[-1]}.
+// With transpose=true: {shape[0], product(shape[1:])}.
+std::array<size_t, 2> get_2d_dims(NVTEShape shape, bool transpose = false);
+
+template <typename T>
+inline std::array<size_t, 2> get_2d_dims(const std::vector<T>& shape, bool transpose = false) {
+  NVTEShape s{};
+  s.ndim = shape.size();
+  for (size_t i = 0; i < shape.size(); ++i) s.data[i] = static_cast<size_t>(shape[i]);
+  return get_2d_dims(s, transpose);
+}
 
 // unpack the PhiloxCudaState into CUDA tensor
 void philox_unpack(at::PhiloxCudaState arg, int64_t* rng_state_ptr);
