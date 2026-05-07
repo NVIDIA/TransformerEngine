@@ -29,12 +29,7 @@ _SUPPORT_TMA = torch.cuda.get_device_capability()[0] >= 9
 def _tma_aligned(t):
     return (t.stride(0) * t.element_size()) % 16 == 0 and t.data_ptr() % 16 == 0
 
-def is_deterministic_enforced():
-    """
-    Check if user enforces deterministic algorithms. We assume non-determinism is allowed if this flag is not set
-    """
-    return os.environ.get("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1") == "0"
-
+use_deterministic = os.environ.get("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1") == "0"
 
 def mhc_generate_mix_and_aggregate(
     x: torch.Tensor,
@@ -405,10 +400,8 @@ class mHCProjectionOp(torch.autograd.Function):
 
         N = phi.shape[0]
 
-        use_determinstic = is_deterministic_enforced()
-
         # Pad H to (s, b, 32) for better memory access pattern in the kernel, but only the first N elements in the last dimension are valid
-        if use_determinstic:
+        if use_deterministic:
             H = torch.empty((M, 32), device=device, dtype=torch.float32)
             ms = torch.empty((M,), device=device, dtype=torch.float32)
         else:
@@ -464,7 +457,7 @@ class mHCProjectionOp(torch.autograd.Function):
             stride_norm_weight=1,
             BLOCK_SIZE_N=32,
             precision=precision,
-            DETERMINISTIC=use_determinstic,
+            DETERMINISTIC=use_deterministic,
             USE_TMA=use_tma
         )
 
@@ -517,7 +510,6 @@ class mHCProjectionOp(torch.autograd.Function):
             grad_x = torch.empty((M, K), device=device, dtype=x.dtype)
 
         if norm_weight is not None:
-            use_deterministic = is_deterministic_enforced()
             # With norm_weight, we need a fused kernel to perform GEMM and output both phi & norm_weight gradients
             # pylint: disable=unnecessary-lambda-assignment
             grid = lambda META: (
@@ -557,7 +549,7 @@ class mHCProjectionOp(torch.autograd.Function):
                 stride_grad_norm_weight=1,
                 BLOCK_SIZE_N=32,
                 precision="tf32" if ctx.use_tf32 else "ieee",
-                DETERMINISTIC=is_deterministic_enforced(),
+                DETERMINISTIC=use_deterministic,
             )
 
             grad_phi = grad_phi.to(phi.dtype)
@@ -706,8 +698,6 @@ class mHCScaleFusedOp(torch.autograd.Function):
         grad_H = torch.zeros(
             (M, 32), device=grad_out.device, dtype=H.dtype
         )  # Pad the grad_H to 32 in the last dimension
-
-        use_deterministic = is_deterministic_enforced()
 
         grad_ms = torch.zeros((M,), device=grad_out.device, dtype=ms.dtype)
 
@@ -1009,7 +999,6 @@ class mHCAggregateOp(torch.autograd.Function):
         else:
             grad_x = torch.empty_like(x)
 
-        use_deterministic = is_deterministic_enforced()
         if use_deterministic:
             grad_H_pre = torch.empty(
                 (s, b, n), dtype=H_pre.dtype, device=H_pre.device
@@ -1158,8 +1147,6 @@ class mHCExpandCombineOp(torch.autograd.Function):
             bias = None
             f, H_post, x, H_res = ctx.saved_tensors
         M = s * b
-
-        use_deterministic = is_deterministic_enforced()
 
         grad_f = torch.empty_like(f)
         grad_x = torch.empty_like(x)
