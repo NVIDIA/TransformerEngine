@@ -36,6 +36,7 @@ from transformer_engine.jax.attention import (
     fused_attn,
     run_length_fill,
     make_swa_mask,
+    check_set_window_size,
     SequenceDescriptor,
     CPStrategy,
     ReorderStrategy,
@@ -1065,10 +1066,15 @@ def _get_swa_window_size_for_test(s_kv: int, attn_mask_type: AttnMaskType) -> Tu
 
     cuDNN < 9.2: skip (no SWA support).
     cuDNN >= 9.2: left-only window (s_kv // 10, 0).
-    cuDNN >= 9.6: bidirectional window (s_kv // 10, s_kv // 10 + 5) for the mask types whose
-                  bidirectional fused dispatch is meaningful here (NO_MASK, PADDING_MASK).
-                  Other mask types keep the left-only window: causal-family masks would
-                  collapse (W, W) -> (W, 0), hence not tested here.
+    cuDNN >= 9.6: bidirectional asymmetric window (s_kv // 10, s_kv // 10 + 5) for the mask
+                  types whose bidirectional fused dispatch is meaningful here (NO_MASK,
+                  PADDING_MASK). Other mask types keep the left-only window: causal-family
+                  masks would collapse (W, W) -> (W, 0), hence not tested here.
+
+    The chosen ``(left, right)`` is then routed through :func:`check_set_window_size`, which
+    is the same canonicalizer the production modules call at construction time. For the
+    candidates above this is always a no-op, so it acts as a contract self-check rather
+    than a value transformation.
     """
     cudnn_version = get_cudnn_version()
     if cudnn_version < 90200:
@@ -1080,8 +1086,10 @@ def _get_swa_window_size_for_test(s_kv: int, attn_mask_type: AttnMaskType) -> Tu
         AttnMaskType.NO_MASK,
         AttnMaskType.PADDING_MASK,
     ):
-        return (left_window_size, right_window_size)
-    return (left_window_size, 0)
+        candidate = (left_window_size, right_window_size)
+    else:
+        candidate = (left_window_size, 0)
+    return check_set_window_size(attn_mask_type, candidate)
 
 
 @pytest.mark.parametrize(

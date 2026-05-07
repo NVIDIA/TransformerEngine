@@ -25,6 +25,7 @@ from transformer_engine.jax.attention import (
     QKVFormat,
     CPStrategy,
     SequenceDescriptor,
+    check_set_window_size,
 )
 from ..sharding import with_sharding_constraint_by_logical_axes, HEAD_AXES, is_mesh_available
 
@@ -3149,7 +3150,13 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
                         config=config,
                     )
 
-                if config.window_size != (-1, -1):
+                # Trigger striped-window adjustment only when there is a finite SWA. After
+                # check_set_window_size canonicalization, "no finite window" is encoded as
+                # (-1, -1) for non-causal masks and (-1, 0) for causal-family masks; both
+                # have window_size[0] == -1, so we use that as the unified SWA sentinel
+                # (matches the convention used elsewhere in this file, e.g. is_sliding_window
+                # at line ~2475).
+                if config.window_size[0] != -1:
                     kv_src_rank = (cp_size + cp_rank - idx) % cp_size
                     # Note: all inputs of adjust_cp_striped_window_size should be host values
                     cp_striped_window_size = adjust_cp_striped_window_size(
@@ -3302,7 +3309,10 @@ class FusedRingAttnStripedBwdPrimitive(FusedAttnBwdPrimitive):
                     )
                     return dq_per_step, dkv_per_step, dbias_per_step
 
-                if config.window_size != (-1, -1):
+                # See fwd path above: window_size[0] != -1 is the unified "finite SWA"
+                # sentinel that handles both the (-1, -1) non-causal and (-1, 0) causal
+                # canonicalizations from check_set_window_size.
+                if config.window_size[0] != -1:
                     kv_src_rank = (cp_size + cp_rank - idx) % cp_size
                     # Note: all inputs of adjust_cp_striped_window_size should be host values
                     cp_striped_window_size = adjust_cp_striped_window_size(
@@ -3486,7 +3496,11 @@ def fused_attn_fwd(
         dropout_probability=dropout_probability,
         is_training=is_training,
         max_segments_per_seq=max_segments_per_seq,
-        window_size=(-1, -1) if window_size is None else window_size,
+        # Canonicalize: None -> (-1, -1) for non-causal, (-1, 0) for causal-family.
+        # The flax modules already canonicalize at __post_init__; this covers direct
+        # callers of fused_attn_fwd/_bwd so the invariant holds at the C-extension
+        # boundary too.
+        window_size=check_set_window_size(attn_mask_type, window_size),
         bottom_right_diagonal=attn_mask_type.is_bottom_right(),
         context_parallel_load_balanced=context_parallel_causal_load_balanced,
         cp_axis=_maybe_context_parallel_axis(context_parallel_axis),
@@ -3661,7 +3675,11 @@ def fused_attn_bwd(
         dropout_probability=dropout_probability,
         is_training=is_training,
         max_segments_per_seq=max_segments_per_seq,
-        window_size=(-1, -1) if window_size is None else window_size,
+        # Canonicalize: None -> (-1, -1) for non-causal, (-1, 0) for causal-family.
+        # The flax modules already canonicalize at __post_init__; this covers direct
+        # callers of fused_attn_fwd/_bwd so the invariant holds at the C-extension
+        # boundary too.
+        window_size=check_set_window_size(attn_mask_type, window_size),
         bottom_right_diagonal=attn_mask_type.is_bottom_right(),
         context_parallel_load_balanced=context_parallel_causal_load_balanced,
         cp_axis=_maybe_context_parallel_axis(context_parallel_axis),
