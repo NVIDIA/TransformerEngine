@@ -8,6 +8,7 @@
 
 #include <array>
 #include <memory>
+#include <optional>
 #include <random>
 #include <vector>
 
@@ -185,56 +186,64 @@ class Tensor {
 
   template <typename T>
   T *rowwise_cpu_dptr() {
-    NVTE_CHECK(TypeInfo<T>::dtype == data_rowwise_.dtype(), "Invalid type!");
+    NVTE_CHECK(data_rowwise_, "Tensor does not have rowwise data!");
+    NVTE_CHECK(TypeInfo<T>::dtype == data_rowwise_->dtype(), "Invalid type!");
     NVTE_CHECK(rowwise_, "Tensor does not have rowwise data!");
-    return data_rowwise_.cpu_buffer<T>();
+    return data_rowwise_->cpu_buffer<T>();
   }
 
   template <typename T>
   T *columnwise_cpu_dptr() {
-    NVTE_CHECK(TypeInfo<T>::dtype == data_columnwise_.dtype(), "Invalid type!");
+    NVTE_CHECK(data_columnwise_, "Tensor does not have columnwise data!");
+    NVTE_CHECK(TypeInfo<T>::dtype == data_columnwise_->dtype(), "Invalid type!");
     NVTE_CHECK(columnwise_, "Tensor does not have columnwise data!");
-    return data_columnwise_.cpu_buffer<T>();
+    return data_columnwise_->cpu_buffer<T>();
   }
 
   float amax() {
-    NVTE_CHECK(amax_rowwise_.size() == 1);
-    NVTE_CHECK(amax_rowwise_.dtype() == DType::kFloat32);
-    amax_rowwise_.to_cpu();
-    return *amax_rowwise_.cpu_buffer<float>();
+    NVTE_CHECK(amax_rowwise_);
+    NVTE_CHECK(amax_rowwise_->size() == 1);
+    NVTE_CHECK(amax_rowwise_->dtype() == DType::kFloat32);
+    amax_rowwise_->to_cpu();
+    return *amax_rowwise_->cpu_buffer<float>();
   }
 
   float amax_columnwise() {
-    NVTE_CHECK(amax_columnwise_.size() == 1);
-    NVTE_CHECK(amax_columnwise_.dtype() == DType::kFloat32);
-    amax_columnwise_.to_cpu();
-    return *amax_columnwise_.cpu_buffer<float>();
+    NVTE_CHECK(amax_columnwise_);
+    NVTE_CHECK(amax_columnwise_->size() == 1);
+    NVTE_CHECK(amax_columnwise_->dtype() == DType::kFloat32);
+    amax_columnwise_->to_cpu();
+    return *amax_columnwise_->cpu_buffer<float>();
   }
 
   float scale() {
-    NVTE_CHECK(scale_.size() == 1);
-    NVTE_CHECK(scale_.dtype() == DType::kFloat32);
-    scale_.to_cpu();
-    return *scale_.cpu_buffer<float>();
+    NVTE_CHECK(scale_);
+    NVTE_CHECK(scale_->size() == 1);
+    NVTE_CHECK(scale_->dtype() == DType::kFloat32);
+    scale_->to_cpu();
+    return *scale_->cpu_buffer<float>();
   }
 
   template <typename T>
   T *rowwise_cpu_scale_inv_ptr(){
-    scale_inv_rowwise_.to_cpu();
-    return scale_inv_rowwise_.cpu_buffer<T>();
+    NVTE_CHECK(scale_inv_rowwise_);
+    scale_inv_rowwise_->to_cpu();
+    return scale_inv_rowwise_->cpu_buffer<T>();
   }
 
   template <typename T>
   T *columnwise_cpu_scale_inv_ptr(){
-    scale_inv_columnwise_.to_cpu();
-    return scale_inv_columnwise_.cpu_buffer<T>();
+    NVTE_CHECK(scale_inv_columnwise_);
+    scale_inv_columnwise_->to_cpu();
+    return scale_inv_columnwise_->cpu_buffer<T>();
   }
 
   float rowwise_scale_inv(){
-    NVTE_CHECK(scale_inv_rowwise_.size() == 1);
-    NVTE_CHECK(scale_inv_rowwise_.dtype() == DType::kFloat32);
-    scale_inv_rowwise_.to_cpu();
-    return *scale_inv_rowwise_.cpu_buffer<float>();
+    NVTE_CHECK(scale_inv_rowwise_);
+    NVTE_CHECK(scale_inv_rowwise_->size() == 1);
+    NVTE_CHECK(scale_inv_rowwise_->dtype() == DType::kFloat32);
+    scale_inv_rowwise_->to_cpu();
+    return *scale_inv_rowwise_->cpu_buffer<float>();
   }
 
   bool rowwise() const {
@@ -329,13 +338,13 @@ class Tensor {
   TensorWrapper tensor_;
 
   // Data buffers
-  Buffer data_rowwise_;
-  Buffer data_columnwise_;
-  Buffer scale_inv_rowwise_;
-  Buffer scale_inv_columnwise_;
-  Buffer amax_rowwise_;
-  Buffer amax_columnwise_;
-  Buffer scale_;
+  std::optional<Buffer> data_rowwise_;
+  std::optional<Buffer> data_columnwise_;
+  std::shared_ptr<Buffer> scale_inv_rowwise_;
+  std::shared_ptr<Buffer> scale_inv_columnwise_;
+  std::optional<Buffer> amax_rowwise_;
+  std::optional<Buffer> amax_columnwise_;
+  std::optional<Buffer> scale_;
 
   bool rowwise_;
   bool columnwise_;
