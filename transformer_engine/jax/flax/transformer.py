@@ -592,7 +592,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         sliding window (full attention for ``no_mask`` / ``padding``, infinite-left for
         causal-family masks).
 
-        Allowed values per ``attn_mask_type``:
+        Allowed values per :attr:`attn_mask_type`:
 
         * ``no_mask``, ``padding``: ``(-1, -1)`` (sentinel for full attention) or
           ``(>=0, >=0)``.
@@ -600,11 +600,13 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
           ``padding_causal_bottom_right``: ``(-1, 0)`` (sentinel for infinite-left
           causal) or ``(>=0, 0)``.
 
-        Inputs are validated and lightly canonicalized at construction time (e.g. ``None``
-        is replaced with the sentinel for the given mask type, and inconsistent sentinels
-        such as ``(-1, 0)`` paired with ``no_mask`` are coerced with a warning). Values
-        with negative ``left`` or ``right`` outside the listed sentinels raise an
-        ``AssertionError``. Bidirectional sliding windows
+        Inputs are validated and canonicalized at construction time. ``None`` is
+        replaced silently with the sentinel for :attr:`attn_mask_type`: ``(-1, -1)``
+        for ``no_mask`` / ``padding`` and ``(-1, 0)`` for the causal family.
+        Inconsistent sentinels (e.g. ``(-1, 0)`` paired with ``no_mask``, or
+        ``(W, R)`` with ``R != 0`` paired with a causal-family mask) are coerced with
+        a warning. Values with negative ``left`` or ``right`` outside the listed
+        sentinels raise an ``AssertionError``. Bidirectional sliding windows
         (``right > 0`` with ``no_mask`` / ``padding``) require cuDNN >= 9.6 in the fused
         backend; left-only sliding windows require cuDNN >= 9.2.
     max_segments_per_seq: Optional[int], default = 1
@@ -1198,7 +1200,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
         sliding window (full attention for ``no_mask`` / ``padding``, infinite-left for
         causal-family masks).
 
-        Allowed values per ``attn_mask_type``:
+        Allowed values per :attr:`attn_mask_type`:
 
         * ``no_mask``, ``padding``: ``(-1, -1)`` (sentinel for full attention) or
           ``(>=0, >=0)``.
@@ -1206,11 +1208,13 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
           ``padding_causal_bottom_right``: ``(-1, 0)`` (sentinel for infinite-left
           causal) or ``(>=0, 0)``.
 
-        Inputs are validated and lightly canonicalized at construction time (e.g. ``None``
-        is replaced with the sentinel for the given mask type, and inconsistent sentinels
-        such as ``(-1, 0)`` paired with ``no_mask`` are coerced with a warning). Values
-        with negative ``left`` or ``right`` outside the listed sentinels raise an
-        ``AssertionError``. Bidirectional sliding windows
+        Inputs are validated and canonicalized at construction time. ``None`` is
+        replaced silently with the sentinel for :attr:`attn_mask_type`: ``(-1, -1)``
+        for ``no_mask`` / ``padding`` and ``(-1, 0)`` for the causal family.
+        Inconsistent sentinels (e.g. ``(-1, 0)`` paired with ``no_mask``, or
+        ``(W, R)`` with ``R != 0`` paired with a causal-family mask) are coerced with
+        a warning. Values with negative ``left`` or ``right`` outside the listed
+        sentinels raise an ``AssertionError``. Bidirectional sliding windows
         (``right > 0`` with ``no_mask`` / ``padding``) require cuDNN >= 9.6 in the fused
         backend; left-only sliding windows require cuDNN >= 9.2.
     softmax_type: str = {'vanilla', 'off-by-one', 'learnable'}, default = 'vanilla'
@@ -1978,7 +1982,19 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
         sliding window (full attention for ``no_mask`` / ``padding``, infinite-left for
         causal-family masks).
 
-        Allowed values per ``attn_mask_type``:
+        This value is forwarded as-is to both the self-attention block (which uses
+        :attr:`self_attn_mask_type`) and, when :attr:`layer_type` is ``DECODER``, the
+        cross-attention block (whose mask type is internally fixed to ``padding``).
+        ``TransformerLayer`` deliberately does not canonicalize ``window_size``: a
+        decoder layer carries two different mask-type contracts simultaneously, so each
+        ``MultiHeadAttention`` block canonicalizes against its own mask type in its
+        own ``__post_init__``. Concretely, for ``self_attn_mask_type`` in the causal
+        family with ``window_size=None``, the self-attention block silently expands
+        ``None`` to ``(-1, 0)`` while the cross-attention block silently expands the
+        same ``None`` to ``(-1, -1)`` -- both blocks land on the correct sentinel for
+        their own mask type without warnings.
+
+        Allowed values per mask type:
 
         * ``no_mask``, ``padding``: ``(-1, -1)`` (sentinel for full attention) or
           ``(>=0, >=0)``.
@@ -1986,13 +2002,12 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
           ``padding_causal_bottom_right``: ``(-1, 0)`` (sentinel for infinite-left
           causal) or ``(>=0, 0)``.
 
-        Inputs are validated and lightly canonicalized at construction time (e.g. ``None``
-        is replaced with the sentinel for the given mask type, and inconsistent sentinels
-        such as ``(-1, 0)`` paired with ``no_mask`` are coerced with a warning). Values
-        with negative ``left`` or ``right`` outside the listed sentinels raise an
-        ``AssertionError``. Bidirectional sliding windows
-        (``right > 0`` with ``no_mask`` / ``padding``) require cuDNN >= 9.6 in the fused
-        backend; left-only sliding windows require cuDNN >= 9.2.
+        Inconsistent sentinels (e.g. ``(-1, 0)`` paired with ``no_mask``) are coerced
+        with a warning inside the relevant ``MultiHeadAttention`` block. Values with
+        negative ``left`` or ``right`` outside the listed sentinels raise an
+        ``AssertionError``. Bidirectional sliding windows (``right > 0`` with
+        ``no_mask`` / ``padding``) require cuDNN >= 9.6 in the fused backend; left-only
+        sliding windows require cuDNN >= 9.2.
     softmax_type: str = {'vanilla', 'off-by-one', 'learnable'}, default = 'vanilla'
         Softmax type as described in the paper
         `Efficient Streaming Language Models with Attention Sinks
@@ -2098,11 +2113,16 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
             )
         if self.num_gqa_groups is None:
             self.num_gqa_groups = self.num_attention_heads
-        # Validate / canonicalize window_size against self_attn_mask_type. The
-        # cross-attention block (encoder-decoder MHA) reuses the same window_size
-        # internally; that combo is re-validated against its fixed "padding" mask
-        # type inside MultiHeadAttention.
-        self.window_size = check_set_window_size(self.self_attn_mask_type, self.window_size)
+        # window_size is intentionally NOT canonicalized here. A decoder layer
+        # constructs two MultiHeadAttention blocks with different mask types
+        # (self-attention uses self_attn_mask_type; cross-attention is hardcoded
+        # to "padding"). Canonicalizing at this layer would force a single
+        # mask-type contract onto a dual-contract object and produce a sentinel
+        # that is correct for one block but not the other (e.g. None + causal
+        # self-attn would yield (-1, 0), which the padding cross-attn would
+        # then warn-coerce). Instead, the raw user value is forwarded as-is to
+        # both blocks; each block canonicalizes against its own mask type in
+        # MultiHeadAttention.__post_init__.
         super().__post_init__()
 
     @nn.compact
