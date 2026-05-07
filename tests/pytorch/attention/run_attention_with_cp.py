@@ -227,9 +227,7 @@ def run_dpa_with_cp(
             config.attn_mask_type = "padding"
 
     # Process group is managed by main(); one init/destroy per torchrun, not per config.
-    assert dist.is_initialized(), (
-        "dist.init_process_group must be called before run_dpa_with_cp"
-    )
+    assert dist.is_initialized(), "dist.init_process_group must be called before run_dpa_with_cp"
     world_size = dist.get_world_size()
     rank = dist.get_rank()
     logging.info(f"[Rank {rank}] Setup: world_size {world_size}")
@@ -828,9 +826,9 @@ def main(**kwargs):
         else:
             with open(batch_path, "r") as f:
                 configs = json.load(f)
-            assert isinstance(configs, list), (
-                f"batch_config_json must be a JSON list, got {type(configs)}"
-            )
+            assert isinstance(
+                configs, list
+            ), f"batch_config_json must be a JSON list, got {type(configs)}"
             results_path = batch_path + ".results.json"
             results = []
 

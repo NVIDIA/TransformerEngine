@@ -145,9 +145,7 @@ def _run_or_fetch(request, batch_results, *, num_gpus_per_node, **worker_kwargs)
     skips.
     """
     if _COLLECT_MODE:
-        _COLLECTED_KWARGS[request.node.nodeid] = dict(
-            num_gpus=num_gpus_per_node, **worker_kwargs
-        )
+        _COLLECTED_KWARGS[request.node.nodeid] = dict(num_gpus=num_gpus_per_node, **worker_kwargs)
         return
     entry = batch_results.get(request.node.nodeid)
     if entry is None:
@@ -164,13 +162,9 @@ def _run_batch_once(num_gpus, configs):
     """
     # Stringify values: run_dpa_with_cp uses ``== "True"`` string comparisons.
     # Strip ``num_gpus`` (launcher-only, not a worker kwarg).
-    worker_kwargs = [
-        {k: str(v) for k, v in cfg.items() if k != "num_gpus"} for cfg in configs
-    ]
+    worker_kwargs = [{k: str(v) for k, v in cfg.items() if k != "num_gpus"} for cfg in configs]
 
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".cp_batch.json", delete=False
-    ) as fh:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".cp_batch.json", delete=False) as fh:
         batch_path = fh.name
         json.dump(worker_kwargs, fh)
     results_path = batch_path + ".results.json"
@@ -285,9 +279,7 @@ def _cp_batch_results(request):
     global _COLLECT_MODE
 
     items = [
-        it
-        for it in request.session.items
-        if "_cp_batch_results" in getattr(it, "fixturenames", ())
+        it for it in request.session.items if "_cp_batch_results" in getattr(it, "fixturenames", ())
     ]
 
     _COLLECTED_KWARGS.clear()
