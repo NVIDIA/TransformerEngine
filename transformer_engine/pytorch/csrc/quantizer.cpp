@@ -1342,13 +1342,7 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(const std::ve
 
   // Tensor dimensions
   const std::vector<int64_t> shape_int64(shape.begin(), shape.end());
-  size_t flat_first_dim = 1;
-  if (shape.size() > 0) {
-    for (size_t i = 0; i < shape.size() - 1; ++i) {
-      flat_first_dim *= shape[i];
-    }
-  }
-  const size_t flat_last_dim = shape.size() > 0 ? shape.back() : 1;
+  const auto [flat_first_dim, flat_last_dim] = get_2d_dims(shape);
   NVTE_CHECK(flat_first_dim % MXFP8_BLOCK_SIZE == 0 && flat_last_dim % MXFP8_BLOCK_SIZE == 0,
              "MXFP8 requires tensor dims that are divisible by ", MXFP8_BLOCK_SIZE,
              " (got shape=", shape, ")");
@@ -1735,13 +1729,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(const std::ve
 
   // Tensor dimensions
   const std::vector<int64_t> shape_int64(shape.begin(), shape.end());
-  size_t flat_first_dim = 1;
-  if (shape.size() > 0) {
-    for (size_t i = 0; i < shape.size() - 1; ++i) {
-      flat_first_dim *= shape[i];
-    }
-  }
-  const size_t flat_last_dim = shape.size() > 0 ? shape.back() : 1;
+  const auto [flat_first_dim, flat_last_dim] = get_2d_dims(shape);
   NVTE_CHECK(flat_first_dim % NVFP4_BLOCK_SIZE == 0, "First dim for NVFP4 must be divisible by ",
              NVFP4_BLOCK_SIZE, " (got shape=", shape, ")");
   NVTE_CHECK(flat_last_dim % NVFP4_BLOCK_SIZE == 0,
@@ -2025,13 +2013,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
     shape = convert_shape_back_from_fp4(getTensorShape(*columnwise_data), true);
   }
 
-  size_t flat_first_dim = 1;
-  if (shape.size() > 0) {
-    for (size_t i = 0; i < shape.size() - 1; ++i) {
-      flat_first_dim *= shape[i];
-    }
-  }
-  const size_t flat_last_dim = shape.size() > 0 ? shape.back() : 1;
+  const auto [flat_first_dim, flat_last_dim] = get_2d_dims(shape);
 
   // Coerce row-wise data
   if (rowwise_usage) {
@@ -2170,24 +2152,16 @@ void NVFP4Quantizer::quantize_with_rht_unfused_helper(
     // NOTE: should already be populated.
     auto out_columnwise_amax = out.get_columnwise_amax();
 
+    // Flatten column-wise data shape to 2D to avoid problems when
+    // converting between FP4 tensor shape and byte tensor shape
+    // (involves dividing last dim by 2).
+    auto [flat_first_dim, flat_last_dim] = get_2d_dims(out_columnwise_data.shape, true);
+    std::vector<size_t> colwise_data_shape_2d = {flat_first_dim, flat_last_dim};
+
     // Create a wrapper for the columnwise output, as the rowwise output.
     // The reason is due to the input `rht_output_t` is already in the transposed layout.
     // Thus, we only need a rowwise quantization to generate the columnwise output.
     TensorWrapper out_transpose(out.scaling_mode());
-    // Note: since we are faking columnwise tensor into rowwise, the flat first dim check will fail
-    // need to convert the shape to 2D here
-    auto colwise_data_shape = out_columnwise_data.shape;
-    std::vector<size_t> colwise_data_shape_2d;
-    // shape could be [512, 32, 64], that's actually 512, 32, 128 because 2 FP4 take 1 byte
-    // the 2D shape should be [512, 32*128], but columnwise data shape expect last dim to be halved again
-    // so the multiple 2 get cancelled out
-    colwise_data_shape_2d.push_back(colwise_data_shape.data[0]);
-    size_t last_dim = 1;
-    for (size_t i = 1; i < colwise_data_shape.ndim; ++i) {
-      last_dim *= colwise_data_shape.data[i];
-    }
-    colwise_data_shape_2d.push_back(last_dim);
-
     out_transpose.set_rowwise_data(out_columnwise_data.data_ptr,
                                    static_cast<DType>(out_columnwise_data.dtype),
                                    colwise_data_shape_2d);
@@ -2199,7 +2173,6 @@ void NVFP4Quantizer::quantize_with_rht_unfused_helper(
                            out_columnwise_amax.shape);
 
     // Invoking fallback RHT kernel unfused.
-
     NVTE_SCOPED_GIL_RELEASE({
       // Perform the RHT(input.t), and write to rht_output_cpp.columnwise.
       nvte_hadamard_transform(input.data(), rht_output_t_cpp.data(), 0,
@@ -2434,13 +2407,7 @@ void NVFP4Quantizer::quantize_with_amax(TensorWrapper& input, TensorWrapper& out
 
 std::vector<size_t> NVFP4Quantizer::get_scale_shape(const std::vector<size_t>& shape,
                                                     bool columnwise) const {
-  size_t numel = 1;
-  for (auto s : shape) {
-    numel *= s;
-  }
-
-  auto last_dim = shape.back();
-  auto flat_first_dim = numel / last_dim;
+  const auto [flat_first_dim, last_dim] = get_2d_dims(shape);
 
   NVTE_CHECK(last_dim % NVFP4_BLOCK_SIZE == 0, "Last dim for NVFP4 must be divisible by ",
              NVFP4_BLOCK_SIZE, " (got dim=", last_dim, ")");
