@@ -2005,9 +2005,8 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
     shape = convert_shape_back_from_fp4(getTensorShape(*rowwise_data), false);
     if (columnwise_data) {
       auto col_shape = convert_shape_back_from_fp4(getTensorShape(*columnwise_data), true);
-      NVTE_CHECK(get_2d_dims(shape) == get_2d_dims(col_shape),
-                 "NVFP4 row-wise data (shape=", shape, ") and column-wise data (shape=", col_shape,
-                 ") do not match");
+      NVTE_CHECK(get_2d_dims(shape) == get_2d_dims(col_shape), "NVFP4 row-wise data (shape=", shape,
+                 ") and column-wise data (shape=", col_shape, ") do not match");
     }
   } else {
     shape = convert_shape_back_from_fp4(getTensorShape(*columnwise_data), true);
