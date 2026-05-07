@@ -334,10 +334,9 @@ class TestMoEBlockSingleDevice:
             " divergence; pick a config where they differ"
         )
 
-        assert jnp.allclose(block_aux_loss, corrected_ref, atol=1e-5, rtol=1e-5), (
-            f"Block aux_loss {block_aux_loss} does not match"
-            f" real-routing reference {corrected_ref}"
-        )
+        assert jnp.allclose(
+            block_aux_loss, corrected_ref, atol=1e-5, rtol=1e-5
+        ), f"Block aux_loss {block_aux_loss} does not match real-routing reference {corrected_ref}"
         # The corrected and buggy refs can be numerically close
         # (only the mis-routed tokens contribute to the difference),
         # so assert that the block is *strictly closer* to the

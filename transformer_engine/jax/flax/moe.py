@@ -1042,15 +1042,9 @@ class MoEBlock(TransformerEngineBase):
             # exact same counts as ``psum(local_tokens_per_expert)``
             # without an extra collective. The duplicate topk
             # compute is small relative to the FFNs.
-            _, global_routing_map = self._route_topk(
-                global_logits_2d, full_expert_bias
-            )
-            global_tokens_per_expert = jnp.sum(
-                global_routing_map.astype(jnp.int32), axis=0
-            )
-            aux_loss = self._compute_aux_loss(
-                global_logits_2d, global_tokens_per_expert
-            )
+            _, global_routing_map = self._route_topk(global_logits_2d, full_expert_bias)
+            global_tokens_per_expert = jnp.sum(global_routing_map.astype(jnp.int32), axis=0)
+            aux_loss = self._compute_aux_loss(global_logits_2d, global_tokens_per_expert)
         else:
             aux_loss = None
 
@@ -1123,9 +1117,7 @@ class MoEBlock(TransformerEngineBase):
         )
 
         # -- Stage 8: invert global permute, weighted sum over top-k --
-        output = self._global_combine(
-            y_back, perm, batch_size=local_b, sequence_length=local_s
-        )
+        output = self._global_combine(y_back, perm, batch_size=local_b, sequence_length=local_s)
 
         if self.tensor_parallelism_axis is not None:
             output = jax.lax.psum_scatter(

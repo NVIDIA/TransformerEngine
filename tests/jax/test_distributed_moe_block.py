@@ -153,9 +153,9 @@ class TestDistributedMoEBlock:
                 sharded_variables = jax.jit(sharded_block.init, out_shardings=out_shardings)(
                     init_key, inputs
                 )
-                (sharded_loss, (sharded_output, sharded_aux)), sharded_grads = (
-                    _make_loss_and_grad(sharded_block)(sharded_variables, inputs)
-                )
+                (sharded_loss, (sharded_output, sharded_aux)), sharded_grads = _make_loss_and_grad(
+                    sharded_block
+                )(sharded_variables, inputs)
 
         wi_0 = _unwrap_partitioned(sharded_variables["params"]["wi_0"])
         wi_1 = _unwrap_partitioned(sharded_variables["params"]["wi_1"])
