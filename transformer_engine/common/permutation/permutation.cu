@@ -19,12 +19,19 @@ static __global__ void moe_permute_row_map(const int *sorted_row_id, int *row_id
   const int tid = threadIdx.x;
   const int idx = bid * blockDim.x + tid;
 
-  if (idx >= num_out_tokens) return;
+  if (idx >= num_rows * topK) return;
 
   int source_row = sorted_row_id[idx];
   int source_token_id = source_row / topK;
   int source_topK_id = source_row % topK;
-  row_id_map[source_topK_id * num_rows + source_token_id] = idx;
+
+  if (idx >= num_out_tokens) {
+    // Set the indices of dropped tokens to -1
+    row_id_map[source_topK_id * num_rows + source_token_id] = -1;
+  } else {
+    // Create a row id map for subsequent unpermute operation
+    row_id_map[source_topK_id * num_rows + source_token_id] = idx;
+  }
 }
 
 template <typename T, typename TCompute, bool hasProb>
@@ -232,7 +239,7 @@ void nvte_permute_launcher(const T *input, T *output, const int *sorted_row_id, 
     // moe_permute_fwd
 
     int threads = 64;
-    int blocks = (num_out_tokens + threads - 1) / threads;
+    int blocks = (num_rows * topK + threads - 1) / threads;
 
     moe_permute_row_map<<<blocks, threads, 0, stream>>>(sorted_row_id, row_id_map, num_rows, topK,
                                                         num_out_tokens);
@@ -364,6 +371,13 @@ void nvte_device_radix_sort_pairs(void *temp_storage, size_t *temp_storage_bytes
                                   int *keys_out, int *values_in, int *values_out,
                                   size_t num_items) {
   NVTE_API_CALL(nvte_device_radix_sort_pairs);
-  cub::DeviceRadixSort::SortPairs(temp_storage, *temp_storage_bytes, keys_in, keys_out, values_in,
-                                  values_out, num_items);
+  // Sort keys as uint32_t so any negative-int sentinel (e.g. `-1` placed by an
+  // expert-parallel rank mask) becomes a large unsigned value and lands at the
+  // tail of the sorted output, matching the existing capacity-drop convention
+  // (drops encoded as a large positive expert id) and the
+  // `idx >= num_out_tokens` drop branch in moe_permute_row_map.
+  auto *u_keys_in = reinterpret_cast<uint32_t *>(keys_in);
+  auto *u_keys_out = reinterpret_cast<uint32_t *>(keys_out);
+  cub::DeviceRadixSort::SortPairs(temp_storage, *temp_storage_bytes, u_keys_in, u_keys_out,
+                                  values_in, values_out, num_items);
 }
