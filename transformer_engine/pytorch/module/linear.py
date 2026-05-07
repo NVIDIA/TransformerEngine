@@ -575,10 +575,26 @@ def _linear_forward_impl(
         if is_fsdp2 and weightmat is not weight:
             wt_save = None
 
-        # Raw tensors that ``_linear_setup_ctx`` will combine with anything
-        # else it needs to save; ``prepare_for_saving`` is invoked once at
-        # the autograd boundary on the merged list.
-        tensors_to_save_from_forward = (saved_inputmat, wt_save)
+        # Mark which "save slots" duplicate forward inputs.  When a slot is
+        # an alias of ``inp`` / ``weight`` / ``bias`` we emit ``None`` in
+        # ``tensors_to_save_from_forward`` and rebuild the original ref in
+        # ``_linear_setup_ctx``.  In eager this saves one Python ref per
+        # alias and avoids autograd seeing the same Python object twice;
+        # under ``torch.compile`` it also keeps the opaque op from
+        # returning aliases of its inputs (which the tracer otherwise has
+        # to reason about).
+        saved_tensor_aliases = (
+            "inp" if saved_inputmat is inp else None,
+            "weight" if wt_save is weight else None,
+            "weight",  # ``saved_weight`` slot is always the weight parameter
+            "bias" if bias is not None else None,
+        )
+        tensors_to_save_from_forward = (
+            None if saved_tensor_aliases[0] is not None else saved_inputmat,
+            None if saved_tensor_aliases[1] is not None else wt_save,
+            None,
+            None if saved_tensor_aliases[3] is not None else bias,
+        )
 
         owns_input = saved_inputmat is not inp
 
@@ -587,6 +603,7 @@ def _linear_forward_impl(
             "fsdp_shapes": fsdp_shapes,
             "owns_input": owns_input,
             "is_fsdp2": is_fsdp2,
+            "saved_tensor_aliases": saved_tensor_aliases,
         }
 
     return out, new_weight_workspace, tensors_to_save_from_forward, None, ctx_attrs
@@ -678,8 +695,19 @@ def _linear_setup_ctx(
         bwd_args.grad_weight_quantizer = None
         bwd_args.grad_output_quantizer = None
 
-    saved_inputmat, wt_save = tensors_to_save_from_forward
-    return (saved_inputmat, wt_save, weight, bias)
+    saved_inputmat, wt_save, saved_weight, saved_bias = tensors_to_save_from_forward
+    inputmat_alias, wt_save_alias, saved_weight_alias, bias_alias = ctx_attrs[
+        "saved_tensor_aliases"
+    ]
+    if inputmat_alias == "inp":
+        saved_inputmat = inp
+    if wt_save_alias == "weight":
+        wt_save = weight
+    if saved_weight_alias == "weight":
+        saved_weight = weight
+    if bias_alias == "bias":
+        saved_bias = bias
+    return (saved_inputmat, wt_save, saved_weight, saved_bias)
 
 
 def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ...]:
