@@ -305,7 +305,6 @@ def mhc_fused_expand_combine(
         out of shape (s, b, C, n), which is the expanded and combined output after merging n hyper connections,
         with the same dtype as x
     """
-    _, _, _, n = x.shape
     assert n == 4, "Only n=4 is supported in this implementation"
     out = mHCExpandCombineOp.apply(f, bias, H_post, x, H_res, n, use_tf32, fuse_grad_x_acc)
     return out
