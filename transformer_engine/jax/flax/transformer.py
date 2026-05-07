@@ -788,7 +788,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
                 "Fall back to the unfused attention.\n"
                 "Please try to update the cuDNN and TE to the latest version.\n"
                 f"{qkv_layout=}\n{attn_bias_type=}\n{attn_mask_type=}\n"
-                f"{self.attention_dropout=}\n{self.num_attention_heads=}\n"
+                f"{self.attention_dropout=}\n{self.num_attention_heads=}\n{self.window_size=}\n"
                 f"{self.num_gqa_groups=}\n{seqlen_q=}\n{seqlen_kv=}\n{head_dim_qk=}\n{head_dim_v=}\n"
             )
 
