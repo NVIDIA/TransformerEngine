@@ -262,6 +262,7 @@ def mhc_fused_expand_combine(
     H_post: torch.Tensor,
     x: torch.Tensor,
     H_res: torch.Tensor,
+    n: int,
     use_tf32: bool = True,
     fuse_grad_x_acc: bool = False,
 ):
@@ -287,6 +288,8 @@ def mhc_fused_expand_combine(
     H_res : torch.Tensor
         input H_res matrix of shape (s, b, n, n)
         dtype is torch.bfloat16 or torch.float32
+    n : int
+        number of hyper connections, where only n=4 is supported in the current implementation
     use_tf32 : bool
         whether to use TF32 precision for matmul operations. If False, it will use ieee for better precision.
         This is mainly used by our unittests since TF32 precision will introduce some errors and cause tests to fail
@@ -311,9 +314,9 @@ def mhc_fused_expand_combine(
 def mhc_fused_projection(
     x: torch.Tensor,
     phi: torch.Tensor,
-    norm_weight: torch.Tensor = None,
     use_tf32: bool = True,
     fuse_grad_x_acc: bool = False,
+    norm_weight: torch.Tensor = None,
 ):
     """
     Fused projection operation to compute H matrices and mean square for RMSNorm (see eq. 14-15, section 4.3.1 of the DeepSeek mHC paper):
@@ -340,9 +343,6 @@ def mhc_fused_projection(
     phi : torch.Tensor
         projection matrix of shape (N, K), where N=2n+n*n (=24 for n=4)
         dtype is torch.bfloat16 or torch.float32
-    norm_weight : torch.Tensor or None
-        optional, the weight for RMSNorm, of shape (K,), which is the learnable per-element affine parameters (gamma) applied to RMSNorm
-        dtype is torch.bfloat16 or torch.float32
     use_tf32 : bool
         whether to use TF32 precision for matmul operations. If False, it will use ieee for better precision.
         This is mainly used by our unittests since TF32 precision will introduce some errors and cause tests to fail.
@@ -350,6 +350,9 @@ def mhc_fused_projection(
         Use the same buffer for inplace gradient accumulation to avoid PyTorch autograd overhead.
         If enable, triton kernels will accumulate the gradient of x in the same buffer to avoid copying the gradient by PyTorch.
         Note: if enabled, you must also enable this flag for `mhc_fused_aggregate` & `mhc_fused_expand_combine` so they can share the same buffer for activation's gradient accumulation.
+    norm_weight : torch.Tensor or None
+        optional, the weight for RMSNorm, of shape (K,), which is the learnable per-element affine parameters (gamma) applied to RMSNorm
+        dtype is torch.bfloat16 or torch.float32
 
     Returns
     -------
