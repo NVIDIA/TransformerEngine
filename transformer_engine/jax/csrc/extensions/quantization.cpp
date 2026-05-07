@@ -383,9 +383,17 @@ Error_Type GroupedQuantizeFFI(cudaStream_t stream, Buffer_Type inputs, Buffer_Ty
   cudaStreamSynchronize(stream);
 
   size_t sum_group_sizes = std::accumulate(dim_list_host.begin(), dim_list_host.end(), 0);
-  NVTE_CHECK(m == sum_group_sizes || input_dims[0] == sum_group_sizes,
-             "Unexpected group_sizes! Got %zu (M=%zu, input_dims[0] = %zu)", sum_group_sizes, m,
-             input_dims[0]);
+  // Allow callers to pass an input that is at least as large as the active
+  // ragged region (sum_group_sizes). This supports ragged-all-to-all flows
+  // where the recv buffer is over-allocated to a worst-case size and only the
+  // first sum_group_sizes rows are populated; the trailing slack rows are
+  // simply not quantized (and not consumed by the downstream grouped GEMM
+  // which is also keyed on group_sizes).
+  // For flatten_axis==1, m == input_dims[0]; for flatten_axis>1, the per-group
+  // tile is dim_list_host[i] * non_group_m, so the binding dim is input_dims[0].
+  NVTE_CHECK(sum_group_sizes <= input_dims[0],
+             "Unexpected group_sizes! sum(group_sizes)=%zu must be <= input_dims[0]=%zu (M=%zu)",
+             sum_group_sizes, input_dims[0], m);
 
   if (is_delayed_scaling) {
     NVTE_CHECK(amaxs->dimensions()[0] == num_groups, "Unexpected amax size, Expected ", num_groups,

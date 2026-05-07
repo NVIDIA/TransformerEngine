@@ -6,7 +6,7 @@
 
 This module exposes :class:`MoEBlock`, a self-contained Flax Linen MoE layer
 that wires together TE's fused router, a selectable token-dispatch backend
-(pure-JAX ``unfused_*`` or fused Triton), TE's ``grouped_dense``, and an
+(``pure_jax`` or ``triton``), TE's ``grouped_dense``, and an
 optional ragged-all-to-all (A2A / A2Av) expert-parallelism strategy.
 
 Architecture
@@ -56,11 +56,12 @@ way to support ``align_size > 0`` end-to-end. Until that lands the
 ``align_size > 0`` tests stay xfail.
 """
 
+from functools import partial
 from typing import Any, Callable, NewType, Optional, Tuple, Union
 
 import jax
 import jax.numpy as jnp
-from flax import linen as nn
+from flax import linen as nn, struct as flax_struct
 from jax.sharding import PartitionSpec as P
 
 from ..dense import grouped_dense
@@ -70,10 +71,11 @@ from ..permutation import (
     compute_reverse_ragged_all_to_all_params,
     local_permute_after_a2a,
     local_unpermute_before_a2a,
+    PureJaxPermState,
+    pure_jax_token_combine,
+    pure_jax_token_dispatch,
     token_combine,
     token_dispatch,
-    unfused_token_combine,
-    unfused_token_dispatch,
 )
 from ..quantize import noop_quantizer_set
 from ..router import ScoreFunction, fused_moe_aux_loss, fused_topk_with_score_function
@@ -87,7 +89,36 @@ Array = NewType("Array", jnp.ndarray)
 Initializer = Callable[[PRNGKey, Shape, DType], Array]
 
 
-__all__ = ["MoEBlock"]
+__all__ = ["GlobalPermuteResult", "MoEBlock"]
+
+
+# =============================================================================
+# GlobalPermuteResult
+# =============================================================================
+#
+# Output of :meth:`MoEBlock._global_permute`. Carried as a pytree (so it
+# crosses ``jax.shard_map`` / ``jax.value_and_grad`` boundaries
+# transparently) and consumed by :meth:`MoEBlock._global_combine`. The
+# fields populated depend on the permutation backend; the unused fields
+# stay ``None``.
+#
+# Per-backend payloads (anything else is ``None``):
+#   pure_jax: ``perm_state``, ``routing_weights``
+#   triton:   ``row_id_map``, ``pad_offsets``, ``merging_probs``
+
+
+@flax_struct.dataclass
+class GlobalPermuteResult:
+    """Result of :meth:`MoEBlock._global_permute`."""
+
+    sorted_inputs: jnp.ndarray
+    group_sizes: jnp.ndarray
+    perm_state: Optional[PureJaxPermState] = None
+    routing_weights: Optional[jnp.ndarray] = None
+    row_id_map: Optional[jnp.ndarray] = None
+    pad_offsets: Optional[jnp.ndarray] = None
+    merging_probs: Optional[jnp.ndarray] = None
+    backend: str = flax_struct.field(pytree_node=False, default="pure_jax")
 
 
 # =============================================================================
@@ -106,8 +137,8 @@ class MoEBlock(TransformerEngineBase):
     Two permutation backends are pluggable via ``permutation_backend``:
 
     * ``"pure_jax"`` (default) -- argsort-based
-      :func:`~transformer_engine.jax.permutation.unfused_token_dispatch` /
-      :func:`~transformer_engine.jax.permutation.unfused_token_combine`.
+      :func:`~transformer_engine.jax.permutation.pure_jax_token_dispatch` /
+      :func:`~transformer_engine.jax.permutation.pure_jax_token_combine`.
       Faster than Triton in profiling for DeepSeek-style configs.
     * ``"triton"`` -- TE's fused
       :func:`~transformer_engine.jax.permutation.token_dispatch` /
@@ -273,70 +304,6 @@ class MoEBlock(TransformerEngineBase):
         super().__post_init__()
 
     # ------------------------------------------------------------------
-    # Parameter registration
-    # ------------------------------------------------------------------
-
-    def _make_params(self, hidden_size: int) -> dict:
-        """Register module parameters and return them as a dict."""
-        gate_kernel = self.param(
-            "gate_kernel",
-            nn.with_logical_partitioning(self.kernel_init, self.gate_kernel_axes),
-            (hidden_size, self.num_experts),
-            self.dtype,
-        )
-        wi_0 = self.param(
-            "wi_0",
-            nn.with_logical_partitioning(self.kernel_init, self.wi_kernel_axes),
-            (self.num_experts, hidden_size, self.intermediate_size),
-            self.dtype,
-        )
-        wi_1 = self.param(
-            "wi_1",
-            nn.with_logical_partitioning(self.kernel_init, self.wi_kernel_axes),
-            (self.num_experts, hidden_size, self.intermediate_size),
-            self.dtype,
-        )
-        wo = self.param(
-            "wo",
-            nn.with_logical_partitioning(self.kernel_init, self.wo_kernel_axes),
-            (self.num_experts, self.intermediate_size, hidden_size),
-            self.dtype,
-        )
-        params: dict = {
-            "gate_kernel": gate_kernel,
-            "wi_0": wi_0,
-            "wi_1": wi_1,
-            "wo": wo,
-        }
-        if self.use_bias:
-            params["wi_0_bias"] = self.param(
-                "wi_0_bias",
-                nn.with_logical_partitioning(self.bias_init, ("exp", "mlp")),
-                (self.num_experts, self.intermediate_size),
-                self.dtype,
-            )
-            params["wi_1_bias"] = self.param(
-                "wi_1_bias",
-                nn.with_logical_partitioning(self.bias_init, ("exp", "mlp")),
-                (self.num_experts, self.intermediate_size),
-                self.dtype,
-            )
-            params["wo_bias"] = self.param(
-                "wo_bias",
-                nn.with_logical_partitioning(self.bias_init, ("exp", "embed")),
-                (self.num_experts, hidden_size),
-                self.dtype,
-            )
-        if self.use_expert_bias:
-            params["expert_bias"] = self.param(
-                "expert_bias",
-                nn.with_logical_partitioning(self.expert_bias_init, ("exp",)),
-                (self.num_experts,),
-                self.dtype,
-            )
-        return params
-
-    # ------------------------------------------------------------------
     # Entry point
     # ------------------------------------------------------------------
 
@@ -363,17 +330,91 @@ class MoEBlock(TransformerEngineBase):
         inputs = with_sharding_constraint_by_logical_axes(inputs, self.input_axes)
 
         _, _, hidden_size = inputs.shape
-        params = self._make_params(hidden_size)
 
-        # The gate runs OUTSIDE any EP shard_map: under EP each shard
-        # projects only its local slice of tokens, producing local gate
-        # logits with the same per-shard layout as ``inputs``.
-        gate_logits = self._gate(inputs, params["gate_kernel"])
+        # Param registrations are inlined here (not in a helper) so each
+        # ``self.param`` lives close to the rest of the entry point.
+        # Note: under EP the FFN weights and ``expert_bias`` are
+        # consumed *inside* a ``shard_map`` body. Flax's ``self.param``
+        # must run OUTSIDE any JAX transform that would alter the
+        # variable scope (``shard_map`` does), so the registrations stay
+        # here in ``__call__`` and the values are passed down explicitly
+        # via ``in_specs``. ``_gate`` is called outside ``shard_map`` in
+        # both paths, so its kernel is registered inline inside
+        # ``_gate`` itself rather than here.
+
+        gate_logits = self._gate(inputs)
+
+        wi_0 = self.param(
+            "wi_0",
+            nn.with_logical_partitioning(self.kernel_init, self.wi_kernel_axes),
+            (self.num_experts, hidden_size, self.intermediate_size),
+            self.dtype,
+        )
+        wi_1 = self.param(
+            "wi_1",
+            nn.with_logical_partitioning(self.kernel_init, self.wi_kernel_axes),
+            (self.num_experts, hidden_size, self.intermediate_size),
+            self.dtype,
+        )
+        wo = self.param(
+            "wo",
+            nn.with_logical_partitioning(self.kernel_init, self.wo_kernel_axes),
+            (self.num_experts, self.intermediate_size, hidden_size),
+            self.dtype,
+        )
+        wi_0_bias = wi_1_bias = wo_bias = None
+        if self.use_bias:
+            wi_0_bias = self.param(
+                "wi_0_bias",
+                nn.with_logical_partitioning(self.bias_init, ("exp", "mlp")),
+                (self.num_experts, self.intermediate_size),
+                self.dtype,
+            )
+            wi_1_bias = self.param(
+                "wi_1_bias",
+                nn.with_logical_partitioning(self.bias_init, ("exp", "mlp")),
+                (self.num_experts, self.intermediate_size),
+                self.dtype,
+            )
+            wo_bias = self.param(
+                "wo_bias",
+                nn.with_logical_partitioning(self.bias_init, ("exp", "embed")),
+                (self.num_experts, hidden_size),
+                self.dtype,
+            )
+        expert_bias = None
+        if self.use_expert_bias:
+            expert_bias = self.param(
+                "expert_bias",
+                nn.with_logical_partitioning(self.expert_bias_init, ("exp",)),
+                (self.num_experts,),
+                self.dtype,
+            )
 
         if self.expert_parallelism_axis is None:
-            output, aux_loss = self._forward_no_ep(inputs, gate_logits, params)
+            output, aux_loss = self._forward_no_ep(
+                inputs,
+                gate_logits,
+                wi_0=wi_0,
+                wi_1=wi_1,
+                wo=wo,
+                wi_0_bias=wi_0_bias,
+                wi_1_bias=wi_1_bias,
+                wo_bias=wo_bias,
+                expert_bias=expert_bias,
+            )
         else:
-            output, aux_loss = self._forward_a2a_ep(inputs, gate_logits, params)
+            output, aux_loss = self._forward_a2a_ep(
+                inputs,
+                gate_logits,
+                wi_0=wi_0,
+                wi_1=wi_1,
+                wo=wo,
+                wi_0_bias=wi_0_bias,
+                wi_1_bias=wi_1_bias,
+                wo_bias=wo_bias,
+                expert_bias=expert_bias,
+            )
 
         if self.aux_loss_coeff <= 0.0:
             aux_loss = None
@@ -383,14 +424,34 @@ class MoEBlock(TransformerEngineBase):
     # Gate
     # ------------------------------------------------------------------
 
-    def _gate(self, inputs: jnp.ndarray, gate_kernel: jnp.ndarray) -> jnp.ndarray:
+    def _gate(self, inputs: jnp.ndarray) -> jnp.ndarray:
         """Linear gate projection ``inputs @ gate_kernel``.
 
         Kept as a plain ``einsum`` (not ``DenseGeneral``) so it composes
         cleanly with the EP shard_map: the gate runs in the outer
         (pre-shard_map) scope and its output passes through the
-        ``shard_map`` boundary unchanged.
+        ``shard_map`` boundary unchanged. Because the gate runs outside
+        any ``shard_map`` body in both EP and no-EP forwards, the
+        ``gate_kernel`` parameter is registered inline here.
+
+        The gating GEMM is intentionally kept in ``self.dtype`` (typically
+        ``bfloat16``) and is **not** autocast to FP8 even when the caller
+        wraps the block in :func:`transformer_engine.jax.autocast`. Two
+        reasons: (1) the GEMM is tiny (``H * E`` with ``E`` small) and
+        contributes well under 1% of the block's compute, so quantization
+        savings are marginal; (2) the resulting logits feed a top-k +
+        softmax (or sigmoid) routing decision that is sensitive to
+        quantization noise -- routing flips at low-confidence tokens
+        could materially hurt model quality. To override, wrap the call
+        site in your own ``autocast`` and manually replace this method.
         """
+        hidden_size = inputs.shape[-1]
+        gate_kernel = self.param(
+            "gate_kernel",
+            nn.with_logical_partitioning(self.kernel_init, self.gate_kernel_axes),
+            (hidden_size, self.num_experts),
+            self.dtype,
+        )
         kernel = gate_kernel.astype(inputs.dtype)
         return jnp.einsum("bsh,he->bse", inputs, kernel)
 
@@ -427,31 +488,48 @@ class MoEBlock(TransformerEngineBase):
     def _compute_aux_loss(
         self,
         logits_2d: jnp.ndarray,
+        tokens_per_expert: jnp.ndarray,
     ) -> Optional[jnp.ndarray]:
         """Compute the MoE auxiliary load-balancing loss.
 
-        The score-for-aux kernel has no data dependency on the main
-        routing kernel, so XLA can overlap them on the GPU.
+        The score-for-aux kernel reads only ``logits_2d`` and the final
+        reduction reads only the (already-computed) ``tokens_per_expert``,
+        so the aux scores can run concurrently with the main routing
+        path on the GPU.
 
         ``logits_2d`` should be the *full* logits tensor over the global
         token batch -- under EP the caller is responsible for
         :func:`jax.lax.all_gather` ing the logits before calling this so
         the aux_loss formula
         ``loss = (E * coeff / (k * T^2)) * sum_i(sum_t(probs[t,i]) * tokens[i])``
-        sees the global ``T`` and the global ``tokens_per_expert``.
+        sees the global ``T``.
+
+        ``tokens_per_expert`` must be the per-expert token-assignment
+        count from the *actual* routing decision -- i.e. derived from
+        ``_route_topk``'s ``routing_map``, not recomputed from a clean
+        top-k. This matters under DeepSeek-style routing
+        (``num_groups > 0`` / ``group_topk > 0``) where the
+        post-grouping routing differs from a plain top-k. Under EP the
+        caller is responsible for summing over all (ep + dp) shards
+        first so the count is global.
         """
         if self.aux_loss_coeff <= 0.0:
             return None
-        aux_scores, aux_routing_map = fused_topk_with_score_function(
+        # The "compute_aux_scores=True" kernel intentionally ignores
+        # num_groups/group_topk/expert_bias and returns the dense
+        # post-score-function scores over all experts. Those scores are
+        # what the aux-loss formula expects (raw scoring, no grouping
+        # bias); the routing decisions used for ``tokens_per_expert``
+        # come from the caller-supplied real ``routing_map``.
+        aux_scores, _ = fused_topk_with_score_function(
             logits_2d.astype(jnp.float32),
             topk=self.num_experts_per_tok,
             score_function=self.score_function,
             compute_aux_scores=True,
         )
-        aux_tokens_per_expert = jnp.sum(aux_routing_map.astype(jnp.int32), axis=0)
         return fused_moe_aux_loss(
             aux_scores.astype(jnp.float32),
-            aux_tokens_per_expert,
+            tokens_per_expert.astype(jnp.int32),
             topk=self.num_experts_per_tok,
             coeff=self.aux_loss_coeff,
         )
@@ -465,28 +543,15 @@ class MoEBlock(TransformerEngineBase):
         inputs_2d: jnp.ndarray,
         sparse_probs: jnp.ndarray,
         routing_map: jnp.ndarray,
-    ) -> dict:
+    ) -> GlobalPermuteResult:
         """Dispatch tokens to the global expert axis.
 
-        Returns a permutation-result dict suitable both for the no-EP
-        forward (where the same buffer feeds ``_expert_ffn`` directly) and
-        for the A2A-EP path (where the buffer is sliced + sent over the EP
-        axis before the FFN). The dict carries the per-backend opaque
-        state needed to invert the dispatch in :meth:`_global_combine`.
-
-        The output dict layout is::
-
-            {
-                "backend":         "pure_jax" | "triton",
-                "sorted_inputs":   [buffer_size, hidden],
-                "group_sizes":     [num_experts],     # per-expert,
-                                                       # length == E always.
-                "perm_state":      UnfusedPermState | None,   # pure_jax
-                "row_id_map":      jnp.ndarray | None,        # triton
-                "pad_offsets":     jnp.ndarray | None,        # triton
-                "routing_weights": jnp.ndarray | None,        # pure_jax
-                "merging_probs":   jnp.ndarray | None,        # triton
-            }
+        Returns a :class:`GlobalPermuteResult` suitable both for the
+        no-EP forward (where the same buffer feeds ``_expert_ffn``
+        directly) and for the A2A-EP path (where the buffer is sliced +
+        sent over the EP axis before the FFN). The result carries the
+        per-backend opaque state needed to invert the dispatch in
+        :meth:`_global_combine`.
         """
         num_tokens = inputs_2d.shape[0]
         topk = self.num_experts_per_tok
@@ -495,20 +560,20 @@ class MoEBlock(TransformerEngineBase):
             selected_experts, routing_weights = routing_map_to_selected_experts(
                 sparse_probs, routing_map, topk
             )
-            sorted_inputs, perm_state, group_sizes = unfused_token_dispatch(
+            sorted_inputs, perm_state, group_sizes = pure_jax_token_dispatch(
                 inputs_2d,
                 selected_experts,
                 num_experts=self.num_experts,
                 num_experts_per_tok=topk,
                 align_size=self.align_size,
             )
-            return {
-                "backend": "pure_jax",
-                "sorted_inputs": sorted_inputs,
-                "group_sizes": group_sizes,
-                "perm_state": perm_state,
-                "routing_weights": routing_weights,
-            }
+            return GlobalPermuteResult(
+                backend="pure_jax",
+                sorted_inputs=sorted_inputs,
+                group_sizes=group_sizes,
+                perm_state=perm_state,
+                routing_weights=routing_weights,
+            )
 
         # triton
         num_out_tokens = num_tokens * topk
@@ -526,14 +591,14 @@ class MoEBlock(TransformerEngineBase):
             probs=sparse_probs,
             align_size=align_size_arg,
         )
-        return {
-            "backend": "triton",
-            "sorted_inputs": sorted_inputs,
-            "group_sizes": group_sizes,
-            "row_id_map": row_id_map,
-            "pad_offsets": pad_offsets,
-            "merging_probs": sparse_probs,
-        }
+        return GlobalPermuteResult(
+            backend="triton",
+            sorted_inputs=sorted_inputs,
+            group_sizes=group_sizes,
+            row_id_map=row_id_map,
+            pad_offsets=pad_offsets,
+            merging_probs=sparse_probs,
+        )
 
     # ------------------------------------------------------------------
     # Expert FFN (three grouped_dense calls + activation)
@@ -543,10 +608,20 @@ class MoEBlock(TransformerEngineBase):
         self,
         sorted_inputs: jnp.ndarray,
         group_sizes: jnp.ndarray,
-        params: dict,
         n_groups: int,
+        wi_0: jnp.ndarray,
+        wi_1: jnp.ndarray,
+        wo: jnp.ndarray,
+        wi_0_bias: Optional[jnp.ndarray] = None,
+        wi_1_bias: Optional[jnp.ndarray] = None,
+        wo_bias: Optional[jnp.ndarray] = None,
     ) -> jnp.ndarray:
         """Run the per-expert SwiGLU-style FFN over a permuted buffer.
+
+        All ``wi_*`` / ``wo`` weights and the optional biases are passed
+        in as explicit args (rather than registered inline here) because
+        in the EP path this method runs *inside* a ``shard_map`` body
+        and Flax param registration must happen outside that scope.
 
         Parameters
         ----------
@@ -558,24 +633,26 @@ class MoEBlock(TransformerEngineBase):
             ``sum(group_sizes)`` must equal ``buffer_size`` (TE
             ``grouped_dense`` FFI assertion at
             ``transformer_engine/jax/csrc/extensions/gemm.cpp:1029``).
-        params : dict
-            Block parameters from :meth:`_make_params`. Reads ``wi_0``,
-            ``wi_1``, ``wo``, and the optional bias entries.
         n_groups : int
             Number of expert groups. Equals ``self.num_experts`` for the
             no-EP path and ``num_experts // num_ep`` for the A2A-EP path.
             Used to size the per-call quantizer set so the FP8 metadata
             tensors match ``group_sizes``.
+        wi_0, wi_1, wo : jnp.ndarray
+            Expert weight tensors. Shapes (no-EP):
+            ``(num_experts, hidden, intermediate)`` for wi_*,
+            ``(num_experts, intermediate, hidden)`` for wo. Under EP
+            the leading expert dim is sliced to ``num_experts // num_ep``.
+        wi_0_bias, wi_1_bias, wo_bias : Optional[jnp.ndarray]
+            Optional per-expert biases (shape ``(num_experts, N)``);
+            ``grouped_dense`` adds ``bias[i]`` to the rows belonging to
+            expert ``i`` in the permuted layout.
 
         Returns
         -------
         expert_outputs : jnp.ndarray
             ``[buffer_size, hidden]``.
         """
-        wi_0 = params["wi_0"]
-        wi_1 = params["wi_1"]
-        wo = params["wo"]
-
         # Each grouped_dense call gets its own quantizer_set with
         # n_groups matching ``group_sizes``; this keeps the FP8 meta
         # tensors correctly sized in both no-EP and A2A-EP cases.
@@ -591,13 +668,6 @@ class MoEBlock(TransformerEngineBase):
             wi_1 = wi_1.astype(sorted_inputs.dtype)
         if q_set_wo == noop_quantizer_set:
             wo = wo.astype(sorted_inputs.dtype)
-
-        # ``grouped_dense`` accepts per-expert bias of shape (G, N); it
-        # adds ``bias[i]`` to the ``group_sizes[i]`` rows belonging to
-        # expert ``i`` in the permuted layout.
-        wi_0_bias = params.get("wi_0_bias") if self.use_bias else None
-        wi_1_bias = params.get("wi_1_bias") if self.use_bias else None
-        wo_bias = params.get("wo_bias") if self.use_bias else None
 
         layer_w0 = grouped_dense(
             sorted_inputs,
@@ -636,7 +706,7 @@ class MoEBlock(TransformerEngineBase):
     def _global_combine(
         self,
         expert_outputs: jnp.ndarray,
-        perm_result: dict,
+        perm_result: GlobalPermuteResult,
         batch_size: int,
         sequence_length: int,
     ) -> jnp.ndarray:
@@ -645,12 +715,11 @@ class MoEBlock(TransformerEngineBase):
         Gathers per-expert outputs back into ``[batch, sequence, hidden]``
         and applies the per-token weighted sum across the top-k experts.
         """
-        backend = perm_result["backend"]
-        if backend == "pure_jax":
-            return unfused_token_combine(
+        if perm_result.backend == "pure_jax":
+            return pure_jax_token_combine(
                 expert_outputs,
-                perm_result["perm_state"],
-                perm_result["routing_weights"],
+                perm_result.perm_state,
+                perm_result.routing_weights,
                 num_experts_per_tok=self.num_experts_per_tok,
                 batch_size=batch_size,
                 sequence_length=sequence_length,
@@ -658,9 +727,9 @@ class MoEBlock(TransformerEngineBase):
         # triton
         out_2d = token_combine(
             expert_outputs,
-            perm_result["row_id_map"],
-            merging_probs=perm_result["merging_probs"],
-            pad_offsets=perm_result["pad_offsets"],
+            perm_result.row_id_map,
+            merging_probs=perm_result.merging_probs,
+            pad_offsets=perm_result.pad_offsets,
         )
         hidden_size = out_2d.shape[-1]
         return out_2d.reshape(batch_size, sequence_length, hidden_size).astype(self.dtype)
@@ -673,7 +742,14 @@ class MoEBlock(TransformerEngineBase):
         self,
         inputs: jnp.ndarray,
         gate_logits: jnp.ndarray,
-        params: dict,
+        *,
+        wi_0: jnp.ndarray,
+        wi_1: jnp.ndarray,
+        wo: jnp.ndarray,
+        wi_0_bias: Optional[jnp.ndarray] = None,
+        wi_1_bias: Optional[jnp.ndarray] = None,
+        wo_bias: Optional[jnp.ndarray] = None,
+        expert_bias: Optional[jnp.ndarray] = None,
     ) -> Tuple[jnp.ndarray, Optional[jnp.ndarray]]:
         """Single-shard or DP/FSDP/TP forward (no shard_map wrapper).
 
@@ -681,19 +757,55 @@ class MoEBlock(TransformerEngineBase):
         ``custom_partitioning`` rule -- there is no cross-primitive
         collective that the rules cannot express on their own, so a
         ``shard_map`` is unnecessary here.
+
+        Sharding contract for callers
+        -----------------------------
+
+        On this no-EP path the grouped quantize and grouped GEMMs run
+        in the caller's outer SPMD context (no ``shard_map`` boundary).
+        Their custom_partitioning rules read sharding from each input's
+        ``NamedSharding`` and propagate consistent shardings on outputs.
+        Concretely:
+
+        * ``inputs`` should be FSDP/DP-sharded on the batch dim
+          (``input_axes`` in :class:`MoEBlock` enforces this via a
+          logical ``with_sharding_constraint``).
+        * ``wi_*`` / ``wo`` weights should carry the logical axes
+          ``wi_kernel_axes`` / ``wo_kernel_axes`` so FSDP shards a
+          weight non-contracting dim, gathered inside ``grouped_dense``
+          before the GEMM.
+        * The wgrad reduce-scatter (when FSDP is active) is emitted by
+          ``grouped_dense_bwd``'s partitioning rule; no explicit
+          collective is needed here.
+
+        Without those shardings the grouped GEMM falls back to
+        replicated-everywhere semantics (legal but defeats FSDP/DP).
+        Tested in ``tests/jax/test_distributed_moe_block.py`` for the
+        EP=2 + FSDP=2 case; the no-EP + FSDP-only case shares the same
+        infra and is covered when ``expert_parallelism_axis`` is left
+        ``None`` in that test.
         """
         batch_size, sequence_length, hidden_size = inputs.shape
         inputs_2d = inputs.reshape(-1, hidden_size)
         logits_2d = gate_logits.reshape(-1, self.num_experts)
 
-        sparse_probs, routing_map = self._route_topk(logits_2d, params.get("expert_bias"))
-        aux_loss = self._compute_aux_loss(logits_2d)
+        sparse_probs, routing_map = self._route_topk(logits_2d, expert_bias)
+        # ``tokens_per_expert`` MUST come from the real routing_map so the
+        # aux-loss objective matches actual routing decisions under
+        # DeepSeek-style num_groups/group_topk routing.
+        tokens_per_expert = jnp.sum(routing_map.astype(jnp.int32), axis=0)
+        aux_loss = self._compute_aux_loss(logits_2d, tokens_per_expert)
         perm = self._global_permute(inputs_2d, sparse_probs, routing_map)
         expert_outputs = self._expert_ffn(
-            perm["sorted_inputs"],
-            perm["group_sizes"],
-            params,
+            perm.sorted_inputs,
+            perm.group_sizes,
             n_groups=self.num_experts,
+            wi_0=wi_0,
+            wi_1=wi_1,
+            wo=wo,
+            wi_0_bias=wi_0_bias,
+            wi_1_bias=wi_1_bias,
+            wo_bias=wo_bias,
         )
         output = self._global_combine(expert_outputs, perm, batch_size, sequence_length)
 
@@ -714,7 +826,14 @@ class MoEBlock(TransformerEngineBase):
         self,
         inputs: jnp.ndarray,
         gate_logits: jnp.ndarray,
-        params: dict,
+        *,
+        wi_0: jnp.ndarray,
+        wi_1: jnp.ndarray,
+        wo: jnp.ndarray,
+        wi_0_bias: Optional[jnp.ndarray] = None,
+        wi_1_bias: Optional[jnp.ndarray] = None,
+        wo_bias: Optional[jnp.ndarray] = None,
+        expert_bias: Optional[jnp.ndarray] = None,
     ) -> Tuple[jnp.ndarray, Optional[jnp.ndarray]]:
         """Wrap the body in a ``shard_map`` that runs a forward
         ``ragged_all_to_all`` (A2A / A2Av) around the FFN.
@@ -800,12 +919,15 @@ class MoEBlock(TransformerEngineBase):
         # pytree. shard_map fully supports pytrees: ``in_specs`` must
         # structurally match ``captured`` and we build them in lockstep
         # so adding/removing an optional bias is one ``dict[name] = ...``.
+        # Params must be packed here (rather than passed inline by
+        # ``self.param`` inside the body) because Flax variable scopes
+        # must not be entered from inside a JAX transform's body.
         captured: dict = {
             "inputs": inputs,
             "gate_logits": gate_logits,
-            "wi_0": params["wi_0"],
-            "wi_1": params["wi_1"],
-            "wo": params["wo"],
+            "wi_0": wi_0,
+            "wi_1": wi_1,
+            "wo": wo,
         }
         in_specs: dict = {
             "inputs": P(batch_pspec_axis, None, None),
@@ -814,161 +936,208 @@ class MoEBlock(TransformerEngineBase):
             "wi_1": P(ep_axis, None, None),
             "wo": P(ep_axis, None, None),
         }
-        if "expert_bias" in params:
-            captured["expert_bias"] = params["expert_bias"]
+        if expert_bias is not None:
+            captured["expert_bias"] = expert_bias
             in_specs["expert_bias"] = P(ep_axis)
-        if "wi_0_bias" in params:
+        if wi_0_bias is not None:
+            captured["wi_0_bias"] = wi_0_bias
+            captured["wi_1_bias"] = wi_1_bias
+            captured["wo_bias"] = wo_bias
             for name in ("wi_0_bias", "wi_1_bias", "wo_bias"):
-                captured[name] = params[name]
                 in_specs[name] = P(ep_axis, None)
 
-        def _a2a_fn(local: dict) -> Tuple[jnp.ndarray, jnp.ndarray]:
-            shard_id = jax.lax.axis_index(ep_axis)
-
-            # -- Stage 1: per-shard route + global permute over all E --
-            # Inside the shard_map body each input has its EP axis already
-            # consumed, so ``local_inputs.shape == [B/num_ep, S, H]``.
-            local_inputs = local["inputs"]
-            local_logits = local["gate_logits"]
-            local_b, local_s, local_h = local_inputs.shape
-            inputs_2d = local_inputs.reshape(-1, local_h)
-            logits_2d = local_logits.reshape(-1, self.num_experts)
-
-            # The router operates over the full expert axis, so the
-            # EP-sharded ``expert_bias`` (in_spec ``P(ep_axis)``) must be
-            # all-gathered before being passed in.
-            if "expert_bias" in local:
-                full_expert_bias = jax.lax.all_gather(
-                    local["expert_bias"], axis_name=ep_axis, tiled=True
-                )
-            else:
-                full_expert_bias = None
-            sparse_probs, routing_map = self._route_topk(logits_2d, full_expert_bias)
-
-            # aux_loss must see the global token batch and the global
-            # tokens_per_expert: its formula ``E*coeff/(k*T^2) * sum_i(
-            # sum_t(probs[t,i]) * tokens[i])`` is not shard-decomposable
-            # (the sum_t * tokens product is data-dependent across
-            # shards). Cheapest fix: gather logits along ALL batch
-            # axes (ep + any DP axes) so the kernel sees the full
-            # token set. The aux branch has no data dependency on the
-            # main routing path so XLA can overlap the two on the GPU.
-            if self.aux_loss_coeff > 0.0:
-                # ``axis_name`` accepts a tuple ⇒ a single all_gather
-                # over the cartesian product of axes; XLA may lower
-                # this to one multi-axis collective or split it.
-                if len(self.data_parallelism_axes) == 0:
-                    aux_gather_axes: Any = ep_axis
-                else:
-                    aux_gather_axes = (ep_axis, *self.data_parallelism_axes)
-                global_logits_2d = jax.lax.all_gather(
-                    logits_2d, axis_name=aux_gather_axes, axis=0, tiled=True
-                )
-                aux_loss = self._compute_aux_loss(global_logits_2d)
-            else:
-                aux_loss = None
-
-            perm = self._global_permute(inputs_2d, sparse_probs, routing_map)
-            global_group_sizes = perm["group_sizes"]  # [E]
-
-            # -- Stage 2: gather per-expert counts across the EP axis --
-            all_shards_tokens_per_expert = jax.lax.all_gather(
-                global_group_sizes[None, :],
-                axis_name=ep_axis,
-                axis=0,
-                tiled=True,
-            )  # [num_ep, num_experts]
-
-            # -- Stage 3: forward ragged_all_to_all over EP --
-            in_off, send_sz, out_off, recv_sz = compute_ragged_all_to_all_params(
-                all_shards_tokens_per_expert, shard_id, num_ep
-            )
-            recv_buf = jnp.zeros(
-                (recv_buffer_rows, local_h),
-                dtype=perm["sorted_inputs"].dtype,
-            )
-            x_recv = jax.lax.ragged_all_to_all(
-                perm["sorted_inputs"],
-                recv_buf,
-                in_off,
-                send_sz,
-                out_off,
-                recv_sz,
-                axis_name=ep_axis,
-            )
-
-            # -- Stage 4: local permute (source_shard, expert) -> (expert, shard)
-            sorted_x, local_group_sizes, local_perm_state = local_permute_after_a2a(
-                x_recv,
-                all_shards_tokens_per_expert,
-                shard_id,
-                num_ep,
-            )
-
-            # -- Stage 5: per-expert FFN (E_local groups) --
-            local_params: dict = {
-                "wi_0": local["wi_0"],
-                "wi_1": local["wi_1"],
-                "wo": local["wo"],
-            }
-            if "wi_0_bias" in local:
-                local_params["wi_0_bias"] = local["wi_0_bias"]
-                local_params["wi_1_bias"] = local["wi_1_bias"]
-                local_params["wo_bias"] = local["wo_bias"]
-            expert_outputs = self._expert_ffn(
-                sorted_x,
-                local_group_sizes,
-                local_params,
-                n_groups=num_experts_local,
-            )
-
-            # -- Stage 6: invert local permute --
-            x_send_back = local_unpermute_before_a2a(expert_outputs, local_perm_state)
-
-            # -- Stage 7: reverse ragged_all_to_all over EP --
-            in_off_r, send_sz_r, out_off_r, recv_sz_r = compute_reverse_ragged_all_to_all_params(
-                all_shards_tokens_per_expert, shard_id, num_ep
-            )
-            send_back_buf = jnp.zeros_like(perm["sorted_inputs"])
-            y_back = jax.lax.ragged_all_to_all(
-                x_send_back,
-                send_back_buf,
-                in_off_r,
-                send_sz_r,
-                out_off_r,
-                recv_sz_r,
-                axis_name=ep_axis,
-            )
-
-            # -- Stage 8: invert global permute, weighted sum over top-k --
-            output = self._global_combine(y_back, perm, batch_size=local_b, sequence_length=local_s)
-
-            if self.tensor_parallelism_axis is not None:
-                output = jax.lax.psum_scatter(
-                    output,
-                    self.tensor_parallelism_axis,
-                    scatter_dimension=2,
-                    tiled=True,
-                )
-
-            # ``out_specs`` must match the returned pytree structurally,
-            # so always emit a real scalar for aux_loss; the outer
-            # ``__call__`` re-strips it to None when aux_loss_coeff <= 0.
-            if aux_loss is None:
-                aux_loss = jnp.zeros((), dtype=self.dtype)
-            return output, aux_loss
+        a2a_body = partial(
+            self._a2a_body,
+            ep_axis=ep_axis,
+            num_ep=num_ep,
+            num_experts_local=num_experts_local,
+            recv_buffer_rows=recv_buffer_rows,
+        )
 
         # ``check_rep=False`` disables shard_map's invariant that any
         # output declared as ``P()`` is replicated across ``ep_axis``.
-        # We use ``axis_index(ep_axis)`` inside ``_a2a_fn`` so the body
-        # is genuinely non-replicated, which would otherwise (correctly)
-        # fail the check. ``ragged_all_to_all`` already produces the
-        # right cross-shard semantics; this is the standard JAX escape
-        # hatch when collectives + per-shard logic coexist.
+        # We use ``axis_index(ep_axis)`` inside ``_a2a_body`` so the
+        # body is genuinely non-replicated, which would otherwise
+        # (correctly) fail the check. ``ragged_all_to_all`` already
+        # produces the right cross-shard semantics; this is the standard
+        # JAX escape hatch when collectives + per-shard logic coexist.
         return shard_map(
-            _a2a_fn,
+            a2a_body,
             mesh=mesh,
             in_specs=(in_specs,),
             out_specs=(P(batch_pspec_axis, None, None), P()),
             check_rep=False,
         )(captured)
+
+    # ------------------------------------------------------------------
+    # Body of the per-shard A2A-EP forward (extracted from
+    # :meth:`_forward_a2a_ep` for readability). Runs *inside* the
+    # ``shard_map`` and is therefore in EP-manual mode: collectives over
+    # ``ep_axis`` are explicit, the rest of the mesh stays in auto mode.
+    # ------------------------------------------------------------------
+
+    def _a2a_body(
+        self,
+        local: dict,
+        *,
+        ep_axis: str,
+        num_ep: int,
+        num_experts_local: int,
+        recv_buffer_rows: int,
+    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        shard_id = jax.lax.axis_index(ep_axis)
+
+        # -- Stage 1: per-shard route + global permute over all E --
+        # Inside the shard_map body each input has its EP axis already
+        # consumed, so ``local_inputs.shape == [B/num_ep, S, H]``.
+        local_inputs = local["inputs"]
+        local_logits = local["gate_logits"]
+        local_b, local_s, local_h = local_inputs.shape
+        inputs_2d = local_inputs.reshape(-1, local_h)
+        logits_2d = local_logits.reshape(-1, self.num_experts)
+
+        # The router operates over the full expert axis, so the
+        # EP-sharded ``expert_bias`` (in_spec ``P(ep_axis)``) must be
+        # all-gathered before being passed in.
+        if "expert_bias" in local:
+            full_expert_bias = jax.lax.all_gather(
+                local["expert_bias"], axis_name=ep_axis, tiled=True
+            )
+        else:
+            full_expert_bias = None
+        sparse_probs, routing_map = self._route_topk(logits_2d, full_expert_bias)
+
+        # aux_loss must see the global token batch and the global
+        # tokens_per_expert: its formula ``E*coeff/(k*T^2) * sum_i(
+        # sum_t(probs[t,i]) * tokens[i])`` is not shard-decomposable
+        # (the sum_t * tokens product is data-dependent across
+        # shards). We need a *single* collective:
+        #   * ``all_gather`` logits over (ep + any DP axes) so both
+        #     (a) the score-for-aux kernel and (b) a re-run of
+        #     ``_route_topk`` see the full token batch. The re-run
+        #     gives us the global per-expert token count directly,
+        #     avoiding a separate ``psum``. Two consecutive global
+        #     collectives over the same replica group at the very
+        #     start of the program have been observed to deadlock
+        #     under FP8 autocast on some XLA + NCCL combinations,
+        #     so we keep this branch to one collective.
+        # The aux branch has no data dependency on the main routing
+        # path beyond what is already gathered, so XLA can overlap
+        # the two routings on the GPU.
+        if self.aux_loss_coeff > 0.0:
+            # ``axis_name`` accepts a tuple ⇒ a single collective
+            # over the cartesian product of axes; XLA may lower
+            # this to one multi-axis op or split it.
+            if len(self.data_parallelism_axes) == 0:
+                aux_collective_axes: Any = ep_axis
+            else:
+                aux_collective_axes = (ep_axis, *self.data_parallelism_axes)
+            global_logits_2d = jax.lax.all_gather(
+                logits_2d, axis_name=aux_collective_axes, axis=0, tiled=True
+            )
+            # Re-run topk on the gathered logits to obtain the
+            # *global* routing_map post-grouping (respects
+            # num_groups/group_topk/expert_bias just like the local
+            # routing). Summing over the global token dim gives the
+            # exact same counts as ``psum(local_tokens_per_expert)``
+            # without an extra collective. The duplicate topk
+            # compute is small relative to the FFNs.
+            _, global_routing_map = self._route_topk(
+                global_logits_2d, full_expert_bias
+            )
+            global_tokens_per_expert = jnp.sum(
+                global_routing_map.astype(jnp.int32), axis=0
+            )
+            aux_loss = self._compute_aux_loss(
+                global_logits_2d, global_tokens_per_expert
+            )
+        else:
+            aux_loss = None
+
+        perm = self._global_permute(inputs_2d, sparse_probs, routing_map)
+        global_group_sizes = perm.group_sizes  # [E]
+
+        # -- Stage 2: gather per-expert counts across the EP axis --
+        all_shards_tokens_per_expert = jax.lax.all_gather(
+            global_group_sizes[None, :],
+            axis_name=ep_axis,
+            axis=0,
+            tiled=True,
+        )  # [num_ep, num_experts]
+
+        # -- Stage 3: forward ragged_all_to_all over EP --
+        in_off, send_sz, out_off, recv_sz = compute_ragged_all_to_all_params(
+            all_shards_tokens_per_expert, shard_id, num_ep
+        )
+        recv_buf = jnp.zeros(
+            (recv_buffer_rows, local_h),
+            dtype=perm.sorted_inputs.dtype,
+        )
+        x_recv = jax.lax.ragged_all_to_all(
+            perm.sorted_inputs,
+            recv_buf,
+            in_off,
+            send_sz,
+            out_off,
+            recv_sz,
+            axis_name=ep_axis,
+        )
+
+        # -- Stage 4: local permute (source_shard, expert) -> (expert, shard)
+        sorted_x, local_group_sizes, local_perm_state = local_permute_after_a2a(
+            x_recv,
+            all_shards_tokens_per_expert,
+            shard_id,
+            num_ep,
+        )
+
+        # -- Stage 5: per-expert FFN (E_local groups) --
+        expert_outputs = self._expert_ffn(
+            sorted_x,
+            local_group_sizes,
+            n_groups=num_experts_local,
+            wi_0=local["wi_0"],
+            wi_1=local["wi_1"],
+            wo=local["wo"],
+            wi_0_bias=local.get("wi_0_bias"),
+            wi_1_bias=local.get("wi_1_bias"),
+            wo_bias=local.get("wo_bias"),
+        )
+
+        # -- Stage 6: invert local permute --
+        x_send_back = local_unpermute_before_a2a(expert_outputs, local_perm_state)
+
+        # -- Stage 7: reverse ragged_all_to_all over EP --
+        in_off_r, send_sz_r, out_off_r, recv_sz_r = compute_reverse_ragged_all_to_all_params(
+            all_shards_tokens_per_expert, shard_id, num_ep
+        )
+        send_back_buf = jnp.zeros_like(perm.sorted_inputs)
+        y_back = jax.lax.ragged_all_to_all(
+            x_send_back,
+            send_back_buf,
+            in_off_r,
+            send_sz_r,
+            out_off_r,
+            recv_sz_r,
+            axis_name=ep_axis,
+        )
+
+        # -- Stage 8: invert global permute, weighted sum over top-k --
+        output = self._global_combine(
+            y_back, perm, batch_size=local_b, sequence_length=local_s
+        )
+
+        if self.tensor_parallelism_axis is not None:
+            output = jax.lax.psum_scatter(
+                output,
+                self.tensor_parallelism_axis,
+                scatter_dimension=2,
+                tiled=True,
+            )
+
+        # ``out_specs`` must match the returned pytree structurally,
+        # so always emit a real scalar for aux_loss; the outer
+        # ``__call__`` re-strips it to None when aux_loss_coeff <= 0.
+        if aux_loss is None:
+            aux_loss = jnp.zeros((), dtype=self.dtype)
+        return output, aux_loss

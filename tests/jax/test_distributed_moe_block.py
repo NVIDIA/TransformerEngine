@@ -74,18 +74,29 @@ class TestDistributedMoEBlock:
 
         single_block = MoEBlock(**base_kwargs)
 
-        def loss_fn(block, variables, x):
-            output, aux_loss = block.apply(variables, x)
-            loss = jnp.mean(output.astype(jnp.float32) ** 2)
-            if aux_loss is not None:
-                loss = loss + aux_loss.astype(jnp.float32)
-            return loss, (output, aux_loss)
+        def _make_loss_and_grad(block):
+            """Build a jitted ``value_and_grad`` over ``(variables, x)``.
+
+            Capturing ``block`` in a closure (so it isn't a jit input)
+            sidesteps having to mark it as static -- Flax modules are
+            registered pytrees but they carry Python-level config that
+            jit treats as part of the trace.
+            """
+
+            def loss_fn(variables, x):
+                output, aux_loss = block.apply(variables, x)
+                loss = jnp.mean(output.astype(jnp.float32) ** 2)
+                if aux_loss is not None:
+                    loss = loss + aux_loss.astype(jnp.float32)
+                return loss, (output, aux_loss)
+
+            return jax.jit(jax.value_and_grad(loss_fn, has_aux=True))
 
         with autocast(enabled=False, mesh_resource=MeshResource()):
             single_variables = single_block.init(init_key, inputs)
-            (single_loss, (single_output, single_aux)), single_grads = jax.value_and_grad(
-                loss_fn, argnums=1, has_aux=True
-            )(single_block, single_variables, inputs)
+            (single_loss, (single_output, single_aux)), single_grads = _make_loss_and_grad(
+                single_block
+            )(single_variables, inputs)
 
         devices = np.asarray(jax.devices()[:4]).reshape(2, 2)
         mesh = Mesh(devices, ("ep", "fsdp"))
@@ -142,9 +153,9 @@ class TestDistributedMoEBlock:
                 sharded_variables = jax.jit(sharded_block.init, out_shardings=out_shardings)(
                     init_key, inputs
                 )
-                (sharded_loss, (sharded_output, sharded_aux)), sharded_grads = jax.value_and_grad(
-                    loss_fn, argnums=1, has_aux=True
-                )(sharded_block, sharded_variables, inputs)
+                (sharded_loss, (sharded_output, sharded_aux)), sharded_grads = (
+                    _make_loss_and_grad(sharded_block)(sharded_variables, inputs)
+                )
 
         wi_0 = _unwrap_partitioned(sharded_variables["params"]["wi_0"])
         wi_1 = _unwrap_partitioned(sharded_variables["params"]["wi_1"])

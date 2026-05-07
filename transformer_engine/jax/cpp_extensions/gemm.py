@@ -2024,9 +2024,14 @@ def grouped_gemm_copy_group_sizes(
     return out
 
 
-@cache
 def _should_enforce_v2_grouped_gemm() -> bool:
-    """Read NVTE_JAX_ENFORCE_V2_GROUPED_GEMM once per process (cached)."""
+    """Read NVTE_JAX_ENFORCE_V2_GROUPED_GEMM.
+
+    Not cached so tests can flip the env var with ``monkeypatch.setenv``
+    and have it picked up on the next call. This is called only on
+    grouped-GEMM dispatch (not in any tight loop), so the per-call
+    ``getenv`` cost is negligible.
+    """
     val = os.getenv("NVTE_JAX_ENFORCE_V2_GROUPED_GEMM", "0")
     try:
         return bool(int(val))

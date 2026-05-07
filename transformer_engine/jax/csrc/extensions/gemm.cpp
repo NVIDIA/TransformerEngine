@@ -1157,12 +1157,18 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
       cudaStreamSynchronize(stream);
     }
     size_t sum_group_sizes = std::accumulate(dim_list_host.begin(), dim_list_host.end(), 0);
+    // Allow callers to pass an LHS/RHS that is at least as large as the active
+    // ragged region (sum_group_sizes). This supports ragged-all-to-all flows
+    // where the recv buffer is over-allocated to a worst-case size and only
+    // the first sum_group_sizes rows along the ragged dim are populated; the
+    // trailing slack rows are not consumed by the per-group GEMMs (which key
+    // off group_sizes).
     if (!is_rhs_ragged) {
-      NVTE_CHECK(m == sum_group_sizes, "Unexpected group_sizes! M = ", m,
-                 ", got sum(group_sizes)=", sum_group_sizes);
+      NVTE_CHECK(sum_group_sizes <= m, "Unexpected group_sizes! sum(group_sizes)=", sum_group_sizes,
+                 " must be <= M = ", m);
     } else {
-      NVTE_CHECK(k == sum_group_sizes, "Unexpected group_sizes! K = ", k,
-                 ", got sum(group_sizes)=", sum_group_sizes);
+      NVTE_CHECK(sum_group_sizes <= k, "Unexpected group_sizes! sum(group_sizes)=", sum_group_sizes,
+                 " must be <= K = ", k);
     }
   }
 

@@ -12,6 +12,7 @@
 #include <transformer_engine/multi_stream.h>
 
 #include <mutex>
+#include <unordered_map>
 #include <vector>
 
 #include "cuda_runtime.h"
@@ -19,18 +20,54 @@
 
 namespace transformer_engine::detail {
 
+namespace {
+
+// CUDA streams and events are device-bound: a stream / event created
+// on device A cannot be recorded into / waited on from device B
+// (CUDA returns ``cudaErrorInvalidResourceHandle``). The previous
+// implementation used ``std::call_once`` to lazily create one
+// process-global vector of streams + one of events, which works for
+// the single-device case (PyTorch eager / single-host single-device
+// JAX) but breaks for single-process *multi*-device JAX: the first
+// worker thread to win the ``call_once`` would create streams /
+// events on its own device, and subsequent calls from other devices
+// would receive those same handles and fail at ``cudaEventRecord``.
+//
+// We now key the cache on the active CUDA device. Each device gets
+// its own ``num_compute_streams`` streams and events, created lazily
+// the first time a thread on that device asks for one.
+template <typename CreateFn>
+auto& per_device_pool(CreateFn&& create) {
+  static std::mutex mu;
+  using PoolT = decltype(std::vector{create()});
+  static std::unordered_map<int, PoolT> pools;
+  int device;
+  NVTE_CHECK_CUDA(cudaGetDevice(&device));
+  std::lock_guard<std::mutex> lock(mu);
+  auto it = pools.find(device);
+  if (it == pools.end()) {
+    const size_t num_streams = nvte_get_num_compute_streams();
+    PoolT v;
+    v.reserve(num_streams);
+    for (size_t i = 0; i < num_streams; i++) {
+      v.push_back(create());
+    }
+    it = pools.emplace(device, std::move(v)).first;
+  }
+  return it->second;
+}
+
+}  // namespace
+
 cudaStream_t get_compute_stream(int idx) {
   const size_t num_streams = nvte_get_num_compute_streams();
   NVTE_CHECK(0 <= idx && idx < num_streams, "Invalid compute stream (requested idx ", idx,
              ", but there are ", num_streams, " streams)");
-  static std::vector<cudaStream_t> streams(num_streams);
-  static std::once_flag stream_init_flag;
-  auto init = [&]() {
-    for (size_t i = 0; i < num_streams; i++) {
-      NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&streams[i], cudaStreamNonBlocking, -1));
-    }
-  };
-  std::call_once(stream_init_flag, init);
+  auto& streams = per_device_pool([] {
+    cudaStream_t s;
+    NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&s, cudaStreamNonBlocking, -1));
+    return s;
+  });
   return streams[idx];
 }
 
@@ -38,14 +75,11 @@ cudaEvent_t get_compute_stream_event(int idx) {
   const size_t num_streams = nvte_get_num_compute_streams();
   NVTE_CHECK(0 <= idx && idx < num_streams, "Invalid compute stream (requested idx ", idx,
              ", but there are ", num_streams, " streams)");
-  static std::vector<cudaEvent_t> events(num_streams);
-  static std::once_flag event_init_flag;
-  auto init = [&]() {
-    for (size_t i = 0; i < num_streams; i++) {
-      NVTE_CHECK_CUDA(cudaEventCreate(&events[i]));
-    }
-  };
-  std::call_once(event_init_flag, init);
+  auto& events = per_device_pool([] {
+    cudaEvent_t e;
+    NVTE_CHECK_CUDA(cudaEventCreate(&e));
+    return e;
+  });
   return events[idx];
 }
 

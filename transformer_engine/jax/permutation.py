@@ -9,10 +9,12 @@ Mixture of Experts (MoE) models with proper automatic differentiation support.
 
 Two backends are offered:
 
-* Fused, Triton-backed ``token_dispatch`` / ``token_combine`` - uses the
+* Triton-backed ``token_dispatch`` / ``token_combine`` - uses the
   Triton kernels in ``transformer_engine.jax.triton_extensions.permutation``.
-* Unfused, pure-JAX ``unfused_token_dispatch`` / ``unfused_token_combine`` -
-  uses only ``jnp.argsort`` + gather and is therefore compiled as plain XLA.
+* Pure-JAX ``pure_jax_token_dispatch`` / ``pure_jax_token_combine`` - uses
+  only ``jnp.argsort`` + gather and is therefore compiled as plain XLA.
+  Despite the name, this path is often *faster* than the Triton kernels in
+  current testing because XLA can fuse the ops with surrounding work.
 
 Both backends support optional alignment padding (``align_size > 0``) so each
 expert's group size is a multiple of ``align_size``, which is required for
@@ -49,9 +51,9 @@ __all__ = [
     "token_dispatch",
     "token_combine",
     "sort_chunks_by_index",
-    "unfused_token_dispatch",
-    "unfused_token_combine",
-    "UnfusedPermState",
+    "pure_jax_token_dispatch",
+    "pure_jax_token_combine",
+    "PureJaxPermState",
     # Ragged-all-to-all expert-parallelism helpers
     "compute_ragged_all_to_all_params",
     "compute_reverse_ragged_all_to_all_params",
@@ -678,15 +680,19 @@ _sort_chunks_by_index.defvjp(_sort_chunks_by_index_fwd_rule, _sort_chunks_by_ind
 
 
 # =============================================================================
-# Unfused (pure-JAX) token dispatch / combine
+# Pure-JAX token dispatch / combine
 # =============================================================================
 #
 # The following implementations use only ``jnp.argsort`` + gather and compile
 # to plain XLA. They are a drop-in alternative to ``token_dispatch`` /
 # ``token_combine`` above, differing only in input/output conventions (the
-# fused path takes ``routing_map`` and ``sparse_probs`` over all experts; the
-# unfused path takes dense ``selected_experts`` and per-token ``weights`` of
+# Triton path takes ``routing_map`` and ``sparse_probs`` over all experts; the
+# pure-JAX path takes dense ``selected_experts`` and per-token ``weights`` of
 # shape ``[..., topk]``).
+#
+# Note: despite Triton being fused and pure-JAX being a sequence of XLA ops,
+# the pure-JAX backend is often *faster* in current testing because XLA can
+# fuse these ops into the surrounding work.
 
 
 # -----------------------------------------------------------------------------
@@ -704,7 +710,7 @@ def _sort_activations(inputs: jax.Array, sort_indices: jax.Array) -> jax.Array:
     assert (
         inputs.shape[0] == sort_indices.shape[0]
     ), f"inputs.shape[0]={inputs.shape[0]} must match sort_indices.shape[0]={sort_indices.shape[0]}"
-    with jax.named_scope("unfused_sort_activations"):
+    with jax.named_scope("pure_jax_sort_activations"):
         return inputs[sort_indices, ...]
 
 
@@ -730,7 +736,7 @@ def routing_map_to_selected_experts(
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Convert ``(sparse_probs, routing_map)`` from TE's fused router to the
     ``(selected_experts, weights)`` format consumed by
-    :func:`unfused_token_dispatch`.
+    :func:`pure_jax_token_dispatch`.
 
     ``routing_map`` is a boolean mask of shape ``[num_tokens, num_experts]``
     with exactly ``topk`` ``True`` positions per row.
@@ -746,14 +752,14 @@ def routing_map_to_selected_experts(
 # Permutation state carried from dispatch to combine.
 
 
-class UnfusedPermState(NamedTuple):
-    """Opaque state produced by :func:`unfused_token_dispatch`.
+class PureJaxPermState(NamedTuple):
+    """Opaque state produced by :func:`pure_jax_token_dispatch`.
 
     Attributes
     ----------
     sorted_indices : jnp.ndarray
         The argsort indices used in the forward sort. Needed to reverse the
-        permutation in :func:`unfused_token_combine`. Shape
+        permutation in :func:`pure_jax_token_combine`. Shape
         ``[num_real_tokens + padding_size]``.
     num_real_tokens : int
         Number of real (non-padding) permuted tokens, i.e.
@@ -774,14 +780,14 @@ class UnfusedPermState(NamedTuple):
 # Dispatch (permute)
 
 
-def unfused_token_dispatch(
+def pure_jax_token_dispatch(
     inputs: jnp.ndarray,
     selected_experts: jnp.ndarray,
     num_experts: int,
     num_experts_per_tok: int,
     align_size: int = 0,
     roll_to_expert_id: Optional[int] = None,
-) -> Tuple[jnp.ndarray, UnfusedPermState, jnp.ndarray]:
+) -> Tuple[jnp.ndarray, PureJaxPermState, jnp.ndarray]:
     """Pure-JAX ``argsort``-based token dispatch.
 
     Parameters
@@ -811,8 +817,8 @@ def unfused_token_dispatch(
     sorted_inputs : jnp.ndarray
         Permuted tokens grouped by expert, shape
         ``[num_real_tokens + padding_size, hidden_size]``.
-    perm_state : UnfusedPermState
-        State needed by :func:`unfused_token_combine`.
+    perm_state : PureJaxPermState
+        State needed by :func:`pure_jax_token_combine`.
     group_sizes : jnp.ndarray
         Token count per expert, shape ``[num_experts]``. Each entry is a
         multiple of ``align_size`` when ``align_size > 0``.
@@ -907,7 +913,7 @@ def unfused_token_dispatch(
 
         padding_size = 0
 
-    perm_state = UnfusedPermState(
+    perm_state = PureJaxPermState(
         sorted_indices=sorted_selected_experts,
         num_real_tokens=num_real_tokens,
         padding_size=padding_size,
@@ -919,9 +925,9 @@ def unfused_token_dispatch(
 # Combine (unpermute + weighted sum)
 
 
-def unfused_token_combine(
+def pure_jax_token_combine(
     expert_outputs: jnp.ndarray,
-    perm_state: UnfusedPermState,
+    perm_state: PureJaxPermState,
     routing_weights: jnp.ndarray,
     num_experts_per_tok: int,
     batch_size: int,
@@ -929,7 +935,7 @@ def unfused_token_combine(
 ) -> jnp.ndarray:
     """Pure-JAX ``argsort``-based token combine.
 
-    Reverses the permutation performed by :func:`unfused_token_dispatch`,
+    Reverses the permutation performed by :func:`pure_jax_token_dispatch`,
     strips any alignment-padding rows appended during dispatch, and applies a
     per-token weighted sum across the top-k experts.
 
@@ -938,8 +944,8 @@ def unfused_token_combine(
     expert_outputs : jnp.ndarray
         Output of the expert FFN, shape
         ``[num_real_tokens + padding_size, hidden_size]``.
-    perm_state : UnfusedPermState
-        State returned by :func:`unfused_token_dispatch`.
+    perm_state : PureJaxPermState
+        State returned by :func:`pure_jax_token_dispatch`.
     routing_weights : jnp.ndarray
         Top-k routing weights, shape ``[batch*seq, num_experts_per_tok]``
         (or broadcastable to it after a ``reshape``).
@@ -979,7 +985,7 @@ def unfused_token_combine(
     # intermediate dtype; callers can upcast before calling if higher
     # precision weight-sum is desired).
     reshaped_weights = reshaped_weights.astype(reshaped_intermediate.dtype)
-    with jax.named_scope("unfused_weight_sum"):
+    with jax.named_scope("pure_jax_weight_sum"):
         output = jnp.einsum(
             "BKE,BK -> BE",
             reshaped_intermediate,
@@ -1206,7 +1212,7 @@ def compute_reverse_ragged_all_to_all_params(
 # Implementation uses :func:`sort_chunks_by_index`, which is Triton-backed
 # (see ``transformer_engine.jax.triton_extensions.permutation``) and has a
 # paired custom-VJP backward. There is no pure-JAX alternative here -- the
-# global :func:`unfused_token_dispatch` / :func:`token_dispatch` choice is
+# global :func:`pure_jax_token_dispatch` / :func:`token_dispatch` choice is
 # unaffected by this; only the (small) post-A2A chunk reorder uses Triton
 # unconditionally.
 
@@ -1221,7 +1227,7 @@ def local_permute_after_a2a(
     tokens are contiguous.
 
     This is the EP-side complement to the global :func:`token_dispatch` /
-    :func:`unfused_token_dispatch`. Internally uses
+    :func:`pure_jax_token_dispatch`. Internally uses
     :func:`sort_chunks_by_index` (Triton-backed) for both the forward sort
     and -- via :func:`local_unpermute_before_a2a` -- the inverse.
 
