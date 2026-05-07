@@ -80,6 +80,9 @@ from ...debug.pytorch.debug_state import TEDebugState
 __all__ = ["Linear"]
 
 
+TensorOrQuantized = Union[torch.Tensor, QuantizedTensorStorage]
+
+
 def _check_fp8_reduce_and_update():
     """Check if this is the first FP8 module (for backward reduce-and-update)."""
     qstate = FP8GlobalStateManager.quantization_state
@@ -1659,11 +1662,17 @@ class Linear(TransformerEngineBaseModule):
                 ub_bulk_dgrad = self.ub_bulk_dgrad
                 ub_bulk_wgrad = self.ub_bulk_wgrad
 
+            linear_bias_tensor = (
+                bias_tensor if (self.apply_bias and not self.gemm_bias_unfused_add) else None
+            )
+            wgrad_store = (
+                self.wgrad_store if self.wgrad_store.delay_wgrad_compute() else None
+            )
             non_tensor_args = (
                 is_first_microbatch,
                 self.fp8,
                 self.fp8_calibration,
-                self.wgrad_store,
+                wgrad_store,
                 self.fuse_wgrad_accumulation,
                 is_cpu_offload_enabled(),
                 self.tp_group,
@@ -1697,7 +1706,7 @@ class Linear(TransformerEngineBaseModule):
                 weight_tensor,
                 weight_workspace,
                 inp,
-                bias_tensor if (self.apply_bias and not self.gemm_bias_unfused_add) else None,
+                linear_bias_tensor,
                 non_tensor_args,
                 input_quantizer,
                 weight_quantizer,
