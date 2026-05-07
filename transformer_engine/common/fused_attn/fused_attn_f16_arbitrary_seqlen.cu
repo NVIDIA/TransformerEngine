@@ -1385,7 +1385,7 @@ ProbeDims compute_probe_dims(int64_t batch, int64_t num_attn_heads, int64_t max_
 }
 }  // namespace
 
-cudnn_frontend::error_t is_supported_f16_fwd(
+std::string is_supported_f16_fwd(
     size_t batch, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
     size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, bool is_training,
     bool return_max_logit, float p_dropout, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
@@ -1416,16 +1416,15 @@ cudnn_frontend::error_t is_supported_f16_fwd(
         /*devPtrSeqOffsetsQ=*/nullptr, /*devPtrSeqOffsetsKV=*/nullptr, get_cudnn_fe_dtype(q_dtype),
         /*workspace=*/nullptr, &workspace_size,
         /*stream=*/static_cast<cudaStream_t>(0), handle);
-    return {cudnn_frontend::error_code_t::OK, ""};
+    return "";
   } catch (const std::exception &e) {
-    return {cudnn_frontend::error_code_t::GRAPH_NOT_SUPPORTED, e.what()};
+    return std::string("[GRAPH_NOT_SUPPORTED] ") + e.what();
   } catch (...) {
-    return {cudnn_frontend::error_code_t::GRAPH_NOT_SUPPORTED,
-            "is_supported_f16_fwd: unknown failure"};
+    return "[GRAPH_NOT_SUPPORTED] is_supported_f16_fwd: unknown failure";
   }
 }
 
-cudnn_frontend::error_t is_supported_f16_bwd(
+std::string is_supported_f16_bwd(
     size_t batch, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
     size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, float p_dropout,
     NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
@@ -1458,12 +1457,11 @@ cudnn_frontend::error_t is_supported_f16_bwd(
         /*devPtrSeqOffsetsQ=*/nullptr, /*devPtrSeqOffsetsKV=*/nullptr, get_cudnn_fe_dtype(q_dtype),
         /*workspace=*/nullptr, &workspace_size,
         /*stream=*/static_cast<cudaStream_t>(0), handle);
-    return {cudnn_frontend::error_code_t::OK, ""};
+    return "";
   } catch (const std::exception &e) {
-    return {cudnn_frontend::error_code_t::GRAPH_NOT_SUPPORTED, e.what()};
+    return std::string("[GRAPH_NOT_SUPPORTED] ") + e.what();
   } catch (...) {
-    return {cudnn_frontend::error_code_t::GRAPH_NOT_SUPPORTED,
-            "is_supported_f16_bwd: unknown failure"};
+    return "[GRAPH_NOT_SUPPORTED] is_supported_f16_bwd: unknown failure";
   }
 }
 

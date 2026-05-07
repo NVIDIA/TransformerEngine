@@ -12,7 +12,8 @@
 #define TRANSFORMER_ENGINE_COMMON_FUSED_ATTN_FUSED_ATTN_ARBITRARY_SEQLEN_H_
 
 #include <cudnn.h>
-#include <cudnn_frontend.h>
+
+#include <string>
 
 #include "common/common.h"
 #include "transformer_engine/fused_attn.h"
@@ -50,11 +51,15 @@ void fused_attn_arbitrary_seqlen_bwd(
 
 // Probe: drives cuDNN-FE (validate -> build_operation_graph -> create_execution_plans ->
 // check_support -> build_plans) for an F16/BF16 forward graph with the given configuration.
-// Returns the cuDNN-FE status: error_code_t::OK iff the graph compiles end-to-end. On OK,
-// the built graph is inserted into the same thread-local cache used by
-// fused_attn_arbitrary_seqlen_fwd_impl, so the executor cache-hits on matching descriptors.
-// On rejection, err_msg contains the underlying cuDNN-FE / NVTE_CHECK message.
-cudnn_frontend::error_t is_supported_f16_fwd(
+// Returns an empty string iff the graph compiles end-to-end; on OK the built graph is
+// inserted into the same thread-local cache used by fused_attn_arbitrary_seqlen_fwd_impl,
+// so the executor cache-hits on matching descriptors.
+//
+// On rejection, returns a non-empty diagnostic of the form
+//   "[<CATEGORY>] <human-readable message>"
+// where <CATEGORY> is a stable tag mirroring cudnn_frontend::error_code_t names
+// (e.g. GRAPH_NOT_SUPPORTED for cuDNN-FE rejections forwarded from the support chain).
+std::string is_supported_f16_fwd(
     size_t batch, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
     size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, bool is_training,
     bool return_max_logit, float p_dropout, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
@@ -62,7 +67,7 @@ cudnn_frontend::error_t is_supported_f16_fwd(
     int64_t window_size_right, bool bottom_right_diagonal, DType q_dtype, cudnnHandle_t handle);
 
 // Probe: same as above for the F16/BF16 backward graph.
-cudnn_frontend::error_t is_supported_f16_bwd(
+std::string is_supported_f16_bwd(
     size_t batch, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
     size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, float p_dropout,
     NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,

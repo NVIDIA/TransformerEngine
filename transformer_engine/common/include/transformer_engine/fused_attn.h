@@ -198,22 +198,6 @@ NVTE_QKV_Format nvte_get_q_format(NVTE_QKV_Layout qkv_layout);
  */
 NVTE_QKV_Format nvte_get_kv_format(NVTE_QKV_Layout qkv_layout);
 
-/*! \struct NVTEFusedAttnBackendStatus
- *  \brief Diagnostic info from \c nvte_get_fused_attn_backend.
- *
- *  Filled by \c nvte_get_fused_attn_backend when the caller passes a non-NULL pointer.
- *  When the routing decision is supported, \c code is 0 and \c message is the empty
- *  string. When the routing rejects the configuration, \c code is the underlying
- *  cuDNN-FE \c cudnn_frontend::error_code_t cast to \c int (TE-synthesized post-filter
- *  rejections use \c INVALID_VALUE), and \c message is a null-terminated human-readable
- *  reason that points into per-thread storage owned by TE. The pointer is valid only
- *  until the next call to \c nvte_get_fused_attn_backend on the same thread.
- */
-typedef struct NVTEFusedAttnBackendStatus {
-  int code;
-  const char *message;
-} NVTEFusedAttnBackendStatus;
-
 /*! \brief Get fused attention backend based on input parameters.
  *
  *  Authoritative routing: when a non-NVTE_No_Backend value is returned, the configuration
@@ -249,12 +233,19 @@ typedef struct NVTEFusedAttnBackendStatus {
  *  \param[in]     cuda_graph          Whether cuda graph capture is enabled or not.
  *  \param[in]     deterministic       Whether determinism is required or not.
  *  \param[in]     handle              cuDNN handle used for the support chain. Required.
- *  \param[out]    out_status          Optional. When non-NULL, populated with a code +
- *                                     message describing why the configuration was
- *                                     rejected (NVTE_No_Backend) or with code=0 and
- *                                     message="" on success. The message buffer lives in
- *                                     thread-local storage and is overwritten on every
- *                                     call on the same thread.
+ *  \param[out]    out_reason          Optional. When non-NULL, set to a null-terminated
+ *                                     diagnostic string describing why the configuration
+ *                                     was rejected (NVTE_No_Backend) or set to "" on
+ *                                     success. Rejection messages are tagged with a
+ *                                     stable category prefix that mirrors
+ *                                     \c cudnn_frontend::error_code_t, e.g.
+ *                                     \c "[INVALID_VALUE] ..." for TE post-filter
+ *                                     rejections and FP8 layout pre-filter rejections,
+ *                                     \c "[GRAPH_NOT_SUPPORTED] ..." for cuDNN-FE
+ *                                     rejections forwarded from the support chain. The
+ *                                     pointer points into per-thread storage owned by TE
+ *                                     and is valid only until the next call to
+ *                                     \c nvte_get_fused_attn_backend on the same thread.
  */
 NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     bool is_training, NVTEDType q_dtype, NVTEDType kv_dtype, NVTEDType o_dtype,
@@ -263,7 +254,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q, size_t max_seqlen_kv,
     size_t head_dim_qk, size_t head_dim_v, int64_t window_size_left, int64_t window_size_right,
     bool return_max_logit, bool cuda_graph, bool deterministic, cudnnHandle_t handle,
-    NVTEFusedAttnBackendStatus *out_status);
+    const char **out_reason);
 
 /*! \brief Compute dot product attention with separate Q, K and V.
  *

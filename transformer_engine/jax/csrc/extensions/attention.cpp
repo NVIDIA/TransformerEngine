@@ -25,7 +25,7 @@ NVTE_Fused_Attn_Backend GetFusedAttnBackend(
       mask_type, softmax_type, dropout_probability, q_attn_heads, kv_attn_heads, q_max_seqlen,
       kv_max_seqlen, qk_head_dim, v_head_dim, window_size_left, window_size_right,
       /*return_max_logit=*/false, /*cuda_graph=*/false, deterministic, handle,
-      /*out_status=*/nullptr);
+      /*out_reason=*/nullptr);
   return backend;
 }
 
@@ -282,7 +282,7 @@ static void FusedAttnForwardImpl(
       static_cast<NVTEDType>(dtype), NVTE_DELAYED_TENSOR_SCALING, qkv_layout, bias_type, mask_type,
       softmax_type, dropout_probability, attn_heads, num_gqa_groups, q_max_seqlen, kv_max_seqlen,
       qk_head_dim, v_head_dim, window_size_left, window_size_right, /*return_max_logit=*/false,
-      /*cuda_graph=*/false, deterministic, _handle_fwd, /*out_status=*/nullptr);
+      /*cuda_graph=*/false, deterministic, _handle_fwd, /*out_reason=*/nullptr);
   nvte_populate_rng_state_async(rng_state, seed, q_max_seqlen, kv_max_seqlen, backend, stream);
 
   /* Auxiliary tensors (to be propagated to the backward pass later) */
@@ -560,7 +560,7 @@ static void FusedAttnBackwardImpl(
       static_cast<NVTEDType>(dtype), NVTE_DELAYED_TENSOR_SCALING, qkv_layout, bias_type, mask_type,
       softmax_type, dropout_probability, attn_heads, num_gqa_groups, q_max_seqlen, kv_max_seqlen,
       qk_head_dim, v_head_dim, window_size_left, window_size_right, /*return_max_logit=*/false,
-      /*cuda_graph=*/false, deterministic, _handle_bwd, /*out_status=*/nullptr);
+      /*cuda_graph=*/false, deterministic, _handle_bwd, /*out_reason=*/nullptr);
   PrepareFusedAttnBackwardAuxTensors(&aux_input_tensors, input_batch, bias_batch, attn_heads,
                                      bias_heads, q_max_seqlen, kv_max_seqlen, dtype, backend,
                                      softmax_aux, rng_state, bias, softmax_offset);

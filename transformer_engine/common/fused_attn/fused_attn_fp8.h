@@ -8,7 +8,7 @@
  *  \brief Functions for fused attention for FP8 with seqlen <= 512
  */
 
-#include <cudnn_frontend.h>
+#include <string>
 
 #include "transformer_engine/fused_attn.h"
 #include "transformer_engine/transformer_engine.h"
@@ -44,10 +44,15 @@ void fused_attn_fp8_bwd(
 
 // Probe: drives cuDNN-FE (validate -> build_operation_graph -> create_execution_plans ->
 // check_support -> build_plans) for an FP8 forward graph with the given configuration.
-// Returns the cuDNN-FE status: error_code_t::OK iff the graph compiles end-to-end. On OK,
-// the built graph is inserted into the same thread-local cache used by fused_attn_fp8_fwd_impl.
-// On rejection, err_msg contains the underlying cuDNN-FE / NVTE_CHECK message.
-cudnn_frontend::error_t is_supported_fp8_fwd(
+// Returns an empty string iff the graph compiles end-to-end; on OK the built graph is
+// inserted into the same thread-local cache used by fused_attn_fp8_fwd_impl.
+//
+// On rejection, returns a non-empty diagnostic of the form
+//   "[<CATEGORY>] <human-readable message>"
+// where <CATEGORY> mirrors cudnn_frontend::error_code_t names (INVALID_VALUE for the
+// FP8-only layout pre-filter, GRAPH_NOT_SUPPORTED for cuDNN-FE rejections forwarded
+// from the support chain).
+std::string is_supported_fp8_fwd(
     size_t batch, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
     size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, bool is_training, float p_dropout,
     NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
@@ -56,12 +61,11 @@ cudnn_frontend::error_t is_supported_fp8_fwd(
     cudnnHandle_t handle);
 
 // Probe: same as above for the FP8 backward graph.
-cudnn_frontend::error_t is_supported_fp8_bwd(
+std::string is_supported_fp8_bwd(
     size_t batch, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
     size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, float p_dropout,
     NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
     NVTE_Softmax_Type softmax_type, int64_t window_size_left, int64_t window_size_right,
     bool bottom_right_diagonal, bool deterministic, DType q_dtype, DType o_dtype,
     NVTEScalingMode scaling_mode, cudnnHandle_t handle);
->>>>>>> c9006435 (refactor nvte_get_fused_attn_backend with FE calls)
 }  // namespace transformer_engine
