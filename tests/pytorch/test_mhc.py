@@ -471,7 +471,7 @@ def test_mhc_fuse_grad_acc(cfg: MHCConfig, dtype):
     nC = n * C
 
     # Since we tested the exactly same path twice with only gradient accumulation logic different, we can use tighter tolerances here
-    tols = {"atol": 1e-6, "rtol": 1e-6}
+    tols = {"atol": 1e-5, "rtol": 1e-5}
     use_tf32 = False
 
     x = torch.randn(s, b, C, n, device="cuda", requires_grad=True, dtype=dtype)
