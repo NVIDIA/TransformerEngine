@@ -1715,6 +1715,7 @@ def _mhc_expand_combine_bwd(
 
         if HAS_BIAS:
             grad_bias = tl.sum(grad_f_acc, axis=0)  # (STEP_SIZE_C,)
+            # This is reduction over M dimension, so it has nothing to do with whether we use split-C. It only depends on determinism or not.
             if DETERMINISTIC:
                 grad_bias_ws_ptrs = (
                     grad_bias_ws_ptr
