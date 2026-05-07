@@ -97,6 +97,11 @@ class Recipe:
         return issubclass(cls, NVFP4BlockScaling)
 
     @classmethod
+    def nvfp4_pertoken(cls):
+        """Whether the given recipe is NVFP4 per-token block scaling."""
+        return issubclass(cls, NVFP4PerTokenBlockScaling)
+
+    @classmethod
     def mxfp8(cls):
         """Whether the given recipe is MXFP8 block scaling."""
         return issubclass(cls, MXFP8BlockScaling)
@@ -538,6 +543,47 @@ class NVFP4BlockScaling(Recipe):
             f"fp4_quant_fwd_weight={self.fp4_quant_fwd_weight}, "
             f"fp4_quant_bwd_grad={self.fp4_quant_bwd_grad}, "
         )
+
+
+@dataclass()
+class NVFP4PerTokenBlockScaling(NVFP4BlockScaling):
+    """
+    NVFP4 with per-token (per-row) global scaling.
+
+    Extends NVFP4BlockScaling by computing a separate FP32 global scale factor
+    for each token row, rather than a single per-tensor global scale. This
+    preserves more dynamic range information per token, improving accuracy
+    for MoE grouped GEMM workloads.
+
+    The forward pass uses cuDNN Frontend's grouped GEMM kernels with the
+    ``global_scale_tensor`` parameter to apply per-token scales. The backward
+    pass is controlled by ``backward_override``:
+
+    - ``None``: Use standard NVFP4 backward (default)
+    - ``'high_precision'``: Keep original high-precision operands for backward
+    - ``'dequantized'``: Dequantize saved operands to BF16/FP32 for backward
+
+    Parameters
+    ----------
+    fp4_format : {Format.E2M1}, default = Format.E2M1
+             FP4 data type.
+    backward_override : {None, 'high_precision', 'dequantized'}, default = None
+            Backward precision mode. Inherited from NVFP4BlockScaling.
+    disable_rht : bool, default = False
+             If set to `True`, random Hadamard transforms are not applied.
+    disable_stochastic_rounding : bool, default = False
+             If set to `True`, stochastic rounding is disabled.
+    disable_2d_quantization : bool, default = False
+             If set to `True`, 1D block scaling with block size 16 is used for all tensors.
+
+    Notes
+    -----
+    The per-token quantization kernel is a placeholder. Currently, the per-tensor
+    amax is broadcast to all tokens as an approximation. A true per-token kernel
+    (``quantize_pertoken_nvfp4.cuh``) will compute row-wise amax for optimal accuracy.
+    """
+
+    pass
 
 
 @dataclass()

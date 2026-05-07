@@ -326,6 +326,8 @@ py::object group_dequantize(const py::handle &input, DType otype);
 py::object bgrad_group_quantize(const at::Tensor &tensor, py::handle quantizer,
                                 const size_t num_tensors, std::optional<at::Tensor> first_dims);
 
+std::tuple<at::Tensor, at::Tensor, at::Tensor> quantize_nvfp4_pertoken(at::Tensor input);
+
 std::vector<py::object> multi_tensor_quantize(const std::vector<at::Tensor> &tensor_list,
                                               std::vector<py::handle> quantizer_list);
 
