@@ -52,41 +52,39 @@ def get_nvfp4_quantizer_factory():
     """
     Create a quantizer factory for NVFP4 reference implementation.
 
-    This factory returns NVFP4QuantizerRef instances with RHT and 2D quantization
-    enabled.
+    Linear/grouped-linear weight slots get 2D (16x16) quantization without RHT;
+    every other slot (input, gradient, boundary slots with ``role is None``,
+    and any unknown tensor type) gets 1D (1x16) quantization with RHT.
+
+    Mirrors the canonical "branch on what we care about, default fall-through"
+    pattern from
+    ``transformer_engine.pytorch.custom_recipes.quantization_recipes_base``;
+    every slot gets a real :class:`NVFP4QuantizerRef` (``CustomRecipeState``
+    rejects ``None`` returns).
 
     Returns:
         A factory function that takes a QuantizerRole and returns a quantizer instance
     """
 
     def factory(role):
-        if role.tensor_type == "input":
-            return quantization_ref_nvfp4.NVFP4QuantizerRef(
-                dtype=utils.Fp4Formats.E2M1,
-                quant_tile_shape=(1, 16),
-                pow_2_scales=False,
-                with_rht=True,
-            )
-        elif role.tensor_type == "weight":
+        is_weight = (
+            role is not None
+            and role.module_type in ("linear", "grouped_linear")
+            and role.tensor_type == "weight"
+        )
+        if is_weight:
             return quantization_ref_nvfp4.NVFP4QuantizerRef(
                 dtype=utils.Fp4Formats.E2M1,
                 quant_tile_shape=(16, 16),
                 pow_2_scales=False,
                 with_rht=False,
             )
-        elif role.tensor_type == "output":
-            return None
-        elif role.tensor_type == "grad_output":
-            return quantization_ref_nvfp4.NVFP4QuantizerRef(
-                dtype=utils.Fp4Formats.E2M1,
-                quant_tile_shape=(1, 16),
-                pow_2_scales=False,
-                with_rht=True,
-            )
-        elif role.tensor_type == "grad_input":
-            return None
-        else:
-            return None
+        return quantization_ref_nvfp4.NVFP4QuantizerRef(
+            dtype=utils.Fp4Formats.E2M1,
+            quant_tile_shape=(1, 16),
+            pow_2_scales=False,
+            with_rht=True,
+        )
 
     return factory
 
