@@ -1244,6 +1244,255 @@ class FlashAttention(torch.nn.Module):
         return output.contiguous()
 
 
+def _format_to_bhsd(tensor: torch.Tensor, tensor_format: str) -> torch.Tensor:
+    """Convert TE's SBHD/BSHD tensor formats to cuDNN frontend's BHSD format."""
+    if tensor_format == "sbhd":
+        return tensor.permute(1, 2, 0, 3).contiguous()
+    if tensor_format == "bshd":
+        return tensor.permute(0, 2, 1, 3).contiguous()
+    raise ValueError(f"score_mod only supports SBHD/BSHD tensor formats, got {tensor_format}.")
+
+
+def _bhsd_to_format(tensor: torch.Tensor, tensor_format: str) -> torch.Tensor:
+    """Convert cuDNN frontend's BHSD format back to TE's SBHD/BSHD tensor formats."""
+    if tensor_format == "sbhd":
+        return tensor.permute(2, 0, 1, 3).contiguous()
+    if tensor_format == "bshd":
+        return tensor.permute(0, 2, 1, 3).contiguous()
+    raise ValueError(f"score_mod only supports SBHD/BSHD tensor formats, got {tensor_format}.")
+
+
+def _make_cudnn_graph_tensor_dict(graph, tensors: Optional[Dict[str, torch.Tensor]]):
+    """Create cuDNN graph tensors matching runtime tensors."""
+    if tensors is None:
+        return {}
+    return {name: graph.tensor_like(tensor) for name, tensor in tensors.items()}
+
+
+def _wrap_score_mod(score_mod: Optional[Callable], graph_tensors: Dict[str, Any]):
+    """Adapt TE's score_mod signature to cuDNN frontend's two-argument callback."""
+    if score_mod is None:
+        return None
+
+    def _wrapped_score_mod(sdpa_graph, score_tensor):
+        return score_mod(sdpa_graph, score_tensor, graph_tensors)
+
+    return _wrapped_score_mod
+
+
+def _build_cudnn_pygraph(dtype: torch.dtype):
+    """Create a cuDNN frontend Python graph for F16/BF16 SDPA."""
+    import cudnn  # pylint: disable=import-outside-toplevel
+
+    if dtype == torch.float16:
+        io_data_type = cudnn.data_type.HALF
+    elif dtype == torch.bfloat16:
+        io_data_type = cudnn.data_type.BFLOAT16
+    else:
+        raise ValueError(f"score_mod only supports FP16/BF16 tensors, got {dtype}.")
+
+    graph = cudnn.pygraph(
+        io_data_type=io_data_type,
+        intermediate_data_type=cudnn.data_type.FLOAT,
+        compute_data_type=cudnn.data_type.FLOAT,
+    )
+    return cudnn, graph
+
+
+def _build_and_run_cudnn_graph(graph, variant_pack: Dict[Any, torch.Tensor], device: torch.device):
+    """Build and execute a cuDNN frontend Python graph without caching."""
+    import cudnn  # pylint: disable=import-outside-toplevel
+
+    graph.validate()
+    graph.build_operation_graph()
+    try:
+        graph.create_execution_plans([cudnn.heur_mode.A, cudnn.heur_mode.FALLBACK])
+        graph.check_support()
+    except cudnn.cudnnGraphNotSupportedError as exc:
+        raise RuntimeError(f"cuDNN score_mod SDPA graph is not supported: {exc}") from exc
+    graph.build_plans(cudnn.build_plan_policy.HEURISTICS_CHOICE)
+
+    workspace = torch.empty(
+        max(graph.get_workspace_size(), 1),
+        device=device,
+        dtype=torch.uint8,
+    )
+    graph.execute(variant_pack, workspace)
+
+
+class FusedAttentionWithScoreModFunc(torch.autograd.Function):
+    """cuDNN frontend Python SDPA path with score_mod callback support."""
+
+    @staticmethod
+    def forward(
+        ctx,
+        is_training: bool,
+        query_layer: torch.Tensor,
+        key_layer: torch.Tensor,
+        value_layer: torch.Tensor,
+        q_format: str,
+        kv_format: str,
+        attn_scale: float,
+        score_mod: Callable,
+        score_mod_bprop: Optional[Callable],
+        score_mod_tensors: Optional[Dict[str, torch.Tensor]],
+        score_mod_bprop_tensors: Optional[Dict[str, torch.Tensor]],
+        deterministic: bool,
+    ) -> torch.Tensor:
+        # pylint: disable=missing-function-docstring
+        query_bhsd = _format_to_bhsd(query_layer, q_format)
+        key_bhsd = _format_to_bhsd(key_layer, kv_format)
+        value_bhsd = _format_to_bhsd(value_layer, kv_format)
+
+        cudnn, graph = _build_cudnn_pygraph(query_bhsd.dtype)
+        q = graph.tensor_like(query_bhsd)
+        k = graph.tensor_like(key_bhsd)
+        v = graph.tensor_like(value_bhsd)
+
+        score_mod_graph_tensors = _make_cudnn_graph_tensor_dict(graph, score_mod_tensors)
+        wrapped_score_mod = _wrap_score_mod(score_mod, score_mod_graph_tensors)
+
+        output_bhsd = torch.empty(
+            (*query_bhsd.shape[:-1], value_bhsd.shape[-1]),
+            device=query_bhsd.device,
+            dtype=query_bhsd.dtype,
+        )
+        output, stats = graph.sdpa(
+            name="te_score_mod_sdpa",
+            q=q,
+            k=k,
+            v=v,
+            generate_stats=is_training,
+            attn_scale=attn_scale,
+            use_causal_mask=False,
+            score_mod=wrapped_score_mod,
+        )
+        output.set_output(True).set_dim(output_bhsd.size()).set_stride(output_bhsd.stride())
+
+        variant_pack = {
+            q: query_bhsd,
+            k: key_bhsd,
+            v: value_bhsd,
+            output: output_bhsd,
+        }
+        if is_training:
+            stats_bhs1 = torch.empty(
+                (*query_bhsd.shape[:-1], 1),
+                device=query_bhsd.device,
+                dtype=torch.float32,
+            )
+            stats.set_output(True).set_dim(stats_bhs1.size()).set_stride(
+                stats_bhs1.stride()
+            ).set_data_type(cudnn.data_type.FLOAT)
+            variant_pack[stats] = stats_bhs1
+        else:
+            stats_bhs1 = None
+        for name, graph_tensor in score_mod_graph_tensors.items():
+            variant_pack[graph_tensor] = score_mod_tensors[name]
+
+        _build_and_run_cudnn_graph(graph, variant_pack, query_bhsd.device)
+
+        ctx.is_training = is_training
+        ctx.q_format = q_format
+        ctx.kv_format = kv_format
+        ctx.attn_scale = attn_scale
+        ctx.score_mod = score_mod
+        ctx.score_mod_bprop = score_mod_bprop
+        ctx.score_mod_tensors = dict(score_mod_tensors or {})
+        ctx.score_mod_bprop_tensors = dict(score_mod_bprop_tensors or {})
+        ctx.deterministic = deterministic
+        if is_training:
+            ctx.save_for_backward(query_bhsd, key_bhsd, value_bhsd, output_bhsd, stats_bhs1)
+        else:
+            ctx.save_for_backward(query_bhsd, key_bhsd, value_bhsd, output_bhsd)
+
+        return _bhsd_to_format(output_bhsd, q_format)
+
+    @staticmethod
+    def backward(ctx, d_out: torch.Tensor):
+        # pylint: disable=missing-function-docstring
+        if not ctx.is_training:
+            raise RuntimeError(
+                "score_mod backward requires DotProductAttention to be in training mode."
+            )
+
+        query_bhsd, key_bhsd, value_bhsd, output_bhsd, stats_bhs1 = ctx.saved_tensors
+        d_out_bhsd = _format_to_bhsd(d_out, ctx.q_format)
+
+        cudnn, graph = _build_cudnn_pygraph(query_bhsd.dtype)
+        q = graph.tensor_like(query_bhsd)
+        k = graph.tensor_like(key_bhsd)
+        v = graph.tensor_like(value_bhsd)
+        output = graph.tensor_like(output_bhsd)
+        d_output = graph.tensor_like(d_out_bhsd)
+        stats = graph.tensor_like(stats_bhs1)
+
+        score_mod_graph_tensors = _make_cudnn_graph_tensor_dict(graph, ctx.score_mod_tensors)
+        score_mod_bprop_graph_tensors = (
+            _make_cudnn_graph_tensor_dict(graph, ctx.score_mod_bprop_tensors)
+            if ctx.score_mod_bprop is not None
+            else {}
+        )
+        wrapped_score_mod = _wrap_score_mod(ctx.score_mod, score_mod_graph_tensors)
+        wrapped_score_mod_bprop = _wrap_score_mod(
+            ctx.score_mod_bprop, score_mod_bprop_graph_tensors
+        )
+
+        dq_bhsd = torch.empty_like(query_bhsd)
+        dk_bhsd = torch.empty_like(key_bhsd)
+        dv_bhsd = torch.empty_like(value_bhsd)
+        dq, dk, dv = graph.sdpa_backward(
+            name="te_score_mod_sdpa_backward",
+            q=q,
+            k=k,
+            v=v,
+            o=output,
+            dO=d_output,
+            stats=stats,
+            attn_scale=ctx.attn_scale,
+            use_causal_mask=False,
+            score_mod=wrapped_score_mod,
+            score_mod_bprop=wrapped_score_mod_bprop,
+            use_deterministic_algorithm=ctx.deterministic,
+        )
+        dq.set_output(True).set_dim(dq_bhsd.size()).set_stride(dq_bhsd.stride())
+        dk.set_output(True).set_dim(dk_bhsd.size()).set_stride(dk_bhsd.stride())
+        dv.set_output(True).set_dim(dv_bhsd.size()).set_stride(dv_bhsd.stride())
+
+        variant_pack = {
+            q: query_bhsd,
+            k: key_bhsd,
+            v: value_bhsd,
+            output: output_bhsd,
+            d_output: d_out_bhsd,
+            stats: stats_bhs1,
+            dq: dq_bhsd,
+            dk: dk_bhsd,
+            dv: dv_bhsd,
+        }
+        for name, graph_tensor in score_mod_graph_tensors.items():
+            variant_pack[graph_tensor] = ctx.score_mod_tensors[name]
+        for name, graph_tensor in score_mod_bprop_graph_tensors.items():
+            variant_pack[graph_tensor] = ctx.score_mod_bprop_tensors[name]
+
+        _build_and_run_cudnn_graph(graph, variant_pack, query_bhsd.device)
+
+        return (
+            None,
+            _bhsd_to_format(dq_bhsd, ctx.q_format),
+            _bhsd_to_format(dk_bhsd, ctx.kv_format),
+            _bhsd_to_format(dv_bhsd, ctx.kv_format),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+
+
 class FusedAttnFunc(torch.autograd.Function):
     """FusedAttention forward and backward implementation"""
 
@@ -1945,6 +2194,10 @@ class FusedAttention(torch.nn.Module):
         inference_params: Optional[InferenceParams] = None,
         softmax_offset: torch.Tensor = None,
         fp8_output: bool = False,
+        score_mod: Optional[Callable] = None,
+        score_mod_bprop: Optional[Callable] = None,
+        score_mod_tensors: Optional[Dict[str, torch.Tensor]] = None,
+        score_mod_bprop_tensors: Optional[Dict[str, torch.Tensor]] = None,
     ) -> torch.Tensor:
         """fused attention fprop"""
         assert (
@@ -2067,7 +2320,43 @@ class FusedAttention(torch.nn.Module):
                             cp_group[0] if cp_comm_type == "a2a+p2p" else cp_group
                         )
 
-        if context_parallel:
+        if score_mod is not None:
+            assert (
+                not context_parallel
+            ), "score_mod is not supported with context parallelism!"
+            assert (
+                not fp8
+            ), "score_mod is not supported with FP8 FusedAttention!"
+            assert (
+                type(query_layer) is torch.Tensor
+                and type(key_layer) is torch.Tensor
+                and type(value_layer) is torch.Tensor
+            ), "score_mod only supports unquantized torch.Tensor Q, K and V inputs!"
+            assert (
+                fused_attention_backend == tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
+            ), "score_mod requires the F16/BF16 cuDNN fused attention backend!"
+            assert (
+                attn_mask_type == "no_mask"
+                and core_attention_bias_type == "no_bias"
+                and core_attention_bias is None
+                and self.softmax_type == "vanilla"
+                and self.attention_dropout == 0.0
+            ), "score_mod is mutually exclusive with masks, bias, sink attention and dropout!"
+            output = FusedAttentionWithScoreModFunc.apply(
+                self.training,
+                query_layer,
+                key_layer,
+                value_layer,
+                q_format,
+                kv_format,
+                self.softmax_scale,
+                score_mod,
+                score_mod_bprop,
+                score_mod_tensors,
+                score_mod_bprop_tensors,
+                self.deterministic,
+            )
+        elif context_parallel:
             assert (
                 fp8
                 or fused_attention_backend == tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen

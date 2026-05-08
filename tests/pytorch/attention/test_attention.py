@@ -1390,6 +1390,131 @@ def _run_dot_product_attention(
                 return out, max_logit, (None, None, None, d_softmax_offset)
 
 
+def _score_mod_causal(score_mod_graph, score_tensor, tensors):
+    """cuDNN frontend score_mod implementing top-left causal masking."""
+    import cudnn  # pylint: disable=import-outside-toplevel
+
+    row_index = score_mod_graph.gen_index(input=score_tensor, axis=2)
+    row_index.set_data_type(cudnn.data_type.INT32)
+    col_index = score_mod_graph.gen_index(input=score_tensor, axis=3)
+    col_index.set_data_type(cudnn.data_type.INT32)
+    keep = score_mod_graph.cmp_ge(
+        input=row_index,
+        comparison=col_index,
+        compute_data_type=cudnn.data_type.BOOLEAN,
+    )
+    keep.set_data_type(cudnn.data_type.BOOLEAN)
+    return score_mod_graph.binary_select(
+        input0=score_tensor,
+        input1=tensors["neg_inf"],
+        mask=keep,
+    )
+
+
+def _score_mod_causal_bprop(score_mod_graph, dP_tensor, tensors):
+    """cuDNN frontend score_mod_bprop implementing top-left causal masking."""
+    import cudnn  # pylint: disable=import-outside-toplevel
+
+    row_index = score_mod_graph.gen_index(input=dP_tensor, axis=2)
+    row_index.set_data_type(cudnn.data_type.INT32)
+    col_index = score_mod_graph.gen_index(input=dP_tensor, axis=3)
+    col_index.set_data_type(cudnn.data_type.INT32)
+    keep = score_mod_graph.cmp_ge(
+        input=row_index,
+        comparison=col_index,
+        compute_data_type=cudnn.data_type.BOOLEAN,
+    )
+    keep.set_data_type(cudnn.data_type.BOOLEAN)
+    return score_mod_graph.binary_select(
+        input0=dP_tensor,
+        input1=tensors["zero"],
+        mask=keep,
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required.")
+@pytest.mark.skipif(get_cudnn_version() < (9, 6, 0), reason="cuDNN 9.6.0+ is required.")
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("qkv_format", ["sbhd", "bshd"])
+def test_dot_product_attention_score_mod(dtype, qkv_format):
+    """Compare score_mod causal masking against standard cuDNN causal attention."""
+    try:
+        import cudnn  # pylint: disable=unused-import,import-outside-toplevel
+    except ImportError:
+        pytest.skip("cuDNN Python frontend is required for score_mod attention.")
+
+    reset_rng_states()
+    os.environ["NVTE_FLASH_ATTN"] = "0"
+    os.environ["NVTE_FUSED_ATTN"] = "1"
+    os.environ["NVTE_UNFUSED_ATTN"] = "0"
+    _attention_backends["backend_selection_requires_update"] = True
+
+    config = ModelConfig(2, 64, 4, 64, attn_mask_type="no_mask")
+    available_backends, _, fused_attn_backends = get_available_attention_backends(
+        config,
+        qkv_dtype=dtype,
+        qkv_layout=f"{qkv_format}_{qkv_format}_{qkv_format}",
+    )
+    if not available_backends[1] or not fused_attn_backends:
+        pytest.skip("FusedAttention is not available for this score_mod configuration.")
+
+    if qkv_format == "sbhd":
+        q_shape = (config.max_seqlen_q, config.batch_size, config.num_heads, config.head_dim_qk)
+        kv_shape = q_shape
+    else:
+        q_shape = (config.batch_size, config.max_seqlen_q, config.num_heads, config.head_dim_qk)
+        kv_shape = q_shape
+
+    q = (0.1 * torch.randn(q_shape, dtype=dtype, device="cuda")).requires_grad_()
+    k = (0.1 * torch.randn(kv_shape, dtype=dtype, device="cuda")).requires_grad_()
+    v = (0.1 * torch.randn(kv_shape, dtype=dtype, device="cuda")).requires_grad_()
+    q_ref, k_ref, v_ref = [x.detach().clone().requires_grad_() for x in (q, k, v)]
+
+    flex_attn = DotProductAttention(
+        config.num_heads,
+        config.head_dim_qk,
+        qkv_format=qkv_format,
+        attn_mask_type="no_mask",
+        layer_number=1,
+    ).to(dtype=dtype, device="cuda")
+    ref_attn = DotProductAttention(
+        config.num_heads,
+        config.head_dim_qk,
+        qkv_format=qkv_format,
+        attn_mask_type="causal",
+        layer_number=1,
+    ).to(dtype=dtype, device="cuda")
+
+    out = flex_attn(
+        q,
+        k,
+        v,
+        qkv_format=qkv_format,
+        attn_mask_type="no_mask",
+        score_mod=_score_mod_causal,
+        score_mod_bprop=_score_mod_causal_bprop,
+        score_mod_tensors={"neg_inf": torch.full((1, 1, 1, 1), -1e9)},
+        score_mod_bprop_tensors={"zero": torch.full((1, 1, 1, 1), 0.0)},
+    )
+    out_ref = ref_attn(
+        q_ref,
+        k_ref,
+        v_ref,
+        qkv_format=qkv_format,
+        attn_mask_type="causal",
+    )
+
+    d_out = torch.randn_like(out)
+    out.backward(d_out)
+    out_ref.backward(d_out)
+
+    tols = dict(atol=5e-2, rtol=5e-2)
+    torch.testing.assert_close(out, out_ref, **tols)
+    torch.testing.assert_close(q.grad, q_ref.grad, **tols)
+    torch.testing.assert_close(k.grad, k_ref.grad, **tols)
+    torch.testing.assert_close(v.grad, v_ref.grad, **tols)
+
+
 model_configs_te_layer = {
     # test: ModelConfig(b, sq, hq, dqk)
     "te_1_0": ModelConfig(2, 128, 16, 64, attn_bias_type="post_scale_bias"),
