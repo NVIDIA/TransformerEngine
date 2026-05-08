@@ -36,8 +36,8 @@ void fused_attn_fp8_bwd(
     NVTE_Softmax_Type softmax_type, size_t window_size_left, size_t window_size_right,
     bool bottom_right_diagonal, bool deterministic, const Tensor *input_Q, const Tensor *input_K,
     const Tensor *input_V, const Tensor *input_O, const Tensor *input_dO,
-    const Tensor *input_dO_f16, const Tensor *input_M, const Tensor *input_ZInv,
-    const Tensor *input_S, const Tensor *input_SoftmaxOffset, Tensor *input_output_dP,
+    const Tensor *input_dO_f16, const Tensor *input_M, const Tensor *input_S,
+    const Tensor *input_SoftmaxOffset, Tensor *input_output_dP,
     const Tensor *output_dQ, const Tensor *output_dK, const Tensor *output_dV,
     Tensor *output_dSoftmaxOffset, const Tensor *cu_seqlens_q, const Tensor *cu_seqlens_kv,
     const Tensor *rng_state, Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle);
