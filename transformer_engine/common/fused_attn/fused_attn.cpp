@@ -310,8 +310,8 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
       std::string bwd_reason = is_supported_fp8_bwd(
           batch_size, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim_qk,
           head_dim_v, dropout, qkv_layout, bias_type, attn_mask_type, softmax_type,
-          window_size_left, window_size_right, bottom_right_diagonal, deterministic, qkv_t,
-          o_t, scaling_mode, handle);
+          window_size_left, window_size_right, bottom_right_diagonal, deterministic, qkv_t, o_t,
+          scaling_mode, handle);
       if (!bwd_reason.empty()) {
         set_message(message, bwd_reason);
         return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
@@ -334,8 +334,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     std::string fwd_reason = is_supported_f16_fwd(
         batch_size, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim_qk,
         head_dim_v, is_training, return_max_logit, dropout, qkv_layout, bias_type, attn_mask_type,
-        softmax_type, window_size_left, window_size_right, bottom_right_diagonal, qkv_t,
-        handle);
+        softmax_type, window_size_left, window_size_right, bottom_right_diagonal, qkv_t, handle);
     if (!fwd_reason.empty()) {
       set_message(message, fwd_reason);
       return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
@@ -344,8 +343,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
       std::string bwd_reason = is_supported_f16_bwd(
           batch_size, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim_qk,
           head_dim_v, dropout, qkv_layout, bias_type, attn_mask_type, softmax_type,
-          window_size_left, window_size_right, bottom_right_diagonal, deterministic, qkv_t,
-          handle);
+          window_size_left, window_size_right, bottom_right_diagonal, deterministic, qkv_t, handle);
       if (!bwd_reason.empty()) {
         set_message(message, bwd_reason);
         return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
