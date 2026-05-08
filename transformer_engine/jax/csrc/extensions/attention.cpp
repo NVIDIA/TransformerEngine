@@ -13,19 +13,46 @@ namespace jax {
 
 std::tuple<NVTE_Fused_Attn_Backend, std::string> GetFusedAttnBackend(
     bool is_training, size_t batch_size, DType q_dtype, DType kv_dtype, DType o_dtype,
-    NVTEScalingMode scaling_mode, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
-    NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type, float dropout_probability,
-    size_t q_attn_heads, size_t kv_attn_heads, size_t q_max_seqlen, size_t kv_max_seqlen,
-    size_t qk_head_dim, size_t v_head_dim, int64_t window_size_left, int64_t window_size_right,
-    bool bottom_right_diagonal, bool deterministic) {
+    NVTEScalingMode scaling_mode, NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format,
+    NVTE_QKV_Format do_format, NVTE_QKV_Layout dqkv_layout,
+    NVTE_QKV_Format qkv_scale_inv_format, NVTE_QKV_Format do_scale_inv_format,
+    NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type,
+    float dropout_probability, size_t q_attn_heads, size_t kv_attn_heads, size_t q_max_seqlen,
+    size_t kv_max_seqlen, size_t qk_head_dim, size_t v_head_dim, int64_t window_size_left,
+    int64_t window_size_right, bool bottom_right_diagonal, bool deterministic) {
+  // For convenience, allow callers to pass *_NOT_SET sentinels and infer the missing values
+  // from `qkv_layout`; JAX's fused-attn path always uses matching output / dQKV layouts so
+  // this preserves the existing behavior without forcing every Python call site to compute them.
+  // The scale-inv formats stay as NOT_SET when the caller passes NOT_SET because cuDNN-frontend
+  // already infers them from the QKV layout for the recipes JAX currently exercises.
+  if (o_format == NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET) {
+    o_format = nvte_get_q_format(qkv_layout);
+  }
+  if (do_format == NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET) {
+    do_format = o_format;
+  }
+  if (dqkv_layout == NVTE_QKV_Layout::NVTE_QKV_Layout_NOT_SET) {
+    dqkv_layout = qkv_layout;
+  }
+  // The pointer returned via `message` aliases a thread-local buffer in libtransformer_engine that
+  // is overwritten by the next nvte_get_fused_attn_backend call on this thread. We copy it into a
+  // std::string here so the value we return is safe to retain.
+  //
+  // NOTE: attn_scale is part of the cuDNN-frontend graph cache key (FADescriptor_v1::attnScale).
+  // Passing 1.0f here means the graph this probe builds will not be reused at the corresponding
+  // FusedAttnForwardImpl/FusedAttnBackwardImpl call (which forwards the user's actual scale).
+  // The lost reuse is a known performance gap that will be addressed when the future
+  // config-struct refactor also updates this Python-facing wrapper.
   const char *message = nullptr;
   auto backend = nvte_get_fused_attn_backend(
       is_training, batch_size, static_cast<NVTEDType>(q_dtype), static_cast<NVTEDType>(kv_dtype),
-      static_cast<NVTEDType>(o_dtype), scaling_mode, qkv_layout, bias_type, mask_type, softmax_type,
-      dropout_probability, q_attn_heads, kv_attn_heads, q_max_seqlen, kv_max_seqlen, qk_head_dim,
-      v_head_dim, window_size_left, window_size_right, bottom_right_diagonal,
-      /*return_max_logit=*/false, /*cuda_graph=*/false, deterministic, &message);
-  return {backend, message ? std::string(message) : std::string()};
+      static_cast<NVTEDType>(o_dtype), scaling_mode, qkv_layout, o_format, do_format, dqkv_layout,
+      qkv_scale_inv_format, do_scale_inv_format, bias_type, mask_type, softmax_type,
+      /*attn_scale=*/1.0f, dropout_probability, q_attn_heads, kv_attn_heads, q_max_seqlen,
+      kv_max_seqlen, qk_head_dim, v_head_dim, window_size_left, window_size_right,
+      bottom_right_diagonal, /*return_max_logit=*/false, /*cuda_graph=*/false, deterministic,
+      &message);
+  return {backend, message != nullptr ? std::string(message) : std::string()};
 }
 
 /*
@@ -264,12 +291,19 @@ static void FusedAttnForwardImpl(
   /* Prepare RNG state */
   auto rng_state_tensor = TensorWrapper(rng_state, std::vector<size_t>{2}, DType::kInt64);
 
+  // JAX uses the same layout for output / dQKV as for QKV, so derive the formats from qkv_layout.
+  // Scale-inv formats stay NOT_SET because JAX's fused-attn path here is non-FP8.
+  const NVTE_QKV_Format probe_o_format = nvte_get_q_format(qkv_layout);
   auto backend = nvte_get_fused_attn_backend(
       is_training, input_batch, static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype),
-      static_cast<NVTEDType>(dtype), NVTE_INVALID_SCALING, qkv_layout, bias_type, mask_type,
-      softmax_type, dropout_probability, attn_heads, num_gqa_groups, q_max_seqlen, kv_max_seqlen,
-      qk_head_dim, v_head_dim, window_size_left, window_size_right, bottom_right_diagonal,
-      /*return_max_logit=*/false, /*cuda_graph=*/false, deterministic, /*message=*/nullptr);
+      static_cast<NVTEDType>(dtype), NVTE_INVALID_SCALING, qkv_layout, probe_o_format,
+      /*do_format=*/probe_o_format, /*dqkv_layout=*/qkv_layout,
+      /*qkv_scale_inv_format=*/NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET,
+      /*do_scale_inv_format=*/NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET, bias_type, mask_type,
+      softmax_type, scaling_factor, dropout_probability, attn_heads, num_gqa_groups, q_max_seqlen,
+      kv_max_seqlen, qk_head_dim, v_head_dim, window_size_left, window_size_right,
+      bottom_right_diagonal, /*return_max_logit=*/false, /*cuda_graph=*/false, deterministic,
+      /*message=*/nullptr);
   nvte_populate_rng_state_async(rng_state, seed, q_max_seqlen, kv_max_seqlen, backend, stream);
 
   /* Auxiliary tensors (to be propagated to the backward pass later) */
@@ -541,12 +575,19 @@ static void FusedAttnBackwardImpl(
   /* Auxiliary tensors (propagated from the forward pass) */
   NVTETensorPack aux_input_tensors;
   nvte_tensor_pack_create(&aux_input_tensors);
+  // JAX uses the same layout for output / dQKV as for QKV, so derive the formats from qkv_layout.
+  // Scale-inv formats stay NOT_SET because JAX's fused-attn path here is non-FP8.
+  const NVTE_QKV_Format probe_o_format = nvte_get_q_format(qkv_layout);
   auto backend = nvte_get_fused_attn_backend(
       is_training, input_batch, static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype),
-      static_cast<NVTEDType>(dtype), NVTE_INVALID_SCALING, qkv_layout, bias_type, mask_type,
-      softmax_type, dropout_probability, attn_heads, num_gqa_groups, q_max_seqlen, kv_max_seqlen,
-      qk_head_dim, v_head_dim, window_size_left, window_size_right, bottom_right_diagonal,
-      /*return_max_logit=*/false, /*cuda_graph=*/false, deterministic, /*message=*/nullptr);
+      static_cast<NVTEDType>(dtype), NVTE_INVALID_SCALING, qkv_layout, probe_o_format,
+      /*do_format=*/probe_o_format, /*dqkv_layout=*/qkv_layout,
+      /*qkv_scale_inv_format=*/NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET,
+      /*do_scale_inv_format=*/NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET, bias_type, mask_type,
+      softmax_type, scaling_factor, dropout_probability, attn_heads, num_gqa_groups, q_max_seqlen,
+      kv_max_seqlen, qk_head_dim, v_head_dim, window_size_left, window_size_right,
+      bottom_right_diagonal, /*return_max_logit=*/false, /*cuda_graph=*/false, deterministic,
+      /*message=*/nullptr);
   PrepareFusedAttnBackwardAuxTensors(&aux_input_tensors, input_batch, bias_batch, attn_heads,
                                      bias_heads, q_max_seqlen, kv_max_seqlen, dtype, backend,
                                      softmax_aux, rng_state, bias, softmax_offset);

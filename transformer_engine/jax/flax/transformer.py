@@ -762,7 +762,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             head_dim_qk = self.head_dim
             head_dim_v = self.head_dim
 
-        has_fused_attn_kernel = is_fused_attn_kernel_available(
+        has_fused_attn_kernel, fused_attn_reject_reason = is_fused_attn_kernel_available(
             # This needs to be fixed: TE-Jax has historically correlated training mode with deterministic mode.
             not deterministic,
             batch_size,
@@ -781,15 +781,17 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             head_dim_qk,
             head_dim_v,
             self.window_size,
+            return_reason=True,
         )
 
         use_fused_attn = enable_fused_attn and has_fused_attn_kernel
 
         if enable_fused_attn and not has_fused_attn_kernel:
+            reason = fused_attn_reject_reason or "(no diagnostic message available)"
             warnings.warn(
                 "Fused attention is not enabled because there is no available kernel.\n"
                 "Fall back to the unfused attention.\n"
-                "Please try to update the cuDNN and TE to the latest version.\n"
+                f"Reason for this rejection is: {reason}\n"
                 f"{qkv_layout=}\n{attn_bias_type=}\n{attn_mask_type=}\n"
                 f"{self.attention_dropout=}\n{self.num_attention_heads=}\n{self.window_size=}\n"
                 f"{self.num_gqa_groups=}\n{seqlen_q=}\n{seqlen_kv=}\n{head_dim_qk=}\n{head_dim_v=}\n"

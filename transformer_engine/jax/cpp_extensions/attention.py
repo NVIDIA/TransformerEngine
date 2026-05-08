@@ -16,7 +16,12 @@ from jax.sharding import PartitionSpec, NamedSharding
 from jax.experimental.custom_partitioning import SdyShardingRule
 
 import transformer_engine_jax
-from transformer_engine_jax import NVTE_Fused_Attn_Backend, NVTEScalingMode
+from transformer_engine_jax import (
+    NVTE_Fused_Attn_Backend,
+    NVTE_QKV_Format,
+    NVTE_QKV_Layout,
+    NVTEScalingMode,
+)
 from transformer_engine.jax.attention import (
     AttnBiasType,
     AttnMaskType,
@@ -126,7 +131,11 @@ class FusedAttnHelper:
     bottom_right_diagonal: bool
 
     def is_fused_attn_kernel_available(self):
-        """Check if there is available fused attention kernel"""
+        """Check if there is available fused attention kernel.
+
+        Use ``get_fused_attn_backend()`` directly to also get the diagnostic message
+        explaining why a configuration was rejected.
+        """
         backend, _ = self.get_fused_attn_backend()
         return backend != NVTE_Fused_Attn_Backend.NVTE_No_Backend
 
@@ -145,6 +154,11 @@ class FusedAttnHelper:
             q_type,
             NVTEScalingMode.NVTE_INVALID_SCALING,
             self.qkv_layout.value,
+            NVTE_QKV_Format.NVTE_QKV_Format_NOT_SET,
+            NVTE_QKV_Format.NVTE_QKV_Format_NOT_SET,
+            NVTE_QKV_Layout.NVTE_QKV_Layout_NOT_SET,
+            NVTE_QKV_Format.NVTE_QKV_Format_NOT_SET,
+            NVTE_QKV_Format.NVTE_QKV_Format_NOT_SET,
             self.attn_bias_type.value,
             self.attn_mask_type.value,
             self.softmax_type.value,

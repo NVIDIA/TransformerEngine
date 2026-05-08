@@ -23,6 +23,7 @@ import transformer_engine_torch as tex
 import transformer_engine as te
 from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     QKVLayout,
+    QKVFormat,
     AttnBiasType,
     AttnMaskType,
     SoftmaxType,
@@ -1224,6 +1225,8 @@ def get_attention_backend(
         kv_type = q_type
         o_type = q_type
         scaling_mode = tex.NVTEScalingMode.NVTE_INVALID_SCALING
+        qkv_scale_inv_format = None
+        do_scale_inv_format = None
         if fp8 and fp8_meta["recipe"].fp8_dpa:
             recipe = fp8_meta["recipe"]
             q_type = get_fp8_te_dtype(recipe, fprop_tensor=True)
@@ -1232,12 +1235,17 @@ def get_attention_backend(
             if recipe.mxfp8():
                 scaling_mode = tex.NVTEScalingMode.NVTE_MXFP8_1D_SCALING
                 o_type = TE_DType[torch.bfloat16]
+                qkv_scale_inv_format = "bhsd"
+                do_scale_inv_format = "bhsd"
             elif recipe.float8_current_scaling() and cs_o_in_f16:
                 scaling_mode = tex.NVTEScalingMode.NVTE_DELAYED_TENSOR_SCALING
                 o_type = TE_DType[torch.bfloat16]
             else:
                 scaling_mode = tex.NVTEScalingMode.NVTE_DELAYED_TENSOR_SCALING
                 o_type = q_type
+        o_format = q_format
+        do_format = o_format
+        dqkv_layout = qkv_layout
         fused_attention_backend, reject_message = tex.get_fused_attn_backend(
             is_training,
             batch_size,
@@ -1246,6 +1254,11 @@ def get_attention_backend(
             o_type,
             scaling_mode,
             QKVLayout[qkv_layout],
+            QKVFormat[o_format],
+            QKVFormat[do_format],
+            QKVLayout[dqkv_layout],
+            QKVFormat[qkv_scale_inv_format],
+            QKVFormat[do_scale_inv_format],
             AttnBiasType[fu_core_attention_bias_type],
             AttnMaskType[attn_mask_type],
             SoftmaxType[softmax_type],

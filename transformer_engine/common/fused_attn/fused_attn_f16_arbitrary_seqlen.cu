@@ -1337,11 +1337,15 @@ void fused_attn_arbitrary_seqlen_bwd(
 std::string is_supported_f16_fwd(size_t batch, size_t num_attn_heads, size_t num_gqa_groups,
                                  size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim_qk,
                                  size_t head_dim_v, bool is_training, bool return_max_logit,
-                                 float p_dropout, NVTE_QKV_Layout qkv_layout,
+                                 float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout,
+                                 NVTE_QKV_Format o_format,
+                                 [[maybe_unused]] NVTE_QKV_Format qkv_scale_inv_format,
                                  NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
                                  NVTE_Softmax_Type softmax_type, int64_t window_size_left,
                                  int64_t window_size_right, bool bottom_right_diagonal,
-                                 DType qkv_dtype, cudnnHandle_t handle) {
+                                 DType qkv_dtype, [[maybe_unused]] DType o_dtype,
+                                 [[maybe_unused]] NVTEScalingMode scaling_mode,
+                                 cudnnHandle_t handle) {
   const auto b = static_cast<int64_t>(batch);
   const auto h = static_cast<int64_t>(num_attn_heads);
   const auto sq = static_cast<int64_t>(max_seqlen_q);
@@ -1369,17 +1373,15 @@ std::string is_supported_f16_fwd(size_t batch, size_t num_attn_heads, size_t num
   const int64_t bias_sq = has_bias ? sq : 0;
   const int64_t bias_skv = has_bias ? skv : 0;
 
-  const NVTE_QKV_Format o_format = q_format;
-
   size_t workspace_size = 0;
   try {
     fused_attn::fused_attn_arbitrary_seqlen_fwd_impl(
         b, h, static_cast<int64_t>(num_gqa_groups), sq, skv, static_cast<int64_t>(head_dim_qk),
         static_cast<int64_t>(head_dim_v), max_b, max_t_q, max_t_kv, num_pages_k, num_pages_v,
         page_size_k, page_size_v, max_pages_per_seq_k, max_pages_per_seq_v, bias_b, bias_h, bias_sq,
-        bias_skv, is_training, return_max_logit,
-        /*scaling_factor=*/1.0f, p_dropout, qkv_layout, o_format, bias_type, mask_type,
-        softmax_type, window_size_left, window_size_right, bottom_right_diagonal,
+        bias_skv, is_training, return_max_logit, attn_scale, p_dropout, qkv_layout, o_format,
+        bias_type, mask_type, softmax_type, window_size_left, window_size_right,
+        bottom_right_diagonal,
         /*devPtrQ=*/nullptr, /*devPtrK=*/nullptr, /*devPtrV=*/nullptr, /*devPtrBias=*/nullptr,
         /*devPtrSoftmaxOffset=*/nullptr, /*devPtrS1=*/nullptr, /*devPtrS2=*/nullptr,
         /*devPtrO=*/nullptr, /*devPtrDropoutSeed=*/nullptr, /*devPtrDropoutOffset=*/nullptr,
@@ -1399,11 +1401,18 @@ std::string is_supported_f16_fwd(size_t batch, size_t num_attn_heads, size_t num
 
 std::string is_supported_f16_bwd(size_t batch, size_t num_attn_heads, size_t num_gqa_groups,
                                  size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim_qk,
-                                 size_t head_dim_v, float p_dropout, NVTE_QKV_Layout qkv_layout,
+                                 size_t head_dim_v, float attn_scale, float p_dropout,
+                                 NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format,
+                                 NVTE_QKV_Format do_format, NVTE_QKV_Layout dqkv_layout,
+                                 [[maybe_unused]] NVTE_QKV_Format qkv_scale_inv_format,
+                                 [[maybe_unused]] NVTE_QKV_Format do_scale_inv_format,
                                  NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
                                  NVTE_Softmax_Type softmax_type, int64_t window_size_left,
                                  int64_t window_size_right, bool bottom_right_diagonal,
-                                 bool deterministic, DType qkv_dtype, cudnnHandle_t handle) {
+                                 bool deterministic, DType qkv_dtype,
+                                 [[maybe_unused]] DType o_dtype,
+                                 [[maybe_unused]] NVTEScalingMode scaling_mode,
+                                 cudnnHandle_t handle) {
   const auto b = static_cast<int64_t>(batch);
   const auto h = static_cast<int64_t>(num_attn_heads);
   const auto sq = static_cast<int64_t>(max_seqlen_q);
@@ -1423,16 +1432,12 @@ std::string is_supported_f16_bwd(size_t batch, size_t num_attn_heads, size_t num
   const int64_t bias_sq = has_bias ? sq : 0;
   const int64_t bias_skv = has_bias ? skv : 0;
 
-  const NVTE_QKV_Format o_format = q_format;
-  const NVTE_QKV_Format do_format = o_format;
-  const NVTE_QKV_Layout dqkv_layout = qkv_layout;
-
   size_t workspace_size = 0;
   try {
     fused_attn::fused_attn_arbitrary_seqlen_bwd_impl(
         b, h, static_cast<int64_t>(num_gqa_groups), sq, skv, static_cast<int64_t>(head_dim_qk),
         static_cast<int64_t>(head_dim_v), max_b, max_t_q, max_t_kv, bias_b, bias_h, bias_sq,
-        bias_skv, /*scaling_factor=*/1.0f, p_dropout, qkv_layout, o_format, do_format, dqkv_layout,
+        bias_skv, attn_scale, p_dropout, qkv_layout, o_format, do_format, dqkv_layout,
         bias_type, mask_type, softmax_type, window_size_left, window_size_right,
         bottom_right_diagonal, deterministic, /*devPtrQ=*/nullptr, /*devPtrKTranspose=*/nullptr,
         /*devPtrVTranspose=*/nullptr, /*devPtrO=*/nullptr, /*devPtrSoftmaxStats=*/nullptr,

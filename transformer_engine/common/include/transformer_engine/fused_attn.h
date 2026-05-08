@@ -198,6 +198,11 @@ NVTE_QKV_Format nvte_get_kv_format(NVTE_QKV_Layout qkv_layout);
 
 /*! \brief Get fused attention backend based on input parameters.
  *
+ *  This call exercises cudnn-frontend's support checks by building (and caching) the
+ *  cuDNN execution graph for the supported configurations. The configuration parameters
+ *  are a superset of those of ``nvte_fused_attn_fwd`` and ``nvte_fused_attn_bwd`` to
+ *  maintain a consistent signature between graph building and runtime calls.
+ *
  *  \param[in]     is_training           Whether the model is in training mode.
  *  \param[in]     batch_size            Batch size.
  *  \param[in]     q_dtype               The data type of Tensor Q.
@@ -205,9 +210,19 @@ NVTE_QKV_Format nvte_get_kv_format(NVTE_QKV_Layout qkv_layout);
  *  \param[in]     o_dtype               The data type of Tensor O.
  *  \param[in]     scaling_mode          Scaling mode of attention.
  *  \param[in]     qkv_layout            The layout of Tensors Q, K, V.
+ *  \param[in]     o_format              The format of Tensor O.
+ *  \param[in]     do_format             The format of Tensor dO.
+ *  \param[in]     dqkv_layout           The layout of Tensors dQ, dK, dV.
+ *  \param[in]     qkv_scale_inv_format  Format of the scale-inverse tensors for QKV in FP8
+ *                                       configurations; pass NVTE_QKV_Format_NOT_SET to let the
+ *                                       backend infer it from ``qkv_layout`` otherwise.
+ *  \param[in]     do_scale_inv_format   Format of the scale-inverse tensor for dO in FP8 backward
+ *                                       configurations; pass NVTE_QKV_Format_NOT_SET to let the
+ *                                       backend infer it from ``do_format`` otherwise.
  *  \param[in]     bias_type             The attention bias type.
  *  \param[in]     attn_mask_type        The attention mask type.
  *  \param[in]     softmax_type          The attention softmax type.
+ *  \param[in]     attn_scale            Scaling factor for Q * K^T.
  *  \param[in]     dropout               The dropout probability.
  *  \param[in]     num_attn_heads        The number of heads in Q.
  *  \param[in]     num_gqa_groups        The number of heads in K, V.
@@ -222,17 +237,24 @@ NVTE_QKV_Format nvte_get_kv_format(NVTE_QKV_Layout qkv_layout);
  *  \param[in]     return_max_logit      Whether to produce Max along with Stats.
  *  \param[in]     cuda_graph            Whether cuda graph capture is enabled or not.
  *  \param[in]     deterministic         Whether determinism is required or not.
- *  \param[out]    message               Empty string on success, otherwise a diagnostic string
- *                                       describing why the configuration was rejected.
+ *  \param[out]    message               Empty on success, otherwise a diagnostic string describing
+ *                                       why the configuration was rejected. The string pointer refers to a
+ *                                       per-thread buffer owned by the library and remains valid
+ *                                       only until the next call to ``nvte_get_fused_attn_backend``
+ *                                       on the same thread; callers that need to retain the
+ *                                       message across further calls must copy it. Pass NULL to
+ *                                       skip diagnostics.
  */
 NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     bool is_training, size_t batch_size, NVTEDType q_dtype, NVTEDType kv_dtype, NVTEDType o_dtype,
-    NVTEScalingMode scaling_mode, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
-    NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type, float dropout,
-    size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q, size_t max_seqlen_kv,
-    size_t head_dim_qk, size_t head_dim_v, int64_t window_size_left, int64_t window_size_right,
-    bool bottom_right_diagonal, bool return_max_logit, bool cuda_graph, bool deterministic,
-    const char **message);
+    NVTEScalingMode scaling_mode, NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format,
+    NVTE_QKV_Format do_format, NVTE_QKV_Layout dqkv_layout,
+    NVTE_QKV_Format qkv_scale_inv_format, NVTE_QKV_Format do_scale_inv_format,
+    NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
+    float attn_scale, float dropout, size_t num_attn_heads, size_t num_gqa_groups,
+    size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v,
+    int64_t window_size_left, int64_t window_size_right, bool bottom_right_diagonal,
+    bool return_max_logit, bool cuda_graph, bool deterministic, const char **message);
 
 /*! \brief Compute dot product attention with separate Q, K and V.
  *
