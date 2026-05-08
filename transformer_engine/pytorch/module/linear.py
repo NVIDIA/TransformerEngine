@@ -1321,7 +1321,12 @@ class _Linear(torch.autograd.Function):
         if bwd_args.ub_name is not None:
             nvtx_label = f"{nvtx_label}.{bwd_args.ub_name}"
         result = _linear_backward(bwd_args) + (None,)  # fwd_args grad slot
-        if bwd_args.reduce_and_update_bwd_fp8_tensors and not is_graph_capturing():
+        reduce_and_update_bwd_fp8_tensors = bwd_args.reduce_and_update_bwd_fp8_tensors
+        # Drop all references held by bwd_args (saved tensors, quantizers, weakrefs,
+        # main_grad closure) so they don't outlive backward via ctx under retain_graph.
+        ctx.backward_objects = None
+        del bwd_args
+        if reduce_and_update_bwd_fp8_tensors and not is_graph_capturing():
             nvtx_range_push(f"{nvtx_label}.reduce_and_update_fp8_tensors")
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
             nvtx_range_pop(f"{nvtx_label}.reduce_and_update_fp8_tensors")
