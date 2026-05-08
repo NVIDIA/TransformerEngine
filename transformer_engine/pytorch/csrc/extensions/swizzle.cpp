@@ -379,13 +379,6 @@ std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor(GroupedTensorW
   if (!swizzle_rowwise && !swizzle_columnwise) {
     return std::nullopt;
   }
-  const auto first_dims = input.get_first_dims();
-  const auto last_dims = input.get_last_dims();
-  if (first_dims.data_ptr != nullptr || last_dims.data_ptr != nullptr) {
-    NVTE_ERROR(
-        "Grouped GEMM swizzle requires uniform shapes for now (first_dims/last_dims must be "
-        "absent).");
-  }
 
   std::optional<at::Tensor> rowwise_scales_pyt;
   std::optional<at::Tensor> columnwise_scales_pyt;
@@ -403,16 +396,39 @@ std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor(GroupedTensorW
         tensor_offsets.data_ptr, static_cast<DType>(tensor_offsets.dtype), tensor_offsets.shape);
   }
 
+  // Per-tensor logical dimensions (uniform-shape grouped tensor).
+  const size_t num_tensors = input.num_tensors();
+  const auto logical_shape_nvte = input.logical_shape();
+  NVTE_CHECK(logical_shape_nvte.ndim >= 2,
+             "Grouped GEMM swizzle expects logical_shape with ndim >= 2.");
+  const size_t per_tensor_first_dim = logical_shape_nvte.data[0] / num_tensors;
+  const size_t per_tensor_last_dim = logical_shape_nvte.data[logical_shape_nvte.ndim - 1];
+  constexpr size_t kMxfp8BlockSize = 32;
+
+  // Output is always allocated in the per-tensor padded ("swizzle-ready") layout
+  // so the cuDNN grouped GEMM consumer sees the correct stride between experts.
+  // The swizzle kernel itself handles converting from the kernel-emitted compact
+  // layout (per-tensor first dim is the unpadded value) to this padded layout.
+  auto compute_padded_grouped_scale_shape = [&](bool rowwise) {
+    const size_t m = rowwise ? per_tensor_first_dim : per_tensor_last_dim;
+    const size_t k = rowwise ? per_tensor_last_dim : per_tensor_first_dim;
+    const size_t padded_m = ceildiv(m, size_t{128}) * 128;
+    const size_t padded_k = ceildiv(ceildiv(k, kMxfp8BlockSize), size_t{4}) * 4;
+    return std::vector<size_t>{num_tensors * padded_m, padded_k};
+  };
+
   if (swizzle_rowwise) {
     const auto data = input.get_rowwise_data();
     const auto data_dtype = static_cast<DType>(data.dtype);
     const auto scales_dtype = static_cast<DType>(row_scales.dtype);
     swizzle_input.set_rowwise_data(nullptr, data_dtype, data.shape);
     swizzle_input.set_rowwise_scale_inv(row_scales.data_ptr, scales_dtype, row_scales.shape);
-    rowwise_scales_pyt = allocateSpace(row_scales.shape, scales_dtype, false);
+    const auto padded_shape = compute_padded_grouped_scale_shape(/*rowwise=*/true);
+    rowwise_scales_pyt = allocateSpace(padded_shape, scales_dtype, false);
+    NVTEShape padded_shape_nvte = nvte_make_shape(padded_shape.data(), padded_shape.size());
     swizzle_output.set_rowwise_data(nullptr, data_dtype, data.shape);
     swizzle_output.set_rowwise_scale_inv(getDataPtr(*rowwise_scales_pyt), scales_dtype,
-                                         row_scales.shape);
+                                         padded_shape_nvte);
   }
   if (swizzle_columnwise) {
     const auto data = input.get_columnwise_data();
@@ -420,13 +436,16 @@ std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor(GroupedTensorW
     const auto scales_dtype = static_cast<DType>(col_scales.dtype);
     swizzle_input.set_columnwise_data(nullptr, data_dtype, data.shape);
     swizzle_input.set_columnwise_scale_inv(col_scales.data_ptr, scales_dtype, col_scales.shape);
-    columnwise_scales_pyt = allocateSpace(col_scales.shape, scales_dtype, false);
+    const auto padded_shape = compute_padded_grouped_scale_shape(/*rowwise=*/false);
+    columnwise_scales_pyt = allocateSpace(padded_shape, scales_dtype, false);
+    NVTEShape padded_shape_nvte = nvte_make_shape(padded_shape.data(), padded_shape.size());
     swizzle_output.set_columnwise_data(nullptr, data_dtype, data.shape);
     swizzle_output.set_columnwise_scale_inv(getDataPtr(*columnwise_scales_pyt), scales_dtype,
-                                            col_scales.shape);
+                                            padded_shape_nvte);
   }
 
   swizzle_output.set_with_gemm_swizzled_scales(true);
+
   NVTE_SCOPED_GIL_RELEASE({
     nvte_swizzle_grouped_scaling_factors(swizzle_input.data(), swizzle_output.data(),
                                          at::cuda::getCurrentCUDAStream());
@@ -434,12 +453,13 @@ std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor(GroupedTensorW
 
   if (swizzle_rowwise) {
     const auto scales_dtype = static_cast<DType>(row_scales.dtype);
-    input.set_rowwise_scale_inv(getDataPtr(*rowwise_scales_pyt), scales_dtype, row_scales.shape);
+    input.set_rowwise_scale_inv(getDataPtr(*rowwise_scales_pyt), scales_dtype,
+                                getTensorShape(*rowwise_scales_pyt));
   }
   if (swizzle_columnwise) {
     const auto scales_dtype = static_cast<DType>(col_scales.dtype);
     input.set_columnwise_scale_inv(getDataPtr(*columnwise_scales_pyt), scales_dtype,
-                                   col_scales.shape);
+                                   getTensorShape(*columnwise_scales_pyt));
   }
   input.set_with_gemm_swizzled_scales(true);
   return SwizzledGroupedScales{std::move(rowwise_scales_pyt), std::move(columnwise_scales_pyt)};

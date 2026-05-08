@@ -26,6 +26,10 @@ inline void dequantize_helper(const Tensor &input, Tensor *output, cudaStream_t 
   CheckInputTensor(input, "cast_input");
   CheckOutputTensor(*output, "cast_output");
 
+  if (input.numel() == 0) {
+    return;
+  }
+
   switch (input.scaling_mode) {
     case NVTE_DELAYED_TENSOR_SCALING: {
       NVTE_CHECK(is_fp8_dtype(input.dtype()), "Input must have FP8 type.");

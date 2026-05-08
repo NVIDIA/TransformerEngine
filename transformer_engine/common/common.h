@@ -177,6 +177,11 @@ struct Tensor {
    *  Only meaningful for MXFP8 and NVFP4.
    */
   bool with_gemm_swizzled_scales = false;
+  /*! \brief Whether NVFP4 rowwise amax metadata is row-scaled.
+   *
+   *  Only meaningful for NVFP4 tensors.
+   */
+  bool row_scaled_nvfp4 = false;
 
   /*! Map from NVTETensorParam to parameter sizes */
   static constexpr size_t attr_sizes[] = {
@@ -187,7 +192,8 @@ struct Tensor {
       sizeof(NVTEBasicTensor),  // kNVTERowwiseScaleInv
       sizeof(NVTEBasicTensor),  // kNVTEColumnwiseScaleInv
       sizeof(NVTEBasicTensor),  // kNVTEColumnwiseAmax
-      sizeof(uint8_t)           // kNVTEWithGEMMSwizzledScales
+      sizeof(uint8_t),          // kNVTEWithGEMMSwizzledScales
+      sizeof(uint8_t)           // kNVTERowScaledNVFP4
   };
 
   Tensor() : scaling_mode{NVTE_DELAYED_TENSOR_SCALING}, nvte_tensor{0} {}
@@ -203,6 +209,7 @@ struct Tensor {
     columnwise_scale_inv.clear();
     scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
     with_gemm_swizzled_scales = false;
+    row_scaled_nvfp4 = false;
   }
 
   explicit operator NVTETensor() const noexcept { return nvte_tensor; }
@@ -948,6 +955,26 @@ struct TypeInfo {
     default: {                                                                             \
       NVTE_ERROR("Unsupported grouped tensor shape representation.");                      \
     }                                                                                      \
+  }
+
+#define TRANSFORMER_ENGINE_VECTORIZED_LOAD_INTEGER_TYPE_SWITCH(INTEGER_ELTS_NUM, type, ...) \
+  switch (INTEGER_ELTS_NUM) {                                                               \
+    case 1: {                                                                               \
+      using type = int;                                                                     \
+      { __VA_ARGS__ }                                                                       \
+    } break;                                                                                \
+    case 2: {                                                                               \
+      using type = int2;                                                                    \
+      { __VA_ARGS__ }                                                                       \
+    } break;                                                                                \
+    case 4: {                                                                               \
+      using type = int4;                                                                    \
+      { __VA_ARGS__ }                                                                       \
+    } break;                                                                                \
+    default: {                                                                              \
+      NVTE_ERROR("Unsupported number of integer elements ", INTEGER_ELTS_NUM,               \
+                 ". Expected one of: 1, 2, or 4.");                                         \
+    }                                                                                       \
   }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

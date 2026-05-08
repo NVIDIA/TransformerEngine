@@ -776,7 +776,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fp8_meta["fp8_checkpoint"] = False
         self.fp8_meta["fp8_group"] = None
         self.fp8_meta_tensors_initialized = False
-        self.quantizers = {"scaling_fwd": {}, "scaling_bwd": {}}
+        self.quantizers = {"scaling_fwd": [], "scaling_bwd": []}
         self.tp_group = None
         self.tp_size = 1
         self.sequence_parallel = False

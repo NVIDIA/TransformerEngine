@@ -222,6 +222,14 @@ TensorWrapper CommOverlapCore::get_tensor_chunk(const TensorWrapper &source, siz
   TensorWrapper chunk(scaling_mode);
   for (int param_id = 0; param_id < NVTETensorParam::kNVTENumTensorParams; param_id++) {
     auto param_type = static_cast<NVTETensorParam>(param_id);
+    if (param_type == NVTETensorParam::kNVTEWithGEMMSwizzledScales) {
+      chunk.set_with_gemm_swizzled_scales(source.get_with_gemm_swizzled_scales());
+      continue;
+    }
+    if (param_type == NVTETensorParam::kNVTERowScaledNVFP4) {
+      chunk.set_row_scaled_nvfp4(source.get_row_scaled_nvfp4());
+      continue;
+    }
     auto param = source.get_parameter(param_type);
     auto param_dptr = reinterpret_cast<char *>(param.data_ptr);
     auto param_dtype = static_cast<DType>(param.dtype);

@@ -411,20 +411,6 @@ cudnn_frontend::Operation ternary_pw_op_create(cudnn_frontend::Tensor const &xDe
   return pw_op_created;
 }
 
-// convert cu_seqlens_q to qkv/o_ragged_offset and actual_seqlens_q
-__global__ void cu_seqlens_to_offsets(int64_t b, int64_t h, int64_t d, int32_t *cu_seqlens_q,
-                                      int32_t *actual_seqlens_q, int32_t *qkv_ragged_offset,
-                                      int32_t *o_ragged_offset) {
-  size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-  if (tid < b) {
-    actual_seqlens_q[tid] = cu_seqlens_q[tid + 1] - cu_seqlens_q[tid];
-  }
-  if (tid < b + 1) {
-    qkv_ragged_offset[tid] = cu_seqlens_q[tid] * 3 * h * d;
-    o_ragged_offset[tid] = cu_seqlens_q[tid] * h * d;
-  }
-}
-
 // convert cu_seqlens to actual_seqlens
 __global__ void cu_seqlens_to_actual_seqlens(int64_t actual_b, int64_t max_b,
                                              int32_t const *const q_cu_seqlens,
