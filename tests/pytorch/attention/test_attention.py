@@ -2570,10 +2570,21 @@ def test_custom_mha_fp8_vs_f16(dtype, model):
 
     # Test backend availability
     is_training = True
+    fp8_meta = {}
+    fp8_recipe = recipe.DelayedScaling(
+        margin=0,
+        fp8_format=recipe.Format.HYBRID,
+        amax_history_len=1,
+        amax_compute_algo="most_recent",
+        fp8_dpa=True,
+    )
+    fp8_meta["recipe"] = fp8_recipe
     available_backends, _, fused_attn_backends = get_available_attention_backends(
         config,
         qkv_dtype=torch.float8_e4m3fn,
         qkv_layout="bs3hd",
+        fp8=True,
+        fp8_meta=fp8_meta,
         is_training=is_training,
         deterministic=_deterministic,
     )
@@ -2651,6 +2662,7 @@ def _run_custom_mha_fp8(dtype, config, backend):
         fp8_format=recipe.Format.HYBRID,
         amax_history_len=1,
         amax_compute_algo="most_recent",
+        fp8_dpa=True,
     )
 
     mha = Custom_MHA_FP8(config).to(dtype=dtype, device="cuda")
