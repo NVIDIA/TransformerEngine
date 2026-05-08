@@ -325,6 +325,7 @@ def canonicalize_attn_mask_type(attn_mask_type: str):
 
 def is_fused_attn_kernel_available(
     is_training,
+    batch_size,
     q_dtype,
     kv_dtype,
     qkv_layout,
@@ -357,6 +358,7 @@ def is_fused_attn_kernel_available(
         )
         return tex.FusedAttnHelper(
             is_training,
+            batch_size,
             q_dtype,
             kv_dtype,
             qkv_layout,

@@ -199,6 +199,7 @@ NVTE_QKV_Format nvte_get_kv_format(NVTE_QKV_Layout qkv_layout);
 /*! \brief Get fused attention backend based on input parameters.
  *
  *  \param[in]     is_training           Whether the model is in training mode.
+ *  \param[in]     batch_size            Batch size.
  *  \param[in]     q_dtype               The data type of Tensor Q.
  *  \param[in]     kv_dtype              The data type of Tensors K, V.
  *  \param[in]     o_dtype               The data type of Tensor O.
@@ -225,7 +226,7 @@ NVTE_QKV_Format nvte_get_kv_format(NVTE_QKV_Layout qkv_layout);
  *                                       describing why the configuration was rejected.
  */
 NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
-    bool is_training, NVTEDType q_dtype, NVTEDType kv_dtype, NVTEDType o_dtype,
+    bool is_training, size_t batch_size, NVTEDType q_dtype, NVTEDType kv_dtype, NVTEDType o_dtype,
     NVTEScalingMode scaling_mode, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
     NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type, float dropout,
     size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q, size_t max_seqlen_kv,

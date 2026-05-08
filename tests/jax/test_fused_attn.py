@@ -446,6 +446,7 @@ class FusedAttnRunner:
 
         self.backend, message = FusedAttnHelper(
             self.is_training,
+            self.batch_size,
             self.dtype,
             self.dtype,
             self.qkv_layout,

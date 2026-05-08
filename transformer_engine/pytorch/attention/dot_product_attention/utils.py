@@ -1227,6 +1227,7 @@ def get_attention_backend(
             kv_type = q_type
         fused_attention_backend, reject_message = tex.get_fused_attn_backend(
             is_training,
+            batch_size,
             q_type,
             kv_type,
             q_type,

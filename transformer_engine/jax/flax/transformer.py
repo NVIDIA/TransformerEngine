@@ -748,6 +748,8 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         enable_fused_attn = int(os.getenv("NVTE_FUSED_ATTN", "1"))
 
         sequence_dim = 0 if self.transpose_batch_sequence else 1
+        batch_dim = 1 - sequence_dim
+        batch_size = query.shape[batch_dim]
         seqlen_q = query.shape[sequence_dim]
         if qkv_layout == QKVLayout.BS3HD:
             seqlen_kv = seqlen_q
@@ -763,6 +765,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         has_fused_attn_kernel = is_fused_attn_kernel_available(
             # This needs to be fixed: TE-Jax has historically correlated training mode with deterministic mode.
             not deterministic,
+            batch_size,
             input_dtype,
             # self._assert_dtypes enforces Q, K, V, bias to have the same dtype so using input_dtype as kv dtype is sufficient
             input_dtype,

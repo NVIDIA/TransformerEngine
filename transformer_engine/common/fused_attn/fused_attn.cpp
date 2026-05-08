@@ -241,7 +241,7 @@ void set_message(const char **message, const std::string &reason) {
 
 // select a backend for fused attention
 NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
-    bool is_training, NVTEDType q_dtype, NVTEDType kv_dtype, NVTEDType o_dtype,
+    bool is_training, size_t batch_size, NVTEDType q_dtype, NVTEDType kv_dtype, NVTEDType o_dtype,
     NVTEScalingMode scaling_mode, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
     NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type, float dropout,
     size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q, size_t max_seqlen_kv,
@@ -279,11 +279,6 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
   }
 
-  // Use batch=1 for the probe to keep graph caches minimal; batch is not part of cuDNN-FE's
-  // support-check criteria. All other params are passed through verbatim so the cached graph
-  // matches what the eventual nvte_fused_attn_fwd/bwd call will build.
-  constexpr size_t probe_batch = 1;
-
   const bool is_fp8 =
       (q_dtype == NVTEDType::kNVTEFloat8E4M3 || q_dtype == NVTEDType::kNVTEFloat8E5M2);
   const bool is_f16_or_bf16 =
@@ -303,7 +298,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     const DType qkv_t = static_cast<DType>(q_dtype);
     const DType o_t = static_cast<DType>(o_dtype);
     std::string fwd_reason = is_supported_fp8_fwd(
-        probe_batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim_qk,
+        batch_size, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim_qk,
         head_dim_v, is_training, dropout, qkv_layout, bias_type, attn_mask_type, softmax_type,
         window_size_left, window_size_right, bottom_right_diagonal, qkv_t, o_t, scaling_mode,
         handle);
@@ -313,7 +308,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     }
     if (is_training) {
       std::string bwd_reason = is_supported_fp8_bwd(
-          probe_batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim_qk,
+          batch_size, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim_qk,
           head_dim_v, dropout, qkv_layout, bias_type, attn_mask_type, softmax_type,
           window_size_left, window_size_right, bottom_right_diagonal, deterministic, qkv_t,
           o_t, scaling_mode, handle);
@@ -337,7 +332,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     }
     const DType qkv_t = static_cast<DType>(q_dtype);
     std::string fwd_reason = is_supported_f16_fwd(
-        probe_batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim_qk,
+        batch_size, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim_qk,
         head_dim_v, is_training, return_max_logit, dropout, qkv_layout, bias_type, attn_mask_type,
         softmax_type, window_size_left, window_size_right, bottom_right_diagonal, qkv_t,
         handle);
@@ -347,7 +342,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     }
     if (is_training) {
       std::string bwd_reason = is_supported_f16_bwd(
-          probe_batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim_qk,
+          batch_size, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim_qk,
           head_dim_v, dropout, qkv_layout, bias_type, attn_mask_type, softmax_type,
           window_size_left, window_size_right, bottom_right_diagonal, deterministic, qkv_t,
           handle);
@@ -449,7 +444,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   const NVTEScalingMode scaling_mode = input_Q->scaling_mode;
 
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
-      is_training, Q_type, KV_type, O_type, scaling_mode, qkv_layout, bias_type, attn_mask_type,
+      is_training, b, Q_type, KV_type, O_type, scaling_mode, qkv_layout, bias_type, attn_mask_type,
       softmax_type, dropout, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, window_size_left,
       window_size_right, bottom_right_diagonal, return_max_logit, cuda_graph,
       /*deterministic=*/false, /*message=*/nullptr);
@@ -533,7 +528,7 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   const NVTEScalingMode scaling_mode = input_Q->scaling_mode;
 
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
-      /*is_training=*/true, Q_type, KV_type, O_type, scaling_mode, qkv_layout, bias_type,
+      /*is_training=*/true, b, Q_type, KV_type, O_type, scaling_mode, qkv_layout, bias_type,
       attn_mask_type, softmax_type, dropout, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v,
       window_size_left, window_size_right, bottom_right_diagonal, /*return_max_logit=*/false,
       cuda_graph, deterministic, /*message=*/nullptr);

@@ -75,6 +75,7 @@ class TestDistributedSelfAttn:
 
         if not is_fused_attn_kernel_available(
             is_training,
+            batch,
             dtype,
             dtype,
             QKVLayout.BS3HD,
@@ -227,6 +228,7 @@ class TestDistributedCrossAttn:
 
         if not is_fused_attn_kernel_available(
             is_training,
+            batch,
             dtype,
             dtype,
             QKVLayout.BSHD_BS2HD,
@@ -368,6 +370,7 @@ class TestDistributedContextParallelSelfAttn:
         def check_has_backend_for_mask(mask_type):
             return is_fused_attn_kernel_available(
                 is_training,
+                batch,
                 dtype,
                 dtype,
                 qkv_layout,

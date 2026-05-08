@@ -108,6 +108,7 @@ class FusedAttnHelper:
     """
 
     is_training: bool
+    batch_size: int
     q_dtype: jnp.dtype
     kv_dtype: jnp.dtype
     qkv_layout: QKVLayout
@@ -138,6 +139,7 @@ class FusedAttnHelper:
         q_type = jax_dtype_to_te_dtype(self.q_dtype)
         return transformer_engine_jax.get_fused_attn_backend(
             self.is_training,
+            self.batch_size,
             q_type,
             jax_dtype_to_te_dtype(self.kv_dtype),
             q_type,
@@ -345,8 +347,10 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         out_aval = q_aval.update(shape=output_shape, dtype=q_dtype)
 
         # backend determines the softmax buffer shape/dtype
+        input_batch = reduce(operator.mul, batch_shape)
         backend, message = FusedAttnHelper(
             config.is_training,
+            input_batch,
             q_dtype,
             k_dtype,
             config.qkv_layout,
