@@ -26,10 +26,13 @@ from transformer_engine.pytorch.cpp_extensions.gemm import general_gemm
 
 _SUPPORT_TMA = torch.cuda.get_device_capability()[0] >= 9
 
+
 def _tma_aligned(t):
     return (t.stride(0) * t.element_size()) % 16 == 0 and t.data_ptr() % 16 == 0
 
+
 ENFORCE_DETERMINISTIC = os.environ.get("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1") == "0"
+
 
 def mhc_generate_mix_and_aggregate(
     x: torch.Tensor,
@@ -103,14 +106,22 @@ def mhc_generate_mix_and_aggregate(
         with dtype float32
     """
     if use_split_k:
-        assert not ENFORCE_DETERMINISTIC, "Determninism is enforced with ,NVTE_ALLOW_NONDETERMINISTIC_ALGO=0, but split-K will introduce non-determinism due to atomic add which violates determinism."
+        assert not ENFORCE_DETERMINISTIC, (
+            "Determninism is enforced with ,NVTE_ALLOW_NONDETERMINISTIC_ALGO=0, but split-K will"
+            " introduce non-determinism due to atomic add which violates determinism."
+        )
     s, b, C, n = x.shape
     assert (
         n == 4
     ), "Only n=4 is supported in this implementation, where n is the Hyper Connection number"
     nC = n * C
     H, ms = mhc_fused_projection(
-        x.view(s * b, nC), phi, norm_weight=norm_weight, use_tf32=use_tf32, fuse_grad_x_acc=fuse_grad_x_acc, use_split_k=use_split_k
+        x.view(s * b, nC),
+        phi,
+        norm_weight=norm_weight,
+        use_tf32=use_tf32,
+        fuse_grad_x_acc=fuse_grad_x_acc,
+        use_split_k=use_split_k,
     )
     h_pre, h_post, h_res = mhc_fused_scale(H, alpha, beta, ms, n)
     H_pre = h_pre.view(s, b, n)
@@ -118,7 +129,12 @@ def mhc_generate_mix_and_aggregate(
     H_res = h_res.view(s, b, n, n)
     H_res = mhc_fused_sinkhorn(H_res, n, recompute_hist=True, iters=20)
     out = mhc_fused_aggregate(
-        x, H_pre.view(s, b, n), n, use_tf32=use_tf32, fuse_grad_x_acc=fuse_grad_x_acc, use_split_k=use_split_k
+        x,
+        H_pre.view(s, b, n),
+        n,
+        use_tf32=use_tf32,
+        fuse_grad_x_acc=fuse_grad_x_acc,
+        use_split_k=use_split_k,
     )
     return out, H_post, H_res
 
@@ -257,7 +273,10 @@ def mhc_fused_aggregate(
          with the same dtype as x
     """
     if use_split_k:
-        assert not ENFORCE_DETERMINISTIC, "Determninism is enforced with ,NVTE_ALLOW_NONDETERMINISTIC_ALGO=0, but split-K will introduce non-determinism due to atomic add which violates determinism."
+        assert not ENFORCE_DETERMINISTIC, (
+            "Determninism is enforced with ,NVTE_ALLOW_NONDETERMINISTIC_ALGO=0, but split-K will"
+            " introduce non-determinism due to atomic add which violates determinism."
+        )
     assert n == 4, "Only n=4 is supported in this implementation"
     out = mHCAggregateOp.apply(x, H_pre, n, use_tf32, fuse_grad_x_acc, use_split_k)
     return out
@@ -317,9 +336,14 @@ def mhc_fused_expand_combine(
         with the same dtype as x
     """
     if use_split_k:
-        assert not ENFORCE_DETERMINISTIC, "Determninism is enforced with ,NVTE_ALLOW_NONDETERMINISTIC_ALGO=0, but split-K will introduce non-determinism due to atomic add which violates determinism."
+        assert not ENFORCE_DETERMINISTIC, (
+            "Determninism is enforced with ,NVTE_ALLOW_NONDETERMINISTIC_ALGO=0, but split-K will"
+            " introduce non-determinism due to atomic add which violates determinism."
+        )
     assert n == 4, "Only n=4 is supported in this implementation"
-    out = mHCExpandCombineOp.apply(f, bias, H_post, x, H_res, n, use_tf32, fuse_grad_x_acc, use_split_k)
+    out = mHCExpandCombineOp.apply(
+        f, bias, H_post, x, H_res, n, use_tf32, fuse_grad_x_acc, use_split_k
+    )
     return out
 
 
@@ -380,7 +404,10 @@ def mhc_fused_projection(
         with dtype float32
     """
     if use_split_k:
-        assert not ENFORCE_DETERMINISTIC, "Determninism is enforced with ,NVTE_ALLOW_NONDETERMINISTIC_ALGO=0, but split-K will introduce non-determinism due to atomic add which violates determinism."
+        assert not ENFORCE_DETERMINISTIC, (
+            "Determninism is enforced with ,NVTE_ALLOW_NONDETERMINISTIC_ALGO=0, but split-K will"
+            " introduce non-determinism due to atomic add which violates determinism."
+        )
     assert phi.shape[0] == 24, (
         "Currently only n=4 is supported, which means phi should have 24 (or 32 if you padded phi)"
         " in its first dimension"
@@ -395,7 +422,9 @@ class mHCProjectionOp(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, x, phi, norm_weight=None, use_tf32=True, fuse_grad_x_acc=False, use_split_k=False):
+    def forward(
+        ctx, x, phi, norm_weight=None, use_tf32=True, fuse_grad_x_acc=False, use_split_k=False
+    ):
         """
         The forward pass of the fused projection operation. Computes H = x @ phi^T and the mean
         If norm_weight is provided, it will be absorbd by phi
@@ -444,6 +473,7 @@ class mHCProjectionOp(torch.autograd.Function):
             # TMA descriptors require a global memory allocation
             def alloc_fn(size: int, alignment: int, stream: Optional[int]):
                 return torch.empty(size, device="cuda", dtype=torch.int8)
+
             triton.set_allocator(alloc_fn)
 
         ctx.save_for_backward(x, phi, ms, norm_weight)
@@ -461,7 +491,6 @@ class mHCProjectionOp(torch.autograd.Function):
         if precision == "ieee" and x.dtype == torch.bfloat16 and phi.dtype == torch.float32:
             precision = "tf32x3"
         ctx.precision = precision
-
 
         _mhc_projection_fwd_fused[grid](
             x_ptr=x,  # (M, K)
@@ -483,7 +512,7 @@ class mHCProjectionOp(torch.autograd.Function):
             BLOCK_SIZE_N=32,
             precision=precision,
             USE_SPLIT_K=use_split_k,
-            USE_TMA=use_tma
+            USE_TMA=use_tma,
         )
 
         return H, ms  # Keep both in fp32, which will be passed to sigmoid in mHCScaleFusedOp
@@ -1076,7 +1105,9 @@ class mHCExpandCombineOp(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, f, bias, H_post, x, H_res, n, use_tf32=True, fuse_grad_x_acc=False, use_split_k=False):
+    def forward(
+        ctx, f, bias, H_post, x, H_res, n, use_tf32=True, fuse_grad_x_acc=False, use_split_k=False
+    ):
         """
         The forward pass of the expand and combine operation. Expands the sub-layer output f back
         to n streams using H_post, and combines with the residual connections using H_res:

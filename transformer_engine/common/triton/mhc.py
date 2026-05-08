@@ -113,7 +113,7 @@ def _mhc_projection_fwd_fused(
     BLOCK_SIZE_N: tl.constexpr,
     precision: tl.constexpr,
     USE_SPLIT_K: tl.constexpr,
-    USE_TMA: tl.constexpr, # If True, load x and phi via TMA tensor descriptors (Hopper+ only). Falls back to pointer-arith tl.load otherwise.
+    USE_TMA: tl.constexpr,  # If True, load x and phi via TMA tensor descriptors (Hopper+ only). Falls back to pointer-arith tl.load otherwise.
 ):
     pid_m = tl.program_id(axis=0)
     pid_k = tl.program_id(axis=1)
@@ -142,11 +142,15 @@ def _mhc_projection_fwd_fused(
 
     if USE_TMA:
         x_desc = tl.make_tensor_descriptor(
-            x_ptr, shape=[M, K], strides=[stride_xm, 1],
+            x_ptr,
+            shape=[M, K],
+            strides=[stride_xm, 1],
             block_shape=[BLOCK_SIZE_M, STEP_SIZE_K],
         )
         phi_desc = tl.make_tensor_descriptor(
-            phi_ptr, shape=[N, K], strides=[stride_phin, 1],
+            phi_ptr,
+            shape=[N, K],
+            strides=[stride_phin, 1],
             block_shape=[BLOCK_SIZE_N, STEP_SIZE_K],
         )
 
