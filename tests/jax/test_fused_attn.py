@@ -1072,9 +1072,7 @@ def _get_swa_window_size_for_test(s_kv: int, attn_mask_type: AttnMaskType) -> Tu
                   masks would collapse (W, W) -> (W, 0), hence not tested here.
 
     The chosen ``(left, right)`` is then routed through :func:`check_set_window_size`, which
-    is the same canonicalizer the production modules call at construction time. For the
-    candidates above this is always a no-op, so it acts as a contract self-check rather
-    than a value transformation.
+    is the same canonicalizer the production modules call at construction time.
     """
     cudnn_version = get_cudnn_version()
     if cudnn_version < 90200:
@@ -1089,6 +1087,7 @@ def _get_swa_window_size_for_test(s_kv: int, attn_mask_type: AttnMaskType) -> Tu
         candidate = (left_window_size, right_window_size)
     else:
         candidate = (left_window_size, 0)
+    # Validate the window size against the contract and return the canonicalized value.
     return check_set_window_size(attn_mask_type, candidate)
 
 

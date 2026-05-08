@@ -133,9 +133,7 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
     softmax_type: AttnSoftmaxType = AttnSoftmaxType.VANILLA_SOFTMAX
 
     def __post_init__(self):
-        # Defensive canonicalization: in normal flow window_size arrives canonical
-        # from DotProductAttention, but this guarantees the inner module never has
-        # to handle window_size=None.
+        # Canonicalize window_size so that the inner module never has to handle window_size=None.
         self.window_size = check_set_window_size(self.attn_mask_type, self.window_size)
         super().__post_init__()
 
@@ -251,12 +249,12 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
 
         def convert_to_softmax_fusion_type(attn_mask_type, mask):
             """Convert the attn_mask_type to SoftmaxFusionType"""
+            #TODO(KshitijLakhani): Fix swa mask construction and softmax fusion selection for
+            # missing mask cases.
             # mask is ignored for no_mask and causal_mask without sliding window
             if attn_mask_type == AttnMaskType.NO_MASK:
                 mask = None
-            # check_set_window_size (called in __post_init__) canonicalizes
-            # "no SWA + causal" to (-1, 0), so this is the only sentinel we need
-            # to recognize here.
+            # No SWA + causal mask is equivalent to no mask
             if attn_mask_type == AttnMaskType.CAUSAL_MASK and self.window_size == (-1, 0):
                 mask = None
             if mask is not None:
@@ -322,10 +320,7 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
     softmax_type: AttnSoftmaxType = AttnSoftmaxType.VANILLA_SOFTMAX
 
     def __post_init__(self):
-        # Defensive canonicalization: parallels _UnfusedDotProductAttention. The
-        # value is also re-canonicalized inside fused_attn_fwd/_bwd at the
-        # C-extension boundary, so this is purely about keeping the invariant
-        # uniform across the private module layer.
+        # Canonicalize window_size so that the inner modules do not need to handle window_size=None.
         self.window_size = check_set_window_size(self.attn_mask_type, self.window_size)
         super().__post_init__()
 
@@ -600,15 +595,9 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
           ``padding_causal_bottom_right``: ``(-1, 0)`` (sentinel for infinite-left
           causal) or ``(>=0, 0)``.
 
-        Inputs are validated and canonicalized at construction time. ``None`` is
-        replaced silently with the sentinel for :attr:`attn_mask_type`: ``(-1, -1)``
-        for ``no_mask`` / ``padding`` and ``(-1, 0)`` for the causal family.
-        Inconsistent sentinels (e.g. ``(-1, 0)`` paired with ``no_mask``, or
-        ``(W, R)`` with ``R != 0`` paired with a causal-family mask) are coerced with
-        a warning. Values with negative ``left`` or ``right`` outside the listed
-        sentinels raise an ``AssertionError``. Bidirectional sliding windows
-        (``right > 0`` with ``no_mask`` / ``padding``) require cuDNN >= 9.6 in the fused
-        backend; left-only sliding windows require cuDNN >= 9.2.
+        Inputs are validated and canonicalized at construction time via check_set_window_size. 
+        Bidirectional sliding windows (right > 0 with no_mask / padding) for fused attention
+        require cuDNN >= 9.6; left-only sliding windows (right = 0) require cuDNN >= 9.2.
     max_segments_per_seq: Optional[int], default = 1
         The maximum number of segments per sequence, also used for THD format (sequence packing).
     context_parallel_causal_load_balanced: bool
@@ -1208,15 +1197,9 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
           ``padding_causal_bottom_right``: ``(-1, 0)`` (sentinel for infinite-left
           causal) or ``(>=0, 0)``.
 
-        Inputs are validated and canonicalized at construction time. ``None`` is
-        replaced silently with the sentinel for :attr:`attn_mask_type`: ``(-1, -1)``
-        for ``no_mask`` / ``padding`` and ``(-1, 0)`` for the causal family.
-        Inconsistent sentinels (e.g. ``(-1, 0)`` paired with ``no_mask``, or
-        ``(W, R)`` with ``R != 0`` paired with a causal-family mask) are coerced with
-        a warning. Values with negative ``left`` or ``right`` outside the listed
-        sentinels raise an ``AssertionError``. Bidirectional sliding windows
-        (``right > 0`` with ``no_mask`` / ``padding``) require cuDNN >= 9.6 in the fused
-        backend; left-only sliding windows require cuDNN >= 9.2.
+        Inputs are validated and canonicalized at construction time via check_set_window_size. 
+        Bidirectional sliding windows (right > 0 with no_mask / padding) for fused attention
+        require cuDNN >= 9.6; left-only sliding windows (right = 0) require cuDNN >= 9.2.
     softmax_type: str = {'vanilla', 'off-by-one', 'learnable'}, default = 'vanilla'
         Softmax type as described in the paper
         `Efficient Streaming Language Models with Attention Sinks
@@ -1982,17 +1965,8 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
         sliding window (full attention for ``no_mask`` / ``padding``, infinite-left for
         causal-family masks).
 
-        This value is forwarded as-is to both the self-attention block (which uses
-        :attr:`self_attn_mask_type`) and, when :attr:`layer_type` is ``DECODER``, the
-        cross-attention block (whose mask type is internally fixed to ``padding``).
-        ``TransformerLayer`` deliberately does not canonicalize ``window_size``: a
-        decoder layer carries two different mask-type contracts simultaneously, so each
-        ``MultiHeadAttention`` block canonicalizes against its own mask type in its
-        own ``__post_init__``. Concretely, for ``self_attn_mask_type`` in the causal
-        family with ``window_size=None``, the self-attention block silently expands
-        ``None`` to ``(-1, 0)`` while the cross-attention block silently expands the
-        same ``None`` to ``(-1, -1)`` -- both blocks land on the correct sentinel for
-        their own mask type without warnings.
+        ``TransformerLayer`` deliberately does not canonicalize ``window_size`` and passes
+        on the responsibility to the inner modules (MultiHeadAttention) to canonicalize.
 
         Allowed values per mask type:
 
@@ -2002,12 +1976,8 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
           ``padding_causal_bottom_right``: ``(-1, 0)`` (sentinel for infinite-left
           causal) or ``(>=0, 0)``.
 
-        Inconsistent sentinels (e.g. ``(-1, 0)`` paired with ``no_mask``) are coerced
-        with a warning inside the relevant ``MultiHeadAttention`` block. Values with
-        negative ``left`` or ``right`` outside the listed sentinels raise an
-        ``AssertionError``. Bidirectional sliding windows (``right > 0`` with
-        ``no_mask`` / ``padding``) require cuDNN >= 9.6 in the fused backend; left-only
-        sliding windows require cuDNN >= 9.2.
+        Bidirectional sliding windows (right > 0 with no_mask / padding) for fused attention
+        require cuDNN >= 9.6; left-only sliding windows (right = 0) require cuDNN >= 9.2.
     softmax_type: str = {'vanilla', 'off-by-one', 'learnable'}, default = 'vanilla'
         Softmax type as described in the paper
         `Efficient Streaming Language Models with Attention Sinks
@@ -2113,16 +2083,8 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
             )
         if self.num_gqa_groups is None:
             self.num_gqa_groups = self.num_attention_heads
-        # window_size is intentionally NOT canonicalized here. A decoder layer
-        # constructs two MultiHeadAttention blocks with different mask types
-        # (self-attention uses self_attn_mask_type; cross-attention is hardcoded
-        # to "padding"). Canonicalizing at this layer would force a single
-        # mask-type contract onto a dual-contract object and produce a sentinel
-        # that is correct for one block but not the other (e.g. None + causal
-        # self-attn would yield (-1, 0), which the padding cross-attn would
-        # then warn-coerce). Instead, the raw user value is forwarded as-is to
-        # both blocks; each block canonicalizes against its own mask type in
-        # MultiHeadAttention.__post_init__.
+        # window_size is intentionally NOT canonicalized here and is passed on to the inner modules
+        # (MultiHeadAttention) to canonicalize against the mask type.
         super().__post_init__()
 
     @nn.compact

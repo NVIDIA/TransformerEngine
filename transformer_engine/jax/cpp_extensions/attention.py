@@ -2486,16 +2486,11 @@ class _FusedAttnCPWithP2PHelper:
         for off-diagonal steps where the kv chunk is fully past or fully future of the
         local q chunk; see ``ring_attn_fwd_impl`` / ``ring_attn_bwd_impl``). The user's
         ``window_size`` is the canonical no-SWA form for the *original* mask, so we
-        re-canonicalize it for the per-step mask: a causal-canonical ``(-1, 0)``
-        propagated unchanged to a ``NO_MASK`` step would otherwise be interpreted by
-        cuDNN as "no mask + right=0 SWA", erroneously restricting attention to
-        ``kv_pos <= q_pos`` within that step.
+        re-canonicalize it for the per-step mask.
 
-        The partition-time gate (``FusedRingAttnFwdPrimitive.partition`` /
-        ``FusedRingAttnBwdPrimitive.partition``) guarantees no finite SWA reaches this
-        primitive, so the recanonicalization is unambiguous. ``warn=False`` because the
-        user's ``window_size`` was already validated upstream and this per-step coercion
-        is an internal mask switch the user neither requested nor can act on.
+        ``warn=False`` because the user's ``window_size`` was already canonicalized 
+        by check_set_window_size upstream. This per-step coercion is an internal mask 
+        switch (for ring P2P) which if reported, may confuse the user.
         """
         per_step_window = check_set_window_size(
             attn_mask_type, self.config.window_size, warn=False
@@ -3172,10 +3167,7 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
                 # Trigger striped-window adjustment only when there is a finite SWA.
                 # window_size[0] == -1 is the unified "no finite window" sentinel that
                 # covers both the non-causal (-1, -1) form and the causal-family (-1, 0)
-                # form produced by check_set_window_size at the flax boundary; window_size[0]
-                # is the SWA's left bound, so any finite SWA has window_size[0] >= 0
-                # (matches the convention used elsewhere in this file, e.g.
-                # is_sliding_window at line ~2475).
+                # form produced by check_set_window_size
                 if config.window_size[0] != -1:
                     kv_src_rank = (cp_size + cp_rank - idx) % cp_size
                     # Note: all inputs of adjust_cp_striped_window_size should be host values
@@ -3331,8 +3323,7 @@ class FusedRingAttnStripedBwdPrimitive(FusedAttnBwdPrimitive):
 
                 # See fwd path above: window_size[0] != -1 is the unified "finite SWA"
                 # sentinel that handles both the non-causal (-1, -1) and causal-family
-                # (-1, 0) canonical forms produced by check_set_window_size at the flax
-                # boundary.
+                # (-1, 0) canonical forms produced by check_set_window_size.
                 if config.window_size[0] != -1:
                     kv_src_rank = (cp_size + cp_rank - idx) % cp_size
                     # Note: all inputs of adjust_cp_striped_window_size should be host values
@@ -3517,13 +3508,9 @@ def fused_attn_fwd(
         dropout_probability=dropout_probability,
         is_training=is_training,
         max_segments_per_seq=max_segments_per_seq,
-        # Canonicalize at the C-extension boundary so direct callers (e.g. the
-        # context-parallel ring primitives and unit tests that bypass flax)
-        # see the same canonical encoding as flax users (whose flax DPA/MHA
-        # __post_init__ already canonicalizes via check_set_window_size).
-        # For the ring CP P2P path, the per-step mask switch from CAUSAL_MASK
-        # to NO_MASK is handled inside _FusedAttnCPWithP2PHelper.get_step_config,
-        # which re-canonicalizes the window_size for the per-step mask type.
+        # Canonicalize at the CPP-extension boundary so every downstream primitive this
+        # function dispatches to (default fused-attn and the CP all-gather/ring variants)
+        # sees the same canonical encoding as the DPA/MHA API.
         window_size=check_set_window_size(attn_mask_type, window_size),
         bottom_right_diagonal=attn_mask_type.is_bottom_right(),
         context_parallel_load_balanced=context_parallel_causal_load_balanced,
@@ -3699,9 +3686,9 @@ def fused_attn_bwd(
         dropout_probability=dropout_probability,
         is_training=is_training,
         max_segments_per_seq=max_segments_per_seq,
-        # Canonicalize at the C-extension boundary; see fused_attn_fwd for the
-        # rationale. The ring CP P2P path's per-step mask switch is handled
-        # inside _FusedAttnCPWithP2PHelper.get_step_config.
+        # Canonicalize at the CPP-extension boundary so every downstream primitive this
+        # function dispatches to (default fused-attn and the CP all-gather/ring variants)
+        # sees the same canonical encoding as the DPA/MHA API.
         window_size=check_set_window_size(attn_mask_type, window_size),
         bottom_right_diagonal=attn_mask_type.is_bottom_right(),
         context_parallel_load_balanced=context_parallel_causal_load_balanced,
