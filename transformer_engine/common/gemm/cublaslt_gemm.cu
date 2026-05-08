@@ -318,6 +318,9 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                  const void *alpha, const void *beta, bool use_split_accumulator, int math_sm_count,
                  int m_split, int n_split, bool gemm_producer, const Tensor *inputCounter,
                  cudaStream_t stream) {
+  NVTE_CHECK(!inputA->row_scaled_nvfp4 && !inputB->row_scaled_nvfp4,
+             "cuBLAS GEMM does not support row-scaled NVFP4 inputs.");
+
   // Tensor dims in row-major order
   const int A0 = inputA->flat_first_dim();
   const int A1 = inputA->flat_last_dim();

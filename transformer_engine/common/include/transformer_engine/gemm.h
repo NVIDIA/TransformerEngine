@@ -440,7 +440,7 @@ void nvte_grouped_bias_add(const NVTEGroupedTensor output, const NVTEGroupedTens
 /*! \brief Grouped Scaled Bias add for grouped GEMM outputs.
 *
 * output[row,col] += bias[col] * scale[row], where biases are per-group
-* and scales are per-token (per-row across all groups).
+* and scales are per-row across all groups.
 * Requires uniform last-dimension across all output tensors and bias tensors.
 */
 void nvte_grouped_scaled_bias_add(const NVTEGroupedTensor output, const NVTEGroupedTensor bias,

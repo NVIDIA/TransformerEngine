@@ -148,7 +148,7 @@ std::tuple<at::Tensor, at::Tensor> fused_moe_aux_loss_fwd(at::Tensor probs,
 
   // Create the output tensor
   at::Tensor aux_loss = at::empty({}, at::dtype(probs.scalar_type()).device(at::kCUDA));
-  at::Tensor Const_buf = at::empty({}, at::dtype(at::kFloat).device(at::kCUDA));
+  at::Tensor Const_buf = at::empty({2}, at::dtype(at::kFloat).device(at::kCUDA));
 
   auto probs_cu = makeTransformerEngineTensor(probs);
   auto tokens_per_expert_cu = makeTransformerEngineTensor(tokens_per_expert);

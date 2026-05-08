@@ -333,10 +333,6 @@ struct FADescriptor_v1 {
   }
 };
 
-__global__ void cu_seqlens_to_offsets(int64_t b, int64_t h, int64_t d, int32_t *cu_seqlens_q,
-                                      int32_t *actual_seqlens_q, int32_t *qkv_ragged_offset,
-                                      int32_t *o_ragged_offset);
-
 __global__ void cu_seqlens_to_actual_seqlens(int64_t actual_b, int64_t max_b,
                                              int32_t const *const q_cu_seqlens,
                                              int32_t const *const kv_cu_seqlens, int32_t *q_seqlens,

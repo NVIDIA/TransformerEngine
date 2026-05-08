@@ -28,7 +28,6 @@ NVTE_Fused_Attn_Backend GetFusedAttnBackend(
 /*
     NOTE: PrepareFusedAttnForwardAuxTensors unifies the auxiliary tensor pack logic from the fused
     attention forward kernels in:
-        - common/fused_attn/fused_attn_f16_max512_seqlen.cu lines 594-634 and 773-812
         - common/fused_attn/fused_attn_f16_arbitrary_seqlen.cu lines 1270-1281 and 1348-1359
 */
 void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack, const size_t input_batch,
@@ -40,7 +39,6 @@ void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack, const size_t
                                        void *bias_buf = nullptr,
                                        void *softmax_offset_buf = nullptr) {
   // all backends need softmax but expect different shapes/dtypes
-  // start with the max512 sequence length softmax shape/dtype and correct later
   tensor_pack->size = 1;
   NVTETensor &softmax_aux = tensor_pack->tensors[0];
   NVTEBasicTensor softmax_aux_data;
@@ -127,15 +125,6 @@ void PrepareFusedAttnBackwardAuxTensors(NVTETensorPack *tensor_pack, const size_
                                     q_max_seqlen, kv_max_seqlen, dtype, dummy_bias_type,
                                     dummy_backend, softmax_buf, rng_state_buf, bias_buf,
                                     softmax_offset_buf);
-
-  // correct softmax shape for max512 sequence length kernel
-  if (backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
-    NVTEBasicTensor softmax_aux_data =
-        nvte_get_tensor_param(tensor_pack->tensors[0], kNVTERowwiseData);
-    softmax_aux_data.shape.data[3] = kv_max_seqlen;  // {B,H,Qs,1} -> {B,H,Qs,Ks}
-    softmax_aux_data.dtype = static_cast<NVTEDType>(dtype);
-    nvte_set_tensor_param(&(tensor_pack->tensors[0]), kNVTERowwiseData, &softmax_aux_data);
-  }
 }
 
 pybind11::tuple GetFusedAttnForwardWorkspaceSizes(

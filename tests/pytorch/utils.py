@@ -117,7 +117,7 @@ def quantization_tols(name: str) -> dict[str, float]:
         "mxfp8_block_scaling",
     ):
         return dtype_tols(tex.DType.kFloat8E4M3)
-    if name == "nvfp4":
+    if name in ("nvfp4", "nvfp4_row_scaled"):
         return dtype_tols(tex.DType.kFloat4E2M1)
     raise ValueError(f"Unsupported quantization scheme ({name})")
 
@@ -151,7 +151,24 @@ def make_recipe(name: Optional[str], **recipe_kwargs: Any) -> Optional[Recipe]:
             disable_2d_quantization=True,
             **recipe_kwargs,
         )
+    if name == "nvfp4_row_scaled":
+        return transformer_engine.common.recipe.NVFP4BlockScaling(
+            disable_rht=True,
+            disable_stochastic_rounding=True,
+            disable_2d_quantization=True,
+            row_scaled_activation=True,
+            **recipe_kwargs,
+        )
     raise ValueError(f"Unsupported quantization scheme ({name})")
+
+
+def recipe_id(recipe: Optional[Recipe]) -> str:
+    """Readable pytest id for a quantization recipe."""
+    if not isinstance(recipe, Recipe):
+        return "None"
+    if recipe.nvfp4() and recipe.row_scaled_activation:
+        return "NVFP4RowScaledBlockScaling"
+    return type(recipe).__name__
 
 
 def skip_unsupported_backward_override(
@@ -160,6 +177,13 @@ def skip_unsupported_backward_override(
     backward_override: Optional[str],
 ) -> None:
     """Skip known unsupported layer/recipe/backward-override combinations used in tests."""
+    if (
+        quant_recipe is not None
+        and quant_recipe.nvfp4()
+        and getattr(quant_recipe, "row_scaled_activation", False)
+        and backward_override is None
+    ):
+        pytest.skip("Row-scaled NVFP4 does not support default quantized backward.")
     if backward_override is None:
         return
     if quant_recipe is None and backward_override is not None:
@@ -392,11 +416,11 @@ def get_available_attention_backends(
         _attention_backends["backend_selection_requires_update"] = False
         return available_backends, flash_attention_backend, fused_attention_backend
 
-    backends = {0: "F16_max512_seqlen", 1: "F16_arbitrary_seqlen", 2: "FP8"}
+    backends = {1: "F16_arbitrary_seqlen", 2: "FP8"}
     if AttentionLogging._is_logging_setup is False:
         AttentionLogging.setup_logging()
 
-    for i in range(3):
+    for i in backends:
         os.environ["NVTE_FUSED_ATTN_BACKEND"] = str(i)
         _attention_backends["backend_selection_requires_update"] = True
         available_backends, flash_attention_backend, fused_attention_backend = test()
