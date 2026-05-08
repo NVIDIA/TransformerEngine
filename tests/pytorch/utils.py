@@ -392,11 +392,11 @@ def get_available_attention_backends(
         _attention_backends["backend_selection_requires_update"] = False
         return available_backends, flash_attention_backend, fused_attention_backend
 
-    backends = {0: "F16_max512_seqlen", 1: "F16_arbitrary_seqlen", 2: "FP8"}
+    backends = {1: "F16_arbitrary_seqlen", 2: "FP8"}
     if AttentionLogging._is_logging_setup is False:
         AttentionLogging.setup_logging()
 
-    for i in range(3):
+    for i in backends:
         os.environ["NVTE_FUSED_ATTN_BACKEND"] = str(i)
         _attention_backends["backend_selection_requires_update"] = True
         available_backends, flash_attention_backend, fused_attention_backend = test()

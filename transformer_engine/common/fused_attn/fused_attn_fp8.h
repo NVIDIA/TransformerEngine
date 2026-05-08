@@ -5,7 +5,7 @@
  ************************************************************************/
 
 /*! \file fused_attn_fp8.h
- *  \brief Functions for fused attention for FP8 with seqlen <= 512
+ *  \brief Functions for fused attention for FP8
  */
 
 #include <string>
