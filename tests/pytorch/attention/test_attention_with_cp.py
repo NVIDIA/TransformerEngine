@@ -249,8 +249,7 @@ def _cp_batch_results(request):
             chunk_results = _run_one_batch(num_gpus, [kw for _, kw in chunk])
             ok = sum(1 for r in chunk_results if r.get("ok"))
             print(
-                f"[CP-BATCH]   => {ok}/{len(chunk)} passed"
-                f" in {_time.monotonic() - _bt:.1f}s",
+                f"[CP-BATCH]   => {ok}/{len(chunk)} passed in {_time.monotonic() - _bt:.1f}s",
                 flush=True,
             )
             for (nodeid, _), res in zip(chunk, chunk_results):
@@ -577,6 +576,7 @@ def test_cp_with_fused_attention(
 
     # For 111s, dbias calculation is not supported as of cuDNN 9.18, hence, test fwd only for 111s.
     is_training = False if config.bias_shape == "111s" else True
+
     def _check_fused_backend():
         backend_kwargs = dict(
             qkv_dtype=dtypes[dtype] if dtype != "fp8" else torch.float8_e4m3fn,
