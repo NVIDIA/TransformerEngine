@@ -206,6 +206,14 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
       .value("NVFP4_2D_SCALING", JAXX_Scaling_Mode::NVFP4_2D_SCALING)
       .export_values();
 
+  pybind11::enum_<NVTEScalingMode>(m, "NVTEScalingMode", pybind11::module_local())
+      .value("NVTE_DELAYED_TENSOR_SCALING", NVTEScalingMode::NVTE_DELAYED_TENSOR_SCALING)
+      .value("NVTE_MXFP8_1D_SCALING", NVTEScalingMode::NVTE_MXFP8_1D_SCALING)
+      .value("NVTE_BLOCK_SCALING_1D", NVTEScalingMode::NVTE_BLOCK_SCALING_1D)
+      .value("NVTE_BLOCK_SCALING_2D", NVTEScalingMode::NVTE_BLOCK_SCALING_2D)
+      .value("NVTE_NVFP4_1D_SCALING", NVTEScalingMode::NVTE_NVFP4_1D_SCALING)
+      .value("NVTE_INVALID_SCALING", NVTEScalingMode::NVTE_INVALID_SCALING);
+
   pybind11::enum_<JAXX_Quantize_Layout>(m, "JAXX_Quantize_Layout", pybind11::module_local())
       .value("ROWWISE", JAXX_Quantize_Layout::ROWWISE)
       .value("COLWISE", JAXX_Quantize_Layout::COLWISE)
