@@ -530,6 +530,9 @@ template <typename T>
 inline std::array<size_t, 2> get_2d_dims(const std::vector<T>& shape, bool transpose = false) {
   NVTEShape s{};
   s.ndim = shape.size();
+  constexpr size_t max_ndim = sizeof(s.data) / sizeof(size_t);
+  NVTE_CHECK(s.ndim <= max_ndim,
+             "Shape has too many dimensions (got ", s.ndim, ", max ", max_ndim, ").");
   for (size_t i = 0; i < shape.size(); ++i) s.data[i] = static_cast<size_t>(shape[i]);
   return get_2d_dims(s, transpose);
 }
