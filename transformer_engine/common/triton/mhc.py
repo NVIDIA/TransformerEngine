@@ -41,7 +41,7 @@ def projection_config_fwd():
     for m, bk, sk, w, s in itertools.product(block_m, block_k, step_k, warps, stages):
         configs.append(
             triton.Config(
-                {"BLOCK_SIZE_M": m, "BLOCK_SIZE_K": bk, "STEP_SIZE_K": sk, "USE_SPLIT_K": True},
+                {"BLOCK_SIZE_M": m, "BLOCK_SIZE_K": bk, "STEP_SIZE_K": sk},
                 num_warps=w,
                 num_stages=s,
             )
@@ -50,18 +50,14 @@ def projection_config_fwd():
 
 
 def projection_prune_fwd(configs, named_args, **kwargs):
-    DETERMINISTIC = named_args.get("DETERMINISTIC", kwargs.get("DETERMINISTIC", None))
-    M = named_args.get("M", kwargs.get("M", None))
-    K = named_args.get("K", kwargs.get("K", None))
+    USE_SPLIT_K = named_args.get("USE_SPLIT_K", kwargs.get("USE_SPLIT_K", None))
 
-    block_m = [8, 16, 64, 128]
-    block_k = align_to(K, 32)
-
-    # Use Split-K only if determinism is not enforced and M is not large enough to effectively parallelize
-    # sms * 4 is a empirical threshold I found via experiments on B200 for non-split-K starts to be better
-    if not DETERMINISTIC and triton.cdiv(M, block_m[0]) < get_device_sms() * 4:
+    if USE_SPLIT_K:
         pruned_configs = configs
     else:
+        K = named_args.get("K", kwargs.get("K", None))
+        block_m = [8, 16, 64, 128]
+        block_k = align_to(K, 32)
         step_k = [128, 256]
         warps = [2, 4, 8]
         stages = [2, 3, 4]
@@ -74,7 +70,6 @@ def projection_prune_fwd(configs, named_args, **kwargs):
                         "BLOCK_SIZE_M": bm,
                         "BLOCK_SIZE_K": block_k,
                         "STEP_SIZE_K": sk,
-                        "USE_SPLIT_K": False,
                     },
                     num_warps=w,
                     num_stages=s,
@@ -89,7 +84,7 @@ def projection_prune_fwd(configs, named_args, **kwargs):
 
 @triton.autotune(
     configs=projection_config_fwd(),
-    key=["M", "K", "DETERMINISTIC", "USE_TMA"],
+    key=["M", "K", "USE_TMA", "USE_SPLIT_K"],
     reset_to_zero=["h_ptr", "ms_ptr"],
     prune_configs_by={"early_config_prune": projection_prune_fwd},
 )
@@ -117,8 +112,7 @@ def _mhc_projection_fwd_fused(
     STEP_SIZE_K: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     precision: tl.constexpr,
-    DETERMINISTIC: tl.constexpr,  # pylint: disable=unused-argument # If user wants to enforce deterministic, which is used to prune configs
-    USE_SPLIT_K: tl.constexpr,  # If we actually use split-K, which is determined by both DETERMINISTIC flag and input size
+    USE_SPLIT_K: tl.constexpr,
     USE_TMA: tl.constexpr, # If True, load x and phi via TMA tensor descriptors (Hopper+ only). Falls back to pointer-arith tl.load otherwise.
 ):
     pid_m = tl.program_id(axis=0)
@@ -342,7 +336,7 @@ def projection_config_bwd_dphi():
     for bm, sm, bk, w, s in itertools.product(block_m, step_m, block_k, warps, stages):
         configs.append(
             triton.Config(
-                {"BLOCK_SIZE_M": bm, "STEP_SIZE_M": sm, "BLOCK_SIZE_K": bk, "USE_SPLIT_M": True},
+                {"BLOCK_SIZE_M": bm, "STEP_SIZE_M": sm, "BLOCK_SIZE_K": bk},
                 num_warps=w,
                 num_stages=s,
             )
@@ -351,17 +345,14 @@ def projection_config_bwd_dphi():
 
 
 def projection_prune_bwd_dphi(configs, named_args, **kwargs):
-    DETERMINISTIC = named_args.get("DETERMINISTIC", kwargs.get("DETERMINISTIC", None))
-    M = named_args.get("M", kwargs.get("M", None))
-    K = named_args.get("K", kwargs.get("K", None))
+    USE_SPLIT_M = named_args.get("USE_SPLIT_M", kwargs.get("USE_SPLIT_M", None))
 
-    block_k = [128]
-    block_m = align_to(M, 128)
-
-    # Use split-M only if determinism is not enforced and K is large enough to effectively parallelize
-    if not DETERMINISTIC and triton.cdiv(K, block_k[0]) < get_device_sms() * 4:
+    if USE_SPLIT_M:
         pruned_configs = configs
     else:
+        M = named_args.get("M", kwargs.get("M", None))
+        block_k = [128]
+        block_m = align_to(M, 128)
         step_m = [32]
         warps = [4]
         stages = [6, 7, 8]
@@ -374,7 +365,6 @@ def projection_prune_bwd_dphi(configs, named_args, **kwargs):
                         "BLOCK_SIZE_M": block_m,
                         "STEP_SIZE_M": sm,
                         "BLOCK_SIZE_K": bk,
-                        "USE_SPLIT_M": False,
                     },
                     num_warps=w,
                     num_stages=s,
@@ -389,7 +379,7 @@ def projection_prune_bwd_dphi(configs, named_args, **kwargs):
 
 @triton.autotune(
     configs=projection_config_bwd_dphi(),
-    key=["M", "K", "DETERMINISTIC"],
+    key=["M", "K", "USE_SPLIT_M"],
     reset_to_zero=["grad_phi_ptr", "grad_norm_weight_ptr"],
     prune_configs_by={"early_config_prune": projection_prune_bwd_dphi},
 )
@@ -420,8 +410,7 @@ def _mhc_projection_bwd_fused_dphi(
     BLOCK_SIZE_K: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     precision: tl.constexpr,
-    DETERMINISTIC: tl.constexpr,  # pylint: disable=unused-argument # If user wants to enforce deterministic, which is used to prune configs
-    USE_SPLIT_M: tl.constexpr,  # If we actually use split-M, which is determined by both DETERMINISTIC flag and input size
+    USE_SPLIT_M: tl.constexpr,
 ):
     pid_k = tl.program_id(axis=0)
     pid_m = tl.program_id(axis=1)
@@ -1119,7 +1108,7 @@ def aggregate_config_bwd():
     for bm, bc, sc, w, s in itertools.product(block_m, block_c, step_c, warps, stages):
         configs.append(
             triton.Config(
-                {"BLOCK_SIZE_M": bm, "BLOCK_SIZE_C": bc, "STEP_SIZE_C": sc, "USE_SPLIT_C": True},
+                {"BLOCK_SIZE_M": bm, "BLOCK_SIZE_C": bc, "STEP_SIZE_C": sc},
                 num_warps=w,
                 num_stages=s,
             )
@@ -1128,17 +1117,15 @@ def aggregate_config_bwd():
 
 
 def aggregate_prune_bwd(configs, named_args, **kwargs):
-    DETERMINISTIC = named_args.get("DETERMINISTIC", kwargs.get("DETERMINISTIC", None))
+    USE_SPLIT_K = named_args.get("USE_SPLIT_K", kwargs.get("USE_SPLIT_K", None))
     M = named_args.get("M", kwargs.get("M", None))
-    C = named_args.get("C", kwargs.get("C", None))
 
-    block_m = [4]
-    block_c = align_to(C, 64)
-
-    # Use Split-K only if determinism is not enforced and M is not large enough to effectively parallelize
-    if not DETERMINISTIC and triton.cdiv(M, block_m[0]) < get_device_sms() * 4:
+    if USE_SPLIT_K:
         pruned_configs = configs
     else:
+        C = named_args.get("C", kwargs.get("C", None))
+        block_m = [4]
+        block_c = align_to(C, 64)
         step_c = [64]
         warps = [1]
         stages = [2, 3, 4]
@@ -1151,7 +1138,6 @@ def aggregate_prune_bwd(configs, named_args, **kwargs):
                         "BLOCK_SIZE_M": bm,
                         "BLOCK_SIZE_C": block_c,
                         "STEP_SIZE_C": sc,
-                        "USE_SPLIT_C": False,
                     },
                     num_warps=w,
                     num_stages=s,
@@ -1174,7 +1160,7 @@ def aggregate_prune_bwd(configs, named_args, **kwargs):
 
 @triton.autotune(
     configs=aggregate_config_bwd(),
-    key=["M", "C", "DETERMINISTIC"],
+    key=["M", "C", "USE_SPLIT_K"],
     reset_to_zero=["grad_H_pre_ptr"],
     # When FUSE_GRAD_X_ACC=True the kernel does a read-modify-write on grad_x_ptr; without
     # restore_value the autotune timing trials accumulate onto the buffer and corrupt it.
@@ -1203,8 +1189,7 @@ def _mhc_aggregate_bwd(
     STEP_SIZE_C: tl.constexpr,
     precision: tl.constexpr,
     FUSE_GRAD_X_ACC: tl.constexpr,
-    DETERMINISTIC: tl.constexpr,  # pylint: disable=unused-argument # If user wants to enforce deterministic, which is used to prune configs
-    USE_SPLIT_C: tl.constexpr,
+    USE_SPLIT_K: tl.constexpr,
 ):
     """
     Forward:
@@ -1291,7 +1276,7 @@ def _mhc_aggregate_bwd(
     grad_H_pre = tl.reshape(grad_H_pre_acc, (BLOCK_SIZE_M * n,))  # (BLOCK_SIZE_M * n)
     offs_grad_H_pre = pid_m * BLOCK_SIZE_M * n + tl.arange(0, BLOCK_SIZE_M * n)
     grad_H_pre_ptrs = grad_H_pre_ptr + offs_grad_H_pre
-    if USE_SPLIT_C:
+    if USE_SPLIT_K:
         tl.atomic_add(grad_H_pre_ptrs, grad_H_pre, mask=offs_grad_H_pre < M * n, sem="relaxed")
     else:
         tl.store(grad_H_pre_ptrs, grad_H_pre.to(H_pre.dtype), mask=offs_grad_H_pre < M * n)
@@ -1452,7 +1437,7 @@ def expand_combine_config_bwd():
     for m, c, sc, w, s in itertools.product(block_m, block_c, step_c, warps, stages):
         configs.append(
             triton.Config(
-                {"BLOCK_SIZE_M": m, "BLOCK_SIZE_C": c, "STEP_SIZE_C": sc, "USE_SPLIT_C": True},
+                {"BLOCK_SIZE_M": m, "BLOCK_SIZE_C": c, "STEP_SIZE_C": sc},
                 num_warps=w,
                 num_stages=s,
             )
@@ -1461,18 +1446,17 @@ def expand_combine_config_bwd():
 
 
 def expand_combine_prune_bwd(configs, named_args, **kwargs):
-    DETERMINISTIC = named_args.get("DETERMINISTIC", kwargs.get("DETERMINISTIC", None))
+    USE_SPLIT_K = named_args.get("USE_SPLIT_K", kwargs.get("USE_SPLIT_K", None))
     M = named_args.get("M", kwargs.get("M", None))
-    C = named_args.get("C", kwargs.get("C", None))
-
-    block_m = [4]
-    block_c = align_to(C, 32)
 
     # Use Split-K only if determinism is not enforced and M is not large enough to effectively parallelize
     # sms * 8 is a empirical threshold I found via experiments on B200 for non-split-K starts to be better
-    if not DETERMINISTIC and triton.cdiv(M, block_m[0]) < get_device_sms() * 8:
+    if USE_SPLIT_K:
         pruned_configs = configs
     else:
+        C = named_args.get("C", kwargs.get("C", None))
+        block_m = [4]
+        block_c = align_to(C, 32)
         step_c = [32, 64, 128]
         warps = [1, 2]
         stages = [1, 2, 3, 4]
@@ -1485,7 +1469,6 @@ def expand_combine_prune_bwd(configs, named_args, **kwargs):
                         "BLOCK_SIZE_M": bm,
                         "BLOCK_SIZE_C": block_c,
                         "STEP_SIZE_C": sc,
-                        "USE_SPLIT_C": False,
                     },
                     num_warps=w,
                     num_stages=s,
@@ -1508,7 +1491,7 @@ def expand_combine_prune_bwd(configs, named_args, **kwargs):
 
 @triton.autotune(
     configs=expand_combine_config_bwd(),
-    key=["M", "C", "DETERMINISTIC"],
+    key=["M", "C", "DETERMINISTIC", "USE_SPLIT_K"],
     reset_to_zero=["grad_H_post_ptr", "grad_H_res_ptr", "grad_bias_ptr"],
     prune_configs_by={"early_config_prune": expand_combine_prune_bwd},
 )
@@ -1550,7 +1533,7 @@ def _mhc_expand_combine_bwd(
     precision: tl.constexpr,
     HAS_BIAS: tl.constexpr,
     DETERMINISTIC: tl.constexpr,
-    USE_SPLIT_C: tl.constexpr,
+    USE_SPLIT_K: tl.constexpr,
 ):
     """
     Each block
@@ -1760,7 +1743,7 @@ def _mhc_expand_combine_bwd(
     offs_grad_H_res = pid_m * BLOCK_SIZE_M * n * n + tl.arange(0, BLOCK_SIZE_M * n * n)
     grad_H_res_ptrs = grad_H_res_ptr + offs_grad_H_res
 
-    if USE_SPLIT_C:
+    if USE_SPLIT_K:
         tl.atomic_add(grad_H_post_ptrs, grad_H_post, mask=offs_grad_H_post < M * n, sem="relaxed")
         tl.atomic_add(
             grad_H_res_ptrs,

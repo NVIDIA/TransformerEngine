@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 from dataclasses import dataclass
+import os
 import pytest
 import torch
 import torch.nn.functional as F
@@ -15,12 +16,12 @@ from transformer_engine.pytorch.triton.mhc import (
     mhc_fused_expand_combine,
     mhc_fused_projection,
     mhc_generate_mix_and_aggregate,
-    is_deterministic_enforced,
 )
 
 # Disable TF32 for matmul to ensure consistency between the fused and reference implementations
 torch.backends.cuda.matmul.allow_tf32 = False
 
+ENFORCE_DETERMINISTIC = os.environ.get("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1") == "0"
 
 def mhc_projection_ref(x, phi, norm_weight):
     """
@@ -280,8 +281,12 @@ def get_tols(dtype):
     ids=["x_fp32_phi_fp32", "x_bf16_phi_bf16", "x_bf16_phi_fp32"],
 )
 @pytest.mark.parametrize("has_norm_weight", [False, True], ids=["no_norm_weight", "norm_weight"])
-def test_mhc_projection(cfg: MHCConfig, dtypes, has_norm_weight):
+@pytest.mark.parametrize("use_split_k", [True, False], ids=["split_k", "no_split_k"])  # Disable TF32 to align with reference implementation's precision
+def test_mhc_projection(cfg: MHCConfig, dtypes, has_norm_weight, use_split_k):
     reset_rng_states()
+
+    if ENFORCE_DETERMINISTIC and use_split_k:
+        pytest.skip("Split-K is not deterministic, skip the test under deterministic mode")
 
     s, b, C, n = cfg.s, cfg.b, cfg.C, cfg.n
     nC = n * C
@@ -305,7 +310,7 @@ def test_mhc_projection(cfg: MHCConfig, dtypes, has_norm_weight):
         norm_weight_ref = None
 
     ref_out_Hs, ref_out_ms = mhc_projection_ref(x_ref, phi_ref, norm_weight_ref)
-    fused_out_Hs_padded, fused_out_ms = mhc_fused_projection(x, phi, norm_weight, use_tf32)
+    fused_out_Hs_padded, fused_out_ms = mhc_fused_projection(x, phi, norm_weight=norm_weight, use_tf32=use_tf32, use_split_k=use_split_k)
     fused_out_Hs = fused_out_Hs_padded[:, :N]
 
     torch.testing.assert_close(fused_out_Hs, ref_out_Hs, **tols)
@@ -367,9 +372,13 @@ def test_mhc_scale(cfg: MHCConfig, dtype):
     ids=["x_fp32_phi_fp32", "x_bf16_phi_bf16", "x_bf16_phi_fp32"],
 )
 @pytest.mark.parametrize("has_norm_weight", [False, True], ids=["no_norm_weight", "norm_weight"])
-def test_mhc_rmsnorm(cfg: MHCConfig, dtypes, has_norm_weight):
+@pytest.mark.parametrize("use_split_k", [True, False], ids=["split_k", "no_split_k"])  # Disable TF32 to align with reference implementation's precision
+def test_mhc_rmsnorm(cfg: MHCConfig, dtypes, has_norm_weight, use_split_k):
     # Verify if the fused kernel is equivalent to applying RMSNorm in the normal order
     reset_rng_states()
+
+    if ENFORCE_DETERMINISTIC and use_split_k:
+        pytest.skip("Split-K is not deterministic, skip the test under deterministic mode")
 
     s, b, C, n = cfg.s, cfg.b, cfg.C, cfg.n
     N = 2 * n + n * n
@@ -399,7 +408,7 @@ def test_mhc_rmsnorm(cfg: MHCConfig, dtypes, has_norm_weight):
         norm_weight_ref = None
 
     ref_out_H, ref_out_r = mhc_projection_ref(x_ref, phi_ref, norm_weight_ref)
-    fused_out_H_padded, fused_out_r = mhc_fused_projection(x, phi, norm_weight, use_tf32)
+    fused_out_H_padded, fused_out_r = mhc_fused_projection(x, phi, norm_weight=norm_weight, use_tf32=use_tf32, use_split_k=use_split_k)
 
     ref_H_pre, ref_H_post, ref_H_res = mhc_scale_ref(
         ref_out_H[:, :N], alpha_ref, beta_ref, ref_out_r, n
@@ -458,7 +467,7 @@ def test_mhc_fuse_grad_acc(cfg: MHCConfig, dtype):
     # Skip bf16 tests since in the unfused path the we accumulate 3 bf16 gradients, whereas in the fused path
     # we accumulate 3 fp32 gradients and then cast to bf16 in the end, which causes two paths to have different precision patterns
 
-    if not is_deterministic_enforced():
+    if not ENFORCE_DETERMINISTIC:
         pytest.skip(
             "This test needs to be tested under deterministic mode to avoid discrepancies from"
             " running two non-deterministic implementations twice"
@@ -496,6 +505,7 @@ def test_mhc_fuse_grad_acc(cfg: MHCConfig, dtype):
             H_post,
             x,
             H_res,
+            n,
             False,
             fused_grad_x_acc,
         )
@@ -541,8 +551,12 @@ def test_mhc_sinkhorn(cfg: MHCConfig, dtype, recompute):
 
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
-def test_mhc_aggregate(cfg: MHCConfig, dtype):
+@pytest.mark.parametrize("use_split_k", [False, True], ids=["no_split_k", "split_k"])
+def test_mhc_aggregate(cfg: MHCConfig, dtype, use_split_k):
     reset_rng_states()
+
+    if ENFORCE_DETERMINISTIC and use_split_k:
+        pytest.skip("Split-K is not deterministic, skip the test under deterministic mode")
 
     s, b, C, n = cfg.s, cfg.b, cfg.C, cfg.n
 
@@ -555,7 +569,7 @@ def test_mhc_aggregate(cfg: MHCConfig, dtype):
     H_pre_ref = H_pre.detach().clone().requires_grad_(True)
 
     ref_out = mhc_aggregate_ref(x_ref, H_pre_ref, n)
-    fused_out = mhc_fused_aggregate(x, H_pre, n, False)
+    fused_out = mhc_fused_aggregate(x, H_pre, n, use_tf32=False, use_split_k=use_split_k)
 
     torch.testing.assert_close(fused_out, ref_out, **tols)
 
@@ -569,8 +583,12 @@ def test_mhc_aggregate(cfg: MHCConfig, dtype):
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
 @pytest.mark.parametrize("with_bias", [True, False], ids=["with_bias", "no_bias"])
-def test_mhc_expand_combine(cfg: MHCConfig, dtype, with_bias):
+@pytest.mark.parametrize("use_split_k", [False, True], ids=["no_split_k", "split_k"])
+def test_mhc_expand_combine(cfg: MHCConfig, dtype, with_bias, use_split_k):
     reset_rng_states()
+
+    if ENFORCE_DETERMINISTIC and use_split_k:
+        pytest.skip("Split-K is not deterministic, skip the test under deterministic mode")
 
     s, b, C, n = cfg.s, cfg.b, cfg.C, cfg.n
 
@@ -591,7 +609,7 @@ def test_mhc_expand_combine(cfg: MHCConfig, dtype, with_bias):
     H_res_ref = H_res.detach().clone().requires_grad_(True)
 
     ref_out = mhc_expand_combine_ref(f_ref, bias_ref, H_post_ref, x_ref, H_res_ref, n)
-    fused_out = mhc_fused_expand_combine(f, bias, H_post, x, H_res, False, False)
+    fused_out = mhc_fused_expand_combine(f, bias, H_post, x, H_res, n=n, use_tf32=False, use_split_k=use_split_k)
 
     torch.testing.assert_close(fused_out, ref_out, **tols)
 
