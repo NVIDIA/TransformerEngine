@@ -90,9 +90,8 @@ GroupedGemmConfig prepare_grouped_gemm_config(at::Tensor alpha, at::Tensor beta,
                                               int math_sm_count, bool use_split_accumulator) {
   const bool per_group = (alpha.numel() == static_cast<int64_t>(num_tensors));
   const bool scalar = (alpha.numel() == 1);
-  NVTE_CHECK(per_group || scalar,
-             "Grouped GEMM expects alpha to have 1 or num_tensors (", num_tensors,
-             ") elements, got ", alpha.numel());
+  NVTE_CHECK(per_group || scalar, "Grouped GEMM expects alpha to have 1 or num_tensors (",
+             num_tensors, ") elements, got ", alpha.numel());
   NVTE_CHECK(beta.numel() == alpha.numel(),
              "Grouped GEMM expects beta to have the same number of elements as alpha (",
              alpha.numel(), "), got ", beta.numel());
