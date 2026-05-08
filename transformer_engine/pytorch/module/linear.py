@@ -229,7 +229,9 @@ class LinearBwdArgs:
             self.weight_fp8,
             self.saved_weight,
             self.bias,
-        ) = restore_from_func_ctx(ctx)  # pylint: disable=unbalanced-tuple-unpacking
+        ) = restore_from_func_ctx(
+            ctx
+        )  # pylint: disable=unbalanced-tuple-unpacking
 
 
 def _check_fp8_reduce_and_update():
