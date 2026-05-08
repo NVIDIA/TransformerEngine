@@ -227,8 +227,15 @@ def run_dpa_with_cp(
         else:
             config.attn_mask_type = "padding"
 
-    # Process group is managed by main(); one init/destroy per torchrun, not per config.
-    assert dist.is_initialized(), "dist.init_process_group must be called before run_dpa_with_cp"
+    # When called from batch main(), dist is already initialized — reuse it.
+    # When called standalone (legacy single-config), init here.
+    _owns_dist = not dist.is_initialized()
+    if _owns_dist:
+        rank = int(os.getenv("RANK", "0"))
+        world_size = int(os.getenv("WORLD_SIZE", "1"))
+        device_count = torch.cuda.device_count()
+        torch.cuda.set_device(rank % device_count)
+        dist.init_process_group(backend="nccl", world_size=world_size, rank=rank)
     world_size = dist.get_world_size()
     rank = dist.get_rank()
     logging.info(f"[Rank {rank}] Setup: world_size {world_size}")
@@ -758,15 +765,14 @@ def run_dpa_with_cp(
                 )
             logging.info(f"[Rank {rank}] CP vs no-CP: {names[i]} matches")
 
-    # Destroy per-config communication groups so they don't leak into the next
-    # config in batch mode. The global process group is torn down by main().
     dist.destroy_process_group(cp_comm_group)
     if cp_comm_type == "a2a+p2p":
         for sg in cp_comm_sub_groups:
             dist.destroy_process_group(sg)
+    if _owns_dist:
+        dist.destroy_process_group()
 
 
-# Env vars set by run_dpa_with_cp; cleared between batch configs to prevent leakage.
 _TRANSIENT_ENV_KEYS = (
     "NVTE_FP8_DPA_BWD",
     "NVTE_DPA_FP8CS_O_in_F16",
@@ -777,12 +783,9 @@ _TRANSIENT_ENV_KEYS = (
 
 
 def _init_distributed():
-    """Init NCCL process group + CUDA device once per torchrun invocation."""
     rank = int(os.getenv("RANK", "0"))
     world_size = int(os.getenv("WORLD_SIZE", "1"))
     device_count = torch.cuda.device_count()
-    # Prefer LOCAL_RANK when available (set by torchrun / torch.distributed.launch);
-    # fall back to RANK % device_count for single-node runs.
     local_rank = int(os.getenv("LOCAL_RANK", str(rank % device_count)))
     torch.cuda.set_device(local_rank)
     dist.init_process_group(backend="nccl", world_size=world_size, rank=rank)
@@ -790,11 +793,7 @@ def _init_distributed():
 
 
 def _run_single_config(kwargs):
-    """Run one config, return ``(ok, error_message)``.
-
-    Re-seeds RNG before each config so results are deterministic and
-    order-independent within a batch.
-    """
+    """Run one config, return ``(ok, error_message)``."""
     torch.manual_seed(1234)
     torch.cuda.manual_seed(1234)
     try:
@@ -805,20 +804,7 @@ def _run_single_config(kwargs):
 
 
 def main(**kwargs):
-    """Entry point.
-
-    Two modes:
-
-    * Single-config (legacy): ``run_attention_with_cp.py key=val ...`` runs
-      one config, propagates exceptions for normal exit-code signalling.
-    * Batch: ``run_attention_with_cp.py batch_config_json=<path>`` reads a
-      JSON list of kwargs dicts, runs each via ``_run_single_config``,
-      aggregates ``ok`` across ranks (any rank failure → False), and flushes
-      ``[{ok,error}, ...]`` atomically to ``<path>.results.json`` after each
-      config so a worker crash mid-batch leaves earlier results intact.
-      Transient env vars are reset between configs; per-config NCCL groups
-      are torn down inside ``run_dpa_with_cp``.
-    """
+    """Single-config (key=val args) or batch (batch_config_json=<path>) entry point."""
     batch_path = kwargs.pop("batch_config_json", None)
     rank, _ = _init_distributed()
     try:
@@ -836,7 +822,6 @@ def main(**kwargs):
             def _flush_results():
                 if rank != 0:
                     return
-                # Atomic write: tmp + rename so the reader never sees partial JSON.
                 tmp_path = results_path + ".tmp"
                 with open(tmp_path, "w") as f:
                     json.dump(results, f)
@@ -847,9 +832,6 @@ def main(**kwargs):
                 for env_key in _TRANSIENT_ENV_KEYS:
                     os.environ.pop(env_key, None)
                 ok, err = _run_single_config(cfg)
-                # Aggregate ok across ranks so a non-rank-0 failure (e.g. a
-                # per-partition compare assertion that fires only on rank > 0)
-                # is not silently swallowed when only rank 0 writes the result.
                 ok_tensor = torch.tensor(1 if ok else 0, dtype=torch.int32, device="cuda")
                 dist.all_reduce(ok_tensor, op=dist.ReduceOp.MIN)
                 ok_aggregate = bool(ok_tensor.item())

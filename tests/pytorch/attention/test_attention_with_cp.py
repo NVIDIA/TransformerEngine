@@ -81,72 +81,30 @@ def get_bash_arguments(num_gpus_per_node, **kwargs):
 
 
 # ---------------------------------------------------------------------------
-# Batched dispatch — keeps test bodies identical to the non-batched flow
-# (parametrize stack + inline ``pytest.skip(...)``) and replaces only the
-# final ``run_distributed(...)`` call with ``_run_or_fetch(...)``.
+# Batched dispatch: session fixture dry-runs each test to collect kwargs,
+# groups by num_gpus, chunks into batches of CP_TEST_BATCH_SIZE, and runs
+# each batch in one torchrun. Test bodies are unchanged except they call
+# ``_run_or_fetch(request, _cp_batch_results, ...)`` instead of
+# ``run_distributed(get_bash_arguments(...))``.
 #
-# Flow:
-#   1. Collect (dry-run, in-process). Session fixture ``_cp_batch_results``
-#      walks each parametrized item that requests this fixture, calls it
-#      with a stub ``request`` (only ``request.node.nodeid``). The body runs
-#      its ``pytest.skip(...)`` checks; if none fire, ``_run_or_fetch``
-#      records the kwargs in ``_COLLECTED_KWARGS`` instead of launching
-#      torchrun. ``@pytest.mark.skip(if)`` markers are evaluated up front
-#      via ``_item_static_skip`` so marker-skipped items aren't queued.
-#   2. Batch + execute. Recorded kwargs are grouped by num_gpus_per_node,
-#      chunked into batches of CP_TEST_BATCH_SIZE (default 16), and each
-#      batch runs in one torchrun (``_run_one_batch``). Worker
-#      (run_attention_with_cp.py) inits NCCL once, loops over configs,
-#      flushes per-config results to ``<batch>.results.json`` atomically.
-#   3. Execute mode (normal pytest run). The test body re-evaluates its
-#      skip checks; if none fire, ``_run_or_fetch`` looks up the recorded
-#      result by nodeid and asserts pass/fail.
-#
-# Failure handling:
-#   - Inline ``pytest.skip``: same code path as non-batched.
-#   - Worker assertion: surfaced as ``AssertionError`` from the JSON entry.
-#   - Per-rank failure: cross-rank ``dist.all_reduce(ok, op=MIN)`` in the
-#     worker so a rank > 0 assertion isn't swallowed by the rank-0-only flush.
-#   - Worker subprocess crash mid-batch: configs without flushed results are
-#     marked unattributed and ``_run_one_batch`` retries each as a singleton
-#     to identify the actual culprit. Disable via ``CP_TEST_BATCH_RETRY=0``.
-#   - Dry-run exception: caught; the same error fires in execute mode and
-#     pytest reports it as a normal test ERROR (no fixture-level cascade).
-#
-# To add a new batched test: write it like a non-batched CP test
-# (parametrize + inline ``pytest.skip(...)``), accept
-# ``request, _cp_batch_results`` as fixtures, and replace
-# ``run_distributed(get_bash_arguments(...))`` with
-# ``_run_or_fetch(request, _cp_batch_results, num_gpus_per_node=N, ...)``.
-# Nothing else needs wiring up.
-#
-# Knobs:
-#   CP_TEST_BATCH_SIZE=N    configs per torchrun; default 16; set 1 to bisect.
-#   CP_TEST_BATCH_RETRY=0   skip the singleton retry on unattributed crashes.
-#
-# Caveats:
-#   - ``pytest -k`` reduces what's collected and therefore what's batched.
-#   - The body executes once per item in collect mode (cheap; only Python
-#     skip logic + ``get_available_attention_backends``).
-#   - Mutations to module-level state during the body persist between collect
-#     and execute. Worker uses ``copy.deepcopy(model_configs_*[model])`` so
-#     ``run_dpa_with_cp`` mutations don't leak across configs in a batch.
+# Env knobs: CP_TEST_BATCH_SIZE (default 16), CP_TEST_BATCH_RETRY (default 1).
 # ---------------------------------------------------------------------------
 
 # Module-level state used by the session fixture's collect phase.
 _COLLECT_MODE = False
 _COLLECTED_KWARGS = {}  # nodeid -> kwargs dict (populated in collect mode)
-_BACKEND_CACHE = {}  # nodeid -> (fused_attn_supported, fused_attn_backends) or (flash_attn_supported,)
+_BACKEND_CACHE = {}
+
+
+def _cached_backend_check(nodeid, check_fn):
+    """Cache backend availability per test node so dry-run and execute agree."""
+    if nodeid not in _BACKEND_CACHE:
+        _BACKEND_CACHE[nodeid] = check_fn()
+    return _BACKEND_CACHE[nodeid]
 
 
 def _run_or_fetch(request, batch_results, *, num_gpus_per_node, **worker_kwargs):
-    """Drop-in replacement for ``run_distributed(get_bash_arguments(...))``.
-
-    In *collect mode* (during the session fixture's first pass), records this
-    test's kwargs so the fixture can batch them. In *execute mode* (the normal
-    test run), looks up the pre-computed result and either passes, fails, or
-    skips.
-    """
+    """Collect mode: stash kwargs. Execute mode: look up pre-computed result."""
     if _COLLECT_MODE:
         _COLLECTED_KWARGS[request.node.nodeid] = dict(num_gpus=num_gpus_per_node, **worker_kwargs)
         return
@@ -158,13 +116,7 @@ def _run_or_fetch(request, batch_results, *, num_gpus_per_node, **worker_kwargs)
 
 
 def _run_batch_once(num_gpus, configs):
-    """Launch one torchrun that runs *configs* sequentially inside one NCCL world.
-
-    Returns a list of ``{"ok": bool, "error": str|None}`` dicts, one per config.
-    Missing entries (subprocess crashed mid-batch) are synthesized as failures.
-    """
-    # Stringify values: run_dpa_with_cp uses ``== "True"`` string comparisons.
-    # Strip ``num_gpus`` (launcher-only, not a worker kwarg).
+    """Launch one torchrun for *configs*; return list of ``{ok, error}`` dicts."""
     worker_kwargs = [{k: str(v) for k, v in cfg.items() if k != "num_gpus"} for cfg in configs]
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".cp_batch.json", delete=False) as fh:
@@ -178,11 +130,6 @@ def _run_batch_once(num_gpus, configs):
         try:
             run_distributed(argv)
         except Exception as exc:
-            # Catch broadly: subprocess.run can raise OSError/FileNotFoundError
-            # in addition to the AssertionError that run_distributed wraps a
-            # non-zero exit in. Letting any of these propagate would tear down
-            # the session fixture and ERROR every batched test instead of
-            # marking just this batch's configs as failed.
             launch_err = str(exc) or repr(exc)
 
         try:
@@ -213,19 +160,7 @@ def _run_batch_once(num_gpus, configs):
 
 
 def _run_one_batch(num_gpus, configs):
-    """Run a batch, then retry any unattributed-crash entries as singletons.
-
-    When the worker subprocess crashes (segfault / NCCL hang / OOM) before it
-    can flush a per-config result, every config past the crash gets the
-    generic "Subprocess exited before this config ran" marker and we don't
-    know which config is the actual culprit. Re-running each marked config in
-    its own torchrun pinpoints which one crashes on its own (and salvages a
-    real result for the ones that ran fine but were caught downstream of the
-    crash).
-
-    Disable via ``CP_TEST_BATCH_RETRY=0`` — useful if the singleton retries
-    themselves are taking too long on a flaky cluster.
-    """
+    """Run a batch, retrying unattributed crashes as singletons to isolate the culprit."""
     results = _run_batch_once(num_gpus, configs)
     if len(configs) <= 1 or not int(os.getenv("CP_TEST_BATCH_RETRY", "1")):
         for r in results:
@@ -239,23 +174,14 @@ def _run_one_batch(num_gpus, configs):
 
 
 class _DummyRequest:
-    """Stand-in for the ``request`` fixture during the dry-run phase.
-
-    The test body only touches ``request.node.nodeid``, so this is enough.
-    """
+    """Minimal stand-in for the ``request`` fixture during dry-run."""
 
     def __init__(self, nodeid):
         self.node = type("_DummyNode", (), {"nodeid": nodeid})()
 
 
 def _item_static_skip(item):
-    """Return True if pytest's static skip/skipif markers would skip *item*.
-
-    These markers are evaluated by pytest at runtime, before the test body
-    runs. The dry-run calls ``item.function(...)`` directly and would bypass
-    them — we replicate the check here so a marker-skipped test isn't queued
-    for torchrun unnecessarily.
-    """
+    """Return True if pytest skip/skipif markers would skip *item*."""
     for marker in item.iter_markers("skip"):
         return True
     for marker in item.iter_markers("skipif"):
@@ -266,11 +192,7 @@ def _item_static_skip(item):
 
 
 def _dry_run_item(item):
-    """Invoke a parametrized test body in collect mode.
-
-    Raises ``pytest.skip.Exception`` if the body skips, otherwise returns
-    after ``_run_or_fetch`` has stashed the kwargs in ``_COLLECTED_KWARGS``.
-    """
+    """Invoke a parametrized test body in collect mode to gather kwargs."""
     func = item.function
     params = dict(item.callspec.params)
     func(_DummyRequest(item.nodeid), {}, **params)
@@ -278,12 +200,7 @@ def _dry_run_item(item):
 
 @pytest.fixture(scope="session")
 def _cp_batch_results(request):
-    """Run all batched test bodies once in collect mode, then run torchrun batches.
-
-    Skips are NOT tracked here — the test body raises ``pytest.skip(...)`` in
-    both collect and execute mode, so skipped tests never reach ``_run_or_fetch``
-    and don't need an entry in the result map.
-    """
+    """Dry-run all batched tests to collect kwargs, then dispatch torchrun batches."""
     global _COLLECT_MODE
 
     items = [
@@ -298,15 +215,12 @@ def _cp_batch_results(request):
     try:
         for item in items:
             if _item_static_skip(item):
-                continue  # pytest will skip this at runtime; don't queue for torchrun
+                continue
             try:
                 _dry_run_item(item)
             except pytest.skip.Exception:
-                pass  # the same pytest.skip will fire again in execute mode
+                pass
             except BaseException:  # noqa: BLE001
-                # Don't let a single bad item kill the whole session fixture —
-                # pytest will re-raise the same error in execute mode and the
-                # failure will surface there as a normal test ERROR.
                 pass
     finally:
         _COLLECT_MODE = False
@@ -407,17 +321,12 @@ def test_cp_with_flash_attention(
     if "p2p" not in cp_comm_type and config.head_dim_qk != config.head_dim_v:
         pytest.skip("MLA CP currently only support KV P2P!")
     dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16}
-    nodeid = request.node.nodeid
-    if nodeid in _BACKEND_CACHE:
-        flash_attn_supported = _BACKEND_CACHE[nodeid]
-    else:
-        available_backends, *_ = get_available_attention_backends(
-            config,
-            qkv_dtype=dtypes[dtype],
-            qkv_layout="_".join([qkv_format] * 3),
-        )
-        flash_attn_supported, *_ = available_backends
-        _BACKEND_CACHE[nodeid] = flash_attn_supported
+    flash_attn_supported = _cached_backend_check(
+        request.node.nodeid,
+        lambda: get_available_attention_backends(
+            config, qkv_dtype=dtypes[dtype], qkv_layout="_".join([qkv_format] * 3)
+        )[0][0],
+    )
     if not flash_attn_supported:
         pytest.skip("No attention backend available.")
 
@@ -668,12 +577,8 @@ def test_cp_with_fused_attention(
 
     # For 111s, dbias calculation is not supported as of cuDNN 9.18, hence, test fwd only for 111s.
     is_training = False if config.bias_shape == "111s" else True
-    nodeid = request.node.nodeid
-    if nodeid in _BACKEND_CACHE:
-        fused_attn_supported = _BACKEND_CACHE[nodeid]
-    else:
-        available_backends, _, fused_attn_backends = get_available_attention_backends(
-            config,
+    def _check_fused_backend():
+        backend_kwargs = dict(
             qkv_dtype=dtypes[dtype] if dtype != "fp8" else torch.float8_e4m3fn,
             qkv_layout="_".join([qkv_format] * 3),
             fp8=fp8,
@@ -681,23 +586,19 @@ def test_cp_with_fused_attention(
             is_training=is_training,
             deterministic=_deterministic,
         )
-
-        _, fused_attn_supported, _ = available_backends
-        if fused_attn_supported and config.attn_mask_type in ["causal", "padding_causal"]:
+        available_backends, _, _ = get_available_attention_backends(config, **backend_kwargs)
+        _, supported, _ = available_backends
+        if supported and config.attn_mask_type in ["causal", "padding_causal"]:
             config_copy = copy.deepcopy(config)
             config_copy.context_parallel = False
             config_copy.attn_mask_type = config.attn_mask_type + "_bottom_right"
-            available_backends, _, fused_attn_backends = get_available_attention_backends(
-                config_copy,
-                qkv_dtype=dtypes[dtype] if dtype != "fp8" else torch.float8_e4m3fn,
-                qkv_layout="_".join([qkv_format] * 3),
-                fp8=fp8,
-                fp8_meta=fp8_meta,
-                is_training=is_training,
-                deterministic=_deterministic,
+            available_backends, _, _ = get_available_attention_backends(
+                config_copy, **backend_kwargs
             )
-            _, fused_attn_supported, _ = available_backends
-        _BACKEND_CACHE[nodeid] = fused_attn_supported
+            _, supported, _ = available_backends
+        return supported
+
+    fused_attn_supported = _cached_backend_check(request.node.nodeid, _check_fused_backend)
     if not fused_attn_supported:
         pytest.skip("No attention backend available.")
 
