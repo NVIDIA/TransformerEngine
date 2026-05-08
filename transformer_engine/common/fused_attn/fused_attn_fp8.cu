@@ -1325,13 +1325,14 @@ void fused_attn_fp8_bwd(
   }
 }
 
-std::string is_supported_fp8_fwd(
-    size_t batch, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
-    size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, bool is_training, float p_dropout,
-    NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
-    NVTE_Softmax_Type softmax_type, int64_t window_size_left, int64_t window_size_right,
-    bool bottom_right_diagonal, DType qkv_dtype, DType o_dtype, NVTEScalingMode scaling_mode,
-    cudnnHandle_t handle) {
+std::string is_supported_fp8_fwd(size_t batch, size_t num_attn_heads, size_t num_gqa_groups,
+                                 size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim_qk,
+                                 size_t head_dim_v, bool is_training, float p_dropout,
+                                 NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
+                                 NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type,
+                                 int64_t window_size_left, int64_t window_size_right,
+                                 bool bottom_right_diagonal, DType qkv_dtype, DType o_dtype,
+                                 NVTEScalingMode scaling_mode, cudnnHandle_t handle) {
   const NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
   if (qkv_format != NVTE_QKV_Format::NVTE_BSHD && qkv_format != NVTE_QKV_Format::NVTE_SBHD &&
       qkv_format != NVTE_QKV_Format::NVTE_BHSD) {
@@ -1352,8 +1353,8 @@ std::string is_supported_fp8_fwd(
         /*devPtrDescaleS=*/nullptr, /*devPtrScaleS=*/nullptr, /*devPtrScaleO=*/nullptr,
         /*devPtrAmaxO=*/nullptr, /*devPtrAmaxS=*/nullptr, /*devPtrcuSeqlensQ=*/nullptr,
         /*devPtrcuSeqlensKV=*/nullptr, /*devPtrDropoutSeed=*/nullptr,
-        /*devPtrDropoutOffset=*/nullptr, get_cudnn_fe_dtype(qkv_dtype),
-        get_cudnn_fe_dtype(o_dtype), scaling_mode,
+        /*devPtrDropoutOffset=*/nullptr, get_cudnn_fe_dtype(qkv_dtype), get_cudnn_fe_dtype(o_dtype),
+        scaling_mode,
         /*qkv_scale_inv_format=*/NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET,
         /*workspace=*/nullptr, &workspace_size,
         /*stream=*/static_cast<cudaStream_t>(0), handle);
@@ -1365,13 +1366,14 @@ std::string is_supported_fp8_fwd(
   }
 }
 
-std::string is_supported_fp8_bwd(
-    size_t batch, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
-    size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, float p_dropout,
-    NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
-    NVTE_Softmax_Type softmax_type, int64_t window_size_left, int64_t window_size_right,
-    bool bottom_right_diagonal, bool deterministic, DType qkv_dtype, DType o_dtype,
-    NVTEScalingMode scaling_mode, cudnnHandle_t handle) {
+std::string is_supported_fp8_bwd(size_t batch, size_t num_attn_heads, size_t num_gqa_groups,
+                                 size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim_qk,
+                                 size_t head_dim_v, float p_dropout, NVTE_QKV_Layout qkv_layout,
+                                 NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
+                                 NVTE_Softmax_Type softmax_type, int64_t window_size_left,
+                                 int64_t window_size_right, bool bottom_right_diagonal,
+                                 bool deterministic, DType qkv_dtype, DType o_dtype,
+                                 NVTEScalingMode scaling_mode, cudnnHandle_t handle) {
   const NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
   if (qkv_format != NVTE_QKV_Format::NVTE_BSHD && qkv_format != NVTE_QKV_Format::NVTE_SBHD &&
       qkv_format != NVTE_QKV_Format::NVTE_BHSD) {

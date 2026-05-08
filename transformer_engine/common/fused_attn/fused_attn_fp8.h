@@ -45,22 +45,24 @@ void fused_attn_fp8_bwd(
 // check if a given configuration is supported for FP8 forward;
 // if it is, cache the graph built for this config, and return an empty string;
 // if not, return a diagnostic message in the form of a string.
-std::string is_supported_fp8_fwd(
-    size_t batch, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
-    size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, bool is_training, float p_dropout,
-    NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
-    NVTE_Softmax_Type softmax_type, int64_t window_size_left, int64_t window_size_right,
-    bool bottom_right_diagonal, DType qkv_dtype, DType o_dtype, NVTEScalingMode scaling_mode,
-    cudnnHandle_t handle);
+std::string is_supported_fp8_fwd(size_t batch, size_t num_attn_heads, size_t num_gqa_groups,
+                                 size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim_qk,
+                                 size_t head_dim_v, bool is_training, float p_dropout,
+                                 NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
+                                 NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type,
+                                 int64_t window_size_left, int64_t window_size_right,
+                                 bool bottom_right_diagonal, DType qkv_dtype, DType o_dtype,
+                                 NVTEScalingMode scaling_mode, cudnnHandle_t handle);
 
 // check if a given configuration is supported for FP8 backward;
 // if it is, cache the graph built for this config, and return an empty string;
 // if not, return a diagnostic message in the form of a string.
-std::string is_supported_fp8_bwd(
-    size_t batch, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
-    size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, float p_dropout,
-    NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
-    NVTE_Softmax_Type softmax_type, int64_t window_size_left, int64_t window_size_right,
-    bool bottom_right_diagonal, bool deterministic, DType qkv_dtype, DType o_dtype,
-    NVTEScalingMode scaling_mode, cudnnHandle_t handle);
+std::string is_supported_fp8_bwd(size_t batch, size_t num_attn_heads, size_t num_gqa_groups,
+                                 size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim_qk,
+                                 size_t head_dim_v, float p_dropout, NVTE_QKV_Layout qkv_layout,
+                                 NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
+                                 NVTE_Softmax_Type softmax_type, int64_t window_size_left,
+                                 int64_t window_size_right, bool bottom_right_diagonal,
+                                 bool deterministic, DType qkv_dtype, DType o_dtype,
+                                 NVTEScalingMode scaling_mode, cudnnHandle_t handle);
 }  // namespace transformer_engine

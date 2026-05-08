@@ -263,8 +263,8 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
                                      max_seqlen_kv, head_dim_qk, head_dim_v) == DType::kInt64);
   if (requires_64bit_ragged_offset && cudnn_runtime_version < 90500) {
     set_message(message,
-               "Configuration requires 64-bit ragged offsets, which require "
-               "cuDNN >= 9.5.");
+                "Configuration requires 64-bit ragged offsets, which require "
+                "cuDNN >= 9.5.");
     return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
   }
 
@@ -274,7 +274,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
       attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK &&
       attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK) {
     set_message(message,
-               "THD format requires PADDING / PADDING_CAUSAL / PADDING_CAUSAL_BOTTOM_RIGHT mask.");
+                "THD format requires PADDING / PADDING_CAUSAL / PADDING_CAUSAL_BOTTOM_RIGHT mask.");
     return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
   }
 
@@ -285,8 +285,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
       attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_MASK &&
       attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK &&
       attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK) {
-    set_message(message,
-               "Known cuDNN <= 9.15 issue with CUDA graph. Please upgrade cuDNN.");
+    set_message(message, "Known cuDNN <= 9.15 issue with CUDA graph. Please upgrade cuDNN.");
     return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
   }
 
@@ -300,8 +299,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
 
   if (is_fp8) {
     if (return_max_logit) {
-      set_message(message,
-                 "FP8 fused attention does not support return_max_logit=True.");
+      set_message(message, "FP8 fused attention does not support return_max_logit=True.");
       return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
     }
     const DType qkv_t = static_cast<DType>(q_dtype);
@@ -354,8 +352,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     return NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen;
   }
 
-  set_message(message,
-             "Unsupported QKV dtype qkv_dtype=" + std::to_string(q_dtype) + " .");
+  set_message(message, "Unsupported QKV dtype qkv_dtype=" + std::to_string(q_dtype) + " .");
   return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
 }
 
