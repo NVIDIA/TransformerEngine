@@ -91,13 +91,11 @@ class QParams:
         object.__setattr__(
             self,
             "_cached_repr",
-            (
-                f"Qparams(\npower_2_scale={self.power_2_scale},\n"
-                f"amax_epsilon={self.amax_epsilon},\n"
-                f"random_hadamard_transform={self.random_hadamard_transform},\n"
-                f"stochastic_rounding={self.stochastic_rounding},\n"
-                f"fp4_2d_quantization={self.fp4_2d_quantization}\n)"
-            ),
+            f"Qparams(\npower_2_scale={self.power_2_scale},\n"
+            f"amax_epsilon={self.amax_epsilon},\n"
+            f"random_hadamard_transform={self.random_hadamard_transform},\n"
+            f"stochastic_rounding={self.stochastic_rounding},\n"
+            f"fp4_2d_quantization={self.fp4_2d_quantization}\n)",
         )
 
     def __repr__(self) -> str:
