@@ -507,11 +507,9 @@ class OperationFuser:
             op.pre_fuser_forward(requires_grad=idx >= self.first_op_requiring_backward)
 
         # Fuser forward pass
-        # When is_grad_enabled is False, we call forward directly.
-        # This does not register a PyTorch autograd node, so
-        # no fuser backward will run. We pass set_output_requires_grad=False
-        # to avoid setting requires_grad on outputs in
-        # this path since they may be non-leaf tensors from the inner ops.
+        # Note: We call forward directly when is_grad_enabled=False,
+        # which can expose non-leaf tensors to the inner ops. Avoid
+        # problems in this case by passing set_output_requires_grad=False.
         args = (
             input,
             self,
