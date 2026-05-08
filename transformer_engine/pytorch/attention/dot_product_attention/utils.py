@@ -1217,10 +1217,6 @@ def get_attention_backend(
                 "Disabling FusedAttention as dbias calculation is not supported for 111s"
             )
             use_fused_attention = False
-        elif not fu_core_attention_bias_requires_grad:
-            # max512 backend will only support [1, h, s, s]
-            os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
-
     # Filter: cuDNN support
     fused_attention_backend = None
     if use_fused_attention:
@@ -1254,32 +1250,6 @@ def get_attention_backend(
             logger.debug("Disabling FusedAttention as no backend supports the provided input")
             use_fused_attention = False
             fused_attention_backend = None
-        if (
-            use_fused_attention
-            and window_size is not None
-            and (window_size[0] != -1 or window_size[1] not in [-1, 0])
-            and fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]
-        ):
-            logger.debug(
-                "Disabling FusedAttention as only sub-backend %s does not support "
-                "slidng window attention",
-                int(fused_attention_backend),
-            )
-            use_fused_attention = False
-            fused_attention_backend = None
-        if (
-            use_fused_attention
-            and fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]
-            and fu_core_attention_bias_type == "post_scale_bias"
-            and fu_core_attention_bias_shape != "1hss"
-        ):
-            logger.debug(
-                "Disabling FusedAttention as cuDNN sub-backend 0 only supports post_scale_bias in"
-                " [1, H, S, S] shape"
-            )
-            use_fused_attention = False
-            fused_attention_backend = None
-
     # Filter: Determinism
     # backend                      | deterministic
     # ---------------------------------------------

@@ -1634,6 +1634,11 @@ class NVFP4BlockScalingRecipeState(RecipeState):
                 with_post_rht_amax=qparams.random_hadamard_transform,
                 with_2d_quantization=qparams.fp4_2d_quantization,
                 stochastic_rounding=qparams.stochastic_rounding,
+                row_scaled_nvfp4=(
+                    self.mode == "forward"
+                    and tensor_type != "weight"
+                    and self.recipe.row_scaled_activation
+                ),
             )
 
         if self.mode not in ("forward", "backward"):
