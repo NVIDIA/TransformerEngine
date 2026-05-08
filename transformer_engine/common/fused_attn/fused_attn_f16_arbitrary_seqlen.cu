@@ -1334,19 +1334,27 @@ void fused_attn_arbitrary_seqlen_bwd(
   }
 }
 
-std::string is_supported_f16_fwd(
-    size_t batch, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
-    size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, bool is_training,
-    bool return_max_logit, float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout,
-    NVTE_QKV_Format o_format, [[maybe_unused]] NVTE_QKV_Format qkv_scale_inv_format,
-    NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type,
-    int64_t window_size_left, int64_t window_size_right, bool bottom_right_diagonal,
-    DType qkv_dtype, [[maybe_unused]] DType o_dtype, [[maybe_unused]] NVTEScalingMode scaling_mode,
-    cudnnHandle_t handle) {
-  const auto b = static_cast<int64_t>(batch);
-  const auto h = static_cast<int64_t>(num_attn_heads);
-  const auto sq = static_cast<int64_t>(max_seqlen_q);
-  const auto skv = static_cast<int64_t>(max_seqlen_kv);
+std::string is_supported_f16_fwd(const NVTEFusedAttnConfig *cfg, cudnnHandle_t handle) {
+  const size_t num_gqa_groups = cfg->num_gqa_groups;
+  const size_t head_dim_qk = cfg->head_dim_qk;
+  const size_t head_dim_v = cfg->head_dim_v;
+  const bool is_training = cfg->is_training;
+  const bool return_max_logit = cfg->return_max_logit;
+  const float attn_scale = cfg->attn_scale;
+  const float p_dropout = cfg->dropout;
+  const NVTE_QKV_Layout qkv_layout = cfg->qkv_layout;
+  const NVTE_QKV_Format o_format = cfg->o_format;
+  const NVTE_Bias_Type bias_type = cfg->bias_type;
+  const NVTE_Mask_Type mask_type = cfg->attn_mask_type;
+  const NVTE_Softmax_Type softmax_type = cfg->softmax_type;
+  const int64_t window_size_left = cfg->window_size_left;
+  const int64_t window_size_right = cfg->window_size_right;
+  const bool bottom_right_diagonal = cfg->bottom_right_diagonal;
+  const DType qkv_dtype = static_cast<DType>(cfg->qkv_dtype);
+  const auto b = static_cast<int64_t>(cfg->batch_size);
+  const auto h = static_cast<int64_t>(cfg->num_attn_heads);
+  const auto sq = static_cast<int64_t>(cfg->max_seqlen_q);
+  const auto skv = static_cast<int64_t>(cfg->max_seqlen_kv);
 
   const NVTE_QKV_Format q_format = nvte_get_q_format(qkv_layout);
   const NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
@@ -1396,20 +1404,28 @@ std::string is_supported_f16_fwd(
   }
 }
 
-std::string is_supported_f16_bwd(
-    size_t batch, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
-    size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, float attn_scale, float p_dropout,
-    NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format, NVTE_QKV_Format do_format,
-    NVTE_QKV_Layout dqkv_layout, [[maybe_unused]] NVTE_QKV_Format qkv_scale_inv_format,
-    [[maybe_unused]] NVTE_QKV_Format do_scale_inv_format, NVTE_Bias_Type bias_type,
-    NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type, int64_t window_size_left,
-    int64_t window_size_right, bool bottom_right_diagonal, bool deterministic, DType qkv_dtype,
-    [[maybe_unused]] DType o_dtype, [[maybe_unused]] NVTEScalingMode scaling_mode,
-    cudnnHandle_t handle) {
-  const auto b = static_cast<int64_t>(batch);
-  const auto h = static_cast<int64_t>(num_attn_heads);
-  const auto sq = static_cast<int64_t>(max_seqlen_q);
-  const auto skv = static_cast<int64_t>(max_seqlen_kv);
+std::string is_supported_f16_bwd(const NVTEFusedAttnConfig *cfg, cudnnHandle_t handle) {
+  const size_t num_gqa_groups = cfg->num_gqa_groups;
+  const size_t head_dim_qk = cfg->head_dim_qk;
+  const size_t head_dim_v = cfg->head_dim_v;
+  const float attn_scale = cfg->attn_scale;
+  const float p_dropout = cfg->dropout;
+  const NVTE_QKV_Layout qkv_layout = cfg->qkv_layout;
+  const NVTE_QKV_Format o_format = cfg->o_format;
+  const NVTE_QKV_Format do_format = cfg->do_format;
+  const NVTE_QKV_Layout dqkv_layout = cfg->dqkv_layout;
+  const NVTE_Bias_Type bias_type = cfg->bias_type;
+  const NVTE_Mask_Type mask_type = cfg->attn_mask_type;
+  const NVTE_Softmax_Type softmax_type = cfg->softmax_type;
+  const int64_t window_size_left = cfg->window_size_left;
+  const int64_t window_size_right = cfg->window_size_right;
+  const bool bottom_right_diagonal = cfg->bottom_right_diagonal;
+  const bool deterministic = cfg->deterministic;
+  const DType qkv_dtype = static_cast<DType>(cfg->qkv_dtype);
+  const auto b = static_cast<int64_t>(cfg->batch_size);
+  const auto h = static_cast<int64_t>(cfg->num_attn_heads);
+  const auto sq = static_cast<int64_t>(cfg->max_seqlen_q);
+  const auto skv = static_cast<int64_t>(cfg->max_seqlen_kv);
 
   const NVTE_QKV_Format q_format = nvte_get_q_format(qkv_layout);
   const NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);

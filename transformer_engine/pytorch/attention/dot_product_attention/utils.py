@@ -257,6 +257,9 @@ class AttentionParams:
         Whether support for cuda graph capture is needed or not.
     num_splits : int, default = 1
         The number of kernels to split attention to.
+    softmax_scale : float, default = 1.0
+        Pre-softmax attention scale. Plumbed through to the cuDNN graph cache key so that the
+        backend probe builds the same execution graph the runtime call later reuses.
     """
 
     qkv_type: Union[torch.Tensor, Float8Tensor] = torch.Tensor
@@ -290,6 +293,7 @@ class AttentionParams:
     return_max_logit: bool = False
     cuda_graph: bool = False
     num_splits: int = 1
+    softmax_scale: float = 1.0
 
     def __eq__(self, other):
         """
@@ -368,6 +372,7 @@ def get_attention_backend(
     return_max_logit = attention_params.return_max_logit
     cuda_graph = attention_params.cuda_graph
     num_splits = attention_params.num_splits
+    softmax_scale = attention_params.softmax_scale
 
     # Run config
     logger = logging.getLogger("DotProductAttention")
@@ -1262,6 +1267,7 @@ def get_attention_backend(
             AttnBiasType[fu_core_attention_bias_type],
             AttnMaskType[attn_mask_type],
             SoftmaxType[softmax_type],
+            softmax_scale,
             attention_dropout,
             num_heads,
             num_gqa_groups,

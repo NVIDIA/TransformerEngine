@@ -426,6 +426,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             softmax_scale = 1.0 / math.sqrt(
                 kv_channels if isinstance(kv_channels, int) else kv_channels[0]
             )
+        self.softmax_scale = softmax_scale
 
         self.deterministic = (
             not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
@@ -1441,6 +1442,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 return_max_logit=self.return_max_logit,
                 cuda_graph=is_graph_capturing(),
                 num_splits=num_splits,
+                softmax_scale=self.softmax_scale,
             )
             global _attention_backends
             if is_in_onnx_export_mode():

@@ -129,6 +129,7 @@ class FusedAttnHelper:
     head_dim_v: int
     window_size: Tuple[int, int]
     bottom_right_diagonal: bool
+    attn_scale: float = 1.0
 
     def is_fused_attn_kernel_available(self):
         """Check if there is available fused attention kernel.
@@ -162,6 +163,7 @@ class FusedAttnHelper:
             self.attn_bias_type.value,
             self.attn_mask_type.value,
             self.softmax_type.value,
+            self.attn_scale,
             self.dropout_probability,
             self.q_num_heads,
             self.kv_num_heads,
@@ -380,6 +382,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             v_head_dim,
             config.window_size,
             config.bottom_right_diagonal,
+            attn_scale=float(config.scaling_factor),
         ).get_fused_attn_backend()
 
         if backend == NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:

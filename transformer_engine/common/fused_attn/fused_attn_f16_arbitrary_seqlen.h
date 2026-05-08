@@ -52,31 +52,12 @@ void fused_attn_arbitrary_seqlen_bwd(
 // check if a given configuration is supported for F16/BF16 forward;
 // if it is, cache the graph built for this config, and return an empty string;
 // if not, return a diagnostic message in the form of a string.
-std::string is_supported_f16_fwd(size_t batch, size_t num_attn_heads, size_t num_gqa_groups,
-                                 size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim_qk,
-                                 size_t head_dim_v, bool is_training, bool return_max_logit,
-                                 float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout,
-                                 NVTE_QKV_Format o_format, NVTE_QKV_Format qkv_scale_inv_format,
-                                 NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
-                                 NVTE_Softmax_Type softmax_type, int64_t window_size_left,
-                                 int64_t window_size_right, bool bottom_right_diagonal,
-                                 DType qkv_dtype, DType o_dtype, NVTEScalingMode scaling_mode,
-                                 cudnnHandle_t handle);
+std::string is_supported_f16_fwd(const NVTEFusedAttnConfig *cfg, cudnnHandle_t handle);
 
 // check if a given configuration is supported for F16/BF16 backward;
 // if it is, cache the graph built for this config, and return an empty string;
 // if not, return a diagnostic message in the form of a string.
-std::string is_supported_f16_bwd(size_t batch, size_t num_attn_heads, size_t num_gqa_groups,
-                                 size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim_qk,
-                                 size_t head_dim_v, float attn_scale, float p_dropout,
-                                 NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format,
-                                 NVTE_QKV_Format do_format, NVTE_QKV_Layout dqkv_layout,
-                                 NVTE_QKV_Format qkv_scale_inv_format,
-                                 NVTE_QKV_Format do_scale_inv_format, NVTE_Bias_Type bias_type,
-                                 NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type,
-                                 int64_t window_size_left, int64_t window_size_right,
-                                 bool bottom_right_diagonal, bool deterministic, DType qkv_dtype,
-                                 DType o_dtype, NVTEScalingMode scaling_mode, cudnnHandle_t handle);
+std::string is_supported_f16_bwd(const NVTEFusedAttnConfig *cfg, cudnnHandle_t handle);
 
 }  // namespace transformer_engine
 
