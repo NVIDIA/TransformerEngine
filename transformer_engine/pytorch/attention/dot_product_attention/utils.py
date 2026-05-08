@@ -2337,7 +2337,7 @@ def check_set_window_size(
         if orig_window_size is None:
             window_size = (-1, 0)
         elif orig_window_size == (-1, -1) or (
-            orig_window_size[0] >= 0 and orig_window_size[1] != 0
+            orig_window_size[0] >= 0 and orig_window_size[1] > 0
         ):
             window_size = (orig_window_size[0], 0)
             warnings.warn(
