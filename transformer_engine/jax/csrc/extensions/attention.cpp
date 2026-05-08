@@ -12,21 +12,21 @@
 namespace transformer_engine {
 namespace jax {
 
-NVTE_Fused_Attn_Backend GetFusedAttnBackend(
-    bool is_training, DType q_dtype, DType kv_dtype, NVTE_QKV_Layout qkv_layout,
-    NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type,
-    float dropout_probability, size_t q_attn_heads, size_t kv_attn_heads, size_t q_max_seqlen,
-    size_t kv_max_seqlen, size_t qk_head_dim, size_t v_head_dim, int64_t window_size_left,
-    int64_t window_size_right, bool deterministic) {
+std::tuple<NVTE_Fused_Attn_Backend, std::string> GetFusedAttnBackend(
+    bool is_training, DType q_dtype, DType kv_dtype, DType o_dtype, NVTEScalingMode scaling_mode,
+    NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
+    NVTE_Softmax_Type softmax_type, float dropout_probability, size_t q_attn_heads,
+    size_t kv_attn_heads, size_t q_max_seqlen, size_t kv_max_seqlen, size_t qk_head_dim,
+    size_t v_head_dim, int64_t window_size_left, int64_t window_size_right, bool deterministic) {
   auto handle = cudnnExecutionPlanManager::Instance().GetHandle();
+  const char *message = nullptr;
   auto backend = nvte_get_fused_attn_backend(
       is_training, static_cast<NVTEDType>(q_dtype), static_cast<NVTEDType>(kv_dtype),
-      static_cast<NVTEDType>(q_dtype), NVTE_DELAYED_TENSOR_SCALING, qkv_layout, bias_type,
-      mask_type, softmax_type, dropout_probability, q_attn_heads, kv_attn_heads, q_max_seqlen,
-      kv_max_seqlen, qk_head_dim, v_head_dim, window_size_left, window_size_right,
-      /*return_max_logit=*/false, /*cuda_graph=*/false, deterministic, handle,
-      /*out_reason=*/nullptr);
-  return backend;
+      static_cast<NVTEDType>(o_dtype), scaling_mode, qkv_layout, bias_type, mask_type, softmax_type,
+      dropout_probability, q_attn_heads, kv_attn_heads, q_max_seqlen, kv_max_seqlen, qk_head_dim,
+      v_head_dim, window_size_left, window_size_right,
+      /*return_max_logit=*/false, /*cuda_graph=*/false, deterministic, handle, &message);
+  return {backend, message ? std::string(message) : std::string()};
 }
 
 /*
@@ -279,10 +279,10 @@ static void FusedAttnForwardImpl(
   auto _handle_fwd = cudnnExecutionPlanManager::Instance().GetHandle();
   auto backend = nvte_get_fused_attn_backend(
       is_training, static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype),
-      static_cast<NVTEDType>(dtype), NVTE_DELAYED_TENSOR_SCALING, qkv_layout, bias_type, mask_type,
+      static_cast<NVTEDType>(dtype), NVTE_INVALID_SCALING, qkv_layout, bias_type, mask_type,
       softmax_type, dropout_probability, attn_heads, num_gqa_groups, q_max_seqlen, kv_max_seqlen,
       qk_head_dim, v_head_dim, window_size_left, window_size_right, /*return_max_logit=*/false,
-      /*cuda_graph=*/false, deterministic, _handle_fwd, /*out_reason=*/nullptr);
+      /*cuda_graph=*/false, deterministic, _handle_fwd, /*message=*/nullptr);
   nvte_populate_rng_state_async(rng_state, seed, q_max_seqlen, kv_max_seqlen, backend, stream);
 
   /* Auxiliary tensors (to be propagated to the backward pass later) */
@@ -557,10 +557,10 @@ static void FusedAttnBackwardImpl(
   auto _handle_bwd = cudnnExecutionPlanManager::Instance().GetHandle();
   auto backend = nvte_get_fused_attn_backend(
       is_training, static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype),
-      static_cast<NVTEDType>(dtype), NVTE_DELAYED_TENSOR_SCALING, qkv_layout, bias_type, mask_type,
+      static_cast<NVTEDType>(dtype), NVTE_INVALID_SCALING, qkv_layout, bias_type, mask_type,
       softmax_type, dropout_probability, attn_heads, num_gqa_groups, q_max_seqlen, kv_max_seqlen,
       qk_head_dim, v_head_dim, window_size_left, window_size_right, /*return_max_logit=*/false,
-      /*cuda_graph=*/false, deterministic, _handle_bwd, /*out_reason=*/nullptr);
+      /*cuda_graph=*/false, deterministic, _handle_bwd, /*message=*/nullptr);
   PrepareFusedAttnBackwardAuxTensors(&aux_input_tensors, input_batch, bias_batch, attn_heads,
                                      bias_heads, q_max_seqlen, kv_max_seqlen, dtype, backend,
                                      softmax_aux, rng_state, bias, softmax_offset);

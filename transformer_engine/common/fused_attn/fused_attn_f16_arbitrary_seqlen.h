@@ -49,30 +49,25 @@ void fused_attn_arbitrary_seqlen_bwd(
     const Tensor *cu_seqlens_kv_padded, const Tensor *rng_state, Tensor *workspace,
     cudaStream_t stream, cudnnHandle_t handle);
 
-// Probe: drives cuDNN-FE (validate -> build_operation_graph -> create_execution_plans ->
-// check_support -> build_plans) for an F16/BF16 forward graph with the given configuration.
-// Returns an empty string iff the graph compiles end-to-end; on OK the built graph is
-// inserted into the same thread-local cache used by fused_attn_arbitrary_seqlen_fwd_impl,
-// so the executor cache-hits on matching descriptors.
-//
-// On rejection, returns a non-empty diagnostic of the form
-//   "[<CATEGORY>] <human-readable message>"
-// where <CATEGORY> is a stable tag mirroring cudnn_frontend::error_code_t names
-// (e.g. GRAPH_NOT_SUPPORTED for cuDNN-FE rejections forwarded from the support chain).
+// check if a given configuration is supported for F16/BF16 forward;
+// if it is, cache the graph built for this config, and return an empty string;
+// if not, return a diagnostic message in the form of a string.
 std::string is_supported_f16_fwd(
     size_t batch, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
     size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, bool is_training,
     bool return_max_logit, float p_dropout, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
     NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type, int64_t window_size_left,
-    int64_t window_size_right, bool bottom_right_diagonal, DType q_dtype, cudnnHandle_t handle);
+    int64_t window_size_right, bool bottom_right_diagonal, DType qkv_dtype, cudnnHandle_t handle);
 
-// Probe: same as above for the F16/BF16 backward graph.
+// check if a given configuration is supported for F16/BF16 backward;
+// if it is, cache the graph built for this config, and return an empty string;
+// if not, return a diagnostic message in the form of a string.
 std::string is_supported_f16_bwd(
     size_t batch, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
     size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, float p_dropout,
     NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
     NVTE_Softmax_Type softmax_type, int64_t window_size_left, int64_t window_size_right,
-    bool bottom_right_diagonal, bool deterministic, DType q_dtype, cudnnHandle_t handle);
+    bool bottom_right_diagonal, bool deterministic, DType qkv_dtype, cudnnHandle_t handle);
 
 }  // namespace transformer_engine
 

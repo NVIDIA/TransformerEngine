@@ -2997,14 +2997,12 @@ std::string is_supported_fp8_fwd(
     size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, bool is_training, float p_dropout,
     NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
     NVTE_Softmax_Type softmax_type, int64_t window_size_left, int64_t window_size_right,
-    bool bottom_right_diagonal, DType q_dtype, DType o_dtype, NVTEScalingMode scaling_mode,
+    bool bottom_right_diagonal, DType qkv_dtype, DType o_dtype, NVTEScalingMode scaling_mode,
     cudnnHandle_t handle) {
-  // FP8 fwd impl rejects any qkv_format other than BSHD/SBHD/BHSD with NVTE_ERROR; mirror that
-  // here so the probe returns a typed rejection instead of catching the throw.
   const NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
   if (qkv_format != NVTE_QKV_Format::NVTE_BSHD && qkv_format != NVTE_QKV_Format::NVTE_SBHD &&
       qkv_format != NVTE_QKV_Format::NVTE_BHSD) {
-    return "[INVALID_VALUE] FP8 fused attention only supports BSHD/SBHD/BHSD layouts.";
+    return "FP8 fused attention supports BSHD/SBHD/BHSD formats, found " + qkv_format + ".";
   }
   size_t workspace_size = 0;
   try {
@@ -3021,16 +3019,16 @@ std::string is_supported_fp8_fwd(
         /*devPtrDescaleS=*/nullptr, /*devPtrScaleS=*/nullptr, /*devPtrScaleO=*/nullptr,
         /*devPtrAmaxO=*/nullptr, /*devPtrAmaxS=*/nullptr, /*devPtrcuSeqlensQ=*/nullptr,
         /*devPtrcuSeqlensKV=*/nullptr, /*devPtrDropoutSeed=*/nullptr,
-        /*devPtrDropoutOffset=*/nullptr, get_cudnn_fe_dtype(q_dtype), get_cudnn_fe_dtype(o_dtype),
-        scaling_mode,
+        /*devPtrDropoutOffset=*/nullptr, get_cudnn_fe_dtype(qkv_dtype),
+        get_cudnn_fe_dtype(o_dtype), scaling_mode,
         /*qkv_scale_inv_format=*/NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET,
         /*workspace=*/nullptr, &workspace_size,
         /*stream=*/static_cast<cudaStream_t>(0), handle);
     return "";
   } catch (const std::exception& e) {
-    return std::string("[GRAPH_NOT_SUPPORTED] ") + e.what();
+    return e.what();
   } catch (...) {
-    return "[GRAPH_NOT_SUPPORTED] is_supported_fp8_fwd: unknown failure";
+    return "is_supported_fp8_fwd: unknown failure.";
   }
 }
 
@@ -3039,16 +3037,14 @@ std::string is_supported_fp8_bwd(
     size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, float p_dropout,
     NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
     NVTE_Softmax_Type softmax_type, int64_t window_size_left, int64_t window_size_right,
-    bool bottom_right_diagonal, bool deterministic, DType q_dtype, DType o_dtype,
+    bool bottom_right_diagonal, bool deterministic, DType qkv_dtype, DType o_dtype,
     NVTEScalingMode scaling_mode, cudnnHandle_t handle) {
   const NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
   if (qkv_format != NVTE_QKV_Format::NVTE_BSHD && qkv_format != NVTE_QKV_Format::NVTE_SBHD &&
       qkv_format != NVTE_QKV_Format::NVTE_BHSD) {
-    return "[INVALID_VALUE] FP8 fused attention only supports BSHD/SBHD/BHSD layouts.";
+    return "FP8 fused attention supports BSHD/SBHD/BHSD formats, found " + qkv_format + ".";
   }
-  // For FP8 bwd, dO data type matches O data type and dQKV data type matches Q data type
-  // (this mirrors the assumption used by callers of fused_attn_fp8_bwd in TE).
-  const cudnn_frontend::DataType_t qkv_t = get_cudnn_fe_dtype(q_dtype);
+  const cudnn_frontend::DataType_t qkv_t = get_cudnn_fe_dtype(qkv_dtype);
   const cudnn_frontend::DataType_t o_t = get_cudnn_fe_dtype(o_dtype);
   const cudnn_frontend::DataType_t do_t = o_t;
   const cudnn_frontend::DataType_t dqkv_t = qkv_t;
@@ -3082,9 +3078,9 @@ std::string is_supported_fp8_bwd(
         /*stream=*/static_cast<cudaStream_t>(0), handle);
     return "";
   } catch (const std::exception& e) {
-    return std::string("[GRAPH_NOT_SUPPORTED] ") + e.what();
+    return e.what();
   } catch (...) {
-    return "[GRAPH_NOT_SUPPORTED] is_supported_fp8_bwd: unknown failure";
+    return "is_supported_fp8_bwd: unknown failure.";
   }
 }
 

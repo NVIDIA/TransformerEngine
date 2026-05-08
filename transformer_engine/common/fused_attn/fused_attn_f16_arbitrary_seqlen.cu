@@ -1334,31 +1334,18 @@ void fused_attn_arbitrary_seqlen_bwd(
   }
 }
 
-namespace {
-// Probe-time defaults for runtime-only quantities the router doesn't see (paged-KV dims,
-// ragged max-tokens, bias dims). These produce a graph whose support surface matches the
-// real executor's: for non-paged / non-ragged paths these are unused inside the impl;
-// for ragged-THD we rebind to worst-case bounds; for paged we use 1 page of full s_kv per
-// batch (= same dims as non-paged), so cuDNN-FE applies the paged-attention support rules.
-struct ProbeDims {
-  int64_t max_b;
-  int64_t max_t_q;
-  int64_t max_t_kv;
-  int64_t num_pages_k;
-  int64_t num_pages_v;
-  int64_t page_size_k;
-  int64_t page_size_v;
-  int64_t max_pages_per_seq_k;
-  int64_t max_pages_per_seq_v;
-  int64_t bias_b;
-  int64_t bias_h;
-  int64_t bias_sq;
-  int64_t bias_skv;
-};
+std::string is_supported_f16_fwd(
+    size_t batch, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
+    size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, bool is_training,
+    bool return_max_logit, float p_dropout, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
+    NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type, int64_t window_size_left,
+    int64_t window_size_right, bool bottom_right_diagonal, DType qkv_dtype,
+    cudnnHandle_t handle) {
+  const auto b = static_cast<int64_t>(batch);
+  const auto h = static_cast<int64_t>(num_attn_heads);
+  const auto sq = static_cast<int64_t>(max_seqlen_q);
+  const auto skv = static_cast<int64_t>(max_seqlen_kv);
 
-ProbeDims compute_probe_dims(int64_t batch, int64_t num_attn_heads, int64_t max_seqlen_q,
-                             int64_t max_seqlen_kv, NVTE_QKV_Layout qkv_layout,
-                             NVTE_Bias_Type bias_type) {
   const NVTE_QKV_Format q_format = nvte_get_q_format(qkv_layout);
   const NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
   const bool is_ragged_q = (q_format == NVTE_QKV_Format::NVTE_THD);
@@ -1367,45 +1354,29 @@ ProbeDims compute_probe_dims(int64_t batch, int64_t num_attn_heads, int64_t max_
   const bool is_paged_kv = (layout_group == NVTE_QKV_Layout_Group::NVTE_Paged_KV_HD_HD_HD);
   const bool has_bias = (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
 
-  ProbeDims d{};
-  d.max_b = (is_ragged_q || is_ragged_kv) ? batch : 0;
-  d.max_t_q = is_ragged_q ? batch * max_seqlen_q : 0;
-  d.max_t_kv = is_ragged_kv ? batch * max_seqlen_kv : 0;
-  d.num_pages_k = is_paged_kv ? batch : 0;
-  d.num_pages_v = is_paged_kv ? batch : 0;
-  d.page_size_k = is_paged_kv ? max_seqlen_kv : 0;
-  d.page_size_v = is_paged_kv ? max_seqlen_kv : 0;
-  d.max_pages_per_seq_k = is_paged_kv ? 1 : 0;
-  d.max_pages_per_seq_v = is_paged_kv ? 1 : 0;
-  d.bias_b = has_bias ? batch : 0;
-  d.bias_h = has_bias ? num_attn_heads : 0;
-  d.bias_sq = has_bias ? max_seqlen_q : 0;
-  d.bias_skv = has_bias ? max_seqlen_kv : 0;
-  return d;
-}
-}  // namespace
+  const int64_t max_b = (is_ragged_q || is_ragged_kv) ? b : 0;
+  const int64_t max_t_q = is_ragged_q ? b * sq : 0;
+  const int64_t max_t_kv = is_ragged_kv ? b * skv : 0;
+  const int64_t num_pages_k = is_paged_kv ? b : 0;
+  const int64_t num_pages_v = is_paged_kv ? b : 0;
+  const int64_t page_size_k = is_paged_kv ? skv : 0;
+  const int64_t page_size_v = is_paged_kv ? skv : 0;
+  const int64_t max_pages_per_seq_k = is_paged_kv ? 1 : 0;
+  const int64_t max_pages_per_seq_v = is_paged_kv ? 1 : 0;
+  const int64_t bias_b = has_bias ? b : 0;
+  const int64_t bias_h = has_bias ? h : 0;
+  const int64_t bias_sq = has_bias ? sq : 0;
+  const int64_t bias_skv = has_bias ? skv : 0;
 
-std::string is_supported_f16_fwd(
-    size_t batch, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
-    size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, bool is_training,
-    bool return_max_logit, float p_dropout, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
-    NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type, int64_t window_size_left,
-    int64_t window_size_right, bool bottom_right_diagonal, DType q_dtype, cudnnHandle_t handle) {
-  const ProbeDims d =
-      compute_probe_dims(static_cast<int64_t>(batch), static_cast<int64_t>(num_attn_heads),
-                         static_cast<int64_t>(max_seqlen_q), static_cast<int64_t>(max_seqlen_kv),
-                         qkv_layout, bias_type);
-  const NVTE_QKV_Format o_format = nvte_get_q_format(qkv_layout);
+  const NVTE_QKV_Format o_format = q_format;
 
   size_t workspace_size = 0;
   try {
     fused_attn::fused_attn_arbitrary_seqlen_fwd_impl(
-        static_cast<int64_t>(batch), static_cast<int64_t>(num_attn_heads),
-        static_cast<int64_t>(num_gqa_groups), static_cast<int64_t>(max_seqlen_q),
-        static_cast<int64_t>(max_seqlen_kv), static_cast<int64_t>(head_dim_qk),
-        static_cast<int64_t>(head_dim_v), d.max_b, d.max_t_q, d.max_t_kv, d.num_pages_k,
-        d.num_pages_v, d.page_size_k, d.page_size_v, d.max_pages_per_seq_k, d.max_pages_per_seq_v,
-        d.bias_b, d.bias_h, d.bias_sq, d.bias_skv, is_training, return_max_logit,
+        b, h, static_cast<int64_t>(num_gqa_groups), sq, skv, static_cast<int64_t>(head_dim_qk),
+        static_cast<int64_t>(head_dim_v), max_b, max_t_q, max_t_kv, num_pages_k, num_pages_v,
+        page_size_k, page_size_v, max_pages_per_seq_k, max_pages_per_seq_v, bias_b, bias_h,
+        bias_sq, bias_skv, is_training, return_max_logit,
         /*scaling_factor=*/1.0f, p_dropout, qkv_layout, o_format, bias_type, mask_type,
         softmax_type, window_size_left, window_size_right, bottom_right_diagonal,
         /*devPtrQ=*/nullptr, /*devPtrK=*/nullptr, /*devPtrV=*/nullptr, /*devPtrBias=*/nullptr,
@@ -1413,14 +1384,15 @@ std::string is_supported_f16_fwd(
         /*devPtrO=*/nullptr, /*devPtrDropoutSeed=*/nullptr, /*devPtrDropoutOffset=*/nullptr,
         /*devPtrCuSeqlensQ=*/nullptr, /*devPtrCuSeqlensKV=*/nullptr,
         /*devPtrPageTableK=*/nullptr, /*devPtrPageTableV=*/nullptr,
-        /*devPtrSeqOffsetsQ=*/nullptr, /*devPtrSeqOffsetsKV=*/nullptr, get_cudnn_fe_dtype(q_dtype),
+        /*devPtrSeqOffsetsQ=*/nullptr, /*devPtrSeqOffsetsKV=*/nullptr,
+        get_cudnn_fe_dtype(qkv_dtype),
         /*workspace=*/nullptr, &workspace_size,
         /*stream=*/static_cast<cudaStream_t>(0), handle);
     return "";
   } catch (const std::exception &e) {
-    return std::string("[GRAPH_NOT_SUPPORTED] ") + e.what();
+    return e.what();
   } catch (...) {
-    return "[GRAPH_NOT_SUPPORTED] is_supported_f16_fwd: unknown failure";
+    return "is_supported_f16_fwd: unknown failure.";
   }
 }
 
@@ -1429,23 +1401,36 @@ std::string is_supported_f16_bwd(
     size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, float p_dropout,
     NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
     NVTE_Softmax_Type softmax_type, int64_t window_size_left, int64_t window_size_right,
-    bool bottom_right_diagonal, bool deterministic, DType q_dtype, cudnnHandle_t handle) {
-  const ProbeDims d =
-      compute_probe_dims(static_cast<int64_t>(batch), static_cast<int64_t>(num_attn_heads),
-                         static_cast<int64_t>(max_seqlen_q), static_cast<int64_t>(max_seqlen_kv),
-                         qkv_layout, bias_type);
-  const NVTE_QKV_Format o_format = nvte_get_q_format(qkv_layout);
+    bool bottom_right_diagonal, bool deterministic, DType qkv_dtype, cudnnHandle_t handle) {
+  const auto b = static_cast<int64_t>(batch);
+  const auto h = static_cast<int64_t>(num_attn_heads);
+  const auto sq = static_cast<int64_t>(max_seqlen_q);
+  const auto skv = static_cast<int64_t>(max_seqlen_kv);
+
+  const NVTE_QKV_Format q_format = nvte_get_q_format(qkv_layout);
+  const NVTE_QKV_Format kv_format = nvte_get_kv_format(qkv_layout);
+  const bool is_ragged_q = (q_format == NVTE_QKV_Format::NVTE_THD);
+  const bool is_ragged_kv = (kv_format == NVTE_QKV_Format::NVTE_THD);
+  const bool has_bias = (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
+
+  const int64_t max_b = (is_ragged_q || is_ragged_kv) ? b : 0;
+  const int64_t max_t_q = is_ragged_q ? b * sq : 0;
+  const int64_t max_t_kv = is_ragged_kv ? b * skv : 0;
+  const int64_t bias_b = has_bias ? b : 0;
+  const int64_t bias_h = has_bias ? h : 0;
+  const int64_t bias_sq = has_bias ? sq : 0;
+  const int64_t bias_skv = has_bias ? skv : 0;
+
+  const NVTE_QKV_Format o_format = q_format;
   const NVTE_QKV_Format do_format = o_format;
   const NVTE_QKV_Layout dqkv_layout = qkv_layout;
 
   size_t workspace_size = 0;
   try {
     fused_attn::fused_attn_arbitrary_seqlen_bwd_impl(
-        static_cast<int64_t>(batch), static_cast<int64_t>(num_attn_heads),
-        static_cast<int64_t>(num_gqa_groups), static_cast<int64_t>(max_seqlen_q),
-        static_cast<int64_t>(max_seqlen_kv), static_cast<int64_t>(head_dim_qk),
-        static_cast<int64_t>(head_dim_v), d.max_b, d.max_t_q, d.max_t_kv, d.bias_b, d.bias_h,
-        d.bias_sq, d.bias_skv, /*scaling_factor=*/1.0f, p_dropout, qkv_layout, o_format, do_format,
+        b, h, static_cast<int64_t>(num_gqa_groups), sq, skv, static_cast<int64_t>(head_dim_qk),
+        static_cast<int64_t>(head_dim_v), max_b, max_t_q, max_t_kv, bias_b, bias_h, bias_sq,
+        bias_skv, /*scaling_factor=*/1.0f, p_dropout, qkv_layout, o_format, do_format,
         dqkv_layout, bias_type, mask_type, softmax_type, window_size_left, window_size_right,
         bottom_right_diagonal, deterministic, /*devPtrQ=*/nullptr, /*devPtrKTranspose=*/nullptr,
         /*devPtrVTranspose=*/nullptr, /*devPtrO=*/nullptr, /*devPtrSoftmaxStats=*/nullptr,
@@ -1454,14 +1439,15 @@ std::string is_supported_f16_bwd(
         /*devPtrdBias=*/nullptr, /*devPtrdSoftmaxOffset=*/nullptr,
         /*devPtrDropoutSeed=*/nullptr, /*devPtrDropoutOffset=*/nullptr,
         /*devPtrCuSeqlensQ=*/nullptr, /*devPtrCuSeqlensKV=*/nullptr,
-        /*devPtrSeqOffsetsQ=*/nullptr, /*devPtrSeqOffsetsKV=*/nullptr, get_cudnn_fe_dtype(q_dtype),
+        /*devPtrSeqOffsetsQ=*/nullptr, /*devPtrSeqOffsetsKV=*/nullptr,
+        get_cudnn_fe_dtype(qkv_dtype),
         /*workspace=*/nullptr, &workspace_size,
         /*stream=*/static_cast<cudaStream_t>(0), handle);
     return "";
   } catch (const std::exception &e) {
-    return std::string("[GRAPH_NOT_SUPPORTED] ") + e.what();
+    return e.what();
   } catch (...) {
-    return "[GRAPH_NOT_SUPPORTED] is_supported_f16_bwd: unknown failure";
+    return "is_supported_f16_bwd: unknown failure.";
   }
 }
 

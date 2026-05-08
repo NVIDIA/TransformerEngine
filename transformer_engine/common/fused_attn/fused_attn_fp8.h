@@ -42,30 +42,25 @@ void fused_attn_fp8_bwd(
     Tensor *output_dSoftmaxOffset, const Tensor *cu_seqlens_q, const Tensor *cu_seqlens_kv,
     const Tensor *rng_state, Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle);
 
-// Probe: drives cuDNN-FE (validate -> build_operation_graph -> create_execution_plans ->
-// check_support -> build_plans) for an FP8 forward graph with the given configuration.
-// Returns an empty string iff the graph compiles end-to-end; on OK the built graph is
-// inserted into the same thread-local cache used by fused_attn_fp8_fwd_impl.
-//
-// On rejection, returns a non-empty diagnostic of the form
-//   "[<CATEGORY>] <human-readable message>"
-// where <CATEGORY> mirrors cudnn_frontend::error_code_t names (INVALID_VALUE for the
-// FP8-only layout pre-filter, GRAPH_NOT_SUPPORTED for cuDNN-FE rejections forwarded
-// from the support chain).
+// check if a given configuration is supported for FP8 forward;
+// if it is, cache the graph built for this config, and return an empty string;
+// if not, return a diagnostic message in the form of a string.
 std::string is_supported_fp8_fwd(
     size_t batch, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
     size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, bool is_training, float p_dropout,
     NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
     NVTE_Softmax_Type softmax_type, int64_t window_size_left, int64_t window_size_right,
-    bool bottom_right_diagonal, DType q_dtype, DType o_dtype, NVTEScalingMode scaling_mode,
+    bool bottom_right_diagonal, DType qkv_dtype, DType o_dtype, NVTEScalingMode scaling_mode,
     cudnnHandle_t handle);
 
-// Probe: same as above for the FP8 backward graph.
+// check if a given configuration is supported for FP8 backward;
+// if it is, cache the graph built for this config, and return an empty string;
+// if not, return a diagnostic message in the form of a string.
 std::string is_supported_fp8_bwd(
     size_t batch, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
     size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, float p_dropout,
     NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
     NVTE_Softmax_Type softmax_type, int64_t window_size_left, int64_t window_size_right,
-    bool bottom_right_diagonal, bool deterministic, DType q_dtype, DType o_dtype,
+    bool bottom_right_diagonal, bool deterministic, DType qkv_dtype, DType o_dtype,
     NVTEScalingMode scaling_mode, cudnnHandle_t handle);
 }  // namespace transformer_engine

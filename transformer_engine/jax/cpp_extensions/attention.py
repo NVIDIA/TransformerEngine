@@ -16,7 +16,7 @@ from jax.sharding import PartitionSpec, NamedSharding
 from jax.experimental.custom_partitioning import SdyShardingRule
 
 import transformer_engine_jax
-from transformer_engine_jax import NVTE_Fused_Attn_Backend
+from transformer_engine_jax import NVTE_Fused_Attn_Backend, NVTEScalingMode
 from transformer_engine.jax.attention import (
     AttnBiasType,
     AttnMaskType,
@@ -125,14 +125,22 @@ class FusedAttnHelper:
 
     def is_fused_attn_kernel_available(self):
         """Check if there is available fused attention kernel"""
-        return self.get_fused_attn_backend() != NVTE_Fused_Attn_Backend.NVTE_No_Backend
+        backend, _ = self.get_fused_attn_backend()
+        return backend != NVTE_Fused_Attn_Backend.NVTE_No_Backend
 
     def get_fused_attn_backend(self):
-        """Get the fused attention kernel backend"""
+        """Get the fused attention kernel backend.
+
+        Returns a ``(backend, message)`` tuple. ``message`` is empty on success, otherwise a
+        diagnostic string describing why the configuration was rejected when backend = NVTE_No_Backend.
+        """
+        q_type = jax_dtype_to_te_dtype(self.q_dtype)
         return transformer_engine_jax.get_fused_attn_backend(
             self.is_training,
-            jax_dtype_to_te_dtype(self.q_dtype),
+            q_type,
             jax_dtype_to_te_dtype(self.kv_dtype),
+            q_type,
+            NVTEScalingMode.NVTE_INVALID_SCALING,
             self.qkv_layout.value,
             self.attn_bias_type.value,
             self.attn_mask_type.value,
@@ -335,7 +343,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         out_aval = q_aval.update(shape=output_shape, dtype=q_dtype)
 
         # backend determines the softmax buffer shape/dtype
-        backend = FusedAttnHelper(
+        backend, message = FusedAttnHelper(
             config.is_training,
             q_dtype,
             k_dtype,
@@ -372,7 +380,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                 )
             softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
         else:
-            raise ValueError(f"Unsupported {backend=}")
+            raise ValueError(f"Unsupported backend: {message}")
         softmax_aux_aval = q_aval.update(shape=softmax_shape, dtype=softmax_dtype)
 
         # JAX does not enable 64-bit int by default so we get XLA to allocate x8 memory with

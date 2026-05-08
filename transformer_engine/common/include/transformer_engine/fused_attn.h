@@ -200,22 +200,11 @@ NVTE_QKV_Format nvte_get_kv_format(NVTE_QKV_Layout qkv_layout);
 
 /*! \brief Get fused attention backend based on input parameters.
  *
- *  Authoritative routing: when a non-NVTE_No_Backend value is returned, the configuration
- *  is guaranteed to compile through cuDNN-FE (validate -> build_operation_graph ->
- *  create_execution_plans -> check_support -> build_plans). The router applies a small
- *  set of TE-specific post-filters in addition to delegating to cuDNN-FE for capability
- *  checks. On success the built plan is cached, so the executor avoids rebuilding.
- *
  *  \param[in]     is_training         Whether the model is in training mode.
  *  \param[in]     q_dtype             The data type of Tensor Q.
  *  \param[in]     kv_dtype            The data type of Tensors K, V.
- *  \param[in]     o_dtype             The data type of output Tensor O. Used by the FP8
- *                                     branch to disambiguate FP8 vs HALF/BF16 output;
- *                                     ignored by the F16/BF16 branch (pass q_dtype).
- *  \param[in]     scaling_mode        Scaling mode of the input tensors. Used by the FP8
- *                                     branch to select among delayed/current/MXFP8 recipes;
- *                                     ignored by the F16/BF16 branch
- *                                     (pass NVTE_DELAYED_TENSOR_SCALING).
+ *  \param[in]     o_dtype             The data type of Tensor O.
+ *  \param[in]     scaling_mode        Scaling mode of attention.
  *  \param[in]     qkv_layout          The layout of Tensors Q, K, V.
  *  \param[in]     bias_type           The attention bias type.
  *  \param[in]     attn_mask_type      The attention mask type.
@@ -232,20 +221,9 @@ NVTE_QKV_Format nvte_get_kv_format(NVTE_QKV_Layout qkv_layout);
  *  \param[in]     return_max_logit    Whether to produce Max along with Stats.
  *  \param[in]     cuda_graph          Whether cuda graph capture is enabled or not.
  *  \param[in]     deterministic       Whether determinism is required or not.
- *  \param[in]     handle              cuDNN handle used for the support chain. Required.
- *  \param[out]    out_reason          Optional. When non-NULL, set to a null-terminated
- *                                     diagnostic string describing why the configuration
- *                                     was rejected (NVTE_No_Backend) or set to "" on
- *                                     success. Rejection messages are tagged with a
- *                                     stable category prefix that mirrors
- *                                     \c cudnn_frontend::error_code_t, e.g.
- *                                     \c "[INVALID_VALUE] ..." for TE post-filter
- *                                     rejections and FP8 layout pre-filter rejections,
- *                                     \c "[GRAPH_NOT_SUPPORTED] ..." for cuDNN-FE
- *                                     rejections forwarded from the support chain. The
- *                                     pointer points into per-thread storage owned by TE
- *                                     and is valid only until the next call to
- *                                     \c nvte_get_fused_attn_backend on the same thread.
+ *  \param[in]     handle              cuDNN handle.
+ *  \param[out]    message             Empty string on success, otherwise a diagnostic string
+ *                                     describing why the configuration was rejected.
  */
 NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     bool is_training, NVTEDType q_dtype, NVTEDType kv_dtype, NVTEDType o_dtype,
@@ -254,7 +232,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q, size_t max_seqlen_kv,
     size_t head_dim_qk, size_t head_dim_v, int64_t window_size_left, int64_t window_size_right,
     bool return_max_logit, bool cuda_graph, bool deterministic, cudnnHandle_t handle,
-    const char **out_reason);
+    const char **message);
 
 /*! \brief Compute dot product attention with separate Q, K and V.
  *

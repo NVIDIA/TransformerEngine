@@ -1229,10 +1229,12 @@ def get_attention_backend(
         if fp8 and fp8_meta["recipe"].fp8_dpa:
             q_type = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
             kv_type = q_type
-        fused_attention_backend = tex.get_fused_attn_backend(
+        fused_attention_backend, reject_message = tex.get_fused_attn_backend(
             is_training,
             q_type,
             kv_type,
+            q_type,
+            tex.NVTEScalingMode.NVTE_INVALID_SCALING,
             QKVLayout[qkv_layout],
             AttnBiasType[fu_core_attention_bias_type],
             AttnMaskType[attn_mask_type],
@@ -1251,7 +1253,10 @@ def get_attention_backend(
             deterministic,
         )
         if fused_attention_backend == FusedAttnBackend["No_Backend"]:
-            logger.debug("Disabling FusedAttention as no backend supports the provided input")
+            logger.debug(
+                "Disabling FusedAttention as %s",
+                reject_message,
+            )
             use_fused_attention = False
             fused_attention_backend = None
         if (
