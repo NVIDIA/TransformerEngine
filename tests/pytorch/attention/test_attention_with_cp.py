@@ -70,6 +70,8 @@ def get_bash_arguments(num_gpus_per_node, **kwargs):
         "torch.distributed.launch",
         "--nproc-per-node=" + str(num_gpus_per_node),
     ]
+    if "MASTER_PORT" in os.environ:
+        args.append("--master-port=" + os.environ["MASTER_PORT"])
     te_path = os.getenv("TE_PATH", "/opt/transformerengine")
     script_path = os.path.join(te_path, "tests/pytorch/attention/run_attention_with_cp.py")
     args.append(script_path)
@@ -134,6 +136,7 @@ def get_bash_arguments(num_gpus_per_node, **kwargs):
 # Module-level state used by the session fixture's collect phase.
 _COLLECT_MODE = False
 _COLLECTED_KWARGS = {}  # nodeid -> kwargs dict (populated in collect mode)
+_BACKEND_CACHE = {}  # nodeid -> (fused_attn_supported, fused_attn_backends) or (flash_attn_supported,)
 
 
 def _run_or_fetch(request, batch_results, *, num_gpus_per_node, **worker_kwargs):
@@ -287,8 +290,11 @@ def _cp_batch_results(request):
         it for it in request.session.items if "_cp_batch_results" in getattr(it, "fixturenames", ())
     ]
 
+    import time as _time
+
     _COLLECTED_KWARGS.clear()
     _COLLECT_MODE = True
+    _t0 = _time.monotonic()
     try:
         for item in items:
             if _item_static_skip(item):
@@ -304,6 +310,11 @@ def _cp_batch_results(request):
                 pass
     finally:
         _COLLECT_MODE = False
+    print(
+        f"\n[CP-BATCH] Collect done: {len(_COLLECTED_KWARGS)} configs from"
+        f" {len(items)} items in {_time.monotonic() - _t0:.1f}s",
+        flush=True,
+    )
 
     by_num_gpus = {}
     for nodeid, kwargs in _COLLECTED_KWARGS.items():
@@ -312,11 +323,29 @@ def _cp_batch_results(request):
 
     results = {}
     for num_gpus, entries in by_num_gpus.items():
-        for start in range(0, len(entries), _BATCH_SIZE):
+        n_batches = (len(entries) + _BATCH_SIZE - 1) // _BATCH_SIZE
+        for batch_idx, start in enumerate(range(0, len(entries), _BATCH_SIZE)):
             chunk = entries[start : start + _BATCH_SIZE]
+            print(
+                f"[CP-BATCH] Running batch {batch_idx + 1}/{n_batches}"
+                f" ({len(chunk)} cfgs, {num_gpus} GPUs)...",
+                flush=True,
+            )
+            _bt = _time.monotonic()
             chunk_results = _run_one_batch(num_gpus, [kw for _, kw in chunk])
+            ok = sum(1 for r in chunk_results if r.get("ok"))
+            print(
+                f"[CP-BATCH]   => {ok}/{len(chunk)} passed"
+                f" in {_time.monotonic() - _bt:.1f}s",
+                flush=True,
+            )
             for (nodeid, _), res in zip(chunk, chunk_results):
                 results[nodeid] = res
+    print(
+        f"[CP-BATCH] All batches done: {len(results)} results"
+        f" in {_time.monotonic() - _t0:.1f}s total",
+        flush=True,
+    )
     return results
 
 
@@ -378,12 +407,17 @@ def test_cp_with_flash_attention(
     if "p2p" not in cp_comm_type and config.head_dim_qk != config.head_dim_v:
         pytest.skip("MLA CP currently only support KV P2P!")
     dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16}
-    available_backends, *_ = get_available_attention_backends(
-        config,
-        qkv_dtype=dtypes[dtype],
-        qkv_layout="_".join([qkv_format] * 3),
-    )
-    flash_attn_supported, *_ = available_backends
+    nodeid = request.node.nodeid
+    if nodeid in _BACKEND_CACHE:
+        flash_attn_supported = _BACKEND_CACHE[nodeid]
+    else:
+        available_backends, *_ = get_available_attention_backends(
+            config,
+            qkv_dtype=dtypes[dtype],
+            qkv_layout="_".join([qkv_format] * 3),
+        )
+        flash_attn_supported, *_ = available_backends
+        _BACKEND_CACHE[nodeid] = flash_attn_supported
     if not flash_attn_supported:
         pytest.skip("No attention backend available.")
 
@@ -634,23 +668,12 @@ def test_cp_with_fused_attention(
 
     # For 111s, dbias calculation is not supported as of cuDNN 9.18, hence, test fwd only for 111s.
     is_training = False if config.bias_shape == "111s" else True
-    available_backends, _, fused_attn_backends = get_available_attention_backends(
-        config,
-        qkv_dtype=dtypes[dtype] if dtype != "fp8" else torch.float8_e4m3fn,
-        qkv_layout="_".join([qkv_format] * 3),
-        fp8=fp8,
-        fp8_meta=fp8_meta,
-        is_training=is_training,
-        deterministic=_deterministic,
-    )
-
-    _, fused_attn_supported, _ = available_backends
-    if fused_attn_supported and config.attn_mask_type in ["causal", "padding_causal"]:
-        config_copy = copy.deepcopy(config)
-        config_copy.context_parallel = False
-        config_copy.attn_mask_type = config.attn_mask_type + "_bottom_right"
+    nodeid = request.node.nodeid
+    if nodeid in _BACKEND_CACHE:
+        fused_attn_supported = _BACKEND_CACHE[nodeid]
+    else:
         available_backends, _, fused_attn_backends = get_available_attention_backends(
-            config_copy,
+            config,
             qkv_dtype=dtypes[dtype] if dtype != "fp8" else torch.float8_e4m3fn,
             qkv_layout="_".join([qkv_format] * 3),
             fp8=fp8,
@@ -658,7 +681,23 @@ def test_cp_with_fused_attention(
             is_training=is_training,
             deterministic=_deterministic,
         )
+
         _, fused_attn_supported, _ = available_backends
+        if fused_attn_supported and config.attn_mask_type in ["causal", "padding_causal"]:
+            config_copy = copy.deepcopy(config)
+            config_copy.context_parallel = False
+            config_copy.attn_mask_type = config.attn_mask_type + "_bottom_right"
+            available_backends, _, fused_attn_backends = get_available_attention_backends(
+                config_copy,
+                qkv_dtype=dtypes[dtype] if dtype != "fp8" else torch.float8_e4m3fn,
+                qkv_layout="_".join([qkv_format] * 3),
+                fp8=fp8,
+                fp8_meta=fp8_meta,
+                is_training=is_training,
+                deterministic=_deterministic,
+            )
+            _, fused_attn_supported, _ = available_backends
+        _BACKEND_CACHE[nodeid] = fused_attn_supported
     if not fused_attn_supported:
         pytest.skip("No attention backend available.")
 

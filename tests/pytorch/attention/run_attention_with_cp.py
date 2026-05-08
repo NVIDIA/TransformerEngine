@@ -24,6 +24,7 @@ from transformer_engine.pytorch import (
     Float8CurrentScalingQuantizer,
     MXFP8Quantizer,
 )
+from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 from transformer_engine.common.recipe import (
     DelayedScaling,
     Float8CurrentScaling,
@@ -842,6 +843,7 @@ def main(**kwargs):
                 os.replace(tmp_path, results_path)
 
             for cfg in configs:
+                FP8GlobalStateManager.reset()
                 for env_key in _TRANSIENT_ENV_KEYS:
                     os.environ.pop(env_key, None)
                 ok, err = _run_single_config(cfg)
