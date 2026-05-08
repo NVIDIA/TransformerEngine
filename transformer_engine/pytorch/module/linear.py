@@ -85,6 +85,8 @@ TensorOrQuantized = Union[torch.Tensor, QuantizedTensorStorage]
 
 @dataclass(slots=True)
 class LinearFwdArgs:
+    """Single-argument bag for the forward path of :class:`_Linear`."""
+
     # --- Differentiable tensors (also passed positionally to autograd) ---
     weight: TensorOrQuantized
     inp: torch.Tensor
@@ -154,6 +156,7 @@ class LinearFwdArgs:
 
 @dataclass(slots=True)
 class LinearBwdArgs:
+    """Single-argument bag for the backward path of :class:`_Linear`."""
 
     # --- Saved / restored tensors (populated at backward entry) ---
     grad_output: Optional[torch.Tensor] = None
