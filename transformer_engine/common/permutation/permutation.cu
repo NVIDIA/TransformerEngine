@@ -19,7 +19,7 @@ static __global__ void moe_permute_row_map(const int *sorted_row_id, int *row_id
   const int tid = threadIdx.x;
   const int idx = bid * blockDim.x + tid;
 
-  if (idx >= num_rows * topK) return;
+  if (idx >= static_cast<int64_t>(num_rows) * topK) return;
 
   int source_row = sorted_row_id[idx];
   int source_token_id = source_row / topK;
@@ -27,10 +27,10 @@ static __global__ void moe_permute_row_map(const int *sorted_row_id, int *row_id
 
   if (idx >= num_out_tokens) {
     // Set the indices of dropped tokens to -1
-    row_id_map[source_topK_id * num_rows + source_token_id] = -1;
+    row_id_map[static_cast<int64_t>(source_topK_id) * num_rows + source_token_id] = -1;
   } else {
     // Create a row id map for subsequent unpermute operation
-    row_id_map[source_topK_id * num_rows + source_token_id] = idx;
+    row_id_map[static_cast<int64_t>(source_topK_id) * num_rows + source_token_id] = idx;
   }
 }
 
@@ -239,7 +239,7 @@ void nvte_permute_launcher(const T *input, T *output, const int *sorted_row_id, 
     // moe_permute_fwd
 
     int threads = 64;
-    int blocks = (num_rows * topK + threads - 1) / threads;
+    int blocks = (static_cast<int64_t>(num_rows) * topK + threads - 1) / threads;
 
     moe_permute_row_map<<<blocks, threads, 0, stream>>>(sorted_row_id, row_id_map, num_rows, topK,
                                                         num_out_tokens);
