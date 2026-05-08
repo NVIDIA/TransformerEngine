@@ -369,7 +369,7 @@ def check_set_window_size(
             window_size = (-1, 0)
         # Coerce the right side window to 0.
         elif orig_window_size == (-1, -1) or (
-            orig_window_size[0] >= 0 and orig_window_size[1] != 0
+            orig_window_size[0] >= 0 and orig_window_size[1] > 0
         ):
             window_size = (orig_window_size[0], 0)
             if warn:
@@ -427,7 +427,7 @@ def is_fused_attn_kernel_available(
     """
     To check whether the fused attention kernel is supported
     """
-    # Canonicalize at the C-extension boundary so direct callers see the same
+    # Canonicalize at the CPP-extension boundary so direct callers see the same
     # canonical encoding as users of DPA/MHA API to ensure consistency.
     window_size_tuple = check_set_window_size(attn_mask_type, window_size)
 
