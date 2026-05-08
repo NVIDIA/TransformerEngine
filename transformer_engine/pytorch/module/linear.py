@@ -63,7 +63,7 @@ from ..quantized_tensor import (
     QuantizedTensorStorage,
     Quantizer,
     prepare_for_saving,
-    restore_from_saved,
+    restore_from_func_ctx,
 )
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
@@ -83,30 +83,22 @@ __all__ = ["Linear"]
 TensorOrQuantized = Union[torch.Tensor, QuantizedTensorStorage]
 
 
-@dataclass
+@dataclass(slots=True)
 class LinearFwdArgs:
-    """Single-argument bag for the forward path of :class:`_Linear`.
-
-    All tensor and non-tensor inputs needed by the forward helpers live here.
-    ``_Linear.forward`` itself still takes ``weight``, ``inp`` and ``bias`` as
-    positional Tensor arguments so that autograd tracks them, but they are
-    immediately written into this object so every helper can be called with a
-    single argument.
-
-    ``weight_workspace`` is a non-differentiable cached FP8 weight buffer
-    owned by the module; the freshly produced workspace is returned as a
-    separate output of ``_Linear.forward`` so the module can refresh its
-    cache.
-    """
-
+    # --- Differentiable tensors (also passed positionally to autograd) ---
     weight: TensorOrQuantized
-    weight_workspace: Optional[torch.Tensor]
     inp: torch.Tensor
     bias: Optional[torch.Tensor]
+
+    # --- Non-differentiable cached tensors ---
+    weight_workspace: Optional[torch.Tensor]
+
+    # --- requires_grad flags (cached so backward does not re-query) ---
     input_requires_grad: bool
     weight_requires_grad: bool
     bias_requires_grad: bool
 
+    # --- Quantizers ---
     input_quantizer: Optional[Quantizer]
     weight_quantizer: Optional[Quantizer]
     output_quantizer: Optional[Quantizer]
@@ -114,118 +106,130 @@ class LinearFwdArgs:
     grad_weight_quantizer: Optional[Quantizer]
     grad_output_quantizer: Optional[Quantizer]
 
-    is_first_microbatch: Optional[bool]
+    # --- Numerical / dtype config ---
+    activation_dtype: torch.dtype
     fp8: bool
     fp8_calibration: bool
-    wgrad_store: Optional[Any]
-    fuse_wgrad_accumulation: bool
-    cpu_offloading: bool
+    fp8_output: bool
+    save_original_input: bool
+    backward_override: Optional[str]
+    custom: bool
+    debug: bool
+
+    # --- Weight-workspace caching ---
+    is_first_microbatch: Optional[bool]
+    cache_weight: bool
+    skip_fp8_weight_update: Optional[bool]
+
+    # --- Tensor / sequence parallelism ---
+    parallel_mode: Optional[str]
     tp_group: Optional[Any]
     tp_size: int
-    sequence_parallel: bool
     tensor_parallel: bool
-    activation_dtype: torch.dtype
-    parallel_mode: Optional[str]
-    is_grad_enabled: bool
+    sequence_parallel: bool
+    symmetric_ar_type: Optional[str]
+    backward_input_needs_gather: bool
+
+    # --- Userbuffers (comm + GEMM overlap) ---
+    ub_name: Optional[str]
+    ub_overlap_ag_fprop: bool
     ub_overlap_rs_fprop: bool
     ub_overlap_ag_dgrad: bool
-    ub_overlap_ag_fprop: bool
     ub_overlap_rs_dgrad: bool
     ub_bulk_dgrad: bool
     ub_bulk_wgrad: bool
-    ub_name: Optional[str]
-    fp8_output: bool
+
+    # --- FSDP ---
     fsdp_group: Optional[Any]
-    cache_weight: bool
-    skip_fp8_weight_update: Optional[bool]
-    symmetric_ar_type: Optional[str]
-    save_original_input: bool
-    debug: bool
-    backward_override: Optional[str]
-    custom: bool
-    backward_input_needs_gather: bool
     is_fsdp2: bool
 
+    # --- Weight-grad scheduling ---
+    fuse_wgrad_accumulation: bool
+    wgrad_store: Optional[Any]
 
-@dataclass
+    # --- Misc ---
+    cpu_offloading: bool
+    is_grad_enabled: bool
+
+
+@dataclass(slots=True)
 class LinearBwdArgs:
-    """Single-argument bag for the backward path of :class:`_Linear`.
 
-    ``_linear_setup_ctx`` populates this object from forward state and
-    ``_Linear.backward`` re-attaches the saved tensors via
-    :meth:`setup_saved_tensors` before invoking ``_linear_backward``.
-    """
-
+    # --- Saved / restored tensors (populated at backward entry) ---
     grad_output: Optional[torch.Tensor] = None
     inputmat: Optional[TensorOrQuantized] = None
     weight_fp8: Optional[TensorOrQuantized] = None
     saved_weight: Optional[TensorOrQuantized] = None
     bias: Optional[torch.Tensor] = None
 
+    # --- Quantizers ---
     input_quantizer: Optional[Quantizer] = None
     weight_quantizer: Optional[Quantizer] = None
     grad_input_quantizer: Optional[Quantizer] = None
     grad_weight_quantizer: Optional[Quantizer] = None
     grad_output_quantizer: Optional[Quantizer] = None
 
+    # --- Differentiability summary ---
     use_bias: bool = False
     requires_dgrad: bool = False
     requires_wgrad: bool = False
     inp_shape: Optional[torch.Size] = None
 
+    # --- Numerical / dtype config ---
     activation_dtype: Optional[torch.dtype] = None
     fp8: bool = False
     fp8_recipe: Optional[Recipe] = None
     backward_override: Optional[str] = None
     is_weight_param_quantized: bool = False
-    fuse_wgrad_accumulation: bool = False
-    cpu_offloading: bool = False
-    is_first_microbatch: Optional[bool] = None
-    sequence_parallel: bool = False
-    tensor_parallel: bool = False
+    custom: bool = False
+    debug: bool = False
+
+    # --- Tensor / sequence parallelism ---
     parallel_mode: Optional[str] = None
     tp_group: Optional[Any] = None
     tp_size: int = 1
+    tensor_parallel: bool = False
+    sequence_parallel: bool = False
+    backward_input_needs_gather: bool = False
+
+    # --- Userbuffers (comm + GEMM overlap) ---
     ub_name: Optional[str] = None
-    fsdp_group: Optional[Any] = None
-    debug: bool = False
-    wgrad_store: Optional[Any] = None
     ub_overlap_ag: bool = False
     ub_overlap_rs_dgrad: bool = False
     ub_bulk_dgrad: bool = False
     ub_bulk_wgrad: bool = False
 
-    backward_input_needs_gather: bool = False
-    custom: bool = False
-
+    # --- FSDP ---
+    fsdp_group: Optional[Any] = None
     fsdp_shapes: Any = None
-    owns_input: bool = False
     is_fsdp2: bool = False
 
+    # --- Weight-grad scheduling / accumulation ---
+    is_first_microbatch: Optional[bool] = None
+    fuse_wgrad_accumulation: bool = False
+    wgrad_store: Optional[Any] = None
     origin_weight_ref: Optional[Any] = None
     origin_weight_overwrites_main_grad: bool = False
     main_grad_func: Optional[Callable[[], torch.Tensor]] = None
 
+    # --- FP8 reduce-and-update bookkeeping ---
     reduce_and_update_bwd_fp8_tensors: bool = False
 
-    # Per-backward scratch state (populated inside _linear_backward).
+    # --- Misc ---
+    cpu_offloading: bool = False
+    owns_input: bool = False
+
+    # --- Per-backward scratch state (populated inside _linear_backward) ---
     ub_obj_gradout: Optional[Any] = None
 
-    def setup_saved_tensors(
-        self,
-        saved_tensors: Tuple[torch.Tensor, ...],
-        tensor_objects: List[Optional[QuantizedTensorStorage]],
-    ) -> None:
-        """Restore saved tensors into the fields consumed by backward."""
+    def setup_saved_tensors(self, ctx: torch.autograd.function.FunctionCtx) -> None:
+        """Pull saved tensors from ``ctx`` into the fields backward consumes."""
         (
             self.inputmat,
             self.weight_fp8,
             self.saved_weight,
             self.bias,
-        ) = restore_from_saved(  # pylint: disable=unbalanced-tuple-unpacking
-            tensor_objects,
-            list(saved_tensors),
-        )
+        ) = restore_from_func_ctx(ctx)  # pylint: disable=unbalanced-tuple-unpacking
 
 
 def _check_fp8_reduce_and_update():
@@ -244,13 +248,12 @@ def _linear_forward_impl(
     """Forward implementation for the linear layer.
 
     Returns ``(out, new_weight_workspace, tensors_to_save_from_forward, None,
-    ctx_attrs)``. The middle slot is the freshly produced FP8 weight
+    ctx_attrs)``. ``new_weight_workspace`` is the freshly produced FP8 weight
     workspace (returned alongside ``out`` so the caller can refresh its
     cache). The last three are ``None`` when gradients are disabled.
     """
 
     weight = args.weight
-    weight_workspace = args.weight_workspace
     inp = args.inp
     bias = args.bias
     input_quantizer = args.input_quantizer
@@ -258,12 +261,9 @@ def _linear_forward_impl(
     output_quantizer = args.output_quantizer
     is_first_microbatch = args.is_first_microbatch
     fp8 = args.fp8
-    fp8_calibration = args.fp8_calibration
     cpu_offloading = args.cpu_offloading
     tp_group = args.tp_group
-    tp_size = args.tp_size
     sequence_parallel = args.sequence_parallel
-    tensor_parallel = args.tensor_parallel
     activation_dtype = args.activation_dtype
     parallel_mode = args.parallel_mode
     is_grad_enabled = args.is_grad_enabled
@@ -271,14 +271,10 @@ def _linear_forward_impl(
     ub_overlap_ag_fprop = args.ub_overlap_ag_fprop
     ub_name = args.ub_name
     fsdp_group = args.fsdp_group
-    cache_weight = args.cache_weight
-    skip_fp8_weight_update = args.skip_fp8_weight_update
     symmetric_ar_type = args.symmetric_ar_type
     save_original_input = args.save_original_input
     debug = args.debug
     backward_override = args.backward_override
-    custom = args.custom
-    backward_input_needs_gather = args.backward_input_needs_gather
     is_fsdp2 = args.is_fsdp2
     if backward_override == "high_precision":
         save_original_input = True
@@ -330,7 +326,7 @@ def _linear_forward_impl(
         if fp8 or debug:
             if input_quantizer is None:
                 raise ValueError("Missing quantizer for input tensor")
-            if not isinstance(inputmat, QuantizedTensorStorage) and not custom:
+            if not isinstance(inputmat, QuantizedTensorStorage) and not args.custom:
                 own_quantized_input = True
                 input_quantizer.set_usage(
                     rowwise=True,
@@ -421,12 +417,12 @@ def _linear_forward_impl(
         weightmat, new_weight_workspace = quantize_weight(
             tensor=weight,
             quantizer=weight_quantizer,
-            workspace=weight_workspace,
+            workspace=args.weight_workspace,
             update_workspace=update_ws,
-            skip_update_flag=skip_fp8_weight_update,
+            skip_update_flag=args.skip_fp8_weight_update,
             fsdp_group=fsdp_group,
             workspace_dtype=activation_dtype,
-            cache=cache_weight,
+            cache=args.cache_weight,
         )
         weightmat.update_usage(rowwise_usage=True)
 
@@ -444,7 +440,7 @@ def _linear_forward_impl(
     bias = cast_if_needed(bias, bias_dtype) if bias is not None else bias
 
     # Calibrate quantizers if needed
-    if not fp8 and fp8_calibration:
+    if not fp8 and args.fp8_calibration:
         if input_quantizer is not None:
             input_quantizer.calibrate(inputmat_total)
         if weight_quantizer is not None:
@@ -504,12 +500,12 @@ def _linear_forward_impl(
     out = None
     if ub_overlap_rs_fprop:
         out = reduce_scatter_out
-    elif parallel_mode == "row" and tp_size > 1:
+    elif parallel_mode == "row" and args.tp_size > 1:
         nvtx_range_push(f"{nvtx_label}.row_parallel_comm")
         out = gemm_out
         if sequence_parallel:
             out, _ = reduce_scatter_along_first_dim(out, tp_group)
-        elif tensor_parallel:
+        elif args.tensor_parallel:
             if symmetric_ar_type is not None:
                 out, _ = symmetric_all_reduce(out, tp_group, all_reduce_type=symmetric_ar_type)
             else:
@@ -538,7 +534,8 @@ def _linear_forward_impl(
             if backward_override is not None:
                 inputmat.update_usage(rowwise_usage=True, columnwise_usage=False)
             elif (
-                backward_input_needs_gather and weight_quantizer.supports_only_rowwise_all_gather()
+                args.backward_input_needs_gather
+                and weight_quantizer.supports_only_rowwise_all_gather()
             ):
                 # All-gather is not supported with FP8 column-wise data
                 inputmat.update_usage(rowwise_usage=True, columnwise_usage=False)
@@ -575,14 +572,9 @@ def _linear_forward_impl(
         if is_fsdp2 and weightmat is not weight:
             wt_save = None
 
-        # Mark which "save slots" duplicate forward inputs.  When a slot is
-        # an alias of ``inp`` / ``weight`` / ``bias`` we emit ``None`` in
-        # ``tensors_to_save_from_forward`` and rebuild the original ref in
-        # ``_linear_setup_ctx``.  In eager this saves one Python ref per
-        # alias and avoids autograd seeing the same Python object twice;
-        # under ``torch.compile`` it also keeps the opaque op from
-        # returning aliases of its inputs (which the tracer otherwise has
-        # to reason about).
+        # Dedup save slots that alias forward inputs; ``_linear_setup_ctx``
+        # rebuilds the refs from ``inp`` / ``weight`` / ``bias``.
+        # Needed for torch.compile to work correctly.
         saved_tensor_aliases = (
             "inp" if saved_inputmat is inp else None,
             "weight" if wt_save is weight else None,
@@ -596,13 +588,8 @@ def _linear_forward_impl(
             None if saved_tensor_aliases[3] is not None else bias,
         )
 
-        owns_input = saved_inputmat is not inp
-
         ctx_attrs = {
-            "weight_quantizer": weight_quantizer,
             "fsdp_shapes": fsdp_shapes,
-            "owns_input": owns_input,
-            "is_fsdp2": is_fsdp2,
             "saved_tensor_aliases": saved_tensor_aliases,
         }
 
@@ -635,45 +622,54 @@ def _linear_setup_ctx(
     fp8 = fwd_args.fp8
     fuse_wgrad_accumulation = fwd_args.fuse_wgrad_accumulation
 
+    # Quantizers
     bwd_args.input_quantizer = fwd_args.input_quantizer
-    bwd_args.weight_quantizer = ctx_attrs["weight_quantizer"]
+    bwd_args.weight_quantizer = (
+        weight._quantizer if isinstance(weight, QuantizedTensor) else fwd_args.weight_quantizer
+    )
     bwd_args.grad_input_quantizer = fwd_args.grad_input_quantizer
     bwd_args.grad_weight_quantizer = fwd_args.grad_weight_quantizer
     bwd_args.grad_output_quantizer = fwd_args.grad_output_quantizer
 
+    # Differentiability summary
     bwd_args.use_bias = bias is not None
     bwd_args.requires_dgrad = fwd_args.input_requires_grad
     bwd_args.requires_wgrad = fwd_args.weight_requires_grad
     bwd_args.inp_shape = inp.shape
 
+    # Numerical / dtype config
     bwd_args.activation_dtype = fwd_args.activation_dtype
     bwd_args.fp8 = fp8
     bwd_args.fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
     bwd_args.backward_override = backward_override
     bwd_args.is_weight_param_quantized = isinstance(weight, QuantizedTensorStorage)
-    bwd_args.fuse_wgrad_accumulation = fuse_wgrad_accumulation
-    bwd_args.cpu_offloading = fwd_args.cpu_offloading
-    bwd_args.is_first_microbatch = fwd_args.is_first_microbatch
-    bwd_args.sequence_parallel = fwd_args.sequence_parallel
-    bwd_args.tensor_parallel = fwd_args.tensor_parallel
+    bwd_args.custom = fwd_args.custom
+    bwd_args.debug = fwd_args.debug
+
+    # Tensor / sequence parallelism
     bwd_args.parallel_mode = fwd_args.parallel_mode
     bwd_args.tp_group = fwd_args.tp_group
     bwd_args.tp_size = fwd_args.tp_size
+    bwd_args.tensor_parallel = fwd_args.tensor_parallel
+    bwd_args.sequence_parallel = fwd_args.sequence_parallel
+    bwd_args.backward_input_needs_gather = fwd_args.backward_input_needs_gather
+
+    # Userbuffers
     bwd_args.ub_name = fwd_args.ub_name
-    bwd_args.fsdp_group = fwd_args.fsdp_group
-    bwd_args.debug = fwd_args.debug
-    bwd_args.wgrad_store = fwd_args.wgrad_store
     bwd_args.ub_overlap_ag = fwd_args.ub_overlap_ag_dgrad
     bwd_args.ub_overlap_rs_dgrad = fwd_args.ub_overlap_rs_dgrad
     bwd_args.ub_bulk_dgrad = fwd_args.ub_bulk_dgrad
     bwd_args.ub_bulk_wgrad = fwd_args.ub_bulk_wgrad
-    bwd_args.backward_input_needs_gather = fwd_args.backward_input_needs_gather
-    bwd_args.custom = fwd_args.custom
 
+    # FSDP
+    bwd_args.fsdp_group = fwd_args.fsdp_group
     bwd_args.fsdp_shapes = ctx_attrs["fsdp_shapes"]
-    bwd_args.owns_input = ctx_attrs["owns_input"]
-    bwd_args.is_fsdp2 = ctx_attrs["is_fsdp2"]
+    bwd_args.is_fsdp2 = fwd_args.is_fsdp2
 
+    # Weight-grad scheduling / accumulation
+    bwd_args.is_first_microbatch = fwd_args.is_first_microbatch
+    bwd_args.fuse_wgrad_accumulation = fuse_wgrad_accumulation
+    bwd_args.wgrad_store = fwd_args.wgrad_store
     if fuse_wgrad_accumulation and fwd_args.weight_requires_grad:
         bwd_args.origin_weight_ref = weakref.ref(weight)
         bwd_args.origin_weight_overwrites_main_grad = getattr(weight, "overwrite_main_grad", False)
@@ -681,6 +677,9 @@ def _linear_setup_ctx(
             bwd_args.main_grad_func = weight.get_main_grad
         else:
             bwd_args.main_grad_func = lambda: weight.main_grad
+
+    # Misc
+    bwd_args.cpu_offloading = fwd_args.cpu_offloading
 
     if backward_override is not None:
         bwd_args.fp8 = False
@@ -697,6 +696,7 @@ def _linear_setup_ctx(
     inputmat_alias, wt_save_alias, saved_weight_alias, bias_alias = ctx_attrs[
         "saved_tensor_aliases"
     ]
+    bwd_args.owns_input = inputmat_alias != "inp"
     if inputmat_alias == "inp":
         saved_inputmat = inp
     if wt_save_alias == "weight":
@@ -712,8 +712,7 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
     """Backward implementation for the linear layer.
 
     Caller must have populated ``args.grad_output`` and run
-    ``args.setup_saved_tensors(saved_tensors, tensor_objects)`` before
-    invocation.
+    ``args.setup_saved_tensors(ctx)`` before invocation.
     """
     bwd_args = args
     grad_output = args.grad_output
@@ -1312,8 +1311,7 @@ class _Linear(torch.autograd.Function):
         """Backward pass: compute gradients and reduce FP8 scaling factors."""
         bwd_args: LinearBwdArgs = ctx.backward_objects
         bwd_args.grad_output = grad_output
-        bwd_args.setup_saved_tensors(ctx.saved_tensors, ctx.tensor_objects)
-        ctx.tensor_objects = None
+        bwd_args.setup_saved_tensors(ctx)
         nvtx_label = "transformer_engine._Linear.backward"
         if bwd_args.ub_name is not None:
             nvtx_label = f"{nvtx_label}.{bwd_args.ub_name}"
@@ -1804,52 +1802,62 @@ class Linear(TransformerEngineBaseModule):
             )
             wgrad_store = self.wgrad_store if self.wgrad_store.delay_wgrad_compute() else None
             fwd_args = LinearFwdArgs(
+                # tensors
                 weight=weight_tensor,
-                weight_workspace=weight_workspace,
                 inp=inp,
                 bias=linear_bias_tensor,
+                weight_workspace=weight_workspace,
+                # requires_grad flags
                 input_requires_grad=inp.requires_grad,
                 weight_requires_grad=weight_tensor.requires_grad,
                 bias_requires_grad=(
                     linear_bias_tensor.requires_grad if linear_bias_tensor is not None else False
                 ),
+                # quantizers
                 input_quantizer=input_quantizer,
                 weight_quantizer=weight_quantizer,
                 output_quantizer=output_quantizer,
                 grad_input_quantizer=grad_input_quantizer,
                 grad_weight_quantizer=grad_weight_quantizer,
                 grad_output_quantizer=grad_output_quantizer,
-                is_first_microbatch=is_first_microbatch,
+                # numerical / dtype config
+                activation_dtype=self.activation_dtype,
                 fp8=self.fp8,
                 fp8_calibration=self.fp8_calibration,
-                wgrad_store=wgrad_store,
-                fuse_wgrad_accumulation=self.fuse_wgrad_accumulation,
-                cpu_offloading=is_cpu_offload_enabled(),
+                fp8_output=fp8_output,
+                save_original_input=self.save_original_input,
+                backward_override=backward_override,
+                custom=custom,
+                debug=debug,
+                # weight-workspace caching
+                is_first_microbatch=is_first_microbatch,
+                cache_weight=cache_name is not None,
+                skip_fp8_weight_update=skip_fp8_weight_update,
+                # tensor / sequence parallelism
+                parallel_mode=self.parallel_mode,
                 tp_group=self.tp_group,
                 tp_size=self.tp_size,
-                sequence_parallel=self.sequence_parallel,
                 tensor_parallel=self.tp_size > 1,
-                activation_dtype=self.activation_dtype,
-                parallel_mode=self.parallel_mode,
-                is_grad_enabled=is_grad_enabled,
+                sequence_parallel=self.sequence_parallel,
+                symmetric_ar_type=self.symmetric_ar_type,
+                backward_input_needs_gather=backward_input_needs_gather,
+                # userbuffers
+                ub_name=self.ub_name,
+                ub_overlap_ag_fprop=ub_overlap_ag_fprop,
                 ub_overlap_rs_fprop=ub_overlap_rs_fprop,
                 ub_overlap_ag_dgrad=ub_overlap_ag_dgrad,
-                ub_overlap_ag_fprop=ub_overlap_ag_fprop,
                 ub_overlap_rs_dgrad=ub_overlap_rs_dgrad,
                 ub_bulk_dgrad=ub_bulk_dgrad,
                 ub_bulk_wgrad=ub_bulk_wgrad,
-                ub_name=self.ub_name,
-                fp8_output=fp8_output,
+                # FSDP
                 fsdp_group=self.fsdp_group,
-                cache_weight=cache_name is not None,
-                skip_fp8_weight_update=skip_fp8_weight_update,
-                symmetric_ar_type=self.symmetric_ar_type,
-                save_original_input=self.save_original_input,
-                debug=debug,
-                backward_override=backward_override,
-                custom=custom,
-                backward_input_needs_gather=backward_input_needs_gather,
                 is_fsdp2=self.is_fsdp2,
+                # weight-grad scheduling
+                fuse_wgrad_accumulation=self.fuse_wgrad_accumulation,
+                wgrad_store=wgrad_store,
+                # misc
+                cpu_offloading=is_cpu_offload_enabled(),
+                is_grad_enabled=is_grad_enabled,
             )
             out, new_weight_workspace = linear_fn(
                 *autograd_ctx,
