@@ -1244,13 +1244,14 @@ def get_attention_backend(
             head_dim_v,
             window_size[0],
             window_size[1],
+            bottom_right_diagonal,
             return_max_logit,
             cuda_graph,
             deterministic,
         )
         if fused_attention_backend == FusedAttnBackend["No_Backend"]:
             logger.debug(
-                "Disabling FusedAttention as %s",
+                "Disabling FusedAttention: %s",
                 reject_message,
             )
             use_fused_attention = False

@@ -5,7 +5,6 @@
  ************************************************************************/
 
 #include "../extensions.h"
-#include "common/cudnn_utils.h"
 #include "transformer_engine/fused_attn.h"
 #include "transformer_engine/transformer_engine.h"
 
@@ -17,15 +16,15 @@ std::tuple<NVTE_Fused_Attn_Backend, std::string> GetFusedAttnBackend(
     NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
     NVTE_Softmax_Type softmax_type, float dropout_probability, size_t q_attn_heads,
     size_t kv_attn_heads, size_t q_max_seqlen, size_t kv_max_seqlen, size_t qk_head_dim,
-    size_t v_head_dim, int64_t window_size_left, int64_t window_size_right, bool deterministic) {
-  auto handle = cudnnExecutionPlanManager::Instance().GetHandle();
+    size_t v_head_dim, int64_t window_size_left, int64_t window_size_right,
+    bool bottom_right_diagonal, bool deterministic) {
   const char *message = nullptr;
   auto backend = nvte_get_fused_attn_backend(
       is_training, static_cast<NVTEDType>(q_dtype), static_cast<NVTEDType>(kv_dtype),
       static_cast<NVTEDType>(o_dtype), scaling_mode, qkv_layout, bias_type, mask_type, softmax_type,
       dropout_probability, q_attn_heads, kv_attn_heads, q_max_seqlen, kv_max_seqlen, qk_head_dim,
-      v_head_dim, window_size_left, window_size_right,
-      /*return_max_logit=*/false, /*cuda_graph=*/false, deterministic, handle, &message);
+      v_head_dim, window_size_left, window_size_right, bottom_right_diagonal,
+      /*return_max_logit=*/false, /*cuda_graph=*/false, deterministic, &message);
   return {backend, message ? std::string(message) : std::string()};
 }
 
@@ -265,13 +264,12 @@ static void FusedAttnForwardImpl(
   /* Prepare RNG state */
   auto rng_state_tensor = TensorWrapper(rng_state, std::vector<size_t>{2}, DType::kInt64);
 
-  auto _handle_fwd = cudnnExecutionPlanManager::Instance().GetHandle();
   auto backend = nvte_get_fused_attn_backend(
       is_training, static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype),
       static_cast<NVTEDType>(dtype), NVTE_INVALID_SCALING, qkv_layout, bias_type, mask_type,
       softmax_type, dropout_probability, attn_heads, num_gqa_groups, q_max_seqlen, kv_max_seqlen,
-      qk_head_dim, v_head_dim, window_size_left, window_size_right, /*return_max_logit=*/false,
-      /*cuda_graph=*/false, deterministic, _handle_fwd, /*message=*/nullptr);
+      qk_head_dim, v_head_dim, window_size_left, window_size_right, bottom_right_diagonal,
+      /*return_max_logit=*/false, /*cuda_graph=*/false, deterministic, /*message=*/nullptr);
   nvte_populate_rng_state_async(rng_state, seed, q_max_seqlen, kv_max_seqlen, backend, stream);
 
   /* Auxiliary tensors (to be propagated to the backward pass later) */
@@ -543,13 +541,12 @@ static void FusedAttnBackwardImpl(
   /* Auxiliary tensors (propagated from the forward pass) */
   NVTETensorPack aux_input_tensors;
   nvte_tensor_pack_create(&aux_input_tensors);
-  auto _handle_bwd = cudnnExecutionPlanManager::Instance().GetHandle();
   auto backend = nvte_get_fused_attn_backend(
       is_training, static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype),
       static_cast<NVTEDType>(dtype), NVTE_INVALID_SCALING, qkv_layout, bias_type, mask_type,
       softmax_type, dropout_probability, attn_heads, num_gqa_groups, q_max_seqlen, kv_max_seqlen,
-      qk_head_dim, v_head_dim, window_size_left, window_size_right, /*return_max_logit=*/false,
-      /*cuda_graph=*/false, deterministic, _handle_bwd, /*message=*/nullptr);
+      qk_head_dim, v_head_dim, window_size_left, window_size_right, bottom_right_diagonal,
+      /*return_max_logit=*/false, /*cuda_graph=*/false, deterministic, /*message=*/nullptr);
   PrepareFusedAttnBackwardAuxTensors(&aux_input_tensors, input_batch, bias_batch, attn_heads,
                                      bias_heads, q_max_seqlen, kv_max_seqlen, dtype, backend,
                                      softmax_aux, rng_state, bias, softmax_offset);

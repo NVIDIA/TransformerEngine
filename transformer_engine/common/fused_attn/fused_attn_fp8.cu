@@ -1334,11 +1334,6 @@ std::string is_supported_fp8_fwd(size_t batch, size_t num_attn_heads, size_t num
                                  bool bottom_right_diagonal, DType qkv_dtype, DType o_dtype,
                                  NVTEScalingMode scaling_mode, cudnnHandle_t handle) {
   const NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
-  if (qkv_format != NVTE_QKV_Format::NVTE_BSHD && qkv_format != NVTE_QKV_Format::NVTE_SBHD &&
-      qkv_format != NVTE_QKV_Format::NVTE_BHSD) {
-    return "FP8 fused attention supports BSHD/SBHD/BHSD formats, found " +
-           std::to_string(static_cast<int>(qkv_format)) + ".";
-  }
   size_t workspace_size = 0;
   try {
     fused_attn::fused_attn_fp8_fwd_impl(
@@ -1376,11 +1371,6 @@ std::string is_supported_fp8_bwd(size_t batch, size_t num_attn_heads, size_t num
                                  bool deterministic, DType qkv_dtype, DType o_dtype,
                                  NVTEScalingMode scaling_mode, cudnnHandle_t handle) {
   const NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
-  if (qkv_format != NVTE_QKV_Format::NVTE_BSHD && qkv_format != NVTE_QKV_Format::NVTE_SBHD &&
-      qkv_format != NVTE_QKV_Format::NVTE_BHSD) {
-    return "FP8 fused attention supports BSHD/SBHD/BHSD formats, found " +
-           std::to_string(static_cast<int>(qkv_format)) + ".";
-  }
   const cudnn_frontend::DataType_t qkv_t = get_cudnn_fe_dtype(qkv_dtype);
   const cudnn_frontend::DataType_t o_t = get_cudnn_fe_dtype(o_dtype);
   const cudnn_frontend::DataType_t do_t = o_t;

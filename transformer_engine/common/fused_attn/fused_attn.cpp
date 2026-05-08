@@ -246,12 +246,13 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type, float dropout,
     size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q, size_t max_seqlen_kv,
     size_t head_dim_qk, size_t head_dim_v, int64_t window_size_left, int64_t window_size_right,
-    bool return_max_logit, bool cuda_graph, bool deterministic, cudnnHandle_t handle,
+    bool bottom_right_diagonal, bool return_max_logit, bool cuda_graph, bool deterministic,
     const char **message) {
   using namespace transformer_engine;
   set_message(message, "");
   NVTE_CHECK(q_dtype == kv_dtype, "Q and KV must have the same data type.");
 
+  cudnnHandle_t handle = cudnnExecutionPlanManager::Instance().GetHandle();
   const NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
   const NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
   const auto cudnn_runtime_version = cudnnGetVersion();
@@ -278,19 +279,10 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
   }
 
-  // avoid CUDA graph issue with cuDNN <= 9.15
-  if (cudnn_runtime_version <= 91500 && is_training &&
-      (qkv_format == NVTE_QKV_Format::NVTE_BSHD || qkv_format == NVTE_QKV_Format::NVTE_SBHD) &&
-      (max_seqlen_kv % 128 != 0) && cuda_graph &&
-      attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_MASK &&
-      attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK &&
-      attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK) {
-    set_message(message, "Known cuDNN <= 9.15 issue with CUDA graph. Please upgrade cuDNN.");
-    return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
-  }
-
+  // Use batch=1 for the probe to keep graph caches minimal; batch is not part of cuDNN-FE's
+  // support-check criteria. All other params are passed through verbatim so the cached graph
+  // matches what the eventual nvte_fused_attn_fwd/bwd call will build.
   constexpr size_t probe_batch = 1;
-  constexpr bool probe_bottom_right_diagonal = false;
 
   const bool is_fp8 =
       (q_dtype == NVTEDType::kNVTEFloat8E4M3 || q_dtype == NVTEDType::kNVTEFloat8E5M2);
@@ -302,12 +294,18 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
       set_message(message, "FP8 fused attention does not support return_max_logit=True.");
       return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
     }
+    if (qkv_format != NVTE_QKV_Format::NVTE_BSHD && qkv_format != NVTE_QKV_Format::NVTE_SBHD &&
+        qkv_format != NVTE_QKV_Format::NVTE_BHSD) {
+      set_message(message, "FP8 fused attention supports BSHD/SBHD/BHSD formats, found " +
+                               std::to_string(static_cast<int>(qkv_format)) + ".");
+      return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
+    }
     const DType qkv_t = static_cast<DType>(q_dtype);
     const DType o_t = static_cast<DType>(o_dtype);
     std::string fwd_reason = is_supported_fp8_fwd(
         probe_batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim_qk,
         head_dim_v, is_training, dropout, qkv_layout, bias_type, attn_mask_type, softmax_type,
-        window_size_left, window_size_right, probe_bottom_right_diagonal, qkv_t, o_t, scaling_mode,
+        window_size_left, window_size_right, bottom_right_diagonal, qkv_t, o_t, scaling_mode,
         handle);
     if (!fwd_reason.empty()) {
       set_message(message, fwd_reason);
@@ -317,7 +315,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
       std::string bwd_reason = is_supported_fp8_bwd(
           probe_batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim_qk,
           head_dim_v, dropout, qkv_layout, bias_type, attn_mask_type, softmax_type,
-          window_size_left, window_size_right, probe_bottom_right_diagonal, deterministic, qkv_t,
+          window_size_left, window_size_right, bottom_right_diagonal, deterministic, qkv_t,
           o_t, scaling_mode, handle);
       if (!bwd_reason.empty()) {
         set_message(message, bwd_reason);
@@ -328,11 +326,20 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
   }
 
   if (is_f16_or_bf16) {
+    if (cudnn_runtime_version <= 91500 && is_training &&
+        (qkv_format == NVTE_QKV_Format::NVTE_BSHD || qkv_format == NVTE_QKV_Format::NVTE_SBHD) &&
+        (max_seqlen_kv % 128 != 0) && cuda_graph &&
+        attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_MASK &&
+        attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK &&
+        attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK) {
+      set_message(message, "Known cuDNN <= 9.15 issue with CUDA graph. Please upgrade cuDNN.");
+      return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
+    }
     const DType qkv_t = static_cast<DType>(q_dtype);
     std::string fwd_reason = is_supported_f16_fwd(
         probe_batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim_qk,
         head_dim_v, is_training, return_max_logit, dropout, qkv_layout, bias_type, attn_mask_type,
-        softmax_type, window_size_left, window_size_right, probe_bottom_right_diagonal, qkv_t,
+        softmax_type, window_size_left, window_size_right, bottom_right_diagonal, qkv_t,
         handle);
     if (!fwd_reason.empty()) {
       set_message(message, fwd_reason);
@@ -342,7 +349,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
       std::string bwd_reason = is_supported_f16_bwd(
           probe_batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim_qk,
           head_dim_v, dropout, qkv_layout, bias_type, attn_mask_type, softmax_type,
-          window_size_left, window_size_right, probe_bottom_right_diagonal, deterministic, qkv_t,
+          window_size_left, window_size_right, bottom_right_diagonal, deterministic, qkv_t,
           handle);
       if (!bwd_reason.empty()) {
         set_message(message, bwd_reason);
@@ -444,8 +451,8 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       is_training, Q_type, KV_type, O_type, scaling_mode, qkv_layout, bias_type, attn_mask_type,
       softmax_type, dropout, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, window_size_left,
-      window_size_right, return_max_logit, cuda_graph, /*deterministic=*/false, handle,
-      /*message=*/nullptr);
+      window_size_right, bottom_right_diagonal, return_max_logit, cuda_graph,
+      /*deterministic=*/false, /*message=*/nullptr);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen) {
     fused_attn_arbitrary_seqlen_fwd(
@@ -528,8 +535,8 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       /*is_training=*/true, Q_type, KV_type, O_type, scaling_mode, qkv_layout, bias_type,
       attn_mask_type, softmax_type, dropout, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v,
-      window_size_left, window_size_right, /*return_max_logit=*/false, cuda_graph, deterministic,
-      handle, /*message=*/nullptr);
+      window_size_left, window_size_right, bottom_right_diagonal, /*return_max_logit=*/false,
+      cuda_graph, deterministic, /*message=*/nullptr);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen) {
     size_t i = 0;

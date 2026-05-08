@@ -198,30 +198,31 @@ NVTE_QKV_Format nvte_get_kv_format(NVTE_QKV_Layout qkv_layout);
 
 /*! \brief Get fused attention backend based on input parameters.
  *
- *  \param[in]     is_training         Whether the model is in training mode.
- *  \param[in]     q_dtype             The data type of Tensor Q.
- *  \param[in]     kv_dtype            The data type of Tensors K, V.
- *  \param[in]     o_dtype             The data type of Tensor O.
- *  \param[in]     scaling_mode        Scaling mode of attention.
- *  \param[in]     qkv_layout          The layout of Tensors Q, K, V.
- *  \param[in]     bias_type           The attention bias type.
- *  \param[in]     attn_mask_type      The attention mask type.
- *  \param[in]     softmax_type        The attention softmax type.
- *  \param[in]     dropout             The dropout probability.
- *  \param[in]     num_attn_heads      The number of heads in Q.
- *  \param[in]     num_gqa_groups      The number of heads in K, V.
- *  \param[in]     max_seqlen_q        The sequence length of Q.
- *  \param[in]     max_seqlen_kv       The sequence length of K, V.
- *  \param[in]     head_dim_qk         The head dimension of Q, K.
- *  \param[in]     head_dim_v          The head dimension of V.
- *  \param[in]     window_size_left    Sliding window size (the left half).
- *  \param[in]     window_size_right   Sliding window size (the right half).
- *  \param[in]     return_max_logit    Whether to produce Max along with Stats.
- *  \param[in]     cuda_graph          Whether cuda graph capture is enabled or not.
- *  \param[in]     deterministic       Whether determinism is required or not.
- *  \param[in]     handle              cuDNN handle.
- *  \param[out]    message             Empty string on success, otherwise a diagnostic string
- *                                     describing why the configuration was rejected.
+ *  \param[in]     is_training           Whether the model is in training mode.
+ *  \param[in]     q_dtype               The data type of Tensor Q.
+ *  \param[in]     kv_dtype              The data type of Tensors K, V.
+ *  \param[in]     o_dtype               The data type of Tensor O.
+ *  \param[in]     scaling_mode          Scaling mode of attention.
+ *  \param[in]     qkv_layout            The layout of Tensors Q, K, V.
+ *  \param[in]     bias_type             The attention bias type.
+ *  \param[in]     attn_mask_type        The attention mask type.
+ *  \param[in]     softmax_type          The attention softmax type.
+ *  \param[in]     dropout               The dropout probability.
+ *  \param[in]     num_attn_heads        The number of heads in Q.
+ *  \param[in]     num_gqa_groups        The number of heads in K, V.
+ *  \param[in]     max_seqlen_q          The sequence length of Q.
+ *  \param[in]     max_seqlen_kv         The sequence length of K, V.
+ *  \param[in]     head_dim_qk           The head dimension of Q, K.
+ *  \param[in]     head_dim_v            The head dimension of V.
+ *  \param[in]     window_size_left      Sliding window size (the left half).
+ *  \param[in]     window_size_right     Sliding window size (the right half).
+ *  \param[in]     bottom_right_diagonal Whether to align sliding window and ALiBi diagonal to the
+ *                                       bottom right corner of the softmax matrix.
+ *  \param[in]     return_max_logit      Whether to produce Max along with Stats.
+ *  \param[in]     cuda_graph            Whether cuda graph capture is enabled or not.
+ *  \param[in]     deterministic         Whether determinism is required or not.
+ *  \param[out]    message               Empty string on success, otherwise a diagnostic string
+ *                                       describing why the configuration was rejected.
  */
 NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     bool is_training, NVTEDType q_dtype, NVTEDType kv_dtype, NVTEDType o_dtype,
@@ -229,7 +230,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type, float dropout,
     size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q, size_t max_seqlen_kv,
     size_t head_dim_qk, size_t head_dim_v, int64_t window_size_left, int64_t window_size_right,
-    bool return_max_logit, bool cuda_graph, bool deterministic, cudnnHandle_t handle,
+    bool bottom_right_diagonal, bool return_max_logit, bool cuda_graph, bool deterministic,
     const char **message);
 
 /*! \brief Compute dot product attention with separate Q, K and V.

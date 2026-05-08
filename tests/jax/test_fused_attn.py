@@ -460,6 +460,7 @@ class FusedAttnRunner:
             self.head_dim_qk,
             self.head_dim_v,
             (-1, -1) if self.window_size is None else self.window_size,
+            self.attn_mask_type.is_bottom_right(),
         ).get_fused_attn_backend()
         if self.backend != NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
             pytest.skip(message)

@@ -122,6 +122,7 @@ class FusedAttnHelper:
     head_dim_qk: int
     head_dim_v: int
     window_size: Tuple[int, int]
+    bottom_right_diagonal: bool
 
     def is_fused_attn_kernel_available(self):
         """Check if there is available fused attention kernel"""
@@ -154,6 +155,7 @@ class FusedAttnHelper:
             self.head_dim_v,
             self.window_size[0],
             self.window_size[1],
+            self.bottom_right_diagonal,
             not self.is_non_deterministic_allowed(),
         )
 
@@ -359,6 +361,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             q_head_dim,
             v_head_dim,
             config.window_size,
+            config.bottom_right_diagonal,
         ).get_fused_attn_backend()
 
         if backend == NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:

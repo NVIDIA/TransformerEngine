@@ -339,13 +339,22 @@ def is_fused_attn_kernel_available(
     head_dim_qk,
     head_dim_v,
     window_size: Optional[Tuple[int, int]] = None,
+    bottom_right_diagonal: Optional[bool] = None,
 ):
     """
-    To check whether the fused attention kernel is supported
+    To check whether the fused attention kernel is supported.
+
+    If ``bottom_right_diagonal`` is None, it is derived from the mask type, matching the
+    convention used everywhere else in JAX TE (see ``_FusedAttnConfig`` constructions).
     """
     window_size_tuple = (-1, -1) if window_size is None else window_size
 
     def make_helper(attn_mask_type):
+        bottom_right = (
+            attn_mask_type.is_bottom_right()
+            if bottom_right_diagonal is None
+            else bottom_right_diagonal
+        )
         return tex.FusedAttnHelper(
             is_training,
             q_dtype,
@@ -362,6 +371,7 @@ def is_fused_attn_kernel_available(
             head_dim_qk,
             head_dim_v,
             window_size_tuple,
+            bottom_right,
         )
 
     return make_helper(attn_mask_type).is_fused_attn_kernel_available()

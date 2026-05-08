@@ -6,7 +6,6 @@
 
 #include "../extensions.h"
 #include "common.h"
-#include "common/cudnn_utils.h"
 #include "pybind.h"
 
 namespace {
@@ -47,15 +46,14 @@ std::tuple<NVTE_Fused_Attn_Backend, std::string> get_fused_attn_backend(
     NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type, float p_dropout,
     size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q, size_t max_seqlen_kv,
     size_t head_dim_qk, size_t head_dim_v, int64_t window_size_left, int64_t window_size_right,
-    bool return_max_logit, bool cuda_graph, bool deterministic) {
-  auto handle = cudnnExecutionPlanManager::Instance().GetHandle();
+    bool bottom_right_diagonal, bool return_max_logit, bool cuda_graph, bool deterministic) {
   const char *message = nullptr;
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       is_training, static_cast<NVTEDType>(q_dtype), static_cast<NVTEDType>(kv_dtype),
       static_cast<NVTEDType>(o_dtype), scaling_mode, qkv_layout, bias_type, attn_mask_type,
       softmax_type, p_dropout, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv,
-      head_dim_qk, head_dim_v, window_size_left, window_size_right, return_max_logit, cuda_graph,
-      deterministic, handle, &message);
+      head_dim_qk, head_dim_v, window_size_left, window_size_right, bottom_right_diagonal,
+      return_max_logit, cuda_graph, deterministic, &message);
   return {fused_attention_backend, message ? std::string(message) : std::string()};
 }
 
