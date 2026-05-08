@@ -1054,6 +1054,7 @@ class TestAdamTest:
 
     def test_large_tensor(self):
         import gc
+
         gc.collect()
         torch.cuda.empty_cache()
         if torch.cuda.memory.mem_get_info()[0] < 60 * 1024**3:
