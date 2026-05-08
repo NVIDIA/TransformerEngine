@@ -590,13 +590,11 @@ class FP8GlobalStateManager:
         Object identity is sufficient since autocast contexts never outlive a single
         training session.
         """
-        # directly getting the cached repr is about 40 ns faster than str(recipe)
-        # on grace systems.
         recipe_repr = recipe.__dict__.get("_cached_repr") if recipe is not None else None
         if recipe_repr is None:
             recipe_repr = str(recipe)
-        group_id = id(group) if group is not None else 0
-        return f"{recipe_repr}|{group_id}"
+        group_id = id(group) if group is not None else None
+        return f"recipe={recipe_repr},group={group_id}"
 
     @classmethod
     def autocast_enter(
@@ -925,8 +923,6 @@ class autocast:
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         FP8GlobalStateManager.set_autocast_state(self._fp8_state)
         FP8GlobalStateManager.autocast_exit(self._enabled, _graph=self._graph)
-        # Do not suppress exceptions.
-        return None
 
 
 def _update_amax_history(amax_history: torch.Tensor) -> torch.Tensor:
