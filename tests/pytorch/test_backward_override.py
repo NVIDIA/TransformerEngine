@@ -396,8 +396,7 @@ def _snapshot_backward_ctx_state(
     missing_attrs = [attr for attr in required_attrs if not hasattr(state_holder, attr)]
     if missing_attrs:
         raise RuntimeError(
-            "Backward context does not expose required attributes: "
-            f"{', '.join(missing_attrs)}."
+            f"Backward context does not expose required attributes: {', '.join(missing_attrs)}."
         )
     return (
         getattr(state_holder, "backward_override"),
