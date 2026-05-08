@@ -20,17 +20,19 @@ from transformer_engine.pytorch import (
     is_fp8_available,
     is_fp8_block_scaling_available,
     is_mxfp8_available,
+    is_nvfp4_available,
     is_bf16_available,
 )
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.common import recipe
-from utils import ModelConfig, reset_rng_states, skip_unsupported_backward_override
+from utils import ModelConfig, recipe_id, reset_rng_states, skip_unsupported_backward_override
 
 # Check if FP8 is supported.
 fp8_available = is_fp8_available()
 fp8_block_scaling_available = is_fp8_block_scaling_available()
 mxfp8_available = is_mxfp8_available()
+nvfp4_available = is_nvfp4_available()
 
 # Reset RNG states.
 reset_rng_states()
@@ -62,6 +64,14 @@ def nvfp4_rht_and_2d_quantization():
     return nvfp4_recipe
 
 
+def nvfp4_row_scaled():
+    nvfp4_recipe = recipe.NVFP4BlockScaling(row_scaled_activation=True)
+    nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams()
+    nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams()
+    nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams()
+    return nvfp4_recipe
+
+
 def check_rht_usage(recipe: recipe.Recipe) -> bool:
     # if using RHT, we can only support bf16
     # check fp4_quant_fwd_inp, fp4_quant_fwd_weight, fp4_quant_bwd_grad
@@ -88,7 +98,9 @@ def get_nvfp4_inp_supported_dtypes(recipe: recipe.Recipe, dtype: torch.dtype) ->
 fp8_recipes = []
 if mxfp8_available:
     fp8_recipes.append(recipe.MXFP8BlockScaling())
+if nvfp4_available:
     fp8_recipes.append(nvfp4_rht_and_2d_quantization())
+    fp8_recipes.append(nvfp4_row_scaled())
 if fp8_block_scaling_available:
     fp8_recipes.append(recipe.Float8BlockScaling())
 if fp8_available:
@@ -360,7 +372,7 @@ def _test_cuda_graphs(
 @pytest.mark.parametrize("module", _test_cuda_graphs_modules)
 @pytest.mark.parametrize("dtype", dtypes)
 @pytest.mark.parametrize("fp8_params", (False, True))
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes + [None], ids=lambda r: type(r).__name__)
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes + [None], ids=recipe_id)
 @pytest.mark.parametrize("backward_override", (None, "high_precision", "dequantized"))
 def test_make_graphed_callables(
     *,
@@ -390,6 +402,8 @@ def test_make_graphed_callables(
             f"Module not yet supported for {fp8_recipe.__class__.__name__} with CUDA graphs"
         )
     if fp8 and fp8_recipe.nvfp4():
+        if getattr(fp8_recipe, "row_scaled_activation", False) and module == "mha":
+            pytest.skip("Row-scaled NVFP4 CUDA graph coverage applies to GEMM modules.")
         if dtype not in get_nvfp4_inp_supported_dtypes(fp8_recipe, dtype):
             pytest.skip(
                 f"Input dtype {dtype} not supported for NVFP4 Recipe"
@@ -448,7 +462,7 @@ _test_make_graphed_callables_with_fp8_weight_caching_modules = [
 )
 @pytest.mark.parametrize("dtype", dtypes)
 @pytest.mark.parametrize("fp8_params", (False, True))
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes, ids=lambda r: type(r).__name__)
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes, ids=recipe_id)
 @pytest.mark.parametrize("backward_override", (None, "high_precision", "dequantized"))
 def test_make_graphed_callables_with_fp8_weight_caching(
     *,
