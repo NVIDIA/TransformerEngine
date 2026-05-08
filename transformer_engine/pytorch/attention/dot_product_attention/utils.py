@@ -1222,16 +1222,29 @@ def get_attention_backend(
     if use_fused_attention:
         q_type = TE_DType[qkv_dtype]
         kv_type = q_type
+        o_type = q_type
+        scaling_mode = tex.NVTEScalingMode.NVTE_INVALID_SCALING
         if fp8 and fp8_meta["recipe"].fp8_dpa:
-            q_type = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
+            recipe = fp8_meta["recipe"]
+            q_type = get_fp8_te_dtype(recipe, fprop_tensor=True)
             kv_type = q_type
+            cs_o_in_f16 = os.getenv("NVTE_DPA_FP8CS_O_in_F16", "1") == "1"
+            if recipe.mxfp8():
+                scaling_mode = tex.NVTEScalingMode.NVTE_MXFP8_1D_SCALING
+                o_type = TE_DType[torch.bfloat16]
+            elif recipe.float8_current_scaling() and cs_o_in_f16:
+                scaling_mode = tex.NVTEScalingMode.NVTE_DELAYED_TENSOR_SCALING
+                o_type = TE_DType[torch.bfloat16]
+            else:
+                scaling_mode = tex.NVTEScalingMode.NVTE_DELAYED_TENSOR_SCALING
+                o_type = q_type
         fused_attention_backend, reject_message = tex.get_fused_attn_backend(
             is_training,
             batch_size,
             q_type,
             kv_type,
-            q_type,
-            tex.NVTEScalingMode.NVTE_INVALID_SCALING,
+            o_type,
+            scaling_mode,
             QKVLayout[qkv_layout],
             AttnBiasType[fu_core_attention_bias_type],
             AttnMaskType[attn_mask_type],
