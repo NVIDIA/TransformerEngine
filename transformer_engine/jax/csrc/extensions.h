@@ -147,13 +147,6 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnForwardHandler);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnBackwardHandler);
 
-// Returns (backend, message). `message` is empty on success, otherwise a diagnostic string
-// describing why the configuration was rejected when backend = NVTE_No_Backend.
-// `o_format`, `do_format`, and `dqkv_layout` describe the output, output-gradient, and
-// QKV-gradient formats/layouts the actual fwd/bwd kernels will use; pass NVTE_QKV_Format_NOT_SET
-// / NVTE_QKV_Layout_NOT_SET to request that they be inferred from `qkv_layout`.
-// `qkv_scale_inv_format` / `do_scale_inv_format` describe the FP8 scale-inverse layouts; pass
-// NVTE_QKV_Format_NOT_SET to let the backend infer them.
 std::tuple<NVTE_Fused_Attn_Backend, std::string> GetFusedAttnBackend(
     bool is_training, size_t batch_size, DType q_dtype, DType kv_dtype, DType o_dtype,
     NVTEScalingMode scaling_mode, NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format,

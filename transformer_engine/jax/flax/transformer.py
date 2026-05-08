@@ -789,12 +789,11 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         if enable_fused_attn and not has_fused_attn_kernel:
             reason = fused_attn_reject_reason or "(no diagnostic message available)"
             warnings.warn(
-                "Fused attention is not enabled because there is no available kernel.\n"
-                "Fall back to the unfused attention.\n"
-                f"Reason for this rejection is: {reason}\n"
+                "Falling back to the unfused attention backend as fused attention does not support:\n"
                 f"{qkv_layout=}\n{attn_bias_type=}\n{attn_mask_type=}\n"
                 f"{self.attention_dropout=}\n{self.num_attention_heads=}\n{self.window_size=}\n"
                 f"{self.num_gqa_groups=}\n{seqlen_q=}\n{seqlen_kv=}\n{head_dim_qk=}\n{head_dim_v=}\n"
+                f"Reason for this rejection: {reason}\n"
             )
 
         dropout_rng = None

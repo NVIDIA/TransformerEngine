@@ -14,17 +14,12 @@ namespace jax {
 std::tuple<NVTE_Fused_Attn_Backend, std::string> GetFusedAttnBackend(
     bool is_training, size_t batch_size, DType q_dtype, DType kv_dtype, DType o_dtype,
     NVTEScalingMode scaling_mode, NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format,
-    NVTE_QKV_Format do_format, NVTE_QKV_Layout dqkv_layout, NVTE_QKV_Format qkv_scale_inv_format,
-    NVTE_QKV_Format do_scale_inv_format, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
-    NVTE_Softmax_Type softmax_type, float dropout_probability, size_t q_attn_heads,
-    size_t kv_attn_heads, size_t q_max_seqlen, size_t kv_max_seqlen, size_t qk_head_dim,
-    size_t v_head_dim, int64_t window_size_left, int64_t window_size_right,
-    bool bottom_right_diagonal, bool deterministic) {
-  // For convenience, allow callers to pass *_NOT_SET sentinels and infer the missing values
-  // from `qkv_layout`; JAX's fused-attn path always uses matching output / dQKV layouts so
-  // this preserves the existing behavior without forcing every Python call site to compute them.
-  // The scale-inv formats stay as NOT_SET when the caller passes NOT_SET because cuDNN-frontend
-  // already infers them from the QKV layout for the recipes JAX currently exercises.
+    NVTE_QKV_Format do_format, NVTE_QKV_Layout dqkv_layout,
+    NVTE_QKV_Format qkv_scale_inv_format, NVTE_QKV_Format do_scale_inv_format,
+    NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type,
+    float dropout_probability, size_t q_attn_heads, size_t kv_attn_heads, size_t q_max_seqlen,
+    size_t kv_max_seqlen, size_t qk_head_dim, size_t v_head_dim, int64_t window_size_left,
+    int64_t window_size_right, bool bottom_right_diagonal, bool deterministic) {
   if (o_format == NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET) {
     o_format = nvte_get_q_format(qkv_layout);
   }
@@ -34,15 +29,6 @@ std::tuple<NVTE_Fused_Attn_Backend, std::string> GetFusedAttnBackend(
   if (dqkv_layout == NVTE_QKV_Layout::NVTE_QKV_Layout_NOT_SET) {
     dqkv_layout = qkv_layout;
   }
-  // The pointer returned via `message` aliases a thread-local buffer in libtransformer_engine that
-  // is overwritten by the next nvte_get_fused_attn_backend call on this thread. We copy it into a
-  // std::string here so the value we return is safe to retain.
-  //
-  // NOTE: attn_scale is part of the cuDNN-frontend graph cache key (FADescriptor_v1::attnScale).
-  // Passing 1.0f here means the graph this probe builds will not be reused at the corresponding
-  // FusedAttnForwardImpl/FusedAttnBackwardImpl call (which forwards the user's actual scale).
-  // The lost reuse is a known performance gap that will be addressed when the future
-  // config-struct refactor also updates this Python-facing wrapper.
   const char *message = nullptr;
   auto backend = nvte_get_fused_attn_backend(
       is_training, batch_size, static_cast<NVTEDType>(q_dtype), static_cast<NVTEDType>(kv_dtype),
@@ -291,8 +277,6 @@ static void FusedAttnForwardImpl(
   /* Prepare RNG state */
   auto rng_state_tensor = TensorWrapper(rng_state, std::vector<size_t>{2}, DType::kInt64);
 
-  // JAX uses the same layout for output / dQKV as for QKV, so derive the formats from qkv_layout.
-  // Scale-inv formats stay NOT_SET because JAX's fused-attn path here is non-FP8.
   const NVTE_QKV_Format probe_o_format = nvte_get_q_format(qkv_layout);
   auto backend = nvte_get_fused_attn_backend(
       is_training, input_batch, static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype),

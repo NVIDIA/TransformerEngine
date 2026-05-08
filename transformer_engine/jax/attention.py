@@ -347,11 +347,8 @@ def is_fused_attn_kernel_available(
     """
     To check whether the fused attention kernel is supported.
 
-    If ``bottom_right_diagonal`` is None, it is derived from the mask type, matching the
-    convention used everywhere else in JAX TE (see ``_FusedAttnConfig`` constructions).
-
     When ``return_reason`` is ``True``, returns ``(available, message)`` where ``message`` is
-    the diagnostic string the backend produced (empty on success).
+    the diagnostic string for the reason why the fused attention kernel is not supported (empty on success).
     """
     window_size_tuple = (-1, -1) if window_size is None else window_size
 
