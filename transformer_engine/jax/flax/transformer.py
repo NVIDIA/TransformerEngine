@@ -249,7 +249,7 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
 
         def convert_to_softmax_fusion_type(attn_mask_type, mask):
             """Convert the attn_mask_type to SoftmaxFusionType"""
-            #TODO(KshitijLakhani): Fix swa mask construction and softmax fusion selection for
+            # TODO(KshitijLakhani): Fix swa mask construction and softmax fusion selection for
             # missing mask cases.
             # mask is ignored for no_mask and causal_mask without sliding window
             if attn_mask_type == AttnMaskType.NO_MASK:
@@ -595,7 +595,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
           ``padding_causal_bottom_right``: ``(-1, 0)`` (sentinel for infinite-left
           causal) or ``(>=0, 0)``.
 
-        Inputs are validated and canonicalized at construction time via check_set_window_size. 
+        Inputs are validated and canonicalized at construction time via check_set_window_size.
         Bidirectional sliding windows (right > 0 with no_mask / padding) for fused attention
         require cuDNN >= 9.6; left-only sliding windows (right = 0) require cuDNN >= 9.2.
     max_segments_per_seq: Optional[int], default = 1
@@ -1197,7 +1197,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
           ``padding_causal_bottom_right``: ``(-1, 0)`` (sentinel for infinite-left
           causal) or ``(>=0, 0)``.
 
-        Inputs are validated and canonicalized at construction time via check_set_window_size. 
+        Inputs are validated and canonicalized at construction time via check_set_window_size.
         Bidirectional sliding windows (right > 0 with no_mask / padding) for fused attention
         require cuDNN >= 9.6; left-only sliding windows (right = 0) require cuDNN >= 9.2.
     softmax_type: str = {'vanilla', 'off-by-one', 'learnable'}, default = 'vanilla'

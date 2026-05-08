@@ -2488,13 +2488,11 @@ class _FusedAttnCPWithP2PHelper:
         ``window_size`` is the canonical no-SWA form for the *original* mask, so we
         re-canonicalize it for the per-step mask.
 
-        ``warn=False`` because the user's ``window_size`` was already canonicalized 
-        by check_set_window_size upstream. This per-step coercion is an internal mask 
+        ``warn=False`` because the user's ``window_size`` was already canonicalized
+        by check_set_window_size upstream. This per-step coercion is an internal mask
         switch (for ring P2P) which if reported, may confuse the user.
         """
-        per_step_window = check_set_window_size(
-            attn_mask_type, self.config.window_size, warn=False
-        )
+        per_step_window = check_set_window_size(attn_mask_type, self.config.window_size, warn=False)
         return _FusedAttnConfig(
             attn_bias_type=self.config.attn_bias_type,
             attn_mask_type=attn_mask_type,

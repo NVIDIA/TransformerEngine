@@ -374,16 +374,14 @@ def check_set_window_size(
             window_size = (orig_window_size[0], 0)
             if warn:
                 warnings.warn(
-                    f"window_size should be (-1, 0) or (>=0, 0) for "
+                    "window_size should be (-1, 0) or (>=0, 0) for "
                     f"attn_mask_type={attn_mask_type_str}, got {orig_window_size}; "
                     f"coercing to {window_size}."
                 )
         # Assert if invalid window size is provided.
-        elif orig_window_size != (-1, 0) and (
-            orig_window_size[0] < 0 or orig_window_size[1] != 0
-        ):
+        elif orig_window_size != (-1, 0) and (orig_window_size[0] < 0 or orig_window_size[1] != 0):
             raise AssertionError(
-                f"window_size should be (-1, 0) or (>=0, 0) for "
+                "window_size should be (-1, 0) or (>=0, 0) for "
                 f"attn_mask_type={attn_mask_type_str}, got {orig_window_size}."
             )
     elif attn_mask_type_enum in (AttnMaskType.NO_MASK, AttnMaskType.PADDING_MASK):
@@ -394,16 +392,14 @@ def check_set_window_size(
             window_size = (-1, -1)
             if warn:
                 warnings.warn(
-                    f"window_size should be (-1, -1) or (>=0, >=0) for "
+                    "window_size should be (-1, -1) or (>=0, >=0) for "
                     f"attn_mask_type={attn_mask_type_str}, got {orig_window_size}; "
                     f"coercing to {window_size}."
                 )
         # Assert if invalid window size is provided.
-        elif orig_window_size != (-1, -1) and (
-            orig_window_size[0] < 0 or orig_window_size[1] < 0
-        ):
+        elif orig_window_size != (-1, -1) and (orig_window_size[0] < 0 or orig_window_size[1] < 0):
             raise AssertionError(
-                f"window_size should be (-1, -1) or (>=0, >=0) for "
+                "window_size should be (-1, -1) or (>=0, >=0) for "
                 f"attn_mask_type={attn_mask_type_str}, got {orig_window_size}."
             )
     else:
@@ -929,7 +925,7 @@ class SequenceDescriptor:
         """
         Acquire the seqlens/offsets for cuDNN backend.
 
-        ``window_size`` must be a ``Tuple[int, int]`` (never ``None``) 
+        ``window_size`` must be a ``Tuple[int, int]`` (never ``None``)
         and already canonicalized by check_set_window_size.
         """
         q_segment_ids, kv_segment_ids = self.segment_ids
