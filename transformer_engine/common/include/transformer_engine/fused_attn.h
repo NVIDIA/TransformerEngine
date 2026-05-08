@@ -207,9 +207,9 @@ NVTE_QKV_Format nvte_get_kv_format(NVTE_QKV_Layout qkv_layout);
  *    in range according to ``struct_size`` and uses safe defaults otherwise.
  */
 typedef struct NVTEFusedAttnConfig {
-  size_t struct_size;  /*!< MUST equal sizeof(NVTEFusedAttnConfig). */
-  uint32_t reserved0;  /*!< Padding for layout stability; set to 0. */
-  uint32_t reserved1;  /*!< Padding for layout stability; set to 0. */
+  size_t struct_size; /*!< MUST equal sizeof(NVTEFusedAttnConfig). */
+  uint32_t reserved0; /*!< Padding for layout stability; set to 0. */
+  uint32_t reserved1; /*!< Padding for layout stability; set to 0. */
 
   NVTE_QKV_Layout qkv_layout;           /*!< QKV tensors' layout. */
   NVTE_QKV_Format o_format;             /*!< Output O tensor format. */
@@ -227,18 +227,18 @@ typedef struct NVTEFusedAttnConfig {
   size_t max_seqlen_kv;                 /*!< Max sequence length for K, V. */
   int64_t window_size_left;             /*!< Sliding window size (left half); -1 = unlimited. */
   int64_t window_size_right;            /*!< Sliding window size (right half); -1 = unlimited. */
-  bool bottom_right_diagonal;           /*!< Whether causal mask aligns to the bottom-right diagonal. */
-  bool cuda_graph;                      /*!< Whether CUDA graph capture is enabled. */
+  bool bottom_right_diagonal; /*!< Whether causal mask aligns to the bottom-right diagonal. */
+  bool cuda_graph;            /*!< Whether CUDA graph capture is enabled. */
 
-  NVTEDType qkv_dtype;      /*!< Data type of Tensors Q, K, V. Q and K/V must share a dtype. */
-  NVTEDType o_dtype;        /*!< Data type of Tensor O. */
-  NVTEDType do_dtype;       /*!< Data type of Tensor dO (bwd). */
-  NVTEDType dqkv_dtype;     /*!< Data type of Tensors dQ, dK, dV (bwd). */
-  size_t batch_size;        /*!< Batch size. */
-  size_t num_attn_heads;    /*!< Number of heads in Q. */
-  size_t num_gqa_groups;    /*!< Number of heads in K, V. */
-  size_t head_dim_qk;       /*!< Head dimension of Q, K. */
-  size_t head_dim_v;        /*!< Head dimension of V. */
+  NVTEDType qkv_dtype;   /*!< Data type of Tensors Q, K, V. Q and K/V must share a dtype. */
+  NVTEDType o_dtype;     /*!< Data type of Tensor O. */
+  NVTEDType do_dtype;    /*!< Data type of Tensor dO (bwd). */
+  NVTEDType dqkv_dtype;  /*!< Data type of Tensors dQ, dK, dV (bwd). */
+  size_t batch_size;     /*!< Batch size. */
+  size_t num_attn_heads; /*!< Number of heads in Q. */
+  size_t num_gqa_groups; /*!< Number of heads in K, V. */
+  size_t head_dim_qk;    /*!< Head dimension of Q, K. */
+  size_t head_dim_v;     /*!< Head dimension of V. */
 
   size_t num_pages_k;         /*!< Total number of K cache pages. */
   size_t num_pages_v;         /*!< Total number of V cache pages. */
@@ -265,15 +265,21 @@ typedef struct NVTEFusedAttnConfig {
  * flags all default to zero/false; callers must set the fields relevant to
  * their query.
  */
-#define NVTE_FUSED_ATTN_CONFIG_INIT                                                                \
-  {                                                                                                \
-    .struct_size = sizeof(NVTEFusedAttnConfig),                                                    \
-    .qkv_layout = NVTE_QKV_Layout_NOT_SET, .o_format = NVTE_QKV_Format_NOT_SET,                    \
-    .do_format = NVTE_QKV_Format_NOT_SET, .dqkv_layout = NVTE_QKV_Layout_NOT_SET,                  \
-    .qkv_scale_inv_format = NVTE_QKV_Format_NOT_SET,                                               \
-    .do_scale_inv_format = NVTE_QKV_Format_NOT_SET, .bias_type = NVTE_NO_BIAS,                     \
-    .attn_mask_type = NVTE_NO_MASK, .softmax_type = NVTE_VANILLA_SOFTMAX,                          \
-    .scaling_mode = NVTE_DELAYED_TENSOR_SCALING, .window_size_left = -1, .window_size_right = -1,  \
+#define NVTE_FUSED_ATTN_CONFIG_INIT                    \
+  {                                                    \
+      .struct_size = sizeof(NVTEFusedAttnConfig),      \
+      .qkv_layout = NVTE_QKV_Layout_NOT_SET,           \
+      .o_format = NVTE_QKV_Format_NOT_SET,             \
+      .do_format = NVTE_QKV_Format_NOT_SET,            \
+      .dqkv_layout = NVTE_QKV_Layout_NOT_SET,          \
+      .qkv_scale_inv_format = NVTE_QKV_Format_NOT_SET, \
+      .do_scale_inv_format = NVTE_QKV_Format_NOT_SET,  \
+      .bias_type = NVTE_NO_BIAS,                       \
+      .attn_mask_type = NVTE_NO_MASK,                  \
+      .softmax_type = NVTE_VANILLA_SOFTMAX,            \
+      .scaling_mode = NVTE_DELAYED_TENSOR_SCALING,     \
+      .window_size_left = -1,                          \
+      .window_size_right = -1,                         \
   }
 
 /*! \brief Get fused attention backend based on input parameters.

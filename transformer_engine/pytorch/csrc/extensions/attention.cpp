@@ -82,8 +82,7 @@ std::tuple<NVTE_Fused_Attn_Backend, std::string> get_fused_attn_backend(
   cfg.deterministic = deterministic;
 
   const char *message = nullptr;
-  NVTE_Fused_Attn_Backend fused_attention_backend =
-      nvte_get_fused_attn_backend_v2(&cfg, &message);
+  NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend_v2(&cfg, &message);
   return {fused_attention_backend, message != nullptr ? std::string(message) : std::string()};
 }
 

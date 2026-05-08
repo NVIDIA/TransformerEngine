@@ -244,7 +244,7 @@ void set_message(const char **message, std::string reason) {
 
 // select a backend for fused attention
 NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(const NVTEFusedAttnConfig *cfg,
-                                                      const char **message) {
+                                                       const char **message) {
   using namespace transformer_engine;
   set_message(message, "");
   NVTE_CHECK(cfg != nullptr, "NVTEFusedAttnConfig pointer must not be NULL.");
@@ -282,8 +282,8 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(const NVTEFusedAttnConfig
 
   const bool is_fp8 = (cfg->qkv_dtype == NVTEDType::kNVTEFloat8E4M3 ||
                        cfg->qkv_dtype == NVTEDType::kNVTEFloat8E5M2);
-  const bool is_f16_or_bf16 = (cfg->qkv_dtype == NVTEDType::kNVTEFloat16 ||
-                               cfg->qkv_dtype == NVTEDType::kNVTEBFloat16);
+  const bool is_f16_or_bf16 =
+      (cfg->qkv_dtype == NVTEDType::kNVTEFloat16 || cfg->qkv_dtype == NVTEDType::kNVTEBFloat16);
 
   if (is_fp8) {
     if (cfg->return_max_logit) {
@@ -336,8 +336,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(const NVTEFusedAttnConfig
     return NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen;
   }
 
-  set_message(message,
-              "Unsupported QKV dtype qkv_dtype=" + std::to_string(cfg->qkv_dtype) + " .");
+  set_message(message, "Unsupported QKV dtype qkv_dtype=" + std::to_string(cfg->qkv_dtype) + " .");
   return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
 }
 
@@ -475,8 +474,8 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   NVTEFusedAttnConfig cfg = NVTE_FUSED_ATTN_CONFIG_INIT;
   cfg.qkv_layout = qkv_layout;
   cfg.o_format = o_format;
-  cfg.do_format = o_format;          // fwd path: same format used for dO if/when probed for bwd
-  cfg.dqkv_layout = qkv_layout;      // fwd path: same layout used for dQKV if/when probed for bwd
+  cfg.do_format = o_format;      // fwd path: same format used for dO if/when probed for bwd
+  cfg.dqkv_layout = qkv_layout;  // fwd path: same layout used for dQKV if/when probed for bwd
   cfg.qkv_scale_inv_format = qkv_scale_inv_format;
   cfg.do_scale_inv_format = qkv_scale_inv_format;  // fwd path: mirror QKV
   cfg.bias_type = bias_type;
@@ -493,8 +492,8 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   cfg.cuda_graph = cuda_graph;
   cfg.qkv_dtype = Q_type;
   cfg.o_dtype = O_type;
-  cfg.do_dtype = O_type;             // fwd path: dO assumed to share dtype with O
-  cfg.dqkv_dtype = Q_type;           // fwd path: dQKV assumed to share dtype with QKV
+  cfg.do_dtype = O_type;    // fwd path: dO assumed to share dtype with O
+  cfg.dqkv_dtype = Q_type;  // fwd path: dQKV assumed to share dtype with QKV
   cfg.batch_size = b;
   cfg.num_attn_heads = h_q;
   cfg.num_gqa_groups = h_kv;

@@ -1325,7 +1325,7 @@ void fused_attn_fp8_bwd(
   }
 }
 
-std::string is_supported_fp8_fwd(const NVTEFusedAttnConfig *cfg, cudnnHandle_t handle) {
+std::string is_supported_fp8_fwd(const NVTEFusedAttnConfig* cfg, cudnnHandle_t handle) {
   const size_t batch = cfg->batch_size;
   const size_t num_attn_heads = cfg->num_attn_heads;
   const size_t num_gqa_groups = cfg->num_gqa_groups;
@@ -1376,7 +1376,7 @@ std::string is_supported_fp8_fwd(const NVTEFusedAttnConfig *cfg, cudnnHandle_t h
   }
 }
 
-std::string is_supported_fp8_bwd(const NVTEFusedAttnConfig *cfg, cudnnHandle_t handle) {
+std::string is_supported_fp8_bwd(const NVTEFusedAttnConfig* cfg, cudnnHandle_t handle) {
   const size_t batch = cfg->batch_size;
   const size_t num_attn_heads = cfg->num_attn_heads;
   const size_t num_gqa_groups = cfg->num_gqa_groups;
