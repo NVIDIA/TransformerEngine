@@ -1334,19 +1334,19 @@ GroupedBuffers build_grouped_tensor(const std::vector<Tensor*>& tensors,
     nvte_set_grouped_tensor_param(h, kNVTEGroupedColumnwiseScaleInv, &scale_tensor,
                                   sizeof(scale_tensor));
   } else if (scaling_mode == NVTE_MXFP8_1D_SCALING) {
-    // The grouped GEMM setup kernel computes scale offsets as data_offset / 32, which is
-    // only correct when the padded scale size equals the unpadded one (no padding gaps).
-    // This requires first_dim % 128 == 0 and last_dim % 128 == 0. Tests that don't use
-    // the grouped GEMM setup path (e.g. swizzle/unswizzle) can opt out via
-    // enforce_grouped_gemm_alignment=false; their gather_scales path uses padded
-    // scale_inv shapes directly.
+    // The grouped GEMM setup kernel now computes per-tensor scale offsets via
+    // compute_grouped_tensor_mxfp8_scale_inv_offset, which sums the padded
+    // (roundup(., 128) x roundup(./32, 4)) scale tile sizes — so dims only need to
+    // satisfy the MXFP8 block alignment of 32, not 128. (Previously this assertion
+    // enforced /128 alignment because the old setup kernel computed offsets as
+    // data_offset / 32, which silently mismatched for unaligned dims.)
     if (enforce_grouped_gemm_alignment) {
       for (size_t i = 0; i < num_tensors; ++i) {
-        NVTE_CHECK(first_dims[i] % 128 == 0,
-                   "MXFP8 grouped GEMM test: first_dim must be divisible by 128, got ",
+        NVTE_CHECK(first_dims[i] % 32 == 0,
+                   "MXFP8 grouped GEMM test: first_dim must be divisible by 32, got ",
                    first_dims[i]);
-        NVTE_CHECK(last_dims[i] % 128 == 0,
-                   "MXFP8 grouped GEMM test: last_dim must be divisible by 128, got ",
+        NVTE_CHECK(last_dims[i] % 32 == 0,
+                   "MXFP8 grouped GEMM test: last_dim must be divisible by 32, got ",
                    last_dims[i]);
       }
     }
@@ -1467,17 +1467,17 @@ GroupedBuffers build_grouped_tensor(const std::vector<Tensor*>& tensors,
       nvte_set_grouped_tensor_param(h, kNVTEGroupedColumnwiseScaleInv, &col_tensor, sizeof(col_tensor));
     }
   } else if (scaling_mode == NVTE_NVFP4_1D_SCALING) {
-    // The grouped GEMM setup kernel computes scale offsets as data_offset / 16, which is
-    // only correct when the padded scale size equals the unpadded one (no padding gaps).
-    // This requires first_dim % 128 == 0 and last_dim % 64 == 0. Tests that don't use
-    // the grouped GEMM setup path can opt out via enforce_grouped_gemm_alignment=false.
+    // The grouped GEMM setup kernel now computes per-tensor scale offsets via
+    // compute_grouped_tensor_nvfp4_scale_inv_offset, which sums the padded
+    // (roundup(., 128) x roundup(./16, 4)) scale tile sizes — so dims only need to
+    // satisfy the NVFP4 block alignment of 16, not 128/64.
     if (enforce_grouped_gemm_alignment) {
       for (size_t i = 0; i < num_tensors; ++i) {
-        NVTE_CHECK(first_dims[i] % 128 == 0,
-                   "NVFP4 grouped GEMM test: first_dim must be divisible by 128, got ",
+        NVTE_CHECK(first_dims[i] % 16 == 0,
+                   "NVFP4 grouped GEMM test: first_dim must be divisible by 16, got ",
                    first_dims[i]);
-        NVTE_CHECK(last_dims[i] % 64 == 0,
-                   "NVFP4 grouped GEMM test: last_dim must be divisible by 64, got ",
+        NVTE_CHECK(last_dims[i] % 16 == 0,
+                   "NVFP4 grouped GEMM test: last_dim must be divisible by 16, got ",
                    last_dims[i]);
       }
     }

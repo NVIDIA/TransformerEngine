@@ -375,6 +375,11 @@ struct GroupedOperandSelection {
   bool with_gemm_swizzled_scales = false;
   bool trans = false;
   bool rowwise = true;
+  // Whether sel.shape is pre-swapped relative to the original tensor shape (i.e., whether
+  // the columnwise data was set up as a transposed view). Together with `rowwise`, this
+  // determines the canonical orientation of the underlying scale_inv buffer when computing
+  // per-tensor scale offsets in setup_grouped_gemm_kernel for non-MXFP8 recipes.
+  bool swap_dims = false;
 };
 
 struct GroupedGemmConfig {
@@ -722,6 +727,7 @@ inline GroupedOperandSelection select_grouped_operand(const transformer_engine::
     sel.amax = t->columnwise_amax.dptr;
     sel.dtype = col_dtype;
     sel.rowwise = false;
+    sel.swap_dims = swap_dims;
     sel.shape = create_shape_info(t, swap_dims);
   };
 
@@ -1084,6 +1090,104 @@ __forceinline__ __device__ int64_t compute_grouped_tensor_mxfp8_scale_inv_offset
          padded_mxfp8_scale_inv_bytes(meta.uniform_first, meta.uniform_last, rowwise);
 }
 
+// NVFP4: same swizzled tile layout as MXFP8 (128x4) but block_size = 16. NVFP4 columnwise
+// data is the transposed tensor quantized rowwise (use_columnwise(swap_dims=true)), so
+// `meta` is already pre-transposed when sel.rowwise=false. Therefore the formula is always
+// the rowwise one applied to (first, last) as found in `meta`.
+__forceinline__ __device__ int64_t padded_nvfp4_scale_inv_bytes(int64_t first, int64_t last) {
+  namespace mxfp8_swizzle = transformer_engine::dispatch::mxfp8::swizzle;
+  constexpr int64_t kNvfp4BlockSize = 16;
+  const int64_t scale_tile_y = static_cast<int64_t>(mxfp8_swizzle::GEMM_SWIZZLED_SCALE_TILE_DIM_Y);
+  const int64_t scale_tile_x = static_cast<int64_t>(mxfp8_swizzle::GEMM_SWIZZLED_SCALE_TILE_DIM_X);
+  const int64_t padded_scale_dim_y =
+      ((first + scale_tile_y - 1) / scale_tile_y) * scale_tile_y;
+  const int64_t scale_dim_x = (last + kNvfp4BlockSize - 1) / kNvfp4BlockSize;
+  const int64_t padded_scale_dim_x =
+      ((scale_dim_x + scale_tile_x - 1) / scale_tile_x) * scale_tile_x;
+  // E4M3 scales are 1 byte per element.
+  return padded_scale_dim_y * padded_scale_dim_x;
+}
+
+__forceinline__ __device__ int64_t compute_grouped_tensor_nvfp4_scale_inv_offset(
+    const TensorShapeInfo &meta, size_t idx) {
+  if (meta.first_dims != nullptr || meta.last_dims != nullptr) {
+    int64_t cumsum = 0;
+    for (size_t i = 0; i < idx; i++) {
+      const int64_t f = meta.first_dims ? meta.first_dims[i] : meta.uniform_first;
+      const int64_t l = meta.last_dims ? meta.last_dims[i] : meta.uniform_last;
+      cumsum += padded_nvfp4_scale_inv_bytes(f, l);
+    }
+    return cumsum;
+  }
+  return static_cast<int64_t>(idx) *
+         padded_nvfp4_scale_inv_bytes(meta.uniform_first, meta.uniform_last);
+}
+
+// FP8 block scaling 1D. Per-tensor float32 scale count, matching Float8BlockQuantizer alloc
+// (quantizer.cpp Float8BlockQuantizer::get_scale_shape):
+//   rowwise alloc:  (ceildiv(K, 128), roundup(M, 4))   — Y=last/128, X=first/4
+//   colwise alloc:  (ceildiv(M, 128), roundup(K, 4))   — Y=first/128, X=last/4
+// `effective_rowwise` is `sel.rowwise || sel.swap_dims`: when colwise data was set up with
+// swap_dims=true, sel.shape is already pre-swapped so the rowwise formula on (first, last)
+// recovers the colwise alloc of the original tensor.
+__forceinline__ __device__ int64_t padded_block_1d_scale_inv_floats(int64_t first, int64_t last,
+                                                                    bool effective_rowwise) {
+  constexpr int64_t kBlockLen = 128;
+  constexpr int64_t kRowAlign = 4;
+  const int64_t y_dim = effective_rowwise ? last : first;
+  const int64_t x_dim = effective_rowwise ? first : last;
+  const int64_t y = (y_dim + kBlockLen - 1) / kBlockLen;
+  const int64_t x = ((x_dim + kRowAlign - 1) / kRowAlign) * kRowAlign;
+  return y * x;
+}
+
+__forceinline__ __device__ int64_t compute_grouped_tensor_block_1d_scale_inv_offset(
+    const TensorShapeInfo &meta, size_t idx, bool effective_rowwise) {
+  if (meta.first_dims != nullptr || meta.last_dims != nullptr) {
+    int64_t cumsum = 0;
+    for (size_t i = 0; i < idx; i++) {
+      const int64_t f = meta.first_dims ? meta.first_dims[i] : meta.uniform_first;
+      const int64_t l = meta.last_dims ? meta.last_dims[i] : meta.uniform_last;
+      cumsum += padded_block_1d_scale_inv_floats(f, l, effective_rowwise);
+    }
+    return cumsum;
+  }
+  return static_cast<int64_t>(idx) *
+         padded_block_1d_scale_inv_floats(meta.uniform_first, meta.uniform_last,
+                                          effective_rowwise);
+}
+
+// FP8 block scaling 2D. Per-tensor float32 scale count, matching Float8BlockQuantizer alloc:
+//   rowwise alloc:  (ceildiv(M, 128), roundup(ceildiv(K, 128), 4))  — Y=first/128, X=last/128 then /4
+//   colwise alloc:  (ceildiv(K, 128), roundup(ceildiv(M, 128), 4))  — Y=last/128, X=first/128 then /4
+__forceinline__ __device__ int64_t padded_block_2d_scale_inv_floats(int64_t first, int64_t last,
+                                                                    bool effective_rowwise) {
+  constexpr int64_t kBlockLen = 128;
+  constexpr int64_t kRowAlign = 4;
+  const int64_t y_dim = effective_rowwise ? first : last;
+  const int64_t x_dim = effective_rowwise ? last : first;
+  const int64_t y = (y_dim + kBlockLen - 1) / kBlockLen;
+  const int64_t x_ceil = (x_dim + kBlockLen - 1) / kBlockLen;
+  const int64_t x = ((x_ceil + kRowAlign - 1) / kRowAlign) * kRowAlign;
+  return y * x;
+}
+
+__forceinline__ __device__ int64_t compute_grouped_tensor_block_2d_scale_inv_offset(
+    const TensorShapeInfo &meta, size_t idx, bool effective_rowwise) {
+  if (meta.first_dims != nullptr || meta.last_dims != nullptr) {
+    int64_t cumsum = 0;
+    for (size_t i = 0; i < idx; i++) {
+      const int64_t f = meta.first_dims ? meta.first_dims[i] : meta.uniform_first;
+      const int64_t l = meta.last_dims ? meta.last_dims[i] : meta.uniform_last;
+      cumsum += padded_block_2d_scale_inv_floats(f, l, effective_rowwise);
+    }
+    return cumsum;
+  }
+  return static_cast<int64_t>(idx) *
+         padded_block_2d_scale_inv_floats(meta.uniform_first, meta.uniform_last,
+                                          effective_rowwise);
+}
+
 // Linear scan to find which tensor contains the given row.
 // Returns the tensor index and writes the exclusive end-row of that tensor to *out_tensor_row_end.
 __forceinline__ __device__ int find_tensor_for_row(const int64_t *first_dims, int64_t uniform_first,
@@ -1292,13 +1396,14 @@ __global__ void setup_grouped_gemm_kernel(
     beta_ptrs[idx] = beta_ptr;
   }
 
-  // Fill scale pointers (per-matrix).
-  // The interpretation of the scale buffers depends on the shared scaling recipe:
-  //   NVTE_MXFP8_1D_SCALING        : E8M0 byte stream; offset accounts for swizzled tile padding
-  //   NVTE_NVFP4_1D_SCALING        : E4M3 byte stream; offset = data_offset / 16 elements
-  //   NVTE_BLOCK_SCALING_1D        : float32 array; offset = data_offset / 128
-  //   NVTE_BLOCK_SCALING_2D        : float32 array; offset = data_offset / (128*128)
-  //   otherwise (tensor scaling)   : one float per tensor, indexed by tensor index
+  // Fill scale pointers (per-matrix). For MXFP8/NVFP4 and FP8 block scaling, the per-expert
+  // scale_inv buffer is padded to a layout that depends on the recipe — offsets are computed
+  // from the same padded sizes that the quantizer uses at allocation, not from data_offset.
+  //   NVTE_MXFP8_1D_SCALING : E8M0 byte stream; padded swizzled 128x4 tile, block_size=32.
+  //   NVTE_NVFP4_1D_SCALING : E4M3 byte stream; padded swizzled 128x4 tile, block_size=16.
+  //   NVTE_BLOCK_SCALING_1D : float32 array;    ceildiv(./128) * roundup(./4) per tensor.
+  //   NVTE_BLOCK_SCALING_2D : float32 array;    ceildiv(./128) * roundup(ceildiv(./128), 4).
+  //   otherwise (tensor)    : one float per tensor, indexed by tensor index.
   if (a_scale_base) {
     if (scaling_mode == NVTE_MXFP8_1D_SCALING) {
       const int64_t a_scale_offset =
@@ -1306,14 +1411,18 @@ __global__ void setup_grouped_gemm_kernel(
       a_scale_inv_ptrs[idx] = reinterpret_cast<void *>(
           static_cast<char *>(static_cast<void *>(a_scale_base)) + a_scale_offset);
     } else if (scaling_mode == NVTE_NVFP4_1D_SCALING) {
+      const int64_t a_scale_offset =
+          compute_grouped_tensor_nvfp4_scale_inv_offset(A_meta, idx);
       a_scale_inv_ptrs[idx] = reinterpret_cast<void *>(
-          static_cast<char *>(static_cast<void *>(a_scale_base)) + a_offset / 16);
+          static_cast<char *>(static_cast<void *>(a_scale_base)) + a_scale_offset);
     } else if (scaling_mode == NVTE_BLOCK_SCALING_1D) {
-      // 1D block scaling: 1 float per 128 elements (assumes dims divisible by 128)
-      a_scale_inv_ptrs[idx] = static_cast<float *>(a_scale_base) + a_offset / 128;
+      const int64_t a_scale_offset =
+          compute_grouped_tensor_block_1d_scale_inv_offset(A_meta, idx, a_rowwise);
+      a_scale_inv_ptrs[idx] = static_cast<float *>(a_scale_base) + a_scale_offset;
     } else if (scaling_mode == NVTE_BLOCK_SCALING_2D) {
-      // 2D block scaling: 1 float per 128x128 block (assumes dims divisible by 128)
-      a_scale_inv_ptrs[idx] = static_cast<float *>(a_scale_base) + a_offset / (128 * 128);
+      const int64_t a_scale_offset =
+          compute_grouped_tensor_block_2d_scale_inv_offset(A_meta, idx, a_rowwise);
+      a_scale_inv_ptrs[idx] = static_cast<float *>(a_scale_base) + a_scale_offset;
     } else {
       a_scale_inv_ptrs[idx] = static_cast<float *>(a_scale_base) + idx;
     }
@@ -1327,14 +1436,18 @@ __global__ void setup_grouped_gemm_kernel(
       b_scale_inv_ptrs[idx] = reinterpret_cast<void *>(
           static_cast<char *>(static_cast<void *>(b_scale_base)) + b_scale_offset);
     } else if (scaling_mode == NVTE_NVFP4_1D_SCALING) {
+      const int64_t b_scale_offset =
+          compute_grouped_tensor_nvfp4_scale_inv_offset(B_meta, idx);
       b_scale_inv_ptrs[idx] = reinterpret_cast<void *>(
-          static_cast<char *>(static_cast<void *>(b_scale_base)) + b_offset / 16);
+          static_cast<char *>(static_cast<void *>(b_scale_base)) + b_scale_offset);
     } else if (scaling_mode == NVTE_BLOCK_SCALING_1D) {
-      // 1D block scaling: 1 float per 128 elements (assumes dims divisible by 128)
-      b_scale_inv_ptrs[idx] = static_cast<float *>(b_scale_base) + b_offset / 128;
+      const int64_t b_scale_offset =
+          compute_grouped_tensor_block_1d_scale_inv_offset(B_meta, idx, b_rowwise);
+      b_scale_inv_ptrs[idx] = static_cast<float *>(b_scale_base) + b_scale_offset;
     } else if (scaling_mode == NVTE_BLOCK_SCALING_2D) {
-      // 2D block scaling: 1 float per 128x128 block (assumes dims divisible by 128)
-      b_scale_inv_ptrs[idx] = static_cast<float *>(b_scale_base) + b_offset / (128 * 128);
+      const int64_t b_scale_offset =
+          compute_grouped_tensor_block_2d_scale_inv_offset(B_meta, idx, b_rowwise);
+      b_scale_inv_ptrs[idx] = static_cast<float *>(b_scale_base) + b_scale_offset;
     } else {
       b_scale_inv_ptrs[idx] = static_cast<float *>(b_scale_base) + idx;
     }
@@ -1399,10 +1512,13 @@ inline void launch_grouped_gemm_setup(
   // A and B share the same scaling recipe (validated in validate_grouped_gemm_inputs).
   // Pass scale buffers as void* and let the kernel interpret them via scaling_mode.
 
-  // Scale rowwise flag for MXFP8/NVFP4: to calculate scale_inv padding based offsets
-  // within kernel. Ignored for tensor scaling.
-  const bool a_rowwise = A_sel.rowwise;
-  const bool b_rowwise = B_sel.rowwise;
+  // Effective rowwise flag for swizzled (MXFP8/NVFP4) and FP8 block scale offset math:
+  // sel.rowwise || sel.swap_dims. When colwise data was set up with swap_dims=true the
+  // sel.shape is already pre-swapped, so the canonical scale layout is rowwise on the
+  // (already-transposed) shape. For MXFP8 swap_dims is always false so this reduces to
+  // sel.rowwise (and the MXFP8 helper is invariant under the flag anyway).
+  const bool a_rowwise = A_sel.rowwise || A_sel.swap_dims;
+  const bool b_rowwise = B_sel.rowwise || B_sel.swap_dims;
   setup_grouped_gemm_kernel<<<num_blocks, threads_per_block, 0, stream>>>(
       ws.A_ptrs, ws.B_ptrs, ws.C_ptrs, ws.D_ptrs, ws.a_rows, ws.a_cols, ws.b_rows, ws.b_cols,
       ws.d_rows, ws.d_cols, ws.alpha_ptrs, ws.beta_ptrs, ws.a_scale_inv_ptrs, ws.b_scale_inv_ptrs,
@@ -1599,6 +1715,7 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
                                                      A_list_info.all_row, A_list_info.all_col, "A");
   A_sel.trans = choice.trans;
   A_sel.rowwise = choice.use_rowwise;
+  A_sel.swap_dims = choice.use_rowwise ? false : choice.swap_dims;
   if (choice.use_rowwise) {
     NVTE_CHECK(A_list_info.all_row, "Grouped GEMM: A_list is missing row-wise data");
     A_sel.dtype = A_list_info.row_dtype;

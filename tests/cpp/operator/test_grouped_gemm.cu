@@ -43,6 +43,13 @@ enum class ShapeCase {
   kSameFirst,
   kSameLast,
   kAllDifferent,
+  // All experts share the same (M, N, K) but the dims are intentionally NOT multiples of 128.
+  // This exposes per-expert scale_inv padding bugs in grouped GEMM offset arithmetic
+  // (MXFP8 #2954, and the analogous NVFP4 / FP8 block scaling cases): per-expert scale
+  // tiles are padded by the quantizer to multiples of 128/4, but a naive setup-kernel
+  // computes offsets from data_offset alone and points subsequent experts at the wrong
+  // place when dims are unaligned. With the fix, each expert reads from its own scale tile.
+  kUnalignedAllSame,
 };
 
 size_t grouped_setup_workspace_size(const size_t num_tensors) {
@@ -301,8 +308,13 @@ std::vector<std::tuple<size_t, size_t, size_t>> make_shapes(ShapeCase scase) {
       // Same N (last dim), varying M and K
       return {{128, 256, 384}, {256, 256, 512}, {384, 256, 640}};
     case ShapeCase::kAllDifferent:
-    default:
       return {{128, 256, 384}, {256, 384, 512}, {384, 512, 640}};
+    case ShapeCase::kUnalignedAllSame:
+    default:
+      // (M, N, K) all multiples of 32 (MXFP8 block) and 16 (NVFP4 block), but NONE
+      // are multiples of 128 — so each expert's scale_inv is padded and the per-expert
+      // offsets must come from the padded sizes, not from data_offset / block_size.
+      return {{160, 288, 416}, {160, 288, 416}, {160, 288, 416}};
   }
 }
 
@@ -1065,7 +1077,8 @@ TEST_P(GroupedGemmTest, CompareWithMultiTensorGemmDiscreteIn) {
 
 std::string MakeGroupedGemmTestName(const testing::TestParamInfo<GroupedGemmTest::ParamType>& info) {
   constexpr const char* kInputNames[] = {"FP8Current", "BF16", "MXFP8", "NVFP4", "FP8BlockScaling"};
-  constexpr const char* kShapeNames[] = {"AllSame", "SameM", "SameN", "AllDiff"};
+  constexpr const char* kShapeNames[] = {"AllSame", "SameM", "SameN", "AllDiff",
+                                         "UnalignedAllSame"};
   const std::string layout = std::string("ta") + (info.param.transa ? "T" : "N") +
                              "tb" + (info.param.transb ? "T" : "N");
   const std::string null_c = info.param.use_null_c ? "_NullC" : "";
@@ -1116,6 +1129,18 @@ const std::vector<TestParams> kTestParams = {
     {InputCase::kFP8BlockScaling, false, false, ShapeCase::kAllSame, false},
     // FP8 Block Scaling with NULL C
     {InputCase::kFP8BlockScaling, true, false, ShapeCase::kAllSame, true},
+    // Unaligned-dim tests: dims are multiples of 32 / 16 (per-recipe block size) but NOT
+    // multiples of 128 — exposes scale_inv padding bugs in per-expert offset arithmetic.
+    // MXFP8 covered by upstream PR #2954, the rest by the analogous fix.
+    {InputCase::kMXFP8, true, false, ShapeCase::kUnalignedAllSame, false},
+    {InputCase::kMXFP8, false, true, ShapeCase::kUnalignedAllSame, false},
+    {InputCase::kMXFP8, false, false, ShapeCase::kUnalignedAllSame, false},
+    {InputCase::kNVFP4, true, false, ShapeCase::kUnalignedAllSame, false},
+    {InputCase::kNVFP4, false, true, ShapeCase::kUnalignedAllSame, false},
+    {InputCase::kNVFP4, false, false, ShapeCase::kUnalignedAllSame, false},
+    {InputCase::kFP8BlockScaling, true, false, ShapeCase::kUnalignedAllSame, false},
+    {InputCase::kFP8BlockScaling, false, true, ShapeCase::kUnalignedAllSame, false},
+    {InputCase::kFP8BlockScaling, false, false, ShapeCase::kUnalignedAllSame, false},
 };
 
 INSTANTIATE_TEST_SUITE_P(OperatorTest,
