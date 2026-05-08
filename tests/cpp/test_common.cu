@@ -543,6 +543,59 @@ void Tensor::set_scale(float scale) {
   }
 }
 
+void Tensor::set_tensor_amax_shape(const std::vector<size_t> &shape) {
+  const size_t numel = product(shape);
+  NVTE_CHECK(tensor_.scaling_mode() == NVTE_NVFP4_1D_SCALING,
+             "Amax shape override is only supported for NVFP4 test tensors.");
+
+  auto old_amax = tensor_.get_amax();
+  if (old_amax.data_ptr != nullptr) {
+    NVTE_CHECK_CUDA(cudaFree(old_amax.data_ptr));
+  }
+
+  float *amax = nullptr;
+  NVTE_CHECK_CUDA(cudaMalloc(&amax, numel * sizeof(float)));
+  NVTE_CHECK_CUDA(cudaMemset(amax, 0, numel * sizeof(float)));
+  tensor_.set_amax(amax, DType::kFloat32, shape);
+}
+
+std::vector<float> Tensor::tensor_amax_values() const {
+  const auto amax = tensor_.get_amax();
+  NVTE_CHECK(static_cast<DType>(amax.dtype) == DType::kFloat32, "Tensor amax must be FP32.");
+
+  const size_t numel = product(amax.shape);
+  if (numel == 0) {
+    return {};
+  }
+  NVTE_CHECK(amax.data_ptr != nullptr, "Tensor amax is not allocated.");
+
+  std::vector<float> values(numel);
+  NVTE_CHECK_CUDA(
+      cudaMemcpy(values.data(), amax.data_ptr, numel * sizeof(float), cudaMemcpyDeviceToHost));
+  return values;
+}
+
+void Tensor::copy_tensor_amax_from(const Tensor &other) {
+  const auto other_amax = other.tensor_.get_amax();
+  NVTE_CHECK(static_cast<DType>(other_amax.dtype) == DType::kFloat32,
+             "Source tensor amax must be FP32.");
+
+  auto my_amax = tensor_.get_amax();
+  NVTE_CHECK(static_cast<DType>(my_amax.dtype) == DType::kFloat32,
+             "Destination tensor amax must be FP32.");
+  NVTE_CHECK(areShapesEqual(my_amax.shape, other_amax.shape), "Amax shape mismatch.");
+
+  const size_t numel = product(other_amax.shape);
+  if (numel == 0) {
+    return;
+  }
+
+  NVTE_CHECK(other_amax.data_ptr != nullptr, "Source tensor amax is not allocated.");
+  NVTE_CHECK(my_amax.data_ptr != nullptr, "Destination tensor amax is not allocated.");
+  NVTE_CHECK_CUDA(cudaMemcpy(my_amax.data_ptr, other_amax.data_ptr, numel * sizeof(float),
+                             cudaMemcpyDeviceToDevice));
+}
+
 void Tensor::set_scale_inv(float scale_inv) {
   if (isFp8Type(dtype()) || isFp4Type(dtype())) {
     if (rowwise_) {

@@ -1859,31 +1859,12 @@ class FusedAttnFunc(torch.autograd.Function):
 
 
 class FusedAttention(torch.nn.Module):
-    """Dot product attention, with multiple backends:
+    """Dot product attention using cuDNN attention:
 
-    1. FusedAttnBackend["F16_max512_seqlen"]
-       cuDNN based fused attention for FP16/BF16 and <=512 sequence length.
-    2. FusedAttnBackend["F16_arbitrary_seqlen"]
-       cuDNN based fused attention for FP16/BF16 and any sequence length.
-
-    Support matrix:
-
-    | backend       | 1                       | 2                              |
-    | flash based   | no                      | yes                            |
-    | cuDNN based   | yes                     | yes                            |
-    | qkv dtype     | fp16/bf16               | fp16/bf16                      |
-    | attn_type     | self/cross              | self/cross                     |
-    | qkv_layout    |                         |                                |
-    |  - (q,k,v)    | sb3hd, bs3hd            | sb3hd, bs3hd, sbh3d, bsh3d     |
-    |               | sbhd_sb2hd, bshd_bs2hd  | sbhd_sb2hd, bshd_bs2hd         |
-    |               | bshd_bshd_bshd          | sbhd_sbh2d, bshd_bsh2d         |
-    |               |                         | sbhd_sbhd_sbhd, bshd_bshd_bshd |
-    | mask_type     | causal/padding/no_mask  | causal/padding/no_mask         |
-    | bias_type     | post_scale_bias/no_bias | post_scale_bias/alibi/no_bias  |
-    | dropout       | yes                     | yes                            |
-    | max_seqlen    | <=512, multiple of 64   | any, multiple of 64            |
-    | head_dim      | 64                      | <=128, multiple of 8           |
-    | output dtype  | fp16/bf16               | fp16/bf16                      |
+    FusedAttnBackend["F16_arbitrary_seqlen"]
+       cuDNN attention for FP16/BF16 with any sequence length.
+    FusedAttnBackend["FP8"]
+       cuDNN attention for FP8 with any sequence length.
     """
 
     def __init__(
