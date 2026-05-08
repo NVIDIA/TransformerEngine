@@ -326,6 +326,8 @@ def canonicalize_attn_mask_type(attn_mask_type: str):
 def check_set_window_size(
     attn_mask_type: Union[str, AttnMaskType],
     window_size: Optional[Tuple[int, int]] = None,
+    *,
+    warn: bool = True,
 ) -> Tuple[int, int]:
     """Check if sliding window size is compliant with attention mask type.
     If not, set it to the appropriate size.
@@ -345,6 +347,16 @@ def check_set_window_size(
             ``"padding_causal_bottom_right"``) or an :class:`AttnMaskType` enum value.
         window_size: ``(left, right)`` tuple, or ``None`` to use the natural default for the
             given mask type.
+        warn: When ``True`` (default), emit a :class:`UserWarning` whenever the supplied
+            ``window_size`` is silently coerced to the canonical form for ``attn_mask_type``
+            (e.g. ``(-1, -1)`` → ``(-1, 0)`` for causal masks, or ``(-1, 0)`` → ``(-1, -1)``
+            for non-causal masks). Set to ``False`` for internal call sites that route an
+            already-validated value through this function purely for re-canonicalization
+            (for example, the context-parallel ring primitive's per-step mask switch from
+            ``CAUSAL_MASK`` to ``NO_MASK``), where the warning would target user-supplied
+            input that the user never provided in non-canonical form. Hard-error branches
+            (negative bounds outside the recognized sentinels) are not gated by this flag
+            and always raise.
 
     Returns:
         The canonicalized ``(left, right)`` tuple.
@@ -364,11 +376,12 @@ def check_set_window_size(
             orig_window_size[0] >= 0 and orig_window_size[1] != 0
         ):
             window_size = (orig_window_size[0], 0)
-            warnings.warn(
-                f"window_size should be (-1, 0) or (>=0, 0) for "
-                f"attn_mask_type={attn_mask_type_str}, got {orig_window_size}; "
-                f"coercing to {window_size}."
-            )
+            if warn:
+                warnings.warn(
+                    f"window_size should be (-1, 0) or (>=0, 0) for "
+                    f"attn_mask_type={attn_mask_type_str}, got {orig_window_size}; "
+                    f"coercing to {window_size}."
+                )
         elif orig_window_size != (-1, 0) and (
             orig_window_size[0] < 0 or orig_window_size[1] != 0
         ):
@@ -381,11 +394,12 @@ def check_set_window_size(
             window_size = (-1, -1)
         elif orig_window_size == (-1, 0):
             window_size = (-1, -1)
-            warnings.warn(
-                f"window_size should be (-1, -1) or (>=0, >=0) for "
-                f"attn_mask_type={attn_mask_type_str}, got {orig_window_size}; "
-                f"coercing to {window_size}."
-            )
+            if warn:
+                warnings.warn(
+                    f"window_size should be (-1, -1) or (>=0, >=0) for "
+                    f"attn_mask_type={attn_mask_type_str}, got {orig_window_size}; "
+                    f"coercing to {window_size}."
+                )
         elif orig_window_size != (-1, -1) and (
             orig_window_size[0] < 0 or orig_window_size[1] < 0
         ):
@@ -418,10 +432,11 @@ def is_fused_attn_kernel_available(
     """
     To check whether the fused attention kernel is supported
     """
-    # Canonicalize: None -> (-1, -1) for non-causal, (-1, 0) for causal-family.
-    # The flax modules already canonicalize at __post_init__; this covers direct
-    # callers (e.g. tests, internal dispatch helpers) so the value reaching the
-    # FusedAttnHelper is always self-consistent with attn_mask_type.
+    # Canonicalize at the C-extension boundary so direct callers see the same
+    # canonical encoding as flax users (whose flax DPA/MHA __post_init__ already
+    # canonicalizes via check_set_window_size). This keeps backend-availability
+    # queries consistent regardless of how the caller spelled the no-SWA
+    # sentinel ((-1, -1) vs (-1, 0) vs None).
     window_size_tuple = check_set_window_size(attn_mask_type, window_size)
 
     def make_helper(attn_mask_type):
@@ -787,11 +802,12 @@ def _segment_ids_pos_to_seqlens_offsets(
         attn_mask_type: AttnMaskType. Selects the mask predicate used to decide
                         which positions are valid (top-left causal vs
                         bottom-right causal vs. padding-only)
-        window_size:    Sliding-window tuple ``(left, right)`` in canonical form.
-                        Required (not Optional): every public boundary
-                        (``check_set_window_size``, ``fused_attn_fwd`` /
-                        ``fused_attn_bwd``, ``is_fused_attn_kernel_available``,
-                        flax ``__post_init__``s) canonicalizes ``None`` upstream
+        window_size:    Sliding-window tuple ``(left, right)``. Required (not
+                        Optional): the flax DPA / MHA ``__post_init__`` calls
+                        :func:`check_set_window_size` to canonicalize user
+                        input, and the public ``fused_attn_fwd`` /
+                        ``fused_attn_bwd`` / ``is_fused_attn_kernel_available``
+                        entrypoints default ``None`` to ``(-1, -1)`` upstream
                         before reaching this internal helper. Used here only
                         as a fast-path eligibility hint.
         max_segments_per_seq: maximum number of segments expected per row
@@ -803,13 +819,16 @@ def _segment_ids_pos_to_seqlens_offsets(
            segment_ids and trims at most one token per segment at the
            boundary. Used for any non-bottom-right mask with no finite
            sliding window, i.e. ``window_size`` in
-           ``{(-1, -1), (-1, 0)}``. ``(-1, 0)`` is the canonical causal-family
-           "no-SWA" sentinel produced by :func:`check_set_window_size`;
-           ``(-1, -1)`` is the corresponding non-causal sentinel.
-           ``window_size`` is guaranteed non-``None`` here because every
-           caller routes through ``check_set_window_size`` (flax modules at
-           ``__post_init__`` and the public ``fused_attn_fwd`` / ``fused_attn_bwd``
-           entrypoints). Bottom-right causal cross-attention is excluded:
+           ``{(-1, -1), (-1, 0)}``. Both encodings represent "no SWA":
+           ``(-1, 0)`` is the canonical causal-family form produced by
+           :func:`check_set_window_size` at the flax DPA / MHA boundary, and
+           ``(-1, -1)`` is the corresponding non-causal form (and is also the
+           form that internal callers such as ring-attention CP primitives
+           continue to use unmodified). ``window_size`` is guaranteed
+           non-``None`` here because the flax modules canonicalize at
+           ``__post_init__`` and the public ``fused_attn_fwd`` /
+           ``fused_attn_bwd`` entrypoints default ``None`` to ``(-1, -1)``.
+           Bottom-right causal cross-attention is excluded:
            the boundary trim leaves kv_seqlen short by one per active
            segment, which shifts the BRCM bottom-right alignment by one KV
            per Q row.
@@ -927,10 +946,12 @@ class SequenceDescriptor:
         """
         Acquire the seqlens/offsets for cuDNN backend.
 
-        ``window_size`` must be in canonical form (``Tuple[int, int]``,
-        never ``None``). The callers (``FusedAttn{Fwd,Bwd}Primitive.impl``)
-        construct ``_FusedAttnConfig`` via ``check_set_window_size`` at the
-        public boundary, which guarantees this invariant.
+        ``window_size`` must be a ``Tuple[int, int]`` (never ``None``). The
+        callers (``FusedAttn{Fwd,Bwd}Primitive.impl``) construct
+        ``_FusedAttnConfig`` via ``fused_attn_fwd`` / ``fused_attn_bwd``,
+        which default ``None`` to ``(-1, -1)`` at the public boundary; the
+        flax DPA / MHA modules additionally canonicalize user input through
+        :func:`check_set_window_size` at ``__post_init__`` upstream of that.
         """
         q_segment_ids, kv_segment_ids = self.segment_ids
         q_segment_pos, kv_segment_pos = self.segment_pos
