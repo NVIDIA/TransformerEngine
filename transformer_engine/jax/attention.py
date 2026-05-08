@@ -368,9 +368,7 @@ def check_set_window_size(
         if orig_window_size is None:
             window_size = (-1, 0)
         # Coerce the right side window to 0.
-        elif orig_window_size == (-1, -1) or (
-            orig_window_size[0] >= 0 and orig_window_size[1] > 0
-        ):
+        elif orig_window_size == (-1, -1) or (orig_window_size[0] >= 0 and orig_window_size[1] > 0):
             window_size = (orig_window_size[0], 0)
             if warn:
                 warnings.warn(
