@@ -76,8 +76,7 @@ std::string is_supported_f16_bwd(size_t batch, size_t num_attn_heads, size_t num
                                  NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type,
                                  int64_t window_size_left, int64_t window_size_right,
                                  bool bottom_right_diagonal, bool deterministic, DType qkv_dtype,
-                                 DType o_dtype, NVTEScalingMode scaling_mode,
-                                 cudnnHandle_t handle);
+                                 DType o_dtype, NVTEScalingMode scaling_mode, cudnnHandle_t handle);
 
 }  // namespace transformer_engine
 

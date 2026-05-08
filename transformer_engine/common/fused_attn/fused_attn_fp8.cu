@@ -1325,17 +1325,14 @@ void fused_attn_fp8_bwd(
   }
 }
 
-std::string is_supported_fp8_fwd(size_t batch, size_t num_attn_heads, size_t num_gqa_groups,
-                                 size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim_qk,
-                                 size_t head_dim_v, bool is_training,
-                                 [[maybe_unused]] bool return_max_logit, float attn_scale,
-                                 float p_dropout, NVTE_QKV_Layout qkv_layout,
-                                 NVTE_QKV_Format o_format, NVTE_QKV_Format qkv_scale_inv_format,
-                                 NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
-                                 NVTE_Softmax_Type softmax_type, int64_t window_size_left,
-                                 int64_t window_size_right, bool bottom_right_diagonal,
-                                 DType qkv_dtype, DType o_dtype, NVTEScalingMode scaling_mode,
-                                 cudnnHandle_t handle) {
+std::string is_supported_fp8_fwd(
+    size_t batch, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
+    size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, bool is_training,
+    [[maybe_unused]] bool return_max_logit, float attn_scale, float p_dropout,
+    NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format, NVTE_QKV_Format qkv_scale_inv_format,
+    NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type,
+    int64_t window_size_left, int64_t window_size_right, bool bottom_right_diagonal,
+    DType qkv_dtype, DType o_dtype, NVTEScalingMode scaling_mode, cudnnHandle_t handle) {
   size_t workspace_size = 0;
   try {
     fused_attn::fused_attn_fp8_fwd_impl(
@@ -1363,18 +1360,15 @@ std::string is_supported_fp8_fwd(size_t batch, size_t num_attn_heads, size_t num
   }
 }
 
-std::string is_supported_fp8_bwd(size_t batch, size_t num_attn_heads, size_t num_gqa_groups,
-                                 size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim_qk,
-                                 size_t head_dim_v, float attn_scale, float p_dropout,
-                                 NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format,
-                                 NVTE_QKV_Format do_format, NVTE_QKV_Layout dqkv_layout,
-                                 NVTE_QKV_Format qkv_scale_inv_format,
-                                 NVTE_QKV_Format do_scale_inv_format, NVTE_Bias_Type bias_type,
-                                 NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type,
-                                 int64_t window_size_left, int64_t window_size_right,
-                                 bool bottom_right_diagonal, bool deterministic, DType qkv_dtype,
-                                 DType o_dtype, NVTEScalingMode scaling_mode,
-                                 cudnnHandle_t handle) {
+std::string is_supported_fp8_bwd(
+    size_t batch, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
+    size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, float attn_scale, float p_dropout,
+    NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format, NVTE_QKV_Format do_format,
+    NVTE_QKV_Layout dqkv_layout, NVTE_QKV_Format qkv_scale_inv_format,
+    NVTE_QKV_Format do_scale_inv_format, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
+    NVTE_Softmax_Type softmax_type, int64_t window_size_left, int64_t window_size_right,
+    bool bottom_right_diagonal, bool deterministic, DType qkv_dtype, DType o_dtype,
+    NVTEScalingMode scaling_mode, cudnnHandle_t handle) {
   const cudnn_frontend::DataType_t qkv_t = get_cudnn_fe_dtype(qkv_dtype);
   const cudnn_frontend::DataType_t o_t = get_cudnn_fe_dtype(o_dtype);
   const cudnn_frontend::DataType_t do_t = o_t;
@@ -1385,9 +1379,9 @@ std::string is_supported_fp8_bwd(size_t batch, size_t num_attn_heads, size_t num
         static_cast<int64_t>(batch), static_cast<int64_t>(num_attn_heads),
         static_cast<int64_t>(num_gqa_groups), static_cast<int64_t>(max_seqlen_q),
         static_cast<int64_t>(max_seqlen_kv), static_cast<int64_t>(head_dim_qk),
-        static_cast<int64_t>(head_dim_v), attn_scale, p_dropout, qkv_layout, o_format,
-        do_format, dqkv_layout, bias_type, mask_type, softmax_type, window_size_left,
-        window_size_right, bottom_right_diagonal, deterministic,
+        static_cast<int64_t>(head_dim_v), attn_scale, p_dropout, qkv_layout, o_format, do_format,
+        dqkv_layout, bias_type, mask_type, softmax_type, window_size_left, window_size_right,
+        bottom_right_diagonal, deterministic,
         /*devPtrQ=*/nullptr, /*devPtrK=*/nullptr, /*devPtrV=*/nullptr, /*devPtrM=*/nullptr,
         /*devPtrO=*/nullptr, /*devPtrdO=*/nullptr, /*devPtrSoftmaxOffset=*/nullptr,
         /*devPtrdQ=*/nullptr, /*devPtrdK=*/nullptr, /*devPtrdV=*/nullptr,

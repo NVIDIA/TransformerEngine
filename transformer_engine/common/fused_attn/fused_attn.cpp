@@ -246,13 +246,13 @@ void set_message(const char **message, std::string reason) {
 NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     bool is_training, size_t batch_size, NVTEDType q_dtype, NVTEDType kv_dtype, NVTEDType o_dtype,
     NVTEScalingMode scaling_mode, NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format,
-    NVTE_QKV_Format do_format, NVTE_QKV_Layout dqkv_layout,
-    NVTE_QKV_Format qkv_scale_inv_format, NVTE_QKV_Format do_scale_inv_format,
-    NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
-    float attn_scale, float dropout, size_t num_attn_heads, size_t num_gqa_groups,
-    size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v,
-    int64_t window_size_left, int64_t window_size_right, bool bottom_right_diagonal,
-    bool return_max_logit, bool cuda_graph, bool deterministic, const char **message) {
+    NVTE_QKV_Format do_format, NVTE_QKV_Layout dqkv_layout, NVTE_QKV_Format qkv_scale_inv_format,
+    NVTE_QKV_Format do_scale_inv_format, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
+    NVTE_Softmax_Type softmax_type, float attn_scale, float dropout, size_t num_attn_heads,
+    size_t num_gqa_groups, size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim_qk,
+    size_t head_dim_v, int64_t window_size_left, int64_t window_size_right,
+    bool bottom_right_diagonal, bool return_max_logit, bool cuda_graph, bool deterministic,
+    const char **message) {
   using namespace transformer_engine;
   set_message(message, "");
   NVTE_CHECK(q_dtype == kv_dtype, "Q and KV must have the same data type.");
