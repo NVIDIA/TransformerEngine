@@ -238,6 +238,21 @@ class Utils:
             return tensor.numel() * tensor.element_size() / (1024**2)
 
     @staticmethod
+    def get_saved_tensor_gpu_size_mb(tensor):
+        if tensor is None or isinstance(tensor, int):
+            return 0
+        if isinstance(tensor, tuple):
+            push_results, _ = tensor
+            return Utils.get_saved_tensor_gpu_size_mb(push_results)
+        if isinstance(tensor, list):
+            return sum(Utils.get_saved_tensor_gpu_size_mb(t) for t in tensor)
+        return Utils.get_tensor_size_mb(tensor)
+
+    @staticmethod
+    def keeps_small_nvfp4_row_amax_on_gpu(recipe: Optional[recipe.Recipe]):
+        return recipe is not None and recipe.nvfp4() and recipe.row_scaled_activation
+
+    @staticmethod
     def memory_leak_check():
         # Should be called before each test.
         # Only cublas workspaces and some global tensors are allowed to be allocated.
@@ -292,6 +307,25 @@ class TestsOffloadableLayerState:
                 assert tensor_gpu.dtype == original_tensors[j].dtype
                 torch.testing.assert_close(tensor_gpu, original_tensors[j])
             offload_layer_state.release_all_memory()
+        torch.cuda.synchronize()
+
+    @pytest.mark.skipif(not nvfp4_available, reason="NVFP4 requires Blackwell")
+    def test_nvfp4_row_scaled_amax_stays_on_gpu(self):
+        Utils.memory_leak_check()
+        stream = torch.cuda.Stream()
+        offload_layer_state = OffloadableLayerState(
+            offload_stream=stream,
+        )
+        tensor = Utils.create_tensor(nvfp4_row_scaled())
+        tensor_id = offload_layer_state.push_tensor(tensor)
+        assert isinstance(tensor_id, tuple)
+        push_results, _ = tensor_id
+        assert isinstance(push_results[0], int)
+        assert isinstance(push_results[4], torch.Tensor)
+        assert push_results[4].device.type == "cuda"
+        assert push_results[4].numel() < 256 * 1024
+        del tensor, tensor_id
+        offload_layer_state.release_all_memory()
         torch.cuda.synchronize()
 
     def test_offload_base_tensor(self):
@@ -405,11 +439,16 @@ class TestsDefaultOffloadSynchronizer:
             del tensor, tensor_id
         torch.cuda.synchronize()
 
+        resident_gpu_size = sum(
+            Utils.get_saved_tensor_gpu_size_mb(tensor_id) for tensor_id in tensor_ids
+        )
         if recipe is None:
             assert Utils.get_max_cuda_memory_mb() == pytest.approx(
-                init_cuda_memory + tensor_size, 0.1
+                init_cuda_memory + resident_gpu_size, 0.1
             )
-        assert Utils.get_cuda_memory_mb() == pytest.approx(init_cuda_memory + tensor_size, 0.1)
+        assert Utils.get_cuda_memory_mb() == pytest.approx(
+            init_cuda_memory + resident_gpu_size, 0.1
+        )
 
         for i in range(NUM_LAYERS - 1, -1, -1):
             offload_synchronizer.bwd_step(i)
@@ -578,7 +617,9 @@ class TestTELayers:
             out = out + 1
         out = sync_function(out)
         del inp
-        if backward_override is None:
+        if Utils.keeps_small_nvfp4_row_amax_on_gpu(recipe):
+            assert Utils.get_cuda_memory_mb() <= cuda_memory_no_offload
+        elif backward_override is None:
             assert Utils.get_cuda_memory_mb() == pytest.approx(init_cuda_memory, 0.1)
         else:
             assert (
