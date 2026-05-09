@@ -275,12 +275,6 @@ void Tensor::Buffer::from_cpu() {
   }
 }
 
-void Tensor::Buffer::GPUDeleter::operator() (void *ptr) {
-  if (ptr != nullptr) {
-    cudaFree(ptr);
-  }
-}
-
 Tensor::Tensor(const std::string& name,
                const NVTEShape &shape, const DType type,
                const bool rowwise, const bool columnwise,
@@ -395,15 +389,54 @@ Tensor::Tensor(const std::string& name,
 
       // NVFP4 uses amax for tensor scaling
       if (scaling_mode == NVTE_NVFP4_1D_SCALING) {
-        amax_rowwise_.emplace(1, DType::kFloat32);
-        amax_columnwise_.emplace(1, DType::kFloat32);
-        tensor_.set_amax(amax_rowwise_->gpu_buffer(), DType::kFloat32, std::vector<size_t>{1});
-        tensor_.set_columnwise_amax(amax_columnwise_->gpu_buffer(), DType::kFloat32, std::vector<size_t>{1});
+        if (rowwise) {
+          amax_rowwise_.emplace(1, DType::kFloat32);
+          tensor_.set_amax(amax_rowwise_->gpu_buffer(), DType::kFloat32, std::vector<size_t>{1});
+        }
+        if (columnwise) {
+          amax_columnwise_.emplace(1, DType::kFloat32);
+          tensor_.set_columnwise_amax(amax_columnwise_->gpu_buffer(), DType::kFloat32, std::vector<size_t>{1});
+        }
       }
     }
     break;
   default:
     NVTE_ERROR("Unsupported tensor format (", static_cast<int>(scaling_mode), ")");
+  }
+}
+
+void Tensor::set_tensor_amax_nullptr() {
+  tensor_.set_amax(nullptr, DType::kFloat32, tensor_.defaultShape);
+}
+
+void Tensor::set_with_gemm_swizzled_scales(bool with_gemm_swizzled_scales) {
+  tensor_.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
+}
+
+void Tensor::set_row_scaled_nvfp4(bool row_scaled_nvfp4) {
+  NVTE_CHECK(tensor_.scaling_mode() == NVTE_NVFP4_1D_SCALING,
+             "Row-scaled NVFP4 is only supported for NVFP4 tensors.");
+  tensor_.set_row_scaled_nvfp4(row_scaled_nvfp4);
+
+  // Update amax tensor
+  if (row_scaled_nvfp4) {
+    // Row-scaled NVFP4 has amax matching number of rows
+    NVTE_CHECK(rowwise_, "Row-scaled NVFP4 requires row-wise data.");
+    NVTE_CHECK(!columnwise_, "Row-scaled NVFP4 does not support column-wise data.");
+    auto shape = tensor_.shape();
+    const size_t rows = product(shape, 0, shape.ndim - 1);
+    amax_rowwise_.emplace(rows, DType::kFloat32);
+    tensor_.set_amax(amax_rowwise_->gpu_buffer(), DType::kFloat32, std::vector<size_t>{rows});
+  } else {
+    // Tensor-scaled NVFP4 has single amax
+    if (rowwise_) {
+      amax_rowwise_.emplace(1, DType::kFloat32);
+      tensor_.set_amax(amax_rowwise_->gpu_buffer(), DType::kFloat32, std::vector<size_t>{1});
+    }
+    if (columnwise_) {
+      amax_columnwise_.emplace(1, DType::kFloat32);
+      tensor_.set_columnwise_amax(amax_columnwise_->gpu_buffer(), DType::kFloat32, std::vector<size_t>{1});
+    }
   }
 }
 
@@ -441,59 +474,6 @@ void Tensor::set_scale(float scale) {
   NVTE_CHECK(scale_->dtype() == DType::kFloat32);
   *scale_->cpu_buffer<float>() = scale;
   scale_->from_cpu();
-}
-
-void Tensor::set_tensor_amax_shape(const std::vector<size_t> &shape) {
-  const size_t numel = product(shape);
-  NVTE_CHECK(tensor_.scaling_mode() == NVTE_NVFP4_1D_SCALING,
-             "Amax shape override is only supported for NVFP4 test tensors.");
-
-  auto old_amax = tensor_.get_amax();
-  if (old_amax.data_ptr != nullptr) {
-    NVTE_CHECK_CUDA(cudaFree(old_amax.data_ptr));
-  }
-
-  float *amax = nullptr;
-  NVTE_CHECK_CUDA(cudaMalloc(&amax, numel * sizeof(float)));
-  NVTE_CHECK_CUDA(cudaMemset(amax, 0, numel * sizeof(float)));
-  tensor_.set_amax(amax, DType::kFloat32, shape);
-}
-
-std::vector<float> Tensor::tensor_amax_values() const {
-  const auto amax = tensor_.get_amax();
-  NVTE_CHECK(static_cast<DType>(amax.dtype) == DType::kFloat32, "Tensor amax must be FP32.");
-
-  const size_t numel = product(amax.shape);
-  if (numel == 0) {
-    return {};
-  }
-  NVTE_CHECK(amax.data_ptr != nullptr, "Tensor amax is not allocated.");
-
-  std::vector<float> values(numel);
-  NVTE_CHECK_CUDA(
-      cudaMemcpy(values.data(), amax.data_ptr, numel * sizeof(float), cudaMemcpyDeviceToHost));
-  return values;
-}
-
-void Tensor::copy_tensor_amax_from(const Tensor &other) {
-  const auto other_amax = other.tensor_.get_amax();
-  NVTE_CHECK(static_cast<DType>(other_amax.dtype) == DType::kFloat32,
-             "Source tensor amax must be FP32.");
-
-  auto my_amax = tensor_.get_amax();
-  NVTE_CHECK(static_cast<DType>(my_amax.dtype) == DType::kFloat32,
-             "Destination tensor amax must be FP32.");
-  NVTE_CHECK(areShapesEqual(my_amax.shape, other_amax.shape), "Amax shape mismatch.");
-
-  const size_t numel = product(other_amax.shape);
-  if (numel == 0) {
-    return;
-  }
-
-  NVTE_CHECK(other_amax.data_ptr != nullptr, "Source tensor amax is not allocated.");
-  NVTE_CHECK(my_amax.data_ptr != nullptr, "Destination tensor amax is not allocated.");
-  NVTE_CHECK_CUDA(cudaMemcpy(my_amax.data_ptr, other_amax.data_ptr, numel * sizeof(float),
-                             cudaMemcpyDeviceToDevice));
 }
 
 void Tensor::set_scale_inv(float scale_inv) {

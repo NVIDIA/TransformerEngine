@@ -124,6 +124,27 @@ struct TypeInfo {
     constexpr static size_t size = BitsNumber<T>::num_bits;
 };
 
+// Deleter for CUDA buffer RAII class
+struct CudaDeleter {
+  void operator()(void* ptr) const { if (ptr != nullptr) cudaFree(ptr); }
+};
+
+// CUDA buffer RAII class
+template <typename T = void>
+using CudaPtr = std::unique_ptr<T, CudaDeleter>;
+
+// Construct CUDA memory
+template <typename T = void>
+CudaPtr<T> cuda_alloc(size_t bytes) {
+  void* ptr = nullptr;
+  NVTE_CHECK_CUDA(cudaMalloc(&ptr, bytes));
+  return CudaPtr<T>(static_cast<T*>(ptr));
+}
+
+/* Wrapper for Transformer Engine tensor
+ *
+ * Maintains matching GPU and CPU buffers.
+ */
 class Tensor {
  public:
   Tensor(const std::string& name,
@@ -224,6 +245,14 @@ class Tensor {
     return *scale_->cpu_buffer<float>();
   }
 
+  float rowwise_scale_inv(){
+    NVTE_CHECK(scale_inv_rowwise_);
+    NVTE_CHECK(scale_inv_rowwise_->size() == 1);
+    NVTE_CHECK(scale_inv_rowwise_->dtype() == DType::kFloat32);
+    scale_inv_rowwise_->to_cpu();
+    return *scale_inv_rowwise_->cpu_buffer<float>();
+  }
+
   template <typename T>
   T *rowwise_cpu_scale_inv_ptr(){
     NVTE_CHECK(scale_inv_rowwise_);
@@ -238,12 +267,18 @@ class Tensor {
     return scale_inv_columnwise_->cpu_buffer<T>();
   }
 
-  float rowwise_scale_inv(){
-    NVTE_CHECK(scale_inv_rowwise_);
-    NVTE_CHECK(scale_inv_rowwise_->size() == 1);
-    NVTE_CHECK(scale_inv_rowwise_->dtype() == DType::kFloat32);
-    scale_inv_rowwise_->to_cpu();
-    return *scale_inv_rowwise_->cpu_buffer<float>();
+  template <typename T>
+  T *cpu_rowwise_amax_ptr() {
+    NVTE_CHECK(amax_rowwise_);
+    amax_rowwise_->to_cpu();
+    return amax_rowwise_->cpu_buffer<T>();
+  }
+
+  template <typename T>
+  T *cpu_columnwise_amax_ptr() {
+    NVTE_CHECK(amax_columnwise_);
+    amax_columnwise_->to_cpu();
+    return amax_columnwise_->cpu_buffer<T>();
   }
 
   bool rowwise() const {
@@ -254,20 +289,10 @@ class Tensor {
     return columnwise_;
   }
 
-  void set_tensor_amax_nullptr(){
-    tensor_.set_amax(nullptr, DType::kFloat32, tensor_.defaultShape);
-  }
+  void set_tensor_amax_nullptr();
 
-  void set_tensor_amax_shape(const std::vector<size_t> &shape);
-  std::vector<float> tensor_amax_values() const;
-  void copy_tensor_amax_from(const Tensor &other);
-
-  void set_with_gemm_swizzled_scales(bool with_gemm_swizzled_scales){
-    tensor_.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
-  }
-  void set_row_scaled_nvfp4(bool row_scaled_nvfp4) {
-    tensor_.set_row_scaled_nvfp4(row_scaled_nvfp4);
-  }
+  void set_with_gemm_swizzled_scales(bool with_gemm_swizzled_scales);
+  void set_row_scaled_nvfp4(bool row_scaled_nvfp4);
 
   void to_cpu();
   void from_cpu();
@@ -329,13 +354,8 @@ class Tensor {
     void from_cpu();
 
   private:
-
-    struct GPUDeleter {
-      void operator()(void *ptr);
-    };
-
     std::unique_ptr<unsigned char[]> cpu_buffer_;
-    std::unique_ptr<unsigned char[], GPUDeleter> gpu_buffer_;
+    CudaPtr<unsigned char[]> gpu_buffer_;
     size_t size_;
     DType dtype_;
     size_t bytes_;
@@ -550,25 +570,13 @@ int32_t getDeviceComputeCapability();
 constexpr int32_t hopperComputeCapability = 90;
 constexpr int32_t blackwellComputeCapability = 100;
 
-// Custom deleters for RAII
-struct CudaDeleter {
-  void operator()(void* p) const { if (p) cudaFree(p); }
-};
+// Custom deleter for RAII
 struct GroupedTensorDeleter {
   void operator()(NVTEGroupedTensor h) const { if (h) nvte_destroy_grouped_tensor(h); }
 };
 
-template <typename T = void>
-using CudaPtr = std::unique_ptr<T, CudaDeleter>;
+// Grouped tensor RAII class
 using GroupedTensorHandle = std::unique_ptr<std::remove_pointer_t<NVTEGroupedTensor>, GroupedTensorDeleter>;
-
-// Helper to allocate CUDA memory into a CudaPtr
-template <typename T = void>
-CudaPtr<T> cuda_alloc(size_t bytes) {
-  void* ptr = nullptr;
-  NVTE_CHECK_CUDA(cudaMalloc(&ptr, bytes));
-  return CudaPtr<T>(static_cast<T*>(ptr));
-}
 
 // Helper owning GPU buffers that back NVTEGroupedTensor.
 // NVTEGroupedTensor does not own memory; data/offsets/scales
