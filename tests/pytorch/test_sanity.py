@@ -132,9 +132,6 @@ if fp8_available:
     fp8_recipes.append(recipe.Float8CurrentScaling())
     fp8_recipes.append(recipe.DelayedScaling())
 fp8_recipes.append(None)
-fp8_recipes_with_row_scaled = fp8_recipes.copy()
-if nvfp4_available:
-    fp8_recipes_with_row_scaled.insert(-1, nvfp4_row_scaled())
 
 param_types = [torch.float32, torch.float16]
 if is_bf16_available():  # bf16 requires sm_80 or higher
@@ -434,7 +431,11 @@ def test_sanity_normalization_amp(dtype, model, skip_wgrad, skip_dgrad, normaliz
 
 
 @pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes_with_row_scaled, ids=recipe_id)
+@pytest.mark.parametrize(
+    "fp8_recipe",
+    fp8_recipes + ([nvfp4_row_scaled()] if nvfp4_available else []),
+    ids=recipe_id,
+)
 @pytest.mark.parametrize("backward_override", [None, "high_precision", "dequantized"])
 @pytest.mark.parametrize("model", ["small", "weird"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
@@ -482,7 +483,11 @@ def test_sanity_layernorm_linear(
 
 
 @pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes_with_row_scaled, ids=recipe_id)
+@pytest.mark.parametrize(
+    "fp8_recipe",
+    fp8_recipes + ([nvfp4_row_scaled()] if nvfp4_available else []),
+    ids=recipe_id,
+)
 @pytest.mark.parametrize("backward_override", [None, "high_precision", "dequantized"])
 @pytest.mark.parametrize("model", ["small", "weird"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
@@ -520,7 +525,11 @@ def test_sanity_linear(
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes_with_zero)
 @pytest.mark.parametrize("model", ["small", "weird"])
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes_with_row_scaled, ids=recipe_id)
+@pytest.mark.parametrize(
+    "fp8_recipe",
+    fp8_recipes + ([nvfp4_row_scaled()] if nvfp4_available else []),
+    ids=recipe_id,
+)
 @pytest.mark.parametrize("backward_override", [None, "high_precision", "dequantized"])
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 @pytest.mark.parametrize("use_bias", all_boolean)
@@ -561,7 +570,11 @@ def test_sanity_linear_with_zero_tokens(
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes_with_zero)
 @pytest.mark.parametrize("model", ["small", "weird"])
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes_with_row_scaled, ids=recipe_id)
+@pytest.mark.parametrize(
+    "fp8_recipe",
+    fp8_recipes + ([nvfp4_row_scaled()] if nvfp4_available else []),
+    ids=recipe_id,
+)
 @pytest.mark.parametrize("backward_override", [None, "high_precision", "dequantized"])
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 @pytest.mark.parametrize("use_bias", all_boolean)
