@@ -118,7 +118,7 @@ def quantization_tols(name: str) -> dict[str, float]:
         "mxfp8_block_scaling",
     ):
         return dtype_tols(tex.DType.kFloat8E4M3)
-    if name in ("nvfp4", "nvfp4_row_scaled", "nvfp4_row_scaled_4over6"):
+    if name in ("nvfp4", "nvfp4_4over6", "nvfp4_row_scaled", "nvfp4_row_scaled_4over6"):
         return dtype_tols(tex.DType.kFloat4E2M1)
     raise ValueError(f"Unsupported quantization scheme ({name})")
 
@@ -152,6 +152,14 @@ def make_recipe(name: Optional[str], **recipe_kwargs: Any) -> Optional[Recipe]:
             disable_2d_quantization=True,
             **recipe_kwargs,
         )
+    if name == "nvfp4_4over6":
+        return transformer_engine.common.recipe.NVFP4BlockScaling(
+            disable_rht=True,
+            disable_stochastic_rounding=True,
+            disable_2d_quantization=True,
+            enable_4over6=True,
+            **recipe_kwargs,
+        )
     if name == "nvfp4_row_scaled":
         return transformer_engine.common.recipe.NVFP4BlockScaling(
             disable_rht=True,
@@ -178,6 +186,8 @@ def recipe_id(recipe: Optional[Recipe]) -> str:
         return "None"
     if recipe.nvfp4() and recipe.row_scaled_activation and recipe.enable_4over6:
         return "NVFP4RowScaled4Over6BlockScaling"
+    if recipe.nvfp4() and recipe.enable_4over6:
+        return "NVFP44Over6BlockScaling"
     if recipe.nvfp4() and recipe.row_scaled_activation:
         return "NVFP4RowScaledBlockScaling"
     return type(recipe).__name__

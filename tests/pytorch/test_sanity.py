@@ -94,6 +94,19 @@ def nvfp4_vanilla():
     return nvfp4_recipe
 
 
+def nvfp4_4over6():
+    nvfp4_recipe = recipe.NVFP4BlockScaling(
+        disable_rht=True,
+        disable_stochastic_rounding=True,
+        disable_2d_quantization=True,
+        enable_4over6=True,
+    )
+    nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams()
+    nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams()
+    nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams()
+    return nvfp4_recipe
+
+
 def nvfp4_row_scaled_4over6():
     nvfp4_recipe = recipe.NVFP4BlockScaling(
         disable_rht=True,
@@ -113,6 +126,7 @@ if mxfp8_available:
     fp8_recipes.append(recipe.MXFP8BlockScaling())
 if nvfp4_available:
     fp8_recipes.append(nvfp4_vanilla())  # TODO: fix check for this
+    fp8_recipes.append(nvfp4_4over6())
 if fp8_block_scaling_available:
     fp8_recipes.append(recipe.Float8BlockScaling())
 if fp8_available:

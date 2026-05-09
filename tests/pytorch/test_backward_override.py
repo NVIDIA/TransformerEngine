@@ -39,7 +39,7 @@ from utils import (
 # --------------------------
 
 _BACKWARD_OVERRIDES = ("high_precision", "dequantized")
-_NVFP4_RECIPE_NAMES = ("nvfp4", "nvfp4_row_scaled", "nvfp4_row_scaled_4over6")
+_NVFP4_RECIPE_NAMES = ("nvfp4", "nvfp4_4over6", "nvfp4_row_scaled", "nvfp4_row_scaled_4over6")
 _NVFP4_ROW_SCALED_RECIPE_NAMES = ("nvfp4_row_scaled", "nvfp4_row_scaled_4over6")
 
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
@@ -79,6 +79,11 @@ _quantized_numerics_recipe_list = [
         "nvfp4",
         marks=pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4),
         id="NVFP4BlockScaling",
+    ),
+    pytest.param(
+        "nvfp4_4over6",
+        marks=pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4),
+        id="NVFP44Over6BlockScaling",
     ),
     pytest.param(
         "nvfp4_row_scaled_4over6",
@@ -187,6 +192,8 @@ def _maybe_skip_unsupported_recipe_module_combo(recipe_name: str, module_type: s
         pytest.skip("Fusible ops (te_ops.Linear) do not support Float8BlockScaling recipe")
     if module_type == "ops_linear" and recipe_name in _NVFP4_ROW_SCALED_RECIPE_NAMES:
         pytest.skip("Row-scaled NVFP4 currently does not support fused te_ops paths.")
+    if module_type == "grouped_linear" and recipe_name == "nvfp4_4over6":
+        pytest.skip("NVFP4 4over6 currently does not support grouped quantization.")
 
 
 def _make_quantized_forward_reference_recipe(recipe_name: str) -> recipe.Recipe:
