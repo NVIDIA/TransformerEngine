@@ -28,6 +28,7 @@ from transformer_engine.pytorch.utils import is_non_tn_fp8_gemm_supported
 import transformer_engine_torch as tex
 
 from references.ref_per_tensor_cs import ref_per_tensor_cs_cast
+from utils import assert_close, quantization_tols
 
 # PyTorch tensor dtypes
 _dtypes: List[torch.dtype] = [torch.float32, torch.float16, torch.bfloat16]
@@ -701,6 +702,63 @@ class TestQuantizedTensor:
             f"Expected shape {shape} but got {x_test.shape} "
             f"after setting data to None on {type(x_test).__name__}"
         )
+
+    @pytest.mark.parametrize(
+        "quantization",
+        _quantization_list + (["nvfp4_2d"] if nvfp4_available else []),
+    )
+    def test_update_nd_tensor(
+        self,
+        *,
+        quantization: str,
+        shape: Iterable[int] = (32, 4, 128),
+        dtype: torch.dtype = torch.bfloat16,
+        device: str = "cuda",
+    ) -> None:
+        """Check that an N-D quantized tensor can be updated."""
+
+        # Construct quantizer
+        if quantization == "fp8":
+            quantizer = Float8Quantizer(
+                scale=torch.ones(1, dtype=torch.float32, device=device).squeeze(),
+                amax=torch.zeros(1, dtype=torch.float32, device=device),
+                fp8_dtype=tex.DType.kFloat8E4M3,
+            )
+        elif quantization == "fp8_blockwise":
+            quantizer = Float8BlockQuantizer(
+                fp8_dtype=tex.DType.kFloat8E4M3,
+                rowwise=True,
+                columnwise=True,
+                force_pow_2_scales=True,
+                amax_epsilon=0.0,
+                block_scaling_dim=1,
+            )
+        elif quantization == "mxfp8":
+            quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+        elif quantization in ("nvfp4", "nvfp4_2d"):
+            quantizer = NVFP4Quantizer(
+                rowwise=True,
+                columnwise=True,
+                with_rht=False,
+                with_post_rht_amax=False,
+                with_2d_quantization=(quantization == "nvfp4_2d"),
+            )
+            quantization = "nvfp4"
+        else:
+            raise ValueError(f"Unknown quantization: {quantization}")
+
+        # Construct quantized tensor
+        x = torch.randn(list(shape), dtype=dtype, device=device)
+        q_x = quantizer(x)
+
+        # Update tensor
+        x_new = torch.randn(list(shape), dtype=dtype, device=device)
+        q_x.copy_(x_new)
+
+        # Check results
+        assert q_x.shape == torch.Size(shape)
+        tols = quantization_tols(quantization)
+        assert_close(q_x, x_new, **tols)
 
 
 @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)

@@ -8,7 +8,6 @@ from contextlib import nullcontext
 import pytest
 import torch
 from torch import nn
-from torch.testing._internal.common_device_type import largeTensorTest
 import transformer_engine.pytorch as te
 from transformer_engine.common.recipe import DelayedScaling, MXFP8BlockScaling, Float8BlockScaling
 from transformer_engine.pytorch import MultiheadAttention, quantized_model_init, is_bf16_available
@@ -1053,8 +1052,13 @@ class TestAdamTest:
 
             self.model_.load_state_dict(copy.deepcopy(self.model.state_dict()))
 
-    @largeTensorTest("60GB", "cuda")
     def test_large_tensor(self):
+        import gc
+
+        gc.collect()
+        torch.cuda.empty_cache()
+        if torch.cuda.memory.mem_get_info()[0] < 60 * 1024**3:
+            pytest.skip("Insufficient available memory")
         t = torch.zeros(2359332864, dtype=torch.half, device="cuda")
         t2 = torch.zeros(2359332864, dtype=torch.half, device="cuda")
         grad = torch.randn_like(t)

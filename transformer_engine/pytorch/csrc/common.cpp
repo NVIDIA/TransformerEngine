@@ -26,6 +26,20 @@ std::vector<size_t> convert_shape_back_from_fp4(const std::vector<size_t>& shape
   return ret;
 }
 
+std::array<size_t, 2> get_2d_dims(NVTEShape shape, bool transpose) {
+  if (!transpose) {
+    size_t flat_first = 1;
+    for (size_t i = 0; i + 1 < shape.ndim; ++i) flat_first *= shape.data[i];
+    const size_t flat_last = shape.ndim > 0 ? shape.data[shape.ndim - 1] : 1;
+    return {flat_first, flat_last};
+  } else {
+    const size_t flat_first = shape.ndim > 0 ? shape.data[0] : 1;
+    size_t flat_last = 1;
+    for (size_t i = 1; i < shape.ndim; ++i) flat_last *= shape.data[i];
+    return {flat_first, flat_last};
+  }
+}
+
 std::vector<size_t> getTensorShape(const at::Tensor& t) {
   std::vector<size_t> shape;
   for (auto s : t.sizes()) {

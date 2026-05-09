@@ -29,8 +29,7 @@ at::Tensor fp8_transpose(at::Tensor input, DType otype, std::optional<at::Tensor
       transpose_shape_int64.push_back(shape[i]);
     }
   }
-  const size_t M = shape.size() > 0 ? product(shape) / shape.back() : 1;
-  const size_t N = shape.size() > 0 ? shape.back() : 1;
+  const auto [M, N] = get_2d_dims(shape);
 
   // Output tensor
   at::Tensor out;
