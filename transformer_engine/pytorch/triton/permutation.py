@@ -18,7 +18,42 @@ from transformer_engine.common.triton.permutation import (
     _unpermute_bwd_with_merging_probs_kernel,
     _make_chunk_sort_map_kernel,
     _sort_chunks_by_map_kernel,
+    _row_id_map_pass_1_kernel_musa,
+    _row_id_map_pass_2_kernel_musa,
 )
+
+def make_row_id_map_musa(
+    routing_map: torch.Tensor,
+    num_tokens: int,
+    num_experts: int,
+):
+    # pylint: disable=missing-function-docstring
+    row_id_map = torch.empty((num_experts, num_tokens), dtype=torch.int64, device="cuda")
+    row_id_map_non_trans = torch.empty((num_tokens, num_experts), dtype=torch.int64, device="cuda")
+    block_size = 256
+    grid = (num_experts, triton.cdiv(num_tokens, block_size))
+    workspace_tensor = torch.empty(grid, dtype=torch.int64, device="cuda")
+    # block cumsum
+    _row_id_map_pass_1_kernel_musa[grid](
+        routing_map,
+        row_id_map,
+        workspace_tensor,
+        num_tokens,
+        routing_map.stride(0),
+        routing_map.stride(1),
+        block_size,
+    )
+    # cumsum all and process the mask
+    _row_id_map_pass_2_kernel_musa[grid](
+        row_id_map,
+        row_id_map_non_trans,
+        workspace_tensor,
+        num_experts,
+        num_tokens,
+        triton.next_power_of_2(num_experts * triton.cdiv(num_tokens, block_size)),
+        block_size,
+    )
+    return row_id_map, row_id_map_non_trans
 
 
 def make_row_id_map(

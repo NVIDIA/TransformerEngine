@@ -21,6 +21,8 @@ __all__ = [
     "moe_sort_chunks_by_index",
 ]
 
+use_musa_kernel = None
+
 
 class _moe_permute_index_map(torch.autograd.Function):
     """functional Permute with index router map"""
@@ -213,12 +215,19 @@ class _moe_permute_mask_map(torch.autograd.Function):
             num_out_tokens is not None
         ), "num_out_tokens must be provided to the fused permute function."
 
-        row_id_map = triton_permutation.make_row_id_map(routing_map, num_tokens, num_experts)
-
         fp8 = isinstance(inp, QuantizedTensor)
         per_tensor_recipe = isinstance(inp, Float8Tensor)
         blockwise_recipe = isinstance(inp, Float8BlockwiseQTensor)
         mxfp8_recipe = isinstance(inp, MXFP8Tensor)
+
+        global use_musa_kernel
+        if use_musa_kernel is None:
+            use_musa_kernel = not fp8 and num_experts % 4 == 0
+        assert use_musa_kernel is not None
+        if use_musa_kernel:
+            row_id_map, row_id_map_non_trans = triton_permutation.make_row_id_map_musa(routing_map, num_tokens, num_experts)
+        else:
+            row_id_map = triton_permutation.make_row_id_map(routing_map, num_tokens, num_experts)
 
         if fp8:
             fp8_dtype = inp._fp8_dtype
@@ -249,18 +258,31 @@ class _moe_permute_mask_map(torch.autograd.Function):
             fp8_dtype = None
             scale_hidden_dim = None
 
-        output, permuted_scale, permuted_probs = triton_permutation.permute_with_mask_map(
-            inp,
-            row_id_map,
-            probs,
-            fp8_scale,
-            pad_offsets,
-            num_tokens,
-            num_experts,
-            num_out_tokens,
-            hidden_size,
-            scale_hidden_dim,
-        )
+        if use_musa_kernel:
+            dtype = TE_DType[inp.dtype]
+            output, permuted_probs = tex.moe_permute_mask(
+                dtype,
+                inp,
+                row_id_map_non_trans,
+                probs,
+                num_tokens,
+                num_experts,
+                num_out_tokens,
+                hidden_size,
+            )
+        else:
+            output, permuted_scale, permuted_probs = triton_permutation.permute_with_mask_map(
+                inp,
+                row_id_map,
+                probs,
+                fp8_scale,
+                pad_offsets,
+                num_tokens,
+                num_experts,
+                num_out_tokens,
+                hidden_size,
+                scale_hidden_dim,
+            )
 
         if fp8:
             if per_tensor_recipe:
@@ -316,6 +338,8 @@ class _moe_permute_mask_map(torch.autograd.Function):
         if not permuted_act_grad.numel():
             return permuted_act_grad, None, None, ctx.probs, None
         
+        assert use_musa_kernel is not None
+
         preallocated_act_b = ctx.preallocated_act_b
 
         act_grad = None
@@ -325,17 +349,39 @@ class _moe_permute_mask_map(torch.autograd.Function):
             assert not isinstance(
                 permuted_act_grad, QuantizedTensor
             ), "The backward of moe_permute does not support FP8."
-            act_grad, probs_grad = triton_permutation.unpermute_with_mask_map(
-                permuted_act_grad,
-                row_id_map,
-                None,
-                permuted_probs_grad,
-                pad_offsets,
-                ctx.num_tokens,
-                ctx.num_experts,
-                ctx.hidden_size,
-                preallocated_act_b,
-            )
+            if use_musa_kernel:
+                dtype = TE_DType[permuted_act_grad.dtype]
+                if permuted_probs_grad is None:
+                    permuted_probs_grad = torch.empty(0)
+                if preallocated_act_b is None:
+                    preallocated_act_b = torch.empty(0)
+                else:
+                    preallocated_act_b = preallocated_act_b.view(permuted_act_grad.dtype)
+                    preallocated_act_b = preallocated_act_b[:ctx.num_tokens*ctx.hidden_size]
+                    preallocated_act_b = preallocated_act_b.view(ctx.num_tokens, ctx.hidden_size)
+                act_grad, probs_grad = tex.moe_unpermute_mask(
+                    dtype,
+                    permuted_act_grad,
+                    row_id_map,
+                    torch.empty(0),
+                    permuted_probs_grad,
+                    ctx.num_tokens,
+                    ctx.num_experts,
+                    ctx.hidden_size,
+                    preallocated_act_b,
+                )
+            else:
+                act_grad, probs_grad = triton_permutation.unpermute_with_mask_map(
+                    permuted_act_grad,
+                    row_id_map,
+                    None,
+                    permuted_probs_grad,
+                    pad_offsets,
+                    ctx.num_tokens,
+                    ctx.num_experts,
+                    ctx.hidden_size,
+                    preallocated_act_b,
+                )
         if not ctx.needs_input_grad[3]:
             probs_grad = None
         return act_grad, None, None, probs_grad, None, None
@@ -363,6 +409,9 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
             restore_shape = inp.shape
         num_tokens, hidden_size = restore_shape
         num_experts = (row_id_map.size(1) - 1) // 2
+        assert use_musa_kernel is not None
+        if use_musa_kernel:
+            num_experts = row_id_map.size(0)
 
         with_probs = merging_probs is not None
         if with_probs:
@@ -377,17 +426,38 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
         assert not isinstance(
             inp, QuantizedTensor
         ), "The forward of moe_unpermute does not support FP8."
-        unpermuted_output, _ = triton_permutation.unpermute_with_mask_map(
-            inp,
-            row_id_map,
-            merging_probs,
-            None,
-            pad_offsets,
-            num_tokens,
-            num_experts,
-            hidden_size,
-            preallocated_act_f,
-        )
+
+        if use_musa_kernel:
+            dtype = TE_DType[inp.dtype]
+            if preallocated_act_f is None:
+                preallocated_act_f = torch.empty(0)
+            else:
+                preallocated_act_f = preallocated_act_f.view(inp.dtype)
+                preallocated_act_f = preallocated_act_f[:num_tokens*hidden_size]
+                preallocated_act_f = preallocated_act_f.view(num_tokens, hidden_size)
+            unpermuted_output, _ = tex.moe_unpermute_mask(
+                dtype,
+                inp,
+                row_id_map,
+                merging_probs if merging_probs is not None else torch.empty(0),
+                torch.empty(0),
+                num_tokens,
+                num_experts,
+                hidden_size,
+                preallocated_act_f,
+            )
+        else:
+            unpermuted_output, _ = triton_permutation.unpermute_with_mask_map(
+                inp,
+                row_id_map,
+                merging_probs,
+                None,
+                pad_offsets,
+                num_tokens,
+                num_experts,
+                hidden_size,
+                preallocated_act_f,
+            )
 
         if with_probs:
             ctx.save_for_backward(inp, row_id_map, merging_probs, pad_offsets)
@@ -418,6 +488,8 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
             per_tensor_recipe = isinstance(unpermuted_act_grad, Float8Tensor)
             blockwise_recipe = isinstance(unpermuted_act_grad, Float8BlockwiseQTensor)
             mxfp8_recipe = isinstance(unpermuted_act_grad, MXFP8Tensor)
+
+            assert use_musa_kernel is not None
 
             if fp8:
                 fp8_dtype = unpermuted_act_grad._fp8_dtype
@@ -452,32 +524,61 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
                 assert (
                     not fp8
                 ), "The backward of moe_unpermute with merging probs does not support FP8."
-                act_grad, probs_grad = (
-                    triton_permutation.unpermute_with_mask_map_bwd_with_merging_probs(
+                if use_musa_kernel:
+                    dtype = TE_DType[unpermuted_act_grad.dtype]
+                    act_grad, probs_grad = (
+                        tex.moe_unpermute_mask_bwd_with_merging_probs(
+                            dtype,
+                            unpermuted_act_grad,
+                            fwd_input,
+                            merging_probs,
+                            row_id_map,
+                            ctx.num_tokens,
+                            ctx.num_experts,
+                            ctx.num_permuted_tokens,
+                            ctx.hidden_size,
+                        )
+                    )
+                else:
+                    act_grad, probs_grad = (
+                        triton_permutation.unpermute_with_mask_map_bwd_with_merging_probs(
+                            unpermuted_act_grad,
+                            row_id_map,
+                            fwd_input,
+                            merging_probs,
+                            pad_offsets,
+                            ctx.num_tokens,
+                            ctx.num_experts,
+                            ctx.num_permuted_tokens,
+                            ctx.hidden_size,
+                        )
+                    )
+            else:
+                if use_musa_kernel:
+                    dtype = TE_DType[unpermuted_act_grad.dtype]
+                    act_grad, _ = tex.moe_permute_mask(
+                        dtype,
                         unpermuted_act_grad,
                         row_id_map,
-                        fwd_input,
-                        merging_probs,
-                        pad_offsets,
+                        torch.empty(0),
                         ctx.num_tokens,
                         ctx.num_experts,
                         ctx.num_permuted_tokens,
                         ctx.hidden_size,
                     )
-                )
-            else:
-                act_grad, permuted_scale, _ = triton_permutation.permute_with_mask_map(
-                    unpermuted_act_grad,
-                    row_id_map,
-                    None,
-                    fp8_scale,
-                    pad_offsets,
-                    ctx.num_tokens,
-                    ctx.num_experts,
-                    ctx.num_permuted_tokens,
-                    ctx.hidden_size,
-                    scale_hidden_dim,
-                )
+                else:
+                    act_grad, permuted_scale, _ = triton_permutation.permute_with_mask_map(
+                        unpermuted_act_grad,
+                        row_id_map,
+                        None,
+                        fp8_scale,
+                        pad_offsets,
+                        ctx.num_tokens,
+                        ctx.num_experts,
+                        ctx.num_permuted_tokens,
+                        ctx.hidden_size,
+                        scale_hidden_dim,
+                    )
 
             if fp8:
                 if per_tensor_recipe:

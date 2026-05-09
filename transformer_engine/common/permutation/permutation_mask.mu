@@ -1,22 +1,30 @@
 #include <transformer_engine/permutation.h>
 
+#include <cstdio>
+
 #include "../common.h"
 #include "../util/mtfp8_utils.muh"
 #include "../utils.cuh"
+
+namespace {
+
+using  v2i32_t = int32_t __attribute__((vector_size(8)));
+
+}
 
 // input: [num_tokens, hidden_size] @ [stride_input_token, stride_input_hidden]
 // row_id_map: [num_experts, num_tokens]
 // output: [num_out_tokens, hidden_size] @ [stride_output_token, stride_output_hidden]
 // probs: [num_tokens, num_experts]
 // permuted_probs: [num_out_tokens]
-template <typename Dtype, typename IdxDtype, bool with_permuted_probs = false>
+template <typename Dtype, typename P_Dtype, typename IdxDtype, bool with_permuted_probs = false>
 __global__ void permute_with_mask_map_trans(
     MUtensorDescriptor out_dev_tensorDesc, MUtensorDescriptor in_dev_tensorDesc,
-    IdxDtype *row_id_map_ptr, const Dtype *probs_ptr, Dtype *permuted_probs_ptr,
+    IdxDtype *row_id_map_ptr, const P_Dtype *probs_ptr, P_Dtype *permuted_probs_ptr,
     const int num_tokens, const int num_experts, const int hidden_size,
     const int stride_input_token, const int stride_input_hidden, const int stride_output_token,
     const int stride_output_hidden, const int stride_probs_token, const int stride_probs_expert,
-    const int stride_permuted_probs_token) {
+    const int stride_permuted_probs_token, const v2i32_t ld_st_token_dim) {
   using IdxVec = transformer_engine::Vec<IdxDtype, 4>;
   int tidx = threadIdx.x;
   int token_id = blockIdx.x;
@@ -28,9 +36,9 @@ __global__ void permute_with_mask_map_trans(
   bar.init_arrival(1);
   __syncthreads();
 
-  int ld_dim = hidden_size;
-  int ld_pos = token_id * hidden_size;
-  __musa::memcpy_async(bar, smem, &in_dev_tensorDesc, ld_dim, ld_pos, trans_count, 0, 3, 1);
+  v2i32_t ld_pos{0, static_cast<int>(token_id)};
+  __musa::memcpy_async(bar, smem, &in_dev_tensorDesc, ld_st_token_dim, ld_pos, trans_count, 0, 3, 1);
+
   unsigned phase_id = bar.arrive();
   bar.wait(phase_id);
 
@@ -38,13 +46,12 @@ __global__ void permute_with_mask_map_trans(
   for (int expert_id = 0; expert_id < num_experts; expert_id += 1) {
     dst_row = row_id_map_ptr[expert_id * num_tokens + token_id];
     if (dst_row != -1) {
-      int st_dim = hidden_size;
-      int st_pos = dst_row * hidden_size;
-      __musa::memcpy(smem, &out_dev_tensorDesc, st_dim, st_pos);
+      v2i32_t st_pos{0, static_cast<int>(dst_row)};
+      __musa::memcpy(smem, &out_dev_tensorDesc, ld_st_token_dim, st_pos);
       if constexpr (with_permuted_probs) {
         if (tidx == 0) {
           int prob_offset = token_id * stride_probs_token + expert_id * stride_probs_expert;
-          Dtype prob_val = probs_ptr[prob_offset];
+          P_Dtype prob_val = probs_ptr[prob_offset];
           int permuted_prob_offset = dst_row * stride_permuted_probs_token;
           permuted_probs_ptr[permuted_prob_offset] = prob_val;
         }
@@ -54,16 +61,16 @@ __global__ void permute_with_mask_map_trans(
   __musa::memcpy_idf_l2();
 }
 
-template <typename Dtype, typename IdxDtype, bool with_permuted_probs = false>
+template <typename Dtype, typename P_Dtype, typename IdxDtype, bool with_permuted_probs = false>
 __global__ void permute_with_mask_map(MUtensorDescriptor out_dev_tensorDesc,
                                       MUtensorDescriptor in_dev_tensorDesc,
-                                      MUtensorDescriptor map_dev_tensorDesc, const Dtype *probs_ptr,
-                                      Dtype *permuted_probs_ptr, const int num_tokens,
+                                      MUtensorDescriptor map_dev_tensorDesc, const P_Dtype *probs_ptr,
+                                      P_Dtype *permuted_probs_ptr, const int num_tokens,
                                       const int num_experts, const int hidden_size,
                                       const int stride_input_token, const int stride_input_hidden,
                                       const int stride_output_token, const int stride_output_hidden,
                                       const int stride_probs_token, const int stride_probs_expert,
-                                      const int stride_permuted_probs_token) {
+                                      const int stride_permuted_probs_token, const v2i32_t ld_st_token_dim) {
   using IdxVec = transformer_engine::Vec<IdxDtype, 4>;
   int tidx = threadIdx.x;
   int token_id = blockIdx.x;
@@ -81,31 +88,33 @@ __global__ void permute_with_mask_map(MUtensorDescriptor out_dev_tensorDesc,
   bar_map.init_arrival(1);
   __syncthreads();
 
-  int ld_dim = hidden_size;
-  int ld_pos = token_id * hidden_size;
   int ld_dim_map = num_experts;
   int ld_pos_map = token_id * num_experts;
   __musa::memcpy_async(bar_map, smem_map, &map_dev_tensorDesc, ld_dim_map, ld_pos_map,
                        trans_count_map, 0, 3, 1);
   unsigned phase_id_map = bar_map.arrive();
-  __musa::memcpy_async(bar, smem, &in_dev_tensorDesc, ld_dim, ld_pos, trans_count, 0, 3, 1);
+
+  v2i32_t ld_pos{0, static_cast<int>(token_id)};
+  __musa::memcpy_async(bar, smem, &in_dev_tensorDesc, ld_st_token_dim, ld_pos, trans_count, 0, 3, 1);
   unsigned phase_id = bar.arrive();
 
   bar_map.wait(phase_id_map);
   bar.wait(phase_id);
+
   IdxVec dst_row_vec;
   for (int expert_id = 0; expert_id < num_experts; expert_id += 4) {
     dst_row_vec.load_from(smem_map + expert_id);
 #pragma unroll
     for (int i = 0; i < 4; i++) {
       if (dst_row_vec.data.elt[i] != -1) {
-        int st_dim = hidden_size;
-        int st_pos = dst_row_vec.data.elt[i] * hidden_size;
-        __musa::memcpy(smem, &out_dev_tensorDesc, st_dim, st_pos);
+
+        v2i32_t st_pos{0, static_cast<int>(dst_row_vec.data.elt[i])};
+        __musa::memcpy(smem, &out_dev_tensorDesc, ld_st_token_dim, st_pos);
+
         if constexpr (with_permuted_probs) {
           if (tidx == 0) {
             int prob_offset = token_id * stride_probs_token + (expert_id + i) * stride_probs_expert;
-            Dtype prob_val = probs_ptr[prob_offset];
+            P_Dtype prob_val = probs_ptr[prob_offset];
             int permuted_prob_offset = dst_row_vec.data.elt[i] * stride_permuted_probs_token;
             permuted_probs_ptr[permuted_prob_offset] = prob_val;
           }
@@ -116,17 +125,18 @@ __global__ void permute_with_mask_map(MUtensorDescriptor out_dev_tensorDesc,
   __musa::memcpy_idf_l2();
 }
 
+
 // input: [num_out_tokens, hidden_size]
 // row_id_map: [num_experts, num_tokens]
 // output: [num_tokens, hidden_size]
 // merging_probs: [num_tokens, num_experts]
 // permuted_probs: [num_out_tokens]
 // unpermuted_probs: [num_tokens, num_experts]
-template <typename Dtype, typename IdxDtype, bool with_merging_probs, bool with_permuted_probs,
+template <typename Dtype, typename P_Dtype, typename IdxDtype, bool with_merging_probs, bool with_permuted_probs,
           bool trans_row_id_map, int vlen>
 __global__ void moe_unpermute_mask(
-    const Dtype *in_ptr, Dtype *out_ptr, IdxDtype *row_id_map_ptr, const Dtype *merging_probs_ptr,
-    const Dtype *permuted_probs_ptr, Dtype *unpermuted_probs_ptr, const int num_tokens,
+    const Dtype *in_ptr, Dtype *out_ptr, IdxDtype *row_id_map_ptr, const P_Dtype *merging_probs_ptr,
+    const P_Dtype *permuted_probs_ptr, P_Dtype *unpermuted_probs_ptr, const int num_tokens,
     const int num_experts, const int hidden_size, const int stride_input_token,
     const int stride_input_hidden, const int stride_output_token, const int stride_output_hidden,
     const int stride_merging_probs_token, const int stride_merging_probs_expert,
@@ -169,7 +179,7 @@ __global__ void moe_unpermute_mask(
           DtypeVec src_val_vec = (Dtype)(0.0f);
           src_val_vec.load_from(in_ptr + src_offset);
 
-          Dtype merging_probs_val = (Dtype)(1.0f);
+          P_Dtype merging_probs_val = (P_Dtype)(1.0f);
           if constexpr (with_merging_probs) {
             int merging_probs_offset = token_id * stride_merging_probs_token +
                                        (expert_id + i) * stride_merging_probs_expert;
@@ -190,7 +200,7 @@ __global__ void moe_unpermute_mask(
         } else {
           if constexpr (with_permuted_probs) {
             if (tidx == 0) {
-              unpermuted_probs_ptr[unpermuted_offset] = (Dtype)(0.0f);
+              unpermuted_probs_ptr[unpermuted_offset] = (P_Dtype)(0.0f);
             }
           }
           continue;
@@ -309,10 +319,10 @@ __global__ void moe_unpermute_mask_bwd_with_merging_probs(
   }
 }
 
-template <typename Dtype, typename IdxDtype, bool with_permuted_probs = false,
+template <typename Dtype, typename P_Dtype, typename IdxDtype, bool with_permuted_probs = false,
           bool trans_row_id_map = true>
 void nvte_permute_mask_launcher(const Dtype *input, Dtype *output, IdxDtype *row_id_map,
-                                const Dtype *probs, Dtype *permuted_probs, const int num_tokens,
+                                const P_Dtype *probs, P_Dtype *permuted_probs, const int num_tokens,
                                 const int num_experts, const int num_out_tokens,
                                 const int hidden_size, musaStream_t stream) {
   NVTE_CHECK((hidden_size * sizeof(Dtype)) % 4 == 0, "bytes of hidden_size must be divisible by 4");
@@ -320,32 +330,38 @@ void nvte_permute_mask_launcher(const Dtype *input, Dtype *output, IdxDtype *row
     NVTE_CHECK((num_experts * sizeof(IdxDtype)) % 4 == 0,
                "bytes of num_experts must be divisible by 4");
   }
+  constexpr int data_size = sizeof(Dtype);
 
   MUtensorDescriptor intensorDesc;
   MUtensorDescriptor outtensorDesc;
   MUtensorDescriptor maptensorDesc;
   MUtensorDescriptorDataType tensorDataType = MU_TENSOR_DESCRIPTOR_DATA_TYPE_BFLOAT16;
   MUtensorDescriptorDataType mapDataType = MU_TENSOR_DESCRIPTOR_DATA_TYPE_INT64;
-  uint32_t tensorRank = 1;
-  const uint64_t in_globalDim[5] = {static_cast<uint64_t>(hidden_size) * num_tokens, 1, 1, 1, 1};
-  const uint64_t in_globalStrides[4] = {0, 0, 0, 0};
-  const uint64_t out_globalDim[5] = {static_cast<uint64_t>(hidden_size) * num_out_tokens, 1, 1, 1,
-                                     1};
-  const uint64_t out_globalStrides[4] = {0, 0, 0, 0};
-  const uint64_t map_globalDim[5] = {static_cast<uint64_t>(num_experts) * num_tokens, 1, 1, 1, 1};
-  const uint64_t map_globalStrides[4] = {0, 0, 0, 0};
   MUtensorDescriptorInterleave interleave = MU_TENSOR_DESCRIPTOR_INTERLEAVE_NONE;
   uint64_t oobConstantFill = 0;
 
-  NVTE_CHECK_MU(muTensorDescriptorEncode(&intensorDesc, tensorDataType, tensorRank, (void *)input,
-                                         in_globalDim, in_globalStrides, interleave,
-                                         oobConstantFill));
-  NVTE_CHECK_MU(muTensorDescriptorEncode(&outtensorDesc, tensorDataType, tensorRank, (void *)output,
-                                         out_globalDim, out_globalStrides, interleave,
-                                         oobConstantFill));
+  uint32_t tensorRank = 1;
+  const uint64_t map_globalDim[5] = {static_cast<uint64_t>(num_experts) * num_tokens, 1, 1, 1, 1};
+  const uint64_t map_globalStrides[4] = {0, 0, 0, 0};
   NVTE_CHECK_MU(muTensorDescriptorEncode(&maptensorDesc, mapDataType, tensorRank,
                                          (void *)row_id_map, map_globalDim, map_globalStrides,
                                          interleave, oobConstantFill));
+
+  uint32_t tensorRankIn = 2;
+  const uint64_t in_globalDim[5] = {static_cast<uint64_t>(hidden_size), static_cast<uint64_t>(num_tokens), 1, 1, 1};
+  const uint64_t in_globalStrides[4] = {static_cast<uint64_t>(hidden_size)*data_size, 0, 0, 0};
+  NVTE_CHECK_MU(muTensorDescriptorEncode(&intensorDesc, tensorDataType, tensorRankIn, (void *)input,
+                                         in_globalDim, in_globalStrides, interleave,
+                                         oobConstantFill));
+
+  uint32_t tensorRankOut = 2;
+  const uint64_t out_globalDim[5] = {static_cast<uint64_t>(hidden_size), static_cast<uint64_t>(num_out_tokens), 1, 1, 1};
+  const uint64_t out_globalStrides[4] = {static_cast<uint64_t>(hidden_size)*data_size, 0, 0, 0};
+  NVTE_CHECK_MU(muTensorDescriptorEncode(&outtensorDesc, tensorDataType, tensorRankOut, (void *)output,
+                                         out_globalDim, out_globalStrides, interleave,
+                                         oobConstantFill));
+
+  const v2i32_t ld_st_token_dim{hidden_size, 1};
 
   const int block_x = 32;
   const int grid_x = num_tokens;
@@ -354,22 +370,22 @@ void nvte_permute_mask_launcher(const Dtype *input, Dtype *output, IdxDtype *row
 
   if constexpr (trans_row_id_map) {
     int smem_size = hidden_size * sizeof(Dtype);
-    permute_with_mask_map_trans<Dtype, IdxDtype, with_permuted_probs><<<grid, block, smem_size, stream>>>(
+    permute_with_mask_map_trans<Dtype, P_Dtype, IdxDtype, with_permuted_probs><<<grid, block, smem_size, stream>>>(
         outtensorDesc, intensorDesc, row_id_map, probs, permuted_probs, num_tokens, num_experts,
-        hidden_size, hidden_size, 1, hidden_size, 1, num_experts, 1, 1);
+        hidden_size, hidden_size, 1, hidden_size, 1, num_experts, 1, 1, ld_st_token_dim);
   } else {
     int smem_size = hidden_size * sizeof(Dtype) + num_experts * sizeof(IdxDtype);
-    permute_with_mask_map<Dtype, IdxDtype, with_permuted_probs><<<grid, block, smem_size, stream>>>(
+    permute_with_mask_map<Dtype, P_Dtype, IdxDtype, with_permuted_probs><<<grid, block, smem_size, stream>>>(
         outtensorDesc, intensorDesc, maptensorDesc, probs, permuted_probs, num_tokens, num_experts,
-        hidden_size, hidden_size, 1, hidden_size, 1, num_experts, 1, 1);
+        hidden_size, hidden_size, 1, hidden_size, 1, num_experts, 1, 1, ld_st_token_dim);
   }
 }
 
-template <typename Dtype, typename IdxDtype, bool with_merging_probs = false,
+template <typename Dtype, typename P_Dtype, typename IdxDtype, bool with_merging_probs = false,
           bool with_permuted_probs = false, bool trans_row_id_map = true>
 void nvte_unpermute_mask_launcher(const Dtype *input, Dtype *output, IdxDtype *row_id_map,
-                                  const Dtype *merging_probs, const Dtype *permuted_probs,
-                                  Dtype *unpermuted_probs, const int num_tokens,
+                                  const P_Dtype *merging_probs, const P_Dtype *permuted_probs,
+                                  P_Dtype *unpermuted_probs, const int num_tokens,
                                   const int num_experts, const int hidden_size,
                                   musaStream_t stream) {
   constexpr int vlen = 16 / sizeof(Dtype);
@@ -380,7 +396,7 @@ void nvte_unpermute_mask_launcher(const Dtype *input, Dtype *output, IdxDtype *r
   dim3 grid(grid_x, grid_y);
   int smem_size = num_experts * sizeof(IdxDtype);
 
-  moe_unpermute_mask<Dtype, IdxDtype, with_merging_probs, with_permuted_probs, trans_row_id_map,
+  moe_unpermute_mask<Dtype, P_Dtype, IdxDtype, with_merging_probs, with_permuted_probs, trans_row_id_map,
                      vlen><<<grid, block, smem_size, stream>>>(
       input, output, row_id_map, merging_probs, permuted_probs, unpermuted_probs, num_tokens,
       num_experts, hidden_size, hidden_size, 1, hidden_size, 1, num_experts, 1, 1, num_experts, 1);
@@ -410,7 +426,7 @@ void nvte_unpermute_mask_bwd_with_merging_probs_launcher(
 #define CALL_PERMUTE_MASK_LAUNCHER(_PERMUTED_PROBS, _TRANS_ROW_ID_MAP)                  \
   TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(                                                 \
       input_cu->data.dtype, T,                                                          \
-      nvte_permute_mask_launcher<T, int64_t, _PERMUTED_PROBS, _TRANS_ROW_ID_MAP>(       \
+      nvte_permute_mask_launcher<T, T, int64_t, _PERMUTED_PROBS, _TRANS_ROW_ID_MAP>(       \
           reinterpret_cast<const T *>(input_cu->data.dptr),                             \
           reinterpret_cast<T *>(output_cu->data.dptr),                                  \
           reinterpret_cast<int64_t *>(row_id_map_cu->data.dptr),                        \
@@ -425,15 +441,15 @@ void nvte_permute_mask(const NVTETensor input, NVTETensor output, NVTETensor row
   NVTE_API_CALL(nvte_permute_mask);
 
   const transformer_engine::Tensor *input_cu =
-      reinterpret_cast<const transformer_engine::Tensor *>(input);
+      transformer_engine::convertNVTETensorCheck(input);
   const transformer_engine::Tensor *output_cu =
-      reinterpret_cast<const transformer_engine::Tensor *>(output);
+      transformer_engine::convertNVTETensorCheck(output);
   const transformer_engine::Tensor *row_id_map_cu =
-      reinterpret_cast<const transformer_engine::Tensor *>(row_id_map);
+      transformer_engine::convertNVTETensorCheck(row_id_map);
   const transformer_engine::Tensor *probs_cu =
-      reinterpret_cast<const transformer_engine::Tensor *>(probs);
+      transformer_engine::convertNVTETensorCheck(probs);
   const transformer_engine::Tensor *permuted_probs_cu =
-      reinterpret_cast<const transformer_engine::Tensor *>(permuted_probs);
+      transformer_engine::convertNVTETensorCheck(permuted_probs);
 
   if (probs_cu->data.dptr != nullptr) {
     if (row_id_map_cu->data.shape[0] == num_experts) {
@@ -449,13 +465,12 @@ void nvte_permute_mask(const NVTETensor input, NVTETensor output, NVTETensor row
     }
   }
 }
-
 #undef CALL_PERMUTE_MASK_LAUNCHER
 
 #define CALL_UNPERMUTE_MASK_LAUNCHER(_MERGING_PROBS, _PERMUTED_PROBS, _TRANS_ROW_ID_MAP)  \
   TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(                                                     \
       input_cu->data.dtype, T,                                                            \
-      nvte_unpermute_mask_launcher<T, int64_t, _MERGING_PROBS, _PERMUTED_PROBS,           \
+      nvte_unpermute_mask_launcher<T, T, int64_t, _MERGING_PROBS, _PERMUTED_PROBS,           \
                                    _TRANS_ROW_ID_MAP>(                                    \
           reinterpret_cast<const T *>(input_cu->data.dptr),                               \
           reinterpret_cast<T *>(output_cu->data.dptr),                                    \
@@ -487,17 +502,17 @@ void nvte_unpermute_mask(const NVTETensor input, NVTETensor output, NVTETensor r
   NVTE_API_CALL(nvte_unpermute_mask);
 
   const transformer_engine::Tensor *input_cu =
-      reinterpret_cast<const transformer_engine::Tensor *>(input);
+      transformer_engine::convertNVTETensorCheck(input);
   const transformer_engine::Tensor *output_cu =
-      reinterpret_cast<const transformer_engine::Tensor *>(output);
+      transformer_engine::convertNVTETensorCheck(output);
   const transformer_engine::Tensor *row_id_map_cu =
-      reinterpret_cast<const transformer_engine::Tensor *>(row_id_map);
+      transformer_engine::convertNVTETensorCheck(row_id_map);
   const transformer_engine::Tensor *merging_probs_cu =
-      reinterpret_cast<const transformer_engine::Tensor *>(merging_probs);
+      transformer_engine::convertNVTETensorCheck(merging_probs);
   const transformer_engine::Tensor *permuted_probs_cu =
-      reinterpret_cast<const transformer_engine::Tensor *>(permuted_probs);
+      transformer_engine::convertNVTETensorCheck(permuted_probs);
   const transformer_engine::Tensor *unpermuted_probs_cu =
-      reinterpret_cast<const transformer_engine::Tensor *>(unpermuted_probs);
+      transformer_engine::convertNVTETensorCheck(unpermuted_probs);
 
   if (row_id_map_cu->data.shape[0] == num_experts) {
     CALL_UNPERMUTE_MASK_TRANS_LAUNCHER(true);
@@ -508,6 +523,149 @@ void nvte_unpermute_mask(const NVTETensor input, NVTETensor output, NVTETensor r
 
 #undef CALL_UNPERMUTE_MASK_LAUNCHER
 #undef CALL_UNPERMUTE_MASK_TRANS_LAUNCHER
+
+#define PROBS_TYPE_SWITCH(probs_dtype, probs_type, ...)        \
+  switch (probs_dtype) {                                       \
+    using namespace transformer_engine;                        \
+    case DType::kFloat16: {                                    \
+      using probs_type = fp16;                                 \
+      __VA_ARGS__;                                             \
+      break;                                                   \
+    }                                                          \
+    case DType::kBFloat16: {                                   \
+      using probs_type = bf16;                                 \
+      __VA_ARGS__;                                             \
+      break;                                                   \
+    }                                                          \
+    case DType::kFloat32: {                                    \
+      using probs_type = fp32;                                 \
+      __VA_ARGS__;                                             \
+      break;                                                   \
+    }                                                          \
+    default:                                                   \
+      NVTE_ERROR("Invalid probs type.");                       \
+  }
+#define TRANSFORMER_ENGINE_PROBS_PERMUTE_TYPE_SWITCH(dtype, type, probs_dtype, probs_type,...) \
+  switch (dtype) {                                             \
+    using namespace transformer_engine;                        \
+    case DType::kFloat16: {                                    \
+      using type = fp16;                                       \
+      PROBS_TYPE_SWITCH(probs_dtype, probs_type, __VA_ARGS__); \
+      break;                                                   \
+    }                                                          \
+    case DType::kBFloat16: {                                   \
+      using type = bf16;                                       \
+      PROBS_TYPE_SWITCH(probs_dtype, probs_type, __VA_ARGS__); \
+      break;                                                   \
+    }                                                          \
+    default:                                                   \
+      NVTE_ERROR("Invalid type for 16 bit.");                  \
+  }
+
+#define CALL_HIGH_PRECISION_PROBS_PERMUTE_MASK_LAUNCHER(_PERMUTED_PROBS, _TRANS_ROW_ID_MAP)                  \
+  TRANSFORMER_ENGINE_PROBS_PERMUTE_TYPE_SWITCH(                                                 \
+      input_cu->data.dtype, T, probs_cu->data.dtype, T_P,                                                         \
+      nvte_permute_mask_launcher<T, T_P, int64_t, _PERMUTED_PROBS, _TRANS_ROW_ID_MAP>(       \
+          reinterpret_cast<const T *>(input_cu->data.dptr),                             \
+          reinterpret_cast<T *>(output_cu->data.dptr),                                  \
+          reinterpret_cast<int64_t *>(row_id_map_cu->data.dptr),                        \
+          reinterpret_cast<const T_P *>(probs_cu->data.dptr),                             \
+          reinterpret_cast<T_P *>(permuted_probs_cu->data.dptr), num_tokens, num_experts, \
+          num_out_tokens, hidden_size, stream););
+
+void nvte_permute_mask_high_precision_probs(const NVTETensor input, NVTETensor output, NVTETensor row_id_map,
+                       const NVTETensor probs, NVTETensor permuted_probs, const int num_tokens,
+                       const int num_experts, const int num_out_tokens, const int hidden_size,
+                       musaStream_t stream) {
+  NVTE_API_CALL(nvte_permute_mask_high_precision_probs);
+
+  const transformer_engine::Tensor *input_cu =
+      transformer_engine::convertNVTETensorCheck(input);
+  const transformer_engine::Tensor *output_cu =
+      transformer_engine::convertNVTETensorCheck(output);
+  const transformer_engine::Tensor *row_id_map_cu =
+      transformer_engine::convertNVTETensorCheck(row_id_map);
+  const transformer_engine::Tensor *probs_cu =
+      transformer_engine::convertNVTETensorCheck(probs);
+  const transformer_engine::Tensor *permuted_probs_cu =
+      transformer_engine::convertNVTETensorCheck(permuted_probs);
+
+  if (probs_cu->data.dptr != nullptr) {
+    if (row_id_map_cu->data.shape[0] == num_experts) {
+      CALL_HIGH_PRECISION_PROBS_PERMUTE_MASK_LAUNCHER(true, true);
+    } else {
+      CALL_HIGH_PRECISION_PROBS_PERMUTE_MASK_LAUNCHER(true, false);
+    }
+  } else {
+    if (row_id_map_cu->data.shape[0] == num_experts) {
+      CALL_HIGH_PRECISION_PROBS_PERMUTE_MASK_LAUNCHER(false, true);
+    } else {
+      CALL_HIGH_PRECISION_PROBS_PERMUTE_MASK_LAUNCHER(false, false);
+    }
+  }
+}
+#undef CALL_HIGH_PRECISION_PROBS_PERMUTE_MASK_LAUNCHER
+
+#define CALL_HIGH_PRECISION_PROBS_UNPERMUTE_MASK_LAUNCHER(_MERGING_PROBS, _PERMUTED_PROBS, _TRANS_ROW_ID_MAP)  \
+  TRANSFORMER_ENGINE_PROBS_PERMUTE_TYPE_SWITCH(                                                     \
+      input_cu->data.dtype, T,permuted_probs_cu->data.dtype, T_P,                                                            \
+      nvte_unpermute_mask_launcher<T, T_P, int64_t, _MERGING_PROBS, _PERMUTED_PROBS,           \
+                                   _TRANS_ROW_ID_MAP>(                                    \
+          reinterpret_cast<const T *>(input_cu->data.dptr),                               \
+          reinterpret_cast<T *>(output_cu->data.dptr),                                    \
+          reinterpret_cast<int64_t *>(row_id_map_cu->data.dptr),                          \
+          reinterpret_cast<const T_P *>(merging_probs_cu->data.dptr),                       \
+          reinterpret_cast<const T_P *>(permuted_probs_cu->data.dptr),                      \
+          reinterpret_cast<T_P *>(unpermuted_probs_cu->data.dptr), num_tokens, num_experts, \
+          hidden_size, stream););
+
+#define CALL_HIGH_PRECISION_PROBS_UNPERMUTE_MASK_TRANS_LAUNCHER(_TRANS_ROW_ID_MAP)        \
+  if (merging_probs_cu->data.dptr != nullptr) {                      \
+    if (permuted_probs_cu->data.dptr != nullptr) {                   \
+      CALL_HIGH_PRECISION_PROBS_UNPERMUTE_MASK_LAUNCHER(true, true, _TRANS_ROW_ID_MAP);   \
+    } else {                                                         \
+      CALL_HIGH_PRECISION_PROBS_UNPERMUTE_MASK_LAUNCHER(true, false, _TRANS_ROW_ID_MAP);  \
+    }                                                                \
+  } else {                                                           \
+    if (permuted_probs_cu->data.dptr != nullptr) {                   \
+      CALL_HIGH_PRECISION_PROBS_UNPERMUTE_MASK_LAUNCHER(false, true, _TRANS_ROW_ID_MAP);  \
+    } else {                                                         \
+      CALL_HIGH_PRECISION_PROBS_UNPERMUTE_MASK_LAUNCHER(false, false, _TRANS_ROW_ID_MAP); \
+    }                                                                \
+  }
+
+void nvte_unpermute_mask_high_precision_probs(const NVTETensor input, NVTETensor output, NVTETensor row_id_map,
+                         const NVTETensor merging_probs, const NVTETensor permuted_probs,
+                         NVTETensor unpermuted_probs, const int num_tokens, const int num_experts,
+                         const int hidden_size, musaStream_t stream) {
+  NVTE_API_CALL(nvte_unpermute_mask_high_precision_probs);
+
+  const transformer_engine::Tensor *input_cu =
+      transformer_engine::convertNVTETensorCheck(input);
+  const transformer_engine::Tensor *output_cu =
+      transformer_engine::convertNVTETensorCheck(output);
+  const transformer_engine::Tensor *row_id_map_cu =
+      transformer_engine::convertNVTETensorCheck(row_id_map);
+  const transformer_engine::Tensor *merging_probs_cu =
+      transformer_engine::convertNVTETensorCheck(merging_probs);
+  const transformer_engine::Tensor *permuted_probs_cu =
+      transformer_engine::convertNVTETensorCheck(permuted_probs);
+  const transformer_engine::Tensor *unpermuted_probs_cu =
+      transformer_engine::convertNVTETensorCheck(unpermuted_probs);
+
+  if (row_id_map_cu->data.shape[0] == num_experts) {
+    CALL_HIGH_PRECISION_PROBS_UNPERMUTE_MASK_TRANS_LAUNCHER(true);
+  } else {
+    CALL_HIGH_PRECISION_PROBS_UNPERMUTE_MASK_TRANS_LAUNCHER(false);
+  }
+}
+
+#undef CALL_HIGH_PRECISION_PROBS_UNPERMUTE_MASK_LAUNCHER
+#undef CALL_HIGH_PRECISION_PROBS_UNPERMUTE_MASK_TRANS_LAUNCHER
+
+#undef PROBS_TYPE_SWITCH
+#undef TRANSFORMER_ENGINE_PROBS_PERMUTE_TYPE_SWITCH
+
 
 #define CALL_UNPERMUTE_MASK_BWD_WITH_MERGING_PROBS_LAUNCHER(_TRANS_ROW_ID_MAP)            \
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(                                             \
@@ -528,17 +686,17 @@ void nvte_unpermute_mask_bwd_with_merging_probs(
   NVTE_API_CALL(nvte_unpermute_mask_bwd_with_merging_probs);
 
   const transformer_engine::Tensor *fwd_output_grad_cu =
-      reinterpret_cast<const transformer_engine::Tensor *>(fwd_output_grad);
+      transformer_engine::convertNVTETensorCheck(fwd_output_grad);
   const transformer_engine::Tensor *fwd_input_grad_cu =
-      reinterpret_cast<const transformer_engine::Tensor *>(fwd_input_grad);
+      transformer_engine::convertNVTETensorCheck(fwd_input_grad);
   const transformer_engine::Tensor *fwd_input_cu =
-      reinterpret_cast<const transformer_engine::Tensor *>(fwd_input);
+      transformer_engine::convertNVTETensorCheck(fwd_input);
   const transformer_engine::Tensor *merging_probs_cu =
-      reinterpret_cast<const transformer_engine::Tensor *>(merging_probs);
+      transformer_engine::convertNVTETensorCheck(merging_probs);
   const transformer_engine::Tensor *merging_probs_grad_cu =
-      reinterpret_cast<const transformer_engine::Tensor *>(merging_probs_grad);
+      transformer_engine::convertNVTETensorCheck(merging_probs_grad);
   const transformer_engine::Tensor *row_id_map_cu =
-      reinterpret_cast<const transformer_engine::Tensor *>(row_id_map);
+      transformer_engine::convertNVTETensorCheck(row_id_map);
 
   if (row_id_map_cu->data.shape[0] == num_experts) {
     CALL_UNPERMUTE_MASK_BWD_WITH_MERGING_PROBS_LAUNCHER(true);

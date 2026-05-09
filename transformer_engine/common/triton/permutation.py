@@ -652,3 +652,75 @@ try:
     )(_sort_chunks_by_map_kernel)
 except RuntimeError:
     pass
+
+
+@triton.jit
+def _row_id_map_pass_1_kernel_musa(
+    # pointers
+    routing_map_ptr,
+    row_id_map_ptr,
+    workspace_ptr,
+    # sizes
+    num_tokens,
+    # strides
+    stride_routing_map_token,
+    stride_routing_map_expert,
+    # metas
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    offset = pid_n * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    expert_token_mask = tl.load(
+        routing_map_ptr + pid_m * stride_routing_map_expert + offset * stride_routing_map_token,
+        mask=(offset < num_tokens),
+        other=0,
+    ).to(tl.int64)
+    row_id_within_token_block = tl.cumsum(expert_token_mask) * expert_token_mask
+    tl.store(
+        row_id_map_ptr + pid_m * num_tokens + offset,
+        row_id_within_token_block,
+        mask=offset < num_tokens,
+    )
+    n_tokens_per_block = tl.sum(expert_token_mask)
+    tl.store(workspace_ptr + pid_m * tl.cdiv(num_tokens, BLOCK_SIZE) + pid_n, n_tokens_per_block)
+
+
+@triton.jit
+def _row_id_map_pass_2_kernel_musa(
+    # pointers
+    row_id_map_ptr,
+    row_id_map_non_trans_ptr,
+    workspace_ptr,
+    # sizes
+    num_experts,
+    num_tokens,
+    # metas
+    WORKSPACE_LOAD_WIDTH: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    chunk_idx = pid_m * tl.cdiv(num_tokens, BLOCK_SIZE) + pid_n
+    offset = pid_n * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    row_id_within_token_block = tl.load(
+        row_id_map_ptr + pid_m * num_tokens + offset, mask=(offset < num_tokens), other=0
+    )
+
+    workspace_off = tl.arange(0, WORKSPACE_LOAD_WIDTH)
+    n_tokens_per_chunk = tl.load(workspace_ptr + workspace_off, mask=workspace_off < chunk_idx)
+    row_id = tl.where(
+        row_id_within_token_block == 0,
+        -1,
+        row_id_within_token_block + tl.sum(n_tokens_per_chunk) - 1,
+    )
+    tl.store(
+        row_id_map_ptr + pid_m * num_tokens + offset,
+        row_id,
+        mask=(offset < num_tokens),
+    )
+    tl.store(
+        row_id_map_non_trans_ptr + offset * num_experts + pid_m,
+        row_id,
+        mask=(offset < num_tokens),
+    )
