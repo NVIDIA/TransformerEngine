@@ -108,7 +108,12 @@ def nvfp4_4over6():
 
 
 def nvfp4_row_scaled():
-    nvfp4_recipe = recipe.NVFP4BlockScaling(row_scaled_activation=True)
+    nvfp4_recipe = recipe.NVFP4BlockScaling(
+        disable_rht=True,
+        disable_stochastic_rounding=True,
+        disable_2d_quantization=True,
+        row_scaled_activation=True,
+    )
     nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams()
     nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams()
     nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams()
@@ -609,12 +614,12 @@ def test_sanity_grouped_linear(
             single_grouped_bias=single_param,
         ).cuda()
 
-    # Verify grouped linear exposes a single grouped weight parameter(and bias when applicable).
+    # Verify grouped linear exposes grouped params when the experimental mode is enabled.
     if fp8_recipe is None or not (fp8_recipe.delayed() or fp8_recipe.float8_current_scaling()):
-        if single_param:
+        if te_grouped_linear.single_grouped_weight:
             check_grouped_weight(te_grouped_linear, num_gemms, ffn_hidden_size, config.hidden_size)
-            if use_bias:
-                check_grouped_bias(te_grouped_linear, num_gemms, ffn_hidden_size)
+        if use_bias and te_grouped_linear.single_grouped_bias:
+            check_grouped_bias(te_grouped_linear, num_gemms, ffn_hidden_size)
 
     inp_hidden_states = torch.randn(
         num_tokens, config.hidden_size, dtype=dtype, requires_grad=True

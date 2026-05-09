@@ -184,6 +184,13 @@ def skip_unsupported_backward_override(
         and backward_override is None
     ):
         pytest.skip("Row-scaled NVFP4 does not support default quantized backward.")
+    if (
+        quant_recipe is not None
+        and quant_recipe.nvfp4()
+        and getattr(quant_recipe, "enable_4over6", False)
+        and layer_type == "grouped_linear"
+    ):
+        pytest.skip("NVFP4 4over6 currently does not support grouped quantization.")
     if backward_override is None:
         return
     if quant_recipe is None and backward_override is not None:

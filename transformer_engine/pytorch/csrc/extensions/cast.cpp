@@ -869,10 +869,25 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
     py::object amax_columnwise = columnwise_usage ? py::cast(amax_columnwise_list[i]) : py::none();
 
     // Construct Python tensor
-    tensor_py_list.emplace_back(
-        NVFP4TensorClass(rowwise_data, rowwise_scale, columnwise_data, columnwise_scale,
-                         amax_rowwise, amax_columnwise, fp4_dtype, quantizer_py_list[i],
-                         with_gemm_swizzled_scales, row_scaled_nvfp4, use_4over6));
+    py::dict kwargs;
+    kwargs["rowwise_data"] = rowwise_data;
+    kwargs["rowwise_scale_inv"] = rowwise_scale;
+    kwargs["columnwise_data"] = columnwise_data;
+    kwargs["columnwise_scale_inv"] = columnwise_scale;
+    kwargs["amax_rowwise"] = amax_rowwise;
+    kwargs["amax_columnwise"] = amax_columnwise;
+    kwargs["fp4_dtype"] = py::cast(fp4_dtype);
+    kwargs["quantizer"] = py::reinterpret_borrow<py::object>(quantizer_py_list[i]);
+    kwargs["with_gemm_swizzled_scales"] = py::cast(with_gemm_swizzled_scales);
+    kwargs["row_scaled_nvfp4"] = py::cast(row_scaled_nvfp4);
+    kwargs["use_4over6"] = py::cast(use_4over6);
+    py::tuple args(0);
+    PyObject *tensor_py = PyObject_Call(NVFP4TensorClass.ptr(), args.ptr(), kwargs.ptr());
+    if (tensor_py == nullptr) {
+      PyErr_Print();
+    }
+    NVTE_CHECK(tensor_py != nullptr, "Failed to create NVFP4TensorStorage instance");
+    tensor_py_list.emplace_back(py::reinterpret_steal<py::object>(tensor_py));
 
     // Construct C++ tensor
     // Use a TensorWrapper variable to hold the output of makeTransformerEngineTensor,

@@ -28,6 +28,33 @@ fp8_block_scaling_available, _ = FP8GlobalStateManager.is_fp8_block_scaling_avai
 mxfp8_available, _ = FP8GlobalStateManager.is_mxfp8_available()
 nvfp4_available, _ = FP8GlobalStateManager.is_nvfp4_available()
 
+
+def nvfp4_4over6():
+    nvfp4_recipe = recipe.NVFP4BlockScaling(
+        disable_rht=True,
+        disable_stochastic_rounding=True,
+        disable_2d_quantization=True,
+        enable_4over6=True,
+    )
+    nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams()
+    nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams()
+    nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams()
+    return nvfp4_recipe
+
+
+def nvfp4_row_scaled():
+    nvfp4_recipe = recipe.NVFP4BlockScaling(
+        disable_rht=True,
+        disable_stochastic_rounding=True,
+        disable_2d_quantization=True,
+        row_scaled_activation=True,
+    )
+    nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams()
+    nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams()
+    nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams()
+    return nvfp4_recipe
+
+
 quantization_recipes: List[Optional[recipe.Recipe]] = [None]
 if fp8_available:
     quantization_recipes.extend((recipe.Float8CurrentScaling(), recipe.DelayedScaling()))
@@ -37,6 +64,8 @@ if mxfp8_available:
     quantization_recipes.append(recipe.MXFP8BlockScaling())
 if nvfp4_available:
     quantization_recipes.append(recipe.NVFP4BlockScaling())
+    quantization_recipes.append(nvfp4_4over6())
+    quantization_recipes.append(nvfp4_row_scaled())
 
 
 model_config = {
@@ -176,7 +205,17 @@ class Utils:
             quantizer = te.tensor.mxfp8_tensor.MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
             return quantizer(tensor)
         elif recipe.nvfp4():
-            quantizer = te.tensor.nvfp4_tensor.NVFP4Quantizer()
+            qparams = recipe.fp4_quant_fwd_inp
+            quantizer = te.tensor.nvfp4_tensor.NVFP4Quantizer(
+                rowwise=True,
+                columnwise=not recipe.row_scaled_activation,
+                with_rht=qparams.random_hadamard_transform,
+                with_post_rht_amax=qparams.random_hadamard_transform,
+                with_2d_quantization=qparams.fp4_2d_quantization,
+                stochastic_rounding=qparams.stochastic_rounding,
+                row_scaled_nvfp4=recipe.row_scaled_activation,
+                use_4over6=recipe.enable_4over6,
+            )
             return quantizer(tensor)
 
     @staticmethod
@@ -191,7 +230,10 @@ class Utils:
         if tensor is None:
             return 0
         if isinstance(tensor, te.quantized_tensor.QuantizedTensorStorage):
-            return sum(Utils.get_tensor_size_mb(t) for t in tensor.get_data_tensors())
+            tensors = [
+                value for value in tensor.get_metadata().values() if isinstance(value, torch.Tensor)
+            ]
+            return sum(Utils.get_tensor_size_mb(t) for t in tensors)
         else:
             return tensor.numel() * tensor.element_size() / (1024**2)
 

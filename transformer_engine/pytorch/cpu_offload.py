@@ -363,7 +363,9 @@ class OffloadableLayerState:
             self.bwd_gpu_tensor_group
         )
 
-    def push_tensor(self, tensor: torch.Tensor) -> int | torch.Tensor | tuple[list, list]:
+    def push_tensor(
+        self, tensor: torch.Tensor, *, ignore_size_threshold: bool = False
+    ) -> int | torch.Tensor | tuple[list, list]:
         """
         It is called when a tensor is saved for backward pass.
 
@@ -373,16 +375,29 @@ class OffloadableLayerState:
         """
         self._validate_state(func_name="push_tensor", allowed_states=["not_offloaded"])
 
-        if self._check_if_offload(tensor):
+        if self._check_if_offload(tensor, ignore_size_threshold=ignore_size_threshold):
             # For QuantizedTensor: decompose into component tensors, push each one recursively
             if isinstance(tensor, QuantizedTensor):
                 # Make a copy because prepare_for_saving modifies the object (sets fields to None)
                 tensor_copy = tensor.detach()
+                force_offload_tensor_ids = set()
+                if getattr(tensor_copy, "_row_scaled_nvfp4", False):
+                    amax_rowwise = getattr(tensor_copy, "_amax_rowwise", None)
+                    if amax_rowwise is not None:
+                        force_offload_tensor_ids.add(id(amax_rowwise))
                 # Inline prepare_for_saving logic - QuantizedTensor is a torch.Tensor subclass,
                 # so the generic prepare_for_saving would not call tensor.prepare_for_saving()
                 saved_tensors, tensor_obj = tensor_copy.prepare_for_saving()
                 push_results = [
-                    self.push_tensor(t) if t is not None else None for t in saved_tensors
+                    (
+                        self.push_tensor(
+                            t,
+                            ignore_size_threshold=id(t) in force_offload_tensor_ids,
+                        )
+                        if t is not None
+                        else None
+                    )
+                    for t in saved_tensors
                 ]
                 return (push_results, [tensor_obj])
 
@@ -451,12 +466,12 @@ class OffloadableLayerState:
         self.bwd_gpu_tensor_group = TensorGroup()
         self.state = "not_offloaded"
 
-    def _check_if_offload(self, t: torch.Tensor) -> bool:
+    def _check_if_offload(self, t: torch.Tensor, *, ignore_size_threshold: bool = False) -> bool:
         """
         Check if tensor needs to be offloaded.
         """
         # Only offload tensors with at least 256k elements (~1MB for float32)
-        if t.numel() < 256 * 1024:
+        if not ignore_size_threshold and t.numel() < 256 * 1024:
             return False
 
         if (
