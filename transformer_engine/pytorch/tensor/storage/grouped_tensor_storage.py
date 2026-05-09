@@ -48,13 +48,6 @@ class GroupedTensorStorage:
     Note: This structure is used only for combined storage of multiple tensors with the same dtype and scaling mode.
     """
 
-    # Whether scaling factors are in the swizzled format expected by GEMM
-    _with_gemm_swizzled_scales: bool
-    # Whether grouped NVFP4 tensors use row-scaled amax metadata
-    _row_scaled_nvfp4: bool
-    # Whether grouped NVFP4 tensors use 4over6 block scale selection
-    _use_4over6: bool
-
     @staticmethod
     def _initialize_storage_fields(
         instance: "GroupedTensorStorage",
@@ -156,8 +149,8 @@ class GroupedTensorStorage:
         # Used as a convenience.
         instance.quantized_tensors = None
         instance._with_gemm_swizzled_scales = with_gemm_swizzled_scales
-        instance._row_scaled_nvfp4 = row_scaled_nvfp4
-        instance._use_4over6 = use_4over6
+        instance.row_scaled_nvfp4 = row_scaled_nvfp4
+        instance.use_4over6 = use_4over6
 
     def __new__(
         cls,
@@ -404,8 +397,8 @@ class GroupedTensorStorage:
         self.columnwise_scale_inv_offsets = None
         self.tensor_shapes = []
         self.fake_dtype = torch.float32
-        self._row_scaled_nvfp4 = False
-        self._use_4over6 = False
+        self.row_scaled_nvfp4 = False
+        self.use_4over6 = False
 
     def __repr__(self) -> str:
         """String representation of the GroupedTensorStorage."""
@@ -574,8 +567,8 @@ class GroupedTensorStorage:
             scale_inv_offsets=self.scale_inv_offsets,
             columnwise_scale_inv_offsets=self.columnwise_scale_inv_offsets,
             with_gemm_swizzled_scales=self._with_gemm_swizzled_scales,
-            row_scaled_nvfp4=self._row_scaled_nvfp4,
-            use_4over6=self._use_4over6,
+            row_scaled_nvfp4=self.row_scaled_nvfp4,
+            use_4over6=self.use_4over6,
         )
 
     @staticmethod
@@ -990,8 +983,8 @@ class GroupedTensorStorage:
                     columnwise_scale_inv_offsets.append(cum)
                 self.columnwise_scale_inv_offsets = columnwise_scale_inv_offsets
         nvfp4_rowwise_amax_offsets = None
-        row_scaled_nvfp4 = self._row_scaled_nvfp4
-        use_4over6 = self._use_4over6
+        row_scaled_nvfp4 = self.row_scaled_nvfp4
+        use_4over6 = self.use_4over6
         if recipe.nvfp4() and row_scaled_nvfp4:
             cum = 0
             nvfp4_rowwise_amax_offsets = [0]

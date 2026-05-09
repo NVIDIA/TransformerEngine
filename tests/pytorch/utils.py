@@ -31,6 +31,16 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import FusedAttnBacken
 from transformer_engine.pytorch.module.base import get_dummy_wgrad
 
 
+_NVFP4_RECIPE_NAMES = (
+    "nvfp4",
+    "nvfp4_4over6",
+    "nvfp4_row_scaled",
+    "nvfp4_row_scaled_4over6",
+)
+_NVFP4_ROW_SCALED_RECIPE_NAMES = ("nvfp4_row_scaled", "nvfp4_row_scaled_4over6")
+_NVFP4_4OVER6_RECIPE_NAMES = ("nvfp4_4over6", "nvfp4_row_scaled_4over6")
+
+
 def str_to_dtype(dtype: str | torch.dtype) -> torch.dtype:
     """Convert type name to PyTorch dtype"""
     if isinstance(dtype, torch.dtype):
@@ -118,7 +128,7 @@ def quantization_tols(name: str) -> dict[str, float]:
         "mxfp8_block_scaling",
     ):
         return dtype_tols(tex.DType.kFloat8E4M3)
-    if name in ("nvfp4", "nvfp4_4over6", "nvfp4_row_scaled", "nvfp4_row_scaled_4over6"):
+    if name in _NVFP4_RECIPE_NAMES:
         return dtype_tols(tex.DType.kFloat4E2M1)
     raise ValueError(f"Unsupported quantization scheme ({name})")
 
@@ -145,38 +155,16 @@ def make_recipe(name: Optional[str], **recipe_kwargs: Any) -> Optional[Recipe]:
         )
     if name == "fp8_block_scaling":
         return transformer_engine.common.recipe.Float8BlockScaling(**recipe_kwargs)
-    if name == "nvfp4":
-        return transformer_engine.common.recipe.NVFP4BlockScaling(
-            disable_rht=True,
-            disable_stochastic_rounding=True,
-            disable_2d_quantization=True,
-            **recipe_kwargs,
-        )
-    if name == "nvfp4_4over6":
-        return transformer_engine.common.recipe.NVFP4BlockScaling(
-            disable_rht=True,
-            disable_stochastic_rounding=True,
-            disable_2d_quantization=True,
-            enable_4over6=True,
-            **recipe_kwargs,
-        )
-    if name == "nvfp4_row_scaled":
-        return transformer_engine.common.recipe.NVFP4BlockScaling(
-            disable_rht=True,
-            disable_stochastic_rounding=True,
-            disable_2d_quantization=True,
-            row_scaled_activation=True,
-            **recipe_kwargs,
-        )
-    if name == "nvfp4_row_scaled_4over6":
-        return transformer_engine.common.recipe.NVFP4BlockScaling(
-            disable_rht=True,
-            disable_stochastic_rounding=True,
-            disable_2d_quantization=True,
-            row_scaled_activation=True,
-            enable_4over6=True,
-            **recipe_kwargs,
-        )
+    if name in _NVFP4_RECIPE_NAMES:
+        kwargs = {
+            "disable_rht": True,
+            "disable_stochastic_rounding": True,
+            "disable_2d_quantization": True,
+            "row_scaled_activation": name in _NVFP4_ROW_SCALED_RECIPE_NAMES,
+            "enable_4over6": name in _NVFP4_4OVER6_RECIPE_NAMES,
+        }
+        kwargs.update(recipe_kwargs)
+        return transformer_engine.common.recipe.NVFP4BlockScaling(**kwargs)
     raise ValueError(f"Unsupported quantization scheme ({name})")
 
 

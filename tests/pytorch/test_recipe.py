@@ -586,15 +586,11 @@ def test_nvfp4_grouped_storage_metadata():
         device=torch.device("cuda"),
         dtype=torch.bfloat16,
     )
-    assert grouped_tensor._row_scaled_nvfp4
     assert grouped_tensor.row_scaled_nvfp4
-    assert grouped_tensor._use_4over6
     assert grouped_tensor.use_4over6
 
     grouped_copy = grouped_tensor.copy()
-    assert grouped_copy._row_scaled_nvfp4
     assert grouped_copy.row_scaled_nvfp4
-    assert grouped_copy._use_4over6
     assert grouped_copy.use_4over6
 
     for tensor in grouped_tensor.split_into_quantized_tensors():
