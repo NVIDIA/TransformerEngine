@@ -48,7 +48,7 @@ void compute_ref_dequantize_nvfp4(const uint8_t *packed_data,
                                   size_t cols,
                                   size_t scale_stride,
                                   bool use_4over6) {
-    const float factor_inv = 1.0f / (6.0f * (use_4over6 ? 256.0f : 448.0f));
+    constexpr float factor_inv = 1.0f / (6.0f * (use_4over6 ? 256.0f : 448.0f));
     constexpr size_t BLOCK_SIZE = 16;
     const size_t Mread = cols / BLOCK_SIZE;
     const size_t bytes_per_block = BLOCK_SIZE / 2;

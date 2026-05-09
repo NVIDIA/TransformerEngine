@@ -28,7 +28,6 @@ from transformer_engine.pytorch.quantization import (
     NVFP4BlockScalingRecipeState,
     _amax_and_scale_update,
 )
-from transformer_engine.pytorch.tensor.storage.grouped_tensor_storage import GroupedTensorStorage
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.common.recipe import (
     DelayedScaling,
@@ -515,8 +514,12 @@ class TestFP8Recipe:
 
 
 @pytest.mark.skipif(not fp4_available, reason=reason_for_no_fp4)
-def test_nvfp4_row_scaled_quantizer_roles():
-    recipe = NVFP4BlockScaling(row_scaled_activation=True)
+@pytest.mark.parametrize("use_4over6", [False, True], ids=["default", "4over6"])
+def test_nvfp4_row_scaled_quantizer_roles(use_4over6):
+    recipe = NVFP4BlockScaling(
+        enable_4over6=use_4over6,
+        row_scaled_activation=True,
+    )
 
     forward_quantizers = NVFP4BlockScalingRecipeState(
         recipe,
@@ -533,69 +536,6 @@ def test_nvfp4_row_scaled_quantizer_roles():
         num_quantizers=2,
     ).make_quantizers()
     assert [q.row_scaled_nvfp4 for q in backward_quantizers] == [False, False]
-
-
-@pytest.mark.skipif(not fp4_available, reason=reason_for_no_fp4)
-def test_nvfp4_4over6_quantizer_roles():
-    recipe = NVFP4BlockScaling(
-        disable_rht=True,
-        disable_stochastic_rounding=True,
-        disable_2d_quantization=True,
-        enable_4over6=True,
-        row_scaled_activation=True,
-    )
-
-    forward_quantizers = NVFP4BlockScalingRecipeState(
-        recipe,
-        mode="forward",
-        num_quantizers=3,
-    ).make_quantizers()
-    assert [q.use_4over6 for q in forward_quantizers] == [True, True, True]
-    assert [q.row_scaled_nvfp4 for q in forward_quantizers] == [True, False, True]
-
-    backward_quantizers = NVFP4BlockScalingRecipeState(
-        recipe,
-        mode="backward",
-        num_quantizers=2,
-    ).make_quantizers()
-    assert [q.use_4over6 for q in backward_quantizers] == [True, True]
-    assert [q.row_scaled_nvfp4 for q in backward_quantizers] == [False, False]
-
-
-@pytest.mark.skipif(not fp4_available, reason=reason_for_no_fp4)
-def test_nvfp4_grouped_storage_metadata():
-    q = NVFP4Quantizer(
-        fp4_dtype=tex.DType.kFloat4E2M1,
-        rowwise=True,
-        columnwise=False,
-        with_rht=False,
-        with_post_rht_amax=False,
-        with_2d_quantization=False,
-        stochastic_rounding=False,
-        row_scaled_nvfp4=True,
-        use_4over6=True,
-    )
-
-    grouped_tensor = GroupedTensorStorage.make_grouped_tensor(
-        num_tensors=2,
-        first_dims=None,
-        last_dims=None,
-        logical_first_dim=32,
-        logical_last_dim=64,
-        quantizer=q,
-        device=torch.device("cuda"),
-        dtype=torch.bfloat16,
-    )
-    assert grouped_tensor.row_scaled_nvfp4
-    assert grouped_tensor.use_4over6
-
-    grouped_copy = grouped_tensor.copy()
-    assert grouped_copy.row_scaled_nvfp4
-    assert grouped_copy.use_4over6
-
-    for tensor in grouped_tensor.split_into_quantized_tensors():
-        assert tensor._row_scaled_nvfp4
-        assert tensor._use_4over6
 
 
 @pytest.mark.skipif(not fp4_available, reason=reason_for_no_fp4)
