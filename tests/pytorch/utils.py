@@ -113,6 +113,7 @@ def quantization_tols(name: str) -> dict[str, float]:
         "fp8",
         "fp8_delayed_scaling",
         "fp8_current_scaling",
+        "fp8_blockwise",
         "mxfp8",
         "mxfp8_block_scaling",
     ):

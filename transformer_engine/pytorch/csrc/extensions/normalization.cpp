@@ -80,8 +80,7 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
 
   // Tensor dimensions
   const auto shape = nvte_shape_to_vector(input_nvte.shape());
-  const auto outer_size = product(shape) / shape.back();
-  const auto inner_size = shape.back();
+  const auto [outer_size, inner_size] = get_2d_dims(shape);
 
   // Tensors to save for backward pass
   at::Tensor mu_py = at::empty({static_cast<int64_t>(outer_size)}, at::CUDA(at::kFloat));
@@ -320,8 +319,7 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
 
   // Tensor dimensions
   const auto shape = nvte_shape_to_vector(input_nvte.shape());
-  const auto outer_size = product(shape) / shape.back();
-  const auto inner_size = shape.back();
+  const auto [outer_size, inner_size] = get_2d_dims(shape);
 
   // Tensors to save for backward pass
   at::Tensor rsigma_py = at::empty({static_cast<int64_t>(outer_size)}, at::CUDA(at::kFloat));
