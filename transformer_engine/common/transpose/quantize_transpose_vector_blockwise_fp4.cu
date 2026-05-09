@@ -190,16 +190,8 @@ __device__ __forceinline__ float ComputeOutputFP4(IType input, float encode_scal
 
 template <bool kUse4Over6 = false>
 __device__ __forceinline__ float ComputeGlobalEncodeScaleFP4(const float global_amax) {
-  constexpr float fp8_max = kUse4Over6 ? 256.0f : TypeExtrema<fp8e4m3>::max;
-  constexpr float fp4_max = TypeExtrema<fp4e2m1>::max;
-  float global_encode_scale = fp8_max * fp4_max / global_amax;
-  // If scale is infinity, return max value of float32
-  global_encode_scale = fminf(global_encode_scale, TypeExtrema<float>::max);
-  // If global amax is 0 or infinity, return 1
-  if (global_amax == 0.f || global_encode_scale == 0.f) {
-    return 1.f;
-  }
-  return global_encode_scale;
+  return transformer_engine::dispatch::nvfp4::core::compute_global_encode_scaling_factor_FP4<
+      kUse4Over6>(global_amax);
 }
 
 __device__ __forceinline__ uint32_t get_rbits(

@@ -2,6 +2,8 @@
 #
 # See LICENSE for license information.
 
+import os
+
 import pytest
 import torch
 import transformer_engine.pytorch as te
@@ -14,6 +16,17 @@ from transformer_engine.pytorch.constants import TE_DType
 
 
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
+
+
+@pytest.fixture(autouse=True)
+def disable_fast_math_for_exact_reference_tests():
+    original = os.environ.get("NVTE_USE_FAST_MATH")
+    os.environ["NVTE_USE_FAST_MATH"] = "0"
+    yield
+    if original is None:
+        os.environ.pop("NVTE_USE_FAST_MATH", None)
+    else:
+        os.environ["NVTE_USE_FAST_MATH"] = original
 
 
 def maybe_skip_row_scaled_unsupported_quantization(

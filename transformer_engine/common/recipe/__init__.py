@@ -523,8 +523,8 @@ class NVFP4BlockScaling(Recipe):
              NVFP4 tensors. In this mode, rowwise ``amax`` metadata is stored
              as a vector with one FP32 value per tensor row.
     enable_4over6 : bool, default = False
-             If set to `True`, NVFP4 1D quantization evaluates per-block 4over6
-             and 6-over-6 candidates and chooses the one with lower MSE.
+             If set to `True`, NVFP4 1D quantization evaluates per-block
+             map-to-4 and map-to-6 candidates and chooses the one with lower MSE.
     backward_override : {None, 'high_precision', 'dequantized'}, default = None
             Backward precision mode. None does not modify backward behavior,
             `high_precision` keeps original high-precision operands for backward,
