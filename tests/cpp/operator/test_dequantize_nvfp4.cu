@@ -109,9 +109,9 @@ void performTest_dequantize_nvfp4(const size_t rows, const size_t cols,
       quantized.set_row_scaled_nvfp4(true);
       amax_size = rows;
     } else if (rows > 0 && cols > 0) {
-      quantized.set_tensor_amax(compute_amax<OutputType>(input, rows, cols));
+      quantized.set_amax(compute_amax<OutputType>(input, rows, cols));
     } else {
-      quantized.set_tensor_amax(0.0f);
+      quantized.set_amax(0.0f);
     }
 
     // Quantize
@@ -168,9 +168,9 @@ void performTest_dequantize_nvfp4_swizzled(const size_t rows, const size_t cols,
     if (row_scaled_nvfp4) {
         quantized_compact.set_row_scaled_nvfp4(true);
     } else if (rows > 0 && cols > 0) {
-        quantized_compact.set_tensor_amax(compute_amax<OutputType>(input, rows, cols));
+        quantized_compact.set_amax(compute_amax<OutputType>(input, rows, cols));
     } else {
-        quantized_compact.set_tensor_amax(0.0f);
+        quantized_compact.set_amax(0.0f);
     }
 
     if (rows > 0 && cols > 0) {
@@ -189,7 +189,7 @@ void performTest_dequantize_nvfp4_swizzled(const size_t rows, const size_t cols,
     if (row_scaled_nvfp4) {
         quantized_swizzled.set_row_scaled_nvfp4(true);
     } else {
-        quantized_swizzled.set_tensor_amax(0.0f);
+        quantized_swizzled.set_amax(0.0f);
     }
     quantized_swizzled.set_with_gemm_swizzled_scales(true);
 
@@ -202,7 +202,7 @@ void performTest_dequantize_nvfp4_swizzled(const size_t rows, const size_t cols,
         std::copy(src, src + rows, dst);
         quantized_swizzled.from_cpu();
     } else {
-        quantized_swizzled.set_tensor_amax(quantized_compact.amax());
+        quantized_swizzled.set_amax(quantized_compact.amax());
     }
 
     // Copy FP4 data after from_cpu() to avoid being overwritten

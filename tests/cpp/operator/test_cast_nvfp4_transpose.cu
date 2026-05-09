@@ -516,6 +516,7 @@ void compareResults_nvfp4(Tensor &test,
 }
 
 void compare_rowwise_amax(Tensor &output, const std::vector<float> &ref_amax) {
+    ASSERT_EQ(output.rowwise_amax_size(), ref_amax.size());
     const auto *amax_ptr = output.cpu_rowwise_amax_ptr<float>();
     const std::vector<float> test_amax_data(amax_ptr, amax_ptr + ref_amax.size());
     for (size_t row = 0; row < ref_amax.size(); ++row) {

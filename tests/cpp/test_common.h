@@ -281,6 +281,10 @@ class Tensor {
     return amax_columnwise_->cpu_buffer<T>();
   }
 
+  size_t rowwise_amax_size() const noexcept {
+    return amax_rowwise_ ? amax_rowwise_->size() : 0;
+  }
+
   bool rowwise() const {
     return rowwise_;
   }
@@ -300,7 +304,6 @@ class Tensor {
   void set_amax(float amax);
   void set_scale(float scale);
   void set_scale_inv(float scale_inv);
-  void set_tensor_amax(float amax);
   void set_tensor_amax_columnwise(float amax);
 
   void fill_uniform_rowwise_scale_inv();

@@ -484,10 +484,6 @@ void Tensor::set_scale_inv(float scale_inv) {
   scale_inv_rowwise_->from_cpu();
 }
 
-void Tensor::set_tensor_amax(float amax) {
-  set_amax(amax);
-}
-
 void Tensor::set_tensor_amax_columnwise(float amax) {
   NVTE_CHECK(amax_columnwise_);
   NVTE_CHECK(amax_columnwise_->size() == 1);
@@ -496,21 +492,16 @@ void Tensor::set_tensor_amax_columnwise(float amax) {
   amax_columnwise_->from_cpu();
 }
 
-void Tensor::fill_uniform_rowwise_scale_inv() {
-  if (!scale_inv_rowwise_ || scale_inv_rowwise_->size() == 0) {
-    return;
-  }
+namespace {
 
-  // Generate random scales on CPU
-  const auto numel = scale_inv_rowwise_->size();
-  const auto dtype = scale_inv_rowwise_->dtype();
+void fill_uniform_buffer(void *cpu_data, size_t numel, DType dtype, std::mt19937 &gen) {
   switch (dtype) {
   case DType::kFloat32:
     {
-      auto *cpu_data = scale_inv_rowwise_->cpu_buffer<float>();
+      auto *data = static_cast<float *>(cpu_data);
       std::uniform_real_distribution<float> dis(-2.0, 1.0);
       for (size_t i = 0; i < numel; ++i) {
-        cpu_data[i] = dis(gen_);
+        data[i] = dis(gen);
       }
     }
     break;
@@ -518,19 +509,26 @@ void Tensor::fill_uniform_rowwise_scale_inv() {
   case DType::kFloat8E8M0:
   case DType::kByte:
     {
-      auto *cpu_data = reinterpret_cast<uint8_t *>(scale_inv_rowwise_->cpu_buffer());
+      auto *data = static_cast<uint8_t *>(cpu_data);
       std::uniform_int_distribution<uint8_t> dis(0, 127);
       for (size_t i = 0; i < numel; ++i) {
-        cpu_data[i] = dis(gen_);
+        data[i] = dis(gen);
       }
     }
     break;
   default:
-    NVTE_ERROR("Unsupported rowwise scale-inv dtype (",
-               static_cast<int>(dtype), ").");
+    NVTE_ERROR("Unsupported dtype (", static_cast<int>(dtype), ").");
   }
+}
 
-  // Update GPU tensor
+}  // namespace
+
+void Tensor::fill_uniform_rowwise_scale_inv() {
+  if (!scale_inv_rowwise_ || scale_inv_rowwise_->size() == 0) {
+    return;
+  }
+  fill_uniform_buffer(scale_inv_rowwise_->cpu_buffer(), scale_inv_rowwise_->size(),
+                      scale_inv_rowwise_->dtype(), gen_);
   scale_inv_rowwise_->from_cpu();
 }
 
@@ -538,37 +536,8 @@ void Tensor::fill_uniform_columnwise_scale_inv() {
   if (!scale_inv_columnwise_ || scale_inv_columnwise_->size() == 0) {
     return;
   }
-
-  // Generate random scales on CPU
-  const auto numel = scale_inv_columnwise_->size();
-  const auto dtype = scale_inv_columnwise_->dtype();
-  switch (dtype) {
-  case DType::kFloat32:
-    {
-      auto *cpu_data = scale_inv_columnwise_->cpu_buffer<float>();
-      std::uniform_real_distribution<float> dis(-2.0, 1.0);
-      for (size_t i = 0; i < numel; ++i) {
-        cpu_data[i] = dis(gen_);
-      }
-    }
-    break;
-  case DType::kFloat8E4M3:
-  case DType::kFloat8E8M0:
-  case DType::kByte:
-    {
-      auto *cpu_data = reinterpret_cast<uint8_t *>(scale_inv_columnwise_->cpu_buffer());
-      std::uniform_int_distribution<uint8_t> dis(0, 127);
-      for (size_t i = 0; i < numel; ++i) {
-        cpu_data[i] = dis(gen_);
-      }
-    }
-    break;
-  default:
-    NVTE_ERROR("Unsupported columnwise scale-inv dtype (",
-               static_cast<int>(dtype), ").");
-  }
-
-  // Update GPU tensor
+  fill_uniform_buffer(scale_inv_columnwise_->cpu_buffer(), scale_inv_columnwise_->size(),
+                      scale_inv_columnwise_->dtype(), gen_);
   scale_inv_columnwise_->from_cpu();
 }
 
