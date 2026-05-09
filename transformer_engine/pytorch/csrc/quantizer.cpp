@@ -1729,6 +1729,7 @@ NVFP4Quantizer::NVFP4Quantizer(const py::handle& quantizer) : Quantizer(quantize
   this->with_post_rht_amax = quantizer.attr("with_post_rht_amax").cast<bool>();
   this->with_2d_quantization = quantizer.attr("with_2d_quantization").cast<bool>();
   this->stochastic_rounding = quantizer.attr("stochastic_rounding").cast<bool>();
+  this->use_4over6 = quantizer.attr("use_4over6").cast<bool>();
   this->row_scaled_nvfp4 = quantizer.attr("row_scaled_nvfp4").cast<bool>();
 
   // Get amax reduction group if needed for NVFP4 AG
@@ -1778,6 +1779,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
              "NVFP4 requires tensor dims that are divisible by ", NVFP4_BLOCK_SIZE,
              " (got shape=", shape, ")");
   const bool row_scaled_nvfp4 = this->row_scaled_nvfp4;
+  const bool use_4over6 = this->use_4over6;
   if (row_scaled_nvfp4) {
     NVTE_CHECK(rowwise_usage, "Row-scaled NVFP4 quantization requires rowwise usage.");
     NVTE_CHECK(!columnwise_usage,
@@ -1845,6 +1847,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
     kwargs["quantizer"] = this->quantizer;
     kwargs["with_gemm_swizzled_scales"] = py::cast(with_gemm_swizzled_scales);
     kwargs["row_scaled_nvfp4"] = py::cast(row_scaled_nvfp4);
+    kwargs["use_4over6"] = py::cast(use_4over6);
     kwargs["fake_dtype"] = GetATenDType(dtype);
 
     py::tuple args(0);
@@ -1875,6 +1878,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
     kwargs["with_gemm_swizzled_scales"] = py::cast(with_gemm_swizzled_scales);
     kwargs["device"] = py::cast(device);
     kwargs["row_scaled_nvfp4"] = py::cast(row_scaled_nvfp4);
+    kwargs["use_4over6"] = py::cast(use_4over6);
     py::tuple args(0);
     PyObject* result = PyObject_Call(reinterpret_cast<PyObject*>(NVFP4TensorPythonClass),
                                      args.ptr(), kwargs.ptr());
@@ -1908,6 +1912,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
   }
   out_cpp.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
   out_cpp.set_row_scaled_nvfp4(row_scaled_nvfp4);
+  out_cpp.set_nvfp4_4over6(use_4over6);
   this->set_quantization_params(&out_cpp);
 
   return {std::move(out_cpp), std::move(out_py)};
@@ -1936,6 +1941,7 @@ std::pair<GroupedTensorWrapper, py::object> NVFP4Quantizer::create_grouped_tenso
   std::optional<at::Tensor> columnwise_amax;
   const std::vector<size_t> logical_shape_vec = {logical_first_dim, logical_last_dim};
   const bool row_scaled_nvfp4 = this->row_scaled_nvfp4;
+  const bool use_4over6 = this->use_4over6;
   if (row_scaled_nvfp4) {
     NVTE_CHECK(rowwise_usage, "Row-scaled NVFP4 grouped quantization requires rowwise usage.");
     NVTE_CHECK(!columnwise_usage,
@@ -2010,6 +2016,7 @@ std::pair<GroupedTensorWrapper, py::object> NVFP4Quantizer::create_grouped_tenso
   kwargs["tensor_offsets"] = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none();
   kwargs["with_gemm_swizzled_scales"] = this->optimize_for_gemm;
   kwargs["row_scaled_nvfp4"] = py::cast(row_scaled_nvfp4);
+  kwargs["use_4over6"] = py::cast(use_4over6);
   PyObject* result = PyObject_Call(GroupedTensorClass.ptr(), args.ptr(), kwargs.ptr());
   if (result == nullptr) {
     PyErr_Print();
@@ -2091,6 +2098,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
                "Row-scaled NVFP4 quantization does not support columnwise usage.");
   }
   tensor.attr("_row_scaled_nvfp4") = py::cast(row_scaled_nvfp4);
+  tensor.attr("_use_4over6") = py::cast(use_4over6);
 
   // Coerce row-wise data
   if (rowwise_usage) {
@@ -2195,6 +2203,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
   }
   out_cpp.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
   out_cpp.set_row_scaled_nvfp4(row_scaled_nvfp4);
+  out_cpp.set_nvfp4_4over6(use_4over6);
   this->set_quantization_params(&out_cpp);
 
   return {std::move(out_cpp), std::move(tensor)};
@@ -2285,6 +2294,15 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
   }
   quant_config.set_nvfp4_2d_quantization(this->with_2d_quantization);
   quant_config.set_stochastic_rounding(this->stochastic_rounding);
+  quant_config.set_nvfp4_4over6(this->use_4over6);
+
+  if (this->use_4over6) {
+    NVTE_CHECK(!this->with_rht, "NVFP4 4over6 quantization does not support RHT.");
+    NVTE_CHECK(!this->with_2d_quantization,
+               "NVFP4 4over6 quantization does not support 2D quantization.");
+    NVTE_CHECK(!this->stochastic_rounding,
+               "NVFP4 4over6 quantization does not support stochastic rounding.");
+  }
 
   // We only need RHT for columnwise usage.
   // flat first dim and last dim for multi dimensional input

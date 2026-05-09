@@ -35,8 +35,8 @@ template <typename OType, bool WITH_GEMM_SWIZZLED_SCALES>
 __global__ void __launch_bounds__(512)
     dequantize_fp4_kernel(const void *const input, OType *output, const fp8e4m3 *const scales,
                           const float *const tensor_amax, const bool row_scaled_nvfp4,
-                          const size_t N, const size_t M, const size_t scale_stride,
-                          const size_t num_scale_tiles_X) {
+                          const bool use_4over6, const size_t N, const size_t M,
+                          const size_t scale_stride, const size_t num_scale_tiles_X) {
   const size_t thread_idx = blockIdx.x * blockDim.x + threadIdx.x;
   const size_t x = thread_idx % M;
   const size_t y = thread_idx / M;
@@ -65,7 +65,8 @@ __global__ void __launch_bounds__(512)
   value.vec = input_vectorized[my_index];
   fp8e4m3 scale = scales[my_scale_index];
   float amax = row_scaled_nvfp4 ? tensor_amax[y] : tensor_amax[0];
-  constexpr float factor_inv = 1.0 / (6.0 * 448.0);
+  const float fp8_max = use_4over6 ? 256.0f : 448.0f;
+  const float factor_inv = 1.0f / (6.0f * fp8_max);
   float final_scale = static_cast<float>(scale) * amax * factor_inv;
 #pragma unroll
   for (int i = 0; i < 4; i++) {
@@ -92,6 +93,7 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
 
   const bool with_gemm_swizzled_scales = input.with_gemm_swizzled_scales;
   const bool row_scaled_nvfp4 = input.row_scaled_nvfp4;
+  const bool use_4over6 = input.nvfp4_4over6;
 
   constexpr int FP4_BLOCK_SIZE = 16;
   const size_t N = input.flat_first_dim();
@@ -116,7 +118,7 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
           dequantize_fp4_kernel<OType, WITH_GEMM_SWIZZLED_SCALES><<<blocks, threads, 0, stream>>>(
               input.data.dptr, reinterpret_cast<OType *>(output->data.dptr),
               reinterpret_cast<fp8e4m3 *>(input.scale_inv.dptr),
-              reinterpret_cast<float *>(input.amax.dptr), row_scaled_nvfp4, N, Mread,
+              reinterpret_cast<float *>(input.amax.dptr), row_scaled_nvfp4, use_4over6, N, Mread,
               input.scale_inv.shape.back(),
               num_scale_tiles_X););  // NOLINT(*)
   );                                 // NOLINT(*)

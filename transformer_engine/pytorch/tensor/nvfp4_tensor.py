@@ -130,6 +130,8 @@ class NVFP4Quantizer(Quantizer):
 
     """Whether emitted NVFP4 tensors store one FP32 amax per row."""
     row_scaled_nvfp4: bool
+    """Whether to use NVFP4 4over6 block scale selection."""
+    use_4over6: bool
 
     """RHT matrix random sign mask"""
     rht_matrix_random_sign_mask_t: int
@@ -147,6 +149,7 @@ class NVFP4Quantizer(Quantizer):
         with_2d_quantization: bool = False,
         stochastic_rounding: bool = False,
         row_scaled_nvfp4: bool = False,
+        use_4over6: bool = False,
         with_random_sign_mask: bool = True,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
@@ -158,6 +161,7 @@ class NVFP4Quantizer(Quantizer):
         self.with_2d_quantization = with_2d_quantization
         self.stochastic_rounding = stochastic_rounding
         self.row_scaled_nvfp4 = row_scaled_nvfp4
+        self.use_4over6 = use_4over6
         self.rht_matrix_random_sign_mask_t = get_random_sign_mask_for_rht(
             with_random_sign_mask, torch.cuda.current_device()
         )
@@ -204,6 +208,7 @@ class NVFP4Quantizer(Quantizer):
             with_2d_quantization=self.with_2d_quantization,
             stochastic_rounding=self.stochastic_rounding,
             row_scaled_nvfp4=self.row_scaled_nvfp4,
+            use_4over6=self.use_4over6,
         )
         quantizer.internal = self.internal
         quantizer.optimize_for_gemm = self.optimize_for_gemm
@@ -356,6 +361,7 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
         quantizer: Quantizer,
         with_gemm_swizzled_scales: bool,
         row_scaled_nvfp4: bool = False,
+        use_4over6: bool = False,
         **kwargs,
     ):
         instance = super().__new__(
@@ -371,6 +377,7 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
             with_gemm_swizzled_scales,
             *args,
             row_scaled_nvfp4=row_scaled_nvfp4,
+            use_4over6=use_4over6,
             **kwargs,
         )
         return instance

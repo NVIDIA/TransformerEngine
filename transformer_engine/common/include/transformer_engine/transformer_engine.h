@@ -83,6 +83,7 @@ enum NVTETensorParam {
    *  its values are populated during quantization.
    */
   kNVTERowScaledNVFP4 = 8,
+  kNVTENVFP44Over6 = 9,            /*!< Whether an NVFP4 tensor uses 4over6 scaling */
   kNVTENumTensorParams
 };
 
@@ -381,6 +382,8 @@ enum NVTEQuantizationConfigAttribute {
    *  inconsistently between kernels.
    */
   kNVTEQuantizationConfigUseFastMath = 7,
+  /*! Whether to use NVFP4 4over6 block scale selection */
+  kNVTEQuantizationConfigNVFP44Over6 = 8,
   kNVTEQuantizationConfigNumAttributes
 };
 
@@ -781,6 +784,11 @@ class TensorWrapper {
     nvte_set_tensor_param_v2(tensor_, kNVTERowScaledNVFP4, &val, sizeof(val));
   }
 
+  void set_nvfp4_4over6(bool nvfp4_4over6) {
+    const auto val = static_cast<uint8_t>(nvfp4_4over6);
+    nvte_set_tensor_param_v2(tensor_, kNVTENVFP44Over6, &val, sizeof(val));
+  }
+
   // Parameter getters
 
   NVTEBasicTensor get_parameter(const NVTETensorParam param) const noexcept {
@@ -820,6 +828,12 @@ class TensorWrapper {
   bool get_row_scaled_nvfp4() const {
     uint8_t val = 0;
     nvte_get_tensor_param_v2(tensor_, kNVTERowScaledNVFP4, &val, sizeof(val), nullptr);
+    return static_cast<bool>(val);
+  }
+
+  bool get_nvfp4_4over6() const {
+    uint8_t val = 0;
+    nvte_get_tensor_param_v2(tensor_, kNVTENVFP44Over6, &val, sizeof(val), nullptr);
     return static_cast<bool>(val);
   }
 
@@ -1315,6 +1329,13 @@ class QuantizationConfigWrapper {
   void set_use_fast_math(bool use_fast_math) {
     const auto val = static_cast<uint8_t>(use_fast_math);
     nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigUseFastMath, &val,
+                                           sizeof(val));
+  }
+
+  /*! \brief Set whether to use NVFP4 4over6 block scale selection */
+  void set_nvfp4_4over6(bool nvfp4_4over6) {
+    const auto val = static_cast<uint8_t>(nvfp4_4over6);
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigNVFP44Over6, &val,
                                            sizeof(val));
   }
 

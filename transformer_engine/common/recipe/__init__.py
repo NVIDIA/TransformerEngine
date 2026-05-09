@@ -522,6 +522,9 @@ class NVFP4BlockScaling(Recipe):
              If set to `True`, forward activation quantizers emit row-scaled
              NVFP4 tensors. In this mode, rowwise ``amax`` metadata is stored
              as a vector with one FP32 value per tensor row.
+    enable_4over6 : bool, default = False
+             If set to `True`, NVFP4 1D quantization evaluates per-block 4over6
+             and 6-over-6 candidates and chooses the one with lower MSE.
     backward_override : {None, 'high_precision', 'dequantized'}, default = None
             Backward precision mode. None does not modify backward behavior,
             `high_precision` keeps original high-precision operands for backward,
@@ -536,6 +539,7 @@ class NVFP4BlockScaling(Recipe):
     )
     disable_2d_quantization: bool = os.getenv("NVTE_NVFP4_DISABLE_2D_QUANTIZATION", "0") == "1"
     row_scaled_activation: bool = os.getenv("NVTE_NVFP4_ROW_SCALED_ACTIVATION", "0") == "1"
+    enable_4over6: bool = os.getenv("NVTE_NVFP4_ENABLE_4OVER6", "0") == "1"
 
     fp4_format: Format = Format.E2M1
     fp8_format: Format = Format.E4M3
@@ -551,6 +555,14 @@ class NVFP4BlockScaling(Recipe):
         assert (
             self.backward_override in _BACKWARD_OVERRIDES
         ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
+        if self.enable_4over6:
+            assert self.disable_rht, "NVFP4 4over6 currently requires RHT to be disabled"
+            assert (
+                self.disable_stochastic_rounding
+            ), "NVFP4 4over6 currently requires stochastic rounding to be disabled"
+            assert (
+                self.disable_2d_quantization
+            ), "NVFP4 4over6 currently requires 2D quantization to be disabled"
 
         # Quantization params
         # Note: RHT is currently only applied to column-wise usage so that
@@ -580,6 +592,7 @@ class NVFP4BlockScaling(Recipe):
             f"fp8_mha={self.fp8_mha}, "
             f"backward_override={self.backward_override}, "
             f"row_scaled_activation={self.row_scaled_activation}, "
+            f"enable_4over6={self.enable_4over6}, "
             f"fp4_quant_fwd_inp={self.fp4_quant_fwd_inp}, "
             f"fp4_quant_fwd_weight={self.fp4_quant_fwd_weight}, "
             f"fp4_quant_bwd_grad={self.fp4_quant_bwd_grad}, "

@@ -101,6 +101,11 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
       int32_t cols = input_tensor->flat_last_dim();
       auto dtype = input_tensor->dtype();
       const bool row_scaled_nvfp4 = output_tensor->row_scaled_nvfp4;
+      const bool use_4over6 = quant_config_cpp.nvfp4_4over6;
+      NVTE_CHECK(!use_4over6 || !quant_config_cpp.nvfp4_2d_quantization,
+                 "NVFP4 4over6 quantization does not support 2D quantization.");
+      NVTE_CHECK(!use_4over6 || !quant_config_cpp.stochastic_rounding,
+                 "NVFP4 4over6 quantization does not support stochastic rounding.");
       if (row_scaled_nvfp4) {
         NVTE_CHECK(!quant_config_cpp.nvfp4_2d_quantization,
                    "Row-scaled NVFP4 quantization does not support 2D quantization.");
@@ -132,9 +137,11 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
             /*return_transpose=*/output_tensor->has_columnwise_data(), /*pow2_scale=*/false,
             /*swizzled_scale=*/false,
             /*use_stochastic_rounding=*/quant_config_cpp.stochastic_rounding,
+            /*use_fast_math=*/quant_config_cpp.use_fast_math,
             /*rng_state=*/quant_config_cpp.rng_state,
             /*use_2d_quantization=*/quant_config_cpp.nvfp4_2d_quantization,
             /*row_scaled_nvfp4=*/row_scaled_nvfp4,
+            /*use_4over6=*/use_4over6,
             /*noop_tensor=*/noop_tensor->data,
             /*stream=*/stream);
       }
@@ -249,6 +256,11 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
       int32_t rows = grad_tensor->flat_first_dim();
       int32_t cols = grad_tensor->flat_last_dim();
       auto dtype = grad_tensor->dtype();
+      const bool use_4over6 = quant_config_cpp.nvfp4_4over6;
+      NVTE_CHECK(!use_4over6 || !quant_config_cpp.nvfp4_2d_quantization,
+                 "NVFP4 4over6 quantization does not support 2D quantization.");
+      NVTE_CHECK(!use_4over6 || !quant_config_cpp.stochastic_rounding,
+                 "NVFP4 4over6 quantization does not support stochastic rounding.");
       NVTE_CHECK(!output_tensor->row_scaled_nvfp4,
                  "Backward NVFP4 quantization does not support row-scaled outputs.");
       bool use_optimized_kernel = (dtype == DType::kBFloat16) && (rows % 32 == 0) &&
@@ -275,9 +287,11 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
             /*return_transpose=*/output_tensor->has_columnwise_data(), /*pow2_scale=*/false,
             /*swizzled_scale=*/false,
             /*use_stochastic_rounding=*/quant_config_cpp.stochastic_rounding,
+            /*use_fast_math=*/quant_config_cpp.use_fast_math,
             /*rng_state=*/quant_config_cpp.rng_state,
             /*use_2d_quantization=*/quant_config_cpp.nvfp4_2d_quantization,
-            /*row_scaled_nvfp4=*/false, /*noop_tensor=*/noop_tensor->data,
+            /*row_scaled_nvfp4=*/false,
+            /*use_4over6=*/use_4over6, /*noop_tensor=*/noop_tensor->data,
             /*stream=*/stream);
       }
       break;
@@ -374,6 +388,8 @@ void group_quantize_fwd_host_aware_helper(const NVTETensor input, NVTETensor *ou
 
       NVTE_CHECK(!quant_config_cpp.nvfp4_2d_quantization,
                  "2D quantization is not supported for group quantize.");
+      NVTE_CHECK(!quant_config_cpp.nvfp4_4over6,
+                 "NVFP4 4over6 quantization is not supported for group quantize.");
 
       // Launch NVFP4 group quantize kernel
       nvfp4::group_quantize_transpose</*use_2d_quantization*/ false>(

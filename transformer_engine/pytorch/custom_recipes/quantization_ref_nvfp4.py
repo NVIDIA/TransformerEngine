@@ -350,6 +350,7 @@ class NVFP4QuantizerRef(Quantizer):
         eps: float = 0.0,
         quant_tile_shape: Tuple[int, int] = (1, 16),
         row_scaled_nvfp4: bool = False,
+        use_4over6: bool = False,
         with_rht: bool = False,
         with_random_sign_mask: bool = True,
     ):
@@ -360,6 +361,13 @@ class NVFP4QuantizerRef(Quantizer):
                 raise ValueError(
                     "Row-scaled NVFP4 reference quantization does not support columnwise usage."
                 )
+        if use_4over6:
+            if pow_2_scales:
+                raise ValueError("4over6 is only supported for NVFP4 (non-pow2) mode.")
+            if quant_tile_shape != (1, 16):
+                raise ValueError("4over6 reference quantization only supports 1x16 tiles.")
+            if with_rht:
+                raise ValueError("4over6 reference quantization does not support RHT.")
         super().__init__(rowwise=rowwise, columnwise=columnwise)
         self.internal = True
 
@@ -368,6 +376,7 @@ class NVFP4QuantizerRef(Quantizer):
         self.eps = eps
         self.quant_tile_shape = quant_tile_shape
         self.row_scaled_nvfp4 = row_scaled_nvfp4
+        self.use_4over6 = use_4over6
         self.with_rht = with_rht
         self.with_random_sign_mask = with_random_sign_mask
 
@@ -456,6 +465,7 @@ class NVFP4QuantizerRef(Quantizer):
         *,
         pow_2_scales: bool,
         row_scaled_nvfp4: bool = False,
+        use_4over6: bool = False,
         eps: float,  # pylint: disable=unused-argument
     ) -> Tuple[torch.Tensor, torch.Tensor]:
 
@@ -488,6 +498,9 @@ class NVFP4QuantizerRef(Quantizer):
         x = x.view(m, n // tile_len_x, tile_len_x)
         FLOAT4_E2M1_MAX = torch.tensor(6.0, device=x.device, dtype=torch.float32)
         FLOAT8_E4M3_MAX = torch.tensor(448.0, device=x.device, dtype=torch.float32)
+        GLOBAL_SCALE_E4M3_MAX = torch.tensor(
+            256.0 if use_4over6 else 448.0, device=x.device, dtype=torch.float32
+        )
         decode_scale = torch.div(vec_max, FLOAT4_E2M1_MAX)
 
         if pow_2_scales:
@@ -497,10 +510,12 @@ class NVFP4QuantizerRef(Quantizer):
                 decode_scale.to(torch.float32),
             )
         else:
+            if use_4over6 and using_2d_quantization:
+                raise ValueError("4over6 reference quantization does not support 2D quantization.")
             if row_scaled_nvfp4:
                 global_amax = global_amax.to(torch.float32).view(m, 1, 1)
 
-            global_encode_scale = torch.div(FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX, global_amax)
+            global_encode_scale = torch.div(GLOBAL_SCALE_E4M3_MAX * FLOAT4_E2M1_MAX, global_amax)
             global_encode_scale = torch.min(
                 global_encode_scale,
                 torch.tensor(
@@ -519,30 +534,111 @@ class NVFP4QuantizerRef(Quantizer):
                     global_encode_scale,
                 )
             global_decode_scale = torch.div(1.0, global_encode_scale)
-            global_encode_scale_multiplier = global_encode_scale * torch.reciprocal(FLOAT4_E2M1_MAX)
+            if use_4over6:
+                # FourOverSix compares map-to-4 and map-to-6 candidates using
+                # the original input-domain MSE, while keeping TE-style FP4
+                # quantization for each candidate.
+                decode_scale_map6 = torch.div(vec_max, FLOAT4_E2M1_MAX) * global_encode_scale
+                decode_scale_map4 = decode_scale_map6 * 1.5
+                decode_scale_map4 = torch.clamp(
+                    decode_scale_map4, min=-FLOAT8_E4M3_MAX, max=FLOAT8_E4M3_MAX
+                ).to(torch.float8_e4m3fn)
+                decode_scale_map6 = torch.clamp(
+                    decode_scale_map6, min=-FLOAT8_E4M3_MAX, max=FLOAT8_E4M3_MAX
+                ).to(torch.float8_e4m3fn)
 
-            # Match the kernel's default path: fold the FP4 reciprocal into the
-            # global scale multiplier, but keep the final reciprocal exact.
-            decode_scale = vec_max * global_encode_scale_multiplier
-            decode_scale = torch.min(
-                decode_scale,
-                torch.tensor(
+                fp32_max = torch.tensor(
                     torch.finfo(torch.float32).max,
-                    device=decode_scale.device,
+                    device=decode_scale_map4.device,
                     dtype=torch.float32,
-                ),
-            )
-            decode_scale = torch.clamp(decode_scale, min=-FLOAT8_E4M3_MAX, max=FLOAT8_E4M3_MAX)
-            decode_scale = decode_scale.to(torch.float8_e4m3fn)
+                )
+                encode_scale_map4 = torch.min(
+                    torch.div(1.0, decode_scale_map4.to(torch.float32) * global_decode_scale),
+                    fp32_max,
+                )
+                encode_scale_map6 = torch.min(
+                    torch.div(1.0, decode_scale_map6.to(torch.float32) * global_decode_scale),
+                    fp32_max,
+                )
 
-            encode_scale = torch.min(
-                torch.div(1.0, decode_scale.to(torch.float32) * global_decode_scale),
-                torch.tensor(
-                    torch.finfo(torch.float32).max,
-                    device=decode_scale.device,
-                    dtype=torch.float32,
-                ),
-            )
+                clipped_x_map4 = torch.clamp(
+                    x.to(torch.float32) * encode_scale_map4,
+                    -FLOAT4_E2M1_MAX,
+                    FLOAT4_E2M1_MAX,
+                ).reshape(m, n)
+                clipped_x_map6 = torch.clamp(
+                    x.to(torch.float32) * encode_scale_map6,
+                    -FLOAT4_E2M1_MAX,
+                    FLOAT4_E2M1_MAX,
+                ).reshape(m, n)
+                qx_map4 = cast_to_fp4x2(clipped_x_map4)
+                qx_map6 = cast_to_fp4x2(clipped_x_map6)
+
+                fp4_map4 = cast_from_fp4x2(qx_map4, torch.float32).view(
+                    m, n // tile_len_x, tile_len_x
+                )
+                fp4_map6 = cast_from_fp4x2(qx_map6, torch.float32).view(
+                    m, n // tile_len_x, tile_len_x
+                )
+                denom = FLOAT4_E2M1_MAX * GLOBAL_SCALE_E4M3_MAX
+                sf_map4 = decode_scale_map4.to(torch.float32).squeeze(-1)
+                sf_map6 = decode_scale_map6.to(torch.float32).squeeze(-1)
+                if row_scaled_nvfp4:
+                    mse_global_amax = global_amax.squeeze(-1)
+                else:
+                    mse_global_amax = global_amax
+                x_float = x.to(torch.float32)
+                err_map4 = torch.zeros_like(vec_max)
+                err_map6 = torch.zeros_like(vec_max)
+                for idx in range(tile_len_x):
+                    val_map4 = fp4_map4[:, :, idx] * sf_map4
+                    val_map4 = val_map4 * mse_global_amax
+                    val_map4 = val_map4 / denom
+                    diff_map4 = val_map4 - x_float[:, :, idx]
+                    err_map4 = err_map4 + (diff_map4 * diff_map4).unsqueeze(-1)
+
+                    val_map6 = fp4_map6[:, :, idx] * sf_map6
+                    val_map6 = val_map6 * mse_global_amax
+                    val_map6 = val_map6 / denom
+                    diff_map6 = val_map6 - x_float[:, :, idx]
+                    err_map6 = err_map6 + (diff_map6 * diff_map6).unsqueeze(-1)
+                pick_map4 = err_map4 < err_map6
+                qx = torch.where(
+                    pick_map4.expand(-1, -1, tile_len_x // 2),
+                    qx_map4.view(m, n // tile_len_x, tile_len_x // 2),
+                    qx_map6.view(m, n // tile_len_x, tile_len_x // 2),
+                ).reshape(m, n // 2)
+                decode_scale = torch.where(pick_map4, decode_scale_map4, decode_scale_map6).squeeze(
+                    -1
+                )
+                return qx, decode_scale
+            else:
+                global_encode_scale_multiplier = global_encode_scale * torch.reciprocal(
+                    FLOAT4_E2M1_MAX
+                )
+
+                # Match the kernel's default path: fold the FP4 reciprocal into the
+                # global scale multiplier, but keep the final reciprocal exact.
+                decode_scale = vec_max * global_encode_scale_multiplier
+                decode_scale = torch.min(
+                    decode_scale,
+                    torch.tensor(
+                        torch.finfo(torch.float32).max,
+                        device=decode_scale.device,
+                        dtype=torch.float32,
+                    ),
+                )
+                decode_scale = torch.clamp(decode_scale, min=-FLOAT8_E4M3_MAX, max=FLOAT8_E4M3_MAX)
+                decode_scale = decode_scale.to(torch.float8_e4m3fn)
+
+                encode_scale = torch.min(
+                    torch.div(1.0, decode_scale.to(torch.float32) * global_decode_scale),
+                    torch.tensor(
+                        torch.finfo(torch.float32).max,
+                        device=decode_scale.device,
+                        dtype=torch.float32,
+                    ),
+                )
 
         scaled_x = x.to(torch.float32) * encode_scale
 
@@ -679,6 +775,7 @@ class NVFP4QuantizerRef(Quantizer):
                 self.quant_tile_shape[0],
                 pow_2_scales=self.pow_2_scales,
                 row_scaled_nvfp4=self.row_scaled_nvfp4,
+                use_4over6=self.use_4over6,
                 eps=self.eps,
             )
             if transpose_scales:
@@ -702,6 +799,7 @@ class NVFP4QuantizerRef(Quantizer):
                 self.quant_tile_shape[1],
                 self.quant_tile_shape[0],
                 pow_2_scales=self.pow_2_scales,
+                use_4over6=self.use_4over6,
                 eps=self.eps,
             )
 

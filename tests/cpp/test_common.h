@@ -297,6 +297,7 @@ class Tensor {
 
   void set_with_gemm_swizzled_scales(bool with_gemm_swizzled_scales);
   void set_row_scaled_nvfp4(bool row_scaled_nvfp4);
+  void set_nvfp4_4over6(bool nvfp4_4over6);
 
   void to_cpu();
   void from_cpu();

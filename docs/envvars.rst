@@ -287,6 +287,12 @@ Kernel Configuration
    :Default: ``0``
    :Description: Enable row-scaled NVFP4 tensors for forward activation quantizers in the ``NVFP4BlockScaling`` recipe. When set to ``1`` (or when ``NVFP4BlockScaling(row_scaled_activation=True)`` is used), rowwise ``amax`` metadata is stored as one FP32 value per tensor row instead of a single scalar.
 
+.. envvar:: NVTE_NVFP4_ENABLE_4OVER6
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Enable 4over6 candidate selection for NVFP4 1D quantization in the ``NVFP4BlockScaling`` recipe. This mode currently requires RHT, stochastic rounding, and 2D quantization to be disabled, either with the corresponding recipe fields or with :envvar:`NVTE_NVFP4_DISABLE_RHT`, :envvar:`NVTE_NVFP4_DISABLE_STOCHASTIC_ROUNDING`, and :envvar:`NVTE_NVFP4_DISABLE_2D_QUANTIZATION`.
+
 Torch Compilation and Fusion
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 

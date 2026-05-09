@@ -39,6 +39,8 @@ from utils import (
 # --------------------------
 
 _BACKWARD_OVERRIDES = ("high_precision", "dequantized")
+_NVFP4_RECIPE_NAMES = ("nvfp4", "nvfp4_row_scaled", "nvfp4_row_scaled_4over6")
+_NVFP4_ROW_SCALED_RECIPE_NAMES = ("nvfp4_row_scaled", "nvfp4_row_scaled_4over6")
 
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
 mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
@@ -79,9 +81,9 @@ _quantized_numerics_recipe_list = [
         id="NVFP4BlockScaling",
     ),
     pytest.param(
-        "nvfp4_row_scaled",
+        "nvfp4_row_scaled_4over6",
         marks=pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4),
-        id="NVFP4RowScaledBlockScaling",
+        id="NVFP4RowScaled4Over6BlockScaling",
     ),
 ]
 
@@ -170,7 +172,7 @@ def _maybe_skip_recipe_dtype(
 ) -> None:
     if dtype == torch.bfloat16 and not bf16_available:
         pytest.skip(reason_for_no_bf16)
-    if recipe_name in ("nvfp4", "nvfp4_row_scaled"):
+    if recipe_name in _NVFP4_RECIPE_NAMES:
         if module_type in ("linear", "layernorm_linear") and dtype not in (
             torch.bfloat16,
             torch.float32,
@@ -183,12 +185,12 @@ def _maybe_skip_recipe_dtype(
 def _maybe_skip_unsupported_recipe_module_combo(recipe_name: str, module_type: str) -> None:
     if module_type == "ops_linear" and recipe_name == "fp8_block_scaling":
         pytest.skip("Fusible ops (te_ops.Linear) do not support Float8BlockScaling recipe")
-    if module_type == "ops_linear" and recipe_name == "nvfp4_row_scaled":
+    if module_type == "ops_linear" and recipe_name in _NVFP4_ROW_SCALED_RECIPE_NAMES:
         pytest.skip("Row-scaled NVFP4 currently does not support fused te_ops paths.")
 
 
 def _make_quantized_forward_reference_recipe(recipe_name: str) -> recipe.Recipe:
-    if recipe_name == "nvfp4_row_scaled":
+    if recipe_name in _NVFP4_ROW_SCALED_RECIPE_NAMES:
         return make_recipe(recipe_name, backward_override="dequantized")
     return make_recipe(recipe_name)
 
@@ -208,9 +210,7 @@ def _maybe_skip_unsupported_recipe_shape(
                 " by 32."
             )
             return
-        if recipe_name in ("nvfp4", "nvfp4_row_scaled") and (
-            flat_first_dim % 16 != 0 or last_dim % 16 != 0
-        ):
+        if recipe_name in _NVFP4_RECIPE_NAMES and (flat_first_dim % 16 != 0 or last_dim % 16 != 0):
             pytest.skip(
                 "Linear/LayerNormLinear + NVFP4 requires prod(shape[:-1]) and shape[-1] divisible"
                 " by 16."
@@ -235,9 +235,7 @@ def _maybe_skip_unsupported_recipe_shape(
             pytest.skip(
                 "te_ops.Linear + MXFP8 requires prod(shape[:-1]) and shape[-1] divisible by 32."
             )
-        if recipe_name in ("nvfp4", "nvfp4_row_scaled") and (
-            flat_first_dim % 16 != 0 or last_dim % 16 != 0
-        ):
+        if recipe_name in _NVFP4_RECIPE_NAMES and (flat_first_dim % 16 != 0 or last_dim % 16 != 0):
             pytest.skip(
                 "te_ops.Linear + NVFP4 requires prod(shape[:-1]) and shape[-1] divisible by 16."
             )
@@ -256,9 +254,9 @@ def _maybe_skip_unsupported_grouped_splits(recipe_name: str, m_splits: list[int]
         )
     if recipe_name == "mxfp8" and any(m % 32 != 0 for m in non_empty_splits):
         pytest.skip("GroupedLinear + MXFP8 requires each non-empty m_split divisible by 32.")
-    if recipe_name in ("nvfp4", "nvfp4_row_scaled") and any(m % 16 != 0 for m in non_empty_splits):
+    if recipe_name in _NVFP4_RECIPE_NAMES and any(m % 16 != 0 for m in non_empty_splits):
         pytest.skip("GroupedLinear + NVFP4 requires each non-empty m_split divisible by 16.")
-    if recipe_name in ("nvfp4", "nvfp4_row_scaled") and any(m % 64 != 0 for m in non_empty_splits):
+    if recipe_name in _NVFP4_RECIPE_NAMES and any(m % 64 != 0 for m in non_empty_splits):
         pytest.skip(
             "GroupedLinear + NVFP4 grouped split_quantize currently requires each non-empty "
             "m_split divisible by 64 due to grouped amax kernel constraints."
@@ -1741,7 +1739,7 @@ def test_backward_override_memory_peak_report(
 
     modes = (
         ("high_precision", "dequantized")
-        if recipe_name == "nvfp4_row_scaled"
+        if recipe_name in _NVFP4_ROW_SCALED_RECIPE_NAMES
         else (None, "high_precision", "dequantized")
     )
     mode_results: dict[str, dict[str, float] | str] = {}

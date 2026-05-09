@@ -440,6 +440,12 @@ void Tensor::set_row_scaled_nvfp4(bool row_scaled_nvfp4) {
   }
 }
 
+void Tensor::set_nvfp4_4over6(bool nvfp4_4over6) {
+  NVTE_CHECK(tensor_.scaling_mode() == NVTE_NVFP4_1D_SCALING,
+             "NVFP4 4over6 is only supported for NVFP4 tensors.");
+  tensor_.set_nvfp4_4over6(nvfp4_4over6);
+}
+
 void Tensor::to_cpu() {
   if (data_rowwise_) { data_rowwise_->to_cpu(); }
   if (data_columnwise_) { data_columnwise_->to_cpu(); }

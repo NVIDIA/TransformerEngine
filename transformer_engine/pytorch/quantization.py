@@ -1668,6 +1668,7 @@ class NVFP4BlockScalingRecipeState(RecipeState):
                     and tensor_type != "weight"
                     and self.recipe.row_scaled_activation
                 ),
+                use_4over6=self.recipe.enable_4over6,
             )
 
         if self.mode not in ("forward", "backward"):
