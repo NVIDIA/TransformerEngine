@@ -28,6 +28,7 @@ def check_nvfp4_gemm_versus_reference(
     x_columnwise: bool = False,
     w_columnwise: bool = False,
     row_scaled_nvfp4: bool = False,
+    use_4over6: bool = False,
 ):
     te_dtype = tex.DType.kFloat4E2M1
 
@@ -59,6 +60,7 @@ def check_nvfp4_gemm_versus_reference(
         with_rht=False,
         with_post_rht_amax=False,
         row_scaled_nvfp4=row_scaled_nvfp4,
+        use_4over6=use_4over6,
     )
     w_quantizer = NVFP4Quantizer(
         fp4_dtype=te_dtype,
@@ -68,6 +70,7 @@ def check_nvfp4_gemm_versus_reference(
         amax_reduction_group=None,
         with_rht=False,
         with_post_rht_amax=False,
+        use_4over6=use_4over6,
     )
 
     # Quantize x and w
@@ -123,6 +126,7 @@ def check_nvfp4_gemm_versus_reference(
         eps=0.0,
         quant_tile_shape=(1, 16),
         row_scaled_nvfp4=row_scaled_nvfp4,
+        use_4over6=use_4over6,
     )
     w_ref_quantizer = NVFP4QuantizerRef(
         dtype=utils.Fp4Formats.E2M1,
@@ -131,6 +135,7 @@ def check_nvfp4_gemm_versus_reference(
         pow_2_scales=False,
         eps=0.0,
         quant_tile_shape=(1, 16),
+        use_4over6=use_4over6,
     )
 
     # Create reference quantized tensors needed by reference GEMM
@@ -232,6 +237,7 @@ def check_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
     *,
     use_bias: bool,
     single_output: bool,
+    use_4over6: bool = False,
 ):
     te_dtype = tex.DType.kFloat4E2M1
     device = "cuda"
@@ -249,6 +255,7 @@ def check_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
         with_rht=False,
         with_post_rht_amax=False,
         row_scaled_nvfp4=True,
+        use_4over6=use_4over6,
     )
     w_quantizer = NVFP4Quantizer(
         fp4_dtype=te_dtype,
@@ -258,6 +265,7 @@ def check_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
         amax_reduction_group=None,
         with_rht=False,
         with_post_rht_amax=False,
+        use_4over6=use_4over6,
     )
 
     x_nvfp4 = []
@@ -321,6 +329,7 @@ def check_nvfp4_row_scaled_gemm_matches_emulated(
     M: int,
     K: int,
     N: int,
+    use_4over6: bool = False,
 ):
     te_dtype = tex.DType.kFloat4E2M1
     device = "cuda"
@@ -339,6 +348,7 @@ def check_nvfp4_row_scaled_gemm_matches_emulated(
         with_rht=False,
         with_post_rht_amax=False,
         row_scaled_nvfp4=True,
+        use_4over6=use_4over6,
     )
     x_tensorwise_quantizer = NVFP4Quantizer(
         fp4_dtype=te_dtype,
@@ -348,6 +358,7 @@ def check_nvfp4_row_scaled_gemm_matches_emulated(
         amax_reduction_group=None,
         with_rht=False,
         with_post_rht_amax=False,
+        use_4over6=use_4over6,
     )
     w_quantizer = NVFP4Quantizer(
         fp4_dtype=te_dtype,
@@ -357,6 +368,7 @@ def check_nvfp4_row_scaled_gemm_matches_emulated(
         amax_reduction_group=None,
         with_rht=False,
         with_post_rht_amax=False,
+        use_4over6=use_4over6,
     )
 
     x_row_scaled = x_row_scaled_quantizer.update_quantized(
@@ -417,6 +429,7 @@ def check_nvfp4_row_scaled_gemm_matches_emulated(
     ids=["rowxrow", "colxrow", "colxcol"],
 )
 @pytest.mark.parametrize("row_scaled_nvfp4", [False, True], ids=["nvfp4", "nvfp4_row_scaled"])
+@pytest.mark.parametrize("use_4over6", [False, True], ids=["default", "4over6"])
 def test_nvfp4_gemm_versus_reference(
     M: int,
     K: int,
@@ -428,6 +441,7 @@ def test_nvfp4_gemm_versus_reference(
     is_x_columnwise: bool,
     is_w_columnwise: bool,
     row_scaled_nvfp4: bool,
+    use_4over6: bool,
 ):
     if row_scaled_nvfp4:
         if accumulate:
@@ -446,6 +460,7 @@ def test_nvfp4_gemm_versus_reference(
         x_columnwise=is_x_columnwise,
         w_columnwise=is_w_columnwise,
         row_scaled_nvfp4=row_scaled_nvfp4,
+        use_4over6=use_4over6,
     )
 
 
@@ -471,6 +486,7 @@ def test_nvfp4_gemm_versus_reference(
 @pytest.mark.parametrize("out_dtype", [torch.float32, torch.bfloat16], ids=str)
 @pytest.mark.parametrize("use_bias", [False, True], ids=["no_bias", "bias"])
 @pytest.mark.parametrize("single_output", [False, True], ids=["list_output", "single_output"])
+@pytest.mark.parametrize("use_4over6", [False, True], ids=["default", "4over6"])
 def test_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
     m_splits: list[int],
     k: int,
@@ -480,6 +496,7 @@ def test_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
     out_dtype: torch.dtype,
     use_bias: bool,
     single_output: bool,
+    use_4over6: bool,
 ):
     check_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
         x_dtype=x_dtype,
@@ -490,6 +507,7 @@ def test_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
         n=n,
         use_bias=use_bias,
         single_output=single_output,
+        use_4over6=use_4over6,
     )
 
 
@@ -513,6 +531,7 @@ def test_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
 @pytest.mark.parametrize("x_dtype", [torch.float32, torch.bfloat16], ids=str)
 @pytest.mark.parametrize("w_dtype", [torch.float32, torch.bfloat16], ids=str)
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32], ids=str)
+@pytest.mark.parametrize("use_4over6", [False, True], ids=["default", "4over6"])
 def test_nvfp4_row_scaled_gemm_matches_emulated(
     M: int,
     K: int,
@@ -520,6 +539,7 @@ def test_nvfp4_row_scaled_gemm_matches_emulated(
     x_dtype: torch.dtype,
     w_dtype: torch.dtype,
     out_dtype: torch.dtype,
+    use_4over6: bool,
 ):
     check_nvfp4_row_scaled_gemm_matches_emulated(
         x_dtype=x_dtype,
@@ -528,4 +548,5 @@ def test_nvfp4_row_scaled_gemm_matches_emulated(
         M=M,
         K=K,
         N=N,
+        use_4over6=use_4over6,
     )

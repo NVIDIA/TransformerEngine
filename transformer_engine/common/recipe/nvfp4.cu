@@ -65,15 +65,15 @@ namespace nvfp4_recipe {
  * ---------------------------------------------------------------------------
  */
 
-// constexpr float factor = 6.0 * 6.0 * 448.0 * 448.0;
-constexpr float factor_inv = 1.0 / (6.0 * 6.0 * 448.0 * 448.0);
 constexpr int kTileDim = 16;
 constexpr int kThreadsPerBlock = 256;
 
 // Kernel to compute alpha *= amax_A * amax_B / factor
 __global__ void compute_nvfp4_per_tensor_scale_kernel(float alpha_in, const float *amax_A,
-                                                      const float *amax_B, float *alpha_out) {
-  // factor is defined in the enclosing namespace
+                                                      const float *amax_B, float fp8_max_A,
+                                                      float fp8_max_B, float *alpha_out) {
+  constexpr float fp4_max = 6.0f;
+  const float factor_inv = 1.0f / (fp4_max * fp4_max * fp8_max_A * fp8_max_B);
   *alpha_out = alpha_in * (*amax_A) * (*amax_B) * factor_inv;
 }
 
@@ -924,6 +924,18 @@ void nvte_nvfp4_compute_per_tensor_scale(const NVTETensor inpA, const bool use_r
   void *amax_A_ptr = use_rowwise_amax_A ? tA->amax.dptr : tA->columnwise_amax.dptr;
   void *amax_B_ptr = use_rowwise_amax_B ? tB->amax.dptr : tB->columnwise_amax.dptr;
   void *alpha_ptr = tOut->data.dptr;
+  float fp8_max_A;
+  if (tA->nvfp4_4over6) {
+    fp8_max_A = 256.0f;
+  } else {
+    fp8_max_A = 448.0f;
+  }
+  float fp8_max_B;
+  if (tB->nvfp4_4over6) {
+    fp8_max_B = 256.0f;
+  } else {
+    fp8_max_B = 448.0f;
+  }
 
   // check for not null pointers
   NVTE_CHECK(amax_A_ptr != nullptr, "amax_A_ptr is null");
@@ -932,7 +944,8 @@ void nvte_nvfp4_compute_per_tensor_scale(const NVTETensor inpA, const bool use_r
 
   nvfp4_recipe::compute_nvfp4_per_tensor_scale_kernel<<<1, 1, 0, stream>>>(
       alpha_in, reinterpret_cast<const float *>(amax_A_ptr),
-      reinterpret_cast<const float *>(amax_B_ptr), reinterpret_cast<float *>(alpha_ptr));
+      reinterpret_cast<const float *>(amax_B_ptr), fp8_max_A, fp8_max_B,
+      reinterpret_cast<float *>(alpha_ptr));
   NVTE_CHECK_CUDA(cudaGetLastError());
 #else
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);

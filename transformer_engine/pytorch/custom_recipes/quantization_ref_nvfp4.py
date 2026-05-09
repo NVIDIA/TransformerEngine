@@ -221,6 +221,7 @@ class NVFP4TensorRef(QuantizedTensorStorage):
     scale_t: Optional[torch.Tensor] = None
     global_amax_row: Optional[torch.Tensor] = None
     global_amax_col: Optional[torch.Tensor] = None
+    use_4over6: bool = False
 
     dtype: Optional[torch.dtype] = None
     device: Optional[torch.device] = None
@@ -839,6 +840,7 @@ class NVFP4QuantizerRef(Quantizer):
             scale_t=sx_t,
             global_amax_row=global_amax_row,
             global_amax_col=global_amax_col,
+            use_4over6=self.use_4over6,
             dtype=tensor.dtype,
             device=tensor.device,
             quant_dtype=self.dtype,
@@ -886,6 +888,7 @@ class NVFP4QuantizerRef(Quantizer):
         dst.scale_t = sx_t
         dst.global_amax_row = global_amax_row
         dst.global_amax_col = global_amax_col
+        dst.use_4over6 = self.use_4over6
         dst.dtype = src.dtype
         dst.quant_dtype = self.dtype
         dst.original_shape = original_shape
@@ -991,7 +994,21 @@ class NVFP4QuantizerRef(Quantizer):
             sx = sx.to(torch.float32)
             sw = sw.to(torch.float32)
 
-            factor = 6.0 * 6.0 * 448.0 * 448.0
+            qresult_x_use_4over6 = getattr(
+                qresult_x, "use_4over6", getattr(qresult_x, "_use_4over6", self.use_4over6)
+            )
+            qresult_w_use_4over6 = getattr(
+                qresult_w, "use_4over6", getattr(qresult_w, "_use_4over6", self.use_4over6)
+            )
+            if qresult_x_use_4over6:
+                fp8_max_x = 256.0
+            else:
+                fp8_max_x = 448.0
+            if qresult_w_use_4over6:
+                fp8_max_w = 256.0
+            else:
+                fp8_max_w = 448.0
+            factor = 6.0 * 6.0 * fp8_max_x * fp8_max_w
 
             if gemm_type == quantization.GEMMType.WGRAD:
                 partial_alpha = qresult_x.global_amax_col * qresult_w.global_amax_col
