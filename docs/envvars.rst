@@ -291,7 +291,7 @@ Kernel Configuration
 
    :Type: ``int`` (0 or 1)
    :Default: ``0``
-   :Description: Enable per-block map-to-4 versus map-to-6 candidate selection for NVFP4 1D quantization in the ``NVFP4BlockScaling`` recipe. This mode currently requires RHT, stochastic rounding, and 2D quantization to be disabled, either with the corresponding recipe fields or with :envvar:`NVTE_NVFP4_DISABLE_RHT`, :envvar:`NVTE_NVFP4_DISABLE_STOCHASTIC_ROUNDING`, and :envvar:`NVTE_NVFP4_DISABLE_2D_QUANTIZATION`.
+   :Description: Enable per-block map-to-4 versus map-to-6 candidate selection for NVFP4 1D quantization in the ``NVFP4BlockScaling`` recipe. This mode currently requires RHT, stochastic rounding, and 2D quantization to be disabled.
 
 Torch Compilation and Fusion
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

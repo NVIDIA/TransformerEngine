@@ -34,6 +34,7 @@ using std::uint32_t;
 using std::uint8_t;
 
 using transformer_engine::detail::TypeExtrema;
+using transformer_engine::dispatch::nvfp4::core::compute_global_encode_scaling_factor_FP4;
 
 // clang-format off
 /*
@@ -187,12 +188,6 @@ __device__ __forceinline__ float ComputeEncodeScaleFP4(ScaleType decode_scale,
 template <typename IType, typename ScaleType>
 __device__ __forceinline__ float ComputeOutputFP4(IType input, float encode_scale) {
   return static_cast<float>(input) * encode_scale;
-}
-
-template <bool kUse4Over6 = false>
-__device__ __forceinline__ float ComputeGlobalEncodeScaleFP4(const float global_amax) {
-  return transformer_engine::dispatch::nvfp4::core::compute_global_encode_scaling_factor_FP4<
-      kUse4Over6>(global_amax);
 }
 
 __device__ __forceinline__ uint32_t get_rbits(
@@ -414,7 +409,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
 
   const int kNumThreadsReduce = kScaleBlockDim / kNVecOut;
   const float global_encode_scale =
-      kIsE8Scaling ? 1.0f : ComputeGlobalEncodeScaleFP4<kUse4Over6>(global_amax[0]);
+      kIsE8Scaling ? 1.0f : compute_global_encode_scaling_factor_FP4<kUse4Over6>(global_amax[0]);
   constexpr float fp4_max_inv = 1.0f / TypeExtrema<fp4e2m1>::max;
   const float global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
   const float global_decode_scale = 1.0 / global_encode_scale;
@@ -509,8 +504,9 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
       float row_global_encode_scale = global_encode_scale;
       if constexpr (kRowScaledNVFP4) {
         row_global_encode_scale =
-            row_idx < num_rows ? ComputeGlobalEncodeScaleFP4<kUse4Over6>(global_amax[row_idx])
-                               : 1.0f;
+            row_idx < num_rows
+                ? compute_global_encode_scaling_factor_FP4<kUse4Over6>(global_amax[row_idx])
+                : 1.0f;
       }
       const float row_global_encode_scale_multiplier =
           kRowScaledNVFP4 ? row_global_encode_scale * fp4_max_inv : global_encode_scale_multiplier;
