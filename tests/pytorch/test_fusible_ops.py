@@ -80,16 +80,6 @@ if nvfp4_available:
     _quantization_list.append("nvfp4_4over6")
 
 
-def is_nvfp4_quantization(quantization: Optional[str]) -> bool:
-    """Whether a quantization recipe uses NVFP4."""
-    return quantization is not None and "nvfp4" in quantization
-
-
-def is_nvfp4_4over6_quantization(quantization: Optional[str]) -> bool:
-    """Whether a quantization recipe uses NVFP4 4over6."""
-    return quantization is not None and "4over6" in quantization
-
-
 @pytest.fixture(autouse=True, scope="class")
 def _reset_rng_states_per_test():
     """Restore torch, CUDA, and Python ``random`` before each test in this module."""
@@ -117,7 +107,7 @@ def maybe_skip_quantization(
         pytest.skip(reason_for_no_fp8)
     if quantization == "mxfp8" and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
-    if is_nvfp4_quantization(quantization) and not nvfp4_available:
+    if "nvfp4" in quantization and not nvfp4_available:
         pytest.skip(reason_for_no_nvfp4)
 
     # Check dims
@@ -130,13 +120,13 @@ def maybe_skip_quantization(
         elif quantization == "mxfp8":
             if math.prod(dims[:-1]) % 32 != 0 or dims[-1] % 32 != 0:
                 pytest.skip("MXFP8 GEMMs require dims that are divisible by 32")
-        elif is_nvfp4_quantization(quantization):
+        elif "nvfp4" in quantization:
             if math.prod(dims[:-1]) % 16 != 0 or dims[-1] % 16 != 0:
                 pytest.skip("NVFP4 GEMMs require dims that are divisible by 16")
 
     # Check dtype
     if dtype is not None:
-        if is_nvfp4_quantization(quantization) and dtype != torch.bfloat16:
+        if "nvfp4" in quantization and dtype != torch.bfloat16:
             pytest.skip("NVFP4 quantization is only supported with BF16 data")
 
 
@@ -191,14 +181,14 @@ def make_reference_and_test_tensors(
         test = quantizer(test)
     elif quantization == "mxfp8":
         test = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)(test)
-    elif is_nvfp4_quantization(quantization):
+    elif "nvfp4" in quantization:
         test = NVFP4Quantizer(
             with_rht=False,
             with_post_rht_amax=False,
             with_2d_quantization=False,
             stochastic_rounding=False,
             with_random_sign_mask=False,
-            use_4over6=is_nvfp4_4over6_quantization(quantization),
+            use_4over6="4over6" in quantization,
         )(test)
     else:
         raise ValueError(f"Unsupported quantization scheme ({quantization})")
@@ -1524,7 +1514,7 @@ class TestBasicOps:
         if in_place:
             if quantization in ("fp8_delayed_scaling", "fp8_current_scaling", "mxfp8"):
                 tols = dtype_tols(x1_test._fp8_dtype)
-            elif is_nvfp4_quantization(quantization):
+            elif "nvfp4" in quantization:
                 tols = dtype_tols(x1_test._fp4_dtype)
         y_test = y_test.to(dtype=torch.float64, device="cpu")
         dx1_test = x1_test.grad.to(dtype=torch.float64, device="cpu")
@@ -1895,7 +1885,7 @@ class TestBasicOps:
 
         # Expected numerical error
         tols = dtype_tols(dtype)
-        if quantized_compute and is_nvfp4_quantization(quantization):
+        if quantized_compute and "nvfp4" in quantization:
             tols = dtype_tols(tex.DType.kFloat4E2M1)
         elif quantized_compute:
             tols = dtype_tols(tex.DType.kFloat8E4M3)
@@ -2088,7 +2078,7 @@ class TestBasicOps:
             pytest.skip("Quantization scheme is not used")
         if quantization is not None and dtype not in (torch.bfloat16, torch.float16):
             pytest.skip("Quantized group GEMM is only supported with BF16/FP16")
-        if is_nvfp4_4over6_quantization(quantization):
+        if quantization and "4over6" in quantization:
             pytest.skip("NVFP4 4over6 grouped quantization is not supported")
 
         if single_grouped_bias and not bias:
@@ -3622,9 +3612,9 @@ class TestSequentialModules:
             pytest.skip("single_grouped_bias requires bias=True")
         if with_quantization and dtype not in (torch.bfloat16, torch.float16):
             pytest.skip("Quantized group GEMM is only supported with BF16/FP16")
-        if is_nvfp4_4over6_quantization(quantization):
+        if with_quantization and "4over6" in quantization:
             pytest.skip("NVFP4 4over6 grouped quantization is not supported")
-        if is_nvfp4_quantization(quantization) and activation == "scaled_clamped_qgeglu" and bias:
+        if "nvfp4" in quantization and activation == "scaled_clamped_qgeglu" and bias:
             # TODO: ksivaman: Need to debug numerics for this case.
             pytest.skip("Bias/dbias not yet supported in NVFP4 fused grouped MLP with GeGLU")
 
@@ -3846,7 +3836,7 @@ class TestSequentialModules:
 
         # Loose tols for sanity checking
         tols = {"rtol": 0.125, "atol": 0.25}
-        if is_nvfp4_quantization(quantization):
+        if "nvfp4" in quantization:
             tols = {"rtol": 0.25, "atol": 0.5}
 
         # Check values
