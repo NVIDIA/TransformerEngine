@@ -291,7 +291,7 @@ Kernel Configuration
 
    :Type: ``int`` (0 or 1)
    :Default: ``0``
-   :Description: Enable per-block map-to-4 versus map-to-6 candidate selection for NVFP4 1D quantization in the ``NVFP4BlockScaling`` recipe. This mode currently requires RHT, stochastic rounding, and 2D quantization to be disabled.
+   :Description: Enable per-block map-to-4 versus map-to-6 candidate selection for NVFP4 1D quantization in the ``NVFP4BlockScaling`` recipe. The selected block scale is the candidate with lower input-domain MSE, and ties select map-to-6. This mode uses 256 as the global E4M3 scale bound instead of 448 bound, and currently requires RHT, stochastic rounding, and 2D quantization to be disabled.
 
 Torch Compilation and Fusion
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

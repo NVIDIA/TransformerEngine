@@ -130,7 +130,7 @@ class NVFP4Quantizer(Quantizer):
 
     """Whether emitted NVFP4 tensors store one FP32 amax per row."""
     row_scaled_nvfp4: bool
-    """Whether to use NVFP4 4over6 block scale selection."""
+    """Whether to use NVFP4 4over6 map-to-4/map-to-6 block selection."""
     use_4over6: bool
 
     """RHT matrix random sign mask"""

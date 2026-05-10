@@ -525,6 +525,7 @@ class NVFP4BlockScaling(Recipe):
     enable_4over6 : bool, default = False
              If set to `True`, NVFP4 1D quantization evaluates per-block
              map-to-4 and map-to-6 candidates and chooses the one with lower MSE.
+             Ties choose map-to-6. The global E4M3 scale bound is 256 in this mode instead of 448.
     backward_override : {None, 'high_precision', 'dequantized'}, default = None
             Backward precision mode. None does not modify backward behavior,
             `high_precision` keeps original high-precision operands for backward,

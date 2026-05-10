@@ -1201,6 +1201,7 @@ void split_quantize_nvfp4_impl_helper(const TensorWrapper &input,
     config.set_nvfp4_4over6(quantizer.use_4over6);
   }
 
+  // Fast math affects the 4over6 MSE computation when 4over6 is enabled
   const auto use_fast_math = transformer_engine::getenv<bool>("NVTE_USE_FAST_MATH");
   if (use_fast_math) {
     for (auto &config : quant_config_list) {

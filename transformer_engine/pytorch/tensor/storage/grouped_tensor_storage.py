@@ -322,7 +322,7 @@ class GroupedTensorStorage:
 
     @property
     def use_4over6(self) -> bool:
-        """Whether grouped NVFP4 tensors use 4over6 block scale selection."""
+        """Whether grouped NVFP4 tensors carry 4over6 metadata."""
         return self._use_4over6
 
     @use_4over6.setter

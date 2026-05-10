@@ -465,7 +465,12 @@ class NVFP4QuantizerRef(Quantizer):
         global_decode_scale: torch.Tensor,
         row_scaled_nvfp4: bool,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Quantize NVFP4 with 4over6 candidate selection."""
+        """Quantize NVFP4 with 4over6 candidate selection.
+
+        This mirrors the CUDA path: map-to-4 uses a 1.5x expanded E4M3 block scale,
+        MSE is computed in the original input domain with the 6 * 256 denominator,
+        and ties choose map-to-6.
+        """
         m, num_blocks, tile_len_x = x.shape
         n = num_blocks * tile_len_x
         FLOAT4_E2M1_MAX = torch.tensor(6.0, device=x.device, dtype=torch.float32)

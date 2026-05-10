@@ -99,7 +99,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
     _with_gemm_swizzled_scales: bool
     # Whether this NVFP4 tensor uses row-scaled amax metadata
     _row_scaled_nvfp4: bool
-    # Whether this NVFP4 tensor uses 4over6 block scale selection
+    # Whether this NVFP4 tensor uses 4over6 map-to-4/map-to-6 block selection
     _use_4over6: bool
 
     def __new__(

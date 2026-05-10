@@ -180,7 +180,9 @@ struct Tensor {
   bool row_scaled_nvfp4 = false;
   /*! \brief Whether NVFP4 uses 4over6 block scale selection.
    *
-   *  Only meaningful for NVFP4 tensors.
+   *  Only meaningful for NVFP4 tensors. 4over6 tensors use 256 as their
+   *  global E4M3 scale bound and store the lower-MSE map-to-4/map-to-6
+   *  candidate for each 1x16 block.
    */
   bool nvfp4_4over6 = false;
 

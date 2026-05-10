@@ -6,6 +6,12 @@
 
 /*! \file quantize_4over6_nvfp4.cuh
  *  \brief Helpers used by NVFP4 4over6 quantization.
+ *
+ *  4over6 evaluates two TE-style NVFP4 encodings for each 1x16 block. The
+ *  map-to-6 candidate uses the normal block scale. The map-to-4 candidate uses
+ *  a 1.5x expanded block scale, which maps the FP4 value 4 to the same dynamic
+ *  range as FP4 value 6. The selected candidate is the one with lower MSE after
+ *  dequantizing back to the original input domain; ties select map-to-6.
  */
 
 #ifndef TRANSFORMER_ENGINE_QUANTIZE_4OVER6_NVFP4_CUH_

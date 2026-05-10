@@ -382,7 +382,11 @@ enum NVTEQuantizationConfigAttribute {
    *  inconsistently between kernels.
    */
   kNVTEQuantizationConfigUseFastMath = 7,
-  /*! Whether to use NVFP4 4over6 block scale selection */
+  /*! Whether to use NVFP4 4over6 block scale selection.
+   *
+   *  4over6 evaluates map-to-4 and map-to-6 candidates for each 1x16 block,
+   *  stores the lower-MSE candidate, and uses a 256 global E4M3 scale bound.
+   */
   kNVTEQuantizationConfigNVFP44Over6 = 8,
   kNVTEQuantizationConfigNumAttributes
 };

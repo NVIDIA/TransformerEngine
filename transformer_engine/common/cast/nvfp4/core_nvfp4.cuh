@@ -76,6 +76,7 @@ namespace core {
 using namespace ptx;
 
 // Compute the global encode scale factor for a given global amax
+// 4over6 uses 256 instead of 448 to leave room for the map-to-4 scale expansion
 template <bool USE_4OVER6 = false>
 __device__ __forceinline__ float compute_global_encode_scaling_factor_FP4(const float global_amax) {
   using namespace detail;
