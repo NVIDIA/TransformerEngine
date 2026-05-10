@@ -1514,7 +1514,7 @@ class TestBasicOps:
         if in_place:
             if quantization in ("fp8_delayed_scaling", "fp8_current_scaling", "mxfp8"):
                 tols = dtype_tols(x1_test._fp8_dtype)
-            elif "nvfp4" in quantization:
+            elif quantization is not None and "nvfp4" in quantization:
                 tols = dtype_tols(x1_test._fp4_dtype)
         y_test = y_test.to(dtype=torch.float64, device="cpu")
         dx1_test = x1_test.grad.to(dtype=torch.float64, device="cpu")
@@ -3614,7 +3614,12 @@ class TestSequentialModules:
             pytest.skip("Quantized group GEMM is only supported with BF16/FP16")
         if with_quantization and "4over6" in quantization:
             pytest.skip("NVFP4 4over6 grouped quantization is not supported")
-        if "nvfp4" in quantization and activation == "scaled_clamped_qgeglu" and bias:
+        if (
+            with_quantization
+            and "nvfp4" in quantization
+            and activation == "scaled_clamped_qgeglu"
+            and bias
+        ):
             # TODO: ksivaman: Need to debug numerics for this case.
             pytest.skip("Bias/dbias not yet supported in NVFP4 fused grouped MLP with GeGLU")
 
@@ -3836,7 +3841,7 @@ class TestSequentialModules:
 
         # Loose tols for sanity checking
         tols = {"rtol": 0.125, "atol": 0.25}
-        if "nvfp4" in quantization:
+        if with_quantization and "nvfp4" in quantization:
             tols = {"rtol": 0.25, "atol": 0.5}
 
         # Check values
