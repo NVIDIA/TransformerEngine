@@ -573,6 +573,8 @@ def test_fp4_dequantize(dtype, row_scaled_nvfp4, use_4over6, M, N):
     assert new_tensor._row_scaled_nvfp4 == row_scaled_nvfp4
     assert new_tensor._use_4over6 == use_4over6
     assert new_tensor._amax_rowwise.numel() == (M if row_scaled_nvfp4 else 1)
+    # 4over6 can re-encode a dequantized block with the alternate 4/6 scale
+    # choice while preserving the dequantized values.
     if not use_4over6:
         torch.testing.assert_close(
             new_tensor._rowwise_data,

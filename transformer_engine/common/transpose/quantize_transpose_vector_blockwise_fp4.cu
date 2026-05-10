@@ -15,6 +15,7 @@
 #include <utility>
 
 #include "common/cast/nvfp4/core_nvfp4.cuh"
+#include "common/cast/nvfp4/quantize_4over6_nvfp4.cuh"
 #include "common/common.h"
 #include "common/recipe/recipe_common.cuh"
 #include "common/transpose/cast_transpose.h"
@@ -538,40 +539,13 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
           row_global_amax = global_amax[0];
         }
 
-        float err_map4 = 0.0f;
-        float err_map6 = 0.0f;
-        uint32_t output_vec_map4[2];
-        uint32_t output_vec_map6[2];
-#pragma unroll
-        for (int i = 0; i < kNVecOut / kNVecSMem; i += 4) {
-          const int out_idx = i / 4;
-          const float x[8] = {
-              static_cast<float>(smem_vec[i + 0].data.elt[0]),
-              static_cast<float>(smem_vec[i + 0].data.elt[1]),
-              static_cast<float>(smem_vec[i + 1].data.elt[0]),
-              static_cast<float>(smem_vec[i + 1].data.elt[1]),
-              static_cast<float>(smem_vec[i + 2].data.elt[0]),
-              static_cast<float>(smem_vec[i + 2].data.elt[1]),
-              static_cast<float>(smem_vec[i + 3].data.elt[0]),
-              static_cast<float>(smem_vec[i + 3].data.elt[1]),
-          };
-          output_vec_map4[out_idx] =
-              transformer_engine::dispatch::nvfp4::core::cvt_fp32_to_fp4_8x_with_mse_rn<
-                  kUseFastMath>(x, encode_scale_map4, scale_inv_map4, row_global_amax, &err_map4);
-          output_vec_map6[out_idx] =
-              transformer_engine::dispatch::nvfp4::core::cvt_fp32_to_fp4_8x_with_mse_rn<
-                  kUseFastMath>(x, encode_scale_map6, scale_inv_map6, row_global_amax, &err_map6);
-        }
-
-        if (err_map4 < err_map6) {
-          scale_inv = scale_inv_map4;
-          *reinterpret_cast<uint32_t*>(&output_vec.data.elt[0]) = output_vec_map4[0];
-          *reinterpret_cast<uint32_t*>(&output_vec.data.elt[4]) = output_vec_map4[1];
-        } else {
-          scale_inv = scale_inv_map6;
-          *reinterpret_cast<uint32_t*>(&output_vec.data.elt[0]) = output_vec_map6[0];
-          *reinterpret_cast<uint32_t*>(&output_vec.data.elt[4]) = output_vec_map6[1];
-        }
+        uint32_t output_vec_4over6[2];
+        transformer_engine::dispatch::nvfp4::core::quantize_4over6_vec2_array_16x<kUseFastMath,
+                                                                                  float>(
+            smem_vec, scale_inv_map4, scale_inv_map6, encode_scale_map4, encode_scale_map6,
+            row_global_amax, scale_inv, output_vec_4over6);
+        transformer_engine::dispatch::nvfp4::core::store_4over6_packed_16x(output_vec_4over6,
+                                                                           output_vec);
       } else {
         scale_inv = ComputeDecodeScaleFP4<ScaleType>(amax, row_global_encode_scale_multiplier);
         encode_scale = ComputeEncodeScaleFP4<ScaleType>(scale_inv, row_global_decode_scale);
@@ -712,40 +686,13 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
           const float encode_scale_map6 =
               ComputeEncodeScaleFP4<ScaleType>(scale_inv_map6, global_decode_scale);
 
-          float err_map4 = 0.0f;
-          float err_map6 = 0.0f;
-          uint32_t output_vec_map4[2];
-          uint32_t output_vec_map6[2];
-#pragma unroll
-          for (int i = 0; i < kNVecOut / kNFP4PerContainer; i += 4) {
-            const int out_idx = i / 4;
-            const float x[8] = {
-                static_cast<float>(smem_vec[2 * (i + 0)].data.elt[smem_idx]),
-                static_cast<float>(smem_vec[2 * (i + 0) + 1].data.elt[smem_idx]),
-                static_cast<float>(smem_vec[2 * (i + 1)].data.elt[smem_idx]),
-                static_cast<float>(smem_vec[2 * (i + 1) + 1].data.elt[smem_idx]),
-                static_cast<float>(smem_vec[2 * (i + 2)].data.elt[smem_idx]),
-                static_cast<float>(smem_vec[2 * (i + 2) + 1].data.elt[smem_idx]),
-                static_cast<float>(smem_vec[2 * (i + 3)].data.elt[smem_idx]),
-                static_cast<float>(smem_vec[2 * (i + 3) + 1].data.elt[smem_idx]),
-            };
-            output_vec_map4[out_idx] =
-                transformer_engine::dispatch::nvfp4::core::cvt_fp32_to_fp4_8x_with_mse_rn<
-                    kUseFastMath>(x, encode_scale_map4, scale_inv_map4, global_amax[0], &err_map4);
-            output_vec_map6[out_idx] =
-                transformer_engine::dispatch::nvfp4::core::cvt_fp32_to_fp4_8x_with_mse_rn<
-                    kUseFastMath>(x, encode_scale_map6, scale_inv_map6, global_amax[0], &err_map6);
-          }
-
-          if (err_map4 < err_map6) {
-            scale_inv = scale_inv_map4;
-            *reinterpret_cast<uint32_t*>(&output_vec.data.elt[0]) = output_vec_map4[0];
-            *reinterpret_cast<uint32_t*>(&output_vec.data.elt[4]) = output_vec_map4[1];
-          } else {
-            scale_inv = scale_inv_map6;
-            *reinterpret_cast<uint32_t*>(&output_vec.data.elt[0]) = output_vec_map6[0];
-            *reinterpret_cast<uint32_t*>(&output_vec.data.elt[4]) = output_vec_map6[1];
-          }
+          uint32_t output_vec_4over6[2];
+          transformer_engine::dispatch::nvfp4::core::quantize_4over6_vec_index_16x<kUseFastMath,
+                                                                                   float>(
+              smem_vec, smem_idx, scale_inv_map4, scale_inv_map6, encode_scale_map4,
+              encode_scale_map6, global_amax[0], scale_inv, output_vec_4over6);
+          transformer_engine::dispatch::nvfp4::core::store_4over6_packed_16x(output_vec_4over6,
+                                                                             output_vec);
         } else {
           scale_inv = ComputeDecodeScaleFP4<ScaleType>(amax, global_encode_scale_multiplier);
           encode_scale = ComputeEncodeScaleFP4<ScaleType>(scale_inv, global_decode_scale);

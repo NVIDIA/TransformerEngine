@@ -21,6 +21,7 @@
 #include "../../../util/ptx.cuh"
 #include "../../../utils.cuh"
 #include "../core_nvfp4.cuh"
+#include "../quantize_4over6_nvfp4.cuh"
 
 namespace transformer_engine {
 namespace dispatch {
@@ -227,60 +228,43 @@ __device__ __forceinline__ void colwise_scaling(
   }
   const float block_amax[2] = {static_cast<float>(__habs(thread_amax_2x.x)),
                                static_cast<float>(__habs(thread_amax_2x.y))};
+
 #pragma unroll
   for (int w = 0; w < 2; ++w) {
-    __align__(8) uint32_t rOut[SCALE_DIM / 8];
-    nvfp4_scale_t S_dec_b_fp8;
-
     if constexpr (USE_4OVER6) {
+      __align__(8) uint32_t rOut[SCALE_DIM / 8];
+      nvfp4_scale_t S_dec_b_fp8;
       nvfp4_scale_t S_dec_b_fp8_map4;
       nvfp4_scale_t S_dec_b_fp8_map6;
       core::compute_4over6_decoding_scaling_factors(block_amax[w], S_enc_colwise, S_dec_b_fp8_map4,
                                                     S_dec_b_fp8_map6);
-
       const scaling_coeff_type SFcoefficient_map4 =
           compute_nvfp4_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8_map4, S_enc_colwise);
       const scaling_coeff_type SFcoefficient_map6 =
           compute_nvfp4_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8_map6, S_enc_colwise);
 
-      float err_map4 = 0.0f;
-      float err_map6 = 0.0f;
-      __align__(8) uint32_t rOut_map4[SCALE_DIM / 8];
-      __align__(8) uint32_t rOut_map6[SCALE_DIM / 8];
-#pragma unroll
-      for (int e = 0; e < SCALE_DIM / 8; ++e) {
-        const float x[8] = {
-            static_cast<float>(rIn[w][8 * e + 0]), static_cast<float>(rIn[w][8 * e + 1]),
-            static_cast<float>(rIn[w][8 * e + 2]), static_cast<float>(rIn[w][8 * e + 3]),
-            static_cast<float>(rIn[w][8 * e + 4]), static_cast<float>(rIn[w][8 * e + 5]),
-            static_cast<float>(rIn[w][8 * e + 6]), static_cast<float>(rIn[w][8 * e + 7]),
-        };
-        rOut_map4[e] = core::cvt_fp32_to_fp4_8x_with_mse_rn<USE_FAST_MATH>(
-            x, static_cast<float>(SFcoefficient_map4), S_dec_b_fp8_map4, global_amax_colwise,
-            &err_map4);
-        rOut_map6[e] = core::cvt_fp32_to_fp4_8x_with_mse_rn<USE_FAST_MATH>(
-            x, static_cast<float>(SFcoefficient_map6), S_dec_b_fp8_map6, global_amax_colwise,
-            &err_map6);
-      }
+      core::quantize_4over6_contiguous_16x<USE_FAST_MATH, scaling_coeff_type>(
+          rIn[w], S_dec_b_fp8_map4, S_dec_b_fp8_map6, SFcoefficient_map4, SFcoefficient_map6,
+          global_amax_colwise, S_dec_b_fp8, rOut);
 
-      if (err_map4 < err_map6) {
-        S_dec_b_fp8 = S_dec_b_fp8_map4;
-#pragma unroll
-        for (int e = 0; e < SCALE_DIM / 8; ++e) {
-          rOut[e] = rOut_map4[e];
-        }
-      } else {
-        S_dec_b_fp8 = S_dec_b_fp8_map6;
-#pragma unroll
-        for (int e = 0; e < SCALE_DIM / 8; ++e) {
-          rOut[e] = rOut_map6[e];
-        }
-      }
+      // Store scaling factors to SMEM buffer (R2S)
+      sSFcolwise[scale_tr_offset_Y + w][scale_tr_offset_X] = S_dec_b_fp8;
+
+      uint64_t &out_pack_16x = *reinterpret_cast<uint64_t *>(rOut);
+      ptx::st_shared_b64(&sOut_tr[buff_out_tr][out_tr_thread_offset_Y + w][out_tr_thread_offset_X],
+                         out_pack_16x);
     } else {
-      S_dec_b_fp8 = compute_decoding_scaling_factor(block_amax[w], S_enc_colwise);
+      const nvfp4_scale_t S_dec_b_fp8 =
+          compute_decoding_scaling_factor(block_amax[w], S_enc_colwise);
+
+      // Store scaling factors to SMEM buffer (R2S)
+      sSFcolwise[scale_tr_offset_Y + w][scale_tr_offset_X] = S_dec_b_fp8;
+
       const scaling_coeff_type SFcoefficient =
           compute_nvfp4_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8, S_enc_colwise);
 
+      // Scale elements
+      __align__(8) uint32_t rOut[SCALE_DIM / 8];
 #pragma unroll
       for (int e = 0; e < SCALE_DIM / 8; ++e) {
         const uint64_t elts03 = *reinterpret_cast<uint64_t *>(&rIn[w][8 * e]);
@@ -295,14 +279,11 @@ __device__ __forceinline__ void colwise_scaling(
                                                                                      SFcoefficient);
         }
       }
+
+      uint64_t &out_pack_16x = *reinterpret_cast<uint64_t *>(rOut);
+      ptx::st_shared_b64(&sOut_tr[buff_out_tr][out_tr_thread_offset_Y + w][out_tr_thread_offset_X],
+                         out_pack_16x);
     }
-
-    // Store scaling factors to SMEM buffer (R2S)
-    sSFcolwise[scale_tr_offset_Y + w][scale_tr_offset_X] = S_dec_b_fp8;
-
-    uint64_t &out_pack_16x = *reinterpret_cast<uint64_t *>(rOut);
-    ptx::st_shared_b64(&sOut_tr[buff_out_tr][out_tr_thread_offset_Y + w][out_tr_thread_offset_X],
-                       out_pack_16x);
   }
 }
 
@@ -358,32 +339,28 @@ __device__ __forceinline__ void rowwise_scaling(
     }
     const float block_amax = get_amax_of_pair(thread_amax_2x);
 
-    nvfp4_scale_t S_dec_b_fp8;
-    float block_S_enc_rowwise;
-    float block_global_amax;
-    if constexpr (ROW_SCALED_NVFP4) {
-      const size_t row_idx = row_offset + stage_Y * TILE_DIM_Y + it_offset_Y_rowwise;
-      if (row_idx < rows) {
-        block_global_amax = amax_rowwise_ptr[row_idx];
-        block_S_enc_rowwise =
-            core::compute_global_encode_scaling_factor_FP4<USE_4OVER6>(block_global_amax);
-      } else {
-        block_global_amax = 1.0f;
-        block_S_enc_rowwise = 1.0f;
-      }
-    } else {
-      block_global_amax = *amax_rowwise_ptr;
-      block_S_enc_rowwise = S_enc_rowwise;
-    }
-
-    __align__(8) uint32_t rOut[WAVES];
-
     if constexpr (USE_4OVER6) {
+      nvfp4_scale_t S_dec_b_fp8;
       nvfp4_scale_t S_dec_b_fp8_map4;
       nvfp4_scale_t S_dec_b_fp8_map6;
+      float block_S_enc_rowwise;
+      float block_global_amax;
+      if constexpr (ROW_SCALED_NVFP4) {
+        const size_t row_idx = row_offset + stage_Y * TILE_DIM_Y + it_offset_Y_rowwise;
+        if (row_idx < rows) {
+          block_global_amax = amax_rowwise_ptr[row_idx];
+          block_S_enc_rowwise =
+              core::compute_global_encode_scaling_factor_FP4<USE_4OVER6>(block_global_amax);
+        } else {
+          block_global_amax = 1.0f;
+          block_S_enc_rowwise = 1.0f;
+        }
+      } else {
+        block_global_amax = *amax_rowwise_ptr;
+        block_S_enc_rowwise = S_enc_rowwise;
+      }
       core::compute_4over6_decoding_scaling_factors(block_amax, block_S_enc_rowwise,
                                                     S_dec_b_fp8_map4, S_dec_b_fp8_map6);
-
       const scaling_coeff_type SFcoefficient_map4 =
           compute_nvfp4_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8_map4,
                                                                 block_S_enc_rowwise);
@@ -391,112 +368,76 @@ __device__ __forceinline__ void rowwise_scaling(
           compute_nvfp4_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8_map6,
                                                                 block_S_enc_rowwise);
 
-      float err_map4 = 0.0f;
-      float err_map6 = 0.0f;
-      __align__(8) uint32_t rOut_map4[WAVES];
-      __align__(8) uint32_t rOut_map6[WAVES];
-
+      __align__(8) uint32_t rOut[WAVES];
       if (bank_group == 0) {
-        const float x0[8] = {
-            static_cast<float>(rIn[0][0].x), static_cast<float>(rIn[0][0].y),
-            static_cast<float>(rIn[0][1].x), static_cast<float>(rIn[0][1].y),
-            static_cast<float>(rIn[0][2].x), static_cast<float>(rIn[0][2].y),
-            static_cast<float>(rIn[0][3].x), static_cast<float>(rIn[0][3].y),
-        };
-        rOut_map4[0] = core::cvt_fp32_to_fp4_8x_with_mse_rn<USE_FAST_MATH>(
-            x0, static_cast<float>(SFcoefficient_map4), S_dec_b_fp8_map4, block_global_amax,
-            &err_map4);
-        rOut_map6[0] = core::cvt_fp32_to_fp4_8x_with_mse_rn<USE_FAST_MATH>(
-            x0, static_cast<float>(SFcoefficient_map6), S_dec_b_fp8_map6, block_global_amax,
-            &err_map6);
-
-        const float x1[8] = {
-            static_cast<float>(rIn[1][0].x), static_cast<float>(rIn[1][0].y),
-            static_cast<float>(rIn[1][1].x), static_cast<float>(rIn[1][1].y),
-            static_cast<float>(rIn[1][2].x), static_cast<float>(rIn[1][2].y),
-            static_cast<float>(rIn[1][3].x), static_cast<float>(rIn[1][3].y),
-        };
-        rOut_map4[1] = core::cvt_fp32_to_fp4_8x_with_mse_rn<USE_FAST_MATH>(
-            x1, static_cast<float>(SFcoefficient_map4), S_dec_b_fp8_map4, block_global_amax,
-            &err_map4);
-        rOut_map6[1] = core::cvt_fp32_to_fp4_8x_with_mse_rn<USE_FAST_MATH>(
-            x1, static_cast<float>(SFcoefficient_map6), S_dec_b_fp8_map6, block_global_amax,
-            &err_map6);
+        core::quantize_4over6_pair_array_16x<USE_FAST_MATH, scaling_coeff_type>(
+            rIn, S_dec_b_fp8_map4, S_dec_b_fp8_map6, SFcoefficient_map4, SFcoefficient_map6,
+            block_global_amax, S_dec_b_fp8, rOut);
       } else {
-        const float x1[8] = {
-            static_cast<float>(rIn[1][0].x), static_cast<float>(rIn[1][0].y),
-            static_cast<float>(rIn[1][1].x), static_cast<float>(rIn[1][1].y),
-            static_cast<float>(rIn[1][2].x), static_cast<float>(rIn[1][2].y),
-            static_cast<float>(rIn[1][3].x), static_cast<float>(rIn[1][3].y),
-        };
-        rOut_map4[1] = core::cvt_fp32_to_fp4_8x_with_mse_rn<USE_FAST_MATH>(
-            x1, static_cast<float>(SFcoefficient_map4), S_dec_b_fp8_map4, block_global_amax,
-            &err_map4);
-        rOut_map6[1] = core::cvt_fp32_to_fp4_8x_with_mse_rn<USE_FAST_MATH>(
-            x1, static_cast<float>(SFcoefficient_map6), S_dec_b_fp8_map6, block_global_amax,
-            &err_map6);
-
-        const float x0[8] = {
-            static_cast<float>(rIn[0][0].x), static_cast<float>(rIn[0][0].y),
-            static_cast<float>(rIn[0][1].x), static_cast<float>(rIn[0][1].y),
-            static_cast<float>(rIn[0][2].x), static_cast<float>(rIn[0][2].y),
-            static_cast<float>(rIn[0][3].x), static_cast<float>(rIn[0][3].y),
-        };
-        rOut_map4[0] = core::cvt_fp32_to_fp4_8x_with_mse_rn<USE_FAST_MATH>(
-            x0, static_cast<float>(SFcoefficient_map4), S_dec_b_fp8_map4, block_global_amax,
-            &err_map4);
-        rOut_map6[0] = core::cvt_fp32_to_fp4_8x_with_mse_rn<USE_FAST_MATH>(
-            x0, static_cast<float>(SFcoefficient_map6), S_dec_b_fp8_map6, block_global_amax,
-            &err_map6);
+        core::quantize_4over6_pair_array_16x<USE_FAST_MATH, scaling_coeff_type, true>(
+            rIn, S_dec_b_fp8_map4, S_dec_b_fp8_map6, SFcoefficient_map4, SFcoefficient_map6,
+            block_global_amax, S_dec_b_fp8, rOut);
       }
 
-      if (err_map4 < err_map6) {
-        S_dec_b_fp8 = S_dec_b_fp8_map4;
+      // Store scaling factors to SMEM buffer (R2S)
+      if (SF_storing_thread) {
+        const int scales_offset_Y = stage_rowwise_scales_offset_Y + it * THREADS_Y_ROWWISE;
+        const int scales_offset_X = stage_rowwise_scales_offset_X;
+        sSFrowwise[scales_offset_Y][scales_offset_X] = S_dec_b_fp8;
+      }
+
 #pragma unroll
-        for (int w = 0; w < WAVES; ++w) {
-          rOut[w] = rOut_map4[w];
-        }
-      } else {
-        S_dec_b_fp8 = S_dec_b_fp8_map6;
-#pragma unroll
-        for (int w = 0; w < WAVES; ++w) {
-          rOut[w] = rOut_map6[w];
-        }
+      for (int w = 0; w < WAVES; ++w) {
+        const int swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % ELTS_PER_THREAD;
+        const int swizzled_idx = (swizzled_group_idx + thread_offset_X_rowwise) / 2;
+        ptx::st_shared_b32(&sOut[buff_out][it_offset_Y_rowwise][swizzled_idx], rOut[w]);
       }
     } else {
-      S_dec_b_fp8 = compute_decoding_scaling_factor(block_amax, block_S_enc_rowwise);
-      const scaling_coeff_type SFcoefficient =
-          compute_nvfp4_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8, block_S_enc_rowwise);
+      nvfp4_scale_t S_dec_b_fp8;
+      scaling_coeff_type SFcoefficient;
+      if constexpr (ROW_SCALED_NVFP4) {
+        const size_t row_idx = row_offset + stage_Y * TILE_DIM_Y + it_offset_Y_rowwise;
+        const float S_enc_rowwise_block =
+            row_idx < rows
+                ? core::compute_global_encode_scaling_factor_FP4(amax_rowwise_ptr[row_idx])
+                : 1.0f;
+        S_dec_b_fp8 = compute_decoding_scaling_factor(block_amax, S_enc_rowwise_block);
+        SFcoefficient =
+            compute_nvfp4_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8, S_enc_rowwise_block);
+      } else {
+        S_dec_b_fp8 = compute_decoding_scaling_factor(block_amax, S_enc_rowwise);
+        SFcoefficient =
+            compute_nvfp4_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8, S_enc_rowwise);
+      }
 
+      // Store scaling factors to SMEM buffer (R2S)
+      if (SF_storing_thread) {
+        const int scales_offset_Y = stage_rowwise_scales_offset_Y + it * THREADS_Y_ROWWISE;
+        const int scales_offset_X = stage_rowwise_scales_offset_X;
+        sSFrowwise[scales_offset_Y][scales_offset_X] = S_dec_b_fp8;
+      }
+
+// Scale elements
 #pragma unroll
       for (int w = 0; w < WAVES; ++w) {
         const uint64_t elts03 = *reinterpret_cast<uint64_t *>(&rIn[w][0]);
         const uint64_t elts47 = *reinterpret_cast<uint64_t *>(&rIn[w][2]);
 
+        uint32_t out_x8;
         if constexpr (USE_STOCHASTIC_ROUNDING) {
           const uint32_t rbits03 = core::get_rbits(rng, random_uint4, rnd_idx);
           const uint32_t rbits47 = core::get_rbits(rng, random_uint4, rnd_idx);
-          rOut[w] = ptx::mul_cvt_bf16_to_fp4_8x_stochastic_rounding<scaling_coeff_type>(
+          out_x8 = ptx::mul_cvt_bf16_to_fp4_8x_stochastic_rounding<scaling_coeff_type>(
               elts03, elts47, SFcoefficient, rbits03, rbits47);
         } else {
-          rOut[w] = ptx::mul_cvt_bf16_to_fp4_8x_round_to_nearest<scaling_coeff_type>(elts03, elts47,
-                                                                                     SFcoefficient);
+          out_x8 = ptx::mul_cvt_bf16_to_fp4_8x_round_to_nearest<scaling_coeff_type>(elts03, elts47,
+                                                                                    SFcoefficient);
         }
+
+        const int swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % ELTS_PER_THREAD;
+        const int swizzled_idx = (swizzled_group_idx + thread_offset_X_rowwise) / 2;
+        ptx::st_shared_b32(&sOut[buff_out][it_offset_Y_rowwise][swizzled_idx], out_x8);
       }
-    }
-
-    // Store scaling factors to SMEM buffer (R2S)
-    if (SF_storing_thread) {
-      const int scales_offset_Y = stage_rowwise_scales_offset_Y + it * THREADS_Y_ROWWISE;
-      const int scales_offset_X = stage_rowwise_scales_offset_X;
-      sSFrowwise[scales_offset_Y][scales_offset_X] = S_dec_b_fp8;
-    }
-
-#pragma unroll
-    for (int w = 0; w < WAVES; ++w) {
-      const int swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % ELTS_PER_THREAD;
-      const int swizzled_idx = (swizzled_group_idx + thread_offset_X_rowwise) / 2;
-      ptx::st_shared_b32(&sOut[buff_out][it_offset_Y_rowwise][swizzled_idx], rOut[w]);
     }
   }
 }
