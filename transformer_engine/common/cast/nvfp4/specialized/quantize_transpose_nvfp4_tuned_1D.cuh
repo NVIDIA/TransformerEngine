@@ -234,18 +234,12 @@ __device__ __forceinline__ void colwise_scaling(
     if constexpr (USE_4OVER6) {
       __align__(8) uint32_t rOut[SCALE_DIM / 8];
       nvfp4_scale_t S_dec_b_fp8;
-      nvfp4_scale_t S_dec_b_fp8_map4;
-      nvfp4_scale_t S_dec_b_fp8_map6;
-      core::compute_4over6_decoding_scaling_factors(block_amax[w], S_enc_colwise, S_dec_b_fp8_map4,
-                                                    S_dec_b_fp8_map6);
-      const scaling_coeff_type SFcoefficient_map4 =
-          compute_nvfp4_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8_map4, S_enc_colwise);
-      const scaling_coeff_type SFcoefficient_map6 =
-          compute_nvfp4_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8_map6, S_enc_colwise);
+      const auto scaling_factors =
+          core::compute_4over6_nvfp4_quantization_scaling_factors<scaling_coeff_type>(
+              block_amax[w], S_enc_colwise);
 
-      core::quantize_4over6_contiguous_16x<USE_FAST_MATH, scaling_coeff_type>(
-          rIn[w], S_dec_b_fp8_map4, S_dec_b_fp8_map6, SFcoefficient_map4, SFcoefficient_map6,
-          global_amax_colwise, S_dec_b_fp8, rOut);
+      core::quantize_4over6_contiguous_16x<USE_FAST_MATH>(rIn[w], scaling_factors,
+                                                          global_amax_colwise, S_dec_b_fp8, rOut);
 
       // Store scaling factors to SMEM buffer (R2S)
       sSFcolwise[scale_tr_offset_Y + w][scale_tr_offset_X] = S_dec_b_fp8;
@@ -341,8 +335,6 @@ __device__ __forceinline__ void rowwise_scaling(
 
     if constexpr (USE_4OVER6) {
       nvfp4_scale_t S_dec_b_fp8;
-      nvfp4_scale_t S_dec_b_fp8_map4;
-      nvfp4_scale_t S_dec_b_fp8_map6;
       float block_S_enc_rowwise;
       float block_global_amax;
       if constexpr (ROW_SCALED_NVFP4) {
@@ -359,24 +351,17 @@ __device__ __forceinline__ void rowwise_scaling(
         block_global_amax = *amax_rowwise_ptr;
         block_S_enc_rowwise = S_enc_rowwise;
       }
-      core::compute_4over6_decoding_scaling_factors(block_amax, block_S_enc_rowwise,
-                                                    S_dec_b_fp8_map4, S_dec_b_fp8_map6);
-      const scaling_coeff_type SFcoefficient_map4 =
-          compute_nvfp4_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8_map4,
-                                                                block_S_enc_rowwise);
-      const scaling_coeff_type SFcoefficient_map6 =
-          compute_nvfp4_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8_map6,
-                                                                block_S_enc_rowwise);
+      const auto scaling_factors =
+          core::compute_4over6_nvfp4_quantization_scaling_factors<scaling_coeff_type>(
+              block_amax, block_S_enc_rowwise);
 
       __align__(8) uint32_t rOut[WAVES];
       if (bank_group == 0) {
-        core::quantize_4over6_pair_array_16x<USE_FAST_MATH, scaling_coeff_type>(
-            rIn, S_dec_b_fp8_map4, S_dec_b_fp8_map6, SFcoefficient_map4, SFcoefficient_map6,
-            block_global_amax, S_dec_b_fp8, rOut);
+        core::quantize_4over6_pair_array_16x<USE_FAST_MATH>(rIn, scaling_factors, block_global_amax,
+                                                            S_dec_b_fp8, rOut);
       } else {
-        core::quantize_4over6_pair_array_16x<USE_FAST_MATH, scaling_coeff_type, true>(
-            rIn, S_dec_b_fp8_map4, S_dec_b_fp8_map6, SFcoefficient_map4, SFcoefficient_map6,
-            block_global_amax, S_dec_b_fp8, rOut);
+        core::quantize_4over6_pair_array_16x<USE_FAST_MATH, true>(
+            rIn, scaling_factors, block_global_amax, S_dec_b_fp8, rOut);
       }
 
       // Store scaling factors to SMEM buffer (R2S)

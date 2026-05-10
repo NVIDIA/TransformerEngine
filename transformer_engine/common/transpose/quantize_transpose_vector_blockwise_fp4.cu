@@ -520,14 +520,9 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
       float encode_scale;
       OVec output_vec;
       if constexpr (kUse4Over6) {
-        ScaleType scale_inv_map4;
-        ScaleType scale_inv_map6;
-        transformer_engine::dispatch::nvfp4::core::compute_4over6_decoding_scaling_factors(
-            amax, row_global_encode_scale, scale_inv_map4, scale_inv_map6);
-        const float encode_scale_map4 =
-            ComputeEncodeScaleFP4<ScaleType>(scale_inv_map4, row_global_decode_scale);
-        const float encode_scale_map6 =
-            ComputeEncodeScaleFP4<ScaleType>(scale_inv_map6, row_global_decode_scale);
+        const auto scaling_factors = transformer_engine::dispatch::nvfp4::core::
+            compute_4over6_fp4_encode_quantization_scaling_factors(amax, row_global_encode_scale,
+                                                                   row_global_decode_scale);
         float row_global_amax;
         if constexpr (kRowScaledNVFP4) {
           if (row_idx < num_rows) {
@@ -540,10 +535,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
         }
 
         uint32_t output_vec_4over6[2];
-        transformer_engine::dispatch::nvfp4::core::quantize_4over6_vec2_array_16x<kUseFastMath,
-                                                                                  float>(
-            smem_vec, scale_inv_map4, scale_inv_map6, encode_scale_map4, encode_scale_map6,
-            row_global_amax, scale_inv, output_vec_4over6);
+        transformer_engine::dispatch::nvfp4::core::quantize_4over6_vec2_array_16x<kUseFastMath>(
+            smem_vec, scaling_factors, row_global_amax, scale_inv, output_vec_4over6);
         transformer_engine::dispatch::nvfp4::core::store_4over6_packed_16x(output_vec_4over6,
                                                                            output_vec);
       } else {
@@ -677,20 +670,13 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
         float encode_scale;
         OVec output_vec;
         if constexpr (kUse4Over6) {
-          ScaleType scale_inv_map4;
-          ScaleType scale_inv_map6;
-          transformer_engine::dispatch::nvfp4::core::compute_4over6_decoding_scaling_factors(
-              amax, global_encode_scale, scale_inv_map4, scale_inv_map6);
-          const float encode_scale_map4 =
-              ComputeEncodeScaleFP4<ScaleType>(scale_inv_map4, global_decode_scale);
-          const float encode_scale_map6 =
-              ComputeEncodeScaleFP4<ScaleType>(scale_inv_map6, global_decode_scale);
+          const auto scaling_factors = transformer_engine::dispatch::nvfp4::core::
+              compute_4over6_fp4_encode_quantization_scaling_factors(amax, global_encode_scale,
+                                                                     global_decode_scale);
 
           uint32_t output_vec_4over6[2];
-          transformer_engine::dispatch::nvfp4::core::quantize_4over6_vec_index_16x<kUseFastMath,
-                                                                                   float>(
-              smem_vec, smem_idx, scale_inv_map4, scale_inv_map6, encode_scale_map4,
-              encode_scale_map6, global_amax[0], scale_inv, output_vec_4over6);
+          transformer_engine::dispatch::nvfp4::core::quantize_4over6_vec_index_16x<kUseFastMath>(
+              smem_vec, smem_idx, scaling_factors, global_amax[0], scale_inv, output_vec_4over6);
           transformer_engine::dispatch::nvfp4::core::store_4over6_packed_16x(output_vec_4over6,
                                                                              output_vec);
         } else {
