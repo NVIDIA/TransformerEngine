@@ -628,12 +628,12 @@ def test_sanity_grouped_linear(
             single_grouped_bias=single_param,
         ).cuda()
 
-    # Verify grouped linear exposes grouped params when the experimental mode is enabled.
+    # Verify grouped linear exposes a single grouped weight parameter(and bias when applicable).
     if fp8_recipe is None or not (fp8_recipe.delayed() or fp8_recipe.float8_current_scaling()):
-        if te_grouped_linear.single_grouped_weight:
+        if single_param:
             check_grouped_weight(te_grouped_linear, num_gemms, ffn_hidden_size, config.hidden_size)
-        if use_bias and te_grouped_linear.single_grouped_bias:
-            check_grouped_bias(te_grouped_linear, num_gemms, ffn_hidden_size)
+            if use_bias:
+                check_grouped_bias(te_grouped_linear, num_gemms, ffn_hidden_size)
 
     inp_hidden_states = torch.randn(
         num_tokens, config.hidden_size, dtype=dtype, requires_grad=True

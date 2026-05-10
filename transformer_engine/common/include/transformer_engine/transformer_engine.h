@@ -83,7 +83,7 @@ enum NVTETensorParam {
    *  its values are populated during quantization.
    */
   kNVTERowScaledNVFP4 = 8,
-  kNVTENVFP44Over6 = 9,            /*!< Whether an NVFP4 tensor uses 4over6 scaling */
+  kNVTENVFP44Over6 = 9, /*!< Whether an NVFP4 tensor uses 4over6 scaling */
   kNVTENumTensorParams
 };
 
