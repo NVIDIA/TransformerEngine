@@ -54,7 +54,7 @@ from transformer_engine.pytorch.cpp_extensions import (
 from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
 from transformer_engine.common import recipe
 import transformer_engine_torch as tex
-from utils import ModelConfig, reset_rng_states
+from utils import ModelConfig, reset_rng_states, skip_unsupported_backward_override
 
 
 # Only run FP8 tests on supported devices.
@@ -135,6 +135,20 @@ def nvfp4_rht_and_2d_quantization():
     nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams(
         random_hadamard_transform=True, fp4_2d_quantization=False
     )
+    return nvfp4_recipe
+
+
+def nvfp4_row_scaled():
+    nvfp4_recipe = recipe.NVFP4BlockScaling(
+        disable_rht=True,
+        disable_stochastic_rounding=True,
+        disable_2d_quantization=True,
+        row_scaled_activation=True,
+        backward_override="dequantized",
+    )
+    nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams()
+    nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams()
+    nvfp4_recipe.fp4_quant_bwd_grad = recipe.QParams()
     return nvfp4_recipe
 
 
@@ -1908,7 +1922,10 @@ def _test_grouped_linear_accuracy(
 @pytest.mark.parametrize("num_gemms", [3, 6])
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", ["126m"])
-@pytest.mark.parametrize("recipe", fp8_recipes + [None])
+@pytest.mark.parametrize(
+    "recipe",
+    fp8_recipes + ([nvfp4_row_scaled()] if nvfp4_available else []) + [None],
+)
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 @pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
 @pytest.mark.parametrize("bias", all_boolean)
@@ -1931,6 +1948,9 @@ def test_grouped_linear_accuracy(
         pytest.skip("FP8 parameters are not supported in debug mode.")
     if NVTE_TEST_NVINSPECT_ENABLED and delay_wgrad_compute:
         pytest.skip("Delayed wgrad compute is not supported in debug mode.")
+    skip_unsupported_backward_override(
+        "grouped_linear", recipe, getattr(recipe, "backward_override", None)
+    )
 
     config = model_configs[model]
     if config.max_seqlen_q % 16 != 0 and fp8:
@@ -2075,6 +2095,7 @@ def test_grouped_linear_accuracy_save_original_input(
         pytest.skip("DelayedScaling recipe is not supported with save_original_input")
     if NVTE_TEST_NVINSPECT_ENABLED and delay_wgrad_compute:
         pytest.skip("Delayed wgrad compute is not supported in debug mode.")
+    skip_unsupported_backward_override("grouped_linear", recipe, None)
 
     config = model_configs[model]
     if config.max_seqlen_q % 16 != 0 and fp8:
@@ -2153,7 +2174,10 @@ def test_grouped_linear_accuracy_save_original_input(
         torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("recipe", fp8_recipes + [None])
+@pytest.mark.parametrize(
+    "recipe",
+    fp8_recipes + ([nvfp4_row_scaled()] if nvfp4_available else []) + [None],
+)
 def test_grouped_linear_accuracy_single_gemm(recipe):
     """Split the tests to save CI time"""
     test_grouped_linear_accuracy(
@@ -2267,7 +2291,10 @@ def _test_padding_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, r
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", ["126m"])
 @pytest.mark.parametrize("fp8", [True])
-@pytest.mark.parametrize("recipe", fp8_recipes)
+@pytest.mark.parametrize(
+    "recipe",
+    fp8_recipes + ([nvfp4_row_scaled()] if nvfp4_available else []),
+)
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 def test_padding_grouped_linear_accuracy(
     dtype,
@@ -2281,6 +2308,9 @@ def test_padding_grouped_linear_accuracy(
 ):
     if fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("FP8 parameters are not supported in debug mode.")
+    skip_unsupported_backward_override(
+        "grouped_linear", recipe, getattr(recipe, "backward_override", None)
+    )
 
     config = model_configs[model]
     if config.max_seqlen_q % 16 != 0 and fp8:
@@ -2358,6 +2388,7 @@ def test_padding_grouped_linear_accuracy_save_original_input(
         pytest.skip("FP8 parameters are not supported in debug mode.")
     if fp8 and recipe.delayed():
         pytest.skip("DelayedScaling recipe is not supported with save_original_input")
+    skip_unsupported_backward_override("grouped_linear", recipe, None)
 
     config = model_configs[model]
     if config.max_seqlen_q % 16 != 0 and fp8:

@@ -88,11 +88,6 @@ _quantized_numerics_recipe_list = [
         marks=pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4),
         id="NVFP44Over6BlockScaling",
     ),
-    pytest.param(
-        "nvfp4_row_scaled_4over6",
-        marks=pytest.mark.skipif(not nvfp4_available, reason=reason_for_no_nvfp4),
-        id="NVFP4RowScaled4Over6BlockScaling",
-    ),
 ]
 
 

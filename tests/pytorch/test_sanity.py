@@ -94,12 +94,13 @@ def nvfp4_vanilla():
     return nvfp4_recipe
 
 
-def nvfp4_4over6():
+def nvfp4_row_scaled():
     nvfp4_recipe = recipe.NVFP4BlockScaling(
         disable_rht=True,
         disable_stochastic_rounding=True,
         disable_2d_quantization=True,
-        enable_4over6=True,
+        row_scaled_activation=True,
+        backward_override="dequantized",
     )
     nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams()
     nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams()
@@ -107,12 +108,12 @@ def nvfp4_4over6():
     return nvfp4_recipe
 
 
-def nvfp4_row_scaled():
+def nvfp4_4over6():
     nvfp4_recipe = recipe.NVFP4BlockScaling(
         disable_rht=True,
         disable_stochastic_rounding=True,
         disable_2d_quantization=True,
-        row_scaled_activation=True,
+        enable_4over6=True,
     )
     nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams()
     nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams()
