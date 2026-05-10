@@ -517,6 +517,9 @@ class TestFP8Recipe:
 @pytest.mark.parametrize("use_4over6", [False, True], ids=["default", "4over6"])
 def test_nvfp4_row_scaled_quantizer_roles(use_4over6):
     recipe = NVFP4BlockScaling(
+        disable_rht=True,
+        disable_stochastic_rounding=True,
+        disable_2d_quantization=True,
         enable_4over6=use_4over6,
         row_scaled_activation=True,
     )
