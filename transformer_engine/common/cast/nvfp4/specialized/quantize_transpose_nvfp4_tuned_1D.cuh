@@ -228,7 +228,6 @@ __device__ __forceinline__ void colwise_scaling(
   }
   const float block_amax[2] = {static_cast<float>(__habs(thread_amax_2x.x)),
                                static_cast<float>(__habs(thread_amax_2x.y))};
-
 #pragma unroll
   for (int w = 0; w < 2; ++w) {
     if constexpr (USE_4OVER6) {
@@ -273,7 +272,6 @@ __device__ __forceinline__ void colwise_scaling(
                                                                                      SFcoefficient);
         }
       }
-
       uint64_t &out_pack_16x = *reinterpret_cast<uint64_t *>(rOut);
       ptx::st_shared_b64(&sOut_tr[buff_out_tr][out_tr_thread_offset_Y + w][out_tr_thread_offset_X],
                          out_pack_16x);
@@ -502,6 +500,8 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D
       (amax_colwise_ptr == nullptr)
           ? S_enc_rowwise
           : core::compute_global_encode_scaling_factor_FP4<USE_4OVER6>(*amax_colwise_ptr);
+  // Original NVFP4 uses a scalar per-tensor amax for both rowwise and columnwise output.
+  // If no dedicated columnwise amax buffer is allocated, the rowwise amax is that same scalar.
   const float global_amax_colwise = (amax_colwise_ptr == nullptr)
                                         ? ((amax_rowwise_ptr == nullptr) ? 1.0f : *amax_rowwise_ptr)
                                         : *amax_colwise_ptr;
@@ -816,6 +816,11 @@ inline void quantize_transpose_tuned_1D(const Tensor &input, const Tensor *noop,
   const float *const amax_rowwise_ptr = reinterpret_cast<const float *>(output->amax.dptr);
   const float *const amax_colwise_ptr =
       reinterpret_cast<const float *>(output->columnwise_amax.dptr);
+  if (use_4over6 && return_transpose && amax_colwise_ptr == nullptr) {
+    NVTE_CHECK(amax_rowwise_ptr != nullptr && output->amax.numel() == 1,
+               "NVFP4 4over6 quantization with columnwise output requires columnwise amax "
+               "or scalar per-tensor rowwise amax.");
+  }
 
   const NVTETensor rng_state_tensor = (quant_config != nullptr) ? quant_config->rng_state : nullptr;
   const size_t *rng_state = nullptr;

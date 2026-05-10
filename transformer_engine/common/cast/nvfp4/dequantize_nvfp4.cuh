@@ -63,14 +63,8 @@ __global__ void __launch_bounds__(512)
   fp4vec value;
   value.vec = input_vectorized[my_index];
   fp8e4m3 scale = scales[my_scale_index];
-  float amax;
-  if constexpr (ROW_SCALED_NVFP4) {
-    amax = tensor_amax[y];
-  } else {
-    amax = tensor_amax[0];
-  }
-  constexpr float fp8_max = USE_4OVER6 ? 256.0f : 448.0f;
-  const float factor_inv = 1.0f / (6.0f * fp8_max);
+  float amax = ROW_SCALED_NVFP4 ? tensor_amax[y] : tensor_amax[0];
+  constexpr float factor_inv = 1.0f / (6.0f * (USE_4OVER6 ? 256.0f : 448.0f));
   float final_scale = static_cast<float>(scale) * amax * factor_inv;
 #pragma unroll
   for (int i = 0; i < 4; i++) {

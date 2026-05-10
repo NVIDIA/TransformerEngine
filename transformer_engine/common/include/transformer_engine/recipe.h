@@ -304,9 +304,6 @@ void nvte_mxfp8_scaling_partial_cast(const NVTETensor input, NVTETensor output_r
  *  \param[in]     alpha_in            Input scaling factor.
  *  \param[out]    alpha_out           Output scaling factor.
  *  \param[in]     stream              CUDA stream used for the operation.
- *
- *  Uses each NVFP4 tensor's 4over6 metadata to choose the matching FP8 max
- *  when folding global amax values into the GEMM alpha.
  */
 void nvte_nvfp4_compute_per_tensor_scale(const NVTETensor inpA, const bool use_rowwise_amax_A,
                                          const NVTETensor inpB, const bool use_rowwise_amax_B,
