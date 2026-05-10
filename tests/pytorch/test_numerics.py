@@ -54,7 +54,7 @@ from transformer_engine.pytorch.cpp_extensions import (
 from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
 from transformer_engine.common import recipe
 import transformer_engine_torch as tex
-from utils import ModelConfig, reset_rng_states, skip_unsupported_backward_override
+from utils import ModelConfig, recipe_id, reset_rng_states, skip_unsupported_backward_override
 
 
 # Only run FP8 tests on supported devices.
@@ -656,7 +656,7 @@ def _test_e2e_selective_recompute(
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", ["126m"])
 @pytest.mark.parametrize("fp8", all_boolean)
-@pytest.mark.parametrize("recipe", fp8_recipes)
+@pytest.mark.parametrize("recipe", fp8_recipes, ids=recipe_id)
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 def test_gpt_selective_activation_recompute(dtype, bs, model, fp8, recipe, fp8_model_params):
     if fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
@@ -772,7 +772,7 @@ def _test_e2e_full_recompute(
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", ["126m"])
 @pytest.mark.parametrize("fp8", all_boolean)
-@pytest.mark.parametrize("recipe", fp8_recipes)
+@pytest.mark.parametrize("recipe", fp8_recipes, ids=recipe_id)
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 @pytest.mark.parametrize("use_reentrant", all_boolean)
 def test_gpt_full_activation_recompute(
@@ -1361,7 +1361,7 @@ def test_linear_accuracy_delay_wgrad_compute(dtype, bs, model, bias, fuse_wgrad_
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("model", ["small"])
-@pytest.mark.parametrize("recipe", fp8_recipes + [None])
+@pytest.mark.parametrize("recipe", fp8_recipes + [None], ids=recipe_id)
 def test_linear_accuracy_save_original_input(dtype, model, recipe):
     bs = 1
     fuse_wgrad_accumulation = True
@@ -1932,7 +1932,7 @@ def _test_grouped_linear_accuracy(
 @pytest.mark.parametrize("num_gemms", [3, 6])
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", ["126m"])
-@pytest.mark.parametrize("recipe", fp8_recipes + [None])
+@pytest.mark.parametrize("recipe", fp8_recipes + [None], ids=recipe_id)
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 @pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
 @pytest.mark.parametrize("bias", all_boolean)
@@ -2078,7 +2078,7 @@ def test_grouped_linear_accuracy_cutlass(
 @pytest.mark.parametrize("num_gemms", [3])
 @pytest.mark.parametrize("bs", [1])
 @pytest.mark.parametrize("model", ["126m"])
-@pytest.mark.parametrize("recipe", fp8_recipes + [None])
+@pytest.mark.parametrize("recipe", fp8_recipes + [None], ids=recipe_id)
 @pytest.mark.parametrize("fp8_model_params", [False])
 @pytest.mark.parametrize("fuse_wgrad_accumulation", [True])
 @pytest.mark.parametrize("bias", [False])
@@ -2183,7 +2183,7 @@ def test_grouped_linear_accuracy_save_original_input(
         torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("recipe", fp8_recipes + [None])
+@pytest.mark.parametrize("recipe", fp8_recipes + [None], ids=recipe_id)
 def test_grouped_linear_accuracy_single_gemm(recipe):
     """Split the tests to save CI time"""
     test_grouped_linear_accuracy(
@@ -2297,7 +2297,7 @@ def _test_padding_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, r
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", ["126m"])
 @pytest.mark.parametrize("fp8", [True])
-@pytest.mark.parametrize("recipe", fp8_recipes)
+@pytest.mark.parametrize("recipe", fp8_recipes, ids=recipe_id)
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 def test_padding_grouped_linear_accuracy(
     dtype,
@@ -2375,7 +2375,7 @@ def test_padding_grouped_linear_accuracy(
 @pytest.mark.parametrize("bs", [1])
 @pytest.mark.parametrize("model", ["126m"])
 @pytest.mark.parametrize("fp8", [True])
-@pytest.mark.parametrize("recipe", fp8_recipes)
+@pytest.mark.parametrize("recipe", fp8_recipes, ids=recipe_id)
 @pytest.mark.parametrize("fp8_model_params", [False])
 def test_padding_grouped_linear_accuracy_save_original_input(
     dtype,
@@ -2609,7 +2609,7 @@ def _test_gpt_fp8_parameters(bs, dtype, config, fp8_model_params, recipe):
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", ["126m"])
-@pytest.mark.parametrize("recipe", fp8_recipes)
+@pytest.mark.parametrize("recipe", fp8_recipes, ids=recipe_id)
 def test_gpt_fp8_parameters(dtype, bs, model, recipe):
     if NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("FP8 parameters are not supported in debug mode.")

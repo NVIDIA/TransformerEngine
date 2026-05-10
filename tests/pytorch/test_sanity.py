@@ -654,7 +654,7 @@ def test_sanity_grouped_linear(
 
 
 @pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes, ids=recipe_id)
 @pytest.mark.parametrize("model", ["small", "weird"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
@@ -704,7 +704,7 @@ def test_sanity_layernorm_mlp(
 
 
 @pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes, ids=recipe_id)
 @pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 @pytest.mark.parametrize("bias", all_boolean)
@@ -777,7 +777,7 @@ def test_sanity_gpt_126m():
 
 
 @pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes, ids=recipe_id)
 @pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 @pytest.mark.parametrize("normalization", all_normalizations)
@@ -833,7 +833,7 @@ def test_sanity_bert_126m():
 
 
 @pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes, ids=recipe_id)
 @pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 @pytest.mark.parametrize("normalization", all_normalizations)
@@ -889,7 +889,7 @@ def test_sanity_T5_126m():
 
 
 @pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes, ids=recipe_id)
 @pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 def test_sanity_amp_and_nvfuser(dtype, fp8_recipe, model, skip_wgrad):
@@ -922,7 +922,7 @@ def test_sanity_amp_and_nvfuser(dtype, fp8_recipe, model, skip_wgrad):
 
 
 @pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes, ids=recipe_id)
 @pytest.mark.parametrize("model", ["small"])
 def test_sanity_drop_path(dtype, fp8_recipe, model):
     config = model_configs[model]
@@ -957,7 +957,7 @@ def test_sanity_drop_path(dtype, fp8_recipe, model):
 
 
 @pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes, ids=recipe_id)
 @pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 def test_sanity_fused_qkv_params(dtype, fp8_recipe, model, skip_wgrad):
@@ -993,7 +993,7 @@ def test_sanity_fused_qkv_params(dtype, fp8_recipe, model, skip_wgrad):
 
 
 @pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes, ids=recipe_id)
 @pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("skip_wgrad", all_boolean)
 def test_sanity_gradient_accumulation_fusion(dtype, fp8_recipe, model, skip_wgrad):

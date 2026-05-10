@@ -19,7 +19,7 @@ from transformer_engine.pytorch.cpu_offload import (
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
-from utils import ModelConfig, skip_unsupported_backward_override
+from utils import ModelConfig, recipe_id, skip_unsupported_backward_override
 import transformer_engine_torch as tex
 
 # Check supported quantization schemes
@@ -270,7 +270,7 @@ class Utils:
 
 class TestsOffloadableLayerState:
     @pytest.mark.parametrize("random_num_tensors", [True, False])
-    @pytest.mark.parametrize("recipe", quantization_recipes)
+    @pytest.mark.parametrize("recipe", quantization_recipes, ids=recipe_id)
     def test_general(self, random_num_tensors, recipe):
         """
         Test general functionality of DefaultOffloadSynchronizer - offload NUM_LAYERS-1 out of NUM_LAYERS layers,
@@ -366,7 +366,7 @@ class TestsOffloadableLayerState:
 
 class TestsDefaultOffloadSynchronizer:
     @pytest.mark.parametrize("random_num_tensors", [True, False])
-    @pytest.mark.parametrize("recipe", quantization_recipes)
+    @pytest.mark.parametrize("recipe", quantization_recipes, ids=recipe_id)
     def test_general(self, random_num_tensors, recipe):
         """
         Test general functionality of DefaultOffloadSynchronizer - offload NUM_LAYERS-1 out of NUM_LAYERS layers,
@@ -412,7 +412,7 @@ class TestsDefaultOffloadSynchronizer:
             offload_synchronizer.finish_part_of_bwd()
         torch.cuda.synchronize()
 
-    @pytest.mark.parametrize("recipe", quantization_recipes)
+    @pytest.mark.parametrize("recipe", quantization_recipes, ids=recipe_id)
     def test_memory(self, recipe):
         torch.cuda.synchronize()
         Utils.memory_leak_check()
@@ -467,7 +467,7 @@ class TestsDefaultOffloadSynchronizer:
             )
         assert Utils.get_cuda_memory_mb() == pytest.approx(init_cuda_memory, 0.1)
 
-    @pytest.mark.parametrize("recipe", quantization_recipes)
+    @pytest.mark.parametrize("recipe", quantization_recipes, ids=recipe_id)
     def test_multiple_tensor_offload(self, recipe):
         Utils.memory_leak_check()
         init_cpu_memory = Utils.get_cpu_memory_mb()
@@ -498,7 +498,7 @@ class TestsDefaultOffloadSynchronizer:
 
 class TestTELayers:
     @pytest.mark.parametrize("layer_type", Utils.get_layer_names())
-    @pytest.mark.parametrize("recipe", quantization_recipes)
+    @pytest.mark.parametrize("recipe", quantization_recipes, ids=recipe_id)
     @pytest.mark.parametrize("backward_override", [None, "high_precision", "dequantized"])
     def test_sanity(self, layer_type, recipe, backward_override):
         Utils.memory_leak_check()
@@ -545,7 +545,7 @@ class TestTELayers:
         del out, inp, layers
 
     @pytest.mark.parametrize("layer_type", Utils.get_layer_names())
-    @pytest.mark.parametrize("recipe", quantization_recipes)
+    @pytest.mark.parametrize("recipe", quantization_recipes, ids=recipe_id)
     @pytest.mark.parametrize("backward_override", [None, "high_precision", "dequantized"])
     def test_memory(self, layer_type, recipe, backward_override):
         Utils.memory_leak_check()
@@ -638,7 +638,7 @@ class TestTELayers:
         out.sum().backward()
 
     @pytest.mark.parametrize("layer_type", Utils.get_layer_names())
-    @pytest.mark.parametrize("recipe", quantization_recipes)
+    @pytest.mark.parametrize("recipe", quantization_recipes, ids=recipe_id)
     @pytest.mark.parametrize("backward_override", [None, "high_precision", "dequantized"])
     def test_manual_synchronization(self, recipe, layer_type, backward_override):
         Utils.memory_leak_check()
@@ -707,7 +707,7 @@ class TestTELayers:
         out_1.sum().backward()
         out_2.sum().backward()
 
-    @pytest.mark.parametrize("recipe", quantization_recipes)
+    @pytest.mark.parametrize("recipe", quantization_recipes, ids=recipe_id)
     @pytest.mark.parametrize("backward_override", [None, "high_precision", "dequantized"])
     @pytest.mark.parametrize("layer_type", Utils.get_layer_names())
     @pytest.mark.parametrize("use_cuda_graphs", [True, False])
