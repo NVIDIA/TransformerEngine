@@ -1436,7 +1436,8 @@ def _score_mod_causal_bprop(score_mod_graph, dP_tensor, tensors):
 @pytest.mark.skipif(get_cudnn_version() < (9, 6, 0), reason="cuDNN 9.6.0+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("qkv_format", ["sbhd", "bshd"])
-def test_dot_product_attention_score_mod(dtype, qkv_format):
+@pytest.mark.parametrize("scalar_loss", [False, True])
+def test_dot_product_attention_score_mod(dtype, qkv_format, scalar_loss):
     """Compare score_mod causal masking against standard cuDNN causal attention."""
     try:
         import cudnn  # pylint: disable=unused-import,import-outside-toplevel
@@ -1504,9 +1505,13 @@ def test_dot_product_attention_score_mod(dtype, qkv_format):
         attn_mask_type="causal",
     )
 
-    d_out = torch.randn_like(out)
-    out.backward(d_out)
-    out_ref.backward(d_out)
+    if scalar_loss:
+        out.sum().backward()
+        out_ref.sum().backward()
+    else:
+        d_out = torch.randn_like(out)
+        out.backward(d_out)
+        out_ref.backward(d_out)
 
     tols = dict(atol=5e-2, rtol=5e-2)
     torch.testing.assert_close(out, out_ref, **tols)

@@ -1244,22 +1244,27 @@ class FlashAttention(torch.nn.Module):
         return output.contiguous()
 
 
-def _format_to_bhsd(tensor: torch.Tensor, tensor_format: str) -> torch.Tensor:
-    """Convert TE's SBHD/BSHD tensor formats to cuDNN frontend's BHSD format."""
+def _bhsd_dim_stride(
+    tensor: torch.Tensor, tensor_format: str
+) -> Tuple[Tuple[int, ...], Tuple[int, ...]]:
+    """Describe an SBHD/BSHD tensor as cuDNN frontend's logical BHSD format."""
     if tensor_format == "sbhd":
-        return tensor.permute(1, 2, 0, 3).contiguous()
+        return (
+            (tensor.shape[1], tensor.shape[2], tensor.shape[0], tensor.shape[3]),
+            (tensor.stride(1), tensor.stride(2), tensor.stride(0), tensor.stride(3)),
+        )
     if tensor_format == "bshd":
-        return tensor.permute(0, 2, 1, 3).contiguous()
+        return (
+            (tensor.shape[0], tensor.shape[2], tensor.shape[1], tensor.shape[3]),
+            (tensor.stride(0), tensor.stride(2), tensor.stride(1), tensor.stride(3)),
+        )
     raise ValueError(f"score_mod only supports SBHD/BSHD tensor formats, got {tensor_format}.")
 
 
-def _bhsd_to_format(tensor: torch.Tensor, tensor_format: str) -> torch.Tensor:
-    """Convert cuDNN frontend's BHSD format back to TE's SBHD/BSHD tensor formats."""
-    if tensor_format == "sbhd":
-        return tensor.permute(2, 0, 1, 3).contiguous()
-    if tensor_format == "bshd":
-        return tensor.permute(0, 2, 1, 3).contiguous()
-    raise ValueError(f"score_mod only supports SBHD/BSHD tensor formats, got {tensor_format}.")
+def _bhsd_graph_tensor(graph, tensor: torch.Tensor, tensor_format: str):
+    """Create a cuDNN graph tensor with BHSD dims and TE-layout strides."""
+    dim, stride = _bhsd_dim_stride(tensor, tensor_format)
+    return graph.tensor(dim=dim, stride=stride, data_type=tensor.dtype)
 
 
 def _make_cudnn_graph_tensor_dict(graph, tensors: Optional[Dict[str, torch.Tensor]]):
@@ -1340,23 +1345,19 @@ class FusedAttentionWithScoreModFunc(torch.autograd.Function):
         deterministic: bool,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
-        query_bhsd = _format_to_bhsd(query_layer, q_format)
-        key_bhsd = _format_to_bhsd(key_layer, kv_format)
-        value_bhsd = _format_to_bhsd(value_layer, kv_format)
+        q_bhsd_dim, _ = _bhsd_dim_stride(query_layer, q_format)
 
-        cudnn, graph = _build_cudnn_pygraph(query_bhsd.dtype)
-        q = graph.tensor_like(query_bhsd)
-        k = graph.tensor_like(key_bhsd)
-        v = graph.tensor_like(value_bhsd)
+        cudnn, graph = _build_cudnn_pygraph(query_layer.dtype)
+        q = _bhsd_graph_tensor(graph, query_layer, q_format)
+        k = _bhsd_graph_tensor(graph, key_layer, kv_format)
+        v = _bhsd_graph_tensor(graph, value_layer, kv_format)
 
         score_mod_graph_tensors = _make_cudnn_graph_tensor_dict(graph, score_mod_tensors)
         wrapped_score_mod = _wrap_score_mod(score_mod, score_mod_graph_tensors)
 
-        output_bhsd = torch.empty(
-            (*query_bhsd.shape[:-1], value_bhsd.shape[-1]),
-            device=query_bhsd.device,
-            dtype=query_bhsd.dtype,
-        )
+        output_shape = (*query_layer.shape[:-1], value_layer.shape[-1])
+        output_layer = torch.empty(output_shape, device=query_layer.device, dtype=query_layer.dtype)
+        output_dim, output_stride = _bhsd_dim_stride(output_layer, q_format)
         output, stats = graph.sdpa(
             name="te_score_mod_sdpa",
             q=q,
@@ -1367,18 +1368,18 @@ class FusedAttentionWithScoreModFunc(torch.autograd.Function):
             use_causal_mask=False,
             score_mod=wrapped_score_mod,
         )
-        output.set_output(True).set_dim(output_bhsd.size()).set_stride(output_bhsd.stride())
+        output.set_output(True).set_dim(output_dim).set_stride(output_stride)
 
         variant_pack = {
-            q: query_bhsd,
-            k: key_bhsd,
-            v: value_bhsd,
-            output: output_bhsd,
+            q: query_layer,
+            k: key_layer,
+            v: value_layer,
+            output: output_layer,
         }
         if is_training:
             stats_bhs1 = torch.empty(
-                (*query_bhsd.shape[:-1], 1),
-                device=query_bhsd.device,
+                (*q_bhsd_dim[:-1], 1),
+                device=query_layer.device,
                 dtype=torch.float32,
             )
             stats.set_output(True).set_dim(stats_bhs1.size()).set_stride(
@@ -1390,7 +1391,7 @@ class FusedAttentionWithScoreModFunc(torch.autograd.Function):
         for name, graph_tensor in score_mod_graph_tensors.items():
             variant_pack[graph_tensor] = score_mod_tensors[name]
 
-        _build_and_run_cudnn_graph(graph, variant_pack, query_bhsd.device)
+        _build_and_run_cudnn_graph(graph, variant_pack, query_layer.device)
 
         ctx.is_training = is_training
         ctx.q_format = q_format
@@ -1402,11 +1403,11 @@ class FusedAttentionWithScoreModFunc(torch.autograd.Function):
         ctx.score_mod_bprop_tensors = dict(score_mod_bprop_tensors or {})
         ctx.deterministic = deterministic
         if is_training:
-            ctx.save_for_backward(query_bhsd, key_bhsd, value_bhsd, output_bhsd, stats_bhs1)
+            ctx.save_for_backward(query_layer, key_layer, value_layer, output_layer, stats_bhs1)
         else:
-            ctx.save_for_backward(query_bhsd, key_bhsd, value_bhsd, output_bhsd)
+            ctx.save_for_backward(query_layer, key_layer, value_layer, output_layer)
 
-        return _bhsd_to_format(output_bhsd, q_format)
+        return output_layer
 
     @staticmethod
     def backward(ctx, d_out: torch.Tensor):
@@ -1416,15 +1417,15 @@ class FusedAttentionWithScoreModFunc(torch.autograd.Function):
                 "score_mod backward requires DotProductAttention to be in training mode."
             )
 
-        query_bhsd, key_bhsd, value_bhsd, output_bhsd, stats_bhs1 = ctx.saved_tensors
-        d_out_bhsd = _format_to_bhsd(d_out, ctx.q_format)
+        query_layer, key_layer, value_layer, output_layer, stats_bhs1 = ctx.saved_tensors
+        d_out = d_out.contiguous()
 
-        cudnn, graph = _build_cudnn_pygraph(query_bhsd.dtype)
-        q = graph.tensor_like(query_bhsd)
-        k = graph.tensor_like(key_bhsd)
-        v = graph.tensor_like(value_bhsd)
-        output = graph.tensor_like(output_bhsd)
-        d_output = graph.tensor_like(d_out_bhsd)
+        cudnn, graph = _build_cudnn_pygraph(query_layer.dtype)
+        q = _bhsd_graph_tensor(graph, query_layer, ctx.q_format)
+        k = _bhsd_graph_tensor(graph, key_layer, ctx.kv_format)
+        v = _bhsd_graph_tensor(graph, value_layer, ctx.kv_format)
+        output = _bhsd_graph_tensor(graph, output_layer, ctx.q_format)
+        d_output = _bhsd_graph_tensor(graph, d_out, ctx.q_format)
         stats = graph.tensor_like(stats_bhs1)
 
         score_mod_graph_tensors = _make_cudnn_graph_tensor_dict(graph, ctx.score_mod_tensors)
@@ -1438,9 +1439,12 @@ class FusedAttentionWithScoreModFunc(torch.autograd.Function):
             ctx.score_mod_bprop, score_mod_bprop_graph_tensors
         )
 
-        dq_bhsd = torch.empty_like(query_bhsd)
-        dk_bhsd = torch.empty_like(key_bhsd)
-        dv_bhsd = torch.empty_like(value_bhsd)
+        dq_layer = torch.empty_like(query_layer)
+        dk_layer = torch.empty_like(key_layer)
+        dv_layer = torch.empty_like(value_layer)
+        dq_dim, dq_stride = _bhsd_dim_stride(dq_layer, ctx.q_format)
+        dk_dim, dk_stride = _bhsd_dim_stride(dk_layer, ctx.kv_format)
+        dv_dim, dv_stride = _bhsd_dim_stride(dv_layer, ctx.kv_format)
         dq, dk, dv = graph.sdpa_backward(
             name="te_score_mod_sdpa_backward",
             q=q,
@@ -1455,33 +1459,33 @@ class FusedAttentionWithScoreModFunc(torch.autograd.Function):
             score_mod_bprop=wrapped_score_mod_bprop,
             use_deterministic_algorithm=ctx.deterministic,
         )
-        dq.set_output(True).set_dim(dq_bhsd.size()).set_stride(dq_bhsd.stride())
-        dk.set_output(True).set_dim(dk_bhsd.size()).set_stride(dk_bhsd.stride())
-        dv.set_output(True).set_dim(dv_bhsd.size()).set_stride(dv_bhsd.stride())
+        dq.set_output(True).set_dim(dq_dim).set_stride(dq_stride)
+        dk.set_output(True).set_dim(dk_dim).set_stride(dk_stride)
+        dv.set_output(True).set_dim(dv_dim).set_stride(dv_stride)
 
         variant_pack = {
-            q: query_bhsd,
-            k: key_bhsd,
-            v: value_bhsd,
-            output: output_bhsd,
-            d_output: d_out_bhsd,
+            q: query_layer,
+            k: key_layer,
+            v: value_layer,
+            output: output_layer,
+            d_output: d_out,
             stats: stats_bhs1,
-            dq: dq_bhsd,
-            dk: dk_bhsd,
-            dv: dv_bhsd,
+            dq: dq_layer,
+            dk: dk_layer,
+            dv: dv_layer,
         }
         for name, graph_tensor in score_mod_graph_tensors.items():
             variant_pack[graph_tensor] = ctx.score_mod_tensors[name]
         for name, graph_tensor in score_mod_bprop_graph_tensors.items():
             variant_pack[graph_tensor] = ctx.score_mod_bprop_tensors[name]
 
-        _build_and_run_cudnn_graph(graph, variant_pack, query_bhsd.device)
+        _build_and_run_cudnn_graph(graph, variant_pack, query_layer.device)
 
         return (
             None,
-            _bhsd_to_format(dq_bhsd, ctx.q_format),
-            _bhsd_to_format(dk_bhsd, ctx.kv_format),
-            _bhsd_to_format(dv_bhsd, ctx.kv_format),
+            dq_layer,
+            dk_layer,
+            dv_layer,
             None,
             None,
             None,
