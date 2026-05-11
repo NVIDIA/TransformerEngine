@@ -756,14 +756,13 @@ def _mhc_sinkhorn_fwd(
     x_ptr,
     output_ptr,
     M,
-    BATCH_SIZE: gl.constexpr,
     n: gl.constexpr,
     iters: gl.constexpr,
+    BATCH_SIZE: gl.constexpr,
     NUM_WARPS: gl.constexpr,
 ):
     pid = gl.program_id(0)
     nn: gl.constexpr = n * n
-    gl.static_assert(BATCH_SIZE == NUM_WARPS * 32)
 
     # GMEM-coalescing layout: each thread reads/writes a contiguous 4 fp32 along the inner n.
     # block shape on axis 0 is 8 * NUM_WARPS, so the compiler tiles a (BATCH_SIZE, n, n) load
@@ -840,9 +839,9 @@ def _mhc_sinkhorn_bwd(
     x_ptr,
     grad_x_ptr,
     M,
-    BATCH_SIZE: gl.constexpr,
     n: gl.constexpr,
     iters: gl.constexpr,
+    BATCH_SIZE: gl.constexpr,
     NUM_WARPS: gl.constexpr,
 ):
     pid = gl.program_id(0)
@@ -878,7 +877,7 @@ def _mhc_sinkhorn_bwd(
     # SMEM-resident f/g history. The leading "iter" dim is buffered — .index(i) peels
     # it to give a rank-2 (BATCH_SIZE, n) view that f / g can store into and load from.
     smem_layout: gl.constexpr = gl.SwizzledSharedLayout(
-        vec=1, per_phase=1, max_phase=1, order=[1, 0]
+        vec=4, per_phase=2, max_phase=8, order=[1, 0]
     )
     hist_f = gl.allocate_shared_memory(gl.float32, [iters + 1, BATCH_SIZE, n], smem_layout)
     hist_g = gl.allocate_shared_memory(gl.float32, [iters + 1, BATCH_SIZE, n], smem_layout)

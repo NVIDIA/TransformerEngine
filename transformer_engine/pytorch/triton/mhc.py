@@ -859,7 +859,7 @@ class mHCSinkhornOp(torch.autograd.Function):
         H_res = H_res.to(torch.float32).contiguous().view(M, n * n)
         H_res_out = torch.empty_like(H_res)
 
-        NUM_WARPS = 2
+        NUM_WARPS = 1
         BATCH_SIZE = NUM_WARPS * 32
         grid = (triton.cdiv(M, BATCH_SIZE),)
         
@@ -867,9 +867,9 @@ class mHCSinkhornOp(torch.autograd.Function):
             x_ptr=H_res,
             output_ptr=H_res_out,
             M=M,
-            BATCH_SIZE=BATCH_SIZE,
             n=n,
             iters=iters,
+            BATCH_SIZE=BATCH_SIZE,
             NUM_WARPS=NUM_WARPS,
             num_warps=NUM_WARPS,
         )
@@ -914,9 +914,9 @@ class mHCSinkhornOp(torch.autograd.Function):
             x_ptr=H_res,
             grad_x_ptr=grad_res,
             M=M,
-            BATCH_SIZE=BATCH_SIZE,
             n=n,
             iters=iters,
+            BATCH_SIZE=BATCH_SIZE,
             NUM_WARPS=NUM_WARPS,
             num_warps=NUM_WARPS,
         )
