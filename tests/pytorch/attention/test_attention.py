@@ -1458,6 +1458,53 @@ def _score_mod_identity_bprop(_score_mod_graph, dP_tensor, _tensors):
     return dP_tensor
 
 
+class _ScoreModSoftcap:
+    """cuDNN frontend score_mod implementing softcapping."""
+
+    def __init__(self):
+        self.before_tanh_activation = None
+
+    def forward(self, score_mod_graph, score_tensor, tensors):
+        """Apply softcap * tanh(score / softcap)."""
+        import cudnn  # pylint: disable=import-outside-toplevel
+
+        self.before_tanh_activation = score_mod_graph.div(
+            a=score_tensor,
+            b=tensors["softcap"],
+            compute_data_type=cudnn.data_type.FLOAT,
+        )
+        self.before_tanh_activation.set_data_type(cudnn.data_type.FLOAT)
+        tanh_out = score_mod_graph.tanh(input=self.before_tanh_activation)
+        tanh_out.set_data_type(cudnn.data_type.FLOAT)
+        return score_mod_graph.mul(
+            a=tanh_out,
+            b=tensors["softcap"],
+            compute_data_type=cudnn.data_type.FLOAT,
+        )
+
+    def backward(self, score_mod_graph, dP_tensor, tensors):
+        """Apply softcap derivative to dP."""
+        import cudnn  # pylint: disable=import-outside-toplevel
+
+        d_tanh_out = score_mod_graph.mul(
+            a=dP_tensor,
+            b=tensors["softcap"],
+            compute_data_type=cudnn.data_type.FLOAT,
+        )
+        d_tanh_out.set_data_type(cudnn.data_type.FLOAT)
+        d_before_tanh_activation = score_mod_graph.tanh_backward(
+            loss=d_tanh_out,
+            input=self.before_tanh_activation,
+            compute_data_type=cudnn.data_type.FLOAT,
+        )
+        d_before_tanh_activation.set_data_type(cudnn.data_type.FLOAT)
+        return score_mod_graph.div(
+            a=d_before_tanh_activation,
+            b=tensors["softcap"],
+            compute_data_type=cudnn.data_type.FLOAT,
+        )
+
+
 def _relative_position_bias(config, dtype):
     """Materialize score + (q_idx - kv_idx) as post-scale attention bias."""
     q_idx = torch.arange(config.max_seqlen_q, dtype=torch.float32, device="cuda").view(1, 1, -1, 1)
@@ -1465,6 +1512,32 @@ def _relative_position_bias(config, dtype):
         1, 1, 1, -1
     )
     return (q_idx - kv_idx).to(dtype).expand(1, config.num_heads, -1, -1).contiguous()
+
+
+def _to_bhsd(tensor, qkv_format):
+    """Convert SBHD/BSHD test tensors to logical BHSD."""
+    if qkv_format == "sbhd":
+        return tensor.permute(1, 2, 0, 3)
+    return tensor.permute(0, 2, 1, 3)
+
+
+def _from_bhsd(tensor, qkv_format):
+    """Convert logical BHSD test tensors to SBHD/BSHD."""
+    if qkv_format == "sbhd":
+        return tensor.permute(2, 0, 1, 3).contiguous()
+    return tensor.permute(0, 2, 1, 3).contiguous()
+
+
+def _pytorch_softcap_attention(q, k, v, qkv_format, softmax_scale, softcap):
+    """PyTorch reference for softcapped scaled dot-product attention."""
+    q_bhsd = _to_bhsd(q, qkv_format).float()
+    k_bhsd = _to_bhsd(k, qkv_format).float()
+    v_bhsd = _to_bhsd(v, qkv_format).float()
+    scores = torch.matmul(q_bhsd, k_bhsd.transpose(-2, -1)) * softmax_scale
+    scores = softcap * torch.tanh(scores / softcap)
+    probs = torch.softmax(scores, dim=-1)
+    out = _from_bhsd(torch.matmul(probs, v_bhsd), qkv_format).to(v.dtype)
+    return out.reshape(*out.shape[:-2], out.shape[-2] * out.shape[-1])
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required.")
@@ -1549,6 +1622,86 @@ def test_dot_product_attention_score_mod(dtype, qkv_format, scalar_loss):
         out_ref.backward(d_out)
 
     tols = dict(atol=5e-2, rtol=5e-2)
+    torch.testing.assert_close(out, out_ref, **tols)
+    torch.testing.assert_close(q.grad, q_ref.grad, **tols)
+    torch.testing.assert_close(k.grad, k_ref.grad, **tols)
+    torch.testing.assert_close(v.grad, v_ref.grad, **tols)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required.")
+@pytest.mark.skipif(get_cudnn_version() < (9, 6, 0), reason="cuDNN 9.6.0+ is required.")
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("qkv_format", ["sbhd", "bshd"])
+def test_dot_product_attention_score_mod_softcap(dtype, qkv_format):
+    """Compare softcap score_mod against PyTorch math attention."""
+    try:
+        import cudnn  # pylint: disable=unused-import,import-outside-toplevel
+    except ImportError:
+        pytest.skip("cuDNN Python frontend is required for score_mod attention.")
+
+    reset_rng_states()
+    os.environ["NVTE_FLASH_ATTN"] = "0"
+    os.environ["NVTE_FUSED_ATTN"] = "1"
+    os.environ["NVTE_UNFUSED_ATTN"] = "0"
+    _attention_backends["backend_selection_requires_update"] = True
+
+    config = ModelConfig(2, 16, 4, 64, attn_mask_type="no_mask")
+    available_backends, _, fused_attn_backends = get_available_attention_backends(
+        config,
+        qkv_dtype=dtype,
+        qkv_layout=f"{qkv_format}_{qkv_format}_{qkv_format}",
+    )
+    if not available_backends[1] or not fused_attn_backends:
+        pytest.skip("FusedAttention is not available for this softcap configuration.")
+
+    if qkv_format == "sbhd":
+        q_shape = (config.max_seqlen_q, config.batch_size, config.num_heads, config.head_dim_qk)
+        kv_shape = q_shape
+    else:
+        q_shape = (config.batch_size, config.max_seqlen_q, config.num_heads, config.head_dim_qk)
+        kv_shape = q_shape
+
+    q = torch.randn(q_shape, dtype=dtype, device="cuda").requires_grad_()
+    k = torch.randn(kv_shape, dtype=dtype, device="cuda").requires_grad_()
+    v = (0.1 * torch.randn(kv_shape, dtype=dtype, device="cuda")).requires_grad_()
+    q_ref, k_ref, v_ref = [x.detach().clone().requires_grad_() for x in (q, k, v)]
+
+    softcap = 0.8
+    softcap_tensor = torch.full((1, 1, 1, 1), softcap)
+    softcap_score_mod = _ScoreModSoftcap()
+    flex_attn = DotProductAttention(
+        config.num_heads,
+        config.head_dim_qk,
+        qkv_format=qkv_format,
+        attn_mask_type="no_mask",
+        layer_number=1,
+    ).to(dtype=dtype, device="cuda")
+
+    out = flex_attn(
+        q,
+        k,
+        v,
+        qkv_format=qkv_format,
+        attn_mask_type="no_mask",
+        score_mod=softcap_score_mod.forward,
+        score_mod_bprop=softcap_score_mod.backward,
+        score_mod_tensors={"softcap": softcap_tensor},
+        score_mod_bprop_tensors={"softcap": softcap_tensor},
+    )
+    out_ref = _pytorch_softcap_attention(
+        q_ref,
+        k_ref,
+        v_ref,
+        qkv_format,
+        1.0 / config.head_dim_qk**0.5,
+        softcap,
+    )
+
+    d_out = torch.randn_like(out)
+    out.backward(d_out)
+    out_ref.backward(d_out)
+
+    tols = dict(atol=7e-2, rtol=7e-2)
     torch.testing.assert_close(out, out_ref, **tols)
     torch.testing.assert_close(q.grad, q_ref.grad, **tols)
     torch.testing.assert_close(k.grad, k_ref.grad, **tols)
