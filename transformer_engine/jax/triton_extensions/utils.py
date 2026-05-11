@@ -390,7 +390,16 @@ def triton_call_lowering(
         ctx: MLIR lowering context
         kernel_fn: Triton kernel function
         *array_args: Input arrays (from ctx)
-        grid: Grid dimensions (int or tuple)
+        grid: Grid dimensions. May be either:
+            - an int or tuple (fixed grid for every config), or
+            - a callable ``meta -> int|tuple`` (evaluated per autotune config).
+
+            Use the callable form for autotuned kernels whose grid depends on
+            ``BLOCK_SIZE`` (or any other autotuned constexpr); otherwise the
+            launch grid will not match the autotuner-selected config and the
+            kernel will either over-launch (waste) or under-cover. ``meta`` is
+            the merged dict ``{**constexprs, **config.kwargs}`` for the chosen
+            config — the same convention as jax-triton's ``triton_call``.
         input_output_aliases: Mapping of input to output aliases
         constexprs: Compile-time constants for the kernel. This includes both
                     tl.constexpr arguments AND scalar runtime arguments (like
@@ -404,13 +413,12 @@ def triton_call_lowering(
         def lowering(ctx, x, *, block_size):
             from ..triton_extensions import triton_call_lowering
             n = ctx.avals_in[0].size
+
+            def grid(meta):
+                return (triton.cdiv(n, meta["BLOCK_SIZE"]),)
+
             return triton_call_lowering(
-                ctx, my_kernel, x,
-                grid=(triton.cdiv(n, block_size),),
-                constexprs={
-                    "n_elements": n,  # scalar arg (not tl.constexpr in kernel)
-                    "BLOCK_SIZE": block_size,  # tl.constexpr arg
-                },
+                ctx, my_kernel, x, grid=grid, constexprs={"n_elements": n},
             )
     """
     # Get compute capability using gpu_triton
@@ -431,15 +439,23 @@ def triton_call_lowering(
     tensor_arg_names = [n for n in arg_names if n not in constexpr_names]
     signature = {n: get_triton_dtype(a) for n, a in zip(tensor_arg_names, all_avals)}
 
-    # Normalize grid to 3D
-    if isinstance(grid, int):
-        grid_tuple = (grid, 1, 1)
-    elif len(grid) == 1:
-        grid_tuple = (grid[0], 1, 1)
-    elif len(grid) == 2:
-        grid_tuple = (grid[0], grid[1], 1)
+    # Normalize grid to 3D. When `grid` is a callable, defer evaluation until
+    # we know the per-config meta (so each autotune config gets its own grid,
+    # matching jax-triton's behavior).
+    def _normalize_grid(g):
+        if isinstance(g, int):
+            return (g, 1, 1)
+        if len(g) == 1:
+            return (g[0], 1, 1)
+        if len(g) == 2:
+            return (g[0], g[1], 1)
+        return tuple(g[:3])
+
+    grid_callable = grid if callable(grid) else None
+    if grid_callable is None:
+        grid_tuple = _normalize_grid(grid)
     else:
-        grid_tuple = grid[:3]
+        grid_tuple = None  # evaluated per-config below
 
     # Default values for the kernel
     actual_kernel_fn = kernel_fn
@@ -510,11 +526,18 @@ def triton_call_lowering(
             for _ in list(ctx.avals_in) + list(ctx.avals_out):
                 config_params.append(gpu_triton.create_array_parameter(0, 16))
 
+            # Per-config grid: evaluate `grid(meta)` if grid is a callable so
+            # the launch shape matches this config's BLOCK_SIZE (etc.).
+            if grid_callable is not None:
+                config_grid = _normalize_grid(grid_callable(config_constexprs))
+            else:
+                config_grid = grid_tuple
+
             config_call = gpu_triton.TritonKernelCall(
                 config_kernel,
-                grid_tuple[0],
-                grid_tuple[1],
-                grid_tuple[2],
+                config_grid[0],
+                config_grid[1],
+                config_grid[2],
                 config_params,
             )
 
@@ -571,11 +594,18 @@ def triton_call_lowering(
         for _ in list(ctx.avals_in) + list(ctx.avals_out):
             kernel_params.append(gpu_triton.create_array_parameter(0, 16))
 
+        # Non-autotuned dispatch: evaluate `grid(meta)` once with the merged
+        # constexprs (which already reflect the single config we'll launch).
+        if grid_callable is not None:
+            single_grid = _normalize_grid(grid_callable(kernel_constexprs))
+        else:
+            single_grid = grid_tuple
+
         kernel_call = gpu_triton.TritonKernelCall(
             kernel,
-            grid_tuple[0],
-            grid_tuple[1],
-            grid_tuple[2],
+            single_grid[0],
+            single_grid[1],
+            single_grid[2],
             kernel_params,
         )
 

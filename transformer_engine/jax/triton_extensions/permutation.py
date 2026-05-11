@@ -589,10 +589,17 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
             probs_stride_token = 0
             probs_stride_expert = 0
 
-        # Grid function equivalent: (num_tokens, cdiv(hidden_size, BLOCK_SIZE))
-        # Use minimum BLOCK_SIZE from autotune configs to ensure grid covers all elements
+        # Per-config grid: size by autotune-selected BLOCK_SIZE. With a fixed
+        # grid sized for the smallest BLOCK_SIZE, larger configs over-launch by
+        # the BLOCK_SIZE ratio (every extra block masks out and exits) — the
+        # cause of the perm-kernel perf regression vs jax-triton's autotuner.
+        def grid(meta):
+            return (num_tokens, triton.cdiv(hidden_size, meta["BLOCK_SIZE"]))
+
+        # block_size is only a placeholder for the constexpr signature; the
+        # autotune loop overrides BLOCK_SIZE per config (and on the old-JAX
+        # fallback path, the first config's BLOCK_SIZE is used).
         block_size = _get_min_block_size(_permute_kernel)
-        grid = (num_tokens, triton.cdiv(hidden_size, block_size))
 
         # Use input_output_aliases to alias pre-zeroed buffers to outputs.
         # This ensures padding positions contain zeros since the kernel only writes valid positions.
@@ -997,9 +1004,12 @@ class UnpermuteWithMaskMapPrimitive(BasePrimitive):
         unpermuted_probs_stride_token = num_experts
         unpermuted_probs_stride_expert = 1
 
-        # Grid - use minimum BLOCK_SIZE from autotune configs
+        # Per-config grid: size by autotune-selected BLOCK_SIZE.
+        def grid(meta):
+            return (num_tokens, triton.cdiv(hidden_size, meta["BLOCK_SIZE"]))
+
+        # Placeholder for constexpr signature; autotune overrides per config.
         block_size = _get_min_block_size(_unpermute_kernel)
-        grid = (num_tokens, triton.cdiv(hidden_size, block_size))
 
         return triton_call_lowering(
             ctx,
@@ -1720,9 +1730,12 @@ class SortChunksByMapPrimitive(BasePrimitive):
         probs_stride_token = 1
         permuted_probs_stride_token = 1
 
-        # Grid - use minimum BLOCK_SIZE from autotune configs
+        # Per-config grid: size by autotune-selected BLOCK_SIZE.
+        def grid(meta):
+            return (num_tokens, triton.cdiv(hidden_size, meta["BLOCK_SIZE"]))
+
+        # Placeholder for constexpr signature; autotune overrides per config.
         block_size = _get_min_block_size(_sort_chunks_by_map_kernel)
-        grid = (num_tokens, triton.cdiv(hidden_size, block_size))
 
         # Declare input_output_aliases so XLA knows output slot 0 is claimed by
         # input 3 (output_buf). This prevents XLA from implicitly aliasing any
