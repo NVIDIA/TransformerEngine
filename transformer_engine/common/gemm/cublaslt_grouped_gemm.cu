@@ -171,7 +171,6 @@ struct GroupedGemmSetupWorkspace {
     size_t offset = 0;
     const size_t ptr_size = num_tensors * sizeof(void *);
     const size_t int_size = num_tensors * sizeof(int);
-    const size_t float_size = num_tensors * sizeof(float);
     constexpr size_t kPtrAlignment = 16;  // cuBLAS requires 16-byte alignment for pointer arrays
 
     // Helper to align offset to kPtrAlignment
