@@ -19,8 +19,9 @@ from transformer_engine.common.triton.mhc import (
     _mhc_aggregate_fwd,
     _mhc_aggregate_bwd,
     _mhc_projection_fwd_fused,
-    _mhc_sinkhorn_fwd_fused,
-    _mhc_sinkhorn_bwd_fused,
+    _mhc_sinkhorn_fwd,
+    _mhc_sinkhorn_bwd,
+    _sinkhorn_layouts,
 )
 from transformer_engine.pytorch.cpp_extensions.gemm import general_gemm
 
@@ -142,7 +143,6 @@ def mhc_generate_mix_and_aggregate(
 def mhc_fused_sinkhorn(
     H_res: torch.Tensor,
     n: int = 4,
-    recompute_hist: bool = True,
     iters: int = 20,
 ):
     """
@@ -170,7 +170,7 @@ def mhc_fused_sinkhorn(
         with the same dtype as H_res
     """
     assert n == 4, "Only n=4 is supported in this implementation"
-    out = mHCSinkhornOp.apply(H_res, n, recompute_hist, iters)
+    out = mHCSinkhornOp.apply(H_res, n, iters)
     return out
 
 
@@ -833,7 +833,7 @@ class mHCSinkhornOp(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, H_res, n=4, recompute_hist=True, iters=20):
+    def forward(ctx, H_res, n=4, iters=20):
         """
         The forward pass of the Sinkhorn operation. Performs iterative row-column normalization
         in log space to convert H_res into a doubly stochastic matrix. Each iteration alternately
@@ -847,7 +847,6 @@ class mHCSinkhornOp(torch.autograd.Function):
         ctx : The context object.
         H_res (tensor): The input H_res matrix of shape (s, b, n, n).
         n (int): The number of hyper connections (only n=4 is supported).
-        recompute_hist (bool): Whether to recompute the intermediate f/g history in the backward pass to save memory. If False, stores history buffers of shape (iters+1, s, b, n).
         iters (int): The number of Sinkhorn iterations (20 is enough for convergence per the DeepSeek paper).
 
         Returns:
@@ -855,112 +854,76 @@ class mHCSinkhornOp(torch.autograd.Function):
         """
 
         s, b, _, _ = H_res.shape
+        M = s * b
 
         ctx.dtype = H_res.dtype
-        H_res = H_res.to(torch.float32)
+        H_res = H_res.to(torch.float32).contiguous().view(M, n * n)
+        H_res_out = torch.empty_like(H_res)
 
-        H_res = H_res.contiguous().view(s * b, n * n)
-
-        hist_f, hist_g = None, None
-        if recompute_hist:
-            hist_f = None
-            hist_g = None
-        else:
-            # History buffers: (iters+1, s, b, n)
-            hist_f = torch.empty((iters + 1, s, b, n), device=H_res.device, dtype=H_res.dtype)
-            hist_g = torch.empty((iters + 1, s, b, n), device=H_res.device, dtype=H_res.dtype)
-        H_res_out = torch.empty_like(H_res)  # (s*b, n*n)
-
-        # pylint: disable=unnecessary-lambda-assignment
-        grid = lambda META: (triton.cdiv(s * b * n * n, META["BLOCK_SIZE"]),)
-
-        _mhc_sinkhorn_fwd_fused[grid](
+        NUM_WARPS = 2
+        BATCH_SIZE = NUM_WARPS * 32
+        grid = (triton.cdiv(M, BATCH_SIZE),)
+        
+        _mhc_sinkhorn_fwd[grid](
             x_ptr=H_res,
             output_ptr=H_res_out,
-            hist_f_ptr=hist_f,
-            hist_g_ptr=hist_g,
-            stride_xm=n * n,
-            stride_xn=1,
-            stride_out_m=n * n,
-            stride_out_n=1,
-            M=s * b,
+            M=M,
+            BATCH_SIZE=BATCH_SIZE,
             n=n,
             iters=iters,
-            RECOMPUTE=recompute_hist,
+            NUM_WARPS=NUM_WARPS,
+            num_warps=NUM_WARPS,
         )
 
-        if recompute_hist:
-            ctx.save_for_backward(H_res, H_res_out)
-        else:
-            ctx.save_for_backward(H_res, H_res_out, hist_f, hist_g)
-        ctx.recompute_hist = recompute_hist
+        ctx.save_for_backward(H_res, H_res_out)
         ctx.iters = iters
         ctx.n = n
 
         H_res_out = H_res_out.view(s, b, n, n)
-        return H_res_out.to(ctx.dtype)  # Cast back to the original dtype of H
+        return H_res_out.to(ctx.dtype)
 
     @staticmethod
     def backward(ctx, grad_out):
         """
         The backward pass of the Sinkhorn operation. Backpropagates through the iterative
-        normalization by reversing through the f/g update steps. If recompute_hist is True,
-        the forward pass history is recomputed to save memory.
+        normalization by reversing through the f/g update steps. The f/g history is recomputed
+        inside the backward kernel and held in shared memory; no DRAM scratch buffer is needed.
 
         Parameters:
         ctx : The context object with saved tensors.
         grad_out (tensor): The gradient of the loss with respect to the output, of shape (s, b, n, n).
 
         Returns:
-        tuple: A tuple with the gradients (grad_H_res, None, None, None).
+        tuple: A tuple with the gradients (grad_H_res, None, None).
         """
 
         s, b, n, _ = grad_out.shape
         M = s * b
 
-        hist_f, hist_g = None, None
-        recompute_hist = ctx.recompute_hist
+        H_res, H_res_out = ctx.saved_tensors
         iters = ctx.iters
-        if recompute_hist:
-            H_res, H_res_out = ctx.saved_tensors
-            hist_f = torch.empty((iters + 1, s, b, n), device=H_res.device, dtype=H_res.dtype)
-            hist_g = torch.empty((iters + 1, s, b, n), device=H_res.device, dtype=H_res.dtype)
-        else:
-            H_res, H_res_out, hist_f, hist_g = ctx.saved_tensors
 
-        n = ctx.n
-
-        grad_res_out = grad_out.contiguous().view(M, n * n)
-
+        grad_res_out = grad_out.to(torch.float32).contiguous().view(M, n * n)
         grad_res = torch.empty_like(H_res)
 
-        # pylint: disable=unnecessary-lambda-assignment
-        grid = lambda META: (triton.cdiv(M * n * n, META["BLOCK_SIZE"]),)
-
-        _mhc_sinkhorn_bwd_fused[grid](
+        L_3d, smem_layout = _sinkhorn_layouts()
+        grid = (triton.cdiv(M, 32),)
+        _mhc_sinkhorn_bwd[grid](
             grad_out_ptr=grad_res_out,
             output_ptr=H_res_out,
-            grad_x_ptr=grad_res,
             x_ptr=H_res,
-            hist_f_ptr=hist_f,
-            hist_g_ptr=hist_g,
-            stride_grad_out_m=n * n,
-            stride_grad_out_n=1,
-            stride_out_m=n * n,
-            stride_out_n=1,
-            stride_grad_xm=n * n,
-            stride_grad_xn=1,
-            stride_xm=n * n,
-            stride_xn=1,
+            grad_x_ptr=grad_res,
             M=M,
+            BATCH_SIZE=32,
             n=n,
             iters=iters,
-            RECOMPUTE=recompute_hist,
+            L_3d=L_3d,
+            SMEM_LAYOUT=smem_layout,
+            num_warps=2,
         )
 
         grad_res = grad_res.view(s, b, n, n)
-
-        return grad_res.to(ctx.dtype), None, None, None
+        return grad_res.to(ctx.dtype), None, None
 
 
 class mHCAggregateOp(torch.autograd.Function):

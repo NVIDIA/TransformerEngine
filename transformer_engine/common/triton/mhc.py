@@ -12,6 +12,8 @@ import torch
 
 import triton
 import triton.language as tl
+from triton.experimental import gluon
+from triton.experimental.gluon import language as gl
 
 MAX_GRID_DIM_Y = 65535  # Maximum grid dimension in Y direction for current CUDA architectures
 
@@ -749,249 +751,208 @@ def _mhc_scale_bwd_fused(
 
         tl.atomic_add(grad_b_ptr + cols * stride_grad_b, grad_b, mask=cols < N, sem="relaxed")
 
-
-def sinkhorn_config():
-    block = [256, 1024]
-    warps = [2, 8]
-    stages = [2, 4]
-    configs = []
-    for b, w, s in itertools.product(block, warps, stages):
-        configs.append(triton.Config({"BLOCK_SIZE": b}, num_warps=w, num_stages=s))
-    if os.environ.get("NVTE_DISABLE_TRITON_AUTOTUNING", "0") == "1":
-        configs = configs[:1]
-    return configs
+# Gluon kernels for Sinkhorn fwd/bwd — fused recompute with SMEM-resident
+# f/g history so no DRAM scratch buffer is required for the backward pass.
+#
+# Layout:
+#   - The (BATCH_SIZE, n, n) tile uses a 3D BlockedLayout where each warp owns
+#     one (n, n) sub-tile, so axis=1 and axis=2 reductions are intra-warp shfls.
+#   - In the backward pass, hist_f/hist_g are allocated as shared memory of
+#     shape [iters+1, BATCH_SIZE, n] inside the kernel itself.
 
 
-@triton.autotune(
-    configs=sinkhorn_config(),
-    key=["M"],
-)
-@triton.jit
-def _mhc_sinkhorn_bwd_fused(
+def _sinkhorn_layouts():
+    L_3d = gl.BlockedLayout(
+        size_per_thread=[4, 1, 4],
+        threads_per_warp=[2, 4, 4],
+        warps_per_cta=[4, 1, 1],
+        order=[2, 1, 0],
+    )
+    smem_layout = gl.SwizzledSharedLayout(
+        vec=1, per_phase=1, max_phase=1, order=[1, 0]
+    )
+    return L_3d, smem_layout
+
+@gluon.jit
+def _mhc_sinkhorn_fwd(
+    x_ptr,
+    output_ptr,
+    M,
+    BATCH_SIZE: gl.constexpr,
+    n: gl.constexpr,
+    iters: gl.constexpr,
+    NUM_WARPS: gl.constexpr,
+):
+    pid = gl.program_id(0)
+    nn: gl.constexpr = n * n
+    gl.static_assert(BATCH_SIZE == NUM_WARPS * 32)
+
+    # Each thread load 4 fp32 elements, so each warp forms a 32x4xfp32 coalesced load
+    # We need to do 4 such load to obtain the full (BATCH_SIZE, n, n) tile
+    load_layout: gl.constexpr = gl.BlockedLayout(
+        size_per_thread=[1, 1, 4],
+        threads_per_warp=[8, 4, 1],
+        warps_per_cta=[NUM_WARPS, 1, 1],
+        order=[2, 1, 0],
+    )
+
+    # The size in M dimension that we load each time
+    M_CHUNK: gl.constexpr = 8 * NUM_WARPS
+    # How many times we need to load to cover the full BATCH_SIZE in M dimension
+    NUM_LOADS: gl.constexpr = BATCH_SIZE // M_CHUNK
+
+    # Layout along each axis
+    layout_M: gl.constexpr  = gl.SliceLayout(1, gl.SliceLayout(2, load_layout))
+    layout_n1: gl.constexpr = gl.SliceLayout(0, gl.SliceLayout(2, load_layout))
+    layout_n2: gl.constexpr = gl.SliceLayout(0, gl.SliceLayout(1, load_layout))
+
+    # Allocate (BATCH_SIZE, n, n) tile in shared memory for the input x, with the same swizzling as load_layout
+    smem_x_layout: gl.constexpr = gl.SwizzledSharedLayout(
+        vec=1, per_phase=1, max_phase=1, order=[3, 2, 1, 0]
+    )
+    smem_x = gl.allocate_shared_memory(
+        gl.float32, [NUM_LOADS, M_CHUNK, n, n], smem_x_layout
+    )
+
+    offs_n1 = gl.arange(0, n, layout=layout_n1)
+    offs_n2 = gl.arange(0, n, layout=layout_n2)
+    for i in gl.static_range(NUM_LOADS):
+        offs_b = pid * BATCH_SIZE + i * M_CHUNK + gl.arange(0, M_CHUNK, layout=layout_M)
+        mask_b = offs_b < M
+
+        ptrs = (
+            x_ptr
+            + offs_b[:, None, None]  * (n * n)
+            + offs_n1[None, :, None] * n
+            + offs_n2[None, None, :]
+        )
+        x_chunk = gl.load(ptrs, mask=mask_b[:, None, None], other=0.0)
+        smem_x.index(i).store(x_chunk)
+
+    gl.barrier()
+
+    # Each thread compute one 4x4 matrix
+    compute_layout: gl.constexpr = gl.BlockedLayout(
+        size_per_thread=[1, n, n],
+        threads_per_warp=[32, 1, 1],
+        warps_per_cta=[NUM_WARPS, 1, 1],
+        order=[3, 2, 1, 0],
+    )
+    x = gl.convert_layout(smem_x, compute_layout)
+
+    layout_f: gl.constexpr = gl.SliceLayout(2, compute_layout)
+    layout_g: gl.constexpr = gl.SliceLayout(1, compute_layout)
+
+    f = gl.full([BATCH_SIZE, n], 0.0, gl.float32, layout=layout_f) # norm for rows
+    g = gl.full([BATCH_SIZE, n], 0.0, gl.float32, layout=layout_g) # norm for columns
+
+    for _ in range(iters):
+        f = x + g[:, None, :]
+        f_max = gl.max(f, axis=2)
+        f = -gl.log(gl.sum(gl.exp(f - f_max[:, :, None]), axis=2)) - f_max
+
+        g = x + f[:, :, None]
+        g_max = gl.max(g, axis=1)
+        g = -gl.log(gl.sum(gl.exp(g - g_max[:, None, :]), axis=1)) - g_max
+
+    P = gl.exp(f[:, :, None] + x + g[:, None, :])
+
+    # Write result back to SMEM so we can do coalesced store to global memory
+    smem_x.store(gl.convert_layout(P, smem_x_layout))
+    gl.barrier()
+
+    for i in gl.static_range(NUM_LOADS):
+        offs_b = pid * BATCH_SIZE + i * M_CHUNK + gl.arange(0, M_CHUNK, layout=layout_M)
+        mask_b = offs_b < M
+        chunk = smem_x.index(i).load(load_layout)
+        ptrs  = (output_ptr
+                + offs_b[:, None, None]  * (n*n)
+                + offs_n1[None, :, None] * n
+                + offs_n2[None, None, :])
+        gl.store(ptrs, chunk, mask=mask_b[:, None, None])
+
+@gluon.jit
+def _mhc_sinkhorn_bwd(
     grad_out_ptr,
     output_ptr,
-    grad_x_ptr,
     x_ptr,
-    hist_f_ptr,
-    hist_g_ptr,
-    stride_grad_out_m,
-    stride_grad_out_n,
-    stride_out_m,
-    stride_out_n,
-    stride_grad_xm,
-    stride_grad_xn,
-    stride_xm,
-    stride_xn,
+    grad_x_ptr,
     M,
-    n: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-    iters,
-    RECOMPUTE: tl.constexpr,
+    BATCH_SIZE: gl.constexpr,
+    n: gl.constexpr,
+    iters: gl.constexpr,
+    L_3d: gl.constexpr,
+    SMEM_LAYOUT: gl.constexpr,
 ):
-    pid = tl.program_id(0)
+    """Backward Sinkhorn: recomputes f/g and stores history in shared memory."""
+    pid = gl.program_id(0)
+    nn: gl.constexpr = n * n
 
-    tl.static_assert(BLOCK_SIZE % (n * n) == 0, "BLOCK_SIZE must be divisible by n*n")
-    tl.assume(M > 0 and iters > 0)
-    tl.assume(n == 4)
+    L_drop2: gl.constexpr = gl.SliceLayout(2, L_3d)
+    L_drop1: gl.constexpr = gl.SliceLayout(1, L_3d)
+    L_b3: gl.constexpr = gl.SliceLayout(1, L_drop2)
+    L_n1: gl.constexpr = gl.SliceLayout(0, L_drop2)
+    L_n2: gl.constexpr = gl.SliceLayout(0, L_drop1)
 
-    BATCH_SIZE: tl.constexpr = BLOCK_SIZE // (n * n)  # Assume there's no remainder for simplicity
+    offs_b = pid * BATCH_SIZE + gl.arange(0, BATCH_SIZE, layout=L_b3)
+    offs_n1 = gl.arange(0, n, layout=L_n1)
+    offs_n2 = gl.arange(0, n, layout=L_n2)
+    mask_b = offs_b < M
 
-    offs_batch = pid * BATCH_SIZE + tl.arange(0, BATCH_SIZE)
-    offs_nn = tl.arange(0, n * n)
-    offs_n_hist = tl.arange(0, n)
-    mask_batch = offs_batch < M
-
-    x_ptrs = x_ptr + offs_batch[:, None] * stride_xm + offs_nn[None, :] * stride_xn
-    x = tl.load(x_ptrs, mask=mask_batch[:, None], other=0.0)  # (BATCH_SIZE, n*n)
-    x = tl.reshape(x, (BATCH_SIZE, n, n))  # (BATCH_SIZE, n, n)
-
-    P_ptrs = output_ptr + offs_batch[:, None] * stride_out_m + offs_nn[None, :] * stride_out_n
-    P = tl.load(P_ptrs, mask=mask_batch[:, None], other=0.0)  # (BATCH_SIZE, n*n)
-    P = tl.reshape(P, (BATCH_SIZE, n, n))
-
-    grad_out_ptrs = (
-        grad_out_ptr
-        + offs_batch[:, None] * stride_grad_out_m
-        + offs_nn[None, :] * stride_grad_out_n
+    base_offsets = (
+        offs_b[:, None, None] * nn
+        + offs_n1[None, :, None] * n
+        + offs_n2[None, None, :]
     )
-    grad_out = tl.load(grad_out_ptrs, mask=mask_batch[:, None], other=0.0)  # (BATCH_SIZE, n*n)
-    grad_out = tl.reshape(grad_out, (BATCH_SIZE, n, n))  # (BATCH_SIZE, n, n)
+    x = gl.load(x_ptr + base_offsets, mask=mask_b[:, None, None], other=0.0)
+    P = gl.load(output_ptr + base_offsets, mask=mask_b[:, None, None], other=0.0)
+    grad_out = gl.load(grad_out_ptr + base_offsets, mask=mask_b[:, None, None], other=0.0)
 
-    sbn = M * n
+    # SMEM-resident history — replaces the DRAM hist_f / hist_g scratch buffers.
+    hist_f = gl.allocate_shared_memory(gl.float32, [iters + 1, BATCH_SIZE, n], SMEM_LAYOUT)
+    hist_g = gl.allocate_shared_memory(gl.float32, [iters + 1, BATCH_SIZE, n], SMEM_LAYOUT)
 
-    if RECOMPUTE:
-        # Recompute the full history of f and g
-        log_mu = tl.zeros((BATCH_SIZE, n), dtype=x.dtype)  # (BATCH_SIZE, n)
-        log_nu = tl.zeros((BATCH_SIZE, n), dtype=x.dtype)  # (BATCH_SIZE, n)
+    f = gl.full([BATCH_SIZE, n], 0.0, gl.float32, layout=L_drop2)
+    g = gl.full([BATCH_SIZE, n], 0.0, gl.float32, layout=L_drop1)
+    hist_f.index(0).store(f)
+    hist_g.index(0).store(g)
 
-        f = tl.zeros((BATCH_SIZE, n), dtype=x.dtype)  # (BATCH_SIZE, n)
-        g = tl.zeros((BATCH_SIZE, n), dtype=x.dtype)  # (BATCH_SIZE, n)
+    # Forward recompute, recording each iteration's f and g into shared memory.
+    for i in range(iters):
+        z = x + g[:, None, :]
+        z_max = gl.max(z, axis=2)
+        f = -gl.log(gl.sum(gl.exp(z - z_max[:, :, None]), axis=2)) - z_max
+        hist_f.index(i + 1).store(f)
 
-        f_hist_ptrs = hist_f_ptr + offs_batch[:, None] * n + offs_n_hist[None, :]
-        g_hist_ptrs = hist_g_ptr + offs_batch[:, None] * n + offs_n_hist[None, :]
-        tl.store(f_hist_ptrs, f, mask=mask_batch[:, None])
-        tl.store(g_hist_ptrs, g, mask=mask_batch[:, None])
+        z = x + f[:, :, None]
+        z_max = gl.max(z, axis=1)
+        g = -gl.log(gl.sum(gl.exp(z - z_max[:, None, :]), axis=1)) - z_max
+        hist_g.index(i + 1).store(g)
 
-        for iter_idx in range(iters):
-            # Update f: logsumexp over the column dimension (1)
-            f = x + g[:, None, :]  # Broadcast g to (BATCH_SIZE, n, n)
-            f_max = tl.max(f, axis=2)
-            f = tl.log(tl.sum(tl.exp(f - f_max[:, :, None]), axis=2))  # logsumexp over columns
-            f = log_mu - f - f_max
-
-            f_hist_ptrs = (
-                hist_f_ptr + (iter_idx + 1) * sbn + offs_batch[:, None] * n + offs_n_hist[None, :]
-            )
-            tl.store(f_hist_ptrs, f, mask=mask_batch[:, None])
-
-            # Update g: logsumexp over the row dimension (2)
-            g = x + f[:, :, None]  # Broadcast f to (BATCH_SIZE, n, n)
-            g_max = tl.max(g, axis=1)
-            g = tl.log(tl.sum(tl.exp(g - g_max[:, None, :]), axis=1))  # logsumexp over rows
-            g = log_nu - g - g_max
-
-            g_hist_ptrs = (
-                hist_g_ptr + (iter_idx + 1) * sbn + offs_batch[:, None] * n + offs_n_hist[None, :]
-            )
-            tl.store(g_hist_ptrs, g, mask=mask_batch[:, None])
-
-    # Backward pass
-    grad_log_P = grad_out * P  # (BATCH_SIZE, n, n)
-    zeros = tl.zeros_like(grad_log_P)
-    grad_g = tl.sum(grad_log_P, axis=1)  # (BATCH_SIZE, n)
+    grad_log_P = grad_out * P
+    grad_g = gl.sum(grad_log_P, axis=1)
     grad_x = grad_log_P
 
-    g_hist_ptrs = hist_g_ptr + iters * sbn + offs_batch[:, None] * n + offs_n_hist[None, :]
-    g = tl.load(g_hist_ptrs, mask=mask_batch[:, None], other=0.0)
-    g = tl.reshape(g, (BATCH_SIZE, n))
+    g = hist_g.index(iters).load(L_drop1)
 
-    for iter_idx in range(iters, 0, -1):
-        f_hist_ptrs = hist_f_ptr + iter_idx * sbn + offs_batch[:, None] * n + offs_n_hist[None, :]
-        f = tl.load(f_hist_ptrs, mask=mask_batch[:, None], other=0.0)
-        f = tl.reshape(f, (BATCH_SIZE, n))
+    for k in range(iters):
+        iter_idx = iters - k  # iterates iters .. 1
+        f = hist_f.index(iter_idx).load(L_drop2)
+        g_next = hist_g.index(iter_idx - 1).load(L_drop1)
 
-        g_hist_ptrs = (
-            hist_g_ptr + (iter_idx - 1) * sbn + offs_batch[:, None] * n + offs_n_hist[None, :]
-        )
-        g_next = tl.load(g_hist_ptrs, mask=mask_batch[:, None], other=0.0)
-        g_next = tl.reshape(g_next, (BATCH_SIZE, n))
-
-        term_g = -grad_g[:, None, :] * tl.exp(f[:, :, None] + x + g[:, None, :])
-        grad_f = tl.sum(term_g + grad_log_P, axis=2)  # (BATCH_SIZE, n)
-        # Only the last iteration's f will contribute to gradients with both grad_g1 and grad_log_P
-        grad_log_P = zeros  # Zero out grad_log_P for next iterations
+        term_g = -grad_g[:, None, :] * gl.exp(f[:, :, None] + x + g[:, None, :])
+        if k == 0:
+            grad_f = gl.sum(term_g + grad_log_P, axis=2)
+        else:
+            grad_f = gl.sum(term_g, axis=2)
 
         g = g_next
+        term_f = -grad_f[:, :, None] * gl.exp(f[:, :, None] + x + g[:, None, :])
+        grad_g = gl.sum(term_f, axis=1)
+        grad_x = grad_x + term_f + term_g
 
-        term_f = -grad_f[:, :, None] * tl.exp(f[:, :, None] + x + g[:, None, :])
-        grad_g = tl.sum(term_f, axis=1)  # (BATCH_SIZE, n)
+    gl.store(grad_x_ptr + base_offsets, grad_x, mask=mask_b[:, None, None])
 
-        grad_x += term_f + term_g
-
-    grad_x_ptrs = (
-        grad_x_ptr + offs_batch[:, None] * stride_grad_xm + offs_nn[None, :] * stride_grad_xn
-    )
-    tl.store(
-        grad_x_ptrs,
-        tl.reshape(
-            grad_x,
-            (
-                BATCH_SIZE,
-                n * n,
-            ),
-        ),
-        mask=mask_batch[:, None],
-    )
-
-
-@triton.autotune(
-    configs=sinkhorn_config(),
-    key=["M"],
-)
-@triton.jit
-def _mhc_sinkhorn_fwd_fused(
-    x_ptr,  # (M, n*n)
-    output_ptr,  # (M, n*n)
-    hist_f_ptr,  # (iters+1, M, n), or None if RECOMPUTE is True
-    hist_g_ptr,  # (iters+1, M, n), or None if RECOMPUTE is True
-    stride_xm,
-    stride_xn,
-    stride_out_m,
-    stride_out_n,
-    M,
-    n: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-    iters,
-    RECOMPUTE: tl.constexpr,
-):
-    pid = tl.program_id(0)
-
-    tl.static_assert(BLOCK_SIZE % (n * n) == 0, "BLOCK_SIZE must be divisible by n*n")
-    tl.assume(M > 0 and iters > 0)
-    tl.assume(n == 4)
-
-    BATCH_SIZE: tl.constexpr = BLOCK_SIZE // (n * n)  # Assume there's no remainder for simplicity
-
-    offs_batch = pid * BATCH_SIZE + tl.arange(0, BATCH_SIZE)
-    offs_nn = tl.arange(0, n * n)
-    offs_n_hist = tl.arange(0, n)
-    mask_batch = offs_batch < M
-
-    x_ptrs = x_ptr + offs_batch[:, None] * stride_xm + offs_nn[None, :] * stride_xn
-    x = tl.load(x_ptrs, mask=mask_batch[:, None], other=0.0)  # (BATCH_SIZE, n*n)
-    x = tl.reshape(x, (BATCH_SIZE, n, n))  # (BATCH_SIZE, n, n)
-
-    log_mu = tl.zeros((BATCH_SIZE, n), dtype=x.dtype)  # (BATCH_SIZE, n)
-    log_nu = tl.zeros((BATCH_SIZE, n), dtype=x.dtype)  # (BATCH_SIZE, n)
-
-    f = tl.zeros((BATCH_SIZE, n), dtype=x.dtype)  # (BATCH_SIZE, n)
-    g = tl.zeros((BATCH_SIZE, n), dtype=x.dtype)  # (BATCH_SIZE, n)
-
-    if not RECOMPUTE:
-        sbn = M * n
-        # Store the initial f and g to history
-        f_hist_ptrs = hist_f_ptr + offs_batch[:, None] * n + offs_n_hist[None, :]
-        g_hist_ptrs = hist_g_ptr + offs_batch[:, None] * n + offs_n_hist[None, :]
-        tl.store(f_hist_ptrs, f, mask=mask_batch[:, None])
-        tl.store(g_hist_ptrs, g, mask=mask_batch[:, None])
-
-    for iter_idx in range(iters):
-        # Update f: logsumexp over the column dimension (1)
-        f = x + g[:, None, :]  # Broadcast g to (BATCH_SIZE, n, n)
-        f_max = tl.max(f, axis=2)
-        f = tl.log(tl.sum(tl.exp(f - f_max[:, :, None]), axis=2))  # logsumexp over columns
-        f = log_mu - f - f_max
-
-        if not RECOMPUTE:
-            f_hist_ptrs = (
-                hist_f_ptr + (iter_idx + 1) * sbn + offs_batch[:, None] * n + offs_n_hist[None, :]
-            )
-            tl.store(f_hist_ptrs, f, mask=mask_batch[:, None])
-
-        # Update g: logsumexp over the row dimension (2)
-        g = x + f[:, :, None]  # Broadcast f to (BATCH_SIZE, n, n)
-        g_max = tl.max(g, axis=1)
-        g = tl.log(tl.sum(tl.exp(g - g_max[:, None, :]), axis=1))  # logsumexp over rows
-        g = log_nu - g - g_max
-
-        if not RECOMPUTE:
-            g_hist_ptrs = (
-                hist_g_ptr + (iter_idx + 1) * sbn + offs_batch[:, None] * n + offs_n_hist[None, :]
-            )
-            tl.store(g_hist_ptrs, g, mask=mask_batch[:, None])
-
-    log_P = f[:, :, None] + x + g[:, None, :]
-    log_P = tl.reshape(
-        log_P,
-        (
-            BATCH_SIZE,
-            n * n,
-        ),
-    )
-    P = tl.exp(log_P)
-
-    output_ptrs = output_ptr + offs_batch[:, None] * stride_out_m + offs_nn[None, :] * stride_out_n
-    tl.store(output_ptrs, P, mask=mask_batch[:, None])
 
 
 def aggregate_config_fwd():
