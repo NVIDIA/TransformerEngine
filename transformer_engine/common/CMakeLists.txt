@@ -159,6 +159,7 @@ list(APPEND transformer_engine_cpp_sources
      util/cuda_runtime.cpp
      util/multi_stream.cpp
      util/rtc.cpp
+     comm_gemm/comm_gemm.cpp
      comm_gemm_overlap/userbuffers/ipcsocket.cc
      comm_gemm_overlap/userbuffers/userbuffers-host.cpp
      comm_gemm_overlap/comm_gemm_overlap.cpp
@@ -181,7 +182,6 @@ list(APPEND transformer_engine_cuda_sources
      dropout/dropout.cu
      fused_attn/context_parallel.cu
      fused_attn/kv_cache.cu
-     fused_attn/fused_attn_f16_max512_seqlen.cu
      fused_attn/fused_attn_f16_arbitrary_seqlen.cu
      fused_attn/fused_attn_fp8.cu
      fused_attn/utils.cu
@@ -279,11 +279,6 @@ foreach(cuda_source IN LISTS transformer_engine_cuda_arch_specific_sources)
     )
   endif()
 endforeach()
-
-if (NVTE_WITH_CUBLASMP)
-list(APPEND transformer_engine_SOURCES
-     comm_gemm/comm_gemm.cpp)
-endif()
 
 add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
 # Disable CMake's automatic architecture flag injection.

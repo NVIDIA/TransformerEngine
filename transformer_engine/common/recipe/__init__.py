@@ -478,6 +478,10 @@ class NVFP4BlockScaling(Recipe):
              If set to `True`, stochastic rounding is disabled during quantization for all tensors.
     disable_2d_quantization : bool, default = False
              If set to `True`, 1D block scaling with block size 16 is used for all tensors.
+    row_scaled_activation : bool, default = False
+             If set to `True`, forward activation quantizers emit row-scaled
+             NVFP4 tensors. In this mode, rowwise ``amax`` metadata is stored
+             as a vector with one FP32 value per tensor row.
     backward_override : {None, 'high_precision', 'dequantized'}, default = None
             Backward precision mode. None does not modify backward behavior,
             `high_precision` keeps original high-precision operands for backward,
@@ -491,6 +495,7 @@ class NVFP4BlockScaling(Recipe):
         os.getenv("NVTE_NVFP4_DISABLE_STOCHASTIC_ROUNDING", "0") == "1"
     )
     disable_2d_quantization: bool = os.getenv("NVTE_NVFP4_DISABLE_2D_QUANTIZATION", "0") == "1"
+    row_scaled_activation: bool = os.getenv("NVTE_NVFP4_ROW_SCALED_ACTIVATION", "0") == "1"
 
     fp4_format: Format = Format.E2M1
     fp8_format: Format = Format.E4M3
@@ -534,6 +539,7 @@ class NVFP4BlockScaling(Recipe):
             f"fp8_dpa={self.fp8_dpa}, "
             f"fp8_mha={self.fp8_mha}, "
             f"backward_override={self.backward_override}, "
+            f"row_scaled_activation={self.row_scaled_activation}, "
             f"fp4_quant_fwd_inp={self.fp4_quant_fwd_inp}, "
             f"fp4_quant_fwd_weight={self.fp4_quant_fwd_weight}, "
             f"fp4_quant_bwd_grad={self.fp4_quant_bwd_grad}, "
@@ -552,19 +558,33 @@ class CustomRecipe(Recipe):
     Parameters
     ----------
     qfactory : Callable
-        Factory callable that returns a quantizer instance for a
-        given semantic tensor role.
-        The callable is typically invoked as::
+        Factory callable that returns a quantizer instance *or* a
+        ``QuantizerRequest`` subclass for a given ``QuantizerRole``.
+        The callable is invoked as::
 
             qfactory(
-                role: str,
-            )
+                role: QuantizerRole,
+            ) -> Union[Quantizer, QuantizerRequest]
 
-        Where `role` is one of the following strings for e.g. te.Linear
-        (stable public contract):
+        ``QuantizerRole`` is a frozen dataclass with the following fields:
 
-        - forward:  "linear_input", "linear_weight", "linear_output"
-        - backward: "linear_grad_output", "linear_grad_input"
+        - ``module_type`` (str): module type (empty string when not set), e.g.
+          ``"linear"``, ``"grouped_linear"``, ``"dpa"``.
+        - ``tensor_type`` (str): what tensor is being quantized (empty
+          string when not set), e.g. ``"input"``, ``"weight"``, ``"grad_output"``.
+        - ``name`` (str): caller-provided module instance name (empty
+          string when not set), e.g. ``"qkv"``, ``"proj"``, ``"fc1"``, ``"fc2"``.
+
+        For stateful quantizers (delayed scaling), return a
+        ``DelayedScalingRequest`` dataclass instead of a quantizer.
+        TE will allocate shared scale/amax_history buffers and create
+        ``Float8Quantizer`` instances integrated with the existing
+        delayed-scaling reduction infrastructure.
+
+        See ``transformer_engine.pytorch.quantization.QuantizerRole``
+        and ``transformer_engine.pytorch.quantization.DelayedScalingRequest``
+        for full documentation.
+
     backward_override : {None, 'high_precision', 'dequantized'}, default = None
         Backward precision mode. None does not modify backward behavior,
         `high_precision` keeps original high-precision operands for backward,
@@ -573,6 +593,11 @@ class CustomRecipe(Recipe):
     """
 
     qfactory: Callable[..., Any]
+
+    # fp8_format does not affect quantization (quantization factory controls that),
+    # but TE internals (e.g. get_fp8_te_dtype, backend selection) read it
+    # from the recipe.  HYBRID (E4M3 fwd, E5M2 bwd) is a safe default.
+    fp8_format: Format = Format.HYBRID
 
     fp8_dpa: bool = False
     fp8_mha: bool = False
