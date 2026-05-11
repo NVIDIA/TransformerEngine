@@ -536,8 +536,7 @@ def test_mhc_fuse_grad_acc(cfg: MHCConfig, dtype):
 
 @pytest.mark.parametrize("cfg", mhc_configs, ids=MHCConfig.desc)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
-@pytest.mark.parametrize("recompute", [False, True], ids=["no_recompute", "recompute"])
-def test_mhc_sinkhorn(cfg: MHCConfig, dtype, recompute):
+def test_mhc_sinkhorn(cfg: MHCConfig, dtype):
     reset_rng_states()
 
     s, b, C, n = cfg.s, cfg.b, cfg.C, cfg.n
@@ -548,7 +547,7 @@ def test_mhc_sinkhorn(cfg: MHCConfig, dtype, recompute):
     x_ref = x.detach().clone().requires_grad_(True)
 
     ref_out = mhc_sinkhorn_ref(x_ref, n)
-    fused_out = mhc_fused_sinkhorn(x, n, recompute)
+    fused_out = mhc_fused_sinkhorn(x, n)
 
     torch.testing.assert_close(fused_out, ref_out, **tols)
 

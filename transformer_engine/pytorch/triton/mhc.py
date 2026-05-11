@@ -906,20 +906,20 @@ class mHCSinkhornOp(torch.autograd.Function):
         grad_res_out = grad_out.to(torch.float32).contiguous().view(M, n * n)
         grad_res = torch.empty_like(H_res)
 
-        L_3d, smem_layout = _sinkhorn_layouts()
-        grid = (triton.cdiv(M, 32),)
+        NUM_WARPS = 2
+        BATCH_SIZE = NUM_WARPS * 32
+        grid = (triton.cdiv(M, BATCH_SIZE),)
         _mhc_sinkhorn_bwd[grid](
             grad_out_ptr=grad_res_out,
             output_ptr=H_res_out,
             x_ptr=H_res,
             grad_x_ptr=grad_res,
             M=M,
-            BATCH_SIZE=32,
+            BATCH_SIZE=BATCH_SIZE,
             n=n,
             iters=iters,
-            L_3d=L_3d,
-            SMEM_LAYOUT=smem_layout,
-            num_warps=2,
+            NUM_WARPS=NUM_WARPS,
+            num_warps=NUM_WARPS,
         )
 
         grad_res = grad_res.view(s, b, n, n)

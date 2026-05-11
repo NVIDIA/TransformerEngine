@@ -894,66 +894,66 @@ def _mhc_sinkhorn_bwd(
     layout_n1: gl.constexpr = gl.SliceLayout(0, gl.SliceLayout(2, load_layout))
     layout_n2: gl.constexpr = gl.SliceLayout(0, gl.SliceLayout(1, load_layout))
 
+    layout_f: gl.constexpr = gl.SliceLayout(2, compute_layout)
+    layout_g: gl.constexpr = gl.SliceLayout(1, compute_layout)
+
+    # SMEM-resident f/g history. The leading "iter" dim is buffered — .index(i) peels
+    # it to give a rank-2 (BATCH_SIZE, n) view that f / g can store into and load from.
+    smem_layout: gl.constexpr = gl.SwizzledSharedLayout(
+        vec=1, per_phase=1, max_phase=1, order=[1, 0]
+    )
+    hist_f = gl.allocate_shared_memory(gl.float32, [iters + 1, BATCH_SIZE, n], smem_layout)
+    hist_g = gl.allocate_shared_memory(gl.float32, [iters + 1, BATCH_SIZE, n], smem_layout)
+
     offs_b  = pid * BATCH_SIZE + gl.arange(0, BATCH_SIZE, layout=layout_M)
     offs_n1 = gl.arange(0, n, layout=layout_n1)
     offs_n2 = gl.arange(0, n, layout=layout_n2)
     mask_b  = offs_b < M
 
-    x_ptrs = (
-        x_ptr
-        + offs_b[:, None, None]  * nn
+    base_offsets = (
+        offs_b[:, None, None]  * nn
         + offs_n1[None, :, None] * n
         + offs_n2[None, None, :]
     )
 
     # GMEM -> registers (coalesced) -> convert to per-thread (n, n) layout.
     # `convert_layout` routes through SMEM automatically when the two layouts disagree.
-    x_loaded = gl.load(x_ptrs, mask=mask_b[:, None, None], other=0.0)
+    x_loaded = gl.load(x_ptr + base_offsets, mask=mask_b[:, None, None], other=0.0)
     x = gl.convert_layout(x_loaded, compute_layout)
-
-    layout_f: gl.constexpr = gl.SliceLayout(2, compute_layout)
-    layout_g: gl.constexpr = gl.SliceLayout(1, compute_layout)
 
     f = gl.full([BATCH_SIZE, n], 0.0, gl.float32, layout=layout_f)
     g = gl.full([BATCH_SIZE, n], 0.0, gl.float32, layout=layout_g)
+    hist_f.index(0).store(f)
+    hist_g.index(0).store(g)
 
-    smem_layout = gl.SwizzledSharedLayout(
-        vec=1, per_phase=1, max_phase=1, order=[1, 0]
-    )
-    hist_f = gl.allocate_shared_memory(gl.float32, [iters + 1, BATCH_SIZE, n], smem_layout)
-    hist_g = gl.allocate_shared_memory(gl.float32, [iters + 1, BATCH_SIZE, n], smem_layout)
-
-    for _ in range(iters):
+    # Forward recompute, recording each iteration's f and g into shared memory.
+    for i in range(iters):
         z = x + g[:, None, :]
         z_max = gl.max(z, axis=2)
         f = -gl.log(gl.sum(gl.exp(z - z_max[:, :, None]), axis=2)) - z_max
+        hist_f.index(i + 1).store(f)
 
         z = x + f[:, :, None]
         z_max = gl.max(z, axis=1)
         g = -gl.log(gl.sum(gl.exp(z - z_max[:, None, :]), axis=1)) - z_max
+        hist_g.index(i + 1).store(g)
 
     P = gl.exp(f[:, :, None] + x + g[:, None, :])
 
     # Backward pass starts
-    grad_out_ptrs = (
-        grad_out_ptr
-        + offs_b[:, None, None]  * nn
-        + offs_n1[None, :, None] * n
-        + offs_n2[None, None, :]
-    )
-    grad_out = gl.load(grad_out_ptrs, mask=mask_b[:, None, None], other=0.0)
-    grad_out = gl.convert_layout(grad_out, compute_layout)
+    grad_out_loaded = gl.load(grad_out_ptr + base_offsets, mask=mask_b[:, None, None], other=0.0)
+    grad_out = gl.convert_layout(grad_out_loaded, compute_layout)
 
     grad_log_P = grad_out * P
     grad_g = gl.sum(grad_log_P, axis=1)
     grad_x = grad_log_P
 
-    g = hist_g.index(iters).load(L_drop1)
+    g = hist_g.index(iters).load(layout_g)
 
     for k in range(iters):
         iter_idx = iters - k  # iterates iters .. 1
-        f = hist_f.index(iter_idx).load(L_drop2)
-        g_next = hist_g.index(iter_idx - 1).load(L_drop1)
+        f = hist_f.index(iter_idx    ).load(layout_f)
+        g_next = hist_g.index(iter_idx - 1).load(layout_g)
 
         term_g = -grad_g[:, None, :] * gl.exp(f[:, :, None] + x + g[:, None, :])
         if k == 0:
@@ -966,7 +966,9 @@ def _mhc_sinkhorn_bwd(
         grad_g = gl.sum(term_f, axis=1)
         grad_x = grad_x + term_f + term_g
 
-    gl.store(grad_x_ptr + base_offsets, grad_x, mask=mask_b[:, None, None])
+    # Convert grad_x back to load_layout for coalesced GMEM store.
+    grad_x_out = gl.convert_layout(grad_x, load_layout)
+    gl.store(grad_x_ptr + base_offsets, grad_x_out, mask=mask_b[:, None, None])
 
 
 
