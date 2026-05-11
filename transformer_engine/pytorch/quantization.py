@@ -879,9 +879,7 @@ class autocast:
     """
 
     # Class-based context manager (instead of ``@contextmanager`` from contextlib)
-    # to avoid the ~0.5us / invocation overhead of contextlib's generator-driven
-    # ``GeneratorContextManager``. ``__slots__`` further avoids per-instance
-    # dict allocation.
+    # to avoid overheads.
     __slots__ = (
         "_enabled",
         "_calibrating",
@@ -907,6 +905,11 @@ class autocast:
         self._fp8_state = None
 
     def __enter__(self) -> "autocast":
+        # Disallow nested re-entry of the same instance.
+        if self._fp8_state is not None:
+            raise RuntimeError(
+                "autocast context manager cannot be entered more than once concurrently"
+            )
         if self._enabled:
             check_recipe_support(self._recipe)
         # Save current state so we always restore it on exit.
@@ -921,8 +924,14 @@ class autocast:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        FP8GlobalStateManager.set_autocast_state(self._fp8_state)
-        FP8GlobalStateManager.autocast_exit(self._enabled, _graph=self._graph)
+        try:
+            FP8GlobalStateManager.set_autocast_state(self._fp8_state)
+            FP8GlobalStateManager.autocast_exit(self._enabled, _graph=self._graph)
+        finally:
+            # Clear the saved state so the instance can be entered again
+            # sequentially (and so a failure inside the restore path does not
+            # permanently mark the instance as "active").
+            self._fp8_state = None
 
 
 def _update_amax_history(amax_history: torch.Tensor) -> torch.Tensor:
