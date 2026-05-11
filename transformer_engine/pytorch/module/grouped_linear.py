@@ -24,13 +24,14 @@ from .base import (
     _2X_ACC_WGRAD,
 )
 from ._common import WeightGradStore
-from ..quantization import FP8GlobalStateManager
+from ..quantization import FP8GlobalStateManager, QuantizerRole
 from ..utils import (
     divide,
     cast_if_needed,
     clear_tensor_data,
     init_method_constant,
     requires_grad,
+    resolve_grouped_linear_single_param_flags,
     get_nvtx_range_context,
 )
 from ..distributed import (
@@ -115,7 +116,18 @@ class _GroupedLinear(torch.autograd.Function):
 
         # Configure quantizers
         if save_original_input and isinstance(input_quantizers[0], Float8Quantizer):
-            raise ValueError("DelayedScaling recipe is not supported with save_original_input")
+            if FP8GlobalStateManager.get_fp8_recipe().custom():
+                # Custom recipe factory may produce DS quantizers unknown to caller.
+                # TODO(negvet): fix on Megatron side — guard should also exclude 'custom', or
+                # better: check at runtime whether quantizers are DS-based.
+                warnings.warn(
+                    "save_original_input is incompatible with delayed-scaling quantizers "
+                    "(Float8Quantizer). Disabling save_original_input for this module.",
+                    stacklevel=2,
+                )
+                save_original_input = False
+            else:
+                raise ValueError("DelayedScaling recipe is not supported with save_original_input")
         if input_quantizers[0] is not None:
             for input_quantizer in input_quantizers:
                 input_quantizer.set_usage(
@@ -518,25 +530,11 @@ class _GroupedLinear(torch.autograd.Function):
                         )
                 elif ctx.backward_override == "dequantized":
                     inputmats_dequant = []
-                    for m_split, inputmat in zip(ctx.m_splits, inputmats):
+                    for inputmat in inputmats:
                         if isinstance(inputmat, QuantizedTensorStorage):
-                            if m_split == 0:
-                                # Dequant kernels for some quantized storage formats
-                                # (e.g. MXFP8/Float8BlockScaling) do not accept empty
-                                # M-dimension inputs. For empty grouped splits, materialize
-                                # an explicit empty high-precision matrix instead of invoking
-                                # dequantize().
-                                inputmats_dequant.append(
-                                    torch.empty(
-                                        (0, ctx.weights_shape_1),
-                                        dtype=ctx.activation_dtype,
-                                        device=ctx.device,
-                                    )
-                                )
-                            else:
-                                inputmats_dequant.append(
-                                    inputmat.dequantize(dtype=ctx.activation_dtype)
-                                )
+                            inputmats_dequant.append(
+                                inputmat.dequantize(dtype=ctx.activation_dtype)
+                            )
                         else:
                             inputmats_dequant.append(cast_if_needed(inputmat, ctx.activation_dtype))
                     inputmats = inputmats_dequant
@@ -673,11 +671,15 @@ class GroupedLinear(TransformerEngineBaseModule):
     single_grouped_weight : bool, default = False
                        If set to ``True``, grouped weights are stored as a single grouped parameter
                        instead of one parameter per GEMM.
-                       EXPERIMENTAL and subject to change.
+                       EXPERIMENTAL and subject to change. Gated by the
+                       ``NVTE_GROUPED_LINEAR_SINGLE_PARAM`` environment variable: if the env var
+                       is not set this argument is forced to ``False`` with a warning.
     single_grouped_bias : bool, default = False
                        If set to ``True``, grouped biases are stored as a single grouped bias
                        instead of one bias per GEMM.
-                       EXPERIMENTAL and subject to change.
+                       EXPERIMENTAL and subject to change. Gated by the
+                       ``NVTE_GROUPED_LINEAR_SINGLE_PARAM`` environment variable: if the env var
+                       is not set this argument is forced to ``False`` with a warning.
 
     Notes
     -----
@@ -726,6 +728,9 @@ class GroupedLinear(TransformerEngineBaseModule):
         self.ub_overlap_ag = ub_overlap_ag
         self.ub_name = ub_name
         self.save_original_input = save_original_input
+        single_grouped_weight, single_grouped_bias = resolve_grouped_linear_single_param_flags(
+            single_grouped_weight, single_grouped_bias
+        )
         self.single_grouped_weight = single_grouped_weight
         self.single_grouped_bias = single_grouped_bias
         if ub_overlap_rs or ub_overlap_ag:
@@ -834,6 +839,33 @@ class GroupedLinear(TransformerEngineBaseModule):
         recipe = FP8GlobalStateManager.get_fp8_recipe()
         if recipe.float8_current_scaling():
             self._customize_quantizers_float8_current_scaling(fwd, recipe)
+
+    def get_quantizer_roles(
+        self,
+        *,
+        fwd: bool,
+        num_quantizers: int,
+    ) -> Optional[List[QuantizerRole]]:
+        """QuantizerRole list for quantizers used by ``GroupedLinear``.
+
+        For grouped GEMMs we repeat the same pattern for each GEMM in
+        order.  The output (fwd) and grad-input (bwd) slots default to
+        ``None`` (unknown consumer).  Set :attr:`output_quantizer_role` /
+        :attr:`grad_input_quantizer_role` to provide consumer identity.
+        """
+        name = self.name or ""
+        if fwd:
+            base = [
+                QuantizerRole(module_type="grouped_linear", tensor_type="input", name=name),
+                QuantizerRole(module_type="grouped_linear", tensor_type="weight", name=name),
+                self._output_quantizer_role,
+            ]
+        else:
+            base = [
+                QuantizerRole(module_type="grouped_linear", tensor_type="grad_output", name=name),
+                self._grad_input_quantizer_role,
+            ]
+        return [base[i % len(base)] for i in range(num_quantizers)]
 
     def make_grouped_weights(self, defer_init=False) -> None:
         """
@@ -1331,15 +1363,6 @@ class GroupedLinear(TransformerEngineBaseModule):
                 for i in range(self.num_gemms):
                     grad_output_quantizers[i].internal = True
                     grad_output_quantizers[i].optimize_for_gemm = True
-            fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
-            if fp8_recipe.backward_override == "dequantized" and (
-                fp8_recipe.mxfp8() or fp8_recipe.nvfp4()
-            ):
-                for input_quantizer in input_quantizers:
-                    input_quantizer.optimize_for_gemm = False
-                if torch.is_grad_enabled():
-                    for grad_output_quantizer in grad_output_quantizers:
-                        grad_output_quantizer.optimize_for_gemm = False
         return (
             input_quantizers,
             weight_quantizers,

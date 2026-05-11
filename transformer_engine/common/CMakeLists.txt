@@ -36,7 +36,11 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
   endif()
 endif()
 
-# Process CMAKE_CUDA_ARCHITECTURES to separate generic and specific architectures
+# Process CMAKE_CUDA_ARCHITECTURES to separate standard, generic, and specific architectures.
+# - NVTE_STANDARD_ARCHS: pre-Blackwell archs (e.g. 75, 80, 89, 90). Applied to all CUDA sources.
+# - NVTE_GENERIC_ARCHS: Blackwell family heads (e.g. 100, 120). Applied to non-arch-specific sources only.
+# - NVTE_SPECIFIC_ARCHS: Blackwell specific targets (e.g. 100a, 120f). Applied to arch-specific sources only.
+set(NVTE_STANDARD_ARCHS)
 set(NVTE_GENERIC_ARCHS)
 set(NVTE_SPECIFIC_ARCHS)
 
@@ -78,6 +82,10 @@ if(NOT arch_120_index EQUAL -1)
     list(APPEND NVTE_SPECIFIC_ARCHS "120a")
   endif()
 endif()
+
+# Move remaining standard (pre-Blackwell) architectures into NVTE_STANDARD_ARCHS.
+# These are applied to all CUDA sources (both generic and arch-specific).
+set(NVTE_STANDARD_ARCHS ${CMAKE_CUDA_ARCHITECTURES})
 
 # cuDNN frontend API
 set(CUDNN_FRONTEND_INCLUDE_DIR
@@ -151,6 +159,7 @@ list(APPEND transformer_engine_cpp_sources
      util/cuda_runtime.cpp
      util/multi_stream.cpp
      util/rtc.cpp
+     comm_gemm/comm_gemm.cpp
      comm_gemm_overlap/userbuffers/ipcsocket.cc
      comm_gemm_overlap/userbuffers/userbuffers-host.cpp
      comm_gemm_overlap/comm_gemm_overlap.cpp
@@ -171,10 +180,8 @@ list(APPEND transformer_engine_cuda_sources
      transpose/quantize_transpose_vector_blockwise.cu
      transpose/swap_first_dims.cu
      dropout/dropout.cu
-     fused_attn/flash_attn.cu
      fused_attn/context_parallel.cu
      fused_attn/kv_cache.cu
-     fused_attn/fused_attn_f16_max512_seqlen.cu
      fused_attn/fused_attn_f16_arbitrary_seqlen.cu
      fused_attn/fused_attn_fp8.cu
      fused_attn/utils.cu
@@ -187,6 +194,7 @@ list(APPEND transformer_engine_cuda_sources
      permutation/permutation.cu
      util/utils.cu
      util/padding.cu
+     util/topk.cu
      swizzle/swizzle.cu
      swizzle/swizzle_block_scaling.cu
      fused_softmax/scaled_masked_softmax.cu
@@ -202,6 +210,7 @@ list(APPEND transformer_engine_cuda_sources
      comm_gemm_overlap/userbuffers/userbuffers.cu)
 
 list(APPEND transformer_engine_cuda_arch_specific_sources
+     fused_attn/flash_attn.cu
      activation/gelu.cu
      activation/glu.cu
      activation/relu.cu
@@ -228,9 +237,13 @@ list(APPEND transformer_engine_SOURCES ${transformer_engine_cuda_arch_specific_s
                                        ${transformer_engine_cuda_sources}
                                        ${transformer_engine_cpp_sources})
 
-# Set compile options for CUDA sources with generic architectures
+# Set compile options for CUDA sources with generic architectures.
+# These get standard archs (pre-Blackwell) + generic Blackwell family heads.
 foreach(cuda_source IN LISTS transformer_engine_cuda_sources)
   set(arch_compile_options)
+  foreach(arch IN LISTS NVTE_STANDARD_ARCHS)
+    list(APPEND arch_compile_options "--generate-code=arch=compute_${arch},code=sm_${arch}")
+  endforeach()
   foreach(arch IN LISTS NVTE_GENERIC_ARCHS)
     list(APPEND arch_compile_options "--generate-code=arch=compute_${arch},code=sm_${arch}")
   endforeach()
@@ -245,9 +258,14 @@ foreach(cuda_source IN LISTS transformer_engine_cuda_sources)
   endif()
 endforeach()
 
-# Set compile options for CUDA sources with specific architectures
+# Set compile options for CUDA sources with arch-specific features.
+# These get standard archs (pre-Blackwell) + Blackwell specific targets (a/f suffix).
+# They must NOT get generic Blackwell archs, as they use family/arch-specific PTX features.
 foreach(cuda_source IN LISTS transformer_engine_cuda_arch_specific_sources)
   set(arch_compile_options)
+  foreach(arch IN LISTS NVTE_STANDARD_ARCHS)
+    list(APPEND arch_compile_options "--generate-code=arch=compute_${arch},code=sm_${arch}")
+  endforeach()
   foreach(arch IN LISTS NVTE_SPECIFIC_ARCHS)
     list(APPEND arch_compile_options "--generate-code=arch=compute_${arch},code=sm_${arch}")
   endforeach()
@@ -262,12 +280,11 @@ foreach(cuda_source IN LISTS transformer_engine_cuda_arch_specific_sources)
   endif()
 endforeach()
 
-if (NVTE_WITH_CUBLASMP)
-list(APPEND transformer_engine_SOURCES
-     comm_gemm/comm_gemm.cpp)
-endif()
-
 add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
+# Disable CMake's automatic architecture flag injection.
+# All architectures are handled explicitly via per-source COMPILE_OPTIONS
+# using NVTE_STANDARD_ARCHS, NVTE_GENERIC_ARCHS, and NVTE_SPECIFIC_ARCHS above.
+set_target_properties(transformer_engine PROPERTIES CUDA_ARCHITECTURES OFF)
 target_include_directories(transformer_engine PUBLIC
                            "${CMAKE_CURRENT_SOURCE_DIR}/include")
 

@@ -5,7 +5,7 @@
 """Distributed Newton-Schulz matrix orthogonalization via cuSolverMp."""
 
 from itertools import chain, cycle, islice, repeat
-from typing import Iterator, List, Literal, Optional, Sequence
+from typing import Iterator, Literal, Optional, Sequence
 
 import torch
 import torch.distributed as dist
@@ -63,13 +63,14 @@ _COEFFICIENT_SETS = {
 NSCoeffT = Literal[_COEFFICIENT_SETS.keys()]
 
 CoeffIterMode = Literal["cycle", "repeat_last"]
+CoeffT = tuple[float, float, float]
 
 
 def get_coefficient_iterator(
     steps: int,
-    coefficient_sets: Sequence[tuple[float, float, float]],
+    coefficient_sets: Sequence[CoeffT],
     mode: CoeffIterMode = "cycle",
-) -> Iterator[tuple[float, float, float]]:
+) -> Iterator[CoeffT]:
     """Iterate through coefficient sets with configurable end behavior using itertools.
 
     Args:
@@ -89,7 +90,7 @@ def get_coefficient_iterator(
     if not coefficient_sets:
         raise ValueError("coefficient_sets must be non-empty.")
 
-    base: Iterator[tuple[float, float, float]]
+    base: Iterator[CoeffT]
     if mode == "cycle":
         base = cycle(coefficient_sets)
     elif mode == "repeat_last":
@@ -101,7 +102,7 @@ def get_coefficient_iterator(
     return islice(base, steps)
 
 
-def get_coefficients(steps: int, coefficient_type: NSCoeffT = "quintic") -> List[float]:
+def get_coefficients(steps: int, coefficient_type: NSCoeffT = "quintic") -> list[CoeffT]:
     """Return the coefficient schedule for Newton-Schulz.
 
     Parameter ``coefficient_type`` can be one of the following
@@ -119,7 +120,7 @@ def get_coefficients(steps: int, coefficient_type: NSCoeffT = "quintic") -> List
     coeff_iter = get_coefficient_iterator(
         steps, _COEFFICIENT_SETS[coefficient_type], mode=iter_mode
     )
-    return list(chain.from_iterable(coeff_iter))
+    return list(coeff_iter)
 
 
 class CusolverMpCtx:
@@ -159,7 +160,7 @@ def newton_schulz(
     x: torch.Tensor,
     ctx: CusolverMpCtx,
     num_iterations: int = 5,
-    coefficients: Optional[List[float]] = None,
+    coefficients: Optional[Sequence[CoeffT]] = None,
 ) -> None:
     """Compute Newton-Schulz matrix orthogonalization in-place on a distributed matrix.
 
@@ -173,16 +174,23 @@ def newton_schulz(
         cuSolverMp context created by :func:`cusolvermp_ctx_create`.
     num_iterations : int, optional
         Number of Newton-Schulz iterations. Default: 5.
-    coefficients : list of float, optional
+    coefficients : sequence of tuple[float, float, float], optional
         Polynomial coefficients for the Newton-Schulz iteration.
     """
     if coefficients is None:
         coefficients = get_coefficients(num_iterations)
-    if len(coefficients) != num_iterations * 3:
+    if len(coefficients) != num_iterations:
         raise ValueError(
             f"Unexpected number of coefficients: {len(coefficients)} for"
             f" {num_iterations} iterations"
         )
+    flat_coefficients: list[float] = []
+    for i, coeff in enumerate(coefficients):
+        if len(coeff) != 3:
+            raise ValueError(
+                f"Expected coefficient tuple of length 3 at iteration {i}, got {len(coeff)}"
+            )
+        flat_coefficients.extend(coeff)
 
     if x.dim() != 2:
         raise ValueError(f"Expected 2D tensor, got {x.dim()}D")
@@ -197,4 +205,4 @@ def newton_schulz(
     m = x.size(0)
     n = x.size(1) * ctx.nranks
 
-    tex.newton_schulz(ctx._ptr, m, n, x, num_iterations, coefficients)
+    tex.newton_schulz(ctx._ptr, m, n, x, num_iterations, flat_coefficients)
