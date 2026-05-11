@@ -109,14 +109,11 @@ class Recipe:
 
     # Cached string representation. Lazily populated by ``__repr__`` in
     # subclasses and invalidated by ``__setattr__`` whenever any attribute
-    # changes. This makes repeated ``str(recipe)`` calls essentially
-    # free after the first call.
+    # changes. This makes repeated ``str(recipe)`` calls much cheaper
     _cached_repr: Optional[str] = None
 
     def __setattr__(self, name: str, value: Any) -> None:
-        # Invalidate the cached repr on any attribute mutation. We route
-        # the assignment through ``object.__setattr__`` to avoid recursion
-        # and to bypass any ``__setattr__`` injected by pydantic.
+        # Invalidate the cached repr on any attribute mutation.
         if name != "_cached_repr":
             object.__setattr__(self, "_cached_repr", None)
         object.__setattr__(self, name, value)
