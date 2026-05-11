@@ -88,6 +88,59 @@ def create_train_step_fn(
     return jax.jit(fwd_bwd_fn)
 
 
+def compare_fwd_bwd(
+    apply_a: Callable,
+    variables_a: Any,
+    apply_b: Callable,
+    variables_b: Any,
+    input: jnp.ndarray,
+    output_grad: jnp.ndarray,
+    forward_kwargs_a: Dict[str, Any] = None,
+    forward_kwargs_b: Dict[str, Any] = None,
+    rngs_a: Dict[str, jax.random.PRNGKey] = None,
+    rngs_b: Dict[str, jax.random.PRNGKey] = None,
+) -> Dict[str, Dict[str, float]]:
+    """Run fwd+bwd on two apply functions and report max abs/rel diff on y, dx, and dW."""
+    forward_kwargs_a = forward_kwargs_a or {}
+    forward_kwargs_b = forward_kwargs_b or {}
+    rngs_a = rngs_a or {}
+    rngs_b = rngs_b or {}
+
+    def run(apply_fn, variables, forward_kwargs, rngs):
+        def loss_fn(variables, inp):
+            out = apply_fn(variables, inp, rngs=rngs, **forward_kwargs)
+            return jnp.vdot(out, output_grad), out
+
+        (_, out), (param_grads, dx) = jax.value_and_grad(loss_fn, argnums=(0, 1), has_aux=True)(
+            variables, input
+        )
+        return out, dx, param_grads
+
+    y_a, dx_a, gp_a = run(apply_a, variables_a, forward_kwargs_a, rngs_a)
+    y_b, dx_b, gp_b = run(apply_b, variables_b, forward_kwargs_b, rngs_b)
+
+    kernel_leaves_a = [
+        leaf for path, leaf in jax.tree_util.tree_leaves_with_path(gp_a) if "kernel" in jax.tree_util.keystr(path)
+    ]
+    kernel_leaves_b = [
+        leaf for path, leaf in jax.tree_util.tree_leaves_with_path(gp_b) if "kernel" in jax.tree_util.keystr(path)
+    ]
+    dW_a = kernel_leaves_a[0] if kernel_leaves_a else None
+    dW_b = kernel_leaves_b[0] if kernel_leaves_b else None
+
+    def diffs(a, b):
+        a = a.astype(jnp.float32)
+        b = b.astype(jnp.float32)
+        abs_diff = float(jnp.max(jnp.abs(a - b)))
+        denom = float(jnp.max(jnp.abs(a))) + 1e-12
+        return {"max_abs": abs_diff, "max_rel": abs_diff / denom}
+
+    result = {"y": diffs(y_a, y_b), "dx": diffs(dx_a, dx_b)}
+    if dW_a is not None and dW_b is not None:
+        result["dW"] = diffs(dW_a, dW_b)
+    return result
+
+
 def _split_step_rngs(
     rngs: Dict[str, jax.random.PRNGKey],
 ) -> Tuple[Dict[str, jax.random.PRNGKey], Dict[str, jax.random.PRNGKey]]:
