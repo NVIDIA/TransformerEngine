@@ -596,9 +596,11 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
         def grid(meta):
             return (num_tokens, triton.cdiv(hidden_size, meta["BLOCK_SIZE"]))
 
-        # block_size is only a placeholder for the constexpr signature; the
-        # autotune loop overrides BLOCK_SIZE per config (and on the old-JAX
-        # fallback path, the first config's BLOCK_SIZE is used).
+        # block_size populates the BLOCK_SIZE entry in constexprs so the wrapper
+        # marks it constexpr in the kernel signature. The autotune loop
+        # overrides it per config; on the old-JAX fallback path the caller's
+        # value wins (utils.py merges {**first_cfg.kwargs, **constexprs}),
+        # which is why we pass the smallest config's BLOCK_SIZE explicitly.
         block_size = _get_min_block_size(_permute_kernel)
 
         # Use input_output_aliases to alias pre-zeroed buffers to outputs.
@@ -1008,7 +1010,11 @@ class UnpermuteWithMaskMapPrimitive(BasePrimitive):
         def grid(meta):
             return (num_tokens, triton.cdiv(hidden_size, meta["BLOCK_SIZE"]))
 
-        # Placeholder for constexpr signature; autotune overrides per config.
+        # block_size populates the BLOCK_SIZE entry in constexprs so the wrapper
+        # marks it constexpr in the kernel signature. The autotune loop
+        # overrides it per config; on the old-JAX fallback path the caller's
+        # value wins (utils.py merges {**first_cfg.kwargs, **constexprs}),
+        # which is why we pass the smallest config's BLOCK_SIZE explicitly.
         block_size = _get_min_block_size(_unpermute_kernel)
 
         return triton_call_lowering(
@@ -1734,7 +1740,11 @@ class SortChunksByMapPrimitive(BasePrimitive):
         def grid(meta):
             return (num_tokens, triton.cdiv(hidden_size, meta["BLOCK_SIZE"]))
 
-        # Placeholder for constexpr signature; autotune overrides per config.
+        # block_size populates the BLOCK_SIZE entry in constexprs so the wrapper
+        # marks it constexpr in the kernel signature. The autotune loop
+        # overrides it per config; on the old-JAX fallback path the caller's
+        # value wins (utils.py merges {**first_cfg.kwargs, **constexprs}),
+        # which is why we pass the smallest config's BLOCK_SIZE explicitly.
         block_size = _get_min_block_size(_sort_chunks_by_map_kernel)
 
         # Declare input_output_aliases so XLA knows output slot 0 is claimed by
