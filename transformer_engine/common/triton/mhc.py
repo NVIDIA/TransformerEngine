@@ -787,8 +787,9 @@ def _mhc_sinkhorn_fwd(
     nn: gl.constexpr = n * n
     gl.static_assert(BATCH_SIZE == NUM_WARPS * 32)
 
-    # Each thread load 4 fp32 elements, so each warp forms a 32x4xfp32 coalesced load
-    # We need to do 4 such load to obtain the full (BATCH_SIZE, n, n) tile
+    # GMEM-coalescing layout: each thread reads/writes a contiguous 4 fp32 along the inner n.
+    # block shape on axis 0 is 8 * NUM_WARPS, so the compiler tiles a (BATCH_SIZE, n, n) load
+    # into BATCH_SIZE / (8 * NUM_WARPS) coalesced LDGs per thread.
     load_layout: gl.constexpr = gl.BlockedLayout(
         size_per_thread=[1, 1, 4],
         threads_per_warp=[8, 4, 1],
@@ -796,80 +797,63 @@ def _mhc_sinkhorn_fwd(
         order=[2, 1, 0],
     )
 
-    # The size in M dimension that we load each time
-    M_CHUNK: gl.constexpr = 8 * NUM_WARPS
-    # How many times we need to load to cover the full BATCH_SIZE in M dimension
-    NUM_LOADS: gl.constexpr = BATCH_SIZE // M_CHUNK
-
-    # Layout along each axis
-    layout_M: gl.constexpr  = gl.SliceLayout(1, gl.SliceLayout(2, load_layout))
-    layout_n1: gl.constexpr = gl.SliceLayout(0, gl.SliceLayout(2, load_layout))
-    layout_n2: gl.constexpr = gl.SliceLayout(0, gl.SliceLayout(1, load_layout))
-
-    # Allocate (BATCH_SIZE, n, n) tile in shared memory for the input x, with the same swizzling as load_layout
-    smem_x_layout: gl.constexpr = gl.SwizzledSharedLayout(
-        vec=1, per_phase=1, max_phase=1, order=[3, 2, 1, 0]
-    )
-    smem_x = gl.allocate_shared_memory(
-        gl.float32, [NUM_LOADS, M_CHUNK, n, n], smem_x_layout
-    )
-
-    offs_n1 = gl.arange(0, n, layout=layout_n1)
-    offs_n2 = gl.arange(0, n, layout=layout_n2)
-    for i in gl.static_range(NUM_LOADS):
-        offs_b = pid * BATCH_SIZE + i * M_CHUNK + gl.arange(0, M_CHUNK, layout=layout_M)
-        mask_b = offs_b < M
-
-        ptrs = (
-            x_ptr
-            + offs_b[:, None, None]  * (n * n)
-            + offs_n1[None, :, None] * n
-            + offs_n2[None, None, :]
-        )
-        x_chunk = gl.load(ptrs, mask=mask_b[:, None, None], other=0.0)
-        smem_x.index(i).store(x_chunk)
-
-    gl.barrier()
-
-    # Each thread compute one 4x4 matrix
+    # Compute layout: each thread owns one full (n, n) inner matrix.
+    # Reductions on axes 1, 2 become register-local (no shuffles).
     compute_layout: gl.constexpr = gl.BlockedLayout(
         size_per_thread=[1, n, n],
         threads_per_warp=[32, 1, 1],
         warps_per_cta=[NUM_WARPS, 1, 1],
-        order=[3, 2, 1, 0],
+        order=[2, 1, 0],
     )
-    x = gl.convert_layout(smem_x, compute_layout)
+
+    # 1D offset layouts derived from load_layout (for the coalesced GMEM pointers).
+    layout_M:  gl.constexpr = gl.SliceLayout(1, gl.SliceLayout(2, load_layout))
+    layout_n1: gl.constexpr = gl.SliceLayout(0, gl.SliceLayout(2, load_layout))
+    layout_n2: gl.constexpr = gl.SliceLayout(0, gl.SliceLayout(1, load_layout))
+
+    offs_b  = pid * BATCH_SIZE + gl.arange(0, BATCH_SIZE, layout=layout_M)
+    offs_n1 = gl.arange(0, n, layout=layout_n1)
+    offs_n2 = gl.arange(0, n, layout=layout_n2)
+    mask_b  = offs_b < M
+
+    ptrs = (
+        x_ptr
+        + offs_b[:, None, None]  * nn
+        + offs_n1[None, :, None] * n
+        + offs_n2[None, None, :]
+    )
+
+    # GMEM -> registers (coalesced) -> convert to per-thread (n, n) layout.
+    # `convert_layout` routes through SMEM automatically when the two layouts disagree.
+    x = gl.load(ptrs, mask=mask_b[:, None, None], other=0.0)
+    x = gl.convert_layout(x, compute_layout)
 
     layout_f: gl.constexpr = gl.SliceLayout(2, compute_layout)
     layout_g: gl.constexpr = gl.SliceLayout(1, compute_layout)
 
-    f = gl.full([BATCH_SIZE, n], 0.0, gl.float32, layout=layout_f) # norm for rows
-    g = gl.full([BATCH_SIZE, n], 0.0, gl.float32, layout=layout_g) # norm for columns
+    f = gl.full([BATCH_SIZE, n], 0.0, gl.float32, layout=layout_f)
+    g = gl.full([BATCH_SIZE, n], 0.0, gl.float32, layout=layout_g)
 
     for _ in range(iters):
-        f = x + g[:, None, :]
-        f_max = gl.max(f, axis=2)
-        f = -gl.log(gl.sum(gl.exp(f - f_max[:, :, None]), axis=2)) - f_max
+        z = x + g[:, None, :]
+        z_max = gl.max(z, axis=2)
+        f = -gl.log(gl.sum(gl.exp(z - z_max[:, :, None]), axis=2)) - z_max
 
-        g = x + f[:, :, None]
-        g_max = gl.max(g, axis=1)
-        g = -gl.log(gl.sum(gl.exp(g - g_max[:, None, :]), axis=1)) - g_max
+        z = x + f[:, :, None]
+        z_max = gl.max(z, axis=1)
+        g = -gl.log(gl.sum(gl.exp(z - z_max[:, None, :]), axis=1)) - z_max
 
     P = gl.exp(f[:, :, None] + x + g[:, None, :])
 
-    # Write result back to SMEM so we can do coalesced store to global memory
-    smem_x.store(gl.convert_layout(P, smem_x_layout))
-    gl.barrier()
-
-    for i in gl.static_range(NUM_LOADS):
-        offs_b = pid * BATCH_SIZE + i * M_CHUNK + gl.arange(0, M_CHUNK, layout=layout_M)
-        mask_b = offs_b < M
-        chunk = smem_x.index(i).load(load_layout)
-        ptrs  = (output_ptr
-                + offs_b[:, None, None]  * (n*n)
-                + offs_n1[None, :, None] * n
-                + offs_n2[None, None, :])
-        gl.store(ptrs, chunk, mask=mask_b[:, None, None])
+    # Convert back to the coalesced layout for a coalesced STG.
+    P_out = gl.convert_layout(P, load_layout)
+    out_ptrs = (
+        output_ptr
+        + offs_b[:, None, None]  * nn
+        + offs_n1[None, :, None] * n
+        + offs_n2[None, None, :]
+    )
+    gl.store(out_ptrs, P_out, mask=mask_b[:, None, None])
 
 @gluon.jit
 def _mhc_sinkhorn_bwd(
@@ -881,53 +865,84 @@ def _mhc_sinkhorn_bwd(
     BATCH_SIZE: gl.constexpr,
     n: gl.constexpr,
     iters: gl.constexpr,
-    L_3d: gl.constexpr,
-    SMEM_LAYOUT: gl.constexpr,
+    NUM_WARPS: gl.constexpr,
 ):
-    """Backward Sinkhorn: recomputes f/g and stores history in shared memory."""
     pid = gl.program_id(0)
     nn: gl.constexpr = n * n
 
-    L_drop2: gl.constexpr = gl.SliceLayout(2, L_3d)
-    L_drop1: gl.constexpr = gl.SliceLayout(1, L_3d)
-    L_b3: gl.constexpr = gl.SliceLayout(1, L_drop2)
-    L_n1: gl.constexpr = gl.SliceLayout(0, L_drop2)
-    L_n2: gl.constexpr = gl.SliceLayout(0, L_drop1)
+    # GMEM-coalescing layout: each thread reads/writes a contiguous 4 fp32 along the inner n.
+    # block shape on axis 0 is 8 * NUM_WARPS, so the compiler tiles a (BATCH_SIZE, n, n) load
+    # into BATCH_SIZE / (8 * NUM_WARPS) coalesced LDGs per thread.
+    load_layout: gl.constexpr = gl.BlockedLayout(
+        size_per_thread=[1, 1, 4],
+        threads_per_warp=[8, 4, 1],
+        warps_per_cta=[NUM_WARPS, 1, 1],
+        order=[2, 1, 0],
+    )
 
-    offs_b = pid * BATCH_SIZE + gl.arange(0, BATCH_SIZE, layout=L_b3)
-    offs_n1 = gl.arange(0, n, layout=L_n1)
-    offs_n2 = gl.arange(0, n, layout=L_n2)
-    mask_b = offs_b < M
+    # Compute layout: each thread owns one full (n, n) inner matrix.
+    # Reductions on axes 1, 2 become register-local (no shuffles).
+    compute_layout: gl.constexpr = gl.BlockedLayout(
+        size_per_thread=[1, n, n],
+        threads_per_warp=[32, 1, 1],
+        warps_per_cta=[NUM_WARPS, 1, 1],
+        order=[2, 1, 0],
+    )
 
-    base_offsets = (
-        offs_b[:, None, None] * nn
+    # 1D offset layouts derived from load_layout (for the coalesced GMEM pointers).
+    layout_M:  gl.constexpr = gl.SliceLayout(1, gl.SliceLayout(2, load_layout))
+    layout_n1: gl.constexpr = gl.SliceLayout(0, gl.SliceLayout(2, load_layout))
+    layout_n2: gl.constexpr = gl.SliceLayout(0, gl.SliceLayout(1, load_layout))
+
+    offs_b  = pid * BATCH_SIZE + gl.arange(0, BATCH_SIZE, layout=layout_M)
+    offs_n1 = gl.arange(0, n, layout=layout_n1)
+    offs_n2 = gl.arange(0, n, layout=layout_n2)
+    mask_b  = offs_b < M
+
+    x_ptrs = (
+        x_ptr
+        + offs_b[:, None, None]  * nn
         + offs_n1[None, :, None] * n
         + offs_n2[None, None, :]
     )
-    x = gl.load(x_ptr + base_offsets, mask=mask_b[:, None, None], other=0.0)
-    P = gl.load(output_ptr + base_offsets, mask=mask_b[:, None, None], other=0.0)
-    grad_out = gl.load(grad_out_ptr + base_offsets, mask=mask_b[:, None, None], other=0.0)
 
-    # SMEM-resident history — replaces the DRAM hist_f / hist_g scratch buffers.
-    hist_f = gl.allocate_shared_memory(gl.float32, [iters + 1, BATCH_SIZE, n], SMEM_LAYOUT)
-    hist_g = gl.allocate_shared_memory(gl.float32, [iters + 1, BATCH_SIZE, n], SMEM_LAYOUT)
+    # GMEM -> registers (coalesced) -> convert to per-thread (n, n) layout.
+    # `convert_layout` routes through SMEM automatically when the two layouts disagree.
+    x_loaded = gl.load(x_ptrs, mask=mask_b[:, None, None], other=0.0)
+    x = gl.convert_layout(x_loaded, compute_layout)
 
-    f = gl.full([BATCH_SIZE, n], 0.0, gl.float32, layout=L_drop2)
-    g = gl.full([BATCH_SIZE, n], 0.0, gl.float32, layout=L_drop1)
-    hist_f.index(0).store(f)
-    hist_g.index(0).store(g)
+    layout_f: gl.constexpr = gl.SliceLayout(2, compute_layout)
+    layout_g: gl.constexpr = gl.SliceLayout(1, compute_layout)
 
-    # Forward recompute, recording each iteration's f and g into shared memory.
-    for i in range(iters):
+    f = gl.full([BATCH_SIZE, n], 0.0, gl.float32, layout=layout_f)
+    g = gl.full([BATCH_SIZE, n], 0.0, gl.float32, layout=layout_g)
+
+    smem_layout = gl.SwizzledSharedLayout(
+        vec=1, per_phase=1, max_phase=1, order=[1, 0]
+    )
+    hist_f = gl.allocate_shared_memory(gl.float32, [iters + 1, BATCH_SIZE, n], smem_layout)
+    hist_g = gl.allocate_shared_memory(gl.float32, [iters + 1, BATCH_SIZE, n], smem_layout)
+
+    for _ in range(iters):
         z = x + g[:, None, :]
         z_max = gl.max(z, axis=2)
         f = -gl.log(gl.sum(gl.exp(z - z_max[:, :, None]), axis=2)) - z_max
-        hist_f.index(i + 1).store(f)
 
         z = x + f[:, :, None]
         z_max = gl.max(z, axis=1)
         g = -gl.log(gl.sum(gl.exp(z - z_max[:, None, :]), axis=1)) - z_max
-        hist_g.index(i + 1).store(g)
+
+    P = gl.exp(f[:, :, None] + x + g[:, None, :])
+
+    # Backward pass starts
+    grad_out_ptrs = (
+        grad_out_ptr
+        + offs_b[:, None, None]  * nn
+        + offs_n1[None, :, None] * n
+        + offs_n2[None, None, :]
+    )
+    grad_out = gl.load(grad_out_ptrs, mask=mask_b[:, None, None], other=0.0)
+    grad_out = gl.convert_layout(grad_out, compute_layout)
 
     grad_log_P = grad_out * P
     grad_g = gl.sum(grad_log_P, axis=1)
