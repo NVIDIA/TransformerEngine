@@ -184,17 +184,17 @@ void GemmRsInitMatrices(NVTECommGemmCtx* ctx, int64_t* ldd, int64_t m, int64_t n
                                                      get_cuda_dtype(a->dtype()),
                                                      ctx->grid_row_major.get(), ctx->a_desc.get()));
   }
-  // B is (K/P, N) local -- K is distributed across ranks, N is fully replicated
+  // B is (K/P, N) local -- K is distributed across ranks, N is fully replicated.
   if (transb) {
-    NVTE_CHECK(b1 == n, "Unsupported tensor dimension in B: expected ", n, ", got ", b1);
-    NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(n, k, n, block_size(ctx, k), 0, 0, n,
-                                                     get_cuda_dtype(b->dtype()),
+    NVTE_CHECK(b0 == n, "Unsupported tensor dimension in B: expected ", n, ", got ", b0);
+    NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(n, k, block_size(ctx, n), block_size(ctx, k),
+                                                     0, 0, n, get_cuda_dtype(b->dtype()),
                                                      ctx->grid_row_major.get(), ctx->b_desc.get()));
   } else {
-    NVTE_CHECK(b1 == n, "Unsupported tensor dimension in B: expected ", n, ", got ", b1);
-    NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(k, n, block_size(ctx, k), n, 0, 0,
-                                                     block_size(ctx, k), get_cuda_dtype(b->dtype()),
-                                                     ctx->grid_col_major.get(), ctx->b_desc.get()));
+    NVTE_CHECK(b0 == n, "Unsupported tensor dimension in B: expected ", n, ", got ", b0);
+    NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(
+        k, n, block_size(ctx, k), block_size(ctx, n), 0, 0, block_size(ctx, k),
+        get_cuda_dtype(b->dtype()), ctx->grid_col_major.get(), ctx->b_desc.get()));
   }
   NVTE_CHECK(d1 == m, "Unsupported tensor dimension in D: expected ", m, ", got ", d1);
   *ldd = m;
@@ -476,6 +476,8 @@ NVTECommGemmCtx* nvte_comm_gemm_ctx_create(ncclComm_t comm, int nranks, int rank
       .b_desc = std::move(b_desc),
       .d_desc = std::move(d_desc),
       .matmul_desc = std::move(matmul_desc),
+      .workspace = nullptr,
+      .workspace_size = 0,
   };
 }
 

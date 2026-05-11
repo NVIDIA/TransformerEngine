@@ -20,6 +20,7 @@ from .base import (
     fill_userbuffers_buffer_for_all_gather,
     get_dummy_wgrad,
     get_ub,
+    is_userbuffer_cublasmp_backend,
     quantize_weight,
     TransformerEngineBaseModule,
     _2X_ACC_FPROP,
@@ -361,7 +362,9 @@ def _linear_forward_impl(
     # ------------------------------------------------------
     out = None
     if ub_overlap_rs_fprop:
-        out = reduce_scatter_out
+        # cuBLASMp writes the reduce-scattered output directly into the GEMM
+        # output tensor; Userbuffers writes it into the extra-output buffer.
+        out = gemm_out if ub_obj is not None and ub_obj.with_cublasmp() else reduce_scatter_out
     elif parallel_mode == "row" and tp_size > 1:
         nvtx_range_push(f"{nvtx_label}.row_parallel_comm")
         out = gemm_out
@@ -851,6 +854,17 @@ def _linear_backward(
         # Grad input tensor has been computed...
         # --------------------------------------------------
 
+        # cuBLASMp's AG+GEMM consumes the gathered grad_output inline and does
+        # not preserve it for wgrad. Userbuffers leaves the gathered tensor in
+        # its persistent buffer; cuBLASMp does not, so we gather here.
+        if (
+            ctx.requires_wgrad
+            and ctx.ub_overlap_ag
+            and ctx.ub_obj_gradout is not None
+            and ctx.ub_obj_gradout.with_cublasmp()
+        ):
+            grad_output, _ = gather_along_first_dim(grad_output, ctx.tp_group)
+
         # --------------------------------------------------
         # Compute grad weight
         # --------------------------------------------------
@@ -1315,17 +1329,22 @@ class Linear(TransformerEngineBaseModule):
         self.ub_overlap_rs_dgrad = (
             self.parallel_mode == "column" and self.sequence_parallel and ub_overlap_rs_dgrad
         )
+        # Bulk overlaps require the Userbuffers backend; the cuBLASMp backend
+        # falls back to async NCCL ops via torch.distributed.
+        bulk_available = not is_userbuffer_cublasmp_backend()
         self.ub_bulk_dgrad = (
             self.parallel_mode == "column"
             and self.sequence_parallel
             and ub_bulk_dgrad
             and not self.ub_overlap_rs_dgrad
+            and bulk_available
         )
         self.ub_bulk_wgrad = (
             self.parallel_mode == "column"
             and self.sequence_parallel
             and ub_bulk_wgrad
             and not self.ub_overlap_rs_dgrad
+            and bulk_available
         )
 
         # Row parallel TP overlap options

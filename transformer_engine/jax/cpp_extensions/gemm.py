@@ -302,22 +302,23 @@ def collective_gemm_bootstrap(
         and before any collective GEMM operations. Each process should call
         this function with its own unique process_id.
 
-        Both the Userbuffers and cuBLASMp backends use internal CUDA streams
-        to overlap NCCL collectives with GEMM compute.  XLA command buffers
-        (CUDA graph capture) cannot record work that spans multiple streams,
-        so command buffers must be disabled when executing collective GEMM
-        with communication overlap.  Set the following **before** calling
-        ``jax.distributed.initialize()``::
+        With the cuBLASMp backend, XLA command buffer capture must include
+        ``COLLECTIVES`` so that the NCCL calls inside cuBLASMp end up in the
+        same captured buffer as the CollectiveGemm custom call. Otherwise the
+        capture aborts with ``CUDA_ERROR_STREAM_CAPTURE_INVALIDATED``. Set the
+        flag before ``jax.distributed.initialize()``::
 
             import os
             os.environ["XLA_FLAGS"] = (
                 os.environ.get("XLA_FLAGS", "")
-                + " --xla_gpu_enable_command_buffer="
+                + " --xla_gpu_enable_command_buffer=+COLLECTIVES"
             )
 
-        This is not required for non-overlapped collective GEMM (i.e., when
+        This is not required for non-overlapped collective GEMM (when
         ``collective_op`` is ``CollectiveOp.NONE`` and JAX/XLA handles the
-        collective via its own graph-level optimization).
+        collective via its own graph-level optimization), nor for the
+        Userbuffers backend, which uses CUDA multicast APIs and async
+        memcpy on symmetric memory pointers that XLA already captures.
     """
 
     if not (num_devices_per_process == 1 and jax.local_device_count() == 1):
@@ -1997,19 +1998,21 @@ def gemm(
         backend (see :func:`collective_gemm_bootstrap`).
 
         .. note::
-            Collective GEMM with communication overlap uses internal CUDA streams
-            for NCCL collectives that run concurrently with the GEMM compute.
-            This is incompatible with XLA command buffers (CUDA graph capture).
-            Disable command buffers before JAX initialization::
+            Collective GEMM with communication overlap is captured into XLA
+            command buffers as a custom call. When executing with the cuBLASMp
+            backend, this captured graph spans NCCL collectives that XLA does not 
+            include in command buffers by default, so add ``COLLECTIVES`` to the
+            enabled kinds before JAX initialization::
 
                 os.environ["XLA_FLAGS"] = (
                     os.environ.get("XLA_FLAGS", "")
-                    + " --xla_gpu_enable_command_buffer="
+                    + " --xla_gpu_enable_command_buffer=+COLLECTIVES"
                 )
 
-            This is **not** required when ``collective_op`` is
-            ``CollectiveOp.NONE`` (the default), even if
-            :func:`collective_gemm_bootstrap` has been called.
+            Without this, capture aborts with
+            ``CUDA_ERROR_STREAM_CAPTURE_INVALIDATED``. Not required when
+            ``collective_op`` is ``CollectiveOp.NONE`` or when using the Userbuffers
+            backend instead of cuBLASMp.
 
     Returns
     -------

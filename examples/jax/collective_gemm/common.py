@@ -99,13 +99,19 @@ def _initialize_distributed(args):
 
     assert args.num_devices_per_process == 1, "Only single process single GPU is supported!"
 
-    # Collective GEMM with communication overlap (Userbuffers or cuBLASMp) uses internal
-    # CUDA streams for overlapping NCCL collectives with compute.  XLA command buffers
-    # (CUDA graph capture) cannot record work that spans multiple streams, so we must
-    # disable them when running collective GEMM with overlap.
-    xla_flags = os.environ.get("XLA_FLAGS", "")
-    if "--xla_gpu_enable_command_buffer" not in xla_flags:
-        os.environ["XLA_FLAGS"] = xla_flags + " --xla_gpu_enable_command_buffer="
+    # cuBLASMp issues NCCL collectives on its own communication stream
+    # inside the GEMM custom call. Add COLLECTIVES so XLA captures those
+    # ops alongside the custom call instead of invalidating the capture.
+    # Lower the min-graph-size to 1 so single-matmul modules also get
+    # captured -- otherwise small test cases skip the captured path.
+    # Userbuffers does not need either flag.
+    if args.use_cublasmp:
+        xla_flags = os.environ.get("XLA_FLAGS", "")
+        os.environ["XLA_FLAGS"] = (
+            xla_flags
+            + " --xla_gpu_enable_command_buffer=+COLLECTIVES"
+            + " --xla_gpu_graph_min_graph_size=1"
+        )
 
     print(
         f"Initializing JAX distributed with coordinator={args.coordinator_address}, "

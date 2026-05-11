@@ -325,11 +325,16 @@ TensorWrapper CommOverlapCore::get_buffer_chunk_like(const TensorWrapper &source
   return chunk;
 }
 
-void CommOverlapCore::cublasmp_ag_gemm(const TensorWrapper &A, bool transa, const TensorWrapper &B,
-                                       bool transb, TensorWrapper &D, TensorWrapper &bias,
-                                       TensorWrapper &pre_gelu_out, bool grad, bool accumulate,
-                                       cudaStream_t stream_main) {
-  // Flatten to 2D: A = (A0, A1), B = (B0, B1)
+namespace {
+
+struct CublasMpDims {
+  int64_t m, n, k;
+};
+
+// Resolve the global m/n/k for the three cuBLASMp communication patterns
+// from flattened operand shapes.
+CublasMpDims compute_ag_dims(const TensorWrapper &A, bool transa, const TensorWrapper &B,
+                              bool transb, int tp_size) {
   auto A_tensor = convertNVTETensorCheck(A.data());
   auto B_tensor = convertNVTETensorCheck(B.data());
   int64_t A0 = A_tensor->flat_first_dim();
@@ -338,26 +343,16 @@ void CommOverlapCore::cublasmp_ag_gemm(const TensorWrapper &A, bool transa, cons
   int64_t B1 = B_tensor->flat_last_dim();
 
   // col-major A: (M/P, K) -- tensor-parallel in the non-contracting dimension
-  int64_t m_local = transa ? A0 : A1;
-  int64_t m = m_local * _tp_size;
+  int64_t m = (transa ? A0 : A1) * tp_size;
   // col-major B: (K, N/P) -- sequence-parallel in the non-contracting dimension
-  int64_t n_local = transb ? B1 : B0;
-  int64_t n = n_local * _tp_size;
+  int64_t n = (transb ? B1 : B0) * tp_size;
   // contracting dimension not distributed
   int64_t k = transa ? A1 : A0;
-
-  // col-major GEMM compute overlapped with all-gather on input B
-  // (M/P, K) x [(K, N/P) -(AG)-> (K, N)] = (M/P, N)
-  nvte_all_gather_gemm(_cublasmp_ctx, m, n, k, A.data(), B.data(), D.data(), bias.data(),
-                       pre_gelu_out.data(), transa, transb, grad, accumulate, _num_comm_sm,
-                       stream_main, _algo_type);
+  return {m, n, k};
 }
 
-void CommOverlapCore::cublasmp_gemm_rs(const TensorWrapper &A, bool transa, const TensorWrapper &B,
-                                       bool transb, TensorWrapper &D, TensorWrapper &bias,
-                                       TensorWrapper &pre_gelu_out, bool grad, bool accumulate,
-                                       cudaStream_t stream_main) {
-  // Flatten to 2D: A = (A0, A1), B = (B0, B1)
+CublasMpDims compute_rs_dims(const TensorWrapper &A, bool transa, const TensorWrapper &B,
+                              bool transb, int tp_size) {
   auto A_tensor = convertNVTETensorCheck(A.data());
   auto B_tensor = convertNVTETensorCheck(B.data());
   int64_t A0 = A_tensor->flat_first_dim();
@@ -370,9 +365,35 @@ void CommOverlapCore::cublasmp_gemm_rs(const TensorWrapper &A, bool transa, cons
   // col-major B: (K/P, N) -- tensor-parallel in the contracting dimension
   int64_t n = transb ? B1 : B0;
   // contracting dimension is distributed
-  int64_t k_local = transa ? A1 : A0;
-  int64_t k = k_local * _tp_size;
+  int64_t k = (transa ? A1 : A0) * tp_size;
+  return {m, n, k};
+}
 
+CublasMpDims compute_ar_dims(const TensorWrapper &A, bool transa, const TensorWrapper &B,
+                              bool transb, int tp_size) {
+  // AR shares the same m/n/k semantics as RS at descriptor level.
+  return compute_rs_dims(A, transa, B, transb, tp_size);
+}
+
+}  // namespace
+
+void CommOverlapCore::cublasmp_ag_gemm(const TensorWrapper &A, bool transa, const TensorWrapper &B,
+                                       bool transb, TensorWrapper &D, TensorWrapper &bias,
+                                       TensorWrapper &pre_gelu_out, bool grad, bool accumulate,
+                                       cudaStream_t stream_main) {
+  auto [m, n, k] = compute_ag_dims(A, transa, B, transb, _tp_size);
+  // col-major GEMM compute overlapped with all-gather on input B
+  // (M/P, K) x [(K, N/P) -(AG)-> (K, N)] = (M/P, N)
+  nvte_all_gather_gemm(_cublasmp_ctx, m, n, k, A.data(), B.data(), D.data(), bias.data(),
+                       pre_gelu_out.data(), transa, transb, grad, accumulate, _num_comm_sm,
+                       stream_main, _algo_type);
+}
+
+void CommOverlapCore::cublasmp_gemm_rs(const TensorWrapper &A, bool transa, const TensorWrapper &B,
+                                       bool transb, TensorWrapper &D, TensorWrapper &bias,
+                                       TensorWrapper &pre_gelu_out, bool grad, bool accumulate,
+                                       cudaStream_t stream_main) {
+  auto [m, n, k] = compute_rs_dims(A, transa, B, transb, _tp_size);
   // col-major GEMM compute overlapped with reduce-scatter on the output
   // (M, K/P) x (K/P, N) = (M, N) -(RS)-> (M, N/P)
   nvte_gemm_reduce_scatter(_cublasmp_ctx, m, n, k, A.data(), B.data(), D.data(), bias.data(),
@@ -384,22 +405,7 @@ void CommOverlapCore::cublasmp_gemm_ar(const TensorWrapper &A, bool transa, cons
                                        bool transb, TensorWrapper &D, TensorWrapper &bias,
                                        TensorWrapper &pre_gelu_out, bool grad, bool accumulate,
                                        cudaStream_t stream_main) {
-  // Flatten to 2D: A = (A0, A1), B = (B0, B1)
-  auto A_tensor = convertNVTETensorCheck(A.data());
-  auto B_tensor = convertNVTETensorCheck(B.data());
-  int64_t A0 = A_tensor->flat_first_dim();
-  int64_t A1 = A_tensor->flat_last_dim();
-  int64_t B0 = B_tensor->flat_first_dim();
-  int64_t B1 = B_tensor->flat_last_dim();
-
-  // col-major A: (M, K/P) -- tensor-parallel in K dimension
-  int64_t m = transa ? A0 : A1;
-  // col-major B: (K/P, N) -- tensor-parallel in K dimension
-  int64_t n = transb ? B1 : B0;
-  // contracting dimension is distributed
-  int64_t k_local = transa ? A1 : A0;
-  int64_t k = k_local * _tp_size;
-
+  auto [m, n, k] = compute_ar_dims(A, transa, B, transb, _tp_size);
   // col-major GEMM compute overlapped with all-reduce on the output
   // (M, K/P) x (K/P, N) = (M, N) -(AR)-> (M, N)
   nvte_gemm_all_reduce(_cublasmp_ctx, m, n, k, A.data(), B.data(), D.data(), bias.data(),

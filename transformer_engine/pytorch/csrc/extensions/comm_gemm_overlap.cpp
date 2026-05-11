@@ -225,6 +225,86 @@ CommOverlap::CommOverlap(const std::vector<size_t> &buffer_shape, at::ScalarType
                           num_max_streams, comm_cga_size, gemm_priority, comm_priority, num_comm_sm,
                           set_sm_margin, atomic_gemm, rs_overlap_first_gemm) {}
 
+namespace {
+
+// Run a dummy cuBLASMp matmul during construction so its lazy NCCL window
+// registration and workspace allocation happen outside any CUDA-graph
+// capture. The warmup is sized from the comm buffer so the cached
+// workspace covers any matmul the caller will later run with the same
+// descriptor. BF16 is used unconditionally; its workspace is at least as
+// large as the FP8 workspace for the same m/n/k.
+void cublasmp_capture_warmup(te::CommOverlapCore *core, int tp_size,
+                             te::CommOverlapType comm_type,
+                             const std::vector<size_t> &buffer_shape) {
+  NVTE_CHECK(buffer_shape.size() == 2,
+             "cuBLASMp warmup expects a 2-D buffer shape, got rank ", buffer_shape.size());
+  // Treat the matmul as square in the weight dim so workspace is sized
+  // for the wider of the two cases.
+  const int64_t N_global = static_cast<int64_t>(buffer_shape[0]);
+  const int64_t hidden = static_cast<int64_t>(buffer_shape[1]);
+  auto ceil_div = [](int64_t a, int64_t b) { return (a + b - 1) / b; };
+  const int64_t M_local = ceil_div(hidden, tp_size);
+  const int64_t N_local = ceil_div(N_global, tp_size);
+  const int64_t K_local = ceil_div(hidden, tp_size);
+  const int64_t bf16_bytes = 2;
+
+  std::vector<size_t> a_shape, b_shape, d_shape;
+  if (comm_type == te::CommOverlapType::AG) {
+    // A = (M_local, K), B = (N_local, K), D = (N_global, M_local)
+    a_shape = {static_cast<size_t>(M_local), static_cast<size_t>(hidden)};
+    b_shape = {static_cast<size_t>(N_local), static_cast<size_t>(hidden)};
+    d_shape = {static_cast<size_t>(N_global), static_cast<size_t>(M_local)};
+  } else {  // RS (or AR -- same descriptor-level dims)
+    // A = (M_global, K_local), B = (N_global, K_local), D = (N_local, M_global)
+    a_shape = {static_cast<size_t>(hidden), static_cast<size_t>(K_local)};
+    b_shape = {static_cast<size_t>(N_global), static_cast<size_t>(K_local)};
+    d_shape = {static_cast<size_t>(N_local), static_cast<size_t>(hidden)};
+  }
+
+  const size_t a_bytes = a_shape[0] * a_shape[1] * bf16_bytes;
+  const size_t b_bytes = b_shape[0] * b_shape[1] * bf16_bytes;
+  const size_t d_bytes = d_shape[0] * d_shape[1] * bf16_bytes;
+
+  void *a_ptr = nullptr, *b_ptr = nullptr, *d_ptr = nullptr;
+  NVTE_CHECK_CUDA(cudaMalloc(&a_ptr, a_bytes));
+  NVTE_CHECK_CUDA(cudaMalloc(&b_ptr, b_bytes));
+  NVTE_CHECK_CUDA(cudaMalloc(&d_ptr, d_bytes));
+  NVTE_CHECK_CUDA(cudaMemset(a_ptr, 0, a_bytes));
+  NVTE_CHECK_CUDA(cudaMemset(b_ptr, 0, b_bytes));
+
+  te::TensorWrapper A_tw, B_tw, D_tw, bias_tw, pre_gelu_tw;
+  A_tw.set_rowwise_data(a_ptr, te::DType::kBFloat16, a_shape);
+  B_tw.set_rowwise_data(b_ptr, te::DType::kBFloat16, b_shape);
+  D_tw.set_rowwise_data(d_ptr, te::DType::kBFloat16, d_shape);
+
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  if (comm_type == te::CommOverlapType::AG) {
+    core->cublasmp_ag_gemm(A_tw, /*transa=*/true, B_tw, /*transb=*/false, D_tw, bias_tw,
+                           pre_gelu_tw, /*grad=*/false, /*accumulate=*/false, stream);
+  } else {
+    core->cublasmp_gemm_rs(A_tw, /*transa=*/true, B_tw, /*transb=*/false, D_tw, bias_tw,
+                           pre_gelu_tw, /*grad=*/false, /*accumulate=*/false, stream);
+  }
+  NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
+  cudaFree(a_ptr);
+  cudaFree(b_ptr);
+  cudaFree(d_ptr);
+}
+
+}  // namespace
+
+CommOverlap::CommOverlap(CommOverlapHelper *helper, int tp_rank, int tp_size,
+                         te::CommOverlapType comm_type,
+                         const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
+                         int num_comm_sm, bool atomic_gemm)
+    : te::CommOverlapBase(helper->get_nccl_comm("intra"), tp_rank, tp_size, num_comm_sm,
+                          atomic_gemm) {
+  // buffer_dtype is unused on this path (the warmup runs in BF16); kept in
+  // the signature for API symmetry with the non-cuBLASMp ctor.
+  (void)buffer_dtype;
+  cublasmp_capture_warmup(this, tp_size, comm_type, buffer_shape);
+}
+
 /*
 ** Helper function to copy input to _ubuf
 */
@@ -323,6 +403,17 @@ CommOverlapP2P::CommOverlapP2P(const std::vector<size_t> &buffer_shape, at::Scal
           std::bind(&CommOverlapHelper::ub_barrier, helper, _1), comm_type, num_max_streams,
           comm_cga_size, gemm_priority, comm_priority, num_comm_sm, set_sm_margin, use_ce,
           atomic_gemm, aggregate) {}
+
+CommOverlapP2P::CommOverlapP2P(CommOverlapHelper *helper, int tp_rank, int tp_size,
+                               te::CommOverlapType comm_type,
+                               const std::vector<size_t> &buffer_shape,
+                               at::ScalarType buffer_dtype, int num_comm_sm, bool atomic_gemm)
+    : te::CommOverlapP2PBase(helper->get_nccl_comm("intra"), tp_rank, tp_size, num_comm_sm,
+                             atomic_gemm) {
+  // See CommOverlap constructor for the buffer_dtype rationale.
+  (void)buffer_dtype;
+  cublasmp_capture_warmup(this, tp_size, comm_type, buffer_shape);
+}
 
 /*
 ** Copy input to _ubufs[0]

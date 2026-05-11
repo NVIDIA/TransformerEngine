@@ -99,6 +99,21 @@ std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
   return std::make_tuple(std::move(input), input_shape);
 }
 
+// Build a TensorWrapper for the prepare stage. Operand contents are
+// uninitialized at this point and no kernels are launched.
+static TensorWrapper prepare_operand_tensor(Buffer_Type buf, Buffer_Type scale_inv,
+                                            JAXX_Scaling_Mode scaling_mode,
+                                            const std::vector<size_t> &flat_shape) {
+  auto dtype = convert_ffi_datatype_to_te_dtype(buf.element_type());
+  TensorWrapper t(get_nvte_scaling_mode(scaling_mode));
+  t.set_rowwise_data(buf.untyped_data(), dtype, flat_shape);
+  if (scaling_mode != JAXX_Scaling_Mode::NO_SCALING && scale_inv.element_count() > 0) {
+    auto scale_dtype = convert_ffi_datatype_to_te_dtype(scale_inv.element_type());
+    t.set_rowwise_scale_inv(scale_inv.untyped_data(), scale_dtype, std::vector<size_t>{1});
+  }
+  return t;
+}
+
 Error_Type GemmInitV2FFI(Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buffer_Type rhs,
                          Buffer_Type rhs_scale_inv, Buffer_Type bias, Buffer_Type alpha,
                          Buffer_Type beta, Result_Type output, Result_Type workspace,
@@ -128,8 +143,45 @@ Error_Type GemmInitV2FFI(Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buffer_Type
       buffer_shape[0] = out_shape[0];
       buffer_shape[1] = out_shape[1];
     }
-    [[maybe_unused]] auto _ = CollectiveGemmPlanRegistry::getInstance().get_executor(
+    auto *executor = CollectiveGemmPlanRegistry::getInstance().get_executor(
         buffer_shape, buffer_dtype, config.collective_op);
+
+    // Run a dummy cuBLASMp matmul in the prepare stage so its lazy NCCL
+    // window registration and workspace allocation happen outside any
+    // CUDA-graph capture. The throwaway D output gets overwritten on the
+    // next execute-stage call.
+    if (IsCollectiveGemmWithCublasmp() && executor != nullptr) {
+      auto lhs_ = prepare_operand_tensor(lhs, lhs_scale_inv, config.scaling_mode, lhs_shape);
+      auto rhs_ = prepare_operand_tensor(rhs, rhs_scale_inv, config.scaling_mode, rhs_shape);
+      // Match GemmV2FFI's local D shape: AG gathers along axis 0, RS scatters along axis 0.
+      std::vector<size_t> d_shape = out_shape;
+      if (config.collective_op == JAXX_Collective_Op::ALL_GATHER) {
+        d_shape[0] *= comm_handler.tp_size;
+      } else if (config.collective_op == JAXX_Collective_Op::REDUCE_SCATTER) {
+        d_shape[0] /= comm_handler.tp_size;
+      }
+      TensorWrapper d_(get_nvte_scaling_mode(JAXX_Scaling_Mode::NO_SCALING));
+      d_.set_rowwise_data(output->untyped_data(),
+                          convert_ffi_datatype_to_te_dtype(output->element_type()), d_shape);
+      TensorWrapper bias_(get_nvte_scaling_mode(JAXX_Scaling_Mode::NO_SCALING));
+      if (bias.element_count() > 0) {
+        bias_.set_rowwise_data(bias.untyped_data(),
+                               convert_ffi_datatype_to_te_dtype(bias.element_type()),
+                               std::vector<size_t>{static_cast<size_t>(bias.element_count())});
+      }
+      TensorWrapper pre_gelu_out_(get_nvte_scaling_mode(JAXX_Scaling_Mode::NO_SCALING));
+      // Match GemmV2FFI's operand swap: rhs becomes A, lhs becomes B.
+      cudaStream_t prepare_stream = cudaStreamPerThread;
+      if (config.collective_op == JAXX_Collective_Op::ALL_GATHER) {
+        executor->cublasmp_ag_gemm(rhs_, config.rhs_transposed, lhs_, config.lhs_transposed, d_,
+                                    bias_, pre_gelu_out_, false /*grad*/, false /*accumulate*/,
+                                    prepare_stream);
+      } else if (config.collective_op == JAXX_Collective_Op::REDUCE_SCATTER) {
+        executor->cublasmp_gemm_rs(rhs_, config.rhs_transposed, lhs_, config.lhs_transposed, d_,
+                                    bias_, pre_gelu_out_, false /*grad*/, false /*accumulate*/,
+                                    prepare_stream);
+      }
+    }
   }
   return ffi_with_cuda_error_check();
 }

@@ -23,6 +23,7 @@ from .base import (
     fill_userbuffers_buffer_for_all_gather,
     _ub_communicators,
     get_ub,
+    is_userbuffer_cublasmp_backend,
     quantize_weight,
     TransformerEngineBaseModule,
     _2X_ACC_FPROP,
@@ -583,8 +584,12 @@ class _LayerNormMLP(torch.autograd.Function):
         # first part of if statement means that we only clear ln_out_total if
         # 1) checkpointing and not recomputing (in the forward stage, not bwd recompute stage)
         # 2) not checkpointing and grad disabled
-        if ((checkpoint and not is_recomputation) or not is_grad_enabled) and (
-            ln_out_total is not ln_out_return
+        # The `is not ln_out` guard avoids clearing the bwd-saved tensor when
+        # ln_out_total aliases ln_out (cuBLASMp AG-fprop path).
+        if (
+            ((checkpoint and not is_recomputation) or not is_grad_enabled)
+            and ln_out_total is not ln_out_return
+            and ln_out_total is not ln_out
         ):
             clear_tensor_data(ln_out_total)
 
@@ -683,7 +688,13 @@ class _LayerNormMLP(torch.autograd.Function):
             # Note: Perform tensor-parallel communication if needed
             fc2_out = None
             if ub_overlap_rs:
-                fc2_out = reduce_scatter_out
+                # cuBLASMp writes the reduce-scattered output directly into the
+                # GEMM output tensor; Userbuffers writes it into the extra-output buffer.
+                fc2_out = (
+                    gemm_out
+                    if ub_obj_fc2out is not None and ub_obj_fc2out.with_cublasmp()
+                    else reduce_scatter_out
+                )
             elif set_parallel_mode and sequence_parallel:
                 fc2_out, _ = reduce_scatter_along_first_dim(gemm_out, tp_group)
             elif set_parallel_mode and tensor_parallel:
@@ -1201,6 +1212,18 @@ class _LayerNormMLP(torch.autograd.Function):
             # --------------------------------------------------
             # Finished FC2 DGRAD...
             # --------------------------------------------------
+
+            # cuBLASMp's AG+GEMM consumes the gathered grad_output inline and
+            # does not preserve it for fc2_wgrad. Userbuffers leaves the
+            # gathered tensor in its persistent buffer; cuBLASMp does not, so
+            # we gather here.
+            if (
+                ctx.fc2_weight_requires_grad
+                and ctx.ub_overlap_ag
+                and ctx.ub_obj_gradout is not None
+                and ctx.ub_obj_gradout.with_cublasmp()
+            ):
+                grad_output, _ = gather_along_first_dim(grad_output, ctx.tp_group)
 
             # --------------------------------------------------
             # FC2 WGRAD
@@ -1908,11 +1931,20 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self.ub_overlap_ag = ub_overlap_ag and self.sequence_parallel
         self.ub_overlap_rs = ub_overlap_rs and self.sequence_parallel
         self.ub_overlap_rs_dgrad = ub_overlap_rs_dgrad and self.sequence_parallel
+        # Bulk overlaps require the Userbuffers backend; the cuBLASMp backend
+        # falls back to async NCCL ops via torch.distributed.
+        bulk_available = not is_userbuffer_cublasmp_backend()
         self.ub_bulk_wgrad = (
-            ub_bulk_wgrad and self.sequence_parallel and not self.ub_overlap_rs_dgrad
+            ub_bulk_wgrad
+            and self.sequence_parallel
+            and not self.ub_overlap_rs_dgrad
+            and bulk_available
         )
         self.ub_bulk_dgrad = (
-            ub_bulk_dgrad and self.sequence_parallel and not self.ub_overlap_rs_dgrad
+            ub_bulk_dgrad
+            and self.sequence_parallel
+            and not self.ub_overlap_rs_dgrad
+            and bulk_available
         )
 
         if self.symmetric_ar_type is not None:

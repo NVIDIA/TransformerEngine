@@ -58,15 +58,26 @@ from ...debug.pytorch.debug_state import TEDebugState
 from ...debug.pytorch.debug_quantization import DebugQuantizer, DebugQuantizedTensor
 from ...debug.pytorch.utils import next_iter_when_debug_should_be_run, any_feature_enabled
 
-__all__ = ["initialize_ub", "destroy_ub", "UserBufferQuantizationMode"]
+__all__ = [
+    "initialize_ub",
+    "destroy_ub",
+    "is_userbuffer_cublasmp_backend",
+    "UserBufferQuantizationMode",
+]
 
 _2X_ACC_FPROP = False
 _2X_ACC_DGRAD = True
 _2X_ACC_WGRAD = True
 _dummy_wgrads = {}
 _ub_communicators = None
+_ub_with_cublasmp = False
 _MIN_STREAM_PRIORITY, _MAX_STREAM_PRIORITY = None, None
 layers_atomic_ring_exchange = []
+
+
+def is_userbuffer_cublasmp_backend() -> bool:
+    """Whether the active userbuffer backend is cuBLASMp."""
+    return _ub_with_cublasmp
 
 
 class UserBufferQuantizationMode(Enum):
@@ -200,10 +211,11 @@ def initialize_ub(
                 f"quantization configurations ({len(quantization_modes)})"
             )
 
-    global _ub_communicators
+    global _ub_communicators, _ub_with_cublasmp
     if _ub_communicators is not None:
         raise RuntimeError("UB communicators are already initialized.")
     _ub_communicators = {}
+    _ub_with_cublasmp = with_cublasmp
 
     if tex.ubuf_built_with_mpi():
         # We're bootstrapping with direct calls to MPI in Userbuffers code so we need to force
@@ -408,57 +420,43 @@ def initialize_ub(
             if (quantization_mode == UserBufferQuantizationMode.FP8 and fp8_buf)
             else dtype
         )
+        comm_type = tex.CommOverlapType.RS if is_reduce_scatter else tex.CommOverlapType.AG
         if method == "ring_exchange":
-            if with_cublasmp:
-                ub_obj = tex.CommOverlapP2P(
-                    helper,
-                    local_rank,
-                    tp_size,
-                    num_comm_sm=num_sm,
-                    atomic_gemm=atomic_gemm,
-                )
-            else:
-                ub_obj = tex.CommOverlapP2P(
-                    shape,  # Communication buffer shape
-                    buffer_dtype,  # Communication buffer data type
-                    helper,  # Helper for torch.distributed callbacks during bootstrapping
-                    tp_size,  # Tensor-parallel group size (may be different than local_size)
-                    tex.CommOverlapType.RS if is_reduce_scatter else tex.CommOverlapType.AG,
-                    num_max_streams=_NUM_MAX_UB_STREAMS,
-                    comm_cga_size=cga_size,
-                    num_comm_sm=num_sm,
-                    set_sm_margin=set_sm_margin,
-                    atomic_gemm=atomic_gemm,
-                    use_ce=use_ce,
-                    aggregate=aggregate,
-                    gemm_priority=gemm_priority,
-                    comm_priority=comm_priority,
-                )
+            ub_obj = tex.CommOverlapP2P(
+                shape,  # Communication buffer shape
+                buffer_dtype,  # Communication buffer data type
+                helper,  # Helper for torch.distributed callbacks during bootstrapping
+                tp_size,  # Tensor-parallel group size (may differ from local_size)
+                comm_type,
+                use_cublasmp=with_cublasmp,
+                num_max_streams=_NUM_MAX_UB_STREAMS,
+                comm_cga_size=cga_size,
+                num_comm_sm=num_sm,
+                set_sm_margin=set_sm_margin,
+                atomic_gemm=atomic_gemm,
+                use_ce=use_ce,
+                aggregate=aggregate,
+                gemm_priority=gemm_priority,
+                comm_priority=comm_priority,
+            )
         else:
-            if with_cublasmp and method != "bulk":
-                ub_obj = tex.CommOverlap(
-                    helper,
-                    local_rank,
-                    tp_size,
-                    num_comm_sm=num_sm,
-                    atomic_gemm=atomic_gemm,
-                )
-            else:
-                ub_obj = tex.CommOverlap(
-                    shape,  # Communication buffer shape
-                    buffer_dtype,  # Communication buffer data type
-                    helper,  # Helper for torch.distributed callbacks during bootstrapping
-                    tp_size,  # Tensor-parallel group size (may be different than local_size)
-                    num_splits=num_splits,
-                    num_max_streams=_NUM_MAX_UB_STREAMS,
-                    comm_cga_size=cga_size,
-                    num_comm_sm=num_sm,
-                    set_sm_margin=set_sm_margin,
-                    atomic_gemm=atomic_gemm,
-                    gemm_priority=gemm_priority,
-                    comm_priority=comm_priority,
-                    rs_overlap_first_gemm=pipeline_rs_overlap_first_gemm,
-                )
+            ub_obj = tex.CommOverlap(
+                shape,  # Communication buffer shape
+                buffer_dtype,  # Communication buffer data type
+                helper,  # Helper for torch.distributed callbacks during bootstrapping
+                tp_size,  # Tensor-parallel group size (may differ from local_size)
+                use_cublasmp=with_cublasmp and method != "bulk",
+                comm_type=comm_type,
+                num_splits=num_splits,
+                num_max_streams=_NUM_MAX_UB_STREAMS,
+                comm_cga_size=cga_size,
+                num_comm_sm=num_sm,
+                set_sm_margin=set_sm_margin,
+                atomic_gemm=atomic_gemm,
+                gemm_priority=gemm_priority,
+                comm_priority=comm_priority,
+                rs_overlap_first_gemm=pipeline_rs_overlap_first_gemm,
+            )
         _ub_communicators[(name, quantization_mode)] = ub_obj
 
     for quantization_mode, user_ub_cfg in zip(quantization_modes, ub_cfgs):
@@ -483,9 +481,15 @@ def initialize_ub(
                     new_method = user_ub_cfg[name]["method"]
                     methods[new_method].append(name)
 
-        for name in (
-            methods["ring_exchange"] + methods["pipeline"] + methods["bulk"] + methods["external"]
-        ):
+        # cuBLASMp does not implement bulk or external overlaps, and its
+        # multicast AG path is not supported. Skip those methods so the
+        # layers fall back to async NCCL comms via torch.distributed.
+        if with_cublasmp:
+            configured_methods = ["ring_exchange", "pipeline"]
+        else:
+            configured_methods = ["ring_exchange", "pipeline", "bulk", "external"]
+
+        for name in (m for k in configured_methods for m in methods[k]):
             ub_cfg = get_default_config(name)
             if user_ub_cfg is not None and name in user_ub_cfg:
                 fp8_buf = (name in layers_all_gather_overlap) or (
@@ -511,8 +515,9 @@ def get_ub(name: str, use_fp8: bool):
 
 def destroy_ub():
     """Destroy all allocated userbuffer communicators."""
-    global _ub_communicators
+    global _ub_communicators, _ub_with_cublasmp
     _ub_communicators = None
+    _ub_with_cublasmp = False
     global layers_atomic_ring_exchange
     layers_atomic_ring_exchange = []
 

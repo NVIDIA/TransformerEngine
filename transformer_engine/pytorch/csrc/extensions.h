@@ -651,10 +651,14 @@ class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOve
               bool set_sm_margin = true, bool atomic_gemm = false,
               bool rs_overlap_first_gemm = false);
 
-  CommOverlap(CommOverlapHelper *helper, int tp_rank, int tp_size, int num_comm_sm = 16,
-              bool atomic_gemm = false)
-      : CommOverlapBase(helper->get_nccl_comm("intra"), tp_rank, tp_size, num_comm_sm,
-                        atomic_gemm) {}
+  // cuBLASMp variant. `comm_type`, `buffer_shape`, and `buffer_dtype` size
+  // the construction-time warmup matmul that primes cuBLASMp's lazy NCCL
+  // window registrations and workspace allocation so subsequent matmuls
+  // (including those captured in CUDA graphs) avoid the unsafe lazy paths.
+  CommOverlap(CommOverlapHelper *helper, int tp_rank, int tp_size,
+              transformer_engine::CommOverlapType comm_type,
+              const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
+              int num_comm_sm = 16, bool atomic_gemm = false);
 
   ~CommOverlap() {}
 
@@ -678,10 +682,11 @@ class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::Comm
                  bool set_sm_margin = false, bool atomic_gemm = false, bool use_ce = true,
                  bool aggregate = false);
 
-  CommOverlapP2P(CommOverlapHelper *helper, int tp_rank, int tp_size, int num_comm_sm = 1,
-                 bool atomic_gemm = false)
-      : CommOverlapP2PBase(helper->get_nccl_comm("intra"), tp_rank, tp_size, num_comm_sm,
-                           atomic_gemm) {}
+  // cuBLASMp variant. See CommOverlap for the `comm_type`/buffer args.
+  CommOverlapP2P(CommOverlapHelper *helper, int tp_rank, int tp_size,
+                 transformer_engine::CommOverlapType comm_type,
+                 const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
+                 int num_comm_sm = 1, bool atomic_gemm = false);
 
   ~CommOverlapP2P() {}
 
@@ -692,6 +697,7 @@ class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::Comm
                         std::optional<std::vector<int64_t>> shape = std::nullopt);
 
   std::pair<at::Stream, at::Stream> get_communication_stream();
+
 
 };  // CommOverlapP2P
 
