@@ -2334,7 +2334,7 @@ def check_set_window_size(
     return window_size
 
 
-def get_attention_quantizers(fp8, fp8_recipe, quantizers):
+def get_attention_quantizers(fp8, quantizers):
     """Get the list of quantizers used in attention from the quantizers list."""
     if not fp8:
         return [None] * 6
@@ -2363,7 +2363,11 @@ def get_attention_quantizers(fp8, fp8_recipe, quantizers):
     dQKV_quantizer.internal = False
     dQKV_quantizer.set_usage(rowwise=True, columnwise=False)
 
-    if fp8_recipe.mxfp8():
+    # MXFP8 attention: detect from the QKV quantizer instance rather than the
+    # recipe predicate so that CustomRecipe (whose `mxfp8()` predicate returns
+    # False) gets the same treatment as the built-in MXFP8 recipe. The kernel
+    # handles S/dP internally for MXFP8, hence S/dP are nulled out.
+    if isinstance(QKV_quantizer, MXFP8Quantizer):
         QKV_quantizer.columnwise_usage = True
         QKV_quantizer.optimize_for_gemm = True
         S_quantizer = None
@@ -2373,6 +2377,29 @@ def get_attention_quantizers(fp8, fp8_recipe, quantizers):
         dO_quantizer.optimize_for_gemm = True
         dP_quantizer = None
         dQKV_quantizer.columnwise_usage = True
+
+    _fp8_types = (Float8Quantizer, Float8CurrentScalingQuantizer, MXFP8Quantizer)
+    # S/dP are intentionally None under MXFP8 attention; skip the type check
+    # for those slots in that case.
+    _allow_none = {"S", "dP"} if isinstance(QKV_quantizer, MXFP8Quantizer) else set()
+    for _name, _q in [
+        ("QKV", QKV_quantizer),
+        ("O", O_quantizer),
+        ("S", S_quantizer),
+        ("dQKV", dQKV_quantizer),
+        ("dO", dO_quantizer),
+        ("dP", dP_quantizer),
+    ]:
+        if _q is None and _name in _allow_none:
+            continue
+        assert isinstance(_q, _fp8_types), (
+            "FP8 attention requires FP8-compatible quantizers for all DPA tensor slots, "
+            f"but {_name} quantizer is {type(_q).__name__}. "
+            "When using CustomRecipe with fp8_dpa=True, ensure the factory returns an "
+            "FP8 quantizer (Float8Quantizer, Float8CurrentScalingQuantizer, or "
+            "MXFP8Quantizer) for all DPA roles (module_type='dpa') and for None roles "
+            "(boundary slots like O output and dQKV grad-input)."
+        )
 
     return QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer
 

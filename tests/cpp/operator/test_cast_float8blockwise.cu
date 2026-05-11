@@ -524,14 +524,12 @@ TEST_P(FusedCastFloat8BlockwiseTestSuite, TestFusedCastFloat8Blockwise) {
   //     GTEST_SKIP();
   // }
 
-  DACT_FUNC_SWITCH(
-      Act_type, OP,
-      TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(
-          input_type, InputType,
-          TRANSFORMER_ENGINE_TYPE_SWITCH_FP8_ONLY(
-              output_type, OutputType,
-              runTestCase<InputType, OutputType>(processing_method, matrix_size, rowwise, colwise,
-                                                 fill_case, q_opts););););
+  TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(
+      input_type, InputType,
+      TRANSFORMER_ENGINE_TYPE_SWITCH_FP8_ONLY(
+          output_type, OutputType,
+          runTestCase<InputType, OutputType>(processing_method, matrix_size, rowwise, colwise,
+                                             fill_case, q_opts);););
 }
 
 TEST_P(FusedCastFloat8VectorwiseTestSuite, TestFusedCastFloat8Vectorwise) {
@@ -581,14 +579,12 @@ TEST_P(FusedCastFloat8VectorwiseTestSuite, TestFusedCastFloat8Vectorwise) {
   //     GTEST_SKIP();
   // }
 
-  DACT_FUNC_SWITCH(
-      Act_type, OP,
-      TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(
-          input_type, InputType,
-          TRANSFORMER_ENGINE_TYPE_SWITCH_FP8_ONLY(
-              output_type, OutputType,
-              runTestCaseOneDimensionalBlocks<InputType, OutputType>(
-                  processing_method, matrix_size, rowwise, colwise, fill_case, q_opts););););
+  TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(
+      input_type, InputType,
+      TRANSFORMER_ENGINE_TYPE_SWITCH_FP8_ONLY(
+          output_type, OutputType,
+          runTestCaseOneDimensionalBlocks<InputType, OutputType>(
+              processing_method, matrix_size, rowwise, colwise, fill_case, q_opts);););
 }
 
 std::string to_string(const ProcessingMethod method) {

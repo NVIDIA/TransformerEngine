@@ -6,10 +6,12 @@
 
 #pragma once
 
-#include <memory>
-#include <vector>
 #include <array>
+#include <memory>
+#include <optional>
 #include <random>
+#include <vector>
+
 #include <cudaTypedefs.h>
 #define FP4_TYPE_SUPPORTED (CUDA_VERSION >= 12080)
 
@@ -26,6 +28,11 @@
 
 namespace test {
 using namespace transformer_engine;
+
+size_t typeToNumBits(DType type);
+size_t product(const NVTEShape &shape);
+size_t product(const std::vector<size_t> &shape);
+size_t bytes(const NVTEShape& shape, const DType type);
 
 template <size_t i>
 struct BytesToType {};
@@ -114,9 +121,30 @@ struct TypeInfo {
     }
 
     constexpr static DType dtype = getType<T>();
-    constexpr static size_t size = BitsNumber<T>::num_bits;;
+    constexpr static size_t size = BitsNumber<T>::num_bits;
 };
 
+// Deleter for CUDA buffer RAII class
+struct CudaDeleter {
+  void operator()(void* ptr) const { if (ptr != nullptr) cudaFree(ptr); }
+};
+
+// CUDA buffer RAII class
+template <typename T = void>
+using CudaPtr = std::unique_ptr<T, CudaDeleter>;
+
+// Construct CUDA memory
+template <typename T = void>
+CudaPtr<T> cuda_alloc(size_t bytes) {
+  void* ptr = nullptr;
+  NVTE_CHECK_CUDA(cudaMalloc(&ptr, bytes));
+  return CudaPtr<T>(static_cast<T*>(ptr));
+}
+
+/* Wrapper for Transformer Engine tensor
+ *
+ * Maintains matching GPU and CPU buffers.
+ */
 class Tensor {
  public:
   Tensor(const std::string& name,
@@ -133,7 +161,7 @@ class Tensor {
          const NVTEScalingMode &mode = NVTE_DELAYED_TENSOR_SCALING) :
     Tensor(name, nvte_make_shape(shape.data(), shape.size()), type, rowwise, columnwise, mode) {}
 
-  Tensor() {}
+  Tensor() = default;
 
   Tensor& operator=(const Tensor &other) = delete;
   Tensor(const Tensor &other) = delete;
@@ -141,42 +169,7 @@ class Tensor {
   Tensor(Tensor &&other) = default;
   Tensor& operator=(Tensor &&other) = default;
 
-  ~Tensor() {
-    void *data_ptr = tensor_.dptr();
-    void *scale_inv = tensor_.scale_inv();
-    void *columnwise_data_ptr = tensor_.get_columnwise_data().data_ptr;
-    void *columnwise_scale_inv = tensor_.get_columnwise_scale_inv().data_ptr;
-    void *amax = tensor_.amax();
-    void *columnwise_amax_ptr = tensor_.get_columnwise_amax().data_ptr;
-    void *scale = tensor_.scale();
-    if (columnwise_data_ptr == data_ptr) {
-      columnwise_data_ptr = nullptr;
-    }
-    if (columnwise_scale_inv == scale_inv) {
-      columnwise_scale_inv = nullptr;
-    }
-    if (data_ptr != nullptr) {
-      cudaFree(data_ptr);
-    }
-    if (scale_inv != nullptr) {
-      cudaFree(scale_inv);
-    }
-    if (columnwise_data_ptr != nullptr) {
-      cudaFree(columnwise_data_ptr);
-    }
-    if (columnwise_scale_inv != nullptr) {
-      cudaFree(columnwise_scale_inv);
-    }
-    if (amax != nullptr) {
-      cudaFree(amax);
-    }
-    if (columnwise_amax_ptr != nullptr) {
-      cudaFree(columnwise_amax_ptr);
-    }
-    if (scale != nullptr) {
-      cudaFree(scale);
-    }
-  }
+  ~Tensor() = default;
 
   NVTETensor data() const noexcept { return tensor_.data(); }
 
@@ -213,84 +206,83 @@ class Tensor {
   }
 
   template <typename T>
-  T *rowwise_cpu_dptr() const {
-    NVTE_CHECK(TypeInfo<T>::dtype == tensor_.dtype(), "Invalid type!");
+  T *rowwise_cpu_dptr() {
+    NVTE_CHECK(data_rowwise_, "Tensor does not have rowwise data!");
+    NVTE_CHECK(TypeInfo<T>::dtype == data_rowwise_->dtype(), "Invalid type!");
     NVTE_CHECK(rowwise_, "Tensor does not have rowwise data!");
-    return reinterpret_cast<T *>(cpu_data_rowwise_.get());
+    return data_rowwise_->cpu_buffer<T>();
   }
 
   template <typename T>
-  T *columnwise_cpu_dptr() const {
-    NVTE_CHECK(TypeInfo<T>::dtype == tensor_.dtype(), "Invalid type!");
+  T *columnwise_cpu_dptr() {
+    NVTE_CHECK(data_columnwise_, "Tensor does not have columnwise data!");
+    NVTE_CHECK(TypeInfo<T>::dtype == data_columnwise_->dtype(), "Invalid type!");
     NVTE_CHECK(columnwise_, "Tensor does not have columnwise data!");
-    return reinterpret_cast<T *>(cpu_data_columnwise_.get());
+    return data_columnwise_->cpu_buffer<T>();
   }
 
-  float amax() const {
-    if(amax_cpu_data_) {
-      to_cpu();
-      return *amax_cpu_data_;
-    } else {
-      return 0;
-    }
+  float amax() {
+    NVTE_CHECK(amax_rowwise_);
+    NVTE_CHECK(amax_rowwise_->size() == 1);
+    NVTE_CHECK(amax_rowwise_->dtype() == DType::kFloat32);
+    amax_rowwise_->to_cpu();
+    return *amax_rowwise_->cpu_buffer<float>();
   }
 
-  float amax_columnwise() const {
-    if(amax_cpu_data_columnwise_) {
-      to_cpu();
-      return *amax_cpu_data_columnwise_;
-    } else {
-      return 0;
-    }
+  float amax_columnwise() {
+    NVTE_CHECK(amax_columnwise_);
+    NVTE_CHECK(amax_columnwise_->size() == 1);
+    NVTE_CHECK(amax_columnwise_->dtype() == DType::kFloat32);
+    amax_columnwise_->to_cpu();
+    return *amax_columnwise_->cpu_buffer<float>();
   }
 
-  float scale() const {
-    if(scale_cpu_data_) {
-      NVTE_CHECK(tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING, "Invalid scaling_mode!");
-      to_cpu();
-      return *scale_cpu_data_;
-    } else {
-      return 1;
-    }
+  float scale() {
+    NVTE_CHECK(scale_);
+    NVTE_CHECK(scale_->size() == 1);
+    NVTE_CHECK(scale_->dtype() == DType::kFloat32);
+    scale_->to_cpu();
+    return *scale_->cpu_buffer<float>();
+  }
+
+  float rowwise_scale_inv(){
+    NVTE_CHECK(scale_inv_rowwise_);
+    NVTE_CHECK(scale_inv_rowwise_->size() == 1);
+    NVTE_CHECK(scale_inv_rowwise_->dtype() == DType::kFloat32);
+    scale_inv_rowwise_->to_cpu();
+    return *scale_inv_rowwise_->cpu_buffer<float>();
   }
 
   template <typename T>
   T *rowwise_cpu_scale_inv_ptr(){
-    if (tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING){
-      NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat32, "Invalid type!");
-    } else if (tensor_.scaling_mode() == NVTE_BLOCK_SCALING_1D || tensor_.scaling_mode() == NVTE_BLOCK_SCALING_2D) {
-      NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat32, "Invalid type!");
-    } else if (tensor_.scaling_mode() == NVTE_NVFP4_1D_SCALING) {
-      NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat8E4M3, "Invalid type!");
-    } else {
-      NVTE_CHECK(TypeInfo<T>::dtype == DType::kByte, "Invalid type!");
-    }
-    to_cpu();
-    return reinterpret_cast<T*>(rowwise_scale_inv_cpu_data_.get());
+    NVTE_CHECK(scale_inv_rowwise_);
+    scale_inv_rowwise_->to_cpu();
+    return scale_inv_rowwise_->cpu_buffer<T>();
   }
 
   template <typename T>
   T *columnwise_cpu_scale_inv_ptr(){
-    if (tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING){
-      NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat32, "Invalid type!");
-    } else if (tensor_.scaling_mode() == NVTE_BLOCK_SCALING_1D || tensor_.scaling_mode() == NVTE_BLOCK_SCALING_2D) {
-      NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat32, "Invalid type!");
-    } else if (tensor_.scaling_mode() == NVTE_NVFP4_1D_SCALING) {
-      NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat8E4M3, "Invalid type!");
-    } else {
-      NVTE_CHECK(TypeInfo<T>::dtype == DType::kByte, "Invalid type!");
-    }
-    to_cpu();
-    return reinterpret_cast<T*>(columnwise_scale_inv_cpu_data_.get());
+    NVTE_CHECK(scale_inv_columnwise_);
+    scale_inv_columnwise_->to_cpu();
+    return scale_inv_columnwise_->cpu_buffer<T>();
   }
 
-  float rowwise_scale_inv(){
-    if(rowwise_scale_inv_cpu_data_) {
-      float scale_inv = rowwise_cpu_scale_inv_ptr<float>()[0];
-      return scale_inv;
-    } else {
-      return 1;
-    }
+  template <typename T>
+  T *cpu_rowwise_amax_ptr() {
+    NVTE_CHECK(amax_rowwise_);
+    amax_rowwise_->to_cpu();
+    return amax_rowwise_->cpu_buffer<T>();
+  }
+
+  template <typename T>
+  T *cpu_columnwise_amax_ptr() {
+    NVTE_CHECK(amax_columnwise_);
+    amax_columnwise_->to_cpu();
+    return amax_columnwise_->cpu_buffer<T>();
+  }
+
+  size_t rowwise_amax_size() const noexcept {
+    return amax_rowwise_ ? amax_rowwise_->size() : 0;
   }
 
   bool rowwise() const {
@@ -301,53 +293,89 @@ class Tensor {
     return columnwise_;
   }
 
-  void set_tensor_amax(const float amax) {
-    if (amax_cpu_data_) {
-      *amax_cpu_data_ = amax;
-      from_cpu();
-    }
-  }
+  void set_tensor_amax_nullptr();
 
-  void set_tensor_amax_columnwise(const float amax) {
-    if (amax_cpu_data_columnwise_) {
-      *amax_cpu_data_columnwise_ = amax;
-      from_cpu();
-    }
-  }
+  void set_with_gemm_swizzled_scales(bool with_gemm_swizzled_scales);
+  void set_row_scaled_nvfp4(bool row_scaled_nvfp4);
 
-  void set_tensor_amax_nullptr(){
-    tensor_.set_amax(nullptr, DType::kFloat32, tensor_.defaultShape);
-  }
+  void to_cpu();
+  void from_cpu();
 
-  void set_tensor_amax_shape(const std::vector<size_t> &shape);
-  std::vector<float> tensor_amax_values() const;
-  void copy_tensor_amax_from(const Tensor &other);
-
-  void set_with_gemm_swizzled_scales(bool with_gemm_swizzled_scales){
-    tensor_.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
-  }
-
-  void set_row_scaled_nvfp4(bool row_scaled_nvfp4) {
-    tensor_.set_row_scaled_nvfp4(row_scaled_nvfp4);
-  }
-
-  void to_cpu() const;
-  void from_cpu() const;
+  void set_amax(float amax);
   void set_scale(float scale);
   void set_scale_inv(float scale_inv);
-  void shareFP8Meta(const Tensor &other);
+  void set_tensor_amax_columnwise(float amax);
+
+  void fill_uniform_rowwise_scale_inv();
+  void fill_uniform_columnwise_scale_inv();
+  void fill_uniform_scale();
 
   std::mt19937& gen() { return gen_; }
 
  private:
+
+  /* Manages matching GPU and CPU buffers. */
+  class Buffer {
+  public:
+
+    Buffer(size_t size = 0, DType dtype = DType::kByte);
+    ~Buffer() = default;
+    Buffer(const Buffer&) = delete;
+    Buffer& operator=(const Buffer&) = delete;
+    Buffer(Buffer&&) = default;
+    Buffer& operator=(Buffer&&) = default;
+
+    size_t size() const noexcept { return size_; }
+    DType dtype() const noexcept { return dtype_; }
+
+    // Void pointer accessors
+    void *cpu_buffer() { return cpu_buffer_.get(); }
+    const void *cpu_buffer() const { return cpu_buffer_.get(); }
+    void *gpu_buffer() { return gpu_buffer_.get(); }
+    const void *gpu_buffer() const { return gpu_buffer_.get(); }
+
+    // Templated pointer accessors
+    template <typename T>
+    T *cpu_buffer() {
+      return reinterpret_cast<T *>(cpu_buffer());
+    }
+    template <typename T>
+    const T *cpu_buffer() const {
+      return const_cast<Buffer *>(this)->cpu_buffer<T>();
+    }
+    template <typename T>
+    T *gpu_buffer() {
+      return reinterpret_cast<T *>(gpu_buffer());
+    }
+    template <typename T>
+    const T *gpu_buffer() const {
+      return const_cast<Buffer *>(this)->gpu_buffer<T>();
+    }
+
+    // Memory transfers between CPU and GPU
+    void to_cpu();
+    void from_cpu();
+
+  private:
+    std::unique_ptr<unsigned char[]> cpu_buffer_;
+    CudaPtr<unsigned char[]> gpu_buffer_;
+    size_t size_;
+    DType dtype_;
+    size_t bytes_;
+  };
+
+  // Transformer Engine tensor
   TensorWrapper tensor_;
-  std::unique_ptr<unsigned char[]> cpu_data_rowwise_;
-  std::unique_ptr<unsigned char[]> cpu_data_columnwise_;
-  std::shared_ptr<float> amax_cpu_data_;
-  std::shared_ptr<float> amax_cpu_data_columnwise_;
-  std::shared_ptr<float> scale_cpu_data_;
-  std::unique_ptr<unsigned char[]> rowwise_scale_inv_cpu_data_;
-  std::unique_ptr<unsigned char[]> columnwise_scale_inv_cpu_data_;
+
+  // Data buffers
+  std::optional<Buffer> data_rowwise_;
+  std::optional<Buffer> data_columnwise_;
+  std::shared_ptr<Buffer> scale_inv_rowwise_;
+  std::shared_ptr<Buffer> scale_inv_columnwise_;
+  std::optional<Buffer> amax_rowwise_;
+  std::optional<Buffer> amax_columnwise_;
+  std::optional<Buffer> scale_;
+
   bool rowwise_;
   bool columnwise_;
   std::string name_;
@@ -497,17 +525,12 @@ inline float dsilu(const float x)    { return x * dsigmoid(x) + sigmoid(x); }
 inline float srelu(const float x)    { return x > 0 ? x * x : 0; }
 inline float dsrelu(const float x)   { return fmaxf(0, 2 * x); }
 
-size_t typeToNumBits(DType type);
-size_t product(const NVTEShape &shape);
-size_t product(const std::vector<size_t> &shape);
-size_t bytes(const NVTEShape& shape, const DType type);
-
 size_t first_dimension(const std::vector<size_t> &shape);
 size_t last_dimension(const std::vector<size_t> &shape);
 
 bool areShapesEqual(const NVTEShape &s1, const NVTEShape &s2);
 
-void compareResults(const std::string &name, const Tensor &test, const void *ref,
+void compareResults(const std::string &name, Tensor &test, const void *ref,
                     bool rowwise, double atol = 1e-5, double rtol = 1e-8, bool if_on_gpus = true,
                     const size_t tolerable_mismatches_limit = 0);
 void compareResults(const std::string &name, const float test, const float ref,
@@ -550,25 +573,13 @@ int32_t getDeviceComputeCapability();
 constexpr int32_t hopperComputeCapability = 90;
 constexpr int32_t blackwellComputeCapability = 100;
 
-// Custom deleters for RAII
-struct CudaDeleter {
-  void operator()(void* p) const { if (p) cudaFree(p); }
-};
+// Custom deleter for RAII
 struct GroupedTensorDeleter {
   void operator()(NVTEGroupedTensor h) const { if (h) nvte_destroy_grouped_tensor(h); }
 };
 
-template <typename T = void>
-using CudaPtr = std::unique_ptr<T, CudaDeleter>;
+// Grouped tensor RAII class
 using GroupedTensorHandle = std::unique_ptr<std::remove_pointer_t<NVTEGroupedTensor>, GroupedTensorDeleter>;
-
-// Helper to allocate CUDA memory into a CudaPtr
-template <typename T = void>
-CudaPtr<T> cuda_alloc(size_t bytes) {
-  void* ptr = nullptr;
-  NVTE_CHECK_CUDA(cudaMalloc(&ptr, bytes));
-  return CudaPtr<T>(static_cast<T*>(ptr));
-}
 
 // Helper owning GPU buffers that back NVTEGroupedTensor.
 // NVTEGroupedTensor does not own memory; data/offsets/scales

@@ -27,8 +27,11 @@ from ..quantization import (
     Float8CurrentScalingRecipeState,
     Float8BlockScalingRecipeState,
     NVFP4BlockScalingRecipeState,
+    CustomRecipeState,
     FP8GlobalStateManager,
+    QuantizerRole,
     RecipeState,
+    _has_delayed_scaling_state,
 )
 from ..distributed import (
     gather_along_first_dim,
@@ -789,6 +792,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.activation_dtype: Optional[torch.dtype] = None
         self.wgrad_accumulation_and_reduce_hooks = []
         self.wgrad_store = None
+        self._output_quantizer_role: Optional[QuantizerRole] = None
+        self._grad_input_quantizer_role: Optional[QuantizerRole] = None
 
         if not TEDebugState.debug_enabled:
             TEDebugState.initialize()
@@ -808,6 +813,72 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         parameters and buffers.
         """
         super().__setattr__(name, value)
+
+    @property
+    def output_quantizer_role(self) -> Optional[QuantizerRole]:
+        """Caller-configurable :class:`QuantizerRole` for the forward output quantizer.
+
+        When set, overrides the default role used by :meth:`get_quantizer_roles`
+        for the forward-pass output quantizer slot.  Setting this after
+        quantizers have been created forces their recreation on the next
+        forward pass.
+
+        See also :attr:`grad_input_quantizer_role` for the backward-pass
+        counterpart.
+        """
+        return self._output_quantizer_role
+
+    @output_quantizer_role.setter
+    def output_quantizer_role(self, role: Optional[QuantizerRole]) -> None:
+        if role == self._output_quantizer_role:
+            return
+        self._output_quantizer_role = role
+        if self.fp8_meta_tensors_initialized:
+            self.fp8_meta_tensors_initialized = False
+
+    @property
+    def grad_input_quantizer_role(self) -> Optional[QuantizerRole]:
+        """Caller-configurable :class:`QuantizerRole` for the grad-input quantizer.
+
+        Backward-pass counterpart of :attr:`output_quantizer_role`.
+        """
+        return self._grad_input_quantizer_role
+
+    @grad_input_quantizer_role.setter
+    def grad_input_quantizer_role(self, role: Optional[QuantizerRole]) -> None:
+        if role == self._grad_input_quantizer_role:
+            return
+        self._grad_input_quantizer_role = role
+        if self.fp8_meta_tensors_initialized:
+            self.fp8_meta_tensors_initialized = False
+
+    def _warn_missing_output_quantizer_role(
+        self,
+        fp8_output: bool,
+        fp8_grad: bool,
+    ) -> None:
+        """Warn when quantized output is requested but no consumer role is set.
+
+        Only relevant for ``CustomRecipe`` where the ``qfactory`` dispatches
+        on roles.  Built-in recipes ignore role metadata.
+        """
+        recipe = FP8GlobalStateManager.get_fp8_recipe()
+        if not recipe.custom():
+            return
+        if fp8_output and self._output_quantizer_role is None:
+            warnings.warn(
+                f"{type(self).__name__}: fp8_output=True but "
+                "output_quantizer_role is not set.  The CustomRecipe qfactory "
+                "will receive None for the output quantizer role.",
+                stacklevel=3,
+            )
+        if fp8_grad and self._grad_input_quantizer_role is None:
+            warnings.warn(
+                f"{type(self).__name__}: fp8_grad=True but "
+                "grad_input_quantizer_role is not set.  The CustomRecipe "
+                "qfactory will receive None for the grad-input quantizer role.",
+                stacklevel=3,
+            )
 
     @property
     def is_fsdp2(self) -> bool:
@@ -901,20 +972,123 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 return
             if recipe.nvfp4() and isinstance(recipe_state, NVFP4BlockScalingRecipeState):
                 return
+            if recipe.custom() and isinstance(recipe_state, CustomRecipeState):
+                return
 
         # Max. number of fp8 tensors per GEMM = 3 (input, weight, output) for fwd and
         # 2 (grad_output and grad_input) for bwd
         num_fp8_tensors = self.fp8_meta["num_gemms"] * 3 if fwd else self.fp8_meta["num_gemms"] * 2
 
         # Initialize recipe state and quantizers
-        recipe_state = RecipeState.create(
+        roles = self.get_quantizer_roles(  # pylint: disable=assignment-from-none
+            fwd=fwd, num_quantizers=num_fp8_tensors
+        )
+        if roles is not None:
+            assert (
+                len(roles) == num_fp8_tensors
+            ), f"Recipe roles must match number of quantizers ({len(roles)=} vs {num_fp8_tensors=})"
+        recipe_state = RecipeState.create(  # pylint: disable=assignment-from-none
             recipe,
             mode=("forward" if fwd else "backward"),
             num_quantizers=num_fp8_tensors,
+            roles=roles,
         )
+
+        # Reached the rebuild path because ``fp8_meta_tensors_initialized``
+        # was flipped to False after first init — most commonly because the
+        # ``output_quantizer_role`` / ``grad_input_quantizer_role`` setter
+        # invalidated state when a parent module (e.g. ``MultiheadAttention``)
+        # wired boundary roles. That setter is recipe-agnostic, so this code
+        # fires even for built-in recipes that don't consume role information
+        # in ``make_quantizers``.
+        #
+        # Rebuilding the recipe state must preserve persistent training
+        # buffers (delayed-scaling ``scale`` / ``amax_history``) so the new
+        # quantizer instances and the ``FP8GlobalStateManager`` reduction
+        # buffers end up viewing the SAME tensor objects, and so any
+        # checkpoint-loaded state isn't silently destroyed on the first
+        # forward after ``load_state_dict``.
+        old_state = self.fp8_meta.get(fp8_meta_tensor_key)
+        if old_state is not None:
+            recipe_state.inherit_state_from(old_state)
 
         self.fp8_meta[fp8_meta_tensor_key] = recipe_state
         self.quantizers[fp8_meta_tensor_key] = recipe_state.make_quantizers()
+
+    def get_quantizer_roles(
+        self,
+        *,
+        fwd: bool,  # pylint: disable=unused-argument
+        num_quantizers: int,  # pylint: disable=unused-argument
+    ) -> Optional[List[QuantizerRole]]:
+        """Return an ordered list of :class:`QuantizerRole` for quantizers.
+
+        Overview
+        --------
+        When using ``CustomRecipe``, the quantizer factory is called once
+        per quantizer slot.  Each call receives a ``QuantizerRole`` that
+        tells the factory *what* is being quantized so it can return the
+        right quantizer.
+
+        This method builds the role list.  Subclasses override it to
+        describe their internal GEMM layout.
+
+        Slot layout
+        -----------
+        Return one ``QuantizerRole`` per slot, in the same order as the
+        module's quantizer array.  For example, ``Linear`` uses 3
+        forward slots ``[input, weight, output]`` and 2 backward slots
+        ``[grad_output, grad_input]``.  Multi-GEMM modules like
+        ``LayerNormMLP`` repeat that pattern for each GEMM:
+        ``[fc1_input, fc1_weight, fc1_output, fc2_input, fc2_weight, fc2_output]``.
+
+        What to put in each slot
+        ------------------------
+        Create a ``QuantizerRole(module_type=..., tensor_type=...,
+        name=...)`` for each slot:
+
+        * **module_type** — the kind of module: ``"linear"``,
+          ``"grouped_linear"``, ``"dpa"``, etc.  The factory can dispatch
+          on this to use different quantization formats per module type.
+        * **tensor_type** — what tensor this slot holds, in the module's
+          own vocabulary.  For linears: ``"input"``, ``"weight"``,
+          ``"grad_output"``, etc.  For DPA: ``"qkv"``, ``"s"``,
+          ``"do"``, ``"dp"``, etc.
+        * **name** — the instance name (e.g. ``"encoder.layer0.fc1"``),
+          propagated from the ``name=`` constructor argument.  The factory
+          can dispatch on this to target specific layers.
+
+        Boundary slots
+        --------------
+        The last slot of a forward GEMM group (output) and the last slot
+        of a backward group (grad_input) are **boundary** slots — the
+        tensor leaves this module and enters an unknown consumer.  For
+        these slots, use ``self._output_quantizer_role`` (fwd) and
+        ``self._grad_input_quantizer_role`` (bwd), which default to
+        ``None``.  A parent module (e.g. ``MultiheadAttention``) can set
+        these attributes to fill in the consumer identity; see
+        ``MultiheadAttention._update_output_quantizer_roles`` for an
+        example.
+
+        Return value
+        ------------
+        * A list of ``QuantizerRole`` with length ``num_quantizers``.
+        * ``None`` to opt out of role-based dispatch.
+
+        Not implemented (default)
+        ~~~~~~~~~~~~~~~~~~~~~~~~~
+        The base implementation returns ``None``.  When ``None`` is
+        returned, ``CustomRecipeState`` emits a warning and falls back
+        to bare ``QuantizerRole()`` instances (all fields empty) for
+        every slot.  The factory still gets called once per slot, but
+        every call receives an identical empty role — it cannot
+        distinguish input from weight, forward from backward, or one
+        module from another.  What happens then depends entirely on the
+        factory: it may return the same quantizer for all slots (acting
+        as a uniform recipe), or it may raise an error if it requires
+        meaningful roles to dispatch on.
+        """
+        return None
 
     def _update_weight_quantizers(self) -> None:
         """Update the quantizers for the weight tensors."""
@@ -1024,7 +1198,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         # Copy tensors to CPU and store
         state = {}
         state["recipe"] = self.fp8_meta["recipe"]
-        if state["recipe"].delayed():
+        if _has_delayed_scaling_state(self.fp8_meta):
             state["scale_fwd"] = to_cpu(self.fp8_meta["scaling_fwd"].scale)
             state["amax_history_fwd"] = to_cpu(self.fp8_meta["scaling_fwd"].amax_history)
             state["scale_bwd"] = to_cpu(self.fp8_meta["scaling_bwd"].scale)
@@ -1096,7 +1270,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             dst.copy_(src, non_blocking=True)
 
         # Load tensors
-        if self.fp8_meta["recipe"].delayed():
+        if _has_delayed_scaling_state(self.fp8_meta):
             copy_tensor(state["scale_fwd"], self.fp8_meta["scaling_fwd"].scale)
             copy_tensor(state["amax_history_fwd"], self.fp8_meta["scaling_fwd"].amax_history)
             copy_tensor(state["scale_bwd"], self.fp8_meta["scaling_bwd"].scale)
@@ -1223,7 +1397,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         # Activation recomputation is used and this is the second forward phase.
         if self.fp8 and in_fp8_activation_recompute_phase():
-            delayed_scaling_recipe = self.fp8_meta["recipe"].delayed()
+            delayed_scaling_recipe = _has_delayed_scaling_state(self.fp8_meta)
             FP8GlobalStateManager.get_old_fp8_meta_tensors_for_recompute(self.fp8_meta)
         else:
             if not inp.is_cuda:
@@ -1242,14 +1416,15 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             self.init_fp8_metadata(num_gemms=num_gemms)
             self._check_weight_tensor_recipe_correspondence()
 
-            delayed_scaling_recipe = self.fp8 and self.fp8_meta["recipe"].delayed()
+            delayed_scaling_recipe = self.fp8 and _has_delayed_scaling_state(self.fp8_meta)
             if delayed_scaling_recipe:
                 if self.sequence_parallel:
-                    if not self.fp8_meta["recipe"].reduce_amax:
-                        raise ValueError(
-                            "Amax reduction across tensor parallel group is "
-                            "necessary when using sequence parallelism with FP8."
-                        )
+                    assert (
+                        self.fp8_meta["recipe"].custom() or self.fp8_meta["recipe"].reduce_amax
+                    ), (
+                        "Amax reduction across tensor parallel group is "
+                        "necessary when using sequence parallelism with FP8."
+                    )
 
                 if not FP8GlobalStateManager.fp8_graph_capturing():
                     FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(self.fp8_meta)
@@ -1268,7 +1443,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         Required to be called at the end of the forward function to properly handle
         DelayedScaling metadata handling and the NVTX ranges.
         """
-        delayed_scaling_recipe = self.fp8 and self.fp8_meta["recipe"].delayed()
+        delayed_scaling_recipe = self.fp8 and _has_delayed_scaling_state(self.fp8_meta)
         if delayed_scaling_recipe and self.fp8 and in_fp8_activation_recompute_phase():
             FP8GlobalStateManager.restore_fp8_meta_tensors(self.fp8_meta)
         nvtx_range_pop()

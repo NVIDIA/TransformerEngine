@@ -72,7 +72,17 @@ enum NVTETensorParam {
   kNVTEColumnwiseScaleInv = 5,     /*!< Scale inverse tensor for decoding Columnwise Data */
   kNVTEColumnwiseAmax = 6,         /*!< Columnwise Amax tensor */
   kNVTEWithGEMMSwizzledScales = 7, /*!< Whether scaling factors are in format expected by GEMM */
-  kNVTERowScaledNVFP4 = 8,         /*!< Whether an NVFP4 tensor uses row scaling */
+  /*! Whether an NVFP4 tensor uses row scaling instead of tensor scaling.
+   *
+   *  Column-wise data is not supported with row scaling.
+   *
+   *  Row scaling affects the interpretation of the amax tensor. With
+   *  tensor scaling, the amax tensor is a single FP32 that must be
+   *  computed prior to quantization. With row scaling, the amax
+   *  tensor size is the number of tensor rows (flattened to 2D), and
+   *  its values are populated during quantization.
+   */
+  kNVTERowScaledNVFP4 = 8,
   kNVTENumTensorParams
 };
 

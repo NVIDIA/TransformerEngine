@@ -124,6 +124,7 @@ void performTest(const size_t N, const size_t H) {
   fillUniform(&input);
   fillUniform(&ograd);
   setRandomScale(&output);
+  const float ref_scale = isFp8Type(otype) ? output.scale() : 1.0f;
 
   std::unique_ptr<OType[]> ref_output = std::make_unique<OType[]>(N*H);
   std::unique_ptr<IType[]> ref_igrad = std::make_unique<IType[]>(N*H);
@@ -132,7 +133,7 @@ void performTest(const size_t N, const size_t H) {
 
   float ref_amax;
   compute_ref_act_cast<ref_act>(input.rowwise_cpu_dptr<IType>(), ref_output.get(),
-                                output.scale(), &ref_amax, N, H);
+                                ref_scale, &ref_amax, N, H);
 
   cudaDeviceSynchronize();
   auto err = cudaGetLastError();
@@ -179,6 +180,7 @@ void performTestGLU(const size_t N, const size_t H) {
   fillUniform(&input);
   fillUniform(&ograd);
   setRandomScale(&output);
+  const float ref_scale = isFp8Type(otype) ? output.scale() : 1.0f;
 
   std::unique_ptr<OType[]> ref_output = std::make_unique<OType[]>(N * H);
   std::unique_ptr<IType[]> ref_igrad = std::make_unique<IType[]>(2 * N * H);
@@ -187,7 +189,7 @@ void performTestGLU(const size_t N, const size_t H) {
 
   float ref_amax;
   compute_ref_glu_act_cast<ref_act>(input.rowwise_cpu_dptr<IType>(), ref_output.get(),
-                                    output.scale(), &ref_amax, N, H);
+                                    ref_scale, &ref_amax, N, H);
 
   cudaDeviceSynchronize();
   auto err = cudaGetLastError();
@@ -197,8 +199,8 @@ void performTestGLU(const size_t N, const size_t H) {
     auto [atol, rtol] = getTolerances(DType::kFloat32);
     compareResults("amax", output.amax(), ref_amax, atol, rtol);
     if (output.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING) {
-      const float ref_scale = 1.f / output.scale();
-      compareResults("scale_inv", *output.rowwise_cpu_scale_inv_ptr<float>(), ref_scale, atol, rtol);
+      const float ref_scale_inv = 1.f / ref_scale;
+      compareResults("scale_inv", *output.rowwise_cpu_scale_inv_ptr<float>(), ref_scale_inv, atol, rtol);
     }
   }
   auto [atol, rtol] = getTolerances(otype);

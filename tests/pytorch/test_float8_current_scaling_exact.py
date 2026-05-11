@@ -14,7 +14,7 @@ from transformer_engine.common.recipe import Float8CurrentScaling
 from transformer_engine.pytorch.quantization import autocast, get_fp8_torch_dtype
 from transformer_engine.pytorch.constants import TE_DType
 from transformer_engine.pytorch.custom_recipes.quantization import MMParams
-from transformer_engine.pytorch.custom_recipes.quantization_current_scaling import (
+from transformer_engine.pytorch.custom_recipes.quantization_ref_current_scaling import (
     CurrentScalingQuantizerRef,
 )
 
