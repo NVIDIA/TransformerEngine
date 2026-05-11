@@ -725,7 +725,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
   const bool with_gemm_swizzled_scales = false;  /// TODO (tmoon) Enable based on optimize_for_gemm;
 
   // Helper function to get size of byte buffer holding FP4 data (last dim divided by 2)
-  auto fp4_byte_shape = [](const std::vector<size_t> &shape) {
+  auto fp4_byte_shape = [](const std::vector<size_t> &shape) -> std::vector<size_t> {
     NVTE_CHECK(!shape.empty());
     NVTE_CHECK(shape.back() % 2 == 0);
     std::vector<size_t> out(shape.begin(), shape.end());
@@ -734,7 +734,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
   };
 
   // Helper function to get size of amax buffer
-  auto amax_shape = [](const std::vector<size_t> &shape, bool row_scaled = false) {
+  auto amax_shape = [](const std::vector<size_t> &shape, bool row_scaled = false) -> std::vector<size_t> {
     if (row_scaled) {
       const auto [rows, _] = get_2d_dims(shape);
       return {rows};
