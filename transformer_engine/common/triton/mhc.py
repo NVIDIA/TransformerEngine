@@ -22,16 +22,6 @@ def align_to(x, alignment):
     return ((x + alignment - 1) // alignment) * alignment
 
 
-def get_device_sms():
-    """
-    Get the number of SMs of the current device. This is used to determine the grid size for launching Triton kernels.
-    """
-    device_id = torch.cuda.current_device()
-    device_props = torch.cuda.get_device_properties(device_id)
-    sm_count = device_props.multi_processor_count
-    return sm_count
-
-
 def projection_config_fwd():
     block_m = [64, 128]
     block_k = [1024]
