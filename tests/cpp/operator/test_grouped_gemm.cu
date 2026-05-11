@@ -46,9 +46,6 @@ enum class ShapeCase {
   kAllDifferent,
   // Uniform shapes with dims NOT multiples of 128 — exercises scale_inv padding offsets.
   kUnalignedAllSame,
-  // NVFP4-only: dims are multiples of 16 (NVFP4 block) but NOT of 32 (MXFP8 block),
-  // catching code paths that accidentally hardcode 32 instead of NVFP4_BLOCK_SIZE.
-  kUnalignedAllSameNVFP4,
 };
 
 Tensor make_fp8_operand(const std::string& name, const std::vector<size_t>& shape) {
@@ -333,115 +330,154 @@ inline std::string grouped_gemm_skip_reason(InputCase input_case) {
 #endif
 }
 
+// Reference setup shared by the three run_* variants: builds A/B/D tensors per recipe,
+// runs nvte_multi_tensor_gemm to fill D_multi with reference results, and keeps the
+// workspaces alive (returned in the struct so callers don't have to track them).
+struct GroupedGemmRefSetup {
+  std::vector<std::tuple<size_t, size_t, size_t>> shapes;
+  size_t num_gemms = 0;
+  std::vector<Tensor> A_tensors;
+  std::vector<Tensor> B_tensors;
+  std::vector<Tensor> D_multi;
+  std::vector<Tensor> workspaces;
+  bool use_split_accum = false;
+};
+
+inline GroupedGemmRefSetup make_grouped_gemm_ref(const TestParams& params) {
+  GroupedGemmRefSetup s;
+  s.shapes = make_shapes(params.shape_case);
+  s.num_gemms = s.shapes.size();
+  s.A_tensors.reserve(s.num_gemms);
+  s.B_tensors.reserve(s.num_gemms);
+  s.D_multi.reserve(s.num_gemms);
+
+  for (size_t i = 0; i < s.num_gemms; ++i) {
+    const auto [M, N, K] = s.shapes[i];
+    const std::vector<size_t> a_shape =
+        params.transa ? std::vector<size_t>{N, K} : std::vector<size_t>{K, N};
+    const std::vector<size_t> b_shape =
+        params.transb ? std::vector<size_t>{K, M} : std::vector<size_t>{M, K};
+    switch (params.input_case) {
+      case InputCase::kFP8Current:
+        s.A_tensors.emplace_back(make_fp8_operand("A" + std::to_string(i), a_shape));
+        s.B_tensors.emplace_back(make_fp8_operand("B" + std::to_string(i), b_shape));
+        break;
+      case InputCase::kBF16:
+        s.A_tensors.emplace_back(make_bf16_operand("A" + std::to_string(i), a_shape));
+        s.B_tensors.emplace_back(make_bf16_operand("B" + std::to_string(i), b_shape));
+        break;
+      case InputCase::kMXFP8:
+        s.A_tensors.emplace_back(make_mxfp8_operand("A" + std::to_string(i), a_shape,
+                                                    /*is_A=*/true, params.transa));
+        s.B_tensors.emplace_back(make_mxfp8_operand("B" + std::to_string(i), b_shape,
+                                                    /*is_A=*/false, params.transb));
+        break;
+      case InputCase::kNVFP4:
+        s.A_tensors.emplace_back(make_nvfp4_operand("A" + std::to_string(i), a_shape,
+                                                    /*is_A=*/true, params.transa));
+        s.B_tensors.emplace_back(make_nvfp4_operand("B" + std::to_string(i), b_shape,
+                                                    /*is_A=*/false, params.transb));
+        break;
+      case InputCase::kFP8BlockScaling:
+        s.A_tensors.emplace_back(make_fp8_block_scaling_operand("A" + std::to_string(i),
+                                                                a_shape, /*is_A=*/true,
+                                                                params.transa));
+        s.B_tensors.emplace_back(make_fp8_block_scaling_operand("B" + std::to_string(i),
+                                                                b_shape, /*is_A=*/false,
+                                                                params.transb));
+        break;
+    }
+    s.D_multi.emplace_back(Tensor("D_multi" + std::to_string(i),
+                                  std::vector<size_t>{M, N}, DType::kBFloat16));
+  }
+
+  // FP8 block scaling requires split accumulator (no fast accumulation).
+  s.use_split_accum = (params.input_case == InputCase::kFP8BlockScaling);
+
+  std::vector<NVTETensor> A_ptrs(s.num_gemms), B_ptrs(s.num_gemms), D_ptrs(s.num_gemms);
+  std::vector<NVTETensor> workspace_ptrs(s.num_gemms, nullptr);
+  std::vector<NVTETensor> bias_ptrs(s.num_gemms, nullptr), gelu_ptrs(s.num_gemms, nullptr);
+  constexpr size_t cublas_ws_bytes = 32ull * 1024 * 1024;
+  s.workspaces.reserve(s.num_gemms);
+  for (size_t i = 0; i < s.num_gemms; ++i) {
+    A_ptrs[i] = s.A_tensors[i].data();
+    B_ptrs[i] = s.B_tensors[i].data();
+    D_ptrs[i] = s.D_multi[i].data();
+    s.workspaces.emplace_back(Tensor("workspace" + std::to_string(i),
+                                     std::vector<size_t>{cublas_ws_bytes}, DType::kByte));
+    workspace_ptrs[i] = s.workspaces.back().data();
+  }
+  nvte_multi_tensor_gemm(A_ptrs.data(), B_ptrs.data(), D_ptrs.data(), bias_ptrs.data(),
+                         gelu_ptrs.data(), static_cast<int>(s.num_gemms),
+                         params.transa, params.transb, false, workspace_ptrs.data(),
+                         false, s.use_split_accum, 0, 0);
+  NVTE_CHECK_CUDA(cudaDeviceSynchronize());
+  return s;
+}
+
+// Allocate and initialize alpha/beta tensors for grouped GEMM.
+// Hopper requires a single shared scalar; Blackwell+ uses per-matrix scalars.
+struct AlphaBetaTensors {
+  Tensor alpha;
+  Tensor beta;
+};
+
+inline AlphaBetaTensors make_alpha_beta(size_t num_gemms) {
+  const int32_t cc = getDeviceComputeCapability();
+  const size_t n = cc < blackwellComputeCapability ? 1 : num_gemms;
+  AlphaBetaTensors ab{Tensor("alpha", std::vector<size_t>{n}, DType::kFloat32),
+                      Tensor("beta", std::vector<size_t>{n}, DType::kFloat32)};
+  std::vector<float> a(n, 1.f);
+  std::vector<float> b(n, 0.f);
+  NVTE_CHECK_CUDA(cudaMemcpy(ab.alpha.rowwise_dptr(), a.data(), n * sizeof(float),
+                             cudaMemcpyHostToDevice));
+  NVTE_CHECK_CUDA(cudaMemcpy(ab.beta.rowwise_dptr(), b.data(), n * sizeof(float),
+                             cudaMemcpyHostToDevice));
+  return ab;
+}
+
+// Compare each tensor inside a grouped D buffer (with per-tensor offsets) against the
+// reference D_multi[i] tensors.
+inline void compare_grouped_d_to_multi(
+    const GroupedBuffers& grouped_D,
+    const std::vector<std::tuple<size_t, size_t, size_t>>& shapes,
+    std::vector<Tensor>& D_multi, const char* tag) {
+  for (size_t i = 0; i < shapes.size(); ++i) {
+    Tensor grouped_split("grouped_D" + std::to_string(i),
+                         std::vector<size_t>{static_cast<size_t>(std::get<0>(shapes[i])),
+                                             static_cast<size_t>(std::get<1>(shapes[i]))},
+                         D_multi[i].dtype());
+    const size_t offset_bytes =
+        static_cast<size_t>(grouped_D.offsets_host[i]) * grouped_D.elem_size;
+    NVTE_CHECK_CUDA(cudaMemcpy(grouped_split.rowwise_dptr(),
+                               static_cast<char*>(grouped_D.get_data()) + offset_bytes,
+                               grouped_D.tensor_bytes[i], cudaMemcpyDeviceToDevice));
+    grouped_split.to_cpu();
+    D_multi[i].to_cpu();
+    auto [atol, rtol] = getTolerances(D_multi[i].dtype());
+    compareResults(tag, grouped_split, D_multi[i].rowwise_cpu_dptr<bf16>(), true, atol, rtol);
+  }
+}
+
 void run_grouped_gemm_case(const TestParams& params) {
   if (auto reason = grouped_gemm_skip_reason(params.input_case); !reason.empty()) {
     GTEST_SKIP() << reason;
   }
 #if CUBLAS_VERSION >= 130300
-  const int32_t cc = getDeviceComputeCapability();
+  auto ref = make_grouped_gemm_ref(params);
+  const auto& shapes = ref.shapes;
+  const size_t num_gemms = ref.num_gemms;
 
-  const std::vector<std::tuple<size_t, size_t, size_t>> shapes = make_shapes(params.shape_case);
-
-  const size_t num_gemms = shapes.size();
-  std::vector<Tensor> A_tensors;
-  std::vector<Tensor> B_tensors;
-  std::vector<Tensor> D_multi;
-
-  A_tensors.reserve(num_gemms);
-  B_tensors.reserve(num_gemms);
-  D_multi.reserve(num_gemms);
-
-  for (size_t i = 0; i < num_gemms; ++i) {
-    const auto [M, N, K] = shapes[i];
-    const std::vector<size_t> a_shape = params.transa ? std::vector<size_t>{N, K}
-                                                      : std::vector<size_t>{K, N};
-    const std::vector<size_t> b_shape = params.transb ? std::vector<size_t>{K, M}
-                                                      : std::vector<size_t>{M, K};
-    switch (params.input_case) {
-      case InputCase::kFP8Current: {
-        A_tensors.emplace_back(make_fp8_operand("A" + std::to_string(i), a_shape));
-        B_tensors.emplace_back(make_fp8_operand("B" + std::to_string(i), b_shape));
-        break;
-      }
-      case InputCase::kBF16: {
-        A_tensors.emplace_back(make_bf16_operand("A" + std::to_string(i), a_shape));
-        B_tensors.emplace_back(make_bf16_operand("B" + std::to_string(i), b_shape));
-        break;
-      }
-      case InputCase::kMXFP8: {
-        A_tensors.emplace_back(make_mxfp8_operand("A" + std::to_string(i), a_shape,
-                                                  /*is_A=*/true, params.transa));
-        B_tensors.emplace_back(make_mxfp8_operand("B" + std::to_string(i), b_shape,
-                                                  /*is_A=*/false, params.transb));
-        break;
-      }
-      case InputCase::kNVFP4: {
-        A_tensors.emplace_back(make_nvfp4_operand("A" + std::to_string(i), a_shape,
-                                                  /*is_A=*/true, params.transa));
-        B_tensors.emplace_back(make_nvfp4_operand("B" + std::to_string(i), b_shape,
-                                                  /*is_A=*/false, params.transb));
-        break;
-      }
-      case InputCase::kFP8BlockScaling: {
-        A_tensors.emplace_back(make_fp8_block_scaling_operand("A" + std::to_string(i), a_shape,
-                                                              /*is_A=*/true, params.transa));
-        B_tensors.emplace_back(make_fp8_block_scaling_operand("B" + std::to_string(i), b_shape,
-                                                              /*is_A=*/false, params.transb));
-        break;
-      }
-    }
-    D_multi.emplace_back(Tensor("D_multi" + std::to_string(i),
-                                std::vector<size_t>{M, N},
-                                DType::kBFloat16));
-  }
-
-  std::vector<NVTETensor> A_ptrs(num_gemms);
-  std::vector<NVTETensor> B_ptrs(num_gemms);
-  std::vector<NVTETensor> D_ptrs(num_gemms);
-  std::vector<Tensor> workspaces(num_gemms);
-  std::vector<NVTETensor> workspace_ptrs(num_gemms, nullptr);
-  std::vector<Tensor*> A_views;
-  std::vector<Tensor*> B_views;
+  std::vector<Tensor*> A_views, B_views;
   A_views.reserve(num_gemms);
   B_views.reserve(num_gemms);
-
-  // Empty bias/gelu arrays for nvte_multi_tensor_gemm (no epilogues)
-  std::vector<NVTETensor> bias_ptrs(num_gemms, nullptr);
-  std::vector<NVTETensor> gelu_ptrs(num_gemms, nullptr);
-
-  const size_t cublas_ws_bytes = 32ull * 1024 * 1024;
-
   for (size_t i = 0; i < num_gemms; ++i) {
-    A_ptrs[i] = A_tensors[i].data();
-    B_ptrs[i] = B_tensors[i].data();
-    D_ptrs[i] = D_multi[i].data();
-    workspaces[i] = Tensor("workspace" + std::to_string(i), std::vector<size_t>{cublas_ws_bytes}, DType::kByte);
-    workspace_ptrs[i] = workspaces[i].data();
-    A_views.push_back(&A_tensors[i]);
-    B_views.push_back(&B_tensors[i]);
+    A_views.push_back(&ref.A_tensors[i]);
+    B_views.push_back(&ref.B_tensors[i]);
   }
 
-  // FP8 block scaling requires split accumulator (no fast accumulation)
-  const bool use_split_accum = (params.input_case == InputCase::kFP8BlockScaling);
-
-  nvte_multi_tensor_gemm(A_ptrs.data(),
-                         B_ptrs.data(),
-                         D_ptrs.data(),
-                         bias_ptrs.data(),
-                         gelu_ptrs.data(),
-                         static_cast<int>(num_gemms),
-                         params.transa,
-                         params.transb,
-                         false,  // grad
-                         workspace_ptrs.data(),
-                         false,  // accumulate
-                         use_split_accum,
-                         0,      // sm_count
-                         0);
-  NVTE_CHECK_CUDA(cudaDeviceSynchronize());
-
-  GroupedBuffers grouped_A = build_grouped_tensor(A_views, A_tensors[0].scaling_mode());
-  GroupedBuffers grouped_B = build_grouped_tensor(B_views, B_tensors[0].scaling_mode());
+  GroupedBuffers grouped_A = build_grouped_tensor(A_views, ref.A_tensors[0].scaling_mode());
+  GroupedBuffers grouped_B = build_grouped_tensor(B_views, ref.B_tensors[0].scaling_mode());
 
   std::vector<Tensor> C_tensors;
   std::vector<Tensor> D_group_tensors;
@@ -475,61 +511,25 @@ void run_grouped_gemm_case(const TestParams& params) {
   }
   GroupedBuffers grouped_D = build_grouped_tensor(D_views, NVTE_DELAYED_TENSOR_SCALING);
 
-  const size_t alpha_beta_numel = cc < blackwellComputeCapability ? 1 : num_gemms;
-  Tensor alpha_tensor("alpha", std::vector<size_t>{alpha_beta_numel}, DType::kFloat32);
-  Tensor beta_tensor("beta", std::vector<size_t>{alpha_beta_numel}, DType::kFloat32);
-  std::vector<float> alpha_vals(alpha_beta_numel, 1.f);
-  std::vector<float> beta_vals(alpha_beta_numel, 0.f);
-  NVTE_CHECK_CUDA(cudaMemcpy(alpha_tensor.rowwise_dptr(), alpha_vals.data(),
-                             alpha_beta_numel * sizeof(float), cudaMemcpyHostToDevice));
-  NVTE_CHECK_CUDA(cudaMemcpy(beta_tensor.rowwise_dptr(), beta_vals.data(),
-                             alpha_beta_numel * sizeof(float), cudaMemcpyHostToDevice));
+  AlphaBetaTensors ab = make_alpha_beta(num_gemms);
 
+  constexpr size_t cublas_ws_bytes = 32ull * 1024 * 1024;
   const size_t setup_ws_bytes = nvte_get_grouped_gemm_setup_workspace_size(num_gemms);
   Tensor setup_ws("setup_ws", std::vector<size_t>{setup_ws_bytes}, DType::kByte);
   Tensor cublas_ws("cublas_ws", std::vector<size_t>{cublas_ws_bytes}, DType::kByte);
 
-  // Create config for grouped GEMM (FP8 block scaling requires split accumulator)
   GroupedMatmulConfigWrapper grouped_config;
-  if (use_split_accum) {
+  if (ref.use_split_accum) {
     grouped_config.set_use_split_accumulator(true);
   }
 
-  nvte_grouped_gemm(grouped_A.get_handle(),
-                    params.transa,
-                    grouped_B.get_handle(),
-                    params.transb,
-                    params.use_null_c ? nullptr : grouped_C->get_handle(),
-                    grouped_D.get_handle(),
-                    alpha_tensor.data(),
-                    beta_tensor.data(),
-                    setup_ws.data(),
-                    cublas_ws.data(),
-                    grouped_config,
-                    0);
+  nvte_grouped_gemm(grouped_A.get_handle(), params.transa, grouped_B.get_handle(), params.transb,
+                    params.use_null_c ? nullptr : grouped_C->get_handle(), grouped_D.get_handle(),
+                    ab.alpha.data(), ab.beta.data(), setup_ws.data(), cublas_ws.data(),
+                    grouped_config, 0);
   NVTE_CHECK_CUDA(cudaDeviceSynchronize());
 
-  // Compare results
-  for (size_t i = 0; i < num_gemms; ++i) {
-    Tensor grouped_split("grouped_D" + std::to_string(i),
-                         std::vector<size_t>{static_cast<size_t>(std::get<0>(shapes[i])),
-                                             static_cast<size_t>(std::get<1>(shapes[i]))},
-                         D_multi[i].dtype());
-    const size_t offset_bytes = static_cast<size_t>(grouped_D.offsets_host[i]) * grouped_D.elem_size;
-    NVTE_CHECK_CUDA(cudaMemcpy(grouped_split.rowwise_dptr(),
-                               static_cast<char*>(grouped_D.get_data()) + offset_bytes,
-                               grouped_D.tensor_bytes[i],
-                               cudaMemcpyDeviceToDevice));
-    grouped_split.to_cpu();
-    D_multi[i].to_cpu();
-    auto [atol, rtol] = getTolerances(D_multi[i].dtype());
-    compareResults("grouped_vs_multi",
-                   grouped_split,
-                   D_multi[i].rowwise_cpu_dptr<bf16>(),
-                   true,
-                   atol,
-                   rtol);
-  }
+  compare_grouped_d_to_multi(grouped_D, shapes, ref.D_multi, "grouped_vs_multi");
 #endif  // CUBLAS_VERSION >= 130300
 }
 
@@ -538,111 +538,20 @@ void run_grouped_gemm_discrete_out_case(const TestParams& params) {
     GTEST_SKIP() << reason;
   }
 #if CUBLAS_VERSION >= 130300
-  const int32_t cc = getDeviceComputeCapability();
+  auto ref = make_grouped_gemm_ref(params);
+  const auto& shapes = ref.shapes;
+  const size_t num_gemms = ref.num_gemms;
 
-  const std::vector<std::tuple<size_t, size_t, size_t>> shapes = make_shapes(params.shape_case);
-
-  const size_t num_gemms = shapes.size();
-  std::vector<Tensor> A_tensors;
-  std::vector<Tensor> B_tensors;
-  std::vector<Tensor> D_multi;
-
-  A_tensors.reserve(num_gemms);
-  B_tensors.reserve(num_gemms);
-  D_multi.reserve(num_gemms);
-
-  for (size_t i = 0; i < num_gemms; ++i) {
-    const auto [M, N, K] = shapes[i];
-    const std::vector<size_t> a_shape = params.transa ? std::vector<size_t>{N, K}
-                                                      : std::vector<size_t>{K, N};
-    const std::vector<size_t> b_shape = params.transb ? std::vector<size_t>{K, M}
-                                                      : std::vector<size_t>{M, K};
-    switch (params.input_case) {
-      case InputCase::kFP8Current: {
-        A_tensors.emplace_back(make_fp8_operand("A" + std::to_string(i), a_shape));
-        B_tensors.emplace_back(make_fp8_operand("B" + std::to_string(i), b_shape));
-        break;
-      }
-      case InputCase::kBF16: {
-        A_tensors.emplace_back(make_bf16_operand("A" + std::to_string(i), a_shape));
-        B_tensors.emplace_back(make_bf16_operand("B" + std::to_string(i), b_shape));
-        break;
-      }
-      case InputCase::kMXFP8: {
-        A_tensors.emplace_back(make_mxfp8_operand("A" + std::to_string(i), a_shape,
-                                                  /*is_A=*/true, params.transa));
-        B_tensors.emplace_back(make_mxfp8_operand("B" + std::to_string(i), b_shape,
-                                                  /*is_A=*/false, params.transb));
-        break;
-      }
-      case InputCase::kNVFP4: {
-        A_tensors.emplace_back(make_nvfp4_operand("A" + std::to_string(i), a_shape,
-                                                  /*is_A=*/true, params.transa));
-        B_tensors.emplace_back(make_nvfp4_operand("B" + std::to_string(i), b_shape,
-                                                  /*is_A=*/false, params.transb));
-        break;
-      }
-      case InputCase::kFP8BlockScaling: {
-        A_tensors.emplace_back(make_fp8_block_scaling_operand("A" + std::to_string(i), a_shape,
-                                                              /*is_A=*/true, params.transa));
-        B_tensors.emplace_back(make_fp8_block_scaling_operand("B" + std::to_string(i), b_shape,
-                                                              /*is_A=*/false, params.transb));
-        break;
-      }
-    }
-    D_multi.emplace_back(Tensor("D_multi" + std::to_string(i),
-                                std::vector<size_t>{M, N},
-                                DType::kBFloat16));
-  }
-
-  std::vector<NVTETensor> A_ptrs(num_gemms);
-  std::vector<NVTETensor> B_ptrs(num_gemms);
-  std::vector<NVTETensor> D_ptrs(num_gemms);
-  std::vector<Tensor> workspaces(num_gemms);
-  std::vector<NVTETensor> workspace_ptrs(num_gemms, nullptr);
-  std::vector<Tensor*> A_views;
-  std::vector<Tensor*> B_views;
+  std::vector<Tensor*> A_views, B_views;
   A_views.reserve(num_gemms);
   B_views.reserve(num_gemms);
-
-  // Empty bias/gelu arrays for nvte_multi_tensor_gemm (no epilogues)
-  std::vector<NVTETensor> bias_ptrs(num_gemms, nullptr);
-  std::vector<NVTETensor> gelu_ptrs(num_gemms, nullptr);
-
-  const size_t cublas_ws_bytes = 32ull * 1024 * 1024;
-
   for (size_t i = 0; i < num_gemms; ++i) {
-    A_ptrs[i] = A_tensors[i].data();
-    B_ptrs[i] = B_tensors[i].data();
-    D_ptrs[i] = D_multi[i].data();
-    workspaces[i] =
-        Tensor("workspace" + std::to_string(i), std::vector<size_t>{cublas_ws_bytes}, DType::kByte);
-    workspace_ptrs[i] = workspaces[i].data();
-    A_views.push_back(&A_tensors[i]);
-    B_views.push_back(&B_tensors[i]);
+    A_views.push_back(&ref.A_tensors[i]);
+    B_views.push_back(&ref.B_tensors[i]);
   }
 
-  // FP8 block scaling requires split accumulator (no fast accumulation)
-  const bool use_split_accum = (params.input_case == InputCase::kFP8BlockScaling);
-
-  nvte_multi_tensor_gemm(A_ptrs.data(),
-                         B_ptrs.data(),
-                         D_ptrs.data(),
-                         bias_ptrs.data(),
-                         gelu_ptrs.data(),
-                         static_cast<int>(num_gemms),
-                         params.transa,
-                         params.transb,
-                         false,  // grad
-                         workspace_ptrs.data(),
-                         false,  // accumulate
-                         use_split_accum,
-                         0,      // sm_count
-                         0);
-  NVTE_CHECK_CUDA(cudaDeviceSynchronize());
-
-  GroupedBuffers grouped_A = build_grouped_tensor(A_views, A_tensors[0].scaling_mode());
-  GroupedBuffers grouped_B = build_grouped_tensor(B_views, B_tensors[0].scaling_mode());
+  GroupedBuffers grouped_A = build_grouped_tensor(A_views, ref.A_tensors[0].scaling_mode());
+  GroupedBuffers grouped_B = build_grouped_tensor(B_views, ref.B_tensors[0].scaling_mode());
 
   std::vector<Tensor> C_tensors;
   std::vector<Tensor> D_list_tensors;
@@ -675,54 +584,31 @@ void run_grouped_gemm_discrete_out_case(const TestParams& params) {
     D_list_ptrs.push_back(D_list_tensors[i].data());
   }
 
-  // Hopper requires a single shared alpha/beta scalar; Blackwell+ uses per-matrix scalars.
-  const size_t alpha_beta_numel = cc < blackwellComputeCapability ? 1 : num_gemms;
-  Tensor alpha_tensor("alpha", std::vector<size_t>{alpha_beta_numel}, DType::kFloat32);
-  Tensor beta_tensor("beta", std::vector<size_t>{alpha_beta_numel}, DType::kFloat32);
-  std::vector<float> alpha_vals(alpha_beta_numel, 1.f);
-  std::vector<float> beta_vals(alpha_beta_numel, 0.f);
-  NVTE_CHECK_CUDA(cudaMemcpy(alpha_tensor.rowwise_dptr(), alpha_vals.data(),
-                             alpha_beta_numel * sizeof(float), cudaMemcpyHostToDevice));
-  NVTE_CHECK_CUDA(cudaMemcpy(beta_tensor.rowwise_dptr(), beta_vals.data(),
-                             alpha_beta_numel * sizeof(float), cudaMemcpyHostToDevice));
+  AlphaBetaTensors ab = make_alpha_beta(num_gemms);
 
+  constexpr size_t cublas_ws_bytes = 32ull * 1024 * 1024;
   const size_t setup_ws_bytes = nvte_get_grouped_gemm_setup_workspace_size(num_gemms);
   Tensor setup_ws("setup_ws", std::vector<size_t>{setup_ws_bytes}, DType::kByte);
   Tensor cublas_ws("cublas_ws", std::vector<size_t>{cublas_ws_bytes}, DType::kByte);
 
-  // Create config for grouped GEMM (FP8 block scaling requires split accumulator)
   GroupedMatmulConfigWrapper grouped_config;
-  if (use_split_accum) {
+  if (ref.use_split_accum) {
     grouped_config.set_use_split_accumulator(true);
   }
 
-  nvte_grouped_gemm_with_discrete_out(grouped_A.get_handle(),
-                                      params.transa,
-                                      grouped_B.get_handle(),
-                                      params.transb,
-                                      params.use_null_c ? nullptr : C_list_ptrs.data(),
-                                      params.use_null_c ? 0 : num_gemms,
-                                      D_list_ptrs.data(),
-                                      num_gemms,
-                                      alpha_tensor.data(),
-                                      beta_tensor.data(),
-                                      setup_ws.data(),
-                                      cublas_ws.data(),
-                                      grouped_config,
-                                      0);
+  nvte_grouped_gemm_with_discrete_out(
+      grouped_A.get_handle(), params.transa, grouped_B.get_handle(), params.transb,
+      params.use_null_c ? nullptr : C_list_ptrs.data(), params.use_null_c ? 0 : num_gemms,
+      D_list_ptrs.data(), num_gemms, ab.alpha.data(), ab.beta.data(), setup_ws.data(),
+      cublas_ws.data(), grouped_config, 0);
   NVTE_CHECK_CUDA(cudaDeviceSynchronize());
 
-  // Compare results
   for (size_t i = 0; i < num_gemms; ++i) {
     D_list_tensors[i].to_cpu();
-    D_multi[i].to_cpu();
-    auto [atol, rtol] = getTolerances(D_multi[i].dtype());
-    compareResults("grouped_list_vs_multi",
-                   D_list_tensors[i],
-                   D_multi[i].rowwise_cpu_dptr<bf16>(),
-                   true,
-                   atol,
-                   rtol);
+    ref.D_multi[i].to_cpu();
+    auto [atol, rtol] = getTolerances(ref.D_multi[i].dtype());
+    compareResults("grouped_list_vs_multi", D_list_tensors[i],
+                   ref.D_multi[i].rowwise_cpu_dptr<bf16>(), true, atol, rtol);
   }
 #endif  // CUBLAS_VERSION >= 130300
 }
@@ -732,126 +618,28 @@ void run_grouped_gemm_discrete_in_case(const TestParams& params) {
     GTEST_SKIP() << reason;
   }
 #if CUBLAS_VERSION >= 130300
-  const int32_t cc = getDeviceComputeCapability();
+  auto ref = make_grouped_gemm_ref(params);
+  const auto& shapes = ref.shapes;
+  const size_t num_gemms = ref.num_gemms;
 
-  const std::vector<std::tuple<size_t, size_t, size_t>> shapes = make_shapes(params.shape_case);
-
-  const size_t num_gemms = shapes.size();
-  std::vector<Tensor> A_tensors;
-  std::vector<Tensor> B_tensors;
-  std::vector<Tensor> D_multi;
-
-  A_tensors.reserve(num_gemms);
-  B_tensors.reserve(num_gemms);
-  D_multi.reserve(num_gemms);
-
-  for (size_t i = 0; i < num_gemms; ++i) {
-    const auto [M, N, K] = shapes[i];
-    const std::vector<size_t> a_shape = params.transa ? std::vector<size_t>{N, K}
-                                                      : std::vector<size_t>{K, N};
-    const std::vector<size_t> b_shape = params.transb ? std::vector<size_t>{K, M}
-                                                      : std::vector<size_t>{M, K};
-    switch (params.input_case) {
-      case InputCase::kFP8Current: {
-        A_tensors.emplace_back(make_fp8_operand("A" + std::to_string(i), a_shape));
-        B_tensors.emplace_back(make_fp8_operand("B" + std::to_string(i), b_shape));
-        break;
-      }
-      case InputCase::kBF16: {
-        A_tensors.emplace_back(make_bf16_operand("A" + std::to_string(i), a_shape));
-        B_tensors.emplace_back(make_bf16_operand("B" + std::to_string(i), b_shape));
-        break;
-      }
-      case InputCase::kMXFP8: {
-        A_tensors.emplace_back(make_mxfp8_operand("A" + std::to_string(i), a_shape,
-                                                  /*is_A=*/true, params.transa));
-        B_tensors.emplace_back(make_mxfp8_operand("B" + std::to_string(i), b_shape,
-                                                  /*is_A=*/false, params.transb));
-        break;
-      }
-      case InputCase::kNVFP4: {
-        A_tensors.emplace_back(make_nvfp4_operand("A" + std::to_string(i), a_shape,
-                                                  /*is_A=*/true, params.transa));
-        B_tensors.emplace_back(make_nvfp4_operand("B" + std::to_string(i), b_shape,
-                                                  /*is_A=*/false, params.transb));
-        break;
-      }
-      case InputCase::kFP8BlockScaling: {
-        A_tensors.emplace_back(make_fp8_block_scaling_operand("A" + std::to_string(i), a_shape,
-                                                              /*is_A=*/true, params.transa));
-        B_tensors.emplace_back(make_fp8_block_scaling_operand("B" + std::to_string(i), b_shape,
-                                                              /*is_A=*/false, params.transb));
-        break;
-      }
-    }
-    D_multi.emplace_back(Tensor("D_multi" + std::to_string(i),
-                                std::vector<size_t>{M, N},
-                                DType::kBFloat16));
-  }
-
-  std::vector<NVTETensor> A_ptrs(num_gemms);
-  std::vector<NVTETensor> B_ptrs(num_gemms);
-  std::vector<NVTETensor> D_ptrs(num_gemms);
-  std::vector<Tensor> workspaces(num_gemms);
-  std::vector<NVTETensor> workspace_ptrs(num_gemms, nullptr);
-  std::vector<Tensor*> A_views;
   std::vector<Tensor*> B_views;
-  A_views.reserve(num_gemms);
   B_views.reserve(num_gemms);
+  for (size_t i = 0; i < num_gemms; ++i) B_views.push_back(&ref.B_tensors[i]);
 
-  // Empty bias/gelu arrays for nvte_multi_tensor_gemm (no epilogues)
-  std::vector<NVTETensor> bias_ptrs(num_gemms, nullptr);
-  std::vector<NVTETensor> gelu_ptrs(num_gemms, nullptr);
+  GroupedBuffers grouped_B = build_grouped_tensor(B_views, ref.B_tensors[0].scaling_mode());
 
-  const size_t cublas_ws_bytes = 32ull * 1024 * 1024;
-
-  for (size_t i = 0; i < num_gemms; ++i) {
-    A_ptrs[i] = A_tensors[i].data();
-    B_ptrs[i] = B_tensors[i].data();
-    D_ptrs[i] = D_multi[i].data();
-    workspaces[i] =
-        Tensor("workspace" + std::to_string(i), std::vector<size_t>{cublas_ws_bytes}, DType::kByte);
-    workspace_ptrs[i] = workspaces[i].data();
-    A_views.push_back(&A_tensors[i]);
-    B_views.push_back(&B_tensors[i]);
-  }
-
-  // FP8 block scaling requires split accumulator (no fast accumulation)
-  const bool use_split_accum = (params.input_case == InputCase::kFP8BlockScaling);
-
-  nvte_multi_tensor_gemm(A_ptrs.data(),
-                         B_ptrs.data(),
-                         D_ptrs.data(),
-                         bias_ptrs.data(),
-                         gelu_ptrs.data(),
-                         static_cast<int>(num_gemms),
-                         params.transa,
-                         params.transb,
-                         false,  // grad
-                         workspace_ptrs.data(),
-                         false,  // accumulate
-                         use_split_accum,
-                         0,      // sm_count
-                         0);
-  NVTE_CHECK_CUDA(cudaDeviceSynchronize());
-
-  GroupedBuffers grouped_B = build_grouped_tensor(B_views, B_tensors[0].scaling_mode());
-
-  std::vector<Tensor> C_tensors;
-  std::vector<Tensor> D_group_tensors;
+  std::vector<Tensor> C_tensors, D_group_tensors;
   C_tensors.reserve(num_gemms);
   D_group_tensors.reserve(num_gemms);
   for (size_t i = 0; i < num_gemms; ++i) {
     const auto [M, N, K] = shapes[i];
     (void)K;
     if (!params.use_null_c) {
-      C_tensors.emplace_back(Tensor("C" + std::to_string(i),
-                                    std::vector<size_t>{M, N},
+      C_tensors.emplace_back(Tensor("C" + std::to_string(i), std::vector<size_t>{M, N},
                                     DType::kBFloat16));
     }
     D_group_tensors.emplace_back(Tensor("D_group" + std::to_string(i),
-                                        std::vector<size_t>{M, N},
-                                        DType::kBFloat16));
+                                        std::vector<size_t>{M, N}, DType::kBFloat16));
     NVTE_CHECK_CUDA(cudaMemset(D_group_tensors.back().rowwise_dptr(), 0,
                                bytes(D_group_tensors.back().rowwise_shape(),
                                      D_group_tensors.back().dtype())));
@@ -859,9 +647,7 @@ void run_grouped_gemm_discrete_in_case(const TestParams& params) {
 
   std::vector<Tensor*> C_views, D_views;
   for (size_t i = 0; i < num_gemms; ++i) {
-    if (!params.use_null_c) {
-      C_views.push_back(&C_tensors[i]);
-    }
+    if (!params.use_null_c) C_views.push_back(&C_tensors[i]);
     D_views.push_back(&D_group_tensors[i]);
   }
 
@@ -871,69 +657,29 @@ void run_grouped_gemm_discrete_in_case(const TestParams& params) {
   }
   GroupedBuffers grouped_D = build_grouped_tensor(D_views, NVTE_DELAYED_TENSOR_SCALING);
 
-  // Hopper requires a single shared alpha/beta scalar; Blackwell+ uses per-matrix scalars.
-  const size_t alpha_beta_numel = cc < blackwellComputeCapability ? 1 : num_gemms;
-  Tensor alpha_tensor("alpha", std::vector<size_t>{alpha_beta_numel}, DType::kFloat32);
-  Tensor beta_tensor("beta", std::vector<size_t>{alpha_beta_numel}, DType::kFloat32);
-  std::vector<float> alpha_vals(alpha_beta_numel, 1.f);
-  std::vector<float> beta_vals(alpha_beta_numel, 0.f);
-  NVTE_CHECK_CUDA(cudaMemcpy(alpha_tensor.rowwise_dptr(), alpha_vals.data(),
-                             alpha_beta_numel * sizeof(float), cudaMemcpyHostToDevice));
-  NVTE_CHECK_CUDA(cudaMemcpy(beta_tensor.rowwise_dptr(), beta_vals.data(),
-                             alpha_beta_numel * sizeof(float), cudaMemcpyHostToDevice));
+  AlphaBetaTensors ab = make_alpha_beta(num_gemms);
 
+  constexpr size_t cublas_ws_bytes = 32ull * 1024 * 1024;
   const size_t setup_ws_bytes = nvte_get_grouped_gemm_setup_workspace_size(num_gemms);
   Tensor setup_ws("setup_ws", std::vector<size_t>{setup_ws_bytes}, DType::kByte);
   Tensor cublas_ws("cublas_ws", std::vector<size_t>{cublas_ws_bytes}, DType::kByte);
 
   std::vector<NVTETensor> A_list_ptrs;
   A_list_ptrs.reserve(num_gemms);
-  for (size_t i = 0; i < num_gemms; ++i) {
-    A_list_ptrs.push_back(A_tensors[i].data());
-  }
+  for (size_t i = 0; i < num_gemms; ++i) A_list_ptrs.push_back(ref.A_tensors[i].data());
 
-  // Create config for grouped GEMM (FP8 block scaling requires split accumulator)
   GroupedMatmulConfigWrapper grouped_config;
-  if (use_split_accum) {
+  if (ref.use_split_accum) {
     grouped_config.set_use_split_accumulator(true);
   }
 
-  nvte_grouped_gemm_with_discrete_inputA(A_list_ptrs.data(),
-                                     num_gemms,
-                                     params.transa,
-                                     grouped_B.get_handle(),
-                                     params.transb,
-                                     params.use_null_c ? nullptr : grouped_C->get_handle(),
-                                     grouped_D.get_handle(),
-                                     alpha_tensor.data(),
-                                     beta_tensor.data(),
-                                     setup_ws.data(),
-                                     cublas_ws.data(),
-                                     grouped_config,
-                                     0);
+  nvte_grouped_gemm_with_discrete_inputA(
+      A_list_ptrs.data(), num_gemms, params.transa, grouped_B.get_handle(), params.transb,
+      params.use_null_c ? nullptr : grouped_C->get_handle(), grouped_D.get_handle(),
+      ab.alpha.data(), ab.beta.data(), setup_ws.data(), cublas_ws.data(), grouped_config, 0);
   NVTE_CHECK_CUDA(cudaDeviceSynchronize());
 
-  // Compare results
-  for (size_t i = 0; i < num_gemms; ++i) {
-    Tensor grouped_split("grouped_D" + std::to_string(i),
-                         std::vector<size_t>{static_cast<size_t>(std::get<0>(shapes[i])),
-                                             static_cast<size_t>(std::get<1>(shapes[i]))},
-                         D_multi[i].dtype());
-    const size_t offset_bytes = static_cast<size_t>(grouped_D.offsets_host[i]) * grouped_D.elem_size;
-    NVTE_CHECK_CUDA(cudaMemcpy(grouped_split.rowwise_dptr(),
-                               static_cast<char*>(grouped_D.get_data()) + offset_bytes,
-                               grouped_D.tensor_bytes[i],
-                               cudaMemcpyDeviceToDevice));
-    grouped_split.to_cpu();
-    D_multi[i].to_cpu();
-    auto [atol, rtol] = getTolerances(D_multi[i].dtype());
-    compareResults("grouped_discrete_in_vs_multi",
-                   grouped_split,
-                   D_multi[i].rowwise_cpu_dptr<bf16>(),
-                   true,
-                   atol,
-                   rtol);
-  }
+  compare_grouped_d_to_multi(grouped_D, shapes, ref.D_multi, "grouped_discrete_in_vs_multi");
 #endif  // CUBLAS_VERSION >= 130300
 }
 

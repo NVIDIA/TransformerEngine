@@ -142,101 +142,74 @@ inline int64_t compute_avg_last_dim(const transformer_engine::GroupedTensor *t) 
 static constexpr size_t kGroupedGemmAlignment = 256;
 static constexpr size_t kGroupedGemmCublasWorkspaceSize = 32ull * 1024 * 1024;  // 32 MiB
 
-// Workspace layout for grouped GEMM
+// Workspace layout for grouped GEMM.
+// Layout described once in `from_buffers`; `required_setup_size` runs the same walker
+// with base=nullptr to derive the total byte count, so the two stay in sync by construction.
 struct GroupedGemmSetupWorkspace {
-  void **A_ptrs;
-  void **B_ptrs;
-  void **C_ptrs;
-  void **D_ptrs;
-  float **alpha_ptrs;
-  float **beta_ptrs;
-  void **
-      a_scale_inv_ptrs;  // Per-tensor FP8 scale pointers for A (float* for tensor scaling, E8M0* for MXFP8)
-  void **
-      b_scale_inv_ptrs;  // Per-tensor FP8 scale pointers for B (float* for tensor scaling, E8M0* for MXFP8)
+  void **A_ptrs = nullptr;
+  void **B_ptrs = nullptr;
+  void **C_ptrs = nullptr;
+  void **D_ptrs = nullptr;
+  float **alpha_ptrs = nullptr;
+  float **beta_ptrs = nullptr;
+  // Per-tensor scale_inv pointers (float* for tensor scaling, E8M0* for MXFP8, E4M3* for NVFP4)
+  void **a_scale_inv_ptrs = nullptr;
+  void **b_scale_inv_ptrs = nullptr;
   // Storage dimensions for cuBLAS matrix layouts
-  int *a_rows;
-  int *a_cols;
-  int *b_rows;
-  int *b_cols;
-  int *d_rows;  // M (first dim) - also used for C
-  int *d_cols;  // N (last dim) - also used for C
+  int *a_rows = nullptr;
+  int *a_cols = nullptr;
+  int *b_rows = nullptr;
+  int *b_cols = nullptr;
+  int *d_rows = nullptr;  // M (first dim) - also used for C
+  int *d_cols = nullptr;  // N (last dim) - also used for C
   // NVFP4: per-group computed alpha values (alpha * amax_A * amax_B * factor_inv)
-  float *nvfp4_computed_alpha;
+  float *nvfp4_computed_alpha = nullptr;
+  // End-of-layout offset in bytes (unaligned). required_setup_size rounds this up.
+  size_t total_bytes = 0;
 
-  // Initialize from workspace buffer
-  // Layout: all pointer arrays first (16-byte aligned for cuBLAS), then int arrays, then float arrays
-  static GroupedGemmSetupWorkspace from_buffers(char *setup_ws_ptr, size_t num_tensors) {
+  // Walk the layout once. If `base` is non-null, fields are populated; otherwise
+  // only `total_bytes` is meaningful (used by required_setup_size).
+  static GroupedGemmSetupWorkspace from_buffers(char *base, size_t num_tensors) {
     GroupedGemmSetupWorkspace ws;
-    size_t offset = 0;
-    const size_t ptr_size = num_tensors * sizeof(void *);
-    const size_t int_size = num_tensors * sizeof(int);
     constexpr size_t kPtrAlignment = 16;  // cuBLAS requires 16-byte alignment for pointer arrays
-
-    // Helper to align offset to kPtrAlignment
-    auto align_offset = [&]() {
-      offset = (offset + kPtrAlignment - 1) / kPtrAlignment * kPtrAlignment;
-    };
-
-    // Pointer arrays first (all 16-byte aligned for cuBLAS grouped GEMM)
-    align_offset();
-    ws.A_ptrs = reinterpret_cast<void **>(setup_ws_ptr + offset);
-    offset += ptr_size;
-    align_offset();
-    ws.B_ptrs = reinterpret_cast<void **>(setup_ws_ptr + offset);
-    offset += ptr_size;
-    align_offset();
-    ws.C_ptrs = reinterpret_cast<void **>(setup_ws_ptr + offset);
-    offset += ptr_size;
-    align_offset();
-    ws.D_ptrs = reinterpret_cast<void **>(setup_ws_ptr + offset);
-    offset += ptr_size;
-    align_offset();
-    ws.alpha_ptrs = reinterpret_cast<float **>(setup_ws_ptr + offset);
-    offset += ptr_size;
-    align_offset();
-    ws.beta_ptrs = reinterpret_cast<float **>(setup_ws_ptr + offset);
-    offset += ptr_size;
-    align_offset();
-    ws.a_scale_inv_ptrs = reinterpret_cast<void **>(setup_ws_ptr + offset);
-    offset += ptr_size;
-    align_offset();
-    ws.b_scale_inv_ptrs = reinterpret_cast<void **>(setup_ws_ptr + offset);
-    offset += ptr_size;
-
-    // Int arrays for storage dimensions (4-byte aligned is fine)
-    align_offset();
-    ws.a_rows = reinterpret_cast<int *>(setup_ws_ptr + offset);
-    offset += int_size;
-    ws.a_cols = reinterpret_cast<int *>(setup_ws_ptr + offset);
-    offset += int_size;
-    ws.b_rows = reinterpret_cast<int *>(setup_ws_ptr + offset);
-    offset += int_size;
-    ws.b_cols = reinterpret_cast<int *>(setup_ws_ptr + offset);
-    offset += int_size;
-    ws.d_rows = reinterpret_cast<int *>(setup_ws_ptr + offset);
-    offset += int_size;
-    ws.d_cols = reinterpret_cast<int *>(setup_ws_ptr + offset);
-    offset += int_size;
-
-    // Float array for NVFP4 computed alpha (4-byte aligned)
-    ws.nvfp4_computed_alpha = reinterpret_cast<float *>(setup_ws_ptr + offset);
-
-    return ws;
-  }
-
-  // Calculate required size for setup workspace
-  static size_t required_setup_size(size_t num_tensors, size_t alignment) {
     const size_t ptr_size = num_tensors * sizeof(void *);
     const size_t int_size = num_tensors * sizeof(int);
     const size_t float_size = num_tensors * sizeof(float);
-    constexpr size_t kPtrAlignment = 16;  // Must match from_buffers
+    size_t offset = 0;
 
-    // Layout: 8 ptr arrays (each 16-byte aligned), then 6 int arrays, then 1 float array
-    auto aligned_ptr_size = ((ptr_size + kPtrAlignment - 1) / kPtrAlignment) * kPtrAlignment;
-    size_t size = 8 * aligned_ptr_size + 6 * int_size + float_size;
-    size = ((size + alignment - 1) / alignment) * alignment;
-    return size;
+    auto align_ptr = [&]() {
+      offset = (offset + kPtrAlignment - 1) / kPtrAlignment * kPtrAlignment;
+    };
+    auto place = [&](auto *&field, size_t size_bytes) {
+      using Field = std::remove_reference_t<decltype(field)>;
+      if (base != nullptr) field = reinterpret_cast<Field>(base + offset);
+      offset += size_bytes;
+    };
+
+    // 8 pointer arrays (each 16-byte aligned), then 6 int arrays, then 1 float array.
+    align_ptr(); place(ws.A_ptrs, ptr_size);
+    align_ptr(); place(ws.B_ptrs, ptr_size);
+    align_ptr(); place(ws.C_ptrs, ptr_size);
+    align_ptr(); place(ws.D_ptrs, ptr_size);
+    align_ptr(); place(ws.alpha_ptrs, ptr_size);
+    align_ptr(); place(ws.beta_ptrs, ptr_size);
+    align_ptr(); place(ws.a_scale_inv_ptrs, ptr_size);
+    align_ptr(); place(ws.b_scale_inv_ptrs, ptr_size);
+    place(ws.a_rows, int_size);
+    place(ws.a_cols, int_size);
+    place(ws.b_rows, int_size);
+    place(ws.b_cols, int_size);
+    place(ws.d_rows, int_size);
+    place(ws.d_cols, int_size);
+    place(ws.nvfp4_computed_alpha, float_size);
+
+    ws.total_bytes = offset;
+    return ws;
+  }
+
+  static size_t required_setup_size(size_t num_tensors, size_t alignment) {
+    const size_t raw = from_buffers(nullptr, num_tensors).total_bytes;
+    return ((raw + alignment - 1) / alignment) * alignment;
   }
 };
 
@@ -420,7 +393,10 @@ struct MultiTensorListInfo {
 
 struct OperandStorageChoice {
   bool use_rowwise = true;
-  bool swap_dims = true;
+  // Only meaningful when use_rowwise == false (columnwise storage). Indicates that
+  // the columnwise buffer is the logically-transposed tensor (e.g. NVFP4 colwise =
+  // transposed-rowwise), so sel.shape needs first/last swapped.
+  bool swap_dims = false;
   bool trans = false;
 };
 
@@ -435,7 +411,7 @@ inline OperandStorageChoice choose_grouped_operand_storage(bool trans, bool is_A
     if (is_A) {
       if (trans) {
         NVTE_CHECK(has_row, "Grouped GEMM: MXFP8 transposed ", name, " is missing row-wise data");
-        return {true, true, trans};
+        return {true, false, trans};
       }
       NVTE_CHECK(has_col, "Grouped GEMM: MXFP8 non-transposed ", name,
                  " is missing column-wise data");
@@ -446,7 +422,7 @@ inline OperandStorageChoice choose_grouped_operand_storage(bool trans, bool is_A
       return {false, false, trans};
     }
     NVTE_CHECK(has_row, "Grouped GEMM: MXFP8 non-transposed ", name, " is missing row-wise data");
-    return {true, true, trans};
+    return {true, false, trans};
   }
 
   // FP8 block scaling on Hopper: force TN by using columnwise data with swap_dims=false.
@@ -503,7 +479,7 @@ inline OperandStorageChoice choose_grouped_operand_storage(bool trans, bool is_A
   }
 
   NVTE_CHECK(has_row, "Grouped GEMM: ", name, " is missing row-wise data");
-  return {true, true, trans};
+  return {true, false, trans};
 }
 
 // Build Kernel Arguments detailing out addresses and other metadata for list of C/D tensors
@@ -1539,6 +1515,14 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
   auto A_sel = select_grouped_operand(inputA, static_cast<bool>(transa), /*is_A=*/true);
   auto B_sel = select_grouped_operand(inputB, static_cast<bool>(transb), /*is_A=*/false);
 
+  // NVFP4 global-scale alpha requires per-tensor amax for both operands; without it
+  // the kernel silently drops the (amax_A * amax_B / factor) factor and produces
+  // numerically wrong output.
+  if (is_nvfp_scaling(A_sel.scaling_mode)) {
+    NVTE_CHECK(A_sel.amax != nullptr, "Grouped GEMM: NVFP4 A is missing amax.");
+    NVTE_CHECK(B_sel.amax != nullptr, "Grouped GEMM: NVFP4 B is missing amax.");
+  }
+
   // Workspaces: setup (pointer arrays) and cuBLAS
   auto workspace = setup_grouped_gemm_workspace(wspace_setup, wspace_cublas, num_tensors);
 
@@ -1661,7 +1645,7 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
                                                      A_list_info.all_row, A_list_info.all_col, "A");
   A_sel.trans = choice.trans;
   A_sel.rowwise = choice.use_rowwise;
-  A_sel.swap_dims = choice.use_rowwise ? false : choice.swap_dims;
+  A_sel.swap_dims = choice.swap_dims;
   if (choice.use_rowwise) {
     NVTE_CHECK(A_list_info.all_row, "Grouped GEMM: A_list is missing row-wise data");
     A_sel.dtype = A_list_info.row_dtype;
@@ -1692,6 +1676,7 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
       const auto &amax_i = use_rowwise ? ti->amax : ti->columnwise_amax;
       NVTE_CHECK(amax_i.has_data(), "Grouped GEMM: NVFP4 A_list tensor ", i, " is missing amax.");
     }
+    NVTE_CHECK(B_sel.amax != nullptr, "Grouped GEMM: NVFP4 B is missing amax.");
   }
 
   // Workspaces: setup (pointer arrays) and cuBLAS
@@ -1776,6 +1761,13 @@ void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
   // mirror the non-grouped GEMM logic for FP8 layout constraints.
   auto A_sel = select_grouped_operand(inputA, static_cast<bool>(transa), /*is_A=*/true);
   auto B_sel = select_grouped_operand(inputB, static_cast<bool>(transb), /*is_A=*/false);
+
+  // NVFP4 global-scale alpha requires per-tensor amax for both operands.
+  if (is_nvfp_scaling(A_sel.scaling_mode)) {
+    NVTE_CHECK(A_sel.amax != nullptr, "Grouped GEMM: NVFP4 A is missing amax.");
+    NVTE_CHECK(B_sel.amax != nullptr, "Grouped GEMM: NVFP4 B is missing amax.");
+  }
+
   // Workspaces: setup (pointer arrays) and cuBLAS
   auto workspace = setup_grouped_gemm_workspace(wspace_setup, wspace_cublas, num_tensors);
 

@@ -1312,6 +1312,33 @@ GroupedBuffers build_grouped_tensor(const std::vector<Tensor*>& tensors,
     nvte_set_grouped_tensor_param(h, kNVTEGroupedTensorOffsets, &off_tensor, sizeof(off_tensor));
   }
 
+  // Shared gather of per-tensor scale_inv buffers into a contiguous device buffer.
+  // Returns (device buffer, total element count). Used by all block-scaling recipes
+  // (MXFP8 / NVFP4 / FP8 block) — they only differ in element size and CPU getter.
+  auto gather_scale_inv = [&](size_t bytes_per_elem, auto get_shape_fn,
+                              auto get_cpu_ptr_fn) -> std::pair<CudaPtr<>, size_t> {
+    size_t total_elems = 0;
+    std::vector<size_t> elem_offsets(num_tensors);
+    std::vector<size_t> numels(num_tensors);
+    for (size_t i = 0; i < num_tensors; ++i) {
+      elem_offsets[i] = total_elems;
+      const NVTEShape sshape = get_shape_fn(tensors[i]);
+      size_t numel = 1;
+      for (size_t d = 0; d < sshape.ndim; ++d) numel *= sshape.data[d];
+      numels[i] = numel;
+      total_elems += numel;
+    }
+    CudaPtr<> buffer = cuda_alloc(total_elems * bytes_per_elem);
+    for (size_t i = 0; i < num_tensors; ++i) {
+      tensors[i]->to_cpu();
+      NVTE_CHECK_CUDA(cudaGetLastError());
+      void* dst = static_cast<char*>(buffer.get()) + elem_offsets[i] * bytes_per_elem;
+      NVTE_CHECK_CUDA(cudaMemcpy(dst, get_cpu_ptr_fn(tensors[i]),
+                                 numels[i] * bytes_per_elem, cudaMemcpyHostToDevice));
+    }
+    return {std::move(buffer), total_elems};
+  };
+
   if (isFp8Type(dtype) && scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
     // FP8 tensor scaling: one float scale_inv per tensor
     // For delayed scaling, rowwise and columnwise share the same scale
@@ -1350,118 +1377,51 @@ GroupedBuffers build_grouped_tensor(const std::vector<Tensor*>& tensors,
                    last_dims[i]);
       }
     }
-    // MXFP8: E8M0 scale_inv per block of 32 elements
-    // Helper to gather scale_inv from individual tensors into a contiguous buffer
-    auto gather_scales = [&](
-        auto get_shape_fn,
-        auto get_cpu_ptr_fn) -> std::pair<CudaPtr<>, size_t> {
-      // Compute total size and offsets
-      size_t total_bytes = 0;
-      std::vector<size_t> scale_offsets(num_tensors);
-      std::vector<size_t> numels(num_tensors);
-
-      for (size_t i = 0; i < num_tensors; ++i) {
-        scale_offsets[i] = total_bytes;
-        const NVTEShape shape = get_shape_fn(tensors[i]);
-        size_t numel = 1;
-        for (size_t d = 0; d < shape.ndim; ++d) {
-          numel *= shape.data[d];
-        }
-        numels[i] = numel;
-        total_bytes += numel;  // E8M0 is 1 byte per element
-      }
-
-      // Allocate and copy
-      CudaPtr<> buffer = cuda_alloc(total_bytes);
-      for (size_t i = 0; i < num_tensors; ++i) {
-        tensors[i]->to_cpu();
-        NVTE_CHECK_CUDA(cudaGetLastError());
-        void* dst = static_cast<char*>(buffer.get()) + scale_offsets[i];
-        const void* src = get_cpu_ptr_fn(tensors[i]);
-        NVTE_CHECK_CUDA(cudaMemcpy(dst, src, numels[i], cudaMemcpyHostToDevice));
-      }
-      return {std::move(buffer), total_bytes};
-    };
-
-    // Gather rowwise scale_inv if available
+    // MXFP8: E8M0 scale_inv per block of 32 elements (1 byte per scale element).
     if (has_rowwise) {
-      auto [row_buffer, row_total] = gather_scales(
+      auto [row_buffer, row_total] = gather_scale_inv(
+          /*bytes_per_elem=*/1,
           [](Tensor* t) { return t->rowwise_scale_inv_shape(); },
-          [](Tensor* t) { return t->rowwise_cpu_scale_inv_ptr<uint8_t>(); });
+          [](Tensor* t) -> const void* { return t->rowwise_cpu_scale_inv_ptr<uint8_t>(); });
       grouped.scale_inv = std::move(row_buffer);
-
       NVTEShape row_shape = nvte_make_shape(&row_total, 1);
       NVTEBasicTensor row_tensor{grouped.scale_inv.get(), kNVTEFloat8E8M0, row_shape};
       nvte_set_grouped_tensor_param(h, kNVTEGroupedRowwiseScaleInv, &row_tensor, sizeof(row_tensor));
     }
-
-    // Gather columnwise scale_inv if available
     if (has_columnwise) {
-      auto [col_buffer, col_total] = gather_scales(
+      auto [col_buffer, col_total] = gather_scale_inv(
+          /*bytes_per_elem=*/1,
           [](Tensor* t) { return t->columnwise_scale_inv_shape(); },
-          [](Tensor* t) { return t->columnwise_cpu_scale_inv_ptr<uint8_t>(); });
+          [](Tensor* t) -> const void* { return t->columnwise_cpu_scale_inv_ptr<uint8_t>(); });
       grouped.columnwise_scale_inv = std::move(col_buffer);
-
       NVTEShape col_shape = nvte_make_shape(&col_total, 1);
       NVTEBasicTensor col_tensor{grouped.columnwise_scale_inv.get(), kNVTEFloat8E8M0, col_shape};
       nvte_set_grouped_tensor_param(h, kNVTEGroupedColumnwiseScaleInv, &col_tensor, sizeof(col_tensor));
     }
-
-    // Mark as having swizzled scales (required for GEMM)
     const uint8_t swizzled = 1;
     nvte_set_grouped_tensor_param(h, kNVTEGroupedWithGEMMSwizzledScales, &swizzled,
                                   sizeof(swizzled));
   } else if (scaling_mode == NVTE_BLOCK_SCALING_1D || scaling_mode == NVTE_BLOCK_SCALING_2D) {
-    // FP8 block scaling: float32 scale_inv per block of 128 elements
-    // Gather scale_inv from individual tensors into a contiguous buffer
-    auto gather_block_scales = [&](
-        auto get_shape_fn,
-        auto get_cpu_ptr_fn) -> std::pair<CudaPtr<>, size_t> {
-      size_t total_scale_floats = 0;
-      std::vector<size_t> scale_offsets(num_tensors);
-      std::vector<size_t> numels(num_tensors);
-
-      for (size_t i = 0; i < num_tensors; ++i) {
-        scale_offsets[i] = total_scale_floats;
-        const NVTEShape sshape = get_shape_fn(tensors[i]);
-        size_t numel = 1;
-        for (size_t d = 0; d < sshape.ndim; ++d) {
-          numel *= sshape.data[d];
-        }
-        numels[i] = numel;
-        total_scale_floats += numel;
-      }
-
-      CudaPtr<> buffer = cuda_alloc(total_scale_floats * sizeof(float));
-      for (size_t i = 0; i < num_tensors; ++i) {
-        tensors[i]->to_cpu();
-        NVTE_CHECK_CUDA(cudaGetLastError());
-        void* dst = static_cast<char*>(buffer.get()) + scale_offsets[i] * sizeof(float);
-        const void* src = get_cpu_ptr_fn(tensors[i]);
-        NVTE_CHECK_CUDA(cudaMemcpy(dst, src, numels[i] * sizeof(float), cudaMemcpyHostToDevice));
-      }
-      return {std::move(buffer), total_scale_floats};
-    };
-
-    // Gather rowwise scale_inv if available
+    // FP8 block scaling: float32 scale_inv per block of 128 elements.
+    // Unlike MXFP8/NVFP4, dims are not required to be multiples of the block size — the
+    // quantizer and padded_block_{1d,2d}_scale_inv_floats both use ceildiv, so the
+    // `enforce_grouped_gemm_alignment` flag intentionally has no effect here.
     if (has_rowwise) {
-      auto [row_buffer, row_total] = gather_block_scales(
+      auto [row_buffer, row_total] = gather_scale_inv(
+          /*bytes_per_elem=*/sizeof(float),
           [](Tensor* t) { return t->rowwise_scale_inv_shape(); },
           [](Tensor* t) -> const void* { return t->rowwise_cpu_scale_inv_ptr<float>(); });
       grouped.scale_inv = std::move(row_buffer);
-
       NVTEShape row_shape = nvte_make_shape(&row_total, 1);
       NVTEBasicTensor row_tensor{grouped.scale_inv.get(), kNVTEFloat32, row_shape};
       nvte_set_grouped_tensor_param(h, kNVTEGroupedRowwiseScaleInv, &row_tensor, sizeof(row_tensor));
     }
-
-    // Gather columnwise scale_inv if available
     if (has_columnwise) {
-      auto [col_buffer, col_total] = gather_block_scales(
+      auto [col_buffer, col_total] = gather_scale_inv(
+          /*bytes_per_elem=*/sizeof(float),
           [](Tensor* t) { return t->columnwise_scale_inv_shape(); },
           [](Tensor* t) -> const void* { return t->columnwise_cpu_scale_inv_ptr<float>(); });
       grouped.columnwise_scale_inv = std::move(col_buffer);
-
       NVTEShape col_shape = nvte_make_shape(&col_total, 1);
       NVTEBasicTensor col_tensor{grouped.columnwise_scale_inv.get(), kNVTEFloat32, col_shape};
       nvte_set_grouped_tensor_param(h, kNVTEGroupedColumnwiseScaleInv, &col_tensor, sizeof(col_tensor));
@@ -1481,56 +1441,23 @@ GroupedBuffers build_grouped_tensor(const std::vector<Tensor*>& tensors,
                    last_dims[i]);
       }
     }
-    // NVFP4: E4M3 scale_inv per block of 16 elements (swizzled for GEMM)
-    // Scale layout: [roundup(rows, 128), roundup(cols/16, 4)] E4M3 bytes per tensor
-    auto gather_nvfp4_scales = [&](
-        auto get_shape_fn,
-        auto get_cpu_ptr_fn) -> std::pair<CudaPtr<>, size_t> {
-      size_t total_scale_bytes = 0;
-      std::vector<size_t> scale_byte_offsets(num_tensors);
-      std::vector<size_t> scale_numels(num_tensors);
-
-      for (size_t i = 0; i < num_tensors; ++i) {
-        scale_byte_offsets[i] = total_scale_bytes;
-        const NVTEShape sshape = get_shape_fn(tensors[i]);
-        size_t scale_numel = 1;
-        for (size_t d = 0; d < sshape.ndim; ++d) {
-          scale_numel *= sshape.data[d];
-        }
-        scale_numels[i] = scale_numel;
-        total_scale_bytes += scale_numel;  // E4M3 is 1 byte per element
-      }
-
-      CudaPtr<> buffer = cuda_alloc(total_scale_bytes);
-      for (size_t i = 0; i < num_tensors; ++i) {
-        tensors[i]->to_cpu();
-        NVTE_CHECK_CUDA(cudaGetLastError());
-        void* dst = static_cast<char*>(buffer.get()) + scale_byte_offsets[i];
-        const void* src = get_cpu_ptr_fn(tensors[i]);
-        NVTE_CHECK_CUDA(cudaMemcpy(dst, src, scale_numels[i], cudaMemcpyHostToDevice));
-      }
-      return {std::move(buffer), total_scale_bytes};
-    };
-
-    // Gather rowwise scale_inv if available
+    // NVFP4: E4M3 scale_inv per block of 16 elements (swizzled for GEMM, 1 byte per scale).
     if (has_rowwise) {
-      auto [row_buffer, row_total] = gather_nvfp4_scales(
+      auto [row_buffer, row_total] = gather_scale_inv(
+          /*bytes_per_elem=*/1,
           [](Tensor* t) { return t->rowwise_scale_inv_shape(); },
           [](Tensor* t) -> const void* { return t->rowwise_cpu_scale_inv_ptr<fp8e4m3>(); });
       grouped.scale_inv = std::move(row_buffer);
-
       NVTEShape row_shape = nvte_make_shape(&row_total, 1);
       NVTEBasicTensor row_tensor{grouped.scale_inv.get(), kNVTEFloat8E4M3, row_shape};
       nvte_set_grouped_tensor_param(h, kNVTEGroupedRowwiseScaleInv, &row_tensor, sizeof(row_tensor));
     }
-
-    // Gather columnwise scale_inv if available
     if (has_columnwise) {
-      auto [col_buffer, col_total] = gather_nvfp4_scales(
+      auto [col_buffer, col_total] = gather_scale_inv(
+          /*bytes_per_elem=*/1,
           [](Tensor* t) { return t->columnwise_scale_inv_shape(); },
           [](Tensor* t) -> const void* { return t->columnwise_cpu_scale_inv_ptr<fp8e4m3>(); });
       grouped.columnwise_scale_inv = std::move(col_buffer);
-
       NVTEShape col_shape = nvte_make_shape(&col_total, 1);
       NVTEBasicTensor col_tensor{grouped.columnwise_scale_inv.get(), kNVTEFloat8E4M3, col_shape};
       nvte_set_grouped_tensor_param(h, kNVTEGroupedColumnwiseScaleInv, &col_tensor, sizeof(col_tensor));
