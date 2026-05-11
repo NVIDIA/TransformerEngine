@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Linear API"""
+import os
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Tuple, Union, List
 from functools import reduce
@@ -474,19 +475,67 @@ def _linear_forward_impl(
     # Forward GEMM
     # Note: y = x * w^T
     # ------------------------------------------------------
-    nvtx_range_push(f"{nvtx_label}.gemm")
-    gemm_out, *_, reduce_scatter_out = general_gemm(
-        weightmat,
-        inputmat_total,
-        quantization_params=output_quantizer,
-        out_dtype=activation_dtype,
-        bias=bias,
-        use_split_accumulator=use_split_accumulator,
-        ub=ub_obj,
-        ub_type=ub_type,
-        extra_output=reduce_scatter_out,
+    _fp32_tp_reduce = (
+        os.environ.get("NVTE_FP32_TP_REDUCE", "0") == "1"
+        and parallel_mode == "row"
+        and args.tp_size > 1
     )
-    nvtx_range_pop(f"{nvtx_label}.gemm")
+    _gemm_out_dtype = torch.float32 if _fp32_tp_reduce else activation_dtype
+
+    _tp_invariant = (
+        os.environ.get("NVTE_TP_INVARIANT_MODE", "0") == "1"
+        and parallel_mode == "row"
+        and args.tp_size > 1
+    )
+
+    if _tp_invariant:
+        # TP-invariant diagnostic: full GEMM matching TP=1 accumulation order.
+        assert not fp8, "NVTE_TP_INVARIANT_MODE does not support FP8"
+        nvtx_range_push(f"{nvtx_label}.tp_invariant_gemm")
+
+        def allgather_along_dim(tensor, group, world_size, dim):
+            chunks = [torch.empty_like(tensor) for _ in range(world_size)]
+            torch.distributed.all_gather(chunks, tensor.contiguous(), group=group)
+            return torch.cat(chunks, dim=dim)
+
+        inputmat_gathered = allgather_along_dim(
+            inputmat_total, tp_group, tp_world_size, dim=-1,
+        )  # [tokens, hidden/TP] -> [tokens, hidden]
+        weight_gathered = allgather_along_dim(
+            weightmat, tp_group, tp_world_size, dim=-1,
+        )  # [out, hidden/TP] -> [out, hidden]
+
+        input_2d = inputmat_gathered.reshape(-1, inputmat_gathered.shape[-1])
+        out = general_gemm(
+            weight_gathered, input_2d,
+            out_dtype=activation_dtype,
+            bias=bias,
+        )
+        if isinstance(out, tuple):
+            out = out[0]
+        out = out.reshape(inputmat_gathered.shape[:-1] + (weight_gathered.shape[0],))
+
+        # SP: scatter to per-rank chunk along sequence dim.
+        if sequence_parallel:
+            rank = torch.distributed.get_rank(tp_group)
+            out = out.chunk(tp_world_size, dim=0)[rank].contiguous()
+
+        del inputmat_gathered, weight_gathered, input_2d
+        nvtx_range_pop(f"{nvtx_label}.tp_invariant_gemm")
+    else:
+        nvtx_range_push(f"{nvtx_label}.gemm")
+        gemm_out, *_, reduce_scatter_out = general_gemm(
+            weightmat,
+            inputmat_total,
+            quantization_params=output_quantizer,
+            out_dtype=_gemm_out_dtype,
+            bias=bias,
+            use_split_accumulator=use_split_accumulator,
+            ub=ub_obj,
+            ub_type=ub_type,
+            extra_output=reduce_scatter_out,
+        )
+        nvtx_range_pop(f"{nvtx_label}.gemm")
     # ------------------------------------------------------
     # Finished forward GEMM...
     # ------------------------------------------------------
@@ -502,22 +551,25 @@ def _linear_forward_impl(
     # Prepare output tensor
     # Note: Perform tensor-parallel communication
     # ------------------------------------------------------
-    out = None
-    if ub_overlap_rs_fprop:
-        out = reduce_scatter_out
-    elif parallel_mode == "row" and args.tp_size > 1:
-        nvtx_range_push(f"{nvtx_label}.row_parallel_comm")
-        out = gemm_out
-        if sequence_parallel:
-            out, _ = reduce_scatter_along_first_dim(out, tp_group)
-        elif args.tensor_parallel:
-            if symmetric_ar_type is not None:
-                out, _ = symmetric_all_reduce(out, tp_group, all_reduce_type=symmetric_ar_type)
-            else:
-                out, _ = allreduce(out, tp_group)
-        nvtx_range_pop(f"{nvtx_label}.row_parallel_comm")
-    else:
-        out = gemm_out
+    if not _tp_invariant:
+        out = None
+        if ub_overlap_rs_fprop:
+            out = reduce_scatter_out
+        elif parallel_mode == "row" and args.tp_size > 1:
+            nvtx_range_push(f"{nvtx_label}.row_parallel_comm")
+            out = gemm_out
+            if sequence_parallel:
+                out, _ = reduce_scatter_along_first_dim(out, tp_group)
+            elif args.tensor_parallel:
+                if symmetric_ar_type is not None:
+                    out, _ = symmetric_all_reduce(out, tp_group, all_reduce_type=symmetric_ar_type)
+                else:
+                    out, _ = allreduce(out, tp_group)
+            if _fp32_tp_reduce and out.dtype != activation_dtype:
+                out = out.to(activation_dtype)
+            nvtx_range_pop(f"{nvtx_label}.row_parallel_comm")
+        else:
+            out = gemm_out
     # ------------------------------------------------------
     # Output tensor is ready to return...
     # ------------------------------------------------------
@@ -971,62 +1023,112 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
 
             # dgrad GEMM
             # Note: dx = dy * w
-
-            nvtx_range_push(f"{nvtx_label}.dgrad_gemm")
-            weight_for_dgrad = weight_fp8
-            if bwd_args.backward_override == "dequantized":
-                if isinstance(weight_for_dgrad, QuantizedTensorStorage):
-                    weight_for_dgrad = weight_for_dgrad.dequantize(dtype=bwd_args.activation_dtype)
-                else:
-                    weight_for_dgrad = cast_if_needed(weight_for_dgrad, bwd_args.activation_dtype)
-            elif bwd_args.backward_override == "high_precision":
-                weight_for_dgrad = saved_weight
-                if isinstance(weight_for_dgrad, QuantizedTensorStorage):
-                    weight_for_dgrad = weight_for_dgrad.dequantize(dtype=bwd_args.activation_dtype)
-            gemm_out, *_, reduce_scatter_out = general_gemm(
-                weight_for_dgrad,
-                grad_output,
-                layout="NN",
-                grad=True,
-                quantization_params=grad_input_quantizer,
-                out=gemm_out,
-                out_dtype=bwd_args.activation_dtype,
-                use_split_accumulator=use_split_accumulator,
-                ub=ub_obj_dgrad,
-                ub_type=ub_type_dgrad,
-                extra_output=reduce_scatter_out,
-                bulk_overlap=bwd_args.ub_bulk_dgrad,
+            _fp32_tp_reduce_bwd = (
+                os.environ.get("NVTE_FP32_TP_REDUCE", "0") == "1"
+                and bwd_args.parallel_mode == "column"
+                and bwd_args.tp_size > 1
             )
-            nvtx_range_pop(f"{nvtx_label}.dgrad_gemm")
+            _dgrad_out_dtype = torch.float32 if _fp32_tp_reduce_bwd else bwd_args.activation_dtype
 
-            # FSDP2 only handles deallocation all-gathered weights that it allocates.
-            # Columnwise data is derived from rowwise data after allgather for fp8
-            # and 2d block-scaled weights in TE managed memory. So we need to clear
-            # it here.
-            # (Issues #2681, #2717)
-            if bwd_args.is_fsdp2 and isinstance(weight_fp8, QuantizedTensorStorage):
-                clear_columnwise_cache(weight_fp8)
+            _tp_invariant_bwd = (
+                os.environ.get("NVTE_TP_INVARIANT_MODE", "0") == "1"
+                and bwd_args.parallel_mode == "column"
+                and bwd_args.tp_size > 1
+            )
 
-            # Prepare grad input tensor
-            # Note: Perform tensor-parallel communication
-            if bwd_args.ub_overlap_rs_dgrad:
-                dgrad = reduce_scatter_out
-            elif bwd_args.ub_bulk_wgrad:
-                dgrad = ub_obj_wgrad.get_buffer(local_chunk=True)
-            elif bwd_args.parallel_mode == "column" and bwd_args.tp_size > 1:
-                nvtx_range_push(f"{nvtx_label}.column_parallel_comm_dgrad")
-                dgrad = gemm_out
-                if bwd_args.sequence_parallel:
-                    dgrad, dgrad_work = reduce_scatter_along_first_dim(
-                        dgrad,
-                        bwd_args.tp_group,
-                        async_op=True,
+            if _tp_invariant_bwd:
+                # TP-invariant diagnostic: full dgrad GEMM matching TP=1 accumulation.
+                assert not bwd_args.fp8, "NVTE_TP_INVARIANT_MODE does not support FP8"
+                nvtx_range_push(f"{nvtx_label}.tp_invariant_dgrad")
+
+                def allgather_along_dim(tensor, group, world_size, dim):
+                    chunks = [torch.empty_like(tensor) for _ in range(world_size)]
+                    torch.distributed.all_gather(
+                        chunks, tensor.contiguous(), group=group,
                     )
-                else:
-                    dgrad, dgrad_work = allreduce(dgrad, bwd_args.tp_group, async_op=True)
-                nvtx_range_pop(f"{nvtx_label}.column_parallel_comm_dgrad")
+                    return torch.cat(chunks, dim=dim)
+
+                grad_output_gathered = allgather_along_dim(
+                    grad_output, bwd_args.tp_group, bwd_args.tp_size, dim=-1,
+                )  # [tokens, out/TP] -> [tokens, out]
+                weight_gathered = allgather_along_dim(
+                    weight_fp8, bwd_args.tp_group, bwd_args.tp_size, dim=0,
+                )  # [out/TP, in] -> [out, in]
+
+                grad_output_2d = grad_output_gathered.reshape(
+                    -1, grad_output_gathered.shape[-1],
+                )
+                dgrad = general_gemm(
+                    weight_gathered, grad_output_2d,
+                    layout="NN", grad=True,
+                    out_dtype=bwd_args.activation_dtype,
+                )
+                if isinstance(dgrad, tuple):
+                    dgrad = dgrad[0]
+
+                # SP: scatter to per-rank chunk along sequence dim.
+                if bwd_args.sequence_parallel:
+                    rank = torch.distributed.get_rank(bwd_args.tp_group)
+                    dgrad = dgrad.chunk(bwd_args.tp_size, dim=0)[rank].contiguous()
+
+                del grad_output_gathered, weight_gathered, grad_output_2d
+                nvtx_range_pop(f"{nvtx_label}.tp_invariant_dgrad")
             else:
-                dgrad = gemm_out
+                nvtx_range_push(f"{nvtx_label}.dgrad_gemm")
+                weight_for_dgrad = weight_fp8
+                if bwd_args.backward_override == "dequantized":
+                    if isinstance(weight_for_dgrad, QuantizedTensorStorage):
+                        weight_for_dgrad = weight_for_dgrad.dequantize(dtype=bwd_args.activation_dtype)
+                    else:
+                        weight_for_dgrad = cast_if_needed(weight_for_dgrad, bwd_args.activation_dtype)
+                elif bwd_args.backward_override == "high_precision":
+                    weight_for_dgrad = saved_weight
+                    if isinstance(weight_for_dgrad, QuantizedTensorStorage):
+                        weight_for_dgrad = weight_for_dgrad.dequantize(dtype=bwd_args.activation_dtype)
+                gemm_out, *_, reduce_scatter_out = general_gemm(
+                    weight_for_dgrad,
+                    grad_output,
+                    layout="NN",
+                    grad=True,
+                    quantization_params=grad_input_quantizer,
+                    out=gemm_out,
+                    out_dtype=_dgrad_out_dtype,
+                    use_split_accumulator=use_split_accumulator,
+                    ub=ub_obj_dgrad,
+                    ub_type=ub_type_dgrad,
+                    extra_output=reduce_scatter_out,
+                    bulk_overlap=bwd_args.ub_bulk_dgrad,
+                )
+                nvtx_range_pop(f"{nvtx_label}.dgrad_gemm")
+
+                # FSDP2 only handles deallocation all-gathered weights that it allocates.
+                # Columnwise data is derived from rowwise data after allgather for fp8
+                # and 2d block-scaled weights in TE managed memory. So we need to clear
+                # it here.
+                # (Issues #2681, #2717)
+                if bwd_args.is_fsdp2 and isinstance(weight_fp8, QuantizedTensorStorage):
+                    clear_columnwise_cache(weight_fp8)
+
+                # Prepare grad input tensor
+                # Note: Perform tensor-parallel communication
+                if bwd_args.ub_overlap_rs_dgrad:
+                    dgrad = reduce_scatter_out
+                elif bwd_args.ub_bulk_wgrad:
+                    dgrad = ub_obj_wgrad.get_buffer(local_chunk=True)
+                elif bwd_args.parallel_mode == "column" and bwd_args.tp_size > 1:
+                    nvtx_range_push(f"{nvtx_label}.column_parallel_comm_dgrad")
+                    dgrad = gemm_out
+                    if bwd_args.sequence_parallel:
+                        dgrad, dgrad_work = reduce_scatter_along_first_dim(
+                            dgrad,
+                            bwd_args.tp_group,
+                            async_op=True,
+                        )
+                    else:
+                        dgrad, dgrad_work = allreduce(dgrad, bwd_args.tp_group, async_op=True)
+                    nvtx_range_pop(f"{nvtx_label}.column_parallel_comm_dgrad")
+                else:
+                    dgrad = gemm_out
 
         # --------------------------------------------------
         # Grad input tensor has been computed...
