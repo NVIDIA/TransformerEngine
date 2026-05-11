@@ -187,14 +187,22 @@ struct GroupedGemmSetupWorkspace {
     };
 
     // 8 pointer arrays (each 16-byte aligned), then 6 int arrays, then 1 float array.
-    align_ptr(); place(ws.A_ptrs, ptr_size);
-    align_ptr(); place(ws.B_ptrs, ptr_size);
-    align_ptr(); place(ws.C_ptrs, ptr_size);
-    align_ptr(); place(ws.D_ptrs, ptr_size);
-    align_ptr(); place(ws.alpha_ptrs, ptr_size);
-    align_ptr(); place(ws.beta_ptrs, ptr_size);
-    align_ptr(); place(ws.a_scale_inv_ptrs, ptr_size);
-    align_ptr(); place(ws.b_scale_inv_ptrs, ptr_size);
+    align_ptr();
+    place(ws.A_ptrs, ptr_size);
+    align_ptr();
+    place(ws.B_ptrs, ptr_size);
+    align_ptr();
+    place(ws.C_ptrs, ptr_size);
+    align_ptr();
+    place(ws.D_ptrs, ptr_size);
+    align_ptr();
+    place(ws.alpha_ptrs, ptr_size);
+    align_ptr();
+    place(ws.beta_ptrs, ptr_size);
+    align_ptr();
+    place(ws.a_scale_inv_ptrs, ptr_size);
+    align_ptr();
+    place(ws.b_scale_inv_ptrs, ptr_size);
     place(ws.a_rows, int_size);
     place(ws.a_cols, int_size);
     place(ws.b_rows, int_size);
