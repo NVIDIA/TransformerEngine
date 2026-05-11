@@ -1077,8 +1077,8 @@ __forceinline__ __device__ int64_t padded_mxfp8_scale_inv_bytes(int64_t first, i
 // `PaddedFn` is a callable (int64_t first, int64_t last) -> int64_t returning the
 // recipe-specific padded size (bytes for MXFP8/NVFP4, floats for FP8 block scaling).
 template <typename PaddedFn>
-__forceinline__ __device__ int64_t compute_grouped_scale_inv_offset(
-    const TensorShapeInfo &meta, size_t idx, PaddedFn padded) {
+__forceinline__ __device__ int64_t compute_grouped_scale_inv_offset(const TensorShapeInfo &meta,
+                                                                    size_t idx, PaddedFn padded) {
   if (meta.first_dims != nullptr || meta.last_dims != nullptr) {
     int64_t cumsum = 0;
     for (size_t i = 0; i < idx; i++) {
@@ -1091,14 +1091,12 @@ __forceinline__ __device__ int64_t compute_grouped_scale_inv_offset(
   return static_cast<int64_t>(idx) * padded(meta.uniform_first, meta.uniform_last);
 }
 
-
 __forceinline__ __device__ int64_t padded_nvfp4_scale_inv_bytes(int64_t first, int64_t last) {
   namespace mxfp8_swizzle = transformer_engine::dispatch::mxfp8::swizzle;
   constexpr int64_t kNvfp4BlockSize = 16;
   const int64_t scale_tile_y = static_cast<int64_t>(mxfp8_swizzle::GEMM_SWIZZLED_SCALE_TILE_DIM_Y);
   const int64_t scale_tile_x = static_cast<int64_t>(mxfp8_swizzle::GEMM_SWIZZLED_SCALE_TILE_DIM_X);
-  const int64_t padded_scale_dim_y =
-      ((first + scale_tile_y - 1) / scale_tile_y) * scale_tile_y;
+  const int64_t padded_scale_dim_y = ((first + scale_tile_y - 1) / scale_tile_y) * scale_tile_y;
   const int64_t scale_dim_x = (last + kNvfp4BlockSize - 1) / kNvfp4BlockSize;
   const int64_t padded_scale_dim_x =
       ((scale_dim_x + scale_tile_x - 1) / scale_tile_x) * scale_tile_x;
@@ -1358,8 +1356,7 @@ __global__ void setup_grouped_gemm_kernel(
   //   NVTE_BLOCK_SCALING_1D : float32 array;    ceildiv(./128) * roundup(./4) per tensor.
   //   NVTE_BLOCK_SCALING_2D : float32 array;    ceildiv(./128) * roundup(ceildiv(./128), 4).
   //   otherwise (tensor)    : one float per tensor, indexed by tensor index.
-  auto fill_scale_ptr = [&](void **ptrs, void *base, const TensorShapeInfo &meta,
-                            bool op_rowwise) {
+  auto fill_scale_ptr = [&](void **ptrs, void *base, const TensorShapeInfo &meta, bool op_rowwise) {
     int64_t byte_offset = -1;
     int64_t float_offset = -1;
     switch (scaling_mode) {
@@ -1369,9 +1366,8 @@ __global__ void setup_grouped_gemm_kernel(
         });
         break;
       case NVTE_NVFP4_1D_SCALING:
-        byte_offset = compute_grouped_scale_inv_offset(meta, idx, [](int64_t f, int64_t l) {
-          return padded_nvfp4_scale_inv_bytes(f, l);
-        });
+        byte_offset = compute_grouped_scale_inv_offset(
+            meta, idx, [](int64_t f, int64_t l) { return padded_nvfp4_scale_inv_bytes(f, l); });
         break;
       case NVTE_BLOCK_SCALING_1D:
         float_offset = compute_grouped_scale_inv_offset(meta, idx, [=](int64_t f, int64_t l) {
@@ -1693,8 +1689,7 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
   if (nvfp4) {
     const bool use_rowwise = choice.use_rowwise;
     for (size_t i = 0; i < num_tensors; ++i) {
-      const transformer_engine::Tensor *ti =
-          transformer_engine::convertNVTETensorCheck(A_list[i]);
+      const transformer_engine::Tensor *ti = transformer_engine::convertNVTETensorCheck(A_list[i]);
       const auto &amax_i = use_rowwise ? ti->amax : ti->columnwise_amax;
       NVTE_CHECK(amax_i.has_data(), "Grouped GEMM: NVFP4 A_list tensor ", i, " is missing amax.");
     }
