@@ -41,10 +41,8 @@ bool is_low_precision(const DType type) {
 std::vector<size_t> getGemmOutputShape(const NVTEShape& A_shape, const bool transa,
                                        const NVTEShape& B_shape, const bool transb) {
   // Flatten outer dims to get 2D matrices
-  const size_t A0 = A_shape.ndim > 0 ? product(A_shape, 0, A_shape.ndim - 1) : 1;
-  const size_t A1 = A_shape.ndim > 0 ? A_shape.data[A_shape.ndim - 1] : 1;
-  const size_t B0 = B_shape.ndim > 0 ? product(B_shape, 0, B_shape.ndim - 1) : 1;
-  const size_t B1 = B_shape.ndim > 0 ? B_shape.data[B_shape.ndim - 1] : 1;
+  const auto [A0, A1] = get_2d_dims(A_shape);
+  const auto [B0, B1] = get_2d_dims(B_shape);
 
   // Check matrix dims
   NVTE_CHECK((transa ? A1 : A0) == (transb ? B0 : B1), "Invalid matrix dimensions for GEMM (A=(",
