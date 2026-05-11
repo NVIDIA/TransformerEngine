@@ -442,14 +442,14 @@ def triton_call_lowering(
     # Normalize grid to 3D. When `grid` is a callable, defer evaluation until
     # we know the per-config meta (so each autotune config gets its own grid,
     # matching jax-triton's behavior).
-    def _normalize_grid(g):
-        if isinstance(g, int):
-            return (g, 1, 1)
-        if len(g) == 1:
-            return (g[0], 1, 1)
-        if len(g) == 2:
-            return (g[0], g[1], 1)
-        return tuple(g[:3])
+    def _normalize_grid(grid_tuple):
+        if isinstance(grid_tuple, int):
+            return (grid_tuple, 1, 1)
+        if len(grid_tuple) == 1:
+            return (grid_tuple[0], 1, 1)
+        if len(grid_tuple) == 2:
+            return (grid_tuple[0], grid_tuple[1], 1)
+        return tuple(grid_tuple[:3])
 
     grid_callable = grid if callable(grid) else None
     if grid_callable is None:
