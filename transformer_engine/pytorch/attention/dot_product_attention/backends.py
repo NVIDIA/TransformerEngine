@@ -89,6 +89,7 @@ _flash_attn_fwd = None
 _flash_attn_bwd = None
 _flash_attn_varlen_fwd = None
 _flash_attn_varlen_bwd = None
+_cudnn_score_mod_handles: Dict[torch.device, Any] = {}
 
 # Try to import Flash Attention v2
 try:
@@ -1285,7 +1286,25 @@ def _wrap_score_mod(score_mod: Optional[Callable], graph_tensors: Dict[str, Any]
     return _wrapped_score_mod
 
 
-def _build_cudnn_pygraph(dtype: torch.dtype):
+def _get_cudnn_current_stream_handle(cudnn, device: torch.device):
+    """Return a cuDNN handle for device, bound to PyTorch's current stream."""
+    if device.type != "cuda":
+        raise ValueError(f"score_mod only supports CUDA tensors, got device {device}.")
+    if device.index is None:
+        device = torch.device("cuda", torch.cuda.current_device())
+
+    handle = _cudnn_score_mod_handles.get(device)
+    with torch.cuda.device(device):
+        if handle is None:
+            handle = cudnn.create_handle()
+            _cudnn_score_mod_handles[device] = handle
+
+        stream = torch.cuda.current_stream(device).cuda_stream
+        cudnn.set_stream(handle=handle, stream=stream)
+    return handle
+
+
+def _build_cudnn_pygraph(dtype: torch.dtype, device: torch.device):
     """Create a cuDNN frontend Python graph for F16/BF16 SDPA."""
     import cudnn  # pylint: disable=import-outside-toplevel
 
@@ -1300,6 +1319,7 @@ def _build_cudnn_pygraph(dtype: torch.dtype):
         io_data_type=io_data_type,
         intermediate_data_type=cudnn.data_type.FLOAT,
         compute_data_type=cudnn.data_type.FLOAT,
+        handle=_get_cudnn_current_stream_handle(cudnn, device),
     )
     return cudnn, graph
 
@@ -1322,7 +1342,11 @@ def _build_and_run_cudnn_graph(graph, variant_pack: Dict[Any, torch.Tensor], dev
         device=device,
         dtype=torch.uint8,
     )
-    graph.execute(variant_pack, workspace)
+    graph.execute(
+        variant_pack,
+        workspace,
+        handle=_get_cudnn_current_stream_handle(cudnn, device),
+    )
 
 
 class FusedAttentionWithScoreModFunc(torch.autograd.Function):
@@ -1347,7 +1371,7 @@ class FusedAttentionWithScoreModFunc(torch.autograd.Function):
         # pylint: disable=missing-function-docstring
         q_bhsd_dim, _ = _bhsd_dim_stride(query_layer, q_format)
 
-        cudnn, graph = _build_cudnn_pygraph(query_layer.dtype)
+        cudnn, graph = _build_cudnn_pygraph(query_layer.dtype, query_layer.device)
         q = _bhsd_graph_tensor(graph, query_layer, q_format)
         k = _bhsd_graph_tensor(graph, key_layer, kv_format)
         v = _bhsd_graph_tensor(graph, value_layer, kv_format)
@@ -1420,7 +1444,7 @@ class FusedAttentionWithScoreModFunc(torch.autograd.Function):
         query_layer, key_layer, value_layer, output_layer, stats_bhs1 = ctx.saved_tensors
         d_out = d_out.contiguous()
 
-        cudnn, graph = _build_cudnn_pygraph(query_layer.dtype)
+        cudnn, graph = _build_cudnn_pygraph(query_layer.dtype, query_layer.device)
         q = _bhsd_graph_tensor(graph, query_layer, ctx.q_format)
         k = _bhsd_graph_tensor(graph, key_layer, ctx.kv_format)
         v = _bhsd_graph_tensor(graph, value_layer, ctx.kv_format)
