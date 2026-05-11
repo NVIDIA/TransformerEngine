@@ -311,7 +311,7 @@ __device__ __forceinline__ void permute_vec_loop(const T *__restrict__ in, T *__
       const size_t s_local = w / pad_elems;
       const size_t s_i = s_begin + s_local;
       const size_t d_off = D + (w % pad_elems);
-      out[out_base + s_i * D_out + d_off] = static_cast<T>(0);
+      out[out_base + s_i * D_out + d_off] = static_cast<T>(0.f);
     }
   }
 }

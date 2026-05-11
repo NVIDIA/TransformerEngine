@@ -58,6 +58,29 @@ _softmax_offset_chunk_ids_cache = {}
 _dpa_fp8_cs_o_in_f16 = os.getenv("NVTE_DPA_FP8CS_O_in_F16", "1") == "1"
 
 
+def _reject_custom_recipe_under_cp(fp8, fp8_recipe):
+    """Fail fast when CustomRecipe meets context-parallel FP8 attention.
+
+    Single-device FP8 attention dispatch was migrated to read quantizer
+    instance types (see ``backends._qkv_quantizer_type`` and
+    ``utils.get_attention_quantizers``), which makes CustomRecipe work end
+    to end. The CP code path in this module still dispatches on
+    ``fp8_recipe.<predicate>()`` at ~90 sites; under CustomRecipe those
+    predicates all return False and the dispatch silently falls through to
+    incorrect tensor save / amax-reduction shapes. Until that migration
+    lands, surface the limitation here with a clear error rather than
+    failing later in C++ assertions or with silently-wrong gradients.
+    """
+    if fp8 and fp8_recipe is not None and fp8_recipe.custom():
+        raise NotImplementedError(
+            "CustomRecipe + Context Parallelism is not yet supported for FP8 "
+            "DotProductAttention. Either disable context parallelism, or use a "
+            "built-in FP8 recipe (DelayedScaling, Float8CurrentScaling, "
+            "MXFP8BlockScaling) for CP. The single-device CustomRecipe + DPA "
+            "path is supported."
+        )
+
+
 def get_bsh_dims(tensor_format):
     """Get batch dimension and sequence dimension from tensor format"""
     if tensor_format in ["bshd", "sbhd", "bhsd"]:
@@ -980,10 +1003,7 @@ def cp_p2p_fwd_fused_attn(
     )
 
     if fp8:
-        if qkv_layout != "t3hd":
-            softmax_lse_per_step, rng_states = aux_ctx_tensors
-        else:
-            softmax_lse_per_step, _, rng_states = aux_ctx_tensors
+        softmax_lse_per_step, rng_states = aux_ctx_tensors
     else:
         softmax_lse_per_step, rng_states, *rest = aux_ctx_tensors
         attn_bias = rest[0] if len(rest) > 0 else None
@@ -1169,17 +1189,7 @@ def cp_p2p_bwd_fused_attn(
     section,
 ):
     """Per-tile backward call of CP P2P with FusedAttention backend"""
-    if fp8:
-        if qkv_layout == "t3hd":
-            aux_tensors = [
-                softmax_lse,
-                softmax_lse,
-                rng_states[cp_size - step - 1],
-            ]
-        else:
-            aux_tensors = [softmax_lse, rng_states[cp_size - step - 1]]
-    else:
-        aux_tensors = [softmax_lse, rng_states[cp_size - step - 1]]
+    aux_tensors = [softmax_lse, rng_states[cp_size - step - 1]]
 
     max_seqlen_q_ = max_seqlen_q
     max_seqlen_kv_ = max_seqlen_kv
@@ -1195,17 +1205,7 @@ def cp_p2p_bwd_fused_attn(
         attn_mask_type_ = "padding" if "padding" in attn_mask_type else "no_mask"
     elif section == "upper-triangle":
         q_part, out_part, dout_part = [x.contiguous() for x in [q_part, out_part, dout_part]]
-        if fp8:
-            if qkv_layout == "t3hd":
-                aux_tensors = [
-                    softmax_lse_,
-                    softmax_lse_,
-                    rng_states[cp_size - step - 1],
-                ]
-            else:
-                aux_tensors = [softmax_lse_, rng_states[cp_size - step - 1]]
-        else:
-            aux_tensors = [softmax_lse_, rng_states[cp_size - step - 1]]
+        aux_tensors = [softmax_lse_, rng_states[cp_size - step - 1]]
 
         max_seqlen_q_ = max_seqlen_q // 2
         cu_seqlens_q_padded_ = None if cu_seqlens_q_padded is None else cu_seqlens_q_padded // 2
@@ -1469,12 +1469,14 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         fwd_nominal_dtype = q.dtype
         is_input_fp8 = isinstance(q, QuantizedTensorStorage)
         is_output_fp8 = fp8_output
-        is_bwd_fp8 = int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
+        _use_fp8_dpa_bwd = bool(int(os.getenv("NVTE_FP8_DPA_BWD", "1")))
+        is_bwd_fp8 = fp8 and _use_fp8_dpa_bwd
         # recipe passed in through autocast or set by NVTE_DPA_FP8_RECIPE;
         # may be different from fp8_meta["recipe"]
         fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
         if fp8_meta is not None and fp8_meta.get("local_recipes", None) is not None:
             fp8_recipe = fp8_meta["local_recipes"][0]
+        _reject_custom_recipe_under_cp(fp8, fp8_recipe)
         (
             QKV_quantizer,
             O_quantizer,
@@ -1482,7 +1484,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             dQKV_quantizer,
             dO_quantizer,
             dP_quantizer,
-        ) = dpa_utils.get_attention_quantizers(fp8, fp8_recipe, quantizers)
+        ) = dpa_utils.get_attention_quantizers(fp8, quantizers)
 
         # q, k, v a2a: gather s and split h
         # FP8DS/CS: Float8Tensor -> torch.uint8 -> Float8Tensor
@@ -1556,7 +1558,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             for i in range(cp_size):
                 S_quantizer_per_step[i] = S_quantizer.copy() if S_quantizer is not None else None
                 O_quantizer_per_step[i] = O_quantizer.copy()
-                if not fp8_recipe.mxfp8():
+                if fp8_recipe.delayed():
                     S_quantizer_per_step[i].amax = amax_per_step[0][i].reshape((1,))
                     O_quantizer_per_step[i].amax = amax_per_step[1][i].reshape((1,))
         else:
@@ -2042,7 +2044,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 )
 
         # update FP8 quantizers: amax across cp_size steps
-        if fp8 and use_fused_attention and not fp8_recipe.mxfp8():
+        if fp8 and use_fused_attention and fp8_recipe.delayed():
             amax_cp_fwd = amax_per_step.amax(dim=1)
             S_quantizer.amax.copy_(amax_cp_fwd[0])
             O_quantizer.amax.copy_(amax_cp_fwd[1])
@@ -2063,20 +2065,17 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         # prepare for return and ctx saves
         out_fp8 = None
         out_f16 = out.to(fwd_nominal_dtype)
-        if fp8 and (
-            is_output_fp8
-            or (
-                is_bwd_fp8
-                and not (fp8_recipe.float8_current_scaling() and _dpa_fp8_cs_o_in_f16)
-                and not fp8_recipe.mxfp8()
-            )
+        if (fp8 and is_output_fp8) or (
+            is_bwd_fp8
+            and not (fp8_recipe.float8_current_scaling() and _dpa_fp8_cs_o_in_f16)
+            and not fp8_recipe.mxfp8()
         ):
             out_fp8 = O_quantizer(out_f16)
         out_ret = out_fp8 if (fp8 and is_output_fp8) else out_f16
 
         ctx.layer_number = layer_number
         ctx.fp8_recipe = fp8_recipe
-        ctx.fp8 = fp8 and is_bwd_fp8
+        ctx.fp8 = is_bwd_fp8
 
         kv_fp8 = None
         kv = p2p_comm_buffers[-1]
@@ -2182,7 +2181,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             ctx.QKV_quantizer = QKV_quantizer.copy()
             ctx.O_quantizer = O_quantizer.copy()
             ctx.S_quantizer = S_quantizer.copy() if S_quantizer is not None else None
-            if not ctx.fp8_recipe.mxfp8():
+            if fp8_recipe.delayed():
                 ctx.QKV_quantizer.scale = QKV_quantizer.scale.clone()
                 ctx.O_quantizer.scale = O_quantizer.scale.clone()
                 ctx.S_quantizer.scale = S_quantizer.scale.clone()
@@ -2380,7 +2379,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     ctx.dP_quantizer.copy() if ctx.dP_quantizer is not None else None
                 )
                 dQKV_quantizer_per_step[i] = ctx.dQKV_quantizer.copy()
-                if not ctx.fp8_recipe.mxfp8():
+                if ctx.fp8_recipe.delayed():
                     dP_quantizer_per_step[i].amax = amax_per_step[0][i].reshape((1,))
                     dQKV_quantizer_per_step[i].amax = amax_per_step[1][i].reshape((1,))
         else:
@@ -2793,7 +2792,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
         # sum up all cp_size for dq, dk, dv
         if ctx.fp8 and ctx.use_fused_attention:
-            if not ctx.fp8_recipe.mxfp8():
+            if ctx.fp8_recipe.delayed():
                 amax_cp_bwd = amax_per_step.amax(dim=1)
                 ctx.dP_quantizer.amax.copy_(amax_cp_bwd[0])
                 ctx.dQKV_quantizer.amax.copy_(amax_cp_bwd[1])
@@ -3063,10 +3062,12 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         ), "q, k, v must be of the same class, e.g. torch.Tensor or QuantizedTensorStorage."
         is_input_fp8 = isinstance(q, QuantizedTensorStorage)
         is_output_fp8 = fp8_output
-        is_bwd_fp8 = int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
+        _use_fp8_dpa_bwd = bool(int(os.getenv("NVTE_FP8_DPA_BWD", "1")))
+        is_bwd_fp8 = fp8 and _use_fp8_dpa_bwd
         fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
         if fp8_meta is not None and fp8_meta.get("local_recipes", None) is not None:
             fp8_recipe = fp8_meta["local_recipes"][0]
+        _reject_custom_recipe_under_cp(fp8, fp8_recipe)
         (
             QKV_quantizer,
             O_quantizer,
@@ -3074,7 +3075,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             dQKV_quantizer,
             dO_quantizer,
             dP_quantizer,
-        ) = dpa_utils.get_attention_quantizers(fp8, fp8_recipe, quantizers)
+        ) = dpa_utils.get_attention_quantizers(fp8, quantizers)
         fwd_nominal_dtype = q.dtype
         q_fp8, k_fp8, v_fp8 = (q, k, v) if is_input_fp8 else (None, None, None)
         q_f16, k_f16, v_f16 = (None, None, None) if is_input_fp8 else (q, k, v)
@@ -3224,10 +3225,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             **fp8_meta_kwargs,
                         )
                         if fp8:
-                            if qkv_layout != "t3hd":
-                                softmax_lse_per_step[i], rng_states[i] = aux_ctx_tensors
-                            else:
-                                softmax_lse_per_step[i], _, rng_states[i] = aux_ctx_tensors
+                            softmax_lse_per_step[i], rng_states[i] = aux_ctx_tensors
                         else:
                             softmax_lse_per_step[i], rng_states[i], *_ = aux_ctx_tensors
                         if return_max_logit:
@@ -3306,12 +3304,12 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                 or (fp8_recipe.float8_current_scaling() and not _dpa_fp8_cs_o_in_f16)
             )
         )
-        if fp8 and (is_output_fp8 or bwd_requires_o_fp8):
+        if (fp8 and is_output_fp8) or bwd_requires_o_fp8:
             out_fp8 = O_quantizer(out_f16)
         out_ret = out_fp8 if is_output_fp8 else out_f16
 
         # save tensors for backward
-        ctx.fp8 = fp8 and is_bwd_fp8
+        ctx.fp8 = is_bwd_fp8
         ctx.fp8_recipe = fp8_recipe
         fp8_tensors = (None, None, None, None)
         f16_tensors = (None, None, None, None)
@@ -3405,7 +3403,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             ctx.QKV_quantizer = QKV_quantizer.copy()
             ctx.O_quantizer = O_quantizer.copy()
             ctx.S_quantizer = S_quantizer.copy() if S_quantizer is not None else None
-            if not ctx.fp8_recipe.mxfp8():
+            if ctx.fp8_recipe.delayed():
                 ctx.QKV_quantizer.scale = QKV_quantizer.scale.clone()
                 ctx.O_quantizer.scale = O_quantizer.scale.clone()
                 ctx.S_quantizer.scale = S_quantizer.scale.clone()
@@ -3589,17 +3587,10 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                     out_part = out.select(seq_dim_o, i).contiguous()
                     dout_part = dout.select(seq_dim_o, i).contiguous()
                     if ctx.use_fused_attention:
-                        if ctx.fp8 and ctx.qkv_layout == "t3hd":
-                            aux_ctx_tensors = [
-                                softmax_lse_per_step[i],
-                                softmax_lse_per_step[i],
-                                rng_states[i],
-                            ]
-                        else:
-                            aux_ctx_tensors = [
-                                softmax_lse_per_step[i],
-                                rng_states[i],
-                            ]
+                        aux_ctx_tensors = [
+                            softmax_lse_per_step[i],
+                            rng_states[i],
+                        ]
                         fused_attn_backend = tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
                         fp8_meta_kwargs = {}
                         new_qkv_layout = ctx.qkv_layout
@@ -3931,19 +3922,21 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         ), "q, k, v must be of the same class, e.g. torch.Tensor or QuantizedTensorStorage."
         is_input_fp8 = isinstance(q, QuantizedTensorStorage)
         is_output_fp8 = fp8_output
-        is_bwd_fp8 = int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
+        _use_fp8_dpa_bwd = bool(int(os.getenv("NVTE_FP8_DPA_BWD", "1")))
+        is_bwd_fp8 = fp8 and _use_fp8_dpa_bwd
         # recipe passed in through autocast or set by NVTE_DPA_FP8_RECIPE;
         # may be different from fp8_meta["recipe"]
         fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
         if fp8_meta is not None and fp8_meta.get("local_recipes", None) is not None:
             fp8_recipe = fp8_meta["local_recipes"][0]
+        _reject_custom_recipe_under_cp(fp8, fp8_recipe)
 
         fwd_nominal_dtype = q.dtype
         fused_attn_backend = None
         max_logit = None
 
         QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer = (
-            dpa_utils.get_attention_quantizers(fp8, fp8_recipe, quantizers)
+            dpa_utils.get_attention_quantizers(fp8, quantizers)
         )
 
         q_fp8, k_fp8, v_fp8 = (None, None, None)
@@ -4161,7 +4154,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         ctx.orig_o_shape = orig_o_shape
 
         # save tensors for backward
-        ctx.fp8 = fp8 and is_bwd_fp8
+        ctx.fp8 = is_bwd_fp8
         fp8_tensors = (None, None, None, None)
         f16_tensors = (None, None, None, None)
         if is_training:
@@ -4232,7 +4225,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             ctx.QKV_quantizer = QKV_quantizer.copy()
             ctx.O_quantizer = O_quantizer.copy()
             ctx.S_quantizer = S_quantizer.copy() if S_quantizer is not None else None
-            if not ctx.fp8_recipe.mxfp8():
+            if fp8_recipe.delayed():
                 ctx.QKV_quantizer.scale = QKV_quantizer.scale.clone()
                 ctx.O_quantizer.scale = O_quantizer.scale.clone()
                 ctx.S_quantizer.scale = S_quantizer.scale.clone()

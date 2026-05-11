@@ -42,17 +42,6 @@ py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::ob
   auto input_contiguous = tensor.contiguous();
   auto input_cpp = makeTransformerEngineTensor(input_contiguous);
 
-  // Set amax if use_existing_amax = true (only valid for CS)
-  bool use_existing_amax = false;
-  if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
-    use_existing_amax = quantizer.attr("use_existing_amax").cast<bool>();
-    if (use_existing_amax) {
-      const at::Tensor &amax = quantizer.attr("amax").cast<at::Tensor>();
-      input_cpp.set_amax(amax.data_ptr(), GetTransformerEngineDType(amax.scalar_type()),
-                         getTensorShape(amax));
-    }
-  }
-
   // Initialize output tensor
   TensorWrapper output_cpp;
   py::object output_py;
@@ -71,12 +60,7 @@ py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::ob
   }
 
   // Perform quantization
-  if (use_existing_amax) {
-    auto *quantizer_cs = dynamic_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
-    quantizer_cs->quantize_with_amax(input_cpp, output_cpp, noop_flag_cpp);
-  } else {
-    quantizer_cpp->quantize(input_cpp, output_cpp, noop_flag_cpp);
-  }
+  quantizer_cpp->quantize(input_cpp, output_cpp, noop_flag_cpp);
 
   return output_py;
 }
@@ -729,18 +713,33 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
 
   // Quantization parameters
   const auto rowwise_usage = quantizer_cpp_list[0]->rowwise_usage;
+  const bool row_scaled_nvfp4 = quantizer_cpp_list[0]->row_scaled_nvfp4;
   const auto columnwise_usage = quantizer_cpp_list[0]->columnwise_usage;
+  if (row_scaled_nvfp4) {
+    NVTE_CHECK(rowwise_usage, "Row-scaled NVFP4 bulk allocation requires rowwise usage.");
+    NVTE_CHECK(!columnwise_usage,
+               "Row-scaled NVFP4 bulk allocation does not support columnwise usage.");
+  }
   const auto scaling_mode = quantizer_cpp_list[0]->get_scaling_mode();
   const auto fp4_dtype = quantizer_cpp_list[0]->dtype;
   const bool with_gemm_swizzled_scales = false;  /// TODO (tmoon) Enable based on optimize_for_gemm;
 
-  // Lambda function for converting std::vector<size_t> shape to NVFP4 shape (last dim divided by 2)
-  auto to_fp4_shape = [](const std::vector<size_t> &shape) {
-    std::vector<size_t> fp4_shape(shape.begin(), shape.end());
-    if (!fp4_shape.empty()) {
-      fp4_shape.back() /= 2;
+  // Helper function to get size of byte buffer holding FP4 data (last dim divided by 2)
+  auto fp4_byte_shape = [](const std::vector<size_t> &shape) {
+    NVTE_CHECK(!shape.empty());
+    NVTE_CHECK(shape.back() % 2 == 0);
+    std::vector<size_t> out(shape.begin(), shape.end());
+    out.back() /= 2;
+    return out;
+  };
+
+  // Helper function to get size of amax buffer
+  auto amax_shape = [](const std::vector<size_t> &shape, bool row_scaled = false) {
+    if (row_scaled) {
+      const auto [rows, _] = get_2d_dims(shape);
+      return {rows};
     }
-    return fp4_shape;
+    return {1};
   };
 
   // Allocate row-wise data
@@ -768,14 +767,16 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
     // Bulk-allocate tensors data, scale, and amax tensors
     std::vector<std::vector<size_t>> shapes;
     for (size_t i = 0; i < num_tensors; ++i) {
-      shapes.emplace_back(to_fp4_shape(rowwise_data_shapes[i]));
+      shapes.emplace_back(fp4_byte_shape(rowwise_data_shapes[i]));
     }
     std::vector<at::ScalarType> dtypes(num_tensors, torch::kUInt8);
     std::vector<size_t> alignments(num_tensors, 256);
     shapes.insert(shapes.end(), rowwise_scale_shapes.begin(), rowwise_scale_shapes.end());
     dtypes.insert(dtypes.end(), num_tensors, torch::kUInt8);
     alignments.insert(alignments.end(), num_tensors, 16);
-    shapes.insert(shapes.end(), num_tensors, std::vector<size_t>{1});
+    for (size_t i = 0; i < num_tensors; ++i) {
+      shapes.emplace_back(amax_shape(rowwise_data_shapes[i], row_scaled_nvfp4));
+    }
     dtypes.insert(dtypes.end(), num_tensors, torch::kFloat32);
     alignments.insert(alignments.end(), num_tensors, 16);
     auto tensors = bulk_allocate(shapes, dtypes, std::nullopt, alignments);
@@ -820,14 +821,16 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
     // Bulk-allocate tensors data, scale, and amax tensors
     std::vector<std::vector<size_t>> shapes;
     for (size_t i = 0; i < num_tensors; ++i) {
-      shapes.emplace_back(to_fp4_shape(columnwise_data_shapes[i]));
+      shapes.emplace_back(fp4_byte_shape(columnwise_data_shapes[i]));
     }
     std::vector<at::ScalarType> dtypes(num_tensors, torch::kUInt8);
     std::vector<size_t> alignments(num_tensors, 256);
     shapes.insert(shapes.end(), columnwise_scale_shapes.begin(), columnwise_scale_shapes.end());
     dtypes.insert(dtypes.end(), num_tensors, torch::kUInt8);
     alignments.insert(alignments.end(), num_tensors, 16);
-    shapes.insert(shapes.end(), num_tensors, std::vector<size_t>{1});
+    for (size_t i = 0; i < num_tensors; ++i) {
+      shapes.emplace_back(amax_shape(columnwise_data_shapes[i]));
+    }
     dtypes.insert(dtypes.end(), num_tensors, torch::kFloat32);
     alignments.insert(alignments.end(), num_tensors, 16);
     auto tensors = bulk_allocate(shapes, dtypes, std::nullopt, alignments);
@@ -854,9 +857,10 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
     py::object amax_columnwise = columnwise_usage ? py::cast(amax_columnwise_list[i]) : py::none();
 
     // Construct Python tensor
-    tensor_py_list.emplace_back(NVFP4TensorClass(
-        rowwise_data, rowwise_scale, columnwise_data, columnwise_scale, amax_rowwise,
-        amax_columnwise, fp4_dtype, quantizer_py_list[i], with_gemm_swizzled_scales));
+    tensor_py_list.emplace_back(NVFP4TensorClass(rowwise_data, rowwise_scale, columnwise_data,
+                                                 columnwise_scale, amax_rowwise, amax_columnwise,
+                                                 fp4_dtype, quantizer_py_list[i],
+                                                 with_gemm_swizzled_scales, row_scaled_nvfp4));
 
     // Construct C++ tensor
     // Use a TensorWrapper variable to hold the output of makeTransformerEngineTensor,
@@ -873,11 +877,12 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
           rowwise_usage ? rowwise_scale_shapes[i] : std::vector<size_t>{0},
           columnwise_usage ? columnwise_scale_shapes[i] : std::vector<size_t>{0}, scaling_mode);
       tensor_wrapper.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
+      tensor_wrapper.set_row_scaled_nvfp4(row_scaled_nvfp4);
 
       // Set the amax rowwise and amax columnwise if available
       if (rowwise_usage) {
         tensor_wrapper.set_amax(amax_rowwise_list[i].data_ptr(), DType::kFloat32,
-                                std::vector<size_t>{1});
+                                getTensorShape(amax_rowwise_list[i]));
       }
       if (columnwise_usage) {
         tensor_wrapper.set_columnwise_amax(amax_columnwise_list[i].data_ptr(), DType::kFloat32,
@@ -1111,14 +1116,8 @@ void split_quantize_nvfp4_impl_with_rht_helper(const TensorWrapper &input,
         // Create a wrapper for the columnwise output, as the rowwise output. Input is in transposed layout.
         TensorWrapper out_transpose(output_list[i].scaling_mode());
         if (!is_empty_split) {
-          auto colwise_data_shape = out_columnwise_data.shape;
-          std::vector<size_t> colwise_data_shape_2d;
-          colwise_data_shape_2d.push_back(colwise_data_shape.data[0]);
-          size_t last_dim = 1;
-          for (size_t j = 1; j < colwise_data_shape.ndim; ++j) {
-            last_dim *= colwise_data_shape.data[j];
-          }
-          colwise_data_shape_2d.push_back(last_dim);
+          auto [cw_first, cw_last] = get_2d_dims(out_columnwise_data.shape, true);
+          std::vector<size_t> colwise_data_shape_2d = {cw_first, cw_last};
 
           out_transpose.set_rowwise_data(out_columnwise_data.data_ptr,
                                          static_cast<DType>(out_columnwise_data.dtype),
@@ -1349,7 +1348,16 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
                              return detail::IsNVFP4Quantizers(quantizer.ptr());
                            })) {
       allocation_method = AllocationMethod::BULK_NVFP4;
-      quantization_method = QuantizationMethod::FUSED_NVFP4;
+      const bool has_row_scaled_nvfp4 =
+          std::any_of(quantizer_cpp_list.begin(), quantizer_cpp_list.end(),
+                      [](const std::unique_ptr<Quantizer> &quantizer) {
+                        return static_cast<NVFP4Quantizer *>(quantizer.get())->row_scaled_nvfp4;
+                      });
+      if (has_row_scaled_nvfp4) {
+        quantization_method = QuantizationMethod::UNFUSED;
+      } else {
+        quantization_method = QuantizationMethod::FUSED_NVFP4;
+      }
     }
   }
 
@@ -1386,7 +1394,8 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
       bool contiguous_data_and_scale = false;
       std::tie(output_py_list, output_cpp_list, contiguous_data_and_scale) =
           bulk_allocate_nvfp4_tensors(split_shapes, quantizer_list, nvfp4_quantizers);
-      if (!input_shape.empty() && input_shape.back() % 128 != 0) {
+      if (quantization_method == QuantizationMethod::FUSED_NVFP4 && !input_shape.empty() &&
+          input_shape.back() % 128 != 0) {
         static std::once_flag once_unfused_nvfp4_fallback_warning;
         std::call_once(once_unfused_nvfp4_fallback_warning, []() {
           NVTE_WARN(

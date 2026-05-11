@@ -473,9 +473,14 @@ def get_attention_backend(
     # On SM90, prefer FA3 over FA4 when FA3 is available.
     # FA3 is more mature on Hopper; FA4's SM90 backward has limitations
     # (MLA, non-standard head dims, SplitKV).
-    if use_flash_attention_4 and use_flash_attention_3 and device_compute_capability == (9, 0):
-        if FlashAttentionUtils.v4_is_installed:
-            logger.debug("Disabling FlashAttention 4 to prefer FlashAttention 3 on SM90")
+    if (
+        device_compute_capability == (9, 0)
+        and use_flash_attention_3
+        and FlashAttentionUtils.v3_is_installed
+        and use_flash_attention_4
+        and FlashAttentionUtils.v4_is_installed
+    ):
+        logger.debug("Disabling FlashAttention 4 to prefer FlashAttention 3 on SM90")
         use_flash_attention_4 = False
 
     # Filter: Data type
@@ -1212,10 +1217,6 @@ def get_attention_backend(
                 "Disabling FusedAttention as dbias calculation is not supported for 111s"
             )
             use_fused_attention = False
-        elif not fu_core_attention_bias_requires_grad:
-            # max512 backend will only support [1, h, s, s]
-            os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
-
     # Filter: cuDNN support
     fused_attention_backend = None
     if use_fused_attention:
@@ -1249,32 +1250,6 @@ def get_attention_backend(
             logger.debug("Disabling FusedAttention as no backend supports the provided input")
             use_fused_attention = False
             fused_attention_backend = None
-        if (
-            use_fused_attention
-            and window_size is not None
-            and (window_size[0] != -1 or window_size[1] not in [-1, 0])
-            and fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]
-        ):
-            logger.debug(
-                "Disabling FusedAttention as only sub-backend %s does not support "
-                "slidng window attention",
-                int(fused_attention_backend),
-            )
-            use_fused_attention = False
-            fused_attention_backend = None
-        if (
-            use_fused_attention
-            and fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]
-            and fu_core_attention_bias_type == "post_scale_bias"
-            and fu_core_attention_bias_shape != "1hss"
-        ):
-            logger.debug(
-                "Disabling FusedAttention as cuDNN sub-backend 0 only supports post_scale_bias in"
-                " [1, H, S, S] shape"
-            )
-            use_fused_attention = False
-            fused_attention_backend = None
-
     # Filter: Determinism
     # backend                      | deterministic
     # ---------------------------------------------
@@ -1846,11 +1821,12 @@ def get_full_cu_seqlens(
 
     if is_in_onnx_export_mode():
         return _get_cu_seqlens(batch_size, max_seqlen, device)
-    if (batch_size, max_seqlen) not in _cu_seqlens_cache:
-        _cu_seqlens_cache[(batch_size, max_seqlen)] = _get_cu_seqlens(
-            batch_size, max_seqlen, device
-        )
-    return _cu_seqlens_cache[(batch_size, max_seqlen)]
+
+    is_inference = torch.is_inference_mode_enabled()
+    cu_seqlens_cache_key = (batch_size, max_seqlen, device, is_inference)
+    if cu_seqlens_cache_key not in _cu_seqlens_cache:
+        _cu_seqlens_cache[cu_seqlens_cache_key] = _get_cu_seqlens(batch_size, max_seqlen, device)
+    return _cu_seqlens_cache[cu_seqlens_cache_key]
 
 
 @jit_fuser
@@ -2358,7 +2334,7 @@ def check_set_window_size(
     return window_size
 
 
-def get_attention_quantizers(fp8, fp8_recipe, quantizers):
+def get_attention_quantizers(fp8, quantizers):
     """Get the list of quantizers used in attention from the quantizers list."""
     if not fp8:
         return [None] * 6
@@ -2387,7 +2363,11 @@ def get_attention_quantizers(fp8, fp8_recipe, quantizers):
     dQKV_quantizer.internal = False
     dQKV_quantizer.set_usage(rowwise=True, columnwise=False)
 
-    if fp8_recipe.mxfp8():
+    # MXFP8 attention: detect from the QKV quantizer instance rather than the
+    # recipe predicate so that CustomRecipe (whose `mxfp8()` predicate returns
+    # False) gets the same treatment as the built-in MXFP8 recipe. The kernel
+    # handles S/dP internally for MXFP8, hence S/dP are nulled out.
+    if isinstance(QKV_quantizer, MXFP8Quantizer):
         QKV_quantizer.columnwise_usage = True
         QKV_quantizer.optimize_for_gemm = True
         S_quantizer = None
@@ -2397,6 +2377,29 @@ def get_attention_quantizers(fp8, fp8_recipe, quantizers):
         dO_quantizer.optimize_for_gemm = True
         dP_quantizer = None
         dQKV_quantizer.columnwise_usage = True
+
+    _fp8_types = (Float8Quantizer, Float8CurrentScalingQuantizer, MXFP8Quantizer)
+    # S/dP are intentionally None under MXFP8 attention; skip the type check
+    # for those slots in that case.
+    _allow_none = {"S", "dP"} if isinstance(QKV_quantizer, MXFP8Quantizer) else set()
+    for _name, _q in [
+        ("QKV", QKV_quantizer),
+        ("O", O_quantizer),
+        ("S", S_quantizer),
+        ("dQKV", dQKV_quantizer),
+        ("dO", dO_quantizer),
+        ("dP", dP_quantizer),
+    ]:
+        if _q is None and _name in _allow_none:
+            continue
+        assert isinstance(_q, _fp8_types), (
+            "FP8 attention requires FP8-compatible quantizers for all DPA tensor slots, "
+            f"but {_name} quantizer is {type(_q).__name__}. "
+            "When using CustomRecipe with fp8_dpa=True, ensure the factory returns an "
+            "FP8 quantizer (Float8Quantizer, Float8CurrentScalingQuantizer, or "
+            "MXFP8Quantizer) for all DPA roles (module_type='dpa') and for None roles "
+            "(boundary slots like O output and dQKV grad-input)."
+        )
 
     return QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer
 
@@ -2452,7 +2455,7 @@ def print_quantizers(
                 type_str = "CS"
             elif isinstance(q, MXFP8Quantizer):
                 type_str = "MXFP8"
-            if type_str in ["DS", "CS"]:
+            if type_str == "DS":
                 print(
                     f"{label} >> {names[i]:14s}: {type_str}, {q.scale.item():.4e} x"
                     f" {q.amax.item():.4e} = {q.scale.item()*q.amax.item():.4e}"
