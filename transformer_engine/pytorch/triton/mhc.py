@@ -862,7 +862,7 @@ class mHCSinkhornOp(torch.autograd.Function):
         NUM_WARPS = 1
         BATCH_SIZE = NUM_WARPS * 32
         grid = (triton.cdiv(M, BATCH_SIZE),)
-        
+
         _mhc_sinkhorn_fwd[grid](
             x_ptr=H_res,
             output_ptr=H_res_out,

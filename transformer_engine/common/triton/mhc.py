@@ -751,6 +751,7 @@ def _mhc_scale_bwd_fused(
 
         tl.atomic_add(grad_b_ptr + cols * stride_grad_b, grad_b, mask=cols < N, sem="relaxed")
 
+
 @gluon.jit
 def _mhc_sinkhorn_fwd(
     x_ptr,
@@ -784,21 +785,16 @@ def _mhc_sinkhorn_fwd(
     )
 
     # 1D offset layouts derived from load_layout (for the coalesced GMEM pointers).
-    layout_M:  gl.constexpr = gl.SliceLayout(1, gl.SliceLayout(2, load_layout))
+    layout_M: gl.constexpr = gl.SliceLayout(1, gl.SliceLayout(2, load_layout))
     layout_n1: gl.constexpr = gl.SliceLayout(0, gl.SliceLayout(2, load_layout))
     layout_n2: gl.constexpr = gl.SliceLayout(0, gl.SliceLayout(1, load_layout))
 
-    offs_b  = pid * BATCH_SIZE + gl.arange(0, BATCH_SIZE, layout=layout_M)
+    offs_b = pid * BATCH_SIZE + gl.arange(0, BATCH_SIZE, layout=layout_M)
     offs_n1 = gl.arange(0, n, layout=layout_n1)
     offs_n2 = gl.arange(0, n, layout=layout_n2)
-    mask_b  = offs_b < M
+    mask_b = offs_b < M
 
-    ptrs = (
-        x_ptr
-        + offs_b[:, None, None]  * nn
-        + offs_n1[None, :, None] * n
-        + offs_n2[None, None, :]
-    )
+    ptrs = x_ptr + offs_b[:, None, None] * nn + offs_n1[None, :, None] * n + offs_n2[None, None, :]
 
     # GMEM -> registers (coalesced) -> convert to per-thread (n, n) layout.
     # `convert_layout` routes through SMEM automatically when the two layouts disagree.
@@ -826,11 +822,12 @@ def _mhc_sinkhorn_fwd(
     P_out = gl.convert_layout(P, load_layout)
     out_ptrs = (
         output_ptr
-        + offs_b[:, None, None]  * nn
+        + offs_b[:, None, None] * nn
         + offs_n1[None, :, None] * n
         + offs_n2[None, None, :]
     )
     gl.store(out_ptrs, P_out, mask=mask_b[:, None, None])
+
 
 @gluon.jit
 def _mhc_sinkhorn_bwd(
@@ -867,7 +864,7 @@ def _mhc_sinkhorn_bwd(
     )
 
     # 1D offset layouts derived from load_layout (for the coalesced GMEM pointers).
-    layout_M:  gl.constexpr = gl.SliceLayout(1, gl.SliceLayout(2, load_layout))
+    layout_M: gl.constexpr = gl.SliceLayout(1, gl.SliceLayout(2, load_layout))
     layout_n1: gl.constexpr = gl.SliceLayout(0, gl.SliceLayout(2, load_layout))
     layout_n2: gl.constexpr = gl.SliceLayout(0, gl.SliceLayout(1, load_layout))
 
@@ -882,16 +879,12 @@ def _mhc_sinkhorn_bwd(
     hist_f = gl.allocate_shared_memory(gl.float32, [iters + 1, BATCH_SIZE, n], smem_layout)
     hist_g = gl.allocate_shared_memory(gl.float32, [iters + 1, BATCH_SIZE, n], smem_layout)
 
-    offs_b  = pid * BATCH_SIZE + gl.arange(0, BATCH_SIZE, layout=layout_M)
+    offs_b = pid * BATCH_SIZE + gl.arange(0, BATCH_SIZE, layout=layout_M)
     offs_n1 = gl.arange(0, n, layout=layout_n1)
     offs_n2 = gl.arange(0, n, layout=layout_n2)
-    mask_b  = offs_b < M
+    mask_b = offs_b < M
 
-    base_offsets = (
-        offs_b[:, None, None]  * nn
-        + offs_n1[None, :, None] * n
-        + offs_n2[None, None, :]
-    )
+    base_offsets = offs_b[:, None, None] * nn + offs_n1[None, :, None] * n + offs_n2[None, None, :]
 
     # GMEM -> registers (coalesced) -> convert to per-thread (n, n) layout.
     # `convert_layout` routes through SMEM automatically when the two layouts disagree.
@@ -929,7 +922,7 @@ def _mhc_sinkhorn_bwd(
 
     for k in range(iters):
         iter_idx = iters - k  # iterates iters .. 1
-        f = hist_f.index(iter_idx    ).load(layout_f)
+        f = hist_f.index(iter_idx).load(layout_f)
         g_next = hist_g.index(iter_idx - 1).load(layout_g)
 
         term_g = -grad_g[:, None, :] * gl.exp(f[:, :, None] + x + g[:, None, :])
@@ -946,7 +939,6 @@ def _mhc_sinkhorn_bwd(
     # Convert grad_x back to load_layout for coalesced GMEM store.
     grad_x_out = gl.convert_layout(grad_x, load_layout)
     gl.store(grad_x_ptr + base_offsets, grad_x_out, mask=mask_b[:, None, None])
-
 
 
 def aggregate_config_fwd():
