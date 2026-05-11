@@ -151,7 +151,7 @@ def make_recipe(name: Optional[str], **recipe_kwargs: Any) -> Optional[Recipe]:
             "disable_stochastic_rounding": True,
             "disable_2d_quantization": True,
             "row_scaled_activation": "row_scaled" in name,
-            "enable_4over6": "4over6" in name,
+            "nvfp4_4over6": "all" if "4over6" in name else None,
         }
         kwargs.update(recipe_kwargs)
         return transformer_engine.common.recipe.NVFP4BlockScaling(**kwargs)
@@ -162,9 +162,9 @@ def recipe_id(recipe: Optional[Recipe]) -> str:
     """Readable pytest id for a quantization recipe."""
     if not isinstance(recipe, Recipe):
         return "None"
-    if recipe.nvfp4() and recipe.row_scaled_activation and recipe.enable_4over6:
+    if recipe.nvfp4() and recipe.row_scaled_activation and recipe.nvfp4_4over6 is not None:
         return "NVFP4RowScaled4Over6BlockScaling"
-    if recipe.nvfp4() and recipe.enable_4over6:
+    if recipe.nvfp4() and recipe.nvfp4_4over6 is not None:
         return "NVFP44Over6BlockScaling"
     if recipe.nvfp4() and recipe.row_scaled_activation:
         return "NVFP4RowScaledBlockScaling"
@@ -187,7 +187,7 @@ def skip_unsupported_backward_override(
     if (
         quant_recipe is not None
         and quant_recipe.nvfp4()
-        and getattr(quant_recipe, "enable_4over6", False)
+        and quant_recipe.nvfp4_4over6 is not None
         and layer_type == "grouped_linear"
     ):
         pytest.skip("NVFP4 4over6 currently does not support grouped quantization.")

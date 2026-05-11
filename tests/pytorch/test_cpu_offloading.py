@@ -48,7 +48,7 @@ def nvfp4_4over6():
         disable_rht=True,
         disable_stochastic_rounding=True,
         disable_2d_quantization=True,
-        enable_4over6=True,
+        nvfp4_4over6="all",
     )
     nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams()
     nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams()
@@ -207,6 +207,9 @@ class Utils:
             return quantizer(tensor)
         elif recipe.nvfp4():
             qparams = recipe.fp4_quant_fwd_inp
+            use_4over6 = False
+            if recipe.nvfp4_4over6 in ("activations", "all"):
+                use_4over6 = True
             quantizer = te.tensor.nvfp4_tensor.NVFP4Quantizer(
                 rowwise=True,
                 columnwise=not recipe.row_scaled_activation,
@@ -215,7 +218,7 @@ class Utils:
                 with_2d_quantization=qparams.fp4_2d_quantization,
                 stochastic_rounding=qparams.stochastic_rounding,
                 row_scaled_nvfp4=recipe.row_scaled_activation,
-                use_4over6=recipe.enable_4over6,
+                use_4over6=use_4over6,
             )
             return quantizer(tensor)
 

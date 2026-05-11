@@ -157,7 +157,7 @@ def nvfp4_4over6():
         disable_rht=True,
         disable_stochastic_rounding=True,
         disable_2d_quantization=True,
-        enable_4over6=True,
+        nvfp4_4over6="all",
     )
     nvfp4_recipe.fp4_quant_fwd_inp = recipe.QParams()
     nvfp4_recipe.fp4_quant_fwd_weight = recipe.QParams()

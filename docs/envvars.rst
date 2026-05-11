@@ -287,11 +287,11 @@ Kernel Configuration
    :Default: ``0``
    :Description: Enable row-scaled NVFP4 tensors for forward activation quantizers in the ``NVFP4BlockScaling`` recipe. When set to ``1`` (or when ``NVFP4BlockScaling(row_scaled_activation=True)`` is used), rowwise ``amax`` metadata is stored as one FP32 value per tensor row instead of a single scalar.
 
-.. envvar:: NVTE_NVFP4_ENABLE_4OVER6
+.. envvar:: NVTE_NVFP4_4OVER6
 
-   :Type: ``int`` (0 or 1)
-   :Default: ``0``
-   :Description: Enable per-block map-to-4 versus map-to-6 candidate selection for NVFP4 1D quantization in the ``NVFP4BlockScaling`` recipe. The selected block scale is the candidate with lower input-domain MSE, and ties select map-to-6. This mode uses 256 as the global E4M3 scale bound instead of 448 bound, and currently requires RHT, stochastic rounding, and 2D quantization to be disabled.
+   :Type: ``str`` (``weights``, ``activations``, or ``all``)
+   :Default: unset
+   :Description: Enable per-block map-to-4 versus map-to-6 candidate selection for selected NVFP4 1D quantizers in the ``NVFP4BlockScaling`` recipe. ``weights`` selects weight tensor roles, ``activations`` selects non-weight tensor roles, and ``all`` selects both. The selected block scale is the candidate with lower input-domain MSE, and ties select map-to-6. This mode uses 256 as the global E4M3 scale bound instead of the 448 bound, and currently requires RHT, stochastic rounding, and 2D quantization to be disabled.
 
 Torch Compilation and Fusion
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
