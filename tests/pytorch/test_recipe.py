@@ -26,6 +26,7 @@ import transformer_engine_torch as tex
 from transformer_engine.pytorch.quantization import (
     FP8GlobalStateManager,
     NVFP4BlockScalingRecipeState,
+    QuantizerRole,
     _amax_and_scale_update,
 )
 import transformer_engine.pytorch.ops as te_ops
@@ -530,15 +531,35 @@ def test_nvfp4_row_scaled_quantizer_roles(use_4over6):
         num_quantizers=3,
     ).make_quantizers()
     assert [q.row_scaled_nvfp4 for q in forward_quantizers] == [True, False, True]
+    assert [q.use_4over6 for q in forward_quantizers] == [use_4over6] * 3
     assert not forward_quantizers[0].is_quantizable(torch.empty(16, 16))
     assert forward_quantizers[1].is_quantizable(torch.empty(16, 16))
+
+    role_quantizers = NVFP4BlockScalingRecipeState(
+        recipe,
+        mode="forward",
+        num_quantizers=4,
+        roles=[
+            QuantizerRole(module_type="linear", tensor_type="weight"),
+            QuantizerRole(module_type="linear", tensor_type="input"),
+            QuantizerRole(module_type="linear", tensor_type="output"),
+            None,
+        ],
+    ).make_quantizers()
+    assert [q.row_scaled_nvfp4 for q in role_quantizers] == [False, True, True, True]
+    assert [q.use_4over6 for q in role_quantizers] == [use_4over6] * 4
 
     backward_quantizers = NVFP4BlockScalingRecipeState(
         recipe,
         mode="backward",
         num_quantizers=2,
+        roles=[
+            QuantizerRole(module_type="linear", tensor_type="grad_output"),
+            QuantizerRole(module_type="linear", tensor_type="grad_input"),
+        ],
     ).make_quantizers()
     assert [q.row_scaled_nvfp4 for q in backward_quantizers] == [False, False]
+    assert [q.use_4over6 for q in backward_quantizers] == [use_4over6] * 2
 
 
 @pytest.mark.skipif(not fp4_available, reason=reason_for_no_fp4)

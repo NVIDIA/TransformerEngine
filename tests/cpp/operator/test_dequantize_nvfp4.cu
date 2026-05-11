@@ -108,6 +108,7 @@ void performTest_dequantize_nvfp4(const size_t rows, const size_t cols,
     // Configure quantized tensor amax
     size_t amax_size = 1;
     quantized.set_nvfp4_4over6(use_4over6);
+    ASSERT_EQ(quantized.nvfp4_4over6(), use_4over6);
     if (row_scaled_nvfp4) {
       quantized.set_row_scaled_nvfp4(true);
       amax_size = rows;
@@ -170,6 +171,7 @@ void performTest_dequantize_nvfp4_swizzled(const size_t rows, const size_t cols,
     Tensor quantized_compact("quantized_compact", std::vector<size_t>{rows, cols},
                              DType::kFloat4E2M1, true, false, NVTE_NVFP4_1D_SCALING);
     quantized_compact.set_nvfp4_4over6(use_4over6);
+    ASSERT_EQ(quantized_compact.nvfp4_4over6(), use_4over6);
     if (row_scaled_nvfp4) {
         quantized_compact.set_row_scaled_nvfp4(true);
     } else if (rows > 0 && cols > 0) {
@@ -192,6 +194,7 @@ void performTest_dequantize_nvfp4_swizzled(const size_t rows, const size_t cols,
     Tensor quantized_swizzled("quantized_swizzled", std::vector<size_t>{rows, cols},
                               DType::kFloat4E2M1, true, false, NVTE_NVFP4_1D_SCALING);
     quantized_swizzled.set_nvfp4_4over6(use_4over6);
+    ASSERT_EQ(quantized_swizzled.nvfp4_4over6(), use_4over6);
     if (row_scaled_nvfp4) {
         quantized_swizzled.set_row_scaled_nvfp4(true);
     } else {

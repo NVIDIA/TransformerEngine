@@ -293,6 +293,8 @@ class Tensor {
     return columnwise_;
   }
 
+  bool nvfp4_4over6() const;
+
   void set_tensor_amax_nullptr();
 
   void set_with_gemm_swizzled_scales(bool with_gemm_swizzled_scales);
