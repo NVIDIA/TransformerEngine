@@ -1243,14 +1243,8 @@ void split_quantize_nvfp4_impl_with_rht_helper(const TensorWrapper &input,
         // Create a wrapper for the columnwise output, as the rowwise output. Input is in transposed layout.
         TensorWrapper out_transpose(output_list[i].scaling_mode());
         if (!is_empty_split) {
-          auto colwise_data_shape = out_columnwise_data.shape;
-          std::vector<size_t> colwise_data_shape_2d;
-          colwise_data_shape_2d.push_back(colwise_data_shape.data[0]);
-          size_t last_dim = 1;
-          for (size_t j = 1; j < colwise_data_shape.ndim; ++j) {
-            last_dim *= colwise_data_shape.data[j];
-          }
-          colwise_data_shape_2d.push_back(last_dim);
+          auto [cw_first, cw_last] = get_2d_dims(out_columnwise_data.shape, true);
+          std::vector<size_t> colwise_data_shape_2d = {cw_first, cw_last};
 
           out_transpose.set_rowwise_data(out_columnwise_data.data_ptr,
                                          static_cast<DType>(out_columnwise_data.dtype),
