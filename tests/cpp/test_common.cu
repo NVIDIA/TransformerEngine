@@ -1335,11 +1335,11 @@ GroupedBuffers build_grouped_tensor(const std::vector<Tensor*>& tensors,
                                   sizeof(scale_tensor));
   } else if (scaling_mode == NVTE_MXFP8_1D_SCALING) {
     // The grouped GEMM setup kernel now computes per-tensor scale offsets via
-    // compute_grouped_tensor_mxfp8_scale_inv_offset, which sums the padded
-    // (roundup(., 128) x roundup(./32, 4)) scale tile sizes — so dims only need to
-    // satisfy the MXFP8 block alignment of 32, not 128. (Previously this assertion
-    // enforced /128 alignment because the old setup kernel computed offsets as
-    // data_offset / 32, which silently mismatched for unaligned dims.)
+    // compute_grouped_scale_inv_offset + padded_mxfp8_scale_inv_bytes, which sums
+    // the padded (roundup(., 128) x roundup(./32, 4)) scale tile sizes — so dims
+    // only need to satisfy the MXFP8 block alignment of 32, not 128. (Previously
+    // this assertion enforced /128 alignment because the old setup kernel computed
+    // offsets as data_offset / 32, which silently mismatched for unaligned dims.)
     if (enforce_grouped_gemm_alignment) {
       for (size_t i = 0; i < num_tensors; ++i) {
         NVTE_CHECK(first_dims[i] % 32 == 0,
@@ -1468,9 +1468,9 @@ GroupedBuffers build_grouped_tensor(const std::vector<Tensor*>& tensors,
     }
   } else if (scaling_mode == NVTE_NVFP4_1D_SCALING) {
     // The grouped GEMM setup kernel now computes per-tensor scale offsets via
-    // compute_grouped_tensor_nvfp4_scale_inv_offset, which sums the padded
-    // (roundup(., 128) x roundup(./16, 4)) scale tile sizes — so dims only need to
-    // satisfy the NVFP4 block alignment of 16, not 128/64.
+    // compute_grouped_scale_inv_offset + padded_nvfp4_scale_inv_bytes, which sums
+    // the padded (roundup(., 128) x roundup(./16, 4)) scale tile sizes — so dims
+    // only need to satisfy the NVFP4 block alignment of 16, not 128/64.
     if (enforce_grouped_gemm_alignment) {
       for (size_t i = 0; i < num_tensors; ++i) {
         NVTE_CHECK(first_dims[i] % 16 == 0,

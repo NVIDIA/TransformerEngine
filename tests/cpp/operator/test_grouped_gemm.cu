@@ -14,6 +14,7 @@
 #include <numeric>
 #include <optional>
 #include <random>
+#include <string>
 #include <tuple>
 #include <vector>
 
@@ -43,24 +44,12 @@ enum class ShapeCase {
   kSameFirst,
   kSameLast,
   kAllDifferent,
-  // All experts share the same (M, N, K) but the dims are intentionally NOT multiples of 128.
-  // This exposes per-expert scale_inv padding bugs in grouped GEMM offset arithmetic
-  // (MXFP8 #2954, and the analogous NVFP4 / FP8 block scaling cases): per-expert scale
-  // tiles are padded by the quantizer to multiples of 128/4, but a naive setup-kernel
-  // computes offsets from data_offset alone and points subsequent experts at the wrong
-  // place when dims are unaligned. With the fix, each expert reads from its own scale tile.
+  // Uniform shapes with dims NOT multiples of 128 — exercises scale_inv padding offsets.
   kUnalignedAllSame,
+  // NVFP4-only: dims are multiples of 16 (NVFP4 block) but NOT of 32 (MXFP8 block),
+  // catching code paths that accidentally hardcode 32 instead of NVFP4_BLOCK_SIZE.
+  kUnalignedAllSameNVFP4,
 };
-
-size_t grouped_setup_workspace_size(const size_t num_tensors) {
-  const size_t ptr_bytes = num_tensors * sizeof(void*);
-  const size_t int_bytes = num_tensors * sizeof(int);
-  // Layout: 8 pointer arrays (A, B, C, D, alpha, beta, a_scale, b_scale) + 6 int arrays
-  size_t size = 8 * ptr_bytes + 6 * int_bytes;
-  const size_t alignment = 256;
-  size = ((size + alignment - 1) / alignment) * alignment;
-  return size;
-}
 
 Tensor make_fp8_operand(const std::string& name, const std::vector<size_t>& shape) {
   Tensor input_fp32(name + "_fp32", shape, DType::kFloat32);
@@ -117,6 +106,7 @@ Tensor make_mxfp8_operand(const std::string& name, const std::vector<size_t>& sh
     use_colwise = transposed;
   }
 
+  // Create BF16 input with random data
   Tensor input_bf16(name + "_bf16", shape, DType::kBFloat16);
   fillUniform(&input_bf16);
 
@@ -160,19 +150,6 @@ Tensor make_nvfp4_rowwise(const std::string& name, const std::vector<size_t>& sh
 
   Tensor nvfp4(name, shape, DType::kFloat4E2M1, /*rowwise=*/true, /*columnwise=*/false,
                NVTE_NVFP4_1D_SCALING);
-
-  // Allocate amax on the tensor so nvte_quantize_v2 fills it with max(|input|).
-  // This enables per-group alpha computation in grouped GEMM.
-  // Note: small leak (Tensor destructor doesn't free amax for NVFP4) — acceptable in test.
-  float *amax_ptr;
-  NVTE_CHECK_CUDA(cudaMalloc(&amax_ptr, sizeof(float)));
-  NVTE_CHECK_CUDA(cudaMemset(amax_ptr, 0, sizeof(float)));
-  {
-    size_t one = 1;
-    NVTEBasicTensor amax_bt = {amax_ptr, kNVTEFloat32, nvte_make_shape(&one, 1)};
-    NVTETensor h = nvfp4.data();
-    nvte_set_tensor_param(&h, kNVTEAmax, &amax_bt);
-  }
 
   QuantizationConfigWrapper quant_config;
   nvte_quantize_v2(input_bf16.data(), nvfp4.data(), quant_config, 0);
@@ -233,18 +210,18 @@ Tensor make_nvfp4_operand(const std::string& name, const std::vector<size_t>& sh
         scale_bytes, cudaMemcpyDeviceToDevice));
   }
 
-  // Copy amax from rowwise/colwise tensors to result
-  // Rowwise amax → result.amax (used when transa=T)
-  // Colwise amax → result.columnwise_amax (used when transa=N)
+  // Copy amax values (not pointers) so each Tensor stays sole owner of its amax buffer.
   {
-    NVTEBasicTensor row_amax = nvte_get_tensor_param(rowwise.data(), kNVTEAmax);
-    NVTETensor h = result.data();
-    nvte_set_tensor_param(&h, kNVTEAmax, &row_amax);
+    NVTEBasicTensor src = nvte_get_tensor_param(rowwise.data(), kNVTEAmax);
+    NVTEBasicTensor dst = nvte_get_tensor_param(result.data(), kNVTEAmax);
+    NVTE_CHECK_CUDA(cudaMemcpy(dst.data_ptr, src.data_ptr, sizeof(float),
+                               cudaMemcpyDeviceToDevice));
   }
   {
-    NVTEBasicTensor col_amax = nvte_get_tensor_param(colwise.data(), kNVTEAmax);
-    NVTETensor h = result.data();
-    nvte_set_tensor_param(&h, kNVTEColumnwiseAmax, &col_amax);
+    NVTEBasicTensor src = nvte_get_tensor_param(colwise.data(), kNVTEAmax);
+    NVTEBasicTensor dst = nvte_get_tensor_param(result.data(), kNVTEColumnwiseAmax);
+    NVTE_CHECK_CUDA(cudaMemcpy(dst.data_ptr, src.data_ptr, sizeof(float),
+                               cudaMemcpyDeviceToDevice));
   }
 
   NVTE_CHECK_CUDA(cudaDeviceSynchronize());
@@ -312,8 +289,7 @@ std::vector<std::tuple<size_t, size_t, size_t>> make_shapes(ShapeCase scase) {
     case ShapeCase::kUnalignedAllSame:
     default:
       // (M, N, K) all multiples of 32 (MXFP8 block) and 16 (NVFP4 block), but NONE
-      // are multiples of 128 — so each expert's scale_inv is padded and the per-expert
-      // offsets must come from the padded sizes, not from data_offset / block_size.
+      // are multiples of 128 — so each expert's scale_inv is padded.
       return {{160, 288, 416}, {160, 288, 416}, {160, 288, 416}};
   }
 }
@@ -321,58 +297,48 @@ std::vector<std::tuple<size_t, size_t, size_t>> make_shapes(ShapeCase scase) {
 // Compile-time version macro for Hopper grouped GEMM support (mirrors cublaslt_grouped_gemm.cu)
 #define CUBLAS_GROUPED_GEMM_HOPPER_VERSION 130400
 
-void run_grouped_gemm_case(const TestParams& params) {
+inline std::string grouped_gemm_skip_reason(InputCase input_case) {
 #if CUBLAS_VERSION < 130300
-  GTEST_SKIP() << "Grouped GEMM requires cuBLAS 13.3+, but compile-time cuBLAS version is "
-               << CUBLAS_VERSION << ".";
+  return "Grouped GEMM requires cuBLAS 13.3+, but compile-time cuBLAS version is " +
+         std::to_string(CUBLAS_VERSION) + ".";
 #else
   const int32_t cc = getDeviceComputeCapability();
-
+  const std::string cc_suffix =
+      "but device compute capability is " + std::to_string(cc) + ".";
 #if CUBLAS_VERSION >= CUBLAS_GROUPED_GEMM_HOPPER_VERSION
-  // Compiled with cuBLAS 13.4+: Hopper (SM90) and Blackwell+ are supported.
   if (cc < hopperComputeCapability) {
-    GTEST_SKIP() << "Grouped GEMM requires Hopper (SM90) or newer with cuBLAS 13.4+, "
-                 << "but device compute capability is " << cc << ".";
+    return "Grouped GEMM requires Hopper (SM90) or newer with cuBLAS 13.4+, " + cc_suffix;
   }
-  // FP8 tensor scaling grouped GEMM is only supported on Blackwell+
-  if (cc < blackwellComputeCapability && params.input_case == InputCase::kFP8Current) {
-    GTEST_SKIP() << "FP8 tensor scaling grouped GEMM requires Blackwell (SM100) or newer, "
-                 << "but device compute capability is " << cc << ".";
+  if (cc < blackwellComputeCapability && input_case == InputCase::kFP8Current) {
+    return "FP8 tensor scaling grouped GEMM requires Blackwell (SM100) or newer, " + cc_suffix;
   }
-  // MXFP8 grouped GEMM is only supported on Blackwell+
-  if (cc < blackwellComputeCapability && params.input_case == InputCase::kMXFP8) {
-    GTEST_SKIP() << "MXFP8 grouped GEMM requires Blackwell (SM100) or newer, "
-                 << "but device compute capability is " << cc << ".";
+  if (cc < blackwellComputeCapability && input_case == InputCase::kMXFP8) {
+    return "MXFP8 grouped GEMM requires Blackwell (SM100) or newer, " + cc_suffix;
   }
-  // NVFP4 grouped GEMM is only supported on Blackwell+
-  if (cc < blackwellComputeCapability && params.input_case == InputCase::kNVFP4) {
-    GTEST_SKIP() << "NVFP4 grouped GEMM requires Blackwell (SM100) or newer, "
-                 << "but device compute capability is " << cc << ".";
+  if (cc < blackwellComputeCapability && input_case == InputCase::kNVFP4) {
+    return "NVFP4 grouped GEMM requires Blackwell (SM100) or newer, " + cc_suffix;
   }
-  // FP8 block scaling grouped GEMM is only supported on Hopper
-  if (cc >= blackwellComputeCapability && params.input_case == InputCase::kFP8BlockScaling) {
-    GTEST_SKIP() << "FP8 block scaling grouped GEMM is only supported on Hopper (SM90), "
-                 << "but device compute capability is " << cc << ".";
+  if (cc >= blackwellComputeCapability && input_case == InputCase::kFP8BlockScaling) {
+    return "FP8 block scaling grouped GEMM is only supported on Hopper (SM90), " + cc_suffix;
   }
 #else
-  // Compiled with cuBLAS 13.2: only Blackwell+ is supported.
   if (cc < blackwellComputeCapability) {
-    GTEST_SKIP() << "Grouped GEMM requires Blackwell (SM100) or newer.";
+    return "Grouped GEMM requires Blackwell (SM100) or newer.";
   }
-  // FP8 block scaling grouped GEMM is only supported on Hopper
-  if (params.input_case == InputCase::kFP8BlockScaling) {
-    GTEST_SKIP() << "FP8 block scaling grouped GEMM is only supported on Hopper (SM90), "
-                 << "but device compute capability is " << cc << ".";
+  if (input_case == InputCase::kFP8BlockScaling) {
+    return "FP8 block scaling grouped GEMM is only supported on Hopper (SM90), " + cc_suffix;
   }
-#endif  // CUBLAS_VERSION >= CUBLAS_GROUPED_GEMM_HOPPER_VERSION
-  // Skip known flaky NVFP4 AllDifferent cases: these depend on nvte_multi_tensor_gemm
-  // (the ground-truth reference) which has a pre-existing bug that intermittently
-  // produces partial output writes for these specific shape/transpose combinations.
-  if (params.input_case == InputCase::kNVFP4 &&
-      params.shape_case == ShapeCase::kAllDifferent) {
-    GTEST_SKIP() << "NVFP4 AllDifferent grouped GEMM tests are skipped due to a known "
-                 << "flaky bug in the nvte_multi_tensor_gemm reference implementation.";
+#endif
+  return "";
+#endif
+}
+
+void run_grouped_gemm_case(const TestParams& params) {
+  if (auto reason = grouped_gemm_skip_reason(params.input_case); !reason.empty()) {
+    GTEST_SKIP() << reason;
   }
+#if CUBLAS_VERSION >= 130300
+  const int32_t cc = getDeviceComputeCapability();
 
   const std::vector<std::tuple<size_t, size_t, size_t>> shapes = make_shapes(params.shape_case);
 
@@ -519,7 +485,7 @@ void run_grouped_gemm_case(const TestParams& params) {
   NVTE_CHECK_CUDA(cudaMemcpy(beta_tensor.rowwise_dptr(), beta_vals.data(),
                              alpha_beta_numel * sizeof(float), cudaMemcpyHostToDevice));
 
-  const size_t setup_ws_bytes = grouped_setup_workspace_size(num_gemms);
+  const size_t setup_ws_bytes = nvte_get_grouped_gemm_setup_workspace_size(num_gemms);
   Tensor setup_ws("setup_ws", std::vector<size_t>{setup_ws_bytes}, DType::kByte);
   Tensor cublas_ws("cublas_ws", std::vector<size_t>{cublas_ws_bytes}, DType::kByte);
 
@@ -568,56 +534,11 @@ void run_grouped_gemm_case(const TestParams& params) {
 }
 
 void run_grouped_gemm_discrete_out_case(const TestParams& params) {
-#if CUBLAS_VERSION < 130300
-  GTEST_SKIP() << "Grouped GEMM requires cuBLAS 13.3+, but compile-time cuBLAS version is "
-               << CUBLAS_VERSION << ".";
-#else
+  if (auto reason = grouped_gemm_skip_reason(params.input_case); !reason.empty()) {
+    GTEST_SKIP() << reason;
+  }
+#if CUBLAS_VERSION >= 130300
   const int32_t cc = getDeviceComputeCapability();
-
-#if CUBLAS_VERSION >= CUBLAS_GROUPED_GEMM_HOPPER_VERSION
-  // Compiled with cuBLAS 13.4+: Hopper (SM90) and Blackwell+ are supported.
-  if (cc < hopperComputeCapability) {
-    GTEST_SKIP() << "Grouped GEMM requires Hopper (SM90) or newer with cuBLAS 13.4+, "
-                 << "but device compute capability is " << cc << ".";
-  }
-  // FP8 tensor scaling grouped GEMM is only supported on Blackwell+
-  if (cc < blackwellComputeCapability && params.input_case == InputCase::kFP8Current) {
-    GTEST_SKIP() << "FP8 tensor scaling grouped GEMM requires Blackwell (SM100) or newer, "
-                 << "but device compute capability is " << cc << ".";
-  }
-  // MXFP8 grouped GEMM is only supported on Blackwell+
-  if (cc < blackwellComputeCapability && params.input_case == InputCase::kMXFP8) {
-    GTEST_SKIP() << "MXFP8 grouped GEMM requires Blackwell (SM100) or newer, "
-                 << "but device compute capability is " << cc << ".";
-  }
-  // NVFP4 grouped GEMM is only supported on Blackwell+
-  if (cc < blackwellComputeCapability && params.input_case == InputCase::kNVFP4) {
-    GTEST_SKIP() << "NVFP4 grouped GEMM requires Blackwell (SM100) or newer, "
-                 << "but device compute capability is " << cc << ".";
-  }
-  // FP8 block scaling grouped GEMM is only supported on Hopper
-  if (cc >= blackwellComputeCapability && params.input_case == InputCase::kFP8BlockScaling) {
-    GTEST_SKIP() << "FP8 block scaling grouped GEMM is only supported on Hopper (SM90), "
-                 << "but device compute capability is " << cc << ".";
-  }
-#else
-  // Compiled with cuBLAS 13.2-13.3: only Blackwell+ is supported.
-  if (cc < blackwellComputeCapability) {
-    GTEST_SKIP() << "Grouped GEMM requires Blackwell (SM100) or newer.";
-  }
-  if (params.input_case == InputCase::kFP8BlockScaling) {
-    GTEST_SKIP() << "FP8 block scaling grouped GEMM is only supported on Hopper (SM90), "
-                 << "but device compute capability is " << cc << ".";
-  }
-#endif  // CUBLAS_VERSION >= CUBLAS_GROUPED_GEMM_HOPPER_VERSION
-  // Skip known flaky NVFP4 AllDifferent cases: these depend on nvte_multi_tensor_gemm
-  // (the ground-truth reference) which has a pre-existing bug that intermittently
-  // produces partial output writes for these specific shape/transpose combinations.
-  if (params.input_case == InputCase::kNVFP4 &&
-      params.shape_case == ShapeCase::kAllDifferent) {
-    GTEST_SKIP() << "NVFP4 AllDifferent grouped GEMM tests are skipped due to a known "
-                 << "flaky bug in the nvte_multi_tensor_gemm reference implementation.";
-  }
 
   const std::vector<std::tuple<size_t, size_t, size_t>> shapes = make_shapes(params.shape_case);
 
@@ -765,7 +686,7 @@ void run_grouped_gemm_discrete_out_case(const TestParams& params) {
   NVTE_CHECK_CUDA(cudaMemcpy(beta_tensor.rowwise_dptr(), beta_vals.data(),
                              alpha_beta_numel * sizeof(float), cudaMemcpyHostToDevice));
 
-  const size_t setup_ws_bytes = grouped_setup_workspace_size(num_gemms);
+  const size_t setup_ws_bytes = nvte_get_grouped_gemm_setup_workspace_size(num_gemms);
   Tensor setup_ws("setup_ws", std::vector<size_t>{setup_ws_bytes}, DType::kByte);
   Tensor cublas_ws("cublas_ws", std::vector<size_t>{cublas_ws_bytes}, DType::kByte);
 
@@ -807,56 +728,11 @@ void run_grouped_gemm_discrete_out_case(const TestParams& params) {
 }
 
 void run_grouped_gemm_discrete_in_case(const TestParams& params) {
-#if CUBLAS_VERSION < 130300
-  GTEST_SKIP() << "Grouped GEMM requires cuBLAS 13.3+, but compile-time cuBLAS version is "
-               << CUBLAS_VERSION << ".";
-#else
+  if (auto reason = grouped_gemm_skip_reason(params.input_case); !reason.empty()) {
+    GTEST_SKIP() << reason;
+  }
+#if CUBLAS_VERSION >= 130300
   const int32_t cc = getDeviceComputeCapability();
-
-#if CUBLAS_VERSION >= CUBLAS_GROUPED_GEMM_HOPPER_VERSION
-  // Compiled with cuBLAS 13.4+: Hopper (SM90) and Blackwell+ are supported.
-  if (cc < hopperComputeCapability) {
-    GTEST_SKIP() << "Grouped GEMM requires Hopper (SM90) or newer with cuBLAS 13.4+, "
-                 << "but device compute capability is " << cc << ".";
-  }
-  // FP8 tensor scaling grouped GEMM is only supported on Blackwell+
-  if (cc < blackwellComputeCapability && params.input_case == InputCase::kFP8Current) {
-    GTEST_SKIP() << "FP8 tensor scaling grouped GEMM requires Blackwell (SM100) or newer, "
-                 << "but device compute capability is " << cc << ".";
-  }
-  // MXFP8 grouped GEMM is only supported on Blackwell+
-  if (cc < blackwellComputeCapability && params.input_case == InputCase::kMXFP8) {
-    GTEST_SKIP() << "MXFP8 grouped GEMM requires Blackwell (SM100) or newer, "
-                 << "but device compute capability is " << cc << ".";
-  }
-  // NVFP4 grouped GEMM is only supported on Blackwell+
-  if (cc < blackwellComputeCapability && params.input_case == InputCase::kNVFP4) {
-    GTEST_SKIP() << "NVFP4 grouped GEMM requires Blackwell (SM100) or newer, "
-                 << "but device compute capability is " << cc << ".";
-  }
-  // FP8 block scaling grouped GEMM is only supported on Hopper
-  if (cc >= blackwellComputeCapability && params.input_case == InputCase::kFP8BlockScaling) {
-    GTEST_SKIP() << "FP8 block scaling grouped GEMM is only supported on Hopper (SM90), "
-                 << "but device compute capability is " << cc << ".";
-  }
-#else
-  // Compiled with cuBLAS 13.2-13.3: only Blackwell+ is supported.
-  if (cc < blackwellComputeCapability) {
-    GTEST_SKIP() << "Grouped GEMM requires Blackwell (SM100) or newer.";
-  }
-  if (params.input_case == InputCase::kFP8BlockScaling) {
-    GTEST_SKIP() << "FP8 block scaling grouped GEMM is only supported on Hopper (SM90), "
-                 << "but device compute capability is " << cc << ".";
-  }
-#endif  // CUBLAS_VERSION >= CUBLAS_GROUPED_GEMM_HOPPER_VERSION
-  // Skip known flaky NVFP4 AllDifferent cases: these depend on nvte_multi_tensor_gemm
-  // (the ground-truth reference) which has a pre-existing bug that intermittently
-  // produces partial output writes for these specific shape/transpose combinations.
-  if (params.input_case == InputCase::kNVFP4 &&
-      params.shape_case == ShapeCase::kAllDifferent) {
-    GTEST_SKIP() << "NVFP4 AllDifferent grouped GEMM tests are skipped due to a known "
-                 << "flaky bug in the nvte_multi_tensor_gemm reference implementation.";
-  }
 
   const std::vector<std::tuple<size_t, size_t, size_t>> shapes = make_shapes(params.shape_case);
 
@@ -1006,7 +882,7 @@ void run_grouped_gemm_discrete_in_case(const TestParams& params) {
   NVTE_CHECK_CUDA(cudaMemcpy(beta_tensor.rowwise_dptr(), beta_vals.data(),
                              alpha_beta_numel * sizeof(float), cudaMemcpyHostToDevice));
 
-  const size_t setup_ws_bytes = grouped_setup_workspace_size(num_gemms);
+  const size_t setup_ws_bytes = nvte_get_grouped_gemm_setup_workspace_size(num_gemms);
   Tensor setup_ws("setup_ws", std::vector<size_t>{setup_ws_bytes}, DType::kByte);
   Tensor cublas_ws("cublas_ws", std::vector<size_t>{cublas_ws_bytes}, DType::kByte);
 
