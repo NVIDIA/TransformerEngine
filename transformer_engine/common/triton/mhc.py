@@ -751,28 +751,6 @@ def _mhc_scale_bwd_fused(
 
         tl.atomic_add(grad_b_ptr + cols * stride_grad_b, grad_b, mask=cols < N, sem="relaxed")
 
-# Gluon kernels for Sinkhorn fwd/bwd — fused recompute with SMEM-resident
-# f/g history so no DRAM scratch buffer is required for the backward pass.
-#
-# Layout:
-#   - The (BATCH_SIZE, n, n) tile uses a 3D BlockedLayout where each warp owns
-#     one (n, n) sub-tile, so axis=1 and axis=2 reductions are intra-warp shfls.
-#   - In the backward pass, hist_f/hist_g are allocated as shared memory of
-#     shape [iters+1, BATCH_SIZE, n] inside the kernel itself.
-
-
-def _sinkhorn_layouts():
-    L_3d = gl.BlockedLayout(
-        size_per_thread=[4, 1, 4],
-        threads_per_warp=[2, 4, 4],
-        warps_per_cta=[4, 1, 1],
-        order=[2, 1, 0],
-    )
-    smem_layout = gl.SwizzledSharedLayout(
-        vec=1, per_phase=1, max_phase=1, order=[1, 0]
-    )
-    return L_3d, smem_layout
-
 @gluon.jit
 def _mhc_sinkhorn_fwd(
     x_ptr,

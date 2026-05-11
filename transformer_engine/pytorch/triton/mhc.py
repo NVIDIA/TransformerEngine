@@ -21,7 +21,6 @@ from transformer_engine.common.triton.mhc import (
     _mhc_projection_fwd_fused,
     _mhc_sinkhorn_fwd,
     _mhc_sinkhorn_bwd,
-    _sinkhorn_layouts,
 )
 from transformer_engine.pytorch.cpp_extensions.gemm import general_gemm
 
