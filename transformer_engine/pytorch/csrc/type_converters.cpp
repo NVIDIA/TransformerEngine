@@ -134,6 +134,7 @@ TensorWrapper NVTETensorFromNVFP4Tensor(py::handle tensor, Quantizer *quantizer)
   const bool rowwise_usage = !(tensor.attr("_rowwise_data").is_none());
   const bool columnwise_usage = !(tensor.attr("_columnwise_data").is_none());
   const bool with_gemm_swizzled_scales = tensor.attr("_with_gemm_swizzled_scales").cast<bool>();
+  const bool row_scaled_nvfp4 = tensor.attr("_row_scaled_nvfp4").cast<bool>();
 
   NVTE_CHECK(rowwise_usage || columnwise_usage, "No data found for NVFP4 Tensor.");
 
@@ -163,6 +164,7 @@ TensorWrapper NVTETensorFromNVFP4Tensor(py::handle tensor, Quantizer *quantizer)
 
   // Scale layout
   ret.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
+  ret.set_row_scaled_nvfp4(row_scaled_nvfp4);
 
   // Quantizer state
   quantizer->set_quantization_params(&ret);
