@@ -7,8 +7,8 @@
 #include <pybind.h>
 
 #include "common.h"
-#include "common/util/system.h"
 #include "common/util/cuda_runtime.h"
+#include "common/util/system.h"
 #include "pybind.h"
 #include "torch/torch.h"
 
