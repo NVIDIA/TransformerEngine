@@ -822,12 +822,14 @@ def get_attention_backend(
                 device_compute_capability[0] * 10 + device_compute_capability[1],
             )
             use_flash_attention_4 = False
-        # Workaround: SM100 backward kernel bug when MLA + 2CTA (head_dim_qk >= 128) for the
-        # standard (non-dedicated) kernel path. FlashAttentionBackwardSm100 computes
+        # Workaround: SM100 backward kernel bug when MLA + 2CTA (head_dim_qk >= 128) for
+        # the standard (non-dedicated) kernel path. FlashAttentionBackwardSm100 computes
         # dK_reduce_ncol = gcd(32, tile_hdim // 2) based on Q/K head_dim but reuses it for
         # dV TMEM load atoms. When (tile_hdimv // 2) % dK_reduce_ncol != 0, dV reads are
-        # misaligned. The dedicated (256, 256) kernel uses its own tmem layout so it's
-        # not affected. See: flash_attn/cute/flash_bwd_sm100.py, line ~262 and ~3890.
+        # misaligned (e.g. dqk=128, dv=96 gives 48 % 32 != 0). The dedicated (256, 256)
+        # kernel uses its own tmem layout and is not affected.
+        # See: flash_attn/cute/flash_bwd_sm100.py ~L262 and ~L3890. Still present in
+        # flash-attn-4 4.0.0b11.
         if (
             use_flash_attention_4
             and is_training

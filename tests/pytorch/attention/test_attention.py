@@ -406,8 +406,8 @@ model_configs_fa4_hdim256 = {
     not FlashAttentionUtils.v4_is_installed, reason="Flash-attn v4 (flash-attn-4) is required."
 )
 @pytest.mark.skipif(
-    get_device_compute_capability() != (10, 0),
-    reason="FA4 head_dim=256 dedicated kernel is SM100-only.",
+    device_compute_capability not in ((10, 0), (10, 3)),
+    reason="FA4 head_dim=256 dedicated kernel is SM100/103-only.",
 )
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_fa4_hdim256])
