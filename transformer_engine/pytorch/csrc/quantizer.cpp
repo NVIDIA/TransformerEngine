@@ -19,9 +19,21 @@ namespace {
  *
  * If no device is provided, uses the current CUDA device.
  */
-at::Device resolve_device(std::optional<at::Device> device) {
+at::Device resolve_device(std::optional<at::Device> device,
+                          const std::optional<at::Tensor>& data = std::nullopt) {
+  if (device.has_value() && data.has_value()) {
+    // Ensure that they are the same
+    const auto provided_device = *device;
+    const auto data_device = data->device();
+    NVTE_CHECK(provided_device == data_device,
+        "Provided device and the device of the provided data tensor are not the same.");
+    return provided_device;
+  }
   if (device.has_value()) {
     return *device;
+  }
+  if (data.has_value()) {
+    return data->device();
   }
   return at::Device(torch::kCUDA, c10::cuda::current_device());
 }
@@ -267,7 +279,7 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
     const std::vector<size_t>& shape, DType dtype, std::optional<at::Tensor> data,
     std::optional<at::Tensor> transpose, std::optional<at::Tensor> scale_inv,
     std::optional<at::Device> device_opt, bool pin_memory) const {
-  const auto device = resolve_device(device_opt);
+  const auto device = resolve_device(device_opt, data);
   using namespace pybind11::literals;
   int is_non_tn_fp8_gemm_supported = nvte_is_non_tn_fp8_gemm_supported();
   // Initialize data tensor
