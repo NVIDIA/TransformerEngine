@@ -26,7 +26,7 @@ at::Device resolve_device(std::optional<at::Device> device,
     const auto provided_device = *device;
     const auto data_device = data->device();
     NVTE_CHECK(provided_device == data_device,
-        "Provided device and the device of the provided data tensor are not the same.");
+               "Provided device and the device of the provided data tensor are not the same.");
     return provided_device;
   }
   if (device.has_value()) {
