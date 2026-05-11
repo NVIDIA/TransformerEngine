@@ -138,7 +138,7 @@ def patch_after_import_torch():
 
     original_is_cuda = torch.Tensor.is_cuda
     def always_cuda(self):
-        return True
+        return self.is_musa
     torch.Tensor.is_cuda = property(always_cuda)
 
     origin_init_process_group = torch.distributed.init_process_group
