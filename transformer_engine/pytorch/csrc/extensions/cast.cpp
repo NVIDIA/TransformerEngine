@@ -734,7 +734,8 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
   };
 
   // Helper function to get size of amax buffer
-  auto amax_shape = [](const std::vector<size_t> &shape, bool row_scaled = false) -> std::vector<size_t> {
+  auto amax_shape = [](const std::vector<size_t> &shape,
+                       bool row_scaled = false) -> std::vector<size_t> {
     if (row_scaled) {
       const auto [rows, _] = get_2d_dims(shape);
       return {rows};
