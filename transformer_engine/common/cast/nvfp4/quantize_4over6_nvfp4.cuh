@@ -264,6 +264,19 @@ __device__ __forceinline__ void quantize_4over6_16x(
   }
 }
 
+__device__ __forceinline__ bool pick_4over6_map4(const float err_map4, const float err_map6) {
+  return err_map4 < err_map6;
+}
+
+template <typename scaling_coeff_type>
+__device__ __forceinline__ nvfp4_scale_t selected_4over6_scale(
+    const bool pick_map4, const QuantizationScales4Over6<scaling_coeff_type> &scaling_factors) {
+  if (pick_map4) {
+    return scaling_factors.S_dec_b_fp8_map4;
+  }
+  return scaling_factors.S_dec_b_fp8_map6;
+}
+
 template <bool USE_FAST_MATH, bool REVERSE_PACK_ORDER = false, typename scaling_coeff_type>
 __device__ __forceinline__ void quantize_4over6_16x(
     const float (&first_half)[8], const float (&second_half)[8],
@@ -278,12 +291,12 @@ __device__ __forceinline__ void quantize_4over6_16x(
                                                          global_amax, err_map4, err_map6, rOut_map4,
                                                          rOut_map6);
 
-  if (err_map4 < err_map6) {
-    S_dec_b_fp8 = scaling_factors.S_dec_b_fp8_map4;
+  const bool pick_map4 = pick_4over6_map4(err_map4, err_map6);
+  S_dec_b_fp8 = selected_4over6_scale(pick_map4, scaling_factors);
+  if (pick_map4) {
     rOut[0] = rOut_map4[0];
     rOut[1] = rOut_map4[1];
   } else {
-    S_dec_b_fp8 = scaling_factors.S_dec_b_fp8_map6;
     rOut[0] = rOut_map6[0];
     rOut[1] = rOut_map6[1];
   }
@@ -315,47 +328,16 @@ __device__ __forceinline__ void quantize_4over6_candidates_16x(
                                      candidates.rOut_map6);
 }
 
-template <size_t BLOCK_DIM, size_t BLOCKS_PER_TILE_Y, size_t BLOCKS_PER_TILE_X>
-__device__ __forceinline__ void reduce_4over6_2d_block_selection(
-    const size_t block_in_tile_y, const size_t reduce_thread_idx, const float global_encode_scale,
-    const float global_decode_scale,
-    float (&block_amax_matrix)[BLOCKS_PER_TILE_Y][BLOCKS_PER_TILE_X + 1],
-    float (&err_map4_matrix)[BLOCKS_PER_TILE_Y][BLOCKS_PER_TILE_X][BLOCK_DIM],
-    float (&err_map6_matrix)[BLOCKS_PER_TILE_Y][BLOCKS_PER_TILE_X][BLOCK_DIM],
-    uint8_t (&pick_map4_matrix)[BLOCKS_PER_TILE_Y][BLOCKS_PER_TILE_X],
-    nvfp4_scale_t (&selected_scale_matrix)[BLOCKS_PER_TILE_Y][BLOCKS_PER_TILE_X]) {
-  if (reduce_thread_idx < BLOCKS_PER_TILE_X) {
-    const size_t reduce_block_x = reduce_thread_idx;
-    float block_err_map4 = 0.0f;
-    float block_err_map6 = 0.0f;
-#pragma unroll
-    for (int i = 0; i < BLOCK_DIM; ++i) {
-      block_err_map4 += err_map4_matrix[block_in_tile_y][reduce_block_x][i];
-      block_err_map6 += err_map6_matrix[block_in_tile_y][reduce_block_x][i];
-    }
-
-    const auto scaling_factors = compute_4over6_fp4_encode_quantization_scaling_factors(
-        block_amax_matrix[block_in_tile_y][reduce_block_x], global_encode_scale,
-        global_decode_scale);
-    if (block_err_map4 < block_err_map6) {
-      pick_map4_matrix[block_in_tile_y][reduce_block_x] = 1;
-      selected_scale_matrix[block_in_tile_y][reduce_block_x] = scaling_factors.S_dec_b_fp8_map4;
-    } else {
-      pick_map4_matrix[block_in_tile_y][reduce_block_x] = 0;
-      selected_scale_matrix[block_in_tile_y][reduce_block_x] = scaling_factors.S_dec_b_fp8_map6;
-    }
-  }
-}
-
-template <size_t BLOCK_DIM, size_t BLOCKS_PER_TILE_Y, size_t BLOCKS_PER_TILE_X>
-__device__ __forceinline__ void record_and_reduce_4over6_2d_block_selection(
-    const float block_amax, const float global_encode_scale, const float global_decode_scale,
+template <size_t BLOCK_DIM, size_t BLOCKS_PER_TILE_Y, size_t BLOCKS_PER_TILE_X,
+          typename scaling_coeff_type>
+__device__ __forceinline__ bool record_and_select_4over6_2d_block(
+    const QuantizationScales4Over6<scaling_coeff_type> &scaling_factors,
     const size_t block_in_tile_y, const size_t block_in_tile_x, const size_t participant_idx,
     float (&err_map4_matrix)[BLOCKS_PER_TILE_Y][BLOCKS_PER_TILE_X][BLOCK_DIM],
     float (&err_map6_matrix)[BLOCKS_PER_TILE_Y][BLOCKS_PER_TILE_X][BLOCK_DIM],
     uint8_t (&pick_map4_matrix)[BLOCKS_PER_TILE_Y][BLOCKS_PER_TILE_X],
     nvfp4_scale_t (&selected_scale_matrix)[BLOCKS_PER_TILE_Y][BLOCKS_PER_TILE_X],
-    const QuantizationCandidates4Over6 &candidates) {
+    nvfp4_scale_t &S_dec_b_fp8, const QuantizationCandidates4Over6 &candidates) {
   err_map4_matrix[block_in_tile_y][block_in_tile_x][participant_idx] = candidates.err_map4;
   err_map6_matrix[block_in_tile_y][block_in_tile_x][participant_idx] = candidates.err_map6;
   __syncthreads();
@@ -369,46 +351,43 @@ __device__ __forceinline__ void record_and_reduce_4over6_2d_block_selection(
       block_err_map6 += err_map6_matrix[block_in_tile_y][block_in_tile_x][i];
     }
 
-    const auto scaling_factors = compute_4over6_fp4_encode_quantization_scaling_factors(
-        block_amax, global_encode_scale, global_decode_scale);
-    if (block_err_map4 < block_err_map6) {
+    const bool pick_map4 = pick_4over6_map4(block_err_map4, block_err_map6);
+    if (pick_map4) {
       pick_map4_matrix[block_in_tile_y][block_in_tile_x] = 1;
-      selected_scale_matrix[block_in_tile_y][block_in_tile_x] = scaling_factors.S_dec_b_fp8_map4;
     } else {
       pick_map4_matrix[block_in_tile_y][block_in_tile_x] = 0;
-      selected_scale_matrix[block_in_tile_y][block_in_tile_x] = scaling_factors.S_dec_b_fp8_map6;
     }
+    selected_scale_matrix[block_in_tile_y][block_in_tile_x] =
+        selected_4over6_scale(pick_map4, scaling_factors);
   }
   __syncthreads();
+  S_dec_b_fp8 = selected_scale_matrix[block_in_tile_y][block_in_tile_x];
+  return pick_map4_matrix[block_in_tile_y][block_in_tile_x] != 0;
 }
 
 template <bool USE_FAST_MATH, size_t BLOCK_DIM, size_t BLOCKS_PER_TILE_Y, size_t BLOCKS_PER_TILE_X>
-__device__ __forceinline__ void quantize_4over6_2d_block_candidate(
+__device__ __forceinline__ bool quantize_and_select_4over6_2d_block_16x(
     const float (&x)[16], const float block_amax, const float global_encode_scale,
     const float global_decode_scale, const float global_amax, const size_t block_in_tile_y,
-    const size_t block_in_tile_x, const size_t participant_idx, const size_t reduce_thread_idx,
-    float (&block_amax_matrix)[BLOCKS_PER_TILE_Y][BLOCKS_PER_TILE_X + 1],
+    const size_t block_in_tile_x, const size_t participant_idx,
     float (&err_map4_matrix)[BLOCKS_PER_TILE_Y][BLOCKS_PER_TILE_X][BLOCK_DIM],
     float (&err_map6_matrix)[BLOCKS_PER_TILE_Y][BLOCKS_PER_TILE_X][BLOCK_DIM],
     uint8_t (&pick_map4_matrix)[BLOCKS_PER_TILE_Y][BLOCKS_PER_TILE_X],
     nvfp4_scale_t (&selected_scale_matrix)[BLOCKS_PER_TILE_Y][BLOCKS_PER_TILE_X],
-    QuantizationCandidates4Over6 &candidates) {
+    nvfp4_scale_t &S_dec_b_fp8, QuantizationCandidates4Over6 &candidates) {
   const auto scaling_factors = compute_4over6_fp4_encode_quantization_scaling_factors(
       block_amax, global_encode_scale, global_decode_scale);
   quantize_4over6_candidates_16x<USE_FAST_MATH>(x, scaling_factors, global_amax, candidates);
 
-  err_map4_matrix[block_in_tile_y][block_in_tile_x][participant_idx] = candidates.err_map4;
-  err_map6_matrix[block_in_tile_y][block_in_tile_x][participant_idx] = candidates.err_map6;
-  __syncthreads();
-
-  reduce_4over6_2d_block_selection<BLOCK_DIM, BLOCKS_PER_TILE_Y, BLOCKS_PER_TILE_X>(
-      block_in_tile_y, reduce_thread_idx, global_encode_scale, global_decode_scale,
-      block_amax_matrix, err_map4_matrix, err_map6_matrix, pick_map4_matrix, selected_scale_matrix);
-  __syncthreads();
+  const bool pick_map4 =
+      record_and_select_4over6_2d_block<BLOCK_DIM, BLOCKS_PER_TILE_Y, BLOCKS_PER_TILE_X>(
+          scaling_factors, block_in_tile_y, block_in_tile_x, participant_idx, err_map4_matrix,
+          err_map6_matrix, pick_map4_matrix, selected_scale_matrix, S_dec_b_fp8, candidates);
+  return pick_map4;
 }
 
-__device__ __forceinline__ uint32_t *selected_4over6_packed(
-    const bool pick_map4, QuantizationCandidates4Over6 &candidates) {
+__device__ __forceinline__ const uint32_t *selected_4over6_packed(
+    const bool pick_map4, const QuantizationCandidates4Over6 &candidates) {
   if (pick_map4) {
     return candidates.rOut_map4;
   }
@@ -417,9 +396,9 @@ __device__ __forceinline__ uint32_t *selected_4over6_packed(
 
 template <typename output_type>
 __device__ __forceinline__ void store_4over6_colwise_packed_16x(
-    const bool pick_map4, QuantizationCandidates4Over6 &candidates, const int thread_lane,
+    const bool pick_map4, const QuantizationCandidates4Over6 &candidates, const int thread_lane,
     output_type *out_t_data_sh, const size_t shmem_offset_base_colwise_out_t) {
-  uint32_t *regs_4x = selected_4over6_packed(pick_map4, candidates);
+  const uint32_t *regs_4x = selected_4over6_packed(pick_map4, candidates);
   const int group = thread_lane / 16;
   uint32_t val[2];
   switch (group) {
@@ -440,10 +419,10 @@ __device__ __forceinline__ void store_4over6_colwise_packed_16x(
 
 template <size_t WAVES, size_t PACK_SIZE, size_t SCALE_DIM, typename output_type>
 __device__ __forceinline__ void store_4over6_rowwise_packed_16x(
-    const bool pick_map4, QuantizationCandidates4Over6 &candidates, const int bank_group,
+    const bool pick_map4, const QuantizationCandidates4Over6 &candidates, const int bank_group,
     const size_t thread_offset_X_rowwise, const size_t shmem_offset_base_rowwise_out,
     output_type *out_data_sh) {
-  uint32_t *packed = selected_4over6_packed(pick_map4, candidates);
+  const uint32_t *packed = selected_4over6_packed(pick_map4, candidates);
 #pragma unroll
   for (int w = 0; w < WAVES; ++w) {
     const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM;
@@ -464,8 +443,9 @@ __device__ __forceinline__ void store_4over6_packed_16x(const uint32_t (&packed)
 
 template <typename output_vec_type>
 __device__ __forceinline__ void store_selected_4over6_packed_16x(
-    const bool pick_map4, QuantizationCandidates4Over6 &candidates, output_vec_type &output_vec) {
-  uint32_t *packed = selected_4over6_packed(pick_map4, candidates);
+    const bool pick_map4, const QuantizationCandidates4Over6 &candidates,
+    output_vec_type &output_vec) {
+  const uint32_t *packed = selected_4over6_packed(pick_map4, candidates);
   *reinterpret_cast<uint32_t *>(&output_vec.data.elt[0]) = packed[0];
   *reinterpret_cast<uint32_t *>(&output_vec.data.elt[4]) = packed[1];
 }

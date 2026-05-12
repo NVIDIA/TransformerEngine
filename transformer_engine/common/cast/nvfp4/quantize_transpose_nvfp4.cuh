@@ -1097,21 +1097,20 @@ __global__ void __launch_bounds__(THREADS_NUM)
             }
           }
 
-          QuantizationCandidates4Over6 candidates;
           const size_t block_col = threadIdx.x % BLOCK_DIM;
-          quantize_4over6_2d_block_candidate<USE_FAST_MATH, BLOCK_DIM, BLOCKS_PER_TILE_Y,
-                                             BLOCKS_PER_TILE_X>(
-              x_4over6, block_amax, S_enc_colwise, S_dec_colwise, global_amax_colwise,
-              block_in_tile_y, block_in_tile_x, block_col, threadIdx.x, block_amax_matrix,
-              err_map4_matrix, err_map6_matrix, pick_map4_matrix, selected_scale_matrix,
-              candidates);
+          QuantizationCandidates4Over6 candidates;
+          nvfp4_scale_t S_dec_b_fp8;
+          const bool pick_map4 =
+              quantize_and_select_4over6_2d_block_16x<USE_FAST_MATH, BLOCK_DIM, BLOCKS_PER_TILE_Y,
+                                                      BLOCKS_PER_TILE_X>(
+                  x_4over6, block_amax, S_enc_colwise, S_dec_colwise, global_amax_colwise,
+                  block_in_tile_y, block_in_tile_x, block_col, err_map4_matrix, err_map6_matrix,
+                  pick_map4_matrix, selected_scale_matrix, S_dec_b_fp8, candidates);
 
-          const nvfp4_scale_t S_dec_b_fp8 = selected_scale_matrix[block_in_tile_y][block_in_tile_x];
           const size_t scale_idx_sh =
               tid_Y_t * SCALES_PER_CHUNK_Y + stage * ITERATIONS_TRANSPOSE + it;
           out_colwise_scales_sh[scale_idx_sh] = S_dec_b_fp8;
 
-          const bool pick_map4 = pick_map4_matrix[block_in_tile_y][block_in_tile_x] != 0;
           store_4over6_colwise_packed_16x(pick_map4, candidates, thread_lane, out_t_data_sh,
                                           shmem_offset_base_colwise_out_t);
         } else {
@@ -1263,14 +1262,14 @@ __global__ void __launch_bounds__(THREADS_NUM)
 
         if constexpr (USE_4OVER6) {
           QuantizationCandidates4Over6 candidates;
-          quantize_4over6_2d_block_candidate<USE_FAST_MATH, BLOCK_DIM, BLOCKS_PER_TILE_Y,
-                                             BLOCKS_PER_TILE_X>(
-              in_4over6_rowwise, block_amax, S_enc_rowwise, S_dec_rowwise, global_amax_rowwise,
-              block_in_tile_y, block_in_tile_x, tid_Y_rowwise, threadIdx.x, block_amax_matrix,
-              err_map4_matrix, err_map6_matrix, pick_map4_matrix, selected_scale_matrix,
-              candidates);
+          nvfp4_scale_t S_dec_b_fp8;
+          const bool pick_map4 =
+              quantize_and_select_4over6_2d_block_16x<USE_FAST_MATH, BLOCK_DIM, BLOCKS_PER_TILE_Y,
+                                                      BLOCKS_PER_TILE_X>(
+                  in_4over6_rowwise, block_amax, S_enc_rowwise, S_dec_rowwise, global_amax_rowwise,
+                  block_in_tile_y, block_in_tile_x, tid_Y_rowwise, err_map4_matrix, err_map6_matrix,
+                  pick_map4_matrix, selected_scale_matrix, S_dec_b_fp8, candidates);
 
-          const nvfp4_scale_t S_dec_b_fp8 = selected_scale_matrix[block_in_tile_y][block_in_tile_x];
           const size_t scales_offset_Y =
               scales_offset_Y_rowwise + stage * BUFF_DIM_Y + it * THREADS_Y_ROWWISE;
           const size_t scales_offset_X = scales_offset_X_rowwise;
@@ -1282,7 +1281,6 @@ __global__ void __launch_bounds__(THREADS_NUM)
             scales_ptr[scale_idx_global] = S_dec_b_fp8;
           }
 
-          const bool pick_map4 = pick_map4_matrix[block_in_tile_y][block_in_tile_x] != 0;
           store_4over6_rowwise_packed_16x<WAVES, PACK_SIZE, SCALE_DIM>(
               pick_map4, candidates, bank_group, thread_offset_X_rowwise,
               shmem_offset_base_rowwise_out, out_data_sh);
