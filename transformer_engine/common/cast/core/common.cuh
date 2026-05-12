@@ -17,8 +17,8 @@
 #include <transformer_engine/transformer_engine.h>
 
 #include "../../common.h"
-#include "../../utils.cuh"
 #include "../../util/ptx.cuh"
+#include "../../utils.cuh"
 
 namespace transformer_engine {
 namespace dispatch {
