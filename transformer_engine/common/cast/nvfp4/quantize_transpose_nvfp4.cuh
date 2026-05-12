@@ -784,9 +784,8 @@ __global__ void __launch_bounds__(THREADS_NUM)
 }
 
 template <bool COMPUTE_ACTIVATIONS, typename ParamOP, float (*OP)(float, const ParamOP &),
-          typename IType, bool USE_STOCHASTIC_ROUNDING, bool RETURN_TRANSPOSE, bool USE_4OVER6,
-          bool USE_4OVER6_E4M3_USE_256, NVTENVFP44Over6ErrMode USE_4OVER6_ERR_MODE,
-          bool USE_4OVER6_ERR_USE_FAST_MATH>
+          typename IType, bool USE_STOCHASTIC_ROUNDING, bool RETURN_TRANSPOSE, int E4M3_MAX,
+          typename FourOverSixConfig>
 __global__ void __launch_bounds__(THREADS_NUM)
     quantize_transpose_nvfp4_2D_kernel(const __grid_constant__ CUtensorMap tensor_map_input,
                                        const __grid_constant__ CUtensorMap tensor_map_output,
@@ -900,7 +899,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
   using FourOverSixScratch =
       QuantizationScratch4Over6<BLOCK_DIM, BLOCKS_PER_TILE_Y, BLOCKS_PER_TILE_X>;
   FourOverSixScratch *four_over_six_scratch = nullptr;
-  if constexpr (USE_4OVER6) {
+  if constexpr (FourOverSixConfig::enabled) {
     constexpr size_t four_over_six_scratch_offset = in_mem + out_mem_rowwise_data +
                                                     out_mem_colwise_data + out_mem_rowwise_scales +
                                                     out_mem_colwise_scales;
@@ -916,14 +915,14 @@ __global__ void __launch_bounds__(THREADS_NUM)
   const float S_enc_rowwise =
       (amax_rowwise_ptr == nullptr)
           ? 1.0f
-          : compute_global_encode_scaling_factor_FP4<USE_4OVER6_E4M3_USE_256>(*amax_rowwise_ptr);
+          : compute_global_encode_scaling_factor_FP4<E4M3_MAX>(*amax_rowwise_ptr);
   // NOTE: This is to match with how emulation code was written.
   const float S_dec_rowwise = 1.0 / S_enc_rowwise;
 
   const float S_enc_colwise =
       (amax_colwise_ptr == nullptr)
           ? S_enc_rowwise
-          : compute_global_encode_scaling_factor_FP4<USE_4OVER6_E4M3_USE_256>(*amax_colwise_ptr);
+          : compute_global_encode_scaling_factor_FP4<E4M3_MAX>(*amax_colwise_ptr);
   const float S_dec_colwise = 1.0 / S_enc_colwise;
   const float global_amax_rowwise = (amax_rowwise_ptr == nullptr) ? 1.0f : *amax_rowwise_ptr;
   const float global_amax_colwise =
@@ -1099,7 +1098,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
           }
         }
 
-        if constexpr (USE_4OVER6) {
+        if constexpr (FourOverSixConfig::enabled) {
           float x_4over6[SCALE_DIM];
 #pragma unroll
           for (int i = 0; i < SCALE_DIM; ++i) {
@@ -1113,12 +1112,12 @@ __global__ void __launch_bounds__(THREADS_NUM)
           const size_t block_col = threadIdx.x % BLOCK_DIM;
           QuantizationCandidates4Over6 candidates;
           nvfp4_scale_t S_dec_b_fp8;
-          const bool pick_map4 = quantize_and_select_4over6_2d_block_16x<
-              USE_4OVER6_ERR_MODE, USE_4OVER6_ERR_USE_FAST_MATH, USE_4OVER6_E4M3_USE_256, BLOCK_DIM,
-              BLOCKS_PER_TILE_Y, BLOCKS_PER_TILE_X>(
-              x_4over6, block_amax, S_enc_colwise, S_dec_colwise, global_amax_colwise,
-              block_in_tile_y, block_in_tile_x, block_col, *four_over_six_scratch, S_dec_b_fp8,
-              candidates);
+          const bool pick_map4 =
+              quantize_and_select_4over6_2d_block_16x<FourOverSixConfig, E4M3_MAX, BLOCK_DIM,
+                                                      BLOCKS_PER_TILE_Y, BLOCKS_PER_TILE_X>(
+                  x_4over6, block_amax, S_enc_colwise, S_dec_colwise, global_amax_colwise,
+                  block_in_tile_y, block_in_tile_x, block_col, *four_over_six_scratch, S_dec_b_fp8,
+                  candidates);
 
           const size_t scale_idx_sh =
               tid_Y_t * SCALES_PER_CHUNK_Y + stage * ITERATIONS_TRANSPOSE + it;
@@ -1213,7 +1212,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
             const size_t shmem_offset_rowwise = shmem_offset_base_rowwise_in + swizzled_thread_idx;
             // Load elements
             in_IType[w].load_from(&in_sh[shmem_offset_rowwise]);
-            if constexpr (USE_4OVER6) {
+            if constexpr (FourOverSixConfig::enabled) {
 #pragma unroll
               for (int e = 0; e < PACK_SIZE / 2; ++e) {
                 in_4over6_rowwise[swizzled_group_idx + 2 * e] =
@@ -1234,7 +1233,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
 
             // Load cached elements
             in_cached[w].load_from(&cached_act_sh[shmem_offset_rowwise]);
-            if constexpr (USE_4OVER6) {
+            if constexpr (FourOverSixConfig::enabled) {
 #pragma unroll
               for (int e = 0; e < PACK_SIZE; ++e) {
                 in_4over6_rowwise[swizzled_group_idx + e] =
@@ -1266,22 +1265,22 @@ __global__ void __launch_bounds__(THREADS_NUM)
                 elt = static_cast<float>(static_cast<IType>(elt));
               }
               in_compute_rowwise[j] = elt;
-              if constexpr (USE_4OVER6) {
+              if constexpr (FourOverSixConfig::enabled) {
                 in_4over6_rowwise[swizzled_group_idx + e] = elt;
               }
             }
           }
         }
 
-        if constexpr (USE_4OVER6) {
+        if constexpr (FourOverSixConfig::enabled) {
           QuantizationCandidates4Over6 candidates;
           nvfp4_scale_t S_dec_b_fp8;
-          const bool pick_map4 = quantize_and_select_4over6_2d_block_16x<
-              USE_4OVER6_ERR_MODE, USE_4OVER6_ERR_USE_FAST_MATH, USE_4OVER6_E4M3_USE_256, BLOCK_DIM,
-              BLOCKS_PER_TILE_Y, BLOCKS_PER_TILE_X>(
-              in_4over6_rowwise, block_amax, S_enc_rowwise, S_dec_rowwise, global_amax_rowwise,
-              block_in_tile_y, block_in_tile_x, tid_Y_rowwise, *four_over_six_scratch, S_dec_b_fp8,
-              candidates);
+          const bool pick_map4 =
+              quantize_and_select_4over6_2d_block_16x<FourOverSixConfig, E4M3_MAX, BLOCK_DIM,
+                                                      BLOCKS_PER_TILE_Y, BLOCKS_PER_TILE_X>(
+                  in_4over6_rowwise, block_amax, S_enc_rowwise, S_dec_rowwise, global_amax_rowwise,
+                  block_in_tile_y, block_in_tile_x, tid_Y_rowwise, *four_over_six_scratch,
+                  S_dec_b_fp8, candidates);
 
           const size_t scales_offset_Y =
               scales_offset_Y_rowwise + stage * BUFF_DIM_Y + it * THREADS_Y_ROWWISE;
@@ -1421,8 +1420,7 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
 
   bool use_stochastic_rounding = quant_config ? quant_config->stochastic_rounding : false;
   const bool use_4over6 = quant_config ? quant_config->nvfp4_4over6 : false;
-  const bool use_4over6_e4m3_use_256 =
-      use_4over6 && quant_config && quant_config->nvfp4_4over6_e4m3_use_256;
+  const int nvfp4_e4m3_max = use_4over6 && quant_config ? quant_config->nvfp4_e4m3_max : 448;
   const NVTENVFP44Over6ErrMode use_4over6_err_mode =
       use_4over6 && quant_config ? quant_config->nvfp4_4over6_err_mode : kNVTENVFP44Over6ErrMAE;
   const bool use_4over6_err_use_fast_math =
@@ -1544,43 +1542,34 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
       use_stochastic_rounding, USE_STOCHASTIC_ROUNDING,
       TRANSFORMER_ENGINE_SWITCH_CONDITION(
           row_scaled_nvfp4, ROW_SCALED_NVFP4,
-          TRANSFORMER_ENGINE_SWITCH_CONDITION(use_4over6, USE_4OVER6, {
-            TRANSFORMER_ENGINE_NVFP4_4OVER6_ERR_MODE_SWITCH(
-                use_4over6_err_mode, USE_4OVER6_ERR_MODE, {
-                  TRANSFORMER_ENGINE_SWITCH_CONDITION(
-                      use_4over6_err_use_fast_math, USE_4OVER6_ERR_USE_FAST_MATH,
-                      TRANSFORMER_ENGINE_SWITCH_CONDITION(
-                          use_4over6_e4m3_use_256, USE_4OVER6_E4M3_USE_256,
-                          TRANSFORMER_ENGINE_SWITCH_CONDITION(return_transpose, RETURN_TRANSPOSE, {
-                            auto kernel =
-                                quantize_transpose_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP,
-                                                                IType, USE_STOCHASTIC_ROUNDING,
-                                                                RETURN_TRANSPOSE, ROW_SCALED_NVFP4>;
+          TRANSFORMER_ENGINE_NVFP4_4OVER6_CONFIG_SWITCH(
+              use_4over6, use_4over6_err_mode, use_4over6_err_use_fast_math, FourOverSixConfig,
+              TRANSFORMER_ENGINE_NVFP4_4OVER6_E4M3_MAX_SWITCH(
+                  nvfp4_e4m3_max, E4M3_MAX,
+                  TRANSFORMER_ENGINE_SWITCH_CONDITION(return_transpose, RETURN_TRANSPOSE, {
+                    auto kernel =
+                        quantize_transpose_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,
+                                                        USE_STOCHASTIC_ROUNDING, RETURN_TRANSPOSE,
+                                                        ROW_SCALED_NVFP4>;
 
-                            if constexpr (use_2d_quantization) {
-                              kernel = quantize_transpose_nvfp4_2D_kernel<
-                                  COMPUTE_ACTIVATIONS, ParamOP, OP, IType, USE_STOCHASTIC_ROUNDING,
-                                  RETURN_TRANSPOSE, USE_4OVER6, USE_4OVER6_E4M3_USE_256,
-                                  USE_4OVER6_ERR_MODE, USE_4OVER6_ERR_USE_FAST_MATH>;
-                            }
-                            using FourOverSixScratch =
-                                core::QuantizationScratch4Over6<NVFP4_2D_BLOCK_DIM,
-                                                                NVFP4_2D_BLOCKS_PER_TILE_Y,
-                                                                NVFP4_2D_BLOCKS_PER_TILE_X>;
-                            constexpr size_t dshmem_size =
-                                base_dshmem_size +
-                                FourOverSixScratch::template dynamic_shared_memory_size<
-                                    use_2d_quantization, USE_4OVER6>();
-                            cudaFuncSetAttribute(
-                                kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size);
-                            kernel<<<grid, block_size, dshmem_size, stream>>>(
-                                tensor_map_input, tensor_map_output, tensor_map_output_transpose,
-                                scales_ptr, scales_transpose_ptr, noop_ptr, amax_rowwise_ptr,
-                                amax_colwise_ptr, rows, cols, scale_stride, scale_stride_transpose,
-                                rng_state);
-                          });););
-                });
-          });););
+                    if constexpr (use_2d_quantization) {
+                      kernel = quantize_transpose_nvfp4_2D_kernel<
+                          COMPUTE_ACTIVATIONS, ParamOP, OP, IType, USE_STOCHASTIC_ROUNDING,
+                          RETURN_TRANSPOSE, E4M3_MAX, FourOverSixConfig>;
+                    }
+                    using FourOverSixScratch = core::QuantizationScratch4Over6<
+                        NVFP4_2D_BLOCK_DIM, NVFP4_2D_BLOCKS_PER_TILE_Y, NVFP4_2D_BLOCKS_PER_TILE_X>;
+                    constexpr size_t dshmem_size =
+                        base_dshmem_size + FourOverSixScratch::template dynamic_shared_memory_size<
+                                               use_2d_quantization, FourOverSixConfig::enabled>();
+                    cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                         dshmem_size);
+                    kernel<<<grid, block_size, dshmem_size, stream>>>(
+                        tensor_map_input, tensor_map_output, tensor_map_output_transpose,
+                        scales_ptr, scales_transpose_ptr, noop_ptr, amax_rowwise_ptr,
+                        amax_colwise_ptr, rows, cols, scale_stride, scale_stride_transpose,
+                        rng_state);
+                  });););););
 #else
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
 #endif  // FP4_TYPE_SUPPORTED

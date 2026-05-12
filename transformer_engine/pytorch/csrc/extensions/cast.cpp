@@ -725,7 +725,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
   const auto rowwise_usage = quantizer_cpp_list[0]->rowwise_usage;
   const bool row_scaled_nvfp4 = quantizer_cpp_list[0]->row_scaled_nvfp4;
   const bool use_4over6 = quantizer_cpp_list[0]->use_4over6;
-  const bool four_over_six_e4m3_use_256 = quantizer_cpp_list[0]->four_over_six_e4m3_use_256;
+  const int nvfp4_e4m3_max = quantizer_cpp_list[0]->nvfp4_e4m3_max;
   const auto columnwise_usage = quantizer_cpp_list[0]->columnwise_usage;
   if (row_scaled_nvfp4) {
     NVTE_CHECK(rowwise_usage, "Row-scaled NVFP4 bulk allocation requires rowwise usage.");
@@ -874,7 +874,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
         rowwise_data, rowwise_scale, columnwise_data, columnwise_scale, amax_rowwise,
         amax_columnwise, fp4_dtype, quantizer_py_list[i], with_gemm_swizzled_scales,
         py::arg("row_scaled_nvfp4") = row_scaled_nvfp4, py::arg("use_4over6") = use_4over6,
-        py::arg("four_over_six_e4m3_use_256") = four_over_six_e4m3_use_256));
+        py::arg("nvfp4_e4m3_max") = nvfp4_e4m3_max));
 
     // Construct C++ tensor
     // Use a TensorWrapper variable to hold the output of makeTransformerEngineTensor,
@@ -893,7 +893,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
       tensor_wrapper.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
       tensor_wrapper.set_row_scaled_nvfp4(row_scaled_nvfp4);
       tensor_wrapper.set_nvfp4_4over6(use_4over6);
-      tensor_wrapper.set_nvfp4_4over6_e4m3_use_256(four_over_six_e4m3_use_256);
+      tensor_wrapper.set_nvfp4_e4m3_max(nvfp4_e4m3_max);
 
       // Set the amax rowwise and amax columnwise if available
       if (rowwise_usage) {
@@ -1043,12 +1043,12 @@ void split_quantize_nvfp4_impl_with_rht_helper(const TensorWrapper &input,
 
   for (auto &config : quant_config_list) {
     config.set_nvfp4_4over6(quantizer.use_4over6);
-    config.set_nvfp4_4over6_e4m3_use_256(quantizer.four_over_six_e4m3_use_256);
+    config.set_nvfp4_e4m3_max(quantizer.nvfp4_e4m3_max);
     config.set_nvfp4_4over6_err_mode(quantizer.nvfp4_4over6_err_mode);
   }
   for (auto &config : quant_config_list_colwise) {
     config.set_nvfp4_4over6(quantizer.use_4over6);
-    config.set_nvfp4_4over6_e4m3_use_256(quantizer.four_over_six_e4m3_use_256);
+    config.set_nvfp4_e4m3_max(quantizer.nvfp4_e4m3_max);
     config.set_nvfp4_4over6_err_mode(quantizer.nvfp4_4over6_err_mode);
   }
 
@@ -1226,7 +1226,7 @@ void split_quantize_nvfp4_impl_helper(const TensorWrapper &input,
 
   for (auto &config : quant_config_list) {
     config.set_nvfp4_4over6(quantizer.use_4over6);
-    config.set_nvfp4_4over6_e4m3_use_256(quantizer.four_over_six_e4m3_use_256);
+    config.set_nvfp4_e4m3_max(quantizer.nvfp4_e4m3_max);
     config.set_nvfp4_4over6_err_mode(quantizer.nvfp4_4over6_err_mode);
   }
 

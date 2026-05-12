@@ -184,12 +184,12 @@ struct Tensor {
    *  map-to-4/map-to-6 candidate for each 1x16 block.
    */
   bool nvfp4_4over6 = false;
-  /*! \brief Whether NVFP4 4over6 uses 256 as the global E4M3 scale bound.
+  /*! \brief Global E4M3 scale bound used by NVFP4.
    *
-   *  Only meaningful when nvfp4_4over6 is true. If false, the standard NVFP4
-   *  E4M3 bound 448 is used.
+   *  Standard NVFP4 uses 448. Some 4over6 tensors use 256 to leave room for
+   *  map-to-4 local scale expansion.
    */
-  bool nvfp4_4over6_e4m3_use_256 = false;
+  int nvfp4_e4m3_max = 448;
 
   /*! Map from NVTETensorParam to parameter sizes */
   static constexpr size_t attr_sizes[] = {
@@ -203,7 +203,7 @@ struct Tensor {
       sizeof(uint8_t),          // kNVTEWithGEMMSwizzledScales
       sizeof(uint8_t),          // kNVTERowScaledNVFP4
       sizeof(uint8_t),          // kNVTENVFP44Over6
-      sizeof(uint8_t)           // kNVTENVFP44Over6E4M3Use256
+      sizeof(int)               // kNVTENVFP4E4M3Max
   };
 
   Tensor() : scaling_mode{NVTE_DELAYED_TENSOR_SCALING}, nvte_tensor{0} {}
@@ -221,7 +221,7 @@ struct Tensor {
     with_gemm_swizzled_scales = false;
     row_scaled_nvfp4 = false;
     nvfp4_4over6 = false;
-    nvfp4_4over6_e4m3_use_256 = false;
+    nvfp4_e4m3_max = 448;
   }
 
   explicit operator NVTETensor() const noexcept { return nvte_tensor; }
@@ -494,7 +494,7 @@ struct QuantizationConfig {
   bool stochastic_rounding = false;
   bool use_fast_math = false;
   bool nvfp4_4over6 = false;
-  bool nvfp4_4over6_e4m3_use_256 = false;
+  int nvfp4_e4m3_max = 448;
   NVTENVFP44Over6ErrMode nvfp4_4over6_err_mode = kNVTENVFP44Over6ErrMAE;
   bool nvfp4_4over6_err_use_fast_math = false;
 
@@ -508,7 +508,7 @@ struct QuantizationConfig {
       sizeof(uint8_t),                       // stochastic_rounding
       sizeof(uint8_t),                       // use_fast_math
       sizeof(uint8_t),                       // nvfp4_4over6
-      sizeof(uint8_t),                       // nvfp4_4over6_e4m3_use_256
+      sizeof(int),                           // nvfp4_e4m3_max
       sizeof(uint8_t),                       // nvfp4_4over6_err_mode
       sizeof(uint8_t)                        // nvfp4_4over6_err_use_fast_math
   };

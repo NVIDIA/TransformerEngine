@@ -94,7 +94,7 @@ class GroupedTensor(GroupedTensorStorage, torch.Tensor):
         with_gemm_swizzled_scales: bool = False,
         row_scaled_nvfp4: bool = False,
         use_4over6: bool = False,
-        four_over_six_e4m3_use_256: bool = False,
+        nvfp4_e4m3_max: int = 448,
     ):
         if (
             shapes is not None
@@ -169,7 +169,7 @@ class GroupedTensor(GroupedTensorStorage, torch.Tensor):
             with_gemm_swizzled_scales=with_gemm_swizzled_scales,
             row_scaled_nvfp4=row_scaled_nvfp4,
             use_4over6=use_4over6,
-            four_over_six_e4m3_use_256=four_over_six_e4m3_use_256,
+            nvfp4_e4m3_max=nvfp4_e4m3_max,
         )
         return instance
 
@@ -203,7 +203,7 @@ class GroupedTensor(GroupedTensorStorage, torch.Tensor):
             dst._with_gemm_swizzled_scales = src._with_gemm_swizzled_scales
             dst.row_scaled_nvfp4 = src.row_scaled_nvfp4
             dst.use_4over6 = src.use_4over6
-            dst.four_over_six_e4m3_use_256 = src.four_over_six_e4m3_use_256
+            dst.nvfp4_e4m3_max = src.nvfp4_e4m3_max
 
         def make_wrapper_like(src: GroupedTensor, requires_grad: bool) -> GroupedTensor:
             """Create a wrapper of the same type and tensor metadata as src."""

@@ -29,11 +29,11 @@ def check_nvfp4_gemm_versus_reference(
     w_columnwise: bool = False,
     row_scaled_nvfp4: bool = False,
     use_4over6: bool = False,
-    four_over_six_e4m3_use_256: bool = False,
-    four_over_six_err_mode: str = "MAE",
+    nvfp4_e4m3_max: int = 448,
+    nvfp4_4over6_err_mode: str = "MAE",
 ):
-    if four_over_six_e4m3_use_256 and not use_4over6:
-        pytest.skip("E4M3 256 bound is only meaningful for 4over6")
+    if nvfp4_e4m3_max != 448 and not use_4over6:
+        pytest.skip("E4M3 max 256 is only meaningful for 4over6")
     te_dtype = tex.DType.kFloat4E2M1
 
     # Setup device and random seed
@@ -65,8 +65,8 @@ def check_nvfp4_gemm_versus_reference(
         with_post_rht_amax=False,
         row_scaled_nvfp4=row_scaled_nvfp4,
         use_4over6=use_4over6,
-        four_over_six_e4m3_use_256=four_over_six_e4m3_use_256,
-        four_over_six_err_mode=four_over_six_err_mode,
+        nvfp4_e4m3_max=nvfp4_e4m3_max,
+        nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
     w_quantizer = NVFP4Quantizer(
         fp4_dtype=te_dtype,
@@ -77,8 +77,8 @@ def check_nvfp4_gemm_versus_reference(
         with_rht=False,
         with_post_rht_amax=False,
         use_4over6=use_4over6,
-        four_over_six_e4m3_use_256=four_over_six_e4m3_use_256,
-        four_over_six_err_mode=four_over_six_err_mode,
+        nvfp4_e4m3_max=nvfp4_e4m3_max,
+        nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
 
     # Quantize x and w
@@ -135,8 +135,8 @@ def check_nvfp4_gemm_versus_reference(
         quant_tile_shape=(1, 16),
         row_scaled_nvfp4=row_scaled_nvfp4,
         use_4over6=use_4over6,
-        four_over_six_e4m3_use_256=four_over_six_e4m3_use_256,
-        four_over_six_err_mode=four_over_six_err_mode,
+        nvfp4_e4m3_max=nvfp4_e4m3_max,
+        nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
     w_ref_quantizer = NVFP4QuantizerRef(
         dtype=utils.Fp4Formats.E2M1,
@@ -146,8 +146,8 @@ def check_nvfp4_gemm_versus_reference(
         eps=0.0,
         quant_tile_shape=(1, 16),
         use_4over6=use_4over6,
-        four_over_six_e4m3_use_256=four_over_six_e4m3_use_256,
-        four_over_six_err_mode=four_over_six_err_mode,
+        nvfp4_e4m3_max=nvfp4_e4m3_max,
+        nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
 
     # Create reference quantized tensors needed by reference GEMM
@@ -250,7 +250,7 @@ def check_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
     use_bias: bool,
     single_output: bool,
     use_4over6: bool = False,
-    four_over_six_err_mode: str = "MAE",
+    nvfp4_4over6_err_mode: str = "MAE",
 ):
     te_dtype = tex.DType.kFloat4E2M1
     device = "cuda"
@@ -269,7 +269,7 @@ def check_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
         with_post_rht_amax=False,
         row_scaled_nvfp4=True,
         use_4over6=use_4over6,
-        four_over_six_err_mode=four_over_six_err_mode,
+        nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
     w_quantizer = NVFP4Quantizer(
         fp4_dtype=te_dtype,
@@ -280,7 +280,7 @@ def check_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
         with_rht=False,
         with_post_rht_amax=False,
         use_4over6=use_4over6,
-        four_over_six_err_mode=four_over_six_err_mode,
+        nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
 
     x_nvfp4 = []
@@ -345,7 +345,7 @@ def check_nvfp4_row_scaled_gemm_matches_emulated(
     K: int,
     N: int,
     use_4over6: bool = False,
-    four_over_six_err_mode: str = "MAE",
+    nvfp4_4over6_err_mode: str = "MAE",
 ):
     te_dtype = tex.DType.kFloat4E2M1
     device = "cuda"
@@ -365,7 +365,7 @@ def check_nvfp4_row_scaled_gemm_matches_emulated(
         with_post_rht_amax=False,
         row_scaled_nvfp4=True,
         use_4over6=use_4over6,
-        four_over_six_err_mode=four_over_six_err_mode,
+        nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
     x_tensorwise_quantizer = NVFP4Quantizer(
         fp4_dtype=te_dtype,
@@ -376,7 +376,7 @@ def check_nvfp4_row_scaled_gemm_matches_emulated(
         with_rht=False,
         with_post_rht_amax=False,
         use_4over6=use_4over6,
-        four_over_six_err_mode=four_over_six_err_mode,
+        nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
     w_quantizer = NVFP4Quantizer(
         fp4_dtype=te_dtype,
@@ -387,7 +387,7 @@ def check_nvfp4_row_scaled_gemm_matches_emulated(
         with_rht=False,
         with_post_rht_amax=False,
         use_4over6=use_4over6,
-        four_over_six_err_mode=four_over_six_err_mode,
+        nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
 
     x_row_scaled = x_row_scaled_quantizer.update_quantized(
@@ -449,8 +449,8 @@ def check_nvfp4_row_scaled_gemm_matches_emulated(
 )
 @pytest.mark.parametrize("row_scaled_nvfp4", [False, True], ids=["nvfp4", "nvfp4_row_scaled"])
 @pytest.mark.parametrize("use_4over6", [False, True], ids=["default", "4over6"])
-@pytest.mark.parametrize("four_over_six_e4m3_use_256", [False, True], ids=["e4m3_448", "e4m3_256"])
-@pytest.mark.parametrize("four_over_six_err_mode", ["MAE", "MSE"], ids=["mae_err", "mse_err"])
+@pytest.mark.parametrize("nvfp4_e4m3_max", [448, 256], ids=["e4m3_448", "e4m3_256"])
+@pytest.mark.parametrize("nvfp4_4over6_err_mode", ["MAE", "MSE"], ids=["mae_err", "mse_err"])
 def test_nvfp4_gemm_versus_reference(
     M: int,
     K: int,
@@ -463,8 +463,8 @@ def test_nvfp4_gemm_versus_reference(
     is_w_columnwise: bool,
     row_scaled_nvfp4: bool,
     use_4over6: bool,
-    four_over_six_e4m3_use_256: bool,
-    four_over_six_err_mode: str,
+    nvfp4_e4m3_max: int,
+    nvfp4_4over6_err_mode: str,
 ):
     if row_scaled_nvfp4:
         if accumulate:
@@ -484,8 +484,8 @@ def test_nvfp4_gemm_versus_reference(
         w_columnwise=is_w_columnwise,
         row_scaled_nvfp4=row_scaled_nvfp4,
         use_4over6=use_4over6,
-        four_over_six_e4m3_use_256=four_over_six_e4m3_use_256,
-        four_over_six_err_mode=four_over_six_err_mode,
+        nvfp4_e4m3_max=nvfp4_e4m3_max,
+        nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
 
 
@@ -512,7 +512,7 @@ def test_nvfp4_gemm_versus_reference(
 @pytest.mark.parametrize("use_bias", [False, True], ids=["no_bias", "bias"])
 @pytest.mark.parametrize("single_output", [False, True], ids=["list_output", "single_output"])
 @pytest.mark.parametrize("use_4over6", [False, True], ids=["default", "4over6"])
-@pytest.mark.parametrize("four_over_six_err_mode", ["MAE", "MSE"], ids=["mae_err", "mse_err"])
+@pytest.mark.parametrize("nvfp4_4over6_err_mode", ["MAE", "MSE"], ids=["mae_err", "mse_err"])
 def test_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
     m_splits: list[int],
     k: int,
@@ -523,7 +523,7 @@ def test_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
     use_bias: bool,
     single_output: bool,
     use_4over6: bool,
-    four_over_six_err_mode: str,
+    nvfp4_4over6_err_mode: str,
 ):
     check_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
         x_dtype=x_dtype,
@@ -535,7 +535,7 @@ def test_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
         use_bias=use_bias,
         single_output=single_output,
         use_4over6=use_4over6,
-        four_over_six_err_mode=four_over_six_err_mode,
+        nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
 
 
@@ -560,7 +560,7 @@ def test_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
 @pytest.mark.parametrize("w_dtype", [torch.float32, torch.bfloat16], ids=str)
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32], ids=str)
 @pytest.mark.parametrize("use_4over6", [False, True], ids=["default", "4over6"])
-@pytest.mark.parametrize("four_over_six_err_mode", ["MAE", "MSE"], ids=["mae_err", "mse_err"])
+@pytest.mark.parametrize("nvfp4_4over6_err_mode", ["MAE", "MSE"], ids=["mae_err", "mse_err"])
 def test_nvfp4_row_scaled_gemm_matches_emulated(
     M: int,
     K: int,
@@ -569,7 +569,7 @@ def test_nvfp4_row_scaled_gemm_matches_emulated(
     w_dtype: torch.dtype,
     out_dtype: torch.dtype,
     use_4over6: bool,
-    four_over_six_err_mode: str,
+    nvfp4_4over6_err_mode: str,
 ):
     check_nvfp4_row_scaled_gemm_matches_emulated(
         x_dtype=x_dtype,
@@ -579,5 +579,5 @@ def test_nvfp4_row_scaled_gemm_matches_emulated(
         K=K,
         N=N,
         use_4over6=use_4over6,
-        four_over_six_err_mode=four_over_six_err_mode,
+        nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )

@@ -1662,14 +1662,16 @@ class NVFP4BlockScalingRecipeState(RecipeState):
                 use_4over6 = tensor_type == "weight"
             elif self.recipe.nvfp4_4over6 == "activations":
                 use_4over6 = tensor_type != "weight"
-            use_4over6_e4m3_use_256 = False
+            nvfp4_e4m3_max = 448
             if use_4over6:
-                if self.recipe.nvfp4_4over6_e4m3_use_256 == "all":
-                    use_4over6_e4m3_use_256 = True
-                elif self.recipe.nvfp4_4over6_e4m3_use_256 == "weights":
-                    use_4over6_e4m3_use_256 = tensor_type == "weight"
-                elif self.recipe.nvfp4_4over6_e4m3_use_256 == "activations":
-                    use_4over6_e4m3_use_256 = tensor_type != "weight"
+                if self.recipe.nvfp4_e4m3_max == "all":
+                    nvfp4_e4m3_max = 256
+                elif self.recipe.nvfp4_e4m3_max == "weights":
+                    if tensor_type == "weight":
+                        nvfp4_e4m3_max = 256
+                elif self.recipe.nvfp4_e4m3_max == "activations":
+                    if tensor_type != "weight":
+                        nvfp4_e4m3_max = 256
             return NVFP4Quantizer(
                 fp4_dtype=self.dtype,
                 rowwise=True,
@@ -1684,8 +1686,8 @@ class NVFP4BlockScalingRecipeState(RecipeState):
                     and self.recipe.row_scaled_activation
                 ),
                 use_4over6=use_4over6,
-                four_over_six_e4m3_use_256=use_4over6_e4m3_use_256,
-                four_over_six_err_mode=self.recipe.nvfp4_4over6_err_mode,
+                nvfp4_e4m3_max=nvfp4_e4m3_max,
+                nvfp4_4over6_err_mode=self.recipe.nvfp4_4over6_err_mode,
             )
 
         if self.mode not in ("forward", "backward"):

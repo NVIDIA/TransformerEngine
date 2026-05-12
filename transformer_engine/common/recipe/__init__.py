@@ -533,7 +533,7 @@ class NVFP4BlockScaling(Recipe):
              supported on tensors that use 4over6; activation and backward
              scopes therefore require ``disable_rht=True`` and
              ``disable_stochastic_rounding=True``.
-    nvfp4_4over6_e4m3_use_256 : {None, 'weights', 'activations', 'all'}, default = None
+    nvfp4_e4m3_max : {None, 'weights', 'activations', 'all'}, default = None
              Select 4over6 tensors that use 256 as the global E4M3 scale
              bound. If unset, 4over6 uses the standard NVFP4 448 bound.
     nvfp4_4over6_err_mode : {'MAE', 'MSE'}, default = 'MAE'
@@ -553,7 +553,7 @@ class NVFP4BlockScaling(Recipe):
     disable_2d_quantization: bool = os.getenv("NVTE_NVFP4_DISABLE_2D_QUANTIZATION", "0") == "1"
     row_scaled_activation: bool = os.getenv("NVTE_NVFP4_ROW_SCALED_ACTIVATION", "0") == "1"
     nvfp4_4over6: Optional[str] = os.getenv("NVTE_NVFP4_4OVER6", None)
-    nvfp4_4over6_e4m3_use_256: Optional[str] = os.getenv("NVTE_NVFP4_4OVER6_E4M3_USE_256", None)
+    nvfp4_e4m3_max: Optional[str] = os.getenv("NVTE_NVFP4_4OVER6_E4M3_USE_256", None)
     nvfp4_4over6_err_mode: str = os.getenv("NVTE_NVFP4_4OVER6_ERR_MODE", "MAE").upper()
 
     fp4_format: Format = Format.E2M1
@@ -573,7 +573,7 @@ class NVFP4BlockScaling(Recipe):
         assert (
             self.nvfp4_4over6 in _NVFP4_4OVER6_SCOPES
         ), "NVTE_NVFP4_4OVER6 must be unset or one of: 'weights', 'activations', 'all'."
-        assert self.nvfp4_4over6_e4m3_use_256 in _NVFP4_4OVER6_SCOPES, (
+        assert self.nvfp4_e4m3_max in _NVFP4_4OVER6_SCOPES, (
             "NVTE_NVFP4_4OVER6_E4M3_USE_256 must be unset or one of: "
             "'weights', 'activations', 'all'."
         )
@@ -615,7 +615,7 @@ class NVFP4BlockScaling(Recipe):
             f"backward_override={self.backward_override}, "
             f"row_scaled_activation={self.row_scaled_activation}, "
             f"nvfp4_4over6={self.nvfp4_4over6}, "
-            f"nvfp4_4over6_e4m3_use_256={self.nvfp4_4over6_e4m3_use_256}, "
+            f"nvfp4_e4m3_max={self.nvfp4_e4m3_max}, "
             f"nvfp4_4over6_err_mode={self.nvfp4_4over6_err_mode}, "
             f"fp4_quant_fwd_inp={self.fp4_quant_fwd_inp}, "
             f"fp4_quant_fwd_weight={self.fp4_quant_fwd_weight}, "
