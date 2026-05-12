@@ -120,7 +120,7 @@ void CheckScaleTensorShape(const Tensor &t, const std::string &name) {
 
         const auto &expected = std::vector<size_t>{expected_x, expected_y};
         NVTE_CHECK(t.columnwise_scale_inv.shape == expected, "Tensor \"", name,
-                   "\"  has invalid columnwise_scale_inv shape (expected ", expected, ", got ",
+                   "\" has invalid columnwise_scale_inv shape (expected ", expected, ", got ",
                    t.columnwise_scale_inv.shape, ")");
       }
     } else if (t.scaling_mode == NVTE_NVFP4_1D_SCALING) {
@@ -144,7 +144,7 @@ void CheckScaleTensorShape(const Tensor &t, const std::string &name) {
   }
 }
 
-void CheckInputTensor(const Tensor &t, const std::string &name) {
+void CheckInputTensor(const Tensor &t, const std::string &name, bool check_scale_inv_shapes) {
   const DType type = t.dtype();
   if (is_fp8_dtype(type)) {
     // FP8 input needs to have scale_inv
@@ -195,7 +195,9 @@ void CheckInputTensor(const Tensor &t, const std::string &name) {
   }
   NVTE_CHECK(t.has_data() || t.has_columnwise_data(), "Input ", name, " is not allocated!");
 
-  CheckScaleTensorShape(t, name);
+  if (check_scale_inv_shapes) {
+    CheckScaleTensorShape(t, name);
+  }
 }
 
 void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empty) {
@@ -850,6 +852,9 @@ void nvte_set_tensor_param_v2(NVTETensor tensor, NVTETensorParam param, const vo
     case kNVTEWithGEMMSwizzledScales:
       t.with_gemm_swizzled_scales = static_cast<bool>(*reinterpret_cast<const uint8_t *>(buf));
       break;
+    case kNVTERowScaledNVFP4:
+      t.row_scaled_nvfp4 = static_cast<bool>(*reinterpret_cast<const uint8_t *>(buf));
+      break;
     default:
       NVTE_ERROR("Unsupported tensor parameter (", static_cast<int>(param), ")");
   }
@@ -929,6 +934,9 @@ void nvte_get_tensor_param_v2(const NVTETensor tensor, NVTETensorParam param, vo
     }
     case kNVTEWithGEMMSwizzledScales:
       *reinterpret_cast<uint8_t *>(buf) = static_cast<uint8_t>(t->with_gemm_swizzled_scales);
+      break;
+    case kNVTERowScaledNVFP4:
+      *reinterpret_cast<uint8_t *>(buf) = static_cast<uint8_t>(t->row_scaled_nvfp4);
       break;
     default:
       NVTE_ERROR("Unsupported tensor parameter (", static_cast<int>(param), ")");

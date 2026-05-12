@@ -352,6 +352,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Partial cast from master weights for fp8 block scaling", py::arg("inp"), py::arg("out"),
         py::arg("scale"), py::arg("h"), py::arg("w"), py::arg("start_offset"), py::arg("block_len"),
         py::arg("out_dtype"), py::call_guard<py::gil_scoped_release>());
+
   // NVFP4 2D
   m.def("nvfp4_2d_compute_partial_amax",
         &transformer_engine::pytorch::nvfp4_2d_compute_partial_amax,
@@ -391,9 +392,24 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Fused Multi-tensor unpadding", py::call_guard<py::gil_scoped_release>());
   m.def("swizzle_scales_for_gemm_", &transformer_engine::pytorch::inplace_swizzle_scale_for_gemm,
         "Convert tensor block scales into GEMM swizzled format");
+  m.def("multi_tensor_swizzle_scales_for_gemm_",
+        &transformer_engine::pytorch::inplace_multi_tensor_swizzle_scales_for_gemm,
+        "Convert multiple tensors' block scales into GEMM swizzled format", py::arg("tensors"),
+        py::arg("rowwise_usage"), py::arg("columnwise_usage"));
+  m.def(
+      "multi_tensor_swizzle_scales_for_gemm_unchecked_",
+      &transformer_engine::pytorch::inplace_multi_tensor_swizzle_scales_for_gemm_unchecked,
+      "Convert multiple tensors' block scales into GEMM swizzled format (skip scale shape checks)",
+      py::arg("tensors"), py::arg("rowwise_usage"), py::arg("columnwise_usage"));
   m.def("grouped_swizzle_for_gemm", &transformer_engine::pytorch::grouped_swizzle_for_gemm,
         "In-place swizzle of grouped tensor scales for GEMM", py::arg("tensor"), py::arg("rowwise"),
         py::arg("columnwise"));
+
+  // Tensor allocation
+  m.def("bulk_allocate", &transformer_engine::pytorch::bulk_allocate,
+        "Allocate tensors backed by a single contiguous buffer", py::arg("shapes"),
+        py::arg("dtypes"), py::arg("device") = py::none(), py::arg("alignments") = py::none(),
+        py::call_guard<py::gil_scoped_release>());
 
   // attention kernels
   m.def("fa_prepare_fwd", &transformer_engine::pytorch::fa_prepare_fwd,
@@ -401,6 +417,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fa_prepare_bwd", &transformer_engine::pytorch::fa_prepare_bwd,
         "Backward of QKV preparation for Flash Attention",
         py::call_guard<py::gil_scoped_release>());
+  m.def("multi_tensor_transpose_to_bhsd",
+        &transformer_engine::pytorch::multi_tensor_transpose_to_bhsd,
+        "Permute multiple tensors from BSHD/SBHD to BHSD.", py::arg("inputs"),
+        py::arg("original_format"), py::arg("outputs") = std::vector<std::optional<at::Tensor>>{},
+        py::call_guard<py::gil_scoped_release>());
+  m.def("multi_tensor_pad_last_dim", &transformer_engine::pytorch::multi_tensor_pad_last_dim,
+        "Pad multiple tensors' last dimension to a common alignment.", py::arg("inputs"),
+        py::arg("alignment"), py::call_guard<py::gil_scoped_release>());
   m.def("fused_attn_fwd", &transformer_engine::pytorch::fused_attn_fwd,
         "Fused Attention FP8/BF16/FP16 FWD with separate Q, K and V");
   m.def("fused_attn_bwd", &transformer_engine::pytorch::fused_attn_bwd,

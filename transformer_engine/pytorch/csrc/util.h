@@ -33,6 +33,9 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm(std::vector<Tenso
                                                                bool rowwise_usage,
                                                                bool columnwise_usage);
 
+std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm_unchecked(
+    std::vector<TensorWrapper>& tensors, bool rowwise_usage, bool columnwise_usage);
+
 using SwizzledGroupedScales = std::pair<std::optional<at::Tensor>, std::optional<at::Tensor>>;
 
 /*! \brief Swizzle grouped tensor scales for GEMM if needed.
