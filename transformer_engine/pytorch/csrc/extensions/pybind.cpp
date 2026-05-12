@@ -658,7 +658,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::arg("buffer_dtype"), py::arg("helper"), py::arg("tp_size"),
            py::arg("use_cublasmp") = false,
            py::arg("comm_type") = transformer_engine::CommOverlapType::RS,
-           py::arg("num_splits") = 3, py::arg("num_max_streams") = NVTE_COMM_OVERLAP_MAX_STREAMS,
+           py::arg("num_splits") = 4, py::arg("num_max_streams") = NVTE_COMM_OVERLAP_MAX_STREAMS,
            py::arg("comm_cga_size") = 2, py::arg("gemm_priority") = 0, py::arg("comm_priority") = 0,
            py::arg("num_comm_sm") = 16, py::arg("set_sm_margin") = true,
            py::arg("atomic_gemm") = false, py::arg("rs_overlap_first_gemm") = false)

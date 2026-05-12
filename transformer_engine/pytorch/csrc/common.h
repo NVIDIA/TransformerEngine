@@ -52,7 +52,6 @@
 #include <iostream>
 #include <memory>
 #include <torch/csrc/distributed/c10d/ProcessGroup.hpp>
-#include <torch/csrc/distributed/c10d/ProcessGroupNCCL.hpp>
 #include <vector>
 
 #include "c10/util/ArrayRef.h"

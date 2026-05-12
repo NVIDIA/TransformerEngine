@@ -199,7 +199,8 @@ CommOverlapCore *CollectiveGemmPlanRegistry::get_executor(std::vector<size_t> bu
   std::unique_ptr<CommOverlapCore> executor;
   if (cgemm_config.use_cublasmp) {
     executor = std::make_unique<CommOverlapP2PBase>(
-        comm_handler.get_comm_for_current_device(), comm_handler.get_tp_domain_id(),
+        comm_handler.get_comm_for_current_device(),
+        comm_handler.get_local_device_id_within_tp_domain(),
         comm_handler.tp_size, cgemm_config.num_comm_sm, false /*atomic_gemm*/);
   } else {
     executor = std::make_unique<CommOverlapP2PBase>(
