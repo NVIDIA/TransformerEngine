@@ -822,6 +822,23 @@ def get_attention_backend(
                 device_compute_capability[0] * 10 + device_compute_capability[1],
             )
             use_flash_attention_4 = False
+        # flash-attn-4 4.0.0b11 validates (256, 256) on SM100, but its dedicated
+        # hd256 kernel diverges from the reference for cross-attention/decode-like
+        # shapes such as sq=1, skv=2048. Keep FA4 enabled for the self-attention
+        # hd256 path covered by the dedicated test, and fall back for cross-attn.
+        if (
+            use_flash_attention_4
+            and (10, 0) <= device_compute_capability < (12, 0)
+            and head_dim_qk == head_dim_v == 256
+            and max_seqlen_q != max_seqlen_kv
+        ):
+            logger.debug(
+                "Disabling FlashAttention 4 for SM100 head_dim=256 cross-attention. "
+                "Found: max_seqlen_q = %s, max_seqlen_kv = %s.",
+                max_seqlen_q,
+                max_seqlen_kv,
+            )
+            use_flash_attention_4 = False
         # Workaround: SM100 backward kernel bug when MLA + 2CTA (head_dim_qk >= 128) for
         # the standard (non-dedicated) kernel path. FlashAttentionBackwardSm100 computes
         # dK_reduce_ncol = gcd(32, tile_hdim // 2) based on Q/K head_dim but reuses it for
