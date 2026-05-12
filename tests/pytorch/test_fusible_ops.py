@@ -39,6 +39,7 @@ from transformer_engine.pytorch import (
     Float8Quantizer,
     MXFP8Quantizer,
     NVFP4Quantizer,
+    QuantizerRole,
     is_bf16_available,
 )
 from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
@@ -145,7 +146,7 @@ def make_reference_and_test_tensors(
     test_dtype: torch.dtype = torch.float32,
     test_device: torch.device = "cuda",
     test_is_quantized: bool = False,
-    nvfp4_weight: bool = False,
+    quantizer_role: Optional[QuantizerRole] = None,
     requires_grad: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Construct tensors with the same values
@@ -156,8 +157,8 @@ def make_reference_and_test_tensors(
 
     If a quantization scheme is provided, the tensor values are
     quantized so that they are representable.
-    NVFP4 4over6 activations use 1D quantization, while linear weights
-    use the recipe's 2D weight quantization path.
+    NVFP4 4over6 follows recipe role dispatch: activation-like tensors
+    use 1D quantization and weight tensors use the 2D weight path.
 
     """
 
@@ -188,10 +189,13 @@ def make_reference_and_test_tensors(
     elif quantization == "mxfp8":
         test = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)(test)
     elif quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6"):
+        with_2d_quantization = False
+        if quantization == "nvfp4_4over6" and quantizer_role is not None:
+            with_2d_quantization = quantizer_role.tensor_type == "weight"
         test = NVFP4Quantizer(
             with_rht=False,
             with_post_rht_amax=False,
-            with_2d_quantization=quantization == "nvfp4_4over6" and nvfp4_weight,
+            with_2d_quantization=with_2d_quantization,
             stochastic_rounding=False,
             with_random_sign_mask=False,
             use_4over6=quantization == "nvfp4_4over6",
@@ -511,7 +515,7 @@ class TestFuser:
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
-            nvfp4_weight=True,
+            quantizer_role=QuantizerRole(tensor_type="weight"),
         )
 
         # Construct operation
@@ -919,7 +923,7 @@ class TestBasicOps:
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
-            nvfp4_weight=True,
+            quantizer_role=QuantizerRole(tensor_type="weight"),
         )
         dy_ref, dy_test = make_reference_and_test_tensors(
             out_shape,
@@ -1092,7 +1096,7 @@ class TestBasicOps:
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
-            nvfp4_weight=True,
+            quantizer_role=QuantizerRole(tensor_type="weight"),
         )
         b_ref, b_test = None, None
         if bias:
@@ -2125,7 +2129,7 @@ class TestBasicOps:
                 quantization=quantization,
                 test_dtype=dtype,
                 test_device=device,
-                nvfp4_weight=True,
+                quantizer_role=QuantizerRole(tensor_type="weight"),
                 requires_grad=weight_requires_grad,
             )
             b_ref, b_test = None, None
@@ -2636,7 +2640,7 @@ class TestFusedOps:
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
-            nvfp4_weight=True,
+            quantizer_role=QuantizerRole(tensor_type="weight"),
         )
         b_ref, b_test = None, None
         if bias:
@@ -2742,7 +2746,7 @@ class TestFusedOps:
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
-            nvfp4_weight=True,
+            quantizer_role=QuantizerRole(tensor_type="weight"),
         )
         b_ref, b_test = None, None
         if bias:
@@ -2856,7 +2860,7 @@ class TestFusedOps:
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
-            nvfp4_weight=True,
+            quantizer_role=QuantizerRole(tensor_type="weight"),
         )
         x2_ref, x2_test = make_reference_and_test_tensors(
             out_shape,
@@ -3139,7 +3143,7 @@ class TestFusedOps:
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
-            nvfp4_weight=True,
+            quantizer_role=QuantizerRole(tensor_type="weight"),
         )
         dy1_ref, dy1_test = make_reference_and_test_tensors(
             out_shape,
@@ -3243,7 +3247,7 @@ class TestFusedOps:
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
-            nvfp4_weight=True,
+            quantizer_role=QuantizerRole(tensor_type="weight"),
         )
         dy_ref, dy_test = make_reference_and_test_tensors(
             out_shape,
@@ -3473,14 +3477,14 @@ class TestSequentialModules:
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
-            nvfp4_weight=True,
+            quantizer_role=QuantizerRole(tensor_type="weight"),
         )
         w2_ref, w2_test = make_reference_and_test_tensors(
             (hidden_size, ffn_hidden_size // 2),
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
-            nvfp4_weight=True,
+            quantizer_role=QuantizerRole(tensor_type="weight"),
         )
         b1_ref, b1_test, b2_ref, b2_test = None, None, None, None
         if bias:
@@ -3675,7 +3679,7 @@ class TestSequentialModules:
                 quantization=quantization,
                 test_dtype=dtype,
                 test_device=device,
-                nvfp4_weight=True,
+                quantizer_role=QuantizerRole(tensor_type="weight"),
             )
             fc2_w_ref, fc2_w_test = make_reference_and_test_tensors(
                 (hidden_size, hidden_size),
@@ -3684,7 +3688,7 @@ class TestSequentialModules:
                 quantization=quantization,
                 test_dtype=dtype,
                 test_device=device,
-                nvfp4_weight=True,
+                quantizer_role=QuantizerRole(tensor_type="weight"),
             )
             fc1_b_ref, fc1_b_test = None, None
             fc2_b_ref, fc2_b_test = None, None
