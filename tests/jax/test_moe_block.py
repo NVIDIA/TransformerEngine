@@ -14,7 +14,7 @@ and verify:
   decisions.
 * Auxiliary load-balancing loss is returned when ``aux_loss_coeff > 0``.
 * DeepSeek-style grouped top-k (``num_groups`` / ``group_topk``) runs.
-* ``align_size > 0`` produces numerically-equivalent outputs to ``align_size = 0``
+* ``_align_size > 0`` produces numerically-equivalent outputs to ``_align_size = 0``
   for the pure-JAX backend (padding must not change the result).
 """
 
@@ -40,9 +40,11 @@ def _inject_moe(request):
         return
 
     from transformer_engine.jax.flax import MoEBlock
+    from transformer_engine.jax.flax.moe import PermutationBackend
 
     mod = sys.modules[__name__]
     mod.MoEBlock = MoEBlock
+    mod.PermutationBackend = PermutationBackend
     yield
 
 
@@ -93,6 +95,7 @@ class TestMoEBlockSingleDevice:
 
     @pytest.mark.parametrize("permutation_backend", ["pure_jax", "triton"])
     def test_forward_shape_and_finite(self, permutation_backend):
+        permutation_backend = PermutationBackend(permutation_backend)
         key = jax.random.PRNGKey(0)
         init_key, data_key = jax.random.split(key)
 
@@ -115,6 +118,7 @@ class TestMoEBlockSingleDevice:
 
     @pytest.mark.parametrize("permutation_backend", ["pure_jax", "triton"])
     def test_backward_grad_is_finite_and_nonzero(self, permutation_backend):
+        permutation_backend = PermutationBackend(permutation_backend)
         key = jax.random.PRNGKey(1)
         init_key, data_key = jax.random.split(key)
 
@@ -157,8 +161,8 @@ class TestMoEBlockSingleDevice:
             intermediate_size=INTERMEDIATE_SIZE,
             dtype=DTYPE,
         )
-        pure_block = MoEBlock(permutation_backend="pure_jax", **base_kwargs)
-        triton_block = MoEBlock(permutation_backend="triton", **base_kwargs)
+        pure_block = MoEBlock(permutation_backend=PermutationBackend.PURE_JAX, **base_kwargs)
+        triton_block = MoEBlock(permutation_backend=PermutationBackend.TRITON, **base_kwargs)
         inputs = _make_inputs(data_key)
 
         # Share a single parameter tree so routing decisions and expert
@@ -206,6 +210,7 @@ class TestMoEBlockSingleDevice:
 
     @pytest.mark.parametrize("permutation_backend", ["pure_jax", "triton"])
     def test_aux_loss_returned(self, permutation_backend):
+        permutation_backend = PermutationBackend(permutation_backend)
         key = jax.random.PRNGKey(3)
         init_key, data_key = jax.random.split(key)
 
@@ -272,7 +277,7 @@ class TestMoEBlockSingleDevice:
             num_experts=NUM_EXPERTS,
             num_experts_per_tok=NUM_EXPERTS_PER_TOK,
             intermediate_size=INTERMEDIATE_SIZE,
-            permutation_backend="pure_jax",
+            permutation_backend=PermutationBackend.PURE_JAX,
             score_function="sigmoid",
             num_groups=num_groups,
             group_topk=group_topk,
@@ -357,6 +362,7 @@ class TestMoEBlockSingleDevice:
     @pytest.mark.parametrize("permutation_backend", ["pure_jax", "triton"])
     def test_group_topk_deepseek(self, permutation_backend):
         """Exercise DeepSeek-style grouped top-k routing."""
+        permutation_backend = PermutationBackend(permutation_backend)
         key = jax.random.PRNGKey(4)
         init_key, data_key = jax.random.split(key)
 
@@ -380,13 +386,13 @@ class TestMoEBlockSingleDevice:
         assert jnp.all(jnp.isfinite(output))
 
     def test_align_size_equivalence_pure_jax(self, monkeypatch):
-        """For the pure-JAX backend, ``align_size > 0`` must not change the
+        """For the pure-JAX backend, ``_align_size > 0`` must not change the
         numerical output of the forward pass: padding tokens contribute zero
         to every expert GEMM output (their input rows are zeros) and are
         stripped before the weighted sum.
 
         Why the env knob: the V1 TE grouped GEMM FFI asserts strict
-        equality ``sum(group_sizes) == M``. With ``align_size > 0`` the
+        equality ``sum(group_sizes) == M``. With ``_align_size > 0`` the
         pure-JAX backend produces a buffer where ``M >= sum(group_sizes)``
         (the slack is structural padding for JIT), so V1 is incompatible.
         The V2 cuBLASLt-backed grouped GEMM relaxes the assertion to
@@ -405,11 +411,11 @@ class TestMoEBlockSingleDevice:
             num_experts=NUM_EXPERTS,
             num_experts_per_tok=NUM_EXPERTS_PER_TOK,
             intermediate_size=INTERMEDIATE_SIZE,
-            permutation_backend="pure_jax",
+            permutation_backend=PermutationBackend.PURE_JAX,
             dtype=DTYPE,
         )
-        block_no_pad = MoEBlock(align_size=0, **base_kwargs)
-        block_pad = MoEBlock(align_size=16, **base_kwargs)
+        block_no_pad = MoEBlock(_align_size=0, **base_kwargs)
+        block_pad = MoEBlock(_align_size=16, **base_kwargs)
         inputs = _make_inputs(data_key)
 
         try:
@@ -422,7 +428,7 @@ class TestMoEBlockSingleDevice:
             raise
 
         assert jnp.allclose(out_no_pad, out_pad, atol=5e-2, rtol=5e-2), (
-            "align_size > 0 must not change pure_jax forward output; max diff"
+            "_align_size > 0 must not change pure_jax forward output; max diff"
             f" {jnp.max(jnp.abs(out_no_pad - out_pad))}"
         )
 
@@ -430,6 +436,7 @@ class TestMoEBlockSingleDevice:
     def test_jit_and_determinism(self, permutation_backend):
         """The block must be JIT-compilable and produce a deterministic
         forward pass across repeat calls with the same params."""
+        permutation_backend = PermutationBackend(permutation_backend)
         key = jax.random.PRNGKey(6)
         init_key, data_key = jax.random.split(key)
 

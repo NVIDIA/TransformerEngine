@@ -5,10 +5,11 @@
 """Flax Linen MoEBlock for TransformerEngine JAX.
 
 This module exposes :class:`MoEBlock`, a self-contained Flax Linen MoE
-layer. See the class docstring for the architecture, the EP / FSDP / TP
-strategies, and the ``align_size > 0`` contract.
+layer. See the class docstring for the architecture, the EP / FSDP
+strategies, and the ``_align_size > 0`` contract.
 """
 
+from enum import Enum
 from functools import partial
 from typing import Any, Callable, NewType, Optional, Tuple, Union
 
@@ -32,7 +33,11 @@ from ..permutation import (
 )
 from ..quantize import noop_quantizer_set
 from ..router import ScoreFunction, fused_moe_aux_loss, fused_topk_with_score_function
-from ..sharding import with_sharding_constraint_by_logical_axes
+from ..sharding import (
+    _get_mesh,
+    get_active_resource_axis,
+    with_sharding_constraint_by_logical_axes,
+)
 from .module import TransformerEngineBase, _convert_to_activation_function
 
 PRNGKey = Any
@@ -42,7 +47,25 @@ Array = NewType("Array", jnp.ndarray)
 Initializer = Callable[[PRNGKey, Shape, DType], Array]
 
 
-__all__ = ["GlobalPermuteResult", "MoEBlock"]
+__all__ = ["GlobalPermuteResult", "MoEBlock", "PermutationBackend"]
+
+
+# =============================================================================
+# PermutationBackend
+# =============================================================================
+
+
+class PermutationBackend(Enum):
+    """Token-dispatch / combine backend used by :class:`MoEBlock`.
+
+    * ``PURE_JAX``: ``jnp.argsort`` + gather paths compiled as plain XLA;
+      typically faster than ``TRITON`` in current testing because XLA can
+      fuse the ops with surrounding work.
+    * ``TRITON``: TE's fused Triton kernels.
+    """
+
+    PURE_JAX = "pure_jax"
+    TRITON = "triton"
 
 
 # =============================================================================
@@ -71,7 +94,9 @@ class GlobalPermuteResult:
     row_id_map: Optional[jnp.ndarray] = None
     pad_offsets: Optional[jnp.ndarray] = None
     merging_probs: Optional[jnp.ndarray] = None
-    backend: str = flax_struct.field(pytree_node=False, default="pure_jax")
+    backend: PermutationBackend = flax_struct.field(
+        pytree_node=False, default=PermutationBackend.PURE_JAX
+    )
 
 
 # =============================================================================
@@ -107,7 +132,7 @@ class MoEBlock(TransformerEngineBase):
     Two top-level forward variants compose those stages:
 
     * ``_forward_no_ep``: route -> permute -> ffn -> combine. Each TE
-      primitive's ``custom_partitioning`` rule handles DP / FSDP / TP
+      primitive's ``custom_partitioning`` rule handles DP / FSDP
       automatically.
     * ``_forward_a2a_ep``: wraps the body in :func:`jax.shard_map` and
       inserts ``all_gather(group_sizes)`` + forward
@@ -116,40 +141,44 @@ class MoEBlock(TransformerEngineBase):
       used; A2A is the canonical EP strategy because the in-flight
       NCCL EP component will require this same data layout.
 
-    Note on ``align_size > 0``
-    --------------------------
+    Note on ``_align_size > 0``
+    ---------------------------
 
     Both permutation backends pad each expert's group to a multiple of
-    ``align_size`` when requested, which is what cuBLASLt's grouped GEMM
-    wants for FP8 shape selection. The pure-JAX backend additionally
-    appends a zero-input padding tail to keep the buffer statically
-    sized for JIT, so ``sum(group_sizes) <= sorted_inputs.shape[0]``
-    strictly. The V1 grouped GEMM FFI asserts strict equality
-    ``m == sum(group_sizes)`` and is therefore incompatible with
-    ``align_size > 0``; the V2 cuBLASLt-backed grouped GEMM relaxes this
-    to ``m >= sum(group_sizes)`` and only iterates over the populated
-    ragged region. The ``align_size > 0`` tests therefore force
-    ``NVTE_JAX_ENFORCE_V2_GROUPED_GEMM=1`` and ``skip`` if V2 is not
-    supported on the target hardware / dtype.
+    ``_align_size`` when requested, which is what cuBLASLt's grouped
+    GEMM wants for FP8 shape selection. The pure-JAX backend
+    additionally appends a zero-input padding tail to keep the buffer
+    statically sized for JIT, so ``sum(group_sizes) <=
+    sorted_inputs.shape[0]`` strictly. The V1 grouped GEMM FFI asserts
+    strict equality ``m == sum(group_sizes)`` and is therefore
+    incompatible with ``_align_size > 0``; the V2 cuBLASLt-backed
+    grouped GEMM relaxes this to ``m >= sum(group_sizes)`` and only
+    iterates over the populated ragged region. The ``_align_size > 0``
+    tests therefore force ``NVTE_JAX_ENFORCE_V2_GROUPED_GEMM=1`` and
+    ``skip`` if V2 is not supported on the target hardware / dtype.
 
     Two permutation backends are pluggable via ``permutation_backend``:
 
-    * ``"pure_jax"`` (default) -- argsort-based
+    * :attr:`PermutationBackend.PURE_JAX` (default) -- argsort-based
       :func:`~transformer_engine.jax.permutation.pure_jax_token_dispatch` /
       :func:`~transformer_engine.jax.permutation.pure_jax_token_combine`.
       Faster than Triton in profiling for DeepSeek-style configs.
-    * ``"triton"`` -- TE's fused
+    * :attr:`PermutationBackend.TRITON` -- TE's fused
       :func:`~transformer_engine.jax.permutation.token_dispatch` /
       :func:`~transformer_engine.jax.permutation.token_combine` Triton
       kernels.
 
-    Expert parallelism (``expert_parallelism_axis is not None``) uses the
-    **ragged-all-to-all** EP strategy (a.k.a. A2Av): each shard routes its
-    own tokens globally over all experts, then a forward
-    ``ragged_all_to_all`` exchanges per-expert chunks so each shard ends up
-    holding only the tokens for its local experts; after the FFN a reverse
-    ``ragged_all_to_all`` returns each shard's outputs to it. This matches
-    the layout the in-flight NCCL EP component expects.
+    Expert parallelism is configured via :class:`MeshResource`'s
+    ``ep_resource`` axis. When that axis is set on the active
+    :func:`~transformer_engine.jax.global_mesh_resource` and has more
+    than one device, ``MoEBlock`` dispatches to the
+    **ragged-all-to-all** EP strategy (a.k.a. A2Av): each shard routes
+    its own tokens globally over all experts, then a forward
+    ``ragged_all_to_all`` exchanges per-expert chunks so each shard
+    ends up holding only the tokens for its local experts; after the
+    FFN a reverse ``ragged_all_to_all`` returns each shard's outputs
+    to it. This matches the layout the in-flight NCCL EP component
+    expects.
 
     Parameters
     ----------
@@ -171,11 +200,11 @@ class MoEBlock(TransformerEngineBase):
         :func:`fused_topk_with_score_function`.
     use_pre_softmax : bool
         Apply softmax before top-k when ``score_function="softmax"``.
-    num_groups : int
-        Number of routing groups for grouped top-k (DeepSeek). ``<=0``
-        disables.
-    group_topk : int
-        Top-k at the group level. ``<=0`` disables.
+    num_groups : Optional[int]
+        Number of routing groups for grouped top-k (DeepSeek). ``None``
+        (default) disables.
+    group_topk : Optional[int]
+        Top-k at the group level. ``None`` (default) disables.
     scaling_factor : float
         Scaling factor applied to output probs.
     use_expert_bias : bool
@@ -202,37 +231,22 @@ class MoEBlock(TransformerEngineBase):
         Logical axes used to constrain the input activation sharding at the
         block boundary. ``()`` (default) means no constraint.
 
-    expert_parallelism_axis : Optional[str]
-        Mesh axis along which experts are split. When set, the forward
-        pass is wrapped in :func:`jax.shard_map` that implements the
-        ragged-all-to-all EP strategy. When ``None`` (default), no
-        ``shard_map`` wrapper is used; each TE primitive's
-        ``custom_partitioning`` rule handles DP / FSDP / TP automatically.
     data_parallelism_axes : tuple[str, ...]
         Additional mesh axes that the input *batch* dim is sharded over
-        IN ADDITION to ``expert_parallelism_axis``. Setting this to e.g.
-        ``("fsdp",)`` makes the ``shard_map`` ``in_specs`` for the batch
-        dim become ``P(("ep", "fsdp"), None, None)`` -- giving each
-        device a unique slice of the batch (true FSDP) instead of
+        IN ADDITION to ``MeshResource.ep_resource``. Setting this to
+        e.g. ``("fsdp",)`` makes the ``shard_map`` ``in_specs`` for the
+        batch dim become ``P(("ep", "fsdp"), None, None)`` -- giving
+        each device a unique slice of the batch (true FSDP) instead of
         replicating the per-ep-shard batch across fsdp peers.
         Routing is unaffected: ``axis_index("ep")`` still controls the
         ragged-all-to-all; the extra fsdp peers within an ep group send
         and receive their own batch slices in lockstep. Default ``()``
         preserves legacy ZeRO-1-style behavior (activations replicated
         on fsdp within an ep group).
-    tensor_parallelism_axis : Optional[str]
-        Mesh axis for tensor parallelism on the FFN intermediate dim. When
-        set, the output of the ``wo`` grouped GEMM is ``psum_scatter`` ed
-        along this axis.
 
-    permutation_backend : str
-        ``"pure_jax"`` (default) or ``"triton"``.
-    align_size : int
-        Alignment for per-expert group sizes after padding. ``0``
-        disables padding. ``>0`` is required for quantized TE grouped
-        GEMM whose recipe-specific alignment must divide ``align_size``,
-        and requires the V2 cuBLASLt-backed grouped GEMM (see the
-        ``align_size > 0`` note in this docstring).
+    permutation_backend : PermutationBackend
+        :attr:`PermutationBackend.PURE_JAX` (default) or
+        :attr:`PermutationBackend.TRITON`.
 
     dtype : jnp.dtype
         Compute and parameter dtype.
@@ -243,6 +257,15 @@ class MoEBlock(TransformerEngineBase):
     use_bias : bool
         If ``True``, registers per-expert FFN biases ``wi_0_bias``,
         ``wi_1_bias``, ``wo_bias``.
+
+    TODO:
+    -----
+    ``_align_size`` is an internal, non-public knob (alignment for
+    per-expert group sizes after padding). A follow-up PR will infer it
+    from the active quantization recipe, after which it will become a
+    fully-internal implementation detail. Until then it stays
+    intentionally underscored to discourage callers from depending on
+    it.
     """
 
     # Architecture
@@ -254,8 +277,8 @@ class MoEBlock(TransformerEngineBase):
     # Routing
     score_function: Union[str, ScoreFunction] = "softmax"
     use_pre_softmax: bool = False
-    num_groups: int = -1
-    group_topk: int = -1
+    num_groups: Optional[int] = None
+    group_topk: Optional[int] = None
     scaling_factor: float = 1.0
     use_expert_bias: bool = False
     aux_loss_coeff: float = 0.0
@@ -267,16 +290,18 @@ class MoEBlock(TransformerEngineBase):
     input_axes: Tuple[Optional[str], ...] = ()
 
     # Parallelism
-    expert_parallelism_axis: Optional[str] = None
+    #
+    # The EP axis is resolved from ``global_mesh_resource().ep_resource``
+    # and the active mesh, not configured per-instance. ``MoEBlock``
+    # uses ``_forward_a2a_ep`` when that axis exists on the mesh and
+    # has > 1 device; otherwise it uses ``_forward_no_ep``.
     data_parallelism_axes: Tuple[str, ...] = ()
-    tensor_parallelism_axis: Optional[str] = None
-    # ``jax.sharding.Mesh`` to use when ``expert_parallelism_axis`` is set.
-    # Required for the ``shard_map`` wrapper; ignored otherwise.
-    mesh: Optional[Any] = None
 
     # Permutation
-    permutation_backend: str = "pure_jax"
-    align_size: int = 0
+    permutation_backend: PermutationBackend = PermutationBackend.PURE_JAX
+    # See class docstring "Notes": internal, will be inferred from the
+    # quantization recipe in a follow-up PR.
+    _align_size: int = 0
 
     # Dtypes / init / misc
     dtype: DType = jnp.float32
@@ -294,9 +319,9 @@ class MoEBlock(TransformerEngineBase):
                     1.0, "fan_in", "truncated_normal", dtype=self.dtype
                 ),
             )
-        if self.permutation_backend not in ("pure_jax", "triton"):
-            raise ValueError(
-                "permutation_backend must be 'pure_jax' or 'triton',"
+        if not isinstance(self.permutation_backend, PermutationBackend):
+            raise TypeError(
+                "permutation_backend must be a PermutationBackend,"
                 f" got {self.permutation_backend!r}"
             )
         super().__post_init__()
@@ -389,7 +414,8 @@ class MoEBlock(TransformerEngineBase):
                 self.dtype,
             )
 
-        if self.expert_parallelism_axis is None:
+        ep_axis = get_active_resource_axis("ep_resource")
+        if ep_axis is None:
             output, aux_loss = self._forward_no_ep(
                 inputs,
                 gate_logits,
@@ -405,6 +431,7 @@ class MoEBlock(TransformerEngineBase):
             output, aux_loss = self._forward_a2a_ep(
                 inputs,
                 gate_logits,
+                ep_axis=ep_axis,
                 wi_0=wi_0,
                 wi_1=wi_1,
                 wo=wo,
@@ -470,12 +497,15 @@ class MoEBlock(TransformerEngineBase):
         expert_bias: Optional[jnp.ndarray],
     ) -> Tuple[jnp.ndarray, jnp.ndarray]:
         """Run the fused router top-k selection."""
+        # ``fused_topk_with_score_function`` uses ``-1`` as the
+        # "disabled" sentinel for the grouped-routing knobs; translate
+        # our ``None`` user-facing default to that sentinel here.
         sparse_probs, routing_map = fused_topk_with_score_function(
             logits_2d,
             topk=self.num_experts_per_tok,
             use_pre_softmax=self.use_pre_softmax,
-            num_groups=self.num_groups,
-            group_topk=self.group_topk,
+            num_groups=-1 if self.num_groups is None else self.num_groups,
+            group_topk=-1 if self.group_topk is None else self.group_topk,
             scaling_factor=self.scaling_factor,
             score_function=self.score_function,
             expert_bias=expert_bias,
@@ -554,7 +584,7 @@ class MoEBlock(TransformerEngineBase):
         num_tokens = inputs_2d.shape[0]
         topk = self.num_experts_per_tok
 
-        if self.permutation_backend == "pure_jax":
+        if self.permutation_backend is PermutationBackend.PURE_JAX:
             selected_experts, routing_weights = routing_map_to_selected_experts(
                 sparse_probs, routing_map, topk
             )
@@ -563,10 +593,10 @@ class MoEBlock(TransformerEngineBase):
                 selected_experts,
                 num_experts=self.num_experts,
                 num_experts_per_tok=topk,
-                align_size=self.align_size,
+                align_size=self._align_size,
             )
             return GlobalPermuteResult(
-                backend="pure_jax",
+                backend=PermutationBackend.PURE_JAX,
                 sorted_inputs=sorted_inputs,
                 group_sizes=group_sizes,
                 perm_state=perm_state,
@@ -575,7 +605,7 @@ class MoEBlock(TransformerEngineBase):
 
         # triton
         num_out_tokens = num_tokens * topk
-        align_size_arg = self.align_size if self.align_size > 0 else None
+        align_size_arg = self._align_size if self._align_size > 0 else None
         (
             sorted_inputs,
             _permuted_probs,
@@ -590,7 +620,7 @@ class MoEBlock(TransformerEngineBase):
             align_size=align_size_arg,
         )
         return GlobalPermuteResult(
-            backend="triton",
+            backend=PermutationBackend.TRITON,
             sorted_inputs=sorted_inputs,
             group_sizes=group_sizes,
             row_id_map=row_id_map,
@@ -713,7 +743,7 @@ class MoEBlock(TransformerEngineBase):
         Gathers per-expert outputs back into ``[batch, sequence, hidden]``
         and applies the per-token weighted sum across the top-k experts.
         """
-        if perm_result.backend == "pure_jax":
+        if perm_result.backend is PermutationBackend.PURE_JAX:
             return pure_jax_token_combine(
                 expert_outputs,
                 perm_result.perm_state,
@@ -749,9 +779,9 @@ class MoEBlock(TransformerEngineBase):
         wo_bias: Optional[jnp.ndarray] = None,
         expert_bias: Optional[jnp.ndarray] = None,
     ) -> Tuple[jnp.ndarray, Optional[jnp.ndarray]]:
-        """Single-shard or DP/FSDP/TP forward (no shard_map wrapper).
+        """Single-shard or DP/FSDP forward (no shard_map wrapper).
 
-        DP / FSDP / TP all flow through each TE primitive's
+        DP / FSDP both flow through each TE primitive's
         ``custom_partitioning`` rule -- there is no cross-primitive
         collective that the rules cannot express on their own, so a
         ``shard_map`` is unnecessary here.
@@ -780,8 +810,8 @@ class MoEBlock(TransformerEngineBase):
         replicated-everywhere semantics (legal but defeats FSDP/DP).
         Tested in ``tests/jax/test_distributed_moe_block.py`` for the
         EP=2 + FSDP=2 case; the no-EP + FSDP-only case shares the same
-        infra and is covered when ``expert_parallelism_axis`` is left
-        ``None`` in that test.
+        infra and is covered when ``ep_resource`` is unset on the
+        active ``MeshResource``.
         """
         batch_size, sequence_length, hidden_size = inputs.shape
         inputs_2d = inputs.reshape(-1, hidden_size)
@@ -806,14 +836,6 @@ class MoEBlock(TransformerEngineBase):
             wo_bias=wo_bias,
         )
         output = self._global_combine(expert_outputs, perm, batch_size, sequence_length)
-
-        if self.tensor_parallelism_axis is not None:
-            output = jax.lax.psum_scatter(
-                output,
-                self.tensor_parallelism_axis,
-                scatter_dimension=2,
-                tiled=True,
-            )
         return output, aux_loss
 
     # ------------------------------------------------------------------
@@ -825,6 +847,7 @@ class MoEBlock(TransformerEngineBase):
         inputs: jnp.ndarray,
         gate_logits: jnp.ndarray,
         *,
+        ep_axis: str,
         wi_0: jnp.ndarray,
         wi_1: jnp.ndarray,
         wo: jnp.ndarray,
@@ -859,13 +882,13 @@ class MoEBlock(TransformerEngineBase):
         """
         from jax.experimental.shard_map import shard_map
 
-        ep_axis = self.expert_parallelism_axis
-        if self.mesh is None:
+        mesh = _get_mesh()
+        if mesh is None or mesh.empty:
             raise ValueError(
-                "MoEBlock.expert_parallelism_axis is set; `mesh` must also"
-                " be provided so the EP shard_map can be built."
+                "MoEBlock requires an active jax.sharding.Mesh (either via"
+                " `with mesh:` or `jax.set_mesh`) when EP is configured on"
+                " the active MeshResource."
             )
-        mesh = self.mesh
         num_ep = mesh.shape[ep_axis]
         assert (
             self.num_experts % num_ep == 0
@@ -911,7 +934,16 @@ class MoEBlock(TransformerEngineBase):
             raise ValueError(
                 f"batch={global_batch_size} not divisible by prod(data_parallelism_axes)={dp_size}"
             )
+        # Worst-case A2A receive count per shard: every peer can send its
+        # full per-expert-aligned local buffer. With ``_align_size > 0``
+        # each per-expert group can be padded by up to ``_align_size - 1``
+        # rows, so per shard the receive can overshoot the unpadded count
+        # by up to ``num_experts * (_align_size - 1)``. Skipping this
+        # extra slack would let ``ragged_all_to_all`` write past
+        # ``recv_buf`` when EP and padding are combined.
         recv_buffer_rows = (global_batch_size // dp_size) * sequence_length * topk
+        if self._align_size > 0:
+            recv_buffer_rows += self.num_experts * (self._align_size - 1)
 
         # Pack everything that crosses the shard_map boundary into a dict
         # pytree. shard_map fully supports pytrees: ``in_specs`` must
@@ -1116,14 +1148,6 @@ class MoEBlock(TransformerEngineBase):
 
         # -- Stage 8: invert global permute, weighted sum over top-k --
         output = self._global_combine(y_back, perm, batch_size=local_b, sequence_length=local_s)
-
-        if self.tensor_parallelism_axis is not None:
-            output = jax.lax.psum_scatter(
-                output,
-                self.tensor_parallelism_axis,
-                scatter_dimension=2,
-                tiled=True,
-            )
 
         # ``out_specs`` must match the returned pytree structurally,
         # so always emit a real scalar for aux_loss; the outer

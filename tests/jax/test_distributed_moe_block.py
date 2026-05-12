@@ -25,11 +25,13 @@ def _inject_moe(request):
 
     from transformer_engine.jax import MeshResource, autocast
     from transformer_engine.jax.flax import MoEBlock
+    from transformer_engine.jax.flax.moe import PermutationBackend
 
     mod = sys.modules[__name__]
     mod.MeshResource = MeshResource
     mod.autocast = autocast
     mod.MoEBlock = MoEBlock
+    mod.PermutationBackend = PermutationBackend
     yield
 
 
@@ -59,6 +61,7 @@ class TestDistributedMoEBlock:
         if not is_devices_enough(4):
             pytest.skip("MoE distributed test requires 4 devices for EP=2 x FSDP=2.")
 
+        permutation_backend = PermutationBackend(permutation_backend)
         key = jax.random.PRNGKey(11)
         init_key, data_key = jax.random.split(key)
         inputs = _make_inputs(data_key)
@@ -120,14 +123,19 @@ class TestDistributedMoEBlock:
         # device owns ``B/(ep*fsdp)`` unique tokens (no redundant compute
         # across fsdp peers within an ep group).
         sharded_block = MoEBlock(
-            expert_parallelism_axis="ep",
             data_parallelism_axes=("fsdp",),
-            mesh=mesh,
             input_axes=("batch", None, None),
             **base_kwargs,
         )
 
-        with mesh, autocast(enabled=False, mesh_resource=MeshResource(fsdp_resource="fsdp")):
+        # ``MoEBlock`` resolves the EP axis from
+        # ``global_mesh_resource().ep_resource`` (set via ``autocast``),
+        # so the ``ep`` axis on the mesh is wired in by passing
+        # ``ep_resource="ep"`` here -- no per-instance config needed.
+        with mesh, autocast(
+            enabled=False,
+            mesh_resource=MeshResource(fsdp_resource="fsdp", ep_resource="ep"),
+        ):
             with nn.logical_axis_rules(logical_axis_rules):
                 # ``MoEBlock`` registers params via ``with_logical_partitioning``
                 # which only attaches LogicallyPartitioned metadata; the
