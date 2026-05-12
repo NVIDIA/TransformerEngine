@@ -39,6 +39,19 @@ import torch.distributed as dist
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from run_attention_with_cp import run_dpa_with_cp
+from transformer_engine.pytorch.quantization import FP8GlobalStateManager
+
+
+# Env vars run_dpa_with_cp re-sets at the top of every call. We pop them
+# defensively between cases so a future caller that *doesn't* re-set them
+# can't inherit a leftover value from a previous case in the same worker.
+_TRANSIENT_ENV_KEYS = (
+    "NVTE_FP8_DPA_BWD",
+    "NVTE_DPA_FP8CS_O_in_F16",
+    "NVTE_FLASH_ATTN",
+    "NVTE_FUSED_ATTN",
+    "NVTE_ALLOW_NONDETERMINISTIC_ALGO",
+)
 
 
 def _recv_request(rank: int) -> dict:
@@ -56,6 +69,15 @@ def _send_response(rank: int, payload: dict) -> None:
         sys.stdout.flush()
 
 
+def _reset_between_cases() -> None:
+    """Drop state that would otherwise cascade across cases."""
+    FP8GlobalStateManager.reset()
+    for env_key in _TRANSIENT_ENV_KEYS:
+        os.environ.pop(env_key, None)
+    torch.cuda.empty_cache()
+    gc.collect()
+
+
 def _run_one(req: dict, rank: int) -> tuple[bool, str]:
     op = req["op"]
     if op != "run":
@@ -66,8 +88,7 @@ def _run_one(req: dict, rank: int) -> tuple[bool, str]:
     except Exception:
         return False, f"[Rank {rank}] {traceback.format_exc()}"
     finally:
-        torch.cuda.empty_cache()
-        gc.collect()
+        _reset_between_cases()
 
 
 def main() -> None:
@@ -87,6 +108,10 @@ def main() -> None:
 
             gathered: list[tuple[bool, str]] = [None] * world_size  # type: ignore[list-item]
             dist.gather_object((ok, msg), gathered if rank == 0 else None, dst=0)
+
+            # Surface a wedged communicator here, before the next case's
+            # collectives can inherit the corruption.
+            dist.barrier()
 
             if rank == 0:
                 all_ok = all(o for o, _ in gathered)
