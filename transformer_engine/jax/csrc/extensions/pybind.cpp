@@ -64,6 +64,12 @@ pybind11::dict Registrations() {
   dict["te_fused_attn_backward_ffi"] =
       pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CudnnHandleInitHandler),
                      pybind11::arg("execute") = EncapsulateFFI(FusedAttnBackwardHandler));
+  dict["te_fused_attn_score_mod_forward_ffi"] =
+      pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CudnnHandleInitHandler),
+                     pybind11::arg("execute") = EncapsulateFFI(FusedAttnScoreModForwardHandler));
+  dict["te_fused_attn_score_mod_backward_ffi"] =
+      pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CudnnHandleInitHandler),
+                     pybind11::arg("execute") = EncapsulateFFI(FusedAttnScoreModBackwardHandler));
 
   // GEMM
   dict["te_gemm_ffi"] =
@@ -121,6 +127,7 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("get_norm_bwd_workspace_sizes", &GetNormBackwardWorkspaceSizes);
   m.def("get_fused_attn_fwd_workspace_sizes", &GetFusedAttnForwardWorkspaceSizes);
   m.def("get_fused_attn_bwd_workspace_sizes", &GetFusedAttnBackwardWorkspaceSizes);
+  m.def("register_fused_attn_score_mod_graph", &RegisterFusedAttnScoreModGraph);
   m.def("get_topk_workspace_sizes", &GetTopkWorkspaceSizes);
   m.def("nvte_get_qkv_format", &nvte_get_qkv_format);
   m.def("is_non_nt_fp8_gemm_supported", &nvte_is_non_tn_fp8_gemm_supported);

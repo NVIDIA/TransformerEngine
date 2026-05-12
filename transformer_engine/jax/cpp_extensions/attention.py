@@ -7,10 +7,11 @@ import os
 import warnings
 from dataclasses import dataclass, replace
 from functools import partial, reduce
-from typing import Optional, Tuple
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax import dtypes, lax, ffi
 from jax.sharding import PartitionSpec, NamedSharding
 from jax.experimental.custom_partitioning import SdyShardingRule
@@ -54,6 +55,9 @@ __all__ = [
     "FusedAttnHelper",
     "fused_attn_fwd",
     "fused_attn_bwd",
+    "make_fused_attn_score_mod_config",
+    "fused_attn_score_mod_fwd",
+    "fused_attn_score_mod_bwd",
 ]
 
 
@@ -265,6 +269,574 @@ class _FusedAttnRNGStateChecker:
         ), f"Expected seed.size >= {self.seed_size}, but got seed.size={seed.size}"
 
         return seed
+
+
+@dataclass(frozen=True)
+class _ScoreModScalarSpec:
+    """Static pass-by-value scalar used when building a cuDNN frontend graph."""
+
+    name: str
+    dtype: str
+    value: bytes
+    dim: Tuple[int, ...] = (1, 1, 1, 1)
+    stride: Tuple[int, ...] = (1, 1, 1, 1)
+
+
+@dataclass(frozen=True)
+class _FusedAttnScoreModConfig:
+    """Static configuration for cuDNN frontend score_mod SDPA graphs."""
+
+    score_mod: Callable
+    score_mod_bprop: Optional[Callable]
+    score_mod_tensor_names: Tuple[str, ...]
+    score_mod_bprop_tensor_names: Tuple[str, ...]
+    score_mod_scalars: Tuple[_ScoreModScalarSpec, ...]
+    score_mod_bprop_scalars: Tuple[_ScoreModScalarSpec, ...]
+    scaling_factor: float
+    is_training: bool
+    deterministic: bool
+
+    def __hash__(self):
+        return hash(
+            (
+                id(self.score_mod),
+                id(self.score_mod_bprop) if self.score_mod_bprop is not None else None,
+                self.score_mod_tensor_names,
+                self.score_mod_bprop_tensor_names,
+                self.score_mod_scalars,
+                self.score_mod_bprop_scalars,
+                self.scaling_factor,
+                self.is_training,
+                self.deterministic,
+            )
+        )
+
+    def __eq__(self, other):
+        if not isinstance(other, _FusedAttnScoreModConfig):
+            return False
+        return (
+            self.score_mod is other.score_mod
+            and self.score_mod_bprop is other.score_mod_bprop
+            and self.score_mod_tensor_names == other.score_mod_tensor_names
+            and self.score_mod_bprop_tensor_names == other.score_mod_bprop_tensor_names
+            and self.score_mod_scalars == other.score_mod_scalars
+            and self.score_mod_bprop_scalars == other.score_mod_bprop_scalars
+            and self.scaling_factor == other.scaling_factor
+            and self.is_training == other.is_training
+            and self.deterministic == other.deterministic
+        )
+
+
+_SCORE_MOD_UID_Q = 1
+_SCORE_MOD_UID_K = 2
+_SCORE_MOD_UID_V = 3
+_SCORE_MOD_UID_O = 4
+_SCORE_MOD_UID_STATS = 5
+_SCORE_MOD_UID_DO = 6
+_SCORE_MOD_UID_DQ = 7
+_SCORE_MOD_UID_DK = 8
+_SCORE_MOD_UID_DV = 9
+_SCORE_MOD_FWD_TENSOR_UID_BASE = 1000
+_SCORE_MOD_BPROP_TENSOR_UID_BASE = 2000
+_SCORE_MOD_FWD_SCALAR_UID_BASE = 3000
+_SCORE_MOD_BPROP_SCALAR_UID_BASE = 4000
+
+_score_mod_graph_cache: Dict[Tuple[Any, ...], Tuple[int, int]] = {}
+
+
+def _row_major_stride(shape: Sequence[int]) -> Tuple[int, ...]:
+    stride = []
+    running = 1
+    for dim in reversed(tuple(shape)):
+        stride.append(running)
+        running *= dim
+    return tuple(reversed(stride))
+
+
+def _bshd_as_bhsd_dim_stride(shape: Sequence[int]) -> Tuple[Tuple[int, ...], Tuple[int, ...]]:
+    if len(shape) != 4:
+        raise ValueError(f"score_mod requires rank-4 BSHD tensors, got shape={shape}.")
+    batch, seqlen, heads, head_dim = tuple(shape)
+    return (
+        (batch, heads, seqlen, head_dim),
+        (seqlen * heads * head_dim, head_dim, heads * head_dim, 1),
+    )
+
+
+def _dtype_name(dtype) -> str:
+    return str(jnp.dtype(dtype))
+
+
+def _is_array_operand(value: Any) -> bool:
+    return hasattr(value, "shape") and hasattr(value, "dtype") and not isinstance(
+        value, (bool, int, float, complex, np.generic)
+    )
+
+
+def _scalar_to_spec(name: str, value: Any) -> _ScoreModScalarSpec:
+    if isinstance(value, bool):
+        dtype = np.bool_
+    elif isinstance(value, int):
+        dtype = np.int32
+    elif isinstance(value, float):
+        dtype = np.float32
+    elif isinstance(value, np.generic):
+        dtype = value.dtype
+    else:
+        scalar = np.asarray(value)
+        if scalar.shape != ():
+            raise ValueError(
+                f"score_mod tensor '{name}' is neither a JAX array nor a scalar pass-by-value."
+            )
+        dtype = scalar.dtype
+
+    scalar = np.full((1, 1, 1, 1), value, dtype=dtype)
+    return _ScoreModScalarSpec(name=name, dtype=str(scalar.dtype), value=scalar.tobytes())
+
+
+def _split_score_mod_tensors(
+    tensors: Optional[Mapping[str, Any]], *, argument_name: str
+) -> Tuple[Tuple[str, ...], Tuple[jnp.ndarray, ...], Tuple[_ScoreModScalarSpec, ...]]:
+    if tensors is None:
+        return (), (), ()
+    if not isinstance(tensors, Mapping):
+        raise TypeError(f"{argument_name} must be a mapping from string names to tensors/scalars.")
+
+    names = []
+    operands = []
+    scalars = []
+    for name, value in tensors.items():
+        if not isinstance(name, str):
+            raise TypeError(f"{argument_name} keys must be strings, got {type(name).__name__}.")
+        if _is_array_operand(value):
+            if len(value.shape) == 0:
+                raise ValueError(
+                    f"{argument_name}['{name}'] is a rank-0 array. Use a Python/NumPy scalar "
+                    "for cuDNN pass-by-value scalars, or reshape it to a tensor."
+                )
+            names.append(name)
+            operands.append(jnp.asarray(value))
+        else:
+            scalars.append(_scalar_to_spec(name, value))
+    return tuple(names), tuple(operands), tuple(scalars)
+
+
+def make_fused_attn_score_mod_config(
+    score_mod: Callable,
+    score_mod_bprop: Optional[Callable],
+    score_mod_tensors: Optional[Mapping[str, Any]],
+    score_mod_bprop_tensors: Optional[Mapping[str, Any]],
+    scaling_factor: float,
+    is_training: bool,
+) -> Tuple[_FusedAttnScoreModConfig, Tuple[jnp.ndarray, ...], Tuple[jnp.ndarray, ...]]:
+    """Normalize score_mod operands and create a static graph-build config."""
+    if not callable(score_mod):
+        raise TypeError("score_mod must be callable.")
+    if score_mod_bprop is not None and not callable(score_mod_bprop):
+        raise TypeError("score_mod_bprop must be callable when provided.")
+    if score_mod_bprop is None and score_mod_bprop_tensors:
+        raise ValueError("score_mod_bprop_tensors requires score_mod_bprop to be provided.")
+
+    tensor_names, tensor_operands, scalars = _split_score_mod_tensors(
+        score_mod_tensors, argument_name="score_mod_tensors"
+    )
+    bprop_tensor_names, bprop_tensor_operands, bprop_scalars = _split_score_mod_tensors(
+        score_mod_bprop_tensors, argument_name="score_mod_bprop_tensors"
+    )
+    config = _FusedAttnScoreModConfig(
+        score_mod=score_mod,
+        score_mod_bprop=score_mod_bprop,
+        score_mod_tensor_names=tensor_names,
+        score_mod_bprop_tensor_names=bprop_tensor_names,
+        score_mod_scalars=scalars,
+        score_mod_bprop_scalars=bprop_scalars,
+        scaling_factor=float(scaling_factor),
+        is_training=bool(is_training),
+        deterministic=not FusedAttnHelper.is_non_deterministic_allowed(),
+    )
+    return config, tensor_operands, bprop_tensor_operands
+
+
+def _cudnn_data_type(cudnn, dtype):
+    dtype = jnp.dtype(dtype)
+    if dtype == jnp.float16:
+        return cudnn.data_type.HALF
+    if dtype == jnp.bfloat16:
+        return cudnn.data_type.BFLOAT16
+    if dtype == jnp.float32:
+        return cudnn.data_type.FLOAT
+    if dtype == jnp.float64:
+        return cudnn.data_type.DOUBLE
+    if dtype == jnp.int32:
+        return cudnn.data_type.INT32
+    if dtype == jnp.int64:
+        return cudnn.data_type.INT64
+    if dtype == jnp.uint8:
+        return cudnn.data_type.UINT8
+    if dtype == jnp.bool_:
+        return cudnn.data_type.BOOLEAN
+    raise ValueError(f"Unsupported score_mod tensor dtype: {dtype}.")
+
+
+def _cudnn_data_type_from_name(cudnn, dtype_name: str):
+    if dtype_name == "bfloat16":
+        return cudnn.data_type.BFLOAT16
+    return _cudnn_data_type(cudnn, np.dtype(dtype_name))
+
+
+def _graph_tensor_from_aval(cudnn, graph, name: str, aval, uid: int):
+    shape = tuple(int(dim) for dim in aval.shape)
+    return graph.tensor(
+        name=name,
+        dim=shape,
+        stride=_row_major_stride(shape),
+        data_type=_cudnn_data_type(cudnn, aval.dtype),
+        uid=uid,
+    )
+
+
+def _score_mod_graph_tensors(
+    cudnn,
+    graph,
+    names: Tuple[str, ...],
+    avals: Sequence[Any],
+    scalars: Tuple[_ScoreModScalarSpec, ...],
+    tensor_uid_base: int,
+    scalar_uid_base: int,
+):
+    graph_tensors = {}
+    tensor_uids = []
+    for index, (name, aval) in enumerate(zip(names, avals)):
+        uid = tensor_uid_base + index
+        graph_tensors[name] = _graph_tensor_from_aval(cudnn, graph, name, aval, uid)
+        tensor_uids.append(uid)
+
+    scalar_uids = []
+    scalar_values = []
+    for index, scalar in enumerate(scalars):
+        uid = scalar_uid_base + index
+        graph_tensors[scalar.name] = graph.tensor(
+            name=scalar.name,
+            dim=scalar.dim,
+            stride=scalar.stride,
+            is_pass_by_value=True,
+            data_type=_cudnn_data_type_from_name(cudnn, scalar.dtype),
+            uid=uid,
+        )
+        scalar_uids.append(uid)
+        scalar_values.append(scalar.value)
+
+    return graph_tensors, tuple(tensor_uids), tuple(scalar_uids), tuple(scalar_values)
+
+
+def _wrap_score_mod(score_mod: Optional[Callable], graph_tensors: Dict[str, Any]):
+    if score_mod is None:
+        return None
+
+    def wrapped_score_mod(sdpa_graph, score_tensor):
+        return score_mod(sdpa_graph, score_tensor, graph_tensors)
+
+    return wrapped_score_mod
+
+
+def _finalize_score_mod_graph(cudnn, graph) -> int:
+    graph.validate()
+    graph.build_operation_graph()
+    try:
+        graph.create_execution_plans([cudnn.heur_mode.A, cudnn.heur_mode.FALLBACK])
+        graph.check_support()
+    except cudnn.cudnnGraphNotSupportedError as exc:
+        raise RuntimeError(f"cuDNN score_mod SDPA graph is not supported: {exc}") from exc
+    graph.build_plans(cudnn.build_plan_policy.HEURISTICS_CHOICE)
+    return max(int(graph.get_workspace_size()), 1)
+
+
+def _graph_cache_key(
+    direction: str,
+    config: _FusedAttnScoreModConfig,
+    avals: Sequence[Any],
+) -> Tuple[Any, ...]:
+    return (
+        direction,
+        config,
+        tuple((tuple(aval.shape), _dtype_name(aval.dtype)) for aval in avals),
+    )
+
+
+def _shape_dtype(value) -> jax.ShapeDtypeStruct:
+    return jax.ShapeDtypeStruct(tuple(value.shape), value.dtype)
+
+
+def _import_cudnn_for_score_mod():
+    try:
+        import cudnn  # pylint: disable=import-outside-toplevel
+    except ImportError as exc:
+        raise ImportError(
+            "score_mod fused_attn requires the cuDNN frontend Python package (`cudnn`)."
+        ) from exc
+    return cudnn
+
+
+def _build_score_mod_fwd_graph(q_aval, k_aval, v_aval, score_mod_avals, config):
+    cudnn = _import_cudnn_for_score_mod()
+
+    io_data_type = _cudnn_data_type(cudnn, q_aval.dtype)
+    graph = cudnn.pygraph(
+        io_data_type=io_data_type,
+        intermediate_data_type=cudnn.data_type.FLOAT,
+        compute_data_type=cudnn.data_type.FLOAT,
+    )
+
+    q_dim, q_stride = _bshd_as_bhsd_dim_stride(q_aval.shape)
+    k_dim, k_stride = _bshd_as_bhsd_dim_stride(k_aval.shape)
+    v_dim, v_stride = _bshd_as_bhsd_dim_stride(v_aval.shape)
+    q = graph.tensor(
+        name="q", dim=q_dim, stride=q_stride, data_type=io_data_type, uid=_SCORE_MOD_UID_Q
+    )
+    k = graph.tensor(
+        name="k", dim=k_dim, stride=k_stride, data_type=io_data_type, uid=_SCORE_MOD_UID_K
+    )
+    v = graph.tensor(
+        name="v", dim=v_dim, stride=v_stride, data_type=io_data_type, uid=_SCORE_MOD_UID_V
+    )
+
+    score_mod_graph_tensors, tensor_uids, scalar_uids, scalar_values = _score_mod_graph_tensors(
+        cudnn,
+        graph,
+        config.score_mod_tensor_names,
+        score_mod_avals,
+        config.score_mod_scalars,
+        _SCORE_MOD_FWD_TENSOR_UID_BASE,
+        _SCORE_MOD_FWD_SCALAR_UID_BASE,
+    )
+
+    output, stats = graph.sdpa(
+        name="te_score_mod_sdpa",
+        q=q,
+        k=k,
+        v=v,
+        generate_stats=config.is_training,
+        attn_scale=config.scaling_factor,
+        use_causal_mask=False,
+        score_mod=_wrap_score_mod(config.score_mod, score_mod_graph_tensors),
+    )
+
+    batch, q_seqlen, q_heads, _ = q_aval.shape
+    _, _, _, v_head_dim = v_aval.shape
+    output_dim, output_stride = _bshd_as_bhsd_dim_stride((batch, q_seqlen, q_heads, v_head_dim))
+    output.set_output(True).set_uid(_SCORE_MOD_UID_O).set_dim(output_dim).set_stride(
+        output_stride
+    )
+    output.set_data_type(io_data_type)
+
+    output_uids = [_SCORE_MOD_UID_O]
+    if config.is_training:
+        stats_shape = (batch, q_heads, q_seqlen, 1)
+        stats.set_output(True).set_uid(_SCORE_MOD_UID_STATS).set_dim(stats_shape).set_stride(
+            _row_major_stride(stats_shape)
+        )
+        stats.set_data_type(cudnn.data_type.FLOAT)
+        output_uids.append(_SCORE_MOD_UID_STATS)
+
+    workspace_size = _finalize_score_mod_graph(cudnn, graph)
+    graph_id = transformer_engine_jax.register_fused_attn_score_mod_graph(
+        graph,
+        [int(uid) for uid in graph._get_variant_pack_uids_sorted()],
+        [_SCORE_MOD_UID_Q, _SCORE_MOD_UID_K, _SCORE_MOD_UID_V, *tensor_uids],
+        output_uids,
+        list(scalar_uids),
+        list(scalar_values),
+    )
+    return graph_id, workspace_size
+
+
+def _build_score_mod_bwd_graph(
+    q_aval,
+    k_aval,
+    v_aval,
+    output_aval,
+    doutput_aval,
+    stats_aval,
+    score_mod_avals,
+    score_mod_bprop_avals,
+    config,
+):
+    cudnn = _import_cudnn_for_score_mod()
+
+    io_data_type = _cudnn_data_type(cudnn, q_aval.dtype)
+    graph = cudnn.pygraph(
+        io_data_type=io_data_type,
+        intermediate_data_type=cudnn.data_type.FLOAT,
+        compute_data_type=cudnn.data_type.FLOAT,
+    )
+
+    q_dim, q_stride = _bshd_as_bhsd_dim_stride(q_aval.shape)
+    k_dim, k_stride = _bshd_as_bhsd_dim_stride(k_aval.shape)
+    v_dim, v_stride = _bshd_as_bhsd_dim_stride(v_aval.shape)
+    o_dim, o_stride = _bshd_as_bhsd_dim_stride(output_aval.shape)
+    do_dim, do_stride = _bshd_as_bhsd_dim_stride(doutput_aval.shape)
+    q = graph.tensor(
+        name="q", dim=q_dim, stride=q_stride, data_type=io_data_type, uid=_SCORE_MOD_UID_Q
+    )
+    k = graph.tensor(
+        name="k", dim=k_dim, stride=k_stride, data_type=io_data_type, uid=_SCORE_MOD_UID_K
+    )
+    v = graph.tensor(
+        name="v", dim=v_dim, stride=v_stride, data_type=io_data_type, uid=_SCORE_MOD_UID_V
+    )
+    output = graph.tensor(
+        name="o", dim=o_dim, stride=o_stride, data_type=io_data_type, uid=_SCORE_MOD_UID_O
+    )
+    doutput = graph.tensor(
+        name="dO", dim=do_dim, stride=do_stride, data_type=io_data_type, uid=_SCORE_MOD_UID_DO
+    )
+    stats = graph.tensor(
+        name="stats",
+        dim=tuple(int(dim) for dim in stats_aval.shape),
+        stride=_row_major_stride(stats_aval.shape),
+        data_type=cudnn.data_type.FLOAT,
+        uid=_SCORE_MOD_UID_STATS,
+    )
+
+    score_mod_graph_tensors, tensor_uids, scalar_uids, scalar_values = _score_mod_graph_tensors(
+        cudnn,
+        graph,
+        config.score_mod_tensor_names,
+        score_mod_avals,
+        config.score_mod_scalars,
+        _SCORE_MOD_FWD_TENSOR_UID_BASE,
+        _SCORE_MOD_FWD_SCALAR_UID_BASE,
+    )
+    (
+        score_mod_bprop_graph_tensors,
+        bprop_tensor_uids,
+        bprop_scalar_uids,
+        bprop_scalar_values,
+    ) = _score_mod_graph_tensors(
+        cudnn,
+        graph,
+        config.score_mod_bprop_tensor_names,
+        score_mod_bprop_avals,
+        config.score_mod_bprop_scalars,
+        _SCORE_MOD_BPROP_TENSOR_UID_BASE,
+        _SCORE_MOD_BPROP_SCALAR_UID_BASE,
+    )
+
+    dq, dk, dv = graph.sdpa_backward(
+        name="te_score_mod_sdpa_backward",
+        q=q,
+        k=k,
+        v=v,
+        o=output,
+        dO=doutput,
+        stats=stats,
+        attn_scale=config.scaling_factor,
+        use_causal_mask=False,
+        score_mod=_wrap_score_mod(config.score_mod, score_mod_graph_tensors),
+        score_mod_bprop=_wrap_score_mod(config.score_mod_bprop, score_mod_bprop_graph_tensors),
+        use_deterministic_algorithm=config.deterministic,
+    )
+
+    dq.set_output(True).set_uid(_SCORE_MOD_UID_DQ).set_dim(q_dim).set_stride(q_stride)
+    dk.set_output(True).set_uid(_SCORE_MOD_UID_DK).set_dim(k_dim).set_stride(k_stride)
+    dv.set_output(True).set_uid(_SCORE_MOD_UID_DV).set_dim(v_dim).set_stride(v_stride)
+
+    workspace_size = _finalize_score_mod_graph(cudnn, graph)
+    graph_id = transformer_engine_jax.register_fused_attn_score_mod_graph(
+        graph,
+        [int(uid) for uid in graph._get_variant_pack_uids_sorted()],
+        [
+            _SCORE_MOD_UID_Q,
+            _SCORE_MOD_UID_K,
+            _SCORE_MOD_UID_V,
+            _SCORE_MOD_UID_O,
+            _SCORE_MOD_UID_DO,
+            _SCORE_MOD_UID_STATS,
+            *tensor_uids,
+            *bprop_tensor_uids,
+        ],
+        [_SCORE_MOD_UID_DQ, _SCORE_MOD_UID_DK, _SCORE_MOD_UID_DV],
+        [*scalar_uids, *bprop_scalar_uids],
+        [*scalar_values, *bprop_scalar_values],
+    )
+    return graph_id, workspace_size
+
+
+def fused_attn_score_mod_fwd(
+    qkv: Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray],
+    score_mod_tensors: Tuple[jnp.ndarray, ...],
+    config: _FusedAttnScoreModConfig,
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Run cuDNN frontend SDPA forward with a score_mod callback."""
+    q, k, v = qkv
+    q_aval, k_aval, v_aval = map(_shape_dtype, (q, k, v))
+    score_mod_avals = tuple(_shape_dtype(arg) for arg in score_mod_tensors)
+    key = _graph_cache_key("fwd", config, (q_aval, k_aval, v_aval, *score_mod_avals))
+    if key not in _score_mod_graph_cache:
+        _score_mod_graph_cache[key] = _build_score_mod_fwd_graph(
+            q_aval, k_aval, v_aval, score_mod_avals, config
+        )
+    graph_id, workspace_size = _score_mod_graph_cache[key]
+
+    batch, q_seqlen, q_heads, _ = q.shape
+    _, _, _, v_head_dim = v.shape
+    output_shape = jax.ShapeDtypeStruct((batch, q_seqlen, q_heads, v_head_dim), q.dtype)
+    stats_shape = (batch, q_heads, q_seqlen, 1) if config.is_training else (0,)
+    stats = jax.ShapeDtypeStruct(stats_shape, jnp.float32)
+    workspace = jax.ShapeDtypeStruct((workspace_size,), jnp.uint8)
+    output, softmax_stats, _ = ffi.ffi_call(
+        "te_fused_attn_score_mod_forward_ffi",
+        (output_shape, stats, workspace),
+    )(q, k, v, *score_mod_tensors, graph_id=graph_id)
+    return output, softmax_stats
+
+
+def fused_attn_score_mod_bwd(
+    qkv: Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray],
+    output: jnp.ndarray,
+    doutput: jnp.ndarray,
+    softmax_stats: jnp.ndarray,
+    score_mod_tensors: Tuple[jnp.ndarray, ...],
+    score_mod_bprop_tensors: Tuple[jnp.ndarray, ...],
+    config: _FusedAttnScoreModConfig,
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Run cuDNN frontend SDPA backward with score_mod callbacks."""
+    if not config.is_training:
+        raise RuntimeError("score_mod backward requires fused_attn(..., is_training=True).")
+
+    q, k, v = qkv
+    all_inputs = (q, k, v, output, doutput, softmax_stats, *score_mod_tensors)
+    all_inputs = (*all_inputs, *score_mod_bprop_tensors)
+    avals = tuple(_shape_dtype(arg) for arg in all_inputs)
+    key = _graph_cache_key("bwd", config, avals)
+    if key not in _score_mod_graph_cache:
+        _score_mod_graph_cache[key] = _build_score_mod_bwd_graph(
+            *avals[:6],
+            avals[6 : 6 + len(score_mod_tensors)],
+            avals[6 + len(score_mod_tensors) :],
+            config,
+        )
+    graph_id, workspace_size = _score_mod_graph_cache[key]
+
+    dq = jax.ShapeDtypeStruct(q.shape, q.dtype)
+    dk = jax.ShapeDtypeStruct(k.shape, k.dtype)
+    dv = jax.ShapeDtypeStruct(v.shape, v.dtype)
+    workspace = jax.ShapeDtypeStruct((workspace_size,), jnp.uint8)
+    dq, dk, dv, _ = ffi.ffi_call(
+        "te_fused_attn_score_mod_backward_ffi",
+        (dq, dk, dv, workspace),
+    )(
+        q,
+        k,
+        v,
+        output,
+        doutput,
+        softmax_stats,
+        *score_mod_tensors,
+        *score_mod_bprop_tensors,
+        graph_id=graph_id,
+    )
+    return dq, dk, dv
 
 
 def generate_cu_seqlen(actual_seqlen):

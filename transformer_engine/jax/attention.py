@@ -5,7 +5,7 @@
 from __future__ import annotations
 from enum import Enum
 from functools import partial
-from typing import Optional, Tuple, Union
+from typing import Any, Callable, Mapping, Optional, Tuple, Union
 import warnings
 
 from jax.ad_checkpoint import checkpoint_name
@@ -1391,10 +1391,129 @@ def _fused_attn_bwd_rule(
 _fused_attn.defvjp(_fused_attn_fwd_rule, _fused_attn_bwd_rule)
 
 
+@partial(jax.custom_vjp, nondiff_argnums=(3, 4))
+def _fused_attn_score_mod(
+    qkv: Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray],
+    score_mod_tensors: Tuple[jnp.ndarray, ...],
+    score_mod_bprop_tensors: Tuple[jnp.ndarray, ...],
+    config,
+    context_checkpoint_name: str,
+):
+    output, _ = _fused_attn_score_mod_fwd_rule(
+        qkv,
+        score_mod_tensors,
+        score_mod_bprop_tensors,
+        config,
+        context_checkpoint_name,
+    )
+    return output
+
+
+def _fused_attn_score_mod_fwd_rule(
+    qkv,
+    score_mod_tensors,
+    score_mod_bprop_tensors,
+    config,
+    context_checkpoint_name,
+):
+    output, softmax_stats = tex.fused_attn_score_mod_fwd(qkv, score_mod_tensors, config)
+    output = checkpoint_name(output, context_checkpoint_name)
+    softmax_stats = checkpoint_name(softmax_stats, context_checkpoint_name)
+    return output, (qkv, score_mod_tensors, score_mod_bprop_tensors, output, softmax_stats)
+
+
+def _fused_attn_score_mod_bwd_rule(config, context_checkpoint_name, ctx, dz):
+    del context_checkpoint_name
+    qkv, score_mod_tensors, score_mod_bprop_tensors, output, softmax_stats = ctx
+    grad_qkv = tex.fused_attn_score_mod_bwd(
+        qkv,
+        output,
+        dz,
+        softmax_stats,
+        score_mod_tensors,
+        score_mod_bprop_tensors,
+        config,
+    )
+    return (
+        grad_qkv,
+        tuple(None for _ in score_mod_tensors),
+        tuple(None for _ in score_mod_bprop_tensors),
+    )
+
+
+_fused_attn_score_mod.defvjp(
+    _fused_attn_score_mod_fwd_rule, _fused_attn_score_mod_bwd_rule
+)
+
+
+def _validate_fused_attn_score_mod(
+    qkv: Tuple[jnp.ndarray, ...],
+    bias: Optional[jnp.ndarray],
+    sequence_descriptor: Optional[SequenceDescriptor],
+    seed: Optional[jnp.ndarray],
+    attn_bias_type: AttnBiasType,
+    attn_mask_type: AttnMaskType,
+    qkv_layout: QKVLayout,
+    softmax_type: AttnSoftmaxType,
+    dropout_probability: float,
+    max_segments_per_seq: int,
+    window_size: Optional[Tuple[int, int]],
+    context_parallel_strategy: CPStrategy,
+    context_parallel_causal_load_balanced: bool,
+    context_parallel_axis: str,
+    softmax_offset: Optional[jnp.ndarray],
+    stripe_size: int | None,
+):
+    """Validate arguments for the cuDNN frontend score_mod path."""
+    header = "score_mod fused_attn"
+    if qkv_layout is not QKVLayout.BSHD_BSHD_BSHD:
+        raise ValueError(f"{header} currently only supports QKVLayout.BSHD_BSHD_BSHD.")
+    if len(qkv) != 3:
+        raise ValueError(f"{header} requires separate query, key and value tensors.")
+    if any(tensor.ndim != 4 for tensor in qkv):
+        raise ValueError(f"{header} requires rank-4 BSHD query/key/value tensors.")
+    q, k, v = qkv
+    if q.dtype != k.dtype or q.dtype != v.dtype:
+        raise ValueError(f"{header} requires query, key and value to have the same dtype.")
+    if q.dtype not in (jnp.float16, jnp.bfloat16):
+        raise ValueError(f"{header} only supports FP16/BF16 query, key and value tensors.")
+    if q.shape[0] != k.shape[0] or q.shape[0] != v.shape[0]:
+        raise ValueError(f"{header} requires matching batch dimensions.")
+    if k.shape[1] != v.shape[1]:
+        raise ValueError(f"{header} requires key and value sequence lengths to match.")
+    if k.shape[2] != v.shape[2]:
+        raise ValueError(f"{header} requires key and value head counts to match.")
+    if q.shape[3] != k.shape[3]:
+        raise ValueError(f"{header} requires query/key head dimensions to match.")
+
+    if bias is not None or attn_bias_type is not AttnBiasType.NO_BIAS:
+        raise ValueError(f"{header} is mutually exclusive with attention bias.")
+    if sequence_descriptor is not None:
+        raise ValueError(f"{header} is mutually exclusive with padding/sequence descriptors.")
+    if seed is not None:
+        raise ValueError(f"{header} is mutually exclusive with dropout seed.")
+    if attn_mask_type is not AttnMaskType.NO_MASK:
+        raise ValueError(f"{header} is mutually exclusive with attention masks.")
+    if softmax_type is not AttnSoftmaxType.VANILLA_SOFTMAX or softmax_offset is not None:
+        raise ValueError(f"{header} only supports vanilla softmax without softmax_offset.")
+    if dropout_probability != 0.0:
+        raise ValueError(f"{header} is mutually exclusive with dropout.")
+    if max_segments_per_seq != 1:
+        raise ValueError(f"{header} is mutually exclusive with packed/ragged sequence metadata.")
+    if window_size not in (None, (-1, -1)):
+        raise ValueError(f"{header} is mutually exclusive with sliding-window attention.")
+    if context_parallel_strategy is not CPStrategy.DEFAULT:
+        raise ValueError(f"{header} is mutually exclusive with context parallelism.")
+    if context_parallel_causal_load_balanced or context_parallel_axis:
+        raise ValueError(f"{header} is mutually exclusive with context parallelism.")
+    if stripe_size is not None:
+        raise ValueError(f"{header} is mutually exclusive with striped context parallelism.")
+
+
 def fused_attn(
     qkv: Tuple[jnp.ndarray, ...],
     bias: Optional[jnp.ndarray],
-    sequence_descriptor: SequenceDescriptor,
+    sequence_descriptor: Optional[SequenceDescriptor],
     seed: Optional[jnp.ndarray],
     attn_bias_type: AttnBiasType,
     attn_mask_type: AttnMaskType,
@@ -1411,6 +1530,10 @@ def fused_attn(
     context_checkpoint_name: str = "context",
     softmax_offset: Optional[jnp.ndarray] = None,
     stripe_size: int | None = None,
+    score_mod: Optional[Callable] = None,
+    score_mod_bprop: Optional[Callable] = None,
+    score_mod_tensors: Optional[Mapping[str, Any]] = None,
+    score_mod_bprop_tensors: Optional[Mapping[str, Any]] = None,
 ):
     """
     Perform cuDNN fused attention.
@@ -1453,6 +1576,20 @@ def fused_attn(
             Currently, a stripe_size > 1 is only supported for CP + THD + Striped + AG, whereas a stripe_size=1
             is supported for both, CP + THD + Striped + AG and CP + THD + Striped + P2P(Ring)
             None indicates no striping strategy
+        score_mod (Optional[Callable]): Optional cuDNN frontend score modification callback.
+            The callback is called as `score_mod(graph, score, tensors)` while building a
+            cuDNN frontend graph. When provided, this path only supports BSHD_BSHD_BSHD
+            layout and is mutually exclusive with masks, padding, bias, dropout, context
+            parallelism, sliding windows, and non-vanilla softmax.
+        score_mod_bprop (Optional[Callable]): Optional score modification backward callback,
+            called as `score_mod_bprop(graph, dscore, tensors)`. If omitted, cuDNN uses the
+            default backward behavior for the forward score modification graph.
+        score_mod_tensors (Optional[Mapping[str, Any]]): Additional tensors or Python/NumPy
+            scalars made available to `score_mod` through its `tensors` dictionary. Scalars
+            are represented as cuDNN pass-by-value tensors. Tensor entries are treated as
+            non-differentiable auxiliary inputs.
+        score_mod_bprop_tensors (Optional[Mapping[str, Any]]): Additional tensors or
+            Python/NumPy scalars made available to `score_mod_bprop`.
     Returns:
         (jnp.ndarray): The output tensor from the fused attention.
 
@@ -1485,6 +1622,48 @@ def fused_attn(
                              AttnBiasType.NO_BIAS, AttnMaskType.PADDING_CAUSAL_MASK,
                              QKVLayout.T3HD, 0.125, 0, True, 3)
     """
+    if score_mod is None:
+        if score_mod_bprop is not None:
+            raise ValueError("score_mod_bprop requires score_mod to be provided.")
+        if score_mod_tensors is not None:
+            raise ValueError("score_mod_tensors requires score_mod to be provided.")
+        if score_mod_bprop_tensors is not None:
+            raise ValueError("score_mod_bprop_tensors requires score_mod to be provided.")
+    else:
+        _validate_fused_attn_score_mod(
+            qkv,
+            bias,
+            sequence_descriptor,
+            seed,
+            attn_bias_type,
+            attn_mask_type,
+            qkv_layout,
+            softmax_type,
+            dropout_probability,
+            max_segments_per_seq,
+            window_size,
+            context_parallel_strategy,
+            context_parallel_causal_load_balanced,
+            context_parallel_axis,
+            softmax_offset,
+            stripe_size,
+        )
+        config, tensor_operands, bprop_tensor_operands = tex.make_fused_attn_score_mod_config(
+            score_mod,
+            score_mod_bprop,
+            score_mod_tensors,
+            score_mod_bprop_tensors,
+            scaling_factor,
+            is_training,
+        )
+        return _fused_attn_score_mod(
+            qkv,
+            tensor_operands,
+            bprop_tensor_operands,
+            config,
+            context_checkpoint_name,
+        )
+
     if sequence_descriptor is None or isinstance(sequence_descriptor, jnp.ndarray):
         warnings.warn(
             "Pass mask to fused_attn is deprecated, please use SequenceDescriptor instead. "

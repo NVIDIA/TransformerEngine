@@ -146,6 +146,10 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnForwardHandler);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnBackwardHandler);
 
+XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnScoreModForwardHandler);
+
+XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnScoreModBackwardHandler);
+
 NVTE_Fused_Attn_Backend GetFusedAttnBackend(
     bool is_training, DType q_dtype, DType kv_dtype, NVTE_QKV_Layout qkv_layout,
     NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type,
@@ -168,6 +172,13 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
     NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type, NVTE_QKV_Layout qkv_layout,
     DType dtype, bool is_training, bool deterministic, size_t max_segments_per_seq,
     int64_t window_size_left, int64_t window_size_right, bool bottom_right_diagonal);
+
+int64_t RegisterFusedAttnScoreModGraph(pybind11::object graph,
+                                       const std::vector<int64_t>& user_uids,
+                                       const std::vector<int64_t>& input_uids,
+                                       const std::vector<int64_t>& output_uids,
+                                       const std::vector<int64_t>& scalar_uids,
+                                       const std::vector<std::string>& scalar_values);
 
 // GEMM
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GemmHandler);
