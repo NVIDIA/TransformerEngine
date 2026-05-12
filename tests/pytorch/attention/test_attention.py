@@ -26,6 +26,7 @@ from transformer_engine.pytorch import (
 from transformer_engine.pytorch.attention.dot_product_attention import (
     _attention_backends,
 )
+import transformer_engine.pytorch.attention.dot_product_attention.backends as dpa_backends
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     FlashAttentionUtils,
     check_set_window_size,
@@ -1503,6 +1504,162 @@ class _ScoreModSoftcap:
             b=tensors["softcap"],
             compute_data_type=cudnn.data_type.FLOAT,
         )
+
+
+def _score_mod_cache_cpu_inputs():
+    """Small CPU tensors for score_mod cache-key tests."""
+    q = torch.empty((2, 4, 3, 8), dtype=torch.float16)
+    k = torch.empty((2, 4, 3, 8), dtype=torch.float16)
+    v = torch.empty((2, 4, 3, 8), dtype=torch.float16)
+    o = torch.empty((2, 4, 3, 8), dtype=torch.float16)
+    stats = torch.empty((2, 3, 4, 1), dtype=torch.float32)
+    return q, k, v, o, stats
+
+
+def test_score_mod_cache_bound_method_key_stable():
+    """Bound method keys should be stable across repeated attribute access."""
+    softcap = _ScoreModSoftcap()
+    key_0 = dpa_backends._score_mod_callback_cache_key(softcap.forward)
+    key_1 = dpa_backends._score_mod_callback_cache_key(softcap.forward)
+    other_key = dpa_backends._score_mod_callback_cache_key(_ScoreModSoftcap().forward)
+
+    assert key_0 == key_1
+    assert key_0 != other_key
+
+
+def test_score_mod_cache_key_ignores_pass_by_value_values():
+    """Scalar CPU tensor values are runtime inputs, not execution-plan metadata."""
+    q, k, v, o, stats = _score_mod_cache_cpu_inputs()
+    key_0 = dpa_backends._cudnn_score_mod_fwd_cache_key(
+        True,
+        q,
+        k,
+        v,
+        o,
+        stats,
+        "bshd",
+        "bshd",
+        1.0,
+        _score_mod_causal,
+        {"softcap": torch.tensor(0.8, dtype=torch.float32)},
+    )
+    key_1 = dpa_backends._cudnn_score_mod_fwd_cache_key(
+        True,
+        q,
+        k,
+        v,
+        o,
+        stats,
+        "bshd",
+        "bshd",
+        1.0,
+        _score_mod_causal,
+        {"softcap": torch.tensor(1.2, dtype=torch.float32)},
+    )
+    key_2 = dpa_backends._cudnn_score_mod_fwd_cache_key(
+        True,
+        q,
+        k,
+        v,
+        o,
+        stats,
+        "bshd",
+        "bshd",
+        1.0,
+        _score_mod_causal,
+        {"softcap": torch.tensor([0.8], dtype=torch.float32)},
+    )
+
+    assert key_0 == key_1
+    assert key_0 != key_2
+
+
+def test_score_mod_cache_fwd_reuses_graph_for_pass_by_value_changes(monkeypatch):
+    """Fprop graph cache should reuse entries when only scalar CPU tensor values change."""
+    q, k, v, o, stats = _score_mod_cache_cpu_inputs()
+    cache = dpa_backends._cudnn_score_mod_graph_cache
+    saved_cache = dict(cache)
+    build_entries = []
+
+    def fake_build(
+        is_training,
+        query_layer,
+        key_layer,
+        value_layer,
+        q_format,
+        kv_format,
+        attn_scale,
+        score_mod,
+        score_mod_tensors,
+        output_layer,
+        stats_bhs1,
+    ):
+        del (
+            is_training,
+            query_layer,
+            key_layer,
+            value_layer,
+            q_format,
+            kv_format,
+            attn_scale,
+            score_mod,
+            score_mod_tensors,
+            output_layer,
+            stats_bhs1,
+        )
+        entry = object()
+        build_entries.append(entry)
+        return entry
+
+    monkeypatch.setattr(dpa_backends, "_build_cudnn_score_mod_fwd_graph", fake_build)
+    try:
+        cache.clear()
+        entry_0 = dpa_backends._get_cudnn_score_mod_fwd_graph(
+            True,
+            q,
+            k,
+            v,
+            "bshd",
+            "bshd",
+            1.0,
+            _score_mod_causal,
+            {"softcap": torch.tensor(0.8, dtype=torch.float32)},
+            o,
+            stats,
+        )
+        entry_1 = dpa_backends._get_cudnn_score_mod_fwd_graph(
+            True,
+            q,
+            k,
+            v,
+            "bshd",
+            "bshd",
+            1.0,
+            _score_mod_causal,
+            {"softcap": torch.tensor(1.2, dtype=torch.float32)},
+            o,
+            stats,
+        )
+        entry_2 = dpa_backends._get_cudnn_score_mod_fwd_graph(
+            True,
+            q,
+            k,
+            v,
+            "bshd",
+            "bshd",
+            1.0,
+            _score_mod_causal,
+            {"softcap": torch.tensor([0.8], dtype=torch.float32)},
+            o,
+            stats,
+        )
+    finally:
+        cache.clear()
+        cache.update(saved_cache)
+
+    assert entry_0 is entry_1
+    assert entry_2 is not entry_0
+    assert len(build_entries) == 2
 
 
 def _relative_position_bias(config, dtype):
