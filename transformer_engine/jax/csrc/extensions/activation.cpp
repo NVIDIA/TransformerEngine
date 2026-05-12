@@ -138,8 +138,8 @@ Error_Type ActLuFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type scal
       nvte_sreglu(input_tensor.data(), output_tensor.data(), stream);
       break;
     case NVTE_Activation_Type::CLAMPED_SWIGLU:
-      nvte_clamped_swiglu(input_tensor.data(), output_tensor.data(), swiglu_limit, swiglu_alpha,
-                          swiglu_glu_linear_offset, stream);
+      nvte_clamped_swiglu_v2(input_tensor.data(), output_tensor.data(), swiglu_limit, swiglu_alpha,
+                             swiglu_glu_linear_offset, stream);
       break;
     default:
       NVTE_ERROR("Unsupported ActivationEnum");
@@ -448,8 +448,8 @@ Error_Type DActLuDBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf,
         nvte_dsreglu(input_tensor.data(), act_input_tensor.data(), output_tensor.data(), stream);
         break;
       case NVTE_Activation_Type::CLAMPED_SWIGLU:
-        nvte_clamped_dswiglu(input_tensor.data(), act_input_tensor.data(), output_tensor.data(),
-                             swiglu_limit, swiglu_alpha, swiglu_glu_linear_offset, stream);
+        nvte_clamped_dswiglu_v2(input_tensor.data(), act_input_tensor.data(), output_tensor.data(),
+                                swiglu_limit, swiglu_alpha, swiglu_glu_linear_offset, stream);
         break;
       default:
         NVTE_ERROR("Unsupported ActivationEnum");
