@@ -1058,6 +1058,14 @@ void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
     case kNVTEQuantizationConfigNVFP44Over6:
       bool_to_uint8(config_.nvfp4_4over6, buf);
       break;
+    case kNVTEQuantizationConfigNVFP44Over6ErrMode: {
+      const auto val = static_cast<uint8_t>(config_.nvfp4_4over6_err_mode);
+      std::memcpy(buf, &val, attr_size);
+      break;
+    }
+    case kNVTEQuantizationConfigNVFP44Over6ErrFastMath:
+      bool_to_uint8(config_.nvfp4_4over6_err_fast_math, buf);
+      break;
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
   }
@@ -1115,6 +1123,17 @@ void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
       break;
     case kNVTEQuantizationConfigNVFP44Over6:
       uint8_to_bool(buf, config_.nvfp4_4over6);
+      break;
+    case kNVTEQuantizationConfigNVFP44Over6ErrMode: {
+      const auto val = *reinterpret_cast<const uint8_t *>(buf);
+      NVTE_CHECK(val == static_cast<uint8_t>(kNVTENVFP44Over6ErrMAE) ||
+                     val == static_cast<uint8_t>(kNVTENVFP44Over6ErrMSE),
+                 "Invalid NVFP4 4over6 error mode (got ", static_cast<int>(val), ")");
+      config_.nvfp4_4over6_err_mode = static_cast<NVTENVFP44Over6ErrMode>(val);
+      break;
+    }
+    case kNVTEQuantizationConfigNVFP44Over6ErrFastMath:
+      uint8_to_bool(buf, config_.nvfp4_4over6_err_fast_math);
       break;
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");

@@ -137,11 +137,12 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
             /*return_transpose=*/output_tensor->has_columnwise_data(), /*pow2_scale=*/false,
             /*swizzled_scale=*/false,
             /*use_stochastic_rounding=*/quant_config_cpp.stochastic_rounding,
-            /*use_fast_math=*/quant_config_cpp.use_fast_math,
             /*rng_state=*/quant_config_cpp.rng_state,
             /*use_2d_quantization=*/quant_config_cpp.nvfp4_2d_quantization,
             /*row_scaled_nvfp4=*/row_scaled_nvfp4,
             /*use_4over6=*/use_4over6,
+            /*nvfp4_4over6_err_mode=*/quant_config_cpp.nvfp4_4over6_err_mode,
+            /*nvfp4_4over6_err_fast_math=*/quant_config_cpp.nvfp4_4over6_err_fast_math,
             /*noop_tensor=*/noop_tensor->data,
             /*stream=*/stream);
       }
@@ -287,11 +288,13 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
             /*return_transpose=*/output_tensor->has_columnwise_data(), /*pow2_scale=*/false,
             /*swizzled_scale=*/false,
             /*use_stochastic_rounding=*/quant_config_cpp.stochastic_rounding,
-            /*use_fast_math=*/quant_config_cpp.use_fast_math,
             /*rng_state=*/quant_config_cpp.rng_state,
             /*use_2d_quantization=*/quant_config_cpp.nvfp4_2d_quantization,
             /*row_scaled_nvfp4=*/false,
-            /*use_4over6=*/use_4over6, /*noop_tensor=*/noop_tensor->data,
+            /*use_4over6=*/use_4over6,
+            /*nvfp4_4over6_err_mode=*/quant_config_cpp.nvfp4_4over6_err_mode,
+            /*nvfp4_4over6_err_fast_math=*/quant_config_cpp.nvfp4_4over6_err_fast_math,
+            /*noop_tensor=*/noop_tensor->data,
             /*stream=*/stream);
       }
       break;

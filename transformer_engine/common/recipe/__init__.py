@@ -14,6 +14,7 @@ from pydantic.dataclasses import dataclass
 
 _BACKWARD_OVERRIDES = (None, "high_precision", "dequantized")
 _NVFP4_4OVER6_SCOPES = (None, "weights", "activations", "all")
+_NVFP4_4OVER6_ERR_MODES = ("MAE", "MSE")
 
 
 class _FormatHelper(NamedTuple):
@@ -526,13 +527,15 @@ class NVFP4BlockScaling(Recipe):
     nvfp4_4over6 : {None, 'weights', 'activations', 'all'}, default = None
              Select tensors that use NVFP4 4over6. In this mode NVFP4
              quantization evaluates per-block map-to-4 and map-to-6 candidates
-             and chooses the one with lower MSE. Ties choose map-to-6. The
+             and chooses the one with lower configured error. Ties choose map-to-6. The
              global E4M3 scale bound is 256 in this mode instead of 448. The
              ``activations`` scope applies to every non-weight tensor role.
              Random Hadamard transforms and stochastic rounding are not yet
              supported on tensors that use 4over6; activation and backward
              scopes therefore require ``disable_rht=True`` and
              ``disable_stochastic_rounding=True``.
+    nvfp4_4over6_err_mode : {'MAE', 'MSE'}, default = 'MAE'
+             Error metric used by NVFP4 4over6 candidate selection.
     backward_override : {None, 'high_precision', 'dequantized'}, default = None
             Backward precision mode. None does not modify backward behavior,
             `high_precision` keeps original high-precision operands for backward,
@@ -548,6 +551,7 @@ class NVFP4BlockScaling(Recipe):
     disable_2d_quantization: bool = os.getenv("NVTE_NVFP4_DISABLE_2D_QUANTIZATION", "0") == "1"
     row_scaled_activation: bool = os.getenv("NVTE_NVFP4_ROW_SCALED_ACTIVATION", "0") == "1"
     nvfp4_4over6: Optional[str] = os.getenv("NVTE_NVFP4_4OVER6", None)
+    nvfp4_4over6_err_mode: str = os.getenv("NVTE_NVFP4_4OVER6_ERR_MODE", "MAE").upper()
 
     fp4_format: Format = Format.E2M1
     fp8_format: Format = Format.E4M3
@@ -566,6 +570,9 @@ class NVFP4BlockScaling(Recipe):
         assert (
             self.nvfp4_4over6 in _NVFP4_4OVER6_SCOPES
         ), "NVTE_NVFP4_4OVER6 must be unset or one of: 'weights', 'activations', 'all'."
+        assert (
+            self.nvfp4_4over6_err_mode in _NVFP4_4OVER6_ERR_MODES
+        ), "NVTE_NVFP4_4OVER6_ERR_MODE must be one of: 'MAE', 'MSE'."
         if self.nvfp4_4over6 in ("activations", "all"):
             assert self.disable_rht, "NVFP4 4over6 currently requires RHT to be disabled"
             assert (
@@ -601,6 +608,7 @@ class NVFP4BlockScaling(Recipe):
             f"backward_override={self.backward_override}, "
             f"row_scaled_activation={self.row_scaled_activation}, "
             f"nvfp4_4over6={self.nvfp4_4over6}, "
+            f"nvfp4_4over6_err_mode={self.nvfp4_4over6_err_mode}, "
             f"fp4_quant_fwd_inp={self.fp4_quant_fwd_inp}, "
             f"fp4_quant_fwd_weight={self.fp4_quant_fwd_weight}, "
             f"fp4_quant_bwd_grad={self.fp4_quant_bwd_grad}, "

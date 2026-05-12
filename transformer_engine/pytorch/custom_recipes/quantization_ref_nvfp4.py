@@ -352,9 +352,13 @@ class NVFP4QuantizerRef(Quantizer):
         quant_tile_shape: Tuple[int, int] = (1, 16),
         row_scaled_nvfp4: bool = False,
         use_4over6: bool = False,
+        four_over_six_err_mode: str = "MAE",
         with_rht: bool = False,
         with_random_sign_mask: bool = True,
     ):
+        four_over_six_err_mode = four_over_six_err_mode.upper()
+        if four_over_six_err_mode not in ("MAE", "MSE"):
+            raise ValueError("four_over_six_err_mode must be 'MAE' or 'MSE'.")
         if row_scaled_nvfp4:
             if not rowwise:
                 raise ValueError("Row-scaled NVFP4 reference quantization requires rowwise usage.")
@@ -378,6 +382,7 @@ class NVFP4QuantizerRef(Quantizer):
         self.quant_tile_shape = quant_tile_shape
         self.row_scaled_nvfp4 = row_scaled_nvfp4
         self.use_4over6 = use_4over6
+        self.four_over_six_err_mode = four_over_six_err_mode
         self.with_rht = with_rht
         self.with_random_sign_mask = with_random_sign_mask
 
@@ -465,12 +470,13 @@ class NVFP4QuantizerRef(Quantizer):
         global_decode_scale: torch.Tensor,
         row_scaled_nvfp4: bool,
         tile_len_y: int,
+        four_over_six_err_mode: str,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Quantize NVFP4 with 4over6 candidate selection.
 
         This mirrors the CUDA path: map-to-4 uses a 1.5x expanded E4M3 block scale,
-        MSE is computed in the original input domain with the 6 * 256 denominator,
-        and ties choose map-to-6.
+        the configured error is computed in the original input domain with the
+        6 * 256 denominator, and ties choose map-to-6.
         """
         m, num_blocks, tile_len_x = x.shape
         n = num_blocks * tile_len_x
@@ -521,24 +527,30 @@ class NVFP4QuantizerRef(Quantizer):
         sf_map4 = decode_scale_map4.to(torch.float32).squeeze(-1)
         sf_map6 = decode_scale_map6.to(torch.float32).squeeze(-1)
         if row_scaled_nvfp4:
-            mse_global_amax = global_amax.squeeze(-1)
+            error_global_amax = global_amax.squeeze(-1)
         else:
-            mse_global_amax = global_amax
+            error_global_amax = global_amax
         x_float = x.to(torch.float32)
         err_map4 = torch.zeros_like(vec_max)
         err_map6 = torch.zeros_like(vec_max)
         for idx in range(tile_len_x):
             val_map4 = fp4_map4[:, :, idx] * sf_map4
-            val_map4 = val_map4 * mse_global_amax
+            val_map4 = val_map4 * error_global_amax
             val_map4 = val_map4 / denom
             diff_map4 = val_map4 - x_float[:, :, idx]
-            err_map4 = err_map4 + (diff_map4 * diff_map4).unsqueeze(-1)
+            if four_over_six_err_mode == "MSE":
+                err_map4 = err_map4 + (diff_map4 * diff_map4).unsqueeze(-1)
+            else:
+                err_map4 = err_map4 + torch.abs(diff_map4).unsqueeze(-1)
 
             val_map6 = fp4_map6[:, :, idx] * sf_map6
-            val_map6 = val_map6 * mse_global_amax
+            val_map6 = val_map6 * error_global_amax
             val_map6 = val_map6 / denom
             diff_map6 = val_map6 - x_float[:, :, idx]
-            err_map6 = err_map6 + (diff_map6 * diff_map6).unsqueeze(-1)
+            if four_over_six_err_mode == "MSE":
+                err_map6 = err_map6 + (diff_map6 * diff_map6).unsqueeze(-1)
+            else:
+                err_map6 = err_map6 + torch.abs(diff_map6).unsqueeze(-1)
         if tile_len_y == 1:
             pick_map4 = err_map4 < err_map6
         else:
@@ -564,6 +576,7 @@ class NVFP4QuantizerRef(Quantizer):
         pow_2_scales: bool,
         row_scaled_nvfp4: bool = False,
         use_4over6: bool = False,
+        four_over_six_err_mode: str = "MAE",
         eps: float,  # pylint: disable=unused-argument
     ) -> Tuple[torch.Tensor, torch.Tensor]:
 
@@ -632,7 +645,7 @@ class NVFP4QuantizerRef(Quantizer):
             global_decode_scale = torch.div(1.0, global_encode_scale)
             if use_4over6:
                 # FourOverSix compares map-to-4 and map-to-6 candidates using
-                # the original input-domain MSE, while keeping TE-style FP4
+                # the configured original input-domain error, while keeping TE-style FP4
                 # quantization for each candidate.
                 return cls._quantize_blockwise_4over6_reference(
                     x,
@@ -642,6 +655,7 @@ class NVFP4QuantizerRef(Quantizer):
                     global_decode_scale,
                     row_scaled_nvfp4,
                     tile_len_y,
+                    four_over_six_err_mode,
                 )
 
             global_encode_scale_multiplier = global_encode_scale * torch.reciprocal(FLOAT4_E2M1_MAX)
@@ -805,6 +819,7 @@ class NVFP4QuantizerRef(Quantizer):
                 pow_2_scales=self.pow_2_scales,
                 row_scaled_nvfp4=self.row_scaled_nvfp4,
                 use_4over6=self.use_4over6,
+                four_over_six_err_mode=self.four_over_six_err_mode,
                 eps=self.eps,
             )
             if transpose_scales:
@@ -829,6 +844,7 @@ class NVFP4QuantizerRef(Quantizer):
                 self.quant_tile_shape[0],
                 pow_2_scales=self.pow_2_scales,
                 use_4over6=self.use_4over6,
+                four_over_six_err_mode=self.four_over_six_err_mode,
                 eps=self.eps,
             )
 

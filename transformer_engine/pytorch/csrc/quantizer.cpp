@@ -1730,6 +1730,14 @@ NVFP4Quantizer::NVFP4Quantizer(const py::handle& quantizer) : Quantizer(quantize
   this->with_2d_quantization = quantizer.attr("with_2d_quantization").cast<bool>();
   this->stochastic_rounding = quantizer.attr("stochastic_rounding").cast<bool>();
   this->use_4over6 = quantizer.attr("use_4over6").cast<bool>();
+  const auto nvfp4_4over6_err_mode = quantizer.attr("four_over_six_err_mode").cast<std::string>();
+  if (nvfp4_4over6_err_mode == "MAE") {
+    this->nvfp4_4over6_err_mode = kNVTENVFP44Over6ErrMAE;
+  } else if (nvfp4_4over6_err_mode == "MSE") {
+    this->nvfp4_4over6_err_mode = kNVTENVFP44Over6ErrMSE;
+  } else {
+    NVTE_ERROR("Unsupported NVFP4 4over6 error mode: ", nvfp4_4over6_err_mode);
+  }
   this->row_scaled_nvfp4 = quantizer.attr("row_scaled_nvfp4").cast<bool>();
 
   // Get amax reduction group if needed for NVFP4 AG
@@ -2295,6 +2303,9 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
   quant_config.set_nvfp4_2d_quantization(this->with_2d_quantization);
   quant_config.set_stochastic_rounding(this->stochastic_rounding);
   quant_config.set_nvfp4_4over6(this->use_4over6);
+  quant_config.set_nvfp4_4over6_err_mode(this->nvfp4_4over6_err_mode);
+  quant_config_columnwise.set_nvfp4_4over6(this->use_4over6);
+  quant_config_columnwise.set_nvfp4_4over6_err_mode(this->nvfp4_4over6_err_mode);
 
   if (this->use_4over6) {
     NVTE_CHECK(!this->with_rht, "NVFP4 4over6 quantization does not support RHT.");
@@ -2441,10 +2452,19 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
   // 1. replace 1 / x by reciprocal_approximate_ftz(x)
   // 2. when RHT cast fusion is available, fusion allows cast to be performed on FP32 data,
   //    this will essentially remove a round trip between FP32 to BF16 then FP32
+  // NVFP4 4over6 candidate error math is controlled separately by
+  // NVTE_NVFP4_4OVER6_ERR_FAST_MATH.
   const auto use_fast_math = transformer_engine::getenv<bool>("NVTE_USE_FAST_MATH");
-  if (use_fast_math) {
+  if (use_fast_math && !this->use_4over6) {
     quant_config.set_use_fast_math(true);
     quant_config_columnwise.set_use_fast_math(true);
+  }
+
+  const auto use_4over6_err_fast_math =
+      transformer_engine::getenv<bool>("NVTE_NVFP4_4OVER6_ERR_FAST_MATH");
+  if (use_4over6_err_fast_math) {
+    quant_config.set_nvfp4_4over6_err_fast_math(true);
+    quant_config_columnwise.set_nvfp4_4over6_err_fast_math(true);
   }
 
   if (this->with_rht) {

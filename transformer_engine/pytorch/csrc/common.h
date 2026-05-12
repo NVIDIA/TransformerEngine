@@ -329,6 +329,7 @@ class NVFP4Quantizer : public Quantizer {
   bool stochastic_rounding;
   // Whether emitted NVFP4 tensors use 4over6 candidate selection.
   bool use_4over6;
+  NVTENVFP44Over6ErrMode nvfp4_4over6_err_mode;
   // Whether tensors emitted by this quantizer use row-scaled NVFP4 metadata.
   bool row_scaled_nvfp4;
 

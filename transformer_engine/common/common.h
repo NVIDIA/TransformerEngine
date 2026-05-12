@@ -181,7 +181,7 @@ struct Tensor {
   /*! \brief Whether NVFP4 uses 4over6 block scale selection.
    *
    *  Only meaningful for NVFP4 tensors. 4over6 tensors use 256 as their
-   *  global E4M3 scale bound and store the lower-MSE map-to-4/map-to-6
+   *  global E4M3 scale bound and store a selected map-to-4/map-to-6
    *  candidate for each 1x16 block.
    */
   bool nvfp4_4over6 = false;
@@ -487,6 +487,8 @@ struct QuantizationConfig {
   bool stochastic_rounding = false;
   bool use_fast_math = false;
   bool nvfp4_4over6 = false;
+  NVTENVFP44Over6ErrMode nvfp4_4over6_err_mode = kNVTENVFP44Over6ErrMAE;
+  bool nvfp4_4over6_err_fast_math = false;
 
   static constexpr size_t attr_sizes[] = {
       sizeof(uint8_t),                       // force_pow_2_scales
@@ -497,7 +499,9 @@ struct QuantizationConfig {
       sizeof(uint8_t),                       // nvfp4_2d_quantization
       sizeof(uint8_t),                       // stochastic_rounding
       sizeof(uint8_t),                       // use_fast_math
-      sizeof(uint8_t)                        // nvfp4_4over6
+      sizeof(uint8_t),                       // nvfp4_4over6
+      sizeof(uint8_t),                       // nvfp4_4over6_err_mode
+      sizeof(uint8_t)                        // nvfp4_4over6_err_fast_math
   };
 };
 

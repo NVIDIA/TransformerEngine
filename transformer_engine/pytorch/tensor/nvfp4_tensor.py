@@ -132,6 +132,8 @@ class NVFP4Quantizer(Quantizer):
     row_scaled_nvfp4: bool
     """Whether to use NVFP4 4over6 map-to-4/map-to-6 block selection."""
     use_4over6: bool
+    """NVFP4 4over6 candidate-selection error mode."""
+    four_over_six_err_mode: str
 
     """RHT matrix random sign mask"""
     rht_matrix_random_sign_mask_t: int
@@ -150,6 +152,7 @@ class NVFP4Quantizer(Quantizer):
         stochastic_rounding: bool = False,
         row_scaled_nvfp4: bool = False,
         use_4over6: bool = False,
+        four_over_six_err_mode: str = "MAE",
         with_random_sign_mask: bool = True,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
@@ -162,6 +165,9 @@ class NVFP4Quantizer(Quantizer):
         self.stochastic_rounding = stochastic_rounding
         self.row_scaled_nvfp4 = row_scaled_nvfp4
         self.use_4over6 = use_4over6
+        self.four_over_six_err_mode = four_over_six_err_mode.upper()
+        if self.four_over_six_err_mode not in ("MAE", "MSE"):
+            raise ValueError("four_over_six_err_mode must be 'MAE' or 'MSE'.")
         self.rht_matrix_random_sign_mask_t = get_random_sign_mask_for_rht(
             with_random_sign_mask, torch.cuda.current_device()
         )

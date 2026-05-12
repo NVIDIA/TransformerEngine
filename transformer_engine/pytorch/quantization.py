@@ -1676,6 +1676,7 @@ class NVFP4BlockScalingRecipeState(RecipeState):
                     and self.recipe.row_scaled_activation
                 ),
                 use_4over6=use_4over6,
+                four_over_six_err_mode=self.recipe.nvfp4_4over6_err_mode,
             )
 
         if self.mode not in ("forward", "backward"):

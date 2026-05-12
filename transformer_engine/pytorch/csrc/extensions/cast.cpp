@@ -1038,6 +1038,13 @@ void split_quantize_nvfp4_impl_with_rht_helper(const TensorWrapper &input,
       num_tensors, need_stochastic_rounding, with_bulk_generate_rng_states,
       need_separate_rng_states, quant_config_list, quant_config_list_colwise);
 
+  for (auto &config : quant_config_list) {
+    config.set_nvfp4_4over6_err_mode(quantizer.nvfp4_4over6_err_mode);
+  }
+  for (auto &config : quant_config_list_colwise) {
+    config.set_nvfp4_4over6_err_mode(quantizer.nvfp4_4over6_err_mode);
+  }
+
   // Enable NVFP4 kernels to use math operations that sacrifice
   // accuracy for performance. These optimizations are experimental
   // and inconsistently implemented.
@@ -1045,13 +1052,26 @@ void split_quantize_nvfp4_impl_with_rht_helper(const TensorWrapper &input,
   // 1. replace 1 / x by reciprocal_approximate_ftz(x)
   // 2. when RHT cast fusion is available, fusion allows cast to be performed on FP32 data,
   //    this will essentially remove a round trip between FP32 to BF16 then FP32
+  // NVFP4 4over6 candidate error math is controlled separately by
+  // NVTE_NVFP4_4OVER6_ERR_FAST_MATH.
   const auto use_fast_math = transformer_engine::getenv<bool>("NVTE_USE_FAST_MATH");
-  if (use_fast_math) {
+  if (use_fast_math && !quantizer.use_4over6) {
     for (auto &config : quant_config_list) {
       config.set_use_fast_math(true);
     }
     for (auto &config : quant_config_list_colwise) {
       config.set_use_fast_math(true);
+    }
+  }
+
+  const auto use_4over6_err_fast_math =
+      transformer_engine::getenv<bool>("NVTE_NVFP4_4OVER6_ERR_FAST_MATH");
+  if (use_4over6_err_fast_math) {
+    for (auto &config : quant_config_list) {
+      config.set_nvfp4_4over6_err_fast_math(true);
+    }
+    for (auto &config : quant_config_list_colwise) {
+      config.set_nvfp4_4over6_err_fast_math(true);
     }
   }
 
@@ -1199,13 +1219,23 @@ void split_quantize_nvfp4_impl_helper(const TensorWrapper &input,
 
   for (auto &config : quant_config_list) {
     config.set_nvfp4_4over6(quantizer.use_4over6);
+    config.set_nvfp4_4over6_err_mode(quantizer.nvfp4_4over6_err_mode);
   }
 
-  // Fast math affects the 4over6 MSE computation when 4over6 is enabled
+  // NVFP4 4over6 candidate error math is controlled separately by
+  // NVTE_NVFP4_4OVER6_ERR_FAST_MATH.
   const auto use_fast_math = transformer_engine::getenv<bool>("NVTE_USE_FAST_MATH");
-  if (use_fast_math) {
+  if (use_fast_math && !quantizer.use_4over6) {
     for (auto &config : quant_config_list) {
       config.set_use_fast_math(true);
+    }
+  }
+
+  const auto use_4over6_err_fast_math =
+      transformer_engine::getenv<bool>("NVTE_NVFP4_4OVER6_ERR_FAST_MATH");
+  if (use_4over6_err_fast_math) {
+    for (auto &config : quant_config_list) {
+      config.set_nvfp4_4over6_err_fast_math(true);
     }
   }
 
