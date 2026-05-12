@@ -103,6 +103,12 @@ enum class NVFP4ScalingMode {
   Block2D,
 };
 
+struct NVFP4FourOverSixTestConfig {
+  bool enabled = false;
+  NVTENVFP44Over6ErrMode err_mode = kNVTENVFP44Over6ErrMAE;
+  bool err_fast_math = false;
+};
+
 bool use_2d_quantization(const NVFP4ScalingMode scaling_mode) {
   return scaling_mode == NVFP4ScalingMode::Block2D;
 }
@@ -1072,9 +1078,7 @@ class FusedCastTransposeNVFP4TestSuite : public ::testing::TestWithParam
                 transformer_engine::DType,
                 bool,
                 NVFP4ScalingMode,
-                bool,
-                NVTENVFP44Over6ErrMode,
-                bool>> {};
+                NVFP4FourOverSixTestConfig>> {};
 
 TEST_P(FusedCastTransposeNVFP4TestSuite, TestFusedCastTransposeNVFP4) {
     // Skip tests for pre-Blackwell architectures
@@ -1090,9 +1094,7 @@ TEST_P(FusedCastTransposeNVFP4TestSuite, TestFusedCastTransposeNVFP4) {
     const DType input_type = std::get<2>(GetParam());
     const bool use_fast_math = std::get<3>(GetParam());
     const NVFP4ScalingMode scaling_mode = std::get<4>(GetParam());
-    const bool use_4over6 = std::get<5>(GetParam());
-    const NVTENVFP44Over6ErrMode err_mode = std::get<6>(GetParam());
-    const bool use_4over6_err_fast_math = std::get<7>(GetParam());
+    const NVFP4FourOverSixTestConfig config = std::get<5>(GetParam());
 
     // Skip tests if the input tensor is 1D
     if (tensor_dims.size() < 2) {
@@ -1110,8 +1112,8 @@ TEST_P(FusedCastTransposeNVFP4TestSuite, TestFusedCastTransposeNVFP4) {
     }
 
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(input_type, InputType,
-        performTest<InputType>(OP, tensor_dims, use_fast_math, scaling_mode, use_4over6,
-                               err_mode, use_4over6_err_fast_math);
+        performTest<InputType>(OP, tensor_dims, use_fast_math, scaling_mode, config.enabled,
+                               config.err_mode, config.err_fast_math);
     );
 }
 
@@ -1147,14 +1149,15 @@ std::string test_name(const FusedCastTransposeNVFP4TestSuite::ParamType& param) 
         name += "X_FAST_SCALING";
     }
     name += to_string(std::get<4>(param));
-    if (std::get<5>(param)) {
+    const NVFP4FourOverSixTestConfig& config = std::get<5>(param);
+    if (config.enabled) {
         name += "X4OVER6";
-        if (std::get<6>(param) == kNVTENVFP44Over6ErrMSE) {
+        if (config.err_mode == kNVTENVFP44Over6ErrMSE) {
             name += "XMSE";
         } else {
             name += "XMAE";
         }
-        if (std::get<7>(param)) {
+        if (config.err_fast_math) {
             name += "XERR_FAST_MATH";
         }
     }
@@ -1170,9 +1173,7 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::Values(DType::kBFloat16),             // input_type
         ::testing::Values(false),                       // use_fast_math
         ::testing::Values(NVFP4ScalingMode::Block1D),   // scaling_mode
-        ::testing::Values(false),                       // use_4over6
-        ::testing::Values(kNVTENVFP44Over6ErrMAE),      // err_mode
-        ::testing::Values(false)),                      // use_4over6_err_fast_math
+        ::testing::Values(NVFP4FourOverSixTestConfig{})), // four_over_six_config
     [](const testing::TestParamInfo<FusedCastTransposeNVFP4TestSuite::ParamType>& info) {
         return test_name(info.param);
     });
@@ -1186,9 +1187,7 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::Values(DType::kBFloat16, DType::kFloat32), // input_type
         ::testing::Values(false),                           // use_fast_math
         ::testing::Values(NVFP4ScalingMode::RowScaled1D),   // scaling_mode
-        ::testing::Values(false),                           // use_4over6
-        ::testing::Values(kNVTENVFP44Over6ErrMAE),          // err_mode
-        ::testing::Values(false)),                          // use_4over6_err_fast_math
+        ::testing::Values(NVFP4FourOverSixTestConfig{})),   // four_over_six_config
     [](const testing::TestParamInfo<FusedCastTransposeNVFP4TestSuite::ParamType>& info) {
         return test_name(info.param);
     });
@@ -1202,28 +1201,13 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::Values(DType::kBFloat16, DType::kFloat32), // input_type
         ::testing::Values(false),                       // use_fast_math
         ::testing::Values(NVFP4ScalingMode::Block1D,
+                          NVFP4ScalingMode::RowScaled1D,
                           NVFP4ScalingMode::Block2D),   // scaling_mode
-        ::testing::Values(true),                        // use_4over6
-        ::testing::Values(kNVTENVFP44Over6ErrMAE,
-                          kNVTENVFP44Over6ErrMSE),      // err_mode
-        ::testing::Values(false, true)),                // use_4over6_err_fast_math
-    [](const testing::TestParamInfo<FusedCastTransposeNVFP4TestSuite::ParamType>& info) {
-        return test_name(info.param);
-    });
-
-INSTANTIATE_TEST_SUITE_P(
-    OperatorTestRowScaled4Over6,
-    FusedCastTransposeNVFP4TestSuite,
-    ::testing::Combine(
-        ::testing::ValuesIn(Activation_types),               // activation_type
-        ::testing::ValuesIn(tensor_dims),                    // tensor_dims
-        ::testing::Values(DType::kFloat32),                  // input_type
-        ::testing::Values(false),                           // use_fast_math
-        ::testing::Values(NVFP4ScalingMode::RowScaled1D),   // scaling_mode
-        ::testing::Values(true),                            // use_4over6
-        ::testing::Values(kNVTENVFP44Over6ErrMAE,
-                          kNVTENVFP44Over6ErrMSE),          // err_mode
-        ::testing::Values(false, true)),                    // use_4over6_err_fast_math
+        ::testing::Values(
+            NVFP4FourOverSixTestConfig{true, kNVTENVFP44Over6ErrMAE, false},
+            NVFP4FourOverSixTestConfig{true, kNVTENVFP44Over6ErrMAE, true},
+            NVFP4FourOverSixTestConfig{true, kNVTENVFP44Over6ErrMSE, false},
+            NVFP4FourOverSixTestConfig{true, kNVTENVFP44Over6ErrMSE, true})), // four_over_six_config
     [](const testing::TestParamInfo<FusedCastTransposeNVFP4TestSuite::ParamType>& info) {
         return test_name(info.param);
     });
