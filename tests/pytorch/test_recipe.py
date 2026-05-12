@@ -25,10 +25,16 @@ from transformer_engine.pytorch import (
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.quantization import (
     FP8GlobalStateManager,
+    NVFP4BlockScalingRecipeState,
     _amax_and_scale_update,
 )
 import transformer_engine.pytorch.ops as te_ops
-from transformer_engine.common.recipe import DelayedScaling, Float8BlockScaling, MXFP8BlockScaling
+from transformer_engine.common.recipe import (
+    DelayedScaling,
+    Float8BlockScaling,
+    MXFP8BlockScaling,
+    NVFP4BlockScaling,
+)
 
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
@@ -508,7 +514,29 @@ class TestFP8Recipe:
 
 
 @pytest.mark.skipif(not fp4_available, reason=reason_for_no_fp4)
+def test_nvfp4_row_scaled_quantizer_roles():
+    recipe = NVFP4BlockScaling(row_scaled_activation=True)
+
+    forward_quantizers = NVFP4BlockScalingRecipeState(
+        recipe,
+        mode="forward",
+        num_quantizers=3,
+    ).make_quantizers()
+    assert [q.row_scaled_nvfp4 for q in forward_quantizers] == [True, False, True]
+    assert not forward_quantizers[0].is_quantizable(torch.empty(16, 16))
+    assert forward_quantizers[1].is_quantizable(torch.empty(16, 16))
+
+    backward_quantizers = NVFP4BlockScalingRecipeState(
+        recipe,
+        mode="backward",
+        num_quantizers=2,
+    ).make_quantizers()
+    assert [q.row_scaled_nvfp4 for q in backward_quantizers] == [False, False]
+
+
+@pytest.mark.skipif(not fp4_available, reason=reason_for_no_fp4)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=str)
+@pytest.mark.parametrize("row_scaled_nvfp4", [False, True], ids=["nvfp4", "nvfp4_row_scaled"])
 @pytest.mark.parametrize(
     "M, N",
     [
@@ -524,12 +552,19 @@ class TestFP8Recipe:
         (8192, 8192),
     ],
 )
-def test_fp4_dequantize(dtype, M, N):
-    q = NVFP4Quantizer()
+def test_fp4_dequantize(dtype, row_scaled_nvfp4, M, N):
+    q = NVFP4Quantizer(
+        columnwise=not row_scaled_nvfp4,
+        row_scaled_nvfp4=row_scaled_nvfp4,
+    )
     a = torch.rand((M, N)).cuda().to(dtype=dtype)
     starting_tensor = q(a)
+    assert starting_tensor._row_scaled_nvfp4 == row_scaled_nvfp4
+    assert starting_tensor._amax_rowwise.numel() == (M if row_scaled_nvfp4 else 1)
     dequantized_tensor = starting_tensor.dequantize()
     new_tensor = q(dequantized_tensor)
+    assert new_tensor._row_scaled_nvfp4 == row_scaled_nvfp4
+    assert new_tensor._amax_rowwise.numel() == (M if row_scaled_nvfp4 else 1)
     torch.testing.assert_close(
         new_tensor._rowwise_data,
         starting_tensor._rowwise_data,

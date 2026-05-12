@@ -281,6 +281,12 @@ Kernel Configuration
    :Default: ``0``
    :Description: Emit a warning when falling back from CUTLASS to cuBLAS for grouped GEMM operations.
 
+.. envvar:: NVTE_NVFP4_ROW_SCALED_ACTIVATION
+
+   :Type: ``int`` (0 or 1)
+   :Default: ``0``
+   :Description: Enable row-scaled NVFP4 tensors for forward activation quantizers in the ``NVFP4BlockScaling`` recipe. When set to ``1`` (or when ``NVFP4BlockScaling(row_scaled_activation=True)`` is used), rowwise ``amax`` metadata is stored as one FP32 value per tensor row instead of a single scalar.
+
 Torch Compilation and Fusion
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
