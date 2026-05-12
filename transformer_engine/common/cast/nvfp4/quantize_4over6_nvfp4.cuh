@@ -384,9 +384,9 @@ __device__ __forceinline__ bool record_and_select_4over6_2d_block(
     QuantizationScratch4Over6<BLOCK_DIM, BLOCKS_PER_TILE_Y, BLOCKS_PER_TILE_X> &scratch,
     nvfp4_scale_t &S_dec_b_fp8, const QuantizationCandidates4Over6 &candidates) {
   return record_and_select_4over6_2d_block<BLOCK_DIM, BLOCKS_PER_TILE_Y, BLOCKS_PER_TILE_X>(
-      scaling_factors, block_in_tile_y, block_in_tile_x, participant_idx,
-      scratch.err_map4_matrix, scratch.err_map6_matrix, scratch.pick_map4_matrix,
-      scratch.selected_scale_matrix, S_dec_b_fp8, candidates);
+      scaling_factors, block_in_tile_y, block_in_tile_x, participant_idx, scratch.err_map4_matrix,
+      scratch.err_map6_matrix, scratch.pick_map4_matrix, scratch.selected_scale_matrix, S_dec_b_fp8,
+      candidates);
 }
 
 template <bool USE_FAST_MATH, size_t BLOCK_DIM, size_t BLOCKS_PER_TILE_Y, size_t BLOCKS_PER_TILE_X>
@@ -402,8 +402,8 @@ __device__ __forceinline__ bool quantize_and_select_4over6_2d_block_16x(
 
   const bool pick_map4 =
       record_and_select_4over6_2d_block<BLOCK_DIM, BLOCKS_PER_TILE_Y, BLOCKS_PER_TILE_X>(
-          scaling_factors, block_in_tile_y, block_in_tile_x, participant_idx, scratch,
-          S_dec_b_fp8, candidates);
+          scaling_factors, block_in_tile_y, block_in_tile_x, participant_idx, scratch, S_dec_b_fp8,
+          candidates);
   return pick_map4;
 }
 

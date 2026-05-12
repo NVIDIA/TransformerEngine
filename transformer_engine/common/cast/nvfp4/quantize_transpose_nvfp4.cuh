@@ -1541,39 +1541,30 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
           TRANSFORMER_ENGINE_SWITCH_CONDITION(row_scaled_nvfp4, ROW_SCALED_NVFP4, {
             TRANSFORMER_ENGINE_SWITCH_CONDITION(use_4over6, USE_4OVER6, {
               TRANSFORMER_ENGINE_SWITCH_CONDITION(return_transpose, RETURN_TRANSPOSE, {
-                auto launch_kernel = [&](auto kernel, const size_t dshmem_size) {
-                  cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                       dshmem_size);
-                  kernel<<<grid, block_size, dshmem_size, stream>>>(
-                      tensor_map_input, tensor_map_output, tensor_map_output_transpose, scales_ptr,
-                      scales_transpose_ptr, noop_ptr, amax_rowwise_ptr, amax_colwise_ptr, rows,
-                      cols, scale_stride, scale_stride_transpose, rng_state);
-                };
+                auto kernel = quantize_transpose_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP,
+                                                              IType, USE_STOCHASTIC_ROUNDING,
+                                                              RETURN_TRANSPOSE, ROW_SCALED_NVFP4>;
 
-                if constexpr (use_2d_quantization && USE_4OVER6) {
-                  using FourOverSixScratch = core::QuantizationScratch4Over6<
-                      NVFP4_2D_BLOCK_DIM, NVFP4_2D_BLOCKS_PER_TILE_Y, NVFP4_2D_BLOCKS_PER_TILE_X>;
-                  constexpr size_t dshmem_size =
-                      base_dshmem_size +
-                      DIVUP_TO_MULTIPLE(sizeof(FourOverSixScratch), TMA_SHMEM_ALIGNMENT);
-                  auto kernel =
+                if constexpr (use_2d_quantization) {
+                  kernel =
                       quantize_transpose_nvfp4_2D_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,
                                                          USE_STOCHASTIC_ROUNDING, USE_FAST_MATH,
                                                          RETURN_TRANSPOSE, USE_4OVER6>;
-                  launch_kernel(kernel, dshmem_size);
-                } else {
-                  constexpr size_t dshmem_size = base_dshmem_size;
-                  auto kernel = quantize_transpose_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP,
-                                                                IType, USE_STOCHASTIC_ROUNDING,
-                                                                RETURN_TRANSPOSE, ROW_SCALED_NVFP4>;
-                  if constexpr (use_2d_quantization) {
-                    kernel =
-                        quantize_transpose_nvfp4_2D_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,
-                                                           USE_STOCHASTIC_ROUNDING, USE_FAST_MATH,
-                                                           RETURN_TRANSPOSE, USE_4OVER6>;
-                  }
-                  launch_kernel(kernel, dshmem_size);
                 }
+                using FourOverSixScratch =
+                    core::QuantizationScratch4Over6<NVFP4_2D_BLOCK_DIM, NVFP4_2D_BLOCKS_PER_TILE_Y,
+                                                    NVFP4_2D_BLOCKS_PER_TILE_X>;
+                constexpr size_t dshmem_size =
+                    base_dshmem_size +
+                    ((use_2d_quantization && USE_4OVER6)
+                         ? DIVUP_TO_MULTIPLE(sizeof(FourOverSixScratch), TMA_SHMEM_ALIGNMENT)
+                         : 0);
+                cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                     dshmem_size);
+                kernel<<<grid, block_size, dshmem_size, stream>>>(
+                    tensor_map_input, tensor_map_output, tensor_map_output_transpose, scales_ptr,
+                    scales_transpose_ptr, noop_ptr, amax_rowwise_ptr, amax_colwise_ptr, rows, cols,
+                    scale_stride, scale_stride_transpose, rng_state);
               });
             });
           });););
