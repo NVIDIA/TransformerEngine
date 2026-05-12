@@ -228,9 +228,10 @@ def nvcc_path() -> Tuple[str, str]:
 def get_cuda_include_dirs() -> Tuple[str, str]:
     """Returns the CUDA header directory."""
 
+    force_wheels = bool(int(os.getenv("NVTE_BUILD_USE_NVIDIA_WHEELS", "0")))
     # If cuda is installed via toolkit, all necessary headers
     # are bundled inside the top level cuda directory.
-    if cuda_toolkit_include_path() is not None:
+    if not force_wheels and cuda_toolkit_include_path() is not None:
         return [cuda_toolkit_include_path()]
 
     # Use pip wheels to include all headers.
@@ -239,7 +240,10 @@ def get_cuda_include_dirs() -> Tuple[str, str]:
     except ModuleNotFoundError as e:
         raise RuntimeError("CUDA not found.")
 
-    cuda_root = Path(nvidia.__file__).parent
+    if nvidia.__file__ is not None:
+        cuda_root = Path(nvidia.__file__).parent
+    else:
+        cuda_root = Path(nvidia.__path__[0])  # namespace
     return [
         subdir / "include"
         for subdir in cuda_root.iterdir()
@@ -335,6 +339,17 @@ def get_frameworks() -> List[str]:
             raise ValueError(f"Transformer Engine does not support framework={framework}")
 
     return _frameworks
+
+
+def setup_mpi_flags(include_dirs: List, cxx_flags: List) -> None:
+    """Add MPI include path and compile definition if NVTE_UB_WITH_MPI is enabled."""
+    if bool(int(os.getenv("NVTE_UB_WITH_MPI", "0"))):
+        assert (
+            os.getenv("MPI_HOME") is not None
+        ), "MPI_HOME=/path/to/mpi must be set when compiling with NVTE_UB_WITH_MPI=1!"
+        mpi_path = Path(os.getenv("MPI_HOME"))
+        include_dirs.append(mpi_path / "include")
+        cxx_flags.append("-DNVTE_UB_WITH_MPI")
 
 
 def copy_common_headers(

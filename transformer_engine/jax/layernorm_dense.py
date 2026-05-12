@@ -220,20 +220,15 @@ def _layernorm_dense_fwd_rule(
 
     # NN GEMM
     # (batch..., hidden_in) x (hidden_in, hidden_out...)
-    use_bias = bias is not None
     output = tex.gemm(
         casted_ln_out.get_tensor(TensorUsage.LHS),
         casted_kernel.get_tensor(TensorUsage.RHS),
         contracting_dims=(x_contracting_dims, k_contracting_dims),
         transpose_batch_sequence=transpose_batch_sequence,
-        bias=bias if not tex.gemm_uses_jax_dot() else None,
-        fuse_bias=use_bias if not tex.gemm_uses_jax_dot() else False,
+        bias=bias,
     )
 
-    if use_bias and tex.gemm_uses_jax_dot():
-        bias_new_shape = (1,) * (output.ndim - bias.ndim) + bias.shape
-        output += jnp.reshape(bias, bias_new_shape)
-
+    has_bias = bias is not None
     ctx = (
         casted_ln_out.get_tensor(TensorUsage.LHS_TRANS).checkpoint(quantizer_set.x),
         casted_kernel.get_tensor(TensorUsage.RHS_TRANS).checkpoint(quantizer_set.kernel),
@@ -246,7 +241,7 @@ def _layernorm_dense_fwd_rule(
         beta,
         x_contracting_dims,
         k_contracting_dims,
-        use_bias,
+        has_bias,
         quantizer_set,
         flatten_axis,
     )
@@ -289,14 +284,14 @@ def _layernorm_dense_bwd_rule(
         beta,
         x_contracting_dims_in_fwd,
         k_contracting_dims_in_fwd,
-        use_bias,
+        has_bias,
         quantizer_set,
         flatten_axis,
     ) = ctx
 
     casted_grad, dbias = tex.quantize_dbias(
         grad,
-        is_dbias=use_bias,
+        is_dbias=has_bias,
         flatten_axis=flatten_axis,
         quantizer=quantizer_set.dgrad,
         amax_scope=AmaxScope.TPSP,

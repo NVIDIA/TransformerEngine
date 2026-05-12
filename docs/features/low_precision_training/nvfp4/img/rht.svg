@@ -1,0 +1,138 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 340">
+  <defs>
+    <style>
+      @import url("../_static/css/diagram-colors.css");
+      
+      /* Diagram-specific styles */
+      .input { fill: #e3f2fd; stroke: #1976d2; stroke-width: 2; }
+      .grad { fill: #fce4ec; stroke: #d81b60; stroke-width: 2; }
+      .rht { fill: #fff3e0; stroke: #f57c00; stroke-width: 2; }
+      .output { fill: #e8f5e9; stroke: #388e3c; stroke-width: 2; }
+      
+      .divider { stroke: #bdbdbd; stroke-width: 2; stroke-dasharray: 6,4; }
+      
+      /* Arrow override */
+      .arrow { marker-end: url(#arrowhead); }
+    </style>
+    
+    <!-- Arrow marker -->
+    <marker id="arrowhead" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#616161" />
+    </marker>
+  </defs>
+
+  <!-- Title -->
+  <text x="450" y="30" class="title">Random Hadamard Transform for WGRAD GEMM</text>
+
+  <!-- Divider -->
+  <line x1="450" y1="50" x2="450" y2="320" class="divider"/>
+
+  <!-- ═══════════════ LEFT SIDE: Without RHT ═══════════════ -->
+  <g id="without-rht">
+    <text x="225" y="70" class="section-title">Without RHT</text>
+    
+    <!-- Top row: Activations → Quantize → GEMM -->
+    <!-- Activations -->
+    <rect x="40" y="100" width="90" height="45" rx="6" class="input"/>
+    <text x="85" y="127" class="text">Activations</text>
+    
+    <!-- Arrow -->
+    <path d="M 130 122 L 175 122" class="arrow"/>
+    
+    <!-- Quantize -->
+    <rect x="175" y="100" width="80" height="45" rx="6" class="quantize"/>
+    <text x="215" y="127" class="text">Quantize</text>
+    
+    <!-- Arrow to GEMM -->
+    <path d="M 255 122 L 300 122" class="arrow"/>
+    
+    <!-- GEMM -->
+    <rect x="300" y="80" width="85" height="90" rx="6" class="gemm"/>
+    <text x="342" y="118" class="text">WGRAD</text>
+    <text x="342" y="138" class="text">GEMM</text>
+    
+    <!-- Bottom row: Output Grad → Quantize → GEMM -->
+    <!-- Output Grad -->
+    <rect x="40" y="170" width="90" height="45" rx="6" class="grad"/>
+    <text x="85" y="197" class="text">Output Grad</text>
+    
+    <!-- Arrow -->
+    <path d="M 130 192 L 175 192" class="arrow"/>
+    
+    <!-- Quantize 2 -->
+    <rect x="175" y="170" width="80" height="45" rx="6" class="quantize"/>
+    <text x="215" y="197" class="text">Quantize</text>
+    
+    <!-- Arrow to GEMM (diagonal) -->
+    <path d="M 255 192 L 300 155" class="arrow"/>
+    
+    <!-- Arrow from GEMM to output -->
+    <path d="M 342 170 L 342 245" class="arrow"/>
+    
+    <!-- Weight Grad -->
+    <rect x="300" y="245" width="85" height="45" rx="6" class="output"/>
+    <text x="342" y="272" class="text">Weight Grad</text>
+  </g>
+
+  <!-- ═══════════════ RIGHT SIDE: With RHT ═══════════════ -->
+  <g id="with-rht">
+    <text x="675" y="70" class="section-title">With RHT</text>
+    
+    <!-- Top row: Activations → RHT → Quantize → GEMM -->
+    <!-- Activations -->
+    <rect x="460" y="100" width="90" height="45" rx="6" class="input"/>
+    <text x="505" y="127" class="text">Activations</text>
+    
+    <!-- Arrow -->
+    <path d="M 550 122 L 575 122" class="arrow"/>
+    
+    <!-- RHT -->
+    <rect x="575" y="100" width="50" height="45" rx="6" class="rht"/>
+    <text x="600" y="127" class="text">RHT</text>
+    
+    <!-- Arrow -->
+    <path d="M 625 122 L 650 122" class="arrow"/>
+    
+    <!-- Quantize -->
+    <rect x="650" y="100" width="80" height="45" rx="6" class="quantize"/>
+    <text x="690" y="127" class="text">Quantize</text>
+    
+    <!-- Arrow to GEMM -->
+    <path d="M 730 122 L 775 122" class="arrow"/>
+    
+    <!-- GEMM -->
+    <rect x="775" y="80" width="85" height="90" rx="6" class="gemm"/>
+    <text x="817" y="118" class="text">WGRAD</text>
+    <text x="817" y="138" class="text">GEMM</text>
+    
+    <!-- Bottom row: Output Grad → RHT → Quantize → GEMM -->
+    <!-- Output Grad -->
+    <rect x="460" y="170" width="90" height="45" rx="6" class="grad"/>
+    <text x="505" y="197" class="text">Output Grad</text>
+    
+    <!-- Arrow -->
+    <path d="M 550 192 L 575 192" class="arrow"/>
+    
+    <!-- RHT 2 -->
+    <rect x="575" y="170" width="50" height="45" rx="6" class="rht"/>
+    <text x="600" y="197" class="text">RHT</text>
+    
+    <!-- Arrow -->
+    <path d="M 625 192 L 650 192" class="arrow"/>
+    
+    <!-- Quantize 2 -->
+    <rect x="650" y="170" width="80" height="45" rx="6" class="quantize"/>
+    <text x="690" y="197" class="text">Quantize</text>
+    
+    <!-- Arrow to GEMM (diagonal) -->
+    <path d="M 730 192 L 775 155" class="arrow"/>
+    
+    <!-- Arrow from GEMM to output -->
+    <path d="M 817 170 L 817 245" class="arrow"/>
+    
+    <!-- Weight Grad -->
+    <rect x="775" y="245" width="85" height="45" rx="6" class="output"/>
+    <text x="817" y="272" class="text">Weight Grad</text>
+  </g>
+
+</svg>

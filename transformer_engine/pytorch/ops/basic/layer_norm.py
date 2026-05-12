@@ -31,7 +31,7 @@ class LayerNorm(BasicOperation):
     r"""Layer Normalization
 
     Applies Layer Normalization over a mini-batch of inputs as described in
-    the paper `Layer Normalization <https://arxiv.org/abs/1607.06450>`__
+    the paper `Layer Normalization <https://arxiv.org/abs/1607.06450>`__ .
 
     .. math::
         y = \frac{x - \mathrm{E}[x]}{\sqrt{\mathrm{Var}[x] + \varepsilon}} * \gamma + \beta
@@ -51,9 +51,9 @@ class LayerNorm(BasicOperation):
         Tensor device
     dtype : torch.dtype, default = default dtype
         Tensor datatype
-    zero_centered_gamma : bool, default = 'False'
-        If `True`, the :math:`\gamma` parameter is initialized to zero
-        and the calculation changes to
+    zero_centered_gamma : bool, default = False
+        If ``True``, the :math:`\gamma` parameter is initialized to
+        zero and the calculation changes to
 
             .. math::
                 y = \frac{x - \mathrm{E}[x]}{\sqrt{\mathrm{Var}[x] + \varepsilon}} * (1 + \gamma) + \beta

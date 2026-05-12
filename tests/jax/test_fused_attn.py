@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 """Tests for fused attention"""
+import os
 from enum import Enum, auto
 from dataclasses import dataclass, field
 from functools import partial
@@ -48,6 +49,9 @@ from transformer_engine_jax import (
 
 from distributed_test_base import assert_equal_collectives
 from utils import assert_allclose, print_debug_tensor_stats
+
+# Get determinism
+_deterministic = not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
 
 
 @pytest.fixture(autouse=True, scope="module")
@@ -413,15 +417,25 @@ class FusedAttnRunner:
             pytest.skip(
                 "seqlen_q > seqlen_kv is not supported with sliding window attention in cuDNN"
             )
-        # TODO(KshitijLakhani): Set the upper limit for skipping this test when cuDNN adds support
-        if (
-            get_device_compute_capability(0) >= 100
-            and self.dropout_prob == 0.1
-            and self.attn_bias_type is not AttnBiasType.NO_BIAS
-        ):
-            pytest.skip(
-                "For sm100+, bprop kernel support for dropout + determinism (bias) is not supported"
-            )
+
+        if get_device_compute_capability(0) >= 100 and self.is_training:
+            if FusedAttnHelper.is_non_deterministic_allowed() and (
+                (self.dropout_prob != 0.0 and self.attn_bias_type != AttnBiasType.NO_BIAS)
+                or get_cudnn_version() < 90700
+            ):
+                pytest.skip(
+                    "For sm100+, non-deterministic bprop (cuDNN 9.7+) does not support bias with"
+                    " dropout"
+                )
+            if not FusedAttnHelper.is_non_deterministic_allowed() and (
+                self.dropout_prob != 0.0
+                or self.attn_bias_type != AttnBiasType.NO_BIAS
+                or get_cudnn_version() < 91801
+            ):
+                pytest.skip(
+                    "For sm100+, deterministic bprop (cuDNN 9.18.1+) does not support bias or"
+                    " dropout"
+                )
         # Test the MLA case where head dims for qk differ from head dims for v, only if the tensors
         # are provided in BSHD_BSHD_BSHD or THD_THD_THD formats
         if self.head_dim_qk != self.head_dim_v and not self.qkv_layout.is_separate():
@@ -533,13 +547,20 @@ class FusedAttnRunner:
         else:
             self.softmax_offset = None
 
-        def gen_valid(bs, max_seqlen, pad_ratio):
+        def generate_valid_segment_ids_and_pos(bs, max_seqlen, pad_ratio):
             pad_len = int(max_seqlen * pad_ratio)
             valid_len = max_seqlen - pad_len
-            tokens = jnp.concatenate([jnp.ones((bs, valid_len)), jnp.zeros((bs, pad_len))], axis=-1)
-            return tokens, jnp.logical_not(tokens)
+            tokens = jnp.concatenate(
+                [
+                    jnp.ones((bs, valid_len), dtype=jnp.int32),
+                    jnp.zeros((bs, pad_len), dtype=jnp.int32),
+                ],
+                axis=-1,
+            )
+            segment_pos = jnp.broadcast_to(jnp.arange(max_seqlen, dtype=jnp.int32), tokens.shape)
+            return tokens, segment_pos, jnp.logical_not(tokens)
 
-        def generate_random_segment_ids(
+        def generate_random_segment_ids_and_pos(
             batch_size,
             sequence_length,
             num_segments,
@@ -587,8 +608,10 @@ class FusedAttnRunner:
             return segment_ids, segment_pos, segment_pad
 
         if self.qkv_layout.is_thd():
-            self.segment_ids_q, self.segment_pos_q, self.pad_q = generate_random_segment_ids(
-                self.batch_size, self.max_seqlen_q, self.num_segments_per_seq, seed=42
+            self.segment_ids_q, self.segment_pos_q, self.pad_q = (
+                generate_random_segment_ids_and_pos(
+                    self.batch_size, self.max_seqlen_q, self.num_segments_per_seq, seed=42
+                )
             )
             self.seqlens_q, self.offsets_q = get_seqlens_and_offsets(self.segment_ids_q)
             # TODO(rewang): record only self attention and find the reason of cross attention
@@ -603,22 +626,23 @@ class FusedAttnRunner:
                     self.window_size is not None or self.attn_mask_type.is_bottom_right()
                 ):  # SWA or BRCM requires kv_len >= q_len
                     min_segment_len = self.seqlens_q
-                self.segment_ids_kv, self.segment_pos_kv, self.pad_kv = generate_random_segment_ids(
-                    self.batch_size,
-                    self.max_seqlen_kv,
-                    self.num_segments_per_seq,
-                    seed=2024,
-                    min_segment_len=min_segment_len,
+                self.segment_ids_kv, self.segment_pos_kv, self.pad_kv = (
+                    generate_random_segment_ids_and_pos(
+                        self.batch_size,
+                        self.max_seqlen_kv,
+                        self.num_segments_per_seq,
+                        seed=2024,
+                        min_segment_len=min_segment_len,
+                    )
                 )
             self.seqlens_kv, self.offsets_kv = get_seqlens_and_offsets(self.segment_ids_kv)
         else:
-            self.segment_ids_q, self.pad_q = gen_valid(
+            self.segment_ids_q, self.segment_pos_q, self.pad_q = generate_valid_segment_ids_and_pos(
                 self.batch_size, self.max_seqlen_q, pad_ratio
             )
-            self.segment_ids_kv, self.pad_kv = gen_valid(
-                self.batch_size, self.max_seqlen_kv, pad_ratio
+            self.segment_ids_kv, self.segment_pos_kv, self.pad_kv = (
+                generate_valid_segment_ids_and_pos(self.batch_size, self.max_seqlen_kv, pad_ratio)
             )
-            self.segment_pos_q = self.segment_pos_kv = None
             self.seqlens_q = self.seqlens_kv = self.offsets_q = self.offsets_kv = None
 
         # For reference code
@@ -668,24 +692,15 @@ class FusedAttnRunner:
                         (self.offsets_q, self.offsets_kv),
                     )
                 case SeqDescFormat.SegmentIDs:
-                    # Exercise the path to generate the segment_pos in from_segment_ids_and_pos()
-                    # if no CP and load balancing, else explicitly pass the segment_pos
+                    # from_segment_ids_and_pos requires explicit segment_pos.
                     self.sequence_desciptor = SequenceDescriptor.from_segment_ids_and_pos(
                         (
                             self.cp_reorder_fn(self.segment_ids_q),
                             self.cp_reorder_fn(self.segment_ids_kv),
                         ),
                         (
-                            (
-                                self.cp_reorder_fn(self.segment_pos_q),
-                                self.cp_reorder_fn(self.segment_pos_kv),
-                            )
-                            if self.cp_size > 1 and self.cp_load_balanced
-                            else None
-                        ),
-                        is_thd=self.qkv_layout.is_thd(),
-                        is_segment_ids_reordered=(
-                            True if self.cp_size > 1 and self.cp_load_balanced else False
+                            self.cp_reorder_fn(self.segment_pos_q),
+                            self.cp_reorder_fn(self.segment_pos_kv),
                         ),
                     )
                 case _:
@@ -713,9 +728,7 @@ class FusedAttnRunner:
                 case SeqDescFormat.SegmentIDs:
                     self.sequence_desciptor = SequenceDescriptor.from_segment_ids_and_pos(
                         (self.segment_ids_q, self.segment_ids_kv),
-                        None,
-                        is_thd=self.qkv_layout.is_thd(),
-                        is_segment_ids_reordered=False,
+                        (self.segment_pos_q, self.segment_pos_kv),
                     )
                 case _:
                     raise ValueError(f"Unknown {self.seq_desc_format=}")
@@ -1047,6 +1060,30 @@ class FusedAttnRunner:
             assert_equal_collectives(target_hlo, self.coll_count_ref)
 
 
+def _get_swa_window_size_for_test(s_kv: int, attn_mask_type: AttnMaskType) -> Tuple[int, int]:
+    """Pick a sliding-window size for SWA tests, gated on cuDNN version.
+
+    cuDNN < 9.2: skip (no SWA support).
+    cuDNN >= 9.2: left-only window (s_kv // 10, 0).
+    cuDNN >= 9.6: bidirectional window (s_kv // 10, s_kv // 10 + 5) for the mask types whose
+                  bidirectional fused dispatch is meaningful here (NO_MASK, PADDING_MASK).
+                  Other mask types keep the left-only window: causal-family masks would
+                  collapse (W, W) -> (W, 0), hence not tested here.
+    """
+    cudnn_version = get_cudnn_version()
+    if cudnn_version < 90200:
+        pytest.skip("Sliding window attention requires cuDNN >= 9.2")
+    left_window_size = s_kv // 10
+    # choose asymmetric window size for testing
+    right_window_size = left_window_size + 5
+    if cudnn_version >= 90600 and attn_mask_type in (
+        AttnMaskType.NO_MASK,
+        AttnMaskType.PADDING_MASK,
+    ):
+        return (left_window_size, right_window_size)
+    return (left_window_size, 0)
+
+
 @pytest.mark.parametrize(
     "attn_mask_type",
     [
@@ -1068,21 +1105,45 @@ class FusedAttnRunner:
     ],
 )
 @pytest.mark.parametrize(
-    "qkv_layout",
+    "b, s_q, s_kv, h_q, h_kv, d_qk, d_v, dtype, qkv_layout",
     [
-        pytest.param(QKVLayout.BS3HD, id="QKV_PACKED"),
-        pytest.param(QKVLayout.BSHD_BS2HD, id="KV_PACKED"),
-        pytest.param(QKVLayout.BSHD_BSHD_BSHD, id="SEPARATE"),
-        pytest.param(QKVLayout.T3HD, id="RAGGED_QKV_PACKED"),
-        pytest.param(QKVLayout.THD_T2HD, id="RAGGED_KV_PACKED"),
-        pytest.param(QKVLayout.THD_THD_THD, id="RAGGED_SEPARATE"),
-    ],
-)
-@pytest.mark.parametrize(
-    "b, s_q, s_kv, h_q, h_kv, d_qk, d_v, dtype",
-    [
+        # large data size + bf16 + qkv packed
         pytest.param(
-            2, 2048, 2048, 12, 12, 64, 64, jnp.bfloat16, id="2-2048-2048-12-12-64-64-BF16-SELF"
+            2,
+            2048,
+            2048,
+            12,
+            12,
+            64,
+            64,
+            jnp.bfloat16,
+            QKVLayout.BS3HD,
+            id="2-2048-2048-12-12-64-64-BF16-SELF-QKV_PACKED",
+        ),
+        pytest.param(
+            2,
+            2048,
+            2048,
+            12,
+            12,
+            64,
+            64,
+            jnp.bfloat16,
+            QKVLayout.T3HD,
+            id="2-2048-2048-12-12-64-64-BF16-SELF-RAGGED_QKV_PACKED",
+        ),
+        # mid data size + bf16 + cross attn + kv packed
+        pytest.param(
+            2,
+            512,
+            1024,
+            12,
+            12,
+            64,
+            64,
+            jnp.bfloat16,
+            QKVLayout.BSHD_BS2HD,
+            id="2-512-1024-12-12-64-64-BF16-CROSS-KV_PACKED",
         ),
         pytest.param(
             2,
@@ -1093,16 +1154,21 @@ class FusedAttnRunner:
             64,
             64,
             jnp.bfloat16,
-            id="2-512-1024-12-12-64-64-BF16-CROSS",
+            QKVLayout.THD_T2HD,
+            id="2-512-1024-12-12-64-64-BF16-CROSS-RAGGED_KV_PACKED",
         ),
+        # large data size + bf16 + cross attn + diff hidden v dim + qkv separate
         pytest.param(
-            2, 2048, 2048, 12, 6, 64, 64, jnp.bfloat16, id="2-2048-2048-12-6-64-64-BF16-GQA"
-        ),
-        pytest.param(
-            4, 128, 128, 16, 16, 64, 64, jnp.float16, id="4-128-128-16-16-64-64-FP16-SELF"
-        ),
-        pytest.param(
-            4, 128, 128, 16, 16, 64, 32, jnp.float16, id="4-128-128-16-16-64-32-FP16-SELF"
+            2,
+            2048,
+            1024,
+            12,
+            12,
+            64,
+            32,
+            jnp.bfloat16,
+            QKVLayout.BSHD_BSHD_BSHD,
+            id="2-2048-1024-12-12-64-32-BF16-CROSS-SEPARATE",
         ),
         pytest.param(
             2,
@@ -1113,10 +1179,108 @@ class FusedAttnRunner:
             64,
             32,
             jnp.bfloat16,
-            id="2-2048-1024-12-12-64-32-BF16-CROSS",
+            QKVLayout.THD_THD_THD,
+            id="2-2048-1024-12-12-64-32-BF16-CROSS-RAGGED_SEPARATE",
+        ),
+        # large data size + bf16 + gqa + kv packed
+        pytest.param(
+            2,
+            2048,
+            2048,
+            12,
+            6,
+            64,
+            64,
+            jnp.bfloat16,
+            QKVLayout.BSHD_BS2HD,
+            id="2-2048-2048-12-6-64-64-BF16-GQA-KV_PACKED",
         ),
         pytest.param(
-            2, 2048, 2048, 12, 6, 128, 64, jnp.float16, id="2-2048-2048-12-6-128-64-FP16-GQA"
+            2,
+            2048,
+            2048,
+            12,
+            6,
+            64,
+            64,
+            jnp.bfloat16,
+            QKVLayout.THD_T2HD,
+            id="2-2048-2048-12-6-64-64-BF16-GQA-RAGGED_KV_PACKED",
+        ),
+        # small data size + fp16 + diff hidden v dim + qkv packed
+        pytest.param(
+            4,
+            128,
+            128,
+            16,
+            16,
+            64,
+            32,
+            jnp.float16,
+            QKVLayout.BS3HD,
+            id="4-128-128-16-16-64-32-FP16-SELF-QKV_PACKED",
+        ),
+        pytest.param(
+            4,
+            128,
+            128,
+            16,
+            16,
+            64,
+            32,
+            jnp.float16,
+            QKVLayout.T3HD,
+            id="4-128-128-16-16-64-32-FP16-SELF-RAGGED_QKV_PACKED",
+        ),
+        # small data size + fp16 + kv packed
+        pytest.param(
+            4,
+            128,
+            128,
+            16,
+            16,
+            64,
+            64,
+            jnp.float16,
+            QKVLayout.BSHD_BS2HD,
+            id="4-128-128-16-16-64-64-FP16-SELF-KV_PACKED",
+        ),
+        pytest.param(
+            4,
+            128,
+            128,
+            16,
+            16,
+            64,
+            64,
+            jnp.float16,
+            QKVLayout.THD_T2HD,
+            id="4-128-128-16-16-64-64-FP16-SELF-RAGGED_KV_PACKED",
+        ),
+        # large data size + fp16 + cross attn + gqa + diff hidden v dim + qkv separate
+        pytest.param(
+            2,
+            1024,
+            2048,
+            12,
+            6,
+            128,
+            64,
+            jnp.float16,
+            QKVLayout.BSHD_BSHD_BSHD,
+            id="2-1024-2048-12-6-128-64-FP16-CROSS-GQA-SEPARATE",
+        ),
+        pytest.param(
+            2,
+            1024,
+            2048,
+            12,
+            6,
+            128,
+            64,
+            jnp.float16,
+            QKVLayout.THD_THD_THD,
+            id="2-1024-2048-12-6-128-64-FP16-CROSS-GQA-RAGGED_SEPARATE",
         ),
     ],
 )
@@ -1142,6 +1306,7 @@ class FusedAttnRunner:
         pytest.param(SeqDescFormat.SegmentIDs, id="SegmentIDs"),
     ],
 )
+@pytest.mark.skipif(_deterministic, reason="Test non-determinism only")
 class TestFusedAttn:
     """
     Fused attention tester
@@ -1189,9 +1354,7 @@ class TestFusedAttn:
         This test is not intended to run automatically during CI as it is time-consuming
         It is kept for development and debugging
         """
-        window_size = None
-        if swa:
-            window_size = (s_kv // 10, 0)
+        window_size = _get_swa_window_size_for_test(s_kv, attn_mask_type) if swa else None
         runner = FusedAttnRunner(
             b,
             s_q,
@@ -1242,9 +1405,7 @@ class TestFusedAttn:
         """
         Test backward with parameterized configs
         """
-        window_size = None
-        if swa:
-            window_size = (s_kv // 10, 0)
+        window_size = _get_swa_window_size_for_test(s_kv, attn_mask_type) if swa else None
         runner = FusedAttnRunner(
             b,
             s_q,
@@ -1265,3 +1426,182 @@ class TestFusedAttn:
             seq_desc_format,
         )
         runner.test_backward()
+
+
+@pytest.mark.parametrize(
+    "attn_mask_type",
+    [
+        pytest.param(AttnMaskType.NO_MASK, id="NO_MASK"),
+        pytest.param(AttnMaskType.PADDING_MASK, id="PADDING"),
+        pytest.param(AttnMaskType.CAUSAL_MASK, id="CAUSAL"),
+        pytest.param(AttnMaskType.PADDING_CAUSAL_MASK, id="PADDING_CAUSAL"),
+        pytest.param(
+            AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK, id="PADDING_CAUSAL_BOTTOM_RIGHT"
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "softmax_type",
+    [
+        pytest.param(AttnSoftmaxType.VANILLA_SOFTMAX, id="VANILLA_SOFTMAX"),
+    ],
+)
+@pytest.mark.parametrize(
+    "b, s_q, s_kv, h_q, h_kv, d_qk, d_v, dtype, qkv_layout",
+    [
+        # large data size + fp16 + cross attn + gqa + diff hidden v dim + qkv separate
+        pytest.param(
+            2,
+            1024,
+            2048,
+            12,
+            6,
+            128,
+            64,
+            jnp.bfloat16,
+            QKVLayout.BSHD_BSHD_BSHD,
+            id="2-1024-2048-12-6-128-64-BF16-CROSS-GQA-SEPARATE",
+        ),
+        pytest.param(
+            2,
+            1024,
+            2048,
+            12,
+            6,
+            128,
+            64,
+            jnp.bfloat16,
+            QKVLayout.THD_THD_THD,
+            id="2-1024-2048-12-6-128-64-BF16-CROSS-GQA-RAGGED_SEPARATE",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "dropout_prob",
+    [
+        pytest.param(0.0, id="DROP_0.0"),
+    ],
+)
+@pytest.mark.parametrize(
+    "swa",
+    [
+        pytest.param(False, id="NO_SWA"),
+    ],
+)
+@pytest.mark.parametrize(
+    "seq_desc_format",
+    [
+        pytest.param(SeqDescFormat.Seqlens, id="Seqlens"),
+    ],
+)
+@pytest.mark.skipif(not _deterministic, reason="Test determinism only")
+class TestFusedAttnWithDeterminism:
+    """
+    Fused attention tester with determinism
+    """
+
+    @staticmethod
+    @pytest.mark.parametrize(
+        "is_training",
+        [
+            pytest.param(True, id="TRAINING"),
+        ],
+    )
+    @pytest.mark.parametrize(
+        "attn_bias_type, bias_shape",
+        [
+            pytest.param(AttnBiasType.NO_BIAS, None, id="NO_BIAS"),
+            pytest.param(AttnBiasType.POST_SCALE_BIAS, BiasShape._1HSS, id="POST_SCALE_BIAS-1HSS"),
+        ],
+    )
+    def _test_forward(
+        b,
+        s_q,
+        s_kv,
+        h_q,
+        h_kv,
+        d_qk,
+        d_v,
+        attn_bias_type,
+        attn_mask_type,
+        softmax_type,
+        dropout_prob,
+        dtype,
+        is_training,
+        qkv_layout,
+        bias_shape,
+        swa,
+        seq_desc_format,
+    ):
+        """
+        Test forward with parameterized configs
+        This test is not intended to run automatically during CI as it is time-consuming
+        It is kept for development and debugging
+        """
+        TestFusedAttn._test_forward(
+            b,
+            s_q,
+            s_kv,
+            h_q,
+            h_kv,
+            d_qk,
+            d_v,
+            attn_bias_type,
+            attn_mask_type,
+            softmax_type,
+            dropout_prob,
+            dtype,
+            is_training,
+            qkv_layout,
+            bias_shape,
+            swa,
+            seq_desc_format,
+        )
+
+    @staticmethod
+    @pytest.mark.parametrize(
+        "attn_bias_type, bias_shape",
+        [
+            pytest.param(AttnBiasType.NO_BIAS, None, id="NO_BIAS"),
+            pytest.param(AttnBiasType.POST_SCALE_BIAS, BiasShape._1HSS, id="POST_SCALE_BIAS-1HSS"),
+        ],
+    )
+    def test_backward(
+        b,
+        s_q,
+        s_kv,
+        h_q,
+        h_kv,
+        d_qk,
+        d_v,
+        attn_bias_type,
+        attn_mask_type,
+        softmax_type,
+        dropout_prob,
+        dtype,
+        qkv_layout,
+        bias_shape,
+        swa,
+        seq_desc_format,
+    ):
+        """
+        Test backward with parameterized configs
+        """
+        TestFusedAttn.test_backward(
+            b,
+            s_q,
+            s_kv,
+            h_q,
+            h_kv,
+            d_qk,
+            d_v,
+            attn_bias_type,
+            attn_mask_type,
+            softmax_type,
+            dropout_prob,
+            dtype,
+            qkv_layout,
+            bias_shape,
+            swa,
+            seq_desc_format,
+        )

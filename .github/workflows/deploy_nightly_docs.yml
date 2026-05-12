@@ -7,6 +7,7 @@ name: Deploy nightly docs
 on:
   push:
     branches: [ "main" ]
+  workflow_dispatch:
 jobs:
   build:
     uses: ./.github/workflows/docs.yml
@@ -21,9 +22,8 @@ jobs:
             name: "te_docs"
             path: "html"
       - name: Prepare for pages
-        uses: actions/upload-pages-artifact@v1.0.7
+        uses: actions/upload-pages-artifact@v3
         with:
-          name: github-pages
           path: "html"
   deploy:
     needs: prepare
@@ -36,4 +36,5 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Deploy
-      uses: actions/deploy-pages@v2.0.0
+      id: deployment
+      uses: actions/deploy-pages@v4

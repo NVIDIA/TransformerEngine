@@ -3,13 +3,14 @@
 # See LICENSE for license information.
 
 """JAX related extensions."""
+
 import os
 from pathlib import Path
 from packaging import version
 
 import setuptools
 
-from .utils import get_cuda_include_dirs, all_files_in_dir, debug_build_enabled
+from .utils import get_cuda_include_dirs, all_files_in_dir, debug_build_enabled, setup_mpi_flags
 from typing import List
 
 
@@ -19,8 +20,29 @@ def install_requirements() -> List[str]:
 
 
 def test_requirements() -> List[str]:
-    """Test dependencies for TE/JAX extensions."""
-    return ["numpy", "triton"]
+    """Test dependencies for TE/JAX extensions.
+
+    Triton Package Selection:
+        The triton package is selected based on NVTE_USE_PYTORCH_TRITON environment variable:
+
+        Default (NVTE_USE_PYTORCH_TRITON unset or "0"):
+            Returns 'triton' - OpenAI's standard package from PyPI.
+            Install with: pip install triton
+
+        NVTE_USE_PYTORCH_TRITON=1:
+            Returns 'pytorch-triton' - for mixed JAX+PyTorch environments.
+            Install with: pip install pytorch-triton --index-url https://download.pytorch.org/whl/cu121
+
+            Note: Do NOT install pytorch-triton from PyPI directly - that's a placeholder.
+    """
+    use_pytorch_triton = bool(int(os.environ.get("NVTE_USE_PYTORCH_TRITON", "0")))
+
+    triton_package = "pytorch-triton" if use_pytorch_triton else "triton"
+
+    return [
+        "numpy",
+        triton_package,
+    ]
 
 
 def xla_path() -> str:
@@ -78,6 +100,8 @@ def setup_jax_extension(
         cxx_flags.append("-UNDEBUG")
     else:
         cxx_flags.append("-g0")
+
+    setup_mpi_flags(include_dirs, cxx_flags)
 
     # Define TE/JAX as a Pybind11Extension
     from pybind11.setup_helpers import Pybind11Extension

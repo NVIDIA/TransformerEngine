@@ -9,3 +9,5 @@ from .normalization import *
 from .quantization import *
 from .softmax import *
 from .gemm import *
+from .router import *
+from .topk import *

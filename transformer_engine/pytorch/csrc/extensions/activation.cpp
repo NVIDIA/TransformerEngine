@@ -42,8 +42,9 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
   } else if (detail::IsNVFP4Quantizers(quantizer.ptr())) {
     auto nvfp4_quantizer_cpp = dynamic_cast<NVFP4Quantizer*>(quantizer_cpp.get());
     NVTE_CHECK(nvfp4_quantizer_cpp != nullptr, "Could not cast to NVFP4 quantizer");
-    if (nvfp4_quantizer_cpp->with_rht && nvfp4_quantizer_cpp->with_post_rht_amax) {
-      // Post-RHT amax is handled within NVFP4 quantizer
+    if (nvfp4_quantizer_cpp->row_scaled_nvfp4 ||
+        (nvfp4_quantizer_cpp->with_rht && nvfp4_quantizer_cpp->with_post_rht_amax)) {
+      // Amax is handled within NVFP4 quantizer
       impl = Impl::UNFUSED;
     } else {
       impl = Impl::FUSED_ACTIVATION_AMAX_NVFP4;
@@ -86,7 +87,7 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
       {
         auto fp8_quantizer_cpp = dynamic_cast<Float8CurrentScalingQuantizer*>(quantizer_cpp.get());
         NVTE_CHECK(fp8_quantizer_cpp != nullptr, "Could not cast to FP8 current scaling quantizer");
-        auto [temp_nvte, _] =
+        auto [temp_nvte, _, amax_buf] =
             fp8_quantizer_cpp->create_unquantized_tensor_with_amax(output_shape, fake_dtype);
         NVTE_SCOPED_GIL_RELEASE({
           if constexpr (act_func == nullptr) {
@@ -96,7 +97,7 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
             act_func(input_nvte.data(), temp_nvte.data(), stream);
           }
         });
-        fp8_quantizer_cpp->quantize_with_amax(temp_nvte, out_nvte);
+        fp8_quantizer_cpp->quantize_with_amax(temp_nvte, out_nvte, amax_buf);
       }
       break;
     case Impl::FUSED_ACTIVATION_AMAX_NVFP4:
@@ -154,8 +155,9 @@ py::object dactivation_helper(const at::Tensor& grad_output, const at::Tensor& i
   } else if (detail::IsNVFP4Quantizers(quantizer.ptr())) {
     auto nvfp4_quantizer_cpp = dynamic_cast<NVFP4Quantizer*>(quantizer_cpp.get());
     NVTE_CHECK(nvfp4_quantizer_cpp != nullptr, "Could not cast to NVFP4 quantizer");
-    if (nvfp4_quantizer_cpp->with_rht && nvfp4_quantizer_cpp->with_post_rht_amax) {
-      // Post-RHT amax is handled within NVFP4 quantizer
+    if (nvfp4_quantizer_cpp->row_scaled_nvfp4 ||
+        (nvfp4_quantizer_cpp->with_rht && nvfp4_quantizer_cpp->with_post_rht_amax)) {
+      // Amax is handled within NVFP4 quantizer
       impl = Impl::UNFUSED;
     } else {
       impl = Impl::FUSED_ACTIVATION_AMAX_NVFP4;
@@ -198,7 +200,7 @@ py::object dactivation_helper(const at::Tensor& grad_output, const at::Tensor& i
       {
         auto fp8_quantizer_cpp = dynamic_cast<Float8CurrentScalingQuantizer*>(quantizer_cpp.get());
         NVTE_CHECK(fp8_quantizer_cpp != nullptr, "Could not cast to FP8 current scaling quantizer");
-        auto [temp_nvte, _] =
+        auto [temp_nvte, _, amax_buf] =
             fp8_quantizer_cpp->create_unquantized_tensor_with_amax(input_shape, fake_dtype);
         NVTE_SCOPED_GIL_RELEASE({
           if constexpr (dact_func == nullptr) {
@@ -208,7 +210,7 @@ py::object dactivation_helper(const at::Tensor& grad_output, const at::Tensor& i
             dact_func(grad_output_nvte.data(), input_nvte.data(), temp_nvte.data(), stream);
           }
         });
-        fp8_quantizer_cpp->quantize_with_amax(temp_nvte, grad_input_nvte);
+        fp8_quantizer_cpp->quantize_with_amax(temp_nvte, grad_input_nvte, amax_buf);
       }
       break;
     case Impl::FUSED_ACTIVATION_AMAX_NVFP4:
@@ -244,6 +246,14 @@ py::object gelu(const at::Tensor& input, py::handle quantizer) {
 
 py::object dgelu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer) {
   return dactivation_helper<nvte_dgelu, nullptr>(grad, input, quantizer);
+}
+
+py::object glu(const at::Tensor& input, py::handle quantizer) {
+  return activation_helper<nvte_glu, nullptr>(input, quantizer, 2);
+}
+
+py::object dglu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer) {
+  return dactivation_helper<nvte_dglu, nullptr>(grad, input, quantizer);
 }
 
 py::object geglu(const at::Tensor& input, py::handle quantizer) {

@@ -920,7 +920,7 @@ class GroupedQuantizer(Quantizer):
         self.data_layout = self.quantizers[0].data_layout
 
     def _create_grouped_tensor_from_tensor_list(
-        self, tensor_list, group_sizes, original_shape, group_axis, mode
+        self, tensor_list, group_sizes, original_shape, mode
     ):
         # mode 0 = concate, mode 1 = add
         # TODO(Ming Huang): Consider to apply Enum for mode.
@@ -948,9 +948,8 @@ class GroupedQuantizer(Quantizer):
             is_colwise=tensor_list[0].is_colwise,
             data_layout=tensor_list[0].data_layout,
             flatten_axis=tensor_list[0].flatten_axis,
-            group_sizes=group_sizes,
+            first_dims=group_sizes,
             original_shape=original_shape,
-            group_axis=group_axis,
         )
 
     def _quantize_func(self, *args, **kwargs):
@@ -964,12 +963,11 @@ class GroupedQuantizer(Quantizer):
         dq_dtype=None,
         flatten_axis=-1,
         group_sizes=None,
-        group_axis=0,
     ):
         """Quantize a tensor in grouped manner.
 
         Expected input shape: [M, K] or [G, K, N]
-        Split to x.shape[group_axis] number of groups if group_sizes is not given
+        Split to x.shape[0] number of groups if group_sizes is not given
 
         Args:
             x: Input tensor to quantize
@@ -978,12 +976,10 @@ class GroupedQuantizer(Quantizer):
             dq_dtype: Data type for dequantized values
             flatten_axis: The axis along which the tensor could be flattened to 2D (default: -1)
             group_sizes: Array of ints containing the size of each group (default: None)
-            group_axis: The axis along which grouping is performed (default: 0)
 
         Returns:
             A ScaledTensor1x or ScaledTensor2x containing the quantized data
         """
-        assert group_axis == 0, "Only group_axis == 0 is supported now!"
 
         dq_dtype = dq_dtype if dq_dtype is not None else x.dtype
         if flatten_axis < 0:
@@ -1023,8 +1019,8 @@ class GroupedQuantizer(Quantizer):
                 tensor_list.append(tensor)
             combine_mode = 1  # Add
         else:
-            group_sizes = jnp.ones(x.shape[group_axis], dtype=jnp.int32)
-            x = jnp.split(x, x.shape[group_axis], axis=group_axis)
+            group_sizes = jnp.ones(x.shape[0], dtype=jnp.int32)
+            x = jnp.split(x, x.shape[0], axis=0)
 
             tensor_list = []
             for i in range(len(group_sizes)):
@@ -1038,12 +1034,12 @@ class GroupedQuantizer(Quantizer):
         if is_rowwise:
             rowwise_tensor_list = [tensor.get_rowwise_tensor() for tensor in tensor_list]
             grouped_rowwise_tensor = self._create_grouped_tensor_from_tensor_list(
-                rowwise_tensor_list, group_sizes, original_shape, group_axis, combine_mode
+                rowwise_tensor_list, group_sizes, original_shape, combine_mode
             )
         if is_colwise:
             colwise_tensor_list = [tensor.get_colwise_tensor() for tensor in tensor_list]
             grouped_colwise_tensor = self._create_grouped_tensor_from_tensor_list(
-                colwise_tensor_list, group_sizes, original_shape, group_axis, combine_mode
+                colwise_tensor_list, group_sizes, original_shape, combine_mode
             )
 
         if is_colwise and is_rowwise:

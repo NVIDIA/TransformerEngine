@@ -1,0 +1,134 @@
+/* Diagram color definitions for Transformer Engine documentation */
+
+/* High precision (BF16/FP16) elements */
+.hp {
+  fill: #ede7f6;
+  stroke: #673ab7;
+  stroke-width: 2;
+}
+
+/* FP8 precision elements */
+.fp8 {
+  fill: #fff8e1;
+  stroke: #ffa726;
+  stroke-width: 2;
+}
+
+/* GEMM/computation operations */
+.gemm {
+  fill: #ffe0b2;
+  stroke: #fb8c00;
+  stroke-width: 2.5;
+}
+
+/* Quantization operations */
+.quantize {
+  fill: #e8f5e9;
+  stroke: #66bb6a;
+  stroke-width: 2;
+}
+
+/* Amax computation operations */
+.amax {
+  fill: #e1f5fe;
+  stroke: #039be5;
+  stroke-width: 2;
+}
+
+/* Text styles */
+.text {
+  font-family: 'Segoe UI', Arial, sans-serif;
+  font-size: 14px;
+  text-anchor: middle;
+  fill: #212121;
+}
+
+.small-text {
+  font-family: 'Segoe UI', Arial, sans-serif;
+  font-size: 14px;
+  text-anchor: middle;
+  fill: #757575;
+}
+
+.label {
+  font-family: 'Segoe UI', Arial, sans-serif;
+  font-size: 14px;
+  text-anchor: middle;
+  fill: #424242;
+}
+
+.title {
+  font-family: 'Segoe UI', Arial, sans-serif;
+  font-size: 18px;
+  font-weight: 600;
+  text-anchor: middle;
+  fill: #212121;
+}
+
+.section-title {
+  font-family: 'Segoe UI', Arial, sans-serif;
+  font-size: 15px;
+  font-weight: 600;
+  text-anchor: middle;
+}
+
+/* Arrows */
+/* Note: marker-end references #arrowhead marker which must be defined in each SVG's <defs> section */
+.arrow {
+  stroke: #616161;
+  stroke-width: 2;
+  fill: none;
+  marker-end: url(#arrowhead);
+}
+
+/* Additional box and element styles */
+.box-blue {
+  fill: #e3f2fd;
+  stroke: #1976d2;
+  stroke-width: 2;
+}
+
+.box-orange {
+  fill: #fff3e0;
+  stroke: #f57c00;
+  stroke-width: 2;
+}
+
+.box-green {
+  fill: #c8e6c9;
+  stroke: #388e3c;
+  stroke-width: 2;
+}
+
+.box-dashed {
+  stroke-dasharray: 5,5;
+}
+
+/* LayerNorm specific */
+.layernorm {
+  fill: #b3e5fc;
+  stroke: #0277bd;
+  stroke-width: 2.5;
+}
+
+/* Fused layers */
+.fused {
+  fill: #b2dfdb;
+  stroke: #00695c;
+  stroke-width: 3;
+}
+
+/* Generic computation blocks */
+.computation {
+  fill: #f5f5f5;
+  stroke: #757575;
+  stroke-width: 2;
+}
+
+/* FP32 precision (alternative red) */
+.fp32 {
+  fill: #ffcdd2;
+  stroke: #d32f2f;
+  stroke-width: 2.5;
+}
+

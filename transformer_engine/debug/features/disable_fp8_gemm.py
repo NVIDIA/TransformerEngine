@@ -2,16 +2,27 @@
 #
 # See LICENSE for license information.
 
-"""DisableFP8GEMM Feature support for nvidia-dlframework-inspect"""
+"""DisableFP8GEMM Feature support for nvidia-dlframework-inspect
 
-from nvdlfw_inspect.registry import Registry, api_method
-from transformer_engine.debug.features.api import TEConfigAPIMapper
+DEPRECATED: This is a backward compatibility alias for DisableQuantizationGEMM.
+New code should use DisableQuantizationGEMM instead, which works with all quantization formats.
+"""
+
+import warnings
+
+from nvdlfw_inspect.registry import Registry
+from transformer_engine.debug.features.disable_quantization_gemm import DisableQuantizationGEMM
 
 
 @Registry.register_feature(namespace="transformer_engine")
-class DisableFP8GEMM(TEConfigAPIMapper):
+class DisableFP8GEMM(DisableQuantizationGEMM):
     """
     GEMM operations are executed in higher precision, even when FP8 autocast is enabled.
+
+    .. deprecated::
+        Use :class:`DisableQuantizationGEMM` instead. This class is maintained for
+        backward compatibility only. DisableQuantizationGEMM works with all quantization
+        formats (FP8, NVFP4, etc.), not just FP8.
 
     Parameters
     ----------
@@ -32,22 +43,17 @@ class DisableFP8GEMM(TEConfigAPIMapper):
             layers:
                 layer_types: [fc1]
             transformer_engine:
-                DisableFP8GEMM:
+                DisableFP8GEMM:  # Deprecated: use DisableQuantizationGEMM
                     enabled: True
                     gemms: [dgrad, wgrad]
     """
 
-    @api_method
-    def fp8_gemm_enabled(
-        self, config, layer_name: str, gemm: str, iteration: int
-    ):  # pylint: disable=unused-argument
-        """API call responsible for choice between high-precision and FP8 GEMM execution."""
-
-        for key in config:
-            if key != "gemm":
-                raise ValueError(f'[NVTORCH INSPECT ERROR] Unexpected key in config: "{key}".')
-
-        # If this feature is invoked, then FP8 GEMM is disabled.
-        # If not, then default behaviour in TransformerEngineAPI
-        # is that fp8_gemm() API call returns True.
-        return False, iteration + 1
+    def __init__(self, *args, **kwargs):
+        warnings.warn(
+            "DisableFP8GEMM is deprecated. "
+            "Use DisableQuantizationGEMM instead, which works with all quantization "
+            "formats (FP8, NVFP4, etc.).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        super().__init__(*args, **kwargs)

@@ -1,0 +1,60 @@
+/* Custom styling for program output blocks */
+
+.program-output {
+    background-color: #f8f9fa;
+    padding: 0;  /* No padding at all */
+    margin: 0;  /* No margins at all */
+    border-radius: 0;  /* No rounded corners */
+    font-family: 'Courier New', monospace;
+    font-size: 14px;
+    line-height: 1.5;
+    width: 100%;
+    max-width: 100%;
+}
+
+.program-output pre {
+    margin: 0;
+    padding: 0;
+    background: transparent !important;
+    border: none !important;
+    color: #2c3e50;
+    width: 100%;
+}
+
+.program-output .highlight {
+    background: transparent !important;
+    margin: 0;
+    width: 100%;
+}
+
+/* Alternative lighter style */
+.output-block {
+    background-color: #fafbfc;
+    border: 1px solid #e1e4e8;
+    padding: 10px 14px;
+    margin: 10px 0;
+    border-radius: 3px;
+    font-family: 'SF Mono', 'Consolas', monospace;
+    font-size: 13px;
+    color: #24292e;
+}
+
+/* Console-like output style */
+.console-output {
+    background-color: #1e1e1e;
+    border-left: 3px solid #76b900;
+    padding: 14px 18px;
+    margin: 12px 0;
+    border-radius: 5px;
+    font-family: 'Fira Code', 'Consolas', monospace;
+    font-size: 13px;
+    color: #d4d4d4;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.console-output pre {
+    margin: 0;
+    color: #d4d4d4;
+    background: transparent !important;
+}
+

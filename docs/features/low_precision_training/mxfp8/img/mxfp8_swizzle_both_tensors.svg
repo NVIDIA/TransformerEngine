@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1230 220" width="100%" style="max-width: 900px;">
+  <defs>
+    <style>
+      @import url("../_static/css/diagram-colors.css");
+      
+      /* Diagram-specific styles */
+      .input-box { fill: #f3e5f5; stroke: #7b1fa2; stroke-width: 2.5; }
+      .mxfp8-box { fill: #e3f2fd; stroke: #1976d2; stroke-width: 2.5; }
+      .fp8-tile { fill: #bbdefb; stroke: #1565c0; stroke-width: 1.5; }
+      .scale-tile { fill: #a5d6a7; stroke: #388e3c; stroke-width: 1.5; }
+      .scale-swizzled { fill: #ffb74d; stroke: #e65100; stroke-width: 1.5; }
+      .swizzle-box { fill: #fff3e0; stroke: #f57c00; stroke-width: 2; }
+      .quantize-box { fill: #ede7f6; stroke: #5e35b1; stroke-width: 2; }
+      .comm-box { fill: #fff9c4; stroke: #f57f17; stroke-width: 2; }
+      .gemm-box { fill: #c8e6c9; stroke: #388e3c; stroke-width: 2; }
+      
+      /* Arrow override */
+      .arrow { marker-end: url(#arrowhead); }
+    </style>
+    
+    <!-- Arrow marker -->
+    <marker id="arrowhead" markerWidth="6" markerHeight="6" refX="5" refY="2" orient="auto">
+      <polygon points="0 0, 6 2, 0 4" fill="#616161" />
+    </marker>
+  </defs>
+  
+  <!-- MXFP8 Complete Flow -->
+  <g id="complete-flow">
+    <!-- Step 0: Input Tensor -->
+    <g id="input-fp32-tensor">
+      <text x="80" y="25" class="text" text-anchor="middle" font-weight="600">Input Tensor</text>
+      <rect x="20" y="40" width="120" height="150" rx="6" class="input-box"/>
+      <text x="80" y="120" class="text" text-anchor="middle" fill="#fff" font-weight="600">FP32/BF16</text>
+    </g>
+    
+    <!-- Arrow 0 -->
+    <path d="M 140 115 L 180 115" class="arrow"/>
+    
+    <!-- Step 1: Quantize -->
+    <rect x="180" y="75" width="90" height="80" rx="6" class="quantize-box"/>
+    <text x="225" y="120" class="text" font-weight="600">Quantize</text>
+    
+    <!-- Arrow 1 -->
+    <path d="M 270 115 L 310 115" class="arrow"/>
+    
+    <!-- Step 2: MXFP8 Tensor with sub-tiles stacked vertically -->
+    <g id="mxfp8-tensor">
+      <text x="410" y="25" class="text" text-anchor="middle" font-weight="600">MXFP8 Tensor</text>
+      <rect x="310" y="40" width="200" height="150" rx="6" class="mxfp8-box"/>
+      
+      <!-- Scales sub-tile (green) - on top -->
+      <rect x="330" y="55" width="160" height="40" rx="3" class="scale-tile"/>
+      <text x="410" y="80" class="text" text-anchor="middle" fill="#fff" font-weight="600">Scales</text>
+      
+      <!-- FP8 Data sub-tile - on bottom -->
+      <rect x="330" y="105" width="160" height="70" rx="3" class="fp8-tile"/>
+      <text x="410" y="145" class="text" fill="#fff" font-weight="600">FP8 Data</text>
+    </g>
+    
+    <!-- Arrow 2 -->
+    <path d="M 510 115 L 560 115" class="arrow"/>
+    
+    <!-- Step 3: Communication -->
+    <rect x="560" y="75" width="130" height="80" rx="6" class="comm-box"/>
+    <text x="625" y="110" class="text" font-weight="600">Communication</text>
+    <text x="625" y="125" class="text" font-size="12">(All-Gather)</text>
+    <text x="625" y="140" class="text" font-size="12" font-style="italic">(Optional)</text>
+    
+    <!-- Arrow 3 -->
+    <path d="M 690 115 L 740 115" class="arrow"/>
+    
+    <!-- Step 4: Swizzle -->
+    <rect x="740" y="75" width="110" height="80" rx="6" class="swizzle-box"/>
+    <text x="795" y="120" class="text" font-weight="600">Swizzle</text>
+    
+    <!-- Arrow 4 -->
+    <path d="M 850 115 L 900 115" class="arrow"/>
+    
+    <!-- Step 5: MXFP8 Tensor with swizzled scales -->
+    <g id="swizzled-tensor">
+      <text x="980" y="25" class="text" text-anchor="middle" font-weight="600">MXFP8 Tensor</text>
+      <rect x="900" y="40" width="160" height="150" rx="6" class="mxfp8-box"/>
+      
+      <!-- Swizzled Scales sub-tile (orange) - on top -->
+      <rect x="915" y="55" width="130" height="40" rx="3" class="scale-swizzled"/>
+      <text x="980" y="80" class="text" text-anchor="middle" fill="#fff" font-weight="600">Swizzle Scales</text>
+      
+      <!-- FP8 Data sub-tile (unchanged) - on bottom -->
+      <rect x="915" y="105" width="130" height="70" rx="3" class="fp8-tile"/>
+      <text x="980" y="145" class="text" fill="#fff" font-weight="600">FP8 Data</text>
+    </g>
+    
+    <!-- Arrow 5 -->
+    <path d="M 1060 115 L 1110 115" class="arrow"/>
+    
+    <!-- Step 6: GEMM -->
+    <rect x="1110" y="75" width="110" height="80" rx="6" class="gemm-box"/>
+    <text x="1165" y="120" class="text" font-weight="600">GEMM</text>
+  </g>
+</svg>

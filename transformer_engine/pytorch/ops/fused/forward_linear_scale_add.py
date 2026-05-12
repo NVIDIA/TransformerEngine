@@ -65,6 +65,10 @@ class ForwardLinearScaleAdd(FusedOperation):
         grad_output_quantizer = linear_op.get_quantizer("backward", 0)
         grad_input_quantizer = prev_op_grad_output_quantizer
         with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
+        if with_quantized_compute:
+            backward_override = FP8GlobalStateManager.get_fp8_recipe().backward_override
+        else:
+            backward_override = None
 
         # Get extra input tensor for add operation
         extra_input = basic_op_extra_inputs[2][0]
@@ -87,6 +91,7 @@ class ForwardLinearScaleAdd(FusedOperation):
             tensor_parallel_group=linear_op.tensor_parallel_group,
             sequence_parallel=linear_op.sequence_parallel,
             with_quantized_compute=with_quantized_compute,
+            backward_override=backward_override,
             input_quantizer=input_quantizer,
             weight_quantizer=weight_quantizer,
             output_quantizer=output_quantizer,
@@ -96,10 +101,19 @@ class ForwardLinearScaleAdd(FusedOperation):
 
         # Save state for backward pass
         if linear_op_ctx.requires_grad:
+            if backward_override == "high_precision":
+                saved_input = input_ if weight_requires_grad else None
+                saved_weight = linear_op.weight if input_requires_grad else None
+            else:
+                saved_input = x_local
+                saved_weight = w
             if is_cpu_offload_enabled():
-                mark_activation_offload(x_local)
-            linear_op_ctx.save_for_backward(x_local, w)
-            linear_op_ctx.with_quantized_compute = with_quantized_compute
+                mark_activation_offload(saved_input)
+            linear_op_ctx.save_for_backward(saved_input, saved_weight)
+            linear_op_ctx.with_quantized_compute = (
+                with_quantized_compute and backward_override is None
+            )
+            linear_op_ctx.backward_override = backward_override
             linear_op_ctx.input_quantizer = input_quantizer
             linear_op_ctx.weight_quantizer = weight_quantizer
             linear_op_ctx.grad_output_quantizer = grad_output_quantizer
@@ -110,70 +124,66 @@ class ForwardLinearScaleAdd(FusedOperation):
 
         return output, [() for _ in range(len(self.basic_ops))]
 
+    @staticmethod
+    def fuse_forward_ops(
+        ops: list[FusibleOperation],
+        **unused,  # pylint: disable=unused-argument
+    ) -> list[FusibleOperation]:
+        """Apply operation fusion for forward pass.
 
-def fuse_forward_linear_scale_add(
-    ops: list[tuple[FusibleOperation, list[int]]],
-) -> list[tuple[FusibleOperation, list[int]]]:
-    """Fuse forward GEMM + scale + add
+        Parameters
+        ----------
+        ops : list of FusibleOperation
+            Forward pass operations.
 
-    Parameters
-    ----------
-    ops : list of tuples
-        Forward pass operations and the indices of the corresponding
-        basic operations.
+        Returns
+        -------
+        ops : list of FusibleOperation
+            Updated forward pass operations
 
-    Returns
-    -------
-    ops : list of tuples
-        Updated forward pass operations
+        """
 
-    """
+        # Scan through ops, fusing if possible
+        out = []
+        window, ops = ops[:3], ops[3:]
+        while len(window) == 3:
 
-    # Scan through ops, fusing if possible
-    out = []
-    window = []
-    while len(ops) >= 3:
+            # Check if window matches pattern
+            matches_pattern = True
+            if not (
+                isinstance(window[0], BasicLinear)
+                and isinstance(window[1], ConstantScale)
+                and isinstance(window[2], AddExtraInput)
+            ):
+                matches_pattern = False
+            elif window[0].tensor_parallel_mode == "row":
+                # Row tensor-parallelism requires communication after
+                # the GEMM
+                matches_pattern = False
+            elif not window[2]._in_place:
+                # Fused op accumulates output in-place
+                matches_pattern = False
+
+            if matches_pattern:
+                # Construct fused op if window matches pattern
+                op = ForwardLinearScaleAdd(
+                    linear=window[0],
+                    scale=window[1],
+                    add=window[2],
+                )
+                window = [op]
+            else:
+                # Shift window if window doesn't match pattern
+                out.extend(window[:-2])
+                window = window[-2:]
+
+            # Adjust window to expected size
+            out.extend(window[:-3])
+            window = window[-3:]
+            while ops and len(window) < 3:
+                window.append(ops[0])
+                ops = ops[1:]
+
+        # Return list of ops
         out.extend(window)
-
-        # Check if first op is linear
-        window, ops = ops[:1], ops[1:]
-        op, _ = window[0]
-        if not isinstance(op, BasicLinear):
-            continue
-        if op.tensor_parallel_mode == "row":
-            # Row tensor-parallelism requires communication after the
-            # GEMM
-            continue
-        linear = op
-        op, _ = ops[0]
-
-        # Check if next op is constant scale
-        if not isinstance(op, ConstantScale):
-            continue
-        scale = op
-        window.extend(ops[:1])
-        ops = ops[1:]
-        op, _ = ops[0]
-
-        # Check if next op is in-place add extra input
-        if not isinstance(op, AddExtraInput):
-            continue
-        if not op._in_place:
-            continue
-        add = op
-        window.extend(ops[:1])
-        ops = ops[1:]
-
-        # Replace window with fused op
-        op = ForwardLinearScaleAdd(
-            linear=linear,
-            scale=scale,
-            add=add,
-        )
-        basic_op_idxs = [basic_op_idxs[0] for _, basic_op_idxs in window]
-        window = [(op, basic_op_idxs)]
-
-    # Return list of ops
-    out.extend(window)
-    out.extend(ops)
-    return out
+        return out

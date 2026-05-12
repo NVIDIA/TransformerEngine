@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 950 170" width="950" height="170">
+  <defs>
+    <style>
+      @import url("../_static/css/diagram-colors.css");
+      
+      /* Arrows */
+      .arrow { stroke: #616161; stroke-width: 2; fill: none; marker-end: url(#arrowhead-ag); }
+      
+      /* All-gather operations - fallback if CSS doesn't load */
+      .allgather {
+        fill: #e1f5fe;
+        stroke: #039be5;
+        stroke-width: 2;
+      }
+    </style>
+    <marker id="arrowhead-ag" markerWidth="6" markerHeight="6" refX="5" refY="2" orient="auto">
+      <polygon points="0 0, 6 2, 0 4" fill="#616161" />
+    </marker>
+  </defs>
+  
+  <!-- Title -->
+  <text x="475" y="30" class="title">Quantization + all gather for FP8 current scaling</text>
+  
+  <!-- High Precision Tensor -->
+  <rect x="30" y="80" width="110" height="55" class="hp" rx="6"/>
+  <text x="85" y="103" class="text">High Precision</text>
+  <text x="85" y="120" class="text">Tensor</text>
+  
+  <!-- Arrow -->
+  <path d="M 140 107 L 165 107" class="arrow"/>
+  
+  <!-- Compute Amax -->
+  <rect x="165" y="80" width="100" height="55" class="amax" rx="6"/>
+  <text x="215" y="103" class="text">Compute</text>
+  <text x="215" y="120" class="text">Amax</text>
+  
+  <!-- Arrow -->
+  <path d="M 265 107 L 290 107" class="arrow"/>
+  
+  <!-- Synchronize Amax -->
+  <rect x="290" y="80" width="100" height="55" class="amax" rx="6"/>
+  <text x="340" y="103" class="text">Synchronize</text>
+  <text x="340" y="120" class="text">Amax</text>
+  
+  <!-- Arrow -->
+  <path d="M 390 107 L 415 107" class="arrow"/>
+  
+  <!-- Scale + Cast -->
+  <rect x="415" y="80" width="100" height="55" class="quantize" rx="6"/>
+  <text x="465" y="103" class="text">Scale +</text>
+  <text x="465" y="120" class="text">Cast</text>
+  
+  <!-- Arrow -->
+  <path d="M 515 107 L 540 107" class="arrow"/>
+  
+  <!-- FP8 Tensor (intermediate) -->
+  <rect x="540" y="80" width="100" height="55" class="fp8" rx="6"/>
+  <text x="590" y="103" class="text">FP8</text>
+  <text x="590" y="120" class="text">Tensor</text>
+  
+  <!-- Arrow -->
+  <path d="M 640 107 L 665 107" class="arrow"/>
+  
+  <!-- All-Gather -->
+  <rect x="665" y="80" width="100" height="55" class="allgather" rx="6"/>
+  <text x="715" y="112" class="text">All-Gather</text>
+  
+  <!-- Arrow -->
+  <path d="M 765 107 L 790 107" class="arrow"/>
+  
+  <!-- FP8 Gathered Tensor -->
+  <rect x="790" y="80" width="130" height="55" class="fp8" rx="6"/>
+  <text x="855" y="103" class="text">FP8 Gathered</text>
+  <text x="855" y="120" class="text">Tensor</text>
+  
+</svg>
+

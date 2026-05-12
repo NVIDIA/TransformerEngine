@@ -115,16 +115,16 @@ class UserbuffersForwardLinear(FusedOperation):
             Tensor device
         dtype: torch.dtype
             Tensor datatype
-        tensor_parallel_mode: {`None`, "column", "row"}, default = `None`
+        tensor_parallel_mode: {None, "column", "row"}, default = None
             Mode for tensor parallelism
         tensor_parallel_group: torch.distributed.ProcessGroup, default = world group
             Process group for tensor parallelism
-        sequence_parallel: bool, default = `False`
+        sequence_parallel: bool, default = False
             Whether to apply sequence parallelism together with tensor
             parallelism, i.e. distributing input or output tensors
             along outer dimension (sequence or batch dim) when not
             distributing along inner dimension (embedding dim)
-        with_quantized_compute: bool, default = `False`
+        with_quantized_compute: bool, default = False
             Whether to perform compute with quantized data.
         input_quantizer: Quantizer, optional
             Builder class for quantized input tensor.
@@ -132,10 +132,10 @@ class UserbuffersForwardLinear(FusedOperation):
             Builder class for quantized weight tensor.
         output_quantizer: Quantizer, optional
             Builder class for quantized output tensor.
-        input_requires_grad: bool, default = `True`
+        input_requires_grad: bool, default = True
             Whether the loss gradient w.r.t. the input tensor is
             required in the backward pass.
-        weight_requires_grad: bool, default = `True`
+        weight_requires_grad: bool, default = True
             Whether the loss gradient w.r.t. the weight tensor is
             required in the backward pass.
         ub_comm_name: str
@@ -369,93 +369,92 @@ class UserbuffersForwardLinear(FusedOperation):
 
         return output, [() for _ in range(len(self.basic_ops))]
 
+    @staticmethod
+    def fuse_forward_ops(
+        ops: list[FusibleOperation],
+        **unused,  # pylint: disable=unused-argument
+    ) -> list[FusibleOperation]:
+        """Apply operation fusion for forward pass.
 
-def fuse_userbuffers_forward_linear(
-    ops: list[tuple[FusibleOperation, list[int]]],
-) -> list[tuple[FusibleOperation, list[int]]]:
-    """Substitute linear operations with Userbuffers implementation
+        Parameters
+        ----------
+        ops : list of FusibleOperation
+            Forward pass operations.
 
-    Parameters
-    ----------
-    ops : list of tuples
-        Forward pass operations and the indices of the corresponding
-        basic operations.
+        Returns
+        -------
+        ops : list of FusibleOperation
+            Updated forward pass operations
 
-    Returns
-    -------
-    ops : list of tuples
-        Updated forward pass operations
+        """
 
-    """
-
-    # Return immediately if environment is not distributed
-    if not torch.distributed.is_initialized() or torch.distributed.get_world_size() == 1:
-        return ops
-
-    # Sliding window in list of ops
-    window = []
-
-    def peek_next_op() -> Optional[FusibleOperation]:
-        """Get next op in list of ops"""
-        nonlocal ops
-        if not ops:
-            return None
-        return ops[0][0]
-
-    def pop_next_op() -> FusibleOperation:
-        """Remove next op from list of ops and add to sliding window"""
-        nonlocal ops, window
-        window.append(ops[0])
-        ops = ops[1:]
-        return window[-1][0]
-
-    # Scan through ops, fusing if possible
-    out = []
-    while ops:
-        out.extend(window)
-        window.clear()
-
-        # Check if next op is linear
-        next_op = pop_next_op()
-        if not isinstance(next_op, BasicLinear):
-            continue
-        linear = next_op
-        if linear._userbuffers_options is None:
-            continue
-
-        # Check if next op is bias
-        bias = None
-        if linear.tensor_parallel_mode != "row" and isinstance(peek_next_op(), Bias):
-            bias = pop_next_op()
-
-        # Check if next op is reduce-scatter
-        reduce_scatter = None
-        if linear.tensor_parallel_mode is None and isinstance(peek_next_op(), ReduceScatter):
-            reduce_scatter = pop_next_op()
-
-        # Check for invalid combinations
-        if reduce_scatter is None:
-            if linear.tensor_parallel_mode is None:
-                continue
-            if linear.tensor_parallel_size == 1:
-                continue
-            if linear.tensor_parallel_mode == "row" and bias is not None:
-                continue
+        # Disable Userbuffers for backward overrides.
+        # In high_precision/dequantized modes we want to avoid all UB-specific overlap
+        # paths and run through the standard non-UB operator sequence instead.
+        recipe = unused.get("recipe", None)
+        if recipe is not None:
+            backward_override = recipe.backward_override
+        elif FP8GlobalStateManager.is_fp8_enabled():
+            backward_override = FP8GlobalStateManager.get_fp8_recipe().backward_override
         else:
-            if linear.tensor_parallel_mode is not None:
+            backward_override = None
+        if backward_override is not None:
+            return ops
+
+        # Return immediately if environment is not distributed
+        if not torch.distributed.is_initialized() or torch.distributed.get_world_size() == 1:
+            return ops
+
+        # Scan through ops, fusing if possible
+        out = []
+        window = []
+        while ops:
+
+            # Shift window
+            out.extend(window)
+            window, ops = ops[:1], ops[1:]
+
+            # Check if first op is linear
+            if not isinstance(window[0], BasicLinear):
                 continue
-            if reduce_scatter.process_group_size == 1:
+            linear = window[0]
+            if linear._userbuffers_options is None:
                 continue
 
-        # Replace window with fused op
-        op = UserbuffersForwardLinear(
-            linear=linear,
-            bias=bias,
-            reduce_scatter=reduce_scatter,
-        )
-        basic_op_idxs = [basic_op_idxs[0] for _, basic_op_idxs in window]
-        window = [(op, basic_op_idxs)]
+            # Check if next op is bias
+            bias = None
+            if linear.tensor_parallel_mode != "row" and ops and isinstance(ops[0], Bias):
+                bias, ops = ops[0], ops[1:]
+                window.append(bias)
 
-    # Return list of ops
-    out.extend(window)
-    return out
+            # Check if next op is reduce-scatter
+            reduce_scatter = None
+            if linear.tensor_parallel_mode is None and ops and isinstance(ops[0], ReduceScatter):
+                reduce_scatter, ops = ops[0], ops[1:]
+                window.append(reduce_scatter)
+
+            # Check for invalid combinations
+            if reduce_scatter is None:
+                if linear.tensor_parallel_mode is None:
+                    continue
+                if linear.tensor_parallel_size == 1:
+                    continue
+                if linear.tensor_parallel_mode == "row" and bias is not None:
+                    continue
+            else:
+                if linear.tensor_parallel_mode is not None:
+                    continue
+                if reduce_scatter.process_group_size == 1:
+                    continue
+
+            # Replace window with fused op
+            op = UserbuffersForwardLinear(
+                linear=linear,
+                bias=bias,
+                reduce_scatter=reduce_scatter,
+            )
+            window = [op]
+
+        # Return list of ops
+        out.extend(window)
+        return out

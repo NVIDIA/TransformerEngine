@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 100" width="100%" style="max-width: 900px;">
+  <defs>
+    <style>
+      .layer-box { fill: #f8f9fa; stroke: #aaa; stroke-width: 1.5; rx: 6; }
+      .tensor-box { fill: #e3f2fd; stroke: #64b5f6; stroke-width: 1.5; rx: 3; }
+      .layer-text { font: bold 13px sans-serif; fill: #333; text-anchor: middle; }
+      .tensor-text { font: italic 11px sans-serif; fill: #1565c0; text-anchor: middle; }
+      .conn { stroke: #888; stroke-width: 1.5; fill: none; marker-end: url(#arr); }
+    </style>
+    <marker id="arr" markerWidth="7" markerHeight="5" refX="6" refY="2.5" orient="auto">
+      <polygon points="0 0, 7 2.5, 0 5" fill="#888"/>
+    </marker>
+  </defs>
+
+  <!-- x_0 tensor -->
+  <rect x="30" y="35" width="40" height="30" class="tensor-box"/>
+  <text x="50" y="55" class="tensor-text">x₀</text>
+
+  <path d="M70,50 L100,50" class="conn"/>
+
+  <!-- Layer 1 -->
+  <rect x="105" y="30" width="90" height="40" class="layer-box"/>
+  <text x="150" y="55" class="layer-text">Layer 1</text>
+
+  <path d="M195,50 L225,50" class="conn"/>
+
+  <!-- x_1 tensor -->
+  <rect x="230" y="35" width="40" height="30" class="tensor-box"/>
+  <text x="250" y="55" class="tensor-text">x₁</text>
+
+  <path d="M270,50 L300,50" class="conn"/>
+
+  <!-- Layer 2 -->
+  <rect x="305" y="30" width="90" height="40" class="layer-box"/>
+  <text x="350" y="55" class="layer-text">Layer 2</text>
+
+  <path d="M395,50 L425,50" class="conn"/>
+
+  <!-- x_2 tensor -->
+  <rect x="430" y="35" width="40" height="30" class="tensor-box"/>
+  <text x="450" y="55" class="tensor-text">x₂</text>
+
+  <path d="M470,50 L500,50" class="conn"/>
+
+  <!-- Layer 3 -->
+  <rect x="505" y="30" width="90" height="40" class="layer-box"/>
+  <text x="550" y="55" class="layer-text">Layer 3</text>
+
+  <path d="M595,50 L625,50" class="conn"/>
+
+  <!-- Dots -->
+  <text x="650" y="55" class="layer-text">···</text>
+
+  <path d="M675,50 L705,50" class="conn"/>
+
+  <!-- Layer N -->
+  <rect x="710" y="30" width="90" height="40" class="layer-box"/>
+  <text x="755" y="55" class="layer-text">Layer N</text>
+
+  <path d="M800,50 L830,50" class="conn"/>
+
+  <!-- x_N tensor -->
+  <rect x="835" y="35" width="40" height="30" class="tensor-box"/>
+  <text x="855" y="55" class="tensor-text">xₙ</text>
+
+</svg>

@@ -1,0 +1,7 @@
+Implementation,Time (ms),Speedup
+Baseline Flax,86.58,1.00x
+TE Unfused,42.25,2.05x
+TE Unfused + TE Attention,35.05,2.47x
+TE Unfused + TE Attention + FP8,22.64,3.82x
+TE Fused + TE Attention + FP8,23.70,3.65x
+TE TransformerLayer + FP8,22.81,3.80x

@@ -6,6 +6,7 @@ import random
 import contextlib
 import pytest
 import os
+import copy
 import torch
 from typing import Optional, List
 from transformer_engine.pytorch.cpu_offload import (
@@ -18,7 +19,7 @@ from transformer_engine.pytorch.cpu_offload import (
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe
-from utils import ModelConfig
+from utils import ModelConfig, skip_unsupported_backward_override
 import transformer_engine_torch as tex
 
 # Check supported quantization schemes
@@ -54,9 +55,13 @@ gc.disable()
 
 
 class Utils:
+    # Tensor used for simulating long-running GPU work in long_job()
     tensor1 = torch.randn((1024, 1024), device="cuda", dtype=torch.bfloat16)
-    _B = 64
-    _S = 256
+    # Test tensor dimensions: _B x _S x _D = 128 x 512 x 256 = 16,777,216 elements
+    # This exceeds the 256K element threshold for offloading (cpu_offload.py line 443).
+    # For quantized tensors, scale_inv tensors (~524K elements for block scaling) also exceed threshold.
+    _B = 128
+    _S = 512
     _H = 4
     _D = 256
 
@@ -395,6 +400,9 @@ class TestsDefaultOffloadSynchronizer:
         offload_synchronizer.push_tensor(x1)
         offload_synchronizer.push_tensor(x1)
         offload_synchronizer.push_tensor(x1)
+        # Verify x1 is not corrupted after pushing (important for QuantizedTensor)
+        if recipe is not None:
+            x1.dequantize()  # Should not raise - tensor should still be valid
         offload_synchronizer.fwd_step()
         # Only one copy of tensor on cpu is allocated.
         assert Utils.get_cpu_memory_mb() == pytest.approx(init_cpu_memory + 1 * x_size, 0.1)
@@ -409,9 +417,14 @@ class TestsDefaultOffloadSynchronizer:
 class TestTELayers:
     @pytest.mark.parametrize("layer_type", Utils.get_layer_names())
     @pytest.mark.parametrize("recipe", quantization_recipes)
-    def test_sanity(self, layer_type, recipe):
+    @pytest.mark.parametrize("backward_override", [None, "high_precision", "dequantized"])
+    def test_sanity(self, layer_type, recipe, backward_override):
         Utils.memory_leak_check()
 
+        skip_unsupported_backward_override(layer_type, recipe, backward_override)
+        if recipe is not None:
+            recipe = copy.deepcopy(recipe)
+            recipe.backward_override = backward_override
         # Skip ops-based layers with Float8BlockScaling recipe
         if (
             layer_type in ["linear_op", "layernorm_mlp_ops"]
@@ -451,8 +464,14 @@ class TestTELayers:
 
     @pytest.mark.parametrize("layer_type", Utils.get_layer_names())
     @pytest.mark.parametrize("recipe", quantization_recipes)
-    def test_memory(self, layer_type, recipe):
+    @pytest.mark.parametrize("backward_override", [None, "high_precision", "dequantized"])
+    def test_memory(self, layer_type, recipe, backward_override):
         Utils.memory_leak_check()
+
+        skip_unsupported_backward_override(layer_type, recipe, backward_override)
+        if recipe is not None:
+            recipe = copy.deepcopy(recipe)
+            recipe.backward_override = backward_override
 
         # Skip ops-based layers with Float8BlockScaling recipe
         if (
@@ -517,7 +536,13 @@ class TestTELayers:
             out = out + 1
         out = sync_function(out)
         del inp
-        assert Utils.get_cuda_memory_mb() == pytest.approx(init_cuda_memory, 0.1)
+        if backward_override is None:
+            assert Utils.get_cuda_memory_mb() == pytest.approx(init_cuda_memory, 0.1)
+        else:
+            assert (
+                Utils.get_cuda_memory_mb() == pytest.approx(init_cuda_memory, 0.1)
+                or Utils.get_cuda_memory_mb() <= init_cuda_memory
+            )
         offloaded_memory_cpu = offload_ctx.offload_synchronizer.get_offloaded_total_size_mb()
 
         # This assertion verifies that the memory used by tensors on the CPU matches the memory saved from a layer.
@@ -530,8 +555,14 @@ class TestTELayers:
 
     @pytest.mark.parametrize("layer_type", Utils.get_layer_names())
     @pytest.mark.parametrize("recipe", quantization_recipes)
-    def test_manual_synchronization(self, recipe, layer_type):
+    @pytest.mark.parametrize("backward_override", [None, "high_precision", "dequantized"])
+    def test_manual_synchronization(self, recipe, layer_type, backward_override):
         Utils.memory_leak_check()
+
+        skip_unsupported_backward_override(layer_type, recipe, backward_override)
+        if recipe is not None:
+            recipe = copy.deepcopy(recipe)
+            recipe.backward_override = backward_override
 
         # Skip ops-based layers with Float8BlockScaling recipe
         if (
@@ -593,6 +624,7 @@ class TestTELayers:
         out_2.sum().backward()
 
     @pytest.mark.parametrize("recipe", quantization_recipes)
+    @pytest.mark.parametrize("backward_override", [None, "high_precision", "dequantized"])
     @pytest.mark.parametrize("layer_type", Utils.get_layer_names())
     @pytest.mark.parametrize("use_cuda_graphs", [True, False])
     @pytest.mark.parametrize("retain_pinned_cpu_buffers", [True, False])
@@ -600,11 +632,17 @@ class TestTELayers:
     def test_numerics(
         self,
         recipe,
+        backward_override,
         layer_type,
         use_cuda_graphs,
         backend,
         retain_pinned_cpu_buffers,
     ):
+        skip_unsupported_backward_override(layer_type, recipe, backward_override)
+        if recipe is not None:
+            recipe = copy.deepcopy(recipe)
+            recipe.backward_override = backward_override
+
         # Skip ops-based layers with Float8BlockScaling recipe
         if (
             layer_type in ["linear_op", "layernorm_mlp_ops"]

@@ -36,7 +36,7 @@ enum class FP8BlockwiseRowwiseOption {
   NONE,
   // Rowwise data, scales in GEMM format
   ROWWISE_GEMM_READY,
-  // Rowwise data, scales in compact format, needs extra processing (padding, transposing) before GEMM
+  // Deprecated
   ROWWISE_COMPACT
 };
 
@@ -50,8 +50,7 @@ enum class FP8BlockwiseColumnwiseOption {
   // On Hopper sm90, GEMM_READY means that columnwise quantization also fuses transpose op
   // On higher sm versions with TN,NT,NN fp8 gemm, GEMM_READY doesn't fuse transpose
   COLUMNWISE_GEMM_READY,
-  // Columnwise data in original shape
-  // Scales in compact format, needs extra processing (padding, transposing) before GEMM
+  // Deprecated
   COLUMNWISE_COMPACT
 };
 
@@ -68,7 +67,7 @@ void quantize_transpose_vector_blockwise_fp4(
     SimpleTensor &scale_inv_t, SimpleTensor &output, SimpleTensor &output_t, const float epsilon,
     const bool return_identity, const bool return_transpose, const bool pow2_scale,
     const bool swizzled_scale, const bool use_stochastic_rounding,
-    const NVTETensor rng_state_tensor, const bool use_2d_quantization,
+    const NVTETensor rng_state_tensor, const bool use_2d_quantization, const bool row_scaled_nvfp4,
     const SimpleTensor &noop_tensor, cudaStream_t stream);
 
 }  // namespace transformer_engine::detail

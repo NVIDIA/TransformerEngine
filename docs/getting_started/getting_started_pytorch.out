@@ -1,0 +1,42 @@
+pyxis: importing docker image: gitlab-master.nvidia.com/dl/transformerengine/transformerengine:main-pytorch-py3-devel-amd64
+pyxis: imported docker image: gitlab-master.nvidia.com/dl/transformerengine/transformerengine:main-pytorch-py3-devel-amd64
+/usr/local/lib/python3.12/dist-packages/torch/library.py:357: UserWarning: Warning only once for all operators,  other operators may also be overridden.
+  Overriding a previously registered kernel for the same operator and the same dispatch key
+  operator: flash_attn::_flash_attn_backward(Tensor dout, Tensor q, Tensor k, Tensor v, Tensor out, Tensor softmax_lse, Tensor(a6!)? dq, Tensor(a7!)? dk, Tensor(a8!)? dv, float dropout_p, float softmax_scale, bool causal, SymInt window_size_left, SymInt window_size_right, float softcap, Tensor? alibi_slopes, bool deterministic, Tensor? rng_state=None) -> Tensor
+    registered at /usr/local/lib/python3.12/dist-packages/torch/_library/custom_ops.py:926
+  dispatch key: ADInplaceOrView
+  previous kernel: no debug info
+       new kernel: registered at /usr/local/lib/python3.12/dist-packages/torch/_library/custom_ops.py:926 (Triggered internally at /opt/pytorch/pytorch/aten/src/ATen/core/dispatch/OperatorEntry.cpp:208.)
+  self.m.impl(
+# BENCHMARK_BASELINE_OUTPUT_START
+Baseline PyTorch:
+Mean time: 48.280 ms
+# BENCHMARK_BASELINE_OUTPUT_END
+
+# BENCHMARK_TE_UNFUSED_OUTPUT_START
+TE Unfused:
+Mean time: 49.342 ms
+# BENCHMARK_TE_UNFUSED_OUTPUT_END
+
+# BENCHMARK_TE_UNFUSED_ATTN_OUTPUT_START
+TE Unfused + TE Attention:
+Mean time: 35.709 ms
+# BENCHMARK_TE_UNFUSED_ATTN_OUTPUT_END
+
+# BENCHMARK_TE_UNFUSED_FP8_OUTPUT_START
+TE Unfused + TE Attention + FP8:
+Mean time: 23.406 ms
+# BENCHMARK_TE_UNFUSED_FP8_OUTPUT_END
+
+# BENCHMARK_TE_FUSED_FP8_OUTPUT_START
+TE Fused + TE Attention + FP8:
+Mean time: 22.964 ms
+# BENCHMARK_TE_FUSED_FP8_OUTPUT_END
+
+# BENCHMARK_TE_TRANSFORMER_LAYER_OUTPUT_START
+TE TransformerLayer + FP8:
+Mean time: 21.670 ms
+# BENCHMARK_TE_TRANSFORMER_LAYER_OUTPUT_END
+
+
+Summary written to getting_started_pytorch_summary.csv

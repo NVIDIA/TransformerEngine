@@ -6,6 +6,7 @@
 from __future__ import annotations
 from collections.abc import Iterable
 import math
+import warnings
 from typing import Dict, Optional, Tuple, Union
 import functools
 
@@ -127,6 +128,9 @@ class NVFP4Quantizer(Quantizer):
     """Stochastic rounding, only applicable for gradients."""
     stochastic_rounding: bool
 
+    """Whether emitted NVFP4 tensors store one FP32 amax per row."""
+    row_scaled_nvfp4: bool
+
     """RHT matrix random sign mask"""
     rht_matrix_random_sign_mask_t: int
     rht_matrix: torch.Tensor
@@ -142,6 +146,7 @@ class NVFP4Quantizer(Quantizer):
         with_post_rht_amax: bool = False,
         with_2d_quantization: bool = False,
         stochastic_rounding: bool = False,
+        row_scaled_nvfp4: bool = False,
         with_random_sign_mask: bool = True,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
@@ -152,10 +157,17 @@ class NVFP4Quantizer(Quantizer):
         self.amax_reduction_group = amax_reduction_group
         self.with_2d_quantization = with_2d_quantization
         self.stochastic_rounding = stochastic_rounding
+        self.row_scaled_nvfp4 = row_scaled_nvfp4
         self.rht_matrix_random_sign_mask_t = get_random_sign_mask_for_rht(
             with_random_sign_mask, torch.cuda.current_device()
         )
         self.rht_matrix = get_rht_matrix(with_random_sign_mask, torch.cuda.current_device())
+
+    def __getstate__(self):
+        """Exclude unpicklable process group from serialized state."""
+        state = self.__dict__.copy()
+        state["amax_reduction_group"] = None
+        return state
 
     def update_quantized(
         self,
@@ -191,8 +203,10 @@ class NVFP4Quantizer(Quantizer):
             with_post_rht_amax=self.with_post_rht_amax,
             with_2d_quantization=self.with_2d_quantization,
             stochastic_rounding=self.stochastic_rounding,
+            row_scaled_nvfp4=self.row_scaled_nvfp4,
         )
         quantizer.internal = self.internal
+        quantizer.optimize_for_gemm = self.optimize_for_gemm
         quantizer.rht_matrix = self.rht_matrix
         quantizer.rht_matrix_random_sign_mask_t = self.rht_matrix_random_sign_mask_t
 
@@ -204,6 +218,8 @@ class NVFP4Quantizer(Quantizer):
 
     def is_quantizable(self, inp: torch.Tensor) -> bool:
         """Returns whether or not given inp can be quantized"""
+        if self.row_scaled_nvfp4:
+            return False
         if inp.ndim < 2:
             return False
         if inp.shape[-1] % NVFP4_BLOCK_SCALING_SIZE != 0:
@@ -305,6 +321,11 @@ class NVFP4Quantizer(Quantizer):
             f"Incorrect shape {shape} for NVFP4. Tensor dims must be divisible by"
             f" {NVFP4_BLOCK_SCALING_SIZE}"
         )
+        if self.row_scaled_nvfp4:
+            if not self.rowwise_usage:
+                raise ValueError("Row-scaled NVFP4 quantization requires rowwise usage.")
+            if self.columnwise_usage:
+                raise ValueError("Row-scaled NVFP4 quantization does not support columnwise usage.")
 
         # Allocate FP4 data
         data = None
@@ -321,8 +342,11 @@ class NVFP4Quantizer(Quantizer):
             scale_inv = torch.empty(
                 scale_shape, dtype=torch.uint8, device=device, pin_memory=pin_memory
             )
-            # Allocate per tensor scale inverse. FP32 format.
-            amax_rowwise = torch.zeros(1, dtype=torch.float32, device=device, pin_memory=pin_memory)
+            # Allocate global amax metadata. Row-scaled NVFP4 stores one value per row.
+            amax_rows = flat_first_dim if self.row_scaled_nvfp4 else 1
+            amax_rowwise = torch.zeros(
+                amax_rows, dtype=torch.float32, device=device, pin_memory=pin_memory
+            )
 
         # Allocate FP8 data transpose if needed
         columnwise_data = None
@@ -340,7 +364,10 @@ class NVFP4Quantizer(Quantizer):
             )
             columnwise_scale_shape = self.get_scale_shape(shape, columnwise=True)
             columnwise_scale_inv = torch.empty(
-                columnwise_scale_shape, dtype=torch.uint8, device=device, pin_memory=pin_memory
+                columnwise_scale_shape,
+                dtype=torch.uint8,
+                device=device,
+                pin_memory=pin_memory,
             )
             amax_columnwise = torch.zeros(
                 1, dtype=torch.float32, device=device, pin_memory=pin_memory
@@ -359,6 +386,8 @@ class NVFP4Quantizer(Quantizer):
             fp4_dtype=self.dtype,
             quantizer=self,
             requires_grad=requires_grad,
+            with_gemm_swizzled_scales=False,
+            row_scaled_nvfp4=self.row_scaled_nvfp4,
         )
 
     def calibrate(self, tensor: torch.Tensor) -> None:
@@ -418,6 +447,8 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
         amax_columnwise: Optional[torch.Tensor],
         fp4_dtype: TE_DType,
         quantizer: Quantizer,
+        with_gemm_swizzled_scales: bool,
+        row_scaled_nvfp4: bool = False,
         **kwargs,
     ):
         instance = super().__new__(
@@ -430,13 +461,15 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
             amax_columnwise,
             fp4_dtype,
             quantizer,
+            with_gemm_swizzled_scales,
             *args,
+            row_scaled_nvfp4=row_scaled_nvfp4,
             **kwargs,
         )
         return instance
 
     def __repr__(self, *, tensor_contents=None):
-        return f"NVFP4Tensor, data={self.dequantize(dtype=self.dtype)})"
+        return f"NVFP4Tensor, data={self.dequantize()})"
 
     def dequantize(self, *, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
         """
@@ -537,6 +570,122 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
             "columnwise": self._columnwise_data is not None,
         }
 
+    def fsdp_pre_all_gather(self, mesh, orig_size, contiguous_orig_stride, module, mp_policy):
+        """Called by FSDP2 before all-gather of weights.
+
+        Only all-gathers rowwise data and scales. Columnwise data is derived
+        locally in post_all_gather via _create_columnwise(), halving the
+        all-gather communication volume.
+        """
+        # pylint: disable=unused-argument
+
+        if self._with_gemm_swizzled_scales:
+            raise NotImplementedError(
+                "FSDP2 is not supported for NVFP4Tensors with GEMM-swizzled scales."
+            )
+
+        shard_M = math.prod(self.shape[:-1])
+
+        assert shard_M % NVFP4_BLOCK_SCALING_SIZE == 0, (
+            f"FSDP2 requires shard_M ({shard_M}) to be a multiple of "
+            f"NVFP4_BLOCK_SCALING_SIZE ({NVFP4_BLOCK_SCALING_SIZE}). "
+            "Adjust model dimensions or world size."
+        )
+
+        assert self._rowwise_data is not None, (
+            "FSDP2 requires rowwise data, but _rowwise_data is None. "
+            "Ensure the NVFP4Quantizer was created with rowwise=True."
+        )
+
+        # Rowwise data: (shard_M, K//2) — M in dim0, pass as-is
+        rowwise_data = self._rowwise_data
+        # Rowwise scale: (round_up(shard_M, 128), inner) — unpad dim0 to shard_M
+        rowwise_scale_inv = self._rowwise_scale_inv
+        if rowwise_scale_inv is not None:
+            rowwise_scale_inv = rowwise_scale_inv[:shard_M, :]
+
+        columnwise_usage = self._quantizer.columnwise_usage
+        if columnwise_usage:
+            assert self._quantizer.with_2d_quantization, (
+                "FSDP2 columnwise usage requires 2D quantization to be enabled. "
+                "Ensure the NVFP4Quantizer was created with with_2d_quantization=True."
+            )
+
+        # Only all-gather rowwise tensors; columnwise will be derived locally
+        # via _create_columnwise() in post_all_gather.
+        sharded_tensors = (rowwise_data, rowwise_scale_inv)
+
+        # Pass amax via metadata (scalar, same on all ranks — not all-gathered)
+        metadata = (
+            self._fp4_dtype,
+            columnwise_usage,
+            self._amax_rowwise,
+            self._amax_columnwise,
+            self.shape[-1],
+        )
+        return sharded_tensors, metadata
+
+    def fsdp_post_all_gather(
+        self,
+        all_gather_outputs: Tuple[torch.Tensor, ...],
+        metadata,
+        param_dtype: torch.dtype,
+        *,
+        out: Optional[NVFP4Tensor] = None,
+    ):
+        """Called by FSDP2 after all-gather of weights.
+
+        Repads rowwise scales and constructs the full NVFP4Tensor from
+        all-gathered rowwise data. Columnwise data is derived locally
+        via _create_columnwise() instead of being all-gathered.
+        """
+        fp4_dtype, columnwise_usage, amax_rowwise, amax_columnwise, K = metadata
+
+        # Only rowwise data+scales were all-gathered
+        rowwise_data, rowwise_scale_inv = all_gather_outputs[:2]
+        full_M = rowwise_data.shape[0]
+
+        # Repad rowwise scale dim0 to round_up(full_M, 128)
+        if rowwise_scale_inv is not None:
+            target_m = round_up_to_nearest_multiple(full_M, 128)
+            current_m = rowwise_scale_inv.shape[0]
+            if current_m < target_m:
+                rowwise_scale_inv = torch.nn.functional.pad(
+                    rowwise_scale_inv, (0, 0, 0, target_m - current_m)
+                )
+
+        logical_shape = (full_M, K)
+
+        if out is not None:
+            # Update existing tensor in-place (subsequent iterations)
+            out._rowwise_data = rowwise_data
+            out._rowwise_scale_inv = rowwise_scale_inv
+            out._amax_rowwise = amax_rowwise
+            out._amax_columnwise = amax_columnwise
+        else:
+            # Construct new tensor (first iteration)
+            out = NVFP4Tensor(
+                shape=logical_shape,
+                dtype=param_dtype,
+                fp4_dtype=fp4_dtype,
+                rowwise_data=rowwise_data,
+                rowwise_scale_inv=rowwise_scale_inv,
+                columnwise_data=None,
+                columnwise_scale_inv=None,
+                amax_rowwise=amax_rowwise,
+                amax_columnwise=amax_columnwise,
+                quantizer=self._quantizer,
+                requires_grad=False,
+                with_gemm_swizzled_scales=False,
+            )
+
+        # Derive columnwise data locally via transpose instead of all-gathering it
+        if columnwise_usage:
+            out._create_columnwise()
+
+        out._quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
+        return out, all_gather_outputs
+
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):
 
@@ -549,6 +698,79 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
             if shape == list(tensor.size()):
                 return tensor.detach()
             return tensor.view(shape)
+
+        # as_strided — FSDP2 applies this on the unsharded param.
+        # Only the identity case (same shape, contiguous strides, zero offset) is supported.
+        # Non-identity as_strided cannot fall through because NVFP4 does not support
+        # dequantization, so we raise explicitly rather than producing undefined behavior.
+        if func == aten.as_strided.default:
+            tensor = args[0]
+            shape = args[1]
+            strides = args[2]
+            storage_offset = args[3] if len(args) > 3 else 0
+            if (
+                len(shape) == len(strides) == 2
+                and tuple(strides) == (shape[-1], 1)
+                and tuple(shape) == tuple(tensor.size())
+                and storage_offset == 0
+            ):
+                return NVFP4Tensor.make_like(tensor)
+            raise NotImplementedError(
+                "NVFP4Tensor does not support non-identity as_strided "
+                f"(shape={shape}, strides={strides}, storage_offset={storage_offset}, "
+                f"tensor.size()={tuple(tensor.size())})"
+            )
+
+        # slice — FSDP2 applies this for shard unpadding.
+        # When the slice covers the full dimension, return self.
+        if func == aten.slice.Tensor:
+            tensor = args[0]
+            dim = args[1] if len(args) > 1 else 0
+            start = args[2] if len(args) > 2 else None
+            end = args[3] if len(args) > 3 else None
+            step = args[4] if len(args) > 4 else 1
+            if (
+                step == 1
+                and (start is None or start == 0)
+                and (end is None or end >= tensor.size(dim))
+            ):
+                return NVFP4Tensor.make_like(tensor)
+            raise NotImplementedError(
+                "NVFP4Tensor does not support partial slicing "
+                f"(dim={dim}, start={start}, end={end}, "
+                f"tensor.size(dim)={tensor.size(dim)})"
+            )
+
+        # record_stream — FSDP2 records streams on all-gathered tensors.
+        if func == torch.ops.aten.record_stream.default:
+            qt, stream = args
+            for t in (
+                qt._rowwise_data,
+                qt._columnwise_data,
+                qt._rowwise_scale_inv,
+                qt._columnwise_scale_inv,
+                qt._amax_rowwise,
+                qt._amax_columnwise,
+            ):
+                if t is not None and t.is_cuda:
+                    t.record_stream(stream)
+            return None
+
+        # copy_ — FSDP2 may call this during resharding or parameter writeback.
+        if func == aten.copy_.default:
+            dst, src = args[0], args[1]
+            if isinstance(src, NVFP4Tensor) and isinstance(dst, NVFP4Tensor):
+                if dst._rowwise_data is not None and src._rowwise_data is not None:
+                    dst._rowwise_data.copy_(src._rowwise_data.detach())
+                    dst._rowwise_scale_inv.copy_(src._rowwise_scale_inv.detach())
+                if dst._columnwise_data is not None and src._columnwise_data is not None:
+                    dst._columnwise_data.copy_(src._columnwise_data.detach())
+                    dst._columnwise_scale_inv.copy_(src._columnwise_scale_inv.detach())
+                if dst._amax_rowwise is not None and src._amax_rowwise is not None:
+                    dst._amax_rowwise.copy_(src._amax_rowwise.detach())
+                if dst._amax_columnwise is not None and src._amax_columnwise is not None:
+                    dst._amax_columnwise.copy_(src._amax_columnwise.detach())
+                return dst
 
         # NVFP4 dequantize not supported. Add manual support for needed funcs.
         if func in (aten.empty_like.default, aten.zero_.default):
@@ -592,6 +814,7 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
                 amax_columnwise=amax_columnwise,
                 quantizer=tensor._quantizer,
                 requires_grad=tensor.requires_grad,
+                with_gemm_swizzled_scales=tensor._with_gemm_swizzled_scales,
             )
 
         # Default case
@@ -610,6 +833,7 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
         fp4_dtype: TE_DType,
         dtype: torch.dtype,
         quantizer: Quantizer,
+        with_gemm_swizzled_scales: bool = False,
     ) -> NVFP4Tensor:
         """Build NVFP4Tensor, for use in __reduce__
 
@@ -629,6 +853,7 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
             amax_columnwise=amax_columnwise,
             quantizer=quantizer,
             requires_grad=False,
+            with_gemm_swizzled_scales=with_gemm_swizzled_scales,
         )
 
     def __reduce_ex__(self, protocol: int) -> tuple:
@@ -646,6 +871,7 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
                 self._fp4_dtype,
                 self.dtype,
                 self._quantizer,
+                self._with_gemm_swizzled_scales,
             ),
         )
 
@@ -689,6 +915,7 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
                 )
                 # pylint: disable=unnecessary-dunder-call
                 super(NVFP4Tensor, type(self)).data.__set__(self, dummy_tensor)
+
             self._rowwise_data = tensor._rowwise_data
             self._columnwise_data = tensor._columnwise_data
             self._quantizer = tensor._quantizer
@@ -696,6 +923,7 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
             self._columnwise_scale_inv = tensor._columnwise_scale_inv
             self._amax_rowwise = tensor._amax_rowwise
             self._amax_columnwise = tensor._amax_columnwise
+            self._with_gemm_swizzled_scales = tensor._with_gemm_swizzled_scales
             return
 
         # Quantize to FP8
@@ -706,6 +934,35 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
 
     # Cast to FP8 when setting NVFP4Tensor.data
     data = property(_get_data, _set_data)
+
+    @property
+    def device(self):
+        """Return the device of the tensor. Define this to avoid expensive PyObject lookups."""
+        if self._rowwise_data is not None:
+            return self._rowwise_data.device
+        if self._columnwise_data is not None:
+            return self._columnwise_data.device
+        raise RuntimeError("NVFP4Tensor has no data!")
+
+    @property
+    def shape(self):
+        """Return the shape of the tensor. Define this to avoid expensive PyObject lookups."""
+        if self._rowwise_data is not None:
+            byte_shape = self._rowwise_data.shape
+            return torch.Size(byte_shape[:-1] + (byte_shape[-1] * 2,))
+        if self._columnwise_data is not None:
+            byte_shape = self._columnwise_data.shape
+            return torch.Size(byte_shape[1:-1] + (byte_shape[-1] * 2, byte_shape[0]))
+        return torch.Tensor.size(self)
+
+    @property
+    def is_cuda(self):
+        """Return whether the tensor is on a CUDA device."""
+        if self._rowwise_data is not None:
+            return self._rowwise_data.is_cuda
+        if self._columnwise_data is not None:
+            return self._columnwise_data.is_cuda
+        raise RuntimeError("NVFP4Tensor has no data!")
 
 
 class _ViewFunc(torch.autograd.Function):
@@ -743,10 +1000,14 @@ class _ViewFunc(torch.autograd.Function):
                     shape[i] = d_inferred
                     break
         if shape[-1] != cur_shape[-1]:
-            raise RuntimeError(
+            warnings.warn(
                 "NVFP4Tensor does not support reshaping inner dimension "
-                f"(attempted to reshape dims={tuple(tensor.shape)} to {tuple(shape)})"
+                f"(attempted to reshape dims={tuple(tensor.shape)} to {tuple(shape)}). "
+                "If you are using this for FSDP2 without compiled_autograd_enabled, "
+                "then ignore this warning since this view is not going to be used anywhere.",
+                stacklevel=2,
             )
+            return tensor.dequantize().view(*shape)
 
         # Reshape data
         new_rowwise_data = None
@@ -782,6 +1043,7 @@ class _ViewFunc(torch.autograd.Function):
             quantizer=tensor._quantizer,
             fp4_dtype=tensor._fp4_dtype,
             requires_grad=tensor.requires_grad,
+            with_gemm_swizzled_scales=tensor._with_gemm_swizzled_scales,
         )
 
     @staticmethod
@@ -823,6 +1085,7 @@ class _ViewFunc(torch.autograd.Function):
                 quantizer=grad._quantizer,
                 fp4_dtype=grad._fp4_dtype,
                 requires_grad=grad.requires_grad,
+                with_gemm_swizzled_scales=grad._with_gemm_swizzled_scales,
             )
             return dgrad, None
         return grad.view(ctx.shape), None
@@ -863,10 +1126,14 @@ class _ReshapeFunc(torch.autograd.Function):
                     shape[i] = d_inferred
                     break
         if shape[-1] != cur_shape[-1]:
-            raise RuntimeError(
+            warnings.warn(
                 "NVFP4Tensor does not support reshaping inner dimension "
-                f"(attempted to reshape dims={tuple(tensor.shape)} to {tuple(shape)})"
+                f"(attempted to reshape dims={tuple(tensor.shape)} to {tuple(shape)}). "
+                "If you are using this for FSDP2 without compiled_autograd_enabled, "
+                "then ignore this warning since this view is not going to be used anywhere.",
+                stacklevel=2,
             )
+            return tensor.dequantize().reshape(*shape)
 
         # Reshape data
         new_rowwise_data = None
@@ -902,6 +1169,7 @@ class _ReshapeFunc(torch.autograd.Function):
             quantizer=tensor._quantizer,
             fp4_dtype=tensor._fp4_dtype,
             requires_grad=tensor.requires_grad,
+            with_gemm_swizzled_scales=tensor._with_gemm_swizzled_scales,
         )
 
     @staticmethod
@@ -943,6 +1211,7 @@ class _ReshapeFunc(torch.autograd.Function):
                 quantizer=grad._quantizer,
                 fp4_dtype=grad._fp4_dtype,
                 requires_grad=grad.requires_grad,
+                with_gemm_swizzled_scales=grad._with_gemm_swizzled_scales,
             )
             return dgrad, None
         return grad.view(ctx.shape), None

@@ -44,6 +44,7 @@ __all__ = ["act_lu", "dact_lu", "quantize_dact_dbias"]
 ActivationEnum = {
     ("gelu",): NVTE_Activation_Type.GELU,
     ("gelu", "linear"): NVTE_Activation_Type.GEGLU,
+    ("sigmoid", "linear"): NVTE_Activation_Type.GLU,
     ("silu",): NVTE_Activation_Type.SILU,
     ("silu", "linear"): NVTE_Activation_Type.SWIGLU,
     ("relu",): NVTE_Activation_Type.RELU,

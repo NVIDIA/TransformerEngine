@@ -27,9 +27,14 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
                    const float epsilon, Tensor* z, Tensor* mu, Tensor* rsigma, Tensor* workspace,
                    const int multiprocessorCount, const bool zero_centered_gamma,
                    cudaStream_t stream) {
+  // Check for unsupported configurations
   if (is_fp8_dtype(z->data.dtype) && !is_delayed_tensor_scaling(z->scaling_mode) &&
       !is_mxfp8_scaling(z->scaling_mode)) {
     NVTE_ERROR("Not implemented scaling mode: " + to_string(z->scaling_mode) + ".");
+  }
+  if (is_mxfp8_scaling(z->scaling_mode)) {
+    NVTE_CHECK(!z->with_gemm_swizzled_scales,
+               "MXFP8 output must have scales in compact format, not swizzled for GEMM.");
   }
 
   NVTE_CHECK(x.data.shape.size() == 2, "x must be 2D tensor.");

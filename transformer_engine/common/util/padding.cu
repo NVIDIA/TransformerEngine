@@ -87,14 +87,12 @@ __global__ void __launch_bounds__(threads_per_block) multi_padding_kernel(MultiP
   // Note: Each thread loads n_iterations subtiles, casts to output
   // type, and transposes in registers.
   Type local_zero = static_cast<Type>(0.f);
-#pragma unroll
   for (int iter = 0; iter < n_iterations; ++iter) {
     const int i1 = tidy + iter * bdimy;
     const int j1 = tidx;
 #pragma unroll
     for (int i2 = 0; i2 < nvec; ++i2) {
       const int row = tile_row + i1 * nvec + i2;
-      size_t row_offset = static_cast<size_t>(row) * row_length;
       const int col = tile_col + j1 * nvec;
       Vec local_input;
       Vec local_output;
@@ -102,7 +100,7 @@ __global__ void __launch_bounds__(threads_per_block) multi_padding_kernel(MultiP
       if (row < num_rows) {
         for (int j2 = 0; j2 < nvec; ++j2) {
           if (col + j2 < row_length) {
-            local_input.data.elt[j2] = input[row_offset + col + j2];
+            local_input.data.elt[j2] = input[static_cast<size_t>(row) * row_length + col + j2];
           }
         }
       }
@@ -113,14 +111,14 @@ __global__ void __launch_bounds__(threads_per_block) multi_padding_kernel(MultiP
       if (row < num_rows) {
         for (int j2 = 0; j2 < nvec; ++j2) {
           if (col + j2 < row_length) {
-            output[row_offset + col + j2] = local_output.data.elt[j2];
+            output[static_cast<size_t>(row) * row_length + col + j2] = local_output.data.elt[j2];
           }
         }
       } else if (row < padded_num_rows) {
         // padding
         for (int j2 = 0; j2 < nvec; ++j2) {
           if (col + j2 < row_length) {
-            output[row_offset + col + j2] = local_zero;
+            output[static_cast<size_t>(row) * row_length + col + j2] = local_zero;
           }
         }
       }
@@ -172,14 +170,12 @@ __global__ void __launch_bounds__(threads_per_block) multi_unpadding_kernel(Mult
   // Note: Each thread loads n_iterations subtiles, casts to output
   // type, and transposes in registers.
   Type local_zero = static_cast<Type>(0.f);
-#pragma unroll
   for (int iter = 0; iter < n_iterations; ++iter) {
     const int i1 = tidy + iter * bdimy;
     const int j1 = tidx;
 #pragma unroll
     for (int i2 = 0; i2 < nvec; ++i2) {
       const int row = tile_row + i1 * nvec + i2;
-      size_t row_offset = static_cast<size_t>(row) * row_length;
       const int col = tile_col + j1 * nvec;
       Vec local_input;
       Vec local_output;
@@ -187,7 +183,7 @@ __global__ void __launch_bounds__(threads_per_block) multi_unpadding_kernel(Mult
       if (row < num_rows) {
         for (int j2 = 0; j2 < nvec; ++j2) {
           if (col + j2 < row_length) {
-            local_input.data.elt[j2] = input[row_offset + col + j2];
+            local_input.data.elt[j2] = input[static_cast<size_t>(row) * row_length + col + j2];
           }
         }
       }
@@ -198,7 +194,7 @@ __global__ void __launch_bounds__(threads_per_block) multi_unpadding_kernel(Mult
       if (row < num_rows) {
         for (int j2 = 0; j2 < nvec; ++j2) {
           if (col + j2 < row_length) {
-            output[row_offset + col + j2] = local_output.data.elt[j2];
+            output[static_cast<size_t>(row) * row_length + col + j2] = local_output.data.elt[j2];
           }
         }
       }

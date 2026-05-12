@@ -1,0 +1,7 @@
+Implementation,Time (ms),Speedup
+Baseline PyTorch,48.28,1.00x
+TE Unfused,49.34,0.98x
+TE Unfused + TE Attention,35.71,1.35x
+TE Unfused + TE Attention + FP8,23.41,2.06x
+TE Fused + TE Attention + FP8,22.96,2.10x
+TE TransformerLayer + FP8,21.67,2.23x

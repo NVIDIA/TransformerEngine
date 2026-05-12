@@ -26,6 +26,10 @@ from transformer_engine.jax.attention import (
     make_swa_mask,
 )
 from transformer_engine.jax.quantize.helper import DType as TEDType
+from transformer_engine.jax.version_utils import (
+    TRITON_EXTENSION_MIN_JAX_VERSION,
+    is_triton_extension_supported,
+)
 
 PRNGKey = Any
 Shape = Tuple[int, ...]
@@ -40,11 +44,29 @@ Initializer = Callable[[PRNGKey, Shape, DType], Array]
 NVTE_DEBUG_NUMERICS = bool(int(os.getenv("NVTE_DEBUG_NUMERICS", 0)))
 
 
+def require_triton_or_skip_test_file():
+    """Skip the current test file if JAX is too old for Triton kernel support (calls pytest.skip)."""
+    if not is_triton_extension_supported():
+        pytest.skip(
+            f"JAX >= {TRITON_EXTENSION_MIN_JAX_VERSION} required for Triton kernel support. "
+            "Triton kernel dispatch segfaults with older jaxlib. "
+            "Upgrade with: pip install --upgrade jax jaxlib",
+            allow_module_level=True,
+        )
+
+
 def is_devices_enough(required):
     """
     Check if the available GPUs is enough
     """
     return len(jax.devices()) >= required
+
+
+def is_devices_equal(required):
+    """
+    Check if the available GPUs is exactly equal
+    """
+    return len(jax.devices()) == required
 
 
 def _generate_drop_path_shape(shape: Sequence[int], batch_dim: int) -> Sequence[int]:

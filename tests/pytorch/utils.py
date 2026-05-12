@@ -6,16 +6,20 @@ from __future__ import annotations
 
 import logging
 import os
+import random
+import subprocess
+from collections.abc import Iterable
 from contextlib import contextmanager
-from typing import Optional, Tuple, Dict, Any, List
+from typing import Optional, Sequence, Tuple, Dict, Any, List
 from packaging.version import Version as PkgVersion
 
+import pytest
 import torch
 
 import transformer_engine
 import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Recipe
-from transformer_engine.pytorch import InferenceParams
+from transformer_engine.pytorch import InferenceParams, QuantizedTensor
 from transformer_engine.pytorch.attention.dot_product_attention import _attention_backends
 from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     get_attention_backend,
@@ -24,6 +28,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import (
     check_set_window_size,
 )
 from transformer_engine.pytorch.cpp_extensions.fused_attn import FusedAttnBackend
+from transformer_engine.pytorch.module.base import get_dummy_wgrad
 
 
 def str_to_dtype(dtype: str | torch.dtype) -> torch.dtype:
@@ -108,16 +113,17 @@ def quantization_tols(name: str) -> dict[str, float]:
         "fp8",
         "fp8_delayed_scaling",
         "fp8_current_scaling",
+        "fp8_blockwise",
         "mxfp8",
         "mxfp8_block_scaling",
     ):
         return dtype_tols(tex.DType.kFloat8E4M3)
-    if name == "nvfp4":
+    if name in ("nvfp4", "nvfp4_row_scaled"):
         return dtype_tols(tex.DType.kFloat4E2M1)
     raise ValueError(f"Unsupported quantization scheme ({name})")
 
 
-def make_recipe(name: Optional[str]) -> Optional[Recipe]:
+def make_recipe(name: Optional[str], **recipe_kwargs: Any) -> Optional[Recipe]:
     """Make recipe for quantization scheme"""
     if name is None:
         return None
@@ -125,28 +131,78 @@ def make_recipe(name: Optional[str]) -> Optional[Recipe]:
         return transformer_engine.common.recipe.DelayedScaling(
             fp8_format=transformer_engine.common.recipe.Format.E4M3,
             amax_history_len=8,
+            **recipe_kwargs,
         )
     if name == "fp8_current_scaling":
         return transformer_engine.common.recipe.Float8CurrentScaling(
             fp8_format=transformer_engine.common.recipe.Format.E4M3,
+            **recipe_kwargs,
         )
     if name == "mxfp8":
         return transformer_engine.common.recipe.MXFP8BlockScaling(
             fp8_format=transformer_engine.common.recipe.Format.E4M3,
+            **recipe_kwargs,
         )
     if name == "fp8_block_scaling":
-        return transformer_engine.common.recipe.Float8BlockScaling()
+        return transformer_engine.common.recipe.Float8BlockScaling(**recipe_kwargs)
     if name == "nvfp4":
         return transformer_engine.common.recipe.NVFP4BlockScaling(
             disable_rht=True,
             disable_stochastic_rounding=True,
             disable_2d_quantization=True,
+            **recipe_kwargs,
+        )
+    if name == "nvfp4_row_scaled":
+        return transformer_engine.common.recipe.NVFP4BlockScaling(
+            disable_rht=True,
+            disable_stochastic_rounding=True,
+            disable_2d_quantization=True,
+            row_scaled_activation=True,
+            **recipe_kwargs,
         )
     raise ValueError(f"Unsupported quantization scheme ({name})")
 
 
-# Cached RNG state
-_rng_states: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
+def recipe_id(recipe: Optional[Recipe]) -> str:
+    """Readable pytest id for a quantization recipe."""
+    if not isinstance(recipe, Recipe):
+        return "None"
+    if recipe.nvfp4() and recipe.row_scaled_activation:
+        return "NVFP4RowScaledBlockScaling"
+    return type(recipe).__name__
+
+
+def skip_unsupported_backward_override(
+    layer_type: str,
+    quant_recipe: Optional[Recipe],
+    backward_override: Optional[str],
+) -> None:
+    """Skip known unsupported layer/recipe/backward-override combinations used in tests."""
+    if (
+        quant_recipe is not None
+        and quant_recipe.nvfp4()
+        and getattr(quant_recipe, "row_scaled_activation", False)
+        and backward_override is None
+    ):
+        pytest.skip("Row-scaled NVFP4 does not support default quantized backward.")
+    if backward_override is None:
+        return
+    if quant_recipe is None and backward_override is not None:
+        pytest.skip(f"Not a quantized recipe, cannot use backward override {backward_override}.")
+    if quant_recipe.delayed() and backward_override is not None:
+        pytest.skip(f"Delayed scaling does not support backward override {backward_override}.")
+    if layer_type in (
+        "layernorm_mlp",
+        "layernorm_mlp_nocheckpoint",
+        "layernorm_mlp_checkpoint",
+        "transformer",
+        "transformer_layer",
+    ):
+        pytest.skip(f"{layer_type} does not support NVTE_BACKWARD_OVERRIDE={backward_override}.")
+
+
+# Cached RNG state (torch CPU, torch CUDA, Python ``random``)
+_rng_states: Optional[Tuple[torch.Tensor, torch.Tensor, Any]] = None
 
 
 def reset_rng_states() -> None:
@@ -155,14 +211,24 @@ def reset_rng_states() -> None:
     if _rng_states is None:
         torch.manual_seed(1234)
         torch.cuda.manual_seed(1234)
-        _rng_states = (torch.get_rng_state(), torch.cuda.get_rng_state())
+        random.seed(1234)
+        _rng_states = (
+            torch.get_rng_state(),
+            torch.cuda.get_rng_state(),
+            random.getstate(),
+        )
     else:
-        cpu_rng_state, cuda_rng_state = _rng_states
+        cpu_rng_state, cuda_rng_state, random_state = _rng_states
         torch.set_rng_state(cpu_rng_state)
         torch.cuda.set_rng_state(cuda_rng_state)
+        random.setstate(random_state)
 
 
 def compare_and_assert(a, b, name_a, name_b, atol, rtol, rmse_tol, is_fp8):
+    if a is None and b is None:
+        logging.debug(f"{name_a} vs {name_b}: both are None")
+        return
+
     if not is_fp8:
         torch.testing.assert_close(a, b, atol=atol, rtol=rtol)
         return
@@ -271,7 +337,6 @@ def get_available_attention_backends(
     os.environ["NVTE_FUSED_ATTN"] = "1"
     os.environ["NVTE_UNFUSED_ATTN"] = "1"
     _attention_backends["backend_selection_requires_update"] = True
-
     alibi_slopes_shape = None
     if config.attn_bias_type == "alibi" and config.alibi_type == "custom":
         if config.bias_shape == "1hss":
@@ -289,7 +354,9 @@ def get_available_attention_backends(
         and config.head_dim_qk <= 128
         and config.head_dim_v <= 128
     ):
-        core_attention_bias_requires_grad = True
+        # TODO(KshitijLakhani): Remove this guard when cuDNN starts support dbias calculation for bias shape 111s
+        if core_attention_bias_shape != "111s":
+            core_attention_bias_requires_grad = True
 
     fused_attn_backends = []
     available_backends = None
@@ -350,14 +417,160 @@ def get_available_attention_backends(
         _attention_backends["backend_selection_requires_update"] = False
         return available_backends, flash_attention_backend, fused_attention_backend
 
-    backends = {0: "F16_max512_seqlen", 1: "F16_arbitrary_seqlen", 2: "FP8"}
+    backends = {1: "F16_arbitrary_seqlen", 2: "FP8"}
     if AttentionLogging._is_logging_setup is False:
         AttentionLogging.setup_logging()
-    with logging_context(highest_level=AttentionLogging._log_level):
-        for i in range(3):
-            os.environ["NVTE_FUSED_ATTN_BACKEND"] = str(i)
-            _attention_backends["backend_selection_requires_update"] = True
-            available_backends, flash_attention_backend, fused_attention_backend = test()
-            if fused_attention_backend == FusedAttnBackend[backends[i]]:
-                fused_attn_backends.append(fused_attention_backend)
+
+    for i in backends:
+        os.environ["NVTE_FUSED_ATTN_BACKEND"] = str(i)
+        _attention_backends["backend_selection_requires_update"] = True
+        available_backends, flash_attention_backend, fused_attention_backend = test()
+        if fused_attention_backend == FusedAttnBackend[backends[i]]:
+            fused_attn_backends.append(fused_attention_backend)
     return available_backends, flash_attention_backend, fused_attn_backends
+
+
+@torch.no_grad
+def assert_close(
+    actual: Optional[torch.Tensor],
+    expected: Optional[torch.Tensor],
+    *,
+    check_device: bool = False,
+    check_dtype: bool = False,
+    check_layout: bool = False,
+    **kwargs,
+) -> None:
+    """Assert that two tensors are close.
+
+    This function is a wrapper around torch.testing.assert_close. It
+    changes the defaults for device and dtype checks (useful when the
+    reference implementation is computed in high precision on CPU) and
+    it can handle quantized tensors.
+
+    """
+    if isinstance(actual, QuantizedTensor):
+        actual = actual.dequantize()
+    if isinstance(expected, QuantizedTensor):
+        expected = expected.dequantize()
+    torch.testing.assert_close(
+        actual,
+        expected,
+        check_device=check_device,
+        check_dtype=check_dtype,
+        check_layout=check_layout,
+        **kwargs,
+    )
+
+
+def assert_close_grads(
+    actual: Optional[torch.Tensor],
+    expected: Optional[torch.Tensor],
+    **kwargs,
+) -> None:
+    """Assert that two tensors have close gradients."""
+    if actual is None and expected is None:
+        return
+    assert actual is not None
+    assert expected is not None
+    assert_close(actual.grad, expected.grad, **kwargs)
+
+
+def run_distributed(
+    args: Sequence[str],
+    *,
+    valid_returncodes: Sequence[int] = (0,),
+    **kwargs,
+) -> subprocess.CompletedProcess:
+    """Run a distributed subprocess with stderr capture for better error reporting.
+
+    stdout streams to the terminal in real time for interactive debugging.
+    On failure, stderr (containing Python tracebacks) is included in the
+    AssertionError so pytest writes it into the JUnit XML report.
+
+    Args:
+        args: Command and arguments to run.
+        valid_returncodes: Return codes considered success (default: (0,)).
+            Use (0, 5) for inner pytest runs where 5 means all tests skipped.
+        **kwargs: Passed through to subprocess.run (e.g. env, timeout).
+    """
+    result = subprocess.run(args, stderr=subprocess.PIPE, text=True, **kwargs)
+    if result.returncode not in valid_returncodes:
+        cmd_str = " ".join(str(a) for a in args)
+        msg = f"Command exited with code {result.returncode}:\n  {cmd_str}\n"
+        if result.stderr:
+            stderr_tail = result.stderr[-4000:]
+            if len(result.stderr) > 4000:
+                stderr_tail = "... [truncated] ...\n" + stderr_tail
+            msg += f"\n--- stderr ---\n{stderr_tail}"
+        raise AssertionError(msg)
+    return result
+
+
+class MegatronTrainingHelper:
+    """Test-side stand-in for the Megatron-Core DDP / MegatronFSDP wrapper.
+    Megatron's DDP wrapper (and MegatronFSDP) owns the per-parameter
+    ``main_grad`` buffer and the ``overwrite_main_grad`` /
+    ``grad_added_to_main_grad`` attributes that coordinate
+    ``fuse_wgrad_accumulation`` with TE modules. These helpers reproduce the
+    relevant slice of that protocol so TE tests can exercise the
+    accumulate-into-``main_grad`` code path without pulling in the full
+    Megatron-Core dependency.
+    """
+
+    @staticmethod
+    def init_main_grad_buffers(
+        weight_params: Iterable[torch.nn.Parameter],
+        *,
+        fill_value: float,
+        overwrite_main_grad: bool,
+        zero_out_wgrad: bool = False,
+        dtype: torch.dtype = torch.float32,
+    ) -> None:
+        """Allocate ``main_grad`` and stamp the wrapper attributes on each
+        param, mirroring what the Megatron DDP/FSDP wrapper does before
+        backward."""
+        for wp in weight_params:
+            wp.main_grad = torch.full(wp.size(), fill_value, device=wp.device, dtype=dtype)
+            wp.overwrite_main_grad = overwrite_main_grad
+            wp.zero_out_wgrad = zero_out_wgrad
+            wp.grad_added_to_main_grad = False
+
+    @staticmethod
+    def verify_main_grad_accumulation(
+        weight_params: Iterable[torch.nn.Parameter],
+        *,
+        expected_main_grads: Iterable[torch.Tensor],
+        rtol: float = 0.0,
+        atol: float = 0.0,
+    ) -> None:
+        """Check that backward produced what the Megatron wrapper expects:
+        each ``main_grad`` matches ``expected_main_grads``,
+        ``grad_added_to_main_grad`` was flipped to ``True`` so the wrapper's
+        post-backward hooks won't double-accumulate, and ``param.grad`` was
+        replaced by the cached dummy tensor (so a wrapper hook that did
+        ``main_grad += grad`` would be a no-op rather than double-counting).
+        """
+        for wp, expected in zip(weight_params, expected_main_grads):
+            torch.testing.assert_close(wp.main_grad.to(expected), expected, rtol=rtol, atol=atol)
+
+            assert wp.grad_added_to_main_grad is True, (
+                "weight.grad_added_to_main_grad was not flipped to True; "
+                "the Megatron DDP/FSDP wrapper hook will double-accumulate."
+            )
+
+            # ``.grad`` should be the cached dummy tensor returned by
+            # ``get_dummy_wgrad`` -- shared storage, not the real wgrad.
+            expected_dummy = get_dummy_wgrad(list(wp.size()), wp.dtype)
+            assert (
+                wp.grad is not None
+            ), "weight.grad is None; the Megatron protocol expects a dummy tensor stand-in here."
+            assert wp.grad.data_ptr() == expected_dummy.data_ptr(), (
+                "weight.grad does not share storage with the cached dummy "
+                "wgrad; downstream wrapper hooks risk double-accumulating."
+            )
+            if getattr(wp, "zero_out_wgrad", False):
+                assert torch.all(wp.grad == 0), (
+                    "weight.zero_out_wgrad=True but the dummy weight.grad "
+                    "was not zeroed; downstream hooks reading .grad would "
+                    "see stale bytes from the previous step."
+                )

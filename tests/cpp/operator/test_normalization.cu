@@ -46,6 +46,10 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
     GTEST_SKIP() << "cuDNN normalizations not supported on pre-Hopper GPUs yet!";
   }
 
+  if (fused_bwd_add && use_cudnn && (cudnnGetVersion() < 92100)) {
+    GTEST_SKIP() << "cuDNN < 9.21 does not support fused RMSNorm backward+add";
+  }
+
   using WeightType = InputType;
   DType itype = TypeInfo<InputType>::dtype;
   DType wtype = TypeInfo<WeightType>::dtype;
@@ -204,7 +208,7 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
   auto [atol_amax, rtol_amax] = getTolerances(DType::kFloat32);
   if (isFp8Type(otype)) {
     compareResults("amax", z.amax(), ref_amax, atol_amax, rtol_amax);
-    float ref_scale_inv = 1.f / z.scale();
+    float ref_scale_inv = 1.f / ref_scale;
     compareResults("scale_inv", z.rowwise_scale_inv(), ref_scale_inv, atol_amax, rtol_amax);
   }
 

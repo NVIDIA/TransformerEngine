@@ -19,9 +19,11 @@ from transformer_engine.common.recipe import (
     Recipe,
     DelayedScaling,
     Float8CurrentScaling,
+    MXFP8BlockScaling,
 )
 from transformer_engine.pytorch.utils import get_cudnn_version
 from transformer_engine.pytorch.quantization import (
+    QuantizerRole,
     get_fp8_te_dtype,
     FP8GlobalStateManager,
     RecipeState,
@@ -30,7 +32,7 @@ from transformer_engine.pytorch.quantization import (
     Float8CurrentScalingRecipeState,
     Float8BlockScalingRecipeState,
 )
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
+from transformer_engine.pytorch.tensor.storage.float8_tensor_storage import Float8TensorStorage
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
 from transformer_engine.pytorch.constants import (
@@ -98,19 +100,26 @@ layers as follows.
 +-------------------+-----------+-----------------------------------------------------------------------------------+
 | Linear            | Attention | Configuration                                                                     |
 +===================+===========+===================================================================================+
-| FP8DS/FP8CS/NVFP4 | FP16/BF16 | Pass FP8DS, FP8CS or NVFP4 to autocast();                                     |
-|                   |           | export NVTE_DPA_FP8_RECIPE="F16"                                                  |
+| FP8DS/FP8CS/NVFP4 | FP16/BF16 | Pass FP8DS, FP8CS, NVFP4 or MXFP8 to autocast();                                  |
+| /MXFP8            |           | export NVTE_DPA_FP8_RECIPE="F16"                                                  |
 +-------------------+-----------+-----------------------------------------------------------------------------------+
-| FP8DS             | FP8DS     | Pass FP8DS to autocast();                                                     |
+| FP8DS             | FP8DS     | Pass FP8DS to autocast();                                                         |
 +-------------------+-----------+-----------------------------------------------------------------------------------+
-| FP8CS             | FP8DS     | Pass FP8CS to autocast();                                                     |
+| FP8CS             | FP8DS     | Pass FP8CS to autocast();                                                         |
 |                   |           | Attention FP8DS reuses the fp8_format, fp8_dpa, fp8_mha values from linear FP8CS; |
 |                   |           | export NVTE_DPA_FP8_RECIPE="DelayedScaling"       # switch to DS                  |
 |                   |           | export NVTE_DPA_FP8DS_AMAX_ALGO="most_recent"     # or "max"                      |
 |                   |           | export NVTE_DPA_FP8DS_AMAX_HISTLEN=1              # or any other integer          |
 |                   |           | export NVTE_DPA_FP8DS_REDUCE_AMAX=1               # or 0                          |
 +-------------------+-----------+-----------------------------------------------------------------------------------+
-| NVFP4             | FP8DS     | Pass NVFP4 to autocast();                                                     |
+| MXFP8             | FP8DS     | Pass MXFP8 to autocast();                                                         |
+|                   |           | Attention FP8DS reuses the fp8_format, fp8_dpa, fp8_mha values from linear MXFP8; |
+|                   |           | export NVTE_DPA_FP8_RECIPE="DelayedScaling"       # switch to DS                  |
+|                   |           | export NVTE_DPA_FP8DS_AMAX_ALGO="most_recent"     # or "max"                      |
+|                   |           | export NVTE_DPA_FP8DS_AMAX_HISTLEN=1              # or any other integer          |
+|                   |           | export NVTE_DPA_FP8DS_REDUCE_AMAX=1               # or 0                          |
++-------------------+-----------+-----------------------------------------------------------------------------------+
+| NVFP4             | FP8DS     | Pass NVFP4 to autocast();                                                         |
 |                   |           | Attention FP8DS reuses the fp8_dpa, fp8_mha values from linear NVFP4;             |
 |                   |           | export NVTE_DPA_FP8_RECIPE="DelayedScaling"       # switch to DS                  |
 |                   |           | export NVTE_DPA_FP8_FORMAT="HYBRID"               # or "E4M3", "E5M2"             |
@@ -118,19 +127,27 @@ layers as follows.
 |                   |           | export NVTE_DPA_FP8DS_AMAX_HISTLEN=1              # or any other integer          |
 |                   |           | export NVTE_DPA_FP8DS_REDUCE_AMAX=1               # or 0                          |
 +-------------------+-----------+-----------------------------------------------------------------------------------+
-| FP8DS             | FP8CS     | Pass FP8DS to autocast();                                                     |
+| FP8DS             | FP8CS     | Pass FP8DS to autocast();                                                         |
 |                   |           | Attention uses FP8DS for S, dP tensors, and creates a new FP8CS recipe for QKV, O,|
 |                   |           | dO, dQKV tensors based on fp8_format, fp8_dpa, fp8_mha from linear FP8DS;         |
 |                   |           | export NVTE_DPA_FP8_RECIPE="Float8CurrentScaling" # switch to CS                  |
 +-------------------+-----------+-----------------------------------------------------------------------------------+
-| FP8CS             | FP8CS     | Pass FP8CS to autocast();                                                     |
+| FP8CS             | FP8CS     | Pass FP8CS to autocast();                                                         |
 |                   |           | Attention uses FP8CS for QKV, O, dO, dQKV tensors, and creates a new FP8DS recipe |
 |                   |           | for S, dP tensors based on fp8_format, fp8_dpa, fp8_mha from linear FP8CS and:    |
 |                   |           | export NVTE_DPA_FP8DS_AMAX_ALGO="most_recent"     # or "max"                      |
 |                   |           | export NVTE_DPA_FP8DS_AMAX_HISTLEN=1              # or any other integer          |
 |                   |           | export NVTE_DPA_FP8DS_REDUCE_AMAX=1               # or 0                          |
 +-------------------+-----------+-----------------------------------------------------------------------------------+
-| NVFP4             | FP8CS     | Pass NVFP4 to autocast();                                                     |
+| MXFP8             | FP8CS     | Pass MXFP8 to autocast();                                                         |
+|                   |           | Attention creates a new FP8CS recipe based on fp8_format, fp8_dpa, fp8_mha from   |
+|                   |           | linear MXFP8, and:                                                                |
+|                   |           | export NVTE_DPA_FP8_RECIPE="Float8CurrentScaling" # switch to CS                  |
+|                   |           | export NVTE_DPA_FP8DS_AMAX_ALGO="most_recent"     # or "max"                      |
+|                   |           | export NVTE_DPA_FP8DS_AMAX_HISTLEN=1              # or any other integer          |
+|                   |           | export NVTE_DPA_FP8DS_REDUCE_AMAX=1               # or 0                          |
++-------------------+-----------+-----------------------------------------------------------------------------------+
+| NVFP4             | FP8CS     | Pass NVFP4 to autocast();                                                         |
 |                   |           | Attention creates a new FP8CS recipe for QKV, O, dO, dQKV, and a new FP8DS recipe |
 |                   |           | for S, dP, based on the fp8_dpa, fp8_mha values from linear NVFP4 and:            |
 |                   |           | export NVTE_DPA_FP8_RECIPE="Float8CurrentScaling" # switch to CS                  |
@@ -138,6 +155,18 @@ layers as follows.
 |                   |           | export NVTE_DPA_FP8DS_AMAX_ALGO="most_recent"     # or "max"                      |
 |                   |           | export NVTE_DPA_FP8DS_AMAX_HISTLEN=1              # or any other integer          |
 |                   |           | export NVTE_DPA_FP8DS_REDUCE_AMAX=1               # or 0                          |
++-------------------+-----------+-----------------------------------------------------------------------------------+
+| FP8DS/FP8CS       | MXFP8     | Pass FP8DS/FP8CS to autocast();                                                   |
+|                   |           | Attention creates a new MXFP8 recipe based on fp8_format, fp8_dpa, fp8_mha from   |
+|                   |           | linear FP8DS/FP8CS                                                                |
+|                   |           | export NVTE_DPA_FP8_RECIPE="MXFP8BlockScaling"    # switch to MXFP8BS             |
++-------------------+-----------+-----------------------------------------------------------------------------------+
+| MXFP8             | MXFP8     | Pass MXFP8 to autocast();                                                         |
++-------------------+-----------+-----------------------------------------------------------------------------------+
+| NVFP4             | MXFP8     | Pass NVFP4 to autocast();                                                         |
+|                   |           | Attention MXFP8 reuses the fp8_dpa, fp8_mha values from linear NVFP4;             |
+|                   |           | export NVTE_DPA_FP8_RECIPE="MXFP8BlockScaling"    # switch to MXFP8BS             |
+|                   |           | export NVTE_DPA_FP8_FORMAT="HYBRID"               # or "E4M3", "E5M2"             |
 +-------------------+-----------+-----------------------------------------------------------------------------------+
 """
 _dpa_fp8_recipe = os.getenv("NVTE_DPA_FP8_RECIPE", "")
@@ -228,6 +257,11 @@ class DotProductAttention(TransformerEngineBaseModule):
                 map to ``window_size = (-1, 0)`` and Transformer Engine distinguishes them based on
                 ``attn_mask_type``. Similar to :attr:`attn_mask_type`, ``window_size`` can
                 be overridden by :attr:`window_size` in ``forward`` as well.
+    bottom_right_diagonal: Optional[bool], default = `None`
+                Align sliding window and ALiBi diagonal to the top left (`False`)
+                or bottom right (`True`) corner of the softmax matrix in the encoder.
+                If `None`, it will be set to `False` for `attn_mask_type` =
+                {'causal', 'padding_causal'} and `True` for other mask types.
     attention_type : str, default = "self"
                    type of attention, either ``"self"`` and ``"cross"``.
     layer_number : int, default = None
@@ -279,6 +313,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                      <https://arxiv.org/pdf/2502.16982>`_).
                      :math:`\text{max_logit} = \max(S)`, where :math:`S = \text{mask}(Q \cdot K^T \cdot \text{softmax_scale} + \text{bias})` of shape ``[b, h, s_q, s_kv]``,
                      and :math:`\text{max_logit}` is of shape ``[h]``.
+    name : Optional[str], default = None
+                module instance name.
 
     Parallelism parameters
     ----------------------
@@ -324,6 +360,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         qkv_format: str = "sbhd",
         attn_mask_type: str = "causal",
         window_size: Optional[Tuple[int, int]] = None,
+        bottom_right_diagonal: Optional[bool] = None,
         sequence_parallel: bool = False,
         tp_size: int = 1,
         get_rng_state_tracker: Optional[Callable] = None,
@@ -337,8 +374,9 @@ class DotProductAttention(TransformerEngineBaseModule):
         softmax_scale: Optional[float] = None,
         softmax_type: str = "vanilla",
         return_max_logit: Optional[bool] = False,
+        name: Optional[str] = None,
     ) -> None:
-        super().__init__()
+        super().__init__(name=name)
 
         self.logger = logging.getLogger("DotProductAttention")
         self.logger.setLevel(attn_log._log_level)
@@ -350,6 +388,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             attn_mask_type = "padding_causal"
         self.attn_mask_type = attn_mask_type
         self.window_size = dpa_utils.check_set_window_size(attn_mask_type, window_size)
+        self.bottom_right_diagonal = bottom_right_diagonal
         if tp_group is None:
             self.tp_size = tp_size
             if tp_size == 1:
@@ -432,7 +471,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         if self.softmax_type == "learnable":
             self.register_parameter(
                 "softmax_offset",
-                Parameter(torch.empty(self.num_attention_heads // self.tp_size, device="cuda")),
+                Parameter(torch.zeros(self.num_attention_heads // self.tp_size, device="cuda")),
                 get_rng_state_tracker=get_rng_state_tracker,
             )
 
@@ -577,6 +616,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         # global recipe set in autocast()
         fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
         if fp8_recipe.custom():
+            super().init_fp8_metadata(num_gemms=num_gemms)
             return
 
         # switch/append recipe: fp8_recipe stays unchanged, but DPA.fp8_meta["recipe"] may be set to
@@ -593,7 +633,9 @@ class DotProductAttention(TransformerEngineBaseModule):
             # ignore the recipe from autocast, set fp8_dpa = False, fp8_mha = False
             fp8_recipe.fp8_dpa = False
             fp8_recipe.fp8_mha = False
-        elif fp8_recipe.float8_current_scaling() and _dpa_fp8_recipe == "DelayedScaling":
+        elif (
+            fp8_recipe.float8_current_scaling() or fp8_recipe.mxfp8()
+        ) and _dpa_fp8_recipe == "DelayedScaling":
             # reuse fp8_format, fp8_dpa, fp8_mha from fp8_recipe, and construct a DS recipe
             fake_recipe = DelayedScaling(
                 fp8_format=fp8_recipe.fp8_format,
@@ -646,6 +688,25 @@ class DotProductAttention(TransformerEngineBaseModule):
             )
             fp8_recipe_dpa = fake_recipe
             fp8_recipes = [fp8_recipe, fp8_recipe_dpa]
+        elif fp8_recipe.mxfp8() and _dpa_fp8_recipe == "Float8CurrentScaling":
+            # reuse fp8_format, fp8_dpa, fp8_mha from fp8_recipe, and construct a CS+DS recipe
+            fake_recipes = [
+                Float8CurrentScaling(
+                    fp8_format=fp8_recipe.fp8_format,
+                    fp8_dpa=fp8_recipe.fp8_dpa,
+                    fp8_mha=fp8_recipe.fp8_mha,
+                ),
+                DelayedScaling(
+                    fp8_format=fp8_recipe.fp8_format,
+                    amax_history_len=_dpa_fp8ds_amax_histlen,
+                    amax_compute_algo=_dpa_fp8ds_amax_algo,
+                    fp8_dpa=fp8_recipe.fp8_dpa,
+                    fp8_mha=fp8_recipe.fp8_mha,
+                    reduce_amax=_dpa_fp8ds_reduce_amax,
+                ),
+            ]
+            fp8_recipe_dpa = fake_recipes[1]
+            fp8_recipes = fake_recipes
         elif fp8_recipe.nvfp4() and _dpa_fp8_recipe == "Float8CurrentScaling":
             # reuse fp8_dpa, fp8_mha from fp8_recipe but not fp8_format
             # construct a CS recipe for QKV, O, dO, dQKV and a DS recipe for S, dP
@@ -666,19 +727,34 @@ class DotProductAttention(TransformerEngineBaseModule):
             ]
             fp8_recipe_dpa = fake_recipes[1]
             fp8_recipes = fake_recipes
-        # DPA only support DS and CS; other recipes should have fp8_dpa=False, fp8_mha=False
-        if not fp8_recipe_dpa.float8_per_tensor_scaling():
-            assert not (
-                fp8_recipe_dpa.fp8_dpa or fp8_recipe_dpa.fp8_mha
-            ), f"DotProductAttention does not support {fp8_recipe_dpa.__class__.__name__} recipe"
+        elif (
+            fp8_recipe.delayed() or fp8_recipe.float8_current_scaling()
+        ) and _dpa_fp8_recipe == "MXFP8BlockScaling":
+            # reuse fp8_format, fp8_dpa, fp8_mha from fp8_recipe, and construct a MXFP8 recipe
+            fake_recipe = MXFP8BlockScaling(
+                fp8_format=fp8_recipe.fp8_format,
+                fp8_dpa=fp8_recipe.fp8_dpa,
+                fp8_mha=fp8_recipe.fp8_mha,
+            )
+            fp8_recipe_dpa = fake_recipe
+            fp8_recipes = fp8_recipe_dpa
+        elif fp8_recipe.nvfp4() and _dpa_fp8_recipe == "MXFP8BlockScaling":
+            # reuse fp8_dpa, fp8_mha from fp8_recipe but not fp8_format; construct a MXFP8 recipe
+            fake_recipe = MXFP8BlockScaling(
+                fp8_format=_dpa_fp8_format,
+                fp8_dpa=fp8_recipe.fp8_dpa,
+                fp8_mha=fp8_recipe.fp8_mha,
+            )
+            fp8_recipe_dpa = fake_recipe
+            fp8_recipes = fp8_recipe_dpa
 
         # reduce over TP+CP groups; expect fp8_group to be set up so
         # assume attention uses the same fp8_group as GEMMs
         fp8_group = FP8GlobalStateManager.get_fp8_group()
 
-        self.fp8_parameters = FP8GlobalStateManager.with_fp8_parameters()
-        self.fp8 = FP8GlobalStateManager.is_fp8_enabled()
-        self.fp8_calibration = FP8GlobalStateManager.is_fp8_calibration()
+        self.fast_setattr("fp8_parameters", FP8GlobalStateManager.with_fp8_parameters())
+        self.fast_setattr("fp8", FP8GlobalStateManager.is_fp8_enabled())
+        self.fast_setattr("fp8_calibration", FP8GlobalStateManager.is_fp8_calibration())
         fp8_enabled = self.fp8 or self.fp8_calibration
         self.fp8_meta["fp8_checkpoint"] = self.fp8 or self.fp8_calibration
         if self.fp8_parameters or fp8_enabled:
@@ -697,13 +773,13 @@ class DotProductAttention(TransformerEngineBaseModule):
                 autocast_key = FP8GlobalStateManager.get_unique_autocast_key(
                     fp8_recipe_dpa, fp8_group
                 )
-                FP8GlobalStateManager.autocast_arguments[autocast_key] = (
+                FP8GlobalStateManager.quantization_state.autocast_arguments[autocast_key] = (
                     fp8_recipe_dpa,
                     fp8_group,
                 )
         else:
             # If fp8 isn't enabled, turn off and return.
-            self.fp8_initialized = False
+            self.fast_setattr("fp8_initialized", False)
             return
 
         if self.fp8_parameters and not self.fp8_initialized:
@@ -721,7 +797,7 @@ class DotProductAttention(TransformerEngineBaseModule):
 
             # Allocate scales and amaxes
             self.init_fp8_meta_tensors(fp8_recipes)
-            self.fp8_initialized = True
+            self.fast_setattr("fp8_initialized", True)
 
             self.fp8_meta["recipe"] = fp8_recipe_dpa
             if fp8_recipe != fp8_recipe_dpa:
@@ -729,7 +805,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 autocast_key = FP8GlobalStateManager.get_unique_autocast_key(
                     fp8_recipe_dpa, fp8_group
                 )
-                FP8GlobalStateManager.autocast_arguments[autocast_key] = (
+                FP8GlobalStateManager.quantization_state.autocast_arguments[autocast_key] = (
                     fp8_recipe_dpa,
                     fp8_group,
                 )
@@ -749,6 +825,9 @@ class DotProductAttention(TransformerEngineBaseModule):
 
     def set_meta_tensor(self, fwd: bool, recipe: Union[Recipe, List[Recipe]]) -> None:
         """Override to allow multiple recipes. Init scales and amaxes for fwd | bwd."""
+        if isinstance(recipe, Recipe) and recipe.custom():
+            TransformerEngineBaseModule.set_meta_tensor(self, fwd, recipe)
+            return
         if isinstance(recipe, Recipe):
             recipe = [recipe]
         fp8_recipe_dpa = recipe[-1]
@@ -788,12 +867,126 @@ class DotProductAttention(TransformerEngineBaseModule):
             for i in range(len(recipe))
         ]
 
-        self.fp8_meta[fp8_meta_tensor_key] = (
-            recipe_states[-1] if len(recipe) == 2 else recipe_states[0]
-        )
+        # Reached the rebuild path because ``fp8_meta_tensors_initialized``
+        # was flipped to False after first init — most commonly because the
+        # base-class ``output_quantizer_role`` / ``grad_input_quantizer_role``
+        # setter invalidated state when MHA wired boundary roles. That
+        # setter is recipe-agnostic, so this code fires for built-in
+        # recipes too even though they don't consume role information here
+        # (e.g. ``test_dpa_fp8_extra_state`` reaches this path with pure
+        # DelayedScaling).
+        #
+        # Rebuilding the recipe state must preserve persistent training
+        # buffers (delayed-scaling ``scale`` / ``amax_history``) so the new
+        # quantizer instances and the ``FP8GlobalStateManager`` reduction
+        # buffers end up viewing the SAME tensor objects, and so any
+        # checkpoint-loaded state isn't silently destroyed on the first
+        # forward after ``load_state_dict``.
+        #
+        # Inheritance targets the "primary" state stored under
+        # ``fp8_meta[fp8_meta_tensor_key]`` — the one tracked across
+        # ``set_meta_tensor`` calls. Auxiliary states in a multi-recipe
+        # splice (e.g. the CS half of ``[CS, DS]``) are stateless and have
+        # nothing to inherit.
+        old_state = self.fp8_meta.get(fp8_meta_tensor_key)
+        primary_idx = -1 if len(recipe) == 2 else 0
+        if old_state is not None:
+            recipe_states[primary_idx].inherit_state_from(old_state)
+
+        self.fp8_meta[fp8_meta_tensor_key] = recipe_states[primary_idx]
         self.quantizers[fp8_meta_tensor_key] = []
         for recipe_state in recipe_states:
             self.quantizers[fp8_meta_tensor_key].extend(recipe_state.make_quantizers())
+
+    def get_quantizer_roles(
+        self,
+        *,
+        fwd: bool,
+        num_quantizers: int,
+    ) -> Optional[List[QuantizerRole]]:
+        """QuantizerRole list for quantizers used by ``DotProductAttention``.
+
+        DPA internally performs two matmuls::
+
+            S = softmax(Q · K^T)   (GEMM1)
+            O = S · V              (GEMM2)
+
+        cuDNN's fused-attention API exposes FP8 scale/amax descriptors as
+        a flat array of **slot groups** numbered 1-3.  The numbering is a
+        cuDNN convention — it does *not* correspond to operation order
+        inside DPA:
+
+        Forward  (3 slot groups × 3 positions = 9 slots):
+
+        =========== =========================================== ===========
+        Slot group  Primary tensor                              cuDNN enum
+        =========== =========================================== ===========
+        Group 1     QKV — inputs to GEMM1 (Q·K^T)              GEMM1_OUTPUT
+        Group 2     O — output of GEMM2 (S·V)                  GEMM2_INPUT
+        Group 3     S — post-softmax, input to GEMM2 (S·V)     GEMM3_OUTPUT
+        =========== =========================================== ===========
+
+        Backward (3 slot groups × 2 positions = 6 slots):
+
+        =========== =========================================== ===========
+        Slot group  Primary tensor                              cuDNN enum
+        =========== =========================================== ===========
+        Group 1     dQKV — gradients flowing back to Q, K, V   GRAD_OUTPUT1
+        Group 2     dO — gradient of the attention output       GRAD_INPUT2
+        Group 3     dP — gradient of the softmax output         GRAD_INPUT3
+        =========== =========================================== ===========
+
+        Unused positions within a group share the role of the group's
+        primary tensor.
+
+        **Boundary slots** — O (fwd) and dQKV (bwd) leave DPA and enter
+        the next module (e.g. proj linear).  DPA does not know that
+        consumer, so these default to ``None``.  The parent module
+        (e.g. ``MultiheadAttention``) can set
+        :attr:`output_quantizer_role` / :attr:`grad_input_quantizer_role`
+        to fill in the consumer identity.
+
+        When not set, a hint-only ``QuantizerRole`` with empty
+        ``module_type`` / ``tensor_type`` is emitted, with ``name``
+        containing ``"dpa_output"`` or ``"dpa_grad_input"``.  This lets
+        the factory return a DPA-compatible quantizer (required by the
+        fused kernel) even when the downstream consumer is unknown.
+        """
+        name = self.name or ""
+        if fwd:
+            qkv_role = QuantizerRole(module_type="dpa", tensor_type="qkv", name=name)
+            o_role = self._output_quantizer_role
+            if o_role is None:
+                o_role = QuantizerRole(name=f"{name}.dpa_output" if name else "dpa_output")
+            s_role = QuantizerRole(module_type="dpa", tensor_type="s", name=name)
+            base = [
+                qkv_role,
+                qkv_role,
+                qkv_role,  # Group 1: QKV (inputs to Q·K^T)
+                o_role,
+                o_role,
+                o_role,  # Group 2: O (output of S·V) — boundary
+                s_role,
+                s_role,
+                s_role,  # Group 3: S (post-softmax, input to S·V)
+            ]
+        else:
+            dqkv_role = self._grad_input_quantizer_role
+            if dqkv_role is None:
+                dqkv_role = QuantizerRole(
+                    name=f"{name}.dpa_grad_input" if name else "dpa_grad_input"
+                )
+            do_role = QuantizerRole(module_type="dpa", tensor_type="do", name=name)
+            dp_role = QuantizerRole(module_type="dpa", tensor_type="dp", name=name)
+            base = [
+                dqkv_role,
+                dqkv_role,  # Group 1: dQKV (grads to Q,K,V) — boundary
+                do_role,
+                do_role,  # Group 2: dO (grad of attention output)
+                dp_role,
+                dp_role,  # Group 3: dP (grad of softmax output)
+            ]
+        return base[:num_quantizers]
 
     @no_torch_dynamo(recursive=False)
     def forward(
@@ -811,6 +1004,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         max_seqlen_kv: int = None,
         attn_mask_type: Optional[str] = None,
         window_size: Optional[Tuple[int, int]] = None,
+        bottom_right_diagonal: Optional[bool] = None,
         checkpoint_core_attention: bool = False,
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
@@ -963,6 +1157,16 @@ class DotProductAttention(TransformerEngineBaseModule):
                        causal masks are aligned to the bottom right corner.
         window_size: Optional[Tuple[int, int]], default = None
                     Sliding window size for local attention.
+        bottom_right_diagonal: Optional[bool], default = None
+                    Align sliding window and ALiBi diagonal to the top left (`False`)
+                    or bottom right (`True`) corner of the softmax matrix in the encoder.
+                    If `None`, it will be set to `False` for `attn_mask_type` =
+                    {'causal', 'padding_causal'} and `True` for other mask types.
+                    Note: This parameter will be automatically overridden based on the
+                    `attn_mask_type` - it will be forced to `False` for 'causal' and
+                    'padding_causal' mask types, and forced to `True` for mask types
+                    containing 'bottom_right' (e.g., 'causal_bottom_right',
+                    'padding_causal_bottom_right'), regardless of the explicitly passed value.
         checkpoint_core_attention : bool, default = False
                                    If true, forward activations for attention are recomputed
                                    during the backward pass in order to save memory that would
@@ -1000,7 +1204,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             cases. It is ignored for other backends and when context parallelism is enabled.
         """
 
-        with self.prepare_forward(
+        with self.prepare_forward_ctx(
             query_layer,
             num_gemms=3,
             allow_non_contiguous=True,
@@ -1081,6 +1285,15 @@ class DotProductAttention(TransformerEngineBaseModule):
             if window_size is None:
                 window_size = self.window_size
             window_size = dpa_utils.check_set_window_size(attn_mask_type, window_size)
+            if bottom_right_diagonal is None:
+                bottom_right_diagonal = self.bottom_right_diagonal
+            if attn_mask_type in {"causal", "padding_causal"}:
+                bottom_right_diagonal = False
+            if bottom_right_diagonal is None or attn_mask_type in {
+                "causal_bottom_right",
+                "padding_causal_bottom_right",
+            }:
+                bottom_right_diagonal = True
 
             # checks for qkv_format
             if qkv_format is None:
@@ -1144,11 +1357,14 @@ class DotProductAttention(TransformerEngineBaseModule):
                 assert "padding" in attn_mask_type, "KV caching requires padding mask!"
                 if attn_mask_type == "padding_causal":
                     attn_mask_type = attn_mask_type + "_bottom_right"
+                    # since attention mask is changed, set `bottom_right_diagonal` to True
+                    bottom_right_diagonal = True
 
-                self.attention_type = "cross"
-                self.flash_attention.attention_type = self.attention_type
-                self.fused_attention.attention_type = self.attention_type
-                self.unfused_attention.attention_type = self.attention_type
+                if self.attention_type != "cross":
+                    self.fast_setattr("attention_type", "cross")
+                    self.flash_attention.attention_type = self.attention_type
+                    self.fused_attention.attention_type = self.attention_type
+                    self.unfused_attention.attention_type = self.attention_type
 
                 query_layer, key_layer, value_layer = [
                     x.contiguous() if not x.is_contiguous() else x
@@ -1173,7 +1389,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                 cu_seqlens_kv_padded = None
 
             # get qkv's memory layout
-            if all(isinstance(x, Float8Tensor) for x in [query_layer, key_layer, value_layer]):
+            if all(
+                isinstance(x, Float8TensorStorage) for x in [query_layer, key_layer, value_layer]
+            ):
                 (
                     qkv_layout,
                     query_layer._data,
@@ -1256,7 +1474,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                 if self.layer_number == 1:
                     _alibi_cache["_alibi_slopes_require_update"] = True
                     _alibi_cache["_alibi_bias_require_update"] = True
-            bottom_right_alignment = (attn_mask_type not in ["causal", "padding_causal"],)
             if core_attention_bias_type == "alibi":
                 assert (
                     core_attention_bias is None
@@ -1265,7 +1482,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     _alibi_cache["_num_heads"] != query_layer.shape[-2]
                     or _alibi_cache["_max_seqlen_q"] != max_seqlen_q
                     or _alibi_cache["_max_seqlen_kv"] != max_seqlen_kv
-                    or _alibi_cache["_bottom_right_alignment"] != bottom_right_alignment
+                    or _alibi_cache["_bottom_right_alignment"] != bottom_right_diagonal
                     or _alibi_cache["_alibi_slopes"] is None
                 ):
                     _alibi_cache["_alibi_slopes_require_update"] = True
@@ -1289,11 +1506,14 @@ class DotProductAttention(TransformerEngineBaseModule):
                 ):
                     core_attention_bias_shape = "b1ss"
                 elif core_attention_bias.shape[0] == 1 and core_attention_bias.shape[1] == 1:
-                    core_attention_bias_shape = "11ss"
+                    if core_attention_bias.shape[2] == 1:
+                        core_attention_bias_shape = "111s"
+                    else:
+                        core_attention_bias_shape = "11ss"
                 else:
                     assert (
                         False
-                    ), "core_attention_bias must be in one of {bhss, 1hss, b1ss, 11ss} shapes"
+                    ), "core_attention_bias must be in one of {bhss, 1hss, b1ss, 11ss, 111s} shapes"
 
             # check if there is padding between sequences when qkv_format='thd'
             if pad_between_seqs is None:
@@ -1322,6 +1542,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 head_dim_v=head_dim_v,
                 attn_mask_type=attn_mask_type,
                 window_size=window_size,
+                bottom_right_diagonal=bottom_right_diagonal,
                 alibi_slopes_shape=alibi_slopes.shape if alibi_slopes is not None else None,
                 core_attention_bias_type=core_attention_bias_type,
                 core_attention_bias_shape=core_attention_bias_shape,
@@ -1332,6 +1553,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 attention_dropout=self.attention_dropout,
                 context_parallel=context_parallel,
                 cp_comm_type=self.cp_comm_type,
+                cp_size=cp_size,
                 deterministic=self.deterministic,
                 is_training=self.training,
                 fp8=self.fp8,
@@ -1445,9 +1667,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             if use_fused_attention:
                 fu_core_attention_bias_type = core_attention_bias_type
                 fu_core_attention_bias = core_attention_bias
-                if core_attention_bias_type == "alibi" and (
-                    alibi_slopes is not None or max_seqlen_q != max_seqlen_kv
-                ):
+                if core_attention_bias_type == "alibi" and (alibi_slopes is not None):
                     fu_core_attention_bias_type = "post_scale_bias"
                     _, fu_core_attention_bias = dpa_utils.get_alibi(
                         _alibi_cache,
@@ -1456,7 +1676,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         max_seqlen_kv,
                         alibi_slopes=alibi_slopes,
                         bias_dtype=query_layer.dtype,
-                        bottom_right_alignment=attn_mask_type not in ["causal", "padding_causal"],
+                        bottom_right_alignment=bottom_right_diagonal,
                     )
                 if checkpoint_core_attention:
                     return self._checkpointed_attention_forward(
@@ -1474,6 +1694,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         attn_mask_type=attn_mask_type,
                         attention_mask=attention_mask,
                         window_size=window_size,
+                        bottom_right_diagonal=bottom_right_diagonal,
                         fused_attention_backend=fused_attention_backend,
                         core_attention_bias_type=fu_core_attention_bias_type,
                         core_attention_bias=fu_core_attention_bias,
@@ -1504,6 +1725,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     attn_mask_type=attn_mask_type,
                     attention_mask=attention_mask,
                     window_size=window_size,
+                    bottom_right_diagonal=bottom_right_diagonal,
                     fused_attention_backend=fused_attention_backend,
                     core_attention_bias_type=fu_core_attention_bias_type,
                     core_attention_bias=fu_core_attention_bias,
@@ -1522,7 +1744,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                 )
 
             if use_unfused_attention:
-                allow_emulation = os.getenv("NVTE_UnfusedDPA_Emulate_FP8", "0") == "1"
+                allow_emulation = (
+                    os.getenv("NVTE_UnfusedDPA_Emulate_FP8", "0") == "1" or is_in_onnx_export_mode()
+                )
                 if checkpoint_core_attention:
                     return self._checkpointed_attention_forward(
                         self.unfused_attention,
@@ -1538,6 +1762,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         attn_mask_type=attn_mask_type,
                         attention_mask=attention_mask,
                         window_size=window_size,
+                        bottom_right_diagonal=bottom_right_diagonal,
                         core_attention_bias_type=core_attention_bias_type,
                         core_attention_bias=core_attention_bias,
                         alibi_slopes=alibi_slopes,
@@ -1561,6 +1786,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     attn_mask_type=attn_mask_type,
                     attention_mask=attention_mask,
                     window_size=window_size,
+                    bottom_right_diagonal=bottom_right_diagonal,
                     core_attention_bias_type=core_attention_bias_type,
                     core_attention_bias=core_attention_bias,
                     alibi_slopes=alibi_slopes,

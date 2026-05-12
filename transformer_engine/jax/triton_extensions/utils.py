@@ -6,16 +6,182 @@ Triton utilities for JAX primitives.
 
 This module provides utility functions for integrating Triton kernels into
 JAX primitives. Triton is only imported when this module is used.
+
+Triton Package Compatibility:
+    There are two Triton packages that can be used:
+
+    1. 'triton' (from OpenAI/PyPI): Standard package, works with JAX out of the box.
+       Install with: pip install triton
+
+    2. 'pytorch-triton' (from PyTorch's index): Bundled with PyTorch, includes
+       PyTorch-specific patches. Version format: "3.0.0+<commit_sha>"
+
+       IMPORTANT: The 'pytorch-triton' package on PyPI (version 0.0.1) is a
+       placeholder that will NOT work. The real pytorch-triton is only available
+       from PyTorch's package index and is auto-installed with PyTorch:
+           pip install torch --index-url https://download.pytorch.org/whl/cu121
+
+       pytorch-triton has been tested to work with JAX Triton kernels.
+
+Environment Variables:
+    NVTE_USE_PYTORCH_TRITON: If set to "1", explicitly acknowledge using
+        pytorch-triton for JAX Triton kernels (suppresses warnings). This is
+        useful when both JAX and PyTorch are installed in the same environment.
+        Default is "0".
+    NVTE_JAX_ENFORCE_TRITON_AUTOTUNING: If set to "1", raise a RuntimeError when
+        the installed JAX is too old to safely run TritonAutotunedKernelCall
+        (jax-ml/jax#35218) instead of silently falling back to non-autotuned
+        dispatch. Useful for CI or debugging to ensure autotuning is active.
+        Default is "0" (silent compatibility fallback).
 """
 
 import hashlib
+import os
+import warnings
 from typing import Any, Callable, Mapping
 import zlib
+
+from packaging import version
 
 from jax import core
 import jax
 import jax.numpy as jnp
 
+from ..version_utils import (
+    TRITON_AUTOTUNED_INPUT_OUTPUT_ALIAS_MIN_JAX_VERSION,
+    TRITON_EXTENSION_MIN_JAX_VERSION,
+    is_triton_autotuned_alias_safe,
+    is_triton_extension_supported,
+)
+
+
+# Placeholder package version on PyPI that should never be used
+_PYTORCH_TRITON_PLACEHOLDER_VERSION = "0.0.1"
+
+
+def _detect_triton_package():
+    """Detect which Triton package is installed and validate compatibility.
+
+    Returns:
+        tuple: (triton_version: str or None, is_pytorch_triton: bool, is_placeholder: bool)
+
+    The function detects:
+    - None: Triton not installed
+    - Standard triton from OpenAI (versions like "3.1.0")
+    - Real pytorch-triton from PyTorch's index (versions like "3.0.0+45fff310c8")
+    - Placeholder pytorch-triton from PyPI (version "0.0.1" - broken, raises RuntimeError)
+    """
+    try:
+        import triton
+
+        triton_version = getattr(triton, "__version__", "unknown")
+    except ImportError:
+        return None, False, False
+    except RuntimeError as e:
+        # The placeholder pytorch-triton package from PyPI raises:
+        # RuntimeError: "Should never be installed"
+        if "Should never be installed" in str(e):
+            return _PYTORCH_TRITON_PLACEHOLDER_VERSION, False, True
+        raise
+
+    # Check for placeholder package (version 0.0.1 from PyPI)
+    is_placeholder = triton_version == _PYTORCH_TRITON_PLACEHOLDER_VERSION
+
+    # Real pytorch-triton versions have a commit SHA suffix like "3.0.0+45fff310c8"
+    is_pytorch_triton = "+" in triton_version and len(triton_version.split("+")[-1]) >= 8
+
+    return triton_version, is_pytorch_triton, is_placeholder
+
+
+def _check_triton_compatibility():
+    """Check Triton package compatibility and emit warnings if necessary.
+
+    This function handles the case where both JAX and PyTorch may be installed,
+    each expecting different Triton packages:
+    - JAX typically uses the standard 'triton' package from OpenAI
+    - PyTorch uses 'pytorch-triton' which is versioned with commit SHAs
+
+    The NVTE_USE_PYTORCH_TRITON environment variable can be used to explicitly
+    acknowledge using pytorch-triton with JAX (suppresses warnings).
+
+    Raises:
+        ImportError: If triton is not installed or the placeholder package is detected.
+    """
+    triton_version, is_pytorch_triton, is_placeholder = _detect_triton_package()
+
+    # Handle placeholder package from PyPI
+    if is_placeholder:
+        raise ImportError(
+            "Detected the placeholder 'pytorch-triton' package (version 0.0.1) from PyPI.\n"
+            "This is NOT a functional Triton installation.\n\n"
+            "The placeholder package exists to prevent namespace conflicts. To fix this:\n\n"
+            "Option 1 - Use standard Triton (recommended for JAX-only environments):\n"
+            "    pip uninstall pytorch-triton triton\n"
+            "    pip install triton\n\n"
+            "Option 2 - Use real pytorch-triton (for mixed JAX+PyTorch environments):\n"
+            "    pip uninstall pytorch-triton triton\n"
+            "    pip install torch --index-url https://download.pytorch.org/whl/cu121\n"
+            "    # pytorch-triton is automatically installed as a torch dependency\n\n"
+            "Note: Do NOT run 'pip install pytorch-triton' directly - this installs\n"
+            "the broken placeholder. The real pytorch-triton only comes from PyTorch's index."
+        )
+
+    if triton_version is None:
+        raise ImportError(
+            "Triton is required for transformer_engine.jax.triton_extensions.\n\n"
+            "Option 1 - Install standard Triton (recommended for JAX-only):\n"
+            "    pip install triton\n\n"
+            "Option 2 - Install PyTorch with pytorch-triton (for mixed environments):\n"
+            "    pip install torch --index-url https://download.pytorch.org/whl/cu121\n\n"
+            "If you don't need Triton, use transformer_engine.jax.cpp_extensions instead."
+        )
+
+    val = os.environ.get("NVTE_USE_PYTORCH_TRITON", "0")
+    try:
+        use_pytorch_triton_explicit = bool(int(val))
+    except ValueError as e:
+        raise ValueError(
+            f"NVTE_USE_PYTORCH_TRITON must be an integer (0 or 1), got: {val!r}"
+        ) from e
+
+    if is_pytorch_triton:
+        if use_pytorch_triton_explicit:
+            # User explicitly opted in - just log info (no warning)
+            pass  # Silent acknowledgment, no warning needed
+        else:
+            # pytorch-triton detected but user didn't explicitly opt in
+            warnings.warn(
+                f"Detected pytorch-triton package (version {triton_version}) instead of the"
+                " standard 'triton' package from OpenAI. This typically happens when PyTorch is"
+                " installed alongside JAX.\n\npytorch-triton is compatible with JAX Triton"
+                " kernels. To suppress this warning, set:\n    export"
+                " NVTE_USE_PYTORCH_TRITON=1\n\nAlternatively, for a JAX-only environment:\n  - Use"
+                " separate virtual environments for JAX and PyTorch, or\n  - Use"
+                " transformer_engine.jax.cpp_extensions instead (CUDA-based, no Triton needed)",
+                category=UserWarning,
+                stacklevel=3,
+            )
+
+    return triton_version, is_pytorch_triton
+
+
+# Perform compatibility check and get triton info
+_TRITON_VERSION, _IS_PYTORCH_TRITON = _check_triton_compatibility()
+
+# Enforce minimum JAX version before importing gpu_triton.  The segfault on old
+# jaxlib occurs at Triton kernel dispatch time, not at import time, so gpu_triton
+# itself is safe to import on older jaxlib.  The guard is placed here (before the
+# import) as a belt-and-suspenders measure so that if the import behaviour ever
+# changes, we still fail fast with a clear error rather than a cryptic crash.
+if not is_triton_extension_supported():
+    raise RuntimeError(
+        f"JAX >= {TRITON_EXTENSION_MIN_JAX_VERSION} required for "
+        "transformer_engine.jax.triton_extensions. "
+        "Triton kernel dispatch segfaults with older jaxlib. "
+        f"Current jax version: {jax.__version__}. "
+        "Please upgrade: pip install --upgrade jax jaxlib. "
+        "If you don't need Triton, use transformer_engine.jax.cpp_extensions instead."
+    )
 
 try:
     from jax._src.lib import gpu_triton
@@ -30,10 +196,45 @@ except ImportError as e:
     ) from e
 
 
-__all__ = ["triton_call_lowering"]
+__all__ = ["triton_call_lowering", "get_triton_info"]
 
 # Triton kernel cache (module-level, shared across all kernels)
 _TRITON_KERNEL_CACHE = {}
+
+
+def get_triton_info():
+    """Get information about the installed Triton package.
+
+    Returns:
+        dict: Dictionary containing:
+            - version (str): Triton version string (e.g., "3.1.0" or "3.0.0+45fff310c8")
+            - is_pytorch_triton (bool): True if using real pytorch-triton from PyTorch's index
+            - is_openai_triton (bool): True if using standard triton from OpenAI/PyPI
+            - env_acknowledged (bool): True if NVTE_USE_PYTORCH_TRITON=1 is set
+            - source (str): "pytorch" or "openai" indicating the package source
+
+    Example:
+        from transformer_engine.jax.triton_extensions import get_triton_info
+        info = get_triton_info()
+        print(f"Triton version: {info['version']} (from {info['source']})")
+        if info['is_pytorch_triton']:
+             print("Using pytorch-triton - compatible with both PyTorch and JAX")
+    """
+    val = os.environ.get("NVTE_USE_PYTORCH_TRITON", "0")
+    try:
+        env_acknowledged = bool(int(val))
+    except ValueError as e:
+        raise ValueError(
+            f"NVTE_USE_PYTORCH_TRITON must be an integer (0 or 1), got: {val!r}"
+        ) from e
+
+    return {
+        "version": _TRITON_VERSION,
+        "is_pytorch_triton": _IS_PYTORCH_TRITON,
+        "is_openai_triton": not _IS_PYTORCH_TRITON,
+        "env_acknowledged": env_acknowledged and _IS_PYTORCH_TRITON,
+        "source": "pytorch" if _IS_PYTORCH_TRITON else "openai",
+    }
 
 
 def get_triton_dtype(aval):
@@ -114,13 +315,16 @@ def compile_triton(
         return _TRITON_KERNEL_CACHE[cache_key]
 
     # Compile kernel
+    cuda_option_kwargs = {}
+    if version.parse(_TRITON_VERSION) < version.parse("3.6.0"):
+        cuda_option_kwargs["cluster_dims"] = (1, 1, 1)
     options = cb.CUDAOptions(
         num_warps=num_warps,
         num_stages=num_stages,
         num_ctas=num_ctas,
-        cluster_dims=(1, 1, 1),
         debug=False,
         enable_fp_fusion=enable_fp_fusion,
+        **cuda_option_kwargs,
     )
 
     # Mark constants as constexpr in signature
@@ -143,8 +347,6 @@ def compile_triton(
 
     # Create kernel object for JAX
     # From jax/jaxlib/gpu/triton_kernels.cc:
-    from packaging import version
-
     if version.parse(jax.__version__) >= version.parse("0.8.2"):
         kernel = gpu_triton.TritonKernel(
             compiled.name,  # arg0: kernel_name (str)
@@ -248,8 +450,34 @@ def triton_call_lowering(
     num_ctas = 1
     kernel_constexprs = constexprs if constexprs is not None else {}
 
-    # Handle autotuned kernels - compile all configs
-    if isinstance(kernel_fn, autotuner.Autotuner):
+    # Handle autotuned kernels - compile all configs.
+    # On JAX < TRITON_AUTOTUNED_INPUT_OUTPUT_ALIAS_MIN_JAX_VERSION the save/restore
+    # loop in TritonAutotunedKernelCall is buggy (jax-ml/jax#35218).  Fall back to a
+    # single non-autotuned dispatch for compatibility.  Set
+    # NVTE_JAX_ENFORCE_TRITON_AUTOTUNING=1 to raise an error instead, prompting the
+    # user to upgrade JAX for improved performance.
+    is_autotuned = isinstance(kernel_fn, autotuner.Autotuner)
+    if is_autotuned and not is_triton_autotuned_alias_safe():
+        val = os.environ.get("NVTE_JAX_ENFORCE_TRITON_AUTOTUNING", "0")
+        try:
+            enforce = bool(int(val))
+        except ValueError as e:
+            raise ValueError(
+                f"NVTE_JAX_ENFORCE_TRITON_AUTOTUNING must be an integer (0 or 1), got: {val!r}"
+            ) from e
+        if enforce:
+            raise RuntimeError(
+                "NVTE_JAX_ENFORCE_TRITON_AUTOTUNING=1 requires JAX >= "
+                f"{TRITON_AUTOTUNED_INPUT_OUTPUT_ALIAS_MIN_JAX_VERSION} (stable) or a "
+                "post-2026-03-17 nightly for safe Triton autotuning (jax-ml/jax#35218). "
+                f"Current JAX version: {jax.__version__}. "
+                "Upgrade: pip install --upgrade jax jaxlib"
+            )
+        # Compatibility fallback: disable autotuning on old JAX to avoid
+        # CUDA_ERROR_INVALID_VALUE from the unfixed save/restore loop.
+        is_autotuned = False
+
+    if is_autotuned:
         # Compile all configs for runtime selection
         kernel_calls = []
         actual_kernel_fn = kernel_fn.fn
@@ -260,8 +488,10 @@ def triton_call_lowering(
             config_num_stages = config.num_stages if config.num_stages is not None else num_stages
             config_num_ctas = config.num_ctas if config.num_ctas is not None else num_ctas
 
-            # Merge config kwargs with user constexprs
-            config_constexprs = {**config.kwargs, **(constexprs if constexprs else {})}
+            # Config kwargs (e.g. BLOCK_SIZE) take priority over caller constexprs so that
+            # each autotuning candidate actually compiles with its own BLOCK_SIZE rather than
+            # having the caller-supplied grid BLOCK_SIZE override every config.
+            config_constexprs = {**(constexprs if constexprs else {}), **config.kwargs}
 
             # Compile this config
             config_kernel = compile_triton(
@@ -290,19 +520,19 @@ def triton_call_lowering(
 
             kernel_calls.append((config_call, str(config)))
 
-        # Create autotuned kernel call
-        # Convert input_output_aliases to format with sizes
-        if input_output_aliases is None:
-            input_output_aliases = {}
-
-        input_output_aliases_with_sizes = tuple(
-            (
-                input_idx,
-                output_idx,
-                ctx.avals_in[input_idx].size * ctx.avals_in[input_idx].dtype.itemsize,
-            )
-            for input_idx, output_idx in input_output_aliases.items()
-        )
+        input_output_aliases_with_sizes = ()
+        if input_output_aliases:
+            # JAX version is guaranteed >= TRITON_AUTOTUNED_INPUT_OUTPUT_ALIAS_MIN_JAX_VERSION
+            # here — verified by the upfront check that set is_autotuned.
+            num_inputs = len(ctx.avals_in)
+            aliases = []
+            for input_idx, output_idx in input_output_aliases.items():
+                aval = ctx.avals_in[input_idx]
+                size_bytes = aval.size * jnp.dtype(aval.dtype).itemsize
+                # AutotunedKernelCall expects buffer indices (inputs + outputs).
+                buffer_output_idx = num_inputs + output_idx
+                aliases.append((input_idx, buffer_output_idx, size_bytes))
+            input_output_aliases_with_sizes = tuple(aliases)
 
         kernel_call = gpu_triton.TritonAutotunedKernelCall(
             f"{actual_kernel_fn.__name__}_autotuned",
@@ -311,7 +541,21 @@ def triton_call_lowering(
         )
 
     else:
-        # Regular kernel: compile single config
+        # Regular kernel: compile single config.
+        # If the kernel is an Autotuner but JAX is too old for safe autotuning, unwrap
+        # it and use the first config's kwargs (user constexprs take priority via dict merge).
+        if isinstance(kernel_fn, autotuner.Autotuner):
+            actual_kernel_fn = kernel_fn.fn
+            if kernel_fn.configs:
+                first_cfg = kernel_fn.configs[0]
+                # user constexprs override config kwargs (so stride / size scalars win)
+                kernel_constexprs = {**first_cfg.kwargs, **(constexprs or {})}
+                num_warps = first_cfg.num_warps if first_cfg.num_warps is not None else num_warps
+                num_stages = (
+                    first_cfg.num_stages if first_cfg.num_stages is not None else num_stages
+                )
+                num_ctas = first_cfg.num_ctas if first_cfg.num_ctas is not None else num_ctas
+
         kernel = compile_triton(
             actual_kernel_fn,
             signature,
@@ -338,15 +582,17 @@ def triton_call_lowering(
     serialized_metadata = b""
     call_proto = kernel_call.to_proto(actual_kernel_fn.__name__, serialized_metadata)
 
-    if input_output_aliases is None:
-        input_output_aliases = {}
+    if input_output_aliases:
+        ffi_operand_output_aliases = input_output_aliases
+    else:
+        ffi_operand_output_aliases = None
 
     # Use JAX FFI lowering with compressed protobuf
     rule = jax.ffi.ffi_lowering(
         "triton_kernel_call",  # Custom call target registered in gpu_triton.py
         api_version=2,
         backend_config=zlib.compress(call_proto),
-        operand_output_aliases=input_output_aliases,
+        operand_output_aliases=ffi_operand_output_aliases,
     )
 
     return rule(ctx, *array_args)

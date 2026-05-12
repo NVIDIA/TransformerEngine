@@ -16,8 +16,11 @@ from jax import lax
 from jax import random as jax_random
 from jax.ad_checkpoint import checkpoint_name
 
+from transformer_engine.common.recipe import (
+    MXFP8BlockScaling,
+)
 
-from ..dense import dense
+from ..dense import dense, grouped_dense
 
 from ..layernorm import canonicalize_norm_type
 from ..layernorm import layernorm
@@ -377,6 +380,7 @@ class TransformerEngineBase(nn.Module):  # pylint: disable=too-few-public-method
         variable_collection: str = None,
         quantization_checkpoint_name: Optional[str] = None,
         fp8_recipe=None,
+        n_groups: int = None,
     ):
         """
         Generate a set of FP8 meta for a GEMM.
@@ -409,6 +413,7 @@ class TransformerEngineBase(nn.Module):  # pylint: disable=too-few-public-method
             fp8_recipe=fp8_recipe,
             quantize_meta_set=quantize_meta_set,
             checkpoint_name=quantization_checkpoint_name,
+            n_groups=n_groups,
         )
         return quantizer_set
 
@@ -1356,7 +1361,12 @@ class LayerNormMLP(TransformerEngineBase):
         return out, ln_output  # Output, layer_norm_output
 
 
-def wrap_function_in_te_state_module(f, quantization_recipe, name: Optional[str] = None):
+def wrap_function_in_te_state_module(
+    f,
+    quantization_recipe,
+    name: Optional[str] = None,
+    quantization_checkpoint_name: Optional[str] = None,
+):
     """Wraps the given function `f` to support TransformerEngine quantization.
 
     This method does a couple things:
@@ -1379,12 +1389,14 @@ def wrap_function_in_te_state_module(f, quantization_recipe, name: Optional[str]
     class TEWrapper(te.flax.module.TransformerEngineBase):
         """Wrapper Flax module for TransformerEngine quantization support."""
 
-        def generate_quantizer_set(self, postfix: str = ""):
+        def generate_quantizer_set(self, postfix: str = "", n_groups: int = None):
             OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
             return super().generate_quantizer_set(
                 postfix=postfix,
                 variable_collection=OVERWRITE_WITH_GRADIENT,
+                quantization_checkpoint_name=quantization_checkpoint_name,
                 fp8_recipe=quantization_recipe,
+                n_groups=n_groups,
             )
 
         @nn.compact
@@ -1438,3 +1450,35 @@ def make_dot_general_cls(quantization_recipe):
         )
 
     return wrap_function_in_te_state_module(te_dot_general, quantization_recipe, "dot_general")
+
+
+def make_grouped_dense_cls(quantization_recipe, quantization_checkpoint_name: Optional[str] = None):
+    """Creates a grouped dense (grouped GEMM) instance for use with TE state module."""
+    if quantization_recipe is not None:
+        allowed_grouped_gemm_recipes = [MXFP8BlockScaling]
+        assert any(isinstance(quantization_recipe, r) for r in allowed_grouped_gemm_recipes), (
+            "Only the following quantization recipes are supported for grouped GEMM or `None` for"
+            f" BF16 without quantization: {allowed_grouped_gemm_recipes}. Got"
+            f" {type(quantization_recipe)}."
+        )
+
+    def te_grouped_dot_general(generate_quantizer_set, x, kernel, group_sizes, **kwargs):
+        del kwargs  # Unused
+        num_groups = group_sizes.shape[0]
+        quantizer_set = generate_quantizer_set(n_groups=num_groups)
+
+        out = grouped_dense(
+            x,
+            kernel,
+            group_sizes=group_sizes,
+            contracting_dims=((1,), (1,)),
+            quantizer_set=quantizer_set,
+        )
+        return out
+
+    return wrap_function_in_te_state_module(
+        te_grouped_dot_general,
+        quantization_recipe,
+        "ragged_dot",
+        quantization_checkpoint_name=quantization_checkpoint_name,
+    )()

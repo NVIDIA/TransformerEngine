@@ -293,6 +293,27 @@ void generateMatrixStrides(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int6
         strideA[hidden_dim_idx] = 1;
       }
       break;
+    case NVTE_QKV_Layout::NVTE_BHSD_BHSD_BHSD:
+      if ((matrix == NVTE_QKV_Matrix::NVTE_Q_Matrix) ||
+          (matrix == NVTE_QKV_Matrix::NVTE_O_Matrix)) {
+        strideA[batch_dim_idx] = h * s_q * d;
+        strideA[head_dim_idx] = s_q * d;
+        strideA[seqlen_dim_idx] = d;
+        strideA[hidden_dim_idx] = 1;
+      } else if ((matrix == NVTE_QKV_Matrix::NVTE_K_Matrix) ||
+                 (matrix == NVTE_QKV_Matrix::NVTE_V_Matrix)) {
+        strideA[batch_dim_idx] = h * s_kv * d;
+        strideA[head_dim_idx] = s_kv * d;
+        strideA[seqlen_dim_idx] = d;
+        strideA[hidden_dim_idx] = 1;
+      } else if ((matrix == NVTE_QKV_Matrix::NVTE_K_Matrix_Transpose) ||
+                 (matrix == NVTE_QKV_Matrix::NVTE_V_Matrix_Transpose)) {
+        strideA[batch_dim_idx] = h * s_kv * d;
+        strideA[head_dim_idx] = s_kv * d;
+        strideA[seqlen_transpose_dim_idx] = d;
+        strideA[hidden_transpose_dim_idx] = 1;
+      }
+      break;
   }
 
   if (matrix == NVTE_QKV_Matrix::NVTE_S_Matrix) {
@@ -388,20 +409,6 @@ cudnn_frontend::Operation ternary_pw_op_create(cudnn_frontend::Tensor const &xDe
           .setpwDesc(pwDesc)
           .build();
   return pw_op_created;
-}
-
-// convert cu_seqlens_q to qkv/o_ragged_offset and actual_seqlens_q
-__global__ void cu_seqlens_to_offsets(int64_t b, int64_t h, int64_t d, int32_t *cu_seqlens_q,
-                                      int32_t *actual_seqlens_q, int32_t *qkv_ragged_offset,
-                                      int32_t *o_ragged_offset) {
-  size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-  if (tid < b) {
-    actual_seqlens_q[tid] = cu_seqlens_q[tid + 1] - cu_seqlens_q[tid];
-  }
-  if (tid < b + 1) {
-    qkv_ragged_offset[tid] = cu_seqlens_q[tid] * 3 * h * d;
-    o_ragged_offset[tid] = cu_seqlens_q[tid] * h * d;
-  }
 }
 
 // convert cu_seqlens to actual_seqlens
@@ -535,11 +542,13 @@ size_t get_max_batch_size(size_t batch_size) {
   // batch size is expected to be 10s-100s
   // b = 1, ..., 32   -> max_b = 32
   // b = 33, ..., 512 -> max_b = next power of 2
-  // otherwise        -> max_b = b
+  // b = 513, ...     -> max_b = increment by 512
   if (log2_b <= 5) {
     max_b = 32;
   } else if (log2_b <= 9) {
     max_b = pow(2, log2_b);
+  } else {
+    max_b = (batch_size + 511) / 512 * 512;
   }
   return max_b;
 }

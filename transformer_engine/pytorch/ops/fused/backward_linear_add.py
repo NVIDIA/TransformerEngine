@@ -9,9 +9,13 @@ from typing import Optional
 
 import torch
 
-from ...module.base import get_dummy_wgrad
 from ...utils import clear_tensor_data
 from ..basic import BasicLinear, MakeExtraOutput
+from .._common import (
+    get_accumulate_flag_in_param,
+    get_dummy_wgrads_for_params,
+    get_main_grad_from_param,
+)
 from ..op import FusedOperation, FusibleOperation, OperationContext
 
 
@@ -45,7 +49,7 @@ class BackwardLinearAdd(FusedOperation):
 
         # Get basic operations
         linear_op = self.basic_ops[1]
-        linear_op_ctx = basic_op_ctxs[0]
+        linear_op_ctx = basic_op_ctxs[1]
 
         # Saved tensors from forward pass
         (x_local, w) = linear_op_ctx.saved_tensors
@@ -57,21 +61,14 @@ class BackwardLinearAdd(FusedOperation):
         grad_weight = None
         if linear_op_ctx.weight_requires_grad and accumulate_into_main_grad:
             weight_param = linear_op.weight
-            if hasattr(weight_param, "__fsdp_param__"):
-                weight_param.main_grad = weight_param.get_main_grad()
-            accumulate_into_main_grad = not getattr(weight_param, "overwrite_main_grad", False)
-            if not hasattr(weight_param, "main_grad"):
-                raise RuntimeError(
-                    "BasicLinear op is configured with "
-                    "accumulate_into_main_grad=True, "
-                    "but weight parameter does not have main_grad attribute"
-                )
-            grad_weight = weight_param.main_grad.detach()
+            main_grad = get_main_grad_from_param(weight_param, op_label="BasicLinear")
+            accumulate_into_main_grad = get_accumulate_flag_in_param(weight_param)
+            grad_weight = main_grad.detach()
         else:
             accumulate_into_main_grad = False
 
         # Linear backward pass
-        grad_input = basic_op_grad_extra_outputs[1][0]
+        grad_input = basic_op_grad_extra_outputs[0][0]
         grad_input, grad_weight = BasicLinear._functional_backward(
             grad_output=grad_output,
             input=x_local,
@@ -99,71 +96,62 @@ class BackwardLinearAdd(FusedOperation):
         # Megatron-LM wgrad fusion
         # Note: Return dummy tensor for grad weight if needed.
         if accumulate_into_main_grad:
-            grad_weight = None
-            weight_param = linear_op.weight
-            if hasattr(weight_param, "grad_added_to_main_grad"):
-                weight_param.grad_added_to_main_grad = True
-                grad_weight = get_dummy_wgrad(
-                    list(weight_param.size()),
-                    weight_param.dtype,
-                    zero=getattr(weight_param, "zero_out_wgrad", False),
-                )
+            grad_weight = get_dummy_wgrads_for_params([linear_op.weight])[0]
 
-        return grad_input, [(grad_weight,), ()], [(), ()]
+        return grad_input, [(), (grad_weight,)], [(), ()]
 
+    @staticmethod
+    def fuse_backward_ops(
+        ops: list[FusibleOperation],
+        **unused,  # pylint: disable=unused-argument
+    ) -> list[FusibleOperation]:
+        """Apply operation fusion for backward pass.
 
-def fuse_backward_linear_add(
-    ops: list[tuple[FusibleOperation, list[int]]],
-) -> list[tuple[FusibleOperation, list[int]]]:
-    """Fused backward dgrad GEMM + add
+        Parameters
+        ----------
+        ops : list of FusibleOperation
+            Backward pass operations.
 
-    Parameters
-    ----------
-    ops : list of tuples
-        Backward pass operations and the indices of the corresponding
-        basic operations.
+        Returns
+        -------
+        ops : list of FusibleOperation
+            Updated backward pass operations
 
-    Returns
-    -------
-    ops : list of tuples
-        Updated backward pass operations
+        """
 
-    """
+        # Scan through ops, fusing if possible
+        out = []
+        window, ops = ops[:2], ops[2:]
+        while len(window) == 2:
 
-    # Scan through ops, fusing if possible
-    out = []
-    window = []
-    while len(ops) >= 2:
+            # Check if window matches pattern
+            matches_pattern = True
+            if not (isinstance(window[0], MakeExtraOutput) and isinstance(window[1], BasicLinear)):
+                matches_pattern = False
+            elif not window[0]._in_place:
+                # Fused op accumulates grad input in-place
+                matches_pattern = False
+            elif window[1].tensor_parallel_mode == "column":
+                # Column tensor-parallelism requires communication
+                # after the dgrad GEMM
+                matches_pattern = False
+
+            if matches_pattern:
+                # Construct fused op if window matches pattern
+                op = BackwardLinearAdd(backward_add=window[0], linear=window[1])
+                window = [op]
+            else:
+                # Shift window if window doesn't match pattern
+                out.extend(window[:-1])
+                window = window[-1:]
+
+            # Adjust window to expected size
+            out.extend(window[:-2])
+            window = window[-2:]
+            while ops and len(window) < 2:
+                window.append(ops[0])
+                ops = ops[1:]
+
+        # Return list of ops
         out.extend(window)
-
-        # Check if first op is linear
-        window, ops = ops[:1], ops[1:]
-        op, _ = window[0]
-        if not isinstance(op, BasicLinear):
-            continue
-        if op.tensor_parallel_mode == "column":
-            # Row tensor-parallelism requires communication after the
-            # GEMM
-            continue
-
-        # Check if second op is "make extra output"
-        op, _ = ops[0]
-        if not isinstance(op, MakeExtraOutput):
-            continue
-        if not op._in_place:
-            continue
-        window.extend(ops[:1])
-        ops = ops[1:]
-
-        # Replace window with fused op
-        op = BackwardLinearAdd(
-            linear=window[0][0],
-            backward_add=window[1][0],
-        )
-        basic_op_idxs = [basic_op_idxs[0] for _, basic_op_idxs in window]
-        window = [(op, basic_op_idxs)]
-
-    # Return list of ops
-    out.extend(window)
-    out.extend(ops)
-    return out
+        return out

@@ -5,11 +5,10 @@
 """Multi-head Attention."""
 import os
 import collections
-from typing import Callable, List, Optional, Tuple, Union
+from typing import Any, Callable, List, Optional, Tuple, Union
 import torch
 
-from transformer_engine.debug.pytorch.debug_state import TEDebugState
-from transformer_engine.pytorch.quantization import FP8GlobalStateManager
+from transformer_engine.pytorch.quantization import FP8GlobalStateManager, QuantizerRole
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 from transformer_engine.pytorch.module import LayerNormLinear, Linear, RMSNorm, LayerNorm
@@ -32,6 +31,7 @@ from transformer_engine.pytorch.distributed import (
 from transformer_engine.pytorch.attention.dot_product_attention import DotProductAttention
 from transformer_engine.pytorch.attention.inference import InferenceParams
 from transformer_engine.pytorch.attention.rope import apply_rotary_pos_emb
+from transformer_engine.pytorch.attention.dot_product_attention import utils as dpa_utils
 
 from transformer_engine.pytorch.cpu_offload import start_offload, is_cpu_offload_enabled
 
@@ -93,6 +93,11 @@ class MultiheadAttention(torch.nn.Module):
                 map to ``window_size = (-1, 0)`` and Transformer Engine distinguishes them based on
                 ``attn_mask_type``. Similar to :attr:`attn_mask_type`, ``window_size`` can
                 be overridden by :attr:`window_size` in :meth:`forward` as well.
+    bottom_right_diagonal: Optional[bool], default = `None`
+                          Align sliding window and ALiBi diagonal to the top left (`False`)
+                          or bottom right (`True`) corner of the softmax matrix in the encoder.
+                          If `None`, it will be set to `False` for `attn_mask_type` =
+                          {`causal`, `padding_causal`} and `True` for other mask types.
     num_gqa_groups : int, default = None
                          number of GQA groups in the transformer layer.
                          Grouped Query Attention is described in
@@ -248,6 +253,7 @@ class MultiheadAttention(torch.nn.Module):
         layer_number: Optional[int] = None,
         attn_mask_type: str = "causal",
         window_size: Optional[Tuple[int, int]] = None,
+        bottom_right_diagonal: Optional[bool] = None,
         tp_group: Optional[dist_group_type] = None,
         tp_size: int = 1,
         num_gqa_groups: Optional[int] = None,
@@ -286,6 +292,7 @@ class MultiheadAttention(torch.nn.Module):
         self.qkv_format = qkv_format
         self.attn_mask_type = attn_mask_type
         self.window_size = window_size
+        self.bottom_right_diagonal = bottom_right_diagonal
         self.layer_number = 1 if layer_number is None else layer_number
         self.input_layernorm = input_layernorm
         self.attention_type = attention_type
@@ -335,6 +342,7 @@ class MultiheadAttention(torch.nn.Module):
         self.hidden_size_kv = self.hidden_size_per_attention_head * self.num_gqa_groups
 
         self.name = name
+        TransformerEngineBaseModule._validate_name(self)
 
         common_gemm_kwargs = {
             "fuse_wgrad_accumulation": fuse_wgrad_accumulation,
@@ -347,7 +355,7 @@ class MultiheadAttention(torch.nn.Module):
         }
 
         self.q_norm, self.k_norm = self._create_qk_norm_modules(
-            qk_norm_type, qk_norm_eps, device, seq_length, micro_batch_size
+            qk_norm_type, qk_norm_eps, device, seq_length, micro_batch_size, params_dtype
         )
 
         qkv_parallel_mode = "column" if set_parallel_mode else None
@@ -453,6 +461,7 @@ class MultiheadAttention(torch.nn.Module):
             layer_number=self.layer_number,
             attention_type=self.attention_type,
             softmax_type=self.softmax_type,
+            name=name + ".core_attention" if name is not None else None,
         )
 
         # Linear
@@ -470,6 +479,88 @@ class MultiheadAttention(torch.nn.Module):
             **common_gemm_kwargs,
         )
 
+    def _update_output_quantizer_roles(
+        self,
+        qkv_fp8_output: bool,
+        proj_fp8_grad: bool,
+        dpa_fp8_output: bool,
+    ) -> None:
+        """Set quantizer roles at the boundaries between QKV, DPA, and proj.
+
+        MHA contains three submodules connected as follows::
+
+            Forward:   QKV linear ──(QKV tensor)──> DPA ──(O tensor)──> Proj linear
+            Backward:  QKV linear <──(dQKV tensor)── DPA <──(dO tensor)── Proj linear
+
+        Each submodule owns quantizers for its internal tensors, but the
+        *boundary* tensors (the arrows above) need to know which module
+        will *consume* them so the quantizer factory can pick the right
+        format.  This method sets those boundary roles on all four edges:
+
+        1. ``qkv_fp8_output``  — **QKV linear → DPA (fwd)**: the QKV
+           linear's ``output_quantizer_role`` is told its consumer is DPA.
+        2. ``proj_fp8_grad``   — **Proj linear ← DPA (bwd)**: proj's
+           ``grad_input_quantizer_role`` is told its producer is DPA.
+        3. ``dpa_fp8_output``  — **DPA → Proj linear (fwd)**: DPA's
+           ``output_quantizer_role`` is told its consumer is the proj linear.
+        4. ``dpa_fp8_output``  — **DPA ← QKV linear (bwd)**: DPA's
+           ``grad_input_quantizer_role`` is told its consumer is QKV linear.
+
+        When a flag is ``False`` the corresponding role is reset to ``None``
+        so the module falls back to its own default.
+        """
+        dpa_name = self.core_attention.name or ""
+
+        # ── Boundary 1 (fwd): QKV linear output → consumed by DPA ────────
+        qkv_output_role = (
+            QuantizerRole(module_type="dpa", tensor_type="qkv", name=dpa_name)
+            if qkv_fp8_output
+            else None
+        )
+        if self.attention_type == "self":
+            if self.input_layernorm:
+                self.layernorm_qkv.output_quantizer_role = qkv_output_role
+            else:
+                self.qkv.output_quantizer_role = qkv_output_role
+        elif self.attention_type == "cross":
+            if self.input_layernorm:
+                self.layernorm_query.output_quantizer_role = qkv_output_role
+            else:
+                self.query_layer.output_quantizer_role = qkv_output_role
+            self.key_value.output_quantizer_role = qkv_output_role
+
+        # ── Boundary 2 (bwd): Proj grad-input ← produced by DPA ──────────
+        proj_grad_input_role = (
+            QuantizerRole(module_type="dpa", tensor_type="do", name=dpa_name)
+            if proj_fp8_grad
+            else None
+        )
+        self.proj.grad_input_quantizer_role = proj_grad_input_role
+
+        # ── Boundary 3 (fwd): DPA output (O) → consumed by Proj linear ───
+        proj_name = self.proj.name or ""
+        self.core_attention.output_quantizer_role = (
+            QuantizerRole(module_type="linear", tensor_type="input", name=proj_name)
+            if dpa_fp8_output
+            else None
+        )
+
+        # ── Boundary 4 (bwd): DPA grad-input (dQKV) → consumed by QKV linear
+        if self.attention_type == "self":
+            qkv_linear = self.layernorm_qkv if self.input_layernorm else self.qkv
+        else:
+            qkv_linear = self.layernorm_query if self.input_layernorm else self.query_layer
+        qkv_name = qkv_linear.name or ""
+        self.core_attention.grad_input_quantizer_role = (
+            QuantizerRole(module_type="linear", tensor_type="grad_output", name=qkv_name)
+            if dpa_fp8_output
+            else None
+        )
+
+    def fast_setattr(self, name: str, value: Any) -> None:
+        """Fast attribute set for non-parameter fields."""
+        self.__dict__[name] = value
+
     def _create_qk_norm_modules(
         self,
         qk_norm_type: Optional[str],
@@ -477,6 +568,7 @@ class MultiheadAttention(torch.nn.Module):
         device: Union[torch.device, str],
         seq_length: Optional[int] = None,
         micro_batch_size: Optional[int] = None,
+        params_dtype: Optional[torch.dtype] = None,
     ) -> Tuple[Optional[torch.nn.Module], Optional[torch.nn.Module]]:
         """
         Create query and key normalization modules based on the specified normalization type.
@@ -493,6 +585,8 @@ class MultiheadAttention(torch.nn.Module):
             Sequence length for L2Normalization optimization
         micro_batch_size : Optional[int], default = None
             Micro batch size for L2Normalization optimization
+        params_dtype : Optional[torch.dtype], default = None
+            Data type for the normalization modules
 
         Returns
         -------
@@ -516,11 +610,13 @@ class MultiheadAttention(torch.nn.Module):
                 normalized_shape=self.hidden_size_per_attention_head,
                 eps=qk_norm_eps,
                 device=device,
+                params_dtype=params_dtype,
             )
             k_norm = RMSNorm(
                 normalized_shape=self.hidden_size_per_attention_head,
                 eps=qk_norm_eps,
                 device=device,
+                params_dtype=params_dtype,
             )
             return q_norm, k_norm
 
@@ -529,11 +625,13 @@ class MultiheadAttention(torch.nn.Module):
                 normalized_shape=self.hidden_size_per_attention_head,
                 eps=qk_norm_eps,
                 device=device,
+                params_dtype=params_dtype,
             )
             k_norm = LayerNorm(
                 normalized_shape=self.hidden_size_per_attention_head,
                 eps=qk_norm_eps,
                 device=device,
+                params_dtype=params_dtype,
             )
             return q_norm, k_norm
 
@@ -621,6 +719,7 @@ class MultiheadAttention(torch.nn.Module):
         encoder_output: Optional[torch.Tensor] = None,
         attn_mask_type: Optional[str] = None,
         window_size: Optional[Tuple[int, int]] = None,
+        bottom_right_diagonal: Optional[bool] = None,
         is_first_microbatch: Optional[bool] = None,
         checkpoint_core_attention: bool = False,
         inference_params: Optional[InferenceParams] = None,
@@ -667,6 +766,11 @@ class MultiheadAttention(torch.nn.Module):
                        aligned to the bottom right corner.
         window_size: Optional[Tuple[int, int]], default = None
                     sliding window size for local attention.
+        bottom_right_diagonal: Optional[bool], default = `None`
+                              Align sliding window and ALiBi diagonal to the top left (`False`)
+                              or bottom right (`True`) corner of the softmax matrix in the encoder.
+                              If `None`, it will be set to `False` for `attn_mask_type` =
+                              {`causal`, `padding_causal`} and `True` for other mask types.
         encoder_output : Optional[torch.Tensor], default = None
              Output of the encoder block to be fed into the decoder block if using
              ``layer_type="decoder"``.
@@ -731,6 +835,17 @@ class MultiheadAttention(torch.nn.Module):
         if window_size is None:
             window_size = self.window_size
 
+        window_size = dpa_utils.check_set_window_size(attn_mask_type, window_size)
+        if bottom_right_diagonal is None:
+            bottom_right_diagonal = self.bottom_right_diagonal
+        if attn_mask_type in {"causal", "padding_causal"}:
+            bottom_right_diagonal = False
+        if bottom_right_diagonal is None or attn_mask_type in {
+            "causal_bottom_right",
+            "padding_causal_bottom_right",
+        }:
+            bottom_right_diagonal = True
+
         if "padding" in attn_mask_type and attention_mask is not None:
             for mask in attention_mask:
                 assert mask.dtype == torch.bool, "Attention mask must be in boolean type!"
@@ -738,9 +853,6 @@ class MultiheadAttention(torch.nn.Module):
         assert (
             core_attention_bias_type in AttnBiasTypes
         ), f"core_attention_bias_type {core_attention_bias_type} is not supported!"
-
-        if TEDebugState.debug_enabled:
-            TransformerEngineBaseModule._validate_name(self)
 
         # =================================================
         # Pre-allocate memory for key-value cache for inference
@@ -762,16 +874,34 @@ class MultiheadAttention(torch.nn.Module):
             fp8_dpa = fp8_recipe.fp8_dpa
             fp8_mha = fp8_recipe.fp8_mha
             float8_current_scaling = fp8_recipe.float8_current_scaling()
+            mxfp8_scaling = fp8_recipe.mxfp8()
         else:
             fp8_dpa = _dpa_fp8_recipe_dpa
             fp8_mha = _dpa_fp8_recipe_mha
             float8_current_scaling = _dpa_fp8_recipe == "Float8CurrentScaling"
-        # QKV Gemm: do not produce FP8 output when in Float8CurrentScaling recipe
-        qkv_fp8_output = fp8 and fp8_mha and rotary_pos_emb is None and not float8_current_scaling
-        # DPA: always produce FP8 output when fp8=True to take advantage of the O amax
-        dpa_fp8_output = fp8 and (fp8_dpa or fp8_mha)
-        # Proj Gemm: match DPA output except for Float8CurrentScaling
+            mxfp8_scaling = _dpa_fp8_recipe == "MXFP8BlockScaling"
+
+        # QKV Gemm: do not produce FP8 output when fp8_mha = True if
+        # 1. RoPE is on: RoPE is only implemented in F16 currently
+        # 2. FP8CS recipe: due to cuBLAS limitation, FP8CS Gemms can not produce FP8 output
+        # 3. MXFP8 recipe: QKV Gemm produces QKV in bs(hd), sb(hd), t(hd) shapes, quantization of which would be along
+        # s/b/t and (hd) dimensions, whereas MXFP8 attention requires quantization along s and d, e.g. bhsd, sbhd, thd
+        qkv_fp8_output = (
+            fp8
+            and fp8_mha
+            and rotary_pos_emb is None
+            and not float8_current_scaling
+            and not mxfp8_scaling
+        )
+        # DPA: produce FP8 output to take advantage of O amax from DPA; Projection Gemm can take FP8 or F16 inputs
+        # 1. FP8DS/FP8CS recipe: produce FP8 output
+        # 2. MXFP8 recipe: produce F16 output; again, due to quantization dimensions mismatch
+        dpa_fp8_output = fp8 and (fp8_dpa or fp8_mha) and not mxfp8_scaling
+        # Projection Gemm: match DPA output except
+        # 1. FP8CS recipe: produce F16 grads; again, due to cuBLAS limitation
         proj_fp8_grad = dpa_fp8_output and not float8_current_scaling
+
+        self._update_output_quantizer_roles(qkv_fp8_output, proj_fp8_grad, dpa_fp8_output)
 
         layernorm_output = None
         if self.attention_type == "self":
@@ -1004,6 +1134,7 @@ class MultiheadAttention(torch.nn.Module):
             attention_mask=attention_mask,
             attn_mask_type=attn_mask_type,
             window_size=window_size,
+            bottom_right_diagonal=bottom_right_diagonal,
             checkpoint_core_attention=checkpoint_core_attention,
             core_attention_bias_type=core_attention_bias_type,
             core_attention_bias=core_attention_bias,

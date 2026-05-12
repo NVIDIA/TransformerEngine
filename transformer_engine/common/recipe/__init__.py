@@ -11,6 +11,9 @@ from dataclasses import field
 from pydantic.dataclasses import dataclass
 
 
+_BACKWARD_OVERRIDES = (None, "high_precision", "dequantized")
+
+
 class _FormatHelper(NamedTuple):
     """
     Stores max FP8 values for fprop and bprop a `Format`.
@@ -88,33 +91,40 @@ class Recipe:
     Base recipe class.
     """
 
-    def nvfp4(self):
+    @classmethod
+    def nvfp4(cls):
         """Whether the given recipe is NVFP4 1D block scaling."""
-        return isinstance(self, NVFP4BlockScaling)
+        return issubclass(cls, NVFP4BlockScaling)
 
-    def mxfp8(self):
+    @classmethod
+    def mxfp8(cls):
         """Whether the given recipe is MXFP8 block scaling."""
-        return isinstance(self, MXFP8BlockScaling)
+        return issubclass(cls, MXFP8BlockScaling)
 
-    def delayed(self):
+    @classmethod
+    def delayed(cls):
         """Whether the given recipe is delayed scaling."""
-        return isinstance(self, DelayedScaling)
+        return issubclass(cls, DelayedScaling)
 
-    def float8_current_scaling(self):
+    @classmethod
+    def float8_current_scaling(cls):
         """Whether the given recipe is (per-tensor) current scaling."""
-        return isinstance(self, Float8CurrentScaling)
+        return issubclass(cls, Float8CurrentScaling)
 
-    def float8_per_tensor_scaling(self):
+    @classmethod
+    def float8_per_tensor_scaling(cls):
         """Whether the given recipe is per-tensor scaling."""
-        return isinstance(self, (DelayedScaling, Float8CurrentScaling))
+        return issubclass(cls, (DelayedScaling, Float8CurrentScaling))
 
-    def float8_block_scaling(self):
+    @classmethod
+    def float8_block_scaling(cls):
         """Whether the given recipe is float8 blockwise scaling."""
-        return isinstance(self, Float8BlockScaling)
+        return issubclass(cls, Float8BlockScaling)
 
-    def custom(self):
+    @classmethod
+    def custom(cls):
         """Whether the given recipe is custom."""
-        return isinstance(self, CustomRecipe)
+        return issubclass(cls, CustomRecipe)
 
 
 @dataclass()
@@ -181,6 +191,8 @@ class DelayedScaling(Recipe):
             `LayerNormLinear (BF16 output) -> (cast to FP8 ) FP8 DPA (cast to BF16) -> Linear`.
             When `fp8_mha = True, fp8_dpa = True`, it becomes
             `LayerNormLinear (FP8 output) -> FP8 DPA -> Linear`.
+    backward_override : {None, 'high_precision', 'dequantized'}, default = None
+            Backward precision mode. Delayed scaling only supports None.
 
     Notes
     -----
@@ -204,9 +216,16 @@ class DelayedScaling(Recipe):
     reduce_amax: bool = True
     fp8_dpa: bool = False
     fp8_mha: bool = False
+    backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
 
     def __post_init__(self) -> None:
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
+        assert (
+            self.backward_override in _BACKWARD_OVERRIDES
+        ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
+        assert (
+            self.backward_override is None
+        ), "Delayed scaling only supports backward_override=None."
 
     def __repr__(self) -> str:
         return (
@@ -216,7 +235,8 @@ class DelayedScaling(Recipe):
             f"amax_history_len={self.amax_history_len}, "
             f"reduce_amax={self.reduce_amax}, "
             f"fp8_dpa={self.fp8_dpa}, "
-            f"fp8_mha={self.fp8_mha}"
+            f"fp8_mha={self.fp8_mha}, "
+            f"backward_override={self.backward_override}"
         )
 
 
@@ -230,6 +250,11 @@ class Float8CurrentScaling(Recipe):
     fp8_format : {Format.E4M3, Format.HYBRID}, default = Format.HYBRID
                 Controls the FP8 data format used during forward and backward
                 pass.
+    backward_override : {None, 'high_precision', 'dequantized'}, default = None
+            Backward precision mode. None does not modify backward behavior,
+            `high_precision` keeps original high-precision operands for backward,
+            and `dequantized` dequantizes saved operands to the active high-precision
+            compute dtype (e.g. BF16/FP16/FP32) for backward.
     """
 
     use_power_2_scales: bool = os.getenv("NVTE_FP8_CURRENT_SCALING_POWER_2_SCALES", "0") == "1"
@@ -242,9 +267,13 @@ class Float8CurrentScaling(Recipe):
     fp8_gemm_wgrad: MMParams = MMParams(use_split_accumulator=True)
     fp8_dpa: bool = False
     fp8_mha: bool = False
+    backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
 
     def __post_init__(self) -> None:
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
+        assert (
+            self.backward_override in _BACKWARD_OVERRIDES
+        ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
 
     def __repr__(self) -> str:
         return (
@@ -257,7 +286,8 @@ class Float8CurrentScaling(Recipe):
             f"fp8_gemm_dgrad={self.fp8_gemm_dgrad}, "
             f"fp8_gemm_wgrad={self.fp8_gemm_wgrad}, "
             f"fp8_dpa={self.fp8_dpa}, "
-            f"fp8_mha={self.fp8_mha}"
+            f"fp8_mha={self.fp8_mha}, "
+            f"backward_override={self.backward_override}"
         )
 
 
@@ -284,21 +314,31 @@ class MXFP8BlockScaling(Recipe):
     fp8_format : {Format.E4M3, Format.HYBRID}, default = Format.E4M3
                 Controls the FP8 data format used during forward and backward
                 pass.
+    backward_override : {None, 'high_precision', 'dequantized'}, default = None
+            Backward precision mode. None does not modify backward behavior,
+            `high_precision` keeps original high-precision operands for backward,
+            and `dequantized` dequantizes saved operands to the active high-precision
+            compute dtype (e.g. BF16/FP16/FP32) for backward.
     """
 
     margin: int = 0
     fp8_format: Format = Format.E4M3
     fp8_dpa: bool = False
     fp8_mha: bool = False
+    backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
 
     def __post_init__(self) -> None:
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
+        assert (
+            self.backward_override in _BACKWARD_OVERRIDES
+        ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
 
     def __repr__(self) -> str:
         return (
             f"recipe_type={self.__class__.__name__}, "
             f"margin={self.margin}, "
-            f"format={str(self.fp8_format).split('.')[1]}"
+            f"format={str(self.fp8_format).split('.')[1]}, "
+            f"backward_override={self.backward_override}"
         )
 
 
@@ -327,6 +367,11 @@ class Float8BlockScaling(Recipe):
     fp8_format : {Format.E4M3, Format.HYBRID}, default = Format.E4M3
                 Controls the FP8 data format used during forward and backward
                 pass.
+    backward_override : {None, 'high_precision', 'dequantized'}, default = None
+            Backward precision mode. None does not modify backward behavior,
+            `high_precision` keeps original high-precision operands for backward,
+            and `dequantized` dequantizes saved operands to the active high-precision
+            compute dtype (e.g. BF16/FP16/FP32) for backward.
     """
 
     use_f32_scales: bool = os.getenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", "0") == "1"
@@ -343,6 +388,7 @@ class Float8BlockScaling(Recipe):
     fp8_gemm_wgrad: MMParams = MMParams(use_split_accumulator=True)
     fp8_dpa: bool = False
     fp8_mha: bool = False
+    backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
 
     def __post_init__(self) -> None:
         assert self.x_block_scaling_dim in [1, 2], "Only 1D or 2D blocks supported for x"
@@ -364,6 +410,9 @@ class Float8BlockScaling(Recipe):
             not self.fp8_dpa and not self.fp8_mha
         ), "FP8 attention is not supported for Float8BlockScaling."
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
+        assert (
+            self.backward_override in _BACKWARD_OVERRIDES
+        ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
 
     def __repr__(self) -> str:
         return (
@@ -379,7 +428,8 @@ class Float8BlockScaling(Recipe):
             f"fp8_gemm_dgrad={self.fp8_gemm_dgrad}, "
             f"fp8_gemm_wgrad={self.fp8_gemm_wgrad}, "
             f"fp8_dpa={self.fp8_dpa}, "
-            f"fp8_mha={self.fp8_mha}"
+            f"fp8_mha={self.fp8_mha}, "
+            f"backward_override={self.backward_override}"
         )
 
 
@@ -428,6 +478,15 @@ class NVFP4BlockScaling(Recipe):
              If set to `True`, stochastic rounding is disabled during quantization for all tensors.
     disable_2d_quantization : bool, default = False
              If set to `True`, 1D block scaling with block size 16 is used for all tensors.
+    row_scaled_activation : bool, default = False
+             If set to `True`, forward activation quantizers emit row-scaled
+             NVFP4 tensors. In this mode, rowwise ``amax`` metadata is stored
+             as a vector with one FP32 value per tensor row.
+    backward_override : {None, 'high_precision', 'dequantized'}, default = None
+            Backward precision mode. None does not modify backward behavior,
+            `high_precision` keeps original high-precision operands for backward,
+            and `dequantized` dequantizes saved operands to the active high-precision
+            compute dtype (e.g. BF16/FP16/FP32) for backward.
     """
 
     # Configuration envvars
@@ -436,6 +495,7 @@ class NVFP4BlockScaling(Recipe):
         os.getenv("NVTE_NVFP4_DISABLE_STOCHASTIC_ROUNDING", "0") == "1"
     )
     disable_2d_quantization: bool = os.getenv("NVTE_NVFP4_DISABLE_2D_QUANTIZATION", "0") == "1"
+    row_scaled_activation: bool = os.getenv("NVTE_NVFP4_ROW_SCALED_ACTIVATION", "0") == "1"
 
     fp4_format: Format = Format.E2M1
     fp8_format: Format = Format.E4M3
@@ -443,10 +503,14 @@ class NVFP4BlockScaling(Recipe):
     # Not applying quantization to attention for now
     fp8_dpa: bool = False
     fp8_mha: bool = False
+    backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
 
     def __post_init__(self) -> None:
         assert self.fp4_format == Format.E2M1, "Only E2M1 is supported for NVFP4 scaling"
         assert self.fp8_format == Format.E4M3, "Only E4M3 is supported for NVFP4 scaling"
+        assert (
+            self.backward_override in _BACKWARD_OVERRIDES
+        ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
 
         # Quantization params
         # Note: RHT is currently only applied to column-wise usage so that
@@ -474,6 +538,8 @@ class NVFP4BlockScaling(Recipe):
             f"fp8_format={str(self.fp8_format).split('.')[1]}, "
             f"fp8_dpa={self.fp8_dpa}, "
             f"fp8_mha={self.fp8_mha}, "
+            f"backward_override={self.backward_override}, "
+            f"row_scaled_activation={self.row_scaled_activation}, "
             f"fp4_quant_fwd_inp={self.fp4_quant_fwd_inp}, "
             f"fp4_quant_fwd_weight={self.fp4_quant_fwd_weight}, "
             f"fp4_quant_bwd_grad={self.fp4_quant_bwd_grad}, "
@@ -492,25 +558,59 @@ class CustomRecipe(Recipe):
     Parameters
     ----------
     qfactory : Callable
-        Factory callable that returns a quantizer instance for a
-        given semantic tensor role.
-        The callable is typically invoked as::
+        Factory callable that returns a quantizer instance *or* a
+        ``QuantizerRequest`` subclass for a given ``QuantizerRole``.
+        The callable is invoked as::
 
             qfactory(
-                role: str,
-            )
+                role: QuantizerRole,
+            ) -> Union[Quantizer, QuantizerRequest]
 
-        Where `role` is one of the following strings for e.g. te.Linear
-        (stable public contract):
+        ``QuantizerRole`` is a frozen dataclass with the following fields:
 
-        - forward:  "linear_input", "linear_weight", "linear_output"
-        - backward: "linear_grad_output", "linear_grad_input"
+        - ``module_type`` (str): module type (empty string when not set), e.g.
+          ``"linear"``, ``"grouped_linear"``, ``"dpa"``.
+        - ``tensor_type`` (str): what tensor is being quantized (empty
+          string when not set), e.g. ``"input"``, ``"weight"``, ``"grad_output"``.
+        - ``name`` (str): caller-provided module instance name (empty
+          string when not set), e.g. ``"qkv"``, ``"proj"``, ``"fc1"``, ``"fc2"``.
+
+        For stateful quantizers (delayed scaling), return a
+        ``DelayedScalingRequest`` dataclass instead of a quantizer.
+        TE will allocate shared scale/amax_history buffers and create
+        ``Float8Quantizer`` instances integrated with the existing
+        delayed-scaling reduction infrastructure.
+
+        See ``transformer_engine.pytorch.quantization.QuantizerRole``
+        and ``transformer_engine.pytorch.quantization.DelayedScalingRequest``
+        for full documentation.
+
+    backward_override : {None, 'high_precision', 'dequantized'}, default = None
+        Backward precision mode. None does not modify backward behavior,
+        `high_precision` keeps original high-precision operands for backward,
+        and `dequantized` dequantizes saved operands to the active high-precision
+        compute dtype (e.g. BF16/FP16/FP32) for backward.
     """
 
     qfactory: Callable[..., Any]
 
+    # fp8_format does not affect quantization (quantization factory controls that),
+    # but TE internals (e.g. get_fp8_te_dtype, backend selection) read it
+    # from the recipe.  HYBRID (E4M3 fwd, E5M2 bwd) is a safe default.
+    fp8_format: Format = Format.HYBRID
+
     fp8_dpa: bool = False
     fp8_mha: bool = False
+    backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
+
+    def __post_init__(self) -> None:
+        assert (
+            self.backward_override in _BACKWARD_OVERRIDES
+        ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
 
     def __repr__(self) -> str:
-        return f"recipe_type={self.__class__.__name__}, qfactory={self.qfactory}"
+        return (
+            f"recipe_type={self.__class__.__name__}, "
+            f"qfactory={self.qfactory}, "
+            f"backward_override={self.backward_override}"
+        )
