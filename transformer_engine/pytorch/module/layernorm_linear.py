@@ -63,6 +63,10 @@ from ..quantized_tensor import (
     restore_from_func_ctx,
 )
 from ...debug.pytorch.debug_state import TEDebugState
+from ...debug.pytorch.gemm_runtime_hooks import (
+    resolve_gemm_inputs_after_sampling,
+    should_resolve_inputs_after_sampling,
+)
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..cpu_offload import (
     is_cpu_offload_enabled,
@@ -365,10 +369,21 @@ class _LayerNormLinear(torch.autograd.Function):
         # Forward GEMM
         # Note: y = x * w^T
         # ------------------------------------------------------
+        fprop_weightmat = weightmat
+        fprop_ln_out_total = ln_out_total
+        if debug and should_resolve_inputs_after_sampling(weight_quantizer, input_quantizer):
+            fprop_weightmat, fprop_ln_out_total = resolve_gemm_inputs_after_sampling(
+                "fprop",
+                weightmat,
+                ln_out_total,
+                weight_quantizer,
+                input_quantizer,
+                activation_dtype,
+            )
         nvtx_range_push(f"{nvtx_label}.gemm")
         gemm_out, *_, reduce_scatter_out = general_gemm(
-            weightmat,
-            ln_out_total,
+            fprop_weightmat,
+            fprop_ln_out_total,
             quantization_params=output_quantizer,
             out_dtype=activation_dtype,
             bias=bias,
@@ -772,9 +787,22 @@ class _LayerNormLinear(torch.autograd.Function):
                 weight_for_dgrad = origin_weight
                 if isinstance(weight_for_dgrad, QuantizedTensorStorage):
                     weight_for_dgrad = weight_for_dgrad.dequantize(dtype=ctx.activation_dtype)
+            weight_for_dgrad_gemm = weight_for_dgrad
+            grad_output_for_dgrad = grad_output
+            if ctx.debug and should_resolve_inputs_after_sampling(
+                ctx.weight_quantizer, ctx.grad_output_quantizer
+            ):
+                weight_for_dgrad_gemm, grad_output_for_dgrad = resolve_gemm_inputs_after_sampling(
+                    "dgrad",
+                    weight_for_dgrad,
+                    grad_output,
+                    ctx.weight_quantizer,
+                    ctx.grad_output_quantizer,
+                    ctx.activation_dtype,
+                )
             gemm_out, *_, reduce_scatter_out = general_gemm(
-                weight_for_dgrad,
-                grad_output,
+                weight_for_dgrad_gemm,
+                grad_output_for_dgrad,
                 layout="NN",
                 grad=True,
                 quantization_params=ctx.grad_input_quantizer,
@@ -933,6 +961,17 @@ class _LayerNormLinear(torch.autograd.Function):
                     some advanced communication/compute overlapping.
 
                     """
+                    if ctx.debug and should_resolve_inputs_after_sampling(
+                        ctx.input_quantizer, ctx.grad_output_quantizer
+                    ):
+                        x, dy = resolve_gemm_inputs_after_sampling(
+                            "wgrad",
+                            x,
+                            dy,
+                            ctx.input_quantizer,
+                            ctx.grad_output_quantizer,
+                            ctx.activation_dtype,
+                        )
                     nvtx_range_push(f"{nvtx_label}.wgrad_gemm")
                     dw, db, *_ = general_gemm(x, dy, **wgrad_gemm_kwargs)
                     nvtx_range_pop(f"{nvtx_label}.wgrad_gemm")

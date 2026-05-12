@@ -77,6 +77,19 @@ def _parent_quantizer(quantizer: Optional[Quantizer]) -> Optional[Quantizer]:
     return parent if parent is not None else quantizer
 
 
+def _can_quantize(tensor, quantizer: Optional[Quantizer]) -> bool:
+    """Return whether a tensor can be quantized by this quantizer."""
+    if quantizer is None or not isinstance(tensor, torch.Tensor):
+        return False
+    is_quantizable = getattr(quantizer, "is_quantizable", None)
+    if callable(is_quantizable):
+        try:
+            return bool(is_quantizable(tensor))
+        except Exception:  # pylint: disable=broad-except
+            return False
+    return True
+
+
 def _to_quantized_gemm_input(tensor, quantizer: Optional[Quantizer], dtype: torch.dtype):
     """Convert GEMM input to a quantized DebugQuantizedTensor-compatible object."""
     if tensor is None:
@@ -105,11 +118,14 @@ def _to_quantized_gemm_input(tensor, quantizer: Optional[Quantizer], dtype: torc
     quantizer = _parent_quantizer(quantizer)
     if quantizer is None or not isinstance(tensor, torch.Tensor):
         return tensor
+    tensor = cast_if_needed(tensor, dtype)
+    if not _can_quantize(tensor, quantizer):
+        return tensor
 
     # Use an isolated quantizer copy so runtime coercion does not perturb module state.
     quantizer = quantizer.copy() if hasattr(quantizer, "copy") else copy.copy(quantizer)
     quantizer.set_usage(rowwise=True, columnwise=True)
-    return quantizer(cast_if_needed(tensor, dtype))
+    return quantizer(tensor)
 
 
 def _selected_gemm_tensor(tensor, transpose: bool):
@@ -152,6 +168,7 @@ def _log_final_gemm_decision(
     quantized_enabled: bool,
     lhs_quantized: bool,
     rhs_quantized: bool,
+    actual_precision: str,
 ) -> None:
     """Write final AutoswitchGemm decision to the autoswitch rank-local log."""
     rank = os.getenv("RANK", "0")
@@ -170,10 +187,13 @@ def _log_final_gemm_decision(
     log_file = os.path.join(log_dir, f"nvdlfw_inspect_globalrank-{rank}.log")
     os.makedirs(log_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S,%f")[:-3]
+    requested_precision = "fp8" if quantized_enabled else "bf16"
     message = (
         f"{timestamp} - INFO - {layer_name}_{gemm_name}_final_decision "
         f"\t\t\t\t iteration={iteration:06d} "
         f"\t\t\t\t quantized_enabled={int(bool(quantized_enabled))} "
+        f"requested_precision={requested_precision} "
+        f"precision={actual_precision} "
         f"lhs_quantized={int(lhs_quantized)} "
         f"rhs_quantized={int(rhs_quantized)}"
     )
@@ -222,6 +242,13 @@ def resolve_gemm_inputs_after_sampling(
         rhs_out = _to_high_precision_gemm_input(rhs, target_dtype)
 
     lhs_quantized, rhs_quantized = _selected_gemm_quantization_state(gemm_name, lhs_out, rhs_out)
+    if quantized_enabled and not (lhs_quantized and rhs_quantized):
+        lhs_out = _to_high_precision_gemm_input(lhs_out, target_dtype)
+        rhs_out = _to_high_precision_gemm_input(rhs_out, target_dtype)
+        lhs_quantized, rhs_quantized = _selected_gemm_quantization_state(
+            gemm_name, lhs_out, rhs_out
+        )
+    actual_precision = "fp8" if lhs_quantized and rhs_quantized else "bf16"
     _log_final_gemm_decision(
         layer_name,
         gemm_name,
@@ -229,5 +256,6 @@ def resolve_gemm_inputs_after_sampling(
         bool(quantized_enabled),
         lhs_quantized,
         rhs_quantized,
+        actual_precision,
     )
     return lhs_out, rhs_out

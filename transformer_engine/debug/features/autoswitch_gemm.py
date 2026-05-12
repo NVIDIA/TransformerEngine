@@ -7,6 +7,7 @@
 import copy
 import logging
 import os
+import weakref
 from typing import Dict, Optional, Set, Tuple
 
 import torch
@@ -18,6 +19,64 @@ from nvdlfw_inspect.registry import Registry, api_method
 
 from transformer_engine.debug.features.api import TEConfigAPIMapper
 from transformer_engine.debug.features.utils import next_enabled_iter
+
+
+_AUTOSWITCH_FEATURE_INSTANCES = weakref.WeakSet()
+_AUTOSWITCH_SAMPLING_CONFIGS = []
+_AUTOSWITCH_SAMPLING_CONFIG_KEYS = set()
+_AUTOSWITCH_DISABLE_UNTIL_BY_GEMM = {}
+
+
+def _register_sampling_config(config: Dict) -> None:
+    """Track AutoswitchGemm sampling schedules for runtime eager/graph routing."""
+    schedule = {
+        "start_step": config.get("start_step", None),
+        "end_step": config.get("end_step", None),
+        "start_end_list": config.get("start_end_list", None),
+        "freq": config.get("freq", 1),
+    }
+    key = repr(schedule)
+    if key not in _AUTOSWITCH_SAMPLING_CONFIG_KEYS:
+        _AUTOSWITCH_SAMPLING_CONFIG_KEYS.add(key)
+        _AUTOSWITCH_SAMPLING_CONFIGS.append(schedule)
+
+
+def _is_sampling_iteration(iteration: int) -> bool:
+    """Return True if any AutoswitchGemm config samples on this iteration."""
+    for schedule in _AUTOSWITCH_SAMPLING_CONFIGS:
+        run_current, _ = next_enabled_iter(
+            schedule["start_step"],
+            schedule["end_step"],
+            schedule["start_end_list"],
+            schedule["freq"],
+            iteration,
+        )
+        if run_current:
+            return True
+    return False
+
+
+def autoswitch_gemm_should_force_eager(iteration: Optional[int] = None) -> bool:
+    """
+    Return True when AutoswitchGemm needs eager execution for the whole iteration.
+
+    This is used by Megatron CUDA graph routing. Sampling iterations must be eager
+    so tensor inspection can run; high-precision windows must also be eager because
+    the captured graph represents the stable quantized path.
+    """
+    if iteration is None:
+        try:
+            from transformer_engine.debug.pytorch.debug_state import TEDebugState
+
+            iteration = TEDebugState.get_iteration()
+        except Exception:  # pylint: disable=broad-except
+            return False
+
+    if _is_sampling_iteration(iteration):
+        return True
+
+    max_disable_until = max(_AUTOSWITCH_DISABLE_UNTIL_BY_GEMM.values(), default=-1)
+    return iteration <= max_disable_until
 
 
 class _AutoswitchGemmMetricLogger:
@@ -172,7 +231,7 @@ class AutoswitchGemm(TEConfigAPIMapper):
     The switch decision is same-iteration:
     metrics computed at iteration `n` are consumed in iteration `n`
     after all GEMM input tensors are prepared.
-    The switch is applied for one iteration.
+    The switch is applied until the next sampling period.
 
     allow_fp8_model_params_dequantized_weight: bool, default = False
         If True, allows `fprop`/`dgrad` to switch to high precision even when
@@ -225,6 +284,7 @@ class AutoswitchGemm(TEConfigAPIMapper):
         self._gemm_state: Dict[Tuple[str, str], _GemmSwitchState] = {}
         self._latest_metrics: Dict[Tuple[str, str], Dict[str, float | int | str]] = {}
         self._layer_has_fp8_model_params: Dict[str, bool] = {}
+        _AUTOSWITCH_FEATURE_INSTANCES.add(self)
 
     def parse_config_and_api(self, config, **kwargs):
         """
@@ -258,6 +318,7 @@ class AutoswitchGemm(TEConfigAPIMapper):
         if "enabled" in processed_config:
             processed_config.pop("enabled")
 
+        _register_sampling_config(processed_config)
         return True, processed_config
 
     def _infer_monitored_tensors(self, config: Dict) -> Set[str]:
@@ -301,6 +362,15 @@ class AutoswitchGemm(TEConfigAPIMapper):
         if isinstance(value, str):
             return value.strip().lower() in ("1", "true", "yes", "on")
         return bool(value)
+
+    @staticmethod
+    def _config_positive_int(config: Dict, key: str, default: int) -> int:
+        """Read positive int value from config."""
+        try:
+            value = int(config.get(key, default))
+        except (TypeError, ValueError):
+            value = default
+        return max(1, value)
 
     @staticmethod
     def _get_root_log_dir() -> Optional[str]:
@@ -418,7 +488,7 @@ class AutoswitchGemm(TEConfigAPIMapper):
         config: Dict,
         state: _GemmSwitchState,
     ) -> None:
-        """Consume current-iteration metrics and arm switch for one iteration."""
+        """Consume current-iteration metrics and arm switch until the next sampling period."""
         metric = self._latest_metrics.get((layer_name, gemm))
         if metric is None:
             return
@@ -455,14 +525,21 @@ class AutoswitchGemm(TEConfigAPIMapper):
             reasons.append(f"mse={metric_mse:.6e} > threshold={mse_threshold:.6e}")
 
         if not reasons:
+            # A fresh sample without threshold breach clears any currently active switch.
+            state.disable_until_iter = min(state.disable_until_iter, iteration - 1)
+            _AUTOSWITCH_DISABLE_UNTIL_BY_GEMM[(layer_name, gemm)] = state.disable_until_iter
+            state.last_reason = ""
             return
 
-        state.disable_until_iter = iteration
+        hold_steps = self._config_positive_int(config, "freq", 1)
+        state.disable_until_iter = iteration + hold_steps - 1
+        _AUTOSWITCH_DISABLE_UNTIL_BY_GEMM[(layer_name, gemm)] = state.disable_until_iter
         state.last_reason = "; ".join(reasons)
 
         debug_api.log_message(
             f"Feature={self.__class__.__name__}: switch {gemm} to high precision in"
-            f" iter={iteration}. Triggered by {metric['tensor_name']} sampled at iter={metric_iter}:"
+            f" iter={iteration} through iter={state.disable_until_iter}. Triggered by"
+            f" {metric['tensor_name']} sampled at iter={metric_iter}:"
             f" {state.last_reason}",
             layer_name,
             extra_cachable_args=(gemm, "switch"),
@@ -501,6 +578,7 @@ class AutoswitchGemm(TEConfigAPIMapper):
             and not allow_fp8_model_params_fallback
         ):
             state.disable_until_iter = -1
+            _AUTOSWITCH_DISABLE_UNTIL_BY_GEMM[(layer_name, gemm)] = state.disable_until_iter
             if final_decision and metric_logger is not None:
                 metric_logger.log_scalar(layer_name, gemm, "quantized_enabled", iteration, 1.0)
                 metric_logger.log_scalar(

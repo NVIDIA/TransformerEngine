@@ -53,6 +53,14 @@ from ..quantized_tensor import (
 )
 from ...debug.pytorch.debug_quantization import DebugQuantizer
 from ...debug.pytorch.debug_state import TEDebugState
+from ...debug.pytorch.gemm_runtime_hooks import (
+    resolve_gemm_inputs_after_sampling,
+    should_resolve_inputs_after_sampling,
+)
+from ...debug.pytorch.gemm_runtime_hooks import (
+    resolve_gemm_inputs_after_sampling,
+    should_resolve_inputs_after_sampling,
+)
 
 __all__ = ["GroupedLinear"]
 
@@ -215,9 +223,22 @@ class _GroupedLinear(torch.autograd.Function):
                 use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
 
         # Perform GEMM
+        fprop_weights = list(weights_fp8)
+        fprop_inputmats = list(inputmats)
+        if debug:
+            for i in range(num_gemms):
+                if should_resolve_inputs_after_sampling(weight_quantizers[i], input_quantizers[i]):
+                    fprop_weights[i], fprop_inputmats[i] = resolve_gemm_inputs_after_sampling(
+                        "fprop",
+                        weights_fp8[i],
+                        inputmats[i],
+                        weight_quantizers[i],
+                        input_quantizers[i],
+                        activation_dtype,
+                    )
         general_grouped_gemm(
-            weights_fp8,
-            inputmats,
+            fprop_weights,
+            fprop_inputmats,
             [out],
             output_quantizers,
             activation_dtype,
@@ -457,9 +478,26 @@ class _GroupedLinear(torch.autograd.Function):
                 for weight in weights_for_dgrad:
                     if isinstance(weight, QuantizedTensorStorage):
                         weight.update_usage(columnwise_usage=True)
+                dgrad_weights = list(weights_for_dgrad)
+                dgrad_grad_outputs = list(grad_output)
+                if ctx.debug:
+                    for i in range(N):
+                        if should_resolve_inputs_after_sampling(
+                            ctx.weight_quantizers[i], ctx.grad_output_quantizers[i]
+                        ):
+                            dgrad_weights[i], dgrad_grad_outputs[i] = (
+                                resolve_gemm_inputs_after_sampling(
+                                    "dgrad",
+                                    weights_for_dgrad[i],
+                                    grad_output[i],
+                                    ctx.weight_quantizers[i],
+                                    ctx.grad_output_quantizers[i],
+                                    ctx.activation_dtype,
+                                )
+                            )
                 general_grouped_gemm(
-                    weights_for_dgrad,
-                    grad_output,
+                    dgrad_weights,
+                    dgrad_grad_outputs,
                     [dgrad],
                     ctx.grad_input_quantizers,
                     ctx.activation_dtype,
@@ -537,6 +575,23 @@ class _GroupedLinear(torch.autograd.Function):
                         else:
                             inputmats_dequant.append(cast_if_needed(inputmat, ctx.activation_dtype))
                     inputmats = inputmats_dequant
+                wgrad_inputmats = list(inputmats)
+                wgrad_grad_outputs = list(grad_output)
+                if ctx.debug:
+                    for i in range(N):
+                        if should_resolve_inputs_after_sampling(
+                            ctx.input_quantizers[i], ctx.grad_output_quantizers[i]
+                        ):
+                            wgrad_inputmats[i], wgrad_grad_outputs[i] = (
+                                resolve_gemm_inputs_after_sampling(
+                                    "wgrad",
+                                    inputmats[i],
+                                    grad_output[i],
+                                    ctx.input_quantizers[i],
+                                    ctx.grad_output_quantizers[i],
+                                    ctx.activation_dtype,
+                                )
+                            )
                 grouped_gemm_wgrad = functools.partial(
                     general_grouped_gemm,
                     quantization_params=ctx.grad_weight_quantizers,
@@ -555,9 +610,13 @@ class _GroupedLinear(torch.autograd.Function):
                 )
                 # WGRAD
                 if ctx.wgrad_store is not None and ctx.wgrad_store.delay_wgrad_compute():
-                    ctx.wgrad_store.put([inputmats, grad_output, wgrad_list], grouped_gemm_wgrad)
+                    ctx.wgrad_store.put(
+                        [wgrad_inputmats, wgrad_grad_outputs, wgrad_list], grouped_gemm_wgrad
+                    )
                 else:
-                    _, grad_biases_, _ = grouped_gemm_wgrad(inputmats, grad_output, wgrad_list)
+                    _, grad_biases_, _ = grouped_gemm_wgrad(
+                        wgrad_inputmats, wgrad_grad_outputs, wgrad_list
+                    )
 
                     for i in range(ctx.num_gemms):
                         if grad_biases[i] is None:
