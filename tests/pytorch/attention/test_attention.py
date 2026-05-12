@@ -1662,6 +1662,51 @@ def test_score_mod_cache_fwd_reuses_graph_for_pass_by_value_changes(monkeypatch)
     assert len(build_entries) == 2
 
 
+def test_score_mod_tensors_are_version_checked_for_backward(monkeypatch):
+    """In-place score_mod tensor updates before backward should be rejected."""
+
+    class FakeEntry:
+        graph = object()
+        q = object()
+        k = object()
+        v = object()
+        output = object()
+        stats = object()
+        score_mod_graph_tensors = {"softcap": object()}
+        workspace_size = 1
+
+    def fake_execute(graph, variant_pack, workspace_size, device):
+        del graph, variant_pack, workspace_size, device
+
+    q, k, v, _, _ = _score_mod_cache_cpu_inputs()
+    q = q.requires_grad_()
+    k = k.requires_grad_()
+    v = v.requires_grad_()
+    softcap = torch.tensor(0.8, dtype=torch.float32)
+
+    monkeypatch.setattr(dpa_backends, "_get_cudnn_score_mod_fwd_graph", lambda *args: FakeEntry())
+    monkeypatch.setattr(dpa_backends, "_execute_cudnn_graph", fake_execute)
+
+    out = dpa_backends.FusedAttentionWithScoreModFunc.apply(
+        True,
+        q,
+        k,
+        v,
+        "bshd",
+        "bshd",
+        1.0,
+        _score_mod_causal,
+        None,
+        {"softcap": softcap},
+        None,
+        False,
+    )
+    softcap.add_(1.0)
+
+    with pytest.raises(RuntimeError, match="modified by an inplace operation"):
+        out.sum().backward()
+
+
 def _relative_position_bias(config, dtype):
     """Materialize score + (q_idx - kv_idx) as post-scale attention bias."""
     q_idx = torch.arange(config.max_seqlen_q, dtype=torch.float32, device="cuda").view(1, 1, -1, 1)

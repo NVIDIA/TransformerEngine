@@ -1765,6 +1765,8 @@ class FusedAttentionWithScoreModFunc(torch.autograd.Function):
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
         q_bhsd_dim, _ = _bhsd_dim_stride(query_layer, q_format)
+        score_mod_tensors = dict(score_mod_tensors or {})
+        score_mod_bprop_tensors = dict(score_mod_bprop_tensors or {})
         output_shape = (*query_layer.shape[:-1], value_layer.shape[-1])
         output_layer = torch.empty(output_shape, device=query_layer.device, dtype=query_layer.dtype)
         if is_training:
@@ -1813,11 +1815,21 @@ class FusedAttentionWithScoreModFunc(torch.autograd.Function):
         ctx.attn_scale = attn_scale
         ctx.score_mod = score_mod
         ctx.score_mod_bprop = score_mod_bprop
-        ctx.score_mod_tensors = dict(score_mod_tensors or {})
-        ctx.score_mod_bprop_tensors = dict(score_mod_bprop_tensors or {})
+        ctx.score_mod_tensor_names = tuple(score_mod_tensors.keys())
+        ctx.score_mod_bprop_tensor_names = tuple(score_mod_bprop_tensors.keys())
         ctx.deterministic = deterministic
         if is_training:
-            ctx.save_for_backward(query_layer, key_layer, value_layer, output_layer, stats_bhs1)
+            # save_for_backward records version counters without copying tensor data.
+            # This catches in-place score_mod tensor updates before backward.
+            ctx.save_for_backward(
+                query_layer,
+                key_layer,
+                value_layer,
+                output_layer,
+                stats_bhs1,
+                *score_mod_tensors.values(),
+                *score_mod_bprop_tensors.values(),
+            )
         else:
             ctx.save_for_backward(query_layer, key_layer, value_layer, output_layer)
 
@@ -1831,7 +1843,15 @@ class FusedAttentionWithScoreModFunc(torch.autograd.Function):
                 "score_mod backward requires DotProductAttention to be in training mode."
             )
 
-        query_layer, key_layer, value_layer, output_layer, stats_bhs1 = ctx.saved_tensors
+        saved_tensors = ctx.saved_tensors
+        query_layer, key_layer, value_layer, output_layer, stats_bhs1 = saved_tensors[:5]
+        score_mod_tensors_end = 5 + len(ctx.score_mod_tensor_names)
+        score_mod_tensors = dict(
+            zip(ctx.score_mod_tensor_names, saved_tensors[5:score_mod_tensors_end])
+        )
+        score_mod_bprop_tensors = dict(
+            zip(ctx.score_mod_bprop_tensor_names, saved_tensors[score_mod_tensors_end:])
+        )
         d_out = d_out.contiguous()
 
         dq_layer = torch.empty_like(query_layer)
@@ -1849,8 +1869,8 @@ class FusedAttentionWithScoreModFunc(torch.autograd.Function):
             ctx.attn_scale,
             ctx.score_mod,
             ctx.score_mod_bprop,
-            ctx.score_mod_tensors,
-            ctx.score_mod_bprop_tensors,
+            score_mod_tensors,
+            score_mod_bprop_tensors,
             ctx.deterministic,
         )
         variant_pack = {
@@ -1865,9 +1885,9 @@ class FusedAttentionWithScoreModFunc(torch.autograd.Function):
             entry.dv: dv_layer,
         }
         for name, graph_tensor in entry.score_mod_graph_tensors.items():
-            variant_pack[graph_tensor] = ctx.score_mod_tensors[name]
+            variant_pack[graph_tensor] = score_mod_tensors[name]
         for name, graph_tensor in entry.score_mod_bprop_graph_tensors.items():
-            variant_pack[graph_tensor] = ctx.score_mod_bprop_tensors[name]
+            variant_pack[graph_tensor] = score_mod_bprop_tensors[name]
 
         _execute_cudnn_graph(
             entry.graph,
@@ -2726,6 +2746,10 @@ class FusedAttention(torch.nn.Module):
             assert (
                 not fp8
             ), "score_mod is not supported with FP8 FusedAttention!"
+            assert not fp8_output, "score_mod is not supported with fp8_output!"
+            assert (
+                not self.return_max_logit
+            ), "score_mod is not supported with return_max_logit!"
             assert (
                 type(query_layer) is torch.Tensor
                 and type(key_layer) is torch.Tensor

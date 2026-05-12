@@ -1249,6 +1249,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                         seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
                     max_seqlen_kv = int((seqlens_kv.max().item() + 63) // 64 * 64)
 
+            if score_mod is not None:
+                assert inference_params is None, "score_mod is not supported with KV caching!"
+
             # update KV cache and retrieve saved tokens from cache for inference
             if inference_params is not None:
                 assert self.layer_number is not None, "Layer number must be set!"
@@ -1456,7 +1459,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                 assert (
                     not context_parallel
                 ), "score_mod is not supported with context parallelism!"
-                assert inference_params is None, "score_mod is not supported with KV caching!"
                 assert qkv_format != "thd", "score_mod is not supported with qkv_format='thd'!"
                 assert (
                     not user_supplied_seqlens
