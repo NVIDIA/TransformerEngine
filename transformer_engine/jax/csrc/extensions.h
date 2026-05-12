@@ -119,6 +119,8 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(DBiasQuantizeHandler);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedQuantizeHandler);
 
+XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedQuantizeV2Handler);
+
 XLA_FFI_DECLARE_HANDLER_SYMBOL(DequantizeHandler);
 
 pybind11::tuple GetDBiasQuantizeWorkspaceSizes(size_t batch_size, size_t hidden_size,
@@ -196,6 +198,10 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedTopkWithScoreFunctionForwardHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedTopkWithScoreFunctionBackwardHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedMoEAuxLossForwardHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedMoEAuxLossBackwardHandler);
+
+// TopK
+XLA_FFI_DECLARE_HANDLER_SYMBOL(TopkHandler);
+pybind11::tuple GetTopkWorkspaceSizes(int batch_size, int seq_len, int k);
 
 }  // namespace jax
 }  // namespace transformer_engine

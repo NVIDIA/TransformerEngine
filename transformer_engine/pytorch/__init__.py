@@ -48,6 +48,9 @@ from transformer_engine.pytorch.quantization import is_mxfp8_available
 from transformer_engine.pytorch.quantization import is_fp8_block_scaling_available
 from transformer_engine.pytorch.quantization import is_nvfp4_available
 from transformer_engine.pytorch.quantization import get_default_recipe
+from transformer_engine.pytorch.quantization import QuantizerRole
+from transformer_engine.pytorch.quantization import QuantizerRequest
+from transformer_engine.pytorch.quantization import DelayedScalingRequest
 from transformer_engine.pytorch.utils import get_cudnn_version
 from transformer_engine.pytorch.utils import get_device_compute_capability
 from transformer_engine.pytorch.utils import is_bf16_available
@@ -63,6 +66,10 @@ from transformer_engine.pytorch import ops
 from transformer_engine.pytorch import optimizers
 from transformer_engine.pytorch.export import onnx_export
 from transformer_engine.pytorch.cross_entropy import parallel_cross_entropy
+from transformer_engine.pytorch.newton_schulz import (
+    CusolverMpCtx,
+    newton_schulz,
+)
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensor
 from transformer_engine.pytorch.quantized_tensor import Quantizer
