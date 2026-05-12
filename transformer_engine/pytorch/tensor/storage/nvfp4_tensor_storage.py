@@ -97,6 +97,8 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
     # Whether scaling factors are in the swizzled format expected by
     # GEMM
     _with_gemm_swizzled_scales: bool
+    # Whether this NVFP4 tensor uses row-scaled amax metadata
+    _row_scaled_nvfp4: bool
 
     def __new__(
         cls,
@@ -111,6 +113,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         with_gemm_swizzled_scales: bool,
         *args,
         fake_dtype: Optional[torch.dtype] = None,
+        row_scaled_nvfp4: bool = False,
         **kwargs,
     ):
         if cls is NVFP4TensorStorage:
@@ -128,6 +131,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         instance._amax_rowwise = amax_rowwise
         instance._amax_columnwise = amax_columnwise
         instance._with_gemm_swizzled_scales = with_gemm_swizzled_scales
+        instance._row_scaled_nvfp4 = row_scaled_nvfp4
 
         return instance
 
@@ -152,6 +156,8 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
             raise RuntimeError("FP4 dtype mismatch in copy_from_storage")
         if self._with_gemm_swizzled_scales != src._with_gemm_swizzled_scales:
             raise RuntimeError("Scale layout mismatch in copy_from_storage")
+        if self._row_scaled_nvfp4 != src._row_scaled_nvfp4:
+            raise RuntimeError("Rowwise amax scaling mode mismatch in copy_from_storage")
 
         def _copy_optional(dst: Optional[torch.Tensor], src_tensor: Optional[torch.Tensor]):
             if dst is not None and src_tensor is not None:
@@ -176,6 +182,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
             "fp4_dtype": self._fp4_dtype,
             "quantizer": self._quantizer,
             "with_gemm_swizzled_scales": self._with_gemm_swizzled_scales,
+            "row_scaled_nvfp4": self._row_scaled_nvfp4,
             "fake_dtype": self._dtype,
         }
 
@@ -308,6 +315,7 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
             quantizer=self._quantizer,
             fp4_dtype=self._fp4_dtype,
             with_gemm_swizzled_scales=self._with_gemm_swizzled_scales,
+            row_scaled_nvfp4=self._row_scaled_nvfp4,
             fake_dtype=self._dtype,
         )
 

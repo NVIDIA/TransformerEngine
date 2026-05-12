@@ -141,6 +141,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("otype"));
   m.def("group_quantize", transformer_engine::pytorch::group_quantize, py::arg("tensor"),
         py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"));
+  m.def("group_dequantize", transformer_engine::pytorch::group_dequantize,
+        "Dequantize group tensor", py::arg("input"), py::arg("otype"));
   m.def("bgrad_group_quantize", transformer_engine::pytorch::bgrad_group_quantize,
         py::arg("tensor"), py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"));
   m.def("bgrad_quantize", transformer_engine::pytorch::bgrad_quantize,
@@ -389,6 +391,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Fused Multi-tensor unpadding", py::call_guard<py::gil_scoped_release>());
   m.def("swizzle_scales_for_gemm_", &transformer_engine::pytorch::inplace_swizzle_scale_for_gemm,
         "Convert tensor block scales into GEMM swizzled format");
+  m.def("multi_tensor_swizzle_scales_for_gemm_",
+        &transformer_engine::pytorch::inplace_multi_tensor_swizzle_scales_for_gemm,
+        "Convert multiple tensors' block scales into GEMM swizzled format", py::arg("tensors"),
+        py::arg("rowwise_usage"), py::arg("columnwise_usage"));
+  m.def(
+      "multi_tensor_swizzle_scales_for_gemm_unchecked_",
+      &transformer_engine::pytorch::inplace_multi_tensor_swizzle_scales_for_gemm_unchecked,
+      "Convert multiple tensors' block scales into GEMM swizzled format (skip scale shape checks)",
+      py::arg("tensors"), py::arg("rowwise_usage"), py::arg("columnwise_usage"));
   m.def("grouped_swizzle_for_gemm", &transformer_engine::pytorch::grouped_swizzle_for_gemm,
         "In-place swizzle of grouped tensor scales for GEMM", py::arg("tensor"), py::arg("rowwise"),
         py::arg("columnwise"));
@@ -399,6 +410,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fa_prepare_bwd", &transformer_engine::pytorch::fa_prepare_bwd,
         "Backward of QKV preparation for Flash Attention",
         py::call_guard<py::gil_scoped_release>());
+  m.def("multi_tensor_transpose_to_bhsd",
+        &transformer_engine::pytorch::multi_tensor_transpose_to_bhsd,
+        "Permute multiple tensors from BSHD/SBHD to BHSD.", py::arg("inputs"),
+        py::arg("original_format"), py::arg("outputs") = std::vector<std::optional<at::Tensor>>{},
+        py::call_guard<py::gil_scoped_release>());
+  m.def("multi_tensor_pad_last_dim", &transformer_engine::pytorch::multi_tensor_pad_last_dim,
+        "Pad multiple tensors' last dimension to a common alignment.", py::arg("inputs"),
+        py::arg("alignment"), py::call_guard<py::gil_scoped_release>());
   m.def("fused_attn_fwd", &transformer_engine::pytorch::fused_attn_fwd,
         "Fused Attention FP8/BF16/FP16 FWD with separate Q, K and V");
   m.def("fused_attn_bwd", &transformer_engine::pytorch::fused_attn_bwd,

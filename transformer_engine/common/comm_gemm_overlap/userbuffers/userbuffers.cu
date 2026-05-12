@@ -2304,6 +2304,14 @@ __global__ void __launch_bounds__(MAX_THREADS) kuserbuffers_pushsendrecv_multiat
      (index) * NVTE_MAX_NVLINK * NVTE_MAX_REGIONS) *                                     \
     sizeof(int)))
 
+static __global__ void tiny_delay_kern() {
+  // Although a loop could be used to add a larger delay here, for
+  // the purpose of enforcing proper kernel ordering when using CG,
+  // an empty kernel seems to work well enough.
+}
+
+void userbuffers_tiny_delay(cudaStream_t stream) { tiny_delay_kern<<<1, 1, 0, stream>>>(); }
+
 void userbuffers_send(const int srchandler, const size_t srcoffset, const int dsthandler,
                       const size_t dstoffset, const size_t bytes, communicator *comm,
                       const int peer, cudaStream_t stream) {

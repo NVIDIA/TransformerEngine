@@ -17,7 +17,7 @@ import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch.torch_version import torch_version
-from transformer_engine.pytorch.tensor.utils import is_custom
+from transformer_engine.pytorch.tensor.utils import clear_columnwise_cache, is_custom
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
     get_ub,
@@ -28,7 +28,7 @@ from .base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
 )
-from ..quantization import FP8GlobalStateManager
+from ..quantization import FP8GlobalStateManager, QuantizerRole
 from ..utils import (
     cast_if_needed,
     clear_tensor_data,
@@ -141,6 +141,7 @@ class _LayerNormLinear(torch.autograd.Function):
             skip_fp8_weight_update,
             symmetric_ar_type,
             debug,
+            is_fsdp2,
         ) = non_tensor_args
         if fp8:
             backward_override = FP8GlobalStateManager.get_fp8_recipe().backward_override
@@ -300,14 +301,17 @@ class _LayerNormLinear(torch.autograd.Function):
             is_weight_param_quantized = isinstance(weight, QuantizedTensorStorage)
 
             # Configure quantizer
-            # If weight is already quantized, no need to set quantizer states
+            # If weight is already quantized, weight._quantizer is its true quantizer.
             # for debug mode we create quantizer every iteration, thus we need to set the quantizer states
             if is_weight_param_quantized and not debug:
                 weight_quantizer = weight._quantizer
             elif weight_quantizer is not None:
+                # FSDP2: Skip columnwise/transpose creation during forward
+                # to avoid accumulating caches across layers. Backward's
+                # FSDP2 all-gather will recreate them. (Issue #2681)
                 weight_quantizer.set_usage(
                     rowwise=True,
-                    columnwise=is_grad_enabled and backward_override is None,
+                    columnwise=is_grad_enabled and not is_fsdp2 and backward_override is None,
                 )
 
             # Get quantized weight
@@ -322,6 +326,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 workspace_dtype=activation_dtype,
                 cache=cache_weight,
             )
+
             weightmat.update_usage(rowwise_usage=True)
 
         else:
@@ -468,9 +473,15 @@ class _LayerNormLinear(torch.autograd.Function):
                     ln_bias,
                 )
 
+            # FSDP2: Don't save FP8 workspace for non-quantized weights.
+            # Backward will re-quantize from FSDP2 all-gathered weight.
+            # (Issue #2681)
+            wt_save = weightmat
+            if is_fsdp2 and weightmat is not weight:
+                wt_save = None
             tensors_to_save, tensor_objects = prepare_for_saving(
                 inputmat,
-                weightmat,
+                wt_save,
                 weight,
                 bias,
                 ln_weight,
@@ -483,6 +494,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.requires_dgrad = inp_requires_grad
             ctx.requires_wgrad = weight.requires_grad
             ctx.is_weight_param_quantized = is_weight_param_quantized
+            ctx.is_fsdp2 = is_fsdp2
             if fuse_wgrad_accumulation and weight.requires_grad:
                 # Keep weakref to weight to preserve attributes like main_grad
                 # when we need to modify the weight python object
@@ -737,6 +749,19 @@ class _LayerNormLinear(torch.autograd.Function):
             # Note: Gradient w.r.t. GEMM input (i.e. norm output).
             # --------------------------------------------------
 
+            # FSDP2: Re-create workspace from all-gathered weight when
+            # workspace was not saved. (Issue #2681)
+            # Use saved_weight (the original weight parameter) since
+            # origin_weight is only set when fuse_wgrad_accumulation=True.
+            if weight is None:
+                if isinstance(saved_weight, QuantizedTensorStorage):
+                    # saved weight is already set to right usages by
+                    # fsdp2 quantized-tensor hooks when workspace was not saved.
+                    weight = saved_weight
+                elif ctx.weight_quantizer is not None:
+                    ctx.weight_quantizer.set_usage(rowwise=True, columnwise=True)
+                    weight = ctx.weight_quantizer(saved_weight)
+
             # Make sure required data is available
             if isinstance(grad_output, QuantizedTensorStorage):
                 grad_output.update_usage(rowwise_usage=True)
@@ -796,6 +821,14 @@ class _LayerNormLinear(torch.autograd.Function):
                 bulk_overlap=ctx.ub_bulk_dgrad,
             )
             nvtx_range_pop(f"{nvtx_label}.dgrad_gemm")
+
+            # FSDP2 only handles deallocation all-gathered weights that it allocates.
+            # Columnwise data is derived from rowwise data after allgather for fp8
+            # and 2d block-scaled weights in TE managed memory. So we need to clear
+            # it here.
+            # (Issues #2681, #2717)
+            if getattr(ctx, "is_fsdp2", False) and isinstance(weight, QuantizedTensorStorage):
+                clear_columnwise_cache(weight)
 
             # Prepare grad input tensor
             # Note: Perform tensor-parallel communication
@@ -1468,6 +1501,32 @@ class LayerNormLinear(TransformerEngineBaseModule):
         elif recipe.nvfp4():
             self._customize_quantizers_nvfp4(fwd, recipe)
 
+    def get_quantizer_roles(
+        self,
+        *,
+        fwd: bool,
+        num_quantizers: int,
+    ) -> Optional[List[QuantizerRole]]:
+        """QuantizerRole list for quantizers used by ``LayerNormLinear``.
+
+        The output (fwd) and grad-input (bwd) slots default to ``None``
+        (unknown consumer).  Set :attr:`output_quantizer_role` /
+        :attr:`grad_input_quantizer_role` to provide consumer identity.
+        """
+        name = self.name or ""
+        if fwd:
+            base = [
+                QuantizerRole(module_type="linear", tensor_type="input", name=name),
+                QuantizerRole(module_type="linear", tensor_type="weight", name=name),
+                self._output_quantizer_role,
+            ]
+        else:
+            base = [
+                QuantizerRole(module_type="linear", tensor_type="grad_output", name=name),
+                self._grad_input_quantizer_role,
+            ]
+        return [base[i % len(base)] for i in range(num_quantizers)]
+
     def reset_layer_norm_parameters(self) -> None:
         """Init LN params"""
         warnings.warn(
@@ -1598,7 +1657,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
             else:
                 fwd_fn = _LayerNormLinear.forward
                 autograd_ctx = [None]
-            cache_name = None if is_first_microbatch is None else "weight"
+            cache_name = None if (is_first_microbatch is None or self.is_fsdp2) else "weight"
             weight_workspace = (
                 self._fp8_workspaces.get(cache_name) if cache_name is not None else None
             )
@@ -1642,6 +1701,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 skip_fp8_weight_update,
                 self.symmetric_ar_type,
                 debug,
+                self.is_fsdp2,
             )
             out, ln_out, new_weight_workspace = fwd_fn(
                 *autograd_ctx,
@@ -1676,6 +1736,9 @@ class LayerNormLinear(TransformerEngineBaseModule):
     def _get_quantizers(self, fp8_output, fp8_grad, is_grad_enabled):
         if not self.fp8:
             return [None] * 6
+
+        self._warn_missing_output_quantizer_role(fp8_output, fp8_grad)
+
         grad_input_quantizer = None
         grad_weight_quantizer = None
         grad_output_quantizer = None
@@ -1694,13 +1757,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 grad_output_quantizer.optimize_for_gemm = True
             if fp8_grad:
                 grad_input_quantizer = self.quantizers["scaling_bwd"][FP8BwdTensorIdx.GRAD_INPUT1]
-        fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
-        if fp8_recipe.backward_override == "dequantized" and (
-            fp8_recipe.mxfp8() or fp8_recipe.nvfp4()
-        ):
-            input_quantizer.optimize_for_gemm = False
-            if grad_output_quantizer is not None:
-                grad_output_quantizer.optimize_for_gemm = False
 
         return (
             input_quantizer,
