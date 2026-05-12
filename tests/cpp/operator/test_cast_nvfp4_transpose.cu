@@ -83,21 +83,102 @@ float compute_global_encode_scaling_factor_FP4(const float global_amax, const bo
   return global_encode_scale;
 }
 
-struct NVFP4FourOverSixDecodeScales {
-  fp8e4m3 map4;
-  fp8e4m3 map6;
+struct NVFP4FourOverSixQuantization {
+  fp8e4m3 scale_map4;
+  fp8e4m3 scale_map6;
+  float reciprocal_map4;
+  float reciprocal_map6;
+  fp4e2m1x2 quantized_map4;
+  fp4e2m1x2 quantized_map6;
+  float error_map4;
+  float error_map6;
 };
 
-NVFP4FourOverSixDecodeScales compute_4over6_decoding_scaling_factors(
-    const float block_amax, const float global_encode_scale) {
+NVFP4FourOverSixQuantization compute_4over6_quantization_scales(
+    const float block_amax, const float global_encode_scale, const bool use_fast_math) {
   constexpr float fp4_max = 6.0f;
   constexpr float scale_expansion_factor = 1.5f;
   const float base_sf_high_precision = block_amax / fp4_max * global_encode_scale;
   const float sf_high_precision_map4 = base_sf_high_precision * scale_expansion_factor;
   const float sf_high_precision_map6 = base_sf_high_precision;
+  const fp8e4m3 scale_map4 = static_cast<fp8e4m3>(sf_high_precision_map4);
+  const fp8e4m3 scale_map6 = static_cast<fp8e4m3>(sf_high_precision_map6);
+
+  float reciprocal_map4 = 0.0f;
+  const float scale_map4_fp32 = static_cast<float>(scale_map4);
+  if (scale_map4_fp32 != 0.0f) {
+    reciprocal_map4 = fminf(global_encode_scale / scale_map4_fp32,
+                            Numeric_Traits<float>::maxNorm);
+  }
+
+  float reciprocal_map6 = 0.0f;
+  const float scale_map6_fp32 = static_cast<float>(scale_map6);
+  if (scale_map6_fp32 != 0.0f) {
+    reciprocal_map6 = fminf(global_encode_scale / scale_map6_fp32,
+                            Numeric_Traits<float>::maxNorm);
+  }
+
+  if (use_fast_math) {
+    reciprocal_map4 = static_cast<float>(static_cast<bf16>(reciprocal_map4));
+    reciprocal_map6 = static_cast<float>(static_cast<bf16>(reciprocal_map6));
+  }
+
+  const float2 zero = {0.0f, 0.0f};
   return {
-      static_cast<fp8e4m3>(sf_high_precision_map4),
-      static_cast<fp8e4m3>(sf_high_precision_map6),
+      scale_map4,
+      scale_map6,
+      reciprocal_map4,
+      reciprocal_map6,
+      fp4e2m1x2(zero),
+      fp4e2m1x2(zero),
+      0.0f,
+      0.0f,
+  };
+}
+
+float compute_4over6_dequantized_value(const double quantized_value,
+                                       const fp8e4m3 scale,
+                                       const float global_amax) {
+  constexpr float mse_scale = 1.0f / (6.0f * 256.0f);
+  return static_cast<float>(quantized_value) * static_cast<float>(scale) * global_amax *
+         mse_scale;
+}
+
+float compute_squared_error(const float value, const float reference) {
+  const float diff = value - reference;
+  return diff * diff;
+}
+
+NVFP4FourOverSixQuantization quantize_4over6_pair(
+    const float x, const float y, const NVFP4FourOverSixQuantization& quantization,
+    const float global_amax) {
+  const float2 scaled_map4 = {x * quantization.reciprocal_map4,
+                              y * quantization.reciprocal_map4};
+  const fp4e2m1x2 quantized_map4(scaled_map4);
+  const double2 truncated_map4 = cvt_fp4x2_to_double2(quantized_map4);
+  const float dequant_x_map4 =
+      compute_4over6_dequantized_value(truncated_map4.x, quantization.scale_map4, global_amax);
+  const float dequant_y_map4 =
+      compute_4over6_dequantized_value(truncated_map4.y, quantization.scale_map4, global_amax);
+
+  const float2 scaled_map6 = {x * quantization.reciprocal_map6,
+                              y * quantization.reciprocal_map6};
+  const fp4e2m1x2 quantized_map6(scaled_map6);
+  const double2 truncated_map6 = cvt_fp4x2_to_double2(quantized_map6);
+  const float dequant_x_map6 =
+      compute_4over6_dequantized_value(truncated_map6.x, quantization.scale_map6, global_amax);
+  const float dequant_y_map6 =
+      compute_4over6_dequantized_value(truncated_map6.y, quantization.scale_map6, global_amax);
+
+  return {
+      quantization.scale_map4,
+      quantization.scale_map6,
+      quantization.reciprocal_map4,
+      quantization.reciprocal_map6,
+      quantized_map4,
+      quantized_map6,
+      compute_squared_error(dequant_x_map4, x) + compute_squared_error(dequant_y_map4, y),
+      compute_squared_error(dequant_x_map6, x) + compute_squared_error(dequant_y_map6, y),
   };
 }
 
@@ -148,84 +229,36 @@ void quantize_nvfp4_1d(float (*OP)(const float),
             const size_t scale_idx = i * scales_stride + block_X;
 
             if (use_4over6) {
-                const NVFP4FourOverSixDecodeScales S_dec_b_fp8 =
-                    compute_4over6_decoding_scaling_factors(block_amax, S_enc);
-                const fp8e4m3 S_dec_b_fp8_map4 = S_dec_b_fp8.map4;
-                const fp8e4m3 S_dec_b_fp8_map6 = S_dec_b_fp8.map6;
-                const float S_dec_b_fp32_map6 = static_cast<float>(S_dec_b_fp8_map6);
-                const float S_dec_b_fp32_map4 = static_cast<float>(S_dec_b_fp8_map4);
-
-                float scale_reciprocal_map6 = 0.0f;
-                if (S_dec_b_fp32_map6 != 0.0f) {
-                    scale_reciprocal_map6 =
-                        fminf(S_enc / S_dec_b_fp32_map6, Numeric_Traits<float>::maxNorm);
-                }
-
-                float scale_reciprocal_map4 = 0.0f;
-                if (S_dec_b_fp32_map4 != 0.0f) {
-                    scale_reciprocal_map4 =
-                        fminf(S_enc / S_dec_b_fp32_map4, Numeric_Traits<float>::maxNorm);
-                }
-
-                if (use_fast_math) {
-                    scale_reciprocal_map6 = static_cast<float>(static_cast<bf16>(scale_reciprocal_map6));
-                    scale_reciprocal_map4 = static_cast<float>(static_cast<bf16>(scale_reciprocal_map4));
-                }
+                const NVFP4FourOverSixQuantization quantization =
+                    compute_4over6_quantization_scales(block_amax, S_enc, use_fast_math);
 
                 std::array<fp4e2m1x2, block_size_X / 2> output_map6;
                 std::array<fp4e2m1x2, block_size_X / 2> output_map4;
                 float err_map6 = 0.0f;
                 float err_map4 = 0.0f;
-                constexpr float mse_scale = 1.0f / (6.0f * 256.0f);
 
                 for (size_t j = j_min; j < j_max; j += 2) {
                     const int cache_idx_x = j - j_min;
                     const int cache_idx_y = cache_idx_x + 1;
                     const float cached_x = cache_buffer[cache_idx_x];
                     const float cached_y = cache_buffer[cache_idx_y];
-
-                    const float2 scaled_elt_pair_map6 = {
-                        cached_x * scale_reciprocal_map6,
-                        cached_y * scale_reciprocal_map6,
-                    };
-                    const fp4e2m1x2 casted_to_e2m1_pair_map6(scaled_elt_pair_map6);
-                    output_map6[cache_idx_x / 2] = casted_to_e2m1_pair_map6;
-                    const double2 truncated_pair_map6 = cvt_fp4x2_to_double2(casted_to_e2m1_pair_map6);
-                    const float dequant_x_map6 =
-                        static_cast<float>(truncated_pair_map6.x) * S_dec_b_fp32_map6 *
-                        global_amax * mse_scale;
-                    const float dequant_y_map6 =
-                        static_cast<float>(truncated_pair_map6.y) * S_dec_b_fp32_map6 *
-                        global_amax * mse_scale;
-                    err_map6 += (dequant_x_map6 - cached_x) * (dequant_x_map6 - cached_x);
-                    err_map6 += (dequant_y_map6 - cached_y) * (dequant_y_map6 - cached_y);
-
-                    const float2 scaled_elt_pair_map4 = {
-                        cached_x * scale_reciprocal_map4,
-                        cached_y * scale_reciprocal_map4,
-                    };
-                    const fp4e2m1x2 casted_to_e2m1_pair_map4(scaled_elt_pair_map4);
-                    output_map4[cache_idx_x / 2] = casted_to_e2m1_pair_map4;
-                    const double2 truncated_pair_map4 = cvt_fp4x2_to_double2(casted_to_e2m1_pair_map4);
-                    const float dequant_x_map4 =
-                        static_cast<float>(truncated_pair_map4.x) * S_dec_b_fp32_map4 *
-                        global_amax * mse_scale;
-                    const float dequant_y_map4 =
-                        static_cast<float>(truncated_pair_map4.y) * S_dec_b_fp32_map4 *
-                        global_amax * mse_scale;
-                    err_map4 += (dequant_x_map4 - cached_x) * (dequant_x_map4 - cached_x);
-                    err_map4 += (dequant_y_map4 - cached_y) * (dequant_y_map4 - cached_y);
+                    const NVFP4FourOverSixQuantization pair_quantization =
+                        quantize_4over6_pair(cached_x, cached_y, quantization, global_amax);
+                    output_map4[cache_idx_x / 2] = pair_quantization.quantized_map4;
+                    output_map6[cache_idx_x / 2] = pair_quantization.quantized_map6;
+                    err_map4 += pair_quantization.error_map4;
+                    err_map6 += pair_quantization.error_map6;
                 }
 
                 const bool pick_map4 = err_map4 < err_map6;
                 if (pick_map4) {
-                    scales[scale_idx] = S_dec_b_fp8_map4;
+                    scales[scale_idx] = quantization.scale_map4;
                     for (size_t j = j_min; j < j_max; j += 2) {
                         const int idx_pair = (i * cols + j) / 2;
                         output[idx_pair] = output_map4[(j - j_min) / 2];
                     }
                 } else {
-                    scales[scale_idx] = S_dec_b_fp8_map6;
+                    scales[scale_idx] = quantization.scale_map6;
                     for (size_t j = j_min; j < j_max; j += 2) {
                         const int idx_pair = (i * cols + j) / 2;
                         output[idx_pair] = output_map6[(j - j_min) / 2];
@@ -309,36 +342,12 @@ void compute_2d_mathematical_scales(float (*OP)(const float),
             }
 
             // Compute E4M3 scaling factor for this 16x16 block
-            const float S_dec_b = block_amax / 6.0f * S_enc;
-            const fp8e4m3 S_dec_b_fp8_map6 = static_cast<fp8e4m3>(S_dec_b);
             if (use_4over6) {
-                const NVFP4FourOverSixDecodeScales S_dec_b_fp8 =
-                    compute_4over6_decoding_scaling_factors(block_amax, S_enc);
-                const fp8e4m3 S_dec_b_fp8_map4 = S_dec_b_fp8.map4;
-                const fp8e4m3 S_dec_b_fp8_map6 = S_dec_b_fp8.map6;
-                const float S_dec_b_fp32_map6 = static_cast<float>(S_dec_b_fp8_map6);
-                const float S_dec_b_fp32_map4 = static_cast<float>(S_dec_b_fp8_map4);
-
-                float scale_reciprocal_map6 = 0.0f;
-                if (S_dec_b_fp32_map6 != 0.0f) {
-                    scale_reciprocal_map6 =
-                        fminf(S_enc / S_dec_b_fp32_map6, Numeric_Traits<float>::maxNorm);
-                }
-
-                float scale_reciprocal_map4 = 0.0f;
-                if (S_dec_b_fp32_map4 != 0.0f) {
-                    scale_reciprocal_map4 =
-                        fminf(S_enc / S_dec_b_fp32_map4, Numeric_Traits<float>::maxNorm);
-                }
-
-                if (use_fast_math) {
-                    scale_reciprocal_map6 = static_cast<float>(static_cast<bf16>(scale_reciprocal_map6));
-                    scale_reciprocal_map4 = static_cast<float>(static_cast<bf16>(scale_reciprocal_map4));
-                }
+                const NVFP4FourOverSixQuantization quantization =
+                    compute_4over6_quantization_scales(block_amax, S_enc, use_fast_math);
 
                 float err_map6 = 0.0f;
                 float err_map4 = 0.0f;
-                constexpr float mse_scale = 1.0f / (6.0f * 256.0f);
                 for (size_t i = i_min; i < i_max; ++i) {
                     for (size_t j = j_min; j < j_max; j += 2) {
                         const float input_x = static_cast<float>(input[i * cols + j]);
@@ -350,47 +359,21 @@ void compute_2d_mathematical_scales(float (*OP)(const float),
                             const float act_y = OP(input_y);
                             cached_y = static_cast<float>(static_cast<InputType>(act_y));
                         }
-
-                        const float2 scaled_elt_pair_map6 = {
-                            cached_x * scale_reciprocal_map6,
-                            cached_y * scale_reciprocal_map6,
-                        };
-                        const fp4e2m1x2 casted_to_e2m1_pair_map6(scaled_elt_pair_map6);
-                        const double2 truncated_pair_map6 =
-                            cvt_fp4x2_to_double2(casted_to_e2m1_pair_map6);
-                        const float dequant_x_map6 =
-                            static_cast<float>(truncated_pair_map6.x) * S_dec_b_fp32_map6 *
-                            global_amax * mse_scale;
-                        const float dequant_y_map6 =
-                            static_cast<float>(truncated_pair_map6.y) * S_dec_b_fp32_map6 *
-                            global_amax * mse_scale;
-                        err_map6 += (dequant_x_map6 - cached_x) * (dequant_x_map6 - cached_x);
-                        err_map6 += (dequant_y_map6 - cached_y) * (dequant_y_map6 - cached_y);
-
-                        const float2 scaled_elt_pair_map4 = {
-                            cached_x * scale_reciprocal_map4,
-                            cached_y * scale_reciprocal_map4,
-                        };
-                        const fp4e2m1x2 casted_to_e2m1_pair_map4(scaled_elt_pair_map4);
-                        const double2 truncated_pair_map4 =
-                            cvt_fp4x2_to_double2(casted_to_e2m1_pair_map4);
-                        const float dequant_x_map4 =
-                            static_cast<float>(truncated_pair_map4.x) * S_dec_b_fp32_map4 *
-                            global_amax * mse_scale;
-                        const float dequant_y_map4 =
-                            static_cast<float>(truncated_pair_map4.y) * S_dec_b_fp32_map4 *
-                            global_amax * mse_scale;
-                        err_map4 += (dequant_x_map4 - cached_x) * (dequant_x_map4 - cached_x);
-                        err_map4 += (dequant_y_map4 - cached_y) * (dequant_y_map4 - cached_y);
+                        const NVFP4FourOverSixQuantization pair_quantization =
+                            quantize_4over6_pair(cached_x, cached_y, quantization, global_amax);
+                        err_map4 += pair_quantization.error_map4;
+                        err_map6 += pair_quantization.error_map6;
                     }
                 }
 
                 if (err_map4 < err_map6) {
-                    math_scales[block_Y][block_X] = S_dec_b_fp8_map4;
+                    math_scales[block_Y][block_X] = quantization.scale_map4;
                 } else {
-                    math_scales[block_Y][block_X] = S_dec_b_fp8_map6;
+                    math_scales[block_Y][block_X] = quantization.scale_map6;
                 }
             } else {
+                const float S_dec_b = block_amax / 6.0f * S_enc;
+                const fp8e4m3 S_dec_b_fp8_map6 = static_cast<fp8e4m3>(S_dec_b);
                 math_scales[block_Y][block_X] = S_dec_b_fp8_map6;
             }
         }
@@ -972,6 +955,28 @@ std::string to_string(const ActivationType Act_type) {
     }
 }
 
+std::string test_name(const FusedCastTransposeNVFP4TestSuite::ParamType& param) {
+    std::string name = to_string(std::get<0>(param));
+    const auto& shape = std::get<1>(param);
+    for (const auto& s: shape) {
+        name += "X" + std::to_string(s);
+    }
+    name += "X" + test::typeName(std::get<2>(param));
+    if (std::get<3>(param)) {
+        name += "X_FAST_SCALING";
+    }
+    if (std::get<4>(param)) {
+        name += "X2D";
+    }
+    if (std::get<5>(param)) {
+        name += "XROW_SCALED";
+    }
+    if (std::get<6>(param)) {
+        name += "X4OVER6";
+    }
+    return name;
+}
+
 INSTANTIATE_TEST_SUITE_P(
     OperatorTest,
     FusedCastTransposeNVFP4TestSuite,
@@ -984,22 +989,7 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::Values(false),
         ::testing::Values(false)),
     [](const testing::TestParamInfo<FusedCastTransposeNVFP4TestSuite::ParamType>& info) {
-        std::string name = to_string(std::get<0>(info.param));
-      const auto& shape = std::get<1>(info.param);
-      for ( const auto& s: shape) {
-        name += "X" + std::to_string(s);
-      }
-      name += "X" + test::typeName(std::get<2>(info.param));
-      if (std::get<3>(info.param)) {
-        name += "X_FAST_SCALING";
-      }
-      if (std::get<4>(info.param)) {
-        name += "X2D";
-      }
-      if (std::get<6>(info.param)) {
-        name += "X4OVER6";
-      }
-        return name;
+        return test_name(info.param);
     });
 
 INSTANTIATE_TEST_SUITE_P(
@@ -1014,25 +1004,7 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::Values(true),
         ::testing::Values(false)),
     [](const testing::TestParamInfo<FusedCastTransposeNVFP4TestSuite::ParamType>& info) {
-        std::string name = to_string(std::get<0>(info.param));
-        const auto& shape = std::get<1>(info.param);
-        for (const auto& s: shape) {
-            name += "X" + std::to_string(s);
-        }
-        name += "X" + test::typeName(std::get<2>(info.param));
-        if (std::get<3>(info.param)) {
-            name += "X_FAST_SCALING";
-        }
-        if (std::get<4>(info.param)) {
-            name += "X2D";
-        }
-        if (std::get<5>(info.param)) {
-            name += "XROW_SCALED";
-        }
-        if (std::get<6>(info.param)) {
-            name += "X4OVER6";
-        }
-        return name;
+        return test_name(info.param);
     });
 
 INSTANTIATE_TEST_SUITE_P(
@@ -1047,20 +1019,7 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::Values(false),
         ::testing::Values(true)),
     [](const testing::TestParamInfo<FusedCastTransposeNVFP4TestSuite::ParamType>& info) {
-        std::string name = to_string(std::get<0>(info.param));
-        const auto& shape = std::get<1>(info.param);
-        for (const auto& s: shape) {
-            name += "X" + std::to_string(s);
-        }
-        name += "X" + test::typeName(std::get<2>(info.param));
-        if (std::get<4>(info.param)) {
-            name += "X2D";
-        }
-        if (std::get<5>(info.param)) {
-            name += "XROW_SCALED";
-        }
-        name += "X4OVER6";
-        return name;
+        return test_name(info.param);
     });
 
 INSTANTIATE_TEST_SUITE_P(
@@ -1075,14 +1034,7 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::Values(true),
         ::testing::Values(true)),
     [](const testing::TestParamInfo<FusedCastTransposeNVFP4TestSuite::ParamType>& info) {
-        std::string name = to_string(std::get<0>(info.param));
-        const auto& shape = std::get<1>(info.param);
-        for (const auto& s: shape) {
-            name += "X" + std::to_string(s);
-        }
-        name += "X" + test::typeName(std::get<2>(info.param));
-        name += "XROW_SCALEDX4OVER6";
-        return name;
+        return test_name(info.param);
     });
 
 INSTANTIATE_TEST_SUITE_P(
@@ -1097,12 +1049,5 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::Values(false),
         ::testing::Values(true)),
     [](const testing::TestParamInfo<FusedCastTransposeNVFP4TestSuite::ParamType>& info) {
-        std::string name = to_string(std::get<0>(info.param));
-        const auto& shape = std::get<1>(info.param);
-        for (const auto& s: shape) {
-            name += "X" + std::to_string(s);
-        }
-        name += "X" + test::typeName(std::get<2>(info.param));
-        name += "X2DX4OVER6";
-        return name;
+        return test_name(info.param);
     });
