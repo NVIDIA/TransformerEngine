@@ -108,7 +108,7 @@ void nvte_get_matmul_config_attribute(NVTEMatmulConfig config, NVTEMatmulConfigA
 
 /*! \brief Set an option in matrix multiplication configuration.
  *
- *  \param[in/out] config        Matrix multiplication configuration.
+ *  \param[in,out] config        Matrix multiplication configuration.
  *  \param[in]     attr          Option type.
  *  \param[in]     buf           Memory address to read option value from.
  *  \param[in]     size_in_bytes Size of buf.
@@ -298,39 +298,6 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
                             bool accumulate, bool use_split_accumulator, int math_sm_count,
                             cudaStream_t stream);
 
-/* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
-/*! \brief Grouped matrix multiplication: D = alpha * op(A) @ op(B) + beta * C
- *
- * \note Requires cuBLAS 13.2+ (CUDA 13.1+) and Blackwell (SM100) or newer GPU architecture.
- *       Will error at runtime if compiled with an older cuBLAS version or run on
- *       a pre-Blackwell GPU.
- *
- * Performs batched GEMM on a collection of matrices with potentially different shapes.
- * All tensors in the group must have compatible dimensions for matrix multiplication.
- * Uses NVTEGroupedTensor to efficiently handle collections of tensors with contiguous
- * memory layout and shape metadata.
- *
- *  \param[in]  A                Input grouped tensor A.
- *  \param[in]  transa           Whether to transpose A matrices.
- *  \param[in]  B                Input grouped tensor B.
- *  \param[in]  transb           Whether to transpose B matrices.
- *  \param[in]  C                Input grouped tensor C (can be NULL for beta=0).
- *  \param[out] D                Output grouped tensor D.
- *  \param[in]  alpha            Scale multipliers for A @ B (NVTETensor with num_tensors elements).
- *  \param[in]  beta             Scale multipliers for C (NVTETensor with num_tensors elements).
- *  \param[in]  workspace_setup  Workspace tensor for pointer array setup.
- *  \param[in]  workspace_cublas Workspace tensor for cuBLAS operations.
- *  \param[in]  config           Additional configuration (can be NULL for defaults).
- *  \param[in]  stream           CUDA stream for the operation.
- *
- * Requirements:
- * - cuBLAS 13.2+ (CUDA 13.1+)
- * - Blackwell (SM100) or newer GPU architecture
- * - A, B, C (if provided), D must have the same num_tensors
- * - For each i: D[i] = alpha[i] * op(A[i]) @ op(B[i]) + beta[i] * C[i]
- * - Shape compatibility: if transa=false, transb=false:
- *   - A[i]: (M[i], K[i]), B[i]: (K[i], N[i]), D[i]: (M[i], N[i])
- */
 /*! \brief Return the required size in bytes for the setup workspace of grouped GEMM.
  *
  * The setup workspace stores pointer arrays and per-matrix dimension arrays used
@@ -385,6 +352,39 @@ void nvte_convert_int32_to_int64_with_multiplier(const int32_t *src, int64_t *ds
 void nvte_compute_grouped_tensor_offsets(const int64_t *first_dims, int64_t *offsets,
                                          size_t n_groups, int64_t last_dim, cudaStream_t stream);
 
+/* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
+/*! \brief Grouped matrix multiplication: D = alpha * op(A) @ op(B) + beta * C
+ *
+ * \note Requires cuBLAS 13.2+ (CUDA 13.1+) and Blackwell (SM100) or newer GPU architecture.
+ *       Will error at runtime if compiled with an older cuBLAS version or run on
+ *       a pre-Blackwell GPU.
+ *
+ * Performs batched GEMM on a collection of matrices with potentially different shapes.
+ * All tensors in the group must have compatible dimensions for matrix multiplication.
+ * Uses NVTEGroupedTensor to efficiently handle collections of tensors with contiguous
+ * memory layout and shape metadata.
+ *
+ *  \param[in]  A                Input grouped tensor A.
+ *  \param[in]  transa           Whether to transpose A matrices.
+ *  \param[in]  B                Input grouped tensor B.
+ *  \param[in]  transb           Whether to transpose B matrices.
+ *  \param[in]  C                Input grouped tensor C (can be NULL for beta=0).
+ *  \param[out] D                Output grouped tensor D.
+ *  \param[in]  alpha            Scale multipliers for A @ B (NVTETensor with num_tensors elements).
+ *  \param[in]  beta             Scale multipliers for C (NVTETensor with num_tensors elements).
+ *  \param[in]  workspace_setup  Workspace tensor for pointer array setup.
+ *  \param[in]  workspace_cublas Workspace tensor for cuBLAS operations.
+ *  \param[in]  config           Additional configuration (can be NULL for defaults).
+ *  \param[in]  stream           CUDA stream for the operation.
+ *
+ * Requirements:
+ * - cuBLAS 13.2+ (CUDA 13.1+)
+ * - Blackwell (SM100) or newer GPU architecture
+ * - A, B, C (if provided), D must have the same num_tensors
+ * - For each i: D[i] = alpha[i] * op(A[i]) @ op(B[i]) + beta[i] * C[i]
+ * - Shape compatibility: if transa=false, transb=false:
+ *   - A[i]: (M[i], K[i]), B[i]: (K[i], N[i]), D[i]: (M[i], N[i])
+ */
 void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedTensor B, int transb,
                        const NVTEGroupedTensor C, NVTEGroupedTensor D, const NVTETensor alpha,
                        const NVTETensor beta, NVTETensor workspace_setup,
@@ -398,8 +398,19 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
  * instead of NVTEGroupedTensor. This enables discrete per-expert weights as inputA
  * for Grouped GEMM.
  *
- *  \param[in]  A_list           List of A tensors (length = num_tensors).
+ *  \param[in]  A_list           List of A tensors (length = num_a_tensors).
  *  \param[in]  num_a_tensors    Number of tensors in A_list.
+ *  \param[in]  transa           Whether to transpose A matrices.
+ *  \param[in]  B                Input grouped tensor B.
+ *  \param[in]  transb           Whether to transpose B matrices.
+ *  \param[in]  C                Input grouped tensor C (can be NULL for beta=0).
+ *  \param[out] D                Output grouped tensor D.
+ *  \param[in]  alpha            Scale multipliers for A @ B (NVTETensor with num_tensors elements).
+ *  \param[in]  beta             Scale multipliers for C (NVTETensor with num_tensors elements).
+ *  \param[in]  workspace_setup  Workspace tensor for pointer array setup.
+ *  \param[in]  workspace_cublas Workspace tensor for cuBLAS operations.
+ *  \param[in]  config           Additional configuration (can be NULL for defaults).
+ *  \param[in]  stream           CUDA stream for the operation.
  */
 void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num_a_tensors,
                                             int transa, const NVTEGroupedTensor B, int transb,
@@ -415,10 +426,20 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
 * instead of NVTEGroupedTensor. This enables accumulation into non-contiguous
 * per-expert buffers (for wgrads).
 *
-*  \param[in]  C_list           Optional list of C tensors (length = num_tensors).
+*  \param[in]  A                Input grouped tensor A.
+*  \param[in]  transa           Whether to transpose A matrices.
+*  \param[in]  B                Input grouped tensor B.
+*  \param[in]  transb           Whether to transpose B matrices.
+*  \param[in]  C_list           Optional list of C tensors (length = num_c_tensors).
 *  \param[in]  num_c_tensors    Number of tensors in C_list (Can be 0 if C is not provided).
-*  \param[out] D_list           List of D tensors (length = num_tensors).
+*  \param[out] D_list           List of D tensors (length = num_d_tensors).
 *  \param[in]  num_d_tensors    Number of tensors in D_list.
+*  \param[in]  alpha            Scale multipliers for A @ B (NVTETensor with num_tensors elements).
+*  \param[in]  beta             Scale multipliers for C (NVTETensor with num_tensors elements).
+*  \param[in]  workspace_setup  Workspace tensor for pointer array setup.
+*  \param[in]  workspace_cublas Workspace tensor for cuBLAS operations.
+*  \param[in]  config           Additional configuration (can be NULL for defaults).
+*  \param[in]  stream           CUDA stream for the operation.
 *  \note  All tensors in C_list and D_list must share the same dtype.
 */
 void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
