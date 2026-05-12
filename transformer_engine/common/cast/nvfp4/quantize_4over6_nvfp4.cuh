@@ -37,9 +37,12 @@ __device__ __forceinline__ void compute_4over6_decoding_scaling_factors(
     const float block_amax, const float S_enc, nvfp4_scale_t &S_dec_b_fp8_map4,
     nvfp4_scale_t &S_dec_b_fp8_map6) {
   constexpr float fp4_max = detail::TypeExtrema<fp4e2m1>::max;  // 6.0f
-  const float sf_high_precision = block_amax / fp4_max * S_enc;
-  S_dec_b_fp8_map4 = static_cast<nvfp4_scale_t>(sf_high_precision * 1.5f);
-  S_dec_b_fp8_map6 = static_cast<nvfp4_scale_t>(sf_high_precision);
+  constexpr float scale_expansion_factor = 1.5f;
+  const float base_sf_high_precision = block_amax / fp4_max * S_enc;
+  const float sf_high_precision_map4 = base_sf_high_precision * scale_expansion_factor;
+  const float sf_high_precision_map6 = base_sf_high_precision;
+  S_dec_b_fp8_map4 = static_cast<nvfp4_scale_t>(sf_high_precision_map4);
+  S_dec_b_fp8_map6 = static_cast<nvfp4_scale_t>(sf_high_precision_map6);
 }
 
 template <typename scaling_coeff_type>

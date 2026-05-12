@@ -478,8 +478,9 @@ class NVFP4QuantizerRef(Quantizer):
         FLOAT8_E4M3_MAX = torch.tensor(448.0, device=x.device, dtype=torch.float32)
         GLOBAL_SCALE_E4M3_MAX = torch.tensor(256.0, device=x.device, dtype=torch.float32)
 
-        decode_scale_map6 = torch.div(vec_max, FLOAT4_E2M1_MAX) * global_encode_scale
-        decode_scale_map4 = decode_scale_map6 * 1.5
+        decode_scale_base = torch.div(vec_max, FLOAT4_E2M1_MAX) * global_encode_scale
+        decode_scale_map4 = decode_scale_base * 1.5
+        decode_scale_map6 = decode_scale_base
         decode_scale_map4 = torch.clamp(
             decode_scale_map4, min=-FLOAT8_E4M3_MAX, max=FLOAT8_E4M3_MAX
         ).to(torch.float8_e4m3fn)
