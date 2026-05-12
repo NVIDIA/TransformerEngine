@@ -83,7 +83,13 @@ enum NVTETensorParam {
    *  its values are populated during quantization.
    */
   kNVTERowScaledNVFP4 = 8,
-  kNVTENVFP44Over6 = 9, /*!< Whether an NVFP4 tensor uses 4over6 scaling */
+  /*! Whether an NVFP4 tensor is encoded with 4over6 semantics.
+   *
+   *  This is part of the tensor data contract: 4over6 tensors use 256 as
+   *  their global E4M3 scale bound, so downstream dequantization and GEMM
+   *  scale consumers must decode them differently from default NVFP4 tensors.
+   */
+  kNVTENVFP44Over6 = 9,
   kNVTENumTensorParams
 };
 
@@ -385,7 +391,9 @@ enum NVTEQuantizationConfigAttribute {
   /*! Whether to use NVFP4 4over6 block scale selection.
    *
    *  4over6 evaluates map-to-4 and map-to-6 candidates for each 1x16 block,
-   *  stores the lower-MSE candidate, and uses a 256 global E4M3 scale bound.
+   *  stores the lower-MSE candidate, and emits tensor data that uses a 256
+   *  global E4M3 scale bound. The output tensor's kNVTENVFP44Over6 metadata
+   *  must match this option.
    */
   kNVTEQuantizationConfigNVFP44Over6 = 8,
   kNVTEQuantizationConfigNumAttributes
