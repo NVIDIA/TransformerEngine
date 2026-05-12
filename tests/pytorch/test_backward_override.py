@@ -400,23 +400,26 @@ def _snapshot_backward_ctx_state(
 ) -> tuple[str, bool, object, bool]:
     if output.grad_fn is None:
         raise RuntimeError("Output tensor has no grad_fn; cannot inspect backward context state.")
+    # ``Linear`` packs backward state into ``grad_fn.backward_objects``
+    # (``LinearBwdArgs``); other linear-like modules still set the attributes
+    # directly on the autograd ctx.
+    state_holder = getattr(output.grad_fn, "backward_objects", output.grad_fn)
     required_attrs = (
         "backward_override",
         "fp8",
         "grad_output_quantizer",
         "reduce_and_update_bwd_fp8_tensors",
     )
-    missing_attrs = [attr for attr in required_attrs if not hasattr(output.grad_fn, attr)]
+    missing_attrs = [attr for attr in required_attrs if not hasattr(state_holder, attr)]
     if missing_attrs:
         raise RuntimeError(
-            "grad_fn does not expose required backward context attributes: "
-            f"{', '.join(missing_attrs)}."
+            f"Backward context does not expose required attributes: {', '.join(missing_attrs)}."
         )
     return (
-        getattr(output.grad_fn, "backward_override"),
-        bool(getattr(output.grad_fn, "fp8")),
-        getattr(output.grad_fn, "grad_output_quantizer"),
-        bool(getattr(output.grad_fn, "reduce_and_update_bwd_fp8_tensors")),
+        getattr(state_holder, "backward_override"),
+        bool(getattr(state_holder, "fp8")),
+        getattr(state_holder, "grad_output_quantizer"),
+        bool(getattr(state_holder, "reduce_and_update_bwd_fp8_tensors")),
     )
 
 
