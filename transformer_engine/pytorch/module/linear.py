@@ -18,6 +18,7 @@ from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch.torch_version import torch_version
 
 from .base import (
+    fake_quantize_weight,
     fill_userbuffers_buffer_for_all_gather,
     get_dummy_wgrad,
     get_ub,
@@ -33,6 +34,7 @@ from ..utils import (
     cast_if_needed,
     clear_tensor_data,
     divide,
+    fake_cast_if_needed,
     init_method_constant,
     needs_quantized_gemm,
     assert_dim_for_fp8_exec,
@@ -584,6 +586,275 @@ def _linear_forward_impl(
             "inp" if saved_inputmat is inp else None,
             "weight" if wt_save is weight else None,
             "weight",  # ``saved_weight`` slot is always the weight parameter
+            "bias" if bias is not None else None,
+        )
+        tensors_to_save_from_forward = (
+            None if saved_tensor_aliases[0] is not None else saved_inputmat,
+            None if saved_tensor_aliases[1] is not None else wt_save,
+            None,
+            None if saved_tensor_aliases[3] is not None else bias,
+        )
+
+        ctx_attrs = {
+            "fsdp_shapes": fsdp_shapes,
+            "saved_tensor_aliases": saved_tensor_aliases,
+        }
+
+    return out, new_weight_workspace, tensors_to_save_from_forward, None, ctx_attrs
+
+
+def _linear_forward_fake_impl(
+    args: LinearFwdArgs,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple], None, Optional[Dict]]:
+    """Fake :func:`_linear_forward_impl` for torch custom-op shape inference.
+
+    Mirrors the real control flow and ``set_usage`` / ``update_usage``
+    calls, but replaces computation with empty tensors and skips side
+    effects irrelevant for shape inference (CPU offload, calibration,
+    NCCL/UB collectives, ``clear_tensor_data``, FSDP scatter).
+    """
+
+    # The few locals below are mutated later in the function; everything
+    # else is read directly off ``args``. This shape-inference helper is
+    # not on a hot path, so we don't bother caching attribute lookups.
+    save_original_input = args.save_original_input
+    if args.backward_override == "high_precision":
+        save_original_input = True
+    weight_quantizer = args.weight_quantizer
+
+    out_features, in_features = args.weight.shape
+    assert args.inp.shape[-1] == in_features, "GEMM not possible"
+
+    tp_world_size = get_distributed_world_size(args.tp_group)
+    backward_needs_input = args.is_grad_enabled and args.weight_requires_grad
+    with_input_all_gather_nccl = (
+        args.parallel_mode == "column"
+        and args.sequence_parallel
+        and not args.ub_overlap_ag_fprop
+    )
+
+    # ------------------------------------------------------
+    # Prepare input tensor
+    # ------------------------------------------------------
+    # ``inputmat`` may become a ``QuantizedTensorStorage`` (which does not
+    # always expose ``.shape``), so track the logical shape separately.
+    inputmat = args.inp
+    inputmat_shape = list(args.inp.shape)
+    inputmat_total = None
+    inputmat_total_shape: List[int] = inputmat_shape
+    own_quantized_input = False
+    if args.fp8:
+        assert_dim_for_fp8_exec(inputmat, args.weight)
+        if save_original_input:
+            assert not isinstance(
+                args.input_quantizer, Float8Quantizer
+            ), "DelayedScaling recipe is not supported with save_original_input"
+
+    if with_input_all_gather_nccl or args.ub_overlap_ag_fprop:
+
+        if args.fp8 or args.debug:
+            if args.input_quantizer is None:
+                raise ValueError("Missing quantizer for input tensor")
+            if not isinstance(inputmat, QuantizedTensorStorage) and not args.custom:
+                own_quantized_input = True
+                args.input_quantizer.set_usage(
+                    rowwise=True,
+                    columnwise=backward_needs_input and args.backward_override is None,
+                )
+                if isinstance(
+                    args.input_quantizer, (Float8CurrentScalingQuantizer, Float8Quantizer)
+                ):
+                    args.input_quantizer.set_usage(columnwise=False)
+                if save_original_input:
+                    args.input_quantizer.set_usage(columnwise=False)
+                    own_quantized_input = False
+                inputmat = args.input_quantizer.make_empty(
+                    inputmat.shape,
+                    dtype=args.activation_dtype,
+                    device=inputmat.device,
+                )
+        else:
+            inputmat = fake_cast_if_needed(args.inp, args.activation_dtype)
+
+        # Initialize gathered input tensor (interleaved set_usage stays).
+        quantizer = None
+        if args.fp8 or args.debug:
+            quantizer = args.input_quantizer
+            quantizer.set_usage(rowwise=True, columnwise=False)
+
+        gathered_shape = list(inputmat_shape)
+        gathered_shape[0] *= tp_world_size
+        inputmat_total_shape = gathered_shape
+        if quantizer is not None:
+            inputmat_total = quantizer.make_empty(
+                gathered_shape,
+                dtype=args.activation_dtype,
+                device=args.inp.device,
+            )
+        else:
+            inputmat_total = torch.empty(
+                gathered_shape, dtype=args.activation_dtype, device=args.inp.device
+            )
+
+    else:
+        if args.fp8 or args.debug:
+            if isinstance(inputmat, QuantizedTensorStorage):
+                inputmat.update_usage(rowwise_usage=True)
+            else:
+                if args.input_quantizer is None:
+                    raise ValueError("Missing quantizer for input tensor")
+                args.input_quantizer.set_usage(
+                    rowwise=True,
+                    columnwise=(
+                        backward_needs_input
+                        and not save_original_input
+                        and args.backward_override is None
+                    ),
+                )
+                inputmat = args.input_quantizer.make_empty(
+                    inputmat.shape,
+                    dtype=args.activation_dtype,
+                    device=inputmat.device,
+                )
+                own_quantized_input = True
+        else:
+            inputmat = fake_cast_if_needed(args.inp, args.activation_dtype)
+        inputmat_total = inputmat
+        inputmat_total_shape = inputmat_shape
+
+    # ------------------------------------------------------
+    # Prepare weight tensor
+    # ------------------------------------------------------
+    new_weight_workspace = None
+    weightmat = args.weight
+    if args.fp8 or args.debug:
+        if weight_quantizer is not None and (
+            not isinstance(args.weight, QuantizedTensor) or args.debug
+        ):
+            columnwise_usage = (
+                args.is_grad_enabled and args.input_requires_grad and not args.is_fsdp2
+            )
+            if args.backward_override is not None:
+                columnwise_usage = False
+            if not columnwise_usage:
+                columnwise_usage = (
+                    is_fp8_activation_recompute_enabled()
+                    and not in_fp8_activation_recompute_phase()
+                )
+            weight_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
+        elif isinstance(args.weight, QuantizedTensor):
+            weight_quantizer = args.weight._quantizer
+        weightmat, new_weight_workspace = fake_quantize_weight(
+            tensor=args.weight,
+            quantizer=weight_quantizer,
+            workspace=args.weight_workspace,
+            fsdp_group=args.fsdp_group,
+            workspace_dtype=args.activation_dtype,
+            cache=args.cache_weight,
+        )
+        weightmat.update_usage(rowwise_usage=True)
+    else:
+        weightmat = fake_cast_if_needed(weightmat, args.activation_dtype)
+
+    # Cast bias to expected dtype
+    bias_dtype = args.activation_dtype
+    if needs_quantized_gemm(inputmat_total) and args.activation_dtype == torch.float32:
+        bias_dtype = torch.bfloat16
+    bias = fake_cast_if_needed(args.bias, bias_dtype) if args.bias is not None else args.bias
+
+    # Configure output quantizer
+    if args.output_quantizer is not None:
+        args.output_quantizer.set_usage(rowwise=True, columnwise=False)
+
+    # Output buffer for Userbuffers reduce-scatter (allocated with the
+    # post-RS shape so downstream consumers see consistent dimensions).
+    reduce_scatter_out = None
+    if args.ub_overlap_rs_fprop:
+        out_shape = list(args.inp.shape)
+        out_shape[0] //= tp_world_size
+        out_shape[-1] = out_features
+        reduce_scatter_out = torch.empty(
+            out_shape, dtype=args.activation_dtype, device=args.inp.device
+        )
+
+    # ------------------------------------------------------
+    # Forward GEMM (fake)
+    # ------------------------------------------------------
+    gemm_out_shape = list(inputmat_total_shape[:-1]) + [out_features]
+    if args.output_quantizer is not None:
+        gemm_out = args.output_quantizer.make_empty(
+            gemm_out_shape, dtype=args.activation_dtype, device=args.inp.device
+        )
+    else:
+        gemm_out = torch.empty(
+            gemm_out_shape, dtype=args.activation_dtype, device=args.inp.device
+        )
+
+    if with_input_all_gather_nccl:
+        inputmat_total = None
+
+    # ------------------------------------------------------
+    # Prepare output tensor (mirror the real comm path with shape-only ops)
+    # ------------------------------------------------------
+    if args.ub_overlap_rs_fprop:
+        out = reduce_scatter_out
+    elif args.parallel_mode == "row" and args.tp_size > 1:
+        out = gemm_out
+        if args.sequence_parallel:
+            new_shape = list(out.shape)
+            new_shape[0] //= tp_world_size
+            if args.output_quantizer is not None:
+                out = args.output_quantizer.make_empty(
+                    new_shape, dtype=out.dtype, device=out.device
+                )
+            else:
+                out = torch.empty(new_shape, dtype=out.dtype, device=out.device)
+        # allreduce / symmetric_all_reduce do not change shape.
+    else:
+        out = gemm_out
+
+    # Prepare backward state
+    tensors_to_save_from_forward = None
+    ctx_attrs = None
+
+    if args.is_grad_enabled:
+        if save_original_input:
+            inputmat = args.inp
+
+        if (
+            backward_needs_input
+            and own_quantized_input
+            and isinstance(inputmat, QuantizedTensorStorage)
+        ):
+            if args.backward_override is not None:
+                inputmat.update_usage(rowwise_usage=True, columnwise_usage=False)
+            elif (
+                args.backward_input_needs_gather
+                and weight_quantizer.supports_only_rowwise_all_gather()
+            ):
+                inputmat.update_usage(rowwise_usage=True, columnwise_usage=False)
+            else:
+                inputmat.update_usage(rowwise_usage=False, columnwise_usage=True)
+
+        saved_inputmat = None
+        if backward_needs_input:
+            saved_inputmat = inputmat
+
+        if args.fsdp_group is not None:
+            raise NotImplementedError(
+                "Fake Linear forward does not support manual TE FSDP "
+                "(fsdp_group is not None); use FSDP2 or MCore FSDP."
+            )
+        fsdp_shapes = []
+
+        wt_save = weightmat
+        if args.is_fsdp2 and weightmat is not args.weight:
+            wt_save = None
+
+        saved_tensor_aliases = (
+            "inp" if saved_inputmat is args.inp else None,
+            "weight" if wt_save is args.weight else None,
+            "weight",
             "bias" if bias is not None else None,
         )
         tensors_to_save_from_forward = (
@@ -1247,6 +1518,56 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
         dgrad.view(bwd_args.inp_shape) if bwd_args.requires_dgrad else None,
         grad_bias,
     )
+
+
+def _linear_backward_fake_impl(
+    args: LinearBwdArgs,
+) -> Tuple[Union[torch.Tensor, None], ...]:
+    """Fake :func:`_linear_backward` for torch custom-op shape inference.
+
+    Backward output shapes/dtypes are deterministic, so we just allocate
+    empty tensors of the right shape. ``grad_input_quantizer.set_usage``
+    is preserved because it influences ``dgrad``'s ``make_empty``.
+    Manual TE FSDP is unsupported; FSDP2 / MCore FSDP go through the
+    standard path.
+    """
+
+    if args.fsdp_group is not None:
+        raise NotImplementedError(
+            "Fake Linear backward does not support manual TE FSDP "
+            "(fsdp_group is not None); use FSDP2 or MCore FSDP."
+        )
+
+    assert args.saved_weight is not None and args.grad_output is not None
+    out_features, in_features = args.saved_weight.shape
+
+    if args.grad_input_quantizer is not None:
+        args.grad_input_quantizer.set_usage(rowwise=True, columnwise=False)
+
+    def _empty(shape, quantizer):
+        if quantizer is not None:
+            return quantizer.make_empty(
+                shape, dtype=args.activation_dtype, device=args.grad_output.device
+            )
+        return torch.empty(
+            shape, dtype=args.activation_dtype, device=args.grad_output.device
+        )
+
+    wgrad = None
+    if args.requires_wgrad and not args.fuse_wgrad_accumulation:
+        wgrad = _empty([out_features, in_features], args.grad_weight_quantizer)
+
+    dgrad = None
+    if args.requires_dgrad:
+        dgrad = _empty(list(args.inp_shape), args.grad_input_quantizer)
+
+    grad_bias = None
+    if args.use_bias and args.requires_wgrad:
+        grad_bias = torch.empty(
+            [out_features], dtype=args.activation_dtype, device=args.grad_output.device
+        )
+
+    return wgrad, dgrad, grad_bias
 
 
 class _Linear(torch.autograd.Function):

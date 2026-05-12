@@ -763,6 +763,61 @@ def quantize_weight(
     return out, None
 
 
+def fake_quantize_weight(
+    *,
+    tensor: Optional[torch.Tensor] = None,
+    quantizer: Optional[Quantizer] = None,
+    workspace: Optional[QuantizedTensorStorage] = None,
+    fsdp_group: Optional["dist_group_type"] = None,
+    workspace_dtype: Optional[torch.dtype] = None,
+    cache: bool = False,
+) -> Tuple[QuantizedTensorStorage, Optional[QuantizedTensorStorage]]:
+    """Fake counterpart of :func:`quantize_weight` for shape inference.
+
+    Mirrors the cache-hit / cache-miss control flow of :func:`quantize_weight`
+    but never performs an actual quantization. Cache misses are filled with
+    ``quantizer.make_empty``. Used by torch custom-op fake registrations.
+    """
+
+    # Already-quantized weight (primary FP8 parameters)
+    if isinstance(tensor, QuantizedTensor):
+        update_rowwise = True if quantizer.rowwise_usage else None
+        update_columnwise = True if quantizer.columnwise_usage else None
+        tensor.update_usage(
+            rowwise_usage=update_rowwise,
+            columnwise_usage=update_columnwise,
+        )
+        return tensor, None
+
+    # Validate workspace
+    if workspace is not None and quantizer is not None:
+        if not _is_weight_workspace_valid(workspace, quantizer):
+            workspace = None
+
+    if workspace is not None and fsdp_group is not None:
+        raise NotImplementedError(
+            "fake_quantize_weight does not support FSDP weight workspaces"
+        )
+
+    # Cache hit
+    if workspace is not None:
+        return workspace, None
+
+    # Cache miss — create new (fake) workspace
+    if tensor is None or quantizer is None:
+        raise ValueError(
+            "tensor and quantizer kwargs must be provided to construct FP8 workspace"
+        )
+    out = quantizer.make_empty(
+        tensor.shape,
+        dtype=workspace_dtype,
+        device=tensor.device,
+    )
+    if cache:
+        return out, out
+    return out, None
+
+
 class TransformerEngineBaseModule(torch.nn.Module, ABC):
     """Base TE module."""
 
