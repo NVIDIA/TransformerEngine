@@ -331,8 +331,8 @@ __device__ __forceinline__ void rowwise_scaling(
     }
     const float block_amax = get_amax_of_pair(thread_amax_2x);
 
-    nvfp4_scale_t S_dec_b_fp8;
     if constexpr (USE_4OVER6) {
+      nvfp4_scale_t S_dec_b_fp8;
       float block_S_enc_rowwise;
       float block_global_amax;
       if constexpr (ROW_SCALED_NVFP4) {
@@ -362,6 +362,13 @@ __device__ __forceinline__ void rowwise_scaling(
             rIn, scaling_factors, block_global_amax, S_dec_b_fp8, rOut);
       }
 
+      // Store scaling factors to SMEM buffer (R2S)
+      if (SF_storing_thread) {
+        const int scales_offset_Y = stage_rowwise_scales_offset_Y + it * THREADS_Y_ROWWISE;
+        const int scales_offset_X = stage_rowwise_scales_offset_X;
+        sSFrowwise[scales_offset_Y][scales_offset_X] = S_dec_b_fp8;
+      }
+
 #pragma unroll
       for (int w = 0; w < WAVES; ++w) {
         const int swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % ELTS_PER_THREAD;
@@ -369,6 +376,7 @@ __device__ __forceinline__ void rowwise_scaling(
         ptx::st_shared_b32(&sOut[buff_out][it_offset_Y_rowwise][swizzled_idx], rOut[w]);
       }
     } else {
+      nvfp4_scale_t S_dec_b_fp8;
       scaling_coeff_type SFcoefficient;
       if constexpr (ROW_SCALED_NVFP4) {
         const size_t row_idx = row_offset + stage_Y * TILE_DIM_Y + it_offset_Y_rowwise;
@@ -383,6 +391,13 @@ __device__ __forceinline__ void rowwise_scaling(
         S_dec_b_fp8 = compute_decoding_scaling_factor(block_amax, S_enc_rowwise);
         SFcoefficient =
             compute_nvfp4_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8, S_enc_rowwise);
+      }
+
+      // Store scaling factors to SMEM buffer (R2S)
+      if (SF_storing_thread) {
+        const int scales_offset_Y = stage_rowwise_scales_offset_Y + it * THREADS_Y_ROWWISE;
+        const int scales_offset_X = stage_rowwise_scales_offset_X;
+        sSFrowwise[scales_offset_Y][scales_offset_X] = S_dec_b_fp8;
       }
 
 // Scale elements
@@ -406,13 +421,6 @@ __device__ __forceinline__ void rowwise_scaling(
         const int swizzled_idx = (swizzled_group_idx + thread_offset_X_rowwise) / 2;
         ptx::st_shared_b32(&sOut[buff_out][it_offset_Y_rowwise][swizzled_idx], out_x8);
       }
-    }
-
-    // Store scaling factors to SMEM buffer (R2S)
-    if (SF_storing_thread) {
-      const int scales_offset_Y = stage_rowwise_scales_offset_Y + it * THREADS_Y_ROWWISE;
-      const int scales_offset_X = stage_rowwise_scales_offset_X;
-      sSFrowwise[scales_offset_Y][scales_offset_X] = S_dec_b_fp8;
     }
   }
 }
