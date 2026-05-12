@@ -11,7 +11,6 @@
 #include "../util/cuda_runtime.h"
 #include "../util/system.h"
 #include "fused_attn_f16_arbitrary_seqlen.h"
-#include "fused_attn_f16_max512_seqlen.h"
 #include "fused_attn_fp8.h"
 #include "utils.h"
 
@@ -255,35 +254,31 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
 
   if ((q_dtype == NVTEDType::kNVTEFloat8E4M3 || q_dtype == NVTEDType::kNVTEFloat8E5M2) &&
       sm_arch_ >= 90 && bias_type == NVTE_Bias_Type::NVTE_NO_BIAS &&
-      // 8.9: t3hd, max_s=512, d=64, padding
-      ((cudnn_runtime_version >= 8900 && sm_arch_ < 100 &&
-        qkv_layout == NVTE_QKV_Layout::NVTE_T3HD && max_seqlen_q == max_seqlen_kv &&
-        max_seqlen_q <= 512 && head_dim_qk == 64 && head_dim_v == 64 &&
-        attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK) ||
-       // 9.2.1: {bshd, sbhd}, any seqlen, d=128, {no_mask, causal}
-       (cudnn_runtime_version >= 90201 && sm_arch_ < 100 && max_seqlen_q % 128 == 0 &&
-        max_seqlen_kv % 128 == 0 && head_dim_qk == 128 && head_dim_v == 128 &&
-        (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
-         attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK)) ||
-       // 9.7: {bshd, sbhd}, any seqlen, d<=256 for sm90 and d<=128 for sm100, {padding, padding_causal}
-       (cudnn_runtime_version >= 90700 &&
-        // TODO (cyang): add is_training to nvte_get_fused_attn_backend
-        // sm90: fwd d<=256, bwd d=128 only
-        // sm100: fwd d<=128, bwd d<=128
-        ((sm_arch_ < 100 && (!is_training) && head_dim_qk <= 256 && head_dim_v <= 256) ||
-         (sm_arch_ < 100 && is_training && head_dim_qk == 128 && head_dim_v == 128) ||
-         (sm_arch_ >= 100 && head_dim_qk <= 128 && head_dim_v <= 128)) &&
-        head_dim_qk % 16 == 0 && head_dim_v % 16 == 0 &&
-        (attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK ||
-         attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
-         attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
-         attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK)) ||
-       // 9.21: d_qk=192, d_v=128
-       (cudnn_runtime_version >= 92100 && sm_arch_ >= 100 && head_dim_qk <= 192 &&
-        head_dim_v <= 128 && head_dim_qk % 16 == 0 && head_dim_v % 16 == 0 &&
-        (attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK ||
-         attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
-         attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK))) &&
+      (
+          // 9.2.1: {bshd, sbhd}, any seqlen, d=128, {no_mask, causal}
+          (cudnn_runtime_version >= 90201 && sm_arch_ < 100 && max_seqlen_q % 128 == 0 &&
+           max_seqlen_kv % 128 == 0 && head_dim_qk == 128 && head_dim_v == 128 &&
+           (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
+            attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK)) ||
+          // 9.7: {bshd, sbhd}, any seqlen, d<=256 for sm90 and d<=128 for sm100, {padding, padding_causal}
+          (cudnn_runtime_version >= 90700 &&
+           // TODO (cyang): add is_training to nvte_get_fused_attn_backend
+           // sm90: fwd d<=256, bwd d=128 only
+           // sm100: fwd d<=128, bwd d<=128
+           ((sm_arch_ < 100 && (!is_training) && head_dim_qk <= 256 && head_dim_v <= 256) ||
+            (sm_arch_ < 100 && is_training && head_dim_qk == 128 && head_dim_v == 128) ||
+            (sm_arch_ >= 100 && head_dim_qk <= 128 && head_dim_v <= 128)) &&
+           head_dim_qk % 16 == 0 && head_dim_v % 16 == 0 &&
+           (attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK ||
+            attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
+            attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
+            attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK)) ||
+          // 9.21: d_qk=192, d_v=128
+          (cudnn_runtime_version >= 92100 && sm_arch_ >= 100 && head_dim_qk <= 192 &&
+           head_dim_v <= 128 && head_dim_qk % 16 == 0 && head_dim_v % 16 == 0 &&
+           (attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK ||
+            attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
+            attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK))) &&
       // pre-9.21: {bshd, sbhd}, {vanilla}
       // 9.21+: {bshd, sbhd, bhsd}, {vanilla, off-by-one, learnable}
       ((cudnn_runtime_version < 92100 &&
@@ -295,37 +290,9 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
       !requires_64bit_ragged_offset &&
       // 9.10.0: known bugs with SDPA FP8
       (cudnn_runtime_version != 91000) && !return_max_logit) {
-    if (cudnn_runtime_version >= 8900) {
-      backend = NVTE_Fused_Attn_Backend::NVTE_FP8;
-    } else {
-      backend = NVTE_Fused_Attn_Backend::NVTE_No_Backend;
-      std::cout << "Warning: FP8 fused attention is supported by cuDNN 8.9.0+."
-                   " Please upgrade your cuDNN version if possible."
-                << std::endl;
-    }
+    backend = NVTE_Fused_Attn_Backend::NVTE_FP8;
   } else if ((q_dtype == NVTEDType::kNVTEFloat16) || (q_dtype == NVTEDType::kNVTEBFloat16)) {
-    bool flag_m512 = false;
     bool flag_arb = false;
-    if ((sm_arch_ == 80 || sm_arch_ == 90) && (max_seqlen_q <= 512 && max_seqlen_q % 64 == 0) &&
-        (max_seqlen_kv <= 512 && max_seqlen_kv % 64 == 0) && (head_dim_qk == 64) &&
-        (head_dim_v == 64) && (num_attn_heads == num_gqa_groups) &&
-        ((bias_type == NVTE_Bias_Type::NVTE_NO_BIAS) ||
-         (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS)) &&
-        ((attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK) ||
-         (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK) ||
-         (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK &&
-          max_seqlen_q == max_seqlen_kv) ||
-         (attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK)) &&
-        ((qkv_layout == NVTE_QKV_Layout::NVTE_SB3HD) ||
-         (qkv_layout == NVTE_QKV_Layout::NVTE_SBHD_SB2HD) ||
-         (qkv_layout == NVTE_QKV_Layout::NVTE_BS3HD) ||
-         (qkv_layout == NVTE_QKV_Layout::NVTE_BSHD_BS2HD) ||
-         (qkv_layout == NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD)) &&
-        ((window_size_left == -1) && (window_size_right == -1 || window_size_right == 0)) &&
-        !requires_64bit_ragged_offset &&
-        (softmax_type == NVTE_Softmax_Type::NVTE_VANILLA_SOFTMAX) && !return_max_logit) {
-      flag_m512 = true;
-    }
     if (
         // TODO(cyang): replace with cudnn-frontend check_support for cleaner logic and better error messaging
         // architecture
@@ -499,30 +466,8 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
                                dropout == 0.0 && bias_type == NVTE_Bias_Type::NVTE_NO_BIAS))))) {
       flag_arb = true;
     }
-    if (((max_seqlen_q > 512) || (max_seqlen_kv > 512)) && (flag_arb == true)) {
+    if (flag_arb) {
       backend = NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen;
-    }
-    if ((max_seqlen_q <= 512) && (max_seqlen_kv <= 512)) {
-      if (flag_arb == true) {
-        backend = NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen;
-      } else if ((flag_arb == false) && (flag_m512 == true)) {
-        backend = NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen;
-      }
-      int env_backend = static_cast<int>(backend);
-      env_backend = transformer_engine::getenv<int>("NVTE_FUSED_ATTN_BACKEND", env_backend);
-      if (((env_backend == static_cast<int>(NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen)) &&
-           flag_m512) ||
-          ((env_backend == static_cast<int>(NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen)) &&
-           flag_arb)) {
-        backend = static_cast<NVTE_Fused_Attn_Backend>(env_backend);
-      }
-    }
-    if (cudnn_runtime_version < 8901 &&
-        backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
-      backend = NVTE_Fused_Attn_Backend::NVTE_No_Backend;
-      std::cout << "Warning: FP16/BF16 fused attention is supported by cuDNN 8.9.1+."
-                   " Please upgrade your cuDNN version if possible."
-                << std::endl;
     }
     if (cudnn_runtime_version < 8900 &&
         backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen) {
@@ -668,12 +613,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
       h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, window_size_left, window_size_right,
       return_max_logit, cuda_graph, false);
 
-  if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
-    fused_attn_max_512_fwd(b, h_q, max_seqlen_q, max_seqlen_kv, d_qk, is_training, attn_scale,
-                           dropout, qkv_layout, bias_type, attn_mask_type, input_Q, input_K,
-                           input_V, input_Bias, output_O, Aux_CTX_Tensors, input_cu_seqlens_q,
-                           input_cu_seqlens_kv, input_rng_state, wkspace, stream, handle);
-  } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen) {
+  if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen) {
     fused_attn_arbitrary_seqlen_fwd(
         b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, t_q, t_kv, num_pages_k, num_pages_v,
         page_size_k, page_size_v, max_pages_per_seq_k, max_pages_per_seq_v, is_training,
@@ -754,13 +694,7 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
       h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, window_size_left, window_size_right, false,
       cuda_graph, deterministic);
 
-  if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
-    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
-    fused_attn_max_512_bwd(b, h_q, max_seqlen_q, max_seqlen_kv, d_qk, attn_scale, dropout,
-                           qkv_layout, bias_type, attn_mask_type, input_Q, input_K, input_V,
-                           input_dO, output_S, output_dQ, output_dK, output_dV, output_dBias,
-                           input_cu_seqlens_q, input_cu_seqlens_kv, wkspace, stream, handle);
-  } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen) {
+  if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen) {
     size_t i = 0;
     Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     Tensor *input_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
@@ -782,10 +716,6 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_FP8) {
     size_t i = 0;
     const Tensor *input_M = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
-    const Tensor *input_ZInv = nullptr;
-    if (qkv_layout == NVTE_QKV_Layout::NVTE_T3HD) {
-      input_ZInv = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
-    }
     const Tensor *input_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     const Tensor *input_SoftmaxOffset = nullptr;
     if (softmax_type != NVTE_VANILLA_SOFTMAX) {
@@ -799,10 +729,10 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                        qkv_layout, o_format, do_format, dqkv_layout, qkv_scale_inv_format,
                        do_scale_inv_format, bias_type, attn_mask_type, softmax_type,
                        window_size_left, window_size_right, bottom_right_diagonal, deterministic,
-                       input_Q, input_K, input_V, input_O, input_dO, input_dO_f16, input_M,
-                       input_ZInv, input_S, input_SoftmaxOffset, input_output_dP, output_dQ,
-                       output_dK, output_dV, output_dSoftmaxOffset, input_cu_seqlens_q,
-                       input_cu_seqlens_kv, input_rng_state, wkspace, stream, handle);
+                       input_Q, input_K, input_V, input_O, input_dO, input_dO_f16, input_M, input_S,
+                       input_SoftmaxOffset, input_output_dP, output_dQ, output_dK, output_dV,
+                       output_dSoftmaxOffset, input_cu_seqlens_q, input_cu_seqlens_kv,
+                       input_rng_state, wkspace, stream, handle);
   } else {
     NVTE_ERROR("Invalid combination of data type and sequence length for fused attention. \n");
   }
