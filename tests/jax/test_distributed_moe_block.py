@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Distributed tests for ``transformer_engine.jax.flax.MoEBlock``."""
+"""Distributed tests for the experimental ``transformer_engine.jax.flax._MoEBlock``."""
 
 import sys
 
@@ -18,13 +18,16 @@ from utils import assert_allclose, is_devices_enough
 
 @pytest.fixture(autouse=True, scope="function")
 def _inject_moe(request):
-    """Lazy-load ``MoEBlock`` only for tests marked ``triton``."""
+    """Lazy-load ``_MoEBlock`` only for tests marked ``triton``."""
     if not request.node.get_closest_marker("triton"):
         yield
         return
 
     from transformer_engine.jax import MeshResource, autocast
-    from transformer_engine.jax.flax import MoEBlock
+
+    # The class is intentionally exposed as ``_MoEBlock`` (experimental);
+    # aliasing to ``MoEBlock`` here keeps the test bodies readable.
+    from transformer_engine.jax.flax import _MoEBlock as MoEBlock
     from transformer_engine.jax.flax.moe import PermutationBackend
 
     mod = sys.modules[__name__]

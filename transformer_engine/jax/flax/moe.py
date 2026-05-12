@@ -2,11 +2,18 @@
 #
 # See LICENSE for license information.
 
-"""Flax Linen MoEBlock for TransformerEngine JAX.
+"""Flax Linen MoE block for TransformerEngine JAX.
 
-This module exposes :class:`MoEBlock`, a self-contained Flax Linen MoE
-layer. See the class docstring for the architecture, the EP / FSDP
-strategies, and the ``_align_size > 0`` contract.
+This module exposes :class:`_MoEBlock`, an **experimental** self-contained
+Flax Linen MoE layer. It is intentionally prefixed with an underscore
+while TE's NCCL-backed EP component (and the recipe-driven alignment
+follow-up) stabilises; the public ``MoEBlock`` alias will be introduced
+once those dependencies are ready (target: the TE release following the
+2.16 code freeze). Until then please treat the class, its parameters,
+and :class:`GlobalPermuteResult` as unstable.
+
+See the class docstring for the architecture, the EP / FSDP strategies,
+and the ``_align_size > 0`` contract.
 """
 
 from enum import Enum
@@ -47,7 +54,7 @@ Array = NewType("Array", jnp.ndarray)
 Initializer = Callable[[PRNGKey, Shape, DType], Array]
 
 
-__all__ = ["GlobalPermuteResult", "MoEBlock", "PermutationBackend"]
+__all__ = ["GlobalPermuteResult", "PermutationBackend", "_MoEBlock"]
 
 
 # =============================================================================
@@ -56,7 +63,7 @@ __all__ = ["GlobalPermuteResult", "MoEBlock", "PermutationBackend"]
 
 
 class PermutationBackend(Enum):
-    """Token-dispatch / combine backend used by :class:`MoEBlock`.
+    """Token-dispatch / combine backend used by :class:`_MoEBlock`.
 
     * ``PURE_JAX``: ``jnp.argsort`` + gather paths compiled as plain XLA;
       typically faster than ``TRITON`` in current testing because XLA can
@@ -72,9 +79,9 @@ class PermutationBackend(Enum):
 # GlobalPermuteResult
 # =============================================================================
 #
-# Output of :meth:`MoEBlock._global_permute`. Carried as a pytree (so it
+# Output of :meth:`_MoEBlock._global_permute`. Carried as a pytree (so it
 # crosses ``jax.shard_map`` / ``jax.value_and_grad`` boundaries
-# transparently) and consumed by :meth:`MoEBlock._global_combine`. The
+# transparently) and consumed by :meth:`_MoEBlock._global_combine`. The
 # fields populated depend on the permutation backend; the unused fields
 # stay ``None``.
 #
@@ -85,7 +92,7 @@ class PermutationBackend(Enum):
 
 @flax_struct.dataclass
 class GlobalPermuteResult:
-    """Result of :meth:`MoEBlock._global_permute`."""
+    """Result of :meth:`_MoEBlock._global_permute`."""
 
     sorted_inputs: jnp.ndarray
     group_sizes: jnp.ndarray
@@ -100,12 +107,22 @@ class GlobalPermuteResult:
 
 
 # =============================================================================
-# MoEBlock
+# _MoEBlock
 # =============================================================================
 
 
-class MoEBlock(TransformerEngineBase):
-    """Mixture-of-Experts Flax Linen block.
+class _MoEBlock(TransformerEngineBase):
+    """Mixture-of-Experts Flax Linen block (**experimental**).
+
+    .. warning::
+
+       This class is exposed as ``_MoEBlock`` (leading underscore) on
+       purpose: it is not part of the stable public API yet. The TE
+       NCCL-backed EP component and the recipe-driven ``_align_size``
+       follow-up both need to land before this is promoted to a public
+       ``MoEBlock``. Until then, expect signature changes, including
+       to :class:`GlobalPermuteResult` and :class:`PermutationBackend`.
+       Target promotion: the TE release after the 2.16 code freeze.
 
     Encapsulates the full MoE forward pass: gate projection, fused top-k
     routing, optional auxiliary load-balancing loss, token dispatch,
@@ -171,7 +188,7 @@ class MoEBlock(TransformerEngineBase):
     Expert parallelism is configured via :class:`MeshResource`'s
     ``ep_resource`` axis. When that axis is set on the active
     :func:`~transformer_engine.jax.global_mesh_resource` and has more
-    than one device, ``MoEBlock`` dispatches to the
+    than one device, ``_MoEBlock`` dispatches to the
     **ragged-all-to-all** EP strategy (a.k.a. A2Av): each shard routes
     its own tokens globally over all experts, then a forward
     ``ragged_all_to_all`` exchanges per-expert chunks so each shard
@@ -292,7 +309,7 @@ class MoEBlock(TransformerEngineBase):
     # Parallelism
     #
     # The EP axis is resolved from ``global_mesh_resource().ep_resource``
-    # and the active mesh, not configured per-instance. ``MoEBlock``
+    # and the active mesh, not configured per-instance. ``_MoEBlock``
     # uses ``_forward_a2a_ep`` when that axis exists on the mesh and
     # has > 1 device; otherwise it uses ``_forward_no_ep``.
     data_parallelism_axes: Tuple[str, ...] = ()
@@ -349,7 +366,7 @@ class MoEBlock(TransformerEngineBase):
         """
         assert (
             inputs.ndim == 3
-        ), f"MoEBlock expects [batch, sequence, hidden] input, got shape {inputs.shape}"
+        ), f"_MoEBlock expects [batch, sequence, hidden] input, got shape {inputs.shape}"
         inputs = with_sharding_constraint_by_logical_axes(inputs, self.input_axes)
 
         _, _, hidden_size = inputs.shape
@@ -796,7 +813,7 @@ class MoEBlock(TransformerEngineBase):
         Concretely:
 
         * ``inputs`` should be FSDP/DP-sharded on the batch dim
-          (``input_axes`` in :class:`MoEBlock` enforces this via a
+          (``input_axes`` in :class:`_MoEBlock` enforces this via a
           logical ``with_sharding_constraint``).
         * ``wi_*`` / ``wo`` weights should carry the logical axes
           ``wi_kernel_axes`` / ``wo_kernel_axes`` so FSDP shards a
@@ -885,7 +902,7 @@ class MoEBlock(TransformerEngineBase):
         mesh = _get_mesh()
         if mesh is None or mesh.empty:
             raise ValueError(
-                "MoEBlock requires an active jax.sharding.Mesh (either via"
+                "_MoEBlock requires an active jax.sharding.Mesh (either via"
                 " `with mesh:` or `jax.set_mesh`) when EP is configured on"
                 " the active MeshResource."
             )

@@ -999,7 +999,7 @@ def pure_jax_token_combine(
 # =============================================================================
 #
 # These helpers support the ragged-all-to-all (A2A / A2Av) EP strategy used by
-# :class:`transformer_engine.jax.flax.MoEBlock`. The forward EP path looks
+# :class:`transformer_engine.jax.flax._MoEBlock`. The forward EP path looks
 # like::
 #
 #     route -> global_permute -> AG(group_sizes, ep)
