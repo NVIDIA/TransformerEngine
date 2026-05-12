@@ -42,15 +42,14 @@ namespace transformer_engine::pytorch {
 // get the fused attention backend
 std::tuple<NVTE_Fused_Attn_Backend, std::string> get_fused_attn_backend(
     bool is_training, size_t batch_size, const DType q_dtype, const DType kv_dtype,
-    const DType o_dtype, const DType do_dtype, const DType dqkv_dtype,
-    NVTEScalingMode scaling_mode, NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format,
-    NVTE_QKV_Format do_format, NVTE_QKV_Layout dqkv_layout,
-    NVTE_QKV_Format qkv_scale_inv_format, NVTE_QKV_Format do_scale_inv_format,
-    NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
-    float attn_scale, float p_dropout, size_t num_attn_heads, size_t num_gqa_groups,
-    size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v,
-    int64_t window_size_left, int64_t window_size_right, bool bottom_right_diagonal,
-    bool return_max_logit, bool cuda_graph, bool deterministic) {
+    const DType o_dtype, const DType do_dtype, const DType dqkv_dtype, NVTEScalingMode scaling_mode,
+    NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format, NVTE_QKV_Format do_format,
+    NVTE_QKV_Layout dqkv_layout, NVTE_QKV_Format qkv_scale_inv_format,
+    NVTE_QKV_Format do_scale_inv_format, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
+    NVTE_Softmax_Type softmax_type, float attn_scale, float p_dropout, size_t num_attn_heads,
+    size_t num_gqa_groups, size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim_qk,
+    size_t head_dim_v, int64_t window_size_left, int64_t window_size_right,
+    bool bottom_right_diagonal, bool return_max_logit, bool cuda_graph, bool deterministic) {
   NVTEFusedAttnConfig cfg = NVTE_FUSED_ATTN_CONFIG_INIT;
   cfg.qkv_layout = qkv_layout;
   cfg.o_format = o_format;
