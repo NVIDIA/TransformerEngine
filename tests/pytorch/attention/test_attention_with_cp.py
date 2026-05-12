@@ -2,7 +2,9 @@
 #
 # See LICENSE for license information.
 
+import json
 import os
+import select
 import subprocess
 import sys
 import pathlib
@@ -24,7 +26,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.utils import Fla
 
 _current_file = pathlib.Path(__file__).resolve()
 sys.path.append(str(_current_file.parent.parent))
-from utils import ModelConfig, get_available_attention_backends, run_distributed
+from utils import ModelConfig, get_available_attention_backends
 
 pytest_logging_level = logging.getLevelName(logging.root.level)
 
@@ -60,19 +62,133 @@ model_configs_flash_attn = {
 }
 
 
-def get_bash_arguments(num_gpus_per_node, **kwargs):
-    args = [
-        "python3",
-        "-m",
-        "torch.distributed.launch",
-        "--nproc-per-node=" + str(num_gpus_per_node),
-    ]
-    te_path = os.getenv("TE_PATH", "/opt/transformerengine")
-    script_path = os.path.join(te_path, "tests/pytorch/attention/run_attention_with_cp.py")
-    args.append(script_path)
-    for k, v in kwargs.items():
-        args.append(f"{k}={v}")
-    return args
+# --- Persistent pool runner -----------------------------------------------
+#
+# Each (world_size) is served by one long-lived torchrun running
+# run_attention_with_cp_pool.py. We submit one work item per pytest case over
+# rank-0 stdin and read one JSON response from rank-0 stdout. Replaces
+# the per-case torchrun launch path; init/destroy NCCL once per pool, not
+# once per case.
+#
+# Why two pool sizes: cp_comm_type="a2a+p2p" needs world_size=4; everything
+# else uses world_size=2. We can't resize an active PG, so we keep one pool
+# per world_size and route each case to the right one. Pools are spawned
+# lazily on first use so a session that only exercises 2-GPU cases never
+# pays the 4-GPU init cost.
+
+POOL_SUBMIT_TIMEOUT_SEC = float(os.getenv("NVTE_CP_POOL_TIMEOUT_SEC", "600"))
+
+
+class PoolWorker:
+    def __init__(self, world_size: int):
+        self.world_size = world_size
+        self.proc: subprocess.Popen | None = None
+
+    def _spawn(self) -> None:
+        te_path = os.getenv("TE_PATH", "/opt/transformerengine")
+        worker = os.path.join(
+            te_path, "tests/pytorch/attention/run_attention_with_cp_pool.py"
+        )
+        cmd = [
+            sys.executable,
+            "-m",
+            "torch.distributed.run",
+            f"--nproc-per-node={self.world_size}",
+            "--standalone",  # picks a free rendezvous port
+            worker,
+        ]
+        self.proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=sys.stderr,
+            text=True,
+            bufsize=1,
+            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+        )
+
+    def _ensure_alive(self) -> None:
+        if self.proc is None or self.proc.poll() is not None:
+            self._spawn()
+
+    def _kill(self) -> None:
+        if self.proc and self.proc.poll() is None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                self.proc.wait()
+        self.proc = None
+
+    def submit(self, kwargs: dict, timeout: float = POOL_SUBMIT_TIMEOUT_SEC) -> None:
+        self._ensure_alive()
+        assert self.proc and self.proc.stdin and self.proc.stdout
+        req = json.dumps({"op": "run", "kwargs": kwargs}) + "\n"
+        try:
+            self.proc.stdin.write(req)
+            self.proc.stdin.flush()
+        except BrokenPipeError:
+            self._kill()
+            raise AssertionError("pool worker died before request could be sent")
+
+        ready, _, _ = select.select([self.proc.stdout], [], [], timeout)
+        if not ready:
+            self._kill()
+            raise AssertionError(
+                f"pool worker (world_size={self.world_size}) timed out after {timeout}s; "
+                "pool killed and will be respawned for the next case"
+            )
+
+        line = self.proc.stdout.readline()
+        if not line:
+            self._kill()
+            raise AssertionError("pool worker died mid-request")
+
+        resp = json.loads(line)
+        if not resp["ok"]:
+            # Test failure; pool itself is still healthy.
+            raise AssertionError(resp["error"])
+
+    def shutdown(self) -> None:
+        if self.proc and self.proc.poll() is None:
+            try:
+                self.proc.stdin.write(json.dumps({"op": "shutdown"}) + "\n")
+                self.proc.stdin.flush()
+                self.proc.stdin.close()
+            except BrokenPipeError:
+                pass
+            try:
+                self.proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                self._kill()
+        self.proc = None
+
+
+@pytest.fixture(scope="session")
+def cp_pool():
+    """Returns a callable: cp_pool(world_size) -> PoolWorker."""
+    pools: dict[int, PoolWorker] = {}
+
+    def _get(world_size: int) -> PoolWorker:
+        if world_size > torch.cuda.device_count():
+            pytest.skip(
+                f"Test requires {world_size} GPUs, but found {torch.cuda.device_count()}"
+            )
+        if world_size not in pools:
+            pools[world_size] = PoolWorker(world_size)
+        return pools[world_size]
+
+    yield _get
+    for p in pools.values():
+        p.shutdown()
+
+
+def _submit(pool: PoolWorker, **kwargs) -> None:
+    # run_dpa_with_cp expects all kwargs as strings (it does e.g.
+    # `fp8_bwd == "True"`), matching the old argv-based path. Serialize
+    # everything as strings so we don't accidentally change semantics.
+    pool.submit({k: str(v) for k, v in kwargs.items()})
 
 
 dtypes = ["bf16", "fp16"]
@@ -91,10 +207,9 @@ if test_essential:
 @pytest.mark.parametrize("model", model_configs_flash_attn.keys())
 @pytest.mark.parametrize("qkv_format", qkv_formats)
 @pytest.mark.parametrize("cp_comm_type", cp_comm_types)
-def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
+def test_cp_with_flash_attention(cp_pool, dtype, model, qkv_format, cp_comm_type):
     num_gpus = 4 if cp_comm_type == "a2a+p2p" else 2
-    if num_gpus > torch.cuda.device_count():
-        pytest.skip(f"Test requires {num_gpus} GPUs, but found {torch.cuda.device_count()}")
+    pool = cp_pool(num_gpus)
 
     config = model_configs_flash_attn[model]
     config.context_parallel = True
@@ -140,16 +255,14 @@ def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
     if not flash_attn_supported:
         pytest.skip("No attention backend available.")
 
-    run_distributed(
-        get_bash_arguments(
-            num_gpus_per_node=num_gpus,
-            dtype=dtype,
-            model=model,
-            qkv_format=qkv_format,
-            kernel_backend="FlashAttention",
-            cp_comm_type=cp_comm_type,
-            log_level=pytest_logging_level,
-        ),
+    _submit(
+        pool,
+        dtype=dtype,
+        model=model,
+        qkv_format=qkv_format,
+        kernel_backend="FlashAttention",
+        cp_comm_type=cp_comm_type,
+        log_level=pytest_logging_level,
     )
 
 
@@ -274,15 +387,23 @@ if test_essential:
 @pytest.mark.parametrize("scaling_mode", [None, "delayed", "current", "mxfp8"])
 @pytest.mark.parametrize("f16_O", [True, False])
 def test_cp_with_fused_attention(
-    dtype, model, qkv_format, cp_comm_type, fp8_bwd, fp8_mha, fp8_dpa, scaling_mode, f16_O
+    cp_pool,
+    dtype,
+    model,
+    qkv_format,
+    cp_comm_type,
+    fp8_bwd,
+    fp8_mha,
+    fp8_dpa,
+    scaling_mode,
+    f16_O,
 ):
     config = model_configs_fused_attn[model]
     config.context_parallel = True
     config.cp_comm_type = cp_comm_type
 
     num_gpus = 4 if cp_comm_type == "a2a+p2p" else 2
-    if num_gpus > torch.cuda.device_count():
-        pytest.skip(f"Test requires {num_gpus} GPUs, but found {torch.cuda.device_count()} GPUs.")
+    pool = cp_pool(num_gpus)
 
     if get_device_compute_capability() < (9, 0) and qkv_format == "thd":
         pytest.skip("Only sm90+ architectures support THD format!")
@@ -404,21 +525,19 @@ def test_cp_with_fused_attention(
     if not fused_attn_supported:
         pytest.skip("No attention backend available.")
 
-    run_distributed(
-        get_bash_arguments(
-            num_gpus_per_node=num_gpus,
-            dtype=dtype,
-            model=model,
-            qkv_format=qkv_format,
-            kernel_backend="FusedAttention",
-            cp_comm_type=cp_comm_type,
-            fp8_bwd=fp8_bwd,
-            fp8_dpa=fp8_dpa,
-            fp8_mha=fp8_mha,
-            scaling_mode=scaling_mode,
-            f16_O=f16_O,
-            is_training=is_training,
-            deterministic=_deterministic,
-            log_level=pytest_logging_level,
-        ),
+    _submit(
+        pool,
+        dtype=dtype,
+        model=model,
+        qkv_format=qkv_format,
+        kernel_backend="FusedAttention",
+        cp_comm_type=cp_comm_type,
+        fp8_bwd=fp8_bwd,
+        fp8_dpa=fp8_dpa,
+        fp8_mha=fp8_mha,
+        scaling_mode=scaling_mode,
+        f16_O=f16_O,
+        is_training=is_training,
+        deterministic=_deterministic,
+        log_level=pytest_logging_level,
     )

@@ -226,6 +226,9 @@ def run_dpa_with_cp(
     # set up distributed group
     rank = int(os.getenv("RANK", "0"))
     world_size = int(os.getenv("WORLD_SIZE", "1"))
+    # When NVTE_CP_POOL_PG=1, the pool runner owns the lifecycle of the main
+    # process group across many cases; here we only reuse it.
+    _pool_managed_pg = os.getenv("NVTE_CP_POOL_PG", "0") == "1"
     if dist.is_initialized():
         world_size = dist.get_world_size()
         rank = dist.get_rank()
@@ -234,7 +237,8 @@ def run_dpa_with_cp(
         device = rank % device_count
         torch.cuda.set_device(device)
     logging.info(f"[Rank {rank}] Setup: world_size {world_size}")
-    dist.init_process_group(backend="nccl", world_size=world_size, rank=rank)
+    if not _pool_managed_pg:
+        dist.init_process_group(backend="nccl", world_size=world_size, rank=rank)
 
     # set up communication group for CP
     cp_comm_ranks = range(world_size)
@@ -763,7 +767,14 @@ def run_dpa_with_cp(
             logging.info(f"[Rank {rank}] CP vs no-CP: {names[i]} matches")
 
     # destroy distribution group
-    dist.destroy_process_group()
+    if _pool_managed_pg:
+        # Pool owns the main PG; only clean up groups created for this case.
+        dist.destroy_process_group(cp_comm_group)
+        if cp_comm_type == "a2a+p2p":
+            for g in cp_comm_sub_groups:
+                dist.destroy_process_group(g)
+    else:
+        dist.destroy_process_group()
 
 
 def main(**kwargs):
