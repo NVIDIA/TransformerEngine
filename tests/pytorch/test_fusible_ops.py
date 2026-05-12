@@ -145,6 +145,7 @@ def make_reference_and_test_tensors(
     test_dtype: torch.dtype = torch.float32,
     test_device: torch.device = "cuda",
     test_is_quantized: bool = False,
+    nvfp4_weight: bool = False,
     requires_grad: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Construct tensors with the same values
@@ -155,6 +156,8 @@ def make_reference_and_test_tensors(
 
     If a quantization scheme is provided, the tensor values are
     quantized so that they are representable.
+    NVFP4 4over6 activations use 1D quantization, while linear weights
+    use the recipe's 2D weight quantization path.
 
     """
 
@@ -188,7 +191,7 @@ def make_reference_and_test_tensors(
         test = NVFP4Quantizer(
             with_rht=False,
             with_post_rht_amax=False,
-            with_2d_quantization=False,
+            with_2d_quantization=quantization == "nvfp4_4over6" and nvfp4_weight,
             stochastic_rounding=False,
             with_random_sign_mask=False,
             use_4over6=quantization == "nvfp4_4over6",
@@ -508,6 +511,7 @@ class TestFuser:
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
+            nvfp4_weight=True,
         )
 
         # Construct operation
@@ -915,6 +919,7 @@ class TestBasicOps:
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
+            nvfp4_weight=True,
         )
         dy_ref, dy_test = make_reference_and_test_tensors(
             out_shape,
@@ -1087,6 +1092,7 @@ class TestBasicOps:
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
+            nvfp4_weight=True,
         )
         b_ref, b_test = None, None
         if bias:
@@ -2119,6 +2125,7 @@ class TestBasicOps:
                 quantization=quantization,
                 test_dtype=dtype,
                 test_device=device,
+                nvfp4_weight=True,
                 requires_grad=weight_requires_grad,
             )
             b_ref, b_test = None, None
@@ -2629,6 +2636,7 @@ class TestFusedOps:
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
+            nvfp4_weight=True,
         )
         b_ref, b_test = None, None
         if bias:
@@ -2734,6 +2742,7 @@ class TestFusedOps:
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
+            nvfp4_weight=True,
         )
         b_ref, b_test = None, None
         if bias:
@@ -2847,6 +2856,7 @@ class TestFusedOps:
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
+            nvfp4_weight=True,
         )
         x2_ref, x2_test = make_reference_and_test_tensors(
             out_shape,
@@ -3129,6 +3139,7 @@ class TestFusedOps:
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
+            nvfp4_weight=True,
         )
         dy1_ref, dy1_test = make_reference_and_test_tensors(
             out_shape,
@@ -3232,6 +3243,7 @@ class TestFusedOps:
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
+            nvfp4_weight=True,
         )
         dy_ref, dy_test = make_reference_and_test_tensors(
             out_shape,
@@ -3461,12 +3473,14 @@ class TestSequentialModules:
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
+            nvfp4_weight=True,
         )
         w2_ref, w2_test = make_reference_and_test_tensors(
             (hidden_size, ffn_hidden_size // 2),
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
+            nvfp4_weight=True,
         )
         b1_ref, b1_test, b2_ref, b2_test = None, None, None, None
         if bias:
@@ -3661,6 +3675,7 @@ class TestSequentialModules:
                 quantization=quantization,
                 test_dtype=dtype,
                 test_device=device,
+                nvfp4_weight=True,
             )
             fc2_w_ref, fc2_w_test = make_reference_and_test_tensors(
                 (hidden_size, hidden_size),
@@ -3669,6 +3684,7 @@ class TestSequentialModules:
                 quantization=quantization,
                 test_dtype=dtype,
                 test_device=device,
+                nvfp4_weight=True,
             )
             fc1_b_ref, fc1_b_test = None, None
             fc2_b_ref, fc2_b_test = None, None
