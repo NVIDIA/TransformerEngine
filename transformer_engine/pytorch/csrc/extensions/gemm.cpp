@@ -42,10 +42,8 @@ std::vector<size_t> getGemmOutputShape(const NVTEShape& A_shape, const bool tran
                                        const NVTEShape& B_shape, const bool transb,
                                        size_t tp_size = 1, size_t tp_dim = 0) {
   // Flatten outer dims to get 2D matrices
-  size_t A0 = A_shape.ndim > 0 ? product(A_shape, 0, A_shape.ndim - 1) : 1;
-  size_t A1 = A_shape.ndim > 0 ? A_shape.data[A_shape.ndim - 1] : 1;
-  size_t B0 = B_shape.ndim > 0 ? product(B_shape, 0, B_shape.ndim - 1) : 1;
-  size_t B1 = B_shape.ndim > 0 ? B_shape.data[B_shape.ndim - 1] : 1;
+  const auto [A0, A1] = get_2d_dims(A_shape);
+  const auto [B0, B1] = get_2d_dims(B_shape);
 
   // Check matrix dims
   NVTE_CHECK((transa ? A1 : A0) == (transb ? B0 : B1), "Invalid matrix dimensions for GEMM (A=(",
@@ -633,8 +631,9 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
 
 py::object te_general_grouped_gemm_for_grouped_tensor(
     py::handle A, bool transa, py::handle B, bool transb, py::handle D, py::object bias,
-    at::Tensor alpha, at::Tensor beta, at::Tensor workspace_setup, at::Tensor workspace_cublas,
-    bool use_split_accumulator, int math_sm_count) {
+    std::optional<at::Tensor> bias_scale, at::Tensor alpha, at::Tensor beta,
+    at::Tensor workspace_setup, at::Tensor workspace_cublas, bool use_split_accumulator,
+    int math_sm_count) {
   using namespace transformer_engine::pytorch::detail;
 
   init_extension();
@@ -675,10 +674,18 @@ py::object te_general_grouped_gemm_for_grouped_tensor(
 
   if (!bias.is_none()) {
     auto grouped_bias = GroupedTensorFromPyTorchGroupedTensor(bias);
-    NVTE_SCOPED_GIL_RELEASE({
-      nvte_grouped_bias_add(grouped_D.data(), grouped_bias.data(),
-                            at::cuda::getCurrentCUDAStream());
-    });
+    if (bias_scale.has_value()) {
+      auto te_bias_scale = makeTransformerEngineTensor(*bias_scale);
+      NVTE_SCOPED_GIL_RELEASE({
+        nvte_grouped_scaled_bias_add(grouped_D.data(), grouped_bias.data(), te_bias_scale.data(),
+                                     at::cuda::getCurrentCUDAStream());
+      });
+    } else {
+      NVTE_SCOPED_GIL_RELEASE({
+        nvte_grouped_bias_add(grouped_D.data(), grouped_bias.data(),
+                              at::cuda::getCurrentCUDAStream());
+      });
+    }
   }
 
   return py::reinterpret_borrow<py::object>(D);
@@ -686,6 +693,7 @@ py::object te_general_grouped_gemm_for_grouped_tensor(
 
 py::object te_general_grouped_gemm_for_discrete_in(py::handle A, bool transa, py::handle B,
                                                    bool transb, py::handle D, py::object bias,
+                                                   std::optional<at::Tensor> bias_scale,
                                                    at::Tensor alpha, at::Tensor beta,
                                                    at::Tensor workspace_setup,
                                                    at::Tensor workspace_cublas,
@@ -743,10 +751,18 @@ py::object te_general_grouped_gemm_for_discrete_in(py::handle A, bool transa, py
 
   if (!bias.is_none()) {
     auto grouped_bias = GroupedTensorFromPyTorchGroupedTensor(bias);
-    NVTE_SCOPED_GIL_RELEASE({
-      nvte_grouped_bias_add(grouped_D.data(), grouped_bias.data(),
-                            at::cuda::getCurrentCUDAStream());
-    });
+    if (bias_scale.has_value()) {
+      auto te_bias_scale = makeTransformerEngineTensor(*bias_scale);
+      NVTE_SCOPED_GIL_RELEASE({
+        nvte_grouped_scaled_bias_add(grouped_D.data(), grouped_bias.data(), te_bias_scale.data(),
+                                     at::cuda::getCurrentCUDAStream());
+      });
+    } else {
+      NVTE_SCOPED_GIL_RELEASE({
+        nvte_grouped_bias_add(grouped_D.data(), grouped_bias.data(),
+                              at::cuda::getCurrentCUDAStream());
+      });
+    }
   }
 
   return py::reinterpret_borrow<py::object>(D);
@@ -754,6 +770,7 @@ py::object te_general_grouped_gemm_for_discrete_in(py::handle A, bool transa, py
 
 py::object te_general_grouped_gemm_for_discrete_out(py::handle A, bool transa, py::handle B,
                                                     bool transb, py::handle D, py::object bias,
+                                                    std::optional<at::Tensor> bias_scale,
                                                     at::Tensor alpha, at::Tensor beta,
                                                     at::Tensor workspace_setup,
                                                     at::Tensor workspace_cublas,
@@ -811,5 +828,4 @@ py::object te_general_grouped_gemm_for_discrete_out(py::handle A, bool transa, p
 
   return py::reinterpret_borrow<py::object>(D);
 }
-
 }  // namespace transformer_engine::pytorch
