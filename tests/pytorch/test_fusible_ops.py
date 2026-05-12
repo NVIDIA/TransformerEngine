@@ -77,6 +77,7 @@ if mxfp8_available:
     _quantization_list.append("mxfp8")
 if nvfp4_available:
     _quantization_list.append("nvfp4")
+    _quantization_list.append("nvfp4_4over6")
 
 
 @pytest.fixture(autouse=True, scope="class")
@@ -106,7 +107,7 @@ def maybe_skip_quantization(
         pytest.skip(reason_for_no_fp8)
     if quantization == "mxfp8" and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
-    if quantization == "nvfp4" and not nvfp4_available:
+    if quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6") and not nvfp4_available:
         pytest.skip(reason_for_no_nvfp4)
 
     # Check dims
@@ -119,13 +120,16 @@ def maybe_skip_quantization(
         elif quantization == "mxfp8":
             if math.prod(dims[:-1]) % 32 != 0 or dims[-1] % 32 != 0:
                 pytest.skip("MXFP8 GEMMs require dims that are divisible by 32")
-        elif quantization == "nvfp4":
+        elif quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6"):
             if math.prod(dims[:-1]) % 16 != 0 or dims[-1] % 16 != 0:
                 pytest.skip("NVFP4 GEMMs require dims that are divisible by 16")
 
     # Check dtype
     if dtype is not None:
-        if quantization == "nvfp4" and dtype != torch.bfloat16:
+        if (
+            quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6")
+            and dtype != torch.bfloat16
+        ):
             pytest.skip("NVFP4 quantization is only supported with BF16 data")
 
 
@@ -141,6 +145,7 @@ def make_reference_and_test_tensors(
     test_dtype: torch.dtype = torch.float32,
     test_device: torch.device = "cuda",
     test_is_quantized: bool = False,
+    nvfp4_weight: bool = False,
     requires_grad: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Construct tensors with the same values
@@ -151,6 +156,8 @@ def make_reference_and_test_tensors(
 
     If a quantization scheme is provided, the tensor values are
     quantized so that they are representable.
+    NVFP4 4over6 activations use 1D quantization, while linear weights
+    use the recipe's 2D weight quantization path.
 
     """
 
@@ -180,13 +187,14 @@ def make_reference_and_test_tensors(
         test = quantizer(test)
     elif quantization == "mxfp8":
         test = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)(test)
-    elif quantization == "nvfp4":
+    elif quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6"):
         test = NVFP4Quantizer(
             with_rht=False,
             with_post_rht_amax=False,
-            with_2d_quantization=False,
+            with_2d_quantization=quantization == "nvfp4_4over6" and nvfp4_weight,
             stochastic_rounding=False,
             with_random_sign_mask=False,
+            use_4over6=quantization == "nvfp4_4over6",
         )(test)
     else:
         raise ValueError(f"Unsupported quantization scheme ({quantization})")
@@ -503,6 +511,7 @@ class TestFuser:
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
+            nvfp4_weight=True,
         )
 
         # Construct operation
@@ -910,6 +919,7 @@ class TestBasicOps:
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
+            nvfp4_weight=True,
         )
         dy_ref, dy_test = make_reference_and_test_tensors(
             out_shape,
@@ -1082,6 +1092,7 @@ class TestBasicOps:
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
+            nvfp4_weight=True,
         )
         b_ref, b_test = None, None
         if bias:
@@ -1512,7 +1523,7 @@ class TestBasicOps:
         if in_place:
             if quantization in ("fp8_delayed_scaling", "fp8_current_scaling", "mxfp8"):
                 tols = dtype_tols(x1_test._fp8_dtype)
-            elif quantization == "nvfp4":
+            elif quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6"):
                 tols = dtype_tols(x1_test._fp4_dtype)
         y_test = y_test.to(dtype=torch.float64, device="cpu")
         dx1_test = x1_test.grad.to(dtype=torch.float64, device="cpu")
@@ -1883,7 +1894,7 @@ class TestBasicOps:
 
         # Expected numerical error
         tols = dtype_tols(dtype)
-        if quantized_compute and quantization == "nvfp4":
+        if quantized_compute and quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6"):
             tols = dtype_tols(tex.DType.kFloat4E2M1)
         elif quantized_compute:
             tols = dtype_tols(tex.DType.kFloat8E4M3)
@@ -2076,6 +2087,8 @@ class TestBasicOps:
             pytest.skip("Quantization scheme is not used")
         if quantization is not None and dtype not in (torch.bfloat16, torch.float16):
             pytest.skip("Quantized group GEMM is only supported with BF16/FP16")
+        if quantization == "nvfp4_4over6":
+            pytest.skip("NVFP4 4over6 grouped quantization is not supported")
 
         if single_grouped_bias and not bias:
             pytest.skip("single_grouped_bias requires bias=True")
@@ -2112,6 +2125,7 @@ class TestBasicOps:
                 quantization=quantization,
                 test_dtype=dtype,
                 test_device=device,
+                nvfp4_weight=True,
                 requires_grad=weight_requires_grad,
             )
             b_ref, b_test = None, None
@@ -2622,6 +2636,7 @@ class TestFusedOps:
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
+            nvfp4_weight=True,
         )
         b_ref, b_test = None, None
         if bias:
@@ -2727,6 +2742,7 @@ class TestFusedOps:
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
+            nvfp4_weight=True,
         )
         b_ref, b_test = None, None
         if bias:
@@ -2840,6 +2856,7 @@ class TestFusedOps:
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
+            nvfp4_weight=True,
         )
         x2_ref, x2_test = make_reference_and_test_tensors(
             out_shape,
@@ -3122,6 +3139,7 @@ class TestFusedOps:
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
+            nvfp4_weight=True,
         )
         dy1_ref, dy1_test = make_reference_and_test_tensors(
             out_shape,
@@ -3225,6 +3243,7 @@ class TestFusedOps:
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
+            nvfp4_weight=True,
         )
         dy_ref, dy_test = make_reference_and_test_tensors(
             out_shape,
@@ -3454,12 +3473,14 @@ class TestSequentialModules:
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
+            nvfp4_weight=True,
         )
         w2_ref, w2_test = make_reference_and_test_tensors(
             (hidden_size, ffn_hidden_size // 2),
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
+            nvfp4_weight=True,
         )
         b1_ref, b1_test, b2_ref, b2_test = None, None, None, None
         if bias:
@@ -3608,7 +3629,14 @@ class TestSequentialModules:
             pytest.skip("single_grouped_bias requires bias=True")
         if with_quantization and dtype not in (torch.bfloat16, torch.float16):
             pytest.skip("Quantized group GEMM is only supported with BF16/FP16")
-        if quantization == "nvfp4" and activation == "scaled_clamped_qgeglu" and bias:
+        if quantization == "nvfp4_4over6":
+            pytest.skip("NVFP4 4over6 grouped quantization is not supported")
+        if (
+            with_quantization
+            and quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6")
+            and activation == "scaled_clamped_qgeglu"
+            and bias
+        ):
             # TODO: ksivaman: Need to debug numerics for this case.
             pytest.skip("Bias/dbias not yet supported in NVFP4 fused grouped MLP with GeGLU")
 
@@ -3647,6 +3675,7 @@ class TestSequentialModules:
                 quantization=quantization,
                 test_dtype=dtype,
                 test_device=device,
+                nvfp4_weight=True,
             )
             fc2_w_ref, fc2_w_test = make_reference_and_test_tensors(
                 (hidden_size, hidden_size),
@@ -3655,6 +3684,7 @@ class TestSequentialModules:
                 quantization=quantization,
                 test_dtype=dtype,
                 test_device=device,
+                nvfp4_weight=True,
             )
             fc1_b_ref, fc1_b_test = None, None
             fc2_b_ref, fc2_b_test = None, None
@@ -3830,7 +3860,7 @@ class TestSequentialModules:
 
         # Loose tols for sanity checking
         tols = {"rtol": 0.125, "atol": 0.25}
-        if quantization == "nvfp4":
+        if quantization in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6"):
             tols = {"rtol": 0.25, "atol": 0.5}
 
         # Check values
