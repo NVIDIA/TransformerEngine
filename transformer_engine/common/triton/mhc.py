@@ -12,6 +12,8 @@ import os
 import triton
 import triton.language as tl
 
+MAX_GRID_DIM_Y = 65535  # Maximum grid dimension in Y direction for current CUDA architectures
+
 
 def projection_config_fwd():
     block_m = [64, 128]
@@ -34,23 +36,11 @@ def projection_config_fwd():
     return configs
 
 
-def projection_config_bwd():
-    block_m = [32, 128]
-    block_k = [128]
-    warps = [2]
-    stages = [2, 3, 4]
-
-    configs = []
-    for m, bk, w, s in itertools.product(block_m, block_k, warps, stages):
-        configs.append(
-            triton.Config({"BLOCK_SIZE_M": m, "BLOCK_SIZE_K": bk}, num_warps=w, num_stages=s)
-        )
-    if os.environ.get("NVTE_DISABLE_TRITON_AUTOTUNING", "0") == "1":
-        configs = configs[:1]
-    return configs
-
-
-@triton.autotune(configs=projection_config_fwd(), key=["M", "K"], reset_to_zero=["h_ptr", "ms_ptr"])
+@triton.autotune(
+    configs=projection_config_fwd(),
+    key=["M", "K", "USE_TMA"],
+    reset_to_zero=["h_ptr", "ms_ptr"],
+)
 @triton.jit
 def _mhc_projection_fwd_fused(
     x_ptr,  # (M, K)
@@ -67,12 +57,14 @@ def _mhc_projection_fwd_fused(
     stride_hm: tl.constexpr,
     stride_hn: tl.constexpr,
     stride_ms: tl.constexpr,
+    stride_norm_weight: tl.constexpr,
     # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     STEP_SIZE_K: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     precision: tl.constexpr,
+    USE_TMA: tl.constexpr,  # If True, load x and phi via TMA tensor descriptors (Hopper+ only). Falls back to pointer-arith tl.load otherwise.
 ):
     pid_m = tl.program_id(axis=0)
     pid_k = tl.program_id(axis=1)
@@ -86,8 +78,9 @@ def _mhc_projection_fwd_fused(
     tl.assume(stride_hm == 32)
     tl.assume(stride_hn == 1)
     tl.assume(stride_ms == 1)
+    tl.assume(stride_norm_weight == 1)
 
-    tl.assume(BLOCK_SIZE_M % 32 == 0)
+    tl.assume(BLOCK_SIZE_M % 8 == 0)
     tl.assume(BLOCK_SIZE_K % 32 == 0)
     tl.assume(BLOCK_SIZE_N == 32)
 
@@ -98,24 +91,53 @@ def _mhc_projection_fwd_fused(
     h_acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     ms_acc = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
 
+    if USE_TMA:
+        x_desc = tl.make_tensor_descriptor(
+            x_ptr,
+            shape=[M, K],
+            strides=[stride_xm, 1],
+            block_shape=[BLOCK_SIZE_M, STEP_SIZE_K],
+        )
+        phi_desc = tl.make_tensor_descriptor(
+            phi_ptr,
+            shape=[N, K],
+            strides=[stride_phin, 1],
+            block_shape=[BLOCK_SIZE_N, STEP_SIZE_K],
+        )
+
     k_base = pid_k * BLOCK_SIZE_K
     for k_start in range(0, tl.cdiv(BLOCK_SIZE_K, STEP_SIZE_K)):
-        k_offs = k_base + k_start * STEP_SIZE_K + tl.arange(0, STEP_SIZE_K)
+        k_off = k_base + k_start * STEP_SIZE_K
+        k_offs = k_off + tl.arange(0, STEP_SIZE_K)
         mask_k = k_offs < K
-        x_ptrs = x_ptr + offs_m[:, None] * stride_xm + k_offs[None, :] * stride_xk
-        x = tl.load(
-            x_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0
-        )  # (BLOCK_SIZE_M, BLOCK_SIZE_K)
-        phi_ptrs = phi_ptr + offs_n_full[:, None] * stride_phin + k_offs[None, :] * stride_phik
-        phi = tl.load(
-            phi_ptrs,
-            mask=(offs_n_full[:, None] < N) & mask_k[None, :],
-            other=0.0,
-            cache_modifier=".ca",
-        )  # (BLOCK_SIZE_N, BLOCK_SIZE_K)
-        ms_acc += tl.sum(x * x, axis=1)
+
+        if USE_TMA:
+            x = tl.load_tensor_descriptor(x_desc, [pid_m * BLOCK_SIZE_M, k_off])
+            phi = tl.load_tensor_descriptor(phi_desc, [0, k_off])
+        else:
+            x_ptrs = x_ptr + offs_m[:, None] * stride_xm + k_offs[None, :] * stride_xk
+            x = tl.load(
+                x_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0
+            )  # (BLOCK_SIZE_M, BLOCK_SIZE_K)
+            phi_ptrs = phi_ptr + offs_n_full[:, None] * stride_phin + k_offs[None, :] * stride_phik
+            phi = tl.load(
+                phi_ptrs,
+                mask=(offs_n_full[:, None] < N) & mask_k[None, :],
+                other=0.0,
+                cache_modifier=".ca",
+            )  # (BLOCK_SIZE_N, BLOCK_SIZE_K)
+
+        ms_acc += tl.sum(x.to(tl.float32) * x.to(tl.float32), axis=1)
+
+        # Currently triton has a bug where for small block size, tl.dot(x, phi.T) will use SMEM to transpose the matrix
+        # instead of emit a ldmatrix instruction with `.trans` modifier, which leads bank conflicts and performance regression
+        # See https://github.com/triton-lang/triton/issues/6569#issuecomment-2841739082
         h_acc = tl.dot(
-            x, tl.trans(phi, (1, 0)), h_acc, input_precision=precision, out_dtype=tl.float32
+            x.to(phi.dtype),
+            tl.trans(phi, (1, 0)),
+            h_acc,
+            input_precision=precision,
+            out_dtype=tl.float32,
         )
 
     h_ptrs = h_ptr + offs_m[:, None] * stride_hm + offs_n_full[None, :] * stride_hn
@@ -129,15 +151,35 @@ def _mhc_projection_fwd_fused(
     tl.atomic_add(ms_ptrs, ms, mask=masks_ms, sem="relaxed")
 
 
+def projection_config_bwd_dx():
+    block_m = [32, 128]
+    block_k = [128]
+    warps = [2]
+    stages = [2, 3, 4]
+
+    configs = []
+    for m, bk, w, s in itertools.product(block_m, block_k, warps, stages):
+        configs.append(
+            triton.Config({"BLOCK_SIZE_M": m, "BLOCK_SIZE_K": bk}, num_warps=w, num_stages=s)
+        )
+    if os.environ.get("NVTE_DISABLE_TRITON_AUTOTUNING", "0") == "1":
+        configs = configs[:1]
+    return configs
+
+
 @triton.autotune(
-    configs=projection_config_bwd(),
+    configs=projection_config_bwd_dx(),
     key=["M", "K"],
+    # When FUSE_GRAD_X_ACC=True the kernel does a read-modify-write on grad_x_ptr; without
+    # restore_value the autotune timing trials accumulate onto the buffer and corrupt it.
+    restore_value=["grad_x_ptr"],
 )
 @triton.jit
-def _mhc_projection_bwd_fused(
+def _mhc_projection_bwd_fused_dx(
     x_ptr,
     grad_x_ptr,  # (M, K)
     phi_ptr,  # (N, K)
+    norm_weight_ptr,  # (K,)
     grad_h_ptr,  # (M, N)
     grad_ms_ptr,  # (M,)
     M,
@@ -149,6 +191,7 @@ def _mhc_projection_bwd_fused(
     stride_grad_xk: tl.constexpr,
     stride_phin,
     stride_phik: tl.constexpr,
+    stride_norm_weight: tl.constexpr,
     stride_grad_phin,
     stride_grad_phik: tl.constexpr,
     stride_grad_hm: tl.constexpr,
@@ -159,6 +202,8 @@ def _mhc_projection_bwd_fused(
     BLOCK_SIZE_K: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     precision: tl.constexpr,
+    FUSE_GRAD_X_ACC: tl.constexpr,
+    HAS_NORM_WEIGHT: tl.constexpr,
 ):
     pid_m = tl.program_id(axis=0)
     pid_k = tl.program_id(axis=1)
@@ -174,6 +219,7 @@ def _mhc_projection_bwd_fused(
     tl.assume(stride_grad_phin == K)
     tl.assume(stride_grad_phik == 1)
     tl.assume(stride_grad_ms == 1)
+    tl.assume(stride_norm_weight == 1)
 
     tl.assume(BLOCK_SIZE_M % 32 == 0)
     tl.assume(BLOCK_SIZE_K % 32 == 0)
@@ -204,17 +250,182 @@ def _mhc_projection_bwd_fused(
     phi = tl.load(
         phi_ptrs, mask=(offs_n_full[:, None] < N) & mask_k[None, :], other=0.0
     )  # (BLOCK_SIZE_N, BLOCK_SIZE_K)
+
+    if HAS_NORM_WEIGHT:
+        norm_weight_ptrs = norm_weight_ptr + offs_k * stride_norm_weight
+        norm_weight = tl.load(norm_weight_ptrs, mask=mask_k, other=0.0, cache_modifier=".ca").to(
+            phi.dtype
+        )  # (BLOCK_SIZE_K,)
+        phi = phi.to(tl.float32) * norm_weight.to(tl.float32)[None, :]
+
     grad_ms = tl.load(
         grad_ms_ptrs, mask=offs_ms < M, other=0.0, cache_modifier=".ca"
     )  # (BLOCK_SIZE_M,)
 
     grad_x = x * (grad_ms * 2 / tl.cast(K, tl.float32))[:, None]
     grad_x = tl.dot(
-        grad_h, phi, acc=grad_x, input_precision=precision, out_dtype=tl.float32
+        grad_h.to(phi.dtype), phi, acc=grad_x, input_precision=precision, out_dtype=tl.float32
     )  # (BLOCK_SIZE_M, BLOCK_SIZE_K)
     grad_x_ptrs = grad_x_ptr + offs_m[:, None] * stride_grad_xm + offs_k[None, :] * stride_grad_xk
-    grad_x = grad_x.to(x.dtype)
+    if FUSE_GRAD_X_ACC:  # If fused gradient accumulation is enabled, the buffer is always fp32
+        grad_x_acc = tl.load(grad_x_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0)
+        grad_x = grad_x.to(tl.float32) + grad_x_acc
+    else:
+        grad_x = grad_x.to(x.dtype)
     tl.store(grad_x_ptrs, grad_x, mask=mask_m[:, None] & mask_k[None, :])
+
+
+def projection_config_bwd_dphi():
+    block_m = [512, 1024, 2048]
+    step_m = [32]
+    block_k = [128, 256]
+    warps = [2]
+    stages = [2, 3, 4]
+
+    configs = []
+    for bm, sm, bk, w, s in itertools.product(block_m, step_m, block_k, warps, stages):
+        configs.append(
+            triton.Config(
+                {"BLOCK_SIZE_M": bm, "STEP_SIZE_M": sm, "BLOCK_SIZE_K": bk},
+                num_warps=w,
+                num_stages=s,
+            )
+        )
+    return configs
+
+
+def projection_prune_bwd_dphi(configs, named_args, **kwargs):
+    M = named_args.get("M", kwargs.get("M", None))
+
+    pruned_configs = list(
+        filter(
+            lambda config: triton.cdiv(M, config.kwargs["BLOCK_SIZE_M"]) <= MAX_GRID_DIM_Y, configs
+        )
+    )
+
+    if not pruned_configs:
+        raise ValueError(f"M={M} exceeds the maximum supported M dimension for this kernel.")
+
+    # Triton will skip calling prune function if the autotune returns only one config, which breaks the determinism override here
+    # So we need to apply NVTE_DISABLE_TRITON_AUTOTUNING in the pruner instead
+    if os.environ.get("NVTE_DISABLE_TRITON_AUTOTUNING", "0") == "1":
+        pruned_configs = pruned_configs[:1]
+    return pruned_configs
+
+
+@triton.autotune(
+    configs=projection_config_bwd_dphi(),
+    key=["M", "K"],
+    reset_to_zero=["grad_phi_ptr", "grad_norm_weight_ptr"],
+    prune_configs_by={"early_config_prune": projection_prune_bwd_dphi},
+)
+@triton.jit
+def _mhc_projection_bwd_fused_dphi(
+    x_ptr,  # (M, K)
+    grad_H_ptr,  # (M, 32)
+    phi_ptr,  # (N, K), N=24 in our case since n = 4
+    norm_weight_ptr,  # (K,)
+    grad_phi_ptr,  # (N, K), N=24 in our case since n = 4
+    grad_norm_weight_ptr,  # (K,)
+    M,
+    N,
+    K,
+    stride_xm,
+    stride_xk: tl.constexpr,
+    stride_grad_Hm: tl.constexpr,
+    stride_grad_Hn: tl.constexpr,
+    stride_phin,
+    stride_phik: tl.constexpr,
+    stride_norm_weight: tl.constexpr,
+    stride_grad_phin,
+    stride_grad_phik: tl.constexpr,
+    stride_grad_norm_weight: tl.constexpr,
+    # Meta-parameters
+    BLOCK_SIZE_M: tl.constexpr,
+    STEP_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    precision: tl.constexpr,
+):
+    pid_k = tl.program_id(axis=0)
+    pid_m = tl.program_id(axis=1)
+
+    tl.assume(pid_k >= 0)
+    tl.assume(stride_xm > 0)
+    tl.assume(stride_xk == 1)
+    tl.assume(stride_grad_Hm == 32)
+    tl.assume(stride_grad_Hn == 1)
+    tl.assume(stride_phin == K)
+    tl.assume(stride_phik == 1)
+    tl.assume(stride_grad_phin == K)
+    tl.assume(stride_grad_phin == stride_phin)
+    tl.assume(stride_grad_phik == 1)
+    tl.assume(stride_grad_norm_weight == 1)
+    tl.assume(stride_norm_weight == 1)
+
+    tl.assume(BLOCK_SIZE_M % 128 == 0)
+    tl.assume(BLOCK_SIZE_K % 64 == 0)
+    tl.assume(BLOCK_SIZE_N == 32)
+    tl.assume(STEP_SIZE_M % 32 == 0)
+
+    offs_k = pid_k * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
+    mask_k = offs_k < K
+    offs_n_full = tl.arange(0, BLOCK_SIZE_N)
+    mask_n = offs_n_full < N
+
+    grad_psi_acc = tl.zeros((BLOCK_SIZE_N, BLOCK_SIZE_K), dtype=tl.float32)
+
+    m_start = pid_m * BLOCK_SIZE_M
+    m_end = tl.minimum(m_start + BLOCK_SIZE_M, M)
+    for m_idx in range(0, tl.cdiv(m_end - m_start, STEP_SIZE_M)):
+        offs_m = m_start + m_idx * STEP_SIZE_M + tl.arange(0, STEP_SIZE_M)
+        mask_m = offs_m < M
+        x_ptrs = x_ptr + offs_m[:, None] * stride_xm + offs_k[None, :] * stride_xk
+        x = tl.load(
+            x_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0
+        )  # (STEP_SIZE_M, BLOCK_SIZE_K)
+        grad_H_ptrs = (
+            grad_H_ptr + offs_m[:, None] * stride_grad_Hm + offs_n_full[None, :] * stride_grad_Hn
+        )
+        grad_H = tl.load(
+            grad_H_ptrs, mask=mask_m[:, None] & mask_n[None, :], other=0.0
+        )  # (STEP_SIZE_M, BLOCK_SIZE_N)
+
+        grad_psi_acc = tl.dot(
+            tl.trans(grad_H, (1, 0)),
+            x.to(grad_H.dtype),
+            acc=grad_psi_acc,
+            out_dtype=tl.float32,
+            input_precision=precision,
+        )
+
+    phi_ptrs = phi_ptr + offs_n_full[:, None] * stride_phin + offs_k[None, :] * stride_phik
+    phi = tl.load(
+        phi_ptrs, mask=(offs_n_full[:, None] < N) & mask_k[None, :], other=0.0
+    )  # (BLOCK_SIZE_N, BLOCK_SIZE_K)
+    norm_weight_ptrs = norm_weight_ptr + offs_k * stride_norm_weight
+    norm_weight = tl.load(
+        norm_weight_ptrs, mask=mask_k, other=0.0, cache_modifier=".cg"
+    )  # (BLOCK_SIZE_K,)
+    phi = phi.to(tl.float32)
+    norm_weight = norm_weight.to(tl.float32)
+
+    # Keep grad_psi in SRAM and get grad_phi & grad_norm_weight
+    grad_phi = grad_psi_acc * norm_weight[None, :].to(grad_psi_acc.dtype)  # (32, BLOCK_SIZE_K)
+    grad_norm_weight = tl.sum(grad_psi_acc * phi.to(grad_psi_acc.dtype), axis=0)  # (BLOCK_SIZE_K,)
+
+    grad_phi_ptrs = (
+        grad_phi_ptr + offs_n_full[:, None] * stride_grad_phin + offs_k[None, :] * stride_grad_phik
+    )
+    grad_norm_weight_ptrs = grad_norm_weight_ptr + offs_k * stride_grad_norm_weight
+
+    tl.atomic_add(
+        grad_phi_ptrs,
+        grad_phi,
+        mask=(offs_n_full[:, None] < N) & mask_k[None, :],
+        sem="relaxed",
+    )
+    tl.atomic_add(grad_norm_weight_ptrs, grad_norm_weight, mask=mask_k, sem="relaxed")
 
 
 def scale_config():
@@ -854,9 +1065,9 @@ def _mhc_sinkhorn_bwd_fused(
     )
 
 
-def aggregate_config():
+def aggregate_config_fwd():
     block_m = [1, 2, 4]
-    block_c = [64, 128, 256]
+    block_c = [128, 256]
     warps = [1, 2, 4]
     stages = [1, 2, 3, 4]
 
@@ -865,14 +1076,32 @@ def aggregate_config():
         configs.append(
             triton.Config({"BLOCK_SIZE_M": m, "BLOCK_SIZE_C": c}, num_warps=w, num_stages=s)
         )
-    if os.environ.get("NVTE_DISABLE_TRITON_AUTOTUNING", "0") == "1":
-        configs = configs[:1]
     return configs
 
 
+def aggregate_prune_fwd(configs, named_args, **kwargs):
+    M = named_args.get("M", kwargs.get("M", None))
+
+    pruned_configs = list(
+        filter(
+            lambda config: triton.cdiv(M, config.kwargs["BLOCK_SIZE_M"]) <= MAX_GRID_DIM_Y, configs
+        )
+    )
+
+    if not pruned_configs:
+        raise ValueError(f"M={M} exceeds the maximum supported M dimension for this kernel.")
+
+    # Triton will skip calling prune function if the autotune returns only one config, which breaks the determinism override here
+    # So we need to apply NVTE_DISABLE_TRITON_AUTOTUNING in the pruner instead
+    if os.environ.get("NVTE_DISABLE_TRITON_AUTOTUNING", "0") == "1":
+        pruned_configs = pruned_configs[:1]
+    return pruned_configs
+
+
 @triton.autotune(
-    configs=aggregate_config(),
+    configs=aggregate_config_fwd(),
     key=["M", "C"],
+    prune_configs_by={"early_config_prune": aggregate_prune_fwd},
 )
 @triton.jit
 def _mhc_aggregate_fwd(
@@ -949,7 +1178,54 @@ def _mhc_aggregate_fwd(
     tl.store(output_ptrs, out, mask=mask_m[:, None] & mask_c[None, :])
 
 
-@triton.autotune(configs=aggregate_config(), key=["M", "C"], reset_to_zero=["grad_H_pre_ptr"])
+def aggregate_config_bwd():
+    block_m = [1, 2, 4]
+    block_c = [64, 128, 256]
+    step_c = [32, 64]
+    warps = [1, 2, 4]
+    stages = [1, 2, 3, 4]
+
+    configs = []
+    for bm, bc, sc, w, s in itertools.product(block_m, block_c, step_c, warps, stages):
+        configs.append(
+            triton.Config(
+                {"BLOCK_SIZE_M": bm, "BLOCK_SIZE_C": bc, "STEP_SIZE_C": sc},
+                num_warps=w,
+                num_stages=s,
+            )
+        )
+    return configs
+
+
+def aggregate_prune_bwd(configs, named_args, **kwargs):
+    M = named_args.get("M", kwargs.get("M", None))
+
+    pruned_configs = list(
+        filter(
+            lambda config: triton.cdiv(M, config.kwargs["BLOCK_SIZE_M"]) <= MAX_GRID_DIM_Y,
+            configs,
+        )
+    )
+
+    if not pruned_configs:
+        raise ValueError(f"M={M} exceeds the maximum supported M dimension for this kernel.")
+
+    # Triton will skip calling prune function if the autotune returns only one config, which breaks the determinism override here
+    # So we need to apply NVTE_DISABLE_TRITON_AUTOTUNING in the pruner instead
+    if os.environ.get("NVTE_DISABLE_TRITON_AUTOTUNING", "0") == "1":
+        pruned_configs = pruned_configs[:1]
+    return pruned_configs
+
+
+@triton.autotune(
+    configs=aggregate_config_bwd(),
+    key=["M", "C"],
+    reset_to_zero=["grad_H_pre_ptr"],
+    # When FUSE_GRAD_X_ACC=True the kernel does a read-modify-write on grad_x_ptr; without
+    # restore_value the autotune timing trials accumulate onto the buffer and corrupt it.
+    restore_value=["grad_x_ptr"],
+    prune_configs_by={"early_config_prune": aggregate_prune_bwd},
+)
 @triton.jit
 def _mhc_aggregate_bwd(
     grad_output_ptr,  # (M, C)
@@ -969,7 +1245,9 @@ def _mhc_aggregate_bwd(
     # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_C: tl.constexpr,
+    STEP_SIZE_C: tl.constexpr,
     precision: tl.constexpr,
+    FUSE_GRAD_X_ACC: tl.constexpr,
 ):
     """
     Forward:
@@ -992,38 +1270,14 @@ def _mhc_aggregate_bwd(
     tl.assume(stride_grad_output_m > 0 and stride_grad_output_c == 1)
 
     tl.assume(BLOCK_SIZE_C % 32 == 0)
+    tl.assume(STEP_SIZE_C % 32 == 0)
+    tl.assume(BLOCK_SIZE_C % STEP_SIZE_C == 0)
 
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    offs_c = pid_c * BLOCK_SIZE_C + tl.arange(0, BLOCK_SIZE_C)
-    offs_cn = pid_c * BLOCK_SIZE_C * n + tl.arange(0, BLOCK_SIZE_C * n)
     mask_m = offs_m < M
-    mask_c = offs_c < C
-    mask_cn = offs_cn < C * n
 
-    grad_output_ptrs = (
-        grad_output_ptr
-        + offs_m[:, None] * stride_grad_output_m
-        + offs_c[None, :] * stride_grad_output_c
-    )
-    grad_output = tl.load(
-        grad_output_ptrs, mask=mask_m[:, None] & mask_c[None, :], other=0.0
-    )  # (BLOCK_SIZE_M, BLOCK_SIZE_C)
-
-    x_ptrs = x_ptr + offs_m[:, None] * stride_xm + offs_cn[None, :] * stride_xCn
-    x = tl.load(
-        x_ptrs, mask=mask_m[:, None] & mask_cn[None, :], other=0.0
-    )  # (BLOCK_SIZE_M, BLOCK_SIZE_C * n)
-
-    grad_H_pre = tl.dot(
-        tl.reshape(grad_output, (BLOCK_SIZE_M, 1, BLOCK_SIZE_C)),
-        tl.reshape(x, (BLOCK_SIZE_M, BLOCK_SIZE_C, n)),
-        input_precision=precision,
-        out_dtype=tl.float32,
-    )
-    grad_H_pre = tl.reshape(grad_H_pre, (BLOCK_SIZE_M * n,))  # (BLOCK_SIZE_M * n)
-    offs_grad_H_pre = pid_m * BLOCK_SIZE_M * n + tl.arange(0, BLOCK_SIZE_M * n)
-    grad_H_pre_ptrs = grad_H_pre_ptr + offs_grad_H_pre
-    tl.atomic_add(grad_H_pre_ptrs, grad_H_pre, mask=offs_grad_H_pre < M * n, sem="relaxed")
+    offs_c_start = pid_c * BLOCK_SIZE_C
+    offs_cn_start = pid_c * BLOCK_SIZE_C * n
 
     H_pre_offs = pid_m * BLOCK_SIZE_M * n + tl.arange(0, BLOCK_SIZE_M * n)
     H_pre = tl.load(
@@ -1031,19 +1285,59 @@ def _mhc_aggregate_bwd(
     )  # (BLOCK_SIZE_M * n)
     H_pre = tl.reshape(H_pre, (BLOCK_SIZE_M, n))  # (BLOCK_SIZE_M, n)
 
-    # grad_x = grad_output @ H_pre.T: (BLOCK_SIZE_M, BLOCK_SIZE_C, 1) @ (BLOCK_SIZE_M, 1, n) = (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
-    grad_x = grad_output[:, :, None] * H_pre[:, None, :]  # (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
-    grad_x = tl.reshape(grad_x, (BLOCK_SIZE_M, BLOCK_SIZE_C * n))
+    grad_H_pre_acc = tl.zeros((BLOCK_SIZE_M, 1, n), dtype=tl.float32)
+    for i in tl.range(0, BLOCK_SIZE_C, STEP_SIZE_C, loop_unroll_factor=2):
+        offs_c = offs_c_start + i + tl.arange(0, STEP_SIZE_C)
+        offs_cn = offs_cn_start + i * n + tl.arange(0, STEP_SIZE_C * n)
+        mask_c = offs_c < C
+        mask_cn = offs_cn < C * n
 
-    grad_x_ptrs = grad_x_ptr + offs_m[:, None] * stride_grad_xm + offs_cn[None, :] * stride_grad_xCn
-    tl.store(
-        grad_x_ptrs,
-        grad_x,
-        mask=mask_m[:, None] & mask_cn[None, :],
-    )
+        grad_output_ptrs = (
+            grad_output_ptr
+            + offs_m[:, None] * stride_grad_output_m
+            + offs_c[None, :] * stride_grad_output_c
+        )
+        grad_output = tl.load(
+            grad_output_ptrs, mask=mask_m[:, None] & mask_c[None, :], other=0.0
+        )  # (BLOCK_SIZE_M, STEP_SIZE_C)
+
+        x_ptrs = x_ptr + offs_m[:, None] * stride_xm + offs_cn[None, :] * stride_xCn
+        x = tl.load(
+            x_ptrs, mask=mask_m[:, None] & mask_cn[None, :], other=0.0
+        )  # (BLOCK_SIZE_M, STEP_SIZE_C * n)
+
+        grad_H_pre_acc = tl.dot(
+            tl.reshape(grad_output, (BLOCK_SIZE_M, 1, STEP_SIZE_C)),
+            tl.reshape(x, (BLOCK_SIZE_M, STEP_SIZE_C, n)),
+            acc=grad_H_pre_acc,
+            input_precision=precision,
+            out_dtype=tl.float32,
+        )
+
+        # grad_x = grad_output @ H_pre.T: (BLOCK_SIZE_M, STEP_SIZE_C, 1) @ (BLOCK_SIZE_M, 1, n) = (BLOCK_SIZE_M, STEP_SIZE_C, n)
+        grad_x = grad_output[:, :, None] * H_pre[:, None, :]  # (BLOCK_SIZE_M, STEP_SIZE_C, n)
+        grad_x = tl.reshape(grad_x, (BLOCK_SIZE_M, STEP_SIZE_C * n))
+
+        grad_x_ptrs = (
+            grad_x_ptr + offs_m[:, None] * stride_grad_xm + offs_cn[None, :] * stride_grad_xCn
+        )
+
+        if FUSE_GRAD_X_ACC:  # If fused gradient accumulation is enabled, the buffer is always fp32
+            grad_x_acc = tl.load(grad_x_ptrs, mask=mask_m[:, None] & mask_cn[None, :], other=0.0)
+            grad_x = grad_x.to(tl.float32) + grad_x_acc
+        tl.store(
+            grad_x_ptrs,
+            grad_x,
+            mask=mask_m[:, None] & mask_cn[None, :],
+        )
+
+    grad_H_pre = tl.reshape(grad_H_pre_acc, (BLOCK_SIZE_M * n,))  # (BLOCK_SIZE_M * n)
+    offs_grad_H_pre = pid_m * BLOCK_SIZE_M * n + tl.arange(0, BLOCK_SIZE_M * n)
+    grad_H_pre_ptrs = grad_H_pre_ptr + offs_grad_H_pre
+    tl.atomic_add(grad_H_pre_ptrs, grad_H_pre, mask=offs_grad_H_pre < M * n, sem="relaxed")
 
 
-def expand_combine_config():
+def expand_combine_config_fwd():
     block_m = [1, 2, 4]
     block_c = [128, 256]
     warps = [1, 2]
@@ -1054,18 +1348,37 @@ def expand_combine_config():
         configs.append(
             triton.Config({"BLOCK_SIZE_M": m, "BLOCK_SIZE_C": c}, num_warps=w, num_stages=s)
         )
-    if os.environ.get("NVTE_DISABLE_TRITON_AUTOTUNING", "0") == "1":
-        configs = configs[:1]
     return configs
 
 
+def expand_combine_prune_fwd(configs, named_args, **kwargs):
+    M = named_args.get("M", kwargs.get("M", None))
+
+    pruned_configs = list(
+        filter(
+            lambda config: triton.cdiv(M, config.kwargs["BLOCK_SIZE_M"]) <= MAX_GRID_DIM_Y, configs
+        )
+    )
+
+    if not pruned_configs:
+        raise ValueError(f"M={M} exceeds the maximum supported M dimension for this kernel.")
+
+    # Triton will skip calling prune function if the autotune returns only one config, which breaks the determinism override here
+    # So we need to apply NVTE_DISABLE_TRITON_AUTOTUNING in the pruner instead
+    if os.environ.get("NVTE_DISABLE_TRITON_AUTOTUNING", "0") == "1":
+        pruned_configs = pruned_configs[:1]
+    return pruned_configs
+
+
 @triton.autotune(
-    configs=expand_combine_config(),
+    configs=expand_combine_config_fwd(),
     key=["M", "C"],
+    prune_configs_by={"early_config_prune": expand_combine_prune_fwd},
 )
 @triton.jit
 def _mhc_expand_combine_fwd(
     f_ptr,  # (M, C)
+    bias_ptr,  # (C,), or None if HAS_BIAS is False
     H_post_ptr,  # (M, n)
     x_ptr,  # (M, C, n)
     H_res_ptr,  # (M, n, n)
@@ -1075,6 +1388,7 @@ def _mhc_expand_combine_fwd(
     n: tl.constexpr,
     stride_fm,
     stride_fc,
+    stride_bias,  # Not used if HAS_BIAS is False
     stride_xm,
     stride_xCn,
     stride_output_m,
@@ -1082,313 +1396,7 @@ def _mhc_expand_combine_fwd(
     # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_C: tl.constexpr,
-):
-    """
-    output = f @ H_post: (BLOCK_SIZE_M, BLOCK_SIZE_C, 1) @ (BLOCK_SIZE_M, 1, n)  = (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
-           + x @ H_res: (BLOCK_SIZE_M, BLOCK_SIZE_C, n) @ (BLOCK_SIZE_M, n, n) = (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
-    """
-    pid_m = tl.program_id(1)
-    pid_c = tl.program_id(0)
-
-    tl.static_assert(n == 4)
-    tl.assume(M > 0)
-    tl.assume(C > 0)
-    tl.assume(n == 4)
-    tl.assume(stride_fm > 0 and stride_fc == 1)
-    tl.assume(stride_xm > 0 and stride_xCn == 1)
-    tl.assume(stride_output_m > 0 and stride_output_Cn == 1)
-
-    tl.assume(BLOCK_SIZE_C % 32 == 0)
-
-    offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    offs_c = pid_c * BLOCK_SIZE_C + tl.arange(0, BLOCK_SIZE_C)
-    offs_cn = pid_c * BLOCK_SIZE_C * n + tl.arange(0, BLOCK_SIZE_C * n)
-    mask_m = offs_m < M
-    mask_c = offs_c < C
-    mask_cn = offs_cn < C * n
-
-    f_ptrs = f_ptr + offs_m[:, None] * stride_fm + offs_c[None, :] * stride_fc
-    f = tl.load(f_ptrs, mask=mask_m[:, None] & mask_c[None, :], other=0.0)
-
-    offs_H_post = pid_m * BLOCK_SIZE_M * n + tl.arange(0, BLOCK_SIZE_M * n)
-    H_post = tl.load(
-        H_post_ptr + offs_H_post, mask=offs_H_post < M * n, other=0.0, cache_modifier=".ca"
-    )
-    H_post = tl.reshape(H_post, (BLOCK_SIZE_M, n))  # (BLOCK_SIZE_M, n)
-
-    # Residual connection path: res_out = f @ H_post:
-    # (BLOCK_SIZE_M, BLOCK_SIZE_C, 1) @ (BLOCK_SIZE_M, 1, n)  = (BLOCK_SIZE_M, n, BLOCK_SIZE_C)
-    # Due to broadcasting, it's equivalent to a multiplicaiton
-    out_acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_C, n), dtype=tl.float32)
-    out_acc = tl.fma(f[:, :, None], H_post[:, None, :], out_acc)
-
-    H_res_offs = pid_m * BLOCK_SIZE_M * n * n + tl.arange(0, BLOCK_SIZE_M * n * n)
-    H_res = tl.load(
-        H_res_ptr + H_res_offs, mask=H_res_offs < M * n * n, other=0.0, cache_modifier=".ca"
-    )
-    H_res = tl.reshape(H_res, (BLOCK_SIZE_M, n, n))  # (BLOCK_SIZE_M, n, n)
-
-    x_ptrs = x_ptr + offs_m[:, None] * stride_xm + offs_cn[None, :] * stride_xCn
-    x = tl.load(
-        x_ptrs, mask=mask_m[:, None] & mask_cn[None, :], other=0.0
-    )  # (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
-
-    # Manifold connection path: manifold_out = H_res @ x:
-    # (BLOCK_SIZE_M, BLOCK_SIZE_C, n) @ (BLOCK_SIZE_M, n, n) = (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
-    # triton doesn't support dot prod with inner dimension < 16, so we need to manually unroll the computation for n=4:
-    # x @ H_res = x[:, :, 0] @ H_res[:, 0, :]
-    #           + x[:, :, 1] @ H_res[:, 1, :]
-    #           + x[:, :, 2] @ H_res[:, 2, :]
-    #           + x[:, :, 3] @ H_res[:, 3, :]
-
-    x_reshape = tl.reshape(x, (BLOCK_SIZE_M, BLOCK_SIZE_C, 2, 2))
-    x01, x23 = tl.split(
-        x_reshape
-    )  # (BLOCK_SIZE_M, BLOCK_SIZE_C, 2), (BLOCK_SIZE_M, BLOCK_SIZE_C, 2)
-    x0, x1 = tl.split(x01)  # (BLOCK_SIZE_M, BLOCK_SIZE_C), (BLOCK_SIZE_M, BLOCK_SIZE_C)
-    x2, x3 = tl.split(x23)  # (BLOCK_SIZE_M, BLOCK_SIZE_C), (BLOCK_SIZE_M, BLOCK_SIZE_C)
-
-    H_resT = tl.reshape(tl.trans(H_res, (0, 2, 1)), (BLOCK_SIZE_M, n, 2, 2))
-    H_res01, H_res23 = tl.split(H_resT)  # (BLOCK_SIZE_M, n, 2), (BLOCK_SIZE_M, n, 2)
-    H_res0, H_res1 = tl.split(H_res01)  # (BLOCK_SIZE_M, n), (BLOCK_SIZE_M, n)
-    H_res2, H_res3 = tl.split(H_res23)  # (BLOCK_SIZE_M, n), (BLOCK_SIZE_M, n)
-
-    out_acc = tl.fma(x0[:, :, None], H_res0[:, None, :], out_acc)
-    out_acc = tl.fma(x1[:, :, None], H_res1[:, None, :], out_acc)
-    out_acc = tl.fma(x2[:, :, None], H_res2[:, None, :], out_acc)
-    out_acc = tl.fma(x3[:, :, None], H_res3[:, None, :], out_acc)
-
-    out = out_acc.to(x.dtype)
-    out = tl.reshape(out, (BLOCK_SIZE_M, BLOCK_SIZE_C * n))  # (BLOCK_SIZE_M, BLOCK_SIZE_C*n)
-
-    output_ptrs = (
-        output_ptr + offs_m[:, None] * stride_output_m + offs_cn[None, :] * stride_output_Cn
-    )
-    tl.store(output_ptrs, out, mask=mask_m[:, None] & mask_cn[None, :])
-
-
-@triton.autotune(
-    configs=expand_combine_config(),
-    key=["M", "C"],
-    reset_to_zero=["grad_H_post_ptr", "grad_H_res_ptr"],
-)
-@triton.jit
-def _mhc_expand_combine_bwd(
-    grad_output_ptr,  # (M, C, n)
-    f_ptr,  # (M, C)
-    H_post_ptr,  # (M, n)
-    x_ptr,  # (M, C, n)
-    H_res_ptr,  # (M, n, n)
-    grad_H_post_ptr,  # (M, n)
-    grad_f_ptr,  # (M, C)
-    grad_H_res_ptr,  # (M, n, n)
-    grad_x_ptr,  # (M, C, n)
-    M,
-    C,
-    n: tl.constexpr,
-    stride_grad_output_m,
-    stride_grad_output_Cn,
-    stride_fm,
-    stride_fc,
-    stride_xm,
-    stride_xCn,
-    stride_grad_fm,
-    stride_grad_fc,
-    stride_grad_xm,
-    stride_grad_xCn,
-    # Meta-parameters
-    BLOCK_SIZE_M: tl.constexpr,
-    BLOCK_SIZE_C: tl.constexpr,
-    precision: tl.constexpr,
-):
-    """
-    Each block
-    It reads
-    - (BLOCK_SIZE_M, BLOCK_SIZE_C) of f, which is the output of the attention / FFN module
-    - (BLOCK_SIZE_M, n) of H_post, which is applied for the transformation of the attention / FFN output
-    - (BLOCK_SIZE_M, BLOCK_SIZE_C, n) of x, which is the skip connection's input
-    - (BLOCK_SIZE_M, n*n) of H_res, which is applied for the transformation of the skip connection
-    and writes
-    - (BLOCK_SIZE_M, n) of grad_H_post
-    - (BLOCK_SIZE_M, BLOCK_SIZE_C) of grad_f
-    - (BLOCK_SIZE_M, n, n) of grad_H_res
-    - (BLOCK_SIZE_M, BLOCK_SIZE_C, n) of grad_x
-
-    Forward:
-        out = f @ H_post + x @ H_res
-    Backward:
-        GEMM:
-        grad_H_post = f.T @ grad_output: (BLOCK_SIZE_M, 1, BLOCK_SIZE_C) @ (BLOCK_SIZE_M, BLOCK_SIZE_C, n) = (BLOCK_SIZE_M, 1, n)
-        grad_H_res = x.T @ grad_output: (BLOCK_SIZE_M, n, BLOCK_SIZE_C) @ (BLOCK_SIZE_M, BLOCK_SIZE_C, n) = (BLOCK_SIZE_M, n, n)
-        Not GEMM:
-        grad_f = grad_output @ H_post.T: (BLOCK_SIZE_M, BLOCK_SIZE_C, n) @ (BLOCK_SIZE_M, n, 1) = (BLOCK_SIZE_M, BLOCK_SIZE_C, 1)
-        grad_x = grad_output @ H_res.T: (BLOCK_SIZE_M, BLOCK_SIZE_C, n) @ (BLOCK_SIZE_M, n, n) = (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
-    """
-
-    pid_m = tl.program_id(1)
-    pid_c = tl.program_id(0)
-
-    tl.static_assert(n == 4)
-    tl.assume(M > 0)
-    tl.assume(C > 0)
-    tl.assume(n == 4)
-    tl.assume(stride_fm > 0 and stride_fc == 1)
-    tl.assume(stride_xm > 0 and stride_xCn == 1)
-    tl.assume(stride_grad_output_m > 0 and stride_grad_output_Cn == 1)
-    tl.assume(stride_grad_fm > 0 and stride_grad_fc == 1)
-    tl.assume(stride_grad_xm > 0 and stride_grad_xCn == 1)
-
-    tl.assume(BLOCK_SIZE_C % 32 == 0)
-
-    offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    offs_c = pid_c * BLOCK_SIZE_C + tl.arange(0, BLOCK_SIZE_C)
-    offs_cn = pid_c * BLOCK_SIZE_C * n + tl.arange(0, BLOCK_SIZE_C * n)
-    mask_m = offs_m < M
-    mask_c = offs_c < C
-    mask_cn = offs_cn < C * n
-
-    f_ptrs = f_ptr + offs_m[:, None] * stride_fm + offs_c[None, :] * stride_fc
-    f = tl.load(f_ptrs, mask=mask_m[:, None] & mask_c[None, :], other=0.0)
-
-    H_post_offs = pid_m * BLOCK_SIZE_M * n + tl.arange(0, BLOCK_SIZE_M * n)
-    H_post = tl.load(H_post_ptr + H_post_offs, mask=H_post_offs < M * n, other=0.0)
-    H_post = tl.reshape(H_post, (BLOCK_SIZE_M, n))  # (BLOCK_SIZE_M, n)
-
-    H_res_offs = pid_m * BLOCK_SIZE_M * n * n + tl.arange(0, BLOCK_SIZE_M * n * n)
-    H_res = tl.load(
-        H_res_ptr + H_res_offs, mask=H_res_offs < M * n * n, other=0.0
-    )  # (BLOCK_SIZE_M, n, n)
-    H_res = tl.reshape(H_res, (BLOCK_SIZE_M, n, n))  # (BLOCK_SIZE_M, n, n)
-
-    grad_out_ptrs = (
-        grad_output_ptr
-        + offs_m[:, None] * stride_grad_output_m
-        + offs_cn[None, :] * stride_grad_output_Cn
-    )
-    grad_out = tl.load(
-        grad_out_ptrs, mask=mask_m[:, None] & mask_cn[None, :], other=0.0
-    )  # (BLOCK_SIZE_M, BLOCK_SIZE_C * n)
-    grad_out = tl.reshape(
-        grad_out, (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
-    )  # (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
-
-    # grad_H_post =  f.T @ grad_output # (BLOCK_SIZE_M, 1, BLOCK_SIZE_C) @ (BLOCK_SIZE_M, BLOCK_SIZE_C, n) = (BLOCK_SIZE_M, 1, n)
-    grad_H_post = tl.dot(
-        tl.reshape(f, (BLOCK_SIZE_M, 1, BLOCK_SIZE_C)),
-        tl.reshape(grad_out, (BLOCK_SIZE_M, BLOCK_SIZE_C, n)),
-        input_precision=precision,
-        out_dtype=tl.float32,
-    )  # (BLOCK_SIZE_M, 1, n)
-    grad_H_post = tl.reshape(grad_H_post, (BLOCK_SIZE_M * n,))  # (BLOCK_SIZE_M * n)
-    offs_grad_H_post = pid_m * BLOCK_SIZE_M * n + tl.arange(0, BLOCK_SIZE_M * n)
-    grad_H_post_ptrs = grad_H_post_ptr + offs_grad_H_post
-    tl.atomic_add(grad_H_post_ptrs, grad_H_post, mask=offs_grad_H_post < M * n, sem="relaxed")
-
-    x_ptrs = x_ptr + offs_m[:, None] * stride_xm + offs_cn[None, :] * stride_xCn
-    x = tl.load(
-        x_ptrs, mask=mask_m[:, None] & mask_cn[None, :], other=0.0
-    )  # (BLOCK_SIZE_M, BLOCK_SIZE_C*n)
-    x = tl.reshape(x, (BLOCK_SIZE_M, BLOCK_SIZE_C, n))  # (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
-
-    # grad_H_res = x.T @ grad_output: (BLOCK_SIZE_M, n, BLOCK_SIZE_C) @ (BLOCK_SIZE_M, BLOCK_SIZE_C, n) = (BLOCK_SIZE_M, n, n)
-    grad_H_res = tl.dot(
-        tl.trans(x, (0, 2, 1)), grad_out, input_precision=precision, out_dtype=tl.float32
-    )  # (BLOCK_SIZE_M, n, n)
-    grad_H_res = tl.reshape(grad_H_res, (BLOCK_SIZE_M * n * n,))  # (BLOCK_SIZE_M * n * n)
-    offs_grad_H_res = pid_m * BLOCK_SIZE_M * n * n + tl.arange(0, BLOCK_SIZE_M * n * n)
-    grad_H_res_ptrs = grad_H_res_ptr + offs_grad_H_res
-    tl.atomic_add(
-        grad_H_res_ptrs, grad_H_res.to(tl.float32), mask=offs_grad_H_res < M * n * n, sem="relaxed"
-    )
-
-    grad_out_reshape = tl.reshape(
-        grad_out, (BLOCK_SIZE_M, BLOCK_SIZE_C, 2, 2)
-    )  # (BLOCK_SIZE_M, BLOCK_SIZE_C, 2, 2)
-    grad_out01, grad_out23 = tl.split(
-        grad_out_reshape
-    )  # (BLOCK_SIZE_M, BLOCK_SIZE_C, 2), (BLOCK_SIZE_M, BLOCK_SIZE_C, 2)
-    grad_out0, grad_out1 = tl.split(
-        grad_out01
-    )  # (BLOCK_SIZE_M, BLOCK_SIZE_C), (BLOCK_SIZE_M, BLOCK_SIZE_C)
-    grad_out2, grad_out3 = tl.split(
-        grad_out23
-    )  # (BLOCK_SIZE_M, BLOCK_SIZE_C), (BLOCK_SIZE_M, BLOCK_SIZE_C)
-
-    # grad_f = grad_output @ H_post.T: (BLOCK_SIZE_M, 1, n) @ (BLOCK_SIZE_M, n, BLOCK_SIZE_C) = (BLOCK_SIZE_M, 1, BLOCK_SIZE_C)
-    # Triton doesn't support dot prod with inner dimension < 16, so we need to hack this:
-    # grad_f = grad_out[:, :, 0] @ H_post.T[:, 0, :] (BLOCK_SIZE_M, BLOCK_SIZE_C, 1) @ (BLOCK_SIZE_M, 1, 1)
-    #        + grad_out[:, :, 1] @ H_post.T[:, 1, :]
-    #        + grad_out[:, :, 2] @ H_post.T[:, 2, :]
-    #        + grad_out[:, :, 3] @ H_post.T[:, 3, :]
-    # where H_post.T[:, i, :] = H_post[:, :, i]
-    H_post = tl.reshape(H_post, (BLOCK_SIZE_M, 2, 2))
-    H_post01, H_post23 = tl.split(H_post)  # (BLOCK_SIZE_M, 2), (BLOCK_SIZE_M, 2)
-    H_post0, H_post1 = tl.split(H_post01)  # (BLOCK_SIZE_M,), (BLOCK_SIZE_M,)
-    H_post2, H_post3 = tl.split(H_post23)  # (BLOCK_SIZE_M,), (BLOCK_SIZE_M,)
-
-    grad_f_acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_C), dtype=tl.float32)
-    # (BLOCK_SIZE_M, BLOCK_SIZE_C) * (BLOCK_SIZE_M, 1) -> (BLOCK_SIZE_M, BLOCK_SIZE_C)
-    grad_f_acc = tl.fma(grad_out0, H_post0[:, None], grad_f_acc)
-    grad_f_acc = tl.fma(grad_out1, H_post1[:, None], grad_f_acc)
-    grad_f_acc = tl.fma(grad_out2, H_post2[:, None], grad_f_acc)
-    grad_f_acc = tl.fma(grad_out3, H_post3[:, None], grad_f_acc)
-    grad_f = grad_f_acc.to(f.dtype)
-
-    grad_f_ptrs = grad_f_ptr + offs_m[:, None] * stride_grad_fm + offs_c[None, :] * stride_grad_fc
-    tl.store(grad_f_ptrs, grad_f, mask=mask_m[:, None] & mask_c[None, :])
-
-    # grad_x = grad_output @ H_res.T: (BLOCK_SIZE_M, BLOCK_SIZE_C, n) @ (BLOCK_SIZE_M, n, n) = (BLOCK_SIZE_M, n, BLOCK_SIZE_C)
-    # The inner dim is n=4 which is too small for triton, so we will manually unroll the matmul
-    # grad_x = grad_out[:, :, 0] @ H_res.T[:, 0, :]
-    #        + grad_out[:, :, 1] @ H_res.T[:, 1, :]
-    #        + grad_out[:, :, 2] @ H_res.T[:, 2, :]
-    #        + grad_out[:, :, 3] @ H_res.T[:, 3, :]
-    # where H_res.T[:, i, :] = H_res[:, :, i]
-    # Due to broadcasting, it's equivalent to multiplying each H_res[:, i, :].T with grad_out[:, i, :]
-
-    H_res_reshape = tl.reshape(H_res, (BLOCK_SIZE_M, n, 2, 2))  # (BLOCK_SIZE_M, n, 2, 2)
-    H_res01, H_res23 = tl.split(H_res_reshape)  # (BLOCK_SIZE_M, n, 2), (BLOCK_SIZE_M, n, 2)
-    H_res0, H_res1 = tl.split(H_res01)  # (BLOCK_SIZE_M, n), (BLOCK_SIZE_M, n)
-    H_res2, H_res3 = tl.split(H_res23)  # (BLOCK_SIZE_M, n), (BLOCK_SIZE_M, n)
-
-    grad_x_acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_C, n), dtype=tl.float32)
-    grad_x_acc = tl.fma(grad_out0[:, :, None], H_res0[:, None, :], grad_x_acc)
-    grad_x_acc = tl.fma(grad_out1[:, :, None], H_res1[:, None, :], grad_x_acc)
-    grad_x_acc = tl.fma(grad_out2[:, :, None], H_res2[:, None, :], grad_x_acc)
-    grad_x_acc = tl.fma(grad_out3[:, :, None], H_res3[:, None, :], grad_x_acc)
-
-    grad_x = grad_x_acc.to(x.dtype)
-    grad_x = tl.reshape(grad_x, (BLOCK_SIZE_M, BLOCK_SIZE_C * n))  # (BLOCK_SIZE_M, BLOCK_SIZE_C*n)
-
-    grad_x_ptrs = grad_x_ptr + offs_m[:, None] * stride_grad_xm + offs_cn[None, :] * stride_grad_xCn
-    tl.store(grad_x_ptrs, grad_x, mask=mask_m[:, None] & mask_cn[None, :])
-
-
-@triton.autotune(
-    configs=expand_combine_config(),
-    key=["M", "C"],
-)
-@triton.jit
-def _mhc_expand_combine_with_bias_fwd(
-    f_ptr,  # (M, C)
-    bias_ptr,  # (C,)
-    H_post_ptr,  # (M, n)
-    x_ptr,  # (M, C, n)
-    H_res_ptr,  # (M, n, n)
-    output_ptr,  # # (M, C, n)
-    M,
-    C,
-    n: tl.constexpr,
-    stride_fm,
-    stride_fc,
-    stride_bias,
-    stride_xm,
-    stride_xCn,
-    stride_output_m,
-    stride_output_Cn,
-    # Meta-parameters
-    BLOCK_SIZE_M: tl.constexpr,
-    BLOCK_SIZE_C: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
 ):
     """
     output = (f + bias[None, :, None]) @ H_post: (BLOCK_SIZE_M, BLOCK_SIZE_C, 1) @ (BLOCK_SIZE_M, 1, n)  = (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
@@ -1417,7 +1425,8 @@ def _mhc_expand_combine_with_bias_fwd(
 
     f_ptrs = f_ptr + offs_m[:, None] * stride_fm + offs_c[None, :] * stride_fc
     f = tl.load(f_ptrs, mask=mask_m[:, None] & mask_c[None, :], other=0.0)
-    bias = tl.load(bias_ptr + offs_c * stride_bias, mask=mask_c, other=0.0)  # (BLOCK_SIZE_C,)
+    if HAS_BIAS:
+        bias = tl.load(bias_ptr + offs_c * stride_bias, mask=mask_c, other=0.0)  # (BLOCK_SIZE_C,)
 
     offs_H_post = pid_m * BLOCK_SIZE_M * n + tl.arange(0, BLOCK_SIZE_M * n)
     H_post = tl.load(
@@ -1429,7 +1438,8 @@ def _mhc_expand_combine_with_bias_fwd(
     # (BLOCK_SIZE_M, BLOCK_SIZE_C, 1) @ (BLOCK_SIZE_M, 1, n)  = (BLOCK_SIZE_M, n, BLOCK_SIZE_C)
     # Due to broadcasting, it's equivalent to a multiplicaiton
     out_acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_C, n), dtype=tl.float32)
-    out_acc = tl.fma(bias[None, :, None], H_post[:, None, :], out_acc)
+    if HAS_BIAS:
+        out_acc = tl.fma(bias[None, :, None], H_post[:, None, :], out_acc)
     out_acc = tl.fma(f[:, :, None], H_post[:, None, :], out_acc)
 
     H_res_offs = pid_m * BLOCK_SIZE_M * n * n + tl.arange(0, BLOCK_SIZE_M * n * n)
@@ -1477,22 +1487,62 @@ def _mhc_expand_combine_with_bias_fwd(
     tl.store(output_ptrs, out, mask=mask_m[:, None] & mask_cn[None, :])
 
 
+def expand_combine_config_bwd():
+    block_m = [1, 2, 4]
+    block_c = [128, 256]
+    step_c = [32, 64]
+    warps = [1, 2]
+    stages = [1, 2, 3, 4]
+
+    configs = []
+    for m, c, sc, w, s in itertools.product(block_m, block_c, step_c, warps, stages):
+        configs.append(
+            triton.Config(
+                {"BLOCK_SIZE_M": m, "BLOCK_SIZE_C": c, "STEP_SIZE_C": sc},
+                num_warps=w,
+                num_stages=s,
+            )
+        )
+    return configs
+
+
+def expand_combine_prune_bwd(configs, named_args, **kwargs):
+    M = named_args.get("M", kwargs.get("M", None))
+
+    pruned_configs = list(
+        filter(
+            lambda config: triton.cdiv(M, config.kwargs["BLOCK_SIZE_M"]) <= MAX_GRID_DIM_Y,
+            configs,
+        )
+    )
+
+    if not pruned_configs:
+        raise ValueError(f"M={M} exceeds the maximum supported M dimension for this kernel.")
+
+    # Triton will skip calling prune function if the autotune returns only one config, which breaks the determinism override here
+    # So we need to apply NVTE_DISABLE_TRITON_AUTOTUNING in the pruner instead
+    if os.environ.get("NVTE_DISABLE_TRITON_AUTOTUNING", "0") == "1":
+        pruned_configs = pruned_configs[:1]
+    return pruned_configs
+
+
 @triton.autotune(
-    configs=expand_combine_config(),
+    configs=expand_combine_config_bwd(),
     key=["M", "C"],
     reset_to_zero=["grad_H_post_ptr", "grad_H_res_ptr", "grad_bias_ptr"],
+    prune_configs_by={"early_config_prune": expand_combine_prune_bwd},
 )
 @triton.jit
-def _mhc_expand_combine_with_bias_bwd(
+def _mhc_expand_combine_bwd(
     grad_output_ptr,  # (M, C, n)
     f_ptr,  # (M, C)
-    bias_ptr,  # (C,)
+    bias_ptr,  # (C,), or None if HAS_BIAS is False
     H_post_ptr,  # (M, n)
     x_ptr,  # (M, C, n)
     H_res_ptr,  # (M, n, n)
     grad_H_post_ptr,  # (M, n)
     grad_f_ptr,  # (M, C)
-    grad_bias_ptr,  # (C,)
+    grad_bias_ptr,  # (C,), or None if HAS_BIAS is False
     grad_H_res_ptr,  # (M, n, n)
     grad_x_ptr,  # (M, C, n)
     M,
@@ -1502,18 +1552,21 @@ def _mhc_expand_combine_with_bias_bwd(
     stride_grad_output_Cn,
     stride_fm,
     stride_fc,
-    stride_bias,
+    stride_bias,  # Not used if HAS_BIAS is False
     stride_xm,
     stride_xCn,
     stride_grad_fm,
     stride_grad_fc,
-    stride_grad_bias,
+    stride_grad_bias,  # Not used if HAS_BIAS is False
     stride_grad_xm,
     stride_grad_xCn,
     # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_C: tl.constexpr,
+    STEP_SIZE_C: tl.constexpr,
     precision: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
+    FUSE_GRAD_X_ACC: tl.constexpr,
 ):
     """
     Each block
@@ -1557,137 +1610,169 @@ def _mhc_expand_combine_with_bias_bwd(
     tl.assume(BLOCK_SIZE_C % 32 == 0)
 
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    offs_c = pid_c * BLOCK_SIZE_C + tl.arange(0, BLOCK_SIZE_C)
-    offs_cn = pid_c * BLOCK_SIZE_C * n + tl.arange(0, BLOCK_SIZE_C * n)
     mask_m = offs_m < M
-    mask_c = offs_c < C
-    mask_cn = offs_cn < C * n
 
-    f_ptrs = f_ptr + offs_m[:, None] * stride_fm + offs_c[None, :] * stride_fc
-    f = tl.load(f_ptrs, mask=mask_m[:, None] & mask_c[None, :], other=0.0)
+    offs_c_start = pid_c * BLOCK_SIZE_C
+    offs_cn_start = pid_c * BLOCK_SIZE_C * n
 
-    bias = tl.load(bias_ptr + offs_c * stride_bias, mask=mask_c, other=0.0)  # (BLOCK_SIZE_C,)
+    grad_H_post_acc = tl.zeros((BLOCK_SIZE_M, 1, n), dtype=tl.float32)
+    grad_H_res_acc = tl.zeros((BLOCK_SIZE_M, n, n), dtype=tl.float32)
 
     H_post_offs = pid_m * BLOCK_SIZE_M * n + tl.arange(0, BLOCK_SIZE_M * n)
     H_post = tl.load(H_post_ptr + H_post_offs, mask=H_post_offs < M * n, other=0.0)
-    H_post = tl.reshape(H_post, (BLOCK_SIZE_M, n))  # (BLOCK_SIZE_M, n)
+    H_post_reshape = tl.reshape(H_post, (BLOCK_SIZE_M, 2, 2))
+    H_post01, H_post23 = tl.split(H_post_reshape)  # (BLOCK_SIZE_M, 2), (BLOCK_SIZE_M, 2)
+    H_post0, H_post1 = tl.split(H_post01)  # (BLOCK_SIZE_M,), (BLOCK_SIZE_M,)
+    H_post2, H_post3 = tl.split(H_post23)  # (BLOCK_SIZE_M,), (BLOCK_SIZE_M,)
 
     H_res_offs = pid_m * BLOCK_SIZE_M * n * n + tl.arange(0, BLOCK_SIZE_M * n * n)
     H_res = tl.load(
         H_res_ptr + H_res_offs, mask=H_res_offs < M * n * n, other=0.0
     )  # (BLOCK_SIZE_M, n, n)
     H_res = tl.reshape(H_res, (BLOCK_SIZE_M, n, n))  # (BLOCK_SIZE_M, n, n)
-
-    grad_out_ptrs = (
-        grad_output_ptr
-        + offs_m[:, None] * stride_grad_output_m
-        + offs_cn[None, :] * stride_grad_output_Cn
-    )
-    grad_out = tl.load(
-        grad_out_ptrs, mask=mask_m[:, None] & mask_cn[None, :], other=0.0
-    )  # (BLOCK_SIZE_M, BLOCK_SIZE_C * n)
-    grad_out = tl.reshape(
-        grad_out, (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
-    )  # (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
-
-    # grad_H_post =  f.T @ grad_output # (BLOCK_SIZE_M, 1, BLOCK_SIZE_C) @ (BLOCK_SIZE_M, BLOCK_SIZE_C, n) = (BLOCK_SIZE_M, 1, n)
-    grad_H_post = tl.dot(
-        tl.reshape(f, (BLOCK_SIZE_M, 1, BLOCK_SIZE_C)),
-        tl.reshape(grad_out, (BLOCK_SIZE_M, BLOCK_SIZE_C, n)),
-        input_precision=precision,
-        out_dtype=tl.float32,
-    )  # (BLOCK_SIZE_M, 1, n)
-    grad_H_post = tl.dot(
-        tl.broadcast_to(bias[None, None, :], (BLOCK_SIZE_M, 1, BLOCK_SIZE_C)),
-        tl.reshape(grad_out, (BLOCK_SIZE_M, BLOCK_SIZE_C, n)),
-        acc=grad_H_post,
-        input_precision=precision,
-        out_dtype=tl.float32,
-    )  # (BLOCK_SIZE_M, 1, n)
-    grad_H_post = tl.reshape(grad_H_post, (BLOCK_SIZE_M * n,))  # (BLOCK_SIZE_M * n)
-    offs_grad_H_post = pid_m * BLOCK_SIZE_M * n + tl.arange(0, BLOCK_SIZE_M * n)
-    grad_H_post_ptrs = grad_H_post_ptr + offs_grad_H_post
-    tl.atomic_add(grad_H_post_ptrs, grad_H_post, mask=offs_grad_H_post < M * n, sem="relaxed")
-
-    x_ptrs = x_ptr + offs_m[:, None] * stride_xm + offs_cn[None, :] * stride_xCn
-    x = tl.load(
-        x_ptrs, mask=mask_m[:, None] & mask_cn[None, :], other=0.0
-    )  # (BLOCK_SIZE_M, BLOCK_SIZE_C*n)
-    x = tl.reshape(x, (BLOCK_SIZE_M, BLOCK_SIZE_C, n))  # (BLOCK_SIZE_M, BLOCK_SIZE_C, n)
-
-    # grad_H_res = x.T @ grad_output: (BLOCK_SIZE_M, n, BLOCK_SIZE_C) @ (BLOCK_SIZE_M, BLOCK_SIZE_C, n) = (BLOCK_SIZE_M, n, n)
-    grad_H_res = tl.dot(
-        tl.trans(x, (0, 2, 1)), grad_out, input_precision=precision, out_dtype=tl.float32
-    )  # (BLOCK_SIZE_M, n, n)
-    grad_H_res = tl.reshape(grad_H_res, (BLOCK_SIZE_M * n * n,))  # (BLOCK_SIZE_M * n * n)
-    offs_grad_H_res = pid_m * BLOCK_SIZE_M * n * n + tl.arange(0, BLOCK_SIZE_M * n * n)
-    grad_H_res_ptrs = grad_H_res_ptr + offs_grad_H_res
-    tl.atomic_add(
-        grad_H_res_ptrs, grad_H_res.to(tl.float32), mask=offs_grad_H_res < M * n * n, sem="relaxed"
-    )
-
-    grad_out_reshape = tl.reshape(
-        grad_out, (BLOCK_SIZE_M, BLOCK_SIZE_C, 2, 2)
-    )  # (BLOCK_SIZE_M, BLOCK_SIZE_C, 2, 2)
-    grad_out01, grad_out23 = tl.split(
-        grad_out_reshape
-    )  # (BLOCK_SIZE_M, BLOCK_SIZE_C, 2), (BLOCK_SIZE_M, BLOCK_SIZE_C, 2)
-    grad_out0, grad_out1 = tl.split(
-        grad_out01
-    )  # (BLOCK_SIZE_M, BLOCK_SIZE_C), (BLOCK_SIZE_M, BLOCK_SIZE_C)
-    grad_out2, grad_out3 = tl.split(
-        grad_out23
-    )  # (BLOCK_SIZE_M, BLOCK_SIZE_C), (BLOCK_SIZE_M, BLOCK_SIZE_C)
-
-    # grad_f = grad_output @ H_post.T: (BLOCK_SIZE_M, 1, n) @ (BLOCK_SIZE_M, n, BLOCK_SIZE_C) = (BLOCK_SIZE_M, 1, BLOCK_SIZE_C)
-    # Triton doesn't support dot prod with inner dimension < 16, so we need to hack this:
-    #        = grad_out[:, :, 0] @ H_post.T[:, 0, :] (BLOCK_SIZE_M, BLOCK_SIZE_C, 1) @ (BLOCK_SIZE_M, 1, 1)
-    #        + grad_out[:, :, 1] @ H_post.T[:, 1, :]
-    #        + grad_out[:, :, 2] @ H_post.T[:, 2, :]
-    #        + grad_out[:, :, 3] @ H_post.T[:, 3, :]
-    # where H_post.T[:, i, :] = H_post[:, :, i]
-    H_post = tl.reshape(H_post, (BLOCK_SIZE_M, 2, 2))
-    H_post01, H_post23 = tl.split(H_post)  # (BLOCK_SIZE_M, 2), (BLOCK_SIZE_M, 2)
-    H_post0, H_post1 = tl.split(H_post01)  # (BLOCK_SIZE_M,), (BLOCK_SIZE_M,)
-    H_post2, H_post3 = tl.split(H_post23)  # (BLOCK_SIZE_M,), (BLOCK_SIZE_M,)
-
-    grad_f_acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_C), dtype=tl.float32)
-    # (BLOCK_SIZE_M, BLOCK_SIZE_C) * (BLOCK_SIZE_M, 1) -> (BLOCK_SIZE_M, BLOCK_SIZE_C)
-    grad_f_acc = tl.fma(grad_out0, H_post0[:, None], grad_f_acc)
-    grad_f_acc = tl.fma(grad_out1, H_post1[:, None], grad_f_acc)
-    grad_f_acc = tl.fma(grad_out2, H_post2[:, None], grad_f_acc)
-    grad_f_acc = tl.fma(grad_out3, H_post3[:, None], grad_f_acc)
-    grad_f = grad_f_acc.to(f.dtype)
-
-    grad_f_ptrs = grad_f_ptr + offs_m[:, None] * stride_grad_fm + offs_c[None, :] * stride_grad_fc
-    tl.store(grad_f_ptrs, grad_f, mask=mask_m[:, None] & mask_c[None, :])
-
-    grad_bias = tl.sum(grad_f_acc, axis=0)  # (BLOCK_SIZE_C,)
-    grad_bias_ptrs = grad_bias_ptr + offs_c * stride_grad_bias
-    tl.atomic_add(grad_bias_ptrs, grad_bias, mask=mask_c, sem="relaxed")
-
-    # grad_x = grad_output @ H_res.T: (BLOCK_SIZE_M, BLOCK_SIZE_C, n) @ (BLOCK_SIZE_M, n, n) = (BLOCK_SIZE_M, n, BLOCK_SIZE_C)
-    # The inner dim is n=4 which is too small for triton, so we will manually unroll the matmul
-    # grad_x = grad_out[:, :, 0] @ H_res.T[:, 0, :]
-    #        + grad_out[:, :, 1] @ H_res.T[:, 1, :]
-    #        + grad_out[:, :, 2] @ H_res.T[:, 2, :]
-    #        + grad_out[:, :, 3] @ H_res.T[:, 3, :]
-    # where H_res.T[:, i, :] = H_res[:, :, i]
-    # Due to broadcasting, it's equivalent to multiplying each H_res[:, i, :].T with grad_out[:, i, :]
-
     H_res_reshape = tl.reshape(H_res, (BLOCK_SIZE_M, n, 2, 2))  # (BLOCK_SIZE_M, n, 2, 2)
     H_res01, H_res23 = tl.split(H_res_reshape)  # (BLOCK_SIZE_M, n, 2), (BLOCK_SIZE_M, n, 2)
     H_res0, H_res1 = tl.split(H_res01)  # (BLOCK_SIZE_M, n), (BLOCK_SIZE_M, n)
     H_res2, H_res3 = tl.split(H_res23)  # (BLOCK_SIZE_M, n), (BLOCK_SIZE_M, n)
 
-    grad_x_acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_C, n), dtype=tl.float32)
-    grad_x_acc = tl.fma(grad_out0[:, :, None], H_res0[:, None, :], grad_x_acc)
-    grad_x_acc = tl.fma(grad_out1[:, :, None], H_res1[:, None, :], grad_x_acc)
-    grad_x_acc = tl.fma(grad_out2[:, :, None], H_res2[:, None, :], grad_x_acc)
-    grad_x_acc = tl.fma(grad_out3[:, :, None], H_res3[:, None, :], grad_x_acc)
+    for i in tl.range(0, BLOCK_SIZE_C, STEP_SIZE_C, loop_unroll_factor=2):
+        offs_c = offs_c_start + i + tl.arange(0, STEP_SIZE_C)
+        offs_cn = offs_cn_start + i * n + tl.arange(0, STEP_SIZE_C * n)
+        mask_c = offs_c < C
+        mask_cn = offs_cn < C * n
 
-    grad_x = grad_x_acc.to(x.dtype)
-    grad_x = tl.reshape(grad_x, (BLOCK_SIZE_M, BLOCK_SIZE_C * n))  # (BLOCK_SIZE_M, BLOCK_SIZE_C*n)
+        f_ptrs = f_ptr + offs_m[:, None] * stride_fm + offs_c[None, :] * stride_fc
+        f = tl.load(f_ptrs, mask=mask_m[:, None] & mask_c[None, :], other=0.0)
 
-    grad_x_ptrs = grad_x_ptr + offs_m[:, None] * stride_grad_xm + offs_cn[None, :] * stride_grad_xCn
-    tl.store(grad_x_ptrs, grad_x, mask=mask_m[:, None] & mask_cn[None, :])
+        if HAS_BIAS:
+            bias = tl.load(
+                bias_ptr + offs_c * stride_bias, mask=mask_c, other=0.0
+            )  # (STEP_SIZE_C,)
+
+        grad_out_ptrs = (
+            grad_output_ptr
+            + offs_m[:, None] * stride_grad_output_m
+            + offs_cn[None, :] * stride_grad_output_Cn
+        )
+        grad_out = tl.load(
+            grad_out_ptrs, mask=mask_m[:, None] & mask_cn[None, :], other=0.0
+        )  # (BLOCK_SIZE_M, STEP_SIZE_C * n)
+        grad_out = tl.reshape(
+            grad_out, (BLOCK_SIZE_M, STEP_SIZE_C, n)
+        )  # (BLOCK_SIZE_M, STEP_SIZE_C, n)
+
+        # grad_H_post =  f.T @ grad_output # (BLOCK_SIZE_M, 1, STEP_SIZE_C) @ (BLOCK_SIZE_M, STEP_SIZE_C, n) = (BLOCK_SIZE_M, 1, n)
+        grad_H_post_acc = tl.dot(
+            tl.reshape(f, (BLOCK_SIZE_M, 1, STEP_SIZE_C)),
+            tl.reshape(grad_out, (BLOCK_SIZE_M, STEP_SIZE_C, n)),
+            acc=grad_H_post_acc,
+            input_precision=precision,
+            out_dtype=tl.float32,
+        )  # (BLOCK_SIZE_M, 1, n)
+        if HAS_BIAS:
+            grad_H_post_acc = tl.dot(
+                tl.broadcast_to(bias[None, None, :], (BLOCK_SIZE_M, 1, STEP_SIZE_C)),
+                tl.reshape(grad_out, (BLOCK_SIZE_M, STEP_SIZE_C, n)),
+                acc=grad_H_post_acc,
+                input_precision=precision,
+                out_dtype=tl.float32,
+            )  # (BLOCK_SIZE_M, 1, n)
+
+        x_ptrs = x_ptr + offs_m[:, None] * stride_xm + offs_cn[None, :] * stride_xCn
+        x = tl.load(
+            x_ptrs, mask=mask_m[:, None] & mask_cn[None, :], other=0.0
+        )  # (BLOCK_SIZE_M, STEP_SIZE_C*n)
+        x = tl.reshape(x, (BLOCK_SIZE_M, STEP_SIZE_C, n))  # (BLOCK_SIZE_M, STEP_SIZE_C, n)
+
+        # grad_H_res = x.T @ grad_output: (BLOCK_SIZE_M, n, STEP_SIZE_C) @ (BLOCK_SIZE_M, STEP_SIZE_C, n) = (BLOCK_SIZE_M, n, n)
+        grad_H_res_acc = tl.dot(
+            tl.trans(x, (0, 2, 1)),
+            grad_out,
+            acc=grad_H_res_acc,
+            input_precision=precision,
+            out_dtype=tl.float32,
+        )  # (BLOCK_SIZE_M, n, n)
+
+        grad_out_reshape = tl.reshape(
+            grad_out, (BLOCK_SIZE_M, STEP_SIZE_C, 2, 2)
+        )  # (BLOCK_SIZE_M, STEP_SIZE_C, 2, 2)
+        grad_out01, grad_out23 = tl.split(
+            grad_out_reshape
+        )  # (BLOCK_SIZE_M, STEP_SIZE_C, 2), (BLOCK_SIZE_M, STEP_SIZE_C, 2)
+        grad_out0, grad_out1 = tl.split(
+            grad_out01
+        )  # (BLOCK_SIZE_M, STEP_SIZE_C), (BLOCK_SIZE_M, STEP_SIZE_C)
+        grad_out2, grad_out3 = tl.split(
+            grad_out23
+        )  # (BLOCK_SIZE_M, STEP_SIZE_C), (BLOCK_SIZE_M, STEP_SIZE_C)
+
+        # grad_f = grad_output @ H_post.T: (BLOCK_SIZE_M, 1, n) @ (BLOCK_SIZE_M, n, STEP_SIZE_C) = (BLOCK_SIZE_M, 1, STEP_SIZE_C)
+        # Triton doesn't support dot prod with inner dimension < 16, so we need to hack this:
+        #        = grad_out[:, :, 0] @ H_post.T[:, 0, :] (BLOCK_SIZE_M, STEP_SIZE_C, 1) @ (BLOCK_SIZE_M, 1, 1)
+        #        + grad_out[:, :, 1] @ H_post.T[:, 1, :]
+        #        + grad_out[:, :, 2] @ H_post.T[:, 2, :]
+        #        + grad_out[:, :, 3] @ H_post.T[:, 3, :]
+        # where H_post.T[:, i, :] = H_post[:, :, i]
+
+        grad_f_acc = tl.zeros((BLOCK_SIZE_M, STEP_SIZE_C), dtype=tl.float32)
+        # (BLOCK_SIZE_M, STEP_SIZE_C) * (BLOCK_SIZE_M, 1) -> (BLOCK_SIZE_M, STEP_SIZE_C)
+        grad_f_acc = tl.fma(grad_out0, H_post0[:, None], grad_f_acc)
+        grad_f_acc = tl.fma(grad_out1, H_post1[:, None], grad_f_acc)
+        grad_f_acc = tl.fma(grad_out2, H_post2[:, None], grad_f_acc)
+        grad_f_acc = tl.fma(grad_out3, H_post3[:, None], grad_f_acc)
+        grad_f = grad_f_acc.to(f.dtype)
+
+        grad_f_ptrs = (
+            grad_f_ptr + offs_m[:, None] * stride_grad_fm + offs_c[None, :] * stride_grad_fc
+        )
+        tl.store(grad_f_ptrs, grad_f, mask=mask_m[:, None] & mask_c[None, :])
+
+        if HAS_BIAS:
+            grad_bias = tl.sum(grad_f_acc, axis=0)  # (STEP_SIZE_C,)
+            # This is reduction over M dimension, so it has nothing to do with whether we use split-C. It only depends on determinism or not.
+            grad_bias_ptrs = grad_bias_ptr + offs_c * stride_grad_bias
+            tl.atomic_add(grad_bias_ptrs, grad_bias, mask=mask_c, sem="relaxed")
+
+        # grad_x = grad_output @ H_res.T: (BLOCK_SIZE_M, STEP_SIZE_C, n) @ (BLOCK_SIZE_M, n, n) = (BLOCK_SIZE_M, n, STEP_SIZE_C)
+        # The inner dim is n=4 which is too small for triton, so we will manually unroll the matmul
+        # grad_x = grad_out[:, :, 0] @ H_res.T[:, 0, :]
+        #        + grad_out[:, :, 1] @ H_res.T[:, 1, :]
+        #        + grad_out[:, :, 2] @ H_res.T[:, 2, :]
+        #        + grad_out[:, :, 3] @ H_res.T[:, 3, :]
+        # where H_res.T[:, i, :] = H_res[:, :, i]
+        # Due to broadcasting, it's equivalent to multiplying each H_res[:, i, :].T with grad_out[:, i, :]
+
+        grad_x_acc = tl.zeros((BLOCK_SIZE_M, STEP_SIZE_C, n), dtype=tl.float32)
+        grad_x_acc = tl.fma(grad_out0[:, :, None], H_res0[:, None, :], grad_x_acc)
+        grad_x_acc = tl.fma(grad_out1[:, :, None], H_res1[:, None, :], grad_x_acc)
+        grad_x_acc = tl.fma(grad_out2[:, :, None], H_res2[:, None, :], grad_x_acc)
+        grad_x_acc = tl.fma(grad_out3[:, :, None], H_res3[:, None, :], grad_x_acc)
+
+        if FUSE_GRAD_X_ACC:
+            grad_x = grad_x_acc  # If fusing gradient accumulation, the buffer should be always fp32 so we don't cast here
+        else:
+            grad_x = grad_x_acc.to(x.dtype)
+        grad_x = tl.reshape(
+            grad_x, (BLOCK_SIZE_M, STEP_SIZE_C * n)
+        )  # (BLOCK_SIZE_M, STEP_SIZE_C*n)
+
+        grad_x_ptrs = (
+            grad_x_ptr + offs_m[:, None] * stride_grad_xm + offs_cn[None, :] * stride_grad_xCn
+        )
+        tl.store(grad_x_ptrs, grad_x, mask=mask_m[:, None] & mask_cn[None, :])
+
+    grad_H_post = tl.reshape(grad_H_post_acc, (BLOCK_SIZE_M * n,))  # (BLOCK_SIZE_M * n)
+    offs_grad_H_post = pid_m * BLOCK_SIZE_M * n + tl.arange(0, BLOCK_SIZE_M * n)
+    grad_H_post_ptrs = grad_H_post_ptr + offs_grad_H_post
+
+    grad_H_res = tl.reshape(grad_H_res_acc, (BLOCK_SIZE_M * n * n,))  # (BLOCK_SIZE_M * n * n)
+    offs_grad_H_res = pid_m * BLOCK_SIZE_M * n * n + tl.arange(0, BLOCK_SIZE_M * n * n)
+    grad_H_res_ptrs = grad_H_res_ptr + offs_grad_H_res
+
+    tl.atomic_add(grad_H_post_ptrs, grad_H_post, mask=offs_grad_H_post < M * n, sem="relaxed")
+    tl.atomic_add(
+        grad_H_res_ptrs,
+        grad_H_res.to(tl.float32),
+        mask=offs_grad_H_res < M * n * n,
+        sem="relaxed",
+    )
