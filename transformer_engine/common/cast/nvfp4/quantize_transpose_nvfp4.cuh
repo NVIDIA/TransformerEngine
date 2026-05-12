@@ -921,6 +921,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
   __shared__ alignas(8) uint64_t mbar[STAGES];
 
   __shared__ __align__(16) float block_amax_matrix[BLOCKS_PER_TILE_Y][BLOCKS_PER_TILE_X + 1];
+  // Only used for 4over6 quantization
   __shared__ __align__(16) float err_map4_matrix[BLOCKS_PER_TILE_Y][BLOCKS_PER_TILE_X][BLOCK_DIM];
   __shared__ __align__(16) float err_map6_matrix[BLOCKS_PER_TILE_Y][BLOCKS_PER_TILE_X][BLOCK_DIM];
   __shared__ __align__(16) uint8_t pick_map4_matrix[BLOCKS_PER_TILE_Y][BLOCKS_PER_TILE_X];
