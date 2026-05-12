@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 
+import copy
 import os
 import sys
 import logging
@@ -209,10 +210,13 @@ def run_dpa_with_cp(
     os.environ["NVTE_FUSED_ATTN"] = "0"
     if kernel_backend == "FlashAttention":
         os.environ["NVTE_FLASH_ATTN"] = "1"
-        config = model_configs_flash_attn[model]
+        # Deep-copy: the module-level dict is shared across pool cases; the
+        # THD branch below rewrites attn_mask_type in place, which would
+        # otherwise leak into subsequent cases reusing the same model key.
+        config = copy.deepcopy(model_configs_flash_attn[model])
     if kernel_backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
-        config = model_configs_fused_attn[model]
+        config = copy.deepcopy(model_configs_fused_attn[model])
     assert config.attn_mask_type in [
         "causal",
         "no_mask",
