@@ -261,7 +261,7 @@ Kernel Configuration
 
    :Type: ``int`` (0 or 1)
    :Default: ``0``
-   :Description: Enable fast math optimizations in supported kernels, including runtime-compiled (NVRTC) kernels and NVFP4 4over6 quantization. This trades numerical accuracy for performance. These optimizations are experimental and inconsistently implemented.
+   :Description: Enable fast math optimizations in runtime-compiled (NVRTC) kernels. This trades numerical accuracy for performance. These optimizations are experimental and inconsistently implemented.
 
 .. envvar:: NVTE_DISABLE_NVRTC
 
