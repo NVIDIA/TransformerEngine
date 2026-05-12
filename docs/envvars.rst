@@ -291,7 +291,13 @@ Kernel Configuration
 
    :Type: ``str`` (``weights``, ``activations``, or ``all``)
    :Default: unset
-   :Description: Enable per-block map-to-4 versus map-to-6 candidate selection for selected NVFP4 quantizers in the ``NVFP4BlockScaling`` recipe. ``weights`` selects weight tensor roles, ``activations`` selects non-weight tensor roles, and ``all`` selects both. The selected block scale is the candidate with lower configured input-domain error, and ties select map-to-6. This mode uses 256 as the global E4M3 scale bound instead of the 448 bound. Tensors using 4over6 currently require RHT and stochastic rounding to be disabled; activation and backward scopes therefore require ``NVTE_NVFP4_DISABLE_RHT=1`` and ``NVTE_NVFP4_DISABLE_STOCHASTIC_ROUNDING=1``.
+   :Description: Enable per-block map-to-4 versus map-to-6 candidate selection for selected NVFP4 quantizers in the ``NVFP4BlockScaling`` recipe. ``weights`` selects weight tensor roles, ``activations`` selects non-weight tensor roles, and ``all`` selects both. The selected block scale is the candidate with lower configured input-domain error, and ties select map-to-6. By default, this mode keeps the standard NVFP4 global E4M3 scale bound of 448. Tensors using 4over6 currently require RHT and stochastic rounding to be disabled; activation and backward scopes therefore require ``NVTE_NVFP4_DISABLE_RHT=1`` and ``NVTE_NVFP4_DISABLE_STOCHASTIC_ROUNDING=1``.
+
+.. envvar:: NVTE_NVFP4_4OVER6_E4M3_USE_256
+
+   :Type: ``str`` (``weights``, ``activations``, or ``all``)
+   :Default: unset
+   :Description: Select NVFP4 4over6 quantizers that use 256 instead of 448 as the global E4M3 scale bound. ``weights`` selects weight tensor roles, ``activations`` selects non-weight tensor roles, and ``all`` selects both. This option is only meaningful for tensor roles that also enable :envvar:`NVTE_NVFP4_4OVER6`.
 
 .. envvar:: NVTE_NVFP4_4OVER6_ERR_MODE
 
@@ -299,7 +305,7 @@ Kernel Configuration
    :Default: ``MAE``
    :Description: Select the input-domain error metric used by NVFP4 4over6 map-to-4 versus map-to-6 candidate selection in the ``NVFP4BlockScaling`` recipe.
 
-.. envvar:: NVTE_NVFP4_4OVER6_ERR_FAST_MATH
+.. envvar:: NVTE_NVFP4_4OVER6_ERR_USE_FAST_MATH
 
    :Type: ``int`` (0 or 1)
    :Default: ``0``

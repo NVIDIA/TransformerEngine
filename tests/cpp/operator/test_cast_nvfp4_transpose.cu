@@ -63,15 +63,15 @@ std::vector<InputType> create_transpose(const InputType* const input, const size
 
 // Compute the global encode scale factor for a given global amax
 float compute_global_encode_scaling_factor_FP4(const float global_amax, const bool use_fast_math,
-                                               const bool use_4over6 = false) {
+                                               const bool use_e4m3_256 = false) {
   float fp8_max = 448.0f;
-  if (use_4over6) {
+  if (use_e4m3_256) {
     fp8_max = 256.0f;
   }
   constexpr float fp4_max = 6.0f;       // 6.0f;
   float global_encode_scale = fp8_max * fp4_max / global_amax;
   // If scale is infinity, return the max normalized value
-  const float max_norm_clamp = (use_fast_math && !use_4over6)
+  const float max_norm_clamp = (use_fast_math && !use_e4m3_256)
                                ? Numeric_Traits<bf16>::maxNorm
                                : Numeric_Traits<float>::maxNorm;
 
@@ -105,8 +105,9 @@ enum class NVFP4ScalingMode {
 
 struct NVFP4FourOverSixTestConfig {
   bool enabled = false;
+  bool e4m3_use_256 = false;
   NVTENVFP44Over6ErrMode err_mode = kNVTENVFP44Over6ErrMAE;
-  bool err_fast_math = false;
+  bool err_use_fast_math = false;
 };
 
 bool use_2d_quantization(const NVFP4ScalingMode scaling_mode) {
@@ -120,10 +121,12 @@ bool row_scaled_nvfp4(const NVFP4ScalingMode scaling_mode) {
 NVFP4FourOverSixQuantization compute_4over6_quantization_scales(
     const float block_amax, const float global_encode_scale) {
   constexpr float fp4_max = 6.0f;
+  constexpr float fp8_max = 448.0f;
   constexpr float scale_expansion_factor = 1.5f;
   const float base_sf_high_precision = block_amax / fp4_max * global_encode_scale;
-  const float sf_high_precision_map4 = base_sf_high_precision * scale_expansion_factor;
-  const float sf_high_precision_map6 = base_sf_high_precision;
+  const float sf_high_precision_map4 =
+      fminf(base_sf_high_precision * scale_expansion_factor, fp8_max);
+  const float sf_high_precision_map6 = fminf(base_sf_high_precision, fp8_max);
   const fp8e4m3 scale_map4 = static_cast<fp8e4m3>(sf_high_precision_map4);
   const fp8e4m3 scale_map6 = static_cast<fp8e4m3>(sf_high_precision_map6);
 
@@ -200,11 +203,13 @@ void quantize_nvfp4_1d(float (*OP)(const float),
                        const float global_amax,
                        const bool use_fast_math,
                        const bool use_4over6 = false,
+                       const bool use_e4m3_256 = false,
                        const NVFP4FourOverSixCandidate four_over_six_candidate =
                            NVFP4FourOverSixCandidate::Map6) {
 
     // Compute a global encoding/decoding scaling factor for all S_dec_b
-    const float S_enc = compute_global_encode_scaling_factor_FP4(global_amax, use_fast_math, use_4over6);
+    const float S_enc = compute_global_encode_scaling_factor_FP4(global_amax, use_fast_math,
+                                                                 use_e4m3_256);
 
     constexpr size_t block_size_X = 16;
     const size_t blocks_X = divide_round_up(cols, block_size_X);
@@ -301,10 +306,12 @@ void compute_2d_mathematical_scales(float (*OP)(const float),
                                    std::vector<std::vector<fp8e4m3>>& math_scales,
                                    const bool use_fast_math,
                                    const bool use_4over6 = false,
+                                   const bool use_e4m3_256 = false,
                                    const NVFP4FourOverSixCandidate four_over_six_candidate =
                                        NVFP4FourOverSixCandidate::Map6) {
 
-    const float S_enc = compute_global_encode_scaling_factor_FP4(global_amax, use_fast_math, use_4over6);
+    const float S_enc = compute_global_encode_scaling_factor_FP4(global_amax, use_fast_math,
+                                                                 use_e4m3_256);
     constexpr size_t block_size_Y = 16;
     constexpr size_t block_size_X = 16;
     const size_t blocks_Y = divide_round_up(rows, block_size_Y);
@@ -358,15 +365,17 @@ void quantize_nvfp4_2d(float (*OP)(const float),
                        const float global_amax,
                        const bool use_fast_math,
                        const bool use_4over6 = false,
+                       const bool use_e4m3_256 = false,
                        const NVFP4FourOverSixCandidate four_over_six_candidate =
                            NVFP4FourOverSixCandidate::Map6) {
 
     // Step 1: Compute mathematical 8x8 scaling factors
     std::vector<std::vector<fp8e4m3>> math_scales;
     compute_2d_mathematical_scales(OP, input, rows, cols, global_amax, math_scales, use_fast_math,
-                                   use_4over6, four_over_six_candidate);
+                                   use_4over6, use_e4m3_256, four_over_six_candidate);
 
-    const float S_enc = compute_global_encode_scaling_factor_FP4(global_amax, use_fast_math, use_4over6);
+    const float S_enc = compute_global_encode_scaling_factor_FP4(global_amax, use_fast_math,
+                                                                 use_e4m3_256);
     constexpr size_t block_size_Y = 16;
     constexpr size_t block_size_X = 16;
     const size_t blocks_Y = divide_round_up(rows, block_size_Y);
@@ -450,14 +459,15 @@ void quantize_nvfp4(float (*OP)(const float),
                     const bool use_fast_math,
                     const bool use_2d_quantization = false,
                     const bool use_4over6 = false,
+                    const bool use_e4m3_256 = false,
                     const NVFP4FourOverSixCandidate four_over_six_candidate =
                         NVFP4FourOverSixCandidate::Map6) {
     if (use_2d_quantization) {
         quantize_nvfp4_2d(OP, input, output, scales, rows, cols, scales_stride, global_amax,
-                          use_fast_math, use_4over6, four_over_six_candidate);
+                          use_fast_math, use_4over6, use_e4m3_256, four_over_six_candidate);
     } else {
         quantize_nvfp4_1d(OP, input, output, scales, rows, cols, scales_stride, global_amax,
-                          use_fast_math, use_4over6, four_over_six_candidate);
+                          use_fast_math, use_4over6, use_e4m3_256, four_over_six_candidate);
     }
 }
 
@@ -477,6 +487,7 @@ void compute_ref(float (*OP)(const float),
                  const bool use_2d_quantization = false,
                  const bool row_scaled_nvfp4 = false,
                  const bool use_4over6 = false,
+                 const bool use_e4m3_256 = false,
                  const NVFP4FourOverSixCandidate four_over_six_candidate =
                      NVFP4FourOverSixCandidate::Map6)
 {
@@ -489,7 +500,7 @@ void compute_ref(float (*OP)(const float),
         // Step 1: Compute mathematical 8×8 scaling factors
         std::vector<std::vector<fp8e4m3>> math_scales;
         compute_2d_mathematical_scales(OP, input, rows, cols, *amax, math_scales, use_fast_math,
-                                       use_4over6, four_over_six_candidate);
+                                       use_4over6, use_e4m3_256, four_over_six_candidate);
 
         constexpr size_t block_size_Y = 16;
         constexpr size_t block_size_X = 16;
@@ -517,10 +528,10 @@ void compute_ref(float (*OP)(const float),
         // Step 4: Process quantized outputs using the same algorithm as quantize_nvfp4_2d
         // (This part processes the actual FP4 data using the mathematical scaling factors)
         quantize_nvfp4_2d(OP, input, output, nullptr, rows, cols, scales_stride, *amax,
-                          use_fast_math, use_4over6,
+                          use_fast_math, use_4over6, use_e4m3_256,
                           four_over_six_candidate); // scales already filled
         quantize_nvfp4_2d(OP, input_t.data(), output_t, nullptr, cols, rows, scales_stride_t, *amax,
-                          use_fast_math, use_4over6,
+                          use_fast_math, use_4over6, use_e4m3_256,
                           four_over_six_candidate); // scales_t already filled
 
         return;
@@ -540,6 +551,7 @@ void compute_ref(float (*OP)(const float),
                            use_fast_math,
                            use_2d_quantization,
                            use_4over6,
+                           use_e4m3_256,
                            four_over_six_candidate);
         }
         return;
@@ -547,9 +559,11 @@ void compute_ref(float (*OP)(const float),
 
     // Ref impl for basic NVFP4
     quantize_nvfp4(OP, input, output, scales, rows, cols, scales_stride, *amax,
-                   use_fast_math, use_2d_quantization, use_4over6, four_over_six_candidate);
+                   use_fast_math, use_2d_quantization, use_4over6, use_e4m3_256,
+                   four_over_six_candidate);
     quantize_nvfp4(OP, input_t.data(), output_t, scales_t, cols, rows, scales_stride_t, *amax,
-                   use_fast_math, use_2d_quantization, use_4over6, four_over_six_candidate);
+                   use_fast_math, use_2d_quantization, use_4over6, use_e4m3_256,
+                   four_over_six_candidate);
 }
 
 void compare_nvfp4_tensors(const std::string& name,
@@ -776,13 +790,14 @@ void performTest(float (*OP)(const float),
                  const bool use_fast_math,
                  const NVFP4ScalingMode scaling_mode = NVFP4ScalingMode::Block1D,
                  const bool use_4over6 = false,
+                 const bool use_e4m3_256 = false,
                  const NVTENVFP44Over6ErrMode err_mode = kNVTENVFP44Over6ErrMAE,
-                 const bool use_4over6_err_fast_math = false) {
+                 const bool use_4over6_err_use_fast_math = false) {
     using namespace test;
 
     if (use_4over6 && use_fast_math) {
         std::cout << "WARNING: Plain NVFP4 fast math is ignored for 4over6. "
-                     "Use use_4over6_err_fast_math to test the 4over6 candidate "
+                     "Use use_4over6_err_use_fast_math to test the 4over6 candidate "
                      "error fast-math path."
                   << std::endl;
     }
@@ -818,6 +833,7 @@ void performTest(float (*OP)(const float),
     Tensor input("input", shape, itype);
     Tensor output("output", shape, otype, rowwise, columnwise, NVTE_NVFP4_1D_SCALING);
     output.set_nvfp4_4over6(use_4over6);
+    output.set_nvfp4_4over6_e4m3_use_256(use_4over6 && use_e4m3_256);
 
     std::unique_ptr<fp4e2m1x2[]> ref_output   = std::make_unique<fp4e2m1x2[]>(rows * (cols / 2));
     std::unique_ptr<fp4e2m1x2[]> ref_output_t = std::make_unique<fp4e2m1x2[]>(cols * (rows / 2));
@@ -831,7 +847,7 @@ void performTest(float (*OP)(const float),
     fillCase<fp32>(&input, InputsFillCase::uniform);
 
     if (use_4over6 && is_row_scaled_nvfp4) {
-        constexpr float target_row_amax = 256.0f * 6.0f * 8.0f;
+        const float target_row_amax = (use_e4m3_256 ? 256.0f : 448.0f) * 6.0f * 8.0f;
         auto *input_vals = input.rowwise_cpu_dptr<InputType>();
         for (size_t row = 0; row < rows; ++row) {
             float row_amax = 0.0f;
@@ -883,7 +899,7 @@ void performTest(float (*OP)(const float),
     } else {
         // Golden value of amax chosen to make the 2nd-stage scaling mantissa zero and avoid rounding issues
         if (use_4over6) {
-            ref_amax.assign(1, 256.0f * 6.0f * 8.0f);
+            ref_amax.assign(1, (use_e4m3_256 ? 256.0f : 448.0f) * 6.0f * 8.0f);
         } else {
             ref_amax.assign(1, 448.0f * 6.0f * 8.0f);
         }
@@ -919,6 +935,7 @@ void performTest(float (*OP)(const float),
                                is_2d_quantization,
                                is_row_scaled_nvfp4,
                                use_4over6,
+                               use_e4m3_256,
                                NVFP4FourOverSixCandidate::Map4);
         compute_ref<InputType>(OP,
                                input.rowwise_cpu_dptr<InputType>(),
@@ -935,6 +952,7 @@ void performTest(float (*OP)(const float),
                                is_2d_quantization,
                                is_row_scaled_nvfp4,
                                use_4over6,
+                               use_e4m3_256,
                                NVFP4FourOverSixCandidate::Map6);
     } else {
         compute_ref<InputType>(OP,
@@ -967,8 +985,9 @@ void performTest(float (*OP)(const float),
     quant_config.set_rng_state(rng_state.data());
     quant_config.set_nvfp4_2d_quantization(is_2d_quantization);
     quant_config.set_nvfp4_4over6(use_4over6);
+    quant_config.set_nvfp4_4over6_e4m3_use_256(use_4over6 && use_e4m3_256);
     quant_config.set_nvfp4_4over6_err_mode(err_mode);
-    quant_config.set_nvfp4_4over6_err_fast_math(use_4over6 && use_4over6_err_fast_math);
+    quant_config.set_nvfp4_4over6_err_use_fast_math(use_4over6 && use_4over6_err_use_fast_math);
 
     // Call appropriate function based on operation type
     // Activation functions take 3 parameters (input, output, stream)
@@ -1113,7 +1132,8 @@ TEST_P(FusedCastTransposeNVFP4TestSuite, TestFusedCastTransposeNVFP4) {
 
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(input_type, InputType,
         performTest<InputType>(OP, tensor_dims, use_fast_math, scaling_mode, config.enabled,
-                               config.err_mode, config.err_fast_math);
+                               config.e4m3_use_256, config.err_mode,
+                               config.err_use_fast_math);
     );
 }
 
@@ -1152,13 +1172,18 @@ std::string test_name(const FusedCastTransposeNVFP4TestSuite::ParamType& param) 
     const NVFP4FourOverSixTestConfig& config = std::get<5>(param);
     if (config.enabled) {
         name += "X4OVER6";
+        if (config.e4m3_use_256) {
+            name += "XE4M3_USE_256";
+        } else {
+            name += "XE4M3_USE_448";
+        }
         if (config.err_mode == kNVTENVFP44Over6ErrMSE) {
             name += "XMSE";
         } else {
             name += "XMAE";
         }
-        if (config.err_fast_math) {
-            name += "XERR_FAST_MATH";
+        if (config.err_use_fast_math) {
+            name += "XERR_USE_FAST_MATH";
         }
     }
     return name;
@@ -1204,10 +1229,14 @@ INSTANTIATE_TEST_SUITE_P(
                           NVFP4ScalingMode::RowScaled1D,
                           NVFP4ScalingMode::Block2D),   // scaling_mode
         ::testing::Values(
-            NVFP4FourOverSixTestConfig{true, kNVTENVFP44Over6ErrMAE, false},
-            NVFP4FourOverSixTestConfig{true, kNVTENVFP44Over6ErrMAE, true},
-            NVFP4FourOverSixTestConfig{true, kNVTENVFP44Over6ErrMSE, false},
-            NVFP4FourOverSixTestConfig{true, kNVTENVFP44Over6ErrMSE, true})), // four_over_six_config
+            NVFP4FourOverSixTestConfig{true, false, kNVTENVFP44Over6ErrMAE, false},
+            NVFP4FourOverSixTestConfig{true, false, kNVTENVFP44Over6ErrMAE, true},
+            NVFP4FourOverSixTestConfig{true, false, kNVTENVFP44Over6ErrMSE, false},
+            NVFP4FourOverSixTestConfig{true, false, kNVTENVFP44Over6ErrMSE, true},
+            NVFP4FourOverSixTestConfig{true, true, kNVTENVFP44Over6ErrMAE, false},
+            NVFP4FourOverSixTestConfig{true, true, kNVTENVFP44Over6ErrMAE, true},
+            NVFP4FourOverSixTestConfig{true, true, kNVTENVFP44Over6ErrMSE, false},
+            NVFP4FourOverSixTestConfig{true, true, kNVTENVFP44Over6ErrMSE, true})), // four_over_six_config
     [](const testing::TestParamInfo<FusedCastTransposeNVFP4TestSuite::ParamType>& info) {
         return test_name(info.param);
     });

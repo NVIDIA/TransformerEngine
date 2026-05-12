@@ -31,7 +31,7 @@ namespace dispatch {
 namespace nvfp4 {
 namespace dequantize_kernel {
 #if FP4_TYPE_SUPPORTED
-template <typename OType, bool WITH_GEMM_SWIZZLED_SCALES, bool ROW_SCALED_NVFP4, bool USE_4OVER6>
+template <typename OType, bool WITH_GEMM_SWIZZLED_SCALES, bool ROW_SCALED_NVFP4, bool USE_E4M3_256>
 __global__ void __launch_bounds__(512)
     dequantize_fp4_kernel(const void *const input, OType *output, const fp8e4m3 *const scales,
                           const float *const tensor_amax, const size_t N, const size_t M,
@@ -64,7 +64,7 @@ __global__ void __launch_bounds__(512)
   value.vec = input_vectorized[my_index];
   fp8e4m3 scale = scales[my_scale_index];
   float amax = ROW_SCALED_NVFP4 ? tensor_amax[y] : tensor_amax[0];
-  constexpr float factor_inv = 1.0f / (6.0f * (USE_4OVER6 ? 256.0f : 448.0f));
+  constexpr float factor_inv = 1.0f / (6.0f * (USE_E4M3_256 ? 256.0f : 448.0f));
   float final_scale = static_cast<float>(scale) * amax * factor_inv;
 #pragma unroll
   for (int i = 0; i < 4; i++) {
@@ -91,7 +91,7 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
 
   const bool with_gemm_swizzled_scales = input.with_gemm_swizzled_scales;
   const bool row_scaled_nvfp4 = input.row_scaled_nvfp4;
-  const bool use_4over6 = input.nvfp4_4over6;
+  const bool use_e4m3_256 = input.nvfp4_4over6_e4m3_use_256;
 
   constexpr int FP4_BLOCK_SIZE = 16;
   const size_t N = input.flat_first_dim();
@@ -115,9 +115,9 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
           TRANSFORMER_ENGINE_SWITCH_CONDITION(
               row_scaled_nvfp4, ROW_SCALED_NVFP4,
               TRANSFORMER_ENGINE_SWITCH_CONDITION(
-                  use_4over6, USE_4OVER6,
+                  use_e4m3_256, USE_E4M3_256,
                   dequantize_fp4_kernel<OType, WITH_GEMM_SWIZZLED_SCALES, ROW_SCALED_NVFP4,
-                                        USE_4OVER6><<<blocks, threads, 0, stream>>>(
+                                        USE_E4M3_256><<<blocks, threads, 0, stream>>>(
                       input.data.dptr, reinterpret_cast<OType *>(output->data.dptr),
                       reinterpret_cast<fp8e4m3 *>(input.scale_inv.dptr),
                       reinterpret_cast<float *>(input.amax.dptr), N, Mread,

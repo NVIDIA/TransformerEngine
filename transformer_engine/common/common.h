@@ -180,11 +180,16 @@ struct Tensor {
   bool row_scaled_nvfp4 = false;
   /*! \brief Whether NVFP4 uses 4over6 block scale selection.
    *
-   *  Only meaningful for NVFP4 tensors. 4over6 tensors use 256 as their
-   *  global E4M3 scale bound and store a selected map-to-4/map-to-6
-   *  candidate for each 1x16 block.
+   *  Only meaningful for NVFP4 tensors. 4over6 tensors store a selected
+   *  map-to-4/map-to-6 candidate for each 1x16 block.
    */
   bool nvfp4_4over6 = false;
+  /*! \brief Whether NVFP4 4over6 uses 256 as the global E4M3 scale bound.
+   *
+   *  Only meaningful when nvfp4_4over6 is true. If false, the standard NVFP4
+   *  E4M3 bound 448 is used.
+   */
+  bool nvfp4_4over6_e4m3_use_256 = false;
 
   /*! Map from NVTETensorParam to parameter sizes */
   static constexpr size_t attr_sizes[] = {
@@ -197,7 +202,8 @@ struct Tensor {
       sizeof(NVTEBasicTensor),  // kNVTEColumnwiseAmax
       sizeof(uint8_t),          // kNVTEWithGEMMSwizzledScales
       sizeof(uint8_t),          // kNVTERowScaledNVFP4
-      sizeof(uint8_t)           // kNVTENVFP44Over6
+      sizeof(uint8_t),          // kNVTENVFP44Over6
+      sizeof(uint8_t)           // kNVTENVFP44Over6E4M3Use256
   };
 
   Tensor() : scaling_mode{NVTE_DELAYED_TENSOR_SCALING}, nvte_tensor{0} {}
@@ -215,6 +221,7 @@ struct Tensor {
     with_gemm_swizzled_scales = false;
     row_scaled_nvfp4 = false;
     nvfp4_4over6 = false;
+    nvfp4_4over6_e4m3_use_256 = false;
   }
 
   explicit operator NVTETensor() const noexcept { return nvte_tensor; }
@@ -487,8 +494,9 @@ struct QuantizationConfig {
   bool stochastic_rounding = false;
   bool use_fast_math = false;
   bool nvfp4_4over6 = false;
+  bool nvfp4_4over6_e4m3_use_256 = false;
   NVTENVFP44Over6ErrMode nvfp4_4over6_err_mode = kNVTENVFP44Over6ErrMAE;
-  bool nvfp4_4over6_err_fast_math = false;
+  bool nvfp4_4over6_err_use_fast_math = false;
 
   static constexpr size_t attr_sizes[] = {
       sizeof(uint8_t),                       // force_pow_2_scales
@@ -500,8 +508,9 @@ struct QuantizationConfig {
       sizeof(uint8_t),                       // stochastic_rounding
       sizeof(uint8_t),                       // use_fast_math
       sizeof(uint8_t),                       // nvfp4_4over6
+      sizeof(uint8_t),                       // nvfp4_4over6_e4m3_use_256
       sizeof(uint8_t),                       // nvfp4_4over6_err_mode
-      sizeof(uint8_t)                        // nvfp4_4over6_err_fast_math
+      sizeof(uint8_t)                        // nvfp4_4over6_err_use_fast_math
   };
 };
 

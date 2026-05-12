@@ -53,8 +53,11 @@ def check_quantization_nvfp4_versus_reference(
     with_2d_quantization: bool,
     row_scaled_nvfp4: bool = False,
     use_4over6: bool = False,
+    four_over_six_e4m3_use_256: bool = False,
     four_over_six_err_mode: str = "MAE",
 ) -> None:
+    if four_over_six_e4m3_use_256 and not use_4over6:
+        pytest.skip("E4M3 256 bound is only meaningful for 4over6")
     maybe_skip_row_scaled_unsupported_quantization(
         row_scaled_nvfp4, return_transpose, with_2d_quantization, use_4over6, x_dtype, M, N
     )
@@ -81,6 +84,7 @@ def check_quantization_nvfp4_versus_reference(
         with_2d_quantization=with_2d_quantization,
         row_scaled_nvfp4=row_scaled_nvfp4,
         use_4over6=use_4over6,
+        four_over_six_e4m3_use_256=four_over_six_e4m3_use_256,
         four_over_six_err_mode=four_over_six_err_mode,
     )
     if use_cpp_allocator:
@@ -116,6 +120,7 @@ def check_quantization_nvfp4_versus_reference(
         quant_tile_shape=quant_tile_shape,
         row_scaled_nvfp4=row_scaled_nvfp4,
         use_4over6=use_4over6,
+        four_over_six_e4m3_use_256=four_over_six_e4m3_use_256,
         four_over_six_err_mode=four_over_six_err_mode,
     )
     x_nvfp4_ref = ref_quantizer.quantize(x)
@@ -193,6 +198,7 @@ def check_quantization_nvfp4_versus_reference(
 )
 @pytest.mark.parametrize("row_scaled_nvfp4", [False, True], ids=["nvfp4", "nvfp4_row_scaled"])
 @pytest.mark.parametrize("use_4over6", [False, True], ids=["default", "4over6"])
+@pytest.mark.parametrize("four_over_six_e4m3_use_256", [False, True], ids=["e4m3_448", "e4m3_256"])
 @pytest.mark.parametrize("four_over_six_err_mode", ["MAE", "MSE"], ids=["mae_err", "mse_err"])
 def test_quantization_block_tiling_versus_reference(
     x_dtype: torch.dtype,
@@ -204,6 +210,7 @@ def test_quantization_block_tiling_versus_reference(
     with_2d_quantization: bool,
     row_scaled_nvfp4: bool,
     use_4over6: bool,
+    four_over_six_e4m3_use_256: bool,
     four_over_six_err_mode: str,
 ) -> None:
     check_quantization_nvfp4_versus_reference(
@@ -216,6 +223,7 @@ def test_quantization_block_tiling_versus_reference(
         with_2d_quantization=with_2d_quantization,
         row_scaled_nvfp4=row_scaled_nvfp4,
         use_4over6=use_4over6,
+        four_over_six_e4m3_use_256=four_over_six_e4m3_use_256,
         four_over_six_err_mode=four_over_six_err_mode,
     )
 

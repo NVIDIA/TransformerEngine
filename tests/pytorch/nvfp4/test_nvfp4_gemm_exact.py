@@ -29,8 +29,11 @@ def check_nvfp4_gemm_versus_reference(
     w_columnwise: bool = False,
     row_scaled_nvfp4: bool = False,
     use_4over6: bool = False,
+    four_over_six_e4m3_use_256: bool = False,
     four_over_six_err_mode: str = "MAE",
 ):
+    if four_over_six_e4m3_use_256 and not use_4over6:
+        pytest.skip("E4M3 256 bound is only meaningful for 4over6")
     te_dtype = tex.DType.kFloat4E2M1
 
     # Setup device and random seed
@@ -62,6 +65,7 @@ def check_nvfp4_gemm_versus_reference(
         with_post_rht_amax=False,
         row_scaled_nvfp4=row_scaled_nvfp4,
         use_4over6=use_4over6,
+        four_over_six_e4m3_use_256=four_over_six_e4m3_use_256,
         four_over_six_err_mode=four_over_six_err_mode,
     )
     w_quantizer = NVFP4Quantizer(
@@ -73,6 +77,7 @@ def check_nvfp4_gemm_versus_reference(
         with_rht=False,
         with_post_rht_amax=False,
         use_4over6=use_4over6,
+        four_over_six_e4m3_use_256=four_over_six_e4m3_use_256,
         four_over_six_err_mode=four_over_six_err_mode,
     )
 
@@ -130,6 +135,7 @@ def check_nvfp4_gemm_versus_reference(
         quant_tile_shape=(1, 16),
         row_scaled_nvfp4=row_scaled_nvfp4,
         use_4over6=use_4over6,
+        four_over_six_e4m3_use_256=four_over_six_e4m3_use_256,
         four_over_six_err_mode=four_over_six_err_mode,
     )
     w_ref_quantizer = NVFP4QuantizerRef(
@@ -140,6 +146,7 @@ def check_nvfp4_gemm_versus_reference(
         eps=0.0,
         quant_tile_shape=(1, 16),
         use_4over6=use_4over6,
+        four_over_six_e4m3_use_256=four_over_six_e4m3_use_256,
         four_over_six_err_mode=four_over_six_err_mode,
     )
 
@@ -442,6 +449,7 @@ def check_nvfp4_row_scaled_gemm_matches_emulated(
 )
 @pytest.mark.parametrize("row_scaled_nvfp4", [False, True], ids=["nvfp4", "nvfp4_row_scaled"])
 @pytest.mark.parametrize("use_4over6", [False, True], ids=["default", "4over6"])
+@pytest.mark.parametrize("four_over_six_e4m3_use_256", [False, True], ids=["e4m3_448", "e4m3_256"])
 @pytest.mark.parametrize("four_over_six_err_mode", ["MAE", "MSE"], ids=["mae_err", "mse_err"])
 def test_nvfp4_gemm_versus_reference(
     M: int,
@@ -455,6 +463,7 @@ def test_nvfp4_gemm_versus_reference(
     is_w_columnwise: bool,
     row_scaled_nvfp4: bool,
     use_4over6: bool,
+    four_over_six_e4m3_use_256: bool,
     four_over_six_err_mode: str,
 ):
     if row_scaled_nvfp4:
@@ -475,6 +484,7 @@ def test_nvfp4_gemm_versus_reference(
         w_columnwise=is_w_columnwise,
         row_scaled_nvfp4=row_scaled_nvfp4,
         use_4over6=use_4over6,
+        four_over_six_e4m3_use_256=four_over_six_e4m3_use_256,
         four_over_six_err_mode=four_over_six_err_mode,
     )
 

@@ -50,10 +50,12 @@ __device__ __forceinline__ void compute_4over6_decoding_scaling_factors(
     const float block_amax, const float S_enc, nvfp4_scale_t &S_dec_b_fp8_map4,
     nvfp4_scale_t &S_dec_b_fp8_map6) {
   constexpr float fp4_max = detail::TypeExtrema<fp4e2m1>::max;  // 6.0f
+  constexpr float fp8_max = detail::TypeExtrema<fp8e4m3>::max;  // 448.0f
   constexpr float scale_expansion_factor = 1.5f;
   const float base_sf_high_precision = block_amax / fp4_max * S_enc;
-  const float sf_high_precision_map4 = base_sf_high_precision * scale_expansion_factor;
-  const float sf_high_precision_map6 = base_sf_high_precision;
+  const float sf_high_precision_map4 =
+      fminf(base_sf_high_precision * scale_expansion_factor, fp8_max);
+  const float sf_high_precision_map6 = fminf(base_sf_high_precision, fp8_max);
   S_dec_b_fp8_map4 = static_cast<nvfp4_scale_t>(sf_high_precision_map4);
   S_dec_b_fp8_map6 = static_cast<nvfp4_scale_t>(sf_high_precision_map6);
 }
@@ -124,7 +126,7 @@ __device__ __forceinline__ float compute_4over6_error(const float diff) {
   }
 }
 
-template <NVTENVFP44Over6ErrMode ERR_MODE, bool USE_ERR_FAST_MATH>
+template <NVTENVFP44Over6ErrMode ERR_MODE, bool USE_ERR_USE_FAST_MATH, bool USE_E4M3_256>
 __device__ __forceinline__ uint32_t cvt_fp32_to_fp4_8x_with_error_rn(
     const float (&x)[8], const float block_scale_inverse, const nvfp4_scale_t S_dec_b_fp8,
     const float global_amax, float *err) {
@@ -170,10 +172,11 @@ __device__ __forceinline__ uint32_t cvt_fp32_to_fp4_8x_with_error_rn(
     const uint16_t out_dequant_4_lo = out_dequant_4 & 0xFFFF;
 
     constexpr float fp4_max = detail::TypeExtrema<fp4e2m1>::max;  // 6.0f
-    constexpr float fp8_4over6_max = 256.0f;
+    constexpr float fp8_4over6_max =
+        USE_E4M3_256 ? 256.0f : detail::TypeExtrema<fp8e4m3>::max;  // 448.0f
     constexpr float err_denom = fp4_max * fp8_4over6_max;
     const float sf = static_cast<float>(S_dec_b_fp8);
-    if constexpr (USE_ERR_FAST_MATH) {
+    if constexpr (USE_ERR_USE_FAST_MATH) {
       const float dequant[8] = {
           __half2float(__ushort_as_half(out_dequant_1_lo)),
           __half2float(__ushort_as_half(out_dequant_1_hi)),
@@ -243,7 +246,8 @@ __device__ __forceinline__ uint32_t cvt_fp32_to_fp4_8x_with_error_rn(
   return out;
 }
 
-template <NVTENVFP44Over6ErrMode ERR_MODE, bool USE_ERR_FAST_MATH, bool REVERSE_PACK_ORDER = false>
+template <NVTENVFP44Over6ErrMode ERR_MODE, bool USE_ERR_USE_FAST_MATH, bool USE_E4M3_256,
+          bool REVERSE_PACK_ORDER = false>
 __device__ __forceinline__ void quantize_4over6_16x(const float (&first_half)[8],
                                                     const float (&second_half)[8],
                                                     const QuantizationScales4Over6 &scaling_factors,
@@ -251,29 +255,29 @@ __device__ __forceinline__ void quantize_4over6_16x(const float (&first_half)[8]
                                                     float &err_map6, uint32_t (&rOut_map4)[2],
                                                     uint32_t (&rOut_map6)[2]) {
   if constexpr (REVERSE_PACK_ORDER) {
-    rOut_map4[1] = cvt_fp32_to_fp4_8x_with_error_rn<ERR_MODE, USE_ERR_FAST_MATH>(
+    rOut_map4[1] = cvt_fp32_to_fp4_8x_with_error_rn<ERR_MODE, USE_ERR_USE_FAST_MATH, USE_E4M3_256>(
         second_half, static_cast<float>(scaling_factors.SFcoefficient_map4),
         scaling_factors.S_dec_b_fp8_map4, global_amax, &err_map4);
-    rOut_map6[1] = cvt_fp32_to_fp4_8x_with_error_rn<ERR_MODE, USE_ERR_FAST_MATH>(
+    rOut_map6[1] = cvt_fp32_to_fp4_8x_with_error_rn<ERR_MODE, USE_ERR_USE_FAST_MATH, USE_E4M3_256>(
         second_half, static_cast<float>(scaling_factors.SFcoefficient_map6),
         scaling_factors.S_dec_b_fp8_map6, global_amax, &err_map6);
-    rOut_map4[0] = cvt_fp32_to_fp4_8x_with_error_rn<ERR_MODE, USE_ERR_FAST_MATH>(
+    rOut_map4[0] = cvt_fp32_to_fp4_8x_with_error_rn<ERR_MODE, USE_ERR_USE_FAST_MATH, USE_E4M3_256>(
         first_half, static_cast<float>(scaling_factors.SFcoefficient_map4),
         scaling_factors.S_dec_b_fp8_map4, global_amax, &err_map4);
-    rOut_map6[0] = cvt_fp32_to_fp4_8x_with_error_rn<ERR_MODE, USE_ERR_FAST_MATH>(
+    rOut_map6[0] = cvt_fp32_to_fp4_8x_with_error_rn<ERR_MODE, USE_ERR_USE_FAST_MATH, USE_E4M3_256>(
         first_half, static_cast<float>(scaling_factors.SFcoefficient_map6),
         scaling_factors.S_dec_b_fp8_map6, global_amax, &err_map6);
   } else {
-    rOut_map4[0] = cvt_fp32_to_fp4_8x_with_error_rn<ERR_MODE, USE_ERR_FAST_MATH>(
+    rOut_map4[0] = cvt_fp32_to_fp4_8x_with_error_rn<ERR_MODE, USE_ERR_USE_FAST_MATH, USE_E4M3_256>(
         first_half, static_cast<float>(scaling_factors.SFcoefficient_map4),
         scaling_factors.S_dec_b_fp8_map4, global_amax, &err_map4);
-    rOut_map6[0] = cvt_fp32_to_fp4_8x_with_error_rn<ERR_MODE, USE_ERR_FAST_MATH>(
+    rOut_map6[0] = cvt_fp32_to_fp4_8x_with_error_rn<ERR_MODE, USE_ERR_USE_FAST_MATH, USE_E4M3_256>(
         first_half, static_cast<float>(scaling_factors.SFcoefficient_map6),
         scaling_factors.S_dec_b_fp8_map6, global_amax, &err_map6);
-    rOut_map4[1] = cvt_fp32_to_fp4_8x_with_error_rn<ERR_MODE, USE_ERR_FAST_MATH>(
+    rOut_map4[1] = cvt_fp32_to_fp4_8x_with_error_rn<ERR_MODE, USE_ERR_USE_FAST_MATH, USE_E4M3_256>(
         second_half, static_cast<float>(scaling_factors.SFcoefficient_map4),
         scaling_factors.S_dec_b_fp8_map4, global_amax, &err_map4);
-    rOut_map6[1] = cvt_fp32_to_fp4_8x_with_error_rn<ERR_MODE, USE_ERR_FAST_MATH>(
+    rOut_map6[1] = cvt_fp32_to_fp4_8x_with_error_rn<ERR_MODE, USE_ERR_USE_FAST_MATH, USE_E4M3_256>(
         second_half, static_cast<float>(scaling_factors.SFcoefficient_map6),
         scaling_factors.S_dec_b_fp8_map6, global_amax, &err_map6);
   }
@@ -291,7 +295,8 @@ selected_4over6_scale(const bool pick_map4, const QuantizationScales4Over6 &scal
   return scaling_factors.S_dec_b_fp8_map6;
 }
 
-template <NVTENVFP44Over6ErrMode ERR_MODE, bool USE_ERR_FAST_MATH, bool REVERSE_PACK_ORDER = false>
+template <NVTENVFP44Over6ErrMode ERR_MODE, bool USE_ERR_USE_FAST_MATH, bool USE_E4M3_256,
+          bool REVERSE_PACK_ORDER = false>
 __device__ __forceinline__ void quantize_4over6_16x(const float (&first_half)[8],
                                                     const float (&second_half)[8],
                                                     const QuantizationScales4Over6 &scaling_factors,
@@ -303,7 +308,7 @@ __device__ __forceinline__ void quantize_4over6_16x(const float (&first_half)[8]
   __align__(8) uint32_t rOut_map4[2];
   __align__(8) uint32_t rOut_map6[2];
 
-  quantize_4over6_16x<ERR_MODE, USE_ERR_FAST_MATH, REVERSE_PACK_ORDER>(
+  quantize_4over6_16x<ERR_MODE, USE_ERR_USE_FAST_MATH, USE_E4M3_256, REVERSE_PACK_ORDER>(
       first_half, second_half, scaling_factors, global_amax, err_map4, err_map6, rOut_map4,
       rOut_map6);
 
@@ -403,7 +408,7 @@ __device__ __forceinline__ void load_4over6_vec_index_halves_16x(const vec_type 
   }
 }
 
-template <NVTENVFP44Over6ErrMode ERR_MODE, bool USE_ERR_FAST_MATH>
+template <NVTENVFP44Over6ErrMode ERR_MODE, bool USE_ERR_USE_FAST_MATH, bool USE_E4M3_256>
 __device__ __forceinline__ void quantize_4over6_candidates_16x(
     const float (&x)[16], const QuantizationScales4Over6 &scaling_factors, const float global_amax,
     QuantizationCandidates4Over6 &candidates) {
@@ -412,7 +417,7 @@ __device__ __forceinline__ void quantize_4over6_candidates_16x(
   load_4over6_contiguous_halves_16x(x, first_half, second_half);
 
   candidates.reset_errors();
-  quantize_4over6_16x<ERR_MODE, USE_ERR_FAST_MATH>(
+  quantize_4over6_16x<ERR_MODE, USE_ERR_USE_FAST_MATH, USE_E4M3_256>(
       first_half, second_half, scaling_factors, global_amax, candidates.err_map4,
       candidates.err_map6, candidates.rOut_map4, candidates.rOut_map6);
 }
@@ -450,8 +455,8 @@ __device__ __forceinline__ bool record_and_select_4over6_2d_block(
   return scratch.pick_map4_matrix[block_in_tile_y][block_in_tile_x] != 0;
 }
 
-template <NVTENVFP44Over6ErrMode ERR_MODE, bool USE_ERR_FAST_MATH, size_t BLOCK_DIM,
-          size_t BLOCKS_PER_TILE_Y, size_t BLOCKS_PER_TILE_X>
+template <NVTENVFP44Over6ErrMode ERR_MODE, bool USE_ERR_USE_FAST_MATH, bool USE_E4M3_256,
+          size_t BLOCK_DIM, size_t BLOCKS_PER_TILE_Y, size_t BLOCKS_PER_TILE_X>
 __device__ __forceinline__ bool quantize_and_select_4over6_2d_block_16x(
     const float (&x)[16], const float block_amax, const float global_encode_scale,
     const float global_decode_scale, const float global_amax, const size_t block_in_tile_y,
@@ -460,8 +465,8 @@ __device__ __forceinline__ bool quantize_and_select_4over6_2d_block_16x(
     nvfp4_scale_t &S_dec_b_fp8, QuantizationCandidates4Over6 &candidates) {
   const auto scaling_factors = compute_4over6_fp4_encode_quantization_scaling_factors(
       block_amax, global_encode_scale, global_decode_scale);
-  quantize_4over6_candidates_16x<ERR_MODE, USE_ERR_FAST_MATH>(x, scaling_factors, global_amax,
-                                                              candidates);
+  quantize_4over6_candidates_16x<ERR_MODE, USE_ERR_USE_FAST_MATH, USE_E4M3_256>(
+      x, scaling_factors, global_amax, candidates);
 
   const bool pick_map4 =
       record_and_select_4over6_2d_block<BLOCK_DIM, BLOCKS_PER_TILE_Y, BLOCKS_PER_TILE_X>(
@@ -524,8 +529,8 @@ __device__ __forceinline__ void store_selected_4over6_packed_16x(
   store_4over6_packed_16x(candidates.selected_packed(pick_map4), output_vec);
 }
 
-template <NVTENVFP44Over6ErrMode ERR_MODE, bool USE_ERR_FAST_MATH, bool REVERSE_PACK_ORDER = false,
-          typename input_type>
+template <NVTENVFP44Over6ErrMode ERR_MODE, bool USE_ERR_USE_FAST_MATH, bool USE_E4M3_256,
+          bool REVERSE_PACK_ORDER = false, typename input_type>
 __device__ __forceinline__ void quantize_4over6_contiguous_16x(
     const input_type *x, const QuantizationScales4Over6 &scaling_factors, const float global_amax,
     nvfp4_scale_t &S_dec_b_fp8, uint32_t (&rOut)[2]) {
@@ -533,12 +538,12 @@ __device__ __forceinline__ void quantize_4over6_contiguous_16x(
   float second_half[8];
   load_4over6_contiguous_halves_16x(x, first_half, second_half);
 
-  quantize_4over6_16x<ERR_MODE, USE_ERR_FAST_MATH, REVERSE_PACK_ORDER>(
+  quantize_4over6_16x<ERR_MODE, USE_ERR_USE_FAST_MATH, USE_E4M3_256, REVERSE_PACK_ORDER>(
       first_half, second_half, scaling_factors, global_amax, S_dec_b_fp8, rOut);
 }
 
-template <NVTENVFP44Over6ErrMode ERR_MODE, bool USE_ERR_FAST_MATH, bool REVERSE_PACK_ORDER = false,
-          typename pair_type>
+template <NVTENVFP44Over6ErrMode ERR_MODE, bool USE_ERR_USE_FAST_MATH, bool USE_E4M3_256,
+          bool REVERSE_PACK_ORDER = false, typename pair_type>
 __device__ __forceinline__ void quantize_4over6_pair_array_16x(
     const pair_type (&x)[2][4], const QuantizationScales4Over6 &scaling_factors,
     const float global_amax, nvfp4_scale_t &S_dec_b_fp8, uint32_t (&rOut)[2]) {
@@ -546,11 +551,12 @@ __device__ __forceinline__ void quantize_4over6_pair_array_16x(
   float second_half[8];
   load_4over6_pair_array_halves_16x(x, first_half, second_half);
 
-  quantize_4over6_16x<ERR_MODE, USE_ERR_FAST_MATH, REVERSE_PACK_ORDER>(
+  quantize_4over6_16x<ERR_MODE, USE_ERR_USE_FAST_MATH, USE_E4M3_256, REVERSE_PACK_ORDER>(
       first_half, second_half, scaling_factors, global_amax, S_dec_b_fp8, rOut);
 }
 
-template <NVTENVFP44Over6ErrMode ERR_MODE, bool USE_ERR_FAST_MATH, typename vec_type>
+template <NVTENVFP44Over6ErrMode ERR_MODE, bool USE_ERR_USE_FAST_MATH, bool USE_E4M3_256,
+          typename vec_type>
 __device__ __forceinline__ void quantize_4over6_vec2_array_candidates_16x(
     const vec_type (&x)[8], const QuantizationScales4Over6 &scaling_factors,
     const float global_amax, QuantizationCandidates4Over6 &candidates) {
@@ -559,13 +565,13 @@ __device__ __forceinline__ void quantize_4over6_vec2_array_candidates_16x(
   load_4over6_vec2_array_halves_16x(x, first_half, second_half);
 
   candidates.reset_errors();
-  quantize_4over6_16x<ERR_MODE, USE_ERR_FAST_MATH>(
+  quantize_4over6_16x<ERR_MODE, USE_ERR_USE_FAST_MATH, USE_E4M3_256>(
       first_half, second_half, scaling_factors, global_amax, candidates.err_map4,
       candidates.err_map6, candidates.rOut_map4, candidates.rOut_map6);
 }
 
-template <NVTENVFP44Over6ErrMode ERR_MODE, bool USE_ERR_FAST_MATH, bool REVERSE_PACK_ORDER = false,
-          typename vec_type>
+template <NVTENVFP44Over6ErrMode ERR_MODE, bool USE_ERR_USE_FAST_MATH, bool USE_E4M3_256,
+          bool REVERSE_PACK_ORDER = false, typename vec_type>
 __device__ __forceinline__ void quantize_4over6_vec2_array_16x(
     const vec_type (&x)[8], const QuantizationScales4Over6 &scaling_factors,
     const float global_amax, nvfp4_scale_t &S_dec_b_fp8, uint32_t (&rOut)[2]) {
@@ -573,11 +579,12 @@ __device__ __forceinline__ void quantize_4over6_vec2_array_16x(
   float second_half[8];
   load_4over6_vec2_array_halves_16x(x, first_half, second_half);
 
-  quantize_4over6_16x<ERR_MODE, USE_ERR_FAST_MATH, REVERSE_PACK_ORDER>(
+  quantize_4over6_16x<ERR_MODE, USE_ERR_USE_FAST_MATH, USE_E4M3_256, REVERSE_PACK_ORDER>(
       first_half, second_half, scaling_factors, global_amax, S_dec_b_fp8, rOut);
 }
 
-template <NVTENVFP44Over6ErrMode ERR_MODE, bool USE_ERR_FAST_MATH, typename vec_type>
+template <NVTENVFP44Over6ErrMode ERR_MODE, bool USE_ERR_USE_FAST_MATH, bool USE_E4M3_256,
+          typename vec_type>
 __device__ __forceinline__ void quantize_4over6_vec_index_candidates_16x(
     const vec_type (&x)[16], const int idx, const QuantizationScales4Over6 &scaling_factors,
     const float global_amax, QuantizationCandidates4Over6 &candidates) {
@@ -586,13 +593,13 @@ __device__ __forceinline__ void quantize_4over6_vec_index_candidates_16x(
   load_4over6_vec_index_halves_16x(x, idx, first_half, second_half);
 
   candidates.reset_errors();
-  quantize_4over6_16x<ERR_MODE, USE_ERR_FAST_MATH>(
+  quantize_4over6_16x<ERR_MODE, USE_ERR_USE_FAST_MATH, USE_E4M3_256>(
       first_half, second_half, scaling_factors, global_amax, candidates.err_map4,
       candidates.err_map6, candidates.rOut_map4, candidates.rOut_map6);
 }
 
-template <NVTENVFP44Over6ErrMode ERR_MODE, bool USE_ERR_FAST_MATH, bool REVERSE_PACK_ORDER = false,
-          typename vec_type>
+template <NVTENVFP44Over6ErrMode ERR_MODE, bool USE_ERR_USE_FAST_MATH, bool USE_E4M3_256,
+          bool REVERSE_PACK_ORDER = false, typename vec_type>
 __device__ __forceinline__ void quantize_4over6_vec_index_16x(
     const vec_type (&x)[16], const int idx, const QuantizationScales4Over6 &scaling_factors,
     const float global_amax, nvfp4_scale_t &S_dec_b_fp8, uint32_t (&rOut)[2]) {
@@ -600,7 +607,7 @@ __device__ __forceinline__ void quantize_4over6_vec_index_16x(
   float second_half[8];
   load_4over6_vec_index_halves_16x(x, idx, first_half, second_half);
 
-  quantize_4over6_16x<ERR_MODE, USE_ERR_FAST_MATH, REVERSE_PACK_ORDER>(
+  quantize_4over6_16x<ERR_MODE, USE_ERR_USE_FAST_MATH, USE_E4M3_256, REVERSE_PACK_ORDER>(
       first_half, second_half, scaling_factors, global_amax, S_dec_b_fp8, rOut);
 }
 

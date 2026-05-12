@@ -75,13 +75,14 @@ namespace core {
 #if FP4_TYPE_SUPPORTED
 using namespace ptx;
 
-// Compute the global encode scale factor for a given global amax
-// 4over6 uses 256 instead of 448 to leave room for the map-to-4 scale expansion
-template <bool USE_4OVER6 = false>
+// Compute the global encode scale factor for a given global amax.
+// NVFP4 uses 448 by default. Some 4over6 tensors use 256 to leave room for
+// map-to-4 scale expansion.
+template <bool USE_E4M3_256 = false>
 __device__ __forceinline__ float compute_global_encode_scaling_factor_FP4(const float global_amax) {
   using namespace detail;
-  constexpr float fp8_max = USE_4OVER6 ? 256.0f : TypeExtrema<fp8e4m3>::max;  // 448.0f;
-  constexpr float fp4_max = TypeExtrema<fp4e2m1>::max;                        // 6.0f;
+  constexpr float fp8_max = USE_E4M3_256 ? 256.0f : TypeExtrema<fp8e4m3>::max;  // 448.0f;
+  constexpr float fp4_max = TypeExtrema<fp4e2m1>::max;                          // 6.0f;
   float global_encode_scale = fp8_max * fp4_max / global_amax;
   // If scale is infinity, return max value of float32
   global_encode_scale = fminf(global_encode_scale, TypeExtrema<float>::max);

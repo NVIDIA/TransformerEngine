@@ -74,6 +74,7 @@ class GroupedTensorStorage:
         with_gemm_swizzled_scales: bool = False,
         row_scaled_nvfp4: bool = False,
         use_4over6: bool = False,
+        four_over_six_e4m3_use_256: bool = False,
     ) -> None:
         """
         Initialize a GroupedTensor.
@@ -151,6 +152,7 @@ class GroupedTensorStorage:
         instance._with_gemm_swizzled_scales = with_gemm_swizzled_scales
         instance.row_scaled_nvfp4 = row_scaled_nvfp4
         instance.use_4over6 = use_4over6
+        instance.four_over_six_e4m3_use_256 = use_4over6 and four_over_six_e4m3_use_256
 
     def __new__(
         cls,
@@ -178,6 +180,7 @@ class GroupedTensorStorage:
         with_gemm_swizzled_scales: bool = False,
         row_scaled_nvfp4: bool = False,
         use_4over6: bool = False,
+        four_over_six_e4m3_use_256: bool = False,
     ):
         instance = object.__new__(cls)
         cls._initialize_storage_fields(
@@ -205,6 +208,7 @@ class GroupedTensorStorage:
             with_gemm_swizzled_scales=with_gemm_swizzled_scales,
             row_scaled_nvfp4=row_scaled_nvfp4,
             use_4over6=use_4over6,
+            four_over_six_e4m3_use_256=four_over_six_e4m3_use_256,
         )
         return instance
 
@@ -329,6 +333,15 @@ class GroupedTensorStorage:
     def use_4over6(self, use_4over6: bool) -> None:
         self._use_4over6 = use_4over6
 
+    @property
+    def four_over_six_e4m3_use_256(self) -> bool:
+        """Whether grouped NVFP4 4over6 tensors use the 256 E4M3 scale bound."""
+        return self._four_over_six_e4m3_use_256
+
+    @four_over_six_e4m3_use_256.setter
+    def four_over_six_e4m3_use_256(self, four_over_six_e4m3_use_256: bool) -> None:
+        self._four_over_six_e4m3_use_256 = four_over_six_e4m3_use_256
+
     def prepare_for_saving(
         self,
     ) -> Tuple[list[Optional[torch.Tensor]], "GroupedTensorStorage"]:
@@ -399,6 +412,7 @@ class GroupedTensorStorage:
         self.fake_dtype = torch.float32
         self.row_scaled_nvfp4 = False
         self.use_4over6 = False
+        self.four_over_six_e4m3_use_256 = False
 
     def __repr__(self) -> str:
         """String representation of the GroupedTensorStorage."""
@@ -569,6 +583,7 @@ class GroupedTensorStorage:
             with_gemm_swizzled_scales=self._with_gemm_swizzled_scales,
             row_scaled_nvfp4=self.row_scaled_nvfp4,
             use_4over6=self.use_4over6,
+            four_over_six_e4m3_use_256=self.four_over_six_e4m3_use_256,
         )
 
     @staticmethod
@@ -681,6 +696,7 @@ class GroupedTensorStorage:
         columnwise_scale_inv_offsets = None
         row_scaled_nvfp4 = False
         use_4over6 = False
+        four_over_six_e4m3_use_256 = False
         if no_quantization:
             assert dtype is not None, "dtype must be provided for unquantized GroupedTensor"
             if rowwise_usage:
@@ -741,6 +757,7 @@ class GroupedTensorStorage:
         elif quantizer._get_compatible_recipe().nvfp4():
             row_scaled_nvfp4 = quantizer.row_scaled_nvfp4
             use_4over6 = quantizer.use_4over6
+            four_over_six_e4m3_use_256 = quantizer.four_over_six_e4m3_use_256
             if row_scaled_nvfp4:
                 if not rowwise_usage:
                     raise ValueError(
@@ -870,6 +887,7 @@ class GroupedTensorStorage:
             ),
             row_scaled_nvfp4=row_scaled_nvfp4,
             use_4over6=use_4over6,
+            four_over_six_e4m3_use_256=four_over_six_e4m3_use_256,
         )
         grouped_tensor.quantized_tensors = grouped_tensor.split_into_quantized_tensors()
         return grouped_tensor
@@ -985,6 +1003,7 @@ class GroupedTensorStorage:
         nvfp4_rowwise_amax_offsets = None
         row_scaled_nvfp4 = self.row_scaled_nvfp4
         use_4over6 = self.use_4over6
+        four_over_six_e4m3_use_256 = self.four_over_six_e4m3_use_256
         if recipe.nvfp4() and row_scaled_nvfp4:
             cum = 0
             nvfp4_rowwise_amax_offsets = [0]
@@ -1213,6 +1232,7 @@ class GroupedTensorStorage:
                     with_gemm_swizzled_scales=quantizer.optimize_for_gemm,
                     row_scaled_nvfp4=row_scaled_nvfp4,
                     use_4over6=use_4over6,
+                    four_over_six_e4m3_use_256=four_over_six_e4m3_use_256,
                 )
                 result.append(tensor)
 

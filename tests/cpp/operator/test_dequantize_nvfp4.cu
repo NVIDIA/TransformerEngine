@@ -47,8 +47,8 @@ void compute_ref_dequantize_nvfp4(const uint8_t *packed_data,
                                   size_t rows,
                                   size_t cols,
                                   size_t scale_stride,
-                                  bool use_4over6) {
-    const float factor_inv = 1.0f / (6.0f * (use_4over6 ? 256.0f : 448.0f));
+                                  bool use_e4m3_256) {
+    const float factor_inv = 1.0f / (6.0f * (use_e4m3_256 ? 256.0f : 448.0f));
     constexpr size_t BLOCK_SIZE = 16;
     const size_t Mread = cols / BLOCK_SIZE;
     const size_t bytes_per_block = BLOCK_SIZE / 2;
@@ -92,7 +92,8 @@ float compute_amax(test::Tensor &t, size_t rows, size_t cols) {
 template <typename OutputType>
 void performTest_dequantize_nvfp4(const size_t rows, const size_t cols,
                                   const bool row_scaled_nvfp4,
-                                  const bool use_4over6) {
+                                  const bool use_4over6,
+                                  const bool use_e4m3_256) {
     using namespace test;
     DType otype = TypeInfo<OutputType>::dtype;
 
@@ -108,7 +109,9 @@ void performTest_dequantize_nvfp4(const size_t rows, const size_t cols,
     // Configure quantized tensor amax
     size_t amax_size = 1;
     quantized.set_nvfp4_4over6(use_4over6);
+    quantized.set_nvfp4_4over6_e4m3_use_256(use_4over6 && use_e4m3_256);
     ASSERT_EQ(quantized.nvfp4_4over6(), use_4over6);
+    ASSERT_EQ(quantized.nvfp4_4over6_e4m3_use_256(), use_4over6 && use_e4m3_256);
     if (row_scaled_nvfp4) {
       quantized.set_row_scaled_nvfp4(true);
       amax_size = rows;
@@ -122,6 +125,7 @@ void performTest_dequantize_nvfp4(const size_t rows, const size_t cols,
     if (rows > 0 && cols > 0) {
         QuantizationConfigWrapper quant_config;
         quant_config.set_nvfp4_4over6(use_4over6);
+        quant_config.set_nvfp4_4over6_e4m3_use_256(use_4over6 && use_e4m3_256);
         nvte_quantize_v2(input.data(), quantized.data(), quant_config, 0);
         cudaDeviceSynchronize();
         auto err = cudaGetLastError();
@@ -152,7 +156,7 @@ void performTest_dequantize_nvfp4(const size_t rows, const size_t cols,
       std::make_unique<OutputType[]>(rows * cols);
     compute_ref_dequantize_nvfp4<OutputType>(
       fp4_data, scales, amax_vals, ref_output.get(),
-      rows, cols, scale_stride, use_4over6);
+      rows, cols, scale_stride, use_4over6 && use_e4m3_256);
 
     // Compare results from TE and reference impls
     auto [atol, rtol] = getTolerances(otype);
@@ -163,7 +167,8 @@ void performTest_dequantize_nvfp4(const size_t rows, const size_t cols,
 template <typename OutputType>
 void performTest_dequantize_nvfp4_swizzled(const size_t rows, const size_t cols,
                                            const bool row_scaled_nvfp4,
-                                           const bool use_4over6) {
+                                           const bool use_4over6,
+                                           const bool use_e4m3_256) {
     using namespace test;
     DType otype = TypeInfo<OutputType>::dtype;
 
@@ -173,7 +178,9 @@ void performTest_dequantize_nvfp4_swizzled(const size_t rows, const size_t cols,
     Tensor quantized_compact("quantized_compact", std::vector<size_t>{rows, cols},
                              DType::kFloat4E2M1, true, false, NVTE_NVFP4_1D_SCALING);
     quantized_compact.set_nvfp4_4over6(use_4over6);
+    quantized_compact.set_nvfp4_4over6_e4m3_use_256(use_4over6 && use_e4m3_256);
     ASSERT_EQ(quantized_compact.nvfp4_4over6(), use_4over6);
+    ASSERT_EQ(quantized_compact.nvfp4_4over6_e4m3_use_256(), use_4over6 && use_e4m3_256);
     if (row_scaled_nvfp4) {
         quantized_compact.set_row_scaled_nvfp4(true);
     } else if (rows > 0 && cols > 0) {
@@ -185,6 +192,7 @@ void performTest_dequantize_nvfp4_swizzled(const size_t rows, const size_t cols,
     if (rows > 0 && cols > 0) {
         QuantizationConfigWrapper quant_config;
         quant_config.set_nvfp4_4over6(use_4over6);
+        quant_config.set_nvfp4_4over6_e4m3_use_256(use_4over6 && use_e4m3_256);
         nvte_quantize_v2(input.data(), quantized_compact.data(), quant_config, 0);
         cudaDeviceSynchronize();
     }
@@ -198,7 +206,9 @@ void performTest_dequantize_nvfp4_swizzled(const size_t rows, const size_t cols,
     Tensor quantized_swizzled("quantized_swizzled", std::vector<size_t>{rows, cols},
                               DType::kFloat4E2M1, true, false, NVTE_NVFP4_1D_SCALING);
     quantized_swizzled.set_nvfp4_4over6(use_4over6);
+    quantized_swizzled.set_nvfp4_4over6_e4m3_use_256(use_4over6 && use_e4m3_256);
     ASSERT_EQ(quantized_swizzled.nvfp4_4over6(), use_4over6);
+    ASSERT_EQ(quantized_swizzled.nvfp4_4over6_e4m3_use_256(), use_4over6 && use_e4m3_256);
     if (row_scaled_nvfp4) {
         quantized_swizzled.set_row_scaled_nvfp4(true);
     } else {
@@ -274,6 +284,7 @@ class DequantizeNVFP4TestSuite : public ::testing::TestWithParam
     <std::tuple<std::pair<size_t, size_t>,
                 transformer_engine::DType,
                 bool,
+                bool,
                 bool>> {};
 
 TEST_P(DequantizeNVFP4TestSuite, TestDequantizeNVFP4)
@@ -286,10 +297,11 @@ TEST_P(DequantizeNVFP4TestSuite, TestDequantizeNVFP4)
     const DType output_type = std::get<1>(GetParam());
     const bool row_scaled_nvfp4 = std::get<2>(GetParam());
     const bool use_4over6 = std::get<3>(GetParam());
+    const bool use_e4m3_256 = use_4over6 && std::get<4>(GetParam());
 
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(output_type, OutputType,
         performTest_dequantize_nvfp4<OutputType>(
-            tensor_size.first, tensor_size.second, row_scaled_nvfp4, use_4over6);
+            tensor_size.first, tensor_size.second, row_scaled_nvfp4, use_4over6, use_e4m3_256);
     );
 }
 
@@ -300,6 +312,7 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::ValuesIn(nvfp4_tensor_dims),
         ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
         ::testing::Bool(),
+        ::testing::Bool(),
         ::testing::Bool()),
     [](const testing::TestParamInfo<DequantizeNVFP4TestSuite::ParamType>& info)
     {
@@ -307,7 +320,11 @@ INSTANTIATE_TEST_SUITE_P(
                            std::to_string(std::get<0>(info.param).second) + "X" +
                            test::typeName(std::get<1>(info.param)) + "X" +
                            (std::get<2>(info.param) ? "RowScaled" : "PerTensor") + "X" +
-                           (std::get<3>(info.param) ? "FourOverSix" : "Default");
+                           (std::get<3>(info.param) ? "FourOverSix" : "Default") + "X" +
+                           (std::get<3>(info.param)
+                                ? (std::get<4>(info.param) ? "E4M3Use256" : "E4M3Use448")
+                                : (std::get<4>(info.param) ? "E4M3Use256Ignored"
+                                                           : "E4M3Use448"));
         return name;
     }
 );
@@ -315,6 +332,7 @@ INSTANTIATE_TEST_SUITE_P(
 class DequantizeNVFP4SwizzledTestSuite : public ::testing::TestWithParam
     <std::tuple<std::pair<size_t, size_t>,
                 transformer_engine::DType,
+                bool,
                 bool,
                 bool>> {};
 
@@ -328,10 +346,11 @@ TEST_P(DequantizeNVFP4SwizzledTestSuite, TestDequantizeNVFP4Swizzled)
     const DType output_type = std::get<1>(GetParam());
     const bool row_scaled_nvfp4 = std::get<2>(GetParam());
     const bool use_4over6 = std::get<3>(GetParam());
+    const bool use_e4m3_256 = use_4over6 && std::get<4>(GetParam());
 
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(output_type, OutputType,
         performTest_dequantize_nvfp4_swizzled<OutputType>(
-            tensor_size.first, tensor_size.second, row_scaled_nvfp4, use_4over6);
+            tensor_size.first, tensor_size.second, row_scaled_nvfp4, use_4over6, use_e4m3_256);
     );
 }
 
@@ -342,6 +361,7 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::ValuesIn(nvfp4_tensor_dims),
         ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
         ::testing::Bool(),
+        ::testing::Bool(),
         ::testing::Bool()),
     [](const testing::TestParamInfo<DequantizeNVFP4SwizzledTestSuite::ParamType>& info)
     {
@@ -350,6 +370,10 @@ INSTANTIATE_TEST_SUITE_P(
                            test::typeName(std::get<1>(info.param)) + "X" +
                            (std::get<2>(info.param) ? "RowScaled" : "PerTensor") + "X" +
                            (std::get<3>(info.param) ? "FourOverSix" : "Default") + "X" +
+                           (std::get<3>(info.param)
+                                ? (std::get<4>(info.param) ? "E4M3Use256" : "E4M3Use448")
+                                : (std::get<4>(info.param) ? "E4M3Use256Ignored"
+                                                           : "E4M3Use448")) + "X" +
                            "Swizzled";
         return name;
     }

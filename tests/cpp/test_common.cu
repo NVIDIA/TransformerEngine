@@ -446,10 +446,22 @@ void Tensor::set_nvfp4_4over6(bool nvfp4_4over6) {
   tensor_.set_nvfp4_4over6(nvfp4_4over6);
 }
 
+void Tensor::set_nvfp4_4over6_e4m3_use_256(bool nvfp4_4over6_e4m3_use_256) {
+  NVTE_CHECK(tensor_.scaling_mode() == NVTE_NVFP4_1D_SCALING,
+             "NVFP4 4over6 E4M3 256 scale bound is only supported for NVFP4 tensors.");
+  tensor_.set_nvfp4_4over6_e4m3_use_256(nvfp4_4over6_e4m3_use_256);
+}
+
 bool Tensor::nvfp4_4over6() const {
   NVTE_CHECK(tensor_.scaling_mode() == NVTE_NVFP4_1D_SCALING,
              "NVFP4 4over6 is only supported for NVFP4 tensors.");
   return tensor_.get_nvfp4_4over6();
+}
+
+bool Tensor::nvfp4_4over6_e4m3_use_256() const {
+  NVTE_CHECK(tensor_.scaling_mode() == NVTE_NVFP4_1D_SCALING,
+             "NVFP4 4over6 E4M3 256 scale bound is only supported for NVFP4 tensors.");
+  return tensor_.get_nvfp4_4over6_e4m3_use_256();
 }
 
 void Tensor::to_cpu() {

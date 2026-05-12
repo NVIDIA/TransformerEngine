@@ -924,8 +924,8 @@ void nvte_nvfp4_compute_per_tensor_scale(const NVTETensor inpA, const bool use_r
   void *amax_A_ptr = use_rowwise_amax_A ? tA->amax.dptr : tA->columnwise_amax.dptr;
   void *amax_B_ptr = use_rowwise_amax_B ? tB->amax.dptr : tB->columnwise_amax.dptr;
   void *alpha_ptr = tOut->data.dptr;
-  const float fp8_max_A = tA->nvfp4_4over6 ? 256.0f : 448.0f;
-  const float fp8_max_B = tB->nvfp4_4over6 ? 256.0f : 448.0f;
+  const float fp8_max_A = tA->nvfp4_4over6_e4m3_use_256 ? 256.0f : 448.0f;
+  const float fp8_max_B = tB->nvfp4_4over6_e4m3_use_256 ? 256.0f : 448.0f;
 
   // check for not null pointers
   NVTE_CHECK(amax_A_ptr != nullptr, "amax_A_ptr is null");

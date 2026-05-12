@@ -520,13 +520,21 @@ class TestFP8Recipe:
     [None, "weights", "activations", "all"],
     ids=["default", "weights", "activations", "all"],
 )
+@pytest.mark.parametrize(
+    "nvfp4_4over6_e4m3_use_256",
+    [None, "weights", "activations", "all"],
+    ids=["e4m3_448", "e4m3_256_weights", "e4m3_256_activations", "e4m3_256_all"],
+)
 @pytest.mark.parametrize("nvfp4_4over6_err_mode", ["MAE", "MSE"], ids=["mae_err", "mse_err"])
-def test_nvfp4_row_scaled_quantizer_roles(nvfp4_4over6, nvfp4_4over6_err_mode):
+def test_nvfp4_row_scaled_quantizer_roles(
+    nvfp4_4over6, nvfp4_4over6_e4m3_use_256, nvfp4_4over6_err_mode
+):
     recipe = NVFP4BlockScaling(
         disable_rht=True,
         disable_stochastic_rounding=True,
         disable_2d_quantization=True,
         nvfp4_4over6=nvfp4_4over6,
+        nvfp4_4over6_e4m3_use_256=nvfp4_4over6_e4m3_use_256,
         nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
         row_scaled_activation=True,
     )
@@ -540,6 +548,17 @@ def test_nvfp4_row_scaled_quantizer_roles(nvfp4_4over6, nvfp4_4over6_err_mode):
             return tensor_type != "weight"
         return False
 
+    def expected_e4m3_use_256(tensor_type):
+        if not expected_use_4over6(tensor_type):
+            return False
+        if nvfp4_4over6_e4m3_use_256 == "all":
+            return True
+        if nvfp4_4over6_e4m3_use_256 == "weights":
+            return tensor_type == "weight"
+        if nvfp4_4over6_e4m3_use_256 == "activations":
+            return tensor_type != "weight"
+        return False
+
     forward_quantizers = NVFP4BlockScalingRecipeState(
         recipe,
         mode="forward",
@@ -548,6 +567,9 @@ def test_nvfp4_row_scaled_quantizer_roles(nvfp4_4over6, nvfp4_4over6_err_mode):
     assert [q.row_scaled_nvfp4 for q in forward_quantizers] == [True, False, True]
     assert [q.use_4over6 for q in forward_quantizers] == [
         expected_use_4over6(tensor_type) for tensor_type in ("input", "weight", "output")
+    ]
+    assert [q.four_over_six_e4m3_use_256 for q in forward_quantizers] == [
+        expected_e4m3_use_256(tensor_type) for tensor_type in ("input", "weight", "output")
     ]
     assert [q.four_over_six_err_mode for q in forward_quantizers] == [nvfp4_4over6_err_mode] * 3
     assert not forward_quantizers[0].is_quantizable(torch.empty(16, 16))
@@ -568,6 +590,9 @@ def test_nvfp4_row_scaled_quantizer_roles(nvfp4_4over6, nvfp4_4over6_err_mode):
     assert [q.use_4over6 for q in role_quantizers] == [
         expected_use_4over6(tensor_type) for tensor_type in ("weight", "input", "output", "input")
     ]
+    assert [q.four_over_six_e4m3_use_256 for q in role_quantizers] == [
+        expected_e4m3_use_256(tensor_type) for tensor_type in ("weight", "input", "output", "input")
+    ]
     assert [q.four_over_six_err_mode for q in role_quantizers] == [nvfp4_4over6_err_mode] * 4
 
     backward_quantizers = NVFP4BlockScalingRecipeState(
@@ -582,6 +607,9 @@ def test_nvfp4_row_scaled_quantizer_roles(nvfp4_4over6, nvfp4_4over6_err_mode):
     assert [q.row_scaled_nvfp4 for q in backward_quantizers] == [False, False]
     assert [q.use_4over6 for q in backward_quantizers] == [
         expected_use_4over6(tensor_type) for tensor_type in ("grad_output", "grad_input")
+    ]
+    assert [q.four_over_six_e4m3_use_256 for q in backward_quantizers] == [
+        expected_e4m3_use_256(tensor_type) for tensor_type in ("grad_output", "grad_input")
     ]
     assert [q.four_over_six_err_mode for q in backward_quantizers] == [nvfp4_4over6_err_mode] * 2
 

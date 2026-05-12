@@ -222,6 +222,7 @@ class NVFP4TensorRef(QuantizedTensorStorage):
     global_amax_row: Optional[torch.Tensor] = None
     global_amax_col: Optional[torch.Tensor] = None
     use_4over6: bool = False
+    four_over_six_e4m3_use_256: bool = False
 
     dtype: Optional[torch.dtype] = None
     device: Optional[torch.device] = None
@@ -352,6 +353,7 @@ class NVFP4QuantizerRef(Quantizer):
         quant_tile_shape: Tuple[int, int] = (1, 16),
         row_scaled_nvfp4: bool = False,
         use_4over6: bool = False,
+        four_over_six_e4m3_use_256: bool = False,
         four_over_six_err_mode: str = "MAE",
         with_rht: bool = False,
         with_random_sign_mask: bool = True,
@@ -382,6 +384,7 @@ class NVFP4QuantizerRef(Quantizer):
         self.quant_tile_shape = quant_tile_shape
         self.row_scaled_nvfp4 = row_scaled_nvfp4
         self.use_4over6 = use_4over6
+        self.four_over_six_e4m3_use_256 = use_4over6 and four_over_six_e4m3_use_256
         self.four_over_six_err_mode = four_over_six_err_mode
         self.with_rht = with_rht
         self.with_random_sign_mask = with_random_sign_mask
@@ -471,18 +474,23 @@ class NVFP4QuantizerRef(Quantizer):
         row_scaled_nvfp4: bool,
         tile_len_y: int,
         four_over_six_err_mode: str,
+        four_over_six_e4m3_use_256: bool,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Quantize NVFP4 with 4over6 candidate selection.
 
         This mirrors the CUDA path: map-to-4 uses a 1.5x expanded E4M3 block scale,
         the configured error is computed in the original input domain with the
-        6 * 256 denominator, and ties choose map-to-6.
+        selected global E4M3 denominator, and ties choose map-to-6.
         """
         m, num_blocks, tile_len_x = x.shape
         n = num_blocks * tile_len_x
         FLOAT4_E2M1_MAX = torch.tensor(6.0, device=x.device, dtype=torch.float32)
         FLOAT8_E4M3_MAX = torch.tensor(448.0, device=x.device, dtype=torch.float32)
-        GLOBAL_SCALE_E4M3_MAX = torch.tensor(256.0, device=x.device, dtype=torch.float32)
+        GLOBAL_SCALE_E4M3_MAX = torch.tensor(
+            256.0 if four_over_six_e4m3_use_256 else 448.0,
+            device=x.device,
+            dtype=torch.float32,
+        )
 
         decode_scale_base = torch.div(vec_max, FLOAT4_E2M1_MAX) * global_encode_scale
         decode_scale_map4 = decode_scale_base * 1.5
@@ -576,6 +584,7 @@ class NVFP4QuantizerRef(Quantizer):
         pow_2_scales: bool,
         row_scaled_nvfp4: bool = False,
         use_4over6: bool = False,
+        four_over_six_e4m3_use_256: bool = False,
         four_over_six_err_mode: str = "MAE",
         eps: float,  # pylint: disable=unused-argument
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -609,8 +618,9 @@ class NVFP4QuantizerRef(Quantizer):
         x = x.view(m, n // tile_len_x, tile_len_x)
         FLOAT4_E2M1_MAX = torch.tensor(6.0, device=x.device, dtype=torch.float32)
         FLOAT8_E4M3_MAX = torch.tensor(448.0, device=x.device, dtype=torch.float32)
+        global_scale_e4m3_max = 256.0 if (use_4over6 and four_over_six_e4m3_use_256) else 448.0
         GLOBAL_SCALE_E4M3_MAX = torch.tensor(
-            256.0 if use_4over6 else 448.0, device=x.device, dtype=torch.float32
+            global_scale_e4m3_max, device=x.device, dtype=torch.float32
         )
         decode_scale = torch.div(vec_max, FLOAT4_E2M1_MAX)
 
@@ -656,6 +666,7 @@ class NVFP4QuantizerRef(Quantizer):
                     row_scaled_nvfp4,
                     tile_len_y,
                     four_over_six_err_mode,
+                    four_over_six_e4m3_use_256,
                 )
 
             global_encode_scale_multiplier = global_encode_scale * torch.reciprocal(FLOAT4_E2M1_MAX)
@@ -819,6 +830,7 @@ class NVFP4QuantizerRef(Quantizer):
                 pow_2_scales=self.pow_2_scales,
                 row_scaled_nvfp4=self.row_scaled_nvfp4,
                 use_4over6=self.use_4over6,
+                four_over_six_e4m3_use_256=self.four_over_six_e4m3_use_256,
                 four_over_six_err_mode=self.four_over_six_err_mode,
                 eps=self.eps,
             )
@@ -844,6 +856,7 @@ class NVFP4QuantizerRef(Quantizer):
                 self.quant_tile_shape[0],
                 pow_2_scales=self.pow_2_scales,
                 use_4over6=self.use_4over6,
+                four_over_six_e4m3_use_256=self.four_over_six_e4m3_use_256,
                 four_over_six_err_mode=self.four_over_six_err_mode,
                 eps=self.eps,
             )
@@ -885,6 +898,7 @@ class NVFP4QuantizerRef(Quantizer):
             global_amax_row=global_amax_row,
             global_amax_col=global_amax_col,
             use_4over6=self.use_4over6,
+            four_over_six_e4m3_use_256=self.four_over_six_e4m3_use_256,
             dtype=tensor.dtype,
             device=tensor.device,
             quant_dtype=self.dtype,
@@ -933,6 +947,7 @@ class NVFP4QuantizerRef(Quantizer):
         dst.global_amax_row = global_amax_row
         dst.global_amax_col = global_amax_col
         dst.use_4over6 = self.use_4over6
+        dst.four_over_six_e4m3_use_256 = self.four_over_six_e4m3_use_256
         dst.dtype = src.dtype
         dst.quant_dtype = self.dtype
         dst.original_shape = original_shape
@@ -1044,11 +1059,21 @@ class NVFP4QuantizerRef(Quantizer):
             qresult_w_use_4over6 = getattr(
                 qresult_w, "use_4over6", getattr(qresult_w, "_use_4over6", self.use_4over6)
             )
-            if qresult_x_use_4over6:
+            qresult_x_use_256 = getattr(
+                qresult_x,
+                "four_over_six_e4m3_use_256",
+                getattr(qresult_x, "_four_over_six_e4m3_use_256", self.four_over_six_e4m3_use_256),
+            )
+            qresult_w_use_256 = getattr(
+                qresult_w,
+                "four_over_six_e4m3_use_256",
+                getattr(qresult_w, "_four_over_six_e4m3_use_256", self.four_over_six_e4m3_use_256),
+            )
+            if qresult_x_use_4over6 and qresult_x_use_256:
                 fp8_max_x = 256.0
             else:
                 fp8_max_x = 448.0
-            if qresult_w_use_4over6:
+            if qresult_w_use_4over6 and qresult_w_use_256:
                 fp8_max_w = 256.0
             else:
                 fp8_max_w = 448.0

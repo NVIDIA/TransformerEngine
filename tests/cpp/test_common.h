@@ -294,12 +294,14 @@ class Tensor {
   }
 
   bool nvfp4_4over6() const;
+  bool nvfp4_4over6_e4m3_use_256() const;
 
   void set_tensor_amax_nullptr();
 
   void set_with_gemm_swizzled_scales(bool with_gemm_swizzled_scales);
   void set_row_scaled_nvfp4(bool row_scaled_nvfp4);
   void set_nvfp4_4over6(bool nvfp4_4over6);
+  void set_nvfp4_4over6_e4m3_use_256(bool nvfp4_4over6_e4m3_use_256);
 
   void to_cpu();
   void from_cpu();
