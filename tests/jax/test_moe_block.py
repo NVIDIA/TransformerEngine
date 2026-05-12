@@ -2,10 +2,10 @@
 #
 # See LICENSE for license information.
 
-"""Basic tests for ``transformer_engine.jax.flax.MoEBlock``.
+"""Basic tests for ``transformer_engine.jax.flax._MoEBlock``.
 
-These tests exercise the MoEBlock on a single device (no expert parallelism)
-and verify:
+These tests exercise the (experimental) ``_MoEBlock`` on a single device
+(no expert parallelism) and verify:
 
 * Forward pass runs end-to-end and produces the expected output shape.
 * Backward pass yields finite, non-trivial parameter gradients.
@@ -26,20 +26,23 @@ import jax.numpy as jnp
 import pytest
 
 
-# The MoEBlock pulls in both the fused-router CUDA kernel and the Triton
-# permutation kernels, so it can only run in the environment where those are
-# available. We gate the test on the ``triton`` marker (the Triton permutation
-# backend is stricter than the CUDA router). See ``conftest.py``.
+# The ``_MoEBlock`` class pulls in both the fused-router CUDA kernel and
+# the Triton permutation kernels, so it can only run in the environment
+# where those are available. We gate the test on the ``triton`` marker (the
+# Triton permutation backend is stricter than the CUDA router). See
+# ``conftest.py``.
 
 
 @pytest.fixture(autouse=True, scope="function")
 def _inject_moe(request):
-    """Lazy-load ``MoEBlock`` only for tests marked ``triton``."""
+    """Lazy-load ``_MoEBlock`` only for tests marked ``triton``."""
     if not request.node.get_closest_marker("triton"):
         yield
         return
 
-    from transformer_engine.jax.flax import MoEBlock
+    # The class is intentionally exposed as ``_MoEBlock`` (experimental);
+    # aliasing to ``MoEBlock`` here keeps the test bodies readable.
+    from transformer_engine.jax.flax import _MoEBlock as MoEBlock
     from transformer_engine.jax.flax.moe import PermutationBackend
 
     mod = sys.modules[__name__]
@@ -91,7 +94,7 @@ def _unwrap_partitioned(x):
 
 @pytest.mark.triton
 class TestMoEBlockSingleDevice:
-    """Single-device smoke tests for :class:`MoEBlock`."""
+    """Single-device smoke tests for :class:`_MoEBlock`."""
 
     @pytest.mark.parametrize("permutation_backend", ["pure_jax", "triton"])
     def test_forward_shape_and_finite(self, permutation_backend):
