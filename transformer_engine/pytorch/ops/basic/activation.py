@@ -6,7 +6,8 @@
 
 from __future__ import annotations
 import abc
-from typing import Optional
+from collections.abc import Iterable
+from typing import Any, Optional
 
 import torch
 
@@ -26,6 +27,7 @@ __all__ = [
     "ReLU",
     "ReGLU",
     "SReLU",
+    "ScaledSReLU",
     "SReGLU",
     "SiLU",
 ]
@@ -343,6 +345,100 @@ class SReLU(_ActivationOperation):
 
     def _activation_backward_impl(self, *args, **kwargs) -> torch.Tensor:
         return tex.dsrelu(*args, **kwargs)
+
+
+class ScaledSReLU(BasicOperation):
+    r"""Squared ReLU with per-row post-scaling.
+
+    If the SReLU output has shape ``(d_1, ..., d_n)``, it is multiplied
+    with an extra input tensor of shape ``(d_1, ..., d_{n-1})``.
+    """
+
+    num_extra_inputs: int = 1
+
+    def op_forward(self, *args, **kwargs) -> None:
+        raise RuntimeError(
+            f"{self.__class__.__name__} operation has "
+            f"{self.num_extra_inputs} extra tensor inputs "
+            f"and {self.num_extra_outputs} extra tensor outputs. "
+            "It overrides `fuser_forward` instead of `op_forward`."
+        )
+
+    def op_backward(self, *args, **kwargs) -> None:
+        raise RuntimeError(
+            f"{self.__class__.__name__} operation has "
+            f"{self.num_extra_inputs} extra tensor inputs "
+            f"and {self.num_extra_outputs} extra tensor outputs. "
+            "It overrides `fuser_backward` instead of `op_backward`."
+        )
+
+    def fuser_forward(
+        self,
+        basic_op_ctxs: list[OperationContext],
+        input_: torch.Tensor,
+        *,
+        basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
+        prev_op_grad_output_quantizer: Optional[Quantizer],
+        next_op_input_quantizer: Optional[Quantizer],  # pylint: disable=unused-argument
+        basic_op_kwargs: list[dict[str, Any]],  # pylint: disable=unused-argument
+    ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
+        extra_input = basic_op_extra_inputs[0][0]
+
+        if torch.is_autocast_enabled():
+            dtype = torch.get_autocast_dtype("cuda")
+        elif isinstance(input_, torch.Tensor):
+            dtype = input_.dtype
+        else:
+            dtype = extra_input.dtype
+
+        x = maybe_dequantize(input_.contiguous(), dtype)
+        scales = maybe_dequantize(extra_input, dtype)
+        y = tex.srelu(x, None) * scales.unsqueeze(-1)
+
+        ctx = basic_op_ctxs[0]
+        if ctx.requires_grad:
+            if is_cpu_offload_enabled():
+                mark_activation_offload(x)
+            ctx.input_requires_grad = True
+            ctx.extra_input_requires_grad = extra_input.requires_grad
+            ctx.dtype = dtype
+            ctx.prev_op_grad_output_quantizer = prev_op_grad_output_quantizer
+            ctx.save_for_backward(x, scales)
+
+        return y, [()]
+
+    def fuser_backward(
+        self,
+        basic_op_ctxs: list[OperationContext],
+        grad_output: torch.Tensor,
+        *,
+        basic_op_grad_extra_outputs: list[tuple[torch.Tensor, ...]],
+    ) -> tuple[
+        torch.Tensor,
+        Iterable[Iterable[Optional[torch.Tensor]]],
+        Iterable[Iterable[Optional[torch.Tensor]]],
+    ]:
+        del basic_op_grad_extra_outputs
+
+        ctx = basic_op_ctxs[0]
+        x, scales = ctx.saved_tensors
+        x = maybe_dequantize(x.contiguous(), ctx.dtype)
+        scales = maybe_dequantize(scales, ctx.dtype)
+        grad_output = maybe_dequantize(grad_output.contiguous(), ctx.dtype)
+
+        grad_input = None
+        if ctx.input_requires_grad:
+            grad_srelu_out = grad_output * scales.unsqueeze(-1)
+            grad_input = tex.dsrelu(grad_srelu_out, x, ctx.prev_op_grad_output_quantizer)
+
+        grad_extra_input = None
+        if ctx.extra_input_requires_grad:
+            srelu_out = tex.srelu(x, None)
+            grad_extra_input = torch.linalg.vecdot(srelu_out, grad_output)
+
+        clear_tensor_data(ctx.saved_tensors[0])
+
+        return grad_input, [()], [(grad_extra_input,)]
 
 
 class SReGLU(_ActivationOperation):

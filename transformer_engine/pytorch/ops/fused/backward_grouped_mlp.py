@@ -18,7 +18,7 @@ from ...tensor.grouped_tensor import GroupedTensor
 from ...tensor.mxfp8_tensor import MXFP8Quantizer
 from ...utils import clear_tensor_data, get_cached_ones_tensor, get_device_compute_capability
 from ...constants import MXFP8_BLOCK_SCALING_SIZE
-from ..basic import GroupedLinear, ScaledClampedQGeGLU, ScaledSwiGLU
+from ..basic import GroupedLinear, ScaledSReLU, ScaledClampedQGeGLU, ScaledSwiGLU
 from ..fuser import register_backward_fusion
 from ..op import FusedOperation, FusibleOperation, OperationContext
 from .._common import (
@@ -306,19 +306,32 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
         self,
         *,
         fc1: GroupedLinear,
-        swiglu: ScaledSwiGLU | ScaledClampedQGeGLU,
+        swiglu: Optional[ScaledSwiGLU | ScaledClampedQGeGLU] = None,
+        srelu: Optional[ScaledSReLU] = None,
         fc2: GroupedLinear,
     ) -> None:
-        super().__init__((fc1, swiglu, fc2))
+        if swiglu is not None and srelu is not None:
+            raise TypeError(
+                "Expected exactly one activation op, but both swiglu and srelu were provided."
+            )
+        activation = swiglu if swiglu is not None else srelu
+        if activation is None:
+            raise TypeError("Expected a grouped MLP activation op.")
+        super().__init__((fc1, activation, fc2))
         if not self.is_supported():
             self.grouped_gemm_dglu_kernel()  # Try triggering import error
             raise RuntimeError(f"{self.__class__.__name__} is not supported on this system.")
-        validate_grouped_mlp_dims(fc1, swiglu, fc2)
-        # The cuDNN dgeglu implementation corresponds to ScaledClampedQGeGLU.
-        # The act_func string should be fixed on the cuDNN FE side.
-        self._cudnn_dact_func: str = (
-            "dgeglu" if isinstance(swiglu, ScaledClampedQGeGLU) else "dswiglu"
-        )
+        validate_grouped_mlp_dims(fc1, activation, fc2)
+        if isinstance(activation, ScaledSReLU):
+            # grouped_gemm_dsrelu_wrapper_sm100 is dSReLU-specific and does not
+            # take the GLU ``act_func`` selector.
+            self._cudnn_dact_func: Optional[str] = None
+        else:
+            # The cuDNN dgeglu implementation corresponds to ScaledClampedQGeGLU.
+            # The act_func string should be fixed on the cuDNN FE side.
+            self._cudnn_dact_func = (
+                "dgeglu" if isinstance(activation, ScaledClampedQGeGLU) else "dswiglu"
+            )
 
     def fuser_backward(
         self,
@@ -333,7 +346,7 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
 
         # Get basic operations
         fc1_op, _, fc2_op = self.basic_ops
-        fc1_ctx, swiglu_ctx, fc2_ctx = basic_op_ctxs
+        fc1_ctx, activation_ctx, fc2_ctx = basic_op_ctxs
 
         # Tensor properties
         fc1_weight_shape = (fc1_op.out_features, fc1_op.in_features)
@@ -358,8 +371,8 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
                 saved_tensors[num_groups:],
             )
 
-        # Saved tensors from scaled SwiGLU forward
-        swiglu_in, scales = swiglu_ctx.saved_tensors
+        # Saved tensors from activation forward
+        swiglu_in, scales = activation_ctx.saved_tensors
 
         # Saved tensors from FC2 forward.
         # Layout: [split_sizes, base_split_offsets, split_points,
@@ -459,7 +472,6 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
             "sfa_tensor": fc2_dy_scales,
             "padded_offsets": split_points,
             "alpha_tensor": alpha_tensor,
-            "beta_tensor": alpha_tensor,
             "prob_tensor": scales_tensor,
             "dprob_tensor": dscales_tensor,
             "generate_dbias": fc1_op.has_bias,
@@ -469,9 +481,11 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
             "sf_vec_size": MXFP8_BLOCK_SCALING_SIZE,
             "current_stream": current_stream,
             "discrete_col_sfd": True,
-            "act_func": self._cudnn_dact_func,
             "use_dynamic_sched": True,
         }
+        if self._cudnn_dact_func is not None:
+            fc2_dglu_kwargs["beta_tensor"] = alpha_tensor
+            fc2_dglu_kwargs["act_func"] = self._cudnn_dact_func
 
         if fc2_op.single_grouped_weight:
             # Clone and swizzle scales for GEMM
@@ -547,7 +561,8 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
             else:
                 fc2_bias_grads = [fc2_dbias_packed[idx] for idx in range(num_groups)]
 
-        grad_scales = grad_scales.to(dtype=dtype)
+        if grad_scales is not None:
+            grad_scales = grad_scales.to(dtype=dtype)
 
         fc1_bias_grads: Optional[list[Optional[torch.Tensor]]] = None
         fc1_bias_grad_packed: Optional[torch.Tensor] = None
@@ -703,11 +718,24 @@ class BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8(FusedOperation):
             )
 
         fc2_grad_extra = (None, None) if fc2_op._scale_bias else (None,)
+        activation_grad_extra = (grad_scales,) if grad_scales is not None else ()
         return (
             grad_input,
             [fc1_grad_params, (), fc2_grad_params],
-            [(None,), (grad_scales,), fc2_grad_extra],
+            [(None,), activation_grad_extra, fc2_grad_extra],
         )
+
+
+class BackwardGroupedMLP_CuTeGEMMDSReLU_MXFP8(BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8):
+    """Fused backward op for GroupedLinear + ScaledSReLU + GroupedLinear."""
+
+    @classmethod
+    @functools.lru_cache(maxsize=None)
+    def grouped_gemm_dglu_kernel(cls) -> Callable:
+        """Fused kernel for grouped GEMM and dSReLU activation backward."""
+        from cudnn import grouped_gemm_dsrelu_wrapper_sm100  # pylint: disable=no-name-in-module
+
+        return grouped_gemm_dsrelu_wrapper_sm100
 
 
 def fuse_backward_ops(
@@ -739,6 +767,25 @@ def fuse_backward_ops(
     )
 
 
+def fuse_backward_srelu_ops(
+    ops: list[FusibleOperation],
+    *,
+    recipe: Optional[Recipe] = None,
+    **unused,  # pylint: disable=unused-argument
+) -> list[FusibleOperation]:
+    """Apply GroupedLinear + ScaledSReLU + GroupedLinear fusion for backward pass."""
+
+    return fuse_grouped_mlp_ops(
+        ops,
+        recipe=recipe,
+        fused_op_cls=BackwardGroupedMLP_CuTeGEMMDSReLU_MXFP8,
+        activation_op_types=(ScaledSReLU,),
+        activation_kwarg="srelu",
+    )
+
+
 # Register fusion if available
 if BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8.is_supported():
     register_backward_fusion(fuse_backward_ops, prepend=True)
+if BackwardGroupedMLP_CuTeGEMMDSReLU_MXFP8.is_supported():
+    register_backward_fusion(fuse_backward_srelu_ops, prepend=True)
