@@ -337,6 +337,47 @@ def test_fused_attn_score_mod_config_splits_tensors_and_pass_by_value_scalars():
     assert len(config.score_mod_scalars[0].value) == np.dtype(np.float32).itemsize
 
 
+def test_fused_attn_score_mod_config_stabilizes_bound_method_cache_keys():
+    softcap_score_mod = _ScoreModSoftcap()
+    first_forward = softcap_score_mod.forward
+    second_forward = softcap_score_mod.forward
+    first_backward = softcap_score_mod.backward
+    second_backward = softcap_score_mod.backward
+
+    assert first_forward is not second_forward
+    assert first_backward is not second_backward
+
+    config_1, _, _ = make_fused_attn_score_mod_config(
+        first_forward,
+        first_backward,
+        {"softcap": 0.8},
+        {"softcap": 0.8},
+        0.125,
+        True,
+    )
+    config_2, _, _ = make_fused_attn_score_mod_config(
+        second_forward,
+        second_backward,
+        {"softcap": 0.8},
+        {"softcap": 0.8},
+        0.125,
+        True,
+    )
+    other_softcap_score_mod = _ScoreModSoftcap()
+    config_3, _, _ = make_fused_attn_score_mod_config(
+        other_softcap_score_mod.forward,
+        other_softcap_score_mod.backward,
+        {"softcap": 0.8},
+        {"softcap": 0.8},
+        0.125,
+        True,
+    )
+
+    assert config_1 == config_2
+    assert hash(config_1) == hash(config_2)
+    assert config_1 != config_3
+
+
 @pytest.mark.skipif(not _has_cudnn_frontend_python(), reason="cuDNN Python frontend is required")
 def test_fused_attn_score_mod_relative_position_optional_bprop():
     _require_cudnn_frontend_score_mod()

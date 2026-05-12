@@ -282,12 +282,25 @@ class _ScoreModScalarSpec:
     stride: Tuple[int, ...] = (1, 1, 1, 1)
 
 
+def _score_mod_callback_cache_key(callback: Optional[Callable]) -> Optional[Tuple[Any, ...]]:
+    """Return a stable cache key for callbacks that may be bound methods."""
+    if callback is None:
+        return None
+    self_obj = getattr(callback, "__self__", None)
+    func = getattr(callback, "__func__", None)
+    if self_obj is not None and func is not None:
+        return ("bound_method", id(self_obj), id(func))
+    return ("callable", id(callback))
+
+
 @dataclass(frozen=True)
 class _FusedAttnScoreModConfig:
     """Static configuration for cuDNN frontend score_mod SDPA graphs."""
 
     score_mod: Callable
     score_mod_bprop: Optional[Callable]
+    score_mod_key: Tuple[Any, ...]
+    score_mod_bprop_key: Optional[Tuple[Any, ...]]
     score_mod_tensor_names: Tuple[str, ...]
     score_mod_bprop_tensor_names: Tuple[str, ...]
     score_mod_scalars: Tuple[_ScoreModScalarSpec, ...]
@@ -299,8 +312,8 @@ class _FusedAttnScoreModConfig:
     def __hash__(self):
         return hash(
             (
-                id(self.score_mod),
-                id(self.score_mod_bprop) if self.score_mod_bprop is not None else None,
+                self.score_mod_key,
+                self.score_mod_bprop_key,
                 self.score_mod_tensor_names,
                 self.score_mod_bprop_tensor_names,
                 self.score_mod_scalars,
@@ -315,8 +328,8 @@ class _FusedAttnScoreModConfig:
         if not isinstance(other, _FusedAttnScoreModConfig):
             return False
         return (
-            self.score_mod is other.score_mod
-            and self.score_mod_bprop is other.score_mod_bprop
+            self.score_mod_key == other.score_mod_key
+            and self.score_mod_bprop_key == other.score_mod_bprop_key
             and self.score_mod_tensor_names == other.score_mod_tensor_names
             and self.score_mod_bprop_tensor_names == other.score_mod_bprop_tensor_names
             and self.score_mod_scalars == other.score_mod_scalars
@@ -446,6 +459,8 @@ def make_fused_attn_score_mod_config(
     config = _FusedAttnScoreModConfig(
         score_mod=score_mod,
         score_mod_bprop=score_mod_bprop,
+        score_mod_key=_score_mod_callback_cache_key(score_mod),
+        score_mod_bprop_key=_score_mod_callback_cache_key(score_mod_bprop),
         score_mod_tensor_names=tensor_names,
         score_mod_bprop_tensor_names=bprop_tensor_names,
         score_mod_scalars=scalars,
