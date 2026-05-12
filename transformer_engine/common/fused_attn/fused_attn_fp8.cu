@@ -1401,12 +1401,14 @@ std::string is_supported_fp8_bwd(const NVTEFusedAttnConfig* cfg, cudnnHandle_t h
   const bool deterministic = cfg->deterministic;
   const DType qkv_dtype = static_cast<DType>(cfg->qkv_dtype);
   const DType o_dtype = static_cast<DType>(cfg->o_dtype);
+  const DType do_dtype = static_cast<DType>(cfg->do_dtype);
+  const DType dqkv_dtype = static_cast<DType>(cfg->dqkv_dtype);
   const NVTEScalingMode scaling_mode = cfg->scaling_mode;
 
   const cudnn_frontend::DataType_t qkv_t = get_cudnn_fe_dtype(qkv_dtype);
   const cudnn_frontend::DataType_t o_t = get_cudnn_fe_dtype(o_dtype);
-  const cudnn_frontend::DataType_t do_t = o_t;
-  const cudnn_frontend::DataType_t dqkv_t = qkv_t;
+  const cudnn_frontend::DataType_t do_t = get_cudnn_fe_dtype(do_dtype);
+  const cudnn_frontend::DataType_t dqkv_t = get_cudnn_fe_dtype(dqkv_dtype);
   size_t workspace_size = 0;
   try {
     fused_attn::fused_attn_fp8_bwd_impl(

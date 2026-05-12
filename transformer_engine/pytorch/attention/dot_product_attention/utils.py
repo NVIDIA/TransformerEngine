@@ -1229,6 +1229,8 @@ def get_attention_backend(
         q_type = TE_DType[qkv_dtype]
         kv_type = q_type
         o_type = q_type
+        do_type = q_type
+        dqkv_type = q_type
         scaling_mode = tex.NVTEScalingMode.NVTE_INVALID_SCALING
         qkv_scale_inv_format = None
         do_scale_inv_format = None
@@ -1240,14 +1242,20 @@ def get_attention_backend(
             if recipe.mxfp8():
                 scaling_mode = tex.NVTEScalingMode.NVTE_MXFP8_1D_SCALING
                 o_type = TE_DType[torch.bfloat16]
+                do_type = TE_DType[torch.bfloat16]
+                dqkv_type = TE_DType[torch.bfloat16]
                 qkv_scale_inv_format = "bhsd"
                 do_scale_inv_format = "bhsd"
             elif recipe.float8_current_scaling() and cs_o_in_f16:
                 scaling_mode = tex.NVTEScalingMode.NVTE_DELAYED_TENSOR_SCALING
                 o_type = TE_DType[torch.bfloat16]
+                do_type = TE_DType[torch.bfloat16]
+                dqkv_type = TE_DType[torch.bfloat16]
             else:
                 scaling_mode = tex.NVTEScalingMode.NVTE_DELAYED_TENSOR_SCALING
                 o_type = q_type
+                do_type = o_type
+                dqkv_type = q_type
         o_format = q_format
         do_format = o_format
         dqkv_layout = qkv_layout
@@ -1257,6 +1265,8 @@ def get_attention_backend(
             q_type,
             kv_type,
             o_type,
+            do_type,
+            dqkv_type,
             scaling_mode,
             QKVLayout[qkv_layout],
             QKVFormat[o_format],

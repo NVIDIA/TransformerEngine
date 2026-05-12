@@ -13,13 +13,14 @@ namespace jax {
 
 std::tuple<NVTE_Fused_Attn_Backend, std::string> GetFusedAttnBackend(
     bool is_training, size_t batch_size, DType q_dtype, DType kv_dtype, DType o_dtype,
-    NVTEScalingMode scaling_mode, NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format,
-    NVTE_QKV_Format do_format, NVTE_QKV_Layout dqkv_layout, NVTE_QKV_Format qkv_scale_inv_format,
-    NVTE_QKV_Format do_scale_inv_format, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
-    NVTE_Softmax_Type softmax_type, float attn_scale, float dropout_probability,
-    size_t q_attn_heads, size_t kv_attn_heads, size_t q_max_seqlen, size_t kv_max_seqlen,
-    size_t qk_head_dim, size_t v_head_dim, int64_t window_size_left, int64_t window_size_right,
-    bool bottom_right_diagonal, bool deterministic) {
+    DType do_dtype, DType dqkv_dtype, NVTEScalingMode scaling_mode, NVTE_QKV_Layout qkv_layout,
+    NVTE_QKV_Format o_format, NVTE_QKV_Format do_format, NVTE_QKV_Layout dqkv_layout,
+    NVTE_QKV_Format qkv_scale_inv_format, NVTE_QKV_Format do_scale_inv_format,
+    NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, NVTE_Softmax_Type softmax_type,
+    float attn_scale, float dropout_probability, size_t q_attn_heads, size_t kv_attn_heads,
+    size_t q_max_seqlen, size_t kv_max_seqlen, size_t qk_head_dim, size_t v_head_dim,
+    int64_t window_size_left, int64_t window_size_right, bool bottom_right_diagonal,
+    bool deterministic) {
   if (o_format == NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET) {
     o_format = nvte_get_q_format(qkv_layout);
   }
@@ -52,6 +53,8 @@ std::tuple<NVTE_Fused_Attn_Backend, std::string> GetFusedAttnBackend(
   cfg.cuda_graph = false;
   cfg.qkv_dtype = static_cast<NVTEDType>(q_dtype);
   cfg.o_dtype = static_cast<NVTEDType>(o_dtype);
+  cfg.do_dtype = static_cast<NVTEDType>(do_dtype);
+  cfg.dqkv_dtype = static_cast<NVTEDType>(dqkv_dtype);
   cfg.batch_size = batch_size;
   cfg.num_attn_heads = q_attn_heads;
   cfg.num_gqa_groups = kv_attn_heads;
@@ -303,7 +306,7 @@ static void FusedAttnForwardImpl(
   auto rng_state_tensor = TensorWrapper(rng_state, std::vector<size_t>{2}, DType::kInt64);
 
   auto [backend, _fwd_msg] = GetFusedAttnBackend(
-      is_training, input_batch, dtype, dtype, dtype, NVTE_INVALID_SCALING, qkv_layout,
+      is_training, input_batch, dtype, dtype, dtype, dtype, dtype, NVTE_INVALID_SCALING, qkv_layout,
       NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET, NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET,
       NVTE_QKV_Layout::NVTE_QKV_Layout_NOT_SET, NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET,
       NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET, bias_type, mask_type, softmax_type, scaling_factor,
@@ -581,7 +584,7 @@ static void FusedAttnBackwardImpl(
   NVTETensorPack aux_input_tensors;
   nvte_tensor_pack_create(&aux_input_tensors);
   auto [backend, _bwd_msg] = GetFusedAttnBackend(
-      is_training, input_batch, dtype, dtype, dtype, NVTE_INVALID_SCALING, qkv_layout,
+      is_training, input_batch, dtype, dtype, dtype, dtype, dtype, NVTE_INVALID_SCALING, qkv_layout,
       NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET, NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET,
       NVTE_QKV_Layout::NVTE_QKV_Layout_NOT_SET, NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET,
       NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET, bias_type, mask_type, softmax_type, scaling_factor,

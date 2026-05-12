@@ -342,17 +342,17 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend_v2(const NVTEFusedAttnConfig
 
 // Deprecated: thin wrapper preserving the historical narrow signature. New callers should
 // construct an NVTEFusedAttnConfig and call nvte_get_fused_attn_backend_v2 directly to access
-// the additional fields (attn_scale, format/layout fields, scaling_mode, paged-KV/bias shape, etc.)
-// that this wrapper cannot express.
+// the additional fields (attn_scale, format/layout fields, scaling_mode, paged-KV/bias shape,
+// dO/dQKV dtypes, etc.) that this wrapper cannot express.
 NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     bool is_training, NVTEDType q_dtype, NVTEDType kv_dtype, NVTE_QKV_Layout qkv_layout,
     NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
     float dropout, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
     size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, int64_t window_size_left,
     int64_t window_size_right, bool return_max_logit, bool cuda_graph, bool deterministic) {
+  (void)is_training;
   NVTEFusedAttnConfig cfg = NVTE_FUSED_ATTN_CONFIG_INIT;
   cfg.qkv_layout = qkv_layout;
-  cfg.dqkv_layout = qkv_layout;  // legacy: gradient layout matches input layout
   cfg.bias_type = bias_type;
   cfg.attn_mask_type = attn_mask_type;
   cfg.softmax_type = softmax_type;
@@ -371,7 +371,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
   cfg.num_gqa_groups = num_gqa_groups;
   cfg.head_dim_qk = head_dim_qk;
   cfg.head_dim_v = head_dim_v;
-  cfg.is_training = is_training;
+  cfg.is_training = false;  // legacy wrapper cannot express dO/dQKV dtypes; skip bwd probe
   cfg.return_max_logit = return_max_logit;
   cfg.deterministic = deterministic;
   return nvte_get_fused_attn_backend_v2(&cfg, /*message=*/nullptr);
@@ -474,10 +474,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   NVTEFusedAttnConfig cfg = NVTE_FUSED_ATTN_CONFIG_INIT;
   cfg.qkv_layout = qkv_layout;
   cfg.o_format = o_format;
-  cfg.do_format = o_format;      // fwd path: same format used for dO if/when probed for bwd
-  cfg.dqkv_layout = qkv_layout;  // fwd path: same layout used for dQKV if/when probed for bwd
   cfg.qkv_scale_inv_format = qkv_scale_inv_format;
-  cfg.do_scale_inv_format = qkv_scale_inv_format;  // fwd path: mirror QKV
   cfg.bias_type = bias_type;
   cfg.attn_mask_type = attn_mask_type;
   cfg.softmax_type = softmax_type;
@@ -492,8 +489,6 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   cfg.cuda_graph = cuda_graph;
   cfg.qkv_dtype = Q_type;
   cfg.o_dtype = O_type;
-  cfg.do_dtype = O_type;    // fwd path: dO assumed to share dtype with O
-  cfg.dqkv_dtype = Q_type;  // fwd path: dQKV assumed to share dtype with QKV
   cfg.batch_size = b;
   cfg.num_attn_heads = h_q;
   cfg.num_gqa_groups = h_kv;
@@ -509,7 +504,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   cfg.bias_num_heads = bias_h;
   cfg.bias_seqlen_q = bias_sq;
   cfg.bias_seqlen_kv = bias_skv;
-  cfg.is_training = is_training;
+  cfg.is_training = false;
   cfg.return_max_logit = return_max_logit;
   cfg.deterministic = false;
   NVTE_Fused_Attn_Backend fused_attention_backend =

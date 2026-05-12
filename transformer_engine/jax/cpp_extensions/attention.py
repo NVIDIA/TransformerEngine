@@ -153,6 +153,8 @@ class FusedAttnHelper:
             q_type,
             jax_dtype_to_te_dtype(self.kv_dtype),
             q_type,
+            q_type,
+            q_type,
             NVTEScalingMode.NVTE_INVALID_SCALING,
             self.qkv_layout.value,
             NVTE_QKV_Format.NVTE_QKV_Format_NOT_SET,

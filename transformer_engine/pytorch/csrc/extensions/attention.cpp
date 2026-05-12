@@ -42,8 +42,9 @@ namespace transformer_engine::pytorch {
 // get the fused attention backend
 std::tuple<NVTE_Fused_Attn_Backend, std::string> get_fused_attn_backend(
     bool is_training, size_t batch_size, const DType q_dtype, const DType kv_dtype,
-    const DType o_dtype, NVTEScalingMode scaling_mode, NVTE_QKV_Layout qkv_layout,
-    NVTE_QKV_Format o_format, NVTE_QKV_Format do_format, NVTE_QKV_Layout dqkv_layout,
+    const DType o_dtype, const DType do_dtype, const DType dqkv_dtype,
+    NVTEScalingMode scaling_mode, NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format,
+    NVTE_QKV_Format do_format, NVTE_QKV_Layout dqkv_layout,
     NVTE_QKV_Format qkv_scale_inv_format, NVTE_QKV_Format do_scale_inv_format,
     NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
     float attn_scale, float p_dropout, size_t num_attn_heads, size_t num_gqa_groups,
@@ -72,6 +73,8 @@ std::tuple<NVTE_Fused_Attn_Backend, std::string> get_fused_attn_backend(
   NVTE_CHECK(q_dtype == kv_dtype, "Q and KV must have the same data type.");
   cfg.qkv_dtype = static_cast<NVTEDType>(q_dtype);
   cfg.o_dtype = static_cast<NVTEDType>(o_dtype);
+  cfg.do_dtype = static_cast<NVTEDType>(do_dtype);
+  cfg.dqkv_dtype = static_cast<NVTEDType>(dqkv_dtype);
   cfg.batch_size = batch_size;
   cfg.num_attn_heads = num_attn_heads;
   cfg.num_gqa_groups = num_gqa_groups;
