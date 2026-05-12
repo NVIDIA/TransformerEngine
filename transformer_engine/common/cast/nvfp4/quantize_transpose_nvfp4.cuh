@@ -1098,6 +1098,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
           }
         }
 
+        nvfp4_scale_t S_dec_b_fp8;
         if constexpr (USE_4OVER6) {
           float x_4over6[SCALE_DIM];
 #pragma unroll
@@ -1111,7 +1112,6 @@ __global__ void __launch_bounds__(THREADS_NUM)
 
           const size_t block_col = threadIdx.x % BLOCK_DIM;
           QuantizationCandidates4Over6 candidates;
-          nvfp4_scale_t S_dec_b_fp8;
           const bool pick_map4 =
               quantize_and_select_4over6_2d_block_16x<USE_FAST_MATH, BLOCK_DIM, BLOCKS_PER_TILE_Y,
                                                       BLOCKS_PER_TILE_X>(
@@ -1119,21 +1119,11 @@ __global__ void __launch_bounds__(THREADS_NUM)
                   block_in_tile_y, block_in_tile_x, block_col, *four_over_six_scratch, S_dec_b_fp8,
                   candidates);
 
-          const size_t scale_idx_sh =
-              tid_Y_t * SCALES_PER_CHUNK_Y + stage * ITERATIONS_TRANSPOSE + it;
-          out_colwise_scales_sh[scale_idx_sh] = S_dec_b_fp8;
-
           store_4over6_colwise_packed_16x(pick_map4, candidates, thread_lane, out_t_data_sh,
                                           shmem_offset_base_colwise_out_t);
         } else {
           // 2. Compute E4M3 scaling factor
-          const nvfp4_scale_t S_dec_b_fp8 =
-              compute_decoding_scaling_factor(block_amax, S_enc_colwise);
-
-          // // Store scaling factors through SHMEM
-          const size_t scale_idx_sh =
-              tid_Y_t * SCALES_PER_CHUNK_Y + stage * ITERATIONS_TRANSPOSE + it;
-          out_colwise_scales_sh[scale_idx_sh] = S_dec_b_fp8;
+          S_dec_b_fp8 = compute_decoding_scaling_factor(block_amax, S_enc_colwise);
 
           // Compute "correct" per-block encoding scaling factor
           constexpr float float_max = detail::TypeExtrema<float>::max;
@@ -1177,6 +1167,10 @@ __global__ void __launch_bounds__(THREADS_NUM)
           out_t_data_sh_as_uint32_t[group] = val[0];            // idx1 = (group + 0) % 2;
           out_t_data_sh_as_uint32_t[(group + 1) & 1] = val[1];  // idx2 = (group + 1) % 2;
         }
+
+        const size_t scale_idx_sh =
+            tid_Y_t * SCALES_PER_CHUNK_Y + stage * ITERATIONS_TRANSPOSE + it;
+        out_colwise_scales_sh[scale_idx_sh] = S_dec_b_fp8;
       }
     }
 
@@ -1272,9 +1266,17 @@ __global__ void __launch_bounds__(THREADS_NUM)
           }
         }
 
+        const size_t scales_offset_Y =
+            scales_offset_Y_rowwise + stage * BUFF_DIM_Y + it * THREADS_Y_ROWWISE;
+        const size_t scales_offset_X = scales_offset_X_rowwise;
+        const size_t scale_idx_global = scales_offset_Y * scale_stride + scales_offset_X;
+
+        const bool rowwise_scale_is_within_bounds_Y =
+            (stage_rowwise_scales_offset_Y + it * THREADS_Y_ROWWISE + tid_Y_rowwise) < chunk_rows;
+
+        nvfp4_scale_t S_dec_b_fp8;
         if constexpr (USE_4OVER6) {
           QuantizationCandidates4Over6 candidates;
-          nvfp4_scale_t S_dec_b_fp8;
           const bool pick_map4 =
               quantize_and_select_4over6_2d_block_16x<USE_FAST_MATH, BLOCK_DIM, BLOCKS_PER_TILE_Y,
                                                       BLOCKS_PER_TILE_X>(
@@ -1282,36 +1284,12 @@ __global__ void __launch_bounds__(THREADS_NUM)
                   block_in_tile_y, block_in_tile_x, tid_Y_rowwise, *four_over_six_scratch,
                   S_dec_b_fp8, candidates);
 
-          const size_t scales_offset_Y =
-              scales_offset_Y_rowwise + stage * BUFF_DIM_Y + it * THREADS_Y_ROWWISE;
-          const size_t scales_offset_X = scales_offset_X_rowwise;
-          const size_t scale_idx_global = scales_offset_Y * scale_stride + scales_offset_X;
-
-          const bool rowwise_scale_is_within_bounds_Y =
-              (stage_rowwise_scales_offset_Y + it * THREADS_Y_ROWWISE + tid_Y_rowwise) < chunk_rows;
-          if (rowwise_scale_is_within_bounds_X && rowwise_scale_is_within_bounds_Y) {
-            scales_ptr[scale_idx_global] = S_dec_b_fp8;
-          }
-
           store_4over6_rowwise_packed_16x<WAVES, PACK_SIZE, SCALE_DIM>(
               pick_map4, candidates, bank_group, thread_offset_X_rowwise,
               shmem_offset_base_rowwise_out, out_data_sh);
         } else {
           // 2. Compute E4M3 scaling factor
-          const nvfp4_scale_t S_dec_b_fp8 =
-              compute_decoding_scaling_factor(block_amax, S_enc_rowwise);
-
-          // Check boundaries
-          const size_t scales_offset_Y =
-              scales_offset_Y_rowwise + stage * BUFF_DIM_Y + it * THREADS_Y_ROWWISE;
-          const size_t scales_offset_X = scales_offset_X_rowwise;
-          const size_t scale_idx_global = scales_offset_Y * scale_stride + scales_offset_X;
-
-          const bool rowwise_scale_is_within_bounds_Y =
-              (stage_rowwise_scales_offset_Y + it * THREADS_Y_ROWWISE + tid_Y_rowwise) < chunk_rows;
-          if (rowwise_scale_is_within_bounds_X && rowwise_scale_is_within_bounds_Y) {
-            scales_ptr[scale_idx_global] = S_dec_b_fp8;
-          }
+          S_dec_b_fp8 = compute_decoding_scaling_factor(block_amax, S_enc_rowwise);
 
           // Compute "correct" per-block encoding scaling factor
           constexpr float float_max = detail::TypeExtrema<float>::max;
@@ -1351,6 +1329,10 @@ __global__ void __launch_bounds__(THREADS_NUM)
             const size_t shmem_offset_rowwise = shmem_offset_base_rowwise_out + swizzled_idx / 2;
             out.store_to(&out_data_sh[shmem_offset_rowwise]);
           }
+        }
+
+        if (rowwise_scale_is_within_bounds_X && rowwise_scale_is_within_bounds_Y) {
+          scales_ptr[scale_idx_global] = S_dec_b_fp8;
         }
       }
     }

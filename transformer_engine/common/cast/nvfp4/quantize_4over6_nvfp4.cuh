@@ -310,6 +310,18 @@ struct QuantizationCandidates4Over6 {
   float err_map6;
   uint32_t rOut_map4[2];
   uint32_t rOut_map6[2];
+
+  __device__ __forceinline__ void reset_errors() {
+    err_map4 = 0.0f;
+    err_map6 = 0.0f;
+  }
+
+  __device__ __forceinline__ const uint32_t *selected_packed(const bool pick_map4) const {
+    if (pick_map4) {
+      return rOut_map4;
+    }
+    return rOut_map6;
+  }
 };
 
 template <size_t BLOCK_DIM, size_t BLOCKS_PER_TILE_Y, size_t BLOCKS_PER_TILE_X>
@@ -329,20 +341,64 @@ struct alignas(16) QuantizationScratch4Over6 {
   }
 };
 
+template <typename input_type>
+__device__ __forceinline__ void load_4over6_contiguous_halves_16x(const input_type *x,
+                                                                  float (&first_half)[8],
+                                                                  float (&second_half)[8]) {
+#pragma unroll
+  for (int i = 0; i < 8; ++i) {
+    first_half[i] = static_cast<float>(x[i]);
+    second_half[i] = static_cast<float>(x[i + 8]);
+  }
+}
+
+template <typename pair_type>
+__device__ __forceinline__ void load_4over6_pair_array_halves_16x(const pair_type (&x)[2][4],
+                                                                  float (&first_half)[8],
+                                                                  float (&second_half)[8]) {
+#pragma unroll
+  for (int i = 0; i < 4; ++i) {
+    first_half[2 * i] = static_cast<float>(x[0][i].x);
+    first_half[2 * i + 1] = static_cast<float>(x[0][i].y);
+    second_half[2 * i] = static_cast<float>(x[1][i].x);
+    second_half[2 * i + 1] = static_cast<float>(x[1][i].y);
+  }
+}
+
+template <typename vec_type>
+__device__ __forceinline__ void load_4over6_vec2_array_halves_16x(const vec_type (&x)[8],
+                                                                  float (&first_half)[8],
+                                                                  float (&second_half)[8]) {
+#pragma unroll
+  for (int i = 0; i < 4; ++i) {
+    first_half[2 * i] = static_cast<float>(x[i].data.elt[0]);
+    first_half[2 * i + 1] = static_cast<float>(x[i].data.elt[1]);
+    second_half[2 * i] = static_cast<float>(x[i + 4].data.elt[0]);
+    second_half[2 * i + 1] = static_cast<float>(x[i + 4].data.elt[1]);
+  }
+}
+
+template <typename vec_type>
+__device__ __forceinline__ void load_4over6_vec_index_halves_16x(const vec_type (&x)[16],
+                                                                 const int idx,
+                                                                 float (&first_half)[8],
+                                                                 float (&second_half)[8]) {
+#pragma unroll
+  for (int i = 0; i < 8; ++i) {
+    first_half[i] = static_cast<float>(x[i].data.elt[idx]);
+    second_half[i] = static_cast<float>(x[i + 8].data.elt[idx]);
+  }
+}
+
 template <bool USE_FAST_MATH, typename scaling_coeff_type>
 __device__ __forceinline__ void quantize_4over6_candidates_16x(
     const float (&x)[16], const QuantizationScales4Over6<scaling_coeff_type> &scaling_factors,
     const float global_amax, QuantizationCandidates4Over6 &candidates) {
   float first_half[8];
   float second_half[8];
-#pragma unroll
-  for (int i = 0; i < 8; ++i) {
-    first_half[i] = x[i];
-    second_half[i] = x[i + 8];
-  }
+  load_4over6_contiguous_halves_16x(x, first_half, second_half);
 
-  candidates.err_map4 = 0.0f;
-  candidates.err_map6 = 0.0f;
+  candidates.reset_errors();
   quantize_4over6_16x<USE_FAST_MATH>(first_half, second_half, scaling_factors, global_amax,
                                      candidates.err_map4, candidates.err_map6, candidates.rOut_map4,
                                      candidates.rOut_map6);
@@ -353,13 +409,10 @@ template <size_t BLOCK_DIM, size_t BLOCKS_PER_TILE_Y, size_t BLOCKS_PER_TILE_X,
 __device__ __forceinline__ bool record_and_select_4over6_2d_block(
     const QuantizationScales4Over6<scaling_coeff_type> &scaling_factors,
     const size_t block_in_tile_y, const size_t block_in_tile_x, const size_t participant_idx,
-    float (&err_map4_matrix)[BLOCKS_PER_TILE_Y][BLOCKS_PER_TILE_X][BLOCK_DIM],
-    float (&err_map6_matrix)[BLOCKS_PER_TILE_Y][BLOCKS_PER_TILE_X][BLOCK_DIM],
-    uint8_t (&pick_map4_matrix)[BLOCKS_PER_TILE_Y][BLOCKS_PER_TILE_X],
-    nvfp4_scale_t (&selected_scale_matrix)[BLOCKS_PER_TILE_Y][BLOCKS_PER_TILE_X],
+    QuantizationScratch4Over6<BLOCK_DIM, BLOCKS_PER_TILE_Y, BLOCKS_PER_TILE_X> &scratch,
     nvfp4_scale_t &S_dec_b_fp8, const QuantizationCandidates4Over6 &candidates) {
-  err_map4_matrix[block_in_tile_y][block_in_tile_x][participant_idx] = candidates.err_map4;
-  err_map6_matrix[block_in_tile_y][block_in_tile_x][participant_idx] = candidates.err_map6;
+  scratch.err_map4_matrix[block_in_tile_y][block_in_tile_x][participant_idx] = candidates.err_map4;
+  scratch.err_map6_matrix[block_in_tile_y][block_in_tile_x][participant_idx] = candidates.err_map6;
   __syncthreads();
 
   if (participant_idx == 0) {
@@ -367,35 +420,22 @@ __device__ __forceinline__ bool record_and_select_4over6_2d_block(
     float block_err_map6 = 0.0f;
 #pragma unroll
     for (int i = 0; i < BLOCK_DIM; ++i) {
-      block_err_map4 += err_map4_matrix[block_in_tile_y][block_in_tile_x][i];
-      block_err_map6 += err_map6_matrix[block_in_tile_y][block_in_tile_x][i];
+      block_err_map4 += scratch.err_map4_matrix[block_in_tile_y][block_in_tile_x][i];
+      block_err_map6 += scratch.err_map6_matrix[block_in_tile_y][block_in_tile_x][i];
     }
 
     const bool pick_map4 = pick_4over6_map4(block_err_map4, block_err_map6);
     if (pick_map4) {
-      pick_map4_matrix[block_in_tile_y][block_in_tile_x] = 1;
+      scratch.pick_map4_matrix[block_in_tile_y][block_in_tile_x] = 1;
     } else {
-      pick_map4_matrix[block_in_tile_y][block_in_tile_x] = 0;
+      scratch.pick_map4_matrix[block_in_tile_y][block_in_tile_x] = 0;
     }
-    selected_scale_matrix[block_in_tile_y][block_in_tile_x] =
+    scratch.selected_scale_matrix[block_in_tile_y][block_in_tile_x] =
         selected_4over6_scale(pick_map4, scaling_factors);
   }
   __syncthreads();
-  S_dec_b_fp8 = selected_scale_matrix[block_in_tile_y][block_in_tile_x];
-  return pick_map4_matrix[block_in_tile_y][block_in_tile_x] != 0;
-}
-
-template <size_t BLOCK_DIM, size_t BLOCKS_PER_TILE_Y, size_t BLOCKS_PER_TILE_X,
-          typename scaling_coeff_type>
-__device__ __forceinline__ bool record_and_select_4over6_2d_block(
-    const QuantizationScales4Over6<scaling_coeff_type> &scaling_factors,
-    const size_t block_in_tile_y, const size_t block_in_tile_x, const size_t participant_idx,
-    QuantizationScratch4Over6<BLOCK_DIM, BLOCKS_PER_TILE_Y, BLOCKS_PER_TILE_X> &scratch,
-    nvfp4_scale_t &S_dec_b_fp8, const QuantizationCandidates4Over6 &candidates) {
-  return record_and_select_4over6_2d_block<BLOCK_DIM, BLOCKS_PER_TILE_Y, BLOCKS_PER_TILE_X>(
-      scaling_factors, block_in_tile_y, block_in_tile_x, participant_idx, scratch.err_map4_matrix,
-      scratch.err_map6_matrix, scratch.pick_map4_matrix, scratch.selected_scale_matrix, S_dec_b_fp8,
-      candidates);
+  S_dec_b_fp8 = scratch.selected_scale_matrix[block_in_tile_y][block_in_tile_x];
+  return scratch.pick_map4_matrix[block_in_tile_y][block_in_tile_x] != 0;
 }
 
 template <bool USE_FAST_MATH, size_t BLOCK_DIM, size_t BLOCKS_PER_TILE_Y, size_t BLOCKS_PER_TILE_X>
@@ -416,19 +456,11 @@ __device__ __forceinline__ bool quantize_and_select_4over6_2d_block_16x(
   return pick_map4;
 }
 
-__device__ __forceinline__ const uint32_t *selected_4over6_packed(
-    const bool pick_map4, const QuantizationCandidates4Over6 &candidates) {
-  if (pick_map4) {
-    return candidates.rOut_map4;
-  }
-  return candidates.rOut_map6;
-}
-
 template <typename output_type>
 __device__ __forceinline__ void store_4over6_colwise_packed_16x(
     const bool pick_map4, const QuantizationCandidates4Over6 &candidates, const int thread_lane,
     output_type *out_t_data_sh, const size_t shmem_offset_base_colwise_out_t) {
-  const uint32_t *regs_4x = selected_4over6_packed(pick_map4, candidates);
+  const uint32_t *regs_4x = candidates.selected_packed(pick_map4);
   const int group = thread_lane / 16;
   uint32_t val[2];
   switch (group) {
@@ -452,7 +484,7 @@ __device__ __forceinline__ void store_4over6_rowwise_packed_16x(
     const bool pick_map4, const QuantizationCandidates4Over6 &candidates, const int bank_group,
     const size_t thread_offset_X_rowwise, const size_t shmem_offset_base_rowwise_out,
     output_type *out_data_sh) {
-  const uint32_t *packed = selected_4over6_packed(pick_map4, candidates);
+  const uint32_t *packed = candidates.selected_packed(pick_map4);
 #pragma unroll
   for (int w = 0; w < WAVES; ++w) {
     const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM;
@@ -465,7 +497,7 @@ __device__ __forceinline__ void store_4over6_rowwise_packed_16x(
 }
 
 template <typename output_vec_type>
-__device__ __forceinline__ void store_4over6_packed_16x(const uint32_t (&packed)[2],
+__device__ __forceinline__ void store_4over6_packed_16x(const uint32_t *packed,
                                                         output_vec_type &output_vec) {
   *reinterpret_cast<uint32_t *>(&output_vec.data.elt[0]) = packed[0];
   *reinterpret_cast<uint32_t *>(&output_vec.data.elt[4]) = packed[1];
@@ -475,9 +507,7 @@ template <typename output_vec_type>
 __device__ __forceinline__ void store_selected_4over6_packed_16x(
     const bool pick_map4, const QuantizationCandidates4Over6 &candidates,
     output_vec_type &output_vec) {
-  const uint32_t *packed = selected_4over6_packed(pick_map4, candidates);
-  *reinterpret_cast<uint32_t *>(&output_vec.data.elt[0]) = packed[0];
-  *reinterpret_cast<uint32_t *>(&output_vec.data.elt[4]) = packed[1];
+  store_4over6_packed_16x(candidates.selected_packed(pick_map4), output_vec);
 }
 
 template <bool USE_FAST_MATH, bool REVERSE_PACK_ORDER = false, typename scaling_coeff_type,
@@ -487,11 +517,7 @@ __device__ __forceinline__ void quantize_4over6_contiguous_16x(
     const float global_amax, nvfp4_scale_t &S_dec_b_fp8, uint32_t (&rOut)[2]) {
   float first_half[8];
   float second_half[8];
-#pragma unroll
-  for (int i = 0; i < 8; ++i) {
-    first_half[i] = static_cast<float>(x[i]);
-    second_half[i] = static_cast<float>(x[i + 8]);
-  }
+  load_4over6_contiguous_halves_16x(x, first_half, second_half);
 
   quantize_4over6_16x<USE_FAST_MATH, REVERSE_PACK_ORDER>(first_half, second_half, scaling_factors,
                                                          global_amax, S_dec_b_fp8, rOut);
@@ -504,13 +530,7 @@ __device__ __forceinline__ void quantize_4over6_pair_array_16x(
     const float global_amax, nvfp4_scale_t &S_dec_b_fp8, uint32_t (&rOut)[2]) {
   float first_half[8];
   float second_half[8];
-#pragma unroll
-  for (int i = 0; i < 4; ++i) {
-    first_half[2 * i] = static_cast<float>(x[0][i].x);
-    first_half[2 * i + 1] = static_cast<float>(x[0][i].y);
-    second_half[2 * i] = static_cast<float>(x[1][i].x);
-    second_half[2 * i + 1] = static_cast<float>(x[1][i].y);
-  }
+  load_4over6_pair_array_halves_16x(x, first_half, second_half);
 
   quantize_4over6_16x<USE_FAST_MATH, REVERSE_PACK_ORDER>(first_half, second_half, scaling_factors,
                                                          global_amax, S_dec_b_fp8, rOut);
@@ -522,16 +542,9 @@ __device__ __forceinline__ void quantize_4over6_vec2_array_candidates_16x(
     const float global_amax, QuantizationCandidates4Over6 &candidates) {
   float first_half[8];
   float second_half[8];
-#pragma unroll
-  for (int i = 0; i < 4; ++i) {
-    first_half[2 * i] = static_cast<float>(x[i].data.elt[0]);
-    first_half[2 * i + 1] = static_cast<float>(x[i].data.elt[1]);
-    second_half[2 * i] = static_cast<float>(x[i + 4].data.elt[0]);
-    second_half[2 * i + 1] = static_cast<float>(x[i + 4].data.elt[1]);
-  }
+  load_4over6_vec2_array_halves_16x(x, first_half, second_half);
 
-  candidates.err_map4 = 0.0f;
-  candidates.err_map6 = 0.0f;
+  candidates.reset_errors();
   quantize_4over6_16x<USE_FAST_MATH>(first_half, second_half, scaling_factors, global_amax,
                                      candidates.err_map4, candidates.err_map6, candidates.rOut_map4,
                                      candidates.rOut_map6);
@@ -544,13 +557,7 @@ __device__ __forceinline__ void quantize_4over6_vec2_array_16x(
     const float global_amax, nvfp4_scale_t &S_dec_b_fp8, uint32_t (&rOut)[2]) {
   float first_half[8];
   float second_half[8];
-#pragma unroll
-  for (int i = 0; i < 4; ++i) {
-    first_half[2 * i] = static_cast<float>(x[i].data.elt[0]);
-    first_half[2 * i + 1] = static_cast<float>(x[i].data.elt[1]);
-    second_half[2 * i] = static_cast<float>(x[i + 4].data.elt[0]);
-    second_half[2 * i + 1] = static_cast<float>(x[i + 4].data.elt[1]);
-  }
+  load_4over6_vec2_array_halves_16x(x, first_half, second_half);
 
   quantize_4over6_16x<USE_FAST_MATH, REVERSE_PACK_ORDER>(first_half, second_half, scaling_factors,
                                                          global_amax, S_dec_b_fp8, rOut);
@@ -563,14 +570,9 @@ __device__ __forceinline__ void quantize_4over6_vec_index_candidates_16x(
     QuantizationCandidates4Over6 &candidates) {
   float first_half[8];
   float second_half[8];
-#pragma unroll
-  for (int i = 0; i < 8; ++i) {
-    first_half[i] = static_cast<float>(x[i].data.elt[idx]);
-    second_half[i] = static_cast<float>(x[i + 8].data.elt[idx]);
-  }
+  load_4over6_vec_index_halves_16x(x, idx, first_half, second_half);
 
-  candidates.err_map4 = 0.0f;
-  candidates.err_map6 = 0.0f;
+  candidates.reset_errors();
   quantize_4over6_16x<USE_FAST_MATH>(first_half, second_half, scaling_factors, global_amax,
                                      candidates.err_map4, candidates.err_map6, candidates.rOut_map4,
                                      candidates.rOut_map6);
@@ -584,11 +586,7 @@ __device__ __forceinline__ void quantize_4over6_vec_index_16x(
     nvfp4_scale_t &S_dec_b_fp8, uint32_t (&rOut)[2]) {
   float first_half[8];
   float second_half[8];
-#pragma unroll
-  for (int i = 0; i < 8; ++i) {
-    first_half[i] = static_cast<float>(x[i].data.elt[idx]);
-    second_half[i] = static_cast<float>(x[i + 8].data.elt[idx]);
-  }
+  load_4over6_vec_index_halves_16x(x, idx, first_half, second_half);
 
   quantize_4over6_16x<USE_FAST_MATH, REVERSE_PACK_ORDER>(first_half, second_half, scaling_factors,
                                                          global_amax, S_dec_b_fp8, rOut);

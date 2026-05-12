@@ -364,10 +364,10 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
   __shared__ CType amax_smem[k2DBlockAmaxDim][k2DBlockAmaxDim];
   constexpr int k4Over62DSelectionDim =
       (kUse4Over6 && kIs2DBlockScaling) ? kFP4BlockScalingSize : 1;
-  __shared__ float err_map4_smem[k2DBlockAmaxDim][k2DBlockAmaxDim][k4Over62DSelectionDim];
-  __shared__ float err_map6_smem[k2DBlockAmaxDim][k2DBlockAmaxDim][k4Over62DSelectionDim];
-  __shared__ uint8_t pick_map4_smem[k2DBlockAmaxDim][k2DBlockAmaxDim];
-  __shared__ ScaleType selected_scale_smem[k2DBlockAmaxDim][k2DBlockAmaxDim];
+  using FourOverSixScratch =
+      nvfp4_core::QuantizationScratch4Over6<k4Over62DSelectionDim, k2DBlockAmaxDim,
+                                            k2DBlockAmaxDim>;
+  __shared__ FourOverSixScratch four_over_six_scratch;
 
   // Step 1: Load input to shared memory
   {
@@ -554,8 +554,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
           const bool pick_map4 =
               nvfp4_core::record_and_select_4over6_2d_block<kFP4BlockScalingSize, k2DBlockAmaxDim,
                                                             k2DBlockAmaxDim>(
-                  scaling_factors, block_in_tile_y, block_in_tile_x, participant_idx, err_map4_smem,
-                  err_map6_smem, pick_map4_smem, selected_scale_smem, scale_inv, candidates);
+                  scaling_factors, block_in_tile_y, block_in_tile_x, participant_idx,
+                  four_over_six_scratch, scale_inv, candidates);
 
           nvfp4_core::store_selected_4over6_packed_16x(pick_map4, candidates, output_vec);
         } else {
@@ -719,8 +719,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
                 nvfp4_core::record_and_select_4over6_2d_block<kFP4BlockScalingSize, k2DBlockAmaxDim,
                                                               k2DBlockAmaxDim>(
                     scaling_factors, block_in_tile_y, block_in_tile_x, participant_idx,
-                    err_map4_smem, err_map6_smem, pick_map4_smem, selected_scale_smem, scale_inv,
-                    candidates);
+                    four_over_six_scratch, scale_inv, candidates);
 
             nvfp4_core::store_selected_4over6_packed_16x(pick_map4, candidates, output_vec);
           } else {
