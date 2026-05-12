@@ -530,7 +530,9 @@ class NVFP4BlockScaling(Recipe):
              global E4M3 scale bound is 256 in this mode instead of 448. The
              ``activations`` scope applies to every non-weight tensor role.
              Random Hadamard transforms and stochastic rounding are not yet
-             supported on tensors that use 4over6.
+             supported on tensors that use 4over6; activation and backward
+             scopes therefore require ``disable_rht=True`` and
+             ``disable_stochastic_rounding=True``.
     backward_override : {None, 'high_precision', 'dequantized'}, default = None
             Backward precision mode. None does not modify backward behavior,
             `high_precision` keeps original high-precision operands for backward,

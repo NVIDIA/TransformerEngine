@@ -261,7 +261,7 @@ Kernel Configuration
 
    :Type: ``int`` (0 or 1)
    :Default: ``0``
-   :Description: Enable fast math optimizations in runtime-compiled (NVRTC) kernels. This trades numerical accuracy for performance. These optimizations are experimental and inconsistently implemented.
+   :Description: Enable fast math optimizations in supported kernels, including runtime-compiled (NVRTC) kernels and NVFP4 4over6 quantization. This trades numerical accuracy for performance. These optimizations are experimental and inconsistently implemented.
 
 .. envvar:: NVTE_DISABLE_NVRTC
 
@@ -291,7 +291,7 @@ Kernel Configuration
 
    :Type: ``str`` (``weights``, ``activations``, or ``all``)
    :Default: unset
-   :Description: Enable per-block map-to-4 versus map-to-6 candidate selection for selected NVFP4 quantizers in the ``NVFP4BlockScaling`` recipe. ``weights`` selects weight tensor roles, ``activations`` selects non-weight tensor roles, and ``all`` selects both. The selected block scale is the candidate with lower input-domain MSE, and ties select map-to-6. This mode uses 256 as the global E4M3 scale bound instead of the 448 bound. Tensors using 4over6 currently require RHT and stochastic rounding to be disabled.
+   :Description: Enable per-block map-to-4 versus map-to-6 candidate selection for selected NVFP4 quantizers in the ``NVFP4BlockScaling`` recipe. ``weights`` selects weight tensor roles, ``activations`` selects non-weight tensor roles, and ``all`` selects both. The selected block scale is the candidate with lower input-domain MSE, and ties select map-to-6. This mode uses 256 as the global E4M3 scale bound instead of the 448 bound. Tensors using 4over6 currently require RHT and stochastic rounding to be disabled; activation and backward scopes therefore require ``NVTE_NVFP4_DISABLE_RHT=1`` and ``NVTE_NVFP4_DISABLE_STOCHASTIC_ROUNDING=1``.
 
 Torch Compilation and Fusion
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
