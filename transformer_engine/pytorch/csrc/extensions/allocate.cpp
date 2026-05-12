@@ -14,7 +14,7 @@ namespace pytorch {
 
 std::vector<at::Tensor> bulk_allocate(const std::vector<std::vector<size_t>> &shapes,
                                       const std::vector<at::ScalarType> &dtypes,
-                                      std::optional<at::Device> device,
+                                      std::optional<c10::Device> device,
                                       std::optional<std::vector<size_t>> alignments) {
   // Check shapes and dtypes
   const size_t n = shapes.size();
@@ -27,7 +27,7 @@ std::vector<at::Tensor> bulk_allocate(const std::vector<std::vector<size_t>> &sh
 
   // Set defaults for optional arguments
   if (!device) {
-    device = at::Device(at::kCUDA);
+    device = c10::Device(c10::kCUDA);
   }
   if (!alignments) {
     alignments = std::vector<size_t>{};
