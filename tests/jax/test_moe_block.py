@@ -228,7 +228,7 @@ class TestMoEBlockSingleDevice:
         assert jnp.abs(aux_loss) < 1e2
 
     def test_aux_loss_uses_real_routing_under_group_topk(self):
-        """Regression test for PR #2912 review (greptile P1).
+        """Aux loss must reflect the real (post-group) routing decisions.
 
         Under DeepSeek-style ``num_groups`` / ``group_topk`` routing,
         the auxiliary load-balancing loss must be computed using the
@@ -385,12 +385,11 @@ class TestMoEBlockSingleDevice:
         to every expert GEMM output (their input rows are zeros) and are
         stripped before the weighted sum.
 
-        Why the env knob: the V1 TE grouped GEMM FFI asserts
-        ``sum(group_sizes) == M`` at
-        ``transformer_engine/jax/csrc/extensions/gemm.cpp:1029``. With
-        ``align_size > 0`` the pure-JAX backend produces a buffer where
-        ``M >= sum(group_sizes)`` (the slack is structural padding for
-        JIT). The V2 grouped GEMM relaxes that assertion to
+        Why the env knob: the V1 TE grouped GEMM FFI asserts strict
+        equality ``sum(group_sizes) == M``. With ``align_size > 0`` the
+        pure-JAX backend produces a buffer where ``M >= sum(group_sizes)``
+        (the slack is structural padding for JIT), so V1 is incompatible.
+        The V2 cuBLASLt-backed grouped GEMM relaxes the assertion to
         ``M >= sum(group_sizes)`` and is selected when
         ``NVTE_JAX_ENFORCE_V2_GROUPED_GEMM=1``. If V2 isn't supported on
         this hardware / for this dtype, the dispatch raises a

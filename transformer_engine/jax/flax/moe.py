@@ -4,56 +4,9 @@
 
 """Flax Linen MoEBlock for TransformerEngine JAX.
 
-This module exposes :class:`MoEBlock`, a self-contained Flax Linen MoE layer
-that wires together TE's fused router, a selectable token-dispatch backend
-(``pure_jax`` or ``triton``), TE's ``grouped_dense``, and an
-optional ragged-all-to-all (A2A / A2Av) expert-parallelism strategy.
-
-Architecture
-------------
-
-The MoEBlock is decomposed into orthogonal stages so the EP wrapper can
-inject collectives between them:
-
-* ``_route``:           gate logits -> top-k routing decisions (+ aux loss).
-* ``_global_permute``:  scatter tokens to experts; produces
-                        ``[num_tokens*topk + maybe_padding, hidden]`` and
-                        per-expert ``group_sizes`` of length ``num_experts``.
-* ``_expert_ffn``:      three ``grouped_dense`` calls + activation. Operates
-                        on whatever ``(rows, group_sizes, n_groups)`` it is
-                        handed -- agnostic to whether ``n_groups`` is the
-                        global expert count (no-EP) or the local expert
-                        count (A2A-EP).
-* ``_global_combine``:  inverse of ``_global_permute`` -- gather + weighted
-                        sum across top-k experts.
-
-Two top-level forward variants compose those stages:
-
-* ``_forward_no_ep``:   route -> permute -> ffn -> combine. Each TE
-                        primitive's ``custom_partitioning`` rule handles
-                        DP / FSDP / TP automatically.
-* ``_forward_a2a_ep``:  wraps the body in :func:`jax.shard_map` and inserts
-                        ``all_gather(group_sizes)`` + forward
-                        ``ragged_all_to_all`` + local permute around the
-                        FFN, plus their inverses afterwards. This is the
-                        only place ``shard_map`` is used; A2A is the
-                        canonical EP strategy because the in-flight NCCL
-                        EP component will require this same data layout.
-
-Note on ``align_size > 0``
---------------------------
-
-Both permutation backends pad each expert's group to a multiple of
-``align_size`` when requested, which is what CUBLASLt's grouped GEMM wants
-for FP8 shape selection. The pure-JAX backend additionally appends a
-zero-input padding tail to keep the buffer statically sized for JIT, so
-``sum(group_sizes) <= sorted_inputs.shape[0]`` strictly. TE's
-``grouped_dense`` FFI today asserts ``m == sum(group_sizes)`` at
-``transformer_engine/jax/csrc/extensions/gemm.cpp:1029``; relaxing that
-check to ``m >= sum(group_sizes)`` (the kernel itself only iterates over
-``sum(group_sizes)`` rows via ``nvte_multi_tensor_gemm``) is the cleanest
-way to support ``align_size > 0`` end-to-end. Until that lands the
-``align_size > 0`` tests stay xfail.
+This module exposes :class:`MoEBlock`, a self-contained Flax Linen MoE
+layer. See the class docstring for the architecture, the EP / FSDP / TP
+strategies, and the ``align_size > 0`` contract.
 """
 
 from functools import partial
@@ -133,6 +86,51 @@ class MoEBlock(TransformerEngineBase):
     routing, optional auxiliary load-balancing loss, token dispatch,
     per-expert two-layer FFN via grouped GEMMs, activation, token combine,
     and optional ragged-all-to-all expert parallelism.
+
+    Architecture
+    ------------
+
+    The block is decomposed into orthogonal stages so the EP wrapper can
+    inject collectives between them:
+
+    * ``_route``: gate logits -> top-k routing decisions (+ aux loss).
+    * ``_global_permute``: scatter tokens to experts; produces
+      ``[num_tokens*topk + maybe_padding, hidden]`` and per-expert
+      ``group_sizes`` of length ``num_experts``.
+    * ``_expert_ffn``: three ``grouped_dense`` calls + activation.
+      Operates on whatever ``(rows, group_sizes, n_groups)`` it is
+      handed -- agnostic to whether ``n_groups`` is the global expert
+      count (no-EP) or the local expert count (A2A-EP).
+    * ``_global_combine``: inverse of ``_global_permute`` -- gather +
+      weighted sum across top-k experts.
+
+    Two top-level forward variants compose those stages:
+
+    * ``_forward_no_ep``: route -> permute -> ffn -> combine. Each TE
+      primitive's ``custom_partitioning`` rule handles DP / FSDP / TP
+      automatically.
+    * ``_forward_a2a_ep``: wraps the body in :func:`jax.shard_map` and
+      inserts ``all_gather(group_sizes)`` + forward
+      ``ragged_all_to_all`` + local permute around the FFN, plus their
+      inverses afterwards. This is the only place ``shard_map`` is
+      used; A2A is the canonical EP strategy because the in-flight
+      NCCL EP component will require this same data layout.
+
+    Note on ``align_size > 0``
+    --------------------------
+
+    Both permutation backends pad each expert's group to a multiple of
+    ``align_size`` when requested, which is what cuBLASLt's grouped GEMM
+    wants for FP8 shape selection. The pure-JAX backend additionally
+    appends a zero-input padding tail to keep the buffer statically
+    sized for JIT, so ``sum(group_sizes) <= sorted_inputs.shape[0]``
+    strictly. The V1 grouped GEMM FFI asserts strict equality
+    ``m == sum(group_sizes)`` and is therefore incompatible with
+    ``align_size > 0``; the V2 cuBLASLt-backed grouped GEMM relaxes this
+    to ``m >= sum(group_sizes)`` and only iterates over the populated
+    ragged region. The ``align_size > 0`` tests therefore force
+    ``NVTE_JAX_ENFORCE_V2_GROUPED_GEMM=1`` and ``skip`` if V2 is not
+    supported on the target hardware / dtype.
 
     Two permutation backends are pluggable via ``permutation_backend``:
 
@@ -230,11 +228,11 @@ class MoEBlock(TransformerEngineBase):
     permutation_backend : str
         ``"pure_jax"`` (default) or ``"triton"``.
     align_size : int
-        Alignment for per-expert group sizes after padding. ``0`` disables
-        padding (the only supported configuration end-to-end today). ``>0``
-        is required for quantized TE grouped GEMM whose recipe-specific
-        alignment must divide ``align_size``; see the module docstring for
-        the FFI assertion that currently blocks ``>0`` for both backends.
+        Alignment for per-expert group sizes after padding. ``0``
+        disables padding. ``>0`` is required for quantized TE grouped
+        GEMM whose recipe-specific alignment must divide ``align_size``,
+        and requires the V2 cuBLASLt-backed grouped GEMM (see the
+        ``align_size > 0`` note in this docstring).
 
     dtype : jnp.dtype
         Compute and parameter dtype.

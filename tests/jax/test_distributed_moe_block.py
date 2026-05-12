@@ -168,6 +168,14 @@ class TestDistributedMoEBlock:
         assert_allclose(sharded_loss, single_loss, dtype=jnp.float32, atol=5e-2, rtol=5e-2)
         assert_allclose(sharded_aux, single_aux, dtype=jnp.float32, atol=5e-2, rtol=5e-2)
 
+        # The sharded path runs the same math on each ep-shard but
+        # accumulates gradients via psum across (ep, fsdp), which changes
+        # floating-point reduction order vs the single-device run. Under
+        # bf16 with these toy shapes the observed max-abs grad diff is on
+        # the order of a few units of bf16 eps (~1e-2). 5e-2 / 5e-2
+        # leaves headroom for accumulation jitter without masking real
+        # divergence; matches the cross-backend bf16 grad tolerance in
+        # ``tests/jax/test_moe_block.py::test_pure_jax_matches_triton``.
         for name in ("gate_kernel", "wi_0", "wi_1", "wo"):
             grad_single = _unwrap_partitioned(single_grads["params"][name])
             grad_sharded = _unwrap_partitioned(sharded_grads["params"][name])
@@ -175,7 +183,7 @@ class TestDistributedMoEBlock:
                 grad_sharded,
                 grad_single,
                 dtype=DTYPE,
-                atol=1e-1,
-                rtol=1e-1,
+                atol=5e-2,
+                rtol=5e-2,
                 err_msg=f"Distributed gradient mismatch for {name}",
             )
