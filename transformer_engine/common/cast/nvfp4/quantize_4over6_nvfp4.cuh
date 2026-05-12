@@ -234,12 +234,7 @@ template <bool USE_FAST_MATH, bool REVERSE_PACK_ORDER = false, typename scaling_
 __device__ __forceinline__ void quantize_4over6_16x(
     const float (&first_half)[8], const float (&second_half)[8],
     const QuantizationScales4Over6<scaling_coeff_type> &scaling_factors, const float global_amax,
-    nvfp4_scale_t &S_dec_b_fp8, uint32_t (&rOut)[2]) {
-  float err_map4 = 0.0f;
-  float err_map6 = 0.0f;
-  __align__(8) uint32_t rOut_map4[2];
-  __align__(8) uint32_t rOut_map6[2];
-
+    float &err_map4, float &err_map6, uint32_t (&rOut_map4)[2], uint32_t (&rOut_map6)[2]) {
   if constexpr (REVERSE_PACK_ORDER) {
     rOut_map4[1] = cvt_fp32_to_fp4_8x_with_mse_rn<USE_FAST_MATH>(
         second_half, static_cast<float>(scaling_factors.SFcoefficient_map4),
@@ -267,6 +262,21 @@ __device__ __forceinline__ void quantize_4over6_16x(
         second_half, static_cast<float>(scaling_factors.SFcoefficient_map6),
         scaling_factors.S_dec_b_fp8_map6, global_amax, &err_map6);
   }
+}
+
+template <bool USE_FAST_MATH, bool REVERSE_PACK_ORDER = false, typename scaling_coeff_type>
+__device__ __forceinline__ void quantize_4over6_16x(
+    const float (&first_half)[8], const float (&second_half)[8],
+    const QuantizationScales4Over6<scaling_coeff_type> &scaling_factors, const float global_amax,
+    nvfp4_scale_t &S_dec_b_fp8, uint32_t (&rOut)[2]) {
+  float err_map4 = 0.0f;
+  float err_map6 = 0.0f;
+  __align__(8) uint32_t rOut_map4[2];
+  __align__(8) uint32_t rOut_map6[2];
+
+  quantize_4over6_16x<USE_FAST_MATH, REVERSE_PACK_ORDER>(first_half, second_half, scaling_factors,
+                                                         global_amax, err_map4, err_map6, rOut_map4,
+                                                         rOut_map6);
 
   if (err_map4 < err_map6) {
     S_dec_b_fp8 = scaling_factors.S_dec_b_fp8_map4;
@@ -279,9 +289,183 @@ __device__ __forceinline__ void quantize_4over6_16x(
   }
 }
 
+struct QuantizationCandidates4Over6 {
+  float err_map4;
+  float err_map6;
+  uint32_t rOut_map4[2];
+  uint32_t rOut_map6[2];
+};
+
+template <bool USE_FAST_MATH, typename scaling_coeff_type>
+__device__ __forceinline__ void quantize_4over6_candidates_16x(
+    const float (&x)[16], const QuantizationScales4Over6<scaling_coeff_type> &scaling_factors,
+    const float global_amax, QuantizationCandidates4Over6 &candidates) {
+  float first_half[8];
+  float second_half[8];
+#pragma unroll
+  for (int i = 0; i < 8; ++i) {
+    first_half[i] = x[i];
+    second_half[i] = x[i + 8];
+  }
+
+  candidates.err_map4 = 0.0f;
+  candidates.err_map6 = 0.0f;
+  quantize_4over6_16x<USE_FAST_MATH>(first_half, second_half, scaling_factors, global_amax,
+                                     candidates.err_map4, candidates.err_map6, candidates.rOut_map4,
+                                     candidates.rOut_map6);
+}
+
+template <size_t BLOCK_DIM, size_t BLOCKS_PER_TILE_Y, size_t BLOCKS_PER_TILE_X>
+__device__ __forceinline__ void reduce_4over6_2d_block_selection(
+    const size_t block_in_tile_y, const size_t reduce_thread_idx, const float global_encode_scale,
+    const float global_decode_scale,
+    float (&block_amax_matrix)[BLOCKS_PER_TILE_Y][BLOCKS_PER_TILE_X + 1],
+    float (&err_map4_matrix)[BLOCKS_PER_TILE_Y][BLOCKS_PER_TILE_X][BLOCK_DIM],
+    float (&err_map6_matrix)[BLOCKS_PER_TILE_Y][BLOCKS_PER_TILE_X][BLOCK_DIM],
+    uint8_t (&pick_map4_matrix)[BLOCKS_PER_TILE_Y][BLOCKS_PER_TILE_X],
+    nvfp4_scale_t (&selected_scale_matrix)[BLOCKS_PER_TILE_Y][BLOCKS_PER_TILE_X]) {
+  if (reduce_thread_idx < BLOCKS_PER_TILE_X) {
+    const size_t reduce_block_x = reduce_thread_idx;
+    float block_err_map4 = 0.0f;
+    float block_err_map6 = 0.0f;
+#pragma unroll
+    for (int i = 0; i < BLOCK_DIM; ++i) {
+      block_err_map4 += err_map4_matrix[block_in_tile_y][reduce_block_x][i];
+      block_err_map6 += err_map6_matrix[block_in_tile_y][reduce_block_x][i];
+    }
+
+    const auto scaling_factors = compute_4over6_fp4_encode_quantization_scaling_factors(
+        block_amax_matrix[block_in_tile_y][reduce_block_x], global_encode_scale,
+        global_decode_scale);
+    if (block_err_map4 < block_err_map6) {
+      pick_map4_matrix[block_in_tile_y][reduce_block_x] = 1;
+      selected_scale_matrix[block_in_tile_y][reduce_block_x] = scaling_factors.S_dec_b_fp8_map4;
+    } else {
+      pick_map4_matrix[block_in_tile_y][reduce_block_x] = 0;
+      selected_scale_matrix[block_in_tile_y][reduce_block_x] = scaling_factors.S_dec_b_fp8_map6;
+    }
+  }
+}
+
+template <size_t BLOCK_DIM, size_t BLOCKS_PER_TILE_Y, size_t BLOCKS_PER_TILE_X>
+__device__ __forceinline__ void record_and_reduce_4over6_2d_block_selection(
+    const float block_amax, const float global_encode_scale, const float global_decode_scale,
+    const size_t block_in_tile_y, const size_t block_in_tile_x, const size_t participant_idx,
+    float (&err_map4_matrix)[BLOCKS_PER_TILE_Y][BLOCKS_PER_TILE_X][BLOCK_DIM],
+    float (&err_map6_matrix)[BLOCKS_PER_TILE_Y][BLOCKS_PER_TILE_X][BLOCK_DIM],
+    uint8_t (&pick_map4_matrix)[BLOCKS_PER_TILE_Y][BLOCKS_PER_TILE_X],
+    nvfp4_scale_t (&selected_scale_matrix)[BLOCKS_PER_TILE_Y][BLOCKS_PER_TILE_X],
+    const QuantizationCandidates4Over6 &candidates) {
+  err_map4_matrix[block_in_tile_y][block_in_tile_x][participant_idx] = candidates.err_map4;
+  err_map6_matrix[block_in_tile_y][block_in_tile_x][participant_idx] = candidates.err_map6;
+  __syncthreads();
+
+  if (participant_idx == 0) {
+    float block_err_map4 = 0.0f;
+    float block_err_map6 = 0.0f;
+#pragma unroll
+    for (int i = 0; i < BLOCK_DIM; ++i) {
+      block_err_map4 += err_map4_matrix[block_in_tile_y][block_in_tile_x][i];
+      block_err_map6 += err_map6_matrix[block_in_tile_y][block_in_tile_x][i];
+    }
+
+    const auto scaling_factors = compute_4over6_fp4_encode_quantization_scaling_factors(
+        block_amax, global_encode_scale, global_decode_scale);
+    if (block_err_map4 < block_err_map6) {
+      pick_map4_matrix[block_in_tile_y][block_in_tile_x] = 1;
+      selected_scale_matrix[block_in_tile_y][block_in_tile_x] = scaling_factors.S_dec_b_fp8_map4;
+    } else {
+      pick_map4_matrix[block_in_tile_y][block_in_tile_x] = 0;
+      selected_scale_matrix[block_in_tile_y][block_in_tile_x] = scaling_factors.S_dec_b_fp8_map6;
+    }
+  }
+  __syncthreads();
+}
+
+template <bool USE_FAST_MATH, size_t BLOCK_DIM, size_t BLOCKS_PER_TILE_Y, size_t BLOCKS_PER_TILE_X>
+__device__ __forceinline__ void quantize_4over6_2d_block_candidate(
+    const float (&x)[16], const float block_amax, const float global_encode_scale,
+    const float global_decode_scale, const float global_amax, const size_t block_in_tile_y,
+    const size_t block_in_tile_x, const size_t participant_idx, const size_t reduce_thread_idx,
+    float (&block_amax_matrix)[BLOCKS_PER_TILE_Y][BLOCKS_PER_TILE_X + 1],
+    float (&err_map4_matrix)[BLOCKS_PER_TILE_Y][BLOCKS_PER_TILE_X][BLOCK_DIM],
+    float (&err_map6_matrix)[BLOCKS_PER_TILE_Y][BLOCKS_PER_TILE_X][BLOCK_DIM],
+    uint8_t (&pick_map4_matrix)[BLOCKS_PER_TILE_Y][BLOCKS_PER_TILE_X],
+    nvfp4_scale_t (&selected_scale_matrix)[BLOCKS_PER_TILE_Y][BLOCKS_PER_TILE_X],
+    QuantizationCandidates4Over6 &candidates) {
+  const auto scaling_factors = compute_4over6_fp4_encode_quantization_scaling_factors(
+      block_amax, global_encode_scale, global_decode_scale);
+  quantize_4over6_candidates_16x<USE_FAST_MATH>(x, scaling_factors, global_amax, candidates);
+
+  err_map4_matrix[block_in_tile_y][block_in_tile_x][participant_idx] = candidates.err_map4;
+  err_map6_matrix[block_in_tile_y][block_in_tile_x][participant_idx] = candidates.err_map6;
+  __syncthreads();
+
+  reduce_4over6_2d_block_selection<BLOCK_DIM, BLOCKS_PER_TILE_Y, BLOCKS_PER_TILE_X>(
+      block_in_tile_y, reduce_thread_idx, global_encode_scale, global_decode_scale,
+      block_amax_matrix, err_map4_matrix, err_map6_matrix, pick_map4_matrix, selected_scale_matrix);
+  __syncthreads();
+}
+
+__device__ __forceinline__ uint32_t *selected_4over6_packed(
+    const bool pick_map4, QuantizationCandidates4Over6 &candidates) {
+  if (pick_map4) {
+    return candidates.rOut_map4;
+  }
+  return candidates.rOut_map6;
+}
+
+template <typename output_type>
+__device__ __forceinline__ void store_4over6_colwise_packed_16x(
+    const bool pick_map4, QuantizationCandidates4Over6 &candidates, const int thread_lane,
+    output_type *out_t_data_sh, const size_t shmem_offset_base_colwise_out_t) {
+  uint32_t *regs_4x = selected_4over6_packed(pick_map4, candidates);
+  const int group = thread_lane / 16;
+  uint32_t val[2];
+  switch (group) {
+    case 0:
+      val[0] = regs_4x[0];
+      val[1] = regs_4x[1];
+      break;
+    case 1:
+      val[0] = regs_4x[1];
+      val[1] = regs_4x[0];
+      break;
+  }
+  uint32_t *out_t_data_sh_as_uint32_t =
+      reinterpret_cast<uint32_t *>(&out_t_data_sh[shmem_offset_base_colwise_out_t]);
+  out_t_data_sh_as_uint32_t[group] = val[0];            // idx1 = (group + 0) % 2;
+  out_t_data_sh_as_uint32_t[(group + 1) & 1] = val[1];  // idx2 = (group + 1) % 2;
+}
+
+template <size_t WAVES, size_t PACK_SIZE, size_t SCALE_DIM, typename output_type>
+__device__ __forceinline__ void store_4over6_rowwise_packed_16x(
+    const bool pick_map4, QuantizationCandidates4Over6 &candidates, const int bank_group,
+    const size_t thread_offset_X_rowwise, const size_t shmem_offset_base_rowwise_out,
+    output_type *out_data_sh) {
+  uint32_t *packed = selected_4over6_packed(pick_map4, candidates);
+#pragma unroll
+  for (int w = 0; w < WAVES; ++w) {
+    const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM;
+    const size_t swizzled_idx = swizzled_group_idx + thread_offset_X_rowwise;
+    const size_t shmem_offset_rowwise = shmem_offset_base_rowwise_out + swizzled_idx / 2;
+    uint32_t *out_data_sh_as_uint32_t =
+        reinterpret_cast<uint32_t *>(&out_data_sh[shmem_offset_rowwise]);
+    out_data_sh_as_uint32_t[0] = packed[swizzled_group_idx / PACK_SIZE];
+  }
+}
+
 template <typename output_vec_type>
 __device__ __forceinline__ void store_4over6_packed_16x(const uint32_t (&packed)[2],
                                                         output_vec_type &output_vec) {
+  *reinterpret_cast<uint32_t *>(&output_vec.data.elt[0]) = packed[0];
+  *reinterpret_cast<uint32_t *>(&output_vec.data.elt[4]) = packed[1];
+}
+
+template <typename output_vec_type>
+__device__ __forceinline__ void store_selected_4over6_packed_16x(
+    const bool pick_map4, QuantizationCandidates4Over6 &candidates, output_vec_type &output_vec) {
+  uint32_t *packed = selected_4over6_packed(pick_map4, candidates);
   *reinterpret_cast<uint32_t *>(&output_vec.data.elt[0]) = packed[0];
   *reinterpret_cast<uint32_t *>(&output_vec.data.elt[4]) = packed[1];
 }
@@ -322,6 +506,27 @@ __device__ __forceinline__ void quantize_4over6_pair_array_16x(
                                                          global_amax, S_dec_b_fp8, rOut);
 }
 
+template <bool USE_FAST_MATH, typename scaling_coeff_type, typename vec_type>
+__device__ __forceinline__ void quantize_4over6_vec2_array_candidates_16x(
+    const vec_type (&x)[8], const QuantizationScales4Over6<scaling_coeff_type> &scaling_factors,
+    const float global_amax, QuantizationCandidates4Over6 &candidates) {
+  float first_half[8];
+  float second_half[8];
+#pragma unroll
+  for (int i = 0; i < 4; ++i) {
+    first_half[2 * i] = static_cast<float>(x[i].data.elt[0]);
+    first_half[2 * i + 1] = static_cast<float>(x[i].data.elt[1]);
+    second_half[2 * i] = static_cast<float>(x[i + 4].data.elt[0]);
+    second_half[2 * i + 1] = static_cast<float>(x[i + 4].data.elt[1]);
+  }
+
+  candidates.err_map4 = 0.0f;
+  candidates.err_map6 = 0.0f;
+  quantize_4over6_16x<USE_FAST_MATH>(first_half, second_half, scaling_factors, global_amax,
+                                     candidates.err_map4, candidates.err_map6, candidates.rOut_map4,
+                                     candidates.rOut_map6);
+}
+
 template <bool USE_FAST_MATH, bool REVERSE_PACK_ORDER = false, typename scaling_coeff_type,
           typename vec_type>
 __device__ __forceinline__ void quantize_4over6_vec2_array_16x(
@@ -339,6 +544,26 @@ __device__ __forceinline__ void quantize_4over6_vec2_array_16x(
 
   quantize_4over6_16x<USE_FAST_MATH, REVERSE_PACK_ORDER>(first_half, second_half, scaling_factors,
                                                          global_amax, S_dec_b_fp8, rOut);
+}
+
+template <bool USE_FAST_MATH, typename scaling_coeff_type, typename vec_type>
+__device__ __forceinline__ void quantize_4over6_vec_index_candidates_16x(
+    const vec_type (&x)[16], const int idx,
+    const QuantizationScales4Over6<scaling_coeff_type> &scaling_factors, const float global_amax,
+    QuantizationCandidates4Over6 &candidates) {
+  float first_half[8];
+  float second_half[8];
+#pragma unroll
+  for (int i = 0; i < 8; ++i) {
+    first_half[i] = static_cast<float>(x[i].data.elt[idx]);
+    second_half[i] = static_cast<float>(x[i + 8].data.elt[idx]);
+  }
+
+  candidates.err_map4 = 0.0f;
+  candidates.err_map6 = 0.0f;
+  quantize_4over6_16x<USE_FAST_MATH>(first_half, second_half, scaling_factors, global_amax,
+                                     candidates.err_map4, candidates.err_map6, candidates.rOut_map4,
+                                     candidates.rOut_map6);
 }
 
 template <bool USE_FAST_MATH, bool REVERSE_PACK_ORDER = false, typename scaling_coeff_type,

@@ -365,8 +365,8 @@ class NVFP4QuantizerRef(Quantizer):
         if use_4over6:
             if pow_2_scales:
                 raise ValueError("4over6 is only supported for NVFP4 (non-pow2) mode.")
-            if quant_tile_shape != (1, 16):
-                raise ValueError("4over6 reference quantization only supports 1x16 tiles.")
+            if quant_tile_shape not in ((1, 16), (16, 16)):
+                raise ValueError("4over6 reference quantization only supports 1x16 or 16x16 tiles.")
             if with_rht:
                 raise ValueError("4over6 reference quantization does not support RHT.")
         super().__init__(rowwise=rowwise, columnwise=columnwise)
@@ -464,6 +464,7 @@ class NVFP4QuantizerRef(Quantizer):
         global_encode_scale: torch.Tensor,
         global_decode_scale: torch.Tensor,
         row_scaled_nvfp4: bool,
+        tile_len_y: int,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Quantize NVFP4 with 4over6 candidate selection.
 
@@ -537,7 +538,12 @@ class NVFP4QuantizerRef(Quantizer):
             val_map6 = val_map6 / denom
             diff_map6 = val_map6 - x_float[:, :, idx]
             err_map6 = err_map6 + (diff_map6 * diff_map6).unsqueeze(-1)
-        pick_map4 = err_map4 < err_map6
+        if tile_len_y == 1:
+            pick_map4 = err_map4 < err_map6
+        else:
+            err_map4_blocks = err_map4.view(m // tile_len_y, tile_len_y, num_blocks, 1).sum(dim=1)
+            err_map6_blocks = err_map6.view(m // tile_len_y, tile_len_y, num_blocks, 1).sum(dim=1)
+            pick_map4 = (err_map4_blocks < err_map6_blocks).repeat_interleave(tile_len_y, dim=0)
         qx = torch.where(
             pick_map4.expand(-1, -1, tile_len_x // 2),
             qx_map4.view(m, num_blocks, tile_len_x // 2),
@@ -601,8 +607,6 @@ class NVFP4QuantizerRef(Quantizer):
                 decode_scale.to(torch.float32),
             )
         else:
-            if use_4over6 and using_2d_quantization:
-                raise ValueError("4over6 reference quantization does not support 2D quantization.")
             if row_scaled_nvfp4:
                 global_amax = global_amax.to(torch.float32).view(m, 1, 1)
 
@@ -636,6 +640,7 @@ class NVFP4QuantizerRef(Quantizer):
                     global_encode_scale,
                     global_decode_scale,
                     row_scaled_nvfp4,
+                    tile_len_y,
                 )
 
             global_encode_scale_multiplier = global_encode_scale * torch.reciprocal(FLOAT4_E2M1_MAX)

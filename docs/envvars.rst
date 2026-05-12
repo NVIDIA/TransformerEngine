@@ -291,7 +291,7 @@ Kernel Configuration
 
    :Type: ``str`` (``weights``, ``activations``, or ``all``)
    :Default: unset
-   :Description: Enable per-block map-to-4 versus map-to-6 candidate selection for selected NVFP4 1D quantizers in the ``NVFP4BlockScaling`` recipe. ``weights`` selects weight tensor roles, ``activations`` selects non-weight tensor roles, and ``all`` selects both. The selected block scale is the candidate with lower input-domain MSE, and ties select map-to-6. This mode uses 256 as the global E4M3 scale bound instead of the 448 bound, and currently requires RHT, stochastic rounding, and 2D quantization to be disabled.
+   :Description: Enable per-block map-to-4 versus map-to-6 candidate selection for selected NVFP4 quantizers in the ``NVFP4BlockScaling`` recipe. ``weights`` selects weight tensor roles, ``activations`` selects non-weight tensor roles, and ``all`` selects both. The selected block scale is the candidate with lower input-domain MSE, and ties select map-to-6. This mode uses 256 as the global E4M3 scale bound instead of the 448 bound. Tensors using 4over6 currently require RHT and stochastic rounding to be disabled.
 
 Torch Compilation and Fusion
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

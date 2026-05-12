@@ -2298,8 +2298,6 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
 
   if (this->use_4over6) {
     NVTE_CHECK(!this->with_rht, "NVFP4 4over6 quantization does not support RHT.");
-    NVTE_CHECK(!this->with_2d_quantization,
-               "NVFP4 4over6 quantization does not support 2D quantization.");
     NVTE_CHECK(!this->stochastic_rounding,
                "NVFP4 4over6 quantization does not support stochastic rounding.");
   }

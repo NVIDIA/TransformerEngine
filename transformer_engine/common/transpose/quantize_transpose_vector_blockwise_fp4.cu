@@ -361,6 +361,12 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
       kIs2DBlockScaling ? (kFP4BlockScalingSize / kNumRowsPerWarp) : 1;
   __shared__ CType amax_smem_red[k2DBlockAmaxDim][k2DBlockAmaxDim][k2DBlockAmaxReduceDim];
   __shared__ CType amax_smem[k2DBlockAmaxDim][k2DBlockAmaxDim];
+  constexpr int k4Over62DSelectionDim =
+      (kUse4Over6 && kIs2DBlockScaling) ? kFP4BlockScalingSize : 1;
+  __shared__ float err_map4_smem[k2DBlockAmaxDim][k2DBlockAmaxDim][k4Over62DSelectionDim];
+  __shared__ float err_map6_smem[k2DBlockAmaxDim][k2DBlockAmaxDim][k4Over62DSelectionDim];
+  __shared__ uint8_t pick_map4_smem[k2DBlockAmaxDim][k2DBlockAmaxDim];
+  __shared__ ScaleType selected_scale_smem[k2DBlockAmaxDim][k2DBlockAmaxDim];
 
   // Step 1: Load input to shared memory
   {
@@ -530,11 +536,37 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
           row_global_amax = global_amax[0];
         }
 
-        uint32_t output_vec_4over6[2];
-        transformer_engine::dispatch::nvfp4::core::quantize_4over6_vec2_array_16x<kUseFastMath>(
-            smem_vec, scaling_factors, row_global_amax, scale_inv, output_vec_4over6);
-        transformer_engine::dispatch::nvfp4::core::store_4over6_packed_16x(output_vec_4over6,
-                                                                           output_vec);
+        if constexpr (kIs2DBlockScaling) {
+          constexpr int kNumRowsPerIter = kThreadsPerBlock / kNumThreadsStore;
+          const int warp_idx = threadIdx.x / kThreadsPerWarp;
+          const int tid_in_warp_x = threadIdx.x % kNumThreadsStore;
+          const int tid_in_warp_y = (threadIdx.x / kNumThreadsStore) % kNumRowsPerWarp;
+          const int data_row_idx =
+              iter * kNumRowsPerIter + warp_idx * kNumRowsPerWarp + tid_in_warp_y;
+          const size_t block_in_tile_y = data_row_idx / kFP4BlockScalingSize;
+          const size_t block_in_tile_x = tid_in_warp_x;
+          const size_t participant_idx = data_row_idx % kFP4BlockScalingSize;
+
+          transformer_engine::dispatch::nvfp4::core::QuantizationCandidates4Over6 candidates;
+          transformer_engine::dispatch::nvfp4::core::quantize_4over6_vec2_array_candidates_16x<
+              kUseFastMath>(smem_vec, scaling_factors, row_global_amax, candidates);
+          transformer_engine::dispatch::nvfp4::core::record_and_reduce_4over6_2d_block_selection<
+              kFP4BlockScalingSize, k2DBlockAmaxDim, k2DBlockAmaxDim>(
+              amax, row_global_encode_scale, row_global_decode_scale, block_in_tile_y,
+              block_in_tile_x, participant_idx, err_map4_smem, err_map6_smem, pick_map4_smem,
+              selected_scale_smem, candidates);
+
+          const bool pick_map4 = pick_map4_smem[block_in_tile_y][block_in_tile_x] == 1;
+          scale_inv = selected_scale_smem[block_in_tile_y][block_in_tile_x];
+          transformer_engine::dispatch::nvfp4::core::store_selected_4over6_packed_16x(
+              pick_map4, candidates, output_vec);
+        } else {
+          uint32_t output_vec_4over6[2];
+          transformer_engine::dispatch::nvfp4::core::quantize_4over6_vec2_array_16x<kUseFastMath>(
+              smem_vec, scaling_factors, row_global_amax, scale_inv, output_vec_4over6);
+          transformer_engine::dispatch::nvfp4::core::store_4over6_packed_16x(output_vec_4over6,
+                                                                             output_vec);
+        }
       } else {
         scale_inv = ComputeDecodeScaleFP4<ScaleType>(amax, row_global_encode_scale_multiplier);
         encode_scale = ComputeEncodeScaleFP4<ScaleType>(scale_inv, row_global_decode_scale);
@@ -670,11 +702,39 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
               compute_4over6_fp4_encode_quantization_scaling_factors(amax, global_encode_scale,
                                                                      global_decode_scale);
 
-          uint32_t output_vec_4over6[2];
-          transformer_engine::dispatch::nvfp4::core::quantize_4over6_vec_index_16x<kUseFastMath>(
-              smem_vec, smem_idx, scaling_factors, global_amax[0], scale_inv, output_vec_4over6);
-          transformer_engine::dispatch::nvfp4::core::store_4over6_packed_16x(output_vec_4over6,
-                                                                             output_vec);
+          if constexpr (kIs2DBlockScaling) {
+            const int warp_idx = threadIdx.x / kThreadsPerWarp;
+            constexpr int kNumColsPerWarp = kThreadsPerWarp / kNumThreadsStore * kNVecSMem;
+            constexpr int kNumWarpsPerBlock = kThreadsPerBlock / kThreadsPerWarp;
+            constexpr int kNumColsPerIter = kNumColsPerWarp * kNumWarpsPerBlock;
+            const int tid_in_warp_x = (threadIdx.x / kNumThreadsStore) % kNumColsPerWarp;
+            const int tid_in_warp_y = (threadIdx.x % kThreadsPerWarp) % kNumThreadsStore;
+            const int data_col_idx =
+                iter * kNumColsPerIter + warp_idx * kNumColsPerWarp + tid_in_warp_x;
+            const size_t block_in_tile_y = tid_in_warp_y;
+            const size_t block_in_tile_x = data_col_idx / kFP4BlockScalingSize;
+            const size_t participant_idx = data_col_idx % kFP4BlockScalingSize;
+
+            transformer_engine::dispatch::nvfp4::core::QuantizationCandidates4Over6 candidates;
+            transformer_engine::dispatch::nvfp4::core::quantize_4over6_vec_index_candidates_16x<
+                kUseFastMath>(smem_vec, smem_idx, scaling_factors, global_amax[0], candidates);
+            transformer_engine::dispatch::nvfp4::core::record_and_reduce_4over6_2d_block_selection<
+                kFP4BlockScalingSize, k2DBlockAmaxDim, k2DBlockAmaxDim>(
+                amax, global_encode_scale, global_decode_scale, block_in_tile_y, block_in_tile_x,
+                participant_idx, err_map4_smem, err_map6_smem, pick_map4_smem, selected_scale_smem,
+                candidates);
+
+            const bool pick_map4 = pick_map4_smem[block_in_tile_y][block_in_tile_x] == 1;
+            scale_inv = selected_scale_smem[block_in_tile_y][block_in_tile_x];
+            transformer_engine::dispatch::nvfp4::core::store_selected_4over6_packed_16x(
+                pick_map4, candidates, output_vec);
+          } else {
+            uint32_t output_vec_4over6[2];
+            transformer_engine::dispatch::nvfp4::core::quantize_4over6_vec_index_16x<kUseFastMath>(
+                smem_vec, smem_idx, scaling_factors, global_amax[0], scale_inv, output_vec_4over6);
+            transformer_engine::dispatch::nvfp4::core::store_4over6_packed_16x(output_vec_4over6,
+                                                                               output_vec);
+          }
         } else {
           scale_inv = ComputeDecodeScaleFP4<ScaleType>(amax, global_encode_scale_multiplier);
           encode_scale = ComputeEncodeScaleFP4<ScaleType>(scale_inv, global_decode_scale);
@@ -772,8 +832,6 @@ void quantize_transpose_vector_blockwise_fp4(
              "Row-scaled NVFP4 quantization only supports rowwise quantization.");
   NVTE_CHECK(!row_scaled_nvfp4 || !use_2d_quantization,
              "Row-scaled NVFP4 quantization does not support 2D quantization.");
-  NVTE_CHECK(!use_4over6 || !use_2d_quantization,
-             "NVFP4 4over6 quantization does not support 2D quantization.");
   NVTE_CHECK(!use_4over6 || !use_stochastic_rounding,
              "NVFP4 4over6 quantization does not support stochastic rounding.");
 

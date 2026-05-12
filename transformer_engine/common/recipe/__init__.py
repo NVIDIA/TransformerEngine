@@ -524,11 +524,13 @@ class NVFP4BlockScaling(Recipe):
              NVFP4 tensors. In this mode, rowwise ``amax`` metadata is stored
              as a vector with one FP32 value per tensor row.
     nvfp4_4over6 : {None, 'weights', 'activations', 'all'}, default = None
-             Select tensors that use NVFP4 4over6. In this mode NVFP4 1D
+             Select tensors that use NVFP4 4over6. In this mode NVFP4
              quantization evaluates per-block map-to-4 and map-to-6 candidates
              and chooses the one with lower MSE. Ties choose map-to-6. The
              global E4M3 scale bound is 256 in this mode instead of 448. The
              ``activations`` scope applies to every non-weight tensor role.
+             Random Hadamard transforms and stochastic rounding are not yet
+             supported on tensors that use 4over6.
     backward_override : {None, 'high_precision', 'dequantized'}, default = None
             Backward precision mode. None does not modify backward behavior,
             `high_precision` keeps original high-precision operands for backward,
@@ -562,14 +564,11 @@ class NVFP4BlockScaling(Recipe):
         assert (
             self.nvfp4_4over6 in _NVFP4_4OVER6_SCOPES
         ), "NVTE_NVFP4_4OVER6 must be unset or one of: 'weights', 'activations', 'all'."
-        if self.nvfp4_4over6 is not None:
+        if self.nvfp4_4over6 in ("activations", "all"):
             assert self.disable_rht, "NVFP4 4over6 currently requires RHT to be disabled"
             assert (
                 self.disable_stochastic_rounding
             ), "NVFP4 4over6 currently requires stochastic rounding to be disabled"
-            assert (
-                self.disable_2d_quantization
-            ), "NVFP4 4over6 currently requires 2D quantization to be disabled"
 
         # Quantization params
         # Note: RHT is currently only applied to column-wise usage so that

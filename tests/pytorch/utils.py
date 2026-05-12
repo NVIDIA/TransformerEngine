@@ -146,12 +146,13 @@ def make_recipe(name: Optional[str], **recipe_kwargs: Any) -> Optional[Recipe]:
     if name == "fp8_block_scaling":
         return transformer_engine.common.recipe.Float8BlockScaling(**recipe_kwargs)
     if "nvfp4" in name:
+        use_4over6 = "4over6" in name
         kwargs = {
             "disable_rht": True,
             "disable_stochastic_rounding": True,
-            "disable_2d_quantization": True,
+            "disable_2d_quantization": not use_4over6,
             "row_scaled_activation": "row_scaled" in name,
-            "nvfp4_4over6": "all" if "4over6" in name else None,
+            "nvfp4_4over6": "all" if use_4over6 else None,
         }
         kwargs.update(recipe_kwargs)
         return transformer_engine.common.recipe.NVFP4BlockScaling(**kwargs)

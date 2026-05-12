@@ -21,9 +21,13 @@ def maybe_skip_row_scaled_unsupported_quantization(
     return_transpose: bool,
     with_2d_quantization: bool = False,
     use_4over6: bool = False,
+    x_dtype: torch.dtype | None = None,
+    M: int | None = None,
+    N: int | None = None,
 ) -> None:
     if use_4over6 and with_2d_quantization:
-        pytest.skip("NVFP4 4over6 does not support 2D quantization")
+        if x_dtype != torch.bfloat16 or M is None or N is None or M % 32 != 0 or N % 32 != 0:
+            pytest.skip("NVFP4 2D 4over6 exact tests require the optimized BF16 kernel path")
     if not row_scaled_nvfp4:
         return
     if return_transpose:
@@ -51,7 +55,7 @@ def check_quantization_nvfp4_versus_reference(
     use_4over6: bool = False,
 ) -> None:
     maybe_skip_row_scaled_unsupported_quantization(
-        row_scaled_nvfp4, return_transpose, with_2d_quantization, use_4over6
+        row_scaled_nvfp4, return_transpose, with_2d_quantization, use_4over6, x_dtype, M, N
     )
 
     te_dtype = tex.DType.kFloat4E2M1
