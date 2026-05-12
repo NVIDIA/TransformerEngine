@@ -312,6 +312,14 @@ struct QuantizationCandidates4Over6 {
   uint32_t rOut_map6[2];
 };
 
+template <size_t BLOCK_DIM, size_t BLOCKS_PER_TILE_Y, size_t BLOCKS_PER_TILE_X>
+struct alignas(16) QuantizationScratch4Over6 {
+  alignas(16) float err_map4_matrix[BLOCKS_PER_TILE_Y][BLOCKS_PER_TILE_X][BLOCK_DIM];
+  alignas(16) float err_map6_matrix[BLOCKS_PER_TILE_Y][BLOCKS_PER_TILE_X][BLOCK_DIM];
+  alignas(16) uint8_t pick_map4_matrix[BLOCKS_PER_TILE_Y][BLOCKS_PER_TILE_X];
+  alignas(16) nvfp4_scale_t selected_scale_matrix[BLOCKS_PER_TILE_Y][BLOCKS_PER_TILE_X];
+};
+
 template <bool USE_FAST_MATH, typename scaling_coeff_type>
 __device__ __forceinline__ void quantize_4over6_candidates_16x(
     const float (&x)[16], const QuantizationScales4Over6<scaling_coeff_type> &scaling_factors,
@@ -368,15 +376,25 @@ __device__ __forceinline__ bool record_and_select_4over6_2d_block(
   return pick_map4_matrix[block_in_tile_y][block_in_tile_x] != 0;
 }
 
+template <size_t BLOCK_DIM, size_t BLOCKS_PER_TILE_Y, size_t BLOCKS_PER_TILE_X,
+          typename scaling_coeff_type>
+__device__ __forceinline__ bool record_and_select_4over6_2d_block(
+    const QuantizationScales4Over6<scaling_coeff_type> &scaling_factors,
+    const size_t block_in_tile_y, const size_t block_in_tile_x, const size_t participant_idx,
+    QuantizationScratch4Over6<BLOCK_DIM, BLOCKS_PER_TILE_Y, BLOCKS_PER_TILE_X> &scratch,
+    nvfp4_scale_t &S_dec_b_fp8, const QuantizationCandidates4Over6 &candidates) {
+  return record_and_select_4over6_2d_block<BLOCK_DIM, BLOCKS_PER_TILE_Y, BLOCKS_PER_TILE_X>(
+      scaling_factors, block_in_tile_y, block_in_tile_x, participant_idx,
+      scratch.err_map4_matrix, scratch.err_map6_matrix, scratch.pick_map4_matrix,
+      scratch.selected_scale_matrix, S_dec_b_fp8, candidates);
+}
+
 template <bool USE_FAST_MATH, size_t BLOCK_DIM, size_t BLOCKS_PER_TILE_Y, size_t BLOCKS_PER_TILE_X>
 __device__ __forceinline__ bool quantize_and_select_4over6_2d_block_16x(
     const float (&x)[16], const float block_amax, const float global_encode_scale,
     const float global_decode_scale, const float global_amax, const size_t block_in_tile_y,
     const size_t block_in_tile_x, const size_t participant_idx,
-    float (&err_map4_matrix)[BLOCKS_PER_TILE_Y][BLOCKS_PER_TILE_X][BLOCK_DIM],
-    float (&err_map6_matrix)[BLOCKS_PER_TILE_Y][BLOCKS_PER_TILE_X][BLOCK_DIM],
-    uint8_t (&pick_map4_matrix)[BLOCKS_PER_TILE_Y][BLOCKS_PER_TILE_X],
-    nvfp4_scale_t (&selected_scale_matrix)[BLOCKS_PER_TILE_Y][BLOCKS_PER_TILE_X],
+    QuantizationScratch4Over6<BLOCK_DIM, BLOCKS_PER_TILE_Y, BLOCKS_PER_TILE_X> &scratch,
     nvfp4_scale_t &S_dec_b_fp8, QuantizationCandidates4Over6 &candidates) {
   const auto scaling_factors = compute_4over6_fp4_encode_quantization_scaling_factors(
       block_amax, global_encode_scale, global_decode_scale);
@@ -384,8 +402,8 @@ __device__ __forceinline__ bool quantize_and_select_4over6_2d_block_16x(
 
   const bool pick_map4 =
       record_and_select_4over6_2d_block<BLOCK_DIM, BLOCKS_PER_TILE_Y, BLOCKS_PER_TILE_X>(
-          scaling_factors, block_in_tile_y, block_in_tile_x, participant_idx, err_map4_matrix,
-          err_map6_matrix, pick_map4_matrix, selected_scale_matrix, S_dec_b_fp8, candidates);
+          scaling_factors, block_in_tile_y, block_in_tile_x, participant_idx, scratch,
+          S_dec_b_fp8, candidates);
   return pick_map4;
 }
 
