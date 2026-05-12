@@ -58,6 +58,29 @@ _softmax_offset_chunk_ids_cache = {}
 _dpa_fp8_cs_o_in_f16 = os.getenv("NVTE_DPA_FP8CS_O_in_F16", "1") == "1"
 
 
+def _reject_custom_recipe_under_cp(fp8, fp8_recipe):
+    """Fail fast when CustomRecipe meets context-parallel FP8 attention.
+
+    Single-device FP8 attention dispatch was migrated to read quantizer
+    instance types (see ``backends._qkv_quantizer_type`` and
+    ``utils.get_attention_quantizers``), which makes CustomRecipe work end
+    to end. The CP code path in this module still dispatches on
+    ``fp8_recipe.<predicate>()`` at ~90 sites; under CustomRecipe those
+    predicates all return False and the dispatch silently falls through to
+    incorrect tensor save / amax-reduction shapes. Until that migration
+    lands, surface the limitation here with a clear error rather than
+    failing later in C++ assertions or with silently-wrong gradients.
+    """
+    if fp8 and fp8_recipe is not None and fp8_recipe.custom():
+        raise NotImplementedError(
+            "CustomRecipe + Context Parallelism is not yet supported for FP8 "
+            "DotProductAttention. Either disable context parallelism, or use a "
+            "built-in FP8 recipe (DelayedScaling, Float8CurrentScaling, "
+            "MXFP8BlockScaling) for CP. The single-device CustomRecipe + DPA "
+            "path is supported."
+        )
+
+
 def get_bsh_dims(tensor_format):
     """Get batch dimension and sequence dimension from tensor format"""
     if tensor_format in ["bshd", "sbhd", "bhsd"]:
@@ -1453,6 +1476,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
         if fp8_meta is not None and fp8_meta.get("local_recipes", None) is not None:
             fp8_recipe = fp8_meta["local_recipes"][0]
+        _reject_custom_recipe_under_cp(fp8, fp8_recipe)
         (
             QKV_quantizer,
             O_quantizer,
@@ -1460,7 +1484,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             dQKV_quantizer,
             dO_quantizer,
             dP_quantizer,
-        ) = dpa_utils.get_attention_quantizers(fp8, fp8_recipe, quantizers)
+        ) = dpa_utils.get_attention_quantizers(fp8, quantizers)
 
         # q, k, v a2a: gather s and split h
         # FP8DS/CS: Float8Tensor -> torch.uint8 -> Float8Tensor
@@ -3043,6 +3067,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
         if fp8_meta is not None and fp8_meta.get("local_recipes", None) is not None:
             fp8_recipe = fp8_meta["local_recipes"][0]
+        _reject_custom_recipe_under_cp(fp8, fp8_recipe)
         (
             QKV_quantizer,
             O_quantizer,
@@ -3050,7 +3075,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             dQKV_quantizer,
             dO_quantizer,
             dP_quantizer,
-        ) = dpa_utils.get_attention_quantizers(fp8, fp8_recipe, quantizers)
+        ) = dpa_utils.get_attention_quantizers(fp8, quantizers)
         fwd_nominal_dtype = q.dtype
         q_fp8, k_fp8, v_fp8 = (q, k, v) if is_input_fp8 else (None, None, None)
         q_f16, k_f16, v_f16 = (None, None, None) if is_input_fp8 else (q, k, v)
@@ -3904,13 +3929,14 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
         if fp8_meta is not None and fp8_meta.get("local_recipes", None) is not None:
             fp8_recipe = fp8_meta["local_recipes"][0]
+        _reject_custom_recipe_under_cp(fp8, fp8_recipe)
 
         fwd_nominal_dtype = q.dtype
         fused_attn_backend = None
         max_logit = None
 
         QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer = (
-            dpa_utils.get_attention_quantizers(fp8, fp8_recipe, quantizers)
+            dpa_utils.get_attention_quantizers(fp8, quantizers)
         )
 
         q_fp8, k_fp8, v_fp8 = (None, None, None)

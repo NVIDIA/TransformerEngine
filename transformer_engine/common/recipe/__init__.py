@@ -558,19 +558,33 @@ class CustomRecipe(Recipe):
     Parameters
     ----------
     qfactory : Callable
-        Factory callable that returns a quantizer instance for a
-        given semantic tensor role.
-        The callable is typically invoked as::
+        Factory callable that returns a quantizer instance *or* a
+        ``QuantizerRequest`` subclass for a given ``QuantizerRole``.
+        The callable is invoked as::
 
             qfactory(
-                role: str,
-            )
+                role: QuantizerRole,
+            ) -> Union[Quantizer, QuantizerRequest]
 
-        Where `role` is one of the following strings for e.g. te.Linear
-        (stable public contract):
+        ``QuantizerRole`` is a frozen dataclass with the following fields:
 
-        - forward:  "linear_input", "linear_weight", "linear_output"
-        - backward: "linear_grad_output", "linear_grad_input"
+        - ``module_type`` (str): module type (empty string when not set), e.g.
+          ``"linear"``, ``"grouped_linear"``, ``"dpa"``.
+        - ``tensor_type`` (str): what tensor is being quantized (empty
+          string when not set), e.g. ``"input"``, ``"weight"``, ``"grad_output"``.
+        - ``name`` (str): caller-provided module instance name (empty
+          string when not set), e.g. ``"qkv"``, ``"proj"``, ``"fc1"``, ``"fc2"``.
+
+        For stateful quantizers (delayed scaling), return a
+        ``DelayedScalingRequest`` dataclass instead of a quantizer.
+        TE will allocate shared scale/amax_history buffers and create
+        ``Float8Quantizer`` instances integrated with the existing
+        delayed-scaling reduction infrastructure.
+
+        See ``transformer_engine.pytorch.quantization.QuantizerRole``
+        and ``transformer_engine.pytorch.quantization.DelayedScalingRequest``
+        for full documentation.
+
     backward_override : {None, 'high_precision', 'dequantized'}, default = None
         Backward precision mode. None does not modify backward behavior,
         `high_precision` keeps original high-precision operands for backward,
@@ -579,6 +593,11 @@ class CustomRecipe(Recipe):
     """
 
     qfactory: Callable[..., Any]
+
+    # fp8_format does not affect quantization (quantization factory controls that),
+    # but TE internals (e.g. get_fp8_te_dtype, backend selection) read it
+    # from the recipe.  HYBRID (E4M3 fwd, E5M2 bwd) is a safe default.
+    fp8_format: Format = Format.HYBRID
 
     fp8_dpa: bool = False
     fp8_mha: bool = False
