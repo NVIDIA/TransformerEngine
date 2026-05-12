@@ -175,7 +175,7 @@ def _maybe_skip_recipe_dtype(
 ) -> None:
     if dtype == torch.bfloat16 and not bf16_available:
         pytest.skip(reason_for_no_bf16)
-    if "nvfp4" in recipe_name:
+    if recipe_name in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6"):
         if module_type in ("linear", "layernorm_linear") and dtype not in (
             torch.bfloat16,
             torch.float32,
@@ -188,14 +188,14 @@ def _maybe_skip_recipe_dtype(
 def _maybe_skip_unsupported_recipe_module_combo(recipe_name: str, module_type: str) -> None:
     if module_type == "ops_linear" and recipe_name == "fp8_block_scaling":
         pytest.skip("Fusible ops (te_ops.Linear) do not support Float8BlockScaling recipe")
-    if module_type == "ops_linear" and "nvfp4_row_scaled" in recipe_name:
+    if module_type == "ops_linear" and recipe_name == "nvfp4_row_scaled":
         pytest.skip("Row-scaled NVFP4 currently does not support fused te_ops paths.")
-    if module_type == "grouped_linear" and "nvfp4_4over6" in recipe_name:
+    if module_type == "grouped_linear" and recipe_name == "nvfp4_4over6":
         pytest.skip("NVFP4 4over6 currently does not support grouped quantization.")
 
 
 def _make_quantized_forward_reference_recipe(recipe_name: str) -> recipe.Recipe:
-    if "nvfp4_row_scaled" in recipe_name:
+    if recipe_name == "nvfp4_row_scaled":
         return make_recipe(recipe_name, backward_override="dequantized")
     return make_recipe(recipe_name)
 
@@ -215,7 +215,9 @@ def _maybe_skip_unsupported_recipe_shape(
                 " by 32."
             )
             return
-        if "nvfp4" in recipe_name and (flat_first_dim % 16 != 0 or last_dim % 16 != 0):
+        if recipe_name in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6") and (
+            flat_first_dim % 16 != 0 or last_dim % 16 != 0
+        ):
             pytest.skip(
                 "Linear/LayerNormLinear + NVFP4 requires prod(shape[:-1]) and shape[-1] divisible"
                 " by 16."
@@ -240,7 +242,9 @@ def _maybe_skip_unsupported_recipe_shape(
             pytest.skip(
                 "te_ops.Linear + MXFP8 requires prod(shape[:-1]) and shape[-1] divisible by 32."
             )
-        if "nvfp4" in recipe_name and (flat_first_dim % 16 != 0 or last_dim % 16 != 0):
+        if recipe_name in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6") and (
+            flat_first_dim % 16 != 0 or last_dim % 16 != 0
+        ):
             pytest.skip(
                 "te_ops.Linear + NVFP4 requires prod(shape[:-1]) and shape[-1] divisible by 16."
             )
@@ -259,9 +263,13 @@ def _maybe_skip_unsupported_grouped_splits(recipe_name: str, m_splits: list[int]
         )
     if recipe_name == "mxfp8" and any(m % 32 != 0 for m in non_empty_splits):
         pytest.skip("GroupedLinear + MXFP8 requires each non-empty m_split divisible by 32.")
-    if "nvfp4" in recipe_name and any(m % 16 != 0 for m in non_empty_splits):
+    if recipe_name in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6") and any(
+        m % 16 != 0 for m in non_empty_splits
+    ):
         pytest.skip("GroupedLinear + NVFP4 requires each non-empty m_split divisible by 16.")
-    if "nvfp4" in recipe_name and any(m % 64 != 0 for m in non_empty_splits):
+    if recipe_name in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6") and any(
+        m % 64 != 0 for m in non_empty_splits
+    ):
         pytest.skip(
             "GroupedLinear + NVFP4 grouped split_quantize currently requires each non-empty "
             "m_split divisible by 64 due to grouped amax kernel constraints."
@@ -1744,7 +1752,7 @@ def test_backward_override_memory_peak_report(
 
     modes = (
         ("high_precision", "dequantized")
-        if "nvfp4_row_scaled" in recipe_name
+        if recipe_name == "nvfp4_row_scaled"
         else (None, "high_precision", "dequantized")
     )
     mode_results: dict[str, dict[str, float] | str] = {}

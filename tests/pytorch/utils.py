@@ -118,7 +118,7 @@ def quantization_tols(name: str) -> dict[str, float]:
         "mxfp8_block_scaling",
     ):
         return dtype_tols(tex.DType.kFloat8E4M3)
-    if "nvfp4" in name:
+    if name in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6"):
         return dtype_tols(tex.DType.kFloat4E2M1)
     raise ValueError(f"Unsupported quantization scheme ({name})")
 
@@ -145,13 +145,13 @@ def make_recipe(name: Optional[str], **recipe_kwargs: Any) -> Optional[Recipe]:
         )
     if name == "fp8_block_scaling":
         return transformer_engine.common.recipe.Float8BlockScaling(**recipe_kwargs)
-    if "nvfp4" in name:
-        use_4over6 = "4over6" in name
+    if name in ("nvfp4", "nvfp4_row_scaled", "nvfp4_4over6"):
+        use_4over6 = name == "nvfp4_4over6"
         kwargs = {
             "disable_rht": True,
             "disable_stochastic_rounding": True,
             "disable_2d_quantization": not use_4over6,
-            "row_scaled_activation": "row_scaled" in name,
+            "row_scaled_activation": name == "nvfp4_row_scaled",
             "nvfp4_4over6": "all" if use_4over6 else None,
         }
         kwargs.update(recipe_kwargs)
