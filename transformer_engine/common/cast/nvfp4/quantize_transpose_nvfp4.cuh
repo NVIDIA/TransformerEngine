@@ -1556,9 +1556,8 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
                                                     NVFP4_2D_BLOCKS_PER_TILE_X>;
                 constexpr size_t dshmem_size =
                     base_dshmem_size +
-                    ((use_2d_quantization && USE_4OVER6)
-                         ? DIVUP_TO_MULTIPLE(sizeof(FourOverSixScratch), TMA_SHMEM_ALIGNMENT)
-                         : 0);
+                    FourOverSixScratch::template dynamic_shared_memory_size<use_2d_quantization,
+                                                                            USE_4OVER6>();
                 cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                                      dshmem_size);
                 kernel<<<grid, block_size, dshmem_size, stream>>>(

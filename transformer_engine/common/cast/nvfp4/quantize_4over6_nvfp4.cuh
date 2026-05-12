@@ -318,6 +318,15 @@ struct alignas(16) QuantizationScratch4Over6 {
   alignas(16) float err_map6_matrix[BLOCKS_PER_TILE_Y][BLOCKS_PER_TILE_X][BLOCK_DIM];
   alignas(16) uint8_t pick_map4_matrix[BLOCKS_PER_TILE_Y][BLOCKS_PER_TILE_X];
   alignas(16) nvfp4_scale_t selected_scale_matrix[BLOCKS_PER_TILE_Y][BLOCKS_PER_TILE_X];
+
+  template <bool USE_2D_QUANTIZATION, bool USE_4OVER6>
+  static constexpr size_t dynamic_shared_memory_size() {
+    if constexpr (USE_2D_QUANTIZATION && USE_4OVER6) {
+      return ((sizeof(QuantizationScratch4Over6) + TMA_SHMEM_ALIGNMENT - 1) / TMA_SHMEM_ALIGNMENT) *
+             TMA_SHMEM_ALIGNMENT;
+    }
+    return 0;
+  }
 };
 
 template <bool USE_FAST_MATH, typename scaling_coeff_type>
