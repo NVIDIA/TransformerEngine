@@ -2000,7 +2000,7 @@ def gemm(
         .. note::
             Collective GEMM with communication overlap is captured into XLA
             command buffers as a custom call. When executing with the cuBLASMp
-            backend, this captured graph spans NCCL collectives that XLA does not 
+            backend, this captured graph spans NCCL collectives that XLA does not
             include in command buffers by default, so add ``COLLECTIVES`` to the
             enabled kinds before JAX initialization::
 

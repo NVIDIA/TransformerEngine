@@ -233,11 +233,10 @@ namespace {
 // workspace covers any matmul the caller will later run with the same
 // descriptor. BF16 is used unconditionally; its workspace is at least as
 // large as the FP8 workspace for the same m/n/k.
-void cublasmp_capture_warmup(te::CommOverlapCore *core, int tp_size,
-                             te::CommOverlapType comm_type,
+void cublasmp_capture_warmup(te::CommOverlapCore *core, int tp_size, te::CommOverlapType comm_type,
                              const std::vector<size_t> &buffer_shape) {
-  NVTE_CHECK(buffer_shape.size() == 2,
-             "cuBLASMp warmup expects a 2-D buffer shape, got rank ", buffer_shape.size());
+  NVTE_CHECK(buffer_shape.size() == 2, "cuBLASMp warmup expects a 2-D buffer shape, got rank ",
+             buffer_shape.size());
   // Treat the matmul as square in the weight dim so workspace is sized
   // for the wider of the two cases.
   const int64_t N_global = static_cast<int64_t>(buffer_shape[0]);
@@ -294,9 +293,8 @@ void cublasmp_capture_warmup(te::CommOverlapCore *core, int tp_size,
 }  // namespace
 
 CommOverlap::CommOverlap(CommOverlapHelper *helper, int tp_rank, int tp_size,
-                         te::CommOverlapType comm_type,
-                         const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
-                         int num_comm_sm, bool atomic_gemm)
+                         te::CommOverlapType comm_type, const std::vector<size_t> &buffer_shape,
+                         at::ScalarType buffer_dtype, int num_comm_sm, bool atomic_gemm)
     : te::CommOverlapBase(helper->get_nccl_comm("intra"), tp_rank, tp_size, num_comm_sm,
                           atomic_gemm) {
   // buffer_dtype is unused on this path (the warmup runs in BF16); kept in
@@ -406,8 +404,8 @@ CommOverlapP2P::CommOverlapP2P(const std::vector<size_t> &buffer_shape, at::Scal
 
 CommOverlapP2P::CommOverlapP2P(CommOverlapHelper *helper, int tp_rank, int tp_size,
                                te::CommOverlapType comm_type,
-                               const std::vector<size_t> &buffer_shape,
-                               at::ScalarType buffer_dtype, int num_comm_sm, bool atomic_gemm)
+                               const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
+                               int num_comm_sm, bool atomic_gemm)
     : te::CommOverlapP2PBase(helper->get_nccl_comm("intra"), tp_rank, tp_size, num_comm_sm,
                              atomic_gemm) {
   // See CommOverlap constructor for the buffer_dtype rationale.

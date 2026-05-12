@@ -640,19 +640,18 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def(py::init([](const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
                        CommOverlapHelper *helper, int tp_size, bool use_cublasmp,
                        transformer_engine::CommOverlapType comm_type, int num_splits,
-                       int num_max_streams, int comm_cga_size, int gemm_priority,
-                       int comm_priority, int num_comm_sm, bool set_sm_margin, bool atomic_gemm,
+                       int num_max_streams, int comm_cga_size, int gemm_priority, int comm_priority,
+                       int num_comm_sm, bool set_sm_margin, bool atomic_gemm,
                        bool rs_overlap_first_gemm) {
              if (use_cublasmp) {
                return std::make_shared<CommOverlap>(helper, helper->mylocal, tp_size, comm_type,
                                                     buffer_shape, buffer_dtype, num_comm_sm,
                                                     atomic_gemm);
              }
-             return std::make_shared<CommOverlap>(buffer_shape, buffer_dtype, helper, tp_size,
-                                                  num_splits, num_max_streams, comm_cga_size,
-                                                  gemm_priority, comm_priority, num_comm_sm,
-                                                  set_sm_margin, atomic_gemm,
-                                                  rs_overlap_first_gemm);
+             return std::make_shared<CommOverlap>(
+                 buffer_shape, buffer_dtype, helper, tp_size, num_splits, num_max_streams,
+                 comm_cga_size, gemm_priority, comm_priority, num_comm_sm, set_sm_margin,
+                 atomic_gemm, rs_overlap_first_gemm);
            }),
            py::call_guard<py::gil_scoped_release>(), py::arg("buffer_shape"),
            py::arg("buffer_dtype"), py::arg("helper"), py::arg("tp_size"),

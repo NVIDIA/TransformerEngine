@@ -727,7 +727,6 @@ class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::Comm
 
   std::pair<at::Stream, at::Stream> get_communication_stream();
 
-
 };  // CommOverlapP2P
 
 #endif  // TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_H_

@@ -412,11 +412,7 @@ class _LayerNormLinear(torch.autograd.Function):
         if ub_overlap_rs_fprop:
             # cuBLASMp writes the reduce-scattered output directly into the
             # GEMM output tensor; Userbuffers writes it into the extra-output buffer.
-            out = (
-                gemm_out
-                if ub_obj is not None and ub_obj.with_cublasmp()
-                else reduce_scatter_out
-            )
+            out = gemm_out if ub_obj is not None and ub_obj.with_cublasmp() else reduce_scatter_out
         elif parallel_mode == "row" and tp_size > 1:
             nvtx_range_push(f"{nvtx_label}.row_parallel_comm")
             out = gemm_out

@@ -342,7 +342,7 @@ struct CublasMpDims {
 // Resolve the global m/n/k for the three cuBLASMp communication patterns
 // from flattened operand shapes.
 CublasMpDims compute_ag_dims(const TensorWrapper &A, bool transa, const TensorWrapper &B,
-                              bool transb, int tp_size) {
+                             bool transb, int tp_size) {
   auto A_tensor = convertNVTETensorCheck(A.data());
   auto B_tensor = convertNVTETensorCheck(B.data());
   int64_t A0 = A_tensor->flat_first_dim();
@@ -360,7 +360,7 @@ CublasMpDims compute_ag_dims(const TensorWrapper &A, bool transa, const TensorWr
 }
 
 CublasMpDims compute_rs_dims(const TensorWrapper &A, bool transa, const TensorWrapper &B,
-                              bool transb, int tp_size) {
+                             bool transb, int tp_size) {
   auto A_tensor = convertNVTETensorCheck(A.data());
   auto B_tensor = convertNVTETensorCheck(B.data());
   int64_t A0 = A_tensor->flat_first_dim();
@@ -378,7 +378,7 @@ CublasMpDims compute_rs_dims(const TensorWrapper &A, bool transa, const TensorWr
 }
 
 CublasMpDims compute_ar_dims(const TensorWrapper &A, bool transa, const TensorWrapper &B,
-                              bool transb, int tp_size) {
+                             bool transb, int tp_size) {
   // AR shares the same m/n/k semantics as RS at descriptor level.
   return compute_rs_dims(A, transa, B, transb, tp_size);
 }
