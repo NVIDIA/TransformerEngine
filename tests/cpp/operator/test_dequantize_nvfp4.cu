@@ -120,7 +120,9 @@ void performTest_dequantize_nvfp4(const size_t rows, const size_t cols,
 
     // Quantize
     if (rows > 0 && cols > 0) {
-        nvte_quantize(input.data(), quantized.data(), 0);
+        QuantizationConfigWrapper quant_config;
+        quant_config.set_nvfp4_4over6(use_4over6);
+        nvte_quantize_v2(input.data(), quantized.data(), quant_config, 0);
         cudaDeviceSynchronize();
         auto err = cudaGetLastError();
         ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
@@ -181,7 +183,9 @@ void performTest_dequantize_nvfp4_swizzled(const size_t rows, const size_t cols,
     }
 
     if (rows > 0 && cols > 0) {
-        nvte_quantize(input.data(), quantized_compact.data(), 0);
+        QuantizationConfigWrapper quant_config;
+        quant_config.set_nvfp4_4over6(use_4over6);
+        nvte_quantize_v2(input.data(), quantized_compact.data(), quant_config, 0);
         cudaDeviceSynchronize();
     }
 
