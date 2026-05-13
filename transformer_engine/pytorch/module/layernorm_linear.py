@@ -28,6 +28,7 @@ from .base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
 )
+from ._tp_invariant import tp_invariant_column_parallel_dgrad
 from ..quantization import FP8GlobalStateManager, QuantizerRole
 from ..utils import (
     assert_dim_for_fp8_exec,
@@ -374,15 +375,9 @@ class _LayerNormLinear(torch.autograd.Function):
         # ------------------------------------------------------
         # Forward GEMM
         # Note: y = x * w^T
-        # No _tp_invariant_fwd needed here: LayerNormLinear is column-parallel,
-        # so forward GEMM K=hidden_size is constant across TP (invariant by construction).
-        # Only row-parallel forward (linear.py) needs the invariant path (K=in/TP varies).
+        # No NVTE_TP_INVARIANT_MODE branch: LayerNormLinear is column-parallel only,
+        # so forward GEMM K=hidden_size does not vary with TP (invariant by construction).
         # ------------------------------------------------------
-        if os.environ.get("NVTE_TP_INVARIANT_MODE", "0") == "1" and parallel_mode == "row":
-            assert False, (
-                "NVTE_TP_INVARIANT_MODE row-parallel forward is not implemented in "
-                "layernorm_linear.py. Use linear.py for row-parallel layers."
-            )
         nvtx_range_push(f"{nvtx_label}.gemm")
         gemm_out, *_, reduce_scatter_out = general_gemm(
             weightmat,
@@ -817,64 +812,17 @@ class _LayerNormLinear(torch.autograd.Function):
             )
 
             if _tp_invariant_bwd:
-                # TP-invariant diagnostic: full dgrad GEMM matching TP=1 accumulation.
                 assert not ctx.fp8, "NVTE_TP_INVARIANT_MODE does not support FP8"
-                nvtx_range_push(f"{nvtx_label}.tp_invariant_dgrad")
-
-                def allgather_along_dim(tensor, group, world_size, dim):
-                    chunks = [torch.empty_like(tensor) for _ in range(world_size)]
-                    torch.distributed.all_gather(
-                        chunks, tensor.contiguous(), group=group,
-                    )
-                    return torch.cat(chunks, dim=dim)
-
-                grad_output_gathered = allgather_along_dim(
-                    grad_output, ctx.tp_group, ctx.tp_size, dim=-1,
-                )  # [tokens, out/TP] -> [tokens, out]
-                weight_gathered = allgather_along_dim(
-                    weight, ctx.tp_group, ctx.tp_size, dim=0,
-                )  # [out/TP, in] -> [out, in]
-
-                # Deinterleave gathered tensors to match TP=1 K-dimension ordering.
-                # Only needed for gated linear units (partition_stride > 1, e.g. SwiGLU FC1)
-                # where each rank stores interleaved [gate_i | value_i].
-                # After all-gather: [gate_0|val_0 | gate_1|val_1 | ...].
-                # TP=1 layout is [gate_all | val_all]. Reorder to match.
-                #
-                # For non-gated layers (partition_stride == 1, e.g. QKV), each rank
-                # stores contiguous GQA groups, and the naive all-gather already
-                # produces the correct TP=1 ordering. Deinterleaving would corrupt it.
-                if ctx.partition_stride > 1:
-                    chunk_sz = weight.shape[0]  # out_features per rank
-                    half = chunk_sz // 2
-                    first_w = [weight_gathered[i * chunk_sz : i * chunk_sz + half] for i in range(ctx.tp_size)]
-                    second_w = [weight_gathered[i * chunk_sz + half : (i + 1) * chunk_sz] for i in range(ctx.tp_size)]
-                    weight_gathered = torch.cat(first_w + second_w, dim=0)
-
-                    g_dim = grad_output_gathered.shape[-1] // ctx.tp_size
-                    g_half = g_dim // 2
-                    first_g = [grad_output_gathered[..., i * g_dim : i * g_dim + g_half] for i in range(ctx.tp_size)]
-                    second_g = [grad_output_gathered[..., i * g_dim + g_half : (i + 1) * g_dim] for i in range(ctx.tp_size)]
-                    grad_output_gathered = torch.cat(first_g + second_g, dim=-1)
-
-                grad_output_2d = grad_output_gathered.reshape(
-                    -1, grad_output_gathered.shape[-1],
+                dgrad = tp_invariant_column_parallel_dgrad(
+                    weight=weight,
+                    grad_output=grad_output,
+                    tp_group=ctx.tp_group,
+                    tp_size=ctx.tp_size,
+                    sequence_parallel=ctx.sequence_parallel,
+                    activation_dtype=ctx.activation_dtype,
+                    partition_stride=ctx.partition_stride,
+                    nvtx_label=f"{nvtx_label}.tp_invariant_dgrad",
                 )
-                dgrad = general_gemm(
-                    weight_gathered, grad_output_2d,
-                    layout="NN", grad=True,
-                    out_dtype=ctx.activation_dtype,
-                )
-                if isinstance(dgrad, tuple):
-                    dgrad = dgrad[0]
-
-                # SP: scatter to per-rank chunk along sequence dim.
-                if ctx.sequence_parallel:
-                    rank = torch.distributed.get_rank(ctx.tp_group)
-                    dgrad = dgrad.chunk(ctx.tp_size, dim=0)[rank].contiguous()
-
-                del grad_output_gathered, weight_gathered, grad_output_2d
-                nvtx_range_pop(f"{nvtx_label}.tp_invariant_dgrad")
             else:
                 nvtx_range_push(f"{nvtx_label}.dgrad_gemm")
                 weight_for_dgrad = weight
