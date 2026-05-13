@@ -820,6 +820,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     tp_size=ctx.tp_size,
                     sequence_parallel=ctx.sequence_parallel,
                     activation_dtype=ctx.activation_dtype,
+                    gemm_fn=general_gemm,
                     partition_stride=ctx.partition_stride,
                     nvtx_label=f"{nvtx_label}.tp_invariant_dgrad",
                 )

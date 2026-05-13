@@ -13,16 +13,19 @@ sharded operands across the TP group. Result: bit-identical numerics across
 TP=1/2/4/... because the underlying GEMM K-dimension accumulation order is fixed
 regardless of how the operands were sharded.
 
+``gemm_fn`` is passed in by the caller so downstream monkey-patches of
+``general_gemm`` in the caller's namespace (e.g., Megatron's batch-invariant
+kernels) are honored.
+
 Limitations:
 - FP8 not supported (callers should assert ``not fp8`` before calling).
 - Trades compute for invariance (gathered operands + full GEMM). Off by default.
 """
 
-from typing import Optional
+from typing import Callable, Optional
 
 import torch
 
-from ..cpp_extensions import general_gemm
 from ..utils import nvtx_range_pop, nvtx_range_push
 
 __all__ = [
@@ -52,6 +55,7 @@ def tp_invariant_row_parallel_gemm(
     tp_size: int,
     sequence_parallel: bool,
     activation_dtype: torch.dtype,
+    gemm_fn: Callable,
     nvtx_label: str = "tp_invariant_gemm",
 ) -> torch.Tensor:
     """Row-parallel forward GEMM with TP-invariant numerics.
@@ -80,7 +84,7 @@ def tp_invariant_row_parallel_gemm(
     weight_gathered = allgather_along_dim(weightmat, tp_group, tp_size, dim=-1)
 
     input_2d = inputmat_gathered.reshape(-1, inputmat_gathered.shape[-1])
-    out = general_gemm(
+    out = gemm_fn(
         weight_gathered,
         input_2d,
         out_dtype=activation_dtype,
@@ -105,6 +109,7 @@ def tp_invariant_column_parallel_dgrad(
     tp_size: int,
     sequence_parallel: bool,
     activation_dtype: torch.dtype,
+    gemm_fn: Callable,
     partition_stride: int = 1,
     nvtx_label: str = "tp_invariant_dgrad",
 ) -> torch.Tensor:
@@ -169,7 +174,7 @@ def tp_invariant_column_parallel_dgrad(
         -1,
         grad_output_gathered.shape[-1],
     )
-    dgrad = general_gemm(
+    dgrad = gemm_fn(
         weight_gathered,
         grad_output_2d,
         layout="NN",

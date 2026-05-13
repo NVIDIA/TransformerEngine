@@ -495,6 +495,7 @@ def _linear_forward_impl(
             tp_size=tp_world_size,
             sequence_parallel=sequence_parallel,
             activation_dtype=activation_dtype,
+            gemm_fn=general_gemm,
             nvtx_label=f"{nvtx_label}.tp_invariant_gemm",
         )
     else:
@@ -1011,6 +1012,7 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
                     tp_size=bwd_args.tp_size,
                     sequence_parallel=bwd_args.sequence_parallel,
                     activation_dtype=bwd_args.activation_dtype,
+                    gemm_fn=general_gemm,
                     nvtx_label=f"{nvtx_label}.tp_invariant_dgrad",
                 )
             else:
