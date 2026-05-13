@@ -381,8 +381,10 @@ def _dtype_name(dtype) -> str:
 
 
 def _is_array_operand(value: Any) -> bool:
-    return hasattr(value, "shape") and hasattr(value, "dtype") and not isinstance(
-        value, (bool, int, float, complex, np.generic)
+    return (
+        hasattr(value, "shape")
+        and hasattr(value, "dtype")
+        and not isinstance(value, (bool, int, float, complex, np.generic))
     )
 
 
@@ -639,9 +641,7 @@ def _build_score_mod_fwd_graph(q_aval, k_aval, v_aval, score_mod_avals, config):
     batch, q_seqlen, q_heads, _ = q_aval.shape
     _, _, _, v_head_dim = v_aval.shape
     output_dim, output_stride = _bshd_as_bhsd_dim_stride((batch, q_seqlen, q_heads, v_head_dim))
-    output.set_output(True).set_uid(_SCORE_MOD_UID_O).set_dim(output_dim).set_stride(
-        output_stride
-    )
+    output.set_output(True).set_uid(_SCORE_MOD_UID_O).set_dim(output_dim).set_stride(output_stride)
     output.set_data_type(io_data_type)
 
     output_uids = [_SCORE_MOD_UID_O]

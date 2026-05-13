@@ -384,15 +384,9 @@ def test_fused_attn_score_mod_relative_position_optional_bprop():
 
     key = jax.random.key(0)
     q_key, k_key, v_key = jax.random.split(key, 3)
-    q = (0.125 * jax.random.normal(q_key, (1, 64, 2, 128), dtype=jnp.float16)).astype(
-        jnp.float16
-    )
-    k = (0.125 * jax.random.normal(k_key, (1, 64, 2, 128), dtype=jnp.float16)).astype(
-        jnp.float16
-    )
-    v = (0.125 * jax.random.normal(v_key, (1, 64, 2, 128), dtype=jnp.float16)).astype(
-        jnp.float16
-    )
+    q = (0.125 * jax.random.normal(q_key, (1, 64, 2, 128), dtype=jnp.float16)).astype(jnp.float16)
+    k = (0.125 * jax.random.normal(k_key, (1, 64, 2, 128), dtype=jnp.float16)).astype(jnp.float16)
+    v = (0.125 * jax.random.normal(v_key, (1, 64, 2, 128), dtype=jnp.float16)).astype(jnp.float16)
     scale = 1.0 / sqrt(q.shape[-1])
 
     def score_mod_loss(query, key_, value):
@@ -419,9 +413,9 @@ def test_fused_attn_score_mod_relative_position_optional_bprop():
     (score_mod_value, score_mod_out), score_mod_grads = value_and_grad(
         score_mod_loss, argnums=(0, 1, 2), has_aux=True
     )(q, k, v)
-    (ref_value, ref_out), ref_grads = value_and_grad(
-        ref_loss, argnums=(0, 1, 2), has_aux=True
-    )(q, k, v)
+    (ref_value, ref_out), ref_grads = value_and_grad(ref_loss, argnums=(0, 1, 2), has_aux=True)(
+        q, k, v
+    )
 
     assert_allclose(score_mod_out, ref_out, rtol=5e-2, atol=5e-2)
     assert_allclose(score_mod_value, ref_value, rtol=5e-2, atol=5e-2)
@@ -435,15 +429,9 @@ def test_fused_attn_score_mod_causal_with_bprop():
 
     key = jax.random.key(1)
     q_key, k_key, v_key = jax.random.split(key, 3)
-    q = (0.125 * jax.random.normal(q_key, (1, 64, 2, 128), dtype=jnp.float16)).astype(
-        jnp.float16
-    )
-    k = (0.125 * jax.random.normal(k_key, (1, 64, 2, 128), dtype=jnp.float16)).astype(
-        jnp.float16
-    )
-    v = (0.125 * jax.random.normal(v_key, (1, 64, 2, 128), dtype=jnp.float16)).astype(
-        jnp.float16
-    )
+    q = (0.125 * jax.random.normal(q_key, (1, 64, 2, 128), dtype=jnp.float16)).astype(jnp.float16)
+    k = (0.125 * jax.random.normal(k_key, (1, 64, 2, 128), dtype=jnp.float16)).astype(jnp.float16)
+    v = (0.125 * jax.random.normal(v_key, (1, 64, 2, 128), dtype=jnp.float16)).astype(jnp.float16)
     scale = 1.0 / sqrt(q.shape[-1])
 
     def score_mod_loss(query, key_, value):
@@ -473,9 +461,9 @@ def test_fused_attn_score_mod_causal_with_bprop():
     (score_mod_value, score_mod_out), score_mod_grads = value_and_grad(
         score_mod_loss, argnums=(0, 1, 2), has_aux=True
     )(q, k, v)
-    (ref_value, ref_out), ref_grads = value_and_grad(
-        ref_loss, argnums=(0, 1, 2), has_aux=True
-    )(q, k, v)
+    (ref_value, ref_out), ref_grads = value_and_grad(ref_loss, argnums=(0, 1, 2), has_aux=True)(
+        q, k, v
+    )
 
     assert_allclose(score_mod_out, ref_out, rtol=5e-2, atol=5e-2)
     assert_allclose(score_mod_value, ref_value, rtol=5e-2, atol=5e-2)
@@ -491,9 +479,7 @@ def test_fused_attn_score_mod_softcap_with_bprop():
     q_key, k_key, v_key, d_out_key = jax.random.split(key, 4)
     q = jax.random.normal(q_key, (1, 16, 2, 64), dtype=jnp.float16)
     k = jax.random.normal(k_key, (1, 16, 2, 64), dtype=jnp.float16)
-    v = (0.1 * jax.random.normal(v_key, (1, 16, 2, 64), dtype=jnp.float16)).astype(
-        jnp.float16
-    )
+    v = (0.1 * jax.random.normal(v_key, (1, 16, 2, 64), dtype=jnp.float16)).astype(jnp.float16)
     d_out = jax.random.normal(d_out_key, (1, 16, 2, 64), dtype=jnp.float16)
     scale = 1.0 / sqrt(q.shape[-1])
     softcap = 0.8
@@ -526,9 +512,9 @@ def test_fused_attn_score_mod_softcap_with_bprop():
     (score_mod_value, score_mod_out), score_mod_grads = value_and_grad(
         score_mod_loss, argnums=(0, 1, 2), has_aux=True
     )(q, k, v)
-    (ref_value, ref_out), ref_grads = value_and_grad(
-        ref_loss, argnums=(0, 1, 2), has_aux=True
-    )(q, k, v)
+    (ref_value, ref_out), ref_grads = value_and_grad(ref_loss, argnums=(0, 1, 2), has_aux=True)(
+        q, k, v
+    )
 
     assert_allclose(score_mod_out, ref_out, rtol=7e-2, atol=7e-2)
     assert_allclose(score_mod_value, ref_value, rtol=7e-2, atol=7e-2)

@@ -4,16 +4,16 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "../extensions.h"
-#include "transformer_engine/fused_attn.h"
-#include "transformer_engine/transformer_engine.h"
-
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
+
+#include "../extensions.h"
+#include "transformer_engine/fused_attn.h"
+#include "transformer_engine/transformer_engine.h"
 
 namespace transformer_engine {
 namespace jax {
@@ -766,9 +766,8 @@ Error_Type ExecuteScoreModGraph(cudaStream_t stream, int64_t graph_id,
                                 const std::vector<void *> &input_ptrs,
                                 const std::vector<void *> &output_ptrs, void *workspace) {
   auto entry = GetScoreModGraphEntry(graph_id);
-  NVTE_CHECK(input_ptrs.size() == entry->input_uids.size(),
-             "cuDNN score_mod graph expected ", entry->input_uids.size(), " inputs but got ",
-             input_ptrs.size());
+  NVTE_CHECK(input_ptrs.size() == entry->input_uids.size(), "cuDNN score_mod graph expected ",
+             entry->input_uids.size(), " inputs but got ", input_ptrs.size());
   NVTE_CHECK(output_ptrs.size() >= entry->output_uids.size(),
              "cuDNN score_mod graph expected at least ", entry->output_uids.size(),
              " outputs but got ", output_ptrs.size());
@@ -788,8 +787,7 @@ Error_Type ExecuteScoreModGraph(cudaStream_t stream, int64_t graph_id,
   user_ptrs.reserve(entry->user_uids.size());
   for (const auto uid : entry->user_uids) {
     auto it = variant_pack.find(uid);
-    NVTE_CHECK(it != variant_pack.end(), "cuDNN score_mod graph variant pack is missing UID ",
-               uid);
+    NVTE_CHECK(it != variant_pack.end(), "cuDNN score_mod graph variant pack is missing UID ", uid);
     user_ptrs.push_back(reinterpret_cast<std::intptr_t>(it->second));
   }
 
@@ -860,7 +858,7 @@ Error_Type FusedAttnScoreModForwardFFI(cudaStream_t stream, Buffer_Type q_buf, B
                                        Result_Type workspace_buf, Dictionary attrs) {
   int64_t graph_id = get_attr_value<int64_t>(attrs, "graph_id");
   std::vector<void *> input_ptrs = {q_buf.untyped_data(), k_buf.untyped_data(),
-                                   v_buf.untyped_data()};
+                                    v_buf.untyped_data()};
   AppendRemainingBuffers(score_mod_args, &input_ptrs);
 
   std::vector<void *> output_ptrs = {output_buf->untyped_data(), stats_buf->untyped_data()};
@@ -880,19 +878,20 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedAttnScoreModForwardHandler, FusedAttnScoreMod
                                   .Ret<Buffer_Type>()      // workspace
                                   .Attrs());
 
-Error_Type FusedAttnScoreModBackwardFFI(
-    cudaStream_t stream, Buffer_Type q_buf, Buffer_Type k_buf, Buffer_Type v_buf,
-    Buffer_Type output_buf, Buffer_Type doutput_buf, Buffer_Type stats_buf,
-    Variadic_Buffer_Type score_mod_args, Result_Type dq_buf, Result_Type dk_buf,
-    Result_Type dv_buf, Result_Type workspace_buf, Dictionary attrs) {
+Error_Type FusedAttnScoreModBackwardFFI(cudaStream_t stream, Buffer_Type q_buf, Buffer_Type k_buf,
+                                        Buffer_Type v_buf, Buffer_Type output_buf,
+                                        Buffer_Type doutput_buf, Buffer_Type stats_buf,
+                                        Variadic_Buffer_Type score_mod_args, Result_Type dq_buf,
+                                        Result_Type dk_buf, Result_Type dv_buf,
+                                        Result_Type workspace_buf, Dictionary attrs) {
   int64_t graph_id = get_attr_value<int64_t>(attrs, "graph_id");
-  std::vector<void *> input_ptrs = {q_buf.untyped_data(),      k_buf.untyped_data(),
-                                   v_buf.untyped_data(),      output_buf.untyped_data(),
-                                   doutput_buf.untyped_data(), stats_buf.untyped_data()};
+  std::vector<void *> input_ptrs = {q_buf.untyped_data(),       k_buf.untyped_data(),
+                                    v_buf.untyped_data(),       output_buf.untyped_data(),
+                                    doutput_buf.untyped_data(), stats_buf.untyped_data()};
   AppendRemainingBuffers(score_mod_args, &input_ptrs);
 
   std::vector<void *> output_ptrs = {dq_buf->untyped_data(), dk_buf->untyped_data(),
-                                    dv_buf->untyped_data()};
+                                     dv_buf->untyped_data()};
   return ExecuteScoreModGraph(stream, graph_id, input_ptrs, output_ptrs,
                               workspace_buf->untyped_data());
 }

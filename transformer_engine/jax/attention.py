@@ -1441,9 +1441,7 @@ def _fused_attn_score_mod_bwd_rule(config, context_checkpoint_name, ctx, dz):
     )
 
 
-_fused_attn_score_mod.defvjp(
-    _fused_attn_score_mod_fwd_rule, _fused_attn_score_mod_bwd_rule
-)
+_fused_attn_score_mod.defvjp(_fused_attn_score_mod_fwd_rule, _fused_attn_score_mod_bwd_rule)
 
 
 def _validate_fused_attn_score_mod(
