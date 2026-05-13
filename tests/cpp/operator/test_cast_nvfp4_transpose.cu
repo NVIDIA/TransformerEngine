@@ -128,19 +128,13 @@ NVFP4FourOverSixQuantization compute_4over6_quantization_scales(
   const fp8e4m3 scale_map4 = static_cast<fp8e4m3>(sf_high_precision_map4);
   const fp8e4m3 scale_map6 = static_cast<fp8e4m3>(sf_high_precision_map6);
 
-  float reciprocal_map4 = 0.0f;
+  const float global_decode_scale = 1.0f / global_encode_scale;
   const float scale_map4_fp32 = static_cast<float>(scale_map4);
-  if (scale_map4_fp32 != 0.0f) {
-    reciprocal_map4 = fminf(global_encode_scale / scale_map4_fp32,
-                            Numeric_Traits<float>::maxNorm);
-  }
-
-  float reciprocal_map6 = 0.0f;
+  const float reciprocal_map4 =
+      fminf(1.0f / (scale_map4_fp32 * global_decode_scale), Numeric_Traits<float>::maxNorm);
   const float scale_map6_fp32 = static_cast<float>(scale_map6);
-  if (scale_map6_fp32 != 0.0f) {
-    reciprocal_map6 = fminf(global_encode_scale / scale_map6_fp32,
-                            Numeric_Traits<float>::maxNorm);
-  }
+  const float reciprocal_map6 =
+      fminf(1.0f / (scale_map6_fp32 * global_decode_scale), Numeric_Traits<float>::maxNorm);
 
   const float2 zero = {0.0f, 0.0f};
   return {
