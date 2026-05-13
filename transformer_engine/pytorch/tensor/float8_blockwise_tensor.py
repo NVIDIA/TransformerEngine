@@ -14,6 +14,7 @@ import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
 from transformer_engine.common.recipe import Float8BlockScaling, Recipe
 from .storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
+from ..constants import canonicalize_te_dtype
 from ..quantized_tensor import QuantizedTensor, Quantizer
 from ._quantization_helpers import _IdentityFunc
 from ..utils import devices_match, round_up_to_nearest_multiple
@@ -47,7 +48,7 @@ class Float8BlockQuantizer(Quantizer):
         block_scaling_dim: int = 2,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
-        self.dtype = fp8_dtype
+        self.dtype = canonicalize_te_dtype(fp8_dtype)
         self.block_len = 128
         self.force_pow_2_scales = force_pow_2_scales
         self.amax_epsilon = amax_epsilon
@@ -244,7 +245,21 @@ class Float8BlockQuantizer(Quantizer):
                 **tensor_kwargs,
             )
 
-        # Construct FP8 tensor
+        is_2d_scaled = self.block_scaling_dim == 2
+
+        # See ``Float8Quantizer.make_empty`` for the rationale.
+        if self.internal:
+            return Float8BlockwiseQTensorStorage(
+                rowwise_data,
+                rowwise_scale_inv,
+                columnwise_data,
+                columnwise_scale_inv,
+                self.dtype,
+                self,
+                is_2d_scaled,
+                fake_dtype=dtype,
+            )
+
         return Float8BlockwiseQTensor(
             shape=shape,
             dtype=dtype,
@@ -254,7 +269,7 @@ class Float8BlockQuantizer(Quantizer):
             columnwise_data=columnwise_data,
             columnwise_scale_inv=columnwise_scale_inv,
             quantizer=self,
-            is_2D_scaled=self.block_scaling_dim == 2,
+            is_2D_scaled=is_2d_scaled,
             requires_grad=requires_grad,
         )
 
@@ -265,6 +280,41 @@ class Float8BlockQuantizer(Quantizer):
 
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
         return Float8BlockScaling
+
+    def _flatten(self):
+        from ..dynamo import OpaqueSimpleMetadata
+
+        meta = OpaqueSimpleMetadata(
+            {
+                "_qcls": type(self).__qualname__,
+                "dtype": self.dtype,
+                "rowwise_usage": self.rowwise_usage,
+                "columnwise_usage": self.columnwise_usage,
+                "internal": self.internal,
+                "optimize_for_gemm": self.optimize_for_gemm,
+                "block_len": self.block_len,
+                "amax_epsilon": self.amax_epsilon,
+                "force_pow_2_scales": self.force_pow_2_scales,
+                "block_scaling_dim": self.block_scaling_dim,
+            }
+        )
+        return meta, None, []
+
+    @classmethod
+    def _do_unflatten(cls, meta, process_group, tensors):
+        del process_group, tensors
+        q = cls(
+            fp8_dtype=meta["dtype"],
+            rowwise=meta["rowwise_usage"],
+            columnwise=meta["columnwise_usage"],
+            amax_epsilon=meta["amax_epsilon"],
+            force_pow_2_scales=meta["force_pow_2_scales"],
+            block_scaling_dim=meta["block_scaling_dim"],
+        )
+        q.block_len = meta["block_len"]
+        q.internal = meta["internal"]
+        q.optimize_for_gemm = meta["optimize_for_gemm"]
+        return q
 
 
 class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):

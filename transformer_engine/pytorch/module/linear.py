@@ -58,16 +58,21 @@ from ..cpp_extensions import (
     general_gemm,
 )
 from ..constants import FP8BwdTensorIdx, FP8FwdTensorIdx, GemmParallelModes, dist_group_type
-from ..jit import no_torch_dynamo
+from ..dynamo import _te_register_custom_op
 from ..graph import is_graph_capturing
 from ..quantized_tensor import (
     QuantizedTensor,
     QuantizedTensorStorage,
     Quantizer,
+    TensorOrQuantized,
     prepare_for_saving,
-    restore_from_func_ctx,
+    restore_from_saved,
 )
-from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
+from ..tensor.float8_tensor import (
+    Float8CurrentScalingQuantizer,
+    Float8Quantizer,
+    Float8Tensor,
+)
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.utils import clear_columnwise_cache, is_custom
 from ..export import is_in_onnx_export_mode, assert_warmed_up
@@ -82,20 +87,17 @@ from ...debug.pytorch.debug_state import TEDebugState
 __all__ = ["Linear"]
 
 
-TensorOrQuantized = Union[torch.Tensor, QuantizedTensorStorage]
-
-
 @dataclass(slots=True)
 class LinearFwdArgs:
     """Single-argument bag for the forward path of :class:`_Linear`."""
 
     # --- Differentiable tensors (also passed positionally to autograd) ---
     weight: TensorOrQuantized
-    inp: torch.Tensor
+    inp: TensorOrQuantized
     bias: Optional[torch.Tensor]
 
     # --- Non-differentiable cached tensors ---
-    weight_workspace: Optional[torch.Tensor]
+    weight_workspace: Optional[QuantizedTensorStorage]
 
     # --- requires_grad flags (cached so backward does not re-query) ---
     input_requires_grad: bool
@@ -227,16 +229,23 @@ class LinearBwdArgs:
     # --- Per-backward scratch state (populated inside _linear_backward) ---
     ub_obj_gradout: Optional[Any] = None
 
-    def setup_saved_tensors(self, ctx: torch.autograd.function.FunctionCtx) -> None:
-        """Pull saved tensors from ``ctx`` into the fields backward consumes."""
+    def setup_saved_tensors(self, ctx) -> None:
+        """Restore saved tensors into the fields consumed by backward.
+
+        Accepts both a ``torch.autograd.Function`` ctx (eager path) and a
+        ``torch.library.register_autograd`` ctx (compile path); both expose
+        ``saved_tensors`` and the ``tensor_objects`` attribute we attach
+        during forward.
+        """
         (
             self.inputmat,
             self.weight_fp8,
             self.saved_weight,
             self.bias,
-        ) = restore_from_func_ctx(
-            ctx
-        )  # pylint: disable=unbalanced-tuple-unpacking
+        ) = restore_from_saved(  # pylint: disable=unbalanced-tuple-unpacking
+            ctx.tensor_objects,
+            list(ctx.saved_tensors),
+        )
 
 
 def _check_fp8_reduce_and_update():
@@ -297,7 +306,19 @@ def _linear_forward_impl(
 
     # Configure tensor-parallel communication
     tp_world_size = get_distributed_world_size(tp_group)
-    backward_needs_input = is_grad_enabled and weight.requires_grad
+    # NOTE: prefer the explicit ``args.weight_requires_grad`` flag over
+    # ``weight.requires_grad`` so we stay consistent with the fake impl
+    # under ``torch.compile``: when the outer op flattens a
+    # ``Float8Tensor`` wrapper into a ``Float8TensorStorage`` for the
+    # inner op, the wrapper's ``requires_grad`` is observed inside the
+    # autograd Function and reads as ``False`` (autograd detaches its
+    # forward inputs), so the requires-grad bit baked into the
+    # storage metadata snapshot ends up ``False`` too. The fake impl
+    # uses ``args.weight_requires_grad`` (populated at outer-call site
+    # from the live ``nn.Parameter``) so the real impl must too,
+    # otherwise their ``backward_needs_input`` flags diverge and
+    # ``tensors_to_save_from_forward`` ends up with different lengths.
+    backward_needs_input = is_grad_enabled and args.weight_requires_grad
     with_input_all_gather_nccl = (
         parallel_mode == "column" and sequence_parallel and not ub_overlap_ag_fprop
     )
@@ -1638,6 +1659,7 @@ class _Linear(torch.autograd.Function):
         bwd_args: LinearBwdArgs = ctx.backward_objects
         bwd_args.grad_output = grad_output
         bwd_args.setup_saved_tensors(ctx)
+        ctx.tensor_objects = None
         nvtx_label = "transformer_engine._Linear.backward"
         if bwd_args.ub_name is not None:
             nvtx_label = f"{nvtx_label}.{bwd_args.ub_name}"
@@ -1652,6 +1674,33 @@ class _Linear(torch.autograd.Function):
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
             nvtx_range_pop(f"{nvtx_label}.reduce_and_update_fp8_tensors")
         return result
+
+
+# Register the linear forward + backward as a single torch custom op so that
+# ``torch.compile`` can trace through it without entering the eager
+# ``torch.autograd.Function`` machinery. Used by :meth:`Linear.forward`
+# under ``torch.compiler.is_compiling()``.
+_linear_compiled_op = _te_register_custom_op(
+    op_name="linear",
+    num_outputs=2,
+    input_tensors_for_grad=["weight", "inp", "bias"],
+    fwd_arg_type=LinearFwdArgs,
+    fwd_impl=_linear_forward_impl,
+    fwd_fake_impl=_linear_forward_fake_impl,
+    setup_context=_linear_setup_ctx,
+    backward_arg_type=LinearBwdArgs,
+    backward_obj=LinearBwdArgs,
+    backward_impl=_linear_backward,
+    backward_fake_impl=_linear_backward_fake_impl,
+    # Two-tier custom op: the outer ``linear`` op accepts tensor
+    # subclasses (e.g. ``Float8Tensor`` as a weight), and an
+    # ``register_torch_dispatch`` rule flattens each subclass into
+    # plain tensors plus storage metadata before calling the inner
+    # ``linear_base`` op. The wrapper's autograd identity stays
+    # attached to the inner tensors so gradients flow back to the
+    # user-facing tensor (``Linear.weight.grad`` is populated).
+    subclasses=[Float8Tensor],
+)
 
 
 class Linear(TransformerEngineBaseModule):
@@ -2037,7 +2086,6 @@ class Linear(TransformerEngineBaseModule):
                     elif self.parallel_mode == "column":
                         set_tensor_model_parallel_attributes(getattr(self, bias), True, 0, 1)
 
-    @no_torch_dynamo()
     def forward(
         self,
         inp: torch.Tensor,
@@ -2116,12 +2164,18 @@ class Linear(TransformerEngineBaseModule):
                 grad_output_quantizer,
             ) = quantizers
 
-            if is_grad_enabled:
-                linear_fn = _Linear.apply
-                autograd_ctx = []
-            else:
-                linear_fn = _Linear.forward
-                autograd_ctx = [None]
+            # Under torch.compile we always dispatch through the registered
+            # custom op (it only takes ``fwd_args``); torch.library handles the
+            # no-grad case automatically. Otherwise fall back to the eager
+            # torch.autograd.Function (or its bare forward when grad is off).
+            use_compiled_op = torch.compiler.is_compiling()
+            if not use_compiled_op:
+                if is_grad_enabled:
+                    linear_fn = _Linear.apply
+                    autograd_ctx = []
+                else:
+                    linear_fn = _Linear.forward
+                    autograd_ctx = [None]
 
             cache_name = None if (is_first_microbatch is None or self.is_fsdp2) else "weight"
             weight_workspace = (
@@ -2216,13 +2270,16 @@ class Linear(TransformerEngineBaseModule):
                 cpu_offloading=is_cpu_offload_enabled(),
                 is_grad_enabled=is_grad_enabled,
             )
-            out, new_weight_workspace = linear_fn(
-                *autograd_ctx,
-                weight_tensor,
-                inp,
-                linear_bias_tensor,
-                fwd_args,
-            )
+            if use_compiled_op:
+                out, new_weight_workspace = _linear_compiled_op(fwd_args)
+            else:
+                out, new_weight_workspace = linear_fn(
+                    *autograd_ctx,
+                    weight_tensor,
+                    inp,
+                    linear_bias_tensor,
+                    fwd_args,
+                )
 
             if new_weight_workspace is not None and cache_name is not None:
                 if isinstance(new_weight_workspace, torch.Tensor):

@@ -8,7 +8,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 import functools
 import math
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 import warnings
 
 import torch
@@ -20,6 +20,16 @@ from ...quantized_tensor import QuantizedTensorStorage, Quantizer
 
 from ...constants import TE_DType as torch_to_transformer_engine_dtype
 from ...utils import _empty_tensor
+
+try:
+    from torch._library.opaque_object import is_opaque_value_type, register_opaque_type
+
+    if not hasattr(TE_DType, "__fx_repr__"):
+        TE_DType.__fx_repr__ = lambda self: (f"TE_DType({int(self)})", {"TE_DType": TE_DType})
+    if not is_opaque_value_type(TE_DType):
+        register_opaque_type(TE_DType, typ="value", members={})
+except Exception:  # pragma: no cover - older torch / partial init
+    pass
 
 
 @functools.lru_cache(maxsize=None)
@@ -215,6 +225,91 @@ class NVFP4TensorStorage(QuantizedTensorStorage):
         self._amax_rowwise = tensors[4]
         self._amax_columnwise = tensors[5]
         return tensors[6:]
+
+    def _torch_compile_flatten(self) -> Tuple[Any, Any, List[torch.Tensor]]:
+        from transformer_engine.pytorch.dynamo import OpaqueSimpleMetadata
+
+        tensors: List[torch.Tensor] = []
+
+        def _append_if_present(tensor: Optional[torch.Tensor]) -> bool:
+            if tensor is None:
+                return False
+            tensors.append(tensor)
+            return True
+
+        quantizer_meta = None
+        process_group = None
+        quantizer_tensors: List[torch.Tensor] = []
+        if self._quantizer is not None:
+            quantizer_meta, process_group, quantizer_tensors = self._quantizer._flatten()
+
+        meta = OpaqueSimpleMetadata(
+            {
+                "_qstorage_cls": type(self).__qualname__,
+                "is_tensor": isinstance(self, torch.Tensor),
+                "shape": torch.Size(self.shape) if isinstance(self, torch.Tensor) else None,
+                "requires_grad": self.requires_grad if isinstance(self, torch.Tensor) else False,
+                "device": self.device if isinstance(self, torch.Tensor) else None,
+                "fp4_dtype": self._fp4_dtype,
+                "fake_dtype": self._dtype,
+                "with_gemm_swizzled_scales": self._with_gemm_swizzled_scales,
+                "row_scaled_nvfp4": self._row_scaled_nvfp4,
+                "has_rowwise_data": _append_if_present(self._rowwise_data),
+                "has_rowwise_scale_inv": _append_if_present(self._rowwise_scale_inv),
+                "has_columnwise_data": _append_if_present(self._columnwise_data),
+                "has_columnwise_scale_inv": _append_if_present(self._columnwise_scale_inv),
+                "has_amax_rowwise": _append_if_present(self._amax_rowwise),
+                "has_amax_columnwise": _append_if_present(self._amax_columnwise),
+                "quantizer_meta": quantizer_meta,
+            }
+        )
+        tensors.extend(quantizer_tensors)
+        return meta, process_group, tensors
+
+    @classmethod
+    def _torch_compile_do_unflatten(
+        cls,
+        meta: Any,
+        process_group: Any,
+        tensors: List[torch.Tensor],
+    ) -> "NVFP4TensorStorage":
+        tensor_iter = iter(tensors)
+        rowwise_data = next(tensor_iter) if meta["has_rowwise_data"] else None
+        rowwise_scale_inv = next(tensor_iter) if meta["has_rowwise_scale_inv"] else None
+        columnwise_data = next(tensor_iter) if meta["has_columnwise_data"] else None
+        columnwise_scale_inv = (
+            next(tensor_iter) if meta["has_columnwise_scale_inv"] else None
+        )
+        amax_rowwise = next(tensor_iter) if meta["has_amax_rowwise"] else None
+        amax_columnwise = next(tensor_iter) if meta["has_amax_columnwise"] else None
+        quantizer = None
+        if meta["quantizer_meta"] is not None:
+            quantizer = Quantizer._unflatten(
+                meta["quantizer_meta"], process_group, list(tensor_iter)
+            )
+        kwargs = {
+            "rowwise_data": rowwise_data,
+            "rowwise_scale_inv": rowwise_scale_inv,
+            "columnwise_data": columnwise_data,
+            "columnwise_scale_inv": columnwise_scale_inv,
+            "amax_rowwise": amax_rowwise,
+            "amax_columnwise": amax_columnwise,
+            "fp4_dtype": meta["fp4_dtype"],
+            "quantizer": quantizer,
+            "with_gemm_swizzled_scales": meta["with_gemm_swizzled_scales"],
+            "fake_dtype": meta["fake_dtype"],
+            "row_scaled_nvfp4": meta["row_scaled_nvfp4"],
+        }
+        if meta["is_tensor"]:
+            kwargs.update(
+                {
+                    "shape": meta["shape"],
+                    "dtype": meta["fake_dtype"],
+                    "requires_grad": meta["requires_grad"],
+                    "device": meta["device"],
+                }
+            )
+        return cls(**kwargs)
 
     def get_data_tensors(self):
         """Get this Tensor's data."""

@@ -13,6 +13,7 @@ from typing import (
     Dict,
     List,
     Optional,
+    Sequence,
     Tuple,
     Union,
     get_args,
@@ -24,10 +25,13 @@ import torch
 
 
 __all__ = [
-    "ArgObject",
     "OpaqueSimpleMetadata",
     "_te_register_custom_op",
 ]
+
+
+_TE_OP_NAMESPACE = "transformer_engine_compile"
+_TE_LIB = torch.library.Library(_TE_OP_NAMESPACE, "FRAGMENT")
 
 
 # Sentinel for ``None`` entries inside the op's flat ``Tensor[]`` return.
@@ -89,12 +93,9 @@ class OpaqueSimpleMetadata:
 
     @classmethod
     def _is_opaque_value(cls, value: Any) -> bool:
-        """Whether ``value``'s class is registered as a value-opaque type."""
-        try:
-            from torch._library.opaque_object import is_opaque_value_type
-        except Exception:  # pragma: no cover - older torch
-            return False
-        return is_opaque_value_type(type(value))
+        """Whether ``value``'s class is registered as a value-opaque type.
+        """
+        return _is_opaque_value_type(type(value))
 
     @classmethod
     def is_simple_value(cls, value: Any) -> bool:
@@ -150,16 +151,10 @@ class OpaqueSimpleMetadata:
             return value.__fx_repr__()[0]
         return repr(value)
 
-    def __init__(
-        self,
-        data: Optional[Dict[str, Any]] = None,
-        /,
-        **kwargs: Any,
-    ) -> None:
-        merged: Dict[str, Any] = dict(data) if data else {}
-        merged.update(kwargs)
+    def __init__(self, data: Optional[Dict[str, Any]] = None) -> None:
+        data = dict(data) if data else {}
         cls = type(self)
-        for k, v in merged.items():
+        for k, v in data.items():
             if not cls.is_simple_value(v):
                 raise TypeError(
                     f"OpaqueSimpleMetadata field '{k}' has unsupported "
@@ -168,9 +163,9 @@ class OpaqueSimpleMetadata:
                     f"Enum, torch.Size, registered torch.compile value-"
                     f"opaque types) and tuples/lists thereof are allowed."
                 )
-        self._data: Dict[str, Any] = merged
+        self._data: Dict[str, Any] = data
         self._frozen: Tuple[Tuple[str, Any], ...] = tuple(
-            (k, cls._to_hashable(v)) for k, v in sorted(merged.items())
+            (k, cls._to_hashable(v)) for k, v in sorted(data.items())
         )
 
     def __getitem__(self, key: str) -> Any:
@@ -276,6 +271,7 @@ class OpaqueSimpleMetadata:
 try:
     from torch._library.opaque_object import (
         get_opaque_type_name,
+        is_opaque_value_type as _is_opaque_value_type,
         register_opaque_type,
     )
 
@@ -296,6 +292,7 @@ try:
     except Exception:  # pragma: no cover - distributed not built / disabled
         _PROCESS_GROUP_TYPE_NAME = None
 except Exception:  # pragma: no cover - older torch without opaque_object
+    _is_opaque_value_type = None
     _OPAQUE_SIMPLE_META_TYPE_NAME = None
     _PROCESS_GROUP_TYPE_NAME = None
 
@@ -304,21 +301,20 @@ except Exception:  # pragma: no cover - older torch without opaque_object
 # Field buckets
 # --------------------------------------------------------------------------- #
 
-# Each dataclass field of an :class:`ArgObject` is mapped to exactly one
+# Each dataclass field of an argument container is mapped to exactly one
 # bucket. A bucket owns the full per-field "vocabulary" -- which schema
 # slots it emits, how its packed value(s) are produced from the dataclass
 # instance, and how the unpacked value is re-injected into the
-# reconstructed instance. ``ArgObject`` then becomes three trivial loops
-# over a list of buckets, instead of three parallel branch ladders.
+# reconstructed instance. The module-level :func:`_get_buckets` /
+# :func:`_get_schema` / :func:`_pack` / :func:`_unpack` helpers then
+# become trivial loops over a list of buckets, instead of three parallel
+# branch ladders.
 #
 # Five bucket kinds are used:
 #
 # * :class:`_TensorBucket` -- :class:`torch.Tensor` /
 #   :class:`Optional[torch.Tensor] <typing.Optional>` -> one ``Tensor`` /
 #   ``Tensor?`` slot.
-# * :class:`_TensorListBucket` -- ``List[torch.Tensor]`` /
-#   ``Tuple[torch.Tensor, ...]`` -> one ``Tensor[]`` slot. Used for
-#   variable-length tensor sequences such as ``ctx.saved_tensors``.
 # * :class:`_ProcessGroupBucket` -- :class:`torch.distributed.ProcessGroup`
 #   (already registered upstream as a value-opaque type) -> one direct
 #   slot.
@@ -378,7 +374,7 @@ class _Bucket:
         """Return ``[(slot_name, schema_type_str), ...]`` for this field."""
         raise NotImplementedError
 
-    def pack(self, owner: "ArgObject") -> List[Tuple[str, Any]]:
+    def pack(self, owner: Any) -> List[Tuple[str, Any]]:
         """Return ``[(slot_name, value), ...]`` extracted from ``owner``."""
         raise NotImplementedError
 
@@ -388,55 +384,33 @@ class _Bucket:
         raise NotImplementedError
 
 
-class _TensorOrStorageBucket(_Bucket):
-    """``Tensor | QuantizedTensorStorage`` -> meta / pg / Tensor[] slots.
+class _MetaPGTensorsBucket(_Bucket):
+    """Shared three-slot bucket emitting ``<name>__meta`` /
+    ``<name>__pg`` / ``<name>__tensors``.
 
-    Plain tensors are carried as a single-element ``Tensor[]``. Quantized
-    tensor wrappers and storage shells are carried through their
-    ``_torch_compile_flatten`` protocol so the backward op receives the same
-    structured object type that eager restoration produced.
+    Used by every field whose value must be carried as the triple
+    ``(OpaqueSimpleMetadata, ProcessGroup?, Tensor[])`` -- today this
+    covers ``Tensor | QuantizedTensorStorage`` unions (see
+    :class:`_UniversalTensorBucket`) and ``Quantizer`` / ``Recipe``
+    instances (see :class:`_FlattenableBucket`). Concrete subclasses
+    implement :meth:`_pack_value` / :meth:`_unpack_value` for their
+    flatten/unflatten protocol; the rest of the bucket contract is
+    identical and lives here.
     """
 
-    SUFFIX_META = "__tsmeta"
-    SUFFIX_PG = "__tspg"
-    SUFFIX_TENSORS = "__tstensors"
-
-    KIND_KEY = "_te_tensor_storage_kind"
-    KIND_NONE = "none"
-    KIND_TENSOR = "tensor"
+    SUFFIX_META = "__meta"
+    SUFFIX_PG = "__pg"
+    SUFFIX_TENSORS = "__tensors"
 
     def __init__(self, name: str) -> None:
         if _OPAQUE_SIMPLE_META_TYPE_NAME is None or _PROCESS_GROUP_TYPE_NAME is None:
             raise RuntimeError(
-                f"Tensor/storage field {name!r} requires both "
-                "OpaqueSimpleMetadata and torch.distributed.ProcessGroup "
-                "to be registered as torch._library opaque types; one or "
-                "both are unavailable in this PyTorch build."
+                f"Field {name!r} requires both OpaqueSimpleMetadata and "
+                "torch.distributed.ProcessGroup to be registered as "
+                "torch._library opaque types; one or both are "
+                "unavailable in this PyTorch build."
             )
         self.name = name
-
-    @staticmethod
-    def _is_tensor_storage_union(annot: Any) -> bool:
-        origin = get_origin(annot)
-        if origin is not Union:
-            return False
-        members = [a for a in get_args(annot) if a is not type(None)]
-        if torch.Tensor not in members:
-            return False
-        try:
-            from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage
-        except Exception:  # pragma: no cover - partial init
-            return False
-        return any(
-            isinstance(member, type) and issubclass(member, QuantizedTensorStorage)
-            for member in members
-        )
-
-    @classmethod
-    def try_build(cls, name: str, annot: Any) -> Optional["_TensorOrStorageBucket"]:
-        if cls._is_tensor_storage_union(annot):
-            return cls(name)
-        return None
 
     def _slot_meta(self) -> str:
         return self.name + self.SUFFIX_META
@@ -454,27 +428,9 @@ class _TensorOrStorageBucket(_Bucket):
             (self._slot_tensors(), "Tensor[]"),
         ]
 
-    def pack(self, owner: "ArgObject") -> List[Tuple[str, Any]]:
+    def pack(self, owner: Any) -> List[Tuple[str, Any]]:
         value = getattr(owner, self.name)
-        if value is None:
-            meta = OpaqueSimpleMetadata({self.KIND_KEY: self.KIND_NONE})
-            pg: Any = None
-            tensors: List[torch.Tensor] = []
-        else:
-            from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage
-
-            if isinstance(value, QuantizedTensorStorage):
-                meta, pg, tensors = value._torch_compile_flatten()
-            elif isinstance(value, torch.Tensor):
-                meta = OpaqueSimpleMetadata({self.KIND_KEY: self.KIND_TENSOR})
-                pg = None
-                tensors = [value]
-            else:
-                raise TypeError(
-                    f"{type(owner).__name__} field {self.name!r} expected "
-                    "None, torch.Tensor, or QuantizedTensorStorage, got "
-                    f"{type(value).__name__}"
-                )
+        meta, pg, tensors = self._pack_value(value)
         return [
             (self._slot_meta(), meta),
             (self._slot_pg(), pg),
@@ -482,22 +438,174 @@ class _TensorOrStorageBucket(_Bucket):
         ]
 
     def unpack(self, args: Dict[str, Any], kwargs: Dict[str, Any]) -> None:
-        meta = args[self._slot_meta()]
+        kwargs[self.name] = self._unpack_value(
+            args[self._slot_meta()],
+            args[self._slot_pg()],
+            args[self._slot_tensors()],
+        )
+
+    def _pack_value(
+        self, value: Any
+    ) -> Tuple[Any, Any, List[torch.Tensor]]:
+        """Flatten one field value into ``(meta, pg, tensors)``."""
+        raise NotImplementedError
+
+    def _unpack_value(
+        self, meta: Any, pg: Any, tensors: List[torch.Tensor]
+    ) -> Any:
+        """Inverse of :meth:`_pack_value`."""
+        raise NotImplementedError
+
+
+class _UniversalTensorBucket(_Bucket):
+    """``Tensor | QuantizedTensorStorage`` (also subclass-tensor) field.
+
+    Emits four schema slots per field, regardless of the runtime value:
+
+    * ``<name>`` (``Tensor?``)        -- plain tensor / subclass tensor
+                                         (e.g. :class:`Float8Tensor`)
+                                         passes through here untouched.
+                                         ``None`` for the storage path.
+    * ``<name>__tensors`` (``Tensor[]``) -- flat inner tensors when the
+                                         value was carried through a
+                                         flatten protocol (storage at
+                                         pack-time, or a subclass that
+                                         was dispatched into flat form
+                                         by ``register_torch_dispatch``
+                                         on the outer op).
+    * ``<name>__pg`` (``ProcessGroup?``) -- distributed handle attached
+                                         to the flatten metadata, if
+                                         any.
+    * ``<name>__meta`` (``OpaqueSimpleMetadata``) -- everything else:
+                                         the storage / subclass meta
+                                         dict, plus a ``__kind__``
+                                         marker telling the unpacker
+                                         which slot to look at:
+                                         ``"none"``, ``"tensor"``, or
+                                         ``"storage"`` (the latter
+                                         covers both storage and any
+                                         already-flattened subclass).
+
+    Storage values are flattened at ``_pack`` time (callsite). Plain
+    tensors -- including subclass instances -- are passed unchanged
+    through ``<name>``; under ``torch.compile`` an outer-op
+    ``register_torch_dispatch`` rule turns each registered subclass
+    into the storage layout *between* outer and inner op so the
+    autograd graph stays attached to the user-facing wrapper.
+    """
+
+    SUFFIX_TENSORS = "__tensors"
+    SUFFIX_PG = "__pg"
+    SUFFIX_META = "__meta"
+
+    KIND_KEY = "__kind__"
+    KIND_NONE = "none"
+    KIND_TENSOR = "tensor"
+    KIND_STORAGE = "storage"
+
+    def __init__(self, name: str) -> None:
+        if _OPAQUE_SIMPLE_META_TYPE_NAME is None or _PROCESS_GROUP_TYPE_NAME is None:
+            raise RuntimeError(
+                f"Field {name!r} requires both OpaqueSimpleMetadata and "
+                "torch.distributed.ProcessGroup to be registered as "
+                "torch._library opaque types; one or both are "
+                "unavailable in this PyTorch build."
+            )
+        self.name = name
+
+    def slot_name(self) -> str:
+        return self.name
+
+    def slot_tensors(self) -> str:
+        return self.name + self.SUFFIX_TENSORS
+
+    def slot_pg(self) -> str:
+        return self.name + self.SUFFIX_PG
+
+    def slot_meta(self) -> str:
+        return self.name + self.SUFFIX_META
+
+    def schema_slots(self) -> List[Tuple[str, str]]:
+        return [
+            (self.slot_name(), "Tensor?"),
+            (self.slot_tensors(), "Tensor[]"),
+            (self.slot_pg(), _PROCESS_GROUP_TYPE_NAME + "?"),
+            (self.slot_meta(), _OPAQUE_SIMPLE_META_TYPE_NAME),
+        ]
+
+    @staticmethod
+    def _is_tensor_storage_union(annot: Any) -> bool:
+        origin = get_origin(annot)
+        if origin is not Union:
+            return False
+        members = [a for a in get_args(annot) if a is not type(None)]
+        if torch.Tensor not in members:
+            return False
+        qts = _quantized_tensor_storage_cls()
+        if qts is None:
+            return False
+        return any(
+            isinstance(member, type) and issubclass(member, qts)
+            for member in members
+        )
+
+    @classmethod
+    def try_build(cls, name: str, annot: Any) -> Optional["_UniversalTensorBucket"]:
+        if cls._is_tensor_storage_union(annot):
+            return cls(name)
+        return None
+
+    def pack(self, owner: Any) -> List[Tuple[str, Any]]:
+        value = getattr(owner, self.name)
+        if value is None:
+            return [
+                (self.slot_name(), None),
+                (self.slot_tensors(), []),
+                (self.slot_pg(), None),
+                (self.slot_meta(), OpaqueSimpleMetadata({self.KIND_KEY: self.KIND_NONE})),
+            ]
+        # Plain ``torch.Tensor`` *and* any subclass (e.g. ``Float8Tensor``)
+        # hit this branch first -- the wrapper is forwarded untouched
+        # through the ``Tensor?`` slot so the autograd graph stays
+        # attached to the user-facing tensor object. Subclass-specific
+        # flattening (if any) happens later inside the outer op's
+        # ``register_torch_dispatch`` rule.
+        if isinstance(value, torch.Tensor):
+            return [
+                (self.slot_name(), value),
+                (self.slot_tensors(), []),
+                (self.slot_pg(), None),
+                (self.slot_meta(), OpaqueSimpleMetadata({self.KIND_KEY: self.KIND_TENSOR})),
+            ]
+        qts = _quantized_tensor_storage_cls()
+        if qts is not None and isinstance(value, qts):
+                meta, pg, tensors = value._torch_compile_flatten()
+            # Stamp the storage-flatten meta with our kind marker so the
+            # unpacker can route by ``__kind__`` alone.
+            meta._data[self.KIND_KEY] = self.KIND_STORAGE
+        return [
+                (self.slot_name(), None),
+                (self.slot_tensors(), list(tensors)),
+                (self.slot_pg(), pg),
+                (self.slot_meta(), meta),
+            ]
+        raise TypeError(
+            f"field {self.name!r} expected None, torch.Tensor, or "
+            f"QuantizedTensorStorage, got {type(value).__name__}"
+        )
+
+    def unpack(self, args: Dict[str, Any], kwargs: Dict[str, Any]) -> None:
+        meta = args[self.slot_meta()]
         kind = meta.get(self.KIND_KEY)
         if kind == self.KIND_NONE:
             kwargs[self.name] = None
             return
-        tensors = args[self._slot_tensors()]
         if kind == self.KIND_TENSOR:
-            kwargs[self.name] = tensors[0]
+            kwargs[self.name] = args[self.slot_name()]
             return
-
-        from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage
-
-        kwargs[self.name] = QuantizedTensorStorage._torch_compile_unflatten(
-            meta,
-            args[self._slot_pg()],
-            tensors,
+        qts = _quantized_tensor_storage_cls()
+        kwargs[self.name] = qts._torch_compile_unflatten(
+            meta, args[self.slot_pg()], args[self.slot_tensors()]
         )
 
 
@@ -518,65 +626,11 @@ class _TensorBucket(_Bucket):
     def schema_slots(self) -> List[Tuple[str, str]]:
         return [(self.name, self.type_str)]
 
-    def pack(self, owner: "ArgObject") -> List[Tuple[str, Any]]:
+    def pack(self, owner: Any) -> List[Tuple[str, Any]]:
         return [(self.name, getattr(owner, self.name))]
 
     def unpack(self, args: Dict[str, Any], kwargs: Dict[str, Any]) -> None:
         kwargs[self.name] = args[self.name]
-
-
-class _TensorListBucket(_Bucket):
-    """``List[Tensor]`` / ``Tuple[Tensor, ...]`` -> single ``Tensor[]`` slot.
-
-    Used for fields like ``LinearBwdArgs.saved_tensors`` that carry an
-    arbitrary-length sequence of tensors (typically the
-    ``ctx.saved_tensors`` payload restored before invoking the backward
-    op). The slot itself is non-nullable, but individual ``None``
-    elements are smuggled through using :func:`_encode_none` /
-    :func:`_decode_none` sentinels (matching what the forward op return
-    list already does). An empty sequence is valid.
-    """
-
-    def __init__(self, name: str, container: type) -> None:
-        self.name = name
-        # Remember the original container type so unpack returns the
-        # exact same Python type the dataclass annotation declared.
-        self.container = container
-
-    @classmethod
-    def try_build(cls, name: str, annot: Any) -> Optional["_TensorListBucket"]:
-        stripped, _ = _strip_optional(annot)
-        origin = get_origin(stripped)
-        if origin is None:
-            return None
-        args = get_args(stripped)
-        if not args:
-            return None
-        # ``Tuple[Tensor, ...]`` -> args = (Tensor, Ellipsis); other forms
-        # like ``Tuple[Tensor, Tensor]`` or ``List[Tensor]`` only have
-        # type entries.
-        if origin is tuple:
-            if len(args) == 2 and args[1] is Ellipsis:
-                elem = args[0]
-            else:
-                elem = args[0] if all(a is args[0] for a in args) else None
-        elif origin is list:
-            elem = args[0]
-        else:
-            return None
-        if elem is not torch.Tensor:
-            return None
-        return cls(name, list if origin is list else tuple)
-
-    def schema_slots(self) -> List[Tuple[str, str]]:
-        return [(self.name, "Tensor[]")]
-
-    def pack(self, owner: "ArgObject") -> List[Tuple[str, Any]]:
-        value = getattr(owner, self.name) or ()
-        return [(self.name, [_encode_none(t) for t in value])]
-
-    def unpack(self, args: Dict[str, Any], kwargs: Dict[str, Any]) -> None:
-        kwargs[self.name] = self.container(_decode_none(t) for t in args[self.name])
 
 
 class _ProcessGroupBucket(_Bucket):
@@ -613,11 +667,63 @@ class _ProcessGroupBucket(_Bucket):
     def schema_slots(self) -> List[Tuple[str, str]]:
         return [(self.name, self.type_str)]
 
-    def pack(self, owner: "ArgObject") -> List[Tuple[str, Any]]:
+    def pack(self, owner: Any) -> List[Tuple[str, Any]]:
         return [(self.name, getattr(owner, self.name))]
 
     def unpack(self, args: Dict[str, Any], kwargs: Dict[str, Any]) -> None:
         kwargs[self.name] = args[self.name]
+
+
+# Cached resolutions of TE types that ``dynamo`` references lazily to
+# avoid import cycles (they live in modules that themselves import this
+# one). Each ``_*_cls`` getter resolves its target once and reuses the
+# result on every subsequent call; the values are kept module-level
+# rather than baked into bucket instances so the cache survives across
+# different dataclass registrations.
+_QTS_REF: Optional[type] = None
+_QUANTIZER_REF: Optional[type] = None
+_RECIPE_REF: Optional[type] = None
+
+
+def _quantized_tensor_storage_cls() -> Optional[type]:
+    """Lazy-resolve :class:`QuantizedTensorStorage`; ``None`` if unavailable."""
+    global _QTS_REF
+    if _QTS_REF is None:
+        try:
+            from transformer_engine.pytorch.quantized_tensor import (
+                QuantizedTensorStorage,
+            )
+
+            _QTS_REF = QuantizedTensorStorage
+        except Exception:  # pragma: no cover - partial init
+            return None
+    return _QTS_REF
+
+
+def _quantizer_cls() -> Optional[type]:
+    """Lazy-resolve :class:`Quantizer`; ``None`` if unavailable."""
+    global _QUANTIZER_REF
+    if _QUANTIZER_REF is None:
+        try:
+            from transformer_engine.pytorch.quantized_tensor import Quantizer
+
+            _QUANTIZER_REF = Quantizer
+    except Exception:  # pragma: no cover - partial init
+            return None
+    return _QUANTIZER_REF
+
+
+def _recipe_cls() -> Optional[type]:
+    """Lazy-resolve :class:`Recipe`; ``None`` if unavailable."""
+    global _RECIPE_REF
+    if _RECIPE_REF is None:
+    try:
+        from transformer_engine.common.recipe import Recipe
+
+            _RECIPE_REF = Recipe
+    except Exception:  # pragma: no cover - partial init
+            return None
+    return _RECIPE_REF
 
 
 def _flattenable_bases() -> Tuple[type, ...]:
@@ -628,39 +734,21 @@ def _flattenable_bases() -> Tuple[type, ...]:
 
     * instance method ``_flatten() -> (OpaqueSimpleMetadata, ref, list[Tensor])``
     * classmethod ``_unflatten(meta, ref, tensors)`` (dispatches by an
-      identifier stamped into ``meta``)
-
-    Lazy import keeps ``dynamo`` importable before the modules that
-    define these bases (avoid import cycles).
+      identifier stamped into ``meta``).
     """
-    bases: List[type] = []
-    try:
-        from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage, Quantizer
-
-        bases.append(Quantizer)
-        bases.append(QuantizedTensorStorage)
-    except Exception:  # pragma: no cover - partial init
-        pass
-    try:
-        from transformer_engine.common.recipe import Recipe
-
-        bases.append(Recipe)
-    except Exception:  # pragma: no cover - partial init
-        pass
-    return tuple(bases)
+    return tuple(
+        cls
+        for cls in (_quantizer_cls(), _quantized_tensor_storage_cls(), _recipe_cls())
+        if cls is not None
+    )
 
 
-class _FlattenableBucket(_Bucket):
-    """Three-slot expansion (``meta`` / ``ref`` / ``tensors``) for any
-    field whose type implements the ``_flatten`` / ``_unflatten``
+class _FlattenableBucket(_MetaPGTensorsBucket):
+    """Field whose type implements the ``_flatten`` / ``_unflatten``
     protocol (see :func:`_flattenable_bases`). Used today for
     :class:`~transformer_engine.pytorch.quantized_tensor.Quantizer` and
     :class:`~transformer_engine.common.recipe.Recipe`.
     """
-
-    SUFFIX_META = "__fmeta"
-    SUFFIX_PG = "__fpg"
-    SUFFIX_TENSORS = "__ftensors"
 
     # Stored under ``_qcls`` in the metadata bundle to encode ``None``
     # without making any of the three slots nullable.
@@ -668,14 +756,7 @@ class _FlattenableBucket(_Bucket):
     NONE_MARKER_VAL = ""
 
     def __init__(self, name: str, base_cls: type) -> None:
-        if _OPAQUE_SIMPLE_META_TYPE_NAME is None or _PROCESS_GROUP_TYPE_NAME is None:
-            raise RuntimeError(
-                f"Flattenable field {name!r} requires both "
-                "OpaqueSimpleMetadata and torch.distributed.ProcessGroup "
-                "to be registered as torch._library opaque types; one or "
-                "both are unavailable in this PyTorch build."
-            )
-        self.name = name
+        super().__init__(name)
         self.base_cls = base_cls
 
     @classmethod
@@ -688,52 +769,25 @@ class _FlattenableBucket(_Bucket):
                 return cls(name, base)
         return None
 
-    def _slot_meta(self) -> str:
-        return self.name + self.SUFFIX_META
-
-    def _slot_pg(self) -> str:
-        return self.name + self.SUFFIX_PG
-
-    def _slot_tensors(self) -> str:
-        return self.name + self.SUFFIX_TENSORS
-
-    def schema_slots(self) -> List[Tuple[str, str]]:
-        return [
-            (self._slot_meta(), _OPAQUE_SIMPLE_META_TYPE_NAME),
-            (self._slot_pg(), _PROCESS_GROUP_TYPE_NAME + "?"),
-            (self._slot_tensors(), "Tensor[]"),
-        ]
-
-    def pack(self, owner: "ArgObject") -> List[Tuple[str, Any]]:
-        value = getattr(owner, self.name)
+    def _pack_value(self, value: Any) -> Tuple[Any, Any, List[torch.Tensor]]:
         if value is None:
-            meta = OpaqueSimpleMetadata({self.NONE_MARKER_KEY: self.NONE_MARKER_VAL})
-            pg: Any = None
-            tensors: List[torch.Tensor] = []
-        else:
+            return (
+                OpaqueSimpleMetadata({self.NONE_MARKER_KEY: self.NONE_MARKER_VAL}),
+                None,
+                [],
+            )
             if hasattr(value, "_flatten"):
-                meta, pg, tensors = value._flatten()
-            else:
-                meta, pg, tensors = value._torch_compile_flatten()
-        return [
-            (self._slot_meta(), meta),
-            (self._slot_pg(), pg),
-            (self._slot_tensors(), list(tensors)),
-        ]
+            return value._flatten()
+        return value._torch_compile_flatten()
 
-    def unpack(self, args: Dict[str, Any], kwargs: Dict[str, Any]) -> None:
-        meta = args[self._slot_meta()]
+    def _unpack_value(
+        self, meta: Any, pg: Any, tensors: List[torch.Tensor]
+    ) -> Any:
         if meta.get(self.NONE_MARKER_KEY) == self.NONE_MARKER_VAL:
-            kwargs[self.name] = None
-            return
+            return None
         if hasattr(self.base_cls, "_unflatten"):
-            kwargs[self.name] = self.base_cls._unflatten(
-                meta, args[self._slot_pg()], args[self._slot_tensors()]
-            )
-        else:
-            kwargs[self.name] = self.base_cls._torch_compile_unflatten(
-                meta, args[self._slot_pg()], args[self._slot_tensors()]
-            )
+            return self.base_cls._unflatten(meta, pg, tensors)
+        return self.base_cls._torch_compile_unflatten(meta, pg, tensors)
 
 
 class _SimpleBundleBucket(_Bucket):
@@ -774,12 +828,7 @@ class _SimpleBundleBucket(_Bucket):
             return True
         # Any registered value-opaque class is hashable / FX-reproducible
         # and therefore safe to embed in the OpaqueSimpleMetadata bundle.
-        if isinstance(annot, type):
-            try:
-                from torch._library.opaque_object import is_opaque_value_type
-            except Exception:  # pragma: no cover - older torch
-                is_opaque_value_type = None
-            if is_opaque_value_type is not None and is_opaque_value_type(annot):
+        if isinstance(annot, type) and _is_opaque_value_type(annot):
                 return True
         origin = get_origin(annot)
         if origin in (tuple, list):
@@ -792,7 +841,7 @@ class _SimpleBundleBucket(_Bucket):
     def schema_slots(self) -> List[Tuple[str, str]]:
         return [(self.SLOT, _OPAQUE_SIMPLE_META_TYPE_NAME)]
 
-    def pack(self, owner: "ArgObject") -> List[Tuple[str, Any]]:
+    def pack(self, owner: Any) -> List[Tuple[str, Any]]:
         bundle = OpaqueSimpleMetadata({n: getattr(owner, n) for n in self.names})
         return [(self.SLOT, bundle)]
 
@@ -816,7 +865,7 @@ class _UnknownBucket(_Bucket):
     the op and reconstructed from companion fields (``saved_tensors``,
     quantizer metadata, ...) on the way out.
 
-    Constructed directly by :meth:`ArgObject._buckets` (it has no
+    Constructed directly by :func:`_get_buckets` (it has no
     annotation-based ``try_build`` -- it's the explicit "no match" case).
     """
 
@@ -835,15 +884,14 @@ class _UnknownBucket(_Bucket):
     def schema_slots(self) -> List[Tuple[str, str]]:
         return []
 
-    def pack(self, owner: "ArgObject") -> List[Tuple[str, Any]]:
+    def pack(self, owner: Any) -> List[Tuple[str, Any]]:
         value = getattr(owner, self.name, None)
         if not self._is_trivial(value):
             raise TypeError(
                 f"{self.owner_cls_name} field {self.name!r} has a type not "
                 "supported by torch.compile (not Tensor, simple, "
-                "ProcessGroup, or Quantizer) and carries "
-                "a non-trivial value; override "
-                f"{self.owner_cls_name}.torch_compile_pack to handle it."
+                "ProcessGroup, or Quantizer) and carries a non-trivial "
+                "value; add a matching bucket in dynamo.py to handle it."
             )
         return []
 
@@ -853,39 +901,34 @@ class _UnknownBucket(_Bucket):
 
 # Buckets, in priority order, that own ``try_build`` for a single field.
 _FIELD_BUCKETS: Tuple[type, ...] = (
-    _TensorOrStorageBucket,
+    _UniversalTensorBucket,
     _TensorBucket,
-    _TensorListBucket,
     _ProcessGroupBucket,
     _FlattenableBucket,
 )
 
 
 # --------------------------------------------------------------------------- #
-# ArgObject
+# Dataclass <-> torch.library plumbing
 # --------------------------------------------------------------------------- #
+#
+# The argument containers consumed by :func:`_te_register_custom_op`
+# (e.g. ``LinearFwdArgs`` / ``LinearBwdArgs``) are intentionally just
+# plain ``@dataclass`` types -- no base class, no decorators, no special
+# methods. All translation between the dataclass and the flat
+# ``{slot_name: slot_value}`` view that ``torch.library`` works with is
+# provided by the module-level helpers below, which dispatch on dataclass
+# field annotations: each field is mapped to exactly one :class:`_Bucket`
+# and the three operations (schema / pack / unpack) reduce to a loop
+# over the bucket list.
 
 
-class ArgObject:
-    """Base class for structured argument containers passed to TE custom ops.
-
-    Subclassed by per-module forward / backward dataclasses
-    (e.g. ``LinearFwdArgs``, ``LinearBwdArgs``). Provides the pack /
-    unpack / schema hooks consumed by :func:`_te_register_custom_op`
-    when wiring the dataclass into a ``torch.library`` schema.
-
-    The default pack / unpack / schema implementations dispatch on
-    dataclass field annotations. Each field is mapped to exactly one
-    :class:`_Bucket` (see module-level docstring); the three methods
-    then become trivial iterations over the bucket list.
-    """
-
-    @classmethod
-    def _resolved_field_annotations(cls) -> List[Tuple[str, Any]]:
+def _resolved_field_annotations(cls: type) -> List[Tuple[str, Any]]:
+    """Return ``[(field_name, resolved_type), ...]`` for a dataclass."""
         if not dataclasses.is_dataclass(cls):
             raise TypeError(
-                f"{cls.__name__} must be a @dataclass to use the default "
-                f"ArgObject torch_compile_* implementations."
+            f"{cls.__name__} must be a @dataclass to be used as a TE "
+            f"custom-op argument container."
             )
         # ``get_type_hints`` resolves forward references and PEP 563
         # ``from __future__ import annotations`` strings.
@@ -893,30 +936,27 @@ class ArgObject:
             hints = get_type_hints(cls)
         except Exception:
             hints = {}
-        return [
-            (f.name, hints.get(f.name, f.type)) for f in dataclasses.fields(cls)
-        ]
+    return [(f.name, hints.get(f.name, f.type)) for f in dataclasses.fields(cls)]
 
-    @classmethod
-    def _buckets(cls) -> List[_Bucket]:
-        """Build the bucket list for this dataclass from field annotations.
+
+def _get_buckets(cls: type) -> List[_Bucket]:
+    """Build the bucket list for a dataclass from its field annotations.
 
         Dispatch order per field: try each bucket in :data:`_FIELD_BUCKETS`
         (Tensor, ProcessGroup, Quantizer); if none claims the field, route
         it to :class:`_SimpleBundleBucket` if its annotation is bundle-able,
         else to :class:`_UnknownBucket`.
 
-        Intentionally **not** cached. Caching on ``cls`` (e.g. by writing
-        ``cls.__te_buckets__``) tickles Dynamo: subsequent reads of
+    Intentionally **not** cached on ``cls``. Caching there (e.g. by
+    writing ``cls.__te_buckets__``) tickles Dynamo: subsequent reads of
         ``cls.__dict__`` from a compiled function trigger
-        "mappingproxy affected by dictionary mutation" graph breaks.
-        Hot paths must instead capture the bucket list once at op
-        registration time and pass it explicitly to :meth:`torch_compile_pack`
-        / :meth:`torch_compile_unpack`.
+    "mappingproxy affected by dictionary mutation" graph breaks. Hot
+    paths must instead capture the bucket list once at op registration
+    time and pass it explicitly to :func:`_pack` / :func:`_unpack`.
         """
         buckets: List[_Bucket] = []
         simple_names: List[str] = []
-        for name, annot in cls._resolved_field_annotations():
+    for name, annot in _resolved_field_annotations(cls):
             built: Optional[_Bucket] = None
             for bucket_cls in _FIELD_BUCKETS:
                 built = bucket_cls.try_build(name, annot)
@@ -932,52 +972,46 @@ class ArgObject:
             buckets.append(_SimpleBundleBucket(simple_names))
         return buckets
 
-    @classmethod
-    def torch_compile_get_schema(cls) -> List[Tuple[str, str]]:
-        """Default: derive the schema from dataclass annotations.
 
-        See :class:`_Bucket` subclasses for the per-field-kind layout
-        (Tensor, ProcessGroup, Quantizer, and the
-        aggregated ``_simple_meta`` bundle of simple fields).
-        """
-        return [slot for b in cls._buckets() for slot in b.schema_slots()]
+def _build_schema(buckets: List[_Bucket]) -> Tuple[str, List[str]]:
+    """Return ``(schema_str, slot_names)`` for a precomputed bucket list.
 
-    def torch_compile_pack(
-        self, buckets: Optional[List[_Bucket]] = None
-    ) -> Dict[str, Any]:
-        """Default: ask each bucket to extract its slot(s) from ``self``.
+    ``schema_str`` is the parenthesised argument list (e.g.
+    ``"(Tensor x, Tensor? y)"``) that ``torch.library.Library.define``
+    appends to the op name; ``slot_names`` is the ordered list of slot
+    keys produced by :func:`_pack`, used to flatten/unflatten the
+    keyword dict into the positional call.
+    """
+    spec = [slot for b in buckets for slot in b.schema_slots()]
+    names = [name for name, _ in spec]
+    schema_str = "(" + ", ".join(f"{type_str} {name}" for name, type_str in spec) + ")"
+    return schema_str, names
 
-        ``buckets`` is the precomputed bucket list (from
-        :meth:`_buckets`). Hot paths -- e.g. the closures created by
-        :func:`_te_register_custom_op` -- must pass it to avoid recomputing
-        and, critically, to keep Dynamo away from ``cls.__dict__`` while
-        tracing. When ``None``, this method recomputes the buckets
-        (eager-only fallback intended for ad-hoc / test usage).
-        """
-        if buckets is None:
-            buckets = type(self)._buckets()
+
+def _pack(obj: Any, buckets: List[_Bucket]) -> Dict[str, Any]:
+    """Ask each bucket to extract its slot(s) from ``obj``.
+
+    ``buckets`` is the precomputed bucket list (from :func:`_get_buckets`).
+    Hot paths -- e.g. the closures created by
+    :func:`_te_register_custom_op` -- must pass the precomputed list to
+    avoid recomputing and, critically, to keep Dynamo away from
+    ``cls.__dict__`` while tracing.
+    """
         out: Dict[str, Any] = {}
         for bucket in buckets:
-            for name, value in bucket.pack(self):
+        for name, value in bucket.pack(obj):
                 out[name] = value
         return out
 
-    @classmethod
-    def torch_compile_unpack(
-        cls,
-        args: Dict[str, Any],
-        buckets: Optional[List[_Bucket]] = None,
-    ) -> "ArgObject":
-        """Default: ask each bucket to inject its field(s) into a fresh
-        instance built via ``__new__`` (we bypass the dataclass
-        ``__init__`` so unknown-typed fields can stay as ``None`` even
-        when they have no default).
 
-        ``buckets`` semantics match :meth:`torch_compile_pack`: hot paths
-        pass the precomputed list, eager-only callers may omit it.
-        """
-        if buckets is None:
-            buckets = cls._buckets()
+def _unpack(cls: type, args: Dict[str, Any], buckets: List[_Bucket]) -> Any:
+    """Ask each bucket to inject its field(s) into a fresh instance.
+
+    The instance is built via ``cls.__new__(cls)`` (we bypass any
+    dataclass ``__init__`` so unknown-typed fields can stay as ``None``
+    even when they have no default). ``buckets`` semantics match
+    :func:`_pack`.
+    """
         kwargs: Dict[str, Any] = {}
         for bucket in buckets:
             bucket.unpack(args, kwargs)
@@ -986,271 +1020,246 @@ class ArgObject:
             object.__setattr__(obj, k, v)
         return obj
 
-    @classmethod
-    def torch_compile_get_input_tensors_for_grad(cls) -> List[str]:
-        """Names of forward inputs (from :meth:`torch_compile_get_schema`)
-        for which the corresponding ``backward_impl`` produces gradients,
-        in the exact order ``backward_impl`` returns them.
 
-        Only meaningful on the forward arg type. Default is ``[]`` (no
-        gradients, e.g. for inference-only ops). The wrapper uses this
-        to pad the autograd return tuple with ``None`` for every input
-        not listed here, so torch sees one slot per forward input as
-        required by ``register_autograd``.
-        """
-        return []
+# --------------------------------------------------------------------------- #
+# Op registration helpers
+# --------------------------------------------------------------------------- #
+#
+# The bottom half of the module turns one or more user-supplied eager
+# kernels (forward / backward / their fake counterparts) plus the
+# dataclass argument types into a fully registered ``torch.library``
+# custom op. :func:`_te_register_custom_op` is the orchestrator; the
+# helpers below are the per-step building blocks (validation, kernel
+# wrapping, dispatcher creation).
 
 
-def _te_register_custom_op(
-    *,
-    linear_impl: Callable[[Any], Any],
-    linear_arg_type: type,
-    setup_context: Callable[..., None],
-    backward_impl: Callable[[Any], Any],
-    backward_obj: type,
-    backward_arg_type: type,
-    num_outputs: int,
-    linear_fake_impl: Optional[Callable[[Any], Any]] = None,
-    backward_fake_impl: Optional[Callable[[Any], Any]] = None,
-    op_namespace: str = "transformer_engine",
-    op_name: str = "linear",
-) -> Callable[..., Any]:
-    """Register a TE module's forward + backward as a single torch custom op.
+def _prepare_for_saving(tensors: Any) -> Tuple[List[Optional[torch.Tensor]], Any]:
+    """Lazy wrapper around :func:`quantized_tensor.prepare_for_saving`.
 
-    Parameters
-    ----------
-    linear_impl
-        Eager forward implementation. Receives a single argument of type
-        ``linear_arg_type`` and must return a tuple of the form
-        ``(*output_tensors, tensors_to_save, tensor_objects, ctx_attrs)``
-        where:
-
-        * ``output_tensors`` -- one or more :class:`torch.Tensor` outputs
-          returned to the caller.
-        * ``tensors_to_save`` -- flat list of :class:`torch.Tensor` to be
-          stashed via ``ctx.save_for_backward``.
-        * ``tensor_objects`` -- the metadata object produced by
-          :func:`prepare_for_saving`, paired with ``tensors_to_save`` to
-          let the backward reconstruct quantized / structured tensors.
-        * ``ctx_attrs`` -- non-tensor state to attach to the autograd
-          context, restricted to values that cannot be derived from the
-          forward args inside ``setup_context``.
-    linear_arg_type
-        Dataclass type aggregating all forward inputs (e.g.
-        :class:`LinearFwdArgs`). Used to (re)build the structured argument
-        from the flat tensor / non-tensor inputs accepted by the custom op.
-    setup_context
-        Eager autograd ``setup_context`` analogue. Receives a freshly
-        constructed ``backward_obj`` instance, the forward args, the
-        forward output, and ``ctx_attrs`` produced by ``linear_impl``;
-        is responsible for populating the backward-state object so that
-        ``backward_impl`` can later consume it.
-    backward_impl
-        Eager backward implementation. Receives a single argument of type
-        ``backward_arg_type`` and returns the gradient tuple.
-    backward_obj
-        Dataclass / class used to instantiate a fresh backward-state
-        container at the end of the forward pass (typically the same as
-        ``backward_arg_type``).
-    backward_arg_type
-        Type accepted by ``backward_impl``. May differ from ``backward_obj``
-        if the backward op needs a wrapped / opaque view of the state.
-    num_outputs
-        Number of user-facing tensor outputs returned by ``linear_impl``.
-        The op concatenates ``[*output_tensors, *tensors_to_save]`` into
-        a single ``Tensor[]`` return; the wrapper uses ``num_outputs`` to
-        split the two halves on the way back out.
-
-        The list of forward inputs that receive gradients is declared on
-        the forward arg type itself, via
-        :meth:`ArgObject.torch_compile_get_input_tensors_for_grad`.
-        ``backward_impl`` must return its gradients in that exact order.
-    linear_fake_impl
-        Optional fake (shape inference) counterpart of ``linear_impl``,
-        registered via ``torch.library.register_fake``. Returns the same
-        tuple shape as ``linear_impl`` -- ``(*output_tensors,
-        tensors_to_save, tensor_objects, ctx_attrs)`` -- but every
-        ``torch.Tensor`` is a fake tensor (allocated via
-        ``quantizer.make_empty`` or ``torch.empty``) carrying only the
-        correct shape / dtype / device, with no real storage or
-        computation. ``tensor_objects`` and ``ctx_attrs`` must be
-        structurally identical to those produced by ``linear_impl`` so
-        that ``setup_context`` and ``backward_impl`` see the same
-        non-tensor state in eager and traced modes.
-    backward_fake_impl
-        Optional fake counterpart of ``backward_impl``. Returns the same
-        gradient tuple as ``backward_impl``, with fake tensors in place
-        of the real gradients.
-    op_namespace, op_name
-        Library namespace / op name used when registering with
-        ``torch.library``.
-
-    Returns
-    -------
-    Callable
-        A function ``forward_fn(linear_arg_type_instance)`` that dispatches
-        through the registered custom op, returning the user-facing
-        outputs (single tensor if ``num_outputs == 1``, otherwise a
-        tuple). Use under ``torch.compiler.is_compiling()`` as a drop-in
-        for ``Function.apply``.
+    Lazy-imports to avoid the dynamo<->quantized_tensor circular import
+    that ``transformer_engine.pytorch`` would otherwise trigger at
+    module import time.
     """
+    from transformer_engine.pytorch.quantized_tensor import prepare_for_saving
 
-    fwd_qualname = f"{op_namespace}::{op_name}"
-    bwd_op_name = f"{op_name}_backward"
-    bwd_qualname = f"{op_namespace}::{bwd_op_name}"
+    return prepare_for_saving(*(tensors or ()))
 
-    # Precompute the bucket list for both arg types and capture them in
-    # the closures below. Critical for the compiled path: re-deriving
-    # buckets at call time would force ``ArgObject._buckets`` to read
-    # ``cls.__dict__`` from inside a Dynamo-traced function, which
-    # triggers a "mappingproxy affected by dictionary mutation" graph
-    # break under ``fullgraph=True``.
-    fwd_buckets: List[_Bucket] = linear_arg_type._buckets()
-    bwd_buckets: List[_Bucket] = backward_arg_type._buckets()
 
-    def _build_schema(buckets: List[_Bucket]) -> Tuple[str, List[str]]:
-        spec = [slot for b in buckets for slot in b.schema_slots()]
-        names = [name for name, _ in spec]
-        schema_str = "(" + ", ".join(f"{type_str} {name}" for name, type_str in spec) + ")"
-        return schema_str, names
+def _restore_from_saved(tensor_objects: Any, saved_tensors: List[Any]) -> Any:
+    """Lazy wrapper around :func:`quantized_tensor.restore_from_saved`."""
+    from transformer_engine.pytorch.quantized_tensor import restore_from_saved
 
-    fwd_schema_args, fwd_arg_names = _build_schema(fwd_buckets)
-    bwd_schema_args, bwd_arg_names = _build_schema(bwd_buckets)
+    return restore_from_saved(tensor_objects, saved_tensors)
 
-    # ``torch.library.register_autograd`` requires the backward to return
-    # one grad slot per forward input, with the same Python tree
-    # structure as the input itself: a ``Tensor[]`` slot must get back a
-    # ``list``, not a bare ``None``. Precompute the per-slot "no-grad"
-    # value so the autograd return matches.
+
+def _format_fwd_result(result: Any, num_outputs: int) -> List[torch.Tensor]:
+    """Pack a fwd-impl return tuple into the op's ``Tensor[]`` payload.
+
+    The op concatenates ``[*output_tensors, *tensors_to_save]`` into a
+    single non-nullable list; ``None`` entries are smuggled through the
+    :func:`_encode_none` sentinel so ``register_autograd`` still
+    attaches a ``grad_fn`` to the result.
+    """
+    outputs = list(result[:num_outputs])
+    tensors_to_save, _ = _prepare_for_saving(result[num_outputs])
+    return [_encode_none(t) for t in outputs + tensors_to_save]
+
+
+def _format_bwd_result(
+    grads: Any, num_grad_inputs: int, op_qualname: str
+) -> List[torch.Tensor]:
+    """Pack a backward-impl return tuple into the op's ``Tensor[]`` payload.
+
+    Validates that the user kernel returned exactly one grad per
+    ``input_tensors_for_grad`` entry; raises with the op's qualified
+    name on mismatch.
+    """
+    grads = list(grads)
+    if len(grads) != num_grad_inputs:
+        raise RuntimeError(
+            f"{op_qualname} expected backward_impl to return "
+            f"{num_grad_inputs} grads (one per input_tensors_for_grad "
+            f"entry), got {len(grads)}"
+        )
+    return [_encode_none(g) for g in grads]
+
+
+def _resolve_grad_targets(
+    fwd_buckets: List[_Bucket],
+    fwd_arg_type: type,
+    input_tensors_for_grad: List[str],
+) -> Tuple[List[Any], List[Tuple[int, bool]]]:
+    """Validate ``input_tensors_for_grad`` and resolve grad-output layout.
+
+    Returns ``(fwd_slot_defaults, grad_targets)`` where:
+
+    * ``fwd_slot_defaults`` is the per-slot "no-grad" template the
+      autograd return tuple starts from -- ``[]`` for ``Tensor[]``
+      slots, ``None`` otherwise. ``register_autograd`` requires one
+      grad slot per forward input with matching tree structure (a
+      ``Tensor[]`` slot must get back a list, not bare ``None``).
+    * ``grad_targets`` is the ``[(slot_index, as_list), ...]`` mapping
+      for each name in ``input_tensors_for_grad``, in the same order;
+      ``as_list`` is ``True`` for ``Tensor[]``-shaped slots so the
+      caller wraps the single grad into a length-matched list.
+    """
     fwd_slot_defaults: List[Any] = []
     for bucket in fwd_buckets:
         for _, type_str in bucket.schema_slots():
             fwd_slot_defaults.append([] if type_str.endswith("[]") else None)
 
-    # Validate ``input_tensors_for_grad`` references real forward inputs
-    # and precompute the positions where backward grads land in the
-    # autograd return tuple. Some logical fields (e.g. Tensor-or-storage
-    # fields) expand to a ``Tensor[]`` slot; their gradient must be returned
-    # as a list matching that input tree.
-    input_tensors_for_grad = linear_arg_type.torch_compile_get_input_tensors_for_grad()
     fwd_grad_targets: Dict[str, Tuple[int, bool]] = {}
     slot_offset = 0
     for bucket in fwd_buckets:
         slots = bucket.schema_slots()
         if isinstance(bucket, _TensorBucket):
             fwd_grad_targets[bucket.name] = (slot_offset, False)
-        elif isinstance(bucket, _TensorListBucket):
-            fwd_grad_targets[bucket.name] = (slot_offset, True)
-        elif isinstance(bucket, _TensorOrStorageBucket):
+        elif isinstance(bucket, _UniversalTensorBucket):
+            # Grad routes to the ``Tensor?`` slot -- the wrapper /
+            # plain-tensor passthrough -- so the gradient flows back
+            # to the user-facing object (e.g. an ``nn.Parameter``
+            # wrapped as ``Float8Tensor``). In the storage path the
+            # ``Tensor?`` slot is ``None`` and the kernel does not
+            # request a grad for it.
             for i, (slot_name, _) in enumerate(slots):
-                if slot_name == bucket._slot_tensors():
-                    fwd_grad_targets[bucket.name] = (slot_offset + i, True)
+                if slot_name == bucket.slot_name():
+                    fwd_grad_targets[bucket.name] = (slot_offset + i, False)
                     break
         slot_offset += len(slots)
-    unknown_grad_names = [n for n in input_tensors_for_grad if n not in fwd_grad_targets]
-    if unknown_grad_names:
+
+    unknown = [n for n in input_tensors_for_grad if n not in fwd_grad_targets]
+    if unknown:
         raise ValueError(
-            f"{linear_arg_type.__name__}.torch_compile_get_input_tensors_for_grad() "
-            f"contains names not present in "
-            f"{linear_arg_type.__name__}.torch_compile_get_schema(): "
-            f"{unknown_grad_names}"
+            f"input_tensors_for_grad contains names not present in "
+            f"{fwd_arg_type.__name__} schema: {unknown}"
         )
     grad_targets = [fwd_grad_targets[n] for n in input_tensors_for_grad]
-    num_grad_inputs = len(input_tensors_for_grad)
+    return fwd_slot_defaults, grad_targets
 
-    lib = torch.library.Library(op_namespace, "FRAGMENT")
-    # Forward op concatenates user outputs and tensors_to_save into a
-    # single ``Tensor[]`` return so that autograd's ``setup_context`` can
-    # stash the saved-for-backward tensors without re-running the eager
-    # impl. The schema is non-nullable (``Tensor[]``, not ``Tensor?[]``)
-    # because ``torch.library.register_autograd`` does not propagate
-    # ``grad_fn`` to a nullable list output. ``None`` entries on either
-    # side are smuggled through via :func:`_encode_none` /
-    # :func:`_decode_none` sentinels (see below).
-    lib.define(f"{op_name}{fwd_schema_args} -> Tensor[]")
-    lib.define(f"{bwd_op_name}{bwd_schema_args} -> Tensor[]")
 
-    def _outputs_for_setup(outputs: List[torch.Tensor]) -> Any:
-        return outputs[0] if num_outputs == 1 else tuple(outputs)
+def _register_kernel(
+    *,
+    op_name: str,
+    op_qualname: str,
+    arg_type: type,
+    arg_names: List[str],
+    buckets: List[_Bucket],
+    impl: Callable[[Any], Any],
+    fake_impl: Optional[Callable[[Any], Any]],
+    format_result: Callable[[Any], List[torch.Tensor]],
+) -> None:
+    """Wire ``impl`` (and optionally ``fake_impl``) into :data:`_TE_LIB`
+    under ``op_name``.
 
-    def _prepare_for_saving(tensors: Any) -> Tuple[List[Optional[torch.Tensor]], Any]:
-        from transformer_engine.pytorch.quantized_tensor import prepare_for_saving
+    The wrapper unpacks the flat positional args using
+    ``arg_names`` / ``buckets``, calls the user kernel with the rebuilt
+    dataclass instance, and packs the result through ``format_result``
+    (which encodes ``None``s into the op's ``Tensor[]`` return slot).
+    """
 
-        return prepare_for_saving(*(tensors or ()))
+    def _eager(*flat: Any) -> List[torch.Tensor]:
+        kwargs = dict(zip(arg_names, flat))
+        obj = _unpack(arg_type, kwargs, buckets)
+        return format_result(impl(obj))
 
-    def _restore_from_saved(tensor_objects: Any, saved_tensors: List[Any]) -> Any:
-        from transformer_engine.pytorch.quantized_tensor import restore_from_saved
+    _TE_LIB.impl(op_name, _eager, "CompositeExplicitAutograd")
 
-        return restore_from_saved(tensor_objects, saved_tensors)
+    if fake_impl is not None:
 
-    def _fwd_impl(*flat: Any) -> List[torch.Tensor]:
-        kwargs = dict(zip(fwd_arg_names, flat))
-        obj = linear_arg_type.torch_compile_unpack(kwargs, fwd_buckets)
-        result = linear_impl(obj)
-        outputs = list(result[:num_outputs])
-        tensors_to_save, _ = _prepare_for_saving(result[num_outputs])
-        return [_encode_none(t) for t in outputs + tensors_to_save]
+        def _fake(*flat: Any) -> List[torch.Tensor]:
+            kwargs = dict(zip(arg_names, flat))
+            obj = _unpack(arg_type, kwargs, buckets)
+            return format_result(fake_impl(obj))
 
-    lib.impl(op_name, _fwd_impl, "CompositeExplicitAutograd")
+        torch.library.register_fake(op_qualname, _fake, lib=_TE_LIB)
 
-    if linear_fake_impl is not None:
 
-        def _fwd_fake(*flat: Any) -> List[torch.Tensor]:
-            kwargs = dict(zip(fwd_arg_names, flat))
-            obj = linear_arg_type.torch_compile_unpack(kwargs, fwd_buckets)
-            result = linear_fake_impl(obj)
-            outputs = list(result[:num_outputs])
-            tensors_to_save, _ = _prepare_for_saving(result[num_outputs])
-            return [_encode_none(t) for t in outputs + tensors_to_save]
+def _collect_universal_slot_offsets(buckets: List[_Bucket]) -> List[int]:
+    """Return the start index of each :class:`_UniversalTensorBucket`
+    group inside the flat positional arg list of a registered op.
 
-        torch.library.register_fake(fwd_qualname, _fwd_fake, lib=lib)
+    The four schema slots emitted by a universal bucket are always
+    contiguous (``name``, ``__tensors``, ``__pg``, ``__meta``); knowing
+    the offset of the first slot lets a subclass dispatch rule rewrite
+    all four slots in place at trace / eager time without re-deriving
+    the bucket list.
+    """
+    offsets: List[int] = []
+    pos = 0
+    for bucket in buckets:
+        if isinstance(bucket, _UniversalTensorBucket):
+            offsets.append(pos)
+        pos += len(bucket.schema_slots())
+    return offsets
 
-    def _check_bwd_len(grads):
-        if len(grads) != num_grad_inputs:
-            raise RuntimeError(
-                f"{op_namespace}::{bwd_op_name} expected backward_impl to "
-                f"return {num_grad_inputs} grads (one per "
-                f"input_tensors_for_grad entry), got {len(grads)}"
-            )
 
-    def _bwd_impl(*flat: Any) -> List[torch.Tensor]:
-        kwargs = dict(zip(bwd_arg_names, flat))
-        obj = backward_arg_type.torch_compile_unpack(kwargs, bwd_buckets)
-        grads = list(backward_impl(obj))
-        _check_bwd_len(grads)
-        return [_encode_none(g) for g in grads]
+def _flatten_subclass_into_slots(
+    new_args: List[Any], slot_offsets: List[int], subclass: type
+) -> None:
+    """Rewrite each ``_UniversalTensorBucket`` group whose ``Tensor?``
+    slot holds an instance of ``subclass`` into the storage layout.
 
-    lib.impl(bwd_op_name, _bwd_impl, "CompositeExplicitAutograd")
+    Used as the body of a ``register_torch_dispatch`` rule on the outer
+    fwd / bwd op: a subclass passed through the user-facing op is
+    flattened in place (via ``_torch_compile_flatten``) so that the
+    inner op only ever sees plain tensors plus the storage-flatten
+    metadata. The wrapper's autograd identity remains attached to the
+    inner tensors via the wrapper-subclass machinery, so gradients
+    still flow back to the user-facing tensor.
+    """
+    for offset in slot_offsets:
+        val = new_args[offset]
+        if val is None or not isinstance(val, subclass):
+            continue
+        meta, pg, tensors = val._torch_compile_flatten()
+        meta._data[_UniversalTensorBucket.KIND_KEY] = _UniversalTensorBucket.KIND_STORAGE
+        new_args[offset] = None
+        new_args[offset + 1] = list(tensors)
+        new_args[offset + 2] = pg
+        new_args[offset + 3] = meta
 
-    if backward_fake_impl is not None:
 
-        def _bwd_fake(*flat: Any) -> List[torch.Tensor]:
-            kwargs = dict(zip(bwd_arg_names, flat))
-            obj = backward_arg_type.torch_compile_unpack(kwargs, bwd_buckets)
-            grads = list(backward_fake_impl(obj))
-            _check_bwd_len(grads)
-            return [_encode_none(g) for g in grads]
+def _register_autograd_for_op(
+    *,
+    fwd_op_name: str,
+    bwd_op_name: str,
+    fwd_arg_type: type,
+    fwd_arg_names: List[str],
+    fwd_buckets: List[_Bucket],
+    bwd_arg_names: List[str],
+    bwd_buckets: List[_Bucket],
+    num_outputs: int,
+    fwd_slot_defaults: List[Any],
+    grad_targets: List[Tuple[int, bool]],
+    fwd_fake_impl: Optional[Callable[[Any], Any]],
+    fwd_impl: Callable[[Any], Any],
+    setup_context_user: Callable[..., None],
+    backward_obj_type: type,
+) -> None:
+    """Wire ``register_autograd`` on a forward op so its backward calls
+    ``bwd_op_name``.
 
-        torch.library.register_fake(bwd_qualname, _bwd_fake, lib=lib)
+    Both the inner and outer tiers of a two-tier op share an identical
+    autograd bridge (the wrapper logic only cares about op *names*), so
+    this helper is called once per tier; the actual kernel
+    registration is handled separately (by :func:`_register_kernel`
+    for the inner tier and :func:`_register_outer_forwarder` for the
+    outer tier).
+    """
+    fwd_qualname = f"{_TE_OP_NAMESPACE}::{fwd_op_name}"
 
-    # Re-run fake (or real) impl in setup_context to recover
-    # tensor_objects / ctx_attrs, which are not part of the op's return.
-    fake_for_setup = linear_fake_impl if linear_fake_impl is not None else linear_impl
+    fake_for_setup = fwd_fake_impl if fwd_fake_impl is not None else fwd_impl
 
     def _setup_context(ctx, inputs, output):
         ctx._te_fwd_tensor_list_lengths = {
             i: len(value) for i, value in enumerate(inputs) if isinstance(value, list)
         }
         kwargs = dict(zip(fwd_arg_names, inputs))
-        fwd_obj = linear_arg_type.torch_compile_unpack(kwargs, fwd_buckets)
+        fwd_obj = _unpack(fwd_arg_type, kwargs, fwd_buckets)
         fake_result = fake_for_setup(fwd_obj)
         _, tensor_objects = _prepare_for_saving(fake_result[num_outputs])
         ctx_attrs = fake_result[num_outputs + 2]
 
-        # Split op output: first num_outputs are user-facing tensors,
-        # the rest are tensors_to_save. ``output`` is a flat ``Tensor[]``
-        # with our None-sentinels in place; decode here so downstream
-        # eager code sees the original ``None``\ s.
         user_outputs = [_decode_none(t) for t in output[:num_outputs]]
         op_saved_tensors = [_decode_none(t) for t in output[num_outputs:]]
         tensors_to_save_from_forward = _restore_from_saved(
@@ -1258,11 +1267,11 @@ def _te_register_custom_op(
             op_saved_tensors,
         )
 
-        bwd_obj = backward_obj()
-        tensors_to_save_from_setup = setup_context(
+        bwd_obj = backward_obj_type()
+        tensors_to_save_from_setup = setup_context_user(
             bwd_obj,
             fwd_obj,
-            _outputs_for_setup(user_outputs),
+            user_outputs[0] if num_outputs == 1 else tuple(user_outputs),
             ctx_attrs,
             tensors_to_save_from_forward,
         )
@@ -1274,25 +1283,14 @@ def _te_register_custom_op(
     def _autograd_backward(ctx, *grad_outputs):
         bwd_obj = ctx.bwd_obj
         if hasattr(bwd_obj, "setup_saved_tensors"):
-            bwd_obj.setup_saved_tensors(ctx.saved_tensors, ctx.tensor_objects)
+            bwd_obj.setup_saved_tensors(ctx)
         ctx.tensor_objects = None
-        # The forward op returns a single ``Tensor[]`` (concatenation of
-        # user outputs and saved tensors), so ``grad_outputs`` is a
-        # 1-tuple containing the per-element grad list. Only the first
-        # ``num_outputs`` of those correspond to user-facing outputs;
-        # ``grad_output`` for the backward is the grad of the primary
-        # output.
         per_output_grads = grad_outputs[0]
         bwd_obj.grad_output = _decode_none(per_output_grads[0])
-        kwargs = backward_arg_type.torch_compile_pack(bwd_obj, bwd_buckets)
+        kwargs = _pack(bwd_obj, bwd_buckets)
         bwd_args_flat = [kwargs[name] for name in bwd_arg_names]
-        bwd_op = getattr(getattr(torch.ops, op_namespace), bwd_op_name)
+        bwd_op = getattr(getattr(torch.ops, _TE_OP_NAMESPACE), bwd_op_name)
         grads = [_decode_none(g) for g in bwd_op(*bwd_args_flat)]
-        # ``register_autograd`` requires one grad slot per forward input
-        # with the same tree structure as the input (a ``Tensor[]`` slot
-        # must get back a list, never a bare ``None``). Start from the
-        # precomputed per-slot defaults and overlay the produced grads
-        # at the positions declared by ``input_tensors_for_grad``.
         out: List[Any] = list(fwd_slot_defaults)
         tensor_list_lengths = getattr(ctx, "_te_fwd_tensor_list_lengths", {})
         for (pos, as_list), g in zip(grad_targets, grads):
@@ -1307,18 +1305,335 @@ def _te_register_custom_op(
         fwd_qualname,
         _autograd_backward,
         setup_context=_setup_context,
-        lib=lib,
+        lib=_TE_LIB,
     )
 
-    fwd_op = getattr(getattr(torch.ops, op_namespace), op_name)
+
+def _register_outer_forwarder(
+    *,
+    outer_op_name: str,
+    inner_op_name: str,
+    arg_names: List[str],
+) -> None:
+    """Register the outer op's default kernel + fake as a thin
+    forwarder into the inner op.
+
+    The outer op must remain opaque to compilation (so
+    ``register_torch_dispatch`` rules installed on it actually fire);
+    we register the kernel against ``CompositeExplicitAutograd`` and
+    additionally register a fake impl that simply re-invokes the
+    inner op. For the subclass path the dispatch rule rewrites the
+    call into an inner call *before* this kernel/fake ever runs; the
+    forwarder is only consulted when no rule matches (i.e. the inputs
+    are plain tensors and / or plain ``QuantizedTensorStorage`` flat
+    slots that already match the inner schema directly).
+    """
+    inner_op = getattr(getattr(torch.ops, _TE_OP_NAMESPACE), inner_op_name)
+
+    def _outer_kernel(*flat: Any) -> List[torch.Tensor]:
+        return inner_op(*flat)
+
+    _TE_LIB.impl(outer_op_name, _outer_kernel, "CompositeExplicitAutograd")
+
+    def _outer_fake(*flat: Any) -> List[torch.Tensor]:
+        return inner_op(*flat)
+
+    torch.library.register_fake(
+        f"{_TE_OP_NAMESPACE}::{outer_op_name}", _outer_fake, lib=_TE_LIB
+    )
+
+
+def _te_register_custom_op(
+    *,
+    op_name: str,
+    num_outputs: int,
+    input_tensors_for_grad: List[str],
+    fwd_arg_type: type,
+    fwd_impl: Callable[[Any], Any],
+    fwd_fake_impl: Optional[Callable[[Any], Any]] = None,
+    setup_context: Callable[..., None],
+    backward_arg_type: type,
+    backward_obj: type,
+    backward_impl: Callable[[Any], Any],
+    backward_fake_impl: Optional[Callable[[Any], Any]] = None,
+    subclasses: Optional[Sequence[type]] = None,
+) -> Callable[..., Any]:
+    """Register a TE module's forward + backward as a single torch custom op.
+
+    Parameters
+    ----------
+    op_name
+        Op name used when registering with ``torch.library``. The
+        namespace is fixed at module level (:data:`_TE_OP_NAMESPACE`).
+    num_outputs
+        Number of user-facing tensor outputs returned by ``fwd_impl``.
+        The op concatenates ``[*output_tensors, *tensors_to_save]`` into
+        a single ``Tensor[]`` return; the wrapper uses ``num_outputs`` to
+        split the two halves on the way back out.
+    input_tensors_for_grad
+        Names of forward-arg-type fields for which ``backward_impl``
+        returns gradients, in the same order. The wrapper uses this to
+        pad the autograd return tuple with ``None`` for every input not
+        listed here, so torch sees one grad slot per forward input as
+        required by ``register_autograd``.
+    fwd_arg_type
+        Dataclass type aggregating all forward inputs (e.g.
+        ``LinearFwdArgs``). Used to (re)build the structured argument
+        from the flat tensor / non-tensor inputs accepted by the custom op.
+    fwd_impl
+        Eager forward implementation. Receives a single argument of type
+        ``fwd_arg_type`` and must return a tuple of the form
+        ``(*output_tensors, tensors_to_save, tensor_objects, ctx_attrs)``
+        where:
+
+        * ``output_tensors`` -- one or more :class:`torch.Tensor` outputs
+          returned to the caller.
+        * ``tensors_to_save`` -- flat list of :class:`torch.Tensor` to be
+          stashed via ``ctx.save_for_backward``.
+        * ``tensor_objects`` -- the metadata object produced by
+          :func:`prepare_for_saving`, paired with ``tensors_to_save`` to
+          let the backward reconstruct quantized / structured tensors.
+        * ``ctx_attrs`` -- non-tensor state to attach to the autograd
+          context, restricted to values that cannot be derived from the
+          forward args inside ``setup_context``.
+    fwd_fake_impl
+        Optional fake (shape inference) counterpart of ``fwd_impl``,
+        registered via ``torch.library.register_fake``. Returns the same
+        tuple shape as ``fwd_impl`` -- ``(*output_tensors,
+        tensors_to_save, tensor_objects, ctx_attrs)`` -- but every
+        ``torch.Tensor`` is a fake tensor (allocated via
+        ``quantizer.make_empty`` or ``torch.empty``) carrying only the
+        correct shape / dtype / device, with no real storage or
+        computation. ``tensor_objects`` and ``ctx_attrs`` must be
+        structurally identical to those produced by ``fwd_impl`` so
+        that ``setup_context`` and ``backward_impl`` see the same
+        non-tensor state in eager and traced modes.
+    setup_context
+        Eager autograd ``setup_context`` analogue. Receives a freshly
+        constructed ``backward_obj`` instance, the forward args, the
+        forward output, and ``ctx_attrs`` produced by ``fwd_impl``;
+        is responsible for populating the backward-state object so that
+        ``backward_impl`` can later consume it.
+    backward_arg_type
+        Type accepted by ``backward_impl``. May differ from ``backward_obj``
+        if the backward op needs a wrapped / opaque view of the state.
+    backward_obj
+        Dataclass / class used to instantiate a fresh backward-state
+        container at the end of the forward pass (typically the same as
+        ``backward_arg_type``).
+    backward_impl
+        Eager backward implementation. Receives a single argument of type
+        ``backward_arg_type`` and returns the gradient tuple.
+    backward_fake_impl
+        Optional fake counterpart of ``backward_impl``. Returns the same
+        gradient tuple as ``backward_impl``, with fake tensors in place
+        of the real gradients.
+
+    Returns
+    -------
+    Callable
+        A function ``forward_fn(fwd_arg_type_instance)`` that dispatches
+        through the registered custom op, returning the user-facing
+        outputs (single tensor if ``num_outputs == 1``, otherwise a
+        tuple). Use under ``torch.compiler.is_compiling()`` as a drop-in
+        for ``Function.apply``.
+    """
+
+    outer_fwd_name = op_name
+    outer_bwd_name = f"{op_name}_backward"
+    subclass_list = list(subclasses or ())
+
+    # Precompute the bucket list once per arg type and capture it in
+    # the registered closures. Re-deriving the bucket list inside a
+    # compiled call would force :func:`_get_buckets` to read
+    # ``cls.__dict__`` from inside a Dynamo-traced function, which
+    # triggers a "mappingproxy affected by dictionary mutation" graph
+    # break under ``fullgraph=True``.
+    fwd_buckets: List[_Bucket] = _get_buckets(fwd_arg_type)
+    bwd_buckets: List[_Bucket] = _get_buckets(backward_arg_type)
+
+    fwd_schema_args, fwd_arg_names = _build_schema(fwd_buckets)
+    bwd_schema_args, bwd_arg_names = _build_schema(bwd_buckets)
+
+    num_grad_inputs = len(input_tensors_for_grad)
+    fwd_slot_defaults, grad_targets = _resolve_grad_targets(
+        fwd_buckets, fwd_arg_type, input_tensors_for_grad
+    )
+
+    # Two-tier layout when subclass dispatch rules are requested:
+    #   inner = ``{op_name}_base`` -- real impl, sees only plain tensors
+    #           and the storage-flatten metadata.
+    #   outer = ``{op_name}`` -- user-facing op that either falls through
+    #           to the inner op (plain-tensor path) or is rewritten by a
+    #           ``register_torch_dispatch`` rule (subclass path) into a
+    #           call to the inner op with subclass tensors flattened in
+    #           place. Both tiers carry their own ``register_autograd``
+    #           bridge.
+    # Single-tier when no subclasses are given: only the outer pair is
+    # defined and it owns the real impl (today's behaviour).
+    inner_fwd_name = f"{op_name}_base" if subclass_list else outer_fwd_name
+    inner_bwd_name = f"{outer_bwd_name}_base" if subclass_list else outer_bwd_name
+
+    # Forward op concatenates user outputs and tensors_to_save into a
+    # single ``Tensor[]`` return so that autograd's ``setup_context`` can
+    # stash the saved-for-backward tensors without re-running the eager
+    # impl. The schema is non-nullable (``Tensor[]``, not ``Tensor?[]``)
+    # because ``torch.library.register_autograd`` does not propagate
+    # ``grad_fn`` to a nullable list output. ``None`` entries on either
+    # side are smuggled through via :func:`_encode_none` /
+    # :func:`_decode_none` sentinels.
+    _TE_LIB.define(f"{inner_fwd_name}{fwd_schema_args} -> Tensor[]")
+    _TE_LIB.define(f"{inner_bwd_name}{bwd_schema_args} -> Tensor[]")
+    if subclass_list:
+        # Outer fwd / outer bwd are user-facing entry points. The
+        # outer fwd is the target of ``register_torch_dispatch`` for
+        # the forward subclass path; outer bwd is the target for the
+        # backward subclass path. Both forward to the corresponding
+        # inner op when no rule matches (plain-tensor / pure-storage
+        # path).
+        _TE_LIB.define(f"{outer_fwd_name}{fwd_schema_args} -> Tensor[]")
+        _TE_LIB.define(f"{outer_bwd_name}{bwd_schema_args} -> Tensor[]")
+
+    # Inner pair owns the real implementation. The fwd & bwd kernels
+    # are registered directly against the user-supplied impls; the
+    # autograd bridge below wires the inner fwd op's backward to call
+    # the inner bwd op.
+    inner_fwd_qualname = f"{_TE_OP_NAMESPACE}::{inner_fwd_name}"
+    inner_bwd_qualname = f"{_TE_OP_NAMESPACE}::{inner_bwd_name}"
+    _register_kernel(
+        op_name=inner_fwd_name,
+        op_qualname=inner_fwd_qualname,
+        arg_type=fwd_arg_type,
+        arg_names=fwd_arg_names,
+        buckets=fwd_buckets,
+        impl=fwd_impl,
+        fake_impl=fwd_fake_impl,
+        format_result=lambda r: _format_fwd_result(r, num_outputs),
+    )
+    _register_kernel(
+        op_name=inner_bwd_name,
+        op_qualname=inner_bwd_qualname,
+        arg_type=backward_arg_type,
+        arg_names=bwd_arg_names,
+        buckets=bwd_buckets,
+        impl=backward_impl,
+        fake_impl=backward_fake_impl,
+        format_result=lambda g: _format_bwd_result(g, num_grad_inputs, inner_bwd_qualname),
+    )
+    _register_autograd_for_op(
+        fwd_op_name=inner_fwd_name,
+        bwd_op_name=inner_bwd_name,
+        fwd_arg_type=fwd_arg_type,
+        fwd_arg_names=fwd_arg_names,
+        fwd_buckets=fwd_buckets,
+        bwd_arg_names=bwd_arg_names,
+        bwd_buckets=bwd_buckets,
+        num_outputs=num_outputs,
+        fwd_slot_defaults=fwd_slot_defaults,
+        grad_targets=grad_targets,
+        fwd_fake_impl=fwd_fake_impl,
+        fwd_impl=fwd_impl,
+        setup_context_user=setup_context,
+        backward_obj_type=backward_obj,
+    )
+
+    if subclass_list:
+        # Two-tier setup, mirroring the ex.py pattern:
+        #
+        # * Inner pair (already registered above) carries the real
+        #   kernels + fakes and a full ``register_autograd`` bridge.
+        #   It only ever sees plain tensors / plain
+        #   ``QuantizedTensorStorage`` flat slots; the subclass
+        #   wrapper never reaches it.
+        # * Outer pair is a thin opaque shell. Its kernels forward
+        #   to the inner op and its ``register_torch_dispatch`` rules
+        #   flatten registered subclasses inline before forwarding.
+        #   It carries its own autograd bridge so that the user-facing
+        #   tensor (e.g. a ``Float8Tensor`` weight parameter) ends
+        #   up on the autograd graph and receives a ``.grad``. With
+        #   ``__tensor_unflatten__`` rebuilding a real quantizer from
+        #   the subclass meta snapshot, outer's setup_context can run
+        #   the user fake impl on the raw forward inputs even when
+        #   they include reconstructed subclass instances.
+        _register_outer_forwarder(
+            outer_op_name=outer_fwd_name,
+            inner_op_name=inner_fwd_name,
+            arg_names=fwd_arg_names,
+        )
+        _register_outer_forwarder(
+            outer_op_name=outer_bwd_name,
+            inner_op_name=inner_bwd_name,
+            arg_names=bwd_arg_names,
+        )
+        _register_autograd_for_op(
+            fwd_op_name=outer_fwd_name,
+            bwd_op_name=outer_bwd_name,
+            fwd_arg_type=fwd_arg_type,
+            fwd_arg_names=fwd_arg_names,
+            fwd_buckets=fwd_buckets,
+            bwd_arg_names=bwd_arg_names,
+            bwd_buckets=bwd_buckets,
+            num_outputs=num_outputs,
+            fwd_slot_defaults=fwd_slot_defaults,
+            grad_targets=grad_targets,
+            fwd_fake_impl=fwd_fake_impl,
+            fwd_impl=fwd_impl,
+            setup_context_user=setup_context,
+            backward_obj_type=backward_obj,
+        )
+
+        # Register ``torch_dispatch`` rules per subclass on both the
+        # outer fwd and the outer bwd op. The rule replaces the outer
+        # call entirely: it flattens every ``_UniversalTensorBucket``
+        # slot whose ``name`` value is an instance of the registered
+        # subclass into ``(None, [inner tensors], process_group,
+        # opaque_meta)`` and invokes the inner op on the rewritten
+        # args. After the rewrite no subclass tensor remains in the
+        # call's arg list, and the autograd entry that ends up on the
+        # output graph is the inner op's (not the outer's), so the
+        # backward path goes through the inner pair only.
+        fwd_slot_offsets = _collect_universal_slot_offsets(fwd_buckets)
+        bwd_slot_offsets = _collect_universal_slot_offsets(bwd_buckets)
+        inner_fwd_op = getattr(getattr(torch.ops, _TE_OP_NAMESPACE), inner_fwd_name)
+        inner_bwd_op = getattr(getattr(torch.ops, _TE_OP_NAMESPACE), inner_bwd_name)
+        outer_fwd_op = getattr(getattr(torch.ops, _TE_OP_NAMESPACE), outer_fwd_name)
+        outer_bwd_op = getattr(getattr(torch.ops, _TE_OP_NAMESPACE), outer_bwd_name)
+        outer_fwd_qualname = f"{_TE_OP_NAMESPACE}::{outer_fwd_name}"
+        outer_bwd_qualname = f"{_TE_OP_NAMESPACE}::{outer_bwd_name}"
+        for subclass in subclass_list:
+            def _fwd_rule(mode, func, types, args, kwargs, subclass=subclass):
+                new_args = list(args)
+                _flatten_subclass_into_slots(new_args, fwd_slot_offsets, subclass)
+                return inner_fwd_op(*new_args)
+
+            def _bwd_rule(mode, func, types, args, kwargs, subclass=subclass):
+                new_args = list(args)
+                _flatten_subclass_into_slots(new_args, bwd_slot_offsets, subclass)
+                return inner_bwd_op(*new_args)
+
+            torch.library.register_torch_dispatch(
+                outer_fwd_qualname, subclass, _fwd_rule, lib=_TE_LIB
+            )
+            torch.library.register_torch_dispatch(
+                outer_bwd_qualname, subclass, _bwd_rule, lib=_TE_LIB
+            )
+
+        # ``QuantizedTensor.__torch_dispatch__`` falls back to
+        # dequantizing all subclass args for any op it does not
+        # recognise, which would defeat our
+        # ``register_torch_dispatch`` rules. Marking both outer ops
+        # as passthroughs makes QuantizedTensor delegate straight to
+        # ``super().__torch_dispatch__`` for them, where the
+        # registered dispatch rules are honoured.
+        from transformer_engine.pytorch.quantized_tensor import (
+            _quantized_tensor_passthrough_ops,
+        )
+        _quantized_tensor_passthrough_ops.add(outer_fwd_op.default)
+
+    fwd_op = getattr(getattr(torch.ops, _TE_OP_NAMESPACE), outer_fwd_name)
 
     def forward_fn(fwd_args):
-        # Bind ``lib`` here so its registrations (impl / register_fake /
-        # register_autograd) outlive ``_te_register_custom_op`` even if
-        # all other references to it are dropped: ``torch.library`` uses
-        # the ``Library`` instance lifetime for all attached registrations.
-        _ = lib  # noqa: F841 -- closure-captured for lifetime only
-        kwargs = linear_arg_type.torch_compile_pack(fwd_args, fwd_buckets)
+        kwargs = _pack(fwd_args, fwd_buckets)
         flat = [kwargs[name] for name in fwd_arg_names]
         result = fwd_op(*flat)
         outputs = [_decode_none(t) for t in result[:num_outputs]]

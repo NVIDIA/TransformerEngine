@@ -15,7 +15,7 @@ import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
 
 from transformer_engine.common.recipe import NVFP4BlockScaling, Recipe
-from ..constants import NVFP4_BLOCK_SCALING_SIZE, dist_group_type
+from ..constants import NVFP4_BLOCK_SCALING_SIZE, canonicalize_te_dtype, dist_group_type
 from ..utils import (
     canonicalize_process_group,
     devices_match,
@@ -150,7 +150,7 @@ class NVFP4Quantizer(Quantizer):
         with_random_sign_mask: bool = True,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
-        self.dtype = fp4_dtype
+        self.dtype = canonicalize_te_dtype(fp4_dtype)
         self.with_rht = with_rht
         self.with_post_rht_amax = with_post_rht_amax
         self.with_amax_reduction = with_amax_reduction
@@ -373,7 +373,22 @@ class NVFP4Quantizer(Quantizer):
                 1, dtype=torch.float32, device=device, pin_memory=pin_memory
             )
 
-        # Construct FP8 tensor
+        # See ``Float8Quantizer.make_empty`` for the rationale.
+        if self.internal:
+            return NVFP4TensorStorage(
+                data,
+                scale_inv,
+                columnwise_data,
+                columnwise_scale_inv,
+                amax_rowwise,
+                amax_columnwise,
+                self.dtype,
+                self,
+                False,
+                fake_dtype=dtype,
+                row_scaled_nvfp4=self.row_scaled_nvfp4,
+            )
+
         return NVFP4Tensor(
             shape=shape,
             dtype=dtype,
@@ -399,6 +414,52 @@ class NVFP4Quantizer(Quantizer):
 
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
         return NVFP4BlockScaling
+
+    def _flatten(self):
+        from ..dynamo import OpaqueSimpleMetadata
+
+        meta = OpaqueSimpleMetadata(
+            {
+                "_qcls": type(self).__qualname__,
+                "dtype": self.dtype,
+                "rowwise_usage": self.rowwise_usage,
+                "columnwise_usage": self.columnwise_usage,
+                "internal": self.internal,
+                "optimize_for_gemm": self.optimize_for_gemm,
+                "with_rht": self.with_rht,
+                "with_post_rht_amax": self.with_post_rht_amax,
+                "with_amax_reduction": self.with_amax_reduction,
+                "with_2d_quantization": self.with_2d_quantization,
+                "stochastic_rounding": self.stochastic_rounding,
+                "row_scaled_nvfp4": self.row_scaled_nvfp4,
+                "rht_matrix_random_sign_mask_t": self.rht_matrix_random_sign_mask_t,
+            }
+        )
+        return meta, self.amax_reduction_group, [self.rht_matrix]
+
+    @classmethod
+    def _do_unflatten(cls, meta, process_group, tensors):
+        (rht_matrix,) = tensors
+        # Construct with default RHT mask, then overwrite the computed
+        # ``rht_matrix_random_sign_mask_t`` / ``rht_matrix`` with the
+        # restored values so we don't depend on cuda helpers / device state.
+        q = cls(
+            fp4_dtype=meta["dtype"],
+            rowwise=meta["rowwise_usage"],
+            columnwise=meta["columnwise_usage"],
+            with_amax_reduction=meta["with_amax_reduction"],
+            amax_reduction_group=process_group,
+            with_rht=meta["with_rht"],
+            with_post_rht_amax=meta["with_post_rht_amax"],
+            with_2d_quantization=meta["with_2d_quantization"],
+            stochastic_rounding=meta["stochastic_rounding"],
+            row_scaled_nvfp4=meta["row_scaled_nvfp4"],
+        )
+        q.rht_matrix_random_sign_mask_t = meta["rht_matrix_random_sign_mask_t"]
+        q.rht_matrix = rht_matrix
+        q.internal = meta["internal"]
+        q.optimize_for_gemm = meta["optimize_for_gemm"]
+        return q
 
 
 class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):

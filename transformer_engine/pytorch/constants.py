@@ -41,6 +41,34 @@ TE_DType_To_Torch = {
     tex.DType.kBFloat16: torch.bfloat16,
 }
 
+# Map: TE DType *id* (Python int) -> TE DType enum. Used by
+# :func:`canonicalize_te_dtype` to recover the pybind enum from its
+# integer id without going through ``tex.DType(int)``, which Dynamo
+# cannot trace (pybind11 enum constructor is opaque).
+TE_DType_ID_To_TE = {
+    int(tex.DType.kByte): tex.DType.kByte,
+    int(tex.DType.kFloat8E4M3): tex.DType.kFloat8E4M3,
+    int(tex.DType.kFloat8E5M2): tex.DType.kFloat8E5M2,
+    int(tex.DType.kFloat4E2M1): tex.DType.kFloat4E2M1,
+    int(tex.DType.kInt32): tex.DType.kInt32,
+    int(tex.DType.kFloat32): tex.DType.kFloat32,
+    int(tex.DType.kFloat16): tex.DType.kFloat16,
+    int(tex.DType.kBFloat16): tex.DType.kBFloat16,
+}
+
+
+def canonicalize_te_dtype(dtype):
+    """Accept either a TE ``DType`` enum or its Python ``int`` id.
+
+    Recipe state keeps dtype ids as Python ``int`` values for cheap,
+    trace-friendly comparisons. Quantizer objects, however, are passed to
+    TE's C++ bindings, which expect the pybind ``tex.DType`` enum.
+    """
+    if isinstance(dtype, int):
+        return TE_DType_ID_To_TE[dtype]
+    return dtype
+
+
 # Cache enum -> int conversions to avoid repeated PyObject lookups.
 FP8FwdTensorIdx = SimpleNamespace(
     GEMM1_INPUT=int(tex.FP8FwdTensors.GEMM1_INPUT),

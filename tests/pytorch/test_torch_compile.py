@@ -97,8 +97,8 @@ if _opaque_available:
     def _make_qfactory(tag: str):
         """Return a qfactory that produces ToyQuantizer instances tagged with *tag*."""
 
-        def qfactory(role: str):
-            return ToyQuantizer(tag=f"{tag}:{role}")
+        def qfactory(role):
+            return ToyQuantizer(tag=f"{tag}:{role.tensor_type}")
 
         return qfactory
 
@@ -324,3 +324,81 @@ def test_autocast_sanity(fp8_recipe):
 
     out = compiled(inp)
     out.sum().backward()
+
+
+@pytest.mark.parametrize(
+    "fp8_recipe",
+    [None, *_all_recipes],
+    ids=lambda r: "bf16" if r is None else type(r).__name__,
+)
+def test_te_linear_compiles(fp8_recipe):
+    """torch.compile(fullgraph=True) of ``te.Linear`` under every built-in
+    recipe (and the bf16-only baseline with no autocast).
+
+    Exercises the custom-op path in
+    :mod:`transformer_engine.pytorch.dynamo`: forward goes through
+    ``_linear_compiled_op``, backward through the registered
+    ``transformer_engine::linear_backward`` op, and the dataclass
+    arg-objects are packed/unpacked via the bucket dispatch in
+    :mod:`transformer_engine.pytorch.dynamo`.
+    """
+    if fp8_recipe is not None and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+
+    dtype = torch.bfloat16
+    device = "cuda"
+
+    # FP8 GEMMs require leading dimensions divisible by 16; pick
+    # in/out features and batch comfortably above that minimum.
+    model = te.Linear(64, 32, params_dtype=dtype, device=device)
+    inp = torch.randn(32, 64, dtype=dtype, device=device, requires_grad=True)
+
+    def fn(inp):
+        if fp8_recipe is None:
+            return model(inp)
+        with te.autocast(recipe=fp8_recipe):
+            return model(inp)
+
+    torch._dynamo.reset()
+    compiled = torch.compile(fn, fullgraph=True)
+
+    out = compiled(inp)
+    out.sum().backward()
+    assert out.shape == (32, 32)
+    assert inp.grad is not None
+    assert model.weight.grad is not None, "weight.grad missing"
+    assert model.weight.grad.shape == model.weight.shape, (
+        f"weight.grad shape {tuple(model.weight.grad.shape)} != "
+        f"weight shape {tuple(model.weight.shape)}"
+    )
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+def test_te_linear_compile_with_quantized_fp8_weight():
+    """torch.compile should handle Linear weights initialized as FP8 tensors."""
+    dtype = torch.bfloat16
+    device = "cuda"
+    fp8_recipe = recipe.Float8CurrentScaling()
+
+    with te.quantized_model_init(enabled=True, recipe=fp8_recipe):
+        model = te.Linear(64, 32, params_dtype=dtype, device=device)
+
+    assert isinstance(model.weight, te.Float8Tensor)
+    inp = torch.randn(32, 64, dtype=dtype, device=device, requires_grad=True)
+
+    def fn(inp):
+        with te.autocast(recipe=fp8_recipe):
+            return model(inp)
+
+    torch._dynamo.reset()
+    compiled = torch.compile(fn, fullgraph=True)
+
+    out = compiled(inp)
+    out.sum().backward()
+    assert out.shape == (32, 32)
+    assert inp.grad is not None
+    assert model.weight.grad is not None, "Float8Tensor weight.grad missing"
+    assert model.weight.grad.shape == model.weight.shape, (
+        f"Float8Tensor weight.grad shape {tuple(model.weight.grad.shape)} != "
+        f"weight shape {tuple(model.weight.shape)}"
+    )

@@ -15,7 +15,7 @@ import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
 
 from transformer_engine.common.recipe import MXFP8BlockScaling, Recipe
-from ..constants import MXFP8_BLOCK_SCALING_SIZE
+from ..constants import MXFP8_BLOCK_SCALING_SIZE, canonicalize_te_dtype
 from ..utils import devices_match, round_up_to_nearest_multiple
 from .storage.mxfp8_tensor_storage import MXFP8TensorStorage, _FromMXFP8Func
 from ..quantized_tensor import QuantizedTensor, Quantizer
@@ -43,7 +43,7 @@ class MXFP8Quantizer(Quantizer):
         columnwise: bool = True,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
-        self.dtype = fp8_dtype
+        self.dtype = canonicalize_te_dtype(fp8_dtype)
 
     def copy(self) -> MXFP8Quantizer:
         """Create shallow copy"""
@@ -146,7 +146,19 @@ class MXFP8Quantizer(Quantizer):
                 pin_memory=pin_memory,
             )
 
-        # Construct FP8 tensor
+        # See ``Float8Quantizer.make_empty`` for the rationale.
+        if self.internal:
+            return MXFP8TensorStorage(
+                data,
+                scale_inv,
+                columnwise_data,
+                columnwise_scale_inv,
+                self.dtype,
+                self,
+                self.optimize_for_gemm,
+                fake_dtype=dtype,
+            )
+
         return MXFP8Tensor(
             shape=shape,
             dtype=dtype,
@@ -242,6 +254,33 @@ class MXFP8Quantizer(Quantizer):
 
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
         return MXFP8BlockScaling
+
+    def _flatten(self):
+        from ..dynamo import OpaqueSimpleMetadata
+
+        meta = OpaqueSimpleMetadata(
+            {
+                "_qcls": type(self).__qualname__,
+                "dtype": self.dtype,
+                "rowwise_usage": self.rowwise_usage,
+                "columnwise_usage": self.columnwise_usage,
+                "internal": self.internal,
+                "optimize_for_gemm": self.optimize_for_gemm,
+            }
+        )
+        return meta, None, []
+
+    @classmethod
+    def _do_unflatten(cls, meta, process_group, tensors):
+        del process_group, tensors
+        q = cls(
+            fp8_dtype=meta["dtype"],
+            rowwise=meta["rowwise_usage"],
+            columnwise=meta["columnwise_usage"],
+        )
+        q.internal = meta["internal"]
+        q.optimize_for_gemm = meta["optimize_for_gemm"]
+        return q
 
 
 class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):

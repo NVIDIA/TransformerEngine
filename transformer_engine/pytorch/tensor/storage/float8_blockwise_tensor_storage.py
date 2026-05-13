@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 import math
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, List, Tuple
 import torch
 
 import transformer_engine_torch as tex
@@ -17,6 +17,16 @@ from ...quantized_tensor import QuantizedTensorStorage, Quantizer
 from ...constants import TE_DType_To_Torch
 
 from ...utils import _empty_tensor
+
+try:
+    from torch._library.opaque_object import is_opaque_value_type, register_opaque_type
+
+    if not hasattr(TE_DType, "__fx_repr__"):
+        TE_DType.__fx_repr__ = lambda self: (f"TE_DType({int(self)})", {"TE_DType": TE_DType})
+    if not is_opaque_value_type(TE_DType):
+        register_opaque_type(TE_DType, typ="value", members={})
+except Exception:  # pragma: no cover - older torch / partial init
+    pass
 
 
 class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
@@ -133,6 +143,83 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         self._rowwise_scale_inv = tensors[2]
         self._columnwise_scale_inv = tensors[3]
         return tensors[4:]
+
+    def _torch_compile_flatten(self) -> Tuple[Any, Any, List[torch.Tensor]]:
+        from transformer_engine.pytorch.dynamo import OpaqueSimpleMetadata
+
+        tensors: List[torch.Tensor] = []
+
+        def _append_if_present(tensor: Optional[torch.Tensor]) -> bool:
+            if tensor is None:
+                return False
+            tensors.append(tensor)
+            return True
+
+        quantizer_meta = None
+        process_group = None
+        quantizer_tensors: List[torch.Tensor] = []
+        if self._quantizer is not None:
+            quantizer_meta, process_group, quantizer_tensors = self._quantizer._flatten()
+
+        meta = OpaqueSimpleMetadata(
+            {
+                "_qstorage_cls": type(self).__qualname__,
+                "is_tensor": isinstance(self, torch.Tensor),
+                "shape": torch.Size(self.shape) if isinstance(self, torch.Tensor) else None,
+                "requires_grad": self.requires_grad if isinstance(self, torch.Tensor) else False,
+                "device": self.device if isinstance(self, torch.Tensor) else None,
+                "fp8_dtype": self._fp8_dtype,
+                "fake_dtype": self._dtype,
+                "is_2D_scaled": self._is_2D_scaled,
+                "has_rowwise_data": _append_if_present(self._rowwise_data),
+                "has_rowwise_scale_inv": _append_if_present(self._rowwise_scale_inv),
+                "has_columnwise_data": _append_if_present(self._columnwise_data),
+                "has_columnwise_scale_inv": _append_if_present(self._columnwise_scale_inv),
+                "quantizer_meta": quantizer_meta,
+            }
+        )
+        tensors.extend(quantizer_tensors)
+        return meta, process_group, tensors
+
+    @classmethod
+    def _torch_compile_do_unflatten(
+        cls,
+        meta: Any,
+        process_group: Any,
+        tensors: List[torch.Tensor],
+    ) -> "Float8BlockwiseQTensorStorage":
+        tensor_iter = iter(tensors)
+        rowwise_data = next(tensor_iter) if meta["has_rowwise_data"] else None
+        rowwise_scale_inv = next(tensor_iter) if meta["has_rowwise_scale_inv"] else None
+        columnwise_data = next(tensor_iter) if meta["has_columnwise_data"] else None
+        columnwise_scale_inv = (
+            next(tensor_iter) if meta["has_columnwise_scale_inv"] else None
+        )
+        quantizer = None
+        if meta["quantizer_meta"] is not None:
+            quantizer = Quantizer._unflatten(
+                meta["quantizer_meta"], process_group, list(tensor_iter)
+            )
+        kwargs = {
+            "rowwise_data": rowwise_data,
+            "rowwise_scale_inv": rowwise_scale_inv,
+            "columnwise_data": columnwise_data,
+            "columnwise_scale_inv": columnwise_scale_inv,
+            "fp8_dtype": meta["fp8_dtype"],
+            "quantizer": quantizer,
+            "is_2D_scaled": meta["is_2D_scaled"],
+            "fake_dtype": meta["fake_dtype"],
+        }
+        if meta["is_tensor"]:
+            kwargs.update(
+                {
+                    "shape": meta["shape"],
+                    "dtype": meta["fake_dtype"],
+                    "requires_grad": meta["requires_grad"],
+                    "device": meta["device"],
+                }
+            )
+        return cls(**kwargs)
 
     def get_data_tensors(self, rowwise_data: bool = True, columnwise_data: bool = True):
         """Get this Tensor's data."""

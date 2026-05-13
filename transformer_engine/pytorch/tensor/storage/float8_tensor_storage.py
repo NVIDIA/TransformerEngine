@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 import math
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import torch
 
 import transformer_engine_torch as tex
@@ -17,6 +17,16 @@ from ...quantized_tensor import QuantizedTensorStorage, Quantizer
 from ...constants import TE_DType as torch_to_transformer_engine_dtype, TE_DType_To_Torch
 
 from ...utils import is_non_tn_fp8_gemm_supported, _empty_tensor
+
+try:
+    from torch._library.opaque_object import is_opaque_value_type, register_opaque_type
+
+    if not hasattr(TE_DType, "__fx_repr__"):
+        TE_DType.__fx_repr__ = lambda self: (f"TE_DType({int(self)})", {"TE_DType": TE_DType})
+    if not is_opaque_value_type(TE_DType):
+        register_opaque_type(TE_DType, typ="value", members={})
+except Exception:  # pragma: no cover - older torch / partial init
+    pass
 
 
 class _FromFloat8Func(torch.autograd.Function):
@@ -215,13 +225,99 @@ class Float8TensorStorage(QuantizedTensorStorage):
         )
 
     def __repr__(self):
+        # Must never raise: this runs from Inductor error formatters,
+        # FX node dumps, Dynamo guards, etc. Crucially we must also
+        # avoid any tensor->scalar materialization (``.item()``,
+        # ``.tolist()``, ``dequantize()``): under fake-tensor mode they
+        # allocate fresh unbacked symbols which then leak out of the
+        # current op as "unreturned outputs" and crash the compile.
+        # Stick to shape/dtype summaries.
+        scale_shape = list(getattr(self._scale_inv, "shape", ()))
+        if self._data is None:
+            data_repr = "<no rowwise data (transpose-only)>"
+        else:
+            data_shape = list(getattr(self._data, "shape", ()))
+            data_repr = f"<fp8 data shape={data_shape}>"
         return (
             "Float8TensorStorage("
             f"fp8_dtype={self._fp8_dtype}, "
-            f"scale_inv={self._scale_inv.item()}, "
-            f"data={self.dequantize()}"
+            f"scale_inv=<shape={scale_shape}>, "
+            f"data={data_repr}"
             ")"
         )
+
+    def _torch_compile_flatten(self) -> Tuple[Any, Any, List[torch.Tensor]]:
+        from transformer_engine.pytorch.dynamo import OpaqueSimpleMetadata
+
+        tensors: List[torch.Tensor] = []
+
+        def _append_if_present(tensor: Optional[torch.Tensor]) -> bool:
+            if tensor is None:
+                return False
+            tensors.append(tensor)
+            return True
+
+        quantizer_meta = None
+        process_group = None
+        quantizer_tensors: List[torch.Tensor] = []
+        if self._quantizer is not None:
+            quantizer_meta, process_group, quantizer_tensors = self._quantizer._flatten()
+
+        meta = OpaqueSimpleMetadata(
+            {
+                "_qstorage_cls": type(self).__qualname__,
+                "is_tensor": isinstance(self, torch.Tensor),
+                "shape": torch.Size(self.shape) if isinstance(self, torch.Tensor) else None,
+                "requires_grad": self.requires_grad if isinstance(self, torch.Tensor) else False,
+                "device": self.device if isinstance(self, torch.Tensor) else None,
+                "fp8_dtype": self._fp8_dtype,
+                "fake_dtype": self._dtype,
+                "transpose_invalid": self._transpose_invalid,
+                "has_data": _append_if_present(self._data),
+                "has_transpose": _append_if_present(self._transpose),
+                "has_scale_inv": _append_if_present(self._scale_inv),
+                "quantizer_meta": quantizer_meta,
+            }
+        )
+        tensors.extend(quantizer_tensors)
+        return meta, process_group, tensors
+
+    @classmethod
+    def _torch_compile_do_unflatten(
+        cls,
+        meta: Any,
+        process_group: Any,
+        tensors: List[torch.Tensor],
+    ) -> "Float8TensorStorage":
+        tensor_iter = iter(tensors)
+        data = next(tensor_iter) if meta["has_data"] else None
+        transpose = next(tensor_iter) if meta["has_transpose"] else None
+        scale_inv = next(tensor_iter) if meta["has_scale_inv"] else None
+        quantizer = None
+        if meta["quantizer_meta"] is not None:
+            quantizer = Quantizer._unflatten(
+                meta["quantizer_meta"], process_group, list(tensor_iter)
+            )
+        kwargs = {
+            "data": data,
+            "fp8_scale_inv": scale_inv,
+            "fp8_dtype": meta["fp8_dtype"],
+            "data_transpose": transpose,
+            "quantizer": quantizer,
+            "fake_dtype": meta["fake_dtype"],
+        }
+        if meta["is_tensor"]:
+            kwargs.update(
+                {
+                    "shape": meta["shape"],
+                    "dtype": meta["fake_dtype"],
+                    "requires_grad": meta["requires_grad"],
+                    "device": meta["device"],
+                }
+            )
+        out = cls(**kwargs)
+        out._transpose_invalid = meta["transpose_invalid"]
+        return out
 
     def _create_transpose(self):
         """Update FP8 transpose cache"""
