@@ -1482,19 +1482,11 @@ def run_model_config_benchmarks(
 
     print("\nEstimated GEMM Speedups:")
     bf16_total = full_model.get("BF16", 0)
-    if run_fp8 and bf16_total > 0:
-        fp8_total = full_model.get("MXFP8", 0)
-        if fp8_total > 0:
-            print(f"  MXFP8 vs BF16:  {bf16_total / fp8_total:.2f}x")
-    if run_fp4 and run_fp8:
-        fp8_total = full_model.get("MXFP8", 0)
-        fp4_total = full_model.get("NVFP4", 0)
-        if fp8_total > 0 and fp4_total > 0:
-            print(f"  NVFP4 vs MXFP8: {fp8_total / fp4_total:.2f}x")
-    if run_fp4 and bf16_total > 0:
-        fp4_total = full_model.get("NVFP4", 0)
-        if fp4_total > 0:
-            print(f"  NVFP4 vs BF16:  {bf16_total / fp4_total:.2f}x")
+    if bf16_total > 0:
+        for prec in precisions[1:]:
+            prec_total = full_model.get(prec, 0)
+            if prec_total > 0:
+                print(f"  {prec} vs BF16:  {bf16_total / prec_total:.2f}x")
     print(sep)
 
     # --- Plot ---
