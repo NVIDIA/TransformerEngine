@@ -63,11 +63,16 @@ from transformer_engine.pytorch import ops
 from transformer_engine.pytorch import optimizers
 from transformer_engine.pytorch.export import onnx_export
 from transformer_engine.pytorch.cross_entropy import parallel_cross_entropy
+from transformer_engine.pytorch.newton_schulz import (
+    CusolverMpCtx,
+    newton_schulz,
+)
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensor
 from transformer_engine.pytorch.quantized_tensor import Quantizer
 from transformer_engine.pytorch.quantized_tensor import prepare_for_saving
 from transformer_engine.pytorch.quantized_tensor import restore_from_saved
+from transformer_engine.pytorch.quantized_tensor import restore_from_func_ctx
 from transformer_engine.pytorch.tensor import Float8Quantizer
 from transformer_engine.pytorch.tensor import Float8CurrentScalingQuantizer
 from transformer_engine.pytorch.tensor import MXFP8Quantizer

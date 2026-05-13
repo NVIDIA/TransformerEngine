@@ -91,7 +91,8 @@ class GroupedTensorStorage:
             scale: Scale buffer (for FP8-DS only)
             first_dims: Device tensor of int64 array of length num_tensors (or None if uniform)
             last_dims: Device tensor of int64 array of length num_tensors (or None if uniform)
-            tensor_offsets: Device tensor of int64 array of length num_tensors (or None if uniform)
+            tensor_offsets: Device tensor of int64 array of length num_tensors+1 (CSR-style,
+                or None if uniform). offsets[i] = start of tensor i, offsets[num_tensors] = total.
             offsets: Vector of integer offsets for each tensor.
         """
         # `requires_grad` and `stride` are accepted for API symmetry with
@@ -634,7 +635,7 @@ class GroupedTensorStorage:
                 total_columnwise_scale_elements = 0
                 columnwise_scale_inv_offsets = [0]
                 for i, s in enumerate(shape):
-                    scale_inv_shape = quantizer.get_scale_shape(s, False)
+                    scale_inv_shape = quantizer.get_scale_shape(s, True)
                     columnwise_scale_elements = math.prod(scale_inv_shape)
                     total_columnwise_scale_elements += columnwise_scale_elements
                     columnwise_scale_inv_offsets.append(total_columnwise_scale_elements)
@@ -871,15 +872,25 @@ class GroupedTensorStorage:
 
         # populate scale_inv_offsets from the tensor offsets
         if self.scale_inv is not None and self.scale_inv_offsets is None:
-            if recipe.nvfp4():
-                self.scale_inv_offsets = self.tensor_offsets // 16
-            if recipe.mxfp8():
-                self.scale_inv_offsets = self.tensor_offsets // 32
+            if recipe.nvfp4() or recipe.mxfp8() or recipe.float8_block_scaling():
+                cum = 0
+                scale_inv_offsets = [0]
+                for i in range(self.num_tensors):
+                    tensor_shape = self.tensor_shapes[i]
+                    scale_shape = self.quantizer.get_scale_shape(tensor_shape, False)
+                    cum += math.prod(scale_shape)
+                    scale_inv_offsets.append(cum)
+                self.scale_inv_offsets = scale_inv_offsets
         if self.columnwise_scale_inv is not None and self.columnwise_scale_inv_offsets is None:
-            if recipe.nvfp4():
-                self.columnwise_scale_inv_offsets = self.tensor_offsets // 16
-            if recipe.mxfp8():
-                self.columnwise_scale_inv_offsets = self.tensor_offsets // 32
+            if recipe.nvfp4() or recipe.mxfp8() or recipe.float8_block_scaling():
+                cum = 0
+                columnwise_scale_inv_offsets = [0]
+                for i in range(self.num_tensors):
+                    tensor_shape = self.tensor_shapes[i]
+                    scale_shape = self.quantizer.get_scale_shape(tensor_shape, True)
+                    cum += math.prod(scale_shape)
+                    columnwise_scale_inv_offsets.append(cum)
+                self.columnwise_scale_inv_offsets = columnwise_scale_inv_offsets
 
         for i in range(self.num_tensors):
             quantizer = self.quantizer

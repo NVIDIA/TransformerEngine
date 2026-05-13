@@ -120,7 +120,7 @@ void CheckScaleTensorShape(const Tensor &t, const std::string &name) {
 
         const auto &expected = std::vector<size_t>{expected_x, expected_y};
         NVTE_CHECK(t.columnwise_scale_inv.shape == expected, "Tensor \"", name,
-                   "\"  has invalid columnwise_scale_inv shape (expected ", expected, ", got ",
+                   "\" has invalid columnwise_scale_inv shape (expected ", expected, ", got ",
                    t.columnwise_scale_inv.shape, ")");
       }
     } else if (t.scaling_mode == NVTE_NVFP4_1D_SCALING) {
@@ -144,7 +144,7 @@ void CheckScaleTensorShape(const Tensor &t, const std::string &name) {
   }
 }
 
-void CheckInputTensor(const Tensor &t, const std::string &name) {
+void CheckInputTensor(const Tensor &t, const std::string &name, bool check_scale_inv_shapes) {
   const DType type = t.dtype();
   if (is_fp8_dtype(type)) {
     // FP8 input needs to have scale_inv
@@ -195,7 +195,9 @@ void CheckInputTensor(const Tensor &t, const std::string &name) {
   }
   NVTE_CHECK(t.has_data() || t.has_columnwise_data(), "Input ", name, " is not allocated!");
 
-  CheckScaleTensorShape(t, name);
+  if (check_scale_inv_shapes) {
+    CheckScaleTensorShape(t, name);
+  }
 }
 
 void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empty) {
@@ -281,7 +283,18 @@ void CheckGroupedTensorShapeArrays(const GroupedTensor &t, const std::string &na
   // Validate shape arrays (all optional)
   check_shape_array(t.first_dims, "first_dims");
   check_shape_array(t.last_dims, "last_dims");
-  check_shape_array(t.tensor_offsets, "tensor_offsets");
+
+  // tensor_offsets uses CSR-style prefix-sum layout with num_tensors+1 entries:
+  // offsets[i] = start of tensor i, offsets[num_tensors] = total elements
+  if (t.tensor_offsets.has_data()) {
+    NVTE_CHECK(t.tensor_offsets.shape.size() == 1, "Grouped tensor ", name,
+               " tensor_offsets must be 1D");
+    NVTE_CHECK(t.tensor_offsets.dtype == DType::kInt64, "Grouped tensor ", name,
+               " tensor_offsets must have dtype Int64");
+    NVTE_CHECK(t.tensor_offsets.shape[0] == t.num_tensors + 1, "Grouped tensor ", name,
+               " tensor_offsets size (", t.tensor_offsets.shape[0], ") must equal num_tensors+1 (",
+               t.num_tensors + 1, ")");
+  }
 
   // tensor_offsets is required if any dimension varies
   // (i.e., required unless all_same_shape())

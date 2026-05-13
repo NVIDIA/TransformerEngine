@@ -43,6 +43,7 @@ from ..quantize import (
     ScalingMode,
     compute_scale_from_amax,
     NoScaleTensor,
+    GroupedNoScaleTensor,
     get_rht_matrix,
     QuantizeLayout,
 )
@@ -993,7 +994,8 @@ class GroupedQuantizePrimitive(BasePrimitive):
     Cast Primitive wrapping nvte_quantize and nvte_quantize_dbias
     """
 
-    name = "te_grouped_quantize_ffi"
+    name = "te_grouped_quantize_ffi"  # V1: fallback path (supports all shapes, not CUDA-graph safe)
+    name_v2 = "te_grouped_quantize_v2_ffi"  # V2: MXFP8, CUDA-graph safe
     multiple_results = True
     impl_static_args = (
         3,
@@ -1001,10 +1003,57 @@ class GroupedQuantizePrimitive(BasePrimitive):
         5,
         6,
         7,
-        8,
     )  # out_dtype, scaling_mode, q_layout, flatten_axis, scale_dtype
     inner_primitive = None
     outer_primitive = None
+
+    @staticmethod
+    def _use_v2_kernel(scaling_mode, x_shape, flatten_axis):
+        """Return True when the V2 (CUDA-graph-safe) MXFP8 kernel can be used.
+
+        V2 requires:
+          1. SM100+ (Blackwell) — V2 grouped quantize fuses the scale_inv swizzle via
+             nvte_group_quantize.  The swizzled scale_inv must then be consumed by the
+             V2 grouped GEMM, which also requires SM100+.  Keeping both decisions tied
+             to SM100+ prevents a mismatch where V2-quantized (pre-swizzled) tensors
+             are passed to the V1 grouped GEMM (which would re-swizzle and corrupt).
+          2. The total first logical dimension (product of x_shape up to flatten_axis)
+             is divisible by 128.
+          3. For multi-dim group tensors (eff > 1, e.g., kernel shape G×K×N), the
+             per-group row count non_group_m = prod(x_shape[1:eff]) must also be
+             divisible by 128.
+          4. For lhs-style tensors (eff == 1, shape M×K), individual group sizes must
+             be 128-aligned — this is a dynamic constraint that cannot be checked here
+             because group sizes live on device. The caller is responsible for ensuring
+             this.
+          5. The last logical dimension (contracting dim K or output dim N) must be
+             divisible by 128, matching the V2 grouped GEMM constraint so that the
+             two always agree on V1 vs V2.
+
+        Falls back to V1 when constraints are not met. V1 supports arbitrary shapes
+        but performs a D2H copy of group_sizes (not CUDA-graph safe).
+        """
+        if ScalingMode(scaling_mode) != ScalingMode.MXFP8_1D_SCALING:
+            return False
+        # Require SM100+ so V2 quantize (fused swizzle) is only used alongside V2 GEMM.
+        if get_min_device_compute_capability() < 100:
+            return False
+        ndim = len(x_shape)
+        eff = flatten_axis if flatten_axis >= 0 else flatten_axis + ndim
+        total_first_dim = math.prod(x_shape[:eff])
+        if total_first_dim % 128 != 0:
+            return False
+        # For multi-dim group tensors (e.g., kernel shape G×K×N with eff=2),
+        # non_group_m = K must also be 128-aligned.
+        if eff > 1:
+            non_group_m = math.prod(x_shape[1:eff])
+            if non_group_m % 128 != 0:
+                return False
+        # Last dim must be 128-aligned to match the V2 grouped GEMM requirement.
+        last_dim = math.prod(x_shape[eff:])
+        if last_dim % 128 != 0:
+            return False
+        return True
 
     @staticmethod
     def abstract(
@@ -1016,7 +1065,6 @@ class GroupedQuantizePrimitive(BasePrimitive):
         scaling_mode,
         q_layout,
         flatten_axis,
-        group_axis,
         scale_dtype,
     ):
         """
@@ -1038,7 +1086,6 @@ class GroupedQuantizePrimitive(BasePrimitive):
         ).get_grouped_scale_shape_2x(
             x_aval.shape,
             group_sizes_aval.size,
-            group_axis,
             is_padded=True,
             flatten_axis=flatten_axis,
         )
@@ -1050,7 +1097,20 @@ class GroupedQuantizePrimitive(BasePrimitive):
             rowwise_scale_inv_shape = (1,)
         rowwise_out_aval = jax.core.ShapedArray(shape=rowwise_out_shape, dtype=out_dtype)
 
-        amax_aval = jax.core.ShapedArray(shape=(group_sizes_aval.size,), dtype=jnp.float32)
+        updated_amax_aval = jax.core.ShapedArray(shape=(group_sizes_aval.size,), dtype=jnp.float32)
+
+        use_v2 = GroupedQuantizePrimitive._use_v2_kernel(scaling_mode, x_aval.shape, flatten_axis)
+        if use_v2:
+            # V2 path: int64_workspace laid out as:
+            #   [n_groups int64 group_sizes | n_groups+1 int64 offsets]
+            # = (2*n_groups + 1) * sizeof(int64_t) bytes stored as uint8.
+            n_groups = group_sizes_aval.size
+            int64_workspace_aval = jax.core.ShapedArray(
+                shape=((2 * n_groups + 1) * 8,), dtype=jnp.uint8
+            )
+        else:
+            # V1 path: Unused for V1 codepath
+            int64_workspace_aval = jax.core.ShapedArray(shape=(0,), dtype=jnp.uint8)
 
         if q_layout.has_colwise:
             colwise_out_shape = out_shape
@@ -1070,7 +1130,8 @@ class GroupedQuantizePrimitive(BasePrimitive):
             colwise_out_aval,
             rowwise_scale_inv_aval,
             colwise_scale_inv_aval,
-            amax_aval,
+            updated_amax_aval,
+            int64_workspace_aval,
         )
 
     @staticmethod
@@ -1080,13 +1141,20 @@ class GroupedQuantizePrimitive(BasePrimitive):
         """
         # Phuong: keeping outer abstract so that we can add fuse dbias later
         (
-            rowwise_out,
-            colwise_out,
-            scale_inv,
-            colwise_scale_inv,
-            updated_amax,
+            rowwise_out_aval,
+            colwise_out_aval,
+            rowwise_scale_inv_aval,
+            colwise_scale_inv_aval,
+            updated_amax_aval,
+            _,
         ) = GroupedQuantizePrimitive.abstract(*args, **kwargs)
-        return rowwise_out, colwise_out, scale_inv, colwise_scale_inv, updated_amax
+        return (
+            rowwise_out_aval,
+            colwise_out_aval,
+            rowwise_scale_inv_aval,
+            colwise_scale_inv_aval,
+            updated_amax_aval,
+        )
 
     @staticmethod
     def lowering(
@@ -1099,7 +1167,6 @@ class GroupedQuantizePrimitive(BasePrimitive):
         scaling_mode,
         q_layout,
         flatten_axis,
-        group_axis,
         scale_dtype,
     ):
         """
@@ -1110,7 +1177,21 @@ class GroupedQuantizePrimitive(BasePrimitive):
         assert x_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
         assert scale_aval.dtype == jnp.float32
         assert group_sizes_aval.dtype == jnp.int32
-        assert group_axis == 0
+        use_v2 = GroupedQuantizePrimitive._use_v2_kernel(scaling_mode, x_aval.shape, flatten_axis)
+        if use_v2:
+            # V2: CUDA-graph safe; scale is passed but ignored by the C++ handler.
+            # Requires total_first_dim % 128 == 0 (checked above) and all individual
+            # group sizes % 128 == 0 (dynamic constraint, enforced by the kernel).
+            return ffi.ffi_lowering(GroupedQuantizePrimitive.name_v2)(
+                ctx,
+                x,
+                scale,
+                group_sizes,
+                q_layout=q_layout.value.value,
+                flatten_axis=flatten_axis,
+            )
+        # V1: supports arbitrary shapes but not CUDA-graph safe (performs D2H copy of group_sizes).
+        # Used for non-MXFP8 scaling modes and for MXFP8 when total_first_dim % 128 != 0.
         return ffi.ffi_lowering(GroupedQuantizePrimitive.name)(
             ctx,
             x,
@@ -1130,7 +1211,6 @@ class GroupedQuantizePrimitive(BasePrimitive):
         scaling_mode,
         q_layout,
         flatten_axis,
-        group_axis,
         scale_dtype,
     ):
         """
@@ -1143,6 +1223,7 @@ class GroupedQuantizePrimitive(BasePrimitive):
             rowwise_scale_inv,
             colwise_scale_inv,
             updated_amax,
+            _,
         ) = GroupedQuantizePrimitive.inner_primitive.bind(
             x,
             scale,
@@ -1151,10 +1232,9 @@ class GroupedQuantizePrimitive(BasePrimitive):
             scaling_mode=scaling_mode,
             q_layout=q_layout,
             flatten_axis=flatten_axis,
-            group_axis=group_axis,
             scale_dtype=scale_dtype,
         )
-        return (rowwise_out, colwise_out, rowwise_scale_inv, colwise_scale_inv, updated_amax)
+        return rowwise_out, colwise_out, rowwise_scale_inv, colwise_scale_inv, updated_amax
 
 
 register_primitive(GroupedQuantizePrimitive)
@@ -1164,20 +1244,18 @@ def grouped_quantize(
     x: jnp.ndarray,
     quantizer: GroupedQuantizer,
     group_sizes: jnp.ndarray = None,
-    amax: jnp.ndarray = None,
     flatten_axis: int = -1,
-) -> GroupedScaledTensor1x:
+) -> Union[GroupedScaledTensor1x, GroupedNoScaleTensor]:
     """Quantize a tensor in grouped manner.
 
     This function quantizes a tensor by splitting it into groups along a specified axis
     and applying quantization to each group separately. The groups can be either specified
-    explicitly through group_sizes or automatically split along the group_axis.
+    explicitly through group_sizes or automatically split along axis 0.
 
     Args:
         x: Input tensor to quantize
         quantizer: The quantizer to use for quantization
         group_sizes: Array of ints containing the size of each group (default: None)
-        amax: The amax of x; if None, it is auto-generated. (default: None)
         flatten_axis: The axis along which the tensor could be flattened to 2D (default: -1)
 
     Returns:
@@ -1185,31 +1263,34 @@ def grouped_quantize(
 
     Note:
         - If group_sizes is not provided, the tensor will be split into equal-sized groups
-          along the group_axis
-        - The group_axis is currently fixed to 0
+          along axis 0
         - The quantizer's q_layout determines whether row-wise, column-wise, or both
           quantization is applied
     """
 
     if quantizer is None:
-        if isinstance(x, NoScaleTensor):
+        if isinstance(x, GroupedNoScaleTensor):
             return x
-        return NoScaleTensor(data=x, amax=None)
+        return GroupedNoScaleTensor(
+            data=x,
+            amax=None,
+            first_dims=group_sizes,
+            last_dims=None,
+            original_shape=x.shape,
+        )
 
     # TODO(Phuong): add support for flatten_axis = -2
     assert flatten_axis in (
         -1,
         x.ndim - 1,
     ), f"Only flatten_axis = -1 is supported for now, got {flatten_axis}"
-    group_axis = 0
 
+    ragged_first_dims = group_sizes  # None if no explicit group_sizes (kernel case)
     if group_sizes is None:
-        group_sizes = jnp.ones(x.shape[group_axis], dtype=jnp.int32)
+        group_sizes = jnp.ones(x.shape[0], dtype=jnp.int32)
 
     if not GroupedQuantizePrimitive.enabled():
-        return quantizer.quantize(
-            x, flatten_axis=flatten_axis, group_sizes=group_sizes, group_axis=group_axis
-        )
+        return quantizer.quantize(x, flatten_axis=flatten_axis, group_sizes=group_sizes)
     n_groups = group_sizes.size
     original_shape = x.shape
     assert n_groups == len(
@@ -1222,13 +1303,8 @@ def grouped_quantize(
             scale = scale.at[i].set(quantizer_i.scale[0])
 
     if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
-        if amax is not None:
-            row_amax = amax
-        else:
-            row_amax = jnp.max(jnp.abs(x), axis=range(group_axis + 1, x.ndim))
-        segment_ids = jnp.repeat(
-            jnp.arange(n_groups), group_sizes, total_repeat_length=x.shape[group_axis]
-        )
+        row_amax = jnp.max(jnp.abs(x), axis=range(1, x.ndim))
+        segment_ids = jnp.repeat(jnp.arange(n_groups), group_sizes, total_repeat_length=x.shape[0])
         grouped_amax = jax.ops.segment_max(row_amax, segment_ids, num_segments=n_groups)
         for i in range(n_groups):
             tmp_scale = compute_scale_from_amax(grouped_amax[i], quantizer.q_dtype, margin=0.0)
@@ -1256,7 +1332,6 @@ def grouped_quantize(
         scaling_mode=quantizer.scaling_mode.value,
         q_layout=q_layout,
         flatten_axis=flatten_axis,
-        group_axis=group_axis,
         scale_dtype=quantizer.get_scale_dtype(),
     )
 
@@ -1270,6 +1345,11 @@ def grouped_quantize(
         for i, quantizer_i in enumerate(quantizer.quantizers):
             quantizer_i.update(updated_amax[i].reshape((1,)))
 
+    # Both V1 (set_with_gemm_swizzled_scales) and V2 (nvte_group_quantize) produce
+    # pre-swizzled scale_inv tensors for use by the grouped GEMM kernel. Set
+    # pre_swizzled=True for all MXFP8 grouped quantization so that grouped_gemm can
+    # assert this invariant unconditionally.
+    is_mxfp8 = quantizer.scaling_mode == ScalingMode.MXFP8_1D_SCALING
     out = ScaledTensorFactory.create(
         data=rowwise_casted_output,
         scale_inv=rowwise_scale_inv,
@@ -1280,9 +1360,9 @@ def grouped_quantize(
         q_layout=quantizer.q_layout,
         data_layout=quantizer.get_data_layout(),
         flatten_axis=flatten_axis,
-        group_sizes=group_sizes,
+        first_dims=ragged_first_dims,
         original_shape=original_shape,
-        group_axis=group_axis,
+        pre_swizzled=is_mxfp8,
     )
     return out
 

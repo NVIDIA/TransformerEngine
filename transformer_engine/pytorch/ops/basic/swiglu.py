@@ -17,7 +17,7 @@ from ...utils import clear_tensor_data
 from ..op import BasicOperation, OperationContext
 from .._common import maybe_dequantize
 
-__all__ = ["SwiGLU", "ClampedSwiGLU", "ScaledSwiGLU"]
+__all__ = ["SwiGLU", "ClampedSwiGLU", "ScaledSwiGLU", "ScaledClampedQGeGLU"]
 
 
 class SwiGLU(BasicOperation):
@@ -231,6 +231,34 @@ class ClampedSwiGLU(BasicOperation):
         self.cache_quantized_input: bool = cache_quantized_input
         self.glu_interleave_size: Optional[int] = glu_interleave_size
 
+    def _tex_clamped_swiglu_forward(
+        self,
+        swiglu_in: torch.Tensor,
+        next_op_input_quantizer: Optional[Quantizer],
+    ) -> torch.Tensor:
+        """Call :func:`tex.clamped_swiglu` with this op's ``limit`` / ``alpha``."""
+        return tex.clamped_swiglu(
+            swiglu_in,
+            next_op_input_quantizer,
+            self.limit,
+            self.alpha,
+        )
+
+    def _tex_clamped_dswiglu(
+        self,
+        dy: torch.Tensor,
+        swiglu_in: torch.Tensor,
+        quantizer: Optional[Quantizer],
+    ) -> torch.Tensor:
+        """Call :func:`tex.clamped_dswiglu` with this op's ``limit`` / ``alpha``."""
+        return tex.clamped_dswiglu(
+            dy,
+            swiglu_in,
+            quantizer,
+            self.limit,
+            self.alpha,
+        )
+
     def op_forward(
         self,
         ctx: OperationContext,
@@ -252,7 +280,7 @@ class ClampedSwiGLU(BasicOperation):
         x = maybe_dequantize(input_.contiguous(), dtype)
 
         # Remove interleaving if needed
-        swiglu_in = input_
+        swiglu_in = x
         if self.glu_interleave_size is not None:
             shape = swiglu_in.size()
             swiglu_in = swiglu_in.reshape(
@@ -265,12 +293,7 @@ class ClampedSwiGLU(BasicOperation):
             swiglu_in = swiglu_in.view(shape)
 
         # Launch kernel
-        out = tex.clamped_swiglu(
-            swiglu_in,
-            next_op_input_quantizer,
-            limit=self.limit,
-            alpha=self.alpha,
-        )
+        out = self._tex_clamped_swiglu_forward(swiglu_in, next_op_input_quantizer)
 
         # Quantize input to FP8 before caching if needed
         if self.cache_quantized_input:
@@ -320,13 +343,7 @@ class ClampedSwiGLU(BasicOperation):
             quantizer = None
 
         # Launch kernel
-        grad_swiglu_in = tex.clamped_dswiglu(
-            dy,
-            swiglu_in,
-            quantizer,
-            limit=self.limit,
-            alpha=self.alpha,
-        )
+        grad_swiglu_in = self._tex_clamped_dswiglu(dy, swiglu_in, quantizer)
 
         # Apply interleaving if needed
         dx = grad_swiglu_in
@@ -347,28 +364,24 @@ class ClampedSwiGLU(BasicOperation):
         return dx, ()
 
 
-class ScaledSwiGLU(BasicOperation):
-    r"""SwiGLU with post-scaling.
+class _ScaledGLU(BasicOperation):
+    """SwiGLU-family activation with per-row scales (fused grouped MLP middle op)."""
 
-    If the SwiGLU output has shape ``(d_1, ..., d_n)``, it is
-    multiplied with an extra input tensor of shape
-    ``(d_1, ..., d_{n-1})``.
-
-    Parameters
-    ----------
-    glu_interleave_size : int, optional
-        When set, the GLU activations will use an experimental block
-        interleaved format. See the corresponding option in the SwiGLU
-        operation for more details.
-
-    """
-
-    # Operation expects scales
     num_extra_inputs: int = 1
 
-    def __init__(self, glu_interleave_size: Optional[int] = None):
+    def __init__(self, glu_interleave_size: Optional[int] = None) -> None:
         super().__init__()
         self.glu_interleave_size: Optional[int] = glu_interleave_size
+
+    def _glu_forward(self, swiglu_in: torch.Tensor) -> torch.Tensor:
+        raise NotImplementedError
+
+    def _glu_backward(
+        self,
+        grad_swiglu_out: torch.Tensor,
+        swiglu_in: torch.Tensor,
+    ) -> torch.Tensor:
+        raise NotImplementedError
 
     def op_forward(self, *args, **kwargs) -> None:
         raise RuntimeError(
@@ -423,8 +436,7 @@ class ScaledSwiGLU(BasicOperation):
             swiglu_in = swiglu_in.transpose(1, 2).contiguous()
             swiglu_in = swiglu_in.view(shape)
 
-        # Compute scaled SwiGLU
-        swiglu_out = tex.swiglu(swiglu_in, None)
+        swiglu_out = self._glu_forward(swiglu_in)
         out = swiglu_out * scales.unsqueeze(-1)
 
         # Save state for backward pass
@@ -477,7 +489,7 @@ class ScaledSwiGLU(BasicOperation):
         grad_input = None
         if ctx.input_requires_grad:
             grad_swiglu_out = grad_output * scales.unsqueeze(-1)
-            grad_swiglu_in = tex.dswiglu(grad_swiglu_out, swiglu_in, None)
+            grad_swiglu_in = self._glu_backward(grad_swiglu_out, swiglu_in)
             grad_input = grad_swiglu_in
             if self.glu_interleave_size is not None:
                 shape = grad_input.size()
@@ -490,13 +502,87 @@ class ScaledSwiGLU(BasicOperation):
                 grad_input = grad_input.transpose(1, 2).contiguous()
                 grad_input = grad_input.view(shape)
 
-        # Compute scales grad by recomputing SwiGLU
+        # Compute scales grad by recomputing GLU
         grad_extra_input = None
         if ctx.extra_input_requires_grad:
-            swiglu_out = tex.swiglu(swiglu_in, None)
+            swiglu_out = self._glu_forward(swiglu_in)
             grad_extra_input = torch.linalg.vecdot(swiglu_out, grad_output)
 
         # Clear input tensor if possible
         clear_tensor_data(ctx.saved_tensors[0])  # input_
 
         return grad_input, [()], [(grad_extra_input,)]
+
+
+class ScaledSwiGLU(_ScaledGLU):
+    r"""SwiGLU with post-scaling (matches cuDNN grouped GEMM ``act_func="swiglu"``).
+
+    If the GLU output has shape ``(d_1, ..., d_n)``, it is multiplied
+    with an extra input tensor of shape ``(d_1, ..., d_{n-1})``.
+
+    Parameters
+    ----------
+    glu_interleave_size : int, optional
+        When set, the GLU activations will use an experimental block
+        interleaved format. See the corresponding option in the SwiGLU
+        operation for more details.
+
+    """
+
+    def _glu_forward(self, swiglu_in: torch.Tensor) -> torch.Tensor:
+        return tex.swiglu(swiglu_in, None)
+
+    def _glu_backward(
+        self,
+        grad_swiglu_out: torch.Tensor,
+        swiglu_in: torch.Tensor,
+    ) -> torch.Tensor:
+        return tex.dswiglu(grad_swiglu_out, swiglu_in, None)
+
+
+class ScaledClampedQGeGLU(_ScaledGLU):
+    r"""Clamped QGeGLU with post-scaling
+    (matches cuDNN grouped GEMM ``act_func="geglu"``).
+
+    Same layout and scaling contract as :class:`ScaledSwiGLU`, but the GLU
+    uses :class:`ClampedSwiGLU` numerics (default ``limit`` / ``alpha`` match
+    cuDNN).
+
+    Parameters
+    ----------
+    glu_interleave_size : int, optional
+        When set, the GLU activations will use an experimental block
+        interleaved format. See :class:`ClampedSwiGLU`.
+    limit : float, default ``7.0``
+        Clamp limit (see :class:`ClampedSwiGLU`).
+    alpha : float, default ``1.702``
+        Sigmoid scale (see :class:`ClampedSwiGLU`).
+
+    """
+
+    def __init__(
+        self,
+        glu_interleave_size: Optional[int] = None,
+        *,
+        limit: float = 7.0,
+        alpha: float = 1.702,
+    ) -> None:
+        super().__init__(glu_interleave_size)
+        self._clamped: ClampedSwiGLU = ClampedSwiGLU(
+            limit=limit,
+            alpha=alpha,
+        )
+
+    def _glu_forward(self, swiglu_in: torch.Tensor) -> torch.Tensor:
+        return self._clamped._tex_clamped_swiglu_forward(swiglu_in, None)
+
+    def _glu_backward(
+        self,
+        grad_swiglu_out: torch.Tensor,
+        swiglu_in: torch.Tensor,
+    ) -> torch.Tensor:
+        return self._clamped._tex_clamped_dswiglu(
+            grad_swiglu_out,
+            swiglu_in,
+            None,
+        )

@@ -795,15 +795,31 @@ class MultiheadAttention(torch.nn.Module):
             fp8_dpa = fp8_recipe.fp8_dpa
             fp8_mha = fp8_recipe.fp8_mha
             float8_current_scaling = fp8_recipe.float8_current_scaling()
+            mxfp8_scaling = fp8_recipe.mxfp8()
         else:
             fp8_dpa = _dpa_fp8_recipe_dpa
             fp8_mha = _dpa_fp8_recipe_mha
             float8_current_scaling = _dpa_fp8_recipe == "Float8CurrentScaling"
-        # QKV Gemm: do not produce FP8 output when in Float8CurrentScaling recipe
-        qkv_fp8_output = fp8 and fp8_mha and rotary_pos_emb is None and not float8_current_scaling
-        # DPA: always produce FP8 output when fp8=True to take advantage of the O amax
-        dpa_fp8_output = fp8 and (fp8_dpa or fp8_mha)
-        # Proj Gemm: match DPA output except for Float8CurrentScaling
+            mxfp8_scaling = _dpa_fp8_recipe == "MXFP8BlockScaling"
+
+        # QKV Gemm: do not produce FP8 output when fp8_mha = True if
+        # 1. RoPE is on: RoPE is only implemented in F16 currently
+        # 2. FP8CS recipe: due to cuBLAS limitation, FP8CS Gemms can not produce FP8 output
+        # 3. MXFP8 recipe: QKV Gemm produces QKV in bs(hd), sb(hd), t(hd) shapes, quantization of which would be along
+        # s/b/t and (hd) dimensions, whereas MXFP8 attention requires quantization along s and d, e.g. bhsd, sbhd, thd
+        qkv_fp8_output = (
+            fp8
+            and fp8_mha
+            and rotary_pos_emb is None
+            and not float8_current_scaling
+            and not mxfp8_scaling
+        )
+        # DPA: produce FP8 output to take advantage of O amax from DPA; Projection Gemm can take FP8 or F16 inputs
+        # 1. FP8DS/FP8CS recipe: produce FP8 output
+        # 2. MXFP8 recipe: produce F16 output; again, due to quantization dimensions mismatch
+        dpa_fp8_output = fp8 and (fp8_dpa or fp8_mha) and not mxfp8_scaling
+        # Projection Gemm: match DPA output except
+        # 1. FP8CS recipe: produce F16 grads; again, due to cuBLAS limitation
         proj_fp8_grad = dpa_fp8_output and not float8_current_scaling
 
         layernorm_output = None

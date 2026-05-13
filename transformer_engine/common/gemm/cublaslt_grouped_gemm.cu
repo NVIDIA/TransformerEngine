@@ -1363,7 +1363,7 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
                        NVTETensor workspace_cublas, NVTEGroupedMatmulConfig config,
                        cudaStream_t stream) {
   NVTE_ERROR("nvte_grouped_gemm requires cuBLAS 13.3+, but compile-time cuBLAS version is ",
-             CUBLAS_VERSION, ". Please upgrade to CUDA 13.3 or newer.");
+             CUBLAS_VERSION, ". Please upgrade to cuBLAS 13.3 (shipped with CUDA 13.2) or newer.");
 }
 
 void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num_a_tensors,
@@ -1375,7 +1375,7 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
   NVTE_ERROR(
       "nvte_grouped_gemm_with_discrete_inputA requires cuBLAS 13.3+, but compile-time "
       "cuBLAS version is ",
-      CUBLAS_VERSION, ". Please upgrade to CUDA 13.3 or newer.");
+      CUBLAS_VERSION, ". Please upgrade to cuBLAS 13.3 (shipped with CUDA 13.2) or newer.");
 }
 
 void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
@@ -1388,20 +1388,20 @@ void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
   NVTE_ERROR(
       "nvte_grouped_gemm_with_discrete_out requires cuBLAS 13.3+, but compile-time "
       "cuBLAS version is ",
-      CUBLAS_VERSION, ". Please upgrade to CUDA 13.3 or newer.");
+      CUBLAS_VERSION, ". Please upgrade to cuBLAS 13.3 (shipped with CUDA 13.2) or newer.");
 }
 
 void nvte_grouped_bias_add(const NVTEGroupedTensor output, const NVTEGroupedTensor bias,
                            cudaStream_t stream) {
   NVTE_ERROR("nvte_grouped_bias_add requires cuBLAS 13.3+, but compile-time cuBLAS version is ",
-             CUBLAS_VERSION, ". Please upgrade to CUDA 13.3 or newer.");
+             CUBLAS_VERSION, ". Please upgrade to cuBLAS 13.3 (shipped with CUDA 13.2) or newer.");
 }
 
 size_t nvte_get_grouped_gemm_setup_workspace_size(size_t num_tensors) {
   NVTE_ERROR(
       "nvte_get_grouped_gemm_setup_workspace_size requires cuBLAS 13.3+, but compile-time cuBLAS "
       "version is ",
-      CUBLAS_VERSION, ". Please upgrade to CUDA 13.3 or newer.");
+      CUBLAS_VERSION, ". Please upgrade to cuBLAS 13.3 (shipped with CUDA 13.2) or newer.");
   return 0;
 }
 
@@ -1414,6 +1414,24 @@ __global__ void convert_int32_to_int64_kernel(const int32_t *src, int64_t *dst, 
   if (idx < n) dst[idx] = static_cast<int64_t>(src[idx]);
 }
 
+// Like convert_int32_to_int64_kernel but scales each element by multiplier.
+// Used to convert per-expert slice counts to per-expert row counts for multi-dim tensors.
+__global__ void convert_int32_to_int64_with_multiplier_kernel(const int32_t *src, int64_t *dst,
+                                                              size_t n, int64_t multiplier) {
+  size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx < n) dst[idx] = static_cast<int64_t>(src[idx]) * multiplier;
+}
+
+// Computes exclusive prefix sums: offsets[0]=0, offsets[i]=sum(first_dims[0..i-1]*last_dim).
+// Produces n_groups+1 values. Single-threaded sequential scan; n_groups is typically small.
+__global__ void compute_grouped_tensor_offsets_kernel(const int64_t *first_dims, int64_t *offsets,
+                                                      size_t n_groups, int64_t last_dim) {
+  offsets[0] = 0;
+  for (size_t i = 0; i < n_groups; i++) {
+    offsets[i + 1] = offsets[i] + first_dims[i] * last_dim;
+  }
+}
+
 }  // namespace
 
 void nvte_convert_int32_to_int64(const int32_t *src, int64_t *dst, size_t n, cudaStream_t stream) {
@@ -1422,5 +1440,25 @@ void nvte_convert_int32_to_int64(const int32_t *src, int64_t *dst, size_t n, cud
   const int threads = 256;
   const int blocks = static_cast<int>((n + threads - 1) / threads);
   convert_int32_to_int64_kernel<<<blocks, threads, 0, stream>>>(src, dst, n);
+  NVTE_CHECK_CUDA(cudaGetLastError());
+}
+
+void nvte_convert_int32_to_int64_with_multiplier(const int32_t *src, int64_t *dst, size_t n,
+                                                 int64_t multiplier, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_convert_int32_to_int64_with_multiplier);
+  if (n == 0) return;
+  const int threads = 256;
+  const int blocks = static_cast<int>((n + threads - 1) / threads);
+  convert_int32_to_int64_with_multiplier_kernel<<<blocks, threads, 0, stream>>>(src, dst, n,
+                                                                                multiplier);
+  NVTE_CHECK_CUDA(cudaGetLastError());
+}
+
+void nvte_compute_grouped_tensor_offsets(const int64_t *first_dims, int64_t *offsets,
+                                         size_t n_groups, int64_t last_dim, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_compute_grouped_tensor_offsets);
+  // Always write at least offsets[0]=0 (needed even for n_groups==0).
+  compute_grouped_tensor_offsets_kernel<<<1, 1, 0, stream>>>(first_dims, offsets, n_groups,
+                                                             last_dim);
   NVTE_CHECK_CUDA(cudaGetLastError());
 }

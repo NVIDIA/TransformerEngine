@@ -946,6 +946,26 @@ struct TypeInfo {
     }                                                                                      \
   }
 
+#define TRANSFORMER_ENGINE_VECTORIZED_LOAD_INTEGER_TYPE_SWITCH(INTEGER_ELTS_NUM, type, ...) \
+  switch (INTEGER_ELTS_NUM) {                                                               \
+    case 1: {                                                                               \
+      using type = int;                                                                     \
+      { __VA_ARGS__ }                                                                       \
+    } break;                                                                                \
+    case 2: {                                                                               \
+      using type = int2;                                                                    \
+      { __VA_ARGS__ }                                                                       \
+    } break;                                                                                \
+    case 4: {                                                                               \
+      using type = int4;                                                                    \
+      { __VA_ARGS__ }                                                                       \
+    } break;                                                                                \
+    default: {                                                                              \
+      NVTE_ERROR("Unsupported number of integer elements ", INTEGER_ELTS_NUM,               \
+                 ". Expected one of: 1, 2, or 4.");                                         \
+    }                                                                                       \
+  }
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 inline int log2_ceil(int value) {
@@ -1003,7 +1023,7 @@ size_t typeToSize(const DType type);
 size_t typeToNumBits(const DType type);
 
 void CheckNoopTensor(const Tensor &t, const std::string &name);
-void CheckInputTensor(const Tensor &t, const std::string &name);
+void CheckInputTensor(const Tensor &t, const std::string &name, bool check_scale_inv_shapes = true);
 void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empty = false);
 
 /*! \brief Update a tensor's FP8 scale-inverse
