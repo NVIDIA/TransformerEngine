@@ -496,10 +496,13 @@ class _GroupedLinear(torch.autograd.Function):
                 if ctx.fuse_wgrad_accumulation:
                     wgrad_list = main_grads
                 else:
-                    wgrad_list = [
-                        torch.empty(w.size(), dtype=ctx.activation_dtype, device=ctx.device)
-                        for w in weights
-                    ]
+                    weight_shape = list(weights[0].size())
+                    wgrad_list = tex.bulk_allocate(
+                        [weight_shape] * ctx.num_gemms,
+                        [ctx.activation_dtype] * ctx.num_gemms,
+                        ctx.device,
+                        [256] * ctx.num_gemms,  # alignment
+                    )
 
                 if ctx.save_original_input:
                     inp = inputmats[0]
