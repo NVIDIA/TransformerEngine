@@ -21,7 +21,6 @@
 #include "../../../util/ptx.cuh"
 #include "../../../utils.cuh"
 #include "../core_nvfp4.cuh"
-#include "../quantize_4over6_nvfp4.cuh"
 
 namespace transformer_engine {
 namespace dispatch {
@@ -185,13 +184,14 @@ compute_nvfp4_scaling_coefficient<bf16>(const nvfp4_scale_t S_dec_block, const f
   return static_cast<bf16>(scale_rcp);
 }
 
-template <bool USE_STOCHASTIC_ROUNDING, bool USE_FAST_MATH, int E4M3_MAX,
-          typename FourOverSixConfig>
-__device__ __forceinline__ void colwise_scaling(
-    const IType *__restrict__ sIn_ptr, fp4e2m1x2 *__restrict__ sOut_tr_ptr,
-    nvfp4_scale_t *__restrict__ sSFcolwise_ptr, const float S_enc_colwise,
-    const float global_amax_colwise, const int stage_Y, const int stage_X, const int buff_in,
-    const int buff_out_tr, RNG_t &rng, uint4 &random_uint4, int &rnd_idx) {
+template <bool USE_STOCHASTIC_ROUNDING, bool USE_FAST_MATH>
+__device__ __forceinline__ void colwise_scaling(const IType *__restrict__ sIn_ptr,
+                                                fp4e2m1x2 *__restrict__ sOut_tr_ptr,
+                                                nvfp4_scale_t *__restrict__ sSFcolwise_ptr,
+                                                const float S_enc_colwise, const int stage_Y,
+                                                const int stage_X, const int buff_in,
+                                                const int buff_out_tr, RNG_t &rng,
+                                                uint4 &random_uint4, int &rnd_idx) {
   using scaling_coeff_type = typename SCALING_COEFFICIENT_TYPE<USE_FAST_MATH>::type;
 
   const auto &sIn2x = *reinterpret_cast<const IType2x3D *>(sIn_ptr);
@@ -231,56 +231,37 @@ __device__ __forceinline__ void colwise_scaling(
                                static_cast<float>(__habs(thread_amax_2x.y))};
 #pragma unroll
   for (int w = 0; w < 2; ++w) {
-    if constexpr (FourOverSixConfig::enabled) {
-      __align__(8) uint32_t rOut[SCALE_DIM / 8];
-      nvfp4_scale_t S_dec_b_fp8;
-      const auto scaling_factors =
-          core::compute_4over6_nvfp4_quantization_scaling_factors(block_amax[w], S_enc_colwise);
+    const nvfp4_scale_t S_dec_b_fp8 = compute_decoding_scaling_factor(block_amax[w], S_enc_colwise);
 
-      core::quantize_4over6_contiguous_16x<FourOverSixConfig, E4M3_MAX, false, IType>(
-          rIn[w], scaling_factors, global_amax_colwise, S_dec_b_fp8, rOut);
+    // Store scaling factors to SMEM buffer (R2S)
+    sSFcolwise[scale_tr_offset_Y + w][scale_tr_offset_X] = S_dec_b_fp8;
 
-      // Store scaling factors to SMEM buffer (R2S)
-      sSFcolwise[scale_tr_offset_Y + w][scale_tr_offset_X] = S_dec_b_fp8;
+    const scaling_coeff_type SFcoefficient =
+        compute_nvfp4_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8, S_enc_colwise);
 
-      uint64_t &out_pack_16x = *reinterpret_cast<uint64_t *>(rOut);
-      ptx::st_shared_b64(&sOut_tr[buff_out_tr][out_tr_thread_offset_Y + w][out_tr_thread_offset_X],
-                         out_pack_16x);
-    } else {
-      const nvfp4_scale_t S_dec_b_fp8 =
-          compute_decoding_scaling_factor(block_amax[w], S_enc_colwise);
-
-      // Store scaling factors to SMEM buffer (R2S)
-      sSFcolwise[scale_tr_offset_Y + w][scale_tr_offset_X] = S_dec_b_fp8;
-
-      const scaling_coeff_type SFcoefficient =
-          compute_nvfp4_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8, S_enc_colwise);
-
-      // Scale elements
-      __align__(8) uint32_t rOut[SCALE_DIM / 8];
+    // Scale elements
+    __align__(8) uint32_t rOut[SCALE_DIM / 8];
 #pragma unroll
-      for (int e = 0; e < SCALE_DIM / 8; ++e) {
-        const uint64_t elts03 = *reinterpret_cast<uint64_t *>(&rIn[w][8 * e]);
-        const uint64_t elts47 = *reinterpret_cast<uint64_t *>(&rIn[w][8 * e + 4]);
-        if constexpr (USE_STOCHASTIC_ROUNDING) {
-          const uint32_t rbits03 = core::get_rbits(rng, random_uint4, rnd_idx);
-          const uint32_t rbits47 = core::get_rbits(rng, random_uint4, rnd_idx);
-          rOut[e] = ptx::mul_cvt_bf16_to_fp4_8x_stochastic_rounding<scaling_coeff_type>(
-              elts03, elts47, SFcoefficient, rbits03, rbits47);
-        } else {
-          rOut[e] = ptx::mul_cvt_bf16_to_fp4_8x_round_to_nearest<scaling_coeff_type>(elts03, elts47,
-                                                                                     SFcoefficient);
-        }
+    for (int e = 0; e < SCALE_DIM / 8; ++e) {
+      const uint64_t elts03 = *reinterpret_cast<uint64_t *>(&rIn[w][8 * e]);
+      const uint64_t elts47 = *reinterpret_cast<uint64_t *>(&rIn[w][8 * e + 4]);
+      if constexpr (USE_STOCHASTIC_ROUNDING) {
+        const uint32_t rbits03 = core::get_rbits(rng, random_uint4, rnd_idx);
+        const uint32_t rbits47 = core::get_rbits(rng, random_uint4, rnd_idx);
+        rOut[e] = ptx::mul_cvt_bf16_to_fp4_8x_stochastic_rounding<scaling_coeff_type>(
+            elts03, elts47, SFcoefficient, rbits03, rbits47);
+      } else {
+        rOut[e] = ptx::mul_cvt_bf16_to_fp4_8x_round_to_nearest<scaling_coeff_type>(elts03, elts47,
+                                                                                   SFcoefficient);
       }
-      uint64_t &out_pack_16x = *reinterpret_cast<uint64_t *>(rOut);
-      ptx::st_shared_b64(&sOut_tr[buff_out_tr][out_tr_thread_offset_Y + w][out_tr_thread_offset_X],
-                         out_pack_16x);
     }
+    uint64_t &out_pack_16x = *reinterpret_cast<uint64_t *>(rOut);
+    ptx::st_shared_b64(&sOut_tr[buff_out_tr][out_tr_thread_offset_Y + w][out_tr_thread_offset_X],
+                       out_pack_16x);
   }
 }
 
-template <bool USE_STOCHASTIC_ROUNDING, bool USE_FAST_MATH, bool ROW_SCALED_NVFP4, int E4M3_MAX,
-          typename FourOverSixConfig>
+template <bool USE_STOCHASTIC_ROUNDING, bool USE_FAST_MATH, bool ROW_SCALED_NVFP4>
 __device__ __forceinline__ void rowwise_scaling(
     const IType *__restrict__ sIn_ptr, fp4e2m1x2 *__restrict__ sOut_ptr,
     nvfp4_scale_t *__restrict__ sSFrowwise_ptr, const float S_enc_rowwise, const int stage_Y,
@@ -332,101 +313,55 @@ __device__ __forceinline__ void rowwise_scaling(
     }
     const float block_amax = get_amax_of_pair(thread_amax_2x);
 
-    if constexpr (FourOverSixConfig::enabled) {
-      nvfp4_scale_t S_dec_b_fp8;
-      float block_S_enc_rowwise;
-      float block_global_amax;
-      if constexpr (ROW_SCALED_NVFP4) {
-        const size_t row_idx = row_offset + stage_Y * TILE_DIM_Y + it_offset_Y_rowwise;
-        if (row_idx < rows) {
-          block_global_amax = amax_rowwise_ptr[row_idx];
-          block_S_enc_rowwise =
-              core::compute_global_encode_scaling_factor_FP4<E4M3_MAX>(block_global_amax);
-        } else {
-          block_global_amax = 1.0f;
-          block_S_enc_rowwise = 1.0f;
-        }
-      } else {
-        block_global_amax = *amax_rowwise_ptr;
-        block_S_enc_rowwise = S_enc_rowwise;
-      }
-      const auto scaling_factors =
-          core::compute_4over6_nvfp4_quantization_scaling_factors(block_amax, block_S_enc_rowwise);
-
-      __align__(8) uint32_t rOut[WAVES];
-      if (bank_group == 0) {
-        core::quantize_4over6_pair_array_16x<FourOverSixConfig, E4M3_MAX, false, IType2>(
-            rIn, scaling_factors, block_global_amax, S_dec_b_fp8, rOut);
-      } else {
-        core::quantize_4over6_pair_array_16x<FourOverSixConfig, E4M3_MAX, true, IType2>(
-            rIn, scaling_factors, block_global_amax, S_dec_b_fp8, rOut);
-      }
-
-      // Store scaling factors to SMEM buffer (R2S)
-      if (SF_storing_thread) {
-        const int scales_offset_Y = stage_rowwise_scales_offset_Y + it * THREADS_Y_ROWWISE;
-        const int scales_offset_X = stage_rowwise_scales_offset_X;
-        sSFrowwise[scales_offset_Y][scales_offset_X] = S_dec_b_fp8;
-      }
-
-#pragma unroll
-      for (int w = 0; w < WAVES; ++w) {
-        const int swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % ELTS_PER_THREAD;
-        const int swizzled_idx = (swizzled_group_idx + thread_offset_X_rowwise) / 2;
-        ptx::st_shared_b32(&sOut[buff_out][it_offset_Y_rowwise][swizzled_idx], rOut[w]);
-      }
+    nvfp4_scale_t S_dec_b_fp8;
+    scaling_coeff_type SFcoefficient;
+    if constexpr (ROW_SCALED_NVFP4) {
+      const size_t row_idx = row_offset + stage_Y * TILE_DIM_Y + it_offset_Y_rowwise;
+      const float S_enc_rowwise_block =
+          row_idx < rows ? core::compute_global_encode_scaling_factor_FP4(amax_rowwise_ptr[row_idx])
+                         : 1.0f;
+      S_dec_b_fp8 = compute_decoding_scaling_factor(block_amax, S_enc_rowwise_block);
+      SFcoefficient =
+          compute_nvfp4_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8, S_enc_rowwise_block);
     } else {
-      nvfp4_scale_t S_dec_b_fp8;
-      scaling_coeff_type SFcoefficient;
-      if constexpr (ROW_SCALED_NVFP4) {
-        const size_t row_idx = row_offset + stage_Y * TILE_DIM_Y + it_offset_Y_rowwise;
-        const float S_enc_rowwise_block =
-            row_idx < rows
-                ? core::compute_global_encode_scaling_factor_FP4(amax_rowwise_ptr[row_idx])
-                : 1.0f;
-        S_dec_b_fp8 = compute_decoding_scaling_factor(block_amax, S_enc_rowwise_block);
-        SFcoefficient =
-            compute_nvfp4_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8, S_enc_rowwise_block);
-      } else {
-        S_dec_b_fp8 = compute_decoding_scaling_factor(block_amax, S_enc_rowwise);
-        SFcoefficient =
-            compute_nvfp4_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8, S_enc_rowwise);
-      }
+      S_dec_b_fp8 = compute_decoding_scaling_factor(block_amax, S_enc_rowwise);
+      SFcoefficient =
+          compute_nvfp4_scaling_coefficient<scaling_coeff_type>(S_dec_b_fp8, S_enc_rowwise);
+    }
 
-      // Store scaling factors to SMEM buffer (R2S)
-      if (SF_storing_thread) {
-        const int scales_offset_Y = stage_rowwise_scales_offset_Y + it * THREADS_Y_ROWWISE;
-        const int scales_offset_X = stage_rowwise_scales_offset_X;
-        sSFrowwise[scales_offset_Y][scales_offset_X] = S_dec_b_fp8;
-      }
+    // Store scaling factors to SMEM buffer (R2S)
+    if (SF_storing_thread) {
+      const int scales_offset_Y = stage_rowwise_scales_offset_Y + it * THREADS_Y_ROWWISE;
+      const int scales_offset_X = stage_rowwise_scales_offset_X;
+      sSFrowwise[scales_offset_Y][scales_offset_X] = S_dec_b_fp8;
+    }
 
 // Scale elements
 #pragma unroll
-      for (int w = 0; w < WAVES; ++w) {
-        const uint64_t elts03 = *reinterpret_cast<uint64_t *>(&rIn[w][0]);
-        const uint64_t elts47 = *reinterpret_cast<uint64_t *>(&rIn[w][2]);
+    for (int w = 0; w < WAVES; ++w) {
+      const uint64_t elts03 = *reinterpret_cast<uint64_t *>(&rIn[w][0]);
+      const uint64_t elts47 = *reinterpret_cast<uint64_t *>(&rIn[w][2]);
 
-        uint32_t out_x8;
-        if constexpr (USE_STOCHASTIC_ROUNDING) {
-          const uint32_t rbits03 = core::get_rbits(rng, random_uint4, rnd_idx);
-          const uint32_t rbits47 = core::get_rbits(rng, random_uint4, rnd_idx);
-          out_x8 = ptx::mul_cvt_bf16_to_fp4_8x_stochastic_rounding<scaling_coeff_type>(
-              elts03, elts47, SFcoefficient, rbits03, rbits47);
-        } else {
-          out_x8 = ptx::mul_cvt_bf16_to_fp4_8x_round_to_nearest<scaling_coeff_type>(elts03, elts47,
-                                                                                    SFcoefficient);
-        }
-
-        const int swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % ELTS_PER_THREAD;
-        const int swizzled_idx = (swizzled_group_idx + thread_offset_X_rowwise) / 2;
-        ptx::st_shared_b32(&sOut[buff_out][it_offset_Y_rowwise][swizzled_idx], out_x8);
+      uint32_t out_x8;
+      if constexpr (USE_STOCHASTIC_ROUNDING) {
+        const uint32_t rbits03 = core::get_rbits(rng, random_uint4, rnd_idx);
+        const uint32_t rbits47 = core::get_rbits(rng, random_uint4, rnd_idx);
+        out_x8 = ptx::mul_cvt_bf16_to_fp4_8x_stochastic_rounding<scaling_coeff_type>(
+            elts03, elts47, SFcoefficient, rbits03, rbits47);
+      } else {
+        out_x8 = ptx::mul_cvt_bf16_to_fp4_8x_round_to_nearest<scaling_coeff_type>(elts03, elts47,
+                                                                                  SFcoefficient);
       }
+
+      const int swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % ELTS_PER_THREAD;
+      const int swizzled_idx = (swizzled_group_idx + thread_offset_X_rowwise) / 2;
+      ptx::st_shared_b32(&sOut[buff_out][it_offset_Y_rowwise][swizzled_idx], out_x8);
     }
   }
 }
 
 template <bool USE_STOCHASTIC_ROUNDING, bool USE_FAST_MATH, bool RETURN_TRANSPOSE,
-          bool ROW_SCALED_NVFP4, int E4M3_MAX, typename FourOverSixConfig>
+          bool ROW_SCALED_NVFP4>
 __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D_kernel(
     const __grid_constant__ CUtensorMap tensor_map_input,
     const __grid_constant__ CUtensorMap tensor_map_output,
@@ -494,17 +429,12 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D
   const float S_enc_rowwise =
       (amax_rowwise_ptr == nullptr)
           ? 1.0f
-          : core::compute_global_encode_scaling_factor_FP4<E4M3_MAX>(*amax_rowwise_ptr);
+          : core::compute_global_encode_scaling_factor_FP4(*amax_rowwise_ptr);
 
   const float S_enc_colwise =
       (amax_colwise_ptr == nullptr)
           ? S_enc_rowwise
-          : core::compute_global_encode_scaling_factor_FP4<E4M3_MAX>(*amax_colwise_ptr);
-  // Original NVFP4 uses a scalar per-tensor amax for both rowwise and columnwise output.
-  // If no dedicated columnwise amax buffer is allocated, the rowwise amax is that same scalar.
-  const float global_amax_colwise = (amax_colwise_ptr == nullptr)
-                                        ? ((amax_rowwise_ptr == nullptr) ? 1.0f : *amax_rowwise_ptr)
-                                        : *amax_colwise_ptr;
+          : core::compute_global_encode_scaling_factor_FP4(*amax_colwise_ptr);
 
   __shared__ uint64_t workID_mbar;
   __shared__ __uint128_t workID_response;
@@ -652,15 +582,14 @@ __global__ void __launch_bounds__(THREADS_NUM) quantize_transpose_nvfp4_tuned_1D
       ptx::cp_async_bulk_wait_group_read<TunableConfig::PREFETCH_STAGES>();
 
       // NVFP4 Quantization
-      rowwise_scaling<USE_STOCHASTIC_ROUNDING, USE_FAST_MATH, ROW_SCALED_NVFP4, E4M3_MAX,
-                      FourOverSixConfig>(sIn_ptr, sOut_ptr, sSFrowwise_ptr, S_enc_rowwise, stage_Y,
-                                         stage_X, buff_in, buff_out, amax_rowwise_ptr,
-                                         block_offset_Y, rows, rng, random_uint4, rnd_idx);
+      rowwise_scaling<USE_STOCHASTIC_ROUNDING, USE_FAST_MATH, ROW_SCALED_NVFP4>(
+          sIn_ptr, sOut_ptr, sSFrowwise_ptr, S_enc_rowwise, stage_Y, stage_X, buff_in, buff_out,
+          amax_rowwise_ptr, block_offset_Y, rows, rng, random_uint4, rnd_idx);
 
       if constexpr (RETURN_TRANSPOSE) {
-        colwise_scaling<USE_STOCHASTIC_ROUNDING, USE_FAST_MATH, E4M3_MAX, FourOverSixConfig>(
-            sIn_ptr, sOut_tr_ptr, sSFcolwise_ptr, S_enc_colwise, global_amax_colwise, stage_Y,
-            stage_X, buff_in, buff_out_tr, rng, random_uint4, rnd_idx);
+        colwise_scaling<USE_STOCHASTIC_ROUNDING, USE_FAST_MATH>(
+            sIn_ptr, sOut_tr_ptr, sSFcolwise_ptr, S_enc_colwise, stage_Y, stage_X, buff_in,
+            buff_out_tr, rng, random_uint4, rnd_idx);
       }
 
       // Wait for shared memory writes to be visible to TMA engine
@@ -761,12 +690,7 @@ inline void quantize_transpose_tuned_1D(const Tensor &input, const Tensor *noop,
   using namespace ptx;
 
   const bool use_stochastic_rounding = quant_config ? quant_config->stochastic_rounding : false;
-  const bool use_4over6 = quant_config ? quant_config->nvfp4_4over6 : false;
-  const int nvfp4_e4m3_max = use_4over6 && quant_config ? quant_config->nvfp4_e4m3_max : 448;
-  const NVTENVFP44Over6ErrMode use_4over6_err_mode =
-      use_4over6 && quant_config ? quant_config->nvfp4_4over6_err_mode : kNVTENVFP44Over6ErrMAE;
-  const bool use_4over6_err_use_fast_math =
-      use_4over6 && quant_config && quant_config->nvfp4_4over6_err_use_fast_math;
+  const bool use_fast_math = quant_config ? quant_config->use_fast_math : false;
   const bool row_scaled_nvfp4 = output->row_scaled_nvfp4;
 
   // If transposed output is allocated, return the transposed data
@@ -786,8 +710,6 @@ inline void quantize_transpose_tuned_1D(const Tensor &input, const Tensor *noop,
              "Row-scaled NVFP4 quantization requires rowwise amax.");
   NVTE_CHECK(!row_scaled_nvfp4 || !output->has_columnwise_data(),
              "Row-scaled NVFP4 quantization does not produce columnwise output.");
-  NVTE_CHECK(!use_4over6 || !use_stochastic_rounding,
-             "NVFP4 4over6 quantization does not support stochastic rounding.");
 
   if (return_transpose) {
     NVTE_CHECK(is_fp4_dtype(output->columnwise_data.dtype),
@@ -821,11 +743,6 @@ inline void quantize_transpose_tuned_1D(const Tensor &input, const Tensor *noop,
   const float *const amax_rowwise_ptr = reinterpret_cast<const float *>(output->amax.dptr);
   const float *const amax_colwise_ptr =
       reinterpret_cast<const float *>(output->columnwise_amax.dptr);
-  if (use_4over6 && return_transpose && amax_colwise_ptr == nullptr) {
-    NVTE_CHECK(amax_rowwise_ptr != nullptr && output->amax.numel() == 1,
-               "NVFP4 4over6 quantization with columnwise output requires columnwise amax "
-               "or scalar per-tensor rowwise amax.");
-  }
 
   const NVTETensor rng_state_tensor = (quant_config != nullptr) ? quant_config->rng_state : nullptr;
   const size_t *rng_state = nullptr;
@@ -878,51 +795,24 @@ inline void quantize_transpose_tuned_1D(const Tensor &input, const Tensor *noop,
   const int dshmem_size =
       in_mem + out_mem + out_scales_transpose_mem + out_scales_mem + TMA_SHMEM_ALIGNMENT;
 
-  if (use_4over6) {
-    TRANSFORMER_ENGINE_SWITCH_CONDITION(
-        use_stochastic_rounding, USE_STOCHASTIC_ROUNDING,
-        TRANSFORMER_ENGINE_SWITCH_CONDITION(
-            row_scaled_nvfp4, ROW_SCALED_NVFP4,
-            TRANSFORMER_ENGINE_NVFP4_4OVER6_CONFIG_SWITCH(
-                /*USE_4OVER6_VALUE=*/true, use_4over6_err_mode, use_4over6_err_use_fast_math,
-                FourOverSixConfig,
-                TRANSFORMER_ENGINE_NVFP4_4OVER6_E4M3_MAX_SWITCH(
-                    nvfp4_e4m3_max, E4M3_MAX,
-                    TRANSFORMER_ENGINE_SWITCH_CONDITION(return_transpose, RETURN_TRANSPOSE, {
-                      auto kernel = quantize_transpose_nvfp4_tuned_1D_kernel<
-                          USE_STOCHASTIC_ROUNDING,
-                          /*USE_FAST_MATH=*/false, RETURN_TRANSPOSE, ROW_SCALED_NVFP4, E4M3_MAX,
-                          FourOverSixConfig>;
+  TRANSFORMER_ENGINE_SWITCH_CONDITION(
+      use_stochastic_rounding, USE_STOCHASTIC_ROUNDING,
+      TRANSFORMER_ENGINE_SWITCH_CONDITION(
+          use_fast_math, USE_FAST_MATH,
+          TRANSFORMER_ENGINE_SWITCH_CONDITION(
+              row_scaled_nvfp4, ROW_SCALED_NVFP4,
+              TRANSFORMER_ENGINE_SWITCH_CONDITION(return_transpose, RETURN_TRANSPOSE, {
+                auto kernel =
+                    quantize_transpose_nvfp4_tuned_1D_kernel<USE_STOCHASTIC_ROUNDING, USE_FAST_MATH,
+                                                             RETURN_TRANSPOSE, ROW_SCALED_NVFP4>;
 
-                      cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                           dshmem_size);
-                      kernel<<<grid, block_size, dshmem_size, stream>>>(
-                          tensor_map_input, tensor_map_output, tensor_map_output_transpose,
-                          scales_ptr, scales_transpose_ptr, noop_ptr, amax_rowwise_ptr,
-                          amax_colwise_ptr, rows, cols, scale_stride, scale_stride_transpose,
-                          rng_state);
-                    });););););
-  } else {
-    const bool use_fast_math = quant_config ? quant_config->use_fast_math : false;
-    TRANSFORMER_ENGINE_SWITCH_CONDITION(
-        use_stochastic_rounding, USE_STOCHASTIC_ROUNDING,
-        TRANSFORMER_ENGINE_SWITCH_CONDITION(
-            use_fast_math, USE_FAST_MATH,
-            TRANSFORMER_ENGINE_SWITCH_CONDITION(
-                row_scaled_nvfp4, ROW_SCALED_NVFP4,
-                TRANSFORMER_ENGINE_SWITCH_CONDITION(return_transpose, RETURN_TRANSPOSE, {
-                  auto kernel = quantize_transpose_nvfp4_tuned_1D_kernel<
-                      USE_STOCHASTIC_ROUNDING, USE_FAST_MATH, RETURN_TRANSPOSE, ROW_SCALED_NVFP4,
-                      /*E4M3_MAX=*/448, core::NVFP44Over6DisabledConfig>;
-
-                  cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                       dshmem_size);
-                  kernel<<<grid, block_size, dshmem_size, stream>>>(
-                      tensor_map_input, tensor_map_output, tensor_map_output_transpose, scales_ptr,
-                      scales_transpose_ptr, noop_ptr, amax_rowwise_ptr, amax_colwise_ptr, rows,
-                      cols, scale_stride, scale_stride_transpose, rng_state);
-                }););););
-  }
+                cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                     dshmem_size);
+                kernel<<<grid, block_size, dshmem_size, stream>>>(
+                    tensor_map_input, tensor_map_output, tensor_map_output_transpose, scales_ptr,
+                    scales_transpose_ptr, noop_ptr, amax_rowwise_ptr, amax_colwise_ptr, rows, cols,
+                    scale_stride, scale_stride_transpose, rng_state);
+              }););););
 #else
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
 #endif  // FP4_TYPE_SUPPORTED

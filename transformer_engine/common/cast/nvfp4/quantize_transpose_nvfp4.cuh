@@ -23,7 +23,6 @@
 #include "../../util/ptx.cuh"
 #include "../../utils.cuh"
 #include "core_nvfp4.cuh"
-#include "quantize_4over6_nvfp4.cuh"
 #include "specialized/quantize_transpose_nvfp4_tuned_1D.cuh"
 
 namespace transformer_engine {
@@ -180,10 +179,6 @@ constexpr size_t RNG_GENS_PER_THREAD = SCALES_PER_THREAD / 4;
 
 constexpr size_t TILE_DIM_Y = 32;
 constexpr size_t TILE_DIM_X = 128;
-
-constexpr size_t NVFP4_2D_BLOCK_DIM = 16;
-constexpr size_t NVFP4_2D_BLOCKS_PER_TILE_Y = TILE_DIM_Y / NVFP4_2D_BLOCK_DIM;
-constexpr size_t NVFP4_2D_BLOCKS_PER_TILE_X = TILE_DIM_X / NVFP4_2D_BLOCK_DIM;
 
 // SHould this be SCALE_DIM or BLOCK_DIM? Both are 16, should work for both 1D and 2D
 constexpr size_t SCALES_PER_TILE_Y = TILE_DIM_Y / SCALE_DIM;
@@ -784,8 +779,7 @@ __global__ void __launch_bounds__(THREADS_NUM)
 }
 
 template <bool COMPUTE_ACTIVATIONS, typename ParamOP, float (*OP)(float, const ParamOP &),
-          typename IType, bool USE_STOCHASTIC_ROUNDING, bool RETURN_TRANSPOSE, int E4M3_MAX,
-          typename FourOverSixConfig>
+          typename IType, bool USE_STOCHASTIC_ROUNDING, bool RETURN_TRANSPOSE>
 __global__ void __launch_bounds__(THREADS_NUM)
     quantize_transpose_nvfp4_2D_kernel(const __grid_constant__ CUtensorMap tensor_map_input,
                                        const __grid_constant__ CUtensorMap tensor_map_output,
@@ -818,9 +812,9 @@ __global__ void __launch_bounds__(THREADS_NUM)
       0;  // Index of the random number. It increments each time when used and resets to 0 if reaches 4x
 
   // NEW: 2D Block-based scaling constants
-  constexpr size_t BLOCK_DIM = NVFP4_2D_BLOCK_DIM;
-  constexpr size_t BLOCKS_PER_TILE_Y = NVFP4_2D_BLOCKS_PER_TILE_Y;
-  constexpr size_t BLOCKS_PER_TILE_X = NVFP4_2D_BLOCKS_PER_TILE_X;
+  constexpr size_t BLOCK_DIM = 16;
+  constexpr size_t BLOCKS_PER_TILE_Y = TILE_DIM_Y / BLOCK_DIM;  // 32/16 = 2
+  constexpr size_t BLOCKS_PER_TILE_X = TILE_DIM_X / BLOCK_DIM;  // 128/16 = 8
   constexpr size_t ITERATIONS_BLOCK = 2;  // iterations to calculate 2d block amaxes of 1 tile
   constexpr size_t BLOCKS_PER_WARP = BLOCKS_PER_TILE_X / (THREADS_NUM / 32);  // 8 / (128/32) = 2
 
@@ -875,8 +869,6 @@ __global__ void __launch_bounds__(THREADS_NUM)
   constexpr size_t out_mem_rowwise_data = buff_size_aligned_out;
   constexpr size_t out_mem_colwise_data = buff_size_aligned_out;
   constexpr size_t out_mem_rowwise_scales = 0;
-  constexpr size_t out_mem_colwise_scales =
-      (CHUNK_DIM_Y * CHUNK_DIM_X) / SCALE_DIM * sizeof(nvfp4_scale_t);
 
   extern __shared__ char dynamic_shmem[];
   uintptr_t base_shmem_ptr = reinterpret_cast<uintptr_t>(dynamic_shmem);
@@ -896,37 +888,21 @@ __global__ void __launch_bounds__(THREADS_NUM)
       dshmem + in_mem + out_mem_rowwise_data + out_mem_colwise_data + out_mem_rowwise_scales);
   IType *cached_act_sh = in_sh;  // in_sh is used as a cache buffer
 
-  using FourOverSixScratch =
-      QuantizationScratch4Over6<BLOCK_DIM, BLOCKS_PER_TILE_Y, BLOCKS_PER_TILE_X>;
-  FourOverSixScratch *four_over_six_scratch = nullptr;
-  if constexpr (FourOverSixConfig::enabled) {
-    constexpr size_t four_over_six_scratch_offset = in_mem + out_mem_rowwise_data +
-                                                    out_mem_colwise_data + out_mem_rowwise_scales +
-                                                    out_mem_colwise_scales;
-    four_over_six_scratch =
-        reinterpret_cast<FourOverSixScratch *>(dshmem + four_over_six_scratch_offset);
-  }
-
   constexpr size_t shmem_buff_size = buff_size_aligned_in / BUFFS_NUM;
 
   const bool is_master_thread = (threadIdx.x == 0);
 
   // Compute a global encoding/decoding scaling factors for all S_dec_b
-  const float S_enc_rowwise =
-      (amax_rowwise_ptr == nullptr)
-          ? 1.0f
-          : compute_global_encode_scaling_factor_FP4<E4M3_MAX>(*amax_rowwise_ptr);
+  const float S_enc_rowwise = (amax_rowwise_ptr == nullptr)
+                                  ? 1.0f
+                                  : compute_global_encode_scaling_factor_FP4(*amax_rowwise_ptr);
   // NOTE: This is to match with how emulation code was written.
   const float S_dec_rowwise = 1.0 / S_enc_rowwise;
 
-  const float S_enc_colwise =
-      (amax_colwise_ptr == nullptr)
-          ? S_enc_rowwise
-          : compute_global_encode_scaling_factor_FP4<E4M3_MAX>(*amax_colwise_ptr);
+  const float S_enc_colwise = (amax_colwise_ptr == nullptr)
+                                  ? S_enc_rowwise
+                                  : compute_global_encode_scaling_factor_FP4(*amax_colwise_ptr);
   const float S_dec_colwise = 1.0 / S_enc_colwise;
-  const float global_amax_rowwise = (amax_rowwise_ptr == nullptr) ? 1.0f : *amax_rowwise_ptr;
-  const float global_amax_colwise =
-      (amax_colwise_ptr == nullptr) ? global_amax_rowwise : *amax_colwise_ptr;
 
   const size_t warp_id = threadIdx.x / 32;
   const size_t lane_id = threadIdx.x % 32;
@@ -1098,85 +1074,56 @@ __global__ void __launch_bounds__(THREADS_NUM)
           }
         }
 
-        if constexpr (FourOverSixConfig::enabled) {
-          const size_t block_col = threadIdx.x % BLOCK_DIM;
-          QuantizationCandidates4Over6 candidates;
-          nvfp4_scale_t S_dec_b_fp8;
-          bool pick_map4;
-          if constexpr (NO_ACTIVATIONS_NOT_FP32_INPUT) {
-            pick_map4 =
-                quantize_and_select_4over6_2d_block_16x<FourOverSixConfig, E4M3_MAX, BLOCK_DIM,
-                                                        BLOCKS_PER_TILE_Y, BLOCKS_PER_TILE_X>(
-                    in_colwise_IType, block_amax, S_enc_colwise, S_dec_colwise, global_amax_colwise,
-                    block_in_tile_y, block_in_tile_x, block_col, *four_over_six_scratch,
-                    S_dec_b_fp8, candidates);
-          } else {
-            pick_map4 =
-                quantize_and_select_4over6_2d_block_16x<FourOverSixConfig, E4M3_MAX, BLOCK_DIM,
-                                                        BLOCKS_PER_TILE_Y, BLOCKS_PER_TILE_X>(
-                    in_compute_colwise, block_amax, S_enc_colwise, S_dec_colwise,
-                    global_amax_colwise, block_in_tile_y, block_in_tile_x, block_col,
-                    *four_over_six_scratch, S_dec_b_fp8, candidates);
-          }
+        // 2. Compute E4M3 scaling factor
+        const nvfp4_scale_t S_dec_b_fp8 =
+            compute_decoding_scaling_factor(block_amax, S_enc_colwise);
 
-          const size_t scale_idx_sh =
-              tid_Y_t * SCALES_PER_CHUNK_Y + stage * ITERATIONS_TRANSPOSE + it;
-          out_colwise_scales_sh[scale_idx_sh] = S_dec_b_fp8;
+        // // Store scaling factors through SHMEM
+        const size_t scale_idx_sh =
+            tid_Y_t * SCALES_PER_CHUNK_Y + stage * ITERATIONS_TRANSPOSE + it;
+        out_colwise_scales_sh[scale_idx_sh] = S_dec_b_fp8;
 
-          store_4over6_colwise_packed_16x(pick_map4, candidates, thread_lane, out_t_data_sh,
-                                          shmem_offset_base_colwise_out_t);
-        } else {
-          // 2. Compute E4M3 scaling factor
-          const nvfp4_scale_t S_dec_b_fp8 =
-              compute_decoding_scaling_factor(block_amax, S_enc_colwise);
+        // Compute "correct" per-block encoding scaling factor
+        constexpr float float_max = detail::TypeExtrema<float>::max;
+        const float block_scale_inverse = fminf(
+            1.0f / (static_cast<float>(S_dec_b_fp8) * S_dec_colwise), float_max);  // S_enc_b_fp8
+        const float2 block_scale_inverse_2x{block_scale_inverse, block_scale_inverse};
 
-          // // Store scaling factors through SHMEM
-          const size_t scale_idx_sh =
-              tid_Y_t * SCALES_PER_CHUNK_Y + stage * ITERATIONS_TRANSPOSE + it;
-          out_colwise_scales_sh[scale_idx_sh] = S_dec_b_fp8;
-
-          // Compute "correct" per-block encoding scaling factor
-          constexpr float float_max = detail::TypeExtrema<float>::max;
-          const float block_scale_inverse = fminf(
-              1.0f / (static_cast<float>(S_dec_b_fp8) * S_dec_colwise), float_max);  // S_enc_b_fp8
-          const float2 block_scale_inverse_2x{block_scale_inverse, block_scale_inverse};
-
-          fp4e2m1x4 regs[SCALE_DIM / 4];
+        fp4e2m1x4 regs[SCALE_DIM / 4];
 #pragma unroll
-          for (int e = 0; e < SCALE_DIM / 4; ++e) {
-            const uint32_t rbits = get_rbits(rng, random_uint4, rnd_idx);
-            if constexpr (NO_ACTIVATIONS_NOT_FP32_INPUT) {
-              const uint64_t elts = *reinterpret_cast<uint64_t *>(&in_colwise_IType[4 * e]);
-              regs[e] = ptx::mul_cvt_bf16_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
-                  elts, block_scale_inverse_2x, rbits);
-            } else {
-              const float2 in01 = *reinterpret_cast<float2 *>(&in_compute_colwise[4 * e]);
-              const float2 in23 = *reinterpret_cast<float2 *>(&in_compute_colwise[4 * e + 2]);
-              regs[e] = ptx::mul_cvt_fp32_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
-                  in01, in23, block_scale_inverse_2x, rbits);
-            }
+        for (int e = 0; e < SCALE_DIM / 4; ++e) {
+          const uint32_t rbits = get_rbits(rng, random_uint4, rnd_idx);
+          if constexpr (NO_ACTIVATIONS_NOT_FP32_INPUT) {
+            const uint64_t elts = *reinterpret_cast<uint64_t *>(&in_colwise_IType[4 * e]);
+            regs[e] = ptx::mul_cvt_bf16_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
+                elts, block_scale_inverse_2x, rbits);
+          } else {
+            const float2 in01 = *reinterpret_cast<float2 *>(&in_compute_colwise[4 * e]);
+            const float2 in23 = *reinterpret_cast<float2 *>(&in_compute_colwise[4 * e + 2]);
+            regs[e] = ptx::mul_cvt_fp32_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
+                in01, in23, block_scale_inverse_2x, rbits);
           }
-
-          const int group = thread_lane / 16;
-          uint32_t val[2];
-          uint32_t *regs_4x = reinterpret_cast<uint32_t *>(regs);
-
-          // Helps reducing bank conflicts
-          switch (group) {
-            case 0:
-              val[0] = regs_4x[0];
-              val[1] = regs_4x[1];
-              break;
-            case 1:
-              val[0] = regs_4x[1];
-              val[1] = regs_4x[0];
-              break;
-          }
-          uint32_t *out_t_data_sh_as_uint32_t =
-              reinterpret_cast<uint32_t *>(&out_t_data_sh[shmem_offset_base_colwise_out_t]);
-          out_t_data_sh_as_uint32_t[group] = val[0];            // idx1 = (group + 0) % 2;
-          out_t_data_sh_as_uint32_t[(group + 1) & 1] = val[1];  // idx2 = (group + 1) % 2;
         }
+
+        const int group = thread_lane / 16;
+        uint32_t val[2];
+        uint32_t *regs_4x = reinterpret_cast<uint32_t *>(regs);
+
+        // Helps reducing bank conflicts
+        switch (group) {
+          case 0:
+            val[0] = regs_4x[0];
+            val[1] = regs_4x[1];
+            break;
+          case 1:
+            val[0] = regs_4x[1];
+            val[1] = regs_4x[0];
+            break;
+        }
+        uint32_t *out_t_data_sh_as_uint32_t =
+            reinterpret_cast<uint32_t *>(&out_t_data_sh[shmem_offset_base_colwise_out_t]);
+        out_t_data_sh_as_uint32_t[group] = val[0];            // idx1 = (group + 0) % 2;
+        out_t_data_sh_as_uint32_t[(group + 1) & 1] = val[1];  // idx2 = (group + 1) % 2;
       }
     }
 
@@ -1196,7 +1143,6 @@ __global__ void __launch_bounds__(THREADS_NUM)
 
         block_amax = block_amax_matrix[block_in_tile_y][block_in_tile_x];
         float in_compute_rowwise[SCALE_DIM];
-        float in_4over6_rowwise[SCALE_DIM];
         Vec<IType, PACK_SIZE> in_cached[WAVES];
 
         // used as an IType container for BF16/FP16 --> NVFP4 CAST ONLY
@@ -1212,15 +1158,6 @@ __global__ void __launch_bounds__(THREADS_NUM)
             const size_t shmem_offset_rowwise = shmem_offset_base_rowwise_in + swizzled_thread_idx;
             // Load elements
             in_IType[w].load_from(&in_sh[shmem_offset_rowwise]);
-            if constexpr (FourOverSixConfig::enabled) {
-#pragma unroll
-              for (int e = 0; e < PACK_SIZE / 2; ++e) {
-                in_4over6_rowwise[swizzled_group_idx + 2 * e] =
-                    static_cast<float>(in_IType[w].data.elt[e].x);
-                in_4over6_rowwise[swizzled_group_idx + 2 * e + 1] =
-                    static_cast<float>(in_IType[w].data.elt[e].y);
-              }
-            }
           }
         } else if constexpr (IS_CACHED_ACT_OP) {
           // ensures that all writes to cache made in the section above are visible to all threads
@@ -1233,13 +1170,6 @@ __global__ void __launch_bounds__(THREADS_NUM)
 
             // Load cached elements
             in_cached[w].load_from(&cached_act_sh[shmem_offset_rowwise]);
-            if constexpr (FourOverSixConfig::enabled) {
-#pragma unroll
-              for (int e = 0; e < PACK_SIZE; ++e) {
-                in_4over6_rowwise[swizzled_group_idx + e] =
-                    static_cast<float>(in_cached[w].data.elt[e]);
-              }
-            }
           }
         } else {
 #pragma unroll
@@ -1265,92 +1195,62 @@ __global__ void __launch_bounds__(THREADS_NUM)
                 elt = static_cast<float>(static_cast<IType>(elt));
               }
               in_compute_rowwise[j] = elt;
-              if constexpr (FourOverSixConfig::enabled) {
-                in_4over6_rowwise[swizzled_group_idx + e] = elt;
-              }
             }
           }
         }
 
-        if constexpr (FourOverSixConfig::enabled) {
-          QuantizationCandidates4Over6 candidates;
-          nvfp4_scale_t S_dec_b_fp8;
-          const bool pick_map4 =
-              quantize_and_select_4over6_2d_block_16x<FourOverSixConfig, E4M3_MAX, BLOCK_DIM,
-                                                      BLOCKS_PER_TILE_Y, BLOCKS_PER_TILE_X>(
-                  in_4over6_rowwise, block_amax, S_enc_rowwise, S_dec_rowwise, global_amax_rowwise,
-                  block_in_tile_y, block_in_tile_x, tid_Y_rowwise, *four_over_six_scratch,
-                  S_dec_b_fp8, candidates);
+        // 2. Compute E4M3 scaling factor
+        const nvfp4_scale_t S_dec_b_fp8 =
+            compute_decoding_scaling_factor(block_amax, S_enc_rowwise);
 
-          const size_t scales_offset_Y =
-              scales_offset_Y_rowwise + stage * BUFF_DIM_Y + it * THREADS_Y_ROWWISE;
-          const size_t scales_offset_X = scales_offset_X_rowwise;
-          const size_t scale_idx_global = scales_offset_Y * scale_stride + scales_offset_X;
+        // Check boundaries
+        const size_t scales_offset_Y =
+            scales_offset_Y_rowwise + stage * BUFF_DIM_Y + it * THREADS_Y_ROWWISE;
+        const size_t scales_offset_X = scales_offset_X_rowwise;
+        const size_t scale_idx_global = scales_offset_Y * scale_stride + scales_offset_X;
 
-          const bool rowwise_scale_is_within_bounds_Y =
-              (stage_rowwise_scales_offset_Y + it * THREADS_Y_ROWWISE + tid_Y_rowwise) < chunk_rows;
-          if (rowwise_scale_is_within_bounds_X && rowwise_scale_is_within_bounds_Y) {
-            scales_ptr[scale_idx_global] = S_dec_b_fp8;
-          }
+        const bool rowwise_scale_is_within_bounds_Y =
+            (stage_rowwise_scales_offset_Y + it * THREADS_Y_ROWWISE + tid_Y_rowwise) < chunk_rows;
+        if (rowwise_scale_is_within_bounds_X && rowwise_scale_is_within_bounds_Y) {
+          scales_ptr[scale_idx_global] = S_dec_b_fp8;
+        }
 
-          store_4over6_rowwise_packed_16x<WAVES, PACK_SIZE, SCALE_DIM>(
-              pick_map4, candidates, bank_group, thread_offset_X_rowwise,
-              shmem_offset_base_rowwise_out, out_data_sh);
-        } else {
-          // 2. Compute E4M3 scaling factor
-          const nvfp4_scale_t S_dec_b_fp8 =
-              compute_decoding_scaling_factor(block_amax, S_enc_rowwise);
+        // Compute "correct" per-block encoding scaling factor
+        constexpr float float_max = detail::TypeExtrema<float>::max;
+        const float block_scale_inverse = fminf(
+            1.0f / (static_cast<float>(S_dec_b_fp8) * S_dec_rowwise), float_max);  // S_enc_b_fp8
+        const float2 block_scale_inverse_2x{block_scale_inverse, block_scale_inverse};
 
-          // Check boundaries
-          const size_t scales_offset_Y =
-              scales_offset_Y_rowwise + stage * BUFF_DIM_Y + it * THREADS_Y_ROWWISE;
-          const size_t scales_offset_X = scales_offset_X_rowwise;
-          const size_t scale_idx_global = scales_offset_Y * scale_stride + scales_offset_X;
-
-          const bool rowwise_scale_is_within_bounds_Y =
-              (stage_rowwise_scales_offset_Y + it * THREADS_Y_ROWWISE + tid_Y_rowwise) < chunk_rows;
-          if (rowwise_scale_is_within_bounds_X && rowwise_scale_is_within_bounds_Y) {
-            scales_ptr[scale_idx_global] = S_dec_b_fp8;
-          }
-
-          // Compute "correct" per-block encoding scaling factor
-          constexpr float float_max = detail::TypeExtrema<float>::max;
-          const float block_scale_inverse = fminf(
-              1.0f / (static_cast<float>(S_dec_b_fp8) * S_dec_rowwise), float_max);  // S_enc_b_fp8
-          const float2 block_scale_inverse_2x{block_scale_inverse, block_scale_inverse};
-
-          // 3. Scale elements
+        // 3. Scale elements
 #pragma unroll
-          for (int w = 0; w < WAVES; ++w) {
-            Vec<fp4e2m1x4, PACK_SIZE / 4> out;
+        for (int w = 0; w < WAVES; ++w) {
+          Vec<fp4e2m1x4, PACK_SIZE / 4> out;
 #pragma unroll
-            for (int e = 0; e < PACK_SIZE / 4; ++e) {
-              const uint32_t rbits = get_rbits(rng, random_uint4, rnd_idx);
-              IType2 in01;
-              IType2 in23;
-              if constexpr (NO_ACTIVATIONS_NOT_FP32_INPUT) {
-                const uint64_t elts = *reinterpret_cast<uint64_t *>(&in_IType[w].data.elt[2 * e]);
-                out.data.elt[e] = ptx::mul_cvt_bf16_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
-                    elts, block_scale_inverse_2x, rbits);
-              } else if constexpr (IS_CACHED_ACT_OP) {
-                const uint64_t elts = *reinterpret_cast<uint64_t *>(&in_cached[w].data.elt[4 * e]);
-                out.data.elt[e] = ptx::mul_cvt_bf16_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
-                    elts, block_scale_inverse_2x, rbits);
-              } else {
-                const int j = w * PACK_SIZE + 4 * e;
-                const float2 in01 = make_float2(in_compute_rowwise[j], in_compute_rowwise[j + 1]);
-                const float2 in23 =
-                    make_float2(in_compute_rowwise[j + 2], in_compute_rowwise[j + 3]);
-                out.data.elt[e] = ptx::mul_cvt_fp32_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
-                    in01, in23, block_scale_inverse_2x, rbits);
-              }
+          for (int e = 0; e < PACK_SIZE / 4; ++e) {
+            const uint32_t rbits = get_rbits(rng, random_uint4, rnd_idx);
+            IType2 in01;
+            IType2 in23;
+            if constexpr (NO_ACTIVATIONS_NOT_FP32_INPUT) {
+              const uint64_t elts = *reinterpret_cast<uint64_t *>(&in_IType[w].data.elt[2 * e]);
+              out.data.elt[e] = ptx::mul_cvt_bf16_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
+                  elts, block_scale_inverse_2x, rbits);
+            } else if constexpr (IS_CACHED_ACT_OP) {
+              const uint64_t elts = *reinterpret_cast<uint64_t *>(&in_cached[w].data.elt[4 * e]);
+              out.data.elt[e] = ptx::mul_cvt_bf16_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
+                  elts, block_scale_inverse_2x, rbits);
+            } else {
+              const int j = w * PACK_SIZE + 4 * e;
+              const float2 in01 = make_float2(in_compute_rowwise[j], in_compute_rowwise[j + 1]);
+              const float2 in23 = make_float2(in_compute_rowwise[j + 2], in_compute_rowwise[j + 3]);
+              out.data.elt[e] = ptx::mul_cvt_fp32_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
+                  in01, in23, block_scale_inverse_2x, rbits);
             }
-
-            const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM;
-            const size_t swizzled_idx = swizzled_group_idx + thread_offset_X_rowwise;
-            const size_t shmem_offset_rowwise = shmem_offset_base_rowwise_out + swizzled_idx / 2;
-            out.store_to(&out_data_sh[shmem_offset_rowwise]);
           }
+
+          const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM;
+          const size_t swizzled_idx = swizzled_group_idx + thread_offset_X_rowwise;
+          const size_t shmem_offset_rowwise = shmem_offset_base_rowwise_out + swizzled_idx / 2;
+          out.store_to(&out_data_sh[shmem_offset_rowwise]);
         }
       }
     }
@@ -1419,17 +1319,9 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
   using namespace ptx;
 
   bool use_stochastic_rounding = quant_config ? quant_config->stochastic_rounding : false;
-  const bool use_4over6 = quant_config ? quant_config->nvfp4_4over6 : false;
-  const int nvfp4_e4m3_max = use_4over6 && quant_config ? quant_config->nvfp4_e4m3_max : 448;
-  const NVTENVFP44Over6ErrMode use_4over6_err_mode =
-      use_4over6 && quant_config ? quant_config->nvfp4_4over6_err_mode : kNVTENVFP44Over6ErrMAE;
-  const bool use_4over6_err_use_fast_math =
-      use_4over6 && quant_config && quant_config->nvfp4_4over6_err_use_fast_math;
   const bool row_scaled_nvfp4 = output->row_scaled_nvfp4;
   NVTE_CHECK(!row_scaled_nvfp4 || !use_2d_quantization,
              "Row-scaled NVFP4 quantization does not support 2D quantization.");
-  NVTE_CHECK(!use_4over6 || !use_stochastic_rounding,
-             "NVFP4 4over6 quantization does not support stochastic rounding.");
 
   // If transposed output is allocated, return the transposed data. Otherwise, it's not necesary to
   // return the transposed data.
@@ -1535,41 +1427,29 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
 
   constexpr size_t out_mem = out_data_mem + out_data_transpose_mem;
 
-  constexpr size_t base_dshmem_size =
-      in_mem + out_mem + out_scales_transpose_mem + TMA_SHMEM_ALIGNMENT;
+  constexpr size_t dshmem_size = in_mem + out_mem + out_scales_transpose_mem + TMA_SHMEM_ALIGNMENT;
 
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
       use_stochastic_rounding, USE_STOCHASTIC_ROUNDING,
-      TRANSFORMER_ENGINE_SWITCH_CONDITION(
-          row_scaled_nvfp4, ROW_SCALED_NVFP4,
-          TRANSFORMER_ENGINE_NVFP4_4OVER6_CONFIG_SWITCH(
-              use_4over6, use_4over6_err_mode, use_4over6_err_use_fast_math, FourOverSixConfig,
-              TRANSFORMER_ENGINE_NVFP4_4OVER6_E4M3_MAX_SWITCH(
-                  nvfp4_e4m3_max, E4M3_MAX,
-                  TRANSFORMER_ENGINE_SWITCH_CONDITION(return_transpose, RETURN_TRANSPOSE, {
-                    auto kernel =
-                        quantize_transpose_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,
+
+      TRANSFORMER_ENGINE_SWITCH_CONDITION(row_scaled_nvfp4, ROW_SCALED_NVFP4, {
+        TRANSFORMER_ENGINE_SWITCH_CONDITION(return_transpose, RETURN_TRANSPOSE, {
+          auto kernel = quantize_transpose_nvfp4_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,
                                                         USE_STOCHASTIC_ROUNDING, RETURN_TRANSPOSE,
                                                         ROW_SCALED_NVFP4>;
 
-                    if constexpr (use_2d_quantization) {
-                      kernel = quantize_transpose_nvfp4_2D_kernel<
-                          COMPUTE_ACTIVATIONS, ParamOP, OP, IType, USE_STOCHASTIC_ROUNDING,
-                          RETURN_TRANSPOSE, E4M3_MAX, FourOverSixConfig>;
-                    }
-                    using FourOverSixScratch = core::QuantizationScratch4Over6<
-                        NVFP4_2D_BLOCK_DIM, NVFP4_2D_BLOCKS_PER_TILE_Y, NVFP4_2D_BLOCKS_PER_TILE_X>;
-                    constexpr size_t dshmem_size =
-                        base_dshmem_size + FourOverSixScratch::template dynamic_shared_memory_size<
-                                               use_2d_quantization, FourOverSixConfig::enabled>();
-                    cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                         dshmem_size);
-                    kernel<<<grid, block_size, dshmem_size, stream>>>(
-                        tensor_map_input, tensor_map_output, tensor_map_output_transpose,
-                        scales_ptr, scales_transpose_ptr, noop_ptr, amax_rowwise_ptr,
-                        amax_colwise_ptr, rows, cols, scale_stride, scale_stride_transpose,
-                        rng_state);
-                  });););););
+          if constexpr (use_2d_quantization) {
+            kernel = quantize_transpose_nvfp4_2D_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,
+                                                        USE_STOCHASTIC_ROUNDING, RETURN_TRANSPOSE>;
+          }
+
+          cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size);
+          kernel<<<grid, block_size, dshmem_size, stream>>>(
+              tensor_map_input, tensor_map_output, tensor_map_output_transpose, scales_ptr,
+              scales_transpose_ptr, noop_ptr, amax_rowwise_ptr, amax_colwise_ptr, rows, cols,
+              scale_stride, scale_stride_transpose, rng_state);
+        });
+      }););
 #else
   NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
 #endif  // FP4_TYPE_SUPPORTED

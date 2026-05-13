@@ -21,6 +21,7 @@
 #include "../mxfp8/group_quantize_mxfp8.cuh"
 #include "../mxfp8/quantize_mxfp8.cuh"
 #include "../nvfp4/group_quantize_transpose_nvfp4.cuh"
+#include "../nvfp4/quantize_4over6_nvfp4.cuh"
 #include "../nvfp4/quantize_transpose_nvfp4.cuh"
 
 namespace transformer_engine {
@@ -122,7 +123,15 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
                                   (cols % 32 == 0) && output_tensor->has_data();
 
       // Launch NVFP4 quantize kernel
-      if (use_optimized_kernel) {
+      if (use_4over6) {
+        if (quant_config_cpp.nvfp4_2d_quantization) {
+          nvfp4::quantize_4over6</*use_2d_quantization=*/true>(
+              *input_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
+        } else {
+          nvfp4::quantize_4over6</*use_2d_quantization=*/false>(
+              *input_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
+        }
+      } else if (use_optimized_kernel) {
         if (quant_config_cpp.nvfp4_2d_quantization) {
           nvfp4::quantize_transpose</*use_2d_quantization=*/true>(
               *input_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
@@ -145,10 +154,6 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
             /*rng_state=*/quant_config_cpp.rng_state,
             /*use_2d_quantization=*/quant_config_cpp.nvfp4_2d_quantization,
             /*row_scaled_nvfp4=*/row_scaled_nvfp4,
-            /*use_4over6=*/use_4over6,
-            /*nvfp4_e4m3_max=*/quant_config_cpp.nvfp4_e4m3_max,
-            /*nvfp4_4over6_err_mode=*/quant_config_cpp.nvfp4_4over6_err_mode,
-            /*nvfp4_4over6_err_use_fast_math=*/quant_config_cpp.nvfp4_4over6_err_use_fast_math,
             /*noop_tensor=*/noop_tensor->data,
             /*stream=*/stream);
       }
@@ -279,7 +284,15 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
                                   (cols % 32 == 0) && output_tensor->has_data();
 
       // Launch NVFP4 quantize kernel
-      if (use_optimized_kernel) {
+      if (use_4over6) {
+        if (quant_config_cpp.nvfp4_2d_quantization) {
+          nvfp4::quantize_4over6</*use_2d_quantization=*/true>(
+              *grad_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
+        } else {
+          nvfp4::quantize_4over6</*use_2d_quantization=*/false>(
+              *grad_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
+        }
+      } else if (use_optimized_kernel) {
         if (quant_config_cpp.nvfp4_2d_quantization) {
           nvfp4::quantize_transpose</*use_2d_quantization=*/true>(
               *grad_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
@@ -302,10 +315,6 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
             /*rng_state=*/quant_config_cpp.rng_state,
             /*use_2d_quantization=*/quant_config_cpp.nvfp4_2d_quantization,
             /*row_scaled_nvfp4=*/false,
-            /*use_4over6=*/use_4over6,
-            /*nvfp4_e4m3_max=*/quant_config_cpp.nvfp4_e4m3_max,
-            /*nvfp4_4over6_err_mode=*/quant_config_cpp.nvfp4_4over6_err_mode,
-            /*nvfp4_4over6_err_use_fast_math=*/quant_config_cpp.nvfp4_4over6_err_use_fast_math,
             /*noop_tensor=*/noop_tensor->data,
             /*stream=*/stream);
       }
