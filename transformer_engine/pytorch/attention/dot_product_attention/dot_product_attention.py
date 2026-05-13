@@ -1435,15 +1435,18 @@ class DotProductAttention(TransformerEngineBaseModule):
             if score_mod is None:
                 assert score_mod_bprop is None, "score_mod_bprop requires score_mod!"
                 assert score_mod_tensors is None, "score_mod_tensors requires score_mod!"
-                assert score_mod_bprop_tensors is None, "score_mod_bprop_tensors requires score_mod!"
+                assert (
+                    score_mod_bprop_tensors is None
+                ), "score_mod_bprop_tensors requires score_mod!"
             else:
                 assert callable(score_mod), "score_mod must be callable!"
-                assert (
-                    score_mod_bprop is None or callable(score_mod_bprop)
+                assert score_mod_bprop is None or callable(
+                    score_mod_bprop
                 ), "score_mod_bprop must be callable when provided!"
-                assert (
-                    query_layer.dtype in [torch.float16, torch.bfloat16]
-                ), "score_mod only supports FP16 and BF16 tensors!"
+                assert query_layer.dtype in [
+                    torch.float16,
+                    torch.bfloat16,
+                ], "score_mod only supports FP16 and BF16 tensors!"
                 assert (
                     key_layer.dtype == query_layer.dtype and value_layer.dtype == query_layer.dtype
                 ), "score_mod requires Q, K and V tensors to have the same dtype!"
@@ -1452,24 +1455,21 @@ class DotProductAttention(TransformerEngineBaseModule):
                     and type(key_layer) is torch.Tensor
                     and type(value_layer) is torch.Tensor
                 ), "score_mod only supports unquantized torch.Tensor Q, K and V inputs!"
-                assert (
-                    not self.fp8
-                ), "score_mod is not supported with FP8 DotProductAttention!"
+                assert not self.fp8, "score_mod is not supported with FP8 DotProductAttention!"
                 assert not fp8_output, "score_mod is not supported with fp8_output!"
-                assert (
-                    not context_parallel
-                ), "score_mod is not supported with context parallelism!"
+                assert not context_parallel, "score_mod is not supported with context parallelism!"
                 assert qkv_format != "thd", "score_mod is not supported with qkv_format='thd'!"
                 assert (
                     not user_supplied_seqlens
                 ), "score_mod is mutually exclusive with explicit sequence length metadata!"
                 assert not pad_between_seqs, "score_mod is not supported with pad_between_seqs!"
-                assert attention_mask is None, "score_mod is mutually exclusive with attention_mask!"
                 assert (
-                    attn_mask_type == "no_mask"
-                ), "score_mod requires attn_mask_type='no_mask'!"
-                assert (
-                    window_size is None or window_size == (-1, -1)
+                    attention_mask is None
+                ), "score_mod is mutually exclusive with attention_mask!"
+                assert attn_mask_type == "no_mask", "score_mod requires attn_mask_type='no_mask'!"
+                assert window_size is None or window_size == (
+                    -1,
+                    -1,
                 ), "score_mod is mutually exclusive with sliding window attention!"
                 assert (
                     core_attention_bias_type == "no_bias" and core_attention_bias is None
@@ -1491,13 +1491,12 @@ class DotProductAttention(TransformerEngineBaseModule):
                     not is_graph_capturing()
                 ), "score_mod is not supported with CUDA graph capture!"
                 assert num_splits == 1, "score_mod is not supported with num_splits != 1!"
-                assert (
-                    q_format in ["sbhd", "bshd"] and kv_format in ["sbhd", "bshd"]
-                ), "score_mod only supports SBHD/BSHD QKV formats!"
+                assert q_format in ["sbhd", "bshd"] and kv_format in [
+                    "sbhd",
+                    "bshd",
+                ], "score_mod only supports SBHD/BSHD QKV formats!"
                 if score_mod_tensors is not None:
-                    assert isinstance(
-                        score_mod_tensors, dict
-                    ), "score_mod_tensors must be a dict!"
+                    assert isinstance(score_mod_tensors, dict), "score_mod_tensors must be a dict!"
                     assert all(
                         isinstance(k, str) and isinstance(v, torch.Tensor)
                         for k, v in score_mod_tensors.items()

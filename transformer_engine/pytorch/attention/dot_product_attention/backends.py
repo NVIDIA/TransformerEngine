@@ -2740,16 +2740,10 @@ class FusedAttention(torch.nn.Module):
                         )
 
         if score_mod is not None:
-            assert (
-                not context_parallel
-            ), "score_mod is not supported with context parallelism!"
-            assert (
-                not fp8
-            ), "score_mod is not supported with FP8 FusedAttention!"
+            assert not context_parallel, "score_mod is not supported with context parallelism!"
+            assert not fp8, "score_mod is not supported with FP8 FusedAttention!"
             assert not fp8_output, "score_mod is not supported with fp8_output!"
-            assert (
-                not self.return_max_logit
-            ), "score_mod is not supported with return_max_logit!"
+            assert not self.return_max_logit, "score_mod is not supported with return_max_logit!"
             assert (
                 type(query_layer) is torch.Tensor
                 and type(key_layer) is torch.Tensor
