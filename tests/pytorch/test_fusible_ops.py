@@ -1904,6 +1904,7 @@ class TestBasicOps:
             quantize_forward=False,
             quantize_backward=False,
             glu_interleave_size=32,
+            glu_linear_offset=1.0,
         )
 
     @pytest.mark.parametrize("scale", (1, 0, -2.5, 3.5))
@@ -2578,6 +2579,7 @@ class TestBasicOps:
             glu_interleave_size=32,
             input_requires_grad=True,
             scales_requires_grad=True,
+            glu_linear_offset=1.0,
         )
 
 
@@ -3595,6 +3597,13 @@ class TestSequentialModules:
         activation: str,
     ) -> None:
         """GroupedLinear + ScaledSwiGLU / ScaledClampedQGeGLU + GroupedLinear"""
+        if os.environ.get("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0") == "0" and (
+            single_grouped_weight or single_grouped_bias
+        ):
+            pytest.skip(
+                "single_grouped_weight/single_grouped_bias requires"
+                " NVTE_GROUPED_LINEAR_SINGLE_PARAM=1"
+            )
 
         # Split sizes
         split_sizes = [split_alignment * (i) for i in range(group_size)]
