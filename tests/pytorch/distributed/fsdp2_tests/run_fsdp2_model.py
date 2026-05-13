@@ -380,19 +380,6 @@ def test_distributed(recipe_name, fp8_init, sharding_dims, layer_type):
             "data and scale_inv into a single buffer in pre_all_gather, split in post."
         )
 
-    if recipe_name == "Float8BlockScaling" and fp8_init:
-        pytest.xfail(
-            "Float8BlockScaling + fp8_init: scale inverse padding is not handled "
-            "correctly during FSDP2 all-gather slice ops."
-        )
-    if recipe_name == "NVFP4BlockScaling" and fp8_init and layer_type == "TransformerLayer":
-        pytest.xfail(
-            "NVFP4BlockScaling + fp8_init + TransformerLayer: "
-            "_check_fp8_fsdp2_allgather numerical error compounds across multiple "
-            "linear layers in the transformer block (up to ~1e-2 max abs diff). "
-            "LayerNormLinear passes with relaxed tolerances. "
-            "NVFP4 + FSDP2 training is validated by run_fsdp2_fused_adam.py."
-        )
     torch.manual_seed(42)
     torch.cuda.manual_seed(42)
 

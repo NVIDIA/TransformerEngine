@@ -91,3 +91,60 @@ try:
     torch._dynamo.config.error_on_nested_jit_trace = False
 except AttributeError:
     pass  # error_on_nested_jit_trace was added in PyTorch 2.2.0
+
+
+# Allow QuantizedTensor subclasses (and the metadata they pickle) to
+# round-trip through ``torch.load(weights_only=True)``. DCP async-staging
+# writes a torch.save / torch.load step internally, so without this the
+# default safe-unpickler rejects our custom classes.
+try:
+    from torch.serialization import add_safe_globals
+    from transformer_engine_torch import DType as _TE_DType
+
+    add_safe_globals(
+        [
+            # Wrapper subclasses
+            QuantizedTensor,
+            Float8Tensor,
+            MXFP8Tensor,
+            NVFP4Tensor,
+            Float8BlockwiseQTensor,
+            # Storage mixins (used during pickling of internal-only tensors)
+            QuantizedTensorStorage,
+            Float8TensorStorage,
+            MXFP8TensorStorage,
+            NVFP4TensorStorage,
+            Float8BlockwiseQTensorStorage,
+            # Quantizer types embedded in metadata
+            Quantizer,
+            Float8Quantizer,
+            Float8CurrentScalingQuantizer,
+            MXFP8Quantizer,
+            NVFP4Quantizer,
+            Float8BlockQuantizer,
+            # __reduce_ex__ constructors (bound classmethods).
+            Float8Tensor._make_in_reduce_ex,
+            MXFP8Tensor._make_in_reduce_ex,
+            NVFP4Tensor._make_in_reduce_ex,
+            Float8BlockwiseQTensor._make_in_reduce_ex,
+            # The pickle stream produced by ``__reduce_ex__`` references
+            # the pybind11 enum ``transformer_engine_torch.DType`` (e.g.
+            # the ``fp8_dtype`` argument) and uses ``builtins.getattr`` to
+            # resolve both the enum members and the bound-classmethod
+            # ``_make_in_reduce_ex`` callables above. Both must be
+            # allow-listed for ``torch.load(weights_only=True)`` (used
+            # internally by DCP async-staging) to accept the stream.
+            _TE_DType,
+            getattr,
+        ]
+    )
+except (ImportError, AttributeError):
+    import warnings as _warnings
+    _warnings.warn(
+        "transformer_engine: torch.serialization.add_safe_globals is "
+        "unavailable on this PyTorch version (added in 2.4). DCP "
+        "checkpointing of QuantizedTensor weights with FSDP2 will not "
+        "work; upgrade to PyTorch >= 2.4 to enable it.",
+        RuntimeWarning,
+        stacklevel=2,
+    )

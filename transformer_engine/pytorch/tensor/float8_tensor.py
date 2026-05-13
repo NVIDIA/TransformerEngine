@@ -1007,16 +1007,14 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         )
 
     def __reduce_ex__(self, protocol: int) -> tuple:
-        """Custom pickling to remove references to FP8 metadata objects
+        """Custom pickling to remove references to FP8 metadata objects.
 
-        CPU Float8Tensors are serialized as dequantized plain tensors
-        for compatibility with torch.load(weights_only=True), which is
-        used by DCP async save staging.
+        Always serializes the underlying FP8 buffers (no dequantization
+        fallback for CPU tensors) so that DCP async-staging round-trips
+        preserve bitwise-identical data. ``Float8Tensor`` is registered
+        with ``torch.serialization.add_safe_globals`` to keep
+        ``torch.load(weights_only=True)`` compatibility.
         """
-        data_is_cpu = self._data is not None and self._data.is_cpu
-        transpose_is_cpu = self._transpose is not None and self._transpose.is_cpu
-        if data_is_cpu or transpose_is_cpu:
-            return self.dequantize(dtype=self.dtype).__reduce_ex__(protocol)
         return (
             Float8Tensor._make_in_reduce_ex,
             (self._data, self._fp8_dtype, self._scale_inv, self.dtype, self.shape),
@@ -1177,3 +1175,4 @@ class _ReshapeFunc(torch.autograd.Function):
     ) -> Tuple[Optional[torch.Tensor], ...]:
         # pylint: disable=missing-function-docstring
         return grad.reshape(ctx.shape), None
+

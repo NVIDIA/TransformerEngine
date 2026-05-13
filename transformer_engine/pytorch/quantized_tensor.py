@@ -529,9 +529,26 @@ class QuantizedTensor(torch.Tensor):
         # pylint: disable=missing-function-docstring
         return self.dequantize(dtype=torch.float16)
 
-    def cpu(self, memory_format=torch.preserve_format) -> torch.Tensor:
+    def cpu(self, memory_format=torch.preserve_format) -> QuantizedTensor:
+        """Move tensor to CPU while preserving the QuantizedTensor type.
+
+        Routes through ``aten._to_copy.default`` so the subclass-preserving
+        handler in ``__torch_dispatch__`` runs (rather than dequantizing).
+
+        """
         # pylint: disable=missing-function-docstring
-        return self.dequantize().cpu(memory_format=memory_format)
+        return self.to(device=torch.device("cpu"), memory_format=memory_format)
+
+    def untyped_storage(self) -> torch.UntypedStorage:
+        """Return an empty UntypedStorage on the tensor's device.
+
+        ``QuantizedTensor`` is a ``_make_wrapper_subclass`` and has no real
+        backing storage of its own; the actual bytes live in the inner
+        buffers (e.g. ``_rowwise_data`` / ``_columnwise_data``) which are
+        an implementation detail of the quantization scheme. Need to define
+        this method to avoid DCP staging errors with FSDP2.
+        """
+        return torch.UntypedStorage(0, device=self.device)
 
     def expand_as(self, other: torch.Tensor) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
@@ -584,6 +601,34 @@ class QuantizedTensor(torch.Tensor):
                     src = src.dequantize(dtype=dtype)
                 dst.copy_(src)
             return None
+
+        # _to_copy op (used by .to(device=...), .cpu(), DCP staging).
+        # Preserve the QuantizedTensor subclass and move all internal
+        # buffers (data, scales, etc.) to the requested device.
+        if func == torch.ops.aten._to_copy.default:
+            tensor = args[0]
+            kw = dict(kwargs) if kwargs else {}
+            target_device = kw.get("device", tensor.device) or tensor.device
+            target_device = torch.device(target_device)
+            target_dtype = kw.get("dtype", tensor.dtype) or tensor.dtype
+            pin_memory = bool(kw.get("pin_memory", False))
+            non_blocking = bool(kw.get("non_blocking", False))
+
+            new_metadata = {}
+            for key, value in tensor.get_metadata().items():
+                if isinstance(value, torch.Tensor):
+                    value = value.to(device=target_device, non_blocking=non_blocking)
+                    if pin_memory and target_device.type == "cpu":
+                        value = value.pin_memory()
+                new_metadata[key] = value
+            new_metadata["fake_dtype"] = target_dtype
+            return type(tensor)(
+                shape=tensor.shape,
+                dtype=target_dtype,
+                requires_grad=tensor.requires_grad,
+                device=target_device,
+                **new_metadata,
+            )
 
         # View op
         if func == torch.ops.aten.view.default:
@@ -725,14 +770,24 @@ class QuantizedTensor(torch.Tensor):
         """Create new quantized tensor
 
         By default, new tensor has the same attributes and underlying
-        data. This function is intended to create view of tensors.
+        data. This function is intended to create a view of ``tensor``,
+        so the new tensor lives on the same device. To move quantized
+        data across devices use ``.to(device=...)`` / ``.cpu()`` /
+        ``aten._to_copy.default`` instead, which actually copies the
+        inner buffers.
 
         """
         shape = shape if shape is not None else tensor.shape
         dtype = dtype if dtype is not None else tensor.dtype
         kwargs = tensor.get_metadata()
         kwargs["fake_dtype"] = dtype
-        return cls(shape=shape, dtype=dtype, requires_grad=requires_grad, **kwargs)
+        return cls(
+            shape=shape,
+            dtype=dtype,
+            requires_grad=requires_grad,
+            device=tensor.device,
+            **kwargs,
+        )
 
     def to_dtype(self, dtype: torch.dtype) -> QuantizedTensor:
         """Create `QuantizedTensor` with given nominal dtype
