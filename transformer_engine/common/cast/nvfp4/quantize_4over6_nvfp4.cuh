@@ -160,6 +160,30 @@ __device__ __forceinline__ float compute_4over6_error(const float diff) {
   }
 }
 
+template <typename FourOverSixConfig, int E4M3_MAX, int SHIFT>
+__device__ __forceinline__ void accumulate_4over6_dequant_error(const uint32_t dequant_bits,
+                                                                const float x, const float sf,
+                                                                const float global_amax,
+                                                                float *err) {
+  constexpr float fp4_max = detail::TypeExtrema<fp4e2m1>::max;  // 6.0f
+  static_assert(E4M3_MAX == 448 || E4M3_MAX == 256, "Unsupported NVFP4 E4M3 max.");
+  constexpr float fp8_4over6_max = static_cast<float>(E4M3_MAX);
+  constexpr float err_denom = fp4_max * fp8_4over6_max;
+  const uint16_t half_bits = (dequant_bits >> SHIFT) & 0xFFFF;
+
+  if constexpr (FourOverSixConfig::err_use_fast_math) {
+    const float val = __half2float(__ushort_as_half(half_bits)) * sf * global_amax / err_denom;
+    const float diff = val - x;
+    *err += compute_4over6_error<FourOverSixConfig::err_mode>(diff);
+  } else {
+    const float val =
+        __fdiv_rn(__fmul_rn(__fmul_rn(__half2float(__ushort_as_half(half_bits)), sf), global_amax),
+                  err_denom);
+    const float diff = __fsub_rn(val, x);
+    *err = __fadd_rn(*err, compute_4over6_error_rn<FourOverSixConfig::err_mode>(diff));
+  }
+}
+
 template <typename FourOverSixConfig, int E4M3_MAX>
 __device__ __forceinline__ uint32_t cvt_fp32_to_fp4_8x_with_error_rn(
     const float (&x)[8], const float block_scale_inverse, const nvfp4_scale_t S_dec_b_fp8,
@@ -174,12 +198,6 @@ __device__ __forceinline__ uint32_t cvt_fp32_to_fp4_8x_with_error_rn(
 
   constexpr bool is_blackwell = ARCH_BLACKWELL_FAMILY;
   if constexpr (is_blackwell) {
-    float x_scaled[8];
-#pragma unroll
-    for (int i = 0; i < 8; ++i) {
-      x_scaled[i] = __fmul_rn(x[i], block_scale_inverse);
-    }
-
     asm volatile(
         "{\n"
         ".reg .b8 byte0, byte1, byte2, byte3;\n"
@@ -195,84 +213,28 @@ __device__ __forceinline__ uint32_t cvt_fp32_to_fp4_8x_with_error_rn(
         "}"
         : "=r"(out), "=r"(out_dequant_1), "=r"(out_dequant_2), "=r"(out_dequant_3),
           "=r"(out_dequant_4)
-        : "f"(x_scaled[0]), "f"(x_scaled[1]), "f"(x_scaled[2]), "f"(x_scaled[3]), "f"(x_scaled[4]),
-          "f"(x_scaled[5]), "f"(x_scaled[6]), "f"(x_scaled[7]));
+        : "f"(__fmul_rn(x[0], block_scale_inverse)), "f"(__fmul_rn(x[1], block_scale_inverse)),
+          "f"(__fmul_rn(x[2], block_scale_inverse)), "f"(__fmul_rn(x[3], block_scale_inverse)),
+          "f"(__fmul_rn(x[4], block_scale_inverse)), "f"(__fmul_rn(x[5], block_scale_inverse)),
+          "f"(__fmul_rn(x[6], block_scale_inverse)), "f"(__fmul_rn(x[7], block_scale_inverse)));
 
-    const uint16_t out_dequant_1_hi = (out_dequant_1 >> 16) & 0xFFFF;
-    const uint16_t out_dequant_1_lo = out_dequant_1 & 0xFFFF;
-    const uint16_t out_dequant_2_hi = (out_dequant_2 >> 16) & 0xFFFF;
-    const uint16_t out_dequant_2_lo = out_dequant_2 & 0xFFFF;
-    const uint16_t out_dequant_3_hi = (out_dequant_3 >> 16) & 0xFFFF;
-    const uint16_t out_dequant_3_lo = out_dequant_3 & 0xFFFF;
-    const uint16_t out_dequant_4_hi = (out_dequant_4 >> 16) & 0xFFFF;
-    const uint16_t out_dequant_4_lo = out_dequant_4 & 0xFFFF;
-
-    constexpr float fp4_max = detail::TypeExtrema<fp4e2m1>::max;  // 6.0f
-    static_assert(E4M3_MAX == 448 || E4M3_MAX == 256, "Unsupported NVFP4 E4M3 max.");
-    constexpr float fp8_4over6_max = static_cast<float>(E4M3_MAX);
-    constexpr float err_denom = fp4_max * fp8_4over6_max;
     const float sf = static_cast<float>(S_dec_b_fp8);
-    if constexpr (FourOverSixConfig::err_use_fast_math) {
-      const float dequant[8] = {
-          __half2float(__ushort_as_half(out_dequant_1_lo)),
-          __half2float(__ushort_as_half(out_dequant_1_hi)),
-          __half2float(__ushort_as_half(out_dequant_2_lo)),
-          __half2float(__ushort_as_half(out_dequant_2_hi)),
-          __half2float(__ushort_as_half(out_dequant_3_lo)),
-          __half2float(__ushort_as_half(out_dequant_3_hi)),
-          __half2float(__ushort_as_half(out_dequant_4_lo)),
-          __half2float(__ushort_as_half(out_dequant_4_hi)),
-      };
-#pragma unroll
-      for (int i = 0; i < 8; ++i) {
-        const float val = dequant[i] * sf * global_amax / err_denom;
-        const float diff = val - x[i];
-        *err += compute_4over6_error<FourOverSixConfig::err_mode>(diff);
-      }
-    } else {
-      const float val0 = __fdiv_rn(
-          __fmul_rn(__fmul_rn(__half2float(__ushort_as_half(out_dequant_1_lo)), sf), global_amax),
-          err_denom);
-      const float val1 = __fdiv_rn(
-          __fmul_rn(__fmul_rn(__half2float(__ushort_as_half(out_dequant_1_hi)), sf), global_amax),
-          err_denom);
-      const float val2 = __fdiv_rn(
-          __fmul_rn(__fmul_rn(__half2float(__ushort_as_half(out_dequant_2_lo)), sf), global_amax),
-          err_denom);
-      const float val3 = __fdiv_rn(
-          __fmul_rn(__fmul_rn(__half2float(__ushort_as_half(out_dequant_2_hi)), sf), global_amax),
-          err_denom);
-      const float val4 = __fdiv_rn(
-          __fmul_rn(__fmul_rn(__half2float(__ushort_as_half(out_dequant_3_lo)), sf), global_amax),
-          err_denom);
-      const float val5 = __fdiv_rn(
-          __fmul_rn(__fmul_rn(__half2float(__ushort_as_half(out_dequant_3_hi)), sf), global_amax),
-          err_denom);
-      const float val6 = __fdiv_rn(
-          __fmul_rn(__fmul_rn(__half2float(__ushort_as_half(out_dequant_4_lo)), sf), global_amax),
-          err_denom);
-      const float val7 = __fdiv_rn(
-          __fmul_rn(__fmul_rn(__half2float(__ushort_as_half(out_dequant_4_hi)), sf), global_amax),
-          err_denom);
-
-      const float diff0 = __fsub_rn(val0, x[0]);
-      const float diff1 = __fsub_rn(val1, x[1]);
-      const float diff2 = __fsub_rn(val2, x[2]);
-      const float diff3 = __fsub_rn(val3, x[3]);
-      const float diff4 = __fsub_rn(val4, x[4]);
-      const float diff5 = __fsub_rn(val5, x[5]);
-      const float diff6 = __fsub_rn(val6, x[6]);
-      const float diff7 = __fsub_rn(val7, x[7]);
-
-      *err = __fadd_rn(*err, compute_4over6_error_rn<FourOverSixConfig::err_mode>(diff0));
-      *err = __fadd_rn(*err, compute_4over6_error_rn<FourOverSixConfig::err_mode>(diff1));
-      *err = __fadd_rn(*err, compute_4over6_error_rn<FourOverSixConfig::err_mode>(diff2));
-      *err = __fadd_rn(*err, compute_4over6_error_rn<FourOverSixConfig::err_mode>(diff3));
-      *err = __fadd_rn(*err, compute_4over6_error_rn<FourOverSixConfig::err_mode>(diff4));
-      *err = __fadd_rn(*err, compute_4over6_error_rn<FourOverSixConfig::err_mode>(diff5));
-      *err = __fadd_rn(*err, compute_4over6_error_rn<FourOverSixConfig::err_mode>(diff6));
-      *err = __fadd_rn(*err, compute_4over6_error_rn<FourOverSixConfig::err_mode>(diff7));
-    }
+    accumulate_4over6_dequant_error<FourOverSixConfig, E4M3_MAX, 0>(out_dequant_1, x[0], sf,
+                                                                    global_amax, err);
+    accumulate_4over6_dequant_error<FourOverSixConfig, E4M3_MAX, 16>(out_dequant_1, x[1], sf,
+                                                                     global_amax, err);
+    accumulate_4over6_dequant_error<FourOverSixConfig, E4M3_MAX, 0>(out_dequant_2, x[2], sf,
+                                                                    global_amax, err);
+    accumulate_4over6_dequant_error<FourOverSixConfig, E4M3_MAX, 16>(out_dequant_2, x[3], sf,
+                                                                     global_amax, err);
+    accumulate_4over6_dequant_error<FourOverSixConfig, E4M3_MAX, 0>(out_dequant_3, x[4], sf,
+                                                                    global_amax, err);
+    accumulate_4over6_dequant_error<FourOverSixConfig, E4M3_MAX, 16>(out_dequant_3, x[5], sf,
+                                                                     global_amax, err);
+    accumulate_4over6_dequant_error<FourOverSixConfig, E4M3_MAX, 0>(out_dequant_4, x[6], sf,
+                                                                    global_amax, err);
+    accumulate_4over6_dequant_error<FourOverSixConfig, E4M3_MAX, 16>(out_dequant_4, x[7], sf,
+                                                                     global_amax, err);
   } else {
     NVTE_DEVICE_ERROR(
         "FP4 cvt PTX instructions are architecture-specific. "
@@ -442,10 +404,10 @@ __device__ __forceinline__ void load_4over6_vec_index_halves_16x(const vec_type 
   }
 }
 
-template <typename FourOverSixConfig, int E4M3_MAX>
+template <typename FourOverSixConfig, int E4M3_MAX, typename input_type>
 __device__ __forceinline__ void quantize_4over6_candidates_16x(
-    const float (&x)[16], const QuantizationScales4Over6 &scaling_factors, const float global_amax,
-    QuantizationCandidates4Over6 &candidates) {
+    const input_type (&x)[16], const QuantizationScales4Over6 &scaling_factors,
+    const float global_amax, QuantizationCandidates4Over6 &candidates) {
   float first_half[8];
   float second_half[8];
   load_4over6_contiguous_halves_16x(x, first_half, second_half);
@@ -490,9 +452,9 @@ __device__ __forceinline__ bool record_and_select_4over6_2d_block(
 }
 
 template <typename FourOverSixConfig, int E4M3_MAX, size_t BLOCK_DIM, size_t BLOCKS_PER_TILE_Y,
-          size_t BLOCKS_PER_TILE_X>
+          size_t BLOCKS_PER_TILE_X, typename input_type>
 __device__ __forceinline__ bool quantize_and_select_4over6_2d_block_16x(
-    const float (&x)[16], const float block_amax, const float global_encode_scale,
+    const input_type (&x)[16], const float block_amax, const float global_encode_scale,
     const float global_decode_scale, const float global_amax, const size_t block_in_tile_y,
     const size_t block_in_tile_x, const size_t participant_idx,
     QuantizationScratch4Over6<BLOCK_DIM, BLOCKS_PER_TILE_Y, BLOCKS_PER_TILE_X> &scratch,

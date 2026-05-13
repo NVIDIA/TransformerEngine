@@ -1099,25 +1099,25 @@ __global__ void __launch_bounds__(THREADS_NUM)
         }
 
         if constexpr (FourOverSixConfig::enabled) {
-          float x_4over6[SCALE_DIM];
-#pragma unroll
-          for (int i = 0; i < SCALE_DIM; ++i) {
-            if constexpr (NO_ACTIVATIONS_NOT_FP32_INPUT) {
-              x_4over6[i] = static_cast<float>(in_colwise_IType[i]);
-            } else {
-              x_4over6[i] = in_compute_colwise[i];
-            }
-          }
-
           const size_t block_col = threadIdx.x % BLOCK_DIM;
           QuantizationCandidates4Over6 candidates;
           nvfp4_scale_t S_dec_b_fp8;
-          const bool pick_map4 =
-              quantize_and_select_4over6_2d_block_16x<FourOverSixConfig, E4M3_MAX, BLOCK_DIM,
-                                                      BLOCKS_PER_TILE_Y, BLOCKS_PER_TILE_X>(
-                  x_4over6, block_amax, S_enc_colwise, S_dec_colwise, global_amax_colwise,
-                  block_in_tile_y, block_in_tile_x, block_col, *four_over_six_scratch, S_dec_b_fp8,
-                  candidates);
+          bool pick_map4;
+          if constexpr (NO_ACTIVATIONS_NOT_FP32_INPUT) {
+            pick_map4 =
+                quantize_and_select_4over6_2d_block_16x<FourOverSixConfig, E4M3_MAX, BLOCK_DIM,
+                                                        BLOCKS_PER_TILE_Y, BLOCKS_PER_TILE_X>(
+                    in_colwise_IType, block_amax, S_enc_colwise, S_dec_colwise, global_amax_colwise,
+                    block_in_tile_y, block_in_tile_x, block_col, *four_over_six_scratch,
+                    S_dec_b_fp8, candidates);
+          } else {
+            pick_map4 =
+                quantize_and_select_4over6_2d_block_16x<FourOverSixConfig, E4M3_MAX, BLOCK_DIM,
+                                                        BLOCKS_PER_TILE_Y, BLOCKS_PER_TILE_X>(
+                    in_compute_colwise, block_amax, S_enc_colwise, S_dec_colwise,
+                    global_amax_colwise, block_in_tile_y, block_in_tile_x, block_col,
+                    *four_over_six_scratch, S_dec_b_fp8, candidates);
+          }
 
           const size_t scale_idx_sh =
               tid_Y_t * SCALES_PER_CHUNK_Y + stage * ITERATIONS_TRANSPOSE + it;
