@@ -1,0 +1,24 @@
+# IMPORTANT:
+# This file is ONLY used to subscribe for notifications for PRs
+# related to a specific file path. Approvals from people in this
+# file are not required for merges.
+
+# C API
+/transformer_engine/common/include/ @ptrendx
+
+# TE/JAX
+/transformer_engine/jax/ @jberchtold-nvidia
+
+# TE/PyTorch
+/transformer_engine/pytorch/ @ksivaman
+
+# te.ops API
+/transformer_engine/pytorch/ops/ @timmoon10
+
+# Quantization kernels
+/transformer_engine/common/cast/ @Oleg-Goncharov
+
+# Attention
+/transformer_engine/pytorch/attention/ @cyanguwa
+/transformer_engine/common/fused_attn/ @cyanguwa
+/transformer_engine/jax/cpp_extensions/attention.py @KshitijLakhani
