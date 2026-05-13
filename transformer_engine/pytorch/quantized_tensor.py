@@ -771,11 +771,6 @@ class QuantizedTensor(torch.Tensor):
 
         By default, new tensor has the same attributes and underlying
         data. This function is intended to create a view of ``tensor``,
-        so the new tensor lives on the same device. To move quantized
-        data across devices use ``.to(device=...)`` / ``.cpu()`` /
-        ``aten._to_copy.default`` instead, which actually copies the
-        inner buffers.
-
         """
         shape = shape if shape is not None else tensor.shape
         dtype = dtype if dtype is not None else tensor.dtype
