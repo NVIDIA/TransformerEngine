@@ -165,7 +165,7 @@ class NVFP4Quantizer(Quantizer):
 
     def __getstate__(self):
         """Exclude unpicklable process group from serialized state."""
-        state = self.__dict__.copy()
+        state = super().__getstate__()
         state["amax_reduction_group"] = None
         return state
 
@@ -820,46 +820,10 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
         # Default case
         return super().__torch_dispatch__(func, types, args, kwargs)
 
-    @classmethod
-    def _make_in_reduce_ex(
-        cls,
-        shape: torch.Size,
-        rowwise_data: torch.Tensor,
-        rowwise_scale_inv: torch.Tensor,
-        columnwise_data: torch.Tensor,
-        columnwise_scale_inv: torch.Tensor,
-        amax_rowwise: torch.Tensor,
-        amax_columnwise: torch.Tensor,
-        fp4_dtype: TE_DType,
-        dtype: torch.dtype,
-        quantizer: Quantizer,
-        with_gemm_swizzled_scales: bool = False,
-    ) -> NVFP4Tensor:
-        """Build NVFP4Tensor, for use in __reduce__
-
-        __reduce_ex__ assumes object constructor has positional
-        arguments.
-
-        """
-        return NVFP4Tensor(
-            shape=shape,
-            dtype=dtype,
-            fp4_dtype=fp4_dtype,
-            rowwise_data=rowwise_data,
-            rowwise_scale_inv=rowwise_scale_inv,
-            columnwise_data=columnwise_data,
-            columnwise_scale_inv=columnwise_scale_inv,
-            amax_rowwise=amax_rowwise,
-            amax_columnwise=amax_columnwise,
-            quantizer=quantizer,
-            requires_grad=False,
-            with_gemm_swizzled_scales=with_gemm_swizzled_scales,
-        )
-
     def __reduce_ex__(self, protocol: int) -> tuple:
         """Custom pickling"""
         return (
-            NVFP4Tensor._make_in_reduce_ex,
+            _make_nvfp4_tensor_in_reduce_ex,
             (
                 self.shape,
                 self._rowwise_data,
@@ -868,7 +832,7 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
                 self._columnwise_scale_inv,
                 self._amax_rowwise,
                 self._amax_columnwise,
-                self._fp4_dtype,
+                int(self._fp4_dtype),
                 self.dtype,
                 self._quantizer,
                 self._with_gemm_swizzled_scales,
@@ -963,6 +927,43 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
         if self._columnwise_data is not None:
             return self._columnwise_data.is_cuda
         raise RuntimeError("NVFP4Tensor has no data!")
+
+
+def _make_nvfp4_tensor_in_reduce_ex(
+    shape: torch.Size,
+    rowwise_data: torch.Tensor,
+    rowwise_scale_inv: torch.Tensor,
+    columnwise_data: torch.Tensor,
+    columnwise_scale_inv: torch.Tensor,
+    amax_rowwise: torch.Tensor,
+    amax_columnwise: torch.Tensor,
+    fp4_dtype: int,
+    dtype: torch.dtype,
+    quantizer: Quantizer,
+    with_gemm_swizzled_scales: bool = False,
+) -> NVFP4Tensor:
+    """Reconstruct an ``NVFP4Tensor`` from its ``__reduce_ex__`` payload.
+
+    Defined at module level so the pickle stream uses a single
+    ``GLOBAL`` opcode rather than the ``(getattr, (cls, name))``
+    reduction that bound classmethods produce. ``fp4_dtype`` is passed
+    as an ``int`` and converted back to the pybind11 ``TE_DType`` enum
+    here.
+    """
+    return NVFP4Tensor(
+        shape=shape,
+        dtype=dtype,
+        fp4_dtype=TE_DType(fp4_dtype),
+        rowwise_data=rowwise_data,
+        rowwise_scale_inv=rowwise_scale_inv,
+        columnwise_data=columnwise_data,
+        columnwise_scale_inv=columnwise_scale_inv,
+        amax_rowwise=amax_rowwise,
+        amax_columnwise=amax_columnwise,
+        quantizer=quantizer,
+        requires_grad=False,
+        with_gemm_swizzled_scales=with_gemm_swizzled_scales,
+    )
 
 
 class _ViewFunc(torch.autograd.Function):

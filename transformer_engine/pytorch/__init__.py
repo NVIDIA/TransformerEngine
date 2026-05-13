@@ -86,6 +86,18 @@ from transformer_engine.pytorch.tensor import Float8Tensor
 from transformer_engine.pytorch.tensor import MXFP8Tensor
 from transformer_engine.pytorch.tensor import Float8BlockwiseQTensor
 from transformer_engine.pytorch.tensor import NVFP4Tensor
+from transformer_engine.pytorch.tensor.float8_tensor import (
+    _make_float8_tensor_in_reduce_ex,
+)
+from transformer_engine.pytorch.tensor.mxfp8_tensor import (
+    _make_mxfp8_tensor_in_reduce_ex,
+)
+from transformer_engine.pytorch.tensor.nvfp4_tensor import (
+    _make_nvfp4_tensor_in_reduce_ex,
+)
+from transformer_engine.pytorch.tensor.float8_blockwise_tensor import (
+    _make_float8_blockwise_tensor_in_reduce_ex,
+)
 
 try:
     torch._dynamo.config.error_on_nested_jit_trace = False
@@ -97,9 +109,18 @@ except AttributeError:
 # round-trip through ``torch.load(weights_only=True)``. DCP async-staging
 # writes a torch.save / torch.load step internally, so without this the
 # default safe-unpickler rejects our custom classes.
+#
+# The ``_make_*_in_reduce_ex`` reconstructors are defined as module-level
+# functions (not classmethods) so they pickle as a single ``GLOBAL`` opcode
+# rather than a ``(getattr, (cls, name))`` reduction. Their ``fp8_dtype`` /
+# ``fp4_dtype`` arguments are passed as plain ``int`` values (converted back
+# to the pybind11 ``transformer_engine_torch.DType`` enum on reconstruction)
+# and ``Quantizer.__getstate__`` similarly serializes its embedded ``dtype``
+# as an ``int``. Together these keep the pickle stream free of pybind11-enum
+# reductions and bound-classmethod references, so we don't need to allow-list
+# ``builtins.getattr`` or the enum type itself for ``weights_only=True``.
 try:
     from torch.serialization import add_safe_globals
-    from transformer_engine_torch import DType as _TE_DType
 
     add_safe_globals(
         [
@@ -122,20 +143,11 @@ try:
             MXFP8Quantizer,
             NVFP4Quantizer,
             Float8BlockQuantizer,
-            # __reduce_ex__ constructors (bound classmethods).
-            Float8Tensor._make_in_reduce_ex,
-            MXFP8Tensor._make_in_reduce_ex,
-            NVFP4Tensor._make_in_reduce_ex,
-            Float8BlockwiseQTensor._make_in_reduce_ex,
-            # The pickle stream produced by ``__reduce_ex__`` references
-            # the pybind11 enum ``transformer_engine_torch.DType`` (e.g.
-            # the ``fp8_dtype`` argument) and uses ``builtins.getattr`` to
-            # resolve both the enum members and the bound-classmethod
-            # ``_make_in_reduce_ex`` callables above. Both must be
-            # allow-listed for ``torch.load(weights_only=True)`` (used
-            # internally by DCP async-staging) to accept the stream.
-            _TE_DType,
-            getattr,
+            # __reduce_ex__ reconstructors (module-level functions).
+            _make_float8_tensor_in_reduce_ex,
+            _make_mxfp8_tensor_in_reduce_ex,
+            _make_nvfp4_tensor_in_reduce_ex,
+            _make_float8_blockwise_tensor_in_reduce_ex,
         ]
     )
 except (ImportError, AttributeError):

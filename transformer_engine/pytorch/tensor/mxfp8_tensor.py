@@ -760,47 +760,16 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         out._quantizer.set_usage(rowwise=rowwise_usage, columnwise=columnwise_usage)
         return out, all_gather_outputs
 
-    @classmethod
-    def _make_in_reduce_ex(
-        cls,
-        rowwise_data: torch.Tensor,
-        rowwise_scale_inv: torch.Tensor,
-        columnwise_data: torch.Tensor,
-        columnwise_scale_inv: torch.Tensor,
-        fp8_dtype: TE_DType,
-        dtype: torch.dtype,
-        shape: torch.shape,
-        quantizer: Optional[Quantizer] = None,
-        with_gemm_swizzled_scales: bool = False,
-    ) -> MXFP8Tensor:
-        """Build MXFP8Tensor, for use in __reduce__
-
-        __reduce_ex__ assumes object constructor has positional
-        arguments.
-
-        """
-        return MXFP8Tensor(
-            rowwise_data=rowwise_data,
-            rowwise_scale_inv=rowwise_scale_inv,
-            fp8_dtype=fp8_dtype,
-            columnwise_data=columnwise_data,
-            columnwise_scale_inv=columnwise_scale_inv,
-            dtype=dtype,
-            shape=shape,
-            quantizer=quantizer,
-            with_gemm_swizzled_scales=with_gemm_swizzled_scales,
-        )
-
     def __reduce_ex__(self, protocol: int) -> tuple:
         """Custom pickling"""
         return (
-            MXFP8Tensor._make_in_reduce_ex,
+            _make_mxfp8_tensor_in_reduce_ex,
             (
                 self._rowwise_data,
                 self._rowwise_scale_inv,
                 self._columnwise_data,
                 self._columnwise_scale_inv,
-                self._fp8_dtype,
+                int(self._fp8_dtype),
                 self.dtype,
                 self.shape,
                 self._quantizer,
@@ -894,6 +863,38 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         if self._columnwise_data is not None:
             return self._columnwise_data.is_cuda
         raise RuntimeError("MXFP8Tensor has no data!")
+
+
+def _make_mxfp8_tensor_in_reduce_ex(
+    rowwise_data: torch.Tensor,
+    rowwise_scale_inv: torch.Tensor,
+    columnwise_data: torch.Tensor,
+    columnwise_scale_inv: torch.Tensor,
+    fp8_dtype: int,
+    dtype: torch.dtype,
+    shape: torch.Size,
+    quantizer: Optional[Quantizer] = None,
+    with_gemm_swizzled_scales: bool = False,
+) -> MXFP8Tensor:
+    """Reconstruct an ``MXFP8Tensor`` from its ``__reduce_ex__`` payload.
+
+    Defined at module level so the pickle stream uses a single
+    ``GLOBAL`` opcode rather than the ``(getattr, (cls, name))``
+    reduction that bound classmethods produce. ``fp8_dtype`` is passed
+    as an ``int`` and converted back to the pybind11 ``TE_DType`` enum
+    here.
+    """
+    return MXFP8Tensor(
+        rowwise_data=rowwise_data,
+        rowwise_scale_inv=rowwise_scale_inv,
+        fp8_dtype=TE_DType(fp8_dtype),
+        columnwise_data=columnwise_data,
+        columnwise_scale_inv=columnwise_scale_inv,
+        dtype=dtype,
+        shape=shape,
+        quantizer=quantizer,
+        with_gemm_swizzled_scales=with_gemm_swizzled_scales,
+    )
 
 
 class _ViewFunc(torch.autograd.Function):

@@ -473,49 +473,17 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
             return self
         raise ValueError("Float8BlockwiseQTensor does not support different memory formats!")
 
-    @classmethod
-    def _make_in_reduce_ex(
-        cls,
-        shape: torch.Size,
-        rowwise_data: torch.Tensor,
-        rowwise_scale_inv: torch.Tensor,
-        columnwise_data: torch.Tensor,
-        columnwise_scale_inv: torch.Tensor,
-        fp8_dtype: TE_DType,
-        dtype: torch.dtype,
-        quantizer: Quantizer,
-        is_2D_scaled: bool,
-        data_format: Any = None,  # pylint: disable=unused-argument
-    ) -> Float8BlockwiseQTensor:
-        """Build Float8BlockwiseQTensor, for use in __reduce__
-
-        __reduce_ex__ assumes object constructor has positional
-        arguments.
-
-        """
-        return Float8BlockwiseQTensor(
-            shape=shape,
-            rowwise_data=rowwise_data,
-            rowwise_scale_inv=rowwise_scale_inv,
-            fp8_dtype=fp8_dtype,
-            columnwise_data=columnwise_data,
-            columnwise_scale_inv=columnwise_scale_inv,
-            dtype=dtype,
-            quantizer=quantizer,
-            is_2D_scaled=is_2D_scaled,
-        )
-
     def __reduce_ex__(self, protocol: int) -> tuple:
         """Custom pickling to remove references to FP8 metadata objects"""
         return (
-            Float8BlockwiseQTensor._make_in_reduce_ex,
+            _make_float8_blockwise_tensor_in_reduce_ex,
             (
                 self.shape,
                 self._rowwise_data,
                 self._rowwise_scale_inv,
                 self._columnwise_data,
                 self._columnwise_scale_inv,
-                self._fp8_dtype,
+                int(self._fp8_dtype),
                 self.dtype,
                 self._quantizer,
                 self._is_2D_scaled,
@@ -707,6 +675,39 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
         )
         out._quantizer.set_usage(rowwise=rowwise_usage, columnwise=columnwise_usage)
         return out, all_gather_outputs
+
+
+def _make_float8_blockwise_tensor_in_reduce_ex(
+    shape: torch.Size,
+    rowwise_data: torch.Tensor,
+    rowwise_scale_inv: torch.Tensor,
+    columnwise_data: torch.Tensor,
+    columnwise_scale_inv: torch.Tensor,
+    fp8_dtype: int,
+    dtype: torch.dtype,
+    quantizer: Quantizer,
+    is_2D_scaled: bool,
+    data_format: Any = None,  # pylint: disable=unused-argument
+) -> Float8BlockwiseQTensor:
+    """Reconstruct a ``Float8BlockwiseQTensor`` from ``__reduce_ex__``.
+
+    Defined at module level so the pickle stream uses a single
+    ``GLOBAL`` opcode rather than the ``(getattr, (cls, name))``
+    reduction that bound classmethods produce. ``fp8_dtype`` is passed
+    as an ``int`` and converted back to the pybind11 ``TE_DType`` enum
+    here.
+    """
+    return Float8BlockwiseQTensor(
+        shape=shape,
+        rowwise_data=rowwise_data,
+        rowwise_scale_inv=rowwise_scale_inv,
+        fp8_dtype=TE_DType(fp8_dtype),
+        columnwise_data=columnwise_data,
+        columnwise_scale_inv=columnwise_scale_inv,
+        dtype=dtype,
+        quantizer=quantizer,
+        is_2D_scaled=is_2D_scaled,
+    )
 
 
 class _ViewFunc(torch.autograd.Function):
