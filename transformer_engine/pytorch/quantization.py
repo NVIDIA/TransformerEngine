@@ -686,9 +686,8 @@ class FP8GlobalStateManager:
                         amax_history, scale, get_fp8_max(recipe, forward), recipe
                     )
 
-    @classmethod
+    @staticmethod
     def get_unique_autocast_key(
-        cls,
         recipe: Optional[Recipe] = None,
         group: Optional[dist_group_type] = None,
     ):
@@ -697,7 +696,11 @@ class FP8GlobalStateManager:
         Object identity is sufficient since autocast contexts never outlive a single
         training session.
         """
-        return str((str(recipe), id(group) if group is not None else None))
+        recipe_repr = recipe.__dict__.get("_cached_repr") if recipe is not None else None
+        if recipe_repr is None:
+            recipe_repr = str(recipe)
+        group_id = id(group) if group is not None else None
+        return f"recipe={recipe_repr},group={group_id}"
 
     @classmethod
     def autocast_enter(
@@ -911,14 +914,13 @@ def quantized_model_init(
         qstate.high_precision_init_val = _high_precision_init_val
 
 
-@contextmanager
 def fp8_autocast(
     enabled: bool = True,
     calibrating: bool = False,
     fp8_recipe: Optional[Recipe] = None,
     fp8_group: Optional[dist_group_type] = None,
     _graph: bool = False,
-) -> None:
+) -> "autocast":
     """
     .. warning::
 
@@ -934,25 +936,16 @@ def fp8_autocast(
         stacklevel=2,
     )
 
-    # Call new implementation.
-    with autocast(
+    return autocast(
         enabled=enabled,
         calibrating=calibrating,
         recipe=fp8_recipe,
         amax_reduction_group=fp8_group,
         _graph=_graph,
-    ):
-        yield
+    )
 
 
-@contextmanager
-def autocast(
-    enabled: bool = True,
-    calibrating: bool = False,
-    recipe: Optional["Recipe"] = None,
-    amax_reduction_group: Optional["dist_group_type"] = None,
-    _graph: bool = False,
-) -> None:
+class autocast:
     """
     Context manager for quantization schemes like FP8 or FP4.
 
@@ -991,24 +984,60 @@ def autocast(
                           are reduced at the end of each training step.
     """
 
-    if enabled:
-        check_recipe_support(recipe)
-
-    # Save current state so we always restore it on exit.
-    fp8_state = FP8GlobalStateManager.get_autocast_state()
-
-    FP8GlobalStateManager.autocast_enter(
-        enabled=enabled,
-        calibrating=calibrating,
-        fp8_recipe=recipe,
-        fp8_group=amax_reduction_group,
-        _graph=_graph,
+    # Class-based context manager (instead of ``@contextmanager`` from contextlib)
+    # to avoid overheads.
+    __slots__ = (
+        "_enabled",
+        "_calibrating",
+        "_recipe",
+        "_amax_reduction_group",
+        "_graph",
+        "_fp8_state",
     )
-    try:
-        yield
-    finally:
-        FP8GlobalStateManager.set_autocast_state(fp8_state)
-        FP8GlobalStateManager.autocast_exit(enabled, _graph=_graph)
+
+    def __init__(
+        self,
+        enabled: bool = True,
+        calibrating: bool = False,
+        recipe: Optional["Recipe"] = None,
+        amax_reduction_group: Optional["dist_group_type"] = None,
+        _graph: bool = False,
+    ) -> None:
+        self._enabled = enabled
+        self._calibrating = calibrating
+        self._recipe = recipe
+        self._amax_reduction_group = amax_reduction_group
+        self._graph = _graph
+        self._fp8_state = None
+
+    def __enter__(self) -> "autocast":
+        # Disallow nested re-entry of the same instance.
+        if self._fp8_state is not None:
+            raise RuntimeError(
+                "autocast context manager cannot be entered more than once concurrently"
+            )
+        if self._enabled:
+            check_recipe_support(self._recipe)
+        # Save current state so we always restore it on exit.
+        self._fp8_state = FP8GlobalStateManager.get_autocast_state()
+        FP8GlobalStateManager.autocast_enter(
+            enabled=self._enabled,
+            calibrating=self._calibrating,
+            fp8_recipe=self._recipe,
+            fp8_group=self._amax_reduction_group,
+            _graph=self._graph,
+        )
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        try:
+            FP8GlobalStateManager.set_autocast_state(self._fp8_state)
+            FP8GlobalStateManager.autocast_exit(self._enabled, _graph=self._graph)
+        finally:
+            # Clear the saved state so the instance can be entered again
+            # sequentially (and so a failure inside the restore path does not
+            # permanently mark the instance as "active").
+            self._fp8_state = None
 
 
 def _update_amax_history(amax_history: torch.Tensor) -> torch.Tensor:
