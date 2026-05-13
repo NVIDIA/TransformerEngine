@@ -26,6 +26,8 @@
 #include <cuda_runtime.h>
 #include <transformer_engine/transformer_engine.h>
 
+#include <cstdint>
+
 #include "../../common.h"
 #include "../../util/math.h"
 #include "../../utils.cuh"
@@ -71,8 +73,13 @@ constexpr int kTileRows = 128;
 constexpr int kTileCols = 64;
 constexpr int kTileColGroups = kTileCols / kGroupSize;
 constexpr int kTileRowGroups = kTileRows / kGroupSize;
+constexpr int kPipelineStages = 2;
+constexpr int kStageRows = kTileRows / kPipelineStages;
+constexpr int kStageRowGroups = kStageRows / kGroupSize;
 constexpr int kElementsPerHalfGroup = 8;
 constexpr int kPackedWordsPerGroup = 2;
+static_assert(kTileRows == kPipelineStages * kStageRows);
+static_assert(kStageRows % kGroupSize == 0);
 
 template <NVTENVFP44Over6ErrMode kErrMode, bool kErrUseFastMath>
 struct Config {
@@ -152,11 +159,16 @@ template <typename IType>
 __device__ __forceinline__ void load_row_group(const IType *tile, const int row,
                                                const int col_start, float (&x0)[8], float (&x1)[8],
                                                float *amax) {
+  Vec<IType, kElementsPerHalfGroup> x0_vec;
+  Vec<IType, kElementsPerHalfGroup> x1_vec;
+  x0_vec.load_from(&tile[row * kTileCols + col_start]);
+  x1_vec.load_from(&tile[row * kTileCols + col_start + kElementsPerHalfGroup]);
+
   *amax = 0.0f;
 #pragma unroll
   for (int i = 0; i < kElementsPerHalfGroup; ++i) {
-    const float v0 = load_input(tile, row * kTileCols + col_start + i);
-    const float v1 = load_input(tile, row * kTileCols + col_start + i + kElementsPerHalfGroup);
+    const float v0 = static_cast<float>(x0_vec.data.elt[i]);
+    const float v1 = static_cast<float>(x1_vec.data.elt[i]);
     x0[i] = v0;
     x1[i] = v1;
     *amax = fmaxf(*amax, fabsf(v0));
@@ -294,9 +306,9 @@ __device__ __forceinline__ float reduce_group_max_16(float value) {
 }
 
 __device__ __forceinline__ void store_packed_group(const uint32_t *packed, fp4e2m1x2 *dst) {
-  auto *dst32 = reinterpret_cast<uint32_t *>(dst);
-  dst32[0] = packed[0];
-  dst32[1] = packed[1];
+  const uint64_t packed64 =
+      static_cast<uint64_t>(packed[0]) | (static_cast<uint64_t>(packed[1]) << 32);
+  *reinterpret_cast<uint64_t *>(dst) = packed64;
 }
 
 __device__ __forceinline__ const uint32_t *select_packed(const CandidatePair &candidates,
@@ -315,26 +327,55 @@ __device__ __forceinline__ nvfp4_scale_t select_scale(const ScalePair &scales,
   return scales.map6;
 }
 
+__device__ __forceinline__ void cp_async_cg_16(void *dst, const void *src) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+  const uint32_t dst_smem_ptr = __cvta_generic_to_shared(dst);
+  const uint64_t src_gmem_ptr = reinterpret_cast<uint64_t>(src);
+  asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" ::"r"(dst_smem_ptr),
+               "l"(src_gmem_ptr));
+#else
+  NVTE_DEVICE_ERROR("cp.async is only supported on SM 8.0+.");
+#endif
+}
+
+__device__ __forceinline__ void cp_async_commit_group() {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+  asm volatile("cp.async.commit_group;\n" ::);
+#else
+  NVTE_DEVICE_ERROR("cp.async is only supported on SM 8.0+.");
+#endif
+}
+
+template <int N>
+__device__ __forceinline__ void cp_async_wait_group() {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+  asm volatile("cp.async.wait_group %0;\n" ::"n"(N));
+#else
+  NVTE_DEVICE_ERROR("cp.async is only supported on SM 8.0+.");
+#endif
+}
+
 template <typename IType>
-__device__ void load_tile_to_shared(const IType *input, IType *tile, const size_t rows,
-                                    const size_t cols, const size_t tile_row,
-                                    const size_t tile_col) {
+__device__ void load_stage_to_shared_async(const IType *input, IType *tile, const size_t rows,
+                                           const size_t cols, const size_t stage_row,
+                                           const size_t tile_col) {
   constexpr int vec_elems = 16 / sizeof(IType);
   constexpr int vecs_per_row = kTileCols / vec_elems;
-  constexpr int vecs = kTileRows * vecs_per_row;
+  constexpr int vecs = kStageRows * vecs_per_row;
   using TileVec = Vec<IType, vec_elems>;
 
   for (int idx = threadIdx.x; idx < vecs; idx += blockDim.x) {
     const int local_row = idx / vecs_per_row;
     const int local_vec_col = idx - local_row * vecs_per_row;
     const int local_col = local_vec_col * vec_elems;
-    const size_t global_row = tile_row + local_row;
+    const size_t global_row = stage_row + local_row;
     const size_t global_col = tile_col + local_col;
+    IType *stage_ptr = &tile[local_row * kTileCols + local_col];
 
-    TileVec vec;
     if (global_row < rows && global_col + vec_elems <= cols) {
-      vec.load_from(&input[global_row * cols + global_col]);
+      cp_async_cg_16(stage_ptr, &input[global_row * cols + global_col]);
     } else {
+      TileVec vec;
       vec.clear();
 #pragma unroll
       for (int i = 0; i < vec_elems; ++i) {
@@ -342,23 +383,23 @@ __device__ void load_tile_to_shared(const IType *input, IType *tile, const size_
           vec.data.elt[i] = input[global_row * cols + global_col + i];
         }
       }
+      vec.store_to(stage_ptr);
     }
-    vec.store_to(&tile[local_row * kTileCols + local_col]);
   }
 }
 
 template <bool USE_2D_QUANTIZATION, bool ROW_SCALED_NVFP4, typename Cfg, int E4M3_MAX,
           typename IType>
-__device__ void quantize_tile_rowwise(const IType *tile, fp4e2m1x2 *output, nvfp4_scale_t *scales,
-                                      const float *amax, const size_t rows, const size_t cols,
-                                      const size_t tile_row, const size_t tile_col,
-                                      const size_t scale_stride) {
-  constexpr int groups = kTileRows * kTileColGroups;
+__device__ void quantize_stage_rowwise(const IType *tile, fp4e2m1x2 *output, nvfp4_scale_t *scales,
+                                       const float *amax, const size_t rows, const size_t cols,
+                                       const size_t stage_row, const size_t tile_col,
+                                       const size_t scale_stride) {
+  constexpr int groups = kStageRows * kTileColGroups;
   for (int group = threadIdx.x; group < groups; group += blockDim.x) {
-    const int local_row = group % kTileRows;
-    const int local_col_group = group / kTileRows;
+    const int local_row = group % kStageRows;
+    const int local_col_group = group / kStageRows;
     const int local_col = local_col_group * kGroupSize;
-    const size_t global_row = tile_row + local_row;
+    const size_t global_row = stage_row + local_row;
     const size_t global_col = tile_col + local_col;
     if (global_row >= rows || global_col >= cols) {
       continue;
@@ -400,16 +441,16 @@ __device__ void quantize_tile_rowwise(const IType *tile, fp4e2m1x2 *output, nvfp
 }
 
 template <bool USE_2D_QUANTIZATION, typename Cfg, int E4M3_MAX, typename IType>
-__device__ void quantize_tile_colwise(const IType *tile, fp4e2m1x2 *output_t,
-                                      nvfp4_scale_t *scales_t, const float *amax, const size_t rows,
-                                      const size_t cols, const size_t tile_row,
-                                      const size_t tile_col, const size_t scale_stride_t) {
-  constexpr int groups = kTileRowGroups * kTileCols;
+__device__ void quantize_stage_colwise(const IType *tile, fp4e2m1x2 *output_t,
+                                       nvfp4_scale_t *scales_t, const float *amax,
+                                       const size_t rows, const size_t cols, const size_t stage_row,
+                                       const size_t tile_col, const size_t scale_stride_t) {
+  constexpr int groups = kStageRowGroups * kTileCols;
   for (int group = threadIdx.x; group < groups; group += blockDim.x) {
     const int local_row_group = group / kTileCols;
     const int local_col = group - local_row_group * kTileCols;
     const int local_row = local_row_group * kGroupSize;
-    const size_t global_row = tile_row + local_row;
+    const size_t global_row = stage_row + local_row;
     const size_t global_col = tile_col + local_col;
     if (global_row >= rows || global_col >= cols) {
       continue;
@@ -460,25 +501,51 @@ __global__ void __launch_bounds__(kThreads)
   }
 
   extern __shared__ char dynamic_shmem[];
-  auto *tile = reinterpret_cast<IType *>(dynamic_shmem);
+  auto *tiles = reinterpret_cast<IType *>(dynamic_shmem);
   const size_t tile_col = blockIdx.x * kTileCols;
   const size_t tile_row = blockIdx.y * kTileRows;
 
-  load_tile_to_shared(input, tile, rows, cols, tile_row, tile_col);
+  IType *stage_tiles[kPipelineStages] = {
+      &tiles[0],
+      &tiles[kStageRows * kTileCols],
+  };
+
+  load_stage_to_shared_async(input, stage_tiles[0], rows, cols, tile_row, tile_col);
+  cp_async_commit_group();
+  cp_async_wait_group<0>();
   __syncthreads();
 
-  if constexpr (RETURN_IDENTITY) {
-    quantize_tile_rowwise<USE_2D_QUANTIZATION, ROW_SCALED_NVFP4, Cfg, E4M3_MAX>(
-        tile, output, scales, amax_rowwise, rows, cols, tile_row, tile_col, scale_stride);
-  }
-
-  if constexpr (RETURN_TRANSPOSE) {
-    const float *columnwise_amax = amax_colwise;
-    if (columnwise_amax == nullptr) {
-      columnwise_amax = amax_rowwise;
+  for (int stage = 0; stage < kPipelineStages; ++stage) {
+    const int next_stage = stage + 1;
+    if (next_stage < kPipelineStages) {
+      const size_t next_stage_row = tile_row + next_stage * kStageRows;
+      load_stage_to_shared_async(input, stage_tiles[next_stage], rows, cols, next_stage_row,
+                                 tile_col);
+      cp_async_commit_group();
     }
-    quantize_tile_colwise<USE_2D_QUANTIZATION, Cfg, E4M3_MAX>(
-        tile, output_t, scales_t, columnwise_amax, rows, cols, tile_row, tile_col, scale_stride_t);
+
+    const size_t stage_row = tile_row + stage * kStageRows;
+    IType *stage_tile = stage_tiles[stage];
+
+    if constexpr (RETURN_IDENTITY) {
+      quantize_stage_rowwise<USE_2D_QUANTIZATION, ROW_SCALED_NVFP4, Cfg, E4M3_MAX>(
+          stage_tile, output, scales, amax_rowwise, rows, cols, stage_row, tile_col, scale_stride);
+    }
+
+    if constexpr (RETURN_TRANSPOSE) {
+      const float *columnwise_amax = amax_colwise;
+      if (columnwise_amax == nullptr) {
+        columnwise_amax = amax_rowwise;
+      }
+      quantize_stage_colwise<USE_2D_QUANTIZATION, Cfg, E4M3_MAX>(
+          stage_tile, output_t, scales_t, columnwise_amax, rows, cols, stage_row, tile_col,
+          scale_stride_t);
+    }
+
+    if (next_stage < kPipelineStages) {
+      cp_async_wait_group<0>();
+      __syncthreads();
+    }
   }
 #else
   NVTE_DEVICE_ERROR("sm_100 or higher is required.");
@@ -506,7 +573,7 @@ void launch_quantize_4over6(const Tensor &input, const Tensor *noop, Tensor *out
   const dim3 grid(DIVUP(cols, static_cast<size_t>(kTileCols)),
                   DIVUP(rows, static_cast<size_t>(kTileRows)));
   const dim3 block(kThreads);
-  const size_t shmem = kTileRows * kTileCols * sizeof(IType);
+  const size_t shmem = kPipelineStages * kStageRows * kTileCols * sizeof(IType);
   const size_t scale_stride = return_identity ? output->scale_inv.shape[1] : 0;
   const size_t scale_stride_t = return_transpose ? output->columnwise_scale_inv.shape[1] : 0;
 
