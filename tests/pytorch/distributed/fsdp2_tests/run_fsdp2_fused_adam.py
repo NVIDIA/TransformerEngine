@@ -679,10 +679,7 @@ def test_dcp_output_parity(recipe_name, async_save):
     """
     recipe = get_recipe_from_string(recipe_name)
 
-    if (
-        recipe_name == "Float8BlockScaling"
-        and torch.cuda.get_device_capability()[0] == 12
-    ):
+    if recipe_name == "Float8BlockScaling" and torch.cuda.get_device_capability()[0] == 12:
         pytest.xfail(
             "Float8BlockScaling is failing on SM120 with RuntimeError: "
             "transformer_engine/common/transpose/quantize_transpose_vector_blockwise.cu:534 "

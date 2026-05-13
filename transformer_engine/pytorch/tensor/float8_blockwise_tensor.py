@@ -389,7 +389,6 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
         # pylint: disable=missing-function-docstring
         return _ReshapeFunc.apply(self, shape)
 
-
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):
 

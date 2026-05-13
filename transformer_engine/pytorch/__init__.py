@@ -140,6 +140,7 @@ try:
     )
 except (ImportError, AttributeError):
     import warnings as _warnings
+
     _warnings.warn(
         "transformer_engine: torch.serialization.add_safe_globals is "
         "unavailable on this PyTorch version (added in 2.4). DCP "

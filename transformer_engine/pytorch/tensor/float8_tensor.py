@@ -1175,4 +1175,3 @@ class _ReshapeFunc(torch.autograd.Function):
     ) -> Tuple[Optional[torch.Tensor], ...]:
         # pylint: disable=missing-function-docstring
         return grad.reshape(ctx.shape), None
-
