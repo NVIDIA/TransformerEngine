@@ -81,7 +81,8 @@ def tp_invariant_row_parallel_gemm(
 
     input_2d = inputmat_gathered.reshape(-1, inputmat_gathered.shape[-1])
     out = general_gemm(
-        weight_gathered, input_2d,
+        weight_gathered,
+        input_2d,
         out_dtype=activation_dtype,
         bias=bias,
     )
@@ -143,39 +144,36 @@ def tp_invariant_column_parallel_dgrad(
     if partition_stride > 1:
         # Deinterleave gated [gate|val] halves to TP=1 [gate_all | val_all].
         # Currently only the 2-way gated split (SwiGLU FC1 layout) is handled.
-        assert partition_stride == 2, (
-            f"deinterleave only supports partition_stride=2 (gated halve); got {partition_stride}"
-        )
+        assert (
+            partition_stride == 2
+        ), f"deinterleave only supports partition_stride=2 (gated halve); got {partition_stride}"
         chunk_sz = weight.shape[0]  # out_features per rank
         half = chunk_sz // 2
-        first_w = [
-            weight_gathered[i * chunk_sz : i * chunk_sz + half]
-            for i in range(tp_size)
-        ]
+        first_w = [weight_gathered[i * chunk_sz : i * chunk_sz + half] for i in range(tp_size)]
         second_w = [
-            weight_gathered[i * chunk_sz + half : (i + 1) * chunk_sz]
-            for i in range(tp_size)
+            weight_gathered[i * chunk_sz + half : (i + 1) * chunk_sz] for i in range(tp_size)
         ]
         weight_gathered = torch.cat(first_w + second_w, dim=0)
 
         g_dim = grad_output_gathered.shape[-1] // tp_size
         g_half = g_dim // 2
         first_g = [
-            grad_output_gathered[..., i * g_dim : i * g_dim + g_half]
-            for i in range(tp_size)
+            grad_output_gathered[..., i * g_dim : i * g_dim + g_half] for i in range(tp_size)
         ]
         second_g = [
-            grad_output_gathered[..., i * g_dim + g_half : (i + 1) * g_dim]
-            for i in range(tp_size)
+            grad_output_gathered[..., i * g_dim + g_half : (i + 1) * g_dim] for i in range(tp_size)
         ]
         grad_output_gathered = torch.cat(first_g + second_g, dim=-1)
 
     grad_output_2d = grad_output_gathered.reshape(
-        -1, grad_output_gathered.shape[-1],
+        -1,
+        grad_output_gathered.shape[-1],
     )
     dgrad = general_gemm(
-        weight_gathered, grad_output_2d,
-        layout="NN", grad=True,
+        weight_gathered,
+        grad_output_2d,
+        layout="NN",
+        grad=True,
         out_dtype=activation_dtype,
     )
     if isinstance(dgrad, tuple):

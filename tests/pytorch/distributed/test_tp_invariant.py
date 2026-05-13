@@ -43,8 +43,9 @@ def _tp_sizes():
 @pytest.mark.parametrize("tp_size", _tp_sizes())
 @pytest.mark.parametrize("parallel_mode", ["row", "column"])
 @pytest.mark.parametrize("sequence_parallel", [False, True])
-@pytest.mark.parametrize("expect_bitwise", [True, False],
-                         ids=["with_tp_invariant", "without_tp_invariant"])
+@pytest.mark.parametrize(
+    "expect_bitwise", [True, False], ids=["with_tp_invariant", "without_tp_invariant"]
+)
 def test_tp_invariant(tp_size, parallel_mode, sequence_parallel, expect_bitwise):
     """One TP-invariant correctness check per parameter combination.
 
@@ -55,9 +56,12 @@ def test_tp_invariant(tp_size, parallel_mode, sequence_parallel, expect_bitwise)
         "torchrun",
         f"--nproc_per_node={tp_size}",
         str(TEST_ROOT / "run_tp_invariant.py"),
-        "--check-type", "linear",
-        "--parallel-mode", parallel_mode,
-        "--expect-bitwise", str(int(expect_bitwise)),
+        "--check-type",
+        "linear",
+        "--parallel-mode",
+        parallel_mode,
+        "--expect-bitwise",
+        str(int(expect_bitwise)),
     ]
     if sequence_parallel:
         cmd.append("--sequence-parallel")
@@ -80,11 +84,12 @@ def test_tp_invariant_deinterleave(tp_size, sequence_parallel):
         "torchrun",
         f"--nproc_per_node={tp_size}",
         str(TEST_ROOT / "run_tp_invariant.py"),
-        "--check-type", "deinterleave",
+        "--check-type",
+        "deinterleave",
     ]
     if sequence_parallel:
         cmd.append("--sequence-parallel")
     result = subprocess.run(cmd, env=os.environ, check=False)
-    assert result.returncode == 0, (
-        f"deinterleave failed: tp_size={tp_size}, sequence_parallel={sequence_parallel}"
-    )
+    assert (
+        result.returncode == 0
+    ), f"deinterleave failed: tp_size={tp_size}, sequence_parallel={sequence_parallel}"

@@ -1018,13 +1018,19 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
                 weight_for_dgrad = weight_fp8
                 if bwd_args.backward_override == "dequantized":
                     if isinstance(weight_for_dgrad, QuantizedTensorStorage):
-                        weight_for_dgrad = weight_for_dgrad.dequantize(dtype=bwd_args.activation_dtype)
+                        weight_for_dgrad = weight_for_dgrad.dequantize(
+                            dtype=bwd_args.activation_dtype
+                        )
                     else:
-                        weight_for_dgrad = cast_if_needed(weight_for_dgrad, bwd_args.activation_dtype)
+                        weight_for_dgrad = cast_if_needed(
+                            weight_for_dgrad, bwd_args.activation_dtype
+                        )
                 elif bwd_args.backward_override == "high_precision":
                     weight_for_dgrad = saved_weight
                     if isinstance(weight_for_dgrad, QuantizedTensorStorage):
-                        weight_for_dgrad = weight_for_dgrad.dequantize(dtype=bwd_args.activation_dtype)
+                        weight_for_dgrad = weight_for_dgrad.dequantize(
+                            dtype=bwd_args.activation_dtype
+                        )
                 gemm_out, *_, reduce_scatter_out = general_gemm(
                     weight_for_dgrad,
                     grad_output,

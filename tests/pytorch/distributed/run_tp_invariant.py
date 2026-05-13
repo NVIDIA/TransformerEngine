@@ -52,17 +52,34 @@ def _run_linear(parallel_mode, sequence_parallel):
     sharding, suitable for direct bitwise comparison.
     """
     x, w, bias, gradient = TestDistributedLinearBase._prepare_data(
-        BATCH, HIDDEN, OUT, use_bias=False, seed=42, dtype=DTYPE,
+        BATCH,
+        HIDDEN,
+        OUT,
+        use_bias=False,
+        seed=42,
+        dtype=DTYPE,
     )
     y_ref, dgrad_ref, _, _ = TestDistributedLinearBase.run_linear(
-        x, w, bias, gradient,
-        parallel_mode=None, sequence_parallel=False,
-        tp_group=None, tp_size=1, rank=0,
+        x,
+        w,
+        bias,
+        gradient,
+        parallel_mode=None,
+        sequence_parallel=False,
+        tp_group=None,
+        tp_size=1,
+        rank=0,
     )
     y_tp, dgrad_tp, _, _ = TestDistributedLinearBase.run_linear(
-        x, w, bias, gradient,
-        parallel_mode=parallel_mode, sequence_parallel=sequence_parallel,
-        tp_group=rne.NCCL_WORLD, tp_size=rne.WORLD_SIZE, rank=rne.WORLD_RANK,
+        x,
+        w,
+        bias,
+        gradient,
+        parallel_mode=parallel_mode,
+        sequence_parallel=sequence_parallel,
+        tp_group=rne.NCCL_WORLD,
+        tp_size=rne.WORLD_SIZE,
+        rank=rne.WORLD_RANK,
     )
     if parallel_mode == "row":
         return y_ref, y_tp
@@ -82,14 +99,17 @@ def _check_tp_invariance(parallel_mode, sequence_parallel, expect_bitwise):
 
     if expect_bitwise:
         torch.testing.assert_close(
-            tp, ref, atol=0, rtol=0,
+            tp,
+            ref,
+            atol=0,
+            rtol=0,
             msg=f"{label} not bitwise under NVTE_TP_INVARIANT_MODE=1",
         )
         dist_print(f"[with_tp_invariant   ] {label}: TP=1 ≡ TP={rne.WORLD_SIZE} bitwise")
     else:
-        assert not torch.equal(tp, ref), (
-            f"without_tp_invariant: {label} unexpectedly bitwise under NVTE_TP_INVARIANT_MODE=0"
-        )
+        assert not torch.equal(
+            tp, ref
+        ), f"without_tp_invariant: {label} unexpectedly bitwise under NVTE_TP_INVARIANT_MODE=0"
         dist_print(f"[without_tp_invariant] {label}: TP=1 ≠ TP={rne.WORLD_SIZE} (as expected)")
 
 
@@ -101,22 +121,43 @@ def _check_tp_invariance_deinterleave(sequence_parallel):
     it so TP=N dgrad bitwise matches the TP=1 reference."""
     os.environ["NVTE_TP_INVARIANT_MODE"] = "1"
     x, w, _, g = TestDistributedLinearBase._prepare_data(
-        BATCH, HIDDEN, OUT, use_bias=False, seed=42, dtype=DTYPE,
+        BATCH,
+        HIDDEN,
+        OUT,
+        use_bias=False,
+        seed=42,
+        dtype=DTYPE,
     )
     _, _, dgrad_ref, _, _ = TestDistributedLayerNormLinearBase.run_layernorm_linear(
-        x, w, None, g, parallel_mode=None, sequence_parallel=False,
-        tp_group=None, tp_size=1, rank=0, partition_stride=1,
+        x,
+        w,
+        None,
+        g,
+        parallel_mode=None,
+        sequence_parallel=False,
+        tp_group=None,
+        tp_size=1,
+        rank=0,
+        partition_stride=1,
     )
     _, _, dgrad_tp, _, _ = TestDistributedLayerNormLinearBase.run_layernorm_linear(
-        x, w, None, g, parallel_mode="column", sequence_parallel=sequence_parallel,
-        tp_group=rne.NCCL_WORLD, tp_size=rne.WORLD_SIZE, rank=rne.WORLD_RANK,
+        x,
+        w,
+        None,
+        g,
+        parallel_mode="column",
+        sequence_parallel=sequence_parallel,
+        tp_group=rne.NCCL_WORLD,
+        tp_size=rne.WORLD_SIZE,
+        rank=rne.WORLD_RANK,
         partition_stride=2,
     )
     if rne.WORLD_RANK != 0:
         return
     label = f"LN-Linear stride=2 sp={int(sequence_parallel)}"
-    torch.testing.assert_close(dgrad_tp, dgrad_ref, atol=0, rtol=0,
-                               msg=f"{label}: not TP-invariant")
+    torch.testing.assert_close(
+        dgrad_tp, dgrad_ref, atol=0, rtol=0, msg=f"{label}: not TP-invariant"
+    )
     dist_print(f"{label}: TP=1 ≡ TP={rne.WORLD_SIZE} bitwise via deinterleave")
 
 
@@ -135,7 +176,10 @@ def main():
 
     torch.cuda.set_device(local_rank)
     dist.init_process_group(
-        backend="nccl", rank=rank, world_size=world_size, init_method="env://",
+        backend="nccl",
+        rank=rank,
+        world_size=world_size,
+        init_method="env://",
         timeout=datetime.timedelta(seconds=60),
         device_id=torch.device(f"cuda:{local_rank}"),
     )

@@ -253,9 +253,9 @@ class TestDistributedLinearBase:
         ``ctx.partition_stride``. No-op when stride==1 or tp_size==1.
         """
         if partition_stride > 1 and tp_size > 1:
-            setattr(layer.weight, 'partition_stride', partition_stride)
+            setattr(layer.weight, "partition_stride", partition_stride)
             if layer.bias is not None:
-                setattr(layer.bias, 'partition_stride', partition_stride)
+                setattr(layer.bias, "partition_stride", partition_stride)
 
     @classmethod
     def run_linear_preprocess_parallel(
@@ -274,7 +274,11 @@ class TestDistributedLinearBase:
             if parallel_mode == "column":
                 # split w in N dim (axis 0), gradient in N dim (axis 1); stride>1 → interleave.
                 w = cls._shard_strided(w, tp_size, rank, dim=0, stride=stride)
-                bias = cls._shard_strided(bias, tp_size, rank, dim=0, stride=stride) if bias is not None else None
+                bias = (
+                    cls._shard_strided(bias, tp_size, rank, dim=0, stride=stride)
+                    if bias is not None
+                    else None
+                )
                 gradient = cls._shard_strided(gradient, tp_size, rank, dim=1, stride=stride)
                 if sequence_parallel:
                     # split x in M dim, which should be axis 0
@@ -447,7 +451,14 @@ class TestDistributedLinearBase:
 
         # If Model parallel: split inputs for a given rank
         x, w, bias, gradient = cls.run_linear_preprocess_parallel(
-            x, w, bias, gradient, parallel_mode, sequence_parallel, tp_size, rank,
+            x,
+            w,
+            bias,
+            gradient,
+            parallel_mode,
+            sequence_parallel,
+            tp_size,
+            rank,
             stride=partition_stride,
         )
 
@@ -666,7 +677,14 @@ class TestDistributedLayerNormLinearBase(TestDistributedLinearBase):
 
         # If Model parallel: split inputs for a given rank
         x, w, bias, gradient = cls.run_linear_preprocess_parallel(
-            x, w, bias, gradient, parallel_mode, sequence_parallel, tp_size, rank,
+            x,
+            w,
+            bias,
+            gradient,
+            parallel_mode,
+            sequence_parallel,
+            tp_size,
+            rank,
             stride=partition_stride,
         )
 

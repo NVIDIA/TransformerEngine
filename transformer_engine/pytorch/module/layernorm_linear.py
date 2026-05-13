@@ -523,7 +523,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.input_quantizer = input_quantizer
             ctx.owns_input = inputmat is not inp
             ctx.weight = weight
-            ctx.partition_stride = getattr(weight, 'partition_stride', 1)
+            ctx.partition_stride = getattr(weight, "partition_stride", 1)
             ctx.activation_dtype = activation_dtype
             ctx.fp8 = fp8
             ctx.fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
