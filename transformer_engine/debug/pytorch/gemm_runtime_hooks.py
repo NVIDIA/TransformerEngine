@@ -140,6 +140,44 @@ def _is_quantized_gemm_tensor(tensor) -> bool:
     return isinstance(tensor, QuantizedTensorStorage)
 
 
+def _precision_name_from_class_name(class_name: str) -> str:
+    """Map quantizer/tensor class names to user-facing precision labels."""
+    lowered = class_name.lower()
+    if "mxfp8" in lowered:
+        return "mxfp8"
+    if "nvfp4" in lowered:
+        return "nvfp4"
+    if "float8blockwise" in lowered or "blockwise" in lowered:
+        return "fp8_blockwise"
+    if "float8" in lowered or "fp8" in lowered:
+        return "fp8"
+    return "quantized"
+
+
+def _precision_name_from_quantizer(quantizer: Optional[Quantizer]) -> str:
+    """Return requested quantized precision based on the underlying quantizer."""
+    quantizer = _parent_quantizer(quantizer)
+    if quantizer is None:
+        return "quantized"
+    return _precision_name_from_class_name(quantizer.__class__.__name__)
+
+
+def _precision_name_from_tensor(tensor) -> str:
+    """Return actual precision based on the selected GEMM operand."""
+    if isinstance(tensor, QuantizedTensorStorage):
+        return _precision_name_from_class_name(tensor.__class__.__name__)
+    dtype = getattr(tensor, "dtype", None)
+    if dtype is None:
+        return "unknown"
+    if dtype == torch.bfloat16:
+        return "bf16"
+    if dtype == torch.float16:
+        return "fp16"
+    if dtype == torch.float32:
+        return "fp32"
+    return str(dtype).replace("torch.", "")
+
+
 def _selected_transposes_for_gemm(gemm_name: str) -> tuple[bool, bool]:
     """Return DebugQuantizedTensor view selection for known TE GEMM layouts."""
     # general_gemm selects A.get_tensor(not transa) and B.get_tensor(transb).
@@ -161,6 +199,16 @@ def _selected_gemm_quantization_state(gemm_name: str, lhs, rhs) -> tuple[bool, b
     return _is_quantized_gemm_tensor(lhs_tensor), _is_quantized_gemm_tensor(rhs_tensor)
 
 
+def _selected_gemm_precision(gemm_name: str, lhs, rhs) -> str:
+    """Return the actual precision label for selected GEMM operands."""
+    lhs_transpose, rhs_transpose = _selected_transposes_for_gemm(gemm_name)
+    lhs_precision = _precision_name_from_tensor(_selected_gemm_tensor(lhs, lhs_transpose))
+    rhs_precision = _precision_name_from_tensor(_selected_gemm_tensor(rhs, rhs_transpose))
+    if lhs_precision == rhs_precision:
+        return lhs_precision
+    return f"{lhs_precision}+{rhs_precision}"
+
+
 def _log_final_gemm_decision(
     layer_name: str,
     gemm_name: str,
@@ -168,6 +216,7 @@ def _log_final_gemm_decision(
     quantized_enabled: bool,
     lhs_quantized: bool,
     rhs_quantized: bool,
+    requested_precision: str,
     actual_precision: str,
 ) -> None:
     """Write final AutoswitchGemm decision to the autoswitch rank-local log."""
@@ -187,7 +236,6 @@ def _log_final_gemm_decision(
     log_file = os.path.join(log_dir, f"nvdlfw_inspect_globalrank-{rank}.log")
     os.makedirs(log_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S,%f")[:-3]
-    requested_precision = "fp8" if quantized_enabled else "bf16"
     message = (
         f"{timestamp} - INFO - {layer_name}_{gemm_name}_final_decision "
         f"\t\t\t\t iteration={iteration:06d} "
@@ -234,6 +282,9 @@ def resolve_gemm_inputs_after_sampling(
         final_decision=True,
     )
     quantized_enabled = enabled_ret[0] if isinstance(enabled_ret, tuple) else enabled_ret
+    requested_precision = (
+        _precision_name_from_quantizer(lhs_quantizer) if quantized_enabled else "bf16"
+    )
     if quantized_enabled:
         lhs_out = _to_quantized_gemm_input(lhs, lhs_quantizer, target_dtype)
         rhs_out = _to_quantized_gemm_input(rhs, rhs_quantizer, target_dtype)
@@ -248,7 +299,7 @@ def resolve_gemm_inputs_after_sampling(
         lhs_quantized, rhs_quantized = _selected_gemm_quantization_state(
             gemm_name, lhs_out, rhs_out
         )
-    actual_precision = "fp8" if lhs_quantized and rhs_quantized else "bf16"
+    actual_precision = _selected_gemm_precision(gemm_name, lhs_out, rhs_out)
     _log_final_gemm_decision(
         layer_name,
         gemm_name,
@@ -256,6 +307,7 @@ def resolve_gemm_inputs_after_sampling(
         bool(quantized_enabled),
         lhs_quantized,
         rhs_quantized,
+        requested_precision,
         actual_precision,
     )
     return lhs_out, rhs_out
