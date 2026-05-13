@@ -25,6 +25,8 @@ _AUTOSWITCH_FEATURE_INSTANCES = weakref.WeakSet()
 _AUTOSWITCH_SAMPLING_CONFIGS = []
 _AUTOSWITCH_SAMPLING_CONFIG_KEYS = set()
 _AUTOSWITCH_DISABLE_UNTIL_BY_GEMM = {}
+_AUTOSWITCH_CONFIG_FILE_LOADED = False
+_AUTOSWITCH_DISABLE_UNTIL_ENV = "NVTE_AUTOSWITCH_GEMM_DISABLE_UNTIL"
 
 
 def _register_sampling_config(config: Dict) -> None:
@@ -41,8 +43,47 @@ def _register_sampling_config(config: Dict) -> None:
         _AUTOSWITCH_SAMPLING_CONFIGS.append(schedule)
 
 
+def _register_sampling_configs_from_file() -> None:
+    """Best-effort loading of AutoswitchGemm sampling schedules from NVDFW config."""
+    global _AUTOSWITCH_CONFIG_FILE_LOADED
+    if _AUTOSWITCH_CONFIG_FILE_LOADED:
+        return
+    _AUTOSWITCH_CONFIG_FILE_LOADED = True
+
+    config_file = os.getenv("NVDFW_CONFIG_FILE")
+    if not config_file or not os.path.exists(config_file):
+        return
+
+    try:
+        import yaml
+
+        with open(config_file, encoding="utf-8") as config_stream:
+            config = yaml.safe_load(config_stream)
+    except Exception:  # pylint: disable=broad-except
+        return
+
+    def _walk(node):
+        if isinstance(node, dict):
+            transformer_engine_config = node.get("transformer_engine")
+            if isinstance(transformer_engine_config, dict):
+                autoswitch_config = transformer_engine_config.get("AutoswitchGemm")
+                if isinstance(autoswitch_config, dict) and autoswitch_config.get(
+                    "enabled", True
+                ):
+                    _register_sampling_config(autoswitch_config)
+            for value in node.values():
+                _walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                _walk(value)
+
+    _walk(config)
+
+
 def _is_sampling_iteration(iteration: int) -> bool:
     """Return True if any AutoswitchGemm config samples on this iteration."""
+    if not _AUTOSWITCH_SAMPLING_CONFIGS:
+        _register_sampling_configs_from_file()
     for schedule in _AUTOSWITCH_SAMPLING_CONFIGS:
         run_current, _ = next_enabled_iter(
             schedule["start_step"],
@@ -54,6 +95,23 @@ def _is_sampling_iteration(iteration: int) -> bool:
         if run_current:
             return True
     return False
+
+
+def _update_global_disable_until(layer_name: str, gemm: str, disable_until_iter: int) -> None:
+    """Update process-wide AutoswitchGemm high-precision window state."""
+    _AUTOSWITCH_DISABLE_UNTIL_BY_GEMM[(layer_name, gemm)] = disable_until_iter
+    max_disable_until = max(_AUTOSWITCH_DISABLE_UNTIL_BY_GEMM.values(), default=-1)
+    os.environ[_AUTOSWITCH_DISABLE_UNTIL_ENV] = str(max_disable_until)
+
+
+def _get_global_disable_until() -> int:
+    """Return process-wide high-precision window end iteration."""
+    max_disable_until = max(_AUTOSWITCH_DISABLE_UNTIL_BY_GEMM.values(), default=-1)
+    try:
+        env_disable_until = int(os.getenv(_AUTOSWITCH_DISABLE_UNTIL_ENV, "-1"))
+    except ValueError:
+        env_disable_until = -1
+    return max(max_disable_until, env_disable_until)
 
 
 def autoswitch_gemm_should_force_eager(iteration: Optional[int] = None) -> bool:
@@ -75,8 +133,7 @@ def autoswitch_gemm_should_force_eager(iteration: Optional[int] = None) -> bool:
     if _is_sampling_iteration(iteration):
         return True
 
-    max_disable_until = max(_AUTOSWITCH_DISABLE_UNTIL_BY_GEMM.values(), default=-1)
-    return iteration <= max_disable_until
+    return iteration <= _get_global_disable_until()
 
 
 class _AutoswitchGemmMetricLogger:
@@ -527,13 +584,13 @@ class AutoswitchGemm(TEConfigAPIMapper):
         if not reasons:
             # A fresh sample without threshold breach clears any currently active switch.
             state.disable_until_iter = min(state.disable_until_iter, iteration - 1)
-            _AUTOSWITCH_DISABLE_UNTIL_BY_GEMM[(layer_name, gemm)] = state.disable_until_iter
+            _update_global_disable_until(layer_name, gemm, state.disable_until_iter)
             state.last_reason = ""
             return
 
         hold_steps = self._config_positive_int(config, "freq", 1)
         state.disable_until_iter = iteration + hold_steps - 1
-        _AUTOSWITCH_DISABLE_UNTIL_BY_GEMM[(layer_name, gemm)] = state.disable_until_iter
+        _update_global_disable_until(layer_name, gemm, state.disable_until_iter)
         state.last_reason = "; ".join(reasons)
 
         debug_api.log_message(
@@ -578,7 +635,7 @@ class AutoswitchGemm(TEConfigAPIMapper):
             and not allow_fp8_model_params_fallback
         ):
             state.disable_until_iter = -1
-            _AUTOSWITCH_DISABLE_UNTIL_BY_GEMM[(layer_name, gemm)] = state.disable_until_iter
+            _update_global_disable_until(layer_name, gemm, state.disable_until_iter)
             if final_decision and metric_logger is not None:
                 metric_logger.log_scalar(layer_name, gemm, "quantized_enabled", iteration, 1.0)
                 metric_logger.log_scalar(
