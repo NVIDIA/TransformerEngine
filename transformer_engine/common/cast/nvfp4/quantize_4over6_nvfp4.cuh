@@ -505,10 +505,11 @@ __global__ void __launch_bounds__(kThreads)
   const size_t tile_col = blockIdx.x * kTileCols;
   const size_t tile_row = blockIdx.y * kTileRows;
 
-  IType *stage_tiles[kPipelineStages] = {
-      &tiles[0],
-      &tiles[kStageRows * kTileCols],
-  };
+  IType *stage_tiles[kPipelineStages];
+#pragma unroll
+  for (int stage = 0; stage < kPipelineStages; ++stage) {
+    stage_tiles[stage] = &tiles[stage * kStageRows * kTileCols];
+  }
 
   load_stage_to_shared_async(input, stage_tiles[0], rows, cols, tile_row, tile_col);
   cp_async_commit_group();
