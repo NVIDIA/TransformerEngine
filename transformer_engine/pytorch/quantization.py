@@ -1655,15 +1655,15 @@ class NVFP4BlockScalingRecipeState(RecipeState):
 
         def _make(tensor_type: str) -> NVFP4Quantizer:
             qparams = _qparams(tensor_type)
-            use_4over6 = False
+            nvfp4_use_4over6 = False
             if self.recipe.nvfp4_4over6 == "all":
-                use_4over6 = True
+                nvfp4_use_4over6 = True
             elif self.recipe.nvfp4_4over6 == "weights":
-                use_4over6 = tensor_type == "weight"
+                nvfp4_use_4over6 = tensor_type == "weight"
             elif self.recipe.nvfp4_4over6 == "activations":
-                use_4over6 = tensor_type != "weight"
+                nvfp4_use_4over6 = tensor_type != "weight"
             nvfp4_e4m3_max = 448
-            if use_4over6:
+            if nvfp4_use_4over6:
                 if self.recipe.nvfp4_e4m3_max == "all":
                     nvfp4_e4m3_max = 256
                 elif self.recipe.nvfp4_e4m3_max == "weights":
@@ -1685,7 +1685,7 @@ class NVFP4BlockScalingRecipeState(RecipeState):
                     and tensor_type != "weight"
                     and self.recipe.row_scaled_activation
                 ),
-                use_4over6=use_4over6,
+                nvfp4_use_4over6=nvfp4_use_4over6,
                 nvfp4_e4m3_max=nvfp4_e4m3_max,
                 nvfp4_4over6_err_mode=self.recipe.nvfp4_4over6_err_mode,
             )

@@ -565,7 +565,7 @@ def test_nvfp4_row_scaled_quantizer_roles(nvfp4_4over6, nvfp4_e4m3_max, nvfp4_4o
         num_quantizers=3,
     ).make_quantizers()
     assert [q.row_scaled_nvfp4 for q in forward_quantizers] == [True, False, True]
-    assert [q.use_4over6 for q in forward_quantizers] == [
+    assert [q.nvfp4_use_4over6 for q in forward_quantizers] == [
         expected_use_4over6(tensor_type) for tensor_type in ("input", "weight", "output")
     ]
     assert [q.nvfp4_e4m3_max for q in forward_quantizers] == [
@@ -587,7 +587,7 @@ def test_nvfp4_row_scaled_quantizer_roles(nvfp4_4over6, nvfp4_e4m3_max, nvfp4_4o
         ],
     ).make_quantizers()
     assert [q.row_scaled_nvfp4 for q in role_quantizers] == [False, True, True, True]
-    assert [q.use_4over6 for q in role_quantizers] == [
+    assert [q.nvfp4_use_4over6 for q in role_quantizers] == [
         expected_use_4over6(tensor_type) for tensor_type in ("weight", "input", "output", "input")
     ]
     assert [q.nvfp4_e4m3_max for q in role_quantizers] == [
@@ -605,7 +605,7 @@ def test_nvfp4_row_scaled_quantizer_roles(nvfp4_4over6, nvfp4_e4m3_max, nvfp4_4o
         ],
     ).make_quantizers()
     assert [q.row_scaled_nvfp4 for q in backward_quantizers] == [False, False]
-    assert [q.use_4over6 for q in backward_quantizers] == [
+    assert [q.nvfp4_use_4over6 for q in backward_quantizers] == [
         expected_use_4over6(tensor_type) for tensor_type in ("grad_output", "grad_input")
     ]
     assert [q.nvfp4_e4m3_max for q in backward_quantizers] == [
@@ -637,17 +637,17 @@ def test_fp4_dequantize(dtype, row_scaled_nvfp4, use_4over6, M, N):
     q = NVFP4Quantizer(
         columnwise=not row_scaled_nvfp4,
         row_scaled_nvfp4=row_scaled_nvfp4,
-        use_4over6=use_4over6,
+        nvfp4_use_4over6=use_4over6,
     )
     a = torch.rand((M, N)).cuda().to(dtype=dtype)
     starting_tensor = q(a)
     assert starting_tensor._row_scaled_nvfp4 == row_scaled_nvfp4
-    assert starting_tensor._use_4over6 == use_4over6
+    assert starting_tensor._nvfp4_use_4over6 == use_4over6
     assert starting_tensor._amax_rowwise.numel() == (M if row_scaled_nvfp4 else 1)
     dequantized_tensor = starting_tensor.dequantize()
     new_tensor = q(dequantized_tensor)
     assert new_tensor._row_scaled_nvfp4 == row_scaled_nvfp4
-    assert new_tensor._use_4over6 == use_4over6
+    assert new_tensor._nvfp4_use_4over6 == use_4over6
     assert new_tensor._amax_rowwise.numel() == (M if row_scaled_nvfp4 else 1)
     # 4over6 can re-encode a dequantized block with the alternate 4/6 scale
     # choice while preserving the dequantized values.

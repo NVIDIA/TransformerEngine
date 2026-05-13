@@ -1729,8 +1729,9 @@ NVFP4Quantizer::NVFP4Quantizer(const py::handle& quantizer) : Quantizer(quantize
   this->with_post_rht_amax = quantizer.attr("with_post_rht_amax").cast<bool>();
   this->with_2d_quantization = quantizer.attr("with_2d_quantization").cast<bool>();
   this->stochastic_rounding = quantizer.attr("stochastic_rounding").cast<bool>();
-  this->use_4over6 = quantizer.attr("use_4over6").cast<bool>();
-  this->nvfp4_e4m3_max = this->use_4over6 ? quantizer.attr("nvfp4_e4m3_max").cast<int>() : 448;
+  this->nvfp4_use_4over6 = quantizer.attr("nvfp4_use_4over6").cast<bool>();
+  this->nvfp4_e4m3_max =
+      this->nvfp4_use_4over6 ? quantizer.attr("nvfp4_e4m3_max").cast<int>() : 448;
   NVTE_CHECK(this->nvfp4_e4m3_max == 448 || this->nvfp4_e4m3_max == 256,
              "Unsupported NVFP4 E4M3 max: ", this->nvfp4_e4m3_max);
   const auto nvfp4_4over6_err_mode = quantizer.attr("nvfp4_4over6_err_mode").cast<std::string>();
@@ -1790,7 +1791,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
              "NVFP4 requires tensor dims that are divisible by ", NVFP4_BLOCK_SIZE,
              " (got shape=", shape, ")");
   const bool row_scaled_nvfp4 = this->row_scaled_nvfp4;
-  const bool use_4over6 = this->use_4over6;
+  const bool nvfp4_use_4over6 = this->nvfp4_use_4over6;
   const int nvfp4_e4m3_max = this->nvfp4_e4m3_max;
   if (row_scaled_nvfp4) {
     NVTE_CHECK(rowwise_usage, "Row-scaled NVFP4 quantization requires rowwise usage.");
@@ -1859,7 +1860,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
     kwargs["quantizer"] = this->quantizer;
     kwargs["with_gemm_swizzled_scales"] = py::cast(with_gemm_swizzled_scales);
     kwargs["row_scaled_nvfp4"] = py::cast(row_scaled_nvfp4);
-    kwargs["use_4over6"] = py::cast(use_4over6);
+    kwargs["nvfp4_use_4over6"] = py::cast(nvfp4_use_4over6);
     kwargs["nvfp4_e4m3_max"] = py::cast(nvfp4_e4m3_max);
     kwargs["fake_dtype"] = GetATenDType(dtype);
 
@@ -1891,7 +1892,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
     kwargs["with_gemm_swizzled_scales"] = py::cast(with_gemm_swizzled_scales);
     kwargs["device"] = py::cast(device);
     kwargs["row_scaled_nvfp4"] = py::cast(row_scaled_nvfp4);
-    kwargs["use_4over6"] = py::cast(use_4over6);
+    kwargs["nvfp4_use_4over6"] = py::cast(nvfp4_use_4over6);
     kwargs["nvfp4_e4m3_max"] = py::cast(nvfp4_e4m3_max);
     py::tuple args(0);
     PyObject* result = PyObject_Call(reinterpret_cast<PyObject*>(NVFP4TensorPythonClass),
@@ -1926,7 +1927,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
   }
   out_cpp.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
   out_cpp.set_row_scaled_nvfp4(row_scaled_nvfp4);
-  out_cpp.set_nvfp4_4over6(use_4over6);
+  out_cpp.set_nvfp4_4over6(nvfp4_use_4over6);
   out_cpp.set_nvfp4_e4m3_max(nvfp4_e4m3_max);
   this->set_quantization_params(&out_cpp);
 
@@ -1956,7 +1957,7 @@ std::pair<GroupedTensorWrapper, py::object> NVFP4Quantizer::create_grouped_tenso
   std::optional<at::Tensor> columnwise_amax;
   const std::vector<size_t> logical_shape_vec = {logical_first_dim, logical_last_dim};
   const bool row_scaled_nvfp4 = this->row_scaled_nvfp4;
-  const bool use_4over6 = this->use_4over6;
+  const bool nvfp4_use_4over6 = this->nvfp4_use_4over6;
   const int nvfp4_e4m3_max = this->nvfp4_e4m3_max;
   if (row_scaled_nvfp4) {
     NVTE_CHECK(rowwise_usage, "Row-scaled NVFP4 grouped quantization requires rowwise usage.");
@@ -2032,7 +2033,7 @@ std::pair<GroupedTensorWrapper, py::object> NVFP4Quantizer::create_grouped_tenso
   kwargs["tensor_offsets"] = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none();
   kwargs["with_gemm_swizzled_scales"] = this->optimize_for_gemm;
   kwargs["row_scaled_nvfp4"] = py::cast(row_scaled_nvfp4);
-  kwargs["use_4over6"] = py::cast(use_4over6);
+  kwargs["nvfp4_use_4over6"] = py::cast(nvfp4_use_4over6);
   kwargs["nvfp4_e4m3_max"] = py::cast(nvfp4_e4m3_max);
   PyObject* result = PyObject_Call(GroupedTensorClass.ptr(), args.ptr(), kwargs.ptr());
   if (result == nullptr) {
@@ -2109,7 +2110,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
 
   const auto [flat_first_dim, flat_last_dim] = get_2d_dims(shape);
   const bool row_scaled_nvfp4 = this->row_scaled_nvfp4;
-  const bool use_4over6 = this->use_4over6;
+  const bool nvfp4_use_4over6 = this->nvfp4_use_4over6;
   const int nvfp4_e4m3_max = this->nvfp4_e4m3_max;
   if (row_scaled_nvfp4) {
     NVTE_CHECK(rowwise_usage, "Row-scaled NVFP4 quantization requires rowwise usage.");
@@ -2117,7 +2118,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
                "Row-scaled NVFP4 quantization does not support columnwise usage.");
   }
   tensor.attr("_row_scaled_nvfp4") = py::cast(row_scaled_nvfp4);
-  tensor.attr("_use_4over6") = py::cast(use_4over6);
+  tensor.attr("_nvfp4_use_4over6") = py::cast(nvfp4_use_4over6);
   tensor.attr("_nvfp4_e4m3_max") = py::cast(nvfp4_e4m3_max);
 
   // Coerce row-wise data
@@ -2223,7 +2224,7 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
   }
   out_cpp.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
   out_cpp.set_row_scaled_nvfp4(row_scaled_nvfp4);
-  out_cpp.set_nvfp4_4over6(use_4over6);
+  out_cpp.set_nvfp4_4over6(nvfp4_use_4over6);
   out_cpp.set_nvfp4_e4m3_max(nvfp4_e4m3_max);
   this->set_quantization_params(&out_cpp);
 
@@ -2315,14 +2316,14 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
   }
   quant_config.set_nvfp4_2d_quantization(this->with_2d_quantization);
   quant_config.set_stochastic_rounding(this->stochastic_rounding);
-  quant_config.set_nvfp4_4over6(this->use_4over6);
+  quant_config.set_nvfp4_4over6(this->nvfp4_use_4over6);
   quant_config.set_nvfp4_e4m3_max(this->nvfp4_e4m3_max);
   quant_config.set_nvfp4_4over6_err_mode(this->nvfp4_4over6_err_mode);
-  quant_config_columnwise.set_nvfp4_4over6(this->use_4over6);
+  quant_config_columnwise.set_nvfp4_4over6(this->nvfp4_use_4over6);
   quant_config_columnwise.set_nvfp4_e4m3_max(this->nvfp4_e4m3_max);
   quant_config_columnwise.set_nvfp4_4over6_err_mode(this->nvfp4_4over6_err_mode);
 
-  if (this->use_4over6) {
+  if (this->nvfp4_use_4over6) {
     NVTE_CHECK(!this->with_rht, "NVFP4 4over6 quantization does not support RHT.");
     NVTE_CHECK(!this->stochastic_rounding,
                "NVFP4 4over6 quantization does not support stochastic rounding.");
@@ -2470,7 +2471,7 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
   // NVFP4 4over6 candidate error math is controlled separately by
   // NVTE_NVFP4_4OVER6_ERR_USE_FAST_MATH.
   const auto use_fast_math = transformer_engine::getenv<bool>("NVTE_USE_FAST_MATH");
-  if (use_fast_math && !this->use_4over6) {
+  if (use_fast_math && !this->nvfp4_use_4over6) {
     quant_config.set_use_fast_math(true);
     quant_config_columnwise.set_use_fast_math(true);
   }

@@ -198,7 +198,7 @@ def make_reference_and_test_tensors(
             with_2d_quantization=with_2d_quantization,
             stochastic_rounding=False,
             with_random_sign_mask=False,
-            use_4over6=quantization == "nvfp4_4over6",
+            nvfp4_use_4over6=quantization == "nvfp4_4over6",
         )(test)
     else:
         raise ValueError(f"Unsupported quantization scheme ({quantization})")

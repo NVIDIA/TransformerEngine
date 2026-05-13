@@ -83,7 +83,7 @@ def check_quantization_nvfp4_versus_reference(
         with_post_rht_amax=False,
         with_2d_quantization=with_2d_quantization,
         row_scaled_nvfp4=row_scaled_nvfp4,
-        use_4over6=use_4over6,
+        nvfp4_use_4over6=use_4over6,
         nvfp4_e4m3_max=nvfp4_e4m3_max,
         nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
@@ -119,7 +119,7 @@ def check_quantization_nvfp4_versus_reference(
         eps=0.0,
         quant_tile_shape=quant_tile_shape,
         row_scaled_nvfp4=row_scaled_nvfp4,
-        use_4over6=use_4over6,
+        nvfp4_use_4over6=use_4over6,
         nvfp4_e4m3_max=nvfp4_e4m3_max,
         nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
@@ -280,7 +280,7 @@ def test_nvfp4_quantization_extrema_versus_reference(
         with_rht=False,
         with_post_rht_amax=False,
         row_scaled_nvfp4=row_scaled_nvfp4,
-        use_4over6=use_4over6,
+        nvfp4_use_4over6=use_4over6,
         nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
 
@@ -313,7 +313,7 @@ def test_nvfp4_quantization_extrema_versus_reference(
         eps=0.0,
         quant_tile_shape=(1, 16),
         row_scaled_nvfp4=row_scaled_nvfp4,
-        use_4over6=use_4over6,
+        nvfp4_use_4over6=use_4over6,
         nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
     x_nvfp4_ref = ref_quantizer.quantize(x)
@@ -410,7 +410,7 @@ def test_nvfp4_quantization_boundary_values(
         with_rht=False,
         with_post_rht_amax=False,
         row_scaled_nvfp4=row_scaled_nvfp4,
-        use_4over6=use_4over6,
+        nvfp4_use_4over6=use_4over6,
         nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
 
@@ -443,7 +443,7 @@ def test_nvfp4_quantization_boundary_values(
         eps=0.0,
         quant_tile_shape=(1, 16),
         row_scaled_nvfp4=row_scaled_nvfp4,
-        use_4over6=use_4over6,
+        nvfp4_use_4over6=use_4over6,
         nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
     x_nvfp4_ref = ref_quantizer.quantize(x)
@@ -526,7 +526,7 @@ def test_nvfp4_quantization_noncontiguous_inputs(
         with_rht=False,
         with_post_rht_amax=False,
         row_scaled_nvfp4=row_scaled_nvfp4,
-        use_4over6=use_4over6,
+        nvfp4_use_4over6=use_4over6,
         nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
 
@@ -559,7 +559,7 @@ def test_nvfp4_quantization_noncontiguous_inputs(
         eps=0.0,
         quant_tile_shape=(1, 16),
         row_scaled_nvfp4=row_scaled_nvfp4,
-        use_4over6=use_4over6,
+        nvfp4_use_4over6=use_4over6,
         nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
     x_nvfp4_ref = ref_quantizer.quantize(x_nc)

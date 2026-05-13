@@ -328,7 +328,7 @@ class NVFP4Quantizer : public Quantizer {
   bool with_2d_quantization;
   bool stochastic_rounding;
   // Whether emitted NVFP4 tensors use 4over6 candidate selection.
-  bool use_4over6;
+  bool nvfp4_use_4over6;
   // Global E4M3 scale bound used by emitted NVFP4 tensors.
   int nvfp4_e4m3_max;
   NVTENVFP44Over6ErrMode nvfp4_4over6_err_mode;

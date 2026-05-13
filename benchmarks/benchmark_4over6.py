@@ -52,7 +52,7 @@ def make_quantizer(use_2d_quantization, use_4over6, err_mode):
         with_2d_quantization=use_2d_quantization,
         stochastic_rounding=False,
         row_scaled_nvfp4=False,
-        use_4over6=use_4over6,
+        nvfp4_use_4over6=use_4over6,
         nvfp4_e4m3_max=448,
         nvfp4_4over6_err_mode=err_mode,
         with_random_sign_mask=True,

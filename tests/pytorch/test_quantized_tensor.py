@@ -175,7 +175,7 @@ def make_reference_and_test_tensors(
             stochastic_rounding=False,
             row_scaled_nvfp4=row_scaled_nvfp4,
             with_random_sign_mask=False,
-            use_4over6=(quantization == "nvfp4_4over6"),
+            nvfp4_use_4over6=(quantization == "nvfp4_4over6"),
         )(test)
     else:
         raise ValueError(f"Unsupported quantization scheme ({quantization})")
@@ -750,7 +750,7 @@ class TestQuantizedTensor:
                 with_post_rht_amax=False,
                 with_2d_quantization=(quantization == "nvfp4_2d"),
                 row_scaled_nvfp4=row_scaled_nvfp4,
-                use_4over6=(quantization == "nvfp4_4over6"),
+                nvfp4_use_4over6=(quantization == "nvfp4_4over6"),
             )
             quantization = "nvfp4"
         else:

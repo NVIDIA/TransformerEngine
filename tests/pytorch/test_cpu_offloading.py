@@ -217,7 +217,7 @@ class Utils:
                 with_2d_quantization=qparams.fp4_2d_quantization,
                 stochastic_rounding=qparams.stochastic_rounding,
                 row_scaled_nvfp4=recipe.row_scaled_activation,
-                use_4over6=use_4over6,
+                nvfp4_use_4over6=use_4over6,
             )
             return quantizer(tensor)
 

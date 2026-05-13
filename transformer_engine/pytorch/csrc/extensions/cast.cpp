@@ -84,7 +84,7 @@ void group_quantize_nvfp4_impl(const GroupedTensorWrapper &grouped_input_tensor,
   // assert the 2D scaling case, since 2D scaling grouped quant kernel is not ready yet
   NVTE_CHECK(!nvfp4_quantizer_cpp->with_2d_quantization,
              "2D scaling grouped quant kernel is not ready yet");
-  NVTE_CHECK(!nvfp4_quantizer_cpp->use_4over6,
+  NVTE_CHECK(!nvfp4_quantizer_cpp->nvfp4_use_4over6,
              "NVFP4 4over6 quantization is not supported for grouped quantization.");
 
   auto quant_config_cpp = QuantizationConfigWrapper();
@@ -724,9 +724,8 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
   // Quantization parameters
   const auto rowwise_usage = quantizer_cpp_list[0]->rowwise_usage;
   const bool row_scaled_nvfp4 = quantizer_cpp_list[0]->row_scaled_nvfp4;
-  const bool use_4over6 = quantizer_cpp_list[0]->use_4over6;
+  const bool nvfp4_use_4over6 = quantizer_cpp_list[0]->nvfp4_use_4over6;
   const int nvfp4_e4m3_max = quantizer_cpp_list[0]->nvfp4_e4m3_max;
-  const auto nvfp4_4over6_err_mode = quantizer_cpp_list[0]->nvfp4_4over6_err_mode;
   const auto columnwise_usage = quantizer_cpp_list[0]->columnwise_usage;
   if (row_scaled_nvfp4) {
     NVTE_CHECK(rowwise_usage, "Row-scaled NVFP4 bulk allocation requires rowwise usage.");
@@ -871,11 +870,12 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
     py::object amax_columnwise = columnwise_usage ? py::cast(amax_columnwise_list[i]) : py::none();
 
     // Construct Python tensor
-    tensor_py_list.emplace_back(NVFP4TensorClass(
-        rowwise_data, rowwise_scale, columnwise_data, columnwise_scale, amax_rowwise,
-        amax_columnwise, fp4_dtype, quantizer_py_list[i], with_gemm_swizzled_scales,
-        py::arg("row_scaled_nvfp4") = row_scaled_nvfp4, py::arg("use_4over6") = use_4over6,
-        py::arg("nvfp4_e4m3_max") = nvfp4_e4m3_max));
+    tensor_py_list.emplace_back(
+        NVFP4TensorClass(rowwise_data, rowwise_scale, columnwise_data, columnwise_scale,
+                         amax_rowwise, amax_columnwise, fp4_dtype, quantizer_py_list[i],
+                         with_gemm_swizzled_scales, py::arg("row_scaled_nvfp4") = row_scaled_nvfp4,
+                         py::arg("nvfp4_use_4over6") = nvfp4_use_4over6,
+                         py::arg("nvfp4_e4m3_max") = nvfp4_e4m3_max));
 
     // Construct C++ tensor
     // Use a TensorWrapper variable to hold the output of makeTransformerEngineTensor,
@@ -893,7 +893,7 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
           columnwise_usage ? columnwise_scale_shapes[i] : std::vector<size_t>{0}, scaling_mode);
       tensor_wrapper.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
       tensor_wrapper.set_row_scaled_nvfp4(row_scaled_nvfp4);
-      tensor_wrapper.set_nvfp4_4over6(use_4over6);
+      tensor_wrapper.set_nvfp4_4over6(nvfp4_use_4over6);
       tensor_wrapper.set_nvfp4_e4m3_max(nvfp4_e4m3_max);
 
       // Set the amax rowwise and amax columnwise if available
@@ -1005,7 +1005,7 @@ void split_quantize_nvfp4_impl_with_rht_helper(const TensorWrapper &input,
                                                cudaStream_t stream) {
   const size_t num_tensors = split_sections.size();
   const auto &quantizer = *quantizers.front();
-  NVTE_CHECK(!quantizer.use_4over6,
+  NVTE_CHECK(!quantizer.nvfp4_use_4over6,
              "NVFP4 4over6 quantization is not supported with RHT split quantization.");
 
   std::vector<NVTETensor> nvte_tensor_input_list;
@@ -1043,12 +1043,12 @@ void split_quantize_nvfp4_impl_with_rht_helper(const TensorWrapper &input,
       need_separate_rng_states, quant_config_list, quant_config_list_colwise);
 
   for (auto &config : quant_config_list) {
-    config.set_nvfp4_4over6(quantizer.use_4over6);
+    config.set_nvfp4_4over6(quantizer.nvfp4_use_4over6);
     config.set_nvfp4_e4m3_max(quantizer.nvfp4_e4m3_max);
     config.set_nvfp4_4over6_err_mode(quantizer.nvfp4_4over6_err_mode);
   }
   for (auto &config : quant_config_list_colwise) {
-    config.set_nvfp4_4over6(quantizer.use_4over6);
+    config.set_nvfp4_4over6(quantizer.nvfp4_use_4over6);
     config.set_nvfp4_e4m3_max(quantizer.nvfp4_e4m3_max);
     config.set_nvfp4_4over6_err_mode(quantizer.nvfp4_4over6_err_mode);
   }
@@ -1063,7 +1063,7 @@ void split_quantize_nvfp4_impl_with_rht_helper(const TensorWrapper &input,
   // NVFP4 4over6 candidate error math is controlled separately by
   // NVTE_NVFP4_4OVER6_ERR_USE_FAST_MATH.
   const auto use_fast_math = transformer_engine::getenv<bool>("NVTE_USE_FAST_MATH");
-  if (use_fast_math && !quantizer.use_4over6) {
+  if (use_fast_math && !quantizer.nvfp4_use_4over6) {
     for (auto &config : quant_config_list) {
       config.set_use_fast_math(true);
     }
@@ -1191,7 +1191,7 @@ void split_quantize_nvfp4_impl_helper(const TensorWrapper &input,
                                       cudaStream_t stream) {
   const size_t num_tensors = input_list.size();
   const auto &quantizer = *quantizers.front();
-  NVTE_CHECK(!quantizer.use_4over6 || !quantizer.stochastic_rounding,
+  NVTE_CHECK(!quantizer.nvfp4_use_4over6 || !quantizer.stochastic_rounding,
              "NVFP4 4over6 quantization does not support stochastic rounding.");
 
   std::vector<NVTETensor> nvte_tensor_input_list;
@@ -1226,7 +1226,7 @@ void split_quantize_nvfp4_impl_helper(const TensorWrapper &input,
       dummy_quant_config_list_colwise);  // colwise rng states are not needed in this case
 
   for (auto &config : quant_config_list) {
-    config.set_nvfp4_4over6(quantizer.use_4over6);
+    config.set_nvfp4_4over6(quantizer.nvfp4_use_4over6);
     config.set_nvfp4_e4m3_max(quantizer.nvfp4_e4m3_max);
     config.set_nvfp4_4over6_err_mode(quantizer.nvfp4_4over6_err_mode);
   }
@@ -1234,7 +1234,7 @@ void split_quantize_nvfp4_impl_helper(const TensorWrapper &input,
   // NVFP4 4over6 candidate error math is controlled separately by
   // NVTE_NVFP4_4OVER6_ERR_USE_FAST_MATH.
   const auto use_fast_math = transformer_engine::getenv<bool>("NVTE_USE_FAST_MATH");
-  if (use_fast_math && !quantizer.use_4over6) {
+  if (use_fast_math && !quantizer.nvfp4_use_4over6) {
     for (auto &config : quant_config_list) {
       config.set_use_fast_math(true);
     }
@@ -1318,7 +1318,7 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
              "NVFP4 split-quantize does not support 2D quantization");
   NVTE_CHECK(!quantizer.with_amax_reduction,
              "NVFP4 split-quantize does not support amax reduction");
-  if (quantizer.use_4over6) {
+  if (quantizer.nvfp4_use_4over6) {
     NVTE_CHECK(!quantizer.with_rht, "NVFP4 4over6 quantization does not support RHT.");
     NVTE_CHECK(!quantizer.stochastic_rounding,
                "NVFP4 4over6 quantization does not support stochastic rounding.");

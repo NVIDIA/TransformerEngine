@@ -64,7 +64,7 @@ def check_nvfp4_gemm_versus_reference(
         with_rht=False,
         with_post_rht_amax=False,
         row_scaled_nvfp4=row_scaled_nvfp4,
-        use_4over6=use_4over6,
+        nvfp4_use_4over6=use_4over6,
         nvfp4_e4m3_max=nvfp4_e4m3_max,
         nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
@@ -76,7 +76,7 @@ def check_nvfp4_gemm_versus_reference(
         amax_reduction_group=None,
         with_rht=False,
         with_post_rht_amax=False,
-        use_4over6=use_4over6,
+        nvfp4_use_4over6=use_4over6,
         nvfp4_e4m3_max=nvfp4_e4m3_max,
         nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
@@ -134,7 +134,7 @@ def check_nvfp4_gemm_versus_reference(
         eps=0.0,
         quant_tile_shape=(1, 16),
         row_scaled_nvfp4=row_scaled_nvfp4,
-        use_4over6=use_4over6,
+        nvfp4_use_4over6=use_4over6,
         nvfp4_e4m3_max=nvfp4_e4m3_max,
         nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
@@ -145,7 +145,7 @@ def check_nvfp4_gemm_versus_reference(
         pow_2_scales=False,
         eps=0.0,
         quant_tile_shape=(1, 16),
-        use_4over6=use_4over6,
+        nvfp4_use_4over6=use_4over6,
         nvfp4_e4m3_max=nvfp4_e4m3_max,
         nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
@@ -268,7 +268,7 @@ def check_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
         with_rht=False,
         with_post_rht_amax=False,
         row_scaled_nvfp4=True,
-        use_4over6=use_4over6,
+        nvfp4_use_4over6=use_4over6,
         nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
     w_quantizer = NVFP4Quantizer(
@@ -279,7 +279,7 @@ def check_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
         amax_reduction_group=None,
         with_rht=False,
         with_post_rht_amax=False,
-        use_4over6=use_4over6,
+        nvfp4_use_4over6=use_4over6,
         nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
 
@@ -364,7 +364,7 @@ def check_nvfp4_row_scaled_gemm_matches_emulated(
         with_rht=False,
         with_post_rht_amax=False,
         row_scaled_nvfp4=True,
-        use_4over6=use_4over6,
+        nvfp4_use_4over6=use_4over6,
         nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
     x_tensorwise_quantizer = NVFP4Quantizer(
@@ -375,7 +375,7 @@ def check_nvfp4_row_scaled_gemm_matches_emulated(
         amax_reduction_group=None,
         with_rht=False,
         with_post_rht_amax=False,
-        use_4over6=use_4over6,
+        nvfp4_use_4over6=use_4over6,
         nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
     w_quantizer = NVFP4Quantizer(
@@ -386,7 +386,7 @@ def check_nvfp4_row_scaled_gemm_matches_emulated(
         amax_reduction_group=None,
         with_rht=False,
         with_post_rht_amax=False,
-        use_4over6=use_4over6,
+        nvfp4_use_4over6=use_4over6,
         nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
     )
 
