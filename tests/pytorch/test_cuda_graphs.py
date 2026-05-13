@@ -755,6 +755,50 @@ def test_make_graphed_callables_preserves_skipped_parameter_grad_alias() -> None
         reset_graphs(model)
 
 
+def test_make_graphed_callables_can_skip_returned_parameter_grad_clone() -> None:
+    """Parameter grad clone handling can be disabled for callers that manage lifetimes."""
+    reset_rng_states()
+    model_config = model_configs["small"]
+    dtype = torch.float32
+    model = torch.nn.Linear(
+        model_config.hidden_size,
+        model_config.hidden_size,
+        bias=False,
+        device="cuda",
+        dtype=dtype,
+    )
+    model = make_graphed_callables(
+        model,
+        (generate_data(model_config, dtype, warmup=True, requires_grad=False),),
+        _clone_param_grads_on_return=False,
+    )
+
+    seen_grads = []
+
+    def save_grad(grad):
+        seen_grads.append(grad)
+        return grad
+
+    hook = model.weight.register_hook(save_grad)
+    try:
+        output = model(generate_data(model_config, dtype, requires_grad=False))
+        output.backward(generate_data(model_config, dtype, requires_grad=False))
+
+        assert len(seen_grads) == 1
+        first_grad_ptr = seen_grads[0].data_ptr()
+
+        model.zero_grad(set_to_none=True)
+
+        output = model(generate_data(model_config, dtype, requires_grad=False))
+        output.backward(generate_data(model_config, dtype, requires_grad=False))
+
+        assert len(seen_grads) == 2
+        assert seen_grads[1].data_ptr() == first_grad_ptr
+    finally:
+        hook.remove()
+        reset_graphs(model)
+
+
 def test_make_graphed_callables_snapshots_parameter_grad_clone_policy() -> None:
     """Parameter grad clone policy is fixed at capture time."""
     reset_rng_states()
@@ -808,6 +852,7 @@ def _test_cuda_graphs_with_interleaved_pipeline_parallelism(
     model_config: ModelConfig,
     dtype: torch.dtype,
     reuse_graph_input_output_buffers: bool = False,
+    clone_param_grads_on_return: bool = True,
 ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
     """Simulate Megatron-LM interleaved pipeline parallelism."""
     reset_rng_states()
@@ -849,6 +894,7 @@ def _test_cuda_graphs_with_interleaved_pipeline_parallelism(
             allow_unused_input=True,
             _order=layer_order,
             _reuse_graph_input_output_buffers=reuse_graph_input_output_buffers,
+            _clone_param_grads_on_return=clone_param_grads_on_return,
         )
         layer_forwards = {
             (i // num_microbatches, i % num_microbatches): forward
@@ -950,6 +996,28 @@ def test_make_graphed_callables_with_interleaved_pipeline_parallelism_reused_buf
     graph_outputs, graph_weights = _test_cuda_graphs_with_interleaved_pipeline_parallelism(
         with_graph=True,
         reuse_graph_input_output_buffers=True,
+        **kwargs,
+    )
+    assert_all_equal(outputs, graph_outputs)
+    assert_all_equal(weights, graph_weights)
+
+
+def test_make_graphed_callables_with_interleaved_pipeline_parallelism_reused_buffers_no_param_grad_clone(
+    *,
+    model_config: str = "small",
+    dtype: torch.dtype = torch.float16,
+) -> None:
+    """Test reused input/output buffers when returned parameter grad clones are disabled."""
+    model_config = model_configs[model_config]
+    kwargs = dict(model_config=model_config, dtype=dtype)
+    outputs, weights = _test_cuda_graphs_with_interleaved_pipeline_parallelism(
+        with_graph=False,
+        **kwargs,
+    )
+    graph_outputs, graph_weights = _test_cuda_graphs_with_interleaved_pipeline_parallelism(
+        with_graph=True,
+        reuse_graph_input_output_buffers=True,
+        clone_param_grads_on_return=False,
         **kwargs,
     )
     assert_all_equal(outputs, graph_outputs)
