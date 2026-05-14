@@ -589,18 +589,12 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
             probs_stride_token = 0
             probs_stride_expert = 0
 
-        # Per-config grid: size by autotune-selected BLOCK_SIZE. With a fixed
-        # grid sized for the smallest BLOCK_SIZE, larger configs over-launch by
-        # the BLOCK_SIZE ratio (every extra block masks out and exits) — the
-        # cause of the perm-kernel perf regression vs jax-triton's autotuner.
+        # We use BLOCK_SIZE in the grid calculation to ensure the grid is the
+        # proper size. If the grid size is an overestimate it can significantly
+        # hurt performance.
         def grid(meta):
             return (num_tokens, triton.cdiv(hidden_size, meta["BLOCK_SIZE"]))
 
-        # block_size populates the BLOCK_SIZE entry in constexprs so the wrapper
-        # marks it constexpr in the kernel signature. The autotune loop
-        # overrides it per config; on the old-JAX fallback path the caller's
-        # value wins (utils.py merges {**first_cfg.kwargs, **constexprs}),
-        # which is why we pass the smallest config's BLOCK_SIZE explicitly.
         block_size = _get_min_block_size(_permute_kernel)
 
         # Use input_output_aliases to alias pre-zeroed buffers to outputs.
@@ -1006,15 +1000,12 @@ class UnpermuteWithMaskMapPrimitive(BasePrimitive):
         unpermuted_probs_stride_token = num_experts
         unpermuted_probs_stride_expert = 1
 
-        # Per-config grid: size by autotune-selected BLOCK_SIZE.
+        # We use BLOCK_SIZE in the grid calculation to ensure the grid is the
+        # proper size. If the grid size is an overestimate it can significantly
+        # hurt performance.
         def grid(meta):
             return (num_tokens, triton.cdiv(hidden_size, meta["BLOCK_SIZE"]))
 
-        # block_size populates the BLOCK_SIZE entry in constexprs so the wrapper
-        # marks it constexpr in the kernel signature. The autotune loop
-        # overrides it per config; on the old-JAX fallback path the caller's
-        # value wins (utils.py merges {**first_cfg.kwargs, **constexprs}),
-        # which is why we pass the smallest config's BLOCK_SIZE explicitly.
         block_size = _get_min_block_size(_unpermute_kernel)
 
         return triton_call_lowering(
@@ -1736,15 +1727,12 @@ class SortChunksByMapPrimitive(BasePrimitive):
         probs_stride_token = 1
         permuted_probs_stride_token = 1
 
-        # Per-config grid: size by autotune-selected BLOCK_SIZE.
+        # We use BLOCK_SIZE in the grid calculation to ensure the grid is the
+        # proper size. If the grid size is an overestimate it can significantly
+        # hurt performance.
         def grid(meta):
             return (num_tokens, triton.cdiv(hidden_size, meta["BLOCK_SIZE"]))
 
-        # block_size populates the BLOCK_SIZE entry in constexprs so the wrapper
-        # marks it constexpr in the kernel signature. The autotune loop
-        # overrides it per config; on the old-JAX fallback path the caller's
-        # value wins (utils.py merges {**first_cfg.kwargs, **constexprs}),
-        # which is why we pass the smallest config's BLOCK_SIZE explicitly.
         block_size = _get_min_block_size(_sort_chunks_by_map_kernel)
 
         # Declare input_output_aliases so XLA knows output slot 0 is claimed by

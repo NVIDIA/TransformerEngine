@@ -439,6 +439,11 @@ def triton_call_lowering(
     tensor_arg_names = [n for n in arg_names if n not in constexpr_names]
     signature = {n: get_triton_dtype(a) for n, a in zip(tensor_arg_names, all_avals)}
 
+    assert callable(grid) or isinstance(grid, tuple), (
+        "Argument 'grid' must be a tuple or a callable but received: "
+        f"type={type(grid)}, value={grid}"
+    )
+
     # Normalize grid to 3D. When `grid` is a callable, defer evaluation until
     # we know the per-config meta (so each autotune config gets its own grid,
     # matching jax-triton's behavior).
@@ -457,12 +462,16 @@ def triton_call_lowering(
     else:
         grid_tuple = None  # evaluated per-config below
 
-    # Default values for the kernel
+    # Default kernel launch parameters. These apply to non-autotuned kernels
+    # and as a fallback when an autotuned config doesn't specify them. Values
+    # match Triton's own `triton.Config` defaults (num_warps=4, num_stages=3,
+    # num_ctas=1) and jax-triton's `get_or_create_triton_kernel`. Using a
+    # larger default (e.g. num_warps=32) over-provisions threads per block,
+    # which slashes SM occupancy on non-autotuned kernels — measured as an 8×
+    # slowdown on `_make_chunk_sort_map_kernel` vs jax-triton.
     actual_kernel_fn = kernel_fn
-    num_warps = 32
-    num_stages = (
-        1  # TODO(Phuong): consider if it is beneficial to expose num_warps, num_stages, num_ctas
-    )
+    num_warps = 4
+    num_stages = 3
     num_ctas = 1
     kernel_constexprs = constexprs if constexprs is not None else {}
 
