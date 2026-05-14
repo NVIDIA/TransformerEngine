@@ -238,9 +238,45 @@ Other important keys:
 
 - ``underflow_threshold_pct``: switch trigger based on underflow percentage.
 - ``mse_threshold``: switch trigger based on quantization MSE.
-- metrics are consumed in the same iteration where they are computed.
+- ``freq``: sampling interval. A sampled threshold breach at iteration ``n`` keeps
+  that ``(layer, gemm)`` in high precision through ``n + freq - 1``.
+- ``start_step`` / ``end_step`` / ``start_end_list``: sampling windows. If ``end_step``
+  is omitted, sampling continues according to ``freq`` after ``start_step``.
 - ``allow_fp8_model_params_dequantized_weight``: allows ``fprop``/``dgrad`` switching
-  for layers with FP8 model parameters by using dequantized temporary weights.
+  for layers with quantized model parameters by using temporary dequantized weights.
+- ``AutoswitchGemm`` should use the same ``freq`` / sampling window as companion
+  tensor-inspection features such as ``LogTensorStats`` when they share the same
+  layers and tensors.
+
+Example for attention and MLP linear layers:
+
+.. code-block:: yaml
+
+    log_tensor_stats_all:
+      enabled: True
+      layers:
+        layer_types: [linear_qkv, linear_proj, linear_fc1, linear_fc2]
+      transformer_engine:
+        LogTensorStats:
+          enabled: True
+          stats: [max, min, mean, std, dynamic_range, cur_amax]
+          tensors: [activation, gradient, weight]
+          freq: 10
+          start_step: 10
+        AutoswitchGemm:
+          enabled: True
+          gemms: [fprop, dgrad, wgrad]
+          tensors: [activation, weight, gradient]
+          underflow_threshold_pct: 5
+          mse_threshold: 0.1
+          allow_fp8_model_params_dequantized_weight: True
+          freq: 10
+          start_step: 10
+
+For CUDA Graph training, sampling and high-precision windows must be executed in eager
+mode. Quantized windows may continue to use CUDA Graphs if the training framework routes
+them separately. The Megatron-LM integration used by this example depends on:
+https://github.com/shangxiaokang/Megatron-LM/tree/autogemm
 
 Enabling or Disabling Sections and Features
 -------------------------------------------

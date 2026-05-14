@@ -219,33 +219,53 @@ AutoswitchGemm quick guide
 --------------------------
 
 ``AutoswitchGemm`` monitors quantization quality and can dynamically switch selected GEMMs
-to high precision when thresholds are exceeded.
+to high precision when thresholds are exceeded. It supports the normal FP8 paths as well
+as block-scaled formats such as FP8 blockwise and MXFP8, as long as the selected TE module
+routes the GEMM through the AutoswitchGemm runtime hooks.
 
-Minimal config example:
+Example config matching attention and MLP linears:
 
 .. code-block:: yaml
 
-    autoswitch_fc_layers:
+    log_tensor_stats_all:
       enabled: True
       layers:
-        layer_types: [fc1, fc2]
+        layer_types: [linear_qkv, linear_proj, linear_fc1, linear_fc2]
       transformer_engine:
+        LogTensorStats:
+          enabled: True
+          stats: [max, min, mean, std, dynamic_range, cur_amax]
+          tensors: [activation, gradient, weight]
+          freq: 10
+          start_step: 10
         AutoswitchGemm:
           enabled: True
           gemms: [fprop, dgrad, wgrad]
-          underflow_threshold_pct: 1.0
-          mse_threshold: 1.0e-4
-          # Needed only if the layer uses fp8 model parameters and
-          # you want fprop/dgrad to be able to switch to high precision.
-          allow_fp8_model_params_dequantized_weight: False
-          freq: 1
+          tensors: [activation, weight, gradient]
+          underflow_threshold_pct: 5
+          mse_threshold: 0.1
+          allow_fp8_model_params_dequantized_weight: True
+          freq: 10
+          start_step: 10
 
 Behavior summary:
 
 1. For each ``(layer, gemm)``, AutoswitchGemm tracks the latest tensor metrics and applies
    OR logic across monitored tensors: if any tensor breaches thresholds, that GEMM switches.
-2. Metrics computed in iteration ``n`` are consumed in iteration ``n`` only.
-3. If thresholds are not breached in the current iteration, the GEMM stays quantized.
+2. Sampling is controlled by ``start_step``, ``end_step`` / ``start_end_list``, and
+   ``freq``. For example, ``start_step: 10`` and ``freq: 10`` samples at steps
+   10, 20, 30, ...
+3. A threshold breach at sampling step ``n`` keeps the affected ``(layer, gemm)`` in
+   high precision through ``n + freq - 1``. The next sampling step refreshes the
+   decision; if thresholds are not breached, the GEMM returns to quantized execution.
+4. If model parameters are stored in a quantized format, set
+   ``allow_fp8_model_params_dequantized_weight: True`` to allow ``fprop`` and
+   ``dgrad`` to switch by using temporary dequantized weights.
+5. When CUDA Graphs are used, sampling and high-precision windows must run in eager
+   mode. Quantized windows can continue using CUDA Graphs if the training framework
+   supports this routing. Megatron-LM support for this workflow depends on the
+   ``autogemm`` branch:
+   https://github.com/shangxiaokang/Megatron-LM/tree/autogemm
 
 When AutoswitchGemm is enabled, an additional directory is created under ``log_dir``:
 
@@ -259,6 +279,16 @@ It contains per-rank, per-iteration metrics such as:
 - ``<layer>_<gemm>_disable_until_iter``
 - ``<layer>_<gemm>_switch_blocked_fp8_model_params``
 - ``<layer>_<gemm>_fp8_model_params_dequantized_fallback``
+- ``<layer>_<gemm>_final_decision`` with fields such as
+  ``requested_precision``, ``precision``, ``lhs_quantized``, and ``rhs_quantized``.
+
+A typical Megatron-LM launch exports the debug config and log directory:
+
+.. code-block:: bash
+
+   export ENABLE_NVDFW_INSPECT=1
+   export NVDFW_CONFIG_FILE=/path/to/nvdlfw_inspect_30b.yaml
+   export NVDFW_LOG_DIR=/path/to/output/nvdlfw_logs
 
 Logging using TensorBoard
 -------------------------

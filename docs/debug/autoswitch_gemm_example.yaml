@@ -10,63 +10,46 @@
 #   ...
 #   debug_api.step()  # call once per training step
 
-autoswitch_attention_blocks:
+log_tensor_stats_all:
   enabled: True
   layers:
-    # Match attention linear layers, e.g. *.qkv / *.proj
-    layer_name_regex_pattern: ".*(qkv|proj).*"
+    # Names may be inferred by Megatron/TE. This matches attention linears and
+    # common MLP/MoE linears used by Qwen3-style models.
+    layer_types: [linear_qkv, linear_proj, linear_fc1, linear_fc2]
   transformer_engine:
-    AutoswitchGemm:
+    LogTensorStats:
       enabled: True
-
-      # Optional. If omitted, tensors are inferred from selected gemms:
-      # fprop -> [activation, weight], dgrad -> [gradient, weight],
-      # wgrad -> [activation, gradient].
-      tensors: [activation, weight, gradient]
-
-      # Per-GEMM switching policy.
-      gemms_struct:
-        - gemm: fprop
-          underflow_threshold_pct: 1.0
-          mse_threshold: 1.0e-4
-        - gemm: dgrad
-          underflow_threshold_pct: 1.5
-          mse_threshold: 1.5e-4
-        - gemm: wgrad
-          underflow_threshold_pct: 2.0
-          mse_threshold: 2.0e-4
-
-      # For layers with fp8 model parameters:
-      # - False: keep fprop/dgrad quantized
-      # - True: allow high-precision switch via temporary dequantized weights
-      allow_fp8_model_params_dequantized_weight: False
-
-      # Collect metrics every step after warmup.
-      freq: 1
+      stats: [max, min, mean, std, dynamic_range, cur_amax]
+      tensors: [activation, gradient, weight]
+      # Match AutoswitchGemm's schedule when both features share the same
+      # inspect_tensor_enabled API calls.
+      freq: 10
       start_step: 10
-      end_step: 5000
 
-
-autoswitch_mlp_blocks:
-  enabled: True
-  layers:
-    layer_types: [fc1, fc2]
-  transformer_engine:
     AutoswitchGemm:
       enabled: True
 
-      # Simpler global policy (shared by selected GEMMs).
-      gemms: [fprop, wgrad]
+      # Enable all GEMM paths. If tensors are omitted, AutoswitchGemm infers:
+      # fprop -> [activation, weight]
+      # dgrad -> [gradient, weight]
+      # wgrad -> [activation, gradient]
+      gemms: [fprop, dgrad, wgrad]
       tensors: [activation, weight, gradient]
 
-      underflow_threshold_pct: 3.0
-      mse_threshold: 3.0e-4
+      # Switch to high precision when any monitored tensor for the GEMM
+      # exceeds either threshold.
+      underflow_threshold_pct: 5
+      mse_threshold: 0.1
 
-      # Example sparse monitoring windows.
-      freq: 2
-      start_end_list:
-        - [0, 300]
-        - [800, 3000]
+      # If model parameters are stored in a quantized format, fprop/dgrad can
+      # switch to high precision by using temporary dequantized weights.
+      allow_fp8_model_params_dequantized_weight: True
+
+      # Start sampling at step 10, then sample every 10 steps. A threshold
+      # breach at step N keeps that (layer, GEMM) in high precision through
+      # step N + freq - 1. The next sampling step refreshes the decision.
+      freq: 10
+      start_step: 10
 
 # Autoswitch per-rank metrics are written to:
 #   <log_dir>/nvdlfw_inspect_autoswitchgemm_logs/nvdlfw_inspect_globalrank-<rank>.log
