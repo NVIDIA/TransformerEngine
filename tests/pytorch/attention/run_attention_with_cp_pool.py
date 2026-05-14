@@ -70,7 +70,14 @@ def _send_response(rank: int, payload: dict) -> None:
 
 
 def _reset_between_cases() -> None:
-    """Drop state that would otherwise cascade across cases."""
+    """Drop state that would otherwise cascade across cases.
+
+    Matches the per-case startup of the single-shot worker (``_run_single_config``
+    on the per-case-subprocess branch): identical RNG seed at the start of every
+    case, FP8 state cleared, transient env vars cleared, allocator clean.
+    """
+    torch.manual_seed(1234)
+    torch.cuda.manual_seed(1234)
     FP8GlobalStateManager.reset()
     for env_key in _TRANSIENT_ENV_KEYS:
         os.environ.pop(env_key, None)
@@ -82,13 +89,14 @@ def _run_one(req: dict, rank: int) -> tuple[bool, str]:
     op = req["op"]
     if op != "run":
         return False, f"unknown op: {op}"
+    # Reset BEFORE the case so the first case also starts from a known RNG seed
+    # and clean FP8 state — same as the single-shot worker's per-process startup.
+    _reset_between_cases()
     try:
         run_dpa_with_cp(**req.get("kwargs", {}))
         return True, ""
     except Exception:
         return False, f"[Rank {rank}] {traceback.format_exc()}"
-    finally:
-        _reset_between_cases()
 
 
 def main() -> None:
