@@ -212,7 +212,7 @@ class PoolWorker:
 
             scanned += 1
             if line.startswith(self._RESP_PREFIX):
-                resp_line = line[len(self._RESP_PREFIX):]
+                resp_line = line[len(self._RESP_PREFIX) :]
                 break
             # Otherwise: non-protocol stdout from somewhere. Echo to test stderr
             # so it's still visible in CI logs, then keep looking.
