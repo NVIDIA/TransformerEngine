@@ -1003,7 +1003,7 @@ def _make_float8_tensor_in_reduce_ex(
         fp8_scale_inv=fp8_scale_inv,
         dtype=dtype,
         shape=shape,
-        device=data.device
+        device=data.device,
     )
 
 

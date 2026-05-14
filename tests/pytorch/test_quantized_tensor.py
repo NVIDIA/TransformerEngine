@@ -624,8 +624,7 @@ class TestQuantizedTensor:
         shape: Iterable[int] = (128, 128),
         dtype: torch.dtype = torch.bfloat16,
     ) -> None:
-        """Dequantize on a CPU-resident QuantizedTensor.
-        """
+        """Dequantize on a CPU-resident QuantizedTensor."""
 
         # Construct a quantized tensor on CUDA.
         _, x_cuda = make_reference_and_test_tensors(

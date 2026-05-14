@@ -674,11 +674,13 @@ class QuantizedTensor(torch.Tensor):
                             value = value.pin_memory()
                     new_metadata[key] = value
                 # Update torch Tensor metadata
-                new_metadata.update({
-                    "dtype": tensor.dtype,
-                    "shape": tensor.shape,
-                    "requires_grad": tensor.requires_grad,
-                })
+                new_metadata.update(
+                    {
+                        "dtype": tensor.dtype,
+                        "shape": tensor.shape,
+                        "requires_grad": tensor.requires_grad,
+                    }
+                )
                 return type(tensor)(**new_metadata)
 
         # View op
