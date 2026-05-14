@@ -256,6 +256,7 @@ class Float8BlockQuantizer(Quantizer):
             quantizer=self,
             is_2D_scaled=self.block_scaling_dim == 2,
             requires_grad=requires_grad,
+            device=tensor_kwargs["device"],
         )
 
     def calibrate(self, tensor: torch.Tensor) -> None:
@@ -662,6 +663,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
                 columnwise_scale_inv=None,
                 quantizer=self._quantizer,
                 is_2D_scaled=is_2D_scaled,
+                device=rowwise_data.device,
             )
 
         # For 2D block scaling, derive columnwise data and scales from rowwise
@@ -697,6 +699,13 @@ def _make_float8_blockwise_tensor_in_reduce_ex(
     as an ``int`` and converted back to the pybind11 ``TE_DType`` enum
     here.
     """
+    # Infer device from inner buffers so the wrapper subclass stays
+    # consistent with its data (e.g. CPU after DCP staging deserialize).
+    device = None
+    if rowwise_data is not None:
+        device = rowwise_data.device
+    elif columnwise_data is not None:
+        device = columnwise_data.device
     return Float8BlockwiseQTensor(
         shape=shape,
         rowwise_data=rowwise_data,
@@ -707,6 +716,7 @@ def _make_float8_blockwise_tensor_in_reduce_ex(
         dtype=dtype,
         quantizer=quantizer,
         is_2D_scaled=is_2D_scaled,
+        device=device,
     )
 
 
@@ -791,6 +801,7 @@ class _ViewFunc(torch.autograd.Function):
             quantizer=tensor._quantizer,
             is_2D_scaled=tensor._is_2D_scaled,
             requires_grad=tensor.requires_grad,
+            device=tensor.device,
         )
 
     @staticmethod
@@ -820,6 +831,7 @@ class _ViewFunc(torch.autograd.Function):
                 quantizer=grad._quantizer,
                 is_2D_scaled=grad._is_2D_scaled,
                 requires_grad=grad.requires_grad,
+                device=grad.device,
             )
             return dgrad, None
         return grad.view(ctx.shape), None
@@ -905,6 +917,7 @@ class _ReshapeFunc(torch.autograd.Function):
             quantizer=tensor._quantizer,
             is_2D_scaled=tensor._is_2D_scaled,
             requires_grad=tensor.requires_grad,
+            device=tensor.device,
         )
 
     @staticmethod
@@ -933,6 +946,7 @@ class _ReshapeFunc(torch.autograd.Function):
                 quantizer=grad._quantizer,
                 is_2D_scaled=grad._is_2D_scaled,
                 requires_grad=grad.requires_grad,
+                device=grad.device,
             )
             return dgrad, None
         return grad.view(ctx.shape), None

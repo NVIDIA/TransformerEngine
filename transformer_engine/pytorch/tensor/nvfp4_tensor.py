@@ -388,6 +388,7 @@ class NVFP4Quantizer(Quantizer):
             requires_grad=requires_grad,
             with_gemm_swizzled_scales=False,
             row_scaled_nvfp4=self.row_scaled_nvfp4,
+            device=device,
         )
 
     def calibrate(self, tensor: torch.Tensor) -> None:
@@ -677,6 +678,7 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
                 quantizer=self._quantizer,
                 requires_grad=False,
                 with_gemm_swizzled_scales=False,
+                device=rowwise_data.device,
             )
 
         # Derive columnwise data locally via transpose instead of all-gathering it
@@ -815,6 +817,7 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
                 quantizer=tensor._quantizer,
                 requires_grad=tensor.requires_grad,
                 with_gemm_swizzled_scales=tensor._with_gemm_swizzled_scales,
+                device=tensor.device,
             )
 
         # Default case
@@ -950,6 +953,14 @@ def _make_nvfp4_tensor_in_reduce_ex(
     as an ``int`` and converted back to the pybind11 ``TE_DType`` enum
     here.
     """
+    # Infer device from whichever inner buffer is populated so the wrapper
+    # subclass stays consistent with its data buffers (e.g. CPU after DCP
+    # async-staging deserialize, CUDA after the usual quantize path).
+    device = None
+    if rowwise_data is not None:
+        device = rowwise_data.device
+    elif columnwise_data is not None:
+        device = columnwise_data.device
     return NVFP4Tensor(
         shape=shape,
         dtype=dtype,
@@ -963,6 +974,7 @@ def _make_nvfp4_tensor_in_reduce_ex(
         quantizer=quantizer,
         requires_grad=False,
         with_gemm_swizzled_scales=with_gemm_swizzled_scales,
+        device=device,
     )
 
 
@@ -1045,6 +1057,7 @@ class _ViewFunc(torch.autograd.Function):
             fp4_dtype=tensor._fp4_dtype,
             requires_grad=tensor.requires_grad,
             with_gemm_swizzled_scales=tensor._with_gemm_swizzled_scales,
+            device=tensor.device,
         )
 
     @staticmethod
@@ -1087,6 +1100,7 @@ class _ViewFunc(torch.autograd.Function):
                 fp4_dtype=grad._fp4_dtype,
                 requires_grad=grad.requires_grad,
                 with_gemm_swizzled_scales=grad._with_gemm_swizzled_scales,
+                device=grad.device,
             )
             return dgrad, None
         return grad.view(ctx.shape), None
@@ -1171,6 +1185,7 @@ class _ReshapeFunc(torch.autograd.Function):
             fp4_dtype=tensor._fp4_dtype,
             requires_grad=tensor.requires_grad,
             with_gemm_swizzled_scales=tensor._with_gemm_swizzled_scales,
+            device=tensor.device,
         )
 
     @staticmethod
@@ -1213,6 +1228,7 @@ class _ReshapeFunc(torch.autograd.Function):
                 fp4_dtype=grad._fp4_dtype,
                 requires_grad=grad.requires_grad,
                 with_gemm_swizzled_scales=grad._with_gemm_swizzled_scales,
+                device=grad.device,
             )
             return dgrad, None
         return grad.view(ctx.shape), None

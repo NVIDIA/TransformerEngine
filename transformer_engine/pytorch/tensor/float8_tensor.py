@@ -197,6 +197,7 @@ class Float8Quantizer(Quantizer):
             requires_grad=requires_grad,
             data_transpose=None,
             quantizer=self,
+            device=data.device,
         )
 
     def onnx_quantize(self, tensor: torch.Tensor) -> QuantizedTensor:
@@ -420,6 +421,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
             requires_grad=requires_grad,
             data_transpose=None,
             quantizer=self,
+            device=data.device,
         )
 
     def get_columnwise_shape(self, rowwise_data_shape: Iterable[int]) -> Tuple[int, ...]:
@@ -440,6 +442,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
             requires_grad=False,
             data_transpose=None,
             quantizer=self,
+            device=data.device,
         )
 
     def onnx_dequantize(self, tensor: QuantizedTensor) -> torch.Tensor:
@@ -672,6 +675,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                 fp8_dtype=tensor._fp8_dtype,
                 data_transpose=out_transpose,
                 quantizer=tensor._quantizer,
+                device=tensor.device,
             )
 
         if func in (aten.slice.Tensor, aten.select.int):
@@ -772,6 +776,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                 fp8_scale_inv=scale_inv,
                 data_transpose=func_transposed_out,
                 quantizer=quantizer,
+                device=tensor.device,
             )
             return out_tensor
 
@@ -945,6 +950,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                 "quantizer": self._quantizer,
                 "requires_grad": False,
                 "data": data,
+                "device": data.device,
             }
             out = Float8Tensor(**fp8_args)
 
@@ -1082,6 +1088,7 @@ def _make_float8_tensor_in_reduce_ex(
         fp8_scale_inv=fp8_scale_inv,
         dtype=dtype,
         shape=shape,
+        device=data.device
     )
 
 
@@ -1121,6 +1128,7 @@ class _ViewFunc(torch.autograd.Function):
             fp8_dtype=tensor._fp8_dtype,
             data_transpose=out_transpose,
             quantizer=tensor._quantizer,
+            device=tensor.device,
         )
 
     @staticmethod
@@ -1168,6 +1176,7 @@ class _ReshapeFunc(torch.autograd.Function):
             fp8_dtype=tensor._fp8_dtype,
             data_transpose=out_transpose,
             quantizer=tensor._quantizer,
+            device=tensor.device,
         )
 
     @staticmethod

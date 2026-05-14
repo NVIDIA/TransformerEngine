@@ -636,27 +636,27 @@ class QuantizedTensor(torch.Tensor):
         if func == torch.ops.aten._to_copy.default:
             tensor = args[0]
             kw = dict(kwargs) if kwargs else {}
-            target_device = kw.get("device", tensor.device) or tensor.device
-            target_device = torch.device(target_device)
-            target_dtype = kw.get("dtype", tensor.dtype) or tensor.dtype
-            pin_memory = bool(kw.get("pin_memory", False))
-            non_blocking = bool(kw.get("non_blocking", False))
-
-            new_metadata = {}
-            for key, value in tensor.get_metadata().items():
-                if isinstance(value, torch.Tensor):
-                    value = value.to(device=target_device, non_blocking=non_blocking)
-                    if pin_memory and target_device.type == "cpu":
-                        value = value.pin_memory()
-                new_metadata[key] = value
-            new_metadata["fake_dtype"] = target_dtype
-            return type(tensor)(
-                shape=tensor.shape,
-                dtype=target_dtype,
-                requires_grad=tensor.requires_grad,
-                device=target_device,
-                **new_metadata,
-            )
+            dtype = kw.get("dtype", None)
+            if dtype is None or dtype == tensor.dtype:
+                target_device = kw.get("device", tensor.device) or tensor.device
+                target_device = torch.device(target_device)
+                pin_memory = bool(kw.get("pin_memory", False))
+                non_blocking = bool(kw.get("non_blocking", False))
+                new_metadata = {"device": target_device}
+                # Update tensor storage metadata
+                for key, value in tensor.get_metadata().items():
+                    if isinstance(value, torch.Tensor):
+                        value = value.to(device=target_device, non_blocking=non_blocking)
+                        if pin_memory and target_device.type == "cpu":
+                            value = value.pin_memory()
+                    new_metadata[key] = value
+                # Update torch Tensor metadata
+                new_metadata.update({
+                    "dtype": tensor.dtype,
+                    "shape": tensor.shape,
+                    "requires_grad": tensor.requires_grad,
+                })
+                return type(tensor)(**new_metadata)
 
         # View op
         if func == torch.ops.aten.view.default:
