@@ -43,3 +43,7 @@ tensor_dumps/
 artifacts/
 .DS_Store
 .claude/
+.agents/
+.codex/
+AGENTS.md
+CLAUDE.md
