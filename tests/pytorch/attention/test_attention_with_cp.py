@@ -86,9 +86,7 @@ class PoolWorker:
 
     def _spawn(self) -> None:
         te_path = os.getenv("TE_PATH", "/opt/transformerengine")
-        worker = os.path.join(
-            te_path, "tests/pytorch/attention/run_attention_with_cp_pool.py"
-        )
+        worker = os.path.join(te_path, "tests/pytorch/attention/run_attention_with_cp_pool.py")
         cmd = [
             sys.executable,
             "-m",
@@ -172,9 +170,7 @@ def cp_pool():
 
     def _get(world_size: int) -> PoolWorker:
         if world_size > torch.cuda.device_count():
-            pytest.skip(
-                f"Test requires {world_size} GPUs, but found {torch.cuda.device_count()}"
-            )
+            pytest.skip(f"Test requires {world_size} GPUs, but found {torch.cuda.device_count()}")
         if world_size not in pools:
             pools[world_size] = PoolWorker(world_size)
         return pools[world_size]
