@@ -130,12 +130,13 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
 }
 
 template <typename FirstDimT>
-__global__ void __launch_bounds__(kThreadsPerBlock) prepare_grouped_splits_kernel(
-    const FirstDimT *__restrict__ first_dims, int64_t *__restrict__ first_dims_i64,
-    int64_t *__restrict__ base_offsets,
-    int32_t *__restrict__ split_points, int64_t *__restrict__ tensor_offsets,
-    int64_t logical_last_dim, size_t num_tensors) {
-
+__global__ void __launch_bounds__(kThreadsPerBlock)
+    prepare_grouped_splits_kernel(const FirstDimT *__restrict__ first_dims,
+                                  int64_t *__restrict__ first_dims_i64,
+                                  int64_t *__restrict__ base_offsets,
+                                  int32_t *__restrict__ split_points,
+                                  int64_t *__restrict__ tensor_offsets, int64_t logical_last_dim,
+                                  size_t num_tensors) {
   __shared__ int64_t block_scan[kThreadsPerBlock];
   __shared__ int64_t chunk_prefix;
 
@@ -243,16 +244,15 @@ void nvte_prepare_grouped_splits(const NVTETensor first_dims, NVTETensor first_d
     return tensor->dim() == 1 && tensor->dtype() == dtype && tensor->numel() == numel;
   };
 
-  NVTE_CHECK(
-      num_tensors > 0 && logical_last_dim >= 0 && first_dims_tensor->dim() == 1 &&
-          (first_dims_dtype == DType::kInt32 || first_dims_dtype == DType::kInt64) &&
-          is_tensor(first_dims_i64_tensor, DType::kInt64, num_tensors) &&
-          is_tensor(base_offsets_tensor, DType::kInt64, offsets_numel) &&
-          is_tensor(split_points_tensor, DType::kInt32, num_tensors) &&
-          is_tensor(tensor_offsets_tensor, DType::kInt64, offsets_numel),
-      "Invalid grouped split metadata. Expected first_dims int32/int64[N], "
-      "first_dims_i64 int64[N], base_offsets int64[N+1], split_points int32[N], "
-      "tensor_offsets int64[N+1], and logical_last_dim >= 0.");
+  NVTE_CHECK(num_tensors > 0 && logical_last_dim >= 0 && first_dims_tensor->dim() == 1 &&
+                 (first_dims_dtype == DType::kInt32 || first_dims_dtype == DType::kInt64) &&
+                 is_tensor(first_dims_i64_tensor, DType::kInt64, num_tensors) &&
+                 is_tensor(base_offsets_tensor, DType::kInt64, offsets_numel) &&
+                 is_tensor(split_points_tensor, DType::kInt32, num_tensors) &&
+                 is_tensor(tensor_offsets_tensor, DType::kInt64, offsets_numel),
+             "Invalid grouped split metadata. Expected first_dims int32/int64[N], "
+             "first_dims_i64 int64[N], base_offsets int64[N+1], split_points int32[N], "
+             "tensor_offsets int64[N+1], and logical_last_dim >= 0.");
   // split_points is the only int32 output by design: cuDNN grouped GEMM uses
   // int32 padded split end offsets, while TE grouped tensor offsets are int64.
 

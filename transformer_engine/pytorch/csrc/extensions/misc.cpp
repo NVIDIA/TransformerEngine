@@ -51,12 +51,12 @@ std::vector<at::Tensor> prepare_grouped_splits(const at::Tensor &split_sizes, in
   //      for cuDNN grouped GEMM padded offsets.  This is intentionally int32
   //      even though TE grouped tensor metadata uses int64 below.
   //   3. tensor_offsets: int64[num_groups + 1], base_offsets * logical_last_dim.
-  auto outputs = bulk_allocate(
-      {{static_cast<size_t>(num_groups)},
-       {static_cast<size_t>(offsets_length)},
-       {static_cast<size_t>(num_groups)},
-       {static_cast<size_t>(offsets_length)}},
-      {at::kLong, at::kLong, at::kInt, at::kLong}, split_sizes.device(), std::nullopt);
+  auto outputs = bulk_allocate({{static_cast<size_t>(num_groups)},
+                                {static_cast<size_t>(offsets_length)},
+                                {static_cast<size_t>(num_groups)},
+                                {static_cast<size_t>(offsets_length)}},
+                               {at::kLong, at::kLong, at::kInt, at::kLong}, split_sizes.device(),
+                               std::nullopt);
   auto split_sizes_i64 = outputs[0];
   auto base_offsets = outputs[1];
   auto split_points = outputs[2];
