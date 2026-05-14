@@ -72,7 +72,17 @@ enum NVTETensorParam {
   kNVTEColumnwiseScaleInv = 5,     /*!< Scale inverse tensor for decoding Columnwise Data */
   kNVTEColumnwiseAmax = 6,         /*!< Columnwise Amax tensor */
   kNVTEWithGEMMSwizzledScales = 7, /*!< Whether scaling factors are in format expected by GEMM */
-  kNVTERowScaledNVFP4 = 8,         /*!< Whether an NVFP4 tensor uses row scaling */
+  /*! Whether an NVFP4 tensor uses row scaling instead of tensor scaling.
+   *
+   *  Column-wise data is not supported with row scaling.
+   *
+   *  Row scaling affects the interpretation of the amax tensor. With
+   *  tensor scaling, the amax tensor is a single FP32 that must be
+   *  computed prior to quantization. With row scaling, the amax
+   *  tensor size is the number of tensor rows (flattened to 2D), and
+   *  its values are populated during quantization.
+   */
+  kNVTERowScaledNVFP4 = 8,
   kNVTENumTensorParams
 };
 
@@ -272,7 +282,7 @@ void nvte_zero_tensor(const NVTETensor tensor, cudaStream_t stream);
  *
  *  \warning Deprecated in favor of nvte_set_tensor_param_v2.
  *
- *  \param[in/out] tensor Tensor.
+ *  \param[in,out] tensor Tensor.
  *  \param[in] param_name The parameter to be set.
  *  \param[in] param The value to be set.
  */
@@ -290,7 +300,7 @@ NVTEBasicTensor nvte_get_tensor_param(const NVTETensor tensor, NVTETensorParam p
 
 /*! \brief Set a tensor parameter.
  *
- *  \param[in/out] tensor        Tensor.
+ *  \param[in,out] tensor        Tensor.
  *  \param[in]     param         Tensor parameter type.
  *  \param[in]     buf           Memory address to read parameter value.
  *  \param[in]     size_in_bytes Size of buf.
@@ -396,7 +406,7 @@ void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
 
 /*! \brief Set an option in quantization config.
  *
- *  \param[in/out] config        Quantization config.
+ *  \param[in,out] config        Quantization config.
  *  \param[in]     attr          Option type.
  *  \param[in]     buf           Memory address to read option value.
  *  \param[in]     size_in_bytes Size of buf.
@@ -500,7 +510,7 @@ void nvte_destroy_grouped_tensor(NVTEGroupedTensor tensor);
 /* EXPERIMENTAL FEATURE AND SUBJECT TO CHANGE. */
 /*! \brief Set a grouped tensor parameter.
  *
- *  \param[in/out] tensor        Grouped tensor.
+ *  \param[in,out] tensor        Grouped tensor.
  *  \param[in]     param         Grouped tensor parameter type.
  *  \param[in]     buf           Memory address to read parameter value.
  *  \param[in]     size_in_bytes Size of buf.

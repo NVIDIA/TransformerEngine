@@ -76,7 +76,7 @@ void compute_ref_dequantize_nvfp4(const uint8_t *packed_data,
 }
 
 template <typename OutputType>
-float compute_amax(const test::Tensor &t, size_t rows, size_t cols) {
+float compute_amax(test::Tensor &t, size_t rows, size_t cols) {
     t.to_cpu();
     const auto *data = t.rowwise_cpu_dptr<OutputType>();
     float amax = 0.0f;
@@ -94,50 +94,63 @@ void performTest_dequantize_nvfp4(const size_t rows, const size_t cols,
     using namespace test;
     DType otype = TypeInfo<OutputType>::dtype;
 
+    // Tensors
     Tensor input("input", std::vector<size_t>{rows, cols}, otype);
-    fillCase<fp32>(&input, InputsFillCase::uniform);
-
     Tensor quantized("quantized", std::vector<size_t>{rows, cols},
                      DType::kFloat4E2M1, true, false, NVTE_NVFP4_1D_SCALING);
+    Tensor output("output", std::vector<size_t>{rows, cols}, otype, true, false);
+
+    // Fill input with random data
+    fillCase<fp32>(&input, InputsFillCase::uniform);
+
+    // Configure quantized tensor amax
+    size_t amax_size = 1;
     if (row_scaled_nvfp4) {
-        quantized.set_tensor_amax_shape({rows});
-        quantized.set_row_scaled_nvfp4(true);
+      quantized.set_row_scaled_nvfp4(true);
+      amax_size = rows;
     } else if (rows > 0 && cols > 0) {
-        quantized.set_tensor_amax(compute_amax<OutputType>(input, rows, cols));
+      quantized.set_amax(compute_amax<OutputType>(input, rows, cols));
     } else {
-        quantized.set_tensor_amax(0.0f);
+      quantized.set_amax(0.0f);
     }
 
+    // Quantize
     if (rows > 0 && cols > 0) {
         nvte_quantize(input.data(), quantized.data(), 0);
         cudaDeviceSynchronize();
+        auto err = cudaGetLastError();
+        ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
     }
 
-    Tensor output("output", std::vector<size_t>{rows, cols}, otype, true, false);
+    // Dequantize
     nvte_dequantize(quantized.data(), output.data(), 0);
     cudaDeviceSynchronize();
-
     auto err = cudaGetLastError();
     ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
 
-    if (rows > 0 && cols > 0) {
-        quantized.to_cpu();
-        const uint8_t *fp4_data =
-            reinterpret_cast<const uint8_t *>(quantized.rowwise_cpu_dptr<fp4e2m1>());
-        const fp8e4m3 *scales = quantized.rowwise_cpu_scale_inv_ptr<fp8e4m3>();
-        const std::vector<float> amax_val = quantized.tensor_amax_values();
-        const NVTEShape scale_shape = quantized.rowwise_scale_inv_shape();
-        const size_t scale_stride = scale_shape.data[scale_shape.ndim - 1];
-
-        std::unique_ptr<OutputType[]> ref_output =
-            std::make_unique<OutputType[]>(rows * cols);
-        compute_ref_dequantize_nvfp4<OutputType>(
-            fp4_data, scales, amax_val, ref_output.get(),
-            rows, cols, scale_stride);
-
-        auto [atol, rtol] = getTolerances(otype);
-        compareResults("output_nvfp4", output, ref_output.get(), true, atol, rtol);
+    // Nothing to be done if tensor is empty
+    if (rows == 0 && cols == 0) {
+      return;
     }
+
+    // Dequantize reference implementation
+    quantized.to_cpu();
+    const uint8_t *fp4_data =
+      reinterpret_cast<const uint8_t *>(quantized.rowwise_cpu_dptr<fp4e2m1>());
+    const fp8e4m3 *scales = quantized.rowwise_cpu_scale_inv_ptr<fp8e4m3>();
+    const auto *amax = quantized.cpu_rowwise_amax_ptr<float>();
+    const std::vector<float> amax_vals(amax, amax + amax_size);
+    const NVTEShape scale_shape = quantized.rowwise_scale_inv_shape();
+    const size_t scale_stride = scale_shape.data[scale_shape.ndim - 1];
+    std::unique_ptr<OutputType[]> ref_output =
+      std::make_unique<OutputType[]>(rows * cols);
+    compute_ref_dequantize_nvfp4<OutputType>(
+      fp4_data, scales, amax_vals, ref_output.get(),
+      rows, cols, scale_stride);
+
+    // Compare results from TE and reference impls
+    auto [atol, rtol] = getTolerances(otype);
+    compareResults("output_nvfp4", output, ref_output.get(), true, atol, rtol);
 }
 
 // Dequantize NVFP4 with GEMM-swizzled scales and compare against compact path.
@@ -153,12 +166,11 @@ void performTest_dequantize_nvfp4_swizzled(const size_t rows, const size_t cols,
     Tensor quantized_compact("quantized_compact", std::vector<size_t>{rows, cols},
                              DType::kFloat4E2M1, true, false, NVTE_NVFP4_1D_SCALING);
     if (row_scaled_nvfp4) {
-        quantized_compact.set_tensor_amax_shape({rows});
         quantized_compact.set_row_scaled_nvfp4(true);
     } else if (rows > 0 && cols > 0) {
-        quantized_compact.set_tensor_amax(compute_amax<OutputType>(input, rows, cols));
+        quantized_compact.set_amax(compute_amax<OutputType>(input, rows, cols));
     } else {
-        quantized_compact.set_tensor_amax(0.0f);
+        quantized_compact.set_amax(0.0f);
     }
 
     if (rows > 0 && cols > 0) {
@@ -175,10 +187,9 @@ void performTest_dequantize_nvfp4_swizzled(const size_t rows, const size_t cols,
     Tensor quantized_swizzled("quantized_swizzled", std::vector<size_t>{rows, cols},
                               DType::kFloat4E2M1, true, false, NVTE_NVFP4_1D_SCALING);
     if (row_scaled_nvfp4) {
-        quantized_swizzled.set_tensor_amax_shape({rows});
         quantized_swizzled.set_row_scaled_nvfp4(true);
     } else {
-        quantized_swizzled.set_tensor_amax(0.0f);
+        quantized_swizzled.set_amax(0.0f);
     }
     quantized_swizzled.set_with_gemm_swizzled_scales(true);
 
@@ -186,9 +197,12 @@ void performTest_dequantize_nvfp4_swizzled(const size_t rows, const size_t cols,
     // since from_cpu() uploads all CPU buffers (including zero-init data).
     quantized_compact.to_cpu();
     if (row_scaled_nvfp4) {
-        quantized_swizzled.copy_tensor_amax_from(quantized_compact);
+        const auto *src = quantized_compact.cpu_rowwise_amax_ptr<float>();
+        auto *dst = quantized_swizzled.cpu_rowwise_amax_ptr<float>();
+        std::copy(src, src + rows, dst);
+        quantized_swizzled.from_cpu();
     } else {
-        quantized_swizzled.set_tensor_amax(quantized_compact.amax());
+        quantized_swizzled.set_amax(quantized_compact.amax());
     }
 
     // Copy FP4 data after from_cpu() to avoid being overwritten
