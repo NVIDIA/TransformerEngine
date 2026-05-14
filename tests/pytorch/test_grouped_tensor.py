@@ -163,6 +163,54 @@ class TestGroupedTensor:
             shape[0][1],
         )  # sum of first dims
 
+    @pytest.mark.parametrize(
+        "split_sizes_list,logical_last_dim",
+        [
+            pytest.param([3, 4, 5, 2], 7, id="all_nonzero"),
+            pytest.param([3, 0, 5, 2], 7, id="zero_middle"),
+            pytest.param([0, 3, 5, 0], 11, id="zero_edges"),
+            pytest.param([1], 17, id="single_group"),
+            pytest.param([1, 2, 3, 4, 5, 6, 7, 8], 13, id="many_groups"),
+        ],
+    )
+    @pytest.mark.parametrize("input_dtype", [torch.int32, torch.int64], ids=["int32", "int64"])
+    def test_prepare_grouped_splits(
+        self,
+        input_dtype: torch.dtype,
+        split_sizes_list: List[int],
+        logical_last_dim: int,
+    ) -> None:
+        """Test fused grouped split metadata preparation."""
+        split_sizes = torch.tensor(split_sizes_list, dtype=input_dtype, device="cuda")
+        num_groups = split_sizes.numel()
+
+        (
+            split_sizes_i64,
+            base_offsets,
+            split_points,
+            tensor_offsets,
+        ) = tex.prepare_grouped_splits(split_sizes, num_groups, logical_last_dim)
+
+        expected_split_sizes = split_sizes.to(torch.int64)
+        expected_base_offsets = torch.cat(
+            (
+                torch.zeros(1, dtype=torch.int64, device="cuda"),
+                torch.cumsum(expected_split_sizes, dim=0),
+            )
+        )
+        expected_split_points = expected_base_offsets[1:].to(torch.int32)
+        expected_tensor_offsets = expected_base_offsets * logical_last_dim
+
+        assert split_sizes_i64.dtype == torch.int64
+        assert base_offsets.dtype == torch.int64
+        # cuDNN grouped GEMM consumes int32 end offsets; TE GroupedTensor metadata stays int64.
+        assert split_points.dtype == torch.int32
+        assert tensor_offsets.dtype == torch.int64
+        assert torch.equal(split_sizes_i64, expected_split_sizes)
+        assert torch.equal(base_offsets, expected_base_offsets)
+        assert torch.equal(split_points, expected_split_points)
+        assert torch.equal(tensor_offsets, expected_tensor_offsets)
+
     def test_split_into_quantized_tensors_no_quantization(self) -> None:
         """Test split_into_quantized_tensors for unquantized tensors"""
         num_tensors = 3

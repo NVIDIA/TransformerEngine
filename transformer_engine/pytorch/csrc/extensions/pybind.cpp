@@ -497,6 +497,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("splits_to_offsets", &transformer_engine::pytorch::splits_to_offsets,
         "Compute grouped tensor offsets from split sizes", py::arg("first_dims"),
         py::arg("logical_last_dim"), py::call_guard<py::gil_scoped_release>());
+  m.def("prepare_grouped_splits", &transformer_engine::pytorch::prepare_grouped_splits,
+        "Prepare grouped split metadata from int32 or int64 split sizes", py::arg("split_sizes"),
+        py::arg("num_groups"), py::arg("logical_last_dim"));
   m.def("get_num_cublas_streams", &nvte_get_num_compute_streams, "Get number of compute streams",
         py::call_guard<py::gil_scoped_release>());
 

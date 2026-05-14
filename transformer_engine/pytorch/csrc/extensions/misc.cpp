@@ -5,6 +5,7 @@
  ************************************************************************/
 
 #include "../extensions.h"
+#include "pybind.h"
 
 namespace transformer_engine::pytorch {
 
@@ -28,6 +29,53 @@ at::Tensor splits_to_offsets(const at::Tensor &first_dims, int64_t logical_last_
                          at::cuda::getCurrentCUDAStream());
 
   return output;
+}
+
+std::vector<at::Tensor> prepare_grouped_splits(const at::Tensor &split_sizes, int64_t num_groups,
+                                               int64_t logical_last_dim) {
+  NVTE_CHECK(split_sizes.is_cuda(), "split_sizes must be on CUDA.");
+  NVTE_CHECK(split_sizes.scalar_type() == at::kInt || split_sizes.scalar_type() == at::kLong,
+             "split_sizes must have dtype int32 or int64.");
+  NVTE_CHECK(split_sizes.dim() == 1, "split_sizes must be a 1D tensor.");
+  NVTE_CHECK(split_sizes.is_contiguous(), "split_sizes must be contiguous.");
+  NVTE_CHECK(num_groups > 0, "num_groups must be greater than 0.");
+  NVTE_CHECK(split_sizes.numel() == num_groups, "split_sizes must have length ", num_groups, ".");
+  NVTE_CHECK(logical_last_dim >= 0, "logical_last_dim must be non-negative.");
+
+  const int64_t offsets_length = num_groups + 1;
+
+  // Return order is part of the Python contract:
+  //   0. split_sizes_i64: int64[num_groups], canonical TE GroupedTensor first dims.
+  //   1. base_offsets: int64[num_groups + 1], [0, cumsum(split_sizes)].
+  //   2. split_points: int32[num_groups], cumsum(split_sizes) without the leading 0
+  //      for cuDNN grouped GEMM padded offsets.  This is intentionally int32
+  //      even though TE grouped tensor metadata uses int64 below.
+  //   3. tensor_offsets: int64[num_groups + 1], base_offsets * logical_last_dim.
+  auto outputs = bulk_allocate(
+      {{static_cast<size_t>(num_groups)},
+       {static_cast<size_t>(offsets_length)},
+       {static_cast<size_t>(num_groups)},
+       {static_cast<size_t>(offsets_length)}},
+      {at::kLong, at::kLong, at::kInt, at::kLong}, split_sizes.device(), std::nullopt);
+  auto split_sizes_i64 = outputs[0];
+  auto base_offsets = outputs[1];
+  auto split_points = outputs[2];
+  auto tensor_offsets = outputs[3];
+
+  auto split_sizes_nvte = makeTransformerEngineTensor(split_sizes);
+  auto split_sizes_i64_nvte = makeTransformerEngineTensor(split_sizes_i64);
+  auto base_offsets_nvte = makeTransformerEngineTensor(base_offsets);
+  auto split_points_nvte = makeTransformerEngineTensor(split_points);
+  auto tensor_offsets_nvte = makeTransformerEngineTensor(tensor_offsets);
+
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_prepare_grouped_splits(split_sizes_nvte.data(), split_sizes_i64_nvte.data(),
+                                base_offsets_nvte.data(), split_points_nvte.data(),
+                                tensor_offsets_nvte.data(), logical_last_dim,
+                                at::cuda::getCurrentCUDAStream());
+  });
+
+  return outputs;
 }
 
 }  // namespace transformer_engine::pytorch

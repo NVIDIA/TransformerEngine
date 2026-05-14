@@ -488,6 +488,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> get_device_pointer_for_data_and_s
     std::vector<at::Tensor> data_tensors, std::vector<at::Tensor> scale_tensors, bool swizzle,
     bool rowwise, transformer_engine::DType data_dtype);
 at::Tensor splits_to_offsets(const at::Tensor &first_dims, int64_t logical_last_dim);
+std::vector<at::Tensor> prepare_grouped_splits(const at::Tensor &split_sizes, int64_t num_groups,
+                                               int64_t logical_last_dim);
 
 /***************************************************************************************************
  * Support THD format for Context Parallel

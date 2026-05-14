@@ -159,10 +159,19 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         split_sizes = fc1_split_sizes
         if int(split_sizes.numel()) != num_groups:
             raise ValueError(f"Expected {num_groups} splits, but got {int(split_sizes.numel())}.")
-        split_sizes = split_sizes.to(dtype=torch.int64, device=device)
-        base_split_offsets = tex.splits_to_offsets(split_sizes, 1)
-        split_points = base_split_offsets[1:].to(dtype=torch.int)
-        fc2_x_tensor_offsets = base_split_offsets * fc2_weight_shape[1]
+        # Prepare all split metadata in one CUDA kernel.  The returned split_sizes is the
+        # canonical TE representation: int64[num_groups].  Python uses it from here
+        # onward for grouped quantization and backward state.
+        #
+        # base_split_offsets: int64[num_groups + 1], [0, cumsum(split_sizes)]
+        # split_points: int32[num_groups], cumsum(split_sizes) without the leading 0
+        # fc2_x_tensor_offsets: int64[num_groups + 1], base_split_offsets * fc2 K
+        (
+            split_sizes,
+            base_split_offsets,
+            split_points,
+            fc2_x_tensor_offsets,
+        ) = tex.prepare_grouped_splits(split_sizes, num_groups, fc2_weight_shape[1])
 
         # Extract post-scales from extra input
         scales = basic_op_extra_inputs[1][0]
