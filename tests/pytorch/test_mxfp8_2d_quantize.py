@@ -53,9 +53,7 @@ def _float_to_e8m0(amax: torch.Tensor) -> torch.Tensor:
     exponent = ((val_u32 >> 23) & 0xFF).to(torch.int32)
     mantissa = val_u32 & 0x7FFFFF
 
-    round_up = (mantissa > 0) & (exponent != 254) & ~(
-        (exponent == 0) & (mantissa <= 0x400000)
-    )
+    round_up = (mantissa > 0) & (exponent != 254) & ~((exponent == 0) & (mantissa <= 0x400000))
     exponent = exponent + round_up.to(torch.int32)
     exponent = torch.where(val == 0, torch.zeros_like(exponent), exponent)
 
@@ -197,7 +195,9 @@ def test_mxfp8_2d_quantize_scales_match_known_block_amax(columnwise: bool) -> No
             x[
                 row_start : row_start + MXFP8_BLOCK_SIZE,
                 col_start : col_start + MXFP8_BLOCK_SIZE,
-            ] = amax * 0.5
+            ] = (
+                amax * 0.5
+            )
             x[row_start, col_start] = amax
 
     quantizer = MXFP8Quantizer(

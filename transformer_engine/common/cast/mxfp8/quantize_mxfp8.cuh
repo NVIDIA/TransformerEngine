@@ -822,60 +822,54 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
 
               switch (scaling_type) {
                 case ScalingType::ROWWISE: {
-                  TRANSFORMER_ENGINE_SWITCH_CONDITION(
-                      use_2d_quantization, kIs2DBlockScaling, {
-                        auto kernel =
-                            quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType,
-                                                  OType, true, false, WITH_GEMM_SWIZZLED_SCALES,
-                                                  CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK,
-                                                  kIs2DBlockScaling>;
-                        NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-                            kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
+                  TRANSFORMER_ENGINE_SWITCH_CONDITION(use_2d_quantization, kIs2DBlockScaling, {
+                    auto kernel =
+                        quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
+                                              true, false, WITH_GEMM_SWIZZLED_SCALES, CHUNK_DIM_Y,
+                                              CHUNK_DIM_X, THREADS_PER_CHUNK, kIs2DBlockScaling>;
+                    NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+                        kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
 
-                        kernel<<<grid, block_size, dshmem_size, stream>>>(
-                            tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
-                            tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr,
-                            noop_ptr, workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise,
-                            scale_stride_colwise);
-                      });
+                    kernel<<<grid, block_size, dshmem_size, stream>>>(
+                        tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
+                        tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr, noop_ptr,
+                        workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise,
+                        scale_stride_colwise);
+                  });
                   break;
                 }
                 case ScalingType::COLWISE: {
-                  TRANSFORMER_ENGINE_SWITCH_CONDITION(
-                      use_2d_quantization, kIs2DBlockScaling, {
-                        auto kernel =
-                            quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType,
-                                                  OType, false, true, WITH_GEMM_SWIZZLED_SCALES,
-                                                  CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK,
-                                                  kIs2DBlockScaling>;
-                        NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-                            kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
+                  TRANSFORMER_ENGINE_SWITCH_CONDITION(use_2d_quantization, kIs2DBlockScaling, {
+                    auto kernel =
+                        quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
+                                              false, true, WITH_GEMM_SWIZZLED_SCALES, CHUNK_DIM_Y,
+                                              CHUNK_DIM_X, THREADS_PER_CHUNK, kIs2DBlockScaling>;
+                    NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+                        kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
 
-                        kernel<<<grid, block_size, dshmem_size, stream>>>(
-                            tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
-                            tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr,
-                            noop_ptr, workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise,
-                            scale_stride_colwise);
-                      });
+                    kernel<<<grid, block_size, dshmem_size, stream>>>(
+                        tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
+                        tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr, noop_ptr,
+                        workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise,
+                        scale_stride_colwise);
+                  });
                   break;
                 }
                 case ScalingType::BIDIMENSIONAL: {
-                  TRANSFORMER_ENGINE_SWITCH_CONDITION(
-                      use_2d_quantization, kIs2DBlockScaling, {
-                        auto kernel =
-                            quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType,
-                                                  OType, true, true, WITH_GEMM_SWIZZLED_SCALES,
-                                                  CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK,
-                                                  kIs2DBlockScaling>;
-                        NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-                            kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
+                  TRANSFORMER_ENGINE_SWITCH_CONDITION(use_2d_quantization, kIs2DBlockScaling, {
+                    auto kernel =
+                        quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
+                                              true, true, WITH_GEMM_SWIZZLED_SCALES, CHUNK_DIM_Y,
+                                              CHUNK_DIM_X, THREADS_PER_CHUNK, kIs2DBlockScaling>;
+                    NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+                        kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
 
-                        kernel<<<grid, block_size, dshmem_size, stream>>>(
-                            tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
-                            tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr,
-                            noop_ptr, workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise,
-                            scale_stride_colwise);
-                      });
+                    kernel<<<grid, block_size, dshmem_size, stream>>>(
+                        tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
+                        tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr, noop_ptr,
+                        workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise,
+                        scale_stride_colwise);
+                  });
                   break;
                 }
               } NVTE_CHECK_CUDA(cudaGetLastError());
