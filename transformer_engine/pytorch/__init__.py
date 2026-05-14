@@ -111,6 +111,7 @@ except AttributeError:
 # using DCP checkpointing with FSDP2.
 try:
     from torch.serialization import add_safe_globals
+
     add_safe_globals(
         [
             # Storage mixins (used during pickling of internal-only tensors)
