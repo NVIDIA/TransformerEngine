@@ -272,7 +272,9 @@ class _GroupedLinear(torch.autograd.Function):
                 else:
                     for inputmat in inputmats:
                         if isinstance(inputmat, QuantizedTensorStorage):
-                            if backward_override is not None:
+                            if debug:
+                                inputmat.update_usage(rowwise_usage=True, columnwise_usage=True)
+                            elif backward_override is not None:
                                 # In dequantized mode we should dequantize directly from
                                 # fprop quantized layouts without retargeting usage.
                                 inputmat.update_usage(rowwise_usage=True, columnwise_usage=False)

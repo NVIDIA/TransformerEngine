@@ -47,6 +47,8 @@ def _to_high_precision_gemm_input(tensor, dtype: torch.dtype):
         columnwise_src = getattr(tensor, "columnwise_gemm_tensor", None)
         rowwise_tensor = _to_high_precision_gemm_input(rowwise_src, dtype)
         columnwise_tensor = _to_high_precision_gemm_input(columnwise_src, dtype)
+        if rowwise_tensor is None and columnwise_tensor is None:
+            return tensor
         if rowwise_tensor is None:
             rowwise_tensor = columnwise_tensor
         if columnwise_tensor is None:
@@ -58,12 +60,16 @@ def _to_high_precision_gemm_input(tensor, dtype: torch.dtype):
     if dtype is None:
         dtype = getattr(tensor, "dtype", None)
     if isinstance(tensor, QuantizedTensorStorage):
-        if dtype is None:
-            return tensor.dequantize()
         try:
+            if dtype is None:
+                return tensor.dequantize()
             return tensor.dequantize(dtype=dtype)
         except TypeError:
             return cast_if_needed(tensor.dequantize(), dtype)
+        except NotImplementedError as err:
+            if "column-wise NVFP4" in str(err):
+                return None
+            raise
     if dtype is None:
         return tensor
     return cast_if_needed(tensor, dtype)
