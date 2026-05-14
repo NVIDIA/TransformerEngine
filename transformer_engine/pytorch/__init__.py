@@ -107,32 +107,12 @@ try:
 except AttributeError:
     pass  # error_on_nested_jit_trace was added in PyTorch 2.2.0
 
-
-# Allow QuantizedTensor subclasses (and the metadata they pickle) to
-# round-trip through ``torch.load(weights_only=True)``. DCP async-staging
-# writes a torch.save / torch.load step internally, so without this the
-# default safe-unpickler rejects our custom classes.
-#
-# The ``_make_*_in_reduce_ex`` reconstructors are defined as module-level
-# functions (not classmethods) so they pickle as a single ``GLOBAL`` opcode
-# rather than a ``(getattr, (cls, name))`` reduction. Their ``fp8_dtype`` /
-# ``fp4_dtype`` arguments are passed as plain ``int`` values (converted back
-# to the pybind11 ``transformer_engine_torch.DType`` enum on reconstruction)
-# and ``Quantizer.__getstate__`` similarly serializes its embedded ``dtype``
-# as an ``int``. Together these keep the pickle stream free of pybind11-enum
-# reductions and bound-classmethod references, so we don't need to allow-list
-# ``builtins.getattr`` or the enum type itself for ``weights_only=True``.
+# To allow for safe unpickling of QuantizedTensors when
+# using DCP checkpointing with FSDP2.
 try:
     from torch.serialization import add_safe_globals
-
     add_safe_globals(
         [
-            # Wrapper subclasses
-            QuantizedTensor,
-            Float8Tensor,
-            MXFP8Tensor,
-            NVFP4Tensor,
-            Float8BlockwiseQTensor,
             # Storage mixins (used during pickling of internal-only tensors)
             QuantizedTensorStorage,
             Float8TensorStorage,
