@@ -64,9 +64,15 @@ def _recv_request(rank: int) -> dict:
     return box[0]
 
 
+# Sentinel prefix on every response line so the parent reader can skip any
+# stdout chatter that gets interleaved (torchrun status, library prints, even
+# non-rank-0 stray output — torchrun ranks share rank 0's stdout fd).
+_RESP_PREFIX = "[CP_POOL_RESP] "
+
+
 def _send_response(rank: int, payload: dict) -> None:
     if rank == 0:
-        sys.stdout.write(json.dumps(payload) + "\n")
+        sys.stdout.write(_RESP_PREFIX + json.dumps(payload) + "\n")
         sys.stdout.flush()
 
 

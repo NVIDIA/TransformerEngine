@@ -8,6 +8,7 @@ import select
 import subprocess
 import sys
 import threading
+import time
 import pathlib
 import logging
 import copy
@@ -92,6 +93,12 @@ class PoolWorker:
     # Equivalent in spirit to PR #2965's run_distributed() stderr capture.
     _STDERR_BUFFER_LINES = 200  # ring cap (~40 KB ceiling)
     _STDERR_TAIL_CHARS = 4000  # how much to attach to the AssertionError
+    # Worker prefixes every JSON response with this sentinel; the reader skips
+    # any other stdout content (torchrun status, library prints, rank>0 stray
+    # output that lands on the shared stdout fd) so the JSON protocol can't
+    # be corrupted by interleaved chatter.
+    _RESP_PREFIX = "[CP_POOL_RESP] "
+    _MAX_NOISE_LINES = 1000  # bound the per-submit scan so a chatty worker can't loop forever
 
     def __init__(self, world_size: int):
         self.world_size = world_size
@@ -173,22 +180,54 @@ class PoolWorker:
             self._kill()
             raise AssertionError(msg)
 
-        ready, _, _ = select.select([self.proc.stdout], [], [], timeout)
-        if not ready:
+        # Read lines until we see our sentinel-prefixed JSON response.  Anything
+        # else (torchrun status output, library prints, rank>0 stray writes that
+        # land on the shared stdout fd) is silently discarded — it would corrupt
+        # json.loads if we tried to decode it.  Bounded loop so a chatty worker
+        # can't keep us spinning past the deadline.
+        deadline = None  # set lazily on first iteration so we honour the original timeout budget
+        resp_line = None
+        scanned = 0
+        while scanned < self._MAX_NOISE_LINES:
+            remaining = timeout if deadline is None else max(0.0, deadline - time.monotonic())
+            # select() on a pipe fd is Linux/macOS only — on Windows the select
+            # module only accepts sockets. CP attention tests run on Linux GPU
+            # hosts so this is fine; flag if portability is ever needed.
+            ready, _, _ = select.select([self.proc.stdout], [], [], remaining)
+            if deadline is None:
+                deadline = time.monotonic() + timeout
+            if not ready:
+                msg = self._diag(
+                    f"pool worker (world_size={self.world_size}) timed out after "
+                    f"{timeout}s; pool killed and will be respawned for the next case"
+                )
+                self._kill()
+                raise AssertionError(msg)
+
+            line = self.proc.stdout.readline()
+            if not line:
+                msg = self._diag("pool worker died mid-request")
+                self._kill()
+                raise AssertionError(msg)
+
+            scanned += 1
+            if line.startswith(self._RESP_PREFIX):
+                resp_line = line[len(self._RESP_PREFIX):]
+                break
+            # Otherwise: non-protocol stdout from somewhere. Echo to test stderr
+            # so it's still visible in CI logs, then keep looking.
+            sys.stderr.write(line)
+            sys.stderr.flush()
+
+        if resp_line is None:
             msg = self._diag(
-                f"pool worker (world_size={self.world_size}) timed out after "
-                f"{timeout}s; pool killed and will be respawned for the next case"
+                f"pool worker (world_size={self.world_size}) sent {self._MAX_NOISE_LINES}+ "
+                "stdout lines without a sentinel-prefixed response; assuming protocol corruption"
             )
             self._kill()
             raise AssertionError(msg)
 
-        line = self.proc.stdout.readline()
-        if not line:
-            msg = self._diag("pool worker died mid-request")
-            self._kill()
-            raise AssertionError(msg)
-
-        resp = json.loads(line)
+        resp = json.loads(resp_line)
         if not resp["ok"]:
             # gather_object already carries the full per-rank traceback in
             # resp["error"]; no need to also attach stderr (would duplicate).
