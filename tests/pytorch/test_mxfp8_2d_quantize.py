@@ -387,8 +387,11 @@ def test_mxfp8_2d_quantize_bidirectional_scales_match(
     )
 
 
-def test_mxfp8_recipe_default_2d_quantization_disabled() -> None:
+def test_mxfp8_recipe_default_2d_quantization_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """MXFP8 2D quantization is opt-in."""
+    monkeypatch.setenv("NVTE_MXFP8_ENABLE_2D_QUANTIZATION", "0")
     mxfp8_recipe = MXFP8BlockScaling()
     assert mxfp8_recipe.enable_2d_quantization is False
 
