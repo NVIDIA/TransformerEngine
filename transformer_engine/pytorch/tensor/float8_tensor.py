@@ -932,9 +932,7 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         arguments.
 
         """
-        return _make_float8_tensor_in_reduce_ex(
-            data, fp8_dtype, fp8_scale_inv, dtype, shape
-        )
+        return _make_float8_tensor_in_reduce_ex(data, fp8_dtype, fp8_scale_inv, dtype, shape)
 
     def _get_data(self) -> Float8Tensor:
         """Get tensor data property"""
