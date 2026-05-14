@@ -525,6 +525,11 @@ def test_cp_with_fused_attention(
     if not fused_attn_supported:
         pytest.skip("No attention backend available.")
 
+    if _deterministic and config.softmax_type != "vanilla":
+        pytest.skip("Deterministic mode does not support non-vanilla softmax with FusedAttention")
+    if _deterministic and config.attn_bias_type == "post_scale_bias" and is_training:
+        pytest.skip("Deterministic mode does not support post_scale_bias with requires_grad")
+
     _submit(
         pool,
         dtype=dtype,
