@@ -90,8 +90,8 @@ class PoolWorker:
     # JUnit XML shows the actual failure cause (NCCL/CUDA messages, Python
     # traceback) inline with the failing test, not just "pool worker died".
     # Equivalent in spirit to PR #2965's run_distributed() stderr capture.
-    _STDERR_BUFFER_LINES = 200    # ring cap (~40 KB ceiling)
-    _STDERR_TAIL_CHARS = 4000     # how much to attach to the AssertionError
+    _STDERR_BUFFER_LINES = 200  # ring cap (~40 KB ceiling)
+    _STDERR_TAIL_CHARS = 4000  # how much to attach to the AssertionError
 
     def __init__(self, world_size: int):
         self.world_size = world_size
@@ -123,9 +123,7 @@ class PoolWorker:
             env={**os.environ, "PYTHONUNBUFFERED": "1"},
         )
         self._stderr_buf.clear()
-        self._stderr_thread = threading.Thread(
-            target=self._drain_stderr, daemon=True
-        )
+        self._stderr_thread = threading.Thread(target=self._drain_stderr, daemon=True)
         self._stderr_thread.start()
 
     def _drain_stderr(self) -> None:
@@ -139,7 +137,7 @@ class PoolWorker:
 
     def _stderr_tail(self) -> str:
         text = "".join(self._stderr_buf)
-        return text[-self._STDERR_TAIL_CHARS:] if len(text) > self._STDERR_TAIL_CHARS else text
+        return text[-self._STDERR_TAIL_CHARS :] if len(text) > self._STDERR_TAIL_CHARS else text
 
     def _diag(self, msg: str) -> str:
         tail = self._stderr_tail()
