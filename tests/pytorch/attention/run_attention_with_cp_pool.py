@@ -30,6 +30,7 @@ import gc
 import json
 import os
 import sys
+import time
 import traceback
 
 import torch
@@ -85,18 +86,37 @@ def _reset_between_cases() -> None:
     gc.collect()
 
 
+_case_counter = 0
+
+
 def _run_one(req: dict, rank: int) -> tuple[bool, str]:
+    global _case_counter
     op = req["op"]
     if op != "run":
         return False, f"unknown op: {op}"
     # Reset BEFORE the case so the first case also starts from a known RNG seed
     # and clean FP8 state — same as the single-shot worker's per-process startup.
     _reset_between_cases()
+    t0 = time.monotonic()
+    ok = True
+    err = ""
     try:
         run_dpa_with_cp(**req.get("kwargs", {}))
-        return True, ""
     except Exception:
-        return False, f"[Rank {rank}] {traceback.format_exc()}"
+        ok = False
+        err = f"[Rank {rank}] {traceback.format_exc()}"
+    wall = time.monotonic() - t0
+    # Per-case wall time on rank 0, opt-in via NVTE_CP_POOL_TIMING=1.
+    # Used to tune POOL_SUBMIT_TIMEOUT_SEC against the observed distribution.
+    if rank == 0 and int(os.environ.get("NVTE_CP_POOL_TIMING", "0")):
+        _case_counter += 1
+        sys.stderr.write(
+            f"[POOL-TIMING] case_idx={_case_counter} "
+            f"world_size={int(os.environ.get('WORLD_SIZE', 0))} "
+            f"wall_s={wall:.3f} ok={ok}\n"
+        )
+        sys.stderr.flush()
+    return ok, err
 
 
 def main() -> None:

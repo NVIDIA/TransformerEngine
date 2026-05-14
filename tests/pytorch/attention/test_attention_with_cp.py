@@ -7,9 +7,11 @@ import os
 import select
 import subprocess
 import sys
+import threading
 import pathlib
 import logging
 import copy
+from collections import deque
 import pytest
 import torch
 from transformer_engine.pytorch import (
@@ -76,13 +78,26 @@ model_configs_flash_attn = {
 # lazily on first use so a session that only exercises 2-GPU cases never
 # pays the 4-GPU init cost.
 
-POOL_SUBMIT_TIMEOUT_SEC = float(os.getenv("NVTE_CP_POOL_TIMEOUT_SEC", "600"))
+# Per-case wall is ~5 s p50 / ~15 s max on H100 (test_essential=True).
+# 90 s gives ~6× headroom over the slowest observed case while still detecting
+# a genuine hang within ~1.5 min instead of ~10 min. Override with the env var
+# if a slower machine or expanded test matrix needs more room.
+POOL_SUBMIT_TIMEOUT_SEC = float(os.getenv("NVTE_CP_POOL_TIMEOUT_SEC", "90"))
 
 
 class PoolWorker:
+    # Crash-path AssertionErrors include the tail of the worker's stderr so CI
+    # JUnit XML shows the actual failure cause (NCCL/CUDA messages, Python
+    # traceback) inline with the failing test, not just "pool worker died".
+    # Equivalent in spirit to PR #2965's run_distributed() stderr capture.
+    _STDERR_BUFFER_LINES = 200    # ring cap (~40 KB ceiling)
+    _STDERR_TAIL_CHARS = 4000     # how much to attach to the AssertionError
+
     def __init__(self, world_size: int):
         self.world_size = world_size
         self.proc: subprocess.Popen | None = None
+        self._stderr_buf: deque[str] = deque(maxlen=self._STDERR_BUFFER_LINES)
+        self._stderr_thread: threading.Thread | None = None
 
     def _spawn(self) -> None:
         te_path = os.getenv("TE_PATH", "/opt/transformerengine")
@@ -95,15 +110,42 @@ class PoolWorker:
             "--standalone",  # picks a free rendezvous port
             worker,
         ]
+        # stderr=PIPE so we can capture the tail for crash-path AssertionErrors;
+        # a daemon drainer thread also echoes each line to sys.stderr so pytest's
+        # per-test stderr capture still works.
         self.proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=sys.stderr,
+            stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
             env={**os.environ, "PYTHONUNBUFFERED": "1"},
         )
+        self._stderr_buf.clear()
+        self._stderr_thread = threading.Thread(
+            target=self._drain_stderr, daemon=True
+        )
+        self._stderr_thread.start()
+
+    def _drain_stderr(self) -> None:
+        proc = self.proc
+        if proc is None or proc.stderr is None:
+            return
+        for line in iter(proc.stderr.readline, ""):
+            self._stderr_buf.append(line)
+            sys.stderr.write(line)
+            sys.stderr.flush()
+
+    def _stderr_tail(self) -> str:
+        text = "".join(self._stderr_buf)
+        return text[-self._STDERR_TAIL_CHARS:] if len(text) > self._STDERR_TAIL_CHARS else text
+
+    def _diag(self, msg: str) -> str:
+        tail = self._stderr_tail()
+        if not tail.strip():
+            return msg
+        return f"{msg}\n\n--- pool worker stderr (tail) ---\n{tail}"
 
     def _ensure_alive(self) -> None:
         if self.proc is None or self.proc.poll() is not None:
@@ -117,7 +159,9 @@ class PoolWorker:
             except subprocess.TimeoutExpired:
                 self.proc.kill()
                 self.proc.wait()
+        # Drainer thread exits on its own when the pipe closes.
         self.proc = None
+        self._stderr_thread = None
 
     def submit(self, kwargs: dict, timeout: float = POOL_SUBMIT_TIMEOUT_SEC) -> None:
         self._ensure_alive()
@@ -127,25 +171,29 @@ class PoolWorker:
             self.proc.stdin.write(req)
             self.proc.stdin.flush()
         except BrokenPipeError:
+            msg = self._diag("pool worker died before request could be sent")
             self._kill()
-            raise AssertionError("pool worker died before request could be sent")
+            raise AssertionError(msg)
 
         ready, _, _ = select.select([self.proc.stdout], [], [], timeout)
         if not ready:
-            self._kill()
-            raise AssertionError(
-                f"pool worker (world_size={self.world_size}) timed out after {timeout}s; "
-                "pool killed and will be respawned for the next case"
+            msg = self._diag(
+                f"pool worker (world_size={self.world_size}) timed out after "
+                f"{timeout}s; pool killed and will be respawned for the next case"
             )
+            self._kill()
+            raise AssertionError(msg)
 
         line = self.proc.stdout.readline()
         if not line:
+            msg = self._diag("pool worker died mid-request")
             self._kill()
-            raise AssertionError("pool worker died mid-request")
+            raise AssertionError(msg)
 
         resp = json.loads(line)
         if not resp["ok"]:
-            # Test failure; pool itself is still healthy.
+            # gather_object already carries the full per-rank traceback in
+            # resp["error"]; no need to also attach stderr (would duplicate).
             raise AssertionError(resp["error"])
 
     def shutdown(self) -> None:
@@ -161,6 +209,7 @@ class PoolWorker:
             except subprocess.TimeoutExpired:
                 self._kill()
         self.proc = None
+        self._stderr_thread = None
 
 
 @pytest.fixture(scope="session")
