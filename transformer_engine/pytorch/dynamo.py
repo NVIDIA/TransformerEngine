@@ -579,11 +579,11 @@ class _UniversalTensorBucket(_Bucket):
             ]
         qts = _quantized_tensor_storage_cls()
         if qts is not None and isinstance(value, qts):
-                meta, pg, tensors = value._torch_compile_flatten()
+            meta, pg, tensors = value._torch_compile_flatten()
             # Stamp the storage-flatten meta with our kind marker so the
             # unpacker can route by ``__kind__`` alone.
             meta._data[self.KIND_KEY] = self.KIND_STORAGE
-        return [
+            return [
                 (self.slot_name(), None),
                 (self.slot_tensors(), list(tensors)),
                 (self.slot_pg(), pg),
@@ -708,7 +708,7 @@ def _quantizer_cls() -> Optional[type]:
             from transformer_engine.pytorch.quantized_tensor import Quantizer
 
             _QUANTIZER_REF = Quantizer
-    except Exception:  # pragma: no cover - partial init
+        except Exception:  # pragma: no cover - partial init
             return None
     return _QUANTIZER_REF
 
@@ -717,11 +717,11 @@ def _recipe_cls() -> Optional[type]:
     """Lazy-resolve :class:`Recipe`; ``None`` if unavailable."""
     global _RECIPE_REF
     if _RECIPE_REF is None:
-    try:
-        from transformer_engine.common.recipe import Recipe
+        try:
+            from transformer_engine.common.recipe import Recipe
 
             _RECIPE_REF = Recipe
-    except Exception:  # pragma: no cover - partial init
+        except Exception:  # pragma: no cover - partial init
             return None
     return _RECIPE_REF
 
@@ -776,7 +776,7 @@ class _FlattenableBucket(_MetaPGTensorsBucket):
                 None,
                 [],
             )
-            if hasattr(value, "_flatten"):
+        if hasattr(value, "_flatten"):
             return value._flatten()
         return value._torch_compile_flatten()
 
@@ -829,7 +829,7 @@ class _SimpleBundleBucket(_Bucket):
         # Any registered value-opaque class is hashable / FX-reproducible
         # and therefore safe to embed in the OpaqueSimpleMetadata bundle.
         if isinstance(annot, type) and _is_opaque_value_type(annot):
-                return True
+            return True
         origin = get_origin(annot)
         if origin in (tuple, list):
             # Inner args may contain Ellipsis (e.g. ``Tuple[int, ...]``);
@@ -925,52 +925,52 @@ _FIELD_BUCKETS: Tuple[type, ...] = (
 
 def _resolved_field_annotations(cls: type) -> List[Tuple[str, Any]]:
     """Return ``[(field_name, resolved_type), ...]`` for a dataclass."""
-        if not dataclasses.is_dataclass(cls):
-            raise TypeError(
+    if not dataclasses.is_dataclass(cls):
+        raise TypeError(
             f"{cls.__name__} must be a @dataclass to be used as a TE "
             f"custom-op argument container."
-            )
-        # ``get_type_hints`` resolves forward references and PEP 563
-        # ``from __future__ import annotations`` strings.
-        try:
-            hints = get_type_hints(cls)
-        except Exception:
-            hints = {}
+        )
+    # ``get_type_hints`` resolves forward references and PEP 563
+    # ``from __future__ import annotations`` strings.
+    try:
+        hints = get_type_hints(cls)
+    except Exception:
+        hints = {}
     return [(f.name, hints.get(f.name, f.type)) for f in dataclasses.fields(cls)]
 
 
 def _get_buckets(cls: type) -> List[_Bucket]:
     """Build the bucket list for a dataclass from its field annotations.
 
-        Dispatch order per field: try each bucket in :data:`_FIELD_BUCKETS`
-        (Tensor, ProcessGroup, Quantizer); if none claims the field, route
-        it to :class:`_SimpleBundleBucket` if its annotation is bundle-able,
-        else to :class:`_UnknownBucket`.
+    Dispatch order per field: try each bucket in :data:`_FIELD_BUCKETS`
+    (Tensor, ProcessGroup, Quantizer); if none claims the field, route
+    it to :class:`_SimpleBundleBucket` if its annotation is bundle-able,
+    else to :class:`_UnknownBucket`.
 
     Intentionally **not** cached on ``cls``. Caching there (e.g. by
     writing ``cls.__te_buckets__``) tickles Dynamo: subsequent reads of
-        ``cls.__dict__`` from a compiled function trigger
+    ``cls.__dict__`` from a compiled function trigger
     "mappingproxy affected by dictionary mutation" graph breaks. Hot
     paths must instead capture the bucket list once at op registration
     time and pass it explicitly to :func:`_pack` / :func:`_unpack`.
-        """
-        buckets: List[_Bucket] = []
-        simple_names: List[str] = []
+    """
+    buckets: List[_Bucket] = []
+    simple_names: List[str] = []
     for name, annot in _resolved_field_annotations(cls):
-            built: Optional[_Bucket] = None
-            for bucket_cls in _FIELD_BUCKETS:
-                built = bucket_cls.try_build(name, annot)
-                if built is not None:
-                    break
+        built: Optional[_Bucket] = None
+        for bucket_cls in _FIELD_BUCKETS:
+            built = bucket_cls.try_build(name, annot)
             if built is not None:
-                buckets.append(built)
-            elif _SimpleBundleBucket.matches_field(annot):
-                simple_names.append(name)
-            else:
-                buckets.append(_UnknownBucket(name, cls.__name__))
-        if simple_names:
-            buckets.append(_SimpleBundleBucket(simple_names))
-        return buckets
+                break
+        if built is not None:
+            buckets.append(built)
+        elif _SimpleBundleBucket.matches_field(annot):
+            simple_names.append(name)
+        else:
+            buckets.append(_UnknownBucket(name, cls.__name__))
+    if simple_names:
+        buckets.append(_SimpleBundleBucket(simple_names))
+    return buckets
 
 
 def _build_schema(buckets: List[_Bucket]) -> Tuple[str, List[str]]:
@@ -997,11 +997,11 @@ def _pack(obj: Any, buckets: List[_Bucket]) -> Dict[str, Any]:
     avoid recomputing and, critically, to keep Dynamo away from
     ``cls.__dict__`` while tracing.
     """
-        out: Dict[str, Any] = {}
-        for bucket in buckets:
+    out: Dict[str, Any] = {}
+    for bucket in buckets:
         for name, value in bucket.pack(obj):
-                out[name] = value
-        return out
+            out[name] = value
+    return out
 
 
 def _unpack(cls: type, args: Dict[str, Any], buckets: List[_Bucket]) -> Any:
@@ -1012,13 +1012,13 @@ def _unpack(cls: type, args: Dict[str, Any], buckets: List[_Bucket]) -> Any:
     even when they have no default). ``buckets`` semantics match
     :func:`_pack`.
     """
-        kwargs: Dict[str, Any] = {}
-        for bucket in buckets:
-            bucket.unpack(args, kwargs)
-        obj = cls.__new__(cls)
-        for k, v in kwargs.items():
-            object.__setattr__(obj, k, v)
-        return obj
+    kwargs: Dict[str, Any] = {}
+    for bucket in buckets:
+        bucket.unpack(args, kwargs)
+    obj = cls.__new__(cls)
+    for k, v in kwargs.items():
+        object.__setattr__(obj, k, v)
+    return obj
 
 
 # --------------------------------------------------------------------------- #
