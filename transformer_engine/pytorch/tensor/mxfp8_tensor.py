@@ -712,12 +712,43 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                 self._rowwise_scale_inv,
                 self._columnwise_data,
                 self._columnwise_scale_inv,
-                int(self._fp8_dtype),
+                self._fp8_dtype,
                 self.dtype,
                 self.shape,
                 self._quantizer,
                 self._with_gemm_swizzled_scales,
             ),
+        )
+
+    @classmethod
+    def _make_in_reduce_ex(
+        cls,
+        rowwise_data: torch.Tensor,
+        rowwise_scale_inv: torch.Tensor,
+        columnwise_data: torch.Tensor,
+        columnwise_scale_inv: torch.Tensor,
+        fp8_dtype: TE_DType,
+        dtype: torch.dtype,
+        shape: torch.Size,
+        quantizer: Optional[Quantizer] = None,
+        with_gemm_swizzled_scales: bool = False,
+    ) -> MXFP8Tensor:
+        """Build MXFP8Tensor, for use in __reduce__
+
+        __reduce_ex__ assumes object constructor has positional
+        arguments.
+
+        """
+        return _make_mxfp8_tensor_in_reduce_ex(
+            rowwise_data,
+            rowwise_scale_inv,
+            columnwise_data,
+            columnwise_scale_inv,
+            fp8_dtype,
+            dtype,
+            shape,
+            quantizer,
+            with_gemm_swizzled_scales,
         )
 
     def _get_data(self) -> MXFP8Tensor:
@@ -813,7 +844,7 @@ def _make_mxfp8_tensor_in_reduce_ex(
     rowwise_scale_inv: torch.Tensor,
     columnwise_data: torch.Tensor,
     columnwise_scale_inv: torch.Tensor,
-    fp8_dtype: int,
+    fp8_dtype: TE_DType,
     dtype: torch.dtype,
     shape: torch.Size,
     quantizer: Optional[Quantizer] = None,
@@ -821,11 +852,10 @@ def _make_mxfp8_tensor_in_reduce_ex(
 ) -> MXFP8Tensor:
     """Reconstruct an ``MXFP8Tensor`` from its ``__reduce_ex__`` payload.
 
-    Defined at module level so the pickle stream uses a single
+    Defined at module level (not as a MXFP8Tensor classmethod) so the pickle stream
+    references it via a single ``GLOBAL`` opcode rather than the
     ``GLOBAL`` opcode rather than the ``(getattr, (cls, name))``
-    reduction that bound classmethods produce. ``fp8_dtype`` is passed
-    as an ``int`` and converted back to the pybind11 ``TE_DType`` enum
-    here.
+    reduction that bound classmethods produce.
     """
     # Infer device from inner buffers so the wrapper subclass stays
     # consistent with its data (CPU after DCP staging deserialize,
@@ -838,7 +868,7 @@ def _make_mxfp8_tensor_in_reduce_ex(
     return MXFP8Tensor(
         rowwise_data=rowwise_data,
         rowwise_scale_inv=rowwise_scale_inv,
-        fp8_dtype=TE_DType(fp8_dtype),
+        fp8_dtype=fp8_dtype,
         columnwise_data=columnwise_data,
         columnwise_scale_inv=columnwise_scale_inv,
         dtype=dtype,

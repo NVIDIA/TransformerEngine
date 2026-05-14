@@ -107,8 +107,14 @@ try:
 except AttributeError:
     pass  # error_on_nested_jit_trace was added in PyTorch 2.2.0
 
-# To allow for safe unpickling of QuantizedTensors when
-# using DCP checkpointing with FSDP2.
+# To allow for safe unpickling of QuantizedTensors when using DCP
+# checkpointing with FSDP2. ``tex.DType`` (the pybind11 enum) has its
+# ``__reduce_ex__`` / ``__reduce__`` overridden in the C++ binding (see
+# ``transformer_engine/common/util/pybind_helper.h``) so its pickle
+# stream encodes as ``(tex.DType, (int,))`` and only the class itself
+# needs to be allow-listed below.
+import transformer_engine_torch as tex
+
 try:
     from torch.serialization import add_safe_globals
 
@@ -127,6 +133,8 @@ try:
             MXFP8Quantizer,
             NVFP4Quantizer,
             Float8BlockQuantizer,
+            # pybind11 enum used as Quantizer.dtype
+            tex.DType,
             # __reduce_ex__ reconstructors (module-level functions).
             _make_float8_tensor_in_reduce_ex,
             _make_mxfp8_tensor_in_reduce_ex,

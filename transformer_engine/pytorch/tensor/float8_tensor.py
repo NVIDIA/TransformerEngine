@@ -245,7 +245,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
 
     def __getstate__(self):
         """Exclude unpicklable process group from serialized state."""
-        state = super().__getstate__()
+        state = self.__dict__.copy()
         state["amax_reduction_group"] = None
         return state
 
@@ -915,7 +915,25 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         """
         return (
             _make_float8_tensor_in_reduce_ex,
-            (self._data, int(self._fp8_dtype), self._scale_inv, self.dtype, self.shape),
+            (self._data, self._fp8_dtype, self._scale_inv, self.dtype, self.shape),
+        )
+
+    @classmethod
+    def _make_in_reduce_ex(
+        cls,
+        data: torch.Tensor,
+        fp8_dtype: TE_DType,
+        fp8_scale_inv: torch.Tensor,
+        dtype: torch.dtype,
+        shape: torch.Size,
+    ) -> Float8Tensor:
+        """Build Float8Tensor, for use in __reduce__
+        __reduce_ex__ assumes object constructor has positional
+        arguments.
+
+        """
+        return _make_float8_tensor_in_reduce_ex(
+            data, fp8_dtype, fp8_scale_inv, dtype, shape
         )
 
     def _get_data(self) -> Float8Tensor:
@@ -983,27 +1001,24 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
 
 def _make_float8_tensor_in_reduce_ex(
     data: torch.Tensor,
-    fp8_dtype: int,
+    fp8_dtype: TE_DType,
     fp8_scale_inv: torch.Tensor,
     dtype: torch.dtype,
     shape: torch.Size,
 ) -> Float8Tensor:
     """Reconstruct a ``Float8Tensor`` from its ``__reduce_ex__`` payload.
-
-    Defined at module level (not as a classmethod) so the pickle stream
+    Defined at module level (not as a Float8Tensor classmethod) so the pickle stream
     references it via a single ``GLOBAL`` opcode rather than the
     ``(getattr, (cls, name))`` reduction that bound classmethods/static
-    methods produce. ``fp8_dtype`` is passed as an ``int`` and converted
-    back to the pybind11 ``TE_DType`` enum here so the pickle stream
-    stays free of enum reductions as well.
+    methods produce.
     """
     return Float8Tensor(
         data=data,
-        fp8_dtype=TE_DType(fp8_dtype),
+        fp8_dtype=fp8_dtype,
         fp8_scale_inv=fp8_scale_inv,
         dtype=dtype,
         shape=shape,
-        device=data.device,
+        device=data.device if data is not None else None,
     )
 
 

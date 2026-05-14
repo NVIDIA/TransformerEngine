@@ -256,34 +256,6 @@ class Quantizer(abc.ABC):
         self.internal = False
         self.optimize_for_gemm = False
 
-    def __getstate__(self):
-        """Custom pickling.
-
-        FP8/FP4 quantizer subclasses store ``self.dtype`` as a
-        ``transformer_engine_torch.DType`` (pybind11 enum). Pybind11
-        enums reduce as ``(getattr, (Enum, name))``, which would force
-        callers using ``torch.load(weights_only=True)`` (e.g. DCP
-        async-staging) to allow-list ``builtins.getattr``. Serialize
-        ``dtype`` as an ``int`` here so the pickle stream stays free of
-        those enum reductions. Subclass overrides should call
-        ``super().__getstate__()`` rather than ``self.__dict__.copy()``
-        to preserve this behavior.
-        """
-        from transformer_engine_torch import DType as _TE_DType
-
-        state = self.__dict__.copy()
-        if isinstance(state.get("dtype"), _TE_DType):
-            state["dtype"] = int(state["dtype"])
-        return state
-
-    def __setstate__(self, state):
-        """Reconstruct ``dtype`` from its serialized ``int`` form."""
-        from transformer_engine_torch import DType as _TE_DType
-
-        if isinstance(state.get("dtype"), int):
-            state["dtype"] = _TE_DType(state["dtype"])
-        self.__dict__.update(state)
-
     def __repr__(self):
         return (
             f"{self.__class__.__name__}("

@@ -427,12 +427,45 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
                 self._rowwise_scale_inv,
                 self._columnwise_data,
                 self._columnwise_scale_inv,
-                int(self._fp8_dtype),
+                self._fp8_dtype,
                 self.dtype,
                 self._quantizer,
                 self._is_2D_scaled,
                 None,  # data_format
             ),
+        )
+
+    @classmethod
+    def _make_in_reduce_ex(
+        cls,
+        shape: torch.Size,
+        rowwise_data: torch.Tensor,
+        rowwise_scale_inv: torch.Tensor,
+        columnwise_data: torch.Tensor,
+        columnwise_scale_inv: torch.Tensor,
+        fp8_dtype: TE_DType,
+        dtype: torch.dtype,
+        quantizer: Quantizer,
+        is_2D_scaled: bool,
+        data_format: Any = None,
+    ) -> Float8BlockwiseQTensor:
+        """Build Float8BlockwiseQTensor, for use in __reduce__
+
+        __reduce_ex__ assumes object constructor has positional
+        arguments.
+
+        """
+        return _make_float8_blockwise_tensor_in_reduce_ex(
+            shape,
+            rowwise_data,
+            rowwise_scale_inv,
+            columnwise_data,
+            columnwise_scale_inv,
+            fp8_dtype,
+            dtype,
+            quantizer,
+            is_2D_scaled,
+            data_format,
         )
 
     def _get_data(self) -> Float8BlockwiseQTensor:
@@ -628,7 +661,7 @@ def _make_float8_blockwise_tensor_in_reduce_ex(
     rowwise_scale_inv: torch.Tensor,
     columnwise_data: torch.Tensor,
     columnwise_scale_inv: torch.Tensor,
-    fp8_dtype: int,
+    fp8_dtype: TE_DType,
     dtype: torch.dtype,
     quantizer: Quantizer,
     is_2D_scaled: bool,
@@ -636,11 +669,10 @@ def _make_float8_blockwise_tensor_in_reduce_ex(
 ) -> Float8BlockwiseQTensor:
     """Reconstruct a ``Float8BlockwiseQTensor`` from ``__reduce_ex__``.
 
-    Defined at module level so the pickle stream uses a single
+    Defined at module level (not as a Float8BlockwiseQTensor classmethod)
+    so the pickle stream references it via a single
     ``GLOBAL`` opcode rather than the ``(getattr, (cls, name))``
-    reduction that bound classmethods produce. ``fp8_dtype`` is passed
-    as an ``int`` and converted back to the pybind11 ``TE_DType`` enum
-    here.
+    reduction that bound classmethods produce.
     """
     # Infer device from inner buffers so the wrapper subclass stays
     # consistent with its data (e.g. CPU after DCP staging deserialize).
@@ -653,7 +685,7 @@ def _make_float8_blockwise_tensor_in_reduce_ex(
         shape=shape,
         rowwise_data=rowwise_data,
         rowwise_scale_inv=rowwise_scale_inv,
-        fp8_dtype=TE_DType(fp8_dtype),
+        fp8_dtype=fp8_dtype,
         columnwise_data=columnwise_data,
         columnwise_scale_inv=columnwise_scale_inv,
         dtype=dtype,
