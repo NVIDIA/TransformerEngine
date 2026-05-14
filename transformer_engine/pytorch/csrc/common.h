@@ -293,6 +293,8 @@ class Float8BlockQuantizer : public Quantizer {
 
 class MXFP8Quantizer : public Quantizer {
  public:
+  bool with_2d_quantization = false;
+
   explicit MXFP8Quantizer(const py::handle& quantizer);
 
   NVTEScalingMode get_scaling_mode() const override { return NVTE_MXFP8_1D_SCALING; }
