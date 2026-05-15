@@ -25,6 +25,9 @@ def jax_version_meet_requirement(version: str):
 # Minimum JAX version required for Triton kernel dispatch (jaxlib < 0.8.0 segfaults).
 TRITON_EXTENSION_MIN_JAX_VERSION = "0.8.0"
 
+# Minimum JAX version for non-legacy Triton kernel FFI (supporting CUDA graph capture)
+TRITON_EXTENSION_CUDA_GRAPH_MIN_JAX_VERSION = "0.10.1.dev0"
+
 # Nightly and stable floors for safe input_output_aliases in TritonAutotunedKernelCall.
 # jaxlib/gpu/triton_kernels.cc had a bug in the autotuning save/restore loop:
 # it iterated over all declared aliases unconditionally, but input_copies only
