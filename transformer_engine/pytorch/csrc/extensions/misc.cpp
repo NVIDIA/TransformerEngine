@@ -43,8 +43,8 @@ std::vector<at::Tensor> prepare_grouped_splits(const at::Tensor &split_sizes, in
 
   at::Tensor split_sizes_for_kernel;
   if (split_sizes.is_cuda()) {
-    NVTE_CHECK(split_sizes.device() == device, "CUDA split_sizes must be on current device ",
-               device, ", but got ", split_sizes.device(), ".");
+    NVTE_CHECK(split_sizes.device() == device, "CUDA split_sizes must be on current CUDA device ",
+               device.index(), ", but got CUDA device ", split_sizes.device().index(), ".");
     split_sizes_for_kernel = split_sizes;
   } else {
     // Preserve the legacy eager path: host m_splits are copied to the target
