@@ -361,15 +361,24 @@ std::pair<GroupedTensorWrapper, py::object> Float8Quantizer::create_grouped_tens
   std::optional<at::Tensor> columnwise_data;
   std::optional<at::Tensor> rowwise_scale_inv;
   std::optional<at::Tensor> columnwise_scale_inv;
+  at::Tensor grouped_scale;
+  if (scale.numel() == 1) {
+    grouped_scale = scale.expand({static_cast<int64_t>(num_tensors)}).contiguous();
+  } else {
+    NVTE_CHECK(static_cast<size_t>(scale.numel()) == num_tensors,
+               "Grouped Float8Quantizer scale must be scalar or have one entry per tensor.");
+    grouped_scale = scale.contiguous();
+  }
+  at::Tensor grouped_scale_inv = at::reciprocal(grouped_scale);
   at::Tensor amax = at::empty({static_cast<int64_t>(num_tensors)}, float_opts);
 
   if (rowwise_usage) {
     rowwise_data = at::empty({total_elements}, uint8_opts);
-    rowwise_scale_inv = at::empty({static_cast<int64_t>(num_tensors)}, float_opts);
+    rowwise_scale_inv = grouped_scale_inv;
   }
   if (columnwise_usage) {
     columnwise_data = at::empty({total_elements}, uint8_opts);
-    columnwise_scale_inv = at::empty({static_cast<int64_t>(num_tensors)}, float_opts);
+    columnwise_scale_inv = grouped_scale_inv;
   }
 
   GroupedTensorWrapper out_cpp(num_tensors, logical_shape, this->get_scaling_mode());
@@ -385,6 +394,7 @@ std::pair<GroupedTensorWrapper, py::object> Float8Quantizer::create_grouped_tens
                                      getTensorShape(*columnwise_scale_inv));
   }
   out_cpp.set_amax(amax.data_ptr(), DType::kFloat32, getTensorShape(amax));
+  out_cpp.set_scale(grouped_scale.data_ptr(), DType::kFloat32, getTensorShape(grouped_scale));
   if (first_dims.has_value()) {
     out_cpp.set_first_dims(first_dims->data_ptr(), DType::kInt64, getTensorShape(*first_dims));
   }
@@ -410,7 +420,7 @@ std::pair<GroupedTensorWrapper, py::object> Float8Quantizer::create_grouped_tens
   kwargs["columnwise_scale_inv"] = maybe_tensor_to_py(columnwise_scale_inv);
   kwargs["amax"] = amax;
   kwargs["columnwise_amax"] = py::none();
-  kwargs["scale"] = py::none();
+  kwargs["scale"] = grouped_scale;
   kwargs["first_dims"] = first_dims.has_value() ? py::cast(*first_dims) : py::none();
   kwargs["last_dims"] = py::none();
   kwargs["tensor_offsets"] = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none();

@@ -1057,6 +1057,8 @@ class GroupedTensorStorage:
                 scale_inv = None
                 if self.scale_inv is not None:
                     scale_inv = self.scale_inv[i : i + 1]
+                elif self.columnwise_scale_inv is not None:
+                    scale_inv = self.columnwise_scale_inv[i : i + 1]
 
                 if quantizer.internal:
                     float8_tensor_class = Float8TensorStorage

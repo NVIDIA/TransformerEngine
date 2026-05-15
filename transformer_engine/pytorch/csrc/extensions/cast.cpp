@@ -139,11 +139,137 @@ void group_quantize_nvfp4_impl(const GroupedTensorWrapper &grouped_input_tensor,
   }
 }
 
+float fp8_max_for_dtype(const DType dtype) {
+  switch (dtype) {
+    case DType::kFloat8E4M3:
+      return 448.0f;
+    case DType::kFloat8E5M2:
+      return 57344.0f;
+    default:
+      NVTE_ERROR("Expected FP8 dtype for grouped current-scaling quantization, got ",
+                 to_string(dtype), ".");
+  }
+  return 0.0f;
+}
+
+std::vector<int64_t> get_grouped_first_dims_host(const size_t num_tensors,
+                                                 const std::optional<at::Tensor> &first_dims,
+                                                 const size_t logical_first_dim) {
+  std::vector<int64_t> rows(num_tensors);
+  if (!first_dims.has_value()) {
+    NVTE_CHECK(logical_first_dim % num_tensors == 0,
+               "First logical dimension must be divisible by num_tensors.");
+    std::fill(rows.begin(), rows.end(), static_cast<int64_t>(logical_first_dim / num_tensors));
+    return rows;
+  }
+
+  NVTE_CHECK(static_cast<size_t>(first_dims->numel()) == num_tensors,
+             "first_dims must have length ", num_tensors, ".");
+  auto first_dims_cpu =
+      first_dims->to(at::TensorOptions().device(at::kCPU).dtype(at::kLong)).contiguous();
+  const int64_t *first_dims_ptr = first_dims_cpu.data_ptr<int64_t>();
+  int64_t total_rows = 0;
+  for (size_t i = 0; i < num_tensors; ++i) {
+    rows[i] = first_dims_ptr[i];
+    NVTE_CHECK(rows[i] >= 0, "first_dims entries must be non-negative.");
+    total_rows += rows[i];
+  }
+  NVTE_CHECK(static_cast<size_t>(total_rows) <= logical_first_dim,
+             "Sum of first_dims must not exceed the allocated first dimension.");
+  return rows;
+}
+
+void prepare_grouped_fp8_current_scaling_metadata(
+    const at::Tensor &tensor, const GroupedTensorWrapper &grouped_output_tensor,
+    const py::object &grouped_output_py, Float8CurrentScalingQuantizer *quantizer_cpp,
+    const size_t num_tensors, const std::optional<at::Tensor> &first_dims,
+    const size_t logical_first_dim, const size_t logical_last_dim) {
+  auto amax = grouped_output_py.attr("amax").cast<at::Tensor>();
+  auto scale = grouped_output_py.attr("scale").cast<at::Tensor>();
+  auto rowwise_scale_inv_py = grouped_output_py.attr("scale_inv");
+  auto columnwise_scale_inv_py = grouped_output_py.attr("columnwise_scale_inv");
+  std::optional<at::Tensor> rowwise_scale_inv;
+  std::optional<at::Tensor> columnwise_scale_inv;
+  if (!rowwise_scale_inv_py.is_none()) {
+    rowwise_scale_inv = rowwise_scale_inv_py.cast<at::Tensor>();
+  }
+  if (!columnwise_scale_inv_py.is_none()) {
+    columnwise_scale_inv = columnwise_scale_inv_py.cast<at::Tensor>();
+  }
+  NVTE_CHECK(rowwise_scale_inv.has_value() || columnwise_scale_inv.has_value(),
+             "Grouped FP8 current-scaling output must have at least one scale_inv buffer.");
+
+  const auto rows = get_grouped_first_dims_host(num_tensors, first_dims, logical_first_dim);
+  const auto input_dtype = GetTransformerEngineDType(tensor.scalar_type());
+  auto rowwise_data = grouped_output_tensor.get_rowwise_data();
+  auto columnwise_data = grouped_output_tensor.get_columnwise_data();
+  void *output_data_ptr = rowwise_data.data_ptr != nullptr ? rowwise_data.data_ptr
+                                                           : columnwise_data.data_ptr;
+  const DType output_dtype =
+      static_cast<DType>(rowwise_data.data_ptr != nullptr ? rowwise_data.dtype
+                                                          : columnwise_data.dtype);
+  NVTE_CHECK(output_data_ptr != nullptr,
+             "Grouped FP8 current-scaling output must have allocated output data.");
+
+  QuantizationConfigWrapper quant_config;
+  quant_config.set_force_pow_2_scales(quantizer_cpp->force_pow_2_scales);
+  quant_config.set_amax_epsilon(quantizer_cpp->amax_epsilon);
+
+  auto stream = at::cuda::getCurrentCUDAStream();
+  char *input_base = static_cast<char *>(tensor.data_ptr());
+  size_t row_offset = 0;
+  for (size_t i = 0; i < num_tensors; ++i) {
+    const size_t group_rows = static_cast<size_t>(rows[i]);
+    const size_t element_offset = row_offset * logical_last_dim;
+    void *input_group_ptr = input_base + element_offset * tensor.element_size();
+
+    TensorWrapper input_group(NVTE_DELAYED_TENSOR_SCALING);
+    input_group.set_rowwise_data(input_group_ptr, input_dtype,
+                                 std::vector<size_t>{group_rows, logical_last_dim});
+
+    at::Tensor &scale_inv_target =
+        rowwise_scale_inv.has_value() ? *rowwise_scale_inv : *columnwise_scale_inv;
+    TensorWrapper output_group(NVTE_DELAYED_TENSOR_SCALING);
+    output_group.set_rowwise_data(output_data_ptr, output_dtype,
+                                  std::vector<size_t>{group_rows, logical_last_dim});
+    output_group.set_amax(static_cast<float *>(amax.data_ptr()) + i, DType::kFloat32,
+                          std::vector<size_t>{1});
+    output_group.set_rowwise_scale_inv(static_cast<float *>(scale_inv_target.data_ptr()) + i,
+                                       DType::kFloat32, std::vector<size_t>{1});
+
+    NVTE_SCOPED_GIL_RELEASE({
+      nvte_compute_amax_with_config(input_group.data(), output_group.data(), quant_config, stream);
+    });
+    row_offset += group_rows;
+  }
+
+  if (quantizer_cpp->with_amax_reduction) {
+    c10d::AllreduceOptions opts;
+    opts.reduceOp = c10d::ReduceOp::MAX;
+    std::vector<at::Tensor> tensors = {amax};
+    NVTE_SCOPED_GIL_RELEASE({
+      quantizer_cpp->amax_reduction_group->allreduce(tensors, opts)->wait();
+    });
+  }
+
+  at::Tensor &scale_inv_target =
+      rowwise_scale_inv.has_value() ? *rowwise_scale_inv : *columnwise_scale_inv;
+  auto noop_flag = at::zeros({1}, tensor.options().dtype(torch::kInt32));
+  multi_tensor_compute_scale_and_scale_inv_cuda(
+      2048 * 32, noop_flag, {{amax}, {scale}, {scale_inv_target}},
+      fp8_max_for_dtype(quantizer_cpp->dtype), quantizer_cpp->force_pow_2_scales,
+      quantizer_cpp->amax_epsilon);
+  if (rowwise_scale_inv.has_value() && columnwise_scale_inv.has_value() &&
+      rowwise_scale_inv->data_ptr() != columnwise_scale_inv->data_ptr()) {
+    columnwise_scale_inv->copy_(*rowwise_scale_inv);
+  }
+}
+
 }  // namespace
 
 // NOTE: Only supports varying first dim.
 py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const size_t num_tensors,
-                          std::optional<at::Tensor> first_dims) {
+                          std::optional<at::Tensor> first_dims, const py::object &output) {
   using namespace transformer_engine::pytorch::detail;
   init_extension();
 
@@ -165,14 +291,25 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
   grouped_input_tensor.set_rowwise_data(
       tensor.data_ptr(), GetTransformerEngineDType(tensor.scalar_type()), getTensorShape(tensor));
 
-  // Create output GroupedTensor.
-  auto [grouped_output_tensor_cpp, grouped_output_py] = quantizer_cpp->create_grouped_tensor(
-      num_tensors, logical_shape, GetTransformerEngineDType(tensor.scalar_type()),
-      py::reinterpret_borrow<py::object>(quantizer), first_dims, logical_first_dim,
-      logical_last_dim);
+  // Create or reuse output GroupedTensor.
+  std::optional<GroupedTensorWrapper> grouped_output_tensor_cpp;
+  py::object grouped_output_py;
+  if (output.is_none()) {
+    auto created = quantizer_cpp->create_grouped_tensor(
+        num_tensors, logical_shape, GetTransformerEngineDType(tensor.scalar_type()),
+        py::reinterpret_borrow<py::object>(quantizer), first_dims, logical_first_dim,
+        logical_last_dim);
+    grouped_output_tensor_cpp.emplace(std::move(created.first));
+    grouped_output_py = std::move(created.second);
+  } else {
+    grouped_output_tensor_cpp.emplace(detail::GroupedTensorFromPyTorchGroupedTensor(output));
+    grouped_output_py = py::reinterpret_borrow<py::object>(output);
+  }
 
   // dispatch to scaling methods
   enum class GroupedQuantizationMode {
+    FP8_PRECOMPUTED_GROUPED_QUANTIZE,
+    FP8_CURRENT_SCALING_GROUPED_QUANTIZE,
     MXFP8_GROUPED_QUANTIZE,
     NVFP4_GROUPED_QUANTIZE,
     INVALID_FOR_GROUPED_QUANTIZE
@@ -183,6 +320,10 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
     grouped_quantization_mode = GroupedQuantizationMode::MXFP8_GROUPED_QUANTIZE;
   } else if (detail::IsNVFP4Quantizers(quantizer.ptr())) {
     grouped_quantization_mode = GroupedQuantizationMode::NVFP4_GROUPED_QUANTIZE;
+  } else if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
+    grouped_quantization_mode = GroupedQuantizationMode::FP8_CURRENT_SCALING_GROUPED_QUANTIZE;
+  } else if (detail::IsFloat8Quantizers(quantizer.ptr())) {
+    grouped_quantization_mode = GroupedQuantizationMode::FP8_PRECOMPUTED_GROUPED_QUANTIZE;
   }
 
   if (empty_input_buffer) {
@@ -196,21 +337,42 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
     case GroupedQuantizationMode::NVFP4_GROUPED_QUANTIZE: {
       // NVFP4 grouped quantization
       NVFP4Quantizer *nvfp4_quantizer_cpp = static_cast<NVFP4Quantizer *>(quantizer_cpp.get());
-      group_quantize_nvfp4_impl(grouped_input_tensor, grouped_output_tensor_cpp,
+      group_quantize_nvfp4_impl(grouped_input_tensor, *grouped_output_tensor_cpp,
                                 nvfp4_quantizer_cpp, at::cuda::getCurrentCUDAStream());
+      break;
+    }
+    case GroupedQuantizationMode::FP8_CURRENT_SCALING_GROUPED_QUANTIZE: {
+      auto *fp8_quantizer_cpp =
+          static_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
+      prepare_grouped_fp8_current_scaling_metadata(
+          tensor, *grouped_output_tensor_cpp, grouped_output_py, fp8_quantizer_cpp, num_tensors,
+          first_dims, logical_first_dim, logical_last_dim);
+      QuantizationConfigWrapper quant_config_cpp;
+      NVTE_SCOPED_GIL_RELEASE({
+        nvte_group_quantize(grouped_input_tensor.data(), grouped_output_tensor_cpp->data(),
+                            quant_config_cpp, at::cuda::getCurrentCUDAStream());
+      });
+      break;
+    }
+    case GroupedQuantizationMode::FP8_PRECOMPUTED_GROUPED_QUANTIZE: {
+      QuantizationConfigWrapper quant_config_cpp;
+      NVTE_SCOPED_GIL_RELEASE({
+        nvte_group_quantize(grouped_input_tensor.data(), grouped_output_tensor_cpp->data(),
+                            quant_config_cpp, at::cuda::getCurrentCUDAStream());
+      });
       break;
     }
     case GroupedQuantizationMode::MXFP8_GROUPED_QUANTIZE: {
       QuantizationConfigWrapper quant_config_cpp;
       NVTE_SCOPED_GIL_RELEASE({
-        nvte_group_quantize(grouped_input_tensor.data(), grouped_output_tensor_cpp.data(),
+        nvte_group_quantize(grouped_input_tensor.data(), grouped_output_tensor_cpp->data(),
                             quant_config_cpp, at::cuda::getCurrentCUDAStream());
       });
       break;
     }
     case GroupedQuantizationMode::INVALID_FOR_GROUPED_QUANTIZE:
     default:
-      NVTE_ERROR("group_quantize: only support NVFP4 or MXFP8 quantizer.");
+      NVTE_ERROR("group_quantize: only supports FP8, NVFP4, or MXFP8 quantizer.");
       break;
   }
 
