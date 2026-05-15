@@ -175,6 +175,26 @@ __device__ __forceinline__ void scaled_fp8_cvt_vec_full(const Vec<IType, NUM_ELT
   }
 }
 
+template <typename OType, uint32_t NUM_ELTS>
+__device__ __forceinline__ void store_fp8_vec_streaming(OType *ptr,
+                                                        const Vec<OType, NUM_ELTS> &vec) {
+  constexpr size_t bytes = Vec<OType, NUM_ELTS>::BYTES;
+  if constexpr (bytes == 4) {
+    const uint32_t value = vec.data.vec;
+    asm volatile("st.global.cs.u32 [%0], %1;" ::"l"(ptr), "r"(value) : "memory");
+  } else if constexpr (bytes == 8) {
+    const uint64_t value = vec.data.vec;
+    asm volatile("st.global.cs.u64 [%0], %1;" ::"l"(ptr), "l"(value) : "memory");
+  } else if constexpr (bytes == 16) {
+    const uint4 value = vec.data.vec;
+    asm volatile("st.global.cs.v4.u32 [%0], {%1, %2, %3, %4};" ::"l"(ptr), "r"(value.x),
+                 "r"(value.y), "r"(value.z), "r"(value.w)
+                 : "memory");
+  } else {
+    vec.store_to(ptr);
+  }
+}
+
 template <bool IS_ACT, typename ParamOP, float (*OP)(float, const ParamOP &), typename IType,
           typename OType, ScalingType SCALING_TYPE, ShapeRepresentation SHAPE_REP>
 __global__ void __launch_bounds__(THREADS_PER_TILE) group_cast_fp8_kernel(
@@ -483,7 +503,11 @@ __global__ void __launch_bounds__(THREADS_PER_TILE) group_cast_fp8_same_shape_fu
       scaled_fp8_cvt_vec_full<IS_ACT, ParamOP, OP>(local_input, local_output, scale);
       if constexpr (ROWWISE_OUTPUT) {
         OType *const output_ptr = output_rowwise + tensor_base + row * cols + base_col;
-        local_output.store_to(output_ptr);
+        if constexpr (SCALING_TYPE == ScalingType::BIDIMENSIONAL) {
+          store_fp8_vec_streaming(output_ptr, local_output);
+        } else {
+          local_output.store_to(output_ptr);
+        }
       }
 #pragma unroll
       for (size_t j2 = 0; j2 < nvec_in; ++j2) {
