@@ -238,9 +238,9 @@ class TestGroupedTensor:
             ("split_points", split_points),
             ("tensor_offsets", tensor_offsets),
         ):
-            assert tensor.data_ptr() % 16 == 0, (
-                f"{name} data_ptr is not 16-byte aligned: {tensor.data_ptr():#x}"
-            )
+            assert (
+                tensor.data_ptr() % 16 == 0
+            ), f"{name} data_ptr is not 16-byte aligned: {tensor.data_ptr():#x}"
 
     def test_split_into_quantized_tensors_no_quantization(self) -> None:
         """Test split_into_quantized_tensors for unquantized tensors"""

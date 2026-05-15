@@ -19,10 +19,10 @@ Forward-only:
 
     python benchmarks/linear/benchmark_graph_safe_grouped_linear.py --fwd-only
 
-Nsight Systems:  
+Nsight Systems:
 
     (optionally: unset DEBUGINFOD_URLS)
-    
+
     nsys profile \
         --output=./benchmarks/linear/graph_safe_grouped_linear_mxfp8 \
         --force-overwrite true \
@@ -63,7 +63,7 @@ def make_uniform_splits(total_tokens: int, num_groups: int) -> list[int]:
     """Split tokens uniformly across groups."""
     if total_tokens % num_groups != 0:
         raise ValueError(
-            f"Uniform split requires total_tokens divisible by num_groups, "
+            "Uniform split requires total_tokens divisible by num_groups, "
             f"got total_tokens={total_tokens}, num_groups={num_groups}"
         )
     return [total_tokens // num_groups] * num_groups
@@ -114,7 +114,9 @@ def init_main_grads(module: torch.nn.Module, value: float = 0.0) -> None:
     with torch.no_grad():
         for param in module.parameters():
             if getattr(param, "main_grad", None) is None:
-                param.main_grad = torch.empty(param.size(), device=param.device, dtype=torch.float32)
+                param.main_grad = torch.empty(
+                    param.size(), device=param.device, dtype=torch.float32
+                )
             param.main_grad.fill_(value)
 
 
@@ -236,7 +238,9 @@ def benchmark_case(
         print("backward fused op:", type(backward_ops[0][0]).__name__ if backward_ops else "none")
 
     label = "graph_safe_grouped_mlp_mxfp8_swiglu"
-    timing_context = torch.autograd.profiler.emit_nvtx(record_shapes=True) if profile else nullcontext()
+    timing_context = (
+        torch.autograd.profiler.emit_nvtx(record_shapes=True) if profile else nullcontext()
+    )
     with timing_context:
         torch.cuda.nvtx.range_push(label)
         timing = benchmark.Timer(

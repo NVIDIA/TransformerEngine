@@ -56,12 +56,12 @@ std::vector<at::Tensor> prepare_grouped_splits(const at::Tensor &split_sizes, in
   // cuDNN CuTe-DSL grouped GEMM as ``padded_offsets``, which requires 16-byte
   // alignment) lands on a 16-byte boundary inside the bulk buffer.
   std::vector<size_t> alignments = {16, 16, 16, 16};
-  auto outputs = bulk_allocate({{static_cast<size_t>(num_groups)},
-                                {static_cast<size_t>(offsets_length)},
-                                {static_cast<size_t>(num_groups)},
-                                {static_cast<size_t>(offsets_length)}},
-                               {at::kLong, at::kLong, at::kInt, at::kLong}, split_sizes.device(),
-                               alignments);
+  auto outputs =
+      bulk_allocate({{static_cast<size_t>(num_groups)},
+                     {static_cast<size_t>(offsets_length)},
+                     {static_cast<size_t>(num_groups)},
+                     {static_cast<size_t>(offsets_length)}},
+                    {at::kLong, at::kLong, at::kInt, at::kLong}, split_sizes.device(), alignments);
   auto split_sizes_i64 = outputs[0];
   auto base_offsets = outputs[1];
   auto split_points = outputs[2];
