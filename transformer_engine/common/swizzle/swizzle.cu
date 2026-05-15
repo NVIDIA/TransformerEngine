@@ -1456,10 +1456,8 @@ void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
 
     // We don't allow empty tensors. They should be filtered out before calling this function.
     NVTE_CHECK(input[i]->numel() != 0, "Tensor input[", i, "] is empty.");
-    CheckInputTensor(*input[i], "scaling_factor_input[" + std::to_string(i) + "]",
-                     check_scale_inv_shapes);
-    CheckInputTensor(*output[i], "scaling_factor_output[" + std::to_string(i) + "]",
-                     check_scale_inv_shapes);
+    CheckInputTensor(*input[i], "scaling_factor_input", check_scale_inv_shapes);
+    CheckInputTensor(*output[i], "scaling_factor_output", check_scale_inv_shapes);
     all_has_data = all_has_data && input[i]->scale_inv.has_data();
     all_has_columnwise_data =
         (all_has_columnwise_data && input[i]->columnwise_scale_inv.has_data());

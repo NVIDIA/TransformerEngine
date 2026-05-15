@@ -121,12 +121,19 @@ struct SimpleTensor {
   SimpleTensor(void *dptr, std::vector<size_t> shape, DType dtype)
       : dptr{dptr}, shape{std::move(shape)}, dtype{dtype} {}
 
+  SimpleTensor() : SimpleTensor(nullptr, std::vector<size_t>{0}, DType::kFloat32) {}
+
   SimpleTensor(const NVTEBasicTensor &tensor)  // NOLINT
       : dptr(tensor.data_ptr),
         shape(tensor.shape.data, tensor.shape.data + tensor.shape.ndim),
         dtype(static_cast<DType>(tensor.dtype)) {}
 
-  SimpleTensor() : SimpleTensor(nullptr, std::vector<size_t>{0}, DType::kFloat32) {}
+  SimpleTensor &operator=(const NVTEBasicTensor &tensor) {
+    dptr = tensor.data_ptr;
+    shape.assign(tensor.shape.data, tensor.shape.data + tensor.shape.ndim);
+    dtype = static_cast<DType>(tensor.dtype);
+    return *this;
+  }
 
   operator NVTEBasicTensor() const {
     return {dptr, static_cast<NVTEDType>(dtype),

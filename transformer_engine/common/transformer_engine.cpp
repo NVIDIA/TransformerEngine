@@ -7,6 +7,7 @@
 #include <transformer_engine/transformer_engine.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <climits>
 #include <cstring>
@@ -91,54 +92,58 @@ void CheckScaleTensorShape(const Tensor &t, const std::string &name) {
   } else {
     if (t.scaling_mode == NVTE_MXFP8_1D_SCALING) {
       // Need (4, 128) alignment even for e8 scaling factor
-      auto block_alignment = std::vector<size_t>{128ul, 4ul};
-      size_t expected_x, expected_y, alignment;
-      const size_t block_size_rowwise = 32;
-      const size_t block_size_colwise = 32;
+      constexpr std::array<size_t, 2> block_alignment{128ul, 4ul};
 
       if (t.has_data()) {
-        alignment = block_alignment[0];
-        expected_x =
-            DIVUP(DIVUP(t.flat_first_dim(), static_cast<size_t>(1)), alignment) * alignment;
-        alignment = block_alignment[1];
-        expected_y =
-            DIVUP(DIVUP(t.flat_last_dim(), static_cast<size_t>(block_size_rowwise)), alignment) *
-            alignment;
-
-        const auto &expected = std::vector<size_t>{expected_x, expected_y};
-        NVTE_CHECK(t.scale_inv.shape == expected, "Tensor \"", name,
-                   "\" has invalid scale_inv shape (expected ", expected, ", got ",
-                   t.scale_inv.shape, ")");
+        constexpr std::array<size_t, 2> block_shape{1, 32};
+        const std::array<size_t, 2> expected{
+          DIVUP_TO_MULTIPLE(DIVUP(t.flat_first_dim(), block_shape[0]), block_alignment[0]),
+          DIVUP_TO_MULTIPLE(DIVUP(t.flat_last_dim(), block_shape[1]), block_alignment[1])
+        };
+        NVTE_CHECK(t.scale_inv.shape.size() == 2
+                   && t.scale_inv.shape[0] == expected[0]
+                   && t.scale_inv.shape[1] == expected[1],
+                   "Tensor \"", name,
+                   "\" has invalid scale_inv shape (expected ", expected,
+                   ", got ", t.scale_inv.shape, ")");
       }
       if (t.has_columnwise_data()) {
-        alignment = block_alignment[1];
-        expected_x =
-            DIVUP(DIVUP(t.flat_first_dim(), static_cast<size_t>(block_size_colwise)), alignment) *
-            alignment;
-        alignment = block_alignment[0];
-        expected_y = DIVUP(DIVUP(t.flat_last_dim(), static_cast<size_t>(1)), alignment) * alignment;
-
-        const auto &expected = std::vector<size_t>{expected_x, expected_y};
-        NVTE_CHECK(t.columnwise_scale_inv.shape == expected, "Tensor \"", name,
-                   "\" has invalid columnwise_scale_inv shape (expected ", expected, ", got ",
-                   t.columnwise_scale_inv.shape, ")");
+        constexpr std::array<size_t, 2> block_shape{32, 1};
+        const std::array<size_t, 2> expected{
+          DIVUP_TO_MULTIPLE(DIVUP(t.flat_first_dim(), block_shape[0]), block_alignment[1]),
+          DIVUP_TO_MULTIPLE(DIVUP(t.flat_last_dim(), block_shape[1]), block_alignment[0])
+        };
+        NVTE_CHECK(t.columnwise_scale_inv.shape.size() == 2
+                   && t.columnwise_scale_inv.shape[0] == expected[0]
+                   && t.columnwise_scale_inv.shape[1] == expected[1],
+                   "Tensor \"", name,
+                   "\" has invalid columnwise_scale_inv shape (expected ", expected,
+                   ", got ", t.scale_inv.shape, ")");
       }
     } else if (t.scaling_mode == NVTE_NVFP4_1D_SCALING) {
       if (t.has_data()) {
-        const size_t expected_y = DIVUP_TO_MULTIPLE(t.flat_first_dim(), 128);
-        const size_t expected_x = DIVUP_TO_MULTIPLE(DIVUP(t.flat_last_dim(), 16lu), 4);
-        const auto &expected = std::vector<size_t>{expected_y, expected_x};
-        NVTE_CHECK(t.scale_inv.shape == expected, "Tensor \"", name,
-                   "\" has invalid scale_inv shape (expected ", expected, ", got ",
-                   t.scale_inv.shape, ")");
+        const std::array<size_t, 2> expected{
+          DIVUP_TO_MULTIPLE(t.flat_first_dim(), 128),
+          DIVUP_TO_MULTIPLE(DIVUP(t.flat_last_dim(), 16lu), 4)
+        };
+        NVTE_CHECK(t.scale_inv.shape.size() == 2
+                   && t.scale_inv.shape[0] == expected[0]
+                   && t.scale_inv.shape[1] == expected[1],
+                   "Tensor \"", name,
+                   "\" has invalid scale_inv shape (expected ", expected,
+                   ", got ", t.scale_inv.shape, ")");
       }
       if (t.has_columnwise_data()) {
-        const size_t expected_y = DIVUP_TO_MULTIPLE(t.flat_last_dim(), 128);
-        const size_t expected_x = DIVUP_TO_MULTIPLE(DIVUP(t.flat_first_dim(), 16lu), 4);
-        const auto &expected = std::vector<size_t>{expected_y, expected_x};
-        NVTE_CHECK(t.columnwise_scale_inv.shape == expected, "Tensor \"", name,
-                   "\"  has invalid columnwise_scale_inv shape (expected ", expected, ", got ",
-                   t.columnwise_scale_inv.shape, ")");
+        const std::array<size_t, 2> expected{
+          DIVUP_TO_MULTIPLE(t.flat_last_dim(), 128),
+          DIVUP_TO_MULTIPLE(DIVUP(t.flat_first_dim(), 16lu), 4)
+        };
+        NVTE_CHECK(t.columnwise_scale_inv.shape.size() == 2
+                   && t.columnwise_scale_inv.shape[0] == expected[0]
+                   && t.columnwise_scale_inv.shape[1] == expected[1],
+                   "Tensor \"", name,
+                   "\" has invalid columnwise_scale_inv shape (expected ", expected,
+                   ", got ", t.scale_inv.shape, ")");
       }
     }
   }
