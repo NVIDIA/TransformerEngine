@@ -377,33 +377,23 @@ def finetune_model(model, hyperparams, accelerator, train_dataloader, optimizer,
     is_printer = int(os.environ.get("LOCAL_RANK", "0")) == 0
     torch.cuda.synchronize()
 
-    torch.cuda.nvtx.range_push("timed_steps")
     for step_idx in range(hyperparams.num_training_steps):
-        torch.cuda.nvtx.range_push(f"step_{step_idx}")
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         start.record()
 
-        torch.cuda.nvtx.range_push("dataloader")
         _, batch = next(train_dataloader)
-        torch.cuda.nvtx.range_pop()
 
         with accelerator.accumulate(model):
-            torch.cuda.nvtx.range_push("forward")
             outputs = model(**batch)
             loss = outputs.loss
             total_loss += loss.detach().float()
-            torch.cuda.nvtx.range_pop()
 
-            torch.cuda.nvtx.range_push("backward")
             accelerator.backward(loss)
-            torch.cuda.nvtx.range_pop()
 
-            torch.cuda.nvtx.range_push("optimizer_step")
             optimizer.step()
             lr_scheduler.step()
             optimizer.zero_grad()
-            torch.cuda.nvtx.range_pop()
 
         end.record()
         end.synchronize()
@@ -414,8 +404,6 @@ def finetune_model(model, hyperparams, accelerator, train_dataloader, optimizer,
                 f"[step {step_idx + 1}/{hyperparams.num_training_steps}] {step_ms:.1f} ms",
                 flush=True,
             )
-        torch.cuda.nvtx.range_pop()
-    torch.cuda.nvtx.range_pop()
 
     accelerator.end_training()
 

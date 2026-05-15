@@ -197,47 +197,45 @@ class NVMixtralMXFP8SparseMoeBlock(nn.Module):
         if hidden_states.dim() == 3:
             hidden_states = hidden_states.reshape(-1, self.hidden_size)
 
-        with torch.cuda.nvtx.range("my_router"):
-            with te.autocast(enabled=False):
-                router_logits = self.gate(hidden_states)  # [N, E]
+        with te.autocast(enabled=False):
+            router_logits = self.gate(hidden_states)  # [N, E]
 
-            # Top-k routing weights, two algebraically equivalent forms.
-            # Old::
-            #
-            #     probs   = softmax(logits)                  # (N, E)
-            #     weights, idx = topk(probs, k)
-            #     weights = weights / weights.sum(-1, keepdim=True)
-            #
-            # New (used here)::
-            #
-            #     topk_logits, idx = topk(logits, k)
-            #     weights = softmax(topk_logits)             # softmax over (N, k)
-            topk_logits, selected_experts = torch.topk(router_logits, self.top_k, dim=-1)
-            routing_weights = torch.nn.functional.softmax(topk_logits, dim=-1, dtype=torch.float32)
+        # Top-k routing weights, two algebraically equivalent forms.
+        # Old::
+        #
+        #     probs   = softmax(logits)                  # (N, E)
+        #     weights, idx = topk(probs, k)
+        #     weights = weights / weights.sum(-1, keepdim=True)
+        #
+        # New (used here)::
+        #
+        #     topk_logits, idx = topk(logits, k)
+        #     weights = softmax(topk_logits)             # softmax over (N, k)
+        topk_logits, selected_experts = torch.topk(router_logits, self.top_k, dim=-1)
+        routing_weights = torch.nn.functional.softmax(topk_logits, dim=-1, dtype=torch.float32)
 
-            # Bincount once, in the MoE block. ``AllToAllTokenDispatcher``
-            # takes this as a required argument, so the dispatcher never
-            # bincounts again.
-            tokens_per_expert = torch.bincount(
-                selected_experts.reshape(-1), minlength=self.num_experts
-            ).to(torch.int32)
+        # Bincount once, in the MoE block. ``AllToAllTokenDispatcher``
+        # takes this as a required argument, so the dispatcher never
+        # bincounts again.
+        tokens_per_expert = torch.bincount(
+            selected_experts.reshape(-1), minlength=self.num_experts
+        ).to(torch.int32)
 
-            if self.moe_aux_loss_coeff > 0:
-                num_tokens = hidden_states.shape[0]
-                with torch.cuda.nvtx.range("my_aux_loss"):
-                    softmax_probs = torch.nn.functional.softmax(
-                        router_logits, dim=-1, dtype=torch.float32
-                    )
-                    self._aux_loss = fused_moe_aux_loss(
-                        probs=softmax_probs,
-                        tokens_per_expert=tokens_per_expert,
-                        total_num_tokens=num_tokens,
-                        num_experts=self.num_experts,
-                        topk=self.top_k,
-                        coeff=self.moe_aux_loss_coeff,
-                    )
-            else:
-                self._aux_loss = torch.tensor(0.0, device=hidden_states.device)
+        if self.moe_aux_loss_coeff > 0:
+            num_tokens = hidden_states.shape[0]
+            softmax_probs = torch.nn.functional.softmax(
+                router_logits, dim=-1, dtype=torch.float32
+            )
+            self._aux_loss = fused_moe_aux_loss(
+                probs=softmax_probs,
+                tokens_per_expert=tokens_per_expert,
+                total_num_tokens=num_tokens,
+                num_experts=self.num_experts,
+                topk=self.top_k,
+                coeff=self.moe_aux_loss_coeff,
+            )
+        else:
+            self._aux_loss = torch.tensor(0.0, device=hidden_states.device)
 
         dispatch_out = self.dispatcher.dispatch(
             hidden_states,
@@ -252,10 +250,9 @@ class NVMixtralMXFP8SparseMoeBlock(nn.Module):
         )
 
         # Fused gate_up -> ScaledSwiGLU(probs) -> down.
-        with torch.cuda.nvtx.range("my_grouped_mlp_mxfp8"):
-            expert_output = self._experts_ffn_op(
-                expert_input, split_sizes, expert_probs, split_sizes
-            )
+        expert_output = self._experts_ffn_op(
+            expert_input, split_sizes, expert_probs, split_sizes
+        )
 
         output = self.dispatcher.combine(expert_output, dispatch_out.handle)
         return output.reshape(original_shape)
@@ -312,26 +309,24 @@ class NVMixtralMXFP8DecoderLayer(nn.Module):
         inference_params: InferenceParams | None = None,
         **kwargs: Any,
     ) -> torch.Tensor:
-        with torch.cuda.nvtx.range("my_attention"):
-            attn_output = self.self_attention(
-                hidden_states,
-                attention_mask=attention_mask,
-                rotary_pos_emb=rotary_pos_emb,
-                inference_params=inference_params,
-                cu_seqlens_q=kwargs.get("cu_seqlens_q", None),
-                cu_seqlens_kv=kwargs.get("cu_seqlens_kv", None),
-                cu_seqlens_q_padded=kwargs.get("cu_seqlens_q_padded", None),
-                cu_seqlens_kv_padded=kwargs.get("cu_seqlens_kv_padded", None),
-                max_seqlen_q=kwargs.get("max_seqlen_q", None),
-                max_seqlen_kv=kwargs.get("max_seqlen_kv", None),
-                pad_between_seqs=kwargs.get("pad_between_seqs", None),
-            )
+        attn_output = self.self_attention(
+            hidden_states,
+            attention_mask=attention_mask,
+            rotary_pos_emb=rotary_pos_emb,
+            inference_params=inference_params,
+            cu_seqlens_q=kwargs.get("cu_seqlens_q", None),
+            cu_seqlens_kv=kwargs.get("cu_seqlens_kv", None),
+            cu_seqlens_q_padded=kwargs.get("cu_seqlens_q_padded", None),
+            cu_seqlens_kv_padded=kwargs.get("cu_seqlens_kv_padded", None),
+            max_seqlen_q=kwargs.get("max_seqlen_q", None),
+            max_seqlen_kv=kwargs.get("max_seqlen_kv", None),
+            pad_between_seqs=kwargs.get("pad_between_seqs", None),
+        )
         hidden_states = hidden_states + attn_output
 
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
-        with torch.cuda.nvtx.range("my_mlp"):
-            hidden_states = self.mlp(hidden_states)
+        hidden_states = self.mlp(hidden_states)
         return residual + hidden_states
 
 
@@ -459,22 +454,21 @@ class NVMixtralMXFP8Model(NVMixtralMXFP8PreTrainedModel):
 
         with self._outer_autocast():
             for layer_idx, decoder_layer in enumerate(self.layers):
-                with torch.cuda.nvtx.range(f"my_layer_{layer_idx}"):
-                    hidden_states = decoder_layer(
-                        hidden_states,
-                        attention_mask=(
-                            None if self.config.attn_input_format == "thd" else attention_mask
-                        ),
-                        rotary_pos_emb=te_rope_emb,
-                        inference_params=past_key_values,
-                        cu_seqlens_q=kwargs.get("cu_seq_lens_q", None),
-                        cu_seqlens_kv=kwargs.get("cu_seq_lens_k", None),
-                        cu_seqlens_q_padded=kwargs.get("cu_seq_lens_q_padded", None),
-                        cu_seqlens_kv_padded=kwargs.get("cu_seq_lens_k_padded", None),
-                        max_seqlen_q=kwargs.get("max_length_q", None),
-                        max_seqlen_kv=kwargs.get("max_length_k", None),
-                        pad_between_seqs=kwargs.get("pad_between_seqs", None),
-                    )
+                hidden_states = decoder_layer(
+                    hidden_states,
+                    attention_mask=(
+                        None if self.config.attn_input_format == "thd" else attention_mask
+                    ),
+                    rotary_pos_emb=te_rope_emb,
+                    inference_params=past_key_values,
+                    cu_seqlens_q=kwargs.get("cu_seq_lens_q", None),
+                    cu_seqlens_kv=kwargs.get("cu_seq_lens_k", None),
+                    cu_seqlens_q_padded=kwargs.get("cu_seq_lens_q_padded", None),
+                    cu_seqlens_kv_padded=kwargs.get("cu_seq_lens_k_padded", None),
+                    max_seqlen_q=kwargs.get("max_length_q", None),
+                    max_seqlen_kv=kwargs.get("max_length_k", None),
+                    pad_between_seqs=kwargs.get("pad_between_seqs", None),
+                )
 
         hidden_states = self.norm(hidden_states)
 
