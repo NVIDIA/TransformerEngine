@@ -437,8 +437,9 @@ __device__ inline void radix_topk_and_mask(CompType *scores, int data_size, int 
 }
 
 template <int K>
-__device__ inline void naive_topk_and_mask_smallk(CompType *scores, int data_size, int *topk_indices,
-                                                  CompType *topk_scores, int lane_id) {
+__device__ inline void naive_topk_and_mask_smallk(CompType *scores, int data_size,
+                                                  int *topk_indices, CompType *topk_scores,
+                                                  int lane_id) {
   static_assert(K > 0 && K <= 8, "K must be in [1, 8]");
   int selected[K];
 #pragma unroll
