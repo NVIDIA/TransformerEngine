@@ -1284,7 +1284,9 @@ class _LayerNormMLP(torch.autograd.Function):
                 if ctx.fc2_grad_output_quantizer is not None:
                     ctx.fc2_grad_output_quantizer.set_usage(rowwise=True, columnwise=False)
                 grad_output, _ = gather_along_first_dim(
-                    grad_output, ctx.tp_group, quantizer=ctx.fc2_grad_output_quantizer,
+                    grad_output,
+                    ctx.tp_group,
+                    quantizer=ctx.fc2_grad_output_quantizer,
                 )
 
             # --------------------------------------------------

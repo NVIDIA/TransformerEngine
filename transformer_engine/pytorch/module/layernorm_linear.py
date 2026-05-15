@@ -889,7 +889,9 @@ class _LayerNormLinear(torch.autograd.Function):
                 if ctx.grad_output_quantizer is not None:
                     ctx.grad_output_quantizer.set_usage(rowwise=True, columnwise=False)
                 grad_output, _ = gather_along_first_dim(
-                    grad_output, ctx.tp_group, quantizer=ctx.grad_output_quantizer,
+                    grad_output,
+                    ctx.tp_group,
+                    quantizer=ctx.grad_output_quantizer,
                 )
 
             # --------------------------------------------------

@@ -1064,7 +1064,9 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
             if grad_output_quantizer is not None:
                 grad_output_quantizer.set_usage(rowwise=True, columnwise=False)
             grad_output, _ = gather_along_first_dim(
-                grad_output, bwd_args.tp_group, quantizer=grad_output_quantizer,
+                grad_output,
+                bwd_args.tp_group,
+                quantizer=grad_output_quantizer,
             )
 
         # --------------------------------------------------
