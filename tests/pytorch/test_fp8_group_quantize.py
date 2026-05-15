@@ -7,8 +7,11 @@
 import pytest
 import torch
 import transformer_engine.pytorch as te
+import transformer_engine.pytorch.ops as te_ops
+from transformer_engine.common import recipe
 from transformer_engine.pytorch import Float8CurrentScalingQuantizer
 from transformer_engine.pytorch.constants import TE_DType_To_Torch
+from transformer_engine.pytorch.ops.basic import grouped_linear as grouped_linear_impl
 import transformer_engine_torch as tex
 
 from references.quantize_scale_calc import scale_from_amax_tensor
@@ -40,7 +43,10 @@ def _case_input(case: str, cols: int):
         tensor = torch.randn(actual_rows, cols, dtype=torch.bfloat16, device="cuda")
         return tensor, num_tensors, None, [rows_per_tensor] * num_tensors
 
-    first_dims_list = [512, 256, 384]
+    if case == "empty_split":
+        first_dims_list = [512, 0, 384]
+    else:
+        first_dims_list = [512, 256, 384]
     actual_rows = sum(first_dims_list)
     allocated_rows = actual_rows * 2
     tensor = torch.randn(allocated_rows, cols, dtype=torch.bfloat16, device="cuda")
@@ -58,6 +64,23 @@ def _expected_quantized_parts(tensor: torch.Tensor, first_dims_list: list[int], 
     row_offset = 0
     for rows in first_dims_list:
         group = tensor[row_offset : row_offset + rows]
+        if rows == 0:
+            amax = torch.zeros(1, dtype=torch.float32, device=tensor.device)
+            scale, scale_inv, _ = scale_from_amax_tensor(
+                torch.float32,
+                amax,
+                TE_DType_To_Torch[tex.DType.kFloat8E4M3],
+                eps=0.0,
+                pow_2_scales=False,
+            )
+            scales.append(scale)
+            scale_invs.append(scale_inv)
+            amaxes.append(amax)
+            if mode in ("rowwise", "both"):
+                rowwise_parts.append(torch.empty(0, dtype=torch.uint8, device=tensor.device))
+            if mode in ("columnwise", "both"):
+                columnwise_parts.append(torch.empty(0, dtype=torch.uint8, device=tensor.device))
+            continue
         qx, sx, qx_t, _ = ref_per_tensor_cs_cast(
             group,
             fp8_dtype=tex.DType.kFloat8E4M3,
@@ -89,7 +112,7 @@ def _expected_quantized_parts(tensor: torch.Tensor, first_dims_list: list[int], 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 @pytest.mark.parametrize("mode", ["rowwise", "columnwise", "both"])
-@pytest.mark.parametrize("case", ["uniform", "overallocated"])
+@pytest.mark.parametrize("case", ["uniform", "overallocated", "empty_split"])
 def test_group_quantize_fp8_current_scaling_modes(mode: str, case: str) -> None:
     """Grouped FP8 current scaling matches per-tensor references in every direction mode."""
     cols = 1024
@@ -154,3 +177,71 @@ def test_group_quantize_fp8_columnwise_split_uses_columnwise_scale_inv() -> None
             rtol=0.1,
         )
         row_offset += rows
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+def test_grouped_linear_fp8_current_scaling_bias_backward_empty_split(monkeypatch) -> None:
+    """FP8 current-scaling grouped-linear bias backward avoids MXFP8-only bgrad fusion."""
+    if torch.cuda.get_device_capability() < (10, 0):
+        pytest.skip("GroupedTensor grouped GEMM path requires SM100+.")
+
+    def _unexpected_bgrad_group_quantize(*_args, **_kwargs):
+        raise AssertionError("FP8 current scaling must not call bgrad_group_quantize")
+
+    monkeypatch.setattr(
+        grouped_linear_impl.tex,
+        "bgrad_group_quantize",
+        _unexpected_bgrad_group_quantize,
+    )
+    monkeypatch.setattr(
+        te_ops.GroupedLinear,
+        "_is_graph_safe_path_supported",
+        staticmethod(lambda **_kwargs: True),
+    )
+
+    num_groups = 3
+    in_features = 128
+    out_features = 128
+    split_sizes = torch.tensor([64, 0, 64], dtype=torch.int64, device="cuda")
+    input_ = torch.randn(
+        int(split_sizes.sum().item()),
+        in_features,
+        dtype=torch.bfloat16,
+        device="cuda",
+        requires_grad=True,
+    )
+    grad_output = torch.randn(
+        int(split_sizes.sum().item()),
+        out_features,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    op = te_ops.GroupedLinear(
+        num_groups,
+        in_features,
+        out_features,
+        bias=True,
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+
+    with te.autocast(enabled=True, recipe=recipe.Float8CurrentScaling()):
+        output = op(input_, split_sizes)
+    output.backward(grad_output)
+
+    assert input_.grad is not None
+    split_offsets = torch.cat(
+        (torch.zeros(1, dtype=split_sizes.dtype, device=split_sizes.device), split_sizes.cumsum(0))
+    )
+    for idx, rows in enumerate(split_sizes.tolist()):
+        weight = getattr(op, f"weight{idx}")
+        bias = getattr(op, f"bias{idx}")
+        assert weight.grad is not None
+        assert bias.grad is not None
+        start = int(split_offsets[idx].item())
+        end = int(split_offsets[idx + 1].item())
+        group_grad = grad_output[start:end]
+        expected_dbias = group_grad.float().sum(dim=0).to(dtype=bias.grad.dtype)
+        torch.testing.assert_close(bias.grad, expected_dbias, rtol=1e-2, atol=1e-2)
+        if rows == 0:
+            assert torch.count_nonzero(bias.grad) == 0

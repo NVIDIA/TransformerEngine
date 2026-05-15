@@ -1524,7 +1524,8 @@ class GroupedLinear(BasicOperation):
         total_tokens = dy_2d.size(0)
 
         # Build the grad_output GroupedTensor.
-        # Optionally get dbias is fusion available with bgrad_group_quantize
+        # bgrad_group_quantize is currently MXFP8-only. Other quantizers use
+        # grouped quantization plus the grouped dbias helper below.
         dbias_packed = None
         if with_quantized_compute:
             grad_output_quantizer = ctx.grad_output_quantizers[0]
@@ -1533,7 +1534,11 @@ class GroupedLinear(BasicOperation):
             )
             grad_output_quantizer.optimize_for_gemm = True
 
-            if has_bias and not self._scale_bias:
+            if (
+                has_bias
+                and not self._scale_bias
+                and isinstance(grad_output_quantizer, MXFP8Quantizer)
+            ):
                 grouped_dy, dbias_packed = tex.bgrad_group_quantize(
                     dy_2d, grad_output_quantizer, num_groups, split_sizes
                 )
