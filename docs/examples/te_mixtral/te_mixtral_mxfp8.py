@@ -223,9 +223,7 @@ class NVMixtralMXFP8SparseMoeBlock(nn.Module):
 
         if self.moe_aux_loss_coeff > 0:
             num_tokens = hidden_states.shape[0]
-            softmax_probs = torch.nn.functional.softmax(
-                router_logits, dim=-1, dtype=torch.float32
-            )
+            softmax_probs = torch.nn.functional.softmax(router_logits, dim=-1, dtype=torch.float32)
             self._aux_loss = fused_moe_aux_loss(
                 probs=softmax_probs,
                 tokens_per_expert=tokens_per_expert,
@@ -250,9 +248,7 @@ class NVMixtralMXFP8SparseMoeBlock(nn.Module):
         )
 
         # Fused gate_up -> ScaledSwiGLU(probs) -> down.
-        expert_output = self._experts_ffn_op(
-            expert_input, split_sizes, expert_probs, split_sizes
-        )
+        expert_output = self._experts_ffn_op(expert_input, split_sizes, expert_probs, split_sizes)
 
         output = self.dispatcher.combine(expert_output, dispatch_out.handle)
         return output.reshape(original_shape)
