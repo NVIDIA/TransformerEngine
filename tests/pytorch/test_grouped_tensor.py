@@ -189,14 +189,16 @@ class TestGroupedTensor:
         ],
     )
     @pytest.mark.parametrize("input_dtype", [torch.int32, torch.int64], ids=["int32", "int64"])
+    @pytest.mark.parametrize("input_device", ["cuda", "cpu"], ids=["cuda", "cpu"])
     def test_prepare_grouped_splits(
         self,
+        input_device: str,
         input_dtype: torch.dtype,
         split_sizes_list: List[int],
         logical_last_dim: int,
     ) -> None:
         """Test fused grouped split metadata preparation."""
-        split_sizes = torch.tensor(split_sizes_list, dtype=input_dtype, device="cuda")
+        split_sizes = torch.tensor(split_sizes_list, dtype=input_dtype, device=input_device)
         num_groups = split_sizes.numel()
 
         (
@@ -206,7 +208,7 @@ class TestGroupedTensor:
             tensor_offsets,
         ) = tex.prepare_grouped_splits(split_sizes, num_groups, logical_last_dim)
 
-        expected_split_sizes = split_sizes.to(torch.int64)
+        expected_split_sizes = split_sizes.to(device="cuda", dtype=torch.int64)
         expected_base_offsets = torch.cat(
             (
                 torch.zeros(1, dtype=torch.int64, device="cuda"),
@@ -221,6 +223,10 @@ class TestGroupedTensor:
         # cuDNN grouped GEMM consumes int32 end offsets; TE GroupedTensor metadata stays int64.
         assert split_points.dtype == torch.int32
         assert tensor_offsets.dtype == torch.int64
+        assert split_sizes_i64.device.type == "cuda"
+        assert base_offsets.device.type == "cuda"
+        assert split_points.device.type == "cuda"
+        assert tensor_offsets.device.type == "cuda"
         assert torch.equal(split_sizes_i64, expected_split_sizes)
         assert torch.equal(base_offsets, expected_base_offsets)
         assert torch.equal(split_points, expected_split_points)
