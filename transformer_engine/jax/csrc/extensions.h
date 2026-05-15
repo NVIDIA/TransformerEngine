@@ -21,6 +21,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -39,7 +40,9 @@ namespace jax {
 struct ClampedSwigluConfig {
   float limit;
   float alpha;
-  float glu_linear_offset;
+  // Optional so HLOs serialized before this attribute existed still decode;
+  // consumers should fall back to 1.0f when the attribute is absent.
+  std::optional<float> glu_linear_offset;
 };
 
 struct ActivationConfig {
@@ -207,10 +210,10 @@ pybind11::tuple GetTopkWorkspaceSizes(int batch_size, int seq_len, int k);
 }  // namespace jax
 }  // namespace transformer_engine
 
-XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(transformer_engine::jax::ClampedSwigluConfig,
-                                      ::xla::ffi::StructMember<float>("limit"),
-                                      ::xla::ffi::StructMember<float>("alpha"),
-                                      ::xla::ffi::StructMember<float>("glu_linear_offset"));
+XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(
+    transformer_engine::jax::ClampedSwigluConfig, ::xla::ffi::StructMember<float>("limit"),
+    ::xla::ffi::StructMember<float>("alpha"),
+    ::xla::ffi::StructMember<std::optional<float>>("glu_linear_offset"));
 
 XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(
     transformer_engine::jax::ActivationConfig,
