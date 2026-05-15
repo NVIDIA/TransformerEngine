@@ -285,9 +285,7 @@ def run_dpa_with_cp(
         if scaling_mode == "current":
             fp8_recipe = Float8CurrentScaling(fp8_dpa=fp8_dpa, fp8_mha=fp8_mha)
         if scaling_mode == "mxfp8":
-            fp8_recipe = MXFP8BlockScaling(
-                fp8_format=Format.E4M3, fp8_dpa=fp8_dpa, fp8_mha=fp8_mha
-            )
+            fp8_recipe = MXFP8BlockScaling(fp8_format=Format.E4M3, fp8_dpa=fp8_dpa, fp8_mha=fp8_mha)
 
     # instantiate attention module
     core_attn = DotProductAttention(
@@ -391,9 +389,7 @@ def run_dpa_with_cp(
     ############ run without CP ############
     logging.info(f"[Rank {rank}] Run without context parallelism")
     if dtype == "fp8":
-        fp8_context = autocast(
-            enabled=True, recipe=fp8_recipe, amax_reduction_group=cp_comm_group
-        )
+        fp8_context = autocast(enabled=True, recipe=fp8_recipe, amax_reduction_group=cp_comm_group)
     else:
         fp8_context = nullcontext()
     max_logit = None
@@ -451,8 +447,7 @@ def run_dpa_with_cp(
         seq_idx = torch.tensor([rank, 2 * world_size - rank - 1], device=q_.device)
         q_, k_, v_, dout_ = [x.index_select(seq_dim, seq_idx) for x in [q_, k_, v_, dout_]]
         q_, k_, v_, dout_ = [
-            x.view(*x.shape[:seq_dim], -1, *x.shape[(seq_dim + 2) :])
-            for x in [q_, k_, v_, dout_]
+            x.view(*x.shape[:seq_dim], -1, *x.shape[(seq_dim + 2) :]) for x in [q_, k_, v_, dout_]
         ]
     elif qkv_format == "thd":
         seq_idx_q = tex.thd_get_partitioned_indices(
@@ -509,9 +504,7 @@ def run_dpa_with_cp(
     if dtype == "fp8":
         core_attn.fp8_initialized = False
         core_attn.fp8_meta_tensors_initialized = False
-        fp8_context = autocast(
-            enabled=True, recipe=fp8_recipe, amax_reduction_group=cp_comm_group
-        )
+        fp8_context = autocast(enabled=True, recipe=fp8_recipe, amax_reduction_group=cp_comm_group)
     else:
         fp8_context = nullcontext()
 
@@ -638,9 +631,9 @@ def run_dpa_with_cp(
                         num_pads_q[b] == 0
                         or torch.count_nonzero(
                             x[
-                                (
-                                    cu_seqlens_q_padded[b + 1] - num_pads_q[b]
-                                ) : cu_seqlens_q_padded[b + 1]
+                                (cu_seqlens_q_padded[b + 1] - num_pads_q[b]) : cu_seqlens_q_padded[
+                                    b + 1
+                                ]
                             ]
                         ).item()
                         == 0
