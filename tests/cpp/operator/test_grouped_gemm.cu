@@ -117,13 +117,7 @@ Tensor make_mxfp8_operand(const std::string& name, const std::vector<size_t>& sh
   return mxfp8_swizzled;
 }
 
-// Creates an NVFP4 operand with the given single direction (rowwise XOR columnwise),
-// swizzled scales. cuBLAS NVFP4 GEMM runs in TN, so each operand only needs the direction
-// matching the user's transpose flag — same as MXFP8 / FP8 block scaling. NVFP4 columnwise
-// data is the transposed input quantized rowwise, so nvte_quantize_v2 alone handles the
-// "fake transpose" (no nvte_transpose needed). We never allocate both directions on a
-// single NVFP4 tensor because nvte_swizzle_scaling_factors hard-fails when scale_inv is
-// set in both directions (swizzle/swizzle.cu).
+// Creates an NVFP4 operand with the given single direction, swizzled scales.
 Tensor make_nvfp4_operand(const std::string& name, const std::vector<size_t>& shape,
                           bool use_rowwise, bool nvfp4_2d) {
   Tensor input_bf16(name + "_bf16", shape, DType::kBFloat16);
@@ -231,14 +225,9 @@ inline std::string grouped_gemm_skip_reason(const TestParams& params) {
     if (is_blackwell_plus && *params.recipe == NVTE_BLOCK_SCALING_1D) {
       return "FP8 block scaling grouped GEMM is only supported on Hopper (SM90), " + cc_suffix;
     }
-    // NVFP4 GEMM doesn't accept FP16 output (hard error in cublaslt_gemm.cu:433).
     if (*params.recipe == NVTE_NVFP4_1D_SCALING && params.output_dtype == DType::kFloat16) {
       return "NVFP4 grouped GEMM does not support FP16 output.";
     }
-    // 2D NVFP4 is used for weight tensors in training, which are always quantized with
-    // both rowwise and columnwise output (forward + dgrad). The single-direction
-    // columnwise-only quantize path needed for non-TN layouts here isn't a production
-    // use-case and TE doesn't support 2D there.
     if (*params.recipe == NVTE_NVFP4_1D_SCALING && params.nvfp4_2d &&
         (!params.transa || params.transb)) {
       return "NVFP4 2D quantization only supported in TN layout.";
@@ -279,10 +268,6 @@ inline GroupedGemmRefSetup make_grouped_gemm_ref(const TestParams& params) {
       s.A_tensors.emplace_back(make_bf16_operand("A" + std::to_string(i), a_shape));
       s.B_tensors.emplace_back(make_bf16_operand("B" + std::to_string(i), b_shape));
     } else {
-      // cuBLAS scaled-GEMM kernels run in TN, so each operand only needs the direction
-      // matching its transpose flag: rowwise when A is transposed / B is non-transposed,
-      // columnwise otherwise (the columnwise buffer holds the transposed-then-quantized
-      // data, which cuBLAS reads as if it were rowwise after layout flipping).
       const bool a_use_rowwise = params.transa;
       const bool b_use_rowwise = !params.transb;
       switch (*params.recipe) {
@@ -698,14 +683,11 @@ const std::vector<TestParams> kTestParams = {
     {NVTE_NVFP4_1D_SCALING, false, false, ShapeCase::kAllDifferentMul128, false},
     // NVFP4 with NULL C
     {NVTE_NVFP4_1D_SCALING, true, false, ShapeCase::kAllSameMul128, true},
-    // NVFP4 with 2D (16x16) quantization — scales fed to cuBLAS keep the VEC16 layout,
-    // so this verifies that 2D-quantized inputs also produce the correct GEMM result.
+    // NVFP4 with 2D (16x16) quantization.
     {NVTE_NVFP4_1D_SCALING, true, false, ShapeCase::kAllSameMul128, false, /*nvfp4_2d=*/true},
     {NVTE_NVFP4_1D_SCALING, false, true, ShapeCase::kAllDifferentMul128, false, /*nvfp4_2d=*/true},
     {NVTE_NVFP4_1D_SCALING, false, false, ShapeCase::kAllSameMul128, false, /*nvfp4_2d=*/true},
-    // Non-default output dtypes — implementation accepts BF16/FP16/FP32. cuBLAS grouped
-    // GEMM doesn't support BF16 input -> FP16 output (no algorithm found), and NVFP4 +
-    // FP16 output is also unsupported (see grouped_gemm_skip_reason).
+    // Non-default output dtypes (BF16 covered everywhere else).
     {std::nullopt,                false, false, ShapeCase::kAllSameMul128, false,
      /*nvfp4_2d=*/false, /*output_dtype=*/DType::kFloat32},
     {NVTE_DELAYED_TENSOR_SCALING, true,  false, ShapeCase::kAllSameMul128, false,
@@ -719,9 +701,7 @@ const std::vector<TestParams> kTestParams = {
     {NVTE_BLOCK_SCALING_1D, false, false, ShapeCase::kAllSameMul128, false},
     // FP8 Block Scaling with NULL C
     {NVTE_BLOCK_SCALING_1D, true, false, ShapeCase::kAllSameMul128, true},
-    // Unaligned-dim tests: dims are multiples of 32 / 16 (per-recipe block size) but NOT
-    // multiples of 128 — exposes scale_inv padding bugs in per-expert offset arithmetic.
-    // MXFP8 covered by upstream PR #2954, the rest by the analogous fix.
+    // Dims multiples of 32 but not 128 — exercises scale_inv padding offsets.
     {NVTE_MXFP8_1D_SCALING, true, false, ShapeCase::kAllSameMul32, false},
     {NVTE_MXFP8_1D_SCALING, false, true, ShapeCase::kAllSameMul32, false},
     {NVTE_MXFP8_1D_SCALING, false, false, ShapeCase::kAllSameMul32, false},
