@@ -33,7 +33,9 @@ constexpr size_t WARPS_PER_TILE = 8;
 constexpr size_t THREADS_PER_TILE = THREADS_PER_WARP * WARPS_PER_TILE;
 constexpr size_t ROWWISE_LOAD_SIZE_BYTES = 16;
 constexpr size_t TRANSPOSE_LOAD_SIZE_BYTES = 8;
-constexpr size_t STORE_SIZE_BYTES = 16;
+constexpr size_t ROWWISE_STORE_SIZE_BYTES = 16;
+constexpr size_t TRANSPOSE_STORE_SIZE_BYTES = 8;
+constexpr size_t TRANSPOSE_SHARED_PAD = 1;
 
 template <typename IType, typename OType>
 struct supports_fast_scaled_fp8_cvt_4 {
@@ -188,6 +190,8 @@ __global__ void __launch_bounds__(THREADS_PER_TILE) group_cast_fp8_kernel(
       (SCALING_TYPE == ScalingType::COLWISE) || (SCALING_TYPE == ScalingType::BIDIMENSIONAL);
   constexpr size_t LOAD_SIZE_BYTES =
       COLWISE_OUTPUT ? TRANSPOSE_LOAD_SIZE_BYTES : ROWWISE_LOAD_SIZE_BYTES;
+  constexpr size_t STORE_SIZE_BYTES =
+      COLWISE_OUTPUT ? TRANSPOSE_STORE_SIZE_BYTES : ROWWISE_STORE_SIZE_BYTES;
   constexpr size_t nvec_in = LOAD_SIZE_BYTES / sizeof(IType);
   constexpr size_t nvec_out = STORE_SIZE_BYTES / sizeof(OType);
   constexpr size_t tile_dim_m = THREADS_PER_WARP * nvec_out;
@@ -255,7 +259,8 @@ __global__ void __launch_bounds__(THREADS_PER_TILE) group_cast_fp8_kernel(
   const size_t tidy = tid / THREADS_PER_WARP;
 
   if constexpr (COLWISE_OUTPUT) {
-    OVecT local_output_t[nvec_in][num_iterations];
+    __shared__ OVecT shared_output_t[nvec_in][THREADS_PER_WARP]
+                                         [THREADS_PER_WARP + TRANSPOSE_SHARED_PAD];
 
 #pragma unroll
     for (size_t iter = 0; iter < num_iterations; ++iter) {
@@ -263,14 +268,21 @@ __global__ void __launch_bounds__(THREADS_PER_TILE) group_cast_fp8_kernel(
       const size_t j1 = tidx;
       const size_t base_row = tile_row + i1 * nvec_out;
       const size_t base_col = tile_col + j1 * nvec_in;
-      const bool full_fragment = (base_row + nvec_out <= rows) && (base_col + nvec_in <= cols);
+      const size_t fragment_cols = base_col < cols
+                                       ? ((cols - base_col) < nvec_in ? (cols - base_col)
+                                                                      : nvec_in)
+                                       : 0;
+      if (base_row >= rows || fragment_cols == 0) {
+        continue;
+      }
+      const bool full_fragment = (base_row + nvec_out <= rows) && (fragment_cols == nvec_in);
+      OVecT local_output_t[nvec_in];
 #pragma unroll
       for (size_t i2 = 0; i2 < nvec_out; ++i2) {
         const size_t row = base_row + i2;
         if (full_fragment || row < rows) {
           IVecT local_input;
           OVecC local_output;
-          size_t valid_cols = nvec_in;
           if (full_fragment) {
             const IType *const input_ptr = input + tensor_base + row * cols + base_col;
             if (reinterpret_cast<uint64_t>(input_ptr) % IVecT::BYTES == 0) {
@@ -288,39 +300,34 @@ __global__ void __launch_bounds__(THREADS_PER_TILE) group_cast_fp8_kernel(
               }
             }
           } else {
-            valid_cols = base_col < cols ? ((cols - base_col) < nvec_in ? (cols - base_col)
-                                                                        : nvec_in)
-                                         : 0;
-            if (valid_cols == 0) {
-              continue;
-            }
-            local_input.load_from_elts(input + tensor_base + row * cols + base_col, 0, valid_cols);
-            scaled_fp8_cvt_vec<IS_ACT, ParamOP, OP>(local_input, local_output, valid_cols, scale);
+            local_input.load_from_elts(input + tensor_base + row * cols + base_col, 0,
+                                       fragment_cols);
+            scaled_fp8_cvt_vec<IS_ACT, ParamOP, OP>(local_input, local_output, fragment_cols,
+                                                    scale);
             if constexpr (ROWWISE_OUTPUT) {
               local_output.store_to_elts(output_rowwise + tensor_base + row * cols + base_col, 0,
-                                         valid_cols);
+                                         fragment_cols);
             }
           }
 #pragma unroll
           for (size_t j2 = 0; j2 < nvec_in; ++j2) {
-            if (j2 < valid_cols) {
-              local_output_t[j2][iter].data.elt[i2] = local_output.data.elt[j2];
+            if (j2 < fragment_cols) {
+              local_output_t[j2].data.elt[i2] = local_output.data.elt[j2];
             }
           }
         }
       }
+#pragma unroll
+      for (size_t j2 = 0; j2 < nvec_in; ++j2) {
+        if (j2 < fragment_cols) {
+          shared_output_t[j2][j1][i1] = local_output_t[j2];
+        }
+      }
     }
 
-    __shared__ OVecT shared_output_t[THREADS_PER_WARP][THREADS_PER_WARP + 1];
+    __syncthreads();
 #pragma unroll
     for (size_t j2 = 0; j2 < nvec_in; ++j2) {
-#pragma unroll
-      for (size_t iter = 0; iter < num_iterations; ++iter) {
-        const size_t i1 = tidy + iter * WARPS_PER_TILE;
-        const size_t j1 = tidx;
-        shared_output_t[j1][i1] = local_output_t[j2][iter];
-      }
-      __syncthreads();
 #pragma unroll
       for (size_t iter = 0; iter < num_iterations; ++iter) {
         const size_t i1 = tidx;
@@ -332,16 +339,16 @@ __global__ void __launch_bounds__(THREADS_PER_TILE) group_cast_fp8_kernel(
               row < rows ? ((rows - row) < nvec_out ? (rows - row) : nvec_out) : 0;
           if (valid_rows > 0) {
             OType *const output_ptr = output_colwise + tensor_base + col * rows + row;
+            const OVecT local_output_t = shared_output_t[j2][j1][i1];
             if (valid_rows == nvec_out &&
                 reinterpret_cast<uint64_t>(output_ptr) % OVecT::BYTES == 0) {
-              shared_output_t[j1][i1].store_to(output_ptr);
+              local_output_t.store_to(output_ptr);
             } else {
-              shared_output_t[j1][i1].store_to_elts(output_ptr, 0, valid_rows);
+              local_output_t.store_to_elts(output_ptr, 0, valid_rows);
             }
           }
         }
       }
-      __syncthreads();
     }
   } else {
 #pragma unroll
@@ -452,7 +459,9 @@ void group_quantize(const GroupedTensor *input, const Tensor *noop, GroupedTenso
   if (first_logical_dim == 0 || last_logical_dim == 0) {
     return;
   }
-  constexpr size_t row_tile_size = THREADS_PER_WARP * STORE_SIZE_BYTES;
+  const size_t store_size_bytes =
+      use_colwise_output ? TRANSPOSE_STORE_SIZE_BYTES : ROWWISE_STORE_SIZE_BYTES;
+  const size_t row_tile_size = THREADS_PER_WARP * store_size_bytes;
   size_t work_blocks_Y = DIVUP(first_logical_dim, row_tile_size);
   if (shape_rep == ShapeRepresentation::SAME_BOTH_DIMS) {
     NVTE_CHECK(first_logical_dim % num_tensors == 0,
