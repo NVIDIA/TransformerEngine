@@ -950,6 +950,10 @@ inline GroupedGemmWorkspace setup_grouped_gemm_workspace(transformer_engine::Ten
                                                              "Grouped GEMM setup workspace");
   void *cublas_workspace_ptr = validate_and_get_workspace_ptr(wspace_cublas, cublas_workspace_size,
                                                               "Grouped GEMM cuBLAS workspace");
+  constexpr uintptr_t kSetupBaseAlignment = 16;
+  NVTE_CHECK(reinterpret_cast<uintptr_t>(setup_workspace_ptr) % kSetupBaseAlignment == 0,
+             "Grouped GEMM setup workspace must be ", kSetupBaseAlignment,
+             "-byte aligned (cuBLAS requires this for pointer arrays).");
   auto setup_workspace = GroupedGemmSetupWorkspace::from_buffers(
       static_cast<char *>(setup_workspace_ptr), num_tensors);
   return {std::move(setup_workspace), cublas_workspace_ptr, num_tensors};
@@ -1639,10 +1643,11 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
 
   const DType rep_dtype = A_list_info.all_row ? A_list_info.row_dtype : A_list_info.col_dtype;
   const bool is_fp8 = is_fp8_dtype(rep_dtype);
-  const bool non_tn_fp8_ok = nvte_is_non_tn_fp8_gemm_supported();
   const bool mxfp8 = transformer_engine::is_mxfp_scaling(A_list_info.scaling_mode);
   const bool nvfp4 = transformer_engine::is_nvfp_scaling(A_list_info.scaling_mode);
   const bool fp8_block = transformer_engine::is_fp8_block_scaling(A_list_info.scaling_mode);
+  // FP8 block scaling on Hopper requires TN layout (matches select_grouped_operand logic for B).
+  const bool non_tn_fp8_ok = fp8_block ? false : nvte_is_non_tn_fp8_gemm_supported();
 
   int64_t avg_first_dim = 0;
   int64_t avg_last_dim = 0;
