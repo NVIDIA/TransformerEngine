@@ -165,6 +165,4 @@ Next steps
 ----------
 
 * `Collective GEMM <collective_gemm.html>`_: further speedups by communicating between devices inside the GEMM.
-* `Attention <attention.html>`_
-* `Mixture of Experts <moe.html>`_
 * `← Hub <../te_jax_integration.html>`_

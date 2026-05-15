@@ -7,18 +7,15 @@
 Companion source for ``dense.rst``. Code blocks between ``# DENSE_*_START`` /
 ``# DENSE_*_END`` markers are pulled into the RST via ``literalinclude``.
 
-Run as a pytest module to exercise the example end-to-end:
+Run as a script to exercise the example end-to-end:
 
-    pytest -v docs/examples/jax_examples/dense.py
+    python docs/examples/jax/dense.py
 
-The multi-GPU section auto-skips when fewer than 4 GPUs are visible.
+Pytest tests live in ``test_dense.py``; the multi-GPU section auto-skips when
+fewer than 4 GPUs are visible.
 """
 
 # DENSE_IMPORTS_START
-import sys
-
-sys.path.append("..")  # so we can import quickstart_jax_utils from docs/examples/
-
 import jax
 import jax.numpy as jnp
 from flax import linen as nn
@@ -33,6 +30,7 @@ class FlaxDenseBlock(nn.Module):
     """One linear layer. ``dot_general_cls`` lets us swap the GEMM impl."""
 
     features: int
+    dtype: jnp.dtype = jnp.bfloat16
     dot_general_cls: callable = lambda: None
 
     @nn.compact
@@ -40,6 +38,7 @@ class FlaxDenseBlock(nn.Module):
         return nn.Dense(
             features=self.features,
             use_bias=False,
+            dtype=self.dtype,
             dot_general=self.dot_general_cls(),
         )(x)
 
@@ -170,63 +169,6 @@ def run_multi_gpu_bench():
 
 
 # DENSE_MULTI_GPU_BENCH_END
-
-
-# -----------------------------------------------------------------------------
-# Pytest entry points (not pulled into docs).
-#
-# These run the same code shown in the snippets above and add numeric / smoke
-# assertions so CI catches regressions.
-# -----------------------------------------------------------------------------
-
-import pytest
-from transformer_engine.jax.quantize import is_scaling_mode_supported, ScalingMode
-
-_mxfp8_supported, _mxfp8_reason = is_scaling_mode_supported(ScalingMode.MXFP8_1D_SCALING)
-requires_mxfp8 = pytest.mark.skipif(
-    not _mxfp8_supported, reason=f"MXFP8 not supported on this device: {_mxfp8_reason}"
-)
-
-
-def test_baseline_runs():
-    out = baseline.apply(baseline_vars, x)
-    assert out.shape == (batch, seq, out_features)
-    assert out.dtype == dtype
-
-
-@requires_mxfp8
-def test_te_dense_runs():
-    out = te_model.apply(te_vars, x)
-    assert out.shape == (batch, seq, out_features)
-
-
-@requires_mxfp8
-def test_te_matches_baseline():
-    """TE quantized Dense should match the bf16 baseline within MXFP8 tolerance."""
-    diffs = utils.compare_fwd_bwd(
-        baseline.apply,
-        baseline_vars,
-        te_model.apply,
-        te_vars,
-        input=x,
-        output_grad=dy,
-    )
-    # MXFP8 quantizes activations / weights, so we accept noticeable rel diff vs bf16.
-    # Tune these in follow-ups once we have real CI numbers.
-    assert diffs["y"]["max_rel"] < 0.20, diffs
-    assert diffs["dx"]["max_rel"] < 0.20, diffs
-    assert diffs["dW"]["max_rel"] < 0.30, diffs
-
-
-@requires_mxfp8
-def test_single_gpu_benchmark():
-    run_single_gpu_bench()
-
-
-@requires_mxfp8
-@pytest.mark.skipif(len(jax.devices()) < 4, reason="needs 4 GPUs for DP=2/TP=2")
-def test_multi_gpu_benchmark():
-    run_multi_gpu_bench()
 
 
 if __name__ == "__main__":
