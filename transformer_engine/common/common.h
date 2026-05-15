@@ -26,6 +26,7 @@ static_assert(NVTE_BUILD_NUM_PHILOX_ROUNDS > 0,
 #include <cuda_runtime_api.h>
 #include <transformer_engine/transformer_engine.h>
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <stdexcept>
@@ -219,10 +220,12 @@ struct Tensor {
 
   /*! Number of tensor elements. */
   size_t numel() const {
-    if (!has_data() && has_columnwise_data()) {
-      return product(columnwise_data.shape);
+    const NVTEShape s = compute_shape();
+    size_t ret = 1;
+    for (size_t i = 0; i < s.ndim; i++) {
+      ret *= s.data[i];
     }
-    return product(data.shape);
+    return ret;
   }
 
   /*! Whether the tensor data buffer is not uninitialized.
@@ -314,20 +317,30 @@ struct Tensor {
     return std::vector<size_t>(s.data, s.data + s.ndim);
   }
 
+  /*! Matrix dimensions after flattening tensor to 2D.
+   *
+   * If a tensor has dimensions (D1, D2, ..., Dn), it is reinterpreted
+   * as a (D1*D2*...*D(n-1), Dn) matrix.
+   */
+  std::array<size_t, 2> flat_2d_dims() const {
+    const NVTEShape s = compute_shape();
+    if (s.ndim == 0) {
+      return {1, 1};
+    }
+    size_t first_dim = 1;
+    for (size_t i = 0; i < s.ndim - 1; ++i) {
+      first_dim *= s.data[i];
+    }
+    return {first_dim, s.data[s.ndim - 1]};
+  }
+
   /*! Matrix height after tensor is flattened to 2D
    *
    * If a tensor has dimensions (D1, D2, ..., Dn), it is reinterpreted
    * as a (D1*D2*...*D(n-1), Dn) matrix.
    */
   size_t flat_first_dim() const {
-    const NVTEShape s = compute_shape();
-    size_t ret = 1;
-    if (s.ndim > 0) {
-      for (size_t i = 0; i < s.ndim - 1; i++) {
-        ret *= s.data[i];
-      }
-    }
-    return ret;
+    return flat_2d_dims()[0];
   }
 
   /*! Matrix width after tensor is flattened to 2D
@@ -336,12 +349,7 @@ struct Tensor {
    * as a (D1*D2*...*D(n-1), Dn) matrix.
    */
   size_t flat_last_dim() const {
-    const NVTEShape s = compute_shape();
-    if (s.ndim == 0) {
-      return 1;
-    } else {
-      return s.data[s.ndim - 1];
-    }
+    return flat_2d_dims()[1];
   }
 };
 
