@@ -47,7 +47,7 @@ class FlaxDenseBlock(nn.Module):
 
 
 # DENSE_INPUTS_SETUP_START
-batch, seq, hidden, out_features = 4, 2048, 4096, 16384
+batch, seq, hidden, out_features = 8, 2048, 8192, 32768
 dtype = jnp.bfloat16
 
 key = jax.random.PRNGKey(0)

@@ -1,21 +1,21 @@
 # Numbers below are illustrative (captured on a GB200). Regenerate with:
-#     python3 docs/examples/jax_examples/dense.py > dense.out
+#     python3 docs/examples/jax/dense.py > dense.out
 
 # SINGLE_GPU_OUTPUT_START
 Variable collections: ['params']
-{'params': {'Dense_0': {'kernel': ((4096, 16384), dtype('float32'))}}}
+{'params': {'Dense_0': {'kernel': ((8192, 32768), dtype('float32'))}}}
 
 bf16 baseline:
-Mean time: 4.126 ms
+Mean time: 18.056 ms
 
 TE MXFP8BlockScaling:
-Mean time: 1.690 ms
+Mean time: 11.260 ms
 # SINGLE_GPU_OUTPUT_END
 
 # MULTI_GPU_OUTPUT_START
 bf16 DP=2/TP=2:
-Mean time: 1.726 ms
+Mean time: 5.516 ms
 
 TE MXFP8BlockScaling DP=2/TP=2:
-Mean time: 0.969 ms
+Mean time: 3.712 ms
 # MULTI_GPU_OUTPUT_END

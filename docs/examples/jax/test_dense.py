@@ -41,14 +41,9 @@ requires_mxfp8 = pytest.mark.skipif(
     not _mxfp8_supported, reason=f"MXFP8 not supported on this device: {_mxfp8_reason}"
 )
 
-# MXFP8 quantization noise is ~FP8 epsilon (~5%) of the per-tensor magnitude.
-# ``atol`` covers near-zero ref values where the rtol fraction is too tight.
-# y and dx are O(1) under Flax's lecun_normal init (in/out scaling cancels);
-# dW has no init scaling and accumulates batch*seq products, so it grows as
-# sqrt(batch*seq).
-_FP8_REL_NOISE = float(jnp.finfo(jnp.float8_e4m3fn).eps)  # 0.125
-_ATOL_FWD = 10.0 * _FP8_REL_NOISE                         # ~1.25; covers Gaussian-tail |y|, |dx|
-_ATOL_DW = _ATOL_FWD * jnp.sqrt(batch * seq).item()       # ~113; covers Gaussian-tail |dW|
+_FP8_REL_NOISE = float(jnp.finfo(jnp.float8_e4m3fn).eps)
+_ATOL_FWD = 10.0 * _FP8_REL_NOISE
+_ATOL_DW = _ATOL_FWD * jnp.sqrt(batch * seq).item()
 
 
 def test_baseline_runs():
