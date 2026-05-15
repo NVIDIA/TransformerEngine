@@ -60,6 +60,29 @@ std::optional<std::vector<size_t>> fp8_active_grouped_output_shape(
   return active_shape;
 }
 
+bool fp8_grouped_output_has_uniform_offsets(const py::object &output, const size_t num_tensors,
+                                            const size_t logical_last_dim) {
+  if (output.is_none() || !py::hasattr(output, "offsets") || output.attr("offsets").is_none()) {
+    return false;
+  }
+
+  const auto offsets = output.attr("offsets").cast<std::vector<int64_t>>();
+  if (offsets.size() != num_tensors + 1 || num_tensors == 0 || logical_last_dim == 0) {
+    return false;
+  }
+
+  const int64_t stride = offsets[1] - offsets[0];
+  if (stride <= 0 || stride % static_cast<int64_t>(logical_last_dim) != 0) {
+    return false;
+  }
+  for (size_t i = 0; i < num_tensors; ++i) {
+    if (offsets[i + 1] - offsets[i] != stride) {
+      return false;
+    }
+  }
+  return offsets[0] == 0;
+}
+
 }  // namespace
 
 py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::object &output,
@@ -337,8 +360,11 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
         is_fp8_grouped_quantizer
             ? fp8_active_grouped_output_shape(output, logical_shape, num_tensors, logical_last_dim)
             : std::nullopt;
-    grouped_output_tensor_cpp.emplace(
-        detail::GroupedTensorFromPyTorchGroupedTensor(output, logical_shape_override));
+    const bool use_uniform_fp8_shape =
+        is_fp8_grouped_quantizer &&
+        fp8_grouped_output_has_uniform_offsets(output, num_tensors, logical_last_dim);
+    grouped_output_tensor_cpp.emplace(detail::GroupedTensorFromPyTorchGroupedTensor(
+        output, logical_shape_override, use_uniform_fp8_shape));
     grouped_output_py = py::reinterpret_borrow<py::object>(output);
   }
 

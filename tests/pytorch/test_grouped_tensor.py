@@ -500,6 +500,114 @@ class TestGroupedTensor:
         if output_dbias:
             assert torch.allclose(static_dbias, expected_dbias)
 
+    @pytest.mark.parametrize("mode", ["rowwise", "columnwise", "both"])
+    @pytest.mark.parametrize("first_dims_host", [[96, 96, 96], [64, 128, 96]])
+    @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+    def test_group_quantize_fp8_current_scaling_overallocated_modes(
+        self,
+        mode: str,
+        first_dims_host: List[int],
+    ) -> None:
+        """Test grouped FP8 current scaling modes ignore overallocated tail storage."""
+        num_tensors = 3
+        hidden_size = 256
+        actual_rows = sum(first_dims_host)
+        allocated_rows = actual_rows * 2
+        rowwise = mode in ("rowwise", "both")
+        columnwise = mode in ("columnwise", "both")
+
+        grouped_input = torch.empty(
+            allocated_rows,
+            hidden_size,
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        input_tensors = []
+        row_offset = 0
+        for rows in first_dims_host:
+            tensor = torch.randn(rows, hidden_size, dtype=torch.bfloat16, device="cuda")
+            grouped_input[row_offset : row_offset + rows].copy_(tensor)
+            input_tensors.append(tensor)
+            row_offset += rows
+        grouped_input[actual_rows:].fill_(10000.0)
+
+        first_dims = torch.tensor(first_dims_host, dtype=torch.int64, device="cuda")
+        quantizer = Float8CurrentScalingQuantizer(
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            device="cuda",
+            force_pow_2_scales=False,
+            amax_epsilon=0.0,
+        )
+        quantizer.set_usage(rowwise=rowwise, columnwise=columnwise)
+
+        grouped_output = tex.group_quantize(grouped_input, quantizer, num_tensors, first_dims)
+        tail_start = actual_rows * hidden_size
+        tail_sentinel = 0xA5
+        if rowwise:
+            grouped_output.rowwise_data[tail_start:].fill_(tail_sentinel)
+        if columnwise:
+            grouped_output.columnwise_data[tail_start:].fill_(tail_sentinel)
+
+        grouped_output = tex.group_quantize(
+            grouped_input,
+            quantizer,
+            num_tensors,
+            first_dims,
+            output=grouped_output,
+        )
+
+        expected_amax = torch.stack([tensor.abs().max().float() for tensor in input_tensors])
+        torch.testing.assert_close(grouped_output.amax, expected_amax, rtol=0.0, atol=0.0)
+
+        scale_inv = grouped_output.scale_inv
+        if scale_inv is None:
+            scale_inv = grouped_output.columnwise_scale_inv
+        torch.testing.assert_close(
+            scale_inv,
+            torch.reciprocal(grouped_output.scale),
+            rtol=1e-6,
+            atol=1e-6,
+        )
+        if rowwise and columnwise:
+            torch.testing.assert_close(
+                grouped_output.columnwise_scale_inv,
+                grouped_output.scale_inv,
+                rtol=0.0,
+                atol=0.0,
+            )
+
+        expected_rowwise = []
+        expected_columnwise = []
+        for tensor_id, tensor in enumerate(input_tensors):
+            ref_quantizer = Float8Quantizer(
+                scale=grouped_output.scale[tensor_id : tensor_id + 1],
+                amax=grouped_output.amax[tensor_id : tensor_id + 1],
+                fp8_dtype=tex.DType.kFloat8E4M3,
+                rowwise=True,
+                columnwise=False,
+            )
+            ref = ref_quantizer(tensor)
+            ref_rowwise_data = ref._data.reshape(tensor.shape)
+            if rowwise:
+                expected_rowwise.append(ref_rowwise_data.reshape(-1))
+            if columnwise:
+                expected_columnwise.append(ref_rowwise_data.T.contiguous().reshape(-1))
+
+        if rowwise:
+            expected = torch.cat(expected_rowwise)
+            assert torch.equal(grouped_output.rowwise_data[: expected.numel()], expected)
+            assert torch.equal(
+                grouped_output.rowwise_data[tail_start:],
+                torch.full_like(grouped_output.rowwise_data[tail_start:], tail_sentinel),
+            )
+        if columnwise:
+            expected = torch.cat(expected_columnwise)
+            assert torch.equal(grouped_output.columnwise_data[: expected.numel()], expected)
+            assert torch.equal(
+                grouped_output.columnwise_data[tail_start:],
+                torch.full_like(grouped_output.columnwise_data[tail_start:], tail_sentinel),
+            )
+
     @pytest.mark.parametrize(
         "shape",
         [[(512, 1024), (512, 1024)], [(256, 512), (512, 512), (768, 512)]],

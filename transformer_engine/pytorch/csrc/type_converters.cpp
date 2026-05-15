@@ -202,7 +202,8 @@ DType GetTransformerEngineDTypeForScaleInv(py::handle quantizer, at::Tensor scal
 }
 
 GroupedTensorWrapper GroupedTensorFromPyTorchGroupedTensor(
-    py::handle tensor, const std::optional<std::vector<size_t>> &logical_shape_override) {
+    py::handle tensor, const std::optional<std::vector<size_t>> &logical_shape_override,
+    bool skip_shape_metadata) {
   // Returns a GroupedTensorWrapper from a PyTorch GroupedTensor.
   const auto num_tensors = tensor.attr("num_tensors").cast<size_t>();
   const auto logical_shape = logical_shape_override.has_value()
@@ -274,21 +275,23 @@ GroupedTensorWrapper GroupedTensorFromPyTorchGroupedTensor(
   }
 
   // Shape metadata
-  if (!tensor.attr("first_dims").is_none()) {
-    const auto &first_dims = tensor.attr("first_dims").cast<at::Tensor>();
-    ret.set_first_dims(first_dims.data_ptr(), GetTransformerEngineDType(first_dims.scalar_type()),
-                       getTensorShape(first_dims));
-  }
-  if (!tensor.attr("last_dims").is_none()) {
-    const auto &last_dims = tensor.attr("last_dims").cast<at::Tensor>();
-    ret.set_last_dims(last_dims.data_ptr(), GetTransformerEngineDType(last_dims.scalar_type()),
-                      getTensorShape(last_dims));
-  }
-  if (!tensor.attr("tensor_offsets").is_none()) {
-    const auto &tensor_offsets = tensor.attr("tensor_offsets").cast<at::Tensor>();
-    ret.set_tensor_offsets(tensor_offsets.data_ptr(),
-                           GetTransformerEngineDType(tensor_offsets.scalar_type()),
-                           getTensorShape(tensor_offsets));
+  if (!skip_shape_metadata) {
+    if (!tensor.attr("first_dims").is_none()) {
+      const auto &first_dims = tensor.attr("first_dims").cast<at::Tensor>();
+      ret.set_first_dims(first_dims.data_ptr(), GetTransformerEngineDType(first_dims.scalar_type()),
+                         getTensorShape(first_dims));
+    }
+    if (!tensor.attr("last_dims").is_none()) {
+      const auto &last_dims = tensor.attr("last_dims").cast<at::Tensor>();
+      ret.set_last_dims(last_dims.data_ptr(), GetTransformerEngineDType(last_dims.scalar_type()),
+                        getTensorShape(last_dims));
+    }
+    if (!tensor.attr("tensor_offsets").is_none()) {
+      const auto &tensor_offsets = tensor.attr("tensor_offsets").cast<at::Tensor>();
+      ret.set_tensor_offsets(tensor_offsets.data_ptr(),
+                             GetTransformerEngineDType(tensor_offsets.scalar_type()),
+                             getTensorShape(tensor_offsets));
+    }
   }
 
   bool with_gemm_swizzled = false;

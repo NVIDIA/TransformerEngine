@@ -29,11 +29,11 @@ namespace group_quantize_kernel {
 
 using namespace dispatch::common;
 
-constexpr size_t WARPS_PER_TILE = 4;
+constexpr size_t WARPS_PER_TILE = 8;
 constexpr size_t THREADS_PER_TILE = THREADS_PER_WARP * WARPS_PER_TILE;
 constexpr size_t ROWWISE_LOAD_SIZE_BYTES = 16;
 constexpr size_t TRANSPOSE_LOAD_SIZE_BYTES = 8;
-constexpr size_t STORE_SIZE_BYTES = 8;
+constexpr size_t STORE_SIZE_BYTES = 16;
 
 template <typename IType, typename OType>
 struct supports_fast_scaled_fp8_cvt_4 {
