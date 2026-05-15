@@ -2,7 +2,6 @@
 #
 # See LICENSE for license information.
 """Tests for fused attention"""
-import importlib.util
 import os
 from enum import Enum, auto
 from dataclasses import dataclass, field
@@ -24,6 +23,7 @@ from jax import value_and_grad, jit
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from jax.typing import ArrayLike, DTypeLike
 
+import transformer_engine.jax.cpp_extensions.attention as tex_attention
 from transformer_engine.jax import autocast
 from transformer_engine.jax.sharding import MeshResource
 from transformer_engine.jax.attention import (
@@ -56,11 +56,15 @@ _deterministic = not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")
 
 
 def _has_cudnn_frontend_python():
-    return importlib.util.find_spec("cudnn") is not None
+    try:
+        tex_attention._import_cudnn_for_score_mod()
+    except ImportError:
+        return False
+    return True
 
 
 def _score_mod_causal(graph, score, tensors):
-    import cudnn  # pylint: disable=import-outside-toplevel
+    cudnn = tex_attention._import_cudnn_for_score_mod()
 
     row_index = graph.gen_index(
         input=score,
@@ -84,7 +88,7 @@ def _score_mod_causal(graph, score, tensors):
 
 
 def _score_mod_causal_bprop(graph, dscore, tensors):
-    import cudnn  # pylint: disable=import-outside-toplevel
+    cudnn = tex_attention._import_cudnn_for_score_mod()
 
     row_index = graph.gen_index(
         input=dscore,
@@ -107,8 +111,8 @@ def _score_mod_causal_bprop(graph, dscore, tensors):
     return graph.binary_select(input0=dscore, input1=tensors["zero"], mask=keep)
 
 
-def _score_mod_relative_position(graph, score, tensors):
-    import cudnn  # pylint: disable=import-outside-toplevel
+def _score_mod_post_scale_bias(graph, score, tensors):
+    cudnn = tex_attention._import_cudnn_for_score_mod()
 
     row_index = graph.gen_index(
         input=score,
@@ -122,15 +126,15 @@ def _score_mod_relative_position(graph, score, tensors):
         compute_data_type=cudnn.data_type.INT32,
     )
     col_index.set_data_type(cudnn.data_type.INT32)
-    relative_position = graph.sub(
+    post_scale_bias = graph.sub(
         a=row_index,
         b=col_index,
         compute_data_type=cudnn.data_type.FLOAT,
     )
-    relative_position.set_data_type(cudnn.data_type.FLOAT)
+    post_scale_bias.set_data_type(cudnn.data_type.FLOAT)
     return graph.add(
         a=score,
-        b=relative_position,
+        b=post_scale_bias,
         compute_data_type=cudnn.data_type.FLOAT,
     )
 
@@ -141,8 +145,12 @@ class _ScoreModSoftcap:
     def __init__(self):
         self.before_tanh_activation = None
 
+    def score_mod_graph_cache_key(self):
+        """Graph topology key for softcap score_mod."""
+        return ("softcap",)
+
     def forward(self, graph, score, tensors):
-        import cudnn  # pylint: disable=import-outside-toplevel
+        cudnn = tex_attention._import_cudnn_for_score_mod()
 
         self.before_tanh_activation = graph.div(
             a=score,
@@ -159,7 +167,7 @@ class _ScoreModSoftcap:
         )
 
     def backward(self, graph, dscore, tensors):
-        import cudnn  # pylint: disable=import-outside-toplevel
+        cudnn = tex_attention._import_cudnn_for_score_mod()
 
         d_tanh_out = graph.mul(
             a=dscore,
@@ -181,14 +189,14 @@ class _ScoreModSoftcap:
 
 
 def _reference_attention(
-    query, key, value, scale, *, causal=False, relative_position=False, softcap=None
+    query, key, value, scale, *, causal=False, post_scale_bias=False, softcap=None
 ):
     scores = jnp.einsum("bqhd,bkhd->bhqk", query, key).astype(jnp.float32) * scale
     if causal:
         q_pos = jnp.arange(query.shape[1])[:, None]
         kv_pos = jnp.arange(key.shape[1])[None, :]
         scores = jnp.where(q_pos >= kv_pos, scores, -1e9)
-    if relative_position:
+    if post_scale_bias:
         q_pos = jnp.arange(query.shape[1], dtype=jnp.float32)[:, None]
         kv_pos = jnp.arange(key.shape[1], dtype=jnp.float32)[None, :]
         scores = scores + q_pos - kv_pos
@@ -283,7 +291,10 @@ def general_dot_product_attention(
 
 
 def _require_cudnn_frontend_score_mod():
-    cudnn = pytest.importorskip("cudnn", reason="cuDNN Python frontend is required for score_mod")
+    try:
+        cudnn = tex_attention._import_cudnn_for_score_mod()
+    except ImportError:
+        pytest.skip("cuDNN Python frontend is required for score_mod")
     version = tuple(int(part) for part in cudnn.backend_version_string().split(".")[:2])
     if version < (9, 6):
         pytest.skip("cuDNN score_mod SDPA requires cuDNN frontend 9.6 or newer")
@@ -375,11 +386,28 @@ def test_fused_attn_score_mod_config_stabilizes_bound_method_cache_keys():
 
     assert config_1 == config_2
     assert hash(config_1) == hash(config_2)
-    assert config_1 != config_3
+    assert config_1 == config_3
+
+
+def test_fused_attn_score_mod_config_leaves_unkeyed_bound_methods_uncached():
+    class UnkeyedScoreMod:
+        def forward(self, _graph, score, _tensors):
+            return score
+
+    score_mod = UnkeyedScoreMod()
+    config_1, _, _ = make_fused_attn_score_mod_config(
+        score_mod.forward, None, None, None, 0.125, True
+    )
+    config_2, _, _ = make_fused_attn_score_mod_config(
+        score_mod.forward, None, None, None, 0.125, True
+    )
+
+    assert config_1 != config_2
+    assert tex_attention._graph_cache_key("fwd", config_1, ()) is None
 
 
 @pytest.mark.skipif(not _has_cudnn_frontend_python(), reason="cuDNN Python frontend is required")
-def test_fused_attn_score_mod_relative_position_optional_bprop():
+def test_fused_attn_score_mod_post_scale_bias_optional_bprop():
     _require_cudnn_frontend_score_mod()
 
     key = jax.random.key(0)
@@ -402,12 +430,12 @@ def test_fused_attn_score_mod_relative_position_optional_bprop():
             scale,
             0.0,
             True,
-            score_mod=_score_mod_relative_position,
+            score_mod=_score_mod_post_scale_bias,
         )
         return jnp.sum(out.astype(jnp.float32)), out
 
     def ref_loss(query, key_, value):
-        out = _reference_attention(query, key_, value, scale, relative_position=True)
+        out = _reference_attention(query, key_, value, scale, post_scale_bias=True)
         return jnp.sum(out.astype(jnp.float32)), out
 
     (score_mod_value, score_mod_out), score_mod_grads = value_and_grad(

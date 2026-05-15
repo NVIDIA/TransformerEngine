@@ -2,8 +2,12 @@
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for attention"""
+import importlib
+import inspect
 import operator
 import os
+from pathlib import Path
+import sys
 import warnings
 from dataclasses import dataclass, replace
 from functools import partial, reduce
@@ -59,6 +63,10 @@ __all__ = [
     "fused_attn_score_mod_fwd",
     "fused_attn_score_mod_bwd",
 ]
+
+_CUDNN_FRONTEND_PYTHON_PATH = (
+    Path(__file__).resolve().parents[3] / "3rdparty" / "cudnn-frontend" / "python"
+)
 
 
 @partial(
@@ -282,15 +290,101 @@ class _ScoreModScalarSpec:
     stride: Tuple[int, ...] = (1, 1, 1, 1)
 
 
-def _score_mod_callback_cache_key(callback: Optional[Callable]) -> Optional[Tuple[Any, ...]]:
-    """Return a stable cache key for callbacks that may be bound methods."""
+class _UncacheableScoreModKey:
+    """Unique static key for callbacks that must not share compiled score_mod graphs."""
+
+    def __hash__(self):
+        return id(self)
+
+    def __eq__(self, other):
+        return self is other
+
+
+def _score_mod_key_is_uncacheable(key: Any) -> bool:
+    return isinstance(key, _UncacheableScoreModKey)
+
+
+def _freeze_score_mod_cache_key(value: Any) -> Any:
+    """Convert a user-provided score_mod graph key into a hashable structure."""
+    if _is_array_operand(value):
+        raise TypeError(
+            "score_mod_graph_cache_key() must not include tensors. Pass runtime tensors "
+            "through score_mod_tensors or score_mod_bprop_tensors instead."
+        )
+    if isinstance(value, Mapping):
+        items = (
+            (
+                _freeze_score_mod_cache_key(key),
+                _freeze_score_mod_cache_key(val),
+            )
+            for key, val in value.items()
+        )
+        return tuple(sorted(items, key=repr))
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_score_mod_cache_key(item) for item in value)
+    if isinstance(value, (set, frozenset)):
+        items = (_freeze_score_mod_cache_key(item) for item in value)
+        return tuple(sorted(items, key=repr))
+    try:
+        hash(value)
+    except TypeError as exc:
+        raise TypeError(
+            "score_mod_graph_cache_key() must return a hashable value or a nested "
+            "combination of mapping/list/tuple/set values."
+        ) from exc
+    return value
+
+
+def _score_mod_explicit_cache_key(callback_owner: Any) -> Optional[Any]:
+    """Return a user-provided structural graph key for a score_mod callback."""
+    explicit_key = getattr(callback_owner, "score_mod_graph_cache_key", None)
+    if explicit_key is None:
+        return None
+    explicit_key = explicit_key() if callable(explicit_key) else explicit_key
+    return _freeze_score_mod_cache_key(explicit_key)
+
+
+def _score_mod_callback_cache_key(callback: Optional[Callable]) -> Any:
+    """Create a stable graph cache key for a score_mod callable.
+
+    Module-level functions are assumed to have stable topology. Stateful bound methods and
+    callable instances need an explicit score_mod_graph_cache_key(); otherwise their graphs
+    are left uncached to avoid reusing stale graphs after Python object address reuse.
+    """
     if callback is None:
         return None
     self_obj = getattr(callback, "__self__", None)
-    func = getattr(callback, "__func__", None)
-    if self_obj is not None and func is not None:
-        return ("bound_method", id(self_obj), id(func))
-    return ("callable", id(callback))
+    func_obj = getattr(callback, "__func__", None)
+    if self_obj is not None and func_obj is not None:
+        explicit_key = _score_mod_explicit_cache_key(self_obj)
+        if explicit_key is None:
+            return _UncacheableScoreModKey()
+        return (
+            "bound_method",
+            type(self_obj),
+            func_obj.__module__,
+            func_obj.__qualname__,
+            explicit_key,
+        )
+
+    explicit_key = _score_mod_explicit_cache_key(callback)
+    if explicit_key is not None:
+        return (
+            "callable",
+            type(callback),
+            getattr(callback, "__module__", None),
+            getattr(callback, "__qualname__", None),
+            explicit_key,
+        )
+
+    if (
+        inspect.isfunction(callback)
+        and callback.__closure__ is None
+        and "<locals>" not in callback.__qualname__
+    ):
+        return ("function", callback.__module__, callback.__qualname__)
+
+    return _UncacheableScoreModKey()
 
 
 @dataclass(frozen=True)
@@ -299,8 +393,8 @@ class _FusedAttnScoreModConfig:
 
     score_mod: Callable
     score_mod_bprop: Optional[Callable]
-    score_mod_key: Tuple[Any, ...]
-    score_mod_bprop_key: Optional[Tuple[Any, ...]]
+    score_mod_key: Any
+    score_mod_bprop_key: Any
     score_mod_tensor_names: Tuple[str, ...]
     score_mod_bprop_tensor_names: Tuple[str, ...]
     score_mod_scalars: Tuple[_ScoreModScalarSpec, ...]
@@ -572,7 +666,12 @@ def _graph_cache_key(
     direction: str,
     config: _FusedAttnScoreModConfig,
     avals: Sequence[Any],
-) -> Tuple[Any, ...]:
+) -> Optional[Tuple[Any, ...]]:
+    if (
+        _score_mod_key_is_uncacheable(config.score_mod_key)
+        or _score_mod_key_is_uncacheable(config.score_mod_bprop_key)
+    ):
+        return None
     return (
         direction,
         config,
@@ -585,13 +684,16 @@ def _shape_dtype(value) -> jax.ShapeDtypeStruct:
 
 
 def _import_cudnn_for_score_mod():
+    cudnn_frontend_path = str(_CUDNN_FRONTEND_PYTHON_PATH)
+    cudnn_frontend_package = _CUDNN_FRONTEND_PYTHON_PATH / "cudnn"
+    if any(cudnn_frontend_package.glob("_compiled_module*")) and cudnn_frontend_path not in sys.path:
+        sys.path.insert(0, cudnn_frontend_path)
     try:
-        import cudnn  # pylint: disable=import-outside-toplevel
+        return importlib.import_module("cudnn")
     except ImportError as exc:
         raise ImportError(
             "score_mod fused_attn requires the cuDNN frontend Python package (`cudnn`)."
         ) from exc
-    return cudnn
 
 
 def _build_score_mod_fwd_graph(q_aval, k_aval, v_aval, score_mod_avals, config):
@@ -787,11 +889,16 @@ def fused_attn_score_mod_fwd(
     q_aval, k_aval, v_aval = map(_shape_dtype, (q, k, v))
     score_mod_avals = tuple(_shape_dtype(arg) for arg in score_mod_tensors)
     key = _graph_cache_key("fwd", config, (q_aval, k_aval, v_aval, *score_mod_avals))
-    if key not in _score_mod_graph_cache:
-        _score_mod_graph_cache[key] = _build_score_mod_fwd_graph(
+    if key is None:
+        graph_id, workspace_size = _build_score_mod_fwd_graph(
             q_aval, k_aval, v_aval, score_mod_avals, config
         )
-    graph_id, workspace_size = _score_mod_graph_cache[key]
+    else:
+        if key not in _score_mod_graph_cache:
+            _score_mod_graph_cache[key] = _build_score_mod_fwd_graph(
+                q_aval, k_aval, v_aval, score_mod_avals, config
+            )
+        graph_id, workspace_size = _score_mod_graph_cache[key]
 
     batch, q_seqlen, q_heads, _ = q.shape
     _, _, _, v_head_dim = v.shape
@@ -824,14 +931,22 @@ def fused_attn_score_mod_bwd(
     all_inputs = (*all_inputs, *score_mod_bprop_tensors)
     avals = tuple(_shape_dtype(arg) for arg in all_inputs)
     key = _graph_cache_key("bwd", config, avals)
-    if key not in _score_mod_graph_cache:
-        _score_mod_graph_cache[key] = _build_score_mod_bwd_graph(
+    if key is None:
+        graph_id, workspace_size = _build_score_mod_bwd_graph(
             *avals[:6],
             avals[6 : 6 + len(score_mod_tensors)],
             avals[6 + len(score_mod_tensors) :],
             config,
         )
-    graph_id, workspace_size = _score_mod_graph_cache[key]
+    else:
+        if key not in _score_mod_graph_cache:
+            _score_mod_graph_cache[key] = _build_score_mod_bwd_graph(
+                *avals[:6],
+                avals[6 : 6 + len(score_mod_tensors)],
+                avals[6 + len(score_mod_tensors) :],
+                config,
+            )
+        graph_id, workspace_size = _score_mod_graph_cache[key]
 
     dq = jax.ShapeDtypeStruct(q.shape, q.dtype)
     dk = jax.ShapeDtypeStruct(k.shape, k.dtype)

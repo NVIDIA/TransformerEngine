@@ -1574,7 +1574,7 @@ def fused_attn(
             Currently, a stripe_size > 1 is only supported for CP + THD + Striped + AG, whereas a stripe_size=1
             is supported for both, CP + THD + Striped + AG and CP + THD + Striped + P2P(Ring)
             None indicates no striping strategy
-        score_mod (Optional[Callable]): Optional cuDNN frontend score modification callback.
+        score_mod (Optional[Callable]): Experimental cuDNN frontend score modification callback.
             The callback is called as `score_mod(graph, score, tensors)` while building a
             cuDNN frontend graph. When provided, this path only supports BSHD_BSHD_BSHD
             layout and is mutually exclusive with masks, padding, bias, dropout, context
