@@ -315,7 +315,8 @@ Tensor::Tensor(const std::string& name,
     switch (scaling_mode) {
     case NVTE_DELAYED_TENSOR_SCALING:
     case NVTE_BLOCK_SCALING_1D:
-    case NVTE_BLOCK_SCALING_2D: {
+    case NVTE_BLOCK_SCALING_2D:
+    case NVTE_NVFP4_1D_SCALING: {
       // Column-wise data shape is transposed
       if (shape.ndim > 0) {
         columnwise_shape_vec.emplace_back(shape.data[shape.ndim - 1]);
@@ -325,8 +326,7 @@ Tensor::Tensor(const std::string& name,
       }
       break;
     }
-    case NVTE_MXFP8_1D_SCALING:
-    case NVTE_NVFP4_1D_SCALING: {
+    case NVTE_MXFP8_1D_SCALING: {
       // Column-wise data matches shape
       for (size_t i = 0; i < shape.ndim; ++i) {
         columnwise_shape_vec.emplace_back(shape.data[i]);

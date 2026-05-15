@@ -46,13 +46,15 @@ inline const char* recipe_name(const InputRecipe& r) {
   }
 }
 
+// Mul128 cases use dims that are multiples of 128 — full functionality across all recipes.
+// kAllSameMul32 uses dims that are multiples of 32 but not 128, so each expert's scale_inv
+// is padded.
 enum class ShapeCase {
-  kAllSame,
-  kSameFirst,
-  kSameLast,
-  kAllDifferent,
-  // Uniform shapes with dims NOT multiples of 128 — exercises scale_inv padding offsets.
-  kUnalignedAllSame,
+  kAllSameMul128,
+  kSameFirstMul128,
+  kSameLastMul128,
+  kAllDifferentMul128,
+  kAllSameMul32,
 };
 
 Tensor make_fp8_operand(const std::string& name, const std::vector<size_t>& shape) {
@@ -185,32 +187,26 @@ struct TestParams {
 // K - reduction dimension shared between A and B
 std::vector<std::tuple<size_t, size_t, size_t>> make_shapes(ShapeCase scase) {
   switch (scase) {
-    case ShapeCase::kAllSame:
+    case ShapeCase::kAllSameMul128:
       return {{128, 256, 384}, {128, 256, 384}, {128, 256, 384}};
-    case ShapeCase::kSameFirst:
+    case ShapeCase::kSameFirstMul128:
       // Same M (first dim), varying N and K
       return {{128, 256, 384}, {128, 384, 512}, {128, 512, 640}};
-    case ShapeCase::kSameLast:
+    case ShapeCase::kSameLastMul128:
       // Same N (last dim), varying M and K
       return {{128, 256, 384}, {256, 256, 512}, {384, 256, 640}};
-    case ShapeCase::kAllDifferent:
+    case ShapeCase::kAllDifferentMul128:
       return {{128, 256, 384}, {256, 384, 512}, {384, 512, 640}};
-    case ShapeCase::kUnalignedAllSame:
+    case ShapeCase::kAllSameMul32:
     default:
-      // (M, N, K) all multiples of 32 — satisfies both MXFP8 block (32) and NVFP4
-      // quantize TMA 16B alignment (32 NVFP4 elements). None are multiples of 128,
-      // so each expert's scale_inv is padded (exposes per-expert offset arithmetic bugs).
       return {{160, 288, 416}, {160, 288, 416}, {160, 288, 416}};
   }
 }
 
-// Runtime-only gating: the test calls TE's nvte_grouped_gemm* APIs, not cuBLAS directly,
-// so compile-time cuBLAS version is irrelevant here. Use the runtime cuBLAS version
-// (and device compute capability) instead.
 constexpr size_t kCublasGroupedGemmVersion = 130300;        // Blackwell-only grouped GEMM
 constexpr size_t kCublasGroupedGemmHopperVersion = 130400;  // adds Hopper support
 
-inline std::string grouped_gemm_skip_reason(const InputRecipe& recipe) {
+inline std::string grouped_gemm_skip_reason(const TestParams& params) {
   const size_t cublas_ver = transformer_engine::cuda::cublas_version();
   if (cublas_ver < kCublasGroupedGemmVersion) {
     return "Grouped GEMM requires cuBLAS 13.3+, but run-time cuBLAS version is " +
@@ -226,14 +222,26 @@ inline std::string grouped_gemm_skip_reason(const InputRecipe& recipe) {
     return "Grouped GEMM on Hopper (SM90) requires cuBLAS 13.4+, but run-time cuBLAS "
            "version is " + std::to_string(cublas_ver) + ".";
   }
-  if (recipe.has_value()) {
+  if (params.recipe.has_value()) {
     const bool is_blackwell_plus = cc >= blackwellComputeCapability;
-    if (!is_blackwell_plus && *recipe != NVTE_BLOCK_SCALING_1D) {
-      return std::string(recipe_name(recipe)) +
+    if (!is_blackwell_plus && *params.recipe != NVTE_BLOCK_SCALING_1D) {
+      return std::string(recipe_name(params.recipe)) +
              " grouped GEMM requires Blackwell (SM100) or newer, " + cc_suffix;
     }
-    if (is_blackwell_plus && *recipe == NVTE_BLOCK_SCALING_1D) {
+    if (is_blackwell_plus && *params.recipe == NVTE_BLOCK_SCALING_1D) {
       return "FP8 block scaling grouped GEMM is only supported on Hopper (SM90), " + cc_suffix;
+    }
+    // NVFP4 GEMM doesn't accept FP16 output (hard error in cublaslt_gemm.cu:433).
+    if (*params.recipe == NVTE_NVFP4_1D_SCALING && params.output_dtype == DType::kFloat16) {
+      return "NVFP4 grouped GEMM does not support FP16 output.";
+    }
+    // 2D NVFP4 is used for weight tensors in training, which are always quantized with
+    // both rowwise and columnwise output (forward + dgrad). The single-direction
+    // columnwise-only quantize path needed for non-TN layouts here isn't a production
+    // use-case and TE doesn't support 2D there.
+    if (*params.recipe == NVTE_NVFP4_1D_SCALING && params.nvfp4_2d &&
+        (!params.transa || params.transb)) {
+      return "NVFP4 2D quantization only supported in TN layout.";
     }
   }
   return "";
@@ -302,7 +310,7 @@ inline GroupedGemmRefSetup make_grouped_gemm_ref(const TestParams& params) {
           break;
         default:
           NVTE_ERROR("Unsupported scaling mode in grouped GEMM test: " +
-                     to_string(*params.recipe));
+                     std::string(recipe_name(params.recipe)));
       }
     }
     s.D_multi.emplace_back(Tensor("D_multi" + std::to_string(i),
@@ -384,13 +392,14 @@ inline void compare_grouped_d_to_multi(
         compareResults(tag, grouped_split, D_multi[i].rowwise_cpu_dptr<float>(), true, atol, rtol);
         break;
       default:
-        NVTE_ERROR("Unsupported D dtype in test: " + to_string(D_multi[i].dtype()));
+        NVTE_ERROR("Unsupported D dtype in test: " +
+                   std::to_string(static_cast<int>(D_multi[i].dtype())));
     }
   }
 }
 
 void run_grouped_gemm_case(const TestParams& params) {
-  if (auto reason = grouped_gemm_skip_reason(params.recipe); !reason.empty()) {
+  if (auto reason = grouped_gemm_skip_reason(params); !reason.empty()) {
     GTEST_SKIP() << reason;
   }
   auto ref = make_grouped_gemm_ref(params);
@@ -462,7 +471,7 @@ void run_grouped_gemm_case(const TestParams& params) {
 }
 
 void run_grouped_gemm_discrete_out_case(const TestParams& params) {
-  if (auto reason = grouped_gemm_skip_reason(params.recipe); !reason.empty()) {
+  if (auto reason = grouped_gemm_skip_reason(params); !reason.empty()) {
     GTEST_SKIP() << reason;
   }
   auto ref = make_grouped_gemm_ref(params);
@@ -548,13 +557,14 @@ void run_grouped_gemm_discrete_out_case(const TestParams& params) {
                        ref.D_multi[i].rowwise_cpu_dptr<float>(), true, atol, rtol);
         break;
       default:
-        NVTE_ERROR("Unsupported D dtype in test: " + to_string(ref.D_multi[i].dtype()));
+        NVTE_ERROR("Unsupported D dtype in test: " +
+                   std::to_string(static_cast<int>(ref.D_multi[i].dtype())));
     }
   }
 }
 
 void run_grouped_gemm_discrete_in_case(const TestParams& params) {
-  if (auto reason = grouped_gemm_skip_reason(params.recipe); !reason.empty()) {
+  if (auto reason = grouped_gemm_skip_reason(params); !reason.empty()) {
     GTEST_SKIP() << reason;
   }
   auto ref = make_grouped_gemm_ref(params);
@@ -636,8 +646,8 @@ TEST_P(GroupedGemmTest, CompareWithMultiTensorGemmDiscreteIn) {
 }
 
 std::string MakeGroupedGemmTestName(const testing::TestParamInfo<GroupedGemmTest::ParamType>& info) {
-  constexpr const char* kShapeNames[] = {"AllSame", "SameM", "SameN", "AllDiff",
-                                         "UnalignedAllSame"};
+  constexpr const char* kShapeNames[] = {"AllSameMul128", "SameMMul128", "SameNMul128",
+                                         "AllDiffMul128", "AllSameMul32"};
   const std::string layout = std::string("ta") + (info.param.transa ? "T" : "N") +
                              "tb" + (info.param.transb ? "T" : "N");
   const std::string null_c = info.param.use_null_c ? "_NullC" : "";
@@ -657,73 +667,70 @@ std::string MakeGroupedGemmTestName(const testing::TestParamInfo<GroupedGemmTest
 // recipe == std::nullopt means BF16 (no scaling), otherwise the FP8/NVFP4 scaling mode.
 const std::vector<TestParams> kTestParams = {
     // FP8 tests (each tensor has random mean/stddev -> different scales)
-    {NVTE_DELAYED_TENSOR_SCALING, true, false, ShapeCase::kAllDifferent, false},
-    {NVTE_DELAYED_TENSOR_SCALING, false, true, ShapeCase::kAllDifferent, false},
-    {NVTE_DELAYED_TENSOR_SCALING, false, false, ShapeCase::kAllSame, false},
+    {NVTE_DELAYED_TENSOR_SCALING, true, false, ShapeCase::kAllDifferentMul128, false},
+    {NVTE_DELAYED_TENSOR_SCALING, false, true, ShapeCase::kAllDifferentMul128, false},
+    {NVTE_DELAYED_TENSOR_SCALING, false, false, ShapeCase::kAllSameMul128, false},
     // BF16 tests
-    {std::nullopt, true, false, ShapeCase::kSameFirst, false},
-    {std::nullopt, false, true, ShapeCase::kSameLast, false},
-    {std::nullopt, false, false, ShapeCase::kAllSame, false},
-    {std::nullopt, true, true, ShapeCase::kAllDifferent, false},
+    {std::nullopt, true, false, ShapeCase::kSameFirstMul128, false},
+    {std::nullopt, false, true, ShapeCase::kSameLastMul128, false},
+    {std::nullopt, false, false, ShapeCase::kAllSameMul128, false},
+    {std::nullopt, true, true, ShapeCase::kAllDifferentMul128, false},
     // Test NULL C (valid when beta=0)
-    {std::nullopt, false, false, ShapeCase::kAllSame, true},
+    {std::nullopt, false, false, ShapeCase::kAllSameMul128, true},
     // MXFP8 tests
-    {NVTE_MXFP8_1D_SCALING, true, false, ShapeCase::kAllSame, false},
-    {NVTE_MXFP8_1D_SCALING, true, false, ShapeCase::kAllDifferent, false},
-    {NVTE_MXFP8_1D_SCALING, false, true, ShapeCase::kAllSame, false},
-    {NVTE_MXFP8_1D_SCALING, false, true, ShapeCase::kAllDifferent, false},
-    {NVTE_MXFP8_1D_SCALING, false, false, ShapeCase::kAllSame, false},
-    {NVTE_MXFP8_1D_SCALING, false, false, ShapeCase::kAllDifferent, false},
-    {NVTE_MXFP8_1D_SCALING, false, false, ShapeCase::kSameFirst, false},
+    {NVTE_MXFP8_1D_SCALING, true, false, ShapeCase::kAllSameMul128, false},
+    {NVTE_MXFP8_1D_SCALING, true, false, ShapeCase::kAllDifferentMul128, false},
+    {NVTE_MXFP8_1D_SCALING, false, true, ShapeCase::kAllSameMul128, false},
+    {NVTE_MXFP8_1D_SCALING, false, true, ShapeCase::kAllDifferentMul128, false},
+    {NVTE_MXFP8_1D_SCALING, false, false, ShapeCase::kAllSameMul128, false},
+    {NVTE_MXFP8_1D_SCALING, false, false, ShapeCase::kAllDifferentMul128, false},
+    {NVTE_MXFP8_1D_SCALING, false, false, ShapeCase::kSameFirstMul128, false},
     // MXFP8 with NULL C
-    {NVTE_MXFP8_1D_SCALING, true, false, ShapeCase::kAllSame, true},
+    {NVTE_MXFP8_1D_SCALING, true, false, ShapeCase::kAllSameMul128, true},
     // NVFP4 tests (all transpose combinations - GEMM internally forces TN)
-    {NVTE_NVFP4_1D_SCALING, true, false, ShapeCase::kAllSame, false},
-    {NVTE_NVFP4_1D_SCALING, true, false, ShapeCase::kAllDifferent, false},
-    {NVTE_NVFP4_1D_SCALING, true, false, ShapeCase::kSameFirst, false},
-    {NVTE_NVFP4_1D_SCALING, true, false, ShapeCase::kSameLast, false},
-    {NVTE_NVFP4_1D_SCALING, false, true, ShapeCase::kAllSame, false},
-    {NVTE_NVFP4_1D_SCALING, false, true, ShapeCase::kAllDifferent, false},
-    {NVTE_NVFP4_1D_SCALING, false, false, ShapeCase::kAllSame, false},
-    {NVTE_NVFP4_1D_SCALING, false, false, ShapeCase::kAllDifferent, false},
+    {NVTE_NVFP4_1D_SCALING, true, false, ShapeCase::kAllSameMul128, false},
+    {NVTE_NVFP4_1D_SCALING, true, false, ShapeCase::kAllDifferentMul128, false},
+    {NVTE_NVFP4_1D_SCALING, true, false, ShapeCase::kSameFirstMul128, false},
+    {NVTE_NVFP4_1D_SCALING, true, false, ShapeCase::kSameLastMul128, false},
+    {NVTE_NVFP4_1D_SCALING, false, true, ShapeCase::kAllSameMul128, false},
+    {NVTE_NVFP4_1D_SCALING, false, true, ShapeCase::kAllDifferentMul128, false},
+    {NVTE_NVFP4_1D_SCALING, false, false, ShapeCase::kAllSameMul128, false},
+    {NVTE_NVFP4_1D_SCALING, false, false, ShapeCase::kAllDifferentMul128, false},
     // NVFP4 with NULL C
-    {NVTE_NVFP4_1D_SCALING, true, false, ShapeCase::kAllSame, true},
+    {NVTE_NVFP4_1D_SCALING, true, false, ShapeCase::kAllSameMul128, true},
     // NVFP4 with 2D (16x16) quantization — scales fed to cuBLAS keep the VEC16 layout,
     // so this verifies that 2D-quantized inputs also produce the correct GEMM result.
-    {NVTE_NVFP4_1D_SCALING, true, false, ShapeCase::kAllSame, false, /*nvfp4_2d=*/true},
-    {NVTE_NVFP4_1D_SCALING, false, true, ShapeCase::kAllDifferent, false, /*nvfp4_2d=*/true},
-    {NVTE_NVFP4_1D_SCALING, false, false, ShapeCase::kAllSame, false, /*nvfp4_2d=*/true},
-    // Non-default output dtypes — implementation accepts BF16/FP16/FP32, verify the
-    // less-common ones on a couple of recipes (BF16 covered everywhere else).
-    {std::nullopt,                false, false, ShapeCase::kAllSame, false,
-     /*nvfp4_2d=*/false, /*output_dtype=*/DType::kFloat16},
-    {std::nullopt,                false, false, ShapeCase::kAllSame, false,
+    {NVTE_NVFP4_1D_SCALING, true, false, ShapeCase::kAllSameMul128, false, /*nvfp4_2d=*/true},
+    {NVTE_NVFP4_1D_SCALING, false, true, ShapeCase::kAllDifferentMul128, false, /*nvfp4_2d=*/true},
+    {NVTE_NVFP4_1D_SCALING, false, false, ShapeCase::kAllSameMul128, false, /*nvfp4_2d=*/true},
+    // Non-default output dtypes — implementation accepts BF16/FP16/FP32. cuBLAS grouped
+    // GEMM doesn't support BF16 input -> FP16 output (no algorithm found), and NVFP4 +
+    // FP16 output is also unsupported (see grouped_gemm_skip_reason).
+    {std::nullopt,                false, false, ShapeCase::kAllSameMul128, false,
      /*nvfp4_2d=*/false, /*output_dtype=*/DType::kFloat32},
-    {NVTE_DELAYED_TENSOR_SCALING, true,  false, ShapeCase::kAllSame, false,
-     /*nvfp4_2d=*/false, /*output_dtype=*/DType::kFloat16},
-    {NVTE_NVFP4_1D_SCALING,       true,  false, ShapeCase::kAllSame, false,
+    {NVTE_DELAYED_TENSOR_SCALING, true,  false, ShapeCase::kAllSameMul128, false,
      /*nvfp4_2d=*/false, /*output_dtype=*/DType::kFloat16},
     // FP8 Block Scaling tests (TN layout on Hopper, block size 128)
-    {NVTE_BLOCK_SCALING_1D, true, false, ShapeCase::kAllSame, false},
-    {NVTE_BLOCK_SCALING_1D, true, false, ShapeCase::kAllDifferent, false},
-    {NVTE_BLOCK_SCALING_1D, true, false, ShapeCase::kSameFirst, false},
-    {NVTE_BLOCK_SCALING_1D, true, false, ShapeCase::kSameLast, false},
-    {NVTE_BLOCK_SCALING_1D, false, true, ShapeCase::kAllSame, false},
-    {NVTE_BLOCK_SCALING_1D, false, false, ShapeCase::kAllSame, false},
+    {NVTE_BLOCK_SCALING_1D, true, false, ShapeCase::kAllSameMul128, false},
+    {NVTE_BLOCK_SCALING_1D, true, false, ShapeCase::kAllDifferentMul128, false},
+    {NVTE_BLOCK_SCALING_1D, true, false, ShapeCase::kSameFirstMul128, false},
+    {NVTE_BLOCK_SCALING_1D, true, false, ShapeCase::kSameLastMul128, false},
+    {NVTE_BLOCK_SCALING_1D, false, true, ShapeCase::kAllSameMul128, false},
+    {NVTE_BLOCK_SCALING_1D, false, false, ShapeCase::kAllSameMul128, false},
     // FP8 Block Scaling with NULL C
-    {NVTE_BLOCK_SCALING_1D, true, false, ShapeCase::kAllSame, true},
+    {NVTE_BLOCK_SCALING_1D, true, false, ShapeCase::kAllSameMul128, true},
     // Unaligned-dim tests: dims are multiples of 32 / 16 (per-recipe block size) but NOT
     // multiples of 128 — exposes scale_inv padding bugs in per-expert offset arithmetic.
     // MXFP8 covered by upstream PR #2954, the rest by the analogous fix.
-    {NVTE_MXFP8_1D_SCALING, true, false, ShapeCase::kUnalignedAllSame, false},
-    {NVTE_MXFP8_1D_SCALING, false, true, ShapeCase::kUnalignedAllSame, false},
-    {NVTE_MXFP8_1D_SCALING, false, false, ShapeCase::kUnalignedAllSame, false},
-    {NVTE_NVFP4_1D_SCALING, true, false, ShapeCase::kUnalignedAllSame, false},
-    {NVTE_NVFP4_1D_SCALING, false, true, ShapeCase::kUnalignedAllSame, false},
-    {NVTE_NVFP4_1D_SCALING, false, false, ShapeCase::kUnalignedAllSame, false},
-    {NVTE_BLOCK_SCALING_1D, true, false, ShapeCase::kUnalignedAllSame, false},
-    {NVTE_BLOCK_SCALING_1D, false, true, ShapeCase::kUnalignedAllSame, false},
-    {NVTE_BLOCK_SCALING_1D, false, false, ShapeCase::kUnalignedAllSame, false},
+    {NVTE_MXFP8_1D_SCALING, true, false, ShapeCase::kAllSameMul32, false},
+    {NVTE_MXFP8_1D_SCALING, false, true, ShapeCase::kAllSameMul32, false},
+    {NVTE_MXFP8_1D_SCALING, false, false, ShapeCase::kAllSameMul32, false},
+    {NVTE_NVFP4_1D_SCALING, true, false, ShapeCase::kAllSameMul32, false},
+    {NVTE_NVFP4_1D_SCALING, false, true, ShapeCase::kAllSameMul32, false},
+    {NVTE_NVFP4_1D_SCALING, false, false, ShapeCase::kAllSameMul32, false},
+    {NVTE_BLOCK_SCALING_1D, true, false, ShapeCase::kAllSameMul32, false},
+    {NVTE_BLOCK_SCALING_1D, false, true, ShapeCase::kAllSameMul32, false},
+    {NVTE_BLOCK_SCALING_1D, false, false, ShapeCase::kAllSameMul32, false},
 };
 
 INSTANTIATE_TEST_SUITE_P(OperatorTest,
