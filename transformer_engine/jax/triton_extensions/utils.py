@@ -595,9 +595,7 @@ def triton_call_lowering(
     if jax_version_meet_requirement(TRITON_EXTENSION_CUDA_GRAPH_MIN_JAX_VERSION):
         rule = jax.ffi.ffi_lowering(
             "triton_kernel_call_ffi",  # Custom call target registered in gpu_triton.py
-            backend_config={
-                "kernel_call_proto": ir.StringAttr.get(compressed_call_proto)
-            },
+            backend_config={"kernel_call_proto": ir.StringAttr.get(compressed_call_proto)},
             operand_output_aliases=ffi_operand_output_aliases,
         )
     else:
