@@ -1465,6 +1465,10 @@ class _ScoreModSoftcap:
     def __init__(self):
         self.before_tanh_activation = None
 
+    def score_mod_graph_cache_key(self):
+        """Graph topology key for softcap score_mod."""
+        return ("softcap",)
+
     def forward(self, score_mod_graph, score_tensor, tensors):
         """Apply softcap * tanh(score / softcap)."""
         import cudnn  # pylint: disable=import-outside-toplevel
@@ -1516,15 +1520,48 @@ def _score_mod_cache_cpu_inputs():
     return q, k, v, o, stats
 
 
-def test_score_mod_cache_bound_method_key_stable():
-    """Bound method keys should be stable across repeated attribute access."""
+def test_score_mod_cache_bound_method_requires_explicit_key():
+    """Unkeyed bound methods should be uncached instead of keyed by object id."""
+
+    class UnkeyedScoreMod:
+        def forward(self, _score_mod_graph, score_tensor, _tensors):
+            return score_tensor
+
+    key = dpa_backends._score_mod_callback_cache_key(UnkeyedScoreMod().forward)
+
+    assert key is dpa_backends._SCORE_MOD_UNCACHEABLE
+
+
+def test_score_mod_cache_bound_method_explicit_key_stable():
+    """Bound method keys should be stable when a structural graph key is provided."""
     softcap = _ScoreModSoftcap()
     key_0 = dpa_backends._score_mod_callback_cache_key(softcap.forward)
     key_1 = dpa_backends._score_mod_callback_cache_key(softcap.forward)
     other_key = dpa_backends._score_mod_callback_cache_key(_ScoreModSoftcap().forward)
 
     assert key_0 == key_1
-    assert key_0 != other_key
+    assert key_0 == other_key
+
+
+def test_score_mod_cache_explicit_key_distinguishes_topology():
+    """Stateful score_mods can opt into caching with topology-specific keys."""
+
+    class LayeredScoreMod:
+        def __init__(self, num_layers):
+            self.num_layers = num_layers
+
+        def score_mod_graph_cache_key(self):
+            return {"num_layers": self.num_layers}
+
+        def forward(self, _score_mod_graph, score_tensor, _tensors):
+            return score_tensor
+
+    key_0 = dpa_backends._score_mod_callback_cache_key(LayeredScoreMod(1).forward)
+    key_1 = dpa_backends._score_mod_callback_cache_key(LayeredScoreMod(1).forward)
+    key_2 = dpa_backends._score_mod_callback_cache_key(LayeredScoreMod(2).forward)
+
+    assert key_0 == key_1
+    assert key_0 != key_2
 
 
 def test_score_mod_cache_key_ignores_pass_by_value_values():
@@ -1659,6 +1696,87 @@ def test_score_mod_cache_fwd_reuses_graph_for_pass_by_value_changes(monkeypatch)
 
     assert entry_0 is entry_1
     assert entry_2 is not entry_0
+    assert len(build_entries) == 2
+
+
+def test_score_mod_cache_fwd_skips_cache_for_unkeyed_bound_method(monkeypatch):
+    """Unkeyed bound methods should build fresh graphs instead of using an id-based key."""
+
+    class UnkeyedScoreMod:
+        def forward(self, _score_mod_graph, score_tensor, _tensors):
+            return score_tensor
+
+    q, k, v, o, stats = _score_mod_cache_cpu_inputs()
+    score_mod = UnkeyedScoreMod()
+    cache = dpa_backends._cudnn_score_mod_graph_cache
+    saved_cache = dict(cache)
+    build_entries = []
+
+    def fake_build(
+        is_training,
+        query_layer,
+        key_layer,
+        value_layer,
+        q_format,
+        kv_format,
+        attn_scale,
+        score_mod,
+        score_mod_tensors,
+        output_layer,
+        stats_bhs1,
+    ):
+        del (
+            is_training,
+            query_layer,
+            key_layer,
+            value_layer,
+            q_format,
+            kv_format,
+            attn_scale,
+            score_mod,
+            score_mod_tensors,
+            output_layer,
+            stats_bhs1,
+        )
+        entry = object()
+        build_entries.append(entry)
+        return entry
+
+    monkeypatch.setattr(dpa_backends, "_build_cudnn_score_mod_fwd_graph", fake_build)
+    try:
+        cache.clear()
+        entry_0 = dpa_backends._get_cudnn_score_mod_fwd_graph(
+            True,
+            q,
+            k,
+            v,
+            "bshd",
+            "bshd",
+            1.0,
+            score_mod.forward,
+            None,
+            o,
+            stats,
+        )
+        entry_1 = dpa_backends._get_cudnn_score_mod_fwd_graph(
+            True,
+            q,
+            k,
+            v,
+            "bshd",
+            "bshd",
+            1.0,
+            score_mod.forward,
+            None,
+            o,
+            stats,
+        )
+        assert len(cache) == 0
+    finally:
+        cache.clear()
+        cache.update(saved_cache)
+
+    assert entry_0 is not entry_1
     assert len(build_entries) == 2
 
 

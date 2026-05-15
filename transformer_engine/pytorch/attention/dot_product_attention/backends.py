@@ -5,6 +5,7 @@
 """Attention Backends."""
 from contextlib import nullcontext
 from dataclasses import dataclass
+import inspect
 from importlib.metadata import version as get_pkg_version
 from importlib.metadata import PackageNotFoundError
 import os
@@ -92,6 +93,7 @@ _flash_attn_varlen_fwd = None
 _flash_attn_varlen_bwd = None
 _cudnn_score_mod_handles: Dict[torch.device, Any] = {}
 _cudnn_score_mod_graph_cache: Dict[Tuple[Any, ...], Any] = {}
+_SCORE_MOD_UNCACHEABLE = object()
 
 # Try to import Flash Attention v2
 try:
@@ -1270,15 +1272,87 @@ def _bhsd_graph_tensor(graph, tensor: torch.Tensor, tensor_format: str):
     return graph.tensor(dim=dim, stride=stride, data_type=tensor.dtype)
 
 
-def _score_mod_callback_cache_key(callback: Optional[Callable]) -> Optional[Tuple[Any, ...]]:
-    """Create a stable cache key for a score_mod callable."""
+def _freeze_score_mod_cache_key(value: Any) -> Any:
+    """Convert a user-provided score_mod graph key into a hashable structure."""
+    if isinstance(value, torch.Tensor):
+        raise TypeError(
+            "score_mod_graph_cache_key() must not include tensors. Pass runtime tensors "
+            "through score_mod_tensors or score_mod_bprop_tensors instead."
+        )
+    if isinstance(value, dict):
+        items = (
+            (
+                _freeze_score_mod_cache_key(key),
+                _freeze_score_mod_cache_key(val),
+            )
+            for key, val in value.items()
+        )
+        return tuple(sorted(items, key=repr))
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_score_mod_cache_key(item) for item in value)
+    if isinstance(value, (set, frozenset)):
+        items = (_freeze_score_mod_cache_key(item) for item in value)
+        return tuple(sorted(items, key=repr))
+    try:
+        hash(value)
+    except TypeError as exc:
+        raise TypeError(
+            "score_mod_graph_cache_key() must return a hashable value or a nested "
+            "combination of dict/list/tuple/set values."
+        ) from exc
+    return value
+
+
+def _score_mod_explicit_cache_key(callback_owner: Any) -> Optional[Any]:
+    """Return a user-provided structural graph key for a score_mod callback."""
+    explicit_key = getattr(callback_owner, "score_mod_graph_cache_key", None)
+    if explicit_key is None:
+        return None
+    explicit_key = explicit_key() if callable(explicit_key) else explicit_key
+    return _freeze_score_mod_cache_key(explicit_key)
+
+
+def _score_mod_callback_cache_key(callback: Optional[Callable]) -> Any:
+    """Create a stable graph cache key for a score_mod callable.
+
+    Module-level functions are assumed to have stable topology. Stateful bound methods and
+    callable instances need an explicit score_mod_graph_cache_key(); otherwise their graphs
+    are left uncached to avoid reusing stale graphs after Python object address reuse.
+    """
     if callback is None:
         return None
     self_obj = getattr(callback, "__self__", None)
     func_obj = getattr(callback, "__func__", None)
     if self_obj is not None and func_obj is not None:
-        return ("bound_method", id(self_obj), id(func_obj))
-    return ("callable", id(callback))
+        explicit_key = _score_mod_explicit_cache_key(self_obj)
+        if explicit_key is None:
+            return _SCORE_MOD_UNCACHEABLE
+        return (
+            "bound_method",
+            type(self_obj),
+            func_obj.__module__,
+            func_obj.__qualname__,
+            explicit_key,
+        )
+
+    explicit_key = _score_mod_explicit_cache_key(callback)
+    if explicit_key is not None:
+        return (
+            "callable",
+            type(callback),
+            getattr(callback, "__module__", None),
+            getattr(callback, "__qualname__", None),
+            explicit_key,
+        )
+
+    if (
+        inspect.isfunction(callback)
+        and callback.__closure__ is None
+        and "<locals>" not in callback.__qualname__
+    ):
+        return ("function", callback.__module__, callback.__qualname__)
+
+    return _SCORE_MOD_UNCACHEABLE
 
 
 def _score_mod_device_key(device: torch.device) -> Tuple[Any, ...]:
@@ -1455,15 +1529,18 @@ def _cudnn_score_mod_fwd_cache_key(
     attn_scale: float,
     score_mod: Callable,
     score_mod_tensors: Optional[Dict[str, torch.Tensor]],
-) -> Tuple[Any, ...]:
+) -> Optional[Tuple[Any, ...]]:
     """Cache key for score_mod fprop execution plans."""
+    score_mod_key = _score_mod_callback_cache_key(score_mod)
+    if score_mod_key is _SCORE_MOD_UNCACHEABLE:
+        return None
     return (
         "fwd",
         is_training,
         q_format,
         kv_format,
         attn_scale,
-        _score_mod_callback_cache_key(score_mod),
+        score_mod_key,
         _score_mod_bhsd_tensor_metadata(query_layer, q_format),
         _score_mod_bhsd_tensor_metadata(key_layer, kv_format),
         _score_mod_bhsd_tensor_metadata(value_layer, kv_format),
@@ -1488,16 +1565,23 @@ def _cudnn_score_mod_bwd_cache_key(
     score_mod_tensors: Optional[Dict[str, torch.Tensor]],
     score_mod_bprop_tensors: Optional[Dict[str, torch.Tensor]],
     deterministic: bool,
-) -> Tuple[Any, ...]:
+) -> Optional[Tuple[Any, ...]]:
     """Cache key for score_mod bprop execution plans."""
+    score_mod_key = _score_mod_callback_cache_key(score_mod)
+    score_mod_bprop_key = _score_mod_callback_cache_key(score_mod_bprop)
+    if (
+        score_mod_key is _SCORE_MOD_UNCACHEABLE
+        or score_mod_bprop_key is _SCORE_MOD_UNCACHEABLE
+    ):
+        return None
     return (
         "bwd",
         q_format,
         kv_format,
         attn_scale,
         deterministic,
-        _score_mod_callback_cache_key(score_mod),
-        _score_mod_callback_cache_key(score_mod_bprop),
+        score_mod_key,
+        score_mod_bprop_key,
         _score_mod_bhsd_tensor_metadata(query_layer, q_format),
         _score_mod_bhsd_tensor_metadata(key_layer, kv_format),
         _score_mod_bhsd_tensor_metadata(value_layer, kv_format),
@@ -1594,6 +1678,20 @@ def _get_cudnn_score_mod_fwd_graph(
         score_mod,
         score_mod_tensors,
     )
+    if key is None:
+        return _build_cudnn_score_mod_fwd_graph(
+            is_training,
+            query_layer,
+            key_layer,
+            value_layer,
+            q_format,
+            kv_format,
+            attn_scale,
+            score_mod,
+            score_mod_tensors,
+            output_layer,
+            stats_bhs1,
+        )
     entry = _cudnn_score_mod_graph_cache.get(key)
     if entry is None:
         entry = _build_cudnn_score_mod_fwd_graph(
@@ -1722,6 +1820,23 @@ def _get_cudnn_score_mod_bwd_graph(
         score_mod_bprop_tensors,
         deterministic,
     )
+    if key is None:
+        return _build_cudnn_score_mod_bwd_graph(
+            query_layer,
+            key_layer,
+            value_layer,
+            output_layer,
+            d_out,
+            stats_bhs1,
+            q_format,
+            kv_format,
+            attn_scale,
+            score_mod,
+            score_mod_bprop,
+            score_mod_tensors,
+            score_mod_bprop_tensors,
+            deterministic,
+        )
     entry = _cudnn_score_mod_graph_cache.get(key)
     if entry is None:
         entry = _build_cudnn_score_mod_bwd_graph(
