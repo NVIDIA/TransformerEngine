@@ -177,6 +177,8 @@ class Tensor {
 
   NVTEShape columnwise_shape() const noexcept { return tensor_.get_columnwise_data().shape; }
 
+  NVTEShape shape() const noexcept { return tensor_.shape(); }
+
   NVTEShape rowwise_scale_inv_shape() const {
     NVTE_CHECK(rowwise_, "Tensor does not have rowwise data!");
     return tensor_.get_rowwise_scale_inv().shape;

@@ -1061,8 +1061,6 @@ GroupedBuffers build_grouped_tensor(const std::vector<Tensor*>& tensors,
   const bool has_columnwise = tensors[0]->columnwise();
   NVTE_CHECK(has_rowwise || has_columnwise, "Tensors must have at least one data layout.");
 
-  const NVTEShape shape = has_rowwise ? tensors[0]->rowwise_shape()
-                                      : tensors[0]->columnwise_shape();
   const DType dtype = tensors[0]->dtype();
   const size_t num_tensors = tensors.size();
   const size_t bits_per_elem = typeToNumBits(dtype);
@@ -1084,12 +1082,13 @@ GroupedBuffers build_grouped_tensor(const std::vector<Tensor*>& tensors,
   std::vector<int64_t> first_dims(num_tensors);
   std::vector<int64_t> last_dims(num_tensors);
   for (size_t i = 0; i < num_tensors; ++i) {
-    const auto s = has_rowwise ? tensors[i]->rowwise_shape()
-                               : tensors[i]->columnwise_shape();
+    const auto s = tensors[i]->shape();
     NVTE_CHECK(s.ndim == 2, "Grouped tensor build expects 2D tensors.");
     first_dims[i] = static_cast<int64_t>(s.data[0]);
     last_dims[i] = static_cast<int64_t>(s.data[1]);
-    grouped.tensor_bytes[i] = bytes(s, dtype);
+    const auto storage_shape = has_rowwise ? tensors[i]->rowwise_shape()
+                                           : tensors[i]->columnwise_shape();
+    grouped.tensor_bytes[i] = bytes(storage_shape, dtype);
   }
 
   const bool same_first = std::all_of(first_dims.begin(), first_dims.end(),
