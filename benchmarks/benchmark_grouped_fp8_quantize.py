@@ -7,7 +7,7 @@
 import argparse
 import json
 import os
-from typing import Dict, List
+from typing import Any, Dict, List
 
 import torch
 from transformer_engine.pytorch import Float8CurrentScalingQuantizer, Float8Quantizer
@@ -97,6 +97,37 @@ def _prepare_mode(
     return delayed_quantizers, outputs
 
 
+def _prepare_benchmark_state(args: argparse.Namespace, mode: str) -> Dict[str, Any]:
+    inputs, first_dims, element_counts = _make_inputs(
+        num_buffers=args.num_buffers,
+        num_groups=args.num_groups,
+        rows_per_group=args.rows_per_group,
+        hidden_size=args.hidden_size,
+        dtype=torch.bfloat16,
+    )
+    quantizers, outputs = _prepare_mode(mode, inputs, first_dims, args.num_groups)
+    return {
+        "mode": mode,
+        "inputs": inputs,
+        "first_dims": first_dims,
+        "element_counts": element_counts,
+        "quantizers": quantizers,
+        "outputs": outputs,
+    }
+
+
+def _warmup_benchmark_state(args: argparse.Namespace, state: Dict[str, Any]) -> None:
+    for iteration in range(args.warmup_iters):
+        idx = iteration % len(state["inputs"])
+        tex.group_quantize(
+            state["inputs"][idx],
+            state["quantizers"][idx],
+            args.num_groups,
+            state["first_dims"],
+            output=state["outputs"][idx],
+        )
+
+
 def _run_timed_loop(
     *,
     mode: str,
@@ -132,37 +163,12 @@ def _run_timed_loop(
     return start.elapsed_time(end) / 1000.0
 
 
-def benchmark_mode(args: argparse.Namespace, mode: str) -> Dict[str, object]:
-    inputs, first_dims, element_counts = _make_inputs(
-        num_buffers=args.num_buffers,
-        num_groups=args.num_groups,
-        rows_per_group=args.rows_per_group,
-        hidden_size=args.hidden_size,
-        dtype=torch.bfloat16,
-    )
-    quantizers, outputs = _prepare_mode(mode, inputs, first_dims, args.num_groups)
-
-    for iteration in range(args.warmup_iters):
-        idx = iteration % len(inputs)
-        tex.group_quantize(
-            inputs[idx],
-            quantizers[idx],
-            args.num_groups,
-            first_dims,
-            output=outputs[idx],
-        )
-
-    elapsed_sec = _run_timed_loop(
-        mode=mode,
-        inputs=inputs,
-        quantizers=quantizers,
-        outputs=outputs,
-        first_dims=first_dims,
-        num_groups=args.num_groups,
-        iterations=args.iters,
-        profile=args.profile,
-    )
-
+def _make_result(
+    args: argparse.Namespace,
+    mode: str,
+    element_counts: Dict[str, int],
+    elapsed_sec: float,
+) -> Dict[str, object]:
     input_element_size = torch.tensor([], dtype=torch.bfloat16).element_size()
     relevant_bytes = _bytes_per_call(element_counts["actual_elements"], input_element_size, mode)
     excluded_tail_bytes = _bytes_per_call(
@@ -200,6 +206,53 @@ def benchmark_mode(args: argparse.Namespace, mode: str) -> Dict[str, object]:
     }
 
 
+def benchmark_mode(args: argparse.Namespace, mode: str) -> Dict[str, object]:
+    state = _prepare_benchmark_state(args, mode)
+    _warmup_benchmark_state(args, state)
+    elapsed_sec = _run_timed_loop(
+        mode=mode,
+        inputs=state["inputs"],
+        quantizers=state["quantizers"],
+        outputs=state["outputs"],
+        first_dims=state["first_dims"],
+        num_groups=args.num_groups,
+        iterations=args.iters,
+        profile=args.profile,
+    )
+    return _make_result(args, mode, state["element_counts"], elapsed_sec)
+
+
+def benchmark_modes_with_single_profile(
+    args: argparse.Namespace,
+    modes: tuple[str, ...],
+) -> List[Dict[str, object]]:
+    states = [_prepare_benchmark_state(args, mode) for mode in modes]
+    for state in states:
+        _warmup_benchmark_state(args, state)
+
+    results = []
+    torch.cuda.synchronize()
+    torch.cuda.cudart().cudaProfilerStart()
+    try:
+        for state in states:
+            mode = state["mode"]
+            elapsed_sec = _run_timed_loop(
+                mode=mode,
+                inputs=state["inputs"],
+                quantizers=state["quantizers"],
+                outputs=state["outputs"],
+                first_dims=state["first_dims"],
+                num_groups=args.num_groups,
+                iterations=args.iters,
+                profile=False,
+            )
+            results.append(_make_result(args, mode, state["element_counts"], elapsed_sec))
+    finally:
+        torch.cuda.synchronize()
+        torch.cuda.cudart().cudaProfilerStop()
+    return results
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("all",) + MODES, default="all")
@@ -225,7 +278,10 @@ def main() -> None:
     if args.rows_per_group % 128 != 0:
         raise ValueError("--rows-per-group must be divisible by 128 for the grouped FP8 kernel")
     modes = MODES if args.mode == "all" else (args.mode,)
-    results = [benchmark_mode(args, mode) for mode in modes]
+    if args.profile and len(modes) > 1:
+        results = benchmark_modes_with_single_profile(args, modes)
+    else:
+        results = [benchmark_mode(args, mode) for mode in modes]
     report = {
         "benchmark": "grouped_fp8_tensor_scaling_quantize",
         "profile_enabled": args.profile,

@@ -28,8 +28,8 @@ using namespace dispatch::common;
 
 constexpr size_t WARPS_PER_TILE = 4;
 constexpr size_t THREADS_PER_TILE = THREADS_PER_WARP * WARPS_PER_TILE;
-constexpr size_t LOAD_SIZE_BYTES = 4;
-constexpr size_t STORE_SIZE_BYTES = 4;
+constexpr size_t LOAD_SIZE_BYTES = 8;
+constexpr size_t STORE_SIZE_BYTES = 8;
 
 template <bool IS_ACT, typename ParamOP, float (*OP)(float, const ParamOP &), typename IType,
           typename OType, ScalingType SCALING_TYPE, ShapeRepresentation SHAPE_REP>
@@ -53,6 +53,8 @@ __global__ void __launch_bounds__(THREADS_PER_TILE) group_cast_fp8_kernel(
   constexpr size_t tile_dim_n = THREADS_PER_WARP * nvec_in;
   constexpr size_t num_iterations = THREADS_PER_WARP / WARPS_PER_TILE;
 
+  using IVecT = Vec<IType, nvec_in>;
+  using OVecC = Vec<OType, nvec_in>;
   using OVecT = Vec<OType, nvec_out>;
 
   const size_t tile_col = blockIdx.x * tile_dim_n;
@@ -122,21 +124,33 @@ __global__ void __launch_bounds__(THREADS_PER_TILE) group_cast_fp8_kernel(
       const size_t row = tile_row + i1 * nvec_out + i2;
       const size_t col = tile_col + j1 * nvec_in;
       if (row < rows) {
+        IVecT local_input;
+        OVecC local_output;
+        const size_t valid_cols =
+            col < cols ? ((cols - col) < nvec_in ? (cols - col) : nvec_in) : 0;
+        if (valid_cols == 0) {
+          continue;
+        }
+        local_input.load_from_elts(input + tensor_base + row * cols + col, 0, valid_cols);
 #pragma unroll
         for (size_t j2 = 0; j2 < nvec_in; ++j2) {
-          if (col + j2 < cols) {
-            float elt = static_cast<float>(input[tensor_base + row * cols + col + j2]);
+          if (j2 < valid_cols) {
+            float elt = static_cast<float>(local_input.data.elt[j2]);
             if constexpr (IS_ACT) {
               elt = OP(elt, {});
             }
             const OType out = static_cast<OType>(elt * scale);
             if constexpr (ROWWISE_OUTPUT) {
-              output_rowwise[tensor_base + row * cols + col + j2] = out;
+              local_output.data.elt[j2] = out;
             }
             if constexpr (COLWISE_OUTPUT) {
               local_output_t[j2][iter].data.elt[i2] = out;
             }
           }
+        }
+        if constexpr (ROWWISE_OUTPUT) {
+          local_output.store_to_elts(output_rowwise + tensor_base + row * cols + col, 0,
+                                     valid_cols);
         }
       }
     }
@@ -160,12 +174,11 @@ __global__ void __launch_bounds__(THREADS_PER_TILE) group_cast_fp8_kernel(
         const size_t row = tile_row + i1 * nvec_out;
         const size_t col = tile_col + j1 * nvec_in + j2;
         if (col < cols) {
-#pragma unroll
-          for (size_t i2 = 0; i2 < nvec_out; ++i2) {
-            if (row + i2 < rows) {
-              output_colwise[tensor_base + col * rows + row + i2] =
-                  shared_output_t[j1][i1].data.elt[i2];
-            }
+          const size_t valid_rows =
+              row < rows ? ((rows - row) < nvec_out ? (rows - row) : nvec_out) : 0;
+          if (valid_rows > 0) {
+            shared_output_t[j1][i1].store_to_elts(
+                output_colwise + tensor_base + col * rows + row, 0, valid_rows);
           }
         }
       }
