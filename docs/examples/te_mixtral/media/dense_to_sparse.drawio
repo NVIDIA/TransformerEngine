@@ -1,6 +1,6 @@
 <mxfile host="65bd71144e">
     <diagram name="dense-to-sparse" id="dense-to-sparse">
-        <mxGraphModel dx="858" dy="928" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1168" pageHeight="628" math="0" shadow="0">
+        <mxGraphModel dx="2542" dy="1437" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1168" pageHeight="628" math="0" shadow="0">
             <root>
                 <mxCell id="0"/>
                 <mxCell id="1" parent="0"/>
@@ -58,7 +58,10 @@
                 <mxCell id="e1" value="E1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#D79B00;fontSize=22;" parent="1" vertex="1">
                     <mxGeometry x="749" y="354" width="44" height="60" as="geometry"/>
                 </mxCell>
-                <mxCell id="e2" value="E2" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#D79B00;fontSize=22;" parent="1" vertex="1">
+                <mxCell id="4" style="edgeStyle=none;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="1" source="e2" target="r_experts">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e2" value="E2" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=22;fontColor=#333333;" parent="1" vertex="1">
                     <mxGeometry x="799" y="354" width="44" height="60" as="geometry"/>
                 </mxCell>
                 <mxCell id="e3" value="E3" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#D79B00;fontSize=22;" parent="1" vertex="1">
@@ -67,7 +70,12 @@
                 <mxCell id="e4" value="E4" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#D79B00;fontSize=22;" parent="1" vertex="1">
                     <mxGeometry x="899" y="354" width="44" height="60" as="geometry"/>
                 </mxCell>
-                <mxCell id="e5" value="E5" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#D79B00;fontSize=22;" parent="1" vertex="1">
+                <mxCell id="5" style="edgeStyle=none;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="1" source="e5" target="r_experts">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="890.0000000000002" y="430" as="targetPoint"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="e5" value="E5" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=22;fontColor=#333333;" parent="1" vertex="1">
                     <mxGeometry x="949" y="354" width="44" height="60" as="geometry"/>
                 </mxCell>
                 <mxCell id="e6" value="E6" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#D79B00;fontSize=22;" parent="1" vertex="1">
@@ -82,8 +90,17 @@
                 <mxCell id="r_out" value="output" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666;fontSize=26;" parent="1" vertex="1">
                     <mxGeometry x="743" y="520" width="300" height="50" as="geometry"/>
                 </mxCell>
+                <mxCell id="3" style="edgeStyle=none;html=1;entryX=0.5;entryY=0;entryDx=0;entryDy=0;exitX=0.5;exitY=1;exitDx=0;exitDy=0;" edge="1" parent="1" source="r_router" target="e5">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
                 <mxCell id="r_router" value="&lt;span style=&quot;font-weight: normal;&quot;&gt;&lt;font style=&quot;font-size: 20px;&quot;&gt;Router&lt;/font&gt;&lt;/span&gt;" style="rounded=0;whiteSpace=wrap;html=1;fontSize=23;fontStyle=1;" parent="1" vertex="1">
                     <mxGeometry x="744" y="304" width="300" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="2" value="" style="endArrow=classic;html=1;entryX=0.5;entryY=0;entryDx=0;entryDy=0;exitX=0.5;exitY=1;exitDx=0;exitDy=0;" edge="1" parent="1" source="r_router" target="e2">
+                    <mxGeometry width="50" height="50" relative="1" as="geometry">
+                        <mxPoint x="560" y="470" as="sourcePoint"/>
+                        <mxPoint x="610" y="420" as="targetPoint"/>
+                    </mxGeometry>
                 </mxCell>
             </root>
         </mxGraphModel>
