@@ -265,6 +265,24 @@ def _parse_args(argv=None, namespace=None):
         default=False,
         help="Use cuBLASMp backend.",
     )
+    parser.add_argument(
+        "--rtol",
+        type=float,
+        default=None,
+        help=(
+            "Override the relative-error tolerance used in the numerical check. "
+            "When unset, defaults to 0.125 for FP8 and 0.025 otherwise."
+        ),
+    )
+    parser.add_argument(
+        "--atol",
+        type=float,
+        default=None,
+        help=(
+            "Override the absolute-error tolerance used in the numerical check. "
+            "When unset, defaults to 0.0625 for FP8 and 0.00125 otherwise."
+        ),
+    )
     args = parser.parse_args(argv, namespace)
 
     if args.use_cuda_graphs and args.layer_type in [te.MultiheadAttention, te.TransformerLayer]:
@@ -570,8 +588,8 @@ def _train(opts):
         # Now validate accuracy
         if not bool(numerics_failed.item()):
             for i, (test_g, ref_g) in enumerate(zip(test_grads, ref_grads)):
-                rtol = 0.125 if opts.fp8 else 0.025
-                atol = 0.0625 if opts.fp8 else 0.00125
+                rtol = opts.rtol if opts.rtol is not None else (0.125 if opts.fp8 else 0.025)
+                atol = opts.atol if opts.atol is not None else (0.0625 if opts.fp8 else 0.00125)
                 grad_failed, grad_info = _compare_tensors(names[i], test_g, ref_g, rtol, atol)
                 dist_print(grad_info, src=WORLD_RANK, error=grad_failed)
                 numerics_failed[0] = int(grad_failed)

@@ -274,33 +274,48 @@ void cublasmp_gemm(InitMatricesFn init_matrices_fn, NVTECommGemmCtx* ctx, NVTECo
                "Unsupported scaling mode: " + std::to_string(t->scaling_mode));
   }
 
-  // cuBLASMp only supports TN format for FP8 GEMM on Hopper. If an FP8 input is not in the
-  // expected transpose orientation, swap to its columnwise (transposed) data and flip the
-  // transpose flag, mirroring the canonicalization in cublaslt_gemm.cu's CanonicalizeGemmInput.
-  auto reroute_fp8_input = [](const Tensor* t, bool current_trans, bool want_trans,
-                              const char* side) -> std::pair<Tensor, bool> {
-    if (current_trans == want_trans || !is_fp8_dtype(t->dtype())) {
+  // Mirror cublaslt_gemm.cu's CanonicalizeGemmInput for FP8 tensor scaling: depending on the
+  // architecture and the quantizer's usage modes, the appropriate data + scale_inv
+  // may live on the rowwise or columnwise side of the tensor.
+  //   * Hopper (!nvte_is_non_tn_fp8_gemm_supported): only TN FP8 GEMMs are supported, so an
+  //     FP8 input not already in TN orientation must be swapped to its columnwise (transposed)
+  //     view and the transpose flag flipped.
+  //   * Blackwell+ (nvte_is_non_tn_fp8_gemm_supported): any FP8 GEMM layout is supported, but
+  //     the quantizer usage may have only been set to columnwise. In that case, fall back to
+  //     the columnwise view and flip the transpose flag so the GEMM sees the matching data and
+  //     scale_inv pair.
+  // The original tensor is never modified; a new Tensor view aliases the columnwise pointers.
+  const bool fp8_needs_tn = !nvte_is_non_tn_fp8_gemm_supported();
+  auto canonicalize_fp8_input = [fp8_needs_tn](const Tensor* t, bool current_trans,
+                                               bool want_trans,
+                                               const char* side) -> std::pair<Tensor, bool> {
+    if (!is_fp8_dtype(t->dtype())) {
       return {*t, current_trans};
     }
-    NVTE_CHECK(t->has_columnwise_data(), "cuBLASMp FP8 GEMM requires ", side,
-               " columnwise data when transpose flag is not in TN orientation");
-    Tensor swapped = *t;
-    swapped.data = t->columnwise_data;
-    swapped.scale_inv = t->columnwise_scale_inv;
-    return {swapped, want_trans};
+    const bool hopper_tn_swap = fp8_needs_tn && current_trans != want_trans;
+    const bool blackwell_missing_rowwise = !fp8_needs_tn && !t->has_data();
+    if (!hopper_tn_swap && !blackwell_missing_rowwise) {
+      return {*t, current_trans};
+    }
+    NVTE_CHECK(t->has_columnwise_data() && is_fp8_dtype(t->columnwise_data.dtype),
+               "cuBLASMp FP8 GEMM input ", side, " is missing column-wise usage");
+    Tensor view;
+    view.scaling_mode = t->scaling_mode;
+    view.data = t->columnwise_data;
+    view.scale_inv = t->columnwise_scale_inv;
+    // Columnwise data is the transposed view of the original — flip the transpose flag.
+    return {view, !current_trans};
   };
 
-  auto [a_rerouted, transa_eff] = reroute_fp8_input(a, transa, /*want_trans=*/true, "A");
-  auto [b_rerouted, transb_eff] = reroute_fp8_input(b, transb, /*want_trans=*/false, "B");
-  const Tensor* a_used = is_fp8_dtype(a->dtype()) ? &a_rerouted : a;
-  const Tensor* b_used = is_fp8_dtype(b->dtype()) ? &b_rerouted : b;
+  auto [a_used, transa_eff] = canonicalize_fp8_input(a, transa, /*want_trans=*/true, "A");
+  auto [b_used, transb_eff] = canonicalize_fp8_input(b, transb, /*want_trans=*/false, "B");
   transa = transa_eff;
   transb = transb_eff;
 
   NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorInit(ctx->matmul_desc.get(), CUBLAS_COMPUTE_32F));
 
   int64_t ldd{};
-  init_matrices_fn(ctx, &ldd, m, n, k, a_used, b_used, d, transa, transb);
+  init_matrices_fn(ctx, &ldd, m, n, k, &a_used, &b_used, d, transa, transb);
 
   const cublasOperation_t trans_a = transa ? CUBLAS_OP_T : CUBLAS_OP_N;
   const cublasOperation_t trans_b = transb ? CUBLAS_OP_T : CUBLAS_OP_N;
@@ -316,23 +331,23 @@ void cublasmp_gemm(InitMatricesFn init_matrices_fn, NVTECommGemmCtx* ctx, NVTECo
       sizeof algo_attr));
 
   const cublasMpMatmulMatrixScale_t scale_mode = CUBLASMP_MATMUL_MATRIX_SCALE_SCALAR_FP32;
-  if (is_fp8_dtype(a_used->dtype())) {
-    NVTE_CHECK(a_used->scale_inv.dptr, "Scaling must be set for FP8 dtype");
+  if (is_fp8_dtype(a_used.dtype())) {
+    NVTE_CHECK(a_used.scale_inv.dptr, "Scaling must be set for FP8 dtype");
     NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorSetAttribute(
         ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_A_SCALE_MODE, &scale_mode,
         sizeof scale_mode));
     NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorSetAttribute(
         ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_A_SCALE_POINTER,
-        &a_used->scale_inv.dptr, sizeof(void*)));
+        &a_used.scale_inv.dptr, sizeof(void*)));
   }
-  if (is_fp8_dtype(b_used->dtype())) {
-    NVTE_CHECK(b_used->scale_inv.dptr, "Scaling must be set for FP8 dtype");
+  if (is_fp8_dtype(b_used.dtype())) {
+    NVTE_CHECK(b_used.scale_inv.dptr, "Scaling must be set for FP8 dtype");
     NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorSetAttribute(
         ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_B_SCALE_MODE, &scale_mode,
         sizeof scale_mode));
     NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorSetAttribute(
         ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_B_SCALE_POINTER,
-        &b_used->scale_inv.dptr, sizeof(void*)));
+        &b_used.scale_inv.dptr, sizeof(void*)));
   }
   if (is_fp8_dtype(d->dtype())) {
     NVTE_CHECK(d->scale.dptr, "Scaling must be set for FP8 dtype");
@@ -431,11 +446,11 @@ void cublasmp_gemm(InitMatricesFn init_matrices_fn, NVTECommGemmCtx* ctx, NVTECo
                   n,
                   k,
                   &alpha,
-                  a_used->data.dptr,
+                  a_used.data.dptr,
                   1,
                   1,
                   ctx->a_desc.get(),
-                  b_used->data.dptr,
+                  b_used.data.dptr,
                   1,
                   1,
                   ctx->b_desc.get(),

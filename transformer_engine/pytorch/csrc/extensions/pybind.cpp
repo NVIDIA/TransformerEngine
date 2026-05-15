@@ -702,4 +702,4 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def("get_buffer", &CommOverlapP2P::get_buffer, py::arg("local_chunk") = false,
            py::arg("shape") = std::nullopt)
       .def("get_communication_stream", &CommOverlapP2P::get_communication_stream);
-}
+}  // NOLINT(readability/fn_size)

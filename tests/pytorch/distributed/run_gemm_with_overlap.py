@@ -155,6 +155,24 @@ def _parse_args(argv=None, namespace=None):
         "--use-cublasmp", action="store_true", default=False, help="Use cuBLASMp backend."
     )
     parser.add_argument(
+        "--rtol",
+        type=float,
+        default=None,
+        help=(
+            "Override the relative-error tolerance used in the numerical check. "
+            "When unset, defaults to 0.125 for FP8/MXFP8 and 0.02 otherwise."
+        ),
+    )
+    parser.add_argument(
+        "--atol",
+        type=float,
+        default=None,
+        help=(
+            "Override the absolute-error tolerance used in the numerical check. "
+            "When unset, defaults to 0.0625 for FP8/MXFP8 and 0.002 otherwise."
+        ),
+    )
+    parser.add_argument(
         "-v", "--verbose", action="store_true", default=False, help="Verbose info messages."
     )
     opts = parser.parse_args(argv, namespace)
@@ -856,8 +874,8 @@ def _main(opts):
         m = torch.argmax(diff)
         abs_err = diff[m].item()
         rel_err = abs_err / max(abs(ref_out.flatten()[m].item()), 1e-5)
-        rtol = 0.02 if opts.quantization == "none" else 0.125
-        atol = 0.002 if opts.quantization == "none" else 0.0625
+        rtol = opts.rtol if opts.rtol is not None else (0.02 if opts.quantization == "none" else 0.125)
+        atol = opts.atol if opts.atol is not None else (0.002 if opts.quantization == "none" else 0.0625)
         if rel_err > rtol and abs_err > atol:
             numerics_failed = True
             numerics_info = (
