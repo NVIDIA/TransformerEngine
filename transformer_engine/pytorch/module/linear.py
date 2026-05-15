@@ -521,13 +521,13 @@ def _linear_forward_impl(
         nvtx_range_pop(f"{nvtx_label}.row_parallel_comm")
     else:
         out = gemm_out
-        
+
     # Restore the input's logical rank (e.g., (seq, batch, hidden)) on the output.
     # This is mainly to correct for cuBLASMp comm+GEMM operators that unconditionally
     # return a 2D output buffer that ends up incompatible with downstream consumers
     # (e.g. ``bias_dropout_add`` residual connections inside ``TransformerLayer``).
     out = out.view(-1, *inp.shape[1:-1], out_features)
-    
+
     # ------------------------------------------------------
     # Output tensor is ready to return...
     # ------------------------------------------------------
@@ -805,7 +805,7 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
                 # Overlap dgrad reduce-scatter with wgrad compute
                 ub_obj_wgrad = get_ub(bwd_args.ub_name + "_wgrad", bwd_args.fp8)
                 ub_type_wgrad = tex.CommOverlapType.RS
-                
+
         # --------------------------------------------------
         # Prepare grad output tensor
         # Note: Cast to expected dtype and perform tensor-parallel communication
@@ -1064,7 +1064,9 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
             if grad_output_quantizer is not None:
                 grad_output_quantizer.set_usage(rowwise=True, columnwise=False)
             grad_output, _ = gather_along_first_dim(
-                grad_output, bwd_args.tp_group, quantizer=grad_output_quantizer,
+                grad_output,
+                bwd_args.tp_group,
+                quantizer=grad_output_quantizer,
             )
 
         # --------------------------------------------------
