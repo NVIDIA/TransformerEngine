@@ -1,0 +1,8 @@
+torchao!=0.14.0
+transformer_engine[pytorch]
+transformers==5.8.0
+accelerate==1.13.0
+datasets==4.8.4
+safetensors==0.7.0
+huggingface_hub==1.10.1
+tokenizers==0.22.2
