@@ -139,9 +139,15 @@ def compare_fwd_bwd(
     y_ref, dW_ref, dx_ref = _run(ref_apply_fn)(ref_variables, input, output_grad)
     y_test, dW_test, dx_test = _run(test_apply_fn)(test_variables, input, output_grad)
 
-    np.testing.assert_allclose(y_test, y_ref, rtol=rtol, atol=atol, err_msg="forward output (y) mismatch")
-    np.testing.assert_allclose(dx_test, dx_ref, rtol=rtol, atol=atol, err_msg="input grad (dx) mismatch")
-    for ref_leaf, test_leaf in zip(jax.tree_util.tree_leaves(dW_ref), jax.tree_util.tree_leaves(dW_test)):
+    np.testing.assert_allclose(
+        y_test, y_ref, rtol=rtol, atol=atol, err_msg="forward output (y) mismatch"
+    )
+    np.testing.assert_allclose(
+        dx_test, dx_ref, rtol=rtol, atol=atol, err_msg="input grad (dx) mismatch"
+    )
+    for ref_leaf, test_leaf in zip(
+        jax.tree_util.tree_leaves(dW_ref), jax.tree_util.tree_leaves(dW_test)
+    ):
         np.testing.assert_allclose(
             test_leaf, ref_leaf, rtol=rtol_dW, atol=atol_dW, err_msg="params grad (dW) mismatch"
         )
