@@ -589,10 +589,13 @@ class PermuteWithMaskMapPrimitive(BasePrimitive):
             probs_stride_token = 0
             probs_stride_expert = 0
 
-        # Grid function equivalent: (num_tokens, cdiv(hidden_size, BLOCK_SIZE))
-        # Use minimum BLOCK_SIZE from autotune configs to ensure grid covers all elements
+        # We use BLOCK_SIZE in the grid calculation to ensure the grid is the
+        # proper size. If the grid size is an overestimate it can significantly
+        # hurt performance.
+        def grid(meta):
+            return (num_tokens, triton.cdiv(hidden_size, meta["BLOCK_SIZE"]))
+
         block_size = _get_min_block_size(_permute_kernel)
-        grid = (num_tokens, triton.cdiv(hidden_size, block_size))
 
         # Use input_output_aliases to alias pre-zeroed buffers to outputs.
         # This ensures padding positions contain zeros since the kernel only writes valid positions.
@@ -997,9 +1000,13 @@ class UnpermuteWithMaskMapPrimitive(BasePrimitive):
         unpermuted_probs_stride_token = num_experts
         unpermuted_probs_stride_expert = 1
 
-        # Grid - use minimum BLOCK_SIZE from autotune configs
+        # We use BLOCK_SIZE in the grid calculation to ensure the grid is the
+        # proper size. If the grid size is an overestimate it can significantly
+        # hurt performance.
+        def grid(meta):
+            return (num_tokens, triton.cdiv(hidden_size, meta["BLOCK_SIZE"]))
+
         block_size = _get_min_block_size(_unpermute_kernel)
-        grid = (num_tokens, triton.cdiv(hidden_size, block_size))
 
         return triton_call_lowering(
             ctx,
@@ -1720,9 +1727,13 @@ class SortChunksByMapPrimitive(BasePrimitive):
         probs_stride_token = 1
         permuted_probs_stride_token = 1
 
-        # Grid - use minimum BLOCK_SIZE from autotune configs
+        # We use BLOCK_SIZE in the grid calculation to ensure the grid is the
+        # proper size. If the grid size is an overestimate it can significantly
+        # hurt performance.
+        def grid(meta):
+            return (num_tokens, triton.cdiv(hidden_size, meta["BLOCK_SIZE"]))
+
         block_size = _get_min_block_size(_sort_chunks_by_map_kernel)
-        grid = (num_tokens, triton.cdiv(hidden_size, block_size))
 
         # Declare input_output_aliases so XLA knows output slot 0 is claimed by
         # input 3 (output_buf). This prevents XLA from implicitly aliasing any
