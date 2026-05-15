@@ -263,7 +263,7 @@ struct Tensor {
    *  different shape, e.g. the column-wise data for some tensor
    *  formats are transposed.
    */
-  std::vector<size_t> shape() const {
+  NVTEShape compute_shape() const {
     // Each tensor format interprets its data differently
     switch (scaling_mode) {
       case NVTE_DELAYED_TENSOR_SCALING:
@@ -273,29 +273,45 @@ struct Tensor {
         // Row-wise data shape matches tensor logical shape,
         // column-wise data shape is transpose of logical shape
         if (!has_data() && has_columnwise_data()) {
-          std::vector<size_t> ret;
+          NVTEShape ret;
+          ret.ndim = 1;
+          ret.data[0] = 0;
           if (!columnwise_data.shape.empty()) {
-            ret.reserve(columnwise_data.shape.size());
-            for (size_t i = 1; i < columnwise_data.shape.size(); i++) {
-              ret.push_back(columnwise_data.shape[i]);
+            NVTE_CHECK(columnwise_data.shape.size() <= sizeof(ret.data) / sizeof(ret.data[0]),
+                       "Too many dims for NVTEShape (requested: ", columnwise_data.shape.size(),
+                       ", max: ", sizeof(ret.data) / sizeof(ret.data[0]), ")");
+            ret.ndim = columnwise_data.shape.size();
+            for (size_t i = 1; i < ret.ndim; i++) {
+              ret.data[i - 1] = columnwise_data.shape[i];
             }
-            ret.push_back(columnwise_data.shape.front());
+            ret.data[ret.ndim - 1] = columnwise_data.shape.front();
           }
           return ret;
         }
-        return data.shape;
+        return nvte_make_shape(data.shape.data(), data.shape.size());
       }
       case NVTE_MXFP8_1D_SCALING: {
         // Row-wise and column-wise data shapes both match tensor
         // logical shape
         if (!has_data() && has_columnwise_data()) {
-          return columnwise_data.shape;
+          return nvte_make_shape(columnwise_data.shape.data(), columnwise_data.shape.size());
         }
-        return data.shape;
+        return nvte_make_shape(data.shape.data(), data.shape.size());
       }
       default:
         NVTE_ERROR("Cannot parse tensor shape with scaling mode \"", to_string(scaling_mode), "\"");
     }
+  }
+
+  /*! Tensor dimensions.
+   *
+   *  This is the logical tensor shape. The underlying data may have a
+   *  different shape, e.g. the column-wise data for some tensor
+   *  formats are transposed.
+   */
+  std::vector<size_t> shape() const {
+    const NVTEShape s = compute_shape();
+    return std::vector<size_t>(s.data, s.data + s.ndim);
   }
 
   /*! Matrix height after tensor is flattened to 2D
@@ -304,11 +320,11 @@ struct Tensor {
    * as a (D1*D2*...*D(n-1), Dn) matrix.
    */
   size_t flat_first_dim() const {
-    const auto &full_shape = shape();
+    const NVTEShape s = compute_shape();
     size_t ret = 1;
-    if (!full_shape.empty()) {
-      for (size_t i = 0; i < full_shape.size() - 1; i++) {
-        ret *= full_shape[i];
+    if (s.ndim > 0) {
+      for (size_t i = 0; i < s.ndim - 1; i++) {
+        ret *= s.data[i];
       }
     }
     return ret;
@@ -320,11 +336,11 @@ struct Tensor {
    * as a (D1*D2*...*D(n-1), Dn) matrix.
    */
   size_t flat_last_dim() const {
-    const auto &full_shape = shape();
-    if (full_shape.empty()) {
+    const NVTEShape s = compute_shape();
+    if (s.ndim == 0) {
       return 1;
     } else {
-      return full_shape.back();
+      return s.data[s.ndim - 1];
     }
   }
 };
