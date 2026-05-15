@@ -436,8 +436,18 @@ void group_quantize(const GroupedTensor *input, const Tensor *noop, GroupedTenso
                "first-dimension grouped tensors.");
   }
 
-  const size_t first_logical_dim = input->logical_shape.data[0];
-  const size_t last_logical_dim = input->logical_shape.data[1];
+  NVTE_CHECK(input->logical_shape.data[1] == output->logical_shape.data[1],
+             "Grouped FP8 tensor-scaling input and output must have the same last dimension.");
+  NVTE_CHECK(output->logical_shape.data[0] <= input->logical_shape.data[0],
+             "Grouped FP8 tensor-scaling output first dimension must not exceed input first "
+             "dimension.");
+
+  // FP8 grouped outputs may carry an active logical shape while their backing buffers remain
+  // overallocated. Size the launch from the output shape so metadata-backed groups do not launch
+  // over unused tail rows. When host-side active offsets are unavailable, the output shape remains
+  // the allocated fallback shape.
+  const size_t first_logical_dim = output->logical_shape.data[0];
+  const size_t last_logical_dim = output->logical_shape.data[1];
   const size_t num_tensors = input->num_tensors;
   if (first_logical_dim == 0 || last_logical_dim == 0) {
     return;
