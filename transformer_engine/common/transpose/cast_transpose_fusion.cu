@@ -179,8 +179,7 @@ inline __device__ void cast_and_transpose_regs(const CVec (&in)[nvec_out],
 
 void populate_cast_transpose_dbias_workspace_config(const Tensor &cast_output, /*cast*/
                                                     Tensor *workspace, const int nvec_out) {
-  const size_t row_length = cast_output.flat_last_dim();
-  const size_t num_rows = cast_output.flat_first_dim();
+  const auto [num_rows, row_length] = cast_output.flat_2d_dims();
 
   const size_t tile_size_y = (nvec_out * THREADS_PER_WARP);
   NVTE_CHECK(num_rows % nvec_out == 0, "Unsupported shape.");

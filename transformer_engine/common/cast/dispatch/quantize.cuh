@@ -97,8 +97,7 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
       CheckOutputTensor(*output_tensor, "output", false);
 
       // Choose kernel
-      int32_t rows = input_tensor->flat_first_dim();
-      int32_t cols = input_tensor->flat_last_dim();
+      const auto [rows, cols] = input_tensor->flat_2d_dims();
       auto dtype = input_tensor->dtype();
       const bool row_scaled_nvfp4 = output_tensor->row_scaled_nvfp4;
       if (row_scaled_nvfp4) {
@@ -246,8 +245,7 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
       CheckOutputTensor(*output_tensor, "output", false);
 
       // Choose kernel
-      int32_t rows = grad_tensor->flat_first_dim();
-      int32_t cols = grad_tensor->flat_last_dim();
+      const auto [rows, cols] = grad_tensor->flat_2d_dims();
       auto dtype = grad_tensor->dtype();
       NVTE_CHECK(!output_tensor->row_scaled_nvfp4,
                  "Backward NVFP4 quantization does not support row-scaled outputs.");
@@ -368,8 +366,7 @@ void group_quantize_fwd_host_aware_helper(const NVTETensor input, NVTETensor *ou
       // output list here is allowed to have empty tensor
 
       // Choose kernel
-      int32_t rows = input_tensor->flat_first_dim();
-      int32_t cols = input_tensor->flat_last_dim();
+      const auto [rows, cols] = input_tensor->flat_2d_dims();
       auto dtype = input_tensor->dtype();
 
       NVTE_CHECK(!quant_config_cpp.nvfp4_2d_quantization,

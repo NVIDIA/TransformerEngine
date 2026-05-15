@@ -121,8 +121,7 @@ inline void compute_rowwise_amax(const Tensor &input, const Tensor *noop, Tensor
 #if FP4_TYPE_SUPPORTED
   using namespace rowwise_amax_kernel;
 
-  const size_t rows = input.flat_first_dim();
-  const size_t cols = input.flat_last_dim();
+  const auto [rows, cols] = input.flat_2d_dims();
   NVTE_CHECK(cols % ROWWISE_AMAX_SF_VEC_SIZE == 0,
              "Row-scaled NVFP4 quantization requires last dim divisible by ",
              ROWWISE_AMAX_SF_VEC_SIZE, ".");
@@ -1359,8 +1358,7 @@ void quantize_transpose(const Tensor &input, const Tensor *noop, Tensor *output,
                "Transposed scaling tensor must be allocated");
   }
 
-  const size_t rows = input.flat_first_dim();
-  const size_t cols = input.flat_last_dim();
+  const auto [rows, cols] = input.flat_2d_dims();
 
   NVTE_CHECK(rows % 32 == 0,
              "Number of tensor rows must be a multiple of 32");  // 16B alignment for TMA

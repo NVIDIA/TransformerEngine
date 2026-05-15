@@ -93,12 +93,13 @@ void CheckScaleTensorShape(const Tensor &t, const std::string &name) {
     if (t.scaling_mode == NVTE_MXFP8_1D_SCALING) {
       // Need (4, 128) alignment even for e8 scaling factor
       constexpr std::array<size_t, 2> block_alignment{128ul, 4ul};
+      const auto [first_dim, last_dim] = t.flat_2d_dims();
 
       if (t.has_data()) {
         constexpr std::array<size_t, 2> block_shape{1, 32};
         const std::array<size_t, 2> expected{
-          DIVUP_TO_MULTIPLE(DIVUP(t.flat_first_dim(), block_shape[0]), block_alignment[0]),
-          DIVUP_TO_MULTIPLE(DIVUP(t.flat_last_dim(), block_shape[1]), block_alignment[1])
+          DIVUP_TO_MULTIPLE(DIVUP(first_dim, block_shape[0]), block_alignment[0]),
+          DIVUP_TO_MULTIPLE(DIVUP(last_dim, block_shape[1]), block_alignment[1])
         };
         NVTE_CHECK(t.scale_inv.shape.size() == 2
                    && t.scale_inv.shape[0] == expected[0]
@@ -110,8 +111,8 @@ void CheckScaleTensorShape(const Tensor &t, const std::string &name) {
       if (t.has_columnwise_data()) {
         constexpr std::array<size_t, 2> block_shape{32, 1};
         const std::array<size_t, 2> expected{
-          DIVUP_TO_MULTIPLE(DIVUP(t.flat_first_dim(), block_shape[0]), block_alignment[1]),
-          DIVUP_TO_MULTIPLE(DIVUP(t.flat_last_dim(), block_shape[1]), block_alignment[0])
+          DIVUP_TO_MULTIPLE(DIVUP(first_dim, block_shape[0]), block_alignment[1]),
+          DIVUP_TO_MULTIPLE(DIVUP(last_dim, block_shape[1]), block_alignment[0])
         };
         NVTE_CHECK(t.columnwise_scale_inv.shape.size() == 2
                    && t.columnwise_scale_inv.shape[0] == expected[0]
@@ -121,10 +122,14 @@ void CheckScaleTensorShape(const Tensor &t, const std::string &name) {
                    ", got ", t.scale_inv.shape, ")");
       }
     } else if (t.scaling_mode == NVTE_NVFP4_1D_SCALING) {
+      const auto [first_dim, last_dim] = t.flat_2d_dims();
+
       if (t.has_data()) {
+        constexpr std::array<size_t, 2> block_shape{1, 16};
+        constexpr std::array<size_t, 2> block_alignment{128, 4};
         const std::array<size_t, 2> expected{
-          DIVUP_TO_MULTIPLE(t.flat_first_dim(), 128),
-          DIVUP_TO_MULTIPLE(DIVUP(t.flat_last_dim(), 16lu), 4)
+          DIVUP_TO_MULTIPLE(DIVUP(first_dim, block_shape[0]), block_alignment[0]),
+          DIVUP_TO_MULTIPLE(DIVUP(last_dim, block_shape[1]), block_alignment[1])
         };
         NVTE_CHECK(t.scale_inv.shape.size() == 2
                    && t.scale_inv.shape[0] == expected[0]
@@ -134,9 +139,11 @@ void CheckScaleTensorShape(const Tensor &t, const std::string &name) {
                    ", got ", t.scale_inv.shape, ")");
       }
       if (t.has_columnwise_data()) {
+        constexpr std::array<size_t, 2> block_shape{1, 16};
+        constexpr std::array<size_t, 2> block_alignment{128, 4};
         const std::array<size_t, 2> expected{
-          DIVUP_TO_MULTIPLE(t.flat_last_dim(), 128),
-          DIVUP_TO_MULTIPLE(DIVUP(t.flat_first_dim(), 16lu), 4)
+          DIVUP_TO_MULTIPLE(DIVUP(last_dim, block_shape[0]), block_alignment[0]),
+          DIVUP_TO_MULTIPLE(DIVUP(first_dim, block_shape[1]), block_alignment[1])
         };
         NVTE_CHECK(t.columnwise_scale_inv.shape.size() == 2
                    && t.columnwise_scale_inv.shape[0] == expected[0]

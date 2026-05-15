@@ -1538,17 +1538,18 @@ void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
       const int pos = kernel_args.num_tensors;
       kernel_args.m_list[pos] = m;
       kernel_args.k_list[pos] = k;
+      const auto [first_dim, last_dim] = input[i]->flat_2d_dims();
       if (!all_nvfp4 || all_has_data) {
         int block_scale_size = all_nvfp4 ? NVFP4_BLOCK_SIZE : MXFP8_BLOCK_SIZE;
         kernel_args.input_list[pos] = const_cast<void*>(input[i]->scale_inv.dptr);
         kernel_args.output_list[pos] = output[i]->scale_inv.dptr;
-        kernel_args.original_m_list[pos] = input[i]->flat_first_dim();
-        kernel_args.original_k_list[pos] = input[i]->flat_last_dim() / block_scale_size;
+        kernel_args.original_m_list[pos] = first_dim;
+        kernel_args.original_k_list[pos] = last_dim / block_scale_size;
       } else {
         kernel_args.input_list[pos] = const_cast<void*>(input[i]->columnwise_scale_inv.dptr);
         kernel_args.output_list[pos] = output[i]->columnwise_scale_inv.dptr;
-        kernel_args.original_m_list[pos] = input[i]->flat_last_dim();
-        kernel_args.original_k_list[pos] = input[i]->flat_first_dim() / NVFP4_BLOCK_SIZE;
+        kernel_args.original_m_list[pos] = last_dim;
+        kernel_args.original_k_list[pos] = first_dim / NVFP4_BLOCK_SIZE;
       }
       kernel_args.num_tensors++;
     }
@@ -1607,8 +1608,9 @@ void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
       kernel_args.output_list[pos] = output[i]->columnwise_scale_inv.dptr;
       kernel_args.m_list[pos] = m;
       kernel_args.k_list[pos] = k;
-      kernel_args.original_m_list[pos] = input[i]->flat_last_dim();
-      kernel_args.original_k_list[pos] = input[i]->flat_first_dim() / MXFP8_BLOCK_SIZE;
+      const auto [first_dim, last_dim] = input[i]->flat_2d_dims();
+      kernel_args.original_m_list[pos] = last_dim;
+      kernel_args.original_k_list[pos] = first_dim / MXFP8_BLOCK_SIZE;
       kernel_args.num_tensors++;
     }
     // Launch the remaining tensors
@@ -1956,6 +1958,8 @@ void nvte_multi_tensor_swizzle_scaling_factors(const NVTETensor* inputs, NVTETen
   using namespace transformer_engine;
   NVTE_CHECK(num_tensors > 0, "Number of tensors should be greater than 0.");
   std::vector<Tensor*> input_list, output_list;
+  input_list.reserve(num_tensors);
+  output_list.reserve(num_tensors);
   for (size_t i = 0; i < num_tensors; i++) {
     input_list.push_back(convertNVTETensorCheck(inputs[i]));
     output_list.push_back(convertNVTETensorCheck(outputs[i]));
