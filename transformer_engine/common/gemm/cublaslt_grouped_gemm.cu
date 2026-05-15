@@ -313,8 +313,7 @@ inline void check_fp4_output_compat(transformer_engine::DType a_dtype,
                                     transformer_engine::DType d_dtype) {
   if (!is_fp4_dtype(a_dtype) && !is_fp4_dtype(b_dtype)) return;
   NVTE_CHECK(!is_fp4_dtype(d_dtype), "FP4 GEMM output is not supported!");
-  NVTE_CHECK(get_cuda_dtype(d_dtype) != CUDA_R_16F,
-             "FP4 GEMM does not support FP16 output!");
+  NVTE_CHECK(get_cuda_dtype(d_dtype) != CUDA_R_16F, "FP4 GEMM does not support FP16 output!");
 }
 
 inline size_t grouped_gemm_setup_workspace_size(size_t num_tensors) {
@@ -529,8 +528,7 @@ inline MultiTensorGroupGemmOutputArgs build_grouped_gemm_multi_out_args(
 // passed to the grouped GEMM kernel. Use-case: A --> List of Expert weights
 inline MultiTensorGroupGemmInputArgs build_grouped_gemm_multi_inputA_args(
     const NVTETensor *tensor_list, size_t list_size, bool use_rowwise, bool is_fp8,
-    int64_t *avg_first_dim, int64_t *avg_last_dim, const char *name,
-    bool needs_scale_inv = false) {
+    int64_t *avg_first_dim, int64_t *avg_last_dim, const char *name, bool needs_scale_inv = false) {
   using namespace transformer_engine;
   MultiTensorGroupGemmInputArgs args{};
   *avg_first_dim = 0;
@@ -548,8 +546,7 @@ inline MultiTensorGroupGemmInputArgs build_grouped_gemm_multi_inputA_args(
     NVTE_CHECK(data.has_data(), "Grouped GEMM: ", name, "_list tensor ", i,
                " is missing required data.");
     args.data_ptrs[i] = data.dptr;
-    NVTE_CHECK(data.shape.size() == 2, "Grouped GEMM: ", name, "_list tensor ", i,
-               " must be 2D.");
+    NVTE_CHECK(data.shape.size() == 2, "Grouped GEMM: ", name, "_list tensor ", i, " must be 2D.");
     // Use physical buffer shape (matches what cuBLAS reads); for recipes whose
     // columnwise data is transposed-rowwise storage (NVFP4, FP8 tensor/block scaling),
     // data.shape is already pre-swapped relative to logical.
@@ -1358,14 +1355,12 @@ __global__ void setup_grouped_gemm_kernel(
             meta, idx, [](int64_t f, int64_t l) { return padded_nvfp4_scale_inv_bytes(f, l); });
         break;
       case NVTE_BLOCK_SCALING_1D:
-        float_offset = compute_grouped_scale_inv_offset(meta, idx, [](int64_t f, int64_t l) {
-          return padded_block_1d_scale_inv_floats(f, l);
-        });
+        float_offset = compute_grouped_scale_inv_offset(
+            meta, idx, [](int64_t f, int64_t l) { return padded_block_1d_scale_inv_floats(f, l); });
         break;
       case NVTE_BLOCK_SCALING_2D:
-        float_offset = compute_grouped_scale_inv_offset(meta, idx, [](int64_t f, int64_t l) {
-          return padded_block_2d_scale_inv_floats(f, l);
-        });
+        float_offset = compute_grouped_scale_inv_offset(
+            meta, idx, [](int64_t f, int64_t l) { return padded_block_2d_scale_inv_floats(f, l); });
         break;
       default:
         float_offset = static_cast<int64_t>(idx);
