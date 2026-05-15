@@ -363,12 +363,12 @@ class MXFP8BlockScaling(Recipe):
                 If set to `True`, 2D block scaling is used for weight tensors.
     """
 
-    enable_2d_quantization: bool = os.getenv("NVTE_MXFP8_ENABLE_2D_QUANTIZATION", "0") == "1"
     margin: int = 0
     fp8_format: Format = Format.E4M3
     fp8_dpa: bool = False
     fp8_mha: bool = False
     backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
+    enable_2d_quantization: bool = os.getenv("NVTE_MXFP8_ENABLE_2D_QUANTIZATION", "0") == "1"
 
     def __post_init__(self) -> None:
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
@@ -381,8 +381,8 @@ class MXFP8BlockScaling(Recipe):
             f"recipe_type={self.__class__.__name__}, "
             f"margin={self.margin}, "
             f"format={str(self.fp8_format).split('.')[1]}, "
-            f"enable_2d_quantization={self.enable_2d_quantization}, "
-            f"backward_override={self.backward_override}"
+            f"backward_override={self.backward_override}, "
+            f"enable_2d_quantization={self.enable_2d_quantization}"
         )
 
 

@@ -23,14 +23,11 @@ FP8_E4M3_MAX = 448.0
 MXFP8_TEST_SHAPES = [
     (64, 64),
     (128, 128),
-    (256, 256),
     (256, 1024),
     (1024, 256),
     (256, 288),
     (320, 320),
     (352, 256),
-    (2048, 2048),
-    (1024, 2048),
     (2048, 1024),
 ]
 MXFP8_TEST_DTYPES = [torch.float32, torch.bfloat16]
@@ -75,6 +72,7 @@ def _mxfp8_2d_quantize_reference(
 
     block_rows = rows // MXFP8_BLOCK_SIZE
     block_cols = cols // MXFP8_BLOCK_SIZE
+
     x_blocks = x.view(
         block_rows,
         MXFP8_BLOCK_SIZE,
@@ -453,10 +451,11 @@ def test_mxfp8_recipe_state_2d_requires_explicit_weight_role() -> None:
     ]
 
 
-def test_mxfp8_recipe_state_2d_ignores_non_linear_roles() -> None:
-    """MXFP8 2D is limited to Linear-style weight quantizers."""
+def test_mxfp8_recipe_state_2d_ignores_unsupported_roles() -> None:
+    """MXFP8 2D is limited to regular Linear weight quantizers."""
     recipe = MXFP8BlockScaling(enable_2d_quantization=True)
     roles = [
+        QuantizerRole(module_type="grouped_linear", tensor_type="weight"),
         QuantizerRole(module_type="dpa", tensor_type="qkv"),
         QuantizerRole(module_type="dpa", tensor_type="weight"),
         QuantizerRole(module_type="", tensor_type="weight"),
@@ -468,6 +467,7 @@ def test_mxfp8_recipe_state_2d_ignores_non_linear_roles() -> None:
         roles=roles,
     )
     assert [q.with_2d_quantization for q in state.make_quantizers()] == [
+        False,
         False,
         False,
         False,

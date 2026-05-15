@@ -265,10 +265,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       }
 
       if constexpr (kIs2DBlockScaling) {
-#pragma unroll
-        for (int i = 16; i > 0; i /= 2) {
-          thread_amax = fmaxf(thread_amax, __shfl_xor_sync(0xffffffff, thread_amax, i));
-        }
+        thread_amax = warp_reduce_max_broadcast(thread_amax);
       }
 
       // 2. Compute E8M0 scaling factor
@@ -424,18 +421,26 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       // 2. Compute E8M0 scaling factor
       e8m0_t biased_exponent;
       if constexpr (kIs2DBlockScaling) {
+        using AMax2DType = std::conditional_t<
+            NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>), IType, float>;
         __shared__ e8m0_t block_scales_2d[THREADS_X];
-        __shared__ float block_amax_2d[THREADS_X * THREADS_Y];
-        block_amax_2d[tid_X_rowwise * THREADS_Y + tid_Y_rowwise] = thread_amax;
+        __shared__ AMax2DType block_amax_2d[THREADS_X * THREADS_Y];
+        block_amax_2d[tid_X_rowwise * THREADS_Y + tid_Y_rowwise] =
+            static_cast<AMax2DType>(thread_amax);
         __syncthreads();
         if (tid_Y_rowwise == 0) {
-          float amax_2d = 0.0f;
+          AMax2DType amax_2d = static_cast<AMax2DType>(0.0f);
 #pragma unroll
           for (int i = 0; i < THREADS_Y; ++i) {
-            amax_2d = fmaxf(amax_2d, block_amax_2d[tid_X_rowwise * THREADS_Y + i]);
+            if constexpr (std::is_same_v<AMax2DType, float>) {
+              amax_2d = fmaxf(amax_2d, block_amax_2d[tid_X_rowwise * THREADS_Y + i]);
+            } else {
+              amax_2d = __hmax(amax_2d, block_amax_2d[tid_X_rowwise * THREADS_Y + i]);
+            }
           }
           block_scales_2d[tid_X_rowwise] =
-              ptx::float_to_e8m0(amax_2d * Quantized_Limits<OType>::max_norm_rcp);
+              ptx::float_to_e8m0(static_cast<float>(amax_2d) *
+                                  Quantized_Limits<OType>::max_norm_rcp);
         }
         __syncthreads();
         biased_exponent = block_scales_2d[tid_X_rowwise];
