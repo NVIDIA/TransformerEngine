@@ -712,10 +712,15 @@ def get_attention_backend(
             score_mod_unsupported_reasons.append("KV caching is enabled")
         if context_parallel:
             score_mod_unsupported_reasons.append("context parallelism is enabled")
-        if qkv_format == "thd" or q_format not in ["sbhd", "bshd"] or kv_format not in [
-            "sbhd",
-            "bshd",
-        ]:
+        if (
+            qkv_format == "thd"
+            or q_format not in ["sbhd", "bshd"]
+            or kv_format
+            not in [
+                "sbhd",
+                "bshd",
+            ]
+        ):
             score_mod_unsupported_reasons.append(
                 f"unsupported QKV format: q_format = {q_format}, kv_format = {kv_format}"
             )
@@ -1357,10 +1362,7 @@ def get_attention_backend(
             logger.debug("Disabling FusedAttention as no backend supports the provided input")
             use_fused_attention = False
             fused_attention_backend = None
-        elif (
-            score_mod
-            and fused_attention_backend != FusedAttnBackend["F16_arbitrary_seqlen"]
-        ):
+        elif score_mod and fused_attention_backend != FusedAttnBackend["F16_arbitrary_seqlen"]:
             logger.debug(
                 "Disabling FusedAttention for score_mod because sub-backend %s is not "
                 "F16/BF16 arbitrary-seqlen",

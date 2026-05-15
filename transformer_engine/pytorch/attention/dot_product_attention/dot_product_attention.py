@@ -1434,9 +1434,7 @@ class DotProductAttention(TransformerEngineBaseModule):
 
             if score_mod is None:
                 assert score_mod_bprop is None, "score_mod_bprop requires score_mod!"
-                assert (
-                    score_mod_tensors is None
-                ), "score_mod_tensors requires score_mod!"
+                assert score_mod_tensors is None, "score_mod_tensors requires score_mod!"
                 assert (
                     score_mod_bprop_tensors is None
                 ), "score_mod_bprop_tensors requires score_mod!"
@@ -1457,28 +1455,18 @@ class DotProductAttention(TransformerEngineBaseModule):
                     and type(key_layer) is torch.Tensor
                     and type(value_layer) is torch.Tensor
                 ), "score_mod only supports unquantized torch.Tensor Q, K and V inputs!"
-                assert (
-                    not self.fp8
-                ), "score_mod is not supported with FP8 DotProductAttention!"
+                assert not self.fp8, "score_mod is not supported with FP8 DotProductAttention!"
                 assert not fp8_output, "score_mod is not supported with fp8_output!"
-                assert (
-                    not context_parallel
-                ), "score_mod is not supported with context parallelism!"
-                assert (
-                    qkv_format != "thd"
-                ), "score_mod is not supported with qkv_format='thd'!"
+                assert not context_parallel, "score_mod is not supported with context parallelism!"
+                assert qkv_format != "thd", "score_mod is not supported with qkv_format='thd'!"
                 assert (
                     not user_supplied_seqlens
                 ), "score_mod is mutually exclusive with explicit sequence length metadata!"
-                assert (
-                    not pad_between_seqs
-                ), "score_mod is not supported with pad_between_seqs!"
+                assert not pad_between_seqs, "score_mod is not supported with pad_between_seqs!"
                 assert (
                     attention_mask is None
                 ), "score_mod is mutually exclusive with attention_mask!"
-                assert (
-                    attn_mask_type == "no_mask"
-                ), "score_mod requires attn_mask_type='no_mask'!"
+                assert attn_mask_type == "no_mask", "score_mod requires attn_mask_type='no_mask'!"
                 assert window_size is None or window_size == (
                     -1,
                     -1,
@@ -1508,9 +1496,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     "bshd",
                 ], "score_mod only supports SBHD/BSHD QKV formats!"
                 if score_mod_tensors is not None:
-                    assert isinstance(
-                        score_mod_tensors, dict
-                    ), "score_mod_tensors must be a dict!"
+                    assert isinstance(score_mod_tensors, dict), "score_mod_tensors must be a dict!"
                     assert all(
                         isinstance(k, str) and isinstance(v, torch.Tensor)
                         for k, v in score_mod_tensors.items()

@@ -106,9 +106,13 @@ def _import_cudnn_frontend():
     """Import the vendored cuDNN frontend if built, otherwise use the installed package."""
     cudnn_frontend_path = str(_CUDNN_FRONTEND_PYTHON_PATH)
     cudnn_frontend_package = _CUDNN_FRONTEND_PYTHON_PATH / "cudnn"
-    if any(cudnn_frontend_package.glob("_compiled_module*")) and cudnn_frontend_path not in sys.path:
+    if (
+        any(cudnn_frontend_package.glob("_compiled_module*"))
+        and cudnn_frontend_path not in sys.path
+    ):
         sys.path.insert(0, cudnn_frontend_path)
     return importlib.import_module("cudnn")
+
 
 # Try to import Flash Attention v2
 try:
@@ -1278,9 +1282,7 @@ def _bhsd_dim_stride(
             (tensor.shape[0], tensor.shape[2], tensor.shape[1], tensor.shape[3]),
             (tensor.stride(0), tensor.stride(2), tensor.stride(1), tensor.stride(3)),
         )
-    raise ValueError(
-        f"score_mod only supports SBHD/BSHD tensor formats, got {tensor_format}."
-    )
+    raise ValueError(f"score_mod only supports SBHD/BSHD tensor formats, got {tensor_format}.")
 
 
 def _bhsd_graph_tensor(graph, tensor: torch.Tensor, tensor_format: str):
@@ -1588,10 +1590,7 @@ def _cudnn_score_mod_bwd_cache_key(
     """Cache key for score_mod bprop execution plans."""
     score_mod_key = _score_mod_callback_cache_key(score_mod)
     score_mod_bprop_key = _score_mod_callback_cache_key(score_mod_bprop)
-    if (
-        score_mod_key is _SCORE_MOD_UNCACHEABLE
-        or score_mod_bprop_key is _SCORE_MOD_UNCACHEABLE
-    ):
+    if score_mod_key is _SCORE_MOD_UNCACHEABLE or score_mod_bprop_key is _SCORE_MOD_UNCACHEABLE:
         return None
     return (
         "bwd",
@@ -2874,9 +2873,7 @@ class FusedAttention(torch.nn.Module):
                         )
 
         if context_parallel:
-            assert (
-                score_mod is None
-            ), "score_mod is not supported with context parallelism!"
+            assert score_mod is None, "score_mod is not supported with context parallelism!"
             assert (
                 score_mod_bprop is None
             ), "score_mod_bprop is not supported with context parallelism!"
@@ -2930,13 +2927,11 @@ class FusedAttention(torch.nn.Module):
                     fp8_output=fp8_output,
                     layer_number=self.layer_number,
                     return_max_logit=self.return_max_logit,
-            )
+                )
         elif score_mod is not None:
             assert not fp8, "score_mod is not supported with FP8 FusedAttention!"
             assert not fp8_output, "score_mod is not supported with fp8_output!"
-            assert (
-                not self.return_max_logit
-            ), "score_mod is not supported with return_max_logit!"
+            assert not self.return_max_logit, "score_mod is not supported with return_max_logit!"
             assert (
                 type(query_layer) is torch.Tensor
                 and type(key_layer) is torch.Tensor
