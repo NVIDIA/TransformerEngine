@@ -108,7 +108,7 @@ __device__ __forceinline__ void fast_scaled_fp8_cvt_4(const IType *input, OType 
 }
 
 template <bool IS_ACT, typename ParamOP, float (*OP)(float, const ParamOP &), typename IType,
-          typename OType, size_t NUM_ELTS>
+          typename OType, uint32_t NUM_ELTS>
 __device__ __forceinline__ void scaled_fp8_cvt_vec(const Vec<IType, NUM_ELTS> &input,
                                                    Vec<OType, NUM_ELTS> &output,
                                                    const size_t valid_cols, const float scale) {
