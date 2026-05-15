@@ -112,12 +112,48 @@ def _run_one(req: dict, rank: int) -> tuple[bool, str]:
     return ok, err
 
 
+def _create_cp_comm_groups(rank: int, world_size: int) -> tuple:
+    """Pre-create the CP collective groups for this pool.
+
+    world_size and the rank set are constant for the lifetime of one pool, so
+    the world group and the a2a+p2p sub-groups are deterministic. Creating
+    them once here and reusing them across every case eliminates ~50-100 ms
+    of NCCL setup per case (cyanguwa's review feedback on PR #2993).
+
+    Returns ``(world_group, a2a_p2p_sub_groups)``. ``a2a_p2p_sub_groups`` is
+    empty when world_size is too small to support a2a+p2p (needs an even
+    world_size ≥ 4); cases with cp_comm_type='a2a+p2p' wouldn't be routed to
+    such a pool anyway.
+    """
+    world_group = dist.new_group(range(world_size), backend="nccl")
+    sub_groups: list = []
+    if world_size >= 4 and world_size % 2 == 0:
+        # Mirror the layout in run_attention_with_cp.py: cp_size/2 pairs along
+        # axis 0, plus 2 stride-2 groups along axis 1.
+        cp_comm_sub_ranks = [range(i * 2, (i + 1) * 2) for i in range(world_size // 2)]
+        cp_comm_sub_ranks += [range(i, world_size, 2) for i in range(2)]
+        for sub_ranks in cp_comm_sub_ranks:
+            sub_group = dist.new_group(sub_ranks, backend="nccl")
+            if rank in sub_ranks:
+                sub_groups.append(sub_group)
+    return world_group, sub_groups
+
+
 def main() -> None:
     rank = int(os.environ["RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
     torch.cuda.set_device(rank % torch.cuda.device_count())
     dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
     os.environ["NVTE_CP_POOL_PG"] = "1"
+
+    # Stash pool-shared CP groups on the run_attention_with_cp module so
+    # run_dpa_with_cp can read them per case. Imported here (after the env var
+    # is set) to keep import-time side effects minimal.
+    import run_attention_with_cp as _rac
+
+    _rac._pool_cp_comm_group, _rac._pool_cp_comm_sub_groups = _create_cp_comm_groups(
+        rank, world_size
+    )
 
     try:
         while True:
@@ -140,6 +176,21 @@ def main() -> None:
                     first_err = next(m for o, m in gathered if not o)
                     _send_response(rank, {"ok": False, "error": first_err})
     finally:
+        # Tear down pool-shared CP groups before the main PG (NCCL requires
+        # sub-groups to be destroyed first). Each destroy is independently
+        # guarded so a wedged communicator on one group doesn't leak the rest.
+        if _rac._pool_cp_comm_group is not None:
+            try:
+                dist.destroy_process_group(_rac._pool_cp_comm_group)
+            except Exception:
+                pass
+        for g in _rac._pool_cp_comm_sub_groups:
+            try:
+                dist.destroy_process_group(g)
+            except Exception:
+                pass
+        _rac._pool_cp_comm_group = None
+        _rac._pool_cp_comm_sub_groups = []
         dist.destroy_process_group()
 
 

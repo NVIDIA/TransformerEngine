@@ -30,6 +30,15 @@ from transformer_engine.common.recipe import (
 )
 from utils import ModelConfig, compare_and_assert
 
+# Pool mode (NVTE_CP_POOL_PG=1) only: shared CP collective groups, created once
+# per pool by run_attention_with_cp_pool.main() and reused across every case in
+# that pool. world_size and the rank set don't change per case, so re-creating
+# these per call would be wasted NCCL setup (~50-100 ms each). Single-shot
+# subprocess mode leaves these None / [] and run_dpa_with_cp creates/destroys
+# its own groups inline.
+_pool_cp_comm_group = None
+_pool_cp_comm_sub_groups: list = []
+
 dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
 
 
@@ -244,28 +253,36 @@ def run_dpa_with_cp(
     if not _pool_managed_pg:
         dist.init_process_group(backend="nccl", world_size=world_size, rank=rank)
 
-    # set up communication group for CP
+    # Set up communication group for CP. In pool mode, the pool worker has
+    # already pre-created world-scoped and a2a+p2p sub-groups once and stashed
+    # them in module-level pointers; we reuse those and the pool destroys them
+    # at shutdown. In single-shot mode we create them per call and destroy in
+    # the finally below.
     cp_comm_ranks = range(world_size)
     assert rank in cp_comm_ranks
-    cp_comm_group = dist.new_group(cp_comm_ranks, backend="nccl")
-    # Always defined so the finally cleanup below is safe even when cp_comm_type != "a2a+p2p".
-    cp_comm_sub_groups = []
-    if cp_comm_type == "a2a+p2p":
-        assert world_size % 2 == 0, (
-            "{cp_comm_type=} requires world_size % 2 = 0 as it assumes the a2a level has cp_size"
-            " = 2."
-        )
-        cp_comm_sub_ranks = [range(i * 2, (i + 1) * 2) for i in range(world_size // 2)]
-        cp_comm_sub_ranks += [range(i, world_size, 2) for i in range(2)]
-        for sub_ranks in cp_comm_sub_ranks:
-            sub_group = dist.new_group(sub_ranks, backend="nccl")
-            if rank in sub_ranks:
-                cp_comm_sub_groups.append(sub_group)
-
-    # Wrap test work in try/finally so the per-case NCCL communicators created above
-    # are destroyed even when the body raises (otherwise pool mode leaks one or more
-    # communicators per failed case, eventually exhausting NCCL resources).
+    _reusing_pool_groups = _pool_managed_pg and _pool_cp_comm_group is not None
+    cp_comm_group = None
+    cp_comm_sub_groups: list = []
+    # Wrap setup + body so any failure between new_group calls and the end of
+    # the test still hits the cleanup below — otherwise a partial sub-group
+    # population (e.g. NCCL refuses new_group mid-loop) leaks communicators.
     try:
+        if _reusing_pool_groups:
+            cp_comm_group = _pool_cp_comm_group
+            cp_comm_sub_groups = _pool_cp_comm_sub_groups if cp_comm_type == "a2a+p2p" else []
+        else:
+            cp_comm_group = dist.new_group(cp_comm_ranks, backend="nccl")
+            if cp_comm_type == "a2a+p2p":
+                assert world_size % 2 == 0, (
+                    "{cp_comm_type=} requires world_size % 2 = 0 as it assumes the a2a level has"
+                    " cp_size = 2."
+                )
+                cp_comm_sub_ranks = [range(i * 2, (i + 1) * 2) for i in range(world_size // 2)]
+                cp_comm_sub_ranks += [range(i, world_size, 2) for i in range(2)]
+                for sub_ranks in cp_comm_sub_ranks:
+                    sub_group = dist.new_group(sub_ranks, backend="nccl")
+                    if rank in sub_ranks:
+                        cp_comm_sub_groups.append(sub_group)
         if dtype == "fp8":
             if scaling_mode == "delayed":
                 fp8_recipe = DelayedScaling(fp8_dpa=fp8_dpa, fp8_mha=fp8_mha)
@@ -793,19 +810,24 @@ def run_dpa_with_cp(
                 logging.info(f"[Rank {rank}] CP vs no-CP: {names[i]} matches")
 
     finally:
-        # destroy distribution group(s); runs even on exception
-        if _pool_managed_pg:
-            # Pool owns the main PG; only clean up groups created for this case.
-            try:
-                dist.destroy_process_group(cp_comm_group)
-            except Exception:
-                pass
+        # Destroy only groups WE created. In pool mode with shared groups,
+        # cp_comm_group / cp_comm_sub_groups are owned by the pool runner and
+        # destroyed at pool shutdown — touching them here would tear down the
+        # cache that subsequent cases want to reuse.
+        if not _reusing_pool_groups:
+            if cp_comm_group is not None:
+                try:
+                    dist.destroy_process_group(cp_comm_group)
+                except Exception:
+                    pass
             for g in cp_comm_sub_groups:
                 try:
                     dist.destroy_process_group(g)
                 except Exception:
                     pass
-        else:
+        # Tear down the main PG only in single-shot mode. In pool mode the
+        # pool runner owns the main PG and destroys it at shutdown.
+        if not _pool_managed_pg:
             try:
                 dist.destroy_process_group()
             except Exception:
