@@ -142,6 +142,35 @@ __device__ __forceinline__ void scaled_fp8_cvt_vec(const Vec<IType, NUM_ELTS> &i
 }
 
 template <bool IS_ACT, typename ParamOP, float (*OP)(float, const ParamOP &), typename IType,
+          typename OType, uint32_t NUM_ELTS>
+__device__ __forceinline__ void scaled_fp8_cvt_vec_full(const Vec<IType, NUM_ELTS> &input,
+                                                        Vec<OType, NUM_ELTS> &output,
+                                                        const float scale) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  constexpr bool kUseFastCvt = !IS_ACT && (NUM_ELTS % 4 == 0) &&
+                               supports_fast_scaled_fp8_cvt_4<IType, OType>::value;
+#else
+  constexpr bool kUseFastCvt = false;
+#endif
+
+  if constexpr (kUseFastCvt) {
+#pragma unroll
+    for (size_t base = 0; base < NUM_ELTS; base += 4) {
+      fast_scaled_fp8_cvt_4(input.data.elt + base, output.data.elt + base, scale);
+    }
+  } else {
+#pragma unroll
+    for (size_t j = 0; j < NUM_ELTS; ++j) {
+      float elt = static_cast<float>(input.data.elt[j]);
+      if constexpr (IS_ACT) {
+        elt = OP(elt, {});
+      }
+      output.data.elt[j] = static_cast<OType>(elt * scale);
+    }
+  }
+}
+
+template <bool IS_ACT, typename ParamOP, float (*OP)(float, const ParamOP &), typename IType,
           typename OType, ScalingType SCALING_TYPE, ShapeRepresentation SHAPE_REP>
 __global__ void __launch_bounds__(THREADS_PER_TILE) group_cast_fp8_kernel(
     const IType *__restrict__ input, OType *__restrict__ output_rowwise,
@@ -226,7 +255,7 @@ __global__ void __launch_bounds__(THREADS_PER_TILE) group_cast_fp8_kernel(
   const size_t tidy = tid / THREADS_PER_WARP;
 
   if constexpr (COLWISE_OUTPUT) {
-    __shared__ OVecT shared_output_t[nvec_in][THREADS_PER_WARP][THREADS_PER_WARP + 1];
+    OVecT local_output_t[nvec_in][num_iterations];
 
 #pragma unroll
     for (size_t iter = 0; iter < num_iterations; ++iter) {
@@ -235,48 +264,63 @@ __global__ void __launch_bounds__(THREADS_PER_TILE) group_cast_fp8_kernel(
       const size_t base_row = tile_row + i1 * nvec_out;
       const size_t base_col = tile_col + j1 * nvec_in;
       const bool full_fragment = (base_row + nvec_out <= rows) && (base_col + nvec_in <= cols);
-      OVecT local_output_t[nvec_in];
-      if (!full_fragment) {
-#pragma unroll
-        for (size_t j2 = 0; j2 < nvec_in; ++j2) {
-          local_output_t[j2].clear();
-        }
-      }
 #pragma unroll
       for (size_t i2 = 0; i2 < nvec_out; ++i2) {
         const size_t row = base_row + i2;
-        const size_t col = base_col;
-        if (row < rows) {
+        if (full_fragment || row < rows) {
           IVecT local_input;
           OVecC local_output;
-          const size_t valid_cols =
-              col < cols ? ((cols - col) < nvec_in ? (cols - col) : nvec_in) : 0;
-          if (valid_cols == 0) {
-            continue;
-          }
-          local_input.load_from_elts(input + tensor_base + row * cols + col, 0, valid_cols);
-          scaled_fp8_cvt_vec<IS_ACT, ParamOP, OP>(local_input, local_output, valid_cols, scale);
-          if constexpr (ROWWISE_OUTPUT) {
-            local_output.store_to_elts(output_rowwise + tensor_base + row * cols + col, 0,
-                                       valid_cols);
+          size_t valid_cols = nvec_in;
+          if (full_fragment) {
+            const IType *const input_ptr = input + tensor_base + row * cols + base_col;
+            if (reinterpret_cast<uint64_t>(input_ptr) % IVecT::BYTES == 0) {
+              local_input.load_from(input_ptr);
+            } else {
+              local_input.load_from_elts(input_ptr);
+            }
+            scaled_fp8_cvt_vec_full<IS_ACT, ParamOP, OP>(local_input, local_output, scale);
+            if constexpr (ROWWISE_OUTPUT) {
+              OType *const output_ptr = output_rowwise + tensor_base + row * cols + base_col;
+              if (reinterpret_cast<uint64_t>(output_ptr) % OVecC::BYTES == 0) {
+                local_output.store_to(output_ptr);
+              } else {
+                local_output.store_to_elts(output_ptr);
+              }
+            }
+          } else {
+            valid_cols = base_col < cols ? ((cols - base_col) < nvec_in ? (cols - base_col)
+                                                                        : nvec_in)
+                                         : 0;
+            if (valid_cols == 0) {
+              continue;
+            }
+            local_input.load_from_elts(input + tensor_base + row * cols + base_col, 0, valid_cols);
+            scaled_fp8_cvt_vec<IS_ACT, ParamOP, OP>(local_input, local_output, valid_cols, scale);
+            if constexpr (ROWWISE_OUTPUT) {
+              local_output.store_to_elts(output_rowwise + tensor_base + row * cols + base_col, 0,
+                                         valid_cols);
+            }
           }
 #pragma unroll
           for (size_t j2 = 0; j2 < nvec_in; ++j2) {
             if (j2 < valid_cols) {
-              local_output_t[j2].data.elt[i2] = local_output.data.elt[j2];
+              local_output_t[j2][iter].data.elt[i2] = local_output.data.elt[j2];
             }
           }
         }
       }
-#pragma unroll
-      for (size_t j2 = 0; j2 < nvec_in; ++j2) {
-        shared_output_t[j2][j1][i1] = local_output_t[j2];
-      }
     }
-    __syncthreads();
 
+    __shared__ OVecT shared_output_t[THREADS_PER_WARP][THREADS_PER_WARP + 1];
 #pragma unroll
     for (size_t j2 = 0; j2 < nvec_in; ++j2) {
+#pragma unroll
+      for (size_t iter = 0; iter < num_iterations; ++iter) {
+        const size_t i1 = tidy + iter * WARPS_PER_TILE;
+        const size_t j1 = tidx;
+        shared_output_t[j1][i1] = local_output_t[j2][iter];
+      }
+      __syncthreads();
 #pragma unroll
       for (size_t iter = 0; iter < num_iterations; ++iter) {
         const size_t i1 = tidx;
@@ -287,11 +331,17 @@ __global__ void __launch_bounds__(THREADS_PER_TILE) group_cast_fp8_kernel(
           const size_t valid_rows =
               row < rows ? ((rows - row) < nvec_out ? (rows - row) : nvec_out) : 0;
           if (valid_rows > 0) {
-            shared_output_t[j2][j1][i1].store_to_elts(
-                output_colwise + tensor_base + col * rows + row, 0, valid_rows);
+            OType *const output_ptr = output_colwise + tensor_base + col * rows + row;
+            if (valid_rows == nvec_out &&
+                reinterpret_cast<uint64_t>(output_ptr) % OVecT::BYTES == 0) {
+              shared_output_t[j1][i1].store_to(output_ptr);
+            } else {
+              shared_output_t[j1][i1].store_to_elts(output_ptr, 0, valid_rows);
+            }
           }
         }
       }
+      __syncthreads();
     }
   } else {
 #pragma unroll
@@ -305,15 +355,31 @@ __global__ void __launch_bounds__(THREADS_PER_TILE) group_cast_fp8_kernel(
         if (row < rows) {
           IVecT local_input;
           OVecC local_output;
-          const size_t valid_cols =
-              col < cols ? ((cols - col) < nvec_in ? (cols - col) : nvec_in) : 0;
-          if (valid_cols == 0) {
-            continue;
+          if (col + nvec_in <= cols) {
+            const IType *const input_ptr = input + tensor_base + row * cols + col;
+            if (reinterpret_cast<uint64_t>(input_ptr) % IVecT::BYTES == 0) {
+              local_input.load_from(input_ptr);
+            } else {
+              local_input.load_from_elts(input_ptr);
+            }
+            scaled_fp8_cvt_vec_full<IS_ACT, ParamOP, OP>(local_input, local_output, scale);
+            OType *const output_ptr = output_rowwise + tensor_base + row * cols + col;
+            if (reinterpret_cast<uint64_t>(output_ptr) % OVecC::BYTES == 0) {
+              local_output.store_to(output_ptr);
+            } else {
+              local_output.store_to_elts(output_ptr);
+            }
+          } else {
+            const size_t valid_cols =
+                col < cols ? ((cols - col) < nvec_in ? (cols - col) : nvec_in) : 0;
+            if (valid_cols == 0) {
+              continue;
+            }
+            local_input.load_from_elts(input + tensor_base + row * cols + col, 0, valid_cols);
+            scaled_fp8_cvt_vec<IS_ACT, ParamOP, OP>(local_input, local_output, valid_cols, scale);
+            local_output.store_to_elts(output_rowwise + tensor_base + row * cols + col, 0,
+                                       valid_cols);
           }
-          local_input.load_from_elts(input + tensor_base + row * cols + col, 0, valid_cols);
-          scaled_fp8_cvt_vec<IS_ACT, ParamOP, OP>(local_input, local_output, valid_cols, scale);
-          local_output.store_to_elts(output_rowwise + tensor_base + row * cols + col, 0,
-                                     valid_cols);
         }
       }
     }

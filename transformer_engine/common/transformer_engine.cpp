@@ -318,16 +318,21 @@ void CheckGroupedTensorShapeArrays(const GroupedTensor &t, const std::string &na
                " columnwise_data must be 1D");
   }
 
-  // Validate data size matches logical_shape
+  // Varying-first-dim grouped tensors may carry an overallocated backing buffer. Kernels use
+  // first_dims/tensor_offsets to restrict work to the active payload.
   size_t expected_numel = t.logical_shape.data[0] * t.logical_shape.data[1];
+  const bool allow_overallocated_data = t.first_dims.has_data() && t.tensor_offsets.has_data();
   if (t.has_data()) {
-    NVTE_CHECK(t.data.numel() == expected_numel, "Grouped tensor ", name, " data size (",
-               t.data.numel(), ") must match logical_shape size (", expected_numel, ")");
+    NVTE_CHECK(allow_overallocated_data ? t.data.numel() >= expected_numel
+                                        : t.data.numel() == expected_numel,
+               "Grouped tensor ", name, " data size (", t.data.numel(),
+               ") must cover logical_shape size (", expected_numel, ")");
   }
   if (t.has_columnwise_data()) {
-    NVTE_CHECK(t.columnwise_data.numel() == expected_numel, "Grouped tensor ", name,
-               " columnwise_data size (", t.columnwise_data.numel(),
-               ") must match logical_shape size (", expected_numel, ")");
+    NVTE_CHECK(allow_overallocated_data ? t.columnwise_data.numel() >= expected_numel
+                                        : t.columnwise_data.numel() == expected_numel,
+               "Grouped tensor ", name, " columnwise_data size (", t.columnwise_data.numel(),
+               ") must cover logical_shape size (", expected_numel, ")");
   }
 }
 

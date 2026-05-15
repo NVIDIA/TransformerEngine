@@ -31,6 +31,35 @@ std::vector<size_t> get_tensor_shape(const TensorWrapper &tensor) {
   return std::vector<size_t>(shape.data, shape.data + shape.ndim);
 }
 
+std::optional<std::vector<size_t>> fp8_active_grouped_output_shape(
+    const py::object &output, const std::vector<size_t> &logical_shape, const size_t num_tensors,
+    const size_t logical_last_dim) {
+  if (output.is_none() || !py::hasattr(output, "first_dims") ||
+      output.attr("first_dims").is_none() || !py::hasattr(output, "offsets") ||
+      output.attr("offsets").is_none()) {
+    return std::nullopt;
+  }
+
+  const auto offsets = output.attr("offsets").cast<std::vector<int64_t>>();
+  if (offsets.size() != num_tensors + 1) {
+    return std::nullopt;
+  }
+  NVTE_CHECK(logical_shape.size() == 2, "Grouped tensor logical shape must be 2D.");
+  NVTE_CHECK(logical_last_dim > 0, "Grouped tensor logical last dimension must be positive.");
+  const int64_t active_elements = offsets.back();
+  NVTE_CHECK(active_elements >= 0, "Grouped tensor active element count must be non-negative.");
+  if (active_elements == 0) {
+    return std::nullopt;
+  }
+  NVTE_CHECK(active_elements % static_cast<int64_t>(logical_last_dim) == 0,
+             "Grouped tensor offsets must align to the logical last dimension.");
+  auto active_shape = logical_shape;
+  active_shape[0] = static_cast<size_t>(active_elements / static_cast<int64_t>(logical_last_dim));
+  NVTE_CHECK(active_shape[0] <= logical_shape[0],
+             "Sum of first_dims must not exceed the allocated first dimension.");
+  return active_shape;
+}
+
 }  // namespace
 
 py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::object &output,
@@ -285,6 +314,8 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
   bool empty_input_buffer = logical_first_dim == 0 || logical_last_dim == 0;
 
   auto quantizer_cpp = convert_quantizer(quantizer);
+  const bool is_fp8_grouped_quantizer = detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr()) ||
+                                        detail::IsFloat8Quantizers(quantizer.ptr());
 
   // Create input GroupedTensor.
   auto grouped_input_tensor = GroupedTensorWrapper(num_tensors, logical_shape);
@@ -302,7 +333,12 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
     grouped_output_tensor_cpp.emplace(std::move(created.first));
     grouped_output_py = std::move(created.second);
   } else {
-    grouped_output_tensor_cpp.emplace(detail::GroupedTensorFromPyTorchGroupedTensor(output));
+    const auto logical_shape_override =
+        is_fp8_grouped_quantizer
+            ? fp8_active_grouped_output_shape(output, logical_shape, num_tensors, logical_last_dim)
+            : std::nullopt;
+    grouped_output_tensor_cpp.emplace(
+        detail::GroupedTensorFromPyTorchGroupedTensor(output, logical_shape_override));
     grouped_output_py = py::reinterpret_borrow<py::object>(output);
   }
 

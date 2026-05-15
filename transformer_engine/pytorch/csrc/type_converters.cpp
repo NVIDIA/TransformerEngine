@@ -201,10 +201,13 @@ DType GetTransformerEngineDTypeForScaleInv(py::handle quantizer, at::Tensor scal
   return GetTransformerEngineDType(scale_inv.scalar_type());
 }
 
-GroupedTensorWrapper GroupedTensorFromPyTorchGroupedTensor(py::handle tensor) {
+GroupedTensorWrapper GroupedTensorFromPyTorchGroupedTensor(
+    py::handle tensor, const std::optional<std::vector<size_t>> &logical_shape_override) {
   // Returns a GroupedTensorWrapper from a PyTorch GroupedTensor.
   const auto num_tensors = tensor.attr("num_tensors").cast<size_t>();
-  const auto logical_shape = tensor.attr("logical_shape").cast<std::vector<size_t>>();
+  const auto logical_shape = logical_shape_override.has_value()
+                                 ? logical_shape_override.value()
+                                 : tensor.attr("logical_shape").cast<std::vector<size_t>>();
   py::handle quantizer = py::none();
   DType quantizer_dtype = DType::kNumTypes;
   NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING;

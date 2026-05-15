@@ -6,6 +6,8 @@
 
 #include <pybind.h>
 
+#include <cuda_runtime_api.h>
+
 #include "common.h"
 #include "common/util/system.h"
 #include "pybind.h"
@@ -91,6 +93,59 @@ at::TensorOptions grouped_tensor_data_options(const DType dtype) {
 
 py::object maybe_tensor_to_py(const std::optional<at::Tensor>& tensor) {
   return tensor ? py::cast(*tensor) : py::none();
+}
+
+bool is_current_cuda_stream_capturing() {
+  cudaStreamCaptureStatus capture_status = cudaStreamCaptureStatusNone;
+  const cudaError_t err =
+      cudaStreamIsCapturing(at::cuda::getCurrentCUDAStream().stream(), &capture_status);
+  NVTE_CHECK(err == cudaSuccess, "cudaStreamIsCapturing failed: ", cudaGetErrorString(err));
+  return capture_status != cudaStreamCaptureStatusNone;
+}
+
+std::optional<std::vector<int64_t>> build_grouped_offsets_host(
+    const size_t num_tensors, const std::optional<at::Tensor>& first_dims,
+    const size_t logical_last_dim) {
+  if (!first_dims.has_value()) {
+    return std::nullopt;
+  }
+  if (first_dims->is_cuda() && is_current_cuda_stream_capturing()) {
+    return std::nullopt;
+  }
+
+  NVTE_CHECK(static_cast<size_t>(first_dims->numel()) == num_tensors,
+             "first_dims must have length ", num_tensors, ".");
+  auto first_dims_cpu =
+      first_dims->to(at::TensorOptions().device(at::kCPU).dtype(at::kLong)).contiguous();
+  const int64_t *first_dims_ptr = first_dims_cpu.data_ptr<int64_t>();
+  std::vector<int64_t> offsets(num_tensors + 1, 0);
+  for (size_t i = 0; i < num_tensors; ++i) {
+    NVTE_CHECK(first_dims_ptr[i] >= 0, "first_dims entries must be non-negative.");
+    offsets[i + 1] = offsets[i] + first_dims_ptr[i] * static_cast<int64_t>(logical_last_dim);
+  }
+  return offsets;
+}
+
+std::vector<size_t> active_grouped_logical_shape(
+    const std::vector<size_t>& logical_shape,
+    const std::optional<std::vector<int64_t>>& host_offsets, const size_t logical_last_dim) {
+  if (!host_offsets.has_value()) {
+    return logical_shape;
+  }
+  NVTE_CHECK(logical_shape.size() == 2, "Grouped tensor logical shape must be 2D.");
+  NVTE_CHECK(logical_last_dim > 0, "Grouped tensor logical last dimension must be positive.");
+  const int64_t active_elements = host_offsets->back();
+  NVTE_CHECK(active_elements >= 0, "Grouped tensor active element count must be non-negative.");
+  if (active_elements == 0) {
+    return logical_shape;
+  }
+  NVTE_CHECK(active_elements % static_cast<int64_t>(logical_last_dim) == 0,
+             "Grouped tensor offsets must align to the logical last dimension.");
+  auto active_shape = logical_shape;
+  active_shape[0] = static_cast<size_t>(active_elements / static_cast<int64_t>(logical_last_dim));
+  NVTE_CHECK(active_shape[0] <= logical_shape[0],
+             "Sum of first_dims must not exceed the allocated first dimension.");
+  return active_shape;
 }
 
 py::handle grouped_tensor_python_class(const bool internal) {
@@ -351,6 +406,9 @@ std::pair<GroupedTensorWrapper, py::object> Float8Quantizer::create_grouped_tens
 
   const auto tensor_offsets =
       build_grouped_tensor_offsets(num_tensors, first_dims, logical_last_dim);
+  const auto host_offsets = build_grouped_offsets_host(num_tensors, first_dims, logical_last_dim);
+  const auto active_logical_shape =
+      active_grouped_logical_shape(logical_shape, host_offsets, logical_last_dim);
   const int64_t total_elements =
       static_cast<int64_t>(logical_first_dim) * static_cast<int64_t>(logical_last_dim);
 
@@ -381,7 +439,7 @@ std::pair<GroupedTensorWrapper, py::object> Float8Quantizer::create_grouped_tens
     columnwise_scale_inv = grouped_scale_inv;
   }
 
-  GroupedTensorWrapper out_cpp(num_tensors, logical_shape, this->get_scaling_mode());
+  GroupedTensorWrapper out_cpp(num_tensors, active_logical_shape, this->get_scaling_mode());
   if (rowwise_usage) {
     out_cpp.set_rowwise_data(rowwise_data->data_ptr(), this->dtype, getTensorShape(*rowwise_data));
     out_cpp.set_rowwise_scale_inv(rowwise_scale_inv->data_ptr(), DType::kFloat32,
@@ -424,6 +482,7 @@ std::pair<GroupedTensorWrapper, py::object> Float8Quantizer::create_grouped_tens
   kwargs["first_dims"] = first_dims.has_value() ? py::cast(*first_dims) : py::none();
   kwargs["last_dims"] = py::none();
   kwargs["tensor_offsets"] = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none();
+  kwargs["offsets"] = host_offsets.has_value() ? py::cast(*host_offsets) : py::none();
   kwargs["with_gemm_swizzled_scales"] = py::cast(false);
   PyObject* result = PyObject_Call(GroupedTensorClass.ptr(), args.ptr(), kwargs.ptr());
   if (result == nullptr) {
@@ -670,6 +729,9 @@ std::pair<GroupedTensorWrapper, py::object> Float8CurrentScalingQuantizer::creat
 
   const auto tensor_offsets =
       build_grouped_tensor_offsets(num_tensors, first_dims, logical_last_dim);
+  const auto host_offsets = build_grouped_offsets_host(num_tensors, first_dims, logical_last_dim);
+  const auto active_logical_shape =
+      active_grouped_logical_shape(logical_shape, host_offsets, logical_last_dim);
   const int64_t total_elements =
       static_cast<int64_t>(logical_first_dim) * static_cast<int64_t>(logical_last_dim);
 
@@ -692,7 +754,7 @@ std::pair<GroupedTensorWrapper, py::object> Float8CurrentScalingQuantizer::creat
     columnwise_scale_inv = at::empty({static_cast<int64_t>(num_tensors)}, float_opts);
   }
 
-  GroupedTensorWrapper out_cpp(num_tensors, logical_shape, this->get_scaling_mode());
+  GroupedTensorWrapper out_cpp(num_tensors, active_logical_shape, this->get_scaling_mode());
   if (rowwise_usage) {
     out_cpp.set_rowwise_data(rowwise_data->data_ptr(), this->dtype, getTensorShape(*rowwise_data));
     out_cpp.set_rowwise_scale_inv(rowwise_scale_inv->data_ptr(), DType::kFloat32,
@@ -735,6 +797,7 @@ std::pair<GroupedTensorWrapper, py::object> Float8CurrentScalingQuantizer::creat
   kwargs["first_dims"] = first_dims.has_value() ? py::cast(*first_dims) : py::none();
   kwargs["last_dims"] = py::none();
   kwargs["tensor_offsets"] = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none();
+  kwargs["offsets"] = host_offsets.has_value() ? py::cast(*host_offsets) : py::none();
   kwargs["with_gemm_swizzled_scales"] = py::cast(false);
   PyObject* result = PyObject_Call(GroupedTensorClass.ptr(), args.ptr(), kwargs.ptr());
   if (result == nullptr) {
