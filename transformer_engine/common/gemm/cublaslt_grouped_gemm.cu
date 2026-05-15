@@ -1502,8 +1502,7 @@ inline void launch_grouped_gemm_setup(
       reinterpret_cast<float *>(A_sel.scale_inv), reinterpret_cast<float *>(B_sel.scale_inv),
       a_rowwise, b_rowwise, A_sel.storage_transposed, B_sel.storage_transposed, A_sel.scaling_mode,
       B_sel.scaling_mode, num_tensors, a_multi_tensor_args, c_multi_tensor_args,
-      d_multi_tensor_args,
-      A_sel.amax ? static_cast<float *>(A_sel.amax) : nullptr,
+      d_multi_tensor_args, A_sel.amax ? static_cast<float *>(A_sel.amax) : nullptr,
       B_sel.amax ? static_cast<float *>(B_sel.amax) : nullptr,
       needs_nvfp4_alpha ? ws.nvfp4_computed_alpha : nullptr);
 
@@ -1742,8 +1741,7 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
   gemm_config.avg_m = config_.avg_m.value_or(compute_avg_first_dim(outputD));
   gemm_config.avg_n =
       config_.avg_n.value_or(transb ? compute_avg_first_dim(inputB) : compute_avg_last_dim(inputB));
-  gemm_config.avg_k =
-      config_.avg_k.value_or(transa ? avg_first_dim : avg_last_dim);
+  gemm_config.avg_k = config_.avg_k.value_or(transa ? avg_first_dim : avg_last_dim);
   gemm_config.sm_count = config_.sm_count;
   execute_grouped_gemm(workspace.setup_workspace, A_sel, B_sel, outputD->dtype(), num_tensors,
                        gemm_config, workspace.cublas_workspace_ptr, stream);
