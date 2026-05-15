@@ -107,7 +107,7 @@ not benefit at all because the cast + scale overhead can dominate.
    and your performance comparison will not be accurate.
 
 
-6. Multi-GPU: DP=2 / TP=2 on a single Dense
+4. Multi-GPU: DP=2 / TP=2 on a single Dense
 -------------------------------------------
 
 **Prerequisite:** this section requires four GPUs.
@@ -161,15 +161,10 @@ Two pieces wire this up:
       :end-before: # MULTI_GPU_OUTPUT_END
 
 
-7. Collective GEMM (placeholder)
---------------------------------
-
-*Coming soon.*
-
-
 Next steps
 ----------
 
+* `Collective GEMM <collective_gemm.html>`_: further speedups by communicating between devices inside the GEMM.
 * `Attention <attention.html>`_
 * `Mixture of Experts <moe.html>`_
 * `← Hub <../te_jax_integration.html>`_

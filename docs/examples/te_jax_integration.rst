@@ -21,14 +21,16 @@ Pick a topic
    * - Document
      - Status
      - Covers
-   * - `Dense GEMMs <jax_examples/dense.html>`_
+   * - `Dense GEMMs <jax/dense.html>`_
      - **Available**
      - ``nn.Dense`` → quantized GEMM; single-GPU speedup; multi-GPU speedup;
-       Collective GEMM
-   * - `Attention <jax_examples/attention.html>`_
+   * - `Collective GEMMs <jax/collective_gemm.html>`_
      - *Coming soon*
      -
-   * - `Mixture of Experts <jax_examples/moe.html>`_
+   * - `Attention <jax/attention.html>`_
+     - *Coming soon*
+     -
+   * - `Expert Parallelism <jax/expert_parallelism.html>`_
      - *Coming soon*
      -
 
@@ -80,12 +82,13 @@ Conventions used across these documents
   a different stack.)
 * **Baseline dtype.** bf16 for inputs and parameters.
 * **Benchmarking.** ``quickstart_jax_utils.speedometer`` runs a JIT-compiled
-  fwd+bwd loop with warmup.
+  fwd+bwd loop with warmup 
 
 
 .. toctree::
    :hidden:
 
-   jax_examples/dense
-   jax_examples/attention
-   jax_examples/moe
+   jax/dense
+   jax/collective_gemm
+   jax/attention
+   jax/expert_parallelism

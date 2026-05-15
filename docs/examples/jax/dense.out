@@ -1,6 +1,5 @@
 # Numbers below are illustrative (captured on a GB200). Regenerate with:
 #     python3 docs/examples/jax_examples/dense.py > dense.out
-# after substantial code changes.
 
 # SINGLE_GPU_OUTPUT_START
 Variable collections: ['params']
