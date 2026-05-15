@@ -667,9 +667,8 @@ def _graph_cache_key(
     config: _FusedAttnScoreModConfig,
     avals: Sequence[Any],
 ) -> Optional[Tuple[Any, ...]]:
-    if (
-        _score_mod_key_is_uncacheable(config.score_mod_key)
-        or _score_mod_key_is_uncacheable(config.score_mod_bprop_key)
+    if _score_mod_key_is_uncacheable(config.score_mod_key) or _score_mod_key_is_uncacheable(
+        config.score_mod_bprop_key
     ):
         return None
     return (
@@ -686,7 +685,10 @@ def _shape_dtype(value) -> jax.ShapeDtypeStruct:
 def _import_cudnn_for_score_mod():
     cudnn_frontend_path = str(_CUDNN_FRONTEND_PYTHON_PATH)
     cudnn_frontend_package = _CUDNN_FRONTEND_PYTHON_PATH / "cudnn"
-    if any(cudnn_frontend_package.glob("_compiled_module*")) and cudnn_frontend_path not in sys.path:
+    if (
+        any(cudnn_frontend_package.glob("_compiled_module*"))
+        and cudnn_frontend_path not in sys.path
+    ):
         sys.path.insert(0, cudnn_frontend_path)
     try:
         return importlib.import_module("cudnn")
