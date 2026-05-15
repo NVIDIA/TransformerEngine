@@ -36,6 +36,7 @@ constexpr size_t ROWWISE_LOAD_SIZE_BYTES = 16;
 constexpr size_t TRANSPOSE_LOAD_SIZE_BYTES = 8;
 constexpr size_t ROWWISE_STORE_SIZE_BYTES = 16;
 constexpr size_t TRANSPOSE_STORE_SIZE_BYTES = 8;
+constexpr size_t BIDIRECTIONAL_LOAD_SIZE_BYTES = 16;
 constexpr size_t ROWWISE_FLAT_LOAD_SIZE_BYTES = 32;
 constexpr size_t ROWWISE_FLAT_THREADS = 512;
 constexpr size_t TRANSPOSE_SHARED_PAD = 1;
@@ -512,6 +513,91 @@ __global__ void __launch_bounds__(THREADS_PER_TILE) group_cast_fp8_same_shape_fu
   }
 }
 
+template <bool IS_ACT, typename ParamOP, float (*OP)(float, const ParamOP &), typename IType,
+          typename OType>
+__global__ void __launch_bounds__(THREADS_PER_TILE)
+    group_cast_fp8_same_shape_bidir_wide_kernel(const IType *__restrict__ input,
+                                                OType *__restrict__ output_rowwise,
+                                                OType *__restrict__ output_colwise,
+                                                const float *__restrict__ scale_ptr,
+                                                const float *__restrict__ noop,
+                                                const size_t rows_per_tensor, const size_t cols) {
+  if (noop != nullptr && noop[0] == 1.0f) {
+    return;
+  }
+
+  constexpr size_t nvec_in = BIDIRECTIONAL_LOAD_SIZE_BYTES / sizeof(IType);
+  constexpr size_t nvec_out = TRANSPOSE_STORE_SIZE_BYTES / sizeof(OType);
+  constexpr size_t tile_dim_m = THREADS_PER_WARP * nvec_out;
+  constexpr size_t tile_dim_n = THREADS_PER_WARP * nvec_in;
+  constexpr size_t num_iterations = THREADS_PER_WARP / WARPS_PER_TILE;
+
+  using IVecT = Vec<IType, nvec_in>;
+  using OVecC = Vec<OType, nvec_in>;
+  using OVecT = Vec<OType, nvec_out>;
+
+  const size_t tiles_per_tensor = rows_per_tensor / tile_dim_m;
+  const size_t tensor_id = blockIdx.y / tiles_per_tensor;
+  const size_t tensor_tile_id = blockIdx.y - tensor_id * tiles_per_tensor;
+  const size_t tensor_base = tensor_id * rows_per_tensor * cols;
+  const size_t tile_row = tensor_tile_id * tile_dim_m;
+  const size_t tile_col = blockIdx.x * tile_dim_n;
+  const float scale = scale_ptr == nullptr ? 1.0f : scale_ptr[tensor_id];
+
+  const size_t tid = threadIdx.x;
+  const size_t tidx = tid % THREADS_PER_WARP;
+  const size_t tidy = tid / THREADS_PER_WARP;
+
+  extern __shared__ __align__(16) char dynamic_shmem[];
+  OVecT *const shared_output_t = reinterpret_cast<OVecT *>(dynamic_shmem);
+  constexpr size_t shared_pitch = THREADS_PER_WARP + TRANSPOSE_SHARED_PAD;
+
+#pragma unroll
+  for (size_t iter = 0; iter < num_iterations; ++iter) {
+    const size_t i1 = tidy + iter * WARPS_PER_TILE;
+    const size_t j1 = tidx;
+    const size_t base_row = tile_row + i1 * nvec_out;
+    const size_t base_col = tile_col + j1 * nvec_in;
+    OVecT local_output_t[nvec_in];
+#pragma unroll
+    for (size_t i2 = 0; i2 < nvec_out; ++i2) {
+      const size_t row = base_row + i2;
+      IVecT local_input;
+      OVecC local_output;
+      const IType *const input_ptr = input + tensor_base + row * cols + base_col;
+      local_input.load_from(input_ptr);
+      scaled_fp8_cvt_vec_full<IS_ACT, ParamOP, OP>(local_input, local_output, scale);
+      OType *const output_ptr = output_rowwise + tensor_base + row * cols + base_col;
+      local_output.store_to(output_ptr);
+#pragma unroll
+      for (size_t j2 = 0; j2 < nvec_in; ++j2) {
+        local_output_t[j2].data.elt[i2] = local_output.data.elt[j2];
+      }
+    }
+#pragma unroll
+    for (size_t j2 = 0; j2 < nvec_in; ++j2) {
+      const size_t shared_idx = (j2 * THREADS_PER_WARP + j1) * shared_pitch + i1;
+      shared_output_t[shared_idx] = local_output_t[j2];
+    }
+  }
+
+  __syncthreads();
+#pragma unroll
+  for (size_t j2 = 0; j2 < nvec_in; ++j2) {
+#pragma unroll
+    for (size_t iter = 0; iter < num_iterations; ++iter) {
+      const size_t i1 = tidx;
+      const size_t j1 = tidy + iter * WARPS_PER_TILE;
+      const size_t row = tile_row + i1 * nvec_out;
+      const size_t col = tile_col + j1 * nvec_in + j2;
+      OType *const output_ptr = output_colwise + tensor_base + col * rows_per_tensor + row;
+      const size_t shared_idx = (j2 * THREADS_PER_WARP + j1) * shared_pitch + i1;
+      const OVecT local_output_t = shared_output_t[shared_idx];
+      local_output_t.store_to(output_ptr);
+    }
+  }
+}
+
 }  // namespace group_quantize_kernel
 
 template <bool IS_ACT, typename ParamOP, float (*OP)(float, const ParamOP &)>
@@ -649,8 +735,40 @@ void group_quantize(const GroupedTensor *input, const Tensor *noop, GroupedTenso
                           constexpr size_t store_size_bytes = TRANSPOSE_STORE_SIZE_BYTES;
                           constexpr size_t nvec_out = store_size_bytes / sizeof(OType);
                           constexpr size_t tile_dim_m = THREADS_PER_WARP * nvec_out;
-                          if (rows_per_tensor % tile_dim_m == 0 &&
-                              last_logical_dim % tile_dim_n == 0) {
+                          if constexpr (SCALING_TYPE == ScalingType::BIDIMENSIONAL) {
+                            constexpr size_t bidir_nvec_in =
+                                BIDIRECTIONAL_LOAD_SIZE_BYTES / sizeof(IType);
+                            constexpr size_t bidir_tile_dim_n = THREADS_PER_WARP * bidir_nvec_in;
+                            using BidirOVecT = Vec<OType, nvec_out>;
+                            constexpr size_t bidir_smem_size =
+                                bidir_nvec_in * THREADS_PER_WARP *
+                                (THREADS_PER_WARP + TRANSPOSE_SHARED_PAD) * sizeof(BidirOVecT);
+                            if (rows_per_tensor % tile_dim_m == 0 &&
+                                last_logical_dim % bidir_tile_dim_n == 0) {
+                              auto kernel = group_cast_fp8_same_shape_bidir_wide_kernel<
+                                  IS_ACT, ParamOP, OP, IType, OType>;
+                              static size_t configured_smem_size = 0;
+                              if (configured_smem_size < bidir_smem_size) {
+                                NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+                                    kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                    bidir_smem_size));
+                                NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+                                    kernel, cudaFuncAttributePreferredSharedMemoryCarveout,
+                                    cudaSharedmemCarveoutMaxShared));
+                                configured_smem_size = bidir_smem_size;
+                              }
+                              const dim3 full_grid(
+                                  last_logical_dim / bidir_tile_dim_n,
+                                  num_tensors * (rows_per_tensor / tile_dim_m));
+                              kernel<<<full_grid, block, bidir_smem_size, stream>>>(
+                                  reinterpret_cast<const IType *>(input->data.dptr),
+                                  reinterpret_cast<OType *>(output->data.dptr),
+                                  reinterpret_cast<OType *>(output->columnwise_data.dptr),
+                                  scale_ptr, noop_ptr, rows_per_tensor, last_logical_dim);
+                              launched_fast_path = true;
+                            }
+                          } else if (rows_per_tensor % tile_dim_m == 0 &&
+                                     last_logical_dim % tile_dim_n == 0) {
                             const dim3 full_grid(last_logical_dim / tile_dim_n,
                                                  num_tensors * (rows_per_tensor / tile_dim_m));
                             group_cast_fp8_same_shape_full_tile_kernel<
