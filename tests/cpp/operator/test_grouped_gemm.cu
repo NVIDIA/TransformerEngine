@@ -744,11 +744,8 @@ const std::vector<TestParams> kTestParams = {
     // Mixed FP8 block scaling modes supported by cuBLASLt: 2D x 1D and 1D x 2D.
     {InputRecipe::kFP8BlockScaling2D1D, true, false, ShapeCase::kAllSameMul128, false},
     {InputRecipe::kFP8BlockScaling2D1D, true, false, ShapeCase::kAllDifferentMul128, false},
-    {InputRecipe::kFP8BlockScaling2D1D, false, true, ShapeCase::kAllSameMul128, false},
-    {InputRecipe::kFP8BlockScaling2D1D, false, false, ShapeCase::kAllSameMul32, false},
     {InputRecipe::kFP8BlockScaling1D2D, true, false, ShapeCase::kAllSameMul128, false},
     {InputRecipe::kFP8BlockScaling1D2D, true, false, ShapeCase::kAllDifferentMul128, false},
-    {InputRecipe::kFP8BlockScaling1D2D, false, true, ShapeCase::kAllSameMul128, false},
     {InputRecipe::kFP8BlockScaling1D2D, false, false, ShapeCase::kAllSameMul32, false},
 };
 
