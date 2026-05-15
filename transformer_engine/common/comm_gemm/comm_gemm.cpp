@@ -286,8 +286,7 @@ void cublasmp_gemm(InitMatricesFn init_matrices_fn, NVTECommGemmCtx* ctx, NVTECo
   //     scale_inv pair.
   // The original tensor is never modified; a new Tensor view aliases the columnwise pointers.
   const bool fp8_needs_tn = !nvte_is_non_tn_fp8_gemm_supported();
-  auto canonicalize_fp8_input = [fp8_needs_tn](const Tensor* t, bool current_trans,
-                                               bool want_trans,
+  auto canonicalize_fp8_input = [fp8_needs_tn](const Tensor* t, bool current_trans, bool want_trans,
                                                const char* side) -> std::pair<Tensor, bool> {
     if (!is_fp8_dtype(t->dtype())) {
       return {*t, current_trans};

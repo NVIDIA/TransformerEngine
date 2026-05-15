@@ -874,8 +874,14 @@ def _main(opts):
         m = torch.argmax(diff)
         abs_err = diff[m].item()
         rel_err = abs_err / max(abs(ref_out.flatten()[m].item()), 1e-5)
-        rtol = opts.rtol if opts.rtol is not None else (0.02 if opts.quantization == "none" else 0.125)
-        atol = opts.atol if opts.atol is not None else (0.002 if opts.quantization == "none" else 0.0625)
+        rtol = (
+            opts.rtol if opts.rtol is not None else (0.02 if opts.quantization == "none" else 0.125)
+        )
+        atol = (
+            opts.atol
+            if opts.atol is not None
+            else (0.002 if opts.quantization == "none" else 0.0625)
+        )
         if rel_err > rtol and abs_err > atol:
             numerics_failed = True
             numerics_info = (
