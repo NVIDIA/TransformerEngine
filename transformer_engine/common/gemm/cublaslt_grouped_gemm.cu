@@ -308,6 +308,15 @@ inline void validate_grouped_gemm_outputs(
   }
 }
 
+inline void check_fp4_output_compat(transformer_engine::DType a_dtype,
+                                    transformer_engine::DType b_dtype,
+                                    transformer_engine::DType d_dtype) {
+  if (!is_fp4_dtype(a_dtype) && !is_fp4_dtype(b_dtype)) return;
+  NVTE_CHECK(!is_fp4_dtype(d_dtype), "FP4 GEMM output is not supported!");
+  NVTE_CHECK(get_cuda_dtype(d_dtype) != CUDA_R_16F,
+             "FP4 GEMM does not support FP16 output!");
+}
+
 inline size_t grouped_gemm_setup_workspace_size(size_t num_tensors) {
   return GroupedGemmSetupWorkspace::required_setup_size(num_tensors, kGroupedGemmAlignment);
 }
@@ -341,9 +350,6 @@ inline transformer_engine::GroupedMatmulConfig parse_grouped_gemm_config(
   return config_;
 }
 
-// Select row-wise vs column-wise storage and adjust transpose flag for grouped GEMM.
-// Mirrors the non-grouped GEMM logic for FP8 layout handling (TN-only on Hopper) and
-// fallback to column-wise data when row-wise is absent.
 // Contains all information needed for GEMM setup - shape already accounts for storage layout.
 struct GroupedOperandSelection {
   TensorShapeInfo shape;  // Shape info with dims already swapped for columnwise if needed
@@ -356,9 +362,7 @@ struct GroupedOperandSelection {
   bool trans = false;
   bool rowwise = true;
   // Whether sel.shape is pre-swapped relative to the original tensor shape (i.e., whether
-  // the columnwise data was set up as a transposed view). Together with `rowwise`, this
-  // determines the canonical orientation of the underlying scale_inv buffer when computing
-  // per-tensor scale offsets in setup_grouped_gemm_kernel for non-MXFP8 recipes.
+  // the columnwise data was set up as a transposed view).
   bool swap_dims = false;
 };
 
@@ -434,9 +438,6 @@ inline OperandStorageChoice choose_grouped_operand_storage(bool trans, bool is_A
   }
 
   // FP8 block scaling on Hopper: force TN by using columnwise data with swap_dims=false.
-  // Unlike tensor scaling, block scaling has per-block scales whose offsets depend on physical
-  // dimensions. swap_dims=false keeps a_rows/b_rows = physical trailing dim = correct lda,
-  // matching how cublas_gemm sets lda = k for block scaling (cublaslt_gemm.cu).
   if (is_fp8_block && !non_tn_fp8_ok) {
     if (is_A && !trans) {
       NVTE_CHECK(has_col, "Grouped GEMM: ", name,
@@ -528,8 +529,8 @@ inline MultiTensorGroupGemmOutputArgs build_grouped_gemm_multi_out_args(
 // passed to the grouped GEMM kernel. Use-case: A --> List of Expert weights
 inline MultiTensorGroupGemmInputArgs build_grouped_gemm_multi_inputA_args(
     const NVTETensor *tensor_list, size_t list_size, bool use_rowwise, bool is_fp8,
-    int64_t *avg_first_dim, int64_t *avg_last_dim, const char *name, bool needs_scale_inv = false,
-    bool swap_dims = false) {
+    int64_t *avg_first_dim, int64_t *avg_last_dim, const char *name,
+    bool needs_scale_inv = false) {
   using namespace transformer_engine;
   MultiTensorGroupGemmInputArgs args{};
   *avg_first_dim = 0;
@@ -547,11 +548,13 @@ inline MultiTensorGroupGemmInputArgs build_grouped_gemm_multi_inputA_args(
     NVTE_CHECK(data.has_data(), "Grouped GEMM: ", name, "_list tensor ", i,
                " is missing required data.");
     args.data_ptrs[i] = data.dptr;
-    const auto logical_shape = t->shape();
-    NVTE_CHECK(logical_shape.size() == 2, "Grouped GEMM: ", name, "_list tensor ", i,
+    NVTE_CHECK(data.shape.size() == 2, "Grouped GEMM: ", name, "_list tensor ", i,
                " must be 2D.");
-    const size_t first_dim = swap_dims ? logical_shape[1] : logical_shape[0];
-    const size_t last_dim = swap_dims ? logical_shape[0] : logical_shape[1];
+    // Use physical buffer shape (matches what cuBLAS reads); for recipes whose
+    // columnwise data is transposed-rowwise storage (NVFP4, FP8 tensor/block scaling),
+    // data.shape is already pre-swapped relative to logical.
+    const size_t first_dim = data.shape[0];
+    const size_t last_dim = data.shape[1];
     args.rows[i] = static_cast<int>(last_dim);
     args.cols[i] = static_cast<int>(first_dim);
     *avg_first_dim += static_cast<int64_t>(first_dim);
@@ -1091,25 +1094,23 @@ __forceinline__ __device__ int64_t padded_nvfp4_scale_inv_bytes(int64_t first, i
   return padded_scale_dim_y * padded_scale_dim_x;
 }
 
-__forceinline__ __device__ int64_t padded_block_1d_scale_inv_floats(int64_t first, int64_t last,
-                                                                    bool effective_rowwise) {
+// FP8 block-scaling scale_inv layout matches the quantizer in get_scales(). For both rowwise
+// and columnwise directions the quantizer uses logical (rowwise-side) dims, and our grouped meta
+// passes transposed dims for columnwise data — the two swaps cancel out, so the same formula
+// in terms of (meta_first, meta_last) works regardless of direction.
+__forceinline__ __device__ int64_t padded_block_1d_scale_inv_floats(int64_t first, int64_t last) {
   constexpr int64_t kBlockLen = 128;
   constexpr int64_t kRowAlign = 4;
-  const int64_t y_dim = effective_rowwise ? last : first;
-  const int64_t x_dim = effective_rowwise ? first : last;
-  const int64_t y = (y_dim + kBlockLen - 1) / kBlockLen;
-  const int64_t x = ((x_dim + kRowAlign - 1) / kRowAlign) * kRowAlign;
+  const int64_t y = (last + kBlockLen - 1) / kBlockLen;
+  const int64_t x = ((first + kRowAlign - 1) / kRowAlign) * kRowAlign;
   return y * x;
 }
 
-__forceinline__ __device__ int64_t padded_block_2d_scale_inv_floats(int64_t first, int64_t last,
-                                                                    bool effective_rowwise) {
+__forceinline__ __device__ int64_t padded_block_2d_scale_inv_floats(int64_t first, int64_t last) {
   constexpr int64_t kBlockLen = 128;
   constexpr int64_t kRowAlign = 4;
-  const int64_t y_dim = effective_rowwise ? first : last;
-  const int64_t x_dim = effective_rowwise ? last : first;
-  const int64_t y = (y_dim + kBlockLen - 1) / kBlockLen;
-  const int64_t x_ceil = (x_dim + kBlockLen - 1) / kBlockLen;
+  const int64_t y = (first + kBlockLen - 1) / kBlockLen;
+  const int64_t x_ceil = (last + kBlockLen - 1) / kBlockLen;
   const int64_t x = ((x_ceil + kRowAlign - 1) / kRowAlign) * kRowAlign;
   return y * x;
 }
@@ -1357,13 +1358,13 @@ __global__ void setup_grouped_gemm_kernel(
             meta, idx, [](int64_t f, int64_t l) { return padded_nvfp4_scale_inv_bytes(f, l); });
         break;
       case NVTE_BLOCK_SCALING_1D:
-        float_offset = compute_grouped_scale_inv_offset(meta, idx, [=](int64_t f, int64_t l) {
-          return padded_block_1d_scale_inv_floats(f, l, op_rowwise);
+        float_offset = compute_grouped_scale_inv_offset(meta, idx, [](int64_t f, int64_t l) {
+          return padded_block_1d_scale_inv_floats(f, l);
         });
         break;
       case NVTE_BLOCK_SCALING_2D:
-        float_offset = compute_grouped_scale_inv_offset(meta, idx, [=](int64_t f, int64_t l) {
-          return padded_block_2d_scale_inv_floats(f, l, op_rowwise);
+        float_offset = compute_grouped_scale_inv_offset(meta, idx, [](int64_t f, int64_t l) {
+          return padded_block_2d_scale_inv_floats(f, l);
         });
         break;
       default:
@@ -1511,13 +1512,7 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
       inputA->num_tensors, {inputA, inputB}, alpha_tensor, beta_tensor, use_per_group_alpha_beta);
   validate_grouped_gemm_outputs(num_tensors, {inputC_raw, outputD});
 
-  // NVFP4-specific output dtype restrictions (matching non-grouped GEMM)
-  const bool use_fp4 = is_fp4_dtype(inputA->dtype()) || is_fp4_dtype(inputB->dtype());
-  if (use_fp4) {
-    NVTE_CHECK(!is_fp4_dtype(outputD->dtype()), "FP4 GEMM output is not supported!");
-    NVTE_CHECK(get_cuda_dtype(outputD->dtype()) != CUDA_R_16F,
-               "FP4 GEMM does not support FP16 output!");
-  }
+  check_fp4_output_compat(inputA->dtype(), inputB->dtype(), outputD->dtype());
 
   // If C is NULL, use D as C (valid when beta=0, cuBLAS won't read C data)
   const GroupedTensor *inputC = (inputC_raw != nullptr) ? inputC_raw : outputD;
@@ -1633,6 +1628,8 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
                "Grouped GEMM: B scales must be swizzled for GEMM (MXFP8/NVFP4).");
   }
 
+  check_fp4_output_compat(a_rep_dtype, inputB->dtype(), outputD->dtype());
+
   // Select operand storage for B (row-wise vs column-wise)
   auto B_sel = select_grouped_operand(inputB, static_cast<bool>(transb), /*is_A=*/false);
 
@@ -1662,20 +1659,13 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
   if (choice.use_rowwise) {
     NVTE_CHECK(A_list_info.all_row, "Grouped GEMM: A_list is missing row-wise data");
     A_sel.dtype = A_list_info.row_dtype;
-    a_multi_tensor_args = build_grouped_gemm_multi_inputA_args(
-        A_list, num_a_tensors, /*use_rowwise=*/true, is_fp8, &avg_first_dim, &avg_last_dim, "A",
-        /*needs_scale_inv=*/nvfp4 || fp8_block,
-        /*swap_dims=*/false);
   } else {
     NVTE_CHECK(A_list_info.all_col, "Grouped GEMM: A_list is missing column-wise data");
     A_sel.dtype = A_list_info.col_dtype;
-    // NVFP4/MXFP8 columnwise data is physically transposed (logical shape == rowwise shape);
-    // pass swap_dims so rows/cols and avg_first/last match the physical layout cuBLAS sees.
-    a_multi_tensor_args = build_grouped_gemm_multi_inputA_args(
-        A_list, num_a_tensors, /*use_rowwise=*/false, is_fp8, &avg_first_dim, &avg_last_dim, "A",
-        /*needs_scale_inv=*/nvfp4 || fp8_block,
-        /*swap_dims=*/choice.swap_dims);
   }
+  a_multi_tensor_args = build_grouped_gemm_multi_inputA_args(
+      A_list, num_a_tensors, choice.use_rowwise, is_fp8, &avg_first_dim, &avg_last_dim, "A",
+      /*needs_scale_inv=*/nvfp4 || fp8_block);
 
   // Discrete A_list: per-tensor pointers come from `a_multi_tensor_args` (data/scale/amax).
   A_sel.scale_inv = nullptr;
@@ -1751,6 +1741,8 @@ void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
 
   const Tensor *d0 = convertNVTETensorCheck(D_list[0]);
   const DType d_dtype = d0->dtype();
+
+  check_fp4_output_compat(inputA->dtype(), inputB->dtype(), d_dtype);
 
   const size_t num_tensors = validate_grouped_gemm_inputs(
       inputA->num_tensors, {inputA, inputB}, alpha_tensor, beta_tensor, use_per_group_alpha_beta);
