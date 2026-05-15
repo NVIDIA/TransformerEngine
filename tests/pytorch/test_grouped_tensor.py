@@ -171,6 +171,21 @@ class TestGroupedTensor:
             pytest.param([0, 3, 5, 0], 11, id="zero_edges"),
             pytest.param([1], 17, id="single_group"),
             pytest.param([1, 2, 3, 4, 5, 6, 7, 8], 13, id="many_groups"),
+            # MoE-style group counts. ``split_points`` (an int32[num_groups]
+            # tensor packed into a shared buffer alongside int64 outputs) used
+            # to land at an 8-byte-aligned offset for these counts, which
+            # tripped cuDNN's 16-byte alignment requirement in grouped GEMM.
+            pytest.param([8192] * 8, 2048, id="num_groups_8_uniform"),
+            pytest.param([4096] * 16, 4096, id="num_groups_16_uniform"),
+            pytest.param([2048] * 32, 7168, id="num_groups_32_uniform"),
+            pytest.param([1024] * 64, 7168, id="num_groups_64_uniform"),
+            pytest.param([512] * 128, 7168, id="num_groups_128_uniform"),
+            # Non-uniform with large totals to also exercise tensor_offsets > 2^31.
+            pytest.param(
+                [12345, 0, 8192, 1, 65536, 100, 131072, 7],
+                7168,
+                id="non_uniform_large_totals",
+            ),
         ],
     )
     @pytest.mark.parametrize("input_dtype", [torch.int32, torch.int64], ids=["int32", "int64"])
@@ -210,6 +225,22 @@ class TestGroupedTensor:
         assert torch.equal(base_offsets, expected_base_offsets)
         assert torch.equal(split_points, expected_split_points)
         assert torch.equal(tensor_offsets, expected_tensor_offsets)
+
+        # cuDNN CuTe-DSL grouped GEMM kernels require 16-byte-aligned data
+        # pointers for every tensor argument. ``split_points`` used to land at
+        # an 8-byte-aligned offset inside the bulk buffer; pin the fix here so
+        # any regression in ``prepare_grouped_splits`` / ``bulk_allocate``
+        # alignment is caught immediately instead of surfacing as a runtime
+        # "Misaligned Tensor data" error from cuDNN.
+        for name, tensor in (
+            ("split_sizes_i64", split_sizes_i64),
+            ("base_offsets", base_offsets),
+            ("split_points", split_points),
+            ("tensor_offsets", tensor_offsets),
+        ):
+            assert tensor.data_ptr() % 16 == 0, (
+                f"{name} data_ptr is not 16-byte aligned: {tensor.data_ptr():#x}"
+            )
 
     def test_split_into_quantized_tensors_no_quantization(self) -> None:
         """Test split_into_quantized_tensors for unquantized tensors"""
