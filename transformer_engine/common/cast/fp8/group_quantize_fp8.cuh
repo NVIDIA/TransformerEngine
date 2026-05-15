@@ -14,8 +14,11 @@
 #include <cuda_runtime.h>
 #include <transformer_engine/transformer_engine.h>
 
+#include <type_traits>
+
 #include "../../common.h"
 #include "../../util/math.h"
+#include "../../util/ptx.cuh"
 #include "../../utils.cuh"
 #include "../core/common.cuh"
 
@@ -28,8 +31,115 @@ using namespace dispatch::common;
 
 constexpr size_t WARPS_PER_TILE = 4;
 constexpr size_t THREADS_PER_TILE = THREADS_PER_WARP * WARPS_PER_TILE;
-constexpr size_t LOAD_SIZE_BYTES = 8;
+constexpr size_t ROWWISE_LOAD_SIZE_BYTES = 16;
+constexpr size_t TRANSPOSE_LOAD_SIZE_BYTES = 8;
 constexpr size_t STORE_SIZE_BYTES = 8;
+
+template <typename IType, typename OType>
+struct supports_fast_scaled_fp8_cvt_4 {
+  static constexpr bool value =
+      (std::is_same<IType, bf16>::value || std::is_same<IType, fp16>::value ||
+       std::is_same<IType, fp32>::value) &&
+      (std::is_same<OType, fp8e4m3>::value || std::is_same<OType, fp8e5m2>::value);
+};
+
+template <typename IType, typename OType>
+__device__ __forceinline__ void fast_scaled_fp8_cvt_4(const IType *input, OType *output,
+                                                      const float scale) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  const ptx::floatx2 scale_2x{scale, scale};
+  if constexpr (std::is_same<IType, bf16>::value) {
+    const ptx::bf16x4 in{input[0], input[1], input[2], input[3]};
+    if constexpr (std::is_same<OType, fp8e4m3>::value) {
+      ptx::fp8e4m3x4 out;
+      ptx::mul_cvt_4x(out, in, scale_2x);
+      output[0] = out.x1;
+      output[1] = out.x2;
+      output[2] = out.x3;
+      output[3] = out.x4;
+    } else {
+      ptx::fp8e5m2x4 out;
+      ptx::mul_cvt_4x(out, in, scale_2x);
+      output[0] = out.x1;
+      output[1] = out.x2;
+      output[2] = out.x3;
+      output[3] = out.x4;
+    }
+  } else if constexpr (std::is_same<IType, fp16>::value) {
+    const ptx::fp16x4 in{input[0], input[1], input[2], input[3]};
+    if constexpr (std::is_same<OType, fp8e4m3>::value) {
+      ptx::fp8e4m3x4 out;
+      ptx::mul_cvt_4x(out, in, scale_2x);
+      output[0] = out.x1;
+      output[1] = out.x2;
+      output[2] = out.x3;
+      output[3] = out.x4;
+    } else {
+      ptx::fp8e5m2x4 out;
+      ptx::mul_cvt_4x(out, in, scale_2x);
+      output[0] = out.x1;
+      output[1] = out.x2;
+      output[2] = out.x3;
+      output[3] = out.x4;
+    }
+  } else if constexpr (std::is_same<IType, fp32>::value) {
+    const ptx::floatx4 in{input[0], input[1], input[2], input[3]};
+    if constexpr (std::is_same<OType, fp8e4m3>::value) {
+      ptx::fp8e4m3x4 out;
+      ptx::mul_cvt_4x(out, in, scale_2x);
+      output[0] = out.x1;
+      output[1] = out.x2;
+      output[2] = out.x3;
+      output[3] = out.x4;
+    } else {
+      ptx::fp8e5m2x4 out;
+      ptx::mul_cvt_4x(out, in, scale_2x);
+      output[0] = out.x1;
+      output[1] = out.x2;
+      output[2] = out.x3;
+      output[3] = out.x4;
+    }
+  }
+#else
+  (void)input;
+  (void)output;
+  (void)scale;
+#endif
+}
+
+template <bool IS_ACT, typename ParamOP, float (*OP)(float, const ParamOP &), typename IType,
+          typename OType, size_t NUM_ELTS>
+__device__ __forceinline__ void scaled_fp8_cvt_vec(const Vec<IType, NUM_ELTS> &input,
+                                                   Vec<OType, NUM_ELTS> &output,
+                                                   const size_t valid_cols, const float scale) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  constexpr bool kUseFastCvt = !IS_ACT && (NUM_ELTS % 4 == 0) &&
+                               supports_fast_scaled_fp8_cvt_4<IType, OType>::value;
+#else
+  constexpr bool kUseFastCvt = false;
+#endif
+
+  if constexpr (kUseFastCvt) {
+    if (valid_cols == NUM_ELTS) {
+#pragma unroll
+      for (size_t base = 0; base < NUM_ELTS; base += 4) {
+        fast_scaled_fp8_cvt_4(input.data.elt + base, output.data.elt + base, scale);
+      }
+      return;
+    }
+  }
+
+#pragma unroll
+  for (size_t j = 0; j < NUM_ELTS; ++j) {
+    if (j < valid_cols) {
+      float elt = static_cast<float>(input.data.elt[j]);
+      if constexpr (IS_ACT) {
+        elt = OP(elt, {});
+      }
+      output.data.elt[j] = static_cast<OType>(elt * scale);
+    }
+  }
+}
 
 template <bool IS_ACT, typename ParamOP, float (*OP)(float, const ParamOP &), typename IType,
           typename OType, ScalingType SCALING_TYPE, ShapeRepresentation SHAPE_REP>
@@ -47,6 +157,8 @@ __global__ void __launch_bounds__(THREADS_PER_TILE) group_cast_fp8_kernel(
       (SCALING_TYPE == ScalingType::ROWWISE) || (SCALING_TYPE == ScalingType::BIDIMENSIONAL);
   constexpr bool COLWISE_OUTPUT =
       (SCALING_TYPE == ScalingType::COLWISE) || (SCALING_TYPE == ScalingType::BIDIMENSIONAL);
+  constexpr size_t LOAD_SIZE_BYTES =
+      COLWISE_OUTPUT ? TRANSPOSE_LOAD_SIZE_BYTES : ROWWISE_LOAD_SIZE_BYTES;
   constexpr size_t nvec_in = LOAD_SIZE_BYTES / sizeof(IType);
   constexpr size_t nvec_out = STORE_SIZE_BYTES / sizeof(OType);
   constexpr size_t tile_dim_m = THREADS_PER_WARP * nvec_out;
@@ -113,60 +225,58 @@ __global__ void __launch_bounds__(THREADS_PER_TILE) group_cast_fp8_kernel(
   const size_t tidx = tid % THREADS_PER_WARP;
   const size_t tidy = tid / THREADS_PER_WARP;
 
-  OVecT local_output_t[nvec_in][num_iterations];
+  if constexpr (COLWISE_OUTPUT) {
+    __shared__ OVecT shared_output_t[nvec_in][THREADS_PER_WARP][THREADS_PER_WARP + 1];
 
 #pragma unroll
-  for (size_t iter = 0; iter < num_iterations; ++iter) {
-    const size_t i1 = tidy + iter * WARPS_PER_TILE;
-    const size_t j1 = tidx;
-#pragma unroll
-    for (size_t i2 = 0; i2 < nvec_out; ++i2) {
-      const size_t row = tile_row + i1 * nvec_out + i2;
-      const size_t col = tile_col + j1 * nvec_in;
-      if (row < rows) {
-        IVecT local_input;
-        OVecC local_output;
-        const size_t valid_cols =
-            col < cols ? ((cols - col) < nvec_in ? (cols - col) : nvec_in) : 0;
-        if (valid_cols == 0) {
-          continue;
-        }
-        local_input.load_from_elts(input + tensor_base + row * cols + col, 0, valid_cols);
+    for (size_t iter = 0; iter < num_iterations; ++iter) {
+      const size_t i1 = tidy + iter * WARPS_PER_TILE;
+      const size_t j1 = tidx;
+      const size_t base_row = tile_row + i1 * nvec_out;
+      const size_t base_col = tile_col + j1 * nvec_in;
+      const bool full_fragment = (base_row + nvec_out <= rows) && (base_col + nvec_in <= cols);
+      OVecT local_output_t[nvec_in];
+      if (!full_fragment) {
 #pragma unroll
         for (size_t j2 = 0; j2 < nvec_in; ++j2) {
-          if (j2 < valid_cols) {
-            float elt = static_cast<float>(local_input.data.elt[j2]);
-            if constexpr (IS_ACT) {
-              elt = OP(elt, {});
-            }
-            const OType out = static_cast<OType>(elt * scale);
-            if constexpr (ROWWISE_OUTPUT) {
-              local_output.data.elt[j2] = out;
-            }
-            if constexpr (COLWISE_OUTPUT) {
-              local_output_t[j2][iter].data.elt[i2] = out;
+          local_output_t[j2].clear();
+        }
+      }
+#pragma unroll
+      for (size_t i2 = 0; i2 < nvec_out; ++i2) {
+        const size_t row = base_row + i2;
+        const size_t col = base_col;
+        if (row < rows) {
+          IVecT local_input;
+          OVecC local_output;
+          const size_t valid_cols =
+              col < cols ? ((cols - col) < nvec_in ? (cols - col) : nvec_in) : 0;
+          if (valid_cols == 0) {
+            continue;
+          }
+          local_input.load_from_elts(input + tensor_base + row * cols + col, 0, valid_cols);
+          scaled_fp8_cvt_vec<IS_ACT, ParamOP, OP>(local_input, local_output, valid_cols, scale);
+          if constexpr (ROWWISE_OUTPUT) {
+            local_output.store_to_elts(output_rowwise + tensor_base + row * cols + col, 0,
+                                       valid_cols);
+          }
+#pragma unroll
+          for (size_t j2 = 0; j2 < nvec_in; ++j2) {
+            if (j2 < valid_cols) {
+              local_output_t[j2].data.elt[i2] = local_output.data.elt[j2];
             }
           }
         }
-        if constexpr (ROWWISE_OUTPUT) {
-          local_output.store_to_elts(output_rowwise + tensor_base + row * cols + col, 0,
-                                     valid_cols);
-        }
+      }
+#pragma unroll
+      for (size_t j2 = 0; j2 < nvec_in; ++j2) {
+        shared_output_t[j2][j1][i1] = local_output_t[j2];
       }
     }
-  }
+    __syncthreads();
 
-  if constexpr (COLWISE_OUTPUT) {
-    __shared__ OVecT shared_output_t[THREADS_PER_WARP][THREADS_PER_WARP + 1];
 #pragma unroll
     for (size_t j2 = 0; j2 < nvec_in; ++j2) {
-#pragma unroll
-      for (size_t iter = 0; iter < num_iterations; ++iter) {
-        const size_t i1 = tidy + iter * WARPS_PER_TILE;
-        const size_t j1 = tidx;
-        shared_output_t[j1][i1] = local_output_t[j2][iter];
-      }
-      __syncthreads();
 #pragma unroll
       for (size_t iter = 0; iter < num_iterations; ++iter) {
         const size_t i1 = tidx;
@@ -177,12 +287,35 @@ __global__ void __launch_bounds__(THREADS_PER_TILE) group_cast_fp8_kernel(
           const size_t valid_rows =
               row < rows ? ((rows - row) < nvec_out ? (rows - row) : nvec_out) : 0;
           if (valid_rows > 0) {
-            shared_output_t[j1][i1].store_to_elts(
+            shared_output_t[j2][j1][i1].store_to_elts(
                 output_colwise + tensor_base + col * rows + row, 0, valid_rows);
           }
         }
       }
-      __syncthreads();
+    }
+  } else {
+#pragma unroll
+    for (size_t iter = 0; iter < num_iterations; ++iter) {
+      const size_t i1 = tidy + iter * WARPS_PER_TILE;
+      const size_t j1 = tidx;
+#pragma unroll
+      for (size_t i2 = 0; i2 < nvec_out; ++i2) {
+        const size_t row = tile_row + i1 * nvec_out + i2;
+        const size_t col = tile_col + j1 * nvec_in;
+        if (row < rows) {
+          IVecT local_input;
+          OVecC local_output;
+          const size_t valid_cols =
+              col < cols ? ((cols - col) < nvec_in ? (cols - col) : nvec_in) : 0;
+          if (valid_cols == 0) {
+            continue;
+          }
+          local_input.load_from_elts(input + tensor_base + row * cols + col, 0, valid_cols);
+          scaled_fp8_cvt_vec<IS_ACT, ParamOP, OP>(local_input, local_output, valid_cols, scale);
+          local_output.store_to_elts(output_rowwise + tensor_base + row * cols + col, 0,
+                                     valid_cols);
+        }
+      }
     }
   }
 }
@@ -267,32 +400,38 @@ void group_quantize(const GroupedTensor *input, const Tensor *noop, GroupedTenso
       input->dtype(), IType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
           output->dtype(), OType,
-          constexpr size_t nvec_in = LOAD_SIZE_BYTES / sizeof(IType);
-          constexpr size_t tile_dim_n = THREADS_PER_WARP * nvec_in;
-          const size_t work_blocks_X = DIVUP(last_logical_dim, tile_dim_n);
-          const dim3 grid(work_blocks_X, work_blocks_Y);
           TRANSFORMER_ENGINE_SCALING_TYPE_SWITCH(
               scaling_type, SCALING_TYPE,
-              TRANSFORMER_ENGINE_GROUP_TENSOR_SHAPE_REPRESENTATION_SWITCH(
-                  shape_rep, SHAPE_REP,
-                  {
-                    if constexpr (SHAPE_REP == ShapeRepresentation::VARYING_FIRST_DIM) {
-                      NVTE_CHECK(offsets_ptr != nullptr && first_dims_ptr != nullptr,
-                                 "Varying first-dimension grouped FP8 quantization requires "
-                                 "first_dims and tensor_offsets.");
-                    }
-                    group_cast_fp8_kernel<IS_ACT, ParamOP, OP, IType, OType, SCALING_TYPE,
-                                          SHAPE_REP><<<grid, block, 0, stream>>>(
-                        reinterpret_cast<const IType *>(input->data.dptr),
-                        use_rowwise_output ? reinterpret_cast<OType *>(output->data.dptr)
-                                           : nullptr,
-                        use_colwise_output
-                            ? reinterpret_cast<OType *>(output->columnwise_data.dptr)
-                            : nullptr,
-                        scale_ptr, noop_ptr, num_tensors, first_logical_dim, last_logical_dim,
-                        offsets_ptr, first_dims_ptr);
-                    NVTE_CHECK_CUDA(cudaGetLastError());
-                  })));  // NOLINT(*)
+              {
+                constexpr bool colwise_output = (SCALING_TYPE == ScalingType::COLWISE) ||
+                                                (SCALING_TYPE == ScalingType::BIDIMENSIONAL);
+                constexpr size_t load_size_bytes =
+                    colwise_output ? TRANSPOSE_LOAD_SIZE_BYTES : ROWWISE_LOAD_SIZE_BYTES;
+                constexpr size_t nvec_in = load_size_bytes / sizeof(IType);
+                constexpr size_t tile_dim_n = THREADS_PER_WARP * nvec_in;
+                const size_t work_blocks_X = DIVUP(last_logical_dim, tile_dim_n);
+                const dim3 grid(work_blocks_X, work_blocks_Y);
+                TRANSFORMER_ENGINE_GROUP_TENSOR_SHAPE_REPRESENTATION_SWITCH(
+                    shape_rep, SHAPE_REP,
+                    {
+                      if constexpr (SHAPE_REP == ShapeRepresentation::VARYING_FIRST_DIM) {
+                        NVTE_CHECK(offsets_ptr != nullptr && first_dims_ptr != nullptr,
+                                   "Varying first-dimension grouped FP8 quantization requires "
+                                   "first_dims and tensor_offsets.");
+                      }
+                      group_cast_fp8_kernel<IS_ACT, ParamOP, OP, IType, OType, SCALING_TYPE,
+                                            SHAPE_REP><<<grid, block, 0, stream>>>(
+                          reinterpret_cast<const IType *>(input->data.dptr),
+                          use_rowwise_output ? reinterpret_cast<OType *>(output->data.dptr)
+                                             : nullptr,
+                          use_colwise_output
+                              ? reinterpret_cast<OType *>(output->columnwise_data.dptr)
+                              : nullptr,
+                          scale_ptr, noop_ptr, num_tensors, first_logical_dim, last_logical_dim,
+                          offsets_ptr, first_dims_ptr);
+                      NVTE_CHECK_CUDA(cudaGetLastError());
+                    });
+              }));  // NOLINT(*)
   );                     // NOLINT(*)
 }
 
