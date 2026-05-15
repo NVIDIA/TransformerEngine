@@ -1564,6 +1564,23 @@ def test_score_mod_cache_explicit_key_distinguishes_topology():
     assert key_0 != key_2
 
 
+def test_score_mod_cache_module_lambda_keys_do_not_collide():
+    """Module-level lambdas should not reuse graphs only because qualnames match."""
+    score_mod_0 = lambda _graph, score_tensor, _tensors: score_tensor  # noqa: E731
+    score_mod_1 = lambda _graph, score_tensor, _tensors: score_tensor  # noqa: E731
+    score_mod_0.__module__ = __name__
+    score_mod_1.__module__ = __name__
+    score_mod_0.__qualname__ = "<lambda>"
+    score_mod_1.__qualname__ = "<lambda>"
+
+    key_0 = dpa_backends._score_mod_callback_cache_key(score_mod_0)
+    key_1 = dpa_backends._score_mod_callback_cache_key(score_mod_1)
+
+    assert key_0 is not dpa_backends._SCORE_MOD_UNCACHEABLE
+    assert key_1 is not dpa_backends._SCORE_MOD_UNCACHEABLE
+    assert key_0 != key_1
+
+
 def test_score_mod_cache_key_ignores_pass_by_value_values():
     """Scalar CPU tensor values are runtime inputs, not execution-plan metadata."""
     q, k, v, o, stats = _score_mod_cache_cpu_inputs()

@@ -1335,9 +1335,11 @@ def _score_mod_explicit_cache_key(callback_owner: Any) -> Optional[Any]:
 def _score_mod_callback_cache_key(callback: Optional[Callable]) -> Any:
     """Create a stable graph cache key for a score_mod callable.
 
-    Module-level functions are assumed to have stable topology. Stateful bound methods and
-    callable instances need an explicit score_mod_graph_cache_key(); otherwise their graphs
-    are left uncached to avoid reusing stale graphs after Python object address reuse.
+    Module-level named functions are assumed to have stable topology. Anonymous functions
+    are keyed by code object because lambdas in the same module can share the same
+    qualname. Stateful bound methods and callable instances need an explicit
+    score_mod_graph_cache_key(); otherwise their graphs are left uncached to avoid reusing
+    stale graphs after Python object address reuse.
     """
     if callback is None:
         return None
@@ -1370,6 +1372,8 @@ def _score_mod_callback_cache_key(callback: Optional[Callable]) -> Any:
         and callback.__closure__ is None
         and "<locals>" not in callback.__qualname__
     ):
+        if callback.__name__ == "<lambda>" or not callback.__qualname__:
+            return ("function", callback.__module__, callback.__code__)
         return ("function", callback.__module__, callback.__qualname__)
 
     return _SCORE_MOD_UNCACHEABLE
