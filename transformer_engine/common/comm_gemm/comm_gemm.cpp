@@ -189,7 +189,7 @@ void GemmRsInitMatrices(NVTECommGemmCtx* ctx, int64_t* ldd, int64_t m, int64_t n
   }
   // B is (K/P, N) local -- K is distributed across ranks, N is fully replicated.
   if (transb) {
-    NVTE_CHECK(b0 == n, "Unsupported tensor dimension in B: expected ", n, ", got ", b0);
+    NVTE_CHECK(b1 == n, "Unsupported tensor dimension in B: expected ", n, ", got ", b1);
     NVTE_CHECK_CUBLASMP(cublasMpMatrixDescriptorInit(n, k, block_size(ctx, n), block_size(ctx, k),
                                                      0, 0, n, get_cuda_dtype(b->dtype()),
                                                      ctx->grid_row_major.get(), ctx->b_desc.get()));
@@ -274,10 +274,33 @@ void cublasmp_gemm(InitMatricesFn init_matrices_fn, NVTECommGemmCtx* ctx, NVTECo
                "Unsupported scaling mode: " + std::to_string(t->scaling_mode));
   }
 
+  // cuBLASMp only supports TN format for FP8 GEMM on Hopper. If an FP8 input is not in the
+  // expected transpose orientation, swap to its columnwise (transposed) data and flip the
+  // transpose flag, mirroring the canonicalization in cublaslt_gemm.cu's CanonicalizeGemmInput.
+  auto reroute_fp8_input = [](const Tensor* t, bool current_trans, bool want_trans,
+                              const char* side) -> std::pair<Tensor, bool> {
+    if (current_trans == want_trans || !is_fp8_dtype(t->dtype())) {
+      return {*t, current_trans};
+    }
+    NVTE_CHECK(t->has_columnwise_data(), "cuBLASMp FP8 GEMM requires ", side,
+               " columnwise data when transpose flag is not in TN orientation");
+    Tensor swapped = *t;
+    swapped.data = t->columnwise_data;
+    swapped.scale_inv = t->columnwise_scale_inv;
+    return {swapped, want_trans};
+  };
+
+  auto [a_rerouted, transa_eff] = reroute_fp8_input(a, transa, /*want_trans=*/true, "A");
+  auto [b_rerouted, transb_eff] = reroute_fp8_input(b, transb, /*want_trans=*/false, "B");
+  const Tensor* a_used = is_fp8_dtype(a->dtype()) ? &a_rerouted : a;
+  const Tensor* b_used = is_fp8_dtype(b->dtype()) ? &b_rerouted : b;
+  transa = transa_eff;
+  transb = transb_eff;
+
   NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorInit(ctx->matmul_desc.get(), CUBLAS_COMPUTE_32F));
 
   int64_t ldd{};
-  init_matrices_fn(ctx, &ldd, m, n, k, a, b, d, transa, transb);
+  init_matrices_fn(ctx, &ldd, m, n, k, a_used, b_used, d, transa, transb);
 
   const cublasOperation_t trans_a = transa ? CUBLAS_OP_T : CUBLAS_OP_N;
   const cublasOperation_t trans_b = transb ? CUBLAS_OP_T : CUBLAS_OP_N;
@@ -293,23 +316,23 @@ void cublasmp_gemm(InitMatricesFn init_matrices_fn, NVTECommGemmCtx* ctx, NVTECo
       sizeof algo_attr));
 
   const cublasMpMatmulMatrixScale_t scale_mode = CUBLASMP_MATMUL_MATRIX_SCALE_SCALAR_FP32;
-  if (is_fp8_dtype(a->dtype())) {
-    NVTE_CHECK(a->scale_inv.dptr, "Scaling must be set for FP8 dtype");
+  if (is_fp8_dtype(a_used->dtype())) {
+    NVTE_CHECK(a_used->scale_inv.dptr, "Scaling must be set for FP8 dtype");
     NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorSetAttribute(
         ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_A_SCALE_MODE, &scale_mode,
         sizeof scale_mode));
     NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorSetAttribute(
         ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_A_SCALE_POINTER,
-        &a->scale_inv.dptr, sizeof(void*)));
+        &a_used->scale_inv.dptr, sizeof(void*)));
   }
-  if (is_fp8_dtype(b->dtype())) {
-    NVTE_CHECK(b->scale_inv.dptr, "Scaling must be set for FP8 dtype");
+  if (is_fp8_dtype(b_used->dtype())) {
+    NVTE_CHECK(b_used->scale_inv.dptr, "Scaling must be set for FP8 dtype");
     NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorSetAttribute(
         ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_B_SCALE_MODE, &scale_mode,
         sizeof scale_mode));
     NVTE_CHECK_CUBLASMP(cublasMpMatmulDescriptorSetAttribute(
         ctx->matmul_desc.get(), CUBLASMP_MATMUL_DESCRIPTOR_ATTRIBUTE_B_SCALE_POINTER,
-        &b->scale_inv.dptr, sizeof(void*)));
+        &b_used->scale_inv.dptr, sizeof(void*)));
   }
   if (is_fp8_dtype(d->dtype())) {
     NVTE_CHECK(d->scale.dptr, "Scaling must be set for FP8 dtype");
@@ -408,11 +431,11 @@ void cublasmp_gemm(InitMatricesFn init_matrices_fn, NVTECommGemmCtx* ctx, NVTECo
                   n,
                   k,
                   &alpha,
-                  a->data.dptr,
+                  a_used->data.dptr,
                   1,
                   1,
                   ctx->a_desc.get(),
-                  b->data.dptr,
+                  b_used->data.dptr,
                   1,
                   1,
                   ctx->b_desc.get(),

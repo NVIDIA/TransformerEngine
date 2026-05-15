@@ -521,6 +521,13 @@ def _linear_forward_impl(
         nvtx_range_pop(f"{nvtx_label}.row_parallel_comm")
     else:
         out = gemm_out
+        
+    # Restore the input's logical rank (e.g., (seq, batch, hidden)) on the output.
+    # This is mainly to correct for cuBLASMp comm+GEMM operators that unconditionally
+    # return a 2D output buffer that ends up incompatible with downstream consumers
+    # (e.g. ``bias_dropout_add`` residual connections inside ``TransformerLayer``).
+    out = out.view(-1, *inp.shape[1:-1], out_features)
+    
     # ------------------------------------------------------
     # Output tensor is ready to return...
     # ------------------------------------------------------
@@ -798,7 +805,7 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
                 # Overlap dgrad reduce-scatter with wgrad compute
                 ub_obj_wgrad = get_ub(bwd_args.ub_name + "_wgrad", bwd_args.fp8)
                 ub_type_wgrad = tex.CommOverlapType.RS
-
+                
         # --------------------------------------------------
         # Prepare grad output tensor
         # Note: Cast to expected dtype and perform tensor-parallel communication
@@ -1013,7 +1020,13 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
             # Prepare grad input tensor
             # Note: Perform tensor-parallel communication
             if bwd_args.ub_overlap_rs_dgrad:
-                dgrad = reduce_scatter_out
+                # cuBLASMp writes the reduce-scattered dgrad directly into the
+                # GEMM output tensor; Userbuffers uses the extra-output buffer.
+                dgrad = (
+                    gemm_out
+                    if ub_obj_dgrad is not None and ub_obj_dgrad.with_cublasmp()
+                    else reduce_scatter_out
+                )
             elif bwd_args.ub_bulk_wgrad:
                 dgrad = ub_obj_wgrad.get_buffer(local_chunk=True)
             elif bwd_args.parallel_mode == "column" and bwd_args.tp_size > 1:
@@ -1037,14 +1050,22 @@ def _linear_backward(args: LinearBwdArgs) -> Tuple[Union[torch.Tensor, None], ..
 
         # cuBLASMp's AG+GEMM consumes the gathered grad_output inline and does
         # not preserve it for wgrad. Userbuffers leaves the gathered tensor in
-        # its persistent buffer; cuBLASMp does not, so we gather here.
+        # its persistent buffer; cuBLASMp does not, so we gather here. Route
+        # through the same FP8-aware all-gather as the non-overlap path in
+        # ``TransformerEngineBaseModule.grad_output_preprocess`` by passing the
+        # grad_output quantizer. The columnwise data needed for wgrad is then
+        # produced by ``update_usage(columnwise_usage=True)`` further below.
         if (
-            ctx.requires_wgrad
-            and ctx.ub_overlap_ag
-            and ctx.ub_obj_gradout is not None
-            and ctx.ub_obj_gradout.with_cublasmp()
+            bwd_args.requires_wgrad
+            and bwd_args.ub_overlap_ag
+            and bwd_args.ub_obj_gradout is not None
+            and bwd_args.ub_obj_gradout.with_cublasmp()
         ):
-            grad_output, _ = gather_along_first_dim(grad_output, ctx.tp_group)
+            if grad_output_quantizer is not None:
+                grad_output_quantizer.set_usage(rowwise=True, columnwise=False)
+            grad_output, _ = gather_along_first_dim(
+                grad_output, bwd_args.tp_group, quantizer=grad_output_quantizer,
+            )
 
         # --------------------------------------------------
         # Compute grad weight

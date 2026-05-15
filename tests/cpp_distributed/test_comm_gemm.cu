@@ -359,84 +359,49 @@ class CommGemmFixure : public ::testing::TestWithParam<Params> {
                                  out_ref.size() * sizeof(out_ref[0]), cudaMemcpyDefault));
       out_golden = CastToFloat(out_ref);
     } else {
-      // RS/AR reference: local partial GEMM (with bias) then float reduce.
-      //
-      // Epilogue ordering in the fused cuBLASMp kernel:
-      // - AllReduce: BIAS applied per-rank before AR, output = sum_r(A_r@B_r + bias) = sum_r(A_r@B_r) + nranks*bias
-      //              -> no bias correction needed in ref
-      // - ReduceScatter: RS happens first, then BIAS applied once,
-      //                  output = sum_r(A_r@B_r)_shard + bias
-      //                  -> ref needs to subtract (nranks-1)*bias after RS
-      //
-      // Use DType for partial GEMM (conservative approach: guarantees cublasLt works for FP8 inputs)
-      // TODO: Use float for non-FP8 types to avoid intermediate quantization when tol is tight
+      transformer_engine::TensorWrapper empty_bias(nullptr, std::vector<size_t>{0},
+                                                   TypeInfo<BiasType>::dtype);
       auto d_partial = Make<DType>(m, n, d_scale);
       auto aux_partial = Make<DType>(m, n, d_scale);
-      nvte_cublas_gemm(a.data(), b.data(), d_partial.data(), bias.data(), aux_partial.data(),
-                       transa, transb, grad, workspace.data(), accumulate,
+      nvte_cublas_gemm(a.data(), b.data(), d_partial.data(), empty_bias.data(),
+                       aux_partial.data(), transa, transb, grad, workspace.data(), accumulate,
                        true /* use_split_accumulator */, 0 /* math_sm_count */, stream);
 
+      std::vector<DType> partial_host(m * n);
+      NVTE_CHECK_CUDA(cudaMemcpy(partial_host.data(), d_partial.rowwise_dptr(),
+                                 partial_host.size() * sizeof(partial_host[0]),
+                                 cudaMemcpyDefault));
+      std::vector<float> partial_float = CastToFloat(partial_host);
+
+      auto d_partial_float = Make<float>(m, n, 1.0f);
+      NVTE_CHECK_CUDA(cudaMemcpy(d_partial_float.rowwise_dptr(), partial_float.data(),
+                                 partial_float.size() * sizeof(float), cudaMemcpyDefault));
+
+      std::vector<float> reduced;
       if (overlap_type() == OverlapType::kReduceScatter) {
-        // RS: use NCCL ReduceScatter in float precision to match kernel behavior
-        std::vector<DType> partial_host(m * n);
-        NVTE_CHECK_CUDA(cudaMemcpy(partial_host.data(), d_partial.rowwise_dptr(),
-                                   partial_host.size() * sizeof(partial_host[0]),
-                                   cudaMemcpyDefault));
-        std::vector<float> partial_float = CastToFloat(partial_host);
-
-        // Create float buffers for ReduceScatter
-        auto d_partial_float = Make<float>(m, n, 1.0f);
-        NVTE_CHECK_CUDA(cudaMemcpy(d_partial_float.rowwise_dptr(), partial_float.data(),
-                                   partial_float.size() * sizeof(float), cudaMemcpyDefault));
-
-        // Create output buffer for scattered results
         auto d_reduced_float = Make<float>(dims.d_rows_num, dims.d_cols_num, 1.0f);
-
         CHECK_NCCL(ncclReduceScatter(d_partial_float.rowwise_dptr(), d_reduced_float.rowwise_dptr(),
                                      dims.d_rows_num * dims.d_cols_num, ncclFloat, ncclSum,
                                      comm_, stream));
 
-        std::vector<float> reduced_scattered(dims.d_rows_num * dims.d_cols_num);
-        NVTE_CHECK_CUDA(cudaMemcpy(reduced_scattered.data(), d_reduced_float.rowwise_dptr(),
-                                   reduced_scattered.size() * sizeof(float), cudaMemcpyDefault));
-
-        // RS fused kernel applies bias once after RS; reference added bias per-rank,
-        // so subtract (nranks-1)*bias to match.
-        if (nranks_ > 1) {
-          const float correction = static_cast<float>(nranks_ - 1);
-          for (size_t col = 0; col < dims.d_cols_num; ++col) {
-            for (size_t row = 0; row < m; ++row) {
-              reduced_scattered[col * m + row] -=
-                  correction * static_cast<float>(biasdata[row]);
-            }
-          }
-        }
-        out_golden = std::move(reduced_scattered);
+        reduced.resize(dims.d_rows_num * dims.d_cols_num);
+        NVTE_CHECK_CUDA(cudaMemcpy(reduced.data(), d_reduced_float.rowwise_dptr(),
+                                   reduced.size() * sizeof(float), cudaMemcpyDefault));
       } else {
-        // AR: use NCCL AllReduce in float precision to match kernel's mixed-precision behavior
-        // (kernel likely does AR in float internally, then quantizes output)
-        std::vector<DType> partial_host(m * n);
-        NVTE_CHECK_CUDA(cudaMemcpy(partial_host.data(), d_partial.rowwise_dptr(),
-                                   partial_host.size() * sizeof(partial_host[0]),
-                                   cudaMemcpyDefault));
-        std::vector<float> partial_float = CastToFloat(partial_host);
-
-        // Create float buffers for AllReduce
-        auto d_partial_float = Make<float>(m, n, 1.0f);
-        NVTE_CHECK_CUDA(cudaMemcpy(d_partial_float.rowwise_dptr(), partial_float.data(),
-                                   partial_float.size() * sizeof(float), cudaMemcpyDefault));
-
         CHECK_NCCL(ncclAllReduce(d_partial_float.rowwise_dptr(), d_partial_float.rowwise_dptr(),
                                  m * n, ncclFloat, ncclSum, comm_, stream));
 
-        std::vector<float> partial_host_float(m * n);
-        NVTE_CHECK_CUDA(cudaMemcpy(partial_host_float.data(), d_partial_float.rowwise_dptr(),
-                                   partial_host_float.size() * sizeof(float), cudaMemcpyDefault));
-
-        // AR fused kernel applies bias per-rank before AR; reference does the same,
-        // so no correction needed.
-        out_golden = std::move(partial_host_float);
+        reduced.resize(m * n);
+        NVTE_CHECK_CUDA(cudaMemcpy(reduced.data(), d_partial_float.rowwise_dptr(),
+                                   reduced.size() * sizeof(float), cudaMemcpyDefault));
       }
+
+      for (size_t col = 0; col < dims.d_cols_num; ++col) {
+        for (size_t row = 0; row < m; ++row) {
+          reduced[col * m + row] += static_cast<float>(biasdata[row]);
+        }
+      }
+      out_golden = std::move(reduced);
     }
 
     NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));

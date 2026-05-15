@@ -844,7 +844,13 @@ class _LayerNormLinear(torch.autograd.Function):
             dgrad = None
             dgrad_work = None
             if ctx.ub_overlap_rs_dgrad:
-                dgrad = reduce_scatter_out
+                # cuBLASMp writes the reduce-scattered dgrad directly into the
+                # GEMM output tensor; Userbuffers uses the extra-output buffer.
+                dgrad = (
+                    gemm_out
+                    if ub_obj_dgrad is not None and ub_obj_dgrad.with_cublasmp()
+                    else reduce_scatter_out
+                )
             elif ctx.ub_bulk_wgrad:
                 dgrad = ub_obj_wgrad.get_buffer(local_chunk=True)
             elif ctx.parallel_mode == "column" and ctx.tp_size > 1:
@@ -869,14 +875,22 @@ class _LayerNormLinear(torch.autograd.Function):
             # cuBLASMp's AG+GEMM consumes the gathered grad_output inline and
             # does not preserve it for wgrad. Userbuffers leaves the gathered
             # tensor in its persistent buffer; cuBLASMp does not, so we gather
-            # here.
+            # here. Route through the same FP8-aware all-gather as the
+            # non-overlap path in
+            # ``TransformerEngineBaseModule.grad_output_preprocess`` by passing
+            # the grad_output quantizer. Columnwise data needed for wgrad is
+            # produced by ``update_usage(columnwise_usage=True)`` further below.
             if (
                 ctx.requires_wgrad
                 and ctx.ub_overlap_ag
                 and ctx.ub_obj_gradout is not None
                 and ctx.ub_obj_gradout.with_cublasmp()
             ):
-                grad_output, _ = gather_along_first_dim(grad_output, ctx.tp_group)
+                if ctx.grad_output_quantizer is not None:
+                    ctx.grad_output_quantizer.set_usage(rowwise=True, columnwise=False)
+                grad_output, _ = gather_along_first_dim(
+                    grad_output, ctx.tp_group, quantizer=ctx.grad_output_quantizer,
+                )
 
             # --------------------------------------------------
             # Compute grad weight

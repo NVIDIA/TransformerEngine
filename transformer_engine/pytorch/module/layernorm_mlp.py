@@ -1269,14 +1269,23 @@ class _LayerNormMLP(torch.autograd.Function):
             # cuBLASMp's AG+GEMM consumes the gathered grad_output inline and
             # does not preserve it for fc2_wgrad. Userbuffers leaves the
             # gathered tensor in its persistent buffer; cuBLASMp does not, so
-            # we gather here.
+            # we gather here. Route through the same FP8-aware all-gather as
+            # the non-overlap path in
+            # ``TransformerEngineBaseModule.grad_output_preprocess`` by passing
+            # the grad_output quantizer. Columnwise data needed for fc2_wgrad
+            # is produced by ``update_usage(columnwise_usage=True)`` further
+            # below.
             if (
                 ctx.fc2_weight_requires_grad
                 and ctx.ub_overlap_ag
                 and ctx.ub_obj_gradout is not None
                 and ctx.ub_obj_gradout.with_cublasmp()
             ):
-                grad_output, _ = gather_along_first_dim(grad_output, ctx.tp_group)
+                if ctx.fc2_grad_output_quantizer is not None:
+                    ctx.fc2_grad_output_quantizer.set_usage(rowwise=True, columnwise=False)
+                grad_output, _ = gather_along_first_dim(
+                    grad_output, ctx.tp_group, quantizer=ctx.fc2_grad_output_quantizer,
+                )
 
             # --------------------------------------------------
             # FC2 WGRAD
@@ -1547,7 +1556,13 @@ class _LayerNormMLP(torch.autograd.Function):
             fc1_dgrad = None
             fc1_dgrad_work = None
             if ctx.ub_overlap_rs_dgrad:
-                fc1_dgrad = reduce_scatter_out
+                # cuBLASMp writes the reduce-scattered dgrad directly into the
+                # GEMM output tensor; Userbuffers uses the extra-output buffer.
+                fc1_dgrad = (
+                    gemm_out
+                    if ub_obj_fc1_dgrad is not None and ub_obj_fc1_dgrad.with_cublasmp()
+                    else reduce_scatter_out
+                )
             elif ctx.ub_bulk_wgrad:
                 fc1_dgrad = ub_obj_fc1_wgrad.get_buffer(local_chunk=True)
             elif ctx.set_parallel_mode and not ctx.ub_bulk_wgrad:

@@ -23,6 +23,7 @@ from transformer_engine.common.recipe import (
     DelayedScaling,
     Float8CurrentScaling,
     Format,
+    MMParams,
     MXFP8BlockScaling,
 )
 
@@ -477,6 +478,16 @@ def _train(opts):
         fp8_recipe = Float8CurrentScaling(fp8_format=fp8_format)
     elif opts.quantization == "mxfp8":
         fp8_recipe = MXFP8BlockScaling()
+
+    # cuBLASMp's matmul descriptor API does not expose control over the split-accumulator
+    # configuration on its internal cuBLASLt calls, and it always uses split accumulation for FP8
+    # fprop. To ensure a fair numerics comparison between the reference and test models, we need to
+    # align the standalone cuBLASLt calls in TE's reference path with cuBLASMp's behavior by
+    # enabling split accumulation for FP8 fprop in the recipe.
+    if opts.use_cublasmp and opts.fp8:
+        fp8_recipe.fp8_gemm_fprop = MMParams(use_split_accumulator=True)
+        fp8_recipe.fp8_gemm_dgrad = MMParams(use_split_accumulator=True)
+        fp8_recipe.fp8_gemm_wgrad = MMParams(use_split_accumulator=True)
 
     layer_contexts = [
         (
