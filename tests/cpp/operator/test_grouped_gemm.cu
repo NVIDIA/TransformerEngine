@@ -23,7 +23,6 @@
 #include <transformer_engine/recipe.h>
 #include <transformer_engine/swizzle.h>
 #include <transformer_engine/transformer_engine.h>
-#include <transformer_engine/transpose.h>
 
 #include "../test_common.h"
 #include "util/cuda_runtime.h"
@@ -91,195 +90,82 @@ Tensor make_bf16_operand(const std::string& name, const std::vector<size_t>& sha
   return t;
 }
 
-// Creates an MXFP8 operand with the correct data layout for GEMM.
-// MXFP8 GEMM requirements (scales are along K dimension):
-//   A transposed     -> needs rowwise data/scales
-//   A non-transposed -> needs columnwise data/scales
-//   B transposed     -> needs columnwise data/scales
-//   B non-transposed -> needs rowwise data/scales
+// Creates an MXFP8 operand with the given single direction (scales along K dimension).
 Tensor make_mxfp8_operand(const std::string& name, const std::vector<size_t>& shape,
-                          bool is_A, bool transposed) {
-  // Determine which data layout we need
-  bool use_rowwise, use_colwise;
-  if (is_A) {
-    // A: transposed -> rowwise, non-transposed -> columnwise
-    use_rowwise = transposed;
-    use_colwise = !transposed;
-  } else {
-    // B: transposed -> columnwise, non-transposed -> rowwise (opposite of A!)
-    use_rowwise = !transposed;
-    use_colwise = transposed;
-  }
-
-  // Create BF16 input with random data
+                          bool use_rowwise) {
   Tensor input_bf16(name + "_bf16", shape, DType::kBFloat16);
   fillUniform(&input_bf16);
 
-  // Create MXFP8 tensor with only the required data layout
-  Tensor mxfp8(name, shape, TypeInfo<fp8e4m3>::dtype, use_rowwise, use_colwise,
+  Tensor mxfp8(name, shape, TypeInfo<fp8e4m3>::dtype, use_rowwise, !use_rowwise,
                NVTE_MXFP8_1D_SCALING);
-
-  // Quantize BF16 -> MXFP8
   nvte_quantize(input_bf16.data(), mxfp8.data(), 0);
 
-  // Create output tensor for swizzled scales (same data shape, same layout)
   Tensor mxfp8_swizzled(name + "_swizzled", shape, TypeInfo<fp8e4m3>::dtype,
-                        use_rowwise, use_colwise, NVTE_MXFP8_1D_SCALING);
+                        use_rowwise, !use_rowwise, NVTE_MXFP8_1D_SCALING);
   mxfp8_swizzled.set_with_gemm_swizzled_scales(true);  // Must be set BEFORE swizzle call
 
-  // Copy quantized data from mxfp8 to mxfp8_swizzled
-  if (use_rowwise) {
-    size_t data_bytes = test::bytes(mxfp8.rowwise_shape(), mxfp8.dtype());
-    NVTE_CHECK_CUDA(cudaMemcpy(mxfp8_swizzled.rowwise_dptr(), mxfp8.rowwise_dptr(),
-                               data_bytes, cudaMemcpyDeviceToDevice));
-  }
-  if (use_colwise) {
-    size_t data_bytes = test::bytes(mxfp8.columnwise_shape(), mxfp8.dtype());
-    NVTE_CHECK_CUDA(cudaMemcpy(mxfp8_swizzled.columnwise_dptr(), mxfp8.columnwise_dptr(),
-                               data_bytes, cudaMemcpyDeviceToDevice));
-  }
+  const size_t data_bytes = test::bytes(
+      use_rowwise ? mxfp8.rowwise_shape() : mxfp8.columnwise_shape(), mxfp8.dtype());
+  void* dst = use_rowwise ? mxfp8_swizzled.rowwise_dptr() : mxfp8_swizzled.columnwise_dptr();
+  void* src = use_rowwise ? mxfp8.rowwise_dptr() : mxfp8.columnwise_dptr();
+  NVTE_CHECK_CUDA(cudaMemcpy(dst, src, data_bytes, cudaMemcpyDeviceToDevice));
 
-  // Swizzle scales for GEMM
   nvte_swizzle_scaling_factors(mxfp8.data(), mxfp8_swizzled.data(), 0);
-
-  // Sync to ensure operations are complete
   NVTE_CHECK_CUDA(cudaDeviceSynchronize());
-
   return mxfp8_swizzled;
 }
 
-// Helper: quantize an already-filled BF16 tensor to NVFP4 rowwise-only, swizzle scales,
-// return swizzled tensor. Caller owns input_bf16. When nvfp4_2d is true, amax is computed
-// per 16x16 block (the scale layout fed to cuBLAS — VEC16 UE4M3 — is unchanged; values
-// just repeat across the 16 rows of each block).
-Tensor make_nvfp4_rowwise(const std::string& name, Tensor& input_bf16,
-                          const std::vector<size_t>& shape, bool nvfp4_2d) {
-  Tensor nvfp4(name, shape, DType::kFloat4E2M1, /*rowwise=*/true, /*columnwise=*/false,
-               NVTE_NVFP4_1D_SCALING);
+// Creates an NVFP4 operand with the given single direction (rowwise XOR columnwise),
+// swizzled scales. cuBLAS NVFP4 GEMM runs in TN, so each operand only needs the direction
+// matching the user's transpose flag — same as MXFP8 / FP8 block scaling. NVFP4 columnwise
+// data is the transposed input quantized rowwise, so nvte_quantize_v2 alone handles the
+// "fake transpose" (no nvte_transpose needed). We never allocate both directions on a
+// single NVFP4 tensor because nvte_swizzle_scaling_factors hard-fails when scale_inv is
+// set in both directions (swizzle/swizzle.cu).
+Tensor make_nvfp4_operand(const std::string& name, const std::vector<size_t>& shape,
+                          bool use_rowwise, bool nvfp4_2d) {
+  Tensor input_bf16(name + "_bf16", shape, DType::kBFloat16);
+  fillUniform(&input_bf16);
 
+  Tensor nvfp4(name, shape, DType::kFloat4E2M1, use_rowwise, !use_rowwise,
+               NVTE_NVFP4_1D_SCALING);
   QuantizationConfigWrapper quant_config;
   quant_config.set_nvfp4_2d_quantization(nvfp4_2d);
   nvte_quantize_v2(input_bf16.data(), nvfp4.data(), quant_config, 0);
 
-  Tensor nvfp4_sw(name + "_sw", shape, DType::kFloat4E2M1,
-                  /*rowwise=*/true, /*columnwise=*/false, NVTE_NVFP4_1D_SCALING);
+  Tensor nvfp4_sw(name + "_sw", shape, DType::kFloat4E2M1, use_rowwise, !use_rowwise,
+                  NVTE_NVFP4_1D_SCALING);
   nvfp4_sw.set_with_gemm_swizzled_scales(true);
-  size_t data_bytes = test::bytes(nvfp4.rowwise_shape(), nvfp4.dtype());
-  NVTE_CHECK_CUDA(cudaMemcpy(nvfp4_sw.rowwise_dptr(), nvfp4.rowwise_dptr(),
-                             data_bytes, cudaMemcpyDeviceToDevice));
+
+  // Copy quantized data + amax to swizzled tensor (swizzle only rewrites scale_inv).
+  const auto amax_kind = use_rowwise ? kNVTEAmax : kNVTEColumnwiseAmax;
+  const NVTEBasicTensor src_amax = nvte_get_tensor_param(nvfp4.data(), amax_kind);
+  const NVTEBasicTensor dst_amax = nvte_get_tensor_param(nvfp4_sw.data(), amax_kind);
+  NVTE_CHECK_CUDA(cudaMemcpy(dst_amax.data_ptr, src_amax.data_ptr, sizeof(float),
+                             cudaMemcpyDeviceToDevice));
+  const size_t data_bytes = test::bytes(
+      use_rowwise ? nvfp4.rowwise_shape() : nvfp4.columnwise_shape(), nvfp4.dtype());
+  void* dst_data = use_rowwise ? nvfp4_sw.rowwise_dptr() : nvfp4_sw.columnwise_dptr();
+  void* src_data = use_rowwise ? nvfp4.rowwise_dptr() : nvfp4.columnwise_dptr();
+  NVTE_CHECK_CUDA(cudaMemcpy(dst_data, src_data, data_bytes, cudaMemcpyDeviceToDevice));
+
   nvte_swizzle_scaling_factors(nvfp4.data(), nvfp4_sw.data(), 0);
   NVTE_CHECK_CUDA(cudaDeviceSynchronize());
   return nvfp4_sw;
 }
 
-// Creates an NVFP4 operand with both rowwise and columnwise data, swizzled scales.
-// NVFP4 "columnwise" data is the transposed tensor quantized rowwise; rowwise and
-// columnwise share the SAME source BF16 input (transposed via nvte_transpose for the
-// columnwise path) so the two layouts represent the same logical tensor.
-// We can't fuse this into one quantize+swizzle pass:
-//   - nvte_quantize_v2 supports filling both rowwise+columnwise in one call, but the
-//     optimized NVFP4 kernel hard-fails on with_gemm_swizzled_scales=true and the
-//     fallback hard-codes swizzled_scale=false (cast/dispatch/quantize.cuh).
-//   - nvte_swizzle_scaling_factors hard-fails if a tensor has both rowwise and
-//     columnwise scale_inv (swizzle/swizzle.cu).
-Tensor make_nvfp4_operand(const std::string& name, const std::vector<size_t>& shape,
-                          bool is_A, bool transposed, bool nvfp4_2d) {
-  (void)is_A;
-  (void)transposed;
-
-  // Single BF16 input shared by both directions; GPU-side transpose for columnwise path.
-  Tensor input_bf16(name + "_bf16", shape, DType::kBFloat16);
-  fillUniform(&input_bf16);
-
-  std::vector<size_t> t_shape = {shape[1], shape[0]};
-  Tensor input_bf16_t(name + "_bf16_t", t_shape, DType::kBFloat16);
-  nvte_transpose(input_bf16.data(), input_bf16_t.data(), 0);
-
-  // 1. Rowwise: quantize + swizzle from input
-  Tensor rowwise = make_nvfp4_rowwise(name + "_row", input_bf16, shape, nvfp4_2d);
-
-  // 2. Columnwise: quantize + swizzle from transposed input, as rowwise of transposed shape
-  Tensor colwise = make_nvfp4_rowwise(name + "_col", input_bf16_t, t_shape, nvfp4_2d);
-
-  // 3. Assemble: both-layout tensor with rowwise from (1) and columnwise from (2)
-  Tensor result(name, shape, DType::kFloat4E2M1, /*rowwise=*/true, /*columnwise=*/true,
-                NVTE_NVFP4_1D_SCALING);
-  result.set_with_gemm_swizzled_scales(true);
-
-  // Copy rowwise data + scale from rowwise tensor
-  {
-    size_t data_bytes = test::bytes(rowwise.rowwise_shape(), rowwise.dtype());
-    NVTE_CHECK_CUDA(cudaMemcpy(result.rowwise_dptr(), rowwise.rowwise_dptr(),
-                               data_bytes, cudaMemcpyDeviceToDevice));
-    size_t scale_bytes = test::bytes(rowwise.rowwise_scale_inv_shape(), DType::kFloat8E4M3);
-    NVTE_CHECK_CUDA(cudaMemcpy(
-        nvte_get_tensor_param(result.data(), kNVTERowwiseScaleInv).data_ptr,
-        nvte_get_tensor_param(rowwise.data(), kNVTERowwiseScaleInv).data_ptr,
-        scale_bytes, cudaMemcpyDeviceToDevice));
-  }
-
-  // Copy colwise data + scale from transposed-rowwise tensor
-  // The rowwise data of transposed shape IS the columnwise data of original shape
-  {
-    size_t data_bytes = test::bytes(colwise.rowwise_shape(), colwise.dtype());
-    NVTE_CHECK_CUDA(cudaMemcpy(result.columnwise_dptr(), colwise.rowwise_dptr(),
-                               data_bytes, cudaMemcpyDeviceToDevice));
-    size_t scale_bytes = test::bytes(colwise.rowwise_scale_inv_shape(), DType::kFloat8E4M3);
-    NVTE_CHECK_CUDA(cudaMemcpy(
-        nvte_get_tensor_param(result.data(), kNVTEColumnwiseScaleInv).data_ptr,
-        nvte_get_tensor_param(colwise.data(), kNVTERowwiseScaleInv).data_ptr,
-        scale_bytes, cudaMemcpyDeviceToDevice));
-  }
-
-  // Copy amax values (not pointers) so each Tensor stays sole owner of its amax buffer.
-  {
-    NVTEBasicTensor src = nvte_get_tensor_param(rowwise.data(), kNVTEAmax);
-    NVTEBasicTensor dst = nvte_get_tensor_param(result.data(), kNVTEAmax);
-    NVTE_CHECK_CUDA(cudaMemcpy(dst.data_ptr, src.data_ptr, sizeof(float),
-                               cudaMemcpyDeviceToDevice));
-  }
-  {
-    NVTEBasicTensor src = nvte_get_tensor_param(colwise.data(), kNVTEAmax);
-    NVTEBasicTensor dst = nvte_get_tensor_param(result.data(), kNVTEColumnwiseAmax);
-    NVTE_CHECK_CUDA(cudaMemcpy(dst.data_ptr, src.data_ptr, sizeof(float),
-                               cudaMemcpyDeviceToDevice));
-  }
-
-  NVTE_CHECK_CUDA(cudaDeviceSynchronize());
-  return result;
-}
-
-// Creates an FP8 block-scaling operand.
-// FP8 block scaling on Hopper requires TN layout:
-//   A transposed     -> needs rowwise data
-//   A non-transposed -> needs columnwise data (will be flipped to T internally)
-//   B transposed     -> needs columnwise data (will be flipped to N internally)
-//   B non-transposed -> needs rowwise data
+// Creates an FP8 block-scaling operand with the given single direction (TN-only on Hopper).
 Tensor make_fp8_block_scaling_operand(const std::string& name, const std::vector<size_t>& shape,
-                                      bool is_A, bool transposed) {
-  // Determine which data layout we need (TN-only on Hopper)
-  bool use_rowwise, use_colwise;
-  if (is_A) {
-    use_rowwise = transposed;
-    use_colwise = !transposed;
-  } else {
-    use_rowwise = !transposed;
-    use_colwise = transposed;
-  }
-
+                                      bool use_rowwise) {
   Tensor input_bf16(name + "_bf16", shape, DType::kBFloat16);
   fillUniform(&input_bf16);
 
-  // Create FP8 block scaling tensor (1D scaling)
-  Tensor fp8_bs(name, shape, TypeInfo<fp8e4m3>::dtype, use_rowwise, use_colwise,
+  Tensor fp8_bs(name, shape, TypeInfo<fp8e4m3>::dtype, use_rowwise, !use_rowwise,
                 NVTE_BLOCK_SCALING_1D);
-
-  // Quantize BF16 -> FP8 block scaling
   QuantizationConfigWrapper quant_config;
   quant_config.set_force_pow_2_scales(true);
   nvte_quantize_v2(input_bf16.data(), fp8_bs.data(), quant_config, 0);
   NVTE_CHECK_CUDA(cudaDeviceSynchronize());
-
   return fp8_bs;
 }
 
@@ -385,6 +271,12 @@ inline GroupedGemmRefSetup make_grouped_gemm_ref(const TestParams& params) {
       s.A_tensors.emplace_back(make_bf16_operand("A" + std::to_string(i), a_shape));
       s.B_tensors.emplace_back(make_bf16_operand("B" + std::to_string(i), b_shape));
     } else {
+      // cuBLAS scaled-GEMM kernels run in TN, so each operand only needs the direction
+      // matching its transpose flag: rowwise when A is transposed / B is non-transposed,
+      // columnwise otherwise (the columnwise buffer holds the transposed-then-quantized
+      // data, which cuBLAS reads as if it were rowwise after layout flipping).
+      const bool a_use_rowwise = params.transa;
+      const bool b_use_rowwise = !params.transb;
       switch (*params.recipe) {
         case NVTE_DELAYED_TENSOR_SCALING:
           s.A_tensors.emplace_back(make_fp8_operand("A" + std::to_string(i), a_shape));
@@ -392,25 +284,21 @@ inline GroupedGemmRefSetup make_grouped_gemm_ref(const TestParams& params) {
           break;
         case NVTE_MXFP8_1D_SCALING:
           s.A_tensors.emplace_back(make_mxfp8_operand("A" + std::to_string(i), a_shape,
-                                                      /*is_A=*/true, params.transa));
+                                                      a_use_rowwise));
           s.B_tensors.emplace_back(make_mxfp8_operand("B" + std::to_string(i), b_shape,
-                                                      /*is_A=*/false, params.transb));
+                                                      b_use_rowwise));
           break;
         case NVTE_NVFP4_1D_SCALING:
           s.A_tensors.emplace_back(make_nvfp4_operand("A" + std::to_string(i), a_shape,
-                                                      /*is_A=*/true, params.transa,
-                                                      params.nvfp4_2d));
+                                                      a_use_rowwise, params.nvfp4_2d));
           s.B_tensors.emplace_back(make_nvfp4_operand("B" + std::to_string(i), b_shape,
-                                                      /*is_A=*/false, params.transb,
-                                                      params.nvfp4_2d));
+                                                      b_use_rowwise, params.nvfp4_2d));
           break;
         case NVTE_BLOCK_SCALING_1D:
           s.A_tensors.emplace_back(make_fp8_block_scaling_operand("A" + std::to_string(i),
-                                                                  a_shape, /*is_A=*/true,
-                                                                  params.transa));
+                                                                  a_shape, a_use_rowwise));
           s.B_tensors.emplace_back(make_fp8_block_scaling_operand("B" + std::to_string(i),
-                                                                  b_shape, /*is_A=*/false,
-                                                                  params.transb));
+                                                                  b_shape, b_use_rowwise));
           break;
         default:
           NVTE_ERROR("Unsupported scaling mode in grouped GEMM test: " +
