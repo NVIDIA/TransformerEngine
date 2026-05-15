@@ -24,6 +24,7 @@ import jax.numpy as jnp
 from flax import linen as nn
 
 import quickstart_jax_utils as utils
+
 # DENSE_IMPORTS_END
 
 
@@ -41,6 +42,8 @@ class FlaxDenseBlock(nn.Module):
             use_bias=False,
             dot_general=self.dot_general_cls(),
         )(x)
+
+
 # DENSE_BASELINE_MODEL_END
 
 
@@ -90,6 +93,8 @@ def run_single_gpu_bench():
         input=x,
         output_grad=dy,
     )
+
+
 # DENSE_SINGLE_GPU_BENCH_END
 
 
@@ -108,6 +113,8 @@ def build_dp_tp_mesh():
     # outside JIT, so TE's GEMM primitives can plan comms accordingly.
     mesh_resource = MeshResource(dp_resource="dp", tp_resource="tp")
     return mesh, mesh_resource
+
+
 # DENSE_MULTI_GPU_MESH_SETUP_END
 
 
@@ -134,6 +141,8 @@ def shard_variables(mesh, variables_dict):
         "dy": jax.device_put(dy, output_grad_sharding),
         **{name: _shard(vars_) for name, vars_ in variables_dict.items()},
     }
+
+
 # DENSE_MULTI_GPU_SHARD_SETUP_END
 
 
@@ -158,6 +167,8 @@ def run_multi_gpu_bench():
             input=sharded["x"],
             output_grad=sharded["dy"],
         )
+
+
 # DENSE_MULTI_GPU_BENCH_END
 
 
