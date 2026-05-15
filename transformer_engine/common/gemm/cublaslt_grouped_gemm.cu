@@ -221,7 +221,6 @@ struct GroupedGemmSetupWorkspace {
   }
 };
 
-
 inline bool grouped_gemm_supports_per_group_alpha_beta(int sm) { return sm >= 100; }
 
 inline size_t validate_grouped_gemm_inputs(
@@ -298,8 +297,7 @@ inline void validate_grouped_gemm_output_dtype(transformer_engine::DType a_dtype
   NVTE_CHECK(is_output_dtype, "Grouped GEMM: ", name, " must be BF16, FP16, or FP32.");
   if (!is_fp4_dtype(a_dtype) && !is_fp4_dtype(b_dtype)) return;
   NVTE_CHECK(!is_fp4_dtype(output_dtype), "FP4 GEMM output is not supported!");
-  NVTE_CHECK(get_cuda_dtype(output_dtype) != CUDA_R_16F,
-             "FP4 GEMM does not support FP16 output!");
+  NVTE_CHECK(get_cuda_dtype(output_dtype) != CUDA_R_16F, "FP4 GEMM does not support FP16 output!");
 }
 
 inline void validate_grouped_gemm_outputs(
@@ -543,8 +541,7 @@ inline MultiTensorGroupGemmInputArgs build_grouped_gemm_multi_inputA_args(
                " is missing required data.");
     args.data_ptrs[i] = data.dptr;
     const auto &shape = t->shape();
-    NVTE_CHECK(shape.size() == 2, "Grouped GEMM: ", name, "_list tensor ", i,
-               " must be 2D.");
+    NVTE_CHECK(shape.size() == 2, "Grouped GEMM: ", name, "_list tensor ", i, " must be 2D.");
     const size_t first_dim = shape[0];
     const size_t last_dim = shape[1];
     if (storage_transposed) {
@@ -1246,8 +1243,7 @@ __global__ void setup_grouped_gemm_kernel(
     // For MXFP8, pass nullptr for tensor_scale and set mxfp8_base
     float *a_scale_base, float *b_scale_base, bool a_rowwise, bool b_rowwise,
     bool a_storage_transposed, bool b_storage_transposed, NVTEScalingMode scaling_mode,
-    size_t num_tensors,
-    MultiTensorGroupGemmInputArgs a_multi_tensor_args,
+    size_t num_tensors, MultiTensorGroupGemmInputArgs a_multi_tensor_args,
     MultiTensorGroupGemmOutputArgs c_multi_tensor_args,
     MultiTensorGroupGemmOutputArgs d_multi_tensor_args,
     // NVFP4: per-group amax values and output buffer for computed alpha
@@ -1704,8 +1700,7 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
   gemm_config.avg_m = config_.avg_m.value_or(compute_avg_first_dim(outputD));
   gemm_config.avg_n =
       config_.avg_n.value_or(transb ? compute_avg_first_dim(inputB) : compute_avg_last_dim(inputB));
-  gemm_config.avg_k =
-      config_.avg_k.value_or(transa ? avg_last_dim : avg_first_dim);
+  gemm_config.avg_k = config_.avg_k.value_or(transa ? avg_last_dim : avg_first_dim);
   gemm_config.sm_count = config_.sm_count;
   execute_grouped_gemm(workspace.setup_workspace, A_sel, B_sel, outputD->dtype(), num_tensors,
                        gemm_config, workspace.cublas_workspace_ptr, stream);
