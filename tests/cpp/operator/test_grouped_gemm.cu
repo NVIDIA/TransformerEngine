@@ -32,17 +32,53 @@ using namespace test;
 
 namespace {
 
-// std::nullopt means BF16 (no scaling); any other value is the scaling mode for FP8/NVFP4.
-using InputRecipe = std::optional<NVTEScalingMode>;
+enum class InputRecipe {
+  kBF16,
+  kFP8Current,
+  kMXFP8,
+  kNVFP4,
+  kFP8BlockScaling1D1D,
+  kFP8BlockScaling2D1D,
+  kFP8BlockScaling1D2D,
+};
 
-inline const char* recipe_name(const InputRecipe& r) {
-  if (!r.has_value()) return "BF16";
-  switch (*r) {
-    case NVTE_DELAYED_TENSOR_SCALING: return "FP8Current";
-    case NVTE_MXFP8_1D_SCALING:       return "MXFP8";
-    case NVTE_NVFP4_1D_SCALING:       return "NVFP4";
-    case NVTE_BLOCK_SCALING_1D:       return "FP8BlockScaling";
-    default:                          return "Unknown";
+inline const char* recipe_name(InputRecipe recipe) {
+  switch (recipe) {
+    case InputRecipe::kBF16:                 return "BF16";
+    case InputRecipe::kFP8Current:           return "FP8Current";
+    case InputRecipe::kMXFP8:                return "MXFP8";
+    case InputRecipe::kNVFP4:                return "NVFP4";
+    case InputRecipe::kFP8BlockScaling1D1D:  return "FP8BlockScaling1D1D";
+    case InputRecipe::kFP8BlockScaling2D1D:  return "FP8BlockScaling2D1D";
+    case InputRecipe::kFP8BlockScaling1D2D:  return "FP8BlockScaling1D2D";
+    default:                                 return "Unknown";
+  }
+}
+
+inline bool is_fp8_block_recipe(InputRecipe recipe) {
+  return recipe == InputRecipe::kFP8BlockScaling1D1D ||
+         recipe == InputRecipe::kFP8BlockScaling2D1D ||
+         recipe == InputRecipe::kFP8BlockScaling1D2D;
+}
+
+inline NVTEScalingMode a_scaling_mode(InputRecipe recipe) {
+  switch (recipe) {
+    case InputRecipe::kFP8Current:           return NVTE_DELAYED_TENSOR_SCALING;
+    case InputRecipe::kMXFP8:                return NVTE_MXFP8_1D_SCALING;
+    case InputRecipe::kNVFP4:                return NVTE_NVFP4_1D_SCALING;
+    case InputRecipe::kFP8BlockScaling2D1D:  return NVTE_BLOCK_SCALING_2D;
+    case InputRecipe::kFP8BlockScaling1D1D:
+    case InputRecipe::kFP8BlockScaling1D2D:  return NVTE_BLOCK_SCALING_1D;
+    case InputRecipe::kBF16:                 return NVTE_DELAYED_TENSOR_SCALING;
+    default:                                 return NVTE_DELAYED_TENSOR_SCALING;
+  }
+}
+
+inline NVTEScalingMode b_scaling_mode(InputRecipe recipe) {
+  switch (recipe) {
+    case InputRecipe::kFP8BlockScaling1D2D:  return NVTE_BLOCK_SCALING_2D;
+    case InputRecipe::kFP8BlockScaling2D1D:  return NVTE_BLOCK_SCALING_1D;
+    default:                                 return a_scaling_mode(recipe);
   }
 }
 
@@ -119,14 +155,13 @@ Tensor make_mxfp8_operand(const std::string& name, const std::vector<size_t>& sh
 
 // Creates an NVFP4 operand with the given single direction, swizzled scales.
 Tensor make_nvfp4_operand(const std::string& name, const std::vector<size_t>& shape,
-                          bool use_rowwise, bool nvfp4_2d) {
+                          bool use_rowwise) {
   Tensor input_bf16(name + "_bf16", shape, DType::kBFloat16);
   fillUniform(&input_bf16);
 
   Tensor nvfp4(name, shape, DType::kFloat4E2M1, use_rowwise, !use_rowwise,
                NVTE_NVFP4_1D_SCALING);
   QuantizationConfigWrapper quant_config;
-  quant_config.set_nvfp4_2d_quantization(nvfp4_2d);
   nvte_quantize_v2(input_bf16.data(), nvfp4.data(), quant_config, 0);
 
   Tensor nvfp4_sw(name + "_sw", shape, DType::kFloat4E2M1, use_rowwise, !use_rowwise,
@@ -152,12 +187,13 @@ Tensor make_nvfp4_operand(const std::string& name, const std::vector<size_t>& sh
 
 // Creates an FP8 block-scaling operand with the given single direction (TN-only on Hopper).
 Tensor make_fp8_block_scaling_operand(const std::string& name, const std::vector<size_t>& shape,
-                                      bool use_rowwise) {
+                                      bool use_rowwise,
+                                      NVTEScalingMode scaling_mode = NVTE_BLOCK_SCALING_1D) {
   Tensor input_bf16(name + "_bf16", shape, DType::kBFloat16);
   fillUniform(&input_bf16);
 
   Tensor fp8_bs(name, shape, TypeInfo<fp8e4m3>::dtype, use_rowwise, !use_rowwise,
-                NVTE_BLOCK_SCALING_1D);
+                scaling_mode);
   QuantizationConfigWrapper quant_config;
   quant_config.set_force_pow_2_scales(true);
   nvte_quantize_v2(input_bf16.data(), fp8_bs.data(), quant_config, 0);
@@ -166,12 +202,11 @@ Tensor make_fp8_block_scaling_operand(const std::string& name, const std::vector
 }
 
 struct TestParams {
-  InputRecipe recipe;  // std::nullopt = BF16, otherwise the scaling mode.
+  InputRecipe recipe;
   bool transa;
   bool transb;
   ShapeCase shape_case;
   bool use_null_c = false;  // When true, pass nullptr for C (valid when beta=0)
-  bool nvfp4_2d = false;    // NVFP4-only: use 2D (16x16) amax instead of 1D (1x16).
   DType output_dtype = DType::kBFloat16;  // Implementation also accepts FP16 / FP32.
 };
 
@@ -216,21 +251,18 @@ inline std::string grouped_gemm_skip_reason(const TestParams& params) {
     return "Grouped GEMM on Hopper (SM90) requires cuBLAS 13.4+, but run-time cuBLAS "
            "version is " + std::to_string(cublas_ver) + ".";
   }
-  if (params.recipe.has_value()) {
+  if (params.recipe != InputRecipe::kBF16) {
     const bool is_blackwell_plus = cc >= blackwellComputeCapability;
-    if (!is_blackwell_plus && *params.recipe != NVTE_BLOCK_SCALING_1D) {
+    const bool fp8_block = is_fp8_block_recipe(params.recipe);
+    if (!is_blackwell_plus && !fp8_block) {
       return std::string(recipe_name(params.recipe)) +
              " grouped GEMM requires Blackwell (SM100) or newer, " + cc_suffix;
     }
-    if (is_blackwell_plus && *params.recipe == NVTE_BLOCK_SCALING_1D) {
+    if (is_blackwell_plus && fp8_block) {
       return "FP8 block scaling grouped GEMM is only supported on Hopper (SM90), " + cc_suffix;
     }
-    if (*params.recipe == NVTE_NVFP4_1D_SCALING && params.output_dtype == DType::kFloat16) {
+    if (params.recipe == InputRecipe::kNVFP4 && params.output_dtype == DType::kFloat16) {
       return "NVFP4 grouped GEMM does not support FP16 output.";
-    }
-    if (*params.recipe == NVTE_NVFP4_1D_SCALING && params.nvfp4_2d &&
-        (!params.transa || params.transb)) {
-      return "NVFP4 2D quantization only supported in TN layout.";
     }
   }
   return "";
@@ -264,34 +296,38 @@ inline GroupedGemmRefSetup make_grouped_gemm_ref(const TestParams& params) {
         params.transa ? std::vector<size_t>{N, K} : std::vector<size_t>{K, N};
     const std::vector<size_t> b_shape =
         params.transb ? std::vector<size_t>{K, M} : std::vector<size_t>{M, K};
-    if (!params.recipe.has_value()) {
+    if (params.recipe == InputRecipe::kBF16) {
       s.A_tensors.emplace_back(make_bf16_operand("A" + std::to_string(i), a_shape));
       s.B_tensors.emplace_back(make_bf16_operand("B" + std::to_string(i), b_shape));
     } else {
       const bool a_use_rowwise = params.transa;
       const bool b_use_rowwise = !params.transb;
-      switch (*params.recipe) {
-        case NVTE_DELAYED_TENSOR_SCALING:
+      switch (params.recipe) {
+        case InputRecipe::kFP8Current:
           s.A_tensors.emplace_back(make_fp8_operand("A" + std::to_string(i), a_shape));
           s.B_tensors.emplace_back(make_fp8_operand("B" + std::to_string(i), b_shape));
           break;
-        case NVTE_MXFP8_1D_SCALING:
+        case InputRecipe::kMXFP8:
           s.A_tensors.emplace_back(make_mxfp8_operand("A" + std::to_string(i), a_shape,
                                                       a_use_rowwise));
           s.B_tensors.emplace_back(make_mxfp8_operand("B" + std::to_string(i), b_shape,
                                                       b_use_rowwise));
           break;
-        case NVTE_NVFP4_1D_SCALING:
+        case InputRecipe::kNVFP4:
           s.A_tensors.emplace_back(make_nvfp4_operand("A" + std::to_string(i), a_shape,
-                                                      a_use_rowwise, params.nvfp4_2d));
+                                                      a_use_rowwise));
           s.B_tensors.emplace_back(make_nvfp4_operand("B" + std::to_string(i), b_shape,
-                                                      b_use_rowwise, params.nvfp4_2d));
+                                                      b_use_rowwise));
           break;
-        case NVTE_BLOCK_SCALING_1D:
+        case InputRecipe::kFP8BlockScaling1D1D:
+        case InputRecipe::kFP8BlockScaling2D1D:
+        case InputRecipe::kFP8BlockScaling1D2D:
           s.A_tensors.emplace_back(make_fp8_block_scaling_operand("A" + std::to_string(i),
-                                                                  a_shape, a_use_rowwise));
+                                                                  a_shape, a_use_rowwise,
+                                                                  a_scaling_mode(params.recipe)));
           s.B_tensors.emplace_back(make_fp8_block_scaling_operand("B" + std::to_string(i),
-                                                                  b_shape, b_use_rowwise));
+                                                                  b_shape, b_use_rowwise,
+                                                                  b_scaling_mode(params.recipe)));
           break;
         default:
           NVTE_ERROR("Unsupported scaling mode in grouped GEMM test: " +
@@ -303,7 +339,7 @@ inline GroupedGemmRefSetup make_grouped_gemm_ref(const TestParams& params) {
   }
 
   // FP8 block scaling requires split accumulator (no fast accumulation).
-  s.use_split_accum = (params.recipe.has_value() && *params.recipe == NVTE_BLOCK_SCALING_1D);
+  s.use_split_accum = is_fp8_block_recipe(params.recipe);
 
   std::vector<NVTETensor> A_ptrs(s.num_gemms), B_ptrs(s.num_gemms), D_ptrs(s.num_gemms);
   std::vector<NVTETensor> workspace_ptrs(s.num_gemms, nullptr);
@@ -636,7 +672,6 @@ std::string MakeGroupedGemmTestName(const testing::TestParamInfo<GroupedGemmTest
   const std::string layout = std::string("ta") + (info.param.transa ? "T" : "N") +
                              "tb" + (info.param.transb ? "T" : "N");
   const std::string null_c = info.param.use_null_c ? "_NullC" : "";
-  const std::string nvfp4_2d = info.param.nvfp4_2d ? "_2D" : "";
   std::string out_suffix;
   switch (info.param.output_dtype) {
     case DType::kBFloat16: break;  // default, no suffix
@@ -644,73 +679,77 @@ std::string MakeGroupedGemmTestName(const testing::TestParamInfo<GroupedGemmTest
     case DType::kFloat32:  out_suffix = "_outFP32"; break;
     default:               out_suffix = "_outUnknown"; break;
   }
-  return std::string(recipe_name(info.param.recipe)) + nvfp4_2d + "_" +
+  return std::string(recipe_name(info.param.recipe)) + "_" +
          kShapeNames[static_cast<int>(info.param.shape_case)] + "_" + layout + null_c + out_suffix;
 }
 
 // TestParams: {recipe, transa, transb, shape_case, use_null_c}
-// recipe == std::nullopt means BF16 (no scaling), otherwise the FP8/NVFP4 scaling mode.
 const std::vector<TestParams> kTestParams = {
     // FP8 tests (each tensor has random mean/stddev -> different scales)
-    {NVTE_DELAYED_TENSOR_SCALING, true, false, ShapeCase::kAllDifferentMul128, false},
-    {NVTE_DELAYED_TENSOR_SCALING, false, true, ShapeCase::kAllDifferentMul128, false},
-    {NVTE_DELAYED_TENSOR_SCALING, false, false, ShapeCase::kAllSameMul128, false},
+    {InputRecipe::kFP8Current, true, false, ShapeCase::kAllDifferentMul128, false},
+    {InputRecipe::kFP8Current, false, true, ShapeCase::kAllDifferentMul128, false},
+    {InputRecipe::kFP8Current, false, false, ShapeCase::kAllSameMul128, false},
     // BF16 tests
-    {std::nullopt, true, false, ShapeCase::kSameFirstMul128, false},
-    {std::nullopt, false, true, ShapeCase::kSameLastMul128, false},
-    {std::nullopt, false, false, ShapeCase::kAllSameMul128, false},
-    {std::nullopt, true, true, ShapeCase::kAllDifferentMul128, false},
+    {InputRecipe::kBF16, true, false, ShapeCase::kSameFirstMul128, false},
+    {InputRecipe::kBF16, false, true, ShapeCase::kSameLastMul128, false},
+    {InputRecipe::kBF16, false, false, ShapeCase::kAllSameMul128, false},
+    {InputRecipe::kBF16, true, true, ShapeCase::kAllDifferentMul128, false},
     // Test NULL C (valid when beta=0)
-    {std::nullopt, false, false, ShapeCase::kAllSameMul128, true},
+    {InputRecipe::kBF16, false, false, ShapeCase::kAllSameMul128, true},
     // MXFP8 tests
-    {NVTE_MXFP8_1D_SCALING, true, false, ShapeCase::kAllSameMul128, false},
-    {NVTE_MXFP8_1D_SCALING, true, false, ShapeCase::kAllDifferentMul128, false},
-    {NVTE_MXFP8_1D_SCALING, false, true, ShapeCase::kAllSameMul128, false},
-    {NVTE_MXFP8_1D_SCALING, false, true, ShapeCase::kAllDifferentMul128, false},
-    {NVTE_MXFP8_1D_SCALING, false, false, ShapeCase::kAllSameMul128, false},
-    {NVTE_MXFP8_1D_SCALING, false, false, ShapeCase::kAllDifferentMul128, false},
-    {NVTE_MXFP8_1D_SCALING, false, false, ShapeCase::kSameFirstMul128, false},
+    {InputRecipe::kMXFP8, true, false, ShapeCase::kAllSameMul128, false},
+    {InputRecipe::kMXFP8, true, false, ShapeCase::kAllDifferentMul128, false},
+    {InputRecipe::kMXFP8, false, true, ShapeCase::kAllSameMul128, false},
+    {InputRecipe::kMXFP8, false, true, ShapeCase::kAllDifferentMul128, false},
+    {InputRecipe::kMXFP8, false, false, ShapeCase::kAllSameMul128, false},
+    {InputRecipe::kMXFP8, false, false, ShapeCase::kAllDifferentMul128, false},
+    {InputRecipe::kMXFP8, false, false, ShapeCase::kSameFirstMul128, false},
     // MXFP8 with NULL C
-    {NVTE_MXFP8_1D_SCALING, true, false, ShapeCase::kAllSameMul128, true},
+    {InputRecipe::kMXFP8, true, false, ShapeCase::kAllSameMul128, true},
     // NVFP4 tests (all transpose combinations - GEMM internally forces TN)
-    {NVTE_NVFP4_1D_SCALING, true, false, ShapeCase::kAllSameMul128, false},
-    {NVTE_NVFP4_1D_SCALING, true, false, ShapeCase::kAllDifferentMul128, false},
-    {NVTE_NVFP4_1D_SCALING, true, false, ShapeCase::kSameFirstMul128, false},
-    {NVTE_NVFP4_1D_SCALING, true, false, ShapeCase::kSameLastMul128, false},
-    {NVTE_NVFP4_1D_SCALING, false, true, ShapeCase::kAllSameMul128, false},
-    {NVTE_NVFP4_1D_SCALING, false, true, ShapeCase::kAllDifferentMul128, false},
-    {NVTE_NVFP4_1D_SCALING, false, false, ShapeCase::kAllSameMul128, false},
-    {NVTE_NVFP4_1D_SCALING, false, false, ShapeCase::kAllDifferentMul128, false},
+    {InputRecipe::kNVFP4, true, false, ShapeCase::kAllSameMul128, false},
+    {InputRecipe::kNVFP4, true, false, ShapeCase::kAllDifferentMul128, false},
+    {InputRecipe::kNVFP4, true, false, ShapeCase::kSameFirstMul128, false},
+    {InputRecipe::kNVFP4, true, false, ShapeCase::kSameLastMul128, false},
+    {InputRecipe::kNVFP4, false, true, ShapeCase::kAllSameMul128, false},
+    {InputRecipe::kNVFP4, false, true, ShapeCase::kAllDifferentMul128, false},
+    {InputRecipe::kNVFP4, false, false, ShapeCase::kAllSameMul128, false},
+    {InputRecipe::kNVFP4, false, false, ShapeCase::kAllDifferentMul128, false},
     // NVFP4 with NULL C
-    {NVTE_NVFP4_1D_SCALING, true, false, ShapeCase::kAllSameMul128, true},
-    // NVFP4 with 2D (16x16) quantization.
-    {NVTE_NVFP4_1D_SCALING, true, false, ShapeCase::kAllSameMul128, false, /*nvfp4_2d=*/true},
-    {NVTE_NVFP4_1D_SCALING, false, true, ShapeCase::kAllDifferentMul128, false, /*nvfp4_2d=*/true},
-    {NVTE_NVFP4_1D_SCALING, false, false, ShapeCase::kAllSameMul128, false, /*nvfp4_2d=*/true},
+    {InputRecipe::kNVFP4, true, false, ShapeCase::kAllSameMul128, true},
     // Non-default output dtypes (BF16 covered everywhere else).
-    {std::nullopt,                false, false, ShapeCase::kAllSameMul128, false,
-     /*nvfp4_2d=*/false, /*output_dtype=*/DType::kFloat32},
-    {NVTE_DELAYED_TENSOR_SCALING, true,  false, ShapeCase::kAllSameMul128, false,
-     /*nvfp4_2d=*/false, /*output_dtype=*/DType::kFloat16},
+    {InputRecipe::kBF16,          false, false, ShapeCase::kAllSameMul128, false,
+     /*output_dtype=*/DType::kFloat32},
+    {InputRecipe::kFP8Current,    true,  false, ShapeCase::kAllSameMul128, false,
+     /*output_dtype=*/DType::kFloat16},
     // FP8 Block Scaling tests (TN layout on Hopper, block size 128)
-    {NVTE_BLOCK_SCALING_1D, true, false, ShapeCase::kAllSameMul128, false},
-    {NVTE_BLOCK_SCALING_1D, true, false, ShapeCase::kAllDifferentMul128, false},
-    {NVTE_BLOCK_SCALING_1D, true, false, ShapeCase::kSameFirstMul128, false},
-    {NVTE_BLOCK_SCALING_1D, true, false, ShapeCase::kSameLastMul128, false},
-    {NVTE_BLOCK_SCALING_1D, false, true, ShapeCase::kAllSameMul128, false},
-    {NVTE_BLOCK_SCALING_1D, false, false, ShapeCase::kAllSameMul128, false},
+    {InputRecipe::kFP8BlockScaling1D1D, true, false, ShapeCase::kAllSameMul128, false},
+    {InputRecipe::kFP8BlockScaling1D1D, true, false, ShapeCase::kAllDifferentMul128, false},
+    {InputRecipe::kFP8BlockScaling1D1D, true, false, ShapeCase::kSameFirstMul128, false},
+    {InputRecipe::kFP8BlockScaling1D1D, true, false, ShapeCase::kSameLastMul128, false},
+    {InputRecipe::kFP8BlockScaling1D1D, false, true, ShapeCase::kAllSameMul128, false},
+    {InputRecipe::kFP8BlockScaling1D1D, false, false, ShapeCase::kAllSameMul128, false},
     // FP8 Block Scaling with NULL C
-    {NVTE_BLOCK_SCALING_1D, true, false, ShapeCase::kAllSameMul128, true},
+    {InputRecipe::kFP8BlockScaling1D1D, true, false, ShapeCase::kAllSameMul128, true},
     // Dims multiples of 32 but not 128 — exercises scale_inv padding offsets.
-    {NVTE_MXFP8_1D_SCALING, true, false, ShapeCase::kAllSameMul32, false},
-    {NVTE_MXFP8_1D_SCALING, false, true, ShapeCase::kAllSameMul32, false},
-    {NVTE_MXFP8_1D_SCALING, false, false, ShapeCase::kAllSameMul32, false},
-    {NVTE_NVFP4_1D_SCALING, true, false, ShapeCase::kAllSameMul32, false},
-    {NVTE_NVFP4_1D_SCALING, false, true, ShapeCase::kAllSameMul32, false},
-    {NVTE_NVFP4_1D_SCALING, false, false, ShapeCase::kAllSameMul32, false},
-    {NVTE_BLOCK_SCALING_1D, true, false, ShapeCase::kAllSameMul32, false},
-    {NVTE_BLOCK_SCALING_1D, false, true, ShapeCase::kAllSameMul32, false},
-    {NVTE_BLOCK_SCALING_1D, false, false, ShapeCase::kAllSameMul32, false},
+    {InputRecipe::kMXFP8, true, false, ShapeCase::kAllSameMul32, false},
+    {InputRecipe::kMXFP8, false, true, ShapeCase::kAllSameMul32, false},
+    {InputRecipe::kMXFP8, false, false, ShapeCase::kAllSameMul32, false},
+    {InputRecipe::kNVFP4, true, false, ShapeCase::kAllSameMul32, false},
+    {InputRecipe::kNVFP4, false, true, ShapeCase::kAllSameMul32, false},
+    {InputRecipe::kNVFP4, false, false, ShapeCase::kAllSameMul32, false},
+    {InputRecipe::kFP8BlockScaling1D1D, true, false, ShapeCase::kAllSameMul32, false},
+    {InputRecipe::kFP8BlockScaling1D1D, false, true, ShapeCase::kAllSameMul32, false},
+    {InputRecipe::kFP8BlockScaling1D1D, false, false, ShapeCase::kAllSameMul32, false},
+    // Mixed FP8 block scaling modes supported by cuBLASLt: 2D x 1D and 1D x 2D.
+    {InputRecipe::kFP8BlockScaling2D1D, true, false, ShapeCase::kAllSameMul128, false},
+    {InputRecipe::kFP8BlockScaling2D1D, true, false, ShapeCase::kAllDifferentMul128, false},
+    {InputRecipe::kFP8BlockScaling2D1D, false, true, ShapeCase::kAllSameMul128, false},
+    {InputRecipe::kFP8BlockScaling2D1D, false, false, ShapeCase::kAllSameMul32, false},
+    {InputRecipe::kFP8BlockScaling1D2D, true, false, ShapeCase::kAllSameMul128, false},
+    {InputRecipe::kFP8BlockScaling1D2D, true, false, ShapeCase::kAllDifferentMul128, false},
+    {InputRecipe::kFP8BlockScaling1D2D, false, true, ShapeCase::kAllSameMul128, false},
+    {InputRecipe::kFP8BlockScaling1D2D, false, false, ShapeCase::kAllSameMul32, false},
 };
 
 INSTANTIATE_TEST_SUITE_P(OperatorTest,
