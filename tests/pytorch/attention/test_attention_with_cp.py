@@ -44,7 +44,7 @@ seed = 1234
 torch.manual_seed(seed)
 torch.cuda.manual_seed(seed)
 
-test_essential = True
+test_essential = False
 
 model_configs_flash_attn = {
     # test: ModelConfig(b, sq, hq, dqk)
@@ -98,13 +98,11 @@ class PoolWorker:
     # output that lands on the shared stdout fd) so the JSON protocol can't
     # be corrupted by interleaved chatter.
     _RESP_PREFIX = "[CP_POOL_RESP] "
-    _MAX_NOISE_LINES = 1000  # bound the per-submit scan so a chatty worker can't loop forever
 
     def __init__(self, world_size: int):
         self.world_size = world_size
         self.proc: subprocess.Popen | None = None
         self._stderr_buf: deque[str] = deque(maxlen=self._STDERR_BUFFER_LINES)
-        self._stderr_thread: threading.Thread | None = None
 
     def _spawn(self) -> None:
         te_path = os.getenv("TE_PATH", "/opt/transformerengine")
@@ -119,7 +117,8 @@ class PoolWorker:
         ]
         # stderr=PIPE so we can capture the tail for crash-path AssertionErrors;
         # a daemon drainer thread also echoes each line to sys.stderr so pytest's
-        # per-test stderr capture still works.
+        # per-test stderr capture still works. The thread is daemon, so it
+        # self-terminates when the pipe closes — no tracking needed.
         self.proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
@@ -130,8 +129,7 @@ class PoolWorker:
             env={**os.environ, "PYTHONUNBUFFERED": "1"},
         )
         self._stderr_buf.clear()
-        self._stderr_thread = threading.Thread(target=self._drain_stderr, daemon=True)
-        self._stderr_thread.start()
+        threading.Thread(target=self._drain_stderr, daemon=True).start()
 
     def _drain_stderr(self) -> None:
         proc = self.proc
@@ -142,12 +140,8 @@ class PoolWorker:
             sys.stderr.write(line)
             sys.stderr.flush()
 
-    def _stderr_tail(self) -> str:
-        text = "".join(self._stderr_buf)
-        return text[-self._STDERR_TAIL_CHARS :] if len(text) > self._STDERR_TAIL_CHARS else text
-
     def _diag(self, msg: str) -> str:
-        tail = self._stderr_tail()
+        tail = "".join(self._stderr_buf)[-self._STDERR_TAIL_CHARS :]
         if not tail.strip():
             return msg
         return f"{msg}\n\n--- pool worker stderr (tail) ---\n{tail}"
@@ -164,13 +158,10 @@ class PoolWorker:
             except subprocess.TimeoutExpired:
                 self.proc.kill()
                 self.proc.wait()
-        # Drainer thread exits on its own when the pipe closes.
         self.proc = None
-        self._stderr_thread = None
 
     def submit(self, kwargs: dict, timeout: float = POOL_SUBMIT_TIMEOUT_SEC) -> None:
         self._ensure_alive()
-        assert self.proc and self.proc.stdin and self.proc.stdout
         req = json.dumps({"op": "run", "kwargs": kwargs}) + "\n"
         try:
             self.proc.stdin.write(req)
@@ -182,20 +173,16 @@ class PoolWorker:
 
         # Read lines until we see our sentinel-prefixed JSON response.  Anything
         # else (torchrun status output, library prints, rank>0 stray writes that
-        # land on the shared stdout fd) is silently discarded — it would corrupt
-        # json.loads if we tried to decode it.  Bounded loop so a chatty worker
-        # can't keep us spinning past the deadline.
-        deadline = None  # set lazily on first iteration so we honour the original timeout budget
-        resp_line = None
-        scanned = 0
-        while scanned < self._MAX_NOISE_LINES:
-            remaining = timeout if deadline is None else max(0.0, deadline - time.monotonic())
+        # land on the shared stdout fd) is echoed to stderr and skipped — it
+        # would corrupt json.loads if we tried to decode it.  The select()
+        # deadline alone bounds the loop; no separate line counter needed.
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = max(0.0, deadline - time.monotonic())
             # select() on a pipe fd is Linux/macOS only — on Windows the select
             # module only accepts sockets. CP attention tests run on Linux GPU
             # hosts so this is fine; flag if portability is ever needed.
             ready, _, _ = select.select([self.proc.stdout], [], [], remaining)
-            if deadline is None:
-                deadline = time.monotonic() + timeout
             if not ready:
                 msg = self._diag(
                     f"pool worker (world_size={self.world_size}) timed out after "
@@ -210,22 +197,12 @@ class PoolWorker:
                 self._kill()
                 raise AssertionError(msg)
 
-            scanned += 1
             if line.startswith(self._RESP_PREFIX):
                 resp_line = line[len(self._RESP_PREFIX) :]
                 break
-            # Otherwise: non-protocol stdout from somewhere. Echo to test stderr
-            # so it's still visible in CI logs, then keep looking.
+            # Non-protocol stdout — echo to stderr for CI visibility, keep looking.
             sys.stderr.write(line)
             sys.stderr.flush()
-
-        if resp_line is None:
-            msg = self._diag(
-                f"pool worker (world_size={self.world_size}) sent {self._MAX_NOISE_LINES}+ "
-                "stdout lines without a sentinel-prefixed response; assuming protocol corruption"
-            )
-            self._kill()
-            raise AssertionError(msg)
 
         resp = json.loads(resp_line)
         if not resp["ok"]:
@@ -246,7 +223,6 @@ class PoolWorker:
             except subprocess.TimeoutExpired:
                 self._kill()
         self.proc = None
-        self._stderr_thread = None
 
 
 @pytest.fixture(scope="session")

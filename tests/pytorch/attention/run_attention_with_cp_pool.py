@@ -15,7 +15,7 @@ NCCL, then enter a dispatch loop:
         call run_dpa_with_cp(**kwargs) — the same work function the
         per-case subprocess design uses, with NVTE_CP_POOL_PG=1 so the
         function reuses our PG instead of re-initing it
-        torch.cuda.empty_cache() + gc.collect() per case
+        torch.cuda.empty_cache() per case
     all ranks gather (ok, error_msg) to rank 0
     rank 0:
         write one JSON response line to stdout
@@ -26,7 +26,6 @@ Protocol (line-delimited JSON over rank-0 stdio):
     response: {"ok": true}
               {"ok": false, "error": "first failing rank's traceback"}
 """
-import gc
 import json
 import os
 import sys
@@ -41,18 +40,6 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from run_attention_with_cp import run_dpa_with_cp
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
-
-
-# Env vars run_dpa_with_cp re-sets at the top of every call. We pop them
-# defensively between cases so a future caller that *doesn't* re-set them
-# can't inherit a leftover value from a previous case in the same worker.
-_TRANSIENT_ENV_KEYS = (
-    "NVTE_FP8_DPA_BWD",
-    "NVTE_DPA_FP8CS_O_in_F16",
-    "NVTE_FLASH_ATTN",
-    "NVTE_FUSED_ATTN",
-    "NVTE_ALLOW_NONDETERMINISTIC_ALGO",
-)
 
 
 def _recv_request(rank: int) -> dict:
@@ -79,17 +66,17 @@ def _send_response(rank: int, payload: dict) -> None:
 def _reset_between_cases() -> None:
     """Drop state that would otherwise cascade across cases.
 
-    Matches the per-case startup of the single-shot worker (``_run_single_config``
-    on the per-case-subprocess branch): identical RNG seed at the start of every
-    case, FP8 state cleared, transient env vars cleared, allocator clean.
+    Matches the per-case startup of the single-shot worker
+    (``_run_single_config`` on the per-case-subprocess branch): identical RNG
+    seed at the start of every case, FP8 state cleared, allocator clean.
+    ``run_dpa_with_cp`` re-sets ``NVTE_FUSED_ATTN``/``NVTE_FLASH_ATTN``
+    unconditionally and pops the other transient env vars itself, so no
+    explicit pop is needed here.
     """
     torch.manual_seed(1234)
     torch.cuda.manual_seed(1234)
     FP8GlobalStateManager.reset()
-    for env_key in _TRANSIENT_ENV_KEYS:
-        os.environ.pop(env_key, None)
     torch.cuda.empty_cache()
-    gc.collect()
 
 
 _case_counter = 0
@@ -141,11 +128,9 @@ def main() -> None:
             ok, msg = _run_one(req, rank)
 
             gathered: list[tuple[bool, str]] = [None] * world_size  # type: ignore[list-item]
+            # gather_object is itself a collective synchronization point — if
+            # every rank reached it, none is ahead. No extra barrier needed.
             dist.gather_object((ok, msg), gathered if rank == 0 else None, dst=0)
-
-            # Surface a wedged communicator here, before the next case's
-            # collectives can inherit the corruption.
-            dist.barrier()
 
             if rank == 0:
                 all_ok = all(o for o, _ in gathered)
