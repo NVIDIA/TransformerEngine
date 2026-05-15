@@ -1393,7 +1393,7 @@ def _run_dot_product_attention(
 
 def _score_mod_causal(score_mod_graph, score_tensor, tensors):
     """cuDNN frontend score_mod implementing top-left causal masking."""
-    import cudnn  # pylint: disable=import-outside-toplevel
+    cudnn = dpa_backends._import_cudnn_frontend()
 
     row_index = score_mod_graph.gen_index(input=score_tensor, axis=2)
     row_index.set_data_type(cudnn.data_type.INT32)
@@ -1414,7 +1414,7 @@ def _score_mod_causal(score_mod_graph, score_tensor, tensors):
 
 def _score_mod_causal_bprop(score_mod_graph, dP_tensor, tensors):
     """cuDNN frontend score_mod_bprop implementing top-left causal masking."""
-    import cudnn  # pylint: disable=import-outside-toplevel
+    cudnn = dpa_backends._import_cudnn_frontend()
 
     row_index = score_mod_graph.gen_index(input=dP_tensor, axis=2)
     row_index.set_data_type(cudnn.data_type.INT32)
@@ -1433,23 +1433,23 @@ def _score_mod_causal_bprop(score_mod_graph, dP_tensor, tensors):
     )
 
 
-def _score_mod_relative_position(score_mod_graph, score_tensor, _tensors):
-    """cuDNN frontend score_mod adding relative position bias."""
-    import cudnn  # pylint: disable=import-outside-toplevel
+def _score_mod_post_scale_bias(score_mod_graph, score_tensor, _tensors):
+    """cuDNN frontend score_mod adding post-scale bias."""
+    cudnn = dpa_backends._import_cudnn_frontend()
 
     row_index = score_mod_graph.gen_index(input=score_tensor, axis=2)
     row_index.set_data_type(cudnn.data_type.INT32)
     col_index = score_mod_graph.gen_index(input=score_tensor, axis=3)
     col_index.set_data_type(cudnn.data_type.INT32)
-    relative_position = score_mod_graph.sub(
+    post_scale_bias = score_mod_graph.sub(
         a=row_index,
         b=col_index,
         compute_data_type=cudnn.data_type.FLOAT,
     )
-    relative_position.set_data_type(cudnn.data_type.FLOAT)
+    post_scale_bias.set_data_type(cudnn.data_type.FLOAT)
     return score_mod_graph.add(
         a=score_tensor,
-        b=relative_position,
+        b=post_scale_bias,
         compute_data_type=cudnn.data_type.FLOAT,
     )
 
@@ -1471,7 +1471,7 @@ class _ScoreModSoftcap:
 
     def forward(self, score_mod_graph, score_tensor, tensors):
         """Apply softcap * tanh(score / softcap)."""
-        import cudnn  # pylint: disable=import-outside-toplevel
+        cudnn = dpa_backends._import_cudnn_frontend()
 
         self.before_tanh_activation = score_mod_graph.div(
             a=score_tensor,
@@ -1489,7 +1489,7 @@ class _ScoreModSoftcap:
 
     def backward(self, score_mod_graph, dP_tensor, tensors):
         """Apply softcap derivative to dP."""
-        import cudnn  # pylint: disable=import-outside-toplevel
+        cudnn = dpa_backends._import_cudnn_frontend()
 
         d_tanh_out = score_mod_graph.mul(
             a=dP_tensor,
@@ -1629,7 +1629,7 @@ def test_score_mod_cache_fwd_reuses_graph_for_pass_by_value_changes(monkeypatch)
         score_mod,
         score_mod_tensors,
         output_layer,
-        stats_bhs1,
+        stats,
     ):
         del (
             is_training,
@@ -1642,7 +1642,7 @@ def test_score_mod_cache_fwd_reuses_graph_for_pass_by_value_changes(monkeypatch)
             score_mod,
             score_mod_tensors,
             output_layer,
-            stats_bhs1,
+            stats,
         )
         entry = object()
         build_entries.append(entry)
@@ -1723,7 +1723,7 @@ def test_score_mod_cache_fwd_skips_cache_for_unkeyed_bound_method(monkeypatch):
         score_mod,
         score_mod_tensors,
         output_layer,
-        stats_bhs1,
+        stats,
     ):
         del (
             is_training,
@@ -1736,7 +1736,7 @@ def test_score_mod_cache_fwd_skips_cache_for_unkeyed_bound_method(monkeypatch):
             score_mod,
             score_mod_tensors,
             output_layer,
-            stats_bhs1,
+            stats,
         )
         entry = object()
         build_entries.append(entry)
@@ -1825,7 +1825,7 @@ def test_score_mod_tensors_are_version_checked_for_backward(monkeypatch):
         out.sum().backward()
 
 
-def _relative_position_bias(config, dtype):
+def _post_scale_bias(config, dtype):
     """Materialize score + (q_idx - kv_idx) as post-scale attention bias."""
     q_idx = torch.arange(config.max_seqlen_q, dtype=torch.float32, device="cuda").view(1, 1, -1, 1)
     kv_idx = torch.arange(config.max_seqlen_kv, dtype=torch.float32, device="cuda").view(
@@ -1864,28 +1864,63 @@ def _pytorch_softcap_attention(q, k, v, qkv_format, softmax_scale, softcap):
 @pytest.mark.skipif(get_cudnn_version() < (9, 6, 0), reason="cuDNN 9.6.0+ is required.")
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("qkv_format", ["sbhd", "bshd"])
-@pytest.mark.parametrize("scalar_loss", [False, True])
-def test_dot_product_attention_score_mod(dtype, qkv_format, scalar_loss):
-    """Compare score_mod causal masking against standard cuDNN causal attention."""
+@pytest.mark.parametrize(
+    "score_mod_case, scalar_loss",
+    [
+        ("causal", False),
+        ("causal", True),
+        ("softcap", False),
+        ("post_scale_bias", False),
+    ],
+)
+def test_dot_product_attention_score_mod(dtype, qkv_format, score_mod_case, scalar_loss):
+    """Compare score_mod attention against equivalent reference implementations."""
     try:
-        import cudnn  # pylint: disable=unused-import,import-outside-toplevel
+        dpa_backends._import_cudnn_frontend()
     except ImportError:
         pytest.skip("cuDNN Python frontend is required for score_mod attention.")
 
     reset_rng_states()
-    os.environ["NVTE_FLASH_ATTN"] = "0"
-    os.environ["NVTE_FUSED_ATTN"] = "1"
-    os.environ["NVTE_UNFUSED_ATTN"] = "0"
-    _attention_backends["backend_selection_requires_update"] = True
 
-    config = ModelConfig(2, 64, 4, 64, attn_mask_type="no_mask")
+    config = ModelConfig(
+        2,
+        64 if score_mod_case == "causal" else 16,
+        4,
+        64,
+        attn_mask_type="no_mask",
+    )
     available_backends, _, fused_attn_backends = get_available_attention_backends(
         config,
         qkv_dtype=dtype,
         qkv_layout=f"{qkv_format}_{qkv_format}_{qkv_format}",
+        score_mod=True,
+        score_mod_bprop=True,
     )
     if not available_backends[1] or not fused_attn_backends:
         pytest.skip("FusedAttention is not available for this score_mod configuration.")
+
+    if score_mod_case == "post_scale_bias":
+        bias_config = ModelConfig(
+            config.batch_size,
+            config.max_seqlen_q,
+            config.num_heads,
+            config.head_dim_qk,
+            attn_mask_type="no_mask",
+            attn_bias_type="post_scale_bias",
+            bias_shape="1hss",
+        )
+        bias_available_backends, _, bias_fused_attn_backends = get_available_attention_backends(
+            bias_config,
+            qkv_dtype=dtype,
+            qkv_layout=f"{qkv_format}_{qkv_format}_{qkv_format}",
+        )
+        if not bias_available_backends[1] or not bias_fused_attn_backends:
+            pytest.skip("FusedAttention is not available for post_scale_bias reference.")
+
+    os.environ["NVTE_FLASH_ATTN"] = "0"
+    os.environ["NVTE_FUSED_ATTN"] = "1"
+    os.environ["NVTE_UNFUSED_ATTN"] = "0"
+    _attention_backends["backend_selection_requires_update"] = True
 
     if qkv_format == "sbhd":
         q_shape = (config.max_seqlen_q, config.batch_size, config.num_heads, config.head_dim_qk)
@@ -1894,9 +1929,14 @@ def test_dot_product_attention_score_mod(dtype, qkv_format, scalar_loss):
         q_shape = (config.batch_size, config.max_seqlen_q, config.num_heads, config.head_dim_qk)
         kv_shape = q_shape
 
-    q = (0.1 * torch.randn(q_shape, dtype=dtype, device="cuda")).requires_grad_()
-    k = (0.1 * torch.randn(kv_shape, dtype=dtype, device="cuda")).requires_grad_()
-    v = (0.1 * torch.randn(kv_shape, dtype=dtype, device="cuda")).requires_grad_()
+    if score_mod_case == "softcap":
+        q = torch.randn(q_shape, dtype=dtype, device="cuda").requires_grad_()
+        k = torch.randn(kv_shape, dtype=dtype, device="cuda").requires_grad_()
+        v = (0.1 * torch.randn(kv_shape, dtype=dtype, device="cuda")).requires_grad_()
+    else:
+        q = (0.1 * torch.randn(q_shape, dtype=dtype, device="cuda")).requires_grad_()
+        k = (0.1 * torch.randn(kv_shape, dtype=dtype, device="cuda")).requires_grad_()
+        v = (0.1 * torch.randn(kv_shape, dtype=dtype, device="cuda")).requires_grad_()
     q_ref, k_ref, v_ref = [x.detach().clone().requires_grad_() for x in (q, k, v)]
 
     flex_attn = DotProductAttention(
@@ -1906,13 +1946,65 @@ def test_dot_product_attention_score_mod(dtype, qkv_format, scalar_loss):
         attn_mask_type="no_mask",
         layer_number=1,
     ).to(dtype=dtype, device="cuda")
-    ref_attn = DotProductAttention(
-        config.num_heads,
-        config.head_dim_qk,
-        qkv_format=qkv_format,
-        attn_mask_type="causal",
-        layer_number=1,
-    ).to(dtype=dtype, device="cuda")
+
+    if score_mod_case == "causal":
+        score_mod_kwargs = {
+            "score_mod": _score_mod_causal,
+            "score_mod_bprop": _score_mod_causal_bprop,
+            "score_mod_tensors": {"neg_inf": torch.full((1, 1, 1, 1), -1e9)},
+            "score_mod_bprop_tensors": {"zero": torch.full((1, 1, 1, 1), 0.0)},
+        }
+        ref_attn = DotProductAttention(
+            config.num_heads,
+            config.head_dim_qk,
+            qkv_format=qkv_format,
+            attn_mask_type="causal",
+            layer_number=1,
+        ).to(dtype=dtype, device="cuda")
+        out_ref = ref_attn(q_ref, k_ref, v_ref, qkv_format=qkv_format, attn_mask_type="causal")
+        tols = dict(atol=5e-2, rtol=5e-2)
+    elif score_mod_case == "softcap":
+        softcap = 0.8
+        softcap_tensor = torch.full((1, 1, 1, 1), softcap)
+        softcap_score_mod = _ScoreModSoftcap()
+        score_mod_kwargs = {
+            "score_mod": softcap_score_mod.forward,
+            "score_mod_bprop": softcap_score_mod.backward,
+            "score_mod_tensors": {"softcap": softcap_tensor},
+            "score_mod_bprop_tensors": {"softcap": softcap_tensor},
+        }
+        out_ref = _pytorch_softcap_attention(
+            q_ref,
+            k_ref,
+            v_ref,
+            qkv_format,
+            1.0 / config.head_dim_qk**0.5,
+            softcap,
+        )
+        tols = dict(atol=7e-2, rtol=7e-2)
+    else:
+        assert score_mod_case == "post_scale_bias"
+        score_mod_kwargs = {
+            "score_mod": _score_mod_post_scale_bias,
+            "score_mod_bprop": _score_mod_identity_bprop,
+        }
+        ref_attn = DotProductAttention(
+            config.num_heads,
+            config.head_dim_qk,
+            qkv_format=qkv_format,
+            attn_mask_type="no_mask",
+            layer_number=1,
+        ).to(dtype=dtype, device="cuda")
+        out_ref = ref_attn(
+            q_ref,
+            k_ref,
+            v_ref,
+            qkv_format=qkv_format,
+            attn_mask_type="no_mask",
+            core_attention_bias_type="post_scale_bias",
+            core_attention_bias=_post_scale_bias(config, dtype),
+        )
+        tols = dict(atol=5e-2, rtol=5e-2)
 
     out = flex_attn(
         q,
@@ -1920,17 +2012,7 @@ def test_dot_product_attention_score_mod(dtype, qkv_format, scalar_loss):
         v,
         qkv_format=qkv_format,
         attn_mask_type="no_mask",
-        score_mod=_score_mod_causal,
-        score_mod_bprop=_score_mod_causal_bprop,
-        score_mod_tensors={"neg_inf": torch.full((1, 1, 1, 1), -1e9)},
-        score_mod_bprop_tensors={"zero": torch.full((1, 1, 1, 1), 0.0)},
-    )
-    out_ref = ref_attn(
-        q_ref,
-        k_ref,
-        v_ref,
-        qkv_format=qkv_format,
-        attn_mask_type="causal",
+        **score_mod_kwargs,
     )
 
     if scalar_loss:
@@ -1941,190 +2023,6 @@ def test_dot_product_attention_score_mod(dtype, qkv_format, scalar_loss):
         out.backward(d_out)
         out_ref.backward(d_out)
 
-    tols = dict(atol=5e-2, rtol=5e-2)
-    torch.testing.assert_close(out, out_ref, **tols)
-    torch.testing.assert_close(q.grad, q_ref.grad, **tols)
-    torch.testing.assert_close(k.grad, k_ref.grad, **tols)
-    torch.testing.assert_close(v.grad, v_ref.grad, **tols)
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required.")
-@pytest.mark.skipif(get_cudnn_version() < (9, 6, 0), reason="cuDNN 9.6.0+ is required.")
-@pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("qkv_format", ["sbhd", "bshd"])
-def test_dot_product_attention_score_mod_softcap(dtype, qkv_format):
-    """Compare softcap score_mod against PyTorch math attention."""
-    try:
-        import cudnn  # pylint: disable=unused-import,import-outside-toplevel
-    except ImportError:
-        pytest.skip("cuDNN Python frontend is required for score_mod attention.")
-
-    reset_rng_states()
-    os.environ["NVTE_FLASH_ATTN"] = "0"
-    os.environ["NVTE_FUSED_ATTN"] = "1"
-    os.environ["NVTE_UNFUSED_ATTN"] = "0"
-    _attention_backends["backend_selection_requires_update"] = True
-
-    config = ModelConfig(2, 16, 4, 64, attn_mask_type="no_mask")
-    available_backends, _, fused_attn_backends = get_available_attention_backends(
-        config,
-        qkv_dtype=dtype,
-        qkv_layout=f"{qkv_format}_{qkv_format}_{qkv_format}",
-    )
-    if not available_backends[1] or not fused_attn_backends:
-        pytest.skip("FusedAttention is not available for this softcap configuration.")
-
-    if qkv_format == "sbhd":
-        q_shape = (config.max_seqlen_q, config.batch_size, config.num_heads, config.head_dim_qk)
-        kv_shape = q_shape
-    else:
-        q_shape = (config.batch_size, config.max_seqlen_q, config.num_heads, config.head_dim_qk)
-        kv_shape = q_shape
-
-    q = torch.randn(q_shape, dtype=dtype, device="cuda").requires_grad_()
-    k = torch.randn(kv_shape, dtype=dtype, device="cuda").requires_grad_()
-    v = (0.1 * torch.randn(kv_shape, dtype=dtype, device="cuda")).requires_grad_()
-    q_ref, k_ref, v_ref = [x.detach().clone().requires_grad_() for x in (q, k, v)]
-
-    softcap = 0.8
-    softcap_tensor = torch.full((1, 1, 1, 1), softcap)
-    softcap_score_mod = _ScoreModSoftcap()
-    flex_attn = DotProductAttention(
-        config.num_heads,
-        config.head_dim_qk,
-        qkv_format=qkv_format,
-        attn_mask_type="no_mask",
-        layer_number=1,
-    ).to(dtype=dtype, device="cuda")
-
-    out = flex_attn(
-        q,
-        k,
-        v,
-        qkv_format=qkv_format,
-        attn_mask_type="no_mask",
-        score_mod=softcap_score_mod.forward,
-        score_mod_bprop=softcap_score_mod.backward,
-        score_mod_tensors={"softcap": softcap_tensor},
-        score_mod_bprop_tensors={"softcap": softcap_tensor},
-    )
-    out_ref = _pytorch_softcap_attention(
-        q_ref,
-        k_ref,
-        v_ref,
-        qkv_format,
-        1.0 / config.head_dim_qk**0.5,
-        softcap,
-    )
-
-    d_out = torch.randn_like(out)
-    out.backward(d_out)
-    out_ref.backward(d_out)
-
-    tols = dict(atol=7e-2, rtol=7e-2)
-    torch.testing.assert_close(out, out_ref, **tols)
-    torch.testing.assert_close(q.grad, q_ref.grad, **tols)
-    torch.testing.assert_close(k.grad, k_ref.grad, **tols)
-    torch.testing.assert_close(v.grad, v_ref.grad, **tols)
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required.")
-@pytest.mark.skipif(get_cudnn_version() < (9, 6, 0), reason="cuDNN 9.6.0+ is required.")
-@pytest.mark.parametrize("dtype", param_types)
-@pytest.mark.parametrize("qkv_format", ["sbhd", "bshd"])
-def test_dot_product_attention_score_mod_relative_position(dtype, qkv_format):
-    """Compare relative-position score_mod against materialized post-scale bias."""
-    try:
-        import cudnn  # pylint: disable=unused-import,import-outside-toplevel
-    except ImportError:
-        pytest.skip("cuDNN Python frontend is required for score_mod attention.")
-
-    reset_rng_states()
-
-    config = ModelConfig(2, 16, 4, 64, attn_mask_type="no_mask")
-    bias_config = ModelConfig(
-        config.batch_size,
-        config.max_seqlen_q,
-        config.num_heads,
-        config.head_dim_qk,
-        attn_mask_type="no_mask",
-        attn_bias_type="post_scale_bias",
-        bias_shape="1hss",
-    )
-    available_backends, _, fused_attn_backends = get_available_attention_backends(
-        config,
-        qkv_dtype=dtype,
-        qkv_layout=f"{qkv_format}_{qkv_format}_{qkv_format}",
-    )
-    bias_available_backends, _, bias_fused_attn_backends = get_available_attention_backends(
-        bias_config,
-        qkv_dtype=dtype,
-        qkv_layout=f"{qkv_format}_{qkv_format}_{qkv_format}",
-    )
-    if (
-        not available_backends[1]
-        or not fused_attn_backends
-        or not bias_available_backends[1]
-        or not bias_fused_attn_backends
-    ):
-        pytest.skip("FusedAttention is not available for this relative-position configuration.")
-
-    os.environ["NVTE_FLASH_ATTN"] = "0"
-    os.environ["NVTE_FUSED_ATTN"] = "1"
-    os.environ["NVTE_UNFUSED_ATTN"] = "0"
-    _attention_backends["backend_selection_requires_update"] = True
-
-    if qkv_format == "sbhd":
-        q_shape = (config.max_seqlen_q, config.batch_size, config.num_heads, config.head_dim_qk)
-        kv_shape = q_shape
-    else:
-        q_shape = (config.batch_size, config.max_seqlen_q, config.num_heads, config.head_dim_qk)
-        kv_shape = q_shape
-
-    q = (0.1 * torch.randn(q_shape, dtype=dtype, device="cuda")).requires_grad_()
-    k = (0.1 * torch.randn(kv_shape, dtype=dtype, device="cuda")).requires_grad_()
-    v = (0.1 * torch.randn(kv_shape, dtype=dtype, device="cuda")).requires_grad_()
-    q_ref, k_ref, v_ref = [x.detach().clone().requires_grad_() for x in (q, k, v)]
-
-    flex_attn = DotProductAttention(
-        config.num_heads,
-        config.head_dim_qk,
-        qkv_format=qkv_format,
-        attn_mask_type="no_mask",
-        layer_number=1,
-    ).to(dtype=dtype, device="cuda")
-    ref_attn = DotProductAttention(
-        config.num_heads,
-        config.head_dim_qk,
-        qkv_format=qkv_format,
-        attn_mask_type="no_mask",
-        layer_number=1,
-    ).to(dtype=dtype, device="cuda")
-
-    out = flex_attn(
-        q,
-        k,
-        v,
-        qkv_format=qkv_format,
-        attn_mask_type="no_mask",
-        score_mod=_score_mod_relative_position,
-        score_mod_bprop=_score_mod_identity_bprop,
-    )
-    out_ref = ref_attn(
-        q_ref,
-        k_ref,
-        v_ref,
-        qkv_format=qkv_format,
-        attn_mask_type="no_mask",
-        core_attention_bias_type="post_scale_bias",
-        core_attention_bias=_relative_position_bias(config, dtype),
-    )
-
-    d_out = torch.randn_like(out)
-    out.backward(d_out)
-    out_ref.backward(d_out)
-
-    tols = dict(atol=5e-2, rtol=5e-2)
     torch.testing.assert_close(out, out_ref, **tols)
     torch.testing.assert_close(q.grad, q_ref.grad, **tols)
     torch.testing.assert_close(k.grad, k_ref.grad, **tols)

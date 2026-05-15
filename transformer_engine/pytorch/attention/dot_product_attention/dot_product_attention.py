@@ -1085,10 +1085,10 @@ class DotProductAttention(TransformerEngineBaseModule):
             to the FA3 backend to control internal kernel splitting behavior for non-context-parallel
             cases. It is ignored for other backends and when context parallelism is enabled.
         score_mod: Optional[Callable], default = None
-            cuDNN frontend score modification callback. This is a cuDNN-only path and is mutually
-            exclusive with masks, bias, ALiBi, sink attention, dropout, FP8, context parallelism,
-            THD format, KV caching, and return_max_logit. The callback signature is
-            ``score_mod(graph, score, tensors) -> score``.
+            Experimental cuDNN frontend score modification callback. This is a cuDNN-only path
+            and is mutually exclusive with masks, bias, ALiBi, sink attention, dropout, FP8,
+            context parallelism, THD format, KV caching, and return_max_logit. The callback
+            signature is ``score_mod(graph, score, tensors) -> score``.
         score_mod_bprop: Optional[Callable], default = None
             Optional cuDNN frontend callback for the backward pass of score_mod. The callback
             signature is ``score_mod_bprop(graph, dP, tensors) -> dP``.
@@ -1434,7 +1434,9 @@ class DotProductAttention(TransformerEngineBaseModule):
 
             if score_mod is None:
                 assert score_mod_bprop is None, "score_mod_bprop requires score_mod!"
-                assert score_mod_tensors is None, "score_mod_tensors requires score_mod!"
+                assert (
+                    score_mod_tensors is None
+                ), "score_mod_tensors requires score_mod!"
                 assert (
                     score_mod_bprop_tensors is None
                 ), "score_mod_bprop_tensors requires score_mod!"
@@ -1455,18 +1457,28 @@ class DotProductAttention(TransformerEngineBaseModule):
                     and type(key_layer) is torch.Tensor
                     and type(value_layer) is torch.Tensor
                 ), "score_mod only supports unquantized torch.Tensor Q, K and V inputs!"
-                assert not self.fp8, "score_mod is not supported with FP8 DotProductAttention!"
+                assert (
+                    not self.fp8
+                ), "score_mod is not supported with FP8 DotProductAttention!"
                 assert not fp8_output, "score_mod is not supported with fp8_output!"
-                assert not context_parallel, "score_mod is not supported with context parallelism!"
-                assert qkv_format != "thd", "score_mod is not supported with qkv_format='thd'!"
+                assert (
+                    not context_parallel
+                ), "score_mod is not supported with context parallelism!"
+                assert (
+                    qkv_format != "thd"
+                ), "score_mod is not supported with qkv_format='thd'!"
                 assert (
                     not user_supplied_seqlens
                 ), "score_mod is mutually exclusive with explicit sequence length metadata!"
-                assert not pad_between_seqs, "score_mod is not supported with pad_between_seqs!"
+                assert (
+                    not pad_between_seqs
+                ), "score_mod is not supported with pad_between_seqs!"
                 assert (
                     attention_mask is None
                 ), "score_mod is mutually exclusive with attention_mask!"
-                assert attn_mask_type == "no_mask", "score_mod requires attn_mask_type='no_mask'!"
+                assert (
+                    attn_mask_type == "no_mask"
+                ), "score_mod requires attn_mask_type='no_mask'!"
                 assert window_size is None or window_size == (
                     -1,
                     -1,
@@ -1496,7 +1508,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                     "bshd",
                 ], "score_mod only supports SBHD/BSHD QKV formats!"
                 if score_mod_tensors is not None:
-                    assert isinstance(score_mod_tensors, dict), "score_mod_tensors must be a dict!"
+                    assert isinstance(
+                        score_mod_tensors, dict
+                    ), "score_mod_tensors must be a dict!"
                     assert all(
                         isinstance(k, str) and isinstance(v, torch.Tensor)
                         for k, v in score_mod_tensors.items()
@@ -1540,46 +1554,21 @@ class DotProductAttention(TransformerEngineBaseModule):
                 is_training=self.training,
                 fp8=self.fp8,
                 fp8_meta=self.fp8_meta,
+                fp8_output=fp8_output,
                 inference_params=inference_params,
                 softmax_type=self.softmax_type,
                 return_max_logit=self.return_max_logit,
+                checkpoint_core_attention=checkpoint_core_attention,
                 cuda_graph=is_graph_capturing(),
                 num_splits=num_splits,
+                has_attention_mask=attention_mask is not None,
+                has_core_attention_bias=core_attention_bias is not None,
+                user_supplied_seqlens=user_supplied_seqlens,
+                score_mod=score_mod is not None,
+                score_mod_bprop=score_mod_bprop is not None,
             )
             global _attention_backends
-            if score_mod is not None:
-                use_flash_attention = False
-                flash_attention_backend = None
-                use_fused_attention = True
-                use_unfused_attention = False
-                q_type = dpa_utils.TE_DType[query_layer.dtype]
-                fused_attention_backend = tex.get_fused_attn_backend(
-                    self.training,
-                    q_type,
-                    q_type,
-                    dpa_utils.QKVLayout["bshd_bshd_bshd"],
-                    dpa_utils.AttnBiasType["no_bias"],
-                    dpa_utils.AttnMaskType["no_mask"],
-                    dpa_utils.SoftmaxType["vanilla"],
-                    0.0,
-                    num_attention_heads,
-                    num_gqa_groups,
-                    max_seqlen_q,
-                    max_seqlen_kv,
-                    head_dim_qk,
-                    head_dim_v,
-                    -1,
-                    -1,
-                    False,
-                    is_graph_capturing(),
-                    self.deterministic,
-                )
-                if fused_attention_backend == tex.NVTE_Fused_Attn_Backend.NVTE_No_Backend:
-                    raise ValueError(
-                        "score_mod requires a cuDNN FusedAttention backend, but no fused "
-                        "attention backend supports the provided inputs."
-                    )
-            elif is_in_onnx_export_mode():
+            if is_in_onnx_export_mode() and score_mod is None:
                 # We do not want to call get_attention_backend() in ONNX mode
                 # and we want to avoid using any global variables like _attention_backends.
                 use_flash_attention = False
