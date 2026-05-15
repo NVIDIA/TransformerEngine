@@ -421,8 +421,9 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       // 2. Compute E8M0 scaling factor
       e8m0_t biased_exponent;
       if constexpr (kIs2DBlockScaling) {
-        using AMax2DType = std::conditional_t<
-            NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>), IType, float>;
+        using AMax2DType =
+            std::conditional_t<NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>),
+                               IType, float>;
         __shared__ e8m0_t block_scales_2d[THREADS_X];
         __shared__ AMax2DType block_amax_2d[THREADS_X * THREADS_Y];
         block_amax_2d[tid_X_rowwise * THREADS_Y + tid_Y_rowwise] =
@@ -438,9 +439,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
               amax_2d = __hmax(amax_2d, block_amax_2d[tid_X_rowwise * THREADS_Y + i]);
             }
           }
-          block_scales_2d[tid_X_rowwise] =
-              ptx::float_to_e8m0(static_cast<float>(amax_2d) *
-                                  Quantized_Limits<OType>::max_norm_rcp);
+          block_scales_2d[tid_X_rowwise] = ptx::float_to_e8m0(
+              static_cast<float>(amax_2d) * Quantized_Limits<OType>::max_norm_rcp);
         }
         __syncthreads();
         biased_exponent = block_scales_2d[tid_X_rowwise];
