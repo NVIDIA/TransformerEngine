@@ -103,8 +103,9 @@ class Quantizer {
   virtual void set_quantization_params(TensorWrapper* tensor) const = 0;
 
   /*! @brief Construct a tensor with uninitialized data */
-  virtual std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
-                                                             DType dtype) const = 0;
+  virtual std::pair<TensorWrapper, py::object> create_tensor(
+      const std::vector<size_t>& shape, DType dtype,
+      std::optional<at::Device> device = std::nullopt, bool pin_memory = false) const = 0;
 
   /*! @brief Construct a grouped tensor with uninitialized data */
   virtual std::pair<GroupedTensorWrapper, py::object> create_grouped_tensor(
@@ -145,8 +146,9 @@ class NoneQuantizer : public Quantizer {
 
   void set_quantization_params(TensorWrapper* tensor) const override {}
 
-  std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
-                                                     DType dtype) const override;
+  std::pair<TensorWrapper, py::object> create_tensor(
+      const std::vector<size_t>& shape, DType dtype,
+      std::optional<at::Device> device = std::nullopt, bool pin_memory = false) const override;
 
   std::pair<GroupedTensorWrapper, py::object> create_grouped_tensor(
       size_t num_tensors, const std::vector<size_t>& logical_shape, DType dtype,
@@ -175,8 +177,9 @@ class Float8Quantizer : public Quantizer {
 
   void set_quantization_params(TensorWrapper* tensor) const override;
 
-  std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
-                                                     DType dtype) const override;
+  std::pair<TensorWrapper, py::object> create_tensor(
+      const std::vector<size_t>& shape, DType dtype,
+      std::optional<at::Device> device = std::nullopt, bool pin_memory = false) const override;
 
   std::pair<GroupedTensorWrapper, py::object> create_grouped_tensor(
       size_t num_tensors, const std::vector<size_t>& logical_shape, DType dtype,
@@ -184,10 +187,10 @@ class Float8Quantizer : public Quantizer {
       size_t logical_last_dim) const override;
 
   /*! @brief Construct a tensor with pre-initialized data */
-  std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape, DType dtype,
-                                                     std::optional<at::Tensor> data,
-                                                     std::optional<at::Tensor> transpose,
-                                                     std::optional<at::Tensor> scale_inv) const;
+  std::pair<TensorWrapper, py::object> create_tensor(
+      const std::vector<size_t>& shape, DType dtype, std::optional<at::Tensor> data,
+      std::optional<at::Tensor> transpose, std::optional<at::Tensor> scale_inv,
+      std::optional<at::Device> device = std::nullopt, bool pin_memory = false) const;
 
   std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
 
@@ -209,8 +212,9 @@ class Float8CurrentScalingQuantizer : public Quantizer {
 
   void set_quantization_params(TensorWrapper* tensor) const override;
 
-  std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
-                                                     DType dtype) const override;
+  std::pair<TensorWrapper, py::object> create_tensor(
+      const std::vector<size_t>& shape, DType dtype,
+      std::optional<at::Device> device = std::nullopt, bool pin_memory = false) const override;
 
   std::pair<GroupedTensorWrapper, py::object> create_grouped_tensor(
       size_t num_tensors, const std::vector<size_t>& logical_shape, DType dtype,
@@ -271,8 +275,9 @@ class Float8BlockQuantizer : public Quantizer {
   // Create a python Float8BlockQuantized tensor and C++ wrapper
   // for the tensor. Should set quantized data, scales for rowwise
   // and optionally columnwise usage.
-  std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
-                                                     DType dtype) const override;
+  std::pair<TensorWrapper, py::object> create_tensor(
+      const std::vector<size_t>& shape, DType dtype,
+      std::optional<at::Device> device = std::nullopt, bool pin_memory = false) const override;
 
   std::pair<GroupedTensorWrapper, py::object> create_grouped_tensor(
       size_t num_tensors, const std::vector<size_t>& logical_shape, DType dtype,
@@ -295,8 +300,9 @@ class MXFP8Quantizer : public Quantizer {
 
   void set_quantization_params(TensorWrapper* tensor) const override;
 
-  std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
-                                                     DType dtype) const override;
+  std::pair<TensorWrapper, py::object> create_tensor(
+      const std::vector<size_t>& shape, DType dtype,
+      std::optional<at::Device> device = std::nullopt, bool pin_memory = false) const override;
 
   std::pair<GroupedTensorWrapper, py::object> create_grouped_tensor(
       size_t num_tensors, const std::vector<size_t>& logical_shape, DType dtype,
@@ -334,8 +340,9 @@ class NVFP4Quantizer : public Quantizer {
 
   void set_quantization_params(TensorWrapper* tensor) const override;
 
-  std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
-                                                     DType dtype) const override;
+  std::pair<TensorWrapper, py::object> create_tensor(
+      const std::vector<size_t>& shape, DType dtype,
+      std::optional<at::Device> device = std::nullopt, bool pin_memory = false) const override;
 
   std::pair<GroupedTensorWrapper, py::object> create_grouped_tensor(
       size_t num_tensors, const std::vector<size_t>& logical_shape, DType dtype,

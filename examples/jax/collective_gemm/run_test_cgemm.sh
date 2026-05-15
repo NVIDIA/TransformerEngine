@@ -179,5 +179,6 @@ wait
 
 # Final cleanup (trap will also call cleanup on exit)
 cleanup
+wait
 
 exit $HAS_FAILURE
