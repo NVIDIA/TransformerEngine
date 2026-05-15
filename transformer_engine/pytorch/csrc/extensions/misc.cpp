@@ -33,7 +33,6 @@ at::Tensor splits_to_offsets(const at::Tensor &first_dims, int64_t logical_last_
 
 std::vector<at::Tensor> prepare_grouped_splits(const at::Tensor &split_sizes, int64_t num_groups,
                                                int64_t logical_last_dim) {
-
   NVTE_CHECK(split_sizes.scalar_type() == at::kInt || split_sizes.scalar_type() == at::kLong,
              "split_sizes must have dtype int32 or int64.");
   NVTE_CHECK(split_sizes.dim() == 1, "split_sizes must be a 1D tensor.");
@@ -44,8 +43,8 @@ std::vector<at::Tensor> prepare_grouped_splits(const at::Tensor &split_sizes, in
 
   at::Tensor split_sizes_for_kernel;
   if (split_sizes.is_cuda()) {
-    NVTE_CHECK(split_sizes.device() == device, "CUDA split_sizes must be on current device ", device,
-               ", but got ", split_sizes.device(), ".");
+    NVTE_CHECK(split_sizes.device() == device, "CUDA split_sizes must be on current device ",
+               device, ", but got ", split_sizes.device(), ".");
     split_sizes_for_kernel = split_sizes;
   } else {
     // Preserve the legacy eager path: host m_splits are copied to the target
@@ -69,12 +68,11 @@ std::vector<at::Tensor> prepare_grouped_splits(const at::Tensor &split_sizes, in
   // cuDNN CuTe-DSL grouped GEMM as ``padded_offsets``, which requires 16-byte
   // alignment) lands on a 16-byte boundary inside the bulk buffer.
   std::vector<size_t> alignments = {16, 16, 16, 16};
-  auto outputs =
-      bulk_allocate({{static_cast<size_t>(num_groups)},
-                     {static_cast<size_t>(offsets_length)},
-                     {static_cast<size_t>(num_groups)},
-                     {static_cast<size_t>(offsets_length)}},
-                    {at::kLong, at::kLong, at::kInt, at::kLong}, device, alignments);
+  auto outputs = bulk_allocate({{static_cast<size_t>(num_groups)},
+                                {static_cast<size_t>(offsets_length)},
+                                {static_cast<size_t>(num_groups)},
+                                {static_cast<size_t>(offsets_length)}},
+                               {at::kLong, at::kLong, at::kInt, at::kLong}, device, alignments);
   auto split_sizes_i64 = outputs[0];
   auto base_offsets = outputs[1];
   auto split_points = outputs[2];
