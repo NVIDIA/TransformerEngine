@@ -14,6 +14,7 @@ import tempfile
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
+import transformer_engine.common as te_common
 from transformer_engine.pytorch import Float8CurrentScalingQuantizer, Float8Quantizer
 from transformer_engine.pytorch.utils import is_non_tn_fp8_gemm_supported
 import transformer_engine_torch as tex
@@ -21,6 +22,7 @@ import transformer_engine_torch as tex
 
 MODES = ("rowwise", "columnwise", "both")
 SHAPE_CASES = ("same-shape", "varying-first", "varying-last")
+EXTENSION_ROOT_ENV = "NVTE_BENCHMARK_EXPECT_EXTENSION_ROOT"
 
 
 def _usage_for_mode(mode: str) -> Dict[str, bool]:
@@ -258,6 +260,43 @@ def _target_tbps(shape_case: str) -> float:
     return 4.0 if shape_case == "varying-last" else 6.0
 
 
+def _path_is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _extension_path(path: Optional[str]) -> str:
+    return str(Path(path).resolve()) if path else ""
+
+
+def _loaded_extension_metadata() -> Dict[str, object]:
+    common_path = te_common._get_shared_object_file("core")  # pylint: disable=protected-access
+    torch_path = te_common._get_shared_object_file("torch")  # pylint: disable=protected-access
+    metadata: Dict[str, object] = {
+        "python_package_path": _extension_path(tex.__file__),
+        "core_shared_object_path": str(common_path.resolve()),
+        "torch_shared_object_path": str(torch_path.resolve()),
+    }
+    expected_root = os.environ.get(EXTENSION_ROOT_ENV)
+    if expected_root:
+        root = Path(expected_root).resolve()
+        metadata["expected_extension_root"] = str(root)
+        metadata["loaded_from_expected_root"] = (
+            _path_is_relative_to(common_path.resolve(), root)
+            and _path_is_relative_to(torch_path.resolve(), root)
+        )
+        if not metadata["loaded_from_expected_root"]:
+            raise RuntimeError(
+                "Transformer Engine shared objects were not loaded from the expected "
+                f"baseline build root {root}: core={common_path.resolve()}, "
+                f"torch={torch_path.resolve()}"
+            )
+    return metadata
+
+
 def _make_result(
     args: argparse.Namespace,
     state: Dict[str, Any],
@@ -363,6 +402,29 @@ def _make_measurements(results: List[Dict[str, object]]) -> List[Dict[str, objec
     return measurements
 
 
+def _selected_modes(args: argparse.Namespace) -> Tuple[str, ...]:
+    return MODES if args.mode == "all" else (args.mode,)
+
+
+def _selected_shape_cases(args: argparse.Namespace) -> Tuple[str, ...]:
+    return SHAPE_CASES if args.shape_case == "all" else (args.shape_case,)
+
+
+def _expected_case_ids(
+    shape_cases: Tuple[str, ...], modes: Tuple[str, ...]
+) -> Tuple[str, ...]:
+    return tuple(f"{shape_case}/{mode}" for shape_case in shape_cases for mode in modes)
+
+
+def _require_case_ids(
+    results: List[Dict[str, object]], expected_case_ids: Tuple[str, ...], label: str
+) -> None:
+    result_case_ids = {_result_case_id(result) for result in results}
+    missing_case_ids = sorted(set(expected_case_ids) - result_case_ids)
+    if missing_case_ids:
+        raise RuntimeError(f"{label} missing required case IDs: {missing_case_ids}")
+
+
 def benchmark_case_mode(args: argparse.Namespace, shape_case: str, mode: str) -> Dict[str, object]:
     state = _prepare_benchmark_state(args, shape_case, mode)
     _warmup_benchmark_state(args, state)
@@ -427,12 +489,87 @@ def _benchmark_subprocess_command(
     return command
 
 
+def _install_baseline_package(baseline_worktree: Path, install_root: Path) -> Dict[str, object]:
+    install_root.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    env["NVTE_FRAMEWORK"] = "pytorch"
+    submodule_command = ["git", "submodule", "update", "--init", "--recursive"]
+    submodule_completed = subprocess.run(
+        submodule_command,
+        cwd=baseline_worktree,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    if submodule_completed.returncode != 0:
+        print(submodule_completed.stdout, file=sys.stderr, end="")
+        submodule_completed.check_returncode()
+
+    command = [
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "--no-build-isolation",
+        "--no-deps",
+        "--target",
+        str(install_root),
+        ".",
+    ]
+    completed = subprocess.run(
+        command,
+        cwd=baseline_worktree,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    if completed.returncode != 0:
+        print(completed.stdout, file=sys.stderr, end="")
+        completed.check_returncode()
+
+    core_objects = sorted(
+        str(path.resolve()) for path in install_root.glob("**/libtransformer_engine*.so")
+    )
+    torch_objects = sorted(
+        str(path.resolve()) for path in install_root.glob("**/transformer_engine_torch*.so")
+    )
+    if not core_objects or not torch_objects:
+        raise RuntimeError(
+            "Baseline package build completed without the required Transformer Engine "
+            f"shared objects under {install_root}: core={core_objects}, torch={torch_objects}"
+        )
+    return {
+        "submodule_command": " ".join(submodule_command),
+        "build_command": " ".join(command),
+        "build_cwd": str(baseline_worktree),
+        "git_commit": _git_output(baseline_worktree, "rev-parse", "HEAD"),
+        "install_root": str(install_root),
+        "nvte_framework": env["NVTE_FRAMEWORK"],
+        "core_shared_objects": core_objects,
+        "torch_shared_objects": torch_objects,
+    }
+
+
 def _run_benchmark_subprocess(
-    command: List[str], cwd: Path, output_path: Path
+    command: List[str],
+    cwd: Path,
+    output_path: Path,
+    pythonpath_entries: List[Path],
+    expected_extension_root: Optional[Path] = None,
 ) -> Dict[str, object]:
     env = os.environ.copy()
     pythonpath = env.get("PYTHONPATH")
-    env["PYTHONPATH"] = str(cwd) if not pythonpath else os.pathsep.join((str(cwd), pythonpath))
+    pythonpath_parts = [str(path) for path in pythonpath_entries]
+    if pythonpath:
+        pythonpath_parts.append(pythonpath)
+    env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
+    if expected_extension_root is not None:
+        env[EXTENSION_ROOT_ENV] = str(expected_extension_root)
+    else:
+        env.pop(EXTENSION_ROOT_ENV, None)
     completed = subprocess.run(
         command,
         cwd=cwd,
@@ -503,6 +640,7 @@ def benchmark_same_session(args: argparse.Namespace) -> Dict[str, object]:
     with tempfile.TemporaryDirectory(prefix="grouped_fp8_baseline_") as temp_dir:
         temp_path = Path(temp_dir)
         baseline_worktree = temp_path / "baseline"
+        baseline_install_root = temp_path / "baseline_install"
         baseline_output = temp_path / "baseline.json"
         candidate_output = temp_path / "candidate.json"
         subprocess.run(
@@ -511,15 +649,20 @@ def benchmark_same_session(args: argparse.Namespace) -> Dict[str, object]:
             check=True,
         )
         try:
+            baseline_build = _install_baseline_package(
+                baseline_worktree, baseline_install_root
+            )
             baseline_report = _run_benchmark_subprocess(
                 _benchmark_subprocess_command(
                     args,
-                    baseline_worktree / "benchmarks/benchmark_grouped_fp8_quantize.py",
+                    repo_root / "benchmarks/benchmark_grouped_fp8_quantize.py",
                     baseline_output,
                     "same-shape",
                 ),
                 baseline_worktree,
                 baseline_output,
+                [baseline_install_root],
+                baseline_install_root,
             )
             candidate_report = _run_benchmark_subprocess(
                 _benchmark_subprocess_command(
@@ -530,6 +673,7 @@ def benchmark_same_session(args: argparse.Namespace) -> Dict[str, object]:
                 ),
                 repo_root,
                 candidate_output,
+                [repo_root],
             )
         finally:
             subprocess.run(
@@ -546,6 +690,17 @@ def benchmark_same_session(args: argparse.Namespace) -> Dict[str, object]:
     candidate_results = _annotate_results(
         candidate_report["results"], "candidate", candidate_ref
     )
+    modes = _selected_modes(args)
+    baseline_case_ids = _expected_case_ids(("same-shape",), modes)
+    candidate_case_ids = _expected_case_ids(_selected_shape_cases(args), modes)
+    _require_case_ids(baseline_results, baseline_case_ids, "baseline_results")
+    _require_case_ids(candidate_results, candidate_case_ids, "candidate_results")
+    same_shape_comparisons = _same_shape_comparisons(baseline_results, candidate_results)
+    _require_case_ids(
+        same_shape_comparisons,
+        baseline_case_ids,
+        "same_shape_baseline_comparisons",
+    )
     return {
         "benchmark": "grouped_fp8_tensor_scaling_quantize",
         "baseline_mode": "same_session",
@@ -555,13 +710,14 @@ def benchmark_same_session(args: argparse.Namespace) -> Dict[str, object]:
         "profile_after_warmup": True,
         "regular_iterations": args.iters,
         "profile_iterations": args.profile_iters,
+        "baseline_build": baseline_build,
+        "baseline_extension_metadata": baseline_report.get("extension_metadata", {}),
+        "candidate_extension_metadata": candidate_report.get("extension_metadata", {}),
         "baseline_results": baseline_results,
         "candidate_results": candidate_results,
         "results": baseline_results + candidate_results,
         "measurements": _make_measurements(baseline_results + candidate_results),
-        "same_shape_baseline_comparisons": _same_shape_comparisons(
-            baseline_results, candidate_results
-        ),
+        "same_shape_baseline_comparisons": same_shape_comparisons,
     }
 
 
@@ -609,8 +765,9 @@ def main() -> None:
         print(json.dumps(report, indent=2))
         return
 
-    modes = MODES if args.mode == "all" else (args.mode,)
-    shape_cases = SHAPE_CASES if args.shape_case == "all" else (args.shape_case,)
+    extension_metadata = _loaded_extension_metadata()
+    modes = _selected_modes(args)
+    shape_cases = _selected_shape_cases(args)
     results = [
         benchmark_case_mode(args, shape_case, mode)
         for shape_case in shape_cases
@@ -625,6 +782,7 @@ def main() -> None:
         "profile_after_warmup": True,
         "regular_iterations": args.iters,
         "profile_iterations": args.profile_iters,
+        "extension_metadata": extension_metadata,
         "candidate_results": results,
         "results": results,
         "measurements": _make_measurements(results),
