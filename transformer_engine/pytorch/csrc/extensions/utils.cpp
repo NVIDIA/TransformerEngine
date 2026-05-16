@@ -10,6 +10,7 @@
 
 #include "common/common.h"
 #include "extensions.h"
+#include "util.h"
 
 namespace transformer_engine::pytorch {
 
@@ -78,6 +79,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> get_device_pointer_for_data_and_s
   std::vector<uint64_t> scale_host_ptrs(num_tensors);
 
   if (swizzle) {
+    // Determine scaling mode and scale dtype from data dtype
     NVTEScalingMode scaling_mode;
     transformer_engine::DType scale_dtype;
     if (is_fp8_dtype(data_dtype)) {
@@ -90,63 +92,33 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> get_device_pointer_for_data_and_s
       NVTE_ERROR("data_dtype must be an FP8 or FP4 type for swizzling.");
     }
 
-    // Compute output buffer size for swizzled scales (16B aligned per tensor)
-    std::vector<size_t> output_offsets;
-    size_t output_bytes = 0;
+    // Build TensorWrappers for swizzle
+    std::vector<transformer_engine::TensorWrapper> scale_wrappers;
+    scale_wrappers.reserve(num_tensors);
     for (size_t i = 0; i < num_tensors; ++i) {
-      const size_t scale_numel = static_cast<size_t>(scale_tensors[i].numel());
-      const size_t dtype_bits = transformer_engine::pytorch::typeToNumBits(scale_dtype);
-      output_bytes = roundup(output_bytes, 16);
-      output_offsets.push_back(output_bytes);
-      output_bytes += ceildiv(scale_numel * dtype_bits, 8);
-    }
-
-    // Allocate single buffer for all swizzled scales
-    swizzled_scales_keepalive =
-        allocateSpace(std::vector<size_t>{output_bytes}, transformer_engine::DType::kByte, false);
-    uint8_t* output_dptr = reinterpret_cast<uint8_t*>(getDataPtr(swizzled_scales_keepalive));
-
-    // Build TensorWrapper input/output pairs and get scale shapes
-    std::vector<transformer_engine::TensorWrapper> inputs_nvte, outputs_nvte;
-    inputs_nvte.reserve(num_tensors);
-    outputs_nvte.reserve(num_tensors);
-    for (size_t i = 0; i < num_tensors; ++i) {
-      inputs_nvte.emplace_back(scaling_mode);
-      outputs_nvte.emplace_back(scaling_mode);
-      auto& input_nvte = inputs_nvte.back();
-      auto& output_nvte = outputs_nvte.back();
-      output_nvte.set_with_gemm_swizzled_scales(true);
-
       NVTEShape scale_shape = convertTorchShape(scale_tensors[i].sizes());
       void* scale_ptr = scale_tensors[i].data_ptr();
-      uint8_t* out_scale_ptr = output_dptr + output_offsets[i];
-
+      scale_wrappers.emplace_back(scaling_mode);
+      auto& wrapper = scale_wrappers.back();
       if (rowwise) {
-        input_nvte.set_rowwise_data(nullptr, data_dtype, data_shape);
-        input_nvte.set_rowwise_scale_inv(scale_ptr, scale_dtype, scale_shape);
-        output_nvte.set_rowwise_data(nullptr, data_dtype, data_shape);
-        output_nvte.set_rowwise_scale_inv(out_scale_ptr, scale_dtype, scale_shape);
+        wrapper.set_rowwise_data(nullptr, data_dtype, data_shape);
+        wrapper.set_rowwise_scale_inv(scale_ptr, scale_dtype, scale_shape);
       } else {
-        input_nvte.set_columnwise_data(nullptr, data_dtype, data_shape);
-        input_nvte.set_columnwise_scale_inv(scale_ptr, scale_dtype, scale_shape);
-        output_nvte.set_columnwise_data(nullptr, data_dtype, data_shape);
-        output_nvte.set_columnwise_scale_inv(out_scale_ptr, scale_dtype, scale_shape);
+        wrapper.set_columnwise_data(nullptr, data_dtype, data_shape);
+        wrapper.set_columnwise_scale_inv(scale_ptr, scale_dtype, scale_shape);
       }
     }
 
-    // Pack raw NVTETensors and launch swizzle kernel
-    std::vector<NVTETensor> inputs_raw, outputs_raw;
-    inputs_raw.reserve(num_tensors);
-    outputs_raw.reserve(num_tensors);
-    for (auto& t : inputs_nvte) inputs_raw.push_back(t.data());
-    for (auto& t : outputs_nvte) outputs_raw.push_back(t.data());
+    // Swizzle scales; wrappers are updated in-place with swizzled pointers
+    auto result = multi_tensor_swizzle_scales_for_gemm(scale_wrappers, rowwise, !rowwise);
+    NVTE_CHECK(result.has_value(), "Scale swizzle returned no output buffer.");
+    swizzled_scales_keepalive = std::move(*result);
 
-    nvte_multi_tensor_swizzle_scaling_factors(inputs_raw.data(), outputs_raw.data(), num_tensors,
-                                              stream);
-
-    // Collect swizzled scale pointers
+    // Collect swizzled scale pointers from updated wrappers
     for (size_t i = 0; i < num_tensors; ++i) {
-      scale_host_ptrs[i] = reinterpret_cast<uintptr_t>(output_dptr + output_offsets[i]);
+      const auto scales_nvte = rowwise ? scale_wrappers[i].get_rowwise_scale_inv()
+                                       : scale_wrappers[i].get_columnwise_scale_inv();
+      scale_host_ptrs[i] = reinterpret_cast<uintptr_t>(scales_nvte.data_ptr);
     }
   } else {
     swizzled_scales_keepalive = at::empty({0}, at::TensorOptions().dtype(at::kByte).device(device));

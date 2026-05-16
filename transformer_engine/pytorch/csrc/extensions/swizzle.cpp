@@ -173,6 +173,7 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm_impl(
 
   // Filter out tensors that already have swizzled scales
   std::vector<TensorWrapper *> tensors_needing_swizzle;
+  tensors_needing_swizzle.reserve(tensors.size());
   for (auto &tensor : tensors) {
     if (!tensor.get_with_gemm_swizzled_scales()) {
       tensors_needing_swizzle.push_back(&tensor);
@@ -184,6 +185,7 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm_impl(
 
   // Determine buffer size needed for swizzled scales
   std::vector<size_t> output_scales_offsets;
+  output_scales_offsets.reserve(tensors_needing_swizzle.size());
   size_t output_scales_bytes = 0;
   for (auto &tensor : tensors_needing_swizzle) {
     const auto scales_nvte =
@@ -204,6 +206,8 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm_impl(
 
   // Construct TE tensors with only scales
   std::vector<transformer_engine::TensorWrapper> inputs_nvte, outputs_nvte;
+  inputs_nvte.reserve(tensors_needing_swizzle.size());
+  outputs_nvte.reserve(tensors_needing_swizzle.size());
   for (size_t i = 0; i < tensors_needing_swizzle.size(); ++i) {
     auto &tensor = *tensors_needing_swizzle[i];
     inputs_nvte.emplace_back(scaling_mode);
@@ -236,6 +240,8 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm_impl(
 
   // Pack raw NVTETensors into vectors
   std::vector<NVTETensor> inputs_nvte_raw, outputs_nvte_raw;
+  inputs_nvte_raw.reserve(tensors_needing_swizzle.size());
+  outputs_nvte_raw.reserve(tensors_needing_swizzle.size());
   for (auto &tensor : inputs_nvte) {
     inputs_nvte_raw.emplace_back(tensor.data());
   }
