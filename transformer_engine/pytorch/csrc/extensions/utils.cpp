@@ -32,15 +32,14 @@ at::Tensor load_data_ptrs_on_device(const std::vector<at::Tensor> &tensors,
 
   // Load pointers on device
   nvte_load_value_on_device(ptrs_host.data(), ptrs_device.data_ptr(),
-                            tensors.size() * sizeof(uint64_t),
-                            at::cuda::getCurrentCUDAStream());
+                            tensors.size() * sizeof(uint64_t), at::cuda::getCurrentCUDAStream());
 
   return ptrs_device;
 }
 
-std::tuple<at::Tensor, std::optional<at::Tensor>> transform_and_load_data_ptrs_on_device(const std::string &transform_type,
-                                                                                         const std::vector<at::Tensor> &tensors,
-                                                                                         const c10::Device &device) {
+std::tuple<at::Tensor, std::optional<at::Tensor>> transform_and_load_data_ptrs_on_device(
+    const std::string &transform_type, const std::vector<at::Tensor> &tensors,
+    const c10::Device &device) {
   const size_t num_tensors = tensors.size();
 
   // Trivial cases
@@ -50,9 +49,8 @@ std::tuple<at::Tensor, std::optional<at::Tensor>> transform_and_load_data_ptrs_o
   }
   if (num_tensors == 0) {
     // No input tensors, return tensor with no elements
-    return {
-      at::empty({int64_t{0}}, at::TensorOptions().dtype(at::kLong).device(device)),
-      std::nullopt};
+    return {at::empty({int64_t{0}}, at::TensorOptions().dtype(at::kLong).device(device)),
+            std::nullopt};
   }
 
   // CUDA stream
@@ -62,9 +60,7 @@ std::tuple<at::Tensor, std::optional<at::Tensor>> transform_and_load_data_ptrs_o
   const bool uniform_mxfp8_rowwise_swizzle = transform_type == "uniform_mxfp8_rowwise_swizzle";
   const bool uniform_mxfp8_colwise_swizzle = transform_type == "uniform_mxfp8_columnwise_swizzle";
   const bool uniform_nvfp4_swizzle = transform_type == "uniform_nvfp4_swizzle";
-  if (uniform_mxfp8_rowwise_swizzle
-      || uniform_mxfp8_colwise_swizzle
-      || uniform_nvfp4_swizzle) {
+  if (uniform_mxfp8_rowwise_swizzle || uniform_mxfp8_colwise_swizzle || uniform_nvfp4_swizzle) {
     // Tensor format
     NVTEScalingMode scaling_mode = NVTE_INVALID_SCALING;
     if (uniform_mxfp8_rowwise_swizzle || uniform_mxfp8_colwise_swizzle) {
@@ -76,16 +72,16 @@ std::tuple<at::Tensor, std::optional<at::Tensor>> transform_and_load_data_ptrs_o
     // Data types
     transformer_engine::DType data_dtype, scale_dtype;
     switch (scaling_mode) {
-    case NVTE_MXFP8_1D_SCALING:
-      data_dtype = transformer_engine::DType::kFloat8E4M3;
-      scale_dtype = transformer_engine::DType::kFloat8E8M0;
-      break;
-    case NVTE_NVFP4_1D_SCALING:
-      data_dtype = transformer_engine::DType::kFloat4E2M1;
-      scale_dtype = transformer_engine::DType::kFloat8E4M3;
-      break;
-    default:
-      NVTE_ERROR("Unsupported case.");
+      case NVTE_MXFP8_1D_SCALING:
+        data_dtype = transformer_engine::DType::kFloat8E4M3;
+        scale_dtype = transformer_engine::DType::kFloat8E8M0;
+        break;
+      case NVTE_NVFP4_1D_SCALING:
+        data_dtype = transformer_engine::DType::kFloat4E2M1;
+        scale_dtype = transformer_engine::DType::kFloat8E4M3;
+        break;
+      default:
+        NVTE_ERROR("Unsupported case.");
     }
 
     // Scale shape
@@ -128,8 +124,8 @@ std::tuple<at::Tensor, std::optional<at::Tensor>> transform_and_load_data_ptrs_o
     for (size_t i = 0; i < num_tensors; ++i) {
       inputs_nvte.emplace_back(scaling_mode);
       outputs_nvte.emplace_back(scaling_mode);
-      auto& input_nvte = inputs_nvte.back();
-      auto& output_nvte = outputs_nvte.back();
+      auto &input_nvte = inputs_nvte.back();
+      auto &output_nvte = outputs_nvte.back();
       output_nvte.set_with_gemm_swizzled_scales(true);
       void *in_scale_ptr = tensors[i].data_ptr();
       void *out_scale_ptr = swizzled_scales_dptr + i * swizzled_scales_stride;
@@ -150,28 +146,26 @@ std::tuple<at::Tensor, std::optional<at::Tensor>> transform_and_load_data_ptrs_o
     std::vector<NVTETensor> inputs_nvte_raw, outputs_nvte_raw;
     inputs_nvte_raw.reserve(num_tensors);
     outputs_nvte_raw.reserve(num_tensors);
-    for (auto& t : inputs_nvte) inputs_nvte_raw.push_back(t.data());
-    for (auto& t : outputs_nvte) outputs_nvte_raw.push_back(t.data());
+    for (auto &t : inputs_nvte) inputs_nvte_raw.push_back(t.data());
+    for (auto &t : outputs_nvte) outputs_nvte_raw.push_back(t.data());
 
     // Launch kernel
     nvte_multi_tensor_swizzle_scaling_factors(inputs_nvte_raw.data(), outputs_nvte_raw.data(),
-                                              inputs_nvte_raw.size(),
-                                              stream);
+                                              inputs_nvte_raw.size(), stream);
 
     // Collect data pointers
     std::vector<uint64_t> ptrs_host;
     ptrs_host.reserve(num_tensors);
     for (size_t i = 0; i < num_tensors; ++i) {
-      ptrs_host.push_back(reinterpret_cast<uintptr_t>(swizzled_scales_dptr
-                                                      + i * swizzled_scales_stride));
+      ptrs_host.push_back(
+          reinterpret_cast<uintptr_t>(swizzled_scales_dptr + i * swizzled_scales_stride));
     }
 
     // Load pointers on device
     auto ptrs_device = at::empty({static_cast<int64_t>(num_tensors)},
                                  at::TensorOptions().dtype(at::kLong).device(device));
     nvte_load_value_on_device(ptrs_host.data(), ptrs_device.data_ptr(),
-                              num_tensors * sizeof(uint64_t),
-                              stream);
+                              num_tensors * sizeof(uint64_t), stream);
 
     return {std::move(ptrs_device), std::move(swizzled_scales)};
   }

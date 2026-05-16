@@ -339,18 +339,14 @@ struct Tensor {
    * If a tensor has dimensions (D1, D2, ..., Dn), it is reinterpreted
    * as a (D1*D2*...*D(n-1), Dn) matrix.
    */
-  size_t flat_first_dim() const {
-    return flat_2d_dims()[0];
-  }
+  size_t flat_first_dim() const { return flat_2d_dims()[0]; }
 
   /*! Matrix width after tensor is flattened to 2D
    *
    * If a tensor has dimensions (D1, D2, ..., Dn), it is reinterpreted
    * as a (D1*D2*...*D(n-1), Dn) matrix.
    */
-  size_t flat_last_dim() const {
-    return flat_2d_dims()[1];
-  }
+  size_t flat_last_dim() const { return flat_2d_dims()[1]; }
 };
 
 struct GroupedTensor {

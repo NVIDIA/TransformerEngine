@@ -32,7 +32,7 @@ extern "C" {
  *  \param[in]     stream       CUDA stream for the operation.
  */
 void nvte_load_value_on_device(const void *host_ptr, void *device_ptr, size_t num_bytes,
-                                cudaStream_t stream);
+                               cudaStream_t stream);
 
 /*! \deprecated Use nvte_load_value_on_device instead.
  *

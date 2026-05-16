@@ -4,12 +4,11 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <cuda_runtime.h>
 #include <transformer_engine/utils.h>
 
 #include <algorithm>
 #include <cstring>
-
-#include <cuda_runtime.h>
 
 #include "../common.h"
 #include "../util/logging.h"
@@ -27,7 +26,7 @@ union Payload {
 };
 
 constexpr size_t block_size = 512;
-constexpr size_t num_blocks = DIVUP(Payload::kMaxBytes / Payload::kVectorSize, block_size);
+constexpr size_t num_blocks = DIVUP(Payload::kMaxVectors, block_size);
 
 __global__ void __launch_bounds__(block_size) kernel(Payload payload, size_t num_bytes, void *out) {
   const size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -56,7 +55,8 @@ void nvte_load_value_on_device(const void *host_ptr, void *device_ptr, size_t nu
 
   // Check pointers
   NVTE_CHECK(host_ptr != nullptr, "Attempting to read ", num_bytes, " bytes from a null pointer.");
-  NVTE_CHECK(device_ptr != nullptr, "Attempting to write ", num_bytes, " bytes into a null pointer.");
+  NVTE_CHECK(device_ptr != nullptr, "Attempting to write ", num_bytes,
+             " bytes into a null pointer.");
   NVTE_CHECK(reinterpret_cast<uintptr_t>(device_ptr) % Payload::kVectorSize == 0,
              "Device pointer is not aligned to ", Payload::kVectorSize, " bytes.");
 
@@ -74,6 +74,7 @@ void nvte_load_value_on_device(const void *host_ptr, void *device_ptr, size_t nu
 
 void nvte_convert_pointers_to_tensor(const uint64_t *host_ptrs, NVTETensor output, int64_t count,
                                      cudaStream_t stream) {
+  NVTE_API_CALL(nvte_convert_pointers_to_tensor);
   using namespace transformer_engine;
   Tensor *out_tensor = convertNVTETensorCheck(output);
   nvte_load_value_on_device(host_ptrs, out_tensor->data.dptr,

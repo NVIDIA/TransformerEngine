@@ -25,10 +25,11 @@ constexpr int MXFP8_BLOCK_SIZE = 32;
 constexpr int NVFP4_BLOCK_SIZE = 16;
 
 int get_max_dynamic_smem() {
-  auto query_max_smem = [] () -> int {
+  auto query_max_smem = []() -> int {
     int device{0}, max_smem{0};
     NVTE_CHECK_CUDA(cudaGetDevice(&device));
-    NVTE_CHECK_CUDA(cudaDeviceGetAttribute(&max_smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, device));
+    NVTE_CHECK_CUDA(
+        cudaDeviceGetAttribute(&max_smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, device));
     return max_smem;
   };
   static int cached_val = query_max_smem();

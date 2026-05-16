@@ -489,10 +489,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Get cublasLt version", py::call_guard<py::gil_scoped_release>());
   m.def("get_cudnn_version", &transformer_engine::pytorch::get_cudnn_version, "Get cuDNN version",
         py::call_guard<py::gil_scoped_release>());
-  m.def("load_data_ptrs_on_device",
-        &transformer_engine::pytorch::load_data_ptrs_on_device,
-        py::arg("tensors"), py::arg("device"),
-        py::call_guard<py::gil_scoped_release>());
+  m.def("load_data_ptrs_on_device", &transformer_engine::pytorch::load_data_ptrs_on_device,
+        py::arg("tensors"), py::arg("device"), py::call_guard<py::gil_scoped_release>());
   m.def("transform_and_load_data_ptrs_on_device",
         &transformer_engine::pytorch::transform_and_load_data_ptrs_on_device,
         py::arg("transform_type"), py::arg("tensors"), py::arg("device"),
