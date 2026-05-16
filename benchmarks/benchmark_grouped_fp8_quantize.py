@@ -54,6 +54,23 @@ def _make_delayed_quantizer(mode: str, scale: torch.Tensor, amax: torch.Tensor) 
     )
 
 
+def _group_quantize(
+    tensor: torch.Tensor,
+    quantizer,
+    num_groups: int,
+    first_dims: Optional[torch.Tensor],
+    *,
+    output=None,
+    last_dims: Optional[torch.Tensor] = None,
+):
+    kwargs = {}
+    if output is not None:
+        kwargs["output"] = output
+    if last_dims is not None:
+        kwargs["last_dims"] = last_dims
+    return tex.group_quantize(tensor, quantizer, num_groups, first_dims, **kwargs)
+
+
 def _varying_dims(base: int, num_groups: int) -> List[int]:
     step = 128
     center = (num_groups - 1) / 2.0
@@ -156,11 +173,11 @@ def _prepare_mode(
     outputs = []
     current_quantizer = _make_current_quantizer(mode)
     for tensor in inputs:
-        prepared = tex.group_quantize(
+        prepared = _group_quantize(
             tensor, current_quantizer, num_groups, first_dims, last_dims=last_dims
         )
         delayed_quantizer = _make_delayed_quantizer(mode, prepared.scale, prepared.amax)
-        output = tex.group_quantize(
+        output = _group_quantize(
             tensor, delayed_quantizer, num_groups, first_dims, last_dims=last_dims
         )
         delayed_quantizers.append(delayed_quantizer)
@@ -198,7 +215,7 @@ def _prepare_benchmark_state(
 def _warmup_benchmark_state(args: argparse.Namespace, state: Dict[str, Any]) -> None:
     for iteration in range(args.warmup_iters):
         idx = iteration % len(state["inputs"])
-        tex.group_quantize(
+        _group_quantize(
             state["inputs"][idx],
             state["quantizers"][idx],
             args.num_groups,
@@ -240,7 +257,7 @@ def _run_timed_loop(
     start.record()
     for iteration in range(iterations):
         idx = iteration % len(inputs)
-        tex.group_quantize(
+        _group_quantize(
             inputs[idx],
             quantizers[idx],
             num_groups,
