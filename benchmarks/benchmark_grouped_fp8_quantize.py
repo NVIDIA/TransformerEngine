@@ -7,6 +7,10 @@
 import argparse
 import json
 import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
@@ -316,12 +320,39 @@ def _make_result(
     }
 
 
+def _result_case_id(result: Dict[str, object]) -> str:
+    return str(result.get("case_id", f"{result['shape_case']}/{result['mode']}"))
+
+
+def _annotate_results(
+    results: List[Dict[str, object]], run_role: str, git_ref: str
+) -> List[Dict[str, object]]:
+    annotated = []
+    for result in results:
+        result = dict(result)
+        case_id = _result_case_id(result)
+        result["case_id"] = case_id
+        result["run_role"] = run_role
+        result["git_ref"] = git_ref
+        result["result_id"] = f"{run_role}/{case_id}"
+        annotated.append(result)
+    return annotated
+
+
 def _make_measurements(results: List[Dict[str, object]]) -> List[Dict[str, object]]:
     measurements = []
     for idx, result in enumerate(results):
+        case_id = _result_case_id(result)
+        run_role = str(result.get("run_role", "candidate"))
         measurements.append(
             {
-                "case_id": str(result["case_id"]),
+                "measurement_id": f"{run_role}/{case_id}/bandwidth_TBps_actual_bytes",
+                "case_id": case_id,
+                "result_id": str(result.get("result_id", f"{run_role}/{case_id}")),
+                "shape_case": str(result["shape_case"]),
+                "mode": str(result["mode"]),
+                "run_role": run_role,
+                "git_ref": str(result.get("git_ref", "")),
                 "metric": "bandwidth_TBps_actual_bytes",
                 "value": float(result["bandwidth_TBps_actual_bytes"]),
                 "unit": "TB/s",
@@ -351,6 +382,189 @@ def benchmark_case_mode(args: argparse.Namespace, shape_case: str, mode: str) ->
     return _make_result(args, state, elapsed_sec, iterations)
 
 
+def _git_output(repo_root: Path, *args: str) -> str:
+    try:
+        output = subprocess.check_output(
+            ["git", *args], cwd=repo_root, text=True, stderr=subprocess.DEVNULL
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return ""
+    return output.strip()
+
+
+def _benchmark_subprocess_command(
+    args: argparse.Namespace,
+    script_path: Path,
+    output_path: Path,
+    shape_case: str,
+) -> List[str]:
+    command = [
+        sys.executable,
+        str(script_path),
+        "--shape-case",
+        shape_case,
+        "--mode",
+        args.mode,
+        "--num-groups",
+        str(args.num_groups),
+        "--rows-per-group",
+        str(args.rows_per_group),
+        "--hidden-size",
+        str(args.hidden_size),
+        "--num-buffers",
+        str(args.num_buffers),
+        "--warmup-iters",
+        str(args.warmup_iters),
+        "--iters",
+        str(args.iters),
+        "--profile-iters",
+        str(args.profile_iters),
+        "--output",
+        str(output_path),
+    ]
+    if args.profile:
+        command.append("--profile")
+    return command
+
+
+def _run_benchmark_subprocess(
+    command: List[str], cwd: Path, output_path: Path
+) -> Dict[str, object]:
+    env = os.environ.copy()
+    pythonpath = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = str(cwd) if not pythonpath else os.pathsep.join((str(cwd), pythonpath))
+    completed = subprocess.run(
+        command,
+        cwd=cwd,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    if completed.returncode != 0:
+        print(completed.stdout, file=sys.stderr, end="")
+        completed.check_returncode()
+    with open(output_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _same_shape_comparisons(
+    baseline_results: List[Dict[str, object]], candidate_results: List[Dict[str, object]]
+) -> List[Dict[str, object]]:
+    baseline_by_case = {
+        _result_case_id(result): result
+        for result in baseline_results
+        if result["shape_case"] == "same-shape"
+    }
+    candidate_by_case = {
+        _result_case_id(result): result
+        for result in candidate_results
+        if result["shape_case"] == "same-shape"
+    }
+    comparisons = []
+    for case_id in sorted(set(baseline_by_case) & set(candidate_by_case)):
+        baseline = baseline_by_case[case_id]
+        candidate = candidate_by_case[case_id]
+        baseline_bandwidth = float(baseline["bandwidth_TBps_actual_bytes"])
+        candidate_bandwidth = float(candidate["bandwidth_TBps_actual_bytes"])
+        candidate_to_baseline = (
+            candidate_bandwidth / baseline_bandwidth if baseline_bandwidth > 0.0 else 0.0
+        )
+        target_tbps = _target_tbps(str(candidate["shape_case"]))
+        comparisons.append(
+            {
+                "case_id": case_id,
+                "shape_case": str(candidate["shape_case"]),
+                "mode": str(candidate["mode"]),
+                "baseline_result_id": str(baseline["result_id"]),
+                "candidate_result_id": str(candidate["result_id"]),
+                "baseline_ref": str(baseline["git_ref"]),
+                "candidate_ref": str(candidate["git_ref"]),
+                "baseline_bandwidth_TBps_actual_bytes": baseline_bandwidth,
+                "candidate_bandwidth_TBps_actual_bytes": candidate_bandwidth,
+                "candidate_to_baseline_ratio": candidate_to_baseline,
+                "minimum_candidate_to_baseline_ratio": 0.95,
+                "target_TBps_actual_bytes": target_tbps,
+                "passes_baseline_ratio": candidate_to_baseline >= 0.95,
+                "passes_absolute_target": candidate_bandwidth >= target_tbps,
+            }
+        )
+    return comparisons
+
+
+def benchmark_same_session(args: argparse.Namespace) -> Dict[str, object]:
+    repo_root = Path(__file__).resolve().parents[1]
+    candidate_ref = _git_output(repo_root, "rev-parse", "HEAD") or "candidate"
+    baseline_ref = args.baseline_ref
+    if args.shape_case not in ("all", "same-shape"):
+        raise ValueError("--baseline-ref requires --shape-case all or same-shape")
+
+    with tempfile.TemporaryDirectory(prefix="grouped_fp8_baseline_") as temp_dir:
+        temp_path = Path(temp_dir)
+        baseline_worktree = temp_path / "baseline"
+        baseline_output = temp_path / "baseline.json"
+        candidate_output = temp_path / "candidate.json"
+        subprocess.run(
+            ["git", "worktree", "add", "--detach", str(baseline_worktree), baseline_ref],
+            cwd=repo_root,
+            check=True,
+        )
+        try:
+            baseline_report = _run_benchmark_subprocess(
+                _benchmark_subprocess_command(
+                    args,
+                    baseline_worktree / "benchmarks/benchmark_grouped_fp8_quantize.py",
+                    baseline_output,
+                    "same-shape",
+                ),
+                baseline_worktree,
+                baseline_output,
+            )
+            candidate_report = _run_benchmark_subprocess(
+                _benchmark_subprocess_command(
+                    args,
+                    repo_root / "benchmarks/benchmark_grouped_fp8_quantize.py",
+                    candidate_output,
+                    args.shape_case,
+                ),
+                repo_root,
+                candidate_output,
+            )
+        finally:
+            subprocess.run(
+                ["git", "worktree", "remove", "--force", str(baseline_worktree)],
+                cwd=repo_root,
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+    baseline_results = _annotate_results(
+        baseline_report["results"], "baseline", baseline_ref
+    )
+    candidate_results = _annotate_results(
+        candidate_report["results"], "candidate", candidate_ref
+    )
+    return {
+        "benchmark": "grouped_fp8_tensor_scaling_quantize",
+        "baseline_mode": "same_session",
+        "baseline_ref": baseline_ref,
+        "candidate_ref": candidate_ref,
+        "profile_enabled": args.profile,
+        "profile_after_warmup": True,
+        "regular_iterations": args.iters,
+        "profile_iterations": args.profile_iters,
+        "baseline_results": baseline_results,
+        "candidate_results": candidate_results,
+        "results": baseline_results + candidate_results,
+        "measurements": _make_measurements(baseline_results + candidate_results),
+        "same_shape_baseline_comparisons": _same_shape_comparisons(
+            baseline_results, candidate_results
+        ),
+    }
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("all",) + MODES, default="all")
@@ -363,6 +577,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--iters", type=int, default=100)
     parser.add_argument("--profile-iters", type=int, default=5)
     parser.add_argument("--profile", action="store_true")
+    parser.add_argument(
+        "--baseline-ref",
+        default="",
+        help=(
+            "Run a same-session baseline comparison by checking out this ref in a "
+            "temporary worktree, benchmarking same-shape modes there, benchmarking the "
+            "requested candidate cases in this worktree, and writing one combined JSON report."
+        ),
+    )
     parser.add_argument(
         "--output",
         default=os.environ.get(
@@ -379,6 +602,13 @@ def main() -> None:
         raise ValueError("--rows-per-group must be divisible by 128 for the grouped FP8 kernel")
     if args.hidden_size % 128 != 0:
         raise ValueError("--hidden-size must be divisible by 128 for the grouped FP8 kernel")
+    if args.baseline_ref:
+        report = benchmark_same_session(args)
+        with open(args.output, "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2)
+        print(json.dumps(report, indent=2))
+        return
+
     modes = MODES if args.mode == "all" else (args.mode,)
     shape_cases = SHAPE_CASES if args.shape_case == "all" else (args.shape_case,)
     results = [
@@ -386,12 +616,16 @@ def main() -> None:
         for shape_case in shape_cases
         for mode in modes
     ]
+    results = _annotate_results(
+        results, "candidate", _git_output(Path(__file__).resolve().parents[1], "rev-parse", "HEAD")
+    )
     report = {
         "benchmark": "grouped_fp8_tensor_scaling_quantize",
         "profile_enabled": args.profile,
         "profile_after_warmup": True,
         "regular_iterations": args.iters,
         "profile_iterations": args.profile_iters,
+        "candidate_results": results,
         "results": results,
         "measurements": _make_measurements(results),
     }
