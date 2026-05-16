@@ -19,8 +19,8 @@ at::Tensor collect_pointers_in_device_tensor(const std::vector<uint64_t>& host_p
                                              const at::Device& device, cudaStream_t stream) {
   const int64_t count = static_cast<int64_t>(host_ptrs.size());
   auto out = at::empty({count}, at::TensorOptions().dtype(at::kLong).device(device));
-  auto out_nvte = makeTransformerEngineTensor(out);
-  nvte_convert_pointers_to_tensor(host_ptrs.data(), out_nvte.data(), count, stream);
+  nvte_store_value_on_device(host_ptrs.data(), out.data_ptr(),
+                             static_cast<size_t>(count) * sizeof(uint64_t), stream);
   return out;
 }
 

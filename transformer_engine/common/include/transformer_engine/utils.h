@@ -5,13 +5,14 @@
  ************************************************************************/
 
 /*! \file utils.h
- *  \brief Utility functions (e.g. host-to-device pointer copies).
+ *  \brief Utility functions (e.g. host-to-device value stores).
  */
 
 #ifndef TRANSFORMER_ENGINE_UTILS_H_
 #define TRANSFORMER_ENGINE_UTILS_H_
 
 #include <cuda_runtime.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <transformer_engine/transformer_engine.h>
 
@@ -19,12 +20,23 @@
 extern "C" {
 #endif
 
-/*! \brief Copy an array of device pointers (held on host) into a device tensor.
+/*! \brief Copy a small host buffer into device memory.
  *
- *  \param[in]     host_ptrs    Host array of device pointer values cast to uint64_t.
- *  \param[out]    output       NVTETensor whose rowwise data buffer receives the pointer values.
- *  \param[in]     count        Number of pointers.
- *  \param[in]     stream       CUDA stream used for the operation.
+ *  The data is copied into kernel arguments, so the host buffer may
+ *  be freed immediately after this call returns. This is compatible
+ *  with CUDA Graphs.
+ *
+ *  \param[in]     host_ptr     Source in host memory.
+ *  \param[out]    device_ptr   Destination in device memory.
+ *  \param[in]     num_bytes    Size of the value in bytes.
+ *  \param[in]     stream       CUDA stream for the operation.
+ */
+void nvte_store_value_on_device(const void *host_ptr, void *device_ptr, size_t num_bytes,
+                                cudaStream_t stream);
+
+/*! \deprecated Use nvte_store_value_on_device instead.
+ *
+ *  \brief Copy an array of device pointers (held on host) into a device tensor.
  */
 void nvte_convert_pointers_to_tensor(const uint64_t *host_ptrs, NVTETensor output, int64_t count,
                                      cudaStream_t stream);
