@@ -58,6 +58,12 @@ def _varying_dims(base: int, num_groups: int) -> List[int]:
     return dims
 
 
+def _varying_last_dims(base: int, num_groups: int) -> List[int]:
+    aligned_dims = _varying_dims(base, num_groups)
+    offsets = (13, 29, 47, 61, 83, 97, 109, 127)
+    return [dim + offsets[idx % len(offsets)] for idx, dim in enumerate(aligned_dims)]
+
+
 def _make_inputs(
     *,
     shape_case: str,
@@ -106,7 +112,7 @@ def _make_inputs(
         return inputs, first_dims, None, element_counts
 
     if shape_case == "varying-last":
-        last_dims_list = _varying_dims(hidden_size, num_groups)
+        last_dims_list = _varying_last_dims(hidden_size, num_groups)
         total_cols = sum(last_dims_list)
         actual_elements = rows_per_group * total_cols
         last_dims = torch.tensor(last_dims_list, dtype=torch.int64, device="cuda")
@@ -270,7 +276,9 @@ def _make_result(
     )
     bandwidth_tbps = relevant_bytes * iterations / elapsed_sec / 1.0e12
     threshold = _target_tbps(state["shape_case"])
+    case_id = f"{state['shape_case']}/{state['mode']}"
     return {
+        "case_id": case_id,
         "shape_case": state["shape_case"],
         "mode": state["mode"],
         "num_groups": args.num_groups,
@@ -306,6 +314,22 @@ def _make_result(
             "output=preallocated)"
         ),
     }
+
+
+def _make_measurements(results: List[Dict[str, object]]) -> List[Dict[str, object]]:
+    measurements = []
+    for idx, result in enumerate(results):
+        measurements.append(
+            {
+                "case_id": str(result["case_id"]),
+                "metric": "bandwidth_TBps_actual_bytes",
+                "value": float(result["bandwidth_TBps_actual_bytes"]),
+                "unit": "TB/s",
+                "iteration": idx,
+                "higher_is_better": True,
+            }
+        )
+    return measurements
 
 
 def benchmark_case_mode(args: argparse.Namespace, shape_case: str, mode: str) -> Dict[str, object]:
@@ -369,6 +393,7 @@ def main() -> None:
         "regular_iterations": args.iters,
         "profile_iterations": args.profile_iters,
         "results": results,
+        "measurements": _make_measurements(results),
     }
     with open(args.output, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)

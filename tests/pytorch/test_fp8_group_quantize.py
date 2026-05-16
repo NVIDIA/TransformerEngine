@@ -144,7 +144,7 @@ def _graph_input_with_members(shape_case: str):
 
     if shape_case == "varying-last":
         rows = 128
-        last_dims_list = [256, 128, 384]
+        last_dims_list = [257, 130, 383]
         flat_input = torch.empty(
             rows * sum(last_dims_list), dtype=torch.bfloat16, device="cuda"
         )
@@ -404,10 +404,11 @@ def test_group_quantize_fp8_explicit_columnwise_output_varying_dims(
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 @pytest.mark.parametrize("mode", ["rowwise", "columnwise", "both"])
 def test_group_quantize_fp8_current_scaling_varying_last_dim(mode: str) -> None:
-    """Grouped FP8 current scaling supports packed groups with varying last dimensions."""
+    """Grouped FP8 current scaling supports non-tile-aligned varying last dimensions."""
     num_tensors = 3
     rows = 256
-    last_dims_list = [512, 1024, 256]
+    last_dims_list = [513, 1027, 259]
+    assert any(cols % 128 != 0 for cols in last_dims_list)
     total_cols = sum(last_dims_list)
     flat_input = torch.empty(rows * total_cols, dtype=torch.bfloat16, device="cuda")
     input_tensors = []

@@ -264,22 +264,17 @@ __global__ void __launch_bounds__(THREADS_PER_TILE) group_cast_fp8_kernel(
     tile_row = (blockIdx.y - tensor_id * tiles_per_tensor) * tile_dim_m;
   } else if constexpr (SHAPE_REP == ShapeRepresentation::VARYING_LAST_DIM) {
     rows = first_logical_dim;
-    const size_t global_tile_col = tile_col;
-    const size_t global_tile_element_offset = global_tile_col * rows;
-    tensor_id = find_tensor_from_offsets(offsets_ptr, num_tensors, global_tile_element_offset);
+    const size_t row_tiles_per_tensor = DIVUP(rows, tile_dim_m);
+    if (row_tiles_per_tensor == 0) {
+      return;
+    }
+    tensor_id = blockIdx.y / row_tiles_per_tensor;
     if (tensor_id >= num_tensors) {
       return;
     }
     cols = static_cast<size_t>(last_dims_ptr[tensor_id]);
-    if (cols % tile_dim_n != 0) {
-      NVTE_DEVICE_ERROR(
-          "For varying last dimensions support, each last_dims entry must align to the "
-          "grouped FP8 tensor-scaling column tile.");
-    }
     tensor_base = static_cast<size_t>(offsets_ptr[tensor_id]);
-    const size_t tensor_start_col = tensor_base / rows;
-    tile_col = global_tile_col - tensor_start_col;
-    tile_row = blockIdx.y * tile_dim_m;
+    tile_row = (blockIdx.y - tensor_id * row_tiles_per_tensor) * tile_dim_m;
     if (tile_col >= cols) {
       return;
     }
@@ -714,6 +709,9 @@ void group_quantize(const GroupedTensor *input, const Tensor *noop, GroupedTenso
   } else if (shape_rep == ShapeRepresentation::VARYING_FIRST_DIM) {
     // first_dims live on device; over-allocate the grid enough to cover one partial tile per group.
     work_blocks_Y += num_tensors;
+  } else if (shape_rep == ShapeRepresentation::VARYING_LAST_DIM) {
+    // last_dims live on device; map Y to per-group row tiles and over-allocate X by total width.
+    work_blocks_Y = num_tensors * DIVUP(first_logical_dim, row_tile_size);
   }
 
   const int64_t *const offsets_ptr = reinterpret_cast<const int64_t *>(output->tensor_offsets.dptr);
