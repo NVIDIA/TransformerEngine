@@ -82,23 +82,66 @@ def _serialize_orchestra_raw_report(report: Dict[str, object], output_path: Path
 
 def _make_orchestra_raw_report(report: Dict[str, object], output_path: Path) -> Dict[str, object]:
     repo_root = Path(__file__).resolve().parents[1]
-    return {
-        "schema_version": "benchmark_raw_report/v1",
-        "command": " ".join(shlex.quote(arg) for arg in [sys.executable, *sys.argv]),
-        "working_directory": os.getcwd(),
-        "repo_ref": _git_output(repo_root, "rev-parse", "HEAD")
-        or str(report.get("candidate_ref", "")),
-        "cluster_name": os.environ.get("ORCHESTRA_CLUSTER_NAME", "unknown"),
-        "gpu_type": _cuda_device_name(),
-        "benchmark_output_path": str(output_path),
-        "exit_code": 0,
-        "measurements": _canonical_measurements(report),
-    }
+    raw_report = dict(report)
+    measurements = _canonical_measurements(report)
+    candidate_results = _candidate_results(report)
+    if not candidate_results:
+        raise RuntimeError("benchmark raw report missing candidate_results")
+    if not measurements:
+        raise RuntimeError("benchmark raw report missing measurements")
+    raw_report.update(
+        {
+            "schema_version": "benchmark_raw_report/v1",
+            "command": " ".join(shlex.quote(arg) for arg in [sys.executable, *sys.argv]),
+            "working_directory": os.getcwd(),
+            "repo_ref": _git_output(repo_root, "rev-parse", "HEAD")
+            or str(report.get("candidate_ref", "")),
+            "cluster_name": os.environ.get("ORCHESTRA_CLUSTER_NAME", "unknown"),
+            "gpu_type": _cuda_device_name(),
+            "benchmark_output_path": str(output_path),
+            "exit_code": 0,
+            "candidate_results": candidate_results,
+            "measurements": measurements,
+        }
+    )
+    return raw_report
+
+
+def _candidate_results(report: Dict[str, object]) -> List[Dict[str, object]]:
+    candidate_results = report.get("candidate_results", [])
+    if isinstance(candidate_results, list) and candidate_results:
+        return [dict(result) for result in candidate_results if isinstance(result, dict)]
+
+    results = report.get("results", [])
+    if not isinstance(results, list):
+        return []
+    return [
+        dict(result)
+        for result in results
+        if isinstance(result, dict) and result.get("run_role", "candidate") == "candidate"
+    ]
 
 
 def _canonical_measurements(report: Dict[str, object]) -> List[Dict[str, object]]:
+    measurements = report.get("measurements", [])
+    if isinstance(measurements, list) and measurements:
+        canonical = _canonical_measurement_records(measurements)
+        if canonical:
+            return canonical
+
+    results = report.get("results", [])
+    if not isinstance(results, list) or not results:
+        results = report.get("candidate_results", [])
+    if not isinstance(results, list):
+        return []
+    return _canonical_measurement_records(_make_measurements_from_report_results(results))
+
+
+def _canonical_measurement_records(
+    measurements: List[object],
+) -> List[Dict[str, object]]:
     canonical = []
-    for idx, measurement in enumerate(report.get("measurements", [])):
+    for idx, measurement in enumerate(measurements):
         if not isinstance(measurement, dict):
             continue
         case_id = str(measurement.get("case_id", ""))
@@ -107,7 +150,8 @@ def _canonical_measurements(report: Dict[str, object]) -> List[Dict[str, object]
         value = measurement.get("value")
         if case_id == "" or metric == "" or unit == "" or not isinstance(value, (int, float)):
             continue
-        canonical.append(
+        canonical_measurement = dict(measurement)
+        canonical_measurement.update(
             {
                 "case_id": case_id,
                 "metric": metric,
@@ -117,7 +161,15 @@ def _canonical_measurements(report: Dict[str, object]) -> List[Dict[str, object]
                 "higher_is_better": bool(measurement.get("higher_is_better", True)),
             }
         )
+        canonical.append(canonical_measurement)
     return canonical
+
+
+def _make_measurements_from_report_results(
+    results: List[object],
+) -> List[Dict[str, object]]:
+    valid_results = [dict(result) for result in results if isinstance(result, dict)]
+    return _make_measurements(valid_results)
 
 
 def _cuda_device_name() -> str:
