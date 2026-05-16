@@ -941,6 +941,13 @@ class GroupedLinear(BasicOperation):
             input_quantizers=input_quantizers,
             dtype=dtype,
         )
+        if use_grouped_tensor_path and with_quantized_compute:
+            # Keep this as a hard guard in addition to _is_graph_safe_path_supported:
+            # the grouped-tensor GEMM path only supports MXFP8 quantized compute.
+            # FP8 tensor-scaling recipes still use the legacy split-quantize flow.
+            use_grouped_tensor_path = all(
+                isinstance(quantizer, MXFP8Quantizer) for quantizer in input_quantizers
+            )
 
         if use_grouped_tensor_path:
             out, tensors_to_save = self._fuser_forward_grouped_tensor(
