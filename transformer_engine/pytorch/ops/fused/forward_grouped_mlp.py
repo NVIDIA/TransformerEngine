@@ -337,7 +337,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
                 [w._rowwise_data for w in grouped_fc1_weight],
                 device,
             )
-            fc1_sfb_ptrs, fc1_sfb_buffer = tex.transform_and_load_data_ptrs_on_device(
+            fc1_sfb_ptrs, _fc1_sfb_buffer = tex.transform_and_load_data_ptrs_on_device(
                 "uniform_mxfp8_rowwise_swizzle",
                 [w._rowwise_scale_inv for w in grouped_fc1_weight],
                 device,
@@ -438,7 +438,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
                 [w._rowwise_data for w in grouped_fc2_weight],
                 device,
             )
-            fc2_sfb_ptrs, fc2_sfb_buffer = tex.transform_and_load_data_ptrs_on_device(
+            fc2_sfb_ptrs, _fc2_sfb_buffer = tex.transform_and_load_data_ptrs_on_device(
                 "uniform_mxfp8_rowwise_swizzle",
                 [w._rowwise_scale_inv for w in grouped_fc2_weight],
                 device,

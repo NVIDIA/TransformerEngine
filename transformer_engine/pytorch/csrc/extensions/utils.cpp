@@ -27,7 +27,7 @@ at::Tensor load_data_ptrs_on_device(const std::vector<at::Tensor> &tensors,
   }
 
   // Allocate device buffer
-  auto ptrs_device = at::empty({tensors.size()},
+  auto ptrs_device = at::empty({static_cast<int64_t>(tensors.size())},
                                at::TensorOptions().dtype(at::kLong).device(device));
 
   // Load pointers on device
@@ -51,7 +51,7 @@ std::tuple<at::Tensor, std::optional<at::Tensor>> transform_and_load_data_ptrs_o
   if (num_tensors == 0) {
     // No input tensors, return tensor with no elements
     return {
-      at::empty(std::vector<int64_t>{0}, at::TensorOptions().dtype(at::kLong).device(device)),
+      at::empty({int64_t{0}}, at::TensorOptions().dtype(at::kLong).device(device)),
       std::nullopt};
   }
 
@@ -114,10 +114,10 @@ std::tuple<at::Tensor, std::optional<at::Tensor>> transform_and_load_data_ptrs_o
       NVTE_ERROR("Unsupported case.");
     }
 
-    // Allocate single buffer for swizzled scales
+    // Allocate single buffer for swizzled scales.
+    // Uses a uniform stride since all tensors share the same scale shape.
     const size_t swizzled_scales_stride = roundup(scale_bytes, 16);  // Align to 16 bytes
-    const int64_t swizzled_scales_bytes = swizzled_scales_stride * num_tensors;
-    auto swizzled_scales = at::empty({swizzled_scales_bytes},
+    auto swizzled_scales = at::empty({static_cast<int64_t>(swizzled_scales_stride * num_tensors)},
                                      at::TensorOptions().dtype(at::kByte).device(device));
     uint8_t *swizzled_scales_dptr = reinterpret_cast<uint8_t *>(swizzled_scales.data_ptr());
 
@@ -167,7 +167,7 @@ std::tuple<at::Tensor, std::optional<at::Tensor>> transform_and_load_data_ptrs_o
     }
 
     // Load pointers on device
-    auto ptrs_device = at::empty(std::vector<int64_t>{num_tensors},
+    auto ptrs_device = at::empty({static_cast<int64_t>(num_tensors)},
                                  at::TensorOptions().dtype(at::kLong).device(device));
     nvte_load_value_on_device(ptrs_host.data(), ptrs_device.data_ptr(),
                               num_tensors * sizeof(uint64_t),
