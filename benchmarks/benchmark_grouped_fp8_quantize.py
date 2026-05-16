@@ -8,6 +8,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -36,16 +37,22 @@ def _default_output_path() -> str:
 
 
 def _write_report(report: Dict[str, object], output_path: str) -> None:
-    payload = json.dumps(report, indent=2)
     output = Path(output_path).expanduser()
+    payload = _serialize_report_for_path(report, output)
     if str(output.parent) not in ("", "."):
         output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(payload, encoding="utf-8")
-    _mirror_report_to_orchestra_raw_path(output, payload)
+    _mirror_report_to_orchestra_raw_path(output, report)
     print(payload)
 
 
-def _mirror_report_to_orchestra_raw_path(output_path: Path, payload: str) -> None:
+def _serialize_report_for_path(report: Dict[str, object], output_path: Path) -> str:
+    if _is_orchestra_raw_report_path(output_path):
+        return _serialize_orchestra_raw_report(report, output_path)
+    return json.dumps(report, indent=2)
+
+
+def _mirror_report_to_orchestra_raw_path(output_path: Path, report: Dict[str, object]) -> None:
     wrapper_raw_report = os.environ.get("ORCHESTRA_BENCHMARK_RAW_REPORT")
     if not wrapper_raw_report:
         return
@@ -55,7 +62,68 @@ def _mirror_report_to_orchestra_raw_path(output_path: Path, payload: str) -> Non
         return
     if str(raw_report.parent) not in ("", "."):
         raw_report.parent.mkdir(parents=True, exist_ok=True)
+    payload = _serialize_orchestra_raw_report(report, raw_report)
     raw_report.write_text(payload, encoding="utf-8")
+
+
+def _is_orchestra_raw_report_path(output_path: Path) -> bool:
+    wrapper_raw_report = os.environ.get("ORCHESTRA_BENCHMARK_RAW_REPORT")
+    if not wrapper_raw_report:
+        return False
+    return output_path.resolve() == Path(wrapper_raw_report).expanduser().resolve()
+
+
+def _serialize_orchestra_raw_report(report: Dict[str, object], output_path: Path) -> str:
+    return json.dumps(
+        _make_orchestra_raw_report(report, output_path),
+        separators=(",", ":"),
+    )
+
+
+def _make_orchestra_raw_report(report: Dict[str, object], output_path: Path) -> Dict[str, object]:
+    repo_root = Path(__file__).resolve().parents[1]
+    return {
+        "schema_version": "benchmark_raw_report/v1",
+        "command": " ".join(shlex.quote(arg) for arg in [sys.executable, *sys.argv]),
+        "working_directory": os.getcwd(),
+        "repo_ref": _git_output(repo_root, "rev-parse", "HEAD")
+        or str(report.get("candidate_ref", "")),
+        "cluster_name": os.environ.get("ORCHESTRA_CLUSTER_NAME", "unknown"),
+        "gpu_type": _cuda_device_name(),
+        "benchmark_output_path": str(output_path),
+        "exit_code": 0,
+        "measurements": _canonical_measurements(report),
+    }
+
+
+def _canonical_measurements(report: Dict[str, object]) -> List[Dict[str, object]]:
+    canonical = []
+    for idx, measurement in enumerate(report.get("measurements", [])):
+        if not isinstance(measurement, dict):
+            continue
+        case_id = str(measurement.get("case_id", ""))
+        metric = str(measurement.get("metric", ""))
+        unit = str(measurement.get("unit", ""))
+        value = measurement.get("value")
+        if case_id == "" or metric == "" or unit == "" or not isinstance(value, (int, float)):
+            continue
+        canonical.append(
+            {
+                "case_id": case_id,
+                "metric": metric,
+                "value": float(value),
+                "unit": unit,
+                "iteration": int(measurement.get("iteration", idx)),
+                "higher_is_better": bool(measurement.get("higher_is_better", True)),
+            }
+        )
+    return canonical
+
+
+def _cuda_device_name() -> str:
+    if torch.cuda.is_available():
+        return torch.cuda.get_device_name(torch.cuda.current_device())
+    return os.environ.get("ORCHESTRA_GPU_TYPE", "unknown")
 
 
 def _usage_for_mode(mode: str) -> Dict[str, bool]:
