@@ -479,6 +479,101 @@ __global__ void __launch_bounds__(ROWWISE_FLAT_THREADS) group_cast_fp8_rowwise_f
 }
 
 template <bool IS_ACT, typename ParamOP, float (*OP)(float, const ParamOP &), typename IType,
+          typename OType, bool ALIGNED>
+__global__ void __launch_bounds__(ROWWISE_FLAT_THREADS)
+    group_cast_fp8_varying_first_rowwise_flat_kernel(
+        const IType *__restrict__ input, OType *__restrict__ output_rowwise,
+        const float *__restrict__ scale_ptr, const float *__restrict__ noop,
+        const size_t num_tensors, const size_t total_elements,
+        const int64_t *__restrict__ offsets_ptr) {
+  if (noop != nullptr && noop[0] == 1.0f) {
+    return;
+  }
+
+  constexpr size_t nvec = ROWWISE_FLAT_LOAD_SIZE_BYTES / sizeof(IType);
+  using IVecT = Vec<IType, nvec>;
+  using OVecT = Vec<OType, nvec>;
+
+  const size_t active_elements = static_cast<size_t>(offsets_ptr[num_tensors]);
+  const size_t bounded_elements =
+      active_elements < total_elements ? active_elements : total_elements;
+  const size_t block_start_vec = blockIdx.x * blockDim.x;
+  const size_t block_start_offset = block_start_vec * nvec;
+  if (block_start_offset >= bounded_elements) {
+    return;
+  }
+
+  const size_t vec_id = block_start_vec + threadIdx.x;
+  const size_t offset = vec_id * nvec;
+  if (offset >= bounded_elements) {
+    return;
+  }
+
+  const size_t warp_start_vec =
+      block_start_vec + (threadIdx.x / THREADS_PER_WARP) * THREADS_PER_WARP;
+  const size_t warp_start_offset = warp_start_vec * nvec;
+  const int lane_id = threadIdx.x % THREADS_PER_WARP;
+  const unsigned int warp_mask = __activemask();
+  unsigned long long warp_tensor_id = 0;   // NOLINT(runtime/int)
+  unsigned long long warp_tensor_end = 0;  // NOLINT(runtime/int)
+  if (lane_id == 0) {
+    const size_t leader_tensor_id =
+        find_tensor_from_offsets(offsets_ptr, num_tensors, warp_start_offset);
+    warp_tensor_id = static_cast<unsigned long long>(leader_tensor_id);  // NOLINT(runtime/int)
+    warp_tensor_end =
+        static_cast<unsigned long long>(offsets_ptr[leader_tensor_id + 1]);  // NOLINT(runtime/int)
+  }
+  size_t tensor_id = static_cast<size_t>(__shfl_sync(warp_mask, warp_tensor_id, 0));
+  size_t tensor_end = static_cast<size_t>(__shfl_sync(warp_mask, warp_tensor_end, 0));
+  if (offset >= tensor_end) {
+    tensor_id = find_tensor_from_offsets(offsets_ptr, num_tensors, offset);
+    tensor_end = static_cast<size_t>(offsets_ptr[tensor_id + 1]);
+  }
+
+  const float scale = scale_ptr == nullptr ? 1.0f : scale_ptr[tensor_id];
+  IVecT local_input;
+  OVecT local_output;
+  if (offset + nvec <= tensor_end && offset + nvec <= bounded_elements) {
+    if constexpr (ALIGNED) {
+      local_input.load_from(input + offset);
+    } else {
+      local_input.load_from_elts(input + offset);
+    }
+    scaled_fp8_cvt_vec_full<IS_ACT, ParamOP, OP>(local_input, local_output, scale);
+    if constexpr (ALIGNED) {
+      local_output.store_to(output_rowwise + offset);
+    } else {
+      local_output.store_to_elts(output_rowwise + offset);
+    }
+  } else {
+    const size_t valid_elts =
+        offset < bounded_elements
+            ? ((bounded_elements - offset) < nvec ? (bounded_elements - offset) : nvec)
+            : 0;
+    if (valid_elts == 0) {
+      return;
+    }
+#pragma unroll
+    for (size_t i = 0; i < nvec; ++i) {
+      if (i < valid_elts) {
+        const size_t elt_offset = offset + i;
+        const size_t elt_tensor_id =
+            elt_offset < tensor_end
+                ? tensor_id
+                : find_tensor_from_offsets(offsets_ptr, num_tensors, elt_offset);
+        const float elt_scale = scale_ptr == nullptr ? 1.0f : scale_ptr[elt_tensor_id];
+        float elt = static_cast<float>(input[elt_offset]);
+        if constexpr (IS_ACT) {
+          elt = OP(elt, {});
+        }
+        local_output.data.elt[i] = static_cast<OType>(elt * elt_scale);
+      }
+    }
+    local_output.store_to_elts(output_rowwise + offset, 0, valid_elts);
+  }
+}
+
+template <bool IS_ACT, typename ParamOP, float (*OP)(float, const ParamOP &), typename IType,
           typename OType>
 __global__ void __launch_bounds__(ROWWISE_FLAT_THREADS)
     group_cast_fp8_variable_rowwise_flat_kernel(
@@ -807,6 +902,38 @@ void group_quantize(const GroupedTensor *input, const Tensor *noop, GroupedTenso
                               reinterpret_cast<const IType *>(input->data.dptr),
                               reinterpret_cast<OType *>(output->data.dptr), scale_ptr, noop_ptr,
                               num_tensors, total_elements, offsets_ptr);
+                          launched_fast_path = true;
+                        }
+                      }
+                      if constexpr (SHAPE_REP == ShapeRepresentation::VARYING_FIRST_DIM) {
+                        if constexpr (SCALING_TYPE == ScalingType::ROWWISE) {
+                          const size_t total_elements = first_logical_dim * last_logical_dim;
+                          constexpr size_t flat_nvec =
+                              ROWWISE_FLAT_LOAD_SIZE_BYTES / sizeof(IType);
+                          using IVecT = Vec<IType, flat_nvec>;
+                          using OVecT = Vec<OType, flat_nvec>;
+                          const bool flat_aligned =
+                              last_logical_dim % flat_nvec == 0 &&
+                              reinterpret_cast<uintptr_t>(input->data.dptr) % IVecT::BYTES == 0 &&
+                              reinterpret_cast<uintptr_t>(output->data.dptr) % OVecT::BYTES == 0;
+                          const size_t total_vecs = DIVUP(total_elements, flat_nvec);
+                          const dim3 flat_block(ROWWISE_FLAT_THREADS);
+                          const dim3 flat_grid(DIVUP(total_vecs, ROWWISE_FLAT_THREADS));
+                          if (flat_aligned) {
+                            group_cast_fp8_varying_first_rowwise_flat_kernel<
+                                IS_ACT, ParamOP, OP, IType, OType, true>
+                                <<<flat_grid, flat_block, 0, stream>>>(
+                                    reinterpret_cast<const IType *>(input->data.dptr),
+                                    reinterpret_cast<OType *>(output->data.dptr), scale_ptr,
+                                    noop_ptr, num_tensors, total_elements, offsets_ptr);
+                          } else {
+                            group_cast_fp8_varying_first_rowwise_flat_kernel<
+                                IS_ACT, ParamOP, OP, IType, OType, false>
+                                <<<flat_grid, flat_block, 0, stream>>>(
+                                    reinterpret_cast<const IType *>(input->data.dptr),
+                                    reinterpret_cast<OType *>(output->data.dptr), scale_ptr,
+                                    noop_ptr, num_tensors, total_elements, offsets_ptr);
+                          }
                           launched_fast_path = true;
                         }
                       }
