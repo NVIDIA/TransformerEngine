@@ -31,10 +31,10 @@ extern "C" {
  *  \param[in]     num_bytes    Size of the value in bytes.
  *  \param[in]     stream       CUDA stream for the operation.
  */
-void nvte_store_value_on_device(const void *host_ptr, void *device_ptr, size_t num_bytes,
+void nvte_load_value_on_device(const void *host_ptr, void *device_ptr, size_t num_bytes,
                                 cudaStream_t stream);
 
-/*! \deprecated Use nvte_store_value_on_device instead.
+/*! \deprecated Use nvte_load_value_on_device instead.
  *
  *  \brief Copy an array of device pointers (held on host) into a device tensor.
  */

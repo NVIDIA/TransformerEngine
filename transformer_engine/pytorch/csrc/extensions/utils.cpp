@@ -31,9 +31,9 @@ at::Tensor load_data_ptrs_on_device(const std::vector<at::Tensor> &tensors,
                                at::TensorOptions().dtype(at::kLong).device(device));
 
   // Load pointers on device
-  nvte_store_value_on_device(ptrs_host.data(), ptrs_device.data_ptr(),
-                             tensors.size() * sizeof(uint64_t),
-                             at::cuda::getCurrentCUDAStream());
+  nvte_load_value_on_device(ptrs_host.data(), ptrs_device.data_ptr(),
+                            tensors.size() * sizeof(uint64_t),
+                            at::cuda::getCurrentCUDAStream());
 
   return ptrs_device;
 }
@@ -169,9 +169,9 @@ std::tuple<at::Tensor, std::optional<at::Tensor>> transform_and_load_data_ptrs_o
     // Load pointers on device
     auto ptrs_device = at::empty(std::vector<int64_t>{num_tensors},
                                  at::TensorOptions().dtype(at::kLong).device(device));
-    nvte_store_value_on_device(ptrs_host.data(), ptrs_device.data_ptr(),
-                               num_tensors * sizeof(uint64_t),
-                               stream);
+    nvte_load_value_on_device(ptrs_host.data(), ptrs_device.data_ptr(),
+                              num_tensors * sizeof(uint64_t),
+                              stream);
 
     return {std::move(ptrs_device), std::move(swizzled_scales)};
   }
