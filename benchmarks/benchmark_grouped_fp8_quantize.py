@@ -251,6 +251,7 @@ def _run_timed_loop(
     torch.cuda.synchronize()
     if profile:
         torch.cuda.cudart().cudaProfilerStart()
+        torch.cuda.synchronize()
     start = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)
     torch.cuda.nvtx.range_push(f"grouped_fp8_quantize:{shape_case}:{mode}")

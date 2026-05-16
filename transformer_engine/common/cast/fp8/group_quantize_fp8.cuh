@@ -557,6 +557,50 @@ __global__ void __launch_bounds__(ROWWISE_FLAT_THREADS)
 template <bool IS_ACT, typename ParamOP, float (*OP)(float, const ParamOP &), typename IType,
           typename OType>
 __global__ void __launch_bounds__(ROWWISE_FLAT_THREADS)
+    group_cast_fp8_varying_first_rowwise_aligned_flat_kernel(
+        const IType *__restrict__ input, OType *__restrict__ output_rowwise,
+        const float *__restrict__ scale_ptr, const float *__restrict__ noop,
+        const size_t num_tensors, const size_t cols, const size_t total_elements,
+        const int64_t *__restrict__ offsets_ptr, const int64_t *__restrict__ first_dims_ptr) {
+  if (noop != nullptr && noop[0] == 1.0f) {
+    return;
+  }
+
+  constexpr size_t nvec = ROWWISE_FLAT_LOAD_SIZE_BYTES / sizeof(IType);
+  using IVecT = Vec<IType, nvec>;
+  using OVecT = Vec<OType, nvec>;
+
+  const size_t tensor_id = blockIdx.y;
+  if (tensor_id >= num_tensors) {
+    return;
+  }
+
+  const size_t tensor_base = static_cast<size_t>(offsets_ptr[tensor_id]);
+  if (tensor_base >= total_elements) {
+    return;
+  }
+  const size_t declared_tensor_elements = static_cast<size_t>(first_dims_ptr[tensor_id]) * cols;
+  const size_t max_tensor_elements = total_elements - tensor_base;
+  const size_t tensor_elements =
+      declared_tensor_elements < max_tensor_elements ? declared_tensor_elements
+                                                     : max_tensor_elements;
+  const size_t tensor_vecs = tensor_elements / nvec;
+  const float scale = scale_ptr == nullptr ? 1.0f : scale_ptr[tensor_id];
+
+  for (size_t local_vec_id = blockIdx.x * blockDim.x + threadIdx.x;
+       local_vec_id < tensor_vecs; local_vec_id += gridDim.x * blockDim.x) {
+    const size_t offset = tensor_base + local_vec_id * nvec;
+    IVecT local_input;
+    OVecT local_output;
+    local_input.load_from(input + offset);
+    scaled_fp8_cvt_vec_full<IS_ACT, ParamOP, OP>(local_input, local_output, scale);
+    local_output.store_to(output_rowwise + offset);
+  }
+}
+
+template <bool IS_ACT, typename ParamOP, float (*OP)(float, const ParamOP &), typename IType,
+          typename OType>
+__global__ void __launch_bounds__(ROWWISE_FLAT_THREADS)
     group_cast_fp8_variable_rowwise_flat_kernel(
         const IType *__restrict__ input, OType *__restrict__ output_rowwise,
         const float *__restrict__ scale_ptr, const float *__restrict__ noop,
@@ -1075,12 +1119,13 @@ void group_quantize(const GroupedTensor *input, const Tensor *noop, GroupedTenso
                           const dim3 flat_block(ROWWISE_FLAT_THREADS);
                           const dim3 flat_grid(blocks_per_tensor, num_tensors);
                           if (flat_aligned) {
-                            group_cast_fp8_varying_first_rowwise_flat_kernel<
-                                IS_ACT, ParamOP, OP, IType, OType, true>
+                            group_cast_fp8_varying_first_rowwise_aligned_flat_kernel<
+                                IS_ACT, ParamOP, OP, IType, OType>
                                 <<<flat_grid, flat_block, 0, stream>>>(
                                     reinterpret_cast<const IType *>(input->data.dptr),
                                     reinterpret_cast<OType *>(output->data.dptr), scale_ptr,
-                                    noop_ptr, num_tensors, total_elements, offsets_ptr);
+                                    noop_ptr, num_tensors, last_logical_dim, total_elements,
+                                    offsets_ptr, first_dims_ptr);
                           } else {
                             group_cast_fp8_varying_first_rowwise_flat_kernel<
                                 IS_ACT, ParamOP, OP, IType, OType, false>
