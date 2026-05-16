@@ -25,6 +25,25 @@ SHAPE_CASES = ("same-shape", "varying-first", "varying-last")
 EXTENSION_ROOT_ENV = "NVTE_BENCHMARK_EXPECT_EXTENSION_ROOT"
 
 
+def _default_output_path() -> str:
+    output_dir = os.environ.get("ORCHESTRA_BENCHMARK_OUTPUT_DIR")
+    if output_dir:
+        return str(Path(output_dir) / "grouped_fp8_quantize_report.json")
+    return "grouped_fp8_quantize_report.json"
+
+
+def _check_output_path(output_path: str) -> None:
+    wrapper_raw_report = os.environ.get("ORCHESTRA_BENCHMARK_RAW_REPORT")
+    if wrapper_raw_report is None:
+        return
+    if Path(output_path).expanduser().resolve() == Path(wrapper_raw_report).expanduser().resolve():
+        raise ValueError(
+            "--output must not point at ORCHESTRA_BENCHMARK_RAW_REPORT because the "
+            "benchmark wrapper writes its own command report there. Use a separate "
+            "script report path under ORCHESTRA_BENCHMARK_OUTPUT_DIR instead."
+        )
+
+
 def _usage_for_mode(mode: str) -> Dict[str, bool]:
     return {
         "rowwise": mode in ("rowwise", "both"),
@@ -720,6 +739,7 @@ def benchmark_same_session(args: argparse.Namespace) -> Dict[str, object]:
         "same_shape_baseline_comparisons",
     )
     return {
+        "schema_version": "benchmark_raw_report/v1",
         "benchmark": "grouped_fp8_tensor_scaling_quantize",
         "baseline_mode": "same_session",
         "baseline_ref": baseline_ref,
@@ -762,16 +782,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--output",
-        default=os.environ.get(
-            "ORCHESTRA_BENCHMARK_RAW_REPORT",
-            "grouped_fp8_quantize_report.json",
-        ),
+        default=_default_output_path(),
     )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    _check_output_path(args.output)
     if args.rows_per_group % 128 != 0:
         raise ValueError("--rows-per-group must be divisible by 128 for the grouped FP8 kernel")
     if args.hidden_size % 128 != 0:
@@ -795,6 +813,7 @@ def main() -> None:
         results, "candidate", _git_output(Path(__file__).resolve().parents[1], "rev-parse", "HEAD")
     )
     report = {
+        "schema_version": "benchmark_raw_report/v1",
         "benchmark": "grouped_fp8_tensor_scaling_quantize",
         "profile_enabled": args.profile,
         "profile_after_warmup": True,
