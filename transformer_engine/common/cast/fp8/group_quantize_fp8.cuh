@@ -195,6 +195,21 @@ __device__ __forceinline__ void store_fp8_vec_streaming(OType *ptr,
   }
 }
 
+__device__ __forceinline__ size_t find_tensor_from_offsets(
+    const int64_t *__restrict__ offsets_ptr, const size_t num_tensors, const size_t offset) {
+  size_t low = 1;
+  size_t hi = num_tensors;
+  while (low < hi) {
+    const size_t mid = low + (hi - low) / 2;
+    if (static_cast<size_t>(offsets_ptr[mid]) <= offset) {
+      low = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  return low - 1;
+}
+
 template <bool IS_ACT, typename ParamOP, float (*OP)(float, const ParamOP &), typename IType,
           typename OType, ScalingType SCALING_TYPE, ShapeRepresentation SHAPE_REP>
 __global__ void __launch_bounds__(THREADS_PER_TILE) group_cast_fp8_kernel(
@@ -202,7 +217,7 @@ __global__ void __launch_bounds__(THREADS_PER_TILE) group_cast_fp8_kernel(
     OType *__restrict__ output_colwise, const float *__restrict__ scale_ptr,
     const float *__restrict__ noop, const size_t num_tensors, const size_t first_logical_dim,
     const size_t last_logical_dim, const int64_t *__restrict__ offsets_ptr,
-    const int64_t *__restrict__ first_dims_ptr) {
+    const int64_t *__restrict__ first_dims_ptr, const int64_t *__restrict__ last_dims_ptr) {
   if (noop != nullptr && noop[0] == 1.0f) {
     return;
   }
@@ -225,17 +240,16 @@ __global__ void __launch_bounds__(THREADS_PER_TILE) group_cast_fp8_kernel(
   using OVecC = Vec<OType, nvec_in>;
   using OVecT = Vec<OType, nvec_out>;
 
-  const size_t tile_col = blockIdx.x * tile_dim_n;
-  if (tile_col >= last_logical_dim) {
-    return;
-  }
-
+  size_t tile_col = blockIdx.x * tile_dim_n;
   size_t tensor_id = 0;
   size_t rows = 0;
   size_t tensor_base = 0;
   size_t tile_row = 0;
-  const size_t cols = last_logical_dim;
+  size_t cols = last_logical_dim;
   if constexpr (SHAPE_REP == ShapeRepresentation::SAME_BOTH_DIMS) {
+    if (tile_col >= last_logical_dim) {
+      return;
+    }
     const size_t rows_per_tensor = first_logical_dim / num_tensors;
     const size_t tiles_per_tensor = DIVUP(rows_per_tensor, tile_dim_m);
     if (tiles_per_tensor == 0) {
@@ -248,7 +262,31 @@ __global__ void __launch_bounds__(THREADS_PER_TILE) group_cast_fp8_kernel(
     rows = rows_per_tensor;
     tensor_base = tensor_id * rows * cols;
     tile_row = (blockIdx.y - tensor_id * tiles_per_tensor) * tile_dim_m;
+  } else if constexpr (SHAPE_REP == ShapeRepresentation::VARYING_LAST_DIM) {
+    rows = first_logical_dim;
+    const size_t global_tile_col = tile_col;
+    const size_t global_tile_element_offset = global_tile_col * rows;
+    tensor_id = find_tensor_from_offsets(offsets_ptr, num_tensors, global_tile_element_offset);
+    if (tensor_id >= num_tensors) {
+      return;
+    }
+    cols = static_cast<size_t>(last_dims_ptr[tensor_id]);
+    if (cols % tile_dim_n != 0) {
+      NVTE_DEVICE_ERROR(
+          "For varying last dimensions support, each last_dims entry must align to the "
+          "grouped FP8 tensor-scaling column tile.");
+    }
+    tensor_base = static_cast<size_t>(offsets_ptr[tensor_id]);
+    const size_t tensor_start_col = tensor_base / rows;
+    tile_col = global_tile_col - tensor_start_col;
+    tile_row = blockIdx.y * tile_dim_m;
+    if (tile_col >= cols) {
+      return;
+    }
   } else {
+    if (tile_col >= last_logical_dim) {
+      return;
+    }
     size_t local_tile_id = blockIdx.y;
     bool found_tensor = false;
     for (size_t i = 0; i < num_tensors; ++i) {
@@ -446,6 +484,69 @@ __global__ void __launch_bounds__(ROWWISE_FLAT_THREADS) group_cast_fp8_rowwise_f
 }
 
 template <bool IS_ACT, typename ParamOP, float (*OP)(float, const ParamOP &), typename IType,
+          typename OType>
+__global__ void __launch_bounds__(ROWWISE_FLAT_THREADS)
+    group_cast_fp8_variable_rowwise_flat_kernel(
+        const IType *__restrict__ input, OType *__restrict__ output_rowwise,
+        const float *__restrict__ scale_ptr, const float *__restrict__ noop,
+        const size_t num_tensors, const size_t total_elements,
+        const int64_t *__restrict__ offsets_ptr) {
+  if (noop != nullptr && noop[0] == 1.0f) {
+    return;
+  }
+
+  constexpr size_t nvec = ROWWISE_FLAT_LOAD_SIZE_BYTES / sizeof(IType);
+  using IVecT = Vec<IType, nvec>;
+  using OVecT = Vec<OType, nvec>;
+
+  const size_t active_elements = static_cast<size_t>(offsets_ptr[num_tensors]);
+  const size_t bounded_elements =
+      active_elements < total_elements ? active_elements : total_elements;
+  const size_t total_vecs = DIVUP(bounded_elements, nvec);
+  for (size_t vec_id = blockIdx.x * blockDim.x + threadIdx.x; vec_id < total_vecs;
+       vec_id += gridDim.x * blockDim.x) {
+    const size_t offset = vec_id * nvec;
+    const size_t tensor_id = find_tensor_from_offsets(offsets_ptr, num_tensors, offset);
+    const size_t tensor_end = static_cast<size_t>(offsets_ptr[tensor_id + 1]);
+    const float scale = scale_ptr == nullptr ? 1.0f : scale_ptr[tensor_id];
+    IVecT local_input;
+    OVecT local_output;
+    if (offset + nvec <= tensor_end && offset + nvec <= bounded_elements &&
+        reinterpret_cast<uint64_t>(input + offset) % IVecT::BYTES == 0 &&
+        reinterpret_cast<uint64_t>(output_rowwise + offset) % OVecT::BYTES == 0) {
+      local_input.load_from(input + offset);
+      scaled_fp8_cvt_vec_full<IS_ACT, ParamOP, OP>(local_input, local_output, scale);
+      local_output.store_to(output_rowwise + offset);
+    } else {
+      const size_t valid_elts =
+          offset < bounded_elements
+              ? ((bounded_elements - offset) < nvec ? (bounded_elements - offset) : nvec)
+              : 0;
+      if (valid_elts == 0) {
+        continue;
+      }
+#pragma unroll
+      for (size_t i = 0; i < nvec; ++i) {
+        if (i < valid_elts) {
+          const size_t elt_offset = offset + i;
+          const size_t elt_tensor_id =
+              elt_offset < tensor_end
+                  ? tensor_id
+                  : find_tensor_from_offsets(offsets_ptr, num_tensors, elt_offset);
+          const float elt_scale = scale_ptr == nullptr ? 1.0f : scale_ptr[elt_tensor_id];
+          float elt = static_cast<float>(input[elt_offset]);
+          if constexpr (IS_ACT) {
+            elt = OP(elt, {});
+          }
+          local_output.data.elt[i] = static_cast<OType>(elt * elt_scale);
+        }
+      }
+      local_output.store_to_elts(output_rowwise + offset, 0, valid_elts);
+    }
+  }
+}
+
+template <bool IS_ACT, typename ParamOP, float (*OP)(float, const ParamOP &), typename IType,
           typename OType, ScalingType SCALING_TYPE>
 __global__ void __launch_bounds__(THREADS_PER_TILE) group_cast_fp8_same_shape_full_tile_kernel(
     const IType *__restrict__ input, OType *__restrict__ output_rowwise,
@@ -554,9 +655,6 @@ void group_quantize(const GroupedTensor *input, const Tensor *noop, GroupedTenso
              "Grouped FP8 tensor-scaling scale must be FP32.");
   NVTE_CHECK(output->scale.numel() >= output->num_tensors,
              "Grouped FP8 tensor-scaling scale must have at least one entry per tensor.");
-  NVTE_CHECK(input->all_same_last_dim() && output->all_same_last_dim(),
-             "Grouped FP8 tensor-scaling quantization only supports a uniform last dimension.");
-
   const bool use_rowwise_output = output->has_data();
   const bool use_colwise_output = output->has_columnwise_data();
   NVTE_CHECK(use_rowwise_output || use_colwise_output,
@@ -581,9 +679,11 @@ void group_quantize(const GroupedTensor *input, const Tensor *noop, GroupedTenso
     shape_rep = ShapeRepresentation::SAME_BOTH_DIMS;
   } else if (output->all_same_last_dim()) {
     shape_rep = ShapeRepresentation::VARYING_FIRST_DIM;
+  } else if (output->all_same_first_dim()) {
+    shape_rep = ShapeRepresentation::VARYING_LAST_DIM;
   } else {
-    NVTE_ERROR("Grouped FP8 tensor-scaling quantization only supports same-shape or varying "
-               "first-dimension grouped tensors.");
+    NVTE_ERROR("Grouped FP8 tensor-scaling quantization only supports same-shape, varying "
+               "first-dimension, or varying last-dimension grouped tensors.");
   }
 
   NVTE_CHECK(input->logical_shape.data[1] == output->logical_shape.data[1],
@@ -611,13 +711,14 @@ void group_quantize(const GroupedTensor *input, const Tensor *noop, GroupedTenso
                "First logical dimension must be divisible by num_tensors.");
     const size_t rows_per_tensor = first_logical_dim / num_tensors;
     work_blocks_Y = num_tensors * DIVUP(rows_per_tensor, row_tile_size);
-  } else {
+  } else if (shape_rep == ShapeRepresentation::VARYING_FIRST_DIM) {
     // first_dims live on device; over-allocate the grid enough to cover one partial tile per group.
     work_blocks_Y += num_tensors;
   }
 
   const int64_t *const offsets_ptr = reinterpret_cast<const int64_t *>(output->tensor_offsets.dptr);
   const int64_t *const first_dims_ptr = reinterpret_cast<const int64_t *>(output->first_dims.dptr);
+  const int64_t *const last_dims_ptr = reinterpret_cast<const int64_t *>(output->last_dims.dptr);
   const float *noop_ptr = reinterpret_cast<const float *>(noop->data.dptr);
 
   const dim3 block(THREADS_PER_TILE);
@@ -644,6 +745,10 @@ void group_quantize(const GroupedTensor *input, const Tensor *noop, GroupedTenso
                         NVTE_CHECK(offsets_ptr != nullptr && first_dims_ptr != nullptr,
                                    "Varying first-dimension grouped FP8 quantization requires "
                                    "first_dims and tensor_offsets.");
+                      } else if constexpr (SHAPE_REP == ShapeRepresentation::VARYING_LAST_DIM) {
+                        NVTE_CHECK(offsets_ptr != nullptr && last_dims_ptr != nullptr,
+                                   "Varying last-dimension grouped FP8 quantization requires "
+                                   "last_dims and tensor_offsets.");
                       }
                       bool launched_fast_path = false;
                       if constexpr (SHAPE_REP == ShapeRepresentation::SAME_BOTH_DIMS) {
@@ -690,6 +795,23 @@ void group_quantize(const GroupedTensor *input, const Tensor *noop, GroupedTenso
                           }
                         }
                       }
+                      if constexpr (SHAPE_REP == ShapeRepresentation::VARYING_LAST_DIM) {
+                        if constexpr (SCALING_TYPE == ScalingType::ROWWISE) {
+                          const size_t total_elements = first_logical_dim * last_logical_dim;
+                          constexpr size_t flat_nvec =
+                              ROWWISE_FLAT_LOAD_SIZE_BYTES / sizeof(IType);
+                          const size_t total_vecs = DIVUP(total_elements, flat_nvec);
+                          const dim3 flat_block(ROWWISE_FLAT_THREADS);
+                          const dim3 flat_grid(DIVUP(total_vecs, ROWWISE_FLAT_THREADS));
+                          group_cast_fp8_variable_rowwise_flat_kernel<
+                              IS_ACT, ParamOP, OP, IType, OType><<<flat_grid, flat_block, 0,
+                                                                  stream>>>(
+                              reinterpret_cast<const IType *>(input->data.dptr),
+                              reinterpret_cast<OType *>(output->data.dptr), scale_ptr, noop_ptr,
+                              num_tensors, total_elements, offsets_ptr);
+                          launched_fast_path = true;
+                        }
+                      }
                       if (!launched_fast_path) {
                         const size_t work_blocks_X = DIVUP(last_logical_dim, tile_dim_n);
                         const dim3 grid(work_blocks_X, work_blocks_Y);
@@ -702,7 +824,7 @@ void group_quantize(const GroupedTensor *input, const Tensor *noop, GroupedTenso
                                 ? reinterpret_cast<OType *>(output->columnwise_data.dptr)
                                 : nullptr,
                             scale_ptr, noop_ptr, num_tensors, first_logical_dim, last_logical_dim,
-                            offsets_ptr, first_dims_ptr);
+                            offsets_ptr, first_dims_ptr, last_dims_ptr);
                       }
                       NVTE_CHECK_CUDA(cudaGetLastError());
                     });

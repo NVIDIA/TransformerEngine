@@ -19,6 +19,7 @@ namespace transformer_engine {
 namespace {
 
 constexpr int amax_kernel_threads = 512;
+constexpr int grouped_amax_kernel_threads = 256;
 
 __launch_bounds__(1) __global__ void zero_amax_kernel(float *amax_ptr, const float *noop_ptr) {
   if (noop_ptr != nullptr && noop_ptr[0] == 1.0f) {
@@ -113,6 +114,90 @@ void launch_amax_kernel(const InputType *input, float *amax, const size_t N, con
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
+template <typename InputType>
+__launch_bounds__(grouped_amax_kernel_threads) __global__
+    void grouped_amax_kernel(const InputType *input, float *amax, const size_t num_tensors,
+                             const size_t first_logical_dim, const size_t last_logical_dim,
+                             const ShapeRepresentation shape_rep,
+                             const int64_t *__restrict__ offsets_ptr,
+                             const int64_t *__restrict__ first_dims_ptr,
+                             const int64_t *__restrict__ last_dims_ptr,
+                             const float *noop_ptr) {
+  if (noop_ptr != nullptr && noop_ptr[0] == 1.0f) {
+    return;
+  }
+
+  const size_t tensor_id = blockIdx.x;
+  if (tensor_id >= num_tensors) {
+    return;
+  }
+
+  size_t rows = 0;
+  size_t cols = 0;
+  size_t tensor_base = 0;
+  switch (shape_rep) {
+    case ShapeRepresentation::SAME_BOTH_DIMS:
+      rows = first_logical_dim / num_tensors;
+      cols = last_logical_dim;
+      tensor_base = tensor_id * rows * cols;
+      break;
+    case ShapeRepresentation::VARYING_FIRST_DIM:
+      rows = static_cast<size_t>(first_dims_ptr[tensor_id]);
+      cols = last_logical_dim;
+      tensor_base = static_cast<size_t>(offsets_ptr[tensor_id]);
+      break;
+    case ShapeRepresentation::VARYING_LAST_DIM:
+      rows = first_logical_dim;
+      cols = static_cast<size_t>(last_dims_ptr[tensor_id]);
+      tensor_base = static_cast<size_t>(offsets_ptr[tensor_id]);
+      break;
+    case ShapeRepresentation::VARYING_BOTH_DIMS:
+      rows = static_cast<size_t>(first_dims_ptr[tensor_id]);
+      cols = static_cast<size_t>(last_dims_ptr[tensor_id]);
+      tensor_base = static_cast<size_t>(offsets_ptr[tensor_id]);
+      break;
+  }
+
+  float thread_amax = 0.0f;
+  const size_t numel = rows * cols;
+  for (size_t offset = threadIdx.x; offset < numel; offset += blockDim.x) {
+    thread_amax = fmaxf(thread_amax, fabsf(static_cast<float>(input[tensor_base + offset])));
+  }
+
+  __shared__ float block_amax[grouped_amax_kernel_threads];
+  block_amax[threadIdx.x] = thread_amax;
+  __syncthreads();
+
+  for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+    if (threadIdx.x < stride) {
+      block_amax[threadIdx.x] = fmaxf(block_amax[threadIdx.x], block_amax[threadIdx.x + stride]);
+    }
+    __syncthreads();
+  }
+
+  if (threadIdx.x == 0) {
+    amax[tensor_id] = block_amax[0];
+  }
+}
+
+template <typename InputType>
+void launch_grouped_amax_kernel(const InputType *input, float *amax, const size_t num_tensors,
+                                const size_t first_logical_dim,
+                                const size_t last_logical_dim,
+                                const ShapeRepresentation shape_rep,
+                                const int64_t *offsets_ptr,
+                                const int64_t *first_dims_ptr,
+                                const int64_t *last_dims_ptr, const float *noop_ptr,
+                                cudaStream_t stream) {
+  if (num_tensors == 0) {
+    return;
+  }
+  grouped_amax_kernel<InputType><<<num_tensors, grouped_amax_kernel_threads, 0, stream>>>(
+      input, amax, num_tensors, first_logical_dim, last_logical_dim, shape_rep, offsets_ptr,
+      first_dims_ptr, last_dims_ptr, noop_ptr);
+  NVTE_CHECK_CUDA(cudaGetLastError());
+}
+
 }  // namespace
 }  // namespace transformer_engine
 
@@ -175,6 +260,73 @@ void compute_amax_impl(const NVTETensor input_, const NVTETensor output_, cudaSt
           stream););  // NOLINT(*)
 }
 
+void group_compute_amax_impl(const NVTEGroupedTensor input_, NVTEGroupedTensor output_,
+                             const NVTEQuantizationConfig config_, cudaStream_t stream) {
+  using namespace transformer_engine;
+
+  NVTE_CHECK(input_ != nullptr, "Invalid grouped input tensor (got NULL)");
+  const auto &input = *convertNVTEGroupedTensorCheck(input_);
+  NVTE_CHECK(output_ != nullptr, "Invalid grouped output tensor (got NULL)");
+  auto &output = *convertNVTEGroupedTensorCheck(output_);
+  NVTE_CHECK(input.num_tensors == output.num_tensors,
+             "Number of grouped input and output tensors must match.");
+  NVTE_CHECK(input.has_data(), "Grouped amax input must have rowwise data.");
+  NVTE_CHECK(!is_fp8_dtype(input.data.dtype),
+             "Grouped amax input must be unquantized, but got dtype=",
+             to_string(input.data.dtype));
+  NVTE_CHECK(output.amax.has_data() || output.columnwise_amax.has_data(),
+             "Grouped amax output must have an amax buffer.");
+
+  CheckInputGroupedTensor(input, "group_compute_amax_input");
+  CheckOutputGroupedTensor(output, "group_compute_amax_output", true);
+
+  ShapeRepresentation shape_rep = ShapeRepresentation::SAME_BOTH_DIMS;
+  if (output.all_same_shape()) {
+    shape_rep = ShapeRepresentation::SAME_BOTH_DIMS;
+  } else if (output.all_same_last_dim()) {
+    shape_rep = ShapeRepresentation::VARYING_FIRST_DIM;
+  } else if (output.all_same_first_dim()) {
+    shape_rep = ShapeRepresentation::VARYING_LAST_DIM;
+  } else {
+    shape_rep = ShapeRepresentation::VARYING_BOTH_DIMS;
+  }
+
+  const int64_t *offsets_ptr = reinterpret_cast<const int64_t *>(output.tensor_offsets.dptr);
+  const int64_t *first_dims_ptr = reinterpret_cast<const int64_t *>(output.first_dims.dptr);
+  const int64_t *last_dims_ptr = reinterpret_cast<const int64_t *>(output.last_dims.dptr);
+  if (shape_rep != ShapeRepresentation::SAME_BOTH_DIMS) {
+    NVTE_CHECK(offsets_ptr != nullptr,
+               "Grouped amax requires tensor_offsets when a grouped dimension varies.");
+  }
+  if (shape_rep == ShapeRepresentation::VARYING_FIRST_DIM ||
+      shape_rep == ShapeRepresentation::VARYING_BOTH_DIMS) {
+    NVTE_CHECK(first_dims_ptr != nullptr,
+               "Grouped amax requires first_dims for varying first dimensions.");
+  }
+  if (shape_rep == ShapeRepresentation::VARYING_LAST_DIM ||
+      shape_rep == ShapeRepresentation::VARYING_BOTH_DIMS) {
+    NVTE_CHECK(last_dims_ptr != nullptr,
+               "Grouped amax requires last_dims for varying last dimensions.");
+  }
+
+  float *noop_ptr = nullptr;
+  if (config_ != nullptr) {
+    const QuantizationConfig *config_cpp = reinterpret_cast<const QuantizationConfig *>(config_);
+    const NVTETensor noop = config_cpp ? config_cpp->noop_tensor : nullptr;
+    noop_ptr = reinterpret_cast<float *>(
+        (noop != nullptr ? convertNVTETensorCheck(noop)->data.dptr : nullptr));
+  }
+
+  float *amax_ptr = reinterpret_cast<float *>(
+      output.amax.dptr != nullptr ? output.amax.dptr : output.columnwise_amax.dptr);
+  TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
+      input.data.dtype, IType,
+      launch_grouped_amax_kernel(reinterpret_cast<const IType *>(input.data.dptr), amax_ptr,
+                                 output.num_tensors, output.logical_shape.data[0],
+                                 output.logical_shape.data[1], shape_rep, offsets_ptr,
+                                 first_dims_ptr, last_dims_ptr, noop_ptr, stream););  // NOLINT(*)
+}
+
 }  // anonymous namespace
 
 void nvte_compute_amax(const NVTETensor input_, const NVTETensor output_, cudaStream_t stream) {
@@ -186,6 +338,13 @@ void nvte_compute_amax_with_config(const NVTETensor input_, const NVTETensor out
                                    const NVTEQuantizationConfig config_, cudaStream_t stream) {
   NVTE_API_CALL(nvte_compute_amax_with_config);
   compute_amax_impl(input_, output_, stream, config_);
+}
+
+void nvte_group_compute_amax_with_config(const NVTEGroupedTensor input, NVTEGroupedTensor output,
+                                         const NVTEQuantizationConfig config,
+                                         cudaStream_t stream) {
+  NVTE_API_CALL(nvte_group_compute_amax_with_config);
+  group_compute_amax_impl(input, output, config, stream);
 }
 
 namespace transformer_engine {

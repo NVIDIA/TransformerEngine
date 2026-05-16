@@ -19,6 +19,8 @@
 #include "common.h"
 #include "common/util/system.h"
 #include "pybind.h"
+#include "transformer_engine/multi_tensor.h"
+#include "transformer_engine/recipe.h"
 #include "transformer_engine/transformer_engine.h"
 
 namespace transformer_engine {
@@ -29,58 +31,6 @@ namespace {
 std::vector<size_t> get_tensor_shape(const TensorWrapper &tensor) {
   const auto &shape = tensor.shape();
   return std::vector<size_t>(shape.data, shape.data + shape.ndim);
-}
-
-std::optional<std::vector<size_t>> fp8_active_grouped_output_shape(
-    const py::object &output, const std::vector<size_t> &logical_shape, const size_t num_tensors,
-    const size_t logical_last_dim) {
-  if (output.is_none() || !py::hasattr(output, "first_dims") ||
-      output.attr("first_dims").is_none() || !py::hasattr(output, "offsets") ||
-      output.attr("offsets").is_none()) {
-    return std::nullopt;
-  }
-
-  const auto offsets = output.attr("offsets").cast<std::vector<int64_t>>();
-  if (offsets.size() != num_tensors + 1) {
-    return std::nullopt;
-  }
-  NVTE_CHECK(logical_shape.size() == 2, "Grouped tensor logical shape must be 2D.");
-  NVTE_CHECK(logical_last_dim > 0, "Grouped tensor logical last dimension must be positive.");
-  const int64_t active_elements = offsets.back();
-  NVTE_CHECK(active_elements >= 0, "Grouped tensor active element count must be non-negative.");
-  if (active_elements == 0) {
-    return std::nullopt;
-  }
-  NVTE_CHECK(active_elements % static_cast<int64_t>(logical_last_dim) == 0,
-             "Grouped tensor offsets must align to the logical last dimension.");
-  auto active_shape = logical_shape;
-  active_shape[0] = static_cast<size_t>(active_elements / static_cast<int64_t>(logical_last_dim));
-  NVTE_CHECK(active_shape[0] <= logical_shape[0],
-             "Sum of first_dims must not exceed the allocated first dimension.");
-  return active_shape;
-}
-
-bool fp8_grouped_output_has_uniform_offsets(const py::object &output, const size_t num_tensors,
-                                            const size_t logical_last_dim) {
-  if (output.is_none() || !py::hasattr(output, "offsets") || output.attr("offsets").is_none()) {
-    return false;
-  }
-
-  const auto offsets = output.attr("offsets").cast<std::vector<int64_t>>();
-  if (offsets.size() != num_tensors + 1 || num_tensors == 0 || logical_last_dim == 0) {
-    return false;
-  }
-
-  const int64_t stride = offsets[1] - offsets[0];
-  if (stride <= 0 || stride % static_cast<int64_t>(logical_last_dim) != 0) {
-    return false;
-  }
-  for (size_t i = 0; i < num_tensors; ++i) {
-    if (offsets[i + 1] - offsets[i] != stride) {
-      return false;
-    }
-  }
-  return offsets[0] == 0;
 }
 
 }  // namespace
@@ -204,38 +154,10 @@ float fp8_max_for_dtype(const DType dtype) {
   return 0.0f;
 }
 
-std::vector<int64_t> get_grouped_first_dims_host(const size_t num_tensors,
-                                                 const std::optional<at::Tensor> &first_dims,
-                                                 const size_t logical_first_dim) {
-  std::vector<int64_t> rows(num_tensors);
-  if (!first_dims.has_value()) {
-    NVTE_CHECK(logical_first_dim % num_tensors == 0,
-               "First logical dimension must be divisible by num_tensors.");
-    std::fill(rows.begin(), rows.end(), static_cast<int64_t>(logical_first_dim / num_tensors));
-    return rows;
-  }
-
-  NVTE_CHECK(static_cast<size_t>(first_dims->numel()) == num_tensors,
-             "first_dims must have length ", num_tensors, ".");
-  auto first_dims_cpu =
-      first_dims->to(at::TensorOptions().device(at::kCPU).dtype(at::kLong)).contiguous();
-  const int64_t *first_dims_ptr = first_dims_cpu.data_ptr<int64_t>();
-  int64_t total_rows = 0;
-  for (size_t i = 0; i < num_tensors; ++i) {
-    rows[i] = first_dims_ptr[i];
-    NVTE_CHECK(rows[i] >= 0, "first_dims entries must be non-negative.");
-    total_rows += rows[i];
-  }
-  NVTE_CHECK(static_cast<size_t>(total_rows) <= logical_first_dim,
-             "Sum of first_dims must not exceed the allocated first dimension.");
-  return rows;
-}
-
 void prepare_grouped_fp8_current_scaling_metadata(
-    const at::Tensor &tensor, const GroupedTensorWrapper &grouped_output_tensor,
-    const py::object &grouped_output_py, Float8CurrentScalingQuantizer *quantizer_cpp,
-    const size_t num_tensors, const std::optional<at::Tensor> &first_dims,
-    const size_t logical_first_dim, const size_t logical_last_dim) {
+    const GroupedTensorWrapper &grouped_input_tensor,
+    const GroupedTensorWrapper &grouped_output_tensor, const py::object &grouped_output_py,
+    Float8CurrentScalingQuantizer *quantizer_cpp) {
   auto amax = grouped_output_py.attr("amax").cast<at::Tensor>();
   auto scale = grouped_output_py.attr("scale").cast<at::Tensor>();
   auto rowwise_scale_inv_py = grouped_output_py.attr("scale_inv");
@@ -251,49 +173,15 @@ void prepare_grouped_fp8_current_scaling_metadata(
   NVTE_CHECK(rowwise_scale_inv.has_value() || columnwise_scale_inv.has_value(),
              "Grouped FP8 current-scaling output must have at least one scale_inv buffer.");
 
-  const auto rows = get_grouped_first_dims_host(num_tensors, first_dims, logical_first_dim);
-  const auto input_dtype = GetTransformerEngineDType(tensor.scalar_type());
-  auto rowwise_data = grouped_output_tensor.get_rowwise_data();
-  auto columnwise_data = grouped_output_tensor.get_columnwise_data();
-  void *output_data_ptr = rowwise_data.data_ptr != nullptr ? rowwise_data.data_ptr
-                                                           : columnwise_data.data_ptr;
-  const DType output_dtype =
-      static_cast<DType>(rowwise_data.data_ptr != nullptr ? rowwise_data.dtype
-                                                          : columnwise_data.dtype);
-  NVTE_CHECK(output_data_ptr != nullptr,
-             "Grouped FP8 current-scaling output must have allocated output data.");
-
   QuantizationConfigWrapper quant_config;
   quant_config.set_force_pow_2_scales(quantizer_cpp->force_pow_2_scales);
   quant_config.set_amax_epsilon(quantizer_cpp->amax_epsilon);
 
   auto stream = at::cuda::getCurrentCUDAStream();
-  char *input_base = static_cast<char *>(tensor.data_ptr());
-  size_t row_offset = 0;
-  for (size_t i = 0; i < num_tensors; ++i) {
-    const size_t group_rows = static_cast<size_t>(rows[i]);
-    const size_t element_offset = row_offset * logical_last_dim;
-    void *input_group_ptr = input_base + element_offset * tensor.element_size();
-
-    TensorWrapper input_group(NVTE_DELAYED_TENSOR_SCALING);
-    input_group.set_rowwise_data(input_group_ptr, input_dtype,
-                                 std::vector<size_t>{group_rows, logical_last_dim});
-
-    at::Tensor &scale_inv_target =
-        rowwise_scale_inv.has_value() ? *rowwise_scale_inv : *columnwise_scale_inv;
-    TensorWrapper output_group(NVTE_DELAYED_TENSOR_SCALING);
-    output_group.set_rowwise_data(output_data_ptr, output_dtype,
-                                  std::vector<size_t>{group_rows, logical_last_dim});
-    output_group.set_amax(static_cast<float *>(amax.data_ptr()) + i, DType::kFloat32,
-                          std::vector<size_t>{1});
-    output_group.set_rowwise_scale_inv(static_cast<float *>(scale_inv_target.data_ptr()) + i,
-                                       DType::kFloat32, std::vector<size_t>{1});
-
-    NVTE_SCOPED_GIL_RELEASE({
-      nvte_compute_amax_with_config(input_group.data(), output_group.data(), quant_config, stream);
-    });
-    row_offset += group_rows;
-  }
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_group_compute_amax_with_config(grouped_input_tensor.data(), grouped_output_tensor.data(),
+                                        quant_config, stream);
+  });
 
   if (quantizer_cpp->with_amax_reduction) {
     c10d::AllreduceOptions opts;
@@ -306,11 +194,17 @@ void prepare_grouped_fp8_current_scaling_metadata(
 
   at::Tensor &scale_inv_target =
       rowwise_scale_inv.has_value() ? *rowwise_scale_inv : *columnwise_scale_inv;
-  auto noop_flag = at::zeros({1}, tensor.options().dtype(torch::kInt32));
-  multi_tensor_compute_scale_and_scale_inv_cuda(
-      2048 * 32, noop_flag, {{amax}, {scale}, {scale_inv_target}},
-      fp8_max_for_dtype(quantizer_cpp->dtype), quantizer_cpp->force_pow_2_scales,
-      quantizer_cpp->amax_epsilon);
+  auto scale_tensor_lists = makeTransformerEngineTensorList({{amax}, {scale}, {scale_inv_target}});
+  auto &tensor_lists_ptr = std::get<2>(scale_tensor_lists);
+  const size_t num_lists = std::get<3>(scale_tensor_lists);
+  const size_t num_tensors = std::get<4>(scale_tensor_lists);
+  TensorWrapper noop_flag_cpp;
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_multi_tensor_compute_scale_and_scale_inv_cuda(
+        2048 * 32, noop_flag_cpp.data(), tensor_lists_ptr.data(), num_lists, num_tensors,
+        fp8_max_for_dtype(quantizer_cpp->dtype), quantizer_cpp->force_pow_2_scales,
+        quantizer_cpp->amax_epsilon, stream);
+  });
   if (rowwise_scale_inv.has_value() && columnwise_scale_inv.has_value() &&
       rowwise_scale_inv->data_ptr() != columnwise_scale_inv->data_ptr()) {
     columnwise_scale_inv->copy_(*rowwise_scale_inv);
@@ -319,9 +213,9 @@ void prepare_grouped_fp8_current_scaling_metadata(
 
 }  // namespace
 
-// NOTE: Only supports varying first dim.
 py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const size_t num_tensors,
-                          std::optional<at::Tensor> first_dims, const py::object &output) {
+                          std::optional<at::Tensor> first_dims, const py::object &output,
+                          std::optional<at::Tensor> last_dims) {
   using namespace transformer_engine::pytorch::detail;
   init_extension();
 
@@ -337,13 +231,14 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
   bool empty_input_buffer = logical_first_dim == 0 || logical_last_dim == 0;
 
   auto quantizer_cpp = convert_quantizer(quantizer);
-  const bool is_fp8_grouped_quantizer = detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr()) ||
-                                        detail::IsFloat8Quantizers(quantizer.ptr());
+  NVTE_CHECK(!(first_dims.has_value() && last_dims.has_value()),
+             "group_quantize does not support varying both first_dims and last_dims.");
 
   // Create input GroupedTensor.
   auto grouped_input_tensor = GroupedTensorWrapper(num_tensors, logical_shape);
   grouped_input_tensor.set_rowwise_data(
-      tensor.data_ptr(), GetTransformerEngineDType(tensor.scalar_type()), getTensorShape(tensor));
+      tensor.data_ptr(), GetTransformerEngineDType(tensor.scalar_type()),
+      std::vector<size_t>{static_cast<size_t>(tensor.numel())});
 
   // Create or reuse output GroupedTensor.
   std::optional<GroupedTensorWrapper> grouped_output_tensor_cpp;
@@ -351,21 +246,33 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
   if (output.is_none()) {
     auto created = quantizer_cpp->create_grouped_tensor(
         num_tensors, logical_shape, GetTransformerEngineDType(tensor.scalar_type()),
-        py::reinterpret_borrow<py::object>(quantizer), first_dims, logical_first_dim,
+        py::reinterpret_borrow<py::object>(quantizer), first_dims, last_dims, logical_first_dim,
         logical_last_dim);
     grouped_output_tensor_cpp.emplace(std::move(created.first));
     grouped_output_py = std::move(created.second);
   } else {
-    const auto logical_shape_override =
-        is_fp8_grouped_quantizer
-            ? fp8_active_grouped_output_shape(output, logical_shape, num_tensors, logical_last_dim)
-            : std::nullopt;
-    const bool use_uniform_fp8_shape =
-        is_fp8_grouped_quantizer &&
-        fp8_grouped_output_has_uniform_offsets(output, num_tensors, logical_last_dim);
-    grouped_output_tensor_cpp.emplace(detail::GroupedTensorFromPyTorchGroupedTensor(
-        output, logical_shape_override, use_uniform_fp8_shape));
+    grouped_output_tensor_cpp.emplace(
+        detail::GroupedTensorFromPyTorchGroupedTensor(output, std::nullopt, false));
     grouped_output_py = py::reinterpret_borrow<py::object>(output);
+  }
+
+  const auto first_dims_meta = grouped_output_tensor_cpp->get_first_dims();
+  const auto last_dims_meta = grouped_output_tensor_cpp->get_last_dims();
+  const auto offsets_meta = grouped_output_tensor_cpp->get_tensor_offsets();
+  if (first_dims_meta.data_ptr != nullptr) {
+    grouped_input_tensor.set_first_dims(first_dims_meta.data_ptr,
+                                        static_cast<DType>(first_dims_meta.dtype),
+                                        first_dims_meta.shape);
+  }
+  if (last_dims_meta.data_ptr != nullptr) {
+    grouped_input_tensor.set_last_dims(last_dims_meta.data_ptr,
+                                       static_cast<DType>(last_dims_meta.dtype),
+                                       last_dims_meta.shape);
+  }
+  if (offsets_meta.data_ptr != nullptr) {
+    grouped_input_tensor.set_tensor_offsets(offsets_meta.data_ptr,
+                                            static_cast<DType>(offsets_meta.dtype),
+                                            offsets_meta.shape);
   }
 
   // dispatch to scaling methods
@@ -407,8 +314,7 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
       auto *fp8_quantizer_cpp =
           static_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
       prepare_grouped_fp8_current_scaling_metadata(
-          tensor, *grouped_output_tensor_cpp, grouped_output_py, fp8_quantizer_cpp, num_tensors,
-          first_dims, logical_first_dim, logical_last_dim);
+          grouped_input_tensor, *grouped_output_tensor_cpp, grouped_output_py, fp8_quantizer_cpp);
       QuantizationConfigWrapper quant_config_cpp;
       NVTE_SCOPED_GIL_RELEASE({
         nvte_group_quantize(grouped_input_tensor.data(), grouped_output_tensor_cpp->data(),
@@ -464,11 +370,12 @@ py::object bgrad_group_quantize(const at::Tensor &tensor, py::handle quantizer,
 
   auto grouped_input_tensor = GroupedTensorWrapper(num_tensors, logical_shape);
   grouped_input_tensor.set_rowwise_data(
-      tensor.data_ptr(), GetTransformerEngineDType(tensor.scalar_type()), getTensorShape(tensor));
+      tensor.data_ptr(), GetTransformerEngineDType(tensor.scalar_type()),
+      std::vector<size_t>{static_cast<size_t>(tensor.numel())});
 
   auto [grouped_output_tensor_cpp, grouped_output_py] = quantizer_cpp->create_grouped_tensor(
       num_tensors, logical_shape, GetTransformerEngineDType(tensor.scalar_type()),
-      py::reinterpret_borrow<py::object>(quantizer), first_dims, logical_first_dim,
+      py::reinterpret_borrow<py::object>(quantizer), first_dims, std::nullopt, logical_first_dim,
       logical_last_dim);
 
   if (empty_input_buffer) {
@@ -557,7 +464,7 @@ py::object group_dequantize(const py::handle &input, transformer_engine::DType o
     NoneQuantizer q{py::none()};
     auto [out_cpp, out_py] =
         q.create_grouped_tensor(num_tensors, logical_shape, otype, py::none(), first_dims,
-                                logical_first_dim, logical_last_dim);
+                                last_dims, logical_first_dim, logical_last_dim);
     return py::reinterpret_borrow<py::object>(out_py);
   }
 
@@ -595,8 +502,9 @@ py::object group_dequantize(const py::handle &input, transformer_engine::DType o
 
   // Create output GroupedTensor using NoneQuantizer.
   NoneQuantizer q{py::none()};
-  auto [out_cpp, out_py] = q.create_grouped_tensor(num_tensors, logical_shape, otype, py::none(),
-                                                   first_dims, logical_first_dim, logical_last_dim);
+  auto [out_cpp, out_py] =
+      q.create_grouped_tensor(num_tensors, logical_shape, otype, py::none(), first_dims, last_dims,
+                              logical_first_dim, logical_last_dim);
 
   NVTE_SCOPED_GIL_RELEASE({
     nvte_group_dequantize(input_cpp.data(), out_cpp.data(), at::cuda::getCurrentCUDAStream());

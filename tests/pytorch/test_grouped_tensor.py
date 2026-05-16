@@ -18,6 +18,7 @@ from transformer_engine.pytorch import (
     NVFP4Quantizer,
 )
 from transformer_engine.pytorch.constants import TE_DType_To_Torch
+from transformer_engine.pytorch.utils import is_non_tn_fp8_gemm_supported
 import transformer_engine_torch as tex
 
 # Check available recipes
@@ -513,8 +514,12 @@ class TestGroupedTensor:
         hidden_size = 256
         actual_rows = sum(first_dims_host)
         allocated_rows = actual_rows * 2
-        rowwise = mode in ("rowwise", "both")
-        columnwise = mode in ("columnwise", "both")
+        requested_rowwise = mode in ("rowwise", "both")
+        requested_columnwise = mode in ("columnwise", "both")
+        rowwise = requested_rowwise or (
+            requested_columnwise and is_non_tn_fp8_gemm_supported()
+        )
+        columnwise = requested_columnwise and not is_non_tn_fp8_gemm_supported()
 
         grouped_input = torch.empty(
             allocated_rows,
@@ -538,7 +543,7 @@ class TestGroupedTensor:
             force_pow_2_scales=False,
             amax_epsilon=0.0,
         )
-        quantizer.set_usage(rowwise=rowwise, columnwise=columnwise)
+        quantizer.set_usage(rowwise=requested_rowwise, columnwise=requested_columnwise)
 
         grouped_output = tex.group_quantize(grouped_input, quantizer, num_tensors, first_dims)
         tail_start = actual_rows * hidden_size

@@ -318,10 +318,10 @@ void CheckGroupedTensorShapeArrays(const GroupedTensor &t, const std::string &na
                " columnwise_data must be 1D");
   }
 
-  // Varying-first-dim grouped tensors may carry an overallocated backing buffer. Kernels use
-  // first_dims/tensor_offsets to restrict work to the active payload.
+  // Varying-dim grouped tensors may carry an overallocated backing buffer. Kernels use
+  // first_dims/last_dims/tensor_offsets to restrict work to the active payload.
   size_t expected_numel = t.logical_shape.data[0] * t.logical_shape.data[1];
-  const bool allow_overallocated_data = t.first_dims.has_data() && t.tensor_offsets.has_data();
+  const bool allow_overallocated_data = !t.all_same_shape() && t.tensor_offsets.has_data();
   if (t.has_data()) {
     NVTE_CHECK(allow_overallocated_data ? t.data.numel() >= expected_numel
                                         : t.data.numel() == expected_numel,
