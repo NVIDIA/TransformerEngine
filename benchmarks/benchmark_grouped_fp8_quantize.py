@@ -40,8 +40,32 @@ def _check_output_path(output_path: str) -> None:
         raise ValueError(
             "--output must not point at ORCHESTRA_BENCHMARK_RAW_REPORT because the "
             "benchmark wrapper writes its own command report there. Use a separate "
-            "script report path under ORCHESTRA_BENCHMARK_OUTPUT_DIR instead."
+            "script report path under ORCHESTRA_BENCHMARK_OUTPUT_DIR instead; this "
+            "script mirrors that completed report for the wrapper fetch path."
         )
+
+
+def _write_report(report: Dict[str, object], output_path: str) -> None:
+    payload = json.dumps(report, indent=2)
+    output = Path(output_path).expanduser()
+    if str(output.parent) not in ("", "."):
+        output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(payload, encoding="utf-8")
+    _mirror_report_to_orchestra_raw_path(output, payload)
+    print(payload)
+
+
+def _mirror_report_to_orchestra_raw_path(output_path: Path, payload: str) -> None:
+    wrapper_raw_report = os.environ.get("ORCHESTRA_BENCHMARK_RAW_REPORT")
+    if not wrapper_raw_report:
+        return
+
+    raw_report = Path(wrapper_raw_report).expanduser()
+    if output_path.resolve() == raw_report.resolve():
+        return
+    if str(raw_report.parent) not in ("", "."):
+        raw_report.parent.mkdir(parents=True, exist_ok=True)
+    raw_report.write_text(payload, encoding="utf-8")
 
 
 def _usage_for_mode(mode: str) -> Dict[str, bool]:
@@ -796,9 +820,7 @@ def main() -> None:
         raise ValueError("--hidden-size must be divisible by 128 for the grouped FP8 kernel")
     if args.baseline_ref:
         report = benchmark_same_session(args)
-        with open(args.output, "w", encoding="utf-8") as f:
-            json.dump(report, f, indent=2)
-        print(json.dumps(report, indent=2))
+        _write_report(report, args.output)
         return
 
     extension_metadata = _loaded_extension_metadata()
@@ -824,9 +846,7 @@ def main() -> None:
         "results": results,
         "measurements": _make_measurements(results),
     }
-    with open(args.output, "w", encoding="utf-8") as f:
-        json.dump(report, f, indent=2)
-    print(json.dumps(report, indent=2))
+    _write_report(report, args.output)
 
 
 if __name__ == "__main__":
