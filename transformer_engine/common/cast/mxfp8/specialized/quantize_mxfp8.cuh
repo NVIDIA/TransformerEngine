@@ -91,18 +91,6 @@ __device__ __forceinline__ e8m0_t to_e8m0(IType amax) {
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }  // anonymous namespace
 
-inline bool is_cast_only_enabled() {
-  static bool enabled = []() {
-    const char *env = std::getenv("ENABLE_CAST_ONLY");
-    return env != nullptr && (env[0] == '1');
-  }();
-  return enabled;
-
-  //  // FIXME: when finish debugging, remove this
-  //  const char* env = std::getenv("ENABLE_CAST_ONLY");
-  //  return env != nullptr && (env[0] == '1');
-}
-
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename IType, typename OType>
 inline bool hasSpec() {
   return false;
@@ -112,19 +100,19 @@ inline bool hasSpec() {
 // OType could be [fp8e5m2, fp8e4m3]
 template <>
 inline bool hasSpec<false, false, false, fp16, fp8e5m2>() {
-  return is_cast_only_enabled();
+  return true;
 }
 template <>
 inline bool hasSpec<false, false, false, fp16, fp8e4m3>() {
-  return is_cast_only_enabled();
+  return true;
 }
 template <>
 inline bool hasSpec<false, false, false, bf16, fp8e5m2>() {
-  return is_cast_only_enabled();
+  return true;
 }
 template <>
 inline bool hasSpec<false, false, false, bf16, fp8e4m3>() {
-  return is_cast_only_enabled();
+  return true;
 }
 
 template <int32_t _M, int32_t _N>
