@@ -1,4 +1,9 @@
- name: Label community contributions
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
+# A workflow to automatically label the contributions as community/org
+  name: Label community contributions
 
   on:
     pull_request_target:
