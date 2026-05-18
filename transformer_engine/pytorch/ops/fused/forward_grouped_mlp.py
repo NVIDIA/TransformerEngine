@@ -55,7 +55,9 @@ def _grouped_gemm_dsrelu_backward_supported() -> bool:
     if get_device_compute_capability()[0] != 10:
         return False
     try:
-        from cudnn import grouped_gemm_dsrelu_wrapper_sm100  # pylint: disable=import-outside-toplevel
+        from cudnn import (
+            grouped_gemm_dsrelu_wrapper_sm100,
+        )  # pylint: disable=import-outside-toplevel
     except ImportError:
         return False
     return grouped_gemm_dsrelu_wrapper_sm100 is not None
