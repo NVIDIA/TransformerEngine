@@ -6,6 +6,7 @@
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -16,47 +17,25 @@ if torch.cuda.device_count() < 2:
 
 TEST_ROOT = Path(__file__).parent.resolve()
 NUM_PROCS = torch.cuda.device_count()
-LAUNCH_CMD = ["torchrun", f"--nproc_per_node={NUM_PROCS}"]
-ORTHOGONALITY_SHAPES = [
-    (NUM_PROCS * 64, NUM_PROCS * 64),
-    (NUM_PROCS * 64, NUM_PROCS * 96),
-    (NUM_PROCS * 96, NUM_PROCS * 64),
+LAUNCH_CMD = [
+    sys.executable,
+    "-m",
+    "torch.distributed.run",
+    f"--nproc_per_node={NUM_PROCS}",
 ]
-REFERENCE_SHAPES = [(NUM_PROCS * 64, NUM_PROCS * 64)]
 
 
-def _run_test(dtype, matrix_shape, num_iterations, coeff_type, check):
-    _run_worker(dtype, matrix_shape, num_iterations, coeff_type, check)
-
-
-def _run_worker(
-    dtype,
-    matrix_shape,
-    num_iterations,
-    coeff_type,
-    check,
-    api="base",
-    partition_dim=1,
-    tp_mode="distributed",
-):
-    rows, cols = matrix_shape
+def test_newton_schulz_distributed():
+    """Launch one parallel job that runs all distributed Newton-Schulz checks."""
     test_path = TEST_ROOT / "run_newton_schulz.py"
-    test_cmd = LAUNCH_CMD + [
-        str(test_path),
-        f"--check={check}",
-        f"--dtype={dtype}",
-        f"--matrix-rows={rows}",
-        f"--matrix-cols={cols}",
-        f"--num-iterations={num_iterations}",
-        f"--coeff-type={coeff_type}",
-        f"--api={api}",
-        f"--partition-dim={partition_dim}",
-        f"--tp-mode={tp_mode}",
-    ]
-    if dtype == "bfloat16":
-        test_cmd += ["--atol=5e-2", "--rtol=5e-2"]
-
-    result = subprocess.run(test_cmd, env=os.environ, capture_output=True, check=False, timeout=300)
+    test_cmd = LAUNCH_CMD + [str(test_path)]
+    result = subprocess.run(
+        test_cmd,
+        env=os.environ,
+        capture_output=True,
+        check=False,
+        timeout=1200,
+    )
     if (
         result.returncode != 0
         or "NUMERICAL CHECK FAILED" in result.stderr.decode()
@@ -67,35 +46,3 @@ def _run_worker(
             f"stdout: {result.stdout.decode()}\n"
             f"stderr: {result.stderr.decode()}"
         )
-
-
-@pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
-@pytest.mark.parametrize("matrix_shape", ORTHOGONALITY_SHAPES)
-@pytest.mark.parametrize("num_iterations,coeff_type", [(5, "quintic"), (8, "polar_express")])
-def test_orthogonality(dtype, matrix_shape, num_iterations, coeff_type):
-    """Test distributed Newton-Schulz orthogonality."""
-    _run_test(dtype, matrix_shape, num_iterations, coeff_type, "orthogonality")
-
-
-@pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
-@pytest.mark.parametrize("matrix_shape", REFERENCE_SHAPES)
-@pytest.mark.parametrize("num_iterations,coeff_type", [(5, "quintic"), (8, "polar_express")])
-def test_against_reference(dtype, matrix_shape, num_iterations, coeff_type):
-    """Test distributed Newton-Schulz against a local reference implementation."""
-    _run_test(dtype, matrix_shape, num_iterations, coeff_type, "reference")
-
-
-@pytest.mark.parametrize("partition_dim", [0, 1])
-@pytest.mark.parametrize("tp_mode", ["duplicated", "distributed"])
-def test_tp_api_against_reference(partition_dim, tp_mode):
-    """Test tensor-parallel convenience API against a local reference implementation."""
-    _run_worker(
-        "float32",
-        REFERENCE_SHAPES[0],
-        5,
-        "quintic",
-        "reference",
-        api="tp",
-        partition_dim=partition_dim,
-        tp_mode=tp_mode,
-    )
