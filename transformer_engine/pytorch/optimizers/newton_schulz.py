@@ -243,8 +243,8 @@ def newton_schulz_tp(
 ) -> None:
     """Compute tensor-parallel Newton-Schulz orthogonalization in-place.
 
-    This convenience wrapper mirrors the tensor-parallel modes used by Emerging
-    Optimizers while delegating the matrix orthogonalization to :func:`newton_schulz`.
+    This convenience wrapper handles replicated tensors and tensor-parallel
+    shards while delegating the matrix orthogonalization to :func:`newton_schulz`.
     The underlying kernel expects columns to be distributed across ranks, so row
     partitions are transposed before the call and transposed back afterward.
 
