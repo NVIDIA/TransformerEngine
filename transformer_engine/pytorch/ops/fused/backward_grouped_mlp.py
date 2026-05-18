@@ -135,31 +135,18 @@ def _cudnn_compute_wgrad(
 
 
 @functools.lru_cache(maxsize=None)
-def _wrapper_has_arg(wrapper_name: str, arg_name: str) -> bool:
-    """True if a cuDNN FE SM100 wrapper accepts an argument."""
+def _dsrelu_wrapper_has_reuse_arg() -> bool:
+    """True if cuDNN FE SM100 dSReLU wrapper accepts ``use_dsrelu_reuse``."""
     try:
         import cudnn  # pylint: disable=import-outside-toplevel
     except ImportError:
         return False
     try:
-        wrapper = getattr(cudnn, wrapper_name)
+        wrapper = getattr(cudnn, "grouped_gemm_dsrelu_wrapper_sm100")
         params = inspect.signature(wrapper).parameters
     except (AttributeError, TypeError, ValueError):
         return False
-    return arg_name in params
-
-
-def _dsrelu_wrapper_has_reuse_arg() -> bool:
-    """True if cuDNN FE SM100 dSReLU wrapper accepts ``use_dsrelu_reuse``."""
-    return _wrapper_has_arg("grouped_gemm_dsrelu_wrapper_sm100", "use_dsrelu_reuse")
-
-
-def _env_flag(name: str, default: bool = False) -> bool:
-    """Parse a boolean environment flag."""
-    value = os.environ.get(name)
-    if value is None:
-        return default
-    return value.strip().lower() in ("1", "true", "yes", "on")
+    return "use_dsrelu_reuse" in params
 
 
 def _compute_grad_params(
@@ -333,7 +320,7 @@ class _BackwardGroupedMLP_CuTeGEMMDBase_MXFP8(FusedOperation):
         self,
         *,
         fc1: GroupedLinear,
-        activation: Optional[FusibleOperation] = None,
+        activation: Optional[FusibleOperation],
         fc2: GroupedLinear,
     ) -> None:
         if activation is None:
@@ -482,7 +469,7 @@ class _BackwardGroupedMLP_CuTeGEMMDBase_MXFP8(FusedOperation):
         fc2_dy_scales = fc2_dy_scales.permute(3, 4, 1, 5, 2, 0)
 
         # Kernel scaling factors
-        alpha_tensor = get_cached_ones_tensor(num_groups, torch.float32, device)
+        alpha_tensor = get_cached_ones_tensor(num_groups, dtype, device)
         norm_const_tensor = get_cached_ones_tensor(1, torch.float32, device)
         current_stream = torch.cuda.current_stream().cuda_stream
 
@@ -511,8 +498,8 @@ class _BackwardGroupedMLP_CuTeGEMMDBase_MXFP8(FusedOperation):
             fc2_dactivation_kwargs["beta_tensor"] = alpha_tensor
             fc2_dactivation_kwargs["act_func"] = self._cudnn_dact_func
         elif _dsrelu_wrapper_has_reuse_arg():
-            fc2_dactivation_kwargs["use_dsrelu_reuse"] = _env_flag(
-                "NVTE_CUTEDSL_FUSED_GROUPED_MLP_DSRELU_REUSE",
+            fc2_dactivation_kwargs["use_dsrelu_reuse"] = (
+                os.environ.get("NVTE_CUTEDSL_FUSED_GROUPED_MLP_DSRELU_REUSE", "0") == "1"
             )
 
         if fc2_op.single_grouped_weight:
@@ -692,7 +679,7 @@ class _BackwardGroupedMLP_CuTeGEMMDBase_MXFP8(FusedOperation):
                 "a_tensor": fc1_dgrad_a_data,
                 "sfa_tensor": fc1_dgrad_a_scales,
                 "padded_offsets": split_points,
-                "alpha_tensor": alpha_tensor.float(),
+                "alpha_tensor": alpha_tensor,
                 "norm_const_tensor": None,
                 "prob_tensor": torch.ones((out_shape[0], 1, 1), dtype=torch.float32, device=device),
                 "acc_dtype": torch.float32,

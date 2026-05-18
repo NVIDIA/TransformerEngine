@@ -109,7 +109,7 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
         self,
         *,
         fc1: GroupedLinear,
-        activation: Optional[FusibleOperation] = None,
+        activation: Optional[FusibleOperation],
         fc2: GroupedLinear,
     ) -> None:
         if activation is None:
@@ -309,7 +309,7 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
         )
         fc1_x_scales = fc1_x_scales.permute(3, 4, 1, 5, 2, 0)
 
-        alpha_tensor = get_cached_ones_tensor(num_groups, torch.float32, device)
+        alpha_tensor = get_cached_ones_tensor(num_groups, dtype, device)
         norm_const_tensor = get_cached_ones_tensor(1, torch.float32, device)
         current_stream = torch.cuda.current_stream().cuda_stream
 
@@ -431,7 +431,7 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
             "a_tensor": fc1_kernel_out["d_tensor"],
             "sfa_tensor": fc1_kernel_out["sfd_row_tensor"],
             "padded_offsets": split_points,
-            "alpha_tensor": alpha_tensor.float(),
+            "alpha_tensor": alpha_tensor,
             "bias_tensor": fc2_bias_packed,
             "norm_const_tensor": None,
             "prob_tensor": fc2_scales_tensor,
