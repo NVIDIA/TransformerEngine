@@ -920,6 +920,32 @@ __device__ __forceinline__ void reciprocal<float>(float *value_inv, const float 
   *value_inv = __frcp_rn(value);
 }
 
+// Convert float to an unsigned integer that preserves descending sort order.
+// After conversion, a numerically larger float maps to a larger uint32.
+__device__ __forceinline__ unsigned int float_to_ordered_uint(float f) {
+  unsigned int u = __float_as_uint(f);
+  // If sign bit is set (negative), flip all bits.
+  // If sign bit is clear (positive or +0), flip only the sign bit.
+  unsigned int mask = (u & 0x80000000u) ? 0xFFFFFFFFu : 0x80000000u;
+  return u ^ mask;
+}
+
+// Convert back from ordered uint to float.
+__device__ __forceinline__ float ordered_uint_to_float(unsigned int u) {
+  // Reverse the transformation: if MSB is set (was positive), flip sign bit.
+  // If MSB is clear (was negative), flip all bits.
+  unsigned int mask = (u & 0x80000000u) ? 0x80000000u : 0xFFFFFFFFu;
+  return __uint_as_float(u ^ mask);
+}
+
+template <typename T>
+__device__ __forceinline__ T warp_allreduce_sum(T x) {
+  // Butterfly reduction
+#pragma unroll
+  for (int offset = 16; offset > 0; offset >>= 1) x += warp_shuffle_xor(x, offset);
+  return x;
+}
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 using fp8e4m3 = __nv_fp8_e4m3;
