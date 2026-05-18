@@ -398,8 +398,7 @@ class TEMixtralSparseMoeBlock(nn.Module):
             # Each GroupedLinear consumes the same per-expert split sizes.
             split_sizes = torch.tensor(m_splits, dtype=torch.int32, device=tokens.device)
             return self._experts_ffn_op(tokens, split_sizes, split_sizes)
-
-        if self.expert_ffn_mode == "loop":
+        elif self.expert_ffn_mode == "loop":
             # Naive HF-style loop: one F.linear per expert against a slice of the
             # stacked weight. Same checkpoint as the grouped path; only kernel
             # dispatch differs.
