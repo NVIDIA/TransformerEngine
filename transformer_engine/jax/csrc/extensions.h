@@ -173,13 +173,6 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
     DType dtype, bool is_training, bool deterministic, size_t max_segments_per_seq,
     int64_t window_size_left, int64_t window_size_right, bool bottom_right_diagonal);
 
-int64_t RegisterFusedAttnScoreModGraph(pybind11::object graph,
-                                       const std::vector<int64_t>& user_uids,
-                                       const std::vector<int64_t>& input_uids,
-                                       const std::vector<int64_t>& output_uids,
-                                       const std::vector<int64_t>& scalar_uids,
-                                       const std::vector<std::string>& scalar_values);
-
 // GEMM
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GemmHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GemmV2Handler);

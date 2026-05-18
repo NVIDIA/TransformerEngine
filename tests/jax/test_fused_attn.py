@@ -348,6 +348,26 @@ def test_fused_attn_score_mod_config_splits_tensors_and_pass_by_value_scalars():
     assert len(config.score_mod_scalars[0].value) == np.dtype(np.float32).itemsize
 
 
+def test_fused_attn_score_mod_cudnn_frontend_version_check(monkeypatch):
+    class FakeCudnn:
+        __version__ = "1.22.0"
+
+    monkeypatch.setattr(
+        tex_attention.transformer_engine_jax,
+        "get_cudnn_frontend_version",
+        lambda: 12200,
+    )
+    assert tex_attention._check_cudnn_frontend_version_match(FakeCudnn) == 12200
+
+    monkeypatch.setattr(
+        tex_attention.transformer_engine_jax,
+        "get_cudnn_frontend_version",
+        lambda: 12100,
+    )
+    with pytest.raises(RuntimeError, match="Python/C\\+\\+ version mismatch"):
+        tex_attention._check_cudnn_frontend_version_match(FakeCudnn)
+
+
 def test_fused_attn_score_mod_config_stabilizes_bound_method_cache_keys():
     softcap_score_mod = _ScoreModSoftcap()
     first_forward = softcap_score_mod.forward

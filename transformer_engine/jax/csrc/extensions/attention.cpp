@@ -6,10 +6,16 @@
 
 #include <algorithm>
 #include <array>
-#include <atomic>
+#include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
+#include <string_view>
 #include <unordered_map>
+#include <utility>
+#include <vector>
+
+#include <cudnn_frontend.h>
 
 #include "../extensions.h"
 #include "transformer_engine/fused_attn.h"
@@ -703,28 +709,43 @@ struct ScoreModScalarStorage {
   size_t size = 0;
 };
 
-struct ScoreModGraphEntry {
-  PyObject *py_graph = nullptr;
-  std::vector<int64_t> user_uids;
-  std::vector<int64_t> input_uids;
-  std::vector<int64_t> output_uids;
-  std::vector<int64_t> scalar_uids;
-  std::vector<ScoreModScalarStorage> scalar_values;
+struct ScoreModGraphCacheKey {
+  int device_id = 0;
+  int64_t hash0 = 0;
+  int64_t hash1 = 0;
+  int64_t frontend_version = 0;
+
+  bool operator==(const ScoreModGraphCacheKey &other) const {
+    return device_id == other.device_id && hash0 == other.hash0 && hash1 == other.hash1 &&
+           frontend_version == other.frontend_version;
+  }
 };
 
-std::unordered_map<int64_t, std::shared_ptr<ScoreModGraphEntry>> &ScoreModGraphRegistry() {
-  static std::unordered_map<int64_t, std::shared_ptr<ScoreModGraphEntry>> registry;
-  return registry;
+struct ScoreModGraphCacheKeyHash {
+  size_t operator()(const ScoreModGraphCacheKey &key) const {
+    size_t seed = std::hash<int>{}(key.device_id);
+    auto combine = [&seed](int64_t value) {
+      seed ^= std::hash<int64_t>{}(value) + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
+    };
+    combine(key.hash0);
+    combine(key.hash1);
+    combine(key.frontend_version);
+    return seed;
+  }
+};
+
+using ScoreModGraphPtr = std::shared_ptr<cudnn_frontend::graph::Graph>;
+
+std::unordered_map<ScoreModGraphCacheKey, ScoreModGraphPtr, ScoreModGraphCacheKeyHash>
+    &ScoreModGraphCache() {
+  static std::unordered_map<ScoreModGraphCacheKey, ScoreModGraphPtr, ScoreModGraphCacheKeyHash>
+      cache;
+  return cache;
 }
 
-std::mutex &ScoreModGraphRegistryMutex() {
+std::mutex &ScoreModGraphCacheMutex() {
   static std::mutex mutex;
   return mutex;
-}
-
-std::atomic<int64_t> &NextScoreModGraphId() {
-  static std::atomic<int64_t> next_id{1};
-  return next_id;
 }
 
 struct ScoreModCudnnHandleCache {
@@ -754,55 +775,98 @@ cudnnHandle_t GetScoreModCudnnHandle() {
   return cache.GetHandle();
 }
 
-std::shared_ptr<ScoreModGraphEntry> GetScoreModGraphEntry(int64_t graph_id) {
-  std::lock_guard<std::mutex> lock(ScoreModGraphRegistryMutex());
-  auto &registry = ScoreModGraphRegistry();
-  auto it = registry.find(graph_id);
-  NVTE_CHECK(it != registry.end(), "Unknown cuDNN score_mod graph id: ", graph_id);
-  return it->second;
+ScoreModGraphCacheKey GetScoreModGraphCacheKey(Dictionary &attrs) {
+  const int64_t frontend_version = get_attr_value<int64_t>(attrs, "cudnn_frontend_version");
+  NVTE_CHECK(frontend_version == CUDNN_FRONTEND_VERSION,
+             "cuDNN frontend version mismatch for score_mod graph deserialization: graph was "
+             "serialized with Python cuDNN frontend version ",
+             frontend_version, ", but Transformer Engine C++ was built with CUDNN_FRONTEND_VERSION ",
+             CUDNN_FRONTEND_VERSION, ".");
+
+  int device_id = 0;
+  NVTE_CHECK_CUDA(cudaGetDevice(&device_id));
+  return ScoreModGraphCacheKey{
+      device_id,
+      get_attr_value<int64_t>(attrs, "graph_hash0"),
+      get_attr_value<int64_t>(attrs, "graph_hash1"),
+      frontend_version,
+  };
 }
 
-Error_Type ExecuteScoreModGraph(cudaStream_t stream, int64_t graph_id,
+ScoreModGraphPtr GetScoreModGraph(cudaStream_t stream, Dictionary &attrs) {
+  const auto key = GetScoreModGraphCacheKey(attrs);
+  {
+    std::lock_guard<std::mutex> lock(ScoreModGraphCacheMutex());
+    auto &cache = ScoreModGraphCache();
+    auto it = cache.find(key);
+    if (it != cache.end()) {
+      return it->second;
+    }
+  }
+
+  const auto serialized_graph = get_attr_value<std::string_view>(attrs, "serialized_graph");
+  std::vector<uint8_t> serialized_data(serialized_graph.begin(), serialized_graph.end());
+
+  auto handle = GetScoreModCudnnHandle();
+  NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
+
+  auto graph = std::make_shared<cudnn_frontend::graph::Graph>();
+  auto status = graph->deserialize(handle, serialized_data);
+  NVTE_CHECK(status.is_good(), "Failed to deserialize cuDNN score_mod SDPA graph: ",
+             status.get_message());
+
+  std::lock_guard<std::mutex> lock(ScoreModGraphCacheMutex());
+  auto &cache = ScoreModGraphCache();
+  auto it = cache.find(key);
+  if (it != cache.end()) {
+    return it->second;
+  }
+  cache.emplace(key, graph);
+  return graph;
+}
+
+Error_Type ExecuteScoreModGraph(cudaStream_t stream, Dictionary &attrs,
                                 const std::vector<void *> &input_ptrs,
                                 const std::vector<void *> &output_ptrs, void *workspace) {
-  auto entry = GetScoreModGraphEntry(graph_id);
-  NVTE_CHECK(input_ptrs.size() == entry->input_uids.size(), "cuDNN score_mod graph expected ",
-             entry->input_uids.size(), " inputs but got ", input_ptrs.size());
-  NVTE_CHECK(output_ptrs.size() >= entry->output_uids.size(),
-             "cuDNN score_mod graph expected at least ", entry->output_uids.size(),
+  auto graph = GetScoreModGraph(stream, attrs);
+  auto input_uids = get_attr_value<xla::ffi::Span<const int64_t>>(attrs, "input_uids");
+  auto output_uids = get_attr_value<xla::ffi::Span<const int64_t>>(attrs, "output_uids");
+  auto scalar_uids = get_attr_value<xla::ffi::Span<const int64_t>>(attrs, "scalar_uids");
+  auto scalar_sizes = get_attr_value<xla::ffi::Span<const int64_t>>(attrs, "scalar_sizes");
+  auto scalar_values = get_attr_value<xla::ffi::Span<const uint8_t>>(attrs, "scalar_values");
+
+  NVTE_CHECK(input_ptrs.size() == input_uids.size(), "cuDNN score_mod graph expected ",
+             input_uids.size(), " inputs but got ", input_ptrs.size());
+  NVTE_CHECK(output_ptrs.size() >= output_uids.size(),
+             "cuDNN score_mod graph expected at least ", output_uids.size(),
              " outputs but got ", output_ptrs.size());
+  NVTE_CHECK(scalar_uids.size() == scalar_sizes.size(),
+             "Mismatched score_mod scalar uid/value-size counts.");
+  NVTE_CHECK(scalar_values.size() == scalar_uids.size() * 16,
+             "Mismatched score_mod packed scalar value size.");
 
   std::unordered_map<int64_t, void *> variant_pack;
-  for (size_t i = 0; i < entry->input_uids.size(); ++i) {
-    variant_pack.emplace(entry->input_uids[i], input_ptrs[i]);
+  for (size_t i = 0; i < input_uids.size(); ++i) {
+    variant_pack.emplace(input_uids[i], input_ptrs[i]);
   }
-  for (size_t i = 0; i < entry->output_uids.size(); ++i) {
-    variant_pack.emplace(entry->output_uids[i], output_ptrs[i]);
-  }
-  for (size_t i = 0; i < entry->scalar_uids.size(); ++i) {
-    variant_pack.emplace(entry->scalar_uids[i], entry->scalar_values[i].data.data());
+  for (size_t i = 0; i < output_uids.size(); ++i) {
+    variant_pack.emplace(output_uids[i], output_ptrs[i]);
   }
 
-  std::vector<std::intptr_t> user_ptrs;
-  user_ptrs.reserve(entry->user_uids.size());
-  for (const auto uid : entry->user_uids) {
-    auto it = variant_pack.find(uid);
-    NVTE_CHECK(it != variant_pack.end(), "cuDNN score_mod graph variant pack is missing UID ", uid);
-    user_ptrs.push_back(reinterpret_cast<std::intptr_t>(it->second));
+  std::vector<ScoreModScalarStorage> scalar_storage(scalar_uids.size());
+  for (size_t i = 0; i < scalar_uids.size(); ++i) {
+    NVTE_CHECK(scalar_sizes[i] >= 0 && scalar_sizes[i] <= 16,
+               "score_mod pass-by-value scalars must be at most 16 bytes.");
+    scalar_storage[i].size = static_cast<size_t>(scalar_sizes[i]);
+    std::copy_n(scalar_values.begin() + i * 16, 16, scalar_storage[i].data.begin());
+    variant_pack.emplace(scalar_uids[i], scalar_storage[i].data.data());
   }
 
   auto handle = GetScoreModCudnnHandle();
   NVTE_CHECK_CUDNN(cudnnSetStream(handle, stream));
-  {
-    pybind11::gil_scoped_acquire gil;
-    try {
-      auto graph = pybind11::reinterpret_borrow<pybind11::object>(entry->py_graph);
-      graph.attr("_execute_with_ptrs")(user_ptrs, reinterpret_cast<std::intptr_t>(workspace),
-                                       reinterpret_cast<std::intptr_t>(handle));
-    } catch (const pybind11::error_already_set &exc) {
-      NVTE_ERROR("cuDNN score_mod SDPA graph execution failed: ", exc.what());
-    }
-  }
+  auto status = graph->execute(handle, variant_pack, workspace);
+  NVTE_CHECK(status.is_good(), "cuDNN score_mod SDPA graph execution failed: ",
+             status.get_message());
   return ffi_with_cuda_error_check();
 }
 
@@ -817,53 +881,16 @@ void AppendRemainingBuffers(Variadic_Buffer_Type args, std::vector<void *> *ptrs
 
 }  // namespace
 
-int64_t RegisterFusedAttnScoreModGraph(pybind11::object graph,
-                                       const std::vector<int64_t> &user_uids,
-                                       const std::vector<int64_t> &input_uids,
-                                       const std::vector<int64_t> &output_uids,
-                                       const std::vector<int64_t> &scalar_uids,
-                                       const std::vector<std::string> &scalar_values) {
-  NVTE_CHECK(!graph.is_none(), "Cannot register an empty cuDNN score_mod graph.");
-  NVTE_CHECK(!user_uids.empty(), "Cannot register a cuDNN score_mod graph without variant UIDs.");
-  NVTE_CHECK(scalar_uids.size() == scalar_values.size(),
-             "Mismatched score_mod scalar uid/value counts.");
-
-  auto entry = std::make_shared<ScoreModGraphEntry>();
-  entry->py_graph = graph.ptr();
-  Py_INCREF(entry->py_graph);
-  entry->user_uids = user_uids;
-  entry->input_uids = input_uids;
-  entry->output_uids = output_uids;
-  entry->scalar_uids = scalar_uids;
-  entry->scalar_values.reserve(scalar_values.size());
-  for (const auto &value : scalar_values) {
-    NVTE_CHECK(value.size() <= 16, "score_mod pass-by-value scalars must be at most 16 bytes.");
-    ScoreModScalarStorage storage;
-    storage.size = value.size();
-    std::copy(value.begin(), value.end(), storage.data.begin());
-    entry->scalar_values.push_back(storage);
-  }
-
-  const int64_t graph_id = NextScoreModGraphId().fetch_add(1);
-  {
-    std::lock_guard<std::mutex> lock(ScoreModGraphRegistryMutex());
-    ScoreModGraphRegistry().emplace(graph_id, std::move(entry));
-  }
-  return graph_id;
-}
-
 Error_Type FusedAttnScoreModForwardFFI(cudaStream_t stream, Buffer_Type q_buf, Buffer_Type k_buf,
                                        Buffer_Type v_buf, Variadic_Buffer_Type score_mod_args,
                                        Result_Type output_buf, Result_Type stats_buf,
                                        Result_Type workspace_buf, Dictionary attrs) {
-  int64_t graph_id = get_attr_value<int64_t>(attrs, "graph_id");
   std::vector<void *> input_ptrs = {q_buf.untyped_data(), k_buf.untyped_data(),
                                     v_buf.untyped_data()};
   AppendRemainingBuffers(score_mod_args, &input_ptrs);
 
   std::vector<void *> output_ptrs = {output_buf->untyped_data(), stats_buf->untyped_data()};
-  return ExecuteScoreModGraph(stream, graph_id, input_ptrs, output_ptrs,
-                              workspace_buf->untyped_data());
+  return ExecuteScoreModGraph(stream, attrs, input_ptrs, output_ptrs, workspace_buf->untyped_data());
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedAttnScoreModForwardHandler, FusedAttnScoreModForwardFFI,
@@ -884,7 +911,6 @@ Error_Type FusedAttnScoreModBackwardFFI(cudaStream_t stream, Buffer_Type q_buf, 
                                         Variadic_Buffer_Type score_mod_args, Result_Type dq_buf,
                                         Result_Type dk_buf, Result_Type dv_buf,
                                         Result_Type workspace_buf, Dictionary attrs) {
-  int64_t graph_id = get_attr_value<int64_t>(attrs, "graph_id");
   std::vector<void *> input_ptrs = {q_buf.untyped_data(),       k_buf.untyped_data(),
                                     v_buf.untyped_data(),       output_buf.untyped_data(),
                                     doutput_buf.untyped_data(), stats_buf.untyped_data()};
@@ -892,8 +918,7 @@ Error_Type FusedAttnScoreModBackwardFFI(cudaStream_t stream, Buffer_Type q_buf, 
 
   std::vector<void *> output_ptrs = {dq_buf->untyped_data(), dk_buf->untyped_data(),
                                      dv_buf->untyped_data()};
-  return ExecuteScoreModGraph(stream, graph_id, input_ptrs, output_ptrs,
-                              workspace_buf->untyped_data());
+  return ExecuteScoreModGraph(stream, attrs, input_ptrs, output_ptrs, workspace_buf->untyped_data());
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedAttnScoreModBackwardHandler, FusedAttnScoreModBackwardFFI,
