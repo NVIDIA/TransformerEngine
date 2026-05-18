@@ -19,12 +19,13 @@ from ...utils import get_cached_ones_tensor, get_device_compute_capability, mark
 from ...tensor.grouped_tensor import GroupedTensor
 from ...tensor.mxfp8_tensor import MXFP8Quantizer
 from ...constants import MXFP8_BLOCK_SCALING_SIZE
-from ..basic import GroupedLinear, ScaledSReLU, ScaledClampedQGeGLU, ScaledSwiGLU
+from ..basic import GroupedLinear, ScaledSReLU, ScaledClampedQGeGLU
 from ..fuser import register_forward_fusion
 from ..op import FusedOperation, FusibleOperation, OperationContext
 from .._common import (
     _cudnn_frontend_version_supported,
     fuse_grouped_mlp_ops,
+    is_glu_activation,
     is_quantized_tensor,
     maybe_dequantize,
     validate_grouped_mlp_dims,
@@ -45,20 +46,17 @@ def _pack_grouped_linear_bias_for_cudnn(linear_op: GroupedLinear) -> Optional[to
     return torch.stack(rows, dim=0).transpose(0, 1)
 
 
-class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
-    """Fused op for MXFP8 GroupedLinear + scaled GLU + GroupedLinear
+class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
+    """Base fused op for MXFP8 GroupedLinear + activation + GroupedLinear.
 
     Uses experimental CuTe DSL kernel from cuDNN front-end.
 
     """
 
     @classmethod
-    @functools.lru_cache(maxsize=None)
-    def grouped_gemm_glu_kernel(cls) -> Callable:
-        """Fused kernel for grouped GEMM, GLU activation, and post-multiplication."""
-        from cudnn import grouped_gemm_glu_wrapper_sm100  # pylint: disable=no-name-in-module
-
-        return grouped_gemm_glu_wrapper_sm100
+    def grouped_gemm_activation_kernel(cls) -> Callable:
+        """Fused kernel for grouped GEMM, activation, and post-multiplication."""
+        raise NotImplementedError
 
     @classmethod
     @functools.lru_cache(maxsize=None)
@@ -79,7 +77,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         if not _cudnn_frontend_version_supported():
             return False
         try:
-            cls.grouped_gemm_glu_kernel()
+            cls.grouped_gemm_activation_kernel()
             cls.grouped_gemm_quant_kernel()
         except ImportError:
             return False
@@ -89,23 +87,17 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         self,
         *,
         fc1: GroupedLinear,
-        swiglu: Optional[ScaledSwiGLU | ScaledClampedQGeGLU] = None,
-        srelu: Optional[ScaledSReLU] = None,
+        activation: Optional[FusibleOperation] = None,
         fc2: GroupedLinear,
     ) -> None:
-        if swiglu is not None and srelu is not None:
-            raise TypeError(
-                "Expected exactly one activation op, but both swiglu and srelu were provided."
-            )
-        activation = swiglu if swiglu is not None else srelu
         if activation is None:
             raise TypeError("Expected a grouped MLP activation op.")
         super().__init__((fc1, activation, fc2))
         if not self.is_supported():
-            self.grouped_gemm_glu_kernel()  # Try triggering import error
+            self.grouped_gemm_activation_kernel()  # Try triggering import error
             raise RuntimeError(f"{self.__class__.__name__} is not supported on this system.")
         validate_grouped_mlp_dims(fc1, activation, fc2)
-        if isinstance(activation, ScaledSReLU):
+        if not is_glu_activation(activation):
             # grouped_gemm_srelu_wrapper_sm100 is SReLU-specific and does not
             # take the GLU ``act_func`` selector.
             self._cudnn_act_func: Optional[str] = None
@@ -302,7 +294,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         fc1_bias_packed = _pack_grouped_linear_bias_for_cudnn(fc1_op)
         fc2_bias_packed = _pack_grouped_linear_bias_for_cudnn(fc2_op)
 
-        fc1_glu_kwargs = {
+        fc1_activation_kwargs = {
             "a_tensor": fc1_x_data,
             "sfa_tensor": fc1_x_scales,
             "padded_offsets": split_points,
@@ -324,7 +316,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             "use_dynamic_sched": True,
         }
         if self._cudnn_act_func is not None:
-            fc1_glu_kwargs["act_func"] = self._cudnn_act_func
+            fc1_activation_kwargs["act_func"] = self._cudnn_act_func
 
         if fc1_op.single_grouped_weight:
             # Clone and swizzle scales for GEMM.
@@ -349,8 +341,8 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             )
             fc1_w_scales = fc1_w_scales.permute(3, 4, 1, 5, 2, 0)
 
-            fc1_glu_kwargs["b_tensor"] = fc1_w_data
-            fc1_glu_kwargs["sfb_tensor"] = fc1_w_scales
+            fc1_activation_kwargs["b_tensor"] = fc1_w_data
+            fc1_activation_kwargs["sfb_tensor"] = fc1_w_scales
         else:
             # Discrete-weight kernel: per-expert data/scale pointers
             fc1_b_ptrs, fc1_sfb_ptrs, _fc1_sw = tex.get_device_pointer_for_data_and_scales(
@@ -360,13 +352,13 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
                 rowwise=True,
                 data_dtype=grouped_fc1_weight[0]._fp8_dtype,
             )
-            fc1_glu_kwargs["b_ptrs"] = fc1_b_ptrs
-            fc1_glu_kwargs["sfb_ptrs"] = fc1_sfb_ptrs
-            fc1_glu_kwargs["n"] = fc1_weight_shape[0]
-            fc1_glu_kwargs["b_dtype"] = torch.float8_e4m3fn
-            fc1_glu_kwargs["b_major"] = "k"
+            fc1_activation_kwargs["b_ptrs"] = fc1_b_ptrs
+            fc1_activation_kwargs["sfb_ptrs"] = fc1_sfb_ptrs
+            fc1_activation_kwargs["n"] = fc1_weight_shape[0]
+            fc1_activation_kwargs["b_dtype"] = torch.float8_e4m3fn
+            fc1_activation_kwargs["b_major"] = "k"
 
-        fc1_kernel_out = self.grouped_gemm_glu_kernel()(**fc1_glu_kwargs)
+        fc1_kernel_out = self.grouped_gemm_activation_kernel()(**fc1_activation_kwargs)
 
         # Unpack kernel outputs
         # Note: Fused kernel outputs tensors with non-contiguous
@@ -377,8 +369,8 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         # Column-wise data logical shape: (sum(m_splits), k, 1)
         # Column-wise scale logical shape: (32 (block col), 4 (block col),
         #   k/128, 4 (block row), sum(m_splits)/128, 1)
-        swiglu_in = fc1_kernel_out["c_tensor"]
-        swiglu_in = swiglu_in.view(in_shape[0], fc1_weight_shape[0])
+        activation_in = fc1_kernel_out["c_tensor"]
+        activation_in = activation_in.view(in_shape[0], fc1_weight_shape[0])
         fc2_in_row_data = fc1_kernel_out["d_tensor"]
         fc2_in_row_data = fc2_in_row_data.view(in_shape[0], fc2_weight_shape[1])
         fc2_in_row_scale = fc1_kernel_out["sfd_row_tensor"]
@@ -470,7 +462,7 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
 
         # Save state for backward pass
         if requires_grad:
-            mark_grouped_tensor(grouped_fc1_x, swiglu_in, scales, grouped_fc2_x)
+            mark_grouped_tensor(grouped_fc1_x, activation_in, scales, grouped_fc2_x)
             activation_op = self.basic_ops[1]
 
             # Save the input ``GroupedTensor``s themselves for the activations.
@@ -503,9 +495,9 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
             fc1_ctx.weight_requires_grad = weight_requires_grad
 
             # Activation
-            activation_ctx.save_for_backward(swiglu_in, scales)
+            activation_ctx.save_for_backward(activation_in, scales)
             activation_ctx.extra_input_requires_grad = True
-            if isinstance(activation_op, ScaledSReLU):
+            if not is_glu_activation(activation_op):
                 activation_ctx.prev_op_grad_output_quantizer = fc1_grad_output_quantizer
             activation_ctx.input_requires_grad = True
             activation_ctx.dtype = dtype
@@ -543,12 +535,24 @@ class ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8(FusedOperation):
         return fc2_out, [(), (), ()]
 
 
-class ForwardGroupedMLP_CuTeGEMMSReLU_MXFP8(ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8):
-    """Fused op for MXFP8 GroupedLinear + ScaledSReLU + GroupedLinear."""
+class ForwardGroupedMLP_CuTeGEMMGLU_MXFP8(_ForwardGroupedMLP_CuTeGEMMBase_MXFP8):
+    """Fused op for MXFP8 GroupedLinear + scaled GLU + GroupedLinear."""
 
     @classmethod
     @functools.lru_cache(maxsize=None)
-    def grouped_gemm_glu_kernel(cls) -> Callable:
+    def grouped_gemm_activation_kernel(cls) -> Callable:
+        """Fused kernel for grouped GEMM, GLU activation, and post-multiplication."""
+        from cudnn import grouped_gemm_glu_wrapper_sm100  # pylint: disable=no-name-in-module
+
+        return grouped_gemm_glu_wrapper_sm100
+
+
+class ForwardGroupedMLP_CuTeGEMMUnary_MXFP8(_ForwardGroupedMLP_CuTeGEMMBase_MXFP8):
+    """Fused op for MXFP8 GroupedLinear + scaled unary activation + GroupedLinear."""
+
+    @classmethod
+    @functools.lru_cache(maxsize=None)
+    def grouped_gemm_activation_kernel(cls) -> Callable:
         """Fused kernel for grouped GEMM, SReLU activation, and post-multiplication."""
         from cudnn import grouped_gemm_srelu_wrapper_sm100  # pylint: disable=no-name-in-module
 
@@ -580,7 +584,7 @@ def fuse_forward_ops(
     return fuse_grouped_mlp_ops(
         ops,
         recipe=recipe,
-        fused_op_cls=ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8,
+        fused_op_cls=ForwardGroupedMLP_CuTeGEMMGLU_MXFP8,
     )
 
 
@@ -595,14 +599,13 @@ def fuse_forward_srelu_ops(
     return fuse_grouped_mlp_ops(
         ops,
         recipe=recipe,
-        fused_op_cls=ForwardGroupedMLP_CuTeGEMMSReLU_MXFP8,
+        fused_op_cls=ForwardGroupedMLP_CuTeGEMMUnary_MXFP8,
         activation_op_types=(ScaledSReLU,),
-        activation_kwarg="srelu",
     )
 
 
 # Register fusion if available
-if ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8.is_supported():
+if ForwardGroupedMLP_CuTeGEMMGLU_MXFP8.is_supported():
     register_forward_fusion(fuse_forward_ops, prepend=True)
-if ForwardGroupedMLP_CuTeGEMMSReLU_MXFP8.is_supported():
+if ForwardGroupedMLP_CuTeGEMMUnary_MXFP8.is_supported():
     register_forward_fusion(fuse_forward_srelu_ops, prepend=True)

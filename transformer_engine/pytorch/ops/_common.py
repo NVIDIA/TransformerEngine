@@ -182,12 +182,20 @@ def get_dummy_wgrads_for_params(
     return out
 
 
+def is_glu_activation(activation_op) -> bool:
+    """Whether an activation consumes a GLU-style doubled input."""
+    from .basic import (  # pylint: disable=import-outside-toplevel
+        ScaledClampedQGeGLU,
+        ScaledSwiGLU,
+    )
+
+    return isinstance(activation_op, (ScaledSwiGLU, ScaledClampedQGeGLU))
+
+
 def validate_grouped_mlp_dims(fc1, activation_op, fc2) -> None:
     """Validate FC1 / activation / FC2 dimensions for fused grouped MLP."""
     from .basic import (  # pylint: disable=import-outside-toplevel
         ScaledSReLU,
-        ScaledClampedQGeGLU,
-        ScaledSwiGLU,
     )
 
     if fc1.in_features % 64 != 0 or fc1.out_features % 64 != 0:
@@ -200,7 +208,7 @@ def validate_grouped_mlp_dims(fc1, activation_op, fc2) -> None:
             f"Unsupported dims for FC2 (num_groups={fc2.num_groups}, "
             f"in_features={fc2.in_features}, out_features={fc2.out_features})."
         )
-    if isinstance(activation_op, (ScaledSwiGLU, ScaledClampedQGeGLU)):
+    if is_glu_activation(activation_op):
         expected_fc1_out_features = 2 * fc2.in_features
     elif isinstance(activation_op, ScaledSReLU):
         expected_fc1_out_features = fc2.in_features
@@ -214,10 +222,7 @@ def validate_grouped_mlp_dims(fc1, activation_op, fc2) -> None:
             f"and FC2 (num_groups={fc2.num_groups}, in_features={fc2.in_features}, "
             f"out_features={fc2.out_features}) do not match."
         )
-    if (
-        isinstance(activation_op, (ScaledSwiGLU, ScaledClampedQGeGLU))
-        and activation_op.glu_interleave_size != 32
-    ):
+    if is_glu_activation(activation_op) and activation_op.glu_interleave_size != 32:
         raise ValueError(
             "Fused kernel requires 32-wide GLU interleaving, "
             f"but got glu_interleave_size={activation_op.glu_interleave_size}."
@@ -230,7 +235,6 @@ def fuse_grouped_mlp_ops(
     recipe,
     fused_op_cls,
     activation_op_types=None,
-    activation_kwarg: str = "swiglu",
 ):
     """Sliding-window fusion for GroupedLinear + activation + GroupedLinear.
 
@@ -242,7 +246,7 @@ def fuse_grouped_mlp_ops(
         Quantization recipe.
     fused_op_cls : type
         Fused operation class with ``is_supported()`` classmethod and
-        constructor accepting ``fc1``, activation op, and ``fc2`` keyword args.
+        constructor accepting ``fc1``, ``activation``, and ``fc2`` keyword args.
 
     Returns
     -------
@@ -286,8 +290,8 @@ def fuse_grouped_mlp_ops(
         if matches_pattern:
             op = fused_op_cls(
                 fc1=window[0],
+                activation=window[1],
                 fc2=window[2],
-                **{activation_kwarg: window[1]},
             )
             window = [op]
         else:

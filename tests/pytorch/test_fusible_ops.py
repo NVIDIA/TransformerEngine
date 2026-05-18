@@ -22,6 +22,7 @@ import transformer_engine.pytorch as te
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.pytorch.ops._common import (
     _cudnn_frontend_version_supported,
+    is_glu_activation,
 )
 
 from transformer_engine.pytorch.ops.fused import (
@@ -3656,6 +3657,15 @@ class TestSequentialModules:
 
         # Skip invalid configurations
         with_quantization = quantization is not None
+        if activation == "scaled_swiglu":
+            scaled_act = te_ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size)
+        elif activation == "scaled_clamped_qgeglu":
+            scaled_act = te_ops.ScaledClampedQGeGLU(glu_interleave_size=glu_interleave_size)
+        elif activation == "scaled_srelu":
+            scaled_act = te_ops.ScaledSReLU()
+        else:
+            raise ValueError(f"Unexpected grouped MLP activation ({activation})")
+        activation_is_glu = is_glu_activation(scaled_act)
         maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
         if single_grouped_weight and quantization != "mxfp8":
             pytest.skip("single_grouped_weight is only supported for MXFP8 quantization")
@@ -3663,14 +3673,14 @@ class TestSequentialModules:
             pytest.skip("single_grouped_bias requires bias=True")
         if with_quantization and dtype not in (torch.bfloat16, torch.float16):
             pytest.skip("Quantized group GEMM is only supported with BF16/FP16")
-        if activation == "scaled_srelu" and quantization != "mxfp8":
-            pytest.skip("ScaledSReLU grouped MLP fusion is only supported with MXFP8")
-        if activation == "scaled_srelu" and glu_interleave_size is not None:
-            pytest.skip("SReLU does not use GLU interleaving")
+        if not activation_is_glu and quantization != "mxfp8":
+            pytest.skip("Scaled unary grouped MLP fusion is only supported with MXFP8")
+        if not activation_is_glu and glu_interleave_size is not None:
+            pytest.skip("Unary activations do not use GLU interleaving")
         if quantization == "nvfp4" and activation == "scaled_clamped_qgeglu" and bias:
             # TODO: ksivaman: Need to debug numerics for this case.
             pytest.skip("Bias/dbias not yet supported in NVFP4 fused grouped MLP with GeGLU")
-        fc1_out_features = hidden_size if activation == "scaled_srelu" else 2 * hidden_size
+        fc1_out_features = 2 * hidden_size if activation_is_glu else hidden_size
 
         # Random data
         x_ref, x_test = make_reference_and_test_tensors(
@@ -3749,7 +3759,7 @@ class TestSequentialModules:
         for group_idx in range(group_size):
             x = xs[group_idx]
             x = torch.nn.functional.linear(x, fc1_ws_ref[group_idx], bias=fc1_bs_ref[group_idx])
-            if activation != "scaled_srelu" and glu_interleave_size is not None:
+            if activation_is_glu and glu_interleave_size is not None:
                 x = x.reshape(
                     -1,
                     2 * hidden_size // (2 * glu_interleave_size),
@@ -3782,14 +3792,6 @@ class TestSequentialModules:
 
         # Construct operations
         recipe = make_recipe(quantization)
-        if activation == "scaled_swiglu":
-            scaled_act = te_ops.ScaledSwiGLU(glu_interleave_size=glu_interleave_size)
-        elif activation == "scaled_clamped_qgeglu":
-            scaled_act = te_ops.ScaledClampedQGeGLU(glu_interleave_size=glu_interleave_size)
-        elif activation == "scaled_srelu":
-            scaled_act = te_ops.ScaledSReLU()
-        else:
-            raise ValueError(f"Unexpected grouped MLP activation ({activation})")
         with te.quantized_model_init(enabled=with_quantization, recipe=recipe):
             fc1 = te_ops.GroupedLinear(
                 group_size,
@@ -3879,17 +3881,17 @@ class TestSequentialModules:
             quantization == "mxfp8"
             and dtype in (torch.bfloat16, torch.float16)
             and (
-                (activation == "scaled_srelu" and glu_interleave_size is None)
-                or (activation != "scaled_srelu" and glu_interleave_size == 32)
+                (not activation_is_glu and glu_interleave_size is None)
+                or (activation_is_glu and glu_interleave_size == 32)
             )
             and _cudnn_frontend_version_supported()
         ):
-            if activation == "scaled_srelu":
-                forward_cls = te_ops.fused.ForwardGroupedMLP_CuTeGEMMSReLU_MXFP8
-                backward_cls = te_ops.fused.BackwardGroupedMLP_CuTeGEMMDSReLU_MXFP8
+            if activation_is_glu:
+                forward_cls = te_ops.fused.ForwardGroupedMLP_CuTeGEMMGLU_MXFP8
+                backward_cls = te_ops.fused.BackwardGroupedMLP_CuTeGEMMDGLU_MXFP8
             else:
-                forward_cls = te_ops.fused.ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8
-                backward_cls = te_ops.fused.BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8
+                forward_cls = te_ops.fused.ForwardGroupedMLP_CuTeGEMMUnary_MXFP8
+                backward_cls = te_ops.fused.BackwardGroupedMLP_CuTeGEMMDUnary_MXFP8
             if forward_cls.is_supported():
                 forward_ops = module._module_groups[0]._forward_ops
                 assert len(forward_ops) == 1
@@ -3987,9 +3989,9 @@ class TestSequentialModules:
     ) -> None:
         """single_grouped_weight=True/False should match exactly for fused MXFP8 grouped MLP."""
 
-        if not te_ops.fused.ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8.is_supported():
+        if not te_ops.fused.ForwardGroupedMLP_CuTeGEMMGLU_MXFP8.is_supported():
             pytest.skip("MXFP8 fused grouped MLP forward is not supported on this system")
-        if not te_ops.fused.BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8.is_supported():
+        if not te_ops.fused.BackwardGroupedMLP_CuTeGEMMDGLU_MXFP8.is_supported():
             pytest.skip("MXFP8 fused grouped MLP backward is not supported on this system")
 
         split_sizes = [split_alignment * (i + 1) for i in range(group_size)]
@@ -4091,12 +4093,12 @@ class TestSequentialModules:
             assert len(forward_ops) == 1
             assert isinstance(
                 forward_ops[0][0],
-                te_ops.fused.ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8,
+                te_ops.fused.ForwardGroupedMLP_CuTeGEMMGLU_MXFP8,
             )
             assert len(backward_ops) == 1
             assert isinstance(
                 backward_ops[0][0],
-                te_ops.fused.BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8,
+                te_ops.fused.BackwardGroupedMLP_CuTeGEMMDGLU_MXFP8,
             )
 
             if single_grouped_weight:
@@ -4209,9 +4211,9 @@ class TestSequentialModules:
         that read ``.grad`` don't see stale bytes from the cached dummy).
         """
 
-        if not te_ops.fused.ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8.is_supported():
+        if not te_ops.fused.ForwardGroupedMLP_CuTeGEMMGLU_MXFP8.is_supported():
             pytest.skip("MXFP8 fused grouped MLP forward is not supported on this system")
-        if not te_ops.fused.BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8.is_supported():
+        if not te_ops.fused.BackwardGroupedMLP_CuTeGEMMDGLU_MXFP8.is_supported():
             pytest.skip("MXFP8 fused grouped MLP backward is not supported on this system")
 
         recipe = make_recipe("mxfp8")
@@ -4343,7 +4345,7 @@ class TestSequentialModules:
     ) -> None:
         """Grouped MLP forward+backward should be CUDA graph capturable (MXFP8)."""
 
-        if not te_ops.fused.ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8.is_supported():
+        if not te_ops.fused.ForwardGroupedMLP_CuTeGEMMGLU_MXFP8.is_supported():
             pytest.skip("MXFP8 fused grouped MLP is not supported on this system")
         if dtype not in (torch.bfloat16, torch.float16):
             pytest.skip("MXFP8 fused grouped MLP is only supported with BF16/FP16")
@@ -4485,12 +4487,12 @@ class TestSequentialModules:
         assert len(forward_ops) == 1
         assert isinstance(
             forward_ops[0][0],
-            te_ops.fused.ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8,
+            te_ops.fused.ForwardGroupedMLP_CuTeGEMMGLU_MXFP8,
         )
         assert len(backward_ops) == 1
         assert isinstance(
             backward_ops[0][0],
-            te_ops.fused.BackwardGroupedMLP_CuTeGEMMDSwiGLU_MXFP8,
+            te_ops.fused.BackwardGroupedMLP_CuTeGEMMDGLU_MXFP8,
         )
 
         fresh_x = torch.randn_like(static_x)
