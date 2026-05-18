@@ -1,0 +1,60 @@
+ name: Label community contributions
+
+  on:
+    pull_request_target:
+      types: [opened, reopened, ready_for_review, synchronize]
+
+  permissions:
+    contents: read
+    issues: write
+
+  jobs:
+    label:
+      runs-on: ubuntu-latest
+      steps:
+        - uses: actions/github-script@v9
+          with:
+            script: |
+              const pr = context.payload.pull_request;
+              const user = pr.user.login;
+              const association = pr.author_association;
+
+              const communityLabel = "community-contribution";
+              const orgLabel = "org-contribution";
+
+              let targetLabel = null;
+
+              const isOrgMember =
+                association === "MEMBER" || association === "OWNER";
+
+              if (!isOrgMember) {
+                targetLabel = communityLabel;
+              } else {
+                let permission = "none";
+
+                try {
+                  const res = await github.rest.repos.getCollaboratorPermissionLevel({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    username: user,
+                  });
+                  permission = res.data.permission;
+                } catch (e) {
+                  if (e.status !== 404) throw e;
+                }
+
+                const isCore = permission === "write" || permission === "admin";
+
+                if (!isCore) {
+                  targetLabel = orgLabel;
+                }
+              }
+
+              if (targetLabel) {
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: pr.number,
+                  labels: [targetLabel],
+                });
+              }
