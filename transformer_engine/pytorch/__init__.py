@@ -113,10 +113,9 @@ except AttributeError:
 # ``transformer_engine/common/util/pybind_helper.h``) so its pickle
 # stream encodes as ``(tex.DType, (int,))`` and only the class itself
 # needs to be allow-listed below.
-import transformer_engine_torch as tex
-
 try:
     from torch.serialization import add_safe_globals
+    import transformer_engine_torch as tex
 
     add_safe_globals(
         [

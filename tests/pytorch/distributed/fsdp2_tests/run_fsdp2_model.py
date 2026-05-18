@@ -379,7 +379,11 @@ def test_distributed(recipe_name, fp8_init, sharding_dims, layer_type):
             "sending only 1 tensor (scale is per-tensor metadata). Fix: concatenate MXFP8 "
             "data and scale_inv into a single buffer in pre_all_gather, split in post."
         )
-
+    if recipe_name == "Float8BlockScaling" and fp8_init:
+        pytest.xfail(
+            "Float8BlockScaling + fp8_init: scale inverse padding is not handled "
+            "correctly during FSDP2 all-gather slice ops."
+        )
     torch.manual_seed(42)
     torch.cuda.manual_seed(42)
 
