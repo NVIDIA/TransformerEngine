@@ -14,7 +14,7 @@ from transformers import MixtralConfig, MixtralForCausalLM
 import transformer_engine.pytorch as te
 from transformer_engine.common import recipe as te_recipe
 
-from te_mixtral import NVMixtralForCausalLM, replace_params as replace_params_bf16
+from te_mixtral import TEMixtralForCausalLM, replace_params as replace_params_bf16
 from te_mixtral_mxfp8 import (
     TEMixtralMXFP8ForCausalLM,
     replace_params as replace_params_mxfp8,
@@ -114,8 +114,8 @@ def _run_bf16(cfg, model_hf, inputs, device, dtype):
     print("BF16 parity check (forward + backward)")
     print("=" * 64)
 
-    te_cfg = NVMixtralForCausalLM.config_class(**cfg.to_dict())
-    model_te = NVMixtralForCausalLM(te_cfg).to(device=device, dtype=dtype)
+    te_cfg = TEMixtralForCausalLM.config_class(**cfg.to_dict())
+    model_te = TEMixtralForCausalLM(te_cfg).to(device=device, dtype=dtype)
     _load_te_weights(model_te, model_hf, replace_params_bf16)
     model_te.eval()
 

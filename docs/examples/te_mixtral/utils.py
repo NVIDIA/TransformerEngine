@@ -219,7 +219,7 @@ def init_te_mixtral_model(hyperparams: HyperParameters):
         from te_mixtral_mxfp8 import TEMixtralMXFP8ForCausalLM as ForCausalLM
         from te_mixtral_mxfp8 import replace_params
     else:
-        from te_mixtral import NVMixtralForCausalLM as ForCausalLM
+        from te_mixtral import TEMixtralForCausalLM as ForCausalLM
         from te_mixtral import replace_params
 
     base_config = AutoConfig.from_pretrained(hyperparams.weights_cache_dir)

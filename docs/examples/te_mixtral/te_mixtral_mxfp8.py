@@ -65,8 +65,8 @@ from hf_to_te_weights import (
 )
 
 
-class NVMixtralMXFP8Config(MixtralConfig):
-    """Improvement-9 config. Same surface as :class:`te_mixtral.NVMixtralConfig` but
+class TEMixtralMXFP8Config(MixtralConfig):
+    """Improvement-9 config. Same surface as :class:`te_mixtral.TEMixtralConfig` but
     with the FFN mode locked to ``grouped_op`` + MXFP8."""
 
     attn_input_format: str = "thd"
@@ -83,12 +83,12 @@ class NVMixtralMXFP8Config(MixtralConfig):
             )
 
 
-class NVMixtralMXFP8PreTrainedModel(PreTrainedModel):
+class TEMixtralMXFP8PreTrainedModel(PreTrainedModel):
     """HF integration boilerplate for the tier-3 model."""
 
-    config_class = NVMixtralMXFP8Config
+    config_class = TEMixtralMXFP8Config
     base_model_prefix = "model"
-    _no_split_modules = ("NVMixtralMXFP8DecoderLayer",)
+    _no_split_modules = ("TEMixtralMXFP8DecoderLayer",)
     _skip_keys_device_placement = ("past_key_values",)
     _do_not_quantize = ("lm_head", "model.layers.*.mlp.gate")
 
@@ -102,12 +102,12 @@ class NVMixtralMXFP8PreTrainedModel(PreTrainedModel):
         return {k: v for k, v in sd.items() if not k.endswith("_extra_state")}
 
 
-class NVMixtralMXFP8SparseMoeBlock(nn.Module):
+class TEMixtralMXFP8SparseMoeBlock(nn.Module):
     """MoE block: router + EP dispatcher + fused MXFP8 grouped MLP."""
 
     def __init__(
         self,
-        config: NVMixtralMXFP8Config,
+        config: TEMixtralMXFP8Config,
         dispatcher: AllToAllTokenDispatcher | None = None,
     ) -> None:
         super().__init__()
@@ -254,12 +254,12 @@ class NVMixtralMXFP8SparseMoeBlock(nn.Module):
         return output.reshape(original_shape)
 
 
-class NVMixtralMXFP8DecoderLayer(nn.Module):
+class TEMixtralMXFP8DecoderLayer(nn.Module):
     """Self-attention + tier-3 MoE block."""
 
     def __init__(
         self,
-        config: NVMixtralMXFP8Config,
+        config: TEMixtralMXFP8Config,
         layer_idx: int,
         dispatcher: AllToAllTokenDispatcher | None = None,
     ) -> None:
@@ -295,7 +295,7 @@ class NVMixtralMXFP8DecoderLayer(nn.Module):
             dtype=config.dtype,
             device=device,
         )
-        self.mlp = NVMixtralMXFP8SparseMoeBlock(config, dispatcher)
+        self.mlp = TEMixtralMXFP8SparseMoeBlock(config, dispatcher)
 
     def forward(
         self,
@@ -326,12 +326,12 @@ class NVMixtralMXFP8DecoderLayer(nn.Module):
         return residual + hidden_states
 
 
-class NVMixtralMXFP8Model(NVMixtralMXFP8PreTrainedModel):
+class TEMixtralMXFP8Model(TEMixtralMXFP8PreTrainedModel):
     """Embedding + N decoder layers + RMSNorm. THD-packed under MXFP8."""
 
     def __init__(
         self,
-        config: NVMixtralMXFP8Config,
+        config: TEMixtralMXFP8Config,
         fp8_recipe: te_recipe.Recipe | None = None,
         dispatcher: AllToAllTokenDispatcher | None = None,
     ) -> None:
@@ -345,8 +345,8 @@ class NVMixtralMXFP8Model(NVMixtralMXFP8PreTrainedModel):
             config.vocab_size, config.hidden_size, self.padding_idx, dtype=config.dtype
         )
 
-        layers: list[NVMixtralMXFP8DecoderLayer] = [
-            NVMixtralMXFP8DecoderLayer(config, i, dispatcher)
+        layers: list[TEMixtralMXFP8DecoderLayer] = [
+            TEMixtralMXFP8DecoderLayer(config, i, dispatcher)
             for i in range(config.num_hidden_layers)
         ]
         self.layers = nn.ModuleList(layers)
@@ -480,19 +480,19 @@ class NVMixtralMXFP8Model(NVMixtralMXFP8PreTrainedModel):
         )
 
 
-class TEMixtralMXFP8ForCausalLM(NVMixtralMXFP8PreTrainedModel):
+class TEMixtralMXFP8ForCausalLM(TEMixtralMXFP8PreTrainedModel):
     """Causal LM wrapper with MXFP8 autocast."""
 
     _tied_weights_keys: ClassVar[list[str]] = []
 
     def __init__(
         self,
-        config: NVMixtralMXFP8Config,
+        config: TEMixtralMXFP8Config,
         fp8_recipe: te_recipe.Recipe | None = None,
         dispatcher: AllToAllTokenDispatcher | None = None,
     ) -> None:
         super().__init__(config)
-        self.model = NVMixtralMXFP8Model(config, fp8_recipe=fp8_recipe, dispatcher=dispatcher)
+        self.model = TEMixtralMXFP8Model(config, fp8_recipe=fp8_recipe, dispatcher=dispatcher)
         self.vocab_size = config.vocab_size
         with te.quantized_model_init(enabled=False):
             self.lm_head = te.Linear(

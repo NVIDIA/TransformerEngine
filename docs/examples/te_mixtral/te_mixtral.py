@@ -42,9 +42,9 @@ logger = logging.getLogger(__name__)
 
 
 AUTO_MAP = {
-    "AutoConfig": "modeling_mixtral_te.NVMixtralConfig",
-    "AutoModel": "modeling_mixtral_te.NVMixtralModel",
-    "AutoModelForCausalLM": "modeling_mixtral_te.NVMixtralForCausalLM",
+    "AutoConfig": "modeling_mixtral_te.TEMixtralConfig",
+    "AutoModel": "modeling_mixtral_te.TEMixtralModel",
+    "AutoModelForCausalLM": "modeling_mixtral_te.TEMixtralForCausalLM",
 }
 
 
@@ -57,8 +57,8 @@ from hf_to_te_weights import (  # noqa: E402
 )
 
 
-class NVMixtralConfig(MixtralConfig):
-    """NVMixtral configuration."""
+class TEMixtralConfig(MixtralConfig):
+    """TEMixtral configuration."""
 
     # Attention input format:
     #   "bshd" = Batch, Sequence, Head, Dimension (standard padded format)
@@ -80,7 +80,7 @@ class NVMixtralConfig(MixtralConfig):
     expert_ffn_mode: str = "grouped_op"
 
     def __init__(self, **kwargs):
-        """Initialize the NVMixtralConfig with additional TE-related config options."""
+        """Initialize the TEMixtralConfig with additional TE-related config options."""
         super().__init__(**kwargs)
 
         if self.layer_precision is not None:
@@ -168,12 +168,12 @@ class TokenDispatcher(Protocol):
         ...
 
 
-class NVMixtralPreTrainedModel(PreTrainedModel):
-    """Base class for NVMixtral models."""
+class TEMixtralPreTrainedModel(PreTrainedModel):
+    """Base class for TEMixtral models."""
 
-    config_class = NVMixtralConfig
+    config_class = TEMixtralConfig
     base_model_prefix = "model"
-    _no_split_modules = ("NVMixtralDecoderLayer",)
+    _no_split_modules = ("TEMixtralDecoderLayer",)
     _skip_keys_device_placement = ("past_key_values",)
     _do_not_quantize = (
         "lm_head",
@@ -189,7 +189,7 @@ class NVMixtralPreTrainedModel(PreTrainedModel):
         # After reset_parameters materializes GroupedLinear views on CUDA,
         # re-stack them into the authoritative stacked parameters.
         for module in self.modules():
-            if isinstance(module, NVMixtralSparseMoeBlock):
+            if isinstance(module, TEMixtralSparseMoeBlock):
                 module._restack_from_views()
 
         self.model.embed_tokens.to_empty(device="cuda")
@@ -218,7 +218,7 @@ class NVMixtralPreTrainedModel(PreTrainedModel):
         return {k: v for k, v in state_dict.items() if not k.endswith("_extra_state")}
 
 
-class NVMixtralSparseMoeBlock(nn.Module):
+class TEMixtralSparseMoeBlock(nn.Module):
     """Mixture of Experts block using TransformerEngine GroupedLinear."""
 
     def __init__(self, config: MixtralConfig, dispatcher: TokenDispatcher | None = None):
@@ -508,7 +508,7 @@ class NVMixtralSparseMoeBlock(nn.Module):
         return output.reshape(original_shape)
 
 
-class NVMixtralDecoderLayer(nn.Module):
+class TEMixtralDecoderLayer(nn.Module):
     """Mixtral decoder layer using TE attention and MoE MLP."""
 
     def __init__(
@@ -550,7 +550,7 @@ class NVMixtralDecoderLayer(nn.Module):
             device=device,
         )
 
-        self.mlp = NVMixtralSparseMoeBlock(config, dispatcher)
+        self.mlp = TEMixtralSparseMoeBlock(config, dispatcher)
 
     def forward(
         self,
@@ -588,7 +588,7 @@ class NVMixtralDecoderLayer(nn.Module):
         return hidden_states
 
 
-class NVMixtralModel(NVMixtralPreTrainedModel):
+class TEMixtralModel(TEMixtralPreTrainedModel):
     """Mixtral model implemented in Transformer Engine."""
 
     def __init__(
@@ -598,7 +598,7 @@ class NVMixtralModel(NVMixtralPreTrainedModel):
         fp4_recipe: transformer_engine.common.recipe.Recipe | None = None,
         dispatcher: TokenDispatcher | None = None,
     ):
-        """Initialize the NVMixtral model.
+        """Initialize the TEMixtral model.
 
         Args:
             config: The configuration of the model.
@@ -628,10 +628,10 @@ class NVMixtralModel(NVMixtralPreTrainedModel):
             config.vocab_size, config.hidden_size, self.padding_idx, dtype=config.dtype
         )
 
-        layers: list[NVMixtralDecoderLayer] = []
+        layers: list[TEMixtralDecoderLayer] = []
         for layer_idx in range(config.num_hidden_layers):
             with self.get_autocast_context(layer_idx, init=True):
-                layers += [NVMixtralDecoderLayer(config, layer_idx, dispatcher)]
+                layers += [TEMixtralDecoderLayer(config, layer_idx, dispatcher)]
 
         self.layers = nn.ModuleList(layers)
 
@@ -653,7 +653,7 @@ class NVMixtralModel(NVMixtralPreTrainedModel):
         """Propagate an expert-parallel process group and mesh to every MoE block.
 
         Args:
-            ep_group: The EP process group to set on each ``NVMixtralSparseMoeBlock``.
+            ep_group: The EP process group to set on each ``TEMixtralSparseMoeBlock``.
             ep_mesh: A 1-D ``DeviceMesh`` for expert parallelism.
         """
         for layer in self.layers:
@@ -669,7 +669,7 @@ class NVMixtralModel(NVMixtralPreTrainedModel):
         use_cache: bool | None = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> BaseModelOutputWithPast:
-        """Forward pass for the NVMixtral model."""
+        """Forward pass for the TEMixtral model."""
         all_hidden_states = []
         output_hidden_states = kwargs.get("output_hidden_states", False)
 
@@ -818,7 +818,7 @@ class NVMixtralModel(NVMixtralPreTrainedModel):
         return transformer_engine.pytorch.autocast(enabled=False)
 
 
-class NVMixtralForCausalLM(NVMixtralPreTrainedModel, transformers.GenerationMixin):
+class TEMixtralForCausalLM(TEMixtralPreTrainedModel, transformers.GenerationMixin):
     """Mixtral model with causal language head."""
 
     _tied_weights_keys: ClassVar[list[str]] = []
@@ -830,7 +830,7 @@ class NVMixtralForCausalLM(NVMixtralPreTrainedModel, transformers.GenerationMixi
         fp4_recipe: transformer_engine.common.recipe.Recipe | None = None,
         dispatcher: TokenDispatcher | None = None,
     ):
-        """Initialize the NVMixtralForCausalLM model.
+        """Initialize the TEMixtralForCausalLM model.
 
         Args:
             config: The configuration of the model.
@@ -840,7 +840,7 @@ class NVMixtralForCausalLM(NVMixtralPreTrainedModel, transformers.GenerationMixi
                 AllToAllTokenDispatcher will be used.
         """
         super().__init__(config)
-        self.model = NVMixtralModel(
+        self.model = TEMixtralModel(
             config, fp8_recipe=fp8_recipe, fp4_recipe=fp4_recipe, dispatcher=dispatcher
         )
         self.vocab_size = config.vocab_size
@@ -873,7 +873,7 @@ class NVMixtralForCausalLM(NVMixtralPreTrainedModel, transformers.GenerationMixi
         logits_to_keep: int | torch.Tensor = 0,
         **kwargs: Unpack[TransformersKwargs],
     ) -> CausalLMOutputWithPast:
-        """Forward pass for the NVMixtralForCausalLM model."""
+        """Forward pass for the TEMixtralForCausalLM model."""
         outputs: BaseModelOutputWithPast = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -921,7 +921,7 @@ class NVMixtralForCausalLM(NVMixtralPreTrainedModel, transformers.GenerationMixi
 
 
 def save_final_model_ep(
-    model: NVMixtralForCausalLM,
+    model: TEMixtralForCausalLM,
     save_directory: str | os.PathLike,
     dist_config=None,
 ) -> None:
@@ -933,7 +933,7 @@ def save_final_model_ep(
     All ranks must call this function. Only rank 0 writes files.
 
     Args:
-        model: The NVMixtral model (may have DTensor expert parameters).
+        model: The TEMixtral model (may have DTensor expert parameters).
         save_directory: Directory to save ``model.safetensors`` and config.
         dist_config: Optional distributed config with ``is_main_process()`` method.
             If ``None``, only rank 0 saves.
