@@ -17,12 +17,9 @@ namespace transformer_engine {
 namespace fused_router {
 
 template <typename DataType, TopkFuncType TopkFunc = TopkFuncType::Naive>
-__global__ void fused_score_for_moe_aux_loss_forward_kernel(const DataType *logits, int num_tokens,
-                                                            int num_experts, int topk,
-                                                            int score_function, float *scores,
-                                                            uint8_t *routing_map,
-                                                            int routing_map_format,
-                                                            CompType *intermediate_output) {
+__global__ void fused_score_for_moe_aux_loss_forward_kernel(
+    const DataType *logits, int num_tokens, int num_experts, int topk, int score_function,
+    float *scores, uint8_t *routing_map, int routing_map_format, CompType *intermediate_output) {
   /***
      * Section: Global Variables/Addresses init
      * - Each warp is responsible for one token, and has own shared memory buffer.
@@ -43,16 +40,14 @@ __global__ void fused_score_for_moe_aux_loss_forward_kernel(const DataType *logi
   const int bitmap_row_bytes = (num_experts + 7) / 8;
   uint32_t *bitmap_words_buf = nullptr;
   if (routing_map_format == NVTE_ROUTING_MAP_FORMAT_BITMAP_U8) {
-    bitmap_words_buf =
-        reinterpret_cast<uint32_t *>(topk_indices_buf + topk * num_token_per_block);
+    bitmap_words_buf = reinterpret_cast<uint32_t *>(topk_indices_buf + topk * num_token_per_block);
   }
   // The address of buffers on the current warp
   CompType *local_logits = logits_buf + warp_id * num_experts;
   CompType *topk_logits = topk_logits_buf + warp_id * topk;
   int *topk_indices = topk_indices_buf + warp_id * topk;
-  uint32_t *local_bitmap_words = (bitmap_words_buf != nullptr)
-                                     ? bitmap_words_buf + warp_id * bitmap_words_per_warp
-                                     : nullptr;
+  uint32_t *local_bitmap_words =
+      (bitmap_words_buf != nullptr) ? bitmap_words_buf + warp_id * bitmap_words_per_warp : nullptr;
 
   /***
      * Section: Main Loop

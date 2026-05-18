@@ -43,7 +43,7 @@ __all__ = [
 
 
 def _validate_routing_map_format(
-    routing_map_format: Union[str, RoutingMapFormat, int]
+    routing_map_format: Union[str, RoutingMapFormat, int],
 ) -> RoutingMapFormat:
     """Validate and convert routing_map_format to a RoutingMapFormat enum."""
     if isinstance(routing_map_format, RoutingMapFormat):

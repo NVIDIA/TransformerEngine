@@ -615,14 +615,14 @@ def test_topk_bitmap_vs_bytemap(dtype, num_tokens, num_experts, topk, score_func
     assert jnp.array_equal(probs_byte, probs_bit), "Probs must be identical across formats"
 
     packed_expected = _bytemap_to_bitmap_u8(routing_map_byte)
-    assert routing_map_bit.shape == (num_tokens, (num_experts + 7) // 8), (
-        f"Bitmap shape {routing_map_bit.shape} != "
-        f"({num_tokens}, {(num_experts + 7) // 8})"
-    )
+    assert routing_map_bit.shape == (
+        num_tokens,
+        (num_experts + 7) // 8,
+    ), f"Bitmap shape {routing_map_bit.shape} != ({num_tokens}, {(num_experts + 7) // 8})"
     assert routing_map_bit.dtype == jnp.uint8
-    assert jnp.array_equal(routing_map_bit, packed_expected), (
-        "Bitmap routing_map disagrees with np.packbits(bytemap, bitorder='little')"
-    )
+    assert jnp.array_equal(
+        routing_map_bit, packed_expected
+    ), "Bitmap routing_map disagrees with np.packbits(bytemap, bitorder='little')"
 
     # Backward parity: grad of probs.sum() must be identical for both formats.
     def loss_byte(logits_):
@@ -660,9 +660,7 @@ def test_topk_bitmap_vs_bytemap(dtype, num_tokens, num_experts, topk, score_func
 )
 @pytest_parametrize_wrapper("score_function", SCORE_FUNCTIONS)
 @pytest.mark.triton
-def test_score_for_aux_loss_bitmap_vs_bytemap(
-    dtype, num_tokens, num_experts, topk, score_function
-):
+def test_score_for_aux_loss_bitmap_vs_bytemap(dtype, num_tokens, num_experts, topk, score_function):
     """compute_aux_scores=True path: bitmap routing_map must equal LSB-packed
     bytemap; scores must be bitwise identical across formats."""
     from transformer_engine.jax.router import RoutingMapFormat
@@ -694,6 +692,6 @@ def test_score_for_aux_loss_bitmap_vs_bytemap(
     packed_expected = _bytemap_to_bitmap_u8(routing_map_byte)
     assert routing_map_bit.shape == (num_tokens, (num_experts + 7) // 8)
     assert routing_map_bit.dtype == jnp.uint8
-    assert jnp.array_equal(routing_map_bit, packed_expected), (
-        "Bitmap routing_map (aux-loss path) disagrees with packed bytemap"
-    )
+    assert jnp.array_equal(
+        routing_map_bit, packed_expected
+    ), "Bitmap routing_map (aux-loss path) disagrees with packed bytemap"

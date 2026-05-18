@@ -139,17 +139,15 @@ Error_Type FusedTopkWithScoreFunctionBackwardFFI(
                                                grad_logits_tensor.data(), stream);
   } else {
     auto routing_map_dims = routing_map_buf.dimensions();
-    auto routing_map_shape =
-        std::vector<size_t>(routing_map_dims.begin(), routing_map_dims.end());
+    auto routing_map_shape = std::vector<size_t>(routing_map_dims.begin(), routing_map_dims.end());
     auto routing_map_tensor =
         TensorWrapper(routing_map_buf.untyped_data(), routing_map_shape, DType::kByte);
 
     nvte_fused_topk_with_score_function_backward(
-        routing_map_tensor.data(), static_cast<int>(routing_map_format),
-        intermediate_tensor.data(), grad_probs_tensor.data(), num_tokens, num_experts,
-        static_cast<int>(topk), static_cast<int>(use_pre_softmax),
-        static_cast<float>(scaling_factor), static_cast<int>(score_function),
-        grad_logits_tensor.data(), stream);
+        routing_map_tensor.data(), static_cast<int>(routing_map_format), intermediate_tensor.data(),
+        grad_probs_tensor.data(), num_tokens, num_experts, static_cast<int>(topk),
+        static_cast<int>(use_pre_softmax), static_cast<float>(scaling_factor),
+        static_cast<int>(score_function), grad_logits_tensor.data(), stream);
   }
 
   return ffi_with_cuda_error_check();

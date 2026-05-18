@@ -50,8 +50,7 @@ __global__ void fused_topk_with_score_function_forward_kernel(
   const int bitmap_row_bytes = (num_experts + 7) / 8;
   uint32_t *bitmap_words_buf = nullptr;
   if (routing_map_format == NVTE_ROUTING_MAP_FORMAT_BITMAP_U8) {
-    bitmap_words_buf =
-        reinterpret_cast<uint32_t *>(topk_indices_buf + topk * num_token_per_block);
+    bitmap_words_buf = reinterpret_cast<uint32_t *>(topk_indices_buf + topk * num_token_per_block);
   }
   // The address of buffers on the current warp
   CompType *scores = scores_buf + warp_id * num_experts;
@@ -59,9 +58,8 @@ __global__ void fused_topk_with_score_function_forward_kernel(
   CompType *masked_scores = masked_scores_buf + warp_id * num_experts;
   CompType *group_scores = group_scores_buf + warp_id * num_groups;
   int *topk_indices = topk_indices_buf + warp_id * topk;
-  uint32_t *local_bitmap_words = (bitmap_words_buf != nullptr)
-                                     ? bitmap_words_buf + warp_id * bitmap_words_per_warp
-                                     : nullptr;
+  uint32_t *local_bitmap_words =
+      (bitmap_words_buf != nullptr) ? bitmap_words_buf + warp_id * bitmap_words_per_warp : nullptr;
 
   /***
      * Section: Main Loop
@@ -574,8 +572,8 @@ void fused_topk_with_score_function_backward(const Tensor &routing_map, int rout
 void nvte_fused_topk_with_score_function_forward(
     const NVTETensor logits, int num_tokens, int num_experts, int topk, int use_pre_softmax,
     int num_groups, int group_topk, float scaling_factor, int score_function,
-    const NVTETensor expert_bias, NVTETensor probs, NVTETensor routing_map,
-    int routing_map_format, NVTETensor intermediate_output, cudaStream_t stream) {
+    const NVTETensor expert_bias, NVTETensor probs, NVTETensor routing_map, int routing_map_format,
+    NVTETensor intermediate_output, cudaStream_t stream) {
   NVTE_API_CALL(nvte_fused_topk_with_score_function_forward);
   using namespace transformer_engine;
   fused_router::fused_topk_with_score_function_forward(
@@ -586,13 +584,10 @@ void nvte_fused_topk_with_score_function_forward(
       *convertNVTETensorCheck(intermediate_output), stream);
 }
 
-void nvte_fused_topk_with_score_function_backward(const NVTETensor routing_map,
-                                                  int routing_map_format,
-                                                  const NVTETensor intermediate_output,
-                                                  const NVTETensor grad_probs, int num_tokens,
-                                                  int num_experts, int topk, int use_pre_softmax,
-                                                  float scaling_factor, int score_function,
-                                                  NVTETensor grad_logits, cudaStream_t stream) {
+void nvte_fused_topk_with_score_function_backward(
+    const NVTETensor routing_map, int routing_map_format, const NVTETensor intermediate_output,
+    const NVTETensor grad_probs, int num_tokens, int num_experts, int topk, int use_pre_softmax,
+    float scaling_factor, int score_function, NVTETensor grad_logits, cudaStream_t stream) {
   NVTE_API_CALL(nvte_fused_topk_with_score_function_backward);
   using namespace transformer_engine;
   fused_router::fused_topk_with_score_function_backward(
