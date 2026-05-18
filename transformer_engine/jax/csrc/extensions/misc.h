@@ -127,6 +127,13 @@ enum class JAXX_Score_Function : int64_t {
   SOFTMAX = 1,
 };
 
+// Mirror of NVTERoutingMapFormat for JAX FFI plumbing. Values must stay in sync
+// with the C enum in transformer_engine/common/include/transformer_engine/fused_router.h.
+enum class JAXX_Routing_Map_Format : int64_t {
+  BYTEMAP = 0,
+  BITMAP_U8 = 1,
+};
+
 enum class JAXX_Collective_Op : int64_t {
   NONE = 0,
   ALL_GATHER = 1,

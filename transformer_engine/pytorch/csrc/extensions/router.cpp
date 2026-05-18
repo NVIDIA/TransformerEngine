@@ -62,7 +62,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_topk_with_score_function_fw
   nvte_fused_topk_with_score_function_forward(
       logits_cu.data(), num_tokens, num_experts, topk, use_pre_softmax, num_groups_value,
       group_topk_value, scaling_factor_value, score_function_map[score_function],
-      expert_bias_cu.data(), probs_cu.data(), routing_map_cu.data(), intermediate_output_cu.data(),
+      expert_bias_cu.data(), probs_cu.data(), routing_map_cu.data(),
+      NVTE_ROUTING_MAP_FORMAT_BYTEMAP, intermediate_output_cu.data(),
       at::cuda::getCurrentCUDAStream());
 
   return std::make_tuple(probs, routing_map, intermediate_output);
@@ -83,9 +84,9 @@ void fused_topk_with_score_function_bwd(int num_tokens, int num_experts, at::Ten
   auto grad_logits_cu = makeTransformerEngineTensor(grad_logits);
 
   nvte_fused_topk_with_score_function_backward(
-      routing_map_cu.data(), intermediate_output_cu.data(), grad_probs_cu.data(), num_tokens,
-      num_experts, topk, use_pre_softmax, scaling_factor_value, score_function_value,
-      grad_logits_cu.data(), at::cuda::getCurrentCUDAStream());
+      routing_map_cu.data(), NVTE_ROUTING_MAP_FORMAT_BYTEMAP, intermediate_output_cu.data(),
+      grad_probs_cu.data(), num_tokens, num_experts, topk, use_pre_softmax, scaling_factor_value,
+      score_function_value, grad_logits_cu.data(), at::cuda::getCurrentCUDAStream());
 }
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_score_for_moe_aux_loss_fwd(
@@ -116,7 +117,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_score_for_moe_aux_loss_fwd(
 
   nvte_fused_score_for_moe_aux_loss_forward(
       logits_cu.data(), num_tokens, num_experts, topk, score_function_value, scores_cu.data(),
-      routing_map_cu.data(), intermediate_output_cu.data(), at::cuda::getCurrentCUDAStream());
+      routing_map_cu.data(), NVTE_ROUTING_MAP_FORMAT_BYTEMAP, intermediate_output_cu.data(),
+      at::cuda::getCurrentCUDAStream());
 
   return std::make_tuple(scores, routing_map, intermediate_output);
 }

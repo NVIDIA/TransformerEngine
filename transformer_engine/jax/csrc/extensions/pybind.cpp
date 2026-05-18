@@ -218,6 +218,11 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
       .value("SOFTMAX", JAXX_Score_Function::SOFTMAX)
       .export_values();
 
+  pybind11::enum_<JAXX_Routing_Map_Format>(m, "JAXX_Routing_Map_Format", pybind11::module_local())
+      .value("BYTEMAP", JAXX_Routing_Map_Format::BYTEMAP)
+      .value("BITMAP_U8", JAXX_Routing_Map_Format::BITMAP_U8)
+      .export_values();
+
   pybind11::enum_<JAXX_Collective_Op>(m, "JAXX_Collective_Op", pybind11::module_local())
       .value("NONE", JAXX_Collective_Op::NONE)
       .value("ALL_GATHER", JAXX_Collective_Op::ALL_GATHER)

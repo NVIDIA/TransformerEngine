@@ -13,6 +13,21 @@
 extern "C" {
 #endif
 
+/*! \brief Output format of the routing_map tensor.
+ *
+ *  BYTEMAP   — bool/uint8 tensor of shape [num_tokens, num_experts]; one byte
+ *              per (token, expert) pair, 0 or 1.
+ *  BITMAP_U8 — uint8 tensor of shape [num_tokens, ceil(num_experts/8)]; bit
+ *              (e % 8) of byte (e / 8) of row t is 1 iff token t routes to
+ *              expert e (little-endian / LSB-first packing along the expert
+ *              axis). This is the layout NCCL EP dispatch is expected to
+ *              consume directly.
+ */
+typedef enum {
+  NVTE_ROUTING_MAP_FORMAT_BYTEMAP = 0,
+  NVTE_ROUTING_MAP_FORMAT_BITMAP_U8 = 1,
+} NVTERoutingMapFormat;
+
 /*! \brief Apply topk + softmax/sigmoid to the input tensor. Grouped topk is supported.
  *
  *  \param[in]     logits          Logits from the gating GEMM.
@@ -26,7 +41,11 @@ extern "C" {
  *  \param[in]     score_function  Score function, 0: sigmoid, 1: softmax, 2: sqrtsoftplus.
  *  \param[in]     expert_bias     Expert bias. (Used at the sigmoid/sqrtsoftplus cases)
  *  \param[out]    probs           Output tensor for probabilities.
- *  \param[out]    routing_map     Output tensor for routing map.
+ *  \param[out]    routing_map     Output tensor for routing map. Shape depends on
+ *                                 routing_map_format (see NVTERoutingMapFormat).
+ *  \param[in]     routing_map_format NVTERoutingMapFormat value selecting the routing_map
+ *                                    output layout. The caller is responsible for
+ *                                    allocating routing_map with the matching shape.
  *  \param[out]    intermediate_output  Output tensor for intermediate output. (Softmax/sigmoid output)
  *  \param[in]     stream          CUDA stream used for the operation.
  */
@@ -34,11 +53,12 @@ void nvte_fused_topk_with_score_function_forward(
     const NVTETensor logits, int num_tokens, int num_experts, int topk, int use_pre_softmax,
     int num_groups, int group_topk, float scaling_factor, int score_function,
     const NVTETensor expert_bias, NVTETensor probs, NVTETensor routing_map,
-    NVTETensor intermediate_output, cudaStream_t stream);
+    int routing_map_format, NVTETensor intermediate_output, cudaStream_t stream);
 
 /*! \brief Backward pass for fused topk + softmax/sigmoid.
  *
- *  \param[in]     routing_map     Routing map.
+ *  \param[in]     routing_map     Routing map (same layout as produced by forward).
+ *  \param[in]     routing_map_format NVTERoutingMapFormat value matching the layout of routing_map.
  *  \param[in]     intermediate_output  Intermediate output from the forward pass. (Softmax/sigmoid output)
  *  \param[in]     grad_probs      Gradient of probs.
  *  \param[in]     num_tokens      Number of tokens.
@@ -51,6 +71,7 @@ void nvte_fused_topk_with_score_function_forward(
  *  \param[in]     stream          CUDA stream used for the operation.
  */
 void nvte_fused_topk_with_score_function_backward(const NVTETensor routing_map,
+                                                  int routing_map_format,
                                                   const NVTETensor intermediate_output,
                                                   const NVTETensor grad_probs, int num_tokens,
                                                   int num_experts, int topk, int use_pre_softmax,
@@ -65,13 +86,17 @@ void nvte_fused_topk_with_score_function_backward(const NVTETensor routing_map,
  *  \param[in]     topk            Topk value.
  *  \param[in]     score_function  Score function, 0: sigmoid, 1: softmax, 2: sqrtsoftplus.
  *  \param[out]    scores          Output tensor for scores.
- *  \param[in]     routing_map     Routing map.
+ *  \param[out]    routing_map     Output tensor for routing map. Shape depends on
+ *                                 routing_map_format (see NVTERoutingMapFormat).
+ *  \param[in]     routing_map_format NVTERoutingMapFormat value selecting the routing_map
+ *                                    output layout.
  *  \param[in]     intermediate_output  Intermediate output from the forward pass. (Softmax/sigmoid output)
  *  \param[in]     stream          CUDA stream used for the operation.
  */
 void nvte_fused_score_for_moe_aux_loss_forward(const NVTETensor logits, int num_tokens,
                                                int num_experts, int topk, int score_function,
-                                               NVTETensor scores, const NVTETensor routing_map,
+                                               NVTETensor scores, NVTETensor routing_map,
+                                               int routing_map_format,
                                                const NVTETensor intermediate_output,
                                                cudaStream_t stream);
 

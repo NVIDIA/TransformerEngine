@@ -559,3 +559,141 @@ def test_fused_moe_aux_loss(dtype, num_tokens, num_experts, topk):
     assert jnp.allclose(
         grad_ref, grad_fused, atol=1e-5, rtol=1e-5
     ), f"Grad mismatch: max diff = {jnp.abs(grad_ref - grad_fused).max()}"
+
+
+# =============================================================================
+# Test: routing_map BITMAP_U8 vs BYTEMAP parity (fwd + bwd)
+# =============================================================================
+
+
+def _bytemap_to_bitmap_u8(bytemap):
+    """Reference packer: bool[T, E] -> uint8[T, ceil(E/8)] LSB-first."""
+    import numpy as np
+
+    flat = np.asarray(bytemap).astype(np.uint8)
+    return np.packbits(flat, axis=-1, bitorder="little")
+
+
+@pytest_parametrize_wrapper("dtype", DTYPES)
+@pytest_parametrize_wrapper(
+    "num_tokens,num_experts,topk",
+    TOPK_CASES,
+)
+@pytest_parametrize_wrapper("score_function", SCORE_FUNCTIONS)
+@pytest.mark.triton
+def test_topk_bitmap_vs_bytemap(dtype, num_tokens, num_experts, topk, score_function):
+    """fused_topk_with_score_function should produce the same probs and an
+    LSB-packed bitmap routing_map when routing_map_format=BITMAP_U8, and
+    backward gradients should match the bytemap path exactly."""
+    from transformer_engine.jax.router import RoutingMapFormat
+
+    logits = make_logits(num_tokens, num_experts, score_function, dtype)
+    expert_bias = None
+
+    fwd_byte = jax.jit(
+        partial(
+            fused_topk_with_score_function,
+            topk=topk,
+            score_function=score_function,
+            expert_bias=expert_bias,
+            routing_map_format=RoutingMapFormat.BYTEMAP,
+        )
+    )
+    fwd_bit = jax.jit(
+        partial(
+            fused_topk_with_score_function,
+            topk=topk,
+            score_function=score_function,
+            expert_bias=expert_bias,
+            routing_map_format=RoutingMapFormat.BITMAP_U8,
+        )
+    )
+    probs_byte, routing_map_byte = fwd_byte(logits)
+    probs_bit, routing_map_bit = fwd_bit(logits)
+
+    assert probs_byte.dtype == probs_bit.dtype
+    assert jnp.array_equal(probs_byte, probs_bit), "Probs must be identical across formats"
+
+    packed_expected = _bytemap_to_bitmap_u8(routing_map_byte)
+    assert routing_map_bit.shape == (num_tokens, (num_experts + 7) // 8), (
+        f"Bitmap shape {routing_map_bit.shape} != "
+        f"({num_tokens}, {(num_experts + 7) // 8})"
+    )
+    assert routing_map_bit.dtype == jnp.uint8
+    assert jnp.array_equal(routing_map_bit, packed_expected), (
+        "Bitmap routing_map disagrees with np.packbits(bytemap, bitorder='little')"
+    )
+
+    # Backward parity: grad of probs.sum() must be identical for both formats.
+    def loss_byte(logits_):
+        p, _ = fused_topk_with_score_function(
+            logits_,
+            topk,
+            score_function=score_function,
+            expert_bias=expert_bias,
+            routing_map_format=RoutingMapFormat.BYTEMAP,
+        )
+        return p.sum()
+
+    def loss_bit(logits_):
+        p, _ = fused_topk_with_score_function(
+            logits_,
+            topk,
+            score_function=score_function,
+            expert_bias=expert_bias,
+            routing_map_format=RoutingMapFormat.BITMAP_U8,
+        )
+        return p.sum()
+
+    grad_byte = jax.jit(jax.grad(loss_byte))(logits)
+    grad_bit = jax.jit(jax.grad(loss_bit))(logits)
+    assert jnp.allclose(grad_byte, grad_bit, atol=0.0, rtol=0.0), (
+        "Backward grad must be bit-identical across routing_map_format; "
+        f"max diff = {jnp.abs(grad_byte - grad_bit).max()}"
+    )
+
+
+@pytest_parametrize_wrapper("dtype", DTYPES)
+@pytest_parametrize_wrapper(
+    "num_tokens,num_experts,topk",
+    SCORE_AUX_LOSS_CASES,
+)
+@pytest_parametrize_wrapper("score_function", SCORE_FUNCTIONS)
+@pytest.mark.triton
+def test_score_for_aux_loss_bitmap_vs_bytemap(
+    dtype, num_tokens, num_experts, topk, score_function
+):
+    """compute_aux_scores=True path: bitmap routing_map must equal LSB-packed
+    bytemap; scores must be bitwise identical across formats."""
+    from transformer_engine.jax.router import RoutingMapFormat
+
+    logits = make_logits(num_tokens, num_experts, score_function, dtype)
+
+    fwd_byte = jax.jit(
+        partial(
+            fused_topk_with_score_function,
+            topk=topk,
+            score_function=score_function,
+            compute_aux_scores=True,
+            routing_map_format=RoutingMapFormat.BYTEMAP,
+        )
+    )
+    fwd_bit = jax.jit(
+        partial(
+            fused_topk_with_score_function,
+            topk=topk,
+            score_function=score_function,
+            compute_aux_scores=True,
+            routing_map_format=RoutingMapFormat.BITMAP_U8,
+        )
+    )
+    scores_byte, routing_map_byte = fwd_byte(logits)
+    scores_bit, routing_map_bit = fwd_bit(logits)
+
+    assert jnp.array_equal(scores_byte, scores_bit), "Scores must be identical across formats"
+    packed_expected = _bytemap_to_bitmap_u8(routing_map_byte)
+    assert routing_map_bit.shape == (num_tokens, (num_experts + 7) // 8)
+    assert routing_map_bit.dtype == jnp.uint8
+    assert jnp.array_equal(routing_map_bit, packed_expected), (
+        "Bitmap routing_map (aux-loss path) disagrees with packed bytemap"
+    )

@@ -21,10 +21,11 @@ Error_Type FusedTopkWithScoreFunctionForwardFFI(
     Buffer_Type logits_buf,        // [num_tokens, num_experts]
     Buffer_Type expert_bias_buf,   // [num_experts] or empty
     Result_Type probs_buf,         // [num_tokens, num_experts] (or scores when compute_aux_scores)
-    Result_Type routing_map_buf,   // [num_tokens, num_experts]
+    Result_Type routing_map_buf,   // BYTEMAP: [T, E] uint8 / BITMAP_U8: [T, ceil(E/8)] uint8
     Result_Type intermediate_buf,  // [num_tokens, num_experts]
     int64_t topk, int64_t use_pre_softmax, int64_t num_groups, int64_t group_topk,
-    double scaling_factor, JAXX_Score_Function score_function, int64_t compute_aux_scores) {
+    double scaling_factor, JAXX_Score_Function score_function, int64_t compute_aux_scores,
+    JAXX_Routing_Map_Format routing_map_format) {
   auto dtype = convert_ffi_datatype_to_te_dtype(logits_buf.element_type());
   auto dims = logits_buf.dimensions();
   auto num_tokens = static_cast<int>(product(dims, 0, dims.size() - 1));
@@ -40,7 +41,11 @@ Error_Type FusedTopkWithScoreFunctionForwardFFI(
       std::vector<size_t>{static_cast<size_t>(num_tokens), static_cast<size_t>(num_experts)};
   auto logits_tensor = TensorWrapper(logits, flat_shape, dtype);
   auto probs_tensor = TensorWrapper(probs, flat_shape, dtype);
-  auto routing_map_tensor = TensorWrapper(routing_map, flat_shape, DType::kByte);
+  // The routing_map TensorWrapper carries shape only for bookkeeping — the kernel
+  // indexes it directly using num_tokens / num_experts and the format flag.
+  auto routing_map_dims = routing_map_buf->dimensions();
+  auto routing_map_shape = std::vector<size_t>(routing_map_dims.begin(), routing_map_dims.end());
+  auto routing_map_tensor = TensorWrapper(routing_map, routing_map_shape, DType::kByte);
   // intermediate is always float32 (CompType) regardless of logits dtype.
   auto intermediate_dtype = convert_ffi_datatype_to_te_dtype(intermediate_buf->element_type());
   NVTE_CHECK(
@@ -50,11 +55,12 @@ Error_Type FusedTopkWithScoreFunctionForwardFFI(
       ". Check FusedTopkWithScoreFunctionFwdPrimitive.abstract in cpp_extensions/router.py.");
   auto intermediate_tensor = TensorWrapper(intermediate, flat_shape, DType::kFloat32);
 
+  int routing_map_format_int = static_cast<int>(routing_map_format);
   if (compute_aux_scores) {
     nvte_fused_score_for_moe_aux_loss_forward(
         logits_tensor.data(), num_tokens, num_experts, static_cast<int>(topk),
         static_cast<int>(score_function), probs_tensor.data(), routing_map_tensor.data(),
-        intermediate_tensor.data(), stream);
+        routing_map_format_int, intermediate_tensor.data(), stream);
   } else {
     auto bias_dims = expert_bias_buf.dimensions();
     auto expert_bias_tensor =
@@ -68,7 +74,7 @@ Error_Type FusedTopkWithScoreFunctionForwardFFI(
         static_cast<int>(use_pre_softmax), static_cast<int>(num_groups),
         static_cast<int>(group_topk), static_cast<float>(scaling_factor),
         static_cast<int>(score_function), expert_bias_tensor.data(), probs_tensor.data(),
-        routing_map_tensor.data(), intermediate_tensor.data(), stream);
+        routing_map_tensor.data(), routing_map_format_int, intermediate_tensor.data(), stream);
   }
 
   return ffi_with_cuda_error_check();
@@ -89,7 +95,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedTopkWithScoreFunctionForwardHandler,
                                   .Attr<int64_t>("group_topk")
                                   .Attr<double>("scaling_factor")
                                   .Attr<JAXX_Score_Function>("score_function")
-                                  .Attr<int64_t>("compute_aux_scores"),
+                                  .Attr<int64_t>("compute_aux_scores")
+                                  .Attr<JAXX_Routing_Map_Format>("routing_map_format"),
                               FFI_CudaGraph_Traits);
 
 // ============================================================================
@@ -98,12 +105,13 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedTopkWithScoreFunctionForwardHandler,
 
 Error_Type FusedTopkWithScoreFunctionBackwardFFI(
     cudaStream_t stream,
-    Buffer_Type routing_map_buf,   // [num_tokens, num_experts] (unused when compute_aux_scores)
+    Buffer_Type routing_map_buf,   // bytemap [T,E] uint8 or bitmap [T, ceil(E/8)] uint8
     Buffer_Type intermediate_buf,  // [num_tokens, num_experts]
     Buffer_Type grad_probs_buf,   // [num_tokens, num_experts] (grad_scores when compute_aux_scores)
     Result_Type grad_logits_buf,  // [num_tokens, num_experts]
     int64_t topk, int64_t use_pre_softmax, double scaling_factor,
-    JAXX_Score_Function score_function, int64_t compute_aux_scores) {
+    JAXX_Score_Function score_function, int64_t compute_aux_scores,
+    JAXX_Routing_Map_Format routing_map_format) {
   // intermediate is always float32 (CompType) regardless of logits dtype.
   auto intermediate_dtype = convert_ffi_datatype_to_te_dtype(intermediate_buf.element_type());
   NVTE_CHECK(
@@ -130,12 +138,16 @@ Error_Type FusedTopkWithScoreFunctionBackwardFFI(
                                                static_cast<int>(score_function),
                                                grad_logits_tensor.data(), stream);
   } else {
+    auto routing_map_dims = routing_map_buf.dimensions();
+    auto routing_map_shape =
+        std::vector<size_t>(routing_map_dims.begin(), routing_map_dims.end());
     auto routing_map_tensor =
-        TensorWrapper(routing_map_buf.untyped_data(), flat_shape, DType::kByte);
+        TensorWrapper(routing_map_buf.untyped_data(), routing_map_shape, DType::kByte);
 
     nvte_fused_topk_with_score_function_backward(
-        routing_map_tensor.data(), intermediate_tensor.data(), grad_probs_tensor.data(), num_tokens,
-        num_experts, static_cast<int>(topk), static_cast<int>(use_pre_softmax),
+        routing_map_tensor.data(), static_cast<int>(routing_map_format),
+        intermediate_tensor.data(), grad_probs_tensor.data(), num_tokens, num_experts,
+        static_cast<int>(topk), static_cast<int>(use_pre_softmax),
         static_cast<float>(scaling_factor), static_cast<int>(score_function),
         grad_logits_tensor.data(), stream);
   }
@@ -155,7 +167,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedTopkWithScoreFunctionBackwardHandler,
                                   .Attr<int64_t>("use_pre_softmax")
                                   .Attr<double>("scaling_factor")
                                   .Attr<JAXX_Score_Function>("score_function")
-                                  .Attr<int64_t>("compute_aux_scores"),
+                                  .Attr<int64_t>("compute_aux_scores")
+                                  .Attr<JAXX_Routing_Map_Format>("routing_map_format"),
                               FFI_CudaGraph_Traits);
 
 // ============================================================================
