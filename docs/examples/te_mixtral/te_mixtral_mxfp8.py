@@ -480,7 +480,7 @@ class NVMixtralMXFP8Model(NVMixtralMXFP8PreTrainedModel):
         )
 
 
-class NVMixtralMXFP8ForCausalLM(NVMixtralMXFP8PreTrainedModel):
+class TEMixtralMXFP8ForCausalLM(NVMixtralMXFP8PreTrainedModel):
     """Causal LM wrapper with MXFP8 autocast."""
 
     _tied_weights_keys: ClassVar[list[str]] = []

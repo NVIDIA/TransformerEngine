@@ -16,7 +16,7 @@ from transformer_engine.common import recipe as te_recipe
 
 from te_mixtral import NVMixtralForCausalLM, replace_params as replace_params_bf16
 from te_mixtral_mxfp8 import (
-    NVMixtralMXFP8ForCausalLM,
+    TEMixtralMXFP8ForCausalLM,
     replace_params as replace_params_mxfp8,
 )
 
@@ -142,13 +142,13 @@ def _run_mxfp8(cfg, model_hf, inputs, device, dtype):
     print("MXFP8 parity check (forward + backward)")
     print("=" * 64)
 
-    te_cfg = NVMixtralMXFP8ForCausalLM.config_class(**cfg.to_dict())
+    te_cfg = TEMixtralMXFP8ForCausalLM.config_class(**cfg.to_dict())
     te_cfg.attn_input_format = "bshd"
     te_cfg.self_attn_mask_type = "causal"
     te_cfg.expert_parallel_size = 1
     te_cfg.dtype = dtype
     recipe = te_recipe.MXFP8BlockScaling(fp8_format=te_recipe.Format.E4M3)
-    model_te = NVMixtralMXFP8ForCausalLM(te_cfg, fp8_recipe=recipe).to(device=device, dtype=dtype)
+    model_te = TEMixtralMXFP8ForCausalLM(te_cfg, fp8_recipe=recipe).to(device=device, dtype=dtype)
     _load_te_weights(model_te, model_hf, replace_params_mxfp8)
     model_te.eval()
 

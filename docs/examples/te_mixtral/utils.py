@@ -216,7 +216,7 @@ def init_te_mixtral_model(hyperparams: HyperParameters):
         if hyperparams.mixed_precision != "mxfp8":
             raise ValueError("model_impl='te_mixtral_mxfp8' requires mixed_precision='mxfp8'.")
         _enable_fused_mxfp8_grouped_mlp()
-        from te_mixtral_mxfp8 import NVMixtralMXFP8ForCausalLM as ForCausalLM
+        from te_mixtral_mxfp8 import TEMixtralMXFP8ForCausalLM as ForCausalLM
         from te_mixtral_mxfp8 import replace_params
     else:
         from te_mixtral import NVMixtralForCausalLM as ForCausalLM
