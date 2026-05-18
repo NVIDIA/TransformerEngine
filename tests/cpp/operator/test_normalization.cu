@@ -208,7 +208,7 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
   auto [atol_amax, rtol_amax] = getTolerances(DType::kFloat32);
   if (isFp8Type(otype)) {
     compareResults("amax", z.amax(), ref_amax, atol_amax, rtol_amax);
-    float ref_scale_inv = 1.f / z.scale();
+    float ref_scale_inv = 1.f / ref_scale;
     compareResults("scale_inv", z.rowwise_scale_inv(), ref_scale_inv, atol_amax, rtol_amax);
   }
 
