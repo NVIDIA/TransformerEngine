@@ -95,11 +95,14 @@ def run_dense_grad_tests(args, mesh=None):
     # Create test data
     rng = jax.random.PRNGKey(0)
     rng, x_rng, weight_rng, bias_rng = jax.random.split(rng, 4)
-    x = jax.random.normal(
+    std = jnp.asarray(args.std, dtype=jnp.bfloat16)
+    x = std * jax.random.normal(
         x_rng, (args.batch_size, args.seq_len, args.hidden_in), dtype=jnp.bfloat16
     )
-    weight = jax.random.normal(weight_rng, (args.hidden_in, args.hidden_out), dtype=jnp.bfloat16)
-    bias = jax.random.normal(bias_rng, (args.hidden_out,), dtype=jnp.bfloat16)
+    weight = std * jax.random.normal(
+        weight_rng, (args.hidden_in, args.hidden_out), dtype=jnp.bfloat16
+    )
+    bias = std * jax.random.normal(bias_rng, (args.hidden_out,), dtype=jnp.bfloat16)
 
     collective_op = (
         CollectiveOp.ALL_GATHER

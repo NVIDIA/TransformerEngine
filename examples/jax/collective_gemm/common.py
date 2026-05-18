@@ -232,6 +232,16 @@ def cgemm_parser(description="Collective GEMM test on multi-GPU with tensor para
     parser.add_argument("--hidden-in", type=int, default=4096, help="Input hidden dimension")
     parser.add_argument("--hidden-out", type=int, default=8192, help="Output hidden dimension")
     parser.add_argument(
+        "--std",
+        type=float,
+        default=0.023,
+        help=(
+            "Standard deviation for input/weight/bias tensors. Matches TE/PyTorch's"
+            " run_gemm_with_overlap.py default so both frameworks evaluate FP8 noise"
+            " on equal footing."
+        ),
+    )
+    parser.add_argument(
         "--collective-type",
         type=str,
         default="all_gather",

@@ -481,13 +481,19 @@ def _main(opts):
             # Sum the list together for final global result
             ref_g = torch.stack(bulk_inp_list).sum(dim=0)
     else:
+        # cuBLASMp always uses split-accumulator internally and does not expose a
+        # control to disable it, so force the reference to match when testing the
+        # cuBLASMp backend; otherwise honor the framework default.
+        ref_use_split_accumulator = (
+            True if opts.use_cublasmp else te.module.base._2X_ACC_FPROP
+        )
         # For AG: ker_g=kernel_t=(K/P,N), inp_g=(M,N) -> ref_g=(M,K/P) local chunk
         # For RS: ker_g=kernel_t=(N,K/P), inp_g=(M,K/P) -> ref_g=(M,N) partial
         ref_g, *_ = tex.general_gemm(
             ker_g,
             inp_g,
             out_dtype=torch.bfloat16,
-            use_split_accumulator=te.module.base._2X_ACC_FPROP,
+            use_split_accumulator=ref_use_split_accumulator,
         )
         if opts.comm_type == tex.CommOverlapType.RS:
             # Apply non-overlapped reduce-scatter to local reference GEMM output
@@ -508,7 +514,7 @@ def _main(opts):
                 ker2_g,
                 inp2_g,
                 out_dtype=torch.bfloat16,
-                use_split_accumulator=te.module.base._2X_ACC_FPROP,
+                use_split_accumulator=ref_use_split_accumulator,
             )
             # Apply non-overlapped reduce-scatter to partial results
             ref2_rs_list = [torch.zeros_like(ref2_partial) for _ in range(tp_size)]

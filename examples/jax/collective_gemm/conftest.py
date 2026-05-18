@@ -28,6 +28,8 @@ def distributed_args(request):
                 "Collective GEMM cuBLASMp backend tests require Transformer Engine to be built "
                 "with NVTE_WITH_CUBLASMP=1."
             )
+        if use_cublasmp and "mxfp8" in request.node.name.lower():
+            pytest.skip("MXFP8 is not supported by the cuBLASMp backend wrappers in TE/common.")
         request.cls.coordinator_address = request.config.getoption("--coordinator-address")
         request.cls.num_processes = int(request.config.getoption("--num-processes"))
         request.cls.process_id = int(request.config.getoption("--process-id"))
