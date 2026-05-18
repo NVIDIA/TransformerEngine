@@ -52,7 +52,9 @@ def test_newton_schulz_single_gpu():
     _run_worker(1)
 
 
-@pytest.mark.skipif(NUM_PROCS < 2, reason="Distributed Newton-Schulz tests require at least 2 GPUs.")
+@pytest.mark.skipif(
+    NUM_PROCS < 2, reason="Distributed Newton-Schulz tests require at least 2 GPUs."
+)
 def test_newton_schulz_distributed():
     """Launch one parallel job that runs all multi-GPU Newton-Schulz checks."""
     _run_worker(NUM_PROCS)
