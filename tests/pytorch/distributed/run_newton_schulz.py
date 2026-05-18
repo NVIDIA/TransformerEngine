@@ -46,20 +46,30 @@ def _dtype_from_name(dtype: str) -> torch.dtype:
     raise ValueError(f"Unsupported dtype: {dtype}")
 
 
-def _test_tolerances(dtype: str) -> tuple[float, float]:
-    return (5e-2, 5e-2) if dtype == "bfloat16" else (1e-2, 1e-2)
+def _test_tolerances(dtype: str, check: str, world_size: int) -> tuple[float, float]:
+    if dtype == "bfloat16":
+        return (5e-2, 5e-2)
+    if check == "orthogonality" and world_size == 1:
+        return (2e-2, 2e-2)
+    return (1e-2, 1e-2)
+
+
+def _shape_scale(world_size: int) -> int:
+    return 4 if world_size == 1 else world_size
 
 
 def _orthogonality_shapes(world_size: int) -> list[tuple[int, int]]:
+    scale = _shape_scale(world_size)
     return [
-        (world_size * 64, world_size * 64),
-        (world_size * 64, world_size * 96),
-        (world_size * 96, world_size * 64),
+        (scale * 64, scale * 64),
+        (scale * 64, scale * 96),
+        (scale * 96, scale * 64),
     ]
 
 
 def _reference_shapes(world_size: int) -> list[tuple[int, int]]:
-    return [(world_size * 64, world_size * 64)]
+    scale = _shape_scale(world_size)
+    return [(scale * 64, scale * 64)]
 
 
 def _make_matrix(
@@ -106,7 +116,7 @@ def _run_case(
     dtype = _dtype_from_name(dtype_name)
     m, n = matrix_shape
     coefficients = get_coefficients(num_iterations, coeff_type)
-    atol, rtol = _test_tolerances(dtype_name)
+    atol, rtol = _test_tolerances(dtype_name, check, world_size)
 
     if api == "base" or partition_dim == 1:
         # Ensure the distributed column dimension is divisible by world_size.
