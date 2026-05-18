@@ -4,6 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <cublasmp.h>
 #include <cuda.h>
 #include <gtest/gtest.h>
 #include <mpi.h>
@@ -495,6 +496,7 @@ struct GemmRs : public CommGemmFixure {
   }
 };
 
+#if CUBLASMP_VERSION >= 900
 struct GemmAr : public CommGemmFixure {
   OverlapType overlap_type() const override { return OverlapType::kAllReduce; }
 
@@ -528,6 +530,7 @@ struct GemmAr : public CommGemmFixure {
                          accumulate, comm_sm_count, stream, kNVTECommGemmAlgoDefault);
   }
 };
+#endif  // CUBLASMP_VERSION >= 900
 
 TEST_P(AgGemm, Gemm) {
   auto [a_type, b_type, d_type, transa, transb, m, n, k, tol] = GetParam();
@@ -549,6 +552,7 @@ TEST_P(GemmRs, Gemm) {
               d_type, DType, Run<AType, BType, DType, DType>(transa, transb, m, n, k, tol);)));
 }
 
+#if CUBLASMP_VERSION >= 900
 TEST_P(GemmAr, Gemm) {
   auto [a_type, b_type, d_type, transa, transb, m, n, k, tol] = GetParam();
   TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
@@ -558,6 +562,7 @@ TEST_P(GemmAr, Gemm) {
           TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
               d_type, DType, Run<AType, BType, DType, DType>(transa, transb, m, n, k, tol);)));
 }
+#endif  // CUBLASMP_VERSION >= 900
 
 std::string ParamSuffix(const testing::TestParamInfo<Params>& info) {
   const auto [a_type, b_type, d_type, transa, transb, m, n, k, _tol] = info.param;
@@ -610,6 +615,7 @@ INSTANTIATE_TEST_SUITE_P(GemmRs, GemmRs,
                                                 DType::kFloat16, true, false, 64, 128, 256, 7e-2}),
                          &ParamSuffix);
 
+#if CUBLASMP_VERSION >= 900
 INSTANTIATE_TEST_SUITE_P(
     GemmAr, GemmAr,
     testing::Values(Params{DType::kFloat16, DType::kFloat16, DType::kFloat16, true, false, 64,
@@ -623,3 +629,4 @@ INSTANTIATE_TEST_SUITE_P(
                     Params{DType::kFloat8E4M3, DType::kFloat8E4M3, DType::kFloat16, true, false,
                            128, 128 * 4, 128 * 4, 1.5e-1}),
     &ParamSuffix);
+#endif  // CUBLASMP_VERSION >= 900

@@ -181,6 +181,7 @@ Error_Type GemmInitV2FFI(Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buffer_Type
                                    bias_, pre_gelu_out_, false /*grad*/, false /*accumulate*/,
                                    prepare_stream);
       }
+      NVTE_CHECK_CUDA(cudaStreamSynchronize(prepare_stream));
     }
   }
   return ffi_with_cuda_error_check();
