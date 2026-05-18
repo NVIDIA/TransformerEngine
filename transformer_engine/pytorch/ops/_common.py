@@ -33,6 +33,11 @@ def _cudnn_frontend_version_supported() -> bool:
         return False
 
 
+def _nvidia_cudnn_frontend_supports_wgrad() -> bool:
+    """Check cuDNN FE min version for grouped GEMM wgrad kernel."""
+    return _cudnn_frontend_version_supported()
+
+
 def is_quantized_tensor(tensor: torch.Tensor | QuantizedTensorStorage) -> bool:
     """Check if tensor is a quantized tensor"""
     return isinstance(tensor, QuantizedTensorStorage)

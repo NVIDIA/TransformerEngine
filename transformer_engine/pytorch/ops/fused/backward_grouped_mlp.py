@@ -7,6 +7,7 @@
 from __future__ import annotations
 from collections.abc import Callable
 import functools
+import inspect
 import os
 from typing import Optional
 
@@ -131,6 +132,34 @@ def _cudnn_compute_wgrad(
             accumulate_on_output=accumulate,
             current_stream=current_stream,
         )
+
+
+@functools.lru_cache(maxsize=None)
+def _wrapper_has_arg(wrapper_name: str, arg_name: str) -> bool:
+    """True if a cuDNN FE SM100 wrapper accepts an argument."""
+    try:
+        import cudnn  # pylint: disable=import-outside-toplevel
+    except ImportError:
+        return False
+    try:
+        wrapper = getattr(cudnn, wrapper_name)
+        params = inspect.signature(wrapper).parameters
+    except (AttributeError, TypeError, ValueError):
+        return False
+    return arg_name in params
+
+
+def _dsrelu_wrapper_has_reuse_arg() -> bool:
+    """True if cuDNN FE SM100 dSReLU wrapper accepts ``use_dsrelu_reuse``."""
+    return _wrapper_has_arg("grouped_gemm_dsrelu_wrapper_sm100", "use_dsrelu_reuse")
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    """Parse a boolean environment flag."""
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "on")
 
 
 def _compute_grad_params(
@@ -365,6 +394,9 @@ class _BackwardGroupedMLP_CuTeGEMMDBase_MXFP8(FusedOperation):
 
         # Saved tensors from activation forward
         activation_in, scales = activation_ctx.saved_tensors
+        recompute_fc2_x_from_dsrelu = bool(
+            getattr(fc2_ctx, "recompute_input_from_dsrelu", False)
+        ) and bool(fc2_ctx.weight_requires_grad)
 
         # Saved tensors from FC2 forward.
         # Layout: [split_sizes, base_split_offsets, split_points,
@@ -450,8 +482,8 @@ class _BackwardGroupedMLP_CuTeGEMMDBase_MXFP8(FusedOperation):
         fc2_dy_scales = fc2_dy_scales.permute(3, 4, 1, 5, 2, 0)
 
         # Kernel scaling factors
-        alpha_tensor = get_cached_ones_tensor(num_groups, dtype, device)
-        norm_const_tensor = get_cached_ones_tensor(1, dtype, device)
+        alpha_tensor = get_cached_ones_tensor(num_groups, torch.float32, device)
+        norm_const_tensor = get_cached_ones_tensor(1, torch.float32, device)
         current_stream = torch.cuda.current_stream().cuda_stream
 
         scales_f32 = scales.detach().to(dtype=torch.float32)
@@ -478,6 +510,10 @@ class _BackwardGroupedMLP_CuTeGEMMDBase_MXFP8(FusedOperation):
         if self._cudnn_dact_func is not None:
             fc2_dactivation_kwargs["beta_tensor"] = alpha_tensor
             fc2_dactivation_kwargs["act_func"] = self._cudnn_dact_func
+        elif _dsrelu_wrapper_has_reuse_arg():
+            fc2_dactivation_kwargs["use_dsrelu_reuse"] = _env_flag(
+                "NVTE_CUTEDSL_FUSED_GROUPED_MLP_DSRELU_REUSE",
+            )
 
         if fc2_op.single_grouped_weight:
             # Clone and swizzle scales for GEMM
@@ -528,6 +564,37 @@ class _BackwardGroupedMLP_CuTeGEMMDBase_MXFP8(FusedOperation):
         # View scale in their actual swizzled shape
         fc1_dy_col_scale = fc2_dgrad_kernel_out["sfd_col_tensor"].permute(5, 2, 4, 0, 1, 3).view(-1)
         grad_scales = fc2_dgrad_kernel_out["dprob_tensor"].view(-1)
+
+        if recompute_fc2_x_from_dsrelu:
+            d_srelu_tensor = fc2_dgrad_kernel_out.get("d_srelu_tensor")
+            if d_srelu_tensor is None:
+                raise RuntimeError(
+                    "SReLU recompute is enabled, but the DSReLU kernel did not return "
+                    "the recomputed FC2 input tensor."
+                )
+
+            sfd_col_d_srelu_tensor = fc2_dgrad_kernel_out.get("sfd_col_d_srelu_tensor")
+            if sfd_col_d_srelu_tensor is None:
+                raise RuntimeError(
+                    "SReLU recompute is enabled, but the DSReLU kernel did not return "
+                    "the recomputed FC2 input column scale tensor."
+                )
+
+            fc2_x_col_data = d_srelu_tensor.view(out_shape[0], fc2_weight_shape[1])
+            fc2_x_col_scale = sfd_col_d_srelu_tensor.permute(5, 2, 4, 0, 1, 3)
+            grouped_fc2_x = GroupedTensor(
+                shape=(out_shape[0], fc2_weight_shape[1]),
+                dtype=dtype,
+                num_tensors=num_groups,
+                quantizer=fc2_ctx.input_quantizers[0],
+                data=None,
+                columnwise_data=fc2_x_col_data.reshape(-1),
+                scale_inv=None,
+                columnwise_scale_inv=fc2_x_col_scale.reshape(-1),
+                first_dims=split_sizes,
+                tensor_offsets=base_split_offsets * fc2_weight_shape[1],
+                with_gemm_swizzled_scales=True,
+            )
 
         fc2_bias_grads: Optional[list[Optional[torch.Tensor]]] = None
         fc2_bias_grad_packed: Optional[torch.Tensor] = None

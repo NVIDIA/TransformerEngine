@@ -24,6 +24,7 @@ from ..fuser import register_forward_fusion
 from ..op import FusedOperation, FusibleOperation, OperationContext
 from .._common import (
     _cudnn_frontend_version_supported,
+    _nvidia_cudnn_frontend_supports_wgrad,
     fuse_grouped_mlp_ops,
     is_glu_activation,
     is_quantized_tensor,
@@ -44,6 +45,25 @@ def _pack_grouped_linear_bias_for_cudnn(linear_op: GroupedLinear) -> Optional[to
     rows = [getattr(linear_op, f"bias{group_idx}") for group_idx in range(num_groups)]
     # stack to [num_groups, n] but cuDNN expects [n, num_groups] with stride [1, n].
     return torch.stack(rows, dim=0).transpose(0, 1)
+
+
+@functools.lru_cache(maxsize=1)
+def _grouped_gemm_dsrelu_backward_supported() -> bool:
+    """Whether the cuDNN FE grouped GEMM dSReLU backward wrapper is available."""
+    if int(os.environ.get("NVTE_CUTEDSL_FUSED_GROUPED_MLP", "0")) <= 0:
+        return False
+    if get_device_compute_capability()[0] != 10:
+        return False
+    try:
+        from cudnn import grouped_gemm_dsrelu_wrapper_sm100  # pylint: disable=import-outside-toplevel
+    except ImportError:
+        return False
+    return grouped_gemm_dsrelu_wrapper_sm100 is not None
+
+
+def _srelu_fc2_input_recompute_enabled() -> bool:
+    """Whether SReLU backward should regenerate the FC2 input instead of saving it."""
+    return int(os.environ.get("NVTE_CUTEDSL_FUSED_GROUPED_MLP_SRELU_RECOMPUTE", "1")) > 0
 
 
 class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
@@ -287,8 +307,8 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
         )
         fc1_x_scales = fc1_x_scales.permute(3, 4, 1, 5, 2, 0)
 
-        alpha_tensor = get_cached_ones_tensor(num_groups, dtype, device)
-        norm_const_tensor = get_cached_ones_tensor(1, dtype, device)
+        alpha_tensor = get_cached_ones_tensor(num_groups, torch.float32, device)
+        norm_const_tensor = get_cached_ones_tensor(1, torch.float32, device)
         current_stream = torch.cuda.current_stream().cuda_stream
 
         fc1_bias_packed = _pack_grouped_linear_bias_for_cudnn(fc1_op)
@@ -464,9 +484,18 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
         if requires_grad:
             mark_grouped_tensor(grouped_fc1_x, activation_in, scales, grouped_fc2_x)
             activation_op = self.basic_ops[1]
+            activation_is_srelu = isinstance(activation_op, ScaledSReLU)
+            recompute_srelu_fc2_x = (
+                activation_is_srelu
+                and weight_requires_grad
+                and _srelu_fc2_input_recompute_enabled()
+                and _grouped_gemm_dsrelu_backward_supported()
+                and _nvidia_cudnn_frontend_supports_wgrad()
+            )
+            saved_grouped_fc2_x = None if recompute_srelu_fc2_x else grouped_fc2_x
 
             # Save the input ``GroupedTensor``s themselves for the activations.
-            for grouped_fc_x in (grouped_fc1_x, grouped_fc2_x):
+            for grouped_fc_x in (grouped_fc1_x, saved_grouped_fc2_x):
                 if grouped_fc_x is not None:
                     grouped_fc_x.rowwise_data = None
                     grouped_fc_x.scale_inv = None
@@ -517,7 +546,7 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
             ]
             if fc2_op._scale_bias:
                 fc2_saved.append(fc2_scales)
-            fc2_saved.append(grouped_fc2_x)
+            fc2_saved.append(saved_grouped_fc2_x)
             fc2_saved.extend(fc2_weight_tensors)
             fc2_ctx.save_for_backward(*fc2_saved)
             fc2_ctx.use_grouped_tensor_path = True
@@ -529,6 +558,7 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
             fc2_ctx.dtype = dtype
             fc2_ctx.input_requires_grad = input_requires_grad
             fc2_ctx.weight_requires_grad = weight_requires_grad
+            fc2_ctx.recompute_input_from_dsrelu = recompute_srelu_fc2_x
 
         return fc2_out, [(), (), ()]
 
