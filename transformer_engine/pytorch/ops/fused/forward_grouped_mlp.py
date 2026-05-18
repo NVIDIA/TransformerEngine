@@ -497,8 +497,6 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
             # Activation
             activation_ctx.save_for_backward(activation_in, scales)
             activation_ctx.extra_input_requires_grad = True
-            if not is_glu_activation(activation_op):
-                activation_ctx.prev_op_grad_output_quantizer = fc1_grad_output_quantizer
             activation_ctx.input_requires_grad = True
             activation_ctx.dtype = dtype
 

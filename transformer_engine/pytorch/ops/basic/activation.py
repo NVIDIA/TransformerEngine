@@ -378,7 +378,7 @@ class ScaledSReLU(BasicOperation):
         input_: torch.Tensor,
         *,
         basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
-        prev_op_grad_output_quantizer: Optional[Quantizer],
+        prev_op_grad_output_quantizer: Optional[Quantizer],  # pylint: disable=unused-argument
         next_op_input_quantizer: Optional[Quantizer],  # pylint: disable=unused-argument
         basic_op_kwargs: list[dict[str, Any]],  # pylint: disable=unused-argument
     ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
@@ -402,7 +402,6 @@ class ScaledSReLU(BasicOperation):
             ctx.input_requires_grad = True
             ctx.extra_input_requires_grad = extra_input.requires_grad
             ctx.dtype = dtype
-            ctx.prev_op_grad_output_quantizer = prev_op_grad_output_quantizer
             ctx.save_for_backward(x, scales)
 
         return y, [()]
@@ -429,7 +428,7 @@ class ScaledSReLU(BasicOperation):
         grad_input = None
         if ctx.input_requires_grad:
             grad_srelu_out = grad_output * scales.unsqueeze(-1)
-            grad_input = tex.dsrelu(grad_srelu_out, x, ctx.prev_op_grad_output_quantizer)
+            grad_input = tex.dsrelu(grad_srelu_out, x, None)
 
         grad_extra_input = None
         if ctx.extra_input_requires_grad:
