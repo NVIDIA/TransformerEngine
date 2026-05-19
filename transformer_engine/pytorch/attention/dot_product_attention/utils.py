@@ -266,9 +266,9 @@ class AttentionParams:
         Whether an explicit core attention bias tensor was provided.
     user_supplied_seqlens : bool, default = False
         Whether explicit cu_seqlens metadata was provided.
-    score_mod : bool, default = False
+    has_score_mod : bool, default = False
         Whether a score_mod callback was provided.
-    score_mod_bprop : bool, default = False
+    has_score_mod_bprop : bool, default = False
         Whether a score_mod bprop callback was provided.
     """
 
@@ -308,8 +308,8 @@ class AttentionParams:
     has_attention_mask: bool = False
     has_core_attention_bias: bool = False
     user_supplied_seqlens: bool = False
-    score_mod: bool = False
-    score_mod_bprop: bool = False
+    has_score_mod: bool = False
+    has_score_mod_bprop: bool = False
 
     def __eq__(self, other):
         """
@@ -393,8 +393,8 @@ def get_attention_backend(
     has_attention_mask = attention_params.has_attention_mask
     has_core_attention_bias = attention_params.has_core_attention_bias
     user_supplied_seqlens = attention_params.user_supplied_seqlens
-    score_mod = attention_params.score_mod
-    score_mod_bprop = attention_params.score_mod_bprop
+    has_score_mod = attention_params.has_score_mod
+    has_score_mod_bprop = attention_params.has_score_mod_bprop
 
     # Run config
     logger = logging.getLogger("DotProductAttention")
@@ -480,6 +480,24 @@ def get_attention_backend(
         logger.debug("Disabling FusedAttention due to NVTE_FUSED_ATTN=0")
     if not use_unfused_attention:
         logger.debug("Disabling UnfusedDotProductAttention due to NVTE_UNFUSED_ATTN=0")
+
+    def _any_flash_attention_enabled() -> bool:
+        return bool(
+            use_flash_attention
+            or use_flash_attention_2
+            or use_flash_attention_3
+            or use_flash_attention_4
+        )
+
+    def _disable_all_flash_attention() -> None:
+        nonlocal use_flash_attention
+        nonlocal use_flash_attention_2
+        nonlocal use_flash_attention_3
+        nonlocal use_flash_attention_4
+        use_flash_attention = False
+        use_flash_attention_2 = False
+        use_flash_attention_3 = False
+        use_flash_attention_4 = False
 
     # Filter: Compute capability
     if device_compute_capability < (8, 0):
@@ -676,24 +694,18 @@ def get_attention_backend(
             logger.debug("Disabling all backends for max_logit with FP8 attention")
 
     # Filter: score_mod
-    if score_mod_bprop and not score_mod:
+    if has_score_mod_bprop and not has_score_mod:
         logger.debug("Disabling all backends because score_mod_bprop requires score_mod")
-        use_flash_attention = False
-        use_flash_attention_2 = False
-        use_flash_attention_3 = False
-        use_flash_attention_4 = False
+        _disable_all_flash_attention()
         use_fused_attention = False
         use_unfused_attention = False
-    if score_mod:
-        if use_flash_attention_2 or use_flash_attention_3 or use_flash_attention_4:
+    if has_score_mod:
+        if _any_flash_attention_enabled():
             logger.debug("Disabling FlashAttention for score_mod")
-        use_flash_attention = False
-        use_flash_attention_2 = False
-        use_flash_attention_3 = False
-        use_flash_attention_4 = False
+            _disable_all_flash_attention()
         if use_unfused_attention:
             logger.debug("Disabling UnfusedDotProductAttention for score_mod")
-        use_unfused_attention = False
+            use_unfused_attention = False
 
         score_mod_unsupported_reasons = []
         if qkv_dtype not in [torch.float16, torch.bfloat16]:
@@ -1362,7 +1374,7 @@ def get_attention_backend(
             logger.debug("Disabling FusedAttention as no backend supports the provided input")
             use_fused_attention = False
             fused_attention_backend = None
-        elif score_mod and fused_attention_backend != FusedAttnBackend["F16_arbitrary_seqlen"]:
+        elif has_score_mod and fused_attention_backend != FusedAttnBackend["F16_arbitrary_seqlen"]:
             logger.debug(
                 "Disabling FusedAttention for score_mod because sub-backend %s is not "
                 "F16/BF16 arbitrary-seqlen",

@@ -1432,6 +1432,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                 else:
                     pad_between_seqs = False
 
+            # Validate experimental flex attention API inputs that backend selection
+            # cannot represent.
             if score_mod is None:
                 assert score_mod_bprop is None, "score_mod_bprop requires score_mod!"
                 assert score_mod_tensors is None, "score_mod_tensors requires score_mod!"
@@ -1443,10 +1445,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                 assert score_mod_bprop is None or callable(
                     score_mod_bprop
                 ), "score_mod_bprop must be callable when provided!"
-                assert query_layer.dtype in [
-                    torch.float16,
-                    torch.bfloat16,
-                ], "score_mod only supports FP16 and BF16 tensors!"
+                assert (
+                    not is_in_onnx_export_mode()
+                ), "score_mod is not supported with ONNX export!"
                 assert (
                     key_layer.dtype == query_layer.dtype and value_layer.dtype == query_layer.dtype
                 ), "score_mod requires Q, K and V tensors to have the same dtype!"
@@ -1455,46 +1456,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                     and type(key_layer) is torch.Tensor
                     and type(value_layer) is torch.Tensor
                 ), "score_mod only supports unquantized torch.Tensor Q, K and V inputs!"
-                assert not self.fp8, "score_mod is not supported with FP8 DotProductAttention!"
-                assert not fp8_output, "score_mod is not supported with fp8_output!"
-                assert not context_parallel, "score_mod is not supported with context parallelism!"
-                assert qkv_format != "thd", "score_mod is not supported with qkv_format='thd'!"
-                assert (
-                    not user_supplied_seqlens
-                ), "score_mod is mutually exclusive with explicit sequence length metadata!"
-                assert not pad_between_seqs, "score_mod is not supported with pad_between_seqs!"
-                assert (
-                    attention_mask is None
-                ), "score_mod is mutually exclusive with attention_mask!"
-                assert attn_mask_type == "no_mask", "score_mod requires attn_mask_type='no_mask'!"
-                assert window_size is None or window_size == (
-                    -1,
-                    -1,
-                ), "score_mod is mutually exclusive with sliding window attention!"
-                assert (
-                    core_attention_bias_type == "no_bias" and core_attention_bias is None
-                ), "score_mod is mutually exclusive with attention bias!"
-                assert alibi_slopes is None, "score_mod is mutually exclusive with ALiBi!"
-                assert (
-                    self.softmax_type == "vanilla"
-                ), "score_mod is mutually exclusive with sink attention!"
-                assert (
-                    self.attention_dropout == 0.0
-                ), "score_mod is not supported with attention dropout!"
-                assert (
-                    not self.return_max_logit
-                ), "score_mod is not supported with return_max_logit!"
-                assert (
-                    not checkpoint_core_attention
-                ), "score_mod is not supported with checkpoint_core_attention!"
-                assert (
-                    not is_graph_capturing()
-                ), "score_mod is not supported with CUDA graph capture!"
-                assert num_splits == 1, "score_mod is not supported with num_splits != 1!"
-                assert q_format in ["sbhd", "bshd"] and kv_format in [
-                    "sbhd",
-                    "bshd",
-                ], "score_mod only supports SBHD/BSHD QKV formats!"
                 if score_mod_tensors is not None:
                     assert isinstance(score_mod_tensors, dict), "score_mod_tensors must be a dict!"
                     assert all(
@@ -1550,11 +1511,11 @@ class DotProductAttention(TransformerEngineBaseModule):
                 has_attention_mask=attention_mask is not None,
                 has_core_attention_bias=core_attention_bias is not None,
                 user_supplied_seqlens=user_supplied_seqlens,
-                score_mod=score_mod is not None,
-                score_mod_bprop=score_mod_bprop is not None,
+                has_score_mod=score_mod is not None,
+                has_score_mod_bprop=score_mod_bprop is not None,
             )
             global _attention_backends
-            if is_in_onnx_export_mode() and score_mod is None:
+            if is_in_onnx_export_mode():
                 # We do not want to call get_attention_backend() in ONNX mode
                 # and we want to avoid using any global variables like _attention_backends.
                 use_flash_attention = False
