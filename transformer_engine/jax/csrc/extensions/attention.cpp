@@ -736,14 +736,14 @@ struct ScoreModGraphCacheKeyHash {
 
 using ScoreModGraphPtr = std::shared_ptr<cudnn_frontend::graph::Graph>;
 
-std::unordered_map<ScoreModGraphCacheKey, ScoreModGraphPtr, ScoreModGraphCacheKeyHash> &
-ScoreModGraphCache() {
+std::unordered_map<ScoreModGraphCacheKey, ScoreModGraphPtr, ScoreModGraphCacheKeyHash>
+    &getScoreModeGraphCache() {
   static std::unordered_map<ScoreModGraphCacheKey, ScoreModGraphPtr, ScoreModGraphCacheKeyHash>
       cache;
   return cache;
 }
 
-std::mutex &ScoreModGraphCacheMutex() {
+std::mutex &getScoreModGraphCacheMutex() {
   static std::mutex mutex;
   return mutex;
 }
@@ -797,8 +797,8 @@ ScoreModGraphCacheKey GetScoreModGraphCacheKey(Dictionary &attrs) {
 ScoreModGraphPtr GetScoreModGraph(cudaStream_t stream, Dictionary &attrs) {
   const auto key = GetScoreModGraphCacheKey(attrs);
   {
-    std::lock_guard<std::mutex> lock(ScoreModGraphCacheMutex());
-    auto &cache = ScoreModGraphCache();
+    std::lock_guard<std::mutex> lock(getScoreModGraphCacheMutex());
+    auto &cache = getScoreModeGraphCache();
     auto it = cache.find(key);
     if (it != cache.end()) {
       return it->second;
@@ -816,8 +816,8 @@ ScoreModGraphPtr GetScoreModGraph(cudaStream_t stream, Dictionary &attrs) {
   NVTE_CHECK(status.is_good(),
              "Failed to deserialize cuDNN score_mod SDPA graph: ", status.get_message());
 
-  std::lock_guard<std::mutex> lock(ScoreModGraphCacheMutex());
-  auto &cache = ScoreModGraphCache();
+  std::lock_guard<std::mutex> lock(getScoreModGraphCacheMutex());
+  auto &cache = getScoreModeGraphCache();
   auto it = cache.find(key);
   if (it != cache.end()) {
     return it->second;
