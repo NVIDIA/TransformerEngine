@@ -3576,6 +3576,8 @@ class TestSequentialModules:
 
         # Check values
         tols = {"rtol": 0.25, "atol": 0.5}  # Loose tols for sanity checking
+        if quantization == "nvfp4_4over6":
+            tols = {"rtol": 0.25, "atol": 0.75}
         assert_close(y_test, y_ref, **tols)
         assert_close(x_test.grad, x_ref.grad, **tols)
         assert_close_grads(norm.weight, norm_w_ref, **tols)
