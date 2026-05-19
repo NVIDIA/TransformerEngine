@@ -11,61 +11,92 @@
 #include "../common.h"
 #include "../util/logging.h"
 #include "../utils.cuh"
+#include "async_loader.h"
 #include "utils.h"
 
 namespace transformer_engine {
 namespace fused_router {
 
 template <typename DataType, TopkFuncType TopkFunc = TopkFuncType::Naive>
-__global__ void fused_score_for_moe_aux_loss_forward_kernel(const DataType *logits, int num_tokens,
-                                                            int num_experts, int topk,
-                                                            int score_function, float *scores,
-                                                            bool *routing_map,
-                                                            CompType *intermediate_output) {
+__global__ void fused_score_for_moe_aux_loss_forward_kernel(
+    const DataType *logits, int num_tokens, int num_experts, int topk,
+    int score_function, float *scores, bool *routing_map, CompType *intermediate_output,
+    int num_buffers) {
   /***
      * Section: Global Variables/Addresses init
      * - Each warp is responsible for one token, and has own shared memory buffer.
      *   Then __syncwarp() is used instead of __syncthreads()
      */
-  // Used variables/addresses init
   int num_token_per_block = blockDim.x / kThreadsPerWarp;
   int warp_id = threadIdx.x / kThreadsPerWarp;
   int lane_id = threadIdx.x % kThreadsPerWarp;
-  extern __shared__ float shmem_scores_for_aux_loss[];
-  CompType *logits_buf = reinterpret_cast<CompType *>(shmem_scores_for_aux_loss);
-  CompType *topk_logits_buf =
-      reinterpret_cast<CompType *>(logits_buf + num_experts * num_token_per_block);
+  extern __shared__ char shmem_raw_aux[];
+
+  // Shmem layout: logits_raw (async) | logits_work | topk_scratch
+  char *shmem_ptr = shmem_raw_aux;
+  DataType *logits_shmem_base = reinterpret_cast<DataType *>(shmem_ptr);
+  RawAsyncLoader<DataType> loader(logits_shmem_base, warp_id, num_experts, num_token_per_block,
+                                  num_buffers);
+  shmem_ptr += RawAsyncLoader<DataType>::shmem_bytes(num_experts, num_token_per_block, num_buffers);
+
+  CompType *logits_work_buf = reinterpret_cast<CompType *>(shmem_ptr);
+  shmem_ptr += num_experts * num_token_per_block * sizeof(CompType);
+
+  CompType *topk_logits_buf = reinterpret_cast<CompType *>(shmem_ptr);
   int *topk_indices_buf = reinterpret_cast<int *>(topk_logits_buf + topk * num_token_per_block);
+
   // The address of buffers on the current warp
-  CompType *local_logits = logits_buf + warp_id * num_experts;
+  CompType *local_logits = logits_work_buf + warp_id * num_experts;
   CompType *topk_logits = topk_logits_buf + warp_id * topk;
   int *topk_indices = topk_indices_buf + warp_id * topk;
 
   /***
-     * Section: Main Loop
+     * Section: Main Loop — persistent grid with double-buffered async load
      * - Each warp is responsible for one token
      */
   int total_round = (num_tokens + num_token_per_block - 1) / num_token_per_block;
-  for (int round = blockIdx.x; round < total_round; round += gridDim.x) {
+  int first_round = blockIdx.x;
+  if (first_round >= total_round) return;
+
+  // Kick off first async load
+  {
+    int first_token = first_round * num_token_per_block + warp_id;
+    if (first_token < num_tokens) {
+      loader.load_current(logits + first_token * num_experts, num_experts, lane_id);
+    }
+  }
+
+  for (int round = first_round; round < total_round; round += gridDim.x) {
     int token_offset_cur_warp = round * num_token_per_block + warp_id;
-    // Each warp is responsible for one token
     if (token_offset_cur_warp >= num_tokens) break;
+
+    loader.wait();
+    DataType *raw_logits = loader.current_buf();
+
+    // Prefetch next round
+    int next_round = round + gridDim.x;
+    if (next_round < total_round) {
+      int next_token = next_round * num_token_per_block + warp_id;
+      if (next_token < num_tokens) {
+        loader.start_load(logits + next_token * num_experts, num_experts, lane_id);
+      }
+    }
 
     /***
          * Section: Init buffer + Preprocess
-         * - Load logits → apply score function → save intermediate_output
+         * - Convert raw logits (DataType) → apply score function → save intermediate_output
          *
          * Fused into a single loop per score function where possible:
-         *   score_function == 0 (sigmoid):      load, sigmoid, save → shmem
-         *   score_function == 1 (softmax):      load → shmem, softmax (multi-pass), save
-         *   score_function == 2 (sqrtsoftplus): load, save logits, sqrtsoftplus → shmem
+         *   score_function == 0 (sigmoid):      convert, sigmoid, save → shmem
+         *   score_function == 1 (softmax):      convert → shmem, softmax (multi-pass), save
+         *   score_function == 2 (sqrtsoftplus): convert, save logits, sqrtsoftplus → shmem
          */
     int pos_offset = token_offset_cur_warp * num_experts;
 
     if (score_function == 1) {  // Softmax
       // Apply softmax to all logits, save softmax output for backward
       for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
-        local_logits[i] = static_cast<CompType>(logits[pos_offset + i]);
+        local_logits[i] = static_cast<CompType>(raw_logits[i]);
       }
       __syncwarp();
       apply_softmax_on_float(local_logits, num_experts, lane_id);
@@ -75,16 +106,16 @@ __global__ void fused_score_for_moe_aux_loss_forward_kernel(const DataType *logi
         intermediate_output[pos_offset + i] = local_logits[i];
       }
     } else if (score_function == 0) {  // Sigmoid
-      // Fused: load logit → sigmoid → save sigmoid output for backward → shmem
+      // Fused: convert → sigmoid → save sigmoid output for backward → shmem
       for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
-        float val = sigmoid_scalar(static_cast<CompType>(logits[pos_offset + i]));
+        float val = sigmoid_scalar(static_cast<CompType>(raw_logits[i]));
         intermediate_output[pos_offset + i] = val;  // Save sigmoid output for backward
         local_logits[i] = val;
       }
     } else if (score_function == 2) {  // Sqrtsoftplus
-      // Fused: load logit → save original logit for backward → sqrtsoftplus → shmem
+      // Fused: convert → save original logit for backward → sqrtsoftplus → shmem
       for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
-        float logit = static_cast<CompType>(logits[pos_offset + i]);
+        float logit = static_cast<CompType>(raw_logits[i]);
         intermediate_output[pos_offset + i] = logit;  // Save original logits for backward
         local_logits[i] = sqrtsoftplus_scalar(logit);
       }
@@ -109,15 +140,15 @@ __global__ void fused_score_for_moe_aux_loss_forward_kernel(const DataType *logi
     __syncwarp();
 
     // Write the routing_map to the output tensor
+    vec_fill_global(routing_map + pos_offset, false, num_experts, lane_id);
     for (int i = lane_id; i < topk; i += kThreadsPerWarp) {
       routing_map[pos_offset + topk_indices[i]] = true;
     }
     // Write the scores to the output tensor
-    for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
-      scores[pos_offset + i] = local_logits[i];
-    }
-    __threadfence_block();
+    vec_store_global(scores + pos_offset, local_logits, num_experts, lane_id);
     __syncwarp();
+
+    loader.flip();
   }
 }
 
@@ -125,33 +156,39 @@ template <typename DataType>
 void fused_score_for_moe_aux_loss_forward_kernel_launcher(
     const DataType *logits, int num_tokens, int num_experts, int topk, int score_function,
     float *scores, bool *routing_map, CompType *intermediate_output, cudaStream_t stream) {
-  // Meta data for the kernel
   size_t num_token_per_block = kThreadsPerBlock / kThreadsPerWarp;
-  size_t grid_size = (num_tokens + num_token_per_block - 1) / num_token_per_block;
-  size_t shared_memory_size = num_experts * num_token_per_block * sizeof(CompType)  // logits
-                              + topk * num_token_per_block * sizeof(CompType)       // topk_logits
-                              + topk * num_token_per_block * sizeof(int);           // topk_indices
+  size_t total_blocks = (num_tokens + num_token_per_block - 1) / num_token_per_block;
+
+  size_t scores_shmem = num_experts * num_token_per_block * sizeof(CompType);
+  size_t scratch_shmem = topk * num_token_per_block * sizeof(CompType)
+                         + topk * num_token_per_block * sizeof(int);
+  size_t other_shmem = scores_shmem + scratch_shmem;
+  size_t logits_single_buf =
+      RawAsyncLoader<DataType>::shmem_bytes(num_experts, num_token_per_block, 1);
+  int num_buffers = choose_num_buffers(logits_single_buf, other_shmem);
+  size_t logits_raw_shmem =
+      RawAsyncLoader<DataType>::shmem_bytes(num_experts, num_token_per_block, num_buffers);
+  size_t shared_memory_size = logits_raw_shmem + other_shmem;
   check_shared_memory_capacity_num_experts(shared_memory_size, num_experts);
+
+  auto launch = [&](auto kernel) {
+    NVTE_CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                         shared_memory_size));
+    size_t grid_size =
+        compute_persistent_grid(kernel, kThreadsPerBlock, shared_memory_size, total_blocks);
+    kernel<<<grid_size, kThreadsPerBlock, shared_memory_size, stream>>>(
+        logits, num_tokens, num_experts, topk, score_function, scores, routing_map,
+        intermediate_output, num_buffers);
+    NVTE_CHECK_CUDA(cudaGetLastError());
+  };
+
   // Radix selection is O(E), independent of K, but it needs 4 passes for 32-bit float;
   // switch at K=16 where naive O(K^2*E) starts to dominate
   if (topk < 16) {
-    NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-        fused_score_for_moe_aux_loss_forward_kernel<DataType, TopkFuncType::Naive>,
-        cudaFuncAttributeMaxDynamicSharedMemorySize, shared_memory_size));
-    fused_score_for_moe_aux_loss_forward_kernel<DataType, TopkFuncType::Naive>
-        <<<grid_size, kThreadsPerBlock, shared_memory_size, stream>>>(
-            logits, num_tokens, num_experts, topk, score_function, scores, routing_map,
-            intermediate_output);
+    launch(fused_score_for_moe_aux_loss_forward_kernel<DataType, TopkFuncType::Naive>);
   } else {
-    NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-        fused_score_for_moe_aux_loss_forward_kernel<DataType, TopkFuncType::Radix>,
-        cudaFuncAttributeMaxDynamicSharedMemorySize, shared_memory_size));
-    fused_score_for_moe_aux_loss_forward_kernel<DataType, TopkFuncType::Radix>
-        <<<grid_size, kThreadsPerBlock, shared_memory_size, stream>>>(
-            logits, num_tokens, num_experts, topk, score_function, scores, routing_map,
-            intermediate_output);
+    launch(fused_score_for_moe_aux_loss_forward_kernel<DataType, TopkFuncType::Radix>);
   }
-  NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
 void fused_score_for_moe_aux_loss_forward(const Tensor &logits, int num_tokens, int num_experts,
@@ -169,14 +206,13 @@ void fused_score_for_moe_aux_loss_forward(const Tensor &logits, int num_tokens, 
 
 // Backward: grad_scores + intermediate_output → grad_logits.
 // No routing_map — all experts participate (unlike topk backward).
+// Double-buffered cp.async loads both inputs.  Two-pass fused approach.
 //
-// Two-pass fused approach (eliminates the comp_buf shmem buffer):
-//   Pass 1 (reduction): accumulate warp-level sums for normalization/softmax bwd.
-//   Pass 2 (element-wise): compute per-element gradient and write to global memory.
-//
-// Shmem layout (W = warps/block):
-//   grad_buf: E × W × sizeof(CompType)   — grad_scores loaded from global
-//   act_buf:  E × W × sizeof(CompType)   — intermediate_output (sigmoid/softmax out, or logits)
+// Shmem layout (B = 2, W = warps/block):
+//   grad_buf: B × E × W × sizeof(CompType)   — double-buffered async load
+//   act_buf:  B × E × W × sizeof(CompType)   — double-buffered async load
+constexpr int kAuxBwdNumBuffers = 2;
+
 template <typename DataType>
 __global__ void fused_score_for_moe_aux_loss_backward_kernel(const CompType *intermediate_output,
                                                              const float *grad_scores,
@@ -191,32 +227,59 @@ __global__ void fused_score_for_moe_aux_loss_backward_kernel(const CompType *int
   int num_token_per_block = blockDim.x / kThreadsPerWarp;
   int warp_id = threadIdx.x / kThreadsPerWarp;
   int lane_id = threadIdx.x % kThreadsPerWarp;
-  extern __shared__ float shmem[];
-  CompType *grad_buf = reinterpret_cast<CompType *>(shmem);
-  CompType *act_buf = grad_buf + num_experts * num_token_per_block;
-  // The address of buffers on the current warp
-  CompType *local_grad = grad_buf + warp_id * num_experts;
-  CompType *local_act = act_buf + warp_id * num_experts;
+
+  extern __shared__ char shmem_aux_bwd[];
+  char *shmem_ptr = shmem_aux_bwd;
+
+  CompType *grad_shmem_base = reinterpret_cast<CompType *>(shmem_ptr);
+  RawAsyncLoader<CompType> grad_loader(grad_shmem_base, warp_id, num_experts,
+                                       num_token_per_block, kAuxBwdNumBuffers);
+  shmem_ptr += RawAsyncLoader<CompType>::shmem_bytes(num_experts, num_token_per_block,
+                                                     kAuxBwdNumBuffers);
+
+  CompType *act_shmem_base = reinterpret_cast<CompType *>(shmem_ptr);
+  RawAsyncLoader<CompType> act_loader(act_shmem_base, warp_id, num_experts,
+                                      num_token_per_block, kAuxBwdNumBuffers);
 
   /***
-     * Section: Main Loop
+     * Section: Main Loop — persistent grid with double-buffered async load
      * - Each warp is responsible for one token
      */
   int total_round = (num_tokens + num_token_per_block - 1) / num_token_per_block;
-  for (int round = blockIdx.x; round < total_round; round += gridDim.x) {
+  int first_round = blockIdx.x;
+  if (first_round >= total_round) return;
+
+  // Kick off first async load
+  {
+    int first_token = first_round * num_token_per_block + warp_id;
+    if (first_token < num_tokens) {
+      int pos = first_token * num_experts;
+      grad_loader.load_current(grad_scores + pos, num_experts, lane_id);
+      act_loader.load_current(intermediate_output + pos, num_experts, lane_id);
+    }
+  }
+
+  for (int round = first_round; round < total_round; round += gridDim.x) {
     int token_idx = round * num_token_per_block + warp_id;
     if (token_idx >= num_tokens) break;
     int pos = token_idx * num_experts;
 
-    /***
-         * Section: Load inputs to shmem
-         * - Load the grad_scores/intermediate_output to shmem
-         */
-    for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
-      local_grad[i] = grad_scores[pos + i];
-      local_act[i] = intermediate_output[pos + i];
+    grad_loader.wait();
+    act_loader.wait();
+
+    CompType *raw_grad = grad_loader.current_buf();
+    CompType *raw_act = act_loader.current_buf();
+
+    // Prefetch next round
+    int next_round = round + gridDim.x;
+    if (next_round < total_round) {
+      int next_token = next_round * num_token_per_block + warp_id;
+      if (next_token < num_tokens) {
+        int next_pos = next_token * num_experts;
+        grad_loader.start_load(grad_scores + next_pos, num_experts, lane_id);
+        act_loader.start_load(intermediate_output + next_pos, num_experts, lane_id);
+      }
     }
-    __syncwarp();
 
     /***
          * Section: Pass 1 — Reduction
@@ -232,8 +295,8 @@ __global__ void fused_score_for_moe_aux_loss_backward_kernel(const CompType *int
     CompType sum_output_x_grad = 0.0f;
 
     for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
-      CompType g = local_grad[i];
-      CompType act = local_act[i];
+      CompType g = static_cast<CompType>(raw_grad[i]);
+      CompType act = raw_act[i];
       if (score_function == 0) {  // Sigmoid
         // act = sigmoid output; accumulate over all experts
         sum_act += act; sum_grad_act += g * act;
@@ -264,8 +327,8 @@ __global__ void fused_score_for_moe_aux_loss_backward_kernel(const CompType *int
          * Write the grad_logits to the global mem
          */
     for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
-      CompType g = local_grad[i];
-      CompType act = local_act[i];
+      CompType g = static_cast<CompType>(raw_grad[i]);
+      CompType act = raw_act[i];
 
       if (score_function == 0) {  // Sigmoid bwd
         g = normalize_bwd_scalar(g, true, sum_act, sum_grad_act);
@@ -279,7 +342,9 @@ __global__ void fused_score_for_moe_aux_loss_backward_kernel(const CompType *int
 
       grad_logits[pos + i] = static_cast<DataType>(g);
     }
-    __syncwarp();
+
+    grad_loader.flip();
+    act_loader.flip();
   }
 }
 
@@ -288,18 +353,21 @@ void fused_score_for_moe_aux_loss_backward_kernel_launcher(
     const CompType *intermediate_output, const float *grad_scores, int num_tokens, int num_experts,
     int topk, int score_function, DataType *grad_logits, cudaStream_t stream) {
   size_t num_token_per_block = kThreadsPerBlock / kThreadsPerWarp;
-  size_t grid_size = (num_tokens + num_token_per_block - 1) / num_token_per_block;
-  // Shmem: grad_buf + act_buf (no comp_buf — eliminated by fused scalar approach)
-  size_t shared_memory_size = num_experts * num_token_per_block * sizeof(CompType)  // grad_buf
-                              + num_experts * num_token_per_block * sizeof(CompType);  // act_buf
-  check_shared_memory_capacity_num_experts(shared_memory_size, num_experts);
-  NVTE_CHECK_CUDA(cudaFuncSetAttribute(fused_score_for_moe_aux_loss_backward_kernel<DataType>,
-                                       cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                       shared_memory_size));
-  fused_score_for_moe_aux_loss_backward_kernel<DataType>
-      <<<grid_size, kThreadsPerBlock, shared_memory_size, stream>>>(
-          intermediate_output, grad_scores, num_tokens, num_experts, topk, score_function,
-          grad_logits);
+  size_t total_blocks = (num_tokens + num_token_per_block - 1) / num_token_per_block;
+
+  size_t shmem_bytes =
+      RawAsyncLoader<CompType>::shmem_bytes(num_experts, num_token_per_block, kAuxBwdNumBuffers) +
+      RawAsyncLoader<CompType>::shmem_bytes(num_experts, num_token_per_block, kAuxBwdNumBuffers);
+  check_shared_memory_capacity_num_experts(shmem_bytes, num_experts);
+
+  auto kernel = fused_score_for_moe_aux_loss_backward_kernel<DataType>;
+  NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+      kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_bytes));
+  size_t grid_size =
+      compute_persistent_grid(kernel, kThreadsPerBlock, shmem_bytes, total_blocks);
+  kernel<<<grid_size, kThreadsPerBlock, shmem_bytes, stream>>>(
+      intermediate_output, grad_scores, num_tokens, num_experts, topk, score_function,
+      grad_logits);
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
