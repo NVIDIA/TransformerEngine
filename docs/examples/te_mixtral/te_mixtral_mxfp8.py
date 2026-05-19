@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""TE-native MXFP8 Mixtral model (tier 3).
+"""TE-native MXFP8 Mixtral model (improvement 3).
 
 MoE FFN is a TE ``Sequential`` of three fusible ops — ``GroupedLinear``
 (gate_up), ``ScaledSwiGLU(glu_interleave_size=32)``, ``GroupedLinear``
@@ -66,7 +66,7 @@ from hf_to_te_weights import (
 
 
 class TEMixtralMXFP8Config(MixtralConfig):
-    """Improvement-9 config. Same surface as :class:`te_mixtral.TEMixtralConfig` but
+    """Improvement-3 config. Same surface as :class:`te_mixtral.TEMixtralConfig` but
     with the FFN mode locked to ``grouped_op`` + MXFP8."""
 
     attn_input_format: str = "thd"
@@ -84,7 +84,7 @@ class TEMixtralMXFP8Config(MixtralConfig):
 
 
 class TEMixtralMXFP8PreTrainedModel(PreTrainedModel):
-    """HF integration boilerplate for the tier-3 model."""
+    """HF integration boilerplate for the improvement-3 model."""
 
     config_class = TEMixtralMXFP8Config
     base_model_prefix = "model"
@@ -255,7 +255,7 @@ class TEMixtralMXFP8SparseMoeBlock(nn.Module):
 
 
 class TEMixtralMXFP8DecoderLayer(nn.Module):
-    """Self-attention + tier-3 MoE block."""
+    """Self-attention + improvement-3 MoE block."""
 
     def __init__(
         self,
@@ -395,7 +395,17 @@ class TEMixtralMXFP8Model(TEMixtralMXFP8PreTrainedModel):
         has_thd_input = [
             x in kwargs for x in ("cu_seq_lens_q", "cu_seq_lens_k", "max_length_q", "max_length_k")
         ]
-        should_pack_inputs = not any(has_thd_input) and self.config.attn_input_format == "thd"
+        decode_without_mask = (
+            isinstance(past_key_values, InferenceParams)
+            and attention_mask is None
+            and hidden_states.dim() == 3
+            and hidden_states.size(1) == 1
+        )
+        should_pack_inputs = (
+            not any(has_thd_input)
+            and self.config.attn_input_format == "thd"
+            and not decode_without_mask
+        )
 
         thd_remainder = 0
         thd_orig_tokens = 0
@@ -438,10 +448,11 @@ class TEMixtralMXFP8Model(TEMixtralMXFP8PreTrainedModel):
             attention_mask = ~attention_mask[:, None, None, :].bool()
 
         if isinstance(past_key_values, InferenceParams):
+            _ref = input_ids if input_ids is not None else inputs_embeds
             lengths = (
                 attention_mask.sum(dim=1).tolist()
-                if attention_mask.shape == input_ids.shape
-                else [1] * input_ids.shape[0]
+                if attention_mask is not None and attention_mask.shape[:2] == _ref.shape[:2]
+                else [1] * _ref.shape[0]
             )
             past_key_values.pre_step(OrderedDict(zip(list(range(len(lengths))), lengths)))
 

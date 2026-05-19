@@ -262,7 +262,7 @@ class TEMixtralSparseMoeBlock(nn.Module):
             )
 
         # Expert FFNs — only num_local_experts per rank when EP > 1.
-        # Both ``grouped_op`` (tier 2) and ``loop`` (tier 1) allocate the same
+        # Both ``grouped_op`` (improvement 2) and ``loop`` (improvement 1) allocate the same
         # pair of GroupedLinear ops; ``loop`` just routes its tokens through
         # them one-expert-at-a-time in ``_expert_ffn``.
         self.experts_gate_up = TEOpsGroupedLinear(
@@ -350,13 +350,13 @@ class TEMixtralSparseMoeBlock(nn.Module):
             return
 
         gate_up_w = self.experts_gate_up_weight
-        if isinstance(gate_up_w, DTensor):
+        if isinstance(gate_up_w, DTensor) or isinstance(gate_up_w.data, DTensor):
             gate_up_w = gate_up_w.to_local()
         for i in range(self.num_local_experts):
             object.__setattr__(self.experts_gate_up, f"weight{i}", gate_up_w[i])
 
         down_w = self.experts_down_weight
-        if isinstance(down_w, DTensor):
+        if isinstance(down_w, DTensor) or isinstance(down_w.data, DTensor):
             down_w = down_w.to_local()
         for i in range(self.num_local_experts):
             object.__setattr__(self.experts_down, f"weight{i}", down_w[i])
@@ -684,7 +684,17 @@ class TEMixtralModel(TEMixtralPreTrainedModel):
         has_thd_input = [
             x in kwargs for x in ["cu_seq_lens_q", "cu_seq_lens_k", "max_length_q", "max_length_k"]
         ]
-        should_pack_inputs = not any(has_thd_input) and self.config.attn_input_format == "thd"
+        decode_without_mask = (
+            isinstance(past_key_values, InferenceParams)
+            and attention_mask is None
+            and hidden_states.dim() == 3
+            and hidden_states.size(1) == 1
+        )
+        should_pack_inputs = (
+            not any(has_thd_input)
+            and self.config.attn_input_format == "thd"
+            and not decode_without_mask
+        )
 
         if should_pack_inputs:
             assert (
@@ -727,10 +737,11 @@ class TEMixtralModel(TEMixtralPreTrainedModel):
             attention_mask = ~attention_mask[:, None, None, :].bool()
 
         if isinstance(past_key_values, InferenceParams):
+            _ref = input_ids if input_ids is not None else inputs_embeds
             lengths = (
                 attention_mask.sum(dim=1).tolist()
-                if attention_mask.shape == input_ids.shape
-                else [1] * input_ids.shape[0]
+                if attention_mask is not None and attention_mask.shape[:2] == _ref.shape[:2]
+                else [1] * _ref.shape[0]
             )
             past_key_values.pre_step(OrderedDict(zip(list(range(len(lengths))), lengths)))
 
@@ -938,6 +949,18 @@ def save_final_model_ep(
             If ``None``, only rank 0 saves.
     """
     from safetensors.torch import save_file
+
+    for module in model.modules():
+        if (
+            isinstance(module, TEMixtralSparseMoeBlock)
+            and module.ep_size > 1
+            and not module._uses_stacked_expert_weights
+        ):
+            raise NotImplementedError(
+                "save_final_model_ep does not yet support grouped_op expert weights with "
+                "expert_parallel_size > 1 because those per-expert parameters are not DTensors "
+                "and cannot be all-gathered by get_model_state_dict."
+            )
 
     model_state_dict = get_model_state_dict(
         model,
@@ -1250,7 +1273,7 @@ class AllToAllTokenDispatcher:
             permuted_hidden, row_id_map = transformer_engine.pytorch.moe_permute(
                 hidden_states,
                 selected_experts.to(torch.int32),
-                num_out_tokens=0,
+                num_out_tokens=selected_experts.numel(),
                 map_type="index",
             )
             routing_weights_for_unpermute = routing_weights

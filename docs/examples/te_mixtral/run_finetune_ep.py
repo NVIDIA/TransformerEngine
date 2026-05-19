@@ -9,7 +9,7 @@
     torchrun --standalone --nproc_per_node=8 run_finetune_ep.py --improvement 2
     torchrun --standalone --nproc_per_node=8 run_finetune_ep.py --improvement 3
 
-Tiers (``--ep-size 2`` => 4 experts/rank on 8 GPUs, DP=4):
+Improvements (``--ep-size 2`` => 4 experts/rank on 8 GPUs, DP=4):
 
     0 = HF baseline BF16 (single process, ``device_map="auto"``).
     1 = TE EP BF16, Python loop over experts.
@@ -21,7 +21,7 @@ import argparse
 import os
 import sys
 
-# Tier 3 needs ``NVTE_CUTEDSL_FUSED_GROUPED_MLP=1`` set before TE is imported,
+# Improvement 3 needs ``NVTE_CUTEDSL_FUSED_GROUPED_MLP=1`` set before TE is imported,
 # because the fused-grouped-MLP fusion is registered at module-import time
 # inside ``if ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8.is_supported(): ...``.
 for _i, _arg in enumerate(sys.argv[1:]):
@@ -60,7 +60,7 @@ def parse_args() -> argparse.Namespace:
         choices=(0, 1, 2, 3),
         default=1,
         help=(
-            "Tier: "
+            "Improvement: "
             "0=HF baseline BF16, "
             "1=TE EP BF16 Python loop, "
             "2=TE EP BF16 GroupedLinear, "

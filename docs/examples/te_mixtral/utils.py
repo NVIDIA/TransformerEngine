@@ -3,13 +3,12 @@
 # See LICENSE for license information.
 
 import os
-import sys
-import IPython
 
 import torch
 import torch.distributed as dist
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.device_mesh import DeviceMesh
 
@@ -26,7 +25,7 @@ from accelerate import Accelerator
 
 class HyperParameters:
     def __init__(self):
-        # "bf16" (tiers 1-2) or "mxfp8" (tier 3).
+        # "bf16" (improvements 1-2) or "mxfp8" (improvement 3).
         self.mixed_precision = "bf16"
 
         self.model_name = "mistralai/Mixtral-8x7B-v0.1"
@@ -43,10 +42,10 @@ class HyperParameters:
         self.hf_access_token = ""
         self.expert_parallel_size = 8
 
-        # "loop" (tier 1) or "grouped_op" (tiers 2-3).
+        # "loop" (improvement 1) or "grouped_op" (improvements 2-3).
         self.expert_ffn_mode = "grouped_op"
 
-        # "te_mixtral" (tiers 1-2, BF16) or "te_mixtral_mxfp8" (tier 3).
+        # "te_mixtral" (improvements 1-2, BF16) or "te_mixtral_mxfp8" (improvement 3).
         self.model_impl = "te_mixtral"
 
 
@@ -84,9 +83,24 @@ def get_dataloaders(accelerator: Accelerator, hyperparams: HyperParameters):
         separator_id=-100,
     )
 
+    sampler = None
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    if hyperparams.expert_parallel_size > 1 and world_size > 1:
+        ep_size = hyperparams.expert_parallel_size
+        dp_size = world_size // ep_size
+        global_rank = dist.get_rank() if dist.is_initialized() else int(os.environ.get("RANK", "0"))
+        sampler = DistributedSampler(
+            dataset,
+            num_replicas=dp_size,
+            rank=global_rank // ep_size,
+            shuffle=True,
+            drop_last=True,
+        )
+
     train_dataloader = DataLoader(
         dataset,
         batch_size=hyperparams.batch_size,
+        sampler=sampler,
         collate_fn=data_collator,
         drop_last=True,
     )
@@ -137,7 +151,7 @@ def init_baseline_model(hyperparams: HyperParameters):
 
 
 def _enable_fused_mxfp8_grouped_mlp() -> None:
-    """Tier 3: enable the fused ``ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8`` and
+    """Improvement 3: enable the fused ``ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8`` and
     backward kernel in the installed TE without recompiling.
 
     ``NVTE_CUTEDSL_FUSED_GROUPED_MLP=1`` must be set *before*
@@ -264,12 +278,21 @@ def init_te_mixtral_model(hyperparams: HyperParameters):
     )
     te_state_dict = model.state_dict()
     replace_params(hf_model.state_dict(), te_state_dict, model.config)
-    model.load_state_dict(te_state_dict, strict=False)
+    missing, unexpected = model.load_state_dict(te_state_dict, strict=False)
+    if unexpected:
+        raise RuntimeError(f"Unexpected keys when loading TE state dict: {unexpected}")
+    non_extra_missing = [key for key in missing if not key.endswith("_extra_state")]
+    if non_extra_missing:
+        raise RuntimeError(f"Missing non-extra-state keys in TE model: {non_extra_missing}")
     del hf_model
+
+    model._te_mixtral_dp_group = None
+    model._te_mixtral_dp_size = 1
 
     if hyperparams.expert_parallel_size > 1:
         ep_size = hyperparams.expert_parallel_size
         dp_size = world_size // ep_size
+        dp_group = None
         if dp_size == 1:
             ep_mesh = DeviceMesh("cuda", torch.arange(world_size))
             ep_group = dist.group.WORLD
@@ -282,7 +305,10 @@ def init_te_mixtral_model(hyperparams: HyperParameters):
             )
             ep_mesh = full_mesh["ep"]
             ep_group = ep_mesh.get_group()
+            dp_group = full_mesh["dp"].get_group()
         model.model.set_ep_groups(ep_group=ep_group, ep_mesh=ep_mesh)
+        model._te_mixtral_dp_group = dp_group
+        model._te_mixtral_dp_size = dp_size
 
     model.config.use_cache = False
     return model
@@ -315,10 +341,44 @@ def build_adamw(model, hyperparams: HyperParameters):
     )
 
 
+def _local_tensor(tensor: torch.Tensor) -> torch.Tensor:
+    if isinstance(tensor, DTensor):
+        return tensor.to_local()
+    if isinstance(tensor.data, DTensor):
+        return tensor.data.to_local()
+    return tensor
+
+
+def sync_data_parallel_gradients(model) -> None:
+    dp_group = getattr(model, "_te_mixtral_dp_group", None)
+    if dp_group is None:
+        return
+
+    dp_size = getattr(model, "_te_mixtral_dp_size", dist.get_world_size(dp_group))
+    for param in model.parameters():
+        if param.grad is None:
+            continue
+        grad = _local_tensor(param.grad)
+        dist.all_reduce(grad, op=dist.ReduceOp.SUM, group=dp_group)
+        grad.div_(dp_size)
+
+
+def move_batch_to_device(batch, device):
+    if torch.is_tensor(batch):
+        return batch.to(device=device, non_blocking=True)
+    if isinstance(batch, dict):
+        return {key: move_batch_to_device(value, device) for key, value in batch.items()}
+    if isinstance(batch, tuple):
+        return tuple(move_batch_to_device(value, device) for value in batch)
+    if isinstance(batch, list):
+        return [move_batch_to_device(value, device) for value in batch]
+    return batch
+
+
 def wrap_with_accelerator(model, hyperparams: HyperParameters):
     # The TE-native MXFP8 model handles its own FP8 autocast; keep
     # Accelerate's mixed_precision on bf16 to avoid double-wrapping the recipe.
-    use_te_mxfp8 = hyperparams.expert_parallel_size > 1 and hyperparams.mixed_precision == "mxfp8"
+    use_te_mxfp8 = hyperparams.mixed_precision == "mxfp8"
     accelerator_mixed_precision = "bf16" if use_te_mxfp8 else hyperparams.mixed_precision
 
     accelerator = Accelerator(
@@ -331,11 +391,15 @@ def wrap_with_accelerator(model, hyperparams: HyperParameters):
     lr_scheduler = get_linear_schedule_with_warmup(
         optimizer=optimizer,
         num_warmup_steps=hyperparams.num_warmup_steps,
-        num_training_steps=hyperparams.num_training_steps,
+        num_training_steps=hyperparams.num_warmup_steps + hyperparams.num_training_steps,
     )
 
-    if hyperparams.expert_parallel_size > 1 or hasattr(model, "hf_device_map"):
-        # EP path and HF device_map path: don't DDP-wrap the model.
+    if hyperparams.expert_parallel_size > 1:
+        # EP path: keep the DP-aware sampler intact and manually sync DP gradients.
+        optimizer, lr_scheduler = accelerator.prepare(optimizer, lr_scheduler)
+        return accelerator, model, optimizer, train_dataloader, lr_scheduler
+
+    if hasattr(model, "hf_device_map"):
         optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
             optimizer, train_dataloader, lr_scheduler
         )
@@ -364,11 +428,14 @@ def finetune_model(model, hyperparams, accelerator, train_dataloader, optimizer,
 
     for _ in range(hyperparams.num_warmup_steps):
         _, batch = next(train_dataloader)
+        if hyperparams.expert_parallel_size > 1:
+            batch = move_batch_to_device(batch, accelerator.device)
         with accelerator.accumulate(model):
             outputs = model(**batch)
             loss = outputs.loss
             total_loss += loss.detach().float()
             accelerator.backward(loss)
+            sync_data_parallel_gradients(model)
             optimizer.step()
             lr_scheduler.step()
             optimizer.zero_grad()
@@ -383,6 +450,8 @@ def finetune_model(model, hyperparams, accelerator, train_dataloader, optimizer,
         start.record()
 
         _, batch = next(train_dataloader)
+        if hyperparams.expert_parallel_size > 1:
+            batch = move_batch_to_device(batch, accelerator.device)
 
         with accelerator.accumulate(model):
             outputs = model(**batch)
@@ -390,6 +459,7 @@ def finetune_model(model, hyperparams, accelerator, train_dataloader, optimizer,
             total_loss += loss.detach().float()
 
             accelerator.backward(loss)
+            sync_data_parallel_gradients(model)
 
             optimizer.step()
             lr_scheduler.step()
@@ -431,25 +501,3 @@ def run_hf_baseline_finetune(hyperparams: HyperParameters):
         model, hyperparams
     )
     finetune_model(model, hyperparams, accelerator, train_dataloader, optimizer, lr_scheduler)
-
-
-def restart_jupyter_notebook():
-    """Flush GPU memory by restarting the Jupyter kernel."""
-    IPython.Application.instance().kernel.do_shutdown(True)
-
-    if torch.cuda.memory_allocated() != 0:
-        import warnings
-
-        warnings.warn("GPU memory not fully flushed — trying secondary method.")
-        from IPython.core.display import HTML
-
-        HTML("<script>Jupyter.notebook.kernel.restart()</script>")
-
-        if torch.cuda.memory_allocated() != 0:
-            print("Please restart the Jupyter kernel manually.")
-
-    if not sys.warnoptions:
-        import warnings
-
-        warnings.simplefilter("ignore")
-        torch.set_warn_always(False)
