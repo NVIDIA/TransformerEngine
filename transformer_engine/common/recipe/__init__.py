@@ -525,14 +525,12 @@ class NVFP4BlockScaling(Recipe):
              NVFP4 tensors. In this mode, rowwise ``amax`` metadata is stored
              as a vector with one FP32 value per tensor row.
     nvfp4_4over6 : {None, 'weights', 'activations', 'all'}, default = None
-             Select tensors that use NVFP4 4over6. In this mode NVFP4
-             quantization evaluates per-block map-to-4 and map-to-6 candidates
-             and chooses the one with lower configured error. Ties choose map-to-6. The
-             ``activations`` scope applies to every non-weight tensor role.
-             Random Hadamard transforms and stochastic rounding are not yet
-             supported on tensors that use 4over6; activation and backward
-             scopes therefore require ``disable_rht=True`` and
-             ``disable_stochastic_rounding=True``.
+             Enable 4over6 adaptive NVFP4 block scaling for selected tensor
+             scopes. For each selected FP4 block, quantization compares
+             map-to-4 and map-to-6 candidates and stores the candidate with
+             lower configured error. Current 4over6 support targets RL and
+             post-training scenarios; pre-training paths that combine 4over6
+             with RHT are not yet implemented.
     nvfp4_4over6_e4m3_use_256 : {None, 'weights', 'activations', 'all'}, default = None
              Select 4over6 tensors that use 256 as the global E4M3 scale
              bound. If unset, 4over6 uses the standard NVFP4 448 bound.
@@ -580,11 +578,6 @@ class NVFP4BlockScaling(Recipe):
         assert (
             self.nvfp4_4over6_err_mode in _NVFP4_4OVER6_ERR_MODES
         ), "NVTE_NVFP4_4OVER6_ERR_MODE must be one of: 'MAE', 'MSE'."
-        if self.nvfp4_4over6 in ("activations", "all"):
-            assert self.disable_rht, "NVFP4 4over6 currently requires RHT to be disabled"
-            assert (
-                self.disable_stochastic_rounding
-            ), "NVFP4 4over6 currently requires stochastic rounding to be disabled"
 
         # Quantization params
         # Note: RHT is currently only applied to column-wise usage so that

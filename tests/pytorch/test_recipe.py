@@ -531,7 +531,6 @@ def test_nvfp4_row_scaled_quantizer_roles(
 ):
     recipe = NVFP4BlockScaling(
         disable_rht=True,
-        disable_stochastic_rounding=True,
         disable_2d_quantization=True,
         nvfp4_4over6=nvfp4_4over6,
         nvfp4_4over6_e4m3_use_256=nvfp4_4over6_e4m3_use_256,
@@ -540,6 +539,8 @@ def test_nvfp4_row_scaled_quantizer_roles(
     )
 
     def expected_use_4over6(tensor_type):
+        if tensor_type in ("grad_output", "grad_input"):
+            return False
         if nvfp4_4over6 == "all":
             return True
         if nvfp4_4over6 == "weights":
@@ -567,6 +568,8 @@ def test_nvfp4_row_scaled_quantizer_roles(
         num_quantizers=3,
     ).make_quantizers()
     assert [q.row_scaled_nvfp4 for q in forward_quantizers] == [True, False, True]
+    assert [q.stochastic_rounding for q in forward_quantizers] == [False, False, False]
+    assert [q.with_rht for q in forward_quantizers] == [False, False, False]
     assert [q.nvfp4_use_4over6 for q in forward_quantizers] == [
         expected_use_4over6(tensor_type) for tensor_type in ("input", "weight", "output")
     ]
@@ -607,13 +610,37 @@ def test_nvfp4_row_scaled_quantizer_roles(
         ],
     ).make_quantizers()
     assert [q.row_scaled_nvfp4 for q in backward_quantizers] == [False, False]
-    assert [q.nvfp4_use_4over6 for q in backward_quantizers] == [
-        expected_use_4over6(tensor_type) for tensor_type in ("grad_output", "grad_input")
-    ]
-    assert [q.nvfp4_e4m3_max for q in backward_quantizers] == [
-        expected_e4m3_max(tensor_type) for tensor_type in ("grad_output", "grad_input")
-    ]
+    assert [q.nvfp4_use_4over6 for q in backward_quantizers] == [False, False]
+    assert [q.nvfp4_e4m3_max for q in backward_quantizers] == [448, 448]
     assert [q.nvfp4_4over6_err_mode for q in backward_quantizers] == [nvfp4_4over6_err_mode] * 2
+    assert [q.stochastic_rounding for q in backward_quantizers] == [True, True]
+    assert [q.with_rht for q in backward_quantizers] == [False, False]
+
+    backward_operand_quantizers = NVFP4BlockScalingRecipeState(
+        recipe,
+        mode="backward",
+        num_quantizers=4,
+        roles=[
+            QuantizerRole(module_type="linear", tensor_type="input"),
+            QuantizerRole(module_type="linear", tensor_type="weight"),
+            QuantizerRole(module_type="linear", tensor_type="grad_output"),
+            QuantizerRole(module_type="linear", tensor_type="grad_input"),
+        ],
+    ).make_quantizers()
+    assert [q.nvfp4_use_4over6 for q in backward_operand_quantizers] == [
+        expected_use_4over6(tensor_type)
+        for tensor_type in ("input", "weight", "grad_output", "grad_input")
+    ]
+    assert [q.nvfp4_e4m3_max for q in backward_operand_quantizers] == [
+        expected_e4m3_max(tensor_type)
+        for tensor_type in ("input", "weight", "grad_output", "grad_input")
+    ]
+    assert [q.stochastic_rounding for q in backward_operand_quantizers] == [
+        False,
+        False,
+        True,
+        True,
+    ]
 
 
 @pytest.mark.skipif(not fp4_available, reason=reason_for_no_fp4)
