@@ -521,18 +521,20 @@ class TestFP8Recipe:
     ids=["default", "weights", "activations", "all"],
 )
 @pytest.mark.parametrize(
-    "nvfp4_e4m3_max",
+    "nvfp4_4over6_e4m3_use_256",
     [None, "weights", "activations", "all"],
     ids=["e4m3_448", "e4m3_256_weights", "e4m3_256_activations", "e4m3_256_all"],
 )
 @pytest.mark.parametrize("nvfp4_4over6_err_mode", ["MAE", "MSE"], ids=["mae_err", "mse_err"])
-def test_nvfp4_row_scaled_quantizer_roles(nvfp4_4over6, nvfp4_e4m3_max, nvfp4_4over6_err_mode):
+def test_nvfp4_row_scaled_quantizer_roles(
+    nvfp4_4over6, nvfp4_4over6_e4m3_use_256, nvfp4_4over6_err_mode
+):
     recipe = NVFP4BlockScaling(
         disable_rht=True,
         disable_stochastic_rounding=True,
         disable_2d_quantization=True,
         nvfp4_4over6=nvfp4_4over6,
-        nvfp4_e4m3_max=nvfp4_e4m3_max,
+        nvfp4_4over6_e4m3_use_256=nvfp4_4over6_e4m3_use_256,
         nvfp4_4over6_err_mode=nvfp4_4over6_err_mode,
         row_scaled_activation=True,
     )
@@ -549,12 +551,12 @@ def test_nvfp4_row_scaled_quantizer_roles(nvfp4_4over6, nvfp4_e4m3_max, nvfp4_4o
     def expected_e4m3_max(tensor_type):
         if not expected_use_4over6(tensor_type):
             return 448
-        if nvfp4_e4m3_max == "all":
+        if nvfp4_4over6_e4m3_use_256 == "all":
             return 256
-        if nvfp4_e4m3_max == "weights":
+        if nvfp4_4over6_e4m3_use_256 == "weights":
             if tensor_type == "weight":
                 return 256
-        if nvfp4_e4m3_max == "activations":
+        if nvfp4_4over6_e4m3_use_256 == "activations":
             if tensor_type != "weight":
                 return 256
         return 448
