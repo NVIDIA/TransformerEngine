@@ -73,9 +73,7 @@ def profile_path(optimize_for_gemm: bool, x: torch.Tensor, n_iters: int = 20):
         t = q(x)
         tex.swizzle_scales_for_gemm_(t)
     torch.cuda.synchronize()
-    with torch.profiler.profile(
-        activities=[torch.profiler.ProfilerActivity.CUDA]
-    ) as prof:
+    with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
         for _ in range(n_iters):
             t = q(x)
             tex.swizzle_scales_for_gemm_(t)
@@ -106,16 +104,13 @@ def main():
     )
 
     print("\n=== VERDICT ===")
-    base_swizzle = sum(
-        c for n, c in counts_baseline.items() if STANDALONE_SWIZZLE_RE.search(n)
-    )
+    base_swizzle = sum(c for n, c in counts_baseline.items() if STANDALONE_SWIZZLE_RE.search(n))
     swf_swizzle = sum(c for n, c in counts_swf.items() if STANDALONE_SWIZZLE_RE.search(n))
     print(f"  baseline standalone swizzle kernel launches: {base_swizzle}")
     print(f"  SUT standalone swizzle kernel launches:      {swf_swizzle}")
     if swf_swizzle == 0 and base_swizzle > 0:
         print(
-            "  PASS: standalone swizzle pass disappears from timeline under "
-            "optimize_for_gemm=True"
+            "  PASS: standalone swizzle pass disappears from timeline under optimize_for_gemm=True"
         )
     else:
         print(

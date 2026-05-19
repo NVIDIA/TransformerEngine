@@ -1765,8 +1765,7 @@ bool NVFP4Quantizer::is_eligible_for_rht_cast_fusion(size_t rows, size_t cols) {
   // (search for "eligible_for_rht_cast_fusion" in this file). The dtype
   // check (BF16) is implicit: with_rht is only valid for BF16 input by
   // construction.
-  return rows % 64 == 0 && cols % 128 == 0 &&
-         transformer_engine::cuda::sm_arch() >= 100 &&
+  return rows % 64 == 0 && cols % 128 == 0 && transformer_engine::cuda::sm_arch() >= 100 &&
          transformer_engine::cuda::sm_arch() <= 110;
 }
 

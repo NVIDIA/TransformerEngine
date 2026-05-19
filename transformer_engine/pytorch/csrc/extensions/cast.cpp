@@ -748,9 +748,9 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
       break;
     }
   }
-  const bool with_gemm_swizzled_scales =
-      quantizer_cpp_list[0]->optimize_for_gemm && quantizer_cpp_list[0]->with_rht &&
-      all_tensors_rht_cast_fusion_eligible;
+  const bool with_gemm_swizzled_scales = quantizer_cpp_list[0]->optimize_for_gemm &&
+                                         quantizer_cpp_list[0]->with_rht &&
+                                         all_tensors_rht_cast_fusion_eligible;
 
   // Helper function to get size of byte buffer holding FP4 data (last dim divided by 2)
   auto fp4_byte_shape = [](const std::vector<size_t> &shape) -> std::vector<size_t> {

@@ -171,9 +171,9 @@ if __name__ == "__main__":
         min_run_time = args.min_run_time
 
     print(
-        f"NVFP4 RHT cast-fusion: swizzle-fusion (optimize_for_gemm=True) vs baseline. "
+        "NVFP4 RHT cast-fusion: swizzle-fusion (optimize_for_gemm=True) vs baseline. "
         f"min_run_time={min_run_time}s per cell, BF16 input, "
-        f"rowwise+columnwise SF, RHT=True+post_rht_amax."
+        "rowwise+columnwise SF, RHT=True+post_rht_amax."
     )
     rows = []
     for shape in shapes:

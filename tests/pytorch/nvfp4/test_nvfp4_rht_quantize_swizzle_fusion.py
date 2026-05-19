@@ -103,11 +103,11 @@ def _check_nvfp4_rht_quantize_swizzle_fusion(
     quantizer_swizzle_fusion = quantizer.copy()
     quantizer_swizzle_fusion.optimize_for_gemm = True
 
-    qx_swf, sx_swf, amax_row_swf, qx_t_swf, sx_t_swf, amax_col_swf = (
-        _unpack_quantized_tensor(quantizer_swizzle_fusion(x))
+    qx_swf, sx_swf, amax_row_swf, qx_t_swf, sx_t_swf, amax_col_swf = _unpack_quantized_tensor(
+        quantizer_swizzle_fusion(x)
     )
-    qx_ref, sx_ref, amax_row_ref, qx_t_ref, sx_t_ref, amax_col_ref = (
-        _unpack_quantized_tensor(quantizer(x))
+    qx_ref, sx_ref, amax_row_ref, qx_t_ref, sx_t_ref, amax_col_ref = _unpack_quantized_tensor(
+        quantizer(x)
     )
 
     if return_rowwise:
