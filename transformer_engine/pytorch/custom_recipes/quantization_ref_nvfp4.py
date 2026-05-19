@@ -373,8 +373,6 @@ class NVFP4QuantizerRef(Quantizer):
                 raise ValueError("4over6 is only supported for NVFP4 (non-pow2) mode.")
             if quant_tile_shape not in ((1, 16), (16, 16)):
                 raise ValueError("4over6 reference quantization only supports 1x16 or 16x16 tiles.")
-            if with_rht:
-                raise ValueError("4over6 reference quantization does not support RHT.")
         super().__init__(rowwise=rowwise, columnwise=columnwise)
         self.internal = True
 
