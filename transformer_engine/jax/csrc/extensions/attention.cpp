@@ -736,8 +736,8 @@ struct ScoreModGraphCacheKeyHash {
 
 using ScoreModGraphPtr = std::shared_ptr<cudnn_frontend::graph::Graph>;
 
-std::unordered_map<ScoreModGraphCacheKey, ScoreModGraphPtr, ScoreModGraphCacheKeyHash>
-    &getScoreModeGraphCache() {
+std::unordered_map<ScoreModGraphCacheKey, ScoreModGraphPtr, ScoreModGraphCacheKeyHash> &
+getScoreModeGraphCache() {
   static std::unordered_map<ScoreModGraphCacheKey, ScoreModGraphPtr, ScoreModGraphCacheKeyHash>
       cache;
   return cache;
