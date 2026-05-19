@@ -1058,6 +1058,8 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
 
   const int current_device = transformer_engine::cuda::current_device();
   const bool is_hopper = (transformer_engine::cuda::sm_arch(current_device) == 90);
+  const bool is_blackwell = (transformer_engine::cuda::sm_arch(current_device) == 100 ||
+                             transformer_engine::cuda::sm_arch(current_device) == 103);
   const bool use_cutlass = transformer_engine::getenv<bool>("NVTE_USE_CUTLASS_GROUPED_GEMM", false);
   const bool warn_fallback =
       transformer_engine::getenv<bool>("NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK", false);
@@ -1067,8 +1069,8 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
                              workspace, accumulate, use_split_accumulator, math_sm_count, stream);
   };
 
-  // Currently only support cutlass group gemm on Hopper Arch
-  if (!(is_hopper && use_cutlass)) {
+  // CUTLASS grouped GEMM: Hopper (SM90) fwd + wgrad; Blackwell (SM100) fwd (tcgen05 Ptr-Array).
+  if (!((is_hopper || is_blackwell) && use_cutlass)) {
     cublas_path();
     return;
   }
@@ -1110,6 +1112,42 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
            ((A_type == CUDA_R_16BF) || (A_type == CUDA_R_16F));
   };
 
+  auto is_bf16_wgrad_dtype = [&]() -> bool {
+    auto *inputA = transformer_engine::convertNVTETensorCheck(A[0]);
+    auto *inputB = transformer_engine::convertNVTETensorCheck(B[0]);
+    auto *OutputD = transformer_engine::convertNVTETensorCheck(D[0]);
+    auto A_type = get_cuda_dtype(inputA->data.dtype);
+    auto B_type = get_cuda_dtype(inputB->data.dtype);
+    auto D_type = get_cuda_dtype(OutputD->data.dtype);
+
+    return (A_type == CUDA_R_16BF) && (B_type == CUDA_R_16BF) &&
+           (D_type == CUDA_R_32F || D_type == CUDA_R_16BF);
+  };
+
+  // K-grouped BF16 wgrad shape eligibility: every group must be 2D NT with a matching
+  // (ragged) K and a uniform hidden/expert. Shapes outside this fall back to cuBLAS
+  // instead of hard-erroring inside the varlen-k kernel.
+  auto is_bf16_wgrad_shape = [&]() -> bool {
+    int64_t ref_hidden = -1, ref_expert = -1;
+    for (size_t i = 0; i < num_gemms; i++) {
+      const auto *inp = transformer_engine::convertNVTETensorCheck(A[i]);
+      const auto *grad = transformer_engine::convertNVTETensorCheck(B[i]);
+      if (inp->data.shape.size() != 2 || grad->data.shape.size() != 2) return false;
+      const int64_t k = inp->data.shape[0];
+      const int64_t hidden = inp->data.shape[1];
+      const int64_t expert = grad->data.shape[1];
+      if (static_cast<int64_t>(grad->data.shape[0]) != k || hidden <= 0 || expert <= 0)
+        return false;
+      if (ref_hidden < 0) {
+        ref_hidden = hidden;
+        ref_expert = expert;
+      } else if (hidden != ref_hidden || expert != ref_expert) {
+        return false;
+      }
+    }
+    return true;
+  };
+
   // CUTLASS Grouped GEMM fast path (SM90/TMA)
   // Conditions:
   //  - No fused epilogue: both bias and pre_gelu_out are empty.
@@ -1123,6 +1161,13 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
       all_groups_uniform_k128(B, transb)) {
     cutlass_grouped_gemm(A, B, D, num_gemms, transa, transb, grad, workspace, accumulate,
                          current_device, math_sm_count, stream);
+  } else if (is_empty_arr(bias) && is_empty_arr(pre_gelu_out) && is_bf16_wgrad_dtype() && !transa &&
+             transb && grad && is_bf16_wgrad_shape()) {
+    // Dedicated K-grouped (ragged-K) BF16-in / (FP32 or BF16)-out wgrad path:
+    // D_i = B_i.T @ A_i, K_i = routed-token dim. Shape eligibility is guarded above, so
+    // unsupported shapes fall back to cuBLAS rather than hard-erroring in the kernel.
+    cutlass_grouped_gemm_varlen_k(A, B, D, num_gemms, transa, transb, grad, workspace, accumulate,
+                                  current_device, math_sm_count, stream);
   } else {
     if (warn_fallback) {
       NVTE_WARN("Fallback to cuBLAS grouped GEMM.");

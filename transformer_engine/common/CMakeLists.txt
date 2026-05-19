@@ -323,6 +323,8 @@ set_property(
 target_link_libraries(transformer_engine PUBLIC
                       CUDA::cublas
                       CUDA::cudart
+                      CUDA::nvrtc
+                      CUDA::cuda_driver
                       CUDNN::cudnn_all)
 
 target_include_directories(transformer_engine PRIVATE
