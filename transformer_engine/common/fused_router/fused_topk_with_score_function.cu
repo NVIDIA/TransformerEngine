@@ -288,7 +288,7 @@ __global__ void fused_topk_with_score_function_forward_kernel(
     int pos_offset = token_offset_cur_warp * num_experts;
 
     // Clear the probs/routing_map (num_experts)
-    vec_fill_global(probs + pos_offset, static_cast<DataType>(0), num_experts, lane_id);
+    vec_fill_global(probs + pos_offset, static_cast<DataType>(0.0f), num_experts, lane_id);
     vec_fill_global(routing_map + pos_offset, false, num_experts, lane_id);
 
     if constexpr (ScoreFunc == 1) {  // Softmax
