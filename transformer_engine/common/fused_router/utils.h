@@ -185,6 +185,11 @@ enum class TopkFuncType {
   Radix = 1,
 };
 
+// Maximum num_experts supported by the packed 8-bit radix topk histogram.
+// Each thread processes ceil(data_size/32) elements per bucket.  With 8-bit
+// counters the max per-thread count is 255, so data_size <= 255 * 32 = 8160.
+constexpr int kMaxExpertsRadixTopk = 255 * 32;  // 8160
+
 /*******************************************************************************
  * radix_topk_and_mask — Warp-level radix-selection based top-K
  *
@@ -210,11 +215,16 @@ enum class TopkFuncType {
  *     broken by ascending index for determinism matching torch.topk).
  *     Write indices and scores to the output arrays.
  *
+ * Register pressure optimization: pack 16 bucket counts into 4 registers
+ * using 8-bit fields (4 counters per u32).  The original counts[16] +
+ * total_counts[16] required 32 registers, causing massive spill to local
+ * memory on large kernels (81% of L1 traffic on E=2304, K=36).
+ *
  * Tie-breaking: (value DESC, index ASC) — matches torch.topk behavior.
  *
  * Constraints:
  *   - 0 < topk <= data_size
- *   - No upper limit on topk or data_size (unlike v1's 128 cap)
+ *   - data_size <= kMaxExpertsRadixTopk (8160) to avoid 8-bit overflow
  *   - scores must be in shared memory accessible by the warp
  *
  * Complexity: 9 × O(E/32) = O(E) per warp, independent of K.
@@ -222,9 +232,6 @@ enum class TopkFuncType {
 
 __device__ inline void radix_topk_and_mask(CompType *scores, int data_size, int topk,
                                            int *topk_indices, CompType *topk_scores, int lane_id) {
-  // assert(topk > 0 && "naive_topk_and_mask_v2: topk must be positive");
-  // assert(topk <= data_size && "naive_topk_and_mask_v2: topk exceeds data_size");
-
   constexpr int RADIX_BITS = 4;
   constexpr int RADIX_SIZE = 1 << RADIX_BITS;  // 16 buckets
   constexpr int RADIX_MASK = RADIX_SIZE - 1;   // 0xF
@@ -232,54 +239,58 @@ __device__ inline void radix_topk_and_mask(CompType *scores, int data_size, int 
 
   // =========================================================================
   // Phase 1: Radix selection — find the bit pattern of the K-th largest value
+  //
+  // Packed counters: 16 bucket counts are stored in 4 × u32 registers using
+  // 8-bit fields (4 counters per register).  Bucket b is in byte (b % 4) of
+  // packed[b / 4].  This reduces register usage from 32 (counts[16] +
+  // total_counts[16]) to 4 registers.
+  //
+  // Max per-thread count per bucket = ceil(data_size / 32).
+  // For E=2304: max 72 — fits in 8 bits (max 255).
+  // Constraint: data_size must be <= kMaxExpertsRadixTopk (8160).
   // =========================================================================
   unsigned int desired = 0;       // accumulated bit pattern of the K-th value
   unsigned int desired_mask = 0;  // bits determined so far
   int k_remaining = topk;         // how many more elements we need to skip
 
+#pragma unroll 1
   for (int pass = NUM_PASSES - 1; pass >= 0; pass--) {
     int digit_pos = pass * RADIX_BITS;
 
-    // Each thread counts elements per bucket that match the desired pattern
-    unsigned int counts[RADIX_SIZE];
-#pragma unroll
-    for (int b = 0; b < RADIX_SIZE; b++) {
-      counts[b] = 0;
-    }
+    // Packed counters: packed[i] holds 4 × 8-bit counts for buckets [4i..4i+3].
+    // Bucket b is in byte (b % 4) of packed[b / 4].
+    unsigned int packed[4] = {0, 0, 0, 0};
 
     for (int i = lane_id; i < data_size; i += kThreadsPerWarp) {
       unsigned int u = float_to_ordered_uint(scores[i]);
-      // Check if this element matches the desired pattern on already-decided bits
       if ((u & desired_mask) == desired) {
         int bucket = (u >> digit_pos) & RADIX_MASK;
-        counts[bucket]++;
+        int pack_idx = bucket >> 2;         // bucket / 4
+        int byte_idx = bucket & 3;          // bucket % 4
+        int shift = byte_idx << 3;          // byte_idx * 8
+        packed[pack_idx] += (1u << shift);  // increment the 8-bit field
       }
     }
 
-    // Warp-reduce each bucket count across all 32 lanes
-    unsigned int total_counts[RADIX_SIZE];
-#pragma unroll
-    for (int b = 0; b < RADIX_SIZE; b++) {
-      unsigned int c = warp_allreduce_sum(counts[b]);
-      total_counts[b] = c;  // same value on all lanes after full reduction
-    }
-
-    // Scan buckets from LARGEST digit value (15) to smallest (0).
-    // We're looking for the top-K largest, so we want the highest-valued
-    // bucket first.  Accumulate counts until we find the bucket containing
-    // the k_remaining-th element.
+    // Warp-reduce each bucket, then scan to find the target bucket.
     int target_bucket = 0;
+    int k_remaining_copy = k_remaining;
+#pragma unroll
     for (int b = RADIX_SIZE - 1; b >= 0; b--) {
-      unsigned int bc = total_counts[b];
-      if (bc < static_cast<unsigned int>(k_remaining)) {
-        // All elements in this bucket are in the top set; skip them
-        k_remaining -= bc;
+      // Unpack: extract 8-bit count for bucket b from packed[b/4]
+      int pack_idx = b >> 2;
+      int shift = (b & 3) << 3;
+      unsigned int my_count = (packed[pack_idx] >> shift) & 0xFFu;
+      // Warp-reduce to get total count across all 32 lanes
+      unsigned int bc = warp_allreduce_sum(my_count);
+      if (bc < static_cast<unsigned int>(k_remaining_copy)) {
+        k_remaining_copy -= bc;
       } else {
-        // The K-th element is in this bucket
         target_bucket = b;
         break;
       }
     }
+    k_remaining = k_remaining_copy;
 
     // Update the desired pattern and mask
     desired |= (static_cast<unsigned int>(target_bucket) << digit_pos);

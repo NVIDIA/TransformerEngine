@@ -312,6 +312,9 @@ void fused_topk_with_score_function_forward_kernel_launcher(
     launch(fused_topk_with_score_function_forward_kernel<DataType, BiasType,
                                                          TopkFuncType::Naive>);
   } else {
+    NVTE_CHECK(num_experts <= kMaxExpertsRadixTopk,
+               "Radix topk requires num_experts <= ", kMaxExpertsRadixTopk,
+               " (packed 8-bit histogram), got ", num_experts, ".");
     launch(fused_topk_with_score_function_forward_kernel<DataType, BiasType,
                                                          TopkFuncType::Radix>);
   }

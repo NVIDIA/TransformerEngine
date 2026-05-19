@@ -187,6 +187,9 @@ void fused_score_for_moe_aux_loss_forward_kernel_launcher(
   if (topk < 16) {
     launch(fused_score_for_moe_aux_loss_forward_kernel<DataType, TopkFuncType::Naive>);
   } else {
+    NVTE_CHECK(num_experts <= kMaxExpertsRadixTopk,
+               "Radix topk requires num_experts <= ", kMaxExpertsRadixTopk,
+               " (packed 8-bit histogram), got ", num_experts, ".");
     launch(fused_score_for_moe_aux_loss_forward_kernel<DataType, TopkFuncType::Radix>);
   }
 }
