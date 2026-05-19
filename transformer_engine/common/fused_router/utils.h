@@ -10,11 +10,25 @@
 #include <cassert>
 
 #include "../util/logging.h"
+#include "../util/system.h"
 #include "../utils.cuh"
 #include "transformer_engine/transformer_engine.h"
 
 namespace transformer_engine {
 namespace fused_router {
+
+// Topk values below this threshold use naive O(K*E) selection;
+// at or above it, use radix O(E) selection.  Configurable via
+// NVTE_RADIX_TOPK_THRESHOLD (default 0, i.e. always radix).
+//
+// NOTE: This is an inline function with a static local.  Each translation unit
+// that includes this header gets its own copy of the static, so the env var is
+// read once per TU (not once globally).  This is safe because environment
+// variables are immutable during process lifetime in our usage.
+inline int get_radix_topk_threshold() {
+  static int threshold = getenv<int>("NVTE_RADIX_TOPK_THRESHOLD", 0);
+  return threshold;
+}
 
 // Check if requested shared memory size exceeds device capacity.
 // Throws an error with num_experts info to help users diagnose the issue.

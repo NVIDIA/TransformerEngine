@@ -11,19 +11,12 @@
 
 #include "../common.h"
 #include "../util/logging.h"
-#include "../util/system.h"
 #include "../utils.cuh"
 #include "async_loader.h"
 #include "utils.h"
 
 namespace transformer_engine {
 namespace fused_router {
-
-// Reuse the same threshold as the topk kernel (see fused_topk_with_score_function.cu).
-static int get_radix_topk_threshold() {
-  static int threshold = getenv<int>("NVTE_RADIX_TOPK_THRESHOLD", 0);
-  return threshold;
-}
 
 template <typename DataType, TopkFuncType TopkFunc = TopkFuncType::Naive, int ScoreFunc = 0>
 __global__ void fused_score_for_moe_aux_loss_forward_kernel(const DataType *logits, int num_tokens,
