@@ -21,7 +21,7 @@ from .base import (
     fill_userbuffers_buffer_for_all_gather,
     get_dummy_wgrad,
     get_ub,
-    is_userbuffer_cublasmp_backend,
+    using_cublasmp_backend,
     quantize_weight,
     TransformerEngineBaseModule,
     _2X_ACC_FPROP,
@@ -1533,7 +1533,7 @@ class Linear(TransformerEngineBaseModule):
         )
         # Bulk overlaps require the Userbuffers backend; the cuBLASMp backend
         # falls back to async NCCL ops via torch.distributed.
-        bulk_available = not is_userbuffer_cublasmp_backend()
+        bulk_available = not using_cublasmp_backend()
         self.ub_bulk_dgrad = (
             self.parallel_mode == "column"
             and self.sequence_parallel

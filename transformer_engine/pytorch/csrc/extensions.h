@@ -675,6 +675,9 @@ class CommOverlapHelper : torch::CustomClassHolder {
 };
 
 class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOverlapBase {
+ private:
+  void* _warmup_workspace{nullptr};
+
  public:
   CommOverlap(const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
               CommOverlapHelper *helper, int tp_size, int num_splits = 4,
@@ -692,7 +695,11 @@ class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOve
               const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
               int num_comm_sm = 16, bool atomic_gemm = false);
 
-  ~CommOverlap() {}
+  ~CommOverlap() {
+    if (_warmup_workspace != nullptr) {
+      cudaFree(_warmup_workspace);
+    }
+  }
 
   using transformer_engine::CommOverlapCore::copy_into_buffer;
   void copy_into_buffer(const at::Tensor &input, bool local_chunk = false);
@@ -705,6 +712,9 @@ class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOve
 };  // CommOverlap
 
 class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::CommOverlapP2PBase {
+ private:
+  void* _warmup_workspace{nullptr};
+
  public:
   CommOverlapP2P(const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
                  CommOverlapHelper *helper, int tp_size,
@@ -720,7 +730,11 @@ class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::Comm
                  const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
                  int num_comm_sm = 1, bool atomic_gemm = false);
 
-  ~CommOverlapP2P() {}
+  ~CommOverlapP2P() {
+    if (_warmup_workspace != nullptr) {
+      cudaFree(_warmup_workspace);
+    }
+  }
 
   using transformer_engine::CommOverlapP2PBase::copy_into_buffer;
   void copy_into_buffer(const at::Tensor &input, bool local_chunk = false);

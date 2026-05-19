@@ -64,7 +64,7 @@ from ...debug.pytorch.utils import next_iter_when_debug_should_be_run, any_featu
 __all__ = [
     "initialize_ub",
     "destroy_ub",
-    "is_userbuffer_cublasmp_backend",
+    "using_cublasmp_backend",
     "UserBufferQuantizationMode",
 ]
 
@@ -78,8 +78,9 @@ _MIN_STREAM_PRIORITY, _MAX_STREAM_PRIORITY = None, None
 layers_atomic_ring_exchange = []
 
 
-def is_userbuffer_cublasmp_backend() -> bool:
-    """Whether the active userbuffer backend is cuBLASMp."""
+def using_cublasmp_backend() -> bool:
+    """Whether the active comm+GEMM overlap backend is cuBLASMp."""
+    assert _ub_communicators is not None, "initialize_ub() must be called before checking backend."
     return _ub_with_cublasmp
 
 

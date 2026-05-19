@@ -477,6 +477,7 @@ def main() -> None:
     parser.add_argument("--head-dim", type=int, default=256)
     parser.add_argument("--dtype", type=str, default="bfloat16")
     parser.add_argument("--quantization", type=str, default=None)
+    parser.add_argument("--use-cublasmp", type=bool, action="store_true")
     args = parser.parse_args()
 
     # Run parallel tests if needed
@@ -517,6 +518,7 @@ def main() -> None:
             dtype=model_config.dtype,
             bootstrap_backend=bootstrap_backend,
             ub_cfgs=userbuffer_configs,
+            use_cublasmp=args.use_cublasmp,
         )
 
         # Run tests
