@@ -10,11 +10,20 @@
 
 #include "../common.h"
 #include "../util/logging.h"
+#include "../util/system.h"
 #include "async_loader.h"
 #include "utils.h"
 
 namespace transformer_engine {
 namespace fused_router {
+
+// Topk values below this threshold use naive O(K*E) selection;
+// at or above it, use radix O(E) selection.  Configurable via
+// NVTE_RADIX_TOPK_THRESHOLD (default 0, i.e. always radix).
+static int get_radix_topk_threshold() {
+  static int threshold = getenv<int>("NVTE_RADIX_TOPK_THRESHOLD", 0);
+  return threshold;
+}
 
 template <typename DataType, typename BiasType, TopkFuncType TopkFunc = TopkFuncType::Naive,
           int ScoreFunc = 0>
@@ -311,8 +320,9 @@ void fused_topk_with_score_function_forward_kernel_launcher(
   };
 
   // Dispatch on TopkFunc × ScoreFunc (6 instantiations per DataType × BiasType).
-  // Radix selection is O(E), independent of K; switch at K=16 where naive O(K^2*E) dominates.
-  if (topk < 16) {
+  // Radix selection is O(E), independent of K; naive is O(K*E).
+  // Threshold configurable via NVTE_RADIX_TOPK_THRESHOLD (default 16).
+  if (topk < get_radix_topk_threshold()) {
     switch (score_function) {
       case 0:
         launch(fused_topk_with_score_function_forward_kernel<DataType, BiasType,

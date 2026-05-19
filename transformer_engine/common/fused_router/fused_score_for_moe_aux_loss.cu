@@ -10,12 +10,19 @@
 
 #include "../common.h"
 #include "../util/logging.h"
+#include "../util/system.h"
 #include "../utils.cuh"
 #include "async_loader.h"
 #include "utils.h"
 
 namespace transformer_engine {
 namespace fused_router {
+
+// Reuse the same threshold as the topk kernel (see fused_topk_with_score_function.cu).
+static int get_radix_topk_threshold() {
+  static int threshold = getenv<int>("NVTE_RADIX_TOPK_THRESHOLD", 0);
+  return threshold;
+}
 
 template <typename DataType, TopkFuncType TopkFunc = TopkFuncType::Naive, int ScoreFunc = 0>
 __global__ void fused_score_for_moe_aux_loss_forward_kernel(
@@ -183,8 +190,9 @@ void fused_score_for_moe_aux_loss_forward_kernel_launcher(
   };
 
   // Dispatch on TopkFunc × ScoreFunc (6 instantiations per DataType).
-  // Radix selection is O(E), independent of K; switch at K=16 where naive O(K^2*E) dominates.
-  if (topk < 16) {
+  // Radix selection is O(E), independent of K; naive is O(K*E).
+  // Threshold configurable via NVTE_RADIX_TOPK_THRESHOLD (default 16).
+  if (topk < get_radix_topk_threshold()) {
     switch (score_function) {
       case 0:
         launch(fused_score_for_moe_aux_loss_forward_kernel<DataType, TopkFuncType::Naive, 0>);
