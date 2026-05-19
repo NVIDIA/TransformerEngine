@@ -102,13 +102,8 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
       int32_t cols = input_tensor->flat_last_dim();
       auto dtype = input_tensor->dtype();
       const bool row_scaled_nvfp4 = output_tensor->row_scaled_nvfp4;
-      NVTE_CHECK(quant_config_cpp.nvfp4_4over6 == output_tensor->nvfp4_4over6,
-                 "Tensor and quantization config have inconsistent options for NVFP4 4over6.");
-      NVTE_CHECK(quant_config_cpp.nvfp4_e4m3_max == output_tensor->nvfp4_e4m3_max,
-                 "Tensor and quantization config have inconsistent options for NVFP4 4over6 "
-                 "E4M3 scale bound.");
-      const bool nvfp4_use_4over6 = quant_config_cpp.nvfp4_4over6;
-      NVTE_CHECK(nvfp4_use_4over6 || quant_config_cpp.nvfp4_e4m3_max == 448,
+      const bool nvfp4_use_4over6 = quant_config_cpp.nvfp4_4over6_mode != kNVTENVFP44Over6Disabled;
+      NVTE_CHECK(nvfp4_use_4over6 || output_tensor->nvfp4_e4m3_max == 448,
                  "Non-4over6 NVFP4 quantization requires E4M3 max 448.");
       NVTE_CHECK(!nvfp4_use_4over6 || !quant_config_cpp.stochastic_rounding,
                  "NVFP4 4over6 quantization does not support stochastic rounding.");
@@ -268,13 +263,8 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
       int32_t rows = grad_tensor->flat_first_dim();
       int32_t cols = grad_tensor->flat_last_dim();
       auto dtype = grad_tensor->dtype();
-      NVTE_CHECK(quant_config_cpp.nvfp4_4over6 == output_tensor->nvfp4_4over6,
-                 "Tensor and quantization config have inconsistent options for NVFP4 4over6.");
-      NVTE_CHECK(quant_config_cpp.nvfp4_e4m3_max == output_tensor->nvfp4_e4m3_max,
-                 "Tensor and quantization config have inconsistent options for NVFP4 4over6 "
-                 "E4M3 scale bound.");
-      const bool nvfp4_use_4over6 = quant_config_cpp.nvfp4_4over6;
-      NVTE_CHECK(nvfp4_use_4over6 || quant_config_cpp.nvfp4_e4m3_max == 448,
+      const bool nvfp4_use_4over6 = quant_config_cpp.nvfp4_4over6_mode != kNVTENVFP44Over6Disabled;
+      NVTE_CHECK(nvfp4_use_4over6 || output_tensor->nvfp4_e4m3_max == 448,
                  "Non-4over6 NVFP4 quantization requires E4M3 max 448.");
       NVTE_CHECK(!nvfp4_use_4over6 || !quant_config_cpp.stochastic_rounding,
                  "NVFP4 4over6 quantization does not support stochastic rounding.");
@@ -410,16 +400,11 @@ void group_quantize_fwd_host_aware_helper(const NVTETensor input, NVTETensor *ou
       int32_t cols = input_tensor->flat_last_dim();
       auto dtype = input_tensor->dtype();
 
+      const bool nvfp4_use_4over6 = quant_config_cpp.nvfp4_4over6_mode != kNVTENVFP44Over6Disabled;
       for (const auto *output_tensor : output_tensors) {
-        NVTE_CHECK(quant_config_cpp.nvfp4_4over6 == output_tensor->nvfp4_4over6,
-                   "Tensor and quantization config have inconsistent options for NVFP4 4over6.");
-        NVTE_CHECK(quant_config_cpp.nvfp4_e4m3_max == output_tensor->nvfp4_e4m3_max,
-                   "Tensor and quantization config have inconsistent options for NVFP4 4over6 "
-                   "E4M3 scale bound.");
+        NVTE_CHECK(nvfp4_use_4over6 || output_tensor->nvfp4_e4m3_max == 448,
+                   "Non-4over6 NVFP4 quantization requires E4M3 max 448.");
       }
-      const bool nvfp4_use_4over6 = quant_config_cpp.nvfp4_4over6;
-      NVTE_CHECK(nvfp4_use_4over6 || quant_config_cpp.nvfp4_e4m3_max == 448,
-                 "Non-4over6 NVFP4 quantization requires E4M3 max 448.");
       NVTE_CHECK(!quant_config_cpp.nvfp4_2d_quantization,
                  "2D quantization is not supported for group quantize.");
       NVTE_CHECK(!nvfp4_use_4over6,

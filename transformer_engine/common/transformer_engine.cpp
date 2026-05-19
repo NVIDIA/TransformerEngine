@@ -855,9 +855,6 @@ void nvte_set_tensor_param_v2(NVTETensor tensor, NVTETensorParam param, const vo
     case kNVTERowScaledNVFP4:
       t.row_scaled_nvfp4 = static_cast<bool>(*reinterpret_cast<const uint8_t *>(buf));
       break;
-    case kNVTENVFP44Over6:
-      t.nvfp4_4over6 = static_cast<bool>(*reinterpret_cast<const uint8_t *>(buf));
-      break;
     case kNVTENVFP4E4M3Max:
       std::memcpy(&t.nvfp4_e4m3_max, buf, attr_size);
       NVTE_CHECK(t.nvfp4_e4m3_max == 448 || t.nvfp4_e4m3_max == 256,
@@ -945,9 +942,6 @@ void nvte_get_tensor_param_v2(const NVTETensor tensor, NVTETensorParam param, vo
       break;
     case kNVTERowScaledNVFP4:
       *reinterpret_cast<uint8_t *>(buf) = static_cast<uint8_t>(t->row_scaled_nvfp4);
-      break;
-    case kNVTENVFP44Over6:
-      *reinterpret_cast<uint8_t *>(buf) = static_cast<uint8_t>(t->nvfp4_4over6);
       break;
     case kNVTENVFP4E4M3Max:
       std::memcpy(buf, &t->nvfp4_e4m3_max, attr_size);
@@ -1063,14 +1057,8 @@ void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
     case kNVTEQuantizationConfigUseFastMath:
       bool_to_uint8(config_.use_fast_math, buf);
       break;
-    case kNVTEQuantizationConfigNVFP44Over6:
-      bool_to_uint8(config_.nvfp4_4over6, buf);
-      break;
-    case kNVTEQuantizationConfigNVFP4E4M3Max:
-      std::memcpy(buf, &config_.nvfp4_e4m3_max, attr_size);
-      break;
-    case kNVTEQuantizationConfigNVFP44Over6ErrMode: {
-      const auto val = static_cast<uint8_t>(config_.nvfp4_4over6_err_mode);
+    case kNVTEQuantizationConfigNVFP44Over6Mode: {
+      const auto val = static_cast<uint8_t>(config_.nvfp4_4over6_mode);
       std::memcpy(buf, &val, attr_size);
       break;
     }
@@ -1132,20 +1120,13 @@ void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
     case kNVTEQuantizationConfigUseFastMath:
       uint8_to_bool(buf, config_.use_fast_math);
       break;
-    case kNVTEQuantizationConfigNVFP44Over6:
-      uint8_to_bool(buf, config_.nvfp4_4over6);
-      break;
-    case kNVTEQuantizationConfigNVFP4E4M3Max:
-      std::memcpy(&config_.nvfp4_e4m3_max, buf, attr_size);
-      NVTE_CHECK(config_.nvfp4_e4m3_max == 448 || config_.nvfp4_e4m3_max == 256,
-                 "Unsupported NVFP4 E4M3 max (got ", config_.nvfp4_e4m3_max, ")");
-      break;
-    case kNVTEQuantizationConfigNVFP44Over6ErrMode: {
+    case kNVTEQuantizationConfigNVFP44Over6Mode: {
       const auto val = *reinterpret_cast<const uint8_t *>(buf);
-      NVTE_CHECK(val == static_cast<uint8_t>(kNVTENVFP44Over6ErrMAE) ||
-                     val == static_cast<uint8_t>(kNVTENVFP44Over6ErrMSE),
-                 "Invalid NVFP4 4over6 error mode (got ", static_cast<int>(val), ")");
-      config_.nvfp4_4over6_err_mode = static_cast<NVTENVFP44Over6ErrMode>(val);
+      NVTE_CHECK(val == static_cast<uint8_t>(kNVTENVFP44Over6Disabled) ||
+                     val == static_cast<uint8_t>(kNVTENVFP44Over6MinMAE) ||
+                     val == static_cast<uint8_t>(kNVTENVFP44Over6MinMSE),
+                 "Invalid NVFP4 4over6 mode (got ", static_cast<int>(val), ")");
+      config_.nvfp4_4over6_mode = static_cast<NVTENVFP44Over6Mode>(val);
       break;
     }
     case kNVTEQuantizationConfigNVFP44Over6ErrUseFastMath:

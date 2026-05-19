@@ -440,22 +440,10 @@ void Tensor::set_row_scaled_nvfp4(bool row_scaled_nvfp4) {
   }
 }
 
-void Tensor::set_nvfp4_4over6(bool nvfp4_4over6) {
-  NVTE_CHECK(tensor_.scaling_mode() == NVTE_NVFP4_1D_SCALING,
-             "NVFP4 4over6 is only supported for NVFP4 tensors.");
-  tensor_.set_nvfp4_4over6(nvfp4_4over6);
-}
-
 void Tensor::set_nvfp4_e4m3_max(int nvfp4_e4m3_max) {
   NVTE_CHECK(tensor_.scaling_mode() == NVTE_NVFP4_1D_SCALING,
              "NVFP4 E4M3 max is only supported for NVFP4 tensors.");
   tensor_.set_nvfp4_e4m3_max(nvfp4_e4m3_max);
-}
-
-bool Tensor::nvfp4_4over6() const {
-  NVTE_CHECK(tensor_.scaling_mode() == NVTE_NVFP4_1D_SCALING,
-             "NVFP4 4over6 is only supported for NVFP4 tensors.");
-  return tensor_.get_nvfp4_4over6();
 }
 
 int Tensor::nvfp4_e4m3_max() const {

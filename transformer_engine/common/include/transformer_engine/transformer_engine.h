@@ -83,19 +83,13 @@ enum NVTETensorParam {
    *  its values are populated during quantization.
    */
   kNVTERowScaledNVFP4 = 8,
-  /*! Whether an NVFP4 tensor is encoded with 4over6 semantics.
-   *
-   *  This records whether block scales were selected by comparing map-to-4
-   *  and map-to-6 candidates.
-   */
-  kNVTENVFP44Over6 = 9,
   /*! Global E4M3 scale bound used by an NVFP4 tensor.
    *
    *  This is part of the tensor data contract. Downstream dequantization and
    *  GEMM scale consumers must use the same bound used during quantization.
    *  Standard NVFP4 uses 448; 4over6 may use 256 for map-to-4 headroom.
    */
-  kNVTENVFP4E4M3Max = 10,
+  kNVTENVFP4E4M3Max = 9,
   kNVTENumTensorParams
 };
 
@@ -124,12 +118,13 @@ enum NVTEScalingMode {
   NVTE_INVALID_SCALING = 100
 };
 
-/*! \enum NVTENVFP44Over6ErrMode
- * \brief Candidate-selection error mode for NVFP4 4over6 quantization.
+/*! \enum NVTENVFP44Over6Mode
+ * \brief Method for NVFP4 4over6 quantization.
  */
-enum NVTENVFP44Over6ErrMode {
-  kNVTENVFP44Over6ErrMAE = 0, /*!< Select the candidate with lower summed absolute error */
-  kNVTENVFP44Over6ErrMSE = 1, /*!< Select the candidate with lower summed squared error */
+enum NVTENVFP44Over6Mode {
+  kNVTENVFP44Over6Disabled = 0, /*!< 4over6 is not applied */
+  kNVTENVFP44Over6MinMAE = 1,   /*!< Select the candidate with lower mean absolute error */
+  kNVTENVFP44Over6MinMSE = 2,   /*!< Select the candidate with lower mean squared error */
 };
 
 /*! \brief TE Tensor type
@@ -402,34 +397,20 @@ enum NVTEQuantizationConfigAttribute {
    *  inconsistently between kernels.
    */
   kNVTEQuantizationConfigUseFastMath = 7,
-  /*! Whether to use NVFP4 4over6 block scale selection.
+  /*! Method for NVFP4 4over6 block scale selection.
    *
-   *  4over6 evaluates map-to-4 and map-to-6 candidates for each 1x16 block,
-   *  stores the lower-error candidate according to
-   *  kNVTEQuantizationConfigNVFP44Over6ErrMode. The output tensor's
-   *  kNVTENVFP44Over6 metadata must match this option.
+   *  Non-disabled modes evaluate map-to-4 and map-to-6 candidates for each
+   *  1x16 block and store the lower-error candidate. The value is an
+   *  NVTENVFP44Over6Mode encoded as uint8_t.
    */
-  kNVTEQuantizationConfigNVFP44Over6 = 8,
-  /*! Global E4M3 scale bound to use for NVFP4 quantization.
-   *
-   *  Standard NVFP4 uses 448. Some 4over6 tensors use 256 to leave room for
-   *  map-to-4 local scale expansion. The output tensor's kNVTENVFP4E4M3Max
-   *  metadata must match this option.
-   */
-  kNVTEQuantizationConfigNVFP4E4M3Max = 9,
-  /*! Candidate-selection error mode for NVFP4 4over6 quantization.
-   *
-   *  The value is an NVTENVFP44Over6ErrMode encoded as uint8_t. It is only
-   *  used when kNVTEQuantizationConfigNVFP44Over6 is enabled.
-   */
-  kNVTEQuantizationConfigNVFP44Over6ErrMode = 10,
+  kNVTEQuantizationConfigNVFP44Over6Mode = 8,
   /*! Whether the NVFP4 4over6 candidate error computation may use fast math.
    *
    *  This is intentionally separate from kNVTEQuantizationConfigUseFastMath so
    *  callers can keep candidate selection bitwise deterministic independent
    *  of ordinary NVFP4 fast-math settings.
    */
-  kNVTEQuantizationConfigNVFP44Over6ErrUseFastMath = 11,
+  kNVTEQuantizationConfigNVFP44Over6ErrUseFastMath = 9,
   kNVTEQuantizationConfigNumAttributes
 };
 
@@ -830,11 +811,6 @@ class TensorWrapper {
     nvte_set_tensor_param_v2(tensor_, kNVTERowScaledNVFP4, &val, sizeof(val));
   }
 
-  void set_nvfp4_4over6(bool nvfp4_4over6) {
-    const auto val = static_cast<uint8_t>(nvfp4_4over6);
-    nvte_set_tensor_param_v2(tensor_, kNVTENVFP44Over6, &val, sizeof(val));
-  }
-
   void set_nvfp4_e4m3_max(int nvfp4_e4m3_max) {
     const auto val = nvfp4_e4m3_max;
     nvte_set_tensor_param_v2(tensor_, kNVTENVFP4E4M3Max, &val, sizeof(val));
@@ -879,12 +855,6 @@ class TensorWrapper {
   bool get_row_scaled_nvfp4() const {
     uint8_t val = 0;
     nvte_get_tensor_param_v2(tensor_, kNVTERowScaledNVFP4, &val, sizeof(val), nullptr);
-    return static_cast<bool>(val);
-  }
-
-  bool get_nvfp4_4over6() const {
-    uint8_t val = 0;
-    nvte_get_tensor_param_v2(tensor_, kNVTENVFP44Over6, &val, sizeof(val), nullptr);
     return static_cast<bool>(val);
   }
 
@@ -1389,24 +1359,10 @@ class QuantizationConfigWrapper {
                                            sizeof(val));
   }
 
-  /*! \brief Set whether to use NVFP4 4over6 block scale selection */
-  void set_nvfp4_4over6(bool nvfp4_4over6) {
-    const auto val = static_cast<uint8_t>(nvfp4_4over6);
-    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigNVFP44Over6, &val,
-                                           sizeof(val));
-  }
-
-  /*! \brief Set the global E4M3 scale bound used by NVFP4 quantization */
-  void set_nvfp4_e4m3_max(int nvfp4_e4m3_max) {
-    const auto val = nvfp4_e4m3_max;
-    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigNVFP4E4M3Max, &val,
-                                           sizeof(val));
-  }
-
-  /*! \brief Set NVFP4 4over6 candidate-selection error mode */
-  void set_nvfp4_4over6_err_mode(NVTENVFP44Over6ErrMode mode) {
+  /*! \brief Set NVFP4 4over6 candidate-selection mode */
+  void set_nvfp4_4over6_mode(NVTENVFP44Over6Mode mode) {
     const auto val = static_cast<uint8_t>(mode);
-    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigNVFP44Over6ErrMode, &val,
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigNVFP44Over6Mode, &val,
                                            sizeof(val));
   }
 

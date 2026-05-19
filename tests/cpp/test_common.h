@@ -293,14 +293,12 @@ class Tensor {
     return columnwise_;
   }
 
-  bool nvfp4_4over6() const;
   int nvfp4_e4m3_max() const;
 
   void set_tensor_amax_nullptr();
 
   void set_with_gemm_swizzled_scales(bool with_gemm_swizzled_scales);
   void set_row_scaled_nvfp4(bool row_scaled_nvfp4);
-  void set_nvfp4_4over6(bool nvfp4_4over6);
   void set_nvfp4_e4m3_max(int nvfp4_e4m3_max);
 
   void to_cpu();

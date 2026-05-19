@@ -39,19 +39,19 @@ namespace nvfp4 {
 
 #if FP4_TYPE_SUPPORTED
 
-#define TRANSFORMER_ENGINE_NVFP4_4OVER6_ERR_MODE_SWITCH(ERR_MODE, ERR_MODE_CONST, ...) \
-  switch (ERR_MODE) {                                                                  \
-    case kNVTENVFP44Over6ErrMAE: {                                                     \
-      constexpr NVTENVFP44Over6ErrMode ERR_MODE_CONST = kNVTENVFP44Over6ErrMAE;        \
-      { __VA_ARGS__ }                                                                  \
-    } break;                                                                           \
-    case kNVTENVFP44Over6ErrMSE: {                                                     \
-      constexpr NVTENVFP44Over6ErrMode ERR_MODE_CONST = kNVTENVFP44Over6ErrMSE;        \
-      { __VA_ARGS__ }                                                                  \
-    } break;                                                                           \
-    default: {                                                                         \
-      NVTE_ERROR("Unsupported NVFP4 4over6 error mode.");                              \
-    }                                                                                  \
+#define TRANSFORMER_ENGINE_NVFP4_4OVER6_MODE_SWITCH(MODE, MODE_CONST, ...) \
+  switch (MODE) {                                                          \
+    case kNVTENVFP44Over6MinMAE: {                                         \
+      constexpr NVTENVFP44Over6Mode MODE_CONST = kNVTENVFP44Over6MinMAE;   \
+      { __VA_ARGS__ }                                                      \
+    } break;                                                               \
+    case kNVTENVFP44Over6MinMSE: {                                         \
+      constexpr NVTENVFP44Over6Mode MODE_CONST = kNVTENVFP44Over6MinMSE;   \
+      { __VA_ARGS__ }                                                      \
+    } break;                                                               \
+    default: {                                                             \
+      NVTE_ERROR("Unsupported NVFP4 4over6 mode.");                        \
+    }                                                                      \
   }
 
 #define TRANSFORMER_ENGINE_NVFP4_4OVER6_E4M3_MAX_SWITCH(E4M3_MAX_VALUE, E4M3_MAX_CONST, ...) \
@@ -81,9 +81,9 @@ constexpr int kPackedWordsPerGroup = 2;
 static_assert(kTileRows == kPipelineStages * kStageRows);
 static_assert(kStageRows % kGroupSize == 0);
 
-template <NVTENVFP44Over6ErrMode kErrMode, bool kErrUseFastMath>
+template <NVTENVFP44Over6Mode kMode, bool kErrUseFastMath>
 struct Config {
-  static constexpr NVTENVFP44Over6ErrMode err_mode = kErrMode;
+  static constexpr NVTENVFP44Over6Mode mode = kMode;
   static constexpr bool err_use_fast_math = kErrUseFastMath;
 };
 
@@ -104,26 +104,26 @@ struct ScalePair {
   float inv_map6;
 };
 
-template <NVTENVFP44Over6ErrMode kErrMode>
+template <NVTENVFP44Over6Mode kMode>
 __device__ __forceinline__ float compute_error_rn(const float diff) {
-  if constexpr (kErrMode == kNVTENVFP44Over6ErrMSE) {
+  if constexpr (kMode == kNVTENVFP44Over6MinMSE) {
     return __fmul_rn(diff, diff);
-  } else if constexpr (kErrMode == kNVTENVFP44Over6ErrMAE) {
+  } else if constexpr (kMode == kNVTENVFP44Over6MinMAE) {
     return fabsf(diff);
   } else {
-    NVTE_DEVICE_ERROR("Unsupported NVFP4 4over6 error mode.");
+    NVTE_DEVICE_ERROR("Unsupported NVFP4 4over6 mode.");
     return fabsf(diff);
   }
 }
 
-template <NVTENVFP44Over6ErrMode kErrMode>
+template <NVTENVFP44Over6Mode kMode>
 __device__ __forceinline__ float compute_error(const float diff) {
-  if constexpr (kErrMode == kNVTENVFP44Over6ErrMSE) {
+  if constexpr (kMode == kNVTENVFP44Over6MinMSE) {
     return diff * diff;
-  } else if constexpr (kErrMode == kNVTENVFP44Over6ErrMAE) {
+  } else if constexpr (kMode == kNVTENVFP44Over6MinMAE) {
     return fabsf(diff);
   } else {
-    NVTE_DEVICE_ERROR("Unsupported NVFP4 4over6 error mode.");
+    NVTE_DEVICE_ERROR("Unsupported NVFP4 4over6 mode.");
     return fabsf(diff);
   }
 }
@@ -205,12 +205,12 @@ __device__ __forceinline__ void accumulate_dequant_error(const uint32_t dequant_
     const float dequant = __half2float(__ushort_as_half(half_bits));
     const float val = dequant * sf * global_amax / err_denom;
     const float diff = val - x;
-    *err += compute_error<Cfg::err_mode>(diff);
+    *err += compute_error<Cfg::mode>(diff);
   } else {
     const float dequant = __half2float(__ushort_as_half(half_bits));
     const float val = __fdiv_rn(__fmul_rn(__fmul_rn(dequant, sf), global_amax), err_denom);
     const float diff = __fsub_rn(val, x);
-    *err = __fadd_rn(*err, compute_error_rn<Cfg::err_mode>(diff));
+    *err = __fadd_rn(*err, compute_error_rn<Cfg::mode>(diff));
   }
 }
 
@@ -607,13 +607,10 @@ void quantize_4over6(const Tensor &input, const Tensor *noop, Tensor *output,
   CheckInputTensor(input, "input");
   CheckOutputTensor(*output, "output", false);
 
-  NVTE_CHECK(quant_config != nullptr && quant_config->nvfp4_4over6,
-             "NVFP4 4over6 quantization requires an enabled quantization config.");
+  NVTE_CHECK(quant_config != nullptr && quant_config->nvfp4_4over6_mode != kNVTENVFP44Over6Disabled,
+             "NVFP4 4over6 quantization requires a non-disabled 4over6 mode.");
   NVTE_CHECK(!quant_config->stochastic_rounding,
              "NVFP4 4over6 quantization does not support stochastic rounding.");
-  NVTE_CHECK(quant_config->nvfp4_e4m3_max == output->nvfp4_e4m3_max,
-             "Tensor and quantization config have inconsistent options for NVFP4 4over6 "
-             "E4M3 scale bound.");
   NVTE_CHECK(output->has_data() || output->has_columnwise_data(),
              "NVFP4 4over6 output tensor must have rowwise or columnwise data.");
   NVTE_CHECK(!output->with_gemm_swizzled_scales, "Output must have scales in compact format.");
@@ -645,12 +642,12 @@ void quantize_4over6(const Tensor &input, const Tensor *noop, Tensor *output,
   }
 
   TRANSFORMER_ENGINE_NVFP4_4OVER6_E4M3_MAX_SWITCH(
-      quant_config->nvfp4_e4m3_max, E4M3_MAX,
-      TRANSFORMER_ENGINE_NVFP4_4OVER6_ERR_MODE_SWITCH(
-          quant_config->nvfp4_4over6_err_mode, ERR_MODE,
+      output->nvfp4_e4m3_max, E4M3_MAX,
+      TRANSFORMER_ENGINE_NVFP4_4OVER6_MODE_SWITCH(
+          quant_config->nvfp4_4over6_mode, MODE,
           TRANSFORMER_ENGINE_SWITCH_CONDITION(
               quant_config->nvfp4_4over6_err_use_fast_math, ERR_USE_FAST_MATH, {
-                using Cfg = quantize_4over6_kernel::Config<ERR_MODE, ERR_USE_FAST_MATH>;
+                using Cfg = quantize_4over6_kernel::Config<MODE, ERR_USE_FAST_MATH>;
                 TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
                     input.dtype(), IType,
                     quantize_4over6_kernel::launch_quantize_4over6<use_2d_quantization, Cfg,
