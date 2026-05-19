@@ -51,16 +51,26 @@ def _recv_request(rank: int) -> dict:
     return box[0]
 
 
-# Sentinel prefix on every response line so the parent reader can skip any
-# stdout chatter that gets interleaved (torchrun status, library prints, even
-# non-rank-0 stray output — torchrun ranks share rank 0's stdout fd).
-_RESP_PREFIX = "[CP_POOL_RESP] "
-
-
 def _send_response(rank: int, payload: dict) -> None:
     if rank == 0:
-        sys.stdout.write(_RESP_PREFIX + json.dumps(payload) + "\n")
+        sys.stdout.write(json.dumps(payload) + "\n")
         sys.stdout.flush()
+
+
+def _silence_non_rank0_stdout(rank: int) -> None:
+    """Redirect non-rank-0 stdout to /dev/null at fd level.
+
+    All ranks share rank 0's stdout fd (torchrun inherits it from the launcher),
+    so Python/library writes on rank>0 would interleave with rank 0's JSON
+    protocol on the parent's pipe. Closing fd 1 at the OS level on rank>0
+    catches both Python (``print``) and C-level (NCCL, etc.) writes.
+    """
+    if rank == 0:
+        return
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    os.dup2(devnull, 1)
+    os.close(devnull)
+    sys.stdout = open(1, "w", closefd=False)
 
 
 def _reset_between_cases() -> None:
@@ -142,6 +152,7 @@ def _create_cp_comm_groups(rank: int, world_size: int) -> tuple:
 def main() -> None:
     rank = int(os.environ["RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
+    _silence_non_rank0_stdout(rank)
     torch.cuda.set_device(rank % torch.cuda.device_count())
     dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
     os.environ["NVTE_CP_POOL_PG"] = "1"

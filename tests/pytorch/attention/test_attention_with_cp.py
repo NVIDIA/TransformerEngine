@@ -93,11 +93,6 @@ class PoolWorker:
     # Equivalent in spirit to PR #2965's run_distributed() stderr capture.
     _STDERR_BUFFER_LINES = 200  # ring cap (~40 KB ceiling)
     _STDERR_TAIL_CHARS = 4000  # how much to attach to the AssertionError
-    # Worker prefixes every JSON response with this sentinel; the reader skips
-    # any other stdout content (torchrun status, library prints, rank>0 stray
-    # output that lands on the shared stdout fd) so the JSON protocol can't
-    # be corrupted by interleaved chatter.
-    _RESP_PREFIX = "[CP_POOL_RESP] "
 
     def __init__(self, world_size: int):
         self.world_size = world_size
@@ -207,40 +202,27 @@ class PoolWorker:
             self._kill()
             raise AssertionError(msg)
 
-        # Read lines until we see our sentinel-prefixed JSON response.  Anything
-        # else (torchrun status output, library prints, rank>0 stray writes that
-        # land on the shared stdout fd) is echoed to stderr and skipped — it
-        # would corrupt json.loads if we tried to decode it.  The select()
-        # deadline alone bounds the loop; no separate line counter needed.
-        deadline = time.monotonic() + timeout
-        while True:
-            remaining = max(0.0, deadline - time.monotonic())
-            # select() on a pipe fd is Linux/macOS only — on Windows the select
-            # module only accepts sockets. CP attention tests run on Linux GPU
-            # hosts so this is fine; flag if portability is ever needed.
-            ready, _, _ = select.select([self.proc.stdout], [], [], remaining)
-            if not ready:
-                msg = self._diag(
-                    f"pool worker (world_size={self.world_size}) timed out after "
-                    f"{timeout}s; pool killed and will be respawned for the next case"
-                )
-                self._kill()
-                raise AssertionError(msg)
+        # Worker redirects non-rank-0 stdout to /dev/null at fd level, so
+        # rank 0's JSON line is the only thing that arrives on this pipe.
+        # select() on a pipe fd is Linux/macOS only — on Windows the select
+        # module only accepts sockets. CP attention tests run on Linux GPU
+        # hosts so this is fine; flag if portability is ever needed.
+        ready, _, _ = select.select([self.proc.stdout], [], [], timeout)
+        if not ready:
+            msg = self._diag(
+                f"pool worker (world_size={self.world_size}) timed out after "
+                f"{timeout}s; pool killed and will be respawned for the next case"
+            )
+            self._kill()
+            raise AssertionError(msg)
 
-            line = self.proc.stdout.readline()
-            if not line:
-                msg = self._diag("pool worker died mid-request")
-                self._kill()
-                raise AssertionError(msg)
+        line = self.proc.stdout.readline()
+        if not line:
+            msg = self._diag("pool worker died mid-request")
+            self._kill()
+            raise AssertionError(msg)
 
-            if line.startswith(self._RESP_PREFIX):
-                resp_line = line[len(self._RESP_PREFIX) :]
-                break
-            # Non-protocol stdout — echo to stderr for CI visibility, keep looking.
-            sys.stderr.write(line)
-            sys.stderr.flush()
-
-        resp = json.loads(resp_line)
+        resp = json.loads(line)
         if not resp["ok"]:
             # gather_object already carries the full per-rank traceback in
             # resp["error"]; no need to also attach stderr (would duplicate).
