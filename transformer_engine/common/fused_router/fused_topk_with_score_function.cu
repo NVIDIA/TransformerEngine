@@ -5,6 +5,7 @@
  ************************************************************************/
 
 #include <assert.h>
+#include <climits>
 #include <cuda_runtime.h>
 #include <transformer_engine/fused_router.h>
 
@@ -295,6 +296,17 @@ void fused_topk_with_score_function_forward_kernel_launcher(
     int num_groups, int group_topk, float scaling_factor, int score_function,
     const BiasType *expert_bias, DataType *probs, bool *routing_map, CompType *intermediate_output,
     cudaStream_t stream) {
+  NVTE_CHECK(num_experts > 0, "num_experts must be positive, got ", num_experts);
+  NVTE_CHECK(topk > 0 && topk <= num_experts, "topk must be in [1, num_experts], got topk=", topk,
+             " num_experts=", num_experts);
+  NVTE_CHECK(static_cast<int64_t>(num_tokens) * num_experts <= INT_MAX,
+             "num_tokens * num_experts exceeds INT_MAX (kernel uses int offsets), got ",
+             static_cast<int64_t>(num_tokens) * num_experts);
+  if (group_topk > 0) {
+    NVTE_CHECK(topk % group_topk == 0,
+               "topk must be divisible by group_topk, got topk=", topk,
+               " group_topk=", group_topk);
+  }
   size_t num_token_per_block = kThreadsPerBlock / kThreadsPerWarp;
   size_t total_blocks = (num_tokens + num_token_per_block - 1) / num_token_per_block;
   size_t scores_shmem = num_experts * num_token_per_block * sizeof(CompType);
@@ -326,7 +338,7 @@ void fused_topk_with_score_function_forward_kernel_launcher(
 
   // Dispatch on TopkFunc × ScoreFunc (6 instantiations per DataType × BiasType).
   // Radix selection is O(E), independent of K; naive is O(K*E).
-  // Threshold configurable via NVTE_RADIX_TOPK_THRESHOLD (default 16).
+  // Threshold configurable via NVTE_RADIX_TOPK_THRESHOLD (default 0, i.e. always radix).
   if (topk < get_radix_topk_threshold()) {
     switch (score_function) {
       case 0:
@@ -593,6 +605,10 @@ void fused_topk_with_score_function_backward_kernel_launcher(
     const bool *routing_map, const CompType *intermediate_output, const DataType *grad_probs,
     int num_tokens, int num_experts, int topk, bool use_pre_softmax, float scaling_factor,
     int score_function, DataType *grad_logits, cudaStream_t stream) {
+  NVTE_CHECK(num_experts > 0, "num_experts must be positive, got ", num_experts);
+  NVTE_CHECK(static_cast<int64_t>(num_tokens) * num_experts <= INT_MAX,
+             "num_tokens * num_experts exceeds INT_MAX (kernel uses int offsets), got ",
+             static_cast<int64_t>(num_tokens) * num_experts);
   size_t num_token_per_block = kThreadsPerBlock / kThreadsPerWarp;
   size_t total_blocks = (num_tokens + num_token_per_block - 1) / num_token_per_block;
 

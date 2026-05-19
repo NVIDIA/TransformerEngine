@@ -5,6 +5,7 @@
  ************************************************************************/
 
 #include <assert.h>
+#include <climits>
 #include <cuda_runtime.h>
 #include <transformer_engine/fused_router.h>
 
@@ -171,6 +172,12 @@ template <typename DataType>
 void fused_score_for_moe_aux_loss_forward_kernel_launcher(
     const DataType *logits, int num_tokens, int num_experts, int topk, int score_function,
     float *scores, bool *routing_map, CompType *intermediate_output, cudaStream_t stream) {
+  NVTE_CHECK(num_experts > 0, "num_experts must be positive, got ", num_experts);
+  NVTE_CHECK(topk > 0 && topk <= num_experts, "topk must be in [1, num_experts], got topk=", topk,
+             " num_experts=", num_experts);
+  NVTE_CHECK(static_cast<int64_t>(num_tokens) * num_experts <= INT_MAX,
+             "num_tokens * num_experts exceeds INT_MAX (kernel uses int offsets), got ",
+             static_cast<int64_t>(num_tokens) * num_experts);
   size_t num_token_per_block = kThreadsPerBlock / kThreadsPerWarp;
   size_t total_blocks = (num_tokens + num_token_per_block - 1) / num_token_per_block;
 
@@ -199,7 +206,7 @@ void fused_score_for_moe_aux_loss_forward_kernel_launcher(
 
   // Dispatch on TopkFunc × ScoreFunc (6 instantiations per DataType).
   // Radix selection is O(E), independent of K; naive is O(K*E).
-  // Threshold configurable via NVTE_RADIX_TOPK_THRESHOLD (default 16).
+  // Threshold configurable via NVTE_RADIX_TOPK_THRESHOLD (default 0, i.e. always radix).
   if (topk < get_radix_topk_threshold()) {
     switch (score_function) {
       case 0:
@@ -260,7 +267,7 @@ template <typename DataType, int ScoreFunc>
 __global__ void fused_score_for_moe_aux_loss_backward_kernel(const CompType *intermediate_output,
                                                              const float *grad_scores,
                                                              int num_tokens, int num_experts,
-                                                             int topk, DataType *grad_logits) {
+                                                             DataType *grad_logits) {
   /***
      * Section: Global Variables/Addresses init
      * - Each warp is responsible for one token, and has own shared memory buffer.
@@ -396,6 +403,10 @@ template <typename DataType>
 void fused_score_for_moe_aux_loss_backward_kernel_launcher(
     const CompType *intermediate_output, const float *grad_scores, int num_tokens, int num_experts,
     int topk, int score_function, DataType *grad_logits, cudaStream_t stream) {
+  NVTE_CHECK(num_experts > 0, "num_experts must be positive, got ", num_experts);
+  NVTE_CHECK(static_cast<int64_t>(num_tokens) * num_experts <= INT_MAX,
+             "num_tokens * num_experts exceeds INT_MAX (kernel uses int offsets), got ",
+             static_cast<int64_t>(num_tokens) * num_experts);
   size_t num_token_per_block = kThreadsPerBlock / kThreadsPerWarp;
   size_t total_blocks = (num_tokens + num_token_per_block - 1) / num_token_per_block;
 
@@ -409,7 +420,7 @@ void fused_score_for_moe_aux_loss_backward_kernel_launcher(
         cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_bytes));
     size_t grid_size = compute_persistent_grid(kernel, kThreadsPerBlock, shmem_bytes, total_blocks);
     kernel<<<grid_size, kThreadsPerBlock, shmem_bytes, stream>>>(
-        intermediate_output, grad_scores, num_tokens, num_experts, topk, grad_logits);
+        intermediate_output, grad_scores, num_tokens, num_experts, grad_logits);
     NVTE_CHECK_CUDA(cudaGetLastError());
   };
 

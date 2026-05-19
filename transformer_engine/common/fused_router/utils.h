@@ -7,6 +7,8 @@
 #ifndef TRANSFORMER_ENGINE_FUSED_ROUTER_UTILS_H_
 #define TRANSFORMER_ENGINE_FUSED_ROUTER_UTILS_H_
 
+#include <cassert>
+
 #include "../util/logging.h"
 #include "../utils.cuh"
 #include "transformer_engine/transformer_engine.h"
@@ -232,6 +234,9 @@ constexpr int kMaxExpertsRadixTopk = 255 * 32;  // 8160
 
 __device__ inline void radix_topk_and_mask(CompType *scores, int data_size, int topk,
                                            int *topk_indices, CompType *topk_scores, int lane_id) {
+  assert(data_size > 0 && data_size <= kMaxExpertsRadixTopk);
+  assert(topk > 0 && topk <= data_size);
+
   constexpr int RADIX_BITS = 4;
   constexpr int RADIX_SIZE = 1 << RADIX_BITS;  // 16 buckets
   constexpr int RADIX_MASK = RADIX_SIZE - 1;   // 0xF
@@ -388,7 +393,7 @@ __device__ inline void naive_topk_and_mask(CompType *scores, int data_size, int 
                        ? scores[lane_id]
                        : -std::numeric_limits<CompType>::infinity();
     int index = (lane_id < data_size) ? lane_id : 0;
-    // Some value is hanlded in local thread
+    // Some value is handled in local thread
     // Thread 0 is responsible for the: 0-th, 32-th, 64-th, 96-th ...
     // Reduce the value in local thread
     for (int i = lane_id + kThreadsPerWarp; i < data_size; i += kThreadsPerWarp) {
