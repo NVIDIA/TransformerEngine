@@ -18,6 +18,100 @@
 namespace transformer_engine {
 namespace fused_router {
 
+// =============================================================================
+// Simple aux_loss forward kernel — exact upstream structure (no async loader,
+// no persistent grid, runtime score_function dispatch).
+// =============================================================================
+
+template <typename DataType, TopkFuncType TopkFunc = TopkFuncType::Naive>
+__global__ void fused_score_for_moe_aux_loss_forward_simple_kernel(
+    const DataType *logits, int num_tokens, int num_experts, int topk, int score_function,
+    float *scores, bool *routing_map, CompType *intermediate_output) {
+  int num_token_per_block = blockDim.x / kThreadsPerWarp;
+  int warp_id = threadIdx.x / kThreadsPerWarp;
+  int lane_id = threadIdx.x % kThreadsPerWarp;
+  extern __shared__ float shmem_scores_for_aux_loss[];
+  CompType *logits_buf = reinterpret_cast<CompType *>(shmem_scores_for_aux_loss);
+  CompType *topk_logits_buf =
+      reinterpret_cast<CompType *>(logits_buf + num_experts * num_token_per_block);
+  int *topk_indices_buf = reinterpret_cast<int *>(topk_logits_buf + topk * num_token_per_block);
+  CompType *local_logits = logits_buf + warp_id * num_experts;
+  CompType *topk_logits = topk_logits_buf + warp_id * topk;
+  int *topk_indices = topk_indices_buf + warp_id * topk;
+
+  int total_round = (num_tokens + num_token_per_block - 1) / num_token_per_block;
+  for (int round = blockIdx.x; round < total_round; round += gridDim.x) {
+    int token_offset_cur_warp = round * num_token_per_block + warp_id;
+    if (token_offset_cur_warp >= num_tokens) break;
+
+    int pos_offset = token_offset_cur_warp * num_experts;
+    // Clear the routing_map
+    for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
+      routing_map[pos_offset + i] = false;
+      if (score_function == 1) {
+        intermediate_output[pos_offset + i] = -std::numeric_limits<CompType>::infinity();
+      }
+    }
+    // Load the logits to shmem
+    for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
+      local_logits[i] = static_cast<CompType>(logits[pos_offset + i]);
+    }
+    __threadfence_block();
+    __syncwarp();
+
+    // Preprocess: apply score function
+    if (score_function == 1) {
+      apply_softmax_on_float(local_logits, num_experts, lane_id);
+      __syncwarp();
+      for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
+        intermediate_output[pos_offset + i] = local_logits[i];
+      }
+    } else if (score_function == 0) {
+      apply_sigmoid_on_float(local_logits, num_experts, lane_id);
+      __syncwarp();
+      for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
+        intermediate_output[pos_offset + i] = local_logits[i];
+      }
+    } else if (score_function == 2) {
+      for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
+        intermediate_output[pos_offset + i] = local_logits[i];
+      }
+      __syncwarp();
+      apply_sqrtsoftplus_on_float(local_logits, num_experts, lane_id);
+    }
+
+    __syncwarp();
+
+    // Sigmoid/Sqrtsoftplus post-processing: normalize
+    if (score_function == 0 || score_function == 2) {
+      auto sum_logits =
+          warp_reduce_on_shmem<CompType, ReduceFuncType::SUM>(local_logits, num_experts, lane_id);
+      for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
+        local_logits[i] /= (sum_logits + epsilon);
+      }
+      __syncwarp();
+    }
+
+    // Topk
+    topk_and_mask<TopkFunc>(local_logits, num_experts, topk, topk_indices, topk_logits, lane_id);
+    __syncwarp();
+
+    // Write outputs
+    for (int i = lane_id; i < topk; i += kThreadsPerWarp) {
+      routing_map[pos_offset + topk_indices[i]] = true;
+    }
+    for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
+      scores[pos_offset + i] = local_logits[i];
+    }
+    __threadfence_block();
+    __syncwarp();
+  }
+}
+
+// =============================================================================
+// Optimized aux_loss forward kernel — async loader, persistent grid.
+// =============================================================================
+
 template <typename DataType, TopkFuncType TopkFunc = TopkFuncType::Naive, int ScoreFunc = 0>
 __global__ void fused_score_for_moe_aux_loss_forward_kernel(const DataType *logits, int num_tokens,
                                                             int num_experts, int topk,
@@ -197,24 +291,26 @@ void fused_score_for_moe_aux_loss_forward_kernel_launcher(
     NVTE_CHECK_CUDA(cudaGetLastError());
   };
 
-  // Dispatch on TopkFunc × ScoreFunc (6 instantiations per DataType).
-  // Radix selection is O(E), independent of K; naive is O(K*E).
+  // Dispatch: small topk uses the simple kernel (no async loader overhead);
+  // large topk uses the optimized kernel with radix selection + persistent grid.
   // Threshold configurable via NVTE_RADIX_TOPK_THRESHOLD (default 8).
   if (topk < get_radix_topk_threshold()) {
-    switch (score_function) {
-      case 0:
-        launch(fused_score_for_moe_aux_loss_forward_kernel<DataType, TopkFuncType::Naive, 0>);
-        break;
-      case 1:
-        launch(fused_score_for_moe_aux_loss_forward_kernel<DataType, TopkFuncType::Naive, 1>);
-        break;
-      case 2:
-        launch(fused_score_for_moe_aux_loss_forward_kernel<DataType, TopkFuncType::Naive, 2>);
-        break;
-      default:
-        NVTE_ERROR("Unsupported score_function: " + std::to_string(score_function));
-    }
+    // Simple path: exact upstream structure — no async loader, no persistent grid.
+    check_shared_memory_capacity_num_experts(other_shmem, num_experts);
+
+    auto launch_simple = [&](auto kernel) {
+      NVTE_CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                           other_shmem));
+      kernel<<<total_blocks, kThreadsPerBlock, other_shmem, stream>>>(
+          logits, num_tokens, num_experts, topk, score_function, scores, routing_map,
+          intermediate_output);
+      NVTE_CHECK_CUDA(cudaGetLastError());
+    };
+
+    launch_simple(
+        fused_score_for_moe_aux_loss_forward_simple_kernel<DataType, TopkFuncType::Naive>);
   } else {
+    // Optimized path: async loader + persistent grid + radix topk.
     NVTE_CHECK(num_experts <= kMaxExpertsRadixTopk,
                "Radix topk requires num_experts <= ", kMaxExpertsRadixTopk,
                " (packed 8-bit histogram), got ", num_experts, ".");

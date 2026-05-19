@@ -97,6 +97,29 @@ __device__ inline T warp_reduce_on_shmem(T *data_ptr, int data_size, int lane_id
 }
 
 // ============================================================================
+// Array (in-place on shmem) score functions — used by legacy simple kernel
+// ============================================================================
+
+__device__ inline void apply_sigmoid_on_float(float *scores, int data_size, int lane_id) {
+  for (int i = lane_id; i < data_size; i += kThreadsPerWarp) {
+    scores[i] = 1.0f / (1.0f + expf(-scores[i]));
+  }
+}
+
+__device__ inline void apply_sqrtsoftplus_on_float(float *scores, int data_size, int lane_id) {
+  for (int i = lane_id; i < data_size; i += kThreadsPerWarp) {
+    float x = scores[i];
+    float softplus_val;
+    if (x > 20.0f) {
+      softplus_val = x;
+    } else {
+      softplus_val = log1pf(expf(x));
+    }
+    scores[i] = sqrtf(softplus_val);
+  }
+}
+
+// ============================================================================
 // Scalar (per-element) score functions — for fused paths
 // ============================================================================
 
