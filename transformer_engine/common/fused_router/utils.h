@@ -19,14 +19,15 @@ namespace fused_router {
 
 // Topk values below this threshold use naive O(K*E) selection;
 // at or above it, use radix O(E) selection.  Configurable via
-// NVTE_RADIX_TOPK_THRESHOLD (default 0, i.e. always radix).
+// NVTE_RADIX_TOPK_THRESHOLD (default 8: radix is faster for K>=8,
+// naive avoids overhead for very small K).
 //
 // NOTE: This is an inline function with a static local.  Each translation unit
 // that includes this header gets its own copy of the static, so the env var is
 // read once per TU (not once globally).  This is safe because environment
 // variables are immutable during process lifetime in our usage.
 inline int get_radix_topk_threshold() {
-  static int threshold = getenv<int>("NVTE_RADIX_TOPK_THRESHOLD", 0);
+  static int threshold = getenv<int>("NVTE_RADIX_TOPK_THRESHOLD", 8);
   return threshold;
 }
 
@@ -54,48 +55,43 @@ constexpr int kThreadsPerBlock =
     128;  // Using 4 warps in 1 CTA, Each warp is responsible for 1 token.
 constexpr float epsilon = 1e-20;
 
-template <typename T>
-__device__ inline T max(T a, T b) {
-  return a > b ? a : b;
-}
-
-template <typename T>
-__device__ inline T sum(T a, T b) {
-  return a + b;
-}
-
 enum ReduceFuncType {
   SUM,
   MAX,
 };
 
-template <typename T>
-__device__ inline T warp_reduce_on_shmem(T *data_ptr, int data_size, ReduceFuncType type,
-                                         int lane_id) {
-  T (*reduce_func)(T, T);
-  CompType default_val = 0.0;
-  if (type == ReduceFuncType::SUM) {
-    reduce_func = sum;
-    default_val = 0.0;
-  } else if (type == ReduceFuncType::MAX) {
-    reduce_func = max;
-    default_val = -std::numeric_limits<CompType>::infinity();
-  }
+// Warp-level reduction over shared memory data.  Templated on the reduction
+// type to enable compile-time dispatch (no function pointer overhead).
+template <typename T, ReduceFuncType type>
+__device__ inline T warp_reduce_on_shmem(T *data_ptr, int data_size, int lane_id) {
+  constexpr CompType default_val =
+      (type == ReduceFuncType::SUM) ? 0.0f : -std::numeric_limits<CompType>::infinity();
 
-  // Some value is handled in local thread
-  // Thread 0 is responsible for the: 0-th, 32-th, 64-th, 96-th ...
-  // Reduce the value in local thread
+  // Each lane accumulates its strided slice
   CompType val = lane_id < data_size ? data_ptr[lane_id] : default_val;
   for (int i = lane_id + kThreadsPerWarp; i < data_size; i += kThreadsPerWarp) {
-    val = reduce_func(val, data_ptr[i]);
+    if constexpr (type == ReduceFuncType::SUM) {
+      val += data_ptr[i];
+    } else {
+      val = (data_ptr[i] > val) ? static_cast<CompType>(data_ptr[i]) : val;
+    }
   }
 
-  // Warp shuffle between threads
-  val = reduce_func(val, __shfl_xor_sync(0xffffffff, val, 16));
-  val = reduce_func(val, __shfl_xor_sync(0xffffffff, val, 8));
-  val = reduce_func(val, __shfl_xor_sync(0xffffffff, val, 4));
-  val = reduce_func(val, __shfl_xor_sync(0xffffffff, val, 2));
-  val = reduce_func(val, __shfl_xor_sync(0xffffffff, val, 1));
+  // Warp shuffle butterfly reduction
+  if constexpr (type == ReduceFuncType::SUM) {
+    val += __shfl_xor_sync(0xffffffff, val, 16);
+    val += __shfl_xor_sync(0xffffffff, val, 8);
+    val += __shfl_xor_sync(0xffffffff, val, 4);
+    val += __shfl_xor_sync(0xffffffff, val, 2);
+    val += __shfl_xor_sync(0xffffffff, val, 1);
+  } else {
+    auto shfl_max = [](CompType a, CompType b) { return a > b ? a : b; };
+    val = shfl_max(val, __shfl_xor_sync(0xffffffff, val, 16));
+    val = shfl_max(val, __shfl_xor_sync(0xffffffff, val, 8));
+    val = shfl_max(val, __shfl_xor_sync(0xffffffff, val, 4));
+    val = shfl_max(val, __shfl_xor_sync(0xffffffff, val, 2));
+    val = shfl_max(val, __shfl_xor_sync(0xffffffff, val, 1));
+  }
   __syncwarp();
   return T(val);
 }

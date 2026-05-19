@@ -262,7 +262,7 @@ __global__ void fused_topk_with_score_function_forward_kernel(
     // Sigmoid/Sqrtsoftplus post-processing when topk > 1
     if constexpr (ScoreFunc == 0 || ScoreFunc == 2) {
       if (topk > 1) {
-        CompType sum_scores = warp_reduce_on_shmem(topk_scores, topk, ReduceFuncType::SUM, lane_id);
+        CompType sum_scores = warp_reduce_on_shmem<CompType, ReduceFuncType::SUM>(topk_scores, topk, lane_id);
         for (int i = lane_id; i < topk; i += kThreadsPerWarp) {
           topk_scores[i] = topk_scores[i] / (sum_scores + epsilon);
         }
@@ -329,7 +329,7 @@ void fused_topk_with_score_function_forward_kernel_launcher(
 
   // Dispatch on TopkFunc × ScoreFunc (6 instantiations per DataType × BiasType).
   // Radix selection is O(E), independent of K; naive is O(K*E).
-  // Threshold configurable via NVTE_RADIX_TOPK_THRESHOLD (default 0, i.e. always radix).
+  // Threshold configurable via NVTE_RADIX_TOPK_THRESHOLD (default 8).
   if (topk < get_radix_topk_threshold()) {
     switch (score_function) {
       case 0:

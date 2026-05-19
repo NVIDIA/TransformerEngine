@@ -134,7 +134,7 @@ __global__ void fused_score_for_moe_aux_loss_forward_kernel(const DataType *logi
     // Sigmoid/Sqrtsoftplus post-processing: normalize scores to sum to 1
     if constexpr (ScoreFunc == 0 || ScoreFunc == 2) {
       auto sum_logits =
-          warp_reduce_on_shmem(local_logits, num_experts, ReduceFuncType::SUM, lane_id);
+          warp_reduce_on_shmem<CompType, ReduceFuncType::SUM>(local_logits, num_experts, lane_id);
       for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
         local_logits[i] /= (sum_logits + epsilon);
       }
@@ -199,7 +199,7 @@ void fused_score_for_moe_aux_loss_forward_kernel_launcher(
 
   // Dispatch on TopkFunc × ScoreFunc (6 instantiations per DataType).
   // Radix selection is O(E), independent of K; naive is O(K*E).
-  // Threshold configurable via NVTE_RADIX_TOPK_THRESHOLD (default 0, i.e. always radix).
+  // Threshold configurable via NVTE_RADIX_TOPK_THRESHOLD (default 8).
   if (topk < get_radix_topk_threshold()) {
     switch (score_function) {
       case 0:
