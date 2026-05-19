@@ -1730,7 +1730,7 @@ NVFP4Quantizer::NVFP4Quantizer(const py::handle& quantizer) : Quantizer(quantize
   this->with_2d_quantization = quantizer.attr("with_2d_quantization").cast<bool>();
   this->stochastic_rounding = quantizer.attr("stochastic_rounding").cast<bool>();
   const bool nvfp4_use_4over6 = quantizer.attr("nvfp4_use_4over6").cast<bool>();
-  this->nvfp4_e4m3_max = nvfp4_use_4over6 ? quantizer.attr("nvfp4_e4m3_max").cast<int>() : 448;
+  this->nvfp4_e4m3_max = quantizer.attr("nvfp4_e4m3_max").cast<int>();
   NVTE_CHECK(this->nvfp4_e4m3_max == 448 || this->nvfp4_e4m3_max == 256,
              "Unsupported NVFP4 E4M3 max: ", this->nvfp4_e4m3_max);
   const auto nvfp4_4over6_err_mode = quantizer.attr("nvfp4_4over6_err_mode").cast<std::string>();
