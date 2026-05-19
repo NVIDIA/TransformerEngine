@@ -4,6 +4,12 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+// Conditionally compiled: the common Newton-Schulz/cuSOLVERMp impl is gated
+// behind NVTE_WITH_CUSOLVERMP in the common CMakeLists. Without the gate, the
+// pytorch ext glob would pick this file up and produce undefined symbols
+// (nvte_cusolvermp_ctx_*). Keep this gate aligned with common/.
+#ifdef NVTE_WITH_CUSOLVERMP
+
 #include "transformer_engine/newton_schulz.h"
 
 #include "../extensions.h"
@@ -38,3 +44,5 @@ void newton_schulz(int64_t ctx_ptr, int64_t m, int64_t n, at::Tensor x, int64_t 
 }
 
 }  // namespace transformer_engine::pytorch
+
+#endif  // NVTE_WITH_CUSOLVERMP

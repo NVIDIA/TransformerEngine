@@ -147,6 +147,7 @@ set(transformer_engine_cuda_sources)
 set(transformer_engine_cuda_arch_specific_sources)
 
 list(APPEND transformer_engine_cpp_sources
+     comm_handle.cpp
      cudnn_utils.cpp
      transformer_engine.cpp
      fused_attn/fused_attn.cpp

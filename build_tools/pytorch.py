@@ -76,6 +76,13 @@ def setup_pytorch_extension(
 
     setup_mpi_flags(include_dirs, cxx_flags)
 
+    # Mirror the cuSOLVERMp gate. newton_schulz.cpp is conditionally compiled
+    # in the common lib; the pytorch ext glob pulls the same source so it must
+    # see the same define, otherwise the pybind layer refers to undefined
+    # cusolvermp_ctx_* symbols.
+    if bool(int(os.getenv("NVTE_WITH_CUSOLVERMP", "0"))):
+        cxx_flags.append("-DNVTE_WITH_CUSOLVERMP")
+
     library_dirs = []
     libraries = []
     if bool(int(os.getenv("NVTE_ENABLE_NVSHMEM", 0))):
