@@ -927,10 +927,16 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
         dtype: torch.dtype,
         shape: torch.Size,
     ) -> Float8Tensor:
-        """Build Float8Tensor, for use in __reduce__
-        __reduce_ex__ assumes object constructor has positional
-        arguments.
-
+        """This classmethod is kept for backward compatibility only.
+        ``__reduce_ex__`` used to point at this classmethod, but bound
+        classmethods pickle as ``(getattr, (cls, name))`` which adds an
+        extra reduction step to the pickle stream. The current
+        ``__reduce_ex__`` references the module-level
+        ``_make_float8_tensor_in_reduce_ex`` instead so the pickle stream
+        uses a single ``GLOBAL`` opcode. This classmethod is retained so
+        that previously pickled ``Float8Tensor`` payloads (which still
+        reference ``Float8Tensor._make_in_reduce_ex``) can still be
+        unpickled.
         """
         return _make_float8_tensor_in_reduce_ex(data, fp8_dtype, fp8_scale_inv, dtype, shape)
 
@@ -1004,12 +1010,7 @@ def _make_float8_tensor_in_reduce_ex(
     dtype: torch.dtype,
     shape: torch.Size,
 ) -> Float8Tensor:
-    """Reconstruct a ``Float8Tensor`` from its ``__reduce_ex__`` payload.
-    Defined at module level (not as a Float8Tensor classmethod) so the pickle stream
-    references it via a single ``GLOBAL`` opcode rather than the
-    ``(getattr, (cls, name))`` reduction that bound classmethods/static
-    methods produce.
-    """
+    """Reconstruct a ``Float8Tensor`` from its ``__reduce_ex__`` payload."""
     return Float8Tensor(
         data=data,
         fp8_dtype=fp8_dtype,

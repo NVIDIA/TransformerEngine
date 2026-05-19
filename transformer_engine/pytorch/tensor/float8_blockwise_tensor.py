@@ -449,11 +449,17 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorStorage, QuantizedTensor):
         is_2D_scaled: bool,
         data_format: Any = None,
     ) -> Float8BlockwiseQTensor:
-        """Build Float8BlockwiseQTensor, for use in __reduce__
-
-        __reduce_ex__ assumes object constructor has positional
-        arguments.
-
+        """This classmethod is kept for backward compatibility only.
+        ``__reduce_ex__`` used to point at this classmethod, but bound
+        classmethods pickle as ``(getattr, (cls, name))`` which adds an
+        extra reduction step to the pickle stream. The current
+        ``__reduce_ex__`` references the module-level
+        ``_make_float8_blockwise_tensor_in_reduce_ex`` instead so the
+        pickle stream uses a single ``GLOBAL`` opcode. This classmethod
+        is retained so that previously pickled ``Float8BlockwiseQTensor``
+        payloads (which still reference
+        ``Float8BlockwiseQTensor._make_in_reduce_ex``) can still be
+        unpickled.
         """
         return _make_float8_blockwise_tensor_in_reduce_ex(
             shape,
@@ -667,13 +673,7 @@ def _make_float8_blockwise_tensor_in_reduce_ex(
     is_2D_scaled: bool,
     data_format: Any = None,  # pylint: disable=unused-argument
 ) -> Float8BlockwiseQTensor:
-    """Reconstruct a ``Float8BlockwiseQTensor`` from ``__reduce_ex__``.
-
-    Defined at module level (not as a Float8BlockwiseQTensor classmethod)
-    so the pickle stream references it via a single
-    ``GLOBAL`` opcode rather than the ``(getattr, (cls, name))``
-    reduction that bound classmethods produce.
-    """
+    """Reconstruct a ``Float8BlockwiseQTensor`` from its ``__reduce_ex__`` payload."""
     # Infer device from inner buffers so the wrapper subclass stays
     # consistent with its data (e.g. CPU after DCP staging deserialize).
     device = None

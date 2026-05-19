@@ -763,11 +763,16 @@ class NVFP4Tensor(NVFP4TensorStorage, QuantizedTensor):
         quantizer: Quantizer,
         with_gemm_swizzled_scales: bool = False,
     ) -> NVFP4Tensor:
-        """Build NVFP4Tensor, for use in __reduce__
-
-        __reduce_ex__ assumes object constructor has positional
-        arguments.
-
+        """This classmethod is kept for backward compatibility only.
+        ``__reduce_ex__`` used to point at this classmethod, but bound
+        classmethods pickle as ``(getattr, (cls, name))`` which adds an
+        extra reduction step to the pickle stream. The current
+        ``__reduce_ex__`` references the module-level
+        ``_make_nvfp4_tensor_in_reduce_ex`` instead so the pickle stream
+        uses a single ``GLOBAL`` opcode. This classmethod is retained so
+        that previously pickled ``NVFP4Tensor`` payloads (which still
+        reference ``NVFP4Tensor._make_in_reduce_ex``) can still be
+        unpickled.
         """
         return _make_nvfp4_tensor_in_reduce_ex(
             shape,
@@ -886,12 +891,7 @@ def _make_nvfp4_tensor_in_reduce_ex(
     quantizer: Quantizer,
     with_gemm_swizzled_scales: bool = False,
 ) -> NVFP4Tensor:
-    """Reconstruct an ``NVFP4Tensor`` from its ``__reduce_ex__`` payload.
-
-    Defined at module level so the pickle stream uses a single
-    ``GLOBAL`` opcode rather than the ``(getattr, (cls, name))``
-    reduction that bound classmethods produce.
-    """
+    """Reconstruct an ``NVFP4Tensor`` from its ``__reduce_ex__`` payload."""
     # Infer device from whichever inner buffer is populated so the wrapper
     # subclass stays consistent with its data buffers (e.g. CPU after DCP
     # async-staging deserialize, CUDA after the usual quantize path).
