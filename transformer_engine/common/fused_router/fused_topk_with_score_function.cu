@@ -92,16 +92,23 @@ __global__ void fused_topk_with_score_function_forward_kernel(
     int token_offset_cur_warp = round * num_token_per_block + warp_id;
     if (token_offset_cur_warp >= num_tokens) break;
 
+    // Single-buffer: load current round here (no prefetch possible)
+    if (num_buffers == 1 && round != first_round) {
+      loader.load_current(logits + token_offset_cur_warp * num_experts, num_experts, lane_id);
+    }
+
     // Wait for current round's async load to complete
     loader.wait();
     DataType *raw_logits = loader.current_buf();
 
-    // Prefetch next round (overlaps with compute below)
-    int next_round = round + gridDim.x;
-    if (next_round < total_round) {
-      int next_token = next_round * num_token_per_block + warp_id;
-      if (next_token < num_tokens) {
-        loader.start_load(logits + next_token * num_experts, num_experts, lane_id);
+    // Prefetch next round (only when double-buffered, overlaps with compute)
+    if (num_buffers > 1) {
+      int next_round = round + gridDim.x;
+      if (next_round < total_round) {
+        int next_token = next_round * num_token_per_block + warp_id;
+        if (next_token < num_tokens) {
+          loader.start_load(logits + next_token * num_experts, num_experts, lane_id);
+        }
       }
     }
 
