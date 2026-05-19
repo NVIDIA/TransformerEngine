@@ -730,7 +730,27 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
   }
   const auto scaling_mode = quantizer_cpp_list[0]->get_scaling_mode();
   const auto fp4_dtype = quantizer_cpp_list[0]->dtype;
-  const bool with_gemm_swizzled_scales = false;  /// TODO (tmoon) Enable based on optimize_for_gemm;
+  // Only the RHT cast-fusion quant kernel supports direct swizzled SF
+  // emission. Other NVFP4 quant kernels (e.g. nvte_quantize_v2 ->
+  // quantize_nvfp4.cuh, quantize_transpose_nvfp4.cuh) NVTE_CHECK reject a
+  // swizzled-flagged output, so we gate on with_rht to avoid silent data
+  // corruption / hard aborts on non-RHT paths. Additionally we require
+  // *all* tensors in the group to be shape-eligible for RHT cast-fusion,
+  // because the grouped kernel honours a single boolean and the unfused
+  // fallback rejects swizzled output (see NVTE_CHECK at
+  // group_row_cast_col_hadamard_transform_cast_fusion.cu and
+  // quantize_with_rht_unfused_helper).
+  bool all_tensors_rht_cast_fusion_eligible = true;
+  for (size_t i = 0; i < num_tensors; ++i) {
+    const auto [rows, cols] = get_2d_dims(shape_list[i]);
+    if (!NVFP4Quantizer::is_eligible_for_rht_cast_fusion(rows, cols)) {
+      all_tensors_rht_cast_fusion_eligible = false;
+      break;
+    }
+  }
+  const bool with_gemm_swizzled_scales =
+      quantizer_cpp_list[0]->optimize_for_gemm && quantizer_cpp_list[0]->with_rht &&
+      all_tensors_rht_cast_fusion_eligible;
 
   // Helper function to get size of byte buffer holding FP4 data (last dim divided by 2)
   auto fp4_byte_shape = [](const std::vector<size_t> &shape) -> std::vector<size_t> {

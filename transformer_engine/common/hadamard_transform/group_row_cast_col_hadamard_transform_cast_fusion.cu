@@ -1423,7 +1423,20 @@ void group_hadamard_transform_cast_fusion(const Tensor &input_, std::vector<Tens
 
   int k_tile_size = 1024;
 
-  const bool use_swizzle_sf_output = false;
+  // Honor the per-tensor with_gemm_swizzled_scales flag. The SF layout is
+  // selected at compile time via the kEnableSwizzleSFOutput template
+  // parameter, so all output tensors in the group must share the same flag
+  // (otherwise different group elements would need different kernel
+  // instantiations within one launch, which is not supported).
+  NVTE_CHECK(!output_list.empty(),
+             "group_hadamard_transform_cast_fusion: output_list must be non-empty.");
+  const bool use_swizzle_sf_output = output_list[0]->with_gemm_swizzled_scales;
+  for (size_t i = 1; i < output_list.size(); ++i) {
+    NVTE_CHECK(output_list[i]->with_gemm_swizzled_scales == use_swizzle_sf_output,
+               "group_hadamard_transform_cast_fusion: all output tensors must share the same "
+               "with_gemm_swizzled_scales flag (mismatch at index ",
+               i, ").");
+  }
 
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
       use_stochastic_rounding, kEnableStochasticRounding,

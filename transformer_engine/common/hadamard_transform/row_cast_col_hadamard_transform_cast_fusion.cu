@@ -1315,8 +1315,11 @@ void hadamard_transform_cast_fusion(const Tensor &input_, Tensor &output_,
 
   int k_tile_size = 1024;
 
-  // TODO: add support for swizzle sf output
-  const bool use_swizzle_sf_output = false;
+  // Honor the output tensor's GEMM-swizzled-scales flag: when set, emit
+  // scale factors directly in the layout that the downstream cuBLAS LT NVFP4
+  // GEMM consumes, eliminating the otherwise-required
+  // nvte_swizzle_scaling_factors pass between quantize and GEMM.
+  const bool use_swizzle_sf_output = output_.with_gemm_swizzled_scales;
 
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
       use_stochastic_rounding, kEnableStochasticRounding,
