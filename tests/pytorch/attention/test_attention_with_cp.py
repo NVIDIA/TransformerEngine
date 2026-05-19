@@ -183,7 +183,7 @@ class PoolWorker:
                     if first_err is not None:
                         sys.stderr.write(
                             f"[POOL-RETRY-FAIL] world_size={self.world_size}: "
-                            f"both attempts died; first error was: "
+                            "both attempts died; first error was: "
                             f"{str(first_err).splitlines()[0]!r}\n"
                         )
                         sys.stderr.flush()
