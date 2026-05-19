@@ -43,6 +43,7 @@ TE exposes its quantization choices as **recipes**. Please see
 <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/features/low_precision_training/index.html>`_
 for a more detailed description of each recipe.
 
+..  _jax_recipe_table_overview:
 .. list-table::
    :header-rows: 1
    :widths: 25, 15, 30, 30
@@ -50,15 +51,7 @@ for a more detailed description of each recipe.
    * - Recipe
      - Hardware
      - State
-     - When to use
-   * - ``DelayedScaling``
-     - Hopper+
-     - amax history (Flax variables)
-     - Per-tensor FP8 with amax history
-   * - ``Float8CurrentScaling``
-     - Hopper+
-     - none
-     - Per-tensor FP8 without an amax history
+     - Description
    * - ``MXFP8BlockScaling``
      - Blackwell+
      - none
@@ -67,6 +60,14 @@ for a more detailed description of each recipe.
      - Blackwell+
      - requires a Flax RNG ``sr_rng``
      - FP4 with 2D block scaling and stochastic rounding
+   * - ``DelayedScaling``
+     - Hopper+
+     - amax history (Flax variables)
+     - Per-tensor FP8 with amax history
+   * - ``Float8CurrentScaling``
+     - Hopper+
+     - none
+     - Per-tensor FP8 without an amax history
 
 Import them from ``transformer_engine.common.recipe``.
 

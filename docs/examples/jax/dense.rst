@@ -11,7 +11,7 @@ TransformerEngine's quantized GEMM.
 
 **Recipe.** We use ``MXFP8BlockScaling`` in this tutorial. ``MXFP8BlockScaling`` and
 ``NVFP4BlockScaling`` require a Blackwell-class GPU; on Hopper, swap in
-``DelayedScaling`` or ``Float8CurrentScaling``.
+``DelayedScaling`` or ``Float8CurrentScaling``. For more information on recipes, see this :ref:`recipe overview <_jax_recipe_table_overview>`.
 
 `← Back to the JAX integration overview <../te_jax_integration.html>`_
 
@@ -48,22 +48,7 @@ they were.
    :start-after: # DENSE_TE_SETUP_START
    :end-before: # DENSE_TE_SETUP_END
 
-.. note::
-
-   **What about DelayedScaling state?**
-
-   Most recipes are stateless — scaling factors are computed from each tensor
-   as it flows through the GEMM, so there is nothing to persist across steps.
-   However, if you swap in ``DelayedScaling`` instead, ``init`` will produce a
-   second variable collection, ``_overwrite_with_gradient``, holding
-   ``kernel_amax_history``, ``kernel_scale``, ``x_amax_history``, ``x_scale``,
-   etc. These are **not** model parameters — they are Flax variables that TE
-   updates each step to compute per-tensor scales from a rolling amax window.
-
-   If you use ``DelayedScaling``, you must thread the *entire* ``var_collect``
-   through your training loop (not just ``params``) so the history persists
-   across steps. ``MXFP8BlockScaling``, ``NVFP4BlockScaling``, and
-   ``Float8CurrentScaling`` do not require this.
+If using ``DelayedScaling``, see [#delayedscaling]_.
 
 
 3. Single-GPU performance
@@ -90,7 +75,7 @@ same input for both models.
       :start-after: # SINGLE_GPU_OUTPUT_START
       :end-before: # SINGLE_GPU_OUTPUT_END
 
-On a single GB200, that's roughly **2.5× faster** for the fwd+bwd of one large
+On a single GB200, that's roughly **1.6× faster** for the fwd+bwd of one large
 Dense — and the only code change was passing ``dot_general=te_dot_general_cls()``
 into ``nn.Dense``.
 
@@ -166,3 +151,16 @@ Next steps
 
 * `Collective GEMM <collective_gemm.html>`_: further speedups by communicating between devices inside the GEMM.
 * `← Hub <../te_jax_integration.html>`_
+
+.. rubric:: Footnotes
+
+.. [#delayedscaling] **DelayedScaling state.** Most recipes are stateless — scaling factors are computed from each
+   tensor as it flows through the GEMM, so there is nothing to persist across steps. However, if you swap in
+   ``DelayedScaling`` instead, ``init`` will produce a second variable collection,
+   ``_overwrite_with_gradient``, holding ``kernel_amax_history``, ``kernel_scale``,
+   ``x_amax_history``, ``x_scale``, etc. These are **not** model parameters — they are Flax
+   variables that TE updates each step to compute per-tensor scales from a rolling amax window.
+   If you use ``DelayedScaling``, you must thread the *entire* ``var_collect`` through your
+   training loop (not just ``params``) so the history persists across steps, otherwise training
+   accuracy will be impacted. ``MXFP8BlockScaling``, ``NVFP4BlockScaling``, and
+   ``Float8CurrentScaling`` do not require this.

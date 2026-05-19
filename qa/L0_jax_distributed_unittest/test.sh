@@ -37,6 +37,11 @@ wait
 TE_PATH=$TE_PATH bash $TE_PATH/examples/jax/collective_gemm/run_test_cgemm.sh || test_fail "run_test_cgemm.sh"
 wait
 
+# Exercise the multi-GPU tutorial in docs/examples/jax (needs >= 4 GPUs;
+# auto-skips otherwise).
+python3 -m pytest -c $TE_PATH/tests/jax/pytest.ini -v --junitxml=$XML_LOG_DIR/pytest_docs_examples_jax_distributed.xml -k multi_gpu $TE_PATH/docs/examples/jax/ || test_fail "docs/examples/jax (multi-GPU)"
+wait
+
 if [ $RET -ne 0 ]; then
     echo "Error: some sub-tests failed: $FAILED_CASES"
     exit 1

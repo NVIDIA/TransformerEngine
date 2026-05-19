@@ -32,6 +32,7 @@ requires_mxfp8 = pytest.mark.skipif(
 )
 
 
+@requires_mxfp8
 def test_baseline_runs():
     from dense import baseline, baseline_vars, batch, dtype, out_features, seq, x
 
