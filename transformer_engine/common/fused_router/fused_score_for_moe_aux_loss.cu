@@ -5,9 +5,10 @@
  ************************************************************************/
 
 #include <assert.h>
-#include <climits>
 #include <cuda_runtime.h>
 #include <transformer_engine/fused_router.h>
+
+#include <climits>
 
 #include "../common.h"
 #include "../util/logging.h"
@@ -24,9 +25,11 @@ namespace fused_router {
 // =============================================================================
 
 template <typename DataType, TopkFuncType TopkFunc = TopkFuncType::Naive>
-__global__ void fused_score_for_moe_aux_loss_forward_simple_kernel(
-    const DataType *logits, int num_tokens, int num_experts, int topk, int score_function,
-    float *scores, bool *routing_map, CompType *intermediate_output) {
+__global__ void fused_score_for_moe_aux_loss_forward_simple_kernel(const DataType *logits,
+                                                                   int num_tokens, int num_experts,
+                                                                   int topk, int score_function,
+                                                                   float *scores, bool *routing_map,
+                                                                   CompType *intermediate_output) {
   int num_token_per_block = blockDim.x / kThreadsPerWarp;
   int warp_id = threadIdx.x / kThreadsPerWarp;
   int lane_id = threadIdx.x % kThreadsPerWarp;
@@ -299,8 +302,8 @@ void fused_score_for_moe_aux_loss_forward_kernel_launcher(
     check_shared_memory_capacity_num_experts(other_shmem, num_experts);
 
     auto launch_simple = [&](auto kernel) {
-      NVTE_CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                           other_shmem));
+      NVTE_CHECK_CUDA(
+          cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, other_shmem));
       kernel<<<total_blocks, kThreadsPerBlock, other_shmem, stream>>>(
           logits, num_tokens, num_experts, topk, score_function, scores, routing_map,
           intermediate_output);

@@ -5,9 +5,10 @@
  ************************************************************************/
 
 #include <assert.h>
-#include <climits>
 #include <cuda_runtime.h>
 #include <transformer_engine/fused_router.h>
+
+#include <climits>
 
 #include "../common.h"
 #include "../util/logging.h"
@@ -24,11 +25,12 @@ namespace fused_router {
 // =============================================================================
 
 template <typename DataType, typename BiasType, TopkFuncType TopkFunc = TopkFuncType::Naive>
-__global__ void fused_topk_forward_simple_kernel(
-    const DataType *logits, int num_tokens, int num_experts, int topk, bool use_pre_softmax,
-    int num_groups, int group_topk, float scaling_factor, int score_function,
-    const BiasType *expert_bias, DataType *probs, bool *routing_map,
-    CompType *intermediate_output) {
+__global__ void fused_topk_forward_simple_kernel(const DataType *logits, int num_tokens,
+                                                 int num_experts, int topk, bool use_pre_softmax,
+                                                 int num_groups, int group_topk,
+                                                 float scaling_factor, int score_function,
+                                                 const BiasType *expert_bias, DataType *probs,
+                                                 bool *routing_map, CompType *intermediate_output) {
   int num_token_per_block = blockDim.x / kThreadsPerWarp;
   int warp_id = threadIdx.x / kThreadsPerWarp;
   int lane_id = threadIdx.x % kThreadsPerWarp;
@@ -112,9 +114,8 @@ __global__ void fused_topk_forward_simple_kernel(
     if (group_topk > 0) {
       int group_size = num_experts / num_groups;
       for (int i = 0; i < num_groups; i++) {
-        topk_and_mask<TopkFunc>(
-            scores + i * group_size, group_size, topk / group_topk,
-            topk_indices, topk_scores, lane_id);
+        topk_and_mask<TopkFunc>(scores + i * group_size, group_size, topk / group_topk,
+                                topk_indices, topk_scores, lane_id);
         __syncwarp();
         if (lane_id == 0) {
           CompType tmp = 0.0;
@@ -125,8 +126,8 @@ __global__ void fused_topk_forward_simple_kernel(
         }
         __syncwarp();
       }
-      topk_and_mask<TopkFunc>(
-          group_scores, num_groups, group_topk, topk_indices, topk_scores, lane_id);
+      topk_and_mask<TopkFunc>(group_scores, num_groups, group_topk, topk_indices, topk_scores,
+                              lane_id);
       __syncwarp();
       for (int i = 0; i < group_topk; i++) {
         int st = topk_indices[i] * group_size;
@@ -430,7 +431,8 @@ __global__ void fused_topk_with_score_function_forward_kernel(
     // Sigmoid/Sqrtsoftplus post-processing when topk > 1
     if constexpr (ScoreFunc == 0 || ScoreFunc == 2) {
       if (topk > 1) {
-        CompType sum_scores = warp_reduce_on_shmem<CompType, ReduceFuncType::SUM>(topk_scores, topk, lane_id);
+        CompType sum_scores =
+            warp_reduce_on_shmem<CompType, ReduceFuncType::SUM>(topk_scores, topk, lane_id);
         for (int i = lane_id; i < topk; i += kThreadsPerWarp) {
           topk_scores[i] = topk_scores[i] / (sum_scores + epsilon);
         }
@@ -462,8 +464,7 @@ void fused_topk_with_score_function_forward_kernel_launcher(
              "num_tokens * num_experts exceeds INT_MAX (kernel uses int offsets), got ",
              static_cast<int64_t>(num_tokens) * num_experts);
   if (group_topk > 0) {
-    NVTE_CHECK(topk % group_topk == 0,
-               "topk must be divisible by group_topk, got topk=", topk,
+    NVTE_CHECK(topk % group_topk == 0, "topk must be divisible by group_topk, got topk=", topk,
                " group_topk=", group_topk);
   }
   size_t num_token_per_block = kThreadsPerBlock / kThreadsPerWarp;
@@ -504,8 +505,8 @@ void fused_topk_with_score_function_forward_kernel_launcher(
     check_shared_memory_capacity_num_experts(other_shmem, num_experts);
 
     auto launch_simple = [&](auto kernel) {
-      NVTE_CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                           other_shmem));
+      NVTE_CHECK_CUDA(
+          cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, other_shmem));
       kernel<<<total_blocks, kThreadsPerBlock, other_shmem, stream>>>(
           logits, num_tokens, num_experts, topk, use_pre_softmax, num_groups, group_topk,
           scaling_factor, score_function, expert_bias, probs, routing_map, intermediate_output);

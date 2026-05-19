@@ -64,10 +64,8 @@ inline int choose_num_buffers(size_t single_buf_shmem, size_t other_shmem_bytes)
   NVTE_CHECK_CUDA(cudaDeviceGetAttribute(&max_smem_per_sm,
                                          cudaDevAttrMaxSharedMemoryPerMultiprocessor, device_id));
 
-  int blocks_double =
-      (total_double > 0) ? static_cast<int>(max_smem_per_sm / total_double) : 0;
-  int blocks_single =
-      (total_single > 0) ? static_cast<int>(max_smem_per_sm / total_single) : 0;
+  int blocks_double = (total_double > 0) ? static_cast<int>(max_smem_per_sm / total_double) : 0;
+  int blocks_single = (total_single > 0) ? static_cast<int>(max_smem_per_sm / total_single) : 0;
 
   if (blocks_double >= kMinBlocksPerSM) return 2;
   if (blocks_single >= kMinBlocksPerSM) return 1;
