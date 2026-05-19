@@ -202,11 +202,19 @@ def _sequential_op_keys(te_state_dict: dict, layer_prefix: str) -> tuple[list[st
     """Return sorted lists of TE Sequential-Op ``weight{i}`` keys, if present."""
     gate_up_prefix = layer_prefix + "mlp.experts_gate_up."
     down_prefix = layer_prefix + "mlp.experts_down."
+
+    def _weight_index(key: str) -> int:
+        match = re.search(r"weight(\d+)$", key)
+        assert match is not None
+        return int(match.group(1))
+
     gate_up_keys = sorted(
-        k for k in te_state_dict if k.startswith(gate_up_prefix) and re.search(r"weight\d+$", k)
+        (k for k in te_state_dict if k.startswith(gate_up_prefix) and re.search(r"weight\d+$", k)),
+        key=_weight_index,
     )
     down_keys = sorted(
-        k for k in te_state_dict if k.startswith(down_prefix) and re.search(r"weight\d+$", k)
+        (k for k in te_state_dict if k.startswith(down_prefix) and re.search(r"weight\d+$", k)),
+        key=_weight_index,
     )
     return gate_up_keys, down_keys
 
