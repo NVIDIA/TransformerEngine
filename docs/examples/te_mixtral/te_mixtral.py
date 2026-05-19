@@ -348,16 +348,17 @@ class TEMixtralSparseMoeBlock(nn.Module):
         """
         if not self._uses_stacked_expert_weights:
             return
-
         gate_up_w = self.experts_gate_up_weight
-        if isinstance(gate_up_w, DTensor) or isinstance(gate_up_w.data, DTensor):
-            gate_up_w = gate_up_w.to_local()
+        if isinstance(gate_up_w.data, DTensor):
+            gate_up_w = gate_up_w.data.to_local()
         for i in range(self.num_local_experts):
             object.__setattr__(self.experts_gate_up, f"weight{i}", gate_up_w[i])
 
         down_w = self.experts_down_weight
-        if isinstance(down_w, DTensor) or isinstance(down_w.data, DTensor):
-            down_w = down_w.to_local()
+        if isinstance(down_w.data, DTensor):
+            down_w = down_w.data.to_local()
+        for i in range(self.num_local_experts):
+            object.__setattr__(self.experts_down, f"weight{i}", down_w[i])
         for i in range(self.num_local_experts):
             object.__setattr__(self.experts_down, f"weight{i}", down_w[i])
 
