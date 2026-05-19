@@ -68,6 +68,14 @@ Usage::
 
 Snapshots are saved to ``--snapshot-dir`` and can be viewed at
 https://pytorch.org/memory_viz
+
+Quick repro of the FSDP2 + qinit dequantize leak::
+
+    # Use --mode mxfp8-fsdp2 to repro the FSDP2 + qinit lazy_init dequantize
+    # pattern. Compare against --mode bare-fsdp2 (BF16 control) to see the
+    # leaked MXFP8 tensors from quantize_impl that are never freed.
+    torchrun --nproc-per-node 2 single_block_memory_profile.py --mode bare-fsdp2
+    torchrun --nproc-per-node 2 single_block_memory_profile.py --mode mxfp8-fsdp2
 """
 
 import argparse
