@@ -109,7 +109,9 @@ def log_memory(tag: str):  # noqa: D103
     alloc = torch.cuda.memory_allocated() / (1024**3)
     reserved = torch.cuda.memory_reserved() / (1024**3)
     peak = torch.cuda.max_memory_allocated() / (1024**3)
-    print(f"[Memory: {tag}] allocated={alloc:.4f} GB, reserved={reserved:.4f} GB, peak={peak:.4f} GB")
+    print(
+        f"[Memory: {tag}] allocated={alloc:.4f} GB, reserved={reserved:.4f} GB, peak={peak:.4f} GB"
+    )
 
 
 def print_param_info(model):  # noqa: D103
@@ -126,7 +128,10 @@ def print_param_info(model):  # noqa: D103
         else:
             local = param
         is_qt = isinstance(local, QuantizedTensor)
-        has_hpiv = hasattr(local, "get_high_precision_init_val") and local.get_high_precision_init_val() is not None
+        has_hpiv = (
+            hasattr(local, "get_high_precision_init_val")
+            and local.get_high_precision_init_val() is not None
+        )
         print(
             f"  {name}: shape={list(param.shape)}, local_shape={list(local.shape)}, "
             f"dtype={local.dtype}, quantized={is_qt}, hpiv={has_hpiv}"
@@ -153,13 +158,17 @@ def resolve_recipe(args):
         return Float8BlockScaling()
 
 
-def create_layers(num_layers: int, use_qinit: bool, use_hpiv: bool, device: str, recipe, dims: dict):
+def create_layers(
+    num_layers: int, use_qinit: bool, use_hpiv: bool, device: str, recipe, dims: dict
+):
     """Create N TransformerLayers, optionally inside quantized_model_init context."""
     hidden, ffn, heads = dims["hidden_size"], dims["ffn_hidden_size"], dims["num_attention_heads"]
     layers = []
     for _ in range(num_layers):
         if use_qinit:
-            with te.quantized_model_init(recipe=recipe, enabled=True, preserve_high_precision_init_val=use_hpiv):
+            with te.quantized_model_init(
+                recipe=recipe, enabled=True, preserve_high_precision_init_val=use_hpiv
+            ):
                 layer = te.TransformerLayer(
                     hidden,
                     ffn,
@@ -262,7 +271,9 @@ def run_bare(args, use_fp8: bool, use_fp8_autocast_only: bool = False):
             if hasattr(param, "get_high_precision_init_val"):
                 hp_val = param.get_high_precision_init_val()
                 if hp_val is not None:
-                    optimizer.set_scaled_state(param, "master_param", hp_val.to(device=device, dtype=torch.float32))
+                    optimizer.set_scaled_state(
+                        param, "master_param", hp_val.to(device=device, dtype=torch.float32)
+                    )
                     param.clear_high_precision_init_val()
                     count += 1
         dist_print(f"Seeded {count} master weights from HPIV.")
@@ -354,7 +365,9 @@ def run_fsdp2(args, use_fp8: bool, use_fp8_autocast_only: bool = False):
             if hasattr(local, "get_high_precision_init_val"):
                 hp_val = local.get_high_precision_init_val()
                 if hp_val is not None:
-                    optimizer.set_scaled_state(param, "master_param", hp_val.to(device=device, dtype=torch.float32))
+                    optimizer.set_scaled_state(
+                        param, "master_param", hp_val.to(device=device, dtype=torch.float32)
+                    )
                     local.clear_high_precision_init_val()
                     count += 1
         dist_print(f"Seeded {count} master weights from HPIV.")
@@ -410,17 +423,22 @@ def main():  # noqa: D103
         ],
         required=True,
         help=(
-            "bare=BF16, mxfp8=MXFP8+qinit, fp8-no-qinit=BF16 weights+FP8 autocast, *-fsdp2=same with FSDP2 sharding"
+            "bare=BF16, mxfp8=MXFP8+qinit, fp8-no-qinit=BF16 weights+FP8 autocast, *-fsdp2=same"
+            " with FSDP2 sharding"
         ),
     )
-    parser.add_argument("--num-layers", type=int, default=1, help="Number of TransformerLayers (default: 1)")
+    parser.add_argument(
+        "--num-layers", type=int, default=1, help="Number of TransformerLayers (default: 1)"
+    )
     parser.add_argument(
         "--model-size",
         choices=list(MODEL_SIZES.keys()),
         default="8b",
         help="Layer dimensions: 8b (~490M params/layer) or 70b (~973M params/layer) (default: 8b)",
     )
-    parser.add_argument("--no-hpiv", action="store_true", help="Disable preserve_high_precision_init_val")
+    parser.add_argument(
+        "--no-hpiv", action="store_true", help="Disable preserve_high_precision_init_val"
+    )
     parser.add_argument(
         "--recipe",
         choices=["mxfp8", "float8block", "auto"],
@@ -433,8 +451,13 @@ def main():  # noqa: D103
 
     dims = args.dims
     dist_print(f"\n{'=' * 60}")
-    dist_print(f"Memory Profiler — mode={args.mode}, layers={args.num_layers}, size={args.model_size}")
-    dist_print(f"  hidden={dims['hidden_size']}, ffn={dims['ffn_hidden_size']}, heads={dims['num_attention_heads']}")
+    dist_print(
+        f"Memory Profiler — mode={args.mode}, layers={args.num_layers}, size={args.model_size}"
+    )
+    dist_print(
+        f"  hidden={dims['hidden_size']}, ffn={dims['ffn_hidden_size']},"
+        f" heads={dims['num_attention_heads']}"
+    )
     dist_print(f"  seq_len={SEQ_LEN}, batch={BATCH_SIZE}, steps={NUM_STEPS}")
     dist_print(f"  recipe={args.recipe}, hpiv={'disabled' if args.no_hpiv else 'enabled'}")
     dist_print(f"{'=' * 60}\n")
