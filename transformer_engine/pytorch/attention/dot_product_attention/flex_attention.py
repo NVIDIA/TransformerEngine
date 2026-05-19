@@ -819,5 +819,3 @@ class FusedAttentionWithScoreModFunc(torch.autograd.Function):
             None,
             None,
         )
-
-

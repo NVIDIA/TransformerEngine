@@ -1445,9 +1445,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 assert score_mod_bprop is None or callable(
                     score_mod_bprop
                 ), "score_mod_bprop must be callable when provided!"
-                assert (
-                    not is_in_onnx_export_mode()
-                ), "score_mod is not supported with ONNX export!"
+                assert not is_in_onnx_export_mode(), "score_mod is not supported with ONNX export!"
                 assert (
                     key_layer.dtype == query_layer.dtype and value_layer.dtype == query_layer.dtype
                 ), "score_mod requires Q, K and V tensors to have the same dtype!"
