@@ -105,8 +105,8 @@ __device__ __forceinline__ float sigmoid_bwd_scalar(float grad, float y) {
 // Backward: sqrtsoftplus — given original logit x and sqrtsoftplus output y = sqrt(softplus(x)),
 // dy/dx = sigmoid(x) / (2 * y).  For large x (>20), softplus(x) ≈ x so dy/dx ≈ 1/(2*y).
 __device__ __forceinline__ float sqrtsoftplus_bwd_scalar(float grad, float x, float y) {
-  float dy_dx = (x > 20.0f) ? (1.0f / (2.0f * y + epsilon))
-                             : (sigmoid_scalar(x) / (2.0f * y + epsilon));
+  float dy_dx =
+      (x > 20.0f) ? (1.0f / (2.0f * y + epsilon)) : (sigmoid_scalar(x) / (2.0f * y + epsilon));
   return grad * dy_dx;
 }
 
