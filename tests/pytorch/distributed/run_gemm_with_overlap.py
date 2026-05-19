@@ -484,9 +484,7 @@ def _main(opts):
         # cuBLASMp always uses split-accumulator internally and does not expose a
         # control to disable it, so force the reference to match when testing the
         # cuBLASMp backend; otherwise honor the framework default.
-        ref_use_split_accumulator = (
-            True if opts.use_cublasmp else te.module.base._2X_ACC_FPROP
-        )
+        ref_use_split_accumulator = True if opts.use_cublasmp else te.module.base._2X_ACC_FPROP
         # For AG: ker_g=kernel_t=(K/P,N), inp_g=(M,N) -> ref_g=(M,K/P) local chunk
         # For RS: ker_g=kernel_t=(N,K/P), inp_g=(M,K/P) -> ref_g=(M,N) partial
         ref_g, *_ = tex.general_gemm(
