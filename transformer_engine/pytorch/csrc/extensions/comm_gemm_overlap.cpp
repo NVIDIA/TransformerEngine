@@ -93,7 +93,7 @@ CommOverlapHelper::CommOverlapHelper(c10d::ProcessGroup *world_group,
 
   ncclComm_t nccl_world;
   NVTE_CHECK_NCCL(ncclCommInitRank(&nccl_world, numranks, nccl_world_id, myrank));
-  nccl_comms.insert({"world", nccl_world});
+  nccl_comms.insert({"world", NcclCommSharedPtr(nccl_world, ncclCommDestroy)});
 
   if (intra_domain_group.has_value()) {
     // Generate a separate unique ID for the intra-node communicator
@@ -120,7 +120,7 @@ CommOverlapHelper::CommOverlapHelper(c10d::ProcessGroup *world_group,
     // Initialize intra-node communicator
     ncclComm_t nccl_intra;
     NVTE_CHECK_NCCL(ncclCommInitRank(&nccl_intra, numlocal, nccl_intra_id, mylocal));
-    nccl_comms.insert({"intra", nccl_intra});
+    nccl_comms.insert({"intra", NcclCommSharedPtr(nccl_intra, ncclCommDestroy)});
   }
 #endif
 #else
@@ -138,9 +138,9 @@ CommOverlapHelper::~CommOverlapHelper() {
   backend_is_nccl = false;
   initialized = false;
 #ifdef NVTE_WITH_CUBLASMP
-  for (auto &comm : nccl_comms) {
-    NVTE_CHECK_NCCL(ncclCommDestroy(comm.second));
-  }
+  // Releasing the helper's references is enough: each shared_ptr's deleter
+  // calls ncclCommDestroy once the last owner (helper or any consuming
+  // CommOverlap/CommOverlapP2P) drops it.
   nccl_comms.clear();
 #endif
 #endif
@@ -190,15 +190,16 @@ void CommOverlapHelper::ub_barrier(ExtComm group) {
 #endif
 }
 
-ncclComm_t CommOverlapHelper::get_nccl_comm(std::string comm_name) {
+CommOverlapHelper::NcclCommSharedPtr CommOverlapHelper::get_nccl_comm(std::string comm_name) {
 #ifdef NVTE_WITH_CUBLASMP
   NVTE_CHECK(initialized, "Internal TE error: tex.CommOverlapHelper() is not initialized ",
              "with valid process groups!");
   NVTE_CHECK(backend_is_nccl,
              "Internal TE error: tex.CommOverlapHelper() was not initialized with an NCCL backend, "
              "so no NCCL communicators are available!");
-  if (nccl_comms.find(comm_name) != nccl_comms.end()) {
-    return nccl_comms[comm_name];
+  auto it = nccl_comms.find(comm_name);
+  if (it != nccl_comms.end()) {
+    return it->second;
   } else {
     NVTE_ERROR("Internal TE error: No NCCL communicator found with name ", comm_name, "!");
   }
@@ -295,8 +296,9 @@ void cublasmp_capture_warmup(te::CommOverlapCore *core, int tp_size, te::CommOve
 CommOverlap::CommOverlap(CommOverlapHelper *helper, int tp_rank, int tp_size,
                          te::CommOverlapType comm_type, const std::vector<size_t> &buffer_shape,
                          at::ScalarType buffer_dtype, int num_comm_sm, bool atomic_gemm)
-    : te::CommOverlapBase(helper->get_nccl_comm("intra"), tp_rank, tp_size, num_comm_sm,
-                          atomic_gemm) {
+    : te::CommOverlapBase(helper->get_nccl_comm("intra").get(), tp_rank, tp_size, num_comm_sm,
+                          atomic_gemm),
+      _nccl_comm(helper->get_nccl_comm("intra")) {
   // buffer_dtype is unused on this path (the warmup runs in BF16); kept in
   // the signature for API symmetry with the non-cuBLASMp ctor.
   (void)buffer_dtype;
@@ -406,8 +408,9 @@ CommOverlapP2P::CommOverlapP2P(CommOverlapHelper *helper, int tp_rank, int tp_si
                                te::CommOverlapType comm_type,
                                const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
                                int num_comm_sm, bool atomic_gemm)
-    : te::CommOverlapP2PBase(helper->get_nccl_comm("intra"), tp_rank, tp_size, num_comm_sm,
-                             atomic_gemm) {
+    : te::CommOverlapP2PBase(helper->get_nccl_comm("intra").get(), tp_rank, tp_size, num_comm_sm,
+                             atomic_gemm),
+      _nccl_comm(helper->get_nccl_comm("intra")) {
   // See CommOverlap constructor for the buffer_dtype rationale.
   (void)buffer_dtype;
   cublasmp_capture_warmup(this, tp_size, comm_type, buffer_shape, _warmup_workspace);

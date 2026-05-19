@@ -8,9 +8,11 @@
 #define TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_H_
 
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <tuple>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -645,11 +647,18 @@ void newton_schulz(int64_t ctx_ptr, int64_t m, int64_t n, at::Tensor x, int64_t 
  **************************************************************************************************/
 
 class CommOverlapHelper : torch::CustomClassHolder {
+ public:
+  // Shared ownership of an ncclComm_t. The deleter calls ncclCommDestroy when
+  // the last reference (held by the helper and/or any CommOverlap consumers)
+  // is released, so the communicator outlives whichever owner is destroyed
+  // first.
+  using NcclCommSharedPtr = std::shared_ptr<std::remove_pointer<ncclComm_t>::type>;
+
  private:
   bool initialized{false};
   bool backend_is_nccl{false};
   std::map<std::string, c10d::ProcessGroup *> torch_pgs;
-  std::map<std::string, ncclComm_t> nccl_comms;
+  std::map<std::string, NcclCommSharedPtr> nccl_comms;
 
  public:
   int myrank = -1;
@@ -671,12 +680,15 @@ class CommOverlapHelper : torch::CustomClassHolder {
 
   void ub_barrier(ExtComm comm);
 
-  ncclComm_t get_nccl_comm(std::string comm_name);
+  NcclCommSharedPtr get_nccl_comm(std::string comm_name);
 };
 
 class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOverlapBase {
  private:
   void *_warmup_workspace{nullptr};
+  // Keeps the cuBLASMp NCCL communicator alive for the lifetime of this
+  // instance, independent of the CommOverlapHelper that created it.
+  CommOverlapHelper::NcclCommSharedPtr _nccl_comm;
 
  public:
   CommOverlap(const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
@@ -714,6 +726,9 @@ class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOve
 class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::CommOverlapP2PBase {
  private:
   void *_warmup_workspace{nullptr};
+  // Keeps the cuBLASMp NCCL communicator alive for the lifetime of this
+  // instance, independent of the CommOverlapHelper that created it.
+  CommOverlapHelper::NcclCommSharedPtr _nccl_comm;
 
  public:
   CommOverlapP2P(const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
