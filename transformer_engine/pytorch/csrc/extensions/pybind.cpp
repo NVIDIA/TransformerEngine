@@ -679,9 +679,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def(py::init([](const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
                        CommOverlapHelper *helper, int tp_size,
                        transformer_engine::CommOverlapType comm_type, int num_max_streams,
-                       int comm_cga_size, int gemm_priority, int comm_priority,
-                       int num_comm_sm, bool set_sm_margin, bool atomic_gemm, bool use_ce,
-                       bool aggregate, bool use_cublasmp) {
+                       int comm_cga_size, int gemm_priority, int comm_priority, int num_comm_sm,
+                       bool set_sm_margin, bool atomic_gemm, bool use_ce, bool aggregate,
+                       bool use_cublasmp) {
              if (use_cublasmp) {
                return std::make_shared<CommOverlapP2P>(helper, helper->mylocal, tp_size, comm_type,
                                                        buffer_shape, buffer_dtype, num_comm_sm,

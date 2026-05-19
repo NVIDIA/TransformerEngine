@@ -676,7 +676,7 @@ class CommOverlapHelper : torch::CustomClassHolder {
 
 class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOverlapBase {
  private:
-  void* _warmup_workspace{nullptr};
+  void *_warmup_workspace{nullptr};
 
  public:
   CommOverlap(const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
@@ -713,7 +713,7 @@ class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOve
 
 class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::CommOverlapP2PBase {
  private:
-  void* _warmup_workspace{nullptr};
+  void *_warmup_workspace{nullptr};
 
  public:
   CommOverlapP2P(const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,

@@ -235,7 +235,7 @@ namespace {
 // descriptor. BF16 is used unconditionally; its workspace is at least as
 // large as the FP8 workspace for the same m/n/k.
 void cublasmp_capture_warmup(te::CommOverlapCore *core, int tp_size, te::CommOverlapType comm_type,
-                             const std::vector<size_t> &buffer_shape, void* warmup_workspace) {
+                             const std::vector<size_t> &buffer_shape, void *warmup_workspace) {
   NVTE_CHECK(buffer_shape.size() == 2, "cuBLASMp warmup expects a 2-D buffer shape, got rank ",
              buffer_shape.size());
   // Treat the matmul as square in the weight dim so workspace is sized
@@ -266,9 +266,9 @@ void cublasmp_capture_warmup(te::CommOverlapCore *core, int tp_size, te::CommOve
   const size_t d_bytes = d_shape[0] * d_shape[1] * bf16_bytes;
 
   NVTE_CHECK_CUDA(cudaMalloc(&warmup_workspace, a_bytes + b_bytes + d_bytes));
-  void* a_ptr = warmup_workspace;
-  void* b_ptr = (reinterpret_cast<char*>(warmup_workspace) + a_bytes);
-  void* d_ptr = (reinterpret_cast<char*>(warmup_workspace) + a_bytes + b_bytes);
+  void *a_ptr = warmup_workspace;
+  void *b_ptr = (reinterpret_cast<char *>(warmup_workspace) + a_bytes);
+  void *d_ptr = (reinterpret_cast<char *>(warmup_workspace) + a_bytes + b_bytes);
   NVTE_CHECK_CUDA(cudaMemset(a_ptr, 0, a_bytes));
   NVTE_CHECK_CUDA(cudaMemset(b_ptr, 0, b_bytes));
   NVTE_CHECK_CUDA(cudaMemset(d_ptr, 0, d_bytes));
