@@ -160,7 +160,43 @@ class PoolWorker:
                 self.proc.wait()
         self.proc = None
 
+    # One retry on pool-infrastructure failures (worker died / timed out / broken
+    # pipe). Test-assertion failures from the worker carry the full per-rank
+    # traceback in resp["error"] and propagate without retry. Every retry leaves
+    # a [POOL-RETRY] line in stderr so pytest's <system-err> capture surfaces
+    # flake patterns in JUnit XML for offline analysis.
+    _MAX_RETRIES = 1
+
     def submit(self, kwargs: dict, timeout: float = POOL_SUBMIT_TIMEOUT_SEC) -> None:
+        first_err = None
+        for attempt in range(self._MAX_RETRIES + 1):
+            try:
+                return self._submit_once(kwargs, timeout)
+            except AssertionError as e:
+                msg_head = str(e).splitlines()[0]
+                infrastructure_flake = (
+                    "pool worker died" in msg_head
+                    or "timed out" in msg_head
+                    or "before request could be sent" in msg_head
+                )
+                if not infrastructure_flake or attempt == self._MAX_RETRIES:
+                    if first_err is not None:
+                        sys.stderr.write(
+                            f"[POOL-RETRY-FAIL] world_size={self.world_size}: "
+                            f"both attempts died; first error was: "
+                            f"{str(first_err).splitlines()[0]!r}\n"
+                        )
+                        sys.stderr.flush()
+                    raise
+                first_err = e
+                sys.stderr.write(
+                    f"[POOL-RETRY] world_size={self.world_size} attempt {attempt + 1} "
+                    f"died: {msg_head!r}; respawning pool and retrying\n"
+                )
+                sys.stderr.flush()
+        raise first_err  # unreachable; loop either returns or raises
+
+    def _submit_once(self, kwargs: dict, timeout: float) -> None:
         self._ensure_alive()
         req = json.dumps({"op": "run", "kwargs": kwargs}) + "\n"
         try:
