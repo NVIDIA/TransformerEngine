@@ -17,10 +17,10 @@
 namespace transformer_engine {
 namespace fused_router {
 
-template <typename DataType, TopkFuncType TopkFunc = TopkFuncType::Naive>
+template <typename DataType, TopkFuncType TopkFunc = TopkFuncType::Naive, int ScoreFunc = 0>
 __global__ void fused_score_for_moe_aux_loss_forward_kernel(
     const DataType *logits, int num_tokens, int num_experts, int topk,
-    int score_function, float *scores, bool *routing_map, CompType *intermediate_output,
+    float *scores, bool *routing_map, CompType *intermediate_output,
     int num_buffers) {
   /***
      * Section: Global Variables/Addresses init
@@ -93,7 +93,7 @@ __global__ void fused_score_for_moe_aux_loss_forward_kernel(
          */
     int pos_offset = token_offset_cur_warp * num_experts;
 
-    if (score_function == 1) {  // Softmax
+    if constexpr (ScoreFunc == 1) {  // Softmax
       // Apply softmax to all logits, save softmax output for backward
       for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
         local_logits[i] = static_cast<CompType>(raw_logits[i]);
@@ -105,14 +105,14 @@ __global__ void fused_score_for_moe_aux_loss_forward_kernel(
       for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
         intermediate_output[pos_offset + i] = local_logits[i];
       }
-    } else if (score_function == 0) {  // Sigmoid
+    } else if constexpr (ScoreFunc == 0) {  // Sigmoid
       // Fused: convert → sigmoid → save sigmoid output for backward → shmem
       for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
         float val = sigmoid_scalar(static_cast<CompType>(raw_logits[i]));
         intermediate_output[pos_offset + i] = val;  // Save sigmoid output for backward
         local_logits[i] = val;
       }
-    } else if (score_function == 2) {  // Sqrtsoftplus
+    } else if constexpr (ScoreFunc == 2) {  // Sqrtsoftplus
       // Fused: convert → save original logit for backward → sqrtsoftplus → shmem
       for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
         float logit = static_cast<CompType>(raw_logits[i]);
@@ -123,7 +123,7 @@ __global__ void fused_score_for_moe_aux_loss_forward_kernel(
     __syncwarp();
 
     // Sigmoid/Sqrtsoftplus post-processing: normalize scores to sum to 1
-    if (score_function == 0 || score_function == 2) {
+    if constexpr (ScoreFunc == 0 || ScoreFunc == 2) {
       auto sum_logits =
           warp_reduce_on_shmem(local_logits, num_experts, ReduceFuncType::SUM, lane_id);
       for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
@@ -177,20 +177,44 @@ void fused_score_for_moe_aux_loss_forward_kernel_launcher(
     size_t grid_size =
         compute_persistent_grid(kernel, kThreadsPerBlock, shared_memory_size, total_blocks);
     kernel<<<grid_size, kThreadsPerBlock, shared_memory_size, stream>>>(
-        logits, num_tokens, num_experts, topk, score_function, scores, routing_map,
+        logits, num_tokens, num_experts, topk, scores, routing_map,
         intermediate_output, num_buffers);
     NVTE_CHECK_CUDA(cudaGetLastError());
   };
 
-  // Radix selection is O(E), independent of K, but it needs 4 passes for 32-bit float;
-  // switch at K=16 where naive O(K^2*E) starts to dominate
+  // Dispatch on TopkFunc × ScoreFunc (6 instantiations per DataType).
+  // Radix selection is O(E), independent of K; switch at K=16 where naive O(K^2*E) dominates.
   if (topk < 16) {
-    launch(fused_score_for_moe_aux_loss_forward_kernel<DataType, TopkFuncType::Naive>);
+    switch (score_function) {
+      case 0:
+        launch(fused_score_for_moe_aux_loss_forward_kernel<DataType, TopkFuncType::Naive, 0>);
+        break;
+      case 1:
+        launch(fused_score_for_moe_aux_loss_forward_kernel<DataType, TopkFuncType::Naive, 1>);
+        break;
+      case 2:
+        launch(fused_score_for_moe_aux_loss_forward_kernel<DataType, TopkFuncType::Naive, 2>);
+        break;
+      default:
+        NVTE_ERROR("Unsupported score_function: " + std::to_string(score_function));
+    }
   } else {
     NVTE_CHECK(num_experts <= kMaxExpertsRadixTopk,
                "Radix topk requires num_experts <= ", kMaxExpertsRadixTopk,
                " (packed 8-bit histogram), got ", num_experts, ".");
-    launch(fused_score_for_moe_aux_loss_forward_kernel<DataType, TopkFuncType::Radix>);
+    switch (score_function) {
+      case 0:
+        launch(fused_score_for_moe_aux_loss_forward_kernel<DataType, TopkFuncType::Radix, 0>);
+        break;
+      case 1:
+        launch(fused_score_for_moe_aux_loss_forward_kernel<DataType, TopkFuncType::Radix, 1>);
+        break;
+      case 2:
+        launch(fused_score_for_moe_aux_loss_forward_kernel<DataType, TopkFuncType::Radix, 2>);
+        break;
+      default:
+        NVTE_ERROR("Unsupported score_function: " + std::to_string(score_function));
+    }
   }
 }
 
@@ -216,11 +240,11 @@ void fused_score_for_moe_aux_loss_forward(const Tensor &logits, int num_tokens, 
 //   act_buf:  B × E × W × sizeof(CompType)   — double-buffered async load
 constexpr int kAuxBwdNumBuffers = 2;
 
-template <typename DataType>
+template <typename DataType, int ScoreFunc>
 __global__ void fused_score_for_moe_aux_loss_backward_kernel(const CompType *intermediate_output,
                                                              const float *grad_scores,
                                                              int num_tokens, int num_experts,
-                                                             int topk, int score_function,
+                                                             int topk,
                                                              DataType *grad_logits) {
   /***
      * Section: Global Variables/Addresses init
@@ -300,23 +324,23 @@ __global__ void fused_score_for_moe_aux_loss_backward_kernel(const CompType *int
     for (int i = lane_id; i < num_experts; i += kThreadsPerWarp) {
       CompType g = static_cast<CompType>(raw_grad[i]);
       CompType act = raw_act[i];
-      if (score_function == 0) {  // Sigmoid
+      if constexpr (ScoreFunc == 0) {  // Sigmoid
         // act = sigmoid output; accumulate over all experts
         sum_act += act; sum_grad_act += g * act;
-      } else if (score_function == 2) {  // Sqrtsoftplus
+      } else if constexpr (ScoreFunc == 2) {  // Sqrtsoftplus
         // act = original logit; recompute sqrtsoftplus to get activation
         CompType v = sqrtsoftplus_scalar(act);
         sum_act += v; sum_grad_act += g * v;
-      } else if (score_function == 1) {  // Softmax
+      } else if constexpr (ScoreFunc == 1) {  // Softmax
         // act = softmax output
         sum_output_x_grad += g * act;
       }
     }
-    if (score_function == 0 || score_function == 2) {
+    if constexpr (ScoreFunc == 0 || ScoreFunc == 2) {
       sum_act = warp_allreduce_sum(sum_act);
       sum_grad_act = warp_allreduce_sum(sum_grad_act);
     }
-    if (score_function == 1) {
+    if constexpr (ScoreFunc == 1) {
       sum_output_x_grad = warp_allreduce_sum(sum_output_x_grad);
     }
 
@@ -333,13 +357,13 @@ __global__ void fused_score_for_moe_aux_loss_backward_kernel(const CompType *int
       CompType g = static_cast<CompType>(raw_grad[i]);
       CompType act = raw_act[i];
 
-      if (score_function == 0) {  // Sigmoid bwd
+      if constexpr (ScoreFunc == 0) {  // Sigmoid bwd
         g = normalize_bwd_scalar(g, true, sum_act, sum_grad_act);
         g = sigmoid_bwd_scalar(g, act);
-      } else if (score_function == 2) {  // Sqrtsoftplus bwd
+      } else if constexpr (ScoreFunc == 2) {  // Sqrtsoftplus bwd
         g = normalize_bwd_scalar(g, true, sum_act, sum_grad_act);
         g = sqrtsoftplus_bwd_scalar(g, act, sqrtsoftplus_scalar(act));
-      } else if (score_function == 1) {  // Softmax bwd
+      } else if constexpr (ScoreFunc == 1) {  // Softmax bwd
         g = softmax_bwd_scalar(g, act, sum_output_x_grad);
       }
 
@@ -363,15 +387,29 @@ void fused_score_for_moe_aux_loss_backward_kernel_launcher(
       RawAsyncLoader<CompType>::shmem_bytes(num_experts, num_token_per_block, kAuxBwdNumBuffers);
   check_shared_memory_capacity_num_experts(shmem_bytes, num_experts);
 
-  auto kernel = fused_score_for_moe_aux_loss_backward_kernel<DataType>;
-  NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-      kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_bytes));
-  size_t grid_size =
-      compute_persistent_grid(kernel, kThreadsPerBlock, shmem_bytes, total_blocks);
-  kernel<<<grid_size, kThreadsPerBlock, shmem_bytes, stream>>>(
-      intermediate_output, grad_scores, num_tokens, num_experts, topk, score_function,
-      grad_logits);
-  NVTE_CHECK_CUDA(cudaGetLastError());
+  auto launch = [&](auto kernel) {
+    NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+        kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_bytes));
+    size_t grid_size =
+        compute_persistent_grid(kernel, kThreadsPerBlock, shmem_bytes, total_blocks);
+    kernel<<<grid_size, kThreadsPerBlock, shmem_bytes, stream>>>(
+        intermediate_output, grad_scores, num_tokens, num_experts, topk, grad_logits);
+    NVTE_CHECK_CUDA(cudaGetLastError());
+  };
+
+  switch (score_function) {
+    case 0:
+      launch(fused_score_for_moe_aux_loss_backward_kernel<DataType, 0>);
+      break;
+    case 1:
+      launch(fused_score_for_moe_aux_loss_backward_kernel<DataType, 1>);
+      break;
+    case 2:
+      launch(fused_score_for_moe_aux_loss_backward_kernel<DataType, 2>);
+      break;
+    default:
+      NVTE_ERROR("Unsupported score_function: " + std::to_string(score_function));
+  }
 }
 
 void fused_score_for_moe_aux_loss_backward(const Tensor &intermediate_output,
