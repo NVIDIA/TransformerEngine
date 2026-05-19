@@ -11,7 +11,7 @@ TransformerEngine's quantized GEMM.
 
 **Recipe.** We use ``MXFP8BlockScaling`` in this tutorial. ``MXFP8BlockScaling`` and
 ``NVFP4BlockScaling`` require a Blackwell-class GPU; on Hopper, swap in
-``DelayedScaling`` or ``Float8CurrentScaling``. For more information on recipes, see this :ref:`recipe overview <_jax_recipe_table_overview>`.
+``DelayedScaling`` or ``Float8CurrentScaling``. For more information on recipes, see this :ref:`recipe overview <jax_recipe_table_overview>`.
 
 `← Back to the JAX integration overview <../te_jax_integration.html>`_
 
