@@ -5,12 +5,10 @@
  ************************************************************************/
 
 /*! \file nccl_comm.h
- *  \brief NCCL-backed peer-handle setter/getter for NVTETensor.
+ *  \brief Attach a registered NCCL symmetric-memory window to an NVTETensor.
  *
- *  Attaches a registered NCCL symmetric-memory window + byte offset onto a
- *  tensor so consumers (e.g. the EP backend) can issue one-sided put/get over
- *  the window instead of staging through the raw data pointer. The window is
- *  caller-owned; ``attach`` does not register or rendezvous it.
+ *  The window is caller-owned and must outlive the tensor; ``attach`` does
+ *  not register or rendezvous it.
  */
 
 #ifndef TRANSFORMER_ENGINE_NCCL_COMM_H_
@@ -23,11 +21,7 @@
 extern "C" {
 #endif
 
-/*! \brief Attach an NCCL window + byte offset to ``t``.
- *
- *  Sets the tensor's peer-handle kind to ``NVTE_PEER_HANDLE_NCCL_WINDOW``. The
- *  window must stay registered for the tensor's lifetime. Pass ``window=NULL``
- *  to detach (equivalent to ``nvte_tensor_detach_peer_handle``).
+/*! \brief Attach an NCCL window + byte offset to ``t``. Pass ``window=NULL`` to detach.
  *
  *  \param[in,out] t      Tensor to annotate.
  *  \param[in]     window Opaque ncclWindow_t (caller-owned), or NULL to clear.
@@ -35,11 +29,8 @@ extern "C" {
  */
 void nvte_tensor_attach_nccl_window(NVTETensor t, void* window, uint64_t offset);
 
-/*! \brief Read the NCCL window + offset attached to ``t``.
- *
- *  ``*window`` is set to ``NULL`` and ``*offset`` to 0 when no NCCL window is
- *  attached (including when the tensor carries a different peer-handle kind).
- *  Either out-pointer may be ``NULL`` to skip that field.
+/*! \brief Read the NCCL window + offset attached to ``t``; yields (NULL, 0) when unset.
+ *         Either out-pointer may be NULL to skip that field.
  */
 void nvte_tensor_nccl_window(const NVTETensor t, void** window, uint64_t* offset);
 

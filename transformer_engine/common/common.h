@@ -180,16 +180,11 @@ struct Tensor {
    */
   bool row_scaled_nvfp4 = false;
 
-  /*! \brief Optional peer-handle annotation for zero-copy comm fast paths.
-   *
-   *  Borrowed reference to a comm-backend-specific resource (NCCL window,
-   *  NVSHMEM pointer, CUDA IPC handle, etc.) that lets a consumer initiate
-   *  one-sided remote-memory ops against this tensor's storage. The kind tag
-   *  selects which backend owns ``peer_handle_data``; the tensor never owns
-   *  the resource — the caller keeps it valid for the tensor's lifetime.
-   *  Code paths that don't issue cross-rank ops ignore these fields. */
+  /*! \brief Optional borrowed peer handle for one-sided RMA against this tensor.
+   *         ``peer_handle_kind`` selects the backend owning ``peer_handle_data``;
+   *         the caller keeps the resource valid for the tensor's lifetime. */
   NVTEPeerHandleKind peer_handle_kind = NVTE_PEER_HANDLE_NONE;
-  void* peer_handle_data = nullptr;
+  void *peer_handle_data = nullptr;
   uint64_t peer_handle_offset = 0;
 
   /*! Map from NVTETensorParam to parameter sizes */

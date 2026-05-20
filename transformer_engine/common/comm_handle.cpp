@@ -6,9 +6,8 @@
 
 #include "transformer_engine/comm_handle.h"
 
-#include "transformer_engine/nccl_comm.h"
-
 #include "common.h"
+#include "transformer_engine/nccl_comm.h"
 #include "util/logging.h"
 
 using transformer_engine::convertNVTETensor;
