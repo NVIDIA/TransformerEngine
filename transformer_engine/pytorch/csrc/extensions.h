@@ -7,6 +7,8 @@
 #ifndef TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_H_
 #define TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_H_
 
+#include <nccl.h>
+
 #include <map>
 #include <memory>
 #include <optional>
@@ -15,8 +17,6 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
-
-#include <nccl.h>
 
 #include "common.h"
 
