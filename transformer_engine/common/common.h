@@ -134,7 +134,7 @@ class Shape {
 
   constexpr Shape() noexcept = default;
 
-  constexpr Shape(const NVTEShape &shape) noexcept : data_{shape} {}
+  explicit constexpr Shape(const NVTEShape &shape) noexcept : data_{shape} {}
 
   Shape(std::initializer_list<size_t> shape) {
     NVTE_CHECK(shape.size() <= max_ndim, "Too many dimensions (requested ", shape.size(),
@@ -146,7 +146,7 @@ class Shape {
   // Construct from any container of integers
   template <typename Container,
             typename = std::enable_if_t<std::is_integral<typename Container::value_type>::value>>
-  Shape(const Container &shape) {
+  explicit Shape(const Container &shape) {
     NVTE_CHECK(shape.size() <= max_ndim, "Too many dimensions (requested ", shape.size(),
                ", max is ", max_ndim, ").");
     data_.ndim = shape.size();
@@ -209,6 +209,24 @@ class Shape {
            std::equal(lhs.data_.data, lhs.data_.data + lhs.data_.ndim, rhs.data_.data);
   }
   friend bool operator!=(const Shape &lhs, const Shape &rhs) noexcept { return !(lhs == rhs); }
+
+  template <typename Container,
+            typename = std::enable_if_t<std::is_integral<typename Container::value_type>::value>>
+  friend bool operator==(const Shape &lhs, const Container &rhs) {
+    return lhs == Shape(rhs);
+  }
+  template <typename T>
+  friend bool operator==(const T &lhs, const Shape &rhs) {
+    return rhs == lhs;
+  }
+  template <typename T>
+  friend bool operator!=(const Shape &lhs, const T &rhs) {
+    return !(lhs == rhs);
+  }
+  template <typename T>
+  friend bool operator!=(const T &lhs, const Shape &rhs) {
+    return !(rhs == lhs);
+  }
 
  private:
   NVTEShape data_{};

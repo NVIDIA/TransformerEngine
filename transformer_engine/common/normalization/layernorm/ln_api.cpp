@@ -100,7 +100,7 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
       gamma_in_weight_dtype);
 
   if (workspace->data.numel() == 0) {
-    workspace->data.shape = plan->getWorkspaceShape();
+    workspace->data.shape = Shape(plan->getWorkspaceShape());
     workspace->data.dtype = DType::kByte;
     return;
   }
@@ -185,7 +185,7 @@ void layernorm_bwd(const Tensor& dz, const Tensor& x, const Tensor& mu, const Te
       gamma_in_weight_dtype);
 
   if (workspace->data.numel() == 0) {
-    workspace->data.shape = plan->getWorkspaceShape();
+    workspace->data.shape = Shape(plan->getWorkspaceShape());
     workspace->data.dtype = DType::kByte;
     return;
   } else {

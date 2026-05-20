@@ -85,7 +85,7 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
       gamma_in_weight_dtype);
 
   if (workspace->data.numel() == 0) {
-    workspace->data.shape = plan->getWorkspaceShape();
+    workspace->data.shape = Shape(plan->getWorkspaceShape());
     workspace->data.dtype = DType::kByte;
     return;
   }
@@ -162,7 +162,7 @@ void rmsnorm_bwd(const Tensor &dz, const Tensor &x, const Tensor &rsigma, const 
       gamma_in_weight_dtype);
 
   if (workspace->data.numel() == 0) {
-    workspace->data.shape = plan->getWorkspaceShape();
+    workspace->data.shape = Shape(plan->getWorkspaceShape());
     workspace->data.dtype = DType::kByte;
     return;
   } else {
@@ -233,7 +233,7 @@ void rmsnorm_bwd_add(const Tensor &dz, const Tensor &x, const Tensor &add, const
       gamma_in_weight_dtype);
 
   if (workspace->data.numel() == 0) {
-    workspace->data.shape = plan->getWorkspaceShape();
+    workspace->data.shape = Shape(plan->getWorkspaceShape());
     workspace->data.dtype = DType::kByte;
     return;
   } else {
