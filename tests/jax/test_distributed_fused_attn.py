@@ -18,6 +18,9 @@ from test_fused_attn import (
     FusedAttnRunner,
     BiasShape,
     SeqDescFormat,
+    customcall_fused_dpa,
+)
+from test_fused_attn_score_mod import (
     _ScoreModSoftcap,
     _has_cudnn_frontend_python,
     _reference_attention,
@@ -36,7 +39,6 @@ from transformer_engine.jax.attention import (
     inverse_reorder_causal_load_balancing,
     CPStrategy,
     ReorderStrategy,
-    fused_attn,
 )
 
 
@@ -287,7 +289,6 @@ class TestDistributedCrossAttn:
 DISTRIBUTED_SCORE_MOD_DATA_SHAPES = {
     "L0": [],
     "L1": [(4, 16, 4, 64)],
-    "L2": [(4, 16, 4, 64)],
 }
 
 
@@ -335,18 +336,21 @@ class TestDistributedScoreModSelfAttn:
         softcap_score_mod = _ScoreModSoftcap()
 
         def score_mod_loss(q, k, v, dout):
-            out = fused_attn(
-                (q, k, v),
+            out = customcall_fused_dpa(
+                q,
+                k,
+                v,
                 None,
                 None,
                 None,
-                AttnBiasType.NO_BIAS,
-                AttnMaskType.NO_MASK,
-                QKVLayout.BSHD_BSHD_BSHD,
-                AttnSoftmaxType.VANILLA_SOFTMAX,
-                scaling_factor,
-                0.0,
-                True,
+                None,
+                attn_bias_type=AttnBiasType.NO_BIAS,
+                attn_mask_type=AttnMaskType.NO_MASK,
+                qkv_layout=QKVLayout.BSHD_BSHD_BSHD,
+                softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
+                scaling_factor=scaling_factor,
+                dropout_probability=0.0,
+                is_training=True,
                 score_mod=softcap_score_mod.forward,
                 score_mod_bprop=softcap_score_mod.backward,
                 score_mod_tensors={"softcap": softcap},

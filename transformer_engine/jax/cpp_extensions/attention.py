@@ -450,6 +450,8 @@ class _SerializedScoreModGraph:
     scalar_values: np.ndarray
 
 
+# cuDNN frontend tensor UIDs are arbitrary, but assigning stable values makes serialized
+# graphs deterministic and simplifies debugging across the Python graph builder and C++ executor.
 _SCORE_MOD_UID_Q = 1
 _SCORE_MOD_UID_K = 2
 _SCORE_MOD_UID_V = 3
