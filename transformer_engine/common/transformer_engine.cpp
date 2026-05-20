@@ -638,11 +638,7 @@ NVTEShape nvte_tensor_shape(const NVTETensor tensor) {
   if (t == nullptr) {
     NVTE_ERROR("Invalid tensor: received null pointer in nvte_tensor_shape");
   }
-
-  // Determine tensor shape depending on tensor format
-  const std::vector<size_t> &shape = t->shape();
-
-  return nvte_make_shape(shape.data(), shape.size());
+  return t->shape();
 }
 
 NVTEShape nvte_tensor_columnwise_shape(const NVTETensor tensor) {
@@ -650,8 +646,7 @@ NVTEShape nvte_tensor_columnwise_shape(const NVTETensor tensor) {
   if (t == nullptr) {
     NVTE_ERROR("Invalid tensor: received null pointer in nvte_tensor_columnwise_shape");
   }
-  const std::vector<size_t> &shape = t->columnwise_data.shape;
-  return nvte_make_shape(shape.data(), shape.size());
+  return t->columnwise_data.shape;
 }
 
 size_t nvte_tensor_ndims(const NVTETensor tensor) { return nvte_tensor_shape(tensor).ndim; }

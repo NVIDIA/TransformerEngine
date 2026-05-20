@@ -16,6 +16,7 @@
 static_assert(NVTE_BUILD_NUM_PHILOX_ROUNDS > 0,
               "NVTE_BUILD_NUM_PHILOX_ROUNDS must be a positive integer.");
 
+#include <cuda.h>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
@@ -29,13 +30,12 @@ static_assert(NVTE_BUILD_NUM_PHILOX_ROUNDS > 0,
 #include <algorithm>
 #include <array>
 #include <cstdint>
-#include <functional>
 #include <initializer_list>
-#include <stdexcept>
+#include <limits>
 #include <string>
 #include <tuple>
 #include <type_traits>
-#include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "./nvtx.h"
@@ -104,7 +104,10 @@ inline size_t product(const std::vector<size_t> &shape, const size_t begin, cons
   return ret;
 }
 
-inline size_t product(const std::vector<size_t> &shape) {
+template <typename Container,
+          typename = std::enable_if_t<
+              std::is_integral<typename Container::value_type>::value>>
+inline size_t product(const Container &shape) {
   size_t ret = 1;
   for (const auto &elem : shape) {
     ret *= elem;
@@ -163,8 +166,8 @@ class Shape {
   constexpr bool empty() const noexcept { return data_.ndim == 0; }
   static constexpr size_type capacity() noexcept { return max_ndim; }
 
-  size_t *data() noexcept { return data_.data; }
-  constexpr const size_t *data() const noexcept { return data_.data; }
+  value_type *data() noexcept { return data_.data; }
+  constexpr const value_type *data() const noexcept { return data_.data; }
 
   iterator begin() noexcept { return data_.data; }
   constexpr const_iterator begin() const noexcept { return data_.data; }
@@ -173,19 +176,34 @@ class Shape {
   constexpr const_iterator end() const noexcept { return data_.data + data_.ndim; }
   constexpr const_iterator cend() const noexcept { return data_.data + data_.ndim; }
 
-  size_t &operator[](size_type i) noexcept { return data_.data[i]; }
-  constexpr const size_t &operator[](size_type i) const noexcept { return data_.data[i]; }
+  const value_type &at(size_type i) const {
+    NVTE_CHECK(i < data_.ndim, "Attempted to access out-of-bounds entry (requested ", i,
+               ", size is ", data_.ndim, ").");
+    return data_.data[i];
+  }
+  value_type &at(size_type i) {
+    return const_cast<value_type &>(std::as_const(*this).at(i));
+  }
 
-  size_t &front() noexcept { return data_.data[0]; }
-  constexpr const size_t &front() const noexcept { return data_.data[0]; }
+  value_type &operator[](size_type i) noexcept { return data_.data[i]; }
+  constexpr const value_type &operator[](size_type i) const noexcept { return data_.data[i]; }
 
-  size_t &back() noexcept { return data_.data[data_.ndim - 1]; }
-  constexpr const size_t &back() const noexcept { return data_.data[data_.ndim - 1]; }
+  value_type &front() noexcept { return data_.data[0]; }
+  constexpr const value_type &front() const noexcept { return data_.data[0]; }
 
-  void push_back(size_t value) {
+  value_type &back() noexcept { return data_.data[data_.ndim - 1]; }
+  constexpr const value_type &back() const noexcept { return data_.data[data_.ndim - 1]; }
+
+  void push_back(size_type value) {
     NVTE_CHECK(data_.ndim < max_ndim, "Cannot add dimension: shape is at maximum capacity (",
                max_ndim, ").");
     data_.data[data_.ndim++] = value;
+  }
+
+  void resize(size_type count) {
+    NVTE_CHECK(count <= max_ndim, "Too many dimensions (requested ", count,
+               ", max is ", max_ndim, ").");
+    data_.ndim = count;
   }
 
   void clear() noexcept { data_.ndim = 0; }
@@ -202,29 +220,21 @@ class Shape {
 
 struct SimpleTensor {
   void *dptr;
-  std::vector<size_t> shape;
+  Shape shape;
   DType dtype;
 
   SimpleTensor(void *dptr, std::vector<size_t> shape, DType dtype)
-      : dptr{dptr}, shape{std::move(shape)}, dtype{dtype} {}
+      : dptr{dptr}, shape(shape), dtype{dtype} {}
 
-  SimpleTensor() : SimpleTensor(nullptr, std::vector<size_t>{0}, DType::kFloat32) {}
+  SimpleTensor() : SimpleTensor(nullptr, {0}, DType::kFloat32) {}
 
   SimpleTensor(const NVTEBasicTensor &tensor)  // NOLINT
       : dptr(tensor.data_ptr),
-        shape(tensor.shape.data, tensor.shape.data + tensor.shape.ndim),
+        shape(tensor.shape),
         dtype(static_cast<DType>(tensor.dtype)) {}
 
-  SimpleTensor &operator=(const NVTEBasicTensor &tensor) {
-    dptr = tensor.data_ptr;
-    shape.assign(tensor.shape.data, tensor.shape.data + tensor.shape.ndim);
-    dtype = static_cast<DType>(tensor.dtype);
-    return *this;
-  }
-
   operator NVTEBasicTensor() const {
-    return {dptr, static_cast<NVTEDType>(dtype),
-            nvte_make_shape(this->shape.data(), this->shape.size())};
+    return {dptr, static_cast<NVTEDType>(dtype), static_cast<NVTEShape>(shape)};
   }
 
   /*! Number of tensor elements. */
