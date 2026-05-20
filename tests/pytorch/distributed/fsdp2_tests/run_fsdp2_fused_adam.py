@@ -1459,23 +1459,41 @@ def test_hybrid_dcp_output_parity(hybrid_recipe_name):
     """
     import torch.distributed.checkpoint as dcp
 
-    pytest.xfail(
-        "CustomRecipe with closure-based qfactory cannot be pickled by DCP. "
-        "Requires module-level picklable factory functions for DCP compatibility."
-    )
-
     if hybrid_recipe_name == "HybridFloat8BlockScaling":
         pytest.xfail(
             "HybridFloat8BlockScaling: Float8BlockwiseQTensor sub-storage loses "
             "quantized type through FSDP2 view(-1)."
         )
 
+    if hybrid_recipe_name == "HybridFP8CurrentScaling":
+        pytest.xfail(
+            "HybridFP8CurrentScaling: per-tensor _scale_inv is not preserved "
+            "through DCP's tensor-storage-byte serialization path. "
+            "HybridQuantizedTensor.__reduce_ex__ correctly round-trips through "
+            "pickle (verified by torch.save/torch.load), but DCP bypasses "
+            "pickle and serializes the tensor's storage bytes — the scalar "
+            "_scale_inv is not enumerated as a separate tensor leaf and gets "
+            "lost. Vanilla Float8CurrentScaling avoids this because per-tensor "
+            "scale lives in module.fp8_meta (saved as extra_state), not on "
+            "the tensor; hybrid uses per-sub-storage scales without that "
+            "mirror. Fix path: implement __tensor_flatten__/__tensor_unflatten__ "
+            "across the quantized tensor stack so DCP can serialize the "
+            "per-leaf tensor fields directly. Loaded model output diverges by "
+            "~5e-2."
+        )
+
     from fsdp2_utils import get_hybrid_recipe_from_string
 
     hybrid_recipe = get_hybrid_recipe_from_string(hybrid_recipe_name)
     world_size, device = _get_dist_info()
-    rank = int(os.environ["LOCAL_RANK"])
-    checkpoint_dir = os.path.join("/tmp", f"hybrid_dcp_test_{os.getpid()}")
+    rank = int(os.environ.get("RANK", "0"))
+    # Deterministic, rank-agnostic checkpoint dir so all ranks read/write
+    # the same DCP path. ``os.getpid()`` differs per rank under torchrun.
+    checkpoint_dir = f"/tmp/te_test_fsdp2_hybrid_dcp_parity_{hybrid_recipe_name}"
+
+    if rank == 0:
+        shutil.rmtree(checkpoint_dir, ignore_errors=True)
+    dist.barrier()
 
     try:
         model = _build_hybrid_model(hybrid_recipe)
@@ -1543,8 +1561,6 @@ def test_hybrid_dcp_output_parity(hybrid_recipe_name):
     finally:
         dist.barrier()
         if rank == 0:
-            import shutil
-
             shutil.rmtree(checkpoint_dir, ignore_errors=True)
 
 

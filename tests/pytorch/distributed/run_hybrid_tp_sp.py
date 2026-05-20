@@ -99,23 +99,25 @@ def _make_mxfp8_quantizer(*, fp8_dtype=tex.DType.kFloat8E4M3):
 def _hybrid_fp8_qfactory(role):
     """FP8 current scaling in both directions for fwd roles; E5M2 for
     grad roles (standard Hybrid:HYBRID format pairing)."""
-    if role in ("linear_input", "linear_weight", "linear_output"):
+    is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
+    if is_linear and role.tensor_type in ("input", "weight", "output"):
         return HybridQuantizer(
             rowwise_quantizer=_make_fp8_current_quantizer(),
             columnwise_quantizer=_make_fp8_current_quantizer(),
         )
-    if role in ("linear_grad_output", "linear_grad_input"):
+    if is_linear and role.tensor_type in ("grad_output", "grad_input"):
         return _make_fp8_current_quantizer(fp8_dtype=tex.DType.kFloat8E5M2)
     return _make_fp8_current_quantizer()
 
 
 def _hybrid_mxfp8_qfactory(role):
-    if role in ("linear_input", "linear_weight", "linear_output"):
+    is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
+    if is_linear and role.tensor_type in ("input", "weight", "output"):
         return HybridQuantizer(
             rowwise_quantizer=_make_mxfp8_quantizer(),
             columnwise_quantizer=_make_mxfp8_quantizer(),
         )
-    if role in ("linear_grad_output", "linear_grad_input"):
+    if is_linear and role.tensor_type in ("grad_output", "grad_input"):
         return _make_mxfp8_quantizer(fp8_dtype=tex.DType.kFloat8E5M2)
     return _make_mxfp8_quantizer()
 
@@ -131,12 +133,13 @@ def _make_nvfp4_quantizer():
 
 
 def _hybrid_nvfp4_qfactory(role):
-    if role in ("linear_input", "linear_weight", "linear_output"):
+    is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
+    if is_linear and role.tensor_type in ("input", "weight", "output"):
         return HybridQuantizer(
             rowwise_quantizer=_make_nvfp4_quantizer(),
             columnwise_quantizer=_make_nvfp4_quantizer(),
         )
-    if role in ("linear_grad_output", "linear_grad_input"):
+    if is_linear and role.tensor_type in ("grad_output", "grad_input"):
         return _make_nvfp4_quantizer()
     return _make_nvfp4_quantizer()
 

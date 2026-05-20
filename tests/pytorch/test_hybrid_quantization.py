@@ -881,7 +881,11 @@ class TestHybridGemmBitwiseIdentical:
         loss_ref.backward()
 
         def hybrid_fp8_factory(role):
-            if role in ("linear_input", "linear_weight", "linear_output"):
+            if (
+                role is not None
+                and role.module_type in ("linear", "grouped_linear")
+                and role.tensor_type in ("input", "weight", "output")
+            ):
                 return HybridQuantizer(
                     rowwise_quantizer=Float8CurrentScalingQuantizer(
                         tex.DType.kFloat8E4M3,
@@ -892,7 +896,11 @@ class TestHybridGemmBitwiseIdentical:
                         device="cuda",
                     ),
                 )
-            if role in ("linear_grad_output", "linear_grad_input"):
+            if (
+                role is not None
+                and role.module_type in ("linear", "grouped_linear")
+                and role.tensor_type in ("grad_output", "grad_input")
+            ):
                 return Float8CurrentScalingQuantizer(
                     tex.DType.kFloat8E5M2,
                     device="cuda",
@@ -957,7 +965,11 @@ class TestHybridGemmBitwiseIdenticalMXFP8:
         out_ref.float().sum().backward()
 
         def hybrid_mxfp8_factory(role):
-            if role in ("linear_grad_output", "linear_grad_input"):
+            if (
+                role is not None
+                and role.module_type in ("linear", "grouped_linear")
+                and role.tensor_type in ("grad_output", "grad_input")
+            ):
                 return MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
             return HybridQuantizer(
                 rowwise_quantizer=MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
@@ -1010,8 +1022,10 @@ class TestHybridGemmBitwiseIdenticalBlockFP8:
         out_ref.float().sum().backward()
 
         def hybrid_block_fp8_factory(role):
-            dim = 2 if role == "linear_weight" else 1
-            if role in ("linear_grad_output", "linear_grad_input"):
+            is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
+            is_weight = is_linear and role.tensor_type == "weight"
+            dim = 2 if is_weight else 1
+            if is_linear and role.tensor_type in ("grad_output", "grad_input"):
                 return Float8BlockQuantizer(
                     fp8_dtype=tex.DType.kFloat8E4M3,
                     rowwise=True,
@@ -1091,7 +1105,11 @@ class TestHybridGemmBitwiseIdenticalNVFP4:
         out_ref.float().sum().backward()
 
         def hybrid_nvfp4_factory(role):
-            if role in ("linear_grad_output", "linear_grad_input"):
+            if (
+                role is not None
+                and role.module_type in ("linear", "grouped_linear")
+                and role.tensor_type in ("grad_output", "grad_input")
+            ):
                 return NVFP4Quantizer(fp4_dtype=tex.DType.kFloat4E2M1)
             return HybridQuantizer(
                 rowwise_quantizer=NVFP4Quantizer(fp4_dtype=tex.DType.kFloat4E2M1),
@@ -1193,14 +1211,22 @@ class TestHybridGemmMixedFormat:
         )
 
         def mixed_factory(role):
-            if role in ("linear_input", "linear_weight"):
+            if (
+                role is not None
+                and role.module_type in ("linear", "grouped_linear")
+                and role.tensor_type in ("input", "weight")
+            ):
                 return HybridQuantizer(
                     rowwise_quantizer=_make_fp8_quantizer(),
                     columnwise_quantizer=_make_nvfp4_quantizer(),
                 )
-            if role in ("linear_grad_output", "linear_grad_input"):
+            if (
+                role is not None
+                and role.module_type in ("linear", "grouped_linear")
+                and role.tensor_type in ("grad_output", "grad_input")
+            ):
                 return _make_nvfp4_quantizer()
-            return None
+            return _make_fp8_quantizer()
 
         mixed_recipe = recipe.CustomRecipe(qfactory=mixed_factory)
 
@@ -1241,12 +1267,16 @@ class TestHybridGemmMixedFormat:
             out_bf16 = model(inp)
 
         def mixed_factory(role):
-            if role in ("linear_input", "linear_weight"):
+            if (
+                role is not None
+                and role.module_type in ("linear", "grouped_linear")
+                and role.tensor_type in ("input", "weight")
+            ):
                 return HybridQuantizer(
                     rowwise_quantizer=_make_fp8_quantizer(),
                     columnwise_quantizer=_make_nvfp4_quantizer(),
                 )
-            return None
+            return _make_fp8_quantizer()
 
         mixed_recipe = recipe.CustomRecipe(qfactory=mixed_factory)
         with torch.no_grad():
@@ -1333,7 +1363,11 @@ class TestHybridBiasGradient:
 
     def _make_uniform_hybrid_factory(self):
         def factory(role):
-            if role in ("linear_grad_output", "linear_grad_input"):
+            if (
+                role is not None
+                and role.module_type in ("linear", "grouped_linear")
+                and role.tensor_type in ("grad_output", "grad_input")
+            ):
                 return Float8CurrentScalingQuantizer(
                     tex.DType.kFloat8E5M2,
                     device="cuda",
@@ -1423,14 +1457,22 @@ class TestHybridScalingModeCompatibility:
         inp = torch.randn(32, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
 
         def factory(role):
-            if role in ("linear_input", "linear_weight"):
+            if (
+                role is not None
+                and role.module_type in ("linear", "grouped_linear")
+                and role.tensor_type in ("input", "weight")
+            ):
                 return HybridQuantizer(
                     rowwise_quantizer=_make_fp8_quantizer(),
                     columnwise_quantizer=_make_nvfp4_quantizer(),
                 )
-            if role in ("linear_grad_output", "linear_grad_input"):
+            if (
+                role is not None
+                and role.module_type in ("linear", "grouped_linear")
+                and role.tensor_type in ("grad_output", "grad_input")
+            ):
                 return _make_nvfp4_quantizer()
-            return None
+            return _make_fp8_quantizer()
 
         with autocast(enabled=True, recipe=recipe.CustomRecipe(qfactory=factory)):
             out = model(inp)
@@ -1444,17 +1486,25 @@ class TestHybridScalingModeCompatibility:
         inp = torch.randn(32, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
 
         def factory(role):
-            if role in ("linear_input", "linear_weight"):
+            if (
+                role is not None
+                and role.module_type in ("linear", "grouped_linear")
+                and role.tensor_type in ("input", "weight")
+            ):
                 return HybridQuantizer(
                     rowwise_quantizer=_make_fp8_quantizer(),
                     columnwise_quantizer=_make_nvfp4_quantizer(),
                 )
-            if role in ("linear_grad_output", "linear_grad_input"):
+            if (
+                role is not None
+                and role.module_type in ("linear", "grouped_linear")
+                and role.tensor_type in ("grad_output", "grad_input")
+            ):
                 return Float8CurrentScalingQuantizer(
                     tex.DType.kFloat8E5M2,
                     device="cuda",
                 )
-            return None
+            return _make_fp8_quantizer()
 
         with autocast(enabled=True, recipe=recipe.CustomRecipe(qfactory=factory)):
             out = model(inp)
@@ -1480,12 +1530,16 @@ class TestHybridReversedDirection:
         inp = torch.randn(batch, in_features, device="cuda", dtype=torch.bfloat16)
 
         def factory(role):
-            if role in ("linear_input", "linear_weight"):
+            if (
+                role is not None
+                and role.module_type in ("linear", "grouped_linear")
+                and role.tensor_type in ("input", "weight")
+            ):
                 return HybridQuantizer(
                     rowwise_quantizer=_make_nvfp4_quantizer(),
                     columnwise_quantizer=_make_fp8_quantizer(),
                 )
-            return None
+            return _make_nvfp4_quantizer()
 
         mixed_recipe = recipe.CustomRecipe(qfactory=factory)
         with torch.no_grad():
@@ -1507,14 +1561,22 @@ class TestHybridReversedDirection:
         )
 
         def factory(role):
-            if role in ("linear_input", "linear_weight"):
+            if (
+                role is not None
+                and role.module_type in ("linear", "grouped_linear")
+                and role.tensor_type in ("input", "weight")
+            ):
                 return HybridQuantizer(
                     rowwise_quantizer=_make_nvfp4_quantizer(),
                     columnwise_quantizer=_make_fp8_quantizer(),
                 )
-            if role in ("linear_grad_output", "linear_grad_input"):
+            if (
+                role is not None
+                and role.module_type in ("linear", "grouped_linear")
+                and role.tensor_type in ("grad_output", "grad_input")
+            ):
                 return _make_fp8_quantizer()
-            return None
+            return _make_nvfp4_quantizer()
 
         mixed_recipe = recipe.CustomRecipe(qfactory=factory)
         with autocast(enabled=True, recipe=mixed_recipe):
@@ -1558,22 +1620,23 @@ class TestHybridMixedWithNonHybrid:
         )
 
         def factory(role):
-            if role == "linear_input":
+            is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
+            if is_linear and role.tensor_type == "input":
                 return HybridQuantizer(
                     rowwise_quantizer=_make_fp8_quantizer(),
                     columnwise_quantizer=_make_fp8_quantizer(),
                 )
-            if role == "linear_weight":
+            if is_linear and role.tensor_type == "weight":
                 return Float8CurrentScalingQuantizer(
                     tex.DType.kFloat8E4M3,
                     device="cuda",
                 )
-            if role in ("linear_grad_output", "linear_grad_input"):
+            if is_linear and role.tensor_type in ("grad_output", "grad_input"):
                 return Float8CurrentScalingQuantizer(
                     tex.DType.kFloat8E5M2,
                     device="cuda",
                 )
-            return None
+            return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
 
         mixed_recipe = recipe.CustomRecipe(qfactory=factory)
         with autocast(enabled=True, recipe=mixed_recipe):
@@ -1600,22 +1663,23 @@ class TestHybridMixedWithNonHybrid:
         )
 
         def factory(role):
-            if role == "linear_input":
+            is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
+            if is_linear and role.tensor_type == "input":
                 return Float8CurrentScalingQuantizer(
                     tex.DType.kFloat8E4M3,
                     device="cuda",
                 )
-            if role == "linear_weight":
+            if is_linear and role.tensor_type == "weight":
                 return HybridQuantizer(
                     rowwise_quantizer=_make_fp8_quantizer(),
                     columnwise_quantizer=_make_fp8_quantizer(),
                 )
-            if role in ("linear_grad_output", "linear_grad_input"):
+            if is_linear and role.tensor_type in ("grad_output", "grad_input"):
                 return Float8CurrentScalingQuantizer(
                     tex.DType.kFloat8E5M2,
                     device="cuda",
                 )
-            return None
+            return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
 
         mixed_recipe = recipe.CustomRecipe(qfactory=factory)
         with autocast(enabled=True, recipe=mixed_recipe):
@@ -1751,14 +1815,22 @@ class TestHybridCrossFormatParametrized:
         make_col_grad = col_cfg[1] if col_cfg[1] is not None else col_cfg[0]
 
         def factory(role):
-            if role in ("linear_input", "linear_weight"):
+            if (
+                role is not None
+                and role.module_type in ("linear", "grouped_linear")
+                and role.tensor_type in ("input", "weight")
+            ):
                 return HybridQuantizer(
                     rowwise_quantizer=make_row_e4m3(),
                     columnwise_quantizer=make_col_e4m3(),
                 )
-            if role in ("linear_grad_output", "linear_grad_input"):
+            if (
+                role is not None
+                and role.module_type in ("linear", "grouped_linear")
+                and role.tensor_type in ("grad_output", "grad_input")
+            ):
                 return make_col_grad()
-            return None
+            return make_row_e4m3()
 
         mixed_recipe = recipe.CustomRecipe(qfactory=factory)
         with autocast(enabled=True, recipe=mixed_recipe):
@@ -1974,22 +2046,23 @@ class TestHybridThreeFormats:
         )
 
         def factory(role):
-            if role == "linear_weight":
+            is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
+            if is_linear and role.tensor_type == "weight":
                 return HybridQuantizer(
                     rowwise_quantizer=_make_fp8_quantizer(),
                     columnwise_quantizer=_make_mxfp8_quantizer(),
                 )
-            if role == "linear_input":
+            if is_linear and role.tensor_type == "input":
                 return HybridQuantizer(
                     rowwise_quantizer=_make_fp8_quantizer(),
                     columnwise_quantizer=_make_nvfp4_quantizer(),
                 )
-            if role in ("linear_grad_output", "linear_grad_input"):
+            if is_linear and role.tensor_type in ("grad_output", "grad_input"):
                 return HybridQuantizer(
                     rowwise_quantizer=_make_mxfp8_quantizer(),
                     columnwise_quantizer=_make_nvfp4_quantizer(),
                 )
-            return None
+            return _make_fp8_quantizer()
 
         with autocast(enabled=True, recipe=recipe.CustomRecipe(qfactory=factory)):
             out = model(inp)
@@ -2017,22 +2090,23 @@ class TestHybridThreeFormats:
         )
 
         def factory(role):
-            if role == "linear_weight":
+            is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
+            if is_linear and role.tensor_type == "weight":
                 return HybridQuantizer(
                     rowwise_quantizer=_make_nvfp4_quantizer(),
                     columnwise_quantizer=_make_fp8_quantizer(),
                 )
-            if role == "linear_input":
+            if is_linear and role.tensor_type == "input":
                 return HybridQuantizer(
                     rowwise_quantizer=_make_nvfp4_quantizer(),
                     columnwise_quantizer=_make_mxfp8_quantizer(),
                 )
-            if role in ("linear_grad_output", "linear_grad_input"):
+            if is_linear and role.tensor_type in ("grad_output", "grad_input"):
                 return HybridQuantizer(
                     rowwise_quantizer=_make_fp8_quantizer(),
                     columnwise_quantizer=_make_mxfp8_quantizer(),
                 )
-            return None
+            return _make_nvfp4_quantizer()
 
         with autocast(enabled=True, recipe=recipe.CustomRecipe(qfactory=factory)):
             out = model(inp)
@@ -2060,19 +2134,20 @@ class TestHybridThreeFormats:
         )
 
         def factory(role):
-            if role == "linear_weight":
+            is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
+            if is_linear and role.tensor_type == "weight":
                 return HybridQuantizer(
                     rowwise_quantizer=_make_nvfp4_quantizer(),
                     columnwise_quantizer=_make_mxfp8_quantizer(),
                 )
-            if role == "linear_input":
+            if is_linear and role.tensor_type == "input":
                 return HybridQuantizer(
                     rowwise_quantizer=_make_nvfp4_quantizer(),
                     columnwise_quantizer=_make_mxfp8_quantizer(),
                 )
-            if role in ("linear_grad_output", "linear_grad_input"):
+            if is_linear and role.tensor_type in ("grad_output", "grad_input"):
                 return _make_mxfp8_quantizer()
-            return None
+            return _make_nvfp4_quantizer()
 
         with autocast(enabled=True, recipe=recipe.CustomRecipe(qfactory=factory)):
             out = model(inp)
@@ -2096,7 +2171,8 @@ def _make_hybrid_fp8_factory():
     plain FP8 E5M2 for bwd roles."""
 
     def factory(role):
-        if role in ("linear_input", "linear_weight", "linear_output"):
+        is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
+        if is_linear and role.tensor_type in ("input", "weight", "output"):
             return HybridQuantizer(
                 rowwise_quantizer=Float8CurrentScalingQuantizer(
                     tex.DType.kFloat8E4M3,
@@ -2107,7 +2183,7 @@ def _make_hybrid_fp8_factory():
                     device="cuda",
                 ),
             )
-        if role in ("linear_grad_output", "linear_grad_input"):
+        if is_linear and role.tensor_type in ("grad_output", "grad_input"):
             return Float8CurrentScalingQuantizer(
                 tex.DType.kFloat8E5M2,
                 device="cuda",
@@ -2319,10 +2395,20 @@ class TestHybridGroupedLinearClassifier:
         assert "1 non-hybrid" in msg
         assert "CustomRecipe" in msg and "qfactory" in msg
 
-    def test_none_entries_ignored_when_remainder_is_uniform(self):
-        """None entries are filtered before uniformity check — a list
-        of hybrids plus a None must still classify as hybrid (not
-        mixed)."""
+    def test_none_plus_hybrid_raises(self):
+        """None entries mixed with HybridQuantizer must NOT classify as
+        all-hybrid: ``_hybrid_split_quantize`` would later iterate the
+        full list with ``isinstance(q, HybridQuantizer)`` and raise
+        ``TypeError`` on the ``None`` entry. The classifier rejects
+        upfront with a clear ValueError so users see a single,
+        actionable error.
+
+        In current TE flows ``CustomRecipeState.make_quantizers``
+        rejects ``None`` returns from ``qfactory``, so this combination
+        shouldn't actually arise — but if a future "intentional no-op"
+        ``IdentityQuantizer`` ever loosens that contract, this guard
+        prevents the silent crash.
+        """
         from transformer_engine.pytorch.module.grouped_linear import (
             _is_hybrid_quantizer_list,
         )
@@ -2332,7 +2418,12 @@ class TestHybridGroupedLinearClassifier:
             None,
             _make_hybrid_quantizer_fp8_row_fp4_col(),
         ]
-        assert _is_hybrid_quantizer_list(quantizers) is True
+        with pytest.raises(ValueError) as exc_info:
+            _is_hybrid_quantizer_list(quantizers)
+        msg = str(exc_info.value)
+        assert "mixes HybridQuantizer" in msg
+        assert "2 hybrid" in msg
+        assert "1 None" in msg
 
     def test_hybrid_split_quantize_rejects_plain_element(self):
         """Defense-in-depth: even if a caller bypasses the classifier,
@@ -2379,12 +2470,13 @@ def _hybrid_custom_recipe(row_factory, col_factory, grad_factory=None):
         grad_factory = col_factory
 
     def qfactory(role):
-        if role in ("linear_input", "linear_weight", "linear_output"):
+        is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
+        if is_linear and role.tensor_type in ("input", "weight", "output"):
             return HybridQuantizer(
                 rowwise_quantizer=row_factory(),
                 columnwise_quantizer=col_factory(),
             )
-        if role in ("linear_grad_output", "linear_grad_input"):
+        if is_linear and role.tensor_type in ("grad_output", "grad_input"):
             return grad_factory()
         return row_factory()
 
@@ -3051,21 +3143,23 @@ class TestHybridMixedFormatQuantizedParams:
 
 def _hybrid_fp8_current_qfactory(role):
     """Hybrid FP8 current scaling (E4M3 both dirs, E5M2 for grad)."""
-    if role in ("linear_input", "linear_weight", "linear_output"):
+    is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
+    if is_linear and role.tensor_type in ("input", "weight", "output"):
         return HybridQuantizer(
             rowwise_quantizer=Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
             columnwise_quantizer=Float8CurrentScalingQuantizer(
                 tex.DType.kFloat8E4M3, device="cuda"
             ),
         )
-    if role in ("linear_grad_output", "linear_grad_input"):
+    if is_linear and role.tensor_type in ("grad_output", "grad_input"):
         return Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda")
     return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
 
 
 def _hybrid_mxfp8_qfactory(role):
     """Hybrid MXFP8 (E4M3 both dirs)."""
-    if role in ("linear_grad_output", "linear_grad_input"):
+    is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
+    if is_linear and role.tensor_type in ("grad_output", "grad_input"):
         return MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
     return HybridQuantizer(
         rowwise_quantizer=MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
@@ -3075,8 +3169,10 @@ def _hybrid_mxfp8_qfactory(role):
 
 def _hybrid_block_fp8_qfactory(role):
     """Hybrid block FP8 (E4M3 both dirs)."""
-    dim = 2 if role == "linear_weight" else 1
-    if role in ("linear_grad_output", "linear_grad_input"):
+    is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
+    is_weight = is_linear and role.tensor_type == "weight"
+    dim = 2 if is_weight else 1
+    if is_linear and role.tensor_type in ("grad_output", "grad_input"):
         return Float8BlockQuantizer(
             fp8_dtype=tex.DType.kFloat8E4M3,
             rowwise=True,
@@ -3101,7 +3197,8 @@ def _hybrid_block_fp8_qfactory(role):
 
 def _hybrid_nvfp4_qfactory(role):
     """Hybrid NVFP4 (E2M1 both dirs)."""
-    if role in ("linear_grad_output", "linear_grad_input"):
+    is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
+    if is_linear and role.tensor_type in ("grad_output", "grad_input"):
         return NVFP4Quantizer(fp4_dtype=tex.DType.kFloat4E2M1)
     return HybridQuantizer(
         rowwise_quantizer=NVFP4Quantizer(fp4_dtype=tex.DType.kFloat4E2M1),
@@ -3320,14 +3417,15 @@ class TestQuantizedParamsEquivalenceNVFP4(_QuantizedParamsEquivalenceBase):
 
 def _checkpoint_hybrid_fp8_qfactory(role):
     """Module-level qfactory (picklable) for checkpoint tests."""
-    if role in ("linear_input", "linear_weight", "linear_output"):
+    is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
+    if is_linear and role.tensor_type in ("input", "weight", "output"):
         return HybridQuantizer(
             rowwise_quantizer=Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda"),
             columnwise_quantizer=Float8CurrentScalingQuantizer(
                 tex.DType.kFloat8E4M3, device="cuda"
             ),
         )
-    if role in ("linear_grad_output", "linear_grad_input"):
+    if is_linear and role.tensor_type in ("grad_output", "grad_input"):
         return Float8CurrentScalingQuantizer(tex.DType.kFloat8E5M2, device="cuda")
     return Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
 
@@ -4152,6 +4250,175 @@ class TestHybridMakeLike:
         param = self._make_hybrid_param()
         copy = HybridQuantizedTensor.make_like(param)
         assert copy is not param
+
+
+# ---------------------------------------------------------------------------
+# 15b. Hopper-only paths: columnwise-only Float8 sub-storage
+# ---------------------------------------------------------------------------
+#
+# On architectures where ``is_non_tn_fp8_gemm_supported()`` returns False
+# (Hopper sm_90, L40 sm_89), per-tensor FP8 GEMM only supports the TN
+# layout — non-TN layouts are simulated by feeding pre-transposed data.
+# So a columnwise-only ``Float8TensorStorage`` (used as a hybrid sub-
+# storage) holds its quantized data in ``_transpose`` instead of
+# ``_data``, with ``_data = None``.
+#
+# This is the exact layout the FSDP2 buffer protocol must recognize
+# when the sub-storage is part of a ``HybridQuantizedTensor`` parameter.
+# These tests pin the contracts that would break if the buffer
+# protocol regressed to the unconditional ``("_data",)`` field name
+# (which would all-gather a ``None`` tensor on Hopper).
+#
+# Skip on Blackwell where the C++ kernel always populates ``_data`` and
+# the columnwise-only Float8 path doesn't exercise ``_transpose``.
+
+from transformer_engine.pytorch.utils import is_non_tn_fp8_gemm_supported  # noqa: E402
+
+requires_hopper_fp8 = pytest.mark.skipif(
+    is_non_tn_fp8_gemm_supported() or not fp8_available,
+    reason=(
+        "Hopper-only: requires per-tensor FP8 with non-TN GEMM unsupported "
+        "(Hopper sm_90 / L40 sm_89). On Blackwell the C++ kernel populates "
+        "_data even for columnwise-only mode, so the _transpose-only path "
+        "is not exercised."
+    ),
+)
+
+
+@requires_hopper_fp8
+class TestHybridFloat8ColumnwiseOnlyHopperPath:
+    """Float8TensorStorage columnwise-only sub-storage exercises the
+    ``_transpose`` field on Hopper. The FSDP2 buffer protocol must
+    recognize this layout.
+    """
+
+    def _make_columnwise_only_float8_storage(self):
+        """Build a Float8TensorStorage in the layout a columnwise-only
+        hybrid sub-storage would have on Hopper: ``_data=None`` and
+        the actual quantized bytes in ``_transpose``.
+        """
+        q = Float8CurrentScalingQuantizer(
+            tex.DType.kFloat8E4M3,
+            device="cuda",
+            rowwise=False,
+            columnwise=True,
+        )
+        src = torch.randn(64, 64, dtype=torch.bfloat16, device="cuda")
+        out = q(src)
+        # Columnwise-only Float8 on Hopper: _data is None, _transpose holds data
+        assert out._data is None, (
+            f"Test precondition failed: expected _data is None on Hopper, got {out._data}"
+        )
+        assert out._transpose is not None, "Test precondition failed: _transpose is None"
+        return out
+
+    def test_fsdp_buffer_fields_returns_transpose(self):
+        """``fsdp_buffer_fields`` must return ``("_transpose",)`` when
+        ``_data`` is ``None`` and ``_transpose`` is populated. The
+        unconditional ``("_data",)`` would have FSDP2 all-gather a
+        ``None`` tensor on Hopper hybrid + FSDP2.
+        """
+        storage = self._make_columnwise_only_float8_storage()
+        assert storage.fsdp_buffer_fields() == ("_transpose",)
+
+    def test_fsdp_extract_buffers_returns_transpose_data(self):
+        """``fsdp_extract_buffers`` (default impl, reads named fields)
+        must return the actual ``_transpose`` tensor, not ``None``.
+        """
+        storage = self._make_columnwise_only_float8_storage()
+        buffers, meta = storage.fsdp_extract_buffers()
+        assert len(buffers) == 1
+        assert buffers[0] is not None
+        assert buffers[0] is storage._transpose
+        assert meta["field_names"] == ("_transpose",)
+
+    def test_fsdp_assign_gathered_resets_transpose_invalid(self):
+        """After the gathered transpose buffer is written back via
+        ``fsdp_assign_gathered``, ``_transpose_invalid`` must be False
+        — otherwise ``update_usage`` / ``get_usages`` would treat the
+        freshly gathered transpose as stale on first use.
+        """
+        storage = self._make_columnwise_only_float8_storage()
+        # Simulate stale state pre-gather
+        storage._transpose_invalid = True
+        new_transpose = torch.zeros_like(storage._transpose)
+        storage.fsdp_assign_gathered((new_transpose,), {"field_names": ("_transpose",)})
+        assert storage._transpose is new_transpose
+        assert storage._transpose_invalid is False
+        # And ``get_usages`` correctly reports columnwise-available
+        assert storage.get_usages()["columnwise"] is True
+
+    def test_fsdp_buffer_fields_falls_back_to_data_when_both_present(self):
+        """A normally-constructed Float8TensorStorage has ``_data``
+        populated; ``fsdp_buffer_fields`` should still prefer ``_data``
+        — direction-aware logic must not regress the vanilla path.
+        """
+        q = Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
+        src = torch.randn(64, 64, dtype=torch.bfloat16, device="cuda")
+        out = q(src)
+        assert out._data is not None
+        assert out.fsdp_buffer_fields() == ("_data",)
+
+
+@requires_hopper_fp8
+class TestHybridFsdpPostAllGatherUpdateUsage:
+    """``HybridQuantizedTensor.fsdp_post_all_gather`` must call
+    ``update_usage`` on each sub-storage after writing gathered data
+    (mirroring vanilla ``Float8Tensor.fsdp_post_all_gather:888``).
+    Without it, on Hopper a previously-cached ``_transpose`` from the
+    prior iteration is silently reused with the new ``_data``, producing
+    incorrect dgrad / wgrad GEMMs.
+    """
+
+    def _make_param(self):
+        hybrid_recipe = _hybrid_custom_recipe(
+            _fp8_row_factory,
+            _fp8_col_factory,
+            _fp8_grad_factory,
+        )
+        with quantized_model_init(enabled=True, recipe=hybrid_recipe):
+            model = Linear(64, 64, params_dtype=torch.bfloat16).cuda()
+        return model.weight
+
+    def test_iter2_invalidates_stale_transpose_on_rowwise_substorage(self):
+        """Simulates iter-2+ buffer reuse: pre-existing ``out`` with a
+        possibly-stale ``_transpose`` cache; after ``fsdp_post_all_gather``
+        the rowwise sub-storage's ``_transpose`` must be invalidated /
+        regenerated to match the freshly gathered ``_data``.
+        """
+        param = self._make_param()
+        # Build a plausible iter-2+ "out" with stale state.
+        out = HybridQuantizedTensor.make_like(param)
+        # Rowwise sub-storage on Hopper has _data populated. Force a stale
+        # _transpose and invalidate flag to mimic the regression scenario.
+        if out._rowwise_storage._transpose is None:
+            # Set up a fake stale transpose (non-None, marked invalid by
+            # the mismatching shape would catch nothing, so just plant
+            # a tensor and clear the invalid flag to "valid").
+            out._rowwise_storage._transpose = torch.zeros_like(out._rowwise_storage._data).t()
+            out._rowwise_storage._transpose_invalid = False
+        stale_transpose_id = id(out._rowwise_storage._transpose)
+
+        # Drive a real all-gather round trip via the protocol
+        sharded_tensors, metadata = param.fsdp_pre_all_gather(
+            mesh=None,
+            orig_size=param.shape,
+            contiguous_orig_stride=None,
+            module=None,
+            mp_policy=None,
+        )
+        out2, _ = param.fsdp_post_all_gather(
+            sharded_tensors, metadata, param.dtype, out=out
+        )
+
+        # After fsdp_post_all_gather, the rowwise sub-quantizer is pinned
+        # columnwise=False, so update_usage(rowwise=True, columnwise=False)
+        # must clear the stale _transpose (preventing the silent
+        # stale-cache regression on Hopper).
+        assert out2._rowwise_storage._transpose is None or (
+            out2._rowwise_storage._transpose_invalid
+            and id(out2._rowwise_storage._transpose) != stale_transpose_id
+        ), "Stale _transpose was not invalidated after fsdp_post_all_gather"
 
 
 # ---------------------------------------------------------------------------

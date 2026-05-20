@@ -28,17 +28,18 @@ def _hybrid_fp8_mxfp8_qfactory(role):
 
     Forward roles get a HybridQuantizer; backward/grad roles get a plain
     MXFP8 quantizer so dgrad/wgrad GEMMs see a single scaling mode per
-    operand pair. Catch-all returns plain FP8 for non-``linear_*`` roles
+    operand pair. Catch-all returns plain FP8 for non-linear roles
     (layernorm_linear, layernorm_mlp, multihead_attention, transformer_layer).
     """
-    if role in ("linear_input", "linear_weight", "linear_output"):
+    is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
+    if is_linear and role.tensor_type in ("input", "weight", "output"):
         return te.HybridQuantizer(
             rowwise_quantizer=te.Float8CurrentScalingQuantizer(
                 tex.DType.kFloat8E4M3, device="cuda"
             ),
             columnwise_quantizer=te.MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
         )
-    if role in ("linear_grad_output", "linear_grad_input"):
+    if is_linear and role.tensor_type in ("grad_output", "grad_input"):
         return te.MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E5M2)
     return te.Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
 
@@ -50,12 +51,13 @@ def _hybrid_mxfp8_nvfp4_qfactory(role):
     from ``custom_recipes/quantization_nvfp4.py``. grad_output uses plain
     NVFP4 (both directions) so wgrad's columnwise operand matches.
     """
-    if role in ("linear_input", "linear_weight", "linear_output"):
+    is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
+    if is_linear and role.tensor_type in ("input", "weight", "output"):
         return te.HybridQuantizer(
             rowwise_quantizer=te.MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
             columnwise_quantizer=te.NVFP4Quantizer(fp4_dtype=tex.DType.kFloat4E2M1),
         )
-    if role in ("linear_grad_output", "linear_grad_input"):
+    if is_linear and role.tensor_type in ("grad_output", "grad_input"):
         return te.NVFP4Quantizer(fp4_dtype=tex.DType.kFloat4E2M1)
     return te.MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
 

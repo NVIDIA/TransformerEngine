@@ -86,29 +86,23 @@ class HybridQuantizer(Quantizer):
         requires_grad: bool = False,
         pin_memory: bool = False,
     ) -> HybridQuantizedTensor:
-        # The ``internal`` flag toggles a shared-state mode on each sub-
-        # quantizer (returns bare ``*TensorStorage`` rather than a
-        # ``QuantizedTensor`` subclass from ``make_empty``). It is
-        # global to the quantizer instance, so a raise between
-        # ``internal=True`` and ``internal=False`` would leak the flag
-        # and corrupt subsequent non-hybrid quantize calls on the same
-        # sub-quantizer. ``try/finally`` guarantees the reset.
-        def _make_empty_internal(sub_quantizer):
-            prev_internal = sub_quantizer.internal
-            sub_quantizer.internal = True
-            try:
-                return sub_quantizer.make_empty(
-                    shape,
-                    dtype=dtype,
-                    device=device,
-                    pin_memory=pin_memory,
-                )
-            finally:
-                sub_quantizer.internal = prev_internal
-
-        rowwise_empty = _make_empty_internal(self.rowwise_quantizer) if self.rowwise_usage else None
+        # Mirror ``quantize_impl``: invoke each sub-quantizer with its own
+        # ``internal`` setting (no toggle), so the produced sub-storages have
+        # the same type that ``quantize_impl`` would produce via
+        # ``sub_quantizer.quantize(tensor)``.
+        rowwise_empty = (
+            self.rowwise_quantizer.make_empty(
+                shape, dtype=dtype, device=device, pin_memory=pin_memory
+            )
+            if self.rowwise_usage
+            else None
+        )
         columnwise_empty = (
-            _make_empty_internal(self.columnwise_quantizer) if self.columnwise_usage else None
+            self.columnwise_quantizer.make_empty(
+                shape, dtype=dtype, device=device, pin_memory=pin_memory
+            )
+            if self.columnwise_usage
+            else None
         )
 
         return HybridQuantizedTensor(
@@ -372,6 +366,58 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
     def get_metadata(self) -> Dict[str, Any]:
         return HybridQuantizedTensorStorage.get_metadata(self)
 
+    @classmethod
+    def _make_in_reduce_ex(
+        cls,
+        rowwise_storage: Optional[QuantizedTensorStorage],
+        columnwise_storage: Optional[QuantizedTensorStorage],
+        rowwise_quantizer: Optional[Quantizer],
+        columnwise_quantizer: Optional[Quantizer],
+        quantizer: Optional[Quantizer],
+        dtype: torch.dtype,
+        shape: torch.Size,
+    ) -> HybridQuantizedTensor:
+        """Build HybridQuantizedTensor, for use in ``__reduce_ex__``."""
+        return HybridQuantizedTensor(
+            shape=shape,
+            dtype=dtype,
+            rowwise_storage=rowwise_storage,
+            columnwise_storage=columnwise_storage,
+            rowwise_quantizer=rowwise_quantizer,
+            columnwise_quantizer=columnwise_quantizer,
+            quantizer=quantizer,
+        )
+
+    def __reduce_ex__(self, protocol: int) -> tuple:
+        """Custom pickling.
+
+        Without this, the default ``torch.Tensor.__reduce_ex__`` rebuilds
+        the parameter as a plain ``torch.Tensor``, dropping the
+        sub-storages and per-tensor scale state. DCP then reloads the
+        parameter via ``aten.copy_(dst, plain_tensor)`` which routes to
+        ``dst.quantize_(plain_tensor)`` — re-quantizing dequantized data
+        loses precision.
+
+        Mirrors the per-format ``__reduce_ex__`` on ``Float8Tensor``,
+        ``MXFP8Tensor``, ``NVFP4Tensor``, and ``Float8BlockwiseQTensor``.
+        Each sub-storage is itself pickled via its own ``__reduce_ex__``
+        (preserving FP8 bytes + ``_scale_inv``); the quantizers travel as
+        regular Python objects and must therefore be picklable
+        themselves.
+        """
+        return (
+            HybridQuantizedTensor._make_in_reduce_ex,
+            (
+                self._rowwise_storage,
+                self._columnwise_storage,
+                self._rowwise_quantizer,
+                self._columnwise_quantizer,
+                self._quantizer,
+                self.dtype,
+                self.shape,
+            ),
+        )
+
     # ── FSDP2 protocol ──────────────────────────────────────────────
 
     def fsdp_pre_all_gather(self, mesh, orig_size, contiguous_orig_stride, module, mp_policy):
@@ -480,12 +526,30 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
                     return buf.shape
             return None
 
+        # ``update_usage`` after gathered writeback mirrors what vanilla
+        # ``Float8Tensor.fsdp_post_all_gather`` does
+        # — invalidates any stale ``_transpose`` cache on Float8 sub-storages
+        # and recreates the transpose on non-Hopper architectures where the
+        # FP8 cuBLAS path requires it. No-op on Blackwell. The flags come
+        # from the sub-quantizer's pinned direction (set by
+        # ``HybridQuantizer.__init__``), so we honor whatever the inner
+        # quantizer thinks its direction is.
+        def _sync_usage(sub_storage, sub_quantizer):
+            if sub_storage is None or sub_quantizer is None:
+                return
+            sub_storage.update_usage(
+                rowwise_usage=sub_quantizer.rowwise_usage,
+                columnwise_usage=sub_quantizer.columnwise_usage,
+            )
+
         if out is not None:
             # Iteration 2+: in-place field update on existing sub-storages
             if out._rowwise_storage is not None and row_meta is not None:
                 out._rowwise_storage.fsdp_assign_gathered(row_gathered, row_meta)
+                _sync_usage(out._rowwise_storage, out._rowwise_quantizer)
             if out._columnwise_storage is not None and col_meta is not None:
                 out._columnwise_storage.fsdp_assign_gathered(col_gathered, col_meta)
+                _sync_usage(out._columnwise_storage, out._columnwise_quantizer)
         else:
             # First iteration: clone the original sharded sub-storages via make_like,
             # then write gathered (full-size) buffers via each sub-storage's own
@@ -496,6 +560,7 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
                 row_sub = type(orig_row_sub).make_like(orig_row_sub, shape=gathered_shape)
                 if row_meta is not None:
                     row_sub.fsdp_assign_gathered(row_gathered, row_meta)
+                _sync_usage(row_sub, row_quantizer)
 
             col_sub = None
             if orig_col_sub is not None and isinstance(orig_col_sub, QuantizedTensor):
@@ -503,6 +568,7 @@ class HybridQuantizedTensor(HybridQuantizedTensorStorage, QuantizedTensor):
                 col_sub = type(orig_col_sub).make_like(orig_col_sub, shape=gathered_shape)
                 if col_meta is not None:
                     col_sub.fsdp_assign_gathered(col_gathered, col_meta)
+                _sync_usage(col_sub, col_quantizer)
 
             ref_sub = row_sub if row_sub is not None else col_sub
             out = HybridQuantizedTensor(

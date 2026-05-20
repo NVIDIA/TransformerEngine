@@ -289,5 +289,43 @@ class Float8TensorStorage(QuantizedTensorStorage):
 
         ``_scale_inv`` is a per-tensor scalar; it travels through the hook's
         metadata tuple (mirroring :meth:`Float8Tensor.fsdp_pre_all_gather`).
+
+        Direction-aware: a vanilla Float8Tensor parameter has ``_data``
+        populated, but a columnwise-only sub-storage (used inside
+        ``HybridQuantizedTensor`` on Hopper / L40 where non-TN FP8 GEMM is
+        not natively supported) holds its quantized data in ``_transpose``
+        instead. Returning ``("_data",)`` unconditionally would have
+        ``fsdp_extract_buffers`` produce ``(None,)`` and FSDP2 would
+        all-gather a ``None`` tensor.
+
+        The per-sub-storage direction is fixed at construction (pinned by
+        ``HybridQuantizer.__init__`` via ``set_usage``), so this check is
+        stable across iterations even though it inspects the current
+        field state.
         """
+        if self._data is not None:
+            return ("_data",)
+        if self._transpose is not None:
+            return ("_transpose",)
+        # Degenerate: fully empty storage. Fall back to ``_data`` so the
+        # base ``fsdp_extract_buffers`` returns ``(None,)`` — same surface
+        # the caller would have seen pre-direction-aware logic.
         return ("_data",)
+
+    def fsdp_assign_gathered(
+        self,
+        gathered: Tuple[Optional[torch.Tensor], ...],
+        meta: Dict[str, Any],
+    ) -> None:
+        """Write gathered Float8 buffers back, refreshing ``_transpose_invalid``.
+
+        The base implementation just ``setattr``s the gathered tensors into
+        the named fields. For Float8 we additionally need to clear
+        ``_transpose_invalid`` when the gathered field is ``_transpose`` —
+        otherwise a freshly-gathered transpose buffer is treated as stale
+        on first use (see :attr:`_transpose_invalid` semantics in
+        ``update_usage`` / ``get_usages``).
+        """
+        super().fsdp_assign_gathered(gathered, meta)
+        if "_transpose" in meta["field_names"]:
+            self._transpose_invalid = False

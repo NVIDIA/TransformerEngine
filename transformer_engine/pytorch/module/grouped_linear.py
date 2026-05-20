@@ -86,16 +86,21 @@ def _is_hybrid_quantizer_list(quantizers):
     hybrid_count = sum(1 for q in non_none if isinstance(q, HybridQuantizer))
     if hybrid_count == 0:
         return False
-    if hybrid_count == len(non_none):
+    # Reject a list mixing HybridQuantizer with None entries: ``_hybrid_split_quantize``
+    # subsequently iterates the *full* list with ``isinstance(q, HybridQuantizer)`` which
+    # would raise ``TypeError`` on the ``None`` entries. Forcing the list to be entirely
+    # non-``None`` before claiming "all hybrid" matches the dispatch's actual capability.
+    if hybrid_count == len(quantizers):
         return True
     raise ValueError(
         "GroupedLinear quantizer list mixes HybridQuantizer and non-hybrid"
-        f" quantizers ({hybrid_count} hybrid, {len(non_none) - hybrid_count}"
-        " non-hybrid). This combination is not supported: neither"
-        " `tex.split_quantize` nor `_hybrid_split_quantize` can consume a"
-        " heterogeneous list. Make the CustomRecipe `qfactory` return a"
-        " consistent type (all HybridQuantizer or all non-hybrid) across"
-        " every GEMM for the same role."
+        f" quantizers ({hybrid_count} hybrid,"
+        f" {len(non_none) - hybrid_count} non-hybrid,"
+        f" {len(quantizers) - len(non_none)} None). This combination is not"
+        " supported: neither `tex.split_quantize` nor `_hybrid_split_quantize`"
+        " can consume a heterogeneous list. Make the CustomRecipe `qfactory`"
+        " return a consistent type (all HybridQuantizer or all non-hybrid)"
+        " across every GEMM for the same role."
     )
 
 

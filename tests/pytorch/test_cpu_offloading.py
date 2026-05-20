@@ -34,17 +34,18 @@ def _hybrid_fp8_mxfp8_qfactory(role):
 
     Forward roles -> HybridQuantizer; backward roles -> plain MXFP8 so
     dgrad/wgrad operand pairs share a single scaling mode. Catch-all
-    returns plain FP8 for non-``linear_*`` roles used by layernorm_linear,
+    returns plain FP8 for non-linear roles used by layernorm_linear,
     layernorm_mlp, multihead_attention, and transformer_layer.
     """
-    if role in ("linear_input", "linear_weight", "linear_output"):
+    is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
+    if is_linear and role.tensor_type in ("input", "weight", "output"):
         return te.HybridQuantizer(
             rowwise_quantizer=te.Float8CurrentScalingQuantizer(
                 tex.DType.kFloat8E4M3, device="cuda"
             ),
             columnwise_quantizer=te.MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
         )
-    if role in ("linear_grad_output", "linear_grad_input"):
+    if is_linear and role.tensor_type in ("grad_output", "grad_input"):
         return te.MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E5M2)
     return te.Float8CurrentScalingQuantizer(tex.DType.kFloat8E4M3, device="cuda")
 
@@ -56,12 +57,13 @@ def _hybrid_mxfp8_nvfp4_qfactory(role):
     ``custom_recipes/quantization_nvfp4.py``. grad_output uses plain NVFP4
     (both directions) so wgrad's columnwise operand matches.
     """
-    if role in ("linear_input", "linear_weight", "linear_output"):
+    is_linear = role is not None and role.module_type in ("linear", "grouped_linear")
+    if is_linear and role.tensor_type in ("input", "weight", "output"):
         return te.HybridQuantizer(
             rowwise_quantizer=te.MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3),
             columnwise_quantizer=te.NVFP4Quantizer(fp4_dtype=tex.DType.kFloat4E2M1),
         )
-    if role in ("linear_grad_output", "linear_grad_input"):
+    if is_linear and role.tensor_type in ("grad_output", "grad_input"):
         return te.NVFP4Quantizer(fp4_dtype=tex.DType.kFloat4E2M1)
     return te.MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
 
@@ -221,10 +223,12 @@ class Utils:
             quantizer = te.tensor.nvfp4_tensor.NVFP4Quantizer()
             return quantizer(tensor)
         elif recipe.custom():
-            # CustomRecipe: invoke the qfactory for the ``linear_weight`` role
+            # CustomRecipe: invoke the qfactory for the linear weight role
             # as a representative quantizer (returns a HybridQuantizer for the
             # hybrid factories registered at module scope).
-            quantizer = recipe.qfactory("linear_weight")
+            from transformer_engine.pytorch.quantization import QuantizerRole
+
+            quantizer = recipe.qfactory(QuantizerRole(module_type="linear", tensor_type="weight"))
             if quantizer is None:
                 # Fallback: factory did not supply a weight quantizer.
                 return tensor.requires_grad_() if requires_grad else tensor
