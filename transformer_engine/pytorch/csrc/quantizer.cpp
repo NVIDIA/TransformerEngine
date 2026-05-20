@@ -1760,12 +1760,12 @@ void NVFP4Quantizer::set_quantization_params(TensorWrapper* tensor) const {
                               columnwise_data.shape);
 }
 
-bool NVFP4Quantizer::is_eligible_for_rht_cast_fusion(size_t rows, size_t cols) {
-  // Must mirror the eligibility check in NVFP4Quantizer::quantize_impl
-  // (search for "eligible_for_rht_cast_fusion" in this file). The dtype
-  // check (BF16) is implicit: with_rht is only valid for BF16 input by
-  // construction.
-  return rows % 64 == 0 && cols % 128 == 0 && transformer_engine::cuda::sm_arch() >= 100 &&
+bool NVFP4Quantizer::is_eligible_for_rht_cast_fusion(const std::vector<size_t>& shape,
+                                                     bool for_grouped_kernel) {
+  const auto [rows, cols] = get_2d_dims(shape);
+  const size_t row_align = for_grouped_kernel ? 128 : 64;
+  return rows % row_align == 0 && cols % 128 == 0 &&
+         transformer_engine::cuda::sm_arch() >= 100 &&
          transformer_engine::cuda::sm_arch() <= 110;
 }
 
@@ -1779,19 +1779,11 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
   const std::vector<int64_t> shape_int64(shape.begin(), shape.end());
   const auto [flat_first_dim, flat_last_dim] = get_2d_dims(shape);
 
-  // Scaling factor format.
-  // Only the RHT cast-fusion quant kernel
-  // (row_cast_col_hadamard_transform_cast_fusion.cu) emits SF in the GEMM-
-  // swizzled layout. Non-RHT NVFP4 quant kernels (quantize_nvfp4.cuh and
-  // quantize_transpose_nvfp4.cuh) NVTE_CHECK reject a swizzled-flagged
-  // output, so we gate on with_rht. The RHT-unfused fallback (taken when
-  // the input shape is ineligible for the cast-fusion kernel) also
-  // rejects swizzled output, so we additionally gate on shape eligibility
-  // -- otherwise irregular shapes like (8192, 11328) silently set the
-  // flag here and then hard-abort deep inside quantize_with_rht_unfused.
+  // Swizzled SF is only valid when the RHT cast-fusion path runs;
+  // other quantize paths reject it.
   const bool with_gemm_swizzled_scales =
       this->optimize_for_gemm && this->with_rht &&
-      NVFP4Quantizer::is_eligible_for_rht_cast_fusion(flat_first_dim, flat_last_dim);
+      NVFP4Quantizer::is_eligible_for_rht_cast_fusion(shape);
   NVTE_CHECK(flat_first_dim % NVFP4_BLOCK_SIZE == 0, "First dim for NVFP4 must be divisible by ",
              NVFP4_BLOCK_SIZE, " (got shape=", shape, ")");
   NVTE_CHECK(flat_last_dim % NVFP4_BLOCK_SIZE == 0,
@@ -2102,11 +2094,11 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
 
   const auto [flat_first_dim, flat_last_dim] = get_2d_dims(shape);
 
-  // Scaling factor format. See NVFP4Quantizer::create_tensor for the
-  // rationale on gating on (with_rht && shape eligibility).
+  // Swizzled SF is only valid when the RHT cast-fusion path runs;
+  // other quantize paths reject it.
   const bool with_gemm_swizzled_scales =
       this->optimize_for_gemm && this->with_rht &&
-      NVFP4Quantizer::is_eligible_for_rht_cast_fusion(flat_first_dim, flat_last_dim);
+      NVFP4Quantizer::is_eligible_for_rht_cast_fusion(shape);
 
   const bool row_scaled_nvfp4 = this->row_scaled_nvfp4;
   if (row_scaled_nvfp4) {
@@ -2228,13 +2220,8 @@ void NVFP4Quantizer::quantize_with_rht_unfused_helper(
     const TensorWrapper& input, TensorWrapper& out, TensorWrapper& rht_output_t_cpp,
     QuantizationConfigWrapper& quant_config, QuantizationConfigWrapper& quant_config_columnwise,
     cudaStream_t stream) {
-  // only triggered for irregular shapes where RHT cast fusion kernel is not eligible
-  // The unfused fallback dispatches to nvte_quantize_v2 / nvte_hadamard_transform,
-  // neither of which supports emitting SF in the GEMM-swizzled layout (their
-  // backing kernels NVTE_CHECK reject swizzled-flagged output). Surface a clean
-  // error here instead of letting it abort deep inside the kernel with an
-  // opaque message. JAX hard-asserts eligibility upfront; PyTorch matches that
-  // contract specifically when optimize_for_gemm=True.
+  // The kernels invoked below reject swizzled-SF output, so trip a clear
+  // error here before reaching them.
   NVTE_CHECK(!out.get_with_gemm_swizzled_scales(),
              "NVFP4 RHT-unfused fallback path does not support "
              "with_gemm_swizzled_scales=True. Either disable optimize_for_gemm on the "
@@ -2324,11 +2311,7 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
 
   // We only need RHT for columnwise usage.
   // flat first dim and last dim for multi dimensional input
-  size_t rows = 1;
-  for (size_t i = 0; i < input.ndim() - 1; ++i) {
-    rows *= input.size(i);
-  }
-  size_t cols = input.size(input.ndim() - 1);
+  const auto [rows, cols] = get_2d_dims(input.shape());
 
   const bool row_scaled_nvfp4 = out.get_row_scaled_nvfp4();
   if (row_scaled_nvfp4) {
@@ -2343,9 +2326,9 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
   }
 
   // Restriction for the RHT cast fusion kernel because we are using MMA hardware for computing RHT
-  bool eligible_for_rht_cast_fusion =
-      input.dtype() == DType::kBFloat16 && rows % 64 == 0 && cols % 128 == 0 &&
-      transformer_engine::cuda::sm_arch() >= 100 && transformer_engine::cuda::sm_arch() <= 110;
+  const bool eligible_for_rht_cast_fusion =
+      input.dtype() == DType::kBFloat16 &&
+      NVFP4Quantizer::is_eligible_for_rht_cast_fusion(convertShape(input.shape()));
 
   // Stochastic rounding
   // When both rowwise and columnwise quantization are used with RHT,

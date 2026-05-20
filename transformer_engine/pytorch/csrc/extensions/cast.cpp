@@ -719,17 +719,6 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
     return retval;
   }
 
-  // Quantization parameters. Like the NVFP4 split-quantize path
-  // (see split_quantize_nvfp4_impl in this file), we assume all
-  // quantizers in the group share an identical config and read
-  // group-wide flags from quantizer_cpp_list[0]. The grouped RHT
-  // cast-fusion kernel honours a single with_gemm_swizzled_scales
-  // boolean across the whole group, so optimize_for_gemm and with_rht
-  // must in particular agree across all quantizers; the NVTE_CHECK
-  // loop below enforces that for the fields the swizzled-SF gate
-  // depends on. (The other group-wide reads from [0] -- rowwise_usage,
-  // row_scaled_nvfp4, columnwise_usage, scaling_mode, dtype -- are
-  // pre-existing assumptions and out of scope for this PR.)
   const auto rowwise_usage = quantizer_cpp_list[0]->rowwise_usage;
   const bool row_scaled_nvfp4 = quantizer_cpp_list[0]->row_scaled_nvfp4;
   const auto columnwise_usage = quantizer_cpp_list[0]->columnwise_usage;
@@ -741,16 +730,15 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
   const auto scaling_mode = quantizer_cpp_list[0]->get_scaling_mode();
   const auto fp4_dtype = quantizer_cpp_list[0]->dtype;
 
-  // Only the RHT cast-fusion quant kernel supports direct swizzled SF
-  // emission. Other NVFP4 quant kernels (e.g. nvte_quantize_v2 ->
-  // quantize_nvfp4.cuh, quantize_transpose_nvfp4.cuh) NVTE_CHECK reject
-  // a swizzled-flagged output, so we gate on with_rht to avoid silent
-  // data corruption / hard aborts on non-RHT paths. Additionally we
-  // require *all* tensors in the group to be shape-eligible for RHT
-  // cast-fusion, because the grouped kernel honours a single boolean
-  // and the unfused fallback rejects swizzled output (see NVTE_CHECK
-  // at group_row_cast_col_hadamard_transform_cast_fusion.cu and
-  // quantize_with_rht_unfused_helper).
+  // with_gemm_swizzled_scales is a single group-wide boolean baked
+  // into every output tensor. We can safely request it only when
+  // (a) every quantizer in the group has optimize_for_gemm and
+  // with_rht set, and (b) every tensor's shape qualifies for RHT
+  // cast-fusion. Disagreement among quantizers would silently give
+  // some outputs a layout that their own quantizer did not request;
+  // the NVTE_CHECK loop below turns that into a loud error. The
+  // final flag ANDs all three predicates (the shape-eligibility one
+  // is computed by the loop further below).
   const bool group_optimize_for_gemm = quantizer_cpp_list[0]->optimize_for_gemm;
   const bool group_with_rht = quantizer_cpp_list[0]->with_rht;
   for (size_t i = 1; i < num_tensors; ++i) {
@@ -766,8 +754,8 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>, bool> bulk_alloc
   }
   bool all_tensors_rht_cast_fusion_eligible = true;
   for (size_t i = 0; i < num_tensors; ++i) {
-    const auto [rows, cols] = get_2d_dims(shape_list[i]);
-    if (!NVFP4Quantizer::is_eligible_for_rht_cast_fusion(rows, cols)) {
+    if (!NVFP4Quantizer::is_eligible_for_rht_cast_fusion(shape_list[i],
+                                                         /*for_grouped_kernel=*/true)) {
       all_tensors_rht_cast_fusion_eligible = false;
       break;
     }

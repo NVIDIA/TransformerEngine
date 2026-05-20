@@ -371,18 +371,11 @@ class NVFP4Quantizer : public Quantizer {
 
   std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape, bool columnwise) const;
 
-  /*! @brief Whether a 2D shape (rows, cols) is eligible for the
-   *  NVFP4 RHT cast-fusion kernel.
-   *
-   *  Matches the dispatch logic in NVFP4Quantizer::quantize_impl.
-   *  The dtype check (BF16) is implicit -- with_rht=True requires
-   *  BF16 input by construction, so callers gate on with_rht first.
-   *  When false, the dispatch falls back to quantize_with_rht_unfused
-   *  which cannot emit GEMM-swizzled SF; framework gates that opt
-   *  into with_gemm_swizzled_scales must therefore also check this
-   *  to avoid mismatched-flag aborts in the fallback path.
+  /*! @brief Whether a tensor of the given shape is eligible for
+   *  the NVFP4 RHT cast-fusion kernel (single-tensor or grouped).
    */
-  static bool is_eligible_for_rht_cast_fusion(size_t rows, size_t cols);
+  static bool is_eligible_for_rht_cast_fusion(const std::vector<size_t>& shape,
+                                              bool for_grouped_kernel = false);
 
  private:
   void quantize_impl(const TensorWrapper& input, TensorWrapper& out,
