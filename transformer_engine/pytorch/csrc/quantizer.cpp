@@ -1764,8 +1764,7 @@ bool NVFP4Quantizer::is_eligible_for_rht_cast_fusion(const std::vector<size_t>& 
                                                      bool for_grouped_kernel) {
   const auto [rows, cols] = get_2d_dims(shape);
   const size_t row_align = for_grouped_kernel ? 128 : 64;
-  return rows % row_align == 0 && cols % 128 == 0 &&
-         transformer_engine::cuda::sm_arch() >= 100 &&
+  return rows % row_align == 0 && cols % 128 == 0 && transformer_engine::cuda::sm_arch() >= 100 &&
          transformer_engine::cuda::sm_arch() <= 110;
 }
 
@@ -1781,9 +1780,8 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::create_tensor(
 
   // Swizzled SF is only valid when the RHT cast-fusion path runs;
   // other quantize paths reject it.
-  const bool with_gemm_swizzled_scales =
-      this->optimize_for_gemm && this->with_rht &&
-      NVFP4Quantizer::is_eligible_for_rht_cast_fusion(shape);
+  const bool with_gemm_swizzled_scales = this->optimize_for_gemm && this->with_rht &&
+                                         NVFP4Quantizer::is_eligible_for_rht_cast_fusion(shape);
   NVTE_CHECK(flat_first_dim % NVFP4_BLOCK_SIZE == 0, "First dim for NVFP4 must be divisible by ",
              NVFP4_BLOCK_SIZE, " (got shape=", shape, ")");
   NVTE_CHECK(flat_last_dim % NVFP4_BLOCK_SIZE == 0,
@@ -2096,9 +2094,8 @@ std::pair<TensorWrapper, py::object> NVFP4Quantizer::convert_and_update_tensor(
 
   // Swizzled SF is only valid when the RHT cast-fusion path runs;
   // other quantize paths reject it.
-  const bool with_gemm_swizzled_scales =
-      this->optimize_for_gemm && this->with_rht &&
-      NVFP4Quantizer::is_eligible_for_rht_cast_fusion(shape);
+  const bool with_gemm_swizzled_scales = this->optimize_for_gemm && this->with_rht &&
+                                         NVFP4Quantizer::is_eligible_for_rht_cast_fusion(shape);
 
   const bool row_scaled_nvfp4 = this->row_scaled_nvfp4;
   if (row_scaled_nvfp4) {
