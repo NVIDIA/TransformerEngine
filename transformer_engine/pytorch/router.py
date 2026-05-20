@@ -35,7 +35,7 @@ _ROUTING_MAP_FORMAT_FROM_STRING = {
 
 
 def _validate_routing_map_format(
-    routing_map_format: Union[str, "RoutingMapFormat", int]
+    routing_map_format: Union[str, "RoutingMapFormat", int],
 ) -> "RoutingMapFormat":
     """Coerce user-supplied routing_map_format into the NVTERoutingMapFormat enum.
 

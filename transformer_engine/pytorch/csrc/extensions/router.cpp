@@ -20,8 +20,7 @@ static std::map<std::string, int> score_function_map = {
 static at::Tensor allocate_routing_map(int num_tokens, int num_experts,
                                        NVTERoutingMapFormat format) {
   if (format == NVTE_ROUTING_MAP_FORMAT_BITMAP_U8) {
-    return at::empty({num_tokens, (num_experts + 7) / 8},
-                     at::dtype(at::kByte).device(at::kCUDA));
+    return at::empty({num_tokens, (num_experts + 7) / 8}, at::dtype(at::kByte).device(at::kCUDA));
   }
   return at::empty({num_tokens, num_experts}, at::dtype(at::kBool).device(at::kCUDA));
 }

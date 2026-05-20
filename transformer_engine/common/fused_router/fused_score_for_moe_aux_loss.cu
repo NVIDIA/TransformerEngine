@@ -17,10 +17,12 @@ namespace transformer_engine {
 namespace fused_router {
 
 template <typename DataType, TopkFuncType TopkFunc = TopkFuncType::Naive>
-__global__ void fused_score_for_moe_aux_loss_forward_kernel(
-    const DataType *logits, int num_tokens, int num_experts, int topk, int score_function,
-    float *scores, uint8_t *routing_map, NVTERoutingMapFormat routing_map_format,
-    CompType *intermediate_output) {
+__global__ void fused_score_for_moe_aux_loss_forward_kernel(const DataType *logits, int num_tokens,
+                                                            int num_experts, int topk,
+                                                            int score_function, float *scores,
+                                                            uint8_t *routing_map,
+                                                            NVTERoutingMapFormat routing_map_format,
+                                                            CompType *intermediate_output) {
   /***
      * Section: Global Variables/Addresses init
      * - Each warp is responsible for one token, and has own shared memory buffer.
@@ -175,8 +177,8 @@ __global__ void fused_score_for_moe_aux_loss_forward_kernel(
 template <typename DataType>
 void fused_score_for_moe_aux_loss_forward_kernel_launcher(
     const DataType *logits, int num_tokens, int num_experts, int topk, int score_function,
-    float *scores, uint8_t *routing_map, NVTERoutingMapFormat routing_map_format, CompType *intermediate_output,
-    cudaStream_t stream) {
+    float *scores, uint8_t *routing_map, NVTERoutingMapFormat routing_map_format,
+    CompType *intermediate_output, cudaStream_t stream) {
   // Meta data for the kernel
   size_t num_token_per_block = kThreadsPerBlock / kThreadsPerWarp;
   size_t grid_size = (num_tokens + num_token_per_block - 1) / num_token_per_block;
@@ -213,7 +215,8 @@ void fused_score_for_moe_aux_loss_forward_kernel_launcher(
 
 void fused_score_for_moe_aux_loss_forward(const Tensor &logits, int num_tokens, int num_experts,
                                           int topk, int score_function, Tensor &scores,
-                                          Tensor &routing_map, NVTERoutingMapFormat routing_map_format,
+                                          Tensor &routing_map,
+                                          NVTERoutingMapFormat routing_map_format,
                                           Tensor &intermediate_output, cudaStream_t stream) {
   TE_ROUTER_PROBS_TYPE_SWITCH_ALL(
       logits.data.dtype, DataType,

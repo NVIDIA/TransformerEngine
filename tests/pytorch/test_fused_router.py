@@ -537,9 +537,9 @@ def test_topk_bitmap_vs_bytemap(dtype, num_tokens, num_experts, topk, score_func
     torch.testing.assert_close(probs_byte, probs_bit, atol=0.0, rtol=0.0)
 
     expected_shape = (num_tokens, (num_experts + 7) // 8)
-    assert routing_map_bit.shape == expected_shape, (
-        f"Bitmap shape {tuple(routing_map_bit.shape)} != {expected_shape}"
-    )
+    assert (
+        routing_map_bit.shape == expected_shape
+    ), f"Bitmap shape {tuple(routing_map_bit.shape)} != {expected_shape}"
     assert routing_map_bit.dtype == torch.uint8
     assert routing_map_byte.dtype == torch.bool
 
@@ -558,9 +558,7 @@ def test_topk_bitmap_vs_bytemap(dtype, num_tokens, num_experts, topk, score_func
     [(128, 32, 4), (256, 128, 8), (256, 130, 8)],
 )
 @pytest.mark.parametrize("score_function", ["softmax", "sigmoid", "sqrtsoftplus"])
-def test_score_for_aux_loss_bitmap_vs_bytemap(
-    dtype, num_tokens, num_experts, topk, score_function
-):
+def test_score_for_aux_loss_bitmap_vs_bytemap(dtype, num_tokens, num_experts, topk, score_function):
     """fused_compute_score_for_moe_aux_loss: bitmap routing_map must equal
     LSB-packed bytemap; scores must be bit-identical across formats."""
     if topk >= num_experts:
