@@ -410,6 +410,20 @@ class FP8GlobalStateManager:
     quantization_state = FP8GlobalState()
 
     @classmethod
+    def set_skip_fp8_weight_update_tensor(cls, skip: bool) -> None:
+        """Set the skip fp8 weight update tensor"""
+        if cls.quantization_state.skip_fp8_weight_update_tensor is None:
+            cls.quantization_state.skip_fp8_weight_update_tensor = torch.empty(
+                1, dtype=torch.float32, device="cuda"
+            )
+        cls.quantization_state.skip_fp8_weight_update_tensor.fill_(skip)
+
+    @classmethod
+    def get_skip_fp8_weight_update_tensor(cls) -> Union[torch.Tensor, None]:
+        """Get the skip fp8 weight update tensor"""
+        return cls.quantization_state.skip_fp8_weight_update_tensor
+
+    @classmethod
     def reset(cls) -> None:
         """Reset the global state"""
         cls.quantization_state = FP8GlobalState()
