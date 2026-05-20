@@ -46,8 +46,8 @@ namespace {
 
 using namespace cute;
 
-// Ensure Tensor refers to cute::Tensor, not transformer_engine::Tensor
-using cute::Tensor;
+using cute::Tensor;  // Avoid conflict with transformer_engine::Tensor
+using cute::Shape;  // Avoid conflict with transformer_engine::Shape
 
 constexpr int kMaxTensorsPerKernel = 64;
 

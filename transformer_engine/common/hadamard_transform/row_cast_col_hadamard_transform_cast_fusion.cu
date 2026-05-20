@@ -48,6 +48,9 @@ namespace {
 
 using namespace cute;
 
+using cute::Tensor;  // Avoid conflict with transformer_engine::Tensor
+using cute::Shape;  // Avoid conflict with transformer_engine::Shape
+
 struct CLCResponse { uint32_t data[4] = {0}; };
 
 constexpr int kFp4ConvertChunkElements = 8;

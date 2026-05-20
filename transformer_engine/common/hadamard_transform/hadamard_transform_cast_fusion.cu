@@ -38,7 +38,9 @@ namespace detail {
 namespace {
 
 using namespace cute;
-using cute::Tensor;  // Ensure unqualified Tensor refers to cute::Tensor, not transformer_engine::Tensor
+
+using cute::Tensor;  // Avoid conflict with transformer_engine::Tensor
+using cute::Shape;  // Avoid conflict with transformer_engine::Shape
 
 // calculate the global encode scale factor for a given global amax.
 __device__ __forceinline__ float ComputeGlobalEncodeScaleFP4(const float global_amax) {

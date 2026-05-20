@@ -26,9 +26,11 @@ static_assert(NVTE_BUILD_NUM_PHILOX_ROUNDS > 0,
 #include <cuda_runtime_api.h>
 #include <transformer_engine/transformer_engine.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <functional>
+#include <initializer_list>
 #include <stdexcept>
 #include <string>
 #include <tuple>
@@ -113,6 +115,90 @@ inline size_t product(const std::vector<size_t> &shape) {
 size_t get_buffer_size_bytes(const size_t N, const DType buffer_dtype);
 size_t get_buffer_size_bytes(const size_t dim_first, const size_t dim_last,
                              const DType buffer_dtype);
+
+/*! \brief Tensor shape
+ *
+ *  Wraps NVTEShape with an interface similar to std::vector<size_t>.
+ */
+class Shape {
+ public:
+  using value_type = size_t;
+  using size_type = size_t;
+  using iterator = size_t *;
+  using const_iterator = const size_t *;
+
+  /*! Maximum number of dimensions this shape can hold. */
+  static constexpr size_type max_ndim = std::extent_v<decltype(NVTEShape::data)>;
+
+  constexpr Shape() noexcept = default;
+
+  constexpr Shape(const NVTEShape &shape) noexcept : data_{shape} {}
+
+  Shape(std::initializer_list<size_t> shape) {
+    NVTE_CHECK(shape.size() <= max_ndim, "Too many dimensions (requested ", shape.size(),
+               ", max is ", max_ndim, ").");
+    data_.ndim = shape.size();
+    std::copy(shape.begin(), shape.end(), data_.data);
+  }
+
+  // Construct from any container of integers
+  template <typename Container,
+            typename = std::enable_if_t<
+                std::is_integral<typename Container::value_type>::value>>
+  Shape(const Container &shape) {
+    NVTE_CHECK(shape.size() <= max_ndim, "Too many dimensions (requested ", shape.size(),
+               ", max is ", max_ndim, ").");
+    data_.ndim = shape.size();
+    std::copy(shape.begin(), shape.end(), data_.data);
+  }
+
+  constexpr operator NVTEShape() const noexcept { return data_; }
+
+  /*! Cast to std::vector */
+  operator std::vector<size_t>() const {
+    return std::vector<size_t>(data_.data, data_.data + data_.ndim);
+  }
+
+  constexpr size_type size() const noexcept { return data_.ndim; }
+  constexpr bool empty() const noexcept { return data_.ndim == 0; }
+  static constexpr size_type capacity() noexcept { return max_ndim; }
+
+  size_t *data() noexcept { return data_.data; }
+  constexpr const size_t *data() const noexcept { return data_.data; }
+
+  iterator begin() noexcept { return data_.data; }
+  constexpr const_iterator begin() const noexcept { return data_.data; }
+  constexpr const_iterator cbegin() const noexcept { return data_.data; }
+  iterator end() noexcept { return data_.data + data_.ndim; }
+  constexpr const_iterator end() const noexcept { return data_.data + data_.ndim; }
+  constexpr const_iterator cend() const noexcept { return data_.data + data_.ndim; }
+
+  size_t &operator[](size_type i) noexcept { return data_.data[i]; }
+  constexpr const size_t &operator[](size_type i) const noexcept { return data_.data[i]; }
+
+  size_t &front() noexcept { return data_.data[0]; }
+  constexpr const size_t &front() const noexcept { return data_.data[0]; }
+
+  size_t &back() noexcept { return data_.data[data_.ndim - 1]; }
+  constexpr const size_t &back() const noexcept { return data_.data[data_.ndim - 1]; }
+
+  void push_back(size_t value) {
+    NVTE_CHECK(data_.ndim < max_ndim, "Cannot add dimension: shape is at maximum capacity (",
+               max_ndim, ").");
+    data_.data[data_.ndim++] = value;
+  }
+
+  void clear() noexcept { data_.ndim = 0; }
+
+  friend bool operator==(const Shape &lhs, const Shape &rhs) noexcept {
+    return lhs.data_.ndim == rhs.data_.ndim &&
+           std::equal(lhs.data_.data, lhs.data_.data + lhs.data_.ndim, rhs.data_.data);
+  }
+  friend bool operator!=(const Shape &lhs, const Shape &rhs) noexcept { return !(lhs == rhs); }
+
+ private:
+  NVTEShape data_{};
+};
 
 struct SimpleTensor {
   void *dptr;
@@ -220,10 +306,9 @@ struct Tensor {
 
   /*! Number of tensor elements. */
   size_t numel() const {
-    const NVTEShape s = compute_shape();
     size_t ret = 1;
-    for (size_t i = 0; i < s.ndim; i++) {
-      ret *= s.data[i];
+    for (const size_t dim : shape()) {
+      ret *= dim;
     }
     return ret;
   }
@@ -266,7 +351,7 @@ struct Tensor {
    *  different shape, e.g. the column-wise data for some tensor
    *  formats are transposed.
    */
-  NVTEShape compute_shape() const {
+  Shape shape() const {
     // Each tensor format interprets its data differently
     switch (scaling_mode) {
       case NVTE_DELAYED_TENSOR_SCALING:
@@ -276,45 +361,28 @@ struct Tensor {
         // Row-wise data shape matches tensor logical shape,
         // column-wise data shape is transpose of logical shape
         if (!has_data() && has_columnwise_data()) {
-          NVTEShape ret;
-          ret.ndim = 1;
-          ret.data[0] = 0;
+          Shape ret;
           if (!columnwise_data.shape.empty()) {
-            NVTE_CHECK(columnwise_data.shape.size() <= sizeof(ret.data) / sizeof(ret.data[0]),
-                       "Too many dims for NVTEShape (requested: ", columnwise_data.shape.size(),
-                       ", max: ", sizeof(ret.data) / sizeof(ret.data[0]), ")");
-            ret.ndim = columnwise_data.shape.size();
-            for (size_t i = 1; i < ret.ndim; i++) {
-              ret.data[i - 1] = columnwise_data.shape[i];
+            for (size_t i = 1; i < columnwise_data.shape.size(); i++) {
+              ret.push_back(columnwise_data.shape[i]);
             }
-            ret.data[ret.ndim - 1] = columnwise_data.shape.front();
+            ret.push_back(columnwise_data.shape.front());
           }
           return ret;
         }
-        return nvte_make_shape(data.shape.data(), data.shape.size());
+        return data.shape;
       }
       case NVTE_MXFP8_1D_SCALING: {
         // Row-wise and column-wise data shapes both match tensor
         // logical shape
         if (!has_data() && has_columnwise_data()) {
-          return nvte_make_shape(columnwise_data.shape.data(), columnwise_data.shape.size());
+          return columnwise_data.shape;
         }
-        return nvte_make_shape(data.shape.data(), data.shape.size());
+        return data.shape;
       }
       default:
         NVTE_ERROR("Cannot parse tensor shape with scaling mode \"", to_string(scaling_mode), "\"");
     }
-  }
-
-  /*! Tensor dimensions.
-   *
-   *  This is the logical tensor shape. The underlying data may have a
-   *  different shape, e.g. the column-wise data for some tensor
-   *  formats are transposed.
-   */
-  std::vector<size_t> shape() const {
-    const NVTEShape s = compute_shape();
-    return std::vector<size_t>(s.data, s.data + s.ndim);
   }
 
   /*! Matrix dimensions after flattening tensor to 2D.
@@ -323,15 +391,15 @@ struct Tensor {
    * as a (D1*D2*...*D(n-1), Dn) matrix.
    */
   std::array<size_t, 2> flat_2d_dims() const {
-    const NVTEShape s = compute_shape();
-    if (s.ndim == 0) {
+    const auto s = shape();
+    if (s.empty()) {
       return {1, 1};
     }
     size_t first_dim = 1;
-    for (size_t i = 0; i < s.ndim - 1; ++i) {
-      first_dim *= s.data[i];
+    for (size_t i = 0; i + 1 < s.size(); ++i) {
+      first_dim *= s[i];
     }
-    return {first_dim, s.data[s.ndim - 1]};
+    return {first_dim, s.back()};
   }
 
   /*! Matrix height after tensor is flattened to 2D
