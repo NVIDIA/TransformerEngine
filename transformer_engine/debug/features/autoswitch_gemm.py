@@ -290,7 +290,7 @@ class AutoswitchGemm(TEConfigAPIMapper):
     after all GEMM input tensors are prepared.
     The switch is applied until the next sampling period.
 
-    allow_fp8_model_params_dequantized_weight: bool, default = False
+    allow_fp8_model_params_dequantized_weight: bool, default = True
         If True, allows `fprop`/`dgrad` to switch to high precision even when
         fp8 model parameters are enabled by using a temporary dequantized weight
         tensor for GEMM execution.
@@ -334,7 +334,7 @@ class AutoswitchGemm(TEConfigAPIMapper):
 
     _DEFAULT_UNDERFLOW_THRESHOLD_PCT = 5.0
     _DEFAULT_MSE_THRESHOLD = 1e-4
-    _DEFAULT_ALLOW_FP8_MODEL_PARAMS_DEQUANTIZED_WEIGHT = False
+    _DEFAULT_ALLOW_FP8_MODEL_PARAMS_DEQUANTIZED_WEIGHT = True
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
