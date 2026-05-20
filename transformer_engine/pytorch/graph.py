@@ -836,9 +836,7 @@ def _make_graphed_callables(
                 # Set flag for whether to update FP8 weight updates
                 ctx.is_first_module = FP8GlobalStateManager.is_first_fp8_module()
                 if ctx.is_first_module and skip_fp8_weight_update is not None:
-                    FP8GlobalStateManager.set_skip_fp8_weight_update_tensor(
-                        skip_fp8_weight_update
-                    )
+                    FP8GlobalStateManager.set_skip_fp8_weight_update_tensor(skip_fp8_weight_update)
                 ctx.cuda_graph_stream = cuda_graph_stream
                 ctx.cuda_graph_event = cuda_graph_event
                 # Copy values from new tensors into static tensors
