@@ -9,8 +9,6 @@ import torch.distributed as dist
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
-from torch.distributed.tensor import DTensor
-from torch.distributed.tensor.device_mesh import DeviceMesh
 
 from transformers import (
     AutoModelForCausalLM,
@@ -292,21 +290,27 @@ def init_te_mixtral_model(hyperparams: HyperParameters):
     if hyperparams.expert_parallel_size > 1:
         ep_size = hyperparams.expert_parallel_size
         dp_size = world_size // ep_size
+        global_rank = dist.get_rank()
         dp_group = None
         if dp_size == 1:
-            ep_mesh = DeviceMesh("cuda", torch.arange(world_size))
             ep_group = dist.group.WORLD
         else:
-            # 2D (DP, EP) mesh; data is sharded across DP by Accelerate.
-            full_mesh = DeviceMesh(
-                "cuda",
-                torch.arange(world_size).view(dp_size, ep_size),
-                mesh_dim_names=("dp", "ep"),
-            )
-            ep_mesh = full_mesh["ep"]
-            ep_group = ep_mesh.get_group()
-            dp_group = full_mesh["dp"].get_group()
-        model.model.set_ep_groups(ep_group=ep_group, ep_mesh=ep_mesh)
+            # Rank layout is [DP, EP]. EP groups are contiguous ranks; DP groups
+            # contain the same local expert shard across DP replicas.
+            ep_group = None
+            for dp_rank in range(dp_size):
+                ranks = list(range(dp_rank * ep_size, (dp_rank + 1) * ep_size))
+                group = dist.new_group(ranks=ranks)
+                if global_rank in ranks:
+                    ep_group = group
+            for ep_rank in range(ep_size):
+                ranks = [dp_rank * ep_size + ep_rank for dp_rank in range(dp_size)]
+                group = dist.new_group(ranks=ranks)
+                if global_rank in ranks:
+                    dp_group = group
+            if ep_group is None:
+                raise RuntimeError(f"Rank {global_rank} was not assigned to an EP group.")
+        model.model.set_ep_groups(ep_group=ep_group)
         model._te_mixtral_dp_group = dp_group
         model._te_mixtral_dp_size = dp_size
 
@@ -315,38 +319,14 @@ def init_te_mixtral_model(hyperparams: HyperParameters):
 
 
 def build_adamw(model, hyperparams: HyperParameters):
-    """AdamW compatible with mixed Tensor/DTensor parameters."""
-    dtensor_params = []
-    tensor_params = []
-    for param in model.parameters():
-        if not param.requires_grad:
-            continue
-        if isinstance(param, DTensor) or isinstance(param.data, DTensor):
-            dtensor_params.append(param)
-        else:
-            tensor_params.append(param)
-
-    param_groups = []
-    if tensor_params:
-        param_groups.append({"params": tensor_params})
-    if dtensor_params:
-        param_groups.append({"params": dtensor_params})
-
-    use_fused = hyperparams.expert_parallel_size == 1 and not dtensor_params
+    params = [param for param in model.parameters() if param.requires_grad]
+    use_fused = hyperparams.expert_parallel_size == 1
     return AdamW(
-        params=param_groups,
+        params=params,
         lr=hyperparams.learning_rate,
         fused=use_fused,
         foreach=False,
     )
-
-
-def _local_tensor(tensor: torch.Tensor) -> torch.Tensor:
-    if isinstance(tensor, DTensor):
-        return tensor.to_local()
-    if isinstance(tensor.data, DTensor):
-        return tensor.data.to_local()
-    return tensor
 
 
 def sync_data_parallel_gradients(model) -> None:
@@ -358,9 +338,8 @@ def sync_data_parallel_gradients(model) -> None:
     for param in model.parameters():
         if param.grad is None:
             continue
-        grad = _local_tensor(param.grad)
-        dist.all_reduce(grad, op=dist.ReduceOp.SUM, group=dp_group)
-        grad.div_(dp_size)
+        dist.all_reduce(param.grad, op=dist.ReduceOp.SUM, group=dp_group)
+        param.grad.div_(dp_size)
 
 
 def move_batch_to_device(batch, device):
@@ -396,7 +375,10 @@ def wrap_with_accelerator(model, hyperparams: HyperParameters):
 
     if hyperparams.expert_parallel_size > 1:
         # EP path: keep the DP-aware sampler intact and manually sync DP gradients.
-        optimizer, lr_scheduler = accelerator.prepare(optimizer, lr_scheduler)
+        # The dataloader is intentionally not prepared by Accelerate, so keep
+        # the scheduler as a plain PyTorch scheduler to avoid stepping it once
+        # per process.
+        optimizer = accelerator.prepare(optimizer)
         return accelerator, model, optimizer, train_dataloader, lr_scheduler
 
     if hasattr(model, "hf_device_map"):

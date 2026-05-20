@@ -20,9 +20,6 @@ cudnn-frontend signature checks). Requires
 from __future__ import annotations
 
 import logging
-import os
-import re
-import warnings
 from collections import OrderedDict
 from contextlib import nullcontext
 from typing import Any, ClassVar, ContextManager
@@ -40,7 +37,6 @@ from transformer_engine.pytorch.ops import (
     ScaledSwiGLU,
     Sequential as TEOpsSequential,
 )
-from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 from transformer_engine.pytorch.router import fused_moe_aux_loss
 from transformers import MixtralConfig, PreTrainedModel
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
@@ -48,7 +44,6 @@ from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
 
 from te_moe_dispatch import AllToAllTokenDispatcher
 from te_mixtral import (
-    HFInferenceParams,
     _pad_input,
     _unpad_input,
 )
@@ -175,15 +170,13 @@ class TEMixtralMXFP8SparseMoeBlock(nn.Module):
             TEOpsSequential(self.experts_gate_up, self.experts_swiglu, self.experts_down),
         )
 
-    def set_ep_group(self, ep_group: dist.ProcessGroup, ep_mesh: Any) -> None:
+    def set_ep_group(self, ep_group: dist.ProcessGroup) -> None:
         """Set the EP communication group on the dispatcher.
 
         Each EP rank owns its local slice of expert weights as ordinary
-        Parameters (``weight0..weight{N-1}``) — no DTensor wrapping is
-        needed because per-expert parameters are never replicated across the
-        EP group.
+        Parameters (``weight0..weight{N-1}``) because per-expert parameters
+        are never replicated across the EP group.
         """
-        del ep_mesh  # kept for API parity with te_mixtral.set_ep_groups
         self.dispatcher.set_ep_group(ep_group)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -364,9 +357,9 @@ class TEMixtralMXFP8Model(TEMixtralMXFP8PreTrainedModel):
         self.gradient_checkpointing = False
         self.post_init()
 
-    def set_ep_groups(self, ep_group: dist.ProcessGroup, ep_mesh: Any) -> None:
+    def set_ep_groups(self, ep_group: dist.ProcessGroup) -> None:
         for layer in self.layers:
-            layer.mlp.set_ep_group(ep_group, ep_mesh)
+            layer.mlp.set_ep_group(ep_group)
 
     def _outer_autocast(self) -> ContextManager:
         if self._fp8_recipe is None:

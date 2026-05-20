@@ -5,8 +5,6 @@
 """TransformerEngine-optimized Mixtral model with Mixture of Experts."""
 
 import logging
-import os
-import re
 import warnings
 from collections import OrderedDict
 from contextlib import nullcontext
@@ -25,9 +23,6 @@ import transformers
 from transformer_engine.pytorch.ops import GroupedLinear as TEOpsGroupedLinear
 from transformer_engine.pytorch.ops import Sequential as TEOpsSequential
 from transformer_engine.pytorch.ops import SwiGLU as TEOpsSwiGLU
-from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
-from torch.distributed.tensor import DTensor, Shard
-from torch.distributed.tensor.device_mesh import DeviceMesh
 from transformer_engine.pytorch.attention import InferenceParams
 from transformer_engine.pytorch.attention.inference import PagedKVCacheManager
 from transformer_engine.pytorch.attention.rope import RotaryPositionEmbedding
@@ -51,8 +46,6 @@ AUTO_MAP = {
 # HF->TE checkpoint mapping lives in ``hf_to_te_weights.py`` so both
 # ``te_mixtral.py`` (BF16) and ``te_mixtral_mxfp8.py`` (MXFP8) can share it.
 from hf_to_te_weights import (  # noqa: E402
-    _copy_param,
-    _copy_qkv_proj_to_fused,
     replace_params_bf16 as replace_params,
 )
 
@@ -349,48 +342,19 @@ class TEMixtralSparseMoeBlock(nn.Module):
         if not self._uses_stacked_expert_weights:
             return
         gate_up_w = self.experts_gate_up_weight
-        if isinstance(gate_up_w.data, DTensor):
-            gate_up_w = gate_up_w.data.to_local()
         for i in range(self.num_local_experts):
             object.__setattr__(self.experts_gate_up, f"weight{i}", gate_up_w[i])
 
         down_w = self.experts_down_weight
-        if isinstance(down_w.data, DTensor):
-            down_w = down_w.data.to_local()
-        for i in range(self.num_local_experts):
-            object.__setattr__(self.experts_down, f"weight{i}", down_w[i])
         for i in range(self.num_local_experts):
             object.__setattr__(self.experts_down, f"weight{i}", down_w[i])
 
-    def set_ep_group(self, ep_group: dist.ProcessGroup, ep_mesh: DeviceMesh) -> None:
-        """Set the expert-parallel process group and convert stacked weights to DTensors.
+    def set_ep_group(self, ep_group: dist.ProcessGroup) -> None:
+        """Set the expert-parallel process group for token dispatch.
 
         Must be called before the first forward pass when ``ep_size > 1``.
-
-        Args:
-            ep_group: A ``torch.distributed.ProcessGroup`` whose world size equals ``self.ep_size``.
-            ep_mesh: A 1-D ``DeviceMesh`` for expert parallelism. Used to wrap stacked weights
-                as ``DTensor(Shard(0))`` so that DCP can save/load/reshard them automatically.
         """
         self.dispatcher.set_ep_group(ep_group)
-        if not self._uses_stacked_expert_weights:
-            return
-
-        # Convert stacked parameters to DTensors with Shard(0) on the expert dimension.
-        # Global shape is [num_experts, ...]; each rank stores [num_local_experts, ...].
-        # Guard: only wrap plain tensors; skip if already DTensors (e.g. repeated calls).
-        if not isinstance(self.experts_gate_up_weight.data, DTensor):
-            self.experts_gate_up_weight = nn.Parameter(
-                DTensor.from_local(
-                    self.experts_gate_up_weight.data, device_mesh=ep_mesh, placements=[Shard(0)]
-                )
-            )
-        if not isinstance(self.experts_down_weight.data, DTensor):
-            self.experts_down_weight = nn.Parameter(
-                DTensor.from_local(
-                    self.experts_down_weight.data, device_mesh=ep_mesh, placements=[Shard(0)]
-                )
-            )
 
     def _expert_ffn(self, tokens: torch.Tensor, m_splits: list[int]) -> torch.Tensor:
         """Run the expert SwiGLU FFN (gate_up -> silu -> down) per local expert."""
@@ -406,15 +370,9 @@ class TEMixtralSparseMoeBlock(nn.Module):
             # IMPORTANT: do NOT go through ``.data`` here — that detaches
             # the tensor from autograd, so backward never reaches the
             # expert ``nn.Parameter`` and the optimizer silently skips
-            # ~95% of the model. Use ``DTensor.to_local()`` directly so
-            # the autograd-aware ``to_local`` op preserves the graph back
-            # to the stacked Parameter.
+            # ~95% of the model.
             gate_up_w = self.experts_gate_up_weight
-            if isinstance(gate_up_w, DTensor) or isinstance(gate_up_w.data, DTensor):
-                gate_up_w = gate_up_w.to_local()
             down_w = self.experts_down_weight
-            if isinstance(down_w, DTensor) or isinstance(down_w.data, DTensor):
-                down_w = down_w.to_local()
             outputs = []
             for i, chunk in enumerate(torch.split(tokens, m_splits, dim=0)):
                 if chunk.shape[0] == 0:
@@ -483,7 +441,6 @@ class TEMixtralSparseMoeBlock(nn.Module):
             self._aux_loss = torch.tensor(0.0, device=hidden_states.device)
 
         # Populate GroupedLinear weight attributes from stacked parameters.
-        # For EP, the stacked parameter is a DTensor; .to_local() gives the local shard.
         self._sync_expert_views()
 
         if isinstance(self.dispatcher, AllToAllTokenDispatcher):
@@ -649,15 +606,14 @@ class TEMixtralModel(TEMixtralPreTrainedModel):
 
         self.post_init()
 
-    def set_ep_groups(self, ep_group: dist.ProcessGroup, ep_mesh: DeviceMesh) -> None:
-        """Propagate an expert-parallel process group and mesh to every MoE block.
+    def set_ep_groups(self, ep_group: dist.ProcessGroup) -> None:
+        """Propagate an expert-parallel process group to every MoE block.
 
         Args:
             ep_group: The EP process group to set on each ``TEMixtralSparseMoeBlock``.
-            ep_mesh: A 1-D ``DeviceMesh`` for expert parallelism.
         """
         for layer in self.layers:
-            layer.mlp.set_ep_group(ep_group, ep_mesh)
+            layer.mlp.set_ep_group(ep_group)
 
     def forward(
         self,
@@ -929,54 +885,6 @@ class TEMixtralForCausalLM(TEMixtralPreTrainedModel, transformers.GenerationMixi
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
-
-
-def save_final_model_ep(
-    model: TEMixtralForCausalLM,
-    save_directory: str | os.PathLike,
-    dist_config=None,
-) -> None:
-    """Gather all EP-sharded expert weights and save as safetensors.
-
-    Uses ``get_model_state_dict(full_state_dict=True)`` to all-gather DTensors,
-    matching the pattern from ``save_final_model_fsdp2`` in the llama3 checkpoint module.
-
-    All ranks must call this function. Only rank 0 writes files.
-
-    Args:
-        model: The TEMixtral model (may have DTensor expert parameters).
-        save_directory: Directory to save ``model.safetensors`` and config.
-        dist_config: Optional distributed config with ``is_main_process()`` method.
-            If ``None``, only rank 0 saves.
-    """
-    from safetensors.torch import save_file
-
-    for module in model.modules():
-        if (
-            isinstance(module, TEMixtralSparseMoeBlock)
-            and module.ep_size > 1
-            and not module._uses_stacked_expert_weights
-        ):
-            raise NotImplementedError(
-                "save_final_model_ep does not yet support grouped_op expert weights with "
-                "expert_parallel_size > 1 because those per-expert parameters are not DTensors "
-                "and cannot be all-gathered by get_model_state_dict."
-            )
-
-    model_state_dict = get_model_state_dict(
-        model,
-        options=StateDictOptions(full_state_dict=True, cpu_offload=True),
-    )
-
-    # Filter out TE _extra_state keys
-    model_state_dict = {k: v for k, v in model_state_dict.items() if not k.endswith("_extra_state")}
-
-    is_main = dist_config.is_main_process() if dist_config is not None else (dist.get_rank() == 0)
-    if is_main:
-        os.makedirs(save_directory, exist_ok=True)
-        save_file(model_state_dict, os.path.join(save_directory, "model.safetensors"))
-        model.config.save_pretrained(save_directory)
-        logger.info(f"Saved final EP model to {save_directory}")
 
 
 # Required for torch.compile'd functions below (_pad_input, _unpad_input, _build_expert_sort_indices)

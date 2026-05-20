@@ -24,7 +24,6 @@ import re
 
 import torch
 import torch.distributed as dist
-from torch.distributed.tensor import DTensor
 from transformers import MixtralConfig
 
 
@@ -41,8 +40,6 @@ GLU_INTERLEAVE_SIZE = 32
 
 def _copy_param(target: torch.Tensor, source: torch.Tensor) -> None:
     """Copy ``source`` into ``target`` preserving the target's dtype/device."""
-    if isinstance(target, DTensor):
-        target = target.to_local()
     target.copy_(source.to(device=target.device, dtype=target.dtype))
 
 
@@ -57,9 +54,6 @@ def _copy_qkv_proj_to_fused(
     TE interleaves the heads as ``[Q_g_0, ..., Q_g_{h-1}, K_g, V_g]`` per
     KV group ``g``; HF stores Q/K/V as separate projections.
     """
-    if isinstance(fused_qkv, DTensor):
-        fused_qkv = fused_qkv.to_local()
-
     head_num = config.num_attention_heads
     num_query_groups = config.num_key_value_heads
     heads_per_group = head_num // num_query_groups
@@ -253,8 +247,6 @@ def replace_params_bf16(
         for hf_key in packed_gate_up_candidates:
             if hf_key in hf_state_dict and te_gate_up_key in te_state_dict:
                 te_gate_up = te_state_dict[te_gate_up_key]
-                if isinstance(te_gate_up, DTensor):
-                    te_gate_up = te_gate_up.to_local()
                 local_experts = te_gate_up.shape[0]
                 expert_start = ep_rank * local_experts if ep_size > 1 else 0
                 expert_end = expert_start + local_experts
@@ -266,8 +258,6 @@ def replace_params_bf16(
         for hf_key in packed_down_candidates:
             if hf_key in hf_state_dict and te_down_key in te_state_dict:
                 te_down = te_state_dict[te_down_key]
-                if isinstance(te_down, DTensor):
-                    te_down = te_down.to_local()
                 local_experts = te_down.shape[0]
                 expert_start = ep_rank * local_experts if ep_size > 1 else 0
                 expert_end = expert_start + local_experts
@@ -300,10 +290,6 @@ def replace_params_bf16(
         if te_gate_up_key in te_state_dict and te_down_key in te_state_dict:
             te_gate_up = te_state_dict[te_gate_up_key]
             te_down = te_state_dict[te_down_key]
-            if isinstance(te_gate_up, DTensor):
-                te_gate_up = te_gate_up.to_local()
-            if isinstance(te_down, DTensor):
-                te_down = te_down.to_local()
             num_local_experts = te_gate_up.shape[0]
             expert_start = ep_rank * num_local_experts if ep_size > 1 else 0
             for expert_idx in range(num_local_experts):
