@@ -46,8 +46,8 @@ namespace {
 
 using namespace cute;
 
+using cute::Shape;   // Avoid conflict with transformer_engine::Shape
 using cute::Tensor;  // Avoid conflict with transformer_engine::Tensor
-using cute::Shape;  // Avoid conflict with transformer_engine::Shape
 
 constexpr int kMaxTensorsPerKernel = 64;
 constexpr int kNVFP4BlockSize = 16;

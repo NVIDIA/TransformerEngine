@@ -105,8 +105,7 @@ inline size_t product(const std::vector<size_t> &shape, const size_t begin, cons
 }
 
 template <typename Container,
-          typename = std::enable_if_t<
-              std::is_integral<typename Container::value_type>::value>>
+          typename = std::enable_if_t<std::is_integral<typename Container::value_type>::value>>
 inline size_t product(const Container &shape) {
   size_t ret = 1;
   for (const auto &elem : shape) {
@@ -146,8 +145,7 @@ class Shape {
 
   // Construct from any container of integers
   template <typename Container,
-            typename = std::enable_if_t<
-                std::is_integral<typename Container::value_type>::value>>
+            typename = std::enable_if_t<std::is_integral<typename Container::value_type>::value>>
   Shape(const Container &shape) {
     NVTE_CHECK(shape.size() <= max_ndim, "Too many dimensions (requested ", shape.size(),
                ", max is ", max_ndim, ").");
@@ -181,9 +179,7 @@ class Shape {
                ", size is ", data_.ndim, ").");
     return data_.data[i];
   }
-  value_type &at(size_type i) {
-    return const_cast<value_type &>(std::as_const(*this).at(i));
-  }
+  value_type &at(size_type i) { return const_cast<value_type &>(std::as_const(*this).at(i)); }
 
   value_type &operator[](size_type i) noexcept { return data_.data[i]; }
   constexpr const value_type &operator[](size_type i) const noexcept { return data_.data[i]; }
@@ -201,8 +197,8 @@ class Shape {
   }
 
   void resize(size_type count) {
-    NVTE_CHECK(count <= max_ndim, "Too many dimensions (requested ", count,
-               ", max is ", max_ndim, ").");
+    NVTE_CHECK(count <= max_ndim, "Too many dimensions (requested ", count, ", max is ", max_ndim,
+               ").");
     data_.ndim = count;
   }
 
@@ -229,9 +225,7 @@ struct SimpleTensor {
   SimpleTensor() : SimpleTensor(nullptr, {0}, DType::kFloat32) {}
 
   SimpleTensor(const NVTEBasicTensor &tensor)  // NOLINT
-      : dptr(tensor.data_ptr),
-        shape(tensor.shape),
-        dtype(static_cast<DType>(tensor.dtype)) {}
+      : dptr(tensor.data_ptr), shape(tensor.shape), dtype(static_cast<DType>(tensor.dtype)) {}
 
   operator NVTEBasicTensor() const {
     return {dptr, static_cast<NVTEDType>(dtype), static_cast<NVTEShape>(shape)};

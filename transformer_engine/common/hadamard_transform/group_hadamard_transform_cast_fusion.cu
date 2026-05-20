@@ -37,8 +37,8 @@ namespace {
 
 using namespace cute;
 
+using cute::Shape;   // Avoid conflict with transformer_engine::Shape
 using cute::Tensor;  // Avoid conflict with transformer_engine::Tensor
-using cute::Shape;  // Avoid conflict with transformer_engine::Shape
 
 using Stride2D = cute::Stride<int, cute::Int<1>>;
 
