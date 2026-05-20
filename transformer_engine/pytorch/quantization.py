@@ -419,7 +419,7 @@ class FP8GlobalStateManager:
         cls.quantization_state.skip_fp8_weight_update_tensor.fill_(skip)
 
     @classmethod
-    def get_skip_fp8_weight_update_tensor(cls) -> Union[torch.Tensor, None]:
+    def get_skip_fp8_weight_update_tensor(cls) -> Optional[torch.Tensor]:
         """Get the skip fp8 weight update tensor"""
         return cls.quantization_state.skip_fp8_weight_update_tensor
 
