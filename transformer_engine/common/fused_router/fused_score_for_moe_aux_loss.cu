@@ -19,7 +19,8 @@ namespace fused_router {
 template <typename DataType, TopkFuncType TopkFunc = TopkFuncType::Naive>
 __global__ void fused_score_for_moe_aux_loss_forward_kernel(
     const DataType *logits, int num_tokens, int num_experts, int topk, int score_function,
-    float *scores, uint8_t *routing_map, int routing_map_format, CompType *intermediate_output) {
+    float *scores, uint8_t *routing_map, NVTERoutingMapFormat routing_map_format,
+    CompType *intermediate_output) {
   /***
      * Section: Global Variables/Addresses init
      * - Each warp is responsible for one token, and has own shared memory buffer.
@@ -174,7 +175,7 @@ __global__ void fused_score_for_moe_aux_loss_forward_kernel(
 template <typename DataType>
 void fused_score_for_moe_aux_loss_forward_kernel_launcher(
     const DataType *logits, int num_tokens, int num_experts, int topk, int score_function,
-    float *scores, uint8_t *routing_map, int routing_map_format, CompType *intermediate_output,
+    float *scores, uint8_t *routing_map, NVTERoutingMapFormat routing_map_format, CompType *intermediate_output,
     cudaStream_t stream) {
   // Meta data for the kernel
   size_t num_token_per_block = kThreadsPerBlock / kThreadsPerWarp;
@@ -212,7 +213,7 @@ void fused_score_for_moe_aux_loss_forward_kernel_launcher(
 
 void fused_score_for_moe_aux_loss_forward(const Tensor &logits, int num_tokens, int num_experts,
                                           int topk, int score_function, Tensor &scores,
-                                          Tensor &routing_map, int routing_map_format,
+                                          Tensor &routing_map, NVTERoutingMapFormat routing_map_format,
                                           Tensor &intermediate_output, cudaStream_t stream) {
   TE_ROUTER_PROBS_TYPE_SWITCH_ALL(
       logits.data.dtype, DataType,
@@ -388,7 +389,7 @@ void fused_score_for_moe_aux_loss_backward(const Tensor &intermediate_output,
 void nvte_fused_score_for_moe_aux_loss_forward(const NVTETensor logits, int num_tokens,
                                                int num_experts, int topk, int score_function,
                                                NVTETensor scores, NVTETensor routing_map,
-                                               int routing_map_format,
+                                               NVTERoutingMapFormat routing_map_format,
                                                const NVTETensor intermediate_output,
                                                cudaStream_t stream) {
   NVTE_API_CALL(nvte_fused_score_for_moe_aux_loss_forward);

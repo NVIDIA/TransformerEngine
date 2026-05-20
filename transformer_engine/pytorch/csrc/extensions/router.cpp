@@ -12,10 +12,24 @@ namespace transformer_engine::pytorch {
 static std::map<std::string, int> score_function_map = {
     {"sigmoid", 0}, {"softmax", 1}, {"sqrtsoftplus", 2}};
 
+// Allocate a routing_map output tensor with the layout that matches the
+// requested NVTERoutingMapFormat.
+//   BYTEMAP   -> bool[num_tokens, num_experts]
+//   BITMAP_U8 -> uint8[num_tokens, ceil(num_experts/8)], LSB-first along the
+//                expert axis.
+static at::Tensor allocate_routing_map(int num_tokens, int num_experts,
+                                       NVTERoutingMapFormat format) {
+  if (format == NVTE_ROUTING_MAP_FORMAT_BITMAP_U8) {
+    return at::empty({num_tokens, (num_experts + 7) / 8},
+                     at::dtype(at::kByte).device(at::kCUDA));
+  }
+  return at::empty({num_tokens, num_experts}, at::dtype(at::kBool).device(at::kCUDA));
+}
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_topk_with_score_function_fwd(
     at::Tensor logits, int topk, bool use_pre_softmax, std::optional<int> num_groups,
     std::optional<int> group_topk, std::optional<float> scaling_factor, std::string score_function,
-    std::optional<at::Tensor> expert_bias) {
+    std::optional<at::Tensor> expert_bias, NVTERoutingMapFormat routing_map_format) {
   int num_tokens = logits.size(0);
   int num_experts = logits.size(1);
   // Check if the input is valid
@@ -44,8 +58,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_topk_with_score_function_fw
   // Construct the output tensor
   at::Tensor probs =
       at::empty({num_tokens, num_experts}, at::dtype(logits.scalar_type()).device(at::kCUDA));
-  at::Tensor routing_map =
-      at::empty({num_tokens, num_experts}, at::dtype(at::kBool).device(at::kCUDA));
+  at::Tensor routing_map = allocate_routing_map(num_tokens, num_experts, routing_map_format);
   // Intermediate output is used to store the output of the softmax/sigmoid function
   at::Tensor intermediate_output =
       at::empty({num_tokens, num_experts}, at::dtype(at::kFloat).device(at::kCUDA));
@@ -62,9 +75,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_topk_with_score_function_fw
   nvte_fused_topk_with_score_function_forward(
       logits_cu.data(), num_tokens, num_experts, topk, use_pre_softmax, num_groups_value,
       group_topk_value, scaling_factor_value, score_function_map[score_function],
-      expert_bias_cu.data(), probs_cu.data(), routing_map_cu.data(),
-      NVTE_ROUTING_MAP_FORMAT_BYTEMAP, intermediate_output_cu.data(),
-      at::cuda::getCurrentCUDAStream());
+      expert_bias_cu.data(), probs_cu.data(), routing_map_cu.data(), routing_map_format,
+      intermediate_output_cu.data(), at::cuda::getCurrentCUDAStream());
 
   return std::make_tuple(probs, routing_map, intermediate_output);
 }
@@ -73,7 +85,8 @@ void fused_topk_with_score_function_bwd(int num_tokens, int num_experts, at::Ten
                                         at::Tensor intermediate_output, at::Tensor grad_probs,
                                         at::Tensor grad_logits, int topk, bool use_pre_softmax,
                                         std::optional<float> scaling_factor,
-                                        std::string score_function) {
+                                        std::string score_function,
+                                        NVTERoutingMapFormat routing_map_format) {
   // Get the value of the parameters
   auto scaling_factor_value = scaling_factor.has_value() ? scaling_factor.value() : 1.0f;
   auto score_function_value = score_function_map[score_function];
@@ -84,13 +97,14 @@ void fused_topk_with_score_function_bwd(int num_tokens, int num_experts, at::Ten
   auto grad_logits_cu = makeTransformerEngineTensor(grad_logits);
 
   nvte_fused_topk_with_score_function_backward(
-      routing_map_cu.data(), NVTE_ROUTING_MAP_FORMAT_BYTEMAP, intermediate_output_cu.data(),
+      routing_map_cu.data(), routing_map_format, intermediate_output_cu.data(),
       grad_probs_cu.data(), num_tokens, num_experts, topk, use_pre_softmax, scaling_factor_value,
       score_function_value, grad_logits_cu.data(), at::cuda::getCurrentCUDAStream());
 }
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_score_for_moe_aux_loss_fwd(
-    at::Tensor logits, int topk, std::string score_function) {
+    at::Tensor logits, int topk, std::string score_function,
+    NVTERoutingMapFormat routing_map_format) {
   int num_tokens = logits.size(0);
   int num_experts = logits.size(1);
   // Check if the input is valid
@@ -105,8 +119,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_score_for_moe_aux_loss_fwd(
 
   // Construct the output tensor
   at::Tensor scores = at::empty({num_tokens, num_experts}, at::dtype(at::kFloat).device(at::kCUDA));
-  at::Tensor routing_map =
-      at::empty({num_tokens, num_experts}, at::dtype(at::kBool).device(at::kCUDA));
+  at::Tensor routing_map = allocate_routing_map(num_tokens, num_experts, routing_map_format);
   at::Tensor intermediate_output =
       at::empty({num_tokens, num_experts}, at::dtype(at::kFloat).device(at::kCUDA));
 
@@ -117,7 +130,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_score_for_moe_aux_loss_fwd(
 
   nvte_fused_score_for_moe_aux_loss_forward(
       logits_cu.data(), num_tokens, num_experts, topk, score_function_value, scores_cu.data(),
-      routing_map_cu.data(), NVTE_ROUTING_MAP_FORMAT_BYTEMAP, intermediate_output_cu.data(),
+      routing_map_cu.data(), routing_map_format, intermediate_output_cu.data(),
       at::cuda::getCurrentCUDAStream());
 
   return std::make_tuple(scores, routing_map, intermediate_output);

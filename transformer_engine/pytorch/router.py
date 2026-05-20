@@ -13,10 +13,59 @@ Precision Notes:
 - Only cast to low-precision when necessary and the casting only happens in writing to
   global memory. For example, the gradient is required to have the same dtype as the input.
 """
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 import transformer_engine_torch as tex
+
+
+# Re-export the C++ enum NVTERoutingMapFormat under a friendlier Python name.
+# Members:
+#   RoutingMapFormat.BYTEMAP   — bool[num_tokens, num_experts]
+#   RoutingMapFormat.BITMAP_U8 — uint8[num_tokens, ceil(num_experts/8)],
+#                                LSB-first / little-endian packing along the
+#                                expert axis.
+RoutingMapFormat = tex.NVTERoutingMapFormat
+
+
+_ROUTING_MAP_FORMAT_FROM_STRING = {
+    "bytemap": RoutingMapFormat.BYTEMAP,
+    "bitmap_u8": RoutingMapFormat.BITMAP_U8,
+}
+
+
+def _validate_routing_map_format(
+    routing_map_format: Union[str, "RoutingMapFormat", int]
+) -> "RoutingMapFormat":
+    """Coerce user-supplied routing_map_format into the NVTERoutingMapFormat enum.
+
+    Accepts an enum value, an int with one of the enum's values, or one of the
+    case-insensitive strings ``"bytemap"`` / ``"bitmap_u8"``. String parsing is
+    only supported at this outer API boundary; the rest of the stack uses the
+    enum directly.
+    """
+    if isinstance(routing_map_format, RoutingMapFormat):
+        return routing_map_format
+    if isinstance(routing_map_format, str):
+        try:
+            return _ROUTING_MAP_FORMAT_FROM_STRING[routing_map_format.lower()]
+        except KeyError:
+            raise ValueError(
+                "routing_map_format string must be 'bytemap' or 'bitmap_u8'; "
+                f"got {routing_map_format!r}"
+            ) from None
+    if isinstance(routing_map_format, int):
+        try:
+            return RoutingMapFormat(routing_map_format)
+        except ValueError:
+            raise ValueError(
+                "routing_map_format int must match a RoutingMapFormat value; "
+                f"got {routing_map_format!r}"
+            ) from None
+    raise TypeError(
+        "routing_map_format must be a RoutingMapFormat enum, an int matching one "
+        f"of its values, or 'bytemap' / 'bitmap_u8'; got {routing_map_format!r}"
+    )
 
 
 class FusedTopkScoreFunction(torch.autograd.Function):
@@ -36,6 +85,7 @@ class FusedTopkScoreFunction(torch.autograd.Function):
         scaling_factor: Optional[float],
         score_function: str,
         expert_bias: Optional[torch.Tensor],
+        routing_map_format: "RoutingMapFormat",
     ):
         # pylint: disable=missing-function-docstring
         # Save the shape of the logits
@@ -53,6 +103,7 @@ class FusedTopkScoreFunction(torch.autograd.Function):
             scaling_factor,
             score_function,
             expert_bias,
+            routing_map_format,
         )
         # Restore the shape
         probs = probs.view(tensor_shape)
@@ -63,6 +114,7 @@ class FusedTopkScoreFunction(torch.autograd.Function):
         ctx.topk = topk
         ctx.scaling_factor = scaling_factor
         ctx.score_function = score_function
+        ctx.routing_map_format = routing_map_format
         ctx.logits_dtype = logits.dtype
         return probs, routing_map
 
@@ -88,10 +140,11 @@ class FusedTopkScoreFunction(torch.autograd.Function):
             ctx.use_pre_softmax,
             ctx.scaling_factor,
             ctx.score_function,
+            ctx.routing_map_format,
         )
         # Restore the shape
         grad_logits = grad_logits.view(tensor_shape)
-        return grad_logits, None, None, None, None, None, None, None
+        return grad_logits, None, None, None, None, None, None, None, None
 
 
 def fused_topk_with_score_function(
@@ -103,6 +156,7 @@ def fused_topk_with_score_function(
     scaling_factor: Optional[float],
     score_function: str,
     expert_bias: Optional[torch.Tensor],
+    routing_map_format: Union[str, RoutingMapFormat, int] = RoutingMapFormat.BYTEMAP,
 ):
     """
     Fused topk with score function router.
@@ -121,14 +175,24 @@ def fused_topk_with_score_function(
         currently support "softmax", "sigmoid" and "sqrtsoftplus".
     expert_bias : torch.Tensor, optional
         could be used with the sigmoid/sqrtsoftplus score functions.
+    routing_map_format : Union[str, RoutingMapFormat, int], optional
+        Output layout for routing_map. ``"bytemap"`` / ``RoutingMapFormat.BYTEMAP``
+        (default) returns a bool[T, E] tensor; ``"bitmap_u8"`` /
+        ``RoutingMapFormat.BITMAP_U8`` returns a uint8[T, ceil(E/8)] tensor with
+        bit ``(e % 8)`` of byte ``(e / 8)`` set when token ``t`` routes to expert
+        ``e`` (LSB-first / little-endian packing along the expert axis).
 
     Returns
     -------
     probs : torch.Tensor in the same dtype as the "logits".
-    routing_map : torch.Tensor in bool.
+    routing_map : torch.Tensor
+        Shape/dtype depend on routing_map_format:
+        - BYTEMAP: bool[num_tokens, num_experts]
+        - BITMAP_U8: uint8[num_tokens, ceil(num_experts/8)] LSB-first bit-packed.
     """
     if logits.dtype == torch.float64:
         raise ValueError("Current TE does not support float64 router type.")
+    routing_map_format = _validate_routing_map_format(routing_map_format)
     return FusedTopkScoreFunction.apply(
         logits,
         topk,
@@ -138,6 +202,7 @@ def fused_topk_with_score_function(
         scaling_factor,
         score_function,
         expert_bias,
+        routing_map_format,
     )
 
 
@@ -152,6 +217,7 @@ class FusedComputeScoresForMoEAuxLoss(torch.autograd.Function):
         logits: torch.Tensor,
         topk: int,
         score_function: str,
+        routing_map_format: "RoutingMapFormat",
     ):
         # pylint: disable=missing-function-docstring
         # Save the shape of the logits
@@ -164,6 +230,7 @@ class FusedComputeScoresForMoEAuxLoss(torch.autograd.Function):
             logits=logits,
             topk=topk,
             score_function=score_function,
+            routing_map_format=routing_map_format,
         )
         ctx.save_for_backward(intermediate_output)
         ctx.topk = topk
@@ -195,13 +262,14 @@ class FusedComputeScoresForMoEAuxLoss(torch.autograd.Function):
         )
         # Restore the shape
         grad_logits = grad_logits.view(tensor_shape)
-        return grad_logits, None, None
+        return grad_logits, None, None, None
 
 
 def fused_compute_score_for_moe_aux_loss(
     logits: torch.Tensor,
     topk: int,
     score_function: str,
+    routing_map_format: Union[str, RoutingMapFormat, int] = RoutingMapFormat.BYTEMAP,
 ):
     """
     Fused compute scores for MoE aux loss, subset of the fused_topk_with_score_function.
@@ -211,13 +279,18 @@ def fused_compute_score_for_moe_aux_loss(
     topk : int
     score_function : str
         currently support "softmax", "sigmoid" and "sqrtsoftplus".
+    routing_map_format : Union[str, RoutingMapFormat, int], optional
+        Output layout for routing_map; see :func:`fused_topk_with_score_function`.
 
     Returns
     -------
-    routing_map : torch.Tensor in bool
+    routing_map : torch.Tensor
+        Shape/dtype depend on routing_map_format (bool[T, E] for BYTEMAP,
+        uint8[T, ceil(E/8)] for BITMAP_U8).
     scores : torch.Tensor in fp32
     """
-    return FusedComputeScoresForMoEAuxLoss.apply(logits, topk, score_function)
+    routing_map_format = _validate_routing_map_format(routing_map_format)
+    return FusedComputeScoresForMoEAuxLoss.apply(logits, topk, score_function, routing_map_format)
 
 
 class FusedAuxLoss(torch.autograd.Function):

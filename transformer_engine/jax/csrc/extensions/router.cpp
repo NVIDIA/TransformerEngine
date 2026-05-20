@@ -55,12 +55,12 @@ Error_Type FusedTopkWithScoreFunctionForwardFFI(
       ". Check FusedTopkWithScoreFunctionFwdPrimitive.abstract in cpp_extensions/router.py.");
   auto intermediate_tensor = TensorWrapper(intermediate, flat_shape, DType::kFloat32);
 
-  int routing_map_format_int = static_cast<int>(routing_map_format);
+  auto routing_map_format_nvte = static_cast<NVTERoutingMapFormat>(routing_map_format);
   if (compute_aux_scores) {
     nvte_fused_score_for_moe_aux_loss_forward(
         logits_tensor.data(), num_tokens, num_experts, static_cast<int>(topk),
         static_cast<int>(score_function), probs_tensor.data(), routing_map_tensor.data(),
-        routing_map_format_int, intermediate_tensor.data(), stream);
+        routing_map_format_nvte, intermediate_tensor.data(), stream);
   } else {
     auto bias_dims = expert_bias_buf.dimensions();
     auto expert_bias_tensor =
@@ -74,7 +74,7 @@ Error_Type FusedTopkWithScoreFunctionForwardFFI(
         static_cast<int>(use_pre_softmax), static_cast<int>(num_groups),
         static_cast<int>(group_topk), static_cast<float>(scaling_factor),
         static_cast<int>(score_function), expert_bias_tensor.data(), probs_tensor.data(),
-        routing_map_tensor.data(), routing_map_format_int, intermediate_tensor.data(), stream);
+        routing_map_tensor.data(), routing_map_format_nvte, intermediate_tensor.data(), stream);
   }
 
   return ffi_with_cuda_error_check();
@@ -144,10 +144,11 @@ Error_Type FusedTopkWithScoreFunctionBackwardFFI(
         TensorWrapper(routing_map_buf.untyped_data(), routing_map_shape, DType::kByte);
 
     nvte_fused_topk_with_score_function_backward(
-        routing_map_tensor.data(), static_cast<int>(routing_map_format), intermediate_tensor.data(),
-        grad_probs_tensor.data(), num_tokens, num_experts, static_cast<int>(topk),
-        static_cast<int>(use_pre_softmax), static_cast<float>(scaling_factor),
-        static_cast<int>(score_function), grad_logits_tensor.data(), stream);
+        routing_map_tensor.data(), static_cast<NVTERoutingMapFormat>(routing_map_format),
+        intermediate_tensor.data(), grad_probs_tensor.data(), num_tokens, num_experts,
+        static_cast<int>(topk), static_cast<int>(use_pre_softmax),
+        static_cast<float>(scaling_factor), static_cast<int>(score_function),
+        grad_logits_tensor.data(), stream);
   }
 
   return ffi_with_cuda_error_check();

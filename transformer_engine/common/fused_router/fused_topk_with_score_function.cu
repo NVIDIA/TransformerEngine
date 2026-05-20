@@ -19,7 +19,7 @@ template <typename DataType, typename BiasType, TopkFuncType TopkFunc = TopkFunc
 __global__ void fused_topk_with_score_function_forward_kernel(
     const DataType *logits, int num_tokens, int num_experts, int topk, bool use_pre_softmax,
     int num_groups, int group_topk, float scaling_factor, int score_function,
-    const BiasType *expert_bias, DataType *probs, uint8_t *routing_map, int routing_map_format,
+    const BiasType *expert_bias, DataType *probs, uint8_t *routing_map, NVTERoutingMapFormat routing_map_format,
     CompType *intermediate_output) {
   /***
      * Section: Global Variables/Addresses init
@@ -282,7 +282,7 @@ template <typename DataType, typename BiasType>
 void fused_topk_with_score_function_forward_kernel_launcher(
     const DataType *logits, int num_tokens, int num_experts, int topk, bool use_pre_softmax,
     int num_groups, int group_topk, float scaling_factor, int score_function,
-    const BiasType *expert_bias, DataType *probs, uint8_t *routing_map, int routing_map_format,
+    const BiasType *expert_bias, DataType *probs, uint8_t *routing_map, NVTERoutingMapFormat routing_map_format,
     CompType *intermediate_output, cudaStream_t stream) {
   size_t num_token_per_block = kThreadsPerBlock / kThreadsPerWarp;
   size_t grid_size = (num_tokens + num_token_per_block - 1) / num_token_per_block;
@@ -328,7 +328,7 @@ void fused_topk_with_score_function_forward(const Tensor logits, int num_tokens,
                                             int group_topk, float scaling_factor,
                                             int score_function, const Tensor expert_bias,
                                             Tensor probs, Tensor routing_map,
-                                            int routing_map_format, Tensor intermediate_output,
+                                            NVTERoutingMapFormat routing_map_format, Tensor intermediate_output,
                                             cudaStream_t stream) {
   TE_ROUTER_PROBS_TYPE_SWITCH_ALL(
       logits.data.dtype, DataType,
@@ -346,7 +346,7 @@ void fused_topk_with_score_function_forward(const Tensor logits, int num_tokens,
 template <typename DataType>
 __global__ void fused_topk_with_score_function_backward_kernel(
     // Inputs tensor
-    const uint8_t *routing_map, int routing_map_format, const CompType *intermediate_output,
+    const uint8_t *routing_map, NVTERoutingMapFormat routing_map_format, const CompType *intermediate_output,
     const DataType *grad_probs,
     // Other parameters
     int num_tokens, int num_experts, int topk, bool use_pre_softmax, float scaling_factor,
@@ -528,7 +528,7 @@ __global__ void fused_topk_with_score_function_backward_kernel(
 
 template <typename DataType>
 void fused_topk_with_score_function_backward_kernel_launcher(
-    const uint8_t *routing_map, int routing_map_format, const CompType *intermediate_output,
+    const uint8_t *routing_map, NVTERoutingMapFormat routing_map_format, const CompType *intermediate_output,
     const DataType *grad_probs, int num_tokens, int num_experts, int topk, bool use_pre_softmax,
     float scaling_factor, int score_function, DataType *grad_logits, cudaStream_t stream) {
   // Meta data for the kernel
@@ -550,7 +550,7 @@ void fused_topk_with_score_function_backward_kernel_launcher(
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
-void fused_topk_with_score_function_backward(const Tensor &routing_map, int routing_map_format,
+void fused_topk_with_score_function_backward(const Tensor &routing_map, NVTERoutingMapFormat routing_map_format,
                                              const Tensor &intermediate_output,
                                              const Tensor &grad_probs, int num_tokens,
                                              int num_experts, int topk, bool use_pre_softmax,
@@ -572,8 +572,8 @@ void fused_topk_with_score_function_backward(const Tensor &routing_map, int rout
 void nvte_fused_topk_with_score_function_forward(
     const NVTETensor logits, int num_tokens, int num_experts, int topk, int use_pre_softmax,
     int num_groups, int group_topk, float scaling_factor, int score_function,
-    const NVTETensor expert_bias, NVTETensor probs, NVTETensor routing_map, int routing_map_format,
-    NVTETensor intermediate_output, cudaStream_t stream) {
+    const NVTETensor expert_bias, NVTETensor probs, NVTETensor routing_map,
+    NVTERoutingMapFormat routing_map_format, NVTETensor intermediate_output, cudaStream_t stream) {
   NVTE_API_CALL(nvte_fused_topk_with_score_function_forward);
   using namespace transformer_engine;
   fused_router::fused_topk_with_score_function_forward(
@@ -585,9 +585,10 @@ void nvte_fused_topk_with_score_function_forward(
 }
 
 void nvte_fused_topk_with_score_function_backward(
-    const NVTETensor routing_map, int routing_map_format, const NVTETensor intermediate_output,
-    const NVTETensor grad_probs, int num_tokens, int num_experts, int topk, int use_pre_softmax,
-    float scaling_factor, int score_function, NVTETensor grad_logits, cudaStream_t stream) {
+    const NVTETensor routing_map, NVTERoutingMapFormat routing_map_format,
+    const NVTETensor intermediate_output, const NVTETensor grad_probs, int num_tokens,
+    int num_experts, int topk, int use_pre_softmax, float scaling_factor, int score_function,
+    NVTETensor grad_logits, cudaStream_t stream) {
   NVTE_API_CALL(nvte_fused_topk_with_score_function_backward);
   using namespace transformer_engine;
   fused_router::fused_topk_with_score_function_backward(

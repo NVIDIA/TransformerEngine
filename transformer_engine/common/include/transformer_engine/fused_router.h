@@ -52,8 +52,8 @@ typedef enum {
 void nvte_fused_topk_with_score_function_forward(
     const NVTETensor logits, int num_tokens, int num_experts, int topk, int use_pre_softmax,
     int num_groups, int group_topk, float scaling_factor, int score_function,
-    const NVTETensor expert_bias, NVTETensor probs, NVTETensor routing_map, int routing_map_format,
-    NVTETensor intermediate_output, cudaStream_t stream);
+    const NVTETensor expert_bias, NVTETensor probs, NVTETensor routing_map,
+    NVTERoutingMapFormat routing_map_format, NVTETensor intermediate_output, cudaStream_t stream);
 
 /*! \brief Backward pass for fused topk + softmax/sigmoid.
  *
@@ -71,9 +71,10 @@ void nvte_fused_topk_with_score_function_forward(
  *  \param[in]     stream          CUDA stream used for the operation.
  */
 void nvte_fused_topk_with_score_function_backward(
-    const NVTETensor routing_map, int routing_map_format, const NVTETensor intermediate_output,
-    const NVTETensor grad_probs, int num_tokens, int num_experts, int topk, int use_pre_softmax,
-    float scaling_factor, int score_function, NVTETensor grad_logits, cudaStream_t stream);
+    const NVTETensor routing_map, NVTERoutingMapFormat routing_map_format,
+    const NVTETensor intermediate_output, const NVTETensor grad_probs, int num_tokens,
+    int num_experts, int topk, int use_pre_softmax, float scaling_factor, int score_function,
+    NVTETensor grad_logits, cudaStream_t stream);
 
 /*! \brief Forward pass for computing scores/routing map for auxiliary loss.
  *
@@ -93,7 +94,7 @@ void nvte_fused_topk_with_score_function_backward(
 void nvte_fused_score_for_moe_aux_loss_forward(const NVTETensor logits, int num_tokens,
                                                int num_experts, int topk, int score_function,
                                                NVTETensor scores, NVTETensor routing_map,
-                                               int routing_map_format,
+                                               NVTERoutingMapFormat routing_map_format,
                                                const NVTETensor intermediate_output,
                                                cudaStream_t stream);
 
