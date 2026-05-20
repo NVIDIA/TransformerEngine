@@ -281,12 +281,21 @@ def resolve_gemm_inputs_after_sampling(
         return lhs, rhs
 
     iteration = TEDebugState.get_iteration()
-    enabled_ret = debug_api.transformer_engine.fp8_gemm_enabled(
-        layer_name=layer_name,
-        gemm=gemm_name,
-        iteration=iteration,
-        final_decision=True,
-    )
+    try:
+        enabled_ret = debug_api.transformer_engine.fp8_gemm_enabled(
+            layer_name=layer_name,
+            gemm=gemm_name,
+            iteration=iteration,
+            final_decision=True,
+        )
+    except TypeError as err:
+        if "final_decision" not in str(err):
+            raise
+        enabled_ret = debug_api.transformer_engine.fp8_gemm_enabled(
+            layer_name=layer_name,
+            gemm=gemm_name,
+            iteration=iteration,
+        )
     quantized_enabled = enabled_ret[0] if isinstance(enabled_ret, tuple) else enabled_ret
     requested_precision = (
         _precision_name_from_quantizer(lhs_quantizer) if quantized_enabled else "bf16"
