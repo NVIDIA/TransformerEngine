@@ -16,6 +16,8 @@
 #include <utility>
 #include <vector>
 
+#include <nccl.h>
+
 #include "common.h"
 
 class CommOverlapHelper;
@@ -685,7 +687,6 @@ class CommOverlapHelper : torch::CustomClassHolder {
 
 class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOverlapBase {
  private:
-  void *_warmup_workspace{nullptr};
   // Keeps the cuBLASMp NCCL communicator alive for the lifetime of this
   // instance, independent of the CommOverlapHelper that created it.
   CommOverlapHelper::NcclCommSharedPtr _nccl_comm;
@@ -707,11 +708,7 @@ class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOve
               const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
               int num_comm_sm = 16, bool atomic_gemm = false);
 
-  ~CommOverlap() {
-    if (_warmup_workspace != nullptr) {
-      cudaFree(_warmup_workspace);
-    }
-  }
+  ~CommOverlap() {}
 
   using transformer_engine::CommOverlapCore::copy_into_buffer;
   void copy_into_buffer(const at::Tensor &input, bool local_chunk = false);
@@ -725,7 +722,6 @@ class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOve
 
 class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::CommOverlapP2PBase {
  private:
-  void *_warmup_workspace{nullptr};
   // Keeps the cuBLASMp NCCL communicator alive for the lifetime of this
   // instance, independent of the CommOverlapHelper that created it.
   CommOverlapHelper::NcclCommSharedPtr _nccl_comm;
@@ -745,11 +741,7 @@ class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::Comm
                  const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
                  int num_comm_sm = 1, bool atomic_gemm = false);
 
-  ~CommOverlapP2P() {
-    if (_warmup_workspace != nullptr) {
-      cudaFree(_warmup_workspace);
-    }
-  }
+  ~CommOverlapP2P() {}
 
   using transformer_engine::CommOverlapP2PBase::copy_into_buffer;
   void copy_into_buffer(const at::Tensor &input, bool local_chunk = false);

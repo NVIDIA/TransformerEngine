@@ -1339,20 +1339,19 @@ class LayerNormLinear(TransformerEngineBaseModule):
         )
         # Bulk overlaps require the Userbuffers backend; the cuBLASMp backend
         # falls back to async NCCL ops via torch.distributed.
-        bulk_available = not using_cublasmp_backend()
         self.ub_bulk_wgrad = (
             ub_bulk_wgrad
             and self.sequence_parallel
             and self.parallel_mode == "column"
             and not self.ub_overlap_rs_dgrad
-            and bulk_available
+            and using_cublasmp_backend()
         )
         self.ub_bulk_dgrad = (
             ub_bulk_dgrad
             and self.sequence_parallel
             and self.parallel_mode == "column"
             and not self.ub_overlap_rs_dgrad
-            and bulk_available
+            and using_cublasmp_backend()
         )
 
         # Row-parallel overlaps

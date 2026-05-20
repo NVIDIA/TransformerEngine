@@ -306,7 +306,7 @@ def collective_gemm_bootstrap(
         ``COLLECTIVES`` so that the NCCL calls inside cuBLASMp end up in the
         same captured buffer as the CollectiveGemm custom call. Otherwise the
         capture aborts with ``CUDA_ERROR_STREAM_CAPTURE_INVALIDATED``. Set the
-        flag before ``jax.distributed.initialize()``::
+        flag before ``jax.distributed.initialize()``:
 
             import os
             os.environ["XLA_FLAGS"] = (

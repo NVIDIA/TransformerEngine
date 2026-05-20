@@ -121,6 +121,8 @@ CommOverlapHelper::CommOverlapHelper(c10d::ProcessGroup *world_group,
     ncclComm_t nccl_intra;
     NVTE_CHECK_NCCL(ncclCommInitRank(&nccl_intra, numlocal, nccl_intra_id, mylocal));
     nccl_comms.insert({"intra", NcclCommSharedPtr(nccl_intra, ncclCommDestroy)});
+  } else {
+    nccl_comms.insert({"intra", nccl_comms["world"]});
   }
 #endif
 #else
@@ -236,7 +238,7 @@ namespace {
 // descriptor. BF16 is used unconditionally; its workspace is at least as
 // large as the FP8 workspace for the same m/n/k.
 void cublasmp_capture_warmup(te::CommOverlapCore *core, int tp_size, te::CommOverlapType comm_type,
-                             const std::vector<size_t> &buffer_shape, void *warmup_workspace) {
+                             const std::vector<size_t> &buffer_shape) {
   NVTE_CHECK(buffer_shape.size() == 2, "cuBLASMp warmup expects a 2-D buffer shape, got rank ",
              buffer_shape.size());
   // Treat the matmul as square in the weight dim so workspace is sized
@@ -266,13 +268,12 @@ void cublasmp_capture_warmup(te::CommOverlapCore *core, int tp_size, te::CommOve
   const size_t b_bytes = b_shape[0] * b_shape[1] * bf16_bytes;
   const size_t d_bytes = d_shape[0] * d_shape[1] * bf16_bytes;
 
-  NVTE_CHECK_CUDA(cudaMalloc(&warmup_workspace, a_bytes + b_bytes + d_bytes));
-  void *a_ptr = warmup_workspace;
-  void *b_ptr = (reinterpret_cast<char *>(warmup_workspace) + a_bytes);
-  void *d_ptr = (reinterpret_cast<char *>(warmup_workspace) + a_bytes + b_bytes);
+  void *a_ptr = nullptr; void *b_ptr = nullptr; void *d_ptr = nullptr;
+  NVTE_CHECK_CUDA(cudaMalloc(&a_ptr, a_bytes));
+  NVTE_CHECK_CUDA(cudaMalloc(&b_ptr, b_bytes));
+  NVTE_CHECK_CUDA(cudaMalloc(&d_ptr, d_bytes));
   NVTE_CHECK_CUDA(cudaMemset(a_ptr, 0, a_bytes));
   NVTE_CHECK_CUDA(cudaMemset(b_ptr, 0, b_bytes));
-  NVTE_CHECK_CUDA(cudaMemset(d_ptr, 0, d_bytes));
 
   te::TensorWrapper A_tw, B_tw, D_tw, bias_tw, pre_gelu_tw;
   A_tw.set_rowwise_data(a_ptr, te::DType::kBFloat16, a_shape);
@@ -288,7 +289,9 @@ void cublasmp_capture_warmup(te::CommOverlapCore *core, int tp_size, te::CommOve
                            pre_gelu_tw, /*grad=*/false, /*accumulate=*/false, stream);
   }
   NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
-  cudaFree(warmup_workspace);
+  cudaFree(a_ptr);
+  cudaFree(b_ptr);
+  cudaFree(d_ptr);
 }
 
 }  // namespace
@@ -302,7 +305,7 @@ CommOverlap::CommOverlap(CommOverlapHelper *helper, int tp_rank, int tp_size,
   // buffer_dtype is unused on this path (the warmup runs in BF16); kept in
   // the signature for API symmetry with the non-cuBLASMp ctor.
   (void)buffer_dtype;
-  cublasmp_capture_warmup(this, tp_size, comm_type, buffer_shape, _warmup_workspace);
+  cublasmp_capture_warmup(this, tp_size, comm_type, buffer_shape);
 }
 
 /*
@@ -413,7 +416,7 @@ CommOverlapP2P::CommOverlapP2P(CommOverlapHelper *helper, int tp_rank, int tp_si
       _nccl_comm(helper->get_nccl_comm("intra")) {
   // See CommOverlap constructor for the buffer_dtype rationale.
   (void)buffer_dtype;
-  cublasmp_capture_warmup(this, tp_size, comm_type, buffer_shape, _warmup_workspace);
+  cublasmp_capture_warmup(this, tp_size, comm_type, buffer_shape);
 }
 
 /*

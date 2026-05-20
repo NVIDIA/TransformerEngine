@@ -244,8 +244,12 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(CollectiveGemmInitHandler, CollectiveGemmInitFFI,
                                   .Attr<bool>("fuse_gelu")
                                   .Attr<bool>("grad")
                                   .Attr<bool>("use_split_accumulator")
-                                  .Attr<JAXX_Collective_Op>("collective_op"),
-                              FFI_CudaGraph_Traits);
+                                  .Attr<JAXX_Collective_Op>("collective_op")
+#ifndef NVTE_WITH_CUBLASMP
+                              // enable CUDA graphs only when cuBLASMp is NOT enabled
+                              , FFI_CudaGraph_Traits 
+#endif
+                              );
 
 Error_Type GemmV2FFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_inv,
                      Buffer_Type rhs, Buffer_Type rhs_scale_inv, Buffer_Type bias,
