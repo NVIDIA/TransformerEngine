@@ -517,12 +517,12 @@ class TestFP8Recipe:
 @pytest.mark.skipif(not fp4_available, reason=reason_for_no_fp4)
 @pytest.mark.parametrize(
     "nvfp4_4over6",
-    [None, "weights", "activations", "all"],
-    ids=["default", "weights", "activations", "all"],
+    ["none", "weights", "activations", "all"],
+    ids=["disabled", "weights", "activations", "all"],
 )
 @pytest.mark.parametrize(
     "nvfp4_4over6_e4m3_use_256",
-    [None, "weights", "activations", "all"],
+    ["none", "weights", "activations", "all"],
     ids=["e4m3_448", "e4m3_256_weights", "e4m3_256_activations", "e4m3_256_all"],
 )
 @pytest.mark.parametrize("nvfp4_4over6_err_mode", ["MAE", "MSE"], ids=["mae_err", "mse_err"])

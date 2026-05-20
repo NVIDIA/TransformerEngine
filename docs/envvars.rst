@@ -289,15 +289,15 @@ Kernel Configuration
 
 .. envvar:: NVTE_NVFP4_4OVER6
 
-   :Type: ``str`` (``weights``, ``activations``, or ``all``)
-   :Default: unset
-   :Description: Enable 4over6 adaptive NVFP4 block scaling for weights, activations, or both in the ``NVFP4BlockScaling`` recipe. For each selected FP4 block, quantization compares map-to-4 and map-to-6 candidates and stores the candidate with lower configured error. Unset keeps standard NVFP4. Current 4over6 support targets RL and post-training scenarios; pre-training paths that combine 4over6 with RHT are not yet implemented.
+   :Type: ``str`` (``none``, ``weights``, ``activations``, or ``all``)
+   :Default: ``none``
+   :Description: Enable 4over6 adaptive NVFP4 block scaling for weights, activations, or both in the ``NVFP4BlockScaling`` recipe. For each selected FP4 block, quantization compares map-to-4 and map-to-6 candidates and stores the candidate with lower configured error. ``none`` keeps standard NVFP4. Current 4over6 support targets RL and post-training scenarios; pre-training paths that combine 4over6 with RHT are not yet implemented.
 
 .. envvar:: NVTE_NVFP4_4OVER6_E4M3_USE_256
 
-   :Type: ``str`` (``weights``, ``activations``, or ``all``)
-   :Default: unset
-   :Description: Select NVFP4 4over6 quantizers that use 256 instead of 448 as the global E4M3 scale bound. This option is only meaningful for tensor roles that also enable :envvar:`NVTE_NVFP4_4OVER6`.
+   :Type: ``str`` (``none``, ``weights``, ``activations``, or ``all``)
+   :Default: ``all``
+   :Description: Select NVFP4 4over6 quantizers that use 256 instead of 448 as the global E4M3 scale bound. By default, all 4over6 quantizers use 256. Set the env var to ``none`` (or set ``NVFP4BlockScaling(nvfp4_4over6_e4m3_use_256="none")``) to use the standard NVFP4 448 bound for all 4over6 quantizers. This option is only meaningful for tensor roles that also enable :envvar:`NVTE_NVFP4_4OVER6`.
 
 .. envvar:: NVTE_NVFP4_4OVER6_ERR_MODE
 

@@ -1670,7 +1670,7 @@ class NVFP4BlockScalingRecipeState(RecipeState):
             nvfp4_e4m3_max = 448
             if nvfp4_use_4over6:
                 # Current 4over6 kernels target RL and post-training quantization paths.
-                # Add the pre-training fused RHT + 4over6 quantization kernel.
+                # Pre-training usage still needs a fused RHT + 4over6 quantization kernel.
                 if qparams.random_hadamard_transform:
                     raise ValueError("NVFP4 4over6 quantization does not support RHT.")
                 if qparams.stochastic_rounding:
@@ -1685,6 +1685,8 @@ class NVFP4BlockScalingRecipeState(RecipeState):
                 elif self.recipe.nvfp4_4over6_e4m3_use_256 == "activations":
                     if tensor_type != "weight":
                         nvfp4_e4m3_max = 256
+                elif self.recipe.nvfp4_4over6_e4m3_use_256 == "none":
+                    nvfp4_e4m3_max = 448
             return NVFP4Quantizer(
                 fp4_dtype=self.dtype,
                 rowwise=True,
