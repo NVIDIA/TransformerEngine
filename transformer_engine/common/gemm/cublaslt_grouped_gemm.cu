@@ -382,7 +382,7 @@ inline void validate_nvfp4_grouped_gemm_support(const GroupedOperandSelection &A
              "has its own amax-derived global scale.");
 }
 
-// FP8 block scaling grouped GEMM is only supported on Hopper (SM90). 
+// FP8 block scaling grouped GEMM is only supported on Hopper (SM90).
 inline void validate_fp8_block_grouped_gemm_support(const GroupedOperandSelection &A_sel,
                                                     const GroupedOperandSelection &B_sel, int sm) {
   const bool a_fp8_block = transformer_engine::is_fp8_block_scaling(A_sel.scaling_mode);
