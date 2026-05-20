@@ -382,6 +382,20 @@ inline void validate_nvfp4_grouped_gemm_support(const GroupedOperandSelection &A
              "has its own amax-derived global scale.");
 }
 
+// FP8 block scaling grouped GEMM is only supported on Hopper (SM90). 
+inline void validate_fp8_block_grouped_gemm_support(const GroupedOperandSelection &A_sel,
+                                                    const GroupedOperandSelection &B_sel, int sm) {
+  const bool a_fp8_block = transformer_engine::is_fp8_block_scaling(A_sel.scaling_mode);
+  const bool b_fp8_block = transformer_engine::is_fp8_block_scaling(B_sel.scaling_mode);
+  if (!a_fp8_block && !b_fp8_block) return;
+
+  NVTE_CHECK(a_fp8_block && b_fp8_block,
+             "Grouped GEMM: A and B must both use FP8 block scaling or both not.");
+  NVTE_CHECK(sm == 90,
+             "Grouped GEMM: FP8 block scaling is only supported on Hopper (SM90); "
+             "use MXFP8 on Blackwell (SM100) or newer.");
+}
+
 inline bool is_compatible_grouped_scaling_mode(NVTEScalingMode a_mode, NVTEScalingMode b_mode) {
   const bool a_fp8_block = transformer_engine::is_fp8_block_scaling(a_mode);
   const bool b_fp8_block = transformer_engine::is_fp8_block_scaling(b_mode);
@@ -1559,6 +1573,7 @@ void nvte_grouped_gemm(const NVTEGroupedTensor A, int transa, const NVTEGroupedT
   auto A_sel = select_grouped_operand(inputA, static_cast<bool>(transa), /*is_A=*/true);
   auto B_sel = select_grouped_operand(inputB, static_cast<bool>(transb), /*is_A=*/false);
   validate_nvfp4_grouped_gemm_support(A_sel, B_sel, use_per_group_alpha_beta);
+  validate_fp8_block_grouped_gemm_support(A_sel, B_sel, sm);
 
   // NVFP4 global-scale alpha requires per-tensor amax for both operands; without it
   // the kernel silently drops the (amax_A * amax_B / factor) factor and produces
@@ -1680,6 +1695,7 @@ void nvte_grouped_gemm_with_discrete_inputA(const NVTETensor *A_list, size_t num
   A_sel.with_gemm_swizzled_scales = A_list_info.with_gemm_swizzled_scales;
   A_sel.trans = static_cast<bool>(transa);
   validate_nvfp4_grouped_gemm_support(A_sel, B_sel, use_per_group_alpha_beta);
+  validate_fp8_block_grouped_gemm_support(A_sel, B_sel, sm);
 
   const DType rep_dtype = A_list_info.all_row ? A_list_info.row_dtype : A_list_info.col_dtype;
   const bool is_fp8 = is_fp8_dtype(rep_dtype);
@@ -1799,6 +1815,7 @@ void nvte_grouped_gemm_with_discrete_out(const NVTEGroupedTensor A, int transa,
   auto A_sel = select_grouped_operand(inputA, static_cast<bool>(transa), /*is_A=*/true);
   auto B_sel = select_grouped_operand(inputB, static_cast<bool>(transb), /*is_A=*/false);
   validate_nvfp4_grouped_gemm_support(A_sel, B_sel, use_per_group_alpha_beta);
+  validate_fp8_block_grouped_gemm_support(A_sel, B_sel, sm);
 
   // NVFP4 global-scale alpha requires per-tensor amax for both operands.
   if (is_nvfp_scaling(A_sel.scaling_mode)) {
