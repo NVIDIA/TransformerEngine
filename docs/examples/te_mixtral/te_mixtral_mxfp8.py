@@ -390,7 +390,6 @@ class TEMixtralMXFP8Model(TEMixtralMXFP8PreTrainedModel):
         ]
         decode_without_mask = (
             isinstance(past_key_values, InferenceParams)
-            and attention_mask is None
             and hidden_states.dim() == 3
             and hidden_states.size(1) == 1
         )
