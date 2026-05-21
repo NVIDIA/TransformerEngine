@@ -19,6 +19,7 @@ from transformer_engine.pytorch import (
     LayerNormMLP,
     TransformerLayer,
     GroupedLinear,
+    Float8Quantizer,
     Float8CurrentScalingQuantizer,
     MXFP8Quantizer,
     Float8BlockQuantizer,
@@ -2709,6 +2710,612 @@ class TestHybridUpdateWeightQuantizers:
         assert isinstance(
             model.weight, HybridQuantizedTensor
         ), "Weight lost HybridQuantizedTensor type after multiple passes"
+
+
+# ---------------------------------------------------------------------------
+# 3b. quantize_master_weights + post_all_gather_processing for hybrid params
+#
+# Covers the supported (same-format) cases and the rejected (cross-format,
+# missing sub-storage, unsupported sub-quantizer) cases. The supported subset
+# is the first incremental hybrid integration with the distributed-optimizer
+# quantized-param all-gather flow. Cross-format support is deferred to a
+# follow-up; the tests below pin the NotImplementedError contract so the
+# rejection messaging stays clear as the feature evolves.
+# ---------------------------------------------------------------------------
+
+
+def _ensure_single_rank_dp_group():
+    """Return a single-rank NCCL process group for hybrid quantize_master_weights
+    tests. Mirrors the local-pytest setup in
+    `tests/pytorch/distributed/test_cast_master_weights_to_fp8.py` so we can call
+    `torch.distributed.all_reduce` against a trivial group from inside the
+    per-format helpers. The group is created lazily on first call and reused
+    across tests within the same pytest process.
+    """
+    # pylint: disable=import-outside-toplevel
+    import tempfile
+    import pathlib
+
+    if not torch.distributed.is_initialized():
+        torch.cuda.set_device(0)
+        with tempfile.NamedTemporaryFile(delete=False) as f:
+            rendezvous_file = pathlib.Path(f.name)
+        torch.distributed.init_process_group(
+            backend="nccl",
+            init_method=rendezvous_file.resolve().as_uri(),
+            rank=0,
+            world_size=1,
+        )
+    return torch.distributed.GroupMember.WORLD
+
+
+def _hybrid_recipe_fp8_current():
+    """Same-format Float8CurrentScaling on both directions (supported)."""
+    return _hybrid_custom_recipe(
+        row_factory=lambda: Float8CurrentScalingQuantizer(
+            tex.DType.kFloat8E4M3, device="cuda"
+        ),
+        col_factory=lambda: Float8CurrentScalingQuantizer(
+            tex.DType.kFloat8E4M3, device="cuda"
+        ),
+        grad_factory=lambda: Float8CurrentScalingQuantizer(
+            tex.DType.kFloat8E5M2, device="cuda"
+        ),
+    )
+
+
+def _make_delayed_quantizer(fp8_dtype=None):
+    """Construct a ``Float8Quantizer`` (delayed scaling) with locally-allocated
+    scale/amax buffers for single-shot unit tests.
+
+    The full delayed-scaling lifecycle (``FP8GlobalStateManager`` updating
+    ``amax_history`` -> ``scale`` across iterations) is out of scope here; for
+    ``quantize_master_weights`` we only need the helper to read/write
+    ``quantizer.amax`` / ``quantizer.scale`` / ``model_weight._scale_inv``,
+    which works with any pair of 1-element float32 tensors. Initial scale=1.0
+    and amax=0.0 mirror the cold-start state ``FP8GlobalStateManager`` would
+    initialize for the first iteration.
+    """
+    if fp8_dtype is None:
+        fp8_dtype = tex.DType.kFloat8E4M3
+    return Float8Quantizer(
+        scale=torch.ones(1, dtype=torch.float32, device="cuda"),
+        amax=torch.zeros(1, dtype=torch.float32, device="cuda"),
+        fp8_dtype=fp8_dtype,
+    )
+
+
+def _hybrid_recipe_fp8_delayed():
+    """Same-format Float8 delayed scaling on both directions (supported)."""
+    return _hybrid_custom_recipe(
+        row_factory=lambda: _make_delayed_quantizer(tex.DType.kFloat8E4M3),
+        col_factory=lambda: _make_delayed_quantizer(tex.DType.kFloat8E4M3),
+        grad_factory=lambda: _make_delayed_quantizer(tex.DType.kFloat8E5M2),
+    )
+
+
+def _hybrid_recipe_fp8_delayed_row_current_col():
+    """Cross-format per-tensor Float8: delayed rowwise + current columnwise.
+
+    Routed per-direction: row sub-storage -> delayed bucket, col sub-storage
+    -> current bucket. The two helpers run independently (no shared state),
+    so each direction's scale is computed via its own scaling lifecycle.
+    """
+    return _hybrid_custom_recipe(
+        row_factory=lambda: _make_delayed_quantizer(tex.DType.kFloat8E4M3),
+        col_factory=lambda: Float8CurrentScalingQuantizer(
+            tex.DType.kFloat8E4M3, device="cuda"
+        ),
+        # grad_factory matches the columnwise direction so the wgrad GEMM's
+        # grad_output sub-quantizer pairs with the input/weight col format.
+        grad_factory=lambda: Float8CurrentScalingQuantizer(
+            tex.DType.kFloat8E5M2, device="cuda"
+        ),
+    )
+
+
+def _hybrid_recipe_fp8_current_row_delayed_col():
+    """Cross-format per-tensor Float8: current rowwise + delayed columnwise.
+
+    Reversed variant of ``_hybrid_recipe_fp8_delayed_row_current_col``: row
+    sub-storage -> current bucket, col sub-storage -> delayed bucket.
+    """
+    return _hybrid_custom_recipe(
+        row_factory=lambda: Float8CurrentScalingQuantizer(
+            tex.DType.kFloat8E4M3, device="cuda"
+        ),
+        col_factory=lambda: _make_delayed_quantizer(tex.DType.kFloat8E4M3),
+        grad_factory=lambda: _make_delayed_quantizer(tex.DType.kFloat8E5M2),
+    )
+
+
+def _hybrid_recipe_mxfp8():
+    """Same-format MXFP8 on both directions (rejected today; TODO)."""
+    return _hybrid_custom_recipe(
+        row_factory=lambda: MXFP8Quantizer(tex.DType.kFloat8E4M3),
+        col_factory=lambda: MXFP8Quantizer(tex.DType.kFloat8E4M3),
+        grad_factory=lambda: MXFP8Quantizer(tex.DType.kFloat8E5M2),
+    )
+
+
+def _hybrid_recipe_blockwise():
+    """Same-format Float8Blockwise on both directions (rejected today; TODO)."""
+    return _hybrid_custom_recipe(
+        row_factory=lambda: Float8BlockQuantizer(
+            fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True
+        ),
+        col_factory=lambda: Float8BlockQuantizer(
+            fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=True
+        ),
+        grad_factory=lambda: Float8BlockQuantizer(
+            fp8_dtype=tex.DType.kFloat8E5M2, rowwise=True, columnwise=True
+        ),
+    )
+
+
+def _build_hybrid_linear_weight(out_features, in_features, hybrid_recipe):
+    """Build a `HybridQuantizedTensor` weight via `quantized_model_init`.
+
+    Returns (weight, fp32_high_precision_init_val) where the high-precision
+    init val is on GPU so we can use it as the "master" weight in
+    quantize_master_weights tests.
+    """
+    torch.manual_seed(42)
+    with quantized_model_init(
+        enabled=True,
+        recipe=hybrid_recipe,
+        preserve_high_precision_init_val=True,
+    ):
+        model = Linear(
+            in_features, out_features, bias=False, params_dtype=torch.bfloat16
+        ).cuda()
+
+    weight = model.weight
+    assert isinstance(weight, HybridQuantizedTensor), (
+        f"Expected HybridQuantizedTensor, got {type(weight).__name__}"
+    )
+    hp_init_cpu = weight.get_high_precision_init_val()
+    assert hp_init_cpu is not None, "preserve_high_precision_init_val should populate the cpu val"
+    hp_init = hp_init_cpu.to(weight.device).float()
+    return weight, hp_init
+
+
+def _hybrid_param_for(out_features, in_features, hybrid_recipe):
+    """Same as `_build_hybrid_linear_weight` but discards the init val."""
+    weight, _ = _build_hybrid_linear_weight(out_features, in_features, hybrid_recipe)
+    return weight
+
+
+@requires_fp8
+class TestHybridQuantizeMasterWeights:
+    """`quantize_master_weights` + `post_all_gather_processing` for hybrid params.
+
+    Dispatch is per-direction: each sub-storage is routed independently into the
+    per-format bucket matching its own sub-quantizer type. Currently-supported
+    sub-quantizer types can mix freely across directions (e.g. Float8 delayed
+    row + Float8 current col), single-direction hybrid (one sub-storage dropped
+    via ``update_usage``) routes the live direction(s) only; per-block sub-
+    quantizers (MXFP8, NVFP4, Float8Blockwise) raise NotImplementedError
+    regardless of which direction they appear in.
+
+    Supported subset (per-tensor Float8) -- positive tests verify the present
+    sub-storage(s) dequantize close to the master weight after the cast:
+
+      * Float8CurrentScaling on both directions (same-format, full master)
+      * Float8CurrentScaling on both directions (DP-sharded master, non-zero
+        start_offset)
+      * Float8 delayed scaling on both directions (same-format)
+      * Float8 delayed row + Float8 current col (cross-format; row -> delayed
+        bucket, col -> current bucket)
+      * Float8 current row + Float8 delayed col (cross-format, reversed)
+      * Single-direction (rowwise-only) hybrid via ``update_usage``
+      * Single-direction (columnwise-only) hybrid via ``update_usage``
+
+    Rejected subset (NotImplementedError / ValueError) -- negative tests pin
+    the per-direction rejection contract and the both-None guardrail:
+      * MXFP8 as a hybrid sub-quantizer (rowwise OR columnwise)
+      * NVFP4 as a hybrid sub-quantizer (rowwise OR columnwise)
+      * Float8Blockwise as a hybrid sub-quantizer
+      * Both sub-storages dropped (caller bug: nothing left to cast)
+    """
+
+    # ---------- Positive tests (same-format) ----------
+
+    def test_fp8_current_same_format_full_master(self):
+        """Full master (start_offset=0) routes both sub-storages through the
+        existing per-format current-scaling helper. Verifies both directions
+        dequantize close to the master weight after the cast.
+        """
+        from transformer_engine.pytorch.tensor.utils import (
+            quantize_master_weights,
+            post_all_gather_processing,
+        )
+
+        group = _ensure_single_rank_dp_group()
+        hybrid_recipe = _hybrid_recipe_fp8_current()
+        weight, hp_master = _build_hybrid_linear_weight(64, 64, hybrid_recipe)
+        # Distributed-optimizer convention: master weight is the flat FP32 shard
+        # owned by the current rank (or the full param for non-distributed cases).
+        master_flat = hp_master.view(-1).contiguous()
+
+        quantize_master_weights([weight], [master_flat], [0], group=group)
+        post_all_gather_processing([weight])
+
+        assert weight._rowwise_storage is not None
+        assert weight._columnwise_storage is not None
+        dq_row = weight._rowwise_storage.dequantize(dtype=torch.float32)
+        dq_col = weight._columnwise_storage.dequantize(dtype=torch.float32)
+        # FP8 E4M3 round-trip; matches the loose tolerance the equivalent
+        # native-FP8-current test uses (e.g. test_dequantize_close_to_original).
+        torch.testing.assert_close(
+            dq_row.reshape(-1), master_flat, rtol=0.125, atol=0.1
+        )
+        torch.testing.assert_close(
+            dq_col.reshape(-1), master_flat, rtol=0.125, atol=0.1
+        )
+
+    def test_fp8_current_nonzero_start_offset(self):
+        """Mimic DP-sharded master: master covers logical elements
+        [start_offset, start_offset + master.numel()) of the full model weight.
+        Verifies that the shared logical start_offset is honored by both
+        sub-storages' per-format routings.
+        """
+        from transformer_engine.pytorch.tensor.utils import (
+            quantize_master_weights,
+            post_all_gather_processing,
+        )
+
+        group = _ensure_single_rank_dp_group()
+        hybrid_recipe = _hybrid_recipe_fp8_current()
+        weight, hp_master_full = _build_hybrid_linear_weight(64, 64, hybrid_recipe)
+
+        half = hp_master_full.numel() // 2
+        hp_master_shard = hp_master_full.view(-1)[half:].contiguous()
+        start_offset = half
+
+        quantize_master_weights([weight], [hp_master_shard], [start_offset], group=group)
+        post_all_gather_processing([weight])
+
+        # The second-half slice (which the master shard covered) should match.
+        # The first-half slice was already written at quantized_model_init time
+        # from the same high-precision init val, so it should also match (modulo
+        # the second amax all-reduce shifting the per-tensor scale).
+        dq_row = weight._rowwise_storage.dequantize(dtype=torch.float32).view(-1)
+        dq_col = weight._columnwise_storage.dequantize(dtype=torch.float32).view(-1)
+        torch.testing.assert_close(
+            dq_row[start_offset:], hp_master_shard, rtol=0.125, atol=0.1
+        )
+        torch.testing.assert_close(
+            dq_col[start_offset:], hp_master_shard, rtol=0.125, atol=0.1
+        )
+
+    def test_fp8_delayed_same_format_full_master(self):
+        """Same-format delayed scaling on both directions. Both sub-storages
+        route into the delayed-scaling bucket as independent entries; the
+        helper processes them with a single bucket-wide amax all-reduce.
+        Verifies each direction dequantizes close to the master weight.
+        """
+        from transformer_engine.pytorch.tensor.utils import (
+            quantize_master_weights,
+            post_all_gather_processing,
+        )
+
+        group = _ensure_single_rank_dp_group()
+        hybrid_recipe = _hybrid_recipe_fp8_delayed()
+        weight, hp_master = _build_hybrid_linear_weight(64, 64, hybrid_recipe)
+        master_flat = hp_master.view(-1).contiguous()
+
+        quantize_master_weights([weight], [master_flat], [0], group=group)
+        post_all_gather_processing([weight])
+
+        assert weight._rowwise_storage is not None
+        assert weight._columnwise_storage is not None
+        dq_row = weight._rowwise_storage.dequantize(dtype=torch.float32)
+        dq_col = weight._columnwise_storage.dequantize(dtype=torch.float32)
+        torch.testing.assert_close(
+            dq_row.reshape(-1), master_flat, rtol=0.125, atol=0.1
+        )
+        torch.testing.assert_close(
+            dq_col.reshape(-1), master_flat, rtol=0.125, atol=0.1
+        )
+
+    def test_fp8_delayed_row_current_col_full_master(self):
+        """Cross-format per-tensor Float8: delayed row + current col.
+
+        Pins the new per-direction routing: row sub-storage goes to the
+        delayed bucket, col sub-storage goes to the current bucket. Each
+        helper runs independently on its single-entry bucket, with no
+        cross-pollination between the two scaling lifecycles.
+        """
+        from transformer_engine.pytorch.tensor.utils import (
+            quantize_master_weights,
+            post_all_gather_processing,
+        )
+
+        group = _ensure_single_rank_dp_group()
+        hybrid_recipe = _hybrid_recipe_fp8_delayed_row_current_col()
+        weight, hp_master = _build_hybrid_linear_weight(64, 64, hybrid_recipe)
+        master_flat = hp_master.view(-1).contiguous()
+
+        quantize_master_weights([weight], [master_flat], [0], group=group)
+        post_all_gather_processing([weight])
+
+        assert weight._rowwise_storage is not None
+        assert weight._columnwise_storage is not None
+        assert isinstance(weight._rowwise_quantizer, Float8Quantizer)
+        assert isinstance(weight._columnwise_quantizer, Float8CurrentScalingQuantizer)
+        dq_row = weight._rowwise_storage.dequantize(dtype=torch.float32)
+        dq_col = weight._columnwise_storage.dequantize(dtype=torch.float32)
+        torch.testing.assert_close(
+            dq_row.reshape(-1), master_flat, rtol=0.125, atol=0.1
+        )
+        torch.testing.assert_close(
+            dq_col.reshape(-1), master_flat, rtol=0.125, atol=0.1
+        )
+
+    def test_fp8_current_row_delayed_col_full_master(self):
+        """Cross-format per-tensor Float8: current row + delayed col.
+
+        Reversed variant of the test above — pins that the per-direction
+        loop's second iteration (col) reaches the delayed dispatch arm
+        independently of what the rowwise iteration did.
+        """
+        from transformer_engine.pytorch.tensor.utils import (
+            quantize_master_weights,
+            post_all_gather_processing,
+        )
+
+        group = _ensure_single_rank_dp_group()
+        hybrid_recipe = _hybrid_recipe_fp8_current_row_delayed_col()
+        weight, hp_master = _build_hybrid_linear_weight(64, 64, hybrid_recipe)
+        master_flat = hp_master.view(-1).contiguous()
+
+        quantize_master_weights([weight], [master_flat], [0], group=group)
+        post_all_gather_processing([weight])
+
+        assert weight._rowwise_storage is not None
+        assert weight._columnwise_storage is not None
+        assert isinstance(weight._rowwise_quantizer, Float8CurrentScalingQuantizer)
+        assert isinstance(weight._columnwise_quantizer, Float8Quantizer)
+        dq_row = weight._rowwise_storage.dequantize(dtype=torch.float32)
+        dq_col = weight._columnwise_storage.dequantize(dtype=torch.float32)
+        torch.testing.assert_close(
+            dq_row.reshape(-1), master_flat, rtol=0.125, atol=0.1
+        )
+        torch.testing.assert_close(
+            dq_col.reshape(-1), master_flat, rtol=0.125, atol=0.1
+        )
+
+    # NOTE: Per-block sub-quantizers (MXFP8, NVFP4, Float8Blockwise) are not
+    # supported as hybrid sub-quantizers by this initial integration, regardless
+    # of which direction they appear in. See the per-direction rejection tests
+    # below (``test_mxfp8_*_raises`` covers both rowwise and columnwise rejection
+    # of MXFP8; ``test_nvfp4_*_raises`` and ``test_blockwise_*_raises`` similarly).
+    # The TODO block above ``_route_hybrid_to_buckets`` in tensor/utils.py
+    # documents the upstream constraints (single-direction cast helper / kernel
+    # support) whose unblocker drops per-block format support in for free.
+
+    # ---------- Negative tests (per-direction rejection contract) ----------
+
+    @pytest.mark.skipif(not mxfp8_available, reason=f"MXFP8: {reason_for_no_mxfp8}")
+    def test_mxfp8_rowwise_raises(self):
+        """MXFP8 in the rowwise sub-quantizer is rejected per-direction.
+
+        ``_cast_master_weights_to_fp8_mxfp8_scaling`` assumes each entry's
+        ``model_weight`` has BOTH ``_rowwise_*`` and ``_columnwise_*`` populated
+        (the underlying partial-cast kernel is bidirectional), while a hybrid
+        sub-storage is single-direction by construction. See
+        ``TODO(hybrid-mxfp8-distopt)`` in tensor/utils.py for the unblocker shape.
+        """
+        from transformer_engine.pytorch.tensor.utils import quantize_master_weights
+
+        group = _ensure_single_rank_dp_group()
+        hybrid_recipe = _hybrid_recipe_mxfp8()
+        # Shape must be a multiple of MXFP8 block size (32) on both axes.
+        weight, hp_master = _build_hybrid_linear_weight(64, 128, hybrid_recipe)
+        master_flat = hp_master.view(-1).contiguous()
+
+        with pytest.raises(NotImplementedError, match="MXFP8Quantizer rowwise"):
+            quantize_master_weights([weight], [master_flat], [0], group=group)
+
+    @pytest.mark.skipif(not mxfp8_available, reason=f"MXFP8: {reason_for_no_mxfp8}")
+    def test_mxfp8_columnwise_raises(self):
+        """MXFP8 in the columnwise sub-quantizer is rejected per-direction.
+
+        Pairs FP8 current scaling in the rowwise slot (supported) with MXFP8
+        in the columnwise slot (rejected). The rowwise iteration of
+        ``_route_hybrid_to_buckets`` routes the FP8 sub-storage into the
+        current-scaling bucket cleanly; the columnwise iteration then hits
+        MXFP8 and raises. Pins that per-direction dispatch visits and rejects
+        the columnwise sub-quantizer too — not just the rowwise one.
+        """
+        from transformer_engine.pytorch.tensor.utils import quantize_master_weights
+
+        group = _ensure_single_rank_dp_group()
+        hybrid_recipe = _hybrid_custom_recipe(
+            row_factory=lambda: Float8CurrentScalingQuantizer(
+                tex.DType.kFloat8E4M3, device="cuda"
+            ),
+            col_factory=lambda: MXFP8Quantizer(tex.DType.kFloat8E4M3),
+            grad_factory=lambda: Float8CurrentScalingQuantizer(
+                tex.DType.kFloat8E5M2, device="cuda"
+            ),
+        )
+        # Shape must be a multiple of MXFP8 block size (32) on both axes.
+        weight, hp_master = _build_hybrid_linear_weight(64, 128, hybrid_recipe)
+        master_flat = hp_master.view(-1).contiguous()
+
+        with pytest.raises(NotImplementedError, match="MXFP8Quantizer columnwise"):
+            quantize_master_weights([weight], [master_flat], [0], group=group)
+
+    @pytest.mark.skipif(not nvfp4_available, reason=f"NVFP4: {reason_for_no_nvfp4}")
+    def test_nvfp4_rowwise_raises(self):
+        """NVFP4 in the rowwise sub-quantizer is rejected per-direction.
+
+        The NVFP4 cast path is blocked on a pair of upstream constraints
+        documented in the TODO block above ``_route_hybrid_to_buckets`` in
+        tensor/utils.py.
+
+        NOTE: this test exercises the rejection at the ``quantize_master_weights``
+        entrypoint, but ``quantized_model_init`` with 2D NVFP4 hybrid already
+        fails earlier (single-direction 2D NVFP4 quantize is rejected by the
+        kernel). Use ``with_2d_quantization=False`` so the param can be
+        constructed and the rejection surfaces at the cast site we care about.
+        """
+        from transformer_engine.pytorch.tensor.utils import quantize_master_weights
+
+        group = _ensure_single_rank_dp_group()
+        hybrid_recipe = _hybrid_custom_recipe(
+            row_factory=lambda: NVFP4Quantizer(
+                fp4_dtype=tex.DType.kFloat4E2M1, with_2d_quantization=False
+            ),
+            col_factory=lambda: NVFP4Quantizer(
+                fp4_dtype=tex.DType.kFloat4E2M1, with_2d_quantization=False
+            ),
+            grad_factory=lambda: NVFP4Quantizer(
+                fp4_dtype=tex.DType.kFloat4E2M1, with_2d_quantization=False
+            ),
+        )
+        weight, hp_master = _build_hybrid_linear_weight(64, 128, hybrid_recipe)
+        master_flat = hp_master.view(-1).contiguous()
+
+        with pytest.raises(NotImplementedError, match="NVFP4Quantizer rowwise"):
+            quantize_master_weights([weight], [master_flat], [0], group=group)
+
+    @pytest.mark.skipif(
+        not fp8_block_scaling_available,
+        reason=f"Float8 block scaling: {reason_for_no_fp8_block_scaling}",
+    )
+    def test_blockwise_rowwise_raises(self):
+        """Float8BlockQuantizer in the rowwise sub-quantizer is rejected
+        per-direction (no e2e factory uses it; TODO marker in tensor/utils.py).
+        """
+        from transformer_engine.pytorch.tensor.utils import quantize_master_weights
+
+        group = _ensure_single_rank_dp_group()
+        hybrid_recipe = _hybrid_recipe_blockwise()
+        weight, hp_master = _build_hybrid_linear_weight(128, 128, hybrid_recipe)
+        master_flat = hp_master.view(-1).contiguous()
+
+        with pytest.raises(NotImplementedError, match="Float8BlockQuantizer rowwise"):
+            quantize_master_weights([weight], [master_flat], [0], group=group)
+
+    def test_rowwise_only_fp8_current_full_master(self):
+        """Single-direction hybrid: columnwise dropped via update_usage.
+
+        Pins that the per-direction loop in `_route_hybrid_to_buckets` skips
+        the dropped direction silently and routes only the present (rowwise)
+        sub-storage. Useful for inference / memory-saving paths that
+        deliberately keep only the fprop-side direction.
+        """
+        from transformer_engine.pytorch.tensor.utils import (
+            quantize_master_weights,
+            post_all_gather_processing,
+        )
+
+        group = _ensure_single_rank_dp_group()
+        hybrid_recipe = _hybrid_recipe_fp8_current()
+        weight, hp_master = _build_hybrid_linear_weight(64, 64, hybrid_recipe)
+        weight.update_usage(rowwise_usage=True, columnwise_usage=False)
+        assert weight._rowwise_storage is not None
+        assert weight._columnwise_storage is None
+        master_flat = hp_master.view(-1).contiguous()
+
+        quantize_master_weights([weight], [master_flat], [0], group=group)
+        post_all_gather_processing([weight])
+
+        # Columnwise stays dropped (the cast must not silently revive it).
+        assert weight._columnwise_storage is None
+        # Rowwise is populated and dequantizes close to the master.
+        dq_row = weight._rowwise_storage.dequantize(dtype=torch.float32)
+        torch.testing.assert_close(
+            dq_row.reshape(-1), master_flat, rtol=0.125, atol=0.1
+        )
+
+    def test_columnwise_only_fp8_current_full_master(self):
+        """Single-direction hybrid: rowwise dropped via update_usage.
+
+        Reversed variant — verifies the column-only iteration of the per-
+        direction loop reaches the dispatch and routes correctly.
+        """
+        from transformer_engine.pytorch.tensor.utils import (
+            quantize_master_weights,
+            post_all_gather_processing,
+        )
+
+        group = _ensure_single_rank_dp_group()
+        hybrid_recipe = _hybrid_recipe_fp8_current()
+        weight, hp_master = _build_hybrid_linear_weight(64, 64, hybrid_recipe)
+        weight.update_usage(rowwise_usage=False, columnwise_usage=True)
+        assert weight._rowwise_storage is None
+        assert weight._columnwise_storage is not None
+        master_flat = hp_master.view(-1).contiguous()
+
+        quantize_master_weights([weight], [master_flat], [0], group=group)
+        post_all_gather_processing([weight])
+
+        # Rowwise stays dropped (the cast must not silently revive it).
+        assert weight._rowwise_storage is None
+        # Columnwise is populated and dequantizes close to the master.
+        dq_col = weight._columnwise_storage.dequantize(dtype=torch.float32)
+        torch.testing.assert_close(
+            dq_col.reshape(-1), master_flat, rtol=0.125, atol=0.1
+        )
+
+    def test_both_sub_storages_none_raises(self):
+        """Both sub-storages dropped via update_usage — nothing left to cast.
+
+        This is the only remaining sub-storage-presence guardrail after the
+        single-direction enablement: a fully-dropped hybrid weight reaching
+        `quantize_master_weights` is a caller bug, not a deferred feature,
+        so we surface it as a ValueError.
+        """
+        from transformer_engine.pytorch.tensor.utils import quantize_master_weights
+
+        group = _ensure_single_rank_dp_group()
+        hybrid_recipe = _hybrid_recipe_fp8_current()
+        weight, hp_master = _build_hybrid_linear_weight(64, 64, hybrid_recipe)
+        weight.update_usage(rowwise_usage=False, columnwise_usage=False)
+        assert weight._rowwise_storage is None
+        assert weight._columnwise_storage is None
+        master_flat = hp_master.view(-1).contiguous()
+
+        with pytest.raises(ValueError, match="both rowwise and columnwise"):
+            quantize_master_weights([weight], [master_flat], [0], group=group)
+
+
+@requires_fp8
+class TestHybridPostAllGatherProcessing:
+    """Hybrid branch of `post_all_gather_processing` is exercised indirectly by
+    the positive `TestHybridQuantizeMasterWeights` tests; the case below pins
+    an additional invariant that the routing logic must preserve.
+    """
+
+    def test_post_ag_idempotent_for_fp8_current_hybrid(self):
+        """Calling post_all_gather_processing twice on a same-format Float8
+        hybrid must not corrupt the sub-storages.
+        """
+        from transformer_engine.pytorch.tensor.utils import (
+            quantize_master_weights,
+            post_all_gather_processing,
+        )
+
+        group = _ensure_single_rank_dp_group()
+        hybrid_recipe = _hybrid_recipe_fp8_current()
+        weight, hp_master = _build_hybrid_linear_weight(64, 64, hybrid_recipe)
+        master_flat = hp_master.view(-1).contiguous()
+
+        quantize_master_weights([weight], [master_flat], [0], group=group)
+        post_all_gather_processing([weight])
+        dq_row_first = weight._rowwise_storage.dequantize(dtype=torch.float32)
+        dq_col_first = weight._columnwise_storage.dequantize(dtype=torch.float32)
+
+        post_all_gather_processing([weight])
+        dq_row_second = weight._rowwise_storage.dequantize(dtype=torch.float32)
+        dq_col_second = weight._columnwise_storage.dequantize(dtype=torch.float32)
+
+        torch.testing.assert_close(dq_row_first, dq_row_second, rtol=0.0, atol=0.0)
+        torch.testing.assert_close(dq_col_first, dq_col_second, rtol=0.0, atol=0.0)
 
 
 # ---------------------------------------------------------------------------

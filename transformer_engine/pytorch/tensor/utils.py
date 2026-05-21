@@ -19,6 +19,7 @@ from .float8_tensor import Float8Tensor, Float8Quantizer, Float8CurrentScalingQu
 from .nvfp4_tensor import NVFP4Tensor, NVFP4Quantizer
 from .mxfp8_tensor import MXFP8Tensor, MXFP8Quantizer
 from .float8_blockwise_tensor import Float8BlockwiseQTensor, Float8BlockQuantizer
+from .hybrid_tensor import HybridQuantizedTensor, HybridQuantizer
 from ..optimizers.multi_tensor_apply import multi_tensor_applier
 from ..utils import is_non_tn_fp8_gemm_supported
 from ..constants import NVFP4_BLOCK_SCALING_SIZE
@@ -67,6 +68,18 @@ def replace_raw_data(tensor: QuantizedTensor, new_raw_data: torch.Tensor):
         del old_rowwise
     elif isinstance(tensor, MXFP8Tensor):
         raise NotImplementedError("replace_raw_data for MXFP8Tensor is not supported yet")
+    elif isinstance(tensor, HybridQuantizedTensor):
+        # The distopt all-gather buffer routes at the rowwise sub-storage only;
+        # the columnwise sub-storage is refreshed each iteration via
+        # ``HybridQuantizer.update_quantized``. The underlying call delegates
+        # to the rowwise sub-storage's own ``replace_raw_data`` (which may
+        # raise for sub-storage types that don't implement it).
+        if tensor._rowwise_storage is None:
+            raise NotImplementedError(
+                "replace_raw_data for HybridQuantizedTensor without a rowwise "
+                "sub-storage is not supported."
+            )
+        replace_raw_data(tensor._rowwise_storage, new_raw_data)
     else:
         raise ValueError(f"replace_raw_data for {type(tensor)} is not supported yet")
 
@@ -164,6 +177,15 @@ def quantize_master_weights(
         elif isinstance(quantizer, MXFP8Quantizer):
             mxfp8_scaling_params.append(
                 (model_weight, master_weight, start_offset, fsdp_shard_model_weight)
+            )
+        elif isinstance(quantizer, HybridQuantizer):
+            _route_hybrid_to_buckets(
+                model_weight,
+                master_weight,
+                start_offset,
+                fsdp_shard_model_weight,
+                delayed_scaling_params=delayed_scaling_params,
+                current_scaling_params=current_scaling_params,
             )
         else:
             raise ValueError(f"quantize_master_weights for {type(quantizer)} is not supported yet")
@@ -933,6 +955,161 @@ def _cast_master_weights_to_fp8_mxfp8_scaling(
         )
 
 
+# ---------------------------------------------------------------------------------------------
+# HybridQuantizer helpers for `quantize_master_weights` / `post_all_gather_processing`.
+#
+# Dispatch is per-direction: `_route_hybrid_to_buckets` iterates over both sub-storages
+# of a `HybridQuantizedTensor` and routes each one independently into the per-format
+# bucket matching its own sub-quantizer type. Row and col make their own decisions and
+# can mix any pair of currently-supported sub-quantizers.
+#
+#   Supported (per-tensor Float8 sub-quantizers, in any per-direction combination):
+#     - Float8Quantizer                  (delayed scaling)
+#     - Float8CurrentScalingQuantizer    (current scaling)
+#
+#   Per-tensor Float8 works because `_cast_master_weights_to_fp8_{delayed,current}_scaling`
+#   accept any Float8Tensor (single direction is fine — each entry is one Float8Tensor
+#   with its own `_scale_inv` and the helper writes that one entry's `_data`). Each
+#   hybrid sub-storage IS a single-direction Float8Tensor, so we route them as two
+#   independent entries (into the same bucket for same-format, or into different
+#   buckets for cross-format Float8 — e.g. delayed row + current col).
+#
+#   Single-direction hybrid (only one sub-storage populated, e.g. after
+#   `update_usage(columnwise=False)`) routes the present direction only — the
+#   per-direction loop skips dropped sub-storages. Both-None hybrids raise ValueError.
+#   Per-block sub-quantizers still hit their per-direction TODO regardless of single
+#   vs both direction.
+#
+#   Not supported (raise NotImplementedError per-direction + TODO):
+#
+#     - MXFP8Quantizer as a hybrid sub-quantizer (any direction)
+#         TODO(hybrid-mxfp8-distopt): the distopt cast kernels
+#         (`tex.mxfp8_scaling_compute_partial_amax`, `tex.mxfp8_scaling_partial_cast`)
+#         are bidirectional — both rowwise and colwise outputs required — so they
+#         cannot ingest a single-direction hybrid sub-storage. (Unrelated to the
+#         regular `tex.quantize` kernel used by forward/backward, which natively
+#         supports single-direction output.) Unblocker: add single-direction
+#         variants of the two distopt kernels, then route hybrid sub-storages
+#         per-direction into `mxfp8_scaling_params` matching the Float8 path above.
+#         Also unlocks cross-format MXFP8 row + <other format> col.
+#
+#     - NVFP4Quantizer as a hybrid sub-quantizer (any direction)
+#         TODO(hybrid-nvfp4-distopt): load-bearing blocker is the kernel assertion
+#         `return_identity || !use_2d_quantization` in
+#         `quantize_transpose_vector_blockwise_fp4.cu`, which rejects exactly the
+#         columnwise-only 2D configuration that `HybridQuantizer.__init__` produces
+#         for the col sub-quantizer. Blocks hybrid 2D NVFP4 weight construction at
+#         `quantized_model_init` time. 1D NVFP4 is unaffected. The assertion is an
+#         explicitly-marked unwritten code path, not an algorithmic limit (see the
+#         kernel author's note above the early-return guard).
+#
+#         Secondary blocker (gated on the kernel fix): the distopt helper
+#         `_cast_master_weights_to_nvfp4_2d` writes only `_rowwise_data` and relies
+#         on per-tensor post-AG `_create_columnwise()` — for hybrid, the columnwise
+#         data needs to land in a SEPARATE col sub-storage, so the post-AG branch
+#         must be made hybrid-aware (derive `col_sub._columnwise_data` from
+#         `row_sub`'s gathered rowwise).
+#
+#     - Float8BlockQuantizer as a hybrid sub-quantizer
+#         TODO(hybrid-fp8-blockwise): same shape as the NVFP4 secondary blocker —
+#         `_cast_master_weights_to_fp8_blockwise_scaling` writes only `_rowwise_data`
+#         with per-tensor post-AG `_create_columnwise()` that doesn't reach hybrid's
+#         separate col sub-storage. Unlike NVFP4, there is no kernel-level
+#         construction blocker (the Block FP8 kernel natively supports
+#         columnwise-only mode), so hybrid Block FP8 weights construct fine via the
+#         non-distopt FusedAdam path today; only the sharded-master distopt cast
+#         path is blocked. Unblocker is a Python-side hybrid-aware post-AG branch;
+#         no C++ work needed.
+#
+# ---------------------------------------------------------------------------------------------
+
+
+def _route_hybrid_to_buckets(
+    model_weight,
+    master_weight,
+    start_offset,
+    fsdp_shard_model_weight,
+    *,
+    delayed_scaling_params,
+    current_scaling_params,
+):
+    """Decompose a `HybridQuantizedTensor` into per-direction entries and route each
+    into the appropriate per-format bucket used by `quantize_master_weights`.
+
+    Per-direction dispatch: each sub-storage routes independently based on its
+    own sub-quantizer type. Per-tensor Float8 sub-quantizers (delayed and/or
+    current scaling) are supported in any combination per direction; single-
+    direction hybrid (one sub-storage dropped via ``update_usage``) is also
+    supported. See the TODO block above this helper for the per-block-format
+    rejection rationale and unblocker shapes.
+    """
+    row_sub = model_weight._rowwise_storage
+    col_sub = model_weight._columnwise_storage
+    sub_q_row = model_weight._rowwise_quantizer
+    sub_q_col = model_weight._columnwise_quantizer
+
+    if row_sub is None and col_sub is None:
+        raise ValueError(
+            "quantize_master_weights called on HybridQuantizedTensor with both "
+            "rowwise and columnwise sub-storages dropped (via update_usage). "
+            "Nothing to cast — this is most likely a caller bug."
+        )
+
+    # Per-direction routing: each (sub_storage, sub_quantizer) pair selects its
+    # own bucket based on the sub-quantizer's type. Directions that have been
+    # dropped via ``update_usage`` are silently skipped.
+    for direction, sub_storage, sub_q in (
+        ("rowwise", row_sub, sub_q_row),
+        ("columnwise", col_sub, sub_q_col),
+    ):
+        if sub_storage is None:
+            continue
+        entry = (sub_storage, master_weight, start_offset, fsdp_shard_model_weight)
+        if isinstance(sub_q, Float8Quantizer):
+            # Delayed scaling: the per-format helper iterates entries
+            # independently and does a per-DP amax all-reduce across the bucket.
+            delayed_scaling_params.append(entry)
+        elif isinstance(sub_q, Float8CurrentScalingQuantizer):
+            current_scaling_params.append(entry)
+        elif isinstance(sub_q, MXFP8Quantizer):
+            # TODO(hybrid-mxfp8-distopt): the distopt cast kernels are
+            # bidirectional, so a single-direction hybrid sub-storage cannot be
+            # fed in. See top-of-file TODO block for the unblocker (single-
+            # direction variants of the two distopt kernels).
+            raise NotImplementedError(
+                f"quantize_master_weights for HybridQuantizer with MXFP8Quantizer "
+                f"{direction} sub-quantizer is not supported yet. See the TODO "
+                "block above _route_hybrid_to_buckets for the unblocker shape."
+            )
+        elif isinstance(sub_q, NVFP4Quantizer):
+            # TODO(hybrid-nvfp4-distopt): load-bearing blocker is the kernel
+            # assertion that rejects columnwise-only 2D NVFP4 — which is
+            # exactly what hybrid's col sub-quantizer pin produces. Secondary
+            # blocker (gated on the kernel fix) is the per-tensor post-AG
+            # `_create_columnwise()` not reaching hybrid's separate col
+            # sub-storage. See top-of-file TODO block for details.
+            raise NotImplementedError(
+                f"quantize_master_weights for HybridQuantizer with NVFP4Quantizer "
+                f"{direction} sub-quantizer is not supported yet. See the TODO "
+                "block above _route_hybrid_to_buckets for details."
+            )
+        elif isinstance(sub_q, Float8BlockQuantizer):
+            # TODO(hybrid-fp8-blockwise): same shape as the NVFP4 secondary
+            # blocker (and only that one — no kernel-level construction
+            # blocker for Block FP8). Python-side post-AG fix. See top-of-file
+            # TODO block for details.
+            raise NotImplementedError(
+                f"quantize_master_weights for HybridQuantizer with Float8BlockQuantizer "
+                f"{direction} sub-quantizer is not supported yet. See the TODO "
+                "block above _route_hybrid_to_buckets for details."
+            )
+        else:
+            raise NotImplementedError(
+                "quantize_master_weights for HybridQuantizer with "
+                f"{type(sub_q).__name__} {direction} sub-quantizer is not supported yet."
+            )
+
+
 def post_all_gather_processing(model_weights: Union[torch.Tensor, List[torch.Tensor]]):
     """
     Post-processing after all-gather for weights in distributed optimizer.
@@ -941,6 +1118,13 @@ def post_all_gather_processing(model_weights: Union[torch.Tensor, List[torch.Ten
     - Plain pytorch tensor: noop.
 
     For NVFP4 tensors, uses batched multi-tensor processing to reduce CPU overhead.
+
+    For `HybridQuantizedTensor`, recurses per-direction so that each
+    sub-storage's native post-processing runs (e.g. Float8 Hopper transpose-cache
+    pre-creation). Per-block sub-quantizers are rejected at
+    `quantize_master_weights` time, so by the time we reach here each present
+    sub-storage is a `Float8Tensor` and the recursive call hits the native
+    Float8 branch above.
     """
     if not isinstance(model_weights, list):
         model_weights = [model_weights]
@@ -963,6 +1147,14 @@ def post_all_gather_processing(model_weights: Union[torch.Tensor, List[torch.Ten
         elif isinstance(model_weight, MXFP8Tensor):
             # MXFP8 scaling: no need to do anything.
             pass
+        elif isinstance(model_weight, HybridQuantizedTensor):
+            # Per-direction post-processing: each Float8 sub-storage routes
+            # through the recursive call (None / other-type sub-storages are
+            # silently skipped by the isinstance filter — they would have been
+            # rejected upstream in `quantize_master_weights`).
+            for sub in (model_weight._rowwise_storage, model_weight._columnwise_storage):
+                if isinstance(sub, Float8Tensor):
+                    post_all_gather_processing(sub)
         elif isinstance(model_weight, QuantizedTensor):
             raise ValueError(f"post_processing for {type(model_weight)} is not supported")
 
