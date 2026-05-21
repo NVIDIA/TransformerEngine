@@ -204,79 +204,86 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm_impl(
                                          transformer_engine::DType::kByte, false);
   uint8_t *output_scales_dptr = reinterpret_cast<uint8_t *>(getDataPtr(output_scales_pyt));
 
-  // Construct TE tensors with only scales
-  std::vector<transformer_engine::TensorWrapper> inputs_nvte, outputs_nvte;
-  inputs_nvte.reserve(tensors_needing_swizzle.size());
-  outputs_nvte.reserve(tensors_needing_swizzle.size());
-  for (size_t i = 0; i < tensors_needing_swizzle.size(); ++i) {
+  // Allocate input/output NVTETensors as a single batch. The first
+  // n_swizzle entries are inputs; the next n_swizzle are outputs.
+  const size_t n_swizzle = tensors_needing_swizzle.size();
+  std::vector<NVTETensor> nvte_tensors(2 * n_swizzle);
+  nvte_create_tensors(scaling_mode, nvte_tensors.data(), nvte_tensors.size());
+  struct DestroyGuard {
+    NVTETensor *data;
+    size_t n;
+    ~DestroyGuard() { nvte_destroy_tensors(data, n); }
+  } destroy_guard{nvte_tensors.data(), nvte_tensors.size()};
+  NVTETensor *inputs_nvte = nvte_tensors.data();
+  NVTETensor *outputs_nvte = nvte_tensors.data() + n_swizzle;
+
+  auto set_param = [](NVTETensor t, NVTETensorParam param, void *dptr,
+                      transformer_engine::DType dtype, const NVTEShape &shape) {
+    NVTEBasicTensor data{dptr, static_cast<NVTEDType>(dtype), shape};
+    nvte_set_tensor_param_v2(t, param, &data, sizeof(data));
+  };
+
+  // Cache output scale dtype/shape per tensor so we can update the
+  // source TensorWrappers without re-reading from the output NVTETensors.
+  std::vector<transformer_engine::DType> output_scales_dtypes(n_swizzle);
+  std::vector<NVTEShape> output_scales_shapes(n_swizzle);
+
+  for (size_t i = 0; i < n_swizzle; ++i) {
     auto &tensor = *tensors_needing_swizzle[i];
-    inputs_nvte.emplace_back(scaling_mode);
-    outputs_nvte.emplace_back(scaling_mode);
-    auto &input_nvte = inputs_nvte.back();
-    auto &output_nvte = outputs_nvte.back();
-    output_nvte.set_with_gemm_swizzled_scales(true);
+    const uint8_t swizzled_flag = 1;
+    nvte_set_tensor_param_v2(outputs_nvte[i], kNVTEWithGEMMSwizzledScales, &swizzled_flag,
+                             sizeof(swizzled_flag));
     if (rowwise_usage) {
       const auto data_nvte = tensor.get_rowwise_data();
       const auto scales_nvte = tensor.get_rowwise_scale_inv();
       const auto data_dtype = static_cast<transformer_engine::DType>(data_nvte.dtype);
       const auto scales_dtype = static_cast<transformer_engine::DType>(scales_nvte.dtype);
-      input_nvte.set_rowwise_data(nullptr, data_dtype, data_nvte.shape);
-      input_nvte.set_rowwise_scale_inv(scales_nvte.data_ptr, scales_dtype, scales_nvte.shape);
-      output_nvte.set_rowwise_data(nullptr, data_dtype, data_nvte.shape);
-      output_nvte.set_rowwise_scale_inv(output_scales_dptr + output_scales_offsets[i], scales_dtype,
-                                        scales_nvte.shape);
+      output_scales_dtypes[i] = scales_dtype;
+      output_scales_shapes[i] = scales_nvte.shape;
+      set_param(inputs_nvte[i], kNVTERowwiseData, nullptr, data_dtype, data_nvte.shape);
+      set_param(inputs_nvte[i], kNVTERowwiseScaleInv, scales_nvte.data_ptr, scales_dtype,
+                scales_nvte.shape);
+      set_param(outputs_nvte[i], kNVTERowwiseData, nullptr, data_dtype, data_nvte.shape);
+      set_param(outputs_nvte[i], kNVTERowwiseScaleInv,
+                output_scales_dptr + output_scales_offsets[i], scales_dtype, scales_nvte.shape);
     } else {
       const auto data_nvte = tensor.get_columnwise_data();
       const auto scales_nvte = tensor.get_columnwise_scale_inv();
       const auto data_dtype = static_cast<transformer_engine::DType>(data_nvte.dtype);
       const auto scales_dtype = static_cast<transformer_engine::DType>(scales_nvte.dtype);
-      input_nvte.set_columnwise_data(nullptr, data_dtype, data_nvte.shape);
-      input_nvte.set_columnwise_scale_inv(scales_nvte.data_ptr, scales_dtype, scales_nvte.shape);
-      output_nvte.set_columnwise_data(nullptr, data_dtype, data_nvte.shape);
-      output_nvte.set_columnwise_scale_inv(output_scales_dptr + output_scales_offsets[i],
-                                           scales_dtype, scales_nvte.shape);
+      output_scales_dtypes[i] = scales_dtype;
+      output_scales_shapes[i] = scales_nvte.shape;
+      set_param(inputs_nvte[i], kNVTEColumnwiseData, nullptr, data_dtype, data_nvte.shape);
+      set_param(inputs_nvte[i], kNVTEColumnwiseScaleInv, scales_nvte.data_ptr, scales_dtype,
+                scales_nvte.shape);
+      set_param(outputs_nvte[i], kNVTEColumnwiseData, nullptr, data_dtype, data_nvte.shape);
+      set_param(outputs_nvte[i], kNVTEColumnwiseScaleInv,
+                output_scales_dptr + output_scales_offsets[i], scales_dtype, scales_nvte.shape);
     }
-  }
-
-  // Pack raw NVTETensors into vectors
-  std::vector<NVTETensor> inputs_nvte_raw, outputs_nvte_raw;
-  inputs_nvte_raw.reserve(tensors_needing_swizzle.size());
-  outputs_nvte_raw.reserve(tensors_needing_swizzle.size());
-  for (auto &tensor : inputs_nvte) {
-    inputs_nvte_raw.emplace_back(tensor.data());
-  }
-  for (auto &tensor : outputs_nvte) {
-    outputs_nvte_raw.emplace_back(tensor.data());
   }
 
   // Launch kernel
   NVTE_SCOPED_GIL_RELEASE({
     if (check_scale_inv_shapes) {
-      nvte_multi_tensor_swizzle_scaling_factors(inputs_nvte_raw.data(), outputs_nvte_raw.data(),
-                                                inputs_nvte_raw.size(),
+      nvte_multi_tensor_swizzle_scaling_factors(inputs_nvte, outputs_nvte, n_swizzle,
                                                 at::cuda::getCurrentCUDAStream());
     } else {
-      nvte_multi_tensor_swizzle_scaling_factors_unchecked(
-          inputs_nvte_raw.data(), outputs_nvte_raw.data(), inputs_nvte_raw.size(),
-          at::cuda::getCurrentCUDAStream());
+      nvte_multi_tensor_swizzle_scaling_factors_unchecked(inputs_nvte, outputs_nvte, n_swizzle,
+                                                          at::cuda::getCurrentCUDAStream());
     }
   });
 
   // Update tensors with swizzled scales
-  for (size_t i = 0; i < tensors_needing_swizzle.size(); ++i) {
+  for (size_t i = 0; i < n_swizzle; ++i) {
     auto &tensor = *tensors_needing_swizzle[i];
     reset_tensor_data(tensor, !rowwise_usage, !columnwise_usage);
     tensor.set_with_gemm_swizzled_scales(true);
     if (rowwise_usage) {
-      auto scales_nvte = outputs_nvte[i].get_rowwise_scale_inv();
-      const auto scales_dtype = static_cast<transformer_engine::DType>(scales_nvte.dtype);
-      tensor.set_rowwise_scale_inv(output_scales_dptr + output_scales_offsets[i], scales_dtype,
-                                   scales_nvte.shape);
+      tensor.set_rowwise_scale_inv(output_scales_dptr + output_scales_offsets[i],
+                                   output_scales_dtypes[i], output_scales_shapes[i]);
     } else {
-      auto scales_nvte = outputs_nvte[i].get_columnwise_scale_inv();
-      const auto scales_dtype = static_cast<transformer_engine::DType>(scales_nvte.dtype);
-      tensor.set_columnwise_scale_inv(output_scales_dptr + output_scales_offsets[i], scales_dtype,
-                                      scales_nvte.shape);
+      tensor.set_columnwise_scale_inv(output_scales_dptr + output_scales_offsets[i],
+                                      output_scales_dtypes[i], output_scales_shapes[i]);
     }
   }
 
