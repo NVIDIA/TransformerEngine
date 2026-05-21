@@ -482,10 +482,8 @@ class _BackwardGroupedMLP_CuTeGEMMDBase_MXFP8(FusedOperation):
         if self._cudnn_dact_func is not None:
             fc2_dactivation_kwargs["beta_tensor"] = alpha_tensor
             fc2_dactivation_kwargs["act_func"] = self._cudnn_dact_func
-        elif _cudnn_frontend_supports_grouped_gemm_srelu():
-            fc2_dactivation_kwargs["use_dsrelu_reuse"] = (
-                os.environ.get("NVTE_CUTEDSL_FUSED_GROUPED_MLP_DSRELU_REUSE", "0") == "1"
-            )
+        else:
+            fc2_dactivation_kwargs["use_dsrelu_reuse"] = recompute_fc2_x_from_dsrelu
 
         if fc2_op.single_grouped_weight:
             # Clone and swizzle scales for GEMM
