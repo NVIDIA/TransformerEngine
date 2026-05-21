@@ -26,6 +26,20 @@ std::vector<size_t> convert_shape_back_from_fp4(const std::vector<size_t>& shape
   return ret;
 }
 
+std::array<size_t, 2> get_2d_dims(NVTEShape shape, bool transpose) {
+  if (!transpose) {
+    size_t flat_first = 1;
+    for (size_t i = 0; i + 1 < shape.ndim; ++i) flat_first *= shape.data[i];
+    const size_t flat_last = shape.ndim > 0 ? shape.data[shape.ndim - 1] : 1;
+    return {flat_first, flat_last};
+  } else {
+    const size_t flat_first = shape.ndim > 0 ? shape.data[0] : 1;
+    size_t flat_last = 1;
+    for (size_t i = 1; i < shape.ndim; ++i) flat_last *= shape.data[i];
+    return {flat_first, flat_last};
+  }
+}
+
 std::vector<size_t> getTensorShape(const at::Tensor& t) {
   std::vector<size_t> shape;
   for (auto s : t.sizes()) {
@@ -272,7 +286,8 @@ at::Tensor allocateSpace(const NVTEShape& shape, const transformer_engine::DType
   } else if (size == 1) {
     return at::empty({static_cast<int64_t>(shape.data[0])}, at::CUDA(GetATenDType(type)));
   }
-  NVTE_CHECK(false, "Should never reach here! func: allocateSpace");
+  NVTE_ERROR("Unsupported tensor allocation: ndim=", size, ", init_to_zeros=", init_to_zeros,
+             ". Only 1D and 2D tensors are supported.");
 }
 
 at::Tensor allocateTorchTensor(int M, int N, transformer_engine::DType dtype) {

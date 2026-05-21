@@ -21,7 +21,6 @@
 #include "../mxfp8/group_quantize_mxfp8.cuh"
 #include "../mxfp8/quantize_mxfp8.cuh"
 #include "../nvfp4/group_quantize_transpose_nvfp4.cuh"
-#include "../nvfp4/quantize_nvfp4.cuh"
 #include "../nvfp4/quantize_transpose_nvfp4.cuh"
 
 namespace transformer_engine {
@@ -101,6 +100,14 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
       int32_t rows = input_tensor->flat_first_dim();
       int32_t cols = input_tensor->flat_last_dim();
       auto dtype = input_tensor->dtype();
+      const bool row_scaled_nvfp4 = output_tensor->row_scaled_nvfp4;
+      if (row_scaled_nvfp4) {
+        NVTE_CHECK(!quant_config_cpp.nvfp4_2d_quantization,
+                   "Row-scaled NVFP4 quantization does not support 2D quantization.");
+        NVTE_CHECK(!output_tensor->has_columnwise_data(),
+                   "Row-scaled NVFP4 quantization does not produce columnwise output.");
+        nvfp4::compute_rowwise_amax(*input_tensor, noop_tensor, output_tensor, stream);
+      }
       bool use_optimized_kernel = (dtype == DType::kBFloat16) && (rows % 32 == 0) &&
                                   (cols % 32 == 0) && output_tensor->has_data();
 
@@ -127,7 +134,9 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
             /*use_stochastic_rounding=*/quant_config_cpp.stochastic_rounding,
             /*rng_state=*/quant_config_cpp.rng_state,
             /*use_2d_quantization=*/quant_config_cpp.nvfp4_2d_quantization,
-            /*noop_tensor=*/noop_tensor->data, /*stream=*/stream);
+            /*row_scaled_nvfp4=*/row_scaled_nvfp4,
+            /*noop_tensor=*/noop_tensor->data,
+            /*stream=*/stream);
       }
       break;
     }
@@ -240,6 +249,8 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
       int32_t rows = grad_tensor->flat_first_dim();
       int32_t cols = grad_tensor->flat_last_dim();
       auto dtype = grad_tensor->dtype();
+      NVTE_CHECK(!output_tensor->row_scaled_nvfp4,
+                 "Backward NVFP4 quantization does not support row-scaled outputs.");
       bool use_optimized_kernel = (dtype == DType::kBFloat16) && (rows % 32 == 0) &&
                                   (cols % 32 == 0) && output_tensor->has_data();
 
@@ -266,7 +277,8 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
             /*use_stochastic_rounding=*/quant_config_cpp.stochastic_rounding,
             /*rng_state=*/quant_config_cpp.rng_state,
             /*use_2d_quantization=*/quant_config_cpp.nvfp4_2d_quantization,
-            /*noop_tensor=*/noop_tensor->data, /*stream=*/stream);
+            /*row_scaled_nvfp4=*/false, /*noop_tensor=*/noop_tensor->data,
+            /*stream=*/stream);
       }
       break;
     }
@@ -382,13 +394,13 @@ void group_quantize_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTensor 
   NVTEScalingMode scaling_mode = nvte_grouped_tensor_scaling_mode(output);
 
   const NVTEGroupedTensor activation = nullptr;
-  NVTETensor dbias = nullptr;
+  NVTEGroupedTensor dbias = nullptr;
   NVTETensor workspace = nullptr;
 
   const GroupedTensor *input_tensor = convertNVTEGroupedTensorCheck(input);
   GroupedTensor *output_tensor = convertNVTEGroupedTensorCheck(output);
   const GroupedTensor *activations_tensor = convertNVTEGroupedTensor(activation);
-  Tensor *dbias_tensor = convertNVTETensor(dbias);
+  GroupedTensor *dbias_tensor = convertNVTEGroupedTensor(dbias);
   Tensor *workspace_tensor = convertNVTETensor(workspace);
 
   // Quantization config
@@ -409,7 +421,7 @@ void group_quantize_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTensor 
     case NVTE_MXFP8_1D_SCALING: {
       mxfp8::group_quantize</*IS_DBIAS=*/false, /*IS_DACT=*/false, IS_ACT, ParamOP, OP>(
           input_tensor, activations_tensor, noop_tensor, output_tensor, dbias_tensor,
-          workspace_tensor, stream);
+          workspace_tensor, &quant_config_cpp, stream);
       break;
     }
     default:
@@ -419,8 +431,9 @@ void group_quantize_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTensor 
 
 template <bool IS_DBIAS, bool IS_DACT, typename ParamOP, float (*OP)(float, const ParamOP &)>
 void group_quantize_bwd_helper(const NVTEGroupedTensor grad, const NVTEGroupedTensor input,
-                               NVTEGroupedTensor output, NVTETensor dbias, NVTETensor workspace,
-                               const NVTEQuantizationConfig quant_config, cudaStream_t stream) {
+                               NVTEGroupedTensor output, NVTEGroupedTensor dbias,
+                               NVTETensor workspace, const NVTEQuantizationConfig quant_config,
+                               cudaStream_t stream) {
   using namespace detail;
 
   NVTEScalingMode scaling_mode = nvte_grouped_tensor_scaling_mode(output);
@@ -428,7 +441,7 @@ void group_quantize_bwd_helper(const NVTEGroupedTensor grad, const NVTEGroupedTe
   const GroupedTensor *grad_tensor = convertNVTEGroupedTensorCheck(grad);
   const GroupedTensor *input_tensor = convertNVTEGroupedTensor(input);
   GroupedTensor *output_tensor = convertNVTEGroupedTensorCheck(output);
-  Tensor *dbias_tensor = convertNVTETensor(dbias);
+  GroupedTensor *dbias_tensor = convertNVTEGroupedTensor(dbias);
   Tensor *workspace_tensor = convertNVTETensor(workspace);
 
   // Quantization config
@@ -449,7 +462,7 @@ void group_quantize_bwd_helper(const NVTEGroupedTensor grad, const NVTEGroupedTe
     case NVTE_MXFP8_1D_SCALING: {
       mxfp8::group_quantize<IS_DBIAS, IS_DACT, /*IS_ACT=*/false, ParamOP, OP>(
           grad_tensor, input_tensor, noop_tensor, output_tensor, dbias_tensor, workspace_tensor,
-          stream);
+          &quant_config_cpp, stream);
       break;
     }
     default:

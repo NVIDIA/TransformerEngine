@@ -41,7 +41,14 @@ Error_Type FusedTopkWithScoreFunctionForwardFFI(
   auto logits_tensor = TensorWrapper(logits, flat_shape, dtype);
   auto probs_tensor = TensorWrapper(probs, flat_shape, dtype);
   auto routing_map_tensor = TensorWrapper(routing_map, flat_shape, DType::kByte);
-  auto intermediate_tensor = TensorWrapper(intermediate, flat_shape, dtype);
+  // intermediate is always float32 (CompType) regardless of logits dtype.
+  auto intermediate_dtype = convert_ffi_datatype_to_te_dtype(intermediate_buf->element_type());
+  NVTE_CHECK(
+      intermediate_dtype == DType::kFloat32,
+      "intermediate_output must be float32 (CompType); got dtype ",
+      static_cast<int>(intermediate_dtype),
+      ". Check FusedTopkWithScoreFunctionFwdPrimitive.abstract in cpp_extensions/router.py.");
+  auto intermediate_tensor = TensorWrapper(intermediate, flat_shape, DType::kFloat32);
 
   if (compute_aux_scores) {
     nvte_fused_score_for_moe_aux_loss_forward(
@@ -97,7 +104,14 @@ Error_Type FusedTopkWithScoreFunctionBackwardFFI(
     Result_Type grad_logits_buf,  // [num_tokens, num_experts]
     int64_t topk, int64_t use_pre_softmax, double scaling_factor,
     JAXX_Score_Function score_function, int64_t compute_aux_scores) {
-  auto dtype = convert_ffi_datatype_to_te_dtype(intermediate_buf.element_type());
+  // intermediate is always float32 (CompType) regardless of logits dtype.
+  auto intermediate_dtype = convert_ffi_datatype_to_te_dtype(intermediate_buf.element_type());
+  NVTE_CHECK(
+      intermediate_dtype == DType::kFloat32,
+      "intermediate_output must be float32 (CompType); got dtype ",
+      static_cast<int>(intermediate_dtype),
+      ". Check FusedTopkWithScoreFunctionFwdPrimitive.abstract in cpp_extensions/router.py.");
+  auto grad_dtype = convert_ffi_datatype_to_te_dtype(grad_probs_buf.element_type());
   auto dims = intermediate_buf.dimensions();
   auto num_tokens = static_cast<int>(product(dims, 0, dims.size() - 1));
   auto num_experts = static_cast<int>(dims[dims.size() - 1]);
@@ -105,9 +119,10 @@ Error_Type FusedTopkWithScoreFunctionBackwardFFI(
   auto flat_shape =
       std::vector<size_t>{static_cast<size_t>(num_tokens), static_cast<size_t>(num_experts)};
 
-  auto intermediate_tensor = TensorWrapper(intermediate_buf.untyped_data(), flat_shape, dtype);
-  auto grad_probs_tensor = TensorWrapper(grad_probs_buf.untyped_data(), flat_shape, dtype);
-  auto grad_logits_tensor = TensorWrapper(grad_logits_buf->untyped_data(), flat_shape, dtype);
+  auto intermediate_tensor =
+      TensorWrapper(intermediate_buf.untyped_data(), flat_shape, DType::kFloat32);
+  auto grad_probs_tensor = TensorWrapper(grad_probs_buf.untyped_data(), flat_shape, grad_dtype);
+  auto grad_logits_tensor = TensorWrapper(grad_logits_buf->untyped_data(), flat_shape, grad_dtype);
 
   if (compute_aux_scores) {
     nvte_fused_score_for_moe_aux_loss_backward(intermediate_tensor.data(), grad_probs_tensor.data(),
@@ -162,12 +177,12 @@ Error_Type FusedMoEAuxLossForwardFFI(cudaStream_t stream,
       std::vector<size_t>{static_cast<size_t>(num_tokens), static_cast<size_t>(num_experts)};
   auto tpe_dtype = convert_ffi_datatype_to_te_dtype(tokens_per_expert_buf.element_type());
   auto tpe_shape = std::vector<size_t>{static_cast<size_t>(num_experts)};
-  auto scalar_shape = std::vector<size_t>{1};
 
   auto probs_tensor = TensorWrapper(probs_buf.untyped_data(), probs_shape, dtype);
   auto tpe_tensor = TensorWrapper(tokens_per_expert_buf.untyped_data(), tpe_shape, tpe_dtype);
-  auto aux_loss_tensor = TensorWrapper(aux_loss_buf->untyped_data(), scalar_shape, dtype);
-  auto const_buf_tensor = TensorWrapper(const_buf->untyped_data(), scalar_shape, DType::kFloat32);
+  auto aux_loss_tensor = TensorWrapper(aux_loss_buf->untyped_data(), std::vector<size_t>{1}, dtype);
+  auto const_buf_tensor =
+      TensorWrapper(const_buf->untyped_data(), std::vector<size_t>{2}, DType::kFloat32);
 
   nvte_fused_moe_aux_loss_forward(probs_tensor.data(), tpe_tensor.data(), num_tokens, num_experts,
                                   num_tokens, num_experts, static_cast<int>(topk),
@@ -204,16 +219,16 @@ Error_Type FusedMoEAuxLossBackwardFFI(cudaStream_t stream,
   auto num_tokens = static_cast<int>(grad_probs_dims[0]);
   auto num_experts = static_cast<int>(grad_probs_dims[1]);
 
-  auto scalar_shape = std::vector<size_t>{1};
   auto tpe_dims = tokens_per_expert_buf.dimensions();
   auto tpe_shape = std::vector<size_t>{static_cast<size_t>(tpe_dims[0])};
   auto grad_probs_shape =
       std::vector<size_t>{static_cast<size_t>(num_tokens), static_cast<size_t>(num_experts)};
 
-  auto const_buf_tensor = TensorWrapper(const_buf_in.untyped_data(), scalar_shape, DType::kFloat32);
+  auto const_buf_tensor =
+      TensorWrapper(const_buf_in.untyped_data(), std::vector<size_t>{2}, DType::kFloat32);
   auto tpe_tensor = TensorWrapper(tokens_per_expert_buf.untyped_data(), tpe_shape, tpe_dtype);
   auto grad_aux_loss_tensor =
-      TensorWrapper(grad_aux_loss_buf.untyped_data(), scalar_shape, grad_dtype);
+      TensorWrapper(grad_aux_loss_buf.untyped_data(), std::vector<size_t>{1}, grad_dtype);
   auto grad_probs_tensor =
       TensorWrapper(grad_probs_buf->untyped_data(), grad_probs_shape, grad_dtype);
 

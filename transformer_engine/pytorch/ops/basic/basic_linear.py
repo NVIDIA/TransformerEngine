@@ -19,12 +19,11 @@ from ...distributed import (
     gather_along_first_dim,
     reduce_scatter_along_first_dim,
 )
-from ...quantization import FP8GlobalStateManager, Recipe
+from ...quantization import FP8GlobalStateManager, QuantizerRole, Recipe
 from ...module.base import (
     _2X_ACC_FPROP,
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
-    get_dummy_wgrad,
 )
 from ...tensor import Quantizer
 from ...tensor.float8_tensor import Float8Quantizer
@@ -36,7 +35,13 @@ from ...utils import (
     devices_match,
 )
 from ..op import BasicOperation, OperationContext
-from .._common import maybe_dequantize, is_quantized_tensor
+from .._common import (
+    get_accumulate_flag_in_param,
+    get_dummy_wgrads_for_params,
+    get_main_grad_from_param,
+    is_quantized_tensor,
+    maybe_dequantize,
+)
 
 
 def _wait_async(handle: Optional[Any]) -> None:
@@ -270,6 +275,21 @@ class BasicLinear(BasicOperation):
             return 1
         return 0
 
+    def get_quantizer_roles(self, mode: str) -> Optional[list[QuantizerRole]]:
+        name = getattr(self, "name", "") or ""
+        if mode == "forward":
+            # BasicLinear owns input and weight quantizers.
+            # Output quantizer is provided by the next op (as its input quantizer).
+            return [
+                QuantizerRole(module_type="linear", tensor_type="input", name=name),
+                QuantizerRole(module_type="linear", tensor_type="weight", name=name),
+            ]
+        if mode == "backward":
+            # BasicLinear owns grad_output quantizer.
+            # Grad_input quantizer is provided by the previous op (as its grad_output quantizer).
+            return [QuantizerRole(module_type="linear", tensor_type="grad_output", name=name)]
+        return None
+
     def reset_parameters(self) -> None:
         """Initialize parameter buffers and values"""
 
@@ -329,20 +349,21 @@ class BasicLinear(BasicOperation):
         super().pre_fuser_forward(requires_grad=requires_grad)
         if FP8GlobalStateManager.is_fp8_enabled():
             # Configure quantizer usages
-            # Note: We cache the quantized input for backward pass,
-            # but discard the quantized weights.
             weight_requires_grad = requires_grad and self.weight.requires_grad
+            columnwise_usage = weight_requires_grad
+            if FP8GlobalStateManager.get_fp8_recipe().backward_override is not None:
+                columnwise_usage = False
             input_quantizer = self.get_quantizer("forward", 0)
             weight_quantizer = self.get_quantizer("forward", 1)
             grad_output_quantizer = self.get_quantizer("backward", 0)
-            input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
-            weight_quantizer.set_usage(rowwise=True, columnwise=False)
-            grad_output_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
+            input_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
+            weight_quantizer.set_usage(rowwise=True, columnwise=requires_grad)
+            grad_output_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
 
     def reset_recipe_state(self, *, recipe: Optional[Recipe]) -> None:
         super().reset_recipe_state(recipe=recipe)
 
-        # Configure input/grad output tensor
+        # Configure input/grad output quantizers
         # Note: These tensors are only used internally. If there is no
         # tensor-parallel communication, they are only used for GEMM.
         input_quantizer = self.get_quantizer("forward", 0)
@@ -358,21 +379,15 @@ class BasicLinear(BasicOperation):
 
         # Configure weight quantizer
         # Note: This function may be called in base class constructor,
-        # before any basic linear attrs have been set.
+        # before basic linear attrs have been set.
         weight_quantizer = self.get_quantizer("forward", 1)
-        if weight_quantizer is None:
-            pass
-        elif is_quantized_tensor(getattr(self, "weight", None)):
-            # Make sure weight param has correct quantizer
-            weight_quantizer.set_usage(rowwise=True, columnwise=torch.is_grad_enabled())
-            weight_quantizer.internal = False
-            self.weight.update_quantizer(weight_quantizer.copy())
-        else:
-            # Use internal tensors if quantized weights will not be
-            # exposed externally
-            weight_quantizer.internal = (
-                not FP8GlobalStateManager.with_fp8_parameters()
-                and not getattr(self, "_with_quantized_weight", False)
+        weight = getattr(self, "weight", None)
+        if weight_quantizer is not None:
+            # Determine if quantized weight is exposed as parameter
+            weight_quantizer.internal = not (
+                FP8GlobalStateManager.with_fp8_parameters()
+                or getattr(self, "_with_quantized_weight", False)
+                or is_quantized_tensor(weight)
             )
 
         # Recipe-specific configuration
@@ -404,6 +419,18 @@ class BasicLinear(BasicOperation):
                         grad_output_quantizer.with_amax_reduction = True
                         grad_output_quantizer.amax_reduction_group = self.tensor_parallel_group
 
+        # Update quantizer in quantized weight tensor
+        if weight_quantizer is not None and is_quantized_tensor(weight):
+            if weight._quantizer is not None:
+                # Preserve existing usages in weight tensor. Even if a
+                # usage is currently unnecessary, the weight tensor
+                # may be used elsewhere.
+                weight_quantizer.set_usage(
+                    rowwise=weight._quantizer.rowwise_usage,
+                    columnwise=weight._quantizer.columnwise_usage,
+                )
+            weight.update_quantizer(weight_quantizer.copy())
+
     @staticmethod
     def _functional_forward(
         input: torch.Tensor,  # pylint: disable=redefined-builtin
@@ -420,6 +447,7 @@ class BasicLinear(BasicOperation):
         tensor_parallel_group: Optional[torch.distributed.ProcessGroup] = None,
         sequence_parallel: bool = False,
         with_quantized_compute: bool = False,
+        backward_override: Optional[str] = None,
         input_quantizer: Optional[Quantizer] = None,
         weight_quantizer: Optional[Quantizer] = None,
         output_quantizer: Optional[Quantizer] = None,
@@ -459,6 +487,8 @@ class BasicLinear(BasicOperation):
             distributing along inner dimension (embedding dim)
         with_quantized_compute: bool, default = False
             Whether to perform compute with quantized data.
+        backward_override: {`None`, `"high_precision"`, `"dequantized"`}, default = `None`
+            Backward-override policy for quantized compute.
         input_quantizer: Quantizer, optional
             Builder class for quantized input tensor.
         weight_quantizer: Quantizer, optional
@@ -510,7 +540,10 @@ class BasicLinear(BasicOperation):
         if with_quantized_compute:
             if input_quantizer is None:
                 raise ValueError("Missing quantizer for input tensor")
-            input_quantizer.set_usage(rowwise=True, columnwise=weight_requires_grad)
+            input_quantizer.set_usage(
+                rowwise=True,
+                columnwise=weight_requires_grad and backward_override is None,
+            )
             if with_x_all_gather:
                 input_quantizer.set_usage(columnwise=False)
                 x, x_async = gather_along_first_dim(
@@ -542,7 +575,10 @@ class BasicLinear(BasicOperation):
         elif with_quantized_compute and not is_quantized_tensor(w):
             if weight_quantizer is None:
                 raise ValueError("Missing quantizer for weight tensor")
-            weight_quantizer.set_usage(rowwise=True, columnwise=input_requires_grad)
+            weight_quantizer.set_usage(
+                rowwise=True,
+                columnwise=input_requires_grad and backward_override is None,
+            )
             w = weight_quantizer(w)
 
         # Check output tensor
@@ -611,14 +647,23 @@ class BasicLinear(BasicOperation):
 
         # Prepare weight tensor for backward pass
         if input_requires_grad:
-            if w is not weight and with_quantized_compute and is_quantized_tensor(w):
+            if (
+                w is not weight
+                and with_quantized_compute
+                and is_quantized_tensor(w)
+                and backward_override is None
+            ):
                 w.update_usage(rowwise_usage=False, columnwise_usage=True)
         else:
             w = None
 
         # Prepare input tensor for backward pass
         if weight_requires_grad:
-            if with_quantized_compute and is_quantized_tensor(x_local):
+            if (
+                with_quantized_compute
+                and is_quantized_tensor(x_local)
+                and backward_override is None
+            ):
                 if not (isinstance(x_local, Float8TensorStorage) and with_x_all_gather):
                     # FP8 does not support all-gather of transpose data
                     x_local.update_usage(rowwise_usage=False, columnwise_usage=True)
@@ -968,6 +1013,10 @@ class BasicLinear(BasicOperation):
         grad_output_quantizer = self.get_quantizer("backward", 0)
         grad_input_quantizer = prev_op_grad_output_quantizer
         with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
+        if with_quantized_compute:
+            backward_override = FP8GlobalStateManager.get_fp8_recipe().backward_override
+        else:
+            backward_override = None
 
         # Get autocast dtype if needed
         if torch.is_autocast_enabled():
@@ -984,6 +1033,7 @@ class BasicLinear(BasicOperation):
             tensor_parallel_group=self.tensor_parallel_group,
             sequence_parallel=self.sequence_parallel,
             with_quantized_compute=with_quantized_compute,
+            backward_override=backward_override,
             input_quantizer=input_quantizer,
             weight_quantizer=weight_quantizer,
             output_quantizer=output_quantizer,
@@ -993,10 +1043,17 @@ class BasicLinear(BasicOperation):
 
         # Save state for backward pass
         if ctx.requires_grad:
+            if backward_override == "high_precision":
+                saved_input = input_ if weight_requires_grad else None
+                saved_weight = self.weight if input_requires_grad else None
+            else:
+                saved_input = x_local
+                saved_weight = w
             if is_cpu_offload_enabled():
-                mark_activation_offload(x_local)
-            ctx.save_for_backward(x_local, w)
-            ctx.with_quantized_compute = with_quantized_compute
+                mark_activation_offload(saved_input)
+            ctx.save_for_backward(saved_input, saved_weight)
+            ctx.with_quantized_compute = with_quantized_compute and backward_override is None
+            ctx.backward_override = backward_override
             ctx.input_quantizer = input_quantizer
             ctx.weight_quantizer = weight_quantizer
             ctx.grad_output_quantizer = grad_output_quantizer
@@ -1023,16 +1080,9 @@ class BasicLinear(BasicOperation):
         grad_weight = None
         if ctx.weight_requires_grad and accumulate_into_main_grad:
             weight_param = self.weight
-            if hasattr(weight_param, "__fsdp_param__"):
-                weight_param.main_grad = weight_param.get_main_grad()
-            accumulate_into_main_grad = not getattr(weight_param, "overwrite_main_grad", False)
-            if not hasattr(weight_param, "main_grad"):
-                raise RuntimeError(
-                    "BasicLinear op is configured with "
-                    "accumulate_into_main_grad=True, "
-                    "but weight parameter does not have main_grad attribute"
-                )
-            grad_weight = weight_param.main_grad.detach()
+            main_grad = get_main_grad_from_param(weight_param, op_label="BasicLinear")
+            accumulate_into_main_grad = get_accumulate_flag_in_param(weight_param)
+            grad_weight = main_grad.detach()
         else:
             accumulate_into_main_grad = False
 
@@ -1062,14 +1112,6 @@ class BasicLinear(BasicOperation):
         # Megatron-LM wgrad fusion
         # Note: Return dummy tensor for grad weight if needed.
         if accumulate_into_main_grad:
-            grad_weight = None
-            weight_param = self.weight
-            if hasattr(weight_param, "grad_added_to_main_grad"):
-                weight_param.grad_added_to_main_grad = True
-                grad_weight = get_dummy_wgrad(
-                    list(weight_param.size()),
-                    weight_param.dtype,
-                    zero=getattr(weight_param, "zero_out_wgrad", False),
-                )
+            grad_weight = get_dummy_wgrads_for_params([self.weight])[0]
 
         return grad_input, [grad_weight]

@@ -9,6 +9,7 @@
 
 #include "../extensions.h"
 #include "transformer_engine/cast.h"
+#include "transformer_engine/gemm.h"
 #include "transformer_engine/hadamard_transform.h"
 #include "transformer_engine/recipe.h"
 #include "transformer_engine/transformer_engine.h"
@@ -318,8 +319,8 @@ Error_Type GroupedQuantizeFFI(cudaStream_t stream, Buffer_Type inputs, Buffer_Ty
                               Buffer_Type group_sizes, Result_Type outputs,
                               Result_Type colwise_outputs, Result_Type scale_invs,
                               Result_Type colwise_scale_invs, Result_Type amaxs,
-                              JAXX_Scaling_Mode scaling_mode, JAXX_Quantize_Layout quantize_layout,
-                              int64_t flatten_axis) {
+                              Result_Type _unused, JAXX_Scaling_Mode scaling_mode,
+                              JAXX_Quantize_Layout quantize_layout, int64_t flatten_axis) {
   NVTE_CHECK(scaling_mode != JAXX_Scaling_Mode::NO_SCALING,
              "Unsupported scaling mode: ", static_cast<int>(scaling_mode));
 
@@ -451,6 +452,12 @@ Error_Type GroupedQuantizeFFI(cudaStream_t stream, Buffer_Type inputs, Buffer_Ty
       }
     }
 
+    // For MXFP8, produce pre-swizzled scales so the GEMM can consume them directly
+    // without a separate swizzle pass.
+    if (is_mxfp8_scaling) {
+      out_i.set_with_gemm_swizzled_scales(true);
+    }
+
     input_holders.push_back(std::move(inp_i));
     output_holders.push_back(std::move(out_i));
 
@@ -479,20 +486,154 @@ Error_Type GroupedQuantizeFFI(cudaStream_t stream, Buffer_Type inputs, Buffer_Ty
   return ffi_with_cuda_error_check();
 }
 
-XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedQuantizeHandler, GroupedQuantizeFFI,
+XLA_FFI_DEFINE_HANDLER_SYMBOL(
+    GroupedQuantizeHandler, GroupedQuantizeFFI,
+    FFI::Bind()
+        .Ctx<FFI_Stream_Type>()  // stream
+        .Arg<Buffer_Type>()      // input
+        .Arg<Buffer_Type>()      // scale
+        .Arg<Buffer_Type>()      // group_sizes
+        .Ret<Buffer_Type>()      // output
+        .Ret<Buffer_Type>()      // colwise output
+        .Ret<Buffer_Type>()      // scale_inv
+        .Ret<Buffer_Type>()      // scale_inv colwise
+        .Ret<Buffer_Type>()      // amax
+        .Ret<Buffer_Type>()      // unused (for compatibility with V2 interface)
+        .Attr<JAXX_Scaling_Mode>("scaling_mode")
+        .Attr<JAXX_Quantize_Layout>("q_layout")
+        .Attr<int64_t>("flatten_axis"));
+
+Error_Type GroupedQuantizeV2FFI(cudaStream_t stream, Buffer_Type inputs, Buffer_Type scale_unused,
+                                Buffer_Type group_sizes, Result_Type rowwise_out,
+                                Result_Type colwise_out, Result_Type rowwise_sinv,
+                                Result_Type colwise_sinv, Result_Type updated_amaxs,
+                                Result_Type int64_workspace, JAXX_Quantize_Layout quantize_layout,
+                                int64_t flatten_axis) {
+  (void)scale_unused;  // scale is unused for MXFP8; accepted to match V1 input arity
+  auto in_dtype = convert_ffi_datatype_to_te_dtype(inputs.element_type());
+  auto out_dtype = convert_ffi_datatype_to_te_dtype(rowwise_out->element_type());
+  auto sinv_dtype = convert_ffi_datatype_to_te_dtype(rowwise_sinv->element_type());
+
+  NVTE_CHECK(is_fp8_dtype(out_dtype), "Output datatype must be FP8 for GroupedQuantizeV2.");
+  NVTE_CHECK(sinv_dtype == DType::kFloat8E8M0,
+             "scale_inv must be E8M0 for MXFP8 grouped quantize.");
+
+  auto input_dims = inputs.dimensions();
+  int64_t input_ndim = input_dims.size();
+  if (flatten_axis < 0) flatten_axis += input_ndim;
+  NVTE_CHECK(flatten_axis < input_ndim && flatten_axis > 0, "flatten_axis is out of bounds!");
+
+  auto m = product(input_dims, 0, flatten_axis);
+  auto n = product(input_dims, flatten_axis, input_ndim);
+  size_t n_groups = group_sizes.dimensions()[0];
+
+  // Workspace layout (CUDA-graph safe, all device-side):
+  //   int64_ptr[0 .. n_groups-1]       : per-group ROW counts (int64)
+  //   int64_ptr[n_groups .. 2*n_groups] : exclusive prefix-sum offsets (n_groups+1 values)
+  auto *int64_ptr = reinterpret_cast<int64_t *>(int64_workspace->untyped_data());
+  auto *offsets_ptr_out = int64_ptr + n_groups;  // n_groups+1 values follow group_sizes
+
+  // non_group_m handles multi-dim tensors (e.g., kernel shape G×K×N with flatten_axis=2):
+  //   group_sizes[i] counts "slices" along the outermost group axis (e.g., 1 per expert),
+  //   while the kernel expects actual ROW counts (e.g., K rows per expert).
+  //   non_group_m = product(input_dims[1..flatten_axis)) converts slice→row count.
+  // For the lhs case (shape M×K, flatten_axis=1), non_group_m=1 (no-op).
+  int64_t non_group_m =
+      (flatten_axis > 1) ? product(input_dims, 1, static_cast<size_t>(flatten_axis)) : 1;
+
+  // Convert int32 group_sizes to int64 row counts on device (CUDA-graph safe, no D2H).
+  nvte_convert_int32_to_int64_with_multiplier(
+      reinterpret_cast<const int32_t *>(group_sizes.untyped_data()), int64_ptr, n_groups,
+      non_group_m, stream);
+
+  // Compute exclusive prefix-sum offsets on device (CUDA-graph safe, no D2H).
+  nvte_compute_grouped_tensor_offsets(int64_ptr, offsets_ptr_out, n_groups, static_cast<int64_t>(n),
+                                      stream);
+
+  NVTEShape data_shape{};
+  data_shape.data[0] = m;
+  data_shape.data[1] = n;
+  data_shape.ndim = 2;
+
+  NVTEShape sz_shape{};
+  sz_shape.ndim = 1;
+  sz_shape.data[0] = n_groups;
+
+  // Offsets tensor has n_groups+1 elements (exclusive prefix sums with sentinel).
+  NVTEShape offsets_shape{};
+  offsets_shape.ndim = 1;
+  offsets_shape.data[0] = n_groups + 1;
+
+  // Build input grouped tensor (plain float data, no quantization on the input side).
+  GroupedTensorWrapper in_grouped(n_groups, data_shape,
+                                  get_nvte_scaling_mode(JAXX_Scaling_Mode::NO_SCALING));
+  in_grouped
+      .set_rowwise_data(reinterpret_cast<uint8_t *>(inputs.untyped_data()), in_dtype, data_shape)
+      .set_first_dims(reinterpret_cast<void *>(int64_ptr), DType::kInt64, sz_shape)
+      .set_tensor_offsets(reinterpret_cast<void *>(offsets_ptr_out), DType::kInt64, offsets_shape);
+
+  // Build output grouped tensor.
+  GroupedTensorWrapper out_grouped(n_groups, data_shape,
+                                   get_nvte_scaling_mode(JAXX_Scaling_Mode::MXFP8_1D_SCALING));
+  out_grouped.set_first_dims(reinterpret_cast<void *>(int64_ptr), DType::kInt64, sz_shape)
+      .set_tensor_offsets(reinterpret_cast<void *>(offsets_ptr_out), DType::kInt64, offsets_shape);
+
+  // Rowwise output data + scale_inv.
+  if (is_quantize_rowwise(quantize_layout)) {
+    NVTEShape rw_sinv_shape{};
+    rw_sinv_shape.ndim = 2;
+    rw_sinv_shape.data[0] = m;
+    rw_sinv_shape.data[1] = n / 32;  // MXFP8 block size = 32
+    out_grouped.set_rowwise_data(rowwise_out->untyped_data(), out_dtype, data_shape)
+        .set_rowwise_scale_inv(rowwise_sinv->untyped_data(), sinv_dtype, rw_sinv_shape);
+  }
+
+  // Colwise output data + scale_inv.
+  if (is_quantize_colwise(quantize_layout)) {
+    NVTEShape cw_sinv_shape{};
+    cw_sinv_shape.ndim = 2;
+    cw_sinv_shape.data[0] = m / 32;  // MXFP8 block size = 32
+    cw_sinv_shape.data[1] = n;
+    out_grouped.set_columnwise_data(colwise_out->untyped_data(), out_dtype, data_shape)
+        .set_columnwise_scale_inv(colwise_sinv->untyped_data(), sinv_dtype, cw_sinv_shape);
+  }
+
+  // Zero-initialize scale_inv buffers (mirrors V1 behaviour for MXFP8).
+  size_t total_rowwise_sinv_size =
+      is_quantize_rowwise(quantize_layout) ? product(rowwise_sinv->dimensions()) : 0;
+  size_t total_colwise_sinv_size =
+      is_quantize_colwise(quantize_layout) ? product(colwise_sinv->dimensions()) : 0;
+  if (total_rowwise_sinv_size > 0)
+    nvte_memset(rowwise_sinv->untyped_data(), 0, total_rowwise_sinv_size, stream);
+  if (total_colwise_sinv_size > 0)
+    nvte_memset(colwise_sinv->untyped_data(), 0, total_colwise_sinv_size, stream);
+
+  // V2 grouped quantize is always paired with V2 grouped GEMM, which expects
+  // scale_inv in GEMM-swizzled layout.  Enable the fused swizzle so the kernel
+  // writes scales in the layout the GEMM will consume directly.
+  out_grouped.set_with_gemm_swizzled_scales(true);
+
+  QuantizationConfigWrapper quant_config{};
+  nvte_group_quantize(in_grouped.data(), out_grouped.data(), quant_config, stream);
+
+  return ffi_with_cuda_error_check();
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedQuantizeV2Handler, GroupedQuantizeV2FFI,
                               FFI::Bind()
                                   .Ctx<FFI_Stream_Type>()  // stream
-                                  .Arg<Buffer_Type>()      // input
-                                  .Arg<Buffer_Type>()      // scale
-                                  .Arg<Buffer_Type>()      // group_sizes
-                                  .Ret<Buffer_Type>()      // output
-                                  .Ret<Buffer_Type>()      // colwise output
-                                  .Ret<Buffer_Type>()      // scale_inv
-                                  .Ret<Buffer_Type>()      // scale_inv colwise
-                                  .Ret<Buffer_Type>()      // amax
-                                  .Attr<JAXX_Scaling_Mode>("scaling_mode")
+                                  .Arg<Buffer_Type>()      // inputs
+                                  .Arg<Buffer_Type>()      // scale (unused, for input arity match)
+                                  .Arg<Buffer_Type>()      // group_sizes (int32)
+                                  .Ret<Buffer_Type>()      // rowwise_out
+                                  .Ret<Buffer_Type>()      // colwise_out
+                                  .Ret<Buffer_Type>()      // rowwise_sinv
+                                  .Ret<Buffer_Type>()      // colwise_sinv
+                                  .Ret<Buffer_Type>()      // updated_amaxs
+                                  .Ret<Buffer_Type>()      // int64_workspace
                                   .Attr<JAXX_Quantize_Layout>("q_layout")
-                                  .Attr<int64_t>("flatten_axis"));
+                                  .Attr<int64_t>("flatten_axis"),
+                              FFI_CudaGraph_Traits);
 
 }  // namespace jax
 }  // namespace transformer_engine

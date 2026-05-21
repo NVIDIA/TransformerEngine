@@ -54,6 +54,9 @@ Usage:
     from transformer_engine.jax.triton_extensions import get_triton_info
     info = get_triton_info()
     print(f"Using Triton {info['version']} from {info['source']}")
+
+    # Check if JAX version supports Triton (without importing triton_extensions)
+    from transformer_engine.jax.version_utils import is_triton_extension_supported
 """
 
 from .utils import *

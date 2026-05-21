@@ -18,6 +18,7 @@ from transformer_engine.pytorch import (
     MXFP8Quantizer,
     NVFP4Quantizer,
     Float8Tensor,
+    Float8BlockwiseQTensor,
     MXFP8Tensor,
     NVFP4Tensor,
     QuantizedTensor,
@@ -27,6 +28,7 @@ from transformer_engine.pytorch.utils import is_non_tn_fp8_gemm_supported
 import transformer_engine_torch as tex
 
 from references.ref_per_tensor_cs import ref_per_tensor_cs_cast
+from utils import assert_close, quantization_tols
 
 # PyTorch tensor dtypes
 _dtypes: List[torch.dtype] = [torch.float32, torch.float16, torch.bfloat16]
@@ -173,7 +175,7 @@ def make_reference_and_test_tensors(
         raise ValueError(f"Unsupported quantization scheme ({quantization})")
 
     # Make sure reference and test tensors match each other
-    ref.copy_(test)
+    ref.copy_(test.to(dtype=ref.dtype))
 
     ref.requires_grad_(requires_grad)
     test.requires_grad_(requires_grad)
@@ -656,6 +658,107 @@ class TestQuantizedTensor:
             tols = dict(rtol=0, atol=0)  # Chunking is exact
             y_test = y_test.to(dtype=torch.float64, device="cpu")
             torch.testing.assert_close(y_test, y_ref, **tols)
+
+    @pytest.mark.parametrize("quantization", _quantization_list)
+    def test_shape_with_none_data(
+        self,
+        *,
+        quantization: str,
+        shape: Iterable[int] = (128, 128),
+        dtype: torch.dtype = torch.bfloat16,
+    ) -> None:
+        """Test that shape is accessible after internal data tensors are set to None.
+
+        During CPU offloading, both data and transpose tensors can be None.
+        The shape should still be available via the wrapper subclass metadata.
+        """
+
+        _, x_test = make_reference_and_test_tensors(
+            shape=shape,
+            quantization=quantization,
+            test_dtype=dtype,
+            requires_grad=False,
+        )
+
+        # Verify shape before clearing data
+        assert x_test.shape == torch.Size(shape)
+
+        # Simulate CPU offloading: None out all internal data
+        if isinstance(x_test, Float8Tensor):
+            x_test._data = None
+            x_test._transpose = None
+        elif isinstance(x_test, MXFP8Tensor):
+            x_test._rowwise_data = None
+            x_test._columnwise_data = None
+        elif isinstance(x_test, NVFP4Tensor):
+            x_test._rowwise_data = None
+            x_test._columnwise_data = None
+        elif isinstance(x_test, Float8BlockwiseQTensor):
+            x_test._rowwise_data = None
+            x_test._columnwise_data = None
+
+        # Shape must still be correct after data is cleared
+        assert x_test.shape == torch.Size(shape), (
+            f"Expected shape {shape} but got {x_test.shape} "
+            f"after setting data to None on {type(x_test).__name__}"
+        )
+
+    @pytest.mark.parametrize(
+        "quantization",
+        _quantization_list + (["nvfp4_2d"] if nvfp4_available else []),
+    )
+    def test_update_nd_tensor(
+        self,
+        *,
+        quantization: str,
+        shape: Iterable[int] = (32, 4, 128),
+        dtype: torch.dtype = torch.bfloat16,
+        device: str = "cuda",
+    ) -> None:
+        """Check that an N-D quantized tensor can be updated."""
+
+        # Construct quantizer
+        if quantization == "fp8":
+            quantizer = Float8Quantizer(
+                scale=torch.ones(1, dtype=torch.float32, device=device).squeeze(),
+                amax=torch.zeros(1, dtype=torch.float32, device=device),
+                fp8_dtype=tex.DType.kFloat8E4M3,
+            )
+        elif quantization == "fp8_blockwise":
+            quantizer = Float8BlockQuantizer(
+                fp8_dtype=tex.DType.kFloat8E4M3,
+                rowwise=True,
+                columnwise=True,
+                force_pow_2_scales=True,
+                amax_epsilon=0.0,
+                block_scaling_dim=1,
+            )
+        elif quantization == "mxfp8":
+            quantizer = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)
+        elif quantization in ("nvfp4", "nvfp4_2d"):
+            quantizer = NVFP4Quantizer(
+                rowwise=True,
+                columnwise=True,
+                with_rht=False,
+                with_post_rht_amax=False,
+                with_2d_quantization=(quantization == "nvfp4_2d"),
+            )
+            quantization = "nvfp4"
+        else:
+            raise ValueError(f"Unknown quantization: {quantization}")
+
+        # Construct quantized tensor
+        x = torch.randn(list(shape), dtype=dtype, device=device)
+        q_x = quantizer(x)
+
+        # Update tensor
+        x_new = torch.randn(list(shape), dtype=dtype, device=device)
+        q_x.copy_(x_new)
+
+        # Check results
+        assert q_x.shape == torch.Size(shape)
+        tols = quantization_tols(quantization)
+        assert_close(q_x, x_new, **tols)
 
 
 @pytest.mark.skipif(not mxfp8_available, reason=reason_for_no_mxfp8)

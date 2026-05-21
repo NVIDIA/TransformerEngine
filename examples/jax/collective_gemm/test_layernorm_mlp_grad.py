@@ -2,7 +2,6 @@
 #
 # See LICENSE for license information.
 """Collective Dense Gradient test on multi-GPU with tensor parallelism"""
-import argparse
 import unittest
 import os
 
@@ -13,18 +12,24 @@ import flax
 
 from common import (
     assert_allclose,
+    get_tolerance_dtype,
     _initialize_distributed,
     _get_dp_and_tp_sizes,
     _create_mesh,
     DP_AXIS,
     TPSP_AXIS,
-    PARAMS_KEY,
     cgemm_parser,
 )
 
 from transformer_engine.jax.layernorm_mlp import layernorm_mlp
 
-from transformer_engine.jax.quantize import autocast
+from transformer_engine.jax.quantize import (
+    autocast,
+    is_quantize_recipe_supported,
+    get_quantization_recipe,
+    QuantizerFactory,
+    noop_quantizer_set,
+)
 from transformer_engine.jax.cpp_extensions.gemm import (
     CollectiveOpSet,
     CollectiveOp,
@@ -68,6 +73,7 @@ def _mean_layernorm_mlp(
     weight_1_axes,
     weight_2_axes,
     collective_op_sets,
+    quantizer_sets,
 ):
     output = layernorm_mlp(
         x,
@@ -82,6 +88,7 @@ def _mean_layernorm_mlp(
         kernel_2_axes=weight_2_axes,
         activation_type=("gelu",),
         collective_op_sets=collective_op_sets,
+        quantizer_sets=quantizer_sets,
     )
     return jnp.mean(output)
 
@@ -98,6 +105,7 @@ def _value_and_grad_layernorm_mlp(
     weight_1_axes,
     weight_2_axes,
     collective_op_sets,
+    quantizer_sets,
 ):
     return jax.jit(
         jax.value_and_grad(_mean_layernorm_mlp, (0, 1, 2, 3, 4, 5)), static_argnums=(6, 7, 8, 9, 10)
@@ -113,11 +121,12 @@ def _value_and_grad_layernorm_mlp(
         weight_1_axes,
         weight_2_axes,
         collective_op_sets,
+        quantizer_sets,
     )
 
 
 def run_layernorm_mlp_grad_tests(args, mesh=None):
-    """Execute Dense Gradient tests."""
+    """Execute LayerNorm MLP Gradient tests."""
     print(args)
 
     # Initialize distributed with provided arguments
@@ -149,11 +158,21 @@ def run_layernorm_mlp_grad_tests(args, mesh=None):
     collective_op_sets = (collective_op_set_1, collective_op_set_2)
     noop_collective_op_sets = (noop_collective_op_set, noop_collective_op_set)
 
+    use_quantization = args.quantize_recipe is not None
+    recipe = get_quantization_recipe(args.quantize_recipe) if use_quantization else None
     with mesh, autocast(
-        enabled=False,
-        recipe=None,
+        enabled=use_quantization,
+        recipe=recipe,
         mesh_resource=MeshResource(dp_resource=DP_AXIS, tpsp_resource=TPSP_AXIS),
     ):
+        # Build quantizer_sets inside autocast so create_set() reads the global recipe
+        # for correct fwd/bwd dtypes. One set per dense layer (GEMM1=AG, GEMM2=RS).
+        quantizer_sets = (
+            QuantizerFactory.create_set(n_quantizer_sets=2)
+            if use_quantization
+            else (noop_quantizer_set, noop_quantizer_set)
+        )
+
         # Get the base axis rules and extend them with TE's rules. This must be done inside autocast
         axis_rules = flax.linen.get_logical_axis_rules()
         axis_rules += ((TPSP_AXIS, TPSP_AXIS), (DP_AXIS, DP_AXIS))
@@ -181,6 +200,7 @@ def run_layernorm_mlp_grad_tests(args, mesh=None):
                 weight_1_axes,
                 weight_2_axes,
                 noop_collective_op_sets,
+                quantizer_sets,
             )
             output, sharded_grads = _value_and_grad_layernorm_mlp(
                 x_sharded,
@@ -194,6 +214,7 @@ def run_layernorm_mlp_grad_tests(args, mesh=None):
                 weight_1_axes,
                 weight_2_axes,
                 collective_op_sets,
+                quantizer_sets,
             )
         jax.block_until_ready(ref_output)
         jax.block_until_ready(output)
@@ -210,13 +231,14 @@ def run_layernorm_mlp_grad_tests(args, mesh=None):
         jax.block_until_ready(gathered_ref_grads)
 
     if args.enable_result_check and args.process_id == 0:
-        assert_allclose(ref_output, output, dtype=jnp.bfloat16)
+        tol_dtype = get_tolerance_dtype(quantizer_sets[0])
+        assert_allclose(ref_output, output, dtype=tol_dtype)
         for ref_grad, gathered_grad in zip(gathered_ref_grads, gathered_grads):
-            assert_allclose(ref_grad, gathered_grad, dtype=jnp.bfloat16)
+            assert_allclose(ref_grad, gathered_grad, dtype=tol_dtype)
 
 
 class TestCollectiveLayerNormMLPGradient(unittest.TestCase):
-    """Collective Dense Gradient unittests"""
+    """Collective LayerNorm MLP Gradient unittests"""
 
     def setUp(self):
         self.args = cgemm_parser(
@@ -240,8 +262,42 @@ class TestCollectiveLayerNormMLPGradient(unittest.TestCase):
         os.environ.pop("NVTE_JAX_ALL_REDUCE_IN_FP32", None)
 
     def test_te_bf16_layernorm_mlp_grad(self):
-        """Test Collective Dense Gradient with AllGather"""
+        """Test Collective LayerNorm MLP Gradient with BF16"""
         run_layernorm_mlp_grad_tests(self.args, self.mesh)
+
+    def test_te_delayed_scaling_fp8_layernorm_mlp_grad(self):
+        """Test Collective LayerNorm MLP Gradient with FP8 DelayedScaling"""
+        self.args.quantize_recipe = "DelayedScaling"
+        is_supported, reason = is_quantize_recipe_supported(self.args.quantize_recipe)
+        if not is_supported:
+            self.skipTest(reason)
+
+        run_layernorm_mlp_grad_tests(self.args, self.mesh)
+
+    def test_te_current_scaling_fp8_layernorm_mlp_grad(self):
+        """Test Collective LayerNorm MLP Gradient with FP8 Float8CurrentScaling"""
+        self.args.quantize_recipe = "Float8CurrentScaling"
+        is_supported, reason = is_quantize_recipe_supported(self.args.quantize_recipe)
+        if not is_supported:
+            self.skipTest(reason)
+
+        run_layernorm_mlp_grad_tests(self.args, self.mesh)
+
+    def test_te_mxfp8_layernorm_mlp_grad(self):
+        """Test Collective LayerNorm MLP Gradient with MXFP8BlockScaling"""
+        self.args.quantize_recipe = "MXFP8BlockScaling"
+        is_supported, reason = is_quantize_recipe_supported(self.args.quantize_recipe)
+        if not is_supported:
+            self.skipTest(reason)
+        run_layernorm_mlp_grad_tests(self.args, self.mesh)
+
+    # def test_te_nvfp4_layernorm_mlp_grad(self):
+    #     """Test Collective LayerNorm MLP Gradient with NVFP4BlockScaling"""
+    #     self.args.quantize_recipe = "NVFP4BlockScaling"
+    #     is_supported, reason = is_quantize_recipe_supported(self.args.quantize_recipe)
+    #     if not is_supported:
+    #         self.skipTest(reason)
+    #     run_layernorm_mlp_grad_tests(self.args, self.mesh)
 
 
 if __name__ == "__main__":
@@ -265,6 +321,6 @@ if __name__ == "__main__":
 
     args = cgemm_parser(
         "Collective LayerNorm MLP Gradient test on multi-GPU with tensor parallelism"
-    ).parse_args([])
+    ).parse_args()
     _initialize_distributed(args)
     run_layernorm_mlp_grad_tests(args, mesh=None)

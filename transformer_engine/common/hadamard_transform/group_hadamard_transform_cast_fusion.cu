@@ -171,527 +171,525 @@ __global__ static void group_rht_gemm_device(
     BSmemLayout sBlayout, CUTE_GRID_CONSTANT TmaLoadB const tma_load_b, CSmemLayout, TiledMMA mma,
     MultiAmaxHadamardCastFusionArgs kernel_args, const size_t *rng_state) {
   using namespace cute;
-  using X = Underscore;
-  // static constexpr bool kApplyStochasticRounding = true;
-  using ElementAccumulator = float;
-  static constexpr int K_PIPE_MAX = size<3>(ASmemLayout{});
-  using AtomThrShapeMNK = Shape<decltype(shape<0>(typename TiledMMA::ThrLayoutVMNK{})), _1, _1>;
-  static constexpr uint32_t kTmaTransactionBytes = cutlass::bits_to_bytes(
-      size(AtomThrShapeMNK{}) * cosize(take<0, 3>(ASmemLayout{})) * cute::sizeof_bits_v<TA>);
+  constexpr bool is_blackwell_arch = ARCH_BLACKWELL_FAMILY;
+  if constexpr (!is_blackwell_arch) {
+    NVTE_DEVICE_ERROR("RHT fusion is only supported on Blackwell.");
+    return;
+  } else {
+    using X = Underscore;
+    // static constexpr bool kApplyStochasticRounding = true;
+    using ElementAccumulator = float;
+    static constexpr int K_PIPE_MAX = size<3>(ASmemLayout{});
+    using AtomThrShapeMNK = Shape<decltype(shape<0>(typename TiledMMA::ThrLayoutVMNK{})), _1, _1>;
+    static constexpr uint32_t kTmaTransactionBytes = cutlass::bits_to_bytes(
+        size(AtomThrShapeMNK{}) * cosize(take<0, 3>(ASmemLayout{})) * cute::sizeof_bits_v<TA>);
 
-  static constexpr int kTmaRhtTensorTransactionBytes =
-      cutlass::bits_to_bytes(16 * 16 * cute::sizeof_bits_v<TB>);
-  static constexpr int AccumulatorPipelineStageCount = 16;
+    static constexpr int kTmaRhtTensorTransactionBytes =
+        cutlass::bits_to_bytes(16 * 16 * cute::sizeof_bits_v<TB>);
+    static constexpr int AccumulatorPipelineStageCount = 16;
 
-  static constexpr int MainloopPipelineStageCount = size<3>(ASmemLayout{});
-  using MainloopPipeline =
-      cutlass::PipelineTmaUmmaAsync<MainloopPipelineStageCount, Shape<_1, _1, _1>, AtomThrShapeMNK>;
-  using MainloopPipelineState = typename MainloopPipeline::PipelineState;
+    static constexpr int MainloopPipelineStageCount = size<3>(ASmemLayout{});
+    using MainloopPipeline = cutlass::PipelineTmaUmmaAsync<MainloopPipelineStageCount,
+                                                           Shape<_1, _1, _1>, AtomThrShapeMNK>;
+    using MainloopPipelineState = typename MainloopPipeline::PipelineState;
 
-  using TmemAllocator = cute::TMEM::Allocator1Sm;
-  static constexpr int VectorSize = 16;
-  const size_t rng_seed = rng_state != nullptr ? rng_state[0] : 0;
-  const size_t rng_offset = rng_state != nullptr ? rng_state[1] : 0;
-  // Preconditions
-  CUTE_STATIC_ASSERT(is_static<ASmemLayout>::value);
-  CUTE_STATIC_ASSERT(is_static<BSmemLayout>::value);
-  CUTE_STATIC_ASSERT(is_static<CSmemLayout>::value);
+    using TmemAllocator = cute::TMEM::Allocator1Sm;
+    static constexpr int VectorSize = 16;
+    const size_t rng_seed = rng_state != nullptr ? rng_state[0] : 0;
+    const size_t rng_offset = rng_state != nullptr ? rng_state[1] : 0;
+    // Preconditions
+    CUTE_STATIC_ASSERT(is_static<ASmemLayout>::value);
+    CUTE_STATIC_ASSERT(is_static<BSmemLayout>::value);
+    CUTE_STATIC_ASSERT(is_static<CSmemLayout>::value);
 
-  // Represent the full tensors
-  Tensor mA = tma_load_a.get_tma_tensor(make_shape(M, N));
-  Tensor mB = tma_load_b.get_tma_tensor(make_shape(16, 16));
+    // Represent the full tensors
+    Tensor mA = tma_load_a.get_tma_tensor(make_shape(M, N));
+    Tensor mB = tma_load_b.get_tma_tensor(make_shape(16, 16));
 
-  using TensorC = decltype(make_tensor(subbyte_iterator<TC>(recast_ptr<TC>(nullptr)),  // engine
-                                       make_shape(int{}, int{}),                       // (M, N_i)
-                                       Stride2D{}  // stride (dM, dN)
-                                       ));
+    using TensorC = decltype(make_tensor(subbyte_iterator<TC>(recast_ptr<TC>(nullptr)),  // engine
+                                         make_shape(int{}, int{}),                       // (M, N_i)
+                                         Stride2D{}  // stride (dM, dN)
+                                         ));
 
-  using TensorSFC = decltype(make_tensor(
-      make_gmem_ptr(recast_ptr<TSFC>(nullptr)),
-      make_layout(make_shape(int{},                                   // M
-                             make_shape(make_shape(Int<16>{}, _4{}),  // (16, 4)
-                                        int{})                        // n_tiles = split / 64
-                             ),
-                  make_stride(int{},                                // dM = (split / 16)
-                              make_stride(make_stride(_0{}, _1{}),  // inner (16,4) layout
-                                          _4{})                     // tiles stride
-                              ))));
+    using TensorSFC = decltype(make_tensor(
+        make_gmem_ptr(recast_ptr<TSFC>(nullptr)),
+        make_layout(make_shape(int{},                                   // M
+                               make_shape(make_shape(Int<16>{}, _4{}),  // (16, 4)
+                                          int{})                        // n_tiles = split / 64
+                               ),
+                    make_stride(int{},                                // dM = (split / 16)
+                                make_stride(make_stride(_0{}, _1{}),  // inner (16,4) layout
+                                            _4{})                     // tiles stride
+                                ))));
 
-  auto cluster_shape = Shape<_1, _1, _1>{};
+    auto cluster_shape = Shape<_1, _1, _1>{};
 
-  // Get the appropriate blocks for this Cluster
-  dim3 cluster_coord_in_grid = cluster_id_in_grid();
+    // Get the appropriate blocks for this Cluster
+    dim3 cluster_coord_in_grid = cluster_id_in_grid();
 
-  // Total number of k-tiles
-  const int K_TILE_MAX = min(N, K) / 64;
-  uint32_t tiles_in_m = (M + size<0>(cluster_tile) - 1) / size<0>(cluster_tile);
-  uint32_t tiles_in_n = (N + 64 - 1) / 64;
-  uint32_t linear_tile_idx = blockIdx.x;
-  uint32_t tile_idx_m = linear_tile_idx % tiles_in_m;
-  uint32_t tile_idx_n = (linear_tile_idx / tiles_in_m) * K_TILE_MAX;
+    // Total number of k-tiles
+    const int K_TILE_MAX = min(N, K) / 64;
+    uint32_t tiles_in_m = (M + size<0>(cluster_tile) - 1) / size<0>(cluster_tile);
+    uint32_t tiles_in_n = (N + 64 - 1) / 64;
+    uint32_t linear_tile_idx = blockIdx.x;
+    uint32_t tile_idx_m = linear_tile_idx % tiles_in_m;
+    uint32_t tile_idx_n = (linear_tile_idx / tiles_in_m) * K_TILE_MAX;
 
-  auto mainloop_tiler = Shape<_128, _16, _64>{};
-  auto epilogue_tiler = Shape<_128, _64, _64>{};
-  Tensor gA_mk = local_tile(mA, mainloop_tiler, make_coord(_, _, _), Step<_1, X, _1>{});
-  Tensor gB_nk =
-      local_tile(mB, cluster_tile, make_coord(_, _, _), Step<X, _1, _1>{});  // (BLK_N,BLK_K,k)
-  // Tensor gC_mn = local_tile(mC, epilogue_tiler, make_coord(_,_, _), Step<_1,_1, X>{});  // (BLK_M,BLK_N)
+    auto mainloop_tiler = Shape<_128, _16, _64>{};
+    auto epilogue_tiler = Shape<_128, _64, _64>{};
+    Tensor gA_mk = local_tile(mA, mainloop_tiler, make_coord(_, _, _), Step<_1, X, _1>{});
+    Tensor gB_nk =
+        local_tile(mB, cluster_tile, make_coord(_, _, _), Step<X, _1, _1>{});  // (BLK_N,BLK_K,k)
+    // Tensor gC_mn = local_tile(mC, epilogue_tiler, make_coord(_,_, _), Step<_1,_1, X>{});  // (BLK_M,BLK_N)
 
-  using TensorGC = decltype(local_tile(std::declval<TensorC>(), decltype(epilogue_tiler){},
-                                       make_coord(_, _, _), Step<_1, _1, X>{}));
-
-  using TensorGSFC = decltype(local_tile(std::declval<TensorSFC>(), decltype(epilogue_tiler){},
+    using TensorGC = decltype(local_tile(std::declval<TensorC>(), decltype(epilogue_tiler){},
                                          make_coord(_, _, _), Step<_1, _1, X>{}));
 
-  // Allocate SMEM
-  extern __shared__ char shared_memory[];
-  using SharedStorage = SharedStorage<TA, TB, ASmemLayout, BSmemLayout>;
-  SharedStorage &shared_storage = *reinterpret_cast<SharedStorage *>(shared_memory);
-  Tensor tCsA = make_tensor(make_smem_ptr(shared_storage.tensors.smem_A.data()),
-                            sAlayout);  // (MMA,MMA_M,MMA_N,PIPE)
-  Tensor tCsB = make_tensor(make_smem_ptr(shared_storage.tensors.smem_B.data()),
-                            sBlayout);  // (MMA,MMA_N,MMA_K,PIPE)
+    using TensorGSFC = decltype(local_tile(std::declval<TensorSFC>(), decltype(epilogue_tiler){},
+                                           make_coord(_, _, _), Step<_1, _1, X>{}));
 
-  //
-  // MMA: Define C accumulators and A/B partitioning
-  //
+    // Allocate SMEM
+    extern __shared__ char shared_memory[];
+    using SharedStorage = SharedStorage<TA, TB, ASmemLayout, BSmemLayout>;
+    SharedStorage &shared_storage = *reinterpret_cast<SharedStorage *>(shared_memory);
+    Tensor tCsA = make_tensor(make_smem_ptr(shared_storage.tensors.smem_A.data()),
+                              sAlayout);  // (MMA,MMA_M,MMA_N,PIPE)
+    Tensor tCsB = make_tensor(make_smem_ptr(shared_storage.tensors.smem_B.data()),
+                              sBlayout);  // (MMA,MMA_N,MMA_K,PIPE)
 
-  int block_rank_in_cluster = cute::block_rank_in_cluster();
-  ThrMMA thr_mma = mma.get_slice(block_rank_in_cluster);  // blk idx
-  Tensor tCgB = thr_mma.partition_B(gB_nk);               // (MMA,MMA_N,MMA_K,k)
+    //
+    // MMA: Define C accumulators and A/B partitioning
+    //
 
-  auto mma_epilogue = make_tiled_mma(
-      SM100_MMA_F16BF16_SS<TA, TB, ElementAccumulator, 128, 64, UMMA::Major::MN, UMMA::Major::MN>{},
-      Layout<Shape<_1, _1>>{});
-  ThrMMA thr_mma_epilogue = mma_epilogue.get_slice(block_rank_in_cluster);
+    int block_rank_in_cluster = cute::block_rank_in_cluster();
+    ThrMMA thr_mma = mma.get_slice(block_rank_in_cluster);  // blk idx
+    Tensor tCgB = thr_mma.partition_B(gB_nk);               // (MMA,MMA_N,MMA_K,k)
 
-  using TiledMmaEpilogue = decltype(mma_epilogue);
-  Tensor tCgA = thr_mma.partition_A(gA_mk);
-  // Allocate "fragments" -- these are actually umma smem descriptors
-  Tensor tCrA = thr_mma.make_fragment_A(tCsA);  // (MMA,MMA_M,MMA_K,PIPE)
-  Tensor tCrB = thr_mma.make_fragment_B(tCsB);  // (MMA,MMA_M,MMA_K,PIPE)
+    auto mma_epilogue = make_tiled_mma(SM100_MMA_F16BF16_SS<TA, TB, ElementAccumulator, 128, 64,
+                                                            UMMA::Major::MN, UMMA::Major::MN>{},
+                                       Layout<Shape<_1, _1>>{});
+    ThrMMA thr_mma_epilogue = mma_epilogue.get_slice(block_rank_in_cluster);
 
-  auto acc_shape_mma = partition_shape_C(TiledMMA{}, take<0, 2>(ClusterTileShape{}));
-  auto acc_shape_epilogue = partition_shape_C(TiledMmaEpilogue{}, take<0, 2>(epilogue_tiler));
+    using TiledMmaEpilogue = decltype(mma_epilogue);
+    Tensor tCgA = thr_mma.partition_A(gA_mk);
+    // Allocate "fragments" -- these are actually umma smem descriptors
+    Tensor tCrA = thr_mma.make_fragment_A(tCsA);  // (MMA,MMA_M,MMA_K,PIPE)
+    Tensor tCrB = thr_mma.make_fragment_B(tCsB);  // (MMA,MMA_M,MMA_K,PIPE)
 
-  auto bulk_tmem_mma =
-      TiledMMA::make_fragment_C(append(acc_shape_mma, Int<AccumulatorPipelineStageCount>{}));
+    auto acc_shape_mma = partition_shape_C(TiledMMA{}, take<0, 2>(ClusterTileShape{}));
+    auto acc_shape_epilogue = partition_shape_C(TiledMmaEpilogue{}, take<0, 2>(epilogue_tiler));
 
-  auto bulk_tmem_epilogue = TiledMmaEpilogue::make_fragment_C(
-      append(acc_shape_epilogue, Int<AccumulatorPipelineStageCount / 4>{}));
+    auto bulk_tmem_mma =
+        TiledMMA::make_fragment_C(append(acc_shape_mma, Int<AccumulatorPipelineStageCount>{}));
 
-  TmemAllocator tmem_allocator{};
-  cutlass::arch::NamedBarrier tmem_allocation_result_barrier(
-      32 + 128, cutlass::arch::ReservedNamedBarriers::TmemAllocBarrier);
+    auto bulk_tmem_epilogue = TiledMmaEpilogue::make_fragment_C(
+        append(acc_shape_epilogue, Int<AccumulatorPipelineStageCount / 4>{}));
 
-  Layout cta_layout_mnk = make_layout(cluster_shape);
-  Layout cta_layout_vmnk = tiled_divide(cta_layout_mnk, make_tile(typename TiledMMA::AtomThrID{}));
-  auto cta_coord_vmnk = cta_layout_vmnk.get_flat_coord(block_rank_in_cluster);
+    TmemAllocator tmem_allocator{};
+    cutlass::arch::NamedBarrier tmem_allocation_result_barrier(
+        32 + 128, cutlass::arch::ReservedNamedBarriers::TmemAllocBarrier);
 
-  auto [tAgA, tAsA] =
-      tma_partition(tma_load_a, get<2>(cta_coord_vmnk), make_layout(size<2>(cta_layout_vmnk)),
-                    group_modes<0, 3>(tCsA), group_modes<0, 3>(tCgA));
+    Layout cta_layout_mnk = make_layout(cluster_shape);
+    Layout cta_layout_vmnk =
+        tiled_divide(cta_layout_mnk, make_tile(typename TiledMMA::AtomThrID{}));
+    auto cta_coord_vmnk = cta_layout_vmnk.get_flat_coord(block_rank_in_cluster);
 
-  auto [tBgB, tBsB] =
-      tma_partition(tma_load_b, get<1>(cta_coord_vmnk), make_layout(size<1>(cta_layout_vmnk)),
-                    group_modes<0, 3>(tCsB), group_modes<0, 3>(tCgB));
+    auto [tAgA, tAsA] =
+        tma_partition(tma_load_a, get<2>(cta_coord_vmnk), make_layout(size<2>(cta_layout_vmnk)),
+                      group_modes<0, 3>(tCsA), group_modes<0, 3>(tCgA));
 
-  uint16_t tma_mcast_mask_a = create_tma_multicast_mask<2>(cta_layout_vmnk, cta_coord_vmnk);
-  uint16_t tma_mcast_mask_b = create_tma_multicast_mask<1>(cta_layout_vmnk, cta_coord_vmnk);
+    auto [tBgB, tBsB] =
+        tma_partition(tma_load_b, get<1>(cta_coord_vmnk), make_layout(size<1>(cta_layout_vmnk)),
+                      group_modes<0, 3>(tCsB), group_modes<0, 3>(tCgB));
 
-  int warp_idx = cutlass::canonical_warp_idx_sync();
+    uint16_t tma_mcast_mask_a = create_tma_multicast_mask<2>(cta_layout_vmnk, cta_coord_vmnk);
+    uint16_t tma_mcast_mask_b = create_tma_multicast_mask<1>(cta_layout_vmnk, cta_coord_vmnk);
 
-  bool is_mma_warp = (warp_idx == 0);
-  bool is_dma_warp = (warp_idx == 1);
-  bool is_epilogue_warp = (warp_idx >= 4 && warp_idx <= 7);
+    int warp_idx = cutlass::canonical_warp_idx_sync();
 
-  // if (is_epilogue_warp && elect_one_sync()) {
-  //   // prefetch to make the global amax in cache
-  //   for (size_t i = 0; i < kernel_args.num_tensors; ++i) {
-  //     cute::prefetch(raw_pointer_cast(kernel_args.global_amax_list[i]));
-  //   }
-  // }
+    bool is_mma_warp = (warp_idx == 0);
+    bool is_dma_warp = (warp_idx == 1);
+    bool is_epilogue_warp = (warp_idx >= 4 && warp_idx <= 7);
 
-  typename MainloopPipeline::Params mainloop_pipeline_params;
-  if (is_dma_warp) {
-    mainloop_pipeline_params.role = MainloopPipeline::ThreadCategory::Producer;
-  }
-  if (is_mma_warp) {
-    mainloop_pipeline_params.role = MainloopPipeline::ThreadCategory::Consumer;
-  }
-  mainloop_pipeline_params.is_leader = cute::elect_one_sync() && is_dma_warp;
-  mainloop_pipeline_params.transaction_bytes = kTmaTransactionBytes;
-  mainloop_pipeline_params.initializing_warp = 0;
-  MainloopPipeline mainloop_pipeline(shared_storage.mainloop, mainloop_pipeline_params,
-                                     cluster_shape, cute::true_type{},  // Perform barrier init
-                                     cute::true_type{});                // Delay mask calculation
+    // if (is_epilogue_warp && elect_one_sync()) {
+    //   // prefetch to make the global amax in cache
+    //   for (size_t i = 0; i < kernel_args.num_tensors; ++i) {
+    //     cute::prefetch(raw_pointer_cast(kernel_args.global_amax_list[i]));
+    //   }
+    // }
 
-  MainloopPipelineState mainloop_pipe_consumer_state;
-  MainloopPipelineState mainloop_pipe_producer_state =
-      cutlass::make_producer_start_state<MainloopPipeline>();
-
-  using AccumulatorPipeline =
-      cutlass::PipelineUmmaAsync<AccumulatorPipelineStageCount / 4, AtomThrShapeMNK>;
-  using AccumulatorPipelineState = typename AccumulatorPipeline::PipelineState;
-
-  AccumulatorPipelineState accumulator_pipe_consumer_state;
-  AccumulatorPipelineState accumulator_pipe_producer_state =
-      cutlass::make_producer_start_state<AccumulatorPipeline>();
-
-  typename AccumulatorPipeline::Params accumulator_pipeline_params;
-  if (is_mma_warp) {
-    accumulator_pipeline_params.role = AccumulatorPipeline::ThreadCategory::Producer;
-  }
-  if (is_epilogue_warp) {
-    accumulator_pipeline_params.role = AccumulatorPipeline::ThreadCategory::Consumer;
-  }
-  // Only one producer thread arrives on this barrier.
-  accumulator_pipeline_params.producer_arv_count = 1;
-  accumulator_pipeline_params.consumer_arv_count = size(AtomThrShapeMNK{}) * 128;
-  accumulator_pipeline_params.initializing_warp = 1;
-  AccumulatorPipeline accumulator_pipeline(shared_storage.accumulator, accumulator_pipeline_params,
-                                           cluster_shape,
-                                           cute::true_type{},   // Perform barrier init
-                                           cute::true_type{});  // Delay mask calculation
-
-  if (warp_idx == 2 && elect_one_sync()) {
-    cute::initialize_barrier(shared_storage.tma_barrier[0], /* num_threads */ 1);
-  }
-  __syncthreads();
-  using TMEM_LOAD_NEW = cute::SM100::TMEM::LOAD::SM100_TMEM_LOAD_32dp32b64x;
-
-  if (is_dma_warp) {
-    if (elect_one_sync()) {
-      cute::set_barrier_transaction_bytes(shared_storage.tma_barrier[0],
-                                          kTmaRhtTensorTransactionBytes);
-      copy(tma_load_b.with(shared_storage.tma_barrier[0], tma_mcast_mask_b), tBgB(_, 0, 0),
-           tBsB(_, 0));
+    typename MainloopPipeline::Params mainloop_pipeline_params;
+    if (is_dma_warp) {
+      mainloop_pipeline_params.role = MainloopPipeline::ThreadCategory::Producer;
     }
+    if (is_mma_warp) {
+      mainloop_pipeline_params.role = MainloopPipeline::ThreadCategory::Consumer;
+    }
+    mainloop_pipeline_params.is_leader = cute::elect_one_sync() && is_dma_warp;
+    mainloop_pipeline_params.transaction_bytes = kTmaTransactionBytes;
+    mainloop_pipeline_params.initializing_warp = 0;
+    MainloopPipeline mainloop_pipeline(shared_storage.mainloop, mainloop_pipeline_params,
+                                       cluster_shape, cute::true_type{},  // Perform barrier init
+                                       cute::true_type{});                // Delay mask calculation
 
-    do {
-      bool is_first_wave = linear_tile_idx == blockIdx.x;
-      uint32_t skip_wait = is_first_wave;
-      auto tAgA_mk = tAgA(_, tile_idx_m, _);
-      int k_tile = 0;
-      auto barrier_token =
-          mainloop_pipeline.producer_try_acquire(mainloop_pipe_producer_state, skip_wait);
+    MainloopPipelineState mainloop_pipe_consumer_state;
+    MainloopPipelineState mainloop_pipe_producer_state =
+        cutlass::make_producer_start_state<MainloopPipeline>();
 
-      CUTE_NO_UNROLL
-      while (k_tile < K_TILE_MAX && k_tile + tile_idx_n < tiles_in_n) {
-        int k_tile_idx_n = tile_idx_n + k_tile;
-        ++k_tile;
-        skip_wait = (is_first_wave && k_tile < MainloopPipelineStageCount);
-        mainloop_pipeline.producer_acquire(mainloop_pipe_producer_state, barrier_token);
-        using BarrierType = typename MainloopPipeline::ProducerBarrierType;
-        BarrierType *tma_barrier =
-            mainloop_pipeline.producer_get_barrier(mainloop_pipe_producer_state);
-        int write_stage = mainloop_pipe_producer_state.index();
-        ++mainloop_pipe_producer_state;
-        barrier_token =
+    using AccumulatorPipeline =
+        cutlass::PipelineUmmaAsync<AccumulatorPipelineStageCount / 4, AtomThrShapeMNK>;
+    using AccumulatorPipelineState = typename AccumulatorPipeline::PipelineState;
+
+    AccumulatorPipelineState accumulator_pipe_consumer_state;
+    AccumulatorPipelineState accumulator_pipe_producer_state =
+        cutlass::make_producer_start_state<AccumulatorPipeline>();
+
+    typename AccumulatorPipeline::Params accumulator_pipeline_params;
+    if (is_mma_warp) {
+      accumulator_pipeline_params.role = AccumulatorPipeline::ThreadCategory::Producer;
+    }
+    if (is_epilogue_warp) {
+      accumulator_pipeline_params.role = AccumulatorPipeline::ThreadCategory::Consumer;
+    }
+    // Only one producer thread arrives on this barrier.
+    accumulator_pipeline_params.producer_arv_count = 1;
+    accumulator_pipeline_params.consumer_arv_count = size(AtomThrShapeMNK{}) * 128;
+    accumulator_pipeline_params.initializing_warp = 1;
+    AccumulatorPipeline accumulator_pipeline(shared_storage.accumulator,
+                                             accumulator_pipeline_params, cluster_shape,
+                                             cute::true_type{},   // Perform barrier init
+                                             cute::true_type{});  // Delay mask calculation
+
+    if (warp_idx == 2 && elect_one_sync()) {
+      cute::initialize_barrier(shared_storage.tma_barrier[0], /* num_threads */ 1);
+    }
+    __syncthreads();
+    using TMEM_LOAD_NEW = cute::SM100::TMEM::LOAD::SM100_TMEM_LOAD_32dp32b64x;
+
+    if (is_dma_warp) {
+      if (elect_one_sync()) {
+        cute::set_barrier_transaction_bytes(shared_storage.tma_barrier[0],
+                                            kTmaRhtTensorTransactionBytes);
+        copy(tma_load_b.with(shared_storage.tma_barrier[0], tma_mcast_mask_b), tBgB(_, 0, 0),
+             tBsB(_, 0));
+      }
+
+      do {
+        bool is_first_wave = linear_tile_idx == blockIdx.x;
+        uint32_t skip_wait = is_first_wave;
+        auto tAgA_mk = tAgA(_, tile_idx_m, _);
+        int k_tile = 0;
+        auto barrier_token =
             mainloop_pipeline.producer_try_acquire(mainloop_pipe_producer_state, skip_wait);
-        if (cute::elect_one_sync()) {
-          copy(tma_load_a.with(*tma_barrier, tma_mcast_mask_a), tAgA_mk(_, k_tile_idx_n),
-               tAsA(_, write_stage));
-        }
-      }
-      linear_tile_idx += gridDim.x;
-      tile_idx_m = linear_tile_idx % tiles_in_m;
-      tile_idx_n = (linear_tile_idx / tiles_in_m) * K_TILE_MAX;
-    } while (tile_idx_m < tiles_in_m && tile_idx_n < tiles_in_n);
-    mainloop_pipeline.producer_tail(mainloop_pipe_producer_state);
-  } else if (is_mma_warp) {
-    mma.accumulate_ = UMMA::ScaleOut::Zero;
 
-    tmem_allocator.allocate(TmemAllocator::Sm100TmemCapacityColumns, &shared_storage.tmem_base_ptr);
-    __syncwarp();
-    tmem_allocation_result_barrier.arrive();
-    uint32_t tmem_base_ptr = shared_storage.tmem_base_ptr;
-    bulk_tmem_mma.data() = tmem_base_ptr;
-
-    cute::wait_barrier(shared_storage.tma_barrier[0], 0 /*tma_phase_bit*/);
-    do {
-      uint32_t skip_wait = K_TILE_MAX <= 0;
-      auto barrier_token =
-          mainloop_pipeline.consumer_try_wait(mainloop_pipe_consumer_state, skip_wait);
-      CUTE_NO_UNROLL
-      for (int k_tile = 0; k_tile < K_TILE_MAX && k_tile + tile_idx_n < tiles_in_n;) {
-        mainloop_pipeline.consumer_wait(mainloop_pipe_consumer_state, barrier_token);
-        int read_stage = mainloop_pipe_consumer_state.index();
-        auto tCrA_mk = tCrA(_, _, _, read_stage);
-        auto tCrB_nk = tCrB(_, _, 0, 0);
-        CUTE_UNROLL
-        for (int k_block = 0; k_block < size<2>(tCrA) / 4; ++k_block) {
-          accumulator_pipeline.producer_acquire(accumulator_pipe_producer_state);
-          CUTE_UNROLL
-          for (int i = 0; i < 4; i++) {
-            auto accumulators =
-                bulk_tmem_mma(_, _, _, accumulator_pipe_producer_state.index() * 4 + i);
-            gemm(mma, tCrA_mk(_, _, k_block * 4 + i), tCrB_nk, accumulators);
+        CUTE_NO_UNROLL
+        while (k_tile < K_TILE_MAX && k_tile + tile_idx_n < tiles_in_n) {
+          int k_tile_idx_n = tile_idx_n + k_tile;
+          ++k_tile;
+          skip_wait = (is_first_wave && k_tile < MainloopPipelineStageCount);
+          mainloop_pipeline.producer_acquire(mainloop_pipe_producer_state, barrier_token);
+          using BarrierType = typename MainloopPipeline::ProducerBarrierType;
+          BarrierType *tma_barrier =
+              mainloop_pipeline.producer_get_barrier(mainloop_pipe_producer_state);
+          int write_stage = mainloop_pipe_producer_state.index();
+          ++mainloop_pipe_producer_state;
+          barrier_token =
+              mainloop_pipeline.producer_try_acquire(mainloop_pipe_producer_state, skip_wait);
+          if (cute::elect_one_sync()) {
+            copy(tma_load_a.with(*tma_barrier, tma_mcast_mask_a), tAgA_mk(_, k_tile_idx_n),
+                 tAsA(_, write_stage));
           }
-
-          accumulator_pipeline.producer_commit(accumulator_pipe_producer_state);
-          ++accumulator_pipe_producer_state;
         }
-        auto curr_mainloop_pipe_consumer_state = mainloop_pipe_consumer_state;
-        ++mainloop_pipe_consumer_state;
-        ++k_tile;
-        skip_wait = k_tile >= K_TILE_MAX;
-        barrier_token =
+        linear_tile_idx += gridDim.x;
+        tile_idx_m = linear_tile_idx % tiles_in_m;
+        tile_idx_n = (linear_tile_idx / tiles_in_m) * K_TILE_MAX;
+      } while (tile_idx_m < tiles_in_m && tile_idx_n < tiles_in_n);
+      mainloop_pipeline.producer_tail(mainloop_pipe_producer_state);
+    } else if (is_mma_warp) {
+      mma.accumulate_ = UMMA::ScaleOut::Zero;
+
+      tmem_allocator.allocate(TmemAllocator::Sm100TmemCapacityColumns,
+                              &shared_storage.tmem_base_ptr);
+      __syncwarp();
+      tmem_allocation_result_barrier.arrive();
+      uint32_t tmem_base_ptr = shared_storage.tmem_base_ptr;
+      bulk_tmem_mma.data() = tmem_base_ptr;
+
+      cute::wait_barrier(shared_storage.tma_barrier[0], 0 /*tma_phase_bit*/);
+      do {
+        uint32_t skip_wait = K_TILE_MAX <= 0;
+        auto barrier_token =
             mainloop_pipeline.consumer_try_wait(mainloop_pipe_consumer_state, skip_wait);
-        mainloop_pipeline.consumer_release(curr_mainloop_pipe_consumer_state);
-      }
+        CUTE_NO_UNROLL
+        for (int k_tile = 0; k_tile < K_TILE_MAX && k_tile + tile_idx_n < tiles_in_n;) {
+          mainloop_pipeline.consumer_wait(mainloop_pipe_consumer_state, barrier_token);
+          int read_stage = mainloop_pipe_consumer_state.index();
+          auto tCrA_mk = tCrA(_, _, _, read_stage);
+          auto tCrB_nk = tCrB(_, _, 0, 0);
+          CUTE_UNROLL
+          for (int k_block = 0; k_block < size<2>(tCrA) / 4; ++k_block) {
+            accumulator_pipeline.producer_acquire(accumulator_pipe_producer_state);
+            CUTE_UNROLL
+            for (int i = 0; i < 4; i++) {
+              auto accumulators =
+                  bulk_tmem_mma(_, _, _, accumulator_pipe_producer_state.index() * 4 + i);
+              gemm(mma, tCrA_mk(_, _, k_block * 4 + i), tCrB_nk, accumulators);
+            }
 
-      linear_tile_idx += gridDim.x;
-      tile_idx_m = linear_tile_idx % tiles_in_m;
-      tile_idx_n = (linear_tile_idx / tiles_in_m) * K_TILE_MAX;
-    } while (tile_idx_m < tiles_in_m && tile_idx_n < tiles_in_n);
-    tmem_allocator.release_allocation_lock();
-    accumulator_pipeline.producer_tail(accumulator_pipe_producer_state);
-    tmem_allocator.free(tmem_base_ptr, TmemAllocator::Sm100TmemCapacityColumns);
-  } else if (is_epilogue_warp) {
-    static constexpr int FragmentSize = 256 / sizeof_bits_v<TC>;
-
-    tmem_allocation_result_barrier.arrive_and_wait();
-    uint32_t tmem_base_ptr = shared_storage.tmem_base_ptr;
-    bulk_tmem_epilogue.data() = tmem_base_ptr;
-    int thread_idx = threadIdx.x % 128;
-
-    auto tiled_t2r = make_tmem_copy(TMEM_LOAD_NEW{}, bulk_tmem_epilogue(_, _, _, _0{}));
-    auto tiled_r2g =
-        make_tiled_copy_D(Copy_Atom<SM100_STORE_256bit_CACHE_NOALLOCATION, TC>{}, tiled_t2r);
-    auto thr_t2r = tiled_t2r.get_slice(thread_idx);
-    auto thr_r2g = tiled_r2g.get_slice(thread_idx);
-
-    // NVFP4 non-E8 recipe constants and global scales
-    static constexpr float fp4_max = 6.0f;
-    static constexpr float fp4_max_inv = 1.0f / fp4_max;
-
-    // get global amax pointer
-    int tensor_id = GetTensorId(&kernel_args, tile_idx_n * 64);
-    float *global_amax_ptr = GetGlobalAmaxPtrByTensorId(&kernel_args, tensor_id);
-
-    TC *cur_output_colwise_ptr = reinterpret_cast<TC *>(kernel_args.output_colwise_list[tensor_id]);
-    TSFC *cur_output_colwise_scale_inv_ptr =
-        reinterpret_cast<TSFC *>(kernel_args.output_colwise_scale_inv_list[tensor_id]);
-    int cur_output_colwise_n = kernel_args.split_sections[tensor_id];
-
-    TensorC cur_mC =
-        cute::make_tensor(cute::subbyte_iterator<TC>(cur_output_colwise_ptr),
-                          cute::make_shape(static_cast<int>(M), cur_output_colwise_n),  // (M, N_i)
-                          kernel_args.output_stride2d_list[tensor_id]);
-
-    auto cur_sfc_shape =
-        make_shape(M, make_shape(make_shape(Int<16>{}, _4{}), cur_output_colwise_n / 64));
-
-    auto cur_sfc_stride =
-        make_stride(cur_output_colwise_n / 16, make_stride(make_stride(_0{}, _1{}), _4{}));
-
-    TensorSFC cur_mSFC = cute::make_tensor(make_gmem_ptr(cur_output_colwise_scale_inv_ptr),
-                                           make_layout(cur_sfc_shape, cur_sfc_stride));
-
-    TensorGC cur_gC_mn =
-        local_tile(cur_mC, epilogue_tiler, make_coord(_, _, _), Step<_1, _1, X>{}  // (BLK_M, BLK_N)
-        );
-
-    TensorGSFC cur_gSFC_mn = local_tile(
-        cur_mSFC, epilogue_tiler, make_coord(_, _, _), Step<_1, _1, X>{}  // (BLK_M, BLK_N-like)
-    );
-
-    Tensor tCgC = thr_mma_epilogue.partition_C(cur_gC_mn);
-
-    float global_amax_val = *global_amax_ptr;
-    float global_encode_scale = ComputeGlobalEncodeScaleFP4(global_amax_val);
-
-    // Scaling factor for fast math path
-    float global_encode_scale_multiplier = 1.0f;
-    if constexpr (kUseFastMath) {
-      global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
-    }
-
-    float global_decode_scale = 1.0f / global_encode_scale;
-
-    auto sfd_converter = cutlass::NumericConverter<TSFC, float>{};
-
-    do {
-      for (int k_tile = 0; k_tile < K_TILE_MAX && k_tile + tile_idx_n < tiles_in_n; ++k_tile) {
-        // get the starting index of current k-tile in global tensor, to query the correct global amax
-        int cur_k_tile_global_elem_idx = (tile_idx_n + k_tile) * 64;
-        int new_tensor_id = GetTensorId(&kernel_args, cur_k_tile_global_elem_idx);
-        // float* new_global_amax_ptr = GetGlobalAmaxPtr(&kernel_args, cur_k_tile_global_elem_idx);
-        global_amax_ptr = GetGlobalAmaxPtrByTensorId(&kernel_args, new_tensor_id);
-        // update the scaling factors when it's no longer the same amax pointer
-        // TODO(zhongbo): the math operations are very expensive
-        // since the kernel is persistent, we can have a cache for all the possible scaling factors
-        if (tensor_id != new_tensor_id) {
-          global_amax_val = *global_amax_ptr;
-          global_encode_scale = ComputeGlobalEncodeScaleFP4(global_amax_val);
-          if constexpr (kUseFastMath) {
-            global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
+            accumulator_pipeline.producer_commit(accumulator_pipe_producer_state);
+            ++accumulator_pipe_producer_state;
           }
-          global_decode_scale = 1.0f / global_encode_scale;
-          tensor_id = new_tensor_id;
-          // went through the cute operations to update the local tensors
-          cur_output_colwise_ptr =
-              reinterpret_cast<TC *>(kernel_args.output_colwise_list[tensor_id]);
-          cur_output_colwise_scale_inv_ptr =
-              reinterpret_cast<TSFC *>(kernel_args.output_colwise_scale_inv_list[tensor_id]);
-          cur_output_colwise_n = kernel_args.split_sections[tensor_id];
-
-          cur_mC = cute::make_tensor(
-              cute::subbyte_iterator<TC>(cur_output_colwise_ptr),
-              cute::make_shape(static_cast<int>(M), cur_output_colwise_n),  // (M, N_i)
-              kernel_args.output_stride2d_list[tensor_id]);
-
-          cur_sfc_shape =
-              make_shape(M, make_shape(make_shape(Int<16>{}, _4{}), cur_output_colwise_n / 64));
-
-          cur_sfc_stride =
-              make_stride(cur_output_colwise_n / 16, make_stride(make_stride(_0{}, _1{}), _4{}));
-
-          cur_mSFC = cute::make_tensor(make_gmem_ptr(cur_output_colwise_scale_inv_ptr),
-                                       make_layout(cur_sfc_shape, cur_sfc_stride));
-
-          cur_gC_mn = local_tile(
-              cur_mC, epilogue_tiler, make_coord(_, _, _), Step<_1, _1, X>{}  // (BLK_M, BLK_N)
-          );
-
-          cur_gSFC_mn = local_tile(cur_mSFC, epilogue_tiler, make_coord(_, _, _), Step<_1, _1, X>{}
-                                   // (BLK_M, BLK_N-like)
-          );
-
-          tCgC = thr_mma_epilogue.partition_C(cur_gC_mn);
-        }
-        // maybe udpated to the new tensor id
-        int tensor_start_elem = kernel_args.split_sections_range[tensor_id];
-        int local_tile_idx_n = (cur_k_tile_global_elem_idx - tensor_start_elem) / 64;
-
-        Tensor tCgC_mn = tCgC(_, _, _, tile_idx_m, local_tile_idx_n);
-        Tensor tCgSFC_mn = cur_gSFC_mn(_, _, tile_idx_m, local_tile_idx_n);
-
-        accumulator_pipeline.consumer_wait(accumulator_pipe_consumer_state);
-
-        auto tCtC = bulk_tmem_epilogue(_, _, _, accumulator_pipe_consumer_state.index());
-        Tensor tDtC = thr_t2r.partition_S(tCtC);     // ((TMEM_LOAD,#TMEM_LOAD),MMA_M,MMA_N)
-        Tensor tDgC = thr_t2r.partition_D(tCgC_mn);  // ((TMEM_LOAD,#TMEM_LOAD),MMA_M,MMA_N)
-
-        Tensor tTR_rAcc =
-            make_tensor<ElementAccumulator>(shape(tDgC));  // ((TMEM_LOAD,#TMEM_LOAD),MMA_M,MMA_N)
-        Tensor tDrC = make_tensor<TC>(shape(tDgC));
-        Tensor tTR_rAcc_frag =
-            recast<cutlass::Array<ElementAccumulator, FragmentSize>>(coalesce(tTR_rAcc));
-        Tensor tDrC_frag = recast<cutlass::Array<TC, FragmentSize>>(coalesce(tDrC));
-
-        Tensor src = thr_r2g.retile_S(tDrC);
-        Tensor dst = thr_r2g.retile_D(tDgC);
-
-        Tensor tCgSFC = make_tensor(
-            tCgSFC_mn.data(), make_layout(make_shape(shape(tCgSFC_mn), Int<1>{}, Int<1>{}),
-                                          make_stride(stride(tCgSFC_mn), Int<0>{}, Int<0>{})));
-
-        Tensor tDgSFC = filter(thr_t2r.partition_D(tCgSFC));
-        Tensor tDrSFC = make_tensor<TSFC>(shape(tDgSFC));
-
-        static constexpr int NumVecs = size(tDgC) / VectorSize;
-        Tensor tC_rRowSFD_frg = recast<cutlass::Array<TSFC, NumVecs>>(tDrSFC);
-
-        cutlass::maximum_absolute_value_reduction<cutlass::Array<ElementAccumulator, VectorSize>,
-                                                  true>
-            amax_reduction;
-        cutlass::Array<ElementAccumulator, NumVecs> vec_maxs;
-        cutlass::Array<ElementAccumulator, NumVecs> pvscales;
-        // TMEM_LOAD
-        copy(tiled_t2r, tDtC, tTR_rAcc);
-        cutlass::arch::fence_view_async_tmem_load();
-
-        accumulator_pipeline.consumer_release(accumulator_pipe_consumer_state);
-
-        ++accumulator_pipe_consumer_state;
-
-        if constexpr (!kUseFastMath) {
-          // Downcast to BF16 for bit-wise compatibility with unfused
-          // kernels
-          auto convert_accum_to_bf16 =
-              cutlass::NumericArrayConverter<cutlass::bfloat16_t, ElementAccumulator,
-                                             FragmentSize>{};
-          auto convert_bf16_to_accum =
-              cutlass::NumericArrayConverter<ElementAccumulator, cutlass::bfloat16_t,
-                                             FragmentSize>{};
-          tTR_rAcc_frag(_0{}) = convert_bf16_to_accum(convert_accum_to_bf16(tTR_rAcc_frag(_0{})));
+          auto curr_mainloop_pipe_consumer_state = mainloop_pipe_consumer_state;
+          ++mainloop_pipe_consumer_state;
+          ++k_tile;
+          skip_wait = k_tile >= K_TILE_MAX;
+          barrier_token =
+              mainloop_pipeline.consumer_try_wait(mainloop_pipe_consumer_state, skip_wait);
+          mainloop_pipeline.consumer_release(curr_mainloop_pipe_consumer_state);
         }
 
-        auto compute_frgs = reinterpret_cast<cutlass::Array<ElementAccumulator, VectorSize> *>(
-            tTR_rAcc_frag.data());
-        auto output_frgs = reinterpret_cast<cutlass::Array<TC, VectorSize> *>(tDrC_frag.data());
-        CUTLASS_PRAGMA_UNROLL
-        for (int v = 0; v < NumVecs; v++) {
-          vec_maxs[v] = amax_reduction(ElementAccumulator(0), compute_frgs[v]);
-        }
+        linear_tile_idx += gridDim.x;
+        tile_idx_m = linear_tile_idx % tiles_in_m;
+        tile_idx_n = (linear_tile_idx / tiles_in_m) * K_TILE_MAX;
+      } while (tile_idx_m < tiles_in_m && tile_idx_n < tiles_in_n);
+      tmem_allocator.release_allocation_lock();
+      accumulator_pipeline.producer_tail(accumulator_pipe_producer_state);
+      tmem_allocator.free(tmem_base_ptr, TmemAllocator::Sm100TmemCapacityColumns);
+    } else if (is_epilogue_warp) {
+      static constexpr int FragmentSize = 256 / sizeof_bits_v<TC>;
 
-        if constexpr (kUseFastMath) {
-          // Fast math: multiply with precomputed reciprocal
+      tmem_allocation_result_barrier.arrive_and_wait();
+      uint32_t tmem_base_ptr = shared_storage.tmem_base_ptr;
+      bulk_tmem_epilogue.data() = tmem_base_ptr;
+      int thread_idx = threadIdx.x % 128;
+
+      auto tiled_t2r = make_tmem_copy(TMEM_LOAD_NEW{}, bulk_tmem_epilogue(_, _, _, _0{}));
+      auto tiled_r2g =
+          make_tiled_copy_D(Copy_Atom<SM100_STORE_256bit_CACHE_NOALLOCATION, TC>{}, tiled_t2r);
+      auto thr_t2r = tiled_t2r.get_slice(thread_idx);
+      auto thr_r2g = tiled_r2g.get_slice(thread_idx);
+
+      // NVFP4 non-E8 recipe constants and global scales
+      static constexpr float fp4_max = 6.0f;
+      static constexpr float fp4_max_inv = 1.0f / fp4_max;
+
+      // get global amax pointer
+      int tensor_id = GetTensorId(&kernel_args, tile_idx_n * 64);
+      float *global_amax_ptr = GetGlobalAmaxPtrByTensorId(&kernel_args, tensor_id);
+
+      TC *cur_output_colwise_ptr =
+          reinterpret_cast<TC *>(kernel_args.output_colwise_list[tensor_id]);
+      TSFC *cur_output_colwise_scale_inv_ptr =
+          reinterpret_cast<TSFC *>(kernel_args.output_colwise_scale_inv_list[tensor_id]);
+      int cur_output_colwise_n = kernel_args.split_sections[tensor_id];
+
+      TensorC cur_mC = cute::make_tensor(
+          cute::subbyte_iterator<TC>(cur_output_colwise_ptr),
+          cute::make_shape(static_cast<int>(M), cur_output_colwise_n),  // (M, N_i)
+          kernel_args.output_stride2d_list[tensor_id]);
+
+      auto cur_sfc_shape =
+          make_shape(M, make_shape(make_shape(Int<16>{}, _4{}), cur_output_colwise_n / 64));
+
+      auto cur_sfc_stride =
+          make_stride(cur_output_colwise_n / 16, make_stride(make_stride(_0{}, _1{}), _4{}));
+
+      TensorSFC cur_mSFC = cute::make_tensor(make_gmem_ptr(cur_output_colwise_scale_inv_ptr),
+                                             make_layout(cur_sfc_shape, cur_sfc_stride));
+
+      TensorGC cur_gC_mn = local_tile(
+          cur_mC, epilogue_tiler, make_coord(_, _, _), Step<_1, _1, X>{}  // (BLK_M, BLK_N)
+      );
+
+      TensorGSFC cur_gSFC_mn = local_tile(
+          cur_mSFC, epilogue_tiler, make_coord(_, _, _), Step<_1, _1, X>{}  // (BLK_M, BLK_N-like)
+      );
+
+      Tensor tCgC = thr_mma_epilogue.partition_C(cur_gC_mn);
+
+      float global_amax_val = *global_amax_ptr;
+      float global_encode_scale = ComputeGlobalEncodeScaleFP4(global_amax_val);
+
+      // Scaling factor for fast math path
+      float global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
+
+      float global_decode_scale = 1.0f / global_encode_scale;
+
+      auto sfd_converter = cutlass::NumericConverter<TSFC, float>{};
+
+      do {
+        for (int k_tile = 0; k_tile < K_TILE_MAX && k_tile + tile_idx_n < tiles_in_n; ++k_tile) {
+          // get the starting index of current k-tile in global tensor, to query the correct global amax
+          int cur_k_tile_global_elem_idx = (tile_idx_n + k_tile) * 64;
+          int new_tensor_id = GetTensorId(&kernel_args, cur_k_tile_global_elem_idx);
+          // float* new_global_amax_ptr = GetGlobalAmaxPtr(&kernel_args, cur_k_tile_global_elem_idx);
+          global_amax_ptr = GetGlobalAmaxPtrByTensorId(&kernel_args, new_tensor_id);
+          // update the scaling factors when it's no longer the same amax pointer
+          // TODO(zhongbo): the math operations are very expensive
+          // since the kernel is persistent, we can have a cache for all the possible scaling factors
+          if (tensor_id != new_tensor_id) {
+            global_amax_val = *global_amax_ptr;
+            global_encode_scale = ComputeGlobalEncodeScaleFP4(global_amax_val);
+            global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
+            global_decode_scale = 1.0f / global_encode_scale;
+            tensor_id = new_tensor_id;
+            // went through the cute operations to update the local tensors
+            cur_output_colwise_ptr =
+                reinterpret_cast<TC *>(kernel_args.output_colwise_list[tensor_id]);
+            cur_output_colwise_scale_inv_ptr =
+                reinterpret_cast<TSFC *>(kernel_args.output_colwise_scale_inv_list[tensor_id]);
+            cur_output_colwise_n = kernel_args.split_sections[tensor_id];
+
+            cur_mC = cute::make_tensor(
+                cute::subbyte_iterator<TC>(cur_output_colwise_ptr),
+                cute::make_shape(static_cast<int>(M), cur_output_colwise_n),  // (M, N_i)
+                kernel_args.output_stride2d_list[tensor_id]);
+
+            cur_sfc_shape =
+                make_shape(M, make_shape(make_shape(Int<16>{}, _4{}), cur_output_colwise_n / 64));
+
+            cur_sfc_stride =
+                make_stride(cur_output_colwise_n / 16, make_stride(make_stride(_0{}, _1{}), _4{}));
+
+            cur_mSFC = cute::make_tensor(make_gmem_ptr(cur_output_colwise_scale_inv_ptr),
+                                         make_layout(cur_sfc_shape, cur_sfc_stride));
+
+            cur_gC_mn = local_tile(
+                cur_mC, epilogue_tiler, make_coord(_, _, _), Step<_1, _1, X>{}  // (BLK_M, BLK_N)
+            );
+
+            cur_gSFC_mn = local_tile(cur_mSFC, epilogue_tiler, make_coord(_, _, _),
+                                     Step<_1, _1, X>{}  // (BLK_M, BLK_N-like)
+            );
+
+            tCgC = thr_mma_epilogue.partition_C(cur_gC_mn);
+          }
+          // maybe udpated to the new tensor id
+          int tensor_start_elem = kernel_args.split_sections_range[tensor_id];
+          int local_tile_idx_n = (cur_k_tile_global_elem_idx - tensor_start_elem) / 64;
+
+          Tensor tCgC_mn = tCgC(_, _, _, tile_idx_m, local_tile_idx_n);
+          Tensor tCgSFC_mn = cur_gSFC_mn(_, _, tile_idx_m, local_tile_idx_n);
+
+          accumulator_pipeline.consumer_wait(accumulator_pipe_consumer_state);
+
+          auto tCtC = bulk_tmem_epilogue(_, _, _, accumulator_pipe_consumer_state.index());
+          Tensor tDtC = thr_t2r.partition_S(tCtC);     // ((TMEM_LOAD,#TMEM_LOAD),MMA_M,MMA_N)
+          Tensor tDgC = thr_t2r.partition_D(tCgC_mn);  // ((TMEM_LOAD,#TMEM_LOAD),MMA_M,MMA_N)
+
+          Tensor tTR_rAcc =
+              make_tensor<ElementAccumulator>(shape(tDgC));  // ((TMEM_LOAD,#TMEM_LOAD),MMA_M,MMA_N)
+          Tensor tDrC = make_tensor<TC>(shape(tDgC));
+          Tensor tTR_rAcc_frag =
+              recast<cutlass::Array<ElementAccumulator, FragmentSize>>(coalesce(tTR_rAcc));
+          Tensor tDrC_frag = recast<cutlass::Array<TC, FragmentSize>>(coalesce(tDrC));
+
+          Tensor src = thr_r2g.retile_S(tDrC);
+          Tensor dst = thr_r2g.retile_D(tDgC);
+
+          Tensor tCgSFC = make_tensor(
+              tCgSFC_mn.data(), make_layout(make_shape(shape(tCgSFC_mn), Int<1>{}, Int<1>{}),
+                                            make_stride(stride(tCgSFC_mn), Int<0>{}, Int<0>{})));
+
+          Tensor tDgSFC = filter(thr_t2r.partition_D(tCgSFC));
+          Tensor tDrSFC = make_tensor<TSFC>(shape(tDgSFC));
+
+          static constexpr int NumVecs = size(tDgC) / VectorSize;
+          Tensor tC_rRowSFD_frg = recast<cutlass::Array<TSFC, NumVecs>>(tDrSFC);
+
+          cutlass::maximum_absolute_value_reduction<cutlass::Array<ElementAccumulator, VectorSize>,
+                                                    true>
+              amax_reduction;
+          cutlass::Array<ElementAccumulator, NumVecs> vec_maxs;
+          cutlass::Array<ElementAccumulator, NumVecs> pvscales;
+          // TMEM_LOAD
+          copy(tiled_t2r, tDtC, tTR_rAcc);
+          cutlass::arch::fence_view_async_tmem_load();
+
+          accumulator_pipeline.consumer_release(accumulator_pipe_consumer_state);
+
+          ++accumulator_pipe_consumer_state;
+
+          if constexpr (!kUseFastMath) {
+            // Downcast to BF16 for bit-wise compatibility with unfused
+            // kernels
+            auto convert_accum_to_bf16 =
+                cutlass::NumericArrayConverter<cutlass::bfloat16_t, ElementAccumulator,
+                                               FragmentSize>{};
+            auto convert_bf16_to_accum =
+                cutlass::NumericArrayConverter<ElementAccumulator, cutlass::bfloat16_t,
+                                               FragmentSize>{};
+            tTR_rAcc_frag(_0{}) = convert_bf16_to_accum(convert_accum_to_bf16(tTR_rAcc_frag(_0{})));
+          }
+
+          auto compute_frgs = reinterpret_cast<cutlass::Array<ElementAccumulator, VectorSize> *>(
+              tTR_rAcc_frag.data());
+          auto output_frgs = reinterpret_cast<cutlass::Array<TC, VectorSize> *>(tDrC_frag.data());
+          CUTLASS_PRAGMA_UNROLL
+          for (int v = 0; v < NumVecs; v++) {
+            vec_maxs[v] = amax_reduction(ElementAccumulator(0), compute_frgs[v]);
+          }
+
           pvscales = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(
               vec_maxs, global_encode_scale_multiplier);
-        } else {
-          // Accurate math: perform division
-          pvscales =
-              cutlass::divides<cutlass::Array<ElementAccumulator, NumVecs>>{}(vec_maxs, fp4_max);
-          pvscales = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(
-              pvscales, global_encode_scale);
-        }
-        auto pvscales_cvted =
-            cutlass::NumericArrayConverter<TSFC, ElementAccumulator, NumVecs>{}(pvscales);
+          auto pvscales_cvted =
+              cutlass::NumericArrayConverter<TSFC, ElementAccumulator, NumVecs>{}(pvscales);
 
-        tC_rRowSFD_frg(_0{}) = pvscales_cvted;
-        auto qpvscale_ups = cutlass::NumericArrayConverter<ElementAccumulator, TSFC, NumVecs>{}(
-            tC_rRowSFD_frg(_0{}));
-        auto qpvscale_scaled = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(
-            qpvscale_ups, global_decode_scale);
-        cutlass::Array<ElementAccumulator, NumVecs> acc_scales;
-        if constexpr (kUseFastMath) {
-          // Fast math: compute approximate reciprocal
-          acc_scales =
-              cutlass::reciprocal_approximate_ftz<decltype(qpvscale_scaled)>{}(qpvscale_scaled);
-        } else {
-          // Accurate math: compute reciprocal with division
-          acc_scales =
-              cutlass::divides<cutlass::Array<ElementAccumulator, NumVecs>>{}(1.0, qpvscale_scaled);
-        }
-
-        // Initialize RNG for tile
-        const size_t rng_sequence = thread_idx + k_tile * 256 + linear_tile_idx * K_TILE_MAX * 256;
-
-        transformer_engine::curanddx::detail::philox4x32_native_state<10> rng;
-        rng.init(rng_seed, rng_sequence, rng_offset);
-        uint4 random_uint4 = uint4{0, 0, 0, 0};
-
-        CUTLASS_PRAGMA_UNROLL
-        for (int v = 0; v < NumVecs; v++) {
-          auto acc_scale = cutlass::minimum_with_nan_propagation<ElementAccumulator>{}(
-              acc_scales[v], cutlass::platform::numeric_limits<ElementAccumulator>::max());
-          // auto acc_scale = acc_scales[v];
-          if constexpr (kEnableStochasticRounding) {
-            random_uint4 = rng.generate4();
-            output_frgs[v] = StochasticNumericConverter(
-                cutlass::multiplies<cutlass::Array<ElementAccumulator, VectorSize>>{}(
-                    compute_frgs[v], acc_scale),
-                reinterpret_cast<cutlass::Array<uint32_t, 4> *>(&random_uint4));
+          tC_rRowSFD_frg(_0{}) = pvscales_cvted;
+          auto qpvscale_ups = cutlass::NumericArrayConverter<ElementAccumulator, TSFC, NumVecs>{}(
+              tC_rRowSFD_frg(_0{}));
+          auto qpvscale_scaled = cutlass::multiplies<cutlass::Array<ElementAccumulator, NumVecs>>{}(
+              qpvscale_ups, global_decode_scale);
+          cutlass::Array<ElementAccumulator, NumVecs> acc_scales;
+          if constexpr (kUseFastMath) {
+            // Fast math: compute approximate reciprocal
+            acc_scales =
+                cutlass::reciprocal_approximate_ftz<decltype(qpvscale_scaled)>{}(qpvscale_scaled);
           } else {
-            output_frgs[v] = cutlass::NumericArrayConverter<TC, ElementAccumulator, VectorSize>{}(
-                cutlass::multiplies<cutlass::Array<ElementAccumulator, VectorSize>>{}(
-                    compute_frgs[v], acc_scale));
+            // Accurate math: compute reciprocal with division
+            acc_scales = cutlass::divides<cutlass::Array<ElementAccumulator, NumVecs>>{}(
+                1.0, qpvscale_scaled);
           }
+
+          // Initialize RNG for tile
+          const size_t rng_sequence =
+              thread_idx + k_tile * 256 + linear_tile_idx * K_TILE_MAX * 256;
+
+          transformer_engine::curanddx::detail::philox4x32_native_state<
+              NVTE_BUILD_NUM_PHILOX_ROUNDS>
+              rng;
+          rng.init(rng_seed, rng_sequence, rng_offset);
+          uint4 random_uint4 = uint4{0, 0, 0, 0};
+
+          CUTLASS_PRAGMA_UNROLL
+          for (int v = 0; v < NumVecs; v++) {
+            auto acc_scale = cutlass::minimum_with_nan_propagation<ElementAccumulator>{}(
+                acc_scales[v], cutlass::platform::numeric_limits<ElementAccumulator>::max());
+            // auto acc_scale = acc_scales[v];
+            if constexpr (kEnableStochasticRounding) {
+              random_uint4 = rng.generate4();
+              output_frgs[v] = StochasticNumericConverter(
+                  cutlass::multiplies<cutlass::Array<ElementAccumulator, VectorSize>>{}(
+                      compute_frgs[v], acc_scale),
+                  reinterpret_cast<cutlass::Array<uint32_t, 4> *>(&random_uint4));
+            } else {
+              output_frgs[v] = cutlass::NumericArrayConverter<TC, ElementAccumulator, VectorSize>{}(
+                  cutlass::multiplies<cutlass::Array<ElementAccumulator, VectorSize>>{}(
+                      compute_frgs[v], acc_scale));
+            }
+          }
+
+          copy(tiled_r2g, src, dst);
+
+          // copy(AutoVectorizingCopyWithAssumedAlignment<128>{}, tDrC, tDgC);
+
+          copy(AutoVectorizingCopyWithAssumedAlignment<128>{}, tDrSFC, tDgSFC);
         }
-
-        copy(tiled_r2g, src, dst);
-
-        // copy(AutoVectorizingCopyWithAssumedAlignment<128>{}, tDrC, tDgC);
-
-        copy(AutoVectorizingCopyWithAssumedAlignment<128>{}, tDrSFC, tDgSFC);
-      }
-      linear_tile_idx += gridDim.x;
-      tile_idx_m = linear_tile_idx % tiles_in_m;
-      tile_idx_n = (linear_tile_idx / tiles_in_m) * K_TILE_MAX;
-    } while (tile_idx_m < tiles_in_m && tile_idx_n < tiles_in_n);
+        linear_tile_idx += gridDim.x;
+        tile_idx_m = linear_tile_idx % tiles_in_m;
+        tile_idx_n = (linear_tile_idx / tiles_in_m) * K_TILE_MAX;
+      } while (tile_idx_m < tiles_in_m && tile_idx_n < tiles_in_n);
+    }
   }
 }
 
