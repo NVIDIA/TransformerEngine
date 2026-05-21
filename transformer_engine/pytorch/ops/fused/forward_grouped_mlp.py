@@ -481,10 +481,12 @@ class _ForwardGroupedMLP_CuTeGEMMBase_MXFP8(FusedOperation):
             mark_grouped_tensor(grouped_fc1_x, activation_in, scales, grouped_fc2_x)
             activation_op = self.basic_ops[1]
             activation_is_srelu = isinstance(activation_op, ScaledSReLU)
-            activation_recompute = bool(getattr(activation_op, "activation_recompute", False))
+            activation_recompute_in_mlp = bool(
+                getattr(activation_op, "activation_recompute_in_mlp", False)
+            )
             recompute_srelu_fc2_x = (
                 activation_is_srelu
-                and activation_recompute
+                and activation_recompute_in_mlp
                 and weight_requires_grad
                 and _grouped_gemm_dsrelu_backward_supported()
                 and _nvidia_cudnn_frontend_supports_wgrad()

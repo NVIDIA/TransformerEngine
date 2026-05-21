@@ -355,16 +355,16 @@ class ScaledSReLU(BasicOperation):
 
     Parameters
     ----------
-    activation_recompute : bool, default = ``False``
+    activation_recompute_in_mlp : bool, default = ``False``
         Enable fused grouped MLP kernels to recompute activation outputs
         during backward when supported instead of saving them.
     """
 
     num_extra_inputs: int = 1
 
-    def __init__(self, *, activation_recompute: bool = False) -> None:
+    def __init__(self, *, activation_recompute_in_mlp: bool = False) -> None:
         super().__init__()
-        self.activation_recompute: bool = activation_recompute
+        self.activation_recompute_in_mlp: bool = activation_recompute_in_mlp
 
     def op_forward(self, *args, **kwargs) -> None:
         raise RuntimeError(
@@ -392,9 +392,9 @@ class ScaledSReLU(BasicOperation):
         next_op_input_quantizer: Optional[Quantizer],  # pylint: disable=unused-argument
         basic_op_kwargs: list[dict[str, Any]],  # pylint: disable=unused-argument
     ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
-        if self.activation_recompute:
+        if self.activation_recompute_in_mlp:
             raise RuntimeError(
-                f"{self.__class__.__name__}(activation_recompute=True) requires the "
+                f"{self.__class__.__name__}(activation_recompute_in_mlp=True) requires the "
                 "fused grouped MLP path."
             )
 
@@ -435,9 +435,9 @@ class ScaledSReLU(BasicOperation):
     ]:
         del basic_op_grad_extra_outputs
 
-        if self.activation_recompute:
+        if self.activation_recompute_in_mlp:
             raise RuntimeError(
-                f"{self.__class__.__name__}(activation_recompute=True) requires the "
+                f"{self.__class__.__name__}(activation_recompute_in_mlp=True) requires the "
                 "fused grouped MLP path."
             )
 
