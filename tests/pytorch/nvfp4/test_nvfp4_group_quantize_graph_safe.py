@@ -27,22 +27,6 @@ from nvfp4_utils import (
 
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
 
-SM120_SWIZZLED_SCALE_RTOL_ATOL = (1e-3, 1e-3)
-STRICT_SCALE_RTOL_ATOL = (0.0, 0.0)
-
-
-def _scale_compare_tolerances(expected_swizzled_layout: bool) -> tuple[float, float]:
-    """Return comparison tolerances for NVFP4 scale tensors.
-
-    On SM120 with swizzled scale layout enabled, grouped NVFP4 can route through a
-    fallback path whose scale accumulation order differs slightly from the
-    Python reference. Layout must still match, but exact bitwise equality of
-    scale values is not guaranteed.
-    """
-    if torch.cuda.get_device_capability() == (12, 0) and expected_swizzled_layout:
-        return SM120_SWIZZLED_SCALE_RTOL_ATOL
-    return STRICT_SCALE_RTOL_ATOL
-
 
 def _reference_scale_for_layout(
     ref_unswizzled: torch.Tensor,
@@ -133,8 +117,7 @@ def check_grouped_tensor_nvfp4_versus_reference(
             "Grouped output and split output disagree on swizzled-scale metadata "
             f"(split {i}: grouped={expected_swizzled_layout}, split={split_flag})"
         )
-    # Fetch appropriate scale comparison tolerances based on expected swizzled layout and CC
-    scale_atol, scale_rtol = _scale_compare_tolerances(expected_swizzled_layout)
+    scale_atol, scale_rtol = 0.0, 0.0
 
     if return_rowwise:
         x_qx = [output._rowwise_data.view(dtype=torch.uint8) for output in split_quantize_outputs]
@@ -275,8 +258,7 @@ def check_grouped_tensor_nvfp4_with_paged_stashing(
             "Grouped output and split output disagree on swizzled-scale metadata "
             f"(split {i}: grouped={expected_swizzled_layout}, split={split_flag})"
         )
-    # Fetch appropriate scale comparison tolerances based on expected swizzled layout and CC
-    scale_atol, scale_rtol = _scale_compare_tolerances(expected_swizzled_layout)
+    scale_atol, scale_rtol = 0.0, 0.0
 
     if return_rowwise:
         x_qx = [output._rowwise_data.view(dtype=torch.uint8) for output in split_quantize_outputs]
