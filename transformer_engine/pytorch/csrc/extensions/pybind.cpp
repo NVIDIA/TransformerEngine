@@ -139,6 +139,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("output") = py::none(), py::arg("noop") = py::none());
   m.def("dequantize", &transformer_engine::pytorch::dequantize, "Dequantize", py::arg("input"),
         py::arg("otype"));
+  m.def("create_empty_quantized_tensor",
+        &transformer_engine::pytorch::create_empty_quantized_tensor,
+        "Create an empty quantized tensor", py::arg("quantizer"), py::arg("shape"),
+        py::arg("dtype"), py::arg("device"), py::arg("pin_memory"));
   m.def("group_quantize", transformer_engine::pytorch::group_quantize, py::arg("tensor"),
         py::arg("quantizer"), py::arg("num_tensors"), py::arg("first_dims"));
   m.def("group_dequantize", transformer_engine::pytorch::group_dequantize,
@@ -352,6 +356,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Partial cast from master weights for fp8 block scaling", py::arg("inp"), py::arg("out"),
         py::arg("scale"), py::arg("h"), py::arg("w"), py::arg("start_offset"), py::arg("block_len"),
         py::arg("out_dtype"), py::call_guard<py::gil_scoped_release>());
+
   // NVFP4 2D
   m.def("nvfp4_2d_compute_partial_amax",
         &transformer_engine::pytorch::nvfp4_2d_compute_partial_amax,
@@ -403,6 +408,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("grouped_swizzle_for_gemm", &transformer_engine::pytorch::grouped_swizzle_for_gemm,
         "In-place swizzle of grouped tensor scales for GEMM", py::arg("tensor"), py::arg("rowwise"),
         py::arg("columnwise"));
+
+  // Tensor allocation
+  m.def("bulk_allocate", &transformer_engine::pytorch::bulk_allocate,
+        "Allocate tensors backed by a single contiguous buffer", py::arg("shapes"),
+        py::arg("dtypes"), py::arg("device") = py::none(), py::arg("alignments") = py::none(),
+        py::call_guard<py::gil_scoped_release>());
 
   // attention kernels
   m.def("fa_prepare_fwd", &transformer_engine::pytorch::fa_prepare_fwd,

@@ -4,6 +4,7 @@
 
 """This module provides predefined FP8 recipes."""
 from __future__ import annotations
+import abc
 import os
 from enum import Enum
 from typing import Any, Literal, Optional, Union, Callable, NamedTuple
@@ -60,6 +61,16 @@ class MMParams:
 
     use_split_accumulator: bool = True
 
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "_cached_repr",
+            f"MMParams(use_split_accumulator={self.use_split_accumulator})",
+        )
+
+    def __repr__(self) -> str:
+        return self._cached_repr
+
 
 @dataclass(frozen=True)
 class QParams:
@@ -76,20 +87,49 @@ class QParams:
     stochastic_rounding: bool = False
     fp4_2d_quantization: bool = False
 
-    def __repr__(self) -> str:
-        return (
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "_cached_repr",
             f"Qparams(\npower_2_scale={self.power_2_scale},\n"
             f"amax_epsilon={self.amax_epsilon},\n"
             f"random_hadamard_transform={self.random_hadamard_transform},\n"
             f"stochastic_rounding={self.stochastic_rounding},\n"
-            f"fp4_2d_quantization={self.fp4_2d_quantization}\n)"
+            f"fp4_2d_quantization={self.fp4_2d_quantization}\n)",
         )
+
+    def __repr__(self) -> str:
+        return self._cached_repr
 
 
 class Recipe:
     """
     Base recipe class.
     """
+
+    # Cached string representation. Lazily populated by ``__repr__`` in
+    # subclasses and invalidated by ``__setattr__`` whenever any attribute
+    # changes. This makes repeated ``str(recipe)`` calls much cheaper
+    _cached_repr: Optional[str] = None
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        # Invalidate the cached repr on any attribute mutation.
+        if name != "_cached_repr":
+            object.__setattr__(self, "_cached_repr", None)
+        object.__setattr__(self, name, value)
+
+    @abc.abstractmethod
+    def _make_repr(self) -> str:
+        """Build the string representation for this recipe.
+
+        Subclasses must override this method. The result is cached by
+        ``__repr__`` and reused until any attribute is mutated.
+        """
+
+    def __repr__(self) -> str:
+        if self._cached_repr is None:
+            self._cached_repr = self._make_repr()
+        return self._cached_repr
 
     @classmethod
     def nvfp4(cls):
@@ -127,7 +167,7 @@ class Recipe:
         return issubclass(cls, CustomRecipe)
 
 
-@dataclass()
+@dataclass(repr=False)
 class DelayedScaling(Recipe):
     """
     Use the delayed scaling factor strategy. Use scale factor from previous
@@ -227,7 +267,7 @@ class DelayedScaling(Recipe):
             self.backward_override is None
         ), "Delayed scaling only supports backward_override=None."
 
-    def __repr__(self) -> str:
+    def _make_repr(self) -> str:
         return (
             f"recipe_type={self.__class__.__name__}, "
             f"margin={self.margin}, "
@@ -240,7 +280,7 @@ class DelayedScaling(Recipe):
         )
 
 
-@dataclass()
+@dataclass(repr=False)
 class Float8CurrentScaling(Recipe):
     """
     Use the per-tensor current scaling factor strategy.
@@ -275,7 +315,7 @@ class Float8CurrentScaling(Recipe):
             self.backward_override in _BACKWARD_OVERRIDES
         ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
 
-    def __repr__(self) -> str:
+    def _make_repr(self) -> str:
         return (
             f"recipe_type={self.__class__.__name__}, "
             f"format={str(self.fp8_format).split('.')[1]}, "
@@ -291,7 +331,7 @@ class Float8CurrentScaling(Recipe):
         )
 
 
-@dataclass()
+@dataclass(repr=False)
 class MXFP8BlockScaling(Recipe):
     """
     Use the MXFP8 scaling factor strategy.
@@ -333,7 +373,7 @@ class MXFP8BlockScaling(Recipe):
             self.backward_override in _BACKWARD_OVERRIDES
         ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
 
-    def __repr__(self) -> str:
+    def _make_repr(self) -> str:
         return (
             f"recipe_type={self.__class__.__name__}, "
             f"margin={self.margin}, "
@@ -342,7 +382,7 @@ class MXFP8BlockScaling(Recipe):
         )
 
 
-@dataclass()
+@dataclass(repr=False)
 class Float8BlockScaling(Recipe):
     """
     Use block-wise scaling for FP8 tensors.
@@ -414,7 +454,7 @@ class Float8BlockScaling(Recipe):
             self.backward_override in _BACKWARD_OVERRIDES
         ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
 
-    def __repr__(self) -> str:
+    def _make_repr(self) -> str:
         return (
             f"recipe_type={self.__class__.__name__}, "
             f"format={str(self.fp8_format).split('.')[1]}, "
@@ -433,7 +473,7 @@ class Float8BlockScaling(Recipe):
         )
 
 
-@dataclass()
+@dataclass(repr=False)
 class NVFP4BlockScaling(Recipe):
     """
     Use the NVFP4 scaling strategy.
@@ -531,7 +571,7 @@ class NVFP4BlockScaling(Recipe):
             fp4_2d_quantization=False,
         )
 
-    def __repr__(self) -> str:
+    def _make_repr(self) -> str:
         return (
             f"recipe_type={self.__class__.__name__}, "
             f"fp4_format={str(self.fp4_format).split('.')[1]}, "
@@ -546,7 +586,7 @@ class NVFP4BlockScaling(Recipe):
         )
 
 
-@dataclass()
+@dataclass(repr=False)
 class CustomRecipe(Recipe):
     """
     Custom recipe that allows users to provide quantizer factories.
@@ -608,7 +648,7 @@ class CustomRecipe(Recipe):
             self.backward_override in _BACKWARD_OVERRIDES
         ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
 
-    def __repr__(self) -> str:
+    def _make_repr(self) -> str:
         return (
             f"recipe_type={self.__class__.__name__}, "
             f"qfactory={self.qfactory}, "
