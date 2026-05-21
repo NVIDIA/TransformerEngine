@@ -114,6 +114,32 @@ class _GroupedLinear(torch.autograd.Function):
         device = inp.device
         weight_requires_grad = weights[0].requires_grad
 
+        # Short-circuit when this rank has zero tokens for every local expert.
+        # Calling the underlying grouped GEMM with sum(m_splits) == 0 can
+        # crash or hang in cuBLAS, and skipping it entirely would also remove
+        # the weights from the autograd graph. That asymmetry desynchronizes
+        # the autograd graphs across ranks (some of which DO have tokens) and
+        # produces hangs at the next DDP / EP collective. Here we produce an
+        # empty output of the correct shape and dtype, register weights and
+        # biases with ctx.save_for_backward so DDP sees matching shapes, and
+        # let _GroupedLinear.backward return correctly-shaped zero gradients.
+        if sum(m_splits) == 0:
+            out_features = weights[0].size(0)
+            out = torch.empty([0, out_features], dtype=activation_dtype, device=device)
+            if is_grad_enabled:
+                ctx.empty_input = True
+                ctx.num_gemms = num_gemms
+                ctx.use_bias = use_bias
+                ctx.activation_dtype = activation_dtype
+                ctx.inp_shape = inp.shape
+                ctx.requires_dgrad = inp.requires_grad
+                ctx.weights_requires_grad = weight_requires_grad
+                ctx.fuse_wgrad_accumulation = fuse_wgrad_accumulation
+                ctx.save_for_backward(*weights, *biases)
+            return out, [None] * num_gemms
+        if is_grad_enabled:
+            ctx.empty_input = False
+
         # Configure quantizers
         if save_original_input and isinstance(input_quantizers[0], Float8Quantizer):
             if FP8GlobalStateManager.get_fp8_recipe().custom():
@@ -354,6 +380,40 @@ class _GroupedLinear(torch.autograd.Function):
         ctx, grad_output: torch.Tensor, _grad_workspaces
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         # pylint: disable=missing-function-docstring
+        if getattr(ctx, "empty_input", False):
+            # Counterpart to the empty-input short-circuit in forward. Skip all
+            # quantization / GEMM work and synthesize correctly-shaped zero
+            # gradients so that DDP / EP collectives over weight and bias
+            # gradients see matching shapes across ranks (some of which had
+            # non-empty input on this microbatch).
+            saved_tensors = ctx.saved_tensors
+            N = ctx.num_gemms
+            weights = saved_tensors[:N]
+            biases = saved_tensors[N : 2 * N] if ctx.use_bias else [None] * N
+            device = weights[0].device
+            dgrad = (
+                torch.zeros(ctx.inp_shape, dtype=ctx.activation_dtype, device=device)
+                if ctx.requires_dgrad
+                else None
+            )
+            if ctx.weights_requires_grad:
+                wgrad_list = [torch.zeros_like(w) for w in weights]
+                if ctx.fuse_wgrad_accumulation:
+                    # Mirror the mcore custom-DDP path: when weight gradient
+                    # accumulation is fused into main_grad on the weight, mark
+                    # main_grad as already updated (we accumulated zero) and
+                    # let downstream skip its own add.
+                    for w in weights:
+                        if hasattr(w, "grad_added_to_main_grad"):
+                            w.grad_added_to_main_grad = True
+                    wgrad_list = [None] * N
+            else:
+                wgrad_list = [None] * N
+            if ctx.use_bias:
+                grad_biases = [torch.zeros_like(b) for b in biases]
+            else:
+                grad_biases = [None] * N
+            return (dgrad, None, *wgrad_list, *grad_biases)
         with get_nvtx_range_context("_GroupedLinear_backward"):
             saved_tensors = restore_from_func_ctx(ctx)
             N = ctx.num_gemms
