@@ -245,7 +245,6 @@ class RawAsyncLoader {
       for (int i = lane_id; i < count; i += kThreadsPerWarp) {
         dst[i] = src[i];
       }
-      cp_async_commit();  // No-op on sm_70; matches wait() expectation on sm_80+.
     }
   }
 };

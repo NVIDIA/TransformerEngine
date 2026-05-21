@@ -281,9 +281,9 @@ void fused_score_for_moe_aux_loss_forward_kernel_launcher(
   size_t logits_raw_shmem =
       RawAsyncLoader<DataType>::shmem_bytes(num_experts, num_token_per_block, num_buffers);
   size_t shared_memory_size = logits_raw_shmem + other_shmem;
-  check_shared_memory_capacity_num_experts(shared_memory_size, num_experts);
 
   auto launch = [&](auto kernel) {
+    check_shared_memory_capacity_num_experts(shared_memory_size, num_experts);
     NVTE_CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                                          shared_memory_size));
     size_t grid_size =
@@ -350,16 +350,16 @@ void fused_score_for_moe_aux_loss_forward(const Tensor &logits, int num_tokens, 
 // No routing_map — all experts participate (unlike topk backward).
 // Double-buffered cp.async loads both inputs.  Two-pass fused approach.
 //
-// Shmem layout (B = 2, W = warps/block):
-//   grad_buf: B × E × W × sizeof(CompType)   — double-buffered async load
-//   act_buf:  B × E × W × sizeof(CompType)   — double-buffered async load
-constexpr int kAuxBwdNumBuffers = 2;
+// Shmem layout (B = num_buffers, W = warps/block):
+//   grad_buf: B × E × W × sizeof(CompType)   — async-loaded grad
+//   act_buf:  B × E × W × sizeof(CompType)   — async-loaded activations
 
 template <typename DataType, int ScoreFunc>
 __global__ void fused_score_for_moe_aux_loss_backward_kernel(const CompType *intermediate_output,
                                                              const float *grad_scores,
                                                              int num_tokens, int num_experts,
-                                                             DataType *grad_logits) {
+                                                             DataType *grad_logits,
+                                                             int num_buffers) {
   /***
      * Section: Global Variables/Addresses init
      * - Each warp is responsible for one token, and has own shared memory buffer.
@@ -374,13 +374,13 @@ __global__ void fused_score_for_moe_aux_loss_backward_kernel(const CompType *int
 
   CompType *grad_shmem_base = reinterpret_cast<CompType *>(shmem_ptr);
   RawAsyncLoader<CompType> grad_loader(grad_shmem_base, warp_id, num_experts, num_token_per_block,
-                                       kAuxBwdNumBuffers);
+                                       num_buffers);
   shmem_ptr +=
-      RawAsyncLoader<CompType>::shmem_bytes(num_experts, num_token_per_block, kAuxBwdNumBuffers);
+      RawAsyncLoader<CompType>::shmem_bytes(num_experts, num_token_per_block, num_buffers);
 
   CompType *act_shmem_base = reinterpret_cast<CompType *>(shmem_ptr);
   RawAsyncLoader<CompType> act_loader(act_shmem_base, warp_id, num_experts, num_token_per_block,
-                                      kAuxBwdNumBuffers);
+                                      num_buffers);
 
   /***
      * Section: Main Loop — persistent grid with double-buffered async load
@@ -405,20 +405,27 @@ __global__ void fused_score_for_moe_aux_loss_backward_kernel(const CompType *int
     if (token_idx >= num_tokens) break;
     int pos = token_idx * num_experts;
 
+    if (num_buffers == 1 && round != first_round) {
+      grad_loader.load_current(grad_scores + pos, num_experts, lane_id);
+      act_loader.load_current(intermediate_output + pos, num_experts, lane_id);
+    }
+
     grad_loader.wait();
     act_loader.wait();
 
     CompType *raw_grad = grad_loader.current_buf();
     CompType *raw_act = act_loader.current_buf();
 
-    // Prefetch next round
-    int next_round = round + gridDim.x;
-    if (next_round < total_round) {
-      int next_token = next_round * num_token_per_block + warp_id;
-      if (next_token < num_tokens) {
-        int next_pos = next_token * num_experts;
-        grad_loader.start_load(grad_scores + next_pos, num_experts, lane_id);
-        act_loader.start_load(intermediate_output + next_pos, num_experts, lane_id);
+    // Prefetch next round only when double-buffered; single-buffer loads above.
+    if (num_buffers > 1) {
+      int next_round = round + gridDim.x;
+      if (next_round < total_round) {
+        int next_token = next_round * num_token_per_block + warp_id;
+        if (next_token < num_tokens) {
+          int next_pos = next_token * num_experts;
+          grad_loader.start_load(grad_scores + next_pos, num_experts, lane_id);
+          act_loader.start_load(intermediate_output + next_pos, num_experts, lane_id);
+        }
       }
     }
 
@@ -502,9 +509,13 @@ void fused_score_for_moe_aux_loss_backward_kernel_launcher(
   size_t num_token_per_block = kThreadsPerBlock / kThreadsPerWarp;
   size_t total_blocks = (num_tokens + num_token_per_block - 1) / num_token_per_block;
 
+  size_t single_buf_shmem =
+      RawAsyncLoader<CompType>::shmem_bytes(num_experts, num_token_per_block, 1) +
+      RawAsyncLoader<CompType>::shmem_bytes(num_experts, num_token_per_block, 1);
+  int num_buffers = choose_num_buffers(single_buf_shmem, 0);
   size_t shmem_bytes =
-      RawAsyncLoader<CompType>::shmem_bytes(num_experts, num_token_per_block, kAuxBwdNumBuffers) +
-      RawAsyncLoader<CompType>::shmem_bytes(num_experts, num_token_per_block, kAuxBwdNumBuffers);
+      RawAsyncLoader<CompType>::shmem_bytes(num_experts, num_token_per_block, num_buffers) +
+      RawAsyncLoader<CompType>::shmem_bytes(num_experts, num_token_per_block, num_buffers);
   check_shared_memory_capacity_num_experts(shmem_bytes, num_experts);
 
   auto launch = [&](auto kernel) {
@@ -512,7 +523,7 @@ void fused_score_for_moe_aux_loss_backward_kernel_launcher(
         cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_bytes));
     size_t grid_size = compute_persistent_grid(kernel, kThreadsPerBlock, shmem_bytes, total_blocks);
     kernel<<<grid_size, kThreadsPerBlock, shmem_bytes, stream>>>(
-        intermediate_output, grad_scores, num_tokens, num_experts, grad_logits);
+        intermediate_output, grad_scores, num_tokens, num_experts, grad_logits, num_buffers);
     NVTE_CHECK_CUDA(cudaGetLastError());
   };
 
